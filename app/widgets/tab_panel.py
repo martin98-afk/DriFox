@@ -1485,21 +1485,30 @@ class TabPanel(QWidget):
         for grp in self._team_groups.values():
             self._apply_team_compact(grp, compact)
 
-        # ── UI 插件区紧凑同步（矩阵 D5）：折叠时自定义插件卡片只显 icon 行 ──
-        # 折叠态：隐藏卡片折叠头（arrow/文字/badge），强制展开 scroll 显示
-        # 插件 icon 行（每行 set_compact 仅留图标）；展开态按保存现场恢复。
+        # ── UI 插件区紧凑同步（矩阵 D5）：折叠时尊重折叠前状态 ──
+        # 折叠态：header 简化为只显 arrow（label/badge 隐藏，46px 窄条容得下），
+        #         scroll 保持折叠前可见性（不强制展开——用户手动展开过则保持
+        #         展开，折叠过则保持折叠，由 saved_state 记录）；
+        # 展开态：按 saved_state 恢复 label/badge/scroll 可见性。
         if hasattr(self, "_custom_plugin_card"):
             if compact:
                 if getattr(self, "_custom_plugin_saved_state", None) is None:
                     self._custom_plugin_saved_state = {
                         "scroll_visible": not self._custom_plugin_scroll.isHidden(),
+                        "label_visible": not self._custom_plugin_label.isHidden(),
+                        "badge_visible": not self._custom_plugin_badge.isHidden(),
                     }
-                self._custom_plugin_header.setVisible(False)
-                self._custom_plugin_scroll.setVisible(True)
+                # header 简化：只留 arrow（46px 窄条 label/badge 放不下）
+                self._custom_plugin_label.setVisible(False)
+                self._custom_plugin_badge.setVisible(False)
+                # scroll 保持折叠前状态（不强制展开）
+                self._custom_plugin_scroll.setVisible(bool(self._custom_plugin_saved_state["scroll_visible"]))
+                self._custom_plugin_arrow.set_expanded(self._custom_plugin_scroll.isVisible())
                 self._apply_custom_card_style(compact=True)
             else:
-                self._custom_plugin_header.setVisible(not self._custom_plugin_card.isHidden())
                 saved = getattr(self, "_custom_plugin_saved_state", None) or {}
+                self._custom_plugin_label.setVisible(bool(saved.get("label_visible", True)))
+                self._custom_plugin_badge.setVisible(bool(saved.get("badge_visible", True)))
                 self._custom_plugin_scroll.setVisible(bool(saved.get("scroll_visible", False)))
                 self._custom_plugin_arrow.set_expanded(self._custom_plugin_scroll.isVisible())
                 self._custom_plugin_saved_state = None
@@ -1512,6 +1521,10 @@ class TabPanel(QWidget):
         expanded = not self._custom_plugin_scroll.isVisible()
         self._custom_plugin_scroll.setVisible(expanded)
         self._custom_plugin_arrow.set_expanded(expanded)
+        # 折叠态下手动切换 scroll：同步 saved_state，展开侧边栏时按最新
+        # 状态恢复（避免回到"折叠前"旧状态造成体验割裂）
+        if self._collapsed and getattr(self, "_custom_plugin_saved_state", None) is not None:
+            self._custom_plugin_saved_state["scroll_visible"] = expanded
         # 展开时刷新样式，确保折叠期间的主题变更被应用
         if expanded:
             for row in self._custom_plugin_buttons:

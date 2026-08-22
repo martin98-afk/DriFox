@@ -632,7 +632,7 @@ def test_refresh_style_preserves_collapsed_alpha(panel, qtbot):
     assert _bg_alpha(style3) == 40, f"展开态背景 alpha 应恢复 40，实际 {_bg_alpha(style3)}"
 
 
-# ── 自定义插件卡片折叠态紧凑（D5）：折叠时隐藏卡片头、强制展开 icon 行 ──
+# ── 自定义插件卡片折叠态紧凑（D5）：尊重折叠前 scroll 状态 ──
 
 def _add_custom_plugin_row(panel, title="测试插件"):
     """手动注入一个自定义插件行（绕过 registry，聚焦折叠态 UI 行为）"""
@@ -647,62 +647,97 @@ def _add_custom_plugin_row(panel, title="测试插件"):
     return row
 
 
-def test_d5_collapsed_custom_plugin_icon_visible(panel):
-    """折叠态：自定义插件卡片头隐藏、scroll 展开、icon 行紧凑只留图标"""
+def test_d5_collapsed_custom_plugin_collapsed_stays_collapsed(panel):
+    """折叠前 scroll 折叠：折叠态保持折叠，header 简化为只显 arrow（label/badge 隐藏）"""
     row = _add_custom_plugin_row(panel)
+    # 折叠前 scroll 默认折叠
+    assert _shown(panel._custom_plugin_scroll) is False
+
     panel.set_collapsed(True)
 
-    assert _shown(panel._custom_plugin_header) is False, "折叠态卡片头（arrow/文字/badge）应隐藏"
-    assert _shown(panel._custom_plugin_scroll) is True, "折叠态应强制展开 scroll 显示 icon 行"
-    assert row._compact is True, "折叠态插件行应进入紧凑模式"
-    assert _shown(row._title_label) is False, "紧凑行标题应隐藏"
-    assert _shown(row._icon_label) is True, "紧凑行 icon 应可见"
-    assert row.layout().getContentsMargins() == (4, 4, 4, 4)
-
-
-def test_d5_expand_restores_custom_plugin_card(panel):
-    """展开恢复：卡片头按卡片可见性恢复、scroll 回到默认折叠、行恢复完整"""
-    row = _add_custom_plugin_row(panel)
-    panel.set_collapsed(True)
+    # scroll 保持折叠前状态（不强制展开）
+    assert _shown(panel._custom_plugin_scroll) is False, "折叠前折叠 → 折叠态保持折叠"
+    # header 简化：label/badge 隐藏、arrow 保留（46px 窄条只放得下 arrow）
+    assert _shown(panel._custom_plugin_label) is False, "折叠态 label 隐藏"
+    assert _shown(panel._custom_plugin_badge) is False, "折叠态 badge 隐藏"
+    assert _shown(panel._custom_plugin_arrow) is True, "折叠态 arrow 保留作为展开入口"
+    # 插件行仍紧凑（用户后续点 arrow 展开后行保持紧凑）
     assert row._compact is True
-
-    panel.set_collapsed(False)
-    assert _shown(panel._custom_plugin_header) is True, "展开后卡片头应恢复可见"
-    assert _shown(panel._custom_plugin_scroll) is False, "展开后 scroll 恢复默认折叠"
-    assert row._compact is False, "展开后插件行退出紧凑模式"
-    assert _shown(row._title_label) is True, "展开后标题恢复可见"
-    assert row.layout().getContentsMargins() == (4, 2, 4, 2), "展开后 margins 还原"
+    assert _shown(row._title_label) is False
+    assert _shown(row._icon_label) is True
 
 
-def test_d5_collapsed_scroll_state_restored(panel):
-    """折叠前手动展开 scroll：折叠→展开后保持展开（保存现场）"""
+def test_d5_collapsed_expanded_stays_expanded(panel):
+    """折叠前 scroll 展开：折叠态保持展开，icon 行可见"""
     row = _add_custom_plugin_row(panel)
     # 用户手动展开自定义插件列表
     panel._on_custom_plugin_toggle()
     assert _shown(panel._custom_plugin_scroll) is True
 
     panel.set_collapsed(True)
-    assert _shown(panel._custom_plugin_scroll) is True, "折叠态保持 scroll 展开（icon 行可见）"
-    assert _shown(panel._custom_plugin_header) is False
+    assert _shown(panel._custom_plugin_scroll) is True, "折叠前展开 → 折叠态保持展开"
+    assert _shown(panel._custom_plugin_label) is False
+    assert _shown(panel._custom_plugin_badge) is False
+    assert _shown(panel._custom_plugin_arrow) is True
+    assert row._compact is True
+    assert _shown(row._icon_label) is True
 
-    panel.set_collapsed(False)
-    assert _shown(panel._custom_plugin_scroll) is True, "折叠前展开态应恢复"
-    assert _shown(panel._custom_plugin_header) is True
-    assert row._compact is False
 
-
-def test_d5_collapsed_refresh_plugins_reapplies_compact(panel):
-    """折叠态 refresh_ui_plugins 重建后：新行立即 compact、scroll 保持展开"""
+def test_d5_expand_restores_custom_plugin_card(panel):
+    """展开恢复：label/badge 按折叠前可见性恢复、scroll 按折叠前状态恢复、行恢复完整"""
     row = _add_custom_plugin_row(panel)
+    # 折叠前默认折叠
     panel.set_collapsed(True)
     assert row._compact is True
 
-    # 重建（模拟插件热更新）：同一行对象被重建
+    panel.set_collapsed(False)
+    # 展开后 label/badge/arrow 都可见（恢复）
+    assert _shown(panel._custom_plugin_label) is True
+    assert _shown(panel._custom_plugin_badge) is True
+    assert _shown(panel._custom_plugin_arrow) is True
+    # scroll 恢复折叠前状态（默认折叠）
+    assert _shown(panel._custom_plugin_scroll) is False
+    assert row._compact is False
+    assert _shown(row._title_label) is True
+    assert row.layout().getContentsMargins() == (4, 2, 4, 2)
+
+
+def test_d5_collapsed_toggle_updates_saved_state(panel):
+    """折叠态下点 arrow 展开 scroll：saved_state 同步，展开侧边栏后保持展开
+
+    避免：用户在折叠态主动展开 → 展开侧边栏后被旧 saved_state 拉回折叠。
+    """
+    row = _add_custom_plugin_row(panel)
+    panel.set_collapsed(True)
+    assert _shown(panel._custom_plugin_scroll) is False
+
+    # 折叠态下点击 header 展开 scroll
+    panel._on_custom_plugin_toggle()
+    assert _shown(panel._custom_plugin_scroll) is True
+
+    # 展开侧边栏：应保持展开（saved_state 已被折叠态切换同步）
+    panel.set_collapsed(False)
+    assert _shown(panel._custom_plugin_scroll) is True
+    assert _shown(panel._custom_plugin_label) is True
+    assert _shown(panel._custom_plugin_badge) is True
+
+
+def test_d5_collapsed_refresh_plugins_preserves_scroll_state(panel):
+    """折叠态 refresh_ui_plugins 重建后：新行立即 compact，scroll 保持折叠前状态
+
+    修复回归：原实现 rebuild 后强制展开 scroll，覆盖用户折叠前的选择。
+    """
+    row = _add_custom_plugin_row(panel)
+    panel.set_collapsed(True)
+    assert _shown(panel._custom_plugin_scroll) is False
+    assert row._compact is True
+
+    # 重建（模拟插件热更新）
     panel._custom_plugin_buttons.clear()
     new_row = _add_custom_plugin_row(panel, "新插件")
-    # refresh_ui_plugins 内部末尾会按折叠态重同步（这里直接触发等价路径）
-    panel._update_toggle_button()
+    panel._update_toggle_button()  # 等价于 refresh_ui_plugins 末尾重同步
 
     assert new_row._compact is True, "折叠态重建后新行应立即紧凑"
-    assert _shown(panel._custom_plugin_scroll) is True
-    assert _shown(panel._custom_plugin_header) is False
+    assert _shown(panel._custom_plugin_scroll) is False, "折叠前折叠 → 重建后保持折叠"
+    assert _shown(panel._custom_plugin_label) is False
+    assert _shown(panel._custom_plugin_badge) is False
