@@ -433,6 +433,7 @@ class PluginManager:
             logger.warning(f"[PluginManager] Plugin not found: {name}")
             return
         enabled = self._get_enabled_set()
+        state_changed = False
         if name not in enabled:
             enabled.add(name)
             self._save_enabled_set(enabled)
@@ -443,10 +444,14 @@ class PluginManager:
                 self._save_disabled_set(disabled)
             self.invalidate_mcp_cache()  # 启用插件可能带入新 MCP 配置
             logger.info(f"[PluginManager] Enabled plugin: {name}")
+            state_changed = True
         # 联动加载 UI 组件
         self._load_plugin_ui(name)
         # 对齐工具注册（该插件工具注册；watcher 未启动时跳过）
         self._rescan_plugin_tools(name, enabled=True)
+        # 状态实际变化才触发（幂等跳过重复启用）；置于末尾保证 diff 拿到注册后状态
+        if state_changed:
+            self._trigger_plugin_changed_hook("enabled", name)
 
     def disable_plugin(self, name: str):
         """禁用插件（配置持久化，调用方需触发各子系统 reload）
@@ -471,6 +476,7 @@ class PluginManager:
             logger.warning(f"[PluginManager] 拒绝禁用系统插件: {name}")
             return
         enabled = self._get_enabled_set()
+        state_changed = False
         if name in enabled:
             enabled.discard(name)
             self._save_enabled_set(enabled)
@@ -480,10 +486,14 @@ class PluginManager:
             self._save_disabled_set(disabled)
             self.invalidate_mcp_cache()  # 禁用插件需剔除其 MCP 配置
             logger.info(f"[PluginManager] Disabled plugin: {name}")
+            state_changed = True
         # 联动卸载 UI 组件
         self._unload_plugin_ui(name)
         # 对齐工具注册（该插件工具注销；watcher 未启动时跳过）
         self._rescan_plugin_tools(name, enabled=False)
+        # 状态实际变化才触发（幂等跳过重复禁用）；置于末尾保证 diff 拿到注销后状态
+        if state_changed:
+            self._trigger_plugin_changed_hook("disabled", name)
 
     def _rescan_plugin_tools(self, name: str, enabled: bool) -> None:
         """插件启停后精准对齐工具注册（工具插件随启停热生效）。
@@ -1233,6 +1243,8 @@ class PluginManager:
             logger.info(f"[PluginManager] Updated MCP server '{name}' in {source_path}")
         except Exception as e:
             logger.error(f"[PluginManager] Failed to update MCP server '{name}': {e}")
+        else:
+            self._trigger_plugin_changed_hook("mcp_updated", name, server_data)
 
     def add_mcp_server(self, name: str, server_data: dict):
         """添加 MCP 服务器到用户自定义插件（user-custom）的 .mcp.json
@@ -1306,6 +1318,37 @@ class PluginManager:
 
         self.invalidate_mcp_cache()
         logger.info(f"[PluginManager] Added MCP server '{name}' to user-custom plugin")
+        self._trigger_plugin_changed_hook("mcp_added", name, server_data)
+
+    def _trigger_plugin_changed_hook(
+        self, action: str, target_name: str, extra: Optional[dict] = None
+    ) -> None:
+        """触发 PluginChanged hook（PluginManager 内部变化统一出口）
+
+        覆盖：MCP 配置级（mcp_added/mcp_removed/mcp_updated）与插件启停
+        （enabled/disabled）。懒导入避免循环依赖（backend → plugin_manager）；
+        任意线程安全（trigger_plugin_changed_hook 内部投递线程池并附带 diff）。
+
+        Args:
+            action: 子事件动作
+            target_name: MCP 服务器名（mcp_* 动作）或插件名（enabled/disabled）
+            extra: 附加字段（如 server_config）
+        """
+        try:
+            from app.core.hook_manager import trigger_plugin_changed_hook
+
+            is_mcp = action.startswith("mcp_")
+            context: dict = {
+                "action": action,
+                ("server_name" if is_mcp else "plugin_name"): target_name,
+            }
+            if extra:
+                # 只保留可序列化的展示字段，去掉内部标记
+                key = "server_config" if is_mcp else "detail"
+                context[key] = {k: v for k, v in extra.items() if not str(k).startswith("_")}
+            trigger_plugin_changed_hook(context)
+        except Exception as e:
+            logger.debug(f"[PluginManager] trigger plugin changed hook failed: {e}")
 
     def remove_mcp_server(self, name: str):
         """从来源插件的 .mcp.json 中移除指定 MCP 服务器
@@ -1358,3 +1401,6 @@ class PluginManager:
             self.invalidate_mcp_cache()
         except Exception as e:
             logger.error(f"[PluginManager] Failed to remove MCP server '{name}': {e}")
+        else:
+            # 系统插件禁用 / 用户插件删除，对活跃列表均为移除
+            self._trigger_plugin_changed_hook("mcp_removed", name)

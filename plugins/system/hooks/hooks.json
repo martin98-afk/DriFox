@@ -213,6 +213,20 @@
           }
         ]
       }
+    ],
+    "PluginChanged": [
+      {
+        "matcher": "tools_added|tools_removed|tools_updated",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".format_tool_changes:hook",
+            "add_output_to_context": true,
+            "statusMessage": "插件变更:",
+            "id": "builtin_format_tool_changes"
+          }
+        ]
+      }
     ]
   }
 }

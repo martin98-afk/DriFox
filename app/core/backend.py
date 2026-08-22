@@ -547,6 +547,8 @@ class ChatBackend(QObject):
 
             # PreToolUse → 独立队列（worker 在 tool 执行后立即消费，插入 tool result 之前）
             # PostToolUse → 主队列（在 loop 顶部消费，出现在 tool result 之后）
+            # PluginChanged → 主队列（环境事件，触发时通常无活跃对话，排队至下轮 loop 顶部
+            #   消费，AI 下一轮对话可见工具/MCP/插件增减明细）
             # prompt hooks → 主队列
             if event_name == "PreToolUse":
                 hook_output = _format_hook_output(event_name, output, status_message)
@@ -558,7 +560,7 @@ class ChatBackend(QObject):
                     }
                 )
                 logger.debug("[HookManager] PreToolUse queued to pre-tool queue")
-            elif is_prompt_hook or event_name == "PostToolUse":
+            elif is_prompt_hook or event_name in ("PostToolUse", "PluginChanged"):
                 hook_output = _format_hook_output(event_name, output, status_message)
                 self._hook_message_queue.put(
                     {
@@ -1834,7 +1836,7 @@ class ChatBackend(QObject):
             # 否则已注册插件会被反复识别为"新插件"，触发 bridge.json 自触发循环）
             self._rebuild_watcher_prefixes()
 
-    def emit_plugin_changed(self, result: dict, plugin_name: str = "") -> None:
+    def emit_plugin_changed(self, result: dict, plugin_name: str = "", action: Optional[str] = None) -> None:
         """广播插件变更结果到全部活跃 backend 的 plugin_changed 信号
 
         附加事件标识（仅广播用，不污染业务 result 消费方）：
@@ -1843,7 +1845,22 @@ class ChatBackend(QObject):
           两个插件均为 {ui: True}）也不会被窗口级指纹短窗误吞。
         - _plugin_name：本次变更的插件名（"" = 全量/合并路径），UI 据此
           精准重绘该插件已挂载的视图（消息内容块 / 浮动卡片 / 欢迎卡片）。
+
+        PluginChanged hook：重载完成后同步触发（diff 明细见 _trigger_plugin_changed_hook），
+        hook 输出经 on_hook_finished → _hook_message_queue 注入，AI 下一轮对话可见。
+
+        Args:
+            action: 变更动作语义。None 时按 plugin_name 自动推断：
+                _NEW_PLUGIN_SENTINEL → installed；插件已不在注册表 → uninstalled；
+                其余（热重载/全量/更新）→ updated。市场路径传精确值
+                （installed/updated/uninstalled/enabled/disabled）
         """
+        # PluginChanged hook 触发（广播前，result 尚未被 _event_seq 污染）
+        try:
+            self._trigger_plugin_changed_hook(result, plugin_name, action)
+        except Exception as e:
+            logger.debug(f"[ChatBackend] PluginChanged hook trigger failed: {e}")
+
         seq = getattr(self, "_hot_reload_seq", 0) + 1
         self._hot_reload_seq = seq
         annotated = dict(result)
@@ -1863,6 +1880,61 @@ class ChatBackend(QObject):
                     _b.plugin_changed.emit(annotated)
                 except RuntimeError:
                     pass
+
+    def _infer_plugin_changed_action(self, plugin_name: str) -> str:
+        """按 plugin_name 推断 PluginChanged 的 action 语义"""
+        if plugin_name == self._NEW_PLUGIN_SENTINEL:
+            return "installed"
+        if plugin_name:
+            try:
+                from app.plugins.managers.plugin_manager import PluginManager
+
+                if not PluginManager.get_instance().has_plugin(plugin_name):
+                    return "uninstalled"
+            except Exception:
+                pass
+        return "updated"
+
+    def _trigger_plugin_changed_hook(self, result: dict, plugin_name: str, action: Optional[str]) -> None:
+        """触发 PluginChanged hook（插件安装/卸载/启停/热重载统一出口）
+
+        主线程同步触发（prompt hook 注入顺序）；diff 由
+        hook_manager.trigger_plugin_changed_hook 统一计算（模块级基线，
+        与 mcp/启停触发点共享）。
+
+        context 经 stdin JSON 传给 command hook，字段：
+        - action: installed/updated/uninstalled/enabled/disabled
+        - plugin_name: 变更插件名（sentinel 解析后置空）
+        - components: 各组件重载结果（agents 数量/其余布尔）
+        - diff: 工具与 MCP 服务器增减明细（tools_added/tools_removed/mcp_added/mcp_removed）
+        """
+        if self._hook_manager is None or "PluginChanged" not in self._hook_manager._hooks:
+            # 无注册 hook 仍刷新基线（懒导入失败静默，不影响主流程）
+            try:
+                from app.core.hook_manager import _compute_plugin_snapshot_diff
+
+                _compute_plugin_snapshot_diff()
+            except Exception:
+                pass
+            return
+        if action is None:
+            action = self._infer_plugin_changed_action(plugin_name)
+        name = plugin_name if plugin_name != self._NEW_PLUGIN_SENTINEL else ""
+        context: Dict[str, Any] = {
+            "action": action,
+            "plugin_name": name,
+            "components": {k: v for k, v in result.items() if not k.startswith("_")},
+        }
+        try:
+            from app.core.hook_manager import _compute_plugin_snapshot_diff, _sub_actions_from_diff
+
+            diff = _compute_plugin_snapshot_diff()
+        except Exception:
+            diff = None
+        if diff:
+            context["diff"] = diff
+            context["sub_actions"] = _sub_actions_from_diff(diff)
+        self._hook_manager.trigger_event("PluginChanged", context)
 
     def _schedule_debounced_reload(self):
         """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）"""
@@ -2246,7 +2318,7 @@ class ChatBackend(QObject):
 
         return result
 
-    def reload_plugin_targeted(self, plugin_name: str) -> dict:
+    def reload_plugin_targeted(self, plugin_name: str, action: Optional[str] = None) -> dict:
         """精准重载单个插件（UI 安装/更新/启用/禁用专用），不触发全量子系统重载
 
         与 reload_plugin_subsystems（全量：rescan + 所有 agents/hooks/commands/
@@ -2264,13 +2336,17 @@ class ChatBackend(QObject):
         自己 emit）——若此处不广播，窗口收不到 ui=True，已打开标签页的输入区
         插件按钮/消息内容块全部不刷新（watcher 抑制解除后的 fallback 事件组件
         归类常为 root → ui=False，顶替不了本事件的刷新语义）。
+
+        Args:
+            action: PluginChanged hook 的动作语义（installer 传入精确值：
+                installed/updated/uninstalled/enabled/disabled；None 时自动推断）
         """
         if not plugin_name:
             result = self.reload_plugin_subsystems()
         else:
             result = self._reload_single_plugin(plugin_name, "__manifest__")
         try:
-            self.emit_plugin_changed(result, plugin_name)
+            self.emit_plugin_changed(result, plugin_name, action=action)
         except Exception as e:
             logger.warning(f"[ChatBackend] reload_plugin_targeted 广播失败: {e}")
         return result
@@ -3186,6 +3262,38 @@ class ChatBackend(QObject):
         future = data["future"]
 
         logger.info(f"[Gateway] Main thread processing: {text[:50]}...")
+
+        # ===== 入口守卫 =====
+        # 窗口关闭后 GatewayEngine.cleanup() 会把实例置为非活跃，而 PlatformManager
+        # 的后台事件循环仍在跑，钉钉/企微消息可能照旧投到本槽位。没有这层守卫，
+        # engine 内部 None 校验会向平台回复"❌ 处理出错: Gateway 引擎已停用..."，
+        # 并且 MessageHandler.handle 的 await future 永远不结束（→ 30s 超时）。
+        engine = getattr(self, "_gateway_engine", None)
+        if engine is None or not getattr(engine, "is_active", True):
+            logger.warning("[Gateway] skip incoming message: engine unavailable (window closed)")
+            try:
+                if not future.done():
+                    future.set_result("")
+            except Exception:
+                pass
+            _ev_loop = getattr(self._gateway_manager, "_loop", None)
+            if _ev_loop:
+                try:
+                    import asyncio
+
+                    from app.gateway.base import Platform as GatewayPlatform
+
+                    asyncio.run_coroutine_threadsafe(
+                        self._gateway_send_message(
+                            GatewayPlatform(platform),
+                            chat_id,
+                            "Gateway 当前不可用，请打开 DriFox 主窗口后重试。",
+                        ),
+                        _ev_loop,
+                    )
+                except Exception as e:
+                    logger.warning(f"[Gateway] skip notice send failed: {e}")
+            return
 
         try:
             import asyncio

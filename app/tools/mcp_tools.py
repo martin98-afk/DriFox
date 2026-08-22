@@ -349,9 +349,41 @@ class MCPServerConnection:
         self._stderr_path: Optional[str] = None
 
     def set_state(self, state: str, error: str = "") -> None:
+        """更新连接状态（mcp 事件循环线程调用）
+
+        状态迁移时触发 PluginChanged hook（mcp_connected/mcp_failed/mcp_disconnected）：
+        - CONNECTING 不触发（频繁且无语义价值）
+        - 同态重复设置过滤（避免抖动重报）
+        - CONNECTED 附带发现的 MCP 工具名列表（mcp_tools）
+        - FAILED 附带错误信息（last_error）
+        """
+        prev = self.state
         self.state = state
         self.last_error = error
         self.updated_at = time.time()
+
+        if prev == state:
+            return  # 同态重复，不重复上报
+        try:
+            from app.core.hook_manager import trigger_plugin_changed_hook
+
+            if state == MCPState.CONNECTED:
+                context = {
+                    "action": "mcp_connected",
+                    "server_name": self.name,
+                    "server_type": self.server_type,
+                    "mcp_tools": [t.name for t in self.tools],
+                }
+                trigger_plugin_changed_hook(context)
+            elif state == MCPState.FAILED:
+                trigger_plugin_changed_hook(
+                    {"action": "mcp_failed", "server_name": self.name, "error": error}
+                )
+            elif state == MCPState.DISABLED:
+                trigger_plugin_changed_hook({"action": "mcp_disconnected", "server_name": self.name})
+            # CONNECTING → 不触发
+        except Exception as e:
+            logger.debug(f"[MCP] trigger mcp state hook failed: {e}")
 
     @property
     def server_type(self) -> str:

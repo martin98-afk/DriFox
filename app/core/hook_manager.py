@@ -53,6 +53,135 @@ def shutdown_parallel_executor():
         _PARALLEL_EXECUTOR = None
 
 
+# PluginChanged 快照基线（模块级共享：多窗口 / 多触发点一份 diff 基线）
+# None = 未初始化（首次触发只建基线不 diff，避免启动风暴误报）
+# tools 快照存 {name: signature_hash}：检测增删 + 同名工具 schema 变化（updated）
+_plugin_snapshot_tools: Optional[Dict[str, str]] = None
+_plugin_snapshot_mcp: Optional[frozenset] = None
+
+
+def _tool_signature(reg) -> str:
+    """工具签名（schema 内容 hash，变更检测用）
+
+    兼容 OpenAI function 格式（schema.function.*）与扁平格式
+    （schema.description/input_schema），取 description + 参数 JSON。
+    """
+    import hashlib
+
+    schema = getattr(reg, "schema", None) or {}
+    fn = schema.get("function") if isinstance(schema.get("function"), dict) else schema
+    desc = fn.get("description") or ""
+    params = fn.get("parameters") or fn.get("input_schema") or {}
+    try:
+        blob = json.dumps({"d": desc, "p": params}, sort_keys=True, ensure_ascii=False)
+    except (TypeError, ValueError):
+        blob = f"{desc!r}:{sorted(params.keys()) if isinstance(params, dict) else params!r}"
+    return hashlib.md5(blob.encode("utf-8")).hexdigest()
+
+
+def _compute_plugin_snapshot_diff() -> Optional[dict]:
+    """对比工具/MCP 注册表快照，产出 PluginChanged diff 明细
+
+    快照模块级共享（backend / plugin_manager / mcp_tools 各触发点统一基线）。
+    首次调用只建基线返回 None。
+
+    Returns:
+        {"tools_added": [...], "tools_removed": [...], "tools_updated": [...],
+         "mcp_added": [...], "mcp_removed": [...]} 或 None（无变化/首次）
+    """
+    global _plugin_snapshot_tools, _plugin_snapshot_mcp
+    try:
+        from app.tools.registry import ToolRegistry
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        tools_now = {r.name: _tool_signature(r) for r in ToolRegistry.get_instance().list()}
+        pm = PluginManager.get_instance()
+        mcp_now = frozenset(s["name"] for s in pm.get_mcp_servers() if s.get("enabled", True))
+    except Exception as e:
+        logger.debug(f"[HookManager] compute plugin snapshot failed: {e}")
+        return None
+
+    prev_tools = _plugin_snapshot_tools
+    prev_mcp = _plugin_snapshot_mcp
+    _plugin_snapshot_tools = tools_now
+    _plugin_snapshot_mcp = mcp_now
+
+    if prev_tools is None or prev_mcp is None:
+        return None  # 首次：仅建基线
+
+    added = set(tools_now) - set(prev_tools)
+    removed = set(prev_tools) - set(tools_now)
+    updated = {
+        n
+        for n in set(tools_now) & set(prev_tools)  # 同名但签名变化
+        if tools_now[n] != prev_tools[n]
+    }
+    diff = {
+        "tools_added": sorted(added),
+        "tools_removed": sorted(removed),
+        "tools_updated": sorted(updated),
+        "mcp_added": sorted(mcp_now - prev_mcp),
+        "mcp_removed": sorted(prev_mcp - mcp_now),
+    }
+    if not any(diff.values()):
+        return None  # 工具与 MCP 层无变化（如仅 ui/theme 组件重载）
+    return diff
+
+
+def _sub_actions_from_diff(diff: Optional[dict]) -> list:
+    """从 diff 派生工具/MCP 级子动作列表（供 matcher 精确匹配）
+
+    diff 非空键即子动作：tools_added/tools_removed/tools_updated/
+    mcp_added/mcp_removed。
+    """
+    if not diff:
+        return []
+    return [k for k, v in diff.items() if v]
+
+
+def trigger_plugin_changed_hook(context: dict) -> None:
+    """全局触发 PluginChanged hook（任意线程安全调用）
+
+    供 PluginManager（MCP 增删改/插件启停）/ MCPClientManager（连接状态变化）等
+    无 backend 引用的模块使用：
+    - 取首个活跃 backend 实例的 HookManager 触发（_hooks 类级共享，任一实例等效）
+    - 提交到共享线程池异步执行，不阻塞调用方（mcp 事件循环线程 / 工具线程）
+    - 自动附加工具/MCP 注册表 diff 明细（有变化时；调用方显式传 diff 则跳过）
+    - 无活跃 backend（全部窗口关闭）时静默跳过
+
+    Args:
+        context: hook 上下文，至少含 "action"（installed/updated/uninstalled/
+            enabled/disabled/mcp_added/mcp_removed/mcp_updated/mcp_connected/
+            mcp_disconnected/mcp_failed），可选 "plugin_name"/"server_name" 等
+    """
+    try:
+        from app.core.backend import ChatBackend
+
+        inst = next(iter(ChatBackend._active_instances), None)
+        if inst is None:
+            # 无窗口仍刷新快照基线，避免窗口全关期间的变化跨窗口误报
+            _compute_plugin_snapshot_diff()
+            return
+        hm = inst._hook_manager
+        # 无注册 hook 提前跳过（省线程池开销）；快照仍需刷新保持基线新鲜
+        if "PluginChanged" not in hm._hooks:
+            _compute_plugin_snapshot_diff()
+            return
+        if "diff" not in context:
+            diff = _compute_plugin_snapshot_diff()
+            if diff:
+                context = dict(context)
+                context["diff"] = diff
+        # 附带子动作（tools_added/removed/updated/mcp_*），matcher 可精确匹配
+        if context.get("diff") and not context.get("sub_actions"):
+            context = dict(context)
+            context["sub_actions"] = _sub_actions_from_diff(context["diff"])
+        executor = _get_parallel_executor()
+        executor.submit(hm.trigger_event, "PluginChanged", context)
+    except Exception as e:
+        logger.debug(f"[HookManager] trigger_plugin_changed_hook failed: {e}")
+
+
 def _is_ui_thread() -> bool:
     """检测当前是否运行在 Qt 主线程（UI 线程）上"""
     try:
@@ -314,6 +443,21 @@ class HookMatchRule:
             stop_reason = context.get("reason", "completed")
             reasons = [r.strip() for r in self.matcher.split("|")]
             return stop_reason in reasons
+
+        # PluginChanged 插件变更子事件匹配（参考 SessionStart 的 state 模式）
+        # matcher 可混合两类值（pipe 分隔）：
+        # - 插件/MCP 级 action: installed/updated/uninstalled/enabled/disabled/
+        #   mcp_added/mcp_removed/mcp_updated/mcp_connected/mcp_disconnected/mcp_failed
+        # - 工具/MCP 变更子动作: tools_added/tools_removed/tools_updated/
+        #   mcp_added/mcp_removed（由 diff 非空键派生，经 context["sub_actions"] 注入）
+        # 例 "tools_added|tools_updated" 仅工具新增/变更时触发；
+        #    "installed|mcp_failed" 安装或 MCP 连接失败时触发
+        if event_name == "PluginChanged":
+            wanted = {a.strip() for a in self.matcher.split("|")}
+            if context.get("action", "") in wanted:
+                return True
+            sub_actions = context.get("sub_actions") or []
+            return any(a in wanted for a in sub_actions)
 
         # BuildSystemPrompt 智能体角色匹配
         # matcher 格式如 "primary|subagent"，匹配 context["current_role"]

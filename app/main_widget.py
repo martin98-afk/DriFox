@@ -13366,7 +13366,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._add_chat_widget(card, insert_index=insert_index)
         # 流式新建卡片时同步最新任务列表（模型跨轮继续执行任务时，
         # 新回复卡片底部延续显示当前任务进度；历史加载 scroll=False 不同步）
-        if scroll and self._latest_todos:
+        # 若已有任务全部完成，则不同步——避免新消息卡片底部残留旧任务完成态。
+        if scroll and self._latest_todos and any(
+            isinstance(t, dict) and t.get("status") != "completed" for t in self._latest_todos
+        ):
             card.update_todo_list(self._latest_todos)
         if scroll and not self._suspend_auto_scroll:
             self._scroll_to_bottom()

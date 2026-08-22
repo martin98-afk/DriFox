@@ -98,11 +98,27 @@ class GatewayEngine(QObject, BaseEngine):
         # ===== Gateway 会话级配置 =====
         self._current_agent: Optional[str] = "plan"
 
+        # ===== 生命周期状态 =====
+        # cleanup() 后置 False；上层（ChatBackend._on_gateway_input）据此跳过该实例，
+        # 避免给平台回复"引擎已停用"并让 future 永远挂起。
+        self._is_active: bool = True
+
         # BaseEngine 属性已在上面赋值（_conversation_core, _conversation_executor）
         # 无需再调用 BaseEngine.__init__，因为 super() 链已触发过（使用默认值）
 
         # 注册为全局单例
         GatewayEngine._global_instance = self
+
+    @property
+    def is_active(self) -> bool:
+        """引擎是否仍可用（cleanup 之后变 False，外部可据此跳过该实例）。
+
+        多窗口场景下：第一个窗口 cleanup 会把全局单例 _global_instance 置 None，
+        第二个窗口启动时重新创建新实例，本属性在新实例上始终为 True。
+        单窗口 cleanup 后没新窗口时，旧实例 is_active=False，
+        平台残留消息到达 backend 由其入口守卫拦截，不再走到本引擎。
+        """
+        return self._is_active
 
     @classmethod
     def get_instance(
@@ -162,6 +178,9 @@ class GatewayEngine(QObject, BaseEngine):
         self._session_store = None
         if GatewayEngine._global_instance is self:
             GatewayEngine._global_instance = None
+        # 标记引擎停用，让 backend 入口守卫能感知，避免对平台推送"引擎已停用"
+        # 并让异步 future 永久挂起。
+        self._is_active = False
 
     # ==================== BaseEngine 接口实现 ====================
 
@@ -451,11 +470,10 @@ class GatewayEngine(QObject, BaseEngine):
 
         # 引擎可能已被窗口关闭时 cleanup（多窗口共享全局单例，cleanup 会置 None），
         # 此时消息仍可能经 PlatformManager 残留回调路由过来 → 直接崩溃 None 调用。
-        if self._get_model_config is None:
-            logger.error("[GatewayEngine] 引擎已停用（窗口关闭后 cleanup），拒绝处理消息")
-            cb = callbacks.get("error")
-            if cb:
-                cb("Gateway 引擎已停用，请重新打开应用窗口后重试。")
+        # 上层 ChatBackend._on_gateway_input 已在入口守卫拦住，这里是兜底。
+        if self._get_model_config is None or not self._is_active:
+            logger.warning("[GatewayEngine] skip message: engine cleaned up (window closed)")
+            # 不再向平台推送错误：上层入口已处理提示，避免重复 / 吓用户。
             return False
 
         # 获取模型配置

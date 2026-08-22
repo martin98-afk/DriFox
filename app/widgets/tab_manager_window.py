@@ -992,6 +992,13 @@ class TabManagerWindow(QWidget):
         _tab_panel.set_resizing(False)，复位拖拽首帧标记供下次拖拽重新冻结。
         """
         self._splitter_dragging = False
+        # ── #14 收尾：折叠/展开动画仍运行则跳过解冻，交 #4 动画 finally 统一恢复 ──
+        # 防「拖拽跨折叠阈值触发动画 + 120ms idle timer 提前解冻」极端路径尾段
+        # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复
+        # _content_area(setUpdatesEnabled True) 与 _set_cards_resize_preview_mode(False)。
+        # _splitter_dragging 已先行复位，后续 splitterMoved 可重新冻结下一拖拽会话。
+        if self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running:
+            return
         if hasattr(self, "_content_area"):
             self._content_area.setUpdatesEnabled(True)
         if hasattr(self, "_tab_panel"):
