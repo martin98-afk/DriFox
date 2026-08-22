@@ -2012,7 +2012,7 @@ _SKELETON_CACHE_MAX = 48
 # 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
 # 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
 # data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
-_SKELETON_CACHE_VERSION = 12
+_SKELETON_CACHE_VERSION = 15
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2270,6 +2270,11 @@ _STREAMING_DOCK_CSS = """
                 }
                 body.streaming-dock #content-placeholder {
                     order: 1;
+                    /* 坞态正文限高（6/10）：容器自身滚动，卡片总高稳定不随流式增长，
+                       工具区+todo 保持可见；流式结束归位后恢复自然高度 */
+                    max-height: 330px;
+                    overflow-y: auto;
+                    overflow-anchor: none;
                 }
                 body.streaming-dock #tool-section {
                     order: 2;
@@ -3252,12 +3257,14 @@ class CodeWebViewer(QWebEngineView):
             # 🆕 F2（S2 兜底）：DOM 中存在运行中工具块（data-streaming="true"）
             # 时强制 dock on——覆盖"JS 就绪晚于工具流式注入"的竞态窗口（_on_js_ready
             # 执行时 _streaming 可能已 False，但运行中块仍在 DOM 等待结果）。
-            self.page().runJavaScript(
-                "var _ts2=document.getElementById('tool-section');"
-                "var _co=_ts2&&_ts2.getAttribute('data-collapsed')==='true';"
-                "var _act=document.querySelector('#tool-content [data-tool-call-id][data-streaming=\"true\"]');"
-                "if(typeof _setStreamingDock==='function')_setStreamingDock(!!_act||!_co);"
-            )
+            # 🛡️ 欢迎卡片（light 骨架）跳过：坞态会限死正文高度，欢迎页长内容被截断。
+            if not self._light_skeleton:
+                self.page().runJavaScript(
+                    "var _ts2=document.getElementById('tool-section');"
+                    "var _co=_ts2&&_ts2.getAttribute('data-collapsed')==='true';"
+                    "var _act=document.querySelector('#tool-content [data-tool-call-id][data-streaming=\"true\"]');"
+                    "if(typeof _setStreamingDock==='function')_setStreamingDock(!!_act||!_co);"
+                )
         except RuntimeError:
             pass
         # 🐛 修复：流式内容可能在 JS 就绪前通过 _lazy_markdown_cb 缓存，
@@ -4514,7 +4521,7 @@ class CodeWebViewer(QWebEngineView):
                     display: flex;
                     align-items: center;
                     gap: 8px;
-                    font-size: 11px;
+                    font-size: 13px;
                     color: var(--text-muted);
                     user-select: none;
                     padding: 2px 2px 6px 2px;
@@ -4620,15 +4627,36 @@ class CodeWebViewer(QWebEngineView):
                     overflow: hidden;
                 }}
 
-                /* ── 任务列表（工具区最底部：分割线画在工具内容与任务列表之间）── */
+                /* ── 任务列表（工具区最底部）── */
                 #todo-panel {{
-                    border-top: 1px dashed var(--border);
                     margin: 2px 2px 0 2px;
-                    padding-top: 2px;
                 }}
                 /* 工具区折叠时 todo 面板一起收起 */
                 #tool-section[data-collapsed="true"] #todo-panel {{
                     display: none;
+                }}
+                /* 任务列表分隔线（与 #tool-separator 同源样式）：标题+完成统计在分隔线上，任务项在其下 */
+                #todo-separator {{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    font-size: 13px;
+                    color: var(--text-muted);
+                    user-select: none;
+                    padding: 4px 2px 4px 2px;
+                    border-top: 1px dashed var(--border);
+                }}
+                #todo-separator::before,
+                #todo-separator::after {{
+                    content: '';
+                    flex: 1;
+                    height: 1px;
+                    background: transparent;
+                }}
+                #todo-separator #todo-progress {{
+                    font-size: 12px;
+                    color: var(--text-muted);
+                    white-space: nowrap;
                 }}
                 .todo-panel-header {{
                     display: flex;
@@ -4639,11 +4667,6 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-muted);
                     user-select: none;
                     padding: 2px 4px 3px 4px;
-                }}
-                .todo-panel-header #todo-progress {{
-                    font-size: 12px;
-                    color: var(--text-muted);
-                    white-space: nowrap;
                 }}
                 /* 列表限高与 #tool-content 同尺度（600px），超出滚动 */
                 #todo-content {{
@@ -4734,7 +4757,7 @@ class CodeWebViewer(QWebEngineView):
               </div>
               <div id="tool-content"></div>
               <div id="todo-panel" style="display: none;">
-                <div class="todo-panel-header">📋 任务列表 <span id="todo-progress"></span></div>
+                <div id="todo-separator"><span>📋 任务列表</span><span id="todo-progress"></span></div>
                 <div id="todo-content"></div>
               </div>
             </div>
@@ -5055,12 +5078,12 @@ class CodeWebViewer(QWebEngineView):
                         // 程序触发的滚动事件（解决 suppress=false 之后异步派发 scroll 的 race）。
                         // 此时 _suppressScrollEvent 仍为 true，所有 scroll 事件仍被抑制。
                         if (!_wasUserScrolled) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }} else {{
                             var _wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < _scrollThreshold;
                             if (_wasAtBottom) {{
-                                document.body.scrollTop = document.body.scrollHeight;
+                                _autoScrollStreamingBody();
                                 window._userScrolledWithin = false;
                             }}
                         }}
@@ -5143,11 +5166,11 @@ class CodeWebViewer(QWebEngineView):
                     // 同步滚动到底（流式期间通常期望跟到底部）
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -5205,11 +5228,11 @@ class CodeWebViewer(QWebEngineView):
                     restoreCollapsibleStates(container);
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -5217,6 +5240,15 @@ class CodeWebViewer(QWebEngineView):
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     setTimeout(() => reportHeight(), 30);
+                }}
+                function _autoScrollStreamingBody() {{
+                    // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
+                    // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
+                    var _cp = document.getElementById('content-placeholder');
+                    if (document.body.classList.contains('streaming-dock') && _cp) {{
+                        _cp.scrollTop = _cp.scrollHeight;
+                    }}
+                    document.body.scrollTop = document.body.scrollHeight;
                 }}
                 function reportHeight() {{
                     // 用 body.scrollHeight 获取完整内容高度。
@@ -5253,20 +5285,15 @@ class CodeWebViewer(QWebEngineView):
                 // JS 不再硬编码工具名。
                 var _EDIT_TOOLS_SELECTOR = ':not([data-keep-in-content="true"])';
 
-                // 更新"工具与思考"标题（总项数，无勾叉 badge）
+                // 更新"工具与思考"标题（总项数）
                 function _updateToolSectionHeader() {{
                     var toolContent = document.getElementById('tool-content');
                     var separator = document.getElementById('tool-separator');
                     if (!separator) return;
                     var total = toolContent ? toolContent.children.length : 0;
-                    var todoCount = window._todoCount || 0;
                     var titleSpan = separator.querySelector(':scope > span:not(.chevron)');
                     if (titleSpan) {{
-                        var parts = [];
-                        if (total > 0) parts.push('⚙ 工具与思考 · ' + total + ' 项');
-                        else parts.push('⚙ 工具与思考');
-                        if (todoCount > 0) parts.push('📋 任务 ' + todoCount);
-                        titleSpan.textContent = parts.join('　');
+                        titleSpan.textContent = total > 0 ? '⚙ 工具与思考 · ' + total + ' 项' : '⚙ 工具与思考';
                     }}
                     // ── 自动展开：流式时有新工具且当前折叠 → 展开 ──
                     var _hasStreaming = document.querySelector('#tool-content [data-streaming="true"]');
@@ -5721,6 +5748,7 @@ class CodeWebViewer(QWebEngineView):
                 // ===== 任务列表（嵌入工具区，随工具区折叠/归位/沉底）=====
                 var _TODO_SNAKE_SVG = '{_THINK_SNAKE_SVG}';
                 window._todoCount = 0;
+                window._todoProgressText = '';
                 window._updateTodoList = function(todos) {{
                     var panel = document.getElementById('todo-panel');
                     if (!panel) return;
@@ -5730,6 +5758,8 @@ class CodeWebViewer(QWebEngineView):
                     var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : null;
                     if (!todos || !todos.length) {{
                         window._todoCount = 0;
+                        window._todoProgressText = '';
+                        if (prog) prog.textContent = '';
                         if (panel.style.display !== 'none') {{
                             panel.style.display = 'none';
                             // 无工具块时连工具区一起隐藏
@@ -5759,7 +5789,9 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     window._todoCount = todos.length;
                     content.innerHTML = html;
-                    prog.textContent = done + '/' + todos.length + ' 完成';
+                    var progText = '📋 ' + done + '/' + todos.length + ' 完成';
+                    window._todoProgressText = progText;
+                    if (prog) prog.textContent = progText;
                     panel.style.display = '';
                     // 有 todo 时工具区必须可见（即使暂无工具/思考块）
                     if (ts) ts.style.display = '';
@@ -6056,11 +6088,11 @@ class CodeWebViewer(QWebEngineView):
                 // 快速流式时时间窗永不过期导致用户滚轮被永久忽略）。
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
-                    document.body.scrollTop = document.body.scrollHeight;
+                    _autoScrollStreamingBody();
                 }} else {{
                     var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
                     if (wasAtBottom) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                         window._userScrolledWithin = false;
                     }}
                 }}
@@ -6895,6 +6927,10 @@ class CodeWebViewer(QWebEngineView):
         非简洁模式注入为空操作。JS 未就绪时跳过——_on_js_ready 会按当前
         _streaming / _is_history 状态兜底同步。
         """
+        # 欢迎卡片（light 骨架）不进入坞态：坞态 CSS 会限死正文高度，
+        # 欢迎卡片的长内容（会话列表/项目列表）会被截断在 330px。
+        if self._light_skeleton:
+            return
         try:
             if self._is_js_ready and self.page():
                 flag = "true" if active else "false"
@@ -9754,13 +9790,13 @@ class MessageCard(SimpleCardWidget):
                     "(function(){"
                     "  window._suppressScrollEvent = true;"
                     "  if (!window._userScrolledWithin) {"
-                    "    document.body.scrollTop = document.body.scrollHeight;"
+                    "    _autoScrollStreamingBody();"
                     "  } else {"
                     "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < "
                     + str(AUTO_SCROLL_THRESHOLD)
                     + ";"
                     "    if (wasAtBottom) {"
-                    "      document.body.scrollTop = document.body.scrollHeight;"
+                    "      _autoScrollStreamingBody();"
                     "      window._userScrolledWithin = false;"
                     "    }"
                     "  }"
@@ -10484,11 +10520,11 @@ class MessageCard(SimpleCardWidget):
                     }}
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -10516,11 +10552,11 @@ class MessageCard(SimpleCardWidget):
                 // 🐛 修复：追加新块后同步滚动 document.body，替换旧的 tc.scrollTop
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
-                    document.body.scrollTop = document.body.scrollHeight;
+                    _autoScrollStreamingBody();
                 }} else {{
                     var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                     if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                         window._userScrolledWithin = false;
                     }}
                 }}
@@ -10780,7 +10816,7 @@ class MessageCard(SimpleCardWidget):
                         // 🐛 修复：状态更新后 body 自动滚底
                         window._suppressScrollEvent = true;
                         if (!window._userScrolledWithin) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                         }}
                         // 🐛 修复：工具区内部自动滚底
                         if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
@@ -10807,11 +10843,11 @@ class MessageCard(SimpleCardWidget):
                     // 🐛 修复：预览内容更新后 body 自动滚底
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -10838,11 +10874,11 @@ class MessageCard(SimpleCardWidget):
                     // 🐛 修复：追加新块后 body 自动滚底，替换旧的 tc.scrollTop
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
