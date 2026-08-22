@@ -2012,7 +2012,7 @@ _SKELETON_CACHE_MAX = 48
 # 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
 # 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
 # data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
-_SKELETON_CACHE_VERSION = 15
+_SKELETON_CACHE_VERSION = 16
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -4670,6 +4670,7 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 /* 列表限高与 #tool-content 同尺度（600px），超出滚动 */
                 #todo-content {{
+                    position: relative;  /* 子项 offsetTop 相对本容器计算（in_progress 定位滚动依赖） */
                     max-height: 600px;
                     overflow-y: auto;
                     overflow-anchor: none;
@@ -5796,12 +5797,21 @@ class CodeWebViewer(QWebEngineView):
                     // 有 todo 时工具区必须可见（即使暂无工具/思考块）
                     if (ts) ts.style.display = '';
                     if (ts && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
-                    // 有滚动时始终让第一个进行中任务可见（尽量居中）
-                    var act = content.querySelector('.todo-item[data-status="in_progress"]');
-                    if (act) {{
-                        var target = act.offsetTop - (content.clientHeight - act.offsetHeight) / 2;
-                        content.scrollTop = Math.max(0, target);
-                    }}
+                    // 始终保持第一个进行中任务可见（列表超出限高时滚动到可视区）
+                    // 双 rAF：面板可能刚 display:''，等布局完成后再读 offsetTop/clientHeight。
+                    // 手动设 scrollTop 只动本容器，不扰动祖先链（scrollIntoView 会连带滚 body/工具区）。
+                    window._todoScrollToken = (window._todoScrollToken || 0) + 1;
+                    var _tk = window._todoScrollToken;
+                    requestAnimationFrame(function() {{
+                        requestAnimationFrame(function() {{
+                            if (_tk !== window._todoScrollToken) return;  // 已有更新，放弃旧滚动
+                            var act = content.querySelector('.todo-item[data-status="in_progress"]');
+                            if (!act) return;
+                            var target = act.offsetTop - (content.clientHeight - act.offsetHeight) / 2;
+                            var maxScroll = content.scrollHeight - content.clientHeight;
+                            content.scrollTop = Math.max(0, Math.min(target, Math.max(0, maxScroll)));
+                        }});
+                    }});
                     if (hr) hr();
                 }};
 
