@@ -73,7 +73,7 @@ class BalanceDisplay(QWidget):
         # UsageService 只存 config 快照不持窗口引用；本连接随组件销毁自动断开。
         from app.core.usage_service import UsageService
 
-        UsageService.get_instance().balance_ready.connect(self.show_balance_result)
+        self._reg_sig(UsageService.get_instance().balance_ready, self.show_balance_result)
 
         self.setToolTip("余额查询")
 
