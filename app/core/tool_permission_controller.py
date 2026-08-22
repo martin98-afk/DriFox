@@ -105,6 +105,10 @@ class ToolPermissionController(QObject):
         # 当前激活的智能体(None = 用户模式)
         self._active_agent_name: Optional[str] = None
 
+        # ★ singleton 信号连接跟踪（销毁时统一断开，防泄漏）
+        self._singleton_connections: list = []
+        self.destroyed.connect(self._disconnect_singleton_connections)
+
         # ── 监听配置外部同步刷新（仅真正的云端/外部配置同步） ──
         # 关键改动：不再监听 Settings.*.valueChanged，避免「一个 tab 编辑 → 全局
         # 信号 → 所有 tab 的 _on_settings_*_changed 被触发刷新」的跨标签广播。
@@ -115,6 +119,28 @@ class ToolPermissionController(QObject):
             from app.core.config_sync import ConfigSyncService
 
             ConfigSyncService.get_instance().settingsRestored.connect(self._on_config_synced)
+        except Exception:
+            pass
+
+    # ── singleton 信号连接管理 ──────────────────────────
+    def _reg_sig(self, signal, slot) -> None:
+        """注册 singleton 信号连接，自动跟踪以便销毁时统一断开"""
+        signal.connect(slot)
+        self._singleton_connections.append((signal, slot))
+
+    def _disconnect_singleton_connections(self) -> None:
+        """断开所有 _singleton_connections 中的连接（destroyed 信号触发）"""
+        for signal, slot in self._singleton_connections:
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        self._singleton_connections.clear()
+
+    def __del__(self) -> None:
+        """析构兜底：再次清理 singleton 连接"""
+        try:
+            self._disconnect_singleton_connections()
         except Exception:
             pass
 

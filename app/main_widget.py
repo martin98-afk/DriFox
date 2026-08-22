@@ -1138,6 +1138,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 无需重复执行同步子进程（最坏可达 3s 阻塞主线程，拖慢窗口出现速度）。
         self._is_duplicate_window = source_window is not None
         self._source_window = source_window
+        # ★ singleton 信号连接跟踪（销毁时统一断开，防泄漏）
+        self._singleton_connections: list = []
+        self.destroyed.connect(self._disconnect_singleton_connections)
         # 调用父类（会触发 setup_ui -> _create_agent_switch_buttons）
         super().__init__(homepage)
         # 需要在 super().__init__() 之前初始化所有依赖项
@@ -1434,6 +1437,28 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
     _global_auto_update_checked = False
+
+    # ── singleton 信号连接管理 ──────────────────────────
+    def _reg_sig(self, signal, slot) -> None:
+        """注册 singleton 信号连接，自动跟踪以便销毁时统一断开"""
+        signal.connect(slot)
+        self._singleton_connections.append((signal, slot))
+
+    def _disconnect_singleton_connections(self) -> None:
+        """断开所有 _singleton_connections 中的连接（destroyed 信号触发）"""
+        for signal, slot in self._singleton_connections:
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        self._singleton_connections.clear()
+
+    def __del__(self) -> None:
+        """析构兜底：再次清理 singleton 连接"""
+        try:
+            self._disconnect_singleton_connections()
+        except Exception:
+            pass
 
     def _init_auto_update_check(self):
         """启动时静默检查更新（使用延迟确保窗口完全就绪）"""
@@ -5854,6 +5879,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # （worker 侧 _inject_pending_hook_messages 注入路径），不受影响。
         if time.monotonic() - getattr(self, "_last_stop_time", 0.0) < 1.0:
             logger.debug("[TeamMail] 停止冷却期内，跳过 pending 自动处理")
+            # 🛡️ G3 修复：冷却只应延迟而非吞掉本次检查——新邮件恰在冷却窗口
+            # 到达时，watcher 事件已消费（新 id 已记入 _known_mail_ids），
+            # 错过即躺尸到成员下次对话（发送方已显示发送成功，接收方无反应）。
+            # 安排冷却过期后自动重检（1s 冷却语义不变）。
+            self._schedule_pending_recheck()
             return
 
         tm = self._get_team_manager()
@@ -5870,6 +5900,26 @@ class OpenAIChatToolWindow(ToolWindow):
             # 非流式路径：正常走对话流程处理
             self._team_processing = True
             self._process_team_task(mail)
+
+    def _schedule_pending_recheck(self):
+        """安排冷却过期后的 pending 重检（G3：冷却窗口错过不丢邮件）
+
+        冷却期可能连续命中（用户反复停止/新邮件连发），防重入标志保证
+        同一时刻至多一个待触发的重检；触发时若仍在冷却则再次顺延。
+        """
+        if getattr(self, "_pending_recheck_scheduled", False):
+            return
+        self._pending_recheck_scheduled = True
+        from PyQt5.QtCore import QTimer as _QTimer
+
+        _QTimer.singleShot(1150, self._pending_recheck_fire)
+
+    def _pending_recheck_fire(self):
+        """冷却重检回调：复位防重入标志后重新检查 pending（窗口已销毁则跳过）"""
+        self._pending_recheck_scheduled = False
+        if getattr(self, "_is_destroyed", False):
+            return
+        self._check_and_process_pending()
 
     def _inject_team_mail_as_hook(self, mail: dict):
         """流式中：将团队任务邮件作为 hook 消息注入到当前消息流
