@@ -107,6 +107,10 @@ SLEEP_SUB_MAP = {
 # 每状态帧数（从 8→12）
 FRAMES_PER_STATE = 12
 
+# 帧率上限保护：最短帧间隔（≈30fps）。当前 FRAME_INTERVALS 最小 80ms，
+# 此处为无操作化安全网，防止后续误将帧间隔调到极小值导致 paintEvent 无节流超频重绘。
+_MIN_FRAME_INTERVAL_MS = 33
+
 # 帧间隔（ms，支持 (min,max) 范围随机取值）
 FRAME_INTERVALS = {
     "idle": (200, 350),        # 空闲：缓慢自然呼吸
@@ -411,11 +415,11 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def _get_interval(self, state: str) -> int:
-        """获取帧间隔，支持范围随机"""
+        """获取帧间隔，支持范围随机；下限 _MIN_FRAME_INTERVAL_MS 帧率上限保护"""
         interval = FRAME_INTERVALS.get(state, 150)
         if isinstance(interval, (tuple, list)):
-            return random.randint(interval[0], interval[1])
-        return interval
+            interval = random.randint(interval[0], interval[1])
+        return max(interval, _MIN_FRAME_INTERVAL_MS)
 
     def _start_frame_timer(self, state: str) -> None:
         """启动帧 Timer"""
