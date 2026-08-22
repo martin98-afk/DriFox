@@ -13,8 +13,8 @@ import re as _re
 from typing import List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
+from PyQt5.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap, QPen
 from PyQt5.QtGui import (
     QColor as _QColor,
 )
@@ -727,6 +727,60 @@ def _make_position_icon(black_cells) -> QIcon:
     return icon
 
 
+class _RotatableArrow(QWidget):
+    """可旋转 chevron 折叠指示箭头：0° 指向右(折叠)，90° 指向下(展开)。
+
+    用 QPainter 实时绘制（颜色取自当前主题 Colors.TEXT_MUTED），配合
+    QPropertyAnimation 做 160ms 缓动旋转，替换原字符箭头 ▶/▼ 的生硬切换。
+    """
+
+    def __init__(self, parent=None, size: int = 14):
+        super().__init__(parent)
+        self._size = size
+        self._angle = 0.0
+        self.setFixedSize(size, size)
+        self._anim: Optional[QPropertyAnimation] = None
+
+    def _get_angle(self) -> float:
+        return self._angle
+
+    def _set_angle(self, a: float):
+        self._angle = a
+        self.update()
+
+    angle = pyqtProperty(float, _get_angle, _set_angle)
+
+    def set_expanded(self, expanded: bool, animate: bool = True):
+        target = 90.0 if expanded else 0.0
+        if not animate or self._angle == target:
+            self._set_angle(target)
+            return
+        if self._anim is not None:
+            self._anim.stop()
+        self._anim = QPropertyAnimation(self, b"angle")
+        self._anim.setDuration(160)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._anim.setStartValue(self._angle)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.translate(self.width() / 2, self.height() / 2)
+        p.rotate(self._angle)
+        pen = QPen(QColor(Colors.TEXT_MUTED))
+        pen.setWidthF(1.5)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        half = self._size / 2
+        dx, dy = half * 0.34, half * 0.46
+        p.drawLine(int(-dx), int(-dy), 0, 0)
+        p.drawLine(0, 0, int(-dx), int(dy))
+        p.end()
+
+
 class UIPluginRow(QFrame):
     """TabPanel 中的 UI 插件行，固定图标和文本的相对位置。"""
 
@@ -753,9 +807,11 @@ class UIPluginRow(QFrame):
         self._icon_label.setToolTip(title)
         # 使用与 TabItem 同款的 _ElidedLabel，收起时自动省略文本
         self._title_label = _ElidedLabel(title, self)
+        self._compact = False  # 紧凑模式（侧边栏折叠态：只保留图标）
+        self._compact_saved: Optional[dict] = None  # 紧凑态恢复现场
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setContentsMargins(4, 2, 4, 2)
         layout.setSpacing(6)
         layout.addWidget(self._icon_label)
         layout.addWidget(self._title_label, 1)
@@ -780,6 +836,32 @@ class UIPluginRow(QFrame):
             self._icon_label.setPixmap(icon.pixmap(size, size))
         else:
             self._icon_label.clear()
+
+    def set_compact(self, compact: bool):
+        """切换紧凑模式（侧边栏折叠态）：仅保留图标
+
+        compact=True：保存恢复现场（标题可见性 + margins），隐藏标题，
+            边距收紧为 (4,4,4,4)（折叠态窄条下只显示 icon）；
+        compact=False：按保存的现场恢复。
+        幂等：相同状态重复调用直接返回。
+        """
+        if self._compact == compact:
+            return
+        self._compact = compact
+        if compact:
+            self._compact_saved = {
+                "title_visible": not self._title_label.isHidden(),
+                "margins": self.layout().getContentsMargins(),
+            }
+            self._title_label.setVisible(False)
+            self.layout().setContentsMargins(4, 4, 4, 4)
+        else:
+            saved = self._compact_saved or {}
+            self._title_label.setVisible(bool(saved.get("title_visible", True)))
+            if "margins" in saved:
+                self.layout().setContentsMargins(*saved["margins"])
+            self._compact_saved = None
+        self.update()
 
     def refresh_style(self):
         """刷新主题样式：字体 + 颜色 + 主题相关图标"""
@@ -882,6 +964,7 @@ class TabPanel(QWidget):
         self._system_plugin_buttons: list[UIPluginRow] = []
         self._custom_plugin_layout: Optional[QVBoxLayout] = None
         self._custom_plugin_buttons: list[UIPluginRow] = []
+        self._custom_plugin_saved_state: Optional[dict] = None  # 折叠态保存卡片 scroll 现场
         self._gitee_account_row: Optional[GiteeAccountRow] = None
         self._anim_phase: float = 0.0  # 彩虹动画相位
         self._question_phase: float = 0.0  # question 脉动相位（独立，避免与彩虹冲突）
@@ -968,39 +1051,40 @@ class TabPanel(QWidget):
         self._system_plugin_section.setVisible(False)
         layout.addWidget(self._system_plugin_section)
 
-        # ── 分隔线：系统插件 ↔ 自定义插件 ──
-        self._plugin_separator_1 = QFrame(self)
-        self._plugin_separator_1.setFrameShape(QFrame.HLine)
-        self._plugin_separator_1.setStyleSheet(self._SEPARATOR_STYLE)
-        self._plugin_separator_1.setVisible(False)
-        layout.addWidget(self._plugin_separator_1)
+        # ── 自定义 UI 插件：卡片式分组（折叠头 + 滚动列表，对齐团队分组框）──
+        self._custom_plugin_card = QFrame(self)
+        self._custom_plugin_card.setObjectName("customPluginCard")
+        card_layout = QVBoxLayout(self._custom_plugin_card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+        self._custom_plugin_card.setVisible(False)
+        layout.addWidget(self._custom_plugin_card)
 
-        # ── 自定义 UI 插件折叠区 ──
-        self._custom_plugin_header = QWidget(self)
+        # 折叠头（卡片内顶部，点击切换展开/折叠）
+        self._custom_plugin_header = QWidget(self._custom_plugin_card)
+        self._custom_plugin_header.setObjectName("customPluginHeader")
         self._custom_plugin_header.setCursor(Qt.PointingHandCursor)
         custom_header_layout = QHBoxLayout(self._custom_plugin_header)
-        custom_header_layout.setContentsMargins(6, 4, 6, 4)
-        custom_header_layout.setSpacing(4)
-        self._custom_plugin_arrow = QLabel("▶", self._custom_plugin_header)
-        self._custom_plugin_arrow.setFixedWidth(12)
-        self._custom_plugin_arrow.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent;")
-        self._custom_plugin_label = QLabel("自定义插件", self._custom_plugin_header)
-        self._custom_plugin_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
-        )
+        custom_header_layout.setContentsMargins(6, 5, 6, 5)
+        custom_header_layout.setSpacing(6)
+        self._custom_plugin_arrow = _RotatableArrow(self._custom_plugin_header, size=14)
         custom_header_layout.addWidget(self._custom_plugin_arrow)
+        self._custom_plugin_label = QLabel("自定义插件", self._custom_plugin_header)
+        self._custom_plugin_label.setObjectName("customPluginTitle")
         custom_header_layout.addWidget(self._custom_plugin_label, 1)
-        self._custom_plugin_header.setVisible(False)
+        self._custom_plugin_badge = QLabel("0", self._custom_plugin_header)
+        self._custom_plugin_badge.setObjectName("customPluginBadge")
+        custom_header_layout.addWidget(self._custom_plugin_badge)
         self._custom_plugin_header.mousePressEvent = lambda ev: self._on_custom_plugin_toggle()
-        layout.addWidget(self._custom_plugin_header)
+        card_layout.addWidget(self._custom_plugin_header)
 
-        # ── 自定义 UI 插件滚动区 ──
-        self._custom_plugin_scroll = QScrollArea(self)
+        # 滚动列表（卡片内，默认折叠）
+        self._custom_plugin_scroll = QScrollArea(self._custom_plugin_card)
         self._custom_plugin_scroll.setWidgetResizable(True)
         self._custom_plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._custom_plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._custom_plugin_scroll.setFrameShape(QFrame.NoFrame)
-        self._custom_plugin_scroll.setMaximumHeight(160)
+        self._custom_plugin_scroll.setMaximumHeight(200)
         self._custom_plugin_scroll.setStyleSheet(
             f"""
             QScrollArea {{
@@ -1016,13 +1100,15 @@ class TabPanel(QWidget):
         self._custom_plugin_scroll.viewport().setStyleSheet("background: transparent;")
         self._custom_plugin_section = QWidget(self._custom_plugin_scroll)
         custom_plugin_layout = QVBoxLayout(self._custom_plugin_section)
-        custom_plugin_layout.setContentsMargins(6, 0, 6, 4)
+        custom_plugin_layout.setContentsMargins(2, 2, 2, 2)
         custom_plugin_layout.setSpacing(2)
         self._custom_plugin_layout = custom_plugin_layout
         self._custom_plugin_section.setStyleSheet("background: transparent;")
         self._custom_plugin_scroll.setWidget(self._custom_plugin_section)
         self._custom_plugin_scroll.setVisible(False)
-        layout.addWidget(self._custom_plugin_scroll)
+        card_layout.addWidget(self._custom_plugin_scroll)
+
+        self._apply_custom_card_style()
 
         # ── 分隔线：UI 插件区域 ↔ 新建标签页 ──
         self._plugin_separator_2 = QFrame(self)
@@ -1268,17 +1354,21 @@ class TabPanel(QWidget):
             self._custom_plugin_layout.addWidget(row)
             self._custom_plugin_buttons.append(row)
         has_custom = bool(custom_infos)
-        self._custom_plugin_header.setVisible(has_custom)
+        self._custom_plugin_card.setVisible(has_custom)
         # 默认折叠
         self._custom_plugin_scroll.setVisible(False)
-        self._custom_plugin_arrow.setText("▶")
-        self._custom_plugin_label.setText(f"自定义插件 ({len(custom_infos)})")
+        self._custom_plugin_arrow.set_expanded(False, animate=False)
+        self._custom_plugin_label.setText("自定义插件")
+        self._custom_plugin_badge.setText(str(len(custom_infos)))
 
         # ── 分隔符可见性 ──
-        self._plugin_separator_1.setVisible(has_system and has_custom)
         self._plugin_separator_2.setVisible(has_system or has_custom)
 
         self._refresh_plugin_style()
+
+        # 折叠态重建后重新应用紧凑 UI（上面 scroll 被重置为默认折叠，新行未 compact）
+        if self._collapsed:
+            self._update_toggle_button()
 
     def _on_sidebar_item_clicked(self, info):
         """独立侧边栏项点击：组上下文（当前窗口 + item_id）派发 info.on_click"""
@@ -1395,11 +1485,33 @@ class TabPanel(QWidget):
         for grp in self._team_groups.values():
             self._apply_team_compact(grp, compact)
 
+        # ── UI 插件区紧凑同步（矩阵 D5）：折叠时自定义插件卡片只显 icon 行 ──
+        # 折叠态：隐藏卡片折叠头（arrow/文字/badge），强制展开 scroll 显示
+        # 插件 icon 行（每行 set_compact 仅留图标）；展开态按保存现场恢复。
+        if hasattr(self, "_custom_plugin_card"):
+            if compact:
+                if getattr(self, "_custom_plugin_saved_state", None) is None:
+                    self._custom_plugin_saved_state = {
+                        "scroll_visible": not self._custom_plugin_scroll.isHidden(),
+                    }
+                self._custom_plugin_header.setVisible(False)
+                self._custom_plugin_scroll.setVisible(True)
+                self._apply_custom_card_style(compact=True)
+            else:
+                self._custom_plugin_header.setVisible(not self._custom_plugin_card.isHidden())
+                saved = getattr(self, "_custom_plugin_saved_state", None) or {}
+                self._custom_plugin_scroll.setVisible(bool(saved.get("scroll_visible", False)))
+                self._custom_plugin_arrow.set_expanded(self._custom_plugin_scroll.isVisible())
+                self._custom_plugin_saved_state = None
+                self._apply_custom_card_style(compact=False)
+        for row in self._custom_plugin_buttons:
+            row.set_compact(compact)
+
     def _on_custom_plugin_toggle(self):
         """切换自定义插件折叠/展开状态"""
         expanded = not self._custom_plugin_scroll.isVisible()
         self._custom_plugin_scroll.setVisible(expanded)
-        self._custom_plugin_arrow.setText("▼" if expanded else "▶")
+        self._custom_plugin_arrow.set_expanded(expanded)
         # 展开时刷新样式，确保折叠期间的主题变更被应用
         if expanded:
             for row in self._custom_plugin_buttons:
@@ -1483,12 +1595,10 @@ class TabPanel(QWidget):
         # 自定义插件（即使折叠也需刷新，否则展开后样式仍为旧主题）
         for row in self._custom_plugin_buttons:
             row.refresh_style()
+        # 自定义插件卡片 / 折叠头 / 标题 / 计数徽章（颜色随主题刷新）
+        self._apply_custom_card_style(compact=self._collapsed)
         if hasattr(self, "_custom_plugin_arrow"):
-            self._custom_plugin_arrow.setStyleSheet(f"color: {Colors.TEXT_MUTED}; background: transparent;")
-        if hasattr(self, "_custom_plugin_label"):
-            self._custom_plugin_label.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
-            )
+            self._custom_plugin_arrow.update()
         # ── 顶部：分支 + 新建按钮字体随字号设置刷新 ──
         for _btn in (getattr(self, "_branch_btn", None), getattr(self, "_new_btn", None)):
             if _btn is not None:
@@ -2364,6 +2474,49 @@ class TabPanel(QWidget):
         self._refresh_plugin_style()
         if self._gitee_account_row is not None:
             self._gitee_account_row.refresh_style()
+
+    def _apply_custom_card_style(self, compact: bool = False):
+        """应用自定义插件卡片分组样式（卡片背景 + 细边框 + 圆角，对齐团队分组框）。
+
+        颜色取自主题 Colors，主题切换时由 _refresh_plugin_style 重新调用。
+        compact=True：折叠态紧凑样式——margin 收紧，窄条下只容纳 icon 行。
+        """
+        if not hasattr(self, "_custom_plugin_card"):
+            return
+        Colors.refresh()
+        margin = "2px 2px" if compact else "2px 6px"
+        self._custom_plugin_card.setStyleSheet(f"""
+            #customPluginCard {{
+                background: {Colors.CARD_BG.format(alpha=40)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                margin: {margin};
+            }}
+            #customPluginHeader {{
+                background: transparent;
+                border: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+            }}
+            #customPluginHeader:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+            #customPluginTitle {{
+                color: {Colors.TEXT_PRIMARY};
+                background: transparent;
+                {get_font_family_css()} {font_size_css(12)}
+                font-weight: bold;
+                padding: 0px;
+            }}
+            #customPluginBadge {{
+                color: {Colors.TEXT_MUTED};
+                background: {Colors.HOVER_BG};
+                border-radius: 8px;
+                padding: 1px 7px;
+                {get_font_family_css()} {font_size_css(10)}
+                min-width: 14px;
+            }}
+        """)
 
     @property
     def count(self) -> int:
