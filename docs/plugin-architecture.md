@@ -390,8 +390,78 @@ discover → load → enable → disable → unload
 | agents/ | `plugins/*/agents/*.md` | AgentManager（`app/core/agent.py`） | `_load_agents_from_dir`；同时 `_register_builtin_agents_as_commands` 注册 /agent 命令 | backend watchfiles → reload_plugin_agents |
 | skills/ | `plugins/*/skills/*/SKILL.md` | 技能系统（懒加载） | `get_local_skills()` + `invalidate_skills_cache()` 失效 | 懒失效 |
 | themes/ | `plugins/*/themes/` | ThemeManager（`app/utils/theme_manager.py`） | `theme_manager.reload()` + `update_theme_options()` | backend watchfiles → reload |
-| hooks/ | `plugins/*/hooks/hooks.json` + py | HookManager（`app/core/hook_manager.py`） | `load_hooks_from_directory_flat`；事件点 BuildSystemPrompt/SessionStart/PreUserMessage/PreToolUse/PostToolUse/Stop + matcher + 类型(prompt/python/http/command) + 决策(continue/block/defer) | backend watchfiles → 仅重载 hooks |
+| hooks/ | `plugins/*/hooks/hooks.json` + py | HookManager（`app/core/hook_manager.py`） | `load_hooks_from_directory_flat`；事件点 BuildSystemPrompt/SessionStart/PreUserMessage/PreToolUse/PostToolUse/Stop/PluginChanged + matcher + 类型(prompt/python/http/command) + 决策(continue/block/defer) | backend watchfiles → 仅重载 hooks |
 | mcp/ (.mcp.json) | `plugins/*/.mcp.json` | mcp_tools（`app/tools/mcp_tools.py`） | `PluginManager.get_mcp_configs()` 合并 + `get_mcp_servers()`（30s TTL 缓存） | 懒失效（invalidate_mcp_cache） |
+
+### PluginChanged 事件（插件/MCP 变更通知）
+
+> 环境事件：插件或 MCP 发生变化时触发，不在会话流内。hook 输出经
+> `_hook_message_queue` 排队，AI 下一轮对话可见（`add_output_to_context` 可关）。
+
+**触发点与 action 语义**（matcher 可混合两类值 pipe 多选）：
+
+| action / 子动作 | 触发点 | 说明 |
+|---|---|---|
+| installed / updated / uninstalled | `backend.emit_plugin_changed()`（安装/更新/卸载/热重载统一出口；installer 传精确值，watcher 路径自动推断） | `context.plugin_name` + `components`（各组件重载结果） |
+| enabled / disabled | `plugin_manager.enable_plugin / disable_plugin` 末尾（覆盖市场与所有启停入口） | `context.plugin_name` |
+| mcp_added / mcp_removed / mcp_updated | `plugin_manager.add/remove/update_mcp_server` | `context.server_name` + `server_config` |
+| mcp_connected / mcp_disconnected / mcp_failed | `MCPServerConnection.set_state` 状态迁移（CONNECTING 不触发、同态过滤） | `context.server_name`；connected 附 `mcp_tools`（发现的工具名列表），failed 附 `error` |
+| tools_added / tools_removed / tools_updated | **子动作**（`context.sub_actions`，由 diff 非空键派生）：工具新增/移除/同名 schema 变更（签名 hash 对比） | matcher 写 `"tools_added\|tools_updated"` 可仅在工具增删改时触发 |
+
+**diff 明细**：事件自动附加 `context.diff` + `context.sub_actions`
+（`hook_manager._compute_plugin_snapshot_diff`，模块级快照基线，首次触发只建基线）：
+`{"tools_added": [...], "tools_removed": [...], "tools_updated": [...], "mcp_added": [...], "mcp_removed": [...]}`。
+
+**全局触发辅助**：`hook_manager.trigger_plugin_changed_hook(context)` — 无 backend
+引用的模块（plugin_manager/mcp_tools）统一入口；任意线程安全（线程池异步投递），
+自动附加 diff；无活跃 backend 或无注册 hook 时静默跳过（仍刷新快照基线）。
+
+### 对话引擎 Hook 规范化（HookPolicy）
+
+> 插件自建对话执行栈（autoloop/chinese-chess 等经 `services["conversation_stack"]`
+> 或 `services["create_engine_session"]`）复用主程序 tool_executor 时，hook 是否
+> 触发由**引擎声明的 HookPolicy 决定**，不再被动执行全局 hooks。
+
+`ConversationConfig.hook_policy`（`app/core/conversation/config.py`）三档：
+
+| 级别 | 消息级（PreAssistantMessage/PostAssistantMessage/Stop） | 工具级（PreToolUse/PostToolUse） | 适用 |
+|---|---|---|---|
+| `ALL`（默认） | 触发 | 触发 | UI 主对话 / Gateway（行为零变化） |
+| `TOOL_EVENTS_ONLY` | 不触发 | 触发 | 需保留安全审查类工具 hook 的插件引擎 |
+| `NONE` | 不触发 | 不触发 | 插件后台循环（默认推荐） |
+
+传导链：`ConversationConfig.hook_policy` → executor 注入 worker_kwargs →
+ChatWorker `_hook_policy` 归一化（None/非法 → ALL 兼容旧调用方）→
+①消息级：`_trigger_worker_hook` 入口短路；②工具级：`_execute_tool` 传
+`trigger_hooks` per-call 参数 → `tool_executor.execute(trigger_hooks=False)`
+跳过 PreToolUse/PostToolUse（per-call 线程安全，subagent 并发不受影响）。
+
+### EngineSession — 插件对话引擎最通用驱动原语（EP3）
+
+> 契约 `app/plugins/contracts/engine_session.py`；实现
+> `app/core/conversation/engine_session.py`；注入
+> `services["create_engine_session"](engine_name, **kwargs)`。
+
+**设计原则：不预设对话流程，最大化自由度。**
+
+```python
+session = services["create_engine_session"]("my-engine")   # 默认 hook_policy="none"
+r = session.turn(user="你好", timeout=60)                    # 最简一轮
+r = session.turn(messages=msgs, tools=phase_tools,          # 全控一轮
+                 callbacks={"content_received": on_chunk})
+session.executor.execute(...)                               # 逃生舱（core/executor 公开）
+```
+
+`turn()` 只做「执行一轮 + 同步等待」；messages/tools/callbacks 全量透传
+（finished/error 由会话持有以保证同步语义，其余回调原样转发 worker）；
+`auto_history` 可选多轮累积（默认关闭，上下文由调用方管理）；返回
+`ChatResult(text/error/cancelled/timed_out/messages/ok)`。
+
+实现收编插件曾各自维护的五类样板（隔离 ConversationCore / threading.Event
+同步 Adapter / stale worker 复位防御 / 会话初始化 / 空响应兜底恢复），
+插件只剩业务逻辑。插件应在自己的 QThread 中调用 `turn()`（阻塞），
+UI 更新经 Qt 信号转发。
+
 | lsp/ (.lsp.json) | `plugins/*/.lsp.json` | LspManager（`app/core/lsp/`） | `add_plugin_servers` / `remove_plugin_servers` 增量 | backend watchfiles → 增量重载 |
 | ui/ | `plugins/*/ui/__init__.py`（必须暴露 register_ui） | UIPluginRegistry（`app/core/ui_plugin_registry.py`） | `load_plugin`：sys.path 注入 → importlib 动态加载 → `register_ui(self)`；4 扩展点：register_content_renderer / register_message_factory / register_floating_card / register_welcome_tab | backend watchfiles → reload_plugin（先卸旧后载新、清 sys.modules + pycache） |
 | tools/ | `plugins/*/tools/*.py`（必须暴露 register(registry)） | ToolRegistry（`app/tools/registry.py`） | `plugin_tool_loader.load_plugin_tools`：source 强制 `plugin:<name>`、danger 必填、user 覆盖 system | 独立 PluginToolWatcher 轮询线程（2s 签名对比 → scan_now 全量重扫，幂等+锁） |
