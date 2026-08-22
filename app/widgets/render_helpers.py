@@ -1324,3 +1324,15 @@ def format_timestamp(ts: str) -> str:
     if len(ts) > 5:
         return ts[-5:]
     return ts
+
+
+def invalidate_render_caches():
+    """清除 render_helpers 模块级缓存（qrc icon 存在性 + diff formatter + lexer）。
+
+    在新建/切换会话或主题切换时调用，避免缓存的 qrc 查询结果、diff formatter
+    实例和 pygments lexer 实例累积。每个缓存内部已有 max 防御上限，本函数
+    用于主动一次性释放。
+    """
+    _QRC_ICON_EXISTS_CACHE.clear()
+    _DIFF_FORMATTER_CACHE.clear()
+    _DIFF_LEXER_CACHE.clear()

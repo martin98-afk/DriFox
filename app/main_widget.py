@@ -20902,6 +20902,24 @@ def _cleanup_global_lru_caches():
         _render_tool_block_content.cache_clear()
     except Exception:
         pass
+    try:
+        from app.widgets.render_helpers import invalidate_render_caches
+
+        invalidate_render_caches()
+    except Exception:
+        pass
+    try:
+        from app.utils.utils import invalidate_icon_cache
+
+        invalidate_icon_cache()
+    except Exception:
+        pass
+    try:
+        from app.utils.provider_icons import invalidate_provider_icon_cache
+
+        invalidate_provider_icon_cache()
+    except Exception:
+        pass
 
 
 def _compact_process_heap_after_cleanup():

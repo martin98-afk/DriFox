@@ -7,11 +7,14 @@
 主程序 qrc 仅作回退兜底。与 tools 插件的图标机制对称。
 """
 
+from collections import OrderedDict
 from pathlib import Path
 
 from PyQt5.QtGui import QIcon
 
-_ICON_CACHE: dict = {}
+# LRU 缓存（max 256），超限驱逐最久未访问条目，避免插件图标字典无限膨胀。
+_ICON_CACHE: OrderedDict = OrderedDict()
+_ICON_CACHE_MAX = 256
 
 
 def _is_light_theme() -> bool:
@@ -65,6 +68,7 @@ def get_provider_icon(provider_name: str) -> QIcon:
             return QIcon()
         cache_key = f"{provider_name}:{p.icon}:{p.icon_dir}:{p.icon_dir_light}:{_is_light_theme()}"
         if cache_key in _ICON_CACHE:
+            _ICON_CACHE.move_to_end(cache_key)
             return _ICON_CACHE[cache_key]
 
         path = _provider_icon_path(provider_name)
@@ -72,6 +76,8 @@ def get_provider_icon(provider_name: str) -> QIcon:
             icon = QIcon(path)
             if not icon.isNull():
                 _ICON_CACHE[cache_key] = icon
+                if len(_ICON_CACHE) > _ICON_CACHE_MAX:
+                    _ICON_CACHE.popitem(last=False)
                 return icon
 
         # 回退：主程序 qrc（按 icon key 取，主题感知由 _ThemeIconEngine 处理）
@@ -79,8 +85,15 @@ def get_provider_icon(provider_name: str) -> QIcon:
 
         icon = get_icon(p.icon)
         _ICON_CACHE[cache_key] = icon
+        if len(_ICON_CACHE) > _ICON_CACHE_MAX:
+            _ICON_CACHE.popitem(last=False)
         return icon
     except Exception:
         from app.utils.utils import get_icon
 
         return get_icon("大模型")
+
+
+def invalidate_provider_icon_cache():
+    """清除服务商图标 LRU 缓存（主题切换/会话清理时调用）"""
+    _ICON_CACHE.clear()
