@@ -134,9 +134,6 @@ from app.widgets.cards.floating.sub_agent_compact_widget import (
 )
 from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCardContent
 from app.widgets.cards.floating.share_card import ShareCardContent
-from app.widgets.cards.floating.todo_floating_widget import (
-    TodoFloatingWidget,
-)
 from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
 
 # [PERF] 设置卡导入纪律：顶层仅保留 __init__/setup_ui 直线构造的卡片；
@@ -1032,10 +1029,9 @@ class OpenAIChatToolWindow(ToolWindow):
     _tool_call_depth: int = 0
     _pending_tool_calls: int = 0
     _first_tool_result: bool = True
-    _todo_floating_widget = None
+    _latest_todos: Optional[list] = None  # 最近一次 todowrite 回传的任务列表（推送消息卡片内嵌任务区）
     _question_floating_widget = None
     _question_tool_call_id = None
-    _todo_was_visible_before_system: bool = False  # 打开系统卡片前todo的可见状态
     _is_system_card_visible: bool = False  # 当前是否有系统卡片显示
     _system_cards_open: bool = False  # 是否有系统卡片正在打开（用于 _do_hide_input_area 做竞态保护）
     _window_active: bool = True
@@ -1623,8 +1619,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ===== TopCardContainer (chatscroll 上方) =====
         # 系统配置卡片，互斥显示
-        mgr.register_card(self._window_id, ContainerType.TOP, "todo", self._todo_floating_widget)
-        self._top_card_container.add_card("todo", self._todo_floating_widget)
 
         # 注：mcp_edit/provider_edit/hook_edit 三张编辑卡片已改为懒创建，
         # 注册/入容器在 _ensure_xxx_card() 中按需执行，避免 setup_ui 关键路径上构建。
@@ -2583,9 +2577,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _update_widgets_opacity(self, opacity: float):
         """更新所有需要响应透明度变化的组件"""
-        # 更新待办事项悬浮框
-        if self._todo_floating_widget:
-            self._todo_floating_widget.set_opacity(opacity)
         # 更新模型配置卡片
         if self._model_config_card:
             self._model_config_card.set_opacity(opacity)
@@ -3041,10 +3032,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 实例由 GlobalCardController 持有，本类通过下方只读 property 兼容旧读取点
         # （透明度调节、主题刷新、字体缩放等仍按旧属性名访问）
 
-        self._todo_floating_widget = TodoFloatingWidget(self)
-        self._todo_floating_widget.setVisible(False)
-        self._todo_floating_widget.closed.connect(self._on_todo_closed)
-
         self._sub_agent_compact_widget = SubAgentCompactFloatingWidget(self)
         self._sub_agent_compact_widget.setVisible(False)
         self._sub_agent_compact_widget.closed.connect(self._on_sub_agent_compact_closed)
@@ -3064,9 +3051,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 下方卡片容器 - 添加 SubAgentCompact
         self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
-
-        # 上方卡片容器 - 添加 Todo
-        self._top_card_container.add_card("todo", self._todo_floating_widget)
 
         # 注：mcp_edit/hook_edit/provider_edit 三张编辑卡片已改为懒创建，
         # 在 _ensure_xxx_card() 中按需添加至容器，此处跳过避免访问 None。
@@ -8174,15 +8158,12 @@ class OpenAIChatToolWindow(ToolWindow):
         """隐藏主要的悬浮面板（互斥显示）
 
         包括：系统设置、模型配置、历史会话、记忆管理
-        现在也保存并隐藏 todo/tool/sub_agent 实时卡片
+        现在也保存并隐藏 tool/sub_agent 实时卡片
         """
         # 标记系统卡片打开状态，阻止实时卡片自行显示
         self._is_system_card_visible = True
-        # 保存 todo 可见状态，用于系统卡片关闭后恢复
-        self._todo_was_visible_before_system = self._todo_floating_widget.isVisible()
         # 通过 CardManager 隐藏所有卡片
         for card_id in [
-            "todo",
             "tool",
             "sub_agent",
             "question",
@@ -8363,13 +8344,10 @@ class OpenAIChatToolWindow(ToolWindow):
         return False
 
     def _restore_after_system_close(self):
-        """系统卡片关闭后，恢复 todo/sub_agent 实时卡片"""
+        """系统卡片关闭后，恢复实时卡片"""
         if not self._is_any_system_card_visible():
             # 只有当所有系统卡片都关闭时才重置标志
             self._is_system_card_visible = False
-        # 恢复 todo（如果之前是显示的且还有内容）
-        if self._todo_was_visible_before_system and self._todo_floating_widget._todo_list:
-            self._todo_floating_widget.setVisible(True)
 
     # ══════════════════════════════════════════════════════════════
     # 像素小狐桌宠 — 集中 AI 状态管理
@@ -10268,7 +10246,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._settings_popup.refresh_style()
             # 浮动卡片
             for card in (
-                self._todo_floating_widget,
                 self._question_floating_widget,
                 self._sub_agent_compact_widget,
                 self._share_card_content,
@@ -10728,8 +10705,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.node_preview.clear_nodes()
         # 新会话无用户消息，徽章应隐藏（clear_nodes 绕过了 _update_node_preview）
         self._update_history_questions_badge()
-        if self._todo_floating_widget:
-            self._todo_floating_widget.clear()
+        # 新会话重置任务列表快照（工具插件状态由 clear_todo_list 清理）
+        self._latest_todos = None
         self.backend.clear_todo_list()
         self.backend.set_session_context(self._current_session_id)
         if self._question_floating_widget:
@@ -12530,6 +12507,15 @@ class OpenAIChatToolWindow(ToolWindow):
                     self.history_manager.archive_history(idx)
                 self._current_session_id = None
             self._session_dirty = False
+            # 🛡️ 空会话也必须设置截断哨兵：撤销/删除至空后，old worker 的
+            # finished_with_messages / _on_finalize_complete 回调仍可能延迟到达，
+            # 无哨兵会用旧快照全量覆写空会话 → 已撤销消息复活并被 save+flush
+            # 持久化（UI 卡片已删但消息列表仍残留）。调用方仅截断路径，无误伤。
+            self._truncation_sentinel = {
+                "session_id": session.session_id,
+                "messages_len": 0,
+                "set_at": time.time(),
+            }
             return
 
         if self.history_manager:
@@ -13378,6 +13364,10 @@ class OpenAIChatToolWindow(ToolWindow):
         card.modelLabelClicked.connect(self._on_footer_model_label_clicked)
 
         self._add_chat_widget(card, insert_index=insert_index)
+        # 流式新建卡片时同步最新任务列表（模型跨轮继续执行任务时，
+        # 新回复卡片底部延续显示当前任务进度；历史加载 scroll=False 不同步）
+        if scroll and self._latest_todos:
+            card.update_todo_list(self._latest_todos)
         if scroll and not self._suspend_auto_scroll:
             self._scroll_to_bottom()
         return card
@@ -14490,7 +14480,17 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             self._undo_delete_cache = {}
 
+        # 🛡️ 设置截断哨兵，必须领先于 _on_stop_clicked（与 _delete_message 同理）：
+        # stop 触发的 deferred finalize（_on_finalize_complete / finished_with_messages）
+        # 可能在 FileUndoCard.exec_() 嵌套事件循环期间到达，此时截断尚未执行；
+        # 且若撤销最终截断至空会话，_persist_session_after_mutation 空分支曾不设哨兵，
+        # old worker 快照会复活已撤销消息并落盘（UI 卡片已删但消息残留）。
         if self._is_streaming:
+            self._truncation_sentinel = {
+                "session_id": session.session_id,
+                "messages_len": len(session.messages),
+                "set_at": time.time(),
+            }
             self._on_stop_clicked()
 
         # 获取待回滚的文件操作（从该轮次到最后的全部）
@@ -14508,6 +14508,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 result = dialog.exec_()
 
                 if result == FileUndoCard.CANCEL:
+                    # 🛡️ 取消撤销 = 会话保持原样，恢复「正常 stop」语义：
+                    # 清除 stop 前设置的截断哨兵，让 deferred finalize 的
+                    # partial 消息正常保存（否则 partial 会被哨兵误拦丢失）。
+                    self._truncation_sentinel = None
                     return  # 取消撤销，什么都不做
 
                 # 执行回滚 - 只还原选中的操作
@@ -16203,10 +16207,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._hide_all_cards_for_question()
             return
 
-        # 专属 UI 工具：更新数据，但只有在系统卡片未打开时才能显示
+        # 专属 UI 工具：不创建通用流式块，UI 联动由工具结果驱动
+        # （如 todowrite：结果携带 todos 字段 → _on_tool_result_received
+        #   推送到当前消息卡片底部的内嵌任务列表）
         if _ui_managed:
-            if not self._is_system_card_visible:
-                self._card_manager.show_card("todo", self._window_id)
             return
 
         # 工具参数接收完成，更新预览文本，保持"执行中"状态（金色转圈继续显示）
@@ -16227,16 +16231,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 通知 CardManager 卡片已关闭，否则 show_card 以为它仍可见而跳过
         if hasattr(self, "_card_manager"):
             self._card_manager.hide_card("sub_agent_compact", self._window_id)
-
-    def _on_todo_closed(self):
-        """todo 卡片关闭时通知 CardManager
-
-        与 sub_agent 对称：卡片关闭只 setVisible(False) 不会让 CardManager
-        感知（visible_cards 仍为 todo，show_card 会被跳过、容器也不会折叠）。
-        显式 hide_card 使状态同步 + 触发容器折叠释放 A3 min 锁，对话区恢复。
-        """
-        if hasattr(self, "_card_manager"):
-            self._card_manager.hide_card("todo", self._window_id)
 
     def _on_sub_agent_stop_requested(self, task_id: str):
         """处理子智能体停止请求 - 中止当前运行中的子智能体"""
@@ -16323,7 +16317,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._trigger_context_compaction(clear_after=clear_after, user_hint=user_hint)
 
     def _handle_todos_command(self, args: str):
-        """/todos 命令：手动显示/刷新待办事项卡片"""
+        """/todos 命令：在最新消息卡片刷新内嵌任务列表"""
         # 工具插件化：待办状态在工具插件内，主程序不读插件状态——
         # 通过执行 todoread 工具拿当前列表（主程序 → 工具执行，正常方向）
         todos = []
@@ -16335,13 +16329,13 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             todos = []
         if todos:
-            self._todo_floating_widget.update_todos(todos)
-            # 确保卡片可见（update_todos 内部已处理自动显示，但通过 CardManager 确保容器展开）
-            from app.widgets.cards.card_manager import CardManager
-
-            CardManager.get_instance().show_card("todo", self._window_id)
+            self._latest_todos = todos
+            card = self._current_assistant_card or self._find_latest_assistant_card()
+            if card and hasattr(card, "update_todo_list"):
+                card.update_todo_list(todos)
         else:
-            self._todo_floating_widget.setVisible(False)
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
             InfoBar.info(
                 "暂无待办事项",
                 "",
@@ -17053,10 +17047,14 @@ class OpenAIChatToolWindow(ToolWindow):
             content = str(result) if result else ""
 
         # 统一处理工具完成状态
-        # 字段驱动：任何工具结果携带 todos 字段 → 联动待办 UI（插件声明，主程序不写死工具名）
+        # 字段驱动：任何工具结果携带 todos 字段 → 联动消息卡片内嵌任务列表
+        # （插件声明，主程序不写死工具名）
         todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
         if todos:
-            self._todo_floating_widget.update_todos(todos)
+            self._latest_todos = todos
+            card = self._current_assistant_card or self._find_latest_assistant_card()
+            if card and hasattr(card, "update_todo_list"):
+                card.update_todo_list(todos)
         # （T11-3c：原 if/elif 空分支已删——todo 更新由上方完成；
         #   工具结果块由 append_tool_result 原地转换处理，无需额外动作）
 
@@ -17990,11 +17988,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _hide_all_cards_for_question(self):
         """Question 卡片显示时，隐藏所有其他卡片（最高优先级）"""
-        # 保存 todo 可见状态（用于 question 关闭后恢复）
-        self._todo_was_visible_before_system = self._todo_floating_widget.isVisible()
         # 通过 CardManager 隐藏所有卡片
         for card_id in [
-            "todo",
             "tool",
             "sub_agent",
             "model_config",
@@ -18009,9 +18004,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _restore_after_question_close(self):
         """Question 卡片关闭后，恢复非系统卡片的显示状态"""
-        # 恢复 todo（如果之前是显示的且还有内容）
-        if self._todo_was_visible_before_system and self._todo_floating_widget._todo_list:
-            self._todo_floating_widget.setVisible(True)
         # tool 和 sub_agent 有自我生命周期管理，不需要强制恢复
 
     def _on_question_asked(self, tool_call_id: str, questions: list, extra: dict = None):

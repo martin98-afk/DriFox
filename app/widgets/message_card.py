@@ -2012,7 +2012,7 @@ _SKELETON_CACHE_MAX = 48
 # 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
 # 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
 # data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
-_SKELETON_CACHE_VERSION = 9
+_SKELETON_CACHE_VERSION = 12
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2278,6 +2278,12 @@ _STREAMING_DOCK_CSS = """
                 /* 坞态限高：≈3-4 行条目（行高约 26px + 上下 padding） */
                 body.streaming-dock #tool-content {
                     max-height: 110px;
+                }
+                /* 任务列表坞态：固定高度（非仅 max-height）——切断工具区流式抖动向 todo 传导，
+                   项目增减时限高内高度也不变，流式期间观感稳定 */
+                body.streaming-dock #todo-content {
+                    height: 96px;
+                    max-height: 96px;
                 }
 """
 
@@ -3268,6 +3274,15 @@ class CodeWebViewer(QWebEngineView):
             self._renderer_pid = self.page().renderProcessPid()
         except Exception:
             self._renderer_pid = 0
+        # 任务列表补推：骨架重载（主题/字体变化 setHtml）会清空 JS 注入的
+        # todo DOM；JS 就绪后按 _pending_todos 快照重推，保证卡片底部
+        # 任务列表在骨架重建后不丢失。
+        if getattr(self, "_pending_todos", None) is not None:
+            try:
+                payload = json.dumps(self._pending_todos).decode("utf-8")
+                self.page().runJavaScript(f"window._updateTodoList && window._updateTodoList({payload});")
+            except RuntimeError:
+                pass
 
     def _load_skeleton(self):
         # 获取系统字体
@@ -4604,6 +4619,87 @@ class CodeWebViewer(QWebEngineView):
                     padding-bottom: 0;
                     overflow: hidden;
                 }}
+
+                /* ── 任务列表（工具区最底部：分割线画在工具内容与任务列表之间）── */
+                #todo-panel {{
+                    border-top: 1px dashed var(--border);
+                    margin: 2px 2px 0 2px;
+                    padding-top: 2px;
+                }}
+                /* 工具区折叠时 todo 面板一起收起 */
+                #tool-section[data-collapsed="true"] #todo-panel {{
+                    display: none;
+                }}
+                .todo-panel-header {{
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: var(--text-muted);
+                    user-select: none;
+                    padding: 2px 4px 3px 4px;
+                }}
+                .todo-panel-header #todo-progress {{
+                    font-size: 12px;
+                    color: var(--text-muted);
+                    white-space: nowrap;
+                }}
+                /* 列表限高与 #tool-content 同尺度（600px），超出滚动 */
+                #todo-content {{
+                    max-height: 600px;
+                    overflow-y: auto;
+                    overflow-anchor: none;
+                    background: transparent;
+                    border-radius: 6px;
+                    padding: 2px 4px;
+                }}
+                .todo-item {{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 4px 6px;
+                    font-size: {body_font_size}px;
+                    line-height: 1.5;
+                    color: var(--text);
+                }}
+                .todo-item + .todo-item {{
+                    margin-top: 1px;
+                }}
+                /* 进行中：左侧蛇形转圈（.think-snake 由 _animateThinkSnake 统一驱动） */
+                .todo-item .todo-spin {{
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    flex: 0 0 auto;
+                }}
+                .todo-item .todo-spin svg {{
+                    display: block;
+                }}
+                .todo-item[data-status="in_progress"] .todo-text {{
+                    color: var(--accent-warm);
+                    font-weight: 600;
+                }}
+                /* 完成：✓ + 划掉 */
+                .todo-item .todo-done-icon {{
+                    flex: 0 0 auto;
+                    color: rgba(63, 185, 80, 0.95);
+                    font-weight: 700;
+                }}
+                .todo-item[data-status="completed"] .todo-text {{
+                    color: var(--text-muted);
+                    text-decoration: line-through;
+                }}
+                /* 待办：○ */
+                .todo-item .todo-pending-icon {{
+                    flex: 0 0 auto;
+                    color: var(--text-muted);
+                }}
+                .todo-item .todo-text {{
+                    flex: 1 1 auto;
+                    min-width: 0;
+                    overflow-wrap: break-word;
+                }}
                 /* 新工具块入场动效 — 仅对"真正新"的块生效
                    （无 data-tool-call-id 且非 restore 的块）。
                    流式/恢复的块已有 data-tool-call-id 或 data-restored，跳过动画避免闪烁。 */
@@ -4637,6 +4733,10 @@ class CodeWebViewer(QWebEngineView):
                 <span class="tool-separator-tooltip">点击折叠/展开工具与思考区</span>
               </div>
               <div id="tool-content"></div>
+              <div id="todo-panel" style="display: none;">
+                <div class="todo-panel-header">📋 任务列表 <span id="todo-progress"></span></div>
+                <div id="todo-content"></div>
+              </div>
             </div>
             <div id="content-placeholder"></div>
             <script>
@@ -5159,9 +5259,14 @@ class CodeWebViewer(QWebEngineView):
                     var separator = document.getElementById('tool-separator');
                     if (!separator) return;
                     var total = toolContent ? toolContent.children.length : 0;
+                    var todoCount = window._todoCount || 0;
                     var titleSpan = separator.querySelector(':scope > span:not(.chevron)');
                     if (titleSpan) {{
-                        titleSpan.textContent = total > 0 ? '⚙ 工具与思考 · ' + total + ' 项' : '⚙ 工具与思考';
+                        var parts = [];
+                        if (total > 0) parts.push('⚙ 工具与思考 · ' + total + ' 项');
+                        else parts.push('⚙ 工具与思考');
+                        if (todoCount > 0) parts.push('📋 任务 ' + todoCount);
+                        titleSpan.textContent = parts.join('　');
                     }}
                     // ── 自动展开：流式时有新工具且当前折叠 → 展开 ──
                     var _hasStreaming = document.querySelector('#tool-content [data-streaming="true"]');
@@ -5187,8 +5292,8 @@ class CodeWebViewer(QWebEngineView):
                         '[data-tool-call-id]' + _EDIT_TOOLS_SELECTOR
                     );
                     if (blocks.length === 0) {{
-                        // 容器没有需要迁移的块 —— 若 tool-content 也空就隐藏整个区
-                        if (toolContent.children.length === 0) {{
+                        // 容器没有需要迁移的块 —— 若 tool-content 空且无 todo 就隐藏整个区
+                        if (toolContent.children.length === 0 && !window._todoCount) {{
                             toolSection.style.display = 'none';
                             return;
                         }}
@@ -5612,6 +5717,61 @@ class CodeWebViewer(QWebEngineView):
                     requestAnimationFrame(_animateThinkSnake);
                 }}
                 _animateThinkSnake();
+
+                // ===== 任务列表（嵌入工具区，随工具区折叠/归位/沉底）=====
+                var _TODO_SNAKE_SVG = '{_THINK_SNAKE_SVG}';
+                window._todoCount = 0;
+                window._updateTodoList = function(todos) {{
+                    var panel = document.getElementById('todo-panel');
+                    if (!panel) return;
+                    var content = document.getElementById('todo-content');
+                    var prog = document.getElementById('todo-progress');
+                    var ts = document.getElementById('tool-section');
+                    var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : null;
+                    if (!todos || !todos.length) {{
+                        window._todoCount = 0;
+                        if (panel.style.display !== 'none') {{
+                            panel.style.display = 'none';
+                            // 无工具块时连工具区一起隐藏
+                            var _tc0 = document.getElementById('tool-content');
+                            if (ts && _tc0 && _tc0.children.length === 0) ts.style.display = 'none';
+                            if (hr) hr();
+                        }}
+                        if (ts && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
+                        return;
+                    }}
+                    var html = '';
+                    var done = 0;
+                    for (var i = 0; i < todos.length; i++) {{
+                        var t = todos[i] || {{}};
+                        var status = t.status || 'pending';
+                        if (status === 'completed') done++;
+                        var icon;
+                        if (status === 'in_progress') {{
+                            icon = '<span class="todo-spin">' + _TODO_SNAKE_SVG + '</span>';
+                        }} else if (status === 'completed') {{
+                            icon = '<span class="todo-done-icon">✓</span>';
+                        }} else {{
+                            icon = '<span class="todo-pending-icon">○</span>';
+                        }}
+                        html += '<div class="todo-item" data-status="' + status + '">' + icon +
+                                '<span class="todo-text">' + (t.content || '') + '</span></div>';
+                    }}
+                    window._todoCount = todos.length;
+                    content.innerHTML = html;
+                    prog.textContent = done + '/' + todos.length + ' 完成';
+                    panel.style.display = '';
+                    // 有 todo 时工具区必须可见（即使暂无工具/思考块）
+                    if (ts) ts.style.display = '';
+                    if (ts && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
+                    // 有滚动时始终让第一个进行中任务可见（尽量居中）
+                    var act = content.querySelector('.todo-item[data-status="in_progress"]');
+                    if (act) {{
+                        var target = act.offsetTop - (content.clientHeight - act.offsetHeight) / 2;
+                        content.scrollTop = Math.max(0, target);
+                    }}
+                    if (hr) hr();
+                }};
 
                 // ===== 工具区（#tool-content）自动滚底 =====
                 // 当工具/思考区有新内容时，自动滚动到底部，让用户始终看到最新状态。
@@ -6639,7 +6799,7 @@ class CodeWebViewer(QWebEngineView):
             "if(typeof _scrollToolContentToBottom==='function')_scrollToolContentToBottom();"
             "if(window._toolCompactMode){"
             "var _ts2=document.getElementById('tool-section');"
-            "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
+            "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)||window._todoCount?'':'none';_updateToolSectionHeader();}"
             "}"
             "})();"
         )
@@ -7655,8 +7815,14 @@ class PlainTextViewer(QWidget):
         if self.maximumWidth() != bubble_w:
             self.setMaximumWidth(bubble_w)
 
-        # 高度按气泡实际宽计算（viewport 在气泡收紧瞬间可能仍是旧值，不可信）
-        doc.setTextWidth(bubble_w)
+        # 高度按气泡实际宽计算（viewport 在气泡收紧瞬间可能仍是旧值，不可信）。
+        # 测量宽必须对齐真实渲染视口：text_edit 宽 = bubble_w - 16(布局边距 8×2)，
+        # QTextDocument 渲染内容宽再减 docMargin 4×2。旧实现 setTextWidth(bubble_w)
+        # 比渲染宽大 16px → "测量不溢出、渲染溢出"错位 → 滚动条出现 → 视口再窄
+        # 6px → 内容重折行 → 高度变化 → 滚动条消失 → 宽度反馈环（气泡滚动条
+        # 反复出现/消失抖动）。对齐无滚动条渲染宽后两态各自稳定：无溢出时测量=
+        # 渲染；溢出时滚动条只会让渲染更窄更高，方向单调不回摆。
+        doc.setTextWidth(bubble_w - 16)
         h = int(math.ceil(doc.size().height())) + 12  # 上下边距
 
         # 限制最大高度：内容超出 MAX_HEIGHT 后由 QTextEdit 内部滚动条处理滚动
@@ -7905,6 +8071,9 @@ class MessageCard(SimpleCardWidget):
             self._content_data.append({"type": "reasoning", "content": reasoning_content})
         self._streaming = False
         self._retrying = False  # 重试模式标志
+        # 任务列表快照（卡片底部内嵌 todo 区数据）：viewer 未创建/JS 未就绪时
+        # 暂存，viewer 就绪后补推；骨架重载后据此恢复。
+        self._todos_snapshot: Optional[list] = None
         self._retry_error_type = ""  # 重试错误类型
         self._retry_attempt = 0  # 当前重试次数
         self._retry_max = 15  # 最大重试次数
@@ -9222,6 +9391,10 @@ class MessageCard(SimpleCardWidget):
             self.viewer._markdown_text = markdown_text
             self.viewer._schedule_render(immediate=True)
 
+        # 任务列表随 viewer 重建补推（_pending_todos 由 viewer._on_js_ready 消费）
+        if self._todos_snapshot is not None:
+            self._push_todo_list()
+
         # 恢复正常样式
         self._apply_card_style()
         self._webengine_needs_restore = False
@@ -9834,6 +10007,10 @@ class MessageCard(SimpleCardWidget):
             # 创建 viewer 完成（不可见门控已放行），清除"推迟渲染"标记；
             # 若下方 set_content 因 JS 未就绪再次 deferred，由 _on_js_ready 兜底补渲。
             self._render_deferred = False
+
+            # 任务列表随 viewer 创建补推（JS 未就绪时由 _on_js_ready 兜底）
+            if self._todos_snapshot is not None:
+                self._push_todo_list()
 
             # 如果有等待渲染的内容，现在渲染
             if self._pending_content is not None:
@@ -10836,6 +11013,43 @@ class MessageCard(SimpleCardWidget):
             }})();
             """
             self.viewer.page().runJavaScript(js_code)
+        except RuntimeError:
+            pass
+
+    # ── 任务列表（卡片底部内嵌 todo 区，替代原悬浮卡片）──
+
+    def update_todo_list(self, todos):
+        """更新卡片底部任务列表
+
+        Args:
+            todos: [{status: pending|in_progress|completed, content: str, priority: ...}, ...]
+                   空列表 → 隐藏任务区。
+        """
+        self._todos_snapshot = list(todos or [])
+        self._push_todo_list()
+
+    def _push_todo_list(self):
+        """把 _todos_snapshot 推送到 viewer 内的 #todo-section
+
+        viewer 未创建（懒加载）/ JS 未就绪时仅写 viewer._pending_todos，
+        由 viewer 创建点或 _on_js_ready 兜底补推。
+        """
+        v = self.viewer
+        if v is None or not isinstance(v, CodeWebViewer):
+            return
+        v._pending_todos = self._todos_snapshot
+        if not getattr(v, "_is_js_ready", False):
+            return
+        try:
+            payload = [
+                {
+                    "status": item.get("status", "pending") if isinstance(item, dict) else "pending",
+                    "content": escape(item.get("content", "") if isinstance(item, dict) else str(item)),
+                }
+                for item in (self._todos_snapshot or [])
+            ]
+            data = json.dumps(payload).decode("utf-8")
+            v.page().runJavaScript(f"window._updateTodoList && window._updateTodoList({data});")
         except RuntimeError:
             pass
 
