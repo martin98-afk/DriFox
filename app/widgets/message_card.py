@@ -9094,6 +9094,19 @@ class MessageCard(SimpleCardWidget):
             main.addWidget(self._viewer_container)
             self._lazy_rendered = False
             self.viewer = None  # 懒加载，延后创建
+            self.resize_placeholder = QFrame(self)
+            self.resize_placeholder.setVisible(False)
+            self.resize_placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.resize_placeholder.setStyleSheet(
+                """
+                QFrame {
+                    background: rgba(255,255,255,0.035);
+                    border: 1px dashed rgba(255,255,255,0.08);
+                    border-radius: 12px;
+                }
+                """
+            )
+            main.addWidget(self.resize_placeholder)
         elif self.role != "user":  # user 已在 _setup_user_bubble 创建，不再进入懒渲染
             # 懒渲染：占位符，不立即创建QWebEngine，进入可视区域再创建
             placeholder = QLabel("加载中...", self)
@@ -9895,11 +9908,7 @@ class MessageCard(SimpleCardWidget):
         if self.role == "user":
             return
 
-        # welcome 卡片不需要 resize placeholder
-        if self.role == "welcome":
-            return
-
-        # 懒渲染还没创建viewer，跳过
+        # 懒渲染还没创建viewer，跳过（welcome 卡已创建 viewer 时同样走占位逻辑）
         if self.viewer is None:
             return
 

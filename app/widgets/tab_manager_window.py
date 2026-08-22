@@ -249,6 +249,15 @@ class TabManagerWindow(QWidget):
         self._resize_timer.setInterval(100)
         self._resize_timer.timeout.connect(self._on_resize_finished)
 
+        # ── splitter 拖拽/动画防抖：松手后 ~120ms 恢复 _content_area 绘制 ──
+        # 超时回调合并 _content_area.setUpdatesEnabled(True) + _tab_panel.set_resizing(False)。
+        self._splitter_idle_timer = QTimer(self)
+        self._splitter_idle_timer.setSingleShot(True)
+        self._splitter_idle_timer.setInterval(120)
+        self._splitter_idle_timer.timeout.connect(self._on_splitter_idle)
+        # 拖拽首帧冻结标记：本次拖拽会话仅冻结一次，松手(device idle)后复位
+        self._splitter_dragging: bool = False
+
         self.setWindowTitle("飘狐-DriFox")
         self.setObjectName("tabManagerWindow")
         self.setMinimumSize(600, 450)
@@ -775,6 +784,12 @@ class TabManagerWindow(QWidget):
 
     def _start_sidebar_anim(self, start_w: int, end_w: int, collapsing: bool):
         """启动侧边栏宽度动画（200ms OutCubic）"""
+        # ── P0 性能优化 OPT-1：动画期间冻结右侧 _content_area 重绘 ──
+        # splitter 拖拽/动画只改子控件 geometry，不触发顶层 resizeEvent，
+        # 故该冻结无法被 resize 节流路径覆盖，需在此显式冻结，
+        # 由 _on_sidebar_anim_finished 的 try/finally 统一恢复。
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(False)
         anim = self._sidebar_anim
         if anim is None:
             anim = QVariantAnimation(self)
@@ -814,25 +829,46 @@ class TabManagerWindow(QWidget):
 
     def _on_sidebar_anim_finished(self):
         """动画结束：恢复自动展开能力 + 精确落位最终宽度 + 保存配置"""
-        if hasattr(self, "_tab_panel"):
-            self._tab_panel.set_animating(False)
-        # 最终宽度精确落位（插值收尾可能差 1px）
-        sizes = self._splitter.sizes()
-        total_w = sum(sizes) if sizes else self.width()
-        if self._sidebar_anim_collapsing:
-            target_w = self._tab_panel._collapsed_min_width + 14
-        else:
-            target_w = getattr(self, "_saved_panel_frame_width", 250)
-            target_w = max(_EXPANDED_MIN_FRAME_WIDTH, target_w)
-        self._splitter.setSizes([target_w, max(0, total_w - target_w)])
-        # UI 最终状态兜底（动画中途未跨阈值时强制同步，如目标宽度恰为阈值）
-        if hasattr(self, "_tab_panel"):
-            self._tab_panel.sync_collapsed_ui()
-        # 折叠动画结束：布局已稳定，若折叠是"挤压所致"（_collapsed_by_squeeze），
-        # 补一次空间恢复检测——覆盖"折叠动画期间窗口已拉宽"的时序缺口
-        # （resize 结束检测在动画中会被 _animating 跳过）。
-        if self._sidebar_anim_collapsing:
-            self._maybe_auto_expand_after_squeeze()
+        try:
+            if hasattr(self, "_tab_panel"):
+                self._tab_panel.set_animating(False)
+            # 最终宽度精确落位（插值收尾可能差 1px）
+            sizes = self._splitter.sizes()
+            total_w = sum(sizes) if sizes else self.width()
+            if self._sidebar_anim_collapsing:
+                target_w = self._tab_panel._collapsed_min_width + 14
+            else:
+                target_w = getattr(self, "_saved_panel_frame_width", 250)
+                target_w = max(_EXPANDED_MIN_FRAME_WIDTH, target_w)
+            self._splitter.setSizes([target_w, max(0, total_w - target_w)])
+            # UI 最终状态兜底（动画中途未跨阈值时强制同步，如目标宽度恰为阈值）
+            if hasattr(self, "_tab_panel"):
+                self._tab_panel.sync_collapsed_ui()
+            # 折叠动画结束：布局已稳定，若折叠是"挤压所致"（_collapsed_by_squeeze），
+            # 补一次空间恢复检测——覆盖"折叠动画期间窗口已拉宽"的时序缺口
+            # （resize 结束检测在动画中会被 _animating 跳过）。
+            if self._sidebar_anim_collapsing:
+                self._maybe_auto_expand_after_squeeze()
+        finally:
+            # ── P0 性能优化 OPT-1：保证 _content_area 必定恢复绘制 ──
+            # 所有退出路径（含 _maybe_auto_expand_after_squeeze 触发的嵌套展开动画、
+            # 以及任何异常）都在此恢复 True，否则内容区黑屏。
+            # 若本回调又同步启动了新动画（_maybe_auto_expand 走 _start_sidebar_anim
+            # 重新冻结），则交由其 _on_sidebar_anim_finished 恢复，此处跳过。
+            if (
+                hasattr(self, "_content_area")
+                and not (
+                    self._sidebar_anim is not None
+                    and self._sidebar_anim.state() == QVariantAnimation.Running
+                )
+            ):
+                self._content_area.setUpdatesEnabled(True)
+                # ── #10 对齐恢复：与解冻同步显式恢复 WebView 预览（幂等） ──
+                # 冻结期 MainWidget.resizeEvent 已自动 _set_cards_resize_preview_mode(True)
+                # 隐藏 WebView，此处与 setUpdatesEnabled(True) 同步恢复，消除潜在空窗。
+                mw = self._content_area.currentWidget()
+                if mw is not None and hasattr(mw, "_set_cards_resize_preview_mode"):
+                    mw._set_cards_resize_preview_mode(False)
 
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
         """挤压折叠后空间恢复：自动展开回常规宽度
@@ -948,6 +984,25 @@ class TabManagerWindow(QWidget):
             # 条件（否则窗口没变宽永远不会自动展开），此处仅按绝对空间下限判断。
             QTimer.singleShot(0, lambda: self._maybe_auto_expand_after_squeeze(growth_required=False))
 
+    def _on_splitter_idle(self):
+        """splitter 拖拽防抖超时：松手后恢复内容区绘制 + 解除 TabPanel 节流
+
+        ~120ms 无新 splitterMoved 即视为停手/松手，由 _splitter_idle_timer
+        触发。合并恢复 _content_area.setUpdatesEnabled(True) 与
+        _tab_panel.set_resizing(False)，复位拖拽首帧标记供下次拖拽重新冻结。
+        """
+        self._splitter_dragging = False
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(True)
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_resizing(False)
+        # ── #10 对齐恢复：与解冻同步显式恢复 WebView 预览（幂等） ──
+        # 冻结期 MainWidget.resizeEvent 已自动 _set_cards_resize_preview_mode(True)
+        # 隐藏 WebView，此处与 setUpdatesEnabled(True) 同步恢复，消除潜在空窗。
+        mw = self._content_area.currentWidget() if hasattr(self, "_content_area") else None
+        if mw is not None and hasattr(mw, "_set_cards_resize_preview_mode"):
+            mw._set_cards_resize_preview_mode(False)
+
     def _on_splitter_manually_moved(self, pos: int, index: int):
         """用户手动拖拽 splitter 把手：清除挤压折叠标记 + 手动拖宽显式展开
 
@@ -966,6 +1021,16 @@ class TabManagerWindow(QWidget):
         panel = self._tab_panel
         # 手动拖拽：清除挤压折叠标记（无论方向，尊重手动意图）
         panel._collapsed_by_squeeze = False
+        # ── P0 性能优化 OPT-2：拖拽首帧冻结 _content_area 重绘，防抖 timer 松手恢复 ──
+        # 仅首帧冻结一次（_splitter_dragging 未置位时）；_tab_panel 全程保持启用，
+        # 侧栏 UI 切换/展开逻辑仍须响应。每次 splitterMoved 重置 ~120ms 防抖 timer，
+        # 松手后由 _on_splitter_idle 统一恢复绘制，抑制每帧全量重绘/reflow 致卡顿。
+        if not self._splitter_dragging:
+            self._splitter_dragging = True
+            if hasattr(self, "_content_area"):
+                self._content_area.setUpdatesEnabled(False)
+        if hasattr(self, "_splitter_idle_timer"):
+            self._splitter_idle_timer.start()
         # 手动拖宽超过展开阈值（滞回区 110+）：显式展开
         if panel._collapsed and not panel._animating and pos >= panel._auto_collapse_width + 10:
             panel._collapsed = False
@@ -1935,7 +2000,11 @@ class TabManagerWindow(QWidget):
         # 启用子控件绘制
         if hasattr(self, "_tab_panel"):
             self._tab_panel.setUpdatesEnabled(True)
-        if hasattr(self, "_content_area"):
+        # ── P1 防竞态：若 splitter 拖拽防抖 timer 仍活跃，跳过本次 _content_area 释放 ──
+        # 避免与 OPT-2 的 _on_splitter_idle 双重释放竞态/闪烁（拖拽松手由 timer 统一恢复）。
+        if hasattr(self, "_content_area") and not (
+            hasattr(self, "_splitter_idle_timer") and self._splitter_idle_timer.isActive()
+        ):
             self._content_area.setUpdatesEnabled(True)
 
         # 强制完整 relayout：blocking 期间跳过了 super().resizeEvent，
