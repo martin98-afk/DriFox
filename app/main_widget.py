@@ -6170,6 +6170,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if done or requeued:
             logger.info(f"[TeamMail] 流式结束：{done} 封已处理标 done，{requeued} 封未处理回滚 pending")
 
+        # 🛡️ G1 修复：回滚 pending 的邮件必须立即重新拉起，兑现本函数
+        # docstring 声称的"由流结束后的 _check_and_process_pending 重新排队
+        # 处理"。时序陷阱：_on_stream_finished 中 _check_and_process_pending
+        # 先于本函数执行——此刻邮件仍为 running 状态，check 落空；随后回滚
+        # 写文件触发的 directoryChanged 被 P0-1 id 快照拦截（状态写回不
+        # 回流）→ 不补拉起则邮件躺尸到成员下次对话（用户感知：发送方显示
+        # 已发送，接收成员永远没反应）。内部自带冷却守卫，停止语义不受影响。
+        self._check_and_process_pending()
+
     def _sync_team_mail_on_stop(self):
         """手动停止时，按处理状态收尾所有团队邮件（修复 T23：未处理回滚 pending）。
 

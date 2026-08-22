@@ -175,6 +175,8 @@ class TestStopCooldown:
             _window_id="win_02",
         )
         fake._get_team_manager = lambda: team_manager
+        # G3 修复后冷却分支会安排重检：打桩隔离 QTimer（本用例只断言"冷却内不拉起"）
+        fake._schedule_pending_recheck = lambda: None
         fake._check_and_process_pending = MethodType(OpenAIChatToolWindow._check_and_process_pending, fake)
         return fake
 
