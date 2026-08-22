@@ -973,6 +973,10 @@ class OpenAIChatToolWindow(ToolWindow):
     # _is_destroyed 守卫 + E3 计数收口，无风险
     _TEAM_JOIN_MAX_RETRIES: int = 30
     _TEAM_JOIN_RETRY_INTERVAL_MS: int = 50
+
+    # resize 防抖间隔（（ms）：80ms 已足够覆盖感知刷新率，减少慢速 resize
+    # 拖拽场景下的冗余布局重算（每帧比 16ms/32ms 少一次）。
+    _RESIZE_DEBOUNCE_MS: int = 80
     # 新建任务：相邻成员窗口会话创建的交错间隔（C3，避免 N 窗同步链冻结 UI）
     _TEAM_NEW_TASK_STAGGER_MS: int = 50
     # 模板加载时待排列的新窗口计数（延迟 join 完成后递减，归零时触发自动排列）
@@ -1240,7 +1244,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 每帧比 16ms 少一次布局重算，在慢速 resize 拖拽场景下人眼不会感知差异
         self._resize_debounce_timer = QTimer(self)
         self._resize_debounce_timer.setSingleShot(True)
-        self._resize_debounce_timer.setInterval(32)  # 32ms 防抖，约30fps视觉刷新
+        self._resize_debounce_timer.setInterval(_RESIZE_DEBOUNCE_MS)
         self._resize_debounce_timer.timeout.connect(self._do_debounced_resize)
         # resize 完成后更新所有卡片的定时器（延迟更新非可见区域卡片）
         self._resize_complete_timer = QTimer(self)
