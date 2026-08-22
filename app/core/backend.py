@@ -2540,6 +2540,11 @@ class ChatBackend(QObject):
         """
         self._initialized = False
 
+        # 0. 停止去抖重载定时器（M8）：惰性创建、无 parent 的 QTimer，
+        #    不先 stop 会在 cleanup 后 300ms 触发 _do_debounced_reload 访问已清理对象。
+        if getattr(self, "_reload_timer", None) is not None and self._reload_timer.isActive():
+            self._reload_timer.stop()
+
         # 1. 清理 ChatEngine（停止 worker + 清空回调）
         if self._chat_engine:
             try:

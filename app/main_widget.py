@@ -1621,7 +1621,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 强制触发首次 tab 渲染
         self._history_card.tabChanged.connect(self._on_history_tab_changed)
         self._history_card.set_current_tab("history")
-        self._history_card.tabChanged.connect(self._on_history_tab_changed)
         self._history_card.setVisible(False)
         self._history_card.closed.connect(
             lambda: (
@@ -20227,6 +20226,13 @@ class OpenAIChatToolWindow(ToolWindow):
                         sig.disconnect(slot)
                 except TypeError, RuntimeError:
                     pass
+
+            # 🔧 泄漏修复（M6）：断开全局单例 coding_plan_ready，关窗后不再幽灵回调
+            try:
+                from app.core.usage_service import UsageService
+                UsageService.get_instance().coding_plan_ready.disconnect(self._on_coding_plan_result)
+            except (TypeError, RuntimeError):
+                pass
 
             # 🛡️ B5 异步化：closeEvent 不再同步调用 backend.stop_streaming()
             # （其内部 finalize 等待 worker 退出，最多阻塞 ~4s）。

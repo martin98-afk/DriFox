@@ -7927,6 +7927,14 @@ class MessageCard(SimpleCardWidget):
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._update_anim)
         self._pulse_phase = 0.0
+        # M1 性能缓存：流式脉动渐变/调色板/裁剪路径模板（相位无关对象，
+        # paintEvent 内仅改色/坐标，避免每帧 new 数十个临时对象）。
+        self._rainbow_normal = [QColor(c) for c in ("#60D4FF","#40C8FF","#4DA6FF","#8B7BFF","#C084FC","#F472B6","#FB7185","#F59E0B","#34D399","#22D3EE")]
+        self._rainbow_retry = [QColor(c) for c in ("#ff2222","#aa0000","#ff3333","#880000","#ff1111","#bb0000","#ff4444","#990000")]
+        self._grad_main, self._grad_inner, self._grad_glow, self._grad_shimmer = (QLinearGradient(0, 0, 1, 1) for _ in range(4))
+        self._clip_inner = self._clip_outer = self._clip_inner_edge = self._clip_border = QPainterPath()
+        self._clip_inner_border = self._clip_shimmer = self._clip_top = self._clip_glow_region = self._clip_border_region = QPainterPath()
+        self._clip_w = self._clip_h = -1
         self._height_anim = QVariantAnimation(self)
         self._height_anim.setDuration(180)
         self._height_anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -9260,32 +9268,7 @@ class MessageCard(SimpleCardWidget):
                 bl = int(a.blue() + (b.blue() - a.blue()) * t)
                 return QColor(r, g, bl)
 
-            if self._retrying:
-                # ── 重试模式：红色流动渐变 ──
-                rainbow = [
-                    QColor("#ff2222"),  # 鲜红
-                    QColor("#aa0000"),  # 暗红
-                    QColor("#ff3333"),  # 亮红
-                    QColor("#880000"),  # 深红
-                    QColor("#ff1111"),  # 火红
-                    QColor("#bb0000"),  # 酒红
-                    QColor("#ff4444"),  # 浅红
-                    QColor("#990000"),  # 暗深红
-                ]
-            else:
-                # ── 正常模式：10 色精细彩虹 ──
-                rainbow = [
-                    QColor("#60D4FF"),  # 天蓝
-                    QColor("#40C8FF"),  # 青蓝
-                    QColor("#4DA6FF"),  # 柔蓝
-                    QColor("#8B7BFF"),  # 薰衣草
-                    QColor("#C084FC"),  # 紫罗兰
-                    QColor("#F472B6"),  # 玫瑰粉
-                    QColor("#FB7185"),  # 珊瑚红
-                    QColor("#F59E0B"),  # 琥珀金
-                    QColor("#34D399"),  # 翠绿
-                    QColor("#22D3EE"),  # 青色
-                ]
+            rainbow = self._rainbow_retry if self._retrying else self._rainbow_normal
             N = len(rainbow)
             # 主边框连续相位
             shift_main = (self._pulse_phase / (math.pi * 2)) * N
@@ -9294,9 +9277,10 @@ class MessageCard(SimpleCardWidget):
             # 流光带相位
             shift_shimmer = shift_main * 1.15
 
-            def build_gradient(shift: float, stops: list, alpha_base: float) -> QLinearGradient:
-                """用连续相位生成平滑渐变：每个 stop 点用前后两色插值"""
-                grad = QLinearGradient(0, 0, w, h)
+            def build_gradient(grad: QLinearGradient, shift: float, stops: list, alpha_base: float) -> QLinearGradient:
+                """相位无关模板 grad 复用：仅改坐标与 stop 颜色，不每帧 new"""
+                grad.setStart(0, 0)
+                grad.setFinalStop(w, h)
                 for pos in stops:
                     raw = (shift + pos * N) % N
                     idx = int(raw) % N
@@ -9319,11 +9303,22 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层1：内壁漫射（极柔和的边缘渗光）
         # ══════════════════════════════════════════════════════
-        inner_clip = QPainterPath()
-        inner_clip.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
+        # M1：裁剪路径按几何缓存，仅尺寸变化时重建，不再每帧 new QPainterPath
+        if self._clip_w != w or self._clip_h != h:
+            self._clip_w, self._clip_h = w, h
+            self._clip_inner = QPainterPath(); self._clip_inner.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
+            self._clip_outer = QPainterPath(); self._clip_outer.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
+            self._clip_inner_edge = QPainterPath(); self._clip_inner_edge.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+            self._clip_border = QPainterPath(); self._clip_border.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+            self._clip_inner_border = QPainterPath(); self._clip_inner_border.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
+            self._clip_shimmer = QPainterPath(); self._clip_shimmer.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
+            self._clip_top = QPainterPath(); self._clip_top.addRoundedRect(0, 0, w, h, radius, radius)
+            self._clip_glow_region = self._clip_outer - self._clip_inner_edge
+            self._clip_border_region = self._clip_border - self._clip_inner_border
+        inner_clip = self._clip_inner
         painter.setClipPath(inner_clip)
         if self.role == "assistant":
-            inner_gradient = build_gradient(shift_glow, inner_stops, 12)
+            inner_gradient = build_gradient(self._grad_inner, shift_glow, inner_stops, 12)
         else:
             inner_gradient = QLinearGradient(0, 0, w, h)
             c = QColor(pulse.lighter(150))
@@ -9335,14 +9330,12 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层2：外发光（霓虹光晕，7px宽，比主边框更宽更柔和）
         # ══════════════════════════════════════════════════════
-        outer_clip = QPainterPath()
-        outer_clip.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
-        inner_edge_clip = QPainterPath()
-        inner_edge_clip.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
-        glow_region = outer_clip - inner_edge_clip
+        outer_clip = self._clip_outer
+        inner_edge_clip = self._clip_inner_edge
+        glow_region = self._clip_glow_region
         painter.setClipPath(glow_region)
         if self.role == "assistant":
-            glow_gradient = build_gradient(shift_glow, glow_stops, 48)
+            glow_gradient = build_gradient(self._grad_glow, shift_glow, glow_stops, 48)
         else:
             glow_gradient = QLinearGradient(0, 0, w, h)
             glow_gradient.setColorAt(0.0, QColor(pulse.lighter(130).name()))
@@ -9356,14 +9349,12 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层3：主彩色边框（4px，饱和鲜艳）
         # ══════════════════════════════════════════════════════
-        border_clip = QPainterPath()
-        border_clip.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
-        inner_border_clip = QPainterPath()
-        inner_border_clip.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
-        border_region = border_clip - inner_border_clip
+        border_clip = self._clip_border
+        inner_border_clip = self._clip_inner_border
+        border_region = self._clip_border_region
         painter.setClipPath(border_region)
         if self.role == "assistant":
-            main_gradient = build_gradient(shift_main, main_stops, 215)
+            main_gradient = build_gradient(self._grad_main, shift_main, main_stops, 215)
         else:
             main_gradient = QLinearGradient(0, 0, w, h)
             glow_a = int((90 + 45 * (math.sin(self._pulse_phase * 1.5) + 1) / 2) * breathe)
@@ -9381,12 +9372,13 @@ class MessageCard(SimpleCardWidget):
         #  层4：流光高光带（白色细光条快速划过）
         # ══════════════════════════════════════════════════════
         if self.role == "assistant":
-            shimmer_clip = QPainterPath()
-            shimmer_clip.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
+            shimmer_clip = self._clip_shimmer
             painter.setClipPath(shimmer_clip)
             # 流光位置：连续小数，避免跳变
             shimmer_pos = (shift_shimmer % N) / N
-            shimmer_band_gradient = QLinearGradient(0, 0, w, h)
+            shimmer_band_gradient = self._grad_shimmer
+            shimmer_band_gradient.setStart(0, 0)
+            shimmer_band_gradient.setFinalStop(w, h)
             shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.07), QColor(0, 0, 0, 0))
             shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.03), QColor(255, 255, 255, int(80 * shimmer)))
             shimmer_band_gradient.setColorAt(shimmer_pos, QColor(255, 255, 255, int(150 * shimmer)))
@@ -9400,8 +9392,7 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层5：顶部高光条（柔和的光泽）
         # ══════════════════════════════════════════════════════
-        top_clip = QPainterPath()
-        top_clip.addRoundedRect(0, 0, w, h, radius, radius)
+        top_clip = self._clip_top
         painter.setClipPath(top_clip)
         if self.role == "assistant":
             if self._retrying or self.error:
