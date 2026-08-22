@@ -1139,10 +1139,15 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_duplicate_window = source_window is not None
         self._source_window = source_window
         # ★ singleton 信号连接跟踪（销毁时统一断开，防泄漏）
+        # 注意：self._singleton_connections 是纯 Python 属性，可先于 super().__init__()
+        # 设置；但 self.destroyed 是 QObject 内置信号，其 .connect() 必须在父类
+        # QObject.__init__() 执行之后调用，否则触发
+        # "super-class __init__() of type ... was never called" RuntimeError。
         self._singleton_connections: list = []
-        self.destroyed.connect(self._disconnect_singleton_connections)
         # 调用父类（会触发 setup_ui -> _create_agent_switch_buttons）
         super().__init__(homepage)
+        # 父类 QObject.__init__ 已执行，此时连接 destroyed 信号安全
+        self.destroyed.connect(self._disconnect_singleton_connections)
         # 需要在 super().__init__() 之前初始化所有依赖项
         self.homepage = homepage  # 必须在 super() 之前设置，供 backend.initialize 使用
         self.cfg = Settings.get_instance()
@@ -1333,7 +1338,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 每帧比 16ms 少一次布局重算，在慢速 resize 拖拽场景下人眼不会感知差异
         self._resize_debounce_timer = QTimer(self)
         self._resize_debounce_timer.setSingleShot(True)
-        self._resize_debounce_timer.setInterval(_RESIZE_DEBOUNCE_MS)
+        self._resize_debounce_timer.setInterval(self._RESIZE_DEBOUNCE_MS)
         self._resize_debounce_timer.timeout.connect(self._do_debounced_resize)
         # resize 完成后更新所有卡片的定时器（延迟更新非可见区域卡片）
         self._resize_complete_timer = QTimer(self)
