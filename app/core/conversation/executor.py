@@ -109,6 +109,9 @@ class ConversationExecutor:
             "compactor": self._core.compactor,
             "initial_compaction_cache": getattr(session, "compaction_cache", None),
             "session_id": session_id,
+            # Hook 参与级别：引擎经 ConversationConfig 声明，消息级 hook 拦截 +
+            # 工具级 per-call 传参都由 worker 消费（未声明时默认 ALL 保持兼容）
+            "hook_policy": getattr(self._config, "hook_policy", None),
         }
         self._current_worker = self._worker_factory(**worker_kwargs)
 

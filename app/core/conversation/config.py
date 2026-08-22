@@ -15,6 +15,24 @@ class PermissionStrategy(Enum):
     AUTO_DENY = "auto_deny"        # 全部拒绝，只读模式（Cron 保守模式）
 
 
+class HookPolicy(Enum):
+    """Hook 触发策略 — 由对话引擎持有，决定本轮对话参与哪些全局 hook
+
+    背景：插件自建对话执行栈（autoloop/chinese-chess 等）复用主程序
+    tool_executor 时，ChatWorker 与 tool_executor 内部会触发全局 hooks
+    （PreAssistantMessage/PostAssistantMessage/Stop + PreToolUse/PostToolUse），
+    导致插件循环被动执行主对话语义的 hooks（如 Stop 续命 BLOCK 干扰循环控制）。
+    引擎在此声明参与级别，hook 是否执行回归引擎决策。
+
+    - ALL：全部触发（UI 主对话 / Gateway 默认）
+    - TOOL_EVENTS_ONLY：仅工具级 PreToolUse/PostToolUse（安全审查类 hook 仍生效）
+    - NONE：完全不触发（插件后台循环默认，如象棋每步棋）
+    """
+    ALL = "all"
+    TOOL_EVENTS_ONLY = "tool_events_only"
+    NONE = "none"
+
+
 # 非交互策略下必须过滤的工具——这些工具需要人工参与或实时交互，
 # 只在 INTERACTIVE 策略下可用
 INTERACTIVE_ONLY_TOOLS = frozenset({
@@ -62,6 +80,8 @@ class ConversationConfig:
     agent_permission_config: Dict[str, Any] = field(default_factory=dict)
     # INTERACTIVE 策略下需要外部提供权限检查回调
     interactive_check_callback: Optional[Callable[[str, dict], str]] = None
+    # Hook 参与级别（默认 ALL：UI/Gateway 主对话行为不变；插件引擎建议 NONE/TOOL_EVENTS_ONLY）
+    hook_policy: "HookPolicy" = HookPolicy.ALL
 
 
 # ============================================================

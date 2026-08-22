@@ -395,14 +395,17 @@ class ToolExecutor:
 
         return token_count, token_limit
 
-    def _trigger_post_tool_use(self, tool_name: str, args: dict, result=None) -> None:
+    def _trigger_post_tool_use(self, tool_name: str, args: dict, result=None, enabled: bool = True) -> None:
         """触发 PostToolUse hook（统一方法，减少重复代码）
 
         Args:
             tool_name: 工具名
             args: 工具参数
             result: 工具执行结果（ToolResult 或 None），用于回填结果信息
+            enabled: 是否触发（引擎 HookPolicy.NONE 时 False，跳过工具级 hooks）
         """
+        if not enabled:
+            return
         if not (self._backend and self._backend.hook_manager):
             return
 
@@ -752,6 +755,7 @@ class ToolExecutor:
         args: dict,
         call_id: str = None,
         hook_context: Optional[Dict] = None,
+        trigger_hooks: bool = True,
     ) -> ToolResult:
         """
         执行工具调用
@@ -762,6 +766,9 @@ class ToolExecutor:
             call_id: 工具调用 ID（可选，用于并行执行时隔离上下文；不传则使用 self._call_id）
             hook_context: 调用方提供的 hook context 覆盖字段（如 current_role/is_subagent_call）
                          用于区分主智能体/子智能体的工具调用，不传则使用默认值。
+            trigger_hooks: 是否触发 PreToolUse/PostToolUse hook（per-call，线程安全）。
+                          由对话引擎的 HookPolicy 决定——插件自建引擎（HookPolicy.NONE）
+                          不再被动触发全局工具级 hooks；默认 True 保持既有行为。
 
         Returns:
             ToolResult: 执行结果
@@ -784,7 +791,8 @@ class ToolExecutor:
         logger.info(f"[ToolExecutor] Executing tool: {tool_name}, args: {args}")
 
         # Trigger PreToolUse hook（同步执行，支持跳过和输出回填）
-        if self._backend and self._backend.hook_manager:
+        # trigger_hooks=False 时整体跳过（引擎 HookPolicy.NONE）
+        if trigger_hooks and self._backend and self._backend.hook_manager:
             # 创建标准化 tool_input 副本（兼容 Claude Code 字段命名）
             _normalized_input = dict(args)  # 浅拷贝，不污染原始 args
             for _src, _dst in [
@@ -897,7 +905,7 @@ class ToolExecutor:
 
         # MCP 工具调用：工具名以 "mcp__" 开头
         if tool_name.startswith("mcp__") and self._builtin_tools:
-            return self._execute_mcp_tool(tool_name, args)
+            return self._execute_mcp_tool(tool_name, args, trigger_hooks=trigger_hooks)
 
         # ========== 工具执行前的有效性检查 ==========
         # 在 UI 关闭场景下，即使方法开头检查通过，
@@ -936,7 +944,7 @@ class ToolExecutor:
                     result = self._try_auto_lsp_diagnose(tool_name, args, result)
 
                 # Trigger PostToolUse hook（统一方法，含结果回填）
-                self._trigger_post_tool_use(tool_name, args, result)
+                self._trigger_post_tool_use(tool_name, args, result, enabled=trigger_hooks)
 
                 return result
             except Exception as e:
@@ -1039,7 +1047,7 @@ class ToolExecutor:
 
         return _run
 
-    def _execute_mcp_tool(self, tool_name: str, args: dict) -> ToolResult:
+    def _execute_mcp_tool(self, tool_name: str, args: dict, trigger_hooks: bool = True) -> ToolResult:
         """执行 MCP 工具调用"""
         # 执行前检查 ToolExecutor 有效性
         if not self.is_valid():
@@ -1061,12 +1069,12 @@ class ToolExecutor:
         except TimeoutError as e:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' timeout: {e}")
             err_result = ToolResult(False, error="MCP 工具调用超时，请稍后重试")
-            self._trigger_post_tool_use(tool_name, args, err_result)
+            self._trigger_post_tool_use(tool_name, args, err_result, enabled=trigger_hooks)
             return err_result
         except Exception as e:
             logger.error(f"[ToolExecutor] MCP tool '{tool_name}' raised exception: {e}")
             err_result = ToolResult(False, error=f"MCP 工具执行异常: {str(e)}")
-            self._trigger_post_tool_use(tool_name, args, err_result)
+            self._trigger_post_tool_use(tool_name, args, err_result, enabled=trigger_hooks)
             return err_result
 
         # 执行后检查 ToolExecutor 有效性（MCP 调用可能耗时较长）
@@ -1075,7 +1083,7 @@ class ToolExecutor:
             # 不再尝试修改 result，避免访问已删除的 QObject 属性
 
         # Trigger PostToolUse hook for MCP tools
-        self._trigger_post_tool_use(tool_name, args, result)
+        self._trigger_post_tool_use(tool_name, args, result, enabled=trigger_hooks)
 
         return result
 

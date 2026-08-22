@@ -20811,6 +20811,25 @@ class OpenAIChatToolWindow(ToolWindow):
 
             return ConversationStackImpl()
 
+        def _create_engine_session(engine_name: str, **kwargs):
+            """EP3：创建插件对话引擎会话（最通用同步驱动原语）。
+
+            契约见 app/plugins/contracts/engine_session.py。默认 hook_policy=NONE
+            （引擎决定 hook 参与——插件循环不再被动触发全局 hooks）；
+            turn() 不预设对话流程，messages/tools/callbacks 全量透传，
+            core/executor 逃生舱公开，最大化自由度。
+            """
+            from app.core.conversation.engine_session import EngineSessionImpl
+
+            return EngineSessionImpl(
+                engine_name=engine_name,
+                get_model_config=self._get_current_model_config,
+                tool_executor=backend.tool_executor if backend else None,
+                agent_manager=backend.agent_manager if backend else None,
+                backend=backend,
+                **kwargs,
+            )
+
         return {
             "get_model_config": self._get_current_model_config,
             "get_tool_executor": lambda: backend.tool_executor if backend else None,
@@ -20821,6 +20840,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "get_workdir": lambda: self._resolve_project_workdir() or "",
             "get_compactor": _get_compactor,
             "conversation_stack": _conversation_stack,
+            "create_engine_session": _create_engine_session,
             "save_messages_to_session": self._save_messages_to_session,
             "enter_exclusive_ui_mode": self.enter_exclusive_ui_mode,
             "exit_exclusive_ui_mode": self.exit_exclusive_ui_mode,

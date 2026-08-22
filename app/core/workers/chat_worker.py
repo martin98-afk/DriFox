@@ -39,7 +39,7 @@ from PyQt5.QtGui import QImage
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 
-from app.core.conversation.config import PermissionCache
+from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.message_content import append_text_block, consolidate_messages
 
 from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
@@ -201,6 +201,7 @@ class OpenAIChatWorker(QThread):
         compactor=None,
         initial_compaction_cache: Dict = None,
         session_id: str = "",
+        hook_policy=None,
     ):
         super().__init__()
         self.messages = messages
@@ -214,6 +215,8 @@ class OpenAIChatWorker(QThread):
         self.stage_changed_callback = stage_changed_callback
         self.permission_check_callback = permission_check_callback
         self.session_id = session_id
+        # Hook 参与级别（None = 未声明，按 ALL 兼容旧调用方）
+        self._hook_policy = hook_policy if isinstance(hook_policy, HookPolicy) else HookPolicy.ALL
         if self.session_id:
             logger.debug(f"[ChatWorker] session_id={self.session_id[:12]}...")
         else:
@@ -688,6 +691,12 @@ class OpenAIChatWorker(QThread):
                 否则返回 None。Stop hook 用此实现"强制续命"机制。
         """
         from app.core.backend import _make_hook_message
+
+        # Hook 参与级别拦截：消息级事件（PreAssistantMessage/PostAssistantMessage/Stop）
+        # 由引擎 HookPolicy 决定。ALL 之外一律不触发——插件自建引擎（autoloop/
+        # chinese-chess 等）默认 NONE，不再被动执行主对话语义的全局 hooks。
+        if self._hook_policy != HookPolicy.ALL:
+            return None
 
         try:
             backend = getattr(self.tool_executor, "_backend", None)
@@ -4352,6 +4361,8 @@ class OpenAIChatWorker(QThread):
                 tool_name,
                 arguments,
                 call_id=tool_call_id,
+                # Hook 参与级别（引擎 HookPolicy）：NONE 时跳过 PreToolUse/PostToolUse
+                trigger_hooks=self._hook_policy != HookPolicy.NONE,
                 hook_context={
                     "current_role": "primary",
                     "is_subagent_call": False,
