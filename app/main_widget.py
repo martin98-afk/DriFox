@@ -925,6 +925,92 @@ class _ToolReloadNoticeBridge(QObject):
 _tool_reload_notice_bridge: Optional[_ToolReloadNoticeBridge] = None
 
 
+def _image_path_to_data_uri(img_path: str) -> "str | None":
+    """把单个图片路径编码为 data URI，三档分支处理大图。
+
+    - <8MB：直接 base64 编码
+    - 8-20MB：强制压缩（复用 chat_worker.compress_data_uri）
+    - >20MB：QImage 降采样到 2048px JPEG q85
+
+    Returns:
+        data URI 字符串（"data:mime;base64,xxx"），或 None（读取/编码失败）。
+    """
+    import base64 as _base64
+    import os as _os
+
+    from PyQt5.QtCore import QByteArray, QBuffer, QIODevice
+    from PyQt5.QtGui import QImage
+
+    _MIME_MAP = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+    }
+    _MAX_DOWNSCALE_PX = 2048
+    _JPEG_QUALITY = 85
+
+    try:
+        with open(img_path, "rb") as f:
+            raw_bytes = f.read()
+        raw_size = len(raw_bytes)
+        ext = _os.path.splitext(img_path)[1].lower()
+        mime = _MIME_MAP.get(ext, "image/png")
+
+        # 第一档：<8MB 直读
+        if raw_size < 8 * 1024 * 1024:
+            b64 = _base64.b64encode(raw_bytes).decode()
+            return f"data:{mime};base64,{b64}"
+
+        # 第二档：8-20MB 强制压缩
+        if raw_size < 20 * 1024 * 1024:
+            b64 = _base64.b64encode(raw_bytes).decode()
+            data_uri = f"data:{mime};base64,{b64}"
+            from app.core.workers.chat_worker import compress_data_uri
+
+            compressed = compress_data_uri(data_uri)
+            if compressed != data_uri:
+                logger.info(f"[ImageAttach] 8-20MB 强制压缩: {img_path}")
+                return compressed
+            return data_uri
+
+        # 第三档：>20MB QImage 降采样到 2048px JPEG q85
+        img = QImage.fromData(QByteArray(raw_bytes))
+        if img.isNull():
+            logger.warning(f"[ImageAttach] QImage 解码失败 {img_path}")
+            return None
+        orig_w, orig_h = img.width(), img.height()
+        scale = min(
+            _MAX_DOWNSCALE_PX / max(orig_w, 1),
+            _MAX_DOWNSCALE_PX / max(orig_h, 1),
+            1.0,
+        )
+        if scale < 1.0:
+            new_w = max(64, int(orig_w * scale))
+            new_h = max(64, int(orig_h * scale))
+            img = img.scaled(new_w, new_h, 1, 0)  # KeepAspectRatio, FastTransformation
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        try:
+            if img.save(buf, "JPEG", _JPEG_QUALITY):
+                b64 = _base64.b64encode(bytes(ba.data())).decode()
+                logger.info(
+                    f"[ImageAttach] >20MB 降采样 {orig_w}x{orig_h} → "
+                    f"{img.width()}x{img.height()} JPEG q{_JPEG_QUALITY}: {img_path}"
+                )
+                return f"data:image/jpeg;base64,{b64}"
+        finally:
+            buf.close()
+        logger.warning(f"[ImageAttach] JPEG 编码失败 {img_path}")
+        return None
+    except Exception as e:
+        logger.warning(f"[ImageAttach] 处理图片附件失败 {img_path}: {e}")
+        return None
+
+
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐"
     icon = get_icon("drifox")
@@ -15577,38 +15663,12 @@ class OpenAIChatToolWindow(ToolWindow):
             multimodal content 列表（[text, image_url, image_url, ...]），
             或 None（编码失败/无图片）。
         """
-        import base64
-
-        _MIME_MAP = {
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".gif": "image/gif",
-            ".webp": "image/webp",
-            ".bmp": "image/bmp",
-        }
         image_blocks = []
         for img_path in image_paths:
-            try:
-                with open(img_path, "rb") as f:
-                    img_bytes = f.read()
-                img_b64 = base64.b64encode(img_bytes).decode()
-                ext = os.path.splitext(img_path)[1].lower()
-                mime = _MIME_MAP.get(ext, "image/png")
-                data_uri = f"data:{mime};base64,{img_b64}"
-
-                # 图片大小检查：超过 5MB 自动压缩，防止 API 400
-                if len(img_b64) > 5 * 1024 * 1024:
-                    from app.core.workers.chat_worker import compress_data_uri
-
-                    compressed = compress_data_uri(data_uri)
-                    if compressed != data_uri:
-                        data_uri = compressed
-                        logger.info(f"[ImageAttach] 附件图片已压缩: {img_path}")
-
-                image_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
-            except Exception as e:
-                logger.warning(f"处理图片附件失败 {img_path}: {e}")
+            data_uri = _image_path_to_data_uri(img_path)
+            if data_uri is None:
+                continue
+            image_blocks.append({"type": "image_url", "image_url": {"url": data_uri}})
         if not image_blocks:
             return None
         logger.info(
