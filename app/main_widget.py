@@ -19851,6 +19851,10 @@ class OpenAIChatToolWindow(ToolWindow):
     @classmethod
     def _on_app_about_to_quit(cls):
         """应用退出时保存所有窗口的脏会话（单次注册，批量执行）"""
+        # 停止全局子智能体日志清理定时器，避免退出后悬空回调
+        if cls._class_subagent_log_cleanup_timer is not None:
+            cls._class_subagent_log_cleanup_timer.stop()
+            cls._class_subagent_log_cleanup_timer = None
         for win in getattr(cls, "_instances", []):
             if getattr(win, "_is_destroyed", False):
                 continue
