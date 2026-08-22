@@ -1258,7 +1258,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 替代旧的 per-window _coding_plan_result_ready 信号桥接。
         from app.core.usage_service import UsageService
 
-        UsageService.get_instance().coding_plan_ready.connect(self._on_coding_plan_result)
+        self._reg_sig(UsageService.get_instance().coding_plan_ready, self._on_coding_plan_result)
         # 线程安全桥接：OpenCode Zen 免费模型异步刷新结果回主线程
         self._opencode_models_ready.connect(self._on_opencode_models_ready)
         # 线程安全桥接：models.dev 动态数据后台刷新结果回主线程
