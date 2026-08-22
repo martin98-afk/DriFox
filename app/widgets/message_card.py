@@ -4719,6 +4719,16 @@ class CodeWebViewer(QWebEngineView):
                     flex: 0 0 auto;
                     color: var(--text-muted);
                 }}
+                /* 优先级染色：仅影响待办 ○ 圆点（in_progress 是 SVG 动画、completed 是 ✓ 已带语义色） */
+                .todo-item[data-priority="high"] .todo-pending-icon {{
+                    color: #ef4444;
+                }}
+                .todo-item[data-priority="medium"] .todo-pending-icon {{
+                    color: #f59e0b;
+                }}
+                .todo-item[data-priority="low"] .todo-pending-icon {{
+                    color: #3b82f6;
+                }}
                 .todo-item .todo-text {{
                     flex: 1 1 auto;
                     min-width: 0;
@@ -5785,12 +5795,12 @@ class CodeWebViewer(QWebEngineView):
                         }} else {{
                             icon = '<span class="todo-pending-icon">○</span>';
                         }}
-                        html += '<div class="todo-item" data-status="' + status + '">' + icon +
+                        html += '<div class="todo-item" data-status="' + status + '" data-priority="' + (t.priority || 'medium') + '">' + icon +
                                 '<span class="todo-text">' + (t.content || '') + '</span></div>';
                     }}
                     window._todoCount = todos.length;
                     content.innerHTML = html;
-                    var progText = '📋 ' + done + '/' + todos.length + ' 完成';
+                    var progText = ' ' + done + '/' + todos.length + ' 完成';
                     window._todoProgressText = progText;
                     if (prog) prog.textContent = progText;
                     panel.style.display = '';
@@ -11091,6 +11101,8 @@ class MessageCard(SimpleCardWidget):
                 {
                     "status": item.get("status", "pending") if isinstance(item, dict) else "pending",
                     "content": escape(item.get("content", "") if isinstance(item, dict) else str(item)),
+                    # 优先级：high/medium/low（来自 todowrite 工具 _normalize_todos 默认 medium）
+                    "priority": (item.get("priority", "medium") if isinstance(item, dict) else "medium") or "medium",
                 }
                 for item in (self._todos_snapshot or [])
             ]
