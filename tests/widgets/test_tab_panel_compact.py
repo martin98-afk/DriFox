@@ -2,6 +2,7 @@
 """TabPanel 侧边栏折叠态紧凑模式测试（T4b 验收 TC-* 自动化部分）"""
 
 import re
+from unittest.mock import MagicMock, patch
 
 import pytest
 from PyQt5.QtCore import Qt
@@ -741,3 +742,44 @@ def test_d5_collapsed_refresh_plugins_preserves_scroll_state(panel):
     assert _shown(panel._custom_plugin_scroll) is False, "折叠前折叠 → 重建后保持折叠"
     assert _shown(panel._custom_plugin_label) is False
     assert _shown(panel._custom_plugin_badge) is False
+
+
+def test_d5_expanded_refresh_keeps_manual_expand(panel):
+    """展开态手动展开 scroll 后 refresh_ui_plugins：保持展开（用户反馈 bug 修复）
+
+    原 bug：refresh_ui_plugins 总是 scroll.setVisible(False) 且在展开态不重同步，
+    导致用户在展开态手动展开的自定义插件列表在插件热更新/新增时被强制折叠。
+    """
+    row = _add_custom_plugin_row(panel)
+    # 展开态手动展开列表
+    panel._on_custom_plugin_toggle()
+    assert _shown(panel._custom_plugin_scroll) is True
+
+    # 模拟插件热更新 / 新增插件触发 refresh_ui_plugins
+    fake_registry = MagicMock()
+    fake_registry.get_sidebar_items.return_value = []
+    fake_registry.get_floating_cards.return_value = {}
+    fake_pm = MagicMock()
+    fake_pm.get_plugin.return_value = MagicMock(is_system=False)
+    with (
+        patch("app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance", return_value=fake_registry),
+        patch("app.plugins.managers.plugin_manager.PluginManager.get_instance", return_value=fake_pm),
+    ):
+        panel.refresh_ui_plugins()
+
+    assert _shown(panel._custom_plugin_scroll) is True, "展开态刷新后应保持展开"
+    assert _shown(panel._custom_plugin_label) is True
+    assert _shown(panel._custom_plugin_badge) is True
+
+
+def test_d5_expanded_toggle_collapse_then_expand_keeps_choice(panel):
+    """展开态手动折叠 scroll → 收起侧边栏 → 展开：保持折叠（saved_state 正确）"""
+    row = _add_custom_plugin_row(panel)
+    panel._on_custom_plugin_toggle()  # 展开
+    panel._on_custom_plugin_toggle()  # 再折叠
+    assert _shown(panel._custom_plugin_scroll) is False
+
+    panel.set_collapsed(True)
+    assert _shown(panel._custom_plugin_scroll) is False, "折叠态尊重折叠前状态"
+    panel.set_collapsed(False)
+    assert _shown(panel._custom_plugin_scroll) is False, "展开后保持折叠（saved_state 恢复）"

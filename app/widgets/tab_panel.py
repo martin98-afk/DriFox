@@ -1355,6 +1355,8 @@ class TabPanel(QWidget):
             self._custom_plugin_buttons.append(row)
         has_custom = bool(custom_infos)
         self._custom_plugin_card.setVisible(has_custom)
+        # 重建前记录用户当前展开/折叠选择（展开态刷新后需恢复，见末尾）
+        prev_custom_expanded = not self._custom_plugin_scroll.isHidden()
         # 默认折叠
         self._custom_plugin_scroll.setVisible(False)
         self._custom_plugin_arrow.set_expanded(False, animate=False)
@@ -1366,9 +1368,15 @@ class TabPanel(QWidget):
 
         self._refresh_plugin_style()
 
-        # 折叠态重建后重新应用紧凑 UI（上面 scroll 被重置为默认折叠，新行未 compact）
-        if self._collapsed:
-            self._update_toggle_button()
+        # 重建后重新应用紧凑 UI：
+        # - 折叠态：按 saved_state 应用（上面 scroll 被重置为默认折叠，新行未 compact）
+        # - 展开态：无 saved_state 时 _update_toggle_button 保持当前状态不变；
+        #   但上面已强制 setVisible(False)，需用重建前的用户选择恢复，
+        #   避免手动展开的自定义插件列表在刷新（热更新/新增插件）后被强制折叠
+        self._update_toggle_button()
+        if not self._collapsed and getattr(self, "_custom_plugin_saved_state", None) is None:
+            self._custom_plugin_scroll.setVisible(prev_custom_expanded)
+            self._custom_plugin_arrow.set_expanded(prev_custom_expanded)
 
     def _on_sidebar_item_clicked(self, info):
         """独立侧边栏项点击：组上下文（当前窗口 + item_id）派发 info.on_click"""
@@ -1506,19 +1514,26 @@ class TabPanel(QWidget):
                 self._custom_plugin_arrow.set_expanded(self._custom_plugin_scroll.isVisible())
                 self._apply_custom_card_style(compact=True)
             else:
-                saved = getattr(self, "_custom_plugin_saved_state", None) or {}
-                self._custom_plugin_label.setVisible(bool(saved.get("label_visible", True)))
-                self._custom_plugin_badge.setVisible(bool(saved.get("badge_visible", True)))
-                self._custom_plugin_scroll.setVisible(bool(saved.get("scroll_visible", False)))
-                self._custom_plugin_arrow.set_expanded(self._custom_plugin_scroll.isVisible())
-                self._custom_plugin_saved_state = None
+                # 展开恢复：按 saved_state 恢复折叠前现场（saved_state 为 None 时
+                # 保持当前 scroll 可见性——避免 refresh_ui_plugins 在展开态刷新
+                # 后 scroll 被强制折叠）
+                saved = getattr(self, "_custom_plugin_saved_state", None)
+                if saved is not None:
+                    self._custom_plugin_label.setVisible(bool(saved.get("label_visible", True)))
+                    self._custom_plugin_badge.setVisible(bool(saved.get("badge_visible", True)))
+                    self._custom_plugin_scroll.setVisible(bool(saved.get("scroll_visible", False)))
+                    self._custom_plugin_arrow.set_expanded(self._custom_plugin_scroll.isVisible())
+                    self._custom_plugin_saved_state = None
                 self._apply_custom_card_style(compact=False)
         for row in self._custom_plugin_buttons:
             row.set_compact(compact)
 
     def _on_custom_plugin_toggle(self):
         """切换自定义插件折叠/展开状态"""
-        expanded = not self._custom_plugin_scroll.isVisible()
+        # 用 isHidden()（显式隐藏状态）判断当前态：当前隐藏(True)→展开，
+        # 当前显示(False)→折叠。isVisible() 依赖父链显示，折叠态/未显示窗口
+        # 下恒 False 会导致 toggle 永远判为"展开"而无法折叠。
+        expanded = self._custom_plugin_scroll.isHidden()
         self._custom_plugin_scroll.setVisible(expanded)
         self._custom_plugin_arrow.set_expanded(expanded)
         # 折叠态下手动切换 scroll：同步 saved_state，展开侧边栏时按最新
