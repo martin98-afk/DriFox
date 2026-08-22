@@ -6,7 +6,6 @@ import ctypes
 import gc
 import heapq
 import os
-import psutil
 import re
 import shutil
 import subprocess
@@ -708,25 +707,6 @@ class ToolWindowTitleBar(QWidget):
         self._action_layout.setSpacing(3)
         layout.addWidget(self._action_container)
 
-        # 内存显示标签
-        self._memory_label = QLabel(self)
-        self._memory_label.setObjectName("memoryLabel")
-        self._memory_label.setFixedHeight(20)
-        from app.utils.design_tokens import Colors
-
-        self._memory_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(11)}px; "
-            f"padding: 1px 4px; background-color: transparent; border: none; border-radius: 3px;"
-        )
-        self._memory_label.hide()  # 默认隐藏，子类可以控制显示
-        layout.insertWidget(layout.indexOf(self._action_container) - 1, self._memory_label)
-
-        # 内存刷新定时器
-        self._memory_timer = QTimer(self)
-        self._memory_timer.setInterval(5000)  # 5秒刷新
-        self._memory_timer.timeout.connect(self._update_memory_label)
-        self._memory_refreshing = False
-
         # 设置按钮已移除（移到主窗口内）
 
         self._min_btn = TransparentToolButton(get_icon("最小化"), self)
@@ -865,31 +845,6 @@ class ToolWindowTitleBar(QWidget):
                 background-color: {btn_hover};
             }}
         """)
-
-        # 内存标签样式（单独设置，因为其 objectName 与整体样式不冲突）
-        self._memory_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} font-size: {scale_font_size(11)}px; "
-            f"padding: 1px 4px; background-color: transparent; border: none; border-radius: 3px;"
-        )
-
-    def show_memory_label(self):
-        """显示内存标签并开始刷新"""
-        self._memory_label.show()
-        # 每次显示都重新启动定时器，确保新窗口独立刷新
-        self._memory_timer.stop()
-        self._memory_refreshing = True
-        self._update_memory_label()
-        self._memory_timer.start()
-
-    def _update_memory_label(self):
-        """更新内存显示"""
-        try:
-            process = psutil.Process()
-            mem_info = process.memory_info()
-            mem_mb = mem_info.rss / (1024 * 1024)
-            self._memory_label.setText(f" {mem_mb:.0f} MB ")
-        except Exception:
-            self._memory_label.setText(" N/A ")
 
 
 class ToolWindow(QWidget):
@@ -1914,8 +1869,6 @@ class OpenAIChatToolWindow(ToolWindow):
     def _setup_title_bar(self):
         """设置标题栏按钮"""
         title_bar = self.get_title_bar()
-        # 显示内存标签
-        title_bar.show_memory_label()
         # 创建复制窗口按钮
         self._copy_btn = TransparentToolButton(get_icon("新建窗口"), self)
         self._copy_btn.setFixedSize(28, 28)
@@ -18431,6 +18384,10 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 缓存结果（同一路径下次直接命中）
+        if len(self._branch_cache) >= _MAX_BRANCH_CACHE:
+            # Python 3.7+ dict 保插入序：弹出最早插入的 key
+            oldest = next(iter(self._branch_cache))
+            self._branch_cache.pop(oldest, None)
         self._branch_cache[workdir] = branch
         # 再次校验：缓存写完后若 request_id 又变了，说明并发切换，仍跳过
         if request_id != self._branch_detect_request_id:
@@ -20881,6 +20838,7 @@ _gc_hook_pending = False
 # 强回收层（kill 离屏 renderer）依赖 message_card 的 renderer_pid 记录，暂缓。
 _MAX_RENDERED_CARDS = 18
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
+_MAX_BRANCH_CACHE = 64  # workdir→branch 缓存上限（M5-B）：超出时淘汰最早插入项，防长期累积渗漏
 
 # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──
 # 双判据：主进程 RSS 超总阈值，且 WebEngine 子进程 RSS 超子阈值才触发强回收——
