@@ -3010,13 +3010,20 @@ class OpenAIChatToolWindow(ToolWindow):
         # gitee 配置同步完成 → 本窗口按云端 llm_selected_model 刷新模型选择。
         # 不用 valueChanged 监听（llm_selected_model 全项目无监听器，且直接监听会破坏
         # 多窗口各自选择独立模型），改为同步服务在配置全部写回内存后一次性通知。
-        # 窗口销毁时 PyQt 自动断开连接，不泄漏。
+        # ★ 关键：PyQt 不会自动断开 singleton → window 的跨对象连接（widget 销毁
+        # 只断开 parent-owned 信号），必须用 _reg_sig 跟踪并在 destroyed 时清理。
         try:
             from app.core.config_sync import ConfigSyncService
 
-            ConfigSyncService.get_instance().settingsRestored.connect(self._apply_synced_model_selection)
+            self._reg_sig(
+                ConfigSyncService.get_instance().settingsRestored,
+                self._apply_synced_model_selection,
+            )
             # Gitee token 真失效（syncDone 含"已失效"）→ 触发全局「重新绑定」提醒
-            ConfigSyncService.get_instance().syncDone.connect(self._on_gitee_sync_done)
+            self._reg_sig(
+                ConfigSyncService.get_instance().syncDone,
+                self._on_gitee_sync_done,
+            )
         except Exception:
             pass
 
