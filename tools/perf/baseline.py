@@ -340,7 +340,8 @@ def spawn_once(mode, entry, platform, retries=3, **kw):
     last_err = ""
     for attempt in range(1, retries + 1):
         try:
-            p = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300)
+            p = subprocess.run(cmd, env=env, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=300)
         except subprocess.TimeoutExpired as e:
             last_err = f"timeout: {e}"
             continue

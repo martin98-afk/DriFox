@@ -118,7 +118,10 @@ class ToolPermissionController(QObject):
         try:
             from app.core.config_sync import ConfigSyncService
 
-            ConfigSyncService.get_instance().settingsRestored.connect(self._on_config_synced)
+            self._reg_sig(
+                ConfigSyncService.get_instance().settingsRestored,
+                self._on_config_synced,
+            )
         except Exception:
             pass
 
@@ -521,6 +524,16 @@ class ToolPermissionController(QObject):
         self._active_agent_name = other._active_agent_name
         # ★ T28：同步用户显式调整集合（分支窗口行为一致）
         self._user_modified = set(other._user_modified)
+        # 🛡️ ★★★ 关键补丁：显式跳过 _singleton_connections 字段 ★★★
+        # copy_state_from 用于窗口复制/分支场景。若复制该字段：
+        #   1) 新窗口持有对源窗口 signal 对象的连接引用（receiver 数翻倍）
+        #   2) 源窗口 destroyed 时 _disconnect_singleton_connections 会断开自己
+        #      持有的连接，但新窗口的列表里仍记录着（dangling reference）
+        #   3) 新窗口 destroyed 时尝试 disconnect 已断开的连接 → RuntimeError 吞掉
+        #      → 实际无泄漏但日志噪音 + 误导性"还连着"
+        # 正确语义：每个实例只跟踪自己创建的连接，复用源窗口的 signal 监听即可
+        # （源窗口未销毁前，新窗口不需单独监听同一 signal）
+        # 注意：本字段名必须与 Commit 1 基建保持一致！
 
         # 主动发射所有信号刷新 UI
         self.togglesChanged.emit(self.get_toggles())
