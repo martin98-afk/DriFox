@@ -1256,6 +1256,9 @@ class TestLoadMissingDegradation:
 
         修复：start_team_run 之后、_spawn_team_members 之前，无条件
         set_team_project(源标签页 _current_project)。
+        #5a-fix Plan C：粒度从 team_name 改为 run_id（projects_by_run_id），
+        调用名同步改为 set_project_for_run_id。位置约束保留（start_team_run
+        之后、_spawn_team_members 之前）。
         """
         import ast as _ast
         import re as _re
@@ -1269,15 +1272,23 @@ class TestLoadMissingDegradation:
 
         func_src = _tw.dedent(_ast.unparse(target))
 
-        # 必须调用 set_team_project 重置团队级项目
-        assert "set_team_project" in func_src, "_handle_team_load 必须调用 set_team_project"
+        # #5a-fix Plan C：必须调用 set_project_for_run_id 按 run_id 粒度重置
+        # （保留 set_team_project 作为旧接口兼容，但新代码应用新接口）
+        assert (
+            "set_project_for_run_id" in func_src or "set_team_project" in func_src
+        ), "_handle_team_load 必须调用 set_project_for_run_id 或 set_team_project 重置团队级项目"
         # 顺序：start_team_run 之后、_spawn_team_members 之前
         _run_idx = func_src.find("start_team_run")
         _spawn_idx = func_src.find("_spawn_team_members")
-        _set_idx = func_src.find("set_team_project")
-        assert -1 not in (_run_idx, _spawn_idx, _set_idx), "缺少关键调用"
+        _set_idx_proj = func_src.find("set_project_for_run_id")
+        _set_idx_team = func_src.find("set_team_project")
+        _set_idx_candidates = [i for i in (_set_idx_proj, _set_idx_team) if i >= 0]
+        assert _run_idx >= 0, "缺少 start_team_run 调用"
+        assert _spawn_idx >= 0, "缺少 _spawn_team_members 调用"
+        assert _set_idx_candidates, "缺少 set_project_for_run_id/set_team_project 调用"
+        _set_idx = min(_set_idx_candidates)
         assert _run_idx < _set_idx < _spawn_idx, (
-            "set_team_project 必须在 start_team_run 之后、_spawn_team_members 之前"
+            "set_project_for_run_id/set_team_project 必须在 start_team_run 之后、_spawn_team_members 之前"
         )
         # 数据源为源标签页当前项目（self._current_project）
         assert "_current_project" in func_src, "必须读取源标签页 _current_project"

@@ -1004,6 +1004,11 @@ class TeamManager:
         同步应用与恢复路径读取。放顶层而非成员级——_cleanup_stale_members
         清理失效成员时只动 members，不会丢失 project。
 
+        🛡️ 弃用警告：team_name 粒度无法区分同模板多次加载产生的多个团队
+        运行（每次 /team --load 都有独立 run_id），多团队并存时 set_team_project
+        会互相覆盖。新代码请改用 set_project_for_run_id（按 run_id 粒度）。
+        本接口保留仅为向后兼容单团队旧调用方。
+
         Args:
             project: 项目名（空串表示清除）
         """
@@ -1015,9 +1020,64 @@ class TeamManager:
             self._save_team_data(team_name)
 
     def get_team_project(self, team_name: str = DEFAULT_TEAM) -> str:
-        """获取团队级统一项目（未设置 / 老团队无 project 时返回空串）"""
+        """获取团队级统一项目（未设置 / 老团队无 project 时返回空串）
+
+        🛡️ 弃用警告：team_name 粒度无法区分多 run_id 团队，新代码请改用
+        get_project_for_run_id（按 run_id 粒度）。本接口保留仅为向后兼容。
+        """
         with self._data_lock:
             data = self._get_team_data(team_name)
+            return data.get("project", "") or ""
+
+    # ── 团队级统一项目（按 run_id 粒度，#5a-fix Plan C）──
+
+    def set_project_for_run_id(self, project: str, run_id: str, team_name: str = DEFAULT_TEAM):
+        """按 run_id 粒度设置团队级项目（写入 team.json **顶层**
+        ``projects_by_run_id[run_id]``，与 ``run_id`` 平级）。
+
+        设计动机：tab_panel 团队框以 run_id 分组，而旧 set_team_project 以
+        team_name（默认 DEFAULT_TEAM）粒度存储——同模板多次加载产生多个
+        run_id 时所有团队共享 DEFAULT_TEAM.project，导致多团队并存时
+        ``后建团队切项目 → 之前团队框 header icon 被覆盖`` 的 bug。
+
+        本接口以 run_id 粒度存储，与 tab_panel 分组维度对齐；旧 set_team_project
+        保留（team_name 粒度）仅为兼容老调用方。
+
+        Args:
+            project: 项目名（空串表示清除该 run_id 的项目）
+            run_id: 团队运行标识（uuid hex，空串时静默 no-op）
+            team_name: 团队名（仅用于定位 team.json 路径，默认 DEFAULT_TEAM）
+        """
+        if not run_id:
+            return
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            mapping = data.get("projects_by_run_id") or {}
+            if mapping.get(run_id) == project:
+                return
+            # 复制 + 写回，避免多线程下直接改 dict 引发的并发问题
+            new_mapping = dict(mapping)
+            new_mapping[run_id] = project
+            data["projects_by_run_id"] = new_mapping
+            self._save_team_data(team_name)
+
+    def get_project_for_run_id(self, run_id: str, team_name: str = DEFAULT_TEAM) -> str:
+        """按 run_id 粒度读取团队级项目（未设置时回退顶层 ``project`` 字段）
+
+        回退策略：``projects_by_run_id`` 不存在该 run_id 时返回顶层 ``project``
+        字段值（兼容仅用旧 set_team_project 写入的老团队）。读不到任何值时
+        返回空串（与旧 get_team_project 行为一致）。
+
+        Args:
+            run_id: 团队运行标识（uuid hex）
+            team_name: 团队名（默认 DEFAULT_TEAM）
+        """
+        with self._data_lock:
+            data = self._get_team_data(team_name)
+            mapping = data.get("projects_by_run_id") or {}
+            if run_id and run_id in mapping:
+                return mapping[run_id] or ""
+            # 回退：未注册 run_id 或老数据无 projects_by_run_id 时返回顶层 project
             return data.get("project", "") or ""
 
     # ── 团队级统一工作目录/工作树（一人改工作目录全员同步）──

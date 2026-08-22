@@ -553,7 +553,9 @@ def test_spawn_team_member_window_creates_fresh_window(qapp):
 def test_spawn_team_member_window_inherits_source_project_when_team_empty(qapp):
     """🐛 回归：构建团队（/team --load / 快速新建成员）时若团队级项目尚未
     设置，新成员窗口应继承执行构建的源窗口（self._current_project）的项目，
-    而非回落到全局默认项目。"""
+    而非回落到全局默认项目。
+    #5a-fix Plan C：按 run_id 粒度写入 projects_by_run_id[run_id]。
+    """
     import app.main_widget as mw
 
     inst = _make_main_widget_instance()
@@ -564,7 +566,8 @@ def test_spawn_team_member_window_inherits_source_project_when_team_empty(qapp):
     fake_tm = MagicMock()
     fake_tm.get_template.return_value = {"name": "t", "agents": []}
     fake_tm.get_team_run_id.return_value = "run-X"
-    fake_tm.get_team_project.return_value = ""  # 团队级项目未设置
+    fake_tm.get_project_for_run_id.return_value = ""  # 团队级项目未设置
+    fake_tm.get_team_project.return_value = ""  # 团队级项目未设置（回退接口）
 
     inst._create_fresh_window = MagicMock(return_value=fake_win)
     inst._get_team_manager = MagicMock(return_value=fake_tm)
@@ -572,14 +575,16 @@ def test_spawn_team_member_window_inherits_source_project_when_team_empty(qapp):
     with patch.object(mw.QTimer, "singleShot"):
         inst._spawn_team_member_window("build")
 
-    # 源窗口项目被复制并以团队级项目落盘
-    fake_tm.set_team_project.assert_called_once_with("项目-X")
+    # 源窗口项目被复制并按 run_id 粒度落盘（#5a-fix Plan C）
+    fake_tm.set_project_for_run_id.assert_called_once_with("项目-X", "run-X", team_name="t")
     # 并把项目应用到新窗口
     fake_win._apply_team_project.assert_called_once_with("项目-X")
 
 
 def test_spawn_team_member_window_reuses_already_set_team_project(qapp):
-    """团队级项目已设置时，新成员窗口沿用团队项目，不覆盖为源窗口项目。"""
+    """团队级项目已设置时，新成员窗口沿用团队项目，不覆盖为源窗口项目。
+    #5a-fix Plan C：按 run_id 粒度读取 get_project_for_run_id。
+    """
     import app.main_widget as mw
 
     inst = _make_main_widget_instance()
@@ -590,7 +595,8 @@ def test_spawn_team_member_window_reuses_already_set_team_project(qapp):
     fake_tm = MagicMock()
     fake_tm.get_template.return_value = {"name": "t", "agents": []}
     fake_tm.get_team_run_id.return_value = "run-X"
-    fake_tm.get_team_project.return_value = "团队项目"  # 团队级已有项目
+    fake_tm.get_project_for_run_id.return_value = "团队项目"  # run_id 已有项目
+    fake_tm.get_team_project.return_value = "团队项目"  # 回退接口
 
     inst._create_fresh_window = MagicMock(return_value=fake_win)
     inst._get_team_manager = MagicMock(return_value=fake_tm)
@@ -598,7 +604,8 @@ def test_spawn_team_member_window_reuses_already_set_team_project(qapp):
     with patch.object(mw.QTimer, "singleShot"):
         inst._spawn_team_member_window("build")
 
-    fake_tm.set_team_project.assert_not_called()  # 不覆盖已有团队项目
+    fake_tm.set_project_for_run_id.assert_not_called()  # 不覆盖已有团队项目
+    fake_tm.set_team_project.assert_not_called()
     fake_win._apply_team_project.assert_called_once_with("团队项目")
 
 

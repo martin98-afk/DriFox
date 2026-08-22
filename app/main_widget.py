@@ -2209,6 +2209,7 @@ class OpenAIChatToolWindow(ToolWindow):
         team_agent: str = "",
         team_name: str = "",
         team_run_id: str = "",
+        initial_session_delay_ms: int = 0,
     ):
         """创建一个全新的空白会话窗口（不复制任何已有窗口的上下文/会话内容）。
 
@@ -2229,6 +2230,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 分离"竞态窗口期；空串表示非团队窗口）。
             team_name: 可选。团队显示名（模板名），随 team_agent 一起前置。
             team_run_id: 可选。团队运行标识（分组 key），随 team_agent 一起前置。
+            initial_session_delay_ms: 可选。showEvent 中
+                ``QTimer.singleShot`` 触发 ``_create_new_session`` 的延迟；
+                主要用于创建团队场景避免 N 窗 ``QTimer(0)`` 背靠背堆叠
+                阻塞主线程（4a：复用 ``_TEAM_NEW_TASK_STAGGER_MS``，
+                按 idx 线性递增传入）。默认 0 行为不变——其他入口不走这条
+                路径时,_initial_session_delay_ms 仍是 0（普通窗口）。
         """
         try:
             from PyQt5 import sip
@@ -2243,6 +2250,11 @@ class OpenAIChatToolWindow(ToolWindow):
             new_instance = OpenAIChatToolWindow(valid_homepage)
             # 跳过历史会话恢复，创建全新空白会话
             new_instance._skip_restore_history = True
+            # 🆕 4a：错峰触发 _create_new_session 的延迟（创建团队场景专用）。
+            # 默认 0；_spawn_team_members 按 idx × _TEAM_NEW_TASK_STAGGER_MS 计算传入。
+            # showEvent 读此值决定 QTimer.singleShot 的延迟，4 窗依次间隔错峰，
+            # 避免 SessionStart→BuildSystemPrompt hook 背靠背同步阻塞主线程。
+            new_instance._initial_session_delay_ms = int(initial_session_delay_ms or 0)
             # 🛡️ 分支数据在 add_window（触发 showEvent）之前赋值，
             # 消除"分支数据赋值太晚"竞态（见 docstring）。
             if branch_data is not None:
@@ -2422,7 +2434,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_branch_session_data", None):
             QTimer.singleShot(50, lambda: self._safe_timer_call(self._apply_branch_or_create_session))
         else:
-            QTimer.singleShot(0, lambda: self._safe_timer_call(self._create_new_session))
+            # 🆕 4a：创建团队场景——4 个窗口 add_window→showEvent 全在同一事件循环批次内
+            # 排队，全部 QTimer(0) 会让 SessionStart→BuildSystemPrompt hook 背靠背同步
+            # 阻塞主线程 8-10s。_spawn_team_members 按 idx × _TEAM_NEW_TASK_STAGGER_MS
+            # 提前写入 _initial_session_delay_ms（默认 0 行为不变），使各窗的
+            # _create_new_session 错峰触发，UI 在创建期间可响应。
+            _init_session_delay = int(getattr(self, "_initial_session_delay_ms", 0) or 0)
+            QTimer.singleShot(_init_session_delay, lambda: self._safe_timer_call(self._create_new_session))
 
         # 性能优化：复制窗口已从源窗口复制了 _valid_configs 和 workdir，
         # 跳过从磁盘重载模型配置和工作目录，直接进入完成状态
@@ -4706,8 +4724,16 @@ class OpenAIChatToolWindow(ToolWindow):
         # 等 4 处业务功能均依赖该字段。join_team 仅写 TeamManager 成员表，
         # 不回写窗口实例标记——此处必须显式赋值（与原行为一致）。
         self._team_agent_name = agent_name
-        # 应用团队级统一项目（若已设置）：手动加入团队后与团队共享同一项目
-        team_project = tm.get_team_project()
+        # 应用团队级统一项目（若已设置）：手动加入团队后与团队共享同一项目。
+        # #5a-fix Plan C：按 run_id 粒度读取，与 tab_panel 团队框分组维度对齐。
+        # run_id 尚未生成（手动 join 早期阶段）时回退到 team_name 粒度接口。
+        team_project = ""
+        join_run_id = getattr(self, "_team_run_id", "") or ""
+        join_team_name = getattr(self, "_team_name", "") or tm.DEFAULT_TEAM
+        if join_run_id:
+            team_project = tm.get_project_for_run_id(join_run_id, team_name=join_team_name)
+        if not team_project:
+            team_project = tm.get_team_project(team_name=join_team_name)
         if team_project:
             self._apply_team_project(team_project)
         # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
@@ -5001,7 +5027,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 时共享同一项目。
         src_project = self.__dict__.get("_current_project") or ""
         if src_project:
-            tm_mgr.set_team_project(src_project)
+            # #5a-fix Plan C：按 run_id 粒度重置本次新团队的项目，避免与之前
+            # 团队残留的 DEFAULT_TEAM.project 互相覆盖（bug：之前团队框
+            # header icon 被新团队项目覆盖）
+            tm_mgr.set_project_for_run_id(src_project, new_run_id)
 
         # 🐛 构建团队默认工作目录继承：与团队级项目同理，team_workdir 也是
         # 持久化的（team.json 顶层，用户切换工作目录/git worktree 即写入），
@@ -5096,6 +5125,7 @@ class OpenAIChatToolWindow(ToolWindow):
         run_id: str = "",
         team_label: str = "",
         team_name: str = "",
+        initial_session_delay_ms: int = 0,
     ) -> Optional["OpenAIChatToolWindow"]:
         """为团队新建一个成员窗口（_handle_team_load 与团队框"快速新建成员"共用）。
 
@@ -5157,6 +5187,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 team_agent=agent_name,
                 team_name=team_name,
                 team_run_id=team_run_id,
+                # 🆕 4a：错峰触发 _create_new_session（创建团队场景专用），
+                # _spawn_team_members 按 idx × _TEAM_NEW_TASK_STAGGER_MS 透传过来。
+                # 默认 0 不影响快速新建成员（_handle_team_add_member）等单窗场景。
+                initial_session_delay_ms=initial_session_delay_ms,
             )
             if win is None:
                 return None
@@ -5192,12 +5226,23 @@ class OpenAIChatToolWindow(ToolWindow):
             # 团队级，使本次所有新成员窗口与后续恢复路径共享同一项目。
             # 注：用 __dict__.get 而非 getattr——测试用 __new__ 构造实例时
             # 访问 Qt 子类实例属性会触发 super().__init__ 检查抛 RuntimeError。
-            team_project = tm_mgr.get_team_project()
+            # #5a-fix Plan C：按 run_id 粒度读取/写入新团队项目，避免与其他团队
+            # 残留的 DEFAULT_TEAM.project 互相覆盖。
+            team_run_id_local = getattr(win, "_team_run_id", "") or tm_mgr.get_team_run_id()
+            team_name_local = getattr(win, "_team_name", "") or (tm_mgr.get_template() or {}).get("name") or "default"
+            team_project = ""
+            if team_run_id_local:
+                team_project = tm_mgr.get_project_for_run_id(team_run_id_local, team_name=team_name_local)
+            if not team_project:
+                team_project = tm_mgr.get_team_project(team_name=team_name_local)
             if not team_project:
                 src_project = self.__dict__.get("_current_project") or ""
                 if src_project:
                     team_project = src_project
-                    tm_mgr.set_team_project(team_project)
+                    if team_run_id_local:
+                        tm_mgr.set_project_for_run_id(team_project, team_run_id_local, team_name=team_name_local)
+                    else:
+                        tm_mgr.set_team_project(team_project, team_name=team_name_local)
             if team_project:
                 win._apply_team_project(team_project)
             # 应用团队级统一工作目录/工作树（若已设置）：新窗口与团队共享同一工作树
@@ -5258,7 +5303,15 @@ class OpenAIChatToolWindow(ToolWindow):
         if _tmw is not None:
             _tmw._tab_panel.begin_batch_add()
         try:
-            for agent_name in agent_names:
+            # 🆕 4a：错峰触发各窗 _create_new_session，避免 N 窗口 showEvent →
+            # QTimer(0) 背靠背入队让 SessionStart→BuildSystemPrompt hook 同步重入
+            # 堆叠（单窗 1.5s×N → 4 窗 8-10s 主线程封锁）。复用现有 _TEAM_NEW_TASK_STAGGER_MS
+            # 与「新建任务」链式错峰（_handle_team_new_task:5483）同常量同语义，
+            # 第 i 窗 (i × 50ms) 后再触发 session 创建。idx 从 0 起→首窗仍 0ms 行为
+            # 不变；后续窗依次 50/100/150ms 错峰，事件循环得以穿插处理绘制/输入。
+            # 仅「创建团队」路径改这一支，「新建任务」/ 单窗会话入口不动。
+            for idx, agent_name in enumerate(agent_names):
+                _initial_session_delay_ms = idx * self._TEAM_NEW_TASK_STAGGER_MS
                 # 🛡️ M1：run_id / team_label 透传到 join_team，保证一次 /team --load
                 # 生成的所有新窗口共享同一团队归属（多团队分组基础）。
                 # 🛡️ M1'：team_name 同样透传，避免窗口实例 _team_name 被 team.json
@@ -5268,6 +5321,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     run_id=run_id,
                     team_label=team_label,
                     team_name=team_name,
+                    initial_session_delay_ms=_initial_session_delay_ms,
                 )
                 if win is not None:
                     new_windows.append(win)
@@ -5573,8 +5627,15 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 刷新覆盖，导致恢复窗口归入错误 run_id 分组漂移）
                 win._team_run_id = tm_mgr.get_team_run_id()
             # 🛡️ C3：不再重复 join_team（调用方已同步前置执行，恰好一次写盘）
-            # 应用团队级统一项目（若已设置）：延迟补注册后与团队共享同一项目
-            team_project = tm_mgr.get_team_project()
+            # 应用团队级统一项目（若已设置）：延迟补注册后与团队共享同一项目。
+            # #5a-fix Plan C：按 run_id 粒度读取，与 tab_panel 团队框分组对齐。
+            team_project = ""
+            join_run_id_local = getattr(win, "_team_run_id", "") or ""
+            join_team_name_local = getattr(win, "_team_name", "") or "default"
+            if join_run_id_local:
+                team_project = tm_mgr.get_project_for_run_id(join_run_id_local, team_name=join_team_name_local)
+            if not team_project:
+                team_project = tm_mgr.get_team_project(team_name=join_team_name_local)
             if team_project:
                 win._apply_team_project(team_project)
             # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
@@ -18691,6 +18752,8 @@ class OpenAIChatToolWindow(ToolWindow):
         不同团队互不影响，非团队成员不受影响。
         P2-B（Bug A）：接收方当前项目必须与发送方切换前项目一致才应用广播，
         防止 A 项目团队切项目误广播到 B 项目窗口。
+        #5a-fix Plan C：写入按 run_id 粒度的 projects_by_run_id[run_id]，
+        与 tab_panel 团队框分组维度对齐，避免多团队并存时互相覆盖。
         """
         if not getattr(self, "_team_agent_name", ""):
             return
@@ -18700,8 +18763,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 发送方切换前项目兜底：未显式传入时用当前 _current_project
         if prev_project is None:
             prev_project = getattr(self, "_current_project", "")
-        # 写团队级统一项目（team.json 顶层，与 run_id 平级）
-        tm_mgr.set_team_project(project)
+        # 写团队级统一项目：按 run_id 粒度（team.json["projects_by_run_id"][run_id]），
+        # team_name 仅用于定位 team.json 路径（默认 DEFAULT_TEAM）
+        run_id = getattr(self, "_team_run_id", "") or ""
+        team_name = getattr(self, "_team_name", "") or tm_mgr.DEFAULT_TEAM
+        if run_id:
+            tm_mgr.set_project_for_run_id(project, run_id, team_name=team_name)
+        else:
+            # 兜底：老窗口无 run_id 时回退到 team_name 粒度接口
+            tm_mgr.set_team_project(project, team_name=team_name)
         # 本窗口团队 key：run_id 优先（同一次 /team --load 共享），回退团队名
         my_key = getattr(self, "_team_run_id", "") or getattr(self, "_team_name", "") or TeamManager.DEFAULT_TEAM
         for win in type(self)._instances:

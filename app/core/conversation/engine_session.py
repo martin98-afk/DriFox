@@ -89,11 +89,19 @@ class EngineSessionImpl:
         backend: Any = None,
         hook_policy: Any = HookPolicy.NONE,
         permission_strategy: Any = PermissionStrategy.AUTO_ALLOW,
+        model_config_override: Optional[Dict[str, Any]] = None,
     ):
         self.engine_name = engine_name
-        self._get_model_config = get_model_config
         self._is_cancelled = False
         self._history: List[Dict[str, Any]] = []
+
+        # 模型配置覆盖：插件可强制关思考/降温度等（如象棋插件关掉 reasoning 提速）。
+        # 实时包裹 get_model_config，保留「模型切换后即时生效」语义，仅在顶层叠加。
+        if model_config_override:
+            base_get = get_model_config
+            override = dict(model_config_override)
+            get_model_config = lambda: {**base_get(), **override}
+        self._get_model_config = get_model_config
 
         if isinstance(hook_policy, str):
             hook_policy = _HOOK_POLICIES.get(hook_policy, HookPolicy.NONE)

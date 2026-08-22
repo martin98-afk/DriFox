@@ -1259,9 +1259,11 @@ class TabManagerWindow(QWidget):
     def _team_project_icon_data(window, fallback: str = "") -> tuple:
         """团队框 header 项目 icon 数据（缩写, 颜色）
 
-        数据源**必须为团队级 project**（TeamManager.get_team_project）：
-        多个成员窗口共享同一个团队框 header，读任一窗口自身项目会导致
-        展示不一致（review 检查点 1）。
+        数据源**必须为按 run_id 粒度的团队级 project**（TeamManager.
+        get_project_for_run_id）：tab_panel 团队框以 run_id（uuid）分组，
+        用旧 get_team_project(team_name=DEFAULT_TEAM) 会读到所有团队共享
+        的 DEFAULT_TEAM.project，导致多团队并存时 ``后建团队切项目 → 之前
+        团队框 header icon 被覆盖`` 的 bug（#5a-fix Plan C）。
 
         团队级 project 为空（团队尚未统一设置项目）时：回退 fallback 参数
         （调用方传入的"正在切换的目标项目"——广播后团队级即写入，两者一致）；
@@ -1270,7 +1272,10 @@ class TabManagerWindow(QWidget):
         try:
             from app.core.team_manager import TeamManager
 
-            project = TeamManager.get_instance().get_team_project()
+            tm = TeamManager.get_instance()
+            run_id = TabManagerWindow._resolve_tab_team_id(window)
+            team_name = getattr(window, "_team_name", "") or tm.DEFAULT_TEAM
+            project = tm.get_project_for_run_id(run_id, team_name=team_name) if run_id else ""
             if not project:
                 project = fallback
             if not project:

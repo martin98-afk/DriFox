@@ -93,7 +93,12 @@ class TestTeamWorkdirResetOnLoad:
         assert "_resolve_project_workdir" in body, "应读取源标签页工作目录作为团队工作目录"
 
     def test_residual_team_workdir_reset_on_load(self, fresh_tm):
-        """端到端回归：残留 team_workdir 在 /team --load 时被重置为源标签页 workdir。"""
+        """端到端回归：残留 team_workdir 在 /team --load 时被重置为源标签页 workdir。
+
+        #5a-fix Plan C：项目按 run_id 粒度存储（projects_by_run_id[run_id]），
+        不再写顶层 project 字段。残留的旧 team_project 仍保留，但本次新团队
+        按 new_run_id 写入新值——断言改为按 run_id 读取。
+        """
         # 模拟上次团队遗留的旧工作目录（例如曾切换过的 git worktree）
         fresh_tm.set_team_workdir("D:/stale/old-worktree")
         assert fresh_tm.get_team_workdir() == "D:/stale/old-worktree"
@@ -148,4 +153,17 @@ class TestTeamWorkdirResetOnLoad:
         assert fresh_tm.get_team_workdir() == src_workdir, (
             "新团队应继承源标签页工作目录，而非沿用上次构建残留的旧工作目录"
         )
-        assert fresh_tm.get_team_project() == "项目A", "项目也应重置为源标签页项目"
+        # #5a-fix Plan C：新团队按 run_id 写入 projects_by_run_id[run_id]，
+        # 旧 set_team_project("旧项目") 写顶层 project 字段保持不变（隔离）。
+        # 通过 mock 拦截到的 start_team_run 返回值找到新 run_id，按 run_id 读取新项目。
+        # fake_tm 是 Mock，start_team_run 默认返回 MagicMock；为端到端验证，这里
+        # 退化为通过 team.json 顶层 projects_by_run_id 字段长度判断（写入动作已发生）
+        # + 新项目确实落地（用临时 new_run_id 探测）。
+        team_data = fresh_tm._read_json(fresh_tm._team_file(fresh_tm.DEFAULT_TEAM))
+        mapping = team_data.get("projects_by_run_id") or {}
+        # 新 run_id（force=True 生成的 uuid4 hex）应写入 projects_by_run_id
+        assert len(mapping) >= 1, "新团队应按 run_id 写入 projects_by_run_id"
+        new_run_id, new_project = next(iter(mapping.items()))
+        assert new_project == "项目A", f"新团队项目应为源标签页项目，实际={new_project}"
+        # 旧团队残留项目不应丢失（隔离保护）
+        assert fresh_tm.get_team_project() == "旧项目", "旧团队残留顶层 project 字段不应丢失"
