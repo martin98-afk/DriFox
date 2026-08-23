@@ -229,6 +229,7 @@ class UIPluginRegistry:
             ("toolbar:input", TOOLBAR_BUTTON, "输入区工具栏按钮"),
             ("menu:message_card", MENU, "消息卡片右键菜单"),
             ("menu:tab", MENU, "Tab 标签右键菜单"),
+            ("menu:input_area", MENU, "输入框右键菜单"),
             ("settings:plugins", PANEL, "设置面板插件分区"),
         ]:
             self.declare_region(rid, kind, desc)

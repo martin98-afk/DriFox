@@ -111,6 +111,18 @@ def test_tab_panel_injection(qtbot, fresh_registry):
     assert calls and calls[0]["tab_index"] == 2
 
 
+# ---------- Phase E：input_area 右键菜单 ----------
+
+
+class TestInputAreaMenu:
+    def test_register_input_area_action(self, fresh_registry):
+        fresh_registry.register_context_menu_action(
+            "demo", "wrap-quote", target="input_area", label="引用选中内容", action_func=lambda ctx: True
+        )
+        actions = fresh_registry.get_context_actions("input_area")
+        assert len(actions) == 1 and actions[0].label == "引用选中内容"
+
+
 if __name__ == "__main__":
     import sys
 

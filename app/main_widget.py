@@ -4068,6 +4068,44 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[MainWidget] 输入区插件按钮 {info.button_id} 回调失败：{e}")
 
+    def _build_plugin_input_menu(self, menu) -> None:
+        """向输入框右键菜单追加插件项（Phase E：target=input_area）
+
+        context 约定：window_id / main_widget / selected_text
+        """
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            actions = UIPluginRegistry.get_instance().get_context_actions("input_area")
+        except Exception:
+            return
+        if not actions:
+            return
+        try:
+            cursor = self.input_area.textCursor()
+            selected_text = cursor.selectedText() if cursor.hasSelection() else ""
+        except Exception:
+            selected_text = ""
+        context = {
+            "window_id": getattr(self, "_window_id", None),
+            "main_widget": self,
+            "selected_text": selected_text,
+        }
+        first = True
+        for info in actions:
+            try:
+                if info.enabled_func is not None and not info.enabled_func(context):
+                    continue
+                if first:
+                    menu.addSeparator()
+                    first = False
+                if info.separator_before:
+                    menu.addSeparator()
+                act = menu.addAction(info.label)
+                act.triggered.connect(lambda checked=False, a=info: a.action_func(context))
+            except Exception as e:
+                logger.error(f"[MainWidget] 输入框菜单项 {info.action_id} 失败: {e}")
+
     def _build_plugin_input_buttons(self):
         """重建输入区插件按钮（Phase D + E 扩展点，幂等）
 
