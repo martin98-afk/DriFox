@@ -327,6 +327,19 @@ class CardManager:
             for cb in win_data["shown_callbacks"][card_id]:
                 cb(card_id)
 
+        # Phase E：发布卡片显隐事件
+        try:
+            from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(
+                EV_CARD_VISIBILITY_CHANGED,
+                card_id=card_id,
+                window_id=window_id,
+                visible=True,
+            )
+        except Exception:
+            pass
+
     def hide_card(self, card_id: str, window_id: str):
         """隐藏指定窗口的指定卡片"""
         if window_id not in self._window_data:
@@ -370,6 +383,19 @@ class CardManager:
         if card_id in win_data["hidden_callbacks"]:
             for cb in win_data["hidden_callbacks"][card_id]:
                 cb(card_id)
+
+        # Phase E：发布卡片显隐事件
+        try:
+            from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(
+                EV_CARD_VISIBILITY_CHANGED,
+                card_id=card_id,
+                window_id=window_id,
+                visible=False,
+            )
+        except Exception:
+            pass
 
     # ========== 兼容旧 API（使用默认窗口）==========
     # 这些方法保留用于向后兼容，但新代码应使用带 window_id 的版本

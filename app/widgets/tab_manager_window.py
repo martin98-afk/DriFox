@@ -1413,6 +1413,17 @@ class TabManagerWindow(QWidget):
                     UIPluginRegistry.get_instance().sync_floating_cards_to_tab(_wid)
             except Exception:
                 pass
+            # Phase E：发布 Tab 切换事件
+            try:
+                from app.core.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
+
+                UIEventBus.get_instance().publish(
+                    EV_TAB_SWITCHED,
+                    tab_index=index,
+                    window_id=_wid,
+                )
+            except Exception:
+                pass
             # 切换 tab 时同步宿主窗口标题
             self._sync_window_title()
             # 🆕 会话数据即时同步：切回窗口时历史卡片/欢迎卡片可能已过期
