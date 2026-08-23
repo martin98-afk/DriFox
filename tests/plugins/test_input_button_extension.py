@@ -151,8 +151,8 @@ def test_rebuild_idempotent(qtbot, widget, fresh_registry):
     buttons = [b for b in capsule.findChildren(QToolButton) if b.toolTip() == "按钮A"]
     assert len(buttons) == 1
 
-    # 清空注册 → 重建后消失
-    fresh_registry._input_buttons.clear()
+    # 清空注册 → 重建后消失（Phase E：注册表走 region 存储，用 unload_plugin 清理）
+    fresh_registry.unload_plugin("demo")
     widget._build_plugin_input_buttons()
     assert [b for b in capsule.findChildren(QToolButton) if b.toolTip() == "按钮A"] == []
 
@@ -176,6 +176,23 @@ def test_click_exception_safe(qtbot, widget, fresh_registry):
 
     btn = [b for b in widget._toolbar_capsule.findChildren(QToolButton) if b.toolTip() == "坏按钮"][0]
     btn.click()  # 不应抛异常
+
+
+# ---------- Phase E：position 位置插入 ----------
+
+
+class TestInputButtonPosition:
+    def test_default_position_end(self, fresh_registry):
+        fresh_registry.register_input_button("demo", "b1")
+        assert fresh_registry.get_input_buttons()[0].position == "end"
+
+    def test_position_passthrough(self, fresh_registry):
+        fresh_registry.register_input_button("demo", "b1", position="before:memory")
+        assert fresh_registry.get_input_buttons()[0].position == "before:memory"
+
+    def test_invalid_position_rejected(self, fresh_registry):
+        with pytest.raises(ValueError, match="position"):
+            fresh_registry.register_input_button("demo", "b1", position="middle")
 
 
 if __name__ == "__main__":

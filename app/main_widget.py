@@ -3623,6 +3623,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.memory_btn.setFixedSize(24, 24)
         self.memory_btn.setStyleSheet(btn_capsule_style)
         self.memory_btn.setToolTip("长期记忆")
+        self.memory_btn.setObjectName("memory")  # Phase E：插件按钮 position 锚点
         self.memory_btn.clicked.connect(self._show_soul_memory)
         capsule_layout.addWidget(self.memory_btn)
 
@@ -3631,6 +3632,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.history_btn.setFixedSize(24, 24)
         self.history_btn.setStyleSheet(btn_capsule_style)
         self.history_btn.setToolTip("历史会话")
+        self.history_btn.setObjectName("history")  # Phase E：插件按钮 position 锚点
         self.history_btn.clicked.connect(self._toggle_history_card)
         capsule_layout.addWidget(self.history_btn)
 
@@ -3639,6 +3641,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self.new_session_btn.setFixedSize(24, 24)
         self.new_session_btn.setStyleSheet(btn_capsule_style)
         self.new_session_btn.setToolTip("新建对话")
+        self.new_session_btn.setObjectName("new_session")  # Phase E：插件按钮 position 锚点
         self.new_session_btn.clicked.connect(self._create_new_session)
         capsule_layout.addWidget(self.new_session_btn)
 
@@ -4066,11 +4069,18 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.error(f"[MainWidget] 输入区插件按钮 {info.button_id} 回调失败：{e}")
 
     def _build_plugin_input_buttons(self):
-        """重建输入区插件按钮（Phase D 扩展点，幂等）
+        """重建输入区插件按钮（Phase D + E 扩展点，幂等）
 
         先清空本方法构建的按钮 + 分隔线，再按 UIPluginRegistry.get_input_buttons()
         重新构建；未注册任何按钮时不渲染任何东西（行为零变化）。
         热重载/卸载经 _on_plugin_hot_reload 触发重建。
+
+        Phase E：按 info.position 决定插入位置：
+        - "start"        插入 capsule_layout 首位
+        - "end"          默认：末尾追加（与分隔线一起）
+        - "before:<id>"  锚定到 objectName=<id> 的 widget 左侧
+        - "after:<id>"   锚定到 objectName=<id> 的 widget 右侧
+        锚点缺失降级末尾追加。
         """
         if not hasattr(self, "_toolbar_capsule"):
             return
@@ -4099,25 +4109,70 @@ class OpenAIChatToolWindow(ToolWindow):
             TransparentToolButton {{ background: transparent; border: none; }}
             TransparentToolButton:hover {{ background: {Colors.HOVER_BG_STRONG}; border-radius: 5px; }}
         """
-        # 分隔线：系统按钮与插件按钮区分
-        separator = QFrame(self._toolbar_capsule)
-        separator.setFrameShape(QFrame.VLine)
-        separator.setStyleSheet(f"color: {Colors.DIVIDER_COLOR};")
-        separator.setFixedHeight(16)
-        capsule_layout.addWidget(separator)
-        self._plugin_input_buttons.append(separator)
 
-        for info in buttons:
+        def _make_btn(info):
+            icon = self._resolve_input_button_icon(info)
+            btn = TransparentToolButton(icon, self._toolbar_capsule)
+            btn.setFixedSize(24, 24)
+            btn.setToolTip(info.tooltip or info.button_id)
+            btn.setStyleSheet(btn_capsule_style)
+            btn.setObjectName(info.button_id)  # 供其他插件锚点匹配
+            btn._plugin_input_info = info  # 供主题切换时刷新图标
+            btn.clicked.connect(lambda checked=False, i=info: self._on_plugin_input_button_clicked(i))
+            return btn
+
+        def _find_anchor_index(anchor_id: str) -> int:
+            """按 objectName 匹配 capsule_layout 中已存在的 widget 索引"""
+            for i in range(capsule_layout.count()):
+                w = capsule_layout.itemAt(i).widget()
+                if w is not None and w.objectName() == anchor_id:
+                    return i
+            return -1
+
+        # 按 position 分组：start / end / anchored (before/after)
+        start_buttons = [b for b in buttons if b.position == "start"]
+        end_buttons = [b for b in buttons if b.position == "end"]
+        anchored = [b for b in buttons if b.position not in ("start", "end")]
+
+        # 1) start：插入 capsule_layout 首位（按 priority desc）
+        for info in sorted(start_buttons, key=lambda b: -b.priority):
             try:
-                icon = self._resolve_input_button_icon(info)
-                btn = TransparentToolButton(icon, self._toolbar_capsule)
-                btn.setFixedSize(24, 24)
-                btn.setToolTip(info.tooltip or info.button_id)
-                btn.setStyleSheet(btn_capsule_style)
-                btn._plugin_input_info = info  # 供主题切换时刷新图标
-                btn.clicked.connect(lambda checked=False, i=info: self._on_plugin_input_button_clicked(i))
-                capsule_layout.addWidget(btn)
+                btn = _make_btn(info)
                 self._plugin_input_buttons.append(btn)
+                capsule_layout.insertWidget(0, btn)
+            except Exception as e:
+                logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 构建失败：{e}")
+
+        # 2) anchored：按 before/after 锚定到现有 widget
+        for info in sorted(anchored, key=lambda b: -b.priority):
+            try:
+                btn = _make_btn(info)
+                self._plugin_input_buttons.append(btn)
+                rel, _, anchor_id = info.position.partition(":")
+                idx = _find_anchor_index(anchor_id)
+                if idx < 0:
+                    capsule_layout.addWidget(btn)  # 锚点缺失降级末尾
+                elif rel == "before":
+                    capsule_layout.insertWidget(idx, btn)
+                else:  # after
+                    capsule_layout.insertWidget(idx + 1, btn)
+            except Exception as e:
+                logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 构建失败：{e}")
+
+        # 3) end：末尾追加（与分隔线一起）
+        if end_buttons or anchored:
+            # 分隔线：系统按钮与插件按钮区分
+            separator = QFrame(self._toolbar_capsule)
+            separator.setFrameShape(QFrame.VLine)
+            separator.setStyleSheet(f"color: {Colors.DIVIDER_COLOR};")
+            separator.setFixedHeight(16)
+            capsule_layout.addWidget(separator)
+            self._plugin_input_buttons.append(separator)
+        for info in sorted(end_buttons, key=lambda b: -b.priority):
+            try:
+                btn = _make_btn(info)
+                self._plugin_input_buttons.append(btn)
+                capsule_layout.addWidget(btn)
             except Exception as e:
                 logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 构建失败：{e}")
 

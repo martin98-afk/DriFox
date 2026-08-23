@@ -150,6 +150,7 @@ class InputButtonInfo:
     priority: int = 0
     on_click: Optional[Callable[[Dict[str, Any]], None]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    position: str = "end"  # "start" | "before:<id>" | "after:<id>" | "end"（默认追加末尾）
 
 
 @dataclass(frozen=True)
@@ -475,12 +476,23 @@ class UIPluginRegistry:
         priority: int = 0,
         on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        position: str = "end",
     ) -> None:
         """注册输入区插件按钮（Phase D）
 
         icon_path 为深色主题默认图标；icon_light_path 为浅色主题图标
         （可选，缺省时浅色主题回退 icon_path）。主题切换时主程序自动刷新。
+
+        position: "start" | "before:<button_id>" | "after:<button_id>" | "end"
+        （Phase E：允许插件声明按钮位置——锚定系统按钮 memory/history/new_session
+        或其他插件按钮 id；锚点缺失降级末尾追加）
         """
+        import re
+
+        if position not in ("start", "end") and not re.fullmatch(r"(before|after):[\w:-]+", position):
+            raise ValueError(
+                f"invalid position {position!r}: use 'start'/'end'/'before:<id>'/'after:<id>'"
+            )
         if metadata is None:
             metadata = {}
         info = InputButtonInfo(
@@ -493,6 +505,7 @@ class UIPluginRegistry:
             priority=priority,
             on_click=on_click,
             metadata=metadata,
+            position=position,
         )
         existing = self._input_buttons.get(button_id)
         if existing is not None and existing.priority > priority:
