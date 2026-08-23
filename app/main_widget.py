@@ -17207,18 +17207,33 @@ class OpenAIChatToolWindow(ToolWindow):
         elapsed = time.time() - self._current_tool_start_time if hasattr(self, "_current_tool_start_time") else 0
 
         # 支持 ToolResult 对象和 dict 格式的 result
+        # ⚠️ content 可能是 dict/list（如子智能体工具 subagent_para/subagent_status/dag
+        #    返回 ToolResult(True, content={"tasks":...})）。必须用 JSON 序列化，不能 str()——
+        #    str(dict) 产生 Python repr（单引号 + 真实换行），会被 _render_tool_block_content
+        #    的行锚定字段解析（^success:|^diff:|^echarts:|^tool_call_id:）误判边界，
+        #    并导致 _parse_subagent_task_ids 的 json.loads 失败。
+        #    与 tool_executor.py:459 的 hook 路径保持一致。
         if isinstance(result, dict):
             success = result.get("success", True)
             error_msg = result.get("error", "") or ""
-            content = (
-                error_msg
-                if not success
-                else (str(result.get("content", "")) if result.get("content") is not None else "")
-            )
+            raw_content = result.get("content", "")
         else:
             success = getattr(result, "success", True) if hasattr(result, "success") else True
             error_msg = str(getattr(result, "error", "") or "")
-            content = str(result) if result else ""
+            raw_content = getattr(result, "content", None) if hasattr(result, "content") else None
+
+        if not success and error_msg:
+            content = error_msg
+        elif raw_content is None:
+            content = ""
+        elif isinstance(raw_content, str):
+            content = raw_content
+        else:
+            # dict/list 等非字符串 content → 序列化为 JSON，避免 Python repr 破坏渲染
+            try:
+                content = json.dumps(raw_content).decode("utf-8", errors="replace")
+            except (TypeError, ValueError):
+                content = str(raw_content)
 
         # 统一处理工具完成状态
         # 字段驱动：任何工具结果携带 todos 字段 → 联动消息卡片内嵌任务列表
