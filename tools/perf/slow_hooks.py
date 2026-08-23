@@ -13,7 +13,7 @@ def set_sec(secs: float) -> None:
     _SEC = float(secs)
 
 
-def blocking_sleep(context: dict) -> str:
+def blocking_sleep(event, context) -> str:
     """python 注入型(add_output=True) 慢 hook：worker 线程 + UI QEventLoop 等待 → 计入 backend_create。"""
     print(f"[slow_hooks] blocking_sleep ENTER sec={_SEC} pid={os.getpid()}", file=sys.stderr, flush=True)
     t0 = time.perf_counter()
@@ -23,6 +23,6 @@ def blocking_sleep(context: dict) -> str:
     return f"blocking-sleep-done-{_SEC}s"
 
 
-def async_sleep(context: dict) -> str:
+def async_sleep(event, context) -> str:
     """python 非注入型(add_output=False) 慢 hook：后台异步不阻塞。"""
-    return blocking_sleep(context)
+    return blocking_sleep(event, context)

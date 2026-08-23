@@ -1627,16 +1627,29 @@ class HookManager:
         if not all_hooks:
             return []
 
-        # 分离 PROMPT 类型（必须同步执行，保持注入顺序）和其他类型（可并行）
+        # 分离同步阶段（PROMPT + PYTHON 注入型）和并行阶段（COMMAND/HTTP 等）
+        # PERF（团队加载 2026-08-23）：PYTHON 注入型 hook 是进程内快代码
+        # （系统 hook 契约：context 预取、函数仅格式化无 I/O），且调用方必须
+        # 等待结果注入——送全局 4-worker 池 + 50ms 轮询等待纯添开销
+        # （实测 0.16ms hook 等 50ms；5 窗并发 backend_create 375→2085ms）。
+        # 改在调用线程同步执行。非注入型 PYTHON 保持原路径（后台异步/线程池），
+        # W1 语义不变。注意：慢的第三方 PYTHON 注入型 hook 会同步阻塞调用线程
+        # ——其耗时本已计入调用方等待（注入型必须等），仅等待期 UI 响应性不同。
         n = len(all_hooks)
-        prompt_indices = [i for i in range(n) if all_hooks[i].type == HookType.PROMPT.value]
-        parallel_indices = [i for i in range(n) if all_hooks[i].type != HookType.PROMPT.value]
+        sync_indices = [
+            i
+            for i in range(n)
+            if all_hooks[i].type == HookType.PROMPT.value
+            or (all_hooks[i].type == HookType.PYTHON.value and all_hooks[i].add_output_to_context)
+        ]
+        sync_set = set(sync_indices)
+        parallel_indices = [i for i in range(n) if i not in sync_set]
 
         # 预分配结果列表，保持原始顺序
         results: List[Optional[HookExecutionResult]] = [None] * n
 
-        # Phase 2: PROMPT hook 同步执行（按顺序，输出需立即注入）
-        for idx in prompt_indices:
+        # Phase 2: 同步阶段 hook（PROMPT + PYTHON 注入型）按序执行，输出需立即注入
+        for idx in sync_indices:
             hook = all_hooks[idx]
             results[idx] = self._execute_hook(hook, context, trigger_async=False)
 
@@ -1759,20 +1772,33 @@ class HookManager:
 
         不阻塞 UI 事件处理，用户操作（缩放/滚动/输入）仍然响应。
         内置 5 分钟超时保护，防止挂起 hook 无限阻塞。
+
+        Perf（团队加载 2026-08-23）：原实现「先跑满 50ms QEventLoop 再查 done」
+        使 0.16ms 完成的 hook 也要白等 50ms（5 窗并发 → backend_create 375-2085ms）。
+        现改为：每轮先查 done（快路径，常见情况零等待直接返回），
+        轮询间隔 50ms→5ms，等待地板从 50ms 降到 ~5ms。
         """
         from PyQt5.QtCore import QEventLoop, QTimer
 
         pending = set(future_to_idx.keys())
-        check_interval = 50  # 每 50ms 检查一次
+        check_interval = 5  # 每 5ms 检查一次（原 50ms：等待地板 50ms，团队加载瓶颈）
         timeout_ms = 300_000  # 5 分钟总超时
         elapsed = 0
 
         while pending:
-            # 处理 Qt 事件 50ms，保持 UI 响应
-            loop = QEventLoop()
-            QTimer.singleShot(check_interval, loop.quit)
-            loop.exec_()
-            elapsed += check_interval
+            # 快路径：hook 往往已完成（常见情况），先查后等，避免整轮白等
+            done = {f for f in pending if f.done()}
+            if done:
+                for future in done:
+                    idx = future_to_idx[future]
+                    try:
+                        results[idx] = future.result()
+                    except Exception as e:
+                        logger.error(f"[HookManager] Parallel hook failed: {e}")
+                        results[idx] = HookExecutionResult(success=False, output=str(e))
+                pending -= done
+                if not pending:
+                    return
 
             # 超时保护：取消未完成 futures 并标记失败
             if elapsed >= timeout_ms:
@@ -1786,16 +1812,11 @@ class HookManager:
                 logger.warning("[HookManager] Parallel hook timeout, cancelled remaining futures")
                 break
 
-            # 检查哪些 future 已完成
-            done = {f for f in pending if f.done()}
-            for future in done:
-                idx = future_to_idx[future]
-                try:
-                    results[idx] = future.result()
-                except Exception as e:
-                    logger.error(f"[HookManager] Parallel hook failed: {e}")
-                    results[idx] = HookExecutionResult(success=False, output=str(e))
-            pending -= done
+            # 处理 Qt 事件 5ms，保持 UI 响应
+            loop = QEventLoop()
+            QTimer.singleShot(check_interval, loop.quit)
+            loop.exec_()
+            elapsed += check_interval
 
     @staticmethod
     def _can_async_execute(hook: "Hook") -> bool:

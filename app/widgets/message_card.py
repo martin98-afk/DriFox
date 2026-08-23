@@ -233,7 +233,7 @@ def _get_formatter_cached():
 
 # ======== 滚动行为常量 ========
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
-AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
+AUTO_SCROLL_THRESHOLD = 80  # "接近底部"判定阈值(px)：仅真接近底部才恢复自动跟随；过大会把用户阅读位置反复拉回底部
 
 
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
@@ -2270,9 +2270,10 @@ _STREAMING_DOCK_CSS = """
                 }
                 body.streaming-dock #content-placeholder {
                     order: 1;
-                    /* 坞态正文限高（6/10）：容器自身滚动，卡片总高稳定不随流式增长，
-                       工具区+todo 保持可见；流式结束归位后恢复自然高度 */
-                    max-height: 330px;
+                    /* 坞态正文限高：容器自身滚动，卡片总高稳定不随流式增长，
+                       工具区+todo 保持可见；流式结束归位后恢复自然高度。
+                       330→450 略微放宽，让流式长回复展示更多正文。 */
+                    max-height: 450px;
                     overflow-y: auto;
                     overflow-anchor: none;
                 }
@@ -2312,9 +2313,10 @@ _STREAMING_DOCK_JS = """
                         if (!_atBottom && _dockH > 0) {
                             document.body.scrollTop = document.body.scrollTop + _dockH;
                         }
-                        // 恢复完整高度后滚到底部，展示最新条目
+                        // 归位后滚到底部展示最新条目——仅当用户未在上方阅读时；
+                        // 用户上滚查看中则保持其位置（内容未更新，不打扰阅读）
                         var tc = document.getElementById('tool-content');
-                        if (tc) { tc._userScrolledUp = false; tc.scrollTop = tc.scrollHeight; }
+                        if (tc && !tc._userScrolledUp) { tc._progScroll = true; tc.scrollTop = tc.scrollHeight; }
                     } else if (on && !wasOn) {
                         // 顶部 → 坞态：正文上移，做对称补偿
                         if (!_atBottom && _dockH > 0) {
@@ -3481,7 +3483,9 @@ class CodeWebViewer(QWebEngineView):
                     padding: 0;
                 }}
                 body {{
-                    padding: 6px 14px 0 14px; 
+                    /* 右侧 8px = 14px 视觉边距 - 6px 常驻滚动轨道：轨道占位使
+                       内容右视觉边距比左侧多 6px，扣减后左右对称 */
+                    padding: 6px 8px 0 14px;
                     max-height: {self.MAX_HEIGHT}px;
                     /* 🛡️ 稳定性修复：滚动条轨道常驻，内容可用宽度恒定。
                        overflow-y:auto 时滚动条出现/消失会使内容宽度 ±6px 波动 →
@@ -3494,6 +3498,14 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 /* body 滚动轨道常驻但视觉隐形（覆盖全局 6px 滚动条样式的 track 底色） */
                 body::-webkit-scrollbar-track {{
+                    background: transparent;
+                }}
+                /* 内层滚动容器（工具区/任务列表/思考体/工具结果）轨道同样隐形：
+                   常驻轨道(scroll) + 右 padding 扣减 6px，消除滚动条带来的右侧加宽 */
+                #tool-content::-webkit-scrollbar-track,
+                #todo-content::-webkit-scrollbar-track,
+                .think-content::-webkit-scrollbar-track,
+                .result-content::-webkit-scrollbar-track {{
                     background: transparent;
                 }}
                 {scrollbar_css}
@@ -4016,7 +4028,8 @@ class CodeWebViewer(QWebEngineView):
                     animation: think-tip-sweep 2.5s ease-in-out infinite;
                 }}
                 .think-content {{
-                    padding: 8px 10px;
+                    /* 右 4px = 10px - 6px 滚动轨道：轨道常驻后内容宽度稳定，右侧视觉边距与左对称 */
+                    padding: 8px 4px 8px 10px;
                     border-top: 1px solid var(--border);
                     background: transparent;
                     color: var(--text-secondary) !important;
@@ -4025,7 +4038,7 @@ class CodeWebViewer(QWebEngineView):
                     font-family: '{font_family}', sans-serif;
                     line-height: 1.6;
                     max-height: 500px;
-                    overflow-y: auto;
+                    overflow-y: scroll;
                     transition: opacity 200ms ease;
                 }}
                 /* 思考内容加载骨架屏动画 */
@@ -4411,14 +4424,15 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {small_font_size}px;
                 }}
                 .result-content {{
-                    padding: 6px 12px 10px;
+                    /* 右 6px = 12px - 6px 滚动轨道：同 .think-content，右侧视觉边距与左对称 */
+                    padding: 6px 6px 10px 12px;
                     color: var(--text);
                     font-size: {tag_font_size}px;
                     line-height: 1.5;
                     word-break: break-word;
                     font-family: {mono_font};
                     max-height: 400px;
-                    overflow-y: auto;
+                    overflow-y: scroll;
                 }}
                 .result-empty {{
                     padding: 6px 12px 10px;
@@ -4610,12 +4624,14 @@ class CodeWebViewer(QWebEngineView):
                     /* 固定最大高度，超出时显示滚动条。
                        不设动态大小（不依赖 body 高度比例）。 */
                     max-height: 600px;
-                    overflow-y: auto;
+                    /* 轨道常驻：出现/消失切换不再使内容宽度 ±6px 波动；
+                       右 padding 扣减 6px，右侧视觉边距与左基本对称 */
+                    overflow-y: scroll;
                     overflow-anchor: none;  /* 禁用 scroll anchoring，防止浏览器在 reorganizeContent 后调整 scrollTop 覆盖 JS 设置的滚底位置 */
                     background: transparent;
                     border: none;
                     border-radius: 6px;
-                    padding: 2px 4px;
+                    padding: 2px 0 2px 4px;
                     /* 折叠过渡：高度 0 时禁用滚动，避免用户看到残留滚动条 */
                     transition: max-height 200ms ease, opacity 160ms ease;
                 }}
@@ -4672,11 +4688,11 @@ class CodeWebViewer(QWebEngineView):
                 #todo-content {{
                     position: relative;  /* 子项 offsetTop 相对本容器计算（in_progress 定位滚动依赖） */
                     max-height: 600px;
-                    overflow-y: auto;
+                    overflow-y: scroll;  /* 轨道常驻 + 右 padding 扣减：同 #tool-content */
                     overflow-anchor: none;
                     background: transparent;
                     border-radius: 6px;
-                    padding: 2px 4px;
+                    padding: 2px 0 2px 4px;
                 }}
                 .todo-item {{
                     display: flex;
@@ -5339,8 +5355,8 @@ class CodeWebViewer(QWebEngineView):
                         // （markdown 被缩短、块被删除），仍需刷新 header
                         toolSection.style.display = '';
                         _updateToolSectionHeader();
-                        // 坞态（流式中）：自动滚底显示最新活动
-                        if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom(true);
+                        // 坞态（流式中）：自动滚底显示最新活动（尊重用户上滚）
+                        if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
                         return;
                     }}
                     // ── [PERF v2] 单次扫描 blocks：posMap + thinkKeys + toolIds + thinkStreaming ──
@@ -5557,7 +5573,7 @@ class CodeWebViewer(QWebEngineView):
                     toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                     // 坞态（流式中）：新条目进入后自动滚底
-                    if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom(true);
+                    if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
                 }}
                 // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
                 // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
@@ -5799,6 +5815,11 @@ class CodeWebViewer(QWebEngineView):
                                 '<span class="todo-text">' + (t.content || '') + '</span></div>';
                     }}
                     window._todoCount = todos.length;
+                    // 重建前保存用户滚动状态：innerHTML 重建会把 scrollTop 归零，
+                    // 且归零触发的 scroll 事件会误置 _userScrolledUp（用 _progScroll 吞掉）
+                    var _wasUp = !!content._userScrolledUp;
+                    var _prevTop = content.scrollTop;
+                    content._progScroll = true;
                     content.innerHTML = html;
                     var progText = ' ' + done + '/' + todos.length + ' 完成';
                     window._todoProgressText = progText;
@@ -5810,11 +5831,18 @@ class CodeWebViewer(QWebEngineView):
                     // 始终保持第一个进行中任务可见（列表超出限高时滚动到可视区）
                     // 双 rAF：面板可能刚 display:''，等布局完成后再读 offsetTop/clientHeight。
                     // 手动设 scrollTop 只动本容器，不扰动祖先链（scrollIntoView 会连带滚 body/工具区）。
+                    // 用户上滚查看中 → 恢复原位置；未滚动 → 定位到进行中项
                     window._todoScrollToken = (window._todoScrollToken || 0) + 1;
                     var _tk = window._todoScrollToken;
                     requestAnimationFrame(function() {{
                         requestAnimationFrame(function() {{
                             if (_tk !== window._todoScrollToken) return;  // 已有更新，放弃旧滚动
+                            content._progScroll = true;
+                            if (_wasUp) {{
+                                var _maxT = Math.max(0, content.scrollHeight - content.clientHeight);
+                                content.scrollTop = Math.min(_prevTop, _maxT);
+                                return;
+                            }}
                             var act = content.querySelector('.todo-item[data-status="in_progress"]');
                             if (!act) return;
                             var target = act.offsetTop - (content.clientHeight - act.offsetHeight) / 2;
@@ -5827,23 +5855,34 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== 工具区（#tool-content）自动滚底 =====
                 // 当工具/思考区有新内容时，自动滚动到底部，让用户始终看到最新状态。
-                // force=true：跳过 _userScrolledUp 检查（用于 reorganizeContent 程序性更新）
-                function _scrollToolContentToBottom(force) {{
+                // 用户主动上滚后不再打扰（_userScrolledUp），滚回底部附近自动恢复跟随。
+                function _scrollToolContentToBottom() {{
                     var tc = document.getElementById('tool-content');
                     if (!tc) return;
                     // 用户主动向上滚动了工具区则不自动滚底
-                    if (tc._userScrolledUp && !force) return;
+                    if (tc._userScrolledUp) return;
+                    // 抑制本次程序滚底触发的 scroll 事件：异步 scroll 到达时
+                    // scrollHeight 可能已增长（流式新块加入），atBottom 误判 false
+                    // 会错误置位 _userScrolledUp 导致跟随中断。
+                    tc._progScroll = true;
                     tc.scrollTop = tc.scrollHeight;
-                    // ⚡ 修复：reorganizeContent 是程序性内容重组，不受旧 _userScrolledUp 影响，
-                    // 滚底后清除标志，防止异步 scroll 事件在下一轮渲染中误设标志。
-                    if (force) tc._userScrolledUp = false;
                 }}
                 // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
                 document.getElementById('tool-content')?.addEventListener('scroll', function() {{
                     var tc = this;
+                    // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
+                    if (tc._progScroll) {{ tc._progScroll = false; return; }}
                     var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
                     tc._userScrolledUp = !atBottom;
                     if (atBottom) tc._userScrolledUp = false;
+                }});
+                // 任务列表滚动跟踪：与工具区同款（程序滚动/重建不算用户行为）
+                document.getElementById('todo-content')?.addEventListener('scroll', function() {{
+                    var td = this;
+                    if (td._progScroll) {{ td._progScroll = false; return; }}
+                    var atBottom = Math.abs(td.scrollHeight - td.scrollTop - td.clientHeight) < 30;
+                    td._userScrolledUp = !atBottom;
+                    if (atBottom) td._userScrolledUp = false;
                 }});
                 {_STREAMING_DOCK_JS}
 

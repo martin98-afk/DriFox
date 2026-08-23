@@ -116,7 +116,7 @@ def register_slow(mode: str):
             "matcher": "#team_member",
             "hooks": [{
                 "id": "perf_blocking_py", "type": "python",
-                "function": "slow_hooks:blocking_sleep",
+                "function": ".slow_hooks:blocking_sleep",
                 "add_output_to_context": True,
                 "statusMessage": "慢python注入:", "timeout": 300,
             }],
@@ -153,7 +153,7 @@ def register_slow(mode: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mode", choices=["baseline", "slow_python", "slow_command"],
+    ap.add_argument("--mode", choices=["baseline", "slow_python", "slow_command", "all"],
                     default="baseline")
     ap.add_argument("--iters", type=int, default=5)
     args = ap.parse_args()
@@ -167,8 +167,24 @@ def main():
     )
     if args.mode in ("slow_python", "slow_command"):
         register_slow(args.mode)
+    elif args.mode == "all":
+        # 真实注册 system + 全部用户插件 hooks.json 里的 SessionStart，实测各自真实耗时
+        import glob as _glob
+        for hf in [str(SYS_HOOKS)] + _glob.glob(str(ROOT / ".drifox" / "plugins" / "*" / "hooks" / "hooks.json")):
+            try:
+                cfg = json.loads(Path(hf).read_text(encoding="utf-8"))
+                hm.register_hooks_from_json(Path(hf).parent.name, str(Path(hf).parent), cfg, hf)
+                print(f"[reg] {hf}", file=sys.stderr, flush=True)
+            except Exception as e:
+                print(f"[skip] {hf}: {e}", file=sys.stderr, flush=True)
 
     ctx = build_context()
+    if args.mode == "all":
+        print("=== SessionStart registered rules (after all registration) ===", file=sys.stderr, flush=True)
+        for ri, rule in enumerate(hm._hooks.get("SessionStart", [])):
+            for h in rule.hooks:
+                print(f"  rule#{ri} matcher={rule.matcher!r} id={h.id} type={h.type} "
+                      f"enabled={h.enabled} add_output={h.add_output_to_context}", file=sys.stderr, flush=True)
     iters = 1 if args.mode != "baseline" else args.iters
 
     walls = []
@@ -221,6 +237,12 @@ def main():
         "pool_ratio_pct": round(100.0 * pool_wait / wall_avg, 1) if wall_avg else 0.0,
         "per_hook": per_hook_list,
         "n_results": len(results),
+        "results_detail": [
+            {"success": getattr(r, "success", None),
+             "output": (getattr(r, "output", "") or "")[:200],
+             "status_message": getattr(r, "status_message", "")}
+            for r in results
+        ],
     }
     print("=== PERF SUMMARY ===")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
