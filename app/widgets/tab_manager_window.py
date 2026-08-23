@@ -216,6 +216,9 @@ class _DockSideWrapper(QWidget):
         """关联宿主 splitter：联动 setSizes 维持收起态"""
         self._splitter = splitter
         self._splitter_index = index
+        # 立即同步：默认两子均 hide → 立即压回 splitter 0 大小，
+        # 避免 addWidget 后 splitter 默认均分空间导致空白 handle 显示
+        self._sync()
 
     def eventFilter(self, obj, ev):
         if ev.type() in (QEvent.Show, QEvent.Hide):
