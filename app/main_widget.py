@@ -144,8 +144,6 @@ from app.widgets.cards.settings.base_settings_card import (
 )
 from app.widgets.cards.settings.project_selector_card import (
     ProjectSelectorCardContent,
-    _SquareAvatar,
-    extract_project_initials,
     get_project_color,
 )
 from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
@@ -2833,16 +2831,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # Phase F：注册 5 个系统 UI 模块（瘦版占位；插件可 register_ui_module override）
         _register_system_ui_modules()
 
-        # 标题栏分组分隔线（1px 竖线，用主题色 DIVIDER_COLOR）
-        def _make_vdivider() -> QFrame:
-            div = QFrame(self)
-            div.setFrameShape(QFrame.VLine)
-            div.setFixedHeight(18)
-            div.setFixedWidth(1)
-            Colors.refresh()
-            div.setStyleSheet(f"color: {Colors.DIVIDER_COLOR}; background: {Colors.DIVIDER_COLOR}; border: none;")
-            return div
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(1, 1, 1, 1)
         layout.setSpacing(0)
@@ -2876,142 +2864,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 桌宠显示开关的实时响应
         Settings.get_instance().pet_enabled.valueChanged.connect(self._on_pet_enabled_changed)
 
-        session_bar_layout = QHBoxLayout()
+        # ── 会话栏装配（Phase F：已迁移到 TitleBarModule，由 compose 驱动）──
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+        from app.widgets.ui_composition import compose
 
-        # ===== 项目+分支组合控件（一体感布局） =====
-        self._project_branch_container = QFrame(self)
-        self._project_branch_container.setObjectName("projectBranchContainer")
-        pb_layout = QHBoxLayout(self._project_branch_container)
-        pb_layout.setContentsMargins(8, 0, 8, 0)  # 左侧留出 padding，与标题编辑区保持间距
-        pb_layout.setSpacing(2)
-
-        # 项目方形 icon（缩写字母，flat design squircle 风格）
-        self._project_avatar = _SquareAvatar(
-            extract_project_initials(self._current_project), get_project_color(self._current_project), self, size=24
-        )
-        self._project_avatar.setCursor(Qt.PointingHandCursor)
-        self._project_avatar.mousePressEvent = self._on_project_label_clicked
-        self._project_avatar.setToolTip("点击切换项目")  # tooltip 在 _update_branch() 中动态更新（含项目名/路径/分支）
-        pb_layout.addWidget(self._project_avatar)
-
-        # 项目选择标签（隐藏，仅通过 avatar icon 展示项目缩写）
-        self._project_label = QLabel(self._current_project, self)
-        self._project_label.setCursor(Qt.PointingHandCursor)
-        self._project_label.mousePressEvent = self._on_project_label_clicked
-        self._project_label.setToolTip("点击切换项目")
-        self._project_label.setVisible(False)
-
-        # 分支分隔符（三角箭头，面包屑风格）
-        self._pb_separator = QLabel("▸", self)
-        self._pb_separator.setAlignment(Qt.AlignCenter)
-        self._pb_separator.setVisible(False)
-        pb_layout.addWidget(self._pb_separator)
-
-        # Git 分支标签
-        self._branch_widget = PushButton(text="main", parent=self)
-        self._branch_widget.setObjectName("_branchWidget")
-        self._branch_widget.clicked.connect(self._on_branch_label_clicked)
-        self._branch_widget.setToolTip("当前 Git 分支 — 点击打开关键文档")
-        self._branch_widget.setAutoDefault(False)  # 防止 QDialog 在 Enter 时误触发
-        self._branch_widget.setVisible(False)
-        self._refresh_branch_widget_style()
-        pb_layout.addWidget(self._branch_widget)
-
-        self._refresh_project_branch_style()
-        # 性能优化：复制/分支窗口直接从源窗口复制 git 分支标签状态，
-        # 跳过同步 git 子进程（最坏可达 3s），避免重复窗口出现卡顿
-        if getattr(self, "_is_duplicate_window", False) and getattr(self, "_source_window", None):
-            self._copy_branch_from(self._source_window)
-        else:
-            self._update_branch()
-
-        # 将组合控件加入布局
-        # 标题编辑（行内编辑模式）
-        self.title_edit = TitleEditWidget("新对话", self)
-        font_css = get_font_family_css()
-        Colors.refresh()
-        title_style = f"""QLabel {{
-            color: {Colors.TEXT_PRIMARY};
-            {font_size_css(15)}
-            font-weight: bold;
-            padding: 6px 4px;
-            border-radius: 10px;
-            background-color: transparent;
-            {font_css}
-        }}
-        QLabel:hover {{
-            background-color: {Colors.HOVER_BG};
-        }}
-        QLineEdit {{
-            color: {Colors.TEXT_PRIMARY};
-            {font_size_css(15)}
-            font-weight: bold;
-            padding: 6px 4px;
-            border-radius: 10px;
-            background-color: transparent;
-            border: none;
-            {font_css}
-        }}
-        QLineEdit:focus {{
-            background-color: {Colors.TOOLBAR_BG};
-            border: 1px solid {Colors.BORDER};
-        }}
-    """
-        self.title_edit.setStyleSheet(title_style)
-        self.title_edit.returnPressed.connect(self._on_title_edit_finished)
-        self.title_edit.editingFinished.connect(self._on_title_edit_finished)
-
-        session_bar_layout.addWidget(self._project_branch_container)
-
-        # 标题栏分组分隔线：[项目▸分支] │ [标题]
-        session_bar_layout.addWidget(_make_vdivider())
-
-        session_bar_layout.addWidget(self.title_edit, 1)  # 占据剩余空间
-
-        # 先创建余额/用量/上下文组件（稍后添加到底部工具栏，模型选择右侧）
-        self.balance_display = BalanceDisplay(self)
-        self.coding_plan_ring = CodingPlanRing(self)
-        # 圆环隐藏状态（ring 初始隐藏）：_on_coding_plan_result 据此判断
-        # 是否打"无数据"日志，避免多标签页下无数据广播刷屏
-        self._coding_plan_hidden = True
-        self.context_usage_ring = ContextUsageRing(self)
-
-        # 标题栏右侧：分享按钮 + 当前会话历史问题按钮（替代时间线节点）
-        right_layout = QHBoxLayout()
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(2)
-        right_layout.setAlignment(Qt.AlignVCenter)
-
-        # 历史问题按钮（点击弹窗显示当前会话所有用户提问，支持快速跳转）
-        self._history_questions_btn = TransparentToolButton(FluentIcon.MESSAGE, self)
-        self._history_questions_btn.setFixedSize(28, 28)
-        self._history_questions_btn.setToolTip("当前会话的用户提问历史")
-        self._history_questions_btn.clicked.connect(self._toggle_history_questions_popup)
-        right_layout.addWidget(self._history_questions_btn)
-        # 右上角 InfoBadge，显示用户问题总数（自动跟随按钮位置）
-        self._history_questions_badge = InfoBadge.attension(
-            0, parent=self, target=self._history_questions_btn, position=InfoBadgePosition.LEFT
-        )
-        self._history_questions_badge.setVisible(False)
-
-        # 分享按钮
-        self._share_btn = TransparentToolButton(FluentIcon.SHARE, self)
-        self._share_btn.setFixedSize(28, 28)
-        self._share_btn.setToolTip("分享当前对话")
-        self._share_btn.clicked.connect(self._on_share_clicked)
-        right_layout.addWidget(self._share_btn)
-
-        # 差异对比按钮（从右下移到右上）
-        self.diff_btn = TransparentToolButton(get_icon("差异对比"), self)
-        self.diff_btn.setFixedSize(28, 28)
-        self.diff_btn.setToolTip("会话级差异对比")
-        self.diff_btn.clicked.connect(self._open_diff_viewer)
-        right_layout.addWidget(self.diff_btn)
-
-        right_layout.addSpacing(8)  # 右侧留白
-
-        session_bar_layout.addLayout(right_layout)
-        layout.addLayout(session_bar_layout)
+        compose(host=self, module_ids=["title_bar"], root_layout_factory=lambda h: None)
 
         # 时间线节点不再显示为 UI 元素，但保留 widget 及其内部逻辑供历史问题弹窗使用
         self.node_preview = ConversationNodePreview(self)
@@ -3271,148 +3128,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
-        # ===== 底部输入区域（输入卡 + 工具栏紧贴拼接）=====
-        # 视觉目标：输入框 + toolbar 等宽，无间距，无外 padding，紧贴 chat 区。
-        #          上半圆角（输入卡） + 下半圆角（toolbar），中间一条边框线作分隔。
-        # 抖动修复：spacing 永久固定 0，不再随 collapsed 切换；toolbar y 位置
-        #          只取决于 _input_card 高度的单调变化，无"先下后上"中间帧。
-        self._bottom_input_container = QWidget(self)
-        self._bottom_input_container.setStyleSheet("QWidget#bottomContainer { background: transparent; }")
-        self._bottom_input_container.setObjectName("bottomContainer")
-        bottom_layout = QVBoxLayout(self._bottom_input_container)
-        self._bottom_input_layout = bottom_layout
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(0)
+        # ── 底部输入区域（Phase F 模块化：装配代码已迁 app/widgets/modules/input_card_module.py）──
+        from app.widgets.modules.input_card_module import InputCardModule
+        from app.widgets.ui_composition import compose
 
-        # ===== 输入卡片（上方圆角 + 渐变 + 边框，border-bottom: none）=====
-        self._input_card = QWidget(self._bottom_input_container)
-        self._input_card.setObjectName("_input_card")
-        self._input_card.setAcceptDrops(True)
-        self._input_card.installEventFilter(self)
-        card_layout = QVBoxLayout(self._input_card)
-        card_layout.setContentsMargins(2, 2, 2, 2)
-        card_layout.setSpacing(0)
-
-        # 输入卡环境光晕容器（包裹 _input_card，承载宽柔的外层环境光）
-        # 实现双层 halo：输入卡自身 = 紧致主光（primary），wrapper = 弥散环境光（ambient）
-        self._input_card_wrapper = QWidget(self._bottom_input_container)
-        self._input_card_wrapper.setObjectName("_input_card_wrapper")
-        self._input_card_wrapper.setAttribute(Qt.WA_TranslucentBackground, True)
-        wrapper_layout = QVBoxLayout(self._input_card_wrapper)
-        wrapper_layout.setContentsMargins(0, 0, 0, 0)
-        wrapper_layout.setSpacing(0)
-        # 把 _input_card 移入 wrapper
-        self._input_card.setParent(self._input_card_wrapper)
-        wrapper_layout.addWidget(self._input_card)
-
-        # 附件预览行（拖拽/粘贴文件时显示 AttachmentChip）
-        self._attach_container = QWidget(self._input_card)
-        self._attach_container.setVisible(False)
-        self._attach_container.setAcceptDrops(True)
-        self._attach_container.installEventFilter(self)
-        self._attach_layout = QHBoxLayout(self._attach_container)
-        self._attach_layout.setContentsMargins(6, 6, 6, 0)
-        self._attach_layout.setSpacing(3)
-        self._attach_layout.addStretch()
-        self._attachments: list[str] = []
-        self._history_working_attachments: list[str] = []  # 进入历史模式时保存的附件（退出时恢复）
-        card_layout.addWidget(self._attach_container)
-
-        # 输入框（融入卡片，无边框）
-        self.input_area = SendableTextEdit(self._input_card)
-        self.input_area._agent_combo.hide()
-        self.input_area._initializing = False
-        # self.input_area.setFixedHeight(52)
-        setFont(self.input_area, scale_font_size(15))
-        self.input_area.sendMessageRequested.connect(self._on_send_clicked)
-        self.input_area.stopMessageRequested.connect(self._on_stop_clicked)
-        self.input_area.clearRequested.connect(self._on_clear_shortcut)
-        self.input_area.agentChanged.connect(self._on_agent_changed)
-        # 注意：textChanged 已在 SendableTextEdit 内部连接 _on_text_changed
-        # 并触发 _adjust_height_to_content；这里不重复连接，避免一次输入
-        # 触发两次布局重算导致抖动。系统卡片开/关路径会显式调用
-        # _on_input_area_height_changed。
-        self.input_area.slashTriggered.connect(self._on_slash_triggered)
-        self.input_area.slashDismissed.connect(self._on_slash_dismissed)
-        self.input_area.slashShowHint.connect(self._on_slash_show_hint)
-        self.input_area.atTriggered.connect(self._on_at_triggered)
-        self.input_area.atDismissed.connect(self._on_at_dismissed)
-        self.input_area.files_dropped.connect(self._on_files_dropped)
-        self.input_area.enteringHistoryMode.connect(self._on_entering_history_mode)
-        self.input_area.historyAttachmentsRestored.connect(self._on_history_attachments_restored)
-        self.input_area.historyModeExited.connect(self._on_history_mode_exited)
-        # ★ 用户输入时通知桌宠好奇看向输入框
-        self.input_area.textChanged.connect(self._on_pet_typing)
-        card_layout.addWidget(self.input_area)
-
-        # 加载输入历史
-        self._load_input_history()
-
-        # 命令卡片（必须是输入框创建后）
-        self._command_card = CommandCard(self._bottom_input_container)
-        self._command_card.setVisible(False)
-        self.input_area.set_command_card(self._command_card)
-        mgr = self._card_manager
-        # 命令卡片压制 tool、sub_agent 和 sub_agent_compact
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "command",
-            self._command_card,
-            suppress_others=["tool", "sub_agent", "sub_agent_compact"],
-        )
-        self._bottom_card_container.add_card("command", self._command_card)
-
-        # 文件提及卡片（输入 @ 时显示文件列表）
-        self._file_mention_card = FileMentionCard(self._bottom_input_container)
-        self._file_mention_card.setVisible(False)
-        self.input_area.set_file_mention_card(self._file_mention_card)
-        self._file_mention_card.fileSelected.connect(self._on_file_mention_selected)
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "file_mention",
-            self._file_mention_card,
-        )
-        self._bottom_card_container.add_card("file_mention", self._file_mention_card)
-
-        # 预缓存文件列表：延迟到事件循环空闲后执行，不阻塞 UI 初始化
-        QTimer.singleShot(200, self._ensure_file_mention_cache)
-
-        # 撤销删除卡片
-        self._undo_delete_card = UndoDeleteCard(self._bottom_input_container)
-        self._undo_delete_card.setVisible(False)
-        self._undo_delete_card.restoreRequested.connect(self._restore_deleted_message)
-        self._undo_delete_card.dismissed.connect(self._on_undo_delete_dismissed)
-        mgr.register_card(self._window_id, ContainerType.BOTTOM, "undo_delete", self._undo_delete_card)
-        self._bottom_card_container.add_card("undo_delete", self._undo_delete_card)
-
-        # 初始化撤销删除缓存（只缓存一步）
-        self._undo_delete_cache = {}
-
-        # 🛡️ Bug 修复：截断哨兵 — 记录最近一次 session 截断的关键信息，
-        # 用于在异步 finalize_stop / messages_updated 回调到达时识别"是否发生了截断"
-        # 结构：{"session_id": str, "messages_len": int, "set_at": float} 或 None
-        # 时机：撤销/删除消息触发的 _persist_session_after_mutation 末尾设置；
-        #       _on_finalize_complete 在覆盖 session.messages 前检查；
-        #       若 worker 返回的消息序列比截断后的当前序列长，且不是其前缀，则丢弃覆盖。
-        self._truncation_sentinel = None
-
-        # 🛡️ 截断后发送标志：用户撤销消息后又快速发送新消息时置 True，
-        # 用于 _on_finalize_complete / _on_messages_updated 识别并丢弃旧 worker 的过期回调。
-        self._pending_send_after_truncation = False
-        self._pending_send_user_text = None  # 截断后发送的用户消息文本（用于指纹比对）
-
-        # （内置命令已在上方注册）更新命令 --model= 参数描述
-        self._update_subagents_param_description()
-        self._update_title_gen_param_description()
-
-        # 监听配置变更，配置同步时自动刷新命令卡参数描述和 UI
-        from app.utils.config import Settings as _Cfg
-
-        _cfg = _Cfg.get_instance()
-        _cfg.llm_subagent_default_model.valueChanged.connect(self._on_subagent_model_config_changed)
-        _cfg.llm_title_gen_default_model.valueChanged.connect(self._on_title_gen_model_config_changed)
+        compose(host=self, module_ids=["input_card"], root_layout_factory=lambda h: None)
 
         # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
         # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
