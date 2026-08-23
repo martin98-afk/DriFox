@@ -543,9 +543,7 @@ class UIPluginRegistry:
         import re
 
         if position not in ("start", "end") and not re.fullmatch(r"(before|after):[\w:-]+", position):
-            raise ValueError(
-                f"invalid position {position!r}: use 'start'/'end'/'before:<id>'/'after:<id>'"
-            )
+            raise ValueError(f"invalid position {position!r}: use 'start'/'end'/'before:<id>'/'after:<id>'")
         if metadata is None:
             metadata = {}
         info = InputButtonInfo(
@@ -565,7 +563,9 @@ class UIPluginRegistry:
             return
         self._input_buttons[button_id] = info
         # 写入 region 存储（Phase E 单源化）
-        self.register_slot_entry("toolbar:input", button_id, plugin_name, priority=priority, payload=info, metadata=metadata)
+        self.register_slot_entry(
+            "toolbar:input", button_id, plugin_name, priority=priority, payload=info, metadata=metadata
+        )
 
     def get_input_buttons(self) -> List[InputButtonInfo]:
         """获取全部输入区插件按钮（priority 降序 → 注册序）
@@ -605,16 +605,16 @@ class UIPluginRegistry:
             return
         self._context_actions[key] = info
         # 写入 region 存储（Phase E 单源化）：按 menu:<target> 分区
-        self.register_slot_entry(f"menu:{target}", action_id, plugin_name, priority=priority, payload=info, metadata=metadata)
+        self.register_slot_entry(
+            f"menu:{target}", action_id, plugin_name, priority=priority, payload=info, metadata=metadata
+        )
 
     def get_context_actions(self, target: str) -> List[ContextMenuActionInfo]:
         """获取指定 target 的菜单插件项（priority 降序 → 注册序；separator_before 为渲染标记）
 
         数据源：region 存储（Phase E 单源化）。target 开放：宿主声明新 menu:<target> 区域即可消费。"""
         return [
-            e.payload
-            for e in self.get_region_entries(f"menu:{target}")
-            if isinstance(e.payload, ContextMenuActionInfo)
+            e.payload for e in self.get_region_entries(f"menu:{target}") if isinstance(e.payload, ContextMenuActionInfo)
         ]
 
     def register_settings_card(
@@ -670,11 +670,7 @@ class UIPluginRegistry:
         for region_id, region in self._regions.items():
             if not region_id.startswith("settings:"):
                 continue
-            infos.extend(
-                e.payload
-                for e in region["entries"].values()
-                if isinstance(e.payload, SettingsCardInfo)
-            )
+            infos.extend(e.payload for e in region["entries"].values() if isinstance(e.payload, SettingsCardInfo))
         infos.sort(key=lambda i: -i.priority)
         return infos
 
@@ -1282,9 +1278,7 @@ class UIPluginRegistry:
             or any(v.plugin_name == plugin_name for v in self._settings_cards.values())
             or any(v.plugin_name == plugin_name for v in self._workspace_pages.values())
             or any(
-                e.plugin_name == plugin_name
-                for region in self._regions.values()
-                for e in region["entries"].values()
+                e.plugin_name == plugin_name for region in self._regions.values() for e in region["entries"].values()
             )
             or any(name == plugin_name for impls in self._ui_modules.values() for name, _p, _f in impls)
         )
@@ -1433,12 +1427,18 @@ class UIPluginRegistry:
         from loguru import logger
 
         total = len(self._window_main_widgets)
+        skipped_no_method = 0
         skipped_no_cache = 0
         invalidated = 0
         rescheduled = 0
         for mw in list(self._window_main_widgets.values()):
             try:
                 if not hasattr(mw, "_invalidate_welcome_card"):
+                    skipped_no_method += 1
+                    logger.debug(
+                        f"[UIPluginRegistry] _refresh_welcome_cards: window={getattr(mw, '_window_id', '?')} "
+                        f"缺 _invalidate_welcome_card 方法，跳过"
+                    )
                     continue
                 window_id = getattr(mw, "_window_id", None)
                 cache = getattr(mw, "_welcome_card_cache", {})
@@ -1463,7 +1463,8 @@ class UIPluginRegistry:
                 logger.warning(f"[UIPluginRegistry] _refresh_welcome_cards: window={wid} 处理失败: {e}")
         logger.debug(
             f"[UIPluginRegistry] _refresh_welcome_cards: total={total} "
-            f"skipped_no_cache={skipped_no_cache} invalidated={invalidated} rescheduled={rescheduled}"
+            f"skipped_no_method={skipped_no_method} skipped_no_cache={skipped_no_cache} "
+            f"invalidated={invalidated} rescheduled={rescheduled}"
         )
 
     def _remove_widget_from_container(self, window_id: str, card_id: str, widget) -> None:

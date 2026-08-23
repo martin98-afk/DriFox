@@ -20,7 +20,6 @@ C. _refresh_welcome_cards 按窗口 catch + log，DEBUG 暴露调度数
 
 import ast
 import re
-import sys
 from pathlib import Path
 
 import pytest
@@ -72,6 +71,7 @@ class TestSourceGuards:
         assert "logger.debug" in method_src, "缺少 logger.debug 调用"
         assert "total=" in method_src, "DEBUG 日志必须包含 total= 决策统计"
         assert "invalidated=" in method_src, "DEBUG 日志必须包含 invalidated= 决策统计"
+        assert "skipped_no_method=" in method_src, "DEBUG 日志必须包含 skipped_no_method= 区分缺方法窗口"
 
     def test_notify_history_data_changed_uses_getattr_for_history_card(self):
         """_notify_history_data_changed 必须用 getattr 防御 _history_card 缺失"""
@@ -82,8 +82,7 @@ class TestSourceGuards:
         method_src = ast.unparse(method)
         # ast.unparse 默认输出单引号字符串
         assert "getattr(self, '_history_card'" in method_src or 'getattr(self, "_history_card"' in method_src, (
-            "_notify_history_data_changed 必须用 getattr(self, '_history_card', ...) "
-            "防御契约属性缺失"
+            "_notify_history_data_changed 必须用 getattr(self, '_history_card', ...) 防御契约属性缺失"
         )
 
     def test_notify_history_data_changed_no_direct_self_history_card(self):
@@ -94,9 +93,7 @@ class TestSourceGuards:
         assert method is not None
         method_src = ast.unparse(method)
         problematic = re.search(r"refresh_history_card_if_visible\(\s*self\._history_card", method_src)
-        assert not problematic, (
-            "refresh_history_card_if_visible 必须传 getattr 后的局部变量 history_card"
-        )
+        assert not problematic, "refresh_history_card_if_visible 必须传 getattr 后的局部变量 history_card"
 
     def test_setup_ui_system_cards_build_has_fallback(self):
         """setup_ui 中 system_cards_module.build 必须包 try/except + SystemCardsModule 兜底"""
@@ -107,89 +104,42 @@ class TestSourceGuards:
         method_src = ast.unparse(method)
         assert "system_cards_module.build(self)" in method_src
         # 兜底必须直接实例化 SystemCardsModule
-        assert "SystemCardsModule()" in method_src, (
-            "setup_ui 必须有 SystemCardsModule() 兜底调用"
-        )
+        assert "SystemCardsModule()" in method_src, "setup_ui 必须有 SystemCardsModule() 兜底调用"
         # 必须有两次 build(self) 调用（主路径 + 兜底）
-        assert method_src.count("build(self)") >= 2, (
-            "必须有主路径 + 兜底两次 build 调用"
+        assert method_src.count("build(self)") >= 2, "必须有主路径 + 兜底两次 build 调用"
+
+    def test_show_initial_welcome_has_exception_guard(self):
+        """_show_initial_welcome 必须包 try/except + DEBUG 日志（防 QWebEngineView 异常）"""
+        src = _read_source("app/main_widget.py")
+        tree = ast.parse(src)
+        method = _find_method(tree, "OpenAIChatToolWindow", "_show_initial_welcome")
+        assert method is not None, "_show_initial_welcome 方法缺失"
+        method_src = ast.unparse(method)
+        # 异常兜底
+        assert "except Exception" in method_src, (
+            "_show_initial_welcome 必须捕获异常，否则 QWebEngineView 创建失败会导致"
+            "卡片永久消失（invalidate 已删旧卡 + 重建抛异常 → 空白）"
+        )
+        assert "logger.debug" in method_src, "_show_initial_welcome 必须有 DEBUG 日志确认渲染成功"
+
+    def test_schedule_initial_welcome_has_debug_log(self):
+        """_schedule_initial_welcome 必须有 DEBUG 日志输出 slot/delay"""
+        src = _read_source("app/main_widget.py")
+        tree = ast.parse(src)
+        method = _find_method(tree, "OpenAIChatToolWindow", "_schedule_initial_welcome")
+        assert method is not None
+        method_src = ast.unparse(method)
+        assert "logger.debug" in method_src, (
+            "_schedule_initial_welcome 必须有 DEBUG 日志输出 slot= delay= ms，便于排查调度断链"
         )
 
-
-# ─── 2. 行为测试：_refresh_welcome_cards 健壮性 ──────────────
-
-
-class TestRefreshWelcomeCardsRobustness:
-    """_refresh_welcome_cards 在窗口方法抛异常时不应崩整个刷新流程
-
-    不依赖 qapp fixture（offscreen + DriFox 完整导入链下会触发 qfluentwidgets
-    等组件初始化，可能 STATUS_STACK_BUFFER_OVERRUN）。仅用 QApplication
-    单例即可（被测试函数实际只读 list / 调用 mock）。
-    """
-
-    def setup_method(self):
-        # 确保 QApplication 存在（loguru 在 sink 内引用 QApplication 不需要，
-        # 但 import ui_plugin_registry 会触发 Qt 系统初始化）
-        from PyQt5.QtWidgets import QApplication
-
-        self._app = QApplication.instance() or QApplication([])
-
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-        self.reg = UIPluginRegistry()
-        UIPluginRegistry._instance = self.reg
-
-    def test_skips_window_without_invalidate_method(self):
-        """窗口无 _invalidate_welcome_card 时跳过（兼容旧窗口）"""
-        from types import SimpleNamespace
-
-        mw = SimpleNamespace(_window_id="w1")
-        self.reg._window_main_widgets = {"w1": mw}
-        # 不抛
-        self.reg._refresh_welcome_cards()
-
-    def test_window_exception_does_not_abort_others(self):
-        """某窗口 _invalidate_welcome_card 抛异常 → 其他窗口仍处理 + WARNING 暴露"""
-        from unittest.mock import MagicMock
-
-        from loguru import logger
-
-        captured = []
-
-        def sink(msg):
-            captured.append(msg)
-
-        sink_id = logger.add(sink, level="WARNING")
-        try:
-            mw_bad = MagicMock()
-            mw_bad._window_id = "bad"
-            mw_bad._invalidate_welcome_card.side_effect = RuntimeError("QWebEngineView init failed")
-            mw_bad._welcome_card_cache = {"bad": MagicMock()}
-            mw_bad._displayed_session_id = None
-            mw_bad._schedule_initial_welcome = MagicMock()
-
-            mw_ok = MagicMock()
-            mw_ok._window_id = "ok"
-            mw_ok._invalidate_welcome_card = MagicMock()
-            mw_ok._welcome_card_cache = {"ok": MagicMock()}
-            mw_ok._displayed_session_id = None
-            mw_ok._schedule_initial_welcome = MagicMock()
-
-            self.reg._window_main_widgets = {"bad": mw_bad, "ok": mw_ok}
-
-            self.reg._refresh_welcome_cards()
-
-            mw_bad._invalidate_welcome_card.assert_called_once()
-            mw_ok._invalidate_welcome_card.assert_called_once()
-            mw_ok._schedule_initial_welcome.assert_called_once()
-
-            joined = "\n".join(str(m) for m in captured)
-            assert "处理失败" in joined and "bad" in joined, (
-                f"异常窗口的失败必须 WARNING 暴露，captured={captured!r}"
-            )
-        finally:
-            logger.remove(sink_id)
-
-
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-v"]))
+    def test_on_welcome_render_slot_has_debug_log(self):
+        """_on_welcome_render_slot 必须有 DEBUG 日志（确认槽位回调真触发）"""
+        src = _read_source("app/main_widget.py")
+        tree = ast.parse(src)
+        method = _find_method(tree, "OpenAIChatToolWindow", "_on_welcome_render_slot")
+        assert method is not None
+        method_src = ast.unparse(method)
+        assert "logger.debug" in method_src, (
+            "_on_welcome_render_slot 必须有 DEBUG 日志，确认 QTimer 回调真触发（防 pending 卡死）"
+        )

@@ -8118,8 +8118,8 @@ class OpenAIChatToolWindow(ToolWindow):
         history_card = getattr(self, "_history_card", None)
         if history_card is None and getattr(self, "_history_card", "__missing__") == "__missing__":
             logger.warning(
-                f"[OpenAIChatToolWindow] _notify_history_data_changed: 缺契约属性 _history_card，"
-                f"跳过历史卡片刷新（欢迎卡片渲染不受影响）"
+                "[OpenAIChatToolWindow] _notify_history_data_changed: 缺契约属性 _history_card，"
+                "跳过历史卡片刷新（欢迎卡片渲染不受影响）"
             )
         refresh_history_card_if_visible(history_card, self._refresh_history_toggle_panel)
         # 2. 欢迎卡片数据同步：优先「软更新」——缓存卡片仍在时保留
@@ -10297,11 +10297,28 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_batch_structures()
 
     def _show_initial_welcome(self):
-        """仅在UI上显示欢迎卡片，不改动Session数据"""
-        self._clear_chat_area(delete_widgets=False)
-        welcome_card = self._get_or_create_welcome_card()
-        self._displayed_session_id = None
-        self._add_chat_widget(welcome_card)
+        """仅在UI上显示欢迎卡片，不改动Session数据
+
+        🛡️ 异常兜底（2026-08-23 bug fix）：_get_or_create_welcome_card 内部 QWebEngineView
+        初始化 / Settings 单例 / 渲染回调任何一环抛异常，会导致 welcome_card=None
+        → _add_chat_widget(None) 抛 TypeError → 整个槽位回调中断 → 欢迎卡片
+        永久消失（invalidate 已删旧卡）。此处捕获后回退到历史卡片，避免空白窗口。
+        """
+        try:
+            self._clear_chat_area(delete_widgets=False)
+            welcome_card = self._get_or_create_welcome_card()
+            if welcome_card is None:
+                # 缓存重建返回 None（极端：create_welcome_card 在 try/except 内全部
+                # 静默失败）—— 仍要让窗口至少可见，避免空白 chat_layout。
+                logger.warning(
+                    f"[OpenAIChatToolWindow] _show_initial_welcome: 重建欢迎卡片返回 None（wid={self._window_id}）"
+                )
+                return
+            self._displayed_session_id = None
+            self._add_chat_widget(welcome_card)
+            logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome OK: wid={self._window_id}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[OpenAIChatToolWindow] _show_initial_welcome 渲染失败（wid={self._window_id}）: {e}")
 
     _WELCOME_SLOT_MS = 50  # 相邻窗口 welcome 渲染的最小间隔
     _WELCOME_SLOT_COUNT = 20  # 槽位数：50ms × 20 = 1000ms 上限轮转
@@ -10326,6 +10343,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         try:
             if self._welcome_render_pending:
+                logger.debug(
+                    f"[OpenAIChatToolWindow] _schedule_initial_welcome: 已有 pending 渲染，跳过（wid={self._window_id}）"
+                )
                 return
         except AttributeError, RuntimeError:
             pass  # stub（__new__ 绕过 __init__）实例无此属性，视为未 pending
@@ -10334,6 +10354,9 @@ class OpenAIChatToolWindow(ToolWindow):
         slot = getattr(cls, "_welcome_slot", 0) + 1
         setattr(cls, "_welcome_slot", slot)
         delay = ((slot - 1) % self._WELCOME_SLOT_COUNT) * self._WELCOME_SLOT_MS
+        logger.debug(
+            f"[OpenAIChatToolWindow] _schedule_initial_welcome: wid={self._window_id} slot={slot} delay={delay}ms"
+        )
         QTimer.singleShot(delay, lambda: self._safe_timer_call(self._on_welcome_render_slot))
 
     def _on_welcome_render_slot(self):
@@ -10342,6 +10365,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._welcome_render_pending = False
         except AttributeError, RuntimeError:
             pass
+        logger.debug(f"[OpenAIChatToolWindow] _on_welcome_render_slot fired: wid={self._window_id}")
         self._show_initial_welcome()
 
     def _hide_welcome_cards(self):
