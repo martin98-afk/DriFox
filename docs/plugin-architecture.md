@@ -468,12 +468,20 @@ UI 更新经 Qt 信号转发。
 | team_templates/ | `plugins/*/team_templates/*.yaml` | TeamManager + `app/core/team/template_manager.py` | `get_template` 查询 | 懒加载 |
 | engines/ | `plugins/*/engines/*.py`（必须暴露 register(registry)） | EngineRegistry（`app/plugins/registries/engine_registry.py`） | `runtime_component_loader._make_engine_loader` + `ensure_engine_watcher`；backend `create_engine_for_slot("ui", ChatEngine, ...)` 工厂化创建；替换类必须 `isinstance(ChatEngine)` 安全网回退内置 | `runtime_component_loader` watcher 轮询 → `builtin_reloaders._reload_engines` 精准卸载/重载单插件 |
 
-**UI 插件的 4 类扩展点（T2 实测 `ui/__init__.py` 内 register_ui 用法）**：
+**UI 插件的扩展点（4 类原始 + 三期扩展）**：
 
-1. `register_floating_card(plugin_name, card_id, widget_class, container, title, ...)` → 自动注册 `/card_id` 命令（用户插件加 `plugin_name:` 前缀）；container ∈ top/bottom/left/right/full；挂 Tab 级四向容器（`app/widgets/cards/card_manager.py` ContainerType）；向卡片注入 set_context_provider / set_context 上下文。**Tab 模式下卡片 widget 单实例挂全局容器，但可见状态按标签页隔离**：registry 维护 per-tab 可见集合（`_tab_card_visibility`），切标签时由 `TabManagerWindow._on_tab_selected → sync_floating_cards_to_tab` 投影 show/hide（走 CardManager 标准路径，互斥/容器展开/覆盖层切换自动生效）——一个标签页打开 full 覆盖卡不再影响其他标签页的对话区。
+**原始 4 类（T2 实测 `ui/__init__.py` 内 register_ui 用法）**：
+
+1. `register_floating_card(plugin_name, card_id, widget_class, container, title, ...)` → 自动注册 `/card_id` 命令（用户插件加 `plugin_name:` 前缀）；container ∈ top/bottom/left/right/full；挂 Tab 级四向容器（`app/widgets/cards/card_manager.py` ContainerType）；向卡片注入 set_context_provider / set_context 上下文。**Tab 模式下卡片 widget 单实例挂全局容器，但可见状态按标签页隔离**：registry 维护 per-tab 可见集合（`_tab_card_visibility`），切标签时由 `TabManagerWindow._on_tab_selected → sync_floating_cards_to_tab` 投影 show/hide（走 CardManager 标准路径，互斥/容器展开/覆盖层切换自动生效）——一个标签页打开 full 覆盖卡不再影响其他标签页的对话区。**三期扩展**：LEFT/RIGHT 容器支持多卡堆叠（声明 `metadata={"stack": True}`，使用 Pivot 切换），TOP/BOTTOM 系统卡互斥逻辑零改动。详见 [`docs/plugins/ui-workspace.md`](./plugins/ui-workspace.md)。
 2. `register_content_renderer(plugin_name, type_name, render_func)` → `app/core/message_content.py` 遇 custom_type 内容块时查表渲染 HTML。
 3. `register_message_factory(plugin_name, name, condition_func, factory_func)` → `app/main_widget.py::_create_message_widget` 按 priority 尝试构造 widget。
 4. `register_welcome_tab(plugin_name, mode_key, label, render_func)` → `app/widgets/message_card.py` 欢迎卡片 tabs；加载/卸载后 debounce 刷新。
+
+**三期新增（Phase G）**：
+
+5. `register_workspace_page(plugin_name, page_id, title, widget_class, ...)` → 插件注册完整主页面（非对话形态），挂载到 `TabManagerWindow._content_area`（QStackedWidget）+ 自动注册侧边栏入口 + `/<plugin_name>:<page_id>` FUNCTION 命令直达。懒创建、卸载清理。详见 [`docs/plugins/ui-workspace.md`](./plugins/ui-workspace.md)。
+
+**三层灵活性模型**：条目级（Phase E：SlotEntry）/ 模块级（Phase F：UIModule）/ 页面级（Phase G：WorkspacePage）。
 
 **插件目录三类优先级（T2 实测）**：`plugins/system/`（system）< `~/.claude/`（claude）< `<app_data>/plugins/`（user），同名用户覆盖系统。
 
