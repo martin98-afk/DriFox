@@ -222,6 +222,9 @@ class UIPluginRegistry:
         # 通用区域挂载模型（Phase E）：宿主声明区域 → 插件挂载条目
         # 结构 {region_id: {"kind": str, "entries": {entry_id: SlotEntry}}}
         self._regions: Dict[str, Dict[str, Any]] = {}
+        # UI 模块槽（Phase F）：{module_id: [(plugin_name, priority, factory), ...]}
+        # 多实现并存（system + 多个插件 override），胜者 = max(priority)
+        self._ui_modules: Dict[str, list] = {}
         # 主程序内置区域（宿主在窗口装配时也可再声明，幂等）
         from app.plugins.contracts.ui_slots import CONTENT, LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
 
@@ -688,6 +691,41 @@ class UIPluginRegistry:
         if region is None:
             return None
         return region["entries"].get(entry_id)
+
+    # ── Phase F：UIModule 模块槽 ──
+
+    SYSTEM_MODULE_PRIORITY = 0  # 系统模块基线；插件覆盖须 >= 100
+
+    def register_ui_module(
+        self,
+        module_id: str,
+        factory,
+        plugin_name: str = "system",
+        priority: int = 0,
+    ) -> None:
+        """注册 UI 模块实现（factory 延迟构造；多实现并存，胜者=最高 priority）
+
+        Args:
+            module_id: 模块槽 ID（与 UIModule.module_id 一致）
+            factory: 无参可调用，返回 UIModule 实例（延迟到 get_ui_module 时构造）
+            plugin_name: 所属插件名（unload 时按此清理）
+            priority: 同 id 时高者胜；系统基线 = SYSTEM_MODULE_PRIORITY (0)，
+                     插件覆盖建议 >= 100
+        """
+        self._ui_modules.setdefault(module_id, []).append((plugin_name, priority, factory))
+
+    def get_ui_module(self, module_id: str):
+        """取胜者模块实例（高 priority 胜；同 priority 后注册胜；无注册返回 None）"""
+        slot = self._ui_modules.get(module_id)
+        if not slot:
+            return None
+        # 胜者 = max(priority, 注册索引) — 索引作 tiebreaker 让后注册胜
+        _idx, (_name, _priority, factory) = max(enumerate(slot), key=lambda x: (x[1][1], x[0]))
+        return factory()
+
+    def list_ui_module_ids(self) -> List[str]:
+        """按注册序返回所有 module_id（供 compose 排序验证）"""
+        return list(self._ui_modules.keys())
 
     def _register_command_for_card(self, card_info: FloatingCardInfo) -> None:
         """为浮动卡片自动注册对应 FUNCTION 命令"""
@@ -1195,6 +1233,7 @@ class UIPluginRegistry:
                 for region in self._regions.values()
                 for e in region["entries"].values()
             )
+            or any(name == plugin_name for impls in self._ui_modules.values() for name, _p, _f in impls)
         )
 
     def unload_plugin(self, plugin_name: str) -> bool:
@@ -1274,6 +1313,13 @@ class UIPluginRegistry:
         # 清理通用区域条目（Phase E）
         for region in self._regions.values():
             region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}
+        # 清理 UI 模块槽（Phase F）：仅移除该 plugin 的实现，其余保留
+        for module_id, impls in list(self._ui_modules.items()):
+            kept = [s for s in impls if s[0] != plugin_name]
+            if kept:
+                self._ui_modules[module_id] = kept
+            else:
+                self._ui_modules.pop(module_id, None)
         # 事件总线退订：防止悬挂回调引用已卸载的旧模块闭包
         from app.core.ui_event_bus import UIEventBus
 
