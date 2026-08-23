@@ -495,7 +495,7 @@ UI 更新经 Qt 信号转发。
 
 | 文件 | 行数 | 问题 |
 |---|---|---|
-| `app/main_widget.py` | 20389 | OpenAIChatToolWindow 单类：UI 装配 + 会话交互 + 快捷键 + 命令面板 + 欢迎卡片全揉一个类；`setup_ui()` 3000+ 行手工装配，无 UI 分区抽象 |
+| `app/main_widget.py` | 20389 | OpenAIChatToolWindow 单类：UI 装配 + 会话交互 + 快捷键 + 命令面板 + 欢迎卡片全揉一个类；`setup_ui()` 3000+ 行手工装配，无 UI 分区抽象（**Phase F 二期**：`setup_ui` 已收敛为根布局 + compose 五模块；装配代码迁至 `app/widgets/modules/`，详见 [`docs/plugins/ui-modules.md`](./plugins/ui-modules.md)） |
 | `app/core/backend.py` | 3384 | ChatBackend 三重身份：引擎工厂 + 插件热更新调度器 + 子系统协调器 |
 | `app/core/hook_manager.py` | 2677 | Hook 全生命周期 + 并行执行 + 事件匹配 |
 | `app/widgets/message_card.py` | 11009 | 消息渲染 + 欢迎卡片 + 交互巨复杂 |
