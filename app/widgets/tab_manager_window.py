@@ -186,6 +186,69 @@ def _get_window_session_title(win) -> str:
         return ""
 
 
+class _DockSideWrapper(QWidget):
+    """LEFT/RIGHT 停靠区侧 wrapper：子控件 visibility 联动 wrapper 与 splitter 大小
+
+    默认收起（hide + splitter 分配 0 空间）；任一子 show 时恢复记忆展开宽度；
+    全 hide 时记忆当前宽度并把 splitter 大小压回 0。解决 T3 接线后无卡片时
+    splitter 默认均分空间导致空白 handle 显示的视觉 bug。
+    """
+
+    DEFAULT_EXPANDED_WIDTH = 300  # 首展开无记忆时的默认宽度
+
+    def __init__(self, primary: QWidget, stack: QWidget, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._primary = primary
+        self._stack = stack
+        self._splitter: Optional[QWidget] = None  # QSplitter（类型注解避免循环引用）
+        self._splitter_index: int = -1
+        self._expanded_width: int = 0
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(primary)
+        lay.addWidget(stack)
+        primary.installEventFilter(self)
+        stack.installEventFilter(self)
+        self.hide()  # 默认收起
+
+    def attach_to_splitter(self, splitter: QWidget, index: int) -> None:
+        """关联宿主 splitter：联动 setSizes 维持收起态"""
+        self._splitter = splitter
+        self._splitter_index = index
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QEvent.Show, QEvent.Hide):
+            # singleShot 0 延迟到事件循环下轮，避免 setSizes 与正在进行的
+            # 容器动画/尺寸变更相互覆盖（动画中 show/hide 频繁触发）
+            QTimer.singleShot(0, self._sync)
+        return super().eventFilter(obj, ev)
+
+    def _sync(self) -> None:
+        any_visible = self._primary.isVisible() or self._stack.isVisible()
+        if self._splitter is None or self._splitter_index < 0:
+            # 未关联 splitter 时只切自身 visibility（测试 / 单实例场景）
+            self.setVisible(any_visible)
+            return
+        sizes = self._splitter.sizes()
+        idx = self._splitter_index
+        if any_visible:
+            if self.isHidden():
+                self.show()
+                if self._expanded_width == 0:
+                    self._expanded_width = self.DEFAULT_EXPANDED_WIDTH
+                if idx < len(sizes):
+                    sizes[idx] = self._expanded_width
+                    self._splitter.setSizes(sizes)
+        else:
+            if not self.isHidden():
+                if idx < len(sizes):
+                    self._expanded_width = sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
+                    sizes[idx] = 0
+                    self._splitter.setSizes(sizes)
+                self.hide()
+
+
 class TabManagerWindow(QWidget):
     """Tab 管理器宿主窗口（单例）"""
 
@@ -659,24 +722,20 @@ class TabManagerWindow(QWidget):
         self._global_right_stack = CardStackContainer(self._chat_frame)
         self._global_right_stack.setObjectName("globalRightStack")
 
-        self._global_left_wrapper = QWidget(self._chat_frame)
+        # 停靠区侧 wrapper：默认收起，子控件 visibility 联动 wrapper 与 splitter 大小
+        # （避免无卡片时 splitter 均分空间显示空白 splitter handle）
+        self._global_left_wrapper = _DockSideWrapper(
+            self._global_left_container, self._global_left_stack, self._chat_frame
+        )
         self._global_left_wrapper.setObjectName("globalLeftWrapper")
-        _left_wrap_layout = QVBoxLayout(self._global_left_wrapper)
-        _left_wrap_layout.setContentsMargins(0, 0, 0, 0)
-        _left_wrap_layout.setSpacing(0)
-        _left_wrap_layout.addWidget(self._global_left_container)
         self._global_left_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.LEFT)
-        _left_wrap_layout.addWidget(self._global_left_stack)
         self._global_left_container.set_stack_sibling(self._global_left_stack)
 
-        self._global_right_wrapper = QWidget(self._chat_frame)
+        self._global_right_wrapper = _DockSideWrapper(
+            self._global_right_container, self._global_right_stack, self._chat_frame
+        )
         self._global_right_wrapper.setObjectName("globalRightWrapper")
-        _right_wrap_layout = QVBoxLayout(self._global_right_wrapper)
-        _right_wrap_layout.setContentsMargins(0, 0, 0, 0)
-        _right_wrap_layout.setSpacing(0)
-        _right_wrap_layout.addWidget(self._global_right_container)
         self._global_right_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.RIGHT)
-        _right_wrap_layout.addWidget(self._global_right_stack)
         self._global_right_container.set_stack_sibling(self._global_right_stack)
 
         self._dock_splitter.addWidget(self._global_left_wrapper)
@@ -688,6 +747,9 @@ class TabManagerWindow(QWidget):
         self._dock_splitter.setHandleWidth(6)
         # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
         self._dock_splitter.setChildrenCollapsible(False)
+        # wrapper 关联 splitter：联动 setSizes 维持收起态
+        self._global_left_wrapper.attach_to_splitter(self._dock_splitter, 0)
+        self._global_right_wrapper.attach_to_splitter(self._dock_splitter, 2)
 
         self._vdock_splitter = _DockSplitter(Qt.Vertical, self._chat_frame)
         self._vdock_splitter.setObjectName("vDockSplitter")
