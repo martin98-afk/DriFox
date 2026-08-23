@@ -217,6 +217,20 @@ class UIPluginRegistry:
         self._input_buttons: Dict[str, InputButtonInfo] = {}
         self._context_actions: Dict[str, ContextMenuActionInfo] = {}
         self._settings_cards: Dict[str, SettingsCardInfo] = {}
+        # 通用区域挂载模型（Phase E）：宿主声明区域 → 插件挂载条目
+        # 结构 {region_id: {"kind": str, "entries": {entry_id: SlotEntry}}}
+        self._regions: Dict[str, Dict[str, Any]] = {}
+        # 主程序内置区域（宿主在窗口装配时也可再声明，幂等）
+        from app.plugins.contracts.ui_slots import CONTENT, LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
+
+        for rid, kind, desc in [
+            ("sidebar", LIST_ITEM, "左侧边栏插件项"),
+            ("toolbar:input", TOOLBAR_BUTTON, "输入区工具栏按钮"),
+            ("menu:message_card", MENU, "消息卡片右键菜单"),
+            ("menu:tab", MENU, "Tab 标签右键菜单"),
+            ("settings:plugins", PANEL, "设置面板插件分区"),
+        ]:
+            self.declare_region(rid, kind, desc)
         self._loaded_plugins: set = set()
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
         self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
@@ -550,6 +564,64 @@ class UIPluginRegistry:
     def get_settings_cards(self) -> List[SettingsCardInfo]:
         """获取全部设置面板插件卡片（注册序）"""
         return list(self._settings_cards.values())
+
+    # ── Phase E：Region 通用挂载模型 ──
+
+    def declare_region(self, region_id: str, kind: str, description: str = "") -> None:
+        """宿主声明 UI 区域（幂等；重复声明覆盖 description/kind）
+
+        region_id 命名约定：
+        - "menu:<target>"     右键/下拉菜单（如 "menu:input_area"）
+        - "toolbar:<name>"    工具栏（如 "toolbar:input"）
+        - 简单名              列表/面板区域（如 "sidebar"、"settings:plugins"）
+        """
+        from app.plugins.contracts.ui_slots import VALID_REGION_KINDS
+
+        if kind not in VALID_REGION_KINDS:
+            raise ValueError(f"invalid region kind {kind!r}, must be one of {sorted(VALID_REGION_KINDS)}")
+        self._regions.setdefault(region_id, {"kind": kind, "entries": {}})
+
+    def register_slot_entry(
+        self,
+        region_id: str,
+        entry_id: str,
+        plugin_name: str,
+        priority: int = 0,
+        payload: Any = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """向已声明区域挂载条目；同 entry_id 高 priority 覆盖低者"""
+        region = self._regions.get(region_id)
+        if region is None:
+            raise ValueError(f"undeclared region {region_id!r}; call declare_region() first")
+        from app.plugins.contracts.ui_slots import SlotEntry
+
+        existing = region["entries"].get(entry_id)
+        if existing is not None and existing.priority > priority:
+            return
+        region["entries"][entry_id] = SlotEntry(
+            entry_id=entry_id,
+            plugin_name=plugin_name,
+            region_id=region_id,
+            priority=priority,
+            payload=payload,
+            metadata=metadata or {},
+        )
+
+    def get_region_entries(self, region_id: str) -> list:
+        """获取区域条目（priority 降序 → 注册序；未声明区域返回空列表）"""
+        region = self._regions.get(region_id)
+        if region is None:
+            return []
+        entries = sorted(region["entries"].values(), key=lambda e: -e.priority)
+        return list(entries)
+
+    def get_region_entry(self, region_id: str, entry_id: str):
+        """按 entry_id 精确查条目（未声明区域/无条目返回 None）"""
+        region = self._regions.get(region_id)
+        if region is None:
+            return None
+        return region["entries"].get(entry_id)
 
     def _register_command_for_card(self, card_info: FloatingCardInfo) -> None:
         """为浮动卡片自动注册对应 FUNCTION 命令"""
@@ -1046,6 +1118,11 @@ class UIPluginRegistry:
             or any(v.plugin_name == plugin_name for v in self._input_buttons.values())
             or any(v.plugin_name == plugin_name for v in self._context_actions.values())
             or any(v.plugin_name == plugin_name for v in self._settings_cards.values())
+            or any(
+                e.plugin_name == plugin_name
+                for region in self._regions.values()
+                for e in region["entries"].values()
+            )
         )
 
     def unload_plugin(self, plugin_name: str) -> bool:
@@ -1122,6 +1199,9 @@ class UIPluginRegistry:
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
         self._context_actions = {k: v for k, v in self._context_actions.items() if v.plugin_name != plugin_name}
         self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
+        # 清理通用区域条目（Phase E）
+        for region in self._regions.values():
+            region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:
