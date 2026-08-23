@@ -461,7 +461,13 @@ class CardContainer(QWidget):
         if sp is None or sp.width() <= 0:
             return
         sizes = sp.sizes()
-        handle_total = sp.handleWidth() * max(0, sp.count() - 1)
+        # QSplitter 对 hidden 子项（如默认收起的 _DockSideWrapper）不显示
+        # handle：avail 必须按「可见子项数」计 handle 占位，否则左展开 +
+        # 右 hidden 时恒定假溢出一个 handleWidth → 每轮压 dock →
+        # resizeEvent 再触发 → setSizes 永动循环（拖动卡死 / 卡片被压到
+        # 最小宽度的根因）。
+        visible_count = sum(1 for i in range(sp.count()) if sp.widget(i) is not None and not sp.widget(i).isHidden())
+        handle_total = sp.handleWidth() * max(0, visible_count - 1)
         avail = sp.width() - handle_total
         total = sum(sizes)
         if total <= avail:
