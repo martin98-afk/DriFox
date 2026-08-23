@@ -689,11 +689,17 @@ class UIPluginRegistry:
         Returns:
             TabManagerWindow 实例（具备 _card_manager/_window_id/四向容器属性），
             不可用时返回 None（回退到 per-window 模式）。
+
+        探测顺序：协议优先（实现 as_ui_host）→ 鸭子属性兜底（legacy 路径）。
         """
         try:
             from app.widgets.tab_manager_window import TabManagerWindow
 
             tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                # 协议优先：宿主实现 as_ui_host() 即直接采用（二期 UIModule 全走此路径）
+                if callable(getattr(tm, "as_ui_host", None)):
+                    return tm.as_ui_host()
             if tm is not None and getattr(tm, "_card_manager", None) is not None:
                 return tm
         except Exception:
