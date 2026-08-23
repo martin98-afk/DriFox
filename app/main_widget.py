@@ -2830,6 +2830,8 @@ class OpenAIChatToolWindow(ToolWindow):
         theme_manager.register_refresh_target(self)
         # 动态更新主题选项
         update_theme_options()
+        # Phase F：注册 5 个系统 UI 模块（瘦版占位；插件可 register_ui_module override）
+        _register_system_ui_modules()
 
         # 标题栏分组分隔线（1px 竖线，用主题色 DIVIDER_COLOR）
         def _make_vdivider() -> QFrame:
@@ -21130,6 +21132,37 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 同步保存到历史记录
         self._save_current_session_to_history()
+
+
+def _register_system_ui_modules() -> None:
+    """Phase F：注册 5 个系统 UI 模块到 UIPluginRegistry（瘦版占位）
+
+    插件可 register_ui_module(module_id, factory, plugin_name, priority>=100) 覆盖。
+    瘦版模块 build 为空（系统默认装配代码仍在 setup_ui 中执行），保证向后兼容。
+    未来按 plan 路线：完整搬迁 setup_ui 段到各模块 → 瘦版升级为系统默认实现。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+        from app.widgets.modules.bottom_toolbar_module import BottomToolbarModule
+        from app.widgets.modules.chat_area_module import ChatAreaModule
+        from app.widgets.modules.input_card_module import InputCardModule
+        from app.widgets.modules.system_cards_module import SystemCardsModule
+        from app.widgets.modules.title_bar_module import TitleBarModule
+
+        reg = UIPluginRegistry.get_instance()
+        for module_cls in (
+            TitleBarModule,
+            ChatAreaModule,
+            SystemCardsModule,
+            InputCardModule,
+            BottomToolbarModule,
+        ):
+            if not reg.get_ui_module(module_cls.module_id):
+                reg.register_ui_module(module_cls.module_id, module_cls, plugin_name="system", priority=0)
+    except Exception as e:
+        from loguru import logger as _logger
+
+        _logger.warning(f"[MainWidget] 注册系统 UI 模块失败: {e}")
 
 
 def _is_sip_deleted(obj) -> bool:
