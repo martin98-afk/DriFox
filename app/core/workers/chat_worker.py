@@ -709,6 +709,19 @@ class OpenAIChatWorker(QThread):
         )
 
         is_team = _check_team_member(getattr(self.tool_executor, "_backend", None))
+
+        # 提前计算 current_message_text：事件构造与后续 trigger_event 都依赖它，
+        # 必须在事件构造（PreAssistantMessageEvent/PostAssistantMessageEvent）之前赋值，
+        # 否则会因延迟绑定触发 UnboundLocalError。
+        current_message_text = ""
+        if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
+            for msg in reversed(current_session_messages):
+                if msg.get("role") == "user":
+                    from app.core.message_content import content_to_text
+
+                    current_message_text = content_to_text(msg.get("content", ""))
+                    break
+
         if event_name == "PreAssistantMessage":
             ev = PreAssistantMessageEvent(message=current_message_text or "", is_team_member=is_team)
         elif event_name == "PostAssistantMessage":
@@ -777,15 +790,6 @@ class OpenAIChatWorker(QThread):
 
             if extra_context:
                 ctx.update(extra_context)
-
-            # 获取当前用户消息作为 current_message
-            current_message_text = ""
-            for msg in reversed(current_session_messages):
-                if msg.get("role") == "user":
-                    from app.core.message_content import content_to_text
-
-                    current_message_text = content_to_text(msg.get("content", ""))
-                    break
 
             # 记录 trigger_event 前的队列大小，用于后续精确 drain
             # 只排出本轮同步执行中入队的消息，不误伤其他路径（如 SubAgentFinished）放入的消息

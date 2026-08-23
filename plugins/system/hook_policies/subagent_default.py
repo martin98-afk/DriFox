@@ -23,7 +23,10 @@ from app.plugins.contracts.hook_policy import (
     HookPolicy,
     PluginChangedEvent,
     PostToolUseEvent,
+    PostUserMessageEvent,
     PreToolUseEvent,
+    PreUserMessageEvent,
+    SessionStartEvent,
     StopEvent,
 )
 
@@ -35,7 +38,7 @@ class SubagentDefaultHookPolicy:
     scope = "subagent"
 
     def should_trigger(self, event: HookEvent) -> HookDecision:
-        if isinstance(event, (PostToolUseEvent, StopEvent, PluginChangedEvent)):
+        if isinstance(event, (SessionStartEvent, PreUserMessageEvent, PostUserMessageEvent, PostToolUseEvent, StopEvent, PluginChangedEvent)):
             return HookDecision.SKIP
         return HookDecision.TRIGGER
 
