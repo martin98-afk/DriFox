@@ -3075,35 +3075,50 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注：mcp_edit/hook_edit/provider_edit 三张编辑卡片已改为懒创建，
         # 在 _ensure_xxx_card() 中按需添加至容器，此处跳过避免访问 None。
 
-        layout.addWidget(self._top_card_container)
+        # ── 对话区装配（Phase F：已迁移到 ChatAreaModule，由 compose 驱动）──
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+        from app.widgets.modules.chat_area_module import ChatAreaModule
+        from app.widgets.ui_composition import compose
 
-        self.chat_scroll_area = SingleDirectionScrollArea(self)
-        self.chat_scroll_area.setMinimumHeight(0)
-        self.chat_scroll_area.setMinimumWidth(320)
-        self.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
-        self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
-        self.chat_scroll_area.setWidgetResizable(True)
-        self.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
-        self.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        chat_area_module = UIPluginRegistry.get_instance().get_ui_module("chat_area")
+        if isinstance(chat_area_module, ChatAreaModule) and not _is_plugin_override("chat_area"):
+            # 系统默认实现：调用 ChatAreaModule.build
+            chat_area_module.build(self)
+        else:
+            # 插件 override：让插件模块接管；保留 _top/_bottom_card_container 的 layout 位置
+            # （但实际插件模块会自行 addWidget；这里仅在插件没接管时才走兜底）
+            if chat_area_module is not None and not isinstance(chat_area_module, ChatAreaModule):
+                chat_area_module.build(self)
+            else:
+                # 兜底：原 setup_ui 装配代码（保持向后兼容）
+                layout.addWidget(self._top_card_container)
 
-        self.chat_container = QWidget()
-        self.chat_container.setStyleSheet("background: transparent;")
-        self.chat_container.setAcceptDrops(True)
-        self.chat_container.installEventFilter(self)
-        self.chat_layout = QVBoxLayout(self.chat_container)
-        self.chat_layout.setContentsMargins(6, 6, 6, 6)
-        self.chat_layout.setSpacing(8)
-        self.chat_layout.setAlignment(Qt.AlignBottom)
-        self.chat_scroll_area.setWidget(self.chat_container)
+                self.chat_scroll_area = SingleDirectionScrollArea(self)
+                self.chat_scroll_area.setMinimumHeight(0)
+                self.chat_scroll_area.setMinimumWidth(320)
+                self.chat_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+                self.chat_scroll_area.setStyleSheet(CHAT_SCROLL_STYLE)
+                self.chat_scroll_area.setWidgetResizable(True)
+                self.chat_scroll_area.setViewportMargins(2, 2, 10, 2)
+                self.chat_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # 连接滚动事件，触发虚拟滚动回收
-        scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        scroll_bar.valueChanged.connect(self._on_chat_scrolled)
+                self.chat_container = QWidget()
+                self.chat_container.setStyleSheet("background: transparent;")
+                self.chat_container.setAcceptDrops(True)
+                self.chat_container.installEventFilter(self)
+                self.chat_layout = QVBoxLayout(self.chat_container)
+                self.chat_layout.setContentsMargins(6, 6, 6, 6)
+                self.chat_layout.setSpacing(8)
+                self.chat_layout.setAlignment(Qt.AlignBottom)
+                self.chat_scroll_area.setWidget(self.chat_container)
 
-        layout.addWidget(self.chat_scroll_area, 1)
+                # 连接滚动事件，触发虚拟滚动回收
+                scroll_bar = self.chat_scroll_area.verticalScrollBar()
+                scroll_bar.valueChanged.connect(self._on_chat_scrolled)
 
-        # 下方卡片容器
-        layout.addWidget(self._bottom_card_container)
+                layout.addWidget(self.chat_scroll_area, 1)
+                # 下方卡片容器
+                layout.addWidget(self._bottom_card_container)
 
         # ── 六张系统卡片框架懒创建（P0-1 性能优化）──
         # 原 setup_ui 同步段直接创建 6 张 BaseSettingsCard 框架（~160ms），
@@ -21163,6 +21178,19 @@ def _register_system_ui_modules() -> None:
         from loguru import logger as _logger
 
         _logger.warning(f"[MainWidget] 注册系统 UI 模块失败: {e}")
+
+
+def _is_plugin_override(module_id: str) -> bool:
+    """检查 module_id 是否被插件 override（priority > 0 视为非系统默认）"""
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        slot = reg._ui_modules.get(module_id, [])
+        # 任一实现 plugin_name != "system" 即视为插件 override
+        return any(name != "system" for name, _p, _f in slot)
+    except Exception:
+        return False
 
 
 def _is_sip_deleted(obj) -> bool:
