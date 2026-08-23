@@ -3,6 +3,54 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.4] - 2026-08-23
+
+自上一版本以来的变更 | 提交数：80 · 文件变更：159 · +14584/-1973 | 贡献者：dingma
+
+### ✨ 新功能 (New Features)
+
+- **事件驱动插件管理 HookPolicy 与 EngineSession** (`app/core/engine/` + `app/core/hook_manager/` + `plugins/system/hooks/`): 引入 `HookPolicy`（三档规范化）与 `EngineSession` 通用驱动原语；新增 `PluginChanged`（工具变更）钩子；实现 team member hook policy 并增强 registry 激活；触发条件扩展至 `SessionStartEvent`。按 run_id 粒度实现团队项目管理。
+- **UI 组件化与插槽体系** (`app/widgets/` + `app/plugins/registries/ui_plugin_registry.py`): 新增 `UIModule` 契约与模块插槽注册表、`compose()` 驱动组装；注册 5 个系统 `UIModule` 插槽（plugin 可整体覆盖 region）；将 `setup_ui` 拆解为 `title_bar` / `bottom_toolbar` / `input_card` / `system_cards` / `chat_area` 模块（行为等价）；集成 `ChatAreaModule` 并支持 plugin override。
+- **UI 事件总线与通用插槽模型** (`app/plugins/registries/ui_plugin_registry.py`): 新增 `UIEventBus`（插件作用域自动取消订阅）并埋点 theme / tab / card-visibility 发布；新增 `Region` / `SlotEntry` 通用挂载模型，将 4 类 Phase-D 插槽统一迁移到单一 region storage（API 兼容）。
+- **UI 扩展点补全** (`app/widgets/`): 新增 `IWindowHost` 协议（兼容旧 duck-typing）；settings-card section 路由；context-menu 开放 input_area 区域；input-button 支持 start/before/after/end 位置锚定；sidebar 优先级排序优于标题排序；tab_manager 将 UI 上下文构建委派给活动聊天窗。
+- **卡片多卡堆叠与 workspace 页** (`app/widgets/cards/` + `app/widgets/workspace/`): 新增 `card-manager` 堆叠模型、`CardStackContainer`（Pivot + 堆叠）widget、`card-dock` 多卡堆叠联动；workspace-page 懒加载宿主接入 tab manager 内容区，新增页面级扩展槽与有序注册。
+- **子代理循环策略与工具加载安全** (`app/core/loop_policies/` + `app/tools/`): 实现 subagent loop policy（轮次上限 + 最终总结提示）；`plugin_tool_loader` 增强工具入口模块校验，防止 `sys.modules` 污染并确保有效 `register` 函数。
+- **性能基建与可观测性** (`tests/` + `scripts/`): 新增 perf baseline 测试（内存/动画/上传/初始化）、`baseline_extra.py` 扩展指标、`measure_perf.py` 回归 harness；`singleton-signals` 迁移 `UsageService.coding_plan_ready` 至 `_reg_sig`；`image-attach` 抽取 `_image_path_to_data_uri`（三档尺寸）；`thread-guard` 卡死 QThread 看门狗（>60s）；`cleanup` 延迟 worker 清理看门狗。
+- **tab 面板增强** (`app/widgets/tab_panel.py`): splitter 拖拽防抖 + 内容区渲染优化；自定义插件卡新增可旋转箭头与样式。
+- **任务列表功能增强** (`app/widgets/`): 增强任务列表并修复 UI 抖动。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **chat-worker / hook-policies** (`app/core/workers/chat_worker.py` + `app/core/hook_manager/`): 预计算当前消息文本避免 `UnboundLocalError`；hook 触发条件纳入 `SessionStartEvent`。
+- **welcome 稳定性** (`app/widgets/`): 补全渲染回调链路 DEBUG 日志 + `_show_initial_welcome` 异常兜底；修复插件热重载后欢迎卡片消失 / 新建会话失败的契约属性防御。
+- **dock / card 渲染** (`app/widgets/streaming_dock.py` + `app/widgets/cards/`): 修复 streaming-dock 水平滚动条与用户滚动时自动滚动打断；修复隐藏控件 resize 死循环；card-dock wrapper 初始折叠态立即同步且可见性联动 splitter 尺寸。
+- **streaming-dock 自动滚动误判** (`app/widgets/streaming_dock.py`): DOM 更新期间忽略程序化滚动事件，避免被误判为用户滚动而打断自动滚动（补 `46993d3f` 热修）。
+- **agents / OpenAIChatToolWindow** (`plugins/system/agents/` + `app/widgets/`): 更新 build / explore 步骤数并移除 summary agent；改进 `ToolResult` 与 dict 格式的内容处理。
+- **message_card 滚动与缓存** (`app/widgets/message_card.py`): 移除 CodeWebViewer 进度文本前导 emoji；更新 skeleton 缓存版本并改进 in-progress / streaming 滚动行为。
+- **tab_panel 滚动态** (`app/widgets/tab_panel.py`): 刷新时保留自定义插件滚动状态（展开 / 折叠模式）。
+- **团队邮件丢失根因 G1** (`app/core/`): 流结束时重排队被回滚的 pending 邮件，修复团队邮件丢失。
+- **信号与生命周期** (`app/widgets/` + `app/main_widget.py`): QObject 初始化后安全连接 `destroyed` 信号；应用退出时停止全局 subagent 日志清理定时器；`tool_permission` 信号注册避免悬挂引用；baseline 子进程调用编码与错误处理；`slow_hooks` 阻塞 sleep 钩子函数签名一致性；`profile_create_session` 扩展模式选项并改进钩子注册日志。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **ui-module 抽取（Phase 2）** (`app/widgets/`): 收敛系统模块注册顺序并补 e2e override 测试；将 title_bar / bottom_toolbar / input_card / system_cards / chat_area 从 `setup_ui` 抽取为独立模块（行为等价）。
+- **ui-slots 收敛** (`app/plugins/registries/ui_plugin_registry.py`): 将 4 类 Phase-D 插槽迁移至单一 region storage（API 兼容）。
+- **tray-manager** (`app/widgets/`): 提取托盘切换防抖为命名常量。
+
+### ⚡ 性能优化 (Performance)
+
+- **缓存与重绘控制** (`app/`): 模块级 icon / render 缓存以 OrderedDict LRU（上限 256）；main-widget resize 防抖 32ms→80ms（命名常量）；pixel-pet 动画重绘率上限（最小帧间隔）；tray 切换防抖抽取常量。
+
+### 📚 文档 (Documentation)
+
+- **UI 模块化文档** (`docs/`): 补 UIModule 契约、系统模块与 override 指南、UIEventBus / Region / IWindowHost / slot 增强、dock 堆叠与 workspace page 指南。
+- **插件架构文档** (`docs/plugin-architecture.md`): HookPolicy 三档规范化与 EngineSession 通用驱动原语（含 PluginChanged 遗漏段落）。
+- **其他** (`AGENTS.md` + `docs/reports/`): 更新 AGENTS.md 结构清晰度；归档 #4 perf 环境 / 可观测性 / 蓝图交付物；补 ui-events / workspace-page 测试与验收 fixture。
+
+### 🔧 其他 (Chores & Build)
+
+- **单例信号 / 测试修正**: `pyqtBoundSignal` 无 `.receivers()`，改用方法存在性 + 源字符串匹配验证结构性配对；修正测试假设（`__init__` 已注册单例 connect，断言 `copy_state_from` 不再向 dst 追加 src 条目）；为 3 个缺失文件补 `_reg_sig()`。
+
 ## [v0.5.3] - 2026-08-22
 
 自上一版本以来的变更 | 提交数：175 · 文件变更：303 · +28058/-15698 | 贡献者：dingma, mading, drifox-bot, builder

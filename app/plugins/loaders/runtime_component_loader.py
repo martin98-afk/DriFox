@@ -396,12 +396,14 @@ class _RuntimeWatcher:
 
 _adapters_loader: Optional[RuntimeComponentLoader] = None
 _loop_loader: Optional[RuntimeComponentLoader] = None
+_hook_loader: Optional[RuntimeComponentLoader] = None
 _storage_loader: Optional[RuntimeComponentLoader] = None
 _serializer_loader: Optional[RuntimeComponentLoader] = None
 _gateway_loader: Optional[RuntimeComponentLoader] = None
 _engine_loader: Optional[RuntimeComponentLoader] = None
 _adapters_watcher: Optional[_RuntimeWatcher] = None
 _loop_watcher: Optional[_RuntimeWatcher] = None
+_hook_watcher: Optional[_RuntimeWatcher] = None
 _storage_watcher: Optional[_RuntimeWatcher] = None
 _serializer_watcher: Optional[_RuntimeWatcher] = None
 _gateway_watcher: Optional[_RuntimeWatcher] = None
@@ -419,6 +421,12 @@ def _make_loop_loader() -> RuntimeComponentLoader:
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
 
     return RuntimeComponentLoader("loop_policies", LoopPolicyRegistry.get_instance())
+
+
+def _make_hook_loader() -> RuntimeComponentLoader:
+    from app.plugins.registries.hook_policy_registry import HookPolicyRegistry
+
+    return RuntimeComponentLoader("hook_policies", HookPolicyRegistry.get_instance())
 
 
 def _make_storage_loader() -> RuntimeComponentLoader:
@@ -467,6 +475,18 @@ def ensure_loop_policy_watcher() -> Optional[_RuntimeWatcher]:
         _loop_watcher.scan_now()
         _loop_watcher.start()
         return _loop_watcher
+
+
+def ensure_hook_policy_watcher() -> Optional[_RuntimeWatcher]:
+    global _hook_loader, _hook_watcher
+    with _watchers_lock:
+        if _hook_watcher is not None:
+            return _hook_watcher
+        _hook_loader = _hook_loader or _make_hook_loader()
+        _hook_watcher = _RuntimeWatcher(_hook_loader, "hook_policies")
+        _hook_watcher.scan_now()
+        _hook_watcher.start()
+        return _hook_watcher
 
 
 def ensure_storage_watcher() -> Optional[_RuntimeWatcher]:
@@ -527,6 +547,7 @@ def warmup_runtime_components() -> Dict[str, Set[str]]:
     result: Dict[str, Set[str]] = {}
     result["model_adapters"] = _make_adapters_loader().scan_roots()
     result["loop_policies"] = _make_loop_loader().scan_roots()
+    result["hook_policies"] = _make_hook_loader().scan_roots()
     result["storages"] = _make_storage_loader().scan_roots()
     result["serializers"] = _make_serializer_loader().scan_roots()
     result["gateways"] = _make_gateway_loader().scan_roots()

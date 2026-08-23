@@ -210,7 +210,6 @@ def _make_stub(streaming: bool, interrupted_messages=None):
     inst.title_edit = MagicMock()
     inst.node_preview = MagicMock()
     inst._update_history_questions_badge = MagicMock()
-    inst._todo_floating_widget = None
     inst._question_floating_widget = None
     inst._question_tool_call_id = None
     inst._load_agent_list = MagicMock()

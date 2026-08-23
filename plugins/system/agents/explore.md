@@ -3,7 +3,7 @@ description: 快速代码探索智能体，用于深入分析代码库、探索�
 mode: subagent
 hidden: false
 temperature: 0.2
-steps: 30
+steps: 50
 permission:
   write: deny
   edit: deny

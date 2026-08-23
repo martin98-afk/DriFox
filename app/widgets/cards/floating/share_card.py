@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -869,46 +869,62 @@ class ShareCardContent(QWidget):
                     },
                 )
                 return
+            # ── M3：异步上传，避免点击"生成链接"后 UI 冻结（后台线程）──
             self._upload_btn.setEnabled(False)
             self._upload_btn.setText("⏳ 上传中…")
-            url, err = uploader.upload_file(str(save_path))
+            self._pending_upload_path = save_path
+            self._pending_title = title
+            self._pending_fmt = fmt
+            try:
+                self._upload_thread = _ShareUploadThread(uploader, str(save_path))
+                self._upload_thread.finished_signal.connect(self._on_upload_finished)
+                self._upload_thread.finished.connect(self._upload_thread.deleteLater)
+                self._upload_thread.start()
+            except Exception as e:
+                self._upload_btn.setEnabled(True)
+                self._upload_btn.setText("🔗 生成链接")
+                self._show_info(f"上传启动失败: {e}（文件已保存到本地）", "warning")
+        except Exception as e:
             self._upload_btn.setEnabled(True)
             self._upload_btn.setText("🔗 生成链接")
-            if err:
-                self._show_info(f"上传失败: {err}（文件已保存到本地）", "warning")
-                fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
-                insert_record(
-                    type_="session",
-                    title=title,
-                    format_=fmt_name,
-                    file_path=str(save_path),
-                    ref_id=self._record.get("session_id", ""),
-                    extra_info={
-                        "msg_count": len(self._messages),
-                        "project": self._record.get("project", ""),
-                    },
-                )
-                return
-            QApplication.clipboard().setText(url)
-            self._show_info(f"链接已复制到剪贴板\n本地备份: {save_path.name}", "success")
-            # ── 写入分享记录（含上传链接） ──
-            fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
+            self._show_info(f"上传异常: {e}（文件已保存到本地）", "warning")
+
+    def _on_upload_finished(self, result):
+        url, err = result
+        save_path = self._pending_upload_path
+        title = self._pending_title
+        fmt = self._pending_fmt
+        fmt_name = {"markdown": "md", "json": "json", "html": "html"}.get(fmt, fmt)
+        self._upload_btn.setEnabled(True)
+        self._upload_btn.setText("🔗 生成链接")
+        if err:
+            self._show_info(f"上传失败: {err}（文件已保存到本地）", "warning")
             insert_record(
                 type_="session",
                 title=title,
                 format_=fmt_name,
                 file_path=str(save_path),
-                upload_url=url,
                 ref_id=self._record.get("session_id", ""),
                 extra_info={
                     "msg_count": len(self._messages),
                     "project": self._record.get("project", ""),
                 },
             )
-        except Exception as e:
-            self._upload_btn.setEnabled(True)
-            self._upload_btn.setText("🔗 生成链接")
-            self._show_info(f"上传异常: {e}（文件已保存到本地）", "warning")
+            return
+        QApplication.clipboard().setText(url)
+        self._show_info(f"链接已复制到剪贴板\n本地备份: {save_path.name}", "success")
+        insert_record(
+            type_="session",
+            title=title,
+            format_=fmt_name,
+            file_path=str(save_path),
+            upload_url=url,
+            ref_id=self._record.get("session_id", ""),
+            extra_info={
+                "msg_count": len(self._messages),
+                "project": self._record.get("project", ""),
+            },
+        )
 
     def _show_info(self, message: str, level: str = "info"):
         from app.widgets.tab_manager_window import TabManagerWindow
@@ -929,3 +945,24 @@ class ShareCardContent(QWidget):
             InfoBar.error(**kwargs)
         else:
             InfoBar.info(**kwargs)
+
+
+class _ShareUploadThread(QThread):
+    """后台线程：上传分享文件到 Gitee，避免点击"生成链接"后 UI 冻结。
+
+    finished_signal 携带 upload_file 返回值 (url, err)，二者有且仅有一个非空。
+    """
+
+    finished_signal = pyqtSignal(object)
+
+    def __init__(self, uploader, file_path, parent=None):
+        super().__init__(parent)
+        self._uploader = uploader
+        self._file_path = file_path
+
+    def run(self):
+        try:
+            self._result = self._uploader.upload_file(self._file_path)
+        except Exception as e:
+            self._result = ("", str(e))
+        self.finished_signal.emit(self._result)

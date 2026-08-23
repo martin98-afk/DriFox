@@ -23,6 +23,7 @@ def test_services_dict_satisfies_protocol_keys():
         def get_workdir(self) -> str: ...
         def get_compactor(self): ...
         def conversation_stack(self): ...
+        def create_engine_session(self, engine_name: str, **kwargs): ...
         def save_messages_to_session(self, messages) -> None: ...
         def enter_exclusive_ui_mode(self, source_id: str) -> None: ...
         def exit_exclusive_ui_mode(self, source_id: str) -> None: ...
@@ -54,3 +55,23 @@ def test_engine_host_contract_declares_conversation_stack():
     from app.plugins.contracts.engine_host import EngineHost
 
     assert "conversation_stack" in dir(EngineHost)
+
+
+def test_engine_host_contract_declares_create_engine_session():
+    """EngineHost 契约包含 create_engine_session 声明（EP3，防 services/契约漂移）"""
+    from app.plugins.contracts.engine_host import EngineHost
+
+    assert "create_engine_session" in dir(EngineHost)
+
+
+def test_services_dict_contains_create_engine_session_key():
+    """_build_ui_services 实际提供 create_engine_session 键（防注入遗漏）"""
+    import inspect
+    import re
+
+    import app.main_widget as mw
+
+    src = inspect.getsource(mw.OpenAIChatToolWindow._build_ui_services)
+    assert re.search(r'["\']create_engine_session["\']\s*:', src), (
+        "services dict 必须包含 create_engine_session 键（EP3）"
+    )

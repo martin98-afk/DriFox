@@ -160,7 +160,10 @@ def test_delete_path_iterates_by_component_order(kernel_env, monkeypatch):
 
     reg, fake_pm = kernel_env
     # 关键：禁用 builtin 内置 reloader（避免 agents→commands 等副作用污染 seen 列表）
-    builtin_reloaders._BUILTIN_REGISTERED.discard(id(reg))
+    # _BUILTIN_REGISTERED 为强引用列表（身份判断，防 GC 后 id 复用误判）
+    builtin_reloaders._BUILTIN_REGISTERED = [
+        r for r in builtin_reloaders._BUILTIN_REGISTERED if r is not reg
+    ]
 
     fake_plugin = MagicMock()
     # 声明全部 11 类组件（含 team_templates 末尾），模拟复杂插件
@@ -238,7 +241,9 @@ def test_reload_plugin_targeted_emits_plugin_changed(kernel_env, monkeypatch):
     # __new__ 实例无 C++ 对象，访问 Qt 信号必抛 RuntimeError →
     # 在 emit_plugin_changed 层断言（信号→窗口槽链路由 test_input_button_hot_reload 覆盖）
     emitted: list = []
-    monkeypatch.setattr(backend, "emit_plugin_changed", lambda r, n="": emitted.append((dict(r), n)))
+    monkeypatch.setattr(
+        backend, "emit_plugin_changed", lambda r, n="", action=None: emitted.append((dict(r), n))
+    )
     monkeypatch.setattr(ChatBackend, "_active_instances", [])
     monkeypatch.setattr(
         "app.plugins.managers.plugin_manager.PluginManager.get_instance",

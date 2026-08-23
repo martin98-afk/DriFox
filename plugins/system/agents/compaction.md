@@ -3,7 +3,7 @@ description: 上下文压缩智能体 - 把长对话压缩成可继续编码的�
 mode: all
 hidden: true
 temperature: 0.1
-steps: 5
+steps: 2
 inherit_history: true
 inherit_history_budget_ratio: 0.8
 permission:

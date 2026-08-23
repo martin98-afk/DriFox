@@ -1729,6 +1729,27 @@ class SendableTextEdit(TextEdit):
         self._reset_history_mode()
         super().clear()
 
+    def contextMenuEvent(self, event):
+        """Phase E：接管输入框右键菜单——保留基础 cut/copy/paste + 追加插件项"""
+        from PyQt5.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        cut_act = menu.addAction("剪切")
+        cut_act.triggered.connect(lambda: self.cut())
+        copy_act = menu.addAction("复制")
+        copy_act.triggered.connect(lambda: self.copy())
+        paste_act = menu.addAction("粘贴")
+        paste_act.triggered.connect(lambda: self.paste())
+        # 插件菜单项注入（main_widget 提供方法）
+        win = self.window()
+        builder = getattr(win, "_build_plugin_input_menu", None)
+        if callable(builder):
+            try:
+                builder(menu)
+            except Exception:
+                pass
+        menu.exec_(event.globalPos())
+
 
 class InputGlowUnderlay(QWidget):
     """统一胶囊向内发光层。

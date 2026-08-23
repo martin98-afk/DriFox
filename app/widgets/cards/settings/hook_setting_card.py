@@ -51,7 +51,8 @@ from app.widgets.elided_label import _ElidedLabel
 # 正确顺序: BuildSystemPrompt → SessionStart → UserPromptSubmit
 # → PreUserMessage → PostUserMessage
 # → PreAssistantMessage → (PreToolUse → PostToolUse)* → PostAssistantMessage → Stop
-# 其中 PreToolUse/PostToolUse 在助手回复过程中可能多次触发
+# 其中 PreToolUse/PostToolUse 在助手回复过程中可能多次触发；
+# PluginChanged 为环境事件（插件/MCP 变化时触发），不参与会话流，附在末尾
 HOOK_EVENT_ORDER = [
     "BuildSystemPrompt",
     "SessionStart",
@@ -63,6 +64,7 @@ HOOK_EVENT_ORDER = [
     "PostToolUse",
     "PostAssistantMessage",
     "Stop",
+    "PluginChanged",
 ]
 
 # 事件中文描述（用于 UI 标题显示）
@@ -77,6 +79,7 @@ HOOK_EVENT_DISPLAY_NAMES = {
     "PreToolUse": "工具调用前",
     "PostToolUse": "工具调用后",
     "Stop": "停止流式输出",
+    "PluginChanged": "插件变更",
 }
 
 
@@ -376,6 +379,28 @@ class HookEditCard(QWidget):
     # - error：API 异常退出（chat_worker.py:1714-1720）
     # 最后一项 "#team_member" 是精确匹配的特殊值，仅团队成员窗口触发。
     STOP_REASONS = ["completed", "cancelled", "error", "#team_member"]
+
+    # PluginChanged 插件变更子事件选项（两类可混合 pipe 匹配）：
+    # - 插件/MCP 级 action（context["action"]）：
+    #   安装/更新/卸载/启停 + MCP 配置增删改 + MCP 连接状态
+    # - 工具/MCP 变更子动作（context["sub_actions"]，由 diff 非空键派生）：
+    #   工具新增/移除/变更（同名 schema 变化）、MCP 服务器增减
+    PLUGIN_ACTIONS = [
+        "installed",
+        "updated",
+        "uninstalled",
+        "enabled",
+        "disabled",
+        "tools_added",
+        "tools_removed",
+        "tools_updated",
+        "mcp_added",
+        "mcp_removed",
+        "mcp_updated",
+        "mcp_connected",
+        "mcp_disconnected",
+        "mcp_failed",
+    ]
 
     saved = pyqtSignal(dict)
     closed = pyqtSignal()
@@ -689,6 +714,11 @@ class HookEditCard(QWidget):
             "Stop": (
                 "匹配停止原因：completed（完成）| cancelled（取消）| error（错误）；#team_member 仅团队成员窗口触发（与其他互斥）"
             ),
+            "PluginChanged": (
+                "匹配插件变更子事件（可混合）：installed/updated/uninstalled/enabled/disabled（插件级）| "
+                "tools_added/tools_removed/tools_updated（工具增删改）| mcp_added/removed/updated（MCP 配置）| "
+                "mcp_connected/disconnected/failed（MCP 连接）；空匹配所有"
+            ),
         }
         # PreToolUse / PostToolUse 用 tool:xxx 示例
         tool_ph = "匹配工具：tool:edit（精确）| Edit|Write（正则）| .*文件.*（内容）"
@@ -732,6 +762,8 @@ class HookEditCard(QWidget):
             options = list(self.SESSION_STATES)
         elif event_name == "Stop":
             options = list(self.STOP_REASONS)
+        elif event_name == "PluginChanged":
+            options = list(self.PLUGIN_ACTIONS)
         elif event_name in ("PreToolUse", "PostToolUse"):
             options = sorted(ToolNameMapper.ALIAS_MAP.keys())
 

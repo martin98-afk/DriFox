@@ -1,7 +1,7 @@
 ---
 description: 面向实际编码实现的构建智能体。负责读取代码、修改文件、运行验证并收敛结果。
 mode: all
-steps: 100
+steps: 1000
 permission:
   "*": allow
 ---

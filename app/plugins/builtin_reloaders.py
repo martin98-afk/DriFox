@@ -35,13 +35,14 @@ RELOADED_COMPONENTS = {
     "team_templates",
     "model_adapters",
     "loop_policies",
+    "hook_policies",
     "storages",
     "serializers",
     "gateways",
     "engines",
 }
 
-_BUILTIN_REGISTERED: set = set()
+_BUILTIN_REGISTERED: list = []  # 强引用已注册的 registry 对象（防 GC 后 id 复用误判）
 
 
 def _reload_agents(ctx: ReloadContext) -> Any:
@@ -228,6 +229,23 @@ def _reload_loop_policies(ctx: ReloadContext) -> Any:
     return False
 
 
+def _reload_hook_policies(ctx: ReloadContext) -> Any:
+    """hook_policies 分支：同 model_adapters（精准卸载/重载单插件）"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_hook_policy_watcher
+
+        watcher = ensure_hook_policy_watcher()
+        if watcher is not None:
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] hook_policies 重载失败: {e}")
+    return False
+
+
 def _reload_storages(ctx: ReloadContext) -> Any:
     """storages 分支：同 model_adapters（精准卸载/重载单插件）"""
     try:
@@ -356,9 +374,15 @@ def bind_runtime(agent_manager: Any) -> None:
 
 
 def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
-    """注册全部内置 reloader（按 registry 幂等 — 同 registry 二次调用跳过，不同 registry 各自注册）"""
+    """注册全部内置 reloader（按 registry 幂等 — 同 registry 二次调用跳过，不同 registry 各自注册）
+
+    幂等判断用对象身份（强引用列表）而非 id(registry)：旧 id 会被 GC 回收复用，
+    测试 fixture 频繁建/销毁 registry 时新对象可能分到已登记的 id，
+    导致「误判已注册 → 空 registry 上无任何 reloader」的顺序依赖失败
+    （症状：result 全 False / ui=False）。
+    """
     global _BUILTIN_REGISTERED
-    if id(registry) in _BUILTIN_REGISTERED:
+    if any(r is registry for r in _BUILTIN_REGISTERED):
         return
     mapping = {
         "agents": _reload_agents,
@@ -374,6 +398,7 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
         "team_templates": _reload_team_templates,
         "model_adapters": _reload_model_adapters,
         "loop_policies": _reload_loop_policies,
+        "hook_policies": _reload_hook_policies,
         "storages": _reload_storages,
         "serializers": _reload_serializers,
         "gateways": _reload_gateways,
@@ -381,4 +406,4 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
     }
     for comp, fn in mapping.items():
         registry.register(comp, fn)
-    _BUILTIN_REGISTERED.add(id(registry))
+    _BUILTIN_REGISTERED.append(registry)

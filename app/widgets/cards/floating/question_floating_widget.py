@@ -59,6 +59,11 @@ class _AutoHeightScrollArea(QScrollArea):
         vw = self.viewport().width()
         if vw <= 0:
             vw = max(1, base.width() - frame)
+        else:
+            # 预留垂直滚动条宽度：内容高度临界时滚动条出现会使视口宽骤减，
+            # wordWrap 内容重折行 → 高度变化 → 滚动条消失 → 宽度反馈环抖动。
+            # 按“含滚动条”的最窄视口测高，滚动条出现后测量基准不变，环闭合。
+            vw = max(1, vw - self.verticalScrollBar().sizeHint().width())
         if w.hasHeightForWidth():
             content_h = w.heightForWidth(vw)
         else:
@@ -76,6 +81,9 @@ class _AutoHeightScrollArea(QScrollArea):
         vw = self.viewport().width()
         if vw <= 0:
             vw = max(1, base.width() - frame)
+        else:
+            # 同 minimumSizeHint：预留垂直滚动条宽度，消除滚动条出现/消失的宽度反馈环
+            vw = max(1, vw - self.verticalScrollBar().sizeHint().width())
         if w.hasHeightForWidth():
             content_h = w.heightForWidth(vw)
         else:

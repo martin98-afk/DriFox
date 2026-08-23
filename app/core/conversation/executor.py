@@ -1,5 +1,6 @@
 # app/core/conversation/executor.py
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -41,6 +42,7 @@ class ConversationExecutor:
         self._cleanup_lock = threading.Lock()
         # B6：超时未退出 worker 的延迟清理队列（线程退出后由 finished 信号触发清理）
         self._pending_cleanup_workers: list = []
+        self._watchdog_timer: Optional[threading.Timer] = None  # M10: 延迟清理看门狗
 
     @property
     def is_streaming(self) -> bool:
@@ -107,6 +109,11 @@ class ConversationExecutor:
             "compactor": self._core.compactor,
             "initial_compaction_cache": getattr(session, "compaction_cache", None),
             "session_id": session_id,
+            # Hook 参与级别：引擎经 ConversationConfig 声明，消息级 hook 拦截 +
+            # 工具级 per-call 传参都由 worker 消费（未声明时默认 ALL 保持兼容）
+            "hook_policy": getattr(self._config, "hook_policy", None),
+            # 可选：HookPolicy 插件 id（优先级高于 hook_policy 枚举）
+            "hook_policy_id": getattr(self._config, "hook_policy_id", None),
         }
         self._current_worker = self._worker_factory(**worker_kwargs)
 
@@ -190,10 +197,16 @@ class ConversationExecutor:
             worker._executor_cleaned = True
 
     def _schedule_deferred_cleanup(self, worker):
-        """B6: 将超时未退出的 worker 转入延迟清理（线程退出后由 finished 信号触发收尾）"""
-        if worker is None or worker in self._pending_cleanup_workers:
+        """B6: 将超时未退出的 worker 转入延迟清理（线程退出后由 finished 信号触发收尾）
+
+        M10: 队列元素改为 (worker, 入队时间戳) 元组，供看门狗判断超时。
+        """
+        if worker is None:
             return
-        self._pending_cleanup_workers.append(worker)
+        for w, _ in self._pending_cleanup_workers:
+            if w is worker:
+                return
+        self._pending_cleanup_workers.append((worker, time.monotonic()))
         try:
             worker.finished.connect(
                 lambda w=worker: self._on_deferred_worker_finished(w)
@@ -204,15 +217,51 @@ class ConversationExecutor:
         # 立即收尾（调用方此时不持有 _cleanup_lock，无重入风险）
         if not worker.isRunning():
             self._on_deferred_worker_finished(worker)
+        # M10: 启动看门狗，兜底回收 finished 信号迟迟不触发的卡死 worker
+        self._start_cleanup_watchdog()
 
     def _on_deferred_worker_finished(self, worker):
         """B6: worker 线程结束后执行延迟收尾（cleanup + deleteLater）"""
-        try:
-            if worker in self._pending_cleanup_workers:
-                self._pending_cleanup_workers.remove(worker)
-        except ValueError:
-            pass
+        for i, (w, _) in enumerate(self._pending_cleanup_workers):
+            if w is worker:
+                del self._pending_cleanup_workers[i]
+                break
         self._finalize_worker_cleanup(worker)
+
+    # ========== 延迟清理看门狗（M10：兜底回收卡死 worker） ==========
+
+    def _start_cleanup_watchdog(self):
+        """M10: 启动/续期看门狗（队列非空时周期扫描，防无限泄漏）"""
+        if self._watchdog_timer is not None and self._watchdog_timer.is_alive():
+            return
+        if not self._pending_cleanup_workers:
+            self._watchdog_timer = None
+            return
+        self._watchdog_timer = threading.Timer(30.0, self._cleanup_watchdog_scan)
+        self._watchdog_timer.daemon = True
+        self._watchdog_timer.start()
+
+    def _cleanup_watchdog_scan(self):
+        """M10: 扫描延迟清理队列，对 >60s 未退出的 worker 强制中断+回收（最后兜底）"""
+        now = time.monotonic()
+        for w, ts in list(self._pending_cleanup_workers):
+            if now - ts <= 60.0:
+                continue
+            try:
+                self._pending_cleanup_workers.remove((w, ts))
+            except ValueError:
+                pass
+            # 卡死兜底：finished 信号未触发（线程卡死），绕过 _finalize_worker_cleanup
+            # 的"运行则重排"逻辑，直接中断+deleteLater 回收，避免无限泄漏。
+            if not getattr(w, "_executor_cleaned", False):
+                try:
+                    w.requestInterruption()
+                    w.quit()
+                    w.deleteLater()
+                    w._executor_cleaned = True
+                except Exception as e:
+                    logger.debug(f"[ConversationExecutor] watchdog cleanup error: {e}")
+        self._start_cleanup_watchdog()
 
     def _make_permission_checker(self) -> Optional[Callable[[str, dict], str]]:
         """根据权限策略生成权限检查器"""

@@ -233,7 +233,7 @@ def _get_formatter_cached():
 
 # ======== 滚动行为常量 ========
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
-AUTO_SCROLL_THRESHOLD = 1000  # "接近底部"判定阈值(px)，用户在此范围内视为"在底部"
+AUTO_SCROLL_THRESHOLD = 80  # "接近底部"判定阈值(px)：仅真接近底部才恢复自动跟随；过大会把用户阅读位置反复拉回底部
 
 
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
@@ -2012,7 +2012,7 @@ _SKELETON_CACHE_MAX = 48
 # 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
 # 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
 # data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
-_SKELETON_CACHE_VERSION = 9
+_SKELETON_CACHE_VERSION = 16
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2270,6 +2270,20 @@ _STREAMING_DOCK_CSS = """
                 }
                 body.streaming-dock #content-placeholder {
                     order: 1;
+                    /* 坞态正文限高：容器自身滚动，卡片总高稳定不随流式增长，
+                       工具区+todo 保持可见；流式结束归位后恢复自然高度。
+                       330→450 略微放宽，让流式长回复展示更多正文。 */
+                    max-height: 450px;
+                    overflow-y: auto;
+                    /* 🐛 修复（禁横向滚动）：单轴 auto 时另一轴 visible 会被计算为
+                       auto → 长行（URL/无空格长 token）超宽出现容器级横向滚动条。
+                       对齐 body 的 overflow-x:hidden；代码块(.code-content)/表格
+                       (table-scroll-wrapper) 自带嵌套横向滚动不受影响。
+                       overflow-wrap:break-word 让超宽长词强制断行（仅无断行点时
+                       生效，正常文本不受影响），避免 hidden 只裁切看不到尾巴。 */
+                    overflow-x: hidden;
+                    overflow-wrap: break-word;
+                    overflow-anchor: none;
                 }
                 body.streaming-dock #tool-section {
                     order: 2;
@@ -2278,6 +2292,12 @@ _STREAMING_DOCK_CSS = """
                 /* 坞态限高：≈3-4 行条目（行高约 26px + 上下 padding） */
                 body.streaming-dock #tool-content {
                     max-height: 110px;
+                }
+                /* 任务列表坞态：固定高度（非仅 max-height）——切断工具区流式抖动向 todo 传导，
+                   项目增减时限高内高度也不变，流式期间观感稳定 */
+                body.streaming-dock #todo-content {
+                    height: 96px;
+                    max-height: 96px;
                 }
 """
 
@@ -2301,13 +2321,23 @@ _STREAMING_DOCK_JS = """
                         if (!_atBottom && _dockH > 0) {
                             document.body.scrollTop = document.body.scrollTop + _dockH;
                         }
-                        // 恢复完整高度后滚到底部，展示最新条目
+                        // 归位后滚到底部展示最新条目——仅当用户未在上方阅读时；
+                        // 用户上滚查看中则保持其位置（内容未更新，不打扰阅读）
                         var tc = document.getElementById('tool-content');
-                        if (tc) { tc._userScrolledUp = false; tc.scrollTop = tc.scrollHeight; }
+                        if (tc && !tc._userScrolledUp) { tc._progScroll = true; tc.scrollTop = tc.scrollHeight; }
                     } else if (on && !wasOn) {
                         // 顶部 → 坞态：正文上移，做对称补偿
                         if (!_atBottom && _dockH > 0) {
                             document.body.scrollTop = Math.max(0, document.body.scrollTop - _dockH);
+                        }
+                        // 🐛 修复：进入坞态时正文容器开始限高内滚，切换瞬间内容溢出
+                        // 会触发一次程序性 scroll 事件；重置正文容器用户滚动标志并程序
+                        // 置底跟随，避免遗留状态/切换抖动误判为正文上滚而卡在顶部。
+                        var _cp = document.getElementById('content-placeholder');
+                        if (_cp) {
+                            _cp._userScrolledUp = false;
+                            _cp._progScroll = true;
+                            _cp.scrollTop = _cp.scrollHeight;
                         }
                     }
                     // 高度变化（110px ↔ 600px max-height）后报告文档高度。
@@ -2320,6 +2350,46 @@ _STREAMING_DOCK_JS = """
                         reportHeightDebounced();
                     }
                 }
+"""
+
+# 正文容器（#content-placeholder）自动滚底 + 用户滚动跟踪。
+# 🐛 修复（区域独立）：坞态下正文容器与工具区（#tool-content）是两个独立内滚动
+# 容器。工具/思考区更新路径（流式块注入/完成块替换/_apply_viewer_height 高度
+# 回调）同样会调用 _autoScrollStreamingBody()——原实现无条件
+# _cp.scrollTop = _cp.scrollHeight 置底正文容器，而 _userScrolledWithin 只由
+# body 的 scroll 事件置位（用户滚正文容器时 body 不滚，标志恒 false），
+# 保护完全失效 → 工具区每来新内容就把正文拉底，打断阅读。
+# 修复对齐工具区 _scrollToolContentToBottom 模式：用户主动上滚正文
+# （_userScrolledUp）时不拉底，滚回底部附近自动恢复跟随；程序置底打
+# _progScroll 标记防误判为用户滚动。
+_CONTENT_AUTOSCROLL_JS = """
+                function _autoScrollStreamingBody() {
+                    // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
+                    // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
+                    var _cp = document.getElementById('content-placeholder');
+                    if (document.body.classList.contains('streaming-dock') && _cp) {
+                        if (!_cp._userScrolledUp) {
+                            _cp._progScroll = true;
+                            _cp.scrollTop = _cp.scrollHeight;
+                        }
+                    }
+                    document.body.scrollTop = document.body.scrollHeight;
+                }
+                // 正文容器滚动跟踪：用户主动上滚时停止自动置底跟随，
+                // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为。
+                // 关键：DOM 操作期间（updateContent 重写 innerHTML /
+                // reorganizeContent 搬移 think 块）触发的程序性 scroll 事件必须
+                // 忽略——与 body 监听的 _suppressScrollEvent 抑制对称，否则会被
+                // 误判为"用户上滚正文"，_userScrolledUp 置 true → _autoScrollStreamingBody
+                // 跳过正文置底 → 正文卡在顶部（置顶 bug）。
+                document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
+                    var cp = this;
+                    if (window._suppressScrollEvent) return;
+                    if (cp._progScroll) { cp._progScroll = false; return; }
+                    var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
+                    cp._userScrolledUp = !atBottom;
+                    if (atBottom) cp._userScrolledUp = false;
+                });
 """
 
 
@@ -3246,12 +3316,14 @@ class CodeWebViewer(QWebEngineView):
             # 🆕 F2（S2 兜底）：DOM 中存在运行中工具块（data-streaming="true"）
             # 时强制 dock on——覆盖"JS 就绪晚于工具流式注入"的竞态窗口（_on_js_ready
             # 执行时 _streaming 可能已 False，但运行中块仍在 DOM 等待结果）。
-            self.page().runJavaScript(
-                "var _ts2=document.getElementById('tool-section');"
-                "var _co=_ts2&&_ts2.getAttribute('data-collapsed')==='true';"
-                "var _act=document.querySelector('#tool-content [data-tool-call-id][data-streaming=\"true\"]');"
-                "if(typeof _setStreamingDock==='function')_setStreamingDock(!!_act||!_co);"
-            )
+            # 🛡️ 欢迎卡片（light 骨架）跳过：坞态会限死正文高度，欢迎页长内容被截断。
+            if not self._light_skeleton:
+                self.page().runJavaScript(
+                    "var _ts2=document.getElementById('tool-section');"
+                    "var _co=_ts2&&_ts2.getAttribute('data-collapsed')==='true';"
+                    "var _act=document.querySelector('#tool-content [data-tool-call-id][data-streaming=\"true\"]');"
+                    "if(typeof _setStreamingDock==='function')_setStreamingDock(!!_act||!_co);"
+                )
         except RuntimeError:
             pass
         # 🐛 修复：流式内容可能在 JS 就绪前通过 _lazy_markdown_cb 缓存，
@@ -3268,6 +3340,15 @@ class CodeWebViewer(QWebEngineView):
             self._renderer_pid = self.page().renderProcessPid()
         except Exception:
             self._renderer_pid = 0
+        # 任务列表补推：骨架重载（主题/字体变化 setHtml）会清空 JS 注入的
+        # todo DOM；JS 就绪后按 _pending_todos 快照重推，保证卡片底部
+        # 任务列表在骨架重建后不丢失。
+        if getattr(self, "_pending_todos", None) is not None:
+            try:
+                payload = json.dumps(self._pending_todos).decode("utf-8")
+                self.page().runJavaScript(f"window._updateTodoList && window._updateTodoList({payload});")
+            except RuntimeError:
+                pass
 
     def _load_skeleton(self):
         # 获取系统字体
@@ -3459,7 +3540,9 @@ class CodeWebViewer(QWebEngineView):
                     padding: 0;
                 }}
                 body {{
-                    padding: 6px 14px 0 14px; 
+                    /* 右侧 8px = 14px 视觉边距 - 6px 常驻滚动轨道：轨道占位使
+                       内容右视觉边距比左侧多 6px，扣减后左右对称 */
+                    padding: 6px 8px 0 14px;
                     max-height: {self.MAX_HEIGHT}px;
                     /* 🛡️ 稳定性修复：滚动条轨道常驻，内容可用宽度恒定。
                        overflow-y:auto 时滚动条出现/消失会使内容宽度 ±6px 波动 →
@@ -3472,6 +3555,14 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 /* body 滚动轨道常驻但视觉隐形（覆盖全局 6px 滚动条样式的 track 底色） */
                 body::-webkit-scrollbar-track {{
+                    background: transparent;
+                }}
+                /* 内层滚动容器（工具区/任务列表/思考体/工具结果）轨道同样隐形：
+                   常驻轨道(scroll) + 右 padding 扣减 6px，消除滚动条带来的右侧加宽 */
+                #tool-content::-webkit-scrollbar-track,
+                #todo-content::-webkit-scrollbar-track,
+                .think-content::-webkit-scrollbar-track,
+                .result-content::-webkit-scrollbar-track {{
                     background: transparent;
                 }}
                 {scrollbar_css}
@@ -3994,7 +4085,8 @@ class CodeWebViewer(QWebEngineView):
                     animation: think-tip-sweep 2.5s ease-in-out infinite;
                 }}
                 .think-content {{
-                    padding: 8px 10px;
+                    /* 右 4px = 10px - 6px 滚动轨道：轨道常驻后内容宽度稳定，右侧视觉边距与左对称 */
+                    padding: 8px 4px 8px 10px;
                     border-top: 1px solid var(--border);
                     background: transparent;
                     color: var(--text-secondary) !important;
@@ -4003,7 +4095,7 @@ class CodeWebViewer(QWebEngineView):
                     font-family: '{font_family}', sans-serif;
                     line-height: 1.6;
                     max-height: 500px;
-                    overflow-y: auto;
+                    overflow-y: scroll;
                     transition: opacity 200ms ease;
                 }}
                 /* 思考内容加载骨架屏动画 */
@@ -4389,14 +4481,15 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {small_font_size}px;
                 }}
                 .result-content {{
-                    padding: 6px 12px 10px;
+                    /* 右 6px = 12px - 6px 滚动轨道：同 .think-content，右侧视觉边距与左对称 */
+                    padding: 6px 6px 10px 12px;
                     color: var(--text);
                     font-size: {tag_font_size}px;
                     line-height: 1.5;
                     word-break: break-word;
                     font-family: {mono_font};
                     max-height: 400px;
-                    overflow-y: auto;
+                    overflow-y: scroll;
                 }}
                 .result-empty {{
                     padding: 6px 12px 10px;
@@ -4499,7 +4592,7 @@ class CodeWebViewer(QWebEngineView):
                     display: flex;
                     align-items: center;
                     gap: 8px;
-                    font-size: 11px;
+                    font-size: 13px;
                     color: var(--text-muted);
                     user-select: none;
                     padding: 2px 2px 6px 2px;
@@ -4588,12 +4681,14 @@ class CodeWebViewer(QWebEngineView):
                     /* 固定最大高度，超出时显示滚动条。
                        不设动态大小（不依赖 body 高度比例）。 */
                     max-height: 600px;
-                    overflow-y: auto;
+                    /* 轨道常驻：出现/消失切换不再使内容宽度 ±6px 波动；
+                       右 padding 扣减 6px，右侧视觉边距与左基本对称 */
+                    overflow-y: scroll;
                     overflow-anchor: none;  /* 禁用 scroll anchoring，防止浏览器在 reorganizeContent 后调整 scrollTop 覆盖 JS 设置的滚底位置 */
                     background: transparent;
                     border: none;
                     border-radius: 6px;
-                    padding: 2px 4px;
+                    padding: 2px 0 2px 4px;
                     /* 折叠过渡：高度 0 时禁用滚动，避免用户看到残留滚动条 */
                     transition: max-height 200ms ease, opacity 160ms ease;
                 }}
@@ -4603,6 +4698,114 @@ class CodeWebViewer(QWebEngineView):
                     padding-top: 0;
                     padding-bottom: 0;
                     overflow: hidden;
+                }}
+
+                /* ── 任务列表（工具区最底部）── */
+                #todo-panel {{
+                    margin: 2px 2px 0 2px;
+                }}
+                /* 工具区折叠时 todo 面板一起收起 */
+                #tool-section[data-collapsed="true"] #todo-panel {{
+                    display: none;
+                }}
+                /* 任务列表分隔线（与 #tool-separator 同源样式）：标题+完成统计在分隔线上，任务项在其下 */
+                #todo-separator {{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    font-size: 13px;
+                    color: var(--text-muted);
+                    user-select: none;
+                    padding: 4px 2px 4px 2px;
+                    border-top: 1px dashed var(--border);
+                }}
+                #todo-separator::before,
+                #todo-separator::after {{
+                    content: '';
+                    flex: 1;
+                    height: 1px;
+                    background: transparent;
+                }}
+                #todo-separator #todo-progress {{
+                    font-size: 12px;
+                    color: var(--text-muted);
+                    white-space: nowrap;
+                }}
+                .todo-panel-header {{
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    font-size: 12px;
+                    font-weight: 600;
+                    color: var(--text-muted);
+                    user-select: none;
+                    padding: 2px 4px 3px 4px;
+                }}
+                /* 列表限高与 #tool-content 同尺度（600px），超出滚动 */
+                #todo-content {{
+                    position: relative;  /* 子项 offsetTop 相对本容器计算（in_progress 定位滚动依赖） */
+                    max-height: 600px;
+                    overflow-y: scroll;  /* 轨道常驻 + 右 padding 扣减：同 #tool-content */
+                    overflow-anchor: none;
+                    background: transparent;
+                    border-radius: 6px;
+                    padding: 2px 0 2px 4px;
+                }}
+                .todo-item {{
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 4px 6px;
+                    font-size: {body_font_size}px;
+                    line-height: 1.5;
+                    color: var(--text);
+                }}
+                .todo-item + .todo-item {{
+                    margin-top: 1px;
+                }}
+                /* 进行中：左侧蛇形转圈（.think-snake 由 _animateThinkSnake 统一驱动） */
+                .todo-item .todo-spin {{
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    flex: 0 0 auto;
+                }}
+                .todo-item .todo-spin svg {{
+                    display: block;
+                }}
+                .todo-item[data-status="in_progress"] .todo-text {{
+                    color: var(--accent-warm);
+                    font-weight: 600;
+                }}
+                /* 完成：✓ + 划掉 */
+                .todo-item .todo-done-icon {{
+                    flex: 0 0 auto;
+                    color: rgba(63, 185, 80, 0.95);
+                    font-weight: 700;
+                }}
+                .todo-item[data-status="completed"] .todo-text {{
+                    color: var(--text-muted);
+                    text-decoration: line-through;
+                }}
+                /* 待办：○ */
+                .todo-item .todo-pending-icon {{
+                    flex: 0 0 auto;
+                    color: var(--text-muted);
+                }}
+                /* 优先级染色：仅影响待办 ○ 圆点（in_progress 是 SVG 动画、completed 是 ✓ 已带语义色） */
+                .todo-item[data-priority="high"] .todo-pending-icon {{
+                    color: #ef4444;
+                }}
+                .todo-item[data-priority="medium"] .todo-pending-icon {{
+                    color: #f59e0b;
+                }}
+                .todo-item[data-priority="low"] .todo-pending-icon {{
+                    color: #3b82f6;
+                }}
+                .todo-item .todo-text {{
+                    flex: 1 1 auto;
+                    min-width: 0;
+                    overflow-wrap: break-word;
                 }}
                 /* 新工具块入场动效 — 仅对"真正新"的块生效
                    （无 data-tool-call-id 且非 restore 的块）。
@@ -4637,6 +4840,10 @@ class CodeWebViewer(QWebEngineView):
                 <span class="tool-separator-tooltip">点击折叠/展开工具与思考区</span>
               </div>
               <div id="tool-content"></div>
+              <div id="todo-panel" style="display: none;">
+                <div id="todo-separator"><span>📋 任务列表</span><span id="todo-progress"></span></div>
+                <div id="todo-content"></div>
+              </div>
             </div>
             <div id="content-placeholder"></div>
             <script>
@@ -4955,12 +5162,12 @@ class CodeWebViewer(QWebEngineView):
                         // 程序触发的滚动事件（解决 suppress=false 之后异步派发 scroll 的 race）。
                         // 此时 _suppressScrollEvent 仍为 true，所有 scroll 事件仍被抑制。
                         if (!_wasUserScrolled) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }} else {{
                             var _wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < _scrollThreshold;
                             if (_wasAtBottom) {{
-                                document.body.scrollTop = document.body.scrollHeight;
+                                _autoScrollStreamingBody();
                                 window._userScrolledWithin = false;
                             }}
                         }}
@@ -5043,11 +5250,11 @@ class CodeWebViewer(QWebEngineView):
                     // 同步滚动到底（流式期间通常期望跟到底部）
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -5105,11 +5312,11 @@ class CodeWebViewer(QWebEngineView):
                     restoreCollapsibleStates(container);
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -5118,6 +5325,7 @@ class CodeWebViewer(QWebEngineView):
                     window._suppressScrollEvent = false;
                     setTimeout(() => reportHeight(), 30);
                 }}
+                {_CONTENT_AUTOSCROLL_JS}
                 function reportHeight() {{
                     // 用 body.scrollHeight 获取完整内容高度。
                     // getBoundingClientRect 在 html{{overflow:hidden}} 下
@@ -5153,7 +5361,7 @@ class CodeWebViewer(QWebEngineView):
                 // JS 不再硬编码工具名。
                 var _EDIT_TOOLS_SELECTOR = ':not([data-keep-in-content="true"])';
 
-                // 更新"工具与思考"标题（总项数，无勾叉 badge）
+                // 更新"工具与思考"标题（总项数）
                 function _updateToolSectionHeader() {{
                     var toolContent = document.getElementById('tool-content');
                     var separator = document.getElementById('tool-separator');
@@ -5187,8 +5395,8 @@ class CodeWebViewer(QWebEngineView):
                         '[data-tool-call-id]' + _EDIT_TOOLS_SELECTOR
                     );
                     if (blocks.length === 0) {{
-                        // 容器没有需要迁移的块 —— 若 tool-content 也空就隐藏整个区
-                        if (toolContent.children.length === 0) {{
+                        // 容器没有需要迁移的块 —— 若 tool-content 空且无 todo 就隐藏整个区
+                        if (toolContent.children.length === 0 && !window._todoCount) {{
                             toolSection.style.display = 'none';
                             return;
                         }}
@@ -5196,8 +5404,8 @@ class CodeWebViewer(QWebEngineView):
                         // （markdown 被缩短、块被删除），仍需刷新 header
                         toolSection.style.display = '';
                         _updateToolSectionHeader();
-                        // 坞态（流式中）：自动滚底显示最新活动
-                        if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom(true);
+                        // 坞态（流式中）：自动滚底显示最新活动（尊重用户上滚）
+                        if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
                         return;
                     }}
                     // ── [PERF v2] 单次扫描 blocks：posMap + thinkKeys + toolIds + thinkStreaming ──
@@ -5414,7 +5622,7 @@ class CodeWebViewer(QWebEngineView):
                     toolSection.style.display = toolContent.children.length > 0 ? '' : 'none';
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                     // 坞态（流式中）：新条目进入后自动滚底
-                    if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom(true);
+                    if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
                 }}
                 // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
                 // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
@@ -5613,25 +5821,117 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 _animateThinkSnake();
 
+                // ===== 任务列表（嵌入工具区，随工具区折叠/归位/沉底）=====
+                var _TODO_SNAKE_SVG = '{_THINK_SNAKE_SVG}';
+                window._todoCount = 0;
+                window._todoProgressText = '';
+                window._updateTodoList = function(todos) {{
+                    var panel = document.getElementById('todo-panel');
+                    if (!panel) return;
+                    var content = document.getElementById('todo-content');
+                    var prog = document.getElementById('todo-progress');
+                    var ts = document.getElementById('tool-section');
+                    var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : null;
+                    if (!todos || !todos.length) {{
+                        window._todoCount = 0;
+                        window._todoProgressText = '';
+                        if (prog) prog.textContent = '';
+                        if (panel.style.display !== 'none') {{
+                            panel.style.display = 'none';
+                            // 无工具块时连工具区一起隐藏
+                            var _tc0 = document.getElementById('tool-content');
+                            if (ts && _tc0 && _tc0.children.length === 0) ts.style.display = 'none';
+                            if (hr) hr();
+                        }}
+                        if (ts && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
+                        return;
+                    }}
+                    var html = '';
+                    var done = 0;
+                    for (var i = 0; i < todos.length; i++) {{
+                        var t = todos[i] || {{}};
+                        var status = t.status || 'pending';
+                        if (status === 'completed') done++;
+                        var icon;
+                        if (status === 'in_progress') {{
+                            icon = '<span class="todo-spin">' + _TODO_SNAKE_SVG + '</span>';
+                        }} else if (status === 'completed') {{
+                            icon = '<span class="todo-done-icon">✓</span>';
+                        }} else {{
+                            icon = '<span class="todo-pending-icon">○</span>';
+                        }}
+                        html += '<div class="todo-item" data-status="' + status + '" data-priority="' + (t.priority || 'medium') + '">' + icon +
+                                '<span class="todo-text">' + (t.content || '') + '</span></div>';
+                    }}
+                    window._todoCount = todos.length;
+                    // 重建前保存用户滚动状态：innerHTML 重建会把 scrollTop 归零，
+                    // 且归零触发的 scroll 事件会误置 _userScrolledUp（用 _progScroll 吞掉）
+                    var _wasUp = !!content._userScrolledUp;
+                    var _prevTop = content.scrollTop;
+                    content._progScroll = true;
+                    content.innerHTML = html;
+                    var progText = ' ' + done + '/' + todos.length + ' 完成';
+                    window._todoProgressText = progText;
+                    if (prog) prog.textContent = progText;
+                    panel.style.display = '';
+                    // 有 todo 时工具区必须可见（即使暂无工具/思考块）
+                    if (ts) ts.style.display = '';
+                    if (ts && typeof _updateToolSectionHeader === 'function') _updateToolSectionHeader();
+                    // 始终保持第一个进行中任务可见（列表超出限高时滚动到可视区）
+                    // 双 rAF：面板可能刚 display:''，等布局完成后再读 offsetTop/clientHeight。
+                    // 手动设 scrollTop 只动本容器，不扰动祖先链（scrollIntoView 会连带滚 body/工具区）。
+                    // 用户上滚查看中 → 恢复原位置；未滚动 → 定位到进行中项
+                    window._todoScrollToken = (window._todoScrollToken || 0) + 1;
+                    var _tk = window._todoScrollToken;
+                    requestAnimationFrame(function() {{
+                        requestAnimationFrame(function() {{
+                            if (_tk !== window._todoScrollToken) return;  // 已有更新，放弃旧滚动
+                            content._progScroll = true;
+                            if (_wasUp) {{
+                                var _maxT = Math.max(0, content.scrollHeight - content.clientHeight);
+                                content.scrollTop = Math.min(_prevTop, _maxT);
+                                return;
+                            }}
+                            var act = content.querySelector('.todo-item[data-status="in_progress"]');
+                            if (!act) return;
+                            var target = act.offsetTop - (content.clientHeight - act.offsetHeight) / 2;
+                            var maxScroll = content.scrollHeight - content.clientHeight;
+                            content.scrollTop = Math.max(0, Math.min(target, Math.max(0, maxScroll)));
+                        }});
+                    }});
+                    if (hr) hr();
+                }};
+
                 // ===== 工具区（#tool-content）自动滚底 =====
                 // 当工具/思考区有新内容时，自动滚动到底部，让用户始终看到最新状态。
-                // force=true：跳过 _userScrolledUp 检查（用于 reorganizeContent 程序性更新）
-                function _scrollToolContentToBottom(force) {{
+                // 用户主动上滚后不再打扰（_userScrolledUp），滚回底部附近自动恢复跟随。
+                function _scrollToolContentToBottom() {{
                     var tc = document.getElementById('tool-content');
                     if (!tc) return;
                     // 用户主动向上滚动了工具区则不自动滚底
-                    if (tc._userScrolledUp && !force) return;
+                    if (tc._userScrolledUp) return;
+                    // 抑制本次程序滚底触发的 scroll 事件：异步 scroll 到达时
+                    // scrollHeight 可能已增长（流式新块加入），atBottom 误判 false
+                    // 会错误置位 _userScrolledUp 导致跟随中断。
+                    tc._progScroll = true;
                     tc.scrollTop = tc.scrollHeight;
-                    // ⚡ 修复：reorganizeContent 是程序性内容重组，不受旧 _userScrolledUp 影响，
-                    // 滚底后清除标志，防止异步 scroll 事件在下一轮渲染中误设标志。
-                    if (force) tc._userScrolledUp = false;
                 }}
                 // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
                 document.getElementById('tool-content')?.addEventListener('scroll', function() {{
                     var tc = this;
+                    // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
+                    if (tc._progScroll) {{ tc._progScroll = false; return; }}
                     var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
                     tc._userScrolledUp = !atBottom;
                     if (atBottom) tc._userScrolledUp = false;
+                }});
+                // 任务列表滚动跟踪：与工具区同款（程序滚动/重建不算用户行为）
+                document.getElementById('todo-content')?.addEventListener('scroll', function() {{
+                    var td = this;
+                    if (td._progScroll) {{ td._progScroll = false; return; }}
+                    var atBottom = Math.abs(td.scrollHeight - td.scrollTop - td.clientHeight) < 30;
+                    td._userScrolledUp = !atBottom;
+                    if (atBottom) td._userScrolledUp = false;
                 }});
                 {_STREAMING_DOCK_JS}
 
@@ -5896,11 +6196,11 @@ class CodeWebViewer(QWebEngineView):
                 // 快速流式时时间窗永不过期导致用户滚轮被永久忽略）。
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
-                    document.body.scrollTop = document.body.scrollHeight;
+                    _autoScrollStreamingBody();
                 }} else {{
                     var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
                     if (wasAtBottom) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                         window._userScrolledWithin = false;
                     }}
                 }}
@@ -6639,7 +6939,7 @@ class CodeWebViewer(QWebEngineView):
             "if(typeof _scrollToolContentToBottom==='function')_scrollToolContentToBottom();"
             "if(window._toolCompactMode){"
             "var _ts2=document.getElementById('tool-section');"
-            "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)?'':'none';_updateToolSectionHeader();}"
+            "if(_ts2){_ts2.style.display=(_tc&&_tc.children.length>0)||window._todoCount?'':'none';_updateToolSectionHeader();}"
             "}"
             "})();"
         )
@@ -6735,6 +7035,10 @@ class CodeWebViewer(QWebEngineView):
         非简洁模式注入为空操作。JS 未就绪时跳过——_on_js_ready 会按当前
         _streaming / _is_history 状态兜底同步。
         """
+        # 欢迎卡片（light 骨架）不进入坞态：坞态 CSS 会限死正文高度，
+        # 欢迎卡片的长内容（会话列表/项目列表）会被截断在 330px。
+        if self._light_skeleton:
+            return
         try:
             if self._is_js_ready and self.page():
                 flag = "true" if active else "false"
@@ -7655,8 +7959,14 @@ class PlainTextViewer(QWidget):
         if self.maximumWidth() != bubble_w:
             self.setMaximumWidth(bubble_w)
 
-        # 高度按气泡实际宽计算（viewport 在气泡收紧瞬间可能仍是旧值，不可信）
-        doc.setTextWidth(bubble_w)
+        # 高度按气泡实际宽计算（viewport 在气泡收紧瞬间可能仍是旧值，不可信）。
+        # 测量宽必须对齐真实渲染视口：text_edit 宽 = bubble_w - 16(布局边距 8×2)，
+        # QTextDocument 渲染内容宽再减 docMargin 4×2。旧实现 setTextWidth(bubble_w)
+        # 比渲染宽大 16px → "测量不溢出、渲染溢出"错位 → 滚动条出现 → 视口再窄
+        # 6px → 内容重折行 → 高度变化 → 滚动条消失 → 宽度反馈环（气泡滚动条
+        # 反复出现/消失抖动）。对齐无滚动条渲染宽后两态各自稳定：无溢出时测量=
+        # 渲染；溢出时滚动条只会让渲染更窄更高，方向单调不回摆。
+        doc.setTextWidth(bubble_w - 16)
         h = int(math.ceil(doc.size().height())) + 12  # 上下边距
 
         # 限制最大高度：内容超出 MAX_HEIGHT 后由 QTextEdit 内部滚动条处理滚动
@@ -7905,6 +8215,9 @@ class MessageCard(SimpleCardWidget):
             self._content_data.append({"type": "reasoning", "content": reasoning_content})
         self._streaming = False
         self._retrying = False  # 重试模式标志
+        # 任务列表快照（卡片底部内嵌 todo 区数据）：viewer 未创建/JS 未就绪时
+        # 暂存，viewer 就绪后补推；骨架重载后据此恢复。
+        self._todos_snapshot: Optional[list] = None
         self._retry_error_type = ""  # 重试错误类型
         self._retry_attempt = 0  # 当前重试次数
         self._retry_max = 15  # 最大重试次数
@@ -7927,6 +8240,14 @@ class MessageCard(SimpleCardWidget):
         self._anim_timer = QTimer(self)
         self._anim_timer.timeout.connect(self._update_anim)
         self._pulse_phase = 0.0
+        # M1 性能缓存：流式脉动渐变/调色板/裁剪路径模板（相位无关对象，
+        # paintEvent 内仅改色/坐标，避免每帧 new 数十个临时对象）。
+        self._rainbow_normal = [QColor(c) for c in ("#60D4FF","#40C8FF","#4DA6FF","#8B7BFF","#C084FC","#F472B6","#FB7185","#F59E0B","#34D399","#22D3EE")]
+        self._rainbow_retry = [QColor(c) for c in ("#ff2222","#aa0000","#ff3333","#880000","#ff1111","#bb0000","#ff4444","#990000")]
+        self._grad_main, self._grad_inner, self._grad_glow, self._grad_shimmer = (QLinearGradient(0, 0, 1, 1) for _ in range(4))
+        self._clip_inner = self._clip_outer = self._clip_inner_edge = self._clip_border = QPainterPath()
+        self._clip_inner_border = self._clip_shimmer = self._clip_top = self._clip_glow_region = self._clip_border_region = QPainterPath()
+        self._clip_w = self._clip_h = -1
         self._height_anim = QVariantAnimation(self)
         self._height_anim.setDuration(180)
         self._height_anim.setEasingCurve(QEasingCurve.OutCubic)
@@ -8861,6 +9182,19 @@ class MessageCard(SimpleCardWidget):
             main.addWidget(self._viewer_container)
             self._lazy_rendered = False
             self.viewer = None  # 懒加载，延后创建
+            self.resize_placeholder = QFrame(self)
+            self.resize_placeholder.setVisible(False)
+            self.resize_placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.resize_placeholder.setStyleSheet(
+                """
+                QFrame {
+                    background: rgba(255,255,255,0.035);
+                    border: 1px dashed rgba(255,255,255,0.08);
+                    border-radius: 12px;
+                }
+                """
+            )
+            main.addWidget(self.resize_placeholder)
         elif self.role != "user":  # user 已在 _setup_user_bubble 创建，不再进入懒渲染
             # 懒渲染：占位符，不立即创建QWebEngine，进入可视区域再创建
             placeholder = QLabel("加载中...", self)
@@ -9214,6 +9548,10 @@ class MessageCard(SimpleCardWidget):
             self.viewer._markdown_text = markdown_text
             self.viewer._schedule_render(immediate=True)
 
+        # 任务列表随 viewer 重建补推（_pending_todos 由 viewer._on_js_ready 消费）
+        if self._todos_snapshot is not None:
+            self._push_todo_list()
+
         # 恢复正常样式
         self._apply_card_style()
         self._webengine_needs_restore = False
@@ -9260,32 +9598,7 @@ class MessageCard(SimpleCardWidget):
                 bl = int(a.blue() + (b.blue() - a.blue()) * t)
                 return QColor(r, g, bl)
 
-            if self._retrying:
-                # ── 重试模式：红色流动渐变 ──
-                rainbow = [
-                    QColor("#ff2222"),  # 鲜红
-                    QColor("#aa0000"),  # 暗红
-                    QColor("#ff3333"),  # 亮红
-                    QColor("#880000"),  # 深红
-                    QColor("#ff1111"),  # 火红
-                    QColor("#bb0000"),  # 酒红
-                    QColor("#ff4444"),  # 浅红
-                    QColor("#990000"),  # 暗深红
-                ]
-            else:
-                # ── 正常模式：10 色精细彩虹 ──
-                rainbow = [
-                    QColor("#60D4FF"),  # 天蓝
-                    QColor("#40C8FF"),  # 青蓝
-                    QColor("#4DA6FF"),  # 柔蓝
-                    QColor("#8B7BFF"),  # 薰衣草
-                    QColor("#C084FC"),  # 紫罗兰
-                    QColor("#F472B6"),  # 玫瑰粉
-                    QColor("#FB7185"),  # 珊瑚红
-                    QColor("#F59E0B"),  # 琥珀金
-                    QColor("#34D399"),  # 翠绿
-                    QColor("#22D3EE"),  # 青色
-                ]
+            rainbow = self._rainbow_retry if self._retrying else self._rainbow_normal
             N = len(rainbow)
             # 主边框连续相位
             shift_main = (self._pulse_phase / (math.pi * 2)) * N
@@ -9294,9 +9607,10 @@ class MessageCard(SimpleCardWidget):
             # 流光带相位
             shift_shimmer = shift_main * 1.15
 
-            def build_gradient(shift: float, stops: list, alpha_base: float) -> QLinearGradient:
-                """用连续相位生成平滑渐变：每个 stop 点用前后两色插值"""
-                grad = QLinearGradient(0, 0, w, h)
+            def build_gradient(grad: QLinearGradient, shift: float, stops: list, alpha_base: float) -> QLinearGradient:
+                """相位无关模板 grad 复用：仅改坐标与 stop 颜色，不每帧 new"""
+                grad.setStart(0, 0)
+                grad.setFinalStop(w, h)
                 for pos in stops:
                     raw = (shift + pos * N) % N
                     idx = int(raw) % N
@@ -9319,11 +9633,22 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层1：内壁漫射（极柔和的边缘渗光）
         # ══════════════════════════════════════════════════════
-        inner_clip = QPainterPath()
-        inner_clip.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
+        # M1：裁剪路径按几何缓存，仅尺寸变化时重建，不再每帧 new QPainterPath
+        if self._clip_w != w or self._clip_h != h:
+            self._clip_w, self._clip_h = w, h
+            self._clip_inner = QPainterPath(); self._clip_inner.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
+            self._clip_outer = QPainterPath(); self._clip_outer.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
+            self._clip_inner_edge = QPainterPath(); self._clip_inner_edge.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+            self._clip_border = QPainterPath(); self._clip_border.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+            self._clip_inner_border = QPainterPath(); self._clip_inner_border.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
+            self._clip_shimmer = QPainterPath(); self._clip_shimmer.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
+            self._clip_top = QPainterPath(); self._clip_top.addRoundedRect(0, 0, w, h, radius, radius)
+            self._clip_glow_region = self._clip_outer - self._clip_inner_edge
+            self._clip_border_region = self._clip_border - self._clip_inner_border
+        inner_clip = self._clip_inner
         painter.setClipPath(inner_clip)
         if self.role == "assistant":
-            inner_gradient = build_gradient(shift_glow, inner_stops, 12)
+            inner_gradient = build_gradient(self._grad_inner, shift_glow, inner_stops, 12)
         else:
             inner_gradient = QLinearGradient(0, 0, w, h)
             c = QColor(pulse.lighter(150))
@@ -9335,14 +9660,12 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层2：外发光（霓虹光晕，7px宽，比主边框更宽更柔和）
         # ══════════════════════════════════════════════════════
-        outer_clip = QPainterPath()
-        outer_clip.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
-        inner_edge_clip = QPainterPath()
-        inner_edge_clip.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
-        glow_region = outer_clip - inner_edge_clip
+        outer_clip = self._clip_outer
+        inner_edge_clip = self._clip_inner_edge
+        glow_region = self._clip_glow_region
         painter.setClipPath(glow_region)
         if self.role == "assistant":
-            glow_gradient = build_gradient(shift_glow, glow_stops, 48)
+            glow_gradient = build_gradient(self._grad_glow, shift_glow, glow_stops, 48)
         else:
             glow_gradient = QLinearGradient(0, 0, w, h)
             glow_gradient.setColorAt(0.0, QColor(pulse.lighter(130).name()))
@@ -9356,14 +9679,12 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层3：主彩色边框（4px，饱和鲜艳）
         # ══════════════════════════════════════════════════════
-        border_clip = QPainterPath()
-        border_clip.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
-        inner_border_clip = QPainterPath()
-        inner_border_clip.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
-        border_region = border_clip - inner_border_clip
+        border_clip = self._clip_border
+        inner_border_clip = self._clip_inner_border
+        border_region = self._clip_border_region
         painter.setClipPath(border_region)
         if self.role == "assistant":
-            main_gradient = build_gradient(shift_main, main_stops, 215)
+            main_gradient = build_gradient(self._grad_main, shift_main, main_stops, 215)
         else:
             main_gradient = QLinearGradient(0, 0, w, h)
             glow_a = int((90 + 45 * (math.sin(self._pulse_phase * 1.5) + 1) / 2) * breathe)
@@ -9381,12 +9702,13 @@ class MessageCard(SimpleCardWidget):
         #  层4：流光高光带（白色细光条快速划过）
         # ══════════════════════════════════════════════════════
         if self.role == "assistant":
-            shimmer_clip = QPainterPath()
-            shimmer_clip.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
+            shimmer_clip = self._clip_shimmer
             painter.setClipPath(shimmer_clip)
             # 流光位置：连续小数，避免跳变
             shimmer_pos = (shift_shimmer % N) / N
-            shimmer_band_gradient = QLinearGradient(0, 0, w, h)
+            shimmer_band_gradient = self._grad_shimmer
+            shimmer_band_gradient.setStart(0, 0)
+            shimmer_band_gradient.setFinalStop(w, h)
             shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.07), QColor(0, 0, 0, 0))
             shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.03), QColor(255, 255, 255, int(80 * shimmer)))
             shimmer_band_gradient.setColorAt(shimmer_pos, QColor(255, 255, 255, int(150 * shimmer)))
@@ -9400,8 +9722,7 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层5：顶部高光条（柔和的光泽）
         # ══════════════════════════════════════════════════════
-        top_clip = QPainterPath()
-        top_clip.addRoundedRect(0, 0, w, h, radius, radius)
+        top_clip = self._clip_top
         painter.setClipPath(top_clip)
         if self.role == "assistant":
             if self._retrying or self.error:
@@ -9590,13 +9911,13 @@ class MessageCard(SimpleCardWidget):
                     "(function(){"
                     "  window._suppressScrollEvent = true;"
                     "  if (!window._userScrolledWithin) {"
-                    "    document.body.scrollTop = document.body.scrollHeight;"
+                    "    _autoScrollStreamingBody();"
                     "  } else {"
                     "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < "
                     + str(AUTO_SCROLL_THRESHOLD)
                     + ";"
                     "    if (wasAtBottom) {"
-                    "      document.body.scrollTop = document.body.scrollHeight;"
+                    "      _autoScrollStreamingBody();"
                     "      window._userScrolledWithin = false;"
                     "    }"
                     "  }"
@@ -9675,11 +9996,7 @@ class MessageCard(SimpleCardWidget):
         if self.role == "user":
             return
 
-        # welcome 卡片不需要 resize placeholder
-        if self.role == "welcome":
-            return
-
-        # 懒渲染还没创建viewer，跳过
+        # 懒渲染还没创建viewer，跳过（welcome 卡已创建 viewer 时同样走占位逻辑）
         if self.viewer is None:
             return
 
@@ -9843,6 +10160,10 @@ class MessageCard(SimpleCardWidget):
             # 创建 viewer 完成（不可见门控已放行），清除"推迟渲染"标记；
             # 若下方 set_content 因 JS 未就绪再次 deferred，由 _on_js_ready 兜底补渲。
             self._render_deferred = False
+
+            # 任务列表随 viewer 创建补推（JS 未就绪时由 _on_js_ready 兜底）
+            if self._todos_snapshot is not None:
+                self._push_todo_list()
 
             # 如果有等待渲染的内容，现在渲染
             if self._pending_content is not None:
@@ -10316,11 +10637,11 @@ class MessageCard(SimpleCardWidget):
                     }}
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -10348,11 +10669,11 @@ class MessageCard(SimpleCardWidget):
                 // 🐛 修复：追加新块后同步滚动 document.body，替换旧的 tc.scrollTop
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
-                    document.body.scrollTop = document.body.scrollHeight;
+                    _autoScrollStreamingBody();
                 }} else {{
                     var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                     if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                         window._userScrolledWithin = false;
                     }}
                 }}
@@ -10612,7 +10933,7 @@ class MessageCard(SimpleCardWidget):
                         // 🐛 修复：状态更新后 body 自动滚底
                         window._suppressScrollEvent = true;
                         if (!window._userScrolledWithin) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                         }}
                         // 🐛 修复：工具区内部自动滚底
                         if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
@@ -10639,11 +10960,11 @@ class MessageCard(SimpleCardWidget):
                     // 🐛 修复：预览内容更新后 body 自动滚底
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -10670,11 +10991,11 @@ class MessageCard(SimpleCardWidget):
                     // 🐛 修复：追加新块后 body 自动滚底，替换旧的 tc.scrollTop
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        document.body.scrollTop = document.body.scrollHeight;
+                        _autoScrollStreamingBody();
                     }} else {{
                         var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
-                            document.body.scrollTop = document.body.scrollHeight;
+                            _autoScrollStreamingBody();
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -10848,6 +11169,45 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             pass
 
+    # ── 任务列表（卡片底部内嵌 todo 区，替代原悬浮卡片）──
+
+    def update_todo_list(self, todos):
+        """更新卡片底部任务列表
+
+        Args:
+            todos: [{status: pending|in_progress|completed, content: str, priority: ...}, ...]
+                   空列表 → 隐藏任务区。
+        """
+        self._todos_snapshot = list(todos or [])
+        self._push_todo_list()
+
+    def _push_todo_list(self):
+        """把 _todos_snapshot 推送到 viewer 内的 #todo-section
+
+        viewer 未创建（懒加载）/ JS 未就绪时仅写 viewer._pending_todos，
+        由 viewer 创建点或 _on_js_ready 兜底补推。
+        """
+        v = self.viewer
+        if v is None or not isinstance(v, CodeWebViewer):
+            return
+        v._pending_todos = self._todos_snapshot
+        if not getattr(v, "_is_js_ready", False):
+            return
+        try:
+            payload = [
+                {
+                    "status": item.get("status", "pending") if isinstance(item, dict) else "pending",
+                    "content": escape(item.get("content", "") if isinstance(item, dict) else str(item)),
+                    # 优先级：high/medium/low（来自 todowrite 工具 _normalize_todos 默认 medium）
+                    "priority": (item.get("priority", "medium") if isinstance(item, dict) else "medium") or "medium",
+                }
+                for item in (self._todos_snapshot or [])
+            ]
+            data = json.dumps(payload).decode("utf-8")
+            v.page().runJavaScript(f"window._updateTodoList && window._updateTodoList({data});")
+        except RuntimeError:
+            pass
+
     def update_tool_streaming(
         self,
         tool_call_id: str,
@@ -11012,9 +11372,11 @@ class MessageCard(SimpleCardWidget):
             self._pending_content = self._content_data
             return
 
-        # 标记内容已加载，高度变化时触发 _on_message_card_height_changed 滚底
-        self._content_just_loaded = True
-
+        # 🔧 不设置 _content_just_loaded：思考流式更新不应触发外部消息列表滚动，
+        # 仅 #tool-content 内部自动滚底（见 JS 注入代码）。与 _inject_tool_streaming_html
+        # 行为一致——工具与思考区是卡片内部独立滚动容器，正文区未更新时外部滚动条
+        # 不应被强制拉底（用户在阅读正文时会被打断）。
+        #
         # 🆕 方案B：首个 reasoning chunk 渲染"深度思考中..." spinner，后续静默累积
         # 不更新 DOM / 不触发渲染定时器 / 不更新高度，等 thinking 结束后的全量渲染
         # （由 append_text / finish_streaming / _maybe_finish_thinking_for_tool 触发）一并处理
@@ -11024,8 +11386,12 @@ class MessageCard(SimpleCardWidget):
             # start_new_thinking_block 不再重置此标志，防止两轮之间的空窗期
             # 已完成 think-block 的 </think> 被错误剥离为 think-streaming。
             self.viewer._thinking_finalized = False
-            # 首 chunk：增量高度 + 立即全量渲染显示 spinner
-            self._update_thinking_incremental(text)
+            # 首 chunk：立即全量渲染显示 spinner。_schedule_render 会触发高度报告，
+            # 由 _on_message_card_height_changed 走"流式首屏"语义统一滚底——这与正文
+            # 首次到达场景一致（用户期待滚底跟随）。
+            # 不调用 _update_thinking_incremental：原方法会主动 reportHeightDebounced
+            # 并设置 _content_just_loaded，导致外部 chat_scroll_area 在正文未更新时被强制
+            # 滚底，破坏阅读。首 chunk 的全量渲染已自然带高度报告，无需额外触发。
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             self.viewer._schedule_render(immediate=True)
         else:
@@ -11038,13 +11404,13 @@ class MessageCard(SimpleCardWidget):
 
         思考中不再更新预览文字，仅显示转圈+思考中。
         结束时通过全量渲染更新预览文字到 summary 右侧。
+
+        注意：本方法已被 append_reasoning 首 chunk 路径不再调用（保留为内部辅助函数，
+        供未来增量思考场景使用）。不在此设置 _content_just_loaded，也不主动报告
+        高度——避免外部 chat_scroll_area 因思考区内部高度变化被强制滚底，破坏正文阅读。
         """
         if not hasattr(self.viewer, "page"):
             return
-
-        # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
-        # 触发消息列表滚底。
-        self._content_just_loaded = True
 
         try:
             # 仅触发布局高度重算，不再更新 .think-streaming-preview

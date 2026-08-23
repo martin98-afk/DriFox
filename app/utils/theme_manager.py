@@ -389,6 +389,21 @@ class ThemeManager:
             ThemeRefreshCoordinator.should_skip(self.get_current_theme_id())
         except Exception:
             pass
+        # Phase E：发布主题切换事件（供插件订阅刷新自定义 UI）
+        try:
+            from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+
+            theme_id = self.get_current_theme_id()
+            theme_obj = self.get_current_theme() or {}
+            is_dark = not self.is_light_theme(theme_id)
+            UIEventBus.get_instance().publish(
+                EV_THEME_CHANGED,
+                theme_id=theme_id,
+                theme_name=theme_obj.get("name", theme_id) if isinstance(theme_obj, dict) else theme_id,
+                is_dark=is_dark,
+            )
+        except Exception:
+            pass
 
     def dispatch_refresh(self) -> None:
         """向所有已注册的 widget 分发 refresh_theme() 调用

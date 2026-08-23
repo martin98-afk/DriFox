@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 import threading
@@ -185,6 +186,60 @@ class _PluginRegistryProxy:
         return ok
 
 
+def _is_tool_entry_module(source: str, path: Path) -> bool:
+    """判断文件是否为工具入口模块（须定义 register(registry) 且不得污染 sys.modules）。
+
+    加载安全网：仅当文件确实暴露 register 入口、且不在模块级直接操作
+    sys.modules（如 sys.modules.update 覆盖核心模块 app.tools）时才 exec。
+    跳过测试脚本/临时文件/误放入 tools/ 目录的其他模块，防止其模块级代码
+    在 exec 时污染全局 sys.modules。
+
+    文件名快速过滤（test_*/conftest）+ AST 精确判定（register 函数 +
+    拒绝 sys.modules 变异），防止误判 'tool_register=' 等相似标识符。
+    """
+    name = path.name
+    if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
+        return False
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    has_register = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "register":
+            has_register = True
+        if _is_sys_modules_mutation(node):
+            logger.warning(f"[PluginToolLoader] 拒绝加载疑似污染 sys.modules 的文件: {path}")
+            return False
+    return has_register
+
+
+def _is_sys_modules_mutation(node: "ast.AST") -> bool:
+    """检测节点是否为直接操作 sys.modules 的危险语句（污染核心模块的元凶）。
+
+    覆盖两种常见形式：sys.modules.update({...}) 与 sys.modules['x'] = <obj>。
+    """
+    # sys.modules.update(...)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        val = node.func.value
+        if (
+            isinstance(val, ast.Attribute)
+            and val.attr == "modules"
+            and isinstance(val.value, ast.Name)
+            and val.value.id == "sys"
+            and node.func.attr == "update"
+        ):
+            return True
+    # sys.modules[...] = ...
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Attribute):
+                val = target.value
+                if val.attr == "modules" and isinstance(val.value, ast.Name) and val.value.id == "sys":
+                    return True
+    return False
+
+
 def _load_module(plugin_name: str, path: Path):
     """加载插件工具模块（唯一模块名，避免命名冲突）。
 
@@ -207,11 +262,22 @@ def _load_module(plugin_name: str, path: Path):
     sys.modules[mod_name] = module
     try:
         source = path.read_text(encoding="utf-8")
-        code = compile(source, str(path), "exec")
     except (OSError, SyntaxError) as e:
         sys.modules.pop(mod_name, None)
         logger.warning(f"[PluginToolLoader] 读取/编译失败 {path}: {e}")
         return None
+    # [SAFETY] 加载安全网：仅加载暴露 register(registry) 入口的工具文件。
+    # 跳过无 register 入口的文件（测试脚本/临时文件/误放入 tools/ 目录的模块），
+    # 避免其模块级代码（如 sys.modules.update 覆盖核心模块 app.tools）在 exec
+    # 时污染全局 sys.modules。
+    # 事故复盘 2026-08-22：自测脚本 test_scaffold_storage.py 落入 self-evolver/tools/，
+    # 其模块级 sys.modules.update({"app.tools": ModuleType(...)}) 覆盖真模块，
+    # 导致后续 `from app.tools import X` 全部 (unknown location) 崩溃。
+    if not _is_tool_entry_module(source, path):
+        sys.modules.pop(mod_name, None)
+        logger.debug(f"[PluginToolLoader] 跳过非工具入口文件（无 register 函数）: {path}")
+        return None
+    code = compile(source, str(path), "exec")
     try:
         exec(code, module.__dict__)
     except Exception:

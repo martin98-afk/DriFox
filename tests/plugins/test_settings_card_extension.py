@@ -89,7 +89,7 @@ def test_rebuild_idempotent(qtbot, settings_card, fresh_registry):
     settings_card.rebuild_plugin_cards()
     assert settings_card._plugin_cards_layout.count() == 1
 
-    fresh_registry._settings_cards.clear()
+    fresh_registry.unload_plugin("demo")
     settings_card.rebuild_plugin_cards()
     assert settings_card._plugin_cards_layout.count() == 0
     assert settings_card._plugin_cards_widget.isVisible() is False
@@ -109,6 +109,36 @@ def test_rebuild_exception_safe(qtbot, settings_card, fresh_registry):
     fresh_registry.register_settings_card("demo", "good", "好卡", _GoodCard)
     settings_card.rebuild_plugin_cards()
     assert settings_card._plugin_cards_layout.count() == 1  # 只有好卡
+
+
+# ---------- Phase E：section 分区 ----------
+
+
+class TestSettingsCardSection:
+    def test_default_section_plugins(self, fresh_registry):
+        class _Card:
+            pass
+
+        fresh_registry.register_settings_card("demo", "c1", "T", _Card)
+        assert fresh_registry.get_settings_cards()[0].section == "plugins"
+        assert fresh_registry.get_region_entries("settings:plugins")
+
+    def test_section_routes_to_region(self, fresh_registry):
+        class _Card:
+            pass
+
+        fresh_registry.register_settings_card("demo", "c2", "T", _Card, section="appearance")
+        assert fresh_registry.get_region_entries("settings:appearance")
+        assert not fresh_registry.get_region_entries("settings:plugins")
+        # get_settings_cards 返回全量合集（兼容旧消费端）
+        assert [c.card_id for c in fresh_registry.get_settings_cards()] == ["c2"]
+
+    def test_invalid_section_rejected(self, fresh_registry):
+        class _Card:
+            pass
+
+        with pytest.raises(ValueError, match="section"):
+            fresh_registry.register_settings_card("demo", "c3", "T", _Card, section="nowhere")
 
 
 if __name__ == "__main__":

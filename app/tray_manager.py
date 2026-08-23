@@ -85,6 +85,10 @@ class _HotkeyNativeFilter(QAbstractNativeEventFilter):
         return (False, 0)
 
 
+# 托盘显隐切换防抖间隔（毫秒）：全局热键 + QShortcut 兜底同时触发时去重
+_TRAY_TOGGLE_DEBOUNCE_MS = 500
+
+
 class TrayManager(QObject):
     """全局唯一托盘图标管理器，管理所有聊天窗口的托盘行为"""
 
@@ -1109,7 +1113,7 @@ class TrayManager(QObject):
         """
         # 防重复触发（全局热键 + QShortcut 兜底同时触发时）
         now = time.perf_counter()
-        if now - self._last_toggle_time < 0.5:
+        if now - self._last_toggle_time < _TRAY_TOGGLE_DEBOUNCE_MS / 1000.0:
             return
         self._last_toggle_time = now
 

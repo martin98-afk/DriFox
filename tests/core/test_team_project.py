@@ -169,8 +169,8 @@ class TestTeamProjectBroadcast:
         with patch.object(OpenAIChatToolWindow, "_instances", [sender, member1, member2, other_team, nonmember]):
             sender._broadcast_team_project("P1")
 
-        # 团队级 project 已写入
-        assert fresh_tm.get_team_project() == "P1"
+        # 团队级 project 已写入（#5a-fix Plan C：按 run_id 粒度）
+        assert fresh_tm.get_project_for_run_id("run_1") == "P1"
         # 同团队成员收到广播
         member1._apply_team_project.assert_called_once_with("P1")
         member2._apply_team_project.assert_called_once_with("P1")
@@ -218,8 +218,8 @@ class TestTeamProjectBroadcast:
         with patch.object(OpenAIChatToolWindow, "_instances", [sender, member_same, member_diff]):
             sender._broadcast_team_project("P1", prev_project="P0")
 
-        # 团队级 project 已写入
-        assert fresh_tm.get_team_project() == "P1"
+        # 团队级 project 已写入（#5a-fix Plan C：按 run_id 粒度）
+        assert fresh_tm.get_project_for_run_id("run_1") == "P1"
         # 项目一致的接收方收到广播
         member_same._apply_team_project.assert_called_once_with("P1")
         # 项目不一致的接收方被跳过（Bug A 防护）

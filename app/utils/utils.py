@@ -17,6 +17,7 @@ import re
 import socket
 import sys
 import weakref
+from collections import OrderedDict
 from pathlib import Path
 
 import orjson as json
@@ -285,7 +286,9 @@ def get_port_node(port):
 
 
 # 图标缓存（仅按 icon_name 缓存 QIcon，theme 感知由 QIconEngine 处理）
-_ICON_CACHE: dict = {}
+# LRU 缓存（max 256），超限驱逐最久未访问条目，避免图标字典无限膨胀。
+_ICON_CACHE: OrderedDict = OrderedDict()
+_ICON_CACHE_MAX = 256
 
 
 class _ThemeIconEngine(QIconEngine):
@@ -363,10 +366,13 @@ def get_icon(icon_name: str) -> QIcon:
         QIcon 实例
     """
     if icon_name in _ICON_CACHE:
+        _ICON_CACHE.move_to_end(icon_name)
         return _ICON_CACHE[icon_name]
 
     icon = QIcon(_ThemeIconEngine(icon_name))
     _ICON_CACHE[icon_name] = icon
+    if len(_ICON_CACHE) > _ICON_CACHE_MAX:
+        _ICON_CACHE.popitem(last=False)
     return icon
 
 

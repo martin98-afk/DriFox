@@ -215,7 +215,7 @@ def _safe_agent_manager(backend: "ChatBackend") -> Any:
     """
     try:
         return object.__getattribute__(backend, "_agent_manager")
-    except (AttributeError, RuntimeError):
+    except AttributeError, RuntimeError:
         return None
 
 
@@ -547,6 +547,8 @@ class ChatBackend(QObject):
 
             # PreToolUse → 独立队列（worker 在 tool 执行后立即消费，插入 tool result 之前）
             # PostToolUse → 主队列（在 loop 顶部消费，出现在 tool result 之后）
+            # PluginChanged → 主队列（环境事件，触发时通常无活跃对话，排队至下轮 loop 顶部
+            #   消费，AI 下一轮对话可见工具/MCP/插件增减明细）
             # prompt hooks → 主队列
             if event_name == "PreToolUse":
                 hook_output = _format_hook_output(event_name, output, status_message)
@@ -558,7 +560,7 @@ class ChatBackend(QObject):
                     }
                 )
                 logger.debug("[HookManager] PreToolUse queued to pre-tool queue")
-            elif is_prompt_hook or event_name == "PostToolUse":
+            elif is_prompt_hook or event_name in ("PostToolUse", "PluginChanged"):
                 hook_output = _format_hook_output(event_name, output, status_message)
                 self._hook_message_queue.put(
                     {
@@ -731,6 +733,16 @@ class ChatBackend(QObject):
 
             # 触发引擎 watcher（注册/热重载），无插件时 no-op
             ensure_engine_watcher()
+            # 多窗口隔离：团队成员窗口使用 team_member 策略（跳过 Pre/PostAssistant
+            # 等主对话语义 hook，避免污染成员的邮件驱动对话流边界）。
+            hook_policy_id = None
+            try:
+                from app.core.team_manager import TeamManager
+
+                if TeamManager.get_instance().is_team_member(self._window_id):
+                    hook_policy_id = "team_member"
+            except Exception:
+                pass
             self._chat_engine = create_engine_for_slot(
                 "ui",
                 ChatEngine,
@@ -740,6 +752,7 @@ class ChatBackend(QObject):
                 agent_manager=self._agent_manager,
                 get_chat_cards=getattr(self, "_build_chat_cards_context", None),
                 backend=self,
+                hook_policy_id=hook_policy_id,
             )
             logger.info("[ChatBackend] ChatEngine 延迟创建完成")
             # [审查 #8r Bug C] 窗口构造期暂存的 UI 回调（流式更新等）补注册
@@ -1270,9 +1283,22 @@ class ChatBackend(QObject):
 
             修复：原 _try_identify_new_plugin 找到第一个插件就 return，
             导致一次性复制多个新插件时只检测到 1 个。现改为返回所有新插件名集合。
+
+            🛡️ 双重校验（2026-08-23 bug fix）：父目录链匹配 .drifox-plugin/plugin.json
+            会把任何运行时数据目录（如 .drifox/backups/、.drifox/logs/、sessions.db）
+            的变更误识别为插件变更（change_path 在 .drifox/backups/ 下，父目录链
+            上溯到 .drifox/plugins/calendar/.drifox-plugin/plugin.json → 标记为
+            calendar 新插件变更，但 change_path 实际不在 calendar 代码目录里 →
+            _identify_components_from_changes_fallback 返回空 → emit("") →
+            _reload_single_plugin(calendar, "") → "root change, skip component reload"
+            → ui 组件永远不被 reload → 已打开标签页欢迎卡片消失 + 新建会话不出现）。
+            修复：父目录链找到插件 manifest 后，再校验 change_path 必须**直接**
+            在该插件的 plugin.path 子树下，否则丢弃该误判。
             """
             import json as _json
             from pathlib import Path as _Path
+
+            from app.plugins.managers.plugin_manager import PluginManager as _PM
 
             found: set = set()
             for _, change_path in changes:
@@ -1283,22 +1309,33 @@ class ChatBackend(QObject):
                         continue
                     # 检查 .drifox-plugin 格式
                     manifest = parent / ".drifox-plugin" / "plugin.json"
-                    if manifest.exists():
-                        try:
-                            data = _json.loads(manifest.read_text(encoding="utf-8"))
-                            found.add(data.get("name", parent.name))
-                        except Exception:
-                            found.add(parent.name)
-                        break  # 跳出父目录链，处理下一个变更路径
-                    # 检查 .claude-plugin 格式
-                    manifest = parent / ".claude-plugin" / "plugin.json"
-                    if manifest.exists():
-                        try:
-                            data = _json.loads(manifest.read_text(encoding="utf-8"))
-                            found.add(data.get("name", parent.name))
-                        except Exception:
-                            found.add(parent.name)
-                        break  # 跳出父目录链，处理下一个变更路径
+                    if not manifest.exists():
+                        # 检查 .claude-plugin 格式
+                        manifest = parent / ".claude-plugin" / "plugin.json"
+                        if not manifest.exists():
+                            continue
+                    try:
+                        data = _json.loads(manifest.read_text(encoding="utf-8"))
+                        candidate_name = data.get("name", parent.name)
+                    except Exception:
+                        candidate_name = parent.name
+                    # 双重校验：candidate_name 是否已注册，且 change_path 必须**直接**
+                    # 在其 plugin.path 子树下（排除 .drifox/backups/ 等运行时目录
+                    # 通过父目录链误命中插件 manifest 的情况）。
+                    plugin = _PM.get_instance().get_plugin(candidate_name)
+                    if plugin is None:
+                        break  # 未注册的插件名，丢弃（防止新建插件误识别）
+                    plugin_root = str(plugin.path.resolve()).lower()
+                    cp_lower = str(change_path).lower().replace("/", os.sep)
+                    if cp_lower == plugin_root or cp_lower.startswith(plugin_root + os.sep):
+                        found.add(candidate_name)
+                    else:
+                        logger.debug(
+                            f"[ChatBackend] _try_identify_new_plugins: 丢弃误判 "
+                            f"change_path={change_path} 命中 manifest={candidate_name} "
+                            f"但不在 plugin.path={plugin_root} 子树下"
+                        )
+                    break  # 跳出父目录链，处理下一个变更路径
             return found
 
         def _watch_loop():
@@ -1834,7 +1871,7 @@ class ChatBackend(QObject):
             # 否则已注册插件会被反复识别为"新插件"，触发 bridge.json 自触发循环）
             self._rebuild_watcher_prefixes()
 
-    def emit_plugin_changed(self, result: dict, plugin_name: str = "") -> None:
+    def emit_plugin_changed(self, result: dict, plugin_name: str = "", action: Optional[str] = None) -> None:
         """广播插件变更结果到全部活跃 backend 的 plugin_changed 信号
 
         附加事件标识（仅广播用，不污染业务 result 消费方）：
@@ -1843,7 +1880,22 @@ class ChatBackend(QObject):
           两个插件均为 {ui: True}）也不会被窗口级指纹短窗误吞。
         - _plugin_name：本次变更的插件名（"" = 全量/合并路径），UI 据此
           精准重绘该插件已挂载的视图（消息内容块 / 浮动卡片 / 欢迎卡片）。
+
+        PluginChanged hook：重载完成后同步触发（diff 明细见 _trigger_plugin_changed_hook），
+        hook 输出经 on_hook_finished → _hook_message_queue 注入，AI 下一轮对话可见。
+
+        Args:
+            action: 变更动作语义。None 时按 plugin_name 自动推断：
+                _NEW_PLUGIN_SENTINEL → installed；插件已不在注册表 → uninstalled；
+                其余（热重载/全量/更新）→ updated。市场路径传精确值
+                （installed/updated/uninstalled/enabled/disabled）
         """
+        # PluginChanged hook 触发（广播前，result 尚未被 _event_seq 污染）
+        try:
+            self._trigger_plugin_changed_hook(result, plugin_name, action)
+        except Exception as e:
+            logger.debug(f"[ChatBackend] PluginChanged hook trigger failed: {e}")
+
         seq = getattr(self, "_hot_reload_seq", 0) + 1
         self._hot_reload_seq = seq
         annotated = dict(result)
@@ -1863,6 +1915,61 @@ class ChatBackend(QObject):
                     _b.plugin_changed.emit(annotated)
                 except RuntimeError:
                     pass
+
+    def _infer_plugin_changed_action(self, plugin_name: str) -> str:
+        """按 plugin_name 推断 PluginChanged 的 action 语义"""
+        if plugin_name == self._NEW_PLUGIN_SENTINEL:
+            return "installed"
+        if plugin_name:
+            try:
+                from app.plugins.managers.plugin_manager import PluginManager
+
+                if not PluginManager.get_instance().has_plugin(plugin_name):
+                    return "uninstalled"
+            except Exception:
+                pass
+        return "updated"
+
+    def _trigger_plugin_changed_hook(self, result: dict, plugin_name: str, action: Optional[str]) -> None:
+        """触发 PluginChanged hook（插件安装/卸载/启停/热重载统一出口）
+
+        主线程同步触发（prompt hook 注入顺序）；diff 由
+        hook_manager.trigger_plugin_changed_hook 统一计算（模块级基线，
+        与 mcp/启停触发点共享）。
+
+        context 经 stdin JSON 传给 command hook，字段：
+        - action: installed/updated/uninstalled/enabled/disabled
+        - plugin_name: 变更插件名（sentinel 解析后置空）
+        - components: 各组件重载结果（agents 数量/其余布尔）
+        - diff: 工具与 MCP 服务器增减明细（tools_added/tools_removed/mcp_added/mcp_removed）
+        """
+        if self._hook_manager is None or "PluginChanged" not in self._hook_manager._hooks:
+            # 无注册 hook 仍刷新基线（懒导入失败静默，不影响主流程）
+            try:
+                from app.core.hook_manager import _compute_plugin_snapshot_diff
+
+                _compute_plugin_snapshot_diff()
+            except Exception:
+                pass
+            return
+        if action is None:
+            action = self._infer_plugin_changed_action(plugin_name)
+        name = plugin_name if plugin_name != self._NEW_PLUGIN_SENTINEL else ""
+        context: Dict[str, Any] = {
+            "action": action,
+            "plugin_name": name,
+            "components": {k: v for k, v in result.items() if not k.startswith("_")},
+        }
+        try:
+            from app.core.hook_manager import _compute_plugin_snapshot_diff, _sub_actions_from_diff
+
+            diff = _compute_plugin_snapshot_diff()
+        except Exception:
+            diff = None
+        if diff:
+            context["diff"] = diff
+            context["sub_actions"] = _sub_actions_from_diff(diff)
+        self._hook_manager.trigger_event("PluginChanged", context)
 
     def _schedule_debounced_reload(self):
         """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）"""
@@ -2230,7 +2337,48 @@ class ChatBackend(QObject):
                         f"component={component}, outcome={reloaded} → {result}"
                     )
             else:
-                logger.debug(f"[ChatBackend] Plugin [{plugin_name}] root change, skip component reload")
+                # 🛡️ 根因修复（2026-08-23 bug fix）：component="" 原本仅在纯根文件变更
+                # （README/LICENSE）时由 _watch_loop 传入。但 _identify_components_from_changes_fallback
+                # 在路径索引过期（rescan 路径 vs plugin.path 不一致）时也会误传空字符串，
+                # 导致有 ui 组件的插件（如 calendar / context-stats / project-dashboard）
+                # 装/卸后 ui 组件不重载 → registry 里的 welcome tabs / 浮动卡片 残留陈旧快照
+                # → 已打开标签页欢迎卡片消失、新建会话不出现。
+                # 修复：component="" 且插件实际拥有 ui/tools 组件时，主动按组件重载，
+                # 不再全跳过——否则 ui=False 路径走完后 _on_plugin_hot_reload
+                # 完全不刷新已打开标签页（输入区插件按钮 / 欢迎卡片 / launcher 全不刷）。
+                if plugin is None:
+                    logger.debug(f"[ChatBackend] Plugin [{plugin_name}] root change, plugin missing, skip")
+                else:
+                    _reloaded_any = False
+                    for comp in ("ui", "tools"):
+                        if not plugin.has_component(comp):
+                            continue
+                        try:
+                            _r = registry.reload(
+                                ReloadContext(
+                                    plugin_name=plugin_name,
+                                    plugin=plugin,
+                                    component=comp,
+                                    is_new_plugin=False,
+                                )
+                            )
+                        except Exception as _re:
+                            logger.warning(
+                                f"[ChatBackend] Plugin [{plugin_name}] root change, {comp} reload failed: {_re}"
+                            )
+                            continue
+                        if comp in result_keys:
+                            result[comp] = _r if _r is not None else False
+                        if _r:
+                            _reloaded_any = True
+                            logger.info(
+                                f"[ChatBackend] Plugin [{plugin_name}] root change fallback "
+                                f"reloaded component={comp} outcome={_r}"
+                            )
+                    if not _reloaded_any:
+                        logger.debug(
+                            f"[ChatBackend] Plugin [{plugin_name}] root change, no ui/tools components to reload"
+                        )
 
             logger.info(
                 f"[ChatBackend] Plugin [{plugin_name}] reloaded: "
@@ -2246,7 +2394,7 @@ class ChatBackend(QObject):
 
         return result
 
-    def reload_plugin_targeted(self, plugin_name: str) -> dict:
+    def reload_plugin_targeted(self, plugin_name: str, action: Optional[str] = None) -> dict:
         """精准重载单个插件（UI 安装/更新/启用/禁用专用），不触发全量子系统重载
 
         与 reload_plugin_subsystems（全量：rescan + 所有 agents/hooks/commands/
@@ -2264,13 +2412,17 @@ class ChatBackend(QObject):
         自己 emit）——若此处不广播，窗口收不到 ui=True，已打开标签页的输入区
         插件按钮/消息内容块全部不刷新（watcher 抑制解除后的 fallback 事件组件
         归类常为 root → ui=False，顶替不了本事件的刷新语义）。
+
+        Args:
+            action: PluginChanged hook 的动作语义（installer 传入精确值：
+                installed/updated/uninstalled/enabled/disabled；None 时自动推断）
         """
         if not plugin_name:
             result = self.reload_plugin_subsystems()
         else:
             result = self._reload_single_plugin(plugin_name, "__manifest__")
         try:
-            self.emit_plugin_changed(result, plugin_name)
+            self.emit_plugin_changed(result, plugin_name, action=action)
         except Exception as e:
             logger.warning(f"[ChatBackend] reload_plugin_targeted 广播失败: {e}")
         return result
@@ -2539,6 +2691,11 @@ class ChatBackend(QObject):
         - 仅释放本窗口创建的实例和引用
         """
         self._initialized = False
+
+        # 0. 停止去抖重载定时器（M8）：惰性创建、无 parent 的 QTimer，
+        #    不先 stop 会在 cleanup 后 300ms 触发 _do_debounced_reload 访问已清理对象。
+        if getattr(self, "_reload_timer", None) is not None and self._reload_timer.isActive():
+            self._reload_timer.stop()
 
         # 1. 清理 ChatEngine（停止 worker + 清空回调）
         if self._chat_engine:
@@ -3181,6 +3338,38 @@ class ChatBackend(QObject):
         future = data["future"]
 
         logger.info(f"[Gateway] Main thread processing: {text[:50]}...")
+
+        # ===== 入口守卫 =====
+        # 窗口关闭后 GatewayEngine.cleanup() 会把实例置为非活跃，而 PlatformManager
+        # 的后台事件循环仍在跑，钉钉/企微消息可能照旧投到本槽位。没有这层守卫，
+        # engine 内部 None 校验会向平台回复"❌ 处理出错: Gateway 引擎已停用..."，
+        # 并且 MessageHandler.handle 的 await future 永远不结束（→ 30s 超时）。
+        engine = getattr(self, "_gateway_engine", None)
+        if engine is None or not getattr(engine, "is_active", True):
+            logger.warning("[Gateway] skip incoming message: engine unavailable (window closed)")
+            try:
+                if not future.done():
+                    future.set_result("")
+            except Exception:
+                pass
+            _ev_loop = getattr(self._gateway_manager, "_loop", None)
+            if _ev_loop:
+                try:
+                    import asyncio
+
+                    from app.gateway.base import Platform as GatewayPlatform
+
+                    asyncio.run_coroutine_threadsafe(
+                        self._gateway_send_message(
+                            GatewayPlatform(platform),
+                            chat_id,
+                            "Gateway 当前不可用，请打开 DriFox 主窗口后重试。",
+                        ),
+                        _ev_loop,
+                    )
+                except Exception as e:
+                    logger.warning(f"[Gateway] skip notice send failed: {e}")
+            return
 
         try:
             import asyncio

@@ -8,6 +8,7 @@
 """
 
 import inspect
+import re
 import sys
 
 from PyQt5.QtWidgets import QApplication
@@ -31,6 +32,22 @@ def test_streaming_dock_css_content():
     assert "max-height: 110px" in css
 
 
+def test_streaming_dock_content_no_horizontal_scrollbar():
+    """回归：坞态正文容器不得出现横向滚动条。
+
+    单轴 overflow-y:auto 时另一轴 visible 被计算为 auto → 长行（URL/无空格
+    长 token）超宽出现容器级横向滚动条。必须 overflow-x:hidden +
+    overflow-wrap:break-word（强制换行，避免 hidden 只裁切看不到尾巴）。
+    """
+    css = mc._STREAMING_DOCK_CSS
+    # 提取坞态正文容器规则块
+    m = re.search(r"body\.streaming-dock #content-placeholder \{(.*?)\}", css, re.S)
+    assert m, "坞态正文容器规则必须存在"
+    rule = m.group(1)
+    assert "overflow-x: hidden" in rule, "坞态正文容器必须禁横向滚动"
+    assert "overflow-wrap: break-word" in rule, "坞态正文容器必须强制换行（超宽长词断行）"
+
+
 def test_streaming_dock_js_content():
     """坞态 JS 必须包含：_setStreamingDock 函数、流式标志、简洁模式守卫、滚动补偿。"""
     js = mc._STREAMING_DOCK_JS
@@ -47,6 +64,37 @@ def test_skeleton_template_includes_dock_assets():
     src = inspect.getsource(CodeWebViewer._load_skeleton)
     assert "_STREAMING_DOCK_CSS" in src
     assert "_STREAMING_DOCK_JS" in src
+
+
+def test_content_autoscroll_respects_user_scroll():
+    """回归：工具/思考区更新不得拉底正文容器（区域独立）。
+
+    坞态下 #content-placeholder（正文）与 #tool-content（工具与思考）是两个
+    独立内滚动容器。_autoScrollStreamingBody 被工具/思考更新路径共用（流式块
+    注入/完成块替换/_apply_viewer_height 高度回调），原实现无条件
+    _cp.scrollTop = _cp.scrollHeight 置底正文——而 _userScrolledWithin 只由
+    body 的 scroll 事件置位，用户滚正文容器时 body 不滚，保护恒失效，
+    工具区每来新内容就把正文拉底打断阅读。
+    """
+    js = mc._CONTENT_AUTOSCROLL_JS
+    # 置底正文容器前必须检查用户上滚标志（与 _scrollToolContentToBottom 同款）
+    assert "if (!_cp._userScrolledUp)" in js, "正文容器置底必须尊重用户上滚"
+    # 程序置底必须打 _progScroll 标记（防 scroll 事件误判为用户滚动）
+    assert "_cp._progScroll = true" in js, "程序置底必须打 _progScroll 标记"
+    # 正文容器必须有 scroll 监听跟踪用户滚动（滚回底部附近恢复跟随）
+    assert "getElementById('content-placeholder')?.addEventListener('scroll'" in js, "正文容器必须有独立 scroll 监听"
+    # 监听内恢复跟随：滚回底部清 _userScrolledUp
+    assert "cp._userScrolledUp = false" in js, "滚回底部附近必须恢复自动跟随"
+    # DOM 操作期间程序性 scroll 必须忽略（防误标正文上滚→置顶），与 body 监听对称
+    assert "if (window._suppressScrollEvent) return;" in js, "DOM 操作期间的程序 scroll 必须忽略"
+    # 程序滚动事件吞掉（不误标用户）
+    assert "if (cp._progScroll) { cp._progScroll = false; return; }" in js
+
+
+def test_skeleton_template_includes_content_autoscroll():
+    """骨架模板必须接入 _CONTENT_AUTOSCROLL_JS（防止定义了没接进去）。"""
+    src = inspect.getsource(CodeWebViewer._load_skeleton)
+    assert "_CONTENT_AUTOSCROLL_JS" in src
 
 
 class _StubPage:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """EngineHost 契约 — UI 插件 context["services"] 的类型化语义声明。
 
-现状：main_widget._build_ui_services() 返回 dict（14 个服务函数），插件按下标
+现状：main_widget._build_ui_services() 返回 dict（15 个服务函数），插件按下标
 取用、无静态检查。本 Protocol 是**语义锚点**——
 - 插件作者：以本文件为服务面清单写代码（IDE 补全/类型检查）
 - 主程序：dict 键集与本 Protocol 方法集保持一致（tests 守卫防漂移）
@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checka
 
 @runtime_checkable
 class EngineHost(Protocol):
-    """对话引擎插件可用的宿主服务面（对应 ctx["services"] 全部 14 键）"""
+    """对话引擎插件可用的宿主服务面（对应 ctx["services"] 全部 15 键）"""
 
     # ===== 对话栈驱动 =====
     def get_model_config(self) -> Dict[str, Any]:
@@ -63,6 +63,18 @@ class EngineHost(Protocol):
     def conversation_stack(self) -> Any:
         """对话执行栈工厂（满足 ConversationStackFactory 契约：
         create_core / create_executor，见 contracts/conversation_stack.py）"""
+        ...
+
+    # ===== 插件对话引擎会话（EP3：自定义对话方式的最通用驱动原语） =====
+    def create_engine_session(self, engine_name: str, **kwargs: Any) -> Any:
+        """创建插件对话引擎会话（满足 EngineSession 契约：
+        turn / cancel / cleanup + core/executor 逃生舱，
+        见 contracts/engine_session.py）。
+
+        不预设对话流程：turn() 的 messages/tools/callbacks 全量透传，
+        多轮上下文由调用方管理（auto_history 可选）。kwargs 可选：
+        hook_policy（默认 "none"）/ permission_strategy（默认 "auto_allow"）。
+        """
         ...
 
     # ===== 会话回写 =====

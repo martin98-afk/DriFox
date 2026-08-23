@@ -32,6 +32,9 @@ class BalanceDisplay(QWidget):
         self._loading = False
         self._current_provider = ""
         self._current_config_id = ""  # 当前显示结果对应的 config_id（竞态校验）
+        # ★ singleton 信号连接跟踪（销毁时统一断开，防泄漏）
+        self._singleton_connections: list = []
+        self.destroyed.connect(self._disconnect_singleton_connections)
 
         # 布局：图标 + 金额
         layout = QHBoxLayout(self)
@@ -70,9 +73,31 @@ class BalanceDisplay(QWidget):
         # UsageService 只存 config 快照不持窗口引用；本连接随组件销毁自动断开。
         from app.core.usage_service import UsageService
 
-        UsageService.get_instance().balance_ready.connect(self.show_balance_result)
+        self._reg_sig(UsageService.get_instance().balance_ready, self.show_balance_result)
 
         self.setToolTip("余额查询")
+
+    # ── singleton 信号连接管理 ──────────────────────────
+    def _reg_sig(self, signal, slot) -> None:
+        """注册 singleton 信号连接，自动跟踪以便销毁时统一断开"""
+        signal.connect(slot)
+        self._singleton_connections.append((signal, slot))
+
+    def _disconnect_singleton_connections(self) -> None:
+        """断开所有 _singleton_connections 中的连接（destroyed 信号触发）"""
+        for signal, slot in self._singleton_connections:
+            try:
+                signal.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        self._singleton_connections.clear()
+
+    def __del__(self) -> None:
+        """析构兜底：再次清理 singleton 连接"""
+        try:
+            self._disconnect_singleton_connections()
+        except Exception:
+            pass
 
     def _has_balance_support(self, provider_name: str) -> bool:
         """服务商是否支持余额查询（providers 插件声明 balance_fetcher）"""

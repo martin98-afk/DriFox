@@ -23,7 +23,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "AttachmentChip":     ("app.widgets.bottom_input_area", "AttachmentChip"),
     "SendableTextEdit":   ("app.widgets.bottom_input_area", "SendableTextEdit"),
     # 悬浮组件
-    "TodoFloatingWidget": ("app.widgets.cards.floating.todo_floating_widget", "TodoFloatingWidget"),
     "QuestionFloatingWidget": ("app.widgets.cards.floating.question_floating_widget", "QuestionFloatingWidget"),
     # 对话组件
     "CodingPlanRing":     ("app.widgets.coding_plan_ring", "CodingPlanRing"),
@@ -61,7 +60,6 @@ __all__ = [
     "create_welcome_card",
     "ModelConfigCard",
     # 悬浮组件
-    "TodoFloatingWidget",
     "QuestionFloatingWidget",
     "MemoryCardContent",
     "ProviderEditCard",

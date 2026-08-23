@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 if TYPE_CHECKING:
     from app.core.command_manager import CommandType  # noqa: F401
 
+# re-export：让 `from app.plugins.registries.ui_plugin_registry import WorkspacePageInfo` 直接可用
+from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo  # noqa: E402,F401
+
 
 @dataclass(frozen=True)
 class ContentRendererInfo:
@@ -150,6 +153,7 @@ class InputButtonInfo:
     priority: int = 0
     on_click: Optional[Callable[[Dict[str, Any]], None]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    position: str = "end"  # "start" | "before:<id>" | "after:<id>" | "end"（默认追加末尾）
 
 
 @dataclass(frozen=True)
@@ -200,6 +204,7 @@ class SettingsCardInfo:
     group: str = "plugin"
     priority: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    section: str = "plugins"  # 挂载分区：plugins/llm/common/appearance/update（对应设置面板 tab）
 
 
 class UIPluginRegistry:
@@ -217,6 +222,30 @@ class UIPluginRegistry:
         self._input_buttons: Dict[str, InputButtonInfo] = {}
         self._context_actions: Dict[str, ContextMenuActionInfo] = {}
         self._settings_cards: Dict[str, SettingsCardInfo] = {}
+        # 工作区页面槽（Phase G）：{page_id: WorkspacePageInfo}，页面级扩展
+        self._workspace_pages: Dict[str, Any] = {}
+        # 通用区域挂载模型（Phase E）：宿主声明区域 → 插件挂载条目
+        # 结构 {region_id: {"kind": str, "entries": {entry_id: SlotEntry}}}
+        self._regions: Dict[str, Dict[str, Any]] = {}
+        # UI 模块槽（Phase F）：{module_id: [(plugin_name, priority, factory), ...]}
+        # 多实现并存（system + 多个插件 override），胜者 = max(priority)
+        self._ui_modules: Dict[str, list] = {}
+        # 主程序内置区域（宿主在窗口装配时也可再声明，幂等）
+        from app.plugins.contracts.ui_slots import CONTENT, LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
+
+        for rid, kind, desc in [
+            ("sidebar", LIST_ITEM, "左侧边栏插件项"),
+            ("toolbar:input", TOOLBAR_BUTTON, "输入区工具栏按钮"),
+            ("menu:message_card", MENU, "消息卡片右键菜单"),
+            ("menu:tab", MENU, "Tab 标签右键菜单"),
+            ("menu:input_area", MENU, "输入框右键菜单"),
+            ("settings:plugins", PANEL, "设置面板插件分区"),
+            ("settings:llm", PANEL, "设置面板大模型分区插件卡"),
+            ("settings:common", PANEL, "设置面板通用分区插件卡"),
+            ("settings:appearance", PANEL, "设置面板外观分区插件卡"),
+            ("settings:update", PANEL, "设置面板更新分区插件卡"),
+        ]:
+            self.declare_region(rid, kind, desc)
         self._loaded_plugins: set = set()
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
         self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
@@ -438,12 +467,56 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._sidebar_items[item_id] = info
+        # 写入 region 存储（Phase E 单源化）
+        self.register_slot_entry("sidebar", item_id, plugin_name, priority=priority, payload=info, metadata=metadata)
 
     def get_sidebar_items(self) -> List[SidebarItemInfo]:
-        """获取全部侧边栏插件项（group 排序：system 在前，custom 在后；同组按注册序）"""
-        system = [v for v in self._sidebar_items.values() if v.group == "system"]
-        custom = [v for v in self._sidebar_items.values() if v.group != "system"]
+        """获取全部侧边栏插件项（group 排序：system 在前，custom 在后；同组按 priority 降序 → 注册序）
+
+        数据源：region 存储（Phase E 单源化）"""
+        items = [e.payload for e in self.get_region_entries("sidebar") if isinstance(e.payload, SidebarItemInfo)]
+        system = [v for v in items if v.group == "system"]
+        custom = [v for v in items if v.group != "system"]
         return system + custom
+
+    # ── Phase G：WorkspacePage 页面槽 ──
+
+    def register_workspace_page(
+        self,
+        plugin_name: str,
+        page_id: str,
+        title: str,
+        widget_class: Any,
+        icon_path: str = "",
+        icon_light_path: str = "",
+        order_hint: int = 500,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册工作区页面（同 page_id 后注册覆盖；order_hint 升序排布）"""
+        from app.plugins.contracts.ui_page import WorkspacePageInfo
+
+        self._workspace_pages[page_id] = WorkspacePageInfo(
+            plugin_name=plugin_name,
+            page_id=page_id,
+            title=title,
+            widget_class=widget_class,
+            icon_path=icon_path,
+            icon_light_path=icon_light_path,
+            order_hint=order_hint,
+            metadata=metadata or {},
+        )
+
+    def get_workspace_pages(self) -> List[Any]:
+        """全部工作区页面（order_hint 升序 → 注册序）"""
+        infos = sorted(
+            self._workspace_pages.values(),
+            key=lambda i: (i.order_hint, list(self._workspace_pages).index(i.page_id)),
+        )
+        return list(infos)
+
+    def get_workspace_page(self, page_id: str) -> Optional[Any]:
+        """按 page_id 精确查询"""
+        return self._workspace_pages.get(page_id)
 
     def register_input_button(
         self,
@@ -456,12 +529,21 @@ class UIPluginRegistry:
         priority: int = 0,
         on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        position: str = "end",
     ) -> None:
         """注册输入区插件按钮（Phase D）
 
         icon_path 为深色主题默认图标；icon_light_path 为浅色主题图标
         （可选，缺省时浅色主题回退 icon_path）。主题切换时主程序自动刷新。
+
+        position: "start" | "before:<button_id>" | "after:<button_id>" | "end"
+        （Phase E：允许插件声明按钮位置——锚定系统按钮 memory/history/new_session
+        或其他插件按钮 id；锚点缺失降级末尾追加）
         """
+        import re
+
+        if position not in ("start", "end") and not re.fullmatch(r"(before|after):[\w:-]+", position):
+            raise ValueError(f"invalid position {position!r}: use 'start'/'end'/'before:<id>'/'after:<id>'")
         if metadata is None:
             metadata = {}
         info = InputButtonInfo(
@@ -474,15 +556,22 @@ class UIPluginRegistry:
             priority=priority,
             on_click=on_click,
             metadata=metadata,
+            position=position,
         )
         existing = self._input_buttons.get(button_id)
         if existing is not None and existing.priority > priority:
             return
         self._input_buttons[button_id] = info
+        # 写入 region 存储（Phase E 单源化）
+        self.register_slot_entry(
+            "toolbar:input", button_id, plugin_name, priority=priority, payload=info, metadata=metadata
+        )
 
     def get_input_buttons(self) -> List[InputButtonInfo]:
-        """获取全部输入区插件按钮（注册序）"""
-        return list(self._input_buttons.values())
+        """获取全部输入区插件按钮（priority 降序 → 注册序）
+
+        数据源：region 存储（Phase E 单源化）"""
+        return [e.payload for e in self.get_region_entries("toolbar:input") if isinstance(e.payload, InputButtonInfo)]
 
     def register_context_menu_action(
         self,
@@ -515,10 +604,18 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._context_actions[key] = info
+        # 写入 region 存储（Phase E 单源化）：按 menu:<target> 分区
+        self.register_slot_entry(
+            f"menu:{target}", action_id, plugin_name, priority=priority, payload=info, metadata=metadata
+        )
 
     def get_context_actions(self, target: str) -> List[ContextMenuActionInfo]:
-        """获取指定 target 的菜单插件项（注册序；separator_before 为渲染标记）"""
-        return [v for k, v in self._context_actions.items() if k.startswith(f"{target}:")]
+        """获取指定 target 的菜单插件项（priority 降序 → 注册序；separator_before 为渲染标记）
+
+        数据源：region 存储（Phase E 单源化）。target 开放：宿主声明新 menu:<target> 区域即可消费。"""
+        return [
+            e.payload for e in self.get_region_entries(f"menu:{target}") if isinstance(e.payload, ContextMenuActionInfo)
+        ]
 
     def register_settings_card(
         self,
@@ -529,8 +626,21 @@ class UIPluginRegistry:
         group: str = "plugin",
         priority: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
+        section: str = "plugins",
     ) -> None:
-        """注册设置面板插件卡片（Phase D）"""
+        """注册设置面板插件卡片（Phase D + E）
+
+        section: 挂载分区（plugins/llm/common/appearance/update），
+        对应设置面板 5 个 tab。声明 section 时自动懒声明 settings:<section> 区域。
+        """
+        valid_sections = ("plugins", "llm", "common", "appearance", "update")
+        if section not in valid_sections:
+            raise ValueError(f"invalid section {section!r}, must be one of {valid_sections}")
+        # 懒声明目标分区区域（幂等）
+        if f"settings:{section}" not in self._regions:
+            from app.plugins.contracts.ui_slots import PANEL
+
+            self.declare_region(f"settings:{section}", PANEL, f"设置面板 {section} 分区插件卡")
         if metadata is None:
             metadata = {}
         info = SettingsCardInfo(
@@ -541,15 +651,121 @@ class UIPluginRegistry:
             group=group,
             priority=priority,
             metadata=metadata,
+            section=section,
         )
         existing = self._settings_cards.get(card_id)
         if existing is not None and existing.priority > priority:
             return
         self._settings_cards[card_id] = info
+        # 写入 region 存储（Phase E 单源化：按 section 分区）
+        self.register_slot_entry(
+            f"settings:{section}", card_id, plugin_name, priority=priority, payload=info, metadata=metadata
+        )
 
     def get_settings_cards(self) -> List[SettingsCardInfo]:
-        """获取全部设置面板插件卡片（注册序）"""
-        return list(self._settings_cards.values())
+        """获取全部设置面板插件卡片（全 section 合集，按 priority 降序）
+
+        数据源：region 存储（Phase E 单源化，按 section 聚合）"""
+        infos = []
+        for region_id, region in self._regions.items():
+            if not region_id.startswith("settings:"):
+                continue
+            infos.extend(e.payload for e in region["entries"].values() if isinstance(e.payload, SettingsCardInfo))
+        infos.sort(key=lambda i: -i.priority)
+        return infos
+
+    # ── Phase E：Region 通用挂载模型 ──
+
+    def declare_region(self, region_id: str, kind: str, description: str = "") -> None:
+        """宿主声明 UI 区域（幂等；重复声明覆盖 description/kind）
+
+        region_id 命名约定：
+        - "menu:<target>"     右键/下拉菜单（如 "menu:input_area"）
+        - "toolbar:<name>"    工具栏（如 "toolbar:input"）
+        - 简单名              列表/面板区域（如 "sidebar"、"settings:plugins"）
+        """
+        from app.plugins.contracts.ui_slots import VALID_REGION_KINDS
+
+        if kind not in VALID_REGION_KINDS:
+            raise ValueError(f"invalid region kind {kind!r}, must be one of {sorted(VALID_REGION_KINDS)}")
+        self._regions.setdefault(region_id, {"kind": kind, "entries": {}})
+
+    def register_slot_entry(
+        self,
+        region_id: str,
+        entry_id: str,
+        plugin_name: str,
+        priority: int = 0,
+        payload: Any = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """向已声明区域挂载条目；同 entry_id 高 priority 覆盖低者"""
+        region = self._regions.get(region_id)
+        if region is None:
+            raise ValueError(f"undeclared region {region_id!r}; call declare_region() first")
+        from app.plugins.contracts.ui_slots import SlotEntry
+
+        existing = region["entries"].get(entry_id)
+        if existing is not None and existing.priority > priority:
+            return
+        region["entries"][entry_id] = SlotEntry(
+            entry_id=entry_id,
+            plugin_name=plugin_name,
+            region_id=region_id,
+            priority=priority,
+            payload=payload,
+            metadata=metadata or {},
+        )
+
+    def get_region_entries(self, region_id: str) -> list:
+        """获取区域条目（priority 降序 → 注册序；未声明区域返回空列表）"""
+        region = self._regions.get(region_id)
+        if region is None:
+            return []
+        entries = sorted(region["entries"].values(), key=lambda e: -e.priority)
+        return list(entries)
+
+    def get_region_entry(self, region_id: str, entry_id: str):
+        """按 entry_id 精确查条目（未声明区域/无条目返回 None）"""
+        region = self._regions.get(region_id)
+        if region is None:
+            return None
+        return region["entries"].get(entry_id)
+
+    # ── Phase F：UIModule 模块槽 ──
+
+    SYSTEM_MODULE_PRIORITY = 0  # 系统模块基线；插件覆盖须 >= 100
+
+    def register_ui_module(
+        self,
+        module_id: str,
+        factory,
+        plugin_name: str = "system",
+        priority: int = 0,
+    ) -> None:
+        """注册 UI 模块实现（factory 延迟构造；多实现并存，胜者=最高 priority）
+
+        Args:
+            module_id: 模块槽 ID（与 UIModule.module_id 一致）
+            factory: 无参可调用，返回 UIModule 实例（延迟到 get_ui_module 时构造）
+            plugin_name: 所属插件名（unload 时按此清理）
+            priority: 同 id 时高者胜；系统基线 = SYSTEM_MODULE_PRIORITY (0)，
+                     插件覆盖建议 >= 100
+        """
+        self._ui_modules.setdefault(module_id, []).append((plugin_name, priority, factory))
+
+    def get_ui_module(self, module_id: str):
+        """取胜者模块实例（高 priority 胜；同 priority 后注册胜；无注册返回 None）"""
+        slot = self._ui_modules.get(module_id)
+        if not slot:
+            return None
+        # 胜者 = max(priority, 注册索引) — 索引作 tiebreaker 让后注册胜
+        _idx, (_name, _priority, factory) = max(enumerate(slot), key=lambda x: (x[1][1], x[0]))
+        return factory()
+
+    def list_ui_module_ids(self) -> List[str]:
+        """按注册序返回所有 module_id（供 compose 排序验证）"""
+        return list(self._ui_modules.keys())
 
     def _register_command_for_card(self, card_info: FloatingCardInfo) -> None:
         """为浮动卡片自动注册对应 FUNCTION 命令"""
@@ -592,11 +808,17 @@ class UIPluginRegistry:
         Returns:
             TabManagerWindow 实例（具备 _card_manager/_window_id/四向容器属性），
             不可用时返回 None（回退到 per-window 模式）。
+
+        探测顺序：协议优先（实现 as_ui_host）→ 鸭子属性兜底（legacy 路径）。
         """
         try:
             from app.widgets.tab_manager_window import TabManagerWindow
 
             tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                # 协议优先：宿主实现 as_ui_host() 即直接采用（二期 UIModule 全走此路径）
+                if callable(getattr(tm, "as_ui_host", None)):
+                    return tm.as_ui_host()
             if tm is not None and getattr(tm, "_card_manager", None) is not None:
                 return tm
         except Exception:
@@ -762,6 +984,14 @@ class UIPluginRegistry:
                 return
             # 以容器为父级创建卡片 widget
             widget = card_info.widget_class(parent=container)
+
+            # Phase G：dock 堆叠声明 — widget 属性优先于注册元数据
+            # （容器侧 CardManager.is_card_stackable 按 property 查询）
+            if card_info.metadata.get("stack"):
+                try:
+                    widget.setProperty("stackInDock", True)
+                except Exception:
+                    pass
 
             # ==== 注入上下文提供函数（拉模型）====
             # 让卡片自己能在需要时（如 showEvent）调用此函数获取最新上下文，
@@ -1046,6 +1276,11 @@ class UIPluginRegistry:
             or any(v.plugin_name == plugin_name for v in self._input_buttons.values())
             or any(v.plugin_name == plugin_name for v in self._context_actions.values())
             or any(v.plugin_name == plugin_name for v in self._settings_cards.values())
+            or any(v.plugin_name == plugin_name for v in self._workspace_pages.values())
+            or any(
+                e.plugin_name == plugin_name for region in self._regions.values() for e in region["entries"].values()
+            )
+            or any(name == plugin_name for impls in self._ui_modules.values() for name, _p, _f in impls)
         )
 
     def unload_plugin(self, plugin_name: str) -> bool:
@@ -1122,6 +1357,22 @@ class UIPluginRegistry:
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
         self._context_actions = {k: v for k, v in self._context_actions.items() if v.plugin_name != plugin_name}
         self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
+        # 清理工作区页面槽（Phase G）
+        self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
+        # 清理通用区域条目（Phase E）
+        for region in self._regions.values():
+            region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}
+        # 清理 UI 模块槽（Phase F）：仅移除该 plugin 的实现，其余保留
+        for module_id, impls in list(self._ui_modules.items()):
+            kept = [s for s in impls if s[0] != plugin_name]
+            if kept:
+                self._ui_modules[module_id] = kept
+            else:
+                self._ui_modules.pop(module_id, None)
+        # 事件总线退订：防止悬挂回调引用已卸载的旧模块闭包
+        from app.core.ui_event_bus import UIEventBus
+
+        UIEventBus.get_instance().unsubscribe_plugin(plugin_name)
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:
@@ -1167,15 +1418,35 @@ class UIPluginRegistry:
         此处对已缓存卡片的窗口：失效缓存（下次显示重建），当前正显示
         欢迎卡片的窗口立即重建。尚无缓存卡片的窗口（正常启动路径：
         卡片在插件加载后才创建）无需处理。
+
+        🛡️ DEBUG 日志（2026-08-23 bug fix）：原 except: pass 完全静默，
+        invalidate 后重建链任何一环崩溃（QWebEngineView 初始化 / Settings 单例
+        异常 / 窗口契约属性缺失）都无法从日志追踪。改为 DEBUG 输出每步决策，
+        异常时 WARNING 暴露堆栈，便于排查「欢迎卡片消失 / 新建会话不出现」。
         """
+        from loguru import logger
+
+        total = len(self._window_main_widgets)
+        skipped_no_method = 0
+        skipped_no_cache = 0
+        invalidated = 0
+        rescheduled = 0
         for mw in list(self._window_main_widgets.values()):
             try:
                 if not hasattr(mw, "_invalidate_welcome_card"):
+                    skipped_no_method += 1
+                    logger.debug(
+                        f"[UIPluginRegistry] _refresh_welcome_cards: window={getattr(mw, '_window_id', '?')} "
+                        f"缺 _invalidate_welcome_card 方法，跳过"
+                    )
                     continue
                 window_id = getattr(mw, "_window_id", None)
-                if window_id is None or window_id not in getattr(mw, "_welcome_card_cache", {}):
+                cache = getattr(mw, "_welcome_card_cache", {})
+                if window_id is None or window_id not in cache:
+                    skipped_no_cache += 1
                     continue  # 尚无缓存卡片，正常启动路径无需刷新
                 mw._invalidate_welcome_card()
+                invalidated += 1
                 if getattr(mw, "_displayed_session_id", None) is None:
                     # 当前正显示欢迎卡片（无会话上下文）→ 立即重建，避免空白。
                     # 走交错时间片调度（_schedule_initial_welcome），避免 N 个窗口
@@ -1183,10 +1454,18 @@ class UIPluginRegistry:
                     # 同步执行卡死 UI（对齐 _create_new_session 的 C2 优化）。
                     if hasattr(mw, "_schedule_initial_welcome"):
                         mw._schedule_initial_welcome()
+                        rescheduled += 1
                     else:
                         mw._show_initial_welcome()
-            except Exception:
-                pass
+                        rescheduled += 1
+            except Exception as e:  # noqa: BLE001
+                wid = getattr(mw, "_window_id", "<unknown>")
+                logger.warning(f"[UIPluginRegistry] _refresh_welcome_cards: window={wid} 处理失败: {e}")
+        logger.debug(
+            f"[UIPluginRegistry] _refresh_welcome_cards: total={total} "
+            f"skipped_no_method={skipped_no_method} skipped_no_cache={skipped_no_cache} "
+            f"invalidated={invalidated} rescheduled={rescheduled}"
+        )
 
     def _remove_widget_from_container(self, window_id: str, card_id: str, widget) -> None:
         """从容器布局和 CardManager 中移除指定 widget（不触发删除，仅 UI 清理）

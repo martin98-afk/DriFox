@@ -16,9 +16,10 @@ from app.plugins.contracts.loop_policy import LoopDecision, LoopPolicy, LoopStat
 
 
 class DefaultLoopPolicy:
-    """默认循环策略 — 与现有 chat_worker.run() 行为逐点等价"""
+    """默认循环策略 — 与现有 chat_worker.run() 行为逐点等价（主智能体域）"""
 
     id = "default"
+    scope = "main"
 
     def should_continue(self, state: LoopState) -> LoopDecision:
         if state.repetitive_loop_detected:
@@ -34,7 +35,7 @@ class DefaultLoopPolicy:
         try:
             v = llm_config.get("最大循环轮数") if llm_config else None
             return int(v) if v else None
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
 
 

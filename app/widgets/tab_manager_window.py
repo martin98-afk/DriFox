@@ -186,6 +186,99 @@ def _get_window_session_title(win) -> str:
         return ""
 
 
+class _DockSideWrapper(QWidget):
+    """LEFT/RIGHT 停靠区侧 wrapper：子控件 visibility 联动 wrapper 与 splitter 大小
+
+    默认收起（hide + splitter 分配 0 空间）；任一子 show 时恢复记忆展开宽度；
+    全 hide 时记忆当前宽度并把 splitter 大小压回 0。解决 T3 接线后无卡片时
+    splitter 默认均分空间导致空白 handle 显示的视觉 bug。
+    """
+
+    DEFAULT_EXPANDED_WIDTH = 300  # 首展开无记忆时的默认宽度
+
+    @staticmethod
+    def _child_visible_intent(w: QWidget) -> bool:
+        """子控件「显式可见意图」：被 show 过即算，不受祖先链遮蔽
+
+        不能用 isVisible()：wrapper 默认 hide 时子控件 isVisible() 恒为
+        False（祖先链中断），_sync 会永远走收起分支 → wrapper 死锁无法
+        展开，左右侧浮动卡片不显示。也不能用 not isHidden()：从未
+        show/hide 过的子控件 isHidden() 同样为 False，会把初始收起态
+        误判为展开。WA_WState_ExplicitShowHide 区分「从未操作」与
+        「显式 show/hide」，WA_WState_Hidden 即 isHidden() 的底层状态位。
+        """
+        if not w.testAttribute(Qt.WA_WState_ExplicitShowHide):  # pyright: ignore[reportAttributeAccessIssue]
+            return False  # 从未显式 show/hide → 视为收起（初始态）
+        return not w.testAttribute(Qt.WA_WState_Hidden)  # pyright: ignore[reportAttributeAccessIssue]
+
+    def __init__(self, primary: QWidget, stack: QWidget, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._primary = primary
+        self._stack = stack
+        self._splitter: Optional[QWidget] = None  # QSplitter（类型注解避免循环引用）
+        self._splitter_index: int = -1
+        self._expanded_width: int = 0
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(primary)
+        lay.addWidget(stack)
+        primary.installEventFilter(self)
+        stack.installEventFilter(self)
+        self.hide()  # 默认收起
+
+    def attach_to_splitter(self, splitter: QWidget, index: int) -> None:
+        """关联宿主 splitter：联动 setSizes 维持收起态"""
+        self._splitter = splitter
+        self._splitter_index = index
+        # 立即同步：默认两子均 hide → 立即压回 splitter 0 大小，
+        # 避免 addWidget 后 splitter 默认均分空间导致空白 handle 显示
+        self._sync()
+
+    def eventFilter(self, obj, ev):
+        # Show/Hide（17/18）仅在父级可见时发出；父级（wrapper 自身）hidden 时
+        # 子控件显式 show() 只发 ShowToParent/HideToParent（26/27）——必须同时
+        # 监听，否则 wrapper 收起态下子显示状态变化收不到通知，_sync 永不触发，
+        # 左右侧浮动卡片无法展开（ isVisible()/事件双死锁）。
+        ev_types = (
+            QEvent.Show,  # pyright: ignore[reportAttributeAccessIssue]
+            QEvent.Hide,  # pyright: ignore[reportAttributeAccessIssue]
+            QEvent.ShowToParent,  # pyright: ignore[reportAttributeAccessIssue]
+            QEvent.HideToParent,  # pyright: ignore[reportAttributeAccessIssue]
+        )
+        if ev.type() in ev_types:
+            # singleShot 0 延迟到事件循环下轮，避免 setSizes 与正在进行的
+            # 容器动画/尺寸变更相互覆盖（动画中 show/hide 频繁触发）
+            QTimer.singleShot(0, self._sync)
+        return super().eventFilter(obj, ev)
+
+    def _sync(self) -> None:
+        any_visible = self._child_visible_intent(self._primary) or self._child_visible_intent(self._stack)
+        if self._splitter is None or self._splitter_index < 0:
+            # 未关联 splitter 时只切自身 visibility（测试 / 单实例场景）
+            self.setVisible(any_visible)
+            return
+        sizes = self._splitter.sizes()
+        idx = self._splitter_index
+        if any_visible:
+            if self.isHidden():
+                self.show()
+                if self._expanded_width == 0:
+                    self._expanded_width = self.DEFAULT_EXPANDED_WIDTH
+                if idx < len(sizes):
+                    sizes[idx] = self._expanded_width
+                    self._splitter.setSizes(sizes)
+        else:
+            if not self.isHidden():
+                if idx < len(sizes):
+                    self._expanded_width = (
+                        sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
+                    )
+                    sizes[idx] = 0
+                    self._splitter.setSizes(sizes)
+                self.hide()
+
+
 class TabManagerWindow(QWidget):
     """Tab 管理器宿主窗口（单例）"""
 
@@ -248,6 +341,15 @@ class TabManagerWindow(QWidget):
         self._resize_timer.setSingleShot(True)
         self._resize_timer.setInterval(100)
         self._resize_timer.timeout.connect(self._on_resize_finished)
+
+        # ── splitter 拖拽/动画防抖：松手后 ~120ms 恢复 _content_area 绘制 ──
+        # 超时回调合并 _content_area.setUpdatesEnabled(True) + _tab_panel.set_resizing(False)。
+        self._splitter_idle_timer = QTimer(self)
+        self._splitter_idle_timer.setSingleShot(True)
+        self._splitter_idle_timer.setInterval(120)
+        self._splitter_idle_timer.timeout.connect(self._on_splitter_idle)
+        # 拖拽首帧冻结标记：本次拖拽会话仅冻结一次，松手(device idle)后复位
+        self._splitter_dragging: bool = False
 
         self.setWindowTitle("飘狐-DriFox")
         self.setObjectName("tabManagerWindow")
@@ -639,15 +741,45 @@ class TabManagerWindow(QWidget):
         # dock_splitter: 左停靠区 | 内容区(wrapper) | 右停靠区
         self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
         self._dock_splitter.setObjectName("dockSplitter")
-        self._dock_splitter.addWidget(self._global_left_container)
+        # 堆叠卡容器（Phase G）：与单卡 CardContainer 并行挂于同侧停靠区下方。
+        # LEFT/RIGHT 侧用 wrapper（QVBoxLayout）包裹 [单卡容器, 堆叠容器]，
+        # wrapper 作为 dock_splitter 直接子项——dock mode 协议依赖 CardContainer
+        # 为 splitter 直接子项，故经 wrapper 承载二者（_splitter_index 兼容之）。
+        from app.widgets.cards.card_stack_container import CardStackContainer
+
+        self._global_left_stack = CardStackContainer(self._chat_frame)
+        self._global_left_stack.setObjectName("globalLeftStack")
+        self._global_right_stack = CardStackContainer(self._chat_frame)
+        self._global_right_stack.setObjectName("globalRightStack")
+
+        # 停靠区侧 wrapper：默认收起，子控件 visibility 联动 wrapper 与 splitter 大小
+        # （避免无卡片时 splitter 均分空间显示空白 splitter handle）
+        self._global_left_wrapper = _DockSideWrapper(
+            self._global_left_container, self._global_left_stack, self._chat_frame
+        )
+        self._global_left_wrapper.setObjectName("globalLeftWrapper")
+        self._global_left_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.LEFT)
+        self._global_left_container.set_stack_sibling(self._global_left_stack)
+
+        self._global_right_wrapper = _DockSideWrapper(
+            self._global_right_container, self._global_right_stack, self._chat_frame
+        )
+        self._global_right_wrapper.setObjectName("globalRightWrapper")
+        self._global_right_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.RIGHT)
+        self._global_right_container.set_stack_sibling(self._global_right_stack)
+
+        self._dock_splitter.addWidget(self._global_left_wrapper)
         self._dock_splitter.addWidget(self._chat_wrapper)
-        self._dock_splitter.addWidget(self._global_right_container)
+        self._dock_splitter.addWidget(self._global_right_wrapper)
         self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
         self._dock_splitter.setStretchFactor(1, 1)  # 内容区(含覆盖层)吃掉多余空间
         self._dock_splitter.setStretchFactor(2, 0)  # 右停靠区不随窗口拉伸
         self._dock_splitter.setHandleWidth(6)
         # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
         self._dock_splitter.setChildrenCollapsible(False)
+        # wrapper 关联 splitter：联动 setSizes 维持收起态
+        self._global_left_wrapper.attach_to_splitter(self._dock_splitter, 0)
+        self._global_right_wrapper.attach_to_splitter(self._dock_splitter, 2)
 
         self._vdock_splitter = _DockSplitter(Qt.Vertical, self._chat_frame)
         self._vdock_splitter.setObjectName("vDockSplitter")
@@ -697,6 +829,12 @@ class TabManagerWindow(QWidget):
 
         # 应用样式（使用 _apply_theme_stylesheet 以确保 objectName 选择器生效）
         self._apply_theme_stylesheet()
+
+        # 工作区页面宿主（Phase G）：插件 register_workspace_page 注册的主页面
+        from app.widgets.workspace_page_host import WorkspacePageHost
+
+        self._workspace_page_host = WorkspacePageHost()
+        self._workspace_page_host.attach_to(self)
 
     def _setup_signals(self):
         self._tab_panel.tabSelected.connect(self._on_tab_selected)
@@ -775,6 +913,12 @@ class TabManagerWindow(QWidget):
 
     def _start_sidebar_anim(self, start_w: int, end_w: int, collapsing: bool):
         """启动侧边栏宽度动画（200ms OutCubic）"""
+        # ── P0 性能优化 OPT-1：动画期间冻结右侧 _content_area 重绘 ──
+        # splitter 拖拽/动画只改子控件 geometry，不触发顶层 resizeEvent，
+        # 故该冻结无法被 resize 节流路径覆盖，需在此显式冻结，
+        # 由 _on_sidebar_anim_finished 的 try/finally 统一恢复。
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(False)
         anim = self._sidebar_anim
         if anim is None:
             anim = QVariantAnimation(self)
@@ -814,25 +958,42 @@ class TabManagerWindow(QWidget):
 
     def _on_sidebar_anim_finished(self):
         """动画结束：恢复自动展开能力 + 精确落位最终宽度 + 保存配置"""
-        if hasattr(self, "_tab_panel"):
-            self._tab_panel.set_animating(False)
-        # 最终宽度精确落位（插值收尾可能差 1px）
-        sizes = self._splitter.sizes()
-        total_w = sum(sizes) if sizes else self.width()
-        if self._sidebar_anim_collapsing:
-            target_w = self._tab_panel._collapsed_min_width + 14
-        else:
-            target_w = getattr(self, "_saved_panel_frame_width", 250)
-            target_w = max(_EXPANDED_MIN_FRAME_WIDTH, target_w)
-        self._splitter.setSizes([target_w, max(0, total_w - target_w)])
-        # UI 最终状态兜底（动画中途未跨阈值时强制同步，如目标宽度恰为阈值）
-        if hasattr(self, "_tab_panel"):
-            self._tab_panel.sync_collapsed_ui()
-        # 折叠动画结束：布局已稳定，若折叠是"挤压所致"（_collapsed_by_squeeze），
-        # 补一次空间恢复检测——覆盖"折叠动画期间窗口已拉宽"的时序缺口
-        # （resize 结束检测在动画中会被 _animating 跳过）。
-        if self._sidebar_anim_collapsing:
-            self._maybe_auto_expand_after_squeeze()
+        try:
+            if hasattr(self, "_tab_panel"):
+                self._tab_panel.set_animating(False)
+            # 最终宽度精确落位（插值收尾可能差 1px）
+            sizes = self._splitter.sizes()
+            total_w = sum(sizes) if sizes else self.width()
+            if self._sidebar_anim_collapsing:
+                target_w = self._tab_panel._collapsed_min_width + 14
+            else:
+                target_w = getattr(self, "_saved_panel_frame_width", 250)
+                target_w = max(_EXPANDED_MIN_FRAME_WIDTH, target_w)
+            self._splitter.setSizes([target_w, max(0, total_w - target_w)])
+            # UI 最终状态兜底（动画中途未跨阈值时强制同步，如目标宽度恰为阈值）
+            if hasattr(self, "_tab_panel"):
+                self._tab_panel.sync_collapsed_ui()
+            # 折叠动画结束：布局已稳定，若折叠是"挤压所致"（_collapsed_by_squeeze），
+            # 补一次空间恢复检测——覆盖"折叠动画期间窗口已拉宽"的时序缺口
+            # （resize 结束检测在动画中会被 _animating 跳过）。
+            if self._sidebar_anim_collapsing:
+                self._maybe_auto_expand_after_squeeze()
+        finally:
+            # ── P0 性能优化 OPT-1：保证 _content_area 必定恢复绘制 ──
+            # 所有退出路径（含 _maybe_auto_expand_after_squeeze 触发的嵌套展开动画、
+            # 以及任何异常）都在此恢复 True，否则内容区黑屏。
+            # 若本回调又同步启动了新动画（_maybe_auto_expand 走 _start_sidebar_anim
+            # 重新冻结），则交由其 _on_sidebar_anim_finished 恢复，此处跳过。
+            if hasattr(self, "_content_area") and not (
+                self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running
+            ):
+                self._content_area.setUpdatesEnabled(True)
+                # ── #10 对齐恢复：与解冻同步显式恢复 WebView 预览（幂等） ──
+                # 冻结期 MainWidget.resizeEvent 已自动 _set_cards_resize_preview_mode(True)
+                # 隐藏 WebView，此处与 setUpdatesEnabled(True) 同步恢复，消除潜在空窗。
+                mw = self._content_area.currentWidget()
+                if mw is not None and hasattr(mw, "_set_cards_resize_preview_mode"):
+                    mw._set_cards_resize_preview_mode(False)
 
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
         """挤压折叠后空间恢复：自动展开回常规宽度
@@ -948,6 +1109,32 @@ class TabManagerWindow(QWidget):
             # 条件（否则窗口没变宽永远不会自动展开），此处仅按绝对空间下限判断。
             QTimer.singleShot(0, lambda: self._maybe_auto_expand_after_squeeze(growth_required=False))
 
+    def _on_splitter_idle(self):
+        """splitter 拖拽防抖超时：松手后恢复内容区绘制 + 解除 TabPanel 节流
+
+        ~120ms 无新 splitterMoved 即视为停手/松手，由 _splitter_idle_timer
+        触发。合并恢复 _content_area.setUpdatesEnabled(True) 与
+        _tab_panel.set_resizing(False)，复位拖拽首帧标记供下次拖拽重新冻结。
+        """
+        self._splitter_dragging = False
+        # ── #14 收尾：折叠/展开动画仍运行则跳过解冻，交 #4 动画 finally 统一恢复 ──
+        # 防「拖拽跨折叠阈值触发动画 + 120ms idle timer 提前解冻」极端路径尾段
+        # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复
+        # _content_area(setUpdatesEnabled True) 与 _set_cards_resize_preview_mode(False)。
+        # _splitter_dragging 已先行复位，后续 splitterMoved 可重新冻结下一拖拽会话。
+        if self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running:
+            return
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(True)
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_resizing(False)
+        # ── #10 对齐恢复：与解冻同步显式恢复 WebView 预览（幂等） ──
+        # 冻结期 MainWidget.resizeEvent 已自动 _set_cards_resize_preview_mode(True)
+        # 隐藏 WebView，此处与 setUpdatesEnabled(True) 同步恢复，消除潜在空窗。
+        mw = self._content_area.currentWidget() if hasattr(self, "_content_area") else None
+        if mw is not None and hasattr(mw, "_set_cards_resize_preview_mode"):
+            mw._set_cards_resize_preview_mode(False)
+
     def _on_splitter_manually_moved(self, pos: int, index: int):
         """用户手动拖拽 splitter 把手：清除挤压折叠标记 + 手动拖宽显式展开
 
@@ -966,6 +1153,16 @@ class TabManagerWindow(QWidget):
         panel = self._tab_panel
         # 手动拖拽：清除挤压折叠标记（无论方向，尊重手动意图）
         panel._collapsed_by_squeeze = False
+        # ── P0 性能优化 OPT-2：拖拽首帧冻结 _content_area 重绘，防抖 timer 松手恢复 ──
+        # 仅首帧冻结一次（_splitter_dragging 未置位时）；_tab_panel 全程保持启用，
+        # 侧栏 UI 切换/展开逻辑仍须响应。每次 splitterMoved 重置 ~120ms 防抖 timer，
+        # 松手后由 _on_splitter_idle 统一恢复绘制，抑制每帧全量重绘/reflow 致卡顿。
+        if not self._splitter_dragging:
+            self._splitter_dragging = True
+            if hasattr(self, "_content_area"):
+                self._content_area.setUpdatesEnabled(False)
+        if hasattr(self, "_splitter_idle_timer"):
+            self._splitter_idle_timer.start()
         # 手动拖宽超过展开阈值（滞回区 110+）：显式展开
         if panel._collapsed and not panel._animating and pos >= panel._auto_collapse_width + 10:
             panel._collapsed = False
@@ -1187,9 +1384,11 @@ class TabManagerWindow(QWidget):
     def _team_project_icon_data(window, fallback: str = "") -> tuple:
         """团队框 header 项目 icon 数据（缩写, 颜色）
 
-        数据源**必须为团队级 project**（TeamManager.get_team_project）：
-        多个成员窗口共享同一个团队框 header，读任一窗口自身项目会导致
-        展示不一致（review 检查点 1）。
+        数据源**必须为按 run_id 粒度的团队级 project**（TeamManager.
+        get_project_for_run_id）：tab_panel 团队框以 run_id（uuid）分组，
+        用旧 get_team_project(team_name=DEFAULT_TEAM) 会读到所有团队共享
+        的 DEFAULT_TEAM.project，导致多团队并存时 ``后建团队切项目 → 之前
+        团队框 header icon 被覆盖`` 的 bug（#5a-fix Plan C）。
 
         团队级 project 为空（团队尚未统一设置项目）时：回退 fallback 参数
         （调用方传入的"正在切换的目标项目"——广播后团队级即写入，两者一致）；
@@ -1198,7 +1397,10 @@ class TabManagerWindow(QWidget):
         try:
             from app.core.team_manager import TeamManager
 
-            project = TeamManager.get_instance().get_team_project()
+            tm = TeamManager.get_instance()
+            run_id = TabManagerWindow._resolve_tab_team_id(window)
+            team_name = getattr(window, "_team_name", "") or tm.DEFAULT_TEAM
+            project = tm.get_project_for_run_id(run_id, team_name=team_name) if run_id else ""
             if not project:
                 project = fallback
             if not project:
@@ -1300,6 +1502,23 @@ class TabManagerWindow(QWidget):
             return self._windows[idx]
         return None
 
+    def _build_ui_context(self) -> "Dict[str, Any]":
+        """委托当前活跃聊天窗口构建 UI 上下文（window._build_ui_context 约定）。
+
+        WorkspacePageHost / 内容渲染等路径以 ``window._build_ui_context()`` 取上下文；
+        TabManagerWindow 本身不含项目/会话状态，转发给当前 OpenAIChatToolWindow。
+        无活跃窗口或委托失败时返回空 dict，避免阻断页面装配。
+        """
+        from loguru import logger
+
+        win = self.get_current_window()
+        if win is not None and hasattr(win, "_build_ui_context"):
+            try:
+                return win._build_ui_context()
+            except Exception as e:
+                logger.warning(f"[TabManagerWindow] _build_ui_context 委托失败: {e}")
+        return {}
+
     @property
     def window_count(self) -> int:
         return len(self._windows)
@@ -1334,6 +1553,17 @@ class TabManagerWindow(QWidget):
                     from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
                     UIPluginRegistry.get_instance().sync_floating_cards_to_tab(_wid)
+            except Exception:
+                pass
+            # Phase E：发布 Tab 切换事件
+            try:
+                from app.core.ui_event_bus import EV_TAB_SWITCHED, UIEventBus
+
+                UIEventBus.get_instance().publish(
+                    EV_TAB_SWITCHED,
+                    tab_index=index,
+                    window_id=_wid,
+                )
             except Exception:
                 pass
             # 切换 tab 时同步宿主窗口标题
@@ -1616,10 +1846,15 @@ class TabManagerWindow(QWidget):
     def _update_shared_launcher(self) -> None:
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
         self._tab_panel.refresh_ui_plugins()
+        # 工作区页面刷新（Phase G）：注册集变化后重建 sidebar 入口 + 销毁被卸载页面
+        if hasattr(self, "_workspace_page_host"):
+            self._workspace_page_host.refresh_pages()
 
     def _show_shared_launcher(self) -> None:
         """兼容模式切换调用：刷新始终显示在 TabPanel 中的插件列表"""
         self._tab_panel.refresh_ui_plugins()
+        if hasattr(self, "_workspace_page_host"):
+            self._workspace_page_host.refresh_pages()
 
     @staticmethod
     def _create_fake_page():
@@ -1935,7 +2170,11 @@ class TabManagerWindow(QWidget):
         # 启用子控件绘制
         if hasattr(self, "_tab_panel"):
             self._tab_panel.setUpdatesEnabled(True)
-        if hasattr(self, "_content_area"):
+        # ── P1 防竞态：若 splitter 拖拽防抖 timer 仍活跃，跳过本次 _content_area 释放 ──
+        # 避免与 OPT-2 的 _on_splitter_idle 双重释放竞态/闪烁（拖拽松手由 timer 统一恢复）。
+        if hasattr(self, "_content_area") and not (
+            hasattr(self, "_splitter_idle_timer") and self._splitter_idle_timer.isActive()
+        ):
             self._content_area.setUpdatesEnabled(True)
 
         # 强制完整 relayout：blocking 期间跳过了 super().resizeEvent，

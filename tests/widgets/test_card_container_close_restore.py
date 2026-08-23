@@ -3,16 +3,19 @@
 
 背景：c8cd2ccc 的 A3 改动在 _do_expand() 非停靠分支展开完成后锁
 min=natural_h，依赖"折叠路径开头 _set_axis_min(0) 解锁"。若卡片关闭/
-移除时未走折叠路径（如 todo 卡片 closed 信号未连接、remove_card、
+移除时未走折叠路径（如卡片 closed 信号未连接、remove_card、
 直接 setVisible(False)），min 锁残留 → 容器仍占 natural_h 空间 →
 对话区（chat_scroll_area）填不回来。
 
 覆盖：
-- todo 卡片真实链路：展开 → 点关闭 → 容器折叠 + min 锁释放 + 对话区恢复
+- 顶卡真实链路：展开 → 点关闭 → 容器折叠 + min 锁释放 + 对话区恢复
 - remove_card：展开后移除卡片 → min 锁释放
-- 直接 setVisible(False)（如空 todo 列表）：→ 折叠 + min 锁释放
+- 直接 setVisible(False)：→ 折叠 + min 锁释放
 - sub_agent 链路（closed 已连接 hide_card）：回归不破坏
 - 回归：展开后 min 锁仍生效（A3 行为不变）
+
+注：原以 TODO 悬浮卡片为载体；TODO 已改为消息卡片内嵌任务列表，
+此处换用等价 dummy 卡片（closed 信号 + NO_ANIMATION_PROP）验证容器机制。
 """
 
 import os
@@ -29,12 +32,37 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from PyQt5.QtCore import QEventLoop, QTimer
+from PyQt5.QtCore import QEventLoop, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QApplication, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from app.widgets.cards.card_container import BottomCardContainer, TopCardContainer
 from app.widgets.cards.card_manager import CardManager, ContainerType
-from app.widgets.cards.floating.todo_floating_widget import TodoFloatingWidget
+
+
+class DummyTopCard(QWidget):
+    """等价 dummy 顶卡：有内容高度 + closed/heightChanged 信号 + NO_ANIMATION_PROP
+
+    复刻原 TodoFloatingWidget 的容器交互面（closed → hide_card、
+    heightChanged → _schedule_expand、跳过容器动画），
+    验证 CardContainer 折叠/min 锁行为。
+    """
+
+    closed = pyqtSignal()
+    heightChanged = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setProperty(TopCardContainer.NO_ANIMATION_PROP, True)
+        self.setMinimumHeight(80)  # 模拟有内容的卡片高度
+
+    def _on_close(self):
+        self.setVisible(False)
+        self.closed.emit()
+
+    def show_content(self):
+        """模拟内容到达：显示并通知容器重算高度（原 update_todos 链路）"""
+        self.setVisible(True)
+        self.heightChanged.emit()
 
 
 def _app():
@@ -73,13 +101,13 @@ class _MiniMainWidget(QWidget):
         lay.addWidget(self.chat_scroll_area, 1)
         lay.addWidget(self._bottom_card_container)
 
-        # todo 卡片（真实组件）
-        self._todo_floating_widget = TodoFloatingWidget(self)
-        self._todo_floating_widget.setVisible(False)
+        # 顶卡（dummy，等价原 todo 卡片链路）
+        self._top_card = DummyTopCard(self)
+        self._top_card.setVisible(False)
         # 模拟 main_widget 修复：连接 closed → hide_card（与 sub_agent 对称）
-        self._todo_floating_widget.closed.connect(lambda: self._card_manager.hide_card("todo", self._window_id))
-        self._card_manager.register_card(self._window_id, ContainerType.TOP, "todo", self._todo_floating_widget)
-        self._top_card_container.add_card("todo", self._todo_floating_widget)
+        self._top_card.closed.connect(lambda: self._card_manager.hide_card("todo", self._window_id))
+        self._card_manager.register_card(self._window_id, ContainerType.TOP, "todo", self._top_card)
+        self._top_card_container.add_card("todo", self._top_card)
 
 
 def _setup():
@@ -106,7 +134,7 @@ class TestTodoCloseRestore:
         mgr = w._card_manager
 
         # 展开 todo
-        w._todo_floating_widget.update_todos([{"status": "in_progress", "content": "任务A", "priority": "high"}])
+        w._top_card.show_content()
         mgr.show_card("todo", w._window_id)
         _pump(350)
         assert top.maximumHeight() >= top._EXPAND_MAX, "todo 展开失败"
@@ -114,25 +142,25 @@ class TestTodoCloseRestore:
         expanded_chat_h = chat.height()
 
         # 模拟用户点关闭按钮（真实 _on_close 路径：setVisible(False) + closed.emit()）
-        w._todo_floating_widget._on_close()
+        w._top_card._on_close()
         _pump(350)
 
         assert top.maximumHeight() == 0, f"容器未折叠: maxH={top.maximumHeight()}"
         assert top.minimumHeight() == 0, f"min 锁残留: minH={top.minimumHeight()}"
         assert top.height() == 0, f"容器仍占空间: h={top.height()}"
         assert chat.height() > expanded_chat_h, f"对话区未恢复: chat={chat.height()} 展开时={expanded_chat_h}"
-        assert not mgr.is_card_visible("todo", w._window_id) or not w._todo_floating_widget.isVisible()
+        assert not mgr.is_card_visible("todo", w._window_id) or not w._top_card.isVisible()
 
     def test_direct_set_visible_false_releases_min_lock(self):
         """直接 setVisible(False)（如空 todo 列表自动隐藏）：min 锁释放"""
         w = _setup()
         top = w._top_card_container
-        w._todo_floating_widget.update_todos([{"status": "in_progress", "content": "任务A", "priority": "high"}])
+        w._top_card.show_content()
         w._card_manager.show_card("todo", w._window_id)
         _pump(350)
         assert top.minimumHeight() > 0
 
-        w._todo_floating_widget.setVisible(False)
+        w._top_card.setVisible(False)
         _pump(350)
         assert top.minimumHeight() == 0, f"min 锁残留: minH={top.minimumHeight()}"
         assert top.maximumHeight() == 0, f"容器未折叠: maxH={top.maximumHeight()}"
@@ -141,7 +169,7 @@ class TestTodoCloseRestore:
         """remove_card 移除卡片：min 锁释放，容器不占空间"""
         w = _setup()
         top = w._top_card_container
-        w._todo_floating_widget.update_todos([{"status": "in_progress", "content": "任务A", "priority": "high"}])
+        w._top_card.show_content()
         w._card_manager.show_card("todo", w._window_id)
         _pump(350)
         assert top.minimumHeight() > 0
@@ -162,7 +190,7 @@ class TestExpandRegression:
         """A3 行为回归：展开后 min 锁仍生效（窗口缩小时卡片不被压缩）"""
         w = _setup()
         top = w._top_card_container
-        w._todo_floating_widget.update_todos([{"status": "in_progress", "content": "任务A", "priority": "high"}])
+        w._top_card.show_content()
         w._card_manager.show_card("todo", w._window_id)
         _pump(350)
         assert top.minimumHeight() > 0, "展开后 min 锁应生效"
@@ -172,16 +200,16 @@ class TestExpandRegression:
         w = _setup()
         top = w._top_card_container
         mgr = w._card_manager
-        w._todo_floating_widget.update_todos([{"status": "in_progress", "content": "任务A", "priority": "high"}])
+        w._top_card.show_content()
         mgr.show_card("todo", w._window_id)
         _pump(350)
 
-        w._todo_floating_widget._on_close()
+        w._top_card._on_close()
         _pump(350)
         assert top.minimumHeight() == 0
 
         # 再次显示
-        w._todo_floating_widget.update_todos([{"status": "in_progress", "content": "任务B", "priority": "high"}])
+        w._top_card.show_content()
         mgr.show_card("todo", w._window_id)
         _pump(350)
         assert top.maximumHeight() >= top._EXPAND_MAX, "二次展开失败"

@@ -117,6 +117,9 @@ class CardManager:
                 "hidden_callbacks": {},
                 "suppress_others_map": {},  # card_id -> set of suppressed card_ids
                 "suppressed_by_others": set(),  # 被其他卡片压制的 card_id 集合
+                # Phase G：dock（LEFT/RIGHT）多卡堆叠数据模型
+                "dock_visible_cards": {ct: [] for ct in DOCK_CONTAINER_TYPES},  # list[card_id]
+                "dock_active_cards": {ct: None for ct in DOCK_CONTAINER_TYPES},  # 栈顶 card_id
             }
 
     def mark_coexist_containers(self, window_id: str, containers: "frozenset[ContainerType]"):
@@ -239,7 +242,24 @@ class CardManager:
         # 与覆盖层（TOP）无互斥关系，四向区域可同时存在
         coexist_cts = self._coexist_containers.get(window_id, frozenset())
         if container_type in DOCK_CONTAINER_TYPES or container_type in coexist_cts:
-            self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
+            # Phase G：dock 容器多卡堆叠——可堆叠卡片追加到 dock_visible_cards 列表；
+            # 非堆叠卡片走原互斥路径（清空列表 + visible_cards 单值）。
+            stackable = self.is_card_stackable(card_id, window_id) if container_type in DOCK_CONTAINER_TYPES else False
+            if container_type in DOCK_CONTAINER_TYPES and stackable:
+                # 堆叠模式：追加到可见列表，active 指向本卡；不隐藏同容器其他卡
+                dock_list = win_data["dock_visible_cards"].setdefault(container_type, [])
+                if card_id not in dock_list:
+                    dock_list.append(card_id)
+                win_data["dock_active_cards"][container_type] = card_id
+                # visible_cards 单值保留为 active（兼容 is_card_visible 旧调用）
+                win_data["visible_cards"][container_type] = card_id
+            else:
+                # 非堆叠：原互斥路径（清空 dock 列表 + 单值）
+                self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
+                if container_type in DOCK_CONTAINER_TYPES:
+                    win_data["dock_visible_cards"][container_type] = [card_id]
+                    win_data["dock_active_cards"][container_type] = card_id
+                win_data["visible_cards"][container_type] = card_id
             try:
                 if hasattr(card_widget, "show_card"):
                     card_widget.show_card()
@@ -248,7 +268,6 @@ class CardManager:
             except RuntimeError:
                 self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
                 return
-            win_data["visible_cards"][container_type] = card_id
             for cb in win_data["shown_callbacks"].get(card_id, []):
                 cb(card_id)
             return
@@ -327,6 +346,19 @@ class CardManager:
             for cb in win_data["shown_callbacks"][card_id]:
                 cb(card_id)
 
+        # Phase E：发布卡片显隐事件
+        try:
+            from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(
+                EV_CARD_VISIBILITY_CHANGED,
+                card_id=card_id,
+                window_id=window_id,
+                visible=True,
+            )
+        except Exception:
+            pass
+
     def hide_card(self, card_id: str, window_id: str):
         """隐藏指定窗口的指定卡片"""
         if window_id not in self._window_data:
@@ -359,6 +391,13 @@ class CardManager:
             return
 
         win_data["visible_cards"][container_type] = None
+        # Phase G：dock 容器多卡——从可见列表移除；active 若指向本卡则指向列表尾
+        if container_type in DOCK_CONTAINER_TYPES:
+            dock_list = win_data.get("dock_visible_cards", {}).get(container_type, [])
+            if card_id in dock_list:
+                dock_list.remove(card_id)
+            if win_data.get("dock_active_cards", {}).get(container_type) == card_id:
+                win_data["dock_active_cards"][container_type] = dock_list[-1] if dock_list else None
 
         # 如果隐藏的是系统卡片，检查是否还有系统卡片可见，没有则解除压制
         if card_id in win_data["system_cards"]:
@@ -370,6 +409,19 @@ class CardManager:
         if card_id in win_data["hidden_callbacks"]:
             for cb in win_data["hidden_callbacks"][card_id]:
                 cb(card_id)
+
+        # Phase E：发布卡片显隐事件
+        try:
+            from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(
+                EV_CARD_VISIBILITY_CHANGED,
+                card_id=card_id,
+                window_id=window_id,
+                visible=False,
+            )
+        except Exception:
+            pass
 
     # ========== 兼容旧 API（使用默认窗口）==========
     # 这些方法保留用于向后兼容，但新代码应使用带 window_id 的版本
@@ -501,6 +553,49 @@ class CardManager:
             return False
         container_type = win_data["containers"][card_id]
         return win_data["visible_cards"].get(container_type) == card_id
+
+    # ── Phase G：dock 多卡堆叠 API ──
+
+    def is_card_stackable(self, card_id: str, window_id: str) -> bool:
+        """卡片是否声明停靠区堆叠（widget 属性 stackInDock 优先）"""
+        win_data = self._window_data.get(window_id)
+        if not win_data:
+            return False
+        ct = win_data["containers"].get(card_id)
+        if ct is None or ct not in DOCK_CONTAINER_TYPES:
+            return False
+        widget = win_data["cards"].get(ct, {}).get(card_id)
+        if widget is not None:
+            try:
+                val = widget.property("stackInDock")
+                if val is True:
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def get_visible_cards(self, window_id: str, container_type: ContainerType) -> List[str]:
+        """dock 容器可见卡列表（多卡堆叠）；非 dock 容器返回空列表"""
+        win_data = self._window_data.get(window_id)
+        if not win_data:
+            return []
+        if container_type not in DOCK_CONTAINER_TYPES:
+            return []
+        return list(win_data.get("dock_visible_cards", {}).get(container_type, []))
+
+    def set_active_card(self, card_id: str, window_id: str) -> None:
+        """切换栈顶卡（仅状态标记，不触发 show/hide 回调）"""
+        win_data = self._window_data.get(window_id)
+        if not win_data:
+            return
+        ct = win_data["containers"].get(card_id)
+        if ct is None or ct not in DOCK_CONTAINER_TYPES:
+            return
+        dock_list = win_data.get("dock_visible_cards", {}).get(ct, [])
+        if card_id not in dock_list:
+            return
+        win_data["dock_active_cards"][ct] = card_id
+        win_data["visible_cards"][ct] = card_id
 
     def get_all_windows(self) -> List[str]:
         """获取所有已注册的窗口ID"""

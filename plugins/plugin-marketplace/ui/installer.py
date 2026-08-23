@@ -692,6 +692,8 @@ class PluginInstaller:
             self._suppress_backend_watcher()
             self._plugins_dir.mkdir(parents=True, exist_ok=True)
             self._cache_dir.mkdir(parents=True, exist_ok=True)
+            # 目标已存在 → 备份替换（update 语义）；否则新装（install 语义）
+            was_existing = target.exists()
 
             # === 1. 下载到 cache 目录 ===
             cache_tmp = self._cache_dir / f"{name}_{int(time.time())}"
@@ -762,7 +764,9 @@ class PluginInstaller:
             # 安装/更新成功 → 上报下载量（后台线程，失败不影响安装结果）
             report_plugin_install(name)
             # 恢复 backend watcher 并精准重载目标插件（仅加载该插件，不触发全量）
-            self._resume_backend_watcher(reload=True, plugin_name=name)
+            self._resume_backend_watcher(
+                reload=True, plugin_name=name, action="updated" if was_existing else "installed"
+            )
             return True
 
         except Exception as e:
@@ -879,12 +883,18 @@ class PluginInstaller:
         except Exception as e:
             logger.debug(f"[Installer] 无法抑制 backend watcher（不影响安装）: {e}")
 
-    def _resume_backend_watcher(self, reload: bool = False, plugin_name: Optional[str] = None) -> None:
+    def _resume_backend_watcher(
+        self, reload: bool = False, plugin_name: Optional[str] = None, action: Optional[str] = None
+    ) -> None:
         """恢复 backend watcher；安装/启停成功时精准重载目标插件（不触发全量）
 
         旧实现 reload=True 时调 reload_plugin_subsystems() 全量重载——卸载/安装
         一个插件会把全部插件的 hooks 注销重注册、全部 agents 重载（数十个插件
         联动抖动）。现改为 reload_plugin_targeted(plugin_name) 只处理目标插件。
+
+        Args:
+            action: PluginChanged hook 动作语义（installed/updated/disabled/enabled），
+                None 时由 backend 按插件注册表状态自动推断
         """
         try:
             from app.core.backend import ChatBackend
@@ -903,9 +913,9 @@ class PluginInstaller:
             try:
                 from PyQt5.QtCore import QTimer
 
-                QTimer.singleShot(0, lambda: inst.reload_plugin_targeted(plugin_name))
+                QTimer.singleShot(0, lambda: inst.reload_plugin_targeted(plugin_name, action=action))
             except Exception:
-                inst.reload_plugin_targeted(plugin_name)
+                inst.reload_plugin_targeted(plugin_name, action=action)
         except Exception as e:
             logger.warning(f"[Installer] 触发插件重载失败（不影响安装）: {e}")
 
@@ -1216,7 +1226,7 @@ class PluginInstaller:
                 self.invalidate_installed_cache()
                 logger.info(f"[Installer] Disabled plugin {name}")
                 # 恢复 watcher 并精准重载目标插件（仅清理该插件，不触发全量）
-                self._resume_backend_watcher(reload=True, plugin_name=name)
+                self._resume_backend_watcher(reload=True, plugin_name=name, action="disabled")
                 return True
             except Exception as e:
                 logger.error(f"[Installer] Disable {name} failed: {e}")
@@ -1252,7 +1262,7 @@ class PluginInstaller:
                 self.invalidate_installed_cache()
                 logger.info(f"[Installer] Enabled plugin {name}")
                 # 恢复 watcher 并精准重载目标插件（仅加载该插件，不触发全量）
-                self._resume_backend_watcher(reload=True, plugin_name=name)
+                self._resume_backend_watcher(reload=True, plugin_name=name, action="enabled")
                 return True
             except Exception as e:
                 logger.error(f"[Installer] Enable {name} failed: {e}")

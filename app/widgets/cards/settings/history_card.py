@@ -1279,6 +1279,7 @@ class HistoryCard(QWidget):
         # 删除卡片 widget
         card.deleteLater()
         self._cached_cards.pop(session_id, None)
+        self._pinyin_cache.pop(session_id, None)
 
         # 从 _all_history 中移除该会话
         self._all_history = [s for s in self._all_history if s.get("session_id") != session_id]
