@@ -8,6 +8,7 @@
 """
 
 import inspect
+import re
 import sys
 
 from PyQt5.QtWidgets import QApplication
@@ -29,6 +30,22 @@ def test_streaming_dock_css_content():
     assert "order: 2" in css
     assert "body.streaming-dock #tool-content" in css
     assert "max-height: 110px" in css
+
+
+def test_streaming_dock_content_no_horizontal_scrollbar():
+    """回归：坞态正文容器不得出现横向滚动条。
+
+    单轴 overflow-y:auto 时另一轴 visible 被计算为 auto → 长行（URL/无空格
+    长 token）超宽出现容器级横向滚动条。必须 overflow-x:hidden +
+    overflow-wrap:break-word（强制换行，避免 hidden 只裁切看不到尾巴）。
+    """
+    css = mc._STREAMING_DOCK_CSS
+    # 提取坞态正文容器规则块
+    m = re.search(r"body\.streaming-dock #content-placeholder \{(.*?)\}", css, re.S)
+    assert m, "坞态正文容器规则必须存在"
+    rule = m.group(1)
+    assert "overflow-x: hidden" in rule, "坞态正文容器必须禁横向滚动"
+    assert "overflow-wrap: break-word" in rule, "坞态正文容器必须强制换行（超宽长词断行）"
 
 
 def test_streaming_dock_js_content():

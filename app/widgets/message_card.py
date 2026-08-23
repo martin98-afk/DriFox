@@ -2275,6 +2275,14 @@ _STREAMING_DOCK_CSS = """
                        330→450 略微放宽，让流式长回复展示更多正文。 */
                     max-height: 450px;
                     overflow-y: auto;
+                    /* 🐛 修复（禁横向滚动）：单轴 auto 时另一轴 visible 会被计算为
+                       auto → 长行（URL/无空格长 token）超宽出现容器级横向滚动条。
+                       对齐 body 的 overflow-x:hidden；代码块(.code-content)/表格
+                       (table-scroll-wrapper) 自带嵌套横向滚动不受影响。
+                       overflow-wrap:break-word 让超宽长词强制断行（仅无断行点时
+                       生效，正常文本不受影响），避免 hidden 只裁切看不到尾巴。 */
+                    overflow-x: hidden;
+                    overflow-wrap: break-word;
                     overflow-anchor: none;
                 }
                 body.streaming-dock #tool-section {
