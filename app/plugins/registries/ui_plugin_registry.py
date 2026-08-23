@@ -945,6 +945,14 @@ class UIPluginRegistry:
             # 以容器为父级创建卡片 widget
             widget = card_info.widget_class(parent=container)
 
+            # Phase G：dock 堆叠声明 — widget 属性优先于注册元数据
+            # （容器侧 CardManager.is_card_stackable 按 property 查询）
+            if card_info.metadata.get("stack"):
+                try:
+                    widget.setProperty("stackInDock", True)
+                except Exception:
+                    pass
+
             # ==== 注入上下文提供函数（拉模型）====
             # 让卡片自己能在需要时（如 showEvent）调用此函数获取最新上下文，
             # 不再由 registry 在外部手动推数据。

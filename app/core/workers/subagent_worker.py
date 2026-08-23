@@ -24,6 +24,7 @@ from app.core.model_capabilities import (
 )
 from app.core.provider_profile import detect_provider_family, get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
+from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 from app.tools.result import ToolResult
 
 # ========== 性能优化：预编译正则表达式 ==========
@@ -34,6 +35,19 @@ _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标
 # ========== 上下文注入预算常量 ==========
 CHARS_PER_TOKEN = 4  # 与 HistoryCompactor 保持一致
 _CONTEXT_INJECTION_RATIO = 0.6  # 上下文注入最多占 budget 的 60%
+
+# 最终总结提示词兕底文案（激活策略无 final_summary_prompt 时使用，内容与原硬编码等价）
+_FALLBACK_FINAL_SUMMARY_PROMPT = """
+
+## 已达到最大迭代次数限制，请总结当前执行结果。
+
+请整理并返回以下内容：
+1. 已完成的工作
+2. 关键发现和结论
+3. 重要文件路径和数据
+4. 待解决的问题（如有）
+
+直接输出总结内容："""
 
 
 def _compute_context_budget(llm_config: Dict) -> int:
@@ -88,7 +102,7 @@ class SubAgentExecutor(QThread):
         tool_executor: Any = None,
         parent_context: str = "",
         is_subagent_call: bool = True,  # 标记是否为被主智能体调用（通过 subagent_para）
-        max_iterations: int = 30,  # 最大迭代次数，默认 30
+        max_iterations: Optional[int] = None,  # 轮数上限（per-agent steps 优先）；None=走激活策略（默认 subagent 策略 30）
     ):
         super().__init__()
         self.task_id = task_id
@@ -99,7 +113,7 @@ class SubAgentExecutor(QThread):
         self.tool_executor = tool_executor
         self.parent_context = parent_context
         self.is_subagent_call = is_subagent_call  # 传递给提示词构建
-        self.max_iterations = max_iterations  # 最大迭代次数限制
+        self.max_iterations = max_iterations  # 轮数上限（None=走激活策略）
         self._is_cancelled = False
         self._pending_answer = None
         self._last_result = None
@@ -475,6 +489,8 @@ class SubAgentExecutor(QThread):
         response_content = ""
         current_reasoning = ""  # DeepSeek V4 thinking mode
         iteration_count = 0
+        # LoopPolicy：轮数上限（per-agent steps 优先，激活策略兜底，默认 30）
+        round_limit = self._resolve_round_limit()
 
         while not self._is_cancelled:
             if self._is_cancelled:
@@ -483,16 +499,19 @@ class SubAgentExecutor(QThread):
             # 每次迭代开始前刷新活跃时间（即将调 API，算作活跃）
             self._last_activity_time = time.time()
 
-            # 检查是否达到最大迭代次数（触发强制结束并总结）
+            # LoopPolicy：轮数上限判定 + 策略门控（默认 subagent 策略到限即停，
+            # 插件策略可改判 CONTINUE 放行进入正常轮次）
             iteration_count += 1
-            if iteration_count > self.max_iterations:
-                self._add_log("progress", f"已达到最大迭代次数 ({self.max_iterations})，强制结束并总结")
-                final_summary_prompt = self._build_final_summary_prompt()
-                current_messages.append({"role": "user", "content": final_summary_prompt})
-                # 强制续命前也触发 PreAssistantMessage（与正常轮次一致）
-                self._trigger_hook_sync("PreAssistantMessage", current_messages)
-                response_content, _, _ = self._make_api_call(current_messages, None, llm_config)
-                return self._filter_thinking_content(response_content)
+            if round_limit is not None and iteration_count > round_limit:
+                _lp_state = LoopState(round_count=iteration_count)
+                if self._loop_policy().should_continue(_lp_state) is not LoopDecision.CONTINUE:
+                    self._add_log("progress", f"已达到最大迭代次数 ({round_limit})，强制结束并总结")
+                    final_summary_prompt = self._final_summary_prompt()
+                    current_messages.append({"role": "user", "content": final_summary_prompt})
+                    # 强制续命前也触发 PreAssistantMessage（与正常轮次一致）
+                    self._trigger_hook_sync("PreAssistantMessage", current_messages)
+                    response_content, _, _ = self._make_api_call(current_messages, None, llm_config)
+                    return self._filter_thinking_content(response_content)
 
             # ====== PreAssistantMessage hook：每次 API 调用前触发 ======
             # 同步触发，hook 输出追加到 current_messages，让 LLM 在下一轮请求中看到
@@ -574,19 +593,39 @@ class SubAgentExecutor(QThread):
             return f"<think>{current_reasoning}</think>\n\n{response_content}"
         return response_content
 
-    def _build_final_summary_prompt(self) -> str:
-        """构建最终总结提示"""
-        return """
+    # ===== LoopPolicy 接入（scope="subagent"）=====
 
-## 已达到最大迭代次数限制，请总结当前执行结果。
+    _loop_policy_obj = None  # 懒解析缓存（激活策略）
 
-请整理并返回以下内容：
-1. 已完成的工作
-2. 关键发现和结论
-3. 重要文件路径和数据
-4. 待解决的问题（如有）
+    def _loop_policy(self):
+        """当前激活的子智能体循环策略（scope=subagent，默认 subagent 策略兜底）"""
+        if self._loop_policy_obj is None:
+            from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
 
-直接输出总结内容："""
+            self._loop_policy_obj = LoopPolicyRegistry.get_instance().get_active("subagent")
+        return self._loop_policy_obj
+
+    def _resolve_round_limit(self) -> Optional[int]:
+        """轮数上限：per-agent steps（max_iterations）显式声明优先，否则激活策略兜底（默认 30）。"""
+        if self.max_iterations is not None:
+            return self.max_iterations
+        try:
+            return self._loop_policy().max_rounds(self.llm_config or {})
+        except Exception as exc:
+            logger.warning(f"[SubAgentExecutor] LoopPolicy max_rounds 调用异常，回退默认 30: {exc!r}")
+            return 30
+
+    def _final_summary_prompt(self) -> str:
+        """最终总结提示词：激活策略提供（SubagentLoopPolicy），异常时回退内置文案"""
+        try:
+            fn = getattr(self._loop_policy(), "final_summary_prompt", None)
+            if callable(fn):
+                prompt = fn()
+                if isinstance(prompt, str) and prompt:
+                    return prompt
+        except Exception as exc:
+            logger.warning(f"[SubAgentExecutor] LoopPolicy final_summary_prompt 调用异常，用内置文案: {exc!r}")
+        return _FALLBACK_FINAL_SUMMARY_PROMPT
 
     def _filter_thinking_content(self, content: str) -> str:
         """过滤掉思考内容，只保留纯回复"""
@@ -1720,8 +1759,8 @@ class SubAgentManager(QObject):
                 except Exception as e:
                     logger.warning(f"[SubAgentManager] 获取上下文失败: {e}")
 
-            # 获取最大迭代次数（从 agent 配置的 steps 获取）
-            max_iterations = agent.steps if agent.steps else 30
+            # 轮数上限：agent.steps 显式声明优先（None=激活策略兜底，默认 subagent 策略 30）
+            max_iterations = agent.steps
 
             executor = SubAgentExecutor(
                 task_id=task_id,
@@ -1969,7 +2008,8 @@ class SubAgentManager(QObject):
         task_description = node.get("description", "")
 
         agent = self._agent_manager.get_agent(agent_name)
-        max_iterations = agent.steps if agent and agent.steps else 30
+        # 轮数上限：agent.steps 显式声明优先（None=激活策略兜底，默认 subagent 策略 30）
+        max_iterations = agent.steps if agent else None
 
         executor = SubAgentExecutor(
             task_id=task_id,

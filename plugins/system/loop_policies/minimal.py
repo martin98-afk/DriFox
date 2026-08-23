@@ -16,9 +16,10 @@ from app.plugins.contracts.loop_policy import LoopDecision, LoopPolicy, LoopStat
 
 
 class MinimalLoopPolicy:
-    """极简策略：无论工具调用/注入，一律单轮即停"""
+    """极简策略：无论工具调用/注入，一律单轮即停（主智能体域）"""
 
     id = "minimal"
+    scope = "main"
 
     def should_continue(self, state: LoopState) -> LoopDecision:
         return LoopDecision.STOP

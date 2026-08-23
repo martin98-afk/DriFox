@@ -64,3 +64,59 @@ def test_set_active_and_fallback(fresh_registry):
     fresh_registry.unregister_source("plugin:demo")
     assert fresh_registry.get_active().id == "default"  # 卸载后回落默认
     assert fresh_registry.set_active("no-such") is False
+
+
+# ===== scope 分组（v2：主智能体/子智能体独立激活槽） =====
+
+
+def test_scope_grouped_defaults(fresh_registry):
+    """subagent 域默认激活 subagent 策略；main 域默认 default；两槽互不影响"""
+    from plugins.system.loop_policies.subagent import SubagentLoopPolicy
+
+    fresh_registry.register(SubagentLoopPolicy(), source="plugin:system")
+    assert fresh_registry.get_active("main").id == "default"
+    assert fresh_registry.get_active("subagent").id == "subagent"
+    assert fresh_registry.get_active().id == "default"  # 缺省 scope=main（向后兼容）
+
+
+def test_set_active_auto_routes_to_policy_scope(fresh_registry):
+    """set_active 不带 scope 时按策略注册的 scope 归位：子域策略激活不影响主域槽"""
+    from plugins.system.loop_policies.subagent import SubagentLoopPolicy
+
+    class _CustomSub:
+        id = "custom-sub"
+        scope = "subagent"
+
+        def should_continue(self, state):
+            return LoopDecision.STOP
+
+        def max_rounds(self, llm_config):
+            return 5
+
+    fresh_registry.register(SubagentLoopPolicy(), source="plugin:system")
+    fresh_registry.register(_CustomSub(), source="plugin:demo")
+    assert fresh_registry.set_active("custom-sub") is True  # 自动归入 subagent 槽
+    assert fresh_registry.get_active("subagent").id == "custom-sub"
+    assert fresh_registry.get_active("main").id == "default"  # main 槽不受影响
+    # 卸载后 subagent 槽独立回落该域默认
+    fresh_registry.unregister_source("plugin:demo")
+    assert fresh_registry.get_active("subagent").id == "subagent"
+
+
+def test_old_policy_without_scope_defaults_main(fresh_registry):
+    """未声明 scope 的旧策略按 main 兜底（向后兼容旧插件）"""
+
+    class _Legacy:
+        id = "legacy"
+
+        def should_continue(self, state):
+            return LoopDecision.STOP
+
+        def max_rounds(self, llm_config):
+            return 1
+
+    fresh_registry.register(_Legacy(), source="plugin:legacy")
+    assert fresh_registry.set_active("legacy") is True
+    assert fresh_registry.get_active("main").id == "legacy"
+    assert fresh_registry.get_active("subagent").id in ("subagent", "default")  # 子域不受污染
+    fresh_registry.unregister_source("plugin:legacy")
