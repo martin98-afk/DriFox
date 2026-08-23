@@ -2826,6 +2826,11 @@ class OpenAIChatToolWindow(ToolWindow):
         theme_manager.register_refresh_target(self)
         # 动态更新主题选项
         update_theme_options()
+        # 模块级 override 前置：必须在 compose 前注册 UI 插件，否则 register_ui_module
+        # (priority=100) 晚于 compose 生效，override 被系统版（priority=0）覆盖。
+        # 首帧后 _init_ui_plugins_deferred 仍会调用本方法，但 registry 单例已加载会跳过，
+        # 仅执行其后的命令重注册等窗口级初始化。
+        self._load_all_ui_plugins()
         # Phase F：注册 5 个系统 UI 模块（瘦版占位；插件可 register_ui_module override）
         _register_system_ui_modules()
 
@@ -2980,14 +2985,14 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.widgets.modules.system_cards_module import SystemCardsModule
 
         system_cards_module = UIPluginRegistry.get_instance().get_ui_module("system_cards")
-        if isinstance(system_cards_module, SystemCardsModule) and not _is_plugin_override("system_cards"):
-            # 系统默认实现：调用 SystemCardsModule.build
+        # 统一由胜出模块 build 完成契约属性初始化（系统默认 / 插件 override 同一路径）。
+        # 关键修复：override 模块可能是 SystemCardsModule 子类（如 demo-override-system-cards
+        # 的 DemoSystemCardsModule），其 build 会调 super().build 初始化 _model_selector_card
+        # 等契约属性。原 isinstance + _is_plugin_override 双判据在「子类 override」场景下两分支
+        # 均跳过 build，导致契约属性永不初始化，点击模型按钮时 _ensure_model_selector_card
+        # 触发 AttributeError: '...' object has no attribute '_model_selector_card'。
+        if system_cards_module is not None:
             system_cards_module.build(self)
-        else:
-            # 插件 override：让插件模块接管；系统模块经 _register_system_ui_modules 始终注册，
-            # 无内联兜底（原 setup_ui 装配代码已迁至 SystemCardsModule.build）。
-            if system_cards_module is not None and not isinstance(system_cards_module, SystemCardsModule):
-                system_cards_module.build(self)
 
         # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，

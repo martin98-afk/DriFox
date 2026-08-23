@@ -1502,6 +1502,23 @@ class TabManagerWindow(QWidget):
             return self._windows[idx]
         return None
 
+    def _build_ui_context(self) -> "Dict[str, Any]":
+        """委托当前活跃聊天窗口构建 UI 上下文（window._build_ui_context 约定）。
+
+        WorkspacePageHost / 内容渲染等路径以 ``window._build_ui_context()`` 取上下文；
+        TabManagerWindow 本身不含项目/会话状态，转发给当前 OpenAIChatToolWindow。
+        无活跃窗口或委托失败时返回空 dict，避免阻断页面装配。
+        """
+        from loguru import logger
+
+        win = self.get_current_window()
+        if win is not None and hasattr(win, "_build_ui_context"):
+            try:
+                return win._build_ui_context()
+            except Exception as e:
+                logger.warning(f"[TabManagerWindow] _build_ui_context 委托失败: {e}")
+        return {}
+
     @property
     def window_count(self) -> int:
         return len(self._windows)
