@@ -648,9 +648,40 @@ class TabManagerWindow(QWidget):
         # dock_splitter: 左停靠区 | 内容区(wrapper) | 右停靠区
         self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
         self._dock_splitter.setObjectName("dockSplitter")
-        self._dock_splitter.addWidget(self._global_left_container)
+        # 堆叠卡容器（Phase G）：与单卡 CardContainer 并行挂于同侧停靠区下方。
+        # LEFT/RIGHT 侧用 wrapper（QVBoxLayout）包裹 [单卡容器, 堆叠容器]，
+        # wrapper 作为 dock_splitter 直接子项——dock mode 协议依赖 CardContainer
+        # 为 splitter 直接子项，故经 wrapper 承载二者（_splitter_index 兼容之）。
+        from app.widgets.cards.card_stack_container import CardStackContainer
+
+        self._global_left_stack = CardStackContainer(self._chat_frame)
+        self._global_left_stack.setObjectName("globalLeftStack")
+        self._global_right_stack = CardStackContainer(self._chat_frame)
+        self._global_right_stack.setObjectName("globalRightStack")
+
+        self._global_left_wrapper = QWidget(self._chat_frame)
+        self._global_left_wrapper.setObjectName("globalLeftWrapper")
+        _left_wrap_layout = QVBoxLayout(self._global_left_wrapper)
+        _left_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        _left_wrap_layout.setSpacing(0)
+        _left_wrap_layout.addWidget(self._global_left_container)
+        self._global_left_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.LEFT)
+        _left_wrap_layout.addWidget(self._global_left_stack)
+        self._global_left_container.set_stack_sibling(self._global_left_stack)
+
+        self._global_right_wrapper = QWidget(self._chat_frame)
+        self._global_right_wrapper.setObjectName("globalRightWrapper")
+        _right_wrap_layout = QVBoxLayout(self._global_right_wrapper)
+        _right_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        _right_wrap_layout.setSpacing(0)
+        _right_wrap_layout.addWidget(self._global_right_container)
+        self._global_right_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.RIGHT)
+        _right_wrap_layout.addWidget(self._global_right_stack)
+        self._global_right_container.set_stack_sibling(self._global_right_stack)
+
+        self._dock_splitter.addWidget(self._global_left_wrapper)
         self._dock_splitter.addWidget(self._chat_wrapper)
-        self._dock_splitter.addWidget(self._global_right_container)
+        self._dock_splitter.addWidget(self._global_right_wrapper)
         self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
         self._dock_splitter.setStretchFactor(1, 1)  # 内容区(含覆盖层)吃掉多余空间
         self._dock_splitter.setStretchFactor(2, 0)  # 右停靠区不随窗口拉伸

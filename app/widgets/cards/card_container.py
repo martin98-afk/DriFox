@@ -85,6 +85,9 @@ class CardContainer(QWidget):
         # 容器不在 splitter 中展开/折叠，而是作为 QStackedWidget 的覆盖层。
         # 卡片显隐时直接 show/hide 容器，发射 overlayStateChanged 信号供外部切换 stack。
         self._overlay_mode = False
+        # 同侧堆叠卡兄弟容器（仅 DOCK LEFT/RIGHT 容器装配；非 dock 容器为 None）：
+        # add_card 时把堆叠声明卡转交它托管；本容器折叠时若它仍可见则保留停靠位。
+        self._stack_sibling: "Optional[CardStackContainer]" = None
         self._setup_ui()
 
     # ── 轴向抽象：纵向容器操作高度，横向容器操作宽度 ──
@@ -219,6 +222,10 @@ class CardContainer(QWidget):
         if self._axis_max() == 0:
             self.hide()
 
+    def set_stack_sibling(self, stack: "CardStackContainer") -> None:
+        """设置同侧堆叠卡兄弟容器（DOCK LEFT/RIGHT 容器装配时调用）"""
+        self._stack_sibling = stack
+
     def set_overlay_mode(self, enabled: bool):
         """启用覆盖层模式：容器作为 QStackedWidget 覆盖层，不参与 splitter 展开/折叠
 
@@ -316,7 +323,17 @@ class CardContainer(QWidget):
     def _splitter_index(self) -> int:
         if self._dock_splitter is None:
             return -1
-        return self._dock_splitter.indexOf(self)
+        idx = self._dock_splitter.indexOf(self)
+        if idx >= 0:
+            return idx
+        # 被 dock 侧 wrapper 包裹时（LEFT/RIGHT 并行挂 CardContainer + CardStackContainer），
+        # 返回包含自身的 dock_splitter 直接子项（wrapper）索引。
+        parent = self.parentWidget()
+        if parent is not None:
+            pidx = self._dock_splitter.indexOf(parent)
+            if pidx >= 0:
+                return pidx
+        return -1
 
     def _remember_dock_size(self):
         """折叠前把当前轴向尺寸兜底记忆到最后可见卡片（per-card）
@@ -399,6 +416,10 @@ class CardContainer(QWidget):
         sp = self._dock_splitter
         idx = self._splitter_index()
         if sp is None or idx < 0:
+            return
+        # 堆叠卡兄弟仍可见：仅隐藏本普通卡容器，保留停靠位空间（不压零），
+        # 避免堆叠组被普通卡关闭连带收起。
+        if self._stack_sibling is not None and self._stack_sibling.isVisible():
             return
         sizes = sp.sizes()
         if idx >= len(sizes) or sizes[idx] == 0:
@@ -842,7 +863,20 @@ class CardContainer(QWidget):
         anim.start()
 
     def add_card(self, card_id: str, card_widget: QWidget):
-        """添加卡片到容器，并注册专属回调"""
+        """添加卡片到容器，并注册专属回调
+
+        停靠区（LEFT/RIGHT）分流：堆叠声明卡（widget 属性 stackInDock 或注册
+        元数据）转交同侧 CardStackContainer 托管，本容器只承载非堆叠互斥卡。
+        """
+        # 堆叠卡分流：交由同侧兄弟容器（由 host 通过 set_stack_sibling 装配）
+        if (
+            self._horizontal
+            and self._stack_sibling is not None
+            and self._card_manager is not None
+            and self._card_manager.is_card_stackable(card_id, self._window_id or "")
+        ):
+            self._stack_sibling.attach_card(card_id, card_widget)
+            return
         self._cards[card_id] = card_widget
         self._layout.addWidget(card_widget)
         # 纵向停靠区（TOP/BOTTOM）：让卡片纵向填满槽位，使"可见卡片高度 = 槽位高度"。
