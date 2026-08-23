@@ -11,6 +11,9 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 if TYPE_CHECKING:
     from app.core.command_manager import CommandType  # noqa: F401
 
+# re-export：让 `from app.plugins.registries.ui_plugin_registry import WorkspacePageInfo` 直接可用
+from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo  # noqa: E402,F401
+
 
 @dataclass(frozen=True)
 class ContentRendererInfo:
@@ -219,6 +222,8 @@ class UIPluginRegistry:
         self._input_buttons: Dict[str, InputButtonInfo] = {}
         self._context_actions: Dict[str, ContextMenuActionInfo] = {}
         self._settings_cards: Dict[str, SettingsCardInfo] = {}
+        # 工作区页面槽（Phase G）：{page_id: WorkspacePageInfo}，页面级扩展
+        self._workspace_pages: Dict[str, Any] = {}
         # 通用区域挂载模型（Phase E）：宿主声明区域 → 插件挂载条目
         # 结构 {region_id: {"kind": str, "entries": {entry_id: SlotEntry}}}
         self._regions: Dict[str, Dict[str, Any]] = {}
@@ -473,6 +478,45 @@ class UIPluginRegistry:
         system = [v for v in items if v.group == "system"]
         custom = [v for v in items if v.group != "system"]
         return system + custom
+
+    # ── Phase G：WorkspacePage 页面槽 ──
+
+    def register_workspace_page(
+        self,
+        plugin_name: str,
+        page_id: str,
+        title: str,
+        widget_class: Any,
+        icon_path: str = "",
+        icon_light_path: str = "",
+        order_hint: int = 500,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册工作区页面（同 page_id 后注册覆盖；order_hint 升序排布）"""
+        from app.plugins.contracts.ui_page import WorkspacePageInfo
+
+        self._workspace_pages[page_id] = WorkspacePageInfo(
+            plugin_name=plugin_name,
+            page_id=page_id,
+            title=title,
+            widget_class=widget_class,
+            icon_path=icon_path,
+            icon_light_path=icon_light_path,
+            order_hint=order_hint,
+            metadata=metadata or {},
+        )
+
+    def get_workspace_pages(self) -> List[Any]:
+        """全部工作区页面（order_hint 升序 → 注册序）"""
+        infos = sorted(
+            self._workspace_pages.values(),
+            key=lambda i: (i.order_hint, list(self._workspace_pages).index(i.page_id)),
+        )
+        return list(infos)
+
+    def get_workspace_page(self, page_id: str) -> Optional[Any]:
+        """按 page_id 精确查询"""
+        return self._workspace_pages.get(page_id)
 
     def register_input_button(
         self,
@@ -1236,6 +1280,7 @@ class UIPluginRegistry:
             or any(v.plugin_name == plugin_name for v in self._input_buttons.values())
             or any(v.plugin_name == plugin_name for v in self._context_actions.values())
             or any(v.plugin_name == plugin_name for v in self._settings_cards.values())
+            or any(v.plugin_name == plugin_name for v in self._workspace_pages.values())
             or any(
                 e.plugin_name == plugin_name
                 for region in self._regions.values()
@@ -1318,6 +1363,8 @@ class UIPluginRegistry:
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
         self._context_actions = {k: v for k, v in self._context_actions.items() if v.plugin_name != plugin_name}
         self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
+        # 清理工作区页面槽（Phase G）
+        self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
         # 清理通用区域条目（Phase E）
         for region in self._regions.values():
             region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}
