@@ -358,3 +358,45 @@ def test_plain_text_viewer_finish_streaming_accepts_keep_dock():
     assert "keep_dock" in sig.parameters, (
         f"PlainTextViewer.finish_streaming 必须声明 keep_dock 参数，实际签名 {sig}"
     )
+
+
+# ──────────────────────────────────────────────
+# 区域独立 II：工具/思考更新不得触碰正文容器滚动位置
+#
+# P005 修复（_userScrolledUp 保护）后残余两处根因：
+# 1. 工具完成块注入 / 工具流式块注入 / _apply_viewer_height 高度回调仍共用
+#    _autoScrollStreamingBody()——用户未上滚（跟随态）时正文容器仍被拉底。
+# 2. updateContent 全量重写 #content-placeholder innerHTML 把 scrollTop 归 0，
+#    只恢复 body 的 scrollTop：思考更新触发全量渲染时正文跳顶（上滚过）/
+#    跳底（跟随态被置底）——即"工具与思考更新时正文滚到固定位置"。
+# ──────────────────────────────────────────────
+
+
+def test_autoscroll_body_only_param():
+    """_autoScrollStreamingBody 必须支持 bodyOnly：true 时只滚 body 不碰正文容器。"""
+    js = mc._CONTENT_AUTOSCROLL_JS
+    assert "function _autoScrollStreamingBody(bodyOnly)" in js, "必须声明 bodyOnly 参数"
+    assert "if (!bodyOnly &&" in js, "正文容器置底必须可被 bodyOnly 跳过"
+
+
+def test_tool_paths_do_not_scroll_content():
+    """工具完成块/流式块注入与高度回调只滚 body（bodyOnly=true），不置底正文容器。"""
+    for fn in (
+        MessageCard.append_tool_result,
+        MessageCard._inject_tool_streaming_html,
+        MessageCard._apply_viewer_height,
+    ):
+        src = inspect.getsource(fn)
+        assert "_autoScrollStreamingBody(true)" in src, (
+            f"{fn.__name__} 必须传 bodyOnly=true（工具/思考更新不碰正文滚动）"
+        )
+        assert "_autoScrollStreamingBody()" not in src, (
+            f"{fn.__name__} 不得存在无参调用（会置底正文容器）"
+        )
+
+
+def test_update_content_preserves_content_scroll():
+    """updateContent 全量重写 innerHTML 后必须恢复正文容器阅读位置。"""
+    src = inspect.getsource(CodeWebViewer._load_skeleton)
+    assert "_cpPrevTop" in src, "必须保存正文容器 scrollTop"
+    assert "Math.min(_cpPrevTop" in src, "必须在 DOM 操作完成后恢复（钳制到新 max）"
