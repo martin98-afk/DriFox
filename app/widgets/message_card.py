@@ -2362,12 +2362,19 @@ _STREAMING_DOCK_JS = """
 # 修复对齐工具区 _scrollToolContentToBottom 模式：用户主动上滚正文
 # （_userScrolledUp）时不拉底，滚回底部附近自动恢复跟随；程序置底打
 # _progScroll 标记防误判为用户滚动。
+# 🐛 修复（区域独立 II）：_userScrolledUp 保护只覆盖"用户上滚过"的场景，
+# 跟随态（标志 false）下工具/思考更新仍会把正文拉底——"工具与思考更新时
+# 正文滚到固定位置"。语义修正：正文容器只在**正文自身更新**时置底；
+# 工具/思考路径传 bodyOnly=true 仅滚 body（非坞态跟随），不碰正文容器。
 _CONTENT_AUTOSCROLL_JS = """
-                function _autoScrollStreamingBody() {
+                function _autoScrollStreamingBody(bodyOnly) {
+                    // bodyOnly=true：调用方是工具/思考更新路径（流式块注入/
+                    // 完成块替换/高度回调），正文内容未变 → 严禁触碰正文容器
+                    // 滚动位置（否则跟随态下正文被拉到固定底部）。
                     // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
                     // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
                     var _cp = document.getElementById('content-placeholder');
-                    if (document.body.classList.contains('streaming-dock') && _cp) {
+                    if (!bodyOnly && document.body.classList.contains('streaming-dock') && _cp) {
                         if (!_cp._userScrolledUp) {
                             _cp._progScroll = true;
                             _cp.scrollTop = _cp.scrollHeight;
@@ -5027,6 +5034,12 @@ class CodeWebViewer(QWebEngineView):
                         var _scrollThreshold = {AUTO_SCROLL_THRESHOLD};
                         var _prevScrollTop = document.body.scrollTop;
                         var _wasUserScrolled = window._userScrolledWithin;
+                        // 🐛 修复（区域独立 II）：同步保存**正文容器**的 scrollTop——
+                        // innerHTML 全量重写会把它重置为 0，而下方只恢复了 body 的。
+                        // 思考/工具更新同样触发全量渲染，若不恢复，正文阅读位置
+                        // 被抹成 0（上滚态卡顶）/被末尾置底拉到固定底部。
+                        var _cpEl = document.getElementById('content-placeholder');
+                        var _cpPrevTop = _cpEl ? _cpEl.scrollTop : 0;
                         // ── 平滑过渡：新内容以轻微透明度淡入，替代生硬闪烁 ──
                         // 在全量 DOM 替换前设 opacity 略低，替换后在 rAF 中恢复全透明，
                         // CSS transition 驱动平滑淡入效果，减轻 innerHTML 重建的视觉突兀感。
@@ -5152,6 +5165,23 @@ class CodeWebViewer(QWebEngineView):
                         // 必须在 _suppressScrollEvent=false 之前执行，
                         // 否则移动 DOM 触发的 scroll 事件会错误标记 _userScrolledWithin=true
                         if (window._toolCompactMode) reorganizeContent();
+
+                        // 🐛 修复（区域独立 II）：所有影响正文高度的 DOM 操作（reorganize
+                        // 搬移/折叠恢复/ECharts）完成后，恢复重建前的阅读位置。
+                        // 钐到新 max（内容变短时不越界）；值实际变化才打 _progScroll
+                        // （防 scroll 事件在 _suppressScrollEvent=false 后异步到达被
+                        // 误判为用户滚动）；值未变不打标记（避免残留吞掉下次真实滚动）。
+                        // 跟随态（_userScrolledUp=false）时下方 _autoScrollStreamingBody
+                        // 置底会覆盖此值（正文有新内容需跟随）；上滚态则保持原位。
+                        var _cpEl2 = document.getElementById('content-placeholder');
+                        if (_cpEl2 && _cpPrevTop > 0) {{
+                            var _cpMax = Math.max(0, _cpEl2.scrollHeight - _cpEl2.clientHeight);
+                            var _cpTarget = Math.min(_cpPrevTop, _cpMax);
+                            if (_cpEl2.scrollTop !== _cpTarget) {{
+                                _cpEl2._progScroll = true;
+                                _cpEl2.scrollTop = _cpTarget;
+                            }}
+                        }}
 
                         // 🐛 修复：auto-scroll 延后到所有 DOM 操作（table 包裹、折叠框状态恢复、
                         // think-block 展开、ECharts 初始化、reorganizeContent）之后执行，
@@ -9910,14 +9940,16 @@ class MessageCard(SimpleCardWidget):
                 self.viewer.page().runJavaScript(
                     "(function(){"
                     "  window._suppressScrollEvent = true;"
+                    # 区域独立 II：高度回调由任何内容变化（含工具/思考区高度）触发，
+                    # 不代表正文更新 → bodyOnly 不碰正文容器滚动位置
                     "  if (!window._userScrolledWithin) {"
-                    "    _autoScrollStreamingBody();"
+                    "    _autoScrollStreamingBody(true);"
                     "  } else {"
                     "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < "
                     + str(AUTO_SCROLL_THRESHOLD)
                     + ";"
                     "    if (wasAtBottom) {"
-                    "      _autoScrollStreamingBody();"
+                    "      _autoScrollStreamingBody(true);"
                     "      window._userScrolledWithin = false;"
                     "    }"
                     "  }"
@@ -10635,13 +10667,14 @@ class MessageCard(SimpleCardWidget):
                         var ts = document.getElementById('tool-section');
                         if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
+                    // 区域独立 II：完成块替换是纯工具区更新 → bodyOnly 不碰正文容器
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        _autoScrollStreamingBody();
+                        _autoScrollStreamingBody(true);
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            _autoScrollStreamingBody();
+                            _autoScrollStreamingBody(true);
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -10667,13 +10700,14 @@ class MessageCard(SimpleCardWidget):
                     tc.appendChild(_newBlock);
                 }}
                 // 🐛 修复：追加新块后同步滚动 document.body，替换旧的 tc.scrollTop
+                // 区域独立 II：追加完成块是纯工具区更新 → bodyOnly 不碰正文容器
                 window._suppressScrollEvent = true;
                 if (!window._userScrolledWithin) {{
-                    _autoScrollStreamingBody();
+                    _autoScrollStreamingBody(true);
                 }} else {{
                     var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                     if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
-                        _autoScrollStreamingBody();
+                        _autoScrollStreamingBody(true);
                         window._userScrolledWithin = false;
                     }}
                 }}
@@ -10931,9 +10965,10 @@ class MessageCard(SimpleCardWidget):
                     if ({_text_only_js}) {{
                         el.setAttribute('data-streaming', '{streaming_flag}');
                         // 🐛 修复：状态更新后 body 自动滚底
+                        // 区域独立 II：状态更新是纯工具区更新 → bodyOnly
                         window._suppressScrollEvent = true;
                         if (!window._userScrolledWithin) {{
-                            _autoScrollStreamingBody();
+                            _autoScrollStreamingBody(true);
                         }}
                         // 🐛 修复：工具区内部自动滚底
                         if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
@@ -10958,13 +10993,14 @@ class MessageCard(SimpleCardWidget):
                         }}
                     }}
                     // 🐛 修复：预览内容更新后 body 自动滚底
+                    // 区域独立 II：预览内容更新是纯工具区更新 → bodyOnly
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        _autoScrollStreamingBody();
+                        _autoScrollStreamingBody(true);
                     }} else {{
                         var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            _autoScrollStreamingBody();
+                            _autoScrollStreamingBody(true);
                             window._userScrolledWithin = false;
                         }}
                     }}
@@ -10989,13 +11025,14 @@ class MessageCard(SimpleCardWidget):
                         tc.appendChild(block);
                     }}
                     // 🐛 修复：追加新块后 body 自动滚底，替换旧的 tc.scrollTop
+                    // 区域独立 II：新流式块追加是纯工具区更新 → bodyOnly
                     window._suppressScrollEvent = true;
                     if (!window._userScrolledWithin) {{
-                        _autoScrollStreamingBody();
+                        _autoScrollStreamingBody(true);
                     }} else {{
                         var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
                         if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
-                            _autoScrollStreamingBody();
+                            _autoScrollStreamingBody(true);
                             window._userScrolledWithin = false;
                         }}
                     }}

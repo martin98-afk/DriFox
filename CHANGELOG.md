@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.4] - 2026-08-23
 
-自上一版本以来的变更 | 提交数：80 · 文件变更：159 · +14584/-1973 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：83 · 文件变更：160 · +14963/-1976 | 贡献者：dingma
 
 ### ✨ 新功能 (New Features)
 
@@ -25,6 +25,8 @@ All notable changes to this project will be documented in this file.
 - **welcome 稳定性** (`app/widgets/`): 补全渲染回调链路 DEBUG 日志 + `_show_initial_welcome` 异常兜底；修复插件热重载后欢迎卡片消失 / 新建会话失败的契约属性防御。
 - **dock / card 渲染** (`app/widgets/streaming_dock.py` + `app/widgets/cards/`): 修复 streaming-dock 水平滚动条与用户滚动时自动滚动打断；修复隐藏控件 resize 死循环；card-dock wrapper 初始折叠态立即同步且可见性联动 splitter 尺寸。
 - **streaming-dock 自动滚动误判** (`app/widgets/streaming_dock.py`): DOM 更新期间忽略程序化滚动事件，避免被误判为用户滚动而打断自动滚动（补 `46993d3f` 热修）。
+- **card-dock splitter 记忆** (`app/widgets/cards/card_container.py` + `app/widgets/tab_manager_window.py`): 修复左右栏 splitter 按插件记忆失效与切换双跳回归（补 `26df65f2` 热修）。
+- **message-card 滚动位置** (`app/widgets/message_card.py`): 工具更新不再影响内容滚动位置（补 `6693093d` 热修）。
 - **agents / OpenAIChatToolWindow** (`plugins/system/agents/` + `app/widgets/`): 更新 build / explore 步骤数并移除 summary agent；改进 `ToolResult` 与 dict 格式的内容处理。
 - **message_card 滚动与缓存** (`app/widgets/message_card.py`): 移除 CodeWebViewer 进度文本前导 emoji；更新 skeleton 缓存版本并改进 in-progress / streaming 滚动行为。
 - **tab_panel 滚动态** (`app/widgets/tab_panel.py`): 刷新时保留自定义插件滚动状态（展开 / 折叠模式）。
