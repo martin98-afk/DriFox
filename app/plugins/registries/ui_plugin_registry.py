@@ -1424,15 +1424,29 @@ class UIPluginRegistry:
         此处对已缓存卡片的窗口：失效缓存（下次显示重建），当前正显示
         欢迎卡片的窗口立即重建。尚无缓存卡片的窗口（正常启动路径：
         卡片在插件加载后才创建）无需处理。
+
+        🛡️ DEBUG 日志（2026-08-23 bug fix）：原 except: pass 完全静默，
+        invalidate 后重建链任何一环崩溃（QWebEngineView 初始化 / Settings 单例
+        异常 / 窗口契约属性缺失）都无法从日志追踪。改为 DEBUG 输出每步决策，
+        异常时 WARNING 暴露堆栈，便于排查「欢迎卡片消失 / 新建会话不出现」。
         """
+        from loguru import logger
+
+        total = len(self._window_main_widgets)
+        skipped_no_cache = 0
+        invalidated = 0
+        rescheduled = 0
         for mw in list(self._window_main_widgets.values()):
             try:
                 if not hasattr(mw, "_invalidate_welcome_card"):
                     continue
                 window_id = getattr(mw, "_window_id", None)
-                if window_id is None or window_id not in getattr(mw, "_welcome_card_cache", {}):
+                cache = getattr(mw, "_welcome_card_cache", {})
+                if window_id is None or window_id not in cache:
+                    skipped_no_cache += 1
                     continue  # 尚无缓存卡片，正常启动路径无需刷新
                 mw._invalidate_welcome_card()
+                invalidated += 1
                 if getattr(mw, "_displayed_session_id", None) is None:
                     # 当前正显示欢迎卡片（无会话上下文）→ 立即重建，避免空白。
                     # 走交错时间片调度（_schedule_initial_welcome），避免 N 个窗口
@@ -1440,10 +1454,17 @@ class UIPluginRegistry:
                     # 同步执行卡死 UI（对齐 _create_new_session 的 C2 优化）。
                     if hasattr(mw, "_schedule_initial_welcome"):
                         mw._schedule_initial_welcome()
+                        rescheduled += 1
                     else:
                         mw._show_initial_welcome()
-            except Exception:
-                pass
+                        rescheduled += 1
+            except Exception as e:  # noqa: BLE001
+                wid = getattr(mw, "_window_id", "<unknown>")
+                logger.warning(f"[UIPluginRegistry] _refresh_welcome_cards: window={wid} 处理失败: {e}")
+        logger.debug(
+            f"[UIPluginRegistry] _refresh_welcome_cards: total={total} "
+            f"skipped_no_cache={skipped_no_cache} invalidated={invalidated} rescheduled={rescheduled}"
+        )
 
     def _remove_widget_from_container(self, window_id: str, card_id: str, widget) -> None:
         """从容器布局和 CardManager 中移除指定 widget（不触发删除，仅 UI 清理）

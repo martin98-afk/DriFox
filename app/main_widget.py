@@ -2991,8 +2991,21 @@ class OpenAIChatToolWindow(ToolWindow):
         # 等契约属性。原 isinstance + _is_plugin_override 双判据在「子类 override」场景下两分支
         # 均跳过 build，导致契约属性永不初始化，点击模型按钮时 _ensure_model_selector_card
         # 触发 AttributeError: '...' object has no attribute '_model_selector_card'。
+        #
+        # 🛡️ 兜底（2026-08-23 bug fix）：get_ui_module / build 任一抛异常 → 窗口契约属性
+        # 全部缺失 → 后续 _notify_history_data_changed 访问 self._history_card 等抛
+        # AttributeError → 新建会话中断 → 欢迎卡片不再渲染（重建链路同步失败）。
+        # 此处捕获后回退到 SystemCardsModule.build(self) 直接设置契约属性，确保
+        # _ensure_xxx_card 兜底链永远能拿到占位 None（即使 build 内容渲染失败）。
         if system_cards_module is not None:
-            system_cards_module.build(self)
+            try:
+                system_cards_module.build(self)
+            except Exception as e:
+                logger.warning(f"[MainWidget] system_cards build 失败，回退 SystemCardsModule 默认契约: {e}")
+                try:
+                    SystemCardsModule().build(self)
+                except Exception as e2:
+                    logger.error(f"[MainWidget] system_cards 兜底 build 也失败，契约属性将缺失: {e2}")
 
         # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，
@@ -8097,7 +8110,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         # 1. 历史卡片可见时刷新
-        refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+        # 🛡️ 防御（2026-08-23 bug fix）：system_cards build 异常（plugin override import 失败等）
+        # 可能导致窗口缺 _history_card 等契约属性，硬访问会抛 AttributeError 中断
+        # _create_new_session 末尾的 notify，进而阻断欢迎卡片渲染链。getattr 兜底
+        # 后本次会话数据变更对历史卡片"无动作"——但 _create_new_session 之前的
+        # _schedule_initial_welcome 已调度，重建照常进行。
+        history_card = getattr(self, "_history_card", None)
+        if history_card is None and getattr(self, "_history_card", "__missing__") == "__missing__":
+            logger.warning(
+                f"[OpenAIChatToolWindow] _notify_history_data_changed: 缺契约属性 _history_card，"
+                f"跳过历史卡片刷新（欢迎卡片渲染不受影响）"
+            )
+        refresh_history_card_if_visible(history_card, self._refresh_history_toggle_panel)
         # 2. 欢迎卡片数据同步：优先「软更新」——缓存卡片仍在时保留
         #    QWebEngineView 实例、仅重渲染 body（避免其他标签页对话完成广播
         #    到本窗口时欢迎卡片被销毁重建，视觉上"重新加载一下"+ 100-500ms
