@@ -738,6 +738,12 @@ class TabManagerWindow(QWidget):
         # 应用样式（使用 _apply_theme_stylesheet 以确保 objectName 选择器生效）
         self._apply_theme_stylesheet()
 
+        # 工作区页面宿主（Phase G）：插件 register_workspace_page 注册的主页面
+        from app.widgets.workspace_page_host import WorkspacePageHost
+
+        self._workspace_page_host = WorkspacePageHost()
+        self._workspace_page_host.attach_to(self)
+
     def _setup_signals(self):
         self._tab_panel.tabSelected.connect(self._on_tab_selected)
         self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
@@ -1735,10 +1741,15 @@ class TabManagerWindow(QWidget):
     def _update_shared_launcher(self) -> None:
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
         self._tab_panel.refresh_ui_plugins()
+        # 工作区页面刷新（Phase G）：注册集变化后重建 sidebar 入口 + 销毁被卸载页面
+        if hasattr(self, "_workspace_page_host"):
+            self._workspace_page_host.refresh_pages()
 
     def _show_shared_launcher(self) -> None:
         """兼容模式切换调用：刷新始终显示在 TabPanel 中的插件列表"""
         self._tab_panel.refresh_ui_plugins()
+        if hasattr(self, "_workspace_page_host"):
+            self._workspace_page_host.refresh_pages()
 
     @staticmethod
     def _create_fake_page():
