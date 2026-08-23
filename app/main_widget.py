@@ -650,7 +650,6 @@ def _abort_team_window(win) -> None:
     if win is None:
         return
     try:
-
         tm = TabManagerWindow.get_instance()
         if tm is not None:
             tm.remove_window(win)
@@ -1448,7 +1447,7 @@ class OpenAIChatToolWindow(ToolWindow):
         for signal, slot in self._singleton_connections:
             try:
                 signal.disconnect(slot)
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
         self._singleton_connections.clear()
 
@@ -1495,7 +1494,6 @@ class OpenAIChatToolWindow(ToolWindow):
             False — 当前窗口不是活动标签页，应跳过焦点操作
         """
         try:
-
             tm = TabManagerWindow.get_instance()
             if tm is not None and tm.isVisible():
                 return tm.get_current_window() is self
@@ -3013,320 +3011,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         compose(host=self, module_ids=["input_card"], root_layout_factory=lambda h: None)
 
-        # ===== 独立工具栏条（钉在主窗口底部，不受 _input_card 缩放影响）=====
-        # 关键：工具栏从 _input_card 中拆出，作为 _input_card 的 sibling
-        # 放在主 layout 自己的容器里。这样 _input_card 缩小到 0 时，
-        # 工具栏的窗口绝对坐标不变——按钮栏不出现视觉跳动。
-        # 视觉上是独立第二张卡：下方圆角 + 渐变 + 边框；颜色使用专属
-        # TOOLBAR_STRIP_BG/TOOLBAR_STRIP_BORDER token（与输入卡片解耦，
-        # 主题可分别调控）。
-        # 工具栏作为 self 的直接子控件（不放在任何 layout 里），
-        # 通过 resizeEvent 绝对定位到窗口底部。这样输入卡折叠/展开时
-        # 工具栏的窗口绝对 Y 坐标完全不变，不再被 VBoxLayout 推上/推下。
-        self._bottom_toolbar_strip = QWidget(self)
-        self._bottom_toolbar_strip.setObjectName("bottomToolbarStrip")
-        self._bottom_toolbar_strip.setFixedHeight(36)
-        strip_layout = QHBoxLayout(self._bottom_toolbar_strip)
-        # 上下 3px 留白 + 28px 内容 = 34px，工具栏 28px 居中放置
-        strip_layout.setContentsMargins(10, 4, 10, 4)
-        strip_layout.setSpacing(8)
+        # ── 底部工具栏（Phase F 模块化：装配代码已迁 app/widgets/modules/bottom_toolbar_module.py）──
+        from app.widgets.ui_composition import compose
 
-        # ===== 工具栏（现在挂在独立 strip 上）=====
-        toolbar_widget = QWidget(self._bottom_toolbar_strip)
-        # 28px 高度匹配 strip 内部 28px 内容区，配合 VCenter 完美居中
-        toolbar_widget.setFixedHeight(28)
-        toolbar_widget.setStyleSheet("background: transparent; border: none;")
-        toolbar_layout = QHBoxLayout(toolbar_widget)
-        toolbar_layout.setContentsMargins(0, 0, 0, 0)
-        toolbar_layout.setSpacing(8)
-        # 内部子项统一 28px 时无需对齐；当前 26/28/28 混用 → VCenter 兜底
-        toolbar_layout.setAlignment(Qt.AlignVCenter)
-
-        # 模型选择（无边框，只保留背景）
-        self._model_btn_container = QWidget(toolbar_widget)
-        self._model_btn_container.setFixedHeight(26)
-        Colors.refresh()
-        self._model_btn_container.setStyleSheet(f"""
-            background: {Colors.TOOLBAR_BG};
-            border: none;
-            border-radius: 8px;
-        """)
-        model_layout = QHBoxLayout(self._model_btn_container)
-        model_layout.setContentsMargins(8, 0, 4, 0)
-        model_layout.setSpacing(0)
-        # 模型胶囊内竖向分隔线：把 [模型名] | [思考强度+配置] | [用量上下文] 三组分开
-        self._model_sep_name = QWidget(self._model_btn_container)
-        self._model_sep_name.setFixedSize(1, 16)
-        self._model_sep_name.setStyleSheet(f"background: {Colors.BORDER};")
-        self._model_sep_name.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self._model_sep_usage = QWidget(self._model_btn_container)
-        self._model_sep_usage.setFixedSize(1, 16)
-        self._model_sep_usage.setStyleSheet(f"background: {Colors.BORDER};")
-        self._model_sep_usage.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self.current_model_btn = QWidget(self._model_btn_container)
-        self.current_model_btn.setCursor(Qt.PointingHandCursor)
-        self.current_model_btn.setStyleSheet(MODEL_BTN_STYLE)
-        self.current_model_btn.mousePressEvent = lambda e: self._toggle_model_selector_card()
-        btn_layout = QHBoxLayout(self.current_model_btn)
-        btn_layout.setContentsMargins(2, 2, 0, 2)
-        btn_layout.setSpacing(4)
-        self._model_btn_icon = QLabel(self.current_model_btn)
-        self._model_btn_icon.setStyleSheet("background: transparent; border: none;")
-        self._model_btn_icon.setFixedSize(18, 18)
-        self._model_btn_icon.setScaledContents(True)
-        btn_layout.addWidget(self._model_btn_icon)
-        self._model_btn_text = QLabel("正在加载...", self.current_model_btn)
-        self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
-        btn_layout.addWidget(self._model_btn_text)
-        model_layout.addWidget(self.current_model_btn, 1)
-        model_layout.addSpacing(6)
-        model_layout.addWidget(self._model_sep_name)
-        model_layout.addSpacing(6)
-        self.settings_btn = QWidget(self._model_btn_container)
-        self.settings_btn.setObjectName("settingsEffortBtn")
-        self.settings_btn.setCursor(Qt.PointingHandCursor)
-        self.settings_btn.setStyleSheet(f"""
-            QWidget#settingsEffortBtn {{
-                background: transparent;
-                border: none;
-                border-radius: 8px;
-            }}
-            QWidget#settingsEffortBtn:hover {{
-                background: {Colors.HOVER_BG_STRONG};
-            }}
-        """)
-        self.settings_btn.setToolTip("模型参数配置")
-        self.settings_btn.mousePressEvent = lambda e: self._toggle_model_config_card()
-        settings_btn_layout = QHBoxLayout(self.settings_btn)
-        settings_btn_layout.setContentsMargins(4, 2, 6, 2)
-        settings_btn_layout.setSpacing(5)
-        self._settings_btn_icon = QLabel(self.settings_btn)
-        self._settings_btn_icon.setFixedSize(16, 16)
-        self._settings_btn_icon.setScaledContents(True)
-        self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
-        settings_btn_layout.addWidget(self._settings_btn_icon)
-
-        # 思考强度胶囊（独立控件，与配置卡片按钮分离）：模型支持 reasoning_effort
-        # 且思考模式开启时显示当前等级；点击直接循环轮换等级（方便快速调强度）
-        self.effort_btn = QWidget(self._model_btn_container)
-        self.effort_btn.setObjectName("effortCycleBtn")
-        self.effort_btn.setCursor(Qt.PointingHandCursor)
-        self.effort_btn.setStyleSheet("""
-            QWidget#effortCycleBtn {
-                background: transparent;
-                border: none;
-            }
-        """)
-        self.effort_btn.setToolTip("点击切换思考强度等级")
-        self.effort_btn.mousePressEvent = lambda e: self._cycle_effort_level(e)
-        effort_btn_layout = QHBoxLayout(self.effort_btn)
-        effort_btn_layout.setContentsMargins(0, 0, 0, 0)
-        effort_btn_layout.setSpacing(0)
-        self._settings_effort_label = QLabel("", self.effort_btn)
-        self._settings_effort_label.setAttribute(Qt.WA_TransparentForMouseEvents)  # 点击穿透到外层轮换按钮
-        self._settings_effort_label.setStyleSheet(self._get_settings_effort_style())
-        effort_btn_layout.addWidget(self._settings_effort_label)
-        model_layout.addWidget(self.effort_btn)
-        model_layout.addWidget(self.settings_btn)
-        model_layout.addWidget(self._model_sep_usage)
-
-        # 余额/用量/上下文放入模型选择胶囊内
-        model_layout.addSpacing(6)
-        model_layout.addWidget(self.balance_display)
-        model_layout.addWidget(self.coding_plan_ring)
-        model_layout.addWidget(self.context_usage_ring)
-        model_layout.addSpacing(2)
-
-        toolbar_layout.addWidget(self._model_btn_container)
-
-        self._current_provider_name = ""
-        self._current_model_name = ""
-        # #4 语义：本窗口用户是否手动选过模型（_on_model_selected_from_popup 置位）。
-        # 同步跟随判定：True → 保持自身选择；False（首次加载/默认态）→ 跟随云端 SelectedModel。
-        self._user_manually_selected_model = False
-
-        # ===== 工具开关双色分段按钮 =====
-        self._tool_toggle_btn = QWidget(toolbar_widget)
-        self._tool_toggle_btn.setFixedHeight(26)
-        self._tool_toggle_btn.setCursor(Qt.PointingHandCursor)
-        Colors.refresh()
-        self._tool_toggle_btn.setStyleSheet(f"""
-            background: {Colors.TOOLBAR_BG};
-            border: none;
-            border-radius: 8px;
-        """)
-        self._tool_toggle_btn.mousePressEvent = lambda e: self._toggle_tool_control_card()
-        tt_layout = QHBoxLayout(self._tool_toggle_btn)
-        tt_layout.setContentsMargins(6, 0, 6, 0)
-        tt_layout.setSpacing(0)
-
-        # 图标（主题感知 SVG — 自动适配浅色/深色模式）
-        tt_icon = _ThemedIconLabel("工具", 18, self._tool_toggle_btn)
-        tt_icon.setStyleSheet("background: transparent; border: none;")
-        tt_layout.addWidget(tt_icon)
-        tt_layout.addSpacing(4)
-
-        # 左：危险工具数（暗红）
-        self._tool_danger_label = QLabel("0")
-        self._tool_danger_label.setAlignment(Qt.AlignCenter)
-        self._tool_danger_label.setFixedHeight(20)
-        self._tool_danger_label.setStyleSheet(f"""
-            background: {Colors.STATUS_DANGER_BG_DARK};
-            color: white; font-weight: 700;
-            border: none; border-top-left-radius: 4px; border-bottom-left-radius: 4px;
-            padding: 0 8px;
-            {font_size_css(13)} {get_font_family_css()}
-        """)
-        tt_layout.addWidget(self._tool_danger_label)
-
-        # 右：安全工具数（暗绿）
-        self._tool_safe_label = QLabel("0")
-        self._tool_safe_label.setAlignment(Qt.AlignCenter)
-        self._tool_safe_label.setFixedHeight(20)
-        self._tool_safe_label.setStyleSheet(f"""
-            background: {Colors.SUCCESS_DARK};
-            color: white; font-weight: 700;
-            border: none; border-top-right-radius: 4px; border-bottom-right-radius: 4px;
-            padding: 0 8px;
-            {font_size_css(13)} {get_font_family_css()}
-        """)
-        tt_layout.addWidget(self._tool_safe_label)
-
-        # 恢复按钮（仅 agent 覆盖时显示，不打开卡片即可恢复）
-        self._tool_restore_btn = QPushButton("↺", self._tool_toggle_btn)
-        self._tool_restore_btn.setFixedSize(20, 20)
-        self._tool_restore_btn.setCursor(Qt.PointingHandCursor)
-        self._tool_restore_btn.setToolTip("取消 agent 覆盖，恢复用户工具权限")
-        self._tool_restore_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; border: none;
-                color: #ff9500; {font_size_css(13)} {get_font_family_css()}
-                font-weight: bold; padding: 0;
-            }}
-            QPushButton:hover {{
-                color: #ffb84d;
-            }}
-        """)
-        self._tool_restore_btn.setVisible(False)
-        self._tool_restore_btn.clicked.connect(lambda: self._on_tool_restore())
-        tt_layout.addWidget(self._tool_restore_btn)
-
-        # 工具权限按钮移到右侧（右对齐）
-        toolbar_layout.addStretch(1)
-
-        toolbar_layout.addWidget(self._tool_toggle_btn)
-
-        # 右侧功能按钮组（无边框，间距加宽）
-        self._toolbar_capsule = QWidget(toolbar_widget)
-        self._toolbar_capsule.setFixedHeight(28)
-        Colors.refresh()
-        self._toolbar_capsule.setStyleSheet(f"""
-            background: {Colors.TOOLBAR_BG};
-            border: none;
-            border-radius: 10px;
-        """)
-        capsule_layout = QHBoxLayout(self._toolbar_capsule)
-        capsule_layout.setContentsMargins(6, 2, 6, 2)
-        capsule_layout.setSpacing(4)
-
-        Colors.refresh()
-        btn_capsule_style = f"""
-            TransparentToolButton {{ background: transparent; border: none; }}
-            TransparentToolButton:hover {{ background: {Colors.HOVER_BG_STRONG}; border-radius: 5px; }}
-        """
-
-        self.memory_btn = TransparentToolButton(get_icon("长期记忆"), self._toolbar_capsule)
-        self.memory_btn.setFixedSize(24, 24)
-        self.memory_btn.setStyleSheet(btn_capsule_style)
-        self.memory_btn.setToolTip("长期记忆")
-        self.memory_btn.setObjectName("memory")  # Phase E：插件按钮 position 锚点
-        self.memory_btn.clicked.connect(self._show_soul_memory)
-        capsule_layout.addWidget(self.memory_btn)
-
-        # 历史会话按钮（从右上移到右下）
-        self.history_btn = TransparentToolButton(get_icon("历史对话"), self._toolbar_capsule)
-        self.history_btn.setFixedSize(24, 24)
-        self.history_btn.setStyleSheet(btn_capsule_style)
-        self.history_btn.setToolTip("历史会话")
-        self.history_btn.setObjectName("history")  # Phase E：插件按钮 position 锚点
-        self.history_btn.clicked.connect(self._toggle_history_card)
-        capsule_layout.addWidget(self.history_btn)
-
-        # 新建对话按钮（从右上移到右下）
-        self.new_session_btn = TransparentToolButton(get_icon("新会话"), self._toolbar_capsule)
-        self.new_session_btn.setFixedSize(24, 24)
-        self.new_session_btn.setStyleSheet(btn_capsule_style)
-        self.new_session_btn.setToolTip("新建对话")
-        self.new_session_btn.setObjectName("new_session")  # Phase E：插件按钮 position 锚点
-        self.new_session_btn.clicked.connect(self._create_new_session)
-        capsule_layout.addWidget(self.new_session_btn)
-
-        # 为工具栏按钮安装自绘 hover tooltip（绕开 QToolTip 样式问题）
-        for _tb in [self.memory_btn, self.history_btn, self.new_session_btn]:
-            install_hover_tooltip(_tb)
-
-        # Phase D：输入区插件按钮（_init_ui_plugins_deferred 加载插件后再构建一次）
-        self._plugin_input_buttons: list = []
-        self._build_plugin_input_buttons()
-
-        toolbar_layout.addWidget(self._toolbar_capsule)
-
-        # 工具栏挂到独立 strip（不在 _input_card 里了）
-        strip_layout.addWidget(toolbar_widget)
-
-        self._bottom_input_container.setAttribute(Qt.WA_TranslucentBackground, True)
-        # 统一胶囊光晕底层：跨越输入卡 + 工具栏整个胶囊，由 paintEvent 自绘连贯环绕光，
-        # 避免两个独立 widget 各挂 QGraphicsDropShadowEffect 时光晕只走局部轮廓、
-        # 接缝处互相遮挡导致"只上半弧形发光"的诡异观感。
-        self._input_glow_underlay = InputGlowUnderlay(self)
-        # 旧的 input_card 主光 / wrapper 环境光保留为占位但默认关闭：发光统一由 underlay 提供。
-        # 之所以不直接删除，是为了保留 setGraphicsEffect 钩子，方便未来需要时复用。
-        self._input_card_primary_shadow = QGraphicsDropShadowEffect(self._input_card)
-        self._input_card_primary_shadow.setOffset(0, 0)
-        self._input_card_primary_shadow.setBlurRadius(0)
-        self._input_card_primary_shadow.setColor(QColor(0, 0, 0, 0))
-        self._input_card.setGraphicsEffect(self._input_card_primary_shadow)
-        self._input_card_ambient_shadow = QGraphicsDropShadowEffect(self._input_card_wrapper)
-        self._input_card_ambient_shadow.setOffset(0, 0)
-        self._input_card_ambient_shadow.setBlurRadius(0)
-        self._input_card_ambient_shadow.setColor(QColor(0, 0, 0, 0))
-        self._input_card_wrapper.setGraphicsEffect(self._input_card_ambient_shadow)
-        # 工具栏自身只保留失焦态的轻微下投阴影增强"落地"感，聚焦发光交给 underlay 统一处理
-        self._bottom_toolbar_shadow = QGraphicsDropShadowEffect(self._bottom_toolbar_strip)
-        self._bottom_toolbar_shadow.setBlurRadius(14)
-        self._bottom_toolbar_shadow.setOffset(0, 4)
-        self._bottom_toolbar_shadow.setColor(QColor(0, 0, 0, 70))
-        self._bottom_toolbar_strip.setGraphicsEffect(self._bottom_toolbar_shadow)
-        self._input_card_focused = False
-        self._input_area_collapsed = False
-        self._apply_bottom_input_stack_style()
-
-        bottom_layout.addWidget(self._input_card_wrapper)
-        # 预留 36px 空间给工具栏（工具栏本身不在 layout 里，绝对定位）。
-        # 输入卡 + 这 36px = 输入容器高度；工具栏钉死在窗口底部 36px，
-        # 与输入容器底部对齐（输入卡隐藏时容器仍占 36px，工具栏位置不变）。
-        bottom_layout.addSpacing(36)
+        compose(host=self, module_ids=["bottom_toolbar"], root_layout_factory=lambda h: None)
 
         layout.addWidget(self._bottom_input_container)
-
-        # 向内发光：underlay 必须在输入容器 / 工具栏 **之上** 才不会被它们
-        # 的不透明背景盖住；setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        # 已让鼠标事件全部穿透，不影响文本输入 / 按钮点击。
-        self._input_glow_underlay.raise_()
-
-        # 输入卡 wrapper / 容器尺寸变化 → 同步胶囊光晕底层几何
-        # （输入框高度自适应、系统卡片折叠都会改它们的尺寸）
-        self._input_card_wrapper.installEventFilter(self)
-        self._bottom_input_container.installEventFilter(self)
-
-        # 初始定位工具栏（resizeEvent 会持续更新）
-        self._position_bottom_toolbar()
-
-        # 初始刷新工具开关按钮
-        self._refresh_tool_toggle_btn()
-
-        # 统一安装自绘 hover tooltip，替换所有原生 QToolTip
-        batch_install_hover_tooltips(self)
 
     def _build_settings_popup(self):
         """（委托全局卡片控制器 GlobalCardController）
@@ -5226,7 +4916,6 @@ class OpenAIChatToolWindow(ToolWindow):
                         logger.warning(f"[_handle_team_new_task] 同步成员 run_id 失败: {e}")
                 # 4) 刷新 Tab 分组：run_id 变化 → 窗口移入新 run_id 团队框分组
                 try:
-
                     tm_win = TabManagerWindow.get_instance()
                     if tm_win is not None:
                         for win in member_windows:
@@ -5384,7 +5073,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🛡️ C4 兜底：异常时窗口可能已建成，至少刷新胶囊使其归入团队分组
             try:
                 if not getattr(win, "_is_destroyed", False):
-
                     tm_win = TabManagerWindow.get_instance()
                     if tm_win is not None:
                         tm_win.refresh_capsule_for_window(win)
@@ -6074,7 +5762,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 导致 _on_win_title_changed 不触发、胶囊不显示）
         try:
             if self.cfg.enable_tab_manager.value:
-
                 _tm = TabManagerWindow.get_instance()
                 if _tm is not None:
                     _tm.refresh_capsule_for_window(self)
@@ -8433,7 +8120,6 @@ class OpenAIChatToolWindow(ToolWindow):
         （本窗口刷新由调用方完成），避免递归。
         """
         try:
-
             tm = TabManagerWindow.get_instance()
             if tm is None:
                 return
@@ -9723,7 +9409,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # Tab 模式下刷新共享 Launcher（热重载可能新增 / 卸载了 UI 插件）
             try:
-
                 _tm = TabManagerWindow.get_instance()
                 if _tm is not None and _tm.isVisible():
                     _tm._update_shared_launcher()
@@ -12957,7 +12642,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # refresh_capsule_for_window 调用；无 Tab 管理器时静默跳过）
         try:
             if self.cfg.enable_tab_manager.value:
-
                 _tm = TabManagerWindow.get_instance()
                 if _tm is not None:
                     _tm.refresh_capsule_for_window(self)
@@ -13137,8 +12821,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 流式新建卡片时同步最新任务列表（模型跨轮继续执行任务时，
         # 新回复卡片底部延续显示当前任务进度；历史加载 scroll=False 不同步）
         # 若已有任务全部完成，则不同步——避免新消息卡片底部残留旧任务完成态。
-        if scroll and self._latest_todos and any(
-            isinstance(t, dict) and t.get("status") != "completed" for t in self._latest_todos
+        if (
+            scroll
+            and self._latest_todos
+            and any(isinstance(t, dict) and t.get("status") != "completed" for t in self._latest_todos)
         ):
             card.update_todo_list(self._latest_todos)
         if scroll and not self._suspend_auto_scroll:
@@ -16831,7 +16517,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # dict/list 等非字符串 content → 序列化为 JSON，避免 Python repr 破坏渲染
             try:
                 content = json.dumps(raw_content).decode("utf-8", errors="replace")
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 content = str(raw_content)
 
         # 统一处理工具完成状态
@@ -16907,7 +16593,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # Tab 模式：计算当前窗口对应的标签页索引，点击通知时自动跳转
         tab_index = -1
         try:
-
             tm = TabManagerWindow.get_instance()
             if tm is not None:
                 tab_index = tm._window_to_index.get(id(self), -1)
@@ -20115,8 +19800,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🔧 泄漏修复（M6）：断开全局单例 coding_plan_ready，关窗后不再幽灵回调
             try:
                 from app.core.usage_service import UsageService
+
                 UsageService.get_instance().coding_plan_ready.disconnect(self._on_coding_plan_result)
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
             # 🛡️ B5 异步化：closeEvent 不再同步调用 backend.stop_streaming()
