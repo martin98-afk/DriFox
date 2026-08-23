@@ -2977,140 +2977,19 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 下方卡片容器
                 layout.addWidget(self._bottom_card_container)
 
-        # ── 六张系统卡片框架懒创建（P0-1 性能优化）──
-        # 原 setup_ui 同步段直接创建 6 张 BaseSettingsCard 框架（~160ms），
-        # 改为 _ensure_xxx_card() 惰性创建：deferred 链预构建 + 打开入口兜底。
-        # 属性名保持稳定（None 占位），引用点已有 hasattr/getattr/if 保护。
-        self._history_card = None
-        self._history_popup_card = None
-        self._share_card = None
-        self._share_card_content = None
-        self._history_questions_card = None
-        self._history_questions_card_content = None
-        self._memory_card = None
-        self._memory_card_popup = None
-        self._model_config_card = None
-        self._model_config_popup = None
-        self._model_selector_card = None
-        self._model_selector_card_content = None
+        # ── 六张系统卡片框架懒创建（Phase F：已迁移到 SystemCardsModule，由 compose 驱动）──
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+        from app.widgets.modules.system_cards_module import SystemCardsModule
 
-        # 工具控制卡片（controller 由 _tool_permission_controller 在后续 set_controller 注入）
-        self._tool_control_card = ToolControlCardFrame(self)
-        # 🛡️ 如果 controller 已存在（__init__ 中在 super 之前创建时），立即绑定
-        if hasattr(self, "_tool_permission_controller") and self._tool_permission_controller is not None:
-            self._tool_control_card.set_controller(self._tool_permission_controller)
-        self._tool_control_card.setObjectName("toolControlCard")
-        self._tool_control_card.setMinimumHeight(250)
-        self._tool_control_card.setVisible(False)
-        self._tool_control_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("tool_control", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._tool_control_card.togglesChanged.connect(lambda _: self._refresh_tool_toggle_btn())
-        self._bottom_card_container.add_card("tool_control", self._tool_control_card)
-
-        # 模型选择卡片框架懒创建（P0-1）：见上方 _ensure_model_selector_card() 说明
-
-        # 项目选择卡片（Top 卡片，与 settings 同容器）
-        self._project_selector_card = BaseSettingsCard("", "", self)
-        self._project_selector_card.setMinimumHeight(200)  # 自适应窗口高度
-        self._project_selector_card_content = ProjectSelectorCardContent()
-        self._project_selector_card_content.projectSelected.connect(self._on_project_selected)
-        self._project_selector_card_content.newProjectCreated.connect(self._on_new_project_created)
-        self._project_selector_card_content.archiveProject.connect(self._on_archive_project)
-        self._project_selector_card_content.exportProject.connect(self._on_export_project)
-        self._project_selector_card_content.importProjectRequested.connect(self._on_import_project)
-        self._project_selector_card_content.projectFileDropped.connect(self._on_project_file_dropped)
-        self._project_selector_card_content.openFolderRequested.connect(self._on_open_project_folder)
-        self._project_selector_card_content.folderDropped.connect(self._on_project_folder_dropped)
-
-        self._project_selector_card.content_layout.addWidget(self._project_selector_card_content)
-        # ── 新建项目输入放到标题栏 ──
-        from PyQt5.QtWidgets import QLineEdit
-
-        Colors.refresh()
-        self._project_new_edit = QLineEdit(self._project_selector_card)
-        self._project_new_edit.setPlaceholderText("新建/搜索项目...")
-        self._project_new_edit.setMaximumWidth(220)
-        self._project_new_edit.setMinimumWidth(130)
-        self._project_new_edit.setFixedHeight(26)
-        self._project_new_edit.setStyleSheet(f"""
-            QLineEdit {{
-                background: {Colors.HOVER_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: 2px 6px;
-                {font_size_css(11)}
-                {get_font_family_css()}
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {Colors.TEXT_ACCENT};
-            }}
-            QLineEdit::placeholder {{
-                color: {Colors.INPUT_PLACEHOLDER};
-            }}
-        """)
-        self._project_new_edit.returnPressed.connect(self._on_header_new_project)
-        self._project_new_edit.textChanged.connect(self._on_project_filter_changed)
-
-        self._project_new_btn = TransparentToolButton(FluentIcon.ADD, self._project_selector_card)
-        self._project_new_btn.setFixedSize(24, 24)
-        self._project_new_btn.setToolTip("创建项目")
-        self._project_new_btn.clicked.connect(self._on_header_new_project)
-
-        # 选择文件夹按钮（+号右侧）
-        self._project_open_folder_btn = TransparentToolButton(FluentIcon.FOLDER, self._project_selector_card)
-        self._project_open_folder_btn.setFixedSize(24, 24)
-        self._project_open_folder_btn.setToolTip("选择文件夹作为项目根目录")
-        self._project_open_folder_btn.clicked.connect(self._on_project_open_folder_btn)
-
-        # 导入项目按钮（从 .drifox_project 压缩包导入）
-        self._project_import_btn = TransparentToolButton(get_icon("导入"), self._project_selector_card)
-        self._project_import_btn.setFixedSize(24, 24)
-        self._project_import_btn.setToolTip("导入项目（从 .drifox_project 压缩包）")
-        self._project_import_btn.clicked.connect(self._on_import_project)
-
-        # 插入到标题栏的额外按钮区（关闭按钮之前）
-        self._project_selector_card._extra_buttons_container.insertWidget(0, self._project_new_edit)
-        self._project_selector_card._extra_buttons_container.insertWidget(1, self._project_new_btn)
-        self._project_selector_card._extra_buttons_container.insertWidget(2, self._project_open_folder_btn)
-        self._project_selector_card._extra_buttons_container.insertWidget(3, self._project_import_btn)
-
-        self._project_selector_card.setVisible(False)
-        self._project_selector_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("project_selector", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-
-        self._question_floating_widget = QuestionFloatingWidget(self)
-        self._question_floating_widget.setVisible(False)
-        self._question_floating_widget.answered.connect(self._on_question_answered)
-        self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
-        self._question_floating_widget.previewRequested.connect(self._on_question_preview_requested)
-        self._bottom_card_container.add_card("question", self._question_floating_widget)
-
-        # 注册卡片到 CardManager（优先级：数值越小权限越高）
-        self._register_cards_to_manager()
-
-        # 系统卡片打开时隐藏文本输入框（保留按钮栏），关闭时恢复
-        # _system_card_ids 在 __init__ 顶部初始化为 _BASE_SYSTEM_CARD_IDS，
-        # UI 插件注册浮动卡片后通过 register_system_card() 扩展该集合。
-        for _cid in self._system_card_ids:
-            self._card_manager.on_card_shown(self._window_id, _cid, lambda cid: self._on_system_card_opened(cid))
-            self._card_manager.on_card_hidden(self._window_id, _cid, lambda cid: self._on_system_card_closed(cid))
-
-        # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
-        # [PERF] 延迟 100ms 到首帧之后注册，节省 ~200ms 关键路径时间。
-        # 为什么是 100ms 而非 singleShot(0)：Qt QTimer 按到期时间排序，
-        # singleShot(0) 到期时间 ≈ 创建时间，早于 main.py 中 _show_popup 的
-        # singleShot(0)（创建更晚），导致 BuiltinCommands 仍在窗口显示前执行。
-        # 100ms 延迟确保到期时间晚于所有 singleShot(0)，在窗口第一次绘制后注册。
-        QTimer.singleShot(100, self._init_builtin_commands)
+        system_cards_module = UIPluginRegistry.get_instance().get_ui_module("system_cards")
+        if isinstance(system_cards_module, SystemCardsModule) and not _is_plugin_override("system_cards"):
+            # 系统默认实现：调用 SystemCardsModule.build
+            system_cards_module.build(self)
+        else:
+            # 插件 override：让插件模块接管；系统模块经 _register_system_ui_modules 始终注册，
+            # 无内联兜底（原 setup_ui 装配代码已迁至 SystemCardsModule.build）。
+            if system_cards_module is not None and not isinstance(system_cards_module, SystemCardsModule):
+                system_cards_module.build(self)
 
         # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，
