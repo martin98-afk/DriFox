@@ -20449,12 +20449,14 @@ class OpenAIChatToolWindow(ToolWindow):
         self._save_current_session_to_history()
 
 
+_SYSTEM_MODULE_ORDER = ["title_bar", "chat_area", "system_cards", "input_card", "bottom_toolbar"]
+
+
 def _register_system_ui_modules() -> None:
-    """Phase F：注册 5 个系统 UI 模块到 UIPluginRegistry（瘦版占位）
+    """Phase F：注册 5 个系统 UI 模块到 UIPluginRegistry
 
     插件可 register_ui_module(module_id, factory, plugin_name, priority>=100) 覆盖。
-    瘦版模块 build 为空（系统默认装配代码仍在 setup_ui 中执行），保证向后兼容。
-    未来按 plan 路线：完整搬迁 setup_ui 段到各模块 → 瘦版升级为系统默认实现。
+    按 _SYSTEM_MODULE_ORDER 顺序注册（装配顺序 = 注册顺序）。
     """
     try:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
