@@ -2330,6 +2330,15 @@ _STREAMING_DOCK_JS = """
                         if (!_atBottom && _dockH > 0) {
                             document.body.scrollTop = Math.max(0, document.body.scrollTop - _dockH);
                         }
+                        // 🐛 修复：进入坞态时正文容器开始限高内滚，切换瞬间内容溢出
+                        // 会触发一次程序性 scroll 事件；重置正文容器用户滚动标志并程序
+                        // 置底跟随，避免遗留状态/切换抖动误判为正文上滚而卡在顶部。
+                        var _cp = document.getElementById('content-placeholder');
+                        if (_cp) {
+                            _cp._userScrolledUp = false;
+                            _cp._progScroll = true;
+                            _cp.scrollTop = _cp.scrollHeight;
+                        }
                     }
                     // 高度变化（110px ↔ 600px max-height）后报告文档高度。
                     // 切换会触发 #tool-content 的 max-height 200ms 过渡 →
@@ -2367,9 +2376,15 @@ _CONTENT_AUTOSCROLL_JS = """
                     document.body.scrollTop = document.body.scrollHeight;
                 }
                 // 正文容器滚动跟踪：用户主动上滚时停止自动置底跟随，
-                // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为
+                // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为。
+                // 关键：DOM 操作期间（updateContent 重写 innerHTML /
+                // reorganizeContent 搬移 think 块）触发的程序性 scroll 事件必须
+                // 忽略——与 body 监听的 _suppressScrollEvent 抑制对称，否则会被
+                // 误判为"用户上滚正文"，_userScrolledUp 置 true → _autoScrollStreamingBody
+                // 跳过正文置底 → 正文卡在顶部（置顶 bug）。
                 document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
                     var cp = this;
+                    if (window._suppressScrollEvent) return;
                     if (cp._progScroll) { cp._progScroll = false; return; }
                     var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
                     cp._userScrolledUp = !atBottom;

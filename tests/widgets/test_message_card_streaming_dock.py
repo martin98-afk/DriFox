@@ -85,6 +85,8 @@ def test_content_autoscroll_respects_user_scroll():
     assert "getElementById('content-placeholder')?.addEventListener('scroll'" in js, "正文容器必须有独立 scroll 监听"
     # 监听内恢复跟随：滚回底部清 _userScrolledUp
     assert "cp._userScrolledUp = false" in js, "滚回底部附近必须恢复自动跟随"
+    # DOM 操作期间程序性 scroll 必须忽略（防误标正文上滚→置顶），与 body 监听对称
+    assert "if (window._suppressScrollEvent) return;" in js, "DOM 操作期间的程序 scroll 必须忽略"
     # 程序滚动事件吞掉（不误标用户）
     assert "if (cp._progScroll) { cp._progScroll = false; return; }" in js
 
