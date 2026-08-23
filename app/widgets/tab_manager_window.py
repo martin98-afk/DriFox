@@ -263,10 +263,23 @@ class _DockSideWrapper(QWidget):
         if any_visible:
             if self.isHidden():
                 self.show()
-                if self._expanded_width == 0:
-                    self._expanded_width = self.DEFAULT_EXPANDED_WIDTH
-                if idx < len(sizes):
-                    sizes[idx] = self._expanded_width
+                # 预置展开宽度（仅槽位为 0 的全收起重开）：
+                # - primary（CardContainer）有可见卡片：用容器 dock 协议已算好
+                #   的展开目标（_last_expand_target，按插件独立记忆），wrapper
+                #   单值记忆会覆盖 per-card 记忆造成二次弹跳；splitter 对
+                #   hidden 子项的 setSizes 无效，容器展开时的预置可能被
+                #   wrapper 随后 show 冲掉，此处 show 后统一归位。
+                # - 仅 stack 侧可见：用 wrapper 自身记忆/默认宽。
+                primary_active = self._child_visible_intent(self._primary)
+                if primary_active:
+                    target = getattr(self._primary, "_last_expand_target", 0)
+                    expand_w = target if target > 0 else (self._expanded_width or self.DEFAULT_EXPANDED_WIDTH)
+                else:
+                    if self._expanded_width == 0:
+                        self._expanded_width = self.DEFAULT_EXPANDED_WIDTH
+                    expand_w = self._expanded_width
+                if idx < len(sizes) and sizes[idx] == 0:
+                    sizes[idx] = expand_w
                     self._splitter.setSizes(sizes)
         else:
             if not self.isHidden():

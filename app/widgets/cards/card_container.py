@@ -335,14 +335,33 @@ class CardContainer(QWidget):
                 return pidx
         return -1
 
+    def _dock_slot_size(self) -> int:
+        """读宿主 splitter 分给本容器（或其 wrapper）的槽位尺寸
+
+        不能用 _axis_current()（容器自身 width/height）：LEFT/RIGHT 容器经
+        _DockSideWrapper 孙项化后，splitter 重排中间态下容器自身尺寸
+        可能为 maximumWidth 解锁后的 _EXPAND_MAX（16777215），直接记忆会
+        爆表 → _ensure_splitter_fits 误判溢出把槽位压到最小值。
+        """
+        sp = self._dock_splitter
+        idx = self._splitter_index()
+        if sp is None or idx < 0:
+            return self._axis_current()
+        sizes = sp.sizes()
+        if idx >= len(sizes):
+            return self._axis_current()
+        return sizes[idx]
+
     def _remember_dock_size(self):
         """折叠前把当前轴向尺寸兜底记忆到最后可见卡片（per-card）
 
         主记忆来自 splitterMoved 实时拖拽回调；本方法覆盖非拖拽导致的
         尺寸变化（如 resize 压缩后关闭卡片）。折叠时卡片已全部 hidden，
         归属取 _on_card_shown 维护的最后可见卡片 id。
+        读 splitter 槽位而非容器自身尺寸：折叠动画进行中容器自身尺寸
+        已开始收缩，槽位仍是用户看到的真实占比。
         """
-        cur = self._axis_current()
+        cur = self._dock_slot_size()
         if cur < self._dock_min():
             return
         owner = self._last_visible_dock_card
@@ -365,11 +384,14 @@ class CardContainer(QWidget):
         dock 容器内卡片互斥（LEFT/RIGHT）或共存（BOTTOM），共享同一
         splitter 槽位尺寸；写入每张可见卡片的记忆槽，重开时按当前
         可见卡片恢复其自己的最后尺寸（拖窄/拖宽均尊重记忆）。
+        尺寸取 splitter 槽位而非容器自身 width/height：容器经 wrapper
+        孙项化后，splitter 重排中间态容器自身尺寸可能为 _EXPAND_MAX
+        解锁值，记忆爆表会连锁触发溢出压缩把槽位压成细条。
         """
         if self._dock_splitter is None or not self._is_expanded():
             return
-        cur = self._axis_current()
-        if cur < self._dock_min():
+        cur = self._dock_slot_size()
+        if cur < self._dock_min() or cur >= self._EXPAND_MAX:
             return
         for card_id, w in self._cards.items():
             if not w.isHidden():
@@ -507,6 +529,28 @@ class CardContainer(QWidget):
         # 溢出已完全消化（空间富余）：同样补恢复 dock 记忆尺寸，保持一致
         if overflow <= 0:
             self._restore_dock_memory_if_room()
+
+    def _apply_visible_card_dock_size(self):
+        """把槽位双向同步到当前可见卡片的记忆尺寸（切卡场景）
+
+        与 _restore_dock_memory_if_room 的区别：那个仅在记忆 > 槽位时恢复
+        （防与用户拖拽抢尺寸）；本方法在互斥切卡后把槽位精确切到新可见
+        卡片自己的记忆（拖窄 380 / 拖宽 450 均恢复）。拖拽防抢仍成立：
+        splitterMoved 已把记忆同步为拖拽值，mem == cur 不会重设。
+        """
+        if self._overlay_mode or self._dock_splitter is None:
+            return
+        if not self._is_expanded():
+            return
+        if self._visible_cards_follow_content():
+            return
+        if not any(not w.isHidden() for w in self._cards.values()):
+            return
+        mem = self._visible_dock_mem_size()
+        cur = self._dock_slot_size()
+        if mem <= 0 or mem == cur:
+            return
+        self._restore_dock_size(mem)
 
     def _restore_dock_memory_if_room(self):
         """空间富余时把展开中的 dock 恢复到记忆尺寸（窗口变大后补恢复记忆）
@@ -669,6 +713,10 @@ class CardContainer(QWidget):
                 and self._axis_current() > 0
             ):
                 self._set_axis_min(max(self._dock_min(), self._visible_cards_min_axis()))
+                # 互斥切卡（旧卡 hide + 新卡 show 同 tick）：容器已展开直接
+                # 早退，但新可见卡片有自己的记忆宽度，不恢复会停在旧插件
+                # 位置，后续内容变化才二次弹跳。在此双向同步到新卡记忆。
+                self._apply_visible_card_dock_size()
                 return
 
             # ── 展开：snap 或动画到 layout 算出的自然尺寸（轴向） ──
@@ -764,6 +812,11 @@ class CardContainer(QWidget):
                 on_expand_done = _release_to_splitter
                 # 记录本次展开目标（已含最小占比），供 _restore_dock_size 精确 setSizes
                 self._last_expand_target = target
+                # 预置槽位到最终目标：重开/切卡时槽位一步到位，消除
+                # "先展开到默认/自然位置，动画结束再跳记忆位置"的双跳
+                # （wrapper 联动与旧 _restore_dock_size-on-finished 都可能在
+                # 动画后二次 setSizes，形成第二跳）。
+                self._restore_dock_size(target)
                 natural_h = target
             elif self._dock_splitter is not None:
                 # follow_content（如 Question）：容器高度严格 = 卡片 sizeHint，
