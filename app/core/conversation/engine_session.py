@@ -90,6 +90,7 @@ class EngineSessionImpl:
         hook_policy: Any = HookPolicy.NONE,
         permission_strategy: Any = PermissionStrategy.AUTO_ALLOW,
         model_config_override: Optional[Dict[str, Any]] = None,
+        hook_policy_id: Optional[str] = None,
     ):
         self.engine_name = engine_name
         self._is_cancelled = False
@@ -119,6 +120,7 @@ class EngineSessionImpl:
             config=ConversationConfig(
                 permission_strategy=permission_strategy,
                 hook_policy=hook_policy,
+                hook_policy_id=hook_policy_id,
             ),
             tool_executor=tool_executor,
             agent_manager=agent_manager,

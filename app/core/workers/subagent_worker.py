@@ -102,7 +102,10 @@ class SubAgentExecutor(QThread):
         tool_executor: Any = None,
         parent_context: str = "",
         is_subagent_call: bool = True,  # 标记是否为被主智能体调用（通过 subagent_para）
-        max_iterations: Optional[int] = None,  # 轮数上限（per-agent steps 优先）；None=走激活策略（默认 subagent 策略 30）
+        max_iterations: Optional[
+            int
+        ] = None,  # 轮数上限（per-agent steps 优先）；None=走激活策略（默认 subagent 策略 30）
+        hook_policy_id: Optional[str] = None,  # 子智能体域 hook 策略插件 id（plugins/system/hook_policies/）
     ):
         super().__init__()
         self.task_id = task_id
@@ -114,6 +117,10 @@ class SubAgentExecutor(QThread):
         self.parent_context = parent_context
         self.is_subagent_call = is_subagent_call  # 传递给提示词构建
         self.max_iterations = max_iterations  # 轮数上限（None=走激活策略）
+        # 子智能体域 hook 策略：默认 None → 走 plugins/system/hook_policies/ 的
+        # "subagent_default"（仅工具级 + Stop + PluginChanged）。可显式传 id 覆盖。
+        self._hook_policy_id = hook_policy_id
+        self._hook_policy_obj = None  # 懒解析缓存
         self._is_cancelled = False
         self._pending_answer = None
         self._last_result = None
@@ -605,6 +612,58 @@ class SubAgentExecutor(QThread):
             self._loop_policy_obj = LoopPolicyRegistry.get_instance().get_active("subagent")
         return self._loop_policy_obj
 
+    # ===== HookPolicy 接入（scope="subagent"）=====
+
+    def _hook_policy_obj_resolve(self):
+        """当前激活的子智能体 hook 触发策略对象
+
+        优先级：_hook_policy_id 显式 id > 默认 scope=subagent 的激活策略
+        （默认 plugins/system/hook_policies/subagent_default.py，仅工具级 + Stop +
+        PluginChanged）。Registry 未加载时回退到内置 SubagentDefaultHookPolicy（保持
+        现状行为：仅工具级 + Stop + PluginChanged）。
+        """
+        if self._hook_policy_obj is not None:
+            return self._hook_policy_obj
+        try:
+            from app.plugins.registries.hook_policy_registry import HookPolicyRegistry
+            from app.plugins.contracts.hook_policy import SCOPE_SUBAGENT
+
+            registry = HookPolicyRegistry.get_instance()
+            self._hook_policy_obj = registry.get_active(SCOPE_SUBAGENT)
+            if self._hook_policy_id and self._hook_policy_obj.id != self._hook_policy_id:
+                if registry.set_active(self._hook_policy_id, SCOPE_SUBAGENT):
+                    self._hook_policy_obj = registry.get_active(SCOPE_SUBAGENT)
+        except Exception as exc:
+            logger.warning(f"[SubAgent] HookPolicy resolve 异常，回退内置默认: {exc!r}")
+            from app.plugins.contracts.hook_policy import (
+                HookDecision,
+                HookEvent,
+                PluginChangedEvent,
+                PostToolUseEvent,
+                PreToolUseEvent,
+                StopEvent,
+            )
+
+            class _FallbackSubagent:
+                id = "subagent_default"
+                scope = "subagent"
+
+                def should_trigger(self, event: HookEvent) -> HookDecision:
+                    if isinstance(event, (PreToolUseEvent, PostToolUseEvent, StopEvent, PluginChangedEvent)):
+                        return HookDecision.TRIGGER
+                    return HookDecision.SKIP
+
+            self._hook_policy_obj = _FallbackSubagent()
+        return self._hook_policy_obj
+
+    def _should_run_hook(self, event) -> bool:
+        """按 _hook_policy_obj 判定给定事件是否触发"""
+        try:
+            policy = self._hook_policy_obj_resolve()
+            return policy.should_trigger(event).value == "trigger"
+        except Exception:
+            return True  # 异常保守放行
+
     def _resolve_round_limit(self) -> Optional[int]:
         """轮数上限：per-agent steps（max_iterations）显式声明优先，否则激活策略兜底（默认 30）。"""
         if self.max_iterations is not None:
@@ -657,8 +716,7 @@ class SubAgentExecutor(QThread):
             adapter = self._resolve_adapter_with_warmup(registry, config or {})
         if adapter is None:
             raise RuntimeError(
-                "未注册任何 ModelAdapter 插件（含系统插件 openai），"
-                "请确认 plugins/system/model_adapters/ 已启用"
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system/model_adapters/ 已启用"
             )
         return adapter.protocol_flags(config or {})
 
@@ -677,8 +735,7 @@ class SubAgentExecutor(QThread):
             adapter = self._resolve_adapter_with_warmup(registry, llm_config)
         if adapter is None:
             raise RuntimeError(
-                "未注册任何 ModelAdapter 插件（含系统插件 openai），"
-                "请确认 plugins/system/model_adapters/ 已启用"
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system/model_adapters/ 已启用"
             )
         return adapter.protocol_flags(llm_config or {}).requires_reasoning_content
 
@@ -734,6 +791,10 @@ class SubAgentExecutor(QThread):
         - 使用 trigger_event(sync) 同步执行 hook
         - 用 _make_hook_message 包装成 user 消息（role=user，与 Claude Code 官方行为对齐）
         - 直接 append 到 current_messages，下次 API 调用时 LLM 即可看到
+
+        HookPolicy 接入（scope=subagent）：按 _hook_policy_id 解析策略，
+        默认 SubagentDefaultHookPolicy（仅工具级 + Stop + PluginChanged）。
+        PreAssistantMessage/PostAssistantMessage 走 subagent 自注入（不在 hook_policy 范围）。
         """
         try:
             backend = getattr(self.tool_executor, "_backend", None) if self.tool_executor else None
@@ -741,6 +802,55 @@ class SubAgentExecutor(QThread):
                 return
 
             ctx = self._build_hook_context(extra=extra_context)
+
+            # HookPolicy 拦截：构造具体事件类 + should_trigger 判定
+            from app.plugins.contracts.hook_policy import (
+                PostAssistantMessageEvent,
+                PreAssistantMessageEvent,
+                PluginChangedEvent,
+                PostToolUseEvent,
+                PreToolUseEvent,
+                StopEvent,
+            )
+
+            is_team = bool(ctx.get("is_team_member", False))
+            role = ctx.get("current_role", "subagent")
+            if event_name == "PreAssistantMessage":
+                ev = PreAssistantMessageEvent(message=ctx.get("message", ""), is_team_member=is_team)
+            elif event_name == "PostAssistantMessage":
+                ev = PostAssistantMessageEvent(message=ctx.get("message", ""), is_team_member=is_team)
+            elif event_name == "PreToolUse":
+                ev = PreToolUseEvent(
+                    tool_name=ctx.get("tool_name", ""),
+                    tool_args=ctx.get("tool_args", {}) if isinstance(ctx.get("tool_args"), dict) else {},
+                    tool_call_id=ctx.get("tool_call_id", ""),
+                    current_role=role,
+                    is_subagent_call=True,
+                    is_team_member=is_team,
+                )
+            elif event_name == "PostToolUse":
+                ev = PostToolUseEvent(
+                    tool_name=ctx.get("tool_name", ""),
+                    tool_result=ctx.get("tool_result"),
+                    tool_call_id=ctx.get("tool_call_id", ""),
+                    current_role=role,
+                    is_subagent_call=True,
+                    is_team_member=is_team,
+                    success=ctx.get("success", True),
+                )
+            elif event_name == "Stop":
+                ev = StopEvent(reason=ctx.get("reason", "completed"), is_team_member=is_team)
+            elif event_name == "PluginChanged":
+                ev = PluginChangedEvent(
+                    action=ctx.get("action", ""),
+                    plugin_name=ctx.get("plugin_name", ""),
+                    diff=ctx.get("diff", {}),
+                    sub_actions=ctx.get("sub_actions", []),
+                )
+            else:
+                ev = None
+            if ev is not None and not self._should_run_hook(ev):
+                return
 
             # PreAssistantMessage / PostAssistantMessage：注入上下文使用量信息
             # 让 hook（如 context_auto_compact）能检测当前 token 占比

@@ -35,6 +35,7 @@ RELOADED_COMPONENTS = {
     "team_templates",
     "model_adapters",
     "loop_policies",
+    "hook_policies",
     "storages",
     "serializers",
     "gateways",
@@ -228,6 +229,23 @@ def _reload_loop_policies(ctx: ReloadContext) -> Any:
     return False
 
 
+def _reload_hook_policies(ctx: ReloadContext) -> Any:
+    """hook_policies 分支：同 model_adapters（精准卸载/重载单插件）"""
+    try:
+        from app.plugins.loaders.runtime_component_loader import ensure_hook_policy_watcher
+
+        watcher = ensure_hook_policy_watcher()
+        if watcher is not None:
+            if ctx.plugin is None:
+                watcher.unload_plugin(ctx.plugin_name)
+            else:
+                watcher.reload_plugin(ctx.plugin_name)
+            return True
+    except Exception as e:
+        logger.warning(f"[builtin_reloaders] hook_policies 重载失败: {e}")
+    return False
+
+
 def _reload_storages(ctx: ReloadContext) -> Any:
     """storages 分支：同 model_adapters（精准卸载/重载单插件）"""
     try:
@@ -380,6 +398,7 @@ def register_builtin_reloaders(registry: ComponentReloaderRegistry) -> None:
         "team_templates": _reload_team_templates,
         "model_adapters": _reload_model_adapters,
         "loop_policies": _reload_loop_policies,
+        "hook_policies": _reload_hook_policies,
         "storages": _reload_storages,
         "serializers": _reload_serializers,
         "gateways": _reload_gateways,

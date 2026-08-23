@@ -82,6 +82,11 @@ class ConversationConfig:
     interactive_check_callback: Optional[Callable[[str, dict], str]] = None
     # Hook 参与级别（默认 ALL：UI/Gateway 主对话行为不变；插件引擎建议 NONE/TOOL_EVENTS_ONLY）
     hook_policy: "HookPolicy" = HookPolicy.ALL
+    # 可选：HookPolicy 插件 id（plugins/system/hook_policies/ 注册）。
+    # 优先级高于 hook_policy 枚举：设置后由 HookPolicyRegistry 取对应插件对象，
+    # 未设置时按 hook_policy 枚举回落（ALL→"all" / TOOL_EVENTS_ONLY→"tool_only" /
+    # NONE→"none"）。允许插件自建引擎（autoloop/象棋）声明更精细的策略。
+    hook_policy_id: Optional[str] = None
 
 
 # ============================================================

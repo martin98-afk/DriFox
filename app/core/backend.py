@@ -1272,9 +1272,22 @@ class ChatBackend(QObject):
 
             修复：原 _try_identify_new_plugin 找到第一个插件就 return，
             导致一次性复制多个新插件时只检测到 1 个。现改为返回所有新插件名集合。
+
+            🛡️ 双重校验（2026-08-23 bug fix）：父目录链匹配 .drifox-plugin/plugin.json
+            会把任何运行时数据目录（如 .drifox/backups/、.drifox/logs/、sessions.db）
+            的变更误识别为插件变更（change_path 在 .drifox/backups/ 下，父目录链
+            上溯到 .drifox/plugins/calendar/.drifox-plugin/plugin.json → 标记为
+            calendar 新插件变更，但 change_path 实际不在 calendar 代码目录里 →
+            _identify_components_from_changes_fallback 返回空 → emit("") →
+            _reload_single_plugin(calendar, "") → "root change, skip component reload"
+            → ui 组件永远不被 reload → 已打开标签页欢迎卡片消失 + 新建会话不出现）。
+            修复：父目录链找到插件 manifest 后，再校验 change_path 必须**直接**
+            在该插件的 plugin.path 子树下，否则丢弃该误判。
             """
             import json as _json
             from pathlib import Path as _Path
+
+            from app.plugins.managers.plugin_manager import PluginManager as _PM
 
             found: set = set()
             for _, change_path in changes:
@@ -1285,22 +1298,33 @@ class ChatBackend(QObject):
                         continue
                     # 检查 .drifox-plugin 格式
                     manifest = parent / ".drifox-plugin" / "plugin.json"
-                    if manifest.exists():
-                        try:
-                            data = _json.loads(manifest.read_text(encoding="utf-8"))
-                            found.add(data.get("name", parent.name))
-                        except Exception:
-                            found.add(parent.name)
-                        break  # 跳出父目录链，处理下一个变更路径
-                    # 检查 .claude-plugin 格式
-                    manifest = parent / ".claude-plugin" / "plugin.json"
-                    if manifest.exists():
-                        try:
-                            data = _json.loads(manifest.read_text(encoding="utf-8"))
-                            found.add(data.get("name", parent.name))
-                        except Exception:
-                            found.add(parent.name)
-                        break  # 跳出父目录链，处理下一个变更路径
+                    if not manifest.exists():
+                        # 检查 .claude-plugin 格式
+                        manifest = parent / ".claude-plugin" / "plugin.json"
+                        if not manifest.exists():
+                            continue
+                    try:
+                        data = _json.loads(manifest.read_text(encoding="utf-8"))
+                        candidate_name = data.get("name", parent.name)
+                    except Exception:
+                        candidate_name = parent.name
+                    # 双重校验：candidate_name 是否已注册，且 change_path 必须**直接**
+                    # 在其 plugin.path 子树下（排除 .drifox/backups/ 等运行时目录
+                    # 通过父目录链误命中插件 manifest 的情况）。
+                    plugin = _PM.get_instance().get_plugin(candidate_name)
+                    if plugin is None:
+                        break  # 未注册的插件名，丢弃（防止新建插件误识别）
+                    plugin_root = str(plugin.path.resolve()).lower()
+                    cp_lower = str(change_path).lower().replace("/", os.sep)
+                    if cp_lower == plugin_root or cp_lower.startswith(plugin_root + os.sep):
+                        found.add(candidate_name)
+                    else:
+                        logger.debug(
+                            f"[ChatBackend] _try_identify_new_plugins: 丢弃误判 "
+                            f"change_path={change_path} 命中 manifest={candidate_name} "
+                            f"但不在 plugin.path={plugin_root} 子树下"
+                        )
+                    break  # 跳出父目录链，处理下一个变更路径
             return found
 
         def _watch_loop():
@@ -2302,7 +2326,50 @@ class ChatBackend(QObject):
                         f"component={component}, outcome={reloaded} → {result}"
                     )
             else:
-                logger.debug(f"[ChatBackend] Plugin [{plugin_name}] root change, skip component reload")
+                # 🛡️ 根因修复（2026-08-23 bug fix）：component="" 原本仅在纯根文件变更
+                # （README/LICENSE）时由 _watch_loop 传入。但 _identify_components_from_changes_fallback
+                # 在路径索引过期（rescan 路径 vs plugin.path 不一致）时也会误传空字符串，
+                # 导致有 ui 组件的插件（如 calendar / context-stats / project-dashboard）
+                # 装/卸后 ui 组件不重载 → registry 里的 welcome tabs / 浮动卡片 残留陈旧快照
+                # → 已打开标签页欢迎卡片消失、新建会话不出现。
+                # 修复：component="" 且插件实际拥有 ui/tools 组件时，主动按组件重载，
+                # 不再全跳过——否则 ui=False 路径走完后 _on_plugin_hot_reload
+                # 完全不刷新已打开标签页（输入区插件按钮 / 欢迎卡片 / launcher 全不刷）。
+                if plugin is None:
+                    logger.debug(f"[ChatBackend] Plugin [{plugin_name}] root change, plugin missing, skip")
+                else:
+                    _reloaded_any = False
+                    for comp in ("ui", "tools"):
+                        if not plugin.has_component(comp):
+                            continue
+                        try:
+                            _r = registry.reload(
+                                ReloadContext(
+                                    plugin_name=plugin_name,
+                                    plugin=plugin,
+                                    component=comp,
+                                    is_new_plugin=False,
+                                )
+                            )
+                        except Exception as _re:
+                            logger.warning(
+                                f"[ChatBackend] Plugin [{plugin_name}] root change, "
+                                f"{comp} reload failed: {_re}"
+                            )
+                            continue
+                        if comp in result_keys:
+                            result[comp] = _r if _r is not None else False
+                        if _r:
+                            _reloaded_any = True
+                            logger.info(
+                                f"[ChatBackend] Plugin [{plugin_name}] root change fallback "
+                                f"reloaded component={comp} outcome={_r}"
+                            )
+                    if not _reloaded_any:
+                        logger.debug(
+                            f"[ChatBackend] Plugin [{plugin_name}] root change, "
+                            f"no ui/tools components to reload"
+                        )
 
             logger.info(
                 f"[ChatBackend] Plugin [{plugin_name}] reloaded: "

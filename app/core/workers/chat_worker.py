@@ -202,6 +202,7 @@ class OpenAIChatWorker(QThread):
         initial_compaction_cache: Dict = None,
         session_id: str = "",
         hook_policy=None,
+        hook_policy_id: Optional[str] = None,
     ):
         super().__init__()
         self.messages = messages
@@ -217,6 +218,11 @@ class OpenAIChatWorker(QThread):
         self.session_id = session_id
         # Hook 参与级别（None = 未声明，按 ALL 兼容旧调用方）
         self._hook_policy = hook_policy if isinstance(hook_policy, HookPolicy) else HookPolicy.ALL
+        # 可选：HookPolicy 插件 id（plugins/system/hook_policies/ 注册）。
+        # 优先级高于 _hook_policy 枚举：设置后从 HookPolicyRegistry 取对应策略对象，
+        # 未设置时按枚举回落（ALL→"all" / TOOL_EVENTS_ONLY→"tool_only" / NONE→"none"）。
+        self._hook_policy_id = hook_policy_id
+        self._hook_policy_obj = None  # 懒解析缓存（首查时从 registry 取策略对象）
         if self.session_id:
             logger.debug(f"[ChatWorker] session_id={self.session_id[:12]}...")
         else:
@@ -693,9 +699,28 @@ class OpenAIChatWorker(QThread):
         from app.core.backend import _make_hook_message
 
         # Hook 参与级别拦截：消息级事件（PreAssistantMessage/PostAssistantMessage/Stop）
-        # 由引擎 HookPolicy 决定。ALL 之外一律不触发——插件自建引擎（autoloop/
-        # chinese-chess 等）默认 NONE，不再被动执行主对话语义的全局 hooks。
-        if self._hook_policy != HookPolicy.ALL:
+        # 由 hook policy 插件决定（plugins/system/hook_policies/）。
+        # 默认 AllHookPolicy 触发所有事件（兼容原 HookPolicy.ALL）；
+        # 插件自建引擎可传 hook_policy=NONE 或 hook_policy_id="none"。
+        from app.plugins.contracts.hook_policy import (
+            PostAssistantMessageEvent,
+            PreAssistantMessageEvent,
+            StopEvent,
+        )
+
+        is_team = _check_team_member(getattr(self.tool_executor, "_backend", None))
+        if event_name == "PreAssistantMessage":
+            ev = PreAssistantMessageEvent(message=current_message_text or "", is_team_member=is_team)
+        elif event_name == "PostAssistantMessage":
+            ev = PostAssistantMessageEvent(message=current_message_text or "", is_team_member=is_team)
+        elif event_name == "Stop":
+            ev = StopEvent(
+                reason=extra_context.get("reason", "completed") if extra_context else "completed",
+                is_team_member=is_team,
+            )
+        else:
+            ev = None
+        if ev is not None and not self._should_run_hook(ev):
             return None
 
         try:
@@ -2774,6 +2799,61 @@ class OpenAIChatWorker(QThread):
             self._loop_policy_obj = LoopPolicyRegistry.get_instance().get_active()
         return self._loop_policy_obj
 
+    def _hook_policy_obj_resolve(self):
+        """当前激活的 hook 触发策略对象（按 _hook_policy_id / _hook_policy 枚举解析）
+
+        优先级：_hook_policy_id 显式 id > _hook_policy 枚举回落（ALL→"all" /
+        TOOL_EVENTS_ONLY→"tool_only" / NONE→"none"）。Registry 未加载时回退到
+        内置 AllHookPolicy（保持主对话 UI 行为零变化）。
+        """
+        if self._hook_policy_obj is not None:
+            return self._hook_policy_obj
+        try:
+            from app.plugins.registries.hook_policy_registry import HookPolicyRegistry
+            from app.plugins.contracts.hook_policy import (
+                SCOPE_MAIN,
+                HookPolicy,
+                HookDecision,
+                HookEvent,
+            )
+
+            registry = HookPolicyRegistry.get_instance()
+            policy_id = self._hook_policy_id
+            if policy_id is None:
+                # 枚举回落（向后兼容）
+                _enum_to_id = {
+                    HookPolicy.ALL: "all",
+                    HookPolicy.TOOL_EVENTS_ONLY: "tool_only",
+                    HookPolicy.NONE: "none",
+                }
+                policy_id = _enum_to_id.get(self._hook_policy, "all")
+            self._hook_policy_obj = registry.get_active(SCOPE_MAIN)
+            # 若指定 id 与当前激活不一致且存在，切换（仅一次）
+            if policy_id and self._hook_policy_obj.id != policy_id:
+                if registry.set_active(policy_id, SCOPE_MAIN):
+                    self._hook_policy_obj = registry.get_active(SCOPE_MAIN)
+        except Exception as exc:
+            logger.warning(f"[HookPolicy] resolve 异常，回退 AllHookPolicy: {exc!r}")
+            from app.plugins.contracts.hook_policy import HookDecision, HookEvent
+
+            class _FallbackAll:
+                id = "all"
+                scope = "main"
+
+                def should_trigger(self, event: HookEvent) -> HookDecision:
+                    return HookDecision.TRIGGER
+
+            self._hook_policy_obj = _FallbackAll()
+        return self._hook_policy_obj
+
+    def _should_run_hook(self, event) -> bool:
+        """按 _hook_policy_obj 判定给定事件是否触发"""
+        try:
+            policy = self._hook_policy_obj_resolve()
+            return policy.should_trigger(event).value == "trigger"
+        except Exception:
+            return True  # 异常保守放行
+
     def _check_loop_round_limit(self) -> bool:
         """轮数上限检查（返回 True=超限应结束）。默认策略 None=不限，零行为变化。
 
@@ -4356,17 +4436,32 @@ class OpenAIChatWorker(QThread):
 
     def _execute_tool(self, tool_name, arguments, tool_call_id):
         """执行单个工具调用。"""
+        from app.plugins.contracts.hook_policy import PreToolUseEvent
+
+        is_team = _check_team_member(getattr(self.tool_executor, "_backend", None))
+        # Hook 参与级别：按 hook policy 插件判定 PreToolUse / PostToolUse 是否触发。
+        # 默认 AllHookPolicy 触发全部（兼容原 HookPolicy.ALL）；
+        # NONE / tool_only 插件可声明更精细的过滤。
+        pre_ev = PreToolUseEvent(
+            tool_name=tool_name,
+            tool_args=arguments if isinstance(arguments, dict) else {},
+            tool_call_id=tool_call_id,
+            current_role="primary",
+            is_subagent_call=False,
+            is_team_member=is_team,
+        )
+        trigger_hooks = self._should_run_hook(pre_ev)
         try:
             result = self.tool_executor.execute(
                 tool_name,
                 arguments,
                 call_id=tool_call_id,
-                # Hook 参与级别（引擎 HookPolicy）：NONE 时跳过 PreToolUse/PostToolUse
-                trigger_hooks=self._hook_policy != HookPolicy.NONE,
+                # Hook 参与级别（hook policy 插件）：判定 PreToolUse/PostToolUse 是否触发
+                trigger_hooks=trigger_hooks,
                 hook_context={
                     "current_role": "primary",
                     "is_subagent_call": False,
-                    "is_team_member": _check_team_member(getattr(self.tool_executor, "_backend", None)),
+                    "is_team_member": is_team,
                 },
             )
         except Exception as e:
