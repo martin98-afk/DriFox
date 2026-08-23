@@ -196,6 +196,21 @@ class _DockSideWrapper(QWidget):
 
     DEFAULT_EXPANDED_WIDTH = 300  # 首展开无记忆时的默认宽度
 
+    @staticmethod
+    def _child_visible_intent(w: QWidget) -> bool:
+        """子控件「显式可见意图」：被 show 过即算，不受祖先链遮蔽
+
+        不能用 isVisible()：wrapper 默认 hide 时子控件 isVisible() 恒为
+        False（祖先链中断），_sync 会永远走收起分支 → wrapper 死锁无法
+        展开，左右侧浮动卡片不显示。也不能用 not isHidden()：从未
+        show/hide 过的子控件 isHidden() 同样为 False，会把初始收起态
+        误判为展开。WA_WState_ExplicitShowHide 区分「从未操作」与
+        「显式 show/hide」，WA_WState_Hidden 即 isHidden() 的底层状态位。
+        """
+        if not w.testAttribute(Qt.WA_WState_ExplicitShowHide):  # pyright: ignore[reportAttributeAccessIssue]
+            return False  # 从未显式 show/hide → 视为收起（初始态）
+        return not w.testAttribute(Qt.WA_WState_Hidden)  # pyright: ignore[reportAttributeAccessIssue]
+
     def __init__(self, primary: QWidget, stack: QWidget, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._primary = primary
@@ -221,14 +236,24 @@ class _DockSideWrapper(QWidget):
         self._sync()
 
     def eventFilter(self, obj, ev):
-        if ev.type() in (QEvent.Show, QEvent.Hide):
+        # Show/Hide（17/18）仅在父级可见时发出；父级（wrapper 自身）hidden 时
+        # 子控件显式 show() 只发 ShowToParent/HideToParent（26/27）——必须同时
+        # 监听，否则 wrapper 收起态下子显示状态变化收不到通知，_sync 永不触发，
+        # 左右侧浮动卡片无法展开（ isVisible()/事件双死锁）。
+        ev_types = (
+            QEvent.Show,  # pyright: ignore[reportAttributeAccessIssue]
+            QEvent.Hide,  # pyright: ignore[reportAttributeAccessIssue]
+            QEvent.ShowToParent,  # pyright: ignore[reportAttributeAccessIssue]
+            QEvent.HideToParent,  # pyright: ignore[reportAttributeAccessIssue]
+        )
+        if ev.type() in ev_types:
             # singleShot 0 延迟到事件循环下轮，避免 setSizes 与正在进行的
             # 容器动画/尺寸变更相互覆盖（动画中 show/hide 频繁触发）
             QTimer.singleShot(0, self._sync)
         return super().eventFilter(obj, ev)
 
     def _sync(self) -> None:
-        any_visible = self._primary.isVisible() or self._stack.isVisible()
+        any_visible = self._child_visible_intent(self._primary) or self._child_visible_intent(self._stack)
         if self._splitter is None or self._splitter_index < 0:
             # 未关联 splitter 时只切自身 visibility（测试 / 单实例场景）
             self.setVisible(any_visible)
@@ -246,7 +271,9 @@ class _DockSideWrapper(QWidget):
         else:
             if not self.isHidden():
                 if idx < len(sizes):
-                    self._expanded_width = sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
+                    self._expanded_width = (
+                        sizes[idx] if sizes[idx] > 0 else self._expanded_width or self.DEFAULT_EXPANDED_WIDTH
+                    )
                     sizes[idx] = 0
                     self._splitter.setSizes(sizes)
                 self.hide()
@@ -957,12 +984,8 @@ class TabManagerWindow(QWidget):
             # 以及任何异常）都在此恢复 True，否则内容区黑屏。
             # 若本回调又同步启动了新动画（_maybe_auto_expand 走 _start_sidebar_anim
             # 重新冻结），则交由其 _on_sidebar_anim_finished 恢复，此处跳过。
-            if (
-                hasattr(self, "_content_area")
-                and not (
-                    self._sidebar_anim is not None
-                    and self._sidebar_anim.state() == QVariantAnimation.Running
-                )
+            if hasattr(self, "_content_area") and not (
+                self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running
             ):
                 self._content_area.setUpdatesEnabled(True)
                 # ── #10 对齐恢复：与解冻同步显式恢复 WebView 预览（幂等） ──

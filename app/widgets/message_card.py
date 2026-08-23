@@ -2335,6 +2335,40 @@ _STREAMING_DOCK_JS = """
                 }
 """
 
+# 正文容器（#content-placeholder）自动滚底 + 用户滚动跟踪。
+# 🐛 修复（区域独立）：坞态下正文容器与工具区（#tool-content）是两个独立内滚动
+# 容器。工具/思考区更新路径（流式块注入/完成块替换/_apply_viewer_height 高度
+# 回调）同样会调用 _autoScrollStreamingBody()——原实现无条件
+# _cp.scrollTop = _cp.scrollHeight 置底正文容器，而 _userScrolledWithin 只由
+# body 的 scroll 事件置位（用户滚正文容器时 body 不滚，标志恒 false），
+# 保护完全失效 → 工具区每来新内容就把正文拉底，打断阅读。
+# 修复对齐工具区 _scrollToolContentToBottom 模式：用户主动上滚正文
+# （_userScrolledUp）时不拉底，滚回底部附近自动恢复跟随；程序置底打
+# _progScroll 标记防误判为用户滚动。
+_CONTENT_AUTOSCROLL_JS = """
+                function _autoScrollStreamingBody() {
+                    // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
+                    // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
+                    var _cp = document.getElementById('content-placeholder');
+                    if (document.body.classList.contains('streaming-dock') && _cp) {
+                        if (!_cp._userScrolledUp) {
+                            _cp._progScroll = true;
+                            _cp.scrollTop = _cp.scrollHeight;
+                        }
+                    }
+                    document.body.scrollTop = document.body.scrollHeight;
+                }
+                // 正文容器滚动跟踪：用户主动上滚时停止自动置底跟随，
+                // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为
+                document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
+                    var cp = this;
+                    if (cp._progScroll) { cp._progScroll = false; return; }
+                    var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
+                    cp._userScrolledUp = !atBottom;
+                    if (atBottom) cp._userScrolledUp = false;
+                });
+"""
+
 
 def clear_global_render_cache():
     """清理全局 Markdown 渲染 LRU 缓存 + 骨架 HTML 缓存
@@ -5268,15 +5302,7 @@ class CodeWebViewer(QWebEngineView):
                     window._suppressScrollEvent = false;
                     setTimeout(() => reportHeight(), 30);
                 }}
-                function _autoScrollStreamingBody() {{
-                    // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
-                    // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
-                    var _cp = document.getElementById('content-placeholder');
-                    if (document.body.classList.contains('streaming-dock') && _cp) {{
-                        _cp.scrollTop = _cp.scrollHeight;
-                    }}
-                    document.body.scrollTop = document.body.scrollHeight;
-                }}
+                {_CONTENT_AUTOSCROLL_JS}
                 function reportHeight() {{
                     // 用 body.scrollHeight 获取完整内容高度。
                     // getBoundingClientRect 在 html{{overflow:hidden}} 下
@@ -11323,9 +11349,11 @@ class MessageCard(SimpleCardWidget):
             self._pending_content = self._content_data
             return
 
-        # 标记内容已加载，高度变化时触发 _on_message_card_height_changed 滚底
-        self._content_just_loaded = True
-
+        # 🔧 不设置 _content_just_loaded：思考流式更新不应触发外部消息列表滚动，
+        # 仅 #tool-content 内部自动滚底（见 JS 注入代码）。与 _inject_tool_streaming_html
+        # 行为一致——工具与思考区是卡片内部独立滚动容器，正文区未更新时外部滚动条
+        # 不应被强制拉底（用户在阅读正文时会被打断）。
+        #
         # 🆕 方案B：首个 reasoning chunk 渲染"深度思考中..." spinner，后续静默累积
         # 不更新 DOM / 不触发渲染定时器 / 不更新高度，等 thinking 结束后的全量渲染
         # （由 append_text / finish_streaming / _maybe_finish_thinking_for_tool 触发）一并处理
@@ -11335,8 +11363,12 @@ class MessageCard(SimpleCardWidget):
             # start_new_thinking_block 不再重置此标志，防止两轮之间的空窗期
             # 已完成 think-block 的 </think> 被错误剥离为 think-streaming。
             self.viewer._thinking_finalized = False
-            # 首 chunk：增量高度 + 立即全量渲染显示 spinner
-            self._update_thinking_incremental(text)
+            # 首 chunk：立即全量渲染显示 spinner。_schedule_render 会触发高度报告，
+            # 由 _on_message_card_height_changed 走"流式首屏"语义统一滚底——这与正文
+            # 首次到达场景一致（用户期待滚底跟随）。
+            # 不调用 _update_thinking_incremental：原方法会主动 reportHeightDebounced
+            # 并设置 _content_just_loaded，导致外部 chat_scroll_area 在正文未更新时被强制
+            # 滚底，破坏阅读。首 chunk 的全量渲染已自然带高度报告，无需额外触发。
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             self.viewer._schedule_render(immediate=True)
         else:
@@ -11349,13 +11381,13 @@ class MessageCard(SimpleCardWidget):
 
         思考中不再更新预览文字，仅显示转圈+思考中。
         结束时通过全量渲染更新预览文字到 summary 右侧。
+
+        注意：本方法已被 append_reasoning 首 chunk 路径不再调用（保留为内部辅助函数，
+        供未来增量思考场景使用）。不在此设置 _content_just_loaded，也不主动报告
+        高度——避免外部 chat_scroll_area 因思考区内部高度变化被强制滚底，破坏正文阅读。
         """
         if not hasattr(self.viewer, "page"):
             return
-
-        # 标记内容加载，确保后续卡片高度变化时 _on_message_card_height_changed
-        # 触发消息列表滚底。
-        self._content_just_loaded = True
 
         try:
             # 仅触发布局高度重算，不再更新 .think-streaming-preview
