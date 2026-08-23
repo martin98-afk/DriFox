@@ -201,6 +201,7 @@ class SettingsCardInfo:
     group: str = "plugin"
     priority: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    section: str = "plugins"  # 挂载分区：plugins/llm/common/appearance/update（对应设置面板 tab）
 
 
 class UIPluginRegistry:
@@ -231,6 +232,10 @@ class UIPluginRegistry:
             ("menu:tab", MENU, "Tab 标签右键菜单"),
             ("menu:input_area", MENU, "输入框右键菜单"),
             ("settings:plugins", PANEL, "设置面板插件分区"),
+            ("settings:llm", PANEL, "设置面板大模型分区插件卡"),
+            ("settings:common", PANEL, "设置面板通用分区插件卡"),
+            ("settings:appearance", PANEL, "设置面板外观分区插件卡"),
+            ("settings:update", PANEL, "设置面板更新分区插件卡"),
         ]:
             self.declare_region(rid, kind, desc)
         self._loaded_plugins: set = set()
@@ -574,8 +579,21 @@ class UIPluginRegistry:
         group: str = "plugin",
         priority: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
+        section: str = "plugins",
     ) -> None:
-        """注册设置面板插件卡片（Phase D）"""
+        """注册设置面板插件卡片（Phase D + E）
+
+        section: 挂载分区（plugins/llm/common/appearance/update），
+        对应设置面板 5 个 tab。声明 section 时自动懒声明 settings:<section> 区域。
+        """
+        valid_sections = ("plugins", "llm", "common", "appearance", "update")
+        if section not in valid_sections:
+            raise ValueError(f"invalid section {section!r}, must be one of {valid_sections}")
+        # 懒声明目标分区区域（幂等）
+        if f"settings:{section}" not in self._regions:
+            from app.plugins.contracts.ui_slots import PANEL
+
+            self.declare_region(f"settings:{section}", PANEL, f"设置面板 {section} 分区插件卡")
         if metadata is None:
             metadata = {}
         info = SettingsCardInfo(
@@ -586,23 +604,32 @@ class UIPluginRegistry:
             group=group,
             priority=priority,
             metadata=metadata,
+            section=section,
         )
         existing = self._settings_cards.get(card_id)
         if existing is not None and existing.priority > priority:
             return
         self._settings_cards[card_id] = info
-        # 写入 region 存储（Phase E 单源化）
-        self.register_slot_entry("settings:plugins", card_id, plugin_name, priority=priority, payload=info, metadata=metadata)
+        # 写入 region 存储（Phase E 单源化：按 section 分区）
+        self.register_slot_entry(
+            f"settings:{section}", card_id, plugin_name, priority=priority, payload=info, metadata=metadata
+        )
 
     def get_settings_cards(self) -> List[SettingsCardInfo]:
-        """获取全部设置面板插件卡片（注册序）
+        """获取全部设置面板插件卡片（全 section 合集，按 priority 降序）
 
-        数据源：region 存储（Phase E 单源化）"""
-        return [
-            e.payload
-            for e in self.get_region_entries("settings:plugins")
-            if isinstance(e.payload, SettingsCardInfo)
-        ]
+        数据源：region 存储（Phase E 单源化，按 section 聚合）"""
+        infos = []
+        for region_id, region in self._regions.items():
+            if not region_id.startswith("settings:"):
+                continue
+            infos.extend(
+                e.payload
+                for e in region["entries"].values()
+                if isinstance(e.payload, SettingsCardInfo)
+            )
+        infos.sort(key=lambda i: -i.priority)
+        return infos
 
     # ── Phase E：Region 通用挂载模型 ──
 
