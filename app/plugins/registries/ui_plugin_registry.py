@@ -452,11 +452,16 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._sidebar_items[item_id] = info
+        # 写入 region 存储（Phase E 单源化）
+        self.register_slot_entry("sidebar", item_id, plugin_name, priority=priority, payload=info, metadata=metadata)
 
     def get_sidebar_items(self) -> List[SidebarItemInfo]:
-        """获取全部侧边栏插件项（group 排序：system 在前，custom 在后；同组按注册序）"""
-        system = [v for v in self._sidebar_items.values() if v.group == "system"]
-        custom = [v for v in self._sidebar_items.values() if v.group != "system"]
+        """获取全部侧边栏插件项（group 排序：system 在前，custom 在后；同组按 priority 降序 → 注册序）
+
+        数据源：region 存储（Phase E 单源化）"""
+        items = [e.payload for e in self.get_region_entries("sidebar") if isinstance(e.payload, SidebarItemInfo)]
+        system = [v for v in items if v.group == "system"]
+        custom = [v for v in items if v.group != "system"]
         return system + custom
 
     def register_input_button(
@@ -493,10 +498,14 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._input_buttons[button_id] = info
+        # 写入 region 存储（Phase E 单源化）
+        self.register_slot_entry("toolbar:input", button_id, plugin_name, priority=priority, payload=info, metadata=metadata)
 
     def get_input_buttons(self) -> List[InputButtonInfo]:
-        """获取全部输入区插件按钮（注册序）"""
-        return list(self._input_buttons.values())
+        """获取全部输入区插件按钮（priority 降序 → 注册序）
+
+        数据源：region 存储（Phase E 单源化）"""
+        return [e.payload for e in self.get_region_entries("toolbar:input") if isinstance(e.payload, InputButtonInfo)]
 
     def register_context_menu_action(
         self,
@@ -529,10 +538,18 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._context_actions[key] = info
+        # 写入 region 存储（Phase E 单源化）：按 menu:<target> 分区
+        self.register_slot_entry(f"menu:{target}", action_id, plugin_name, priority=priority, payload=info, metadata=metadata)
 
     def get_context_actions(self, target: str) -> List[ContextMenuActionInfo]:
-        """获取指定 target 的菜单插件项（注册序；separator_before 为渲染标记）"""
-        return [v for k, v in self._context_actions.items() if k.startswith(f"{target}:")]
+        """获取指定 target 的菜单插件项（priority 降序 → 注册序；separator_before 为渲染标记）
+
+        数据源：region 存储（Phase E 单源化）。target 开放：宿主声明新 menu:<target> 区域即可消费。"""
+        return [
+            e.payload
+            for e in self.get_region_entries(f"menu:{target}")
+            if isinstance(e.payload, ContextMenuActionInfo)
+        ]
 
     def register_settings_card(
         self,
@@ -560,10 +577,18 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._settings_cards[card_id] = info
+        # 写入 region 存储（Phase E 单源化）
+        self.register_slot_entry("settings:plugins", card_id, plugin_name, priority=priority, payload=info, metadata=metadata)
 
     def get_settings_cards(self) -> List[SettingsCardInfo]:
-        """获取全部设置面板插件卡片（注册序）"""
-        return list(self._settings_cards.values())
+        """获取全部设置面板插件卡片（注册序）
+
+        数据源：region 存储（Phase E 单源化）"""
+        return [
+            e.payload
+            for e in self.get_region_entries("settings:plugins")
+            if isinstance(e.payload, SettingsCardInfo)
+        ]
 
     # ── Phase E：Region 通用挂载模型 ──
 
