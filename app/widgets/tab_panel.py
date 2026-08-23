@@ -938,6 +938,15 @@ class UIPluginRow(QFrame):
         self._build_position_menu().exec_(self.mapToGlobal(pos))
 
 
+def _sort_plugin_entries(entries: list) -> list:
+    """插件条目统一排序：priority 降序 → title 字母序兜底（稳定）
+
+    regression：refresh_ui_plugins 曾直接 `sort(key=title.lower())`
+    导致 SidebarItemInfo.priority 失效（注册优先级被字母序覆盖）。
+    """
+    return sorted(entries, key=lambda e: (-e[4], e[2].lower()))
+
+
 class TabPanel(QWidget):
     """左侧 Tab 列表面板"""
 
@@ -959,7 +968,7 @@ class TabPanel(QWidget):
         #    _team_groups 缓存 team_id → QFrame 容器（避免反复创建）
         self._item_team: Dict[int, str] = {}
         self._team_groups: Dict[str, "QFrame"] = {}
-        self._plugin_infos: list[tuple[str, str, str, str]] = []  # (kind, key, title, plugin_name)
+        self._plugin_infos: list[tuple[str, str, str, str, int]] = []  # (kind, key, title, plugin_name, priority)
         self._system_plugin_layout: Optional[QVBoxLayout] = None
         self._system_plugin_buttons: list[UIPluginRow] = []
         self._custom_plugin_layout: Optional[QVBoxLayout] = None
@@ -1258,11 +1267,11 @@ class TabPanel(QWidget):
         # 兼容映射：已注册独立 sidebar 项的插件 → 跳过其 container="left" 卡片派生
         sidebar_plugin_names = {info.plugin_name for info in sidebar_items}
 
-        # 统一条目：(kind, key, title, plugin_name)；kind ∈ {"sidebar", "card"}
-        system_infos: list[tuple[str, str, str, str]] = []
-        custom_infos: list[tuple[str, str, str, str]] = []
+        # 统一条目：(kind, key, title, plugin_name, priority)；kind ∈ {"sidebar", "card"}
+        system_infos: list[tuple[str, str, str, str, int]] = []
+        custom_infos: list[tuple[str, str, str, str, int]] = []
         for info in sidebar_items:
-            entry = ("sidebar", info.item_id, (info.label or "").strip() or info.item_id, info.plugin_name)
+            entry = ("sidebar", info.item_id, (info.label or "").strip() or info.item_id, info.plugin_name, info.priority)
             if info.group == "system":
                 system_infos.append(entry)
             else:
@@ -1279,15 +1288,17 @@ class TabPanel(QWidget):
                 title = (info.title or "").strip() or card_id
                 plugin_info = pm.get_plugin(info.plugin_name)
                 is_system = plugin_info.is_system if plugin_info else False
-                entry = ("card", card_id, title, info.plugin_name)
+                entry = ("card", card_id, title, info.plugin_name, 0)
                 if is_system:
                     system_infos.append(entry)
                 else:
                     custom_infos.append(entry)
             except Exception:
                 continue
-        system_infos.sort(key=lambda item: item[2].lower())
-        custom_infos.sort(key=lambda item: item[2].lower())
+        # Phase E：按 priority 降序 → title 字母序兜底（regression: 旧 sort
+        # 只看 title.lower() 抹平了 priority，导致高优先级插件被字母序压在后面）
+        system_infos = _sort_plugin_entries(system_infos)
+        custom_infos = _sort_plugin_entries(custom_infos)
         self._plugin_infos = system_infos + custom_infos
 
         # ── 系统插件区 ──
@@ -1297,7 +1308,7 @@ class TabPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._system_plugin_buttons = []
-        for kind, key, title, plugin_name in system_infos:
+        for kind, key, title, plugin_name, _priority in system_infos:
             # ★ T3 修复：单行构造异常不中断整体刷新（任一插件构造抛异常时
             # 跳过该插件，其余插件继续重建——否则一个"毒条目"导致整批
             # UI 插件按钮全部不显示）。
@@ -1331,7 +1342,7 @@ class TabPanel(QWidget):
             if widget is not None:
                 widget.deleteLater()
         self._custom_plugin_buttons = []
-        for kind, key, title, plugin_name in custom_infos:
+        for kind, key, title, plugin_name, _priority in custom_infos:
             # ★ T3 修复：单行构造异常不中断整体刷新（同系统插件区）。
             try:
                 row = UIPluginRow(

@@ -111,7 +111,36 @@ def test_system_group_renders_in_system_section(panel, fresh_registry):
     fresh_registry.register_sidebar_item("demo", "s1", "系统项", group="system", on_click=lambda ctx: None)
     panel.refresh_ui_plugins()
     assert len(panel._system_plugin_buttons) == 1
-    assert panel._plugin_infos == [("sidebar", "s1", "系统项", "demo")]
+    assert panel._plugin_infos == [("sidebar", "s1", "系统项", "demo", 0)]
+
+
+# ---------- Phase E：priority 排序失效修复 ----------
+
+
+class TestSidebarSortPriority:
+    def test_priority_beats_title_sort(self, fresh_registry):
+        """sidebar 条目排序：priority 降序优先于标题字母序
+        （regression：tab_panel 曾按 title.lower() 重排导致 priority 失效）"""
+        from app.widgets.tab_panel import _sort_plugin_entries
+
+        # (kind, key, title, plugin_name, priority)；b 注册序在前但 priority 低
+        entries = [
+            ("sidebar", "b", "aaa 高字母低权重", "demo", 1),
+            ("sidebar", "a", "zzz 低字母高权重", "demo", 10),
+            ("card", "c", "卡片", "demo", 5),
+        ]
+        # priority desc: a(10) > c(5) > b(1) → 期望 [a, c, b]
+        assert [e[1] for e in _sort_plugin_entries(entries)] == ["a", "c", "b"]
+
+    def test_title_sort_is_stable_within_same_priority(self, fresh_registry):
+        """同 priority 内部按 title 字母序兜底（稳定）"""
+        from app.widgets.tab_panel import _sort_plugin_entries
+
+        entries = [
+            ("sidebar", "x", "zzz", "demo", 5),
+            ("sidebar", "y", "aaa", "demo", 5),
+        ]
+        assert [e[1] for e in _sort_plugin_entries(entries)] == ["y", "x"]
 
 
 if __name__ == "__main__":
