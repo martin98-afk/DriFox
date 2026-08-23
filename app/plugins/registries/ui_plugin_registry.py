@@ -1227,6 +1227,10 @@ class UIPluginRegistry:
         # 清理通用区域条目（Phase E）
         for region in self._regions.values():
             region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}
+        # 事件总线退订：防止悬挂回调引用已卸载的旧模块闭包
+        from app.core.ui_event_bus import UIEventBus
+
+        UIEventBus.get_instance().unsubscribe_plugin(plugin_name)
         self._loaded_plugins.discard(plugin_name)
         logger.info(f"[UIPluginRegistry] Unloaded UI components for plugin: {plugin_name}")
         if had_welcome_tabs:
