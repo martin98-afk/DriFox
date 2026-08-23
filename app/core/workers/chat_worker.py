@@ -2820,18 +2820,13 @@ class OpenAIChatWorker(QThread):
             registry = HookPolicyRegistry.get_instance()
             policy_id = self._hook_policy_id
             if policy_id is None:
-                # 枚举回落（向后兼容）
-                _enum_to_id = {
-                    HookPolicy.ALL: "all",
-                    HookPolicy.TOOL_EVENTS_ONLY: "tool_only",
-                    HookPolicy.NONE: "none",
-                }
-                policy_id = _enum_to_id.get(self._hook_policy, "all")
-            self._hook_policy_obj = registry.get_active(SCOPE_MAIN)
-            # 若指定 id 与当前激活不一致且存在，切换（仅一次）
-            if policy_id and self._hook_policy_obj.id != policy_id:
-                if registry.set_active(policy_id, SCOPE_MAIN):
-                    self._hook_policy_obj = registry.get_active(SCOPE_MAIN)
+                # 未指定 id：尊重当前主域激活（向后兼容用户切换策略）
+                self._hook_policy_obj = registry.get_active(SCOPE_MAIN)
+                return self._hook_policy_obj
+            # 指定 id（如团队成员窗口 "team_member"）：按 id 直接定位策略对象，
+            # 不调用 set_active —— 避免污染其他 scope（main）的激活状态。
+            item = registry.policies().get(policy_id)
+            self._hook_policy_obj = item if item is not None else registry.get_active(SCOPE_MAIN)
         except Exception as exc:
             logger.warning(f"[HookPolicy] resolve 异常，回退 AllHookPolicy: {exc!r}")
             from app.plugins.contracts.hook_policy import HookDecision, HookEvent

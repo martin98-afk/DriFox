@@ -42,6 +42,7 @@ class UIEngine(BaseEngine):
         worker_callbacks: Optional[Dict[str, Callable]] = None,
         api_mode: bool = False,
         backend: Any = None,
+        hook_policy_id: Optional[str] = None,
     ):
         self._session_manager = session_manager
         self._get_model_config = get_model_config
@@ -71,6 +72,7 @@ class UIEngine(BaseEngine):
         config = ConversationConfig(
             permission_strategy=PermissionStrategy.INTERACTIVE,
             interactive_check_callback=self._check_tool_permission,
+            hook_policy_id=hook_policy_id,
         )
         self._conversation_executor = ConversationExecutor(
             core=self._conversation_core,
@@ -221,9 +223,7 @@ class UIEngine(BaseEngine):
             from app.core.tool_permission_controller import resolve_tool_off_policy
 
             policy = resolve_tool_off_policy(check_name, controller, policies, behavior)
-            logger.info(
-                f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False policy={policy}"
-            )
+            logger.info(f"[ToolToggle] tool={tool_name} check_name={check_name} enabled=False policy={policy}")
             return policy
         # ★ T28：UI 显式开启（用户调整过该工具）→ UI 为准，放行（跳过模板 deny）
         # 与子智能体 _check_ui_tool_permission 语义一致："UI 覆盖模板"

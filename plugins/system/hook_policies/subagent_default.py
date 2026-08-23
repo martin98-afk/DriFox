@@ -35,9 +35,9 @@ class SubagentDefaultHookPolicy:
     scope = "subagent"
 
     def should_trigger(self, event: HookEvent) -> HookDecision:
-        if isinstance(event, (PreToolUseEvent, PostToolUseEvent, StopEvent, PluginChangedEvent)):
-            return HookDecision.TRIGGER
-        return HookDecision.SKIP
+        if isinstance(event, (PostToolUseEvent, StopEvent, PluginChangedEvent)):
+            return HookDecision.SKIP
+        return HookDecision.TRIGGER
 
 
 def register(registry):

@@ -215,7 +215,7 @@ def _safe_agent_manager(backend: "ChatBackend") -> Any:
     """
     try:
         return object.__getattribute__(backend, "_agent_manager")
-    except (AttributeError, RuntimeError):
+    except AttributeError, RuntimeError:
         return None
 
 
@@ -733,6 +733,16 @@ class ChatBackend(QObject):
 
             # 触发引擎 watcher（注册/热重载），无插件时 no-op
             ensure_engine_watcher()
+            # 多窗口隔离：团队成员窗口使用 team_member 策略（跳过 Pre/PostAssistant
+            # 等主对话语义 hook，避免污染成员的邮件驱动对话流边界）。
+            hook_policy_id = None
+            try:
+                from app.core.team_manager import TeamManager
+
+                if TeamManager.get_instance().is_team_member(self._window_id):
+                    hook_policy_id = "team_member"
+            except Exception:
+                pass
             self._chat_engine = create_engine_for_slot(
                 "ui",
                 ChatEngine,
@@ -742,6 +752,7 @@ class ChatBackend(QObject):
                 agent_manager=self._agent_manager,
                 get_chat_cards=getattr(self, "_build_chat_cards_context", None),
                 backend=self,
+                hook_policy_id=hook_policy_id,
             )
             logger.info("[ChatBackend] ChatEngine 延迟创建完成")
             # [审查 #8r Bug C] 窗口构造期暂存的 UI 回调（流式更新等）补注册
@@ -2353,8 +2364,7 @@ class ChatBackend(QObject):
                             )
                         except Exception as _re:
                             logger.warning(
-                                f"[ChatBackend] Plugin [{plugin_name}] root change, "
-                                f"{comp} reload failed: {_re}"
+                                f"[ChatBackend] Plugin [{plugin_name}] root change, {comp} reload failed: {_re}"
                             )
                             continue
                         if comp in result_keys:
@@ -2367,8 +2377,7 @@ class ChatBackend(QObject):
                             )
                     if not _reloaded_any:
                         logger.debug(
-                            f"[ChatBackend] Plugin [{plugin_name}] root change, "
-                            f"no ui/tools components to reload"
+                            f"[ChatBackend] Plugin [{plugin_name}] root change, no ui/tools components to reload"
                         )
 
             logger.info(

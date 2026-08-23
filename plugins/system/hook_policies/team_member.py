@@ -38,19 +38,7 @@ class TeamMemberHookPolicy:
     scope = "team_member"
 
     def should_trigger(self, event: HookEvent) -> HookDecision:
-        if isinstance(
-            event,
-            (
-                PreToolUseEvent,
-                PostToolUseEvent,
-                SessionStartEvent,
-                StopEvent,
-                TeamMailEvent,
-                PluginChangedEvent,
-            ),
-        ):
-            return HookDecision.TRIGGER
-        return HookDecision.SKIP
+        return HookDecision.TRIGGER
 
 
 def register(registry):
