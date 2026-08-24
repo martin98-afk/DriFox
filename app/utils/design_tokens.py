@@ -52,12 +52,33 @@ def _get_font_family_css() -> str:
     return get_font_family_css()
 
 
-FONT_SIZE_OPTIONS = {
-    "small": {"label": "小", "delta": -1, "base": 13},
-    "medium": {"label": "中", "delta": 0, "base": 14},
-    "large": {"label": "大", "delta": 2, "base": 16},
-    "superlarge": {"label": "超大", "delta": 4, "base": 18},
-}
+# 界面字号档位：delta 键（-5px..+10px，步进 1），base 恒 14，实际字号 = 14 + delta
+FONT_SIZE_OPTIONS = {str(d): {"delta": d, "base": 14} for d in range(-5, 11)}
+
+# 旧档位键（small/medium/large/superlarge）→ delta 键迁移映射
+_LEGACY_FONT_SIZE_KEYS = {"small": "-1", "medium": "0", "large": "2", "superlarge": "4"}
+
+# 旧档位标签 → 实际像素字号（base 字段）：保留旧插件对 font_size 的硬编码假设
+#   旧 small base=13, medium base=14, large base=16, superlarge base=18
+# 新结构 base 恒 14，实际像素值 = 14 + delta；新 ctx.font_size 在数值上与旧 base 一致
+# （delta=-1→13 / 0→14 / 2→16 / 4→18）。
+# 旧插件若硬编码按 label 取值（如按 "large" 字符串触发"大"模式），
+# 可用本表 + get_legacy_font_size_px() 兜底，label 未知返回 None。
+_LEGACY_FONT_SIZE_PIXELS = {"small": 13, "medium": 14, "large": 16, "superlarge": 18}
+
+
+def get_legacy_font_size_px(label: str) -> int | None:
+    """按旧档位标签返回"小/中/大/超大"对应的实际像素字号
+
+    新插件请读 ctx.font_size（实际像素值）或迭代 FONT_SIZE_OPTIONS（delta 键）。
+    旧插件若硬编码按 small=13/medium=14/large=16/superlarge=18 计算行高/图标，
+    可用本函数兜底，标签未知返回 None。
+    """
+    return _LEGACY_FONT_SIZE_PIXELS.get(label)
+
+
+# 默认档位（对应旧 superlarge：14+4=18px）；配置键不在 FONT_SIZE_OPTIONS 范围时兜底到此值
+_DEFAULT_FONT_SIZE_KEY = "4"
 
 
 def get_ui_font_size_key() -> str:
@@ -69,9 +90,11 @@ def get_ui_font_size_key() -> str:
 
         key = Settings.get_instance().ui_font_size.value
     except Exception:
-        key = "medium"
+        key = _DEFAULT_FONT_SIZE_KEY
+    # 旧配置值迁移兜底（validator correct 已处理，此处双保险）
+    key = _LEGACY_FONT_SIZE_KEYS.get(key, key)
     if key not in FONT_SIZE_OPTIONS:
-        key = "medium"
+        key = _DEFAULT_FONT_SIZE_KEY
     _cached_font_size_key = key
     _cached_font_size_delta = FONT_SIZE_OPTIONS[key]["delta"]
     _cached_font_size_base = FONT_SIZE_OPTIONS[key]["base"]
@@ -130,8 +153,17 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
     setting_cards = []
     switches = []
+    expand_cards = []
+    # findChildren 不含 widget 自身；若 widget 自身就是 ExpandSettingCard（如直接对一张 OptionsSettingCard 调），
+    # 仍需进 expand_cards 处理链，所以候选集合里把 widget 自身也带上
+    _seen: set = set()
+    candidates = [widget]
+    candidates.extend(widget.findChildren(QWidget))
 
-    for child in widget.findChildren(QWidget):
+    for child in candidates:
+        if id(child) in _seen:
+            continue
+        _seen.add(id(child))
         # setFont 覆盖递归字体
         # [PERF] 仅当像素大小/字族与目标不一致时才 setFont：
         # 全树可达数千控件（长会话消息卡），无变化时 setFont 仍触发
@@ -149,6 +181,8 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
             setting_cards.append(child)
         if isinstance(child, SwitchButton):
             switches.append(child)
+        if isinstance(child, ExpandSettingCard):
+            expand_cards.append(child)
 
     # ── SettingCard / ExpandSettingCard ──
     # ExpandSettingCard 继承 SettingCard，已被 setting_cards 包含
@@ -168,6 +202,41 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
                 card.card.contentLabel.setStyleSheet(
                     f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
                 )
+
+    # ── ExpandSettingCard / OptionsSettingCard QSS 硬编码覆盖 ──
+    # qfluentwidgets 的 EXPAND_SETTING_CARD QSS 硬编码：
+    #   QLabel#titleLabel   { font: 14px --FontFamilies; ... }
+    #   QLabel#contentLabel { font: 11px --FontFamilies; ... }
+    # specificity (1,0,1) 压过 setFont；与同 specificity 规则 cascade 时
+    # `font:` shorthand 会胜出我们的 `font-size:` 单属性。
+    # 唯一可靠修复：在内层 widget 自身的 stylesheet 末尾追加带 `!important` 的规则，
+    # 并用 marker 防重入。
+    # 范围：
+    #   - inner HeaderSettingCard：覆盖 inner.titleLabel / inner.contentLabel（卡片头）
+    #   - ExpandSettingCard 自身：覆盖 OptionsSettingCard.choiceLabel
+    #     （choiceLabel.parent 是 OptionsSettingCard，不走 inner.card 的 cascade，
+    #      必须在自身追加规则才能命中）
+    override_marker = "/* drifox_font_override */"
+    inner_title_rule = (
+        f"QLabel#titleLabel {{ font-size: {scaled}px !important; font-family: '{font_family}' !important; }}"
+    )
+    inner_content_rule = (
+        f"QLabel#contentLabel {{ font-size: {content_scaled}px !important; font-family: '{font_family}' !important; }}"
+    )
+    for ec in expand_cards:
+        # 1) inner HeaderSettingCard 的 QSS 覆盖（影响 inner.titleLabel / inner.contentLabel）
+        inner = getattr(ec, "card", None)
+        if inner is not None:
+            old_inner = inner.styleSheet() or ""
+            if override_marker not in old_inner:
+                inner.setStyleSheet(
+                    old_inner.rstrip() + "\n" + override_marker + "\n" + inner_title_rule + "\n" + inner_content_rule
+                )
+
+        # 2) ExpandSettingCard 自身的 QSS 覆盖（命中 choiceLabel）
+        old_self = ec.styleSheet() or ""
+        if override_marker not in old_self:
+            ec.setStyleSheet(old_self.rstrip() + "\n" + override_marker + "\n" + inner_title_rule)
 
     # ── SwitchButton ──
     for switch in switches:

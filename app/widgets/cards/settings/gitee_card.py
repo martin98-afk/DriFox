@@ -16,6 +16,7 @@ from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
 
+from app.core import window_registry
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -1376,7 +1377,7 @@ class GiteeCard(SettingCard):
             #      - Colors.refresh() → 重算颜色 token
             #      - 按 scope 精准刷新 widget 树（message card / settings card / 圆环等）
             #      - 不触发 dispatch_refresh() 的全量 refresh_theme() 调用
-            for win in getattr(OpenAIChatToolWindow, "_instances", []):
+            for win in window_registry.window_instances:
                 if getattr(win, "_is_destroyed", False):
                     continue
                 try:

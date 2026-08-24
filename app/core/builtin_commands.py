@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 内置命令注册
 
@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import yaml
 from loguru import logger
 
+from app.core import window_registry
 from app.core.command_manager import CommandManager, CommandParameter, CommandType
 from app.tools.tool_name_mapper import ToolNameMapper
 
@@ -678,7 +679,7 @@ def _rebind_command_shortcuts():
         # 清除窗口级快捷键去重缓存，允许命令变更后重新注册
         OpenAIChatToolWindow._window_shortcut_cache.clear()
 
-        for win in OpenAIChatToolWindow._instances:
+        for win in window_registry.window_instances:
             if win._is_destroyed:
                 continue
             try:

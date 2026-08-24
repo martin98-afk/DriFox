@@ -4103,6 +4103,10 @@ class CodeWebViewer(QWebEngineView):
                     line-height: 1.6;
                     max-height: 500px;
                     overflow-y: scroll;
+                    /* 🐛 修复（偶发横向滚动条）：CSS 规范规定一轴非 visible 时另一轴 visible
+                       会被自动计算为 auto，未显式声明会导致内部 .code-container / .table-scroll-wrapper
+                       等 overflow-x:auto 的子容器在内容超宽时撑出整个折叠框的横向滚动条 */
+                    overflow-x: hidden;
                     transition: opacity 200ms ease;
                 }}
                 /* 思考内容加载骨架屏动画 */
@@ -4497,6 +4501,9 @@ class CodeWebViewer(QWebEngineView):
                     font-family: {mono_font};
                     max-height: 400px;
                     overflow-y: scroll;
+                    /* 🐛 修复（偶发横向滚动条）：显式 hidden 避免一轴非 visible
+                       导致另一轴 visible 被自动计算为 auto 而撑出横向滚动条 */
+                    overflow-x: hidden;
                 }}
                 .result-empty {{
                     padding: 6px 12px 10px;
@@ -4691,6 +4698,11 @@ class CodeWebViewer(QWebEngineView):
                     /* 轨道常驻：出现/消失切换不再使内容宽度 ±6px 波动；
                        右 padding 扣减 6px，右侧视觉边距与左基本对称 */
                     overflow-y: scroll;
+                    /* 🐛 修复（偶发横向滚动条）：CSS 规范规定一轴非 visible 时另一轴 visible
+                       会被自动计算为 auto，未显式声明会让内部 .tool-diff-inline__body /
+                       .code-container / .table-scroll-wrapper 等 overflow-x:auto 的子容器
+                       在内容超宽时撑出整个"工具与思考"区的横向滚动条 */
+                    overflow-x: hidden;
                     overflow-anchor: none;  /* 禁用 scroll anchoring，防止浏览器在 reorganizeContent 后调整 scrollTop 覆盖 JS 设置的滚底位置 */
                     background: transparent;
                     border: none;
@@ -4715,7 +4727,7 @@ class CodeWebViewer(QWebEngineView):
                 #tool-section[data-collapsed="true"] #todo-panel {{
                     display: none;
                 }}
-                /* 任务列表分隔线（与 #tool-separator 同源样式）：标题+完成统计在分隔线上，任务项在其下 */
+                /* 任务列表分隔线（与 #tool-separator 同源样式）：标题+完成统计嵌在分隔线中间，任务项在其下 */
                 #todo-separator {{
                     display: flex;
                     align-items: center;
@@ -4723,15 +4735,15 @@ class CodeWebViewer(QWebEngineView):
                     font-size: 13px;
                     color: var(--text-muted);
                     user-select: none;
-                    padding: 4px 2px 4px 2px;
-                    border-top: 1px dashed var(--border);
+                    padding: 2px 2px 6px 2px;
                 }}
                 #todo-separator::before,
                 #todo-separator::after {{
                     content: '';
                     flex: 1;
                     height: 1px;
-                    background: transparent;
+                    background: var(--border);
+                    opacity: 0.6;
                 }}
                 #todo-separator #todo-progress {{
                     font-size: 12px;
@@ -4753,6 +4765,9 @@ class CodeWebViewer(QWebEngineView):
                     position: relative;  /* 子项 offsetTop 相对本容器计算（in_progress 定位滚动依赖） */
                     max-height: 600px;
                     overflow-y: scroll;  /* 轨道常驻 + 右 padding 扣减：同 #tool-content */
+                    /* 🐛 修复（偶发横向滚动条）：同上 #tool-content，显式 hidden 阻止
+                       overflow-x 自动计算为 auto，避免长 todo 文本撑出横向滚动条 */
+                    overflow-x: hidden;
                     overflow-anchor: none;
                     background: transparent;
                     border-radius: 6px;
@@ -4763,7 +4778,7 @@ class CodeWebViewer(QWebEngineView):
                     align-items: center;
                     gap: 8px;
                     padding: 4px 6px;
-                    font-size: {body_font_size}px;
+                    font-size: {scale_font_size(13)}px;
                     line-height: 1.5;
                     color: var(--text);
                 }}
@@ -8276,7 +8291,9 @@ class MessageCard(SimpleCardWidget):
         self._rainbow_retry = [QColor(c) for c in ("#ff2222","#aa0000","#ff3333","#880000","#ff1111","#bb0000","#ff4444","#990000")]
         self._grad_main, self._grad_inner, self._grad_glow, self._grad_shimmer = (QLinearGradient(0, 0, 1, 1) for _ in range(4))
         self._clip_inner = self._clip_outer = self._clip_inner_edge = self._clip_border = QPainterPath()
-        self._clip_inner_border = self._clip_shimmer = self._clip_top = self._clip_glow_region = self._clip_border_region = QPainterPath()
+        self._clip_inner_border = self._clip_shimmer = self._clip_top = self._clip_glow_region = (
+            self._clip_border_region
+        ) = QPainterPath()
         self._clip_w = self._clip_h = -1
         self._height_anim = QVariantAnimation(self)
         self._height_anim.setDuration(180)
@@ -8311,6 +8328,9 @@ class MessageCard(SimpleCardWidget):
         self._finished_streaming_ids: set = set()  # 防止 streaming 状态回退
         # 欢迎卡片模式数据（set_welcome_content 时填充；切换 mode 不重建 QWebEngineView）
         self._welcome_mode: str = ""
+        # 首次渲染时固定的问候语，软刷新（其他标签页会话变更广播）复用，
+        # 避免欢迎卡片内容无谓跳变（仅会话列表应静默更新）。
+        self._welcome_greeting: str = ""
         self._welcome_recent: list = []
         self._welcome_top: list = []
         self._welcome_mode_tabs: Optional["SegmentedWidget"] = None
@@ -8866,6 +8886,26 @@ class MessageCard(SimpleCardWidget):
         self._welcome_mode_tabs = seg
         top_layout.addWidget(seg)
         top_layout.addStretch()
+        # 字号适配：SegmentedItem 内部写死 setFont(self, 14)，不读当前 delta，
+        # 必须在此按当前字号缩放一次，否则新建/重建欢迎卡片时 tab 字体恒为 14px。
+        self._apply_welcome_tabs_font()
+
+    def _apply_welcome_tabs_font(self):
+        """欢迎卡片 segmented tabs 适配系统字号
+
+        SegmentedItem._postInit() 硬 setFont(self, 14)，qfluentwidgets 原组件不感知
+        DriFox 的 font_size delta；此处按当前 delta 缩放覆盖，保证 tab 字体随
+        系统字号变化（首次构建 + _apply_runtime_ui_settings 字体块都会调用）。
+        """
+        if self._welcome_mode_tabs is None:
+            return
+        fs = scale_font_size(14)
+        ff = _get_global_font()
+        for item in self._welcome_mode_tabs.items.values():
+            font = item.font()
+            font.setFamily(ff)
+            font.setPixelSize(fs)
+            item.setFont(font)
 
     def _on_welcome_mode_tab_clicked(self, mode: str):
         """PyQt tabs 点击：切换 mode + 重新渲染 body（不重建 QWebEngineView）"""
@@ -8913,8 +8953,12 @@ class MessageCard(SimpleCardWidget):
         self._render_welcome_with_body(body_html)
 
     def _render_welcome_with_body(self, body_html: str):
-        """统一的 body 渲染入口：拼接 greeting + 写入 viewer（markdown 路径）"""
-        greeting = get_random_greeting()
+        """统一的 body 渲染入口：拼接 greeting + 写入 viewer（markdown 路径）
+
+        软刷新（refresh_welcome_data）也经此入口，复用首次渲染的固定问候语，
+        避免其他标签页会话变更广播到本窗口时欢迎卡片问候语无谓跳变。
+        """
+        greeting = self._welcome_greeting or get_random_greeting()
         welcome_md = f"### 👋 {greeting}\n\n{body_html}\n"
         if self.viewer is not None and self._lazy_rendered:
             self.set_content(welcome_md)
@@ -9006,6 +9050,7 @@ class MessageCard(SimpleCardWidget):
             self._get_welcome_window_context(),
         )
         greeting = get_random_greeting()
+        self._welcome_greeting = greeting
         self._pending_welcome_md = f"### 👋 {greeting}\n\n{body_html}\n"
 
     def refresh_welcome_data(self, recent_sessions: list, top_by_count: list) -> None:
@@ -9031,11 +9076,15 @@ class MessageCard(SimpleCardWidget):
         self._welcome_top = new_top
         if self._welcome_mode != "sessions":
             return
+        # 软刷新：数据更新导致的重渲染，抑制 session-item 进入动画（仅首次
+        # 进入播放），避免其他标签页对话完成广播到本窗口时所有列表项重播
+        # stagger fade-in（见 _render_sessions_body / _render_item 的 suppress_anim）。
         body_html = _render_welcome_body(
             self._welcome_mode,
             self._welcome_recent,
             self._welcome_top,
             self._get_welcome_window_context(),
+            suppress_anim=True,
         )
         self._render_welcome_with_body(body_html)
 
@@ -11657,6 +11706,7 @@ def _render_welcome_body(
     recent_sessions: list,
     top_by_count: list,
     window_context: Optional[dict] = None,
+    suppress_anim: bool = False,
 ) -> str:
     """渲染欢迎卡片 body（不含标题和 tabs）；按 mode 分发
 
@@ -11697,14 +11747,14 @@ def _render_welcome_body(
             return tab.render_func(ctx) or ""
     except Exception:
         pass
-    return _render_sessions_body(recent_sessions, top_by_count)
+    return _render_sessions_body(recent_sessions, top_by_count, suppress_anim=suppress_anim)
 
 
 _SESSION_ROWS = 3  # 双列网格行数（每分类显示 3×2 = 6 张）
 _SESSION_COLS = 2
 
 
-def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
+def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_anim: bool = False) -> str:
     """渲染会话导览 body：最近 / 最活跃两个卡片双列网格（每分类 3 行）
 
     每张卡片：左侧图标徽章 + 标题/副标题 + hover 滑入箭头。
@@ -11712,8 +11762,12 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
     仅替换视觉外观，JS 拦截逻辑不变。
     """
 
-    def _render_item(s: dict, count_mode: bool, idx: int) -> str:
-        """渲染单个会话卡片；idx 用于 stagger 动画延迟"""
+    def _render_item(s: dict, count_mode: bool, idx: int, suppress_anim: bool = False) -> str:
+        """渲染单个会话卡片；idx 用于 stagger 动画延迟
+
+        suppress_anim=True（软刷新：其他标签页会话变更广播到本窗口）时用内联
+        `animation:none` 覆盖 CSS 进入动画，避免列表项重播 stagger fade-in。
+        """
         t = escape(s.get("title", "未命名会话"))
         sid = escape(s.get("session_id", ""))
         if count_mode:
@@ -11723,10 +11777,11 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
         else:
             meta = escape(s.get("last_time") or "")
             icon = "💬"
+        anim_style = "animation: none;" if suppress_anim else f"animation-delay:{idx * 55}ms"
         return (
             f'<div class="context-tag session-item" data-type="session" '
             f'data-session-id="{sid}" data-action="session" '
-            f'style="animation-delay:{idx * 55}ms">'
+            f'style="{anim_style}">'
             f'<span class="session-item-badge">{icon}</span>'
             f'<span class="session-item-body">'
             f'<span class="session-item-title">{t}</span>'
@@ -11736,7 +11791,9 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
             f"</div>"
         )
 
-    def _render_section(title: str, icon: str, items: list, count_mode: bool = False, start_idx: int = 0) -> str:
+    def _render_section(
+        title: str, icon: str, items: list, count_mode: bool = False, start_idx: int = 0, suppress_anim: bool = False
+    ) -> str:
         """渲染单个分类 section；items 为空则返回空串
 
         start_idx: 全局连续卡片序号起点，保证跨分区的 stagger 动画连贯
@@ -11745,7 +11802,7 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
         if not items:
             return ""
         shown = items[: _SESSION_ROWS * _SESSION_COLS]
-        rows = "".join(_render_item(s, count_mode, start_idx + i) for i, s in enumerate(shown))
+        rows = "".join(_render_item(s, count_mode, start_idx + i, suppress_anim) for i, s in enumerate(shown))
         return (
             f'<div class="session-section">'
             f'<div class="session-header">'
@@ -11757,9 +11814,13 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list) -> str:
             f"</div>"
         )
 
-    recent_block = _render_section("最近会话", "📅", recent_sessions, count_mode=False, start_idx=0)
+    recent_block = _render_section(
+        "最近会话", "📅", recent_sessions, count_mode=False, start_idx=0, suppress_anim=suppress_anim
+    )
     top_start = len(recent_sessions[: _SESSION_ROWS * _SESSION_COLS])
-    top_block = _render_section("最活跃会话", "🔥", top_by_count, count_mode=True, start_idx=top_start)
+    top_block = _render_section(
+        "最活跃会话", "🔥", top_by_count, count_mode=True, start_idx=top_start, suppress_anim=suppress_anim
+    )
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block

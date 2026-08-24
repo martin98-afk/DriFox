@@ -68,6 +68,28 @@ All notable changes to this project will be documented in this file.
 - **对话按钮保留开启的 tab 并抑制关闭事件** (`app/widgets/replace_tab_bar.py` + `app/widgets/tab_manager_window.py`): 增强对话按钮行为，保留已开启的 tab 并抑制关闭事件，避免误关。
 - **replace tab 状态按对话隔离** (`app/widgets/tab_manager_window.py` + `plugins/plugin-marketplace/ui/cards.py`): 隔离 replace tab 状态按对话单元存储，防止跨会话串扰，并扩展 `test_replace_tab_bar` 用例覆盖。
 
+### 🔄 Hotfix 重新发布 (Re-release · 2026-08-25)
+
+基于 `v0.5.4` 标签的增量变更 | 提交数：9 · 文件变更：48 · +2280/-550 | 贡献者：dingma, mading
+
+#### ✨ 新功能 (New Features)
+
+- **字号步进器与 legacy key 迁移** (`app/widgets/cards/settings/llm_settings_card.py` + `app/widgets/cards/settings/plugin_config_card.py` + `app/utils/design_tokens.py` + `app/utils/config.py` + `app/main_widget.py` + `app/widgets/tab_manager_window.py`): 字号 stepper 用 delta 映射替代离散档位；旧字号键名平滑迁移；设置卡片字号面板与插件配置卡片扩展；新增 `tests/widgets/test_font_size_stepper.py` 与 `test_replace_tab_bar` 回归测试。
+- **多区主题基建 scene/decoration layer** (`app/widgets/scene_layer.py` + `app/widgets/decoration_layer.py` + `app/utils/theme_manager.py` + `app/widgets/modules/chat_area_module.py` + `app/main_widget.py` + `app/widgets/cards/settings/llm_settings_card.py` + `app/widgets/tab_manager_window.py`): 引入 scene layer（场景切换与刷新钩子）与 decoration layer（装饰叠加层）；主题管理器增强；chat_area 模块接入；新增 `test_font_size_stepper` 用例。
+- **欢迎卡片 tab 字号适配与 replace tab bar 样式** (`app/main_widget.py` + `app/widgets/message_card.py` + `app/widgets/replace_tab_bar.py`): 增强欢迎卡片 tab 字号自适应能力；replace tab bar 样式优化。
+- **scene layer 落地与欢迎卡片软刷新** (`app/widgets/scene_layer.py` + `app/widgets/message_card.py` + `app/utils/theme_manager.py` + `app/widgets/modules/chat_area_module.py` + `app/widgets/tab_manager_window.py`): 落地 scene layer；欢迎卡片软刷新行为改进（避免重建抖动）；新增 `tests/widgets/test_scene_layer_mount.py` 与 `test_welcome_card_enter_anim.py`。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **字号/字族切换即时重建左侧导航按钮样式** (`app/widgets/cards/settings/llm_settings_card.py`): 字号/字族切换即时重建左侧导航按钮样式（不等切 tab），并使刻度条大字号标签高度自适应；新增 `test_font_size_stepper` 用例。
+- **CodeWebViewer 水平滚动条抑制** (`app/utils/design_tokens.py` + `app/widgets/message_card.py`): 显式设置 `overflow-x: hidden`，防止 CodeWebViewer 水平滚动条出现。
+- **默认字号 key 与 superlarge 配置对齐** (`app/utils/design_tokens.py`): 默认字号 key 更新以匹配新 superlarge 配置。
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **window_registry 收敛窗口实例管理** (`app/core/window_registry.py` + `app/main_widget.py` + `app/widgets/tab_manager_window.py` + `app/widgets/pixel_pet.py` + `app/widgets/cards/global_card_controller.py` + `app/widgets/cards/settings/gitee_card.py` + `app/core/builtin_commands.py` + `app/core/team_manager.py`): 新增 `window_registry` 模块统一管理窗口实例，主窗口/团队管理/内置命令/像素宠物迁移至注册表；新增/更新 `test_main_widget_smoke` / `test_team_add_member` / `test_input_button_hot_reload` 测试。
+- **scene/decoration layer 代码结构优化** (`app/widgets/scene_layer.py` + `app/widgets/decoration_layer.py` + `app/widgets/tab_manager_window.py` + `tests/widgets/test_decoration_layer.py`): 提升可读性与可维护性；scene/decoration layer 内部结构清理；新增 decoration_layer 测试覆盖。
+
 ## [v0.5.3] - 2026-08-22
 
 自上一版本以来的变更 | 提交数：175 · 文件变更：303 · +28058/-15698 | 贡献者：dingma, mading, drifox-bot, builder

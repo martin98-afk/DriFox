@@ -373,11 +373,22 @@ class Settings(QConfig):
     llm_font_family = ConfigItem("LLM", "FontFamily", "楷体")
 
     # ========== UI appearance ==========
+    # 界面字号档位：delta 键 "-5".."10"（实际字号 = 14 + delta，步进 1px）
+    class _FontSizeValidator(OptionsValidator):
+        """字号档位校验：旧档位键（small/medium/large/superlarge）读取时自动迁移到 delta 键"""
+
+        _legacy = {"small": "-1", "medium": "0", "large": "2", "superlarge": "4"}
+
+        def correct(self, value):
+            if value in self._legacy:
+                return self._legacy[value]
+            return super().correct(value)
+
     ui_font_size = OptionsConfigItem(
         "UI",
         "FontSize",
-        "large",
-        OptionsValidator(["small", "medium", "large", "superlarge"]),
+        "2",
+        _FontSizeValidator([str(d) for d in range(-5, 11)]),
     )
     ui_theme_style = OptionsConfigItem(
         "UI",

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 TabManagerWindow — Tab 管理器宿主窗口（标准系统窗口）
 
@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from PyQt5 import sip as _sip
 
 from loguru import logger
+from app.core import window_registry
 from PyQt5.QtCore import QEasingCurve, QEvent, Qt, QPoint, QTimer, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
@@ -35,6 +36,13 @@ from app.utils.utils import get_font_family_css, get_unified_font
 # ── 对话区最大宽度（px）：窗口过宽时限制对话区宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。窗口宽度不足该值时对话区自动占满。
 _MAX_CHAT_WIDTH = 1000
+
+# ── 覆盖层「配置类」卡片最大宽度（px）──
+# 比对话区稍宽，同样在超宽窗口下限宽居中，避免系统配置卡片无限拉伸。
+# 仅作用于配置类卡片（系统设置/服务商/Hook/MCP）；差异对比、子智能体
+# 会话等内容型卡片不限宽，铺满对话区。
+_MAX_OVERLAY_WIDTH = _MAX_CHAT_WIDTH + 100
+_CONFIG_REPLACE_CARDS = frozenset({"settings", "provider_edit", "hook_edit", "mcp_edit"})
 
 # ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
 
@@ -308,6 +316,8 @@ class TabManagerWindow(QWidget):
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
+    # 聚合 AI 状态 → 全局桌宠（仅当前激活窗的状态被转发，避免多窗串扰）
+    active_ai_state_changed = pyqtSignal(str)
 
     @classmethod
     def get_instance(cls) -> Optional["TabManagerWindow"]:
@@ -406,6 +416,27 @@ class TabManagerWindow(QWidget):
         # 但保持接口一致性便于将来扩展）
         theme_manager.register_refresh_target(self)
 
+        # ── 全局桌宠（单例浮层，下沉自 MainWidget）──
+        # 多 tab 下唯一常驻：不随窗口销毁，切 tab 平滑跟随激活窗 send_btn。
+        # pet_enabled=False 时 hide 而非 destroy（保留实例，便于实时开关）。
+        from app.widgets.pixel_pet import PixelPetWidget
+
+        self.pixel_pet = PixelPetWidget(self)
+        if Settings.get_instance().pet_enabled.value:
+            self.pixel_pet.show()
+            self.pixel_pet.raise_()
+        else:
+            self.pixel_pet.hide()
+        Settings.get_instance().pet_enabled.valueChanged.connect(self._on_pet_enabled_changed)
+        # 主题 / 字号刷新（取代 main 的 pet 级连接）：仅在此处完成一次。
+        # 注意：_pixel_pet 自身的 __init__ 已调用 _connect_config_signals()，
+        # 此处【不可】重复调用，否则 pet_size 信号会被连两次。
+        theme_manager.register_refresh_target(self.pixel_pet)
+        # AI 状态：pet 只连一次聚合信号（切 tab 由聚合信号改发当前窗状态）
+        self.active_ai_state_changed.connect(self.pixel_pet._on_ai_state_changed)
+        # 初始定位到右下角（首个窗口加入 + 激活后会精确对齐 send_btn）
+        self.pixel_pet.resize_handle(self.width(), self.height())
+
         # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
         QTimer.singleShot(0, self._apply_bg_from_theme)
 
@@ -469,8 +500,28 @@ class TabManagerWindow(QWidget):
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
+    def _on_pet_enabled_changed(self, enabled: bool) -> None:
+        """桌宠显示开关实时响应（全局桌宠由 TabManager 统一管理）"""
+        pet = getattr(self, "pixel_pet", None)
+        if pet is None:
+            return
+        if enabled:
+            pet.show()
+            pet.raise_()
+            # 重新对齐当前激活窗 send_btn
+            pet.reposition_to_active_window()
+        else:
+            # hide 而非 destroy：保留实例，便于再次开启无需重建
+            pet.hide()
+
     def refresh_theme(self):
-        """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
+        """ThemeManager 统一刷新入口（dispatch_refresh 调用）
+
+        全局桌宠配色随主题刷新交由 theme_manager 统一派发：
+        pet 已通过 register_refresh_target 注册，dispatch_refresh 会直接
+        调用 pet.refresh_theme() → refresh_pet() 重载 spritesheet，无需此处
+        再显式调用（避免重复刷新）。
+        """
         self._on_theme_changed()
 
     def _apply_theme_stylesheet(self):
@@ -556,64 +607,147 @@ class TabManagerWindow(QWidget):
             """)
 
     def _apply_bg_from_theme(self):
-        """从当前主题配置加载背景图片，作为 TabManagerWindow 全局背景
+        """主题切换入口：刷新 4 个区域背景（window/sidebar/chat_area/scene）
 
-        背景为纯装饰：单例窗口全局一张，不随对话框各自加载。
-        优化：缓存背景配置，同一背景（路径+透明度）不重复创建 QLabel。
+        新 schema（yaml 的 `backgrounds:` 块）由 get_theme_backgrounds() 暴露；
+        旧字段 `background.chat_list` 通过 PR1 自动映射到 `backgrounds.sidebar`，
+        保持现有 17 套内置主题工作不变。
+
+        scene 撑满整个右侧 _chat_frame 圆角矩形（含 tab bar / 对话区 / 输入框 /
+        LEFT/RIGHT/BOTTOM 停靠区 / UI 插件槽位等），是 aurora 等主题的图片层；
+        chat_area 是 _chat_frame 纯色底（向下兼容旧主题）。
         """
         try:
-            bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
-            chat_list = bg_config.get("chat_list", {})
-            if chat_list.get("enabled", True):
-                image = chat_list.get("image", ":/icons/fox_bg.png")
-                opacity = chat_list.get("opacity", 0.1)
-            else:
-                image = None
-                opacity = 0.1
+            bgs = theme_manager.get_theme_backgrounds(theme_manager.get_current_theme_id())
+            self._apply_area_bg("window", self, bgs["window"])
+            self._apply_area_bg("sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"])
+            self._apply_area_bg("chat_area", getattr(self, "_chat_frame", None), bgs["chat_area"])
+            self._apply_scene_layer(bgs["scene"])
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
 
-            # ── 缓存检查：同一背景配置跳过重建 ──
-            from app.utils.theme_refresh import ThemeRefreshCoordinator
+    def _apply_scene_layer(self, scene_cfg):
+        """应用 scene 配置到 _scene_layer（撑满整个右侧 _chat_frame 圆角矩形）
 
-            bg_key = ThemeRefreshCoordinator.get_bg_cache_key(image, opacity)
-            if (
-                getattr(self, "_last_bg_key", None) == bg_key
-                and hasattr(self, "_bg_label")
-                and self._bg_label is not None
-            ):
-                return
-            self._last_bg_key = bg_key
+        Args:
+            scene_cfg: get_theme_backgrounds()["scene"] 返回的 dict 或 None
+        """
+        if not hasattr(self, "_scene_layer") or self._scene_layer is None:
+            return
 
-            if image:
-                # 先清除旧背景
-                if hasattr(self, "_bg_label") and self._bg_label is not None:
-                    self._bg_label.deleteLater()
-                    self._bg_label = None
-                # 解析图片路径：主题文件夹内的相对路径基于主题目录
-                import os as _os
+        # image 解析：复用 _resolve_theme_image（已在文件内）
+        try:
+            self._scene_layer.apply_config(scene_cfg, self._resolve_theme_image)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用 scene 背景失败: {e}")
 
-                if not image.startswith(":") and not _os.path.isabs(image):
-                    theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
-                    if theme_dir:
-                        abs_path = str(theme_dir / image)
-                        if _os.path.exists(abs_path):
-                            image = abs_path
-                self._bg_label = QLabel(self)
-                self._bg_label.setPixmap(QPixmap(image))
-                self._bg_label.setScaledContents(True)
-                self._bg_opacity = QGraphicsOpacityEffect(self._bg_label)
-                self._bg_opacity.setOpacity(opacity)
-                self._bg_label.setGraphicsEffect(self._bg_opacity)
-                self._bg_label.lower()
-                self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-                self._bg_label.resize(self.size())
-                self._bg_label.show()
-            else:
-                # 主题禁用背景图，清除旧背景
-                if hasattr(self, "_bg_label") and self._bg_label is not None:
-                    self._bg_label.deleteLater()
-                    self._bg_label = None
-        except Exception:
-            pass
+    def _apply_area_bg(self, area, parent_widget, bg_cfg):
+        """统一区域背景加载器（window/sidebar/chat_area 共用）
+
+        Args:
+            area: "window"/"sidebar"/"chat_area"（用作属性名前缀）
+            parent_widget: 背景挂载的目标 widget（None 时跳过）
+            bg_cfg: get_theme_backgrounds() 返回的单个区域配置（None 或 dict）
+        """
+        if parent_widget is None:
+            return
+
+        label_attr = f"_{area}_bg_label"
+        opacity_attr = f"_{area}_bg_opacity"
+        key_attr = f"_last_{area}_bg_key"
+
+        bg_cfg = bg_cfg or {}
+        image = bg_cfg.get("image")
+        opacity = bg_cfg.get("opacity", 1.0)
+        color = bg_cfg.get("color")
+
+        # 缓存键：image + opacity + color 共同决定唯一性
+        bg_key = f"{(image or '__none__')}:{opacity:.3f}:{(color or '__none__')}"
+        if getattr(self, key_attr, None) == bg_key and getattr(self, label_attr, None) is not None:
+            return
+        setattr(self, key_attr, bg_key)
+
+        # 清除旧 label
+        old = getattr(self, label_attr, None)
+        if old is not None:
+            try:
+                old.deleteLater()
+            except Exception:
+                pass
+            setattr(self, label_attr, None)
+
+        if not bg_cfg.get("enabled", True):
+            return
+
+        label = _AutoGeometryLabel(parent_widget)
+        label.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        # 1. 图片
+        if image:
+            resolved = self._resolve_theme_image(image)
+            pix = QPixmap(resolved)
+            if not pix.isNull():
+                label.setPixmap(pix)
+                label.setScaledContents(True)
+
+        # 2. 透明度
+        if opacity < 1.0:
+            effect = QGraphicsOpacityEffect(label)
+            effect.setOpacity(opacity)
+            label.setGraphicsEffect(effect)
+            setattr(self, opacity_attr, effect)
+
+        # 3. 颜色（背景底色，独立于图片）
+        if color:
+            label.setStyleSheet(f"background-color: {color};")
+
+        # Z 序：放到 parent 最底层
+        label.lower()
+        # 尺寸：撑满 parent
+        label.setGeometry(parent_widget.rect())
+        label.show()
+
+        setattr(self, label_attr, label)
+
+        # 兼容别名：window 区域的 label 同时赋值给 _bg_label（保留旧契约，
+        # 不破坏 tests/widgets/test_tab_manager_resize_throttle.py 的 mock）
+        if area == "window":
+            self._bg_label = label
+            self._bg_opacity = getattr(self, opacity_attr, None)
+
+    @staticmethod
+    def _resolve_theme_image(image: str) -> str:
+        """解析图片路径：主题文件夹内相对路径基于主题目录；:/icons/... 走 qrc
+
+        Args:
+            image: 用户在 yaml 中写的图片路径
+
+        Returns:
+            解析后的绝对路径或 qrc 路径
+        """
+        import os as _os
+
+        if not image or image.startswith(":") or _os.path.isabs(image):
+            return image
+        theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
+        if theme_dir:
+            abs_path = str(theme_dir / image)
+            if _os.path.exists(abs_path):
+                return abs_path
+        return image  # fallback 原值
+
+    def _resize_bg_labels(self):
+        """同步 3 个区域背景 label 的尺寸跟随 parent（resize 阶段一/阶段二都用）"""
+        for attr in ("_bg_label", "_sidebar_bg_label", "_chat_area_bg_label"):
+            lbl = getattr(self, attr, None)
+            if lbl is None:
+                continue
+            try:
+                parent = lbl.parent()
+                if parent is not None:
+                    lbl.resize(parent.size())
+            except Exception:
+                pass
 
     def _setup_ui(self):
         # ── 外层纵向布局：直接放内容区（标准系统窗口自带标题栏） ──
@@ -669,6 +803,22 @@ class TabManagerWindow(QWidget):
         chat_frame_layout = QVBoxLayout(self._chat_frame)
         chat_frame_layout.setContentsMargins(6, 6, 6, 6)
         chat_frame_layout.setSpacing(0)
+
+        # ── PR3：场景背景层（scene_layer）撑满整个右侧圆角矩形 ──
+        # scene_layer 作为 _chat_frame 子 widget，绝对定位铺满 _chat_frame.rect()，
+        # 覆盖整个右侧区域（含 replace_tab_bar / 对话区 / LEFT/RIGHT/BOTTOM
+        # 停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）。
+        # 这是 aurora 等主题的 scene 图片/纯色底的真实挂载点。
+        # 注意：scene_layer 在 _chat_frame 内部的其它 layout 之前创建，
+        # 后续 .lower() 确保它在所有 UI 控件之下。
+        from app.widgets.scene_layer import SceneLayer
+
+        self._scene_layer = SceneLayer(self._chat_frame)
+        self._scene_layer.lower()
+        try:
+            self._chat_frame.installEventFilter(self._scene_layer)
+        except Exception:
+            pass
 
         # ── 全局卡片宿主容器（Tab 级系统卡片） ──
         # 系统配置 / 服务商编辑 / Hook 编辑 / MCP 编辑等全局卡片不再绑定
@@ -1215,6 +1365,10 @@ class TabManagerWindow(QWidget):
                 # 120ms 去抖：紧接的 shown(其他) 会保留本卡片；无则视为关闭
                 self._schedule_replace_close(card_id)
         self._update_replace_tab_visibility()
+        # 覆盖层互斥切换（如 settings ↔ diff_viewer）stack 页不变、wrapper 不 resize，
+        # 限宽策略随可见卡片类型变化，主动刷新一次 pad
+        if self._content_stack.currentIndex() == 1:
+            QTimer.singleShot(0, self._sync_chat_wrapper_width)
 
     def _schedule_replace_close(self, card_id: str) -> None:
         """启动/重置某卡片的关闭去抖计时器（区分切换与关闭）"""
@@ -1309,8 +1463,64 @@ class TabManagerWindow(QWidget):
         self._replace_tab_bar.setVisible(len(open_dict) >= 1)
 
     def _on_active_tab_changed(self, index: int) -> None:
-        """切换对话标签页 → 重建顶部 replace tab 栏为当前对话的打开列表/高亮"""
+        """切换对话标签页 → 同步覆盖层卡片显隐 + 重建顶部 replace tab 栏"""
+        self._sync_overlay_cards_to_active_window()
         self._refresh_replace_tab_bar()
+
+    def _sync_overlay_cards_to_active_window(self) -> None:
+        """覆盖层全局卡按目标对话标签页恢复显隐
+
+        全局 replace 卡片是单例（对话间共享显示权），切换标签页时按目标对话的
+        open/active 状态恢复：active 卡显示、其余可见卡隐藏；目标对话停留在
+        「对话」视图或无打开卡片时隐藏全部。隐藏走 _suppress_replace_close
+        保护，open 集合保留（tab 栏仍可点回）。
+        """
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID, CardManager
+        from app.widgets.replace_tab_bar import CONVERSATION_ID, KNOWN_GLOBAL_REPLACE_CARDS
+
+        cm = CardManager.get_instance()
+        if cm is None:
+            return
+        wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
+        cur_wid = self._current_window_id()
+        open_ids = self._replace_open.get(cur_wid, {})
+        active = self._replace_active.get(cur_wid)
+        if active == CONVERSATION_ID:
+            active = None
+        if active is not None and active not in open_ids:
+            active = None
+
+        # 收集所有候选 replace 卡（内置全局卡 + full 浮动卡）
+        candidates = set(KNOWN_GLOBAL_REPLACE_CARDS)
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            for cid, info in UIPluginRegistry.get_instance().get_floating_cards().items():
+                if info.container == "full":
+                    candidates.add(cid)
+        except Exception:
+            pass
+
+        self._suppress_replace_close = True
+        try:
+            for cid in candidates:
+                try:
+                    if not cm.is_card_visible(cid, wid):
+                        continue
+                except Exception:
+                    continue
+                if cid != active:
+                    try:
+                        cm.hide_card(cid, wid)
+                    except Exception:
+                        pass
+            if active is not None:
+                try:
+                    cm.show_card(active, wid)
+                except Exception:
+                    pass
+        finally:
+            self._suppress_replace_close = False
 
     def _update_replace_tab_visibility(self) -> None:
         """按当前对话标签页的 open 集合决定是否显示顶部 replace tab 栏"""
@@ -1564,7 +1774,7 @@ class TabManagerWindow(QWidget):
             window._tab_title_changed_slot = _on_win_title_changed
             window.windowTitleChanged.connect(_on_win_title_changed)
 
-            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
+            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示 + 全局桌宠）
             def _on_ai_state_changed(state, _win=window):
                 if _sip.isdeleted(_win):
                     return
@@ -1583,9 +1793,19 @@ class TabManagerWindow(QWidget):
                 else:  # idle
                     self._tab_panel.update_tab_streaming(cur_idx, False, False)
                     self._tab_panel.update_tab_question(cur_idx, False)
+                # 聚合 AI 状态 → 全局桌宠：仅当前激活窗的状态被转发，
+                # 避免多 tab 下旧窗状态串扰（pet 只连一次 active_ai_state_changed）。
+                if _win is self.get_current_window():
+                    self.active_ai_state_changed.emit(state)
 
             window._tab_ai_state_slot = _on_ai_state_changed
             window.ai_state_changed.connect(_on_ai_state_changed)
+
+            # ★ destroyed 兜底：窗体被 Qt 直接销毁（绕过 _close_window_at，
+            # 如 cleanup() 的 w.close() 路径）时由 _on_window_destroyed 断开
+            # 上述闭包连接，打破 __defaults__ 对 window 的引用环，防止整树泄漏。
+            # _close_window_at 已覆盖常规关闭路径（close 前显式断开）。
+            window.destroyed.connect(self._on_window_destroyed)
 
             # 立即触发一次初始图标更新 + 团队胶囊状态同步
             logger.info(f"[TabMode] 初始图标: project={project!r}, tab_idx={tab_idx}")
@@ -1726,6 +1946,42 @@ class TabManagerWindow(QWidget):
             return
         self._close_window_at(idx)
 
+    def _disconnect_window_signals(self, window):
+        """断开 add_window 时为窗口挂接的信号闭包。
+
+        add_window 连接了两路窗口级信号：
+        - windowTitleChanged → _tab_title_changed_slot（_on_win_title_changed）
+        - ai_state_changed   → _tab_ai_state_slot（_on_ai_state_changed）
+        闭包 __defaults__（_win=window）持有窗口引用，PyQt 对 C++ 对象销毁后
+        自动断开的 Python slot 释放滞后，窗口 Python wrapper 残留导致整树泄漏
+        （T5 诊断第⑦条引用链：信号表自环）。须在窗口 C++ 对象存活时 disconnect，
+        并置 None 打破引用环。destroyed 后 Qt 会自动断开，此处额外置 None 兜底。
+        """
+        for _slot_attr, _signal in (
+            ("_tab_title_changed_slot", "windowTitleChanged"),
+            ("_tab_ai_state_slot", "ai_state_changed"),
+        ):
+            _slot = getattr(window, _slot_attr, None)
+            if _slot is not None:
+                try:
+                    getattr(window, _signal).disconnect(_slot)
+                except Exception:
+                    pass
+                try:
+                    setattr(window, _slot_attr, None)
+                except Exception:
+                    pass
+
+    def _on_window_destroyed(self, window=None):
+        """destroyed 兜底：窗体被 Qt 直接销毁（绕过 _close_window_at，如
+        cleanup() 的 w.close() 路径）时断开上述闭包连接，防止整树泄漏。
+        window 为 destroyed 信号传入的发送者（C++ 对象正在销毁，disconnect
+        可能已无意义，置 None 仍可打破引用环）。
+        """
+        if window is None:
+            return
+        self._disconnect_window_signals(window)
+
     def _close_window_at(self, idx: int):
         """按索引统一关闭窗口：从 _windows 弹出 + removeWidget + remove_tab + close
 
@@ -1758,24 +2014,10 @@ class TabManagerWindow(QWidget):
             self._tab_panel.remove_tab(idx)
         except Exception:
             pass
-        # ★ 泄漏修复（P0）：显式断开 add_window 连接的信号闭包。
-        # 闭包 __defaults__（_win=window）持有窗口引用，PyQt 对 C++ 对象销毁后
-        # 自动断开的 Python slot 释放滞后，窗口 Python wrapper 残留导致整树泄漏。
+        # ★ 泄漏修复（P0）：断开 add_window 连接的信号闭包（逻辑见
+        # _disconnect_window_signals；destroyed 兜底见 _on_window_destroyed）。
         # 须在 close() 之前断开（此时 C++ 对象仍存活，disconnect 安全）。
-        for _slot_attr, _signal in (
-            ("_tab_title_changed_slot", "windowTitleChanged"),
-            ("_tab_ai_state_slot", "ai_state_changed"),
-        ):
-            _slot = getattr(window, _slot_attr, None)
-            if _slot is not None:
-                try:
-                    getattr(window, _signal).disconnect(_slot)
-                except Exception:
-                    pass
-                try:
-                    setattr(window, _slot_attr, None)
-                except Exception:
-                    pass
+        self._disconnect_window_signals(window)
         # 调用窗口的关闭逻辑（自动保存会话）
         try:
             window.close()
@@ -1896,6 +2138,14 @@ class TabManagerWindow(QWidget):
                     scope = getattr(win, "_theme_needs_refresh_scope", None) or None
                     win._theme_needs_refresh_scope = None
                     win._apply_runtime_ui_settings(scope=scope, _skip_global=True)
+                except Exception:
+                    pass
+            # 切换 tab 时同步全局桌宠：① 平滑重定位到激活窗 send_btn；
+            # ② 改发当前窗 AI 状态（旧窗状态不串扰，全局 pet 跟随激活窗）。
+            if getattr(self, "pixel_pet", None) is not None:
+                self.pixel_pet.reposition_to_active_window()
+                try:
+                    self.pixel_pet._on_ai_state_changed(getattr(win, "_ai_state", "idle"))
                 except Exception:
                     pass
 
@@ -2035,7 +2285,7 @@ class TabManagerWindow(QWidget):
         try:
             from app.main_widget import OpenAIChatToolWindow
 
-            for inst in list(OpenAIChatToolWindow._instances):
+            for inst in list(window_registry.window_instances):
                 if not getattr(inst, "_is_destroyed", False) and callable(
                     getattr(inst, "_sync_active_windows_to_team_manager", None)
                 ):
@@ -2224,14 +2474,14 @@ class TabManagerWindow(QWidget):
         """
 
     def _restore_geometry(self):
-        """固定默认窗口几何：960x640，屏幕居中，确保不超出屏幕"""
+        """固定默认窗口几何：960x720，屏幕居中，确保不超出屏幕"""
         screen = QApplication.primaryScreen()
         screen_rect = screen.availableGeometry() if screen else None
         if not screen_rect:
-            self.resize(960, 640)
+            self.resize(960, 740)
             return
 
-        w, h = 960, 640
+        w, h = 960, 740
         self._suppress_drag_detection = True
         self.setGeometry(
             screen_rect.x() + (screen_rect.width() - w) // 2,
@@ -2419,19 +2669,19 @@ class TabManagerWindow(QWidget):
         return False
 
     def _sync_chat_wrapper_width(self):
-        """按当前 wrapper 宽度设置左右 margins，实现对话区限宽居中
+        """按当前 wrapper 宽度设置左右 margins，实现限宽居中
 
-        覆盖层激活（_content_stack 切到 index 1，container=full 卡片可见）时
-        取消限宽居中：full 卡片应该铺满 wrapper 全宽（line 745-749 设计意图），
-        而非与对话区共享 _MAX_CHAT_WIDTH 上限。
+        - 对话区（index 0）：按 _MAX_CHAT_WIDTH 限宽居中
+        - 覆盖层（index 1）：配置类卡片（系统设置/服务商/Hook/MCP）按
+          _MAX_OVERLAY_WIDTH 限宽居中；内容型卡片（diff_viewer、
+          子智能体会话、full 浮动卡）铺满全宽
         """
         wrapper = self._chat_wrapper
         w = wrapper.width()
         if w <= 0:
             return
-        # 覆盖层激活 → 取消限宽，让 full 卡片可铺满 wrapper 全宽
         if self._content_stack.currentIndex() == 1:
-            pad = 0
+            pad = max(0, (w - _MAX_OVERLAY_WIDTH) // 2) if self._overlay_should_limit_width() else 0
         else:
             pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
         layout = self._chat_wrapper_layout
@@ -2441,6 +2691,20 @@ class TabManagerWindow(QWidget):
             # 确保 chat_frame 几何同步到最新 margins（否则停留在旧宽度）
             layout.invalidate()
             layout.activate()
+
+    def _overlay_should_limit_width(self) -> bool:
+        """覆盖层当前可见卡片是否为配置类（需限宽居中）
+
+        系统设置/服务商编辑/Hook/MCP 等配置卡限宽；其余（diff_viewer、
+        sub_agent_session、full 浮动卡）铺满。覆盖层卡片互斥，取可见者判断。
+        """
+        container = getattr(self, "_global_top_container", None)
+        if container is None:
+            return False
+        for cid, card in getattr(container, "_cards", {}).items():
+            if cid in _CONFIG_REPLACE_CARDS and not card.isHidden():
+                return True
+        return False
 
     def _on_resize_finished(self):
         """resize 结束后恢复布局 + 绘制 + 强制收拢
@@ -2521,6 +2785,9 @@ class TabManagerWindow(QWidget):
             self._tab_panel.update()
         if hasattr(self, "_content_area"):
             self._content_area.update()
+        # 全局桌宠跟随窗体缩放：resize 结束后精确重定位到激活窗 send_btn
+        if getattr(self, "pixel_pet", None) is not None:
+            self.pixel_pet.reposition_to_active_window()
         # 窗口 resize 结束：若左面板因挤压已自动折叠且空间已恢复，自动展开
         self._maybe_auto_expand_after_squeeze()
 
@@ -2560,15 +2827,13 @@ class TabManagerWindow(QWidget):
             self._resize_timer.start()  # 重置防抖
             self._save_geometry()
             # 背景图尺寸跟随（轻量操作，不触发布局）
-            if hasattr(self, "_bg_label") and self._bg_label is not None:
-                self._bg_label.resize(self.size())
+            self._resize_bg_labels()
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
         super().resizeEvent(event)
         # 背景图尺寸跟随（轻量操作，不触发布局）
-        if hasattr(self, "_bg_label") and self._bg_label is not None:
-            self._bg_label.resize(self.size())
+        self._resize_bg_labels()
         # 通知 TabPanel 进入 resize 节流模式
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)
@@ -2598,6 +2863,12 @@ class TabManagerWindow(QWidget):
     def cleanup(self):
         """清理所有窗口和资源"""
         TabManagerWindow._instance = None
+        # ★ 清理全局桌宠（停止所有定时器），先于窗口关闭避免悬空引用
+        if getattr(self, "pixel_pet", None) is not None:
+            try:
+                self.pixel_pet.cleanup()
+            except Exception:
+                pass
         for w in list(self._windows):
             try:
                 w.close()
@@ -2606,3 +2877,24 @@ class TabManagerWindow(QWidget):
         self._windows.clear()
         self._window_to_index.clear()
         self.close()
+
+
+class _AutoGeometryLabel(QLabel):
+    """背景 label：监听 parent 的 resize，自动同步 geometry
+
+    用于 QSplitter 拖动 / parent 自身 resize 等场景。
+    注：TabManagerWindow 整体 resize 走 _resize_bg_labels() 手动调用，
+    此处只补齐 splitter 拖动（不触发顶层 resize）的同步路径。
+    """
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        try:
+            parent.installEventFilter(self)
+        except Exception:
+            pass
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Resize and watched is self.parent():
+            self.setGeometry(self.parent().rect())
+        return super().eventFilter(watched, event)

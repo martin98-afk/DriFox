@@ -259,10 +259,12 @@ def test_select_without_options_rejects_schema():
 def test_rich_types_render(qapp, rich_schema):
     """select/number/textarea 渲染为对应控件"""
     from PyQt5.QtWidgets import QTextEdit
-    from qfluentwidgets import ComboBox, SpinBox
+    from qfluentwidgets import SpinBox
+
+    from app.widgets.cards.settings.plugin_config_card import SelectPillsRow
 
     card = PluginConfigCard("plug-rich")
-    assert isinstance(card._rows["mode"], ComboBox)
+    assert isinstance(card._rows["mode"], SelectPillsRow)
     assert isinstance(card._rows["retry"], SpinBox)
     assert isinstance(card._rows["note"], QTextEdit)
     # textarea 行高按 rows 声明（4 行）
@@ -278,9 +280,9 @@ def test_rich_types_echo_defaults(qapp, rich_schema):
 
 
 def test_select_persists_on_change(qapp, rich_schema):
-    """select 切换 → currentIndexChanged 即时保存存储 value（非 label）"""
+    """select 切换 → valueChanged 即时保存存储 value（非 label）"""
     card = PluginConfigCard("plug-rich")
-    card._rows["mode"].setCurrentIndex(1)
+    card._rows["mode"]._on_pill_clicked("b")  # 模拟点击 pill（变化才发射信号）
     assert PluginConfigStore().get("plug-rich", "mode") == "b"
 
 

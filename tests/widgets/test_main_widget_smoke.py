@@ -16,6 +16,7 @@ from textwrap import dedent
 from unittest.mock import MagicMock, patch
 
 import pytest
+from app.core import window_registry
 
 # ─── helpers ───────────────────────────────────────────────────
 
@@ -476,11 +477,10 @@ class TestConstants:
         assert hasattr(OpenAIChatToolWindow, "icon")
 
     def test_class_has_instances_list(self):
-        """_instances 是类变量列表"""
+        """窗口实例登记表已外提到 window_registry.window_instances（类级列表）"""
         from app.main_widget import OpenAIChatToolWindow
 
-        assert hasattr(OpenAIChatToolWindow, "_instances")
-        assert isinstance(OpenAIChatToolWindow._instances, list)
+        assert isinstance(window_registry.window_instances, list)
 
     def test_class_has_session_manager_class_attr(self):
         """session_manager 类属性存在（延迟初始化）"""
@@ -726,18 +726,17 @@ class TestMockedInit:
             pass
 
     def test_instances_list_is_a_class_variable(self):
-        """_instances 是类变量列表"""
+        """窗口实例登记表已外提到 window_registry.window_instances（模块级列表）"""
         from app.main_widget import OpenAIChatToolWindow
 
-        assert hasattr(OpenAIChatToolWindow, "_instances")
-        assert isinstance(OpenAIChatToolWindow._instances, list)
+        assert isinstance(window_registry.window_instances, list)
 
     def test_mock_instance_has_expected_attrs(self):
         """mock 构造的实例应具备 __init__ 中设置的关键属性"""
         from app.main_widget import OpenAIChatToolWindow
 
         fake_homepage = MagicMock()
-        with patch.object(OpenAIChatToolWindow, "_instances", []):
+        with patch.object(window_registry, "window_instances", []):
             try:
                 inst = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
                 inst.__init__(fake_homepage)

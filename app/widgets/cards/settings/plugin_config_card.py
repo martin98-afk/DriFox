@@ -21,10 +21,9 @@ from typing import Dict
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QHBoxLayout, QWidget
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
 from qfluentwidgets import (
     BodyLabel,
-    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     LineEdit,
@@ -52,6 +51,95 @@ class _PlainEdit(TextEdit):
     def focusOutEvent(self, e):
         super().focusOutEvent(e)
         self.editingFinished.emit()
+
+
+class _OptionPill(QLabel):
+    """单个可点击选项胶囊：点击即选中（选中态 accent 高亮）"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self._selected = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAlignment(Qt.AlignCenter)
+        self.refresh_style()
+
+    def set_selected(self, selected: bool) -> None:
+        if self._selected != selected:
+            self._selected = selected
+            self.refresh_style()
+
+    def refresh_style(self) -> None:
+        from app.utils.design_tokens import Colors
+        from app.utils.utils import get_font_family_css
+
+        if self._selected:
+            self.setStyleSheet(
+                f"QLabel {{ color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
+                f" border: 1px solid {Colors.TEXT_ACCENT}; border-radius: 11px;"
+                f" padding: 3px 14px; {get_font_family_css()} }}"
+            )
+        else:
+            self.setStyleSheet(
+                f"QLabel {{ color: {Colors.TEXT_SECONDARY}; background: transparent;"
+                f" border: 1px solid {Colors.BORDER}; border-radius: 11px;"
+                f" padding: 3px 14px; {get_font_family_css()} }}"
+                f"QLabel:hover {{ color: {Colors.TEXT_PRIMARY}; border-color: {Colors.TEXT_ACCENT}; }}"
+            )
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
+
+class SelectPillsRow(QWidget):
+    """select 字段的分段选项行：一排可点击胶囊，点击即选（替代下拉框）
+
+    API 与旧 ComboBox 用法对齐：currentData()/setCurrentData() 读写当前值，
+    valueChanged 信号在用户点击切换时发射。
+    """
+
+    valueChanged = pyqtSignal(object)
+
+    def __init__(self, options, parent=None):
+        """options: List[(value, label)]，保持 schema 声明顺序"""
+        super().__init__(parent)
+        self._options = list(options or [])
+        self._values = [v for v, _ in self._options]
+        self._current = None
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        self._pills = {}
+        for value, label in self._options:
+            pill = _OptionPill(label, self)
+            pill.clicked.connect(lambda v=value: self._on_pill_clicked(v))
+            layout.addWidget(pill)
+            self._pills[value] = pill
+        layout.addStretch(1)
+        # 初始无选中态由 _echo/_apply_value 统一回显
+
+    def _on_pill_clicked(self, value) -> None:
+        if value != self._current:
+            self.setCurrentData(value)
+            self.valueChanged.emit(value)
+
+    def currentData(self):
+        return self._current
+
+    def setCurrentData(self, value) -> None:
+        if value not in self._values and self._values:
+            value = self._values[0]
+        self._current = value
+        for v, pill in self._pills.items():
+            pill.set_selected(v == value)
+
+    def refresh_style(self) -> None:
+        for pill in self._pills.values():
+            pill.refresh_style()
 
 
 class _FieldRow(QWidget):
@@ -113,13 +201,11 @@ class PluginConfigCard(ExpandSettingCard):
                 switch.setOffText(f.label)
                 switch.checkedChanged.connect(lambda _checked, _k=f.key: self._on_field_changed(_k))
             elif f.type == "select":
-                combo = ComboBox(self.view)
-                for _value, _label in f.options:
-                    # qfluentwidgets ComboBox 自绘：addItem(text, icon=None, userData=value)
-                    combo.addItem(_label, None, _value)
-                combo.currentIndexChanged.connect(lambda *_a, _k=f.key: self._on_field_changed(_k))
-                row = _FieldRow(f.label, combo, self.view)
-                self._rows[f.key] = combo
+                # 展开式分段选项：一排可点击胶囊替代下拉框（点击即选中保存）
+                pills = SelectPillsRow(f.options, self.view)
+                pills.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
+                row = _FieldRow(f.label, pills, self.view)
+                self._rows[f.key] = pills
                 self.viewLayout.addWidget(row)
             elif f.type == "number":
                 spin = SpinBox(self.view)
@@ -193,13 +279,12 @@ class PluginConfigCard(ExpandSettingCard):
         if f.type == "bool":
             control.setChecked(bool(val))
         elif f.type == "select":
-            idx = control.findData(val)
-            control.setCurrentIndex(idx if idx >= 0 else 0)
+            control.setCurrentData(val)
             self._echoed[f.key] = control.currentData()
         elif f.type == "number":
             try:
                 control.setValue(int(val))
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 control.setValue(f.min if f.min is not None else 0)
             self._echoed[f.key] = str(control.value())
         elif f.type == "textarea":

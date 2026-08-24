@@ -423,3 +423,33 @@ def test_replace_open_isolated_per_conversation(qtbot, monkeypatch):
     current["win"] = win_a
     tm._on_active_tab_changed(0)
     assert list(tm._replace_tab_bar._buttons) == ["settings"]
+
+
+def test_overlay_limit_width_config_only(qtbot):
+    """覆盖层限宽只针对配置类卡片：settings → True，diff_viewer/sub_agent_session → False"""
+    from PyQt5.QtWidgets import QWidget
+
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    container = tm._global_top_container
+    container.show()  # 覆盖层激活态（子 isHidden 才反映自身显隐）
+
+    cfg_card, diff_card, sub_card = QWidget(), QWidget(), QWidget()
+    container._cards["settings"] = cfg_card
+    container._cards["diff_viewer"] = diff_card
+    container._cards["sub_agent_session"] = sub_card
+    for c in (cfg_card, diff_card, sub_card):
+        c.hide()
+
+    # 无可见卡 → 不限宽
+    assert tm._overlay_should_limit_width() is False
+    # 内容型可见（diff / 子智能体会话）→ 不限宽铺满
+    diff_card.setVisible(True)
+    assert tm._overlay_should_limit_width() is False
+    diff_card.hide()
+    sub_card.setVisible(True)
+    assert tm._overlay_should_limit_width() is False
+    # 配置类可见（settings）→ 限宽居中
+    sub_card.hide()
+    cfg_card.setVisible(True)
+    assert tm._overlay_should_limit_width() is True
