@@ -53,7 +53,7 @@ class ReplaceTabButton(QWidget):
         self._is_conversation = is_conversation
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 4, 8, 4)
+        layout.setContentsMargins(12, 2, 8, 2)
         layout.setSpacing(8)
 
         self._label = QLabel(title, self)
@@ -84,8 +84,8 @@ class ReplaceTabButton(QWidget):
 
     def refresh_style(self) -> None:
         if self._is_conversation:
-            # 「对话」常驻按钮：常亮强调边，提示可返回对话区（无选中态）
-            bg = "transparent"
+            # 「对话」常驻按钮：active 时蓝底高亮，否则透明底蓝边（提示可返回对话区）
+            bg = Colors.CARD_BG.format(alpha=250) if self._active else "transparent"
             border = Colors.BORDER_ACCENT
         else:
             bg = Colors.CARD_BG.format(alpha=250) if self._active else "transparent"
@@ -117,7 +117,7 @@ class ReplaceTabBar(QWidget):
         self._active_id: Optional[str] = None
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(6)
         layout.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum))
         self._btn_container = QWidget(self)
@@ -158,6 +158,8 @@ class ReplaceTabBar(QWidget):
         self._active_id = card_id
         for cid, btn in self._buttons.items():
             btn.set_active(cid == card_id)
+        # 「对话」常驻按钮：active 时高亮（与 replace 按钮一致）
+        self._conv_btn.set_active(card_id == CONVERSATION_ID)
 
     def _add_button(self, card_id: str, title: str) -> None:
         btn = ReplaceTabButton(card_id, title, self._btn_container)

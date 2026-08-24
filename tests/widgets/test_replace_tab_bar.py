@@ -10,8 +10,24 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from app.widgets.replace_tab_bar import ReplaceTabBar
 from app.widgets.tab_manager_window import TabManagerWindow
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tab_manager():
+    TabManagerWindow._instance = None
+    yield
+    inst = TabManagerWindow._instance
+    if inst is not None:
+        for t in list(getattr(inst, "_replace_timers", {}).values()):
+            try:
+                t.stop()
+            except Exception:
+                pass
+        TabManagerWindow._instance = None
 
 
 def test_replace_tab_bar_add_remove(qtbot):
@@ -126,6 +142,7 @@ def test_replace_tab_bar_has_conversation_button(qtbot):
 def test_global_replace_cards_sync(qtbot, monkeypatch):
     from app.widgets.replace_tab_bar import CONVERSATION_ID
 
+    TabManagerWindow._instance = None
     tm = TabManagerWindow.create_instance()
     qtbot.addWidget(tm)
     tm._replace_open.clear()
@@ -155,7 +172,8 @@ def test_global_replace_cards_sync(qtbot, monkeypatch):
 
     # 非 GLOBAL_WINDOW_ID 作用域的卡片事件被忽略
     tm._on_card_visibility_changed({"card_id": "settings", "window_id": "other", "visible": True})
-    assert "settings" not in tm._replace_open
+    _snap = dict(tm._replace_open)
+    assert "settings" not in _snap
 
     # 内置全局卡「系统设置」显示 → 进 open 且 tab 显示（对话按钮常驻）
     visible.add("settings")
@@ -164,13 +182,181 @@ def test_global_replace_cards_sync(qtbot, monkeypatch):
     assert spied[-1] is True
     assert tm._replace_tab_bar._conv_btn._card_id == CONVERSATION_ID
 
-    # 点「对话」→ 隐藏所有 replace 卡片，回到对话区（tab 随之隐藏）
+    # 点「对话」→ 隐藏所有 replace 卡片回到对话区，但保留 open（tab 栏常驻对话项、对话高亮）
     tm._on_replace_tab_clicked(CONVERSATION_ID)
-    assert "settings" not in tm._replace_open
-    assert spied[-1] is False
+    assert "settings" in tm._replace_open
+    assert tm._replace_active == CONVERSATION_ID
+    assert spied[-1] is True
 
     # 子智能体会话显示 → 进 open（标题取内置映射）
     visible.add("sub_agent_session")
     tm._on_card_visibility_changed({"card_id": "sub_agent_session", "visible": True})
     assert tm._replace_open.get("sub_agent_session") == "子智能体会话"
     assert spied[-1] is True
+
+
+def test_replace_tab_disappears_on_card_close(qtbot, monkeypatch):
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    tm._replace_open.clear()
+    tm._replace_active = None
+    tm._replace_timers.clear()
+    spied = []
+    monkeypatch.setattr(tm._replace_tab_bar, "setVisible", lambda v: spied.append(v))
+    reg = MagicMock()
+    reg.get_floating_cards.return_value = {}
+    monkeypatch.setattr(
+        "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance",
+        lambda: reg,
+    )
+    visible = set()
+    cm = MagicMock()
+    cm.is_card_visible.side_effect = lambda cid, wid: cid in visible
+    monkeypatch.setattr(
+        "app.widgets.cards.card_manager.CardManager.get_instance",
+        lambda: cm,
+    )
+
+    # 系统设置显示 → 进 open
+    visible.add("settings")
+    tm._on_card_visibility_changed({"card_id": "settings", "visible": True})
+    assert "settings" in tm._replace_open
+
+    # 关闭系统设置（hidden 事件）→ 移除 tab、tab 栏随之隐藏
+    visible.discard("settings")
+    tm._on_card_visibility_changed({"card_id": "settings", "visible": False})
+    # 直接触发关闭去抖超时（验证移除逻辑，绕过 QTimer 跨测试时序污染）
+    tm._on_replace_close_timeout("settings")
+    assert "settings" not in tm._replace_open
+    assert spied[-1] is False
+
+
+def test_conversation_button_keeps_open(qtbot, monkeypatch):
+    """点「对话」仅切换视图，不销毁 open 集合（tab 栏常驻对话项）"""
+    from app.widgets.replace_tab_bar import CONVERSATION_ID
+
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    tm._replace_open.clear()
+    tm._replace_active = None
+    tm._replace_timers.clear()
+    spied = []
+    monkeypatch.setattr(tm._replace_tab_bar, "setVisible", lambda v: spied.append(v))
+    reg = MagicMock()
+    reg.get_floating_cards.return_value = {}
+    monkeypatch.setattr(
+        "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance",
+        lambda: reg,
+    )
+    visible = set()
+    cm = MagicMock()
+    cm.is_card_visible.side_effect = lambda cid, wid: cid in visible
+    monkeypatch.setattr(
+        "app.widgets.cards.card_manager.CardManager.get_instance",
+        lambda: cm,
+    )
+
+    # 系统设置显示
+    visible.add("settings")
+    tm._on_card_visibility_changed({"card_id": "settings", "visible": True})
+    assert "settings" in tm._replace_open
+    assert spied[-1] is True
+
+    # 点「对话」→ 隐藏 settings 但保留 open，tab 栏仍显示且对话高亮
+    tm._on_replace_tab_clicked(CONVERSATION_ID)
+    assert "settings" in tm._replace_open
+    assert tm._replace_active == CONVERSATION_ID
+    assert spied[-1] is True
+    assert tm._replace_tab_bar._conv_btn._active is True
+
+    # 再点系统设置 → 回到该卡，对话取消高亮
+    tm._on_replace_tab_clicked("settings")
+    assert tm._replace_active == "settings"
+    assert tm._replace_tab_bar._conv_btn._active is False
+
+
+def test_replace_close_via_qtimer(qtbot, monkeypatch):
+    """真实 QTimer 去抖链路：hidden 事件 → 120ms → 移除 tab 且 tab 栏隐藏
+
+    验证运行时设置卡片关闭后 tab 消失（不依赖直接调 timeout 回调绕过时序）。
+    """
+    from app.widgets.replace_tab_bar import CONVERSATION_ID
+
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    tm._replace_open.clear()
+    tm._replace_active = None
+    tm._replace_timers.clear()
+    spied = []
+    monkeypatch.setattr(tm._replace_tab_bar, "setVisible", lambda v: spied.append(v))
+    reg = MagicMock()
+    reg.get_floating_cards.return_value = {}
+    monkeypatch.setattr(
+        "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance",
+        lambda: reg,
+    )
+    visible = {"settings"}
+    cm = MagicMock()
+    cm.is_card_visible.side_effect = lambda cid, wid: cid in visible
+    monkeypatch.setattr(
+        "app.widgets.cards.card_manager.CardManager.get_instance",
+        lambda: cm,
+    )
+
+    # 系统设置显示 → 进 open、tab 显示
+    tm._on_card_visibility_changed({"card_id": "settings", "visible": True})
+    assert "settings" in tm._replace_open
+    assert spied[-1] is True
+
+    # 关闭系统设置（hidden 事件）→ 调度 120ms 去抖（运行时由 CardManager.hide_card 触发）
+    visible.discard("settings")
+    tm._on_card_visibility_changed({"card_id": "settings", "visible": False})
+
+    # 真实 QTimer 去抖超时 → 移除 tab、tab 栏隐藏（关闭到只剩对话窗口）
+    qtbot.wait(250)
+    assert "settings" not in tm._replace_open
+    assert tm._replace_tab_bar.isVisible() is False
+    assert tm._replace_active != CONVERSATION_ID
+
+
+def test_replace_tab_close_clicked_hides_global_card(qtbot, monkeypatch):
+    """点 tab × 关闭内置全局卡（settings）→ 经 CardManager.hide_card 真正隐藏
+
+    回归：之前误用 hide_floating_card_globally（仅对浮动卡有效，对内置全局卡返回
+    False），导致「tab 消失但系统卡片仍显示」。内置全局卡必须走 CardManager。
+    """
+    from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    tm._replace_open.clear()
+    tm._replace_active = None
+    tm._replace_timers.clear()
+    spied = []
+    monkeypatch.setattr(tm._replace_tab_bar, "setVisible", lambda v: spied.append(v))
+    reg = MagicMock()
+    reg.get_floating_cards.return_value = {}
+    monkeypatch.setattr(
+        "app.plugins.registries.ui_plugin_registry.UIPluginRegistry.get_instance",
+        lambda: reg,
+    )
+    visible = {"settings"}
+    cm = MagicMock()
+    cm.is_card_visible.side_effect = lambda cid, wid: cid in visible
+    monkeypatch.setattr(
+        "app.widgets.cards.card_manager.CardManager.get_instance",
+        lambda: cm,
+    )
+
+    # 系统设置显示 → 进 open
+    tm._on_card_visibility_changed({"card_id": "settings", "visible": True})
+    assert "settings" in tm._replace_open
+
+    # 点 tab × 关闭 → 从 open 移除且真正调 CardManager.hide_card(GLOBAL_WINDOW_ID)
+    tm._on_replace_tab_close_clicked("settings")
+    assert "settings" not in tm._replace_open
+    cm.hide_card.assert_called_once_with("settings", GLOBAL_WINDOW_ID)
+    # open 空 → tab 栏隐藏（关闭到只剩对话窗口）
+    assert spied[-1] is False
+    # 确认未误用无效的 hide_floating_card_globally
+    reg.hide_floating_card_globally.assert_not_called()
