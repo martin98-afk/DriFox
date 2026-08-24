@@ -9654,9 +9654,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── 3. 字号专属块（仅 font_size + 全量，不涉及字族变化） ──
         if is_font_size:
             # 所有 SettingCard 图标大小随字号缩放
+            # （含设置弹窗：_settings_popup 由 GlobalCardController 持有，
+            #   不在 self 的 widget 树内，findChildren 扫不到，需单独刷）
             icon_sz = scale_icon_size(16)
             for card in _setting_cards:
                 card.setIconSize(icon_sz, icon_sz)
+            if self._settings_popup:
+                for card in self._settings_popup.findChildren(SettingCard):
+                    card.setIconSize(icon_sz, icon_sz)
 
         # ── 4. 消息卡 viewer 渲染（仅 font_family + 全量，字族变化需重渲） ──
         if is_font_family:

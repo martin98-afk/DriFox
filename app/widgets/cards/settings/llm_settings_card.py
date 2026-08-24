@@ -5,8 +5,8 @@
 """
 
 from loguru import logger
-from PyQt5.QtCore import QPoint, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtCore import QPointF, QRectF, QPoint, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFontComboBox,
     QFrame,
@@ -18,7 +18,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
-    ComboBox,
+    ExpandSettingCard,
     FluentIcon,
     OptionsSettingCard,
     PrimaryPushButton,
@@ -29,6 +29,8 @@ from qfluentwidgets import (
 from app.utils.config import Settings
 from app.utils.design_tokens import (
     FONT_SIZE_OPTIONS,
+    _DEFAULT_FONT_SIZE_KEY,
+    _LEGACY_FONT_SIZE_KEYS,
     ButtonStyles,
     Colors,
     ComboBoxStyles,
@@ -40,7 +42,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
+from app.utils.utils import get_font_family_css, get_icon, get_unified_font, invalidate_font_family_css_cache
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
@@ -56,79 +58,203 @@ class NoWheelFontComboBox(QFontComboBox):
         event.ignore()
 
 
-class NoWheelComboBox(ComboBox):
-    def wheelEvent(self, event):
-        event.ignore()
+def _font_step_text(key: str) -> str:
+    """字号档位显示文本："-5".."0".."+10"（正数带 + 前缀）"""
+    d = int(key)
+    return f"+{d}" if d > 0 else str(d)
 
 
-class RefreshableThemeComboBox(ComboBox):
-    """主题下拉框 - 热重载信号驱动，自动刷新列表"""
+class _FontStepTrack(QWidget):
+    """节点+轨道式字号刻度条
 
-    def __init__(self, parent=None):
+    一条轨道线贯穿 16 个节点（-5..+10），节点下方刻度标签；点击节点直达
+    对应档位。当前档位节点 accent 实心 + 外环，0 为基准刻度（标签加粗 +
+    节点空心大圆）。颜色/字号在 paintEvent 动态读取主题令牌，主题或字号
+    刷新时调用 update() 即可重绘。
+    """
+
+    stepClicked = pyqtSignal(str)
+
+    _NODE_Y = 14  # 节点中心线 y
+    _PAD = 18  # 首末节点距两侧边距
+    _HOVER_R = 4.5  # hover 节点半径
+    _NORMAL_R = 3.0  # 普通节点半径
+    _ZERO_R = 4.0  # 基准(0)节点半径
+    _CUR_INNER_R = 4.0  # 当前节点实心半径
+    _CUR_OUTER_R = 7.0  # 当前节点外环半径
+
+    def __init__(self, steps, parent=None):
         super().__init__(parent)
-        self._themes_changed = False
-        # 注册热重载回调：后端检测到主题文件变更后会触发
-        from app.utils.theme_manager import theme_manager
+        self._steps = list(steps)
+        self._current: str | None = None
+        self._hover_idx = -1
+        self._label_h = 14  # 刻度标签高度（随字号自适应）
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self._recompute_metrics()
 
-        theme_manager.on_reload(self._mark_themes_changed)
+    def _recompute_metrics(self) -> None:
+        """按当前档位字号重算标签行高与最小高度（防大字号标签被裁切）"""
+        from PyQt5.QtGui import QFontMetrics
 
-    def destroy(self, destroyWindow=True, destroySubWindows=True):
-        from app.utils.theme_manager import theme_manager
+        fm = QFontMetrics(get_unified_font(9))
+        self._label_h = max(14, fm.height() + 2)
+        self.setMinimumHeight(self._NODE_Y + self._label_h + 6)
+        self.updateGeometry()
+        self.update()
 
-        theme_manager.remove_reload_callback(self._mark_themes_changed)
-        super().destroy(destroyWindow, destroySubWindows)
+    def set_current(self, key: str | None) -> None:
+        self._current = key
+        self.update()
 
-    def wheelEvent(self, event):
-        event.ignore()
+    # ── 几何映射 ──
 
-    def _mark_themes_changed(self):
-        """热重载回调：标记主题已变更，下次打开时刷新列表"""
-        self._themes_changed = True
+    def _node_x(self, idx: int) -> float:
+        n = len(self._steps)
+        if n <= 1:
+            return self.width() / 2
+        return self._PAD + (self.width() - 2 * self._PAD) * idx / (n - 1)
 
-    def _refresh_items(self):
-        """从当前 theme_manager 重建下拉列表项（不重复 reload）
+    def _index_at(self, x: int) -> int:
+        n = len(self._steps)
+        span = self.width() - 2 * self._PAD
+        if n <= 1 or span <= 0:
+            return 0
+        frac = (x - self._PAD) / span
+        return max(0, min(n - 1, int(round(frac * (n - 1)))))
 
-        按当前深浅模式过滤，只显示符合当前模式的主题。
-        """
-        from app.utils.theme_manager import theme_manager
+    # ── 交互 ──
 
-        # 先找到父 card 以获取配置信息
-        card = self.parent()
-        if not card or not hasattr(card, "config_item"):
-            p = self.parent()
-            while p and not hasattr(p, "config_item"):
-                p = p.parent()
-            card = p
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._steps:
+            self.stepClicked.emit(self._steps[self._index_at(event.x())])
+        super().mousePressEvent(event)
 
-        # 获取所有主题，并按当前深浅模式过滤
-        themes = theme_manager.list_themes()
-        if card and hasattr(card, "cfg") and hasattr(card.cfg, "ui_light_mode"):
-            is_light = card.cfg.ui_light_mode.value
-            themes = {tid: name for tid, name in themes.items() if theme_manager.is_light_theme(tid) == is_light}
+    def mouseMoveEvent(self, event) -> None:
+        idx = self._index_at(event.x())
+        if idx != self._hover_idx:
+            self._hover_idx = idx
+            self.update()
+        super().mouseMoveEvent(event)
 
-        new_options = {tid: {"label": name} for tid, name in themes.items()}
-        if card and hasattr(card, "config_item"):
-            current_key = card.config_item.value
-            card.options = new_options
-            card.value_by_label = {data["label"]: key for key, data in new_options.items()}
-            card.label_by_value = {key: data["label"] for key, data in new_options.items()}
-            if current_key not in card.label_by_value:
-                current_key = list(new_options.keys())[0]
-            self.currentTextChanged.disconnect(card._on_changed)
-            self.clear()
-            self.addItems([data["label"] for data in new_options.values()])
-            self.setCurrentText(card.label_by_value.get(current_key, ""))
-            self.currentTextChanged.connect(card._on_changed)
-        self._themes_changed = False
+    def leaveEvent(self, event) -> None:
+        if self._hover_idx != -1:
+            self._hover_idx = -1
+            self.update()
+        super().leaveEvent(event)
 
-    def _toggleComboMenu(self):
-        """打开下拉前检查是否需要刷新"""
-        try:
-            if self._themes_changed:
-                self._refresh_items()
-        except Exception as e:
-            logger.warning(f"[ThemeComboBox] refresh error: {e}")
-        super()._toggleComboMenu()
+    # ── 绘制 ──
+
+    def paintEvent(self, event) -> None:
+        if not self._steps:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        n = len(self._steps)
+        node_y = float(self._NODE_Y)
+        x0, x1 = self._node_x(0), self._node_x(n - 1)
+        cur_idx = self._steps.index(self._current) if self._current in self._steps else -1
+
+        # 轨道底线
+        p.setPen(QPen(QColor(Colors.BORDER), 2))
+        p.drawLine(int(x0), int(node_y), int(x1), int(node_y))
+        # 已选段（起点 → 当前节点）accent
+        if cur_idx > 0:
+            p.setPen(QPen(QColor(Colors.TEXT_ACCENT), 2))
+            p.drawLine(int(x0), int(node_y), int(self._node_x(cur_idx)), int(node_y))
+
+        # 节点 + 刻度标签
+        label_font = get_unified_font(9)
+        bold_font = get_unified_font(9, True)
+        for i, key in enumerate(self._steps):
+            x = self._node_x(i)
+            is_cur = i == cur_idx
+            is_hover = i == self._hover_idx
+            is_zero = key == "0"
+
+            # 节点
+            if is_cur:
+                p.setPen(QPen(QColor(Colors.TEXT_ACCENT), 1.5))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(QPointF(x, node_y), self._CUR_OUTER_R, self._CUR_OUTER_R)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QBrush(QColor(Colors.TEXT_ACCENT)))
+                p.drawEllipse(QPointF(x, node_y), self._CUR_INNER_R, self._CUR_INNER_R)
+            elif is_zero:
+                p.setPen(QPen(QColor(Colors.TEXT_ACCENT), 1.5))
+                p.setBrush(QBrush(QColor(Colors.BUTTON_TEXT_ON_ACCENT)))
+                p.drawEllipse(QPointF(x, node_y), self._ZERO_R, self._ZERO_R)
+            else:
+                color = Colors.TEXT_ACCENT if is_hover else Colors.BORDER
+                r = self._HOVER_R if is_hover else self._NORMAL_R
+                p.setPen(Qt.NoPen)
+                p.setBrush(QBrush(QColor(color)))
+                p.drawEllipse(QPointF(x, node_y), r, r)
+
+            # 刻度标签（当前 accent 加粗 / hover 主色 / 其余次级；0 基准加粗）
+            if is_cur or is_zero:
+                p.setFont(bold_font)
+                p.setPen(QColor(Colors.TEXT_ACCENT if is_cur else Colors.TEXT_PRIMARY))
+            else:
+                p.setFont(label_font)
+                p.setPen(QColor(Colors.TEXT_PRIMARY if is_hover else Colors.TEXT_SECONDARY))
+            p.drawText(
+                QRectF(x - 24, node_y + 8, 48, self._label_h),
+                Qt.AlignHCenter | Qt.AlignTop,
+                _font_step_text(key),
+            )
+
+
+class FontSizeStepperCard(ExpandSettingCard):
+    """界面字号刻度条卡 — 折叠展开式，展开区为节点+轨道刻度条（-5px..+10px）
+
+    点击节点直达对应档位；当前档位 accent 高亮、0 为基准刻度。
+    header 右侧实时显示当前档位（如 "+2 px"）。
+    """
+
+    def __init__(self, icon, title, content, cfg, parent=None):
+        super().__init__(icon, title, content, parent)
+        self.cfg = cfg
+
+        # header 右侧当前档位值
+        self._value_label = QLabel(self)
+        self._value_label.setObjectName("titleLabel")
+        self.addWidget(self._value_label)
+
+        # 展开区：节点轨道刻度条 + 说明
+        self.viewLayout.setContentsMargins(48, 12, 24, 8)
+        self.viewLayout.setSpacing(4)
+        self._track = _FontStepTrack(list(FONT_SIZE_OPTIONS.keys()), self.view)
+        self._track.stepClicked.connect(self._on_step_clicked)
+        self.viewLayout.addWidget(self._track)
+
+        self._hint_label = QLabel("点击节点直达档位 · 0 为基准（14px）", self.view)
+        self.viewLayout.addWidget(self._hint_label)
+
+        self.cfg.ui_font_size.valueChanged.connect(self._sync_current)
+        self._sync_current()
+
+    def _on_step_clicked(self, key: str) -> None:
+        if key != self.cfg.ui_font_size.value:
+            self.cfg.set(self.cfg.ui_font_size, key, save=True)
+
+    def _sync_current(self, *_args) -> None:
+        """同步节点高亮与 header 当前值（配置变更信号驱动；旧档位键兜底映射）"""
+        key = self.cfg.ui_font_size.value
+        key = _LEGACY_FONT_SIZE_KEYS.get(key, key)
+        if key not in FONT_SIZE_OPTIONS:
+            key = _DEFAULT_FONT_SIZE_KEY
+        self._track.set_current(key)
+        self._value_label.setText(f"{_font_step_text(key)} px")
+
+    def refresh_style(self) -> None:
+        """主题/字号变更后重绘刻度条与文字样式（颜色/字号在 paint 动态读取）"""
+        self._value_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}")
+        self._hint_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
+        )
+        # 字号变化 → 标签行高/最小高度重算（防大字号标签被裁切）+ 重绘
+        self._track._recompute_metrics()
 
 
 class ManualUpdateCard(SettingCard):
@@ -675,54 +801,11 @@ class LLMSettingsCard(SystemCardFrame):
                     sb_style.polish(sb)
 
     def _setup_appearance_cards(self):
-        class AppearanceComboCard(SettingCard):
-            def __init__(self, icon, title, content, cfg, config_item, options, parent=None, is_theme_card=False):
-                super().__init__(icon, title, content, parent)
-                self.cfg = cfg
-                self.config_item = config_item
-                self.options = options
-                self.is_theme_card = is_theme_card
-                self._build_lookup_tables()
-
-                if is_theme_card:
-                    self.comboBox = RefreshableThemeComboBox(self)
-                else:
-                    self.comboBox = NoWheelComboBox(self)
-                self.comboBox.setMaxVisibleItems(6)
-                self.comboBox.addItems([data["label"] for data in options.values()])
-                self.comboBox.setCurrentText(
-                    self.label_by_value.get(config_item.value, next(iter(self.value_by_label)))
-                )
-                self.comboBox.setMinimumWidth(130)
-                ComboBoxStyles.apply(self.comboBox)
-                self.comboBox.currentTextChanged.connect(self._on_changed)
-
-                self.hBoxLayout.addWidget(self.comboBox)
-                self.hBoxLayout.addSpacing(16)
-
-            def _build_lookup_tables(self):
-                self.value_by_label = {data["label"]: key for key, data in self.options.items()}
-                self.label_by_value = {key: data["label"] for key, data in self.options.items()}
-
-            def refresh_style(self):
-                """主题变更时刷新下拉框样式"""
-                ComboBoxStyles.apply(self.comboBox)
-
-            def _on_changed(self, label):
-                value = self.value_by_label.get(label)
-                if value:
-                    self.cfg.set(self.config_item, value, save=True)
-                    parent = self.parent()
-                    if parent and hasattr(parent, "_on_config_changed"):
-                        parent._on_config_changed()
-
-        self.uiFontSizeCard = AppearanceComboCard(
+        self.uiFontSizeCard = FontSizeStepperCard(
             get_icon("字体大小"),
             "界面字号",
             "统一调整界面与对话内容字号",
             self.cfg,
-            self.cfg.ui_font_size,
-            FONT_SIZE_OPTIONS,
             self,
         )
         self.uiLightModeCard = SwitchSettingCard(
@@ -732,16 +815,46 @@ class LLMSettingsCard(SystemCardFrame):
             self.cfg.ui_light_mode,
             self,
         )
-        self.uiThemeStyleCard = AppearanceComboCard(
+        self.uiThemeStyleCard = self._make_theme_style_card()
+
+    def _make_theme_style_card(self):
+        """构建主题风格卡（展开式选项卡，与提示音卡一致的下部展开交互）
+
+        validator options 与 texts 严格对齐（均为深浅过滤后的列表），
+        防 OptionsSettingCard 内部 zip(texts, options) 错位。
+        """
+        options = self._build_theme_options()
+        keys = list(options.keys())
+        if not keys:
+            return getattr(self, "uiThemeStyleCard", None)
+        self.cfg.ui_theme_style.validator.__init__(keys)
+        if self.cfg.ui_theme_style.value not in keys:
+            self.cfg.set(self.cfg.ui_theme_style, keys[0], save=True)
+        return OptionsSettingCard(
+            self.cfg.ui_theme_style,
             get_icon("主题风格"),
             "主题风格",
             "选择界面卡片配色方案",
-            self.cfg,
-            self.cfg.ui_theme_style,
-            self._build_theme_options(),
-            self,
-            True,  # is_theme_card
+            texts=[d["label"] for d in options.values()],
+            parent=self,
         )
+
+    def _rebuild_theme_style_card(self) -> None:
+        """按当前深浅模式重建主题风格卡（选项动态过滤），保持原布局位置"""
+        old = getattr(self, "uiThemeStyleCard", None)
+        new_card = self._make_theme_style_card()
+        if new_card is None or new_card is old:
+            return
+        layout = self._page_layouts["appearance"]
+        idx = layout.indexOf(old) if old is not None else -1
+        if old is not None:
+            layout.removeWidget(old)
+            old.deleteLater()
+        if idx >= 0:
+            layout.insertWidget(idx, new_card)
+        else:
+            layout.addWidget(new_card)
+        self.uiThemeStyleCard = new_card
 
     def _build_theme_options(self) -> dict:
         """从 ThemeManager 动态构建主题选项，按当前深浅模式过滤并加标识"""
@@ -848,29 +961,13 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _on_light_mode_changed(self, is_light: bool):
         """浅色模式开关切换 — 自动选择对应模式的主题"""
-        if is_light:
-            target_theme = "lumia"
-        else:
-            target_theme = "fallout"
-        # 避免循环触发：只有真正需要切换时才改
+        target_theme = "lumia" if is_light else "fallout"
+        # 先重建 validator 为目标模式主题集（防旧集不含 target 被 correct 回退），
+        # 当前值不在集内时回第一个（_make_theme_style_card 内处理）
         if self.cfg.ui_theme_style.value != target_theme:
             self.cfg.set(self.cfg.ui_theme_style, target_theme, save=True)
-        # 重建主题下拉列表（按模式过滤）
-        if hasattr(self, "uiThemeStyleCard") and hasattr(self.uiThemeStyleCard, "comboBox"):
-            card = self.uiThemeStyleCard
-            card.options = self._build_theme_options()
-            card._build_lookup_tables()
-            combo = card.comboBox
-            combo.currentTextChanged.disconnect(card._on_changed)
-            combo.clear()
-            combo.addItems([data["label"] for data in card.options.values()])
-            if target_theme in card.label_by_value:
-                combo.setCurrentText(card.label_by_value[target_theme])
-            elif card.options:
-                first_tid = next(iter(card.options))
-                combo.setCurrentText(card.options[first_tid]["label"])
-                self.cfg.set(self.cfg.ui_theme_style, first_tid, save=True)
-            combo.currentTextChanged.connect(card._on_changed)
+        # 重建主题风格卡（展开式选项按新模式过滤）
+        self._rebuild_theme_style_card()
         # 触发全量刷新
         self._on_config_changed()
 
@@ -944,15 +1041,11 @@ class LLMSettingsCard(SystemCardFrame):
         """
 
     def refresh_theme_options(self):
-        """热更新后刷新主题下拉列表（外部由 _on_plugin_hot_reload 调用）"""
-        if hasattr(self, "uiThemeStyleCard") and hasattr(self.uiThemeStyleCard, "comboBox"):
-            try:
-                combo = self.uiThemeStyleCard.comboBox
-                if hasattr(combo, "_refresh_items"):
-                    combo._refresh_items()
-                    logger.debug("[ThemeComboBox] 主题下拉已主动刷新")
-            except Exception as e:
-                logger.warning(f"[ThemeComboBox] 主动刷新失败: {e}")
+        """热更新后刷新主题选项（外部由 _on_plugin_hot_reload 调用）"""
+        try:
+            self._rebuild_theme_style_card()
+        except Exception as e:
+            logger.warning(f"[ThemeStyleCard] 主题选项刷新失败: {e}")
 
     def _on_toggled(self, enabled: bool):
         """开机自启开关切换时：检查平台支持 + 更新注册表"""

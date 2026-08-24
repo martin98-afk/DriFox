@@ -36,6 +36,13 @@ from app.utils.utils import get_font_family_css, get_unified_font
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。窗口宽度不足该值时对话区自动占满。
 _MAX_CHAT_WIDTH = 1000
 
+# ── 覆盖层「配置类」卡片最大宽度（px）──
+# 比对话区稍宽，同样在超宽窗口下限宽居中，避免系统配置卡片无限拉伸。
+# 仅作用于配置类卡片（系统设置/服务商/Hook/MCP）；差异对比、子智能体
+# 会话等内容型卡片不限宽，铺满对话区。
+_MAX_OVERLAY_WIDTH = _MAX_CHAT_WIDTH + 100
+_CONFIG_REPLACE_CARDS = frozenset({"settings", "provider_edit", "hook_edit", "mcp_edit"})
+
 # ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
 
 # ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
@@ -1215,6 +1222,10 @@ class TabManagerWindow(QWidget):
                 # 120ms 去抖：紧接的 shown(其他) 会保留本卡片；无则视为关闭
                 self._schedule_replace_close(card_id)
         self._update_replace_tab_visibility()
+        # 覆盖层互斥切换（如 settings ↔ diff_viewer）stack 页不变、wrapper 不 resize，
+        # 限宽策略随可见卡片类型变化，主动刷新一次 pad
+        if self._content_stack.currentIndex() == 1:
+            QTimer.singleShot(0, self._sync_chat_wrapper_width)
 
     def _schedule_replace_close(self, card_id: str) -> None:
         """启动/重置某卡片的关闭去抖计时器（区分切换与关闭）"""
@@ -1309,8 +1320,64 @@ class TabManagerWindow(QWidget):
         self._replace_tab_bar.setVisible(len(open_dict) >= 1)
 
     def _on_active_tab_changed(self, index: int) -> None:
-        """切换对话标签页 → 重建顶部 replace tab 栏为当前对话的打开列表/高亮"""
+        """切换对话标签页 → 同步覆盖层卡片显隐 + 重建顶部 replace tab 栏"""
+        self._sync_overlay_cards_to_active_window()
         self._refresh_replace_tab_bar()
+
+    def _sync_overlay_cards_to_active_window(self) -> None:
+        """覆盖层全局卡按目标对话标签页恢复显隐
+
+        全局 replace 卡片是单例（对话间共享显示权），切换标签页时按目标对话的
+        open/active 状态恢复：active 卡显示、其余可见卡隐藏；目标对话停留在
+        「对话」视图或无打开卡片时隐藏全部。隐藏走 _suppress_replace_close
+        保护，open 集合保留（tab 栏仍可点回）。
+        """
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID, CardManager
+        from app.widgets.replace_tab_bar import CONVERSATION_ID, KNOWN_GLOBAL_REPLACE_CARDS
+
+        cm = CardManager.get_instance()
+        if cm is None:
+            return
+        wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
+        cur_wid = self._current_window_id()
+        open_ids = self._replace_open.get(cur_wid, {})
+        active = self._replace_active.get(cur_wid)
+        if active == CONVERSATION_ID:
+            active = None
+        if active is not None and active not in open_ids:
+            active = None
+
+        # 收集所有候选 replace 卡（内置全局卡 + full 浮动卡）
+        candidates = set(KNOWN_GLOBAL_REPLACE_CARDS)
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            for cid, info in UIPluginRegistry.get_instance().get_floating_cards().items():
+                if info.container == "full":
+                    candidates.add(cid)
+        except Exception:
+            pass
+
+        self._suppress_replace_close = True
+        try:
+            for cid in candidates:
+                try:
+                    if not cm.is_card_visible(cid, wid):
+                        continue
+                except Exception:
+                    continue
+                if cid != active:
+                    try:
+                        cm.hide_card(cid, wid)
+                    except Exception:
+                        pass
+            if active is not None:
+                try:
+                    cm.show_card(active, wid)
+                except Exception:
+                    pass
+        finally:
+            self._suppress_replace_close = False
 
     def _update_replace_tab_visibility(self) -> None:
         """按当前对话标签页的 open 集合决定是否显示顶部 replace tab 栏"""
@@ -2419,19 +2486,19 @@ class TabManagerWindow(QWidget):
         return False
 
     def _sync_chat_wrapper_width(self):
-        """按当前 wrapper 宽度设置左右 margins，实现对话区限宽居中
+        """按当前 wrapper 宽度设置左右 margins，实现限宽居中
 
-        覆盖层激活（_content_stack 切到 index 1，container=full 卡片可见）时
-        取消限宽居中：full 卡片应该铺满 wrapper 全宽（line 745-749 设计意图），
-        而非与对话区共享 _MAX_CHAT_WIDTH 上限。
+        - 对话区（index 0）：按 _MAX_CHAT_WIDTH 限宽居中
+        - 覆盖层（index 1）：配置类卡片（系统设置/服务商/Hook/MCP）按
+          _MAX_OVERLAY_WIDTH 限宽居中；内容型卡片（diff_viewer、
+          子智能体会话、full 浮动卡）铺满全宽
         """
         wrapper = self._chat_wrapper
         w = wrapper.width()
         if w <= 0:
             return
-        # 覆盖层激活 → 取消限宽，让 full 卡片可铺满 wrapper 全宽
         if self._content_stack.currentIndex() == 1:
-            pad = 0
+            pad = max(0, (w - _MAX_OVERLAY_WIDTH) // 2) if self._overlay_should_limit_width() else 0
         else:
             pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
         layout = self._chat_wrapper_layout
@@ -2441,6 +2508,20 @@ class TabManagerWindow(QWidget):
             # 确保 chat_frame 几何同步到最新 margins（否则停留在旧宽度）
             layout.invalidate()
             layout.activate()
+
+    def _overlay_should_limit_width(self) -> bool:
+        """覆盖层当前可见卡片是否为配置类（需限宽居中）
+
+        系统设置/服务商编辑/Hook/MCP 等配置卡限宽；其余（diff_viewer、
+        sub_agent_session、full 浮动卡）铺满。覆盖层卡片互斥，取可见者判断。
+        """
+        container = getattr(self, "_global_top_container", None)
+        if container is None:
+            return False
+        for cid, card in getattr(container, "_cards", {}).items():
+            if cid in _CONFIG_REPLACE_CARDS and not card.isHidden():
+                return True
+        return False
 
     def _on_resize_finished(self):
         """resize 结束后恢复布局 + 绘制 + 强制收拢

@@ -52,12 +52,14 @@ def _get_font_family_css() -> str:
     return get_font_family_css()
 
 
-FONT_SIZE_OPTIONS = {
-    "small": {"label": "小", "delta": -1, "base": 13},
-    "medium": {"label": "中", "delta": 0, "base": 14},
-    "large": {"label": "大", "delta": 2, "base": 16},
-    "superlarge": {"label": "超大", "delta": 4, "base": 18},
-}
+# 界面字号档位：delta 键（-5px..+10px，步进 1），base 恒 14，实际字号 = 14 + delta
+FONT_SIZE_OPTIONS = {str(d): {"delta": d, "base": 14} for d in range(-5, 11)}
+
+# 旧档位键（small/medium/large/superlarge）→ delta 键迁移映射
+_LEGACY_FONT_SIZE_KEYS = {"small": "-1", "medium": "0", "large": "2", "superlarge": "4"}
+
+# 默认档位（对应旧 large：14+2=16px）
+_DEFAULT_FONT_SIZE_KEY = "2"
 
 
 def get_ui_font_size_key() -> str:
@@ -69,9 +71,11 @@ def get_ui_font_size_key() -> str:
 
         key = Settings.get_instance().ui_font_size.value
     except Exception:
-        key = "medium"
+        key = _DEFAULT_FONT_SIZE_KEY
+    # 旧配置值迁移兜底（validator correct 已处理，此处双保险）
+    key = _LEGACY_FONT_SIZE_KEYS.get(key, key)
     if key not in FONT_SIZE_OPTIONS:
-        key = "medium"
+        key = _DEFAULT_FONT_SIZE_KEY
     _cached_font_size_key = key
     _cached_font_size_delta = FONT_SIZE_OPTIONS[key]["delta"]
     _cached_font_size_base = FONT_SIZE_OPTIONS[key]["base"]
