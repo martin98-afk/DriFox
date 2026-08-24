@@ -241,6 +241,10 @@ class CardContainer(QWidget):
             self.hide()
             # 覆盖模式使用四角圆角独立面板样式
             self._apply_background_style()
+            # 覆盖层模式：水平居中（full 卡片可能自身限宽，需在容器内居中）
+            # 仅作用于非横向容器：横向（LEFT/RIGHT）一般不进入 overlay_mode
+            if not self._horizontal:
+                self._layout.setAlignment(Qt.AlignHCenter)
 
     def _dock_min(self) -> int:
         return self._DOCK_MIN_H if self._horizontal else self._DOCK_MIN_V

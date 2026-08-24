@@ -2061,6 +2061,11 @@ class MarketplaceCard(QWidget):
         self._reveal_timer: Optional["QTimer"] = None  # 渲染完成延迟显示 timer（防压缩帧）
         self._load_timer: Optional["QTimer"] = None  # show_card 延迟加载 timer（同上）
         self._setup_ui()
+        # 宽度上限：比对话气泡区（约 1000px）宽一点点（1080）即可，不铺满覆盖层全宽。
+        # 容器（CardContainer overlay）已设 AlignHCenter，卡片在此宽度内水平居中。
+        # 覆盖层圆角面板由主程序容器绘制且铺满，此处仅约束卡片自身内容宽度。
+        self.setMaximumWidth(1080)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         # 首次显示时由 show_card 触发加载，__init__ 不再自动加载
 
     # ── 拉模型上下文注入 ──
@@ -2583,8 +2588,7 @@ class MarketplaceCard(QWidget):
         refresh_btn.setCursor(Qt.PointingHandCursor)
         refresh_btn.setFixedSize(30, 30)
         refresh_btn.setStyleSheet(
-            "QToolButton { border: none; border-radius: 8px; }"
-            "QToolButton:hover { background: rgba(128,128,128,0.15); }"
+            "QToolButton { border: none; border-radius: 8px; }QToolButton:hover { background: rgba(128,128,128,0.15); }"
         )
         refresh_btn.clicked.connect(self._rebuild_explore)
         tool_lay.addWidget(refresh_btn)
@@ -4907,7 +4911,7 @@ class MarketplaceCard(QWidget):
         for cat in cats:
             group = sorted(by_cat[cat], key=lambda p: p.get("downloads", 0) or 0, reverse=True)
             total = len(group)  # 角标显示分类总数（组内只展示 Top N）
-            group = group[: _EXPLORE_GROUP_SIZE]
+            group = group[:_EXPLORE_GROUP_SIZE]
             label = _EXPLORE_CATEGORY_LABELS.get(cat, f"📁 {cat}")
             self._add_explore_section(label, f"{total} 个", group, tag=cat)
 
@@ -5648,7 +5652,7 @@ class MarketplaceCard(QWidget):
         """卡片 C++ 对象是否存活（销毁后迟到回调防护）"""
         try:
             return not sip.isdeleted(self)
-        except (RuntimeError, TypeError):
+        except RuntimeError, TypeError:
             return False
 
     def _orphan_worker_thread(self, thread):

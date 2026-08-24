@@ -53,6 +53,21 @@ All notable changes to this project will be documented in this file.
 
 - **单例信号 / 测试修正**: `pyqtBoundSignal` 无 `.receivers()`，改用方法存在性 + 源字符串匹配验证结构性配对；修正测试假设（`__init__` 已注册单例 connect，断言 `copy_state_from` 不再向 dst 追加 src 条目）；为 3 个缺失文件补 `_reg_sig()`。
 
+### 🔄 Hotfix 重新发布 (Re-release · 2026-08-24)
+
+基于 `v0.5.4` 标签的增量变更 | 提交数：5 · 文件变更：11 · +1430/-160 | 贡献者：mading
+
+#### ✨ 新功能 (New Features)
+
+- **ReplaceTabBar 全容器卡片 tab 管理** (`app/widgets/`): 实现 `ReplaceTabBar` 用于管理全容器卡片 tab，与 tab-manager 顶层结构衔接。
+- **replace tab 窗口级状态隔离** (`app/widgets/tab_manager_window.py`): 增强 replace tab 管理，按活动窗口隔离状态，避免多窗口串扰。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **card-container / tab-manager 居中与 margin** (`app/widgets/`): 调整叠加层居中行为与 margin 同步。
+- **对话按钮保留开启的 tab 并抑制关闭事件** (`app/widgets/replace_tab_bar.py` + `app/widgets/tab_manager_window.py`): 增强对话按钮行为，保留已开启的 tab 并抑制关闭事件，避免误关。
+- **replace tab 状态按对话隔离** (`app/widgets/tab_manager_window.py` + `plugins/plugin-marketplace/ui/cards.py`): 隔离 replace tab 状态按对话单元存储，防止跨会话串扰，并扩展 `test_replace_tab_bar` 用例覆盖。
+
 ## [v0.5.3] - 2026-08-22
 
 自上一版本以来的变更 | 提交数：175 · 文件变更：303 · +28058/-15698 | 贡献者：dingma, mading, drifox-bot, builder

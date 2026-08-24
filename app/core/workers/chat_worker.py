@@ -770,23 +770,15 @@ class OpenAIChatWorker(QThread):
 
             # PreAssistantMessage / PostAssistantMessage：注入上下文使用量信息
             # 让 hook（如 context_auto_compact）能检测当前 token 占比
+            # 与圆环同源（engine 快照口径），保证 hook 触发占比与显示一致
             if event_name in ("PreAssistantMessage", "PostAssistantMessage"):
-                try:
-                    from app.core.model_capabilities import resolve_context_limit
-
-                    token_count = count_messages_tokens(current_messages)
-                    token_limit = 0
-                    llm_config = getattr(self, "llm_config", None)
-                    if llm_config:
-                        token_limit = resolve_context_limit(llm_config)
-                    ctx["token_count"] = token_count
-                    ctx["token_limit"] = token_limit
-                    if token_count > 0 and token_limit > 0:
-                        ctx["token_ratio"] = token_count / token_limit
-                    else:
-                        ctx["token_ratio"] = 0.0
-                except Exception:
-                    pass
+                token_count, token_limit = self._hook_context_usage(backend)
+                ctx["token_count"] = token_count
+                ctx["token_limit"] = token_limit
+                if token_count > 0 and token_limit > 0:
+                    ctx["token_ratio"] = token_count / token_limit
+                else:
+                    ctx["token_ratio"] = 0.0
 
             if extra_context:
                 ctx.update(extra_context)
@@ -869,6 +861,15 @@ class OpenAIChatWorker(QThread):
         except Exception as e:
             logger.error(f"[HookManager] Worker hook exception: {event_name} - {e}")
             return None
+
+    def _hook_context_usage(self, backend) -> tuple:
+        """hook 注入用上下文用量（与圆环同源，见 app/core/context_usage.py）"""
+        from app.core.context_usage import snapshot_usage_for_hooks
+
+        return snapshot_usage_for_hooks(
+            backend,
+            llm_config=getattr(self, "llm_config", None),
+        )
 
     def _check_results_auto_compact(self, results: list, backend) -> None:
         """检查 hook 结果中是否有 auto-compact 触发信号

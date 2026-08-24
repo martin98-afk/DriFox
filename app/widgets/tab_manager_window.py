@@ -7,6 +7,7 @@ TabManagerWindow — Tab 管理器宿主窗口（标准系统窗口）
 """
 
 import platform
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
 from PyQt5 import sip as _sip
@@ -34,6 +35,8 @@ from app.utils.utils import get_font_family_css, get_unified_font
 # ── 对话区最大宽度（px）：窗口过宽时限制对话区宽度并居中，两侧留白 ──
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。窗口宽度不足该值时对话区自动占满。
 _MAX_CHAT_WIDTH = 1000
+
+# ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
 
 # ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
 # 挤压折叠后点击展开时，若保存的宽度已被压到折叠阈值以下，展开不得窄于该值，
@@ -375,6 +378,13 @@ class TabManagerWindow(QWidget):
         # 确保 Colors 已刷新（主题色初始化）
         Colors.refresh()
 
+        # 替换类型(full 容器)卡片顶部居中切换栏状态
+        # replace tab 栏状态按对话标签页隔离：{window_id: {card_id: title}}
+        self._replace_open: "Dict[str, OrderedDict[str, str]]" = {}
+        self._replace_active: "Dict[str, Optional[str]]" = {}
+        self._replace_timers: Dict[str, "QTimer"] = {}
+        self._suppress_replace_close: bool = False
+
         self._setup_ui()
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
@@ -449,6 +459,13 @@ class TabManagerWindow(QWidget):
 
         # 刷新全局背景图
         self._apply_bg_from_theme()
+
+        # 刷新替换类型卡片 tab 栏
+        if hasattr(self, "_replace_tab_bar"):
+            try:
+                self._replace_tab_bar.refresh_style()
+            except Exception:
+                pass
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
@@ -802,6 +819,22 @@ class TabManagerWindow(QWidget):
         self._vdock_splitter.setStretchFactor(1, 0)  # 下停靠区不随窗口拉伸
         self._vdock_splitter.setHandleWidth(6)
         self._vdock_splitter.setChildrenCollapsible(False)
+        # ── 替换类型(full 容器)卡片顶部居中切换栏 ──
+        # 只要有 ≥1 个 full 卡片打开即显示（单卡片显示标题+关闭，多卡片支持切换，
+        # 见 ReplaceTabBar 显隐逻辑与 _on_card_visibility_changed）。挂在 _vdock_splitter
+        # 之上，对话区与覆盖层切换时固定可见（覆盖层模式不吞掉 tab 栏）。
+        from app.widgets.replace_tab_bar import ReplaceTabBar
+        from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+
+        self._replace_tab_bar = ReplaceTabBar(self._chat_frame)
+        self._replace_tab_bar.setVisible(False)
+        self._replace_tab_bar.tabClicked.connect(self._on_replace_tab_clicked)
+        self._replace_tab_bar.tabCloseClicked.connect(self._on_replace_tab_close_clicked)
+        chat_frame_layout.insertWidget(0, self._replace_tab_bar)
+
+        # 订阅 full 卡片显隐事件，同步 tab 栏 open 集合与显隐
+        UIEventBus.get_instance().subscribe(EV_CARD_VISIBILITY_CHANGED, self._on_card_visibility_changed)
+
         chat_frame_layout.addWidget(self._vdock_splitter, 1)
 
         # 全局容器启用停靠模式
@@ -851,6 +884,7 @@ class TabManagerWindow(QWidget):
 
     def _setup_signals(self):
         self._tab_panel.tabSelected.connect(self._on_tab_selected)
+        self.activeTabChanged.connect(self._on_active_tab_changed)
         self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
@@ -1121,6 +1155,264 @@ class TabManagerWindow(QWidget):
             # growth_required=False：overlay 挤压时窗口总宽未变，不适用相对增长
             # 条件（否则窗口没变宽永远不会自动展开），此处仅按绝对空间下限判断。
             QTimer.singleShot(0, lambda: self._maybe_auto_expand_after_squeeze(growth_required=False))
+        # 覆盖层切换会改变 wrapper 限宽策略（page=1 取消限宽，page=0 恢复限宽），
+        # wrapper resize 事件不会因此重发，立即同步一次让 margins 即时生效。
+        QTimer.singleShot(0, self._sync_chat_wrapper_width)
+
+    # ── 替换类型(full 容器)卡片顶部居中切换栏 ──
+
+    def _on_card_visibility_changed(self, payload: Dict[str, Any]) -> None:
+        """同步 replace 卡片（UI 插件 full 卡 + 内置全局卡）显隐到顶部 tab 栏
+
+        仅处理覆盖对话区的 replace 卡片：container=="full" 浮动卡，或已知全局卡
+        （settings/diff_viewer/sub_agent_session 等）；其余卡片忽略。
+        shown → 加入 open 集合并高亮；hidden → 120ms 去抖区分「互斥切换」
+        与「用户关闭」：窗口内仍有其他 replace 卡片可见则为切换（保留），否则移除。
+        """
+        from app.widgets.replace_tab_bar import (
+            CONVERSATION_ID,
+            GLOBAL_REPLACE_TITLES,
+            KNOWN_GLOBAL_REPLACE_CARDS,
+        )
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+        card_id = payload.get("card_id")
+        visible = payload.get("visible", False)
+        if not card_id or card_id == CONVERSATION_ID:
+            return
+        # 仅处理全局对话区（GLOBAL_WINDOW_ID）作用域的 replace 卡片
+        if payload.get("window_id") and payload.get("window_id") != GLOBAL_WINDOW_ID:
+            return
+
+        # 解析 replace 卡片与标题：full 浮动卡优先取注册标题，否则取已知全局卡标题
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        info = UIPluginRegistry.get_instance().get_floating_cards().get(card_id)
+        if info is not None:
+            if info.container != "full":
+                return
+            title = info.title
+        elif card_id in KNOWN_GLOBAL_REPLACE_CARDS:
+            title = GLOBAL_REPLACE_TITLES.get(card_id, card_id)
+        else:
+            return
+
+        cur_wid = self._current_window_id()
+        if visible:
+            # 取消该卡片的关闭计时（若是互斥切换后的恢复）
+            self._cancel_replace_timer(card_id)
+            # 卡片按「事件到达时的当前活跃对话」归属到对应窗口的 open 集合
+            open_dict = self._replace_open.setdefault(cur_wid, OrderedDict())
+            if card_id not in open_dict:
+                open_dict[card_id] = title
+                self._replace_tab_bar.add_tab(card_id, title)
+            self._set_replace_active(card_id)
+        else:
+            if getattr(self, "_suppress_replace_close", False):
+                # 点「对话」主动隐藏 replace 卡片：保留 open（tab 栏常驻对话项），仅取消其关闭计时
+                self._cancel_replace_timer(card_id)
+            else:
+                # 120ms 去抖：紧接的 shown(其他) 会保留本卡片；无则视为关闭
+                self._schedule_replace_close(card_id)
+        self._update_replace_tab_visibility()
+
+    def _schedule_replace_close(self, card_id: str) -> None:
+        """启动/重置某卡片的关闭去抖计时器（区分切换与关闭）"""
+        timer = self._replace_timers.get(card_id)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self._on_replace_close_timeout(card_id))
+            self._replace_timers[card_id] = timer
+        timer.start(120)
+
+    def _cancel_replace_timer(self, card_id: str) -> None:
+        timer = self._replace_timers.pop(card_id, None)
+        if timer is not None:
+            timer.stop()
+
+    def _on_replace_close_timeout(self, card_id: str) -> None:
+        self._replace_timers.pop(card_id, None)
+        if not self._has_other_visible_full(card_id):
+            # 卡片是全局单例：从所有对话的 open 集合中移除（关闭后任何对话都不应再显示）
+            owners = [wid for wid, od in self._replace_open.items() if card_id in od]
+            for wid in owners:
+                del self._replace_open[wid][card_id]
+                if self._replace_active.get(wid) == card_id:
+                    self._replace_active[wid] = None
+            # tab 栏仅反映当前对话：仅当卡片归属当前对话时改 tab 栏
+            if owners:
+                self._replace_tab_bar.remove_tab(card_id)
+                # 关掉当前卡片且 open 仍有其他 full 卡片 → 自动激活（互斥显示）最近一个
+                self._activate_remaining_replace_card()
+        self._update_replace_tab_visibility()
+
+    def _activate_remaining_replace_card(self) -> None:
+        """当前对话 open 集合非空时，自动激活（互斥显示）最近一个 full 卡片，避免关掉
+        当前后剩余卡片停在隐藏态（无论关闭来自 tab × 还是卡片自身按钮）。"""
+        remaining = list(self._replace_open.get(self._current_window_id(), {}).keys())
+        if not remaining:
+            return
+        nid = remaining[-1]
+        from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
+
+        cm = CardManager.get_instance()
+        wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
+        if cm is not None and cm.is_card_visible(nid, wid):
+            self._set_replace_active(nid)
+            return
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        UIPluginRegistry.get_instance().toggle_floating_card(nid)
+
+    def _has_other_visible_full(self, exclude_id: str) -> bool:
+        """窗口内是否有其他 replace 卡片当前可见（用于区分切换/关闭）"""
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+        from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
+        from app.widgets.replace_tab_bar import KNOWN_GLOBAL_REPLACE_CARDS
+
+        reg = UIPluginRegistry.get_instance()
+        cm = CardManager.get_instance()
+        wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
+        # 其他可见的 full 浮动卡片
+        for cid, info in reg.get_floating_cards().items():
+            if cid == exclude_id or info.container != "full":
+                continue
+            if cm.is_card_visible(cid, wid):
+                return True
+        # 其他可见的内置全局替换卡片
+        for cid in KNOWN_GLOBAL_REPLACE_CARDS:
+            if cid == exclude_id:
+                continue
+            if cm.is_card_visible(cid, wid):
+                return True
+        return False
+
+    def _set_replace_active(self, card_id: str) -> None:
+        self._replace_active[self._current_window_id()] = card_id
+        self._replace_tab_bar.set_active(card_id)
+
+    def _current_window_id(self) -> str:
+        """当前活跃对话标签页的 window_id（用于隔离 replace tab 栏状态）"""
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+        win = self.get_current_window()
+        wid = getattr(win, "_window_id", None)
+        return wid or GLOBAL_WINDOW_ID
+
+    def _refresh_replace_tab_bar(self) -> None:
+        """按当前活跃对话标签页重建顶部 replace tab 栏（打开列表 + 高亮独立）"""
+        cur_wid = self._current_window_id()
+        open_dict = self._replace_open.get(cur_wid, {})
+        active = self._replace_active.get(cur_wid)
+        self._replace_tab_bar.set_tabs(open_dict, active)
+        self._replace_tab_bar.setVisible(len(open_dict) >= 1)
+
+    def _on_active_tab_changed(self, index: int) -> None:
+        """切换对话标签页 → 重建顶部 replace tab 栏为当前对话的打开列表/高亮"""
+        self._refresh_replace_tab_bar()
+
+    def _update_replace_tab_visibility(self) -> None:
+        """按当前对话标签页的 open 集合决定是否显示顶部 replace tab 栏"""
+        cur_wid = self._current_window_id()
+        open_dict = self._replace_open.get(cur_wid, {})
+        self._replace_tab_bar.setVisible(len(open_dict) >= 1)
+
+    def _on_replace_tab_clicked(self, card_id: str) -> None:
+        """点 tab → 切换/显示对应 replace 卡片；点「对话」返回对话区；点当前 active 不动作"""
+        from app.widgets.replace_tab_bar import CONVERSATION_ID, KNOWN_GLOBAL_REPLACE_CARDS
+        from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
+
+        if card_id == CONVERSATION_ID:
+            # 返回对话视图：隐藏所有 replace 卡片，但保留 open（tab 栏常驻对话项，可随时切回）
+            self._show_conversation_view()
+            return
+        if card_id == self._replace_active.get(self._current_window_id()):
+            return
+        if card_id in KNOWN_GLOBAL_REPLACE_CARDS:
+            # 内置全局卡：裸 show_card 不自动互斥，需先隐藏其他 replace 卡再恢复显示（内容保留）
+            cm = CardManager.get_instance()
+            wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
+            cur_wid = self._current_window_id()
+            for other in list(self._replace_open.get(cur_wid, {}).keys()):
+                if other != card_id:
+                    try:
+                        cm.hide_card(other, wid)
+                    except Exception:
+                        pass
+            try:
+                cm.show_card(card_id, wid)
+            except Exception:
+                pass
+            self._set_replace_active(card_id)
+        else:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().toggle_floating_card(card_id)
+            self._set_replace_active(card_id)
+
+    def _show_conversation_view(self) -> None:
+        """点「对话」→ 隐藏所有 replace 卡片回到对话区，但保留 open（tab 栏常驻对话项，可随时切回）"""
+        from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
+        from app.widgets.replace_tab_bar import CONVERSATION_ID
+
+        cm = CardManager.get_instance()
+        wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
+        # 抑制 hide_card 触发的 visible=False 事件（对话视图下隐藏 replace 卡片是预期行为，open 保留）
+        self._suppress_replace_close = True
+        cur_wid = self._current_window_id()
+        try:
+            for cid in list(self._replace_open.get(cur_wid, {}).keys()):
+                try:
+                    cm.hide_card(cid, wid)
+                except Exception:
+                    pass
+        finally:
+            self._suppress_replace_close = False
+        self._replace_active[cur_wid] = CONVERSATION_ID
+        self._replace_tab_bar.set_active(CONVERSATION_ID)
+        # open 非空 → tab 栏仍显示（含对话高亮 + 各 replace 项）
+        self._update_replace_tab_visibility()
+
+    def _on_replace_tab_close_clicked(self, card_id: str) -> None:
+        """点 tab × → 真正关闭对应卡片并从 open 移除 tab 项；若仍有其他 replace 卡片，
+        自动激活（互斥显示）最近一个。
+
+        内置全局卡（settings/diff_viewer 等）经 CardManager.hide_card(GLOBAL_WINDOW_ID)
+        真正隐藏；full 浮动卡经 registry.hide_floating_card_globally 隐藏（该 API 仅对
+        注册在 UI 插件注册表的浮动卡有效，对内置全局卡返回 False 不生效）。
+        """
+        from app.widgets.replace_tab_bar import KNOWN_GLOBAL_REPLACE_CARDS
+        from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
+
+        # 卡片是全局单例：从所有对话的 open 集合中移除并清 active（避免切回其他对话仍显示已关卡片）
+        cur_wid = self._current_window_id()
+        owners = [wid for wid, od in self._replace_open.items() if card_id in od]
+        for wid in owners:
+            del self._replace_open[wid][card_id]
+            if self._replace_active.get(wid) == card_id:
+                self._replace_active[wid] = None
+        if owners:
+            self._replace_tab_bar.remove_tab(card_id)
+        self._update_replace_tab_visibility()
+
+        # 真正隐藏卡片本身（避免「tab 消失但卡片仍显示」）
+        if card_id in KNOWN_GLOBAL_REPLACE_CARDS:
+            # 内置全局卡：经 CardManager 隐藏（hide_floating_card_globally 对非浮动卡无效）
+            try:
+                CardManager.get_instance().hide_card(card_id, GLOBAL_WINDOW_ID)
+            except Exception:
+                pass
+        else:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            try:
+                UIPluginRegistry.get_instance().hide_floating_card_globally(card_id)
+            except Exception:
+                pass
+
+        if self._replace_open.get(cur_wid):
+            self._activate_remaining_replace_card()
 
     def _on_splitter_idle(self):
         """splitter 拖拽防抖超时：松手后恢复内容区绘制 + 解除 TabPanel 节流
@@ -2127,12 +2419,21 @@ class TabManagerWindow(QWidget):
         return False
 
     def _sync_chat_wrapper_width(self):
-        """按当前 wrapper 宽度设置左右 margins，实现对话区限宽居中"""
+        """按当前 wrapper 宽度设置左右 margins，实现对话区限宽居中
+
+        覆盖层激活（_content_stack 切到 index 1，container=full 卡片可见）时
+        取消限宽居中：full 卡片应该铺满 wrapper 全宽（line 745-749 设计意图），
+        而非与对话区共享 _MAX_CHAT_WIDTH 上限。
+        """
         wrapper = self._chat_wrapper
         w = wrapper.width()
         if w <= 0:
             return
-        pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
+        # 覆盖层激活 → 取消限宽，让 full 卡片可铺满 wrapper 全宽
+        if self._content_stack.currentIndex() == 1:
+            pad = 0
+        else:
+            pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
         layout = self._chat_wrapper_layout
         if layout.contentsMargins().left() != pad:
             layout.setContentsMargins(pad, 0, pad, 0)
