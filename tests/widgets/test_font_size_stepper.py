@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from qfluentwidgets import FluentIcon, OptionsConfigItem, OptionsValidator
 
 from app.utils import design_tokens
+from app.utils.config import Settings
 from app.widgets.cards.settings.llm_settings_card import FontSizeStepperCard, _font_step_text
 
 
@@ -113,3 +114,63 @@ def test_scale_font_size_follows_delta(monkeypatch):
     assert design_tokens.get_ui_font_size_key() == "4"
     # 缓存清理，避免影响其他用例
     monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)
+
+
+def test_nav_btn_style_follows_font_delta(monkeypatch):
+    """导航按钮 QSS 内嵌 font_size_css：档位变化后重建的样式用新字号
+
+    （回归保护：旧 QSS 压制 setFont，字号切换须重建按钮样式才生效）
+    """
+    from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+    def _style_at(delta_key):
+        monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)
+        fake = SimpleNamespace(ui_font_size=SimpleNamespace(value=delta_key))
+        monkeypatch.setattr("app.utils.config.Settings.get_instance", lambda: fake)
+        return LLMSettingsCard._nav_btn_style(True)
+
+    assert "font-size: 12px;" in _style_at("0")  # 导航基准 12 + delta 0
+    assert "font-size: 17px;" in _style_at("5")  # 12 + 5
+    monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)
+
+
+def test_config_changed_rebuilds_nav_style_on_font_size(qapp, monkeypatch):
+    """_last_change_type ∈ {font_size, font_family} → _on_config_changed 即时重建导航样式
+
+    （回归保护：字号/字族切换即时重建导航 QSS，不等切 tab。
+    注：不端到端走 valueChanged —— 骨架 __new__ 绕过 QObject.__init__，
+    sender() 对未初始化 QObject 未定义，sender 判定链由生产路径保证）
+    """
+    from PyQt5.QtWidgets import QLabel
+
+    from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+    card = LLMSettingsCard.__new__(LLMSettingsCard)
+    card.cfg = Settings.get_instance()
+    card._nav_buttons = {"appearance": QLabel("外观样式")}
+
+    # __new__ 骨架未初始化 QObject：类级 pyqtSignal 的绑定 emit 不可用、
+    # sender() 抛 RuntimeError，均替换掉让 _on_config_changed 全流程可跑。
+    # sender 队列模拟真实 valueChanged 信号路径（返回对应 ConfigItem）
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(LLMSettingsCard, "configChanged", MagicMock())
+    senders = []
+    monkeypatch.setattr(LLMSettingsCard, "sender", lambda self: senders.pop(0) if senders else None)
+
+    calls = []
+    monkeypatch.setattr(LLMSettingsCard, "_update_nav_styles", lambda self: calls.append(1))
+    monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)
+    try:
+        # 字号 / 字族变更（模拟对应 item 的 valueChanged）→ 即时重建导航样式
+        for item in (card.cfg.ui_font_size, card.cfg.llm_font_family):
+            senders.append(item)
+            card._on_config_changed()
+        assert len(calls) == 2
+        # 主题类变更 → 不重复重建
+        senders.append(card.cfg.ui_theme_style)
+        card._on_config_changed()
+        assert len(calls) == 2
+    finally:
+        LLMSettingsCard._last_change_type = None
+        monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)
