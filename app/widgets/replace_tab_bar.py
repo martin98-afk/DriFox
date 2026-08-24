@@ -83,24 +83,33 @@ class ReplaceTabButton(QWidget):
             self.refresh_style()
 
     def refresh_style(self) -> None:
-        if self._is_conversation:
-            # 「对话」常驻按钮：active 时蓝底高亮，否则透明底蓝边（提示可返回对话区）
-            bg = Colors.CARD_BG.format(alpha=250) if self._active else "transparent"
-            border = Colors.BORDER_ACCENT
+        if self._active:
+            # 当前所在 tab：蓝底高亮 + 蓝边 + 亮字，一眼可辨
+            bg = Colors.TAB_ACTIVE_BG
+            border = Colors.TAG_ACCENT
+            label_color = Colors.TEXT_PRIMARY
+            hover_bg = Colors.SELECTED_BG
         else:
-            bg = Colors.CARD_BG.format(alpha=250) if self._active else "transparent"
-            border = Colors.BORDER_ACCENT if self._active else Colors.BORDER
+            # 非当前 tab：透明底 + 自适应明暗的次要文字色，hover 给主题色高亮反馈
+            bg = "transparent"
+            border = "transparent"
+            label_color = Colors.TEXT_SECONDARY
+            hover_bg = Colors.HOVER_BG
         self.setStyleSheet(
-            f"QWidget#{self.objectName()} {{ background: {bg}; border: 1px solid {border}; border-radius: 6px; }}"
+            f"QWidget#{self.objectName()} {{ background: {bg}; "
+            f"border: 1px solid {border}; border-radius: 7px; }}"
+            f"QWidget#{self.objectName()}:hover {{ background: {hover_bg}; }}"
         )
         self._label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
+            f"color: {label_color}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(12)}"
         )
         if not self._is_conversation:
             self._close.setStyleSheet(
                 f"QPushButton {{ color: {Colors.TEXT_MUTED}; background: transparent; "
-                f"border: none; font-size: 14px; }}"
-                f"QPushButton:hover {{ color: {Colors.TEXT_PRIMARY}; }}"
+                f"border: none; border-radius: 9px; font-size: 14px; padding: 0px; }}"
+                f"QPushButton:hover {{ color: {Colors.TEXT_PRIMARY}; "
+                f"background: {Colors.HOVER_BG}; }}"
             )
 
 
@@ -118,12 +127,12 @@ class ReplaceTabBar(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
         layout.addSpacerItem(QSpacerItem(0, 0, QSizePolicy.Expanding, QSizePolicy.Minimum))
         self._btn_container = QWidget(self)
         self._btn_layout = QHBoxLayout(self._btn_container)
         self._btn_layout.setContentsMargins(0, 0, 0, 0)
-        self._btn_layout.setSpacing(6)
+        self._btn_layout.setSpacing(8)
         # 常驻「对话」按钮：始终位于 replace 按钮最左，点击返回对话区
         self._conv_btn = ReplaceTabButton(CONVERSATION_ID, "对话", is_conversation=True)
         self._conv_btn.clicked.connect(self.tabClicked.emit)
@@ -170,7 +179,13 @@ class ReplaceTabBar(QWidget):
         self._btn_layout.insertWidget(1, btn)
 
     def refresh_style(self) -> None:
-        self.setStyleSheet("QWidget#replaceTabBar { background: transparent; }")
+        # 顶部切换栏：淡卡片色背景 + 底边分隔线，使其"成栏"而非裸按钮漂浮
+        self.setStyleSheet(
+            "QWidget#replaceTabBar { "
+            f"background: {Colors.CARD_BG.format(alpha=235)}; "
+            f"border-bottom: 1px solid {Colors.DIVIDER_COLOR}; "
+            "border-radius: 0px; }"
+        )
         self._conv_btn.refresh_style()
         for btn in self._buttons.values():
             btn.refresh_style()

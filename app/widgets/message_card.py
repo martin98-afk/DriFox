@@ -8866,6 +8866,26 @@ class MessageCard(SimpleCardWidget):
         self._welcome_mode_tabs = seg
         top_layout.addWidget(seg)
         top_layout.addStretch()
+        # 字号适配：SegmentedItem 内部写死 setFont(self, 14)，不读当前 delta，
+        # 必须在此按当前字号缩放一次，否则新建/重建欢迎卡片时 tab 字体恒为 14px。
+        self._apply_welcome_tabs_font()
+
+    def _apply_welcome_tabs_font(self):
+        """欢迎卡片 segmented tabs 适配系统字号
+
+        SegmentedItem._postInit() 硬 setFont(self, 14)，qfluentwidgets 原组件不感知
+        DriFox 的 font_size delta；此处按当前 delta 缩放覆盖，保证 tab 字体随
+        系统字号变化（首次构建 + _apply_runtime_ui_settings 字体块都会调用）。
+        """
+        if self._welcome_mode_tabs is None:
+            return
+        fs = scale_font_size(14)
+        ff = _get_global_font()
+        for item in self._welcome_mode_tabs.items.values():
+            font = item.font()
+            font.setFamily(ff)
+            font.setPixelSize(fs)
+            item.setFont(font)
 
     def _on_welcome_mode_tab_clicked(self, mode: str):
         """PyQt tabs 点击：切换 mode + 重新渲染 body（不重建 QWebEngineView）"""
