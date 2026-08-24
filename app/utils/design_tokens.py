@@ -77,8 +77,8 @@ def get_legacy_font_size_px(label: str) -> int | None:
     return _LEGACY_FONT_SIZE_PIXELS.get(label)
 
 
-# 默认档位（对应旧 large：14+2=16px）
-_DEFAULT_FONT_SIZE_KEY = "2"
+# 默认档位（对应旧 superlarge：14+4=18px）；配置键不在 FONT_SIZE_OPTIONS 范围时兜底到此值
+_DEFAULT_FONT_SIZE_KEY = "4"
 
 
 def get_ui_font_size_key() -> str:
