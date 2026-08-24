@@ -36,11 +36,7 @@ from app.utils.utils import get_font_family_css, get_unified_font
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。窗口宽度不足该值时对话区自动占满。
 _MAX_CHAT_WIDTH = 1000
 
-# ── 覆盖层（full 卡片，如插件市场）宽度上限额外值（px）──
-# 覆盖层激活时，full 卡片比对话气泡区（_MAX_CHAT_WIDTH）宽一点点（而非
-# 完全铺满对话区全宽），避免卡片在超宽屏上过宽难以阅读。窗口不足
-# _MAX_CHAT_WIDTH + 该值时 pad 归零、卡片自动铺满，不出现两侧空白。
-_OVERLAY_EXTRA_WIDTH = 80
+# ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
 
 # ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
 # 挤压折叠后点击展开时，若保存的宽度已被压到折叠阈值以下，展开不得窄于该值，
@@ -2433,12 +2429,9 @@ class TabManagerWindow(QWidget):
         w = wrapper.width()
         if w <= 0:
             return
-        # 覆盖层激活 → full 卡片限宽居中到「对话气泡区 + 一点」：
-        # 比对话窗口（气泡区 _MAX_CHAT_WIDTH）宽一点点，而非铺满 wrapper 全宽；
-        # 窗口不足该宽度时 pad 归零、卡片自动铺满，不出现两侧空白。
+        # 覆盖层激活 → 取消限宽，让 full 卡片可铺满 wrapper 全宽
         if self._content_stack.currentIndex() == 1:
-            target = _MAX_CHAT_WIDTH + _OVERLAY_EXTRA_WIDTH
-            pad = max(0, (w - target) // 2)
+            pad = 0
         else:
             pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
         layout = self._chat_wrapper_layout
