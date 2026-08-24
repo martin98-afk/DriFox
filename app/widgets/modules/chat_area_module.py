@@ -8,9 +8,15 @@
 - _on_chat_scrolled 滚动条回调（connect scroll_bar.valueChanged）
 
 PR3 扩展（多区域主题插件基础设施）：
-- _scene_layer       SceneLayer（chat_container 子 widget，撑满对话区背景）
 - _decoration_layer  DecorationLayer（host 子 widget，撑满整屏，按 anchor 摆放装饰件）
-- _apply_chat_backgrounds()  应用 scene + decorations 主题配置
+- _apply_decorations  应用 decorations 主题配置（apply_config）
+
+注意：scene_layer（撑满整个 TabManagerWindow._chat_frame 的场景背景）
+**不**在这里创建——它在 TabManagerWindow._setup_ui 里创建在 _chat_frame
+上（详见 app/widgets/tab_manager_window.py）。原因：scene 背景需要覆盖整
+个右侧圆角矩形（含 tab bar / LEFT/RIGHT/BOTTOM 停靠区 / UI 插件槽位等），
+而 host（OpenAIChatToolWindow）只是 _chat_frame 内部嵌入的对话子窗口，
+挂在自己身上无法覆盖 _chat_frame 内其它元素。
 """
 
 import os
@@ -49,7 +55,6 @@ class ChatAreaModule(UIModule):
         from app.main_widget import CHAT_SCROLL_STYLE
         from app.utils.theme_manager import theme_manager
         from app.widgets.decoration_layer import DecorationLayer
-        from app.widgets.scene_layer import SceneLayer
 
         layout = host.layout()
 
@@ -91,15 +96,9 @@ class ChatAreaModule(UIModule):
         if getattr(host, "_bottom_card_container", None) is not None:
             layout.addWidget(host._bottom_card_container)
 
-        # ── PR3：多区域背景层（scene + decorations） ──
-        # SceneLayer 作为 chat_container 子 widget（绝对定位，撑满对话区）
-        host._scene_layer = SceneLayer(host.chat_container)
-        host._scene_layer.lower()
-        try:
-            host.chat_container.installEventFilter(host._scene_layer)
-        except Exception:
-            pass
-
+        # ── PR3：装饰件叠加层（decorations） ──
+        # 注意：scene_layer 由 TabManagerWindow 在自己的 _chat_frame 上创建
+        # （撑满整个右侧圆角矩形），不在这里创建。
         # DecorationLayer 作为 host 子 widget（撑满 host 整屏，按 anchor 定位）
         host._decoration_layer = DecorationLayer(
             host,
@@ -109,14 +108,12 @@ class ChatAreaModule(UIModule):
         host._decoration_layer.raise_()
 
         # 注册主题刷新钩子：refresh_theme 触发重新应用配置
-        host._apply_chat_backgrounds = _make_apply(host)
-        host._scene_layer.refresh_theme = host._apply_chat_backgrounds
-        host._decoration_layer.refresh_theme = host._apply_chat_backgrounds
-        theme_manager.register_refresh_target(host._scene_layer)
+        host._apply_decorations = _make_apply(host)
+        host._decoration_layer.refresh_theme = host._apply_decorations
         theme_manager.register_refresh_target(host._decoration_layer)
 
         # 初始加载（延迟到首帧后，避免阻塞 setup_ui 关键路径）
-        QTimer.singleShot(0, host._apply_chat_backgrounds)
+        QTimer.singleShot(0, host._apply_decorations)
 
 
 def _make_apply(host) -> callable:
@@ -125,8 +122,6 @@ def _make_apply(host) -> callable:
         from app.utils.theme_manager import theme_manager
 
         bgs = theme_manager.get_theme_backgrounds(theme_manager.get_current_theme_id())
-        if hasattr(host, "_scene_layer") and host._scene_layer is not None:
-            host._scene_layer.apply_config(bgs["scene"], _resolve_chat_image)
         if hasattr(host, "_decoration_layer") and host._decoration_layer is not None:
             host._decoration_layer.apply_config(bgs["decorations"], _resolve_chat_image)
     return apply

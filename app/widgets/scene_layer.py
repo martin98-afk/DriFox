@@ -1,18 +1,39 @@
 # -*- coding: utf-8 -*-
 """场景背景层（PR3 — 多区域主题插件基础设施）
 
-挂载点：作为 chat_container 的子 widget（绝对定位，不参与 chat_layout）。
+挂载点：作为 TabManagerWindow._chat_frame 的子 widget（绝对定位，不参与布局）。
+       撑满 _chat_frame.rect()——含 replace_tab_bar / 对话区 / 输入框 /
+       LEFT/RIGHT/BOTTOM 停靠区 / UI 插件槽位等所有 _chat_frame 内的内容。
+       是 aurora 等主题的「右侧整个区域」场景背景图。
 渲染：QLabel + QPixmap，支持 image/opacity/blur/dim。
-同步：监听 parent.resize 自动同步 geometry（chat_container = chat_scroll_area viewport）。
+同步：监听 parent.resize 自动同步 geometry。
 
 设计取舍：
-- 作为 chat_container 子 widget（不是 host 子 widget）→ scene 背景只占据
-  对话区，不延伸到顶部卡/底部卡，避免污染侧栏/输入框背景。
+- 作为 TabManagerWindow._chat_frame 子 widget（2026-08 改造）：
+  scene 图片覆盖整个右侧圆角矩形（含 UI 插件槽位），而不仅是 OpenAIChatToolWindow
+  对话区滚动区内层。
+- SceneLayer 在 _chat_frame 最底层（.lower()），所有 _chat_frame 内的 UI 控件
+  （replace_tab_bar / dock splitter / 对话区 / 输入框 / UI 插件槽位）都在它之上。
+- SceneLayer 自身设 border-radius 8px 适配 _chat_frame 的圆角矩形，
+  避免图片在 _chat_frame 圆角外溢出成方块。
 - 整体（self）挂 QGraphicsOpacityEffect 控制 opacity。
 - 内部 _image_label 单独挂 QGraphicsBlurEffect 控制 blur。
   Qt 限制一个 widget 只能挂一个 effect，所以拆开挂载。
 - _dim_label 是纯 background-color，不挂 effect（叠在 _image_label 之上）。
 """
+
+from typing import Optional
+
+from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtWidgets import (
+    QGraphicsBlurEffect,
+    QGraphicsOpacityEffect,
+    QLabel,
+    QWidget,
+)
+
+# 适配 _chat_frame 的 8px 圆角；SceneLayer 自身和内部图片标签都按此设置
+_CHAT_FRAME_RADIUS = 8
 
 from typing import Optional
 
@@ -58,10 +79,14 @@ class SceneLayer(QWidget):
             return
 
         # 1. 纯色底（color）—— 作为 self 的 background-color
+        # SceneLayer 自身 + image_label/dim_label 都设 border-radius 8px 适配
+        # _chat_frame 圆角矩形，避免图片在圆角外溢出成方块。
         color = cfg.get("color")
         if color:
             self.setAutoFillBackground(True)
-            self.setStyleSheet(f"background-color: {color};")
+            self.setStyleSheet(
+                f"background-color: {color}; border-radius: {_CHAT_FRAME_RADIUS}px;"
+            )
 
         # 2. 图片层（独立 widget，可挂 blur effect）
         image = cfg.get("image")
@@ -75,6 +100,10 @@ class SceneLayer(QWidget):
                 self._image_label.setPixmap(pix)
                 self._image_label.setScaledContents(True)
                 self._image_label.setGeometry(self.rect())
+                # 图片也设圆角（避免溢出到 _chat_frame 圆角外）
+                self._image_label.setStyleSheet(
+                    f"border-radius: {_CHAT_FRAME_RADIUS}px;"
+                )
                 self._image_label.show()
                 # blur 效果挂到 _image_label
                 blur = cfg.get("blur", 0)
@@ -87,7 +116,9 @@ class SceneLayer(QWidget):
         dim = cfg.get("dim")
         if dim:
             self._dim_label = QLabel(self)
-            self._dim_label.setStyleSheet(f"background-color: {dim};")
+            self._dim_label.setStyleSheet(
+                f"background-color: {dim}; border-radius: {_CHAT_FRAME_RADIUS}px;"
+            )
             self._dim_label.setGeometry(self.rect())
             self._dim_label.raise_()
             self._dim_label.show()

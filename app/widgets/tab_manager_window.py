@@ -563,19 +563,39 @@ class TabManagerWindow(QWidget):
             """)
 
     def _apply_bg_from_theme(self):
-        """主题切换入口：刷新 3 个区域背景（window/sidebar/chat_area）
+        """主题切换入口：刷新 4 个区域背景（window/sidebar/chat_area/scene）
 
         新 schema（yaml 的 `backgrounds:` 块）由 get_theme_backgrounds() 暴露；
         旧字段 `background.chat_list` 通过 PR1 自动映射到 `backgrounds.sidebar`，
         保持现有 17 套内置主题工作不变。
+
+        scene 撑满整个右侧 _chat_frame 圆角矩形（含 tab bar / 对话区 / 输入框 /
+        LEFT/RIGHT/BOTTOM 停靠区 / UI 插件槽位等），是 aurora 等主题的图片层；
+        chat_area 是 _chat_frame 纯色底（向下兼容旧主题）。
         """
         try:
             bgs = theme_manager.get_theme_backgrounds(theme_manager.get_current_theme_id())
             self._apply_area_bg("window", self, bgs["window"])
             self._apply_area_bg("sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"])
             self._apply_area_bg("chat_area", getattr(self, "_chat_frame", None), bgs["chat_area"])
+            self._apply_scene_layer(bgs["scene"])
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
+
+    def _apply_scene_layer(self, scene_cfg):
+        """应用 scene 配置到 _scene_layer（撑满整个右侧 _chat_frame 圆角矩形）
+
+        Args:
+            scene_cfg: get_theme_backgrounds()["scene"] 返回的 dict 或 None
+        """
+        if not hasattr(self, "_scene_layer") or self._scene_layer is None:
+            return
+
+        # image 解析：复用 _resolve_theme_image（已在文件内）
+        try:
+            self._scene_layer.apply_config(scene_cfg, self._resolve_theme_image)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用 scene 背景失败: {e}")
 
     def _apply_area_bg(self, area, parent_widget, bg_cfg):
         """统一区域背景加载器（window/sidebar/chat_area 共用）
@@ -739,6 +759,22 @@ class TabManagerWindow(QWidget):
         chat_frame_layout = QVBoxLayout(self._chat_frame)
         chat_frame_layout.setContentsMargins(6, 6, 6, 6)
         chat_frame_layout.setSpacing(0)
+
+        # ── PR3：场景背景层（scene_layer）撑满整个右侧圆角矩形 ──
+        # scene_layer 作为 _chat_frame 子 widget，绝对定位铺满 _chat_frame.rect()，
+        # 覆盖整个右侧区域（含 replace_tab_bar / 对话区 / LEFT/RIGHT/BOTTOM
+        # 停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）。
+        # 这是 aurora 等主题的 scene 图片/纯色底的真实挂载点。
+        # 注意：scene_layer 在 _chat_frame 内部的其它 layout 之前创建，
+        # 后续 .lower() 确保它在所有 UI 控件之下。
+        from app.widgets.scene_layer import SceneLayer
+
+        self._scene_layer = SceneLayer(self._chat_frame)
+        self._scene_layer.lower()
+        try:
+            self._chat_frame.installEventFilter(self._scene_layer)
+        except Exception:
+            pass
 
         # ── 全局卡片宿主容器（Tab 级系统卡片） ──
         # 系统配置 / 服务商编辑 / Hook 编辑 / MCP 编辑等全局卡片不再绑定

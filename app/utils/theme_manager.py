@@ -221,9 +221,13 @@ class ThemeManager:
         新 schema（yaml 的 `backgrounds:` 块）：
           - window      : 整个 TabManagerWindow 最底层（颜色或图片）
           - sidebar     : 左侧 Tab 面板（独立背景）
-          - chat_area   : 右侧 chat_frame 外层（独立背景）
-          - scene       : 对话区滚动区内层（场景化背景）
-          - decorations : 装饰件数组（多张 PNG，按 anchor 摆放）
+          - chat_area   : 右侧 _chat_frame 纯色底（向下兼容旧主题；aurora 类新主题
+                          直接全部配置在 scene 即可，chat_area 可省略）
+          - scene       : 右侧 _chat_frame 图片/场景化背景（撑满整个右侧圆角矩形，
+                          含 replace_tab_bar / 对话区 / 输入框 / LEFT/RIGHT/BOTTOM
+                          停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）
+          - decorations : 装饰件数组（多张 PNG，按 anchor 摆放；anchor 坐标系以
+                          OpenAIChatToolWindow 为基准，定位在对话区/输入框附近）
 
         旧字段兼容（避免破坏现有 17 套内置主题）：
           - background.window_bg → backgrounds.window
