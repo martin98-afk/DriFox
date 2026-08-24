@@ -1121,6 +1121,9 @@ class TabManagerWindow(QWidget):
             # growth_required=False：overlay 挤压时窗口总宽未变，不适用相对增长
             # 条件（否则窗口没变宽永远不会自动展开），此处仅按绝对空间下限判断。
             QTimer.singleShot(0, lambda: self._maybe_auto_expand_after_squeeze(growth_required=False))
+        # 覆盖层切换会改变 wrapper 限宽策略（page=1 取消限宽，page=0 恢复限宽），
+        # wrapper resize 事件不会因此重发，立即同步一次让 margins 即时生效。
+        QTimer.singleShot(0, self._sync_chat_wrapper_width)
 
     def _on_splitter_idle(self):
         """splitter 拖拽防抖超时：松手后恢复内容区绘制 + 解除 TabPanel 节流
@@ -2127,12 +2130,21 @@ class TabManagerWindow(QWidget):
         return False
 
     def _sync_chat_wrapper_width(self):
-        """按当前 wrapper 宽度设置左右 margins，实现对话区限宽居中"""
+        """按当前 wrapper 宽度设置左右 margins，实现对话区限宽居中
+
+        覆盖层激活（_content_stack 切到 index 1，container=full 卡片可见）时
+        取消限宽居中：full 卡片应该铺满 wrapper 全宽（line 745-749 设计意图），
+        而非与对话区共享 _MAX_CHAT_WIDTH 上限。
+        """
         wrapper = self._chat_wrapper
         w = wrapper.width()
         if w <= 0:
             return
-        pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
+        # 覆盖层激活 → 取消限宽，让 full 卡片可铺满 wrapper 全宽
+        if self._content_stack.currentIndex() == 1:
+            pad = 0
+        else:
+            pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
         layout = self._chat_wrapper_layout
         if layout.contentsMargins().left() != pad:
             layout.setContentsMargins(pad, 0, pad, 0)
