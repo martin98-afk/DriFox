@@ -217,7 +217,7 @@ class TeamManager:
     # ── 成员清理 ─────────────────────────────────────
 
     def set_active_window_ids(self, window_ids: set, team_name: Optional[str] = None):
-        """由主窗口同步当前真实的活跃窗口 ID 集合（跨 OpenAIChatToolWindow._instances 收集）
+        """由主窗口同步当前真实的活跃窗口 ID 集合（跨 app.core.window_registry.window_instances 收集）
 
         🛡️ 空集合表示活跃窗口信息不可靠（窗口 __init__ 阶段自身还未注册进
         _instances、创建/销毁时序竞态等），既不覆盖已知的有效集合，也不触发清理。

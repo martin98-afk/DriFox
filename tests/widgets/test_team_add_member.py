@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """团队框"新建任务" + "快速新建成员"按钮测试（F14 返工版）
 
 覆盖范围：
@@ -20,6 +20,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from app.core import window_registry
 
 
 # ══════════════════════════════════════════════════════════
@@ -857,8 +858,8 @@ def test_handle_team_new_task_rotates_run_id(qapp):
     # PyQt 未初始化实例访问属性会抛 RuntimeError。保存原列表，测试后恢复）
     from app.main_widget import OpenAIChatToolWindow
 
-    orig_instances = list(getattr(OpenAIChatToolWindow, "_instances", []))
-    OpenAIChatToolWindow._instances = [win1, win2]
+    orig_instances = list(window_registry.window_instances)
+    window_registry.window_instances = [win1, win2]
 
     # mock TabManagerWindow.get_instance（刷新分组）
     with (
@@ -877,7 +878,7 @@ def test_handle_team_new_task_rotates_run_id(qapp):
             for _ in range(8):
                 QCoreApplication.processEvents()
         finally:
-            OpenAIChatToolWindow._instances = orig_instances
+            window_registry.window_instances = orig_instances
 
     # 1) 全员先 _create_new_session（保存旧历史到旧 run_id）
     win1._create_new_session.assert_called_once_with()
@@ -919,13 +920,13 @@ def test_handle_team_new_task_no_active_windows_warns(qapp):
 
     from app.main_widget import OpenAIChatToolWindow
 
-    orig_instances = list(getattr(OpenAIChatToolWindow, "_instances", []))
-    OpenAIChatToolWindow._instances = []  # 无 win01（inst 是 __new__ 实例不能放）
+    orig_instances = list(window_registry.window_instances)
+    window_registry.window_instances = []  # 无 win01（inst 是 __new__ 实例不能放）
     try:
         with patch.object(InfoBar, "warning") as m_warn:
             inst._handle_team_new_task()
     finally:
-        OpenAIChatToolWindow._instances = orig_instances
+        window_registry.window_instances = orig_instances
 
     m_warn.assert_called_once()
     assert not fake_tm.start_team_run.called
@@ -1141,3 +1142,4 @@ def test_apply_model_selection_no_match_falls_back_to_builder(qapp):
 
     assert fake_win._current_provider_name == "prov-1"
     assert fake_win._current_model_name == "gpt-4o"
+

@@ -410,6 +410,14 @@ class PixelPetWidget(QWidget):
         self._load_spritesheet()
         self.update()
 
+    def refresh_theme(self) -> None:
+        """主题刷新统一入口（ThemeManager.dispatch_refresh 调用）。
+
+        与 refresh_pet 等价：重新加载 spritesheet 以应用主题配色。
+        桌宠下沉为 TabManagerWindow 全局浮层后，由 TabManager 统一注册刷新目标。
+        """
+        self.refresh_pet()
+
     # ═══════════════════════════════════════════════════════════
     # 帧间隔管理
     # ═══════════════════════════════════════════════════════════
@@ -1427,19 +1435,45 @@ class PixelPetWidget(QWidget):
     # ═══════════════════════════════════════════════════════════
 
     def _get_send_button_top(self):
-        """通过父窗口的 input_area.send_btn 获取发送按钮上边缘 Y 坐标"""
-        parent = self.parent()
-        if not parent:
-            return None
+        """桌宠已下沉为 TabManagerWindow 全局浮层：取当前激活窗的
+        input_area.send_btn 在 TabManagerWindow 坐标系下的上边缘 Y 坐标。
+
+        原逻辑读 self.parent().input_area.send_btn（parent 为单个 MainWidget），
+        现 parent 为 TabManagerWindow（无 input_area），改为经 TabManagerWindow
+        取当前激活窗的 send_btn 并映射到 TabManagerWindow 坐标系（与 pet 自身
+        几何坐标系一致）。
+        """
         try:
-            input_area = getattr(parent, 'input_area', None)
-            if input_area is not None and hasattr(input_area, 'send_btn'):
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is None:
+                return None
+            win = tm.get_current_window()
+            if win is None:
+                return None
+            input_area = getattr(win, "input_area", None)
+            if input_area is not None and hasattr(input_area, "send_btn"):
                 sb = input_area.send_btn
                 if sb.isVisible():
-                    return sb.mapTo(parent, QPoint(0, 0)).y()
+                    return sb.mapTo(self.parent() or tm, QPoint(0, 0)).y()
         except Exception:
             pass
         return None
+
+    def reposition_to_active_window(self) -> None:
+        """TabManager 切 tab / 窗体缩放时调用：重新定位到当前激活窗的 send_btn。
+
+        复用 resize_handle 的平滑移动逻辑（_animate_to），从旧位置平滑滑到
+        新窗口输入框；坐标基于 TabManagerWindow 坐标系（pet 已下沉为全局浮层）。
+        拖拽中不打断用户操作。
+        """
+        if self._dragging:
+            return
+        p = self.parent()
+        if p is None:
+            return
+        self.resize_handle(p.width(), p.height())
 
     def resize_handle(self, parent_width: int, parent_height: int) -> None:
         """父窗口大小变化时平滑移动 — 桌宠站在发送按钮上边缘"""

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 TabManagerWindow — Tab 管理器宿主窗口（标准系统窗口）
 
@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from PyQt5 import sip as _sip
 
 from loguru import logger
+from app.core import window_registry
 from PyQt5.QtCore import QEasingCurve, QEvent, Qt, QPoint, QTimer, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
@@ -315,6 +316,8 @@ class TabManagerWindow(QWidget):
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
+    # 聚合 AI 状态 → 全局桌宠（仅当前激活窗的状态被转发，避免多窗串扰）
+    active_ai_state_changed = pyqtSignal(str)
 
     @classmethod
     def get_instance(cls) -> Optional["TabManagerWindow"]:
@@ -413,6 +416,27 @@ class TabManagerWindow(QWidget):
         # 但保持接口一致性便于将来扩展）
         theme_manager.register_refresh_target(self)
 
+        # ── 全局桌宠（单例浮层，下沉自 MainWidget）──
+        # 多 tab 下唯一常驻：不随窗口销毁，切 tab 平滑跟随激活窗 send_btn。
+        # pet_enabled=False 时 hide 而非 destroy（保留实例，便于实时开关）。
+        from app.widgets.pixel_pet import PixelPetWidget
+
+        self.pixel_pet = PixelPetWidget(self)
+        if Settings.get_instance().pet_enabled.value:
+            self.pixel_pet.show()
+            self.pixel_pet.raise_()
+        else:
+            self.pixel_pet.hide()
+        Settings.get_instance().pet_enabled.valueChanged.connect(self._on_pet_enabled_changed)
+        # 主题 / 字号刷新（取代 main 的 pet 级连接）：仅在此处完成一次。
+        # 注意：_pixel_pet 自身的 __init__ 已调用 _connect_config_signals()，
+        # 此处【不可】重复调用，否则 pet_size 信号会被连两次。
+        theme_manager.register_refresh_target(self.pixel_pet)
+        # AI 状态：pet 只连一次聚合信号（切 tab 由聚合信号改发当前窗状态）
+        self.active_ai_state_changed.connect(self.pixel_pet._on_ai_state_changed)
+        # 初始定位到右下角（首个窗口加入 + 激活后会精确对齐 send_btn）
+        self.pixel_pet.resize_handle(self.width(), self.height())
+
         # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
         QTimer.singleShot(0, self._apply_bg_from_theme)
 
@@ -476,8 +500,28 @@ class TabManagerWindow(QWidget):
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
+    def _on_pet_enabled_changed(self, enabled: bool) -> None:
+        """桌宠显示开关实时响应（全局桌宠由 TabManager 统一管理）"""
+        pet = getattr(self, "pixel_pet", None)
+        if pet is None:
+            return
+        if enabled:
+            pet.show()
+            pet.raise_()
+            # 重新对齐当前激活窗 send_btn
+            pet.reposition_to_active_window()
+        else:
+            # hide 而非 destroy：保留实例，便于再次开启无需重建
+            pet.hide()
+
     def refresh_theme(self):
-        """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
+        """ThemeManager 统一刷新入口（dispatch_refresh 调用）
+
+        全局桌宠配色随主题刷新交由 theme_manager 统一派发：
+        pet 已通过 register_refresh_target 注册，dispatch_refresh 会直接
+        调用 pet.refresh_theme() → refresh_pet() 重载 spritesheet，无需此处
+        再显式调用（避免重复刷新）。
+        """
         self._on_theme_changed()
 
     def _apply_theme_stylesheet(self):
@@ -1730,7 +1774,7 @@ class TabManagerWindow(QWidget):
             window._tab_title_changed_slot = _on_win_title_changed
             window.windowTitleChanged.connect(_on_win_title_changed)
 
-            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示）
+            # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示 + 全局桌宠）
             def _on_ai_state_changed(state, _win=window):
                 if _sip.isdeleted(_win):
                     return
@@ -1749,9 +1793,19 @@ class TabManagerWindow(QWidget):
                 else:  # idle
                     self._tab_panel.update_tab_streaming(cur_idx, False, False)
                     self._tab_panel.update_tab_question(cur_idx, False)
+                # 聚合 AI 状态 → 全局桌宠：仅当前激活窗的状态被转发，
+                # 避免多 tab 下旧窗状态串扰（pet 只连一次 active_ai_state_changed）。
+                if _win is self.get_current_window():
+                    self.active_ai_state_changed.emit(state)
 
             window._tab_ai_state_slot = _on_ai_state_changed
             window.ai_state_changed.connect(_on_ai_state_changed)
+
+            # ★ destroyed 兜底：窗体被 Qt 直接销毁（绕过 _close_window_at，
+            # 如 cleanup() 的 w.close() 路径）时由 _on_window_destroyed 断开
+            # 上述闭包连接，打破 __defaults__ 对 window 的引用环，防止整树泄漏。
+            # _close_window_at 已覆盖常规关闭路径（close 前显式断开）。
+            window.destroyed.connect(self._on_window_destroyed)
 
             # 立即触发一次初始图标更新 + 团队胶囊状态同步
             logger.info(f"[TabMode] 初始图标: project={project!r}, tab_idx={tab_idx}")
@@ -1892,6 +1946,42 @@ class TabManagerWindow(QWidget):
             return
         self._close_window_at(idx)
 
+    def _disconnect_window_signals(self, window):
+        """断开 add_window 时为窗口挂接的信号闭包。
+
+        add_window 连接了两路窗口级信号：
+        - windowTitleChanged → _tab_title_changed_slot（_on_win_title_changed）
+        - ai_state_changed   → _tab_ai_state_slot（_on_ai_state_changed）
+        闭包 __defaults__（_win=window）持有窗口引用，PyQt 对 C++ 对象销毁后
+        自动断开的 Python slot 释放滞后，窗口 Python wrapper 残留导致整树泄漏
+        （T5 诊断第⑦条引用链：信号表自环）。须在窗口 C++ 对象存活时 disconnect，
+        并置 None 打破引用环。destroyed 后 Qt 会自动断开，此处额外置 None 兜底。
+        """
+        for _slot_attr, _signal in (
+            ("_tab_title_changed_slot", "windowTitleChanged"),
+            ("_tab_ai_state_slot", "ai_state_changed"),
+        ):
+            _slot = getattr(window, _slot_attr, None)
+            if _slot is not None:
+                try:
+                    getattr(window, _signal).disconnect(_slot)
+                except Exception:
+                    pass
+                try:
+                    setattr(window, _slot_attr, None)
+                except Exception:
+                    pass
+
+    def _on_window_destroyed(self, window=None):
+        """destroyed 兜底：窗体被 Qt 直接销毁（绕过 _close_window_at，如
+        cleanup() 的 w.close() 路径）时断开上述闭包连接，防止整树泄漏。
+        window 为 destroyed 信号传入的发送者（C++ 对象正在销毁，disconnect
+        可能已无意义，置 None 仍可打破引用环）。
+        """
+        if window is None:
+            return
+        self._disconnect_window_signals(window)
+
     def _close_window_at(self, idx: int):
         """按索引统一关闭窗口：从 _windows 弹出 + removeWidget + remove_tab + close
 
@@ -1924,24 +2014,10 @@ class TabManagerWindow(QWidget):
             self._tab_panel.remove_tab(idx)
         except Exception:
             pass
-        # ★ 泄漏修复（P0）：显式断开 add_window 连接的信号闭包。
-        # 闭包 __defaults__（_win=window）持有窗口引用，PyQt 对 C++ 对象销毁后
-        # 自动断开的 Python slot 释放滞后，窗口 Python wrapper 残留导致整树泄漏。
+        # ★ 泄漏修复（P0）：断开 add_window 连接的信号闭包（逻辑见
+        # _disconnect_window_signals；destroyed 兜底见 _on_window_destroyed）。
         # 须在 close() 之前断开（此时 C++ 对象仍存活，disconnect 安全）。
-        for _slot_attr, _signal in (
-            ("_tab_title_changed_slot", "windowTitleChanged"),
-            ("_tab_ai_state_slot", "ai_state_changed"),
-        ):
-            _slot = getattr(window, _slot_attr, None)
-            if _slot is not None:
-                try:
-                    getattr(window, _signal).disconnect(_slot)
-                except Exception:
-                    pass
-                try:
-                    setattr(window, _slot_attr, None)
-                except Exception:
-                    pass
+        self._disconnect_window_signals(window)
         # 调用窗口的关闭逻辑（自动保存会话）
         try:
             window.close()
@@ -2062,6 +2138,14 @@ class TabManagerWindow(QWidget):
                     scope = getattr(win, "_theme_needs_refresh_scope", None) or None
                     win._theme_needs_refresh_scope = None
                     win._apply_runtime_ui_settings(scope=scope, _skip_global=True)
+                except Exception:
+                    pass
+            # 切换 tab 时同步全局桌宠：① 平滑重定位到激活窗 send_btn；
+            # ② 改发当前窗 AI 状态（旧窗状态不串扰，全局 pet 跟随激活窗）。
+            if getattr(self, "pixel_pet", None) is not None:
+                self.pixel_pet.reposition_to_active_window()
+                try:
+                    self.pixel_pet._on_ai_state_changed(getattr(win, "_ai_state", "idle"))
                 except Exception:
                     pass
 
@@ -2201,7 +2285,7 @@ class TabManagerWindow(QWidget):
         try:
             from app.main_widget import OpenAIChatToolWindow
 
-            for inst in list(OpenAIChatToolWindow._instances):
+            for inst in list(window_registry.window_instances):
                 if not getattr(inst, "_is_destroyed", False) and callable(
                     getattr(inst, "_sync_active_windows_to_team_manager", None)
                 ):
@@ -2701,6 +2785,9 @@ class TabManagerWindow(QWidget):
             self._tab_panel.update()
         if hasattr(self, "_content_area"):
             self._content_area.update()
+        # 全局桌宠跟随窗体缩放：resize 结束后精确重定位到激活窗 send_btn
+        if getattr(self, "pixel_pet", None) is not None:
+            self.pixel_pet.reposition_to_active_window()
         # 窗口 resize 结束：若左面板因挤压已自动折叠且空间已恢复，自动展开
         self._maybe_auto_expand_after_squeeze()
 
@@ -2776,6 +2863,12 @@ class TabManagerWindow(QWidget):
     def cleanup(self):
         """清理所有窗口和资源"""
         TabManagerWindow._instance = None
+        # ★ 清理全局桌宠（停止所有定时器），先于窗口关闭避免悬空引用
+        if getattr(self, "pixel_pet", None) is not None:
+            try:
+                self.pixel_pet.cleanup()
+            except Exception:
+                pass
         for w in list(self._windows):
             try:
                 w.close()

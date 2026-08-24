@@ -9,6 +9,7 @@ import pytest
 from PyQt5.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+from app.core import window_registry
 
 
 @pytest.fixture()
@@ -36,13 +37,13 @@ def widget(qtbot, monkeypatch):
     w._command_card = MagicMock()
     qtbot.addWidget(w._toolbar_capsule)
     # 模拟已打开窗口：注册进类级实例表 + 复位热重载指纹
-    OpenAIChatToolWindow._instances.append(w)
-    OpenAIChatToolWindow._last_hot_reload_fingerprint = None
+    window_registry.window_instances.append(w)
+    window_registry.last_hot_reload_fingerprint = None
     OpenAIChatToolWindow._last_hot_reload_at = 0.0
     yield w
-    if w in OpenAIChatToolWindow._instances:
-        OpenAIChatToolWindow._instances.remove(w)
-    OpenAIChatToolWindow._last_hot_reload_fingerprint = None
+    if w in window_registry.window_instances:
+        window_registry.window_instances.remove(w)
+    window_registry.last_hot_reload_fingerprint = None
     OpenAIChatToolWindow._last_hot_reload_at = 0.0
 
 
@@ -97,9 +98,9 @@ def test_hot_reload_rogue_window_does_not_block_broadcast(qtbot, widget, fresh_r
     # 修复前 hasattr(win, "_command_card") 抛 RuntimeError 中断整个广播槽
     rogue = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     monkeypatch.setattr(
-        OpenAIChatToolWindow, "_instances", [rogue, widget]  # 残骸排在最前
+        window_registry, "window_instances", [rogue, widget]  # 残骸排在最前
     )
-    monkeypatch.setattr(OpenAIChatToolWindow, "_last_hot_reload_fingerprint", None)
+    monkeypatch.setattr(window_registry, "last_hot_reload_fingerprint", None)
     monkeypatch.setattr(OpenAIChatToolWindow, "_last_hot_reload_at", 0.0)
 
     from PyQt5.QtWidgets import QToolButton

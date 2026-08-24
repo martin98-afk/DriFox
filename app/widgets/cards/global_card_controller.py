@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 GlobalCardController — Tab 级全局卡片控制器（单例）
 
@@ -16,6 +16,7 @@ per-window 的派生状态（如当前窗口选中的服务商、模型列表）
 """
 
 import copy
+from app.core import window_registry
 from typing import List, Optional
 
 from loguru import logger
@@ -86,7 +87,7 @@ class GlobalCardController:
                 return w
         from app.main_widget import OpenAIChatToolWindow
 
-        for w in OpenAIChatToolWindow._instances:
+        for w in window_registry.window_instances:
             if not getattr(w, "_is_destroyed", False):
                 return w
         return None
@@ -96,7 +97,7 @@ class GlobalCardController:
         from app.main_widget import OpenAIChatToolWindow
 
         result = []
-        for w in OpenAIChatToolWindow._instances:
+        for w in window_registry.window_instances:
             if not getattr(w, "_is_destroyed", False):
                 result.append(w)
         return result

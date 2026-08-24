@@ -84,6 +84,7 @@ from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
 from app.core.tool_permission_controller import ToolPermissionController
+from app.core import window_registry
 
 
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
@@ -108,7 +109,6 @@ from app.widgets.bottom_input_area import (
     InputGlowUnderlay,
     SendableTextEdit,
 )
-from app.widgets.pixel_pet import PixelPetWidget
 
 # TabManagerWindow 延迟导入：133 处 InfoBar parent 统一表达式（get_instance() or self.window()）
 # 需要函数内也可用，模块级导入一次即可。tab_manager_window 顶层仅依赖 app.utils.*，
@@ -1008,8 +1008,7 @@ def _image_path_to_data_uri(img_path: str) -> "str | None":
 class OpenAIChatToolWindow(ToolWindow):
     name = "飘狐"
     icon = get_icon("drifox")
-    # 所有窗口实例列表（用于广播事件）
-    _instances: List[OpenAIChatToolWindow] = []
+    # 所有窗口实例列表（用于广播事件）已外提到 app.core.window_registry.window_instances
     session_manager = None
     _valid_configs: Dict[str, Dict[str, Any]] = {}
     history_manager = None
@@ -1038,7 +1037,7 @@ class OpenAIChatToolWindow(ToolWindow):
     # 每个窗口各执行一遍 _on_plugin_hot_reload。类级指纹 + 短窗抑制，
     # 只让首个窗口执行完整刷新链路，其余窗口直接 return。
     # 指纹 = result 序列化（同一次广播 result 相同）；10s 短窗内同指纹只执行一次。
-    _last_hot_reload_fingerprint: Optional[str] = None
+    # _last_hot_reload_fingerprint 已外提到 app.core.window_registry.last_hot_reload_fingerprint
     _last_hot_reload_at: float = 0.0
 
     # 工具热重载风险通知：进程级注册标记（多窗口只注册一次 listener）
@@ -1067,8 +1066,8 @@ class OpenAIChatToolWindow(ToolWindow):
     # 避免两处硬编码列表漂移。
     # aboutToQuit 全局注册守卫（仅首个窗口连接一次）
     _about_to_quit_connected: bool = False
-    # 子智能体日志全局清理 timer（类级单例，不随窗口销毁）
-    _class_subagent_log_cleanup_timer = None
+    # 子智能体日志全局清理 timer 已外提到
+    # app.core.window_registry.subagent_log_cleanup_timer（类级单例，不随窗口销毁）
 
     _BASE_SYSTEM_CARD_IDS = (
         "model_selector",
@@ -1419,7 +1418,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug("[AutoUpdate] 已检查过更新，跳过")
 
         # 注册到全局实例列表（用于多窗口事件广播）
-        OpenAIChatToolWindow._instances.append(self)
+        window_registry.register_window(self)
 
         # 【性能优化】延迟构建重型卡片内容（记忆/历史/模型选择等），
         # 让窗口外壳（chat_scroll_area + 输入区域）先出现。
@@ -1430,7 +1429,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 避免每个后台 tab 都全量构建重型卡片。
         self._deferred_build_pending = False
         self._settings_popup_pending = False
-        self._pixel_pet_pending = False
         QTimer.singleShot(800, self._deferred_build_cards)
 
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
@@ -2379,7 +2377,6 @@ class OpenAIChatToolWindow(ToolWindow):
         由 showEvent 触发。仅当本窗口此前因未激活而置了待建标记时才补建：
         - _deferred_build_pending  → 重新触发 _deferred_build_cards（7 张卡片）
         - _settings_popup_pending  → 重新触发 _build_settings_popup
-        - _pixel_pet_pending       → 重新触发 _init_pixel_pet
 
         已构建（无 pending）时直接返回，保证"首次激活后与现有行为等价"，
         不会重复构建、不会改变构建内容与时机。
@@ -2405,9 +2402,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_settings_popup_pending", False):
             self._settings_popup_pending = False
             QTimer.singleShot(0, lambda: self._safe_timer_call(self._build_settings_popup))
-        if getattr(self, "_pixel_pet_pending", False):
-            self._pixel_pet_pending = False
-            QTimer.singleShot(0, lambda: self._safe_timer_call(self._init_pixel_pet))
 
     def showEvent(self, event):
         # P2 懒加载：窗口变为可见（Tab 模式被选中 / 独立窗口显示）时，
@@ -2483,7 +2477,7 @@ class OpenAIChatToolWindow(ToolWindow):
     @classmethod
     def _on_class_cleanup_timer(cls):
         """类级清理 timer 回调：找任意存活窗口执行清理"""
-        for win in getattr(cls, "_instances", []):
+        for win in window_registry.window_instances:
             if not getattr(win, "_is_destroyed", False):
                 win._do_clean_subagent_logs()
                 return
@@ -2491,17 +2485,17 @@ class OpenAIChatToolWindow(ToolWindow):
     @classmethod
     def _start_subagent_log_cleanup(cls):
         """定期清理子智能体日志，避免无限堆积（全局仅一个 timer）"""
-        if cls._class_subagent_log_cleanup_timer is not None:
+        if window_registry.subagent_log_cleanup_timer is not None:
             return  # 已有全局 timer
         # 找任意一个存活窗口执行首次清理
-        for win in getattr(cls, "_instances", []):
+        for win in window_registry.window_instances:
             if not getattr(win, "_is_destroyed", False):
                 win._do_clean_subagent_logs()
                 break
-        cls._class_subagent_log_cleanup_timer = QTimer()
-        cls._class_subagent_log_cleanup_timer.setInterval(6 * 60 * 60 * 1000)  # 6小时
-        cls._class_subagent_log_cleanup_timer.timeout.connect(cls._on_class_cleanup_timer)
-        cls._class_subagent_log_cleanup_timer.start()
+        window_registry.subagent_log_cleanup_timer = QTimer()
+        window_registry.subagent_log_cleanup_timer.setInterval(6 * 60 * 60 * 1000)  # 6小时
+        window_registry.subagent_log_cleanup_timer.timeout.connect(cls._on_class_cleanup_timer)
+        window_registry.subagent_log_cleanup_timer.start()
 
     def _do_clean_subagent_logs(self):
         """执行子智能体日志清理（保留14天）"""
@@ -2854,18 +2848,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 字体样式
         self.setStyleSheet("")
-
-        # ===== 像素小狐桌宠 =====
-        self.pixel_pet: PixelPetWidget | None = None
-        from app.utils.config import Settings
-
-        if Settings.get_instance().pet_enabled.value:
-            # 性能优化：桌宠非关键装饰，延迟到首帧后再初始化，
-            # 避免在窗口出现的关键路径上加载 spritesheet / 播放入场动画。
-            QTimer.singleShot(0, self._init_pixel_pet)
-
-        # 桌宠显示开关的实时响应
-        Settings.get_instance().pet_enabled.valueChanged.connect(self._on_pet_enabled_changed)
 
         # ── 会话栏装配（Phase F：已迁移到 TitleBarModule，由 compose 驱动）──
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -3303,7 +3285,7 @@ class OpenAIChatToolWindow(ToolWindow):
         win_id = id(shortcut_parent)
         # 统计同一窗口下残余的 MainWidget 实例数
         remaining = sum(
-            1 for w in OpenAIChatToolWindow._instances if not w._is_destroyed and id(w.window() or w) == win_id
+            1 for w in window_registry.window_instances if not w._is_destroyed and id(w.window() or w) == win_id
         )
         if remaining <= 1:
             # 最后一个实例销毁时清除窗口级缓存
@@ -4248,7 +4230,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _handle_team_save(self, name: str):
         """保存当前活跃窗口的 agent 列表为命名模板到 user-custom 插件。
 
-        收集所有 OpenAIChatToolWindow._instances 的 _current_agent，
+        收集所有 window_registry.window_instances 的 _current_agent，
         去重后写入 .drifox/plugins/user-custom/team_templates/<name>.yaml。
         """
         from app.core.team.template_manager import TemplateManager
@@ -4259,7 +4241,7 @@ class OpenAIChatToolWindow(ToolWindow):
         seen: set = set()
         agent_names: List[str] = []
         active_windows: List["OpenAIChatToolWindow"] = []
-        for win in getattr(OpenAIChatToolWindow, "_instances", []):
+        for win in window_registry.window_instances:
             try:
                 if getattr(win, "_is_destroyed", False):
                     continue
@@ -4883,7 +4865,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 收集团队成员窗口实例（按 _window_id 匹配）
         member_windows: List["OpenAIChatToolWindow"] = []
         member_ids = {m.get("window_id") for m in members if m.get("window_id")}
-        for inst in list(OpenAIChatToolWindow._instances):
+        for inst in list(window_registry.window_instances):
             wid = getattr(inst, "_window_id", None)
             if wid in member_ids and not getattr(inst, "_is_destroyed", False):
                 member_windows.append(inst)
@@ -5699,7 +5681,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         tm = TeamManager.get_instance()
         active_ids = set()
-        for inst in list(OpenAIChatToolWindow._instances):
+        for inst in list(window_registry.window_instances):
             wid = getattr(inst, "_window_id", None)
             if wid and not getattr(inst, "_is_destroyed", False):
                 active_ids.add(wid)
@@ -7852,61 +7834,40 @@ class OpenAIChatToolWindow(ToolWindow):
             TeamManager.get_instance().set_member_runtime_status(self._window_id, "idle")
         # error 等其余状态不覆盖（重试期保持 busy，避免闪烁）
 
-    def _init_pixel_pet(self) -> None:
-        """初始化像素小狐桌宠
+    def _on_pet_typing(self) -> None:
+        """★ 用户输入文字时让全局桌宠好奇看向输入框
 
-        P2 懒加载：窗口未激活（Tab 模式非当前页）时跳过构建，置待建标记，
-        激活时由 _maybe_build_deferred_content 补建。手动开启路径
-        （_on_pet_enabled_changed）不受影响——用户主动开启时窗口必已激活。
+        桌宠已下沉为 TabManagerWindow 唯一全局浮层（见 tab_manager_window），
+        本窗口仅作转发：输入框打字 → 全局 pet 播放陪写动画。
         """
         if getattr(self, "_is_destroyed", False):
-            return  # 窗口已销毁：0ms 定时器仍可能触发，直接跳过
-        if not self.isVisible():
-            self._pixel_pet_pending = True
-            return
-        try:
-            self.pixel_pet = PixelPetWidget(self)
-            from app.utils.theme_manager import theme_manager
-
-            theme_manager.register_refresh_target(self.pixel_pet)
-            self.pixel_pet.show()
-            self.pixel_pet.raise_()
-            # 连接 AI 状态信号 → 桌宠自主管理动画
-            self.ai_state_changed.connect(self.pixel_pet._on_ai_state_changed)
-            # 初始定位到右下角
-            self.pixel_pet.resize_handle(self.width(), self.height())
-            logger.info("[PixelPet] 桌宠已初始化")
-        except Exception as e:
-            logger.warning(f"[PixelPet] 初始化失败: {e}")
-            self.pixel_pet = None
-
-    def _on_pet_typing(self) -> None:
-        """★ 用户输入文字时让桌宠好奇看向输入框"""
-        if getattr(self, "_is_destroyed", False):
-            return
-        if not hasattr(self, "pixel_pet") or self.pixel_pet is None:
             return
         # 只在有实际内容输入时触发（避免清空/加载历史时的误触发）
         text = self.input_area.toPlainText().strip() if hasattr(self, "input_area") else ""
-        if text:
-            self.pixel_pet.on_user_typing()
+        if not text:
+            return
+        tm = TabManagerWindow.get_instance()
+        if tm is not None and getattr(tm, "pixel_pet", None) is not None:
+            tm.pixel_pet.on_user_typing()
 
-    def _on_pet_enabled_changed(self, enabled: bool) -> None:
-        """桌宠显示开关实时响应"""
-        from app.utils.config import Settings
+    def _pet_set_state(self, state: str) -> None:
+        """转发业务/AI 状态到 TabManager 全局桌宠。
 
-        if enabled:
-            if self.pixel_pet is None:
-                self._init_pixel_pet()
-            else:
-                self.pixel_pet.show()
-                self.pixel_pet.raise_()
-        else:
-            if self.pixel_pet is not None:
-                from app.utils.theme_manager import theme_manager
-
-                theme_manager.unregister_refresh_target(self.pixel_pet)
-                self.pixel_pet.hide()
+        仅当前激活窗的状态驱动全局桌宠，避免多 tab 下后台窗状态串扰
+        （语义对齐原"每窗独立 pet"：仅本窗可见时其状态才上宠）。
+        """
+        tm = TabManagerWindow.get_instance()
+        if tm is None:
+            return
+        pet = getattr(tm, "pixel_pet", None)
+        if pet is None:
+            return
+        if self is not tm.get_current_window():
+            return
+        try:
+            pet.set_state(state)
+        except Exception:
+            pass
 
     # ══════════════════════════════════════════════════════════════
 
@@ -8644,9 +8605,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.start()
         # 重新定位底部工具栏（绝对定位，不在 layout 里）
         self._position_bottom_toolbar()
-        # 桌宠跟随窗口大小修正位置
-        if self.pixel_pet:
-            self.pixel_pet.resize_handle(self.width(), self.height())
 
     def _set_cards_resize_preview_mode(self, enabled: bool):
         if enabled == self._resize_preview_active:
@@ -8961,7 +8919,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 _tab_active_win = _tm.get_current_window()
         except Exception:
             pass
-        for win in getattr(OpenAIChatToolWindow, "_instances", []):
+        for win in window_registry.window_instances:
             if getattr(win, "_is_destroyed", False):
                 continue
             # Tab 模式下非可见窗口跳过刷新，标记延迟
@@ -8979,7 +8937,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── Tab 模式：刷新 TabManagerWindow 样式 ──
         # 主题变更路径不走 theme_manager.dispatch_refresh()，而是手动遍历
-        # OpenAIChatToolWindow._instances，导致 TabManagerWindow 注册的
+        # window_registry.window_instances，导致 TabManagerWindow 注册的
         # refresh_target 回调从未触发。此处直接更新。
         try:
             from app.widgets.tab_manager_window import TabManagerWindow as _TabManagerWindow
@@ -9059,7 +9017,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _sync_skill_list_cards(self):
         """同步所有窗口的技能列表卡片状态（无条件同步，widget 隐藏时也更新）"""
-        for win in getattr(OpenAIChatToolWindow, "_instances", []):
+        for win in window_registry.window_instances:
             if win._is_destroyed:
                 continue
             try:
@@ -9137,7 +9095,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 找主窗口作 parent（Tab 管理器优先，否则首个存活窗口）
             parent = TabManagerWindow.get_instance()
             if parent is None:
-                for win in OpenAIChatToolWindow._instances:
+                for win in window_registry.window_instances:
                     if not getattr(win, "_is_destroyed", False):
                         parent = win
                         break
@@ -9194,11 +9152,11 @@ class OpenAIChatToolWindow(ToolWindow):
         _fingerprint = repr(sorted(result.items()))
         _now = time.time()
         if (
-            _fingerprint == OpenAIChatToolWindow._last_hot_reload_fingerprint
+            _fingerprint == window_registry.last_hot_reload_fingerprint
             and _now - OpenAIChatToolWindow._last_hot_reload_at < 10.0
         ):
             return
-        OpenAIChatToolWindow._last_hot_reload_fingerprint = _fingerprint
+        window_registry.last_hot_reload_fingerprint = _fingerprint
         OpenAIChatToolWindow._last_hot_reload_at = _now
         # 不弹 InfoBar，仅日志记录
         logger.debug(
@@ -9214,7 +9172,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
 
         # 广播给所有窗口实例
-        for win in list(OpenAIChatToolWindow._instances):
+        for win in list(window_registry.window_instances):
             if not OpenAIChatToolWindow._win_alive(win, "_command_card"):
                 continue
 
@@ -9235,7 +9193,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if result.get("commands"):
             # 清除窗口级快捷键缓存，允许重新注册
             OpenAIChatToolWindow._window_shortcut_cache.clear()
-            for win in list(OpenAIChatToolWindow._instances):
+            for win in list(window_registry.window_instances):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
@@ -9244,7 +9202,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
         if result.get("ui"):
-            for win in list(OpenAIChatToolWindow._instances):
+            for win in list(window_registry.window_instances):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
@@ -9256,7 +9214,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 消息卡片，命中该插件的 custom 块时用最新 render_func 重新生成。
             # plugin_name 为空（全量/合并重载）时重绘全部 custom 块。
             _ui_plugin_name = result.get("_plugin_name") or ""
-            for win in list(OpenAIChatToolWindow._instances):
+            for win in list(window_registry.window_instances):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
@@ -9291,7 +9249,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注意：settings popup 是全局共享单例（所有窗口通过 property 访问同一实例），
         # 遍历窗口时每个窗口都会命中同一实例 → 只处理一次即 break，避免重复刷新。
         if result.get("skills"):
-            for win in list(OpenAIChatToolWindow._instances):
+            for win in list(window_registry.window_instances):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
@@ -9308,7 +9266,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # Hooks 变更：刷新 hook 设置卡片（settings popup 全局单例 → 只刷一次）
         if result.get("hooks"):
-            for win in list(OpenAIChatToolWindow._instances):
+            for win in list(window_registry.window_instances):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
@@ -9328,7 +9286,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 主题变更：刷新主题下拉列表（settings popup 全局单例，只刷一次）
         if result.get("themes"):
-            for win in list(OpenAIChatToolWindow._instances):
+            for win in list(window_registry.window_instances):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
@@ -9358,7 +9316,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         if _mcp_reload:
             mcp_card = None
-            for win in list(OpenAIChatToolWindow._instances):
+            for win in list(window_registry.window_instances):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
@@ -9406,7 +9364,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # LSP 配置变更：刷新 LSP 状态列表（settings popup 全局单例 → 只刷一次）
         if result.get("lsp"):
-            for win in list(OpenAIChatToolWindow._instances):
+            for win in list(window_registry.window_instances):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
@@ -9425,7 +9383,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # UI 组件变更：热重载可能已强制删除 UI 插件卡片，
         # 检查并恢复输入区（兜底：防止 _on_system_card_closed 回调链断裂）
         if result.get("ui"):
-            for win in list(OpenAIChatToolWindow._instances):
+            for win in list(window_registry.window_instances):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
@@ -12240,27 +12198,23 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _archive_history_session(self, index: int):
         ## 触发警示动画
-        if self.pixel_pet:
-            self.pixel_pet.set_state("warning")
+        self._pet_set_state("warning")
 
         # 🛡️ 使用历史面板缓存的 _all_history 列表查找 session_id，
         # 避免因流式保存导致排序变化后 index 偏移指向错误会话。
         session_record = self._history_popup_card.get_history_at_index(index)
         if not session_record:
-            if self.pixel_pet:
-                self.pixel_pet.set_state("idle")
+            self._pet_set_state("idle")
             return
         session_id = session_record.get("session_id")
         if not session_id:
-            if self.pixel_pet:
-                self.pixel_pet.set_state("idle")
+            self._pet_set_state("idle")
             return
         # 通过 session_id 找到全量列表中的真实 index
         full_index = self.history_manager.find_index_by_session_id(session_id)
         if full_index is None:
             # 会话不存在，恢复状态
-            if self.pixel_pet:
-                self.pixel_pet.set_state("idle")
+            self._pet_set_state("idle")
             return
 
         archived_current = self._current_session_id is not None and session_id == self._current_session_id
@@ -12310,8 +12264,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     self._notify_history_data_changed()
 
         # 操作完成，恢复正常状态
-        if self.pixel_pet:
-            self.pixel_pet.set_state("idle")
+        self._pet_set_state("idle")
 
     def _on_team_archive_requested(self, run_id: str):
         """归档团队会话（合并条目「归档」按钮）
@@ -12324,16 +12277,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if not run_id or not self.history_manager:
             return
         ## 触发警示动画
-        if self.pixel_pet:
-            self.pixel_pet.set_state("warning")
+        self._pet_set_state("warning")
 
         try:
             members = self.history_manager.get_team_sessions_by_run_id(run_id)
         except Exception:
             members = []
         if not members:
-            if self.pixel_pet:
-                self.pixel_pet.set_state("idle")
+            self._pet_set_state("idle")
             InfoBar.warning(
                 "归档失败",
                 "未找到该团队的会话记录",
@@ -12394,8 +12345,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 position=InfoBarPosition.BOTTOM,
             )
         # 操作完成，恢复正常状态
-        if self.pixel_pet:
-            self.pixel_pet.set_state("idle")
+        self._pet_set_state("idle")
 
     def _rename_history_session(self, index: int, new_title: str):
         if not self.history_manager:
@@ -12504,8 +12454,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_archived_session_deleted(self, file_path: str):
         """彻底删除归档会话"""
         ## 触发警示动画
-        if self.pixel_pet:
-            self.pixel_pet.set_state("warning")
+        self._pet_set_state("warning")
         from app.widgets.common_dialogs import ConfirmDialog
 
         # 确认对话框
@@ -12528,8 +12477,7 @@ class OpenAIChatToolWindow(ToolWindow):
         _dialog.exec_()
         if not _confirmed[0]:
             # 取消操作，恢复正常状态
-            if self.pixel_pet:
-                self.pixel_pet.set_state("idle")
+            self._pet_set_state("idle")
             return
 
         try:
@@ -12566,8 +12514,7 @@ class OpenAIChatToolWindow(ToolWindow):
             )
         finally:
             # 操作完成（不论成功或失败），恢复正常状态
-            if self.pixel_pet:
-                self.pixel_pet.set_state("idle")
+            self._pet_set_state("idle")
 
     def _on_archived_session_renamed(self, file_path: str, new_title: str):
         """重命名归档会话"""
@@ -17674,8 +17621,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_input_glow_underlay"):
             self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
-        if self.pixel_pet:
-            self.pixel_pet.set_state("streaming")  # 回答后继续回复
+        self._pet_set_state("streaming")  # 回答后继续回复
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
             self._pending_permission_tool_call_id = None
@@ -17716,8 +17662,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_input_glow_underlay"):
             self._input_glow_underlay.setVisible(True)
         self._restore_after_question_close()
-        if self.pixel_pet:
-            self.pixel_pet.set_state("idle")  # 取消则回 idle
+        self._pet_set_state("idle")  # 取消则回 idle
 
         if self._pending_permission_tool_call_id:
             tool_call_id = self._pending_permission_tool_call_id
@@ -18321,7 +18266,7 @@ class OpenAIChatToolWindow(ToolWindow):
             tm_mgr.set_team_project(project, team_name=team_name)
         # 本窗口团队 key：run_id 优先（同一次 /team --load 共享），回退团队名
         my_key = getattr(self, "_team_run_id", "") or getattr(self, "_team_name", "") or TeamManager.DEFAULT_TEAM
-        for win in type(self)._instances:
+        for win in window_registry.window_instances:
             if win is self or getattr(win, "_is_destroyed", False):
                 continue
             if not getattr(win, "_team_agent_name", ""):
@@ -18387,7 +18332,7 @@ class OpenAIChatToolWindow(ToolWindow):
         tm_mgr.set_team_workdir(workdir or "")
         # 本窗口团队 key：run_id 优先（同一次 /team --load 共享），回退团队名
         my_key = getattr(self, "_team_run_id", "") or getattr(self, "_team_name", "") or TeamManager.DEFAULT_TEAM
-        for win in type(self)._instances:
+        for win in window_registry.window_instances:
             if win is self or getattr(win, "_is_destroyed", False):
                 continue
             if not getattr(win, "_team_agent_name", ""):
@@ -18582,11 +18527,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_archive_project(self, project_name: str):
         """归档项目处理"""
         ## 触发警示动画
-        if self.pixel_pet:
-            self.pixel_pet.set_state("warning")
+        self._pet_set_state("warning")
         if not self.history_manager:
-            if self.pixel_pet:
-                self.pixel_pet.set_state("idle")
+            self._pet_set_state("idle")
             return
 
         # 后端执行归档（可能返回0个会话，但项目本身仍应被清理）
@@ -18674,8 +18617,7 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         # 操作完成，恢复正常状态
-        if self.pixel_pet:
-            self.pixel_pet.set_state("idle")
+        self._pet_set_state("idle")
 
     def _on_export_project(self, project_name: str):
         """导出项目为 .drifox_project 压缩包 — 先选方式再导出（后台线程避免 UI 冻结）"""
@@ -18713,8 +18655,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 root_dir_map = self._build_project_root_dir_map([project_name])
                 root_dir = root_dir_map.get(project_name, "")
 
-            if self.pixel_pet:
-                self.pixel_pet.set_state("warning")
+            self._pet_set_state("warning")
 
             # 后台线程导出 ZIP，避免大项目阻塞 UI
             self._export_thread = _ProjectExportThread(self.history_manager, project_name, root_dir)
@@ -18730,8 +18671,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_project_export_done(self, zip_path: str, error: str, project_name: str, mode: int):
         """后台导出完成回调（主线程）"""
-        if self.pixel_pet:
-            self.pixel_pet.set_state("idle")
+        self._pet_set_state("idle")
 
         if error:
             InfoBar.error(
@@ -19599,10 +19539,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_app_about_to_quit(cls):
         """应用退出时保存所有窗口的脏会话（单次注册，批量执行）"""
         # 停止全局子智能体日志清理定时器，避免退出后悬空回调
-        if cls._class_subagent_log_cleanup_timer is not None:
-            cls._class_subagent_log_cleanup_timer.stop()
-            cls._class_subagent_log_cleanup_timer = None
-        for win in getattr(cls, "_instances", []):
+        if window_registry.subagent_log_cleanup_timer is not None:
+            window_registry.subagent_log_cleanup_timer.stop()
+            window_registry.subagent_log_cleanup_timer = None
+        for win in window_registry.window_instances:
             if getattr(win, "_is_destroyed", False):
                 continue
             try:
@@ -19797,25 +19737,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-        # ★ 泄漏修复（A1-3）：补断 Tab 模式下 add_window 挂接的信号闭包
-        # （windowTitleChanged → _tab_title_changed_slot、ai_state_changed →
-        # _tab_ai_state_slot）。tab_manager_window._close_window_at 已断开
-        # 一次（覆盖 Tab 关闭路径），此处兜底覆盖非 Tab 路径/窗口直接 close
-        # （如 _on_team_close_requested 的批量关闭），防止闭包
-        # __defaults__ 持有窗口引用导致整树泄漏。须在 C++ 对象存活时
-        # disconnect 安全执行。
-        for _slot_attr, _signal in (
-            ("_tab_title_changed_slot", "windowTitleChanged"),
-            ("_tab_ai_state_slot", "ai_state_changed"),
-        ):
-            try:
-                _slot = getattr(self, _slot_attr, None)
-                if _slot is not None:
-                    getattr(self, _signal).disconnect(_slot)
-                    setattr(self, _slot_attr, None)
-            except Exception:
-                pass
-
         # 标记窗口正在关闭，防止所有异步回调访问已销毁的 UI
         self._is_destroyed = True
 
@@ -19856,13 +19777,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-        # ★ 清理像素小狐桌宠（停止所有定时器）
-        if getattr(self, "pixel_pet", None) is not None:
-            try:
-                self.pixel_pet.cleanup()
-            except Exception:
-                pass
-
         # 🔧 清理团队邮箱监听器
         if getattr(self, "_team_fs_watcher", None):
             try:
@@ -19888,7 +19802,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 从全局实例列表中移除
         try:
-            OpenAIChatToolWindow._instances.remove(self)
+            window_registry.unregister_window(self)
         except ValueError, Exception:
             pass
 
@@ -20055,7 +19969,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._unloaded_pids.clear()
 
         # 最后一个窗口关闭 → 应用退出，保存工作目录到 DB，下次启动时自动恢复
-        if not OpenAIChatToolWindow._instances:
+        if not window_registry.window_instances:
             try:
                 workdir = self._current_workdir.get(self._current_project)
                 if workdir and self.backend and self.backend.memory_manager:
@@ -20742,3 +20656,5 @@ def _compact_process_heap_after_cleanup():
     内存管理自行处理，gc 收集足够。
     """
     gc.collect()
+
+
