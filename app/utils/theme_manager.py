@@ -210,10 +210,67 @@ class ThemeManager:
         return theme.get("window", {})
 
     def get_theme_background(self, theme_id: str) -> dict:
-        """获取背景图片配置"""
+        """获取背景图片配置（旧字段，对应 yaml 的 `background:` 块）"""
         self._ensure_loaded()
         theme = self._themes.get(theme_id) or {}
         return theme.get("background", {})
+
+    def get_theme_backgrounds(self, theme_id: str) -> dict:
+        """获取主题的多区域背景配置（新字段，统一 5 个区域）
+
+        新 schema（yaml 的 `backgrounds:` 块）：
+          - window      : 整个 TabManagerWindow 最底层（颜色或图片）
+          - sidebar     : 左侧 Tab 面板（独立背景）
+          - chat_area   : 右侧 chat_frame 外层（独立背景）
+          - scene       : 对话区滚动区内层（场景化背景）
+          - decorations : 装饰件数组（多张 PNG，按 anchor 摆放）
+
+        旧字段兼容（避免破坏现有 17 套内置主题）：
+          - background.window_bg → backgrounds.window
+          - background.chat_list → backgrounds.window（历史行为：作为 TabManagerWindow 全屏背景）
+            注：旧字段命名"chat_list"在历史实现里实际作用于 TabManagerWindow 全屏背景，
+            保持向后兼容不破坏现有主题外观。新主题应直接使用 `backgrounds.window`。
+
+        每个区域的标准字段：{color, image, opacity, blur, dim, enabled}。
+        返回结构：
+          {
+            "window": dict | None,
+            "sidebar": dict | None,
+            "chat_area": dict | None,
+            "scene": dict | None,
+            "decorations": list[dict],
+          }
+        """
+        self._ensure_loaded()
+        theme = self._themes.get(theme_id) or {}
+
+        new_bg = theme.get("backgrounds") or {}
+        legacy_bg = theme.get("background") or {}
+
+        def _normalize(d: Optional[dict]) -> Optional[dict]:
+            """统一区域字段：补默认值 + 兼容旧字段"""
+            if not d:
+                return None
+            return {
+                "color": d.get("color"),
+                "image": d.get("image"),
+                "opacity": d.get("opacity", 1.0),
+                "blur": d.get("blur", 0),
+                "dim": d.get("dim"),
+                "enabled": d.get("enabled", True),
+            }
+
+        return {
+            "window": (
+                _normalize(new_bg.get("window"))
+                or _normalize(legacy_bg.get("window_bg"))
+                or _normalize(legacy_bg.get("chat_list"))  # 历史 chat_list 也作 window（保持向后兼容）
+            ),
+            "sidebar": _normalize(new_bg.get("sidebar")),
+            "chat_area": _normalize(new_bg.get("chat_area")),
+            "scene": _normalize(new_bg.get("scene")),
+            "decorations": new_bg.get("decorations") or [],
+        }
 
     def get_theme_dir(self, theme_id: str) -> Optional[Path]:
         """获取主题资源目录（主题文件夹路径）"""

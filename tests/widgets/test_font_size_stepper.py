@@ -174,3 +174,49 @@ def test_config_changed_rebuilds_nav_style_on_font_size(qapp, monkeypatch):
     finally:
         LLMSettingsCard._last_change_type = None
         monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)
+
+
+def test_config_changed_rebuilds_nav_style_even_if_listener_clears_flag(qapp, monkeypatch):
+    """回归：emit configChanged 后即使 _last_change_type 被监听者清空也要重建导航
+
+    生产路径：on_settings_config_changed → win._on_settings_config_changed
+    会同步把 LLMSettingsCard._last_change_type 清零；emit 后必须还能判别
+    是否需要重建导航 QSS，否则字号切换只能等切 tab 时触发。
+    """
+    from PyQt5.QtWidgets import QLabel
+
+    from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
+
+    card = LLMSettingsCard.__new__(LLMSettingsCard)
+    card.cfg = Settings.get_instance()
+    card._nav_buttons = {"appearance": QLabel("外观样式")}
+
+    from unittest.mock import MagicMock
+
+    real_signal = MagicMock()
+
+    def fake_emit(*args, **kwargs):
+        # 模拟生产链路监听者：emit 后立即清空类级变量
+        LLMSettingsCard._last_change_type = None
+
+    real_signal.emit = fake_emit
+    monkeypatch.setattr(LLMSettingsCard, "configChanged", real_signal)
+    senders = []
+    monkeypatch.setattr(LLMSettingsCard, "sender", lambda self: senders.pop(0) if senders else None)
+
+    calls = []
+    monkeypatch.setattr(LLMSettingsCard, "_update_nav_styles", lambda self: calls.append(1))
+    monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)
+    try:
+        # 字号 / 字族变更：emit 清空类级变量后，仍须重建导航样式
+        for item in (card.cfg.ui_font_size, card.cfg.llm_font_family):
+            senders.append(item)
+            card._on_config_changed()
+        assert len(calls) == 2, f"导航样式重建被 emit 期间清空 _last_change_type 影响，实际次数 {len(calls)}"
+        # 主题类变更 → 不重建
+        senders.append(card.cfg.ui_theme_style)
+        card._on_config_changed()
+        assert len(calls) == 2
+    finally:
+        LLMSettingsCard._last_change_type = None
+        monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)

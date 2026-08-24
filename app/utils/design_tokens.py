@@ -58,6 +58,25 @@ FONT_SIZE_OPTIONS = {str(d): {"delta": d, "base": 14} for d in range(-5, 11)}
 # 旧档位键（small/medium/large/superlarge）→ delta 键迁移映射
 _LEGACY_FONT_SIZE_KEYS = {"small": "-1", "medium": "0", "large": "2", "superlarge": "4"}
 
+# 旧档位标签 → 实际像素字号（base 字段）：保留旧插件对 font_size 的硬编码假设
+#   旧 small base=13, medium base=14, large base=16, superlarge base=18
+# 新结构 base 恒 14，实际像素值 = 14 + delta；新 ctx.font_size 在数值上与旧 base 一致
+# （delta=-1→13 / 0→14 / 2→16 / 4→18）。
+# 旧插件若硬编码按 label 取值（如按 "large" 字符串触发"大"模式），
+# 可用本表 + get_legacy_font_size_px() 兜底，label 未知返回 None。
+_LEGACY_FONT_SIZE_PIXELS = {"small": 13, "medium": 14, "large": 16, "superlarge": 18}
+
+
+def get_legacy_font_size_px(label: str) -> int | None:
+    """按旧档位标签返回"小/中/大/超大"对应的实际像素字号
+
+    新插件请读 ctx.font_size（实际像素值）或迭代 FONT_SIZE_OPTIONS（delta 键）。
+    旧插件若硬编码按 small=13/medium=14/large=16/superlarge=18 计算行高/图标，
+    可用本函数兜底，标签未知返回 None。
+    """
+    return _LEGACY_FONT_SIZE_PIXELS.get(label)
+
+
 # 默认档位（对应旧 large：14+2=16px）
 _DEFAULT_FONT_SIZE_KEY = "2"
 

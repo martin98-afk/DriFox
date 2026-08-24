@@ -991,13 +991,16 @@ class LLMSettingsCard(SystemCardFrame):
         else:
             LLMSettingsCard._last_change_type = None  # 未知类型，全量刷新
 
+        # 局部缓存判断标志：emit 后 OpenAIChatToolWindow._on_settings_config_changed
+        # 会同步把 _last_change_type 清零（批量刷新用），那时再读就拿不到了
+        needs_nav_rebuild = LLMSettingsCard._last_change_type in ("font_size", "font_family")
         self.configChanged.emit()
         # 所有配置控件在变更时已即时保存，这里只负责刷新运行时外观
 
         # 字体/字号变更 → 即时重建左侧导航按钮 QSS
         # （按钮样式串内嵌 font_size_css/get_font_family_css，旧 QSS 会压制
         #   apply_font_size_to_widget 的 setFont；不重建则切 tab 前字体不生效）
-        if LLMSettingsCard._last_change_type in ("font_size", "font_family"):
+        if needs_nav_rebuild:
             try:
                 self._update_nav_styles()
             except Exception:

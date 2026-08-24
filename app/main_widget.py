@@ -3662,7 +3662,11 @@ class OpenAIChatToolWindow(ToolWindow):
             theme_name = theme_data.get("name", "") if theme_data else ""
             is_dark = isDarkTheme()
             font_family = _get_global_font()
-            font_size = get_ui_font_size()
+            # ctx.font_size 取"实际已应用 delta 缩放后的像素值"，与旧 FONT_SIZE_OPTIONS
+            # 中 base 字段（small=13/medium=14/large=16/superlarge=18）语义一致。
+            # 旧插件按 ctx.font_size 为基准派生子字号（标题 +1、描述 -1 等）继续可用；
+            # delta=2 时新旧映射：旧 large=16 ↔ 新 ctx=16（delta=2 → 14+2）。
+            font_size = scale_font_size(get_ui_font_size())
             theme_colors = theme_manager.get_current_colors()
         except Exception:
             pass
@@ -9796,6 +9800,12 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._tool_control_card.refresh_style()
 
         # ── 5b. 字体相关公共块（颜色或字体变化时都执行） ──
+        # 内嵌 font_size_css / get_font_family_css 的浮动卡片：
+        #   - 颜色变化：上面 5a 已调过 refresh_style（重复但无害，setStyleSheet 幂等）
+        #   - 字体变化：5a 不走 → 这里补一次刷新，否则字号/字族切换时
+        #     内嵌硬编码 font-size 的 QSS 不重建，setFont 被 QSS 盖住，视觉不响应
+        self._refresh_floating_cards_font_style()
+
         # 模型按钮文字（含 font_size_css，颜色+字体双敏感）
         if hasattr(self, "_model_btn_text"):
             self._model_btn_text.setStyleSheet(self._get_model_btn_text_style())
@@ -9840,6 +9850,57 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
 
         ThemeRefreshCoordinator.timer_end("total")
+
+    def _refresh_floating_cards_font_style(self):
+        """刷新内嵌 font_size_css / get_font_family_css 的浮动卡片
+
+        字号/字族切换走 _apply_runtime_ui_settings → 5b 块调用本方法。
+        5a 颜色块已对部分卡片 refresh_style，但 5a 不走 is_font 分支 →
+        本方法独立覆盖字体变化路径，避免内嵌硬编码 font-size 的 QSS
+        不重建导致 setFont 被 QSS 盖住（视觉不响应）。
+
+        同时刷新 UI 插件浮动卡片（plugin-marketplace 等），它们通过
+        ctx 拉取 font_size/font_family，show_card 之后需要主动调
+        _apply_latest_theme 重新拉 ctx 应用新字号/字族。
+        """
+        # ── 主窗口内嵌浮动卡片 ──
+        for card in (
+            self._question_floating_widget,
+            self._sub_agent_compact_widget,
+            self._share_card_content,
+            self._history_questions_card_content,
+            self._undo_delete_card,
+            getattr(self, "_command_card", None),
+            getattr(self, "_file_mention_card", None),
+            getattr(self, "_memory_card_popup", None),
+            getattr(self, "_tool_control_card", None),
+        ):
+            if card and hasattr(card, "refresh_style"):
+                try:
+                    card.refresh_style()
+                except Exception:
+                    pass
+
+        # ── UI 插件浮动卡片：拉模型，卡片自带 _apply_latest_theme / _apply_theme / _retheme ──
+        # （detect-by-hasattr 防止强制依赖某个具体方法名，向后兼容多版本插件）
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            reg = UIPluginRegistry.get_instance()
+            instances = reg._card_widget_instances.get(self._window_id, {})
+            for widget in instances.values():
+                if widget is None or not widget.isVisible():
+                    continue
+                for method_name in ("_apply_latest_theme", "_apply_theme", "_retheme"):
+                    method = getattr(widget, method_name, None)
+                    if callable(method):
+                        try:
+                            method()
+                        except Exception:
+                            pass
+                        break
+        except Exception:
+            pass
 
     def _apply_synced_model_selection(self):
         """gitee 配置同步完成后：把本窗口模型选择刷新为云端 llm_selected_model。

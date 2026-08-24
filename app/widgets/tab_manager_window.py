@@ -563,64 +563,127 @@ class TabManagerWindow(QWidget):
             """)
 
     def _apply_bg_from_theme(self):
-        """从当前主题配置加载背景图片，作为 TabManagerWindow 全局背景
+        """主题切换入口：刷新 3 个区域背景（window/sidebar/chat_area）
 
-        背景为纯装饰：单例窗口全局一张，不随对话框各自加载。
-        优化：缓存背景配置，同一背景（路径+透明度）不重复创建 QLabel。
+        新 schema（yaml 的 `backgrounds:` 块）由 get_theme_backgrounds() 暴露；
+        旧字段 `background.chat_list` 通过 PR1 自动映射到 `backgrounds.sidebar`，
+        保持现有 17 套内置主题工作不变。
         """
         try:
-            bg_config = theme_manager.get_theme_background(theme_manager.get_current_theme_id())
-            chat_list = bg_config.get("chat_list", {})
-            if chat_list.get("enabled", True):
-                image = chat_list.get("image", ":/icons/fox_bg.png")
-                opacity = chat_list.get("opacity", 0.1)
-            else:
-                image = None
-                opacity = 0.1
+            bgs = theme_manager.get_theme_backgrounds(theme_manager.get_current_theme_id())
+            self._apply_area_bg("window", self, bgs["window"])
+            self._apply_area_bg("sidebar", getattr(self, "_tab_frame", None), bgs["sidebar"])
+            self._apply_area_bg("chat_area", getattr(self, "_chat_frame", None), bgs["chat_area"])
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 应用主题背景失败: {e}")
 
-            # ── 缓存检查：同一背景配置跳过重建 ──
-            from app.utils.theme_refresh import ThemeRefreshCoordinator
+    def _apply_area_bg(self, area, parent_widget, bg_cfg):
+        """统一区域背景加载器（window/sidebar/chat_area 共用）
 
-            bg_key = ThemeRefreshCoordinator.get_bg_cache_key(image, opacity)
-            if (
-                getattr(self, "_last_bg_key", None) == bg_key
-                and hasattr(self, "_bg_label")
-                and self._bg_label is not None
-            ):
-                return
-            self._last_bg_key = bg_key
+        Args:
+            area: "window"/"sidebar"/"chat_area"（用作属性名前缀）
+            parent_widget: 背景挂载的目标 widget（None 时跳过）
+            bg_cfg: get_theme_backgrounds() 返回的单个区域配置（None 或 dict）
+        """
+        if parent_widget is None:
+            return
 
-            if image:
-                # 先清除旧背景
-                if hasattr(self, "_bg_label") and self._bg_label is not None:
-                    self._bg_label.deleteLater()
-                    self._bg_label = None
-                # 解析图片路径：主题文件夹内的相对路径基于主题目录
-                import os as _os
+        label_attr = f"_{area}_bg_label"
+        opacity_attr = f"_{area}_bg_opacity"
+        key_attr = f"_last_{area}_bg_key"
 
-                if not image.startswith(":") and not _os.path.isabs(image):
-                    theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
-                    if theme_dir:
-                        abs_path = str(theme_dir / image)
-                        if _os.path.exists(abs_path):
-                            image = abs_path
-                self._bg_label = QLabel(self)
-                self._bg_label.setPixmap(QPixmap(image))
-                self._bg_label.setScaledContents(True)
-                self._bg_opacity = QGraphicsOpacityEffect(self._bg_label)
-                self._bg_opacity.setOpacity(opacity)
-                self._bg_label.setGraphicsEffect(self._bg_opacity)
-                self._bg_label.lower()
-                self._bg_label.setAttribute(Qt.WA_TransparentForMouseEvents)
-                self._bg_label.resize(self.size())
-                self._bg_label.show()
-            else:
-                # 主题禁用背景图，清除旧背景
-                if hasattr(self, "_bg_label") and self._bg_label is not None:
-                    self._bg_label.deleteLater()
-                    self._bg_label = None
-        except Exception:
-            pass
+        bg_cfg = bg_cfg or {}
+        image = bg_cfg.get("image")
+        opacity = bg_cfg.get("opacity", 1.0)
+        color = bg_cfg.get("color")
+
+        # 缓存键：image + opacity + color 共同决定唯一性
+        bg_key = f"{(image or '__none__')}:{opacity:.3f}:{(color or '__none__')}"
+        if getattr(self, key_attr, None) == bg_key and getattr(self, label_attr, None) is not None:
+            return
+        setattr(self, key_attr, bg_key)
+
+        # 清除旧 label
+        old = getattr(self, label_attr, None)
+        if old is not None:
+            try:
+                old.deleteLater()
+            except Exception:
+                pass
+            setattr(self, label_attr, None)
+
+        if not bg_cfg.get("enabled", True):
+            return
+
+        label = _AutoGeometryLabel(parent_widget)
+        label.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+        # 1. 图片
+        if image:
+            resolved = self._resolve_theme_image(image)
+            pix = QPixmap(resolved)
+            if not pix.isNull():
+                label.setPixmap(pix)
+                label.setScaledContents(True)
+
+        # 2. 透明度
+        if opacity < 1.0:
+            effect = QGraphicsOpacityEffect(label)
+            effect.setOpacity(opacity)
+            label.setGraphicsEffect(effect)
+            setattr(self, opacity_attr, effect)
+
+        # 3. 颜色（背景底色，独立于图片）
+        if color:
+            label.setStyleSheet(f"background-color: {color};")
+
+        # Z 序：放到 parent 最底层
+        label.lower()
+        # 尺寸：撑满 parent
+        label.setGeometry(parent_widget.rect())
+        label.show()
+
+        setattr(self, label_attr, label)
+
+        # 兼容别名：window 区域的 label 同时赋值给 _bg_label（保留旧契约，
+        # 不破坏 tests/widgets/test_tab_manager_resize_throttle.py 的 mock）
+        if area == "window":
+            self._bg_label = label
+            self._bg_opacity = getattr(self, opacity_attr, None)
+
+    @staticmethod
+    def _resolve_theme_image(image: str) -> str:
+        """解析图片路径：主题文件夹内相对路径基于主题目录；:/icons/... 走 qrc
+
+        Args:
+            image: 用户在 yaml 中写的图片路径
+
+        Returns:
+            解析后的绝对路径或 qrc 路径
+        """
+        import os as _os
+
+        if not image or image.startswith(":") or _os.path.isabs(image):
+            return image
+        theme_dir = theme_manager.get_theme_dir(theme_manager.get_current_theme_id())
+        if theme_dir:
+            abs_path = str(theme_dir / image)
+            if _os.path.exists(abs_path):
+                return abs_path
+        return image  # fallback 原值
+
+    def _resize_bg_labels(self):
+        """同步 3 个区域背景 label 的尺寸跟随 parent（resize 阶段一/阶段二都用）"""
+        for attr in ("_bg_label", "_sidebar_bg_label", "_chat_area_bg_label"):
+            lbl = getattr(self, attr, None)
+            if lbl is None:
+                continue
+            try:
+                parent = lbl.parent()
+                if parent is not None:
+                    lbl.resize(parent.size())
+            except Exception:
+                pass
 
     def _setup_ui(self):
         # ── 外层纵向布局：直接放内容区（标准系统窗口自带标题栏） ──
@@ -2641,15 +2704,13 @@ class TabManagerWindow(QWidget):
             self._resize_timer.start()  # 重置防抖
             self._save_geometry()
             # 背景图尺寸跟随（轻量操作，不触发布局）
-            if hasattr(self, "_bg_label") and self._bg_label is not None:
-                self._bg_label.resize(self.size())
+            self._resize_bg_labels()
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
         super().resizeEvent(event)
         # 背景图尺寸跟随（轻量操作，不触发布局）
-        if hasattr(self, "_bg_label") and self._bg_label is not None:
-            self._bg_label.resize(self.size())
+        self._resize_bg_labels()
         # 通知 TabPanel 进入 resize 节流模式
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)
@@ -2687,3 +2748,24 @@ class TabManagerWindow(QWidget):
         self._windows.clear()
         self._window_to_index.clear()
         self.close()
+
+
+class _AutoGeometryLabel(QLabel):
+    """背景 label：监听 parent 的 resize，自动同步 geometry
+
+    用于 QSplitter 拖动 / parent 自身 resize 等场景。
+    注：TabManagerWindow 整体 resize 走 _resize_bg_labels() 手动调用，
+    此处只补齐 splitter 拖动（不触发顶层 resize）的同步路径。
+    """
+
+    def __init__(self, parent: QWidget):
+        super().__init__(parent)
+        try:
+            parent.installEventFilter(self)
+        except Exception:
+            pass
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Resize and watched is self.parent():
+            self.setGeometry(self.parent().rect())
+        return super().eventFilter(watched, event)
