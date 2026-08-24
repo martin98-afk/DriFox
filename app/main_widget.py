@@ -6933,12 +6933,11 @@ class OpenAIChatToolWindow(ToolWindow):
         QTimer.singleShot(200, lambda: self._expand_provider_list_card())
 
     def _scroll_settings_to_top(self):
-        """滚动设置卡片内容到顶部"""
+        """滚动设置卡片内容到顶部（分页改造后每页有独立滚动区，全部归零）"""
         try:
             # 找到 LLMSettingsCard 内部的 QScrollArea 并滚到顶
-            scroll_areas = self._settings_popup.findChildren(QScrollArea)
-            if scroll_areas:
-                scroll_areas[0].verticalScrollBar().setValue(0)
+            for scroll_area in self._settings_popup.findChildren(QScrollArea):
+                scroll_area.verticalScrollBar().setValue(0)
         except Exception:
             pass
 

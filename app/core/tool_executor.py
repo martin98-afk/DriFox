@@ -357,12 +357,17 @@ class ToolExecutor:
     def _get_context_usage_info(self) -> tuple:
         """获取当前会话的 token 使用量和上下文限制
 
-        从 session 的消息估算 token 数，从模型配置解析上下文窗口限制。
+        与上下文圆环同源（backend.get_context_usage_snapshot）：API 精确
+        prompt_tokens 优先 + 工具结果截断投影 + tools schema + 预算分母，
+        保证 auto-compact hook 的触发占比与圆环显示一致。
+        修复：旧口径 count_messages_tokens(session.messages) 对超长工具结果
+        不截断、不含 tools/system，重度工具会话下估算可达实际 2~3 倍，
+        导致圆环显示 50% 时 hook 已判 80%+ 提前触发。
 
         Returns:
             (token_count, token_limit):
-                token_count: 当前对话已占用的 token 数（估算值）
-                token_limit: 当前模型的最大上下文窗口限制
+                token_count: 当前对话已占用的 token 数（与圆环同口径）
+                token_limit: 上下文预算（圆环同款 get_budget 口径）
                 任一为 0 表示无法获取。
         """
         if not (self._backend and self._backend.session_manager):
@@ -372,28 +377,9 @@ class ToolExecutor:
         if not session or not getattr(session, "messages", None):
             return 0, 0
 
-        messages = session.messages
-        if not messages:
-            return 0, 0
+        from app.core.context_usage import snapshot_usage_for_hooks
 
-        # 估算 token 数
-        token_count = 0
-        try:
-            token_count = count_messages_tokens(messages)
-        except Exception:
-            pass
-
-        # 解析上下文限制
-        token_limit = 0
-        try:
-            getter = getattr(self._backend, "_get_model_config", None)
-            if getter and callable(getter):
-                llm_config = getter() or {}
-                token_limit = resolve_context_limit(llm_config)
-        except Exception:
-            pass
-
-        return token_count, token_limit
+        return snapshot_usage_for_hooks(self._backend, session=session)
 
     def _trigger_post_tool_use(self, tool_name: str, args: dict, result=None, enabled: bool = True) -> None:
         """触发 PostToolUse hook（统一方法，减少重复代码）
