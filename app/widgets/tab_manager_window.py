@@ -36,6 +36,12 @@ from app.utils.utils import get_font_family_css, get_unified_font
 # 避免聊天内容在超宽屏幕上被拉得难以阅读。窗口宽度不足该值时对话区自动占满。
 _MAX_CHAT_WIDTH = 1000
 
+# ── 覆盖层（full 卡片，如插件市场）宽度上限额外值（px）──
+# 覆盖层激活时，full 卡片比对话气泡区（_MAX_CHAT_WIDTH）宽一点点（而非
+# 完全铺满对话区全宽），避免卡片在超宽屏上过宽难以阅读。窗口不足
+# _MAX_CHAT_WIDTH + 该值时 pad 归零、卡片自动铺满，不出现两侧空白。
+_OVERLAY_EXTRA_WIDTH = 80
+
 # ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
 # 挤压折叠后点击展开时，若保存的宽度已被压到折叠阈值以下，展开不得窄于该值，
 # 否则标题文字被压成窄条无法阅读。
@@ -377,8 +383,9 @@ class TabManagerWindow(QWidget):
         Colors.refresh()
 
         # 替换类型(full 容器)卡片顶部居中切换栏状态
-        self._replace_open: "OrderedDict[str, str]" = OrderedDict()
-        self._replace_active: Optional[str] = None
+        # replace tab 栏状态按对话标签页隔离：{window_id: {card_id: title}}
+        self._replace_open: "Dict[str, OrderedDict[str, str]]" = {}
+        self._replace_active: "Dict[str, Optional[str]]" = {}
         self._replace_timers: Dict[str, "QTimer"] = {}
         self._suppress_replace_close: bool = False
 
@@ -881,6 +888,7 @@ class TabManagerWindow(QWidget):
 
     def _setup_signals(self):
         self._tab_panel.tabSelected.connect(self._on_tab_selected)
+        self.activeTabChanged.connect(self._on_active_tab_changed)
         self._tab_panel.tabCloseRequested.connect(self._on_tab_close_requested)
         self._tab_panel.tabBranchRequested.connect(self._on_tab_branch_requested)
         self._tab_panel.newTabRequested.connect(self._on_new_tab_requested)
@@ -1193,11 +1201,14 @@ class TabManagerWindow(QWidget):
         else:
             return
 
+        cur_wid = self._current_window_id()
         if visible:
             # 取消该卡片的关闭计时（若是互斥切换后的恢复）
             self._cancel_replace_timer(card_id)
-            if card_id not in self._replace_open:
-                self._replace_open[card_id] = title
+            # 卡片按「事件到达时的当前活跃对话」归属到对应窗口的 open 集合
+            open_dict = self._replace_open.setdefault(cur_wid, OrderedDict())
+            if card_id not in open_dict:
+                open_dict[card_id] = title
                 self._replace_tab_bar.add_tab(card_id, title)
             self._set_replace_active(card_id)
         else:
@@ -1226,19 +1237,24 @@ class TabManagerWindow(QWidget):
 
     def _on_replace_close_timeout(self, card_id: str) -> None:
         self._replace_timers.pop(card_id, None)
-        if card_id in self._replace_open and not self._has_other_visible_full(card_id):
-            del self._replace_open[card_id]
-            self._replace_tab_bar.remove_tab(card_id)
-            if self._replace_active == card_id:
-                self._replace_active = None
-            # 关掉当前卡片且 open 仍有其他 full 卡片 → 自动激活（互斥显示）最近一个
-            self._activate_remaining_replace_card()
+        if not self._has_other_visible_full(card_id):
+            # 卡片是全局单例：从所有对话的 open 集合中移除（关闭后任何对话都不应再显示）
+            owners = [wid for wid, od in self._replace_open.items() if card_id in od]
+            for wid in owners:
+                del self._replace_open[wid][card_id]
+                if self._replace_active.get(wid) == card_id:
+                    self._replace_active[wid] = None
+            # tab 栏仅反映当前对话：仅当卡片归属当前对话时改 tab 栏
+            if owners:
+                self._replace_tab_bar.remove_tab(card_id)
+                # 关掉当前卡片且 open 仍有其他 full 卡片 → 自动激活（互斥显示）最近一个
+                self._activate_remaining_replace_card()
         self._update_replace_tab_visibility()
 
     def _activate_remaining_replace_card(self) -> None:
-        """open 集合非空时，自动激活（互斥显示）最近一个 full 卡片，避免关掉当前后
-        剩余卡片停在隐藏态（无论关闭来自 tab × 还是卡片自身按钮）。"""
-        remaining = list(self._replace_open.keys())
+        """当前对话 open 集合非空时，自动激活（互斥显示）最近一个 full 卡片，避免关掉
+        当前后剩余卡片停在隐藏态（无论关闭来自 tab × 还是卡片自身按钮）。"""
+        remaining = list(self._replace_open.get(self._current_window_id(), {}).keys())
         if not remaining:
             return
         nid = remaining[-1]
@@ -1277,13 +1293,34 @@ class TabManagerWindow(QWidget):
         return False
 
     def _set_replace_active(self, card_id: str) -> None:
-        self._replace_active = card_id
+        self._replace_active[self._current_window_id()] = card_id
         self._replace_tab_bar.set_active(card_id)
 
+    def _current_window_id(self) -> str:
+        """当前活跃对话标签页的 window_id（用于隔离 replace tab 栏状态）"""
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+        win = self.get_current_window()
+        wid = getattr(win, "_window_id", None)
+        return wid or GLOBAL_WINDOW_ID
+
+    def _refresh_replace_tab_bar(self) -> None:
+        """按当前活跃对话标签页重建顶部 replace tab 栏（打开列表 + 高亮独立）"""
+        cur_wid = self._current_window_id()
+        open_dict = self._replace_open.get(cur_wid, {})
+        active = self._replace_active.get(cur_wid)
+        self._replace_tab_bar.set_tabs(open_dict, active)
+        self._replace_tab_bar.setVisible(len(open_dict) >= 1)
+
+    def _on_active_tab_changed(self, index: int) -> None:
+        """切换对话标签页 → 重建顶部 replace tab 栏为当前对话的打开列表/高亮"""
+        self._refresh_replace_tab_bar()
+
     def _update_replace_tab_visibility(self) -> None:
-        # 只要有 ≥1 个 full 卡片打开即显示 tab 栏（单卡片显示标题+关闭，
-        # 关闭到只剩对话窗口时 open 清空、tab 栏消失）。
-        self._replace_tab_bar.setVisible(len(self._replace_open) >= 1)
+        """按当前对话标签页的 open 集合决定是否显示顶部 replace tab 栏"""
+        cur_wid = self._current_window_id()
+        open_dict = self._replace_open.get(cur_wid, {})
+        self._replace_tab_bar.setVisible(len(open_dict) >= 1)
 
     def _on_replace_tab_clicked(self, card_id: str) -> None:
         """点 tab → 切换/显示对应 replace 卡片；点「对话」返回对话区；点当前 active 不动作"""
@@ -1294,13 +1331,14 @@ class TabManagerWindow(QWidget):
             # 返回对话视图：隐藏所有 replace 卡片，但保留 open（tab 栏常驻对话项，可随时切回）
             self._show_conversation_view()
             return
-        if card_id == self._replace_active:
+        if card_id == self._replace_active.get(self._current_window_id()):
             return
         if card_id in KNOWN_GLOBAL_REPLACE_CARDS:
             # 内置全局卡：裸 show_card 不自动互斥，需先隐藏其他 replace 卡再恢复显示（内容保留）
             cm = CardManager.get_instance()
             wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
-            for other in list(self._replace_open.keys()):
+            cur_wid = self._current_window_id()
+            for other in list(self._replace_open.get(cur_wid, {}).keys()):
                 if other != card_id:
                     try:
                         cm.hide_card(other, wid)
@@ -1326,15 +1364,16 @@ class TabManagerWindow(QWidget):
         wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
         # 抑制 hide_card 触发的 visible=False 事件（对话视图下隐藏 replace 卡片是预期行为，open 保留）
         self._suppress_replace_close = True
+        cur_wid = self._current_window_id()
         try:
-            for cid in list(self._replace_open.keys()):
+            for cid in list(self._replace_open.get(cur_wid, {}).keys()):
                 try:
                     cm.hide_card(cid, wid)
                 except Exception:
                     pass
         finally:
             self._suppress_replace_close = False
-        self._replace_active = CONVERSATION_ID
+        self._replace_active[cur_wid] = CONVERSATION_ID
         self._replace_tab_bar.set_active(CONVERSATION_ID)
         # open 非空 → tab 栏仍显示（含对话高亮 + 各 replace 项）
         self._update_replace_tab_visibility()
@@ -1350,11 +1389,15 @@ class TabManagerWindow(QWidget):
         from app.widgets.replace_tab_bar import KNOWN_GLOBAL_REPLACE_CARDS
         from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
 
-        if card_id in self._replace_open:
-            del self._replace_open[card_id]
+        # 卡片是全局单例：从所有对话的 open 集合中移除并清 active（避免切回其他对话仍显示已关卡片）
+        cur_wid = self._current_window_id()
+        owners = [wid for wid, od in self._replace_open.items() if card_id in od]
+        for wid in owners:
+            del self._replace_open[wid][card_id]
+            if self._replace_active.get(wid) == card_id:
+                self._replace_active[wid] = None
+        if owners:
             self._replace_tab_bar.remove_tab(card_id)
-        if self._replace_active == card_id:
-            self._replace_active = None
         self._update_replace_tab_visibility()
 
         # 真正隐藏卡片本身（避免「tab 消失但卡片仍显示」）
@@ -1372,7 +1415,7 @@ class TabManagerWindow(QWidget):
             except Exception:
                 pass
 
-        if self._replace_open:
+        if self._replace_open.get(cur_wid):
             self._activate_remaining_replace_card()
 
     def _on_splitter_idle(self):
@@ -2390,9 +2433,12 @@ class TabManagerWindow(QWidget):
         w = wrapper.width()
         if w <= 0:
             return
-        # 覆盖层激活 → 取消限宽，让 full 卡片可铺满 wrapper 全宽
+        # 覆盖层激活 → full 卡片限宽居中到「对话气泡区 + 一点」：
+        # 比对话窗口（气泡区 _MAX_CHAT_WIDTH）宽一点点，而非铺满 wrapper 全宽；
+        # 窗口不足该宽度时 pad 归零、卡片自动铺满，不出现两侧空白。
         if self._content_stack.currentIndex() == 1:
-            pad = 0
+            target = _MAX_CHAT_WIDTH + _OVERLAY_EXTRA_WIDTH
+            pad = max(0, (w - target) // 2)
         else:
             pad = max(0, (w - _MAX_CHAT_WIDTH) // 2)
         layout = self._chat_wrapper_layout
