@@ -153,8 +153,17 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
     setting_cards = []
     switches = []
+    expand_cards = []
+    # findChildren 不含 widget 自身；若 widget 自身就是 ExpandSettingCard（如直接对一张 OptionsSettingCard 调），
+    # 仍需进 expand_cards 处理链，所以候选集合里把 widget 自身也带上
+    _seen: set = set()
+    candidates = [widget]
+    candidates.extend(widget.findChildren(QWidget))
 
-    for child in widget.findChildren(QWidget):
+    for child in candidates:
+        if id(child) in _seen:
+            continue
+        _seen.add(id(child))
         # setFont 覆盖递归字体
         # [PERF] 仅当像素大小/字族与目标不一致时才 setFont：
         # 全树可达数千控件（长会话消息卡），无变化时 setFont 仍触发
@@ -172,6 +181,8 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
             setting_cards.append(child)
         if isinstance(child, SwitchButton):
             switches.append(child)
+        if isinstance(child, ExpandSettingCard):
+            expand_cards.append(child)
 
     # ── SettingCard / ExpandSettingCard ──
     # ExpandSettingCard 继承 SettingCard，已被 setting_cards 包含
@@ -191,6 +202,41 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
                 card.card.contentLabel.setStyleSheet(
                     f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
                 )
+
+    # ── ExpandSettingCard / OptionsSettingCard QSS 硬编码覆盖 ──
+    # qfluentwidgets 的 EXPAND_SETTING_CARD QSS 硬编码：
+    #   QLabel#titleLabel   { font: 14px --FontFamilies; ... }
+    #   QLabel#contentLabel { font: 11px --FontFamilies; ... }
+    # specificity (1,0,1) 压过 setFont；与同 specificity 规则 cascade 时
+    # `font:` shorthand 会胜出我们的 `font-size:` 单属性。
+    # 唯一可靠修复：在内层 widget 自身的 stylesheet 末尾追加带 `!important` 的规则，
+    # 并用 marker 防重入。
+    # 范围：
+    #   - inner HeaderSettingCard：覆盖 inner.titleLabel / inner.contentLabel（卡片头）
+    #   - ExpandSettingCard 自身：覆盖 OptionsSettingCard.choiceLabel
+    #     （choiceLabel.parent 是 OptionsSettingCard，不走 inner.card 的 cascade，
+    #      必须在自身追加规则才能命中）
+    override_marker = "/* drifox_font_override */"
+    inner_title_rule = (
+        f"QLabel#titleLabel {{ font-size: {scaled}px !important; font-family: '{font_family}' !important; }}"
+    )
+    inner_content_rule = (
+        f"QLabel#contentLabel {{ font-size: {content_scaled}px !important; font-family: '{font_family}' !important; }}"
+    )
+    for ec in expand_cards:
+        # 1) inner HeaderSettingCard 的 QSS 覆盖（影响 inner.titleLabel / inner.contentLabel）
+        inner = getattr(ec, "card", None)
+        if inner is not None:
+            old_inner = inner.styleSheet() or ""
+            if override_marker not in old_inner:
+                inner.setStyleSheet(
+                    old_inner.rstrip() + "\n" + override_marker + "\n" + inner_title_rule + "\n" + inner_content_rule
+                )
+
+        # 2) ExpandSettingCard 自身的 QSS 覆盖（命中 choiceLabel）
+        old_self = ec.styleSheet() or ""
+        if override_marker not in old_self:
+            ec.setStyleSheet(old_self.rstrip() + "\n" + override_marker + "\n" + inner_title_rule)
 
     # ── SwitchButton ──
     for switch in switches:

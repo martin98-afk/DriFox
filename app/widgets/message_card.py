@@ -4103,6 +4103,10 @@ class CodeWebViewer(QWebEngineView):
                     line-height: 1.6;
                     max-height: 500px;
                     overflow-y: scroll;
+                    /* 🐛 修复（偶发横向滚动条）：CSS 规范规定一轴非 visible 时另一轴 visible
+                       会被自动计算为 auto，未显式声明会导致内部 .code-container / .table-scroll-wrapper
+                       等 overflow-x:auto 的子容器在内容超宽时撑出整个折叠框的横向滚动条 */
+                    overflow-x: hidden;
                     transition: opacity 200ms ease;
                 }}
                 /* 思考内容加载骨架屏动画 */
@@ -4497,6 +4501,9 @@ class CodeWebViewer(QWebEngineView):
                     font-family: {mono_font};
                     max-height: 400px;
                     overflow-y: scroll;
+                    /* 🐛 修复（偶发横向滚动条）：显式 hidden 避免一轴非 visible
+                       导致另一轴 visible 被自动计算为 auto 而撑出横向滚动条 */
+                    overflow-x: hidden;
                 }}
                 .result-empty {{
                     padding: 6px 12px 10px;
@@ -4691,6 +4698,11 @@ class CodeWebViewer(QWebEngineView):
                     /* 轨道常驻：出现/消失切换不再使内容宽度 ±6px 波动；
                        右 padding 扣减 6px，右侧视觉边距与左基本对称 */
                     overflow-y: scroll;
+                    /* 🐛 修复（偶发横向滚动条）：CSS 规范规定一轴非 visible 时另一轴 visible
+                       会被自动计算为 auto，未显式声明会让内部 .tool-diff-inline__body /
+                       .code-container / .table-scroll-wrapper 等 overflow-x:auto 的子容器
+                       在内容超宽时撑出整个"工具与思考"区的横向滚动条 */
+                    overflow-x: hidden;
                     overflow-anchor: none;  /* 禁用 scroll anchoring，防止浏览器在 reorganizeContent 后调整 scrollTop 覆盖 JS 设置的滚底位置 */
                     background: transparent;
                     border: none;
@@ -4753,6 +4765,9 @@ class CodeWebViewer(QWebEngineView):
                     position: relative;  /* 子项 offsetTop 相对本容器计算（in_progress 定位滚动依赖） */
                     max-height: 600px;
                     overflow-y: scroll;  /* 轨道常驻 + 右 padding 扣减：同 #tool-content */
+                    /* 🐛 修复（偶发横向滚动条）：同上 #tool-content，显式 hidden 阻止
+                       overflow-x 自动计算为 auto，避免长 todo 文本撑出横向滚动条 */
+                    overflow-x: hidden;
                     overflow-anchor: none;
                     background: transparent;
                     border-radius: 6px;
