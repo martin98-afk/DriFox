@@ -75,6 +75,7 @@ class SceneLayer(QWidget):
                 self._image_label.setPixmap(pix)
                 self._image_label.setScaledContents(True)
                 self._image_label.setGeometry(self.rect())
+                self._image_label.show()
                 # blur 效果挂到 _image_label
                 blur = cfg.get("blur", 0)
                 if blur and blur > 0:
@@ -89,6 +90,7 @@ class SceneLayer(QWidget):
             self._dim_label.setStyleSheet(f"background-color: {dim};")
             self._dim_label.setGeometry(self.rect())
             self._dim_label.raise_()
+            self._dim_label.show()
 
         # 4. 整体透明度（不影响 blur effect 的内部计算）
         opacity = cfg.get("opacity", 1.0)

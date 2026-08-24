@@ -34,11 +34,11 @@ from PyQt5.QtWidgets import (
 # anchor 字符串 → (reference attr name, vertical_alignment, horizontal_alignment)
 #   valign/halign 取值: "fill" | "top" | "bottom" | "center"
 ANCHOR_MAP = {
-    "scene":        ("chat_container",   "fill",   "fill"),
-    "scene_top":    ("chat_container",   "top",    "center"),
-    "scene_bottom": ("chat_container",   "bottom", "center"),
-    "input_top":    ("_input_card",      "top",    "center"),
-    "input_bottom": ("_input_card",      "bottom", "center"),
+    "scene": ("chat_container", "fill", "fill"),
+    "scene_top": ("chat_container", "top", "center"),
+    "scene_bottom": ("chat_container", "bottom", "center"),
+    "input_top": ("_input_card", "top", "center"),
+    "input_bottom": ("_input_card", "bottom", "center"),
 }
 
 
@@ -99,11 +99,14 @@ class DecorationLayer(QWidget):
                 effect.setOpacity(opacity)
                 label.setGraphicsEffect(effect)
 
-            self._items.append({
-                "dec": dec,
-                "label": label,
-                "ref_widget": ref_widget,
-            })
+            label.show()
+            self._items.append(
+                {
+                    "dec": dec,
+                    "label": label,
+                    "ref_widget": ref_widget,
+                }
+            )
 
             # 监听 reference widget 的 resize
             try:
@@ -157,8 +160,12 @@ class DecorationLayer(QWidget):
                 label.move(0, 0)
             return
 
-        # ref 在 self（DecorationLayer，撑满 host）坐标系下的 topleft
-        ref_topleft = ref.mapTo(self, QPoint(0, 0))
+        # ref 相对 host 的 topleft（DecorationLayer 撑满 host，两者坐标系一致）。
+        # ⚠️ 不能用 ref.mapTo(self)：mapTo 契约要求 target 是 ref 的祖先，而 self
+        # 与 ref（chat_container/_input_card）是兄弟节点（同为 host 子 widget），
+        # 非法参数在 Qt 5.15 会 access violation 直接闪退（aurora 主题启用
+        # decorations 后新建会话即崩的根因）。
+        ref_topleft = ref.mapTo(self._host, QPoint(0, 0))
         ref_w, ref_h = ref.width(), ref.height()
 
         offset_x, offset_y = dec.get("offset", [0, 0])

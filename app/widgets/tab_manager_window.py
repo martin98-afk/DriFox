@@ -2354,14 +2354,14 @@ class TabManagerWindow(QWidget):
         """
 
     def _restore_geometry(self):
-        """固定默认窗口几何：960x640，屏幕居中，确保不超出屏幕"""
+        """固定默认窗口几何：960x720，屏幕居中，确保不超出屏幕"""
         screen = QApplication.primaryScreen()
         screen_rect = screen.availableGeometry() if screen else None
         if not screen_rect:
-            self.resize(960, 640)
+            self.resize(960, 740)
             return
 
-        w, h = 960, 640
+        w, h = 960, 740
         self._suppress_drag_detection = True
         self.setGeometry(
             screen_rect.x() + (screen_rect.width() - w) // 2,
