@@ -593,15 +593,15 @@ class TabManagerWindow(QWidget):
                     border-left: 2px solid {Colors.BORDER_ACCENT};
                 }}
             """)
-        if getattr(self, "_vdock_splitter", None) is not None:
-            self._vdock_splitter.setStyleSheet(f"""
-                #vDockSplitter::handle:vertical {{
+        if getattr(self, "_chat_vsplitter", None) is not None:
+            self._chat_vsplitter.setStyleSheet(f"""
+                #chatVsplitter::handle:vertical {{
                     background: transparent;
                     border-top: 2px solid {Colors.BORDER};
                     margin: 2px 10px;
                     border-radius: 1px;
                 }}
-                #vDockSplitter::handle:vertical:hover {{
+                #chatVsplitter::handle:vertical:hover {{
                     border-top: 2px solid {Colors.BORDER_ACCENT};
                 }}
             """)
@@ -871,7 +871,7 @@ class TabManagerWindow(QWidget):
         )
 
         # ── 停靠区双层 QSplitter：四向占比均可拖拽调整 ──
-        # 结构：vDockSplitter(纵向)
+        # 结构：chatVsplitter(纵向)
         #         ├─ dockSplitter(横向)：左停靠区 | 内容区(含覆盖层) | 右停靠区
         #         └─ 下停靠区（bottom 容器）
         #
@@ -921,6 +921,19 @@ class TabManagerWindow(QWidget):
         # dock_splitter: 左停靠区 | 内容区(wrapper) | 右停靠区
         self._dock_splitter = _DockSplitter(Qt.Horizontal, self._chat_frame)
         self._dock_splitter.setObjectName("dockSplitter")
+
+        # 中间对话列：纵向 splitter 包 [对话区(wrapper) | 下停靠区]，
+        # 使下插槽与对话区域同列，不再横跨左侧/右侧停靠区下方。
+        self._chat_vsplitter = _DockSplitter(Qt.Vertical, self._chat_frame)
+        self._chat_vsplitter.setObjectName("chatVsplitter")
+        self._chat_vsplitter.addWidget(self._chat_wrapper)
+        self._chat_vsplitter.addWidget(self._global_bottom_container)
+        self._chat_vsplitter.setStretchFactor(0, 1)  # 对话区吃掉多余高度
+        self._chat_vsplitter.setStretchFactor(1, 0)  # 下停靠区不随窗口拉伸
+        self._chat_vsplitter.setHandleWidth(6)
+        # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
+        self._chat_vsplitter.setChildrenCollapsible(False)
+
         # 堆叠卡容器（Phase G）：与单卡 CardContainer 并行挂于同侧停靠区下方。
         # LEFT/RIGHT 侧用 wrapper（QVBoxLayout）包裹 [单卡容器, 堆叠容器]，
         # wrapper 作为 dock_splitter 直接子项——dock mode 协议依赖 CardContainer
@@ -949,7 +962,7 @@ class TabManagerWindow(QWidget):
         self._global_right_container.set_stack_sibling(self._global_right_stack)
 
         self._dock_splitter.addWidget(self._global_left_wrapper)
-        self._dock_splitter.addWidget(self._chat_wrapper)
+        self._dock_splitter.addWidget(self._chat_vsplitter)
         self._dock_splitter.addWidget(self._global_right_wrapper)
         self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
         self._dock_splitter.setStretchFactor(1, 1)  # 内容区(含覆盖层)吃掉多余空间
@@ -960,19 +973,10 @@ class TabManagerWindow(QWidget):
         # wrapper 关联 splitter：联动 setSizes 维持收起态
         self._global_left_wrapper.attach_to_splitter(self._dock_splitter, 0)
         self._global_right_wrapper.attach_to_splitter(self._dock_splitter, 2)
-
-        self._vdock_splitter = _DockSplitter(Qt.Vertical, self._chat_frame)
-        self._vdock_splitter.setObjectName("vDockSplitter")
-        self._vdock_splitter.addWidget(self._dock_splitter)
-        self._vdock_splitter.addWidget(self._global_bottom_container)
-        self._vdock_splitter.setStretchFactor(0, 1)  # 内容区吃掉多余空间
-        self._vdock_splitter.setStretchFactor(1, 0)  # 下停靠区不随窗口拉伸
-        self._vdock_splitter.setHandleWidth(6)
-        self._vdock_splitter.setChildrenCollapsible(False)
         # ── 替换类型(full 容器)卡片顶部居中切换栏 ──
         # 只要有 ≥1 个 full 卡片打开即显示（单卡片显示标题+关闭，多卡片支持切换，
-        # 见 ReplaceTabBar 显隐逻辑与 _on_card_visibility_changed）。挂在 _vdock_splitter
-        # 之上，对话区与覆盖层切换时固定可见（覆盖层模式不吞掉 tab 栏）。
+        # 见 ReplaceTabBar 显隐逻辑与 _on_card_visibility_changed）。挂在 _chat_frame 内容区顶部
+        # （chat_frame_layout），对话区与覆盖层切换时固定可见（覆盖层模式不吞掉 tab 栏）。
         from app.widgets.replace_tab_bar import ReplaceTabBar
         from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
 
@@ -985,13 +989,13 @@ class TabManagerWindow(QWidget):
         # 订阅 full 卡片显隐事件，同步 tab 栏 open 集合与显隐
         UIEventBus.get_instance().subscribe(EV_CARD_VISIBILITY_CHANGED, self._on_card_visibility_changed)
 
-        chat_frame_layout.addWidget(self._vdock_splitter, 1)
+        chat_frame_layout.addWidget(self._dock_splitter, 1)
 
         # 全局容器启用停靠模式
         self._global_left_container.enable_dock_mode(self._dock_splitter)
         self._global_right_container.enable_dock_mode(self._dock_splitter)
         # TOP 容器处于覆盖层模式，不启用 dock mode
-        self._global_bottom_container.enable_dock_mode(self._vdock_splitter)
+        self._global_bottom_container.enable_dock_mode(self._chat_vsplitter)
 
         # ── 覆盖层状态切换 ──
         self._global_top_container.overlayStateChanged.connect(self._on_overlay_state_changed)
@@ -1585,8 +1589,15 @@ class TabManagerWindow(QWidget):
         self._update_replace_tab_visibility()
 
     def _on_replace_tab_close_clicked(self, card_id: str) -> None:
-        """点 tab × → 真正关闭对应卡片并从 open 移除 tab 项；若仍有其他 replace 卡片，
-        自动激活（互斥显示）最近一个。
+        """点 tab × → 真正关闭对应卡片并从 open 移除 tab 项（同 close_replace_card）"""
+        self.close_replace_card(card_id)
+
+    def close_replace_card(self, card_id: str) -> None:
+        """真正关闭一张 replace 卡片并从 open 移除 tab 项（公共关闭入口）
+
+        tab × 与「卡片内部关闭按钮」共用：卡片内部关闭（SystemCardFrame.closed）同样
+        意味着用户关闭该卡片，必须移除 tab；若仅依赖 hide 事件的 120ms 去抖，
+        会因其他 replace 卡片（如 settings）可见而被误判为互斥切换导致 tab 残留。
 
         内置全局卡（settings/diff_viewer 等）经 CardManager.hide_card(GLOBAL_WINDOW_ID)
         真正隐藏；full 浮动卡经 registry.hide_floating_card_globally 隐藏（该 API 仅对
@@ -2285,7 +2296,7 @@ class TabManagerWindow(QWidget):
         try:
             from app.main_widget import OpenAIChatToolWindow
 
-            for inst in list(window_registry.window_instances):
+            for inst in list(window_registry.alive_window_instances()):
                 if not getattr(inst, "_is_destroyed", False) and callable(
                     getattr(inst, "_sync_active_windows_to_team_manager", None)
                 ):

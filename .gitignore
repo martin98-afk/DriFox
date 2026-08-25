@@ -67,6 +67,8 @@ htmlcov/
 
 # 团队工作成果（自动生成，不提交）
 .teams/
+# 长时压测运行时数据（pytest -m perf_long 自动生成）
+tests/perf/long_run/baselines/
 
 # 系统文件
 desktop.ini

@@ -111,6 +111,12 @@ class DragStallProfiler:
         self._stop_pending = False
         if self._heartbeat_timer is not None:
             self._heartbeat_timer.stop()
+            # 修 #3 timer：无 parent 的 QTimer 显式释放，避免 stop 后仍被 sip 持有残留
+            try:
+                self._heartbeat_timer.deleteLater()
+            except RuntimeError:
+                pass
+            self._heartbeat_timer = None
         if self._thread is not None:
             self._thread.join(timeout=0.5)
             self._thread = None

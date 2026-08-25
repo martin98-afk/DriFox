@@ -1931,11 +1931,21 @@ class ChatBackend(QObject):
         return "updated"
 
     def _trigger_plugin_changed_hook(self, result: dict, plugin_name: str, action: Optional[str]) -> None:
-        """触发 PluginChanged hook（插件安装/卸载/启停/热重载统一出口）
+        """触发 PluginChanged hook 并广播到全部活跃 backend（多标签页统一出口）
 
         主线程同步触发（prompt hook 注入顺序）；diff 由
         hook_manager.trigger_plugin_changed_hook 统一计算（模块级基线，
         与 mcp/启停触发点共享）。
+
+        ★ 多标签页修复：此前只在宿主 backend 上触发，其余标签页的
+        _hook_message_queue 收不到注入（plugin_changed UI 刷新信号已广播，
+        但 hook 输出未广播）。现对宿主 + 全部活跃 backend 各自触发一次
+        trigger_event——_hooks 注册表类级共享（任一实例等效），但
+        on_hook_finished 闭包与 _hook_message_queue 是实例级的，必须用每个
+        backend 自己的 hook_manager 实例触发，输出才进各自队列。
+        ★ diff 在宿主上只算一次，广播时携带已算好的 diff/sub_actions——
+        模块级快照基线首次消费后第二次 _compute_plugin_snapshot_diff()
+        返回 None，逐个重算会导致非宿主 backend 拿不到 diff。
 
         context 经 stdin JSON 传给 command hook，字段：
         - action: installed/updated/uninstalled/enabled/disabled
@@ -1969,19 +1979,31 @@ class ChatBackend(QObject):
         if diff:
             context["diff"] = diff
             context["sub_actions"] = _sub_actions_from_diff(diff)
-        self._hook_manager.trigger_event("PluginChanged", context)
+        # 广播：宿主 + 全部活跃 backend 各自触发（context 独立拷贝，防并发污染）
+        targets = [self] + [
+            _b for _b in list(ChatBackend._active_instances) if _b is not self and _b._hook_manager is not None
+        ]
+        for _b in targets:
+            try:
+                _b._hook_manager.trigger_event("PluginChanged", dict(context))
+            except RuntimeError:
+                pass  # 窗口关闭竞态：backend 已 deleteLater 但未 cleanup
 
     def _schedule_debounced_reload(self):
-        """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）"""
-        if getattr(self, "_reload_timer", None) is None:
-            self._reload_timer = QTimer()
-            self._reload_timer.setSingleShot(True)
-            self._reload_timer.timeout.connect(self._do_debounced_reload)
-        if not self._reload_timer.isActive():
-            self._reload_timer.start(300)
+        """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）
+
+        修 #2 timer：改用 QTimer.singleShot 静态方法，不持有 QTimer 实例
+        （PyQt5 下即便 stop+deleteLater 仍残留 +1 QTimer，singleShot 零实例）。
+        用 _reload_pending 守卫保留"风暴期合并"语义：多次调用只在首个 300ms 后触发一次。
+        """
+        if getattr(self, "_reload_pending", False):
+            return
+        self._reload_pending = True
+        QTimer.singleShot(300, self._do_debounced_reload)
 
     def _do_debounced_reload(self):
         """去抖到期：合并执行一次全量重载（已内部对 added/changed/removed 增量处理）"""
+        self._reload_pending = False
         self._last_reload_at = time.time()
         try:
             result = self.reload_plugin_subsystems()
@@ -2692,10 +2714,9 @@ class ChatBackend(QObject):
         """
         self._initialized = False
 
-        # 0. 停止去抖重载定时器（M8）：惰性创建、无 parent 的 QTimer，
-        #    不先 stop 会在 cleanup 后 300ms 触发 _do_debounced_reload 访问已清理对象。
-        if getattr(self, "_reload_timer", None) is not None and self._reload_timer.isActive():
-            self._reload_timer.stop()
+        # 0. 取消待执行的去抖重载（修 #2 timer：已改为 QTimer.singleShot，无实例可 stop，
+        #    置标志位由 _do_debounced_reload 自行跳过，避免 cleanup 后回调访问已清理对象）。
+        self._reload_pending = False
 
         # 1. 清理 ChatEngine（停止 worker + 清空回调）
         if self._chat_engine:

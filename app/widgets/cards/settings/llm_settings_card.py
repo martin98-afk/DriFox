@@ -42,7 +42,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
-from app.utils.utils import get_font_family_css, get_icon, get_unified_font, invalidate_font_family_css_cache
+from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
@@ -62,6 +62,17 @@ def _font_step_text(key: str) -> str:
     """字号档位显示文本："-5".."0".."+10"（正数带 + 前缀）"""
     d = int(key)
     return f"+{d}" if d > 0 else str(d)
+
+
+def _ui_font_family() -> str:
+    """读取用户配置 UI 字体族（与 get_unified_font 同源，但不经 scale 二次缩放）"""
+    try:
+        return Settings.get_instance().llm_font_family.value
+    except Exception:
+        try:
+            return Settings.get_instance().canvas_font_selected.value
+        except Exception:
+            return "Segoe UI"
 
 
 class _FontStepTrack(QWidget):
@@ -94,10 +105,10 @@ class _FontStepTrack(QWidget):
         self._recompute_metrics()
 
     def _recompute_metrics(self) -> None:
-        """按当前档位字号重算标签行高与最小高度（防大字号标签被裁切）"""
+        """按最大档位实际字号(14+10=24px)预留标签行高与最小高度（防大字号标签被裁切）"""
         from PyQt5.QtGui import QFontMetrics
 
-        fm = QFontMetrics(get_unified_font(9))
+        fm = QFontMetrics(QFont(_ui_font_family(), 24))
         self._label_h = max(14, fm.height() + 2)
         self.setMinimumHeight(self._NODE_Y + self._label_h + 6)
         self.updateGeometry()
@@ -163,9 +174,8 @@ class _FontStepTrack(QWidget):
             p.setPen(QPen(QColor(Colors.TEXT_ACCENT), 2))
             p.drawLine(int(x0), int(node_y), int(self._node_x(cur_idx)), int(node_y))
 
-        # 节点 + 刻度标签
-        label_font = get_unified_font(9)
-        bold_font = get_unified_font(9, True)
+        # 节点 + 刻度标签（标签用对应档位实际字号渲染，直观体现大小差异）
+        family = _ui_font_family()
         for i, key in enumerate(self._steps):
             x = self._node_x(i)
             is_cur = i == cur_idx
@@ -191,15 +201,19 @@ class _FontStepTrack(QWidget):
                 p.setBrush(QBrush(QColor(color)))
                 p.drawEllipse(QPointF(x, node_y), r, r)
 
-            # 刻度标签（当前 accent 加粗 / hover 主色 / 其余次级；0 基准加粗）
+            # 刻度标签：用对应档位实际字号(14+delta)渲染，数字自身大小随档位变化
+            actual = 14 + int(key)
             if is_cur or is_zero:
-                p.setFont(bold_font)
+                fnt = QFont(family, actual)
+                fnt.setBold(True)
+                p.setFont(fnt)
                 p.setPen(QColor(Colors.TEXT_ACCENT if is_cur else Colors.TEXT_PRIMARY))
             else:
-                p.setFont(label_font)
+                fnt = QFont(family, actual)
+                p.setFont(fnt)
                 p.setPen(QColor(Colors.TEXT_PRIMARY if is_hover else Colors.TEXT_SECONDARY))
             p.drawText(
-                QRectF(x - 24, node_y + 8, 48, self._label_h),
+                QRectF(x - 32, node_y + 8, 64, self._label_h),
                 Qt.AlignHCenter | Qt.AlignTop,
                 _font_step_text(key),
             )
@@ -245,11 +259,23 @@ class FontSizeStepperCard(ExpandSettingCard):
         if key not in FONT_SIZE_OPTIONS:
             key = _DEFAULT_FONT_SIZE_KEY
         self._track.set_current(key)
+        self._set_value_label_size(key)
+
+    def _set_value_label_size(self, key: str) -> None:
+        """header 当前值用对应档位实际字号渲染（数字自身大小随档位变化，直观体现差异）"""
+        actual = 14 + int(key)
         self._value_label.setText(f"{_font_step_text(key)} px")
+        self._value_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} font-size: {actual}px;"
+        )
 
     def refresh_style(self) -> None:
         """主题/字号变更后重绘刻度条与文字样式（颜色/字号在 paint 动态读取）"""
-        self._value_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}")
+        key = self.cfg.ui_font_size.value
+        key = _LEGACY_FONT_SIZE_KEYS.get(key, key)
+        if key not in FONT_SIZE_OPTIONS:
+            key = _DEFAULT_FONT_SIZE_KEY
+        self._set_value_label_size(key)
         self._hint_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
         )

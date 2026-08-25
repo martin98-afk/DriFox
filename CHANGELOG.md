@@ -90,6 +90,59 @@ All notable changes to this project will be documented in this file.
 - **window_registry 收敛窗口实例管理** (`app/core/window_registry.py` + `app/main_widget.py` + `app/widgets/tab_manager_window.py` + `app/widgets/pixel_pet.py` + `app/widgets/cards/global_card_controller.py` + `app/widgets/cards/settings/gitee_card.py` + `app/core/builtin_commands.py` + `app/core/team_manager.py`): 新增 `window_registry` 模块统一管理窗口实例，主窗口/团队管理/内置命令/像素宠物迁移至注册表；新增/更新 `test_main_widget_smoke` / `test_team_add_member` / `test_input_button_hot_reload` 测试。
 - **scene/decoration layer 代码结构优化** (`app/widgets/scene_layer.py` + `app/widgets/decoration_layer.py` + `app/widgets/tab_manager_window.py` + `tests/widgets/test_decoration_layer.py`): 提升可读性与可维护性；scene/decoration layer 内部结构清理；新增 decoration_layer 测试覆盖。
 
+### 🔄 Hotfix 重新发布 (Re-release · 2026-08-25 · Round 2)
+
+基于 `v0.5.4` 标签的增量变更 | 提交数：23 · 文件变更：83 · +5753/-553 | 贡献者：dingma
+
+#### ✨ 新功能 (New Features)
+
+- **动态 value provider 注册** (`app/widgets/cards/floating/command_card.py`): 引入动态 value provider 注册机制，统一 value 选项获取路径，便于插件扩展设置面板选项。
+- **插件变更钩子广播到所有活跃 backend** (`app/core/backend.py` + `app/core/hook_manager.py` + `app/widgets/cards/global_card_controller.py` + `app/widgets/tab_manager_window.py`): `PluginChanged` 钩子事件广播到所有活跃 backend（含多 tab 场景）；改善 `GlobalCardController` 卡片关闭逻辑。
+- **本地 token 估算比例解析** (`app/core/context_usage.py` + `app/core/engines/ui/engine.py` + `app/core/provider_profile.py` + `app/core/token_estimator.py` + `app/core/workers/chat_worker.py` + `plugins/system/providers/{baidu,dashscope,deepseek}.py`): 实现 token ratio 解析机制，统一各 provider 本地估算比例来源。
+- **LLMSettingsCard 动态字族与标签渲染** (`app/widgets/cards/settings/llm_settings_card.py`): 字体族动态切换与标签渲染优化。
+- **百炼（Bailian）控制台用量查询增强** (`plugins/system/providers/dashscope.py`): 用量查询新增额外配额字段（基于既有 fetcher 框架扩展）。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **初始显示高度抖动修复** (`app/widgets/cards/floating/question_floating_widget.py`): 修正首次显示时高度计算，避免内容抖动（用户反馈）。
+- **tooltip 父对象弱引用 + 定位改用父控件位置** (`app/widgets/simple_hover_tooltip.py`): `_HoverTooltipFilter` 父对象改弱引用，断开 filter↔父 引用环（避免 per-tab 泄漏）；定位改父控件位置，跨 DPI/主题对齐更稳；cleanup 兜底置 None。
+- **禁用后台模型拉取避免窗口销毁崩溃** (`main.py`): 禁用后台 models.dev 拉取，避免后台线程在窗口销毁后回调到已删除 C++ 对象触发原生崩溃（`STATUS_STACK_BUFFER_OVERRUN`）。
+- **资源管理与多 backend 清理** (`app/main_widget.py` + `app/widgets/cards/settings/history_card.py` + `app/widgets/message_card.py` + `app/widgets/simple_hover_tooltip.py`): 改进各组件资源管理与清理流程（懒加载 + 安全关闭），避免悬挂引用与延迟初始化空指针。
+- **window_registry 弱引用重构** (`app/core/builtin_commands.py` + `app/core/window_registry.py` + `app/main_widget.py` + `app/widgets/cards/card_manager.py` + `app/widgets/cards/global_card_controller.py` + `app/widgets/cards/settings/gitee_card.py` + `app/widgets/tab_manager_window.py`): `window_registry` 改弱引用管理窗口实例，防止多 tab 切换/关闭时内存泄漏。
+- **token ratio 估算统一为 1.0** (`app/core/token_estimator.py` + `plugins/system/providers/{baidu,dashscope,deepseek,gemini,minimax,siliconflow,volcengine}.py`): 基于 cl100k_base 验证将各 provider 的 token 比例统一为 1.0，避免本地估算与官方 API 偏差。
+- **默认字号 key 与 superlarge 配置对齐** (`app/utils/design_tokens.py`): 默认字号 key 更新以匹配新 superlarge 配置。
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **`vDockSplitter` → `chatVsplitter` 重命名** (`app/widgets/tab_manager_window.py`): 命名更清晰，与聊天垂直分割条语义一致；同步更新所有引用点。
+- **`window_registry` 收敛窗口实例管理** (`app/core/window_registry.py` + `app/core/builtin_commands.py` + `app/core/team_manager.py` + `app/main_widget.py` + `app/widgets/cards/global_card_controller.py` + `app/widgets/cards/settings/gitee_card.py` + `app/widgets/pixel_pet.py` + `app/widgets/tab_manager_window.py`): 提取 `window_registry` 模块统一管理窗口实例；补 `test_main_widget_smoke` / `test_team_add_member` / `test_input_button_hot_reload` 测试。
+
+#### 📚 文档 (Documentation)
+
+- **Midnight Aurora 主题实验与归档** (`plugins/system/themes/midnight_aurora/` + `scripts/generate_midnight_aurora_sidebar.py` + `docs/superpowers/{plans,specs}/2026-08-25-midnight-aurora-theme*.md`): 实验性深色极光侧栏主题（YAML/PNG 资产 + 生成脚本 + 设计文档）；后续评估后整体移除（回滚实现、设计与测试），保留生成脚本与文档做未来参考。
+
+#### ✅ 测试 (Tests)
+
+- **Aurora PNG 颜色模式校验** (`tests/utils/test_midnight_aurora_sidebar.py`): 校验生成 aurora 渐变 PNG 的颜色模式与基础形状（与移除同步归档）。
+- **插件变更钩子集成 + tab-manager 卡片关闭** (`tests/core/test_plugin_changed_hook_integration.py` + `tests/widgets/test_tab_manager_window.py`): 覆盖 `PluginChanged` 钩子在多 backend/多 tab 场景的广播；补 tab-manager 卡片关闭用例。
+
+### 🔄 Hotfix 重新发布 (Re-release · 2026-08-25 · Round 3)
+
+基于 `v0.5.4` Round 2 的增量变更 | 提交数：2 · 文件变更：24 · +3791/-26 | 贡献者：dingma
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **shimmer gradient 缓存导致 stop 累积脏色** (`app/widgets/message_card.py`): 移除未使用的 `_grad_shimmer` 模板缓存（`setColorAt` 持续追加 stop 会残留脏色，每帧 paint 仍新建 gradient，缓存不仅无效还可能造成误用）；补注释说明 stop 位置随相位连续变化必须每帧新建 gradient，修复 shimmer 流光拖影/脏色残留。
+
+#### ⚡ 性能优化 (Performance)
+
+- **shimmer 渐变按帧创建避免 stop 累积** (`app/widgets/message_card.py`): 每帧根据 `shimmer_pos` 连续变化新建 `QLinearGradient`，移除冗余缓存读取分支，减少 paintEvent 内对象引用与冗余路径。
+
+#### ✅ 测试 (Tests)
+
+- **长跑内存泄漏压测场景** (`tests/perf/long_run/` + `app/core/{backend,hook_manager,lsp/lsp_manager}.py` + `app/core/workers/subagent_worker.py` + `app/gateway/manager.py` + `app/main_widget.py` + `app/utils/drag_stall_profiler.py` + `app/widgets/{message_card,pixel_pet}.py`): 新增运行时采样器（RSS / QObject 计数 / tracemalloc 快照），三个压测场景（消息流压测 / 会话切换压测 / 插件热重载压测）+ pytest 阈值断言 + markdown 报告生成；`.gitignore` 忽略压测输出。
+- **最小化复现脚本** (`tests/debug/memleak_repro/`): 消息流 / 信号定时器 / 综合 repro / 中途 verify 四个最小化复现脚本，便于内存泄漏根因定位。
+
 ## [v0.5.3] - 2026-08-22
 
 自上一版本以来的变更 | 提交数：175 · 文件变更：303 · +28058/-15698 | 贡献者：dingma, mading, drifox-bot, builder

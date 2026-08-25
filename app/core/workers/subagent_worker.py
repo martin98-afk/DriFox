@@ -36,6 +36,24 @@ _VALID_IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")  # 验证标
 CHARS_PER_TOKEN = 4  # 与 HistoryCompactor 保持一致
 _CONTEXT_INJECTION_RATIO = 0.6  # 上下文注入最多占 budget 的 60%
 
+
+class _BoundedTaskDict(dict):
+    """有界字典（H1）：超过容量上限时弹出最旧条目，防止 _finished_tasks 无限增长。
+
+    重写 __setitem__，使全部 12+ 处 `self._finished_tasks[task_id] = {...}` 写入点
+    自动受容量约束，无需逐个改写。读取（get/items/in/setdefault-on-value）行为不变。
+    """
+
+    def __init__(self, maxlen: int = 200):
+        super().__init__()
+        self._maxlen = maxlen
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        while len(self) > self._maxlen:
+            oldest = next(iter(self))  # dict 保序：首个即最旧
+            super().__delitem__(oldest)
+
 # 最终总结提示词兕底文案（激活策略无 final_summary_prompt 时使用，内容与原硬编码等价）
 _FALLBACK_FINAL_SUMMARY_PROMPT = """
 
@@ -1607,7 +1625,8 @@ class SubAgentManager(QObject):
         self._tool_executor = tool_executor
         self._get_llm_config = get_llm_config
         self._running_tasks: Dict[str, SubAgentExecutor] = {}
-        self._finished_tasks: Dict[str, Dict] = {}  # task_id -> {"result": str, "error": str, "session_id": str}
+        # H1：有界字典，防止 _finished_tasks 无限增长（进程生命周期内巨漏）；上限 200，超出弹最旧
+        self._finished_tasks = _BoundedTaskDict(maxlen=200)  # task_id -> {"result": str, "error": str, "session_id": str}
         self._session_store = None  # 使用 SessionStore 替代 SubAgentLogStore
         # 批次计数：本次启动的任务总数
         self._batch_total = 0

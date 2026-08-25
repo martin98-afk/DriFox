@@ -168,6 +168,24 @@ _TEXT_LEXER = TextLexer()
 # formatter 含动态字号，缓存当前字号对应的实例
 _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
 
+# ======== 流式边框调色板（模块级共享，修 #1）========
+# 原实现每张 MessageCard 构造时各 new 10+8 个 QColor（约 +18 个/卡），改为
+# 模块级共享 tuple。QColor 不可变，多卡共享同一批实例无副作用。
+_RAINBOW_NORMAL: tuple = tuple(
+    QColor(c)
+    for c in (
+        "#60D4FF", "#40C8FF", "#4DA6FF", "#8B7BFF", "#C084FC",
+        "#F472B6", "#FB7185", "#F59E0B", "#34D399", "#22D3EE",
+    )
+)
+_RAINBOW_RETRY: tuple = tuple(
+    QColor(c)
+    for c in (
+        "#ff2222", "#aa0000", "#ff3333", "#880000",
+        "#ff1111", "#bb0000", "#ff4444", "#990000",
+    )
+)
+
 # ===== 性能缓存：图标前缀和字号（避免每块代码都查主题和计算字号） =====
 _ICON_PREFIX_CACHE: str = "qrc:/icons"
 _CODE_FONT_SIZE: int = scale_font_size(13)
@@ -7805,19 +7823,18 @@ class CodeWebViewer(QWebEngineView):
         self._height_report_pending = False
         self._resize_locked = False
 
-        # 清理页面：先加载空白页释放资源
+        # 清理页面：先停加载并卸载到空白页（比 setHtml("") 更轻，避免 WebEngine 异步导航竞态）
         try:
-            self.setHtml("")
+            self.stop()                      # 停止页面加载
+            from PyQt5.QtCore import QUrl
+            self.setUrl(QUrl("about:blank"))  # 卸载，比 setHtml("") 更轻
         except RuntimeError:
             pass
-
-        # 清理页面对象
-        try:
-            if hasattr(self, "_page"):
-                self._page.deleteLater()
-                del self._page
-        except RuntimeError, AttributeError:
-            pass
+        # 幂等守卫：二次 cleanup 不重复 deleteLater
+        if getattr(self, "_page", None) is not None:
+            self._page.deleteLater()
+            self._page = None
+        self.setPage(None)                   # 断开 view→page，避免 view 析构再引用已删 page
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
         # page 已在上方单独 deleteLater 释放渲染资源（DOM/JS heap/图层）。
@@ -8287,9 +8304,9 @@ class MessageCard(SimpleCardWidget):
         self._pulse_phase = 0.0
         # M1 性能缓存：流式脉动渐变/调色板/裁剪路径模板（相位无关对象，
         # paintEvent 内仅改色/坐标，避免每帧 new 数十个临时对象）。
-        self._rainbow_normal = [QColor(c) for c in ("#60D4FF","#40C8FF","#4DA6FF","#8B7BFF","#C084FC","#F472B6","#FB7185","#F59E0B","#34D399","#22D3EE")]
-        self._rainbow_retry = [QColor(c) for c in ("#ff2222","#aa0000","#ff3333","#880000","#ff1111","#bb0000","#ff4444","#990000")]
-        self._grad_main, self._grad_inner, self._grad_glow, self._grad_shimmer = (QLinearGradient(0, 0, 1, 1) for _ in range(4))
+        self._rainbow_normal = _RAINBOW_NORMAL  # 模块级共享，0 个新 QColor
+        self._rainbow_retry = _RAINBOW_RETRY
+        self._grad_main, self._grad_inner, self._grad_glow = (QLinearGradient(0, 0, 1, 1) for _ in range(3))
         self._clip_inner = self._clip_outer = self._clip_inner_edge = self._clip_border = QPainterPath()
         self._clip_inner_border = self._clip_shimmer = self._clip_top = self._clip_glow_region = (
             self._clip_border_region
@@ -9194,9 +9211,11 @@ class MessageCard(SimpleCardWidget):
         - 复制/撤销/删除按钮 hover 浮现（见 enterEvent/leaveEvent），时间戳常显弱化
         - 宽度自适应见 PlainTextViewer._update_height（idealWidth 收缩，不占满整行）
         """
-        self.viewer = PlainTextViewer(self)
-        self.viewer.contentHeightChanged.connect(self._update_height)
-        self._viewer_layout.addWidget(self.viewer)
+        # 修 #2：用户气泡 PlainTextViewer 改为懒加载——首次 set_content / showEvent 时才
+        # 创建，避免每张卡片 __init__ 即构造 QTextEdit+QTextDocument+QTimer+QWidget 子树
+        # （参考 assistant/welcome 卡片的懒渲染模式，复用 _lazy_rendered 守卫）。
+        self.viewer = None
+        self._viewer_pending_text = None
         main.addWidget(self._viewer_container)
         self._lazy_rendered = True
 
@@ -9235,6 +9254,21 @@ class MessageCard(SimpleCardWidget):
         btns.setVisible(False)  # hover 浮现，保持气泡简洁（高度占位由 wrap 固定）
         footer.addWidget(btns)
         main.addWidget(footer_wrap)
+
+    def _ensure_user_viewer(self) -> None:
+        """懒创建用户气泡 PlainTextViewer（修 #2）。
+
+        首次 set_content / showEvent / append_text 时调用；创建后连接 contentHeightChanged
+        并应用暂存的待显示文本。幂等。避免 __init__ 即建 QTextEdit 子树造成的内存占用。
+        """
+        if self.viewer is not None:
+            return
+        self.viewer = PlainTextViewer(self)
+        self.viewer.contentHeightChanged.connect(self._update_height)
+        self._viewer_layout.addWidget(self.viewer)
+        if getattr(self, "_viewer_pending_text", None):
+            self.viewer.set_text(self._viewer_pending_text)
+            self._viewer_pending_text = None
 
     def _setup_ui(self):
         main = QVBoxLayout(self)
@@ -9785,7 +9819,8 @@ class MessageCard(SimpleCardWidget):
             painter.setClipPath(shimmer_clip)
             # 流光位置：连续小数，避免跳变
             shimmer_pos = (shift_shimmer % N) / N
-            shimmer_band_gradient = self._grad_shimmer
+            # 注意：stop 位置随相位连续变化，不能复用模板渐变（setColorAt 会不断追加 stop 导致残留脏色），必须每帧新建
+            shimmer_band_gradient = QLinearGradient(0, 0, w, h)
             shimmer_band_gradient.setStart(0, 0)
             shimmer_band_gradient.setFinalStop(w, h)
             shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.07), QColor(0, 0, 0, 0))
@@ -10155,6 +10190,9 @@ class MessageCard(SimpleCardWidget):
         时本事件触发，此时父 HWND 已就绪，可安全创建 QWebEngineView。
         """
         super().showEvent(event)
+        # 修 #2：用户气泡 viewer 懒加载——若已暂存待显示文本且 viewer 尚未创建，补建
+        if self.role == "user" and self.viewer is None and getattr(self, "_viewer_pending_text", None):
+            self._ensure_user_viewer()
         if getattr(self, "_render_deferred", False) and not getattr(self, "_lazy_rendered", False):
             self.ensure_rendered()
 
@@ -10289,6 +10327,9 @@ class MessageCard(SimpleCardWidget):
             self._pending_content = content
             return
 
+        # 修 #2：用户气泡 viewer 懒加载，首次 set_content 时创建（set_text 前确保存在）
+        if self.role == "user" and self.viewer is None:
+            self._ensure_user_viewer()
         if hasattr(self.viewer, "_markdown_text"):
             self.viewer._markdown_text = rendered
             # [B1] 内容整体替换：使差量渲染缓存失效（_stable_md_len 指向旧内容偏移，
@@ -10414,6 +10455,8 @@ class MessageCard(SimpleCardWidget):
         return "\n\n".join(part for part in parts if part).strip()
 
     def append_text(self, text: str):
+        if self.role == "user" and self.viewer is None:
+            self._ensure_user_viewer()
         if self.role == "assistant":
             # 🆕 Bug B 方案 F：优先**原地**追加文本块（不重建列表）。
             # append_text_block 在末尾非 text 块时走 ensure_content_blocks 重建整个

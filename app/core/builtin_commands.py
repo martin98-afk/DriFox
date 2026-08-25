@@ -679,7 +679,7 @@ def _rebind_command_shortcuts():
         # 清除窗口级快捷键去重缓存，允许命令变更后重新注册
         OpenAIChatToolWindow._window_shortcut_cache.clear()
 
-        for win in window_registry.window_instances:
+        for win in window_registry.alive_window_instances():
             if win._is_destroyed:
                 continue
             try:

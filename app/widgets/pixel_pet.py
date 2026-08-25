@@ -1586,4 +1586,25 @@ class PixelPetWidget(QWidget):
         self._state_before_drag = None
         self._drag_pending_state = None
         self._sleep_frame_count = 0
+        # H4/H5：解除 parent 事件过滤器 + 断开配置信号 + 注销主题刷新目标，
+        # 避免桌宠销毁/重建后旧实例仍被事件过滤器与 theme_manager 强引用持有（泄漏）。
+        parent = self.parent()
+        if parent is not None:
+            try:
+                parent.removeEventFilter(self)
+            except Exception:
+                pass
+        try:
+            from app.utils.config import Settings
+
+            cfg = Settings.get_instance()
+            cfg.pet_size.valueChanged.disconnect(self.on_pet_size_changed)
+        except Exception:
+            pass
+        try:
+            from app.utils.theme_manager import theme_manager
+
+            theme_manager.unregister_refresh_target(self)
+        except Exception:
+            pass
         logger.debug("[PixelPet] v2 已清理")

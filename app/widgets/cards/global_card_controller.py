@@ -87,7 +87,7 @@ class GlobalCardController:
                 return w
         from app.main_widget import OpenAIChatToolWindow
 
-        for w in window_registry.window_instances:
+        for w in window_registry.alive_window_instances():
             if not getattr(w, "_is_destroyed", False):
                 return w
         return None
@@ -97,10 +97,26 @@ class GlobalCardController:
         from app.main_widget import OpenAIChatToolWindow
 
         result = []
-        for w in window_registry.window_instances:
+        for w in window_registry.alive_window_instances():
             if not getattr(w, "_is_destroyed", False):
                 result.append(w)
         return result
+
+    def _close_edit_card(self, card_id: str) -> None:
+        """关闭编辑卡：移除对话窗口顶部 replace tab + 隐藏卡片 + 显示设置面板
+
+        卡片内部关闭（关闭按钮/保存后）语义 = 真正关闭编辑卡，必须同步移除 tab。
+        仅 hide_card 时，TabManagerWindow 的 120ms 去抖会因 settings 卡片可见
+        而把「关闭」误判为「互斥切换」，导致 tab 残留（hook/provider/mcp 编辑卡）。
+        """
+        tm = self._tab_manager
+        if tm is not None:
+            try:
+                tm.close_replace_card(card_id)
+            except Exception:
+                logger.warning(f"[GlobalCard] 移除 {card_id} replace tab 失败")
+        self._card_manager.hide_card(card_id, GLOBAL_WINDOW_ID)
+        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
 
     # ───────────────────────────────────────────────────────────
     # 懒构建：系统设置大卡
@@ -314,9 +330,8 @@ class GlobalCardController:
             except Exception:
                 pass
 
-        # 隐藏编辑卡，显示设置卡
-        self._card_manager.hide_card("provider_edit", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        # 隐藏编辑卡（同步移除 replace tab），显示设置卡
+        self._close_edit_card("provider_edit")
 
         # 模型选择卡片数据将在下次打开时自动刷新
         for win in self._all_windows():
@@ -337,13 +352,11 @@ class GlobalCardController:
 
     def _on_provider_edit_closed(self):
         """服务商编辑关闭后的回调"""
-        self._card_manager.hide_card("provider_edit", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        self._close_edit_card("provider_edit")
 
     def _on_provider_edit_card_closed(self):
         """服务商编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._card_manager.hide_card("provider_edit", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        self._close_edit_card("provider_edit")
 
     # ───────────────────────────────────────────────────────────
     # Hook 编辑卡片
@@ -416,8 +429,7 @@ class GlobalCardController:
 
     def _on_hook_edit_saved(self, values: dict):
         """Hook 保存回调（全局生效 + 广播所有窗口后端重载）"""
-        self._card_manager.hide_card("hook_edit", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        self._close_edit_card("hook_edit")
 
         if self._settings_popup is None:
             return
@@ -468,13 +480,11 @@ class GlobalCardController:
 
     def _on_hook_edit_closed(self):
         """Hook 编辑关闭回调"""
-        self._card_manager.hide_card("hook_edit", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        self._close_edit_card("hook_edit")
 
     def _on_hook_edit_card_closed(self):
         """Hook 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._card_manager.hide_card("hook_edit", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        self._close_edit_card("hook_edit")
 
     # ───────────────────────────────────────────────────────────
     # MCP 编辑卡片
@@ -574,8 +584,7 @@ class GlobalCardController:
 
     def _on_mcp_edit_saved(self, server_data: dict):
         """MCP 编辑保存回调（全局 PluginManager 落盘 + 刷新全局列表）"""
-        self._card_manager.hide_card("mcp_edit", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        self._close_edit_card("mcp_edit")
         if self._settings_popup is None:
             return
         mcp_card = self._settings_popup.mcpListCard
@@ -598,15 +607,13 @@ class GlobalCardController:
 
     def _on_mcp_edit_closed(self):
         """MCP 编辑关闭回调"""
-        self._card_manager.hide_card("mcp_edit", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        self._close_edit_card("mcp_edit")
         if self._settings_popup is not None:
             self._settings_popup.mcpListCard.refresh_connections()
 
     def _on_mcp_edit_card_closed(self):
         """MCP 编辑卡片（SystemCardFrame）关闭回调 → 回到设置面板"""
-        self._card_manager.hide_card("mcp_edit", GLOBAL_WINDOW_ID)
-        self._card_manager.show_card("settings", GLOBAL_WINDOW_ID)
+        self._close_edit_card("mcp_edit")
 
     # ───────────────────────────────────────────────────────────
     # 内嵌差异对比卡片（替代弹窗 DiffViewerWindow，覆盖对话区域）

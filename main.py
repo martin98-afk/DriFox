@@ -11,6 +11,9 @@ import warnings
 from qfluentwidgets import setFontFamilies
 
 warnings.filterwarnings("ignore")
+# 内存治理(#21)：禁用 pypinyin 对 PINYIN_DICT/PHRASES_DICT 的二次 .copy()，省 ~一半拼音库内存
+# 必须在任何 pypinyin 相关 import 之前设置（main.py 为进程启动最早期入口）
+os.environ.setdefault("PYPINYIN_NO_DICT_COPY", "1")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
 # ========== 内存诊断开关 ==========

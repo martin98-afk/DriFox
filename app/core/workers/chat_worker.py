@@ -1795,7 +1795,16 @@ class OpenAIChatWorker(QThread):
                         # 传入 tools=self.tools，与上下文圆环快照的口径一致
                         # （快照走 count_messages_tokens(..., tools=available_tools)，会含工具定义 tokens；
                         #  这里漏传 tools 会让卡片底部的 fallback 估值缺掉工具定义，与圆环对不上）
-                        ctx_count = count_messages_tokens(current_messages, model=model_name, tools=self.tools)
+                        # ratio：本地估算校正系数（服务商能力 > app.config 覆盖 > 模型名兜底），
+                        # 修正 MiniMax 等不返 usage 厂商的本地估算比真实值高约 2 倍的问题。
+                        from app.core.provider_profile import resolve_token_ratio
+
+                        ctx_count = count_messages_tokens(
+                            current_messages,
+                            model=model_name,
+                            tools=self.tools,
+                            ratio=resolve_token_ratio(self.llm_config, model_name),
+                        )
                     except ValueError, TypeError, RuntimeError:
                         ctx_count = 0
                 self._last_context_token_count = ctx_count

@@ -144,9 +144,13 @@ def trigger_plugin_changed_hook(context: dict) -> None:
 
     供 PluginManager（MCP 增删改/插件启停）/ MCPClientManager（连接状态变化）等
     无 backend 引用的模块使用：
-    - 取首个活跃 backend 实例的 HookManager 触发（_hooks 类级共享，任一实例等效）
+    - 广播到全部活跃 backend 实例的 HookManager 触发——_hooks 注册表类级共享
+      （任一实例等效），但 on_hook_finished 闭包与 _hook_message_queue 是
+      实例级的，逐个 backend 独立触发输出才进各自队列（多标签页都注入）
     - 提交到共享线程池异步执行，不阻塞调用方（mcp 事件循环线程 / 工具线程）
-    - 自动附加工具/MCP 注册表 diff 明细（有变化时；调用方显式传 diff 则跳过）
+    - 自动附加工具/MCP 注册表 diff 明细（有变化时；调用方显式传 diff 则跳过）；
+      diff 只算一次，广播时携带已算好的 diff/sub_actions（模块级基线首次消费
+      后第二次计算返回 None）
     - 无活跃 backend（全部窗口关闭）时静默跳过
 
     Args:
@@ -157,14 +161,19 @@ def trigger_plugin_changed_hook(context: dict) -> None:
     try:
         from app.core.backend import ChatBackend
 
-        inst = next(iter(ChatBackend._active_instances), None)
-        if inst is None:
+        # 过滤窗口关闭竞态实例（closeEvent 后 cleanup 前仍可能在集合中）
+        instances = [
+            b
+            for b in list(ChatBackend._active_instances)
+            if getattr(b, "_ui_valid", True) and b._hook_manager is not None
+        ]
+        if not instances:
             # 无窗口仍刷新快照基线，避免窗口全关期间的变化跨窗口误报
             _compute_plugin_snapshot_diff()
             return
-        hm = inst._hook_manager
         # 无注册 hook 提前跳过（省线程池开销）；快照仍需刷新保持基线新鲜
-        if "PluginChanged" not in hm._hooks:
+        # （_hooks 类级共享，检查任一实例即可）
+        if "PluginChanged" not in instances[0]._hook_manager._hooks:
             _compute_plugin_snapshot_diff()
             return
         if "diff" not in context:
@@ -177,7 +186,8 @@ def trigger_plugin_changed_hook(context: dict) -> None:
             context = dict(context)
             context["sub_actions"] = _sub_actions_from_diff(context["diff"])
         executor = _get_parallel_executor()
-        executor.submit(hm.trigger_event, "PluginChanged", context)
+        for inst in instances:
+            executor.submit(inst._hook_manager.trigger_event, "PluginChanged", dict(context))
     except Exception as e:
         logger.debug(f"[HookManager] trigger_plugin_changed_hook failed: {e}")
 
@@ -889,6 +899,8 @@ class HookManager:
     _shared_skill_to_hooks: Dict[str, List[tuple[str, int]]] = {}
     _shared_config_watchers: Dict[str, float] = {}
     _shared_registered_functions: Dict[str, Callable] = {}
+    # 跨窗口共享的函数归属记录（函数名 → 拥有者标识，避免多实例重复注册互相覆盖）
+    _shared_function_owners: Dict[str, str] = {}
     # 共享的 cwd 解析缓存
     _shared_cwd_resolve_cache: Dict[int, tuple] = {}
     # 跨窗口共享的 hook 开关状态（类级共享，避免多实例各自快照互相覆盖）
@@ -922,6 +934,7 @@ class HookManager:
 
         # 注册的 Python 函数（类级别共享）
         self._registered_functions: Dict[str, Callable] = HookManager._shared_registered_functions
+        self._function_owners: Dict[str, str] = HookManager._shared_function_owners
 
         # cwd 解析缓存（类级别共享）
         self._cwd_resolve_cache: Dict[int, tuple] = HookManager._shared_cwd_resolve_cache
@@ -1066,16 +1079,32 @@ class HookManager:
         """设置决策回调 (当 hook 返回 block/continue 等决策时调用)"""
         self._on_decision_callback = callback
 
-    def register_function(self, name: str, func: Callable):
-        """注册 Python 函数供 hooks 调用"""
+    def register_function(self, name: str, func: Callable, owner: str = ""):
+        """注册 Python 函数供 hooks 调用（H6：记录 owner 以便批量注销）"""
         self._registered_functions[name] = func
-        logger.debug(f"[HookManager] Registered function: {name}")
+        self._function_owners[name] = owner
+        logger.debug(f"[HookManager] Registered function: {name} (owner={owner})")
 
     def unregister_function(self, name: str):
         """注销 Python 函数"""
         if name in self._registered_functions:
             del self._registered_functions[name]
+            self._function_owners.pop(name, None)
             logger.debug(f"[HookManager] Unregistered function: {name}")
+
+    def unregister_functions_by_owner(self, owner: str) -> int:
+        """H6：按 owner 批量注销注册函数，返回注销数量。
+
+        解决 _shared_registered_functions 只增不卸问题：插件/配置热重载或卸载时
+        调用，避免旧 owner 的函数永久残留在类级共享字典中。
+        """
+        removed = [n for n, o in self._function_owners.items() if o == owner]
+        for n in removed:
+            self._registered_functions.pop(n, None)
+            self._function_owners.pop(n, None)
+        if removed:
+            logger.debug(f"[HookManager] Unregistered {len(removed)} functions for owner={owner}")
+        return len(removed)
 
     def register_hooks_from_json(
         self,
@@ -1517,6 +1546,8 @@ class HookManager:
 
             # 先注销旧的 user-custom hooks，避免重新注册后新旧 rule 并存
             self.unregister_skill_hooks("user-custom")
+            # H6：同时清理该 owner 下残留的注册函数，防止 _shared_registered_functions 只增不卸
+            self.unregister_functions_by_owner("user-custom")
 
             # 重新注册 (保留技能注册，skill_name 统一用 "user-custom")
             self.register_hooks_from_json("user-custom", "", config, config_file)
