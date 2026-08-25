@@ -116,7 +116,7 @@ def register(registry):
             models_dev_id="minimax",
             family="minimax",
             capabilities={
-                "token_ratio": 0.43,  # 本地 token 估算校正系数（除数）= 实际/cl100k_base；MiniMax 实测≈0.49 token/中文字
+                "token_ratio": 1.00,  # 本地 token 估算校正系数（除数）；cl100k_base 基线经 OpenCode 验证已准确，统一 1.0；见 token_estimator._MODEL_TOKEN_RATIOS
                 "context_limit": 1000000,
                 "max_output_tokens": 8192,
                 "absolute_limit": 65536,

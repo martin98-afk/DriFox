@@ -47,26 +47,33 @@ ENCODING_MAPPING = {
 }
 
 # 模型 token 校正系数 — 本地估算（cl100k_base / 快估）与实际模型 tokenizer 的补偿
-# 系数语义 = 实际模型分词器 token 数 / cl100k_base(或快估) token 数
-#   - 中文模型（Qwen/DeepSeek/GLM/MiniMax/Kimi）对中文远比 cl100k_base 高效
-#     （实测 MiniMax≈0.49、Qwen≈0.55 token/中文字，而 cl100k_base≈1.14），
-#     故为除数（< 1）。旧实现误写成乘数 1.04~1.08，导致本地估算比 API 真实值
-#     高约 2 倍（见 2026-08-25 排查）。
-#   - OpenAI 原生 cl100k_base 无需校正（1.00）。
-#   - 这些值仅作按模型名子串的兜底；服务商级覆盖见 ProviderDef.capabilities["token_ratio"]
-#     （由 provider_profile.resolve_token_ratio 解析，优先级高于此处）。
+# 系数语义 = 实际模型分词器 token 数 / cl100k_base(或快估) token 数。
+#
+# ⚠️ 单一静态系数无法同时贴合「纯中文」与「混合内容」：
+#    - 纯中文时部分中文模型（Qwen/DeepSeek 等）确实比 cl100k_base 高效；
+#    - 但真实对话多为混合内容（代码+中文+JSON+系统提示），实测 MiniMax-M2.5
+#      经 OpenCode 代理返回的 usage 与 cl100k_base 快估几乎一致
+#      （OpenCode 50k ≈ 快估 53.5k），故 cl100k_base 基线本身已准确。
+# 因此统一取 1.0（信任 cl100k_base/快估基线），避免对混合内容矫枉过正
+# （曾误用「中文 2 倍高效」的测量值把系数写成 0.43，导致 MiniMax 估算比
+#  真实占用低约 2 倍，见 2026-08-25 复盘）。
+#
+# 服务商级覆盖见 ProviderDef.capabilities["token_ratio"]
+# （resolve_token_ratio 解析，优先级：app.config 覆盖 > 服务商能力 > 此处）。
+# 如需针对某模型微调，改对应值或 app.config 的 "token_ratio" 即可。
+# 根治方案是按 API 真实 usage 自动校准（校准因子），可消除内容混合带来的偏差。
 _MODEL_TOKEN_RATIOS: Dict[str, float] = {
-    "minimax": 0.43,    # MiniMax-Text-01 实测 0.49/中文字 ÷ cl100k_base≈1.14
-    "qwen": 0.48,       # 通义千问 Qwen2.5 实测 ≈0.55/中文字
-    "deepseek": 0.48,   # DeepSeek tokenizer 与 Qwen 近似
-    "kimi": 0.48,       # Moonshot 近似 Qwen
-    "glm": 0.50,        # 智谱 GLM 略低于 Qwen
-    "claude": 0.50,     # Anthropic 原生返 usage 不估；仅 OpenAI 兼容路径兜底
-    "gemini": 0.95,     # Google tokenizer 较高效，接近 cl100k_base
-    "gpt-4": 1.00,      # OpenAI 原生，无需校正
+    "minimax": 1.00,
+    "qwen": 1.00,
+    "deepseek": 1.00,
+    "kimi": 1.00,
+    "glm": 1.00,
+    "claude": 1.00,
+    "gemini": 1.00,
+    "gpt-4": 1.00,
     "gpt-3.5": 1.00,
     "gpt-3": 1.00,
-    "default": 1.00,    # 未知模型不校正
+    "default": 1.00,
 }
 
 

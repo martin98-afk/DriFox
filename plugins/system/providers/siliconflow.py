@@ -38,7 +38,7 @@ def register(registry):
             models_dev_id="siliconflow",
             family="siliconflow",
             capabilities={
-                "token_ratio": 0.48,  # 本地 token 估算校正系数（除数）；SiliconFlow 以 Qwen/DeepSeek 为主
+                "token_ratio": 1.00,  # 本地 token 估算校正系数（除数）；cl100k_base 基线经 OpenCode 验证已准确，统一 1.0；见 token_estimator._MODEL_TOKEN_RATIOS
                 "context_limit": 131072,
                 "max_output_tokens": 16384,
                 "absolute_limit": 65536,
