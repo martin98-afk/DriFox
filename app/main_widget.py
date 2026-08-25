@@ -2497,6 +2497,18 @@ class OpenAIChatToolWindow(ToolWindow):
         window_registry.subagent_log_cleanup_timer.timeout.connect(cls._on_class_cleanup_timer)
         window_registry.subagent_log_cleanup_timer.start()
 
+    @classmethod
+    def stop_subagent_log_cleanup(cls):
+        """修 #3 timer：显式停止并释放全局子智能体日志清理 timer（应用退出/单例重建前调用）"""
+        timer = getattr(window_registry, "subagent_log_cleanup_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+                timer.deleteLater()
+            except RuntimeError:
+                pass
+            window_registry.subagent_log_cleanup_timer = None
+
     def _do_clean_subagent_logs(self):
         """执行子智能体日志清理（保留14天）"""
         try:
@@ -8888,6 +8900,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         ThemeRefreshCoordinator.timer_start("batched_total")
 
+        # 修 #3 timer：单触发 timer 触发后置 None 前显式释放，避免无 parent QTimer 残留
+        if cls._theme_batch_timer is not None:
+            try:
+                cls._theme_batch_timer.deleteLater()
+            except RuntimeError:
+                pass
         cls._theme_batch_timer = None
         final_scope = cls._theme_batch_scope
         cls._theme_batch_scope = None
@@ -19538,10 +19556,8 @@ class OpenAIChatToolWindow(ToolWindow):
     @classmethod
     def _on_app_about_to_quit(cls):
         """应用退出时保存所有窗口的脏会话（单次注册，批量执行）"""
-        # 停止全局子智能体日志清理定时器，避免退出后悬空回调
-        if window_registry.subagent_log_cleanup_timer is not None:
-            window_registry.subagent_log_cleanup_timer.stop()
-            window_registry.subagent_log_cleanup_timer = None
+        # 停止全局子智能体日志清理定时器，避免退出后悬空回调（修 #3 timer：含 deleteLater 兜底）
+        cls.stop_subagent_log_cleanup()
         for win in window_registry.alive_window_instances():
             if getattr(win, "_is_destroyed", False):
                 continue

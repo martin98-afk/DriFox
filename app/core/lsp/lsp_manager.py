@@ -191,6 +191,34 @@ class LspManager:
             await client.stop()
         logger.info("[LspManager] 所有 LSP 服务器已停止")
 
+    def shutdown(self) -> None:
+        """H3：显式关闭持久事件循环线程（插件热重载 / 应用退出调用）。
+
+        停止所有 LSP 客户端 → 停止并关闭事件循环 → join 后台线程，避免线程与 loop 泄漏。
+        """
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            future = asyncio.run_coroutine_threadsafe(self.stop_all(), loop)
+            future.result(timeout=10)
+        except Exception as e:
+            logger.warning(f"[LspManager] shutdown 停止客户端异常: {e}")
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            pass
+        if self._loop_thread is not None:
+            self._loop_thread.join(timeout=5)
+            self._loop_thread = None
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.close()
+            except Exception:
+                pass
+        self._loop = None
+        self._initialized = False
+
     # ── 增量热重载 ───────────────────────────────────────────
 
     def add_plugin_servers(self, plugin_name: str, config_data: dict) -> int:

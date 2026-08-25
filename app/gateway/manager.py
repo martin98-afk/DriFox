@@ -195,6 +195,35 @@ class PlatformManager:
         """停止所有平台"""
         self._schedule_coro(self._stop_all_async())
 
+    def shutdown(self) -> None:
+        """H2：显式关闭持久事件循环线程（应用退出 / 单例重建前调用）。
+
+        取消挂起任务 → 停止并关闭事件循环 → join 后台线程，避免线程与 loop 泄漏。
+        """
+        # 先停所有平台适配器
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._stop_all_async(), self._loop)
+            future.result(timeout=10)
+        except Exception:
+            pass
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            pass
+        if self._loop_thread is not None:
+            self._loop_thread.join(timeout=5)
+            self._loop_thread = None
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.close()
+            except Exception:
+                pass
+        self._loop = None
+        self._running = False
+
     async def _start_all_async(self) -> Dict[Platform, bool]:
         """后台启动所有启用的平台（registry 驱动，无平台 if-elif）"""
         if self._running:

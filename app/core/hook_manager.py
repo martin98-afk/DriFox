@@ -899,6 +899,8 @@ class HookManager:
     _shared_skill_to_hooks: Dict[str, List[tuple[str, int]]] = {}
     _shared_config_watchers: Dict[str, float] = {}
     _shared_registered_functions: Dict[str, Callable] = {}
+    # 跨窗口共享的函数归属记录（函数名 → 拥有者标识，避免多实例重复注册互相覆盖）
+    _shared_function_owners: Dict[str, str] = {}
     # 共享的 cwd 解析缓存
     _shared_cwd_resolve_cache: Dict[int, tuple] = {}
     # 跨窗口共享的 hook 开关状态（类级共享，避免多实例各自快照互相覆盖）
@@ -932,6 +934,7 @@ class HookManager:
 
         # 注册的 Python 函数（类级别共享）
         self._registered_functions: Dict[str, Callable] = HookManager._shared_registered_functions
+        self._function_owners: Dict[str, str] = HookManager._shared_function_owners
 
         # cwd 解析缓存（类级别共享）
         self._cwd_resolve_cache: Dict[int, tuple] = HookManager._shared_cwd_resolve_cache
@@ -1076,16 +1079,32 @@ class HookManager:
         """设置决策回调 (当 hook 返回 block/continue 等决策时调用)"""
         self._on_decision_callback = callback
 
-    def register_function(self, name: str, func: Callable):
-        """注册 Python 函数供 hooks 调用"""
+    def register_function(self, name: str, func: Callable, owner: str = ""):
+        """注册 Python 函数供 hooks 调用（H6：记录 owner 以便批量注销）"""
         self._registered_functions[name] = func
-        logger.debug(f"[HookManager] Registered function: {name}")
+        self._function_owners[name] = owner
+        logger.debug(f"[HookManager] Registered function: {name} (owner={owner})")
 
     def unregister_function(self, name: str):
         """注销 Python 函数"""
         if name in self._registered_functions:
             del self._registered_functions[name]
+            self._function_owners.pop(name, None)
             logger.debug(f"[HookManager] Unregistered function: {name}")
+
+    def unregister_functions_by_owner(self, owner: str) -> int:
+        """H6：按 owner 批量注销注册函数，返回注销数量。
+
+        解决 _shared_registered_functions 只增不卸问题：插件/配置热重载或卸载时
+        调用，避免旧 owner 的函数永久残留在类级共享字典中。
+        """
+        removed = [n for n, o in self._function_owners.items() if o == owner]
+        for n in removed:
+            self._registered_functions.pop(n, None)
+            self._function_owners.pop(n, None)
+        if removed:
+            logger.debug(f"[HookManager] Unregistered {len(removed)} functions for owner={owner}")
+        return len(removed)
 
     def register_hooks_from_json(
         self,
@@ -1527,6 +1546,8 @@ class HookManager:
 
             # 先注销旧的 user-custom hooks，避免重新注册后新旧 rule 并存
             self.unregister_skill_hooks("user-custom")
+            # H6：同时清理该 owner 下残留的注册函数，防止 _shared_registered_functions 只增不卸
+            self.unregister_functions_by_owner("user-custom")
 
             # 重新注册 (保留技能注册，skill_name 统一用 "user-custom")
             self.register_hooks_from_json("user-custom", "", config, config_file)

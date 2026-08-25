@@ -1990,16 +1990,20 @@ class ChatBackend(QObject):
                 pass  # 窗口关闭竞态：backend 已 deleteLater 但未 cleanup
 
     def _schedule_debounced_reload(self):
-        """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）"""
-        if getattr(self, "_reload_timer", None) is None:
-            self._reload_timer = QTimer()
-            self._reload_timer.setSingleShot(True)
-            self._reload_timer.timeout.connect(self._do_debounced_reload)
-        if not self._reload_timer.isActive():
-            self._reload_timer.start(300)
+        """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）
+
+        修 #2 timer：改用 QTimer.singleShot 静态方法，不持有 QTimer 实例
+        （PyQt5 下即便 stop+deleteLater 仍残留 +1 QTimer，singleShot 零实例）。
+        用 _reload_pending 守卫保留"风暴期合并"语义：多次调用只在首个 300ms 后触发一次。
+        """
+        if getattr(self, "_reload_pending", False):
+            return
+        self._reload_pending = True
+        QTimer.singleShot(300, self._do_debounced_reload)
 
     def _do_debounced_reload(self):
         """去抖到期：合并执行一次全量重载（已内部对 added/changed/removed 增量处理）"""
+        self._reload_pending = False
         self._last_reload_at = time.time()
         try:
             result = self.reload_plugin_subsystems()
@@ -2710,10 +2714,9 @@ class ChatBackend(QObject):
         """
         self._initialized = False
 
-        # 0. 停止去抖重载定时器（M8）：惰性创建、无 parent 的 QTimer，
-        #    不先 stop 会在 cleanup 后 300ms 触发 _do_debounced_reload 访问已清理对象。
-        if getattr(self, "_reload_timer", None) is not None and self._reload_timer.isActive():
-            self._reload_timer.stop()
+        # 0. 取消待执行的去抖重载（修 #2 timer：已改为 QTimer.singleShot，无实例可 stop，
+        #    置标志位由 _do_debounced_reload 自行跳过，避免 cleanup 后回调访问已清理对象）。
+        self._reload_pending = False
 
         # 1. 清理 ChatEngine（停止 worker + 清空回调）
         if self._chat_engine:

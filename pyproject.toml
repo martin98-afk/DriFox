@@ -124,6 +124,7 @@ python_files = ["test_*.py"]
 asyncio_mode = "auto"
 markers = [
     "perf: 性能基准测试（测量响应时间）",
+    "perf_long: 长时间运行时压测（≥30s/场景，需 QApplication）",
     "stress: 压力测试（连续调用验证稳定性）",
 ]
 
