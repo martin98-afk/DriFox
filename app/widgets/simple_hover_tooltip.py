@@ -387,7 +387,7 @@ class _HoverTooltipFilter(QObject):
             return
         tt = self._get_tooltip()
         tt.set_text(self._text)
-        tt.show_above(self._parent)
+        tt.show_above(p)
 
     def _hide(self):
         if self._tooltip:
