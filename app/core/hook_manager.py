@@ -144,9 +144,13 @@ def trigger_plugin_changed_hook(context: dict) -> None:
 
     供 PluginManager（MCP 增删改/插件启停）/ MCPClientManager（连接状态变化）等
     无 backend 引用的模块使用：
-    - 取首个活跃 backend 实例的 HookManager 触发（_hooks 类级共享，任一实例等效）
+    - 广播到全部活跃 backend 实例的 HookManager 触发——_hooks 注册表类级共享
+      （任一实例等效），但 on_hook_finished 闭包与 _hook_message_queue 是
+      实例级的，逐个 backend 独立触发输出才进各自队列（多标签页都注入）
     - 提交到共享线程池异步执行，不阻塞调用方（mcp 事件循环线程 / 工具线程）
-    - 自动附加工具/MCP 注册表 diff 明细（有变化时；调用方显式传 diff 则跳过）
+    - 自动附加工具/MCP 注册表 diff 明细（有变化时；调用方显式传 diff 则跳过）；
+      diff 只算一次，广播时携带已算好的 diff/sub_actions（模块级基线首次消费
+      后第二次计算返回 None）
     - 无活跃 backend（全部窗口关闭）时静默跳过
 
     Args:
@@ -157,14 +161,19 @@ def trigger_plugin_changed_hook(context: dict) -> None:
     try:
         from app.core.backend import ChatBackend
 
-        inst = next(iter(ChatBackend._active_instances), None)
-        if inst is None:
+        # 过滤窗口关闭竞态实例（closeEvent 后 cleanup 前仍可能在集合中）
+        instances = [
+            b
+            for b in list(ChatBackend._active_instances)
+            if getattr(b, "_ui_valid", True) and b._hook_manager is not None
+        ]
+        if not instances:
             # 无窗口仍刷新快照基线，避免窗口全关期间的变化跨窗口误报
             _compute_plugin_snapshot_diff()
             return
-        hm = inst._hook_manager
         # 无注册 hook 提前跳过（省线程池开销）；快照仍需刷新保持基线新鲜
-        if "PluginChanged" not in hm._hooks:
+        # （_hooks 类级共享，检查任一实例即可）
+        if "PluginChanged" not in instances[0]._hook_manager._hooks:
             _compute_plugin_snapshot_diff()
             return
         if "diff" not in context:
@@ -177,7 +186,8 @@ def trigger_plugin_changed_hook(context: dict) -> None:
             context = dict(context)
             context["sub_actions"] = _sub_actions_from_diff(context["diff"])
         executor = _get_parallel_executor()
-        executor.submit(hm.trigger_event, "PluginChanged", context)
+        for inst in instances:
+            executor.submit(inst._hook_manager.trigger_event, "PluginChanged", dict(context))
     except Exception as e:
         logger.debug(f"[HookManager] trigger_plugin_changed_hook failed: {e}")
 

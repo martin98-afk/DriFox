@@ -1585,8 +1585,15 @@ class TabManagerWindow(QWidget):
         self._update_replace_tab_visibility()
 
     def _on_replace_tab_close_clicked(self, card_id: str) -> None:
-        """点 tab × → 真正关闭对应卡片并从 open 移除 tab 项；若仍有其他 replace 卡片，
-        自动激活（互斥显示）最近一个。
+        """点 tab × → 真正关闭对应卡片并从 open 移除 tab 项（同 close_replace_card）"""
+        self.close_replace_card(card_id)
+
+    def close_replace_card(self, card_id: str) -> None:
+        """真正关闭一张 replace 卡片并从 open 移除 tab 项（公共关闭入口）
+
+        tab × 与「卡片内部关闭按钮」共用：卡片内部关闭（SystemCardFrame.closed）同样
+        意味着用户关闭该卡片，必须移除 tab；若仅依赖 hide 事件的 120ms 去抖，
+        会因其他 replace 卡片（如 settings）可见而被误判为互斥切换导致 tab 残留。
 
         内置全局卡（settings/diff_viewer 等）经 CardManager.hide_card(GLOBAL_WINDOW_ID)
         真正隐藏；full 浮动卡经 registry.hide_floating_card_globally 隐藏（该 API 仅对
