@@ -126,6 +126,23 @@ All notable changes to this project will be documented in this file.
 - **Aurora PNG 颜色模式校验** (`tests/utils/test_midnight_aurora_sidebar.py`): 校验生成 aurora 渐变 PNG 的颜色模式与基础形状（与移除同步归档）。
 - **插件变更钩子集成 + tab-manager 卡片关闭** (`tests/core/test_plugin_changed_hook_integration.py` + `tests/widgets/test_tab_manager_window.py`): 覆盖 `PluginChanged` 钩子在多 backend/多 tab 场景的广播；补 tab-manager 卡片关闭用例。
 
+### 🔄 Hotfix 重新发布 (Re-release · 2026-08-25 · Round 3)
+
+基于 `v0.5.4` Round 2 的增量变更 | 提交数：2 · 文件变更：24 · +3791/-26 | 贡献者：dingma
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **shimmer gradient 缓存导致 stop 累积脏色** (`app/widgets/message_card.py`): 移除未使用的 `_grad_shimmer` 模板缓存（`setColorAt` 持续追加 stop 会残留脏色，每帧 paint 仍新建 gradient，缓存不仅无效还可能造成误用）；补注释说明 stop 位置随相位连续变化必须每帧新建 gradient，修复 shimmer 流光拖影/脏色残留。
+
+#### ⚡ 性能优化 (Performance)
+
+- **shimmer 渐变按帧创建避免 stop 累积** (`app/widgets/message_card.py`): 每帧根据 `shimmer_pos` 连续变化新建 `QLinearGradient`，移除冗余缓存读取分支，减少 paintEvent 内对象引用与冗余路径。
+
+#### ✅ 测试 (Tests)
+
+- **长跑内存泄漏压测场景** (`tests/perf/long_run/` + `app/core/{backend,hook_manager,lsp/lsp_manager}.py` + `app/core/workers/subagent_worker.py` + `app/gateway/manager.py` + `app/main_widget.py` + `app/utils/drag_stall_profiler.py` + `app/widgets/{message_card,pixel_pet}.py`): 新增运行时采样器（RSS / QObject 计数 / tracemalloc 快照），三个压测场景（消息流压测 / 会话切换压测 / 插件热重载压测）+ pytest 阈值断言 + markdown 报告生成；`.gitignore` 忽略压测输出。
+- **最小化复现脚本** (`tests/debug/memleak_repro/`): 消息流 / 信号定时器 / 综合 repro / 中途 verify 四个最小化复现脚本，便于内存泄漏根因定位。
+
 ## [v0.5.3] - 2026-08-22
 
 自上一版本以来的变更 | 提交数：175 · 文件变更：303 · +28058/-15698 | 贡献者：dingma, mading, drifox-bot, builder
