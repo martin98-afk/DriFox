@@ -65,6 +65,14 @@ cpf.fetch_async = _counting_fetch  # 运行时替换
 from app.main_widget import OpenAIChatToolWindow  # noqa: E402
 from app.widgets.tab_manager_window import TabManagerWindow  # noqa: E402
 
+# 禁用 models.dev 后台拉取：避免后台线程在窗口销毁后回调 _models_dev_ready 到已删除
+# C++ 对象，触发原生崩溃（STATUS_STACK_BUFFER_OVERRUN）。perf_regression 同思路禁用网络副作用。
+OpenAIChatToolWindow._start_models_dev_sync = lambda self: None
+# 禁用所有延迟初始化（_safe_timer_call 调度 _sync_working_directory / _load_model_configs /
+# _async_refresh_opencode_models 等后台回调）：避免窗口快速销毁后这些回调/线程进已删 widget
+# 触发原生崩溃。内存压测只关心"标签开/关生命周期"，与这些延迟特性无关。
+OpenAIChatToolWindow._safe_timer_call = lambda self, *a, **k: None
+
 
 class FakePage(QWidget):
     """与 main.py / TabManagerWindow._create_fake_page 等价的假页面。"""
@@ -261,13 +269,15 @@ def run(rounds: int, tabs_per_round: int, keep: int, track_objects: bool, object
     for d in result["tracemalloc_diff_top"][:10]:
         print(f"  +{d['size_kb']:>8.1f} KB  {d['loc']}  ({d['count']} objs)")
 
+    # 先落盘结果：末尾 teardown（关闭多 WebEngine 视图 + app.quit）在原生的 0xC0000409 止血后
+    # 仍可能崩溃（不同退出码），测量已完成，先保存 JSON 避免丢失。
+    bc.save_result("tab_mem_leak", result)
     try:
         first_window.close()
         tm.close()
     except Exception:
         pass
     app.processEvents()
-    bc.save_result("tab_mem_leak", result)
     return result
 
 

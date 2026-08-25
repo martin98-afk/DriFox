@@ -592,3 +592,128 @@ class TestPluginSnapshotSharedBaseline:
         diff = hm._compute_plugin_snapshot_diff()
         assert diff is not None
         assert "foo" in diff["tools_added"]
+
+
+# ──────────────────────────────────────────────
+# Case 7：多标签页（多 backend）广播
+# ──────────────────────────────────────────────
+
+
+class TestPluginChangedHookBroadcast:
+    """多标签页场景：PluginChanged hook 广播到全部活跃 backend
+
+    回归目标：此前 hook 只在宿主（watcher 宿主 / _active_instances 无序首个）
+    backend 上触发，其余标签页的 _hook_message_queue 收不到注入——表现为
+    "不是所有标签页都会触发这个事件"。修复后宿主 + 全部活跃 backend 各触发一次。
+    """
+
+    def test_emit_plugin_changed_broadcasts_to_all_backends(self, monkeypatch, isolated_hook_states):
+        """emit_plugin_changed：宿主 + 其他活跃 backend 的 hook 都被命中
+
+        真实系统 _hooks 注册表类级共享（每个 hook 只注册一次），
+        此处用共享 HookManager 构造两个 backend，模拟多标签页。
+        """
+        captured = []
+
+        def hook_fn(event, context):
+            captured.append(dict(context))
+            return "变更"
+
+        shared_hm = HookManager()
+        func_name = f"__broadcast_hook_{id(hook_fn)}"
+        shared_hm.register_function(func_name, hook_fn)
+        hook = Hook(
+            id="broadcast-hook",
+            type=HookType.PYTHON.value,
+            function=func_name,
+            add_output_to_context=True,
+            enabled=True,
+            timeout=5,
+            skill_root=str(_REPO_ROOT),
+            is_system_plugin=True,
+        )
+        shared_hm._hooks["PluginChanged"] = [HookMatchRule(matcher="", hooks=[hook], skill_name="test")]
+
+        def make_backend():
+            b = ChatBackend.__new__(ChatBackend)
+            b._ui_valid = True
+            b._hot_reload_seq = 0
+            b._hook_message_queue = queue.Queue()
+            b._pre_tool_message_queue = queue.Queue()
+            b._hook_messages_updated = MagicMock()
+            b._hook_manager = shared_hm
+            # PyQtSignal 在 __new__ 实例上访问抛 RuntimeError，mock 掉
+            b.plugin_changed = MagicMock()
+            return b
+
+        backend_a = make_backend()
+        backend_b = make_backend()
+        monkeypatch.setattr(ChatBackend, "_active_instances", {backend_a, backend_b})
+
+        backend_a.emit_plugin_changed({"ui": True}, "demo-plugin")
+
+        # 宿主 + 另一个 backend 各触发 1 次（hook 只注册一次，无重复执行）
+        assert len(captured) == 2, f"应广播 2 次，实际 {len(captured)}"
+        for ctx in captured:
+            assert ctx["plugin_name"] == "demo-plugin"
+            assert "components" in ctx
+        # context 必须独立拷贝（防并发污染）
+        assert captured[0] is not captured[1]
+
+    def test_trigger_plugin_changed_hook_broadcasts_to_all(self, monkeypatch, isolated_hook_states):
+        """PluginManager/MCP 路径：全部活跃 backend 都投递触发"""
+        from app.core import hook_manager as hm
+
+        submitted: list = []
+
+        class _FakeExecutor:
+            @staticmethod
+            def submit(fn, *args):
+                submitted.append((fn, args))
+
+        monkeypatch.setattr(hm, "_get_parallel_executor", lambda: _FakeExecutor())
+        captured = []
+
+        def hook_fn(event, context):
+            captured.append(event)
+            return "ok"
+
+        b1, _ = _build_backend_with_inline_hook(hook_fn, matcher="")
+        b2, _ = _build_backend_with_inline_hook(hook_fn, matcher="")
+        monkeypatch.setattr(ChatBackend, "_active_instances", {b1, b2})
+
+        hm.trigger_plugin_changed_hook({"action": "mcp_added", "server_name": "x"})
+
+        # 每个 backend 各 submit 一次 trigger_event
+        assert len(submitted) == 2, f"应广播 2 次，实际 {len(submitted)}"
+        for fn, args in submitted:
+            assert fn == b1._hook_manager.trigger_event or fn == b2._hook_manager.trigger_event
+            assert args[0] == "PluginChanged"
+            # context 必须独立拷贝（防并发污染）
+            assert args[1] is not b1._hook_manager and args[1] is not b2._hook_manager
+
+    def test_trigger_plugin_changed_hook_skips_closed_backend(self, monkeypatch, isolated_hook_states):
+        """窗口关闭竞态：_ui_valid=False 的 backend 不投递，其余正常广播"""
+        from app.core import hook_manager as hm
+
+        submitted: list = []
+
+        class _FakeExecutor:
+            @staticmethod
+            def submit(fn, *args):
+                submitted.append(args)
+
+        monkeypatch.setattr(hm, "_get_parallel_executor", lambda: _FakeExecutor())
+
+        def hook_fn(event, context):
+            return "ok"
+
+        b_live, _ = _build_backend_with_inline_hook(hook_fn, matcher="")
+        b_closing, _ = _build_backend_with_inline_hook(hook_fn, matcher="")
+        b_closing._ui_valid = False  # 模拟 closeEvent 后 cleanup 前
+        monkeypatch.setattr(ChatBackend, "_active_instances", {b_live, b_closing})
+
+        hm.trigger_plugin_changed_hook({"action": "enabled", "plugin_name": "demo"})
+
+        assert len(submitted) == 1, f"仅存活 backend 应被广播，实际 {len(submitted)}"
+        assert submitted[0][0] == "PluginChanged"

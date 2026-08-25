@@ -321,7 +321,9 @@ class _HoverTooltipFilter(QObject):
 
     def __init__(self, parent: QWidget, text: str, delay_ms: int = 400):
         super().__init__(parent)
-        self._parent = parent
+        # #33 根因修复：parent 改弱引用，断开 filter↔父 引用环（filter 是 parent 子对象，
+        # 强持有 parent 会阻止父随标签关闭被回收 → per-tab 泄漏）。所有使用点需 deref + 判空。
+        self._parent = weakref.ref(parent)
         self._text = text
         self._tooltip: Optional[SimpleHoverTooltip] = None
         self._timer = QTimer(self)
@@ -341,13 +343,13 @@ class _HoverTooltipFilter(QObject):
         return self._tooltip
 
     def eventFilter(self, obj, event):
-        if obj is not self._parent:
+        if obj is not self._parent():
             return False
         t = event.type()
         if t == event.ToolTip:
             return True  # 拦截原生
         elif t in (event.Enter, event.HoverEnter):
-            tip = self._parent.toolTip() or ""
+            tip = self._parent().toolTip() or ""
             if tip:
                 self._text = tip
                 self._timer.start()
@@ -375,11 +377,12 @@ class _HoverTooltipFilter(QObject):
         # 按钮 visible 切换时序（团队框 hover 显示按钮）或隐藏态几何错位
         # （DPI 缩放）下，timer 可能已启动但鼠标已不在控件上（或控件已
         # 隐藏），直接显示会出现"飘着的 tooltip"。校验失败则停表放弃。
-        if not self._parent.isVisible():
+        p = self._parent()
+        if p is None or not p.isVisible():
             self._timer.stop()
             return
-        local = self._parent.mapFromGlobal(QCursor.pos())
-        if not self._parent.rect().contains(local):
+        local = p.mapFromGlobal(QCursor.pos())
+        if not p.rect().contains(local):
             self._timer.stop()
             return
         tt = self._get_tooltip()
@@ -400,7 +403,7 @@ class _HoverTooltipFilter(QObject):
         # 避免 filter wrapper 被 PyQt 信号连接/event filter 框架层短暂持有时
         # 条目仍残留（id 复用会误判"已安装"）。
         try:
-            _filters.pop(id(self._parent), None)
+            _filters.pop(id(self._parent()), None)
         except Exception:
             pass
         try:
@@ -416,6 +419,9 @@ class _HoverTooltipFilter(QObject):
                 self._tooltip.deleteLater()
             except RuntimeError:
                 pass
+        # 方案 B 兜底：cleanup 触发即断环，避免 _parent 弱引用 / _tooltip 残留
+        self._parent = None
+        self._tooltip = None
 
     def refresh_theme(self):
         if self._tooltip:

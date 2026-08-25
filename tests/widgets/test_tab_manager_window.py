@@ -62,6 +62,56 @@ class TestTabManagerWindow:
         assert tm._content_area is not None
 
 
+class TestReplaceTabCloseFromCardInside:
+    """卡片内部关闭（closed 信号路径）→ 必须移除 replace tab
+
+    回归：hook/provider/mcp 编辑卡在卡片内关闭（关闭按钮/保存后）时，因 settings
+    卡片可见被 120ms 去抖误判为互斥切换，导致 tab 残留。close_replace_card 提供
+    明确的"真正关闭"语义，绕过去抖猜测。
+    """
+
+    @staticmethod
+    def _seed_open(tm, card_ids):
+        """向 open 集合灌入卡片并同步 tab 栏（模拟 settings + 编辑卡互斥共存）"""
+        from collections import OrderedDict
+
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+        tm._replace_open[GLOBAL_WINDOW_ID] = OrderedDict((cid, cid) for cid in card_ids)
+        tm._replace_active[GLOBAL_WINDOW_ID] = card_ids[-1]
+        tm._refresh_replace_tab_bar()
+
+    def test_card_inside_close_removes_tab_though_settings_visible(self, qtbot):
+        """卡片内关闭编辑卡：即使 settings 仍可见，hook_edit tab 也应移除"""
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        self._seed_open(tm, ["settings", "hook_edit"])
+        assert "hook_edit" in tm._replace_tab_bar._buttons
+
+        tm.close_replace_card("hook_edit")
+
+        assert "hook_edit" not in tm._replace_open[GLOBAL_WINDOW_ID]
+        assert tm._replace_active.get(GLOBAL_WINDOW_ID) is None
+        assert "hook_edit" not in tm._replace_tab_bar._buttons
+        # settings 保留（卡片内关闭编辑卡 → 回到设置面板）
+        assert "settings" in tm._replace_tab_bar._buttons
+
+    def test_tab_close_click_uses_same_public_entry(self, qtbot):
+        """tab × 关闭走同一公共方法（行为一致）"""
+        from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+        tm = TabManagerWindow.create_instance()
+        qtbot.addWidget(tm)
+        self._seed_open(tm, ["settings", "mcp_edit"])
+
+        tm._on_replace_tab_close_clicked("mcp_edit")
+
+        assert "mcp_edit" not in tm._replace_open[GLOBAL_WINDOW_ID]
+        assert "mcp_edit" not in tm._replace_tab_bar._buttons
+
+
 class TestTabManagerWindowShowEvent:
     """T3: showEvent 补刷 UI 插件列表（隐藏期间热加载 → 重新显示时刷新）"""
 
