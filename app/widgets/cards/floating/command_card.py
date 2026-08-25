@@ -87,6 +87,45 @@ def _split_value_entry(entry) -> tuple:
     return str(entry), ""
 
 
+# ── 动态枚举值参数注册表（param_name → data_provider key） ──
+# 走 data_provider 动态取值的 value 参数清单。新增动态枚举参数只需在此登记一行，
+# _auto_switch_to_value_selection（候选过滤）与 _switch_to_value_selection /
+# _refresh_value_list（取选项）三处共用本表，避免散在多处维护。
+_DYNAMIC_VALUE_PROVIDERS: Dict[str, str] = {
+    "--model=": "model_options",
+    "--join=": "agent_options",
+    "--plugin=": "plugin_options",
+    "--load=": "template_options",
+    "--delete=": "template_options",
+}
+
+
+def _get_value_options(
+    param_name: str,
+    data_provider: Dict[str, Any],
+    param_widgets: Optional[List["ParameterItemWidget"]] = None,
+) -> List[Any]:
+    """统一从 data_provider / 静态 value_options 解析参数的可选值
+
+    优先级：
+    1. param_name 在 _DYNAMIC_VALUE_PROVIDERS 中 → 查 data_provider[key]
+    2. 否则从 param_widgets 中匹配 param_name 的 widget 取 value_options
+    3. 都没有 → 返回空列表
+
+    三个值选择入口（_auto_switch_to_value_selection 候选过滤、
+    _switch_to_value_selection 取值、_refresh_value_list 取值）都走本函数，
+    保证数据源映射单一事实源。
+    """
+    provider_key = _DYNAMIC_VALUE_PROVIDERS.get(param_name)
+    if provider_key is not None:
+        return data_provider.get(provider_key, []) or []
+    if param_widgets is not None:
+        for w in param_widgets:
+            if w.param_name == param_name:
+                return w._param.value_options or []
+    return []
+
+
 class _DescTooltipBubble(QLabel):
     """悬浮描述气泡：自绘圆角主题实底背景
 
@@ -1813,20 +1852,8 @@ class CommandCard(QWidget):
         param_name = widget.param_name
         param = widget._param
 
-        # 获取可选值列表
-        options = []
-        if param_name == "--model=":
-            options = self._data_provider.get("model_options", [])
-        elif param_name == "--load=":
-            options = self._data_provider.get("template_options", [])
-        elif param_name == "--delete=":
-            options = self._data_provider.get("template_options", [])
-        elif param_name == "--join=":
-            options = self._data_provider.get("agent_options", [])
-        elif param_name == "--plugin=":
-            options = self._data_provider.get("plugin_options", [])
-        else:
-            options = param.value_options or []
+        # 获取可选值列表（统一查表：动态源 → data_provider；否则 → 静态 value_options）
+        options = _get_value_options(param_name, self._data_provider)
 
         if not options:
             # 无可选值：--name= 已在 _execute_param_selection 中插入，无需再操作
@@ -1885,18 +1912,12 @@ class CommandCard(QWidget):
         import re
 
         # 1. 收集所有带 value_options 的 value 参数（不论显隐，靠文本来匹配）
+        #    动态源（_DYNAMIC_VALUE_PROVIDERS）或静态 value_options 任一即可
         candidate_params = []
         for w in self._param_widgets:
             if w.param_type != "value":
                 continue
-            # --model= 使用动态数据源；其他参数需有静态 value_options
-            if w.param_name == "--model=":
-                candidate_params.append(w)
-            elif w.param_name == "--join=":
-                candidate_params.append(w)
-            elif w.param_name == "--plugin=":
-                candidate_params.append(w)
-            elif w._param.value_options:
+            if w.param_name in _DYNAMIC_VALUE_PROVIDERS or w._param.value_options:
                 candidate_params.append(w)
 
         if not candidate_params:
@@ -1987,24 +2008,8 @@ class CommandCard(QWidget):
         if not param_name:
             return
 
-        # 重新取源 options
-        options = []
-        if param_name == "--model=":
-            options = self._data_provider.get("model_options", [])
-        elif param_name == "--load=":
-            options = self._data_provider.get("template_options", [])
-        elif param_name == "--delete=":
-            options = self._data_provider.get("template_options", [])
-        elif param_name == "--join=":
-            options = self._data_provider.get("agent_options", [])
-        elif param_name == "--plugin=":
-            options = self._data_provider.get("plugin_options", [])
-        else:
-            # 非 --model= 的 value 参数：从 widget 反查
-            for w in self._param_widgets:
-                if w.param_name == param_name:
-                    options = w._param.value_options or []
-                    break
+        # 重新取源 options（统一查表）
+        options = _get_value_options(param_name, self._data_provider, self._param_widgets)
 
         filtered = self._filter_value_options(options, query)
 
