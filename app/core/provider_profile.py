@@ -9,7 +9,7 @@ stays aligned with software-level provider settings.
 
 import hashlib
 import uuid as _uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 class ProviderConfigCollision(Exception):
@@ -171,6 +171,37 @@ def get_provider_profile(llm_config: Dict[str, Any]) -> Dict[str, Any]:
     profile["family"] = family
     profile["auth_type"] = str(llm_config.get("认证方式", "bearer") or "bearer").lower()
     return profile
+
+
+def resolve_token_ratio(llm_config: Optional[Dict[str, Any]] = None, model: Optional[str] = None) -> float:
+    """解析本地 token 估算的模型校正系数（除数）。
+
+    优先级（高 → 低）：
+      1. llm_config["token_ratio"]                 —— 服务商配置 / app.config 手动覆盖（用户可调）
+      2. ProviderDef.capabilities["token_ratio"]   —— 服务商插件声明的能力（按 family 聚合）
+      3. _MODEL_TOKEN_RATIOS[model]                —— 按模型名子串的兜底默认值
+
+    系数语义 = 实际模型分词器 token 数 / cl100k_base(或快估) token 数。
+    中文模型（Qwen/DeepSeek/GLM/MiniMax/Kimi）对中文远比 cl100k_base 高效，
+    故为除数（< 1）。详见 token_estimator._MODEL_TOKEN_RATIOS 注释。
+
+    背景：MiniMax 等部分厂商的 API 不返回 usage（prompt_tokens），本地估算是唯一口径；
+    旧实现把中文模型系数写成乘数 1.04~1.08，导致本地估算比 API 真实值高约 2 倍。
+    """
+    llm_config = llm_config or {}
+    override = llm_config.get("token_ratio")
+    if isinstance(override, (int, float)) and override > 0:
+        return float(override)
+    try:
+        profile = get_provider_profile(llm_config)
+        cap = profile.get("token_ratio")
+        if isinstance(cap, (int, float)) and cap > 0:
+            return float(cap)
+    except Exception:
+        pass
+    from app.core.token_estimator import _get_model_token_ratio
+
+    return _get_model_token_ratio(model or str(llm_config.get("模型名称", "gpt-4") or "gpt-4"))
 
 
 def supports_vision(llm_config: Dict[str, Any]) -> bool:

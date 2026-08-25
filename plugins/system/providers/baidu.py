@@ -32,6 +32,7 @@ def register(registry):
             models_dev_id="",
             family="baidu_qianfan",
             capabilities={
+                "token_ratio": 0.55,  # 本地 token 估算校正系数（除数）；百度 ERNIE 中文分词效率略低
                 "context_limit": 200000,
                 "max_output_tokens": 8192,
                 "absolute_limit": 65536,

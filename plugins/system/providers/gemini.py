@@ -33,6 +33,7 @@ def register(registry):
             models_dev_id="google",
             family="gemini",
             capabilities={
+                "token_ratio": 0.95,  # 本地 token 估算校正系数（除数）；Google tokenizer 接近 cl100k_base
                 "context_limit": 1000000,
                 "max_output_tokens": 8192,
                 "absolute_limit": 65536,

@@ -24,7 +24,8 @@ from app.core.conversation.config import ConversationConfig, PermissionStrategy
 from app.core.conversation.core import ConversationCore
 from app.core.engines.base import BaseEngine
 from app.core.message_content import content_to_text
-from app.core.token_estimator import count_tools_tokens, get_model_token_ratio, per_message_tokens
+from app.core.token_estimator import count_tools_tokens, per_message_tokens
+from app.core.provider_profile import resolve_token_ratio
 from app.tools import get_builtin_tools_schema
 
 
@@ -559,6 +560,8 @@ class UIEngine(BaseEngine):
             except Exception:
                 system_prompt = ""
         model = str(llm_config.get("模型名称", "gpt-4o") or "gpt-4o")
+        # 本地估算校正系数（除数）：服务商能力 > app.config 覆盖 > 模型名兜底
+        ratio = resolve_token_ratio(llm_config, model)
 
         approx_messages: List[Dict] = []
         if system_prompt:
@@ -571,11 +574,11 @@ class UIEngine(BaseEngine):
         for _m in session.messages:
             _content = _m.get("content")
             if _m.get("role") == "tool" and isinstance(_content, str) and len(_content) > TOOL_RESULT_MAX_LEN:
-                raw_tok = per_message_tokens(_m, model)
+                raw_tok = per_message_tokens(_m, model, ratio)
                 _m_copy = dict(_m)
                 _m_copy["content"] = prune_tool_result(_content)
                 approx_messages.append(_m_copy)
-                pruned_tokens += max(0, raw_tok - per_message_tokens(_m_copy, model))
+                pruned_tokens += max(0, raw_tok - per_message_tokens(_m_copy, model, ratio))
             else:
                 approx_messages.append(_m)
 
@@ -608,7 +611,7 @@ class UIEngine(BaseEngine):
                 )
             # 更新缓存
             tools_tokens = (
-                int(count_tools_tokens(available_tools, model) * get_model_token_ratio(model)) if available_tools else 0
+                int(count_tools_tokens(available_tools, model, ratio)) if available_tools else 0
             )
             _cache["timestamp"] = _now
             _cache["tools"] = available_tools
@@ -620,10 +623,10 @@ class UIEngine(BaseEngine):
         # 避免内部 is 身份缓存的 [msg] 临时列表构造与查找开销。
         # est_total = sum(per_message_tokens) + tools_tokens，保证与下方 breakdown 之和
         # 内部自洽（scale 等比缩放基线准确）。
-        est_total = sum(per_message_tokens(m, model) for m in approx_messages) + tools_tokens
+        est_total = sum(per_message_tokens(m, model, ratio) for m in approx_messages) + tools_tokens
 
         # ---- 各类型上下文占比（按角色拆分，用于 WorkBuddy 风格占比条）----
-        system_tokens = per_message_tokens({"role": "system", "content": system_prompt}, model) if system_prompt else 0
+        system_tokens = per_message_tokens({"role": "system", "content": system_prompt}, model, ratio) if system_prompt else 0
 
         # 按消息角色拆分：用户消息 / 助手消息 / 工具结果 / Hook 注入
         # 每条消息独立计 token，且不含工具 schema 开销（工具定义单独计在 tools_tokens），
@@ -636,7 +639,7 @@ class UIEngine(BaseEngine):
         user_tokens = assistant_tokens = tool_tokens = hook_tokens = 0
         for msg in session.messages:
             role = msg.get("role", "")
-            t = per_message_tokens(msg, model)
+            t = per_message_tokens(msg, model, ratio)
             # 分离 hook 注入消息（带 _hook_event 标记），独立统计
             if msg.get("_hook_event"):
                 hook_tokens += t
@@ -704,7 +707,7 @@ class UIEngine(BaseEngine):
             summary_msg = compaction_cache.get("summary_message")
             if summary_msg:
                 # 性能优化（O-01）：per_message_tokens 直接处理单条 summary_msg
-                compacted_tokens = per_message_tokens(summary_msg, model)
+                compacted_tokens = per_message_tokens(summary_msg, model, ratio)
                 normal_tokens = used_tokens - compacted_tokens
             else:
                 summarized_count = compaction.get("summarized_count", 0)

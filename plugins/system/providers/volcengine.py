@@ -139,6 +139,7 @@ def register(registry):
             models_dev_id="",
             family="volcengine",
             capabilities={
+                "token_ratio": 0.50,  # 本地 token 估算校正系数（除数）；火山 Doubao 分词器与 GLM 近似
                 "context_limit": 1000000,
                 "max_output_tokens": 8192,
                 "absolute_limit": 65536,

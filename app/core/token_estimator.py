@@ -46,17 +46,23 @@ ENCODING_MAPPING = {
     "default": "cl100k_base",
 }
 
-# 模型 token 校正系数 — cl100k_base 编码器与实际模型 tokenizer 之间的补偿
-# 系数 = 实际 API token / cl100k_base 估算值
-# DeepSeek/Claude/Qwen/GLM 的中文分词效率与 OpenAI 不同，需要乘以校正系数
+# 模型 token 校正系数 — 本地估算（cl100k_base / 快估）与实际模型 tokenizer 的补偿
+# 系数语义 = 实际模型分词器 token 数 / cl100k_base(或快估) token 数
+#   - 中文模型（Qwen/DeepSeek/GLM/MiniMax/Kimi）对中文远比 cl100k_base 高效
+#     （实测 MiniMax≈0.49、Qwen≈0.55 token/中文字，而 cl100k_base≈1.14），
+#     故为除数（< 1）。旧实现误写成乘数 1.04~1.08，导致本地估算比 API 真实值
+#     高约 2 倍（见 2026-08-25 排查）。
+#   - OpenAI 原生 cl100k_base 无需校正（1.00）。
+#   - 这些值仅作按模型名子串的兜底；服务商级覆盖见 ProviderDef.capabilities["token_ratio"]
+#     （由 provider_profile.resolve_token_ratio 解析，优先级高于此处）。
 _MODEL_TOKEN_RATIOS: Dict[str, float] = {
-    "deepseek": 1.05,   # DeepSeek tokenizer 对中文/代码比 cl100k_base 略多 5%
-    "claude": 1.08,     # Anthropic tokenizer 差异更大
-    "minimax": 1.04,    # MiniMax 近似 OpenAI
-    "qwen": 1.07,       # 通义千问对中文更费 token
-    "glm": 1.06,        # 智谱 tokenizer
-    "kimi": 1.04,       # Moonshot 近似
-    "gemini": 1.03,     # Google tokenizer 较高效
+    "minimax": 0.43,    # MiniMax-Text-01 实测 0.49/中文字 ÷ cl100k_base≈1.14
+    "qwen": 0.48,       # 通义千问 Qwen2.5 实测 ≈0.55/中文字
+    "deepseek": 0.48,   # DeepSeek tokenizer 与 Qwen 近似
+    "kimi": 0.48,       # Moonshot 近似 Qwen
+    "glm": 0.50,        # 智谱 GLM 略低于 Qwen
+    "claude": 0.50,     # Anthropic 原生返 usage 不估；仅 OpenAI 兼容路径兜底
+    "gemini": 0.95,     # Google tokenizer 较高效，接近 cl100k_base
     "gpt-4": 1.00,      # OpenAI 原生，无需校正
     "gpt-3.5": 1.00,
     "gpt-3": 1.00,
@@ -280,8 +286,9 @@ def _compute_message_tokens(msg: Dict, model: str) -> int:
 def per_message_tokens(
     msg: Dict,
     model: str = "gpt-4",
+    ratio: Optional[float] = None,
 ) -> int:
-    """计算单条消息的 token 数（与 count_messages_tokens([msg], model) 等价）
+    """计算单条消息的 token 数（与 count_messages_tokens([msg], model, ratio) 等价）
 
     性能优化（O-01）：在循环中按角色累加 token 时使用本函数，避免：
     1. 每次为单条消息构造临时 [msg] 列表（list 分配开销）
@@ -293,6 +300,8 @@ def per_message_tokens(
     Args:
         msg: 消息字典
         model: 模型名称
+        ratio: 模型校正系数（除数）。None → 按模型名子串取 _MODEL_TOKEN_RATIOS 兜底；
+            通常由 provider_profile.resolve_token_ratio 解析后传入，优先用服务商级覆盖。
 
     Returns:
         token 数（最小 0，含消息 overhead + 模型校正系数）
@@ -300,14 +309,17 @@ def per_message_tokens(
     raw = _compute_message_tokens(msg, model)
     if raw <= 0:
         return 0
-    total = int(raw * _get_model_token_ratio(model))
+    if ratio is None:
+        ratio = _get_model_token_ratio(model)
+    total = int(raw * ratio)
     return max(0, total)
 
 
 def count_messages_tokens(
     messages: List[Dict],
     model: str = "gpt-4",
-    tools: Optional[List[Dict]] = None
+    tools: Optional[List[Dict]] = None,
+    ratio: Optional[float] = None,
 ) -> int:
     """
     计算消息列表的总 token 数
@@ -346,10 +358,12 @@ def count_messages_tokens(
 
     # 工具定义 tokens
     if tools:
-        total += count_tools_tokens(tools, model)
+        total += count_tools_tokens(tools, model, ratio)
 
-    # 模型 tokenizer 校正系数（cl100k_base → 实际模型编码补偿）
-    total = int(total * _get_model_token_ratio(model))
+    # 模型 tokenizer 校正系数（cl100k_base → 实际模型编码补偿，除数）
+    if ratio is None:
+        ratio = _get_model_token_ratio(model)
+    total = int(total * ratio)
 
     # 确保返回值非负（防御性编程）
     result = max(0, total)
@@ -357,16 +371,23 @@ def count_messages_tokens(
     return result
 
 
-def count_tools_tokens(tools: List[Dict], model: str = "gpt-4") -> int:
+def count_tools_tokens(
+    tools: List[Dict],
+    model: str = "gpt-4",
+    ratio: Optional[float] = None,
+) -> int:
     """
     计算工具定义的总 token 数
-    
+
     工具格式 (参考 OpenAI 文档):
     - type: 8 tokens
     - function: 14 tokens
     - name: + tokens
     - description: + tokens
     - parameters: + tokens
+
+    Args:
+        ratio: 模型校正系数（除数）。None → 按模型名子串取 _MODEL_TOKEN_RATIOS 兜底。
     """
     if not tools:
         return 0
@@ -398,7 +419,9 @@ def count_tools_tokens(tools: List[Dict], model: str = "gpt-4") -> int:
                 params_str = str(params)
                 total += estimate_tokens(params_str, model)
 
-    return total
+    if ratio is None:
+        ratio = _get_model_token_ratio(model)
+    return int(total * ratio)
 
 
 def count_response_tokens(

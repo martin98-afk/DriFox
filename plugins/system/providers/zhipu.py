@@ -114,6 +114,7 @@ def register(registry):
             models_dev_id="zhipuai",
             family="zhipu",
             capabilities={
+                "token_ratio": 0.50,  # 本地 token 估算校正系数（除数）；智谱 GLM 略低于 Qwen
                 "context_limit": 200000,
                 "max_output_tokens": 8192,
                 "absolute_limit": 65536,
