@@ -7805,19 +7805,18 @@ class CodeWebViewer(QWebEngineView):
         self._height_report_pending = False
         self._resize_locked = False
 
-        # 清理页面：先加载空白页释放资源
+        # 清理页面：先停加载并卸载到空白页（比 setHtml("") 更轻，避免 WebEngine 异步导航竞态）
         try:
-            self.setHtml("")
+            self.stop()                      # 停止页面加载
+            from PyQt5.QtCore import QUrl
+            self.setUrl(QUrl("about:blank"))  # 卸载，比 setHtml("") 更轻
         except RuntimeError:
             pass
-
-        # 清理页面对象
-        try:
-            if hasattr(self, "_page"):
-                self._page.deleteLater()
-                del self._page
-        except RuntimeError, AttributeError:
-            pass
+        # 幂等守卫：二次 cleanup 不重复 deleteLater
+        if getattr(self, "_page", None) is not None:
+            self._page.deleteLater()
+            self._page = None
+        self.setPage(None)                   # 断开 view→page，避免 view 析构再引用已删 page
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
         # page 已在上方单独 deleteLater 释放渲染资源（DOM/JS heap/图层）。

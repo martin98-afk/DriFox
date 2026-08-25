@@ -20006,19 +20006,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-        # ★ 泄漏修复（P0）：兜底冲刷已排队的 DeferredDelete 事件。
-        # Tab 模式下 _close_window_at 在 close() 之后调用 setParent(None)+
-        # deleteLater()，若此时主线程事件循环未及时进入下一轮（或应用即将退出），
-        # 排队的删除事件可能滞留。此处主动处理本窗口及其子树已排队的延迟删除，
-        # 确保 C++ 对象树即刻回收。仅主线程安全；由 closeEvent 在主线程执行，
-        # 且异常被吞不影响关闭流程。
-        try:
-            from PyQt5.QtCore import QCoreApplication, QEvent
-
-            QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
-        except Exception:
-            pass
-
         # GC 钩子：closeEvent 末尾防抖触发全局缓存清理 + 堆回收
         self._schedule_gc_hook()
 

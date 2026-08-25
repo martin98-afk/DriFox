@@ -330,7 +330,10 @@ class _HoverTooltipFilter(QObject):
         self._timer.timeout.connect(self._on_timeout)
         parent.installEventFilter(self)
         # 目标销毁时自动清理 tooltip
-        parent.destroyed.connect(self._cleanup)
+        # 改用 self.destroyed（filter 自身析构时发出，连接仍有效）而非 parent.destroyed
+        # （#29 根因：filter 是 parent 子对象，parent 销毁时先删子对象再 emit destroyed，
+        # 连接已断开 → _cleanup 永不触发 → per-tab 泄漏）。self.destroyed 确保 _cleanup 可靠触发。
+        self.destroyed.connect(self._cleanup)
 
     def _get_tooltip(self) -> SimpleHoverTooltip:
         if self._tooltip is None:
