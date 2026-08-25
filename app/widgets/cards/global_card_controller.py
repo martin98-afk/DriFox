@@ -87,7 +87,7 @@ class GlobalCardController:
                 return w
         from app.main_widget import OpenAIChatToolWindow
 
-        for w in window_registry.window_instances:
+        for w in window_registry.alive_window_instances():
             if not getattr(w, "_is_destroyed", False):
                 return w
         return None
@@ -97,7 +97,7 @@ class GlobalCardController:
         from app.main_widget import OpenAIChatToolWindow
 
         result = []
-        for w in window_registry.window_instances:
+        for w in window_registry.alive_window_instances():
             if not getattr(w, "_is_destroyed", False):
                 result.append(w)
         return result

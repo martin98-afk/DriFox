@@ -2285,7 +2285,7 @@ class TabManagerWindow(QWidget):
         try:
             from app.main_widget import OpenAIChatToolWindow
 
-            for inst in list(window_registry.window_instances):
+            for inst in list(window_registry.alive_window_instances()):
                 if not getattr(inst, "_is_destroyed", False) and callable(
                     getattr(inst, "_sync_active_windows_to_team_manager", None)
                 ):

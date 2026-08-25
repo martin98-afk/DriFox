@@ -1377,7 +1377,7 @@ class GiteeCard(SettingCard):
             #      - Colors.refresh() → 重算颜色 token
             #      - 按 scope 精准刷新 widget 树（message card / settings card / 圆环等）
             #      - 不触发 dispatch_refresh() 的全量 refresh_theme() 调用
-            for win in window_registry.window_instances:
+            for win in window_registry.alive_window_instances():
                 if getattr(win, "_is_destroyed", False):
                     continue
                 try:

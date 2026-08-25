@@ -146,8 +146,18 @@ class CardManager:
 
     def unregister_window(self, window_id: str):
         """注销窗口及其所有卡片数据（窗口关闭时调用）"""
-        if window_id in self._window_data:
-            del self._window_data[window_id]
+        # ★ 泄漏修复（P1-E）：先 pop 出窗口数据，再显式 deleteLater 仍存活的
+        # 卡片 widget，释放 C++ 对象树——否则卡片 widget 易被全局单例 / 回调
+        # 残留引用长期持有，反复开关窗口时对象树堆积。
+        win_data = self._window_data.pop(window_id, None)
+        if win_data is not None:
+            for _ct_cards in win_data.get("cards", {}).values():
+                for _card_widget in _ct_cards.values():
+                    try:
+                        if _card_widget is not None:
+                            _card_widget.deleteLater()
+                    except (RuntimeError, TypeError):
+                        pass
         self._coexist_containers.pop(window_id, None)
 
     def register_card(
