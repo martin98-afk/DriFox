@@ -1,0 +1,131 @@
+name: 午夜极光
+id: midnight_aurora
+mode: dark
+window:
+  gradient_start: rgba(7, 10, 28, 255)
+  gradient_end: rgba(20, 13, 43, 255)
+backgrounds:
+  window:
+    color: rgba(7, 10, 28, 238)
+    enabled: true
+  sidebar:
+    image: sidebar_aurora.png
+    opacity: 0.96
+    color: rgba(8, 11, 29, 235)
+    enabled: true
+  scene:
+    image: right_aurora.png
+    opacity: 0.86
+    blur: 5
+    dim: rgba(4, 5, 18, 0.34)
+    enabled: true
+colors:
+  card_bg: rgba(14, 18, 38, 230)
+  card_bg_solid: rgba(14, 18, 38, 250)
+  content_bg: '#11172b'
+  border: '#3b4771'
+  border_accent: '#65ddc0'
+  text_primary: '#f4f7ff'
+  text_secondary: rgba(226, 235, 255, 0.72)
+  text_muted: '#93a0bd'
+  accent: '#65ddc0'
+  accent_warm: '#f28ab8'
+  hover_bg: rgba(101, 221, 192, 0.12)
+  selected_bg: rgba(101, 221, 192, 0.32)
+  capsule_bg: rgba(20, 24, 48, 180)
+  capsule_border: rgba(70, 80, 126, 200)
+
+  # ── 全局 UI 基底 ──────────────────────────────────
+  toolbar_bg: rgba(255, 255, 255, 0.05)
+  divider_color: rgba(255, 255, 255, 0.06)
+  hover_bg_strong: rgba(255, 255, 255, 0.10)
+  scrollbar_handle_bg: rgba(255, 255, 255, 0.20)
+  scrollbar_handle_hover_bg: rgba(255, 255, 255, 0.30)
+  card_placeholder_text: '#8FA4C2'
+
+  # ── 卡片级语义色 ──────────────────────────────────
+  button_text_on_accent: '#1A1F2B'
+  status_info: '#7FDBFF'
+  status_danger_bg: rgba(255, 80, 80, 0.8)
+  status_archive_bg: rgba(139, 92, 246, 0.8)
+  card_bg_dim: rgba(255, 255, 255, 0.04)
+  archived_card_bg: rgba(255, 180, 100, 0.08)
+  archived_card_border: rgba(255, 150, 80, 0.2)
+
+  # ── 语法高亮色 ────────────────────────────────────
+  syntax_step: '#4EC9B0'
+  syntax_tool: '#DCDCAA'
+  syntax_success: '#6A9955'
+  syntax_error: '#F14C4C'
+  syntax_result: '#CE9178'
+
+  # ── 标签色 ────────────────────────────────────────
+  tag_accent: '#65ddc0'
+  tag_accent_text: '#aaf2df'
+  tag_purple: '#b388ff'
+  tag_purple_text: '#d1b3ff'
+  tag_orange: '#ffb366'
+  tag_orange_text: '#ffc999'
+  user_card_bg: rgba(27, 42, 67, 150)
+  user_card_accent: '#9FC3FF'
+  user_card_text: '#F4F7FD'
+  user_card_muted: '#B4C2D9'
+  assistant_card_bg: rgba(45, 30, 20, 150)
+  assistant_card_accent: '#D35400'
+  assistant_card_text: '#FFD4B8'
+  assistant_card_muted: '#8FA4C2'
+  agent_btn_text: '#8FA4C2'
+  agent_btn_text_active: '#C9A85C'
+  agent_btn_bg_active: rgba(201, 168, 92, 0.2)
+  agent_btn_separator: rgba(60, 75, 95, 150)
+  input_bg_start: rgba(12, 17, 36, 150)
+  input_bg_end: rgba(21, 22, 50, 150)
+  input_focus_bg_start: rgba(17, 23, 45, 220)
+  input_focus_bg_end: rgba(27, 27, 58, 220)
+  input_text: '#F2F6FF'
+  input_focus_text: '#FFFFFF'
+  input_border: '#36436d'
+  input_focus_border: '#8df2d5'
+  input_placeholder: rgba(242, 246, 255, 0.4)
+  # 聚焦发光 halo cascade — 主光源（输入卡）与 环境光晕（工具栏）分层
+  glow_primary_alpha: 200
+  glow_primary_blur: 28
+  glow_ambient_alpha: 120
+  glow_ambient_blur: 36
+
+  # 底部工具栏条（与输入卡片解耦的第二张卡，独立 token 以便主题分别调控）
+  toolbar_strip_bg: rgba(24, 31, 45, 150)
+  toolbar_strip_border: '#2B3850'
+  realtime_border: '#4a90d9'
+  realtime_accent: '#65ddc0'
+  realtime_accent_warm: '#f28ab8'
+  realtime_success: '#34d399'
+  realtime_error: '#f87171'
+  realtime_bg: rgba(18, 28, 48, 242)
+  realtime_text: '#f3f6fc'
+  realtime_text_secondary: rgba(226, 235, 249, 0.7)
+  realtime_tag_bg: rgba(125, 211, 252, 0.15)
+  realtime_tag_border: rgba(125, 211, 252, 0.3)
+  system_border: '#3d4a60'
+  system_accent: '#65ddc0'
+  send_btn_start: '#65ddc0'
+  send_btn_end: '#f28ab8'
+  send_btn_hover_start: '#8df2d5'
+  send_btn_hover_end: '#f6a6ca'
+  send_btn_radius: 17
+  timeline_node: '#5A5A5A'
+  timeline_node_hover: '#6BA3FF'
+  timeline_node_visible: '#00FF7F'
+  timeline_node_selected: '#FFA500'
+  timeline_line: '#3A3A3A'
+  timeline_line_progress: '#00FF7F'
+  ring_normal: '#5aa9ff'
+  ring_warning: '#f6c453'
+  ring_danger: '#ff6b6b'
+  ring_compacted: '#9b59b6'
+  branch_label_bg: rgba(101, 221, 192, 0.15)
+  branch_label_border: rgba(101, 221, 192, 0.3)
+  window_bg: rgba(102, 198, 255, 0.04)
+
+  # ── 输入卡发光预设 ──
+  input_glow_preset: "breath"
