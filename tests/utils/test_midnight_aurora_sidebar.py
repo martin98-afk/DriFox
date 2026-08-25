@@ -11,6 +11,8 @@ def read_png_size(path: Path) -> tuple[int, int]:
     data = path.read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n"
     assert data[12:16] == b"IHDR"
+    assert data[24] == 8
+    assert data[25] == 6
     return struct.unpack(">II", data[16:24])
 
 
