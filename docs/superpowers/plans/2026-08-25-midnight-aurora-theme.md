@@ -14,6 +14,7 @@
 - 右侧图片固定放在 `plugins/system/themes/midnight_aurora/right_aurora.png`，不引用用户本机 Downloads 路径。
 - 左侧图片固定放在 `plugins/system/themes/midnight_aurora/sidebar_aurora.png`，默认尺寸为 `480 × 1920`。
 - 左侧生成脚本为 `scripts/generate_midnight_aurora_sidebar.py`，只使用 Python 标准库，不增加 Pillow 或其他运行时依赖。
+- 左侧图片固定为深紫 `#190C3A` 到薰衣草 `#B99ADD` 的单色水平渐变，不叠加光带、波浪或其他色相。
 - 右侧主题参数固定为 `opacity: 0.86`、`blur: 5`、`dim: rgba(4, 5, 18, 0.34)`。
 - 不修改 `app/utils/theme_manager.py`、`app/widgets/tab_manager_window.py` 或其他应用代码。
 - 不修改 `app/widgets/cards/floating/command_card.py` 的既有暂存修改。
@@ -43,7 +44,7 @@
 - Produces: `main() -> int`，读取 `--output`、`--width`、`--height` 并写出 RGBA PNG。
 - Test consumes: `subprocess.run([sys.executable, SCRIPT, "--output", output, "--width", "32", "--height", "64"], check=True)`。
 
-- [ ] **Step 1: 写生成器失败测试**
+- [ ] **Step 1: 更新生成器回归测试（先确认当前实现不满足单色要求）**
 
 在 `tests/utils/test_midnight_aurora_sidebar.py` 写入：
 
@@ -52,29 +53,56 @@ import hashlib
 import struct
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 SCRIPT = Path(__file__).parents[2] / "scripts" / "generate_midnight_aurora_sidebar.py"
 
 
-def read_png_size(path: Path) -> tuple[int, int]:
+def read_png_rgba(path: Path) -> tuple[int, int, list[bytes]]:
     data = path.read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n"
     assert data[12:16] == b"IHDR"
-    return struct.unpack(">II", data[16:24])
+    width, height, bit_depth, color_type = struct.unpack(">IIBB", data[16:26])
+    assert (bit_depth, color_type) == (8, 6)
+    offset = 8
+    compressed = bytearray()
+    while offset < len(data):
+        length = struct.unpack(">I", data[offset : offset + 4])[0]
+        kind = data[offset + 4 : offset + 8]
+        payload = data[offset + 8 : offset + 8 + length]
+        if kind == b"IDAT":
+            compressed.extend(payload)
+        offset += length + 12
+    raw = zlib.decompress(compressed)
+    stride = width * 4
+    rows = []
+    for row_index in range(height):
+        start = row_index * (stride + 1)
+        assert raw[start] == 0
+        rows.append(raw[start + 1 : start + 1 + stride])
+    return width, height, rows
 
 
-def test_generate_sidebar_png_is_rgba_and_deterministic(tmp_path: Path) -> None:
+def test_generate_sidebar_png_is_single_purple_gradient_and_deterministic(tmp_path: Path) -> None:
     first = tmp_path / "first.png"
     second = tmp_path / "second.png"
     command = [sys.executable, str(SCRIPT), "--output", str(first), "--width", "32", "--height", "64"]
     subprocess.run(command, check=True)
-    subprocess.run([*command[:-2], str(second), "32", "64"], check=True)
+    subprocess.run(
+        [sys.executable, str(SCRIPT), "--output", str(second), "--width", "32", "--height", "64"],
+        check=True,
+    )
 
-    assert read_png_size(first) == (32, 64)
-    assert read_png_size(second) == (32, 64)
+    width, height, rows = read_png_rgba(first)
+    second_width, second_height, second_rows = read_png_rgba(second)
+    assert (width, height) == (32, 64)
+    assert (second_width, second_height) == (32, 64)
+    assert tuple(rows[0][0:3]) == (25, 12, 58)
+    assert tuple(rows[0][-4:-1]) == (185, 154, 221)
+    center_offset = (width // 2) * 4
+    assert all(row[center_offset : center_offset + 3] == rows[0][center_offset : center_offset + 3] for row in rows)
     assert hashlib.sha256(first.read_bytes()).digest() == hashlib.sha256(second.read_bytes()).digest()
-    assert len(first.read_bytes()) > 8
 ```
 
 - [ ] **Step 2: 运行测试确认先失败**
@@ -85,7 +113,7 @@ def test_generate_sidebar_png_is_rgba_and_deterministic(tmp_path: Path) -> None:
 pytest tests/utils/test_midnight_aurora_sidebar.py -v
 ```
 
-预期：FAIL，因为 `scripts/generate_midnight_aurora_sidebar.py` 尚不存在。
+预期：在旧生成器上 FAIL，因为首尾颜色不是深紫到薰衣草，且中心像素会随高度变化。
 
 - [ ] **Step 3: 实现标准库 PNG 生成器**
 
@@ -96,29 +124,21 @@ from __future__ import annotations
 
 import argparse
 import binascii
-import math
 import struct
 import zlib
 from pathlib import Path
 
 Color = tuple[int, int, int]
-COLOR_STOPS = (
-    (0.00, (7, 11, 38)),
-    (0.22, (48, 30, 112)),
-    (0.43, (176, 43, 157)),
-    (0.68, (14, 167, 157)),
-    (0.86, (39, 74, 139)),
-    (1.00, (8, 14, 43)),
-)
+GRADIENT_START = (25, 12, 58)
+GRADIENT_END = (185, 154, 221)
 
 
 def interpolate_color(position: float) -> Color:
     position = min(1.0, max(0.0, position))
-    for (left_position, left_color), (right_position, right_color) in zip(COLOR_STOPS, COLOR_STOPS[1:]):
-        if position <= right_position:
-            ratio = (position - left_position) / (right_position - left_position)
-            return tuple(int(left + (right - left) * ratio) for left, right in zip(left_color, right_color))
-    return COLOR_STOPS[-1][1]
+    return tuple(
+        int(start + (end - start) * position)
+        for start, end in zip(GRADIENT_START, GRADIENT_END)
+    )
 
 
 def _clamp(value: float) -> int:
@@ -130,18 +150,10 @@ def generate_sidebar_png(output: Path, width: int = 480, height: int = 1920) -> 
         raise ValueError("width and height must be at least 2")
     rows = bytearray()
     for y in range(height):
-        vertical = y / (height - 1)
         rows.append(0)
         for x in range(width):
             horizontal = x / (width - 1)
             red, green, blue = interpolate_color(horizontal)
-            flow = 0.5 + 0.5 * math.sin(vertical * math.tau * 3.0 + math.sin(horizontal * math.tau) * 0.7)
-            violet_band = math.exp(-((horizontal - (0.28 + 0.035 * math.sin(vertical * math.tau * 2.0))) ** 2) / 0.018)
-            teal_band = math.exp(-((horizontal - (0.67 + 0.045 * math.sin(vertical * math.tau * 1.4 + 1.0))) ** 2) / 0.022)
-            magenta_band = math.exp(-((horizontal - (0.46 + 0.025 * math.sin(vertical * math.tau * 2.6))) ** 2) / 0.012)
-            red = _clamp(red + 38 * violet_band + 26 * magenta_band + 8 * flow)
-            green = _clamp(green + 36 * teal_band + 12 * violet_band)
-            blue = _clamp(blue + 42 * teal_band + 30 * violet_band)
             edge = min(1.0, horizontal / 0.12, (1.0 - horizontal) / 0.12)
             edge = max(0.0, min(1.0, edge))
             alpha = _clamp(255 * (0.28 + 0.72 * edge))
