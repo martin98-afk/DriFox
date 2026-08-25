@@ -8306,7 +8306,7 @@ class MessageCard(SimpleCardWidget):
         # paintEvent 内仅改色/坐标，避免每帧 new 数十个临时对象）。
         self._rainbow_normal = _RAINBOW_NORMAL  # 模块级共享，0 个新 QColor
         self._rainbow_retry = _RAINBOW_RETRY
-        self._grad_main, self._grad_inner, self._grad_glow, self._grad_shimmer = (QLinearGradient(0, 0, 1, 1) for _ in range(4))
+        self._grad_main, self._grad_inner, self._grad_glow = (QLinearGradient(0, 0, 1, 1) for _ in range(3))
         self._clip_inner = self._clip_outer = self._clip_inner_edge = self._clip_border = QPainterPath()
         self._clip_inner_border = self._clip_shimmer = self._clip_top = self._clip_glow_region = (
             self._clip_border_region
@@ -9819,7 +9819,8 @@ class MessageCard(SimpleCardWidget):
             painter.setClipPath(shimmer_clip)
             # 流光位置：连续小数，避免跳变
             shimmer_pos = (shift_shimmer % N) / N
-            shimmer_band_gradient = self._grad_shimmer
+            # 注意：stop 位置随相位连续变化，不能复用模板渐变（setColorAt 会不断追加 stop 导致残留脏色），必须每帧新建
+            shimmer_band_gradient = QLinearGradient(0, 0, w, h)
             shimmer_band_gradient.setStart(0, 0)
             shimmer_band_gradient.setFinalStop(w, h)
             shimmer_band_gradient.setColorAt(max(0.0, shimmer_pos - 0.07), QColor(0, 0, 0, 0))
