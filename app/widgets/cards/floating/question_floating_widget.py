@@ -644,13 +644,33 @@ class QuestionFloatingWidget(QWidget):
         self._setup_ui()
 
     def showEvent(self, event):
-        """控件变为可见时自动聚焦到下一步按钮"""
+        """控件变为可见时自动聚焦到下一步按钮，并在首帧布局完成后重算高度
+
+        卡片首次显示时容器/卡片宽度可能尚未稳定（dock splitter 动画分配尺寸中），
+        导致 sizeHint/heightForWidth 用错误宽度估算高度、被 CardContainer 锁高，
+        出现内容抖动；resize 后宽度稳定才修正。此处于布局完成后（width 已定）
+        主动重算一次，纠正首帧错锁。
+        """
         super().showEvent(event)
         if event.isAccepted() and self._questions:
-            # 延迟到布局完成后聚焦，确保按钮在正确位置
             from PyQt5.QtCore import QTimer
 
+            # 延迟到布局完成后聚焦，确保按钮在正确位置
             QTimer.singleShot(0, lambda: self._next_btn.setFocus() if self.isVisible() else None)
+            # 首帧布局完成后强制重算高度，纠正因宽度未定导致的锁高抖动
+            QTimer.singleShot(0, self._resync_height_on_show)
+
+    def _resync_height_on_show(self):
+        """首帧显示后、布局稳定时强制重算高度（消除显示瞬间抖动）
+
+        与 resizeEvent / show_question 的重算互补：本方法在 showEvent 之后
+        （此时控件已可见、width 已确定）触发，纠正 show_question 早于 show
+        调用时首帧宽度未定造成的错锁。
+        """
+        if not self.isVisible():
+            return
+        self.updateGeometry()
+        self.heightChanged.emit()
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
