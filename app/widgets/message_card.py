@@ -6210,6 +6210,14 @@ class CodeWebViewer(QWebEngineView):
         """
         if not self._is_js_ready or not self.page():
             return
+        # [PERF] 不可见期间跳过 DOM 注入。resize preview / 对话框穿透防护 / 切 tab
+        # 隐藏期间，viewer 已被 MessageCard.hide() 或 WA_TranslucentBackground
+        # 守卫关掉，但 runJavaScript 仍会执行 → Chromium 持续累积 DOM 节点 →
+        # preview 退出或恢复可见时首帧 paint 阻塞整页重排，是流式 + resize 卡顿的
+        # 根因之一。文本已在 _markdown_text 累积，恢复可见时由 _perform_update
+        # 一次性渲染（_render_deferred 标记 + showEvent 补渲已覆盖此路径）。
+        if not self.isVisible():
+            return
         try:
             # 防御：过滤掉可能出现在正文 chunk 中的 <think> / </think> 标签
             # （防止增量显示标签，全量渲染会正确处理）
@@ -8418,6 +8426,10 @@ class MessageCard(SimpleCardWidget):
         self._resize_preview_mode = False
         self._resize_preview_height = 0
         self._options_were_visible_before_resize = False
+        # [PERF] preview 期间 viewer height 目标值累积。_apply_viewer_height 在
+        # preview 模式只写此字段，不真正 setFixedHeight（避免 Chromium 级联
+        # relayout）。set_resize_preview_mode(False) 退出时一次性应用。
+        self._pending_viewer_height: Optional[int] = None
         # WebEngine 上下文恢复标志
         self._webengine_needs_restore = False
         # 懒渲染标志：未进入可视区域前不创建QWebEngine
@@ -10102,6 +10114,15 @@ class MessageCard(SimpleCardWidget):
         if height == self._last_applied_viewer_height:
             return
         self._last_applied_viewer_height = height
+        # [PERF] resize preview 期间 viewer 已 hide + setUpdatesEnabled(False)，
+        # 此时 setFixedHeight 仍会触发 Qt 布局链 → QWebEngineView Chromium
+        # 视口大小变化 → 整页 relayout → ResizeObserver → reportHeight →
+        # _stream_height_timer 80ms 防抖 → 又一轮 setFixedHeight 的循环。
+        # 是流式 + resize 卡顿的根因之一。仅记录目标高度，preview 退出时
+        # set_resize_preview_mode(False) 一次性应用 + 上报，避免级联重排。
+        if self._resize_preview_mode:
+            self._pending_viewer_height = height
+            return
         self.viewer.setFixedHeight(height)
         self.heightChanged.emit(height)
         # viewer 高度变化后 body 视口可能改变，仅在用户已处于底部时重新滚动到底部
@@ -10237,6 +10258,29 @@ class MessageCard(SimpleCardWidget):
 
         if hasattr(self.viewer, "update_height"):
             self.viewer.update_height()
+
+        # [PERF] 流式卡片：preview 期间累积的高度变化一次性应用。
+        # _apply_viewer_height 在 preview 模式下只记录 _pending_viewer_height，
+        # 此处 setFixedHeight 把 viewer 设到正确高度，触发一次 ResizeObserver →
+        # reportHeight → Python 拿到真实高度，结束 preview 期间累积的高度死循环。
+        # 只对 CodeWebViewer（非 PlainTextViewer）有效：PlainTextViewer 的
+        # update_height() 已在上方调用且自身无 _pending_viewer_height 字段。
+        pending_h = getattr(self, "_pending_viewer_height", None)
+        if pending_h is not None and self.role != "user" and self.viewer is not None:
+            try:
+                self.viewer.setFixedHeight(pending_h)
+                self.heightChanged.emit(pending_h)
+            except RuntimeError:
+                pass
+            self._pending_viewer_height = None
+            # 强制一次高度上报：让 JS 侧 ResizeObserver 也跟上 viewer 新高度，
+            # 防止 Chromium 内部仍按旧高度布局（_apply_viewer_height 没真正
+            # 改高度时 Chromium 视口尺寸未变）→ 首帧 paint 仍按旧宽排版。
+            if hasattr(self.viewer, "page") and self.viewer.page():
+                try:
+                    self.viewer.page().runJavaScript("reportHeight();")
+                except RuntimeError:
+                    pass
 
     def enterEvent(self, event):
         # 用户气泡 / assistant 全减：hover 浮现操作按钮，保持静态简洁
@@ -11811,6 +11855,11 @@ class MessageCard(SimpleCardWidget):
         # 🐛 F3（次要提示 2）：工具登记集合随卡片销毁清空——否则边缘场景
         # （cleanup 后 _has_active_tools() 被误调）会因残留登记误判"仍有活跃工具"。
         self._tool_call_order.clear()
+
+        # [PERF] preview 期间累积的 viewer 高度目标清理
+        self._pending_viewer_height = None
+        self._resize_preview_mode = False
+        self._resize_preview_height = 0
 
         # 清理 markdown_cache 如果存在
         if hasattr(self, "_markdown_cache") and self._markdown_cache:
