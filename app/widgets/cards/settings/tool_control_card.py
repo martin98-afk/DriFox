@@ -18,7 +18,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSizePolicy,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -581,13 +580,15 @@ class ToolControlCardContent(QWidget):
         row_layout.addWidget(name_label)
 
         desc_label = _ElidedLabel(desc)
-        desc_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         desc_label.setStyleSheet(
             _TEXT_LABEL_STYLE.format(
                 color=Colors.TEXT_SECONDARY, weight="", font_size=font_size_css(10), font_family=get_font_family_css()
             )
         )
-        row_layout.addWidget(desc_label)
+        # stretch=1：吃掉 source/name 之后到 switch 之间的全部剩余水平空间，
+        # 把开关推到行尾靠右对齐。_ElidedLabel 自身已设 SizePolicy.Ignored/Preferred，
+        # 宽度完全由布局分配决定，正好配合 stretch=1 的"占满剩余"语义。
+        row_layout.addWidget(desc_label, 1)
 
         sw = SwitchButton()
         sw.setChecked(enabled)
