@@ -1324,7 +1324,25 @@ class ChatBackend(QObject):
                     # 通过父目录链误命中插件 manifest 的情况）。
                     plugin = _PM.get_instance().get_plugin(candidate_name)
                     if plugin is None:
-                        break  # 未注册的插件名，丢弃（防止新建插件误识别）
+                        # 未注册：manifest 位于受监控的插件根目录下 → 这是真正的新装
+                        # 插件（整目录复制进 plugins/ 的场景），交给后续 rescan_plugin
+                        # 注册；否则（.drifox/backups/ 等运行时数据目录）按误判丢弃。
+                        # 旧逻辑无条件 break 导致「新装插件的首次变更」永远无法触发
+                        # 注册，用户必须手动重启/重载才能看到新插件。
+                        parent_lower = str(parent.resolve()).lower().rstrip(os.sep)
+                        in_watch_root = any(
+                            parent_lower.startswith(str(w).lower().rstrip(os.sep) + os.sep)
+                            for w in watch_paths
+                        )
+                        if in_watch_root:
+                            found.add(candidate_name)
+                        else:
+                            logger.debug(
+                                f"[ChatBackend] _try_identify_new_plugins: 未注册插件 "
+                                f"candidate={candidate_name} 的 manifest={parent} 不在监控"
+                                f"插件根目录下，丢弃"
+                            )
+                        break  # 未注册分支处理完毕，跳出父目录链
                     plugin_root = str(plugin.path.resolve()).lower()
                     cp_lower = str(change_path).lower().replace("/", os.sep)
                     if cp_lower == plugin_root or cp_lower.startswith(plugin_root + os.sep):

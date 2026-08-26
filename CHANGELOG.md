@@ -143,6 +143,26 @@ All notable changes to this project will be documented in this file.
 - **长跑内存泄漏压测场景** (`tests/perf/long_run/` + `app/core/{backend,hook_manager,lsp/lsp_manager}.py` + `app/core/workers/subagent_worker.py` + `app/gateway/manager.py` + `app/main_widget.py` + `app/utils/drag_stall_profiler.py` + `app/widgets/{message_card,pixel_pet}.py`): 新增运行时采样器（RSS / QObject 计数 / tracemalloc 快照），三个压测场景（消息流压测 / 会话切换压测 / 插件热重载压测）+ pytest 阈值断言 + markdown 报告生成；`.gitignore` 忽略压测输出。
 - **最小化复现脚本** (`tests/debug/memleak_repro/`): 消息流 / 信号定时器 / 综合 repro / 中途 verify 四个最小化复现脚本，便于内存泄漏根因定位。
 
+
+### 🔄 Hotfix 重新发布 (Re-release · 2026-08-27 · Round 4)
+
+基于 `v0.5.4` Round 3 的增量变更 | 提交数：9 · 文件变更：11 · +2281/-17 | 贡献者：dingma
+
+#### ✨ 新功能 (New Features)
+
+- **Qt 渲染器接入消息卡片（带回退）** (`app/widgets/message_card.py`): 引入 Qt 原生 `MarkdownBlockViewer` 渲染消息内容（性能优于 WebEngine），WebEngine 作为回退路径。新增 `markdown_block_viewer.py`（1767 行 Qt 块级渲染实现）。
+- **`PlainTextViewer` 大文本高度计算优化** (`app/widgets/`): 大文本内容的高度计算优化，避免长消息初次渲染耗时过高。
+- **`ToolCardWidget` 工具图标与参数预览** (`app/widgets/cards/`): 工具卡片新增工具图标加载与参数预览，让 LLM 调用结果更直观可读。
+- **MessageCard 流式渲染节流性能回归测试** (`tests/widgets/test_message_card_streaming_resize_throttle.py`): 新增流式渲染 resize 节流的性能回归用例，避免回归导致卡顿。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **ChatBackend 父路径解析** (`app/core/backend.py` + `app/utils/config.py`): resolve parent path correctly，避免插件注册时因路径拼接错误导致加载失败（`e730fdff`）。
+- **Tooltip 隐藏守卫** (`app/widgets/simple_hover_tooltip.py`): 增加 cursor leave / app deactivate 时的 tooltip 隐藏守卫，避免关闭应用后还会触发 tooltip 显示导致崩溃或残留。
+- **`LLMSettingsCard` Qt 渲染器描述冗余清理** (`app/widgets/cards/settings/llm_settings_card.py`): 移除 Qt renderer 描述中的冗余 text，简化文案。
+- **插件热重载 Python hook 缓存** (`app/core/hook_manager.py`): 插件热重载时清除 Python hook 函数缓存，避免旧 hook 残留导致重复触发或错误响应。
+- **插件 watcher 新装插件识别** (`app/plugins/contracts/plugin_config.py` + `app/widgets/cards/settings/plugin_config_card.py`): watcher 识别新装插件——未注册 manifest 在监控根下时交给 rescan 注入，修复新装插件立即可见但 manifest 未在监控列表内的情况。
+
 ## [v0.5.3] - 2026-08-22
 
 自上一版本以来的变更 | 提交数：175 · 文件变更：303 · +28058/-15698 | 贡献者：dingma, mading, drifox-bot, builder

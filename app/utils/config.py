@@ -324,6 +324,10 @@ class Settings(QConfig):
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
+    # 灰度开关：消息正文用纯 Qt 块级渲染器（MarkdownBlockViewer）替代 QWebEngineView。
+    # 仅作用于 assistant 卡片（welcome 卡 JS 交互复杂暂不灰度）；默认关闭。
+    qt_message_renderer = ConfigItem("General", "QtMessageRenderer", False, BoolValidator())
+
     # 版本管理设置
     patch_platform = ConfigItem(
         "Patch",

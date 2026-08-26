@@ -104,6 +104,27 @@ from app.utils.design_tokens import (
     scale_font_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.markdown_block_viewer import MarkdownBlockViewer
+
+
+def _qt_renderer_enabled() -> bool:
+    """灰度开关：assistant 卡片正文用纯 Qt 块级渲染器替代 QWebEngineView。
+
+    配置项 Settings.qt_message_renderer（默认 False）+ 环境变量 DRIFOX_QT_RENDERER
+    （"1" 强制开）双通道；welcome 卡不参与灰度（JS 交互复杂）。
+    """
+    import os
+
+    if os.environ.get("DRIFOX_QT_RENDERER") == "1":
+        return True
+    try:
+        from app.utils.config import Settings
+
+        return bool(Settings.get_instance().qt_message_renderer.value)
+    except Exception:
+        return False
+
+
 from app.widgets.render_helpers import (
     _format_natural_preview,
     _get_tool_cn_name,
@@ -174,15 +195,29 @@ _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
 _RAINBOW_NORMAL: tuple = tuple(
     QColor(c)
     for c in (
-        "#60D4FF", "#40C8FF", "#4DA6FF", "#8B7BFF", "#C084FC",
-        "#F472B6", "#FB7185", "#F59E0B", "#34D399", "#22D3EE",
+        "#60D4FF",
+        "#40C8FF",
+        "#4DA6FF",
+        "#8B7BFF",
+        "#C084FC",
+        "#F472B6",
+        "#FB7185",
+        "#F59E0B",
+        "#34D399",
+        "#22D3EE",
     )
 )
 _RAINBOW_RETRY: tuple = tuple(
     QColor(c)
     for c in (
-        "#ff2222", "#aa0000", "#ff3333", "#880000",
-        "#ff1111", "#bb0000", "#ff4444", "#990000",
+        "#ff2222",
+        "#aa0000",
+        "#ff3333",
+        "#880000",
+        "#ff1111",
+        "#bb0000",
+        "#ff4444",
+        "#990000",
     )
 )
 
@@ -6175,6 +6210,14 @@ class CodeWebViewer(QWebEngineView):
         """
         if not self._is_js_ready or not self.page():
             return
+        # [PERF] 不可见期间跳过 DOM 注入。resize preview / 对话框穿透防护 / 切 tab
+        # 隐藏期间，viewer 已被 MessageCard.hide() 或 WA_TranslucentBackground
+        # 守卫关掉，但 runJavaScript 仍会执行 → Chromium 持续累积 DOM 节点 →
+        # preview 退出或恢复可见时首帧 paint 阻塞整页重排，是流式 + resize 卡顿的
+        # 根因之一。文本已在 _markdown_text 累积，恢复可见时由 _perform_update
+        # 一次性渲染（_render_deferred 标记 + showEvent 补渲已覆盖此路径）。
+        if not self.isVisible():
+            return
         try:
             # 防御：过滤掉可能出现在正文 chunk 中的 <think> / </think> 标签
             # （防止增量显示标签，全量渲染会正确处理）
@@ -7825,8 +7868,9 @@ class CodeWebViewer(QWebEngineView):
 
         # 清理页面：先停加载并卸载到空白页（比 setHtml("") 更轻，避免 WebEngine 异步导航竞态）
         try:
-            self.stop()                      # 停止页面加载
+            self.stop()  # 停止页面加载
             from PyQt5.QtCore import QUrl
+
             self.setUrl(QUrl("about:blank"))  # 卸载，比 setHtml("") 更轻
         except RuntimeError:
             pass
@@ -7834,7 +7878,7 @@ class CodeWebViewer(QWebEngineView):
         if getattr(self, "_page", None) is not None:
             self._page.deleteLater()
             self._page = None
-        self.setPage(None)                   # 断开 view→page，避免 view 析构再引用已删 page
+        self.setPage(None)  # 断开 view→page，避免 view 析构再引用已删 page
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
         # page 已在上方单独 deleteLater 释放渲染资源（DOM/JS heap/图层）。
@@ -7871,6 +7915,11 @@ class PlainTextViewer(QWidget):
         # 由 MessageCard.sync_width 按容器宽度注入上限
         # PyQt5 未导出 QWIDGETSIZE_MAX，16777215 即其值（未 sync 前的不限制初始态）
         self._width_cap = 16777215
+        # [PERF] “超高”单调缓存：全文档实测高度撞上 MAX_HEIGHT 上限时的最大确认宽度（0=未确认）。
+        # 文档高度在某宽度撞上限后，宽度变窄只会行数更多、高度更高，故后续宽度 ≤ 该值时
+        # 可直接 O(1) 判定 (cap, MAX_HEIGHT)，跳过全文档重排——消除超大用户消息的 resize 卡顿。
+        # 文本替换（set_text）使缓存失效；append_chunk 只增不减，无需失效。
+        self._tall_cap = 0
         self._init_ui()
         # 性能优化：添加 resize 防抖定时器
         self._resize_debounce_timer = QTimer(self)
@@ -7927,6 +7976,8 @@ class PlainTextViewer(QWidget):
     def refresh_theme(self):
         """主题切换后刷新文本颜色"""
         self._apply_text_style()
+        # [PERF] 字体/字号可能随主题设置变化 → 行数结论失效，清除“超高”缓存待重测
+        self._tall_cap = 0
 
     def append_chunk(self, text: str):
         self._text += text
@@ -7969,6 +8020,8 @@ class PlainTextViewer(QWidget):
 
     def set_text(self, text: str):
         self._text = text
+        # [PERF] 文本被整体替换（可能变短）→ “超高”结论不再必然成立，失效单调缓存
+        self._tall_cap = 0
         self.text_edit.setPlainText(text)
         # 设置文档宽度以确保正确计算换行
         vp_width = self.text_edit.viewport().width()
@@ -7983,8 +8036,39 @@ class PlainTextViewer(QWidget):
             self._width_cap = cap
             self._schedule_update_height()
 
+    def _definitely_tall_chars(self) -> int:
+        """[PERF] “必然超高”字符阈值（O(1) 计算）。
+
+        内容达到该字符数时，即使按最乐观排版估算——窗口宽至 4000px、字符窄至
+        0.35×字号——渲染高度也必然撞上 MAX_HEIGHT 上限。超过阈值即可跳过全文档
+        布局直接判定 (cap, MAX_HEIGHT)。误判方向只会让气泡偏高留白（内部滚动条仍可见
+        全文），不会裁剪文字。
+        """
+        fs = self.text_edit.font().pixelSize()
+        if fs <= 0:
+            fs = 14
+        # 填满 MAX_HEIGHT 所需行数（行高 1.5×字号）× 4000px 宽下每行最多容纳字符数
+        return int((self.MAX_HEIGHT / (1.5 * fs)) * (4000.0 / (0.35 * fs)))
+
     def _update_height(self):
         """宽度自适应 + 高度重算：气泡按未换行理想宽度收缩，不占满整行"""
+        # [PERF] 超大文本快速路径：跳过全文档布局，O(1) 判定 (cap, MAX_HEIGHT)。
+        # 依据一（单调缓存）：曾实测高度撞上限的宽度 _tall_cap，更窄只会更高；
+        # 依据二（字符阈值）：字符数达“必然超高”阈值，最乐观排版也撞上限。
+        # 12 万字符实测：每步 2 次全文档布局 ~1.4s → O(1)，消除 resize 卡死。
+        cap = self._width_cap
+        if cap < 100000:  # 排除 16777215 初始未限宽态（几何不代表真实窗口）
+            tall_cached = bool(self._tall_cap) and cap <= self._tall_cap
+            if tall_cached or len(self._text) >= self._definitely_tall_chars():
+                if cap > self._tall_cap:
+                    self._tall_cap = cap
+                if self.maximumWidth() != cap:
+                    self.setMaximumWidth(cap)
+                if self.width() != cap or self.height() != self.MAX_HEIGHT:
+                    self.setFixedSize(cap, self.MAX_HEIGHT)
+                    self.contentHeightChanged.emit(self.MAX_HEIGHT)
+                return
+
         # 先让 QTextEdit 重新布局
         self.text_edit.update()
         self.text_edit.document().markContentsDirty(0, self.text_edit.document().characterCount())
@@ -8034,6 +8118,11 @@ class PlainTextViewer(QWidget):
         # 限制最大高度：内容超出 MAX_HEIGHT 后由 QTextEdit 内部滚动条处理滚动
         h = max(40, min(h, self.MAX_HEIGHT))
 
+        # [PERF] 更新“超高”单调缓存：撞上限 → 记录确认宽度（取 max 保留最宽确认点），
+        # 后续更窄宽度走 O(1) 快速路径；未撞上限不更新（更宽时结论仍可能对更窄宽度有效）。
+        if h >= self.MAX_HEIGHT and self._width_cap < 100000:
+            self._tall_cap = max(self._tall_cap, self._width_cap)
+
         # ⚠️ 必须 setFixedSize：仅设 maximumWidth 时布局仍按 QTextEdit 的
         # 默认 sizeHint(272px) 分配宽度，气泡实际展不开（AlignRight 下尤甚）
         if self.width() != bubble_w or self.height() != h:
@@ -8067,6 +8156,7 @@ class PlainTextViewer(QWidget):
 
         # 清理文本缓存
         self._text = ""
+        self._tall_cap = 0
 
         # 清理 QTextEdit（关键修复：先清空内容，再释放文档）
         if hasattr(self, "text_edit") and self.text_edit:
@@ -8336,6 +8426,10 @@ class MessageCard(SimpleCardWidget):
         self._resize_preview_mode = False
         self._resize_preview_height = 0
         self._options_were_visible_before_resize = False
+        # [PERF] preview 期间 viewer height 目标值累积。_apply_viewer_height 在
+        # preview 模式只写此字段，不真正 setFixedHeight（避免 Chromium 级联
+        # relayout）。set_resize_preview_mode(False) 退出时一次性应用。
+        self._pending_viewer_height: Optional[int] = None
         # WebEngine 上下文恢复标志
         self._webengine_needs_restore = False
         # 懒渲染标志：未进入可视区域前不创建QWebEngine
@@ -9641,6 +9735,7 @@ class MessageCard(SimpleCardWidget):
             if item and item.widget():
                 item.widget().deleteLater()
 
+        # 灰度：Qt 渲染器无 context lost，不应进入此方法；防御性回退到 WebEngine
         self.viewer = CodeWebViewer(self)
         self.viewer._lazy_markdown_cb = self._build_incremental_md
         self.viewer.codeActionRequested.connect(self.actionRequested.emit)
@@ -9749,13 +9844,20 @@ class MessageCard(SimpleCardWidget):
         # M1：裁剪路径按几何缓存，仅尺寸变化时重建，不再每帧 new QPainterPath
         if self._clip_w != w or self._clip_h != h:
             self._clip_w, self._clip_h = w, h
-            self._clip_inner = QPainterPath(); self._clip_inner.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
-            self._clip_outer = QPainterPath(); self._clip_outer.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
-            self._clip_inner_edge = QPainterPath(); self._clip_inner_edge.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
-            self._clip_border = QPainterPath(); self._clip_border.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
-            self._clip_inner_border = QPainterPath(); self._clip_inner_border.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
-            self._clip_shimmer = QPainterPath(); self._clip_shimmer.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
-            self._clip_top = QPainterPath(); self._clip_top.addRoundedRect(0, 0, w, h, radius, radius)
+            self._clip_inner = QPainterPath()
+            self._clip_inner.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
+            self._clip_outer = QPainterPath()
+            self._clip_outer.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
+            self._clip_inner_edge = QPainterPath()
+            self._clip_inner_edge.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+            self._clip_border = QPainterPath()
+            self._clip_border.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+            self._clip_inner_border = QPainterPath()
+            self._clip_inner_border.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
+            self._clip_shimmer = QPainterPath()
+            self._clip_shimmer.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
+            self._clip_top = QPainterPath()
+            self._clip_top.addRoundedRect(0, 0, w, h, radius, radius)
             self._clip_glow_region = self._clip_outer - self._clip_inner_edge
             self._clip_border_region = self._clip_border - self._clip_inner_border
         inner_clip = self._clip_inner
@@ -10002,11 +10104,25 @@ class MessageCard(SimpleCardWidget):
             if current_height - h >= 40:
                 self._apply_viewer_height(h)
 
+    def _on_qt_viewer_height(self, h: int) -> None:
+        """灰度：纯 Qt viewer 高度自治（layout 自适应，不 setFixedHeight），
+        仅转发高度变化给父容器（滚底跟随依赖 heightChanged 链路）。"""
+        self.heightChanged.emit(max(40, int(h)))
+
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
         if height == self._last_applied_viewer_height:
             return
         self._last_applied_viewer_height = height
+        # [PERF] resize preview 期间 viewer 已 hide + setUpdatesEnabled(False)，
+        # 此时 setFixedHeight 仍会触发 Qt 布局链 → QWebEngineView Chromium
+        # 视口大小变化 → 整页 relayout → ResizeObserver → reportHeight →
+        # _stream_height_timer 80ms 防抖 → 又一轮 setFixedHeight 的循环。
+        # 是流式 + resize 卡顿的根因之一。仅记录目标高度，preview 退出时
+        # set_resize_preview_mode(False) 一次性应用 + 上报，避免级联重排。
+        if self._resize_preview_mode:
+            self._pending_viewer_height = height
+            return
         self.viewer.setFixedHeight(height)
         self.heightChanged.emit(height)
         # viewer 高度变化后 body 视口可能改变，仅在用户已处于底部时重新滚动到底部
@@ -10143,6 +10259,29 @@ class MessageCard(SimpleCardWidget):
         if hasattr(self.viewer, "update_height"):
             self.viewer.update_height()
 
+        # [PERF] 流式卡片：preview 期间累积的高度变化一次性应用。
+        # _apply_viewer_height 在 preview 模式下只记录 _pending_viewer_height，
+        # 此处 setFixedHeight 把 viewer 设到正确高度，触发一次 ResizeObserver →
+        # reportHeight → Python 拿到真实高度，结束 preview 期间累积的高度死循环。
+        # 只对 CodeWebViewer（非 PlainTextViewer）有效：PlainTextViewer 的
+        # update_height() 已在上方调用且自身无 _pending_viewer_height 字段。
+        pending_h = getattr(self, "_pending_viewer_height", None)
+        if pending_h is not None and self.role != "user" and self.viewer is not None:
+            try:
+                self.viewer.setFixedHeight(pending_h)
+                self.heightChanged.emit(pending_h)
+            except RuntimeError:
+                pass
+            self._pending_viewer_height = None
+            # 强制一次高度上报：让 JS 侧 ResizeObserver 也跟上 viewer 新高度，
+            # 防止 Chromium 内部仍按旧高度布局（_apply_viewer_height 没真正
+            # 改高度时 Chromium 视口尺寸未变）→ 首帧 paint 仍按旧宽排版。
+            if hasattr(self.viewer, "page") and self.viewer.page():
+                try:
+                    self.viewer.page().runJavaScript("reportHeight();")
+                except RuntimeError:
+                    pass
+
     def enterEvent(self, event):
         # 用户气泡 / assistant 全减：hover 浮现操作按钮，保持静态简洁
         if self.role == "user" and getattr(self, "_user_action_btns", None) is not None:
@@ -10253,6 +10392,27 @@ class MessageCard(SimpleCardWidget):
 
             # welcome 卡片使用轻量骨架（无 echarts CDN）
             is_welcome = self.role == "welcome"
+            if not is_welcome and _qt_renderer_enabled():
+                # 灰度：纯 Qt 块级渲染器（无 Chromium/JS 层）
+                self.viewer = MarkdownBlockViewer(self)
+                self.viewer.contentHeightChanged.connect(self._on_qt_viewer_height)
+                self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+                self.viewer._is_history = not self._streaming
+                self._viewer_layout.addWidget(self.viewer)
+                self._lazy_rendered = True
+                self._render_deferred = False
+                if self._todos_snapshot is not None:
+                    self._push_todo_list()
+                if self._pending_content is not None:
+                    self.set_content(self._pending_content)
+                    self._pending_content = None
+                elif self._pending_welcome_md is not None:
+                    self.set_content(self._pending_welcome_md)
+                    self._pending_welcome_md = None
+                    if self._welcome_mode == "changelog":
+                        self._start_changelog_fetcher()
+                self.lazyRenderCompleted.emit()
+                return
             self.viewer = CodeWebViewer(self, light=is_welcome)
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             if not is_welcome:
@@ -11317,7 +11477,13 @@ class MessageCard(SimpleCardWidget):
         由 viewer 创建点或 _on_js_ready 兜底补推。
         """
         v = self.viewer
-        if v is None or not isinstance(v, CodeWebViewer):
+        if v is None:
+            return
+        # 灰度：纯 Qt viewer 走原生任务列表面板
+        if isinstance(v, MarkdownBlockViewer):
+            v.update_todo_list(self._todos_snapshot or [])
+            return
+        if not isinstance(v, CodeWebViewer):
             return
         v._pending_todos = self._todos_snapshot
         if not getattr(v, "_is_js_ready", False):
@@ -11689,6 +11855,11 @@ class MessageCard(SimpleCardWidget):
         # 🐛 F3（次要提示 2）：工具登记集合随卡片销毁清空——否则边缘场景
         # （cleanup 后 _has_active_tools() 被误调）会因残留登记误判"仍有活跃工具"。
         self._tool_call_order.clear()
+
+        # [PERF] preview 期间累积的 viewer 高度目标清理
+        self._pending_viewer_height = None
+        self._resize_preview_mode = False
+        self._resize_preview_height = 0
 
         # 清理 markdown_cache 如果存在
         if hasattr(self, "_markdown_cache") and self._markdown_cache:
