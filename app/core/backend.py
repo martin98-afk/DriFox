@@ -1329,7 +1329,7 @@ class ChatBackend(QObject):
                         # 注册；否则（.drifox/backups/ 等运行时数据目录）按误判丢弃。
                         # 旧逻辑无条件 break 导致「新装插件的首次变更」永远无法触发
                         # 注册，用户必须手动重启/重载才能看到新插件。
-                        parent_lower = str(parent).resolve().lower().rstrip(os.sep)
+                        parent_lower = str(parent.resolve()).lower().rstrip(os.sep)
                         in_watch_root = any(
                             parent_lower.startswith(str(w).lower().rstrip(os.sep) + os.sep)
                             for w in watch_paths
