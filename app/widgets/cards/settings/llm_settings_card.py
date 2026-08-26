@@ -497,7 +497,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.qtRendererCard = SwitchSettingCard(
             FluentIcon.CODE,
             "纯 Qt 消息渲染（实验）",
-            "消息正文改用原生控件渲染，显著降低内存占用；重启应用后生效",
+            "消息正文改用原生控件渲染，显著降低内存占用",
             configItem=self.cfg.qt_message_renderer,
             parent=self,
         )
