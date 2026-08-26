@@ -215,6 +215,18 @@ class PluginConfigCard(ExpandSettingCard):
                 row = _FieldRow(f.label, spin, self.view)
                 self._rows[f.key] = spin
                 self.viewLayout.addWidget(row)
+            elif f.type == "link":
+                # 外链按钮：可点击超链接（系统浏览器打开），无存储值不参与回显
+                link_text = f.placeholder or f.url
+                link_label = BodyLabel(
+                    f"<a href=\"{f.url}\">{link_text} ↗</a>", self.view
+                )
+                from app.utils.design_tokens import Colors
+
+                link_label.setStyleSheet(f"QLabel {{ color: {Colors.TEXT_ACCENT}; }}")
+                link_label.setOpenExternalLinks(True)
+                row = _FieldRow(f.label, link_label, self.view)
+                self.viewLayout.addWidget(row)
             elif f.type == "textarea":
                 edit = _PlainEdit(self.view)
                 if f.placeholder:
@@ -284,7 +296,7 @@ class PluginConfigCard(ExpandSettingCard):
         elif f.type == "number":
             try:
                 control.setValue(int(val))
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 control.setValue(f.min if f.min is not None else 0)
             self._echoed[f.key] = str(control.value())
         elif f.type == "textarea":

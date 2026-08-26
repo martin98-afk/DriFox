@@ -19,6 +19,7 @@
     select    下拉选择（ComboBox），必须声明 options
     number    整数输入（SpinBox），可选 min/max/step
     textarea  多行文本（TextEdit），可选 rows（显示行数）
+    link      外链按钮（可点击超链接，必须声明 url；无存储值，纯展示）
 
 select 的 options 声明（value 为存储值，label 为显示名）：
     "options": {"a": "选项A", "b": "选项B"}            # dict: value → label
@@ -34,7 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 # 支持的字段类型（渲染映射见 plugin_config_card.py）
-FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea")
+FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea", "link")
 
 # number 默认范围（SpinBox 默认 0~2^31-1，与 qfluentwidgets SpinBox 一致）
 _NUMBER_DEFAULT_MIN = 0
@@ -58,6 +59,7 @@ class PluginConfigField:
         max: number 专用，最大值（None=默认 2^31-1）
         step: number 专用，步长（默认 1）
         rows: textarea 专用，显示行数（默认 3）
+        url: link 专用，点击跳转的外部地址（必填）
     """
 
     key: str
@@ -72,6 +74,7 @@ class PluginConfigField:
     max: Optional[int] = None
     step: int = 1
     rows: int = 3
+    url: str = ""
 
 
 @dataclass(frozen=True)
@@ -166,6 +169,12 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
             if not options:
                 logger.warning(f"[PluginConfig] {plugin_name} 字段 {key} select 缺 options，忽略整个 schema")
                 return None
+        url = ""
+        if ftype == "link":
+            url = str(item.get("url") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                logger.warning(f"[PluginConfig] {plugin_name} 字段 {key} link 缺合法 url(http/https)，忽略整个 schema")
+                return None
         fields.append(
             PluginConfigField(
                 key=key,
@@ -180,6 +189,7 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
                 max=_parse_optional_int(item.get("max"), None) if ftype == "number" else None,
                 step=_parse_optional_int(item.get("step"), 1) if ftype == "number" else 1,
                 rows=_parse_optional_int(item.get("rows"), 3) if ftype == "textarea" else 3,
+                url=url,
             )
         )
     return PluginConfigSchema(plugin_name=plugin_name, title=title, fields=fields)

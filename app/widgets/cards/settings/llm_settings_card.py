@@ -493,6 +493,16 @@ class LLMSettingsCard(SystemCardFrame):
         )
         common_layout.addWidget(self.compactToolCard)
 
+        # 灰度开关：纯 Qt 消息渲染器（MarkdownBlockViewer 替代 QWebEngineView）
+        self.qtRendererCard = SwitchSettingCard(
+            FluentIcon.CODE,
+            "纯 Qt 消息渲染（实验）",
+            "消息正文改用原生控件渲染，显著降低内存占用；重启应用后生效",
+            configItem=self.cfg.qt_message_renderer,
+            parent=self,
+        )
+        common_layout.addWidget(self.qtRendererCard)
+
         # 智能体完成通知
         self.llmNotifyCard = SwitchSettingCard(
             get_icon("提示"),

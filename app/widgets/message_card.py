@@ -104,6 +104,27 @@ from app.utils.design_tokens import (
     scale_font_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.markdown_block_viewer import MarkdownBlockViewer
+
+
+def _qt_renderer_enabled() -> bool:
+    """灰度开关：assistant 卡片正文用纯 Qt 块级渲染器替代 QWebEngineView。
+
+    配置项 Settings.qt_message_renderer（默认 False）+ 环境变量 DRIFOX_QT_RENDERER
+    （"1" 强制开）双通道；welcome 卡不参与灰度（JS 交互复杂）。
+    """
+    import os
+
+    if os.environ.get("DRIFOX_QT_RENDERER") == "1":
+        return True
+    try:
+        from app.utils.config import Settings
+
+        return bool(Settings.get_instance().qt_message_renderer.value)
+    except Exception:
+        return False
+
+
 from app.widgets.render_helpers import (
     _format_natural_preview,
     _get_tool_cn_name,
@@ -174,15 +195,29 @@ _FORMATTER_CACHE: dict = {"font_size": None, "formatter": None}
 _RAINBOW_NORMAL: tuple = tuple(
     QColor(c)
     for c in (
-        "#60D4FF", "#40C8FF", "#4DA6FF", "#8B7BFF", "#C084FC",
-        "#F472B6", "#FB7185", "#F59E0B", "#34D399", "#22D3EE",
+        "#60D4FF",
+        "#40C8FF",
+        "#4DA6FF",
+        "#8B7BFF",
+        "#C084FC",
+        "#F472B6",
+        "#FB7185",
+        "#F59E0B",
+        "#34D399",
+        "#22D3EE",
     )
 )
 _RAINBOW_RETRY: tuple = tuple(
     QColor(c)
     for c in (
-        "#ff2222", "#aa0000", "#ff3333", "#880000",
-        "#ff1111", "#bb0000", "#ff4444", "#990000",
+        "#ff2222",
+        "#aa0000",
+        "#ff3333",
+        "#880000",
+        "#ff1111",
+        "#bb0000",
+        "#ff4444",
+        "#990000",
     )
 )
 
@@ -7825,8 +7860,9 @@ class CodeWebViewer(QWebEngineView):
 
         # 清理页面：先停加载并卸载到空白页（比 setHtml("") 更轻，避免 WebEngine 异步导航竞态）
         try:
-            self.stop()                      # 停止页面加载
+            self.stop()  # 停止页面加载
             from PyQt5.QtCore import QUrl
+
             self.setUrl(QUrl("about:blank"))  # 卸载，比 setHtml("") 更轻
         except RuntimeError:
             pass
@@ -7834,7 +7870,7 @@ class CodeWebViewer(QWebEngineView):
         if getattr(self, "_page", None) is not None:
             self._page.deleteLater()
             self._page = None
-        self.setPage(None)                   # 断开 view→page，避免 view 析构再引用已删 page
+        self.setPage(None)  # 断开 view→page，避免 view 析构再引用已删 page
 
         # 共享 profile 为全局单例，不可销毁；仅解除引用。
         # page 已在上方单独 deleteLater 释放渲染资源（DOM/JS heap/图层）。
@@ -9641,6 +9677,7 @@ class MessageCard(SimpleCardWidget):
             if item and item.widget():
                 item.widget().deleteLater()
 
+        # 灰度：Qt 渲染器无 context lost，不应进入此方法；防御性回退到 WebEngine
         self.viewer = CodeWebViewer(self)
         self.viewer._lazy_markdown_cb = self._build_incremental_md
         self.viewer.codeActionRequested.connect(self.actionRequested.emit)
@@ -9749,13 +9786,20 @@ class MessageCard(SimpleCardWidget):
         # M1：裁剪路径按几何缓存，仅尺寸变化时重建，不再每帧 new QPainterPath
         if self._clip_w != w or self._clip_h != h:
             self._clip_w, self._clip_h = w, h
-            self._clip_inner = QPainterPath(); self._clip_inner.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
-            self._clip_outer = QPainterPath(); self._clip_outer.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
-            self._clip_inner_edge = QPainterPath(); self._clip_inner_edge.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
-            self._clip_border = QPainterPath(); self._clip_border.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
-            self._clip_inner_border = QPainterPath(); self._clip_inner_border.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
-            self._clip_shimmer = QPainterPath(); self._clip_shimmer.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
-            self._clip_top = QPainterPath(); self._clip_top.addRoundedRect(0, 0, w, h, radius, radius)
+            self._clip_inner = QPainterPath()
+            self._clip_inner.addRoundedRect(3, 3, w - 6, h - 6, radius - 2, radius - 2)
+            self._clip_outer = QPainterPath()
+            self._clip_outer.addRoundedRect(-2, -2, w + 4, h + 4, radius + 3, radius + 3)
+            self._clip_inner_edge = QPainterPath()
+            self._clip_inner_edge.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+            self._clip_border = QPainterPath()
+            self._clip_border.addRoundedRect(0, 0, w, h, radius + 1, radius + 1)
+            self._clip_inner_border = QPainterPath()
+            self._clip_inner_border.addRoundedRect(2, 2, w - 4, h - 4, radius - 1, radius - 1)
+            self._clip_shimmer = QPainterPath()
+            self._clip_shimmer.addRoundedRect(1, 1, w - 2, h - 2, radius, radius)
+            self._clip_top = QPainterPath()
+            self._clip_top.addRoundedRect(0, 0, w, h, radius, radius)
             self._clip_glow_region = self._clip_outer - self._clip_inner_edge
             self._clip_border_region = self._clip_border - self._clip_inner_border
         inner_clip = self._clip_inner
@@ -10001,6 +10045,11 @@ class MessageCard(SimpleCardWidget):
             # 大幅收拢（≥40px，折叠/展开/dock 切换）仍正常应用。
             if current_height - h >= 40:
                 self._apply_viewer_height(h)
+
+    def _on_qt_viewer_height(self, h: int) -> None:
+        """灰度：纯 Qt viewer 高度自治（layout 自适应，不 setFixedHeight），
+        仅转发高度变化给父容器（滚底跟随依赖 heightChanged 链路）。"""
+        self.heightChanged.emit(max(40, int(h)))
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
@@ -10253,6 +10302,27 @@ class MessageCard(SimpleCardWidget):
 
             # welcome 卡片使用轻量骨架（无 echarts CDN）
             is_welcome = self.role == "welcome"
+            if not is_welcome and _qt_renderer_enabled():
+                # 灰度：纯 Qt 块级渲染器（无 Chromium/JS 层）
+                self.viewer = MarkdownBlockViewer(self)
+                self.viewer.contentHeightChanged.connect(self._on_qt_viewer_height)
+                self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+                self.viewer._is_history = not self._streaming
+                self._viewer_layout.addWidget(self.viewer)
+                self._lazy_rendered = True
+                self._render_deferred = False
+                if self._todos_snapshot is not None:
+                    self._push_todo_list()
+                if self._pending_content is not None:
+                    self.set_content(self._pending_content)
+                    self._pending_content = None
+                elif self._pending_welcome_md is not None:
+                    self.set_content(self._pending_welcome_md)
+                    self._pending_welcome_md = None
+                    if self._welcome_mode == "changelog":
+                        self._start_changelog_fetcher()
+                self.lazyRenderCompleted.emit()
+                return
             self.viewer = CodeWebViewer(self, light=is_welcome)
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             if not is_welcome:
@@ -11317,7 +11387,13 @@ class MessageCard(SimpleCardWidget):
         由 viewer 创建点或 _on_js_ready 兜底补推。
         """
         v = self.viewer
-        if v is None or not isinstance(v, CodeWebViewer):
+        if v is None:
+            return
+        # 灰度：纯 Qt viewer 走原生任务列表面板
+        if isinstance(v, MarkdownBlockViewer):
+            v.update_todo_list(self._todos_snapshot or [])
+            return
+        if not isinstance(v, CodeWebViewer):
             return
         v._pending_todos = self._todos_snapshot
         if not getattr(v, "_is_js_ready", False):
