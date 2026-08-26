@@ -7907,6 +7907,11 @@ class PlainTextViewer(QWidget):
         # 由 MessageCard.sync_width 按容器宽度注入上限
         # PyQt5 未导出 QWIDGETSIZE_MAX，16777215 即其值（未 sync 前的不限制初始态）
         self._width_cap = 16777215
+        # [PERF] “超高”单调缓存：全文档实测高度撞上 MAX_HEIGHT 上限时的最大确认宽度（0=未确认）。
+        # 文档高度在某宽度撞上限后，宽度变窄只会行数更多、高度更高，故后续宽度 ≤ 该值时
+        # 可直接 O(1) 判定 (cap, MAX_HEIGHT)，跳过全文档重排——消除超大用户消息的 resize 卡顿。
+        # 文本替换（set_text）使缓存失效；append_chunk 只增不减，无需失效。
+        self._tall_cap = 0
         self._init_ui()
         # 性能优化：添加 resize 防抖定时器
         self._resize_debounce_timer = QTimer(self)
@@ -7963,6 +7968,8 @@ class PlainTextViewer(QWidget):
     def refresh_theme(self):
         """主题切换后刷新文本颜色"""
         self._apply_text_style()
+        # [PERF] 字体/字号可能随主题设置变化 → 行数结论失效，清除“超高”缓存待重测
+        self._tall_cap = 0
 
     def append_chunk(self, text: str):
         self._text += text
@@ -8005,6 +8012,8 @@ class PlainTextViewer(QWidget):
 
     def set_text(self, text: str):
         self._text = text
+        # [PERF] 文本被整体替换（可能变短）→ “超高”结论不再必然成立，失效单调缓存
+        self._tall_cap = 0
         self.text_edit.setPlainText(text)
         # 设置文档宽度以确保正确计算换行
         vp_width = self.text_edit.viewport().width()
@@ -8019,8 +8028,39 @@ class PlainTextViewer(QWidget):
             self._width_cap = cap
             self._schedule_update_height()
 
+    def _definitely_tall_chars(self) -> int:
+        """[PERF] “必然超高”字符阈值（O(1) 计算）。
+
+        内容达到该字符数时，即使按最乐观排版估算——窗口宽至 4000px、字符窄至
+        0.35×字号——渲染高度也必然撞上 MAX_HEIGHT 上限。超过阈值即可跳过全文档
+        布局直接判定 (cap, MAX_HEIGHT)。误判方向只会让气泡偏高留白（内部滚动条仍可见
+        全文），不会裁剪文字。
+        """
+        fs = self.text_edit.font().pixelSize()
+        if fs <= 0:
+            fs = 14
+        # 填满 MAX_HEIGHT 所需行数（行高 1.5×字号）× 4000px 宽下每行最多容纳字符数
+        return int((self.MAX_HEIGHT / (1.5 * fs)) * (4000.0 / (0.35 * fs)))
+
     def _update_height(self):
         """宽度自适应 + 高度重算：气泡按未换行理想宽度收缩，不占满整行"""
+        # [PERF] 超大文本快速路径：跳过全文档布局，O(1) 判定 (cap, MAX_HEIGHT)。
+        # 依据一（单调缓存）：曾实测高度撞上限的宽度 _tall_cap，更窄只会更高；
+        # 依据二（字符阈值）：字符数达“必然超高”阈值，最乐观排版也撞上限。
+        # 12 万字符实测：每步 2 次全文档布局 ~1.4s → O(1)，消除 resize 卡死。
+        cap = self._width_cap
+        if cap < 100000:  # 排除 16777215 初始未限宽态（几何不代表真实窗口）
+            tall_cached = bool(self._tall_cap) and cap <= self._tall_cap
+            if tall_cached or len(self._text) >= self._definitely_tall_chars():
+                if cap > self._tall_cap:
+                    self._tall_cap = cap
+                if self.maximumWidth() != cap:
+                    self.setMaximumWidth(cap)
+                if self.width() != cap or self.height() != self.MAX_HEIGHT:
+                    self.setFixedSize(cap, self.MAX_HEIGHT)
+                    self.contentHeightChanged.emit(self.MAX_HEIGHT)
+                return
+
         # 先让 QTextEdit 重新布局
         self.text_edit.update()
         self.text_edit.document().markContentsDirty(0, self.text_edit.document().characterCount())
@@ -8070,6 +8110,11 @@ class PlainTextViewer(QWidget):
         # 限制最大高度：内容超出 MAX_HEIGHT 后由 QTextEdit 内部滚动条处理滚动
         h = max(40, min(h, self.MAX_HEIGHT))
 
+        # [PERF] 更新“超高”单调缓存：撞上限 → 记录确认宽度（取 max 保留最宽确认点），
+        # 后续更窄宽度走 O(1) 快速路径；未撞上限不更新（更宽时结论仍可能对更窄宽度有效）。
+        if h >= self.MAX_HEIGHT and self._width_cap < 100000:
+            self._tall_cap = max(self._tall_cap, self._width_cap)
+
         # ⚠️ 必须 setFixedSize：仅设 maximumWidth 时布局仍按 QTextEdit 的
         # 默认 sizeHint(272px) 分配宽度，气泡实际展不开（AlignRight 下尤甚）
         if self.width() != bubble_w or self.height() != h:
@@ -8103,6 +8148,7 @@ class PlainTextViewer(QWidget):
 
         # 清理文本缓存
         self._text = ""
+        self._tall_cap = 0
 
         # 清理 QTextEdit（关键修复：先清空内容，再释放文档）
         if hasattr(self, "text_edit") and self.text_edit:

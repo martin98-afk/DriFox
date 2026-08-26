@@ -21,19 +21,28 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QPropertyAnimation, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QPixmap, QTextOption
+from PyQt5.QtCore import QFile, QPropertyAnimation, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap, QTextOption
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
+from PyQt5.QtWidgets import QSizePolicy
+
+try:  # QSvgRenderer：思考流式 spinner / qrc 图标渲染依赖
+    from PyQt5.QtSvg import QSvgRenderer
+
+    _HAS_QT_SVG = True
+except Exception:  # pragma: no cover
+    _HAS_QT_SVG = False
 
 import html as _html_mod
 
@@ -89,6 +98,154 @@ _LANG_COLOR = "#FFA500"
 _BODY_MAX_HEIGHT = 400  # 代码区内部滚动上限(px)
 
 _FENCE_RE = re.compile(r"^([ \t]*)```([\w+#.-]*)[ \t]*\n", re.M)
+
+# ── 流式活动坞（Streaming Dock）常量（对齐 WebEngine 版 _STREAMING_DOCK_CSS）──
+_DOCK_LOG_MAX = 110  # 工具卡区内滚限高 ≈3-4 行（web #tool-content max-height）
+_DOCK_TODO_H = 96  # 任务列表坞态固定高（web #todo-content height:96px）
+
+_QWIDGETSIZE_MAX = 16777215
+
+try:  # qrc 编译资源注册（幂等）：main.py 仅注册深色 icons_rc，
+    # 浅色主题 icons_light_rc 主程序链路从未 import → 必须在此补齐
+    from app.utils import icons_light_rc as _icons_light_rc  # noqa: F401
+    from app.utils import icons_rc as _icons_rc  # noqa: F401
+
+    _HAS_QRC_ICONS = True
+except Exception:
+    _HAS_QRC_ICONS = False
+
+
+# qrc svg → QPixmap 缓存：key=(prefix/icon_name, size)，含主题前缀故主题切换自动换图。
+_ICON_PIXMAP_CACHE: Dict[Tuple[str, int], QPixmap] = {}
+_ICON_PIXMAP_CACHE_MAX = 256
+
+
+def _qrc_icon_pixmap(icon_name: str, size: int = 16) -> Optional[QPixmap]:
+    """qrc svg 图标 → QPixmap（主题感知 prefix，QSvgRenderer 直渲）。
+
+    不能用 QLabel 富文本 <img src="qrc:...">：该路径经 QImageReader/svg
+    imageformat 插件 + style 缩放，含椭圆弧（A/a）的 SVG 小尺寸下渲染为空白
+    （实测 思考过程/工具 全空白，无弧的 todo 正常）。QSvgRenderer 为 QtSvg 模块
+    API，直渲矢量 path 不经插件，弧完整；渲染结果 setPixmap 到 QLabel。
+    失败返回 None，调用方回退 emoji。
+    """
+    if not _HAS_QRC_ICONS or not _HAS_QT_SVG:
+        return None
+    try:
+        from app.widgets.render_helpers import get_tool_qrc_prefix, _qrc_icon_exists
+
+        prefix = get_tool_qrc_prefix()
+        if not _qrc_icon_exists(prefix, icon_name):
+            return None
+        key = (f"{prefix}/{icon_name}", size)
+        cached = _ICON_PIXMAP_CACHE.get(key)
+        if cached is not None:
+            return cached
+        qrc_path = ":" + prefix[len("qrc:") :] if prefix.startswith("qrc:") else prefix
+        f = QFile(f"{qrc_path}/{icon_name}.svg")
+        if not f.open(QFile.ReadOnly):
+            return None
+        data = bytes(f.readAll())
+        f.close()
+        renderer = QSvgRenderer(data)
+        if not renderer.isValid():
+            return None
+        dpr = 2.0
+        try:
+            _screen = QApplication.primaryScreen()
+            if _screen is not None:
+                dpr = _screen.devicePixelRatio() or 2.0
+        except Exception:
+            dpr = 2.0
+        pm = QPixmap(int(size * dpr), int(size * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        renderer.render(painter, QRectF(0, 0, size, size))
+        painter.end()
+        if len(_ICON_PIXMAP_CACHE) >= _ICON_PIXMAP_CACHE_MAX:
+            _ICON_PIXMAP_CACHE.clear()
+        _ICON_PIXMAP_CACHE[key] = pm
+        return pm
+    except Exception:
+        return None
+
+
+def _measure_expanded_height(wrap: QWidget) -> int:
+    """以当前实际宽度测量折叠容器展开后的真实高度。
+
+    QLabel(wordWrap) 的 sizeHint 按"理想宽度"算行数，在窄布局里低估高度——
+    直接拿 sizeHint 当动画终点会导致到位后放开限高的瞬间二次跳变。
+    此函数对 hasHeightForWidth 的子项用 heightForWidth(可用宽) 精确测量。
+    """
+    lay = wrap.layout()
+    if lay is None:
+        return wrap.sizeHint().height()
+    m = lay.contentsMargins()
+    inner_w = wrap.width() - m.left() - m.right()
+    if inner_w <= 40:  # 未布局/宽度未知 → 退回 sizeHint
+        return max(wrap.sizeHint().height(), 24)
+    total = m.top() + m.bottom()
+    n = 0
+    for i in range(lay.count()):
+        it = lay.itemAt(i)
+        wdg = it.widget() if it is not None else None
+        if wdg is None or wdg.isHidden():
+            continue
+        if n:
+            total += lay.spacing()
+        h = wdg.heightForWidth(inner_w) if wdg.hasHeightForWidth() else 0
+        if h <= 0:
+            h = wdg.sizeHint().height()
+        total += max(h, wdg.minimumSizeHint().height())
+        n += 1
+    return int(total)
+
+
+class _ThinkingSpinner(QWidget):
+    """思考流式 spinner：金色 snake 圆环旋转（复刻 WebEngine 版 _THINK_SNAKE_SVG 观感）。"""
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._angle = 0
+        self.setFixedSize(18, 18)
+        self._timer = QTimer(self)
+        self._timer.setInterval(40)
+        self._timer.timeout.connect(self._tick)
+
+    def start(self) -> None:
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def _tick(self) -> None:
+        self._angle = (self._angle + 12) % 360
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        if _HAS_QT_SVG:
+            try:
+                from app.widgets.message_card import _THINK_SNAKE_SVG
+
+                p.translate(self.width() / 2, self.height() / 2)
+                p.rotate(self._angle)
+                p.translate(-self.width() / 2, -self.height() / 2)
+                QSvgRenderer(_THINK_SNAKE_SVG.encode("utf-8")).render(p)
+                p.end()
+                return
+            except Exception:
+                pass
+        # 兜底：无 SVG 时画简单圆弧
+        from PyQt5.QtCore import QRectF
+
+        rect = QRectF(3, 3, self.width() - 6, self.height() - 6)
+        p.setPen(QPen(QColor(255, 200, 50), 2.5, Qt.SolidLine, Qt.RoundCap))
+        p.drawArc(rect, self._angle * 16, 100 * 16)
+        p.end()
 
 
 # ── 通用标记段切分 ────────────────────────────────────────────────
@@ -342,6 +499,10 @@ class RichTextLabel(QLabel):
         )
         self.setText(html)
 
+    def update_content(self, b: Dict[str, Any]) -> None:
+        """流式原地更新（reconcile slot 复用约定）。"""
+        self.set_html(b.get("html") or "")
+
 
 class CodeBlockWidget(QFrame):
     """代码块：语言标签栏 + 行号列(主题色) + Pygments 高亮正文 + 复制按钮。"""
@@ -471,10 +632,11 @@ class CodeBlockWidget(QFrame):
         self._line_numbers.setText("\n".join(str(i + 1) for i in range(max(1, len(code.splitlines())))))
         self._height_timer.start()
 
-    def update_content(self, code: str, lang: str) -> None:
-        """流式原地更新（不重建控件）。"""
+    def update_content(self, b: Dict[str, Any]) -> None:
+        """流式原地更新（不重建控件）。签名统一接收 block dict。"""
+        code = b.get("code") or ""
         self._raw_code = code
-        self._lang = lang
+        self._lang = b.get("lang") or ""
         self._apply_highlight(code)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
@@ -510,6 +672,7 @@ class ThinkCard(QFrame):
         super().__init__(parent)
         self._expanded = False
         self._anim: Optional[QPropertyAnimation] = None
+        self._content = content or ""
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 2, 0, 2)
         root.setSpacing(0)
@@ -524,7 +687,19 @@ class ThinkCard(QFrame):
         )
         hl = QHBoxLayout(header)
         hl.setContentsMargins(2, 0, 6, 0)
-        icon_label = QLabel("💡", header)
+        hl.setSpacing(6)
+        # 思考过程 qrc svg 图标（QSvgRenderer 直渲，富文本 img 对含弧 SVG 空白），流式态切为 spinner
+        self._icon_label = QLabel(header)
+        icon_pm = _qrc_icon_pixmap("思考过程", 16)
+        self._icon_is_img = icon_pm is not None
+        if icon_pm is not None:
+            self._icon_label.setPixmap(icon_pm)
+        else:
+            self._icon_label.setText("💡")
+        self._icon_label.setFixedSize(18, 18)
+        self._icon_label.setAlignment(Qt.AlignCenter)
+        self._spinner = _ThinkingSpinner(header)
+        self._spinner.hide()
         self._title_label = QLabel("深度思考", header)
         self._title_label.setStyleSheet(
             f"{get_font_family_css()} color:{Colors.ASSISTANT_CARD_MUTED};"
@@ -539,7 +714,7 @@ class ThinkCard(QFrame):
         self._chevron.setStyleSheet(
             f"color:{Colors.ASSISTANT_CARD_MUTED}; font-size:{scale_font_size(12)}px; background:transparent;"
         )
-        for w in (icon_label, self._title_label, self._preview_label):
+        for w in (self._icon_label, self._spinner, self._title_label, self._preview_label):
             hl.addWidget(w)
         hl.addStretch()
         hl.addWidget(self._chevron)
@@ -561,6 +736,8 @@ class ThinkCard(QFrame):
         )
         bw.addWidget(self._body_label)
         root.addWidget(self._body_wrap)
+        if completed:
+            self._refresh_title()
 
     def set_streaming(self) -> None:
         """流式态：单行提示，无折叠。"""
@@ -572,24 +749,59 @@ class ThinkCard(QFrame):
             self._title_label.setText("深度思考中...")
             self._preview_label.setText("")
             self._chevron.hide()
+            self._icon_label.hide()
+            self._spinner.start()
+            self._spinner.show()
         else:
-            self._title_label.setText("深度思考")
+            self._spinner.stop()
+            self._spinner.hide()
+            self._icon_label.show()
             self._chevron.show()
+            self._refresh_title()
+
+    def _refresh_title(self) -> None:
+        """完成态标题/预览：复刻 WebEngine 版分类标签(_classify_think_tag)+结论优先预览。"""
+        try:
+            from app.widgets.message_card import _classify_think_tag, _get_think_preview
+
+            tag = _classify_think_tag(self._content) if self._content else ""
+            self._title_label.setText(tag or "深度思考")
+            self._preview_label.setText(_get_think_preview(self._content) if self._content else "")
+        except Exception:
+            self._title_label.setText("深度思考")
+
+    def update_content(self, b: Dict[str, Any]) -> None:
+        """流式原位更新（不重建控件）：正文文本 + 完成态标题/预览。"""
+        self._content = b.get("content") or ""
+        plain = self._content.replace("```", "").strip()
+        self._body_label.setText(plain)
+        if b.get("completed", True):
+            self.apply_streaming(False)
 
     def toggle(self) -> None:
-        target = self._body_wrap.sizeHint().height() if not self._expanded else 0
-        self._expanded = not self._expanded
+        # 收起从"当前实际渲染高度"起步：展开完成时限高已放开(16777215)，
+        # 直接拿 maximumHeight 当起点会导致大半动画时长无视觉变化、末尾骤缩。
+        if not self._expanded:
+            target = max(_measure_expanded_height(self._body_wrap), 1)
+            start = 0
+            self._expanded = True
+        else:
+            start = max(self._body_wrap.height(), 1)
+            self._body_wrap.setMaximumHeight(start)  # 先钳到实际高度再动画
+            target = 0
+            self._expanded = False
         self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
         self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
         self._anim.setDuration(180)
-        self._anim.setStartValue(self._body_wrap.maximumHeight())
-        self._anim.setEndValue(max(target, 1))
+        self._anim.setStartValue(start)
+        self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_anim_done)
         self._anim.start()
 
     def _on_anim_done(self) -> None:
         if self._expanded:
-            self._body_wrap.setMaximumHeight(16777215)
+            # 展开终点经 heightForWidth 精确测量，放开限高不会二次跳变
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
 
 
 class DiffViewWidget(QTextEdit):
@@ -612,6 +824,10 @@ class DiffViewWidget(QTextEdit):
             " font-family:'Consolas',monospace; font-size:"
             f"{scale_font_size(12)}px; }}\n{get_unified_scrollbar_style(6)}"
         )
+        self.update_diff(diff_text)
+
+    def update_diff(self, diff_text: str) -> None:
+        """原位刷新 diff 内容（流式增量注入复用，不重建控件）。"""
         light = _is_light_theme()
         rows = []
         for line in diff_text.splitlines():
@@ -677,11 +893,13 @@ def _truncate_val(v: Any, max_len: int = 80) -> str:
     return s[:max_len] + "..." if len(s) > max_len else s
 
 
-def _tool_icon_pixmap(tool_name: str, args_raw: str) -> Optional["QPixmap"]:
-    """加载工具自定义图标（对齐 WebEngine 版 _get_tool_icon_name + qrc 机制）。
+def _tool_icon_pixmap(tool_name: str, args_raw: str, size: int = 16) -> Optional[QPixmap]:
+    """工具自定义图标 pixmap（对齐 WebEngine 版 _get_tool_icon_name + qrc 机制）。
 
-    返回 16px QPixmap；加载失败返回 None（调用方回退 ⚙ emoji）。
+    返回 QPixmap；查不到时返回 None（调用方回退 ⚙ emoji）。
     """
+    if not _HAS_QRC_ICONS or not _HAS_QT_SVG:
+        return None
     try:
         from app.tools.registry import DEFAULT_FALLBACK_ICON
         from app.widgets.render_helpers import _get_tool_icon_name, _qrc_icon_exists, get_tool_qrc_prefix
@@ -694,14 +912,10 @@ def _tool_icon_pixmap(tool_name: str, args_raw: str) -> Optional["QPixmap"]:
         except Exception:
             pass
         icon_name = _get_tool_icon_name(tool_name, args)
-        qrc_prefix = get_tool_qrc_prefix()
-        if not _qrc_icon_exists(qrc_prefix, icon_name):
+        prefix = get_tool_qrc_prefix()
+        if not _qrc_icon_exists(prefix, icon_name):
             icon_name = DEFAULT_FALLBACK_ICON
-        qt_path = qrc_prefix.replace("qrc:", "", 1)  # qrc:/icons_light → :/icons_light
-        pm = QPixmap(f"{qt_path}/{icon_name}.svg")
-        if pm.isNull():
-            return None
-        return pm.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return _qrc_icon_pixmap(icon_name, size)
     except Exception:
         return None
 
@@ -743,16 +957,17 @@ class ToolCardWidget(QFrame):
         )
         hl = QHBoxLayout(header)
         hl.setContentsMargins(2, 0, 6, 0)
-        # 工具自定义图标（registry/qrc 驱动，对齐 WebEngine 版），失败回退 ⚙
-        icon_pm = _tool_icon_pixmap(block.get("name") or "", block.get("args_raw") or "")
+        # 工具自定义图标（registry/qrc 驱动，QSvgRenderer 直渲，对齐 WebEngine 版），失败回退 ⚙
         gear = QLabel(header)
-        if icon_pm is not None:
-            gear.setPixmap(icon_pm)
+        self._icon_pm = _tool_icon_pixmap(block.get("name") or "", block.get("args_raw") or "")
+        if self._icon_pm is not None:
+            gear.setPixmap(self._icon_pm)
         else:
             gear.setText("⚙")
+        self._icon_is_pixmap = self._icon_pm is not None  # 兼容 update_content 判断（语义：img 可用）
         gear.setFixedSize(18, 18)
-        gear.setScaledContents(True)
         gear.setAlignment(Qt.AlignCenter)
+        self._gear_label = gear
         self._name_label = QLabel(block.get("cn_name") or block.get("name") or "工具调用", header)
         # 标题色对齐 WebEngine 版 title_color=#FFA500
         self._name_label.setStyleSheet(
@@ -790,15 +1005,32 @@ class ToolCardWidget(QFrame):
         # 展开区：diff 优先 → 参数+结果表格 → args JSON → 纯 result 文本（对齐 WebEngine 版分支）
         self._body_wrap = QFrame(self)
         self._body_wrap.setMaximumHeight(0)
-        bw = QVBoxLayout(self._body_wrap)
-        bw.setContentsMargins(20, 4, 8, 6)
-        bw.setSpacing(6)
+        self._body_lay = QVBoxLayout(self._body_wrap)
+        self._body_lay.setContentsMargins(20, 4, 8, 6)
+        self._body_lay.setSpacing(6)
+        self._build_body(block)
+        root.addWidget(self._body_wrap)
+
+        self._apply_status()
+
+    def _build_body(self, block: Dict[str, Any]) -> None:
+        """构建展开区内容（__init__ 与 update_content 共用）。"""
+        bw = self._body_lay
+        while bw.count():
+            item = bw.takeAt(0)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.deleteLater()
+        self._body_kind = ""
+        self._body_label_ref: Optional[QLabel] = None
         muted = Colors.ASSISTANT_CARD_MUTED
         diff_text = block.get("diff") or ""
         result_text = (block.get("result") or "").strip()
         table_html = "" if diff_text else _unified_table_html(block)
         if diff_text:
-            bw.addWidget(DiffViewWidget(diff_text, self._body_wrap))
+            diff_view = DiffViewWidget(diff_text, self._body_wrap)
+            bw.addWidget(diff_view)
+            self._body_kind, self._body_label_ref = "diff", diff_view
         elif table_html:
             table_label = QLabel(table_html, self._body_wrap)
             table_label.setWordWrap(True)
@@ -809,6 +1041,7 @@ class ToolCardWidget(QFrame):
             )
             table_label.setMaximumHeight(240)
             bw.addWidget(table_label)
+            self._body_kind, self._body_label_ref = "table", table_label
         else:
             args_raw = block.get("args_raw") or ""
             if args_raw:
@@ -821,6 +1054,7 @@ class ToolCardWidget(QFrame):
                 )
                 args_label.setMaximumHeight(160)
                 bw.addWidget(args_label)
+                self._body_kind, self._body_label_ref = "args", args_label
         # 纯 result 文本：仅当未被表格/diff 覆盖时显示（避免重复）
         if result_text and not diff_text and not table_html:
             result_label = QLabel(_html_mod.escape(result_text), self._body_wrap)
@@ -832,8 +1066,46 @@ class ToolCardWidget(QFrame):
             )
             result_label.setMaximumHeight(220)
             bw.addWidget(result_label)
-        root.addWidget(self._body_wrap)
+            if self._body_kind == "":
+                self._body_kind, self._body_label_ref = "result", result_label
 
+    def update_content(self, b: Dict[str, Any]) -> None:
+        """流式原位更新：头部预览/徽章/diff 统计 + body 分支原位或重建（不重建卡片，
+        保留用户展开态与动画）。"""
+        old = self._block
+        self._block = b
+        self._preview_label.setText(_format_args_preview_safe(b.get("args_raw") or ""))
+        new_icon_pm = _tool_icon_pixmap(b.get("name") or "", b.get("args_raw") or "")
+        if self._icon_is_pixmap and new_icon_pm is not None:
+            self._gear_label.setPixmap(new_icon_pm)
+        self._update_diff_stats()
+        new_kind = "diff" if (b.get("diff") or "") else ""
+        if not new_kind:
+            has_result = bool((b.get("result") or "").strip())
+            if _unified_table_html(b):
+                new_kind = "table"
+            elif (b.get("args_raw") or "") and not has_result:
+                new_kind = "args"
+            elif has_result:
+                new_kind = "result"
+            else:
+                new_kind = "args"
+        if old is b or new_kind == getattr(self, "_body_kind", ""):
+            # 同分支：原位刷新文本
+            ref = self._body_label_ref
+            if ref is None:
+                pass
+            elif new_kind == "diff":
+                ref.update_diff(b.get("diff") or "")
+            elif new_kind == "table":
+                ref.setText(_unified_table_html(b))
+            elif new_kind == "result":
+                ref.setText(_html_mod.escape((b.get("result") or "").strip()))
+            else:
+                ref.setText(self._pretty_args(b.get("args_raw") or ""))
+        else:
+            # 分支迁移（如 args → table/result）：重建 body 子树
+            self._build_body(b)
         self._apply_status()
 
     def _update_diff_stats(self) -> None:
@@ -890,49 +1162,78 @@ class ToolCardWidget(QFrame):
             )
 
     def toggle(self) -> None:
-        target = self._body_wrap.sizeHint().height() if not self._expanded else 0
-        self._expanded = not self._expanded
+        # 收起从"当前实际渲染高度"起步（ThinkCard 同策略），避免从 16777215 起步
+        if not self._expanded:
+            target = max(_measure_expanded_height(self._body_wrap), 1)
+            start = 0
+            self._expanded = True
+        else:
+            start = max(self._body_wrap.height(), 1)
+            self._body_wrap.setMaximumHeight(start)
+            target = 0
+            self._expanded = False
         self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
         self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
         self._anim.setDuration(180)
-        self._anim.setStartValue(self._body_wrap.maximumHeight())
-        self._anim.setEndValue(max(target, 1))
+        self._anim.setStartValue(start)
+        self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_anim_done)
         self._anim.start()
 
     def _on_anim_done(self) -> None:
         if self._expanded:
-            self._body_wrap.setMaximumHeight(16777215)
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
 
 
 # ── 「工具与思考」分区 + 任务列表面板 ─────────────────────────────
 class _SeparatorRow(QFrame):
-    """可点击折叠的分隔条（对照 WebEngine 版 tool-separator/todo-separator）。"""
+    """可点击折叠的分隔条（对照 WebEngine 版 tool-separator/todo-separator：
+    两侧细线 + 图标 + 标题 + 附加信息 + chevron）。"""
 
     clicked = pyqtSignal()
 
-    def __init__(self, text: str, parent: Optional[QWidget] = None):
+    def __init__(self, text: str, parent: Optional[QWidget] = None, icon_name: Optional[str] = None):
         super().__init__(parent)
         self.setCursor(Qt.PointingHandCursor)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(4, 3, 4, 3)
+        lay.setContentsMargins(8, 3, 8, 3)
         lay.setSpacing(6)
+
+        def _line() -> QFrame:
+            ln = QFrame(self)
+            ln.setFrameShape(QFrame.HLine)
+            ln.setStyleSheet(f"background:{Colors.ASSISTANT_CARD_MUTED}; border:none; max-height:1px;")
+            ln.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            ln.setFixedHeight(1)
+            ln.setMaximumHeight(1)
+            return ln
+
         self._chevron = QLabel("▾", self)
         label = QLabel(text, self)
         label.setStyleSheet(
             f"{get_font_family_css()} color:{Colors.ASSISTANT_CARD_MUTED};"
             f" font-size:{scale_font_size(12)}px; font-weight:600; background:transparent;"
         )
+        self._icon_label = QLabel(self)
+        icon_pm = _qrc_icon_pixmap(icon_name, 14) if icon_name else None
+        if icon_pm is not None:
+            self._icon_label.setPixmap(icon_pm)
+        else:
+            self._icon_label.setText("•" if icon_name else "")
+        self._icon_label.setFixedSize(16, 16)
+        self._icon_label.setAlignment(Qt.AlignCenter)
+        self._icon_label.setStyleSheet("background:transparent;")
         self._extra = QLabel("", self)
         self._extra.setStyleSheet(
             f"{get_font_family_css()} color:{Colors.ASSISTANT_CARD_MUTED};"
             f" font-size:{scale_font_size(11)}px; background:transparent;"
         )
-        for w in (self._chevron, label, self._extra):
+        lay.addWidget(_line(), 1)  # 左侧细线（web ::before flex:1）
+        for w in (self._chevron, self._icon_label, label, self._extra):
             lay.addWidget(w)
-        lay.addStretch()
+        lay.addWidget(_line(), 1)  # 右侧细线（web ::after flex:1）
         self.setStyleSheet(
-            "_SeparatorRow { background:rgba(127,127,127,0.05); border-radius:6px; padding:1px 6px; }"
+            "_SeparatorRow { background:rgba(127,127,127,0.04); border-radius:6px; padding:1px 4px; }"
             "_SeparatorRow:hover { background:rgba(127,127,127,0.10); }"
         )
 
@@ -947,33 +1248,65 @@ class _SeparatorRow(QFrame):
         self._extra.setText(text)
 
 
+def _slot_items(blocks: List[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any]]]:
+    """块列表 → [(slot, block)]。slot = 类型#同类序号：跨 reconcile 稳定的位置标识。"""
+    counters: Dict[str, int] = {}
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    for b in blocks:
+        t = b["type"]
+        seq = counters.get(t, 0)
+        counters[t] = seq + 1
+        out.append((f"{t}#{seq}", b))
+    return out
+
+
 def reconcile_widgets(
     layout: QVBoxLayout,
     widgets: List[QWidget],
-    keys: List[str],
+    keys: List[Tuple[str, str]],
     items: List[Tuple[str, Dict[str, Any]]],
     builder,
     streaming: bool,
-) -> Tuple[List[QWidget], List[str]]:
-    """差量对齐：只重建分歧点之后的控件。返回新的 (widgets, keys)。"""
-    new_keys = [k for k, _ in items]
+) -> Tuple[List[QWidget], List[Tuple[str, str]]]:
+    """差量对齐（slot 双轨版）。返回新的 (widgets, keys)。
+
+    keys 元素 = (slot, 内容指纹)：
+    - slot（类型+序号）相同 → 复用控件；指纹变了走 widget.update_content 原位更新，
+      不重建——流式期间 think/tool 每 chunk 变内容，旧版按纯指纹比较会整卡重建，
+      导致展开态复位、折叠动画中断、视觉闪烁。
+    - slot 序列分歧 → 只重建分歧点之后的控件。
+    """
+    new_pairs = [(slot, _block_key(b), b) for slot, b in items]
     common = 0
-    while common < len(new_keys) and common < len(keys) and new_keys[common] == keys[common]:
+    while common < len(new_pairs) and common < len(keys):
+        old_slot, old_fp = keys[common]
+        new_slot, new_fp, b_new = new_pairs[common]
+        if old_slot != new_slot:
+            break  # 结构分歧：从此处开始重建
+        if old_fp != new_fp:
+            w = widgets[common] if common < len(widgets) else None
+            upd = getattr(w, "update_content", None)
+            if upd is None:
+                break  # 无原位更新能力：退回重建路径
+            try:
+                upd(b_new)
+            except Exception:
+                break
         common += 1
     while len(widgets) > common:
         w = widgets.pop()
         layout.removeWidget(w)
         w.deleteLater()
     del keys[common:]
-    for _, b in items[common:]:
+    for slot, fp, b in new_pairs[common:]:
         w = builder(b)
         widgets.append(w)
-        keys.append(_block_key(b))
+        keys.append((slot, fp))
         layout.addWidget(w)
     # 统一校正流式态标记：复用控件的内容指纹不变但闭合状态可能已翻转
     # （think/tool 在流式期间闭合且内容不再变化时，需原地恢复正常态）
     if streaming:
-        for i, (_, b) in enumerate(items[: len(widgets)]):
+        for i, (_, _, b) in enumerate(new_pairs[: len(widgets)]):
             w = widgets[i]
             if isinstance(w, ThinkCard):
                 w.apply_streaming(not b.get("completed", True))
@@ -983,20 +1316,24 @@ def reconcile_widgets(
 
 
 class ToolSectionWidget(QWidget):
-    """「⚙ 工具与思考」折叠分区：think/tool 卡统一收纳，分隔条可整体折叠。"""
+    """「工具与思考」折叠分区：think/tool 卡统一收纳，分隔条可整体折叠。
+
+    卡片区常驻 QScrollArea：非坞态无限高（不出滚动条），坞态限高 _DOCK_LOG_MAX
+    内滚并自动跟随最新条目——复刻 WebEngine 版 #tool-content max-height:110px。
+    """
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         # 默认折叠（对齐 WebEngine 版简洁模式：加载时工具区收起，点击分隔条展开）
         self._collapsed = True
         self._anim: Optional[QPropertyAnimation] = None
-        self._keys: List[str] = []
+        self._keys: List[Tuple[str, str]] = []
         self._widgets: List[QWidget] = []
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 2, 0, 2)
         root.setSpacing(2)
-        self._separator = _SeparatorRow("⚙ 工具与思考", self)
+        self._separator = _SeparatorRow("工具与思考", self, icon_name="工具")
         self._separator.clicked.connect(self.toggle)
         self._separator.set_collapsed(True)
         root.addWidget(self._separator)
@@ -1006,10 +1343,28 @@ class ToolSectionWidget(QWidget):
         cv = QVBoxLayout(self._content_wrap)
         cv.setContentsMargins(0, 0, 0, 0)
         cv.setSpacing(2)
+        # ── 卡片内滚容器：坞态限高的载体 ──
+        self._cards_scroll = QScrollArea(self)
+        self._cards_scroll.setWidgetResizable(True)
+        self._cards_scroll.setFocusPolicy(Qt.NoFocus)
+        self._cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._cards_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._cards_scroll.setStyleSheet(
+            "QScrollArea { background:transparent; border:none; }\n" + get_unified_scrollbar_style(6)
+        )
+        self._cards_host = QWidget()
+        self._cards_host.setStyleSheet("background:transparent;")
+        self._cards_scroll.setWidget(self._cards_host)
+        cv.addWidget(self._cards_scroll)
+        # cards_layout 挂到 scroll 内部 host 上
+        ch = QVBoxLayout(self._cards_host)
+        ch.setContentsMargins(0, 0, 4, 0)
+        ch.setSpacing(2)
         self._cards_layout = QVBoxLayout()
         self._cards_layout.setContentsMargins(0, 0, 0, 0)
         self._cards_layout.setSpacing(2)
-        cv.addLayout(self._cards_layout)
+        ch.addLayout(self._cards_layout)
+        ch.addStretch(1)
         # 任务列表面板固定在卡片之后（对齐 WebEngine 版 DOM：#tool-content → #todo-panel）
         self._panel_holder = QVBoxLayout()
         self._panel_holder.setContentsMargins(0, 0, 0, 0)
@@ -1021,7 +1376,19 @@ class ToolSectionWidget(QWidget):
         self._widgets, self._keys = reconcile_widgets(
             self._cards_layout, self._widgets, self._keys, items, self._build, streaming
         )
+        total = len(items)
+        self._separator.set_extra(f"· {total} 项" if total else "")
+        if not self._collapsed and not self._content_wrap.isVisible():
+            self._apply_expand_state()
         self.setVisible(bool(items))
+        # 坞态实时日志：新条目到达自动滚到底（web 版 _scrollToolContentToBottom 语义）
+        if streaming:
+            QTimer.singleShot(0, self._scroll_cards_to_bottom)
+
+    def _scroll_cards_to_bottom(self) -> None:
+        sb = self._cards_scroll.verticalScrollBar()
+        if sb is not None:
+            sb.setValue(sb.maximum())
 
     @staticmethod
     def _build(b: Dict[str, Any]) -> QWidget:
@@ -1032,24 +1399,68 @@ class ToolSectionWidget(QWidget):
     def attach_todo_panel(self, panel: QWidget) -> None:
         self._panel_holder.addWidget(panel)
 
+    # ── 坞态接口（对齐 WebEngine 版 body.streaming-dock） ──
+    def enter_dock(self) -> None:
+        """进入坞态：直接展开（无动画）+ 卡片区限高内滚。"""
+        self._cards_scroll.setMaximumHeight(_DOCK_LOG_MAX)
+        if self._collapsed:
+            self._set_collapsed_instant(False)
+
+    def exit_dock(self) -> None:
+        """退出坞态：解除限高 + 折叠（对齐 web finish 后 auto_collapse_tool_section）。"""
+        self._cards_scroll.setMaximumHeight(_QWIDGETSIZE_MAX)
+        if not self._collapsed:
+            self._set_collapsed_instant(True)
+
+    def _set_collapsed_instant(self, collapsed: bool) -> None:
+        """无动画切换折叠态（坞态进出用，避免与 dock 布局搬移叠加抖动）。"""
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim = None
+        self._collapsed = collapsed
+        self._separator.set_collapsed(collapsed)
+        self._content_wrap.setMaximumHeight(0 if collapsed else _QWIDGETSIZE_MAX)
+        self._apply_expand_state()
+
+    def _apply_expand_state(self) -> None:
+        """按折叠状态显隐内容区（收起时隐藏，展开时显示）。"""
+        self._content_wrap.setVisible(not self._collapsed)
+
     def toggle(self) -> None:
-        self._collapsed = not self._collapsed
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim = None
+        if not self._collapsed:
+            start = max(self._content_wrap.height(), 1)
+            self._content_wrap.setMaximumHeight(start)
+            target = 0
+            self._collapsed = True
+        else:
+            self._content_wrap.setVisible(True)
+            target = max(_measure_expanded_height(self._content_wrap), 1)
+            start = 0
+            self._collapsed = False
         self._separator.set_collapsed(self._collapsed)
         self._anim = QPropertyAnimation(self._content_wrap, b"maximumHeight", self)
         self._anim.setDuration(180)
-        self._anim.setStartValue(self._content_wrap.maximumHeight())
-        target = 0 if self._collapsed else max(self._content_wrap.sizeHint().height(), 1)
+        self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_done)
         self._anim.start()
 
     def _on_done(self) -> None:
         if not self._collapsed:
-            self._content_wrap.setMaximumHeight(16777215)
+            self._content_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
+        else:
+            self._content_wrap.setVisible(False)
 
 
 class TodoPanel(QWidget):
-    """任务列表面板：📋 分隔条 + 进度 + 状态条目（对齐 WebEngine 版 .todo-item 视觉）。"""
+    """任务列表面板：分隔条(todo.svg 图标) + 进度 + 状态条目（对齐 WebEngine 版 .todo-item 视觉）。
+
+    列表区常驻 QScrollArea：坞态固定高 _DOCK_TODO_H 内滚（web #todo-content
+    height:96px 语义，切断工具区流式抖动向 todo 传导），非坞态无限高。
+    """
 
     _PRI_COLORS = {"high": "#ef4444", "medium": "#f59e0b", "low": "#3b82f6"}
 
@@ -1058,10 +1469,20 @@ class TodoPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 2, 0, 2)
         root.setSpacing(2)
-        self._separator = _SeparatorRow("📋 任务列表", self)
+        self._separator = _SeparatorRow("任务列表", self, icon_name="todo")
         self._separator.clicked.connect(self._toggle)
         root.addWidget(self._separator)
-        self._list_wrap = QFrame(self)
+        self._list_scroll = QScrollArea(self)
+        self._list_scroll.setWidgetResizable(True)
+        self._list_scroll.setFocusPolicy(Qt.NoFocus)
+        self._list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._list_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._list_scroll.setStyleSheet(
+            "QScrollArea { background:transparent; border:none; }\n" + get_unified_scrollbar_style(6)
+        )
+        self._list_wrap = QWidget()
+        self._list_wrap.setStyleSheet("background:transparent;")
+        self._list_scroll.setWidget(self._list_wrap)
         lw = QVBoxLayout(self._list_wrap)
         lw.setContentsMargins(6, 2, 6, 2)
         lw.setSpacing(1)
@@ -1069,9 +1490,19 @@ class TodoPanel(QWidget):
         self._list_layout.setContentsMargins(0, 0, 0, 0)
         self._list_layout.setSpacing(1)
         lw.addLayout(self._list_layout)
-        root.addWidget(self._list_wrap)
+        lw.addStretch(1)
+        root.addWidget(self._list_scroll)
         self._collapsed = False
         self.hide()
+
+    def set_dock(self, active: bool) -> None:
+        """坞态任务列表固定高（对齐 web #todo-content height:96px）。"""
+        if active:
+            self._list_scroll.setFixedHeight(_DOCK_TODO_H)
+            self._list_scroll.setMaximumHeight(_DOCK_TODO_H)
+        else:
+            self._list_scroll.setMinimumHeight(0)
+            self._list_scroll.setMaximumHeight(_QWIDGETSIZE_MAX)
 
     def update_todos(self, todos: List[Dict[str, Any]]) -> None:
         todos = list(todos or [])
@@ -1110,7 +1541,7 @@ class TodoPanel(QWidget):
     def _toggle(self) -> None:
         self._collapsed = not self._collapsed
         self._separator.set_collapsed(self._collapsed)
-        self._list_wrap.setVisible(not self._collapsed)
+        self._list_scroll.setVisible(not self._collapsed)
 
 
 # ── 主渲染器 ──────────────────────────────────────────────────────
@@ -1140,11 +1571,13 @@ class MarkdownBlockViewer(QWidget):
         self._light = light
         self._md = ""
         self._streaming = True
-        self._keys: List[str] = []
+        self._keys: List[Tuple[str, str]] = []
         self._widgets: List[QWidget] = []
+        # ── 坞态（Streaming Dock）状态 ──
+        self._dock_active = False
         # ── CodeWebViewer 兼容属性（MessageCard 动态读写） ──
         self._is_js_ready = True  # _push_todo_list 判断：Qt 渲染器始终"就绪"
-        self._tool_compact_mode = True  # 简洁模式：工具卡默认折叠
+        self._tool_compact_mode = True  # 简洁模式：工具卡默认折叠（坞态仅此模式启用）
         self._needs_full_render = True
         self._stable_html = ""
         self._stable_md_len = 0
@@ -1163,7 +1596,14 @@ class MarkdownBlockViewer(QWidget):
         self._tool_section = ToolSectionWidget(self)
         self._todo_panel = TodoPanel(self)
         self._tool_section.attach_todo_panel(self._todo_panel)
+        # 正文块统一挂独立容器：坞态搬移只动 tool_section，body 追加顺序不受影响
+        self._body_box = QWidget()
+        self._body_box.setStyleSheet("background:transparent;")
+        self._body_lay = QVBoxLayout(self._body_box)
+        self._body_lay.setContentsMargins(0, 0, 0, 0)
+        self._body_lay.setSpacing(2)
         self._vbox.addWidget(self._tool_section)
+        self._vbox.addWidget(self._body_box)
 
     # ── 公开接口 ──
     def set_markdown(self, text: str) -> None:
@@ -1177,7 +1617,11 @@ class MarkdownBlockViewer(QWidget):
         self._reconcile()
 
     def finish_streaming(self, keep_dock: bool = False) -> None:
+        """流式结束。keep_dock=True 时保留坞态（S1：文本先于工具结果结束），
+        等最后工具完成由 MessageCard 回调 _sync_streaming_dock(False) 归位。"""
         self._streaming = False
+        if not keep_dock and self._dock_active:
+            self._sync_streaming_dock(False)
         self._reconcile(force=True)
 
     def get_plain_text(self) -> str:
@@ -1216,7 +1660,29 @@ class MarkdownBlockViewer(QWidget):
         """no-op：Qt 控件字体由 QSS 统一管理（refresh_theme 时自动生效）。"""
 
     def _sync_streaming_dock(self, active: bool) -> None:
-        """no-op：工具区「坞态沉底」是 WebEngine DOM 分区状态机，Qt 版由原生 layout 天然排布。"""
+        """流式活动坞（对齐 WebEngine 版 _setStreamingDock）：
+
+        简洁模式 + 流式期间：工具/思考区从顶部沉底、卡片区限高内滚、任务列表
+        固定高 → 卡片底部一块固定高度的实时日志；流式结束归位顶部并折叠。
+        纯 layout 搬移（同 widget remove+add），无控件重建，无闪烁。
+        正文高度交给外层聊天滚动链路（流式自动滚底跟随，视口底部即日志区），
+        不做 viewer 级限高——QScrollArea 尺寸协商会撑爆卡片高度（实测教训）。
+        """
+        # 仅简洁模式启用坞态；欢迎卡片（light 骨架语义）不进坞态
+        on = bool(active) and bool(self._tool_compact_mode) and not self._light
+        if on == self._dock_active:
+            return
+        self._dock_active = on
+        self._vbox.removeWidget(self._tool_section)
+        if on:
+            self._vbox.addWidget(self._tool_section)  # 沉底
+            self._tool_section.enter_dock()
+            self._todo_panel.set_dock(True)
+        else:
+            self._vbox.insertWidget(0, self._tool_section)  # 归位顶部
+            self._tool_section.exit_dock()
+            self._todo_panel.set_dock(False)
+        QTimer.singleShot(0, lambda: self.contentHeightChanged.emit(self.height()))
 
     def _copy_to_clipboard(self, copy_selection: bool = False) -> None:
         """兼容导出路径：复制全文 markdown（Qt 渲染器无选区概念，忽略 copy_selection）。"""
@@ -1281,16 +1747,14 @@ class MarkdownBlockViewer(QWidget):
         blocks = parse_blocks(self._md)
         # 分区规则对齐 WebEngine 版：think + 非编辑工具进「工具与思考」折叠区；
         # 编辑类工具结果始终展示在正文之中（按文档位置）
-        side_items = [
-            (_block_key(b), b) for b in blocks if b["type"] == "think" or (b["type"] == "tool" and not b.get("is_edit"))
-        ]
-        body_items = [
-            (_block_key(b), b)
-            for b in blocks
-            if b["type"] in ("html", "code") or (b["type"] == "tool" and b.get("is_edit"))
-        ]
+        side_items = _slot_items(
+            [b for b in blocks if b["type"] == "think" or (b["type"] == "tool" and not b.get("is_edit"))]
+        )
+        body_items = _slot_items(
+            [b for b in blocks if b["type"] in ("html", "code") or (b["type"] == "tool" and b.get("is_edit"))]
+        )
         self._widgets, self._keys = reconcile_widgets(
-            self._vbox, self._widgets, self._keys, body_items, self._build_block_widget, self._streaming
+            self._body_lay, self._widgets, self._keys, body_items, self._build_block_widget, self._streaming
         )
         self._tool_section.reconcile(side_items, self._streaming)
 
