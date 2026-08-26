@@ -171,6 +171,80 @@ def test_event_filter_mouse_press_hides_tooltip(qtbot):
     m_timer2.stop.assert_called()
 
 
+def test_guard_hides_when_cursor_leaves_after_show(qtbot):
+    """残留修复（R1）回归：tooltip 显示后若光标离开目标（滚动/漏发 Leave），
+    看护轮询应在 ~120ms 内强制收起，不残留。
+    """
+
+    from unittest.mock import patch as _patch
+
+    from PyQt5.QtCore import QPoint
+    from PyQt5.QtWidgets import QApplication, QLabel
+
+    from app.widgets.simple_hover_tooltip import _filters
+
+    # 用一个真实窗口顶替 activeWindow，避免无头环境下 activeWindow() 为 None
+    # 导致看护提前收起、干扰“光标移出”这一断言语义。
+    label = QLabel("target")
+    qtbot.addWidget(label)
+    label.show()
+    label.resize(100, 40)
+    label.setToolTip("测试提示")
+    f = _filters.get(id(label))
+    assert f is not None, "setToolTip 应自动安装 _HoverTooltipFilter"
+
+    inside = label.mapToGlobal(QPoint(10, 10))
+    outside = label.mapToGlobal(QPoint(label.width() + 500, label.height() + 500))
+    with (
+        _patch("app.widgets.simple_hover_tooltip.QCursor.pos", return_value=inside),
+        _patch.object(QApplication, "activeWindow", return_value=label),
+    ):
+        f._on_timeout()
+    assert f._tooltip is not None and f._tooltip.isVisible(), "光标在内应已显示"
+
+    # 光标移到目标外部（模拟滚动/漏发 Leave），看护应强制收起
+    with (
+        _patch("app.widgets.simple_hover_tooltip.QCursor.pos", return_value=outside),
+        _patch.object(QApplication, "activeWindow", return_value=label),
+    ):
+        qtbot.wait(300)
+    assert not f._tooltip.isVisible(), "看护应在光标移出后强制收起 tooltip（不残留）"
+
+
+def test_guard_hides_on_app_deactivate(qtbot):
+    """残留修复（R1）回归：应用失焦（activeWindow=None，如 alt-tab）时
+    tooltip 应被看护收起，不飘在其他窗口上。
+    """
+
+    from unittest.mock import patch as _patch
+
+    from PyQt5.QtCore import QPoint
+    from PyQt5.QtWidgets import QApplication, QLabel
+
+    from app.widgets.simple_hover_tooltip import _filters
+
+    label = QLabel("target")
+    qtbot.addWidget(label)
+    label.show()
+    label.resize(100, 40)
+    label.setToolTip("测试提示")
+    f = _filters.get(id(label))
+    assert f is not None, "setToolTip 应自动安装 _HoverTooltipFilter"
+
+    inside = label.mapToGlobal(QPoint(10, 10))
+    with (
+        _patch("app.widgets.simple_hover_tooltip.QCursor.pos", return_value=inside),
+        _patch.object(QApplication, "activeWindow", return_value=label),
+    ):
+        f._on_timeout()
+    assert f._tooltip.isVisible(), "应已显示"
+
+    # 应用失焦 → 看护应强制收起
+    with _patch.object(QApplication, "activeWindow", return_value=None):
+        qtbot.wait(300)
+    assert not f._tooltip.isVisible(), "应用失焦时 tooltip 应被收起（不残留）"
+
+
 def test_event_filter_mouse_press_does_not_block_click(qtbot):
     """B3 回归：MouseButtonPress 仅收起 tooltip，不拦截鼠标事件
 

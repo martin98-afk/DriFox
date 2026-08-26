@@ -330,6 +330,14 @@ class _HoverTooltipFilter(QObject):
         self._timer.setSingleShot(True)
         self._timer.setInterval(delay_ms)
         self._timer.timeout.connect(self._on_timeout)
+        # 🛡️ 残留修复（R1）：显示后启动看护轮询，兜底各类漏发的隐藏事件
+        # （窗口失焦/alt-tab、列表滚动导致控件移出光标、合成器下漏发的
+        #  Leave 等），最长 ~120ms 内强制收起，杜绝“飘在屏幕上不消失”。
+        #  仅在该 filter 自己的 tooltip 显示时运行，开销极小。
+        self._guard = QTimer(self)
+        self._guard.setSingleShot(False)
+        self._guard.setInterval(120)
+        self._guard.timeout.connect(self._guard_check)
         parent.installEventFilter(self)
         # 目标销毁时自动清理 tooltip
         # 改用 self.destroyed（filter 自身析构时发出，连接仍有效）而非 parent.destroyed
@@ -388,8 +396,31 @@ class _HoverTooltipFilter(QObject):
         tt = self._get_tooltip()
         tt.set_text(self._text)
         tt.show_above(p)
+        # 启动看护轮询（显示期间持续校验是否仍需显示）
+        self._guard.start()
+
+    def _guard_check(self):
+        """显示后兜底看护：任何漏发的隐藏事件（失焦/滚动/几何变化/漏发
+        Leave）都在此强制收起 tooltip，避免残留在屏幕上。"""
+        tt = self._tooltip
+        if tt is None or not tt.isVisible():
+            self._guard.stop()
+            return
+        p = self._parent()
+        # 目标已销毁/不可见，或应用已失焦（alt-tab 等）→ 立即收起
+        if p is None or not p.isVisible() or QApplication.activeWindow() is None:
+            self._hide()
+            return
+        # 光标已不在目标控件内（滚动/遮挡/几何变化导致）→ 收起
+        local = p.mapFromGlobal(QCursor.pos())
+        if not p.rect().contains(local):
+            self._hide()
 
     def _hide(self):
+        try:
+            self._guard.stop()
+        except (RuntimeError, AttributeError):
+            pass
         if self._tooltip:
             try:
                 self._tooltip.hide_tip()
