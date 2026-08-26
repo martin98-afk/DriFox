@@ -22,7 +22,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QPropertyAnimation, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QTextOption
+from PyQt5.QtGui import QPixmap, QTextOption
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -677,6 +677,48 @@ def _truncate_val(v: Any, max_len: int = 80) -> str:
     return s[:max_len] + "..." if len(s) > max_len else s
 
 
+def _tool_icon_pixmap(tool_name: str, args_raw: str) -> Optional["QPixmap"]:
+    """加载工具自定义图标（对齐 WebEngine 版 _get_tool_icon_name + qrc 机制）。
+
+    返回 16px QPixmap；加载失败返回 None（调用方回退 ⚙ emoji）。
+    """
+    try:
+        from app.tools.registry import DEFAULT_FALLBACK_ICON
+        from app.widgets.render_helpers import _get_tool_icon_name, _qrc_icon_exists, get_tool_qrc_prefix
+
+        args: Dict[str, Any] = {}
+        try:
+            parsed = json.loads(args_raw or "{}")
+            if isinstance(parsed, dict):
+                args = parsed
+        except Exception:
+            pass
+        icon_name = _get_tool_icon_name(tool_name, args)
+        qrc_prefix = get_tool_qrc_prefix()
+        if not _qrc_icon_exists(qrc_prefix, icon_name):
+            icon_name = DEFAULT_FALLBACK_ICON
+        qt_path = qrc_prefix.replace("qrc:", "", 1)  # qrc:/icons_light → :/icons_light
+        pm = QPixmap(f"{qt_path}/{icon_name}.svg")
+        if pm.isNull():
+            return None
+        return pm.scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    except Exception:
+        return None
+
+
+def _format_args_preview_safe(args_raw: str, max_len: int = 80) -> str:
+    """参数单行预览 `k=v; k2=v2`（复用 render_helpers._format_args_preview）。"""
+    try:
+        from app.widgets.render_helpers import _format_args_preview
+
+        args = json.loads(args_raw or "{}")
+        if not isinstance(args, dict):
+            return ""
+        return _format_args_preview(args, max_len)
+    except Exception:
+        return ""
+
+
 class ToolCardWidget(QFrame):
     """工具调用卡：头部(名称+状态徽章+chevron)，展开显示 args/result。"""
 
@@ -701,12 +743,27 @@ class ToolCardWidget(QFrame):
         )
         hl = QHBoxLayout(header)
         hl.setContentsMargins(2, 0, 6, 0)
-        gear = QLabel("⚙", header)
+        # 工具自定义图标（registry/qrc 驱动，对齐 WebEngine 版），失败回退 ⚙
+        icon_pm = _tool_icon_pixmap(block.get("name") or "", block.get("args_raw") or "")
+        gear = QLabel(header)
+        if icon_pm is not None:
+            gear.setPixmap(icon_pm)
+        else:
+            gear.setText("⚙")
+        gear.setFixedSize(18, 18)
+        gear.setScaledContents(True)
+        gear.setAlignment(Qt.AlignCenter)
         self._name_label = QLabel(block.get("cn_name") or block.get("name") or "工具调用", header)
         # 标题色对齐 WebEngine 版 title_color=#FFA500
         self._name_label.setStyleSheet(
             f"{get_font_family_css()} color:{_LANG_COLOR};"
             f" font-size:{_CODE_FONT_SIZE}px; font-weight:600; background:transparent;"
+        )
+        # 参数单行预览（对齐 WebEngine 版 _format_args_preview：k=v; k2=v2 截断）
+        self._preview_label = QLabel(_format_args_preview_safe(block.get("args_raw") or ""), header)
+        self._preview_label.setStyleSheet(
+            f"{get_font_family_css()} color:{Colors.ASSISTANT_CARD_MUTED};"
+            f" font-size:{scale_font_size(11)}px; background:transparent;"
         )
         self._status_label = QLabel("", header)
         self._status_label.setStyleSheet(f"font-size:{scale_font_size(11)}px; background:transparent;")
@@ -720,10 +777,12 @@ class ToolCardWidget(QFrame):
         self._chevron.setStyleSheet(
             f"color:{Colors.ASSISTANT_CARD_MUTED}; font-size:{scale_font_size(12)}px; background:transparent;"
         )
-        for w in (gear, self._name_label, self._status_label):
+        for w in (gear, self._name_label, self._preview_label, self._status_label):
             hl.addWidget(w)
         self._update_diff_stats()
         hl.addStretch()
+        # diff 统计靠右（stretch 之后），避免与长工具名挤压重叠
+        hl.addWidget(self._diff_stats_label)
         hl.addWidget(self._chevron)
         header.clicked.connect(self.toggle)
         root.addWidget(header)
@@ -928,7 +987,8 @@ class ToolSectionWidget(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self._collapsed = False
+        # 默认折叠（对齐 WebEngine 版简洁模式：加载时工具区收起，点击分隔条展开）
+        self._collapsed = True
         self._anim: Optional[QPropertyAnimation] = None
         self._keys: List[str] = []
         self._widgets: List[QWidget] = []
@@ -938,9 +998,11 @@ class ToolSectionWidget(QWidget):
         root.setSpacing(2)
         self._separator = _SeparatorRow("⚙ 工具与思考", self)
         self._separator.clicked.connect(self.toggle)
+        self._separator.set_collapsed(True)
         root.addWidget(self._separator)
 
         self._content_wrap = QFrame(self)
+        self._content_wrap.setMaximumHeight(0)  # 初始收起：内容高度为 0，展开走 toggle 动画
         cv = QVBoxLayout(self._content_wrap)
         cv.setContentsMargins(0, 0, 0, 0)
         cv.setSpacing(2)
