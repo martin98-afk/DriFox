@@ -1354,7 +1354,14 @@ class HookManager:
 
         # 按归属过滤删除本 skill 的 rule（不依赖索引，索引错位也不误删）
         empty_events: List[str] = []
+        stale_config_files: set = set()
         for event_name, rules in self._hooks.items():
+            for r in rules:
+                if getattr(r, "skill_name", "") == skill_name:
+                    for h in r.hooks:
+                        cf = getattr(h, "config_file", "") or ""
+                        if cf:
+                            stale_config_files.add(cf)
             kept = [r for r in rules if getattr(r, "skill_name", "") != skill_name]
             if kept:
                 self._hooks[event_name] = kept
@@ -1363,6 +1370,23 @@ class HookManager:
         # 删除空事件（在遍历结束后统一删，避免迭代中修改字典）
         for event_name in empty_events:
             del self._hooks[event_name]
+
+        # 🛡️ 清理本 skill 的 Python hook 函数缓存：_relative_func_cache 按
+        # (config_file, function) 缓存 exec_module 后的函数对象，插件热重载
+        # （unregister → register）若不清除，执行时命中的仍是旧代码的函数——
+        # 表现为「hook 重载成功但行为不变」（模块级状态/逻辑停留旧版本）。
+        if stale_config_files:
+            stale_keys = [
+                k for k in HookWorker._relative_func_cache
+                if any(k.startswith(cf + "::") for cf in stale_config_files)
+            ]
+            for k in stale_keys:
+                HookWorker._relative_func_cache.pop(k, None)
+            if stale_keys:
+                logger.debug(
+                    f"[HookManager] Cleared {len(stale_keys)} relative func cache "
+                    f"entries for skill {skill_name}"
+                )
 
         # 全量重建索引（pop 后其他 skill 的索引位移由重建统一修正）
         del self._skill_to_hooks[skill_name]
