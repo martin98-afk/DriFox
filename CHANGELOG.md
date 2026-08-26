@@ -163,6 +163,15 @@ All notable changes to this project will be documented in this file.
 - **插件热重载 Python hook 缓存** (`app/core/hook_manager.py`): 插件热重载时清除 Python hook 函数缓存，避免旧 hook 残留导致重复触发或错误响应。
 - **插件 watcher 新装插件识别** (`app/plugins/contracts/plugin_config.py` + `app/widgets/cards/settings/plugin_config_card.py`): watcher 识别新装插件——未注册 manifest 在监控根下时交给 rescan 注入，修复新装插件立即可见但 manifest 未在监控列表内的情况。
 
+
+### 🔄 Hotfix 重新发布 (Re-release · 2026-08-27 · Round 5)
+
+基于 `v0.5.4` Round 4 的增量变更 | 提交数：1 · 文件变更：1 · +4/-3 | 贡献者：dingma
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **`ToolControlCard` 描述标签对齐** (`app/widgets/cards/settings/tool_control_card.py`): 移除冗余 `QSizePolicy` 设置，将描述标签的 stretch 改为 1，让 `_ElidedLabel` 吃掉 source/name 之后的全部剩余水平空间，把开关按钮推到行尾靠右对齐（原 SizePolicy 设置失效导致开关位置不固定）。
+
 ## [v0.5.3] - 2026-08-22
 
 自上一版本以来的变更 | 提交数：175 · 文件变更：303 · +28058/-15698 | 贡献者：dingma, mading, drifox-bot, builder
