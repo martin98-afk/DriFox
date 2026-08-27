@@ -4783,6 +4783,22 @@ class OpenAIChatToolWindow(ToolWindow):
         # keep_current_active：不切新成员，恢复发起前的原激活 tab（管理入口
         # 批量建成员不打断用户焦点）。
         if _tmw is not None and keep_current_active:
+            # 静默预热：新窗口从未被激活时，QStackedWidget 不做首次布局/渲染，
+            # 后续团队邮件（_on_send_clicked）追加的消息卡片不显示（需切到该
+            # 成员一次才补上）。这里在冻结重绘下逐窗 setCurrentWidget 一帧完成
+            # 首次布局，再恢复原 tab——用户无感，消息列表即时可显示。
+            try:
+                _stack = _tmw._content_area
+                _stack.setUpdatesEnabled(False)
+                for _nw in new_windows:
+                    _stack.setCurrentWidget(_nw)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[_spawn_team_members] 静默预热失败: {e}")
+            finally:
+                try:
+                    _stack.setUpdatesEnabled(True)
+                except Exception:  # noqa: BLE001
+                    pass
             if _origin_win is not None and not getattr(_origin_win, "_is_destroyed", False):
                 try:
                     _origin_idx = _tmw._window_to_index.get(id(_origin_win), -1)
