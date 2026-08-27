@@ -2419,6 +2419,16 @@ _STREAMING_DOCK_JS = """
 # 跟随态（标志 false）下工具/思考更新仍会把正文拉底——"工具与思考更新时
 # 正文滚到固定位置"。语义修正：正文容器只在**正文自身更新**时置底；
 # 工具/思考路径传 bodyOnly=true 仅滚 body（非坞态跟随），不碰正文容器。
+# 🐛 修复（wheel 标记意图）：_userScrolledUp 原由 scroll 事件（异步派发）
+# 的 atBottom 推断置位，两条失效链：
+# 1. 竞争窗口——用户滚轮后 scroll 事件尚未派发（标志仍 false），流式渲染
+#    JS（_autoScrollStreamingBody 无参调用）抢先执行 → 无条件拉底覆盖用户
+#    位置；后续 updateContent 保存被污染的 _cpPrevTop → 每次恢复到同一错误
+#    值 → 表现为"正文更新时滚轮跳到固定偏上位置"。
+# 2. 钳制误标——innerHTML 重建/高度回调使内容变短 → scrollTop 被浏览器钳制
+#    → 触发 scroll 事件 → atBottom 误判 → userUp 误置 true → 停止跟随漂移。
+# 改用 wheel 事件（同步派发、仅用户滚轮/触控板触发，无程序来源）标记上滚
+# 意图；scroll 事件只做"滚回底部恢复跟随"，不再置位。
 _CONTENT_AUTOSCROLL_JS = """
                 function _autoScrollStreamingBody(bodyOnly) {
                     // bodyOnly=true：调用方是工具/思考更新路径（流式块注入/
@@ -2437,17 +2447,23 @@ _CONTENT_AUTOSCROLL_JS = """
                 }
                 // 正文容器滚动跟踪：用户主动上滚时停止自动置底跟随，
                 // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为。
-                // 关键：DOM 操作期间（updateContent 重写 innerHTML /
-                // reorganizeContent 搬移 think 块）触发的程序性 scroll 事件必须
-                // 忽略——与 body 监听的 _suppressScrollEvent 抑制对称，否则会被
-                // 误判为"用户上滚正文"，_userScrolledUp 置 true → _autoScrollStreamingBody
-                // 跳过正文置底 → 正文卡在顶部（置顶 bug）。
+                // wheel/键盘**同步**标记上滚意图（scroll 事件异步派发，与流式
+                // 渲染 JS 存在竞争窗口，不得作为置位依据）；scroll 事件仅恢复跟随。
+                document.getElementById('content-placeholder')?.addEventListener('wheel', function(e) {
+                    // 上滚（deltaY<0）：同步置位，抢占任何在途渲染 JS 的拉底
+                    if (e.deltaY < 0) this._userScrolledUp = true;
+                }, {passive: true});
                 document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
                     var cp = this;
+                    // DOM 操作期间（updateContent 重写 innerHTML / reorganizeContent
+                    // 搬移 think 块）触发的程序性 scroll 事件必须忽略——与 body 监听的
+                    // _suppressScrollEvent 抑制对称。
                     if (window._suppressScrollEvent) return;
                     if (cp._progScroll) { cp._progScroll = false; return; }
+                    // 只做恢复跟随：滚回底部附近清标志。**不置位**——内容高度
+                    // 变化导致的 scrollTop 钳制也会触发 scroll（非用户行为），
+                    // 置位会误停跟随导致位置漂移。
                     var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
-                    cp._userScrolledUp = !atBottom;
                     if (atBottom) cp._userScrolledUp = false;
                 });
 """

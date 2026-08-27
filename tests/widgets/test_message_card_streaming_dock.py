@@ -91,6 +91,32 @@ def test_content_autoscroll_respects_user_scroll():
     assert "if (cp._progScroll) { cp._progScroll = false; return; }" in js
 
 
+def test_content_autoscroll_marks_user_scroll_via_wheel():
+    """回归：用户上滚意图必须由 wheel 事件同步标记，不得依赖 scroll 事件推断。
+
+    根因（流式滚动位置被拉到固定偏上位置）：_userScrolledUp 原由 scroll 事件
+    （异步派发）的 atBottom 推断置位。两条失效链：
+    1. 竞争窗口：用户滚轮后 scroll 事件尚未派发（标志仍 false），流式渲染
+       JS（_autoScrollStreamingBody 无参调用）抢先执行 → 无条件拉底覆盖
+       用户位置；后续 updateContent 保存被污染的 _cpPrevTop → 每次恢复到
+       同一错误值 → 表现为"正文更新时滚轮跳到固定偏上位置"。
+    2. 钳制误标：innerHTML 重建/高度回调使内容变短 → scrollTop 被浏览器
+       钳制 → 触发 scroll 事件 → atBottom 误判 false → userUp 误置 true
+       → 停止跟随、位置自行漂移。
+    wheel 事件同步派发且仅由用户触发（滚轮/触控板），无程序来源，用它标记
+    上滚意图可同时消除两条失效链。
+    """
+    js = mc._CONTENT_AUTOSCROLL_JS
+    # wheel 上滚同步置位（deltaY < 0）
+    assert "addEventListener('wheel'" in js, "必须有 wheel 监听同步标记用户上滚"
+    assert "deltaY < 0" in js, "wheel 上滚方向判定（deltaY<0）必须存在"
+    assert "this._userScrolledUp = true" in js, "wheel 上滚必须同步置 _userScrolledUp"
+    # scroll 监听只做恢复跟随（atBottom 清标志），不得置位（防钳制 scroll 误标）
+    assert "_userScrolledUp = !atBottom" not in js, "scroll 事件不得置位 _userScrolledUp（异步派发有竞争窗口）"
+    # wheel 监听必须是 passive（不阻断浏览器原生滚动）
+    assert "{passive: true}" in js, "wheel 监听必须 passive"
+
+
 def test_skeleton_template_includes_content_autoscroll():
     """骨架模板必须接入 _CONTENT_AUTOSCROLL_JS（防止定义了没接进去）。"""
     src = inspect.getsource(CodeWebViewer._load_skeleton)
@@ -316,8 +342,7 @@ def test_s1_dock_returns_after_last_tool_result():
     QApplication.processEvents()
     QApplication.processEvents()
     assert any(call is False for call in card.viewer.dock_calls), (
-        f"最后一个工具完成后 dock 应归位（_sync_streaming_dock(False)），"
-        f"实际 dock_calls={card.viewer.dock_calls}"
+        f"最后一个工具完成后 dock 应归位（_sync_streaming_dock(False)），实际 dock_calls={card.viewer.dock_calls}"
     )
 
 
@@ -355,9 +380,7 @@ def test_plain_text_viewer_finish_streaming_accepts_keep_dock():
     from app.widgets.message_card import PlainTextViewer
 
     sig = signature(PlainTextViewer.finish_streaming)
-    assert "keep_dock" in sig.parameters, (
-        f"PlainTextViewer.finish_streaming 必须声明 keep_dock 参数，实际签名 {sig}"
-    )
+    assert "keep_dock" in sig.parameters, f"PlainTextViewer.finish_streaming 必须声明 keep_dock 参数，实际签名 {sig}"
 
 
 # ──────────────────────────────────────────────
@@ -390,9 +413,7 @@ def test_tool_paths_do_not_scroll_content():
         assert "_autoScrollStreamingBody(true)" in src, (
             f"{fn.__name__} 必须传 bodyOnly=true（工具/思考更新不碰正文滚动）"
         )
-        assert "_autoScrollStreamingBody()" not in src, (
-            f"{fn.__name__} 不得存在无参调用（会置底正文容器）"
-        )
+        assert "_autoScrollStreamingBody()" not in src, f"{fn.__name__} 不得存在无参调用（会置底正文容器）"
 
 
 def test_update_content_preserves_content_scroll():
