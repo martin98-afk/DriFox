@@ -433,8 +433,30 @@ class BasePlatformAdapter(ABC):
                 await self.handle_message(pending)
 
     def _get_session_key(self, event: MessageEvent) -> str:
-        """获取会话键"""
-        return f"{event.platform.value}:{event.chat_id}"
+        """获取会话键（platform 兼容 str 直通：第三方平台 id 不经 Platform 枚举）"""
+        p = getattr(event.platform, "value", event.platform)
+        return f"{p}:{event.chat_id}"
+
+    # ── 可选流式回复钩子（平台支持打字机式输出时覆写） ──
+
+    def supports_streaming(self, chat_id: str) -> bool:
+        """该会话是否支持流式回复（默认不支持，适配器按需覆写）"""
+        return False
+
+    async def start_stream(self, chat_id: str) -> Optional[str]:
+        """开始流式回复，返回流句柄 stream_key；不支持返回 None。
+
+        默认实现返回 None；支持流式的适配器覆写（应保持幂等、不发网络请求）。
+        """
+        return None
+
+    async def update_stream(self, stream_key: str, snapshot: str) -> bool:
+        """推送全量内容快照（打字机增量更新）。返回是否继续接受后续更新。"""
+        return False
+
+    async def finish_stream(self, stream_key: str, final: str) -> SendResult:
+        """结束流式回复，发送最终全量内容。"""
+        return SendResult(success=False, error="streaming not supported", retryable=False)
 
     def truncate_message(self, content: str, max_length: Optional[int] = None) -> List[str]:
         """

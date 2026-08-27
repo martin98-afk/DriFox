@@ -2,6 +2,9 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+### 🐛 问题修复 (Bug Fixes)
+- **流式正文上滚位置保持** (`app/widgets/message_card.py`): 修复流式输出时用户上滚查看历史内容，正文一更新滚轮就被拉到固定偏上位置。根因是 `_userScrolledUp` 由 scroll 事件（异步派发）推断置位：① 竞争窗口——滚轮事件尚未派发时流式渲染 JS 抢先拉底覆盖用户位置，后续全量渲染保存被污染的 scrollTop 反复恢复到同一错误值；② 内容变短时 scrollTop 被浏览器钳制触发 scroll 误标上滚。修复改用 wheel 事件（同步派发、仅用户触发）置位上滚意图，scroll 事件只做「滚回底部附近恢复跟随」（补 `21a6ac15`）。
+- **macOS 窗口最小化按钮无响应** (`app/widgets/tab_manager_window.py` + `app/widgets/cards/settings/gitee_card.py`): 根因是「窗口置顶」给主窗口加 `WindowStaysOnTopHint`，Qt 在 macOS 上将窗口提到 NSStatusWindowLevel(8)，WindowServer 对非 normal 层级窗口丢弃标题栏最小化点击（系统层限制）。修复：macOS 改软置顶（不加 hint，应用激活时抬升），并主动摘除历史残留 hint 恢复最小化能力；Windows/Linux 保持原生置顶并补「关闭时摘除」；置顶开关统一收敛到 `_apply_window_topmost` 单一入口。同时移除 `AA_DontUseNativeMenuBar` 误用（应用级属性传给 `QWidget.setAttribute` 导致 TabManagerWindow 创建即 TypeError 崩溃）与 `WA_MacAlwaysShowToolWindow` 无效修复及 changeEvent 死代码双保险。
 
 ## [v0.5.4] - 2026-08-23
 
@@ -162,6 +165,15 @@ All notable changes to this project will be documented in this file.
 - **`LLMSettingsCard` Qt 渲染器描述冗余清理** (`app/widgets/cards/settings/llm_settings_card.py`): 移除 Qt renderer 描述中的冗余 text，简化文案。
 - **插件热重载 Python hook 缓存** (`app/core/hook_manager.py`): 插件热重载时清除 Python hook 函数缓存，避免旧 hook 残留导致重复触发或错误响应。
 - **插件 watcher 新装插件识别** (`app/plugins/contracts/plugin_config.py` + `app/widgets/cards/settings/plugin_config_card.py`): watcher 识别新装插件——未注册 manifest 在监控根下时交给 rescan 注入，修复新装插件立即可见但 manifest 未在监控列表内的情况。
+
+
+### 🔄 Hotfix 重新发布 (Re-release · 2026-08-27 · Round 5)
+
+基于 `v0.5.4` Round 4 的增量变更 | 提交数：1 · 文件变更：1 · +4/-3 | 贡献者：dingma
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **`ToolControlCard` 描述标签对齐** (`app/widgets/cards/settings/tool_control_card.py`): 移除冗余 `QSizePolicy` 设置，将描述标签的 stretch 改为 1，让 `_ElidedLabel` 吃掉 source/name 之后的全部剩余水平空间，把开关按钮推到行尾靠右对齐（原 SizePolicy 设置失效导致开关位置不固定）。
 
 ## [v0.5.3] - 2026-08-22
 

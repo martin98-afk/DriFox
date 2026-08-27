@@ -66,6 +66,7 @@ _AUTO_EXPAND_GROWTH = 200
 # 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
 # 这里预先缓存平台判定与 ctypes cast 函数，避免 per-message 开销。
 _IS_WINDOWS = platform.system() == "Windows"
+_IS_MAC = platform.system() == "Darwin"
 _MSG_CAST = None
 if _IS_WINDOWS:
     try:
@@ -126,11 +127,36 @@ class EmptyStateWidget(QWidget):
 def _apply_window_topmost(window):
     """应用窗口置顶配置（Settings.window_always_on_top）到指定窗口
 
-    用于启动时和模式切换后，确保配置生效。
+    - Windows/Linux：WindowStaysOnTopHint（WS_EX_TOPMOST，与最小化兼容）
+    - macOS：软置顶——不加 hint。Qt 会把 StaysOnTopHint 顶层窗口提到
+      NSStatusWindowLevel(8)，而 macOS WindowServer 对非 normal 层级窗口
+      丢弃标题栏最小化点击（黄按钮无反应，系统层限制无法绕过）。
+      改为仅抬升窗口；持续置顶由 TabManagerWindow 监听应用激活补抬升。
     """
     from app.utils.config import Settings as _Settings
 
-    if _Settings.get_instance().window_always_on_top.value:
+    enabled = _Settings.get_instance().window_always_on_top.value
+
+    def _strip_topmost_hint():
+        """摘除 WindowStaysOnTopHint（配置关闭或历史残留时）"""
+        flags = window.windowFlags()
+        if flags & Qt.WindowStaysOnTopHint:
+            flags &= ~Qt.WindowStaysOnTopHint
+            was_visible = window.isVisible()
+            window.setWindowFlags(flags)
+            if was_visible:
+                window.show()
+                window.raise_()
+                window.activateWindow()
+
+    if _IS_MAC:
+        # 摘除历史残留（旧版本/置顶期间启动的进程），恢复最小化能力
+        _strip_topmost_hint()
+        if enabled and not window.isMinimized():
+            window.raise_()
+        return
+
+    if enabled:
         flags = window.windowFlags()
         if not (flags & Qt.WindowStaysOnTopHint):
             flags |= Qt.WindowStaysOnTopHint
@@ -140,6 +166,8 @@ def _apply_window_topmost(window):
                 window.show()
                 window.raise_()
                 window.activateWindow()
+    else:
+        _strip_topmost_hint()
 
 
 def _update_tab_icon(tab_idx: int, project: str):
@@ -381,6 +409,8 @@ class TabManagerWindow(QWidget):
         self.setObjectName("tabManagerWindow")
         self.setMinimumSize(600, 450)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
+        # 注：macOS 置顶与最小化互斥（WindowStaysOnTopHint → NSStatusWindowLevel
+        # 会丢标题栏最小化点击），置顶统一走 _apply_window_topmost 的软置顶分支
         # 标准系统窗口：原生标题栏 + Aero Snap + 任务栏预览 + 摇动等全部恢复
         self.setWindowFlags(Qt.Window)
         self.setWindowIcon(QIcon(":/icons/drifox.ico"))
@@ -1051,6 +1081,10 @@ class TabManagerWindow(QWidget):
         if hasattr(self, "_splitter"):
             self._splitter.splitterMoved.connect(self._on_splitter_manually_moved)
 
+        # macOS 软置顶：应用激活时补抬升（详见 _on_app_state_changed）
+        if _IS_MAC:
+            QApplication.instance().applicationStateChanged.connect(self._on_app_state_changed)
+
     # ── 侧边栏收起/展开（宽度平滑动画） ──
 
     def _on_sidebar_toggled(self, collapsed: bool, animate: bool = True):
@@ -1507,22 +1541,30 @@ class TabManagerWindow(QWidget):
 
         self._suppress_replace_close = True
         try:
-            for cid in candidates:
-                try:
-                    if not cm.is_card_visible(cid, wid):
-                        continue
-                except Exception:
-                    continue
-                if cid != active:
+            # 切换投影保护：此期间 hide/show 是「per-tab 状态投影」（临时隐藏，
+            # open 集合保留），registry 的 on_card_hidden 回调必须跳过 per-tab
+            # 可见集合清除——否则卡片从集合丢失后，sync_floating_cards_to_tab
+            # 会因 want=False & now=True 误执行 hide_card，触发 120ms 关闭去抖
+            # 判定，导致 full 卡片切走再切回时被误关。
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            with UIPluginRegistry.get_instance().tab_sync_guard():
+                for cid in candidates:
                     try:
-                        cm.hide_card(cid, wid)
+                        if not cm.is_card_visible(cid, wid):
+                            continue
+                    except Exception:
+                        continue
+                    if cid != active:
+                        try:
+                            cm.hide_card(cid, wid)
+                        except Exception:
+                            pass
+                if active is not None:
+                    try:
+                        cm.show_card(active, wid)
                     except Exception:
                         pass
-            if active is not None:
-                try:
-                    cm.show_card(active, wid)
-                except Exception:
-                    pass
         finally:
             self._suppress_replace_close = False
 
@@ -1698,6 +1740,20 @@ class TabManagerWindow(QWidget):
 
     # ── 窗口管理 ──
 
+    def begin_suppress_add_activate(self):
+        """批量添加窗口期间抑制 add_window 自动激活新 tab（保持当前焦点）。
+
+        配合 MainWidget._spawn_team_members(keep_current_active=True)：
+        工作室等管理入口批量建成员时不打断用户当前所在 tab。
+        支持嵌套（内部计数），必须与 end_suppress_add_activate 成对使用。
+        """
+        self._suppress_add_activate = getattr(self, "_suppress_add_activate", 0) + 1
+
+    def end_suppress_add_activate(self):
+        """结束抑制（仅在最外层计数归零后恢复 add_window 自动激活）"""
+        depth = getattr(self, "_suppress_add_activate", 0)
+        self._suppress_add_activate = max(0, depth - 1)
+
     def add_window(self, window) -> int:
         """添加窗口到 Tab 管理器，返回索引"""
         existing = self._window_to_index.get(id(window), -1)
@@ -1844,9 +1900,11 @@ class TabManagerWindow(QWidget):
                 # 非团队窗口：Tab 保持显示项目 icon（回归不变）
                 panel.set_tab_team_mode(tab_idx, False)
 
-            # 隐藏空状态页，切换到新窗口
+            # 隐藏空状态页；激活新窗口——抑制模式下（批量建成员保持焦点）
+            # 且已有激活内容窗口时跳过，避免逐窗跳 tab
             stack.widget(0).hide()
-            panel.set_active_index(idx)
+            if getattr(self, "_suppress_add_activate", 0) <= 0 or self._tab_panel.active_index < 0:
+                panel.set_active_index(idx)
         finally:
             window.setUpdatesEnabled(True)
             panel.setUpdatesEnabled(True)
@@ -2386,19 +2444,145 @@ class TabManagerWindow(QWidget):
         except Exception as e:  # noqa: BLE001
             logger.error(f"[TabManager] 新建任务失败: {e}")
 
+    def _build_new_window(self, source_window, project=None):
+        """创建并配置一个新窗口实例（复制源窗口的项目/模型上下文）。
+
+        提取自 MainWidget._duplicate_window 的创建逻辑，供 spawn_tab 统一编排。
+        返回尚未加入 Tab 管理器的窗口实例；source 无效时返回 None。
+        """
+        from PyQt5 import sip
+
+        try:
+            if sip.isdeleted(source_window) or sip.isdeleted(getattr(source_window, "homepage", None)):
+                return None
+        except Exception:
+            return None
+        if getattr(source_window, "homepage", None) is None:
+            return None
+
+        from app.main_widget import OpenAIChatToolWindow
+
+        new_instance = OpenAIChatToolWindow(source_window.homepage, source_window=source_window)
+
+        # ── 多窗口隔离：把源窗口的项目上下文原样复制给新窗口 ──
+        proj = project or getattr(source_window, "_current_project", None) or "默认项目"
+        new_instance._current_project = proj
+        if getattr(new_instance, "backend", None):
+            new_instance.backend._current_project = proj
+        if getattr(new_instance, "backend", None) and getattr(new_instance.backend, "tool_executor", None):
+            try:
+                new_instance.backend.tool_executor.set_current_project(proj)
+            except Exception:
+                pass
+        if hasattr(new_instance, "_project_label"):
+            new_instance._project_label.setText(proj)
+        if hasattr(new_instance, "_refresh_project_branch_style"):
+            new_instance._refresh_project_branch_style()
+        if hasattr(new_instance, "_copy_branch_from"):
+            new_instance._copy_branch_from(source_window)
+        elif hasattr(new_instance, "_update_branch"):
+            new_instance._update_branch()
+
+        # 复制模型选择（确保两个实例都已初始化 UI）
+        try:
+            src_provider = getattr(source_window, "_current_provider_name", None)
+            if src_provider:
+                new_instance._current_provider_name = src_provider
+                new_instance._current_model_name = getattr(source_window, "_current_model_name", None)
+                new_instance._user_manually_selected_model = getattr(
+                    source_window, "_user_manually_selected_model", False
+                )
+                new_instance._valid_configs = dict(getattr(source_window, "_valid_configs", {}) or {})
+                new_instance._update_model_selector_btn()
+        except Exception:
+            pass
+
+        # 跳过历史会话恢复，由 spawn_tab 按内容加载意图决定
+        new_instance._skip_restore_history = True
+        return new_instance
+
+    def spawn_tab(
+        self,
+        source_window,
+        *,
+        new_session: bool = False,
+        session_record: "dict | None" = None,
+        project: "str | None" = None,
+        branch: bool = False,
+    ) -> "OpenAIChatToolWindow | None":
+        """统一创建新标签页并加载内容。
+
+        把「新标签页 / 分支标签页」的创建与内容加载逻辑收敛到 TabManagerWindow 管理。
+        调用方（MainWidget 各入口）需自行判断当前标签页是否流式，并仅在需要时调用本方法，
+        故本方法不处理停流逻辑。
+
+        Args:
+            source_window: 源窗口（复制项目/模型上下文的来源）
+            new_session: 新 tab 新建会话（可配合 project 指定项目上下文）
+            session_record: 直接加载的历史会话记录（注入 showEvent，跳过空会话）
+            project: 目标项目上下文（覆盖源窗口当前项目）
+            branch: 复制源窗口当前会话消息到新 tab
+        Returns:
+            新窗口实例；失败返回 None（调用方应降级为原行为）
+        """
+        if source_window is None:
+            return None
+        from loguru import logger
+
+        try:
+            new = self._build_new_window(source_window, project=project)
+            if new is None:
+                return None
+
+            if branch:
+                cur = getattr(source_window, "session_manager", None)
+                cur_session = cur.get_current_session() if cur else None
+                if cur_session is not None:
+                    new._branch_session_data = {
+                        "messages": list(cur_session.messages),
+                        "name": (cur_session.name or "对话") + " [分支]",
+                        "project": project or getattr(source_window, "_current_project", None) or "",
+                    }
+                new._skip_restore_history = True
+                # 🛡️ 分支窗口继承源窗口工具权限（对齐原 _duplicate_window 的 branch 分支）
+                try:
+                    if hasattr(source_window, "_tool_permission_controller") and hasattr(
+                        new, "_tool_permission_controller"
+                    ):
+                        new._tool_permission_controller.copy_state_from(
+                            source_window._tool_permission_controller
+                        )
+                except Exception:
+                    pass
+            elif session_record is not None:
+                new._target_session_record = session_record
+                new._skip_restore_history = True
+            # new_session / 其他：showEvent 默认建空新会话（_current_project 已设）
+
+            if not self.isVisible():
+                self.show()
+            self.add_window(new)
+            idx = self._window_to_index.get(id(new), -1)
+            if idx >= 0:
+                self._tab_panel.set_active_index(idx)
+            return new
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] spawn_tab 失败: {e}")
+            return None
+
     def _on_tab_branch_requested(self, index: int):
         """分支窗口 — 从指定标签页创建分支"""
         if 0 <= index < len(self._windows):
             window = self._windows[index]
-            if hasattr(window, "_duplicate_window"):
-                window._duplicate_window(branch=True)
+            if window is not None:
+                self.spawn_tab(window, branch=True)
 
     def _on_new_tab_requested(self):
         """新建窗口 — 走当前窗口的复制逻辑，复用后端状态"""
         current = self.get_current_window()
-        if current is not None and hasattr(current, "_duplicate_window"):
-            # 从当前窗口复制（保留后端上下文）
-            current._duplicate_window(branch=False)
+        if current is not None:
+            # 从当前窗口复制（保留后端上下文）并新开标签页
+            self.spawn_tab(current, new_session=True)
         else:
             # 没有当前窗口时，走基础创建逻辑
             from app.main_widget import OpenAIChatToolWindow
@@ -2406,6 +2590,8 @@ class TabManagerWindow(QWidget):
             fake_page = self._create_fake_page()
             new_window = OpenAIChatToolWindow(fake_page)
             self.add_window(new_window)
+            if not self.isVisible():
+                self.show()
 
     # ── Tab 面板 UI 插件列表 ──
 
@@ -2630,8 +2816,23 @@ class TabManagerWindow(QWidget):
         drag_profiler.stop_deferred()
 
     def changeEvent(self, event):
-        """标准系统窗口自带最大化/还原处理，无需自定义逻辑"""
+        """窗口状态变化：标准系统窗口的最大化/还原由 OS 处理，无需自定义逻辑"""
         super().changeEvent(event)
+
+    def _on_app_state_changed(self, state):
+        """macOS 软置顶：应用激活时若开启置顶配置则抬升主窗口
+
+        替代 WindowStaysOnTopHint（mac 上该 hint 会把窗口提到
+        NSStatusWindowLevel，导致标题栏最小化点击被系统丢弃）。
+        """
+        from app.utils.config import Settings as _Settings
+
+        if state != Qt.ApplicationActive:
+            return
+        if not _Settings.get_instance().window_always_on_top.value:
+            return
+        if not self.isMinimized():
+            self.raise_()
 
     def eventFilter(self, obj, event):
         """对话区 wrapper Resize → 动态调整左右 margins 实现限宽居中

@@ -2028,7 +2028,13 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         logger.debug(f"[_safe_duplicate_window] ENTER branch={branch}")
         try:
-            self._duplicate_window(branch=branch)
+            # 🆕 统一路由到 TabManagerWindow.spawn_tab（新标签页/分支标签页的统一编排）。
+            # spawn_tab 未就绪时回退原 _duplicate_window 实现。
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                tm.spawn_tab(self, new_session=not branch, branch=branch)
+            else:
+                self._duplicate_window(branch=branch)
         except BaseException:
             import traceback
 
@@ -2421,7 +2427,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 如果有分支数据，延迟调用分支会话处理，避免与 _restore_latest_or_create_session 冲突
         # 注：_load_agent_list 由 _create_new_session / _apply_branch_or_create_session 内部调用，此处不需要重复触发
-        if getattr(self, "_branch_session_data", None):
+        if getattr(self, "_target_session_record", None) is not None:
+            # 🆕 流式保护：由 TabManagerWindow.spawn_tab 注入的目标历史会话，
+            # 直接加载，跳过默认空会话创建，避免历史列表出现多余空会话。
+            _rec = self._target_session_record
+            QTimer.singleShot(50, lambda: self._safe_timer_call(lambda: self._load_session_from_record(_rec)))
+        elif getattr(self, "_branch_session_data", None):
             QTimer.singleShot(50, lambda: self._safe_timer_call(self._apply_branch_or_create_session))
         else:
             # 🆕 4a：创建团队场景——4 个窗口 add_window→showEvent 全在同一事件循环批次内
@@ -3896,10 +3907,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._create_new_session()
                 return True
             elif command_name == "new-window":
-                self._duplicate_window(branch=False)
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    tm.spawn_tab(self, new_session=True)
+                else:
+                    self._duplicate_window(branch=False)
                 return True
             elif command_name == "branch":
-                self._duplicate_window(branch=True)
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    tm.spawn_tab(self, branch=True)
+                else:
+                    self._duplicate_window(branch=True)
                 return True
             elif command_name == "remember":
                 self._remember_to_memory(args)
@@ -4696,6 +4715,7 @@ class OpenAIChatToolWindow(ToolWindow):
         run_id: str = "",
         team_label: str = "",
         team_name: str = "",
+        keep_current_active: bool = False,
     ) -> int:
         """批量创建团队成员窗口（去重由调用方保证）。
 
@@ -4707,6 +4727,10 @@ class OpenAIChatToolWindow(ToolWindow):
             team_name: 🛡️ M1' 透传给 _spawn_team_member_window 的窗口实例
                 _team_name（_handle_team_add_member 锁定当前团队名，
                 避免 team.json 模板名覆盖为别的团队）
+            keep_current_active: True 时保持发起者当前 tab 不动（抑制
+                add_window 逐窗激活 + 结束后恢复原激活 tab，而非切到首个
+                成员）——供 pixel-team-studio 等管理入口使用，批量建成员
+                不打断用户焦点；默认 False 保持 /team --load 现有行为。
 
         Returns:
             成功创建的窗口数
@@ -4715,8 +4739,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # C1 批量布局：连续 add_tab 期间跳过每次全量重建，结束统一重建一次
 
         _tmw = TabManagerWindow.get_instance()
+        _origin_win = None
         if _tmw is not None:
             _tmw._tab_panel.begin_batch_add()
+            if keep_current_active:
+                try:
+                    _origin_win = _tmw.get_current_window()
+                except Exception:  # noqa: BLE001
+                    _origin_win = None
+                _tmw.begin_suppress_add_activate()
         try:
             # 🆕 4a：错峰触发各窗 _create_new_session，避免 N 窗口 showEvent →
             # QTimer(0) 背靠背入队让 SessionStart→BuildSystemPrompt hook 同步重入
@@ -4743,11 +4774,39 @@ class OpenAIChatToolWindow(ToolWindow):
         finally:
             if _tmw is not None:
                 _tmw._tab_panel.end_batch_add()
+                if keep_current_active:
+                    _tmw.end_suppress_add_activate()
         # 🐛 模板加载后 tab 自动切到第一个成员：add_window 每次激活新窗口
         # （批量创建 N 个成员后激活停在最后一个），此处统一切回第一个新窗口。
         # 注：单个成员（快速新建成员 _handle_team_add_member）时切回自身，
         # 行为不变；仅批量场景（/team --load）生效。
-        if new_windows and _tmw is not None:
+        # keep_current_active：不切新成员，恢复发起前的原激活 tab（管理入口
+        # 批量建成员不打断用户焦点）。
+        if _tmw is not None and keep_current_active:
+            # 静默预热：新窗口从未被激活时，QStackedWidget 不做首次布局/渲染，
+            # 后续团队邮件（_on_send_clicked）追加的消息卡片不显示（需切到该
+            # 成员一次才补上）。这里在冻结重绘下逐窗 setCurrentWidget 一帧完成
+            # 首次布局，再恢复原 tab——用户无感，消息列表即时可显示。
+            try:
+                _stack = _tmw._content_area
+                _stack.setUpdatesEnabled(False)
+                for _nw in new_windows:
+                    _stack.setCurrentWidget(_nw)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[_spawn_team_members] 静默预热失败: {e}")
+            finally:
+                try:
+                    _stack.setUpdatesEnabled(True)
+                except Exception:  # noqa: BLE001
+                    pass
+            if _origin_win is not None and not getattr(_origin_win, "_is_destroyed", False):
+                try:
+                    _origin_idx = _tmw._window_to_index.get(id(_origin_win), -1)
+                    if 0 <= _origin_idx < len(_tmw._windows):
+                        _tmw._tab_panel.set_active_index(_origin_idx)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[_spawn_team_members] 恢复原激活 tab 失败: {e}")
+        elif new_windows and _tmw is not None:
             try:
                 _first_idx = _tmw._window_to_index.get(id(new_windows[0]), -1)
                 if 0 <= _first_idx < len(_tmw._windows):
@@ -8313,6 +8372,20 @@ class OpenAIChatToolWindow(ToolWindow):
         """从历史面板选择会话"""
         if getattr(self, "_is_destroyed", False):
             return
+        # 🆕 流式保护：当前标签页流式输出时，选历史其他会话 / 新建会话改开新标签页，
+        # 不强行停止当前对话。
+        if self._is_streaming:
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                if index == -1:
+                    new = tm.spawn_tab(self, new_session=True)
+                else:
+                    record = self._history_popup_card.get_history_at_index(index)
+                    new = tm.spawn_tab(self, session_record=record) if record is not None else None
+                if new is not None:
+                    self._card_manager.hide_card("history", self._window_id)
+                    return
+            # 降级原行为
         if index == -1:
             # 新建会话
             self._create_new_session()
@@ -8844,6 +8917,15 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.core.usage_service import UsageService
 
             UsageService.get_instance().invalidate(current_name)
+        except Exception:
+            pass
+        # 🐛 invalidate 会移除该 config 的 active key + 快照，若此处不重新请求，
+        # 单例 60s 轮询 timer 将因集合为空而死亡，圆环/余额永久停更
+        # （直到用户切换模型触发 _update_model_selector_btn 才恢复）。
+        # _update_balance_display 内部：request_balance + _refresh_coding_plan
+        # → 重新注册 active key 并立即重拉新配置的用量。
+        try:
+            self._update_balance_display()
         except Exception:
             pass
 
@@ -10157,6 +10239,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
         except Exception:
             pass
+
+        # 🆕 流式保护：当前标签页正在流式输出时，新建会话改开新标签页，
+        # 不强行停止当前对话（由 TabManagerWindow.spawn_tab 承载新会话）。
+        if self._is_streaming:
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                new = tm.spawn_tab(self, new_session=True)
+                if new is not None:
+                    return
+            # TabManagerWindow 未就绪则降级原行为（原地停流新建）
 
         # 🛡️ 失效欢迎卡片缓存（必须在 _clear_chat_area 之前同步执行，
         # 避免 sip.isdeleted 竞态导致 _show_initial_welcome 命中旧缓存）。
@@ -18370,6 +18462,16 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_project_selected(self, project: str):
         """切换到选中的项目"""
+        # 🆕 流式保护：当前标签页流式输出时，选择其他项目改开新标签页
+        # （新项目·新会话），不污染当前流式对话的项目归属、不强行停流。
+        if self._is_streaming:
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                new = tm.spawn_tab(self, new_session=True, project=project)
+                if new is not None:
+                    self._card_manager.hide_card("project_selector", self._window_id)
+                    return
+            # 降级原行为
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
         prev_project = self._current_project
         self._current_project = project
@@ -19784,12 +19886,21 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ 用量聚合（T6）：注销本窗口 config 的用量轮询注册（active key + 快照）。
         # 套餐用量轮询已由 UsageService 单例统一驱动（窗口不再自建 60s timer），
         # 此处仅清理注册，避免已关闭窗口的配置持续触发后台请求。
+        # 🐛 多窗口同 config：active key 按 (provider, config_id) 共享，若其它窗口
+        # 仍在使用该配置，unregister 会误杀其轮询（plan key 只在切换模型时重新
+        # 注册）→ 圆环永久停更。仅当无其它存活窗口使用同 config 时才注销。
         try:
             _cid = getattr(self, "_current_provider_name", "")
             if _cid:
-                from app.core.usage_service import UsageService
+                _same_config_alive = any(
+                    w is not self
+                    and getattr(w, "_current_provider_name", "") == _cid
+                    for w in window_registry.alive_window_instances()
+                )
+                if not _same_config_alive:
+                    from app.core.usage_service import UsageService
 
-                UsageService.get_instance().unregister(_cid)
+                    UsageService.get_instance().unregister(_cid)
         except Exception:
             pass
 

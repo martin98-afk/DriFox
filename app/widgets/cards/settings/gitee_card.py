@@ -1066,6 +1066,10 @@ class _GiteeMorePopup(QWidget):
     def _on_topmost_toggled(self, checked: bool):
         """窗口置顶开关切换
 
+        统一走 _apply_window_topmost：macOS 走软置顶（不加
+        WindowStaysOnTopHint，避免最小化按钮被系统丢弃），其他平台
+        加/摘 WS_EX_TOPMOST hint。
+
         注意：self.window() 返回的是 popup 自身（Qt.Popup 自带 Window 标志），
         必须通过 _account_row 的父链才能获取真正的应用顶层窗口（TabManagerWindow / OpenAIChatToolWindow）
         """
@@ -1076,19 +1080,9 @@ class _GiteeMorePopup(QWidget):
         if not window:
             return
 
-        flags = window.windowFlags()
-        if checked:
-            flags |= Qt.WindowStaysOnTopHint
-        else:
-            flags &= ~Qt.WindowStaysOnTopHint
+        from app.widgets.tab_manager_window import _apply_window_topmost
 
-        # setWindowFlags 内部会 hide()，双 show() 确保恢复可见并正确生效
-        was_visible = window.isVisible()
-        window.setWindowFlags(flags)
-        if was_visible:
-            window.show()
-            window.raise_()
-            window.activateWindow()
+        _apply_window_topmost(window)
 
     # ── 绘制圆角背景 ──
 

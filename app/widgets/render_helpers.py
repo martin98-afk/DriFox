@@ -1020,8 +1020,8 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
 def _keep_in_content_tools() -> frozenset:
     """始终展示在正文的工具集合（registry 派生，与 message_card._edit_tools 同源）。
 
-    规则：文件写入组（write/edit/multi_edit）+ subagent_task（subagent_para/subagent_dag）
-    + interactive（question）。用于工具块渲染 data-keep-in-content 属性。
+    规则：注册时显式声明 keep_in_content=True（write/edit/multi_edit、
+    subagent_para/subagent_dag、question 等）。用于工具块渲染 data-keep-in-content 属性。
     """
     try:
         from app.tools.registry import ToolRegistry

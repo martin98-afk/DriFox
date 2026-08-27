@@ -77,6 +77,27 @@ class TestParseConfigSchema:
         schema = parse_config_schema("p", raw)
         assert schema is not None and schema.fields[0].type == "text"
 
+    def test_int_alias_normalized_to_number(self):
+        # 社区插件误用 "int"（非 E1 标准 type），应归一化为 number 不打回 schema
+        raw = {
+            "title": "AutoLoop 循环",
+            "fields": [
+                {"key": "max_iterations", "label": "最大迭代轮数", "type": "int", "default": 50, "min": 1, "max": 1000},
+            ],
+        }
+        schema = parse_config_schema("autoloop", raw)
+        assert schema is not None
+        f = schema.get_field("max_iterations")
+        assert f is not None
+        assert f.type == "number"  # 归一化为标准 type
+        assert f.min == 1 and f.max == 1000  # min/max/step 仍按 number 处理
+        assert f.default == 50
+
+    def test_integer_alias_normalized_to_number(self):
+        raw = {"title": "t", "fields": [{"key": "n", "label": "N", "type": "integer", "default": 10}]}
+        schema = parse_config_schema("p", raw)
+        assert schema is not None and schema.fields[0].type == "number"
+
 
 class TestPluginConfigRegistry:
     def _make_schema(self, plugin_name="p1"):

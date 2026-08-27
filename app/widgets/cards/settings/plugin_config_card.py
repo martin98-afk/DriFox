@@ -17,17 +17,21 @@ register_settings_card(..., make_card_class(plugin_name))，插件零 UI 代码�
 
 from __future__ import annotations
 
-from typing import Dict
+import base64
+import re
+from typing import Any, Dict, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtGui import QIcon, QPixmap
+from PyQt5.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     ExpandSettingCard,
     FluentIcon,
+    IndeterminateProgressBar,
     LineEdit,
     PasswordLineEdit,
+    PrimaryPushButton,
     SpinBox,
     SwitchButton,
     TextEdit,
@@ -227,6 +231,17 @@ class PluginConfigCard(ExpandSettingCard):
                 link_label.setOpenExternalLinks(True)
                 row = _FieldRow(f.label, link_label, self.view)
                 self.viewLayout.addWidget(row)
+            elif f.type == "action":
+                # 动作按钮：点击弹窗执行声明式工具编排（通用机制，见 ToolActionDialog），
+                # 无存储值不参与保存/回显
+                btn = PrimaryPushButton(f.placeholder or f.label, self.view)
+                btn.clicked.connect(
+                    lambda _c, _f=f, _p=self._plugin_name, _card=self: ToolActionDialog.open_for(
+                        _card.view, _p, _f.label, _f.action, config_card=_card
+                    )
+                )
+                row = _FieldRow(f.label, btn, self.view)
+                self.viewLayout.addWidget(row)
             elif f.type == "textarea":
                 edit = _PlainEdit(self.view)
                 if f.placeholder:
@@ -422,3 +437,242 @@ def make_card_class(plugin_name: str) -> type:
 
     _BoundConfigCard.__name__ = f"PluginConfigCard[{plugin_name}]"
     return _BoundConfigCard
+
+
+# ── action 字段：声明式工具编排弹窗（通用机制，无平台知识） ──────────────
+#
+# 消费 plugin.json 里 action 字段声明的 ToolActionSpec：
+#   点击按钮 → 调注册工具(args) → image_data 弹窗展示图片 + content 作状态文案
+#   → 声明了 poll 则按模板轮询（{data.<key>} 占位取上次结果）→ 命中 stop_when 终止。
+# 宿主只实现这套通用编排；扫码登录等具体语义完全由插件 schema + 工具定义。
+
+
+class _ToolActionWorker(QThread):
+    """后台执行工具调用 + 轮询循环（同步 impl 跑在子线程，不阻塞 UI）"""
+
+    result_ready = pyqtSignal(object)  # ToolResult（每轮：初始/轮询各发一次）
+    finished_state = pyqtSignal(str, str)  # (终态, 说明)：done/error/stopped
+
+    def __init__(self, tool: str, args: Dict[str, Any], poll, parent=None):
+        super().__init__(parent)
+        self._tool = tool
+        self._args = dict(args or {})
+        self._poll = poll  # ToolActionPoll | None
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    # ── 工具调用 ──
+
+    def _call_impl(self, kwargs: Dict[str, Any]) -> Any:
+        """直接调注册工具 impl（设置卡无会话上下文，构造最小 tool_ctx）"""
+        import inspect
+
+        from app.tools.registry import ToolRegistry
+        from app.tools.result import ToolResult
+
+        reg = ToolRegistry.get_instance().get(self._tool)
+        if reg is None:
+            return ToolResult(False, error=f"工具未注册: {self._tool}")
+        ctx = {"workdir": "", "session_id": "", "call_id": "", "env": {}, "services": {}}
+        try:
+            has_ctx = "tool_ctx" in inspect.signature(reg.impl).parameters
+        except (TypeError, ValueError):
+            has_ctx = True
+        result = reg.impl(tool_ctx=ctx, **kwargs) if has_ctx else reg.impl(**kwargs)
+        return result if isinstance(result, ToolResult) else ToolResult(True, content=str(result))
+
+    # ── 模板与终止条件（通用） ──
+
+    @staticmethod
+    def _resolve_templates(value: Any, last_data: Dict[str, Any]) -> Any:
+        """字符串值中 {data.<key>} 占位符 → 上次结果 data 字段值；未命中保留原样"""
+        if not isinstance(value, str) or "{" not in value:
+            return value
+
+        def _sub(m: "re.Match") -> str:
+            path = m.group(1)
+            if path.startswith("data.") and path[5:] in last_data:
+                return str(last_data[path[5:]])
+            return m.group(0)
+
+        return re.sub(r"\{([a-zA-Z0-9_.]+)\}", _sub, value)
+
+    @staticmethod
+    def _match_stop(stop_when: Dict[str, Any], result) -> Optional[str]:
+        """终止条件命中检查：路径 data.<key> / error；返回命中描述或 None"""
+        rd = getattr(result, "data", None) or {}
+        for path, hits in (stop_when or {}).items():
+            hit_set = {str(h) for h in hits}
+            if path == "error":
+                if not result.success and result.error:
+                    return f"error={result.error[:120]}"
+            elif path.startswith("data.") and path[5:] in rd:
+                if str(rd[path[5:]]) in hit_set:
+                    return f"{path}={rd[path[5:]]}"
+        return None
+
+    # ── 主循环 ──
+
+    def run(self) -> None:  # noqa: C901
+        import time
+
+        from app.tools.result import ToolResult
+
+        last_data: Dict[str, Any] = {}
+        result = self._call_impl(self._args)
+        self.result_ready.emit(result)
+        if not isinstance(result, ToolResult):
+            self.finished_state.emit("error", "工具返回非法结果")
+            return
+        if not result.success:
+            self.finished_state.emit("error", str(result.error or "调用失败"))
+            return
+        last_data = result.data or {}
+
+        if self._poll is None:
+            self.finished_state.emit("done", "执行完成")
+            return
+
+        for _ in range(self._poll.max_rounds):
+            if self._cancelled:
+                self.finished_state.emit("stopped", "已取消")
+                return
+            time.sleep(self._poll.interval_ms / 1000.0)
+            if self._cancelled:
+                self.finished_state.emit("stopped", "已取消")
+                return
+
+            kwargs = {
+                k: self._resolve_templates(v, last_data)
+                for k, v in (self._poll.args or {}).items()
+            }
+            result = self._call_impl(kwargs)
+            if not isinstance(result, ToolResult):
+                self.finished_state.emit("error", "工具返回非法结果")
+                return
+            self.result_ready.emit(result)
+            last_data = result.data or last_data if result.success else last_data
+
+            hit = self._match_stop(self._poll.stop_when, result)
+            if hit:
+                self.finished_state.emit(
+                    "done" if result.success else "error",
+                    f"终止: {hit}" + ("" if result.success else f" | {str(result.error or '')[:120]}"),
+                )
+                return
+            # 未命中终止条件：单轮失败（网络抖动/长轮询超时）不终止，继续下一轮；
+            # 仅连续失败达 max_rounds 才止，保证扫码确认这类长等待不丢
+
+        self.finished_state.emit("stopped", f"达最大轮次 {self._poll.max_rounds}")
+
+
+class ToolActionDialog(QDialog):
+    """通用工具动作弹窗：图片（image_data）+ 状态文案 + 轮询进度。
+
+    类方法 open_for(parent, plugin_name, title, spec) 一键拉起。
+    """
+
+    _instances = []  # 防重复点击开出多窗
+
+    def __init__(self, plugin_name: str, title: str, spec, parent=None, *, config_card=None):
+        super().__init__(parent)
+        self._config_card = config_card  # 发起动作的设置卡（完成后回显刷新）
+        self.setWindowTitle(f"{title} - {plugin_name}")
+        self.setModal(True)
+        self.setMinimumWidth(spec.dialog_width)
+        if spec.dialog_height:
+            self.setMinimumHeight(spec.dialog_height)
+        self._image_width = spec.image_width
+        self._worker: Optional[_ToolActionWorker] = None
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        self._image_label = QLabel(self)
+        self._image_label.setAlignment(Qt.AlignCenter)
+        self._image_label.setMinimumHeight(80)
+        self._image_label.hide()
+        layout.addWidget(self._image_label)
+
+        self._status_label = BodyLabel("正在执行…", self)
+        self._status_label.setWordWrap(True)
+        layout.addWidget(self._status_label)
+
+        self._progress = IndeterminateProgressBar(self)
+        self._progress.start()
+        layout.addWidget(self._progress)
+
+        from qfluentwidgets import PushButton
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self._close_btn = PushButton("关闭", self)
+        self._close_btn.clicked.connect(self._on_close)
+        btn_row.addWidget(self._close_btn)
+        layout.addLayout(btn_row)
+
+        # 启动 worker
+        self._worker = _ToolActionWorker(spec.tool, spec.args, spec.poll, self)
+        self._worker.result_ready.connect(self._on_result)
+        self._worker.finished_state.connect(self._on_finished)
+        self._worker.start()
+
+    # ── 事件 ──
+
+    def _on_result(self, result) -> None:
+        """每轮结果：图片刷新展示 + content 刷新状态文案"""
+        img = getattr(result, "image_data", None)
+        if img and img.get("data"):
+            try:
+                pm = QPixmap()
+                if pm.loadFromData(base64.b64decode(img["data"])):
+                    self._image_label.setPixmap(
+                        pm.scaledToWidth(self._image_width, Qt.SmoothTransformation)
+                    )
+                    self._image_label.show()
+                    self.adjustSize()
+            except Exception:
+                pass
+        content = getattr(result, "content", None)
+        if content:
+            self._status_label.setText(str(content))
+
+    def _on_finished(self, state: str, message: str) -> None:
+        self._progress.stop()
+        self._progress.hide()
+        self._status_label.setText(f"[{ {'done': '完成', 'error': '失败', 'stopped': '中止'}.get(state, state) }] {message}")
+        # 工具可能已写配置存储（如登录 token），回显刷新发起动作的设置卡
+        try:
+            if self._config_card is not None:
+                self._config_card._echo()
+        except Exception:
+            pass
+        if state == "error":
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.error("执行失败", message[:160], parent=self, position=InfoBarPosition.TOP, duration=4000)
+        elif state == "done":
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.success("执行完成", message[:160], parent=self, position=InfoBarPosition.TOP, duration=4000)
+
+    def _on_close(self) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+        self.accept()
+
+    # ── 入口 ──
+
+    @classmethod
+    def open_for(cls, parent, plugin_name: str, title: str, spec, *, config_card=None) -> None:
+        """打开动作弹窗（同一时刻只保留一个实例）"""
+        for dlg in cls._instances:
+            if dlg.isVisible():
+                dlg.raise_()
+                return
+        dlg = cls(plugin_name, title, spec, parent, config_card=config_card)
+        cls._instances.append(dlg)
+        dlg.finished.connect(lambda *_: cls._instances.remove(dlg) if dlg in cls._instances else None)
+        dlg.show()

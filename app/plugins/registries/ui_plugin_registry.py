@@ -6,7 +6,8 @@
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional
 
 if TYPE_CHECKING:
     from app.core.command_manager import CommandType  # noqa: F401
@@ -1096,6 +1097,27 @@ class UIPluginRegistry:
             pass
         return None
 
+    @contextmanager
+    def tab_sync_guard(self) -> Iterator[None]:
+        """Tab 切换投影保护（上下文管理器，公开面）
+
+        切换标签页期间对浮动卡片的 show/hide 属于「per-tab 状态投影」——
+        被隐藏的卡片仍是其归属标签页的打开卡片（open 集合保留），仅暂时
+        不可见。此期间触发的 on_card_hidden 回调（_on_hidden_for_tab）必须
+        跳过 per-tab 可见集合的清除，否则卡片从集合丢失后，下次切换回来
+        sync_floating_cards_to_tab 会因 want=False & now=True 误执行
+        hide_card，进而触发 TabManagerWindow 的 120ms 关闭去抖判定，
+        导致 full 卡片被误关。
+
+        使用方：本类的 sync_floating_cards_to_tab，以及 TabManagerWindow
+        的 _sync_overlay_cards_to_active_window（覆盖层投影的另一条路径）。
+        """
+        self._tab_sync_in_progress = True
+        try:
+            yield
+        finally:
+            self._tab_sync_in_progress = False
+
     def sync_floating_cards_to_tab(self, scope: str) -> None:
         """切换标签页时把浮动卡片显隐投影到目标标签页（Tab 模式 per-tab 隔离）
 
@@ -1117,8 +1139,7 @@ class UIPluginRegistry:
         self._active_tab_scope = scope
         target = self._tab_card_visibility.get(scope, set())
         instances = self._card_widget_instances.get(host_wid, {})
-        self._tab_sync_in_progress = True
-        try:
+        with self.tab_sync_guard():
             for card_id in list(self._floating_cards.keys()):
                 if card_id not in instances:
                     # 从未实例化的卡片无需投影（首次打开时才创建）
@@ -1132,8 +1153,6 @@ class UIPluginRegistry:
                         cm.hide_card(card_id, host_wid)
                 except Exception:
                     continue
-        finally:
-            self._tab_sync_in_progress = False
 
     def load_plugin(self, plugin_name: str, plugin_path) -> bool:
         """加载插件的 ui 组件

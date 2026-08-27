@@ -520,6 +520,10 @@ class ConfigSyncService(QObject):
             #  若同步发生在该卡片构建前，写回 ui_theme_style.value 无监听者，qfluentwidgets
             #  图标/样式不会全量刷新，只更新配置值。通过 dispatch_refresh 兜底显式刷新。）
             _old_theme_id = cfg.ui_theme_style.value
+            # 云端 qfluentwidgets ThemeMode 与内存不一致（跨设备深/浅色同步场景）。
+            # 不直接写内存（见下方写回循环特判），由 _delayed_theme_refresh 的
+            # setTheme 正规链完成切换。
+            _cloud_theme_mode_differs = False
 
             # ── 主题先注册，再恢复配置 ──
             # 下方全量手动同步会把 ui_theme_style 从云端 app.config 写回内存；其 value setter
@@ -556,6 +560,20 @@ class ConfigSyncService(QObject):
                                 _matched = _name
                                 break
                         if _matched:
+                            # 🐛 特判：qfluentwidgets 全局主题模式不直接写内存。
+                            # 直接 .value= 绕过 qconfig.set()，qconfig.theme 内部态
+                            # （图标/QSS 生成依据）不会同步更新；且 150ms 后
+                            # _delayed_theme_refresh → dispatch_refresh → setTheme
+                            # 因 themeMode.value 已被提前改写而命中 qconfig.set
+                            # 的幂等短路（值相同直接 return）→ themeChanged 不发射、
+                            # updateStyleSheet 用旧主题重刷 → 图标与 qfluentwidgets
+                            # 组件字体颜色停留旧主题（同步后「半切换」）。此处跳过
+                            # 写回、仅记录差异，把内存切换交给 setTheme 正规链
+                            # （磁盘文件已是云端权威值，无需内存补写）。
+                            if _section_name == "QFluentWidgets" and _key == "ThemeMode":
+                                if getattr(cfg, _matched).serialize() != _value:
+                                    _cloud_theme_mode_differs = True
+                                continue
                             # 🚀 P5d：diff 短路——内存值已等于云端值时跳过赋值，
                             # 省掉 setter + valueChanged 信号发射完整监听链路径
                             # （隔天同步时多数配置未变，仅此项即可消除主线程 200-500ms 占用）
@@ -582,7 +600,9 @@ class ConfigSyncService(QObject):
             try:
                 QTimer.singleShot(
                     150,
-                    lambda cfg=cfg, old=_old_theme_id: self._delayed_theme_refresh(cfg, old),
+                    lambda cfg=cfg, old=_old_theme_id, tm_diff=_cloud_theme_mode_differs: self._delayed_theme_refresh(
+                        cfg, old, tm_diff
+                    ),
                 )
             except Exception as _te:
                 logger.warning(f"[ConfigSync] 下载后主题全量刷新调度失败: {_te}")
@@ -622,20 +642,27 @@ class ConfigSyncService(QObject):
             self._set_state("idle")
             self.syncDone.emit(True, msg)
 
-    def _delayed_theme_refresh(self, cfg, old_theme_id):
+    def _delayed_theme_refresh(self, cfg, old_theme_id, cloud_theme_mode_differs=False):
         """延迟分片：写回完成后 ~150ms 执行主题显式全量刷新（修复 bug#6 兜底）
 
         🚀 P5d：从 _reload_settings_on_main_thread 拆出的独立 QTimer 分片，
         避免单次事件循环内写回 + dispatch_refresh（全窗口 refresh_theme）
         连续 1-2s 阻塞主线程。仅当主题值确实变化才刷新（diff 短路）。
+
+        cloud_theme_mode_differs：云端 qfluentwidgets ThemeMode 与本地不一致
+        （themeMode 未直写内存，见 _reload_settings_on_main_thread 写回循环特判）。
+        此时也触发 dispatch_refresh → setTheme 正规链：themeMode 内存值仍为旧值，
+        set 不被幂等短路 → themeChanged 发射 + qconfig.theme 同步 + 图标/QSS 刷新。
         """
         try:
-            if cfg.ui_theme_style.value != old_theme_id:
+            if cfg.ui_theme_style.value != old_theme_id or cloud_theme_mode_differs:
                 from app.utils.theme_manager import theme_manager as _tm
 
                 _tm.dispatch_refresh()
                 logger.info(
-                    f"[ConfigSync] 主题已从 {old_theme_id} → {cfg.ui_theme_style.value}，显式全量刷新"
+                    f"[ConfigSync] 主题已从 {old_theme_id} → {cfg.ui_theme_style.value}"
+                    + ("（含深浅模式）" if cloud_theme_mode_differs else "")
+                    + "，显式全量刷新"
                 )
         except Exception as _te:
             logger.warning(f"[ConfigSync] 下载后主题全量刷新失败: {_te}")
@@ -1615,7 +1642,7 @@ class ConfigSyncService(QObject):
                 if self._user_custom_path.exists():
                     shutil.rmtree(str(self._user_custom_path))
                 shutil.move(str(_tmp_extract), str(self._user_custom_path))
-            except (RuntimeError, zipfile.BadZipFile):
+            except RuntimeError, zipfile.BadZipFile:
                 # 解压失败 → 回滚
                 if self._user_custom_path.exists():
                     shutil.rmtree(str(self._user_custom_path))

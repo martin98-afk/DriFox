@@ -20,6 +20,26 @@
     number    整数输入（SpinBox），可选 min/max/step
     textarea  多行文本（TextEdit），可选 rows（显示行数）
     link      外链按钮（可点击超链接，必须声明 url；无存储值，纯展示）
+    action    动作按钮（必须声明 action 对象；无存储值）。
+              声明式工具编排：点击 → 调注册工具（args）→ image_data 弹窗展示 +
+              content 作状态文案 → 可选 poll 声明按模板轮询至终止条件。通用机制，
+              宿主不含任何平台/插件专属逻辑。
+
+类型别名（向前兼容，社区插件可能误用：解析时归一化后再校验）：
+    int / integer  →  number
+
+action 对象结构（全部声明在插件 plugin.json，宿主零硬编码）：
+    {"tool": "<注册工具名>",
+     "args": {…工具参数…},
+     "poll": {                          # 可选：不声明则单击单次调用
+       "args": {…},                    # 轮询参数模板，支持 {data.<key>} 占位
+                                        #   （取上一次结果 data 字段的值）
+       "interval_ms": 3000,            # 轮询间隔（默认 3000）
+       "max_rounds": 60,               # 最大轮次（默认 60）
+       "stop_when": {"data.status": ["confirmed", "expired"]}
+                                        # 终止条件：key 为结果寻址路径
+                                        #   （data.<key> / error），值为命中集合
+     }}
 
 select 的 options 声明（value 为存储值，label 为显示名）：
     "options": {"a": "选项A", "b": "选项B"}            # dict: value → label
@@ -35,7 +55,14 @@ from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 
 # 支持的字段类型（渲染映射见 plugin_config_card.py）
-FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea", "link")
+FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea", "link", "action")
+
+# 类型别名：非标准写法 → 标准 type（解析时归一化，老插件不被打回整个 schema）
+# 仅做容错；新插件仍应按 FIELD_TYPES 书写
+TYPE_ALIASES = {
+    "int": "number",
+    "integer": "number",
+}
 
 # number 默认范围（SpinBox 默认 0~2^31-1，与 qfluentwidgets SpinBox 一致）
 _NUMBER_DEFAULT_MIN = 0
@@ -60,6 +87,7 @@ class PluginConfigField:
         step: number 专用，步长（默认 1）
         rows: textarea 专用，显示行数（默认 3）
         url: link 专用，点击跳转的外部地址（必填）
+        action: action 专用，ToolActionSpec 声明（必填；tool+args+可选 poll）
     """
 
     key: str
@@ -75,6 +103,46 @@ class PluginConfigField:
     step: int = 1
     rows: int = 3
     url: str = ""
+    action: Optional["ToolActionSpec"] = None
+
+
+@dataclass(frozen=True)
+class ToolActionPoll:
+    """action 字段轮询声明（宿主通用编排消费，无平台知识）
+
+    Attributes:
+        args: 轮询参数模板。字符串值支持 {data.<key>} 占位符，
+              运行时取上一次 ToolResult.data 的对应键值替换
+        interval_ms: 轮询间隔毫秒（默认 3000，下限 1000 防打爆）
+        max_rounds: 最大轮次（默认 60）
+        stop_when: 终止条件 {路径: 命中集合}。路径支持 data.<key> 与 error
+    """
+
+    args: Dict[str, Any] = field(default_factory=dict)
+    interval_ms: int = 3000
+    max_rounds: int = 60
+    stop_when: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ToolActionSpec:
+    """action 字段声明：点击设置卡按钮时执行的工具编排
+
+    Attributes:
+        tool: 注册工具名（ToolRegistry.get 查得；未注册则按钮报错提示）
+        args: 初始调用参数（原样传给工具 impl）
+        poll: 可选轮询声明（不声明则单击单次调用）
+        image_width: 弹窗图片展示宽度 px（默认 340；插件按二维码可扫性声明更大值）
+        dialog_width: 弹窗最小宽度 px（默认 420）
+        dialog_height: 弹窗最小高度 px（默认 0=自适应）
+    """
+
+    tool: str
+    args: Dict[str, Any] = field(default_factory=dict)
+    poll: Optional[ToolActionPoll] = None
+    image_width: int = 340
+    dialog_width: int = 420
+    dialog_height: int = 0
 
 
 @dataclass(frozen=True)
@@ -157,6 +225,7 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
             logger.warning(f"[PluginConfig] {plugin_name} 字段缺 key，忽略整个 schema: {item!r}")
             return None
         ftype = str(item.get("type") or "text")
+        ftype = TYPE_ALIASES.get(ftype, ftype)  # 兼容老插件误用 int/integer 等
         if ftype not in FIELD_TYPES:
             logger.warning(f"[PluginConfig] {plugin_name} 字段 {key} 类型未知({ftype})，忽略整个 schema")
             return None
@@ -175,6 +244,11 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
             if not url.startswith(("http://", "https://")):
                 logger.warning(f"[PluginConfig] {plugin_name} 字段 {key} link 缺合法 url(http/https)，忽略整个 schema")
                 return None
+        action_spec: Optional[ToolActionSpec] = None
+        if ftype == "action":
+            action_spec = _parse_tool_action(plugin_name, key, item.get("action"))
+            if action_spec is None:
+                return None
         fields.append(
             PluginConfigField(
                 key=key,
@@ -190,6 +264,51 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
                 step=_parse_optional_int(item.get("step"), 1) if ftype == "number" else 1,
                 rows=_parse_optional_int(item.get("rows"), 3) if ftype == "textarea" else 3,
                 url=url,
+                action=action_spec,
             )
         )
     return PluginConfigSchema(plugin_name=plugin_name, title=title, fields=fields)
+
+
+def _parse_tool_action(plugin_name: str, key: str, raw: Any) -> Optional[ToolActionSpec]:
+    """解析 action 字段的工具编排声明（通用契约，无平台知识）。
+
+    非法声明 → None（整个 schema 忽略，记 warning）。轮询参数模板不在此处校验
+    占位符（运行时未命中占位即按字面量传，由工具自行报错）。"""
+    if not isinstance(raw, dict):
+        logger.warning(f"[PluginConfig] {plugin_name} 字段 {key} action 非对象，忽略整个 schema: {raw!r}")
+        return None
+    tool = str(raw.get("tool") or "").strip()
+    if not tool:
+        logger.warning(f"[PluginConfig] {plugin_name} 字段 {key} action 缺 tool，忽略整个 schema")
+        return None
+    args = raw.get("args") if isinstance(raw.get("args"), dict) else {}
+
+    poll_spec: Optional[ToolActionPoll] = None
+    raw_poll = raw.get("poll")
+    if raw_poll is not None:
+        if not isinstance(raw_poll, dict):
+            logger.warning(f"[PluginConfig] {plugin_name} 字段 {key} action.poll 非对象，忽略整个 schema")
+            return None
+        raw_stop = raw_poll.get("stop_when") if isinstance(raw_poll.get("stop_when"), dict) else {}
+        stop_when: Dict[str, Tuple[str, ...]] = {}
+        for path, hits in raw_stop.items():
+            if isinstance(hits, (list, tuple)):
+                stop_when[str(path)] = tuple(str(h) for h in hits)
+            else:
+                stop_when[str(path)] = (str(hits),)
+        poll_spec = ToolActionPoll(
+            args=raw_poll.get("args") if isinstance(raw_poll.get("args"), dict) else {},
+            interval_ms=max(_parse_optional_int(raw_poll.get("interval_ms"), 3000) or 3000, 1000),
+            max_rounds=max(_parse_optional_int(raw_poll.get("max_rounds"), 60) or 60, 1),
+            stop_when=stop_when,
+        )
+
+    return ToolActionSpec(
+        tool=tool,
+        args=dict(args),
+        poll=poll_spec,
+        image_width=max(_parse_optional_int(raw.get("image_width"), 340) or 340, 120),
+        dialog_width=max(_parse_optional_int(raw.get("dialog_width"), 420) or 420, 200),
+        dialog_height=max(_parse_optional_int(raw.get("dialog_height"), 0) or 0, 0),
+    )

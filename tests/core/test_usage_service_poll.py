@@ -146,3 +146,51 @@ def test_failed_fetch_registers_active_key_for_retry(monkeypatch):
     svc._on_poll_tick()
     _wait(lambda: len(calls) == 2)
     assert svc._poll_timer.isActive(), "重试路径轮询继续"
+
+
+def test_poll_tick_force_bypasses_cache(monkeypatch):
+    """根因 C：TTL(60s) 与 tick 周期(60s) 同长 + 抓取耗时 → tick 时缓存
+    age 恒 < TTL → 旧行为永远命中缓存广播旧值，实际每 2 轮才真刷新。
+    force=True 后 tick 每轮必重拉。"""
+    calls = []
+
+    def counting_fetcher(config):
+        calls.append(1)
+        return dict(EMPTY_PLAN)
+
+    svc = _make_svc(monkeypatch, counting_fetcher)
+
+    # 首次请求：抓取 1 次，写缓存
+    svc.request_coding_plan(PROVIDER, CONFIG_ID, CONFIG)
+    _wait(lambda: len(calls) == 1)
+    assert (PROVIDER, CONFIG_ID) in svc._plan_cache
+
+    # tick 模拟：缓存 age < TTL（刚写完）→ 非 force 会命中缓存不重拉
+    svc._poll_timer.stop()
+    svc._on_poll_tick()
+    _wait(lambda: len(calls) == 2)
+    assert len(calls) == 2, "tick(force=True) 必须跳过缓存命中强制重拉（回归）"
+    assert svc._poll_timer.isActive(), "tick 后轮询 timer 继续"
+
+
+def test_force_request_ignores_cache_hit(monkeypatch):
+    """force=True 直接请求：缓存未过期也重拉（等价 tick 路径语义）"""
+    calls = []
+
+    def counting_fetcher(config):
+        calls.append(1)
+        return dict(EMPTY_PLAN)
+
+    svc = _make_svc(monkeypatch, counting_fetcher)
+
+    svc.request_coding_plan(PROVIDER, CONFIG_ID, CONFIG)
+    _wait(lambda: len(calls) == 1)
+
+    svc.request_coding_plan(PROVIDER, CONFIG_ID, CONFIG, force=True)
+    _wait(lambda: len(calls) == 2)
+    assert len(calls) == 2, "force=True 时缓存未过期也必须重拉（回归）"
+
+    # 对照：非 force 缓存未过期 → 不重拉（保留原行为）
+    svc.request_coding_plan(PROVIDER, CONFIG_ID, CONFIG)
+    time.sleep(0.05)
+    assert len(calls) == 2, "非 force 缓存命中不应重拉"

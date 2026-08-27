@@ -509,6 +509,11 @@ class Settings(QConfig):
     # 开启后锁屏状态下也保持系统唤醒、屏幕常亮，便于手机远程操控与自动化持续运行
     lock_screen_remote_enabled = ConfigItem("System", "LockScreenRemote", False, BoolValidator())
 
+    # ========== 插件 pip 依赖安装 ==========
+    # 市场插件 dependencies.pip 声明的依赖安装源（uv/wheel 回退共用）；
+    # 空串 = PyPI 官方源；国内可填如 https://pypi.tuna.tsinghua.edu.cn/simple
+    pip_index_url = ConfigItem("Pip", "IndexURL", "")
+
     # ========== Tab 管理器 ==========
     enable_tab_manager = ConfigItem("UI", "EnableTabManager", True, BoolValidator())
     # 窗口几何/面板宽度不做记忆（打开时固定默认 960x640 居中 + panel 280），

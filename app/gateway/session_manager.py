@@ -33,10 +33,11 @@ class GatewaySession:
 
     @property
     def display_name(self) -> str:
-        """显示名称"""
+        """显示名称（platform 兼容 str 直通：第三方平台 id）"""
+        p = getattr(self.platform, "value", self.platform)
         if self.user_name:
-            return f"{self.user_name} ({self.platform.value})"
-        return f"{self.user_id[:8]}... ({self.platform.value})"
+            return f"{self.user_name} ({p})"
+        return f"{self.user_id[:8]}... ({p})"
 
 
 class GatewaySessionManager:
@@ -86,9 +87,14 @@ class GatewaySessionManager:
                     data = json.load(f)
 
                 for session_id, info in data.items():
+                    raw_platform = info["platform"]
+                    try:
+                        platform = Platform(raw_platform)  # 枚举内平台（wecom/dingtalk…）
+                    except ValueError:
+                        platform = raw_platform  # 第三方平台 id（str 直通，Phase E 契约）
                     session = GatewaySession(
                         session_id=session_id,
-                        platform=Platform(info["platform"]),
+                        platform=platform,
                         user_id=info["user_id"],
                         chat_id=info["chat_id"],
                         user_name=info.get("user_name", ""),
@@ -114,7 +120,7 @@ class GatewaySessionManager:
             data = {}
             for session_id, session in self._sessions.items():
                 data[session_id] = {
-                    "platform": session.platform.value,
+                    "platform": getattr(session.platform, "value", session.platform),
                     "user_id": session.user_id,
                     "chat_id": session.chat_id,
                     "user_name": session.user_name,
@@ -129,10 +135,10 @@ class GatewaySessionManager:
             logger.warning(f"[GatewaySession] Failed to save sessions: {e}")
 
     def _generate_session_id(self, platform: Platform, user_id: str) -> str:
-        """生成会话 ID"""
+        """生成会话 ID（platform 兼容 str 直通）"""
         import hashlib
         timestamp = str(int(time.time() * 1000))
-        raw = f"{platform.value}:{user_id}:{timestamp}"
+        raw = f"{getattr(platform, 'value', platform)}:{user_id}:{timestamp}"
         return hashlib.md5(raw.encode()).hexdigest()[:16]
 
     def get_or_create_session(self, event: MessageEvent) -> GatewaySession:
@@ -188,7 +194,7 @@ class GatewaySessionManager:
             except Exception as e:
                 logger.warning(f"[GatewaySession] Create callback error: {e}")
 
-        logger.info(f"[GatewaySession] Created session {session_id} for {user_id} on {platform.value}")
+        logger.info(f"[GatewaySession] Created session {session_id} for {user_id} on {getattr(platform, 'value', platform)}")
 
         return session
 

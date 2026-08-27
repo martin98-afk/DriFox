@@ -110,15 +110,43 @@ class PlatformManager:
                 logger.warning(f"[PlatformManager] {d.display_name} 插件加载失败: {e}")
 
     def _ensure_adapter(self, platform: str) -> Optional[BasePlatformAdapter]:
-        """确保某平台 adapter 已加载到 _adapters；缺失则按 registry def 动态加载。
+        """确保某平台 adapter 已加载到 _adapters；缺失或配置已失效时按 registry def 加载/重建。
 
         解决“热安装/热注册平台晚于 manager 单例创建”时 _adapters 不更新、
         start 静默失败（必须重启 manager 才生效）的根因：启用即加载即启动。
-        adapter 已存在时直接返回（不重建，保留热更新重建的实例）。
+        adapter 已存在且未在运行时直接返回；已存在但配置无效（validate_config
+        不过，如扫码后 token 才写入、旧实例持空配置）则重建，避免开关启用
+        仍连旧空配置。
         """
         existing = self._adapters.get(platform)
         if existing is not None:
-            return existing
+            if existing.is_connected or not getattr(existing, "_running", False):
+                if existing.is_connected:
+                    return existing
+            # 未连接：校验当前配置是否仍有效；无效（如 token 后写入）则重建
+            if not existing.is_connected:
+                try:
+                    from app.plugins.registries.gateway_platform_registry import (
+                        GatewayPlatformRegistry as _Reg,
+                    )
+
+                    d0 = _Reg.get_instance().get(platform)
+                    if d0 is not None and d0.validate_config is not None:
+                        cfg0 = d0.config_builder() if d0.config_builder else None
+                        ok0, _ = d0.validate_config(cfg0)
+                        if ok0 and existing._last_error:
+                            # 配置已补齐：丢弃旧实例走重建（先停旧实例，防
+                            # poll/listen task 泄漏导致同平台双收重发）
+                            logger.info(f"[PlatformManager] {platform} 配置已更新，重建 adapter")
+                            old = self._adapters.pop(platform, None)
+                            if old is not None:
+                                self._schedule_coro(self._stop_adapter_async(old))
+                        else:
+                            return existing
+                    else:
+                        return existing
+                except Exception:
+                    return existing
         from app.plugins.registries.gateway_platform_registry import (
             GatewayPlatformRegistry,
         )
@@ -285,19 +313,22 @@ class PlatformManager:
         return results
 
     async def _stop_all_async(self) -> None:
-        """后台停止所有平台"""
+        """后台停止所有平台
+
+        无条件 stop（不查 is_connected）：泄漏实例（_connected=False 但
+        poll/listen task 仍活着）也必须走 stop 清理；base.stop 幂等。
+        """
         if not self._running:
             return
 
         self._running = False
 
         for platform, adapter in self._adapters.items():
-            if adapter.is_connected:
-                try:
-                    await adapter.stop()
-                    logger.info(f"[PlatformManager] {platform} stopped")
-                except Exception as e:
-                    logger.error(f"[PlatformManager] {platform} stop error: {e}", exc_info=True)
+            try:
+                await adapter.stop()
+                logger.info(f"[PlatformManager] {platform} stopped")
+            except Exception as e:
+                logger.error(f"[PlatformManager] {platform} stop error: {e}", exc_info=True)
 
         self._notify_status()
 
@@ -434,10 +465,16 @@ class PlatformManager:
         return success
 
     async def _stop_platform_async(self, platform: str) -> None:
-        """在后台事件循环上停止平台"""
+        """在后台事件循环上停止平台
+
+        无条件 stop（不查 is_connected）：泄漏实例（_connected=False 但
+        poll/listen task 仍活着，如长轮询退避重试中）也必须走 stop 清理；
+        base.stop 幂等，重复调用无害。与 stop_plugin_platforms 的修复对齐
+        （历史同款 bug：is_connected 前置检查跳过 stop → 连接永久泄漏）。
+        """
         adapter = self._adapters.get(platform)
-        if adapter and adapter.is_connected:
-            await adapter.stop()
+        if adapter is not None:
+            await self._stop_adapter_async(adapter)
         self._notify_status()
 
     def get_status(self) -> Dict[str, Any]:

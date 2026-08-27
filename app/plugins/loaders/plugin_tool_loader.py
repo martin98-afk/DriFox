@@ -176,6 +176,7 @@ class _PluginRegistryProxy:
             render_mode=meta.get("render_mode", ""),
             preview=meta.get("preview"),
             summarize=meta.get("summarize"),
+            keep_in_content=bool(meta.get("keep_in_content", False)),
             source=f"plugin:{self._plugin_name}",
             metadata=merged_metadata,
         )
