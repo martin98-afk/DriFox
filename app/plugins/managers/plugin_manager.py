@@ -221,6 +221,35 @@ class PluginManager:
         # 自动从 Settings 恢复已启用状态
         self._restore_enabled_from_settings()
 
+        # ── hooks 兜底：PluginManager 初始化成功后，强制 reload 已存在的 AgentManager 单例 ──
+        # 事故背景（2026-08-28）：backend 在 PluginManager.initialize() 之前抢先创建 AgentManager
+        # 全局单例 → 首建时 pm 未就绪静默加载 0 hooks；该单例幂等不重试，且原本依赖
+        # PluginHostService.ensure_started() 的 reload_agents() 兜底。一旦兜底因 pm.initialize 异常
+        # 被吞或 ensure_started 未走到，单例永久停在 0 hooks → 所有 hook 加载不出来。
+        # 此处把兜底内嵌进 pm.initialize 成功路径：只要 pm 初始化成功，必然触发一次 reload，
+        # 与 PluginHostService 的兜底形成双保险，彻底消除对单一兜底点的依赖。
+        try:
+            from app.core.agent import AgentManager
+
+            for _am in AgentManager._instances:
+                # 仅对「pm 未就绪时抢先创建、未成功加载 hooks」的单例兜底 reload，
+                # 已正确加载（hooks 非空）的单例跳过，避免重复 reload 与状态污染。
+                # ⚠️ 判断依据是 _hook_manager 持有的 hooks（_am._hooks 属性不存在，
+                # 原写法会抛 AttributeError 被外层 except 吞掉 → 兜底形同虚设）。
+                if _am._hook_manager is None:
+                    continue
+                try:
+                    if _am._hook_manager._hooks:
+                        continue
+                except Exception:
+                    pass
+                try:
+                    _am.reload_agents()
+                except Exception as _e:
+                    logger.error(f"[PluginManager] AgentManager 兜底 reload 失败: {_e}")
+        except Exception:
+            pass
+
     def _restore_enabled_from_settings(self):
         """从 Settings 恢复已启用插件状态，新发现的插件默认启用（D8：跳过禁用集）"""
         try:

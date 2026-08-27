@@ -321,14 +321,30 @@ class AgentManager:
     """Agent/Skill 管理器（全局单例，跨窗口共享）"""
 
     _instance = None
+    # 已创建的实例列表：供 PluginManager.initialize 成功后自动 reload hooks，
+    # 兜底「backend 抢先创建 AgentManager 单例时 pm 未就绪 → 静默加载 0 hooks」事故
+    # （详见 plugin_host_service.py 59-64 行注释，2026-08-28 事故根因）。
+    _instances: List["AgentManager"] = []
 
     @classmethod
     def get_instance(
         cls, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None
     ) -> "AgentManager":
-        """获取全局唯一的 AgentManager 实例（首次创建时加载 agents，后续复用）"""
+        """获取全局唯一的 AgentManager 实例（首次创建时加载 agents，后续复用）。
+
+        幂等但可补丁：单例可能被无 hook_manager 的调用方（GatewayService 等）抢先创建，
+        导致 _hook_manager=None → 后续 reload_agents 的 hooks 分支全部跳过（0 hooks 事故根因）。
+        此处兜底：后续传入非空 hook_manager 且单例尚未持有时，补丁注入（hooks 注册目标由此就绪）。
+        """
         if cls._instance is None:
             cls._instance = cls(agents_dir, hook_manager)
+        else:
+            # 🛡️ 2026-08-28 hook 全灭根因：GatewayService 先于 PluginHostService 用
+            # get_instance(None, None) 创建单例 → PluginHostService 再传 host_hook_manager
+            # 也拿不到（get_instance 幂等），_hook_manager 恒为 None，load_hooks 分支永不执行。
+            # 补丁注入后，调用方随后的 reload_agents() 即可完整加载插件 hooks。
+            if hook_manager is not None and cls._instance._hook_manager is None:
+                cls._instance._hook_manager = hook_manager
         return cls._instance
 
     def __init__(self, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None):
@@ -344,6 +360,9 @@ class AgentManager:
         # key: (agent_name, is_subagent_call), value: system_prompt string
         self._system_prompt_cache: Dict[tuple, str] = {}
         self._load_agents()
+        # 注册到全局实例表，供 PluginManager.initialize 成功后兜底 reload（见 plugin_manager）
+        if self not in AgentManager._instances:
+            AgentManager._instances.append(self)
 
     def _load_agents(self, force: bool = False):
         """加载智能体：插件路径优先，后备路径兜底
@@ -376,8 +395,15 @@ class AgentManager:
                     agent_dir = plugin.path / "agents"
                     if agent_dir.exists():
                         self._load_agents_from_dir(agent_dir, source_plugin=plugin.name)
-        except (ImportError, Exception):
-            pass
+            else:
+                # 时序哨兵：此分支曾静默导致 agents 全灭（单例在 pm.initialize 前
+                # 创建 → 0 加载 → get_instance 幂等永不重试），必须留下痕迹
+                logger.warning(
+                    "[AgentManager] PluginManager 未初始化，本次不加载插件 agents "
+                    "（若随后有 reload_agents 兕底则正常，否则即初始化时序缺陷）"
+                )
+        except Exception as e:
+            logger.warning(f"[AgentManager] 插件 agents 加载失败: {e}")
 
     def reload_agents(self):
         """重新从已启用插件加载智能体和 hooks（运行时重载用）"""
@@ -536,8 +562,15 @@ class AgentManager:
                     self._hook_manager.load_hooks_from_directory_flat(
                         hooks_dir, skill_name=plugin.name, is_system_plugin=plugin.is_system
                     )
-        except (ImportError, Exception):
-            pass
+            else:
+                # 时序哨兵：此分支曾静默导致全部插件 hooks 永久缺失且无迹可寻
+                # （2026-08-28 hooks 全灭事故根因之一），必须留下痕迹
+                logger.warning(
+                    "[AgentManager] PluginManager 未初始化，本次不加载任何插件 hooks "
+                    "（若随后有 reload_agents 兕底则正常，否则即初始化时序缺陷）"
+                )
+        except Exception as e:
+            logger.warning(f"[AgentManager] 插件 hooks 加载失败: {e}")
 
     def _load_agents_from_dir(self, agents_dir: Path, source_plugin: str = None):
         """从指定目录加载所有智能体
