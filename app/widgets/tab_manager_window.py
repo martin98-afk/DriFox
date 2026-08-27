@@ -429,12 +429,13 @@ class TabManagerWindow(QWidget):
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
-        # ── 应用级 Gateway 服务（本类是应用生命周期容器，故在此创建/启停） ──
-        # 一个应用一个 GatewayService：与任何 ChatWindow/tab 生命周期解耦，
-        # 关闭任意标签页不影响飞书/企微等平台收发。
+        # ── 应用级服务（本类是应用生命周期容器，故在此创建/启停） ──
+        # 一个应用一个实例：与任何 ChatWindow/tab 生命周期解耦。
         from app.core.gateway_service import GatewayService
+        from app.core.plugin_host_service import PluginHostService
 
         GatewayService.get_instance().ensure_started()
+        PluginHostService.get_instance().ensure_started()
 
         # 全局卡片控制器：系统设置/服务商编辑/Hook/MCP 卡片挂载在 Tab 窗口层
         # （单例在此处初始化，确保全局容器已随 _setup_ui 创建完毕）
@@ -3080,11 +3081,13 @@ class TabManagerWindow(QWidget):
     def cleanup(self):
         """清理所有窗口和资源"""
         TabManagerWindow._instance = None
-        # ★ 停止应用级 Gateway 服务（平台 WebSocket 断连）——先于窗口关闭
+        # ★ 停止应用级服务（Gateway 平台 WebSocket 断连 + 插件 watcher 线程）
         try:
             from app.core.gateway_service import GatewayService
+            from app.core.plugin_host_service import PluginHostService
 
             GatewayService.get_instance().stop()
+            PluginHostService.get_instance().stop()
         except Exception:
             pass
         # ★ 清理全局桌宠（停止所有定时器），先于窗口关闭避免悬空引用

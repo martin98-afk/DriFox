@@ -307,7 +307,6 @@ def main():
             pass
 
     fake_page = FakePage()
-    chat_window = OpenAIChatToolWindow(fake_page)
 
     def _activate_window(window):
         """激活窗口：显示 + 置前 + 还原"""
@@ -332,6 +331,12 @@ def main():
         from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
         tm = TabManagerWindow.create_instance()
+        # 首个 ChatWindow 必须在 TabManagerWindow 创建之后构造：
+        # TabManagerWindow.__init__ 里 PluginHostService.ensure_started() 同步完成
+        # PluginManager 扫描；若先构造本窗口，其 setup_ui 的 _load_all_ui_plugins 与
+        # 首帧 singleShot(0) 重试都会早于 ensure_started 执行（pm 未就绪静默 return），
+        # 此后无人再触发 UI 插件装载 → 主窗口插件内容（卡片/侧边栏/输入按钮）全部缺失。
+        chat_window = OpenAIChatToolWindow(fake_page)
         tm.add_window(chat_window)
         _guard.show_requested.connect(lambda: _activate_window(tm))
         tm.show()

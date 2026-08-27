@@ -4,6 +4,17 @@
 from unittest.mock import MagicMock
 
 import pytest
+from PyQt5.QtCore import QObject
+
+from app.core.plugin_host_service import PluginHostService
+
+
+def _make_host():
+    """构造脱离单例/生命周期约束的 PluginHostService 实例（纯插件分派测试用）"""
+    svc = PluginHostService.__new__(PluginHostService)
+    QObject.__init__(svc)
+    svc._agent_manager = None
+    return svc
 
 
 @pytest.fixture()
@@ -43,7 +54,7 @@ def test_dispatch_via_registry(kernel_env, monkeypatch):
     calls = []
     reg.register("themes", lambda ctx: calls.append(ctx.component) or True)
 
-    backend = ChatBackend.__new__(ChatBackend)  # 跳过 __init__（不做真实初始化）
+    backend = _make_host()  # 跳过 __init__（不做真实初始化）
     monkeypatch.setattr(
         "app.plugins.managers.plugin_manager.PluginManager.get_instance",
         staticmethod(lambda: fake_pm),
@@ -80,7 +91,7 @@ def test_dispatch_deleted_plugin_triggers_cleanup_path(kernel_env, monkeypatch):
     reg.register("commands", lambda ctx: seen.append(("commands", ctx.plugin is None)) or True)
     reg.register("skills", lambda ctx: seen.append(("skills", ctx.plugin is None)) or True)
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     # 给 backend 实例补齐删除段依赖的属性（__new__ 跳过 __init__，默认无任何属性）
     backend._watcher_dedup_cache = {}
     backend._agent_manager = MagicMock()  # builtin_reloaders._RUNTIME 注入前占位（实际不被命中）
@@ -106,7 +117,7 @@ def test_unknown_component_skipped(kernel_env, monkeypatch):
     calls = []
     reg.register("bogus", lambda ctx: calls.append(ctx.component) or True)
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     monkeypatch.setattr(
         "app.plugins.managers.plugin_manager.PluginManager.get_instance",
         staticmethod(lambda: fake_pm),
@@ -135,7 +146,7 @@ def test_agents_dispatch_marks_hooks_and_commands(kernel_env, monkeypatch):
     calls = []
     reg.register("agents", lambda ctx: calls.append(ctx.component) or 3)
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     monkeypatch.setattr(
         "app.plugins.managers.plugin_manager.PluginManager.get_instance",
         staticmethod(lambda: fake_pm),
@@ -180,7 +191,7 @@ def test_delete_path_iterates_by_component_order(kernel_env, monkeypatch):
 
     from app.core.backend import ChatBackend
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     backend._watcher_dedup_cache = {}
     monkeypatch.setattr(
         "app.plugins.managers.plugin_manager.PluginManager.get_instance",
@@ -204,7 +215,7 @@ def test_reload_plugin_targeted_dispatches_manifest(kernel_env, monkeypatch):
     reg, fake_pm = kernel_env
     from app.core.backend import ChatBackend
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     calls: list = []
     monkeypatch.setattr(backend, "_reload_single_plugin", lambda n, c: calls.append((n, c)) or {})
     backend.reload_plugin_targeted("workbuddy")
@@ -216,7 +227,7 @@ def test_reload_plugin_targeted_empty_falls_back_to_full(kernel_env, monkeypatch
     reg, fake_pm = kernel_env
     from app.core.backend import ChatBackend
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     calls: list = []
     monkeypatch.setattr(backend, "reload_plugin_subsystems", lambda: calls.append(True) or {})
     backend.reload_plugin_targeted("")
@@ -237,7 +248,7 @@ def test_reload_plugin_targeted_emits_plugin_changed(kernel_env, monkeypatch):
     fake_plugin.components = {"ui": True}
     fake_plugin.has_component = lambda c: fake_plugin.components.get(c, False)
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     # __new__ 实例无 C++ 对象，访问 Qt 信号必抛 RuntimeError →
     # 在 emit_plugin_changed 层断言（信号→窗口槽链路由 test_input_button_hot_reload 覆盖）
     emitted: list = []
@@ -283,7 +294,7 @@ def test_reload_plugin_subsystems_diff_precise(kernel_env, monkeypatch):
         "changed": [_FakeDiffPlugin("touched-plug", {"commands": True})],
     }
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     backend._watcher_dedup_cache = {}
     seen: list = []
     cleanup_calls: list = []
@@ -326,7 +337,7 @@ def test_reload_plugin_subsystems_no_diff_skips(kernel_env, monkeypatch):
         staticmethod(lambda: fake_pm),
     )
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     backend._watcher_dedup_cache = {}
     reloaded: list = []
     monkeypatch.setattr(backend, "_reload_single_plugin", lambda n, c: reloaded.append(n) or {})
@@ -353,7 +364,7 @@ def test_reload_plugin_subsystems_force_full(kernel_env, monkeypatch):
         staticmethod(lambda: fake_pm),
     )
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     backend._watcher_dedup_cache = {}
     called: list = []
     monkeypatch.setattr(backend, "_reload_all_subsystems", lambda pm, res, keys: called.append(True) or res)

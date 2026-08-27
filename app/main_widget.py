@@ -1193,7 +1193,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 子智能体默认解析是后台自动流程：解析失败静默回退主模型，不弹 InfoBar 警告
         self.backend.set_subagent_model_resolver(lambda v: self._resolve_subagent_model_config(v, show_error=False))
         # 连接插件热更新信号
-        self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
+        from app.core.plugin_host_service import PluginHostService
+
+        PluginHostService.get_instance().plugin_changed.connect(self._on_plugin_hot_reload)
         # 注册工具热重载风险通知监听（进程级一次）
         self._register_tool_reload_notice()
         # 连接自动上下文压缩信号（PostToolUse hook 检测到阈值时触发）
@@ -9138,7 +9140,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
         if hasattr(self, "backend") and self.backend:
             # force_full=True：按钮显式语义——无论是否有变更都全量重载所有子系统
-            result = self.backend.reload_plugin_subsystems(force_full=True)
+            from app.core.plugin_host_service import PluginHostService
+
+            result = PluginHostService.get_instance().reload_plugin_subsystems(force_full=True)
             from qfluentwidgets import InfoBar, InfoBarPosition
 
             InfoBar.success(
@@ -19979,8 +19983,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 停止所有正在进行的流式输出 + 清理窗口独有资源（不影响其他窗口）
         if hasattr(self, "backend") and self.backend:
             # 🔧 内存泄漏修复：先断开信号连接，防止闭包持有窗口引用
+            # （plugin_changed 已上移 PluginHostService——服务信号断开见下方）
             for signal_pair in (
-                ("plugin_changed", "_on_plugin_hot_reload"),
                 ("auto_compact_requested", "_on_auto_compact_requested"),
                 ("sub_agent_ready", "_on_sub_agent_ready"),
             ):
@@ -19991,6 +19995,17 @@ class OpenAIChatToolWindow(ToolWindow):
                         sig.disconnect(slot)
                 except TypeError, RuntimeError:
                     pass
+
+            # 🔧 断开应用级 PluginHostService 的 plugin_changed（窗口销毁后
+            # 服务常驻，不断开会向死窗口槽投递 → RuntimeError 刷屏）
+            try:
+                from app.core.plugin_host_service import PluginHostService
+
+                PluginHostService.get_instance().plugin_changed.disconnect(
+                    self._on_plugin_hot_reload
+                )
+            except (TypeError, RuntimeError):
+                pass
 
             # 🔧 泄漏修复（M6）：断开全局单例 coding_plan_ready，关窗后不再幽灵回调
             try:
