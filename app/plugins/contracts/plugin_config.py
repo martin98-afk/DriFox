@@ -25,6 +25,9 @@
               content 作状态文案 → 可选 poll 声明按模板轮询至终止条件。通用机制，
               宿主不含任何平台/插件专属逻辑。
 
+类型别名（向前兼容，社区插件可能误用：解析时归一化后再校验）：
+    int / integer  →  number
+
 action 对象结构（全部声明在插件 plugin.json，宿主零硬编码）：
     {"tool": "<注册工具名>",
      "args": {…工具参数…},
@@ -53,6 +56,13 @@ from loguru import logger
 
 # 支持的字段类型（渲染映射见 plugin_config_card.py）
 FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea", "link", "action")
+
+# 类型别名：非标准写法 → 标准 type（解析时归一化，老插件不被打回整个 schema）
+# 仅做容错；新插件仍应按 FIELD_TYPES 书写
+TYPE_ALIASES = {
+    "int": "number",
+    "integer": "number",
+}
 
 # number 默认范围（SpinBox 默认 0~2^31-1，与 qfluentwidgets SpinBox 一致）
 _NUMBER_DEFAULT_MIN = 0
@@ -215,6 +225,7 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
             logger.warning(f"[PluginConfig] {plugin_name} 字段缺 key，忽略整个 schema: {item!r}")
             return None
         ftype = str(item.get("type") or "text")
+        ftype = TYPE_ALIASES.get(ftype, ftype)  # 兼容老插件误用 int/integer 等
         if ftype not in FIELD_TYPES:
             logger.warning(f"[PluginConfig] {plugin_name} 字段 {key} 类型未知({ftype})，忽略整个 schema")
             return None
