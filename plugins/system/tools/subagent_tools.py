@@ -545,6 +545,7 @@ def register(registry):
         aliases=["subagents-para", "subagent-para", "TaskBatch", "Batch", "task", "Task"],
         preview=_preview_subagent_para,
         summarize=make_summarize_from_preview(_preview_subagent_para),
+        keep_in_content=True,  # 任务表常驻正文，不迁入工具折叠区
         metadata={"subagent_task": True, "permission_task": True},
     )
     registry.register(
@@ -563,6 +564,7 @@ def register(registry):
         render=_render_dag_body,
         preview=_preview_subagent_dag,
         summarize=make_summarize_from_preview(_preview_subagent_dag),
+        keep_in_content=True,
         metadata={"subagent_task": True},
     )
     # 团队专用工具：team_only=True → 非团队成员从 schema 定义中过滤（LLM 不可见）

@@ -398,6 +398,7 @@ def register(registry):
         render=_render_question_body,
         preview=_preview_question,
         summarize=_summarize_question,
+        keep_in_content=True,  # 提问卡常驻正文，不迁入工具折叠区
         metadata={"interactive": True, "ui_managed": True},  # UI 弹窗交互，非纯工具执行
     )
     registry.register(

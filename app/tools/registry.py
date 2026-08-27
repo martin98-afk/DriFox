@@ -62,6 +62,7 @@ class ToolRegistration:
     preview: Optional[Callable] = None  # 自然语言预览闭包：preview(tool_args) -> str（用于 inline 卡/折叠头参数预览）
     summarize: Optional[Callable] = None  # 结果压缩摘要闭包：summarize(tool_name, tool_args: dict, tool_content: str) -> str（历史压缩用）
     aliases: List[str] = field(default_factory=list)  # Claude Code 风格别名
+    keep_in_content: bool = False  # 工具完成卡常驻消息正文（不迁入「工具与思考」折叠区）
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -177,6 +178,7 @@ class ToolRegistry:
         preview: Optional[Callable] = None,
         summarize: Optional[Callable] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        keep_in_content: bool = False,
         trusted: bool = False,
     ) -> bool:
         """注册工具。返回是否发生了变更（覆盖已存在视为变更）。
@@ -221,6 +223,7 @@ class ToolRegistry:
             preview=preview,
             summarize=summarize,
             aliases=list(aliases or []),
+            keep_in_content=bool(keep_in_content),
             metadata=dict(metadata or {}),
         )
         with self._lock:
@@ -427,18 +430,12 @@ class ToolRegistry:
     def keep_in_content_tools(self) -> frozenset:
         """始终展示在正文的工具名集合（消息卡片正文/工具区分区用）。
 
-        规则（与旧 message_card._EDIT_TOOLS 常量行为等价，语义收敛到注册声明）：
-        - 文件写入组：write/edit/multi_edit（group="文件写入"）
-        - 子智能体任务：subagent_para/subagent_dag（metadata["subagent_task"]）
-        - 交互式提问：question（metadata["interactive"]）
+        纯参数派生：注册时显式声明 keep_in_content=True（如 write/edit/multi_edit、
+        subagent_para/subagent_dag、question）。不做 group/语义标记隐式推断——
+        语义键（interactive/subagent_task）另有消费点，借用会误触发其他流程。
         """
         with self._lock:
-            return frozenset(
-                r.name for r in self._tools.values()
-                if r.group == "文件写入"
-                or (r.metadata or {}).get("subagent_task")
-                or (r.metadata or {}).get("interactive")
-            )
+            return frozenset(r.name for r in self._tools.values() if r.keep_in_content)
 
     def dangerous_tools(self) -> List[str]:
         with self._lock:

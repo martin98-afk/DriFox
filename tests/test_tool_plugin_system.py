@@ -1806,7 +1806,7 @@ class TestRegistryMetadata:
         assert reg.is_ui_managed("mt_plain") is False
 
     def test_subagent_task_keep_in_content(self):
-        """subagent_para/subagent_dag 因 metadata[subagent_task] 常驻正文（keep_in_content_tools）"""
+        """keep_in_content=True 显式声明的工具常驻正文（keep_in_content_tools 纯参数派生）"""
         from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
         from app.tools.registry import ToolRegistry
 
@@ -1816,7 +1816,27 @@ class TestRegistryMetadata:
         kept = reg.keep_in_content_tools()
         assert "subagent_para" in kept
         assert "subagent_dag" in kept
-        assert "write" in kept, "文件写入组工具应常驻正文"
+        assert "write" in kept, "文件写入工具应常驻正文"
+        assert "question" in kept, "提问工具应常驻正文"
+        # 纯 metadata 语义键（interactive/subagent_task）不再隐式驱动留正文
+        assert "skill" not in kept
+
+    def test_keep_in_content_param_only(self):
+        """keep_in_content 纯参数派生：group/语义 metadata 不再隐式生效"""
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.reset_instance()
+        reg = ToolRegistry.get_instance()
+        reg.register("_t_keep", {"type": "object"}, danger="safe", keep_in_content=True, source="plugin:test")
+        reg.register(
+            "_t_no_keep", {"type": "object"},
+            danger="safe", group="文件写入", source="plugin:test",
+            metadata={"interactive": True, "subagent_task": True},
+        )
+        kept = reg.keep_in_content_tools()
+        assert "_t_keep" in kept
+        assert "_t_no_keep" not in kept, "语义借用不再隐式触发留正文"
+        ToolRegistry.reset_instance()
 
 
 class TestPluginLoadFaultTolerance:

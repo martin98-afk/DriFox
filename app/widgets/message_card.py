@@ -292,9 +292,8 @@ AUTO_SCROLL_THRESHOLD = 80  # "接近底部"判定阈值(px)：仅真接近底�
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
 # 子智能体和提问工具（subagent_para/subagent_dag/question）涉及 AI 与用户的直接交互，
 # 留在正文中比收到工具区更符合直觉，体验更连贯。
-# 集合由 registry 派生（group/metadata 声明驱动，不硬编码工具名）：
-#   文件写入组（write/edit/multi_edit）+ subagent_task（subagent_para/subagent_dag）
-#   + interactive（question）——与旧常量集合行为等价
+# 集合由 registry 派生（注册时显式声明 keep_in_content=True，不硬编码工具名）：
+#   write/edit/multi_edit + subagent_para/subagent_dag + question 等
 def _edit_tools() -> frozenset:
     """编辑/子智能体/提问类工具集合（registry 派生，数据源统一）"""
     try:

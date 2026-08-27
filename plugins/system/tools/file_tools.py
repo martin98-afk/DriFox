@@ -974,6 +974,7 @@ def register(registry):
         preview=_make_file_preview("write"),
         summarize=_make_file_summarize("write"),
         render=_render_edit_diff_body,  # 全部 diff 渲染走插件闭包（主程序无兜底）
+        keep_in_content=True,  # diff 卡常驻正文，不迁入工具折叠区
         metadata={"permission_arg": "filePath"},
     )
     registry.register(
@@ -982,6 +983,7 @@ def register(registry):
         group=GROUP_WRITE, description="精确文本替换",
         aliases=["Edit", "TextEdit", "ReplaceInFile", "replace"],
         render=_render_edit_diff_body,
+        keep_in_content=True,
         preview=_make_file_preview("edit"),
         summarize=_make_file_summarize("edit"),
         # reconstruct_diff：历史消息 diff 缺失时，渲染层按 operations 参数重建伪 diff
@@ -994,6 +996,7 @@ def register(registry):
         group=GROUP_WRITE, description="批量文件编辑",
         aliases=["MultiEdit", "MultiEditTool"],
         render=_render_edit_diff_body,
+        keep_in_content=True,
         preview=_make_file_preview("multi_edit"),
         summarize=_make_file_summarize("multi_edit"),
         metadata={"permission_arg": "filePath"},

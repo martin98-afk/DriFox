@@ -3465,14 +3465,59 @@ class ChatBackend(QObject):
                 except Exception as e:
                     logger.error(f"[Gateway] Stream push error: {e}")
 
+            # 3.5 流式（打字机）通道：平台适配器支持时走 update_stream/finish_stream
+            try:
+                _adapter = self._gateway_manager.get_adapter(platform)
+                _use_stream = bool(_adapter and _adapter.supports_streaming(chat_id) and _ev_loop)
+            except Exception:
+                _adapter, _use_stream = None, False
+
+            if _use_stream:
+                # 初始化平台打字机流（幂等、不发网络请求；失败则回退普通发送）
+                try:
+                    _sf = asyncio.run_coroutine_threadsafe(
+                        _adapter.start_stream(chat_id), _ev_loop
+                    )
+                    _use_stream = bool(_sf.result(timeout=10))
+                except Exception as e:
+                    logger.warning(f"[Gateway] start_stream failed, fallback: {e}")
+                    _use_stream = False
+
+            _visible: list = []  # 可见文本累加器（工具进度 + AI 增量，单调追加）
+            _last_stream_push = [0.0]
+            import time as _time
+
+            def _stream_update(force: bool = False) -> None:
+                """把可见快照节流推给平台（300ms 粗节流；中间帧丢失无害，finish 补全）"""
+                if not _use_stream or not _adapter:
+                    return
+                now = _time.monotonic()
+                if not force and now - _last_stream_push[0] < 0.3:
+                    return
+                _last_stream_push[0] = now
+                snapshot = "".join(_visible)
+                if not snapshot.strip():
+                    return
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        _adapter.update_stream(chat_id, snapshot),
+                        _ev_loop,
+                    )
+                except Exception as e:
+                    logger.debug(f"[Gateway] stream update skipped: {e}")
+
             # 4. 流式回调
             # 注意：钉钉/企微不支持编辑已发送消息，流式中间推送会与最终回复内容重叠。
             # 因此只保留工具进度推送，流式内容只在 on_stream_finished 一次性发送。
+            # （支持 update_stream/finish_stream 的平台——如 QQ 单聊——走真打字机。）
             gateway_chunks = []
 
             def on_content_received(chunk):
-                """AI 流式输出到达——不推送中间内容，避免与最终回复重复"""
+                """AI 流式输出到达——流式平台并入可见快照，否则累积待最终发送"""
                 gateway_chunks.append(chunk)
+                if _use_stream:
+                    _visible.append(chunk)
+                    _stream_update()
 
             def on_tool_call(tool_data: dict):
                 """工具调用时发送进度"""
@@ -3482,17 +3527,27 @@ class ChatBackend(QObject):
                     args_str = str(list(args.keys())) if args else ""
                 else:
                     args_str = str(args)[:80]
-                _push_to_platform(f"🔧 正在使用 **{name}**...\n参数: {args_str}")
+                _progress = f"🔧 正在使用 **{name}**...\n参数: {args_str}"
+                if _use_stream:
+                    _visible.append(("\n\n" if _visible else "") + _progress)
+                    _stream_update(force=True)
+                else:
+                    _push_to_platform(_progress)
 
             def on_tool_result(tool_data: dict):
                 """工具返回结果时发送摘要"""
                 name = tool_data.get("tool_name", tool_data.get("name", "未知工具"))
                 result = tool_data.get("result", "")
                 summary = str(result)[:200] if result else ""
-                _push_to_platform(f"✅ **{name}** 完成\n{summary}")
+                _progress = f"✅ **{name}** 完成\n{summary}"
+                if _use_stream:
+                    _visible.append("\n\n" + _progress)
+                    _stream_update(force=True)
+                else:
+                    _push_to_platform(_progress)
 
             def on_stream_finished(response):
-                """AI 完成 → 发送最终完整回复，自动检测并发送本地图片"""
+                """AI 完成 → 流式平台收尾打字机；其余平台发送最终完整回复"""
                 content = response or "".join(gateway_chunks)
                 final = content or "抱歉，我没有生成有效回复，请重试。"
 
@@ -3511,7 +3566,22 @@ class ChatBackend(QObject):
 
                 # 发送清理后的文本
                 text_to_send = clean_content.strip()
-                if text_to_send:
+                if _use_stream and _adapter:
+                    # 打字机收尾：可见快照与最终正文一致时直接结束流；
+                    # 图片剥离导致正文短于快照时仍以最终正文收尾（平台侧 replace 全量）
+                    try:
+                        _fut = asyncio.run_coroutine_threadsafe(
+                            _adapter.finish_stream(chat_id, text_to_send or final),
+                            _ev_loop,
+                        )
+                        _result = _fut.result(timeout=15)
+                    except Exception as e:
+                        logger.error(f"[Gateway] finish_stream error: {e}")
+                        _result = None
+                    if not (_result and _result.success):
+                        # 收尾失败兜底：普通通道发送全文
+                        _push_to_platform(f"💬 **DriFox 助手**\n\n{text_to_send or final}")
+                elif text_to_send:
                     _push_to_platform(f"💬 **DriFox 助手**\n\n{text_to_send}")
                 elif not image_paths:
                     # 既无图片也无文字，兜底发送原文
@@ -3607,8 +3677,15 @@ class ChatBackend(QObject):
         """
         logger.info(f"[Gateway] Processing message from {platform.value}:{user_id}: {text[:50]}...")
 
-        # 先发送"思考中"占位回复
-        await self._gateway_send_message(platform, chat_id, "🤔 正在思考，请稍候...")
+        # 先发送"思考中"占位回复（流式平台跳过：打字机本身即实时反馈，
+        # 且占位与流首片会形成两条独立消息）
+        try:
+            _adapter = self._gateway_manager.get_adapter(platform)
+            _use_stream = bool(_adapter and _adapter.supports_streaming(chat_id))
+        except Exception:
+            _use_stream = False
+        if not _use_stream:
+            await self._gateway_send_message(platform, chat_id, "🤔 正在思考，请稍候...")
 
         # 用 signal 发送到主线程
         import concurrent.futures
