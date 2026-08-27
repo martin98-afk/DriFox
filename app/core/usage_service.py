@@ -85,11 +85,15 @@ class UsageService(QObject):
         registry = ProviderRegistry.get_instance()
         return registry._resolve_coding_plan_fetcher(provider_name)
 
-    def request_coding_plan(self, provider_name: str, config_id: str, config: dict) -> None:
+    def request_coding_plan(self, provider_name: str, config_id: str, config: dict, force: bool = False) -> None:
         """请求套餐用量：缓存命中→广播缓存；in_flight→跳过；否则后台抓取后广播。
 
         无 fetcher 时同步 emit None（通知窗口隐藏圆环）。
         结果写缓存 + 注册 active key（供单例轮询）。
+
+        force=True（轮询 tick 使用）：跳过缓存命中，每轮强制重拉。否则缓存
+        TTL(60s) 与 tick 周期(60s) 相同，抓取耗时导致 tick 时缓存年龄恒 < TTL，
+        永远命中旧值 → 实际每 2 轮（120s）才真刷新。
         """
         key = (provider_name, config_id)
         if config_id:
@@ -101,7 +105,7 @@ class UsageService(QObject):
             return
 
         hit = self._plan_cache.get(key)
-        if hit and time.monotonic() - hit[0] < self.PLAN_TTL_S:
+        if not force and hit and time.monotonic() - hit[0] < self.PLAN_TTL_S:
             # 缓存命中：key 有抓取资格，恢复/保持 active 注册，确保 singleShot
             # 轮询 timer 存活（unregister 后新窗口命中缓存也要继续轮询）
             self._active_plan_keys.add(key)
@@ -137,12 +141,15 @@ class UsageService(QObject):
 
     # ========== 余额 ==========
 
-    def request_balance(self, provider_name: str, config_id: str, config: dict) -> None:
+    def request_balance(self, provider_name: str, config_id: str, config: dict, force: bool = False) -> None:
         """请求余额：缓存命中→广播缓存；in_flight→跳过；否则后台抓取后广播。
 
         非白名单服务商同步 emit None（窗口隐藏余额组件）。
         抓到有效结果（含 hide）即注册 active key，由单例 _poll_timer 统一
         60s 轮询，与套餐用量共用同一 timer，UI 自动刷新。
+
+        force=True（轮询 tick 使用）：跳过缓存命中，每轮强制重拉（同
+        request_coding_plan 的 TTL/tick 同长竞态说明）。
         """
         key = (provider_name, config_id)
         if config_id:
@@ -153,7 +160,7 @@ class UsageService(QObject):
             return
 
         hit = self._balance_cache.get(key)
-        if hit and time.monotonic() - hit[0] < self.BALANCE_TTL_S:
+        if not force and hit and time.monotonic() - hit[0] < self.BALANCE_TTL_S:
             # 缓存命中：注册 active key 保证轮询 timer 存活（与 plan 同步）
             self._active_balance_keys.add(key)
             self.balance_ready.emit(provider_name, config_id, hit[1])
@@ -264,7 +271,8 @@ class UsageService(QObject):
                 # 窗口已 unregister，清理残留 key
                 self._active_plan_keys.discard(key)
                 continue
-            self.request_coding_plan(provider_name, config_id, config)
+            # force=True：tick 语义是「到期重拉」，跳过缓存命中，每轮必重拉
+            self.request_coding_plan(provider_name, config_id, config, force=True)
 
         balance_keys = list(self._active_balance_keys)
         for key in balance_keys:
@@ -274,7 +282,8 @@ class UsageService(QObject):
                 # 窗口已 unregister，清理残留 key
                 self._active_balance_keys.discard(key)
                 continue
-            self.request_balance(provider_name, config_id, config)
+            # force=True：同 plan，每轮必重拉
+            self.request_balance(provider_name, config_id, config, force=True)
 
         # 兜底：tick 内所有路径（命中/in_flight/无 fetcher）都会 return 不重启
         # timer，这里保证只要还有 active key，轮询就继续下一轮

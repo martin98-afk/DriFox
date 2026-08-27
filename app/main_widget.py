@@ -8919,6 +8919,15 @@ class OpenAIChatToolWindow(ToolWindow):
             UsageService.get_instance().invalidate(current_name)
         except Exception:
             pass
+        # 🐛 invalidate 会移除该 config 的 active key + 快照，若此处不重新请求，
+        # 单例 60s 轮询 timer 将因集合为空而死亡，圆环/余额永久停更
+        # （直到用户切换模型触发 _update_model_selector_btn 才恢复）。
+        # _update_balance_display 内部：request_balance + _refresh_coding_plan
+        # → 重新注册 active key 并立即重拉新配置的用量。
+        try:
+            self._update_balance_display()
+        except Exception:
+            pass
 
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）"""
@@ -19877,12 +19886,21 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ 用量聚合（T6）：注销本窗口 config 的用量轮询注册（active key + 快照）。
         # 套餐用量轮询已由 UsageService 单例统一驱动（窗口不再自建 60s timer），
         # 此处仅清理注册，避免已关闭窗口的配置持续触发后台请求。
+        # 🐛 多窗口同 config：active key 按 (provider, config_id) 共享，若其它窗口
+        # 仍在使用该配置，unregister 会误杀其轮询（plan key 只在切换模型时重新
+        # 注册）→ 圆环永久停更。仅当无其它存活窗口使用同 config 时才注销。
         try:
             _cid = getattr(self, "_current_provider_name", "")
             if _cid:
-                from app.core.usage_service import UsageService
+                _same_config_alive = any(
+                    w is not self
+                    and getattr(w, "_current_provider_name", "") == _cid
+                    for w in window_registry.alive_window_instances()
+                )
+                if not _same_config_alive:
+                    from app.core.usage_service import UsageService
 
-                UsageService.get_instance().unregister(_cid)
+                    UsageService.get_instance().unregister(_cid)
         except Exception:
             pass
 

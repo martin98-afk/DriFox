@@ -1541,22 +1541,30 @@ class TabManagerWindow(QWidget):
 
         self._suppress_replace_close = True
         try:
-            for cid in candidates:
-                try:
-                    if not cm.is_card_visible(cid, wid):
-                        continue
-                except Exception:
-                    continue
-                if cid != active:
+            # 切换投影保护：此期间 hide/show 是「per-tab 状态投影」（临时隐藏，
+            # open 集合保留），registry 的 on_card_hidden 回调必须跳过 per-tab
+            # 可见集合清除——否则卡片从集合丢失后，sync_floating_cards_to_tab
+            # 会因 want=False & now=True 误执行 hide_card，触发 120ms 关闭去抖
+            # 判定，导致 full 卡片切走再切回时被误关。
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            with UIPluginRegistry.get_instance().tab_sync_guard():
+                for cid in candidates:
                     try:
-                        cm.hide_card(cid, wid)
+                        if not cm.is_card_visible(cid, wid):
+                            continue
+                    except Exception:
+                        continue
+                    if cid != active:
+                        try:
+                            cm.hide_card(cid, wid)
+                        except Exception:
+                            pass
+                if active is not None:
+                    try:
+                        cm.show_card(active, wid)
                     except Exception:
                         pass
-            if active is not None:
-                try:
-                    cm.show_card(active, wid)
-                except Exception:
-                    pass
         finally:
             self._suppress_replace_close = False
 
