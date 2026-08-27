@@ -437,6 +437,24 @@ class TabManagerWindow(QWidget):
         GatewayService.get_instance().ensure_started()
         PluginHostService.get_instance().ensure_started()
 
+        # app 级 API 会话处理器：始终路由到当前活跃 tab
+        # 修复多 tab 下后建窗口静默覆盖先建窗口的问题（之前由 MainWidget
+        # 在 _init_llm_api_service 注册 handler，绑死后建窗口的 widget；现改为
+        # 每次调用实时查 _tab_panel.active_index 对应的活跃 ChatWindow）
+        from app.gateway.local_service.session_handler import APISessionHandler
+        from app.gateway import LLMAPIService
+
+        def _active_main_widget():
+            idx = self._tab_panel.active_index if self._tab_panel is not None else -1
+            if 0 <= idx < len(self._windows):
+                w = self._windows[idx]
+                if w is not None and not getattr(w, "_is_destroyed", False):
+                    return w
+            return None
+
+        self._api_session_handler = APISessionHandler(_active_main_widget)
+        LLMAPIService.set_session_handler(self._api_session_handler)
+
         # 全局卡片控制器：系统设置/服务商编辑/Hook/MCP 卡片挂载在 Tab 窗口层
         # （单例在此处初始化，确保全局容器已随 _setup_ui 创建完毕）
         from app.widgets.cards.global_card_controller import get_global_card_controller

@@ -189,23 +189,58 @@ class APIHistoryManager:
 class APISessionHandler:
     """API 会话处理器 - 完全隔离的实现"""
 
-    def __init__(self, main_widget):
-        self._main_widget = main_widget
+    def __init__(self, widget_provider: Callable[[], Optional[Any]]):
+        # widget_provider: 无参可调，返回当前活跃 MainWidget 或 None。
+        # 每次调用实时查活跃窗口，避免绑死单实例（多 tab 下后建窗口静默覆盖先建窗口）。
+        self._widget_provider = widget_provider
         self._lock = threading.Lock()
         self._api_callbacks: Dict[str, Callable] = {}
         self._active_streams: Dict[str, StreamContext] = {}
         from app.gateway.local_service.isolated_context import IsolatedContextRegistry
         self._context_registry = IsolatedContextRegistry.get_instance()
-        ui_history_manager = getattr(main_widget, 'history_manager', None)
-        self._api_history_manager = APIHistoryManager(ui_history_manager)
+        # APIHistoryManager 独立 SQLite，与 UI history_manager 解耦；首次访问时再包装。
+        self._api_history_manager: Optional[APIHistoryManager] = None
+        self._api_history_manager_widget_id: Optional[int] = None
+
+    def _current_widget(self) -> Optional[Any]:
+        """从 provider 取当前活跃 MainWidget；失败返回 None（窗口销毁/未激活）。"""
+        try:
+            w = self._widget_provider()
+        except Exception:
+            return None
+        if w is None:
+            return None
+        if getattr(w, "_is_destroyed", False):
+            return None
+        return w
+
+    def _get_api_history_manager(self) -> APIHistoryManager:
+        """惰性获取 APIHistoryManager：首次调用或活跃窗口切换时重建（按 widget id 缓存）。
+
+        APIHistoryManager 自身封装独立 SQLite 存储，跨窗口共享同一个 API 通道的会话。
+        UI history_manager 仅在窗口切换时重新包装一次；provider 返回 None 时保留上次包装。
+        """
+        w = self._current_widget()
+        wid = id(w) if w is not None else None
+        if self._api_history_manager is None or self._api_history_manager_widget_id != wid:
+            ui_hm = getattr(w, 'history_manager', None) if w is not None else None
+            try:
+                self._api_history_manager = APIHistoryManager(ui_hm)
+                self._api_history_manager_widget_id = wid
+            except Exception as e:
+                logger.error(f"[APISessionHandler] APIHistoryManager 初始化失败: {e}")
+                if self._api_history_manager is None:
+                    self._api_history_manager = APIHistoryManager(None)
+                self._api_history_manager_widget_id = wid
+        return self._api_history_manager
 
     @property
     def session_manager(self):
-        return self._api_history_manager
+        return self._get_api_history_manager()
 
     @property
     def history_manager(self):
-        return self._api_history_manager
+        return self._get_api_history_manager()
 
     @property
     def tool_executor(self):
@@ -215,10 +250,16 @@ class APISessionHandler:
 
     @property
     def agent_manager(self):
-        return self._main_widget._agent_manager
+        w = self._current_widget()
+        if w is None:
+            return None
+        return getattr(w, "_agent_manager", None)
 
     def _get_model_config(self) -> Dict[str, Any]:
-        return self._main_widget._get_current_model_config()
+        w = self._current_widget()
+        if w is None:
+            return {}
+        return getattr(w, "_get_current_model_config", lambda: {})()
 
     def _get_context_provider(self):
         return None
@@ -229,10 +270,11 @@ class APISessionHandler:
     def _create_isolated_chat_engine(self, worker_callbacks=None, api_mode=False, target_session=None, context_id=None):
         from app.gateway.local_service.isolated_context import IsolatedChatContext
 
+        widget = self._current_widget()
         ctx_id = context_id or str(uuid.uuid4())
         isolated_context = IsolatedChatContext(
             context_id=ctx_id,
-            main_widget=self._main_widget,
+            main_widget=widget,
             target_session=target_session,
             model_config=self._get_model_config(),
         )

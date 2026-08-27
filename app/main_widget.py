@@ -1105,6 +1105,28 @@ class OpenAIChatToolWindow(ToolWindow):
     # P5b：延迟刷新时记录的待刷 scope（theme/font_family/font_size/None），
     # 切回 tab 补刷时按此精确执行，避免漏刷字体字号（V2 方案 A）
     _theme_needs_refresh_scope: str | None = None
+    # 内置 function 命令 → 方法名（类级映射；实例 dict 只承载动态注册如 UI 插件命令）
+    # 查找顺序：实例 dict（动态）→ 本类级表（getattr 解析）→ FunctionCommandHandlers 全局 → 硬编码
+    _BUILTIN_COMMAND_HANDLER_NAMES: Dict[str, str] = {
+        "subagents": "_handle_subagents_command",
+        "title-gen": "_handle_title_gen_command",
+        "compact": "_handle_compact_command",
+        "todos": "_handle_todos_command",
+        "team": "_handle_team_command",
+        "toggle-window": "_handle_toggle_window_command",
+        "clear": "_handle_clear_command",
+    }
+    # git 分支缓存：类级共享（workdir → branch）。
+    # 同项目多窗口共享，避免重复 git 探测；信号路由仍由实例级 _branch_detect_signals
+    # 负责（不同窗口发起检测，结果需送回自己的槽，不能在类级）。
+    _branch_cache: Dict[str, str] = {}
+    # models.dev 动态数据缓存：类级共享（DynamicModelsResult）。
+    # 多窗口只发一路网络请求，结果广播到全部活跃窗口。
+    _models_dev_cache: Optional[object] = None
+    # 同上 inflight 守卫：避免并发重复发起；首请求完成后再被广播唤醒。
+    _models_dev_fetch_inflight: bool = False
+    # OpenCode Zen 免费模型列表 inflight 守卫（同上语义）
+    _opencode_fetch_inflight: bool = False
     insertResponse = pyqtSignal(str)
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
@@ -1266,7 +1288,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._branch_detect_signals = _BranchDetectSignals()
         self._branch_detect_signals.finished.connect(self._on_branch_detected)
         self._branch_detect_request_id = 0
-        self._branch_cache: Dict[str, str] = {}  # workdir → branch（按路径缓存，避免重复 git 调用）
+        # _branch_cache 已上提类级 OpenAIChatToolWindow._branch_cache（共享）
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -1552,48 +1574,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.set_sub_agent_history_getter(self._get_current_session_messages_for_tools)
         except Exception as e:
             logger.warning(f"[MainWidget] SubAgent 补连失败: {e}")
-
-    def _init_llm_api_service(self):
-        """初始化 LLM API 服务"""
-        from app.gateway import (
-            APISessionHandler,
-            LLMAPIService,
-            is_service_running,
-        )
-
-        # 注册服务商列表获取回调
-        def get_providers_list():
-            return [{"name": name} for name in self._valid_configs.keys()]
-
-        # 创建并注册 API 会话处理器（复用 UI 的 ChatEngine 和 SessionManager）
-        self._api_session_handler = APISessionHandler(self)
-        LLMAPIService.set_session_handler(self._api_session_handler)
-
-        # 根据配置决定是否启动服务
-        if self.cfg.llm_api_enabled.value:
-            if not is_service_running():
-                service = LLMAPIService()
-                service.port = self.cfg.llm_api_port.value
-                service.start(background=True)
-        else:
-            # 确保服务未启动
-            if is_service_running():
-                from app.gateway import (
-                    stop_llm_api_service,
-                )
-
-                stop_llm_api_service()
-
-        # 锁屏远程：若配置开启则自动生效（保持自动化任务持续运行），开关由设置 UI 控制
-        try:
-            from app.core.system.lock_screen_remote import (
-                get_lock_screen_remote_manager,
-            )
-
-            if self.cfg.lock_screen_remote_enabled.value:
-                get_lock_screen_remote_manager().enable(lock_now=False, keep_display_on=True)
-        except Exception as e:
-            logger.warning(f"[MainWidget] 锁屏远程初始化失败: {e}")
 
     def _register_cards_to_manager(self):
         """注册所有卡片到 CardManager 并添加到容器
@@ -2925,16 +2905,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_compact_widget.enter_session_requested.connect(self._on_sub_agent_enter_session)
         self._sub_agent_compact_widget.stop_subagent_requested.connect(self._on_sub_agent_stop_requested)
 
-        # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
-        self._function_command_handlers = {
-            "subagents": self._handle_subagents_command,
-            "title-gen": self._handle_title_gen_command,
-            "compact": self._handle_compact_command,
-            "todos": self._handle_todos_command,
-            "team": self._handle_team_command,
-            "toggle-window": self._handle_toggle_window_command,
-            "clear": self._handle_clear_command,
-        }
+        # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）。
+        # 内置 7 项已上提类级 _BUILTIN_COMMAND_HANDLER_NAMES，实例 dict 只存动态注册
+        # （系统卡片 toggle 方法、UI 插件命令等）。
+        self._function_command_handlers: Dict[str, Callable] = {}
 
         # 下方卡片容器 - 添加 SubAgentCompact
         self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
@@ -3835,9 +3809,12 @@ class OpenAIChatToolWindow(ToolWindow):
         用于区分系统内置 function 命令（有 handler）和用户插件 function 命令（无 handler）。
         后者通过快捷键触发时回退到插入命令文本。
         """
-        # 窗口级处理器
+        # 窗口级处理器（动态注册：UI 插件命令 / 卡片 toggle 等）
         handlers = getattr(self, "_function_command_handlers", {})
         if name in handlers:
+            return True
+        # 类级内置命令表（7 项无实例方法的轻量 handler）
+        if name in self._BUILTIN_COMMAND_HANDLER_NAMES:
             return True
         # 全局注册的处理器
         if FunctionCommandHandlers.has(name):
@@ -3889,12 +3866,20 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.command_manager import CommandNeedDegrade
 
         try:
-            # 多窗口隔离：优先使用当前窗口自己的处理器
+            # 多窗口隔离：优先使用当前窗口自己的处理器（动态注册）
             handlers = getattr(self, "_function_command_handlers", {})
             handler = handlers.get(command_name)
             if handler:
                 handler(args)
                 return True
+
+            # 回退到类级内置命令表（7 项轻量 handler，方法名查 getattr）
+            method_name = self._BUILTIN_COMMAND_HANDLER_NAMES.get(command_name)
+            if method_name:
+                method = getattr(self, method_name, None)
+                if method is not None:
+                    method(args)
+                    return True
 
             # 回退到全局注册的处理器（兼容旧代码路径）
             handler = FunctionCommandHandlers.get(command_name)
@@ -6820,16 +6805,49 @@ class OpenAIChatToolWindow(ToolWindow):
         动态数据且本地缓存不可用时，才经 refresh_dynamic_models_async 在
         后台线程发起网络拉取（30s + 15s 超时全部落在后台），完成后经
         _models_dev_ready 信号回主线程刷新 UI。
+
+        多窗口并发：类级缓存命中直接 emit 给本窗口；inflight 期间直接返回
+        （首个请求的 on_done 回调会广播所有窗口）；首个发起者负责置 inflight
+        并把结果写类级缓存、清 inflight、广播所有活跃窗口。
         """
         from app.core.models_dev_sync import get_dynamic_models, refresh_dynamic_models_async
 
-        # 已加载过动态数据（多窗口/多标签复用模块级内存缓存）→ 无需重复刷新
-        cached = get_dynamic_models()
-        if cached.provider_models or cached.model_capabilities:
+        # 类级内存缓存命中（多窗口已加载过）→ 直接 emit 给本窗口，无需发请求
+        cached = OpenAIChatToolWindow._models_dev_cache
+        if cached is not None:
+            self._models_dev_ready.emit(cached)
             return
 
-        # 后台线程拉取；模块级单飞去重保证多窗口只发一路网络请求
-        refresh_dynamic_models_async(on_done=lambda _r: self._models_dev_ready.emit(_r))
+        # 模块级缓存命中（单窗口预热已成功）→ 写类级缓存并 emit
+        cached = get_dynamic_models()
+        if cached.provider_models or cached.model_capabilities:
+            OpenAIChatToolWindow._models_dev_cache = cached
+            self._models_dev_ready.emit(cached)
+            return
+
+        # inflight 中：跳过（首个请求完成回调会广播所有窗口）
+        if OpenAIChatToolWindow._models_dev_fetch_inflight:
+            return
+
+        # 首个发起者：置 inflight、发请求，on_done 写类级缓存并广播
+        OpenAIChatToolWindow._models_dev_fetch_inflight = True
+
+        def _on_done(_r):
+            try:
+                OpenAIChatToolWindow._models_dev_cache = _r
+                # 遍历活跃窗口逐个 emit；跳过已销毁/无该信号的窗口
+                for win in window_registry.alive_window_instances():
+                    try:
+                        if getattr(win, "_is_destroyed", False):
+                            continue
+                        win._models_dev_ready.emit(_r)
+                    except RuntimeError:
+                        # C++ 对象已销毁（弱引用来不及过滤）→ 跳过
+                        continue
+            finally:
+                OpenAIChatToolWindow._models_dev_fetch_inflight = False
+
+        refresh_dynamic_models_async(on_done=_on_done)
 
     @pyqtSlot(object)
     def _on_models_dev_ready(self, _result):
@@ -6861,10 +6879,18 @@ class OpenAIChatToolWindow(ToolWindow):
         网络与解析逻辑在 app.core.models_dev_sync 的
         fetch_opencode_free_models_for_providers，本方法只负责收集实例、
         调度线程、把结果经信号回主线程刷新 UI。
+
+        多窗口并发：inflight 期间直接返回；首个发起者负责网络请求，结果
+        经 _opencode_models_ready 信号广播到全部活跃窗口（每个窗口按自身
+        _valid_configs 决定是否消费）。
         """
         import threading
 
         from app.core.models_dev_sync import fetch_opencode_free_models_for_providers
+
+        # 类级 inflight 守卫：已有窗口在拉取 → 跳过，结果会在 on_done 回调中广播
+        if OpenAIChatToolWindow._opencode_fetch_inflight:
+            return
 
         # 只刷新内置默认的 OpenCode 免费服务商（name="opencode免费模型"），
         # 不动用户自己添加的 OpenCode 实例，防止覆盖用户自定义模型列表。
@@ -6880,11 +6906,23 @@ class OpenAIChatToolWindow(ToolWindow):
         if not targets:
             return
 
+        OpenAIChatToolWindow._opencode_fetch_inflight = True
+
         def _do_fetch():
-            """后台线程执行：批量拉取各实例免费模型，逐个回传主线程"""
-            results = fetch_opencode_free_models_for_providers(targets)
-            for config_id, free_models in results.items():
-                self._opencode_models_ready.emit((config_id, free_models))
+            """后台线程执行：批量拉取各实例免费模型，逐个广播回传主线程"""
+            try:
+                results = fetch_opencode_free_models_for_providers(targets)
+                wins = window_registry.alive_window_instances()
+                for config_id, free_models in results.items():
+                    for win in wins:
+                        try:
+                            if getattr(win, "_is_destroyed", False):
+                                continue
+                            win._opencode_models_ready.emit((config_id, free_models))
+                        except RuntimeError:
+                            continue
+            finally:
+                OpenAIChatToolWindow._opencode_fetch_inflight = False
 
         threading.Thread(target=_do_fetch, daemon=True).start()
 
@@ -18166,9 +18204,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not workdir or not os.path.isdir(workdir):
             return
 
-        # 缓存命中：直接应用，避免重复 git 调用
-        if workdir in self._branch_cache:
-            self._apply_branch_to_ui(workdir, self._branch_cache[workdir])
+        # 缓存命中：直接应用，避免重复 git 调用（类级缓存，跨窗口共享）
+        if workdir in OpenAIChatToolWindow._branch_cache:
+            self._apply_branch_to_ui(workdir, OpenAIChatToolWindow._branch_cache[workdir])
             return
 
         # 启动后台检测（自增 request_id 用于丢弃过期结果）
@@ -18186,12 +18224,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if not workdir:
             return
 
-        # 缓存结果（同一路径下次直接命中）
-        if len(self._branch_cache) >= _MAX_BRANCH_CACHE:
+        # 缓存结果（同一路径下次直接命中，类级共享）
+        cache = OpenAIChatToolWindow._branch_cache
+        if len(cache) >= _MAX_BRANCH_CACHE:
             # Python 3.7+ dict 保插入序：弹出最早插入的 key
-            oldest = next(iter(self._branch_cache))
-            self._branch_cache.pop(oldest, None)
-        self._branch_cache[workdir] = branch
+            oldest = next(iter(cache))
+            cache.pop(oldest, None)
+        cache[workdir] = branch
         # 再次校验：缓存写完后若 request_id 又变了，说明并发切换，仍跳过
         if request_id != self._branch_detect_request_id:
             return
