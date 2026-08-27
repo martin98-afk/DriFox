@@ -110,15 +110,40 @@ class PlatformManager:
                 logger.warning(f"[PlatformManager] {d.display_name} 插件加载失败: {e}")
 
     def _ensure_adapter(self, platform: str) -> Optional[BasePlatformAdapter]:
-        """确保某平台 adapter 已加载到 _adapters；缺失则按 registry def 动态加载。
+        """确保某平台 adapter 已加载到 _adapters；缺失或配置已失效时按 registry def 加载/重建。
 
         解决“热安装/热注册平台晚于 manager 单例创建”时 _adapters 不更新、
         start 静默失败（必须重启 manager 才生效）的根因：启用即加载即启动。
-        adapter 已存在时直接返回（不重建，保留热更新重建的实例）。
+        adapter 已存在且未在运行时直接返回；已存在但配置无效（validate_config
+        不过，如扫码后 token 才写入、旧实例持空配置）则重建，避免开关启用
+        仍连旧空配置。
         """
         existing = self._adapters.get(platform)
         if existing is not None:
-            return existing
+            if existing.is_connected or not getattr(existing, "_running", False):
+                if existing.is_connected:
+                    return existing
+            # 未连接：校验当前配置是否仍有效；无效（如 token 后写入）则重建
+            if not existing.is_connected:
+                try:
+                    from app.plugins.registries.gateway_platform_registry import (
+                        GatewayPlatformRegistry as _Reg,
+                    )
+
+                    d0 = _Reg.get_instance().get(platform)
+                    if d0 is not None and d0.validate_config is not None:
+                        cfg0 = d0.config_builder() if d0.config_builder else None
+                        ok0, _ = d0.validate_config(cfg0)
+                        if ok0 and existing._last_error:
+                            # 配置已补齐：丢弃旧实例走重建
+                            logger.info(f"[PlatformManager] {platform} 配置已更新，重建 adapter")
+                            self._adapters.pop(platform, None)
+                        else:
+                            return existing
+                    else:
+                        return existing
+                except Exception:
+                    return existing
         from app.plugins.registries.gateway_platform_registry import (
             GatewayPlatformRegistry,
         )
