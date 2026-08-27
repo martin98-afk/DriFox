@@ -47,6 +47,9 @@ from loguru import logger
 # 组件探测规则表（单一事实源在 kernel.KNOWN_COMPONENTS，此处只定义物理探测谓词）
 from app.plugins.kernel import KNOWN_COMPONENTS
 
+# 插件平台声明与 deps 统一加载（设计：docs/superpowers/specs/2026-08-27-plugin-platform-deps-design.md）
+from app.plugins.deps_loader import check_platform, ensure_deps_on_path
+
 # 组件物理探测谓词：按 kernel.KNOWN_COMPONENTS 顺序遍历，物理目录/根文件命中即标记
 # 探测规则差异：hooks 需 hooks.json、ui 需 __init__.py、tools/providers 需 *.py、
 # team_templates 需 *.yaml、其余只看子目录是否存在
@@ -93,6 +96,7 @@ class PluginInfo:
     manifest: dict  # 原始清单数据
     path: Path  # 插件根目录
     plugin_type: str = "user"  # "system" | "user"
+    platform_compatible: bool = True  # platforms 声明与当前系统是否兼容（缺省声明=兼容）
 
     @property
     def description(self) -> str:
@@ -618,6 +622,12 @@ class PluginManager:
                 # 但无 commands/ 目录）导致热更新触发全量命令重载
                 manifest["components"] = _detect_components(item)
 
+                # —— 平台兼容检查 + deps 统一注入（幂等，热重载 rescan 同样覆盖）——
+                compatible, reason = check_platform(manifest)
+                if not compatible:
+                    logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
+                ensure_deps_on_path(item)
+
                 # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
                 self._register_config_schema(plugin_name, manifest)
 
@@ -627,6 +637,7 @@ class PluginManager:
                         manifest=manifest,
                         path=item,
                         plugin_type=plugin_type,
+                        platform_compatible=compatible,
                     )
                 )
                 logger.debug(
@@ -671,6 +682,12 @@ class PluginManager:
             # 但无 commands/ 目录）导致热更新触发全量命令重载
             manifest["components"] = _detect_components(plugin_dir)
 
+            # —— 平台兼容检查 + deps 统一注入（幂等，热重载 rescan 同样覆盖）——
+            compatible, reason = check_platform(manifest)
+            if not compatible:
+                logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
+            ensure_deps_on_path(plugin_dir)
+
             # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
             self._register_config_schema(plugin_name, manifest)
 
@@ -679,6 +696,7 @@ class PluginManager:
                 manifest=manifest,
                 path=plugin_dir,
                 plugin_type=plugin_type,
+                platform_compatible=compatible,
             )
             logger.debug(
                 f"[PluginManager] Rescanned plugin: {plugin_name} (type={plugin_type}, format={manifest_format})"

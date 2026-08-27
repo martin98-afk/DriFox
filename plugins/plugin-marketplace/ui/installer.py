@@ -24,6 +24,7 @@ from typing import Optional, Tuple
 from loguru import logger
 
 from .data import compare_versions
+from .deps_installer import DepsInstaller
 from .proxy import get_proxy_config
 
 
@@ -256,6 +257,8 @@ class PluginInstaller:
         self._manifest_cache: dict = {}
         # 最近一次安装/更新失败原因（供 UI 记录区展示；成功/未执行时为空）
         self.last_error: str = ""
+        # 最近一次依赖自动安装结果（{plugin, success, missing, log}，供 UI 兑底提示）
+        self.last_deps_result: Optional[dict] = None
         # 清理上次卸载残留（进程重启后 DLL/.pyd 句柄已释放，可正常删除）
         self._cleanup_pending_delete()
 
@@ -519,6 +522,7 @@ class PluginInstaller:
 
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
+            self._install_deps_quietly(name, target)
             self.last_error = ""
             self.invalidate_installed_cache()
         else:
@@ -570,6 +574,7 @@ class PluginInstaller:
         # 不存在（更新前被手动删除）→ 等同安装。
         success = self._install_by_source(name, source, target, plugin_meta.get("_marketplace_source"))
         if success:
+            self._install_deps_quietly(name, target)
             logger.info(f"[Installer] Updated plugin {name} -> v{remote_ver}")
             self.last_error = ""
             self.invalidate_installed_cache()
@@ -577,6 +582,31 @@ class PluginInstaller:
             if not self.last_error:
                 self.last_error = f"Update {name} failed"
         return success
+
+    def _install_deps_quietly(self, name: str, target: Path) -> None:
+        """安装/更新成功后自动装 dependencies.pip 声明的依赖（失败不阻断）
+
+        设计决策 C：自动 + 手动兑底 —— 失败/无网时仅记录，不回滚插件本体，
+        缺失依赖由设置卡/市场详情的「安装依赖」按钮手动重试（调 DepsInstaller）。
+        结果缓存在 self.last_deps_result 供 UI 读取展示。
+        """
+        try:
+            manifest = self._read_manifest_at(target)
+            if not manifest:
+                return
+            from app.plugins.deps_loader import resolve_pip_deps
+
+            if not resolve_pip_deps(manifest):
+                return  # 无 pip 依赖声明，零开销
+            logger.info(f"[Installer] 自动安装插件依赖: {name}")
+            result = DepsInstaller().install(target, manifest)
+            self.last_deps_result = {"plugin": name, "success": result.success, "missing": result.missing, "log": result.log}
+            if not result.success:
+                logger.warning(
+                    f"[Installer] {name} 依赖安装不完整（不阻断安装）: {result.missing}"
+                )
+        except Exception as e:
+            logger.warning(f"[Installer] {name} 依赖自动安装异常（不阻断安装）: {e}")
 
     # ── Source 类型分发 ──────────────────────────────────
 
