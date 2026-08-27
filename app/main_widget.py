@@ -3298,41 +3298,24 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _clear_command_shortcuts(self):
-        """清除已注册的命令快捷键"""
-        # F1 守卫：窗口 C++ 对象已销毁时静默返回，避免访问 self.window() 抛
-        # RuntimeError（wrapped C/C++ object has been deleted）。
+        """清空本实例对命令快捷键的引用
+
+        共享 QShortcut 自归属权修复起由窗口级缓存统一持有
+        （_window_shortcut_cache，Qt 父对象为顶层窗口），生命周期跟随窗口，
+        与单个 MainWidget 实例解耦；此处不再 deleteLater 共享对象。
+        """
         if _is_sip_deleted(self):
             return
-        # 清理窗口级去重缓存（当前实例对应的窗口）
-        shortcut_parent = self.window() or self
-        win_id = id(shortcut_parent)
-        # 统计同一窗口下残余的 MainWidget 实例数
-        remaining = sum(
-            1 for w in window_registry.alive_window_instances() if not w._is_destroyed and id(w.window() or w) == win_id
-        )
-        if remaining <= 1:
-            # 最后一个实例销毁时清除窗口级缓存
-            OpenAIChatToolWindow._window_shortcut_cache.pop(win_id, None)
-
-        for qs in getattr(self, "_command_shortcuts", []):
-            try:
-                qs.setEnabled(False)
-                qs.deleteLater()
-            except RuntimeError:
-                pass
+        # 兼容修复前的旧实例字段：仅断开 Python 引用，不触碰窗口共享的 QShortcut
         self._command_shortcuts = []
 
     def _disconnect_command_shortcut_cleanup(self):
-        """closeEvent 主动断开 destroyed 清理连接并立即清理快捷键。
+        """关闭路径兼容钩子（保留签名供 closeEvent 调用）。
 
-        背景：_register_command_shortcuts 首次执行时连接 self.destroyed →
-        lambda 调 _clear_command_shortcuts()。窗口 C++ 对象销毁触发 destroyed 时，
-        lambda 访问已删除的 self 会抛 RuntimeError（wrapped C/C++ object has
-        been deleted），disband 批量关闭团队窗口时每窗报一次。
-
-        修复：关闭路径主动断开该连接 + 立即清理快捷键（此时 C++ 对象仍存活），
-        destroyed 触发时不再执行 lambda；即使仍有其他注入路径触发 destroyed，
-        F1 的 sip 守卫也会静默兜底。
+        历史：_register_command_shortcuts 曾将 per-instance destroyed 钩子接到
+        _clear_command_shortcuts，并在 C++ 析构后访问已删除对象抛 RuntimeError。
+        归属权改窗口级后快捷键由 shortcut_parent.destroyed 钩子统一清理，
+        本方法退化为尽力断开历史连接 + 清空自身残留引用，均无副作用可失败静默。
         """
         try:
             if getattr(self, "_cmd_shortcuts_destroy_connected", False):
@@ -3717,12 +3700,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.error(f"[MainWidget] Message factory {factory.name} failed: {e}")
         return None
 
-    # ── 快捷键窗口级注册去重 ──────────────────────────────
-    # 在 Tab 模式下，多个 MainWidget 共享同一个顶层窗口（TabManagerWindow），
-    # 如果每个 MainWidget 都向同一个窗口注册 QShortcut，将产生重复注册导致
-    # 快捷键行为 undefined（Qt 官方文档明确指出同一 context 下重复 key sequence 行为未定义）。
-    # 此处维护每个窗口已注册的 shortcut key sequences 集合，在注册前检查去重。
-    _window_shortcut_cache: Dict[int, set] = {}
+    # ── 快捷键窗口级归属（幂等 ensure） ──────────────────────
+    # Tab 模式下多个 MainWidget 共享同一个顶层窗口（TabManagerWindow）。
+    # 历史 bug：QShortcut 由"第一个注册的 tab"私有持有，其余 tab 全跳过；
+    # 持有者 tab 关闭时 deleteLater 全部快捷键，后续清理判据 off-by-one
+    # pop 掉去重缓存却无人重建 → 存活 tab 快捷键全灭且不自愈；关非持有者
+    # 又会放行新 tab 重复注册 → 同窗口同键序列多套 QShortcut（undefined 行为，
+    # 开关型命令被执行两次）。
+    # 修复：QShortcut 的 Qt 父对象本来就是顶层窗口，生命周期天然跟随窗口；
+    # 缓存直接持有 QShortcut 对象本身，_register_command_shortcuts 退化为
+    # 幂等 ensure——缓存内对象存活则跳过，否则清死引用重建。任何实例的
+    # 创建/销毁都不再影响快捷键可用性。
+    _window_shortcut_cache: Dict[int, list] = {}
 
     def _register_command_shortcuts(self):
         """为所有有 shortcut 配置的命令注册 QShortcut
@@ -3740,21 +3729,6 @@ class OpenAIChatToolWindow(ToolWindow):
         handler 在运行时解析当前激活的 MainWidget（Tab 模式取 _content_area 当前页），
         不捕获 self，避免命中被隐藏或已关闭的标签页。
         """
-        self._clear_command_shortcuts()
-
-        # 快捷键挂在顶层窗口上，self 被销毁时不会随之自动清理，连接 destroyed 同步清理，避免泄漏
-        # F1 守卫：lambda 在 C++ 对象销毁触发 destroyed 时访问 self 会抛 RuntimeError，
-        # 先经 _is_sip_deleted 判定，删除态直接跳过清理（closeEvent 已主动清理，此处为兜底）。
-        if not getattr(self, "_cmd_shortcuts_destroy_connected", False):
-            try:
-                self._cmd_shortcuts_destroy_slot = lambda *a: (
-                    None if _is_sip_deleted(self) else self._clear_command_shortcuts()
-                )
-                self.destroyed.connect(self._cmd_shortcuts_destroy_slot)
-                self._cmd_shortcuts_destroy_connected = True
-            except RuntimeError:
-                pass
-
         from PyQt5.QtGui import QKeySequence
         from PyQt5.QtWidgets import QShortcut
 
@@ -3776,8 +3750,39 @@ class OpenAIChatToolWindow(ToolWindow):
         shortcut_parent = self.window() or self
         win_id = id(shortcut_parent)
 
-        # Tab 模式去重：同一窗口已注册的 key sequence 跳过（防止多标签页重复注册）
-        registered = OpenAIChatToolWindow._window_shortcut_cache.get(win_id, set())
+        # ── 幂等 ensure：窗口已有存活的命令快捷键集合则直接复用 ──
+        cached = OpenAIChatToolWindow._window_shortcut_cache.get(win_id)
+        if cached is not None:
+            alive = []
+            for qs in cached:
+                try:
+                    if not _is_sip_deleted(qs):
+                        alive.append(qs)
+                except RuntimeError:
+                    continue
+            if len(alive) != len(cached):
+                cached[:] = alive
+            if alive:
+                return
+            # 全部死引用（理论上不会发生：父窗口销毁时窗口自身 destroyed 钩子已 pop）
+            OpenAIChatToolWindow._window_shortcut_cache.pop(win_id, None)
+
+        self._clear_command_shortcuts()
+
+        # 窗口销毁时同步移除缓存条目：QShortcut 是 shortcut_parent 的 Qt 子对象，
+        # 随父自动销毁；此处只防类级 dict 中死 wrapper 堆积与 win_id 复用串扰。
+        try:
+            if getattr(shortcut_parent, "_shortcut_cache_cleanup_connected", False) is False:
+                shortcut_parent._shortcut_cache_cleanup_connected = True
+
+                def _pop_shortcut_cache(*_a, _parent=shortcut_parent):
+                    OpenAIChatToolWindow._window_shortcut_cache.pop(id(_parent), None)
+
+                shortcut_parent.destroyed.connect(_pop_shortcut_cache)
+        except RuntimeError, AttributeError:
+            pass
+
+        cache: list = OpenAIChatToolWindow._window_shortcut_cache.setdefault(win_id, [])
 
         cmd_mgr = CommandManager.get_instance()
         for entries in cmd_mgr._commands.values():
@@ -3785,10 +3790,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 if not cmd_def.shortcut:
                     continue
                 key_seq = cmd_def.shortcut
-                # 去重：同一窗口下相同快捷键只需注册一次
-                if key_seq in registered:
-                    continue
-                registered.add(key_seq)
 
                 qs = QShortcut(QKeySequence(key_seq), shortcut_parent)
 
@@ -3813,10 +3814,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         logger.warning(f"[Shortcut] '{n}' 处理异常", exc_info=True)
 
                 qs.activated.connect(_on_shortcut)
-                self._command_shortcuts.append(qs)
-
-        # 更新窗口级缓存
-        OpenAIChatToolWindow._window_shortcut_cache[win_id] = registered
+                cache.append(qs)
 
     def _command_has_params(self, name: str) -> bool:
         """检查命令是否定义了参数（用于快捷键触发的参数卡片决策）
@@ -19930,7 +19928,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             window_registry.unregister_window(self)
-        except ValueError, Exception:
+        except Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -19964,21 +19962,11 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-        # ★ 泄漏修复（P0-C）：关闭窗口时清理其在类变量 _window_shortcut_cache 中的
-        # 快捷键缓存条目，避免全局类变量长期持有已销毁窗口引用导致泄漏。
-        # key 与注册时一致：id(self.window() or self)（见 _register_window_shortcuts）。
-        try:
-            _sc_win_id = id(self.window() or self)
-            # closeEvent 时 self 已从 window_instances unregister，remaining 不含自身；
-            # 同一 TabManager 下多 tab 共享 win_id，仅最后一个实例销毁时才清共享 cache。
-            _remaining = sum(
-                1 for w in window_registry.alive_window_instances()
-                if id(w.window() or w) == _sc_win_id
-            )
-            if _remaining <= 1:
-                OpenAIChatToolWindow._window_shortcut_cache.pop(_sc_win_id, None)
-        except Exception:
-            pass
+        # 快捷键窗口级缓存（_window_shortcut_cache）无需在此清理：
+        # 归属权修复后共享 QShortcut 为顶层窗口的 Qt 子对象，随窗口销毁自动销毁；
+        # 缓存条目由注册路径挂接的 shortcut_parent.destroyed 钩子统一 pop。
+        # （原 remaining<=1 判据 off-by-one：存活兄弟还剩 1 个时就 pop 缓存，
+        # 导致持有者 tab 关闭后快捷键全灭无自愈，或放行新 tab 重复注册。）
 
         # 停止所有正在进行的流式输出 + 清理窗口独有资源（不影响其他窗口）
         if hasattr(self, "backend") and self.backend:
@@ -20111,9 +20099,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ B4 强回收层：进程退出整体回收，不 kill（窗口销毁时 renderer
         # 子进程随 WebEngine profile 自动退出，显式 kill 反而可能误伤共享进程）
         self._unloaded_pids.clear()
-        # ★ B4 强回收层：进程退出整体回收（不 kill——窗口销毁时 renderer
-        # 子进程随 WebEngine 自动退出，kill 反而可能误伤其他窗口的复用 PID）
-        self._unloaded_pids.clear()
 
         # 最后一个窗口关闭 → 应用退出，保存工作目录到 DB，下次启动时自动恢复
         if not window_registry.alive_window_instances():
@@ -20125,13 +20110,10 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
-        # 断开 aboutToQuit 信号，防止退出时访问已销毁的 widget
-        try:
-            app = QApplication.instance()
-            if app is not None:
-                app.aboutToQuit.disconnect(self._auto_save_current_session)
-        except Exception:
-            pass
+        # aboutToQuit 说明：真正注册的是类级 cls._on_app_about_to_quit（首个窗口
+        # 单次连接，应用生命周期常驻，批量保存所有窗口脏会话，见 19657）。
+        # 历史：此处曾 disconnect(self._auto_save_current_session)，但该槽从未
+        # 被 connect 过 —— 纯死代码已删除；类级连接按设计不随单窗断开。
 
         # GC 钩子：closeEvent 末尾防抖触发全局缓存清理 + 堆回收
         self._schedule_gc_hook()

@@ -344,6 +344,24 @@ def main():
 
     app.aboutToQuit.connect(SessionStore.mark_clean_shutdown)
 
+    # ── M2 修复：全 app 退出（托盘退出等）不走任何 MainWidget.closeEvent ──
+    # _quit_application 直接 quit()，TabManagerWindow.cleanup() 从未被执行：
+    # 各 tab 的完整清理链（流式中断消息 finalize 收集落库 / backend 收尾 /
+    # 桌宠停止）全部跳过，仅靠 _on_app_about_to_quit 的脏会话保存兜底。
+    # 此处显式驱动 cleanup()（幂等）：逐窗 close() 走完整 closeEvent 链。
+    # 尽力而为语义：finalize 为 daemon 线程自同步落盘，不等 join。
+    def _teardown_tab_windows():
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            _tm = TabManagerWindow.get_instance()
+            if _tm is not None:
+                _tm.cleanup()
+        except Exception:
+            logger.warning("[M2] 退出时驱动 TabManagerWindow.cleanup 失败", exc_info=True)
+
+    app.aboutToQuit.connect(_teardown_tab_windows)
+
     # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
     QTimer.singleShot(0, _show_popup)
     QTimer.singleShot(0, _deferred_startup)
