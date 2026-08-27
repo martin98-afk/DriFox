@@ -433,8 +433,9 @@ class BasePlatformAdapter(ABC):
                 await self.handle_message(pending)
 
     def _get_session_key(self, event: MessageEvent) -> str:
-        """获取会话键"""
-        return f"{event.platform.value}:{event.chat_id}"
+        """获取会话键（platform 兼容 str 直通：第三方平台 id 不经 Platform 枚举）"""
+        p = getattr(event.platform, "value", event.platform)
+        return f"{p}:{event.chat_id}"
 
     # ── 可选流式回复钩子（平台支持打字机式输出时覆写） ──
 

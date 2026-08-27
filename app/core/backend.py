@@ -207,6 +207,18 @@ def _extract_markdown_images(content: str) -> tuple[str, list[str]]:
     return cleaned, image_paths
 
 
+def _gw_str_platform(platform: Any):
+    """Gateway 平台入参归一：枚举内平台转 Platform；第三方 str 平台 id 原样直通（Phase E 契约）。"""
+    from app.gateway.base import Platform as GatewayPlatform
+
+    if isinstance(platform, GatewayPlatform):
+        return platform
+    try:
+        return GatewayPlatform(platform)
+    except ValueError:
+        return platform
+
+
 def _safe_agent_manager(backend: "ChatBackend") -> Any:
     """安全读取 _agent_manager：未 __init__ 时返回 None 而不触发 super().__init__ 异常
 
@@ -3396,11 +3408,9 @@ class ChatBackend(QObject):
                 try:
                     import asyncio
 
-                    from app.gateway.base import Platform as GatewayPlatform
-
                     asyncio.run_coroutine_threadsafe(
                         self._gateway_send_message(
-                            GatewayPlatform(platform),
+                            _gw_str_platform(platform),
                             chat_id,
                             "Gateway 当前不可用，请打开 DriFox 主窗口后重试。",
                         ),
@@ -3414,9 +3424,8 @@ class ChatBackend(QObject):
             import asyncio
 
             from app.gateway.base import MessageEvent, MessageType
-            from app.gateway.base import Platform as GatewayPlatform
 
-            gw_platform = GatewayPlatform(platform)
+            gw_platform = _gw_str_platform(platform)
 
             # 1. 获取或创建 GatewaySession（WeCom/钉钉用户映射）
             gw_session = self._gateway_manager.session_manager.get_or_create_session(
@@ -3675,7 +3684,9 @@ class ChatBackend(QObject):
 
         先发送"思考中"提示，然后等待 AI 结果。
         """
-        logger.info(f"[Gateway] Processing message from {platform.value}:{user_id}: {text[:50]}...")
+        # platform 兼容 str 直通（第三方平台 id，Phase E 契约）
+        _pid = getattr(platform, "value", platform)
+        logger.info(f"[Gateway] Processing message from {_pid}:{user_id}: {text[:50]}...")
 
         # 先发送"思考中"占位回复（流式平台跳过：打字机本身即实时反馈，
         # 且占位与流首片会形成两条独立消息）
@@ -3697,7 +3708,7 @@ class ChatBackend(QObject):
                 "text": text,
                 "chat_id": chat_id,
                 "user_id": user_id,
-                "platform": platform.value,
+                "platform": _pid,
                 "future": future,
             }
         )

@@ -236,8 +236,8 @@ class PluginConfigCard(ExpandSettingCard):
                 # 无存储值不参与保存/回显
                 btn = PrimaryPushButton(f.placeholder or f.label, self.view)
                 btn.clicked.connect(
-                    lambda _c, _f=f, _p=self._plugin_name: ToolActionDialog.open_for(
-                        self, _p, _f.label, _f.action
+                    lambda _c, _f=f, _p=self._plugin_name, _card=self: ToolActionDialog.open_for(
+                        _card.view, _p, _f.label, _f.action, config_card=_card
                     )
                 )
                 row = _FieldRow(f.label, btn, self.view)
@@ -562,6 +562,8 @@ class _ToolActionWorker(QThread):
                     f"终止: {hit}" + ("" if result.success else f" | {str(result.error or '')[:120]}"),
                 )
                 return
+            # 未命中终止条件：单轮失败（网络抖动/长轮询超时）不终止，继续下一轮；
+            # 仅连续失败达 max_rounds 才止，保证扫码确认这类长等待不丢
 
         self.finished_state.emit("stopped", f"达最大轮次 {self._poll.max_rounds}")
 
@@ -574,11 +576,15 @@ class ToolActionDialog(QDialog):
 
     _instances = []  # 防重复点击开出多窗
 
-    def __init__(self, plugin_name: str, title: str, spec, parent=None):
+    def __init__(self, plugin_name: str, title: str, spec, parent=None, *, config_card=None):
         super().__init__(parent)
+        self._config_card = config_card  # 发起动作的设置卡（完成后回显刷新）
         self.setWindowTitle(f"{title} - {plugin_name}")
         self.setModal(True)
-        self.setMinimumWidth(360)
+        self.setMinimumWidth(spec.dialog_width)
+        if spec.dialog_height:
+            self.setMinimumHeight(spec.dialog_height)
+        self._image_width = spec.image_width
         self._worker: Optional[_ToolActionWorker] = None
 
         layout = QVBoxLayout(self)
@@ -623,9 +629,10 @@ class ToolActionDialog(QDialog):
                 pm = QPixmap()
                 if pm.loadFromData(base64.b64decode(img["data"])):
                     self._image_label.setPixmap(
-                        pm.scaledToWidth(300, Qt.SmoothTransformation)
+                        pm.scaledToWidth(self._image_width, Qt.SmoothTransformation)
                     )
                     self._image_label.show()
+                    self.adjustSize()
             except Exception:
                 pass
         content = getattr(result, "content", None)
@@ -636,16 +643,20 @@ class ToolActionDialog(QDialog):
         self._progress.stop()
         self._progress.hide()
         self._status_label.setText(f"[{ {'done': '完成', 'error': '失败', 'stopped': '中止'}.get(state, state) }] {message}")
-        # 工具可能已写配置存储（如登录 token），回显刷新所属设置卡
+        # 工具可能已写配置存储（如登录 token），回显刷新发起动作的设置卡
         try:
-            for w in self.parent().findChildren(PluginConfigCard) if self.parent() else []:
-                w._echo()
+            if self._config_card is not None:
+                self._config_card._echo()
         except Exception:
             pass
         if state == "error":
             from qfluentwidgets import InfoBar, InfoBarPosition
 
             InfoBar.error("执行失败", message[:160], parent=self, position=InfoBarPosition.TOP, duration=4000)
+        elif state == "done":
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.success("执行完成", message[:160], parent=self, position=InfoBarPosition.TOP, duration=4000)
 
     def _on_close(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -655,13 +666,13 @@ class ToolActionDialog(QDialog):
     # ── 入口 ──
 
     @classmethod
-    def open_for(cls, parent, plugin_name: str, title: str, spec) -> None:
+    def open_for(cls, parent, plugin_name: str, title: str, spec, *, config_card=None) -> None:
         """打开动作弹窗（同一时刻只保留一个实例）"""
         for dlg in cls._instances:
             if dlg.isVisible():
                 dlg.raise_()
                 return
-        dlg = cls(plugin_name, title, spec, parent)
+        dlg = cls(plugin_name, title, spec, parent, config_card=config_card)
         cls._instances.append(dlg)
         dlg.finished.connect(lambda *_: cls._instances.remove(dlg) if dlg in cls._instances else None)
         dlg.show()

@@ -122,11 +122,17 @@ class ToolActionSpec:
         tool: 注册工具名（ToolRegistry.get 查得；未注册则按钮报错提示）
         args: 初始调用参数（原样传给工具 impl）
         poll: 可选轮询声明（不声明则单击单次调用）
+        image_width: 弹窗图片展示宽度 px（默认 340；插件按二维码可扫性声明更大值）
+        dialog_width: 弹窗最小宽度 px（默认 420）
+        dialog_height: 弹窗最小高度 px（默认 0=自适应）
     """
 
     tool: str
     args: Dict[str, Any] = field(default_factory=dict)
     poll: Optional[ToolActionPoll] = None
+    image_width: int = 340
+    dialog_width: int = 420
+    dialog_height: int = 0
 
 
 @dataclass(frozen=True)
@@ -287,4 +293,11 @@ def _parse_tool_action(plugin_name: str, key: str, raw: Any) -> Optional[ToolAct
             stop_when=stop_when,
         )
 
-    return ToolActionSpec(tool=tool, args=dict(args), poll=poll_spec)
+    return ToolActionSpec(
+        tool=tool,
+        args=dict(args),
+        poll=poll_spec,
+        image_width=max(_parse_optional_int(raw.get("image_width"), 340) or 340, 120),
+        dialog_width=max(_parse_optional_int(raw.get("dialog_width"), 420) or 420, 200),
+        dialog_height=max(_parse_optional_int(raw.get("dialog_height"), 0) or 0, 0),
+    )

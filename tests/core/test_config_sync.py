@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, PropertyMock, call, patch
 import httpx
 import pytest
 from PyQt5.QtCore import QTimer
+from qfluentwidgets import Theme
 from qfluentwidgets.common.config import OptionsConfigItem, OptionsValidator
 
 
@@ -1246,3 +1247,115 @@ class TestThemeSyncTiming:
         )
         assert theme_item.value == "lumia"
         dispatch_mock.assert_not_called(), "主题未变化时不应触发全量刷新"
+
+
+class TestThemeModeSync:
+    """bug#主题半切换回归：下载写回不得直写 qfluentwidgets ThemeMode
+
+    场景：本地深色、云端浅色。写回循环若直接 .value= 会绕过 qconfig.set()，
+    qconfig.theme 内部态（图标/QSS 生成依据）不更新；150ms 后 setTheme 又因
+    themeMode.value 已被提前改写而幂等短路 → themeChanged 不发射、
+    updateStyleSheet 用旧主题重刷 → 图标与组件字体颜色停留深色（半切换）。
+    """
+
+    class _FakeSettings:
+        """替身：类属性含 ui_theme_style + themeMode（真实 ConfigItem 语义）"""
+
+        ui_theme_style = OptionsConfigItem("UI", "ThemeStyle", "lumia", OptionsValidator(["lumia"]))
+        themeMode = OptionsConfigItem(
+            "QFluentWidgets", "ThemeMode", Theme.LIGHT, OptionsValidator(Theme)
+        )
+
+        def __init__(self):
+            self.file = Path("")
+            type(self).ui_theme_style.value = "lumia"
+            type(self).themeMode.value = Theme.DARK  # 本地深色
+
+        def get_instance(self):
+            return self
+
+    def _run_reload(self, svc, tmp_path, monkeypatch, cloud_mode: str):
+        """构造云端配置并执行 _reload_settings_on_main_thread，返回 (dispatch_mock, fake)"""
+        from app.core import config_sync as cs
+
+        cfg_path = tmp_path / "app.config"
+        cfg_path.write_text(
+            json.dumps({"UI": {"ThemeStyle": "lumia"}, "QFluentWidgets": {"ThemeMode": cloud_mode}}),
+            encoding="utf-8",
+        )
+
+        fake = self._FakeSettings()
+        fake.file = cfg_path
+
+        monkeypatch.setattr("app.utils.config.update_theme_options", lambda: None)
+        monkeypatch.setattr("app.utils.theme_manager.ThemeManager.reload", lambda self: None)
+        monkeypatch.setattr(cs, "Settings", fake)
+        dispatch_mock = MagicMock()
+        monkeypatch.setattr("app.utils.theme_manager.ThemeManager.dispatch_refresh", dispatch_mock)
+
+        # 捕获 150ms 延迟回调（真实链：lambda 闭包携带 tm_diff），手动执行模拟到期
+        captured = []
+        monkeypatch.setattr(
+            cs.QTimer, "singleShot", staticmethod(lambda ms, cb: captured.append(cb))
+        )
+        svc.settingsRestored.connect(lambda: None)  # 占位，避免空连接告警
+        try:
+            svc._reload_settings_on_main_thread()
+        finally:
+            try:
+                svc.settingsRestored.disconnect()
+            except TypeError:
+                pass
+        for cb in captured:
+            cb()
+        return dispatch_mock, fake
+
+    def test_theme_mode_not_written_directly(self, reset_sync_service, tmp_path, monkeypatch):
+        """深浅模式与云端不同 → themeMode 内存不直写 + dispatch_refresh 被触发"""
+        dispatch_mock, fake = self._run_reload(
+            reset_sync_service, tmp_path, monkeypatch, cloud_mode="Theme.LIGHT"
+        )
+        assert fake.themeMode.value == Theme.DARK, "themeMode 不应被直写内存（交给 setTheme 正规链）"
+        dispatch_mock.assert_called_once(), "深浅模式云端不同 → 必须显式全量刷新（含 setTheme）"
+
+    def test_theme_mode_same_no_refresh(self, reset_sync_service, tmp_path, monkeypatch):
+        """深浅模式与云端相同 → 不直写、不刷新"""
+        dispatch_mock, fake = self._run_reload(
+            reset_sync_service, tmp_path, monkeypatch, cloud_mode="Theme.DARK"
+        )
+        assert fake.themeMode.value == Theme.DARK
+        dispatch_mock.assert_not_called(), "深浅模式未变化不应触发全量刷新"
+
+
+class TestSetThemeAfterSkip:
+    """跳过直写后，setTheme 正规链可正常切换 qconfig.theme（qfluentwidgets 语义锁定）
+
+    若 qfluentwidgets 升级改变 set/qconfig.set 幂等行为，此处先于线上暴露。
+    使用真实 Settings 单例（qconfig._cfg 已被替换为 Settings），不落盘。
+    """
+
+    def test_set_theme_effective_when_value_not_pre_written(self, qapp):
+        from qfluentwidgets import qconfig, setTheme
+
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        original = cfg.themeMode.value
+        try:
+            setTheme(Theme.DARK)
+            assert qconfig.theme == Theme.DARK
+
+            # 模拟修复后写回路径：不直写 .value，直接 setTheme（窗口侧正规链）
+            setTheme(Theme.LIGHT)
+            assert qconfig.theme == Theme.LIGHT, "themeMode 未被提前直写时 setTheme 必须生效"
+            assert cfg.themeMode.value == Theme.LIGHT
+
+            # 反证修复前 bug：直写 .value 后 setTheme 幂等短路 → qconfig.theme 脱同步
+            cfg.themeMode.value = Theme.DARK  # 模拟绕过 qconfig.set 的直写
+            setTheme(Theme.DARK)
+            cfg.themeMode.value = Theme.LIGHT  # 再直写成新值
+            setTheme(Theme.LIGHT)
+            assert qconfig.theme == Theme.DARK, "直写后 setTheme 被短路，qconfig.theme 停留旧值（bug 现场）"
+        finally:
+            cfg.themeMode.value = original
+            setTheme(original)
