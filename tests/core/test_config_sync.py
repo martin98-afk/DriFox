@@ -18,7 +18,7 @@ import httpx
 import pytest
 from PyQt5.QtCore import QTimer
 from qfluentwidgets import Theme
-from qfluentwidgets.common.config import OptionsConfigItem, OptionsValidator
+from qfluentwidgets.common.config import EnumSerializer, OptionsConfigItem, OptionsValidator
 
 
 # =============================================================================
@@ -93,9 +93,7 @@ class TestCheckRemoteFile:
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value.__enter__.return_value = mock_client
-            mock_client.get.return_value = make_httpx_response(
-                200, {"content": "abc", "sha": "s1"}
-            )
+            mock_client.get.return_value = make_httpx_response(200, {"content": "abc", "sha": "s1"})
             assert svc._check_remote_file("drifox/app.config") is True
 
     def test_returns_false_when_404(self, svc):
@@ -129,9 +127,7 @@ class TestCheckRemoteFile:
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value.__enter__.return_value = mock_client
-            mock_client.get.return_value = make_httpx_response(
-                403, json_data={"message": "invalid_token"}
-            )
+            mock_client.get.return_value = make_httpx_response(403, json_data={"message": "invalid_token"})
             with pytest.raises(TokenAuthError):
                 svc._check_remote_file("drifox/app.config")
 
@@ -142,15 +138,11 @@ class TestCheckRemoteFile:
         with patch("httpx.Client") as mock_client_cls:
             mock_client = MagicMock()
             mock_client_cls.return_value.__enter__.return_value = mock_client
-            mock_client.get.return_value = make_httpx_response(
-                200, json_data={"message": "Access token is expired"}
-            )
+            mock_client.get.return_value = make_httpx_response(200, json_data={"message": "Access token is expired"})
             # 注意：200 带过期语义 → 走非 200 分支前的 200 处理？不——200 分支先返回
             # content 判断。这里 200 且无 content → False。真正带失效语义的响应
             # 是 401/403 等非 200。此用例验证 message 检测在非 200 分支生效：
-            mock_client.get.return_value = make_httpx_response(
-                401, json_data={"message": "Access token is expired"}
-            )
+            mock_client.get.return_value = make_httpx_response(401, json_data={"message": "Access token is expired"})
             with pytest.raises(TokenAuthError):
                 svc._check_remote_file("drifox/app.config")
 
@@ -411,9 +403,7 @@ class TestDoDownload:
             mock_client = MagicMock()
             mock_client_cls.return_value.__enter__.return_value = mock_client
             # SHA 检查返回与缓存相同的 SHA
-            mock_client.get.return_value = make_httpx_response(
-                200, {"sha": "cached_sha"}
-            )
+            mock_client.get.return_value = make_httpx_response(200, {"sha": "cached_sha"})
 
             with patch.object(svc, "_sync_token", return_value=True):
                 with patch("pathlib.Path.write_bytes") as mock_write:
@@ -495,9 +485,7 @@ class TestInitialSync:
             mock_client.get.return_value = make_httpx_response(404)
 
             with patch.object(svc, "_sync_token", return_value=True):
-                with patch.object(
-                    svc, "_upload_file", return_value=True
-                ) as mock_upload:
+                with patch.object(svc, "_upload_file", return_value=True) as mock_upload:
                     svc._initial_sync()
                     assert svc._initial_sync_completed is True
                     assert mock_upload.called
@@ -618,11 +606,14 @@ class TestInitialSync:
 
             # 刷新失败：_sync_token 返回 False，_refresh_local_and_upload 内部
             # _ensure_valid_token 返回 TOKEN_REVOKED → 先尝试云端恢复，恢复失败 → 清绑分支
-            with patch.object(svc, "_sync_token", return_value=False), patch(
-                "app.gateway.auth.gitee.GiteeOAuthBackend._ensure_valid_token",
-                return_value=(None, "TOKEN_REVOKED::invalid_grant"),
-            ), patch.object(svc, "recover_token_from_cloud", return_value=False), patch(
-                "app.core.config_sync.Settings.get_instance", return_value=fake_cfg
+            with (
+                patch.object(svc, "_sync_token", return_value=False),
+                patch(
+                    "app.gateway.auth.gitee.GiteeOAuthBackend._ensure_valid_token",
+                    return_value=(None, "TOKEN_REVOKED::invalid_grant"),
+                ),
+                patch.object(svc, "recover_token_from_cloud", return_value=False),
+                patch("app.core.config_sync.Settings.get_instance", return_value=fake_cfg),
             ):
                 svc._initial_sync()
 
@@ -654,10 +645,11 @@ class TestInitialSync:
                 make_gitee_file_response("remote_data", sha="s1"),  # download
             ]
 
-            with patch.object(svc, "_sync_token", return_value=True), patch.object(
-                svc, "_is_access_token_valid", return_value=True
-            ), patch.object(svc, "_refresh_and_upload_after_download"), patch(
-                "pathlib.Path.write_bytes"
+            with (
+                patch.object(svc, "_sync_token", return_value=True),
+                patch.object(svc, "_is_access_token_valid", return_value=True),
+                patch.object(svc, "_refresh_and_upload_after_download"),
+                patch("pathlib.Path.write_bytes"),
             ):
                 svc._initial_sync()
 
@@ -946,9 +938,7 @@ class TestFileTransfer:
             # GET SHA → None (文件不存在)
             # POST → 201
             mock_client.get.return_value = make_httpx_response(404)
-            mock_client.post.return_value = make_httpx_response(
-                201, {"content": {"sha": "new_sha"}}
-            )
+            mock_client.post.return_value = make_httpx_response(201, {"content": {"sha": "new_sha"}})
 
             result = svc._upload_file(local_path, "drifox/app.config", "app.config")
             assert result is True
@@ -964,12 +954,8 @@ class TestFileTransfer:
             mock_client_cls.return_value.__enter__.return_value = mock_client
             # GET SHA → "existing_sha"
             # PUT → 200
-            mock_client.get.return_value = make_httpx_response(
-                200, {"sha": "existing_sha", "content": "abc"}
-            )
-            mock_client.put.return_value = make_httpx_response(
-                200, {"content": {"sha": "updated_sha"}}
-            )
+            mock_client.get.return_value = make_httpx_response(200, {"sha": "existing_sha", "content": "abc"})
+            mock_client.put.return_value = make_httpx_response(200, {"content": {"sha": "updated_sha"}})
 
             result = svc._upload_file(local_path, "drifox/app.config", "app.config")
             assert result is True
@@ -991,9 +977,7 @@ class TestFileTransfer:
             )
 
             local_path = MagicMock()
-            result = svc._download_file(
-                "drifox/app.config", local_path, "app.config"
-            )
+            result = svc._download_file("drifox/app.config", local_path, "app.config")
             assert result is True
             local_path.write_bytes.assert_called_once_with(b"hello")
             assert svc._config_remote_sha == "file_sha"
@@ -1005,9 +989,7 @@ class TestFileTransfer:
             mock_client_cls.return_value.__enter__.return_value = mock_client
             mock_client.get.return_value = make_httpx_response(404)
 
-            result = svc._download_file(
-                "drifox/app.config", MagicMock(), "app.config"
-            )
+            result = svc._download_file("drifox/app.config", MagicMock(), "app.config")
             assert result is False
 
 
@@ -1263,7 +1245,7 @@ class TestThemeModeSync:
 
         ui_theme_style = OptionsConfigItem("UI", "ThemeStyle", "lumia", OptionsValidator(["lumia"]))
         themeMode = OptionsConfigItem(
-            "QFluentWidgets", "ThemeMode", Theme.LIGHT, OptionsValidator(Theme)
+            "QFluentWidgets", "ThemeMode", Theme.LIGHT, OptionsValidator(Theme), EnumSerializer(Theme)
         )
 
         def __init__(self):
@@ -1295,9 +1277,7 @@ class TestThemeModeSync:
 
         # 捕获 150ms 延迟回调（真实链：lambda 闭包携带 tm_diff），手动执行模拟到期
         captured = []
-        monkeypatch.setattr(
-            cs.QTimer, "singleShot", staticmethod(lambda ms, cb: captured.append(cb))
-        )
+        monkeypatch.setattr(cs.QTimer, "singleShot", staticmethod(lambda ms, cb: captured.append(cb)))
         svc.settingsRestored.connect(lambda: None)  # 占位，避免空连接告警
         try:
             svc._reload_settings_on_main_thread()
@@ -1312,17 +1292,13 @@ class TestThemeModeSync:
 
     def test_theme_mode_not_written_directly(self, reset_sync_service, tmp_path, monkeypatch):
         """深浅模式与云端不同 → themeMode 内存不直写 + dispatch_refresh 被触发"""
-        dispatch_mock, fake = self._run_reload(
-            reset_sync_service, tmp_path, monkeypatch, cloud_mode="Theme.LIGHT"
-        )
+        dispatch_mock, fake = self._run_reload(reset_sync_service, tmp_path, monkeypatch, cloud_mode="Light")
         assert fake.themeMode.value == Theme.DARK, "themeMode 不应被直写内存（交给 setTheme 正规链）"
         dispatch_mock.assert_called_once(), "深浅模式云端不同 → 必须显式全量刷新（含 setTheme）"
 
     def test_theme_mode_same_no_refresh(self, reset_sync_service, tmp_path, monkeypatch):
         """深浅模式与云端相同 → 不直写、不刷新"""
-        dispatch_mock, fake = self._run_reload(
-            reset_sync_service, tmp_path, monkeypatch, cloud_mode="Theme.DARK"
-        )
+        dispatch_mock, fake = self._run_reload(reset_sync_service, tmp_path, monkeypatch, cloud_mode="Dark")
         assert fake.themeMode.value == Theme.DARK
         dispatch_mock.assert_not_called(), "深浅模式未变化不应触发全量刷新"
 
@@ -1342,20 +1318,21 @@ class TestSetThemeAfterSkip:
         cfg = Settings.get_instance()
         original = cfg.themeMode.value
         try:
+            # 本地深色（正常启动态：setTheme 正规链设定）
             setTheme(Theme.DARK)
             assert qconfig.theme == Theme.DARK
 
-            # 模拟修复后写回路径：不直写 .value，直接 setTheme（窗口侧正规链）
+            # 场景 1（修复后路径）：不直写，setTheme 正规链 → 生效
             setTheme(Theme.LIGHT)
             assert qconfig.theme == Theme.LIGHT, "themeMode 未被提前直写时 setTheme 必须生效"
             assert cfg.themeMode.value == Theme.LIGHT
 
-            # 反证修复前 bug：直写 .value 后 setTheme 幂等短路 → qconfig.theme 脱同步
-            cfg.themeMode.value = Theme.DARK  # 模拟绕过 qconfig.set 的直写
-            setTheme(Theme.DARK)
-            cfg.themeMode.value = Theme.LIGHT  # 再直写成新值
-            setTheme(Theme.LIGHT)
+            # 场景 2（bug 现场锁定）：直写 .value 后 setTheme 被幂等短路
+            setTheme(Theme.DARK)  # 回到本地深色
+            cfg.themeMode.value = Theme.LIGHT  # 模拟旧 config_sync 直写云端浅色
+            setTheme(Theme.LIGHT)  # 模拟 150ms 后 dispatch_refresh 兑底
             assert qconfig.theme == Theme.DARK, "直写后 setTheme 被短路，qconfig.theme 停留旧值（bug 现场）"
+            assert cfg.themeMode.value == Theme.LIGHT
         finally:
             cfg.themeMode.value = original
             setTheme(original)
