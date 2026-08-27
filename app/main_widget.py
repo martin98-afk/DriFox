@@ -2028,7 +2028,13 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         logger.debug(f"[_safe_duplicate_window] ENTER branch={branch}")
         try:
-            self._duplicate_window(branch=branch)
+            # 🆕 统一路由到 TabManagerWindow.spawn_tab（新标签页/分支标签页的统一编排）。
+            # spawn_tab 未就绪时回退原 _duplicate_window 实现。
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                tm.spawn_tab(self, new_session=not branch, branch=branch)
+            else:
+                self._duplicate_window(branch=branch)
         except BaseException:
             import traceback
 
@@ -2421,7 +2427,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 如果有分支数据，延迟调用分支会话处理，避免与 _restore_latest_or_create_session 冲突
         # 注：_load_agent_list 由 _create_new_session / _apply_branch_or_create_session 内部调用，此处不需要重复触发
-        if getattr(self, "_branch_session_data", None):
+        if getattr(self, "_target_session_record", None) is not None:
+            # 🆕 流式保护：由 TabManagerWindow.spawn_tab 注入的目标历史会话，
+            # 直接加载，跳过默认空会话创建，避免历史列表出现多余空会话。
+            _rec = self._target_session_record
+            QTimer.singleShot(50, lambda: self._safe_timer_call(lambda: self._load_session_from_record(_rec)))
+        elif getattr(self, "_branch_session_data", None):
             QTimer.singleShot(50, lambda: self._safe_timer_call(self._apply_branch_or_create_session))
         else:
             # 🆕 4a：创建团队场景——4 个窗口 add_window→showEvent 全在同一事件循环批次内
@@ -3896,10 +3907,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._create_new_session()
                 return True
             elif command_name == "new-window":
-                self._duplicate_window(branch=False)
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    tm.spawn_tab(self, new_session=True)
+                else:
+                    self._duplicate_window(branch=False)
                 return True
             elif command_name == "branch":
-                self._duplicate_window(branch=True)
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    tm.spawn_tab(self, branch=True)
+                else:
+                    self._duplicate_window(branch=True)
                 return True
             elif command_name == "remember":
                 self._remember_to_memory(args)
@@ -8313,6 +8332,20 @@ class OpenAIChatToolWindow(ToolWindow):
         """从历史面板选择会话"""
         if getattr(self, "_is_destroyed", False):
             return
+        # 🆕 流式保护：当前标签页流式输出时，选历史其他会话 / 新建会话改开新标签页，
+        # 不强行停止当前对话。
+        if self._is_streaming:
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                if index == -1:
+                    new = tm.spawn_tab(self, new_session=True)
+                else:
+                    record = self._history_popup_card.get_history_at_index(index)
+                    new = tm.spawn_tab(self, session_record=record) if record is not None else None
+                if new is not None:
+                    self._card_manager.hide_card("history", self._window_id)
+                    return
+            # 降级原行为
         if index == -1:
             # 新建会话
             self._create_new_session()
@@ -10157,6 +10190,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
         except Exception:
             pass
+
+        # 🆕 流式保护：当前标签页正在流式输出时，新建会话改开新标签页，
+        # 不强行停止当前对话（由 TabManagerWindow.spawn_tab 承载新会话）。
+        if self._is_streaming:
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                new = tm.spawn_tab(self, new_session=True)
+                if new is not None:
+                    return
+            # TabManagerWindow 未就绪则降级原行为（原地停流新建）
 
         # 🛡️ 失效欢迎卡片缓存（必须在 _clear_chat_area 之前同步执行，
         # 避免 sip.isdeleted 竞态导致 _show_initial_welcome 命中旧缓存）。
@@ -18370,6 +18413,16 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_project_selected(self, project: str):
         """切换到选中的项目"""
+        # 🆕 流式保护：当前标签页流式输出时，选择其他项目改开新标签页
+        # （新项目·新会话），不污染当前流式对话的项目归属、不强行停流。
+        if self._is_streaming:
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                new = tm.spawn_tab(self, new_session=True, project=project)
+                if new is not None:
+                    self._card_manager.hide_card("project_selector", self._window_id)
+                    return
+            # 降级原行为
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
         prev_project = self._current_project
         self._current_project = project
