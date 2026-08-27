@@ -4715,6 +4715,7 @@ class OpenAIChatToolWindow(ToolWindow):
         run_id: str = "",
         team_label: str = "",
         team_name: str = "",
+        keep_current_active: bool = False,
     ) -> int:
         """批量创建团队成员窗口（去重由调用方保证）。
 
@@ -4726,6 +4727,10 @@ class OpenAIChatToolWindow(ToolWindow):
             team_name: 🛡️ M1' 透传给 _spawn_team_member_window 的窗口实例
                 _team_name（_handle_team_add_member 锁定当前团队名，
                 避免 team.json 模板名覆盖为别的团队）
+            keep_current_active: True 时保持发起者当前 tab 不动（抑制
+                add_window 逐窗激活 + 结束后恢复原激活 tab，而非切到首个
+                成员）——供 pixel-team-studio 等管理入口使用，批量建成员
+                不打断用户焦点；默认 False 保持 /team --load 现有行为。
 
         Returns:
             成功创建的窗口数
@@ -4734,8 +4739,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # C1 批量布局：连续 add_tab 期间跳过每次全量重建，结束统一重建一次
 
         _tmw = TabManagerWindow.get_instance()
+        _origin_win = None
         if _tmw is not None:
             _tmw._tab_panel.begin_batch_add()
+            if keep_current_active:
+                try:
+                    _origin_win = _tmw.get_current_window()
+                except Exception:  # noqa: BLE001
+                    _origin_win = None
+                _tmw.begin_suppress_add_activate()
         try:
             # 🆕 4a：错峰触发各窗 _create_new_session，避免 N 窗口 showEvent →
             # QTimer(0) 背靠背入队让 SessionStart→BuildSystemPrompt hook 同步重入
@@ -4762,11 +4774,23 @@ class OpenAIChatToolWindow(ToolWindow):
         finally:
             if _tmw is not None:
                 _tmw._tab_panel.end_batch_add()
+                if keep_current_active:
+                    _tmw.end_suppress_add_activate()
         # 🐛 模板加载后 tab 自动切到第一个成员：add_window 每次激活新窗口
         # （批量创建 N 个成员后激活停在最后一个），此处统一切回第一个新窗口。
         # 注：单个成员（快速新建成员 _handle_team_add_member）时切回自身，
         # 行为不变；仅批量场景（/team --load）生效。
-        if new_windows and _tmw is not None:
+        # keep_current_active：不切新成员，恢复发起前的原激活 tab（管理入口
+        # 批量建成员不打断用户焦点）。
+        if _tmw is not None and keep_current_active:
+            if _origin_win is not None and not getattr(_origin_win, "_is_destroyed", False):
+                try:
+                    _origin_idx = _tmw._window_to_index.get(id(_origin_win), -1)
+                    if 0 <= _origin_idx < len(_tmw._windows):
+                        _tmw._tab_panel.set_active_index(_origin_idx)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[_spawn_team_members] 恢复原激活 tab 失败: {e}")
+        elif new_windows and _tmw is not None:
             try:
                 _first_idx = _tmw._window_to_index.get(id(new_windows[0]), -1)
                 if 0 <= _first_idx < len(_tmw._windows):

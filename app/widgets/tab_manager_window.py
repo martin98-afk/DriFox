@@ -1732,6 +1732,20 @@ class TabManagerWindow(QWidget):
 
     # ── 窗口管理 ──
 
+    def begin_suppress_add_activate(self):
+        """批量添加窗口期间抑制 add_window 自动激活新 tab（保持当前焦点）。
+
+        配合 MainWidget._spawn_team_members(keep_current_active=True)：
+        工作室等管理入口批量建成员时不打断用户当前所在 tab。
+        支持嵌套（内部计数），必须与 end_suppress_add_activate 成对使用。
+        """
+        self._suppress_add_activate = getattr(self, "_suppress_add_activate", 0) + 1
+
+    def end_suppress_add_activate(self):
+        """结束抑制（仅在最外层计数归零后恢复 add_window 自动激活）"""
+        depth = getattr(self, "_suppress_add_activate", 0)
+        self._suppress_add_activate = max(0, depth - 1)
+
     def add_window(self, window) -> int:
         """添加窗口到 Tab 管理器，返回索引"""
         existing = self._window_to_index.get(id(window), -1)
@@ -1878,9 +1892,11 @@ class TabManagerWindow(QWidget):
                 # 非团队窗口：Tab 保持显示项目 icon（回归不变）
                 panel.set_tab_team_mode(tab_idx, False)
 
-            # 隐藏空状态页，切换到新窗口
+            # 隐藏空状态页；激活新窗口——抑制模式下（批量建成员保持焦点）
+            # 且已有激活内容窗口时跳过，避免逐窗跳 tab
             stack.widget(0).hide()
-            panel.set_active_index(idx)
+            if getattr(self, "_suppress_add_activate", 0) <= 0 or self._tab_panel.active_index < 0:
+                panel.set_active_index(idx)
         finally:
             window.setUpdatesEnabled(True)
             panel.setUpdatesEnabled(True)

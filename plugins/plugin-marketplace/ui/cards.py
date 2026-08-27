@@ -9,6 +9,7 @@
 - 安装/更新状态实时反馈
 """
 
+import ast
 import json
 import os
 import re
@@ -313,13 +314,50 @@ class _FlowLayout(QLayout):
 
 # ── 插件内容收集 / 详情弹窗 ──────────────────────────────────
 
+# UI 注册 API → 中文名（与 ui_plugin_registry 提供的 register_* 一致）
+_UI_KIND_LABELS = {
+    "register_floating_card": "浮动卡片",
+    "register_settings_card": "设置卡片",
+    "register_sidebar_item": "侧边栏项",
+    "register_input_button": "输入框按钮",
+    "register_context_menu_action": "右键菜单",
+    "register_content_renderer": "内容渲染器",
+    "register_message_factory": "消息工厂",
+    "register_welcome_tab": "欢迎页签",
+    "register_workspace_page": "工作区页面",
+    "register_slot_entry": "插槽入口",
+}
+
+
+def _ast_calls(py_file: Path) -> list:
+    """静态解析 Python 文件中的全部 ast.Call 节点（解析失败返回空）
+
+    仅做语法级解析、不导入模块，用于提取 register 调用的注册信息。
+    """
+    try:
+        tree = ast.parse(py_file.read_text(encoding="utf-8"))
+    except SyntaxError, ValueError, OSError:
+        return []
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+
+
+def _kw_str(call: ast.Call, *names: str) -> Optional[str]:
+    """从 Call 节点按优先级提取首个字符串常量关键字参数值"""
+    for name in names:
+        for kw in call.keywords:
+            if kw.arg == name and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                return kw.value.value
+    return None
+
 
 def _collect_plugin_contents(plugin_dir: Path) -> dict:
     """收集已安装插件的组件内容清单
 
     Returns:
-        {"skills": [...], "mcp": [...], "commands": [...], "agents": [...], "hooks": [...], "themes": [...]}
-        空组件不出现。
+        {"skills": [...], "mcp": [...], "commands": [...], "agents": [...],
+         "hooks": [...], "themes": [...], "tools": [...], "ui": [...]}
+        空组件不出现。tools/ui 为 AST 静态提取的注册信息（工具中文名/名称、
+        UI 注册点类型+标题），不导入模块、不执行代码。
     """
     contents: dict = {"skills": [], "mcp": [], "commands": [], "agents": [], "hooks": [], "themes": []}
 
@@ -364,6 +402,41 @@ def _collect_plugin_contents(plugin_dir: Path) -> dict:
     if themes_dir.is_dir():
         contents["themes"] = sorted(p.name for p in themes_dir.iterdir() if p.is_dir())
 
+    # 工具：tools/*.py → registry.register("name", ..., cn_name="中文名", ...)
+    # （跳过 _ 开头私有模块；AST 只读语法不执行代码）
+    tools_dir = plugin_dir / "tools"
+    if tools_dir.is_dir():
+        tools_list: list = []
+        for py in sorted(tools_dir.glob("*.py")):
+            if py.name.startswith("_"):
+                continue
+            for call in _ast_calls(py):
+                func = call.func
+                if not (isinstance(func, ast.Attribute) and func.attr == "register" and call.args):
+                    continue
+                first = call.args[0]
+                if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
+                    continue
+                name = first.value
+                cn = _kw_str(call, "cn_name")
+                tools_list.append(f"{cn}（{name}）" if cn else name)
+        if tools_list:
+            contents["tools"] = tools_list
+
+    # UI：ui/__init__.py → registry.register_*（浮动卡片/设置卡片/侧边栏项等）
+    ui_init = plugin_dir / "ui" / "__init__.py"
+    if ui_init.exists():
+        ui_list: list = []
+        for call in _ast_calls(ui_init):
+            func = call.func
+            if not (isinstance(func, ast.Attribute) and func.attr.startswith("register_")):
+                continue
+            kind = _UI_KIND_LABELS.get(func.attr, func.attr)
+            label = _kw_str(call, "title", "card_id", "type_name")
+            ui_list.append(f"{label}（{kind}）" if label else kind)
+        if ui_list:
+            contents["ui"] = ui_list
+
     return {k: v for k, v in contents.items() if v}
 
 
@@ -377,6 +450,8 @@ class _PluginDetailDialog(MaskDialogBase):
 
     installRequested = pyqtSignal(dict)
     updateRequested = pyqtSignal(dict)
+    # 依赖安装完成（worker 线程 emit，queued 到 GUI 线程刷新按钮）
+    _depsDone = pyqtSignal(object, object)
 
     def __init__(
         self,
@@ -399,6 +474,10 @@ class _PluginDetailDialog(MaskDialogBase):
         self._installed = installed
         self._has_update = has_update
         self._local_version = local_version
+        # 平台兼容检查（platforms 缺省 = 兼容，存量插件零影响）
+        from app.plugins.deps_loader import check_platform
+
+        self._plat_ok, self._plat_reason = check_platform(plugin_meta)
         self._init_ui(tc, tcs, ff, fs, accent_bg, card_bg, border_c)
 
     def _init_ui(self, tc, tcs, ff, fs, accent_bg, card_bg, border_c):
@@ -469,6 +548,15 @@ class _PluginDetailDialog(MaskDialogBase):
         author = self._meta.get("author", "")
         if author:
             rows.append(("👤 作者", author))
+        # 平台兼容徽标（platforms 缺省不显示，全平台插件零噪音）
+        platforms = self._meta.get("platforms")
+        if isinstance(platforms, list) and platforms:
+            plat_icons = {"windows": "🪟 Windows", "linux": "🐧 Linux", "darwin": "🍎 macOS"}
+            plat_text = "，".join(plat_icons.get(p, p) for p in platforms)
+            if self._plat_ok:
+                rows.append(("💻 支持平台", plat_text))
+            else:
+                rows.append(("💻 支持平台", f'<span style="color:#EF5350;">{plat_text}（{self._plat_reason}）</span>'))
         license_ = self._meta.get("license", "")
         if license_:
             rows.append(("📜 License", license_))
@@ -524,6 +612,10 @@ class _PluginDetailDialog(MaskDialogBase):
                 content_rows.append(("🔗 Hooks", "，".join(contents["hooks"])))
             if contents.get("themes"):
                 content_rows.append(("🎨 主题", "，".join(contents["themes"])))
+            if contents.get("tools"):
+                content_rows.append(("🛠️ 工具", "，".join(contents["tools"])))
+            if contents.get("ui"):
+                content_rows.append(("🖥️ UI", "，".join(contents["ui"])))
             if not content_rows:
                 content_rows.append(("ℹ️ 内容", "该插件未声明可展示的组件"))
 
@@ -551,8 +643,11 @@ class _PluginDetailDialog(MaskDialogBase):
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(10)
 
-        # 主操作：按状态给出（已安装且无更新 → 禁用态「已安装」）
-        if self._has_update:
+        # 主操作：按状态给出（已安装且无更新 → 禁用态「已安装」；
+        # 平台不兼容 → 禁用态「当前平台不支持」）
+        if not self._plat_ok:
+            main_text, main_fn = "当前平台不支持", None
+        elif self._has_update:
             main_text, main_fn = "更新", self._on_update
         elif self._installed:
             main_text, main_fn = "已安装", None
@@ -564,11 +659,14 @@ class _PluginDetailDialog(MaskDialogBase):
         main_btn.setFixedHeight(36)
         if main_fn is None:
             main_btn.setEnabled(False)
+            style_color = "#4CAF50" if self._plat_ok else "#EF5350"
+            if not self._plat_ok:
+                main_btn.setToolTip(self._plat_reason)
             main_btn.setStyleSheet(
                 f"""
                 QPushButton {{
                     background: rgba(76, 175, 80, 0.12);
-                    color: #4CAF50;
+                    color: {style_color};
                     border: 1px solid rgba(76, 175, 80, 0.3);
                     border-radius: 8px;
                     padding: 4px 24px;
@@ -598,6 +696,10 @@ class _PluginDetailDialog(MaskDialogBase):
             )
             main_btn.clicked.connect(main_fn)
 
+        # 依赖兑底：已安装且兼容但 pip 依赖缺失 → 「安装依赖」次按钮（手动重试）
+        if self._installed and self._plat_ok:
+            dep_btn = self._make_deps_button(tc, fs, ff_qss, btn_layout, main_btn)
+
         close_btn = TransparentPushButton("关闭", self.widget)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setFixedHeight(36)
@@ -626,6 +728,71 @@ class _PluginDetailDialog(MaskDialogBase):
         layout.addLayout(btn_layout)
 
         self.widget.setFixedSize(600, 540)
+
+    def _make_deps_button(self, tc, fs, ff_qss, btn_layout, main_btn):
+        """已安装插件的 pip 依赖缺失兜底按钮（后台线程跑 DepsInstaller）"""
+        from .deps_installer import DepsInstaller
+        from .installer import get_installer
+
+        name = self._meta.get("name", "")
+        inst = get_installer()
+        target = _PluginRow._find_local_plugin_path(name)
+        manifest = inst._read_manifest_at(target) if target else None
+        if not manifest:
+            return None
+        from app.plugins.deps_loader import missing_pip_deps
+
+        try:
+            missing = missing_pip_deps(target, manifest)
+        except Exception:
+            return None
+        if not missing:
+            return None
+
+        dep_btn = TransparentPushButton(f"安装依赖（{len(missing)} 项缺失）", self.widget)
+        dep_btn.setCursor(Qt.PointingHandCursor)
+        dep_btn.setFixedHeight(36)
+        dep_btn.setToolTip("安装缺失的 pip 依赖到插件 deps 目录（uv 优先，回退 PyPI wheel）")
+        dep_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: rgba(255, 167, 38, 0.15);
+                color: #FFA726;
+                border: 1px solid rgba(255, 167, 38, 0.35);
+                border-radius: 8px;
+                padding: 4px 16px;
+                {ff_qss}
+                font-size: {max(8, fs - 1)}px;
+            }}
+            QPushButton:hover {{ background: rgba(255, 167, 38, 0.3); }}
+            """
+        )
+
+        def _on_deps_done(btn, result):
+            if result.success:
+                btn.setText("依赖已就绪")
+            else:
+                btn.setText(f"重试安装依赖（缺 {len(result.missing)} 项）")
+                btn.setEnabled(True)
+                btn.setToolTip("；".join(result.log[-3:]) or "安装失败，可重试")
+
+        self._depsDone.connect(_on_deps_done)
+
+        def _run():
+            dep_btn.setEnabled(False)
+            dep_btn.setText("依赖安装中…")
+
+            def _worker():
+                result = DepsInstaller().install(target, manifest)
+                self._depsDone.emit(dep_btn, result)  # 跨线程 queued 到 GUI 线程
+
+            import threading
+
+            threading.Thread(target=_worker, daemon=True, name=f"deps-install-{name}").start()
+
+        dep_btn.clicked.connect(_run)
+        btn_layout.addWidget(dep_btn)
+        return dep_btn
 
     def _on_install(self):
         self.installRequested.emit(self._meta)
@@ -945,6 +1112,10 @@ class _PluginRow(QFrame):
         self._tc = tc or _text_color()
         self._tcs = tcs or _text_color(secondary=True)
         self._tags = self._compute_tags(plugin_meta)
+        # 平台兼容（platforms 缺省 = 兼容）：未安装且不兼容 → 安装按钮置灰
+        from app.plugins.deps_loader import check_platform
+
+        self._plat_ok, self._plat_reason = check_platform(plugin_meta)
         # 本地路径单次解析并缓存：图标/目录按钮复用（避免每行多轮磁盘扫描）
         self._local_path = self._resolve_local_path()
         self._setup_ui()
@@ -1227,6 +1398,13 @@ class _PluginRow(QFrame):
         elif self._installed:
             # 已安装且无更新：主按钮隐藏（左侧详情按钮已可查看完整信息）
             self._btn.setVisible(False)
+        elif not self._plat_ok:
+            # 未安装且平台不兼容：置灰「不支持此平台」（详情弹窗可见原因）
+            self._btn.setText("不支持此平台")
+            self._btn.setEnabled(False)
+            self._btn.setToolTip(self._plat_reason)
+            self._btn.setStyleSheet(self._outline_btn_style("#9E9E9E"))
+            self._btn.setVisible(True)
         else:
             self._btn.setText("安装")
             self._btn.setEnabled(True)
