@@ -13031,8 +13031,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # timer 激活后会在 50ms 后自动滚底，合并期间所有 content_received 的请求。
         # 卡片高度变化到 layout 更新有至少 1-2 帧延迟，用 timer 合并足够。
         if self._is_streaming and not self._scroll_bottom_timer.isActive():
-            # 延迟到下一事件循环再滚底，等卡片高度变化完成后读取 scroll_bar.maximum()
-            QTimer.singleShot(0, lambda: scroll_to_bottom_if_streaming(self.chat_scroll_area, self._is_streaming))
+            # 🐛 away 守卫：用户主动滚离底部（阅读历史）时不再强制拽回。
+            # 此前流式增量无条件置底，位置保持完全依赖工具静默窗口
+            # （stream_finished 先关 _is_streaming），不稳定。
+            QTimer.singleShot(
+                0,
+                lambda: scroll_to_bottom_if_streaming(
+                    self.chat_scroll_area, self._is_streaming, suppress=self._user_intentionally_away_from_bottom
+                ),
+            )
 
     def _update_node_preview(self):
         session = self.session_manager.get_current_session()
@@ -15082,8 +15089,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     break
 
         # 判断规则
-        if is_last_card or self._is_streaming:
-            # 如果是最后一张卡片，或者正在流式输出 → 强制滚底
+        # 🐛 away 守卫：流式中用户已主动滚离底部时不再强制拽回（位置保持）。
+        # is_last_card 保留原语义（初始加载完成保证到底），不受守卫影响。
+        if is_last_card or (self._is_streaming and not self._user_intentionally_away_from_bottom):
             self._scroll_to_bottom()
         else:
             scroll_bar = self.chat_scroll_area.verticalScrollBar()

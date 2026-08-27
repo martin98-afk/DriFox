@@ -2449,8 +2449,16 @@ _CONTENT_AUTOSCROLL_JS = """
                 // wheel/键盘**同步**标记上滚意图（scroll 事件异步派发，与流式
                 // 渲染 JS 存在竞争窗口，不得作为置位依据）；scroll 事件仅恢复跟随。
                 document.getElementById('content-placeholder')?.addEventListener('wheel', function(e) {
-                    // 上滚（deltaY<0）：同步置位，抢占任何在途渲染 JS 的拉底
-                    if (e.deltaY < 0) this._userScrolledUp = true;
+                    // 上滚（deltaY<0）：同步置位，抢占任何在途渲染 JS 的拉底。
+                    // 🐛 门控：仅当容器实际可滚（内容溢出）才记为"上滚正文"——
+                    // 无溢出时 wheel 本应转发外层聊天列表（Qt wheelEvent 转发分支），
+                    // 页面内收到的事件属冒泡残留，置位会让跟随被无关操作误锁死。
+                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {
+                        this._userScrolledUp = true;
+                        // 记录用户滚轮时刻：scroll 监听清标志前用它区分
+                        // "用户真滚回底部"与"程序性 clamp/anchor 被动贴底"
+                        this._lastUserWheelAt = performance.now();
+                    }
                 }, {passive: true});
                 document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
                     var cp = this;
@@ -2463,7 +2471,17 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 变化导致的 scrollTop 钳制也会触发 scroll（非用户行为），
                     // 置位会误停跟随导致位置漂移。
                     var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
-                    if (atBottom) cp._userScrolledUp = false;
+                    // 🐛 清标志门控：viewport resize / 折叠框展开动画 / 高度报告应用
+                    // 会引发 Chromium 对超界 scrollTop 的钳制与 overflow-anchor 补偿，
+                    // 被动贴底的 scroll 事件会被误判为"用户滚回底部"→ 标志误清 →
+                    // 下一个 chunk 无条件拉底（视口弹到随机位置的根因）。要求清标志
+                    // 前确有近期用户滚轮行为（触控板惯性最后一段也 <800ms 到达底部）。
+                    var recentUserWheel = cp._lastUserWheelAt !== undefined &&
+                                          (performance.now() - cp._lastUserWheelAt) < 800;
+                    if (atBottom && recentUserWheel) {
+                        cp._userScrolledUp = false;
+                        cp._lastUserWheelAt = undefined;
+                    }
                 });
 """
 
