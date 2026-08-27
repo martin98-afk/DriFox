@@ -18,13 +18,10 @@ PluginHostService — 应用级插件宿主服务（一个应用一个实例）
 
 import os
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import Any, Dict, Optional
 
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
-
-if TYPE_CHECKING:
-    from app.core.agent import AgentManager
 
 
 class PluginHostService(QObject):
@@ -52,18 +49,13 @@ class PluginHostService(QObject):
         super().__init__(parent)
 
         # 全局组件（不绑任何窗口）
+        from app.core.agent import AgentManager
         from app.core.hook_manager import HookManager
 
         # 插件 hooks 的注册目标。HookManager._hooks 类级共享（任一实例等效），
-        # 注册到本专属实例后各 tab 均可触发。
-        # ⚠️ AgentManager 单例【不在此处创建】：get_instance 首次创建即同步
-        # _load_agents()，而此刻 PluginManager 尚未 initialize（ensure_started
-        # 由 TabManagerWindow 稍后调用）→ _load_agents_from_plugins/_load_plugin_hooks
-        # 因 pm 未就绪静默加载 0 条，且单例幂等导致后续永不重试 → 全部插件
-        # hooks 永久缺失（trigger_event 静默返回，无日志，2026-08-28 事故根因）。
-        # 单例创建移至 _init_plugin_system() 中 pm.initialize() 之后。
+        # 注册到本专属实例后各 tab 均可触发；AgentManager 单例由此首次创建。
         self._host_hook_manager = HookManager()
-        self._agent_manager: Optional["AgentManager"] = None
+        self._agent_manager = AgentManager.get_instance(None, self._host_hook_manager)
 
         self._hot_reload_requested.connect(self._on_hot_reload_requested)
 
@@ -107,21 +99,13 @@ class PluginHostService(QObject):
             was_initialized = pm.is_initialized()
             pm.initialize(app_data_dir)
 
-            # AgentManager 单例在此创建（pm 已就绪）：首次 _load_agents 即可完整
-            # 加载插件 agents + hooks。若已被其他路径（如早期 backend / GatewayService）
-            # 抢先创建，get_instance 会复用残缺数据并补丁注入 host_hook_manager
-            # （见 AgentManager.get_instance 兜底），由下方无条件 reload_agents() 补齐。
-            if self._agent_manager is None:
-                from app.core.agent import AgentManager
-
-                self._agent_manager = AgentManager.get_instance(None, self._host_hook_manager)
-
-            # 无论 pm 是否首次初始化都全量重载一次 agents+hooks：
-            # - 首次：防单例被早期路径抢建后残缺（0 hooks）无机会补齐
-            # - 重开场景：类级 _shared_hooks 数据虽在，重载幂等代价小
-            self._agent_manager.reload_agents()
-
+            # 首次初始化时才需要全量重载智能体
+            # 后续窗口复用已有的 PluginManager/AgentManager 单例数据
             if not was_initialized:
+                # AgentManager 重新从已启用插件加载智能体（关键路径）
+                if self._agent_manager:
+                    self._agent_manager.reload_agents()
+
                 # ── 非关键路径：延迟到窗口就绪后执行 ──
                 # 主题刷新、插件热更新监听、LSP 初始化不需要阻塞首帧显示
                 # 使用 QTimer 推迟执行（backend 本身不依赖 Qt，由调用方确保）

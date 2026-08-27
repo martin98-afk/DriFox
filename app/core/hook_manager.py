@@ -1141,9 +1141,13 @@ class HookManager:
             logger.debug(f"[HookManager] Skipping already loaded config: {config_file}")
             return 0
 
-        # 记录热重载监控的实例属性（不含去重语义）
+        # 保存配置文件的监控时间
         if config_file:
             self._config_file = config_file
+            try:
+                self._config_watchers[config_file] = os.path.getmtime(config_file)
+            except OSError:
+                pass
 
         # 检测配置格式
         raw_hooks = hooks_config.get("hooks", hooks_config)
@@ -1211,16 +1215,6 @@ class HookManager:
                         # 应用内容覆盖（系统 hook 编辑持久化，如 command/prompt/statusMessage 等）
                         if self._hook_overrides:
                             self._apply_hook_overrides(hook, rule)
-
-        # 去重键写入（仅在解析成功后占位）：若提前占键，解析失败/空配置会永久
-        # 挡住后续重试（Skipping already loaded config），hooks 再也进不来。
-        # ⚠️ 放在 return 前唯一出口处，覆盖所有正常解析路径；
-        # json 读取失败的 return 0 在函数开头，不会走到这里（可重试）。
-        if config_file:
-            try:
-                self._config_watchers[config_file] = os.path.getmtime(config_file)
-            except OSError:
-                pass
 
         return count
 
@@ -1670,9 +1664,6 @@ class HookManager:
         context["timestamp"] = time.time()
 
         if event_name not in self._hooks:
-            # 可观测性：事件无任何已注册 hooks（常见于 hooks 未加载/被清空），
-            # 此前静默返回导致「hooks 全灭」无法从日志定位（2026-08-28）
-            logger.debug(f"[HookManager] trigger_event({event_name}): 无已注册 hooks，静默跳过")
             return []
 
         # Phase 1: 收集所有匹配的 hook（串行，仅做规则匹配，不执行实际 hook）
