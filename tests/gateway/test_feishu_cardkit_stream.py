@@ -8,8 +8,6 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-
 PLUGIN_DIR = Path(r"D:\work\DriFox\.drifox\plugins\gateway-feishu\gateways")
 
 
@@ -69,16 +67,23 @@ def load_adapter_cls():
     for n in ("Platform", "MessageType", "MessageEvent", "SendResult", "PlatformConfig", "BasePlatformAdapter"):
         setattr(base_mod, n, locals()[n])
 
-    sys.modules.setdefault("app", types.ModuleType("app"))
-    sys.modules.setdefault("app.gateway", types.ModuleType("app.gateway"))
-    sys.modules["app.gateway.base"] = base_mod
-    loguru_mod = types.ModuleType("loguru")
-    loguru_mod.logger = MagicMock()
-    sys.modules["loguru"] = loguru_mod
+    saved = {k: sys.modules.get(k) for k in ("app", "app.gateway", "app.gateway.base", "loguru")}
+    try:
+        sys.modules.setdefault("app", types.ModuleType("app"))
+        sys.modules.setdefault("app.gateway", types.ModuleType("app.gateway"))
+        sys.modules["app.gateway.base"] = base_mod
+        # loguru 用真实库（存在），不 stub——避免污染其它测试
 
-    spec = importlib.util.spec_from_file_location("feishu_mod", PLUGIN_DIR / "feishu.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+        spec = importlib.util.spec_from_file_location("feishu_mod", PLUGIN_DIR / "feishu.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    finally:
+        # 恢复 sys.modules，避免 stub 泄漏影响同进程后续测试
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
     return mod.FeishuAdapter
 
 
@@ -186,6 +191,7 @@ def test_sequence_strictly_increasing():
 
 
 if __name__ == "__main__":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
     for fn in fns:

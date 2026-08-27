@@ -272,12 +272,6 @@ class ChatBackend(QObject):
     # Auto-compact 请求（由 tool_executor 在 PostToolUse hook 中检测阈值触发）
     auto_compact_requested = pyqtSignal(float)  # ratio
 
-    # Gateway 状态
-    gateway_status_changed = pyqtSignal(dict)  # status dict
-
-    # Gateway 消息处理（跨线程）
-    gateway_input_received = pyqtSignal(object)  # dict: {text, chat_id, user_id, platform, future}
-
     # 插件热更新信号（watchfiles 检测到变更时触发）
     plugin_changed = pyqtSignal(dict)  # {"agents": int, "commands": bool, "themes": bool}
 
@@ -329,11 +323,6 @@ class ChatBackend(QObject):
 
         # per-window 工具权限控制器（由 main_widget 在 initialize 之前注入）
         self._tool_permission_controller = None
-
-        # Gateway 组件
-        self._gateway_manager = None
-        self._gateway_engine: Optional[GatewayEngine] = None
-        self._gateway_initialized = False
 
         # Auto-compact 防重复触发时间戳
         self._last_auto_compact_time = 0.0
@@ -447,7 +436,7 @@ class ChatBackend(QObject):
           AgentManager 骨架 / HistoryManager），setup_ui 的 get_primary_agents
           等路径立即可用。
         - 延迟段：非首帧必需组件（MemoryManager / ToolExecutor / ChatEngine /
-          GatewayEngine / SubAgentManager + MCP + git 预热）用 QTimer
+          SubAgentManager + MCP + git 预热）用 QTimer
           0/200/400/600ms 错峰创建，失败仅记日志不影响 UI 主流程。
 
         Args:
@@ -653,21 +642,6 @@ class ChatBackend(QObject):
         self._initialized = True
         logger.info("[ChatBackend] 初始化完成（同步段）")
 
-        # 连接 Gateway 信号（跨线程安全，每个窗口实例连接自己的回调）
-        self.gateway_input_received.connect(self._on_gateway_input)
-
-        # 初始化 Gateway（后台进行，不阻塞）
-        # 使用 get_platform_manager() 判断是否已存在管理器实例，避免重复初始化
-        from app.gateway.manager import get_platform_manager
-
-        existing_mgr = get_platform_manager()
-        if existing_mgr is not None:
-            self._gateway_manager = existing_mgr
-            self._gateway_initialized = True
-            logger.debug("[ChatBackend] Gateway 已存在，复用管理器")
-        else:
-            self._init_gateway_async()
-
     # ========== 非首帧必需组件：QTimer 错峰创建 ==========
 
     def _defer_non_critical_components(self):
@@ -680,7 +654,7 @@ class ChatBackend(QObject):
         - 0ms:   MemoryManagerCore（全局单例，ToolExecutor 依赖）
         - 200ms: ToolExecutor（app/tools 级联 import 8 模块 + LSP + codegraph，
                 实测 import 重头，最值得延迟）
-        - 400ms: ChatEngine + GatewayEngine（依赖 tool_executor）
+        - 400ms: ChatEngine（依赖 tool_executor）
         - 600ms: SubAgentManager + MCP 连接 + git 缓存预热（依赖 tool_executor）
 
         失败处理：各批 try/except 只记日志，不抛到事件循环；
@@ -734,7 +708,7 @@ class ChatBackend(QObject):
             logger.error(f"[ChatBackend] ToolExecutor 延迟创建失败: {e}")
 
     def _deferred_create_engines(self):
-        """400ms 批：ChatEngine + GatewayEngine（依赖 tool_executor）"""
+        """400ms 批：ChatEngine（依赖 tool_executor）"""
         if self._tool_executor is None:
             logger.warning("[ChatBackend] ToolExecutor 未创建，跳过引擎延迟创建")
             return
@@ -772,19 +746,7 @@ class ChatBackend(QObject):
         except Exception as e:
             logger.error(f"[ChatBackend] ChatEngine 延迟创建失败: {e}")
 
-        try:
-            # 创建 GatewayEngine（全局单例，多个窗口共享）
-            from app.core.engines.gateway import GatewayEngine
-
-            self._gateway_engine = GatewayEngine.get_instance(
-                get_model_config=self._get_model_config,
-                tool_executor=self._tool_executor,
-                agent_manager=self._agent_manager,
-                session_store=self._session_store,
-            )
-            logger.info("[ChatBackend] GatewayEngine 延迟创建完成")
-        except Exception as e:
-            logger.error(f"[ChatBackend] GatewayEngine 延迟创建失败: {e}")
+        # GatewayEngine 已上移 GatewayService（应用级单例），窗口不再创建
 
     def _deferred_create_sub_agent_and_misc(self):
         """600ms 批：SubAgentManager + MCP 连接 + git 缓存预热"""
@@ -1343,8 +1305,7 @@ class ChatBackend(QObject):
                         # 注册，用户必须手动重启/重载才能看到新插件。
                         parent_lower = str(parent.resolve()).lower().rstrip(os.sep)
                         in_watch_root = any(
-                            parent_lower.startswith(str(w).lower().rstrip(os.sep) + os.sep)
-                            for w in watch_paths
+                            parent_lower.startswith(str(w).lower().rstrip(os.sep) + os.sep) for w in watch_paths
                         )
                         if in_watch_root:
                             found.add(candidate_name)
@@ -2757,35 +2718,6 @@ class ChatBackend(QObject):
                 logger.warning(f"[ChatBackend] cleanup chat_engine: {e}")
             self._chat_engine = None
 
-        # 1.5 泄漏修复（6b/6d）：解除两个全局单例对首个 backend 的持有
-        # - GatewayEngine：get_model_config 是本窗口 backend 的 bound method，
-        #   tool_executor/agent_manager/session_store 是窗口独有组件
-        # - PlatformManager：_do_init 的 process_message/send_message 异步闭包
-        #   捕获 self（backend），create_platform_manager 单例永久持有
-        try:
-            ge = getattr(self, "_gateway_engine", None)
-            if ge is not None and hasattr(ge, "cleanup"):
-                ge.cleanup()
-        except Exception as e:
-            logger.warning(f"[ChatBackend] cleanup gateway_engine: {e}")
-        try:
-            from app.gateway.manager import get_platform_manager
-
-            pm = get_platform_manager()
-            if pm is not None:
-                mh = getattr(pm, "_message_handler", None)
-                if mh is not None:
-                    _pc = getattr(mh, "_process_message", None)
-                    _sc = getattr(mh, "_send_message", None)
-                    if (_pc is not None and _callback_holds_backend(_pc, self)) or (
-                        _sc is not None and _callback_holds_backend(_sc, self)
-                    ):
-                        mh._process_message = None
-                        mh._send_message = None
-                        logger.debug("[ChatBackend] PlatformManager 回调已解除（backend 关闭）")
-        except Exception as e:
-            logger.warning(f"[ChatBackend] cleanup platform_manager: {e}")
-
         # 2. 清理 ToolExecutor 窗口独有状态（共享 BuiltinTools 不碰）
         if self._tool_executor:
             try:
@@ -3370,443 +3302,3 @@ class ChatBackend(QObject):
             if cards:
                 return "\n\n# 已启用的卡片\n" + "\n".join(cards)
         return ""
-
-    # ========== Gateway 方法 ==========
-
-    def _on_gateway_input(self, data: dict):
-        """
-        处理 Gateway 发来的消息（在主线程运行）
-
-        委托给 GatewayEngine 处理，不碰 UI 的 SessionManager/current_index。
-
-        Args:
-            data: {text, chat_id, user_id, platform, future}
-        """
-        text = data["text"]
-        chat_id = data["chat_id"]
-        user_id = data["user_id"]
-        platform = data["platform"]
-        future = data["future"]
-
-        logger.info(f"[Gateway] Main thread processing: {text[:50]}...")
-
-        # ===== 入口守卫 =====
-        # 窗口关闭后 GatewayEngine.cleanup() 会把实例置为非活跃，而 PlatformManager
-        # 的后台事件循环仍在跑，钉钉/企微消息可能照旧投到本槽位。没有这层守卫，
-        # engine 内部 None 校验会向平台回复"❌ 处理出错: Gateway 引擎已停用..."，
-        # 并且 MessageHandler.handle 的 await future 永远不结束（→ 30s 超时）。
-        engine = getattr(self, "_gateway_engine", None)
-        if engine is None or not getattr(engine, "is_active", True):
-            logger.warning("[Gateway] skip incoming message: engine unavailable (window closed)")
-            try:
-                if not future.done():
-                    future.set_result("")
-            except Exception:
-                pass
-            _ev_loop = getattr(self._gateway_manager, "_loop", None)
-            if _ev_loop:
-                try:
-                    import asyncio
-
-                    asyncio.run_coroutine_threadsafe(
-                        self._gateway_send_message(
-                            _gw_str_platform(platform),
-                            chat_id,
-                            "Gateway 当前不可用，请打开 DriFox 主窗口后重试。",
-                        ),
-                        _ev_loop,
-                    )
-                except Exception as e:
-                    logger.warning(f"[Gateway] skip notice send failed: {e}")
-            return
-
-        try:
-            import asyncio
-
-            from app.gateway.base import MessageEvent, MessageType
-
-            gw_platform = _gw_str_platform(platform)
-
-            # 1. 获取或创建 GatewaySession（WeCom/钉钉用户映射）
-            gw_session = self._gateway_manager.session_manager.get_or_create_session(
-                MessageEvent(
-                    text=text,
-                    message_type=MessageType.TEXT,
-                    message_id=user_id,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    platform=gw_platform,
-                )
-            )
-
-            # 2. 查找或创建 Gateway 自己的 ChatSession（完全独立于 UI）
-            stored_chat_id = gw_session.metadata.get("chat_session_id")
-            chat_session = None
-            if stored_chat_id:
-                chat_session = self._gateway_engine.find_session(stored_chat_id)
-
-            if not chat_session:
-                from app.core.chat_session import ChatSession
-
-                user_name = gw_session.user_name or user_id[:8]
-                chat_session = ChatSession(
-                    name=f"{platform}对话"  # UI 显示用（后续会被 topic_summary 覆盖）
-                )
-                # 单独设置 topic_summary，确保 DB 标题字段为有意义的内容
-                # 注意：__init__ 中 topic_summary = name，所以需要覆盖
-                chat_session.set_topic_summary(f"[{platform}] {user_name}")
-                self._gateway_engine.add_session(chat_session)
-                gw_session.metadata["chat_session_id"] = chat_session.session_id
-                logger.debug(f"[Gateway] Created ChatSession: {chat_session.session_id} for {platform}:{user_id}")
-
-            # 3. 流式发送辅助函数（在主线程调用，调度到事件循环执行）
-            _ev_loop = getattr(self._gateway_manager, "_loop", None)
-
-            def _push_to_platform(content: str) -> None:
-                """发送中间更新到平台"""
-                if not _ev_loop or not content.strip():
-                    return
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        self._gateway_send_message(gw_platform, chat_id, content),
-                        _ev_loop,
-                    )
-                except Exception as e:
-                    logger.error(f"[Gateway] Stream push error: {e}")
-
-            # 3.5 流式（打字机）通道：平台适配器支持时走 update_stream/finish_stream
-            try:
-                _adapter = self._gateway_manager.get_adapter(platform)
-                _use_stream = bool(_adapter and _adapter.supports_streaming(chat_id) and _ev_loop)
-            except Exception:
-                _adapter, _use_stream = None, False
-
-            if _use_stream:
-                # 初始化平台打字机流（幂等、不发网络请求；失败则回退普通发送）
-                try:
-                    _sf = asyncio.run_coroutine_threadsafe(
-                        _adapter.start_stream(chat_id), _ev_loop
-                    )
-                    _use_stream = bool(_sf.result(timeout=10))
-                except Exception as e:
-                    logger.warning(f"[Gateway] start_stream failed, fallback: {e}")
-                    _use_stream = False
-
-            _visible: list = []  # 可见文本累加器（工具进度 + AI 增量，单调追加）
-            _last_stream_push = [0.0]
-            import time as _time
-
-            def _stream_update(force: bool = False) -> None:
-                """把可见快照节流推给平台（300ms 粗节流；中间帧丢失无害，finish 补全）"""
-                if not _use_stream or not _adapter:
-                    return
-                now = _time.monotonic()
-                if not force and now - _last_stream_push[0] < 0.3:
-                    return
-                _last_stream_push[0] = now
-                snapshot = "".join(_visible)
-                if not snapshot.strip():
-                    return
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        _adapter.update_stream(chat_id, snapshot),
-                        _ev_loop,
-                    )
-                except Exception as e:
-                    logger.debug(f"[Gateway] stream update skipped: {e}")
-
-            # 4. 流式回调
-            # 消息克制原则（对齐 openhanako Bridge）：用户只收最终正文；
-            # 工具进度仅在支持打字机的平台内联展示，非流式平台不发工具播报；
-            # 思考占位仅在非流式平台发送一次。
-            gateway_chunks = []
-
-            def on_content_received(chunk):
-                """AI 流式输出到达——流式平台并入可见快照，否则累积待最终发送"""
-                gateway_chunks.append(chunk)
-                if _use_stream:
-                    _visible.append(chunk)
-                    _stream_update()
-
-            def on_tool_call(tool_data: dict):
-                """工具调用进度——仅流式平台并入可见快照（打字机内自然滚动）；
-                非流式平台不推送（用户只关心最终正文，逐条工具播报刷屏）"""
-                if not (_use_stream and _adapter):
-                    return
-                name = tool_data.get("tool_name", tool_data.get("name", "未知工具"))
-                _visible.append(("\n\n" if _visible else "") + f"🔧 {name}…")
-                _stream_update(force=True)
-
-            def on_tool_result(tool_data: dict):
-                """工具结果——仅流式平台简讯并入；非流式平台不推送"""
-                if not (_use_stream and _adapter):
-                    return
-                name = tool_data.get("tool_name", tool_data.get("name", "未知工具"))
-                _visible.append(f"\n\n✅ {name} 完成")
-                _stream_update(force=True)
-
-            def on_stream_finished(response):
-                """AI 完成 → 流式平台收尾打字机；其余平台发送最终完整回复"""
-                content = response or "".join(gateway_chunks)
-                final = content or "抱歉，我没有生成有效回复，请重试。"
-
-                logger.info(f"[Gateway] AI completed, response_len={len(response)}, final_len={len(final)}")
-
-                # 提取并发送本地图片
-                clean_content, image_paths = _extract_markdown_images(final)
-                for img_path in image_paths:
-                    try:
-                        asyncio.run_coroutine_threadsafe(
-                            self._gateway_send_image(gw_platform, chat_id, img_path),
-                            _ev_loop,
-                        )
-                    except Exception as e:
-                        logger.error(f"[Gateway] Image send error: {e}")
-
-                # 发送清理后的文本
-                text_to_send = clean_content.strip()
-                if _use_stream and _adapter:
-                    # 打字机收尾：可见快照与最终正文一致时直接结束流；
-                    # 图片剥离导致正文短于快照时仍以最终正文收尾（平台侧 replace 全量）
-                    try:
-                        _fut = asyncio.run_coroutine_threadsafe(
-                            _adapter.finish_stream(chat_id, text_to_send or final),
-                            _ev_loop,
-                        )
-                        _result = _fut.result(timeout=15)
-                    except Exception as e:
-                        logger.error(f"[Gateway] finish_stream error: {e}")
-                        _result = None
-                    if not (_result and _result.success):
-                        # 收尾失败兜底：普通通道发送全文
-                        _push_to_platform(text_to_send or final)
-                elif text_to_send:
-                    _push_to_platform(text_to_send)
-                elif not image_paths:
-                    # 既无图片也无文字，兜底发送原文
-                    _push_to_platform(final)
-
-                # 通知异步等待的 future
-                try:
-                    if not future.done():
-                        future.set_result(final)
-                except Exception:
-                    pass
-
-            def on_error(error):
-                logger.error(f"[Gateway] AI error: {error}")
-                _push_to_platform(f"❌ {error}")
-                try:
-                    if not future.done():
-                        future.set_result(f"处理消息时出错: {error}")
-                except Exception:
-                    pass
-
-            callbacks = {
-                "content_received": on_content_received,
-                "tool_call_started": on_tool_call,
-                "tool_result_received": on_tool_result,
-                "stream_finished": on_stream_finished,
-                "error": on_error,
-            }
-
-            self._gateway_engine.process(
-                session=chat_session,
-                text=text,
-                callbacks=callbacks,
-            )
-
-        except Exception as e:
-            import traceback
-
-            logger.error(f"[Gateway] Processing error: {e}\n{traceback.format_exc()}")
-            try:
-                if not future.done():
-                    future.set_exception(e)
-            except Exception:
-                pass
-
-    def _init_gateway_async(self):
-        """异步初始化 Gateway（后台进行）"""
-
-        def _do_init():
-            try:
-                # 延迟导入，避免主线程加载 adapter 模块（import 有阻塞风险）
-                from app.gateway.manager import create_platform_manager
-
-                # 创建消息处理回调
-                async def process_message(
-                    session_id: str, text: str, platform: Any, chat_id: str, user_id: str, **kwargs
-                ) -> str:
-                    """处理 Gateway 消息"""
-                    # 这里调用 AI 处理
-                    # 由于 ChatBackend 在主线程，需要使用 Qt 信号或线程安全的方式
-                    # 简化实现：直接返回处理结果
-                    return await self._gateway_process_message(session_id, text, platform, chat_id, user_id, **kwargs)
-
-                async def send_message(platform: Any, chat_id: str, content: str, **kwargs) -> Any:
-                    """发送消息到平台"""
-                    return await self._gateway_send_message(platform, chat_id, content, **kwargs)
-
-                # 创建管理器（PlatformManager 是单例，连接逻辑在其后台事件循环）
-                self._gateway_manager = create_platform_manager(process_message, send_message)
-
-                self._gateway_initialized = True
-                logger.info("[ChatBackend] Gateway 管理器创建完成")
-
-                # 启动连接：纯异步调度，不等待结果（避免 WebSocket 连接慢时卡住后台线程）
-                self._gateway_manager.start_all_async()
-
-            except Exception as e:
-                logger.exception(f"[ChatBackend] Gateway 初始化失败: {e}", exc_info=True)
-
-        # 在后台线程运行
-        import threading
-
-        t = threading.Thread(target=_do_init, daemon=True)
-        t.start()
-
-    async def _gateway_process_message(
-        self, session_id: str, text: str, platform: Any, chat_id: str, user_id: str, **kwargs
-    ) -> str:
-        """
-        处理 Gateway 消息 - 调用 AI
-
-        先发送"思考中"提示，然后等待 AI 结果。
-        """
-        # platform 兼容 str 直通（第三方平台 id，Phase E 契约）
-        _pid = getattr(platform, "value", platform)
-        logger.info(f"[Gateway] Processing message from {_pid}:{user_id}: {text[:50]}...")
-
-        # 先发送"思考中"占位回复（流式平台跳过：打字机本身即实时反馈，
-        # 且占位与流首片会形成两条独立消息）
-        try:
-            _adapter = self._gateway_manager.get_adapter(platform)
-            _use_stream = bool(_adapter and _adapter.supports_streaming(chat_id))
-        except Exception:
-            _use_stream = False
-        if not _use_stream:
-            await self._gateway_send_message(platform, chat_id, "🤔 正在思考，请稍候...")
-
-        # 用 signal 发送到主线程
-        import concurrent.futures
-
-        future = concurrent.futures.Future()
-
-        self.gateway_input_received.emit(
-            {
-                "text": text,
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "platform": _pid,
-                "future": future,
-            }
-        )
-
-        try:
-            # 异步等待 AI 结果（不超时，AI 回复多久等多久）
-            response = await asyncio.wrap_future(future)
-
-            # 注意：on_stream_finished 回调已通过 _push_to_platform 发送了最终回复
-            # 所以这里返回空字符串，避免 message_handler 重复发送
-            return ""
-        except Exception as e:
-            import traceback
-
-            logger.error(f"[Gateway] AI processing error: {e}\n{traceback.format_exc()}")
-            return ""
-
-    async def _gateway_send_message(self, platform: Any, chat_id: str, content: str, **kwargs) -> Any:
-        """发送消息到平台"""
-        from app.gateway.base import SendResult
-
-        adapter = self._gateway_manager.get_adapter(platform)
-        if adapter:
-            try:
-                result = await adapter.send(chat_id, content)
-                return result
-            except Exception as e:
-                logger.error(f"[Gateway] Send failed: {e}")
-                return SendResult(success=False, error=str(e))
-
-        logger.warning(f"[Gateway] No adapter for platform {platform}")
-        return SendResult(success=False, error="No adapter")
-
-    async def _gateway_send_image(self, platform: Any, chat_id: str, image_path: str, **kwargs) -> Any:
-        """发送图片到平台"""
-        from app.gateway.base import SendResult
-
-        adapter = self._gateway_manager.get_adapter(platform)
-        if adapter:
-            try:
-                result = await adapter.send_image(chat_id, image_path)
-                return result
-            except Exception as e:
-                logger.error(f"[Gateway] Send image failed: {e}")
-                return SendResult(success=False, error=str(e))
-
-        logger.warning(f"[Gateway] No adapter for platform {platform}")
-        return SendResult(success=False, error="No adapter")
-
-    def _start_gateway_async(self):
-        """异步启动 Gateway"""
-        import threading
-
-        def _do_start():
-            try:
-                if self._gateway_manager and self._gateway_initialized:
-                    self._gateway_manager.start_all_async()
-                    logger.info("[ChatBackend] Gateway 已启动（后台连接中）")
-            except Exception as e:
-                logger.error(f"[ChatBackend] Gateway 启动失败: {e}", exc_info=True)
-
-        t = threading.Thread(target=_do_start, daemon=True)
-        t.start()
-
-    def _stop_gateway_async(self):
-        """异步停止 Gateway"""
-        import threading
-
-        def _do_stop():
-            try:
-                if self._gateway_manager:
-                    self._gateway_manager.stop_all()
-                    logger.info("[ChatBackend] Gateway 已停止")
-            except Exception as e:
-                logger.error(f"[ChatBackend] Gateway 停止失败: {e}", exc_info=True)
-
-        t = threading.Thread(target=_do_stop, daemon=True)
-        t.start()
-
-    def _on_gateway_status_changed(self, status: dict):
-        """Gateway 状态变化回调"""
-        self.gateway_status_changed.emit(status)
-
-    @property
-    def gateway_manager(self):
-        """获取 Gateway 管理器"""
-        return self._gateway_manager
-
-    @property
-    def gateway_engine(self) -> Optional[GatewayEngine]:
-        """获取 Gateway 引擎（与 ChatEngine 完全独立）"""
-        return self._gateway_engine
-
-    @property
-    def gateway_initialized(self) -> bool:
-        """Gateway 是否已初始化"""
-        return self._gateway_initialized
-
-    def get_gateway_status(self) -> dict:
-        """获取 Gateway 状态"""
-        if self._gateway_manager:
-            return self._gateway_manager.get_status()
-        return {"running": False, "platforms": {}}
-
-    def start_gateway(self):
-        """启动 Gateway"""
-        self._start_gateway_async()
-
-    def stop_gateway(self):
-        """停止 Gateway"""
-        self._stop_gateway_async()

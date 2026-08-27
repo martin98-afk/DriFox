@@ -324,7 +324,7 @@ class GatewayEngine(QObject, BaseEngine):
         """处理 /model 命令"""
         cfg = Settings.get_instance()
 
-        current_provider = cfg.llm_selected_model.value or cfg.llm_model.value or ""
+        current_provider = cfg.llm_selected_model.value or ""
         saved_providers = cfg.llm_saved_providers.value or {}
 
         session_meta = session.metadata.get("model") or ""
