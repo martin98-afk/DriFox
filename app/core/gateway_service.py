@@ -170,6 +170,41 @@ class GatewayService(QObject):
         except Exception as e:
             logger.exception(f"[GatewayService] 启动失败: {e}", exc_info=True)
 
+    def sync_platforms(self) -> None:
+        """按 registry 当前注册 + 配置启用状态，补启未连接的启用平台（幂等，主线程调用）。
+
+        修复启动时序缺陷：ensure_started() 的 start_all_async 执行时，gateway 插件
+        组件尚未注册进 GatewayPlatformRegistry（warmup_runtime_components 经
+        QTimer 延迟 ~2s 才跑），registry 为空 → 已启用平台漏启；且 start_all_async
+        跑完后 _running=True，再次 start_all 直接 return（Already running），
+        之后无人补偿 → 只能手动关闭/打开插件开关（走 start_platform_async 才活）。
+
+        本方法在 warmup 完成后调用：对每个"已注册 + 配置启用 + 未连接"的平台
+        补 start_platform_async（_ensure_adapter 动态加载 adapter；
+        adapter.start() 幂等，已连接实例不会重复建连）。
+        """
+        if self._manager is None:
+            return
+        try:
+            from app.plugins.registries.gateway_platform_registry import (
+                GatewayPlatformRegistry,
+            )
+
+            for d in GatewayPlatformRegistry.get_instance().list_platforms():
+                try:
+                    cfg = self._manager._config.get_platform_config(d.platform_id)
+                    if not cfg or not getattr(cfg, "enabled", False):
+                        continue
+                    adapter = self._manager._adapters.get(d.platform_id)
+                    if adapter is not None and adapter.is_connected:
+                        continue
+                    logger.info(f"[GatewayService] sync: 补启平台 {d.platform_id}")
+                    self._manager.start_platform_async(d.platform_id)
+                except Exception as e:
+                    logger.warning(f"[GatewayService] sync 平台 {d.platform_id} 失败: {e}")
+        except Exception as e:
+            logger.warning(f"[GatewayService] sync_platforms 失败: {e}")
+
     def stop(self) -> None:
         """停止平台连接（应用退出时调用）"""
         if self._manager:
@@ -406,18 +441,22 @@ class GatewayService(QObject):
                 elif not image_paths:
                     _push_to_platform(final)
 
+                # 回复已在上方送达（流式卡片 finish_stream / 兜底 _push_to_platform），
+                # future 仅作完成信号置空串——若回传 final，MessageHandler.handle
+                # 会把同一份结果再发一遍（历史 bug：Gateway 结果发两次）。
                 try:
                     if not future.done():
-                        future.set_result(final)
+                        future.set_result("")
                 except Exception:
                     pass
 
             def on_error(error):
                 logger.error(f"[Gateway] AI error: {error}")
                 _push_to_platform(f"❌ {error}")
+                # 错误文案已推送，future 置空串防 handle 二次发送（同上）
                 try:
                     if not future.done():
-                        future.set_result(f"处理消息时出错: {error}")
+                        future.set_result("")
                 except Exception:
                     pass
 

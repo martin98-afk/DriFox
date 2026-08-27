@@ -5726,7 +5726,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return {
                 "api_base": cfg.llm_api_base.value or "",
                 "api_key": cfg.llm_api_key.value or "",
-                "model": cfg.llm_model.value or "",
+                "model": cfg.llm_selected_model.value or "",
             }
         except Exception:
             return {}

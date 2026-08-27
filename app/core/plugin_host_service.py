@@ -198,6 +198,17 @@ class PluginHostService(QObject):
             except Exception as e:
                 logger.error(f"[PluginHost] 运行时组件 warmup 失败: {e}")
 
+            # gateway 平台此时才注册进 registry（warmup 晚于 GatewayService
+            # ensure_started 的 start_all_async → 启动期平台漏启）。注册完成后
+            # 补一次同步：对"已注册 + 已启用 + 未连接"的平台补启连接（幂等）。
+            # 修复：初始化时已启用的 gateway 插件必须手动关闭/打开才连接。
+            try:
+                from app.core.gateway_service import GatewayService
+
+                GatewayService.get_instance().sync_platforms()
+            except Exception as e:
+                logger.error(f"[PluginHost] gateway 平台补启失败: {e}")
+
             # 初始化 LSP 管理器（仅首次，多窗口共享单例）
             try:
                 from app.core.lsp.lsp_manager import get_lsp_manager

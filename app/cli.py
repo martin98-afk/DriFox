@@ -633,7 +633,7 @@ def _run_status():
             print(f"Base URL:  {cfg.get('API_URL', '未设置')}")
             print(f"API Key:   {'已设置' if cfg.get('API_KEY') else '未设置'}")
         else:
-            print(f"当前模型:  {settings.llm_model.value or '未设置'}")
+            print(f"当前模型:  {settings.llm_selected_model.value or '未设置'}")
             print(f"Base URL:  {settings.llm_api_base.value or '未设置'}")
             print(f"API Key:   {'已设置' if settings.llm_api_key.value else '未设置'}")
     except Exception as e:

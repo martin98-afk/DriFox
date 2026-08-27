@@ -452,7 +452,7 @@ class GatewayEngine(QObject, BaseEngine):
         if isinstance(session_meta, dict) and session_meta.get("model"):
             model_line = f"`{session_meta['model']}`（会话覆盖）"
         else:
-            model_line = f"`{cfg.llm_selected_model.value or cfg.llm_model.value or '未配置'}`"
+            model_line = f"`{cfg.llm_selected_model.value or '未配置'}`"
 
         agent = session.metadata.get("agent") or self._current_agent or "plan"
         streaming = "生成中…" if self._conversation_executor.is_streaming else "空闲"
