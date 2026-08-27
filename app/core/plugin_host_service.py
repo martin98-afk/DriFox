@@ -222,6 +222,20 @@ class PluginHostService(QObject):
             except Exception as e:
                 logger.error(f"[PluginHost] LSP 延迟初始化失败: {e}")
 
+            # MCP 自动发现（仅首次）+ 建立连接（后台异步，不阻塞 UI）。
+            # 修复：aa8f7a6b 重构把 _discover_mcp_servers/_init_mcp_connections 迁入
+            # PluginHostService 时调用点丢失（原 ChatBackend 延迟创建尾部两段 try），
+            # 启动后已启用的 MCP 服务器不会自动连接（须手动关闭+开启才启动）。
+            # 与上方 gateway sync_platforms() 补启同构。
+            try:
+                self._discover_mcp_servers()
+            except Exception as e:
+                logger.error(f"[PluginHost] MCP 自动发现失败: {e}")
+            try:
+                self._init_mcp_connections()
+            except Exception as e:
+                logger.error(f"[PluginHost] MCP 连接初始化失败: {e}")
+
         # 延迟 2 秒执行，让窗口首帧 + 用户交互先就绪
         QTimer.singleShot(2000, _do_deferred)
 
