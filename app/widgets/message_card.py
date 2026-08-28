@@ -2435,16 +2435,23 @@ _CONTENT_AUTOSCROLL_JS = """
                     // bodyOnly=true：调用方是工具/思考更新路径（流式块注入/
                     // 完成块替换/高度回调），正文内容未变 → 严禁触碰正文容器
                     // 滚动位置（否则跟随态下正文被拉到固定底部）。
+                    if (bodyOnly) return;
                     // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
                     // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
                     var _cp = document.getElementById('content-placeholder');
-                    if (!bodyOnly && document.body.classList.contains('streaming-dock') && _cp) {
+                    if (document.body.classList.contains('streaming-dock') && _cp) {
                         if (!_cp._userScrolledUp) {
                             _cp._progScroll = true;
                             _cp.scrollTop = _cp.scrollHeight;
                         }
                     }
-                    document.body.scrollTop = document.body.scrollHeight;
+                    // 🔧 核心修复：正文（document.body）只在「跟随底部」状态
+                    // （window._userScrolledWithin === false，即用户接近底部）时才拉到底部；
+                    // 用户已上滚离开阅读(_userScrolledWithin === true)时绝不触碰，
+                    // 保留其阅读位置——这是「不强制控制滚轮、不跳到怪异位置」的关键。
+                    if (!window._userScrolledWithin) {
+                        document.body.scrollTop = document.body.scrollHeight;
+                    }
                 }
                 // 正文容器滚动跟踪：用户主动上滚时停止自动置底跟随，
                 // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为。
@@ -5915,32 +5922,28 @@ class CodeWebViewer(QWebEngineView):
                 // 🐛 修复：当卡片内容超出 MAX_HEIGHT 时，body 出现内部滚动条。
                 // 初始状态 scrollTop=0 导致 wasAtBottom 判断失败，auto-scroll 不触发。
                 // 跟踪用户主动滚动行为，未滚动时强制 auto-scroll 到底部。
+                // 初始即「跟随底部」：未滚动时自动滚底；一旦用户上滚离开，
+                // 由下方 scroll 监听按位置判定改为停止跟随，滚回底部附近自动恢复。
                 window._userScrolledWithin = false;
                 window._suppressScrollEvent = false;
-                // 🐛 修复 race condition：用 scrollTop 差值区分用户滚动 vs 程序自动滚动。
-                // 原实现用 200ms 时间窗抑制 auto-scroll 事件，但快速流式时 auto-scroll
-                // 频繁触发导致时间窗永不过期，用户所有滚轮事件被永久忽略（卡在底部）。
-                // 新方案：用户滚轮单次增量 < 300px，auto-scroll（scrollTop=scrollHeight）
-                // 跳变 > 300px。通过 delta 判断替代时间窗，不受流式频率影响。
-                window._prevScrollTop = 0;
+                window._prevScrollTop = 0;  // 历史基线，已不再用于判定
                 document.body.addEventListener('scroll', function() {{
                     var _st = document.body.scrollTop;
-                    // 即使被抑制也保持 _prevScrollTop 同步，避免 auto-scroll 后首次
-                    // 用户滚动因 _prevScrollTop 陈旧而导致 delta 误判（大跳变）。
+                    // 即使被抑制也保持 _prevScrollTop 同步，避免后续用户滚动时
+                    // _prevScrollTop 陈旧（该字段仅作历史基线，不再用于任何判定）。
                     if (window._suppressScrollEvent) {{
                         window._prevScrollTop = _st;
                         return;
                     }}
-                    var delta = Math.abs(_st - window._prevScrollTop);
                     window._prevScrollTop = _st;
-                    // 用户滚轮单步增量 ~35-120px（取决于滚轮设置和滚动速度）。
-                    // auto-scroll 跳变 > 500px（内容显著增长）。
-                    // Page Down / 键盘滚动 增量可能更大（~视口高度），
-                    // 但用户触发的也应该标记为主动滚动——将阈值设为 2000px，
-                    // 仅过滤 auto-scroll 直接跳到底部的大跳变。
-                    if (delta > 0 && delta < 2000) {{
-                        window._userScrolledWithin = true;
-                    }}
+                    // 🔧 核心修复：用「位置判定」取代脆弱的 delta 阈值。
+                    // 靠近底部(_scrollThreshold 内) = 跟随态(_userScrolledWithin=false)，
+                    // 离开底部 = 用户主动上滚(_userScrolledWithin=true)。
+                    // 程序性滚底同样落在底部 → 自动恢复跟随；用户滚轮上滚 → 立即停止
+                    // 跟随；滚回底部附近 → 恢复跟随。彻底消除 delta 竞态导致的
+                    // “输出跳到莫名其妙位置 / 滚轮被永久锁死”问题。
+                    var _nearBottom = Math.abs(document.body.scrollHeight - _st - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
+                    window._userScrolledWithin = !_nearBottom;
                 }});
                 // ======================================================
 

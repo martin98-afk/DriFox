@@ -434,7 +434,14 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         current = old_content
         failures = []
         for i, edit in enumerate(edits or []):
-            old_s, new_s = edit.get("oldString", ""), edit.get("newString", "")
+            # 键名兼容：camelCase（schema 声明）/ 全小写 / snake_case
+            # （上游某些参数规范化路径会把嵌套 dict 键折叠为全小写，历史 bug 免疫）
+            old_s = edit.get("oldString") or edit.get("oldstring") or edit.get("old_string") or ""
+            new_s = edit.get("newString") or edit.get("newstring") or edit.get("new_string") or ""
+            if not old_s:
+                # 空串 in 任意内容恒真，会把 replace("", x, 1) 伪装成成功——必须显式失败
+                failures.append(f"Edit #{i + 1} failed: oldString 为空（键名或内容缺失）")
+                continue
             if old_s in current:
                 current = current.replace(old_s, new_s, 1)
             else:
