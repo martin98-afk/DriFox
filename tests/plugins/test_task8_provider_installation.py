@@ -15,6 +15,17 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import pytest
+from app.core.plugin_host_service import PluginHostService
+from PyQt5.QtCore import QObject
+
+
+def _make_host():
+    svc = PluginHostService.__new__(PluginHostService)
+    QObject.__init__(svc)
+    svc._agent_manager = None
+    return svc
+
+
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -26,7 +37,7 @@ def _build_backend():
     """绕过 Qt 初始化构造 ChatBackend 实例"""
     from app.core.backend import ChatBackend
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     backend._agent_manager = None
     return backend
 
@@ -194,7 +205,7 @@ def test_identify_components_recognizes_manifest_change(tmp_path):
     """_identify_all_components_from_changes 识别 .drifox-plugin/plugin.json → __manifest__"""
     from app.core.backend import ChatBackend
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     plugin_dir = tmp_path / "my-plugin"
     manifest_dir = plugin_dir / ".drifox-plugin"
     manifest_dir.mkdir(parents=True)
@@ -233,7 +244,7 @@ def test_identify_components_fallback_recognizes_manifest_change(tmp_path):
         staticmethod(lambda: fake_pm),
     )
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     changes = [(None, str(manifest_dir / "plugin.json"))]
     comps = backend._identify_components_from_changes_fallback("my-plugin", changes)
 
@@ -273,7 +284,7 @@ def test_reload_single_plugin_manifest_triggers_all_components(monkeypatch, tmp_
     reg.register("ui", lambda ctx: calls.append(("ui", ctx.plugin_name)) or True)
     monkeypatch.setattr("app.plugins.kernel.get_reloader_registry", lambda: reg)
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     backend._agent_manager = None
 
     result = backend._reload_single_plugin("manifest-plugin", "__manifest__")
@@ -331,7 +342,7 @@ def test_reload_single_plugin_manifest_skips_unknown_component(monkeypatch, tmp_
         reg.register(comp, lambda ctx, c=comp: calls.append(c) or True)
     monkeypatch.setattr("app.plugins.kernel.get_reloader_registry", lambda: reg)
 
-    backend = ChatBackend.__new__(ChatBackend)
+    backend = _make_host()
     backend._agent_manager = None
 
     backend._reload_single_plugin("only-ui", "__manifest__")

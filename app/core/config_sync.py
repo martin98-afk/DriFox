@@ -676,25 +676,22 @@ class ConfigSyncService(QObject):
         watcher 链 2.5-4s × N → 合并单次 ~500ms）。
         """
         try:
-            from app.core.backend import ChatBackend
+            from app.core.plugin_host_service import PluginHostService
 
-            target = next(iter(getattr(ChatBackend, "_active_instances", set())), None)
-            if target is None:
-                logger.debug("[ConfigSync] 无活跃 backend，跳过合并插件重载（数据下次启动加载）")
-                return
-            result = target.reload_plugin_subsystems()
+            result = PluginHostService.get_instance().reload_plugin_subsystems()
             logger.info(f"[ConfigSync] 合并插件重载完成: {result}")
-            target.emit_plugin_changed(result)
+            PluginHostService.get_instance().emit_plugin_changed(result)
         except Exception as e:
             logger.warning(f"[ConfigSync] 合并插件重载失败: {e}")
 
     def _consume_watcher_pending(self):
         """延迟兜底：watchfiles 2s 防抖使 pending 晚置位时的补消费（幂等）"""
         try:
-            from app.core.backend import ChatBackend
+            from app.core.plugin_host_service import PluginHostService
 
-            if getattr(ChatBackend, "_watcher_pending_reload", False):
-                ChatBackend._watcher_pending_reload = False
+            svc = PluginHostService.get_instance()
+            if getattr(svc, "_watcher_pending_reload", False):
+                svc._watcher_pending_reload = False
                 self._trigger_merged_plugin_reload()
         except Exception:
             pass
@@ -1448,9 +1445,9 @@ class ConfigSyncService(QObject):
             # 跳过 user-custom 变更并标记 pending，下载完成后由
             # _reload_settings_on_main_thread 末尾合并触发一次 reload_plugin_subsystems。
             try:
-                from app.core.backend import ChatBackend
+                from app.core.plugin_host_service import PluginHostService
 
-                ChatBackend._suppress_watcher_until = time.time() + 35.0
+                PluginHostService._suppress_watcher_until = time.time() + 35.0
             except Exception:
                 pass
 

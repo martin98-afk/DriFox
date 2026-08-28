@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 TabManagerWindow — Tab 管理器宿主窗口（标准系统窗口）
 
@@ -428,6 +428,32 @@ class TabManagerWindow(QWidget):
         self._setup_ui()
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
+
+        # ── 应用级服务（本类是应用生命周期容器，故在此创建/启停） ──
+        # 一个应用一个实例：与任何 ChatWindow/tab 生命周期解耦。
+        from app.core.gateway_service import GatewayService
+        from app.core.plugin_host_service import PluginHostService
+
+        GatewayService.get_instance().ensure_started()
+        PluginHostService.get_instance().ensure_started()
+
+        # app 级 API 会话处理器：始终路由到当前活跃 tab
+        # 修复多 tab 下后建窗口静默覆盖先建窗口的问题（之前由 MainWidget
+        # 在 _init_llm_api_service 注册 handler，绑死后建窗口的 widget；现改为
+        # 每次调用实时查 _tab_panel.active_index 对应的活跃 ChatWindow）
+        from app.gateway.local_service.session_handler import APISessionHandler
+        from app.gateway import LLMAPIService
+
+        def _active_main_widget():
+            idx = self._tab_panel.active_index if self._tab_panel is not None else -1
+            if 0 <= idx < len(self._windows):
+                w = self._windows[idx]
+                if w is not None and not getattr(w, "_is_destroyed", False):
+                    return w
+            return None
+
+        self._api_session_handler = APISessionHandler(_active_main_widget)
+        LLMAPIService.set_session_handler(self._api_session_handler)
 
         # 全局卡片控制器：系统设置/服务商编辑/Hook/MCP 卡片挂载在 Tab 窗口层
         # （单例在此处初始化，确保全局容器已随 _setup_ui 创建完毕）
@@ -2549,9 +2575,7 @@ class TabManagerWindow(QWidget):
                     if hasattr(source_window, "_tool_permission_controller") and hasattr(
                         new, "_tool_permission_controller"
                     ):
-                        new._tool_permission_controller.copy_state_from(
-                            source_window._tool_permission_controller
-                        )
+                        new._tool_permission_controller.copy_state_from(source_window._tool_permission_controller)
                 except Exception:
                     pass
             elif session_record is not None:
@@ -3075,6 +3099,15 @@ class TabManagerWindow(QWidget):
     def cleanup(self):
         """清理所有窗口和资源"""
         TabManagerWindow._instance = None
+        # ★ 停止应用级服务（Gateway 平台 WebSocket 断连 + 插件 watcher 线程）
+        try:
+            from app.core.gateway_service import GatewayService
+            from app.core.plugin_host_service import PluginHostService
+
+            GatewayService.get_instance().stop()
+            PluginHostService.get_instance().stop()
+        except Exception:
+            pass
         # ★ 清理全局桌宠（停止所有定时器），先于窗口关闭避免悬空引用
         if getattr(self, "pixel_pet", None) is not None:
             try:

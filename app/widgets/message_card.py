@@ -102,6 +102,7 @@ from app.utils.design_tokens import (
     font_size_css,
     get_unified_scrollbar_style,
     scale_font_size,
+    scale_icon_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.markdown_block_viewer import MarkdownBlockViewer
@@ -160,8 +161,10 @@ _render_tls = threading.local()
 # ======== 预编译的正则表达式（提升到模块级别，避免重复编译）=======
 _CODE_BLOCK_PATTERN = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
 _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")?>(.*?)</code></pre>", re.DOTALL)
-_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((ask)(?:\|([^)]*))?\)")
-# 追问新格式：<ask>内容</ask>（替代 [内容](ask)），先归一化为旧格式再统一走 replacer
+# [内容](ask) 旧格式已废弃，请改用 <ask>内容</ask>；
+# 仅保留 jump/create/generate/view/session 的旧 markdown 链接兼容。
+_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((jump|create|generate|view|session)(?:\|([^)]*))?\)")
+# 追问新格式：<ask>内容</ask>，直接生成胶囊（空内容丢弃整段标签，避免 [](ask) 残留）
 _ASK_TAG_PATTERN = re.compile(r"<ask>(.*?)</ask>", re.DOTALL)
 _CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
@@ -1033,8 +1036,9 @@ def _classify_think_tag(content: str) -> str:
     return best_tag if best_score >= 3.0 else ""
 
 
+_THINK_SNAKE_SIZE: int = scale_icon_size(12)
 _THINK_SNAKE_SVG = (
-    '<svg class="think-snake" width="18" height="18" viewBox="0 0 24 24">'
+    f'<svg class="think-snake" width="{_THINK_SNAKE_SIZE}" height="{_THINK_SNAKE_SIZE}" viewBox="0 0 24 24">'
     '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.06)" stroke-width="2.5" />'
     '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.2)" stroke-width="2.5"'
     ' stroke-linecap="round" stroke-dasharray="20 30" class="think-snake-arc" />'
@@ -1216,7 +1220,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 15px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: {scale_font_size(15)}px;">
         {spinner_html}
         <span>深度思考中...</span>
     </span>
@@ -1255,7 +1259,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 15px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: {scale_font_size(15)}px;">
         {spinner_html}
         <span>深度思考中...</span>
     </span>
@@ -2433,24 +2437,36 @@ _CONTENT_AUTOSCROLL_JS = """
                     // bodyOnly=true：调用方是工具/思考更新路径（流式块注入/
                     // 完成块替换/高度回调），正文内容未变 → 严禁触碰正文容器
                     // 滚动位置（否则跟随态下正文被拉到固定底部）。
+                    if (bodyOnly) return;
                     // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
                     // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
                     var _cp = document.getElementById('content-placeholder');
-                    if (!bodyOnly && document.body.classList.contains('streaming-dock') && _cp) {
+                    if (document.body.classList.contains('streaming-dock') && _cp) {
                         if (!_cp._userScrolledUp) {
                             _cp._progScroll = true;
                             _cp.scrollTop = _cp.scrollHeight;
                         }
                     }
-                    document.body.scrollTop = document.body.scrollHeight;
+                    // 🔧 核心修复：正文（document.body）只在「跟随底部」状态
+                    // （window._userScrolledWithin === false，即用户接近底部）时才拉到底部；
+                    // 用户已上滚离开阅读(_userScrolledWithin === true)时绝不触碰，
+                    // 保留其阅读位置——这是「不强制控制滚轮、不跳到怪异位置」的关键。
+                    if (!window._userScrolledWithin) {
+                        document.body.scrollTop = document.body.scrollHeight;
+                    }
                 }
                 // 正文容器滚动跟踪：用户主动上滚时停止自动置底跟随，
                 // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为。
                 // wheel/键盘**同步**标记上滚意图（scroll 事件异步派发，与流式
                 // 渲染 JS 存在竞争窗口，不得作为置位依据）；scroll 事件仅恢复跟随。
                 document.getElementById('content-placeholder')?.addEventListener('wheel', function(e) {
-                    // 上滚（deltaY<0）：同步置位，抢占任何在途渲染 JS 的拉底
-                    if (e.deltaY < 0) this._userScrolledUp = true;
+                    // 上滚（deltaY<0）：同步置位，抢占任何在途渲染 JS 的拉底。
+                    // 🐛 门控：仅当容器实际可滚（内容溢出）才记为"上滚正文"——
+                    // 无溢出时 wheel 本应转发外层聊天列表（Qt wheelEvent 转发分支），
+                    // 页面内收到的事件属冒泡残留，置位会让跟随被无关操作误锁死。
+                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {
+                        this._userScrolledUp = true;
+                    }
                 }, {passive: true});
                 document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
                     var cp = this;
@@ -2459,11 +2475,17 @@ _CONTENT_AUTOSCROLL_JS = """
                     // _suppressScrollEvent 抑制对称。
                     if (window._suppressScrollEvent) return;
                     if (cp._progScroll) { cp._progScroll = false; return; }
-                    // 只做恢复跟随：滚回底部附近清标志。**不置位**——内容高度
-                    // 变化导致的 scrollTop 钳制也会触发 scroll（非用户行为），
-                    // 置位会误停跟随导致位置漂移。
+                    // 位置判定（与 body / #tool-content 监听完全一致）：
+                    // 接近底部 = 恢复跟随（_userScrolledUp=false），离开底部 =
+                    // 用户主动阅读（_userScrolledUp=true），保留其阅读位置——
+                    // 「不强制控制滚轮、不跳到怪异位置」的关键。
+                    // 仅程序性滚动（_progScroll，由 _autoScrollStreamingBody /
+                    // _cpPrevTop 还原显式打标）被排除，不再依赖"近期滚轮"启发式：
+                    // 旧逻辑只在「上滚」时刷新 _lastUserWheelAt，下滚回底不刷新，
+                    // 一旦间隔 >800ms 标志卡死为"已离开"→ 内容更新时跟随失效、
+                    // 视口被 _cpPrevTop 还原拖回旧阅读位置（弹回中间的根因）。
                     var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
-                    if (atBottom) cp._userScrolledUp = false;
+                    cp._userScrolledUp = !atBottom;
                 });
 """
 
@@ -2483,14 +2505,25 @@ def get_random_greeting() -> str:
 
 
 def _inject_context_links(md_text: str) -> str:
-    """将 [文本](ask/jump/create/generate/view/session) 或 <ask>文本</ask> 转换为胶囊样式的追问标签
+    """将 <ask>文本</ask> 或 [文本](jump/create/generate/view/session) 转换为胶囊样式的追问标签
+
+    注：[文本](ask) 旧格式已废弃，不再识别（残留会渲染成空 markdown 链接）。
 
     session 类型格式：[文本](session|session_id|last_time)
     last_time 如果为空则不显示
     """
 
-    # 新格式 <ask>内容</ask> → 归一化为 [内容](ask)，与旧格式共用 replacer 逻辑
-    md_text = _ASK_TAG_PATTERN.sub(lambda m: f"[{m.group(1).strip()}](ask)", md_text)
+    # 新格式 <ask>内容</ask> → 直接生成胶囊
+    # strip 后空内容（如 <ask></ask>、<ask>   </ask>、<ask>\n</ask>）丢弃整段标签，
+    # 避免旧逻辑归一化为 [](ask) 后残留为字面 markdown 链接导致渲染崩（<a href="ask"></a>）。
+    def _ask_replacer(m: re.Match) -> str:
+        content = m.group(1).strip()
+        if not content:
+            return ""
+        attrs = f'data-type="ask" data-content="{escape(content)}" data-action="ask"'
+        return f'<span class="context-tag" {attrs}>{content}</span>'
+
+    md_text = _ASK_TAG_PATTERN.sub(_ask_replacer, md_text)
 
     def replacer(match):
         content = match.group(1)
@@ -5884,32 +5917,28 @@ class CodeWebViewer(QWebEngineView):
                 // 🐛 修复：当卡片内容超出 MAX_HEIGHT 时，body 出现内部滚动条。
                 // 初始状态 scrollTop=0 导致 wasAtBottom 判断失败，auto-scroll 不触发。
                 // 跟踪用户主动滚动行为，未滚动时强制 auto-scroll 到底部。
+                // 初始即「跟随底部」：未滚动时自动滚底；一旦用户上滚离开，
+                // 由下方 scroll 监听按位置判定改为停止跟随，滚回底部附近自动恢复。
                 window._userScrolledWithin = false;
                 window._suppressScrollEvent = false;
-                // 🐛 修复 race condition：用 scrollTop 差值区分用户滚动 vs 程序自动滚动。
-                // 原实现用 200ms 时间窗抑制 auto-scroll 事件，但快速流式时 auto-scroll
-                // 频繁触发导致时间窗永不过期，用户所有滚轮事件被永久忽略（卡在底部）。
-                // 新方案：用户滚轮单次增量 < 300px，auto-scroll（scrollTop=scrollHeight）
-                // 跳变 > 300px。通过 delta 判断替代时间窗，不受流式频率影响。
-                window._prevScrollTop = 0;
+                window._prevScrollTop = 0;  // 历史基线，已不再用于判定
                 document.body.addEventListener('scroll', function() {{
                     var _st = document.body.scrollTop;
-                    // 即使被抑制也保持 _prevScrollTop 同步，避免 auto-scroll 后首次
-                    // 用户滚动因 _prevScrollTop 陈旧而导致 delta 误判（大跳变）。
+                    // 即使被抑制也保持 _prevScrollTop 同步，避免后续用户滚动时
+                    // _prevScrollTop 陈旧（该字段仅作历史基线，不再用于任何判定）。
                     if (window._suppressScrollEvent) {{
                         window._prevScrollTop = _st;
                         return;
                     }}
-                    var delta = Math.abs(_st - window._prevScrollTop);
                     window._prevScrollTop = _st;
-                    // 用户滚轮单步增量 ~35-120px（取决于滚轮设置和滚动速度）。
-                    // auto-scroll 跳变 > 500px（内容显著增长）。
-                    // Page Down / 键盘滚动 增量可能更大（~视口高度），
-                    // 但用户触发的也应该标记为主动滚动——将阈值设为 2000px，
-                    // 仅过滤 auto-scroll 直接跳到底部的大跳变。
-                    if (delta > 0 && delta < 2000) {{
-                        window._userScrolledWithin = true;
-                    }}
+                    // 🔧 核心修复：用「位置判定」取代脆弱的 delta 阈值。
+                    // 靠近底部(_scrollThreshold 内) = 跟随态(_userScrolledWithin=false)，
+                    // 离开底部 = 用户主动上滚(_userScrolledWithin=true)。
+                    // 程序性滚底同样落在底部 → 自动恢复跟随；用户滚轮上滚 → 立即停止
+                    // 跟随；滚回底部附近 → 恢复跟随。彻底消除 delta 竞态导致的
+                    // “输出跳到莫名其妙位置 / 滚轮被永久锁死”问题。
+                    var _nearBottom = Math.abs(document.body.scrollHeight - _st - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
+                    window._userScrolledWithin = !_nearBottom;
                 }});
                 // ======================================================
 
@@ -8130,12 +8159,28 @@ class PlainTextViewer(QWidget):
         doc.setTextWidth(bubble_w - 16)
         h = int(math.ceil(doc.size().height())) + 12  # 上下边距
 
+        # 🛡️ 短消息收缩分支测出超高 = longest 测量伪信号（如字体 fallback 未就绪时
+        # naturalTextWidth 异常偏小 → bubble_w 收到 ~80 → tiny 宽度下短文本折出
+        # 十几行 → h 必然撞 MAX_HEIGHT）。回退全宽重测一次自愈，避免：
+        # 1) 气泡真的收缩成 80px 孤条；2) 下方 _tall_cap 把该 cap 记为"确认超高"，
+        # 之后所有 ≤cap 的宽度永久走 O(1) 快速路径 → 2 行短消息被锁死
+        # (cap, MAX_HEIGHT)，气泡全宽 300 高全是空白（实测截图症状）。
+        if h > self.MAX_HEIGHT and bubble_w < self._width_cap:
+            bubble_w = self._width_cap
+            if self.maximumWidth() != bubble_w:
+                self.setMaximumWidth(bubble_w)
+            doc.setTextWidth(bubble_w - 16)
+            h = int(math.ceil(doc.size().height())) + 12
+
         # 限制最大高度：内容超出 MAX_HEIGHT 后由 QTextEdit 内部滚动条处理滚动
         h = max(40, min(h, self.MAX_HEIGHT))
 
         # [PERF] 更新“超高”单调缓存：撞上限 → 记录确认宽度（取 max 保留最宽确认点），
         # 后续更窄宽度走 O(1) 快速路径；未撞上限不更新（更宽时结论仍可能对更窄宽度有效）。
-        if h >= self.MAX_HEIGHT and self._width_cap < 100000:
+        # 🛡️ 仅在 bubble_w 用满上限（bubble_w >= cap，真·内容超高）时记录：
+        # 短消息收缩分支的撞限是 tiny 宽度测量伪信号，一旦记录，后续宽度
+        # 全部被 O(1) 快速路径锁死 (cap, MAX_HEIGHT)（见上方回退重测注释）。
+        if h >= self.MAX_HEIGHT and self._width_cap < 100000 and bubble_w >= self._width_cap:
             self._tall_cap = max(self._tall_cap, self._width_cap)
 
         # ⚠️ 必须 setFixedSize：仅设 maximumWidth 时布局仍按 QTextEdit 的
@@ -12144,7 +12189,14 @@ class _ChangelogFetcher(QThread):
             return
         new_etag = resp.headers.get("ETag", "")
         releases = []
-        md = get_markdown_instance()
+        # 线程私有实例：全局 _md_instance 禁止跨线程使用（Markdown.reset()/convert()
+        # 非线程安全）。本方法跑在 QThread 后台线程，若与主线程消息渲染并发共用全局
+        # 实例，会互相打乱解析状态——曾致消息卡片表格偶发渲染失败/内容串扰（约0.4%）。
+        md = Markdown(
+            extensions=["fenced_code", "nl2br", "tables"],
+            output_format="html5",
+            safe=False,
+        )
         for item in data:
             body_md = item.get("body") or ""
             try:

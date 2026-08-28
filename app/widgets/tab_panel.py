@@ -1010,9 +1010,9 @@ class TabPanel(QWidget):
 
         # ── 顶部：品牌区（水平布局：左侧产品标识 + 右侧侧边栏收起/展开按钮）──
         self._brand_widget = QWidget(self)
-        brand_layout = QHBoxLayout(self._brand_widget)
-        brand_layout.setContentsMargins(10, 4, 6, 4)
-        brand_layout.setSpacing(4)
+        self._brand_layout = QHBoxLayout(self._brand_widget)
+        self._brand_layout.setContentsMargins(10, 4, 6, 4)
+        self._brand_layout.setSpacing(4)
 
         # 左侧：产品标识（水平：标题 + 版本号同排，降低整体高度）
         self._brand_left = QWidget(self._brand_widget)
@@ -1032,15 +1032,15 @@ class TabPanel(QWidget):
         # 末尾 stretch 吸收多余空间，保证标题+版本号整体左对齐（QLabel 默认
         # Preferred 策略会平分多余空间，把版本号挤到中间）
         brand_left_layout.addStretch(1)
-        brand_layout.addWidget(self._brand_left, 1)
+        self._brand_layout.addWidget(self._brand_left, 1)
 
         # 右侧：侧边栏收起/展开按钮
         self._sidebar_toggle_btn = TransparentToolButton(self._brand_widget)
-        self._sidebar_toggle_btn.setIcon(get_icon("收起侧边栏"))
+        self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
         self._sidebar_toggle_btn.setFixedSize(28, 28)
-        self._sidebar_toggle_btn.setToolTip("收起侧边栏")
+        self._sidebar_toggle_btn.setToolTip("收起/展开侧边栏")
         self._sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
-        brand_layout.addWidget(self._sidebar_toggle_btn)
+        self._brand_layout.addWidget(self._sidebar_toggle_btn)
 
         layout.addWidget(self._brand_widget)
 
@@ -1122,7 +1122,18 @@ class TabPanel(QWidget):
         # ── 分隔线：UI 插件区域 ↔ 新建标签页 ──
         self._plugin_separator_2 = QFrame(self)
         self._plugin_separator_2.setFrameShape(QFrame.HLine)
-        self._plugin_separator_2.setStyleSheet(self._SEPARATOR_STYLE)
+        self._plugin_separator_2.setStyleSheet(
+            f"""
+            QFrame {{
+                background: {Colors.DIVIDER_COLOR};
+                border: none;
+                min-height: 1px;
+                max-height: 1px;
+                margin-top: 4px;
+                margin-bottom: 2px;
+            }}
+            """
+        )
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
@@ -1463,10 +1474,10 @@ class TabPanel(QWidget):
                 走宽度动画，UI 切换由动画跨阈值时驱动）。
         """
         if self._collapsed:
-            self._sidebar_toggle_btn.setIcon(get_icon("展开侧边栏"))
+            self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
             self._sidebar_toggle_btn.setToolTip("展开侧边栏")
         else:
-            self._sidebar_toggle_btn.setIcon(get_icon("收起侧边栏"))
+            self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
             self._sidebar_toggle_btn.setToolTip("收起侧边栏")
 
         # switch_ui=False（按钮点击走宽度动画）时只更新按钮图标/tooltip，
@@ -1483,9 +1494,21 @@ class TabPanel(QWidget):
             self._new_icon_btn.setVisible(True)
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
+            # 折叠态：品牌区只剩收起/展开按钮，让其在窄条内水平居中
+            # （_brand_left 隐藏后无 stretch 会把按钮顶到左对齐，故显式居中）。
+            # 左右 margin 对称 + 按钮 cell 拉伸 + 居中对齐，保证 46px 窄条内居中。
+            self._brand_layout.setContentsMargins(8, 4, 8, 4)
+            self._brand_layout.setStretch(0, 0)
+            self._brand_layout.setStretch(1, 1)
+            self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.AlignHCenter)
         else:
             # 展开时恢复产品标识
             self._brand_left.setVisible(True)
+            # 展开态：恢复默认边距与拉伸，按钮回到右上角
+            self._brand_layout.setContentsMargins(10, 4, 6, 4)
+            self._brand_layout.setStretch(0, 1)
+            self._brand_layout.setStretch(1, 0)
+            self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.Alignment())
             # 展开时恢复文字新建按钮，隐藏图标按钮
             self._branch_btn.setVisible(True)
             self._branch_btn.setText("分支")
@@ -2523,7 +2546,7 @@ class TabPanel(QWidget):
         if not hasattr(self, "_custom_plugin_card"):
             return
         Colors.refresh()
-        margin = "2px 2px" if compact else "2px 6px"
+        margin = "3px 4px" if compact else "5px 8px"
         self._custom_plugin_card.setStyleSheet(f"""
             #customPluginCard {{
                 background: {Colors.CARD_BG.format(alpha=40)};

@@ -1105,6 +1105,28 @@ class OpenAIChatToolWindow(ToolWindow):
     # P5b：延迟刷新时记录的待刷 scope（theme/font_family/font_size/None），
     # 切回 tab 补刷时按此精确执行，避免漏刷字体字号（V2 方案 A）
     _theme_needs_refresh_scope: str | None = None
+    # 内置 function 命令 → 方法名（类级映射；实例 dict 只承载动态注册如 UI 插件命令）
+    # 查找顺序：实例 dict（动态）→ 本类级表（getattr 解析）→ FunctionCommandHandlers 全局 → 硬编码
+    _BUILTIN_COMMAND_HANDLER_NAMES: Dict[str, str] = {
+        "subagents": "_handle_subagents_command",
+        "title-gen": "_handle_title_gen_command",
+        "compact": "_handle_compact_command",
+        "todos": "_handle_todos_command",
+        "team": "_handle_team_command",
+        "toggle-window": "_handle_toggle_window_command",
+        "clear": "_handle_clear_command",
+    }
+    # git 分支缓存：类级共享（workdir → branch）。
+    # 同项目多窗口共享，避免重复 git 探测；信号路由仍由实例级 _branch_detect_signals
+    # 负责（不同窗口发起检测，结果需送回自己的槽，不能在类级）。
+    _branch_cache: Dict[str, str] = {}
+    # models.dev 动态数据缓存：类级共享（DynamicModelsResult）。
+    # 多窗口只发一路网络请求，结果广播到全部活跃窗口。
+    _models_dev_cache: Optional[object] = None
+    # 同上 inflight 守卫：避免并发重复发起；首请求完成后再被广播唤醒。
+    _models_dev_fetch_inflight: bool = False
+    # OpenCode Zen 免费模型列表 inflight 守卫（同上语义）
+    _opencode_fetch_inflight: bool = False
     insertResponse = pyqtSignal(str)
     createResponse = pyqtSignal(str)
     contextActionRequested = pyqtSignal(str, str)
@@ -1193,7 +1215,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 子智能体默认解析是后台自动流程：解析失败静默回退主模型，不弹 InfoBar 警告
         self.backend.set_subagent_model_resolver(lambda v: self._resolve_subagent_model_config(v, show_error=False))
         # 连接插件热更新信号
-        self.backend.plugin_changed.connect(self._on_plugin_hot_reload)
+        from app.core.plugin_host_service import PluginHostService
+
+        PluginHostService.get_instance().plugin_changed.connect(self._on_plugin_hot_reload)
         # 注册工具热重载风险通知监听（进程级一次）
         self._register_tool_reload_notice()
         # 连接自动上下文压缩信号（PostToolUse hook 检测到阈值时触发）
@@ -1264,7 +1288,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._branch_detect_signals = _BranchDetectSignals()
         self._branch_detect_signals.finished.connect(self._on_branch_detected)
         self._branch_detect_request_id = 0
-        self._branch_cache: Dict[str, str] = {}  # workdir → branch（按路径缓存，避免重复 git 调用）
+        # _branch_cache 已上提类级 OpenAIChatToolWindow._branch_cache（共享）
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -1550,48 +1574,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.set_sub_agent_history_getter(self._get_current_session_messages_for_tools)
         except Exception as e:
             logger.warning(f"[MainWidget] SubAgent 补连失败: {e}")
-
-    def _init_llm_api_service(self):
-        """初始化 LLM API 服务"""
-        from app.gateway import (
-            APISessionHandler,
-            LLMAPIService,
-            is_service_running,
-        )
-
-        # 注册服务商列表获取回调
-        def get_providers_list():
-            return [{"name": name} for name in self._valid_configs.keys()]
-
-        # 创建并注册 API 会话处理器（复用 UI 的 ChatEngine 和 SessionManager）
-        self._api_session_handler = APISessionHandler(self)
-        LLMAPIService.set_session_handler(self._api_session_handler)
-
-        # 根据配置决定是否启动服务
-        if self.cfg.llm_api_enabled.value:
-            if not is_service_running():
-                service = LLMAPIService()
-                service.port = self.cfg.llm_api_port.value
-                service.start(background=True)
-        else:
-            # 确保服务未启动
-            if is_service_running():
-                from app.gateway import (
-                    stop_llm_api_service,
-                )
-
-                stop_llm_api_service()
-
-        # 锁屏远程：若配置开启则自动生效（保持自动化任务持续运行），开关由设置 UI 控制
-        try:
-            from app.core.system.lock_screen_remote import (
-                get_lock_screen_remote_manager,
-            )
-
-            if self.cfg.lock_screen_remote_enabled.value:
-                get_lock_screen_remote_manager().enable(lock_now=False, keep_display_on=True)
-        except Exception as e:
-            logger.warning(f"[MainWidget] 锁屏远程初始化失败: {e}")
 
     def _register_cards_to_manager(self):
         """注册所有卡片到 CardManager 并添加到容器
@@ -2923,16 +2905,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sub_agent_compact_widget.enter_session_requested.connect(self._on_sub_agent_enter_session)
         self._sub_agent_compact_widget.stop_subagent_requested.connect(self._on_sub_agent_stop_requested)
 
-        # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）
-        self._function_command_handlers = {
-            "subagents": self._handle_subagents_command,
-            "title-gen": self._handle_title_gen_command,
-            "compact": self._handle_compact_command,
-            "todos": self._handle_todos_command,
-            "team": self._handle_team_command,
-            "toggle-window": self._handle_toggle_window_command,
-            "clear": self._handle_clear_command,
-        }
+        # 多窗口隔离的 function 命令处理器（每个窗口独立，不被新窗口覆盖）。
+        # 内置 7 项已上提类级 _BUILTIN_COMMAND_HANDLER_NAMES，实例 dict 只存动态注册
+        # （系统卡片 toggle 方法、UI 插件命令等）。
+        self._function_command_handlers: Dict[str, Callable] = {}
 
         # 下方卡片容器 - 添加 SubAgentCompact
         self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
@@ -3298,41 +3274,24 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _clear_command_shortcuts(self):
-        """清除已注册的命令快捷键"""
-        # F1 守卫：窗口 C++ 对象已销毁时静默返回，避免访问 self.window() 抛
-        # RuntimeError（wrapped C/C++ object has been deleted）。
+        """清空本实例对命令快捷键的引用
+
+        共享 QShortcut 自归属权修复起由窗口级缓存统一持有
+        （_window_shortcut_cache，Qt 父对象为顶层窗口），生命周期跟随窗口，
+        与单个 MainWidget 实例解耦；此处不再 deleteLater 共享对象。
+        """
         if _is_sip_deleted(self):
             return
-        # 清理窗口级去重缓存（当前实例对应的窗口）
-        shortcut_parent = self.window() or self
-        win_id = id(shortcut_parent)
-        # 统计同一窗口下残余的 MainWidget 实例数
-        remaining = sum(
-            1 for w in window_registry.alive_window_instances() if not w._is_destroyed and id(w.window() or w) == win_id
-        )
-        if remaining <= 1:
-            # 最后一个实例销毁时清除窗口级缓存
-            OpenAIChatToolWindow._window_shortcut_cache.pop(win_id, None)
-
-        for qs in getattr(self, "_command_shortcuts", []):
-            try:
-                qs.setEnabled(False)
-                qs.deleteLater()
-            except RuntimeError:
-                pass
+        # 兼容修复前的旧实例字段：仅断开 Python 引用，不触碰窗口共享的 QShortcut
         self._command_shortcuts = []
 
     def _disconnect_command_shortcut_cleanup(self):
-        """closeEvent 主动断开 destroyed 清理连接并立即清理快捷键。
+        """关闭路径兼容钩子（保留签名供 closeEvent 调用）。
 
-        背景：_register_command_shortcuts 首次执行时连接 self.destroyed →
-        lambda 调 _clear_command_shortcuts()。窗口 C++ 对象销毁触发 destroyed 时，
-        lambda 访问已删除的 self 会抛 RuntimeError（wrapped C/C++ object has
-        been deleted），disband 批量关闭团队窗口时每窗报一次。
-
-        修复：关闭路径主动断开该连接 + 立即清理快捷键（此时 C++ 对象仍存活），
-        destroyed 触发时不再执行 lambda；即使仍有其他注入路径触发 destroyed，
-        F1 的 sip 守卫也会静默兜底。
+        历史：_register_command_shortcuts 曾将 per-instance destroyed 钩子接到
+        _clear_command_shortcuts，并在 C++ 析构后访问已删除对象抛 RuntimeError。
+        归属权改窗口级后快捷键由 shortcut_parent.destroyed 钩子统一清理，
+        本方法退化为尽力断开历史连接 + 清空自身残留引用，均无副作用可失败静默。
         """
         try:
             if getattr(self, "_cmd_shortcuts_destroy_connected", False):
@@ -3717,12 +3676,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.error(f"[MainWidget] Message factory {factory.name} failed: {e}")
         return None
 
-    # ── 快捷键窗口级注册去重 ──────────────────────────────
-    # 在 Tab 模式下，多个 MainWidget 共享同一个顶层窗口（TabManagerWindow），
-    # 如果每个 MainWidget 都向同一个窗口注册 QShortcut，将产生重复注册导致
-    # 快捷键行为 undefined（Qt 官方文档明确指出同一 context 下重复 key sequence 行为未定义）。
-    # 此处维护每个窗口已注册的 shortcut key sequences 集合，在注册前检查去重。
-    _window_shortcut_cache: Dict[int, set] = {}
+    # ── 快捷键窗口级归属（幂等 ensure） ──────────────────────
+    # Tab 模式下多个 MainWidget 共享同一个顶层窗口（TabManagerWindow）。
+    # 历史 bug：QShortcut 由"第一个注册的 tab"私有持有，其余 tab 全跳过；
+    # 持有者 tab 关闭时 deleteLater 全部快捷键，后续清理判据 off-by-one
+    # pop 掉去重缓存却无人重建 → 存活 tab 快捷键全灭且不自愈；关非持有者
+    # 又会放行新 tab 重复注册 → 同窗口同键序列多套 QShortcut（undefined 行为，
+    # 开关型命令被执行两次）。
+    # 修复：QShortcut 的 Qt 父对象本来就是顶层窗口，生命周期天然跟随窗口；
+    # 缓存直接持有 QShortcut 对象本身，_register_command_shortcuts 退化为
+    # 幂等 ensure——缓存内对象存活则跳过，否则清死引用重建。任何实例的
+    # 创建/销毁都不再影响快捷键可用性。
+    _window_shortcut_cache: Dict[int, list] = {}
 
     def _register_command_shortcuts(self):
         """为所有有 shortcut 配置的命令注册 QShortcut
@@ -3740,21 +3705,6 @@ class OpenAIChatToolWindow(ToolWindow):
         handler 在运行时解析当前激活的 MainWidget（Tab 模式取 _content_area 当前页），
         不捕获 self，避免命中被隐藏或已关闭的标签页。
         """
-        self._clear_command_shortcuts()
-
-        # 快捷键挂在顶层窗口上，self 被销毁时不会随之自动清理，连接 destroyed 同步清理，避免泄漏
-        # F1 守卫：lambda 在 C++ 对象销毁触发 destroyed 时访问 self 会抛 RuntimeError，
-        # 先经 _is_sip_deleted 判定，删除态直接跳过清理（closeEvent 已主动清理，此处为兜底）。
-        if not getattr(self, "_cmd_shortcuts_destroy_connected", False):
-            try:
-                self._cmd_shortcuts_destroy_slot = lambda *a: (
-                    None if _is_sip_deleted(self) else self._clear_command_shortcuts()
-                )
-                self.destroyed.connect(self._cmd_shortcuts_destroy_slot)
-                self._cmd_shortcuts_destroy_connected = True
-            except RuntimeError:
-                pass
-
         from PyQt5.QtGui import QKeySequence
         from PyQt5.QtWidgets import QShortcut
 
@@ -3776,8 +3726,39 @@ class OpenAIChatToolWindow(ToolWindow):
         shortcut_parent = self.window() or self
         win_id = id(shortcut_parent)
 
-        # Tab 模式去重：同一窗口已注册的 key sequence 跳过（防止多标签页重复注册）
-        registered = OpenAIChatToolWindow._window_shortcut_cache.get(win_id, set())
+        # ── 幂等 ensure：窗口已有存活的命令快捷键集合则直接复用 ──
+        cached = OpenAIChatToolWindow._window_shortcut_cache.get(win_id)
+        if cached is not None:
+            alive = []
+            for qs in cached:
+                try:
+                    if not _is_sip_deleted(qs):
+                        alive.append(qs)
+                except RuntimeError:
+                    continue
+            if len(alive) != len(cached):
+                cached[:] = alive
+            if alive:
+                return
+            # 全部死引用（理论上不会发生：父窗口销毁时窗口自身 destroyed 钩子已 pop）
+            OpenAIChatToolWindow._window_shortcut_cache.pop(win_id, None)
+
+        self._clear_command_shortcuts()
+
+        # 窗口销毁时同步移除缓存条目：QShortcut 是 shortcut_parent 的 Qt 子对象，
+        # 随父自动销毁；此处只防类级 dict 中死 wrapper 堆积与 win_id 复用串扰。
+        try:
+            if getattr(shortcut_parent, "_shortcut_cache_cleanup_connected", False) is False:
+                shortcut_parent._shortcut_cache_cleanup_connected = True
+
+                def _pop_shortcut_cache(*_a, _parent=shortcut_parent):
+                    OpenAIChatToolWindow._window_shortcut_cache.pop(id(_parent), None)
+
+                shortcut_parent.destroyed.connect(_pop_shortcut_cache)
+        except RuntimeError, AttributeError:
+            pass
+
+        cache: list = OpenAIChatToolWindow._window_shortcut_cache.setdefault(win_id, [])
 
         cmd_mgr = CommandManager.get_instance()
         for entries in cmd_mgr._commands.values():
@@ -3785,10 +3766,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 if not cmd_def.shortcut:
                     continue
                 key_seq = cmd_def.shortcut
-                # 去重：同一窗口下相同快捷键只需注册一次
-                if key_seq in registered:
-                    continue
-                registered.add(key_seq)
 
                 qs = QShortcut(QKeySequence(key_seq), shortcut_parent)
 
@@ -3813,10 +3790,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         logger.warning(f"[Shortcut] '{n}' 处理异常", exc_info=True)
 
                 qs.activated.connect(_on_shortcut)
-                self._command_shortcuts.append(qs)
-
-        # 更新窗口级缓存
-        OpenAIChatToolWindow._window_shortcut_cache[win_id] = registered
+                cache.append(qs)
 
     def _command_has_params(self, name: str) -> bool:
         """检查命令是否定义了参数（用于快捷键触发的参数卡片决策）
@@ -3835,9 +3809,12 @@ class OpenAIChatToolWindow(ToolWindow):
         用于区分系统内置 function 命令（有 handler）和用户插件 function 命令（无 handler）。
         后者通过快捷键触发时回退到插入命令文本。
         """
-        # 窗口级处理器
+        # 窗口级处理器（动态注册：UI 插件命令 / 卡片 toggle 等）
         handlers = getattr(self, "_function_command_handlers", {})
         if name in handlers:
+            return True
+        # 类级内置命令表（7 项无实例方法的轻量 handler）
+        if name in self._BUILTIN_COMMAND_HANDLER_NAMES:
             return True
         # 全局注册的处理器
         if FunctionCommandHandlers.has(name):
@@ -3889,12 +3866,20 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.command_manager import CommandNeedDegrade
 
         try:
-            # 多窗口隔离：优先使用当前窗口自己的处理器
+            # 多窗口隔离：优先使用当前窗口自己的处理器（动态注册）
             handlers = getattr(self, "_function_command_handlers", {})
             handler = handlers.get(command_name)
             if handler:
                 handler(args)
                 return True
+
+            # 回退到类级内置命令表（7 项轻量 handler，方法名查 getattr）
+            method_name = self._BUILTIN_COMMAND_HANDLER_NAMES.get(command_name)
+            if method_name:
+                method = getattr(self, method_name, None)
+                if method is not None:
+                    method(args)
+                    return True
 
             # 回退到全局注册的处理器（兼容旧代码路径）
             handler = FunctionCommandHandlers.get(command_name)
@@ -4131,8 +4116,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._on_agent_changed(agent_name)
         self._apply_agent_command_permissions(agent_name)
         tm = self._get_team_manager()
-        # 团队名：优先取当前模板名，无模板回退 default（与 TeamManager.DEFAULT_TEAM 一致）
-        self._team_name = (tm.get_template() or {}).get("name") or "default"
         # 方案 A：复用团队已有 run_id（模板加载生成的）；手动加入老团队
         # （无 run_id）时保持空串，团队会话不注入团队元数据（行为与现状一致）
         # 🛡️ F3 可选收尾（根因 B）：手动加入且团队无 run_id → start_team_run()
@@ -4143,6 +4126,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not run_id:
             run_id = tm.start_team_run()
         self._team_run_id = run_id
+        # 🛡️ M1'：按 run_id 粒度读模板名，多团队并存下不再被顶层 template
+        # 单槽的最新一次写入覆盖（A 团队成员 /team --join 时不会拿到
+        # B 团队的模板名）。未命中 run_id 时回退顶层 template 字段
+        # （兼容仅用旧 set_template 写入的老团队）。
+        self._team_name = (tm.get_template_for_run_id(run_id) or {}).get("name") or "default"
         # 🛡️ M1：手动 join 路径也透传 run_id / team_label 到 TeamManager，
         # 让成员记录带上团队归属（多团队分组、跨团队拦截的前置条件）。
         team_label = tm.get_team_label()
@@ -4171,7 +4159,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if team_project:
             self._apply_team_project(team_project)
         # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
-        team_workdir = tm.get_team_workdir()
+        if join_run_id:
+            # 🐛 按 run_id 粒度读取（与 projects_by_run_id 对齐），未命中不回退
+            # 顶层——顶层是跨 run_id 的污染单槽（残留值串台到新团队）。
+            team_workdir = tm.get_team_workdir(join_run_id, team_name=join_team_name)
+        else:
+            # run_id 尚未生成（手动 join 早期）：回退顶层兼容行为
+            team_workdir = tm.get_team_workdir(team_name=join_team_name)
         if team_workdir:
             self._apply_team_workdir(team_workdir)
         self._refresh_team_ui(agent_name)
@@ -4304,10 +4298,13 @@ class OpenAIChatToolWindow(ToolWindow):
         active_count = len(active_windows)
         # 角色描述复用：若当前团队已加载过模板（/team --load），该模板 agents 中
         # 带有的角色描述可直接复用到保存的模板；手动加入的成员无描述则保持旧格式（兼容）
+        # 🛡️ M1'：按当前 run_id 读模板，避免多团队并存下顶层 template 单槽
+        # 覆盖导致角色描述取错（/team --save 时混进其他团队的描述）。
         role_descs = {}
         try:
             _tm_mgr = self._get_team_manager()
-            _tpl = _tm_mgr.get_template()
+            _tpl_run_id = _tm_mgr.get_team_run_id()
+            _tpl = _tm_mgr.get_template_for_run_id(_tpl_run_id)
             for item in (_tpl or {}).get("agents") or []:
                 if isinstance(item, dict) and item.get("agent_name"):
                     desc = str(item.get("description") or "").strip()
@@ -4436,22 +4433,28 @@ class OpenAIChatToolWindow(ToolWindow):
         if not _confirmed[0]:
             return
 
-        # 记录团队模板上下文（供 SessionStart hook 注入团队描述 + 各成员角色描述）
-        tm_mgr = self._get_team_manager()
-        tm_mgr.set_template(
-            {
-                "name": template.template_name,
-                "description": template.description,
-                "agents": [{"agent_name": a.agent_name, "description": a.description} for a in template.agents],
-            }
-        )
         # 方案 A：开始一次团队运行（force=True 强制生成新 run_id），
         # 每次新建团队对话都是独立运行，不复用旧 run_id，与一键恢复路径
         # force=True 语义对齐；本次模板加载的所有新窗口共享同一 run_id，
         # 团队会话自动保存时落库。
         # 🛡️ M1：捕获返回值 new_run_id，批量透传给后续 _spawn_team_members，
         # 保证一次 /team --load 创建的所有成员共享同一团队归属（多团队分组）。
+        # 🛡️ M1'：必须在 set_template_for_run_id 之前——后者按 run_id 粒度
+        # 写入 templates_by_run_id[run_id]，需要先有 run_id。
+        tm_mgr = self._get_team_manager()
         new_run_id = tm_mgr.start_team_run(force=True)
+        # 记录团队模板上下文（供 SessionStart hook 注入团队描述 + 各成员角色描述）
+        # 🛡️ M1'：按 run_id 粒度写入 templates_by_run_id[run_id]，避免
+        # 多次 /team --load=不同模板 时顶层 template 单槽互相覆盖（A 团队
+        # 成员窗口 _team_name 变成 B 的模板名）。
+        tm_mgr.set_template_for_run_id(
+            {
+                "name": template.template_name,
+                "description": template.description,
+                "agents": [{"agent_name": a.agent_name, "description": a.description} for a in template.agents],
+            },
+            run_id=new_run_id,
+        )
 
         # 🐛 构建团队默认项目继承：团队级项目是持久化的（team.json 顶层，
         # 任一成员切项目即写入）。若不在此重置，新团队会沿用上次构建残留的
@@ -4466,14 +4469,15 @@ class OpenAIChatToolWindow(ToolWindow):
             # header icon 被新团队项目覆盖）
             tm_mgr.set_project_for_run_id(src_project, new_run_id)
 
-        # 🐛 构建团队默认工作目录继承：与团队级项目同理，team_workdir 也是
-        # 持久化的（team.json 顶层，用户切换工作目录/git worktree 即写入），
+        # 🐛 构建团队默认工作目录继承：团队 workdir 与团队级项目同理按 run_id
+        # 粒度存储（workdirs_by_run_id[run_id]，与 projects_by_run_id 平级），
         # 若不在此重置，新团队会沿用上次构建残留的旧工作目录，导致新成员窗口
         # 左上角分支标签显示旧工作目录（其他项目/worktree）的分支，而非当前
-        # 团队项目。修复：开新团队时把团队级工作目录重置为源标签页当前工作目录，
-        # 使本次所有新成员窗口在 _apply_team_workdir 时共享同一工作树。
+        # 团队项目。修复：开新团队时把本次 run_id 的团队工作目录重置为源标签页
+        # 当前工作目录，使本次所有新成员窗口在 _apply_team_workdir 时共享同一
+        # 工作树。带 run_id 写入后不再污染顶层/其他 run_id 槽位。
         src_workdir = self._resolve_project_workdir() or ""
-        tm_mgr.set_team_workdir(src_workdir)
+        tm_mgr.set_team_workdir(src_workdir, run_id=new_run_id)
 
         # 为模板的每个角色新建一个全新空白窗口（复用公共创建链路：
         # _create_fresh_window + 同步前置 join + 300ms 延迟 join）。
@@ -4608,15 +4612,19 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         try:
             tm_mgr = self._get_team_manager()
+            # 🛡️ M1：run_id 同样以调用方透传优先；空串回退到 team.json 顶层
+            # （兼容历史单团队时代的隐式行为，但多团队并存时应由调用方显式传入）。
+            # 🛡️ M1'：run_id 提前计算——下面模板名回退按 run_id 粒度读。
+            team_run_id = run_id or tm_mgr.get_team_run_id()
             # 🛡️ D2 根治：团队标记前置传入 _create_fresh_window（add_window
             # 之前写入），Tab 管理器 add_window 时直接命中团队分组，消除
             # "tab 先落独立区、依赖 300ms 后置 refresh 补救"的竞态窗口期。
             # 🛡️ M1：调用方透传的 team_name 优先（_handle_team_add_member 透传
             # self._team_name 锁定目标团队）；空串回退到模板名（_handle_team_load 场景）。
-            team_name = team_name or (tm_mgr.get_template() or {}).get("name") or "default"
-            # 🛡️ M1：run_id 同样以调用方透传优先；空串回退到 team.json 顶层
-            # （兼容历史单团队时代的隐式行为，但多团队并存时应由调用方显式传入）。
-            team_run_id = run_id or tm_mgr.get_team_run_id()
+            # 🛡️ M1'：模板名按 run_id 粒度读，避免多团队并存下顶层 template
+            # 单槽覆盖导致新窗口 _team_name 取错（/team --load=A 后 /team --load=B
+            # 时 A 团队的成员 _team_name 全变成 B 的模板名）。
+            team_name = team_name or (tm_mgr.get_template_for_run_id(team_run_id) or {}).get("name") or "default"
             win = self._create_fresh_window(
                 team_agent=agent_name,
                 team_name=team_name,
@@ -4662,8 +4670,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 访问 Qt 子类实例属性会触发 super().__init__ 检查抛 RuntimeError。
             # #5a-fix Plan C：按 run_id 粒度读取/写入新团队项目，避免与其他团队
             # 残留的 DEFAULT_TEAM.project 互相覆盖。
+            # 🛡️ M1'：team_name_local 同样按 run_id 粒度读模板名，避免多团队并存下
+            # 顶层 template 单槽覆盖导致写入 projects_by_run_id 时定位错团队。
             team_run_id_local = getattr(win, "_team_run_id", "") or tm_mgr.get_team_run_id()
-            team_name_local = getattr(win, "_team_name", "") or (tm_mgr.get_template() or {}).get("name") or "default"
+            team_name_local = getattr(win, "_team_name", "") or (tm_mgr.get_template_for_run_id(team_run_id_local) or {}).get("name") or "default"
             team_project = ""
             if team_run_id_local:
                 team_project = tm_mgr.get_project_for_run_id(team_run_id_local, team_name=team_name_local)
@@ -4680,7 +4690,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if team_project:
                 win._apply_team_project(team_project)
             # 应用团队级统一工作目录/工作树（若已设置）：新窗口与团队共享同一工作树
-            team_workdir = tm_mgr.get_team_workdir()
+            # 🐛 按 run_id 粒度读取（与 projects_by_run_id 对齐），未命中不回退
+            # 顶层——顶层是跨 run_id 的污染单槽（残留值串台到新团队）。
+            team_workdir = tm_mgr.get_team_workdir(team_run_id_local, team_name=team_name_local)
             if team_workdir:
                 win._apply_team_workdir(team_workdir)
             # 延迟 join（确保 backend.agent_manager 已初始化）
@@ -4831,9 +4843,14 @@ class OpenAIChatToolWindow(ToolWindow):
         - 无模板且无成员 → InfoBar 提示先 /team --load=<模板> 或先加入成员
         """
         tm_mgr = self._get_team_manager()
+        # 🛡️ M1'：get_template 必须按当前 run_id 过滤——多团队并存下顶层
+        # template 单槽被最新一次 /team --load 覆盖，导致快速新建成员弹窗
+        # 展示错误模板的角色（"快速新建混入其他团队角色"bug 根因）。
+        # 与 get_members(run_id=...) 的 M1' 过滤对齐——同源上下文同源过滤。
+        _target_run_id = self._team_run_id or tm_mgr.get_team_run_id()
+        template = tm_mgr.get_template_for_run_id(_target_run_id)
         # 可选角色：模板 agents ∪ 当前成员角色（去重展示；选择时可重复创建）
         all_agents: List[str] = []
-        template = tm_mgr.get_template()
         if template and template.get("agents"):
             all_agents = [a.get("agent_name") for a in template["agents"] if a.get("agent_name")]
         # 🛡️ M1'：get_members 必须按当前 run_id 过滤——多团队并存下 tm_mgr 全量
@@ -4841,7 +4858,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # （"弹窗全部团队显示最新新建的团队的成员"bug 根因）。ref_win 的
         # _team_run_id 即为目标 run_id（团队框 UI 上下文）；空串时回退到
         # team.json 顶层（兼容历史单团队语义）。
-        _target_run_id = self._team_run_id or tm_mgr.get_team_run_id()
         member_agents = [
             m.get("agent_name") for m in tm_mgr.get_members(run_id=_target_run_id or None) if m.get("agent_name")
         ]
@@ -5094,11 +5110,14 @@ class OpenAIChatToolWindow(ToolWindow):
             win._team_agent_name = agent_name
             tm_mgr = self._get_team_manager()
             if not keep_team_name:
-                win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+                # 🛡️ M1'：按当前 run_id 粒度读模板名，多团队并存下顶层 template
+                # 单槽覆盖不再影响本路径（老窗口加入新团队时取对模板名）。
+                _tpl_run_id = tm_mgr.get_team_run_id()
+                win._team_name = (tm_mgr.get_template_for_run_id(_tpl_run_id) or {}).get("name") or "default"
                 # 🛡️ 恢复路径 keep_team_name=True 时保留调用方已设的 run_id
-                # （恢复窗口已设 new_run_id，避免延后期内被中途 start_team_run
+                # （恢复窗口已设 new_run_id，避免延长期内被中途 start_team_run
                 # 刷新覆盖，导致恢复窗口归入错误 run_id 分组漂移）
-                win._team_run_id = tm_mgr.get_team_run_id()
+                win._team_run_id = _tpl_run_id
             # 🛡️ C3：不再重复 join_team（调用方已同步前置执行，恰好一次写盘）
             # 应用团队级统一项目（若已设置）：延迟补注册后与团队共享同一项目。
             # #5a-fix Plan C：按 run_id 粒度读取，与 tab_panel 团队框分组对齐。
@@ -5112,7 +5131,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if team_project:
                 win._apply_team_project(team_project)
             # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
-            team_workdir = tm_mgr.get_team_workdir()
+            # 🐛 按 run_id 粒度读取（与 projects_by_run_id 对齐），未命中不回退
+            # 顶层——顶层是跨 run_id 的污染单槽（残留值串台到新团队）。
+            team_workdir = tm_mgr.get_team_workdir(join_run_id_local, team_name=join_team_name_local)
             if team_workdir:
                 win._apply_team_workdir(team_workdir)
             if hasattr(win, "_refresh_team_ui"):
@@ -5741,7 +5762,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return {
                 "api_base": cfg.llm_api_base.value or "",
                 "api_key": cfg.llm_api_key.value or "",
-                "model": cfg.llm_model.value or "",
+                "model": cfg.llm_selected_model.value or "",
             }
         except Exception:
             return {}
@@ -6820,16 +6841,49 @@ class OpenAIChatToolWindow(ToolWindow):
         动态数据且本地缓存不可用时，才经 refresh_dynamic_models_async 在
         后台线程发起网络拉取（30s + 15s 超时全部落在后台），完成后经
         _models_dev_ready 信号回主线程刷新 UI。
+
+        多窗口并发：类级缓存命中直接 emit 给本窗口；inflight 期间直接返回
+        （首个请求的 on_done 回调会广播所有窗口）；首个发起者负责置 inflight
+        并把结果写类级缓存、清 inflight、广播所有活跃窗口。
         """
         from app.core.models_dev_sync import get_dynamic_models, refresh_dynamic_models_async
 
-        # 已加载过动态数据（多窗口/多标签复用模块级内存缓存）→ 无需重复刷新
-        cached = get_dynamic_models()
-        if cached.provider_models or cached.model_capabilities:
+        # 类级内存缓存命中（多窗口已加载过）→ 直接 emit 给本窗口，无需发请求
+        cached = OpenAIChatToolWindow._models_dev_cache
+        if cached is not None:
+            self._models_dev_ready.emit(cached)
             return
 
-        # 后台线程拉取；模块级单飞去重保证多窗口只发一路网络请求
-        refresh_dynamic_models_async(on_done=lambda _r: self._models_dev_ready.emit(_r))
+        # 模块级缓存命中（单窗口预热已成功）→ 写类级缓存并 emit
+        cached = get_dynamic_models()
+        if cached.provider_models or cached.model_capabilities:
+            OpenAIChatToolWindow._models_dev_cache = cached
+            self._models_dev_ready.emit(cached)
+            return
+
+        # inflight 中：跳过（首个请求完成回调会广播所有窗口）
+        if OpenAIChatToolWindow._models_dev_fetch_inflight:
+            return
+
+        # 首个发起者：置 inflight、发请求，on_done 写类级缓存并广播
+        OpenAIChatToolWindow._models_dev_fetch_inflight = True
+
+        def _on_done(_r):
+            try:
+                OpenAIChatToolWindow._models_dev_cache = _r
+                # 遍历活跃窗口逐个 emit；跳过已销毁/无该信号的窗口
+                for win in window_registry.alive_window_instances():
+                    try:
+                        if getattr(win, "_is_destroyed", False):
+                            continue
+                        win._models_dev_ready.emit(_r)
+                    except RuntimeError:
+                        # C++ 对象已销毁（弱引用来不及过滤）→ 跳过
+                        continue
+            finally:
+                OpenAIChatToolWindow._models_dev_fetch_inflight = False
+
+        refresh_dynamic_models_async(on_done=_on_done)
 
     @pyqtSlot(object)
     def _on_models_dev_ready(self, _result):
@@ -6861,10 +6915,18 @@ class OpenAIChatToolWindow(ToolWindow):
         网络与解析逻辑在 app.core.models_dev_sync 的
         fetch_opencode_free_models_for_providers，本方法只负责收集实例、
         调度线程、把结果经信号回主线程刷新 UI。
+
+        多窗口并发：inflight 期间直接返回；首个发起者负责网络请求，结果
+        经 _opencode_models_ready 信号广播到全部活跃窗口（每个窗口按自身
+        _valid_configs 决定是否消费）。
         """
         import threading
 
         from app.core.models_dev_sync import fetch_opencode_free_models_for_providers
+
+        # 类级 inflight 守卫：已有窗口在拉取 → 跳过，结果会在 on_done 回调中广播
+        if OpenAIChatToolWindow._opencode_fetch_inflight:
+            return
 
         # 只刷新内置默认的 OpenCode 免费服务商（name="opencode免费模型"），
         # 不动用户自己添加的 OpenCode 实例，防止覆盖用户自定义模型列表。
@@ -6880,11 +6942,23 @@ class OpenAIChatToolWindow(ToolWindow):
         if not targets:
             return
 
+        OpenAIChatToolWindow._opencode_fetch_inflight = True
+
         def _do_fetch():
-            """后台线程执行：批量拉取各实例免费模型，逐个回传主线程"""
-            results = fetch_opencode_free_models_for_providers(targets)
-            for config_id, free_models in results.items():
-                self._opencode_models_ready.emit((config_id, free_models))
+            """后台线程执行：批量拉取各实例免费模型，逐个广播回传主线程"""
+            try:
+                results = fetch_opencode_free_models_for_providers(targets)
+                wins = window_registry.alive_window_instances()
+                for config_id, free_models in results.items():
+                    for win in wins:
+                        try:
+                            if getattr(win, "_is_destroyed", False):
+                                continue
+                            win._opencode_models_ready.emit((config_id, free_models))
+                        except RuntimeError:
+                            continue
+            finally:
+                OpenAIChatToolWindow._opencode_fetch_inflight = False
 
         threading.Thread(target=_do_fetch, daemon=True).start()
 
@@ -9140,7 +9214,9 @@ class OpenAIChatToolWindow(ToolWindow):
         """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
         if hasattr(self, "backend") and self.backend:
             # force_full=True：按钮显式语义——无论是否有变更都全量重载所有子系统
-            result = self.backend.reload_plugin_subsystems(force_full=True)
+            from app.core.plugin_host_service import PluginHostService
+
+            result = PluginHostService.get_instance().reload_plugin_subsystems(force_full=True)
             from qfluentwidgets import InfoBar, InfoBarPosition
 
             InfoBar.success(
@@ -13033,8 +13109,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # timer 激活后会在 50ms 后自动滚底，合并期间所有 content_received 的请求。
         # 卡片高度变化到 layout 更新有至少 1-2 帧延迟，用 timer 合并足够。
         if self._is_streaming and not self._scroll_bottom_timer.isActive():
-            # 延迟到下一事件循环再滚底，等卡片高度变化完成后读取 scroll_bar.maximum()
-            QTimer.singleShot(0, lambda: scroll_to_bottom_if_streaming(self.chat_scroll_area, self._is_streaming))
+            # 🐛 away 守卫：用户主动滚离底部（阅读历史）时不再强制拽回。
+            # 此前流式增量无条件置底，位置保持完全依赖工具静默窗口
+            # （stream_finished 先关 _is_streaming），不稳定。
+            QTimer.singleShot(
+                0,
+                lambda: scroll_to_bottom_if_streaming(
+                    self.chat_scroll_area, self._is_streaming, suppress=self._user_intentionally_away_from_bottom
+                ),
+            )
 
     def _update_node_preview(self):
         session = self.session_manager.get_current_session()
@@ -15084,8 +15167,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     break
 
         # 判断规则
-        if is_last_card or self._is_streaming:
-            # 如果是最后一张卡片，或者正在流式输出 → 强制滚底
+        # 🐛 away 守卫：流式中用户已主动滚离底部时不再强制拽回（位置保持）。
+        # is_last_card 保留原语义（初始加载完成保证到底），不受守卫影响。
+        if is_last_card or (self._is_streaming and not self._user_intentionally_away_from_bottom):
             self._scroll_to_bottom()
         else:
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
@@ -15105,6 +15189,16 @@ class OpenAIChatToolWindow(ToolWindow):
             # session_id 直接就是 content
             session_id = content.strip()
             self._switch_to_session_by_id(session_id)
+        else:
+            # 插件注册的自定义欢迎动作（如 marketplace-recommend 的点击安装）：
+            # 无人接手则静默忽略，保持旧行为
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().dispatch_welcome_action(
+                action,
+                content,
+                {"window_id": self._window_id, "main_widget": self},
+            )
         # 注：mode 切换由 MessageCard.welcomeModeChanged（PyQt 层）触发，不走 contextActionRequested
 
     def _switch_to_session_by_id(self, session_id: str):
@@ -18156,9 +18250,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not workdir or not os.path.isdir(workdir):
             return
 
-        # 缓存命中：直接应用，避免重复 git 调用
-        if workdir in self._branch_cache:
-            self._apply_branch_to_ui(workdir, self._branch_cache[workdir])
+        # 缓存命中：直接应用，避免重复 git 调用（类级缓存，跨窗口共享）
+        if workdir in OpenAIChatToolWindow._branch_cache:
+            self._apply_branch_to_ui(workdir, OpenAIChatToolWindow._branch_cache[workdir])
             return
 
         # 启动后台检测（自增 request_id 用于丢弃过期结果）
@@ -18176,12 +18270,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if not workdir:
             return
 
-        # 缓存结果（同一路径下次直接命中）
-        if len(self._branch_cache) >= _MAX_BRANCH_CACHE:
+        # 缓存结果（同一路径下次直接命中，类级共享）
+        cache = OpenAIChatToolWindow._branch_cache
+        if len(cache) >= _MAX_BRANCH_CACHE:
             # Python 3.7+ dict 保插入序：弹出最早插入的 key
-            oldest = next(iter(self._branch_cache))
-            self._branch_cache.pop(oldest, None)
-        self._branch_cache[workdir] = branch
+            oldest = next(iter(cache))
+            cache.pop(oldest, None)
+        cache[workdir] = branch
         # 再次校验：缓存写完后若 request_id 又变了，说明并发切换，仍跳过
         if request_id != self._branch_detect_request_id:
             return
@@ -18438,12 +18533,17 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.team_manager import TeamManager
 
         tm_mgr = TeamManager.get_instance()
-        # 写团队级统一工作目录/工作树（team.json 顶层，与 project/run_id 平级）
-        tm_mgr.set_team_workdir(workdir or "")
+        # 写团队级统一工作目录/工作树：按 run_id 粒度（workdirs_by_run_id），
+        # 避免顶层单槽残留值串台到后续新团队的其他项目（标签页 workdir 错配根因）
+        tm_mgr.set_team_workdir(workdir or "", run_id=getattr(self, "_team_run_id", ""))
         # 本窗口团队 key：run_id 优先（同一次 /team --load 共享），回退团队名
         my_key = getattr(self, "_team_run_id", "") or getattr(self, "_team_name", "") or TeamManager.DEFAULT_TEAM
         for win in window_registry.alive_window_instances():
             if win is self or getattr(win, "_is_destroyed", False):
+                continue
+            # P2-B 对称校验：接收方当前项目必须与发送方一致才应用广播，
+            # 防止工作目录广播串台到不同项目的窗口（_broadcast_team_project 同款防御）
+            if getattr(win, "_current_project", "") != self._current_project:
                 continue
             if not getattr(win, "_team_agent_name", ""):
                 continue
@@ -19930,7 +20030,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 从全局实例列表中移除
         try:
             window_registry.unregister_window(self)
-        except ValueError, Exception:
+        except Exception:
             pass
 
         # 离开团队并同步活跃窗口
@@ -19964,27 +20064,17 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-        # ★ 泄漏修复（P0-C）：关闭窗口时清理其在类变量 _window_shortcut_cache 中的
-        # 快捷键缓存条目，避免全局类变量长期持有已销毁窗口引用导致泄漏。
-        # key 与注册时一致：id(self.window() or self)（见 _register_window_shortcuts）。
-        try:
-            _sc_win_id = id(self.window() or self)
-            # closeEvent 时 self 已从 window_instances unregister，remaining 不含自身；
-            # 同一 TabManager 下多 tab 共享 win_id，仅最后一个实例销毁时才清共享 cache。
-            _remaining = sum(
-                1 for w in window_registry.alive_window_instances()
-                if id(w.window() or w) == _sc_win_id
-            )
-            if _remaining <= 1:
-                OpenAIChatToolWindow._window_shortcut_cache.pop(_sc_win_id, None)
-        except Exception:
-            pass
+        # 快捷键窗口级缓存（_window_shortcut_cache）无需在此清理：
+        # 归属权修复后共享 QShortcut 为顶层窗口的 Qt 子对象，随窗口销毁自动销毁；
+        # 缓存条目由注册路径挂接的 shortcut_parent.destroyed 钩子统一 pop。
+        # （原 remaining<=1 判据 off-by-one：存活兄弟还剩 1 个时就 pop 缓存，
+        # 导致持有者 tab 关闭后快捷键全灭无自愈，或放行新 tab 重复注册。）
 
         # 停止所有正在进行的流式输出 + 清理窗口独有资源（不影响其他窗口）
         if hasattr(self, "backend") and self.backend:
             # 🔧 内存泄漏修复：先断开信号连接，防止闭包持有窗口引用
+            # （plugin_changed 已上移 PluginHostService——服务信号断开见下方）
             for signal_pair in (
-                ("plugin_changed", "_on_plugin_hot_reload"),
                 ("auto_compact_requested", "_on_auto_compact_requested"),
                 ("sub_agent_ready", "_on_sub_agent_ready"),
             ):
@@ -19995,6 +20085,17 @@ class OpenAIChatToolWindow(ToolWindow):
                         sig.disconnect(slot)
                 except TypeError, RuntimeError:
                     pass
+
+            # 🔧 断开应用级 PluginHostService 的 plugin_changed（窗口销毁后
+            # 服务常驻，不断开会向死窗口槽投递 → RuntimeError 刷屏）
+            try:
+                from app.core.plugin_host_service import PluginHostService
+
+                PluginHostService.get_instance().plugin_changed.disconnect(
+                    self._on_plugin_hot_reload
+                )
+            except (TypeError, RuntimeError):
+                pass
 
             # 🔧 泄漏修复（M6）：断开全局单例 coding_plan_ready，关窗后不再幽灵回调
             try:
@@ -20111,9 +20212,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # ★ B4 强回收层：进程退出整体回收，不 kill（窗口销毁时 renderer
         # 子进程随 WebEngine profile 自动退出，显式 kill 反而可能误伤共享进程）
         self._unloaded_pids.clear()
-        # ★ B4 强回收层：进程退出整体回收（不 kill——窗口销毁时 renderer
-        # 子进程随 WebEngine 自动退出，kill 反而可能误伤其他窗口的复用 PID）
-        self._unloaded_pids.clear()
 
         # 最后一个窗口关闭 → 应用退出，保存工作目录到 DB，下次启动时自动恢复
         if not window_registry.alive_window_instances():
@@ -20125,13 +20223,10 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
-        # 断开 aboutToQuit 信号，防止退出时访问已销毁的 widget
-        try:
-            app = QApplication.instance()
-            if app is not None:
-                app.aboutToQuit.disconnect(self._auto_save_current_session)
-        except Exception:
-            pass
+        # aboutToQuit 说明：真正注册的是类级 cls._on_app_about_to_quit（首个窗口
+        # 单次连接，应用生命周期常驻，批量保存所有窗口脏会话，见 19657）。
+        # 历史：此处曾 disconnect(self._auto_save_current_session)，但该槽从未
+        # 被 connect 过 —— 纯死代码已删除；类级连接按设计不随单窗断开。
 
         # GC 钩子：closeEvent 末尾防抖触发全局缓存清理 + 堆回收
         self._schedule_gc_hook()

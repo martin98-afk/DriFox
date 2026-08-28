@@ -57,6 +57,28 @@ class WelcomeTabInfo:
 
 
 @dataclass(frozen=True)
+class WelcomeActionInfo:
+    """欢迎卡片插件点击动作注册信息
+
+    欢迎卡片 HTML 内的 .context-tag 元素携带自定义 data-type 时，主程序
+    handle_recommended_question 把未知 action 派发到此处注册的 handler，
+    让欢迎 tab 插件能实现自定义交互（如 marketplace-recommend 的点击安装）。
+
+    Attributes:
+        plugin_name: 所属插件名
+        action: 动作名（与 .context-tag 的 data-type 一致）
+        handler: 回调，签名 (content: str, ctx: dict) -> None；
+                 ctx 含 window_id / main_widget 等窗口上下文
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    action: str
+    handler: Callable[[str, Dict[str, Any]], None]
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class MessageFactoryInfo:
     """消息元素工厂
 
@@ -218,6 +240,8 @@ class UIPluginRegistry:
         self._message_factories: List[MessageFactoryInfo] = []
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
         self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
+        # 欢迎卡片插件点击动作：{action: WelcomeActionInfo}
+        self._welcome_actions: Dict[str, WelcomeActionInfo] = {}
         # Phase D：四类新扩展点（键为 item_id/button_id/action_id/card_id）
         self._sidebar_items: Dict[str, SidebarItemInfo] = {}
         self._input_buttons: Dict[str, InputButtonInfo] = {}
@@ -361,6 +385,52 @@ class UIPluginRegistry:
     def get_welcome_tabs(self) -> Dict[str, WelcomeTabInfo]:
         """获取所有已注册的欢迎卡片插件 tab（插入序）"""
         return dict(self._welcome_tabs)
+
+    def register_welcome_action(
+        self,
+        plugin_name: str,
+        action: str,
+        handler: Callable[[str, Dict[str, Any]], None],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册欢迎卡片插件点击动作
+
+        欢迎 tab HTML 中 .context-tag 的自定义 data-type 经
+        handle_recommended_question 派发到此 handler（后注册覆盖先注册）。
+
+        Args:
+            plugin_name: 所属插件名
+            action: 动作名（建议带插件前缀避免冲突，如 "mkr-install"）
+            handler: 回调，签名 (content: str, ctx: dict) -> None
+            metadata: 附加元数据
+        """
+        if metadata is None:
+            metadata = {}
+        self._welcome_actions[action] = WelcomeActionInfo(
+            plugin_name=plugin_name,
+            action=action,
+            handler=handler,
+            metadata=metadata,
+        )
+
+    def dispatch_welcome_action(self, action: str, content: str, ctx: Optional[Dict[str, Any]] = None) -> bool:
+        """派发欢迎卡片点击动作到注册插件
+
+        Args:
+            action: 动作名（.context-tag 的 data-type）
+            content: 内容（.context-tag 的 data-content）
+            ctx: 窗口上下文（window_id / main_widget 等）
+
+        Returns:
+            True 已派发（action 有注册 handler）；False 无人处理
+        """
+        info = self._welcome_actions.get(action)
+        if info is None:
+            return False
+        if ctx is None:
+            ctx = {}
+        info.handler(content, ctx)
+        return True
 
     def register_message_factory(
         self,
@@ -1290,6 +1360,7 @@ class UIPluginRegistry:
             any(v.plugin_name == plugin_name for v in self._content_renderers.values())
             or any(f.plugin_name == plugin_name for f in self._message_factories)
             or any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
+            or any(v.plugin_name == plugin_name for v in self._welcome_actions.values())
             or any(v.plugin_name == plugin_name for v in self._floating_cards.values())
             or any(v.plugin_name == plugin_name for v in self._sidebar_items.values())
             or any(v.plugin_name == plugin_name for v in self._input_buttons.values())
@@ -1339,6 +1410,8 @@ class UIPluginRegistry:
         had_welcome_tabs = any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
         # 清理 welcome tabs
         self._welcome_tabs = {k: v for k, v in self._welcome_tabs.items() if v.plugin_name != plugin_name}
+        # 清理 welcome actions
+        self._welcome_actions = {k: v for k, v in self._welcome_actions.items() if v.plugin_name != plugin_name}
         # 清理 floating cards + 对应命令
         cards_to_remove = [cid for cid, info in self._floating_cards.items() if info.plugin_name == plugin_name]
         for cid in cards_to_remove:
@@ -1795,6 +1868,7 @@ class UIPluginRegistry:
         self._message_factories.clear()
         self._floating_cards.clear()
         self._welcome_tabs.clear()
+        self._welcome_actions.clear()
         self._loaded_plugins.clear()
         self._main_widget = None
         self._ui_command_names.clear()

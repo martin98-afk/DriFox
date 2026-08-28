@@ -58,6 +58,7 @@ class ConversationExecutor:
         llm_config: Dict,
         tools: List[Dict],
         callbacks: Optional[Dict[str, Callable]] = None,
+        direct_signals: bool = False,
     ) -> bool:
         """创建 Worker 并启动
 
@@ -118,7 +119,7 @@ class ConversationExecutor:
         self._current_worker = self._worker_factory(**worker_kwargs)
 
         # 连接回调
-        self._connect_callbacks(callbacks)
+        self._connect_callbacks(callbacks, direct_signals=direct_signals)
 
         # Worker 完成后重置流式状态（start 前连接，避免竞态）
         # 传入 worker 引用用于身份检查，防止旧 worker 的 finished 信号擦除新 worker
@@ -407,8 +408,15 @@ class ConversationExecutor:
 
         return interrupted
 
-    def _connect_callbacks(self, callbacks: Dict[str, Callable]):
-        """连接 Worker 信号到回调"""
+    def _connect_callbacks(self, callbacks: Dict[str, Callable], direct_signals: bool = False):
+        """连接 Worker 信号到回调
+
+        direct_signals=True：强制 DirectConnection（在 worker 发射线程同步执行回调）。
+        供 EngineSession 等后台线程同步等待场景：worker 若在无 Qt 事件循环的
+        daemon 线程创建，AutoConnection 会把 finished 排队到该线程——事件永远
+        不被处理，turn() 等到超时也收不到完成信号（跨线程队列黑洞）。
+        回调方（_SyncAdapter）仅 set Event/存字段，线程安全。
+        """
         if not self._current_worker:
             return
 
@@ -420,7 +428,12 @@ class ConversationExecutor:
                 return
             signal = getattr(worker, signal_name, None)
             if signal is not None:
-                signal.connect(cb)
+                if direct_signals:
+                    from PyQt5.QtCore import Qt
+
+                    signal.connect(cb, Qt.DirectConnection)
+                else:
+                    signal.connect(cb)
 
         safe_connect("content_received", "content_received")
         safe_connect("reasoning_content_received", "reasoning_content_received")

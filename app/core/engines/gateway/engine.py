@@ -282,6 +282,15 @@ class GatewayEngine(QObject, BaseEngine):
         elif cmd == "session":
             return self._cmd_session(args)
 
+        elif cmd == "stop":
+            return self._cmd_stop()
+
+        elif cmd == "status":
+            return self._cmd_status(session)
+
+        elif cmd == "compact":
+            return self._cmd_compact(session)
+
         else:
             return None
 
@@ -302,6 +311,9 @@ class GatewayEngine(QObject, BaseEngine):
 - `/agent <名称>` — 切换到指定 Agent
 
 **通用**
+- `/stop` — 中止当前正在生成的回复
+- `/status` — 查看当前会话状态（模型/Agent/上下文用量）
+- `/compact` — 压缩当前会话上下文（快速模式：剪枝大工具输出+截断）
 - `/help` — 显示此帮助
 
 --------
@@ -312,7 +324,7 @@ class GatewayEngine(QObject, BaseEngine):
         """处理 /model 命令"""
         cfg = Settings.get_instance()
 
-        current_provider = cfg.llm_selected_model.value or cfg.llm_model.value or ""
+        current_provider = cfg.llm_selected_model.value or ""
         saved_providers = cfg.llm_saved_providers.value or {}
 
         session_meta = session.metadata.get("model") or ""
@@ -419,6 +431,110 @@ class GatewayEngine(QObject, BaseEngine):
                     lines.append(f"- **{m.name}**: {m.description}")
                 return "\n".join(lines)
             return f"❌ 未找到 Agent `{args}`\n发送 `/agent` 查看可用列表。"
+
+    def _cmd_stop(self) -> str:
+        """处理 /stop 命令：中止当前正在生成的回复"""
+        executor = self._conversation_executor
+        if not executor.is_streaming:
+            return "当前没有正在进行的回复。"
+
+        executor.cancel_worker()
+        queued = len(self._pending_queue)
+        suffix = f"（另有 {queued} 条排队消息将继续处理）" if queued else ""
+        return f"🛑 已停止当前回复{suffix}"
+
+    def _cmd_status(self, session: ChatSession) -> str:
+        """处理 /status 命令：当前会话状态总览"""
+        cfg = Settings.get_instance()
+
+        # 模型：会话级覆盖 > 全局当前
+        session_meta = session.metadata.get("model")
+        if isinstance(session_meta, dict) and session_meta.get("model"):
+            model_line = f"`{session_meta['model']}`（会话覆盖）"
+        else:
+            model_line = f"`{cfg.llm_selected_model.value or '未配置'}`"
+
+        agent = session.metadata.get("agent") or self._current_agent or "plan"
+        streaming = "生成中…" if self._conversation_executor.is_streaming else "空闲"
+        queued = len(self._pending_queue)
+
+        lines = [
+            "📊 **会话状态**",
+            f"- 模型: {model_line}",
+            f"- Agent: `{agent}`",
+            f"- 消息数: {session.message_count}",
+            f"- 状态: {streaming}" + (f"（排队 {queued} 条）" if queued else ""),
+        ]
+
+        # 上下文用量（估算，可能略有开销，失败静默跳过）
+        try:
+            compactor = self._conversation_core.compactor
+            messages = session.get_context_messages()
+            budget = compactor.get_budget(self._get_model_config() or {})
+            usage = compactor.get_usage(messages, budget)
+            used = usage.get("used_tokens", 0)
+            percent = int(usage.get("percent", 0))
+            lines.append(f"- 上下文: ~{used} / {budget} tokens（{percent}%）")
+        except Exception as e:
+            logger.debug(f"[GatewayEngine] /status usage skipped: {e}")
+
+        return "\n".join(lines)
+
+    def _cmd_compact(self, session: ChatSession) -> str:
+        """处理 /compact 命令：压缩当前会话上下文
+
+        快速模式（allow_llm_summary=False）：尾保留 + 大工具输出剪枝 + 截断，
+        毫秒级完成不阻塞主线程。完整 LLM 摘要压缩请在桌面端执行。
+        """
+        executor = self._conversation_executor
+        if executor.is_streaming:
+            return "⏳ 正在生成回复，请先发送 `/stop` 再压缩。"
+
+        messages = session.get_context_messages()
+        if not messages:
+            return "当前会话没有历史消息，无需压缩。"
+
+        try:
+            compactor = self._conversation_core.compactor
+            llm_config = self._get_model_config() or {}
+            budget = compactor.get_budget(llm_config)
+
+            before_usage = compactor.get_usage(messages, budget)
+            before_tokens = before_usage.get("used_tokens", 0)
+            before_count = len(messages)
+
+            # system 消息不参与压缩（与 chat_worker 迭代内压缩一致）
+            system_message = None
+            if messages and messages[0].get("role") == "system":
+                system_message = messages.pop(0)
+
+            compacted, state, cache = compactor.compact(
+                messages,
+                budget,
+                existing_cache=getattr(session, "compaction_cache", None),
+                allow_llm_summary=False,
+            )
+
+            if system_message is not None:
+                compacted.insert(0, system_message)
+
+            after_tokens = compactor.get_usage(compacted, budget).get("used_tokens", 0)
+            if len(compacted) >= before_count:
+                return f"✨ 上下文负载不高（~{before_tokens} / {budget} tokens），无需压缩。"
+
+            session.set_messages(compacted, preserve_compaction=True)
+            session.compaction_cache = cache
+            self._save_to_store(session)
+
+            saved_pct = int((1 - after_tokens / before_tokens) * 100) if before_tokens else 0
+            return (
+                f"✅ 上下文已压缩\n"
+                f"- 消息: {before_count} → {len(compacted)} 条\n"
+                f"- Token: ~{before_tokens} → ~{after_tokens}（节省 {saved_pct}%）"
+            )
+        except Exception as e:
+            logger.error(f"[GatewayEngine] /compact failed: {e}", exc_info=True)
+            return f"❌ 压缩失败: {str(e)[:150]}"
 
     def _cmd_session(self, args: str) -> str:
         """处理 /session 命令"""
@@ -674,7 +790,7 @@ class GatewayEngine(QObject, BaseEngine):
         try:
             msg_time = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             return (datetime.now() - msg_time).total_seconds() < threshold_seconds
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return False
 
     def _save_to_store(self, session: ChatSession) -> None:

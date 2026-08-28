@@ -26,6 +26,9 @@ if str(_REPO_ROOT / "plugins") not in sys.path:
 
 from app.core import hook_manager as hm_mod
 from app.core.backend import ChatBackend, _format_hook_output
+from PyQt5.QtCore import QObject
+
+from app.core.plugin_host_service import PluginHostService
 from app.core.hook_manager import Hook, HookManager, HookMatchRule, HookType
 from app.core.workers.chat_worker import OpenAIChatWorker as ChatWorker
 from system.hooks import format_tool_changes
@@ -48,6 +51,14 @@ def isolated_hook_states(monkeypatch, tmp_path):
     )
     HookManager._shared_hook_states = {}
     HookManager._shared_hook_overrides = {}
+    saved = {k: getattr(HookManager, k) for k in (
+        "_shared_hook_states", "_shared_hook_overrides", "_shared_hooks",
+        "_shared_skill_to_hooks", "_shared_config_watchers",
+        "_shared_registered_functions", "_shared_cwd_resolve_cache",
+        "_shared_restore_snapshots",
+    )}
+    HookManager._shared_hook_states = {}
+    HookManager._shared_hook_overrides = {}
     HookManager._shared_hooks = {}
     HookManager._shared_skill_to_hooks = {}
     HookManager._shared_config_watchers = {}
@@ -55,6 +66,9 @@ def isolated_hook_states(monkeypatch, tmp_path):
     HookManager._shared_cwd_resolve_cache = {}
     HookManager._shared_restore_snapshots = {}
     yield states_dir
+    # 恢复类级共享状态（否则污染同进程后续测试：hook_policy/settings_card 等）
+    for k, v in saved.items():
+        setattr(HookManager, k, v)
 
 
 def _build_backend_with_inline_hook(hook_func, matcher: str = ""):
@@ -239,13 +253,15 @@ class TestEmitPluginChangedEndToEnd:
             return "工具已变更"
 
         backend, _ = _build_backend_with_inline_hook(fake_hook, matcher="")
-        # mock plugin_changed 信号（PyQtSignal 在 __new__ 实例上访问会抛 RuntimeError）
-        backend.plugin_changed = MagicMock()
-        # 模拟 active instance 集合（broadcast 用），保证 trigger_plugin_changed_hook 找得到
+        # 模拟 active instance 集合：服务触发 hook 时找各 tab 的 hook_manager
         monkeypatch.setattr(ChatBackend, "_active_instances", [backend])
-        # 防止 broadcast 循环里 RuntimeError（虽然本测试只放一个实例）
+        # 宿主改为应用级服务（__new__ 实例无 Qt 信号，mock 掉）
+        svc = PluginHostService.__new__(PluginHostService)
+        QObject.__init__(svc)  # 手动初始化 Qt 基类，绕过单例拦截
+        svc._host_hook_manager = HookManager()  # __init__ 未跑，手工补服务属性
+        svc.plugin_changed = MagicMock()
         # 调用 emit_plugin_changed（同步路径走 _trigger_plugin_changed_hook → trigger_event）
-        backend.emit_plugin_changed({"ui": True}, "demo-plugin")
+        svc.emit_plugin_changed({"ui": True}, "demo-plugin")
 
         # hook 函数被命中，captured 含 (event, context)
         assert len(captured) == 1, f"PluginChanged hook 必须被命中，实际 {len(captured)} 次"
@@ -637,20 +653,22 @@ class TestPluginChangedHookBroadcast:
         def make_backend():
             b = ChatBackend.__new__(ChatBackend)
             b._ui_valid = True
-            b._hot_reload_seq = 0
             b._hook_message_queue = queue.Queue()
             b._pre_tool_message_queue = queue.Queue()
             b._hook_messages_updated = MagicMock()
             b._hook_manager = shared_hm
-            # PyQtSignal 在 __new__ 实例上访问抛 RuntimeError，mock 掉
-            b.plugin_changed = MagicMock()
             return b
 
         backend_a = make_backend()
         backend_b = make_backend()
         monkeypatch.setattr(ChatBackend, "_active_instances", {backend_a, backend_b})
 
-        backend_a.emit_plugin_changed({"ui": True}, "demo-plugin")
+        # 宿主为应用级服务；两个 backend 作为 hook 注入接收方
+        svc = PluginHostService.__new__(PluginHostService)
+        QObject.__init__(svc)  # 手动初始化 Qt 基类，绕过单例拦截
+        svc._host_hook_manager = HookManager()  # __init__ 未跑，手工补服务属性
+        svc.plugin_changed = MagicMock()
+        svc.emit_plugin_changed({"ui": True}, "demo-plugin")
 
         # 宿主 + 另一个 backend 各触发 1 次（hook 只注册一次，无重复执行）
         assert len(captured) == 2, f"应广播 2 次，实际 {len(captured)}"

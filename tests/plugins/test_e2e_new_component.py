@@ -15,6 +15,9 @@
 from unittest.mock import MagicMock
 
 import pytest
+from PyQt5.QtCore import QObject
+
+from app.core.plugin_host_service import PluginHostService
 
 
 def test_new_component_type_end_to_end(monkeypatch, tmp_path):
@@ -30,14 +33,14 @@ def test_new_component_type_end_to_end(monkeypatch, tmp_path):
         calls = []
         reg.register("widgets", lambda ctx: calls.append(ctx.plugin_name) or True)
 
-        # 3) 路径识别链：backend._identify_all_components_from_changes 用 kernel 常量
-        backend_cls = pytest.importorskip("app.core.backend").ChatBackend
-        backend = backend_cls.__new__(backend_cls)
+        # 3) 路径识别链：服务 _identify_all_components_from_changes 用 kernel 常量
+        svc = PluginHostService.__new__(PluginHostService)
+        QObject.__init__(svc)
 
-        # tmp_path 在 Windows 上需小写与 backend 内 os.path 比较语义一致
+        # tmp_path 在 Windows 上需小写与服务内 os.path 比较语义一致
         plugin_prefixes = {str(tmp_path).lower(): "e2e-plugin"}
         changes = [(None, str(tmp_path / "widgets" / "panel.py"))]
-        comps = backend._identify_all_components_from_changes(changes, plugin_prefixes, "e2e-plugin")
+        comps = svc._identify_all_components_from_changes(changes, plugin_prefixes, "e2e-plugin")
         assert "widgets" in comps, f"新组件类型 widgets 应被识别，实际 comps={comps}"
 
         # 4) 分派链：_reload_single_plugin 走注册表
@@ -57,7 +60,7 @@ def test_new_component_type_end_to_end(monkeypatch, tmp_path):
         )
         monkeypatch.setattr(kernel, "get_reloader_registry", lambda: reg)
 
-        result = backend._reload_single_plugin("e2e-plugin", "widgets")
+        result = svc._reload_single_plugin("e2e-plugin", "widgets")
         assert calls == ["e2e-plugin"], f"widgets reloader 应被调用一次，实际 calls={calls}"
         assert result["widgets"] is True, f"result['widgets'] 应为 True，实际={result.get('widgets')}"
     finally:

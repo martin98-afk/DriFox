@@ -329,6 +329,13 @@ class AgentManager:
         """获取全局唯一的 AgentManager 实例（首次创建时加载 agents，后续复用）"""
         if cls._instance is None:
             cls._instance = cls(agents_dir, hook_manager)
+        else:
+            # 🛡️ 2026-08-28 hook 全灭根因：GatewayService 先于 PluginHostService 用
+            # get_instance(None, None) 创建单例 → PluginHostService 再传 host_hook_manager
+            # 也拿不到（get_instance 幂等），_hook_manager 恒为 None → load_hooks 分支永不执行。
+            # 补丁注入后，调用方随后的 reload_agents() 即可完整加载插件 hooks。
+            if hook_manager is not None and cls._instance._hook_manager is None:
+                cls._instance._hook_manager = hook_manager
         return cls._instance
 
     def __init__(self, agents_dir: Optional[str] = None, hook_manager: Optional[HookManager] = None):

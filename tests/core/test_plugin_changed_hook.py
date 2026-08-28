@@ -4,7 +4,7 @@
 覆盖：
 - matcher 按子事件 action pipe 匹配（installed|enabled 等）
 - trigger_plugin_changed_hook 全局触发辅助（diff 附加 + 无 backend 静默）
-- ChatBackend._infer_plugin_changed_action 推断
+- PluginHostService._infer_plugin_changed_action 推断
 """
 
 import pytest
@@ -89,26 +89,26 @@ class TestTriggerPluginChangedHook:
 
 
 class TestInferAction:
-    """ChatBackend._infer_plugin_changed_action 推断"""
+    """PluginHostService._infer_plugin_changed_action 推断"""
 
     def test_sentinel_is_installed(self):
-        from app.core.backend import ChatBackend
+        from app.core.plugin_host_service import PluginHostService
 
-        backend = ChatBackend.__new__(ChatBackend)
-        assert backend._infer_plugin_changed_action(ChatBackend._NEW_PLUGIN_SENTINEL) == "installed"
+        svc = PluginHostService.__new__(PluginHostService)
+        assert svc._infer_plugin_changed_action(PluginHostService._NEW_PLUGIN_SENTINEL) == "installed"
 
     def test_empty_name_is_updated(self):
-        from app.core.backend import ChatBackend
+        from app.core.plugin_host_service import PluginHostService
 
-        backend = ChatBackend.__new__(ChatBackend)
-        assert backend._infer_plugin_changed_action("") == "updated"
+        svc = PluginHostService.__new__(PluginHostService)
+        assert svc._infer_plugin_changed_action("") == "updated"
 
     def test_missing_plugin_is_uninstalled(self, monkeypatch):
-        from app.core.backend import ChatBackend
+        from app.core.plugin_host_service import PluginHostService
 
-        backend = ChatBackend.__new__(ChatBackend)
+        svc = PluginHostService.__new__(PluginHostService)
         monkeypatch.setattr(
             "app.plugins.managers.plugin_manager.PluginManager.get_instance",
             staticmethod(lambda: type("PM", (), {"has_plugin": staticmethod(lambda n: False)})()),
         )
-        assert backend._infer_plugin_changed_action("gone") == "uninstalled"
+        assert svc._infer_plugin_changed_action("gone") == "uninstalled"

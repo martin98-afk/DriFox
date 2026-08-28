@@ -99,36 +99,14 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] migrate_app_data_if_needed 失败")
 
-        # 设置日志
+        # 设置日志（全量 all.log + 按子系统拆分的分文件，见 app/core/logging_setup.py）
         try:
+            from app.core.logging_setup import setup_logging
             from app.utils.utils import get_app_data_dir
 
-            log_dir = get_app_data_dir() / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            logger.add(
-                log_dir / "llm_chatter.log",
-                rotation="10 MB",
-                level="DEBUG",
-                format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-            )
+            setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
         except Exception:
             pass
-
-        # 单独的内存诊断日志文件
-        if MEM_DIAG_ENABLED:
-            try:
-                from app.utils.utils import get_app_data_dir
-
-                log_dir = get_app_data_dir() / "logs"
-                logger.add(
-                    log_dir / "mem_diag.log",
-                    rotation="10 MB",
-                    level="DEBUG",
-                    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-                    filter=lambda r: "[MEM]" in r["message"],
-                )
-            except Exception:
-                pass
 
         # 同步开机自启注册表状态
         try:
@@ -307,7 +285,6 @@ def main():
             pass
 
     fake_page = FakePage()
-    chat_window = OpenAIChatToolWindow(fake_page)
 
     def _activate_window(window):
         """激活窗口：显示 + 置前 + 还原"""
@@ -332,6 +309,12 @@ def main():
         from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
         tm = TabManagerWindow.create_instance()
+        # 首个 ChatWindow 必须在 TabManagerWindow 创建之后构造：
+        # TabManagerWindow.__init__ 里 PluginHostService.ensure_started() 同步完成
+        # PluginManager 扫描；若先构造本窗口，其 setup_ui 的 _load_all_ui_plugins 与
+        # 首帧 singleShot(0) 重试都会早于 ensure_started 执行（pm 未就绪静默 return），
+        # 此后无人再触发 UI 插件装载 → 主窗口插件内容（卡片/侧边栏/输入按钮）全部缺失。
+        chat_window = OpenAIChatToolWindow(fake_page)
         tm.add_window(chat_window)
         _guard.show_requested.connect(lambda: _activate_window(tm))
         tm.show()
@@ -343,6 +326,24 @@ def main():
     from app.core.store.session_store import SessionStore
 
     app.aboutToQuit.connect(SessionStore.mark_clean_shutdown)
+
+    # ── M2 修复：全 app 退出（托盘退出等）不走任何 MainWidget.closeEvent ──
+    # _quit_application 直接 quit()，TabManagerWindow.cleanup() 从未被执行：
+    # 各 tab 的完整清理链（流式中断消息 finalize 收集落库 / backend 收尾 /
+    # 桌宠停止）全部跳过，仅靠 _on_app_about_to_quit 的脏会话保存兜底。
+    # 此处显式驱动 cleanup()（幂等）：逐窗 close() 走完整 closeEvent 链。
+    # 尽力而为语义：finalize 为 daemon 线程自同步落盘，不等 join。
+    def _teardown_tab_windows():
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            _tm = TabManagerWindow.get_instance()
+            if _tm is not None:
+                _tm.cleanup()
+        except Exception:
+            logger.warning("[M2] 退出时驱动 TabManagerWindow.cleanup 失败", exc_info=True)
+
+    app.aboutToQuit.connect(_teardown_tab_windows)
 
     # 调度：主窗口先创建 → 再弹窗 → 最后执行延迟启动
     QTimer.singleShot(0, _show_popup)

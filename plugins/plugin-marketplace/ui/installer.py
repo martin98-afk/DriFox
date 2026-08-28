@@ -905,11 +905,16 @@ class PluginInstaller:
             raise last
 
     def _suppress_backend_watcher(self, duration: float = 180.0) -> None:
-        """安装期间抑制 backend 插件热重载 watcher，避免半安装插件被提前 import 报错。"""
-        try:
-            from app.core.backend import ChatBackend
+        """安装期间抑制 backend 插件热重载 watcher，避免半安装插件被提前 import 报错。
 
-            ChatBackend._suppress_watcher_until = time.time() + duration
+        抑制目标：PluginHostService._suppress_watcher_until（应用级单例）。
+        旧实现写 ChatBackend._suppress_watcher_until，但 watcher 实际读 PluginHostService
+        的同名属性，写入即失效（PluginHostService 迁移遗留）。
+        """
+        try:
+            from app.core.plugin_host_service import PluginHostService
+
+            PluginHostService._suppress_watcher_until = time.time() + duration
         except Exception as e:
             logger.debug(f"[Installer] 无法抑制 backend watcher（不影响安装）: {e}")
 
@@ -922,30 +927,34 @@ class PluginInstaller:
         一个插件会把全部插件的 hooks 注销重注册、全部 agents 重载（数十个插件
         联动抖动）。现改为 reload_plugin_targeted(plugin_name) 只处理目标插件。
 
+        目标服务：PluginHostService（应用级单例）。
+        旧实现从 ChatBackend._active_instances 取 ChatBackend 实例并调用 reload_plugin_targeted，
+        但该方法已上移 PluginHostService，ChatBackend 上无此属性（PluginHostService 迁移遗留）。
+
         Args:
             action: PluginChanged hook 动作语义（installed/updated/disabled/enabled），
                 None 时由 backend 按插件注册表状态自动推断
         """
         try:
-            from app.core.backend import ChatBackend
+            from app.core.plugin_host_service import PluginHostService
 
-            ChatBackend._suppress_watcher_until = 0.0
+            PluginHostService._suppress_watcher_until = 0.0
         except Exception:
             return
         if not reload:
             return
         try:
-            inst = next(iter(ChatBackend._active_instances), None)
-            if inst is None:
-                return
+            from app.core.plugin_host_service import PluginHostService
+
+            svc = PluginHostService.get_instance()
             # 尽量在主线程执行重载（与 backend watcher 的 _hot_reload_requested 信号同效）；
             # 失败则直接调用，异常被吞掉不影响安装结果
             try:
                 from PyQt5.QtCore import QTimer
 
-                QTimer.singleShot(0, lambda: inst.reload_plugin_targeted(plugin_name, action=action))
+                QTimer.singleShot(0, lambda: svc.reload_plugin_targeted(plugin_name, action=action))
             except Exception:
-                inst.reload_plugin_targeted(plugin_name, action=action)
+                svc.reload_plugin_targeted(plugin_name, action=action)
         except Exception as e:
             logger.warning(f"[Installer] 触发插件重载失败（不影响安装）: {e}")
 

@@ -149,10 +149,16 @@ class TestTeamWorkdirResetOnLoad:
             win.backend = SimpleNamespace(agent_manager=Mock(list_agents=Mock(return_value=[])))
             win._handle_team_load("demo")
 
-        # 残留工作目录被重置为源标签页工作目录
-        assert fresh_tm.get_team_workdir() == src_workdir, (
-            "新团队应继承源标签页工作目录，而非沿用上次构建残留的旧工作目录"
-        )
+        # 残留工作目录被重置为源标签页工作目录（run_id 粒度：workdirs_by_run_id）。
+        # 🐛 workdir 已迁移为 run_id 粒度存储（与 projects_by_run_id 对齐），
+        # 顶层 workdir 单槽废弃——新团队按 new_run_id 写入，不再读顶层残留值
+        # （顶层单槽是"标签页工作路径与当前项目不匹配"bug 的污染源）。
+        team_data = fresh_tm._read_json(fresh_tm._team_file(fresh_tm.DEFAULT_TEAM))
+        wd_mapping = team_data.get("workdirs_by_run_id") or {}
+        assert len(wd_mapping) >= 1, "新团队应按 run_id 写入 workdirs_by_run_id"
+        assert src_workdir in wd_mapping.values(), "新团队应继承源标签页工作目录，而非沿用上次构建残留的旧工作目录"
+        # 旧团队残留顶层 workdir 不应被新团队写入污染（隔离保护）
+        assert team_data.get("workdir") == "D:/stale/old-worktree", "旧团队残留顶层 workdir 字段不应丢失"
         # #5a-fix Plan C：新团队按 run_id 写入 projects_by_run_id[run_id]，
         # 旧 set_team_project("旧项目") 写顶层 project 字段保持不变（隔离）。
         # 通过 mock 拦截到的 start_team_run 返回值找到新 run_id，按 run_id 读取新项目。

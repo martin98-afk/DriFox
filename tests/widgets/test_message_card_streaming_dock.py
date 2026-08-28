@@ -115,6 +115,15 @@ def test_content_autoscroll_marks_user_scroll_via_wheel():
     assert "_userScrolledUp = !atBottom" not in js, "scroll 事件不得置位 _userScrolledUp（异步派发有竞争窗口）"
     # wheel 监听必须是 passive（不阻断浏览器原生滚动）
     assert "{passive: true}" in js, "wheel 监听必须 passive"
+    # 🐛 回归（工具折叠框展开→视口弹到随机位置）：
+    # 1) wheel 置位必须门控"容器实际可滚"——无溢出时 wheel 属冒泡残留
+    #    （本应转发外层聊天列表），误置位会锁死正文跟随；
+    assert "scrollHeight > this.clientHeight" in js, "wheel 置位必须检查 cp 实际可滚（防冒泡残留误置位）"
+    # 2) scroll 清标志必须有时间窗门控——折叠框动画/高度报告应用引发 viewport
+    #    resize → Chromium 钳制/anchor 补偿被动贴底 → 原实现距底<30px 即清标志
+    #    → 下个 chunk 无条件拉底。要求近期真实滚轮行为才允许恢复跟随。
+    assert "_lastUserWheelAt" in js, "必须有用户滚轮时间戳用于清标志门控"
+    assert "800" in js, "清标志必须限制在最近一次用户滚轮后 800ms 内（防程序性贴底误清）"
 
 
 def test_skeleton_template_includes_content_autoscroll():

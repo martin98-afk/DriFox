@@ -603,7 +603,9 @@ def generate_diff_html(old_content: str, new_content: str, backup_file) -> str:
     old_lines = normalize_lines(old_content)
     new_lines = normalize_lines(new_content)
 
-    diff = difflib.unified_diff(old_lines, new_lines, fromfile=backup_file.name, tofile=backup_file.name, lineterm="\n", n=10)
+    diff = difflib.unified_diff(
+        old_lines, new_lines, fromfile=backup_file.name, tofile=backup_file.name, lineterm="\n", n=10
+    )
 
     diff_output = "".join(diff)
     return DiffHtmlGenerator.generate_html_report(diff_output, "")
@@ -1352,15 +1354,17 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
 _scroll_last_time = [0.0]  # 使用 list 实现可变闭包
 
 
-def scroll_to_bottom_if_streaming(scroll_area, is_streaming: bool) -> None:
+def scroll_to_bottom_if_streaming(scroll_area, is_streaming: bool, suppress: bool = False) -> None:
     """
     如果正在流式输出则滚动到底部（带时间防抖，最高 20fps）
 
     Args:
         scroll_area: 滚动区域
         is_streaming: 是否正在流式输出
+        suppress: True 时跳过滚底——用户已主动滚离底部（阅读历史），
+            流式增量不得把视口拽回（位置保持）
     """
-    if is_streaming:
+    if is_streaming and not suppress:
         now = time.time()
         if now - _scroll_last_time[0] < 0.05:
             return
@@ -1794,8 +1798,12 @@ def create_assistant_card_widget(
         配置好的 MessageCard
     """
     card = MessageCard(
-        parent=parent, role="assistant", timestamp=timestamp, model_name=model_name,
-        provider_name=provider_name, config_id=config_id,
+        parent=parent,
+        role="assistant",
+        timestamp=timestamp,
+        model_name=model_name,
+        provider_name=provider_name,
+        config_id=config_id,
     )
     card._round_index = round_index
     if immediate_render:
