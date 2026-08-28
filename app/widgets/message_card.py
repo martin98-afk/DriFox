@@ -10524,6 +10524,11 @@ class MessageCard(SimpleCardWidget):
                 # 保持展开 —— 后者若按 _streaming=False 判为历史，会在虚拟滚动
                 # 回收重建后突然折叠，与首次渲染的展开态不一致。
                 self.viewer._is_history = not (self._streaming or self._streaming_finished)
+                # 历史会话：同步非流式态——viewer 初始 _streaming=True 是为流式
+                # 增量注入设计；历史渲染须走非流式分支（完成态渲染、不追加流式
+                # 字数统计、不残留流式坞态）。
+                if self.viewer._is_history:
+                    self.viewer._streaming = False
                 self._viewer_layout.addWidget(self.viewer)
                 self._lazy_rendered = True
                 self._render_deferred = False
@@ -10547,6 +10552,10 @@ class MessageCard(SimpleCardWidget):
                 # 保持展开 —— 后者若按 _streaming=False 判为历史，会在虚拟滚动
                 # 回收重建后突然折叠，与首次渲染的展开态不一致。
                 self.viewer._is_history = not (self._streaming or self._streaming_finished)
+                # 历史会话：同步非流式态（viewer 初始 _streaming=True 为流式设计，
+                # 历史渲染须走非流式分支：完成态渲染、无流式字数统计/坞态）。
+                if self.viewer._is_history:
+                    self.viewer._streaming = False
                 # 让 viewer 的 restore 逻辑知道哪些工具结果已到达，
                 # 避免全量重渲染时把已完成的运行框以“运行中”状态复活。
                 self.viewer._restore_finished_ids = self._finished_streaming_ids
@@ -11899,10 +11908,20 @@ class MessageCard(SimpleCardWidget):
         if enabled:
             self.interventionRequested.emit({"card_id": id(self), "message": "请求人工干预"})
 
-    def finish_streaming(self):
+    def finish_streaming(self, history: bool = False):
+        """流式结束收尾。
+
+        Args:
+            history: True 表示历史会话加载收尾（非流式渲染路径）。
+                此时跳过 stop_streaming_anim()——它会置 _streaming_finished=True，
+                使 ensure_rendered 把卡片误判为"本轮已结束的流式消息"
+                （_is_history=False → 工具与思考不折叠、正文按流式坞态限高），
+                与"历史会话默认折叠"的产品预期冲突。历史卡片从未启动过
+                流式动画，跳过 stop_streaming_anim 无副作用。
+        """
         try:
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
-                self.viewer.finish_streaming(keep_dock=self._has_active_tools())
+                self.viewer.finish_streaming(keep_dock=False if history else self._has_active_tools())
                 if hasattr(self.viewer, "_cleanup_render_cache"):
                     self.viewer._cleanup_render_cache()
                 # 简洁模式：坞态归位后自动折叠工具与思考区。keep_dock=True
@@ -11910,14 +11929,17 @@ class MessageCard(SimpleCardWidget):
                 # 完成时由 append_tool_result 兜底归位处折叠。singleShot(0)
                 # 等本函数尾部的 stop_streaming_anim 先把流式块标完成。
                 # hasattr 守卫：stub viewer（测试桩）无该方法。
-                if not self._has_active_tools() and hasattr(self.viewer, "_auto_collapse_tool_section"):
+                if not history and not self._has_active_tools() and hasattr(self.viewer, "_auto_collapse_tool_section"):
                     QTimer.singleShot(
                         0,
                         lambda: self.viewer._auto_collapse_tool_section() if self.viewer is not None else None,
                     )
         except RuntimeError:
             pass
-        self.stop_streaming_anim()
+        if history:
+            self._streaming = False
+        else:
+            self.stop_streaming_anim()
 
     def _has_active_tools(self) -> bool:
         """是否有仍在执行中的工具（已登记但未完成）。
