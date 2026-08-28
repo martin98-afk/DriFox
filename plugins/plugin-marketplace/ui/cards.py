@@ -3930,13 +3930,11 @@ class MarketplaceCard(QWidget):
         """信号桥：task 随信号参数传入，主线程执行完成处理"""
         if task is not None:
             self._on_task_done(task, bool(result))
-        else:
-    
+
     def _on_task_error_sig(self, err: str, task):
         """信号桥：错误分支（同上，主线程执行）"""
         if task is not None:
             self._on_task_error(task, err)
-        else:
 
     def _on_task_done(self, task: dict, success: bool):
         """任务完成：从活跃表移除 + 分发完成处理 + 启动下一个可运行任务"""
