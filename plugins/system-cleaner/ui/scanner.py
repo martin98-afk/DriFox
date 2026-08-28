@@ -56,6 +56,9 @@ CACHE_DEFS: List[Tuple[str, str, str, str, bool]] = [
     ("screenshots", "📸", "截图文件", "screenshots", False),
     ("archived", "📦", "归档会话", "archived", False),
     ("share_sessions", "📤", "分享会话文件", "share/sessions", False),
+    # 工具执行结果缓存:app/core/tool_result_persister.py 写入
+    # {app_data_dir}/projects/{session_id}/tool-results/,属于可重建的离线缓存。
+    ("projects", "🔧", "工具缓存结果", "projects", True),
 ]
 
 
