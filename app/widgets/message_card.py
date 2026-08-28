@@ -1223,6 +1223,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
 </div>"""
 
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
+    font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(15)}px;"
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
@@ -1262,6 +1263,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
 </div>"""
 
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
+    font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(15)}px;"
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
@@ -7191,27 +7193,30 @@ class CodeWebViewer(QWebEngineView):
         # 才会渲染为 think-block（折叠）。强制重渲染会把流式期间的
         # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
         self._schedule_render(immediate=True)
-        # 🐛 产品诉求：流式结束后工具与思考区**保持展开**（默认展开）。
-        # 旧行为在此处调用 _auto_collapse_tool_section() 自动折叠工具区，
-        # 用户回看时只看到一条"工具与思考 · N 项"的标题栏、内容全隐藏，
-        # 每次都要手动点开 —— 与研究 AI 执行过程的核心场景相悖。
-        # 现改为不自动折叠；方法本身保留，若需恢复「结束后收起」的旧行为，
-        # 取消下面这行注释即可（它内部已做"仍有流式块则跳过"的守卫）。
-        # QTimer.singleShot(0, self._auto_collapse_tool_section)
+        # 简洁模式：流式结束后自动折叠工具与思考区（收起为"工具与思考 · N 项"
+        # 标题栏）。坞态归位 + 折叠由 MessageCard.finish_streaming 统一触发
+        # （需 Python 端 _streaming/_has_active_tools 判据，viewer 侧无此状态，
+        # 故不在此处调用）；非简洁模式保持流式结束后的展开态不变。
 
     def _auto_collapse_tool_section(self):
-        """流式结束时自动折叠工具与思考区
+        """流式结束时自动折叠工具与思考区（仅简洁模式）
 
-        在 dock 归位 + 最终渲染完成后折叠工具区，减少"弹到抬头"的视觉跳跃。
-        检测到仍有流式进行中的块时跳过折叠，等后续工具结果到达再自然收敛。
+        在 dock 归位 + stop_streaming_anim 标完流式块后调用，收起为标题栏。
+        调用方（MessageCard.finish_streaming / append_tool_result 兜底归位）
+        已保证无活跃工具、非流式，故不做 DOM 流式块查询守卫——0ms 时序下
+        最终渲染尚未落 DOM，陈旧的 data-streaming="true" 会误致跳过。
+        非简洁模式保持展开态（与旧产品决策一致），直接 no-op。
+        getattr 默认 True：stub viewer（测试桩）无该 property，视为简洁模式。
         """
+        if not getattr(self, "_tool_compact_mode", True):
+            return
         try:
             if self._is_js_ready and self.page():
                 self.page().runJavaScript(
                     "(function(){"
                     "var _ts=document.getElementById('tool-section');"
                     "var _sep=document.getElementById('tool-separator');"
-                    "if(_ts&&!_ts.querySelector('[data-streaming=\"true\"]')){"
+                    "if(_ts){"
                     "  if(typeof _beginToolSectionTransition==='function')_beginToolSectionTransition();"
                     "  _ts.setAttribute('data-collapsed','true');"
                     "  if(_sep)_sep.setAttribute('aria-expanded','false');"
@@ -11131,10 +11136,17 @@ class MessageCard(SimpleCardWidget):
                 and not self._streaming
                 and not self._has_active_tools()
             ):
-                QTimer.singleShot(
-                    0,
-                    lambda: self.viewer._sync_streaming_dock(False) if self.viewer is not None else None,
-                )
+                # F2（S1 兜底归位）+ 简洁模式折叠：最后一个工具完成时归位，
+                # 并与 finish_streaming 路径一致地收起工具与思考区。
+                # getattr 兜底：Qt 渲染器（markdown_block_viewer）无
+                # _auto_collapse_tool_section，折叠由其 exit_dock 完成。
+                def _dock_off_and_collapse() -> None:
+                    if self.viewer is None:
+                        return
+                    self.viewer._sync_streaming_dock(False)
+                    getattr(self.viewer, "_auto_collapse_tool_section", lambda: None)()
+
+                QTimer.singleShot(0, _dock_off_and_collapse)
         except Exception:
             pass
 
@@ -11889,6 +11901,16 @@ class MessageCard(SimpleCardWidget):
                 self.viewer.finish_streaming(keep_dock=self._has_active_tools())
                 if hasattr(self.viewer, "_cleanup_render_cache"):
                     self.viewer._cleanup_render_cache()
+                # 简洁模式：坞态归位后自动折叠工具与思考区。keep_dock=True
+                # （文本先于工具结束，S1）时保留坞态不折叠，等最后一个工具
+                # 完成时由 append_tool_result 兜底归位处折叠。singleShot(0)
+                # 等本函数尾部的 stop_streaming_anim 先把流式块标完成。
+                # hasattr 守卫：stub viewer（测试桩）无该方法。
+                if not self._has_active_tools() and hasattr(self.viewer, "_auto_collapse_tool_section"):
+                    QTimer.singleShot(
+                        0,
+                        lambda: self.viewer._auto_collapse_tool_section() if self.viewer is not None else None,
+                    )
         except RuntimeError:
             pass
         self.stop_streaming_anim()

@@ -1412,13 +1412,16 @@ class ToolSectionWidget(QWidget):
             self._set_collapsed_instant(False)
 
     def exit_dock(self) -> None:
-        """退出坞态：解除限高，但**保持展开**。
+        """退出坞态：解除限高并折叠（对齐 WebEngine 版简洁模式行为）。
 
-        旧实现在此处折叠（对齐 WebEngine 版 _auto_collapse_tool_section）。
-        WebEngine 侧该自动折叠已按产品诉求移除（流式结束后默认展开），
-        此处同步调整，避免两条渲染路径行为不一致。
+        简洁模式语义：流式结束后工具与思考区收起为「工具与思考 · N 项」
+        标题栏（WebEngine 版 MessageCard._auto_collapse_tool_section 同行为）。
+        本渲染器 _tool_compact_mode 恒为 True（坞态仅简洁模式启用），
+        归位即折叠；流式期间由 enter_dock 保持展开可见。
         """
         self._cards_scroll.setMaximumHeight(_QWIDGETSIZE_MAX)
+        if not self._collapsed:
+            self._set_collapsed_instant(True)
 
     def _set_collapsed_instant(self, collapsed: bool) -> None:
         """无动画切换折叠态（坞态进出用，避免与 dock 布局搬移叠加抖动）。"""
