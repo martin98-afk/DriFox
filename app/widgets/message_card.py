@@ -12178,7 +12178,14 @@ class _ChangelogFetcher(QThread):
             return
         new_etag = resp.headers.get("ETag", "")
         releases = []
-        md = get_markdown_instance()
+        # 线程私有实例：全局 _md_instance 禁止跨线程使用（Markdown.reset()/convert()
+        # 非线程安全）。本方法跑在 QThread 后台线程，若与主线程消息渲染并发共用全局
+        # 实例，会互相打乱解析状态——曾致消息卡片表格偶发渲染失败/内容串扰（约0.4%）。
+        md = Markdown(
+            extensions=["fenced_code", "nl2br", "tables"],
+            output_format="html5",
+            safe=False,
+        )
         for item in data:
             body_md = item.get("body") or ""
             try:
