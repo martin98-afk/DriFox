@@ -10852,6 +10852,55 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ── B4 温和层：WebEngine 并发页上限（T12 蓝图） ──
 
+    def _register_unloaded_pid(self, pid: int, ts: float, batch_idx: int) -> None:
+        """登记一个已卸载 renderer 的 PID，并对队列施加背压上限。
+
+        🐛 修复「长时间运行内存溢出」第二处泄漏：
+        旧实现直接 append，队列无任何上限，且同一 PID 可能被重复登记
+        （批次反复卸载/重建时）。单窗口场景下强回收被活跃护栏阻断（见
+        `_maybe_strong_recycle`），队列只增不减 → 长期运行后队列自身膨胀，
+        更严重的是其登记的 renderer 进程迟迟得不到释放。
+
+        背压策略（队列长度 > _UNLOADED_PIDS_MAX 时）：
+        直接 kill 最老的超出部分。这些 PID 卸载时间最早、离可视区最远，
+        是最该释放的；此处无视离屏护栏，保证队列长度与 renderer 进程数
+        双双有界，不会因护栏过严而永久堆积。
+        """
+        # 同 PID 去重（批次反复卸载/重建会产生重复登记）
+        for entry in self._unloaded_pids:
+            if entry[0] == pid:
+                return
+        self._unloaded_pids.append((pid, ts, batch_idx))
+
+        overflow = len(self._unloaded_pids) - _UNLOADED_PIDS_MAX
+        if overflow <= 0:
+            return
+        # 按卸载时间升序：最老的先强制回收（越过离屏护栏，保证有界）
+        ordered = sorted(self._unloaded_pids, key=lambda x: x[1])
+        victims = ordered[:overflow]
+        kill_set = set()
+        killed = 0
+        for victim_pid, _, _ in victims:
+            # 🛡️ 进程复用护栏：共享 PID 跳过，避免误杀在用卡片
+            if self._pid_still_in_use(victim_pid):
+                continue
+            kill_set.add(victim_pid)
+            if self._kill_renderer(victim_pid):
+                killed += 1
+        self._unloaded_pids = [e for e in self._unloaded_pids if e[0] not in kill_set]
+        if killed:
+            logger.info(
+                f"[B4-strong] 背压回收 {killed} 个超上限 renderer"
+                f"（队列 {len(self._unloaded_pids)}/{_UNLOADED_PIDS_MAX}）"
+            )
+        # 🛡️ 最终兜底：若超限部分全部因「进程被共享」而跳过，队列仍会膨胀。
+        # 此时丢弃最老的登记项（放弃对其的主动回收，交给
+        # --renderer-process-limit 的进程复用统一兜底），保证队列长度有界。
+        # 注意：这里只丢弃"记账"，不 kill 进程，因此绝不会误杀在用卡片。
+        if len(self._unloaded_pids) > _UNLOADED_PIDS_MAX:
+            ordered = sorted(self._unloaded_pids, key=lambda x: x[1])
+            self._unloaded_pids = ordered[-_UNLOADED_PIDS_MAX:]
+
     def _unload_batch(self, batch_idx: int) -> int:
         """卸载一个批次的 UI（释放 WebEngine renderer），保留 _message_batch 数据。
 
@@ -10874,7 +10923,7 @@ class OpenAIChatToolWindow(ToolWindow):
         for card in cards:
             pid = getattr(card, "_renderer_pid", 0) or 0
             if pid > 0 and self._is_widget_alive(card):
-                self._unloaded_pids.append((pid, now, batch_idx))
+                self._register_unloaded_pid(pid, now, batch_idx)
         removed_h = 0
         alive_cards = []
         for card in cards:
@@ -10982,6 +11031,38 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图） ──
 
+    def _pid_still_in_use(self, pid: int) -> bool:
+        """检查该 renderer PID 是否仍被任何「未卸载」的卡片占用。
+
+        🛡️ Chromium 进程复用护栏：main.py 现在设置了
+        `--renderer-process-limit=N`，达到上限后 Chromium 会让多张卡片共享
+        同一个 renderer 进程。这意味着卡片卸载时登记的 `_renderer_pid`
+        可能是**其他仍在使用中的卡片**的 PID —— 若直接 kill，会让那些卡片
+        正文瞬间变空白（用户可见的严重故障）。
+
+        因此 kill 前必须确认：没有任何仍挂在布局上的卡片依赖该 PID。
+        """
+        if pid <= 0:
+            return False
+        for cards in self._batch_cards:
+            if not cards:
+                continue
+            for card in cards:
+                try:
+                    if getattr(card, "_renderer_pid", 0) == pid and self._is_widget_alive(card):
+                        return True
+                except RuntimeError:
+                    continue
+        # 当前流式输出卡片不在 _batch_cards 常规路径时也要保护
+        cur = getattr(self, "_current_assistant_card", None)
+        if cur is not None:
+            try:
+                if getattr(cur, "_renderer_pid", 0) == pid and self._is_widget_alive(cur):
+                    return True
+            except RuntimeError:
+                pass
+        return False
+
     @staticmethod
     def _kill_renderer(pid: int) -> bool:
         """终止指定 renderer 进程（PID 复用误杀防护：校验 cmdline 含
@@ -10989,6 +11070,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         Returns:
             True = 已成功终止（或进程已不存在）
+
+        注意：调用方需先用 `_pid_still_in_use()` 排除「进程被其他卡片共享」
+        的情况（Chromium 开启 renderer-process-limit 后会出现）。
         """
         if pid <= 0:
             return False
@@ -11044,10 +11128,15 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             return 0.0
 
-    def _over_memory_threshold(self) -> bool:
+    def _over_memory_threshold(self, active: bool = False) -> bool:
         """内存阈值判定（T30 双判据）：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB
         且（WebEngine 子进程 RSS > _WEB_MEM_THRESHOLD_MB 或子进程统计不可用时
         退化单判据）→ True。
+
+        Args:
+            active: 本窗口是否处于激活状态。活跃窗口用户正在交互，采用更高的
+                触发阈值（_MEM_THRESHOLD_TOTAL_MB_ACTIVE）避免频繁 kill 造成
+                滚动回看时的重建抖动；但绝不再完全跳过（旧实现跳过 = 内存泄漏）。
 
         无 psutil 时退化判定：并发页 > _MAX_RENDERED_CARDS 且存在
         距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL 的已卸载批次（说明内存压力来自 WebEngine）。
@@ -11055,8 +11144,9 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             import psutil
 
+            threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
             rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
-            if rss_mb <= _MEM_THRESHOLD_TOTAL_MB:
+            if rss_mb <= threshold:
                 return False
             # 主进程已超总阈值：再核对 WebEngine 侧，避免误杀
             web_mb = self._web_children_rss_mb()
@@ -11073,8 +11163,14 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return offscreen and self._rendered_card_count > self._max_rendered_cards
 
-    def _kill_lru_unloaded_renderers(self, keep: int = None) -> int:
+    def _kill_lru_unloaded_renderers(self, keep: int = None, min_offscreen: int = 0) -> int:
         """按卸载时间升序（最老在前）kill 超 keep 部分，每轮 ≤ _KILL_BATCH_MAX。
+
+        Args:
+            keep: 保留最近活跃 renderer 的数量（超出的按最老优先 kill）。
+            min_offscreen: 离屏护栏 —— 仅回收距可视区 ≥ 该批次数的 renderer。
+                >0 时用于活跃窗口：避免 kill 用户即将滚回的邻近内容
+                （活跃窗口重建会造成可见抖动）。0 = 不启用护栏（原行为）。
 
         Returns:
             成功 kill 的数量
@@ -11085,22 +11181,42 @@ class OpenAIChatToolWindow(ToolWindow):
             return 0
         # 按卸载时间升序（最老在前）→ kill 最老的「超出 keep」部分（LRU 语义）
         sorted_pids = sorted(self._unloaded_pids, key=lambda x: x[1])
-        kill_count = max(0, len(sorted_pids) - keep)
-        kill_list = sorted_pids[:kill_count]
+
+        # 离屏护栏：距可视区不足 min_offscreen 批的条目不参与 kill（保留）
+        if min_offscreen > 0:
+            eligible = []
+            ineligible = []
+            for entry in sorted_pids:
+                _, _, idx = entry
+                dist = self._batch_distance(idx) if 0 <= idx < len(self._batch_cards) else 0
+                # _batch_cards 越界（批次已被裁掉）视为足够远，允许回收
+                if 0 <= idx < len(self._batch_cards) and dist < min_offscreen:
+                    ineligible.append(entry)
+                else:
+                    eligible.append(entry)
+        else:
+            eligible = sorted_pids
+            ineligible = []
+
+        kill_count = max(0, len(eligible) - keep)
+        kill_list = eligible[:kill_count]
         killed = 0
-        remaining = []
         kill_set = set()
+        skipped_in_use = 0
         for entry in kill_list[:_KILL_BATCH_MAX]:
             pid, ts, idx = entry
+            # 🛡️ 进程复用护栏：PID 被其他在用卡片共享时跳过（kill 会导致内容空白）
+            if self._pid_still_in_use(pid):
+                skipped_in_use += 1
+                continue
             kill_set.add(pid)
             if self._kill_renderer(pid):
                 killed += 1
-        # 重写队列：保留 keep 内 + 不在本轮 kill 集合的
-        for entry in sorted_pids:
-            if entry[0] in kill_set:
-                continue
-            remaining.append(entry)
-        self._unloaded_pids = remaining
+        # 重写队列：保留 keep 内 + 未达离屏护栏 + 不在本轮 kill 集合的
+        # 被「仍在用」跳过的条目保留在队列（下轮再试），不直接丢弃
+        self._unloaded_pids = [e for e in eligible if e[0] not in kill_set] + ineligible
+        if skipped_in_use:
+            logger.debug(f"[B4-strong] 跳过 {skipped_in_use} 个仍被在用卡片共享的 renderer（进程复用）")
         if killed:
             logger.debug(f"[B4-strong] kill {killed} 个离屏 renderer，队列剩余 {len(self._unloaded_pids)}")
             # [B4-2] 强回收计数日志：warning 级便于观测；带总阈值/WebEngine 阈值上下文
@@ -11115,21 +11231,39 @@ class OpenAIChatToolWindow(ToolWindow):
         return killed
 
     def _maybe_strong_recycle(self):
-        """强回收触发入口（T13）：_unloaded_pids 非空 + 非活跃窗口 + 冷却就绪 + 超阈值。
+        """强回收触发入口（T13）：_unloaded_pids 非空 + 冷却就绪 + 超阈值 → kill。
 
         kill 后更新 _last_kill_at 冷却时间戳。
+
+        🐛 修复「长时间运行内存溢出」根因：
+        旧实现在 `_is_active_window_for_recycle()` 为真时直接 return，即
+        **当前活跃窗口永不执行强回收**。单窗口用户（绝大多数场景）窗口恒为
+        活跃，导致 `_unloaded_pids` 只增不减（唯一减少点是本函数与关闭窗口），
+        离屏 renderer 进程（每个约数十 MB）永不释放，内存单调增长直至溢出。
+
+        现改为「活跃窗口用更保守护栏」而非一刀切跳过：
+        - 非活跃窗口：原策略（LRU 保留 _LRU_RENDERER_KEEP，无离屏护栏）
+        - 活跃窗口：保留更多最近活跃 renderer（_LRU_RENDERER_KEEP_ACTIVE），
+          且仅回收距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL_ACTIVE 批的 renderer
+          （避免 kill 用户即将滚回的内容造成可见抖动），阈值也更高
+          （_MEM_THRESHOLD_TOTAL_MB_ACTIVE）。
         """
         if not self._unloaded_pids:
-            return
-        if self._is_active_window_for_recycle():
             return
         now = time.time()
         if now - self._last_kill_at < _KILL_COOLDOWN_S:
             return
-        if not self._over_memory_threshold():
+        active = self._is_active_window_for_recycle()
+        if not self._over_memory_threshold(active=active):
             return
         self._last_kill_at = now
-        self._kill_lru_unloaded_renderers(keep=_LRU_RENDERER_KEEP)
+        if active:
+            self._kill_lru_unloaded_renderers(
+                keep=_LRU_RENDERER_KEEP_ACTIVE,
+                min_offscreen=_OFFSCREEN_BATCHES_FOR_KILL_ACTIVE,
+            )
+        else:
+            self._kill_lru_unloaded_renderers(keep=_LRU_RENDERER_KEEP)
 
     def _open_diff_viewer(self):
         """打开差异查看窗口，显示当前会话修改文件的 git diff"""
@@ -20810,6 +20944,18 @@ _LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数
 _KILL_COOLDOWN_S = 60  # kill 冷却（防抖动）
 _KILL_BATCH_MAX = 12  # 每轮最多 kill
 _OFFSCREEN_BATCHES_FOR_KILL = 8  # 距可视区 ≥8 批才可 kill（严格离屏护栏）
+
+# ── 活跃窗口强回收（修复「活跃窗口永不回收」导致的内存单调增长）──
+# 活跃窗口用户正在交互，回收需要更保守，但绝不能像旧实现那样直接跳过
+# （跳过 = 单窗口场景永不回收 = 内存溢出）。
+# - 阈值更高：避免刚过阈值就频繁 kill 造成重建抖动
+# - 保留更多：距可视区近的 renderer 留着，回滚时无需重建
+# - 离屏更远才 kill：只回收用户短期内不会滚回的批次
+# - 队列上限做最终兜底：护栏再严也保证队列与 renderer 进程数有界
+_MEM_THRESHOLD_TOTAL_MB_ACTIVE = 1400  # 活跃窗口阈值（高于非活跃的 900MB）
+_LRU_RENDERER_KEEP_ACTIVE = 14  # 活跃窗口保留更多最近 renderer（对比非活跃 8）
+_OFFSCREEN_BATCHES_FOR_KILL_ACTIVE = 12  # 活跃窗口要求离屏更远（对比非活跃 8）
+_UNLOADED_PIDS_MAX = 32  # _unloaded_pids 队列硬上限：超限强制 kill 最老的（背压兜底）
 
 
 def _run_gc_hook():

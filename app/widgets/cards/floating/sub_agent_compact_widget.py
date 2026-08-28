@@ -735,9 +735,16 @@ class SubAgentCompactFloatingWidget(QWidget):
 
     # ── 旋转动画 ──────────────────────────────────────
 
+    # [PERF] 旋转指示器刷新间隔：30ms(≈33fps) → 60ms(≈17fps)。
+    # 每行 set_rotation_angle 都会触发一次重绘，子代理并行数较多时这是持续的
+    # CPU/重绘开销。加载指示器对帧率不敏感，60ms 视觉上依然顺滑；
+    # 步长同步由 12° 提到 24°，保持角速度不变（约 400°/s）。
+    _ROTATION_TICK_MS = 60
+    _ROTATION_STEP_DEG = 24
+
     def _start_rotation(self):
         if not self._rotation_timer.isActive():
-            self._rotation_timer.start(30)
+            self._rotation_timer.start(self._ROTATION_TICK_MS)
         if not self._time_timer.isActive():
             self._time_timer.start(1000)
 
@@ -746,7 +753,7 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._time_timer.stop()
 
     def _update_all_rotations(self):
-        self._rotation_angle = (self._rotation_angle + 12) % 360
+        self._rotation_angle = (self._rotation_angle + self._ROTATION_STEP_DEG) % 360
         for row in self._task_rows.values():
             if row.is_running:
                 row.set_rotation_angle(self._rotation_angle)

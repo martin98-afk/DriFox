@@ -99,6 +99,13 @@ _BINARY_NULL_LIMIT = 8192
 # 模块级 mtime 缓存（外部修改检测；无 window_state 时降级使用）
 _file_mtimes: Dict[str, float] = {}
 
+# 🐛 内存治理：mtime 记录表必须设上限。
+# 每次文件读写都会 `_record_mtime(路径)`，长会话中 LLM 可能操作成百上千个
+# 文件（尤其遍历目录、批量重构时），旧实现无任何淘汰 → 字典单调增长，
+# 是长时间运行内存缓慢爬升的隐蔽来源之一。
+# Python 3.7+ dict 保持插入顺序，超限时弹出最早插入项即为 FIFO 淘汰。
+_FILE_MTIMES_MAX = 2000
+
 
 def _mtimes_state(tool_ctx=None) -> Dict[str, float]:
     """获取 mtime 状态字典：有 window_state → 窗口隔离；无 → 模块级降级。
@@ -121,9 +128,21 @@ def _mtimes_state(tool_ctx=None) -> Dict[str, float]:
 
 
 def _record_mtime(tool_ctx, full_path: Path) -> None:
-    """记录文件 mtime（窗口隔离感知）"""
+    """记录文件 mtime（窗口隔离感知）
+
+    写入后施加 FIFO 上限（_FILE_MTIMES_MAX）：超出时淘汰最早记录的路径，
+    避免长会话中大量文件操作导致缓存无界增长。
+
+    注意：对 _mtimes_state() 返回的字典**原地修改**，绝不重新赋值替换
+    （window_state 场景下外部持有同一引用，替换会导致窗口隔离失效）。
+    """
     try:
-        _mtimes_state(tool_ctx)[str(full_path)] = full_path.stat().st_mtime
+        d = _mtimes_state(tool_ctx)
+        d[str(full_path)] = full_path.stat().st_mtime
+        overflow = len(d) - _FILE_MTIMES_MAX
+        if overflow > 0:
+            for _ in range(overflow):
+                d.pop(next(iter(d)), None)
     except OSError:
         pass
 

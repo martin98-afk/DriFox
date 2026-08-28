@@ -513,20 +513,32 @@ class SendableTextEdit(TextEdit):
     # ==================== @ 文件提及节流 ====================
 
     def _apply_at_throttle(self, query: str):
-        """@ 触发节流：统一防抖合并快速敲键，减少过滤+渲染次数
+        """@ 触发节流：首次弹出立即响应，卡片展开后的连续输入走 100ms 防抖
 
-        关键优化：无论键入多快都不立即发射，始终走防抖。
-        去除了旧的「正常速度立即发射」路径——即使 ~200ms 的普通打字速度，
-        每次键盘事件 emit → show_card → 2000 项评分 → widget 重建的链路
-        依然昂贵。统一 100ms 防抖让快速打字期间只执行最后一次过滤/渲染。
+        [PERF] 旧实现对每一次 @ 触发都统一加 100ms 防抖，于是「按下 @ → 卡片出现」
+               永远有至少 100ms 的固定等待。实测热路径端到端 130ms，其中 100ms
+               纯属等待，用户体感就是"按了 @ 要愣一下"。
+               首次弹出时列表还没显示，一次过滤+渲染的实测成本仅 ~2ms（远低于
+               100ms 防抖窗口），立即发射可以让卡片真正"跟手"出现；
+               等卡片展开后再敲键，才需要防抖来避免每敲一个字符都重建整份列表。
         """
         # 连续输入相同 query（如按方向键/退格到原位置）→ 跳过
         # 注意：初始 _pending_at_query = None，此时空字符串 query = "" 是合法首次触发
         if self._pending_at_query is not None and query == self._pending_at_query:
             return
 
+        if self._at_trigger_pos < 0:
+            return
+
         self._pending_at_query = query
         self._at_throttle_timer.stop()
+
+        # 卡片尚未显示 = 用户正在等列表出现 → 立即发射，不进防抖窗口
+        file_card = self._get_file_mention_card()
+        if file_card is None or not file_card.is_card_visible:
+            self.atTriggered.emit(query)
+            return
+
         self._at_throttle_timer.start(100)
 
     def _on_at_throttle_timeout(self):

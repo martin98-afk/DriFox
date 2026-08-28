@@ -16,6 +16,35 @@ warnings.filterwarnings("ignore")
 os.environ.setdefault("PYPINYIN_NO_DICT_COPY", "1")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
+# ========== Chromium 进程治理（WebEngine 内存占用的根因）==========
+# 必须在 QApplication 创建之前设置：QtWebEngine 在首次初始化时读取该环境变量，
+# 之后修改无效（这也是它必须放在 main.py 最顶部的原因）。
+#
+# 背景：每张消息卡片正文是一个独立的 QWebEngineView，Chromium 默认进程模型下
+# 会为每张卡片派生独立 renderer 进程（各约数十 MB）。长对话滚动过程中进程数
+# 随卡片数单调增长 —— 这是"长时间运行内存溢出"的主要来源。
+#
+# --renderer-process-limit：硬性封顶 renderer 进程总数，达到上限后 Chromium
+#   自动复用已有进程而非继续派生，把内存曲线从"线性增长"压成"恒定上限"。
+#   注意：不使用 --process-per-site —— 它会使所有同源卡片共享同一进程，与
+#   现有的「按 PID kill 离屏 renderer」回收机制冲突（kill 一个会误伤全部卡片）。
+#
+# 其余开关均为本地 setHtml 渲染场景下的纯开销，关闭后无功能损失。
+#
+# 覆盖方式：用 setdefault，外部若已设置 QTWEBENGINE_CHROMIUM_FLAGS 则以其为准
+# （便于调试或快速回退，例如 QTWEBENGINE_CHROMIUM_FLAGS="" 即完全禁用本组开关）。
+_CHROMIUM_FLAGS = (
+    "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
+    " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
+    " --disable-software-rasterizer"
+    " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
+    " --disable-extensions"
+    " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
+    " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染
+    " --js-flags=--max-old-space-size=128"  # 限制单 renderer JS 堆，防单页膨胀
+)
+os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _CHROMIUM_FLAGS)
+
 # ========== 内存诊断开关 ==========
 # 设为 False 可禁用所有 [MEM] 诊断日志和 mem_diag.log 文件
 # 关闭后 Worker 内也不再执行内存快照和自适应 GC 日志

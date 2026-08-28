@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.5.5] - 2026-08-28
+## [v0.5.5] - 2026-08-29
 
-自上一版本以来的变更 | 提交数：41 · 文件变更：95 · +8994/-3461 | 贡献者：dingma, mading, martin98-afk
+自上一版本以来的变更 | 提交数：48 · 文件变更：109 · +10712/-4401 | 贡献者：dingma, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - **平台 session key 与 ToolActionSpec 尺寸** (`app/core/backend.py` + `app/gateway/` + `app/plugins/contracts/plugin_config.py`): 增强平台 session key 获取；ToolActionSpec 增加 image/dialog 尺寸。
 - **插件流式支持与动作按钮** (`app/core/backend.py` + `app/gateway/base.py` + `app/plugins/loaders/plugin_tool_loader.py` + `app/tools/`): 跨插件实现流式支持与动作按钮功能。
 - **TabManager tab 生成统一** (`app/main_widget.py`): 统一 tab 生成逻辑并增强流式 session 处理。
+- **工具区行为与 UI 一致性增强** (`app/main_widget.py` + `app/widgets/message_card.py` + `app/widgets/cards/floating/file_mention_card.py` + `app/utils/design_tokens.py` + `app/widgets/bottom_input_area.py` + `plugins/system/tools/file_tools.py`): 流式 dock 日志最大高度调整为 220px 提升工具内容可见性；`ToolSectionWidget` 默认展开状态对齐用户反馈与 WebEngine 行为；`exit_dock` 退出后保留展开状态；代码块与工具按钮改用主题感知变量提升多主题可见性；补充 `FileMentionCard` 性能优化回归测试。
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -42,6 +43,9 @@ All notable changes to this project will be documented in this file.
 - **message-card 流式正文上滚位置保持** (`app/widgets/message_card.py`): wheel 同步置位替代 scroll 事件推断，修复流式上滚被拉偏。
 - **window macOS 置顶与最小化** (`app/widgets/tab_manager_window.py` + `app/widgets/cards/settings/gitee_card.py`): macOS 改软置顶修复最小化无响应；修复 AA_DontUseNativeMenuBar 崩溃。
 - **README 软件界面图** (`README.md` + `images/`): 补缺失的软件界面图。
+- **工具区折叠行为对齐 WebEngine 版本** (`app/main_widget.py` + `app/widgets/message_card.py` + `app/core/hook_manager.py`): 工具区折叠行为与 WebEngine 版本对齐，确保 spinner 正常渲染。
+- **思考块内联字体样式更新** (`app/widgets/markdown_block_viewer.py`): 修正思考块内联字体渲染样式。
+- **思考块字体大小对齐折叠框样式** (`app/widgets/message_card.py`): 思考块字体大小与折叠框样式对齐。
 
 ### ♻️ 代码重构 (Refactoring)
 
@@ -55,6 +59,9 @@ All notable changes to this project will be documented in this file.
 
 - **版本号升级至 v0.5.5** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): 同步升级四处版本号。
 - **忽略临时调试脚本** (`.gitignore`): 将 _diag*.py 调试脚本加入忽略。
+- **忽略 _spec*/_extract* 临时调试脚本** (`.gitignore`): 扩大临时调试脚本忽略范围。
+- **依赖锁文件更新** (`uv.lock`): 同步依赖锁文件版本。
+- **23:00 自动提交**: 定时任务自动提交累积改动。
 
 ### 🔄 其他变更 (Other)
 

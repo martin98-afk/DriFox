@@ -939,6 +939,7 @@ class HookManager:
         # cwd 解析缓存（类级别共享）
         self._cwd_resolve_cache: Dict[int, tuple] = HookManager._shared_cwd_resolve_cache
         self._CWD_CACHE_TTL = 30.0  # 30秒缓存
+        self._cwd_cache_sweep_counter = 0  # 低频清扫计数器（分摊 O(n) 遍历成本）
 
         # hook 开关持久化（所有 hook 共用，不受插件源文件限制）
         # 🛡️ 类级共享：backend 与 settings popup 各自创建 HookManager 实例时，
@@ -2134,7 +2135,15 @@ class HookManager:
         # 2. 检查缓存（key 基于 hook.command + hook.skill_root，两者都是静态的）
         import time
 
-        cache_key = id(hook)
+        # 🐛 修复：旧实现用 id(hook) 作 key，存在两个问题：
+        #   a) 内存泄漏 —— 每次插件热重载/重新注册都会产生新的 hook 对象（新 id），
+        #      条目只增不减，长会话下字典单调增长；
+        #   b) 正确性风险 —— 旧 hook 对象被回收后，新对象可能复用同一内存地址，
+        #      导致命中**无关 hook** 的缓存 cwd（id 复用碰撞）。
+        # 改为内容哈希（command + skill_root 均为静态字符串），key 空间有限且稳定：
+        # 相同配置的 hook 命中同一缓存，对象重建也能正确复用，不存在地址碰撞。
+        cache_key = hash((hook.command, hook.skill_root))
+        self._maybe_sweep_cwd_cache(time.monotonic())
         cached = self._cwd_resolve_cache.get(cache_key)
         if cached and time.monotonic() - cached[1] < self._CWD_CACHE_TTL:
             return cached[0]
@@ -2186,6 +2195,22 @@ class HookManager:
         logger.debug("[HookManager] No script in command, returning None for cwd")
         self._cwd_resolve_cache[cache_key] = (None, time.monotonic())
         return None
+
+    def _maybe_sweep_cwd_cache(self, now: float) -> None:
+        """低频清扫过期的 cwd 解析缓存条目（类级共享字典，所有实例共用）。
+
+        TTL 命中的条目由读取方自然跳过，但**过期条目本身不会被移除** ——
+        旧实现因此长期累积（配合旧的 id(hook) key 即为明确的无界增长）。
+        每 64 次解析触发一次线性清扫，把 O(n) 成本摊薄到可忽略。
+        """
+        self._cwd_cache_sweep_counter += 1
+        if self._cwd_cache_sweep_counter % 64 != 0:
+            return
+        cache = self._cwd_resolve_cache
+        # 过期 2×TTL 才清扫：刚过 TTL 的条目可能马上被再次读取，留一段宽限
+        expired = [k for k, v in cache.items() if now - v[1] > self._CWD_CACHE_TTL * 2]
+        for k in expired:
+            cache.pop(k, None)
 
     @staticmethod
     def _interpolate_variables(text: str, context: Dict[str, Any]) -> str:

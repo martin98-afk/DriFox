@@ -63,6 +63,8 @@ from app.widgets.message_card import (
     _has_unclosed_think_or_tool,
     _inject_think_cards,
     _render_stable_segment,
+    _render_think_block,
+    _render_think_block_lightweight,
 )
 
 
@@ -242,3 +244,18 @@ def test_second_round_thinking_stays_independent():
     assert "<p>第一轮思考</p>" not in processed
     assert "<p>第二轮思考</p>" not in processed
     assert processed.count("think-compact") == 2  # 两轮均已闭合 → think-compact
+
+
+# ── 用例 6：流式态 spinner 必须可渲染（回归：bd44a773 引入未定义变量）──
+def test_render_think_block_streaming_spinner_renders():
+    """流式态（completed=False）必须产出"深度思考中" spinner，不得抛异常。
+
+    回归背景：bd44a773 把 spinner 的内联字体样式改为引用 `font_style_inline`，
+    但该变量在函数作用域内未定义 → NameError → 被 _render_markdown_to_html
+    的 `except Exception` 吞掉后回退 `<pre>` 原文 → "深度思考中" spinner
+    在流式期间从不出现。
+    """
+    for render in (_render_think_block, _render_think_block_lightweight):
+        html = render("思考内容", completed=False)
+        assert "think-streaming" in html, f"{render.__name__} 未产出流式 spinner: {html!r}"
+        assert "深度思考中" in html, f"{render.__name__} 未产出 spinner 文案: {html!r}"
