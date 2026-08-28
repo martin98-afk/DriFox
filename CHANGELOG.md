@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.5] - 2026-08-29
 
-自上一版本以来的变更 | 提交数：48 · 文件变更：109 · +10712/-4401 | 贡献者：dingma, mading, martin98-afk
+自上一版本以来的变更 | 提交数：49 · 文件变更：111 · +10739/-4406 | 贡献者：dingma, mading, martin98-afk
 
 ### ✨ 新功能 (New Features)
 
@@ -46,6 +46,7 @@ All notable changes to this project will be documented in this file.
 - **工具区折叠行为对齐 WebEngine 版本** (`app/main_widget.py` + `app/widgets/message_card.py` + `app/core/hook_manager.py`): 工具区折叠行为与 WebEngine 版本对齐，确保 spinner 正常渲染。
 - **思考块内联字体样式更新** (`app/widgets/markdown_block_viewer.py`): 修正思考块内联字体渲染样式。
 - **思考块字体大小对齐折叠框样式** (`app/widgets/message_card.py`): 思考块字体大小与折叠框样式对齐。
+- **历史会话加载误用流式架构** (`app/widgets/message_card.py` + `app/widgets/ui_helpers.py`): 修复历史会话加载时误走流式路径导致工具区未折叠、正文受 dock 限制。
 
 ### ♻️ 代码重构 (Refactoring)
 
