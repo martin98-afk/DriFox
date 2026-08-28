@@ -2,9 +2,66 @@
 All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
+
+## [v0.5.5] - 2026-08-28
+
+自上一版本以来的变更 | 提交数：41 · 文件变更：95 · +8994/-3461 | 贡献者：dingma, mading, martin98-afk
+
+### ✨ 新功能 (New Features)
+
+- **插件欢迎动作增强与配置存储迁移** (`app/main_widget.py` + `app/plugins/managers/plugin_config_store.py` + `app/plugins/registries/ui_plugin_registry.py`): 增强插件欢迎 tab 动作；插件配置存储迁移至统一 store；补充侧栏/品牌图标资源。
+- **scanner 工具执行结果缓存** (`plugins/system-cleaner/ui/scanner.py` + `app/widgets/message_card.py`): 新增工具执行结果缓存定义，减少重复扫描开销。
+- **纯几何自动滚动** (`app/core/conversation/engine_session.py` + `executor.py` + `app/widgets/message_card.py`): 内容区与工具区改用纯几何自动滚动逻辑，消除抖动。
+- **多 tab 动态 widget 路由 API** (`app/gateway/local_service/session_handler.py` + `app/main_widget.py` + `app/widgets/tab_manager_window.py`): 重构 API session 处理，支持多 tab 环境动态 widget 路由。
+- **GatewayEngine 内置命令与 CardKit 流式协议** (`app/core/engines/gateway/engine.py`): 新增 /stop /status /compact 内置命令，联调飞书 CardKit 流式协议。
+- **usage_service force 参数与 tab_sync_guard** (`app/core/usage_service.py` + `app/plugins/registries/ui_plugin_registry.py` + `app/widgets/tab_manager_window.py`): request_coding_plan/request_balance 新增 force 绕过缓存；tab 切换用 tab_sync_guard 防止卡片误隐藏。
+- **team 静默预热与新窗口保活** (`app/main_widget.py` + `app/widgets/tab_manager_window.py`): spawn keep_current_active 静默预热新窗口；_spawn_team_members 支持 keep_current_active 保持原 tab 焦点。
+- **插件平台多平台 deps 统一加载** (`app/plugins/deps_loader.py` + `app/plugins/managers/plugin_manager.py` + `plugins/plugin-marketplace/ui/`): 插件平台声明与多平台 deps 统一加载与安装。
+- **plugin_config int/integer 类型别名** (`app/plugins/contracts/plugin_config.py`): 新增 int/integer → number 类型别名归一化。
+- **Gateway 消息瘦身** (`app/core/backend.py`): 工具进度仅流式平台内联，非流式平台只发正文。
+- **ConfigSyncService 主题模式同步** (`app/core/config_sync.py`): 改进主题模式同步处理与刷新逻辑。
+- **平台 session key 与 ToolActionSpec 尺寸** (`app/core/backend.py` + `app/gateway/` + `app/plugins/contracts/plugin_config.py`): 增强平台 session key 获取；ToolActionSpec 增加 image/dialog 尺寸。
+- **插件流式支持与动作按钮** (`app/core/backend.py` + `app/gateway/base.py` + `app/plugins/loaders/plugin_tool_loader.py` + `app/tools/`): 跨插件实现流式支持与动作按钮功能。
+- **TabManager tab 生成统一** (`app/main_widget.py`): 统一 tab 生成逻辑并增强流式 session 处理。
+
 ### 🐛 问题修复 (Bug Fixes)
-- **流式正文上滚位置保持** (`app/widgets/message_card.py`): 修复流式输出时用户上滚查看历史内容，正文一更新滚轮就被拉到固定偏上位置。根因是 `_userScrolledUp` 由 scroll 事件（异步派发）推断置位：① 竞争窗口——滚轮事件尚未派发时流式渲染 JS 抢先拉底覆盖用户位置，后续全量渲染保存被污染的 scrollTop 反复恢复到同一错误值；② 内容变短时 scrollTop 被浏览器钳制触发 scroll 误标上滚。修复改用 wheel 事件（同步派发、仅用户触发）置位上滚意图，scroll 事件只做「滚回底部附近恢复跟随」（补 `21a6ac15`）。
-- **macOS 窗口最小化按钮无响应** (`app/widgets/tab_manager_window.py` + `app/widgets/cards/settings/gitee_card.py`): 根因是「窗口置顶」给主窗口加 `WindowStaysOnTopHint`，Qt 在 macOS 上将窗口提到 NSStatusWindowLevel(8)，WindowServer 对非 normal 层级窗口丢弃标题栏最小化点击（系统层限制）。修复：macOS 改软置顶（不加 hint，应用激活时抬升），并主动摘除历史残留 hint 恢复最小化能力；Windows/Linux 保持原生置顶并补「关闭时摘除」；置顶开关统一收敛到 `_apply_window_topmost` 单一入口。同时移除 `AA_DontUseNativeMenuBar` 误用（应用级属性传给 `QWidget.setAttribute` 导致 TabManagerWindow 创建即 TypeError 崩溃）与 `WA_MacAlwaysShowToolWindow` 无效修复及 changeEvent 死代码双保险。
+
+- **team-manager run_id 粒度工作区存储** (`app/core/team_manager.py` + `app/main_widget.py`): 按 run_id 粒度隔离团队工作区，防止跨项目污染。
+- **changelog-fetcher 线程安全** (`app/widgets/message_card.py`): 改用 thread-local Markdown 实例防止跨线程问题。
+- **plugin-host 热重载补载** (`app/core/plugin_host_service.py`): 空转分支增加组件差异检查补载，修复去抖吞组件导致精准型组件永漏载。
+- **auto-scroll 行为增强与测试** (`app/widgets/message_card.py` + `plugins/system/tools/file_tools.py`): 增强自动滚动体验；补充 evolution_log_query 测试，移除废弃测试。
+- **context link 处理** (`app/widgets/message_card.py`): 弃用旧 markdown 格式，改进 tag 渲染。
+- **PluginHostService 引用迁移** (`app/core/config_sync.py` + `plugins/plugin-marketplace/ui/installer.py`): 更新 installer 与测试中的 PluginHostService 引用。
+- **mcp 启动自动连接恢复** (`app/core/plugin_host_service.py`): 恢复 PluginHostService 迁移中丢失的启动自动连接。
+- **AgentManager/HookManager 初始化** (`app/core/agent.py` + `app/core/hook_manager.py`): 确保 AgentManager 单例中 hook manager 正确初始化，防止静默失败并正确加载 hook。
+- **模型引用统一** (`app/cli.py` + `app/core/engines/gateway/engine.py` + `app/core/gateway_service.py`): 更新模型引用使用 llm_selected_model 保持一致。
+- **scroll_behavior 上滚不打断** (`app/main_widget.py` + `app/widgets/message_card.py` + `app/widgets/ui_helpers.py`): 用户上滚时阻止自动滚动打断。
+- **shortcuts QShortcut 归属** (`app/main_widget.py` + `main.py`): QShortcut 归属权改窗口级幂等 ensure，修复 Tab 模式快捷键失效。
+- **gateway adapter 泄漏修复** (`app/gateway/manager.py`): 重建前停止旧实例防止 adapter 泄漏。
+- **gateway _ensure_adapter 配置补齐** (`app/gateway/manager.py`): 配置补齐后重建旧实例，扫码后开开关即可连。
+- **message-card 流式正文上滚位置保持** (`app/widgets/message_card.py`): wheel 同步置位替代 scroll 事件推断，修复流式上滚被拉偏。
+- **window macOS 置顶与最小化** (`app/widgets/tab_manager_window.py` + `app/widgets/cards/settings/gitee_card.py`): macOS 改软置顶修复最小化无响应；修复 AA_DontUseNativeMenuBar 崩溃。
+- **README 软件界面图** (`README.md` + `images/`): 补缺失的软件界面图。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **Gateway 上移应用级 GatewayService** (`app/core/backend.py` + `app/core/engines/gateway/engine.py` + `app/core/gateway_service.py` + `app/widgets/tab_manager_window.py`): GatewayService 上移为应用级，与 tab/ChatWindow 生命周期彻底解耦。
+
+### 🎨 样式改进 (Style)
+
+- **思考标签图标与分隔线间距** (`app/widgets/message_card.py` + `app/widgets/tab_panel.py`): 调整思考标签蛇形图标尺寸（18→12）；标签页分隔线改用 DIVIDER_COLOR 并加 margin；插件卡内边距调整。
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号升级至 v0.5.5** (`pyproject.toml` + `app/utils/config.py` + `dist/installer.iss` + `README.md`): 同步升级四处版本号。
+- **忽略临时调试脚本** (`.gitignore`): 将 _diag*.py 调试脚本加入忽略。
+
+### 🔄 其他变更 (Other)
+
+- **TabPanel 品牌布局重构与侧栏图标** (`app/widgets/tab_panel.py` + `app/utils/icon_name_map*.py` + `icons/`): 重构品牌布局并新增侧栏图标。
+- **logging 设置与自动滚动重构** (`app/core/logging_setup.py` + `app/core/team_manager.py` + `main.py`): 重构日志设置；增强自动滚动行为。
+- **插件管理重构使用 PluginHostService** (`app/core/backend.py` + `app/core/config_sync.py` + `app/core/plugin_host_service.py` + `app/main_widget.py` + `main.py`): 插件管理迁移至 PluginHostService 统一管理。
+- **revert 撤销 d435668d** (`app/core/`): 撤销 AgentManager/HookManager 无效修复（探针/冗余兜底），回到基线。
 
 ## [v0.5.4] - 2026-08-23
 
