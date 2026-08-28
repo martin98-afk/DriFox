@@ -160,8 +160,10 @@ _render_tls = threading.local()
 # ======== 预编译的正则表达式（提升到模块级别，避免重复编译）=======
 _CODE_BLOCK_PATTERN = re.compile(r"```(\w*)\n(.*?)```", re.DOTALL)
 _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")?>(.*?)</code></pre>", re.DOTALL)
-_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((ask)(?:\|([^)]*))?\)")
-# 追问新格式：<ask>内容</ask>（替代 [内容](ask)），先归一化为旧格式再统一走 replacer
+# [内容](ask) 旧格式已废弃，请改用 <ask>内容</ask>；
+# 仅保留 jump/create/generate/view/session 的旧 markdown 链接兼容。
+_CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((jump|create|generate|view|session)(?:\|([^)]*))?\)")
+# 追问新格式：<ask>内容</ask>，直接生成胶囊（空内容丢弃整段标签，避免 [](ask) 残留）
 _ASK_TAG_PATTERN = re.compile(r"<ask>(.*?)</ask>", re.DOTALL)
 _CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
@@ -2501,14 +2503,25 @@ def get_random_greeting() -> str:
 
 
 def _inject_context_links(md_text: str) -> str:
-    """将 [文本](ask/jump/create/generate/view/session) 或 <ask>文本</ask> 转换为胶囊样式的追问标签
+    """将 <ask>文本</ask> 或 [文本](jump/create/generate/view/session) 转换为胶囊样式的追问标签
+
+    注：[文本](ask) 旧格式已废弃，不再识别（残留会渲染成空 markdown 链接）。
 
     session 类型格式：[文本](session|session_id|last_time)
     last_time 如果为空则不显示
     """
 
-    # 新格式 <ask>内容</ask> → 归一化为 [内容](ask)，与旧格式共用 replacer 逻辑
-    md_text = _ASK_TAG_PATTERN.sub(lambda m: f"[{m.group(1).strip()}](ask)", md_text)
+    # 新格式 <ask>内容</ask> → 直接生成胶囊
+    # strip 后空内容（如 <ask></ask>、<ask>   </ask>、<ask>\n</ask>）丢弃整段标签，
+    # 避免旧逻辑归一化为 [](ask) 后残留为字面 markdown 链接导致渲染崩（<a href="ask"></a>）。
+    def _ask_replacer(m: re.Match) -> str:
+        content = m.group(1).strip()
+        if not content:
+            return ""
+        attrs = f'data-type="ask" data-content="{escape(content)}" data-action="ask"'
+        return f'<span class="context-tag" {attrs}>{content}</span>'
+
+    md_text = _ASK_TAG_PATTERN.sub(_ask_replacer, md_text)
 
     def replacer(match):
         content = match.group(1)
