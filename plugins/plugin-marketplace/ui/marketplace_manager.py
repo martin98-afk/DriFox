@@ -67,7 +67,7 @@ _DEFAULT_SOURCES = [
         "name": "drifox-official",
         "source": {
             "source": "url",
-            "url": "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/main/marketplace.json",
+            "url": "https://raw.githubusercontent.com/martin98-afk/drifox-plugins/pyside6/marketplace.json",
         },
         "auto_update": True,
         "builtin": True,
