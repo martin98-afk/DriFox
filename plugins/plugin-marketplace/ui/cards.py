@@ -131,23 +131,28 @@ def _ctx_font(ctx: dict) -> tuple:
 
 
 class _MarketplaceWorker(QObject):
-    """在后台线程执行阻塞操作，通过信号返回结果"""
+    """在后台线程执行阻塞操作，通过信号返回结果
 
-    finished = Signal(object)
-    error = Signal(str)
+    PySide6 迁移注记：queued 槽内 sender() 在对象生命周期竞争下可能返回 None，
+    故 task 上下文直接作为信号参数传递（随事件拷贝，不依赖 sender）。
+    """
 
-    def __init__(self, fn, *args, **kwargs):
+    finished = Signal(object, object)  # (result, task)
+    error = Signal(str, object)        # (err, task)
+
+    def __init__(self, fn, task=None, *args, **kwargs):
         super().__init__()
         self._fn = fn
+        self._task = task
         self._args = args
         self._kwargs = kwargs
 
     def run(self):
         try:
             result = self._fn(*self._args, **self._kwargs)
-            self.finished.emit(result)
+            self.finished.emit(result, self._task)
         except Exception as e:
-            self.error.emit(f"{e}\n{traceback.format_exc()}")
+            self.error.emit(f"{e}\n{traceback.format_exc()}", self._task)
 
 
 class _MarketFetchWorker(QObject):
@@ -3179,7 +3184,7 @@ class MarketplaceCard(QWidget):
         self._dl_fetch_thread.finished.connect(self._dl_fetch_thread.deleteLater)
         self._dl_fetch_thread.start()
 
-    def _on_dl_fetch_error(self, _err: str):
+    def _on_dl_fetch_error(self, _err: str, _task=None):
         """下载列表拉取失败：以 None 结果进入主线程处理（信号桥）"""
         self._on_downloads_fetched(None)
 
@@ -3903,13 +3908,11 @@ class MarketplaceCard(QWidget):
         # 任务真正开始时行再确认 busy（排队期间可能被其他操作刷新）
         self._set_row_busy(name, task["busy_text"])
 
-        worker = _MarketplaceWorker(task["fn"])
-        worker._bound_task = task  # 供主线程 handler 经 sender() 取回任务上下文
+        worker = _MarketplaceWorker(task["fn"], task=task)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        # PySide6 注记：lambda 连接无 receiver 上下文，会在 emitter（worker）线程执行，
-        # 导致 _on_task_done/InfoBar 跨线程操作 UI → 整体冻结。改绑定方法自动 Queued 回主线程。
+        # task 随信号参数传递（queued 事件拷贝），槽必定拿到完整任务上下文
         worker.finished.connect(self._on_task_done_sig)
         worker.error.connect(self._on_task_error_sig)
         worker.finished.connect(thread.quit)
@@ -3923,17 +3926,17 @@ class MarketplaceCard(QWidget):
         self._worker_thread = thread  # 兼容字段：最近启动的线程
         thread.start()
 
-    def _on_task_done_sig(self, result):
-        """信号桥：经 sender() 取回绑定任务后进入主线程完成处理"""
-        task = getattr(self.sender(), "_bound_task", None)
+    def _on_task_done_sig(self, result, task):
+        """信号桥：task 随信号参数传入，主线程执行完成处理"""
         if task is not None:
             self._on_task_done(task, bool(result))
-
-    def _on_task_error_sig(self, err: str):
-        """信号桥：错误分支（同上，保证主线程执行）"""
-        task = getattr(self.sender(), "_bound_task", None)
+        else:
+    
+    def _on_task_error_sig(self, err: str, task):
+        """信号桥：错误分支（同上，主线程执行）"""
         if task is not None:
             self._on_task_error(task, err)
+        else:
 
     def _on_task_done(self, task: dict, success: bool):
         """任务完成：从活跃表移除 + 分发完成处理 + 启动下一个可运行任务"""
@@ -4417,7 +4420,7 @@ class MarketplaceCard(QWidget):
         self._rs_fetch_thread.finished.connect(self._rs_fetch_thread.deleteLater)
         self._rs_fetch_thread.start()
 
-    def _on_rs_scan_error(self, _err: str):
+    def _on_rs_scan_error(self, _err: str, _task=None):
         """行状态扫描失败：以 None 结果进入主线程处理（信号桥）"""
         self._on_row_states_scanned(None)
 
@@ -4925,7 +4928,7 @@ class MarketplaceCard(QWidget):
         self._proxy_thread.finished.connect(self._proxy_thread.deleteLater)
         self._proxy_thread.start()
 
-    def _on_proxy_test_error(self, err: str):
+    def _on_proxy_test_error(self, err: str, _task=None):
         """代理测速失败：以失败结果进入主线程处理（信号桥）"""
         self._on_proxy_test_done(("失败", err))
 
@@ -5704,11 +5707,12 @@ class MarketplaceCard(QWidget):
             label.setToolTip("正在重新拉取该市场源…")
 
         self._cleanup_check_worker()
-        self._check_worker = _MarketplaceWorker(lambda d=src_def: mgr.fetch_marketplace(d, force=True))
+        self._check_worker = _MarketplaceWorker(
+            lambda d=src_def: mgr.fetch_marketplace(d, force=True), task=name
+        )
         self._check_thread = QThread(self)
         self._check_worker.moveToThread(self._check_thread)
         self._check_thread.started.connect(self._check_worker.run)
-        self._check_worker._bound_name = name
         self._check_worker.finished.connect(self._on_check_source_sig)
         self._check_worker.error.connect(self._on_check_source_error_sig)
         self._check_worker.finished.connect(self._check_thread.quit)
@@ -5718,15 +5722,13 @@ class MarketplaceCard(QWidget):
         self._check_thread.finished.connect(self._check_thread.deleteLater)
         self._check_thread.start()
 
-    def _on_check_source_sig(self, result):
-        """单源校验完成信号桥（主线程执行）"""
-        name = getattr(self.sender(), "_bound_name", None)
+    def _on_check_source_sig(self, result, name):
+        """单源校验完成信号桥（name 随信号参数传入，主线程执行）"""
         if name is not None:
             self._on_check_source_done(name, result)
 
-    def _on_check_source_error_sig(self, err: str):
+    def _on_check_source_error_sig(self, err: str, name):
         """单源校验失败信号桥（主线程执行）"""
-        name = getattr(self.sender(), "_bound_name", None)
         if name is not None:
             self._on_check_source_done(name, None, err=err)
 
