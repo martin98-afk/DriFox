@@ -66,7 +66,7 @@ def test_real_tall_content_still_capped():
 
     # 更窄宽度走 O(1) 快速路径（性能特性不回归）
     v.set_width_cap(300)
-    _flush(qapp)
+    _flush()
     assert v.width() == 300 and v.height() == PlainTextViewer.MAX_HEIGHT
 
 
@@ -77,6 +77,6 @@ def test_short_message_survives_narrow_then_wide():
         v.set_width_cap(cap)
         if v._text != _SHORT:
             v.set_text(_SHORT)
-        _flush(qapp)
+        _flush()
         assert v.height() < 160, f"cap={cap} 时短消息高度异常: {v.height()}"
         assert v._tall_cap == 0, f"cap={cap} 时不应记录超高缓存"

@@ -1010,9 +1010,9 @@ class TabPanel(QWidget):
 
         # ── 顶部：品牌区（水平布局：左侧产品标识 + 右侧侧边栏收起/展开按钮）──
         self._brand_widget = QWidget(self)
-        brand_layout = QHBoxLayout(self._brand_widget)
-        brand_layout.setContentsMargins(10, 4, 6, 4)
-        brand_layout.setSpacing(4)
+        self._brand_layout = QHBoxLayout(self._brand_widget)
+        self._brand_layout.setContentsMargins(10, 4, 6, 4)
+        self._brand_layout.setSpacing(4)
 
         # 左侧：产品标识（水平：标题 + 版本号同排，降低整体高度）
         self._brand_left = QWidget(self._brand_widget)
@@ -1032,7 +1032,7 @@ class TabPanel(QWidget):
         # 末尾 stretch 吸收多余空间，保证标题+版本号整体左对齐（QLabel 默认
         # Preferred 策略会平分多余空间，把版本号挤到中间）
         brand_left_layout.addStretch(1)
-        brand_layout.addWidget(self._brand_left, 1)
+        self._brand_layout.addWidget(self._brand_left, 1)
 
         # 右侧：侧边栏收起/展开按钮
         self._sidebar_toggle_btn = TransparentToolButton(self._brand_widget)
@@ -1040,7 +1040,7 @@ class TabPanel(QWidget):
         self._sidebar_toggle_btn.setFixedSize(28, 28)
         self._sidebar_toggle_btn.setToolTip("收起/展开侧边栏")
         self._sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
-        brand_layout.addWidget(self._sidebar_toggle_btn)
+        self._brand_layout.addWidget(self._sidebar_toggle_btn)
 
         layout.addWidget(self._brand_widget)
 
@@ -1483,9 +1483,21 @@ class TabPanel(QWidget):
             self._new_icon_btn.setVisible(True)
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
+            # 折叠态：品牌区只剩收起/展开按钮，让其在窄条内水平居中
+            # （_brand_left 隐藏后无 stretch 会把按钮顶到左对齐，故显式居中）。
+            # 左右 margin 对称 + 按钮 cell 拉伸 + 居中对齐，保证 46px 窄条内居中。
+            self._brand_layout.setContentsMargins(8, 4, 8, 4)
+            self._brand_layout.setStretch(0, 0)
+            self._brand_layout.setStretch(1, 1)
+            self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.AlignHCenter)
         else:
             # 展开时恢复产品标识
             self._brand_left.setVisible(True)
+            # 展开态：恢复默认边距与拉伸，按钮回到右上角
+            self._brand_layout.setContentsMargins(10, 4, 6, 4)
+            self._brand_layout.setStretch(0, 1)
+            self._brand_layout.setStretch(1, 0)
+            self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.Alignment())
             # 展开时恢复文字新建按钮，隐藏图标按钮
             self._branch_btn.setVisible(True)
             self._branch_btn.setText("分支")
