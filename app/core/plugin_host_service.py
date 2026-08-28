@@ -1691,7 +1691,21 @@ class PluginHostService(QObject):
 
             # ── 精准路径：无变更不重载任何子系统 ──
             if not added and not removed and not changed:
-                logger.debug("[PluginHost] 无插件变更，跳过子系统重载")
+                # 组件差异兑底（2026-08-28）：watcher 300ms 去抖会把同批后到的组件请求
+                # 合并进本方法，而首拍组件的 rescan_plugin 已消费插件级 changed → 此处
+                # diff 恒为空。精准型组件（tools/providers/ui）无自愈轮询，被吞后到重
+                # 启前无人加载（实测：cron-tasks 同批 ui+tools+__manifest__，tools 漏载）。
+                # 此处探测 manifest 声明 vs 运行时注册的差异并精准补载。
+                missed = self._detect_unloaded_components(pm)
+                if missed:
+                    for pname, comps in missed.items():
+                        for comp in comps:
+                            logger.info(f"[PluginHost] 组件差异补载: [{pname}] ({comp})")
+                            sub = self._reload_single_plugin(pname, comp)
+                            self._merge_reload_result(result, sub, result_keys)
+                    logger.info(f"[PluginHost] 组件差异补载完成: {missed}")
+                else:
+                    logger.debug("[PluginHost] 无插件变更，跳过子系统重载")
                 return result
 
             logger.info(
@@ -1727,6 +1741,61 @@ class PluginHostService(QObject):
                 result[k] = result.get(k, 0) + v
             else:
                 result[k] = True
+
+    # ------------------------------------------------------------------
+    #  组件差异探测（精准型组件漏载兑底）
+    # ------------------------------------------------------------------
+
+    def _detect_unloaded_components(self, pm) -> Dict[str, List[str]]:
+        """扫描 manifest 声明 vs 运行时已注册，返回漏载组件 {插件名: [组件名]}
+
+        只探测可轻量判定的精准型组件（tools/providers/ui）：
+        - runtime 系 7 类（storages/serializers/gateways/engines/model_adapters/
+          loop_policies/hook_policies）自带 5s 轮询自愈，无需重复探测；
+        - agents/hooks/commands 等全量/懒生效组件变更通常伴随插件级 changed，
+          走上方精准路径即可。
+        禁用插件跳过（其组件本就不该加载）。
+        """
+        missed: Dict[str, List[str]] = {}
+        for plugin in pm.list_plugins():
+            if not pm.is_enabled(plugin.name):
+                continue
+            declared = {c for c, v in (plugin.components or {}).items() if v}
+            if not declared:
+                continue
+            lack = [c for c in sorted(declared) if self._component_registered(plugin.name, c) is False]
+            if lack:
+                missed[plugin.name] = lack
+        return missed
+
+    def _component_registered(self, plugin_name: str, comp: str) -> Optional[bool]:
+        """单组件运行时注册探测。True=已注册 False=未注册 None=无法判定（不补载）"""
+        try:
+            if comp == "tools":
+                from app.plugins.loaders.plugin_tool_loader import ensure_plugin_tool_watcher
+
+                watcher = ensure_plugin_tool_watcher()
+                if watcher is None:
+                    return None
+                if watcher._loaded.get(plugin_name):
+                    return True
+                # 兑底：_loaded 记忆失真时以注册表实际内容为准（对齐 unload_plugin 防御）
+                return any(reg.source == f"plugin:{plugin_name}" for reg in watcher._registry.list())
+            if comp == "providers":
+                from app.plugins.loaders.provider_loader import ensure_provider_watcher
+
+                watcher = ensure_provider_watcher()
+                if watcher is None:
+                    return None
+                # ProviderWatcher 无自身记忆，以注册表实际内容为准（对齐 scan_now 语义）
+                return f"plugin:{plugin_name}" in watcher._registry.provider_sources()
+            if comp == "ui":
+                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+                return UIPluginRegistry.get_instance().is_loaded(plugin_name)
+        except Exception as e:
+            logger.debug(f"[PluginHost] 组件注册探测失败: {plugin_name}/{comp}: {e}")
+        return None
 
     def _reload_all_subsystems(self, pm, result: dict, result_keys: tuple) -> dict:
         """全量重载所有子系统（设置面板「重载插件」显式语义，force_full=True）"""
