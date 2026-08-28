@@ -1445,9 +1445,9 @@ class ConfigSyncService(QObject):
             # 跳过 user-custom 变更并标记 pending，下载完成后由
             # _reload_settings_on_main_thread 末尾合并触发一次 reload_plugin_subsystems。
             try:
-                from app.core.backend import ChatBackend
+                from app.core.plugin_host_service import PluginHostService
 
-                ChatBackend._suppress_watcher_until = time.time() + 35.0
+                PluginHostService._suppress_watcher_until = time.time() + 35.0
             except Exception:
                 pass
 

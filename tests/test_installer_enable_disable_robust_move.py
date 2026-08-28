@@ -170,27 +170,31 @@ def test_disable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
 
     回归：旧实现 _resume_backend_watcher(reload=True) 固定调 reload_plugin_subsystems，
     卸载/禁用一个插件会把全部插件的 hooks 注销重注册、全部 agents 重载。
+
+    注：reload 目标已迁移到 PluginHostService（应用级单例），不再走 ChatBackend._active_instances。
     """
-    from app.core.backend import ChatBackend
+    from app.core.plugin_host_service import PluginHostService
     from ui.installer import PluginInstaller
 
     installer = _make_installer(tmp_path)
     _build_fake_plugin(installer._plugins_dir, "gateway-feishu")
 
     monkeypatch.setattr("ui.installer.time.sleep", lambda *_: None)
-    monkeypatch.setattr(ChatBackend, "_suppress_watcher_until", 0.0, raising=False)
+    monkeypatch.setattr(PluginHostService, "_suppress_watcher_until", 0.0, raising=False)
 
     targeted: list = []
     full: list = []
 
     class _FakeInst:
-        def reload_plugin_targeted(self, name):
+        def reload_plugin_targeted(self, name, action=None):
             targeted.append(name)
 
         def reload_plugin_subsystems(self):
             full.append(True)
 
-    monkeypatch.setattr(ChatBackend, "_active_instances", {_FakeInst()})
+    monkeypatch.setattr(
+        PluginHostService, "get_instance", classmethod(lambda cls: _FakeInst())
+    )
     # 测试无事件循环：QTimer.singleShot 改为立即执行
     monkeypatch.setattr("PyQt5.QtCore.QTimer.singleShot", staticmethod(lambda msec, fn: fn()))
 
@@ -201,27 +205,32 @@ def test_disable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
 
 
 def test_enable_uses_targeted_reload_not_full(monkeypatch, tmp_path):
-    """启用后重载同样走 reload_plugin_targeted（精准），不触发全量"""
-    from app.core.backend import ChatBackend
+    """启用后重载同样走 reload_plugin_targeted（精准），不触发全量
+
+    注：reload 目标已迁移到 PluginHostService（应用级单例），不再走 ChatBackend._active_instances。
+    """
+    from app.core.plugin_host_service import PluginHostService
     from ui.installer import PluginInstaller
 
     installer = _make_installer(tmp_path)
     _build_fake_plugin(installer._disabled_dir, "gateway-feishu")
 
     monkeypatch.setattr("ui.installer.time.sleep", lambda *_: None)
-    monkeypatch.setattr(ChatBackend, "_suppress_watcher_until", 0.0, raising=False)
+    monkeypatch.setattr(PluginHostService, "_suppress_watcher_until", 0.0, raising=False)
 
     targeted: list = []
     full: list = []
 
     class _FakeInst:
-        def reload_plugin_targeted(self, name):
+        def reload_plugin_targeted(self, name, action=None):
             targeted.append(name)
 
         def reload_plugin_subsystems(self):
             full.append(True)
 
-    monkeypatch.setattr(ChatBackend, "_active_instances", {_FakeInst()})
+    monkeypatch.setattr(
+        PluginHostService, "get_instance", classmethod(lambda cls: _FakeInst())
+    )
     monkeypatch.setattr("PyQt5.QtCore.QTimer.singleShot", staticmethod(lambda msec, fn: fn()))
 
     ok = installer.enable("gateway-feishu")
