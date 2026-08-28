@@ -407,6 +407,24 @@ def _wrap_code_blocks_with_copy_button_web(
                 # JSON 解析失败，降级为普通代码块
                 pass
 
+        # ===== Mermaid 代码块：渲染为矢量图表 =====
+        # 这里只产出占位容器，真正的 vendor（polyfill + mermaid 10.9.1）
+        # 由 JS 侧首次遇到 .mermaid-block 时才动态加载，避免所有卡片都背上 3.3MB。
+        # 背景：Chromium 83 缺 structuredClone，mermaid 10 在模块顶层就炸、
+        #       window.mermaid 直接 undefined，必须先打 polyfill。见 docs/mermaid-chromium83.md。
+        if lang == "mermaid":
+            try:
+                mmd_text = _unescape_html(code_content_raw)
+                if mmd_text.strip():
+                    b64_mmd = base64.b64encode(mmd_text.encode("utf-8")).decode("ascii")
+                    mmd_id = "mmd-" + hashlib.sha1(mmd_text.encode("utf-8")).hexdigest()[:12]
+                    return (
+                        f'<div id="{mmd_id}" class="mermaid-block" '
+                        f'data-mermaid-src="{b64_mmd}" style="margin: 12px 0;"></div>'
+                    )
+            except Exception:
+                pass
+
         # --- 普通代码块处理 ---
         try:
             copy_text = _unescape_html(code_content_raw)
@@ -2079,7 +2097,10 @@ _SKELETON_CACHE_MAX = 48
 # 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
 # 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
 # data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
-_SKELETON_CACHE_VERSION = 16
+# v17（2026-08-29）：新增 Mermaid 渲染链路（_mmdEnsure / renderMermaidBlocks
+# 与 .mermaid-block 样式）。旧骨架无 renderMermaidBlocks，调用点已用
+# typeof 守卫，不会报错，但会静默不渲染——必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 17
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2670,6 +2691,51 @@ def _get_vendor_script_tags() -> str:
 
     _vendor_script_tags_cache = "\n        ".join(tags)
     return _vendor_script_tags_cache
+
+
+_mermaid_vendor_urls_cache: Optional[tuple] = None
+
+
+def _get_mermaid_vendor_urls() -> tuple:
+    """返回 (polyfill_url, mermaid_url)，本地优先、缺失时 mermaid 降级 CDN。
+
+    **不并入** `_get_vendor_script_tags()`：那份结果被写进骨架 HTML 并被
+    `_skeleton_cache` 缓存，会让**每条消息**都背上 3.3MB 的 mermaid。
+    mermaid 由 JS 侧在真正遇到 ```mermaid 块时才动态加载，见 `renderMermaidBlocks`。
+
+    polyfill 必须在 mermaid 之前加载：Qt 5.15.2 的 WebEngine 是 Chromium 83
+    （实测 navigator.userAgent 确认），缺 `structuredClone` / `Object.hasOwn` /
+    `String.replaceAll` / `Array.prototype.at`，而 mermaid 10 在**模块顶层**
+    就会用到，缺一个即整体 `undefined`。详见 `docs/mermaid-chromium83.md`。
+
+    polyfill 是项目自带文件，无 CDN 版本；本地缺失时返回空串，
+    JS 侧跳过它（mermaid 大概率仍会失败，但不影响卡片其余部分渲染）。
+    """
+    global _mermaid_vendor_urls_cache
+    if _mermaid_vendor_urls_cache is not None:
+        return _mermaid_vendor_urls_cache
+
+    base_dirs = [_PROJECT_ROOT]
+    if hasattr(sys, "_MEIPASS"):
+        base_dirs.append(sys._MEIPASS)
+
+    polyfill_url = ""
+    mermaid_url = "https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"
+
+    for base in base_dirs:
+        candidate = os.path.join(base, "app/resources/web/vendor/chromium83-polyfill.js")
+        if os.path.isfile(candidate):
+            polyfill_url = QUrl.fromLocalFile(candidate).toString()
+            break
+
+    for base in base_dirs:
+        candidate = os.path.join(base, "app/resources/web/vendor/mermaid.min.js")
+        if os.path.isfile(candidate):
+            mermaid_url = QUrl.fromLocalFile(candidate).toString()
+            break
+
+    _mermaid_vendor_urls_cache = (polyfill_url, mermaid_url)
+    return _mermaid_vendor_urls_cache
 
 
 # ======== WebViewer ========
@@ -3503,6 +3569,14 @@ class CodeWebViewer(QWebEngineView):
         font_family_global = _get_global_font()
 
         theme_fp = json.dumps({k: theme[k] for k in sorted(theme)}, option=json.OPT_SORT_KEYS).decode("utf-8")
+        # mermaid vendor URL 进 key：热替换 vendor 文件后能让旧骨架缓存失效
+        _mmd_polyfill_url, _mmd_lib_url = _get_mermaid_vendor_urls()
+        # mermaid 主题联动：取 Colors 而非硬编码，避免浅色主题下白叠白
+        # （MEMORY.md 记录的反复出现的缺陷模式）。Colors 大写属性由主题 YAML 自动填充。
+        mmd_text_color = Colors.TEXT_PRIMARY
+        mmd_line_color = Colors.TEXT_SECONDARY
+        mmd_node_bg = Colors.CONTENT_BG
+        mmd_border = Colors.BORDER
         cache_key = (
             # 🆕 方案 A（#33）：骨架缓存版本号——骨架 JS/DOM 结构变更时递增，
             # 防止旧版骨架缓存与新代码混合导致 JS 行为不一致（卡片空白根因之一）。
@@ -3516,6 +3590,12 @@ class CodeWebViewer(QWebEngineView):
             tag_font_size,
             small_font_size,
             tiny_font_size,
+            _mmd_polyfill_url,
+            _mmd_lib_url,
+            mmd_text_color,
+            mmd_line_color,
+            mmd_node_bg,
+            mmd_border,
         )
         cached = _skeleton_cache.get(cache_key)
         if cached is not None:
@@ -4725,6 +4805,39 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 '''
 
+                /* ===== Mermaid 图表容器 ===== */
+                .mermaid-block {{
+                    width: 100%;
+                    margin: 12px 0;
+                    padding: 12px 10px;
+                    border-radius: 10px;
+                    background: transparent;
+                    border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
+                    overflow-x: auto;
+                    text-align: center;
+                }}
+                /* mermaid 输出的 svg 自带固定 width，需放开以便窄卡片内自适应 */
+                .mermaid-block svg {{
+                    max-width: 100%;
+                    height: auto;
+                }}
+                .mermaid-block.mermaid-pending {{
+                    min-height: 42px;
+                    color: var(--text-muted, #8b949e);
+                    font-size: 12px;
+                }}
+                /* 渲染失败：退回源码，保证内容不丢 */
+                .mermaid-error {{
+                    text-align: left;
+                    margin: 0;
+                    padding: 10px 12px;
+                    white-space: pre-wrap;
+                    word-break: break-word;
+                    font-size: 12px;
+                    color: var(--text-secondary, #c9d1d9);
+                }}
+                '''
+
                 /* 内容区图片可点击打开 */
                 #content-placeholder img {{
                     cursor: pointer;
@@ -5157,9 +5270,94 @@ class CodeWebViewer(QWebEngineView):
                     }});
                 }}
 
-                // ===== Mermaid 渲染（已移除） =====
-                // mermaid 图表渲染功能因 QtWebEngine Chromium 版本兼容问题已整体移除。
-                // mermaid 代码块（```mermaid）降级为普通代码块，由 Pygments 高亮显示。
+                // ===== Mermaid 渲染（Chromium 83 兼容：polyfill + mermaid 10.9.1 懒加载） =====
+                // Qt 5.15.2 的 WebEngine 是 Chromium 83，缺 structuredClone / Object.hasOwn /
+                // replaceAll / Array.prototype.at；mermaid 10 在模块顶层就会用到，缺一个即
+                // 整体 undefined。故必须先加载 polyfill，再加载 mermaid。见 docs/mermaid-chromium83.md。
+                var _MMD_POLYFILL = '{_mmd_polyfill_url}';
+                var _MMD_LIB = '{_mmd_lib_url}';
+
+                function _mmdLoadScript(src, onOk) {{
+                    if (!src) {{ onOk(); return; }}
+                    var s = document.createElement('script');
+                    s.src = src;
+                    s.onload = onOk;
+                    s.onerror = function () {{ console.error('[mermaid] load failed: ' + src); }};
+                    document.head.appendChild(s);
+                }}
+
+                function _mmdEnsure(cb) {{
+                    if (window.mermaid && window.mermaid.render) {{ cb(); return; }}
+                    if (!window._mmdQueue) window._mmdQueue = [];
+                    window._mmdQueue.push(cb);
+                    if (window._mmdLoading) return;          // 已在加载中，排队即可
+                    window._mmdLoading = true;
+                    _mmdLoadScript(_MMD_POLYFILL, function () {{
+                        _mmdLoadScript(_MMD_LIB, function () {{
+                            try {{
+                                window.mermaid.initialize({{
+                                    startOnLoad: false,
+                                    // 内容来自 LLM，不可信：strict 会 sanitize 标签、禁用交互
+                                    securityLevel: 'strict',
+                                    theme: 'base',
+                                    themeVariables: {{
+                                        primaryTextColor: '{mmd_text_color}',
+                                        lineColor: '{mmd_line_color}',
+                                        mainBkg: '{mmd_node_bg}',
+                                        nodeBorder: '{mmd_border}',
+                                        background: 'transparent',
+                                        fontSize: '{body_font_size}px'
+                                    }}
+                                }});
+                            }} catch (e) {{
+                                console.error('[mermaid] initialize failed:', e);
+                            }}
+                            window._mmdLoading = false;
+                            var q = window._mmdQueue || [];
+                            window._mmdQueue = [];
+                            for (var qi = 0; qi < q.length; qi++) {{ q[qi](); }}
+                        }});
+                    }});
+                }}
+
+                function renderMermaidBlocks() {{
+                    var blocks = document.querySelectorAll('.mermaid-block[data-mermaid-src]');
+                    if (!blocks.length) return;
+                    _mmdEnsure(function () {{
+                        if (!window.mermaid || !window.mermaid.render) return;
+                        for (var i = 0; i < blocks.length; i++) {{
+                            (function (el) {{
+                                if (el._mmdDone) return;
+                                el._mmdDone = true;             // 流式追加不重复渲染
+                                var decoded;
+                                try {{
+                                    // atob 按 ISO-8859-1 解码，直接用于 UTF-8 中文会 mojibake
+                                    var bytes = Uint8Array.from(atob(el.getAttribute('data-mermaid-src')),
+                                        function (c) {{ return c.charCodeAt(0); }});
+                                    decoded = new TextDecoder('utf-8').decode(bytes);
+                                }} catch (e) {{
+                                    decoded = '';
+                                }}
+                                if (!decoded) return;
+                                var rid = (el.id || 'mmd') + '-svg';
+                                window.mermaid.render(rid, decoded).then(function (r) {{
+                                    var svg = r && r.svg ? r.svg : String(r);
+                                    if (svg.indexOf('<svg') < 0) throw new Error('no svg in result');
+                                    el.classList.remove('mermaid-pending');
+                                    el.innerHTML = svg;
+                                    el.setAttribute('data-mermaid-src', '');   // 渲染完释放 b64
+                                    if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                                }})['catch'](function (e) {{
+                                    // 失败不吞内容：退回原始源码，用户仍可复制
+                                    el.classList.remove('mermaid-pending');
+                                    el.innerHTML = '<pre class="mermaid-error"></pre>';
+                                    el.firstChild.textContent = decoded;
+                                    if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                                }});
+                            }})(blocks[i]);
+                        }}
+                    }});
+                }}
 
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
@@ -5322,6 +5520,9 @@ class CodeWebViewer(QWebEngineView):
                             }});
                         }}
 
+                        // 渲染 Mermaid 图表（内部按需懒加载 polyfill + mermaid）
+                        if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
+
                         // 将工具/思考块分流到独立滚动容器（仅简洁模式）
                         // 必须在 _suppressScrollEvent=false 之前执行，
                         // 否则移动 DOM 触发的 scroll 事件会错误标记 _userScrolledWithin=true
@@ -5470,6 +5671,8 @@ class CodeWebViewer(QWebEngineView):
                             }}
                         }});
                     }}
+                    // 渲染 Mermaid 图表（追加的闭合段可能含 ```mermaid 代码块）
+                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
                     // 使用延迟报告，确保浏览器布局完成
                     setTimeout(() => reportHeight(), 30);
                 }}
