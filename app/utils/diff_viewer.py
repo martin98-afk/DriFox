@@ -24,9 +24,10 @@ from typing import Dict, List, Optional
 
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer, QUrl
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
-from PyQt5.QtWidgets import QDialog, QHBoxLayout
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import QDialog, QHBoxLayout
 
 from app.core.webengine_profile import create_transient_web_profile
 

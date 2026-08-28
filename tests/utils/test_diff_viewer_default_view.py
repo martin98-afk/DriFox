@@ -22,8 +22,8 @@
 
 import sys
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 # 必须在导入 diff_viewer（其导入 QWebEngineWidgets）之前设置
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)

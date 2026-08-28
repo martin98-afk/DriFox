@@ -4,8 +4,8 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QFrame, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QFrame, QWidget
 
 from app.widgets.tab_panel import TabItem, TabPanel, UIPluginRow
 

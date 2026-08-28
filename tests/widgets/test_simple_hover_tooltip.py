@@ -10,8 +10,8 @@
 from unittest.mock import patch
 
 import pytest
-from PyQt5.QtCore import QPoint
-from PyQt5.QtWidgets import QLabel
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QLabel
 
 
 def _make_label_with_filter(qtbot):
@@ -77,9 +77,9 @@ def test_on_timeout_shows_when_cursor_inside(qtbot):
 
 def test_event_filter_enter_starts_timer(qtbot):
     """回归：真实 QEnterEvent 走 eventFilter → tooltip 计时激活"""
-    from PyQt5.QtCore import QPointF
-    from PyQt5.QtGui import QEnterEvent
-    from PyQt5.QtWidgets import QApplication, QPushButton
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QEnterEvent
+    from PySide6.QtWidgets import QApplication, QPushButton
 
     from app.widgets.simple_hover_tooltip import _filters, install_hover_tooltip
 
@@ -104,8 +104,8 @@ def test_event_filter_hide_to_parent_hides_tooltip(qtbot):
     """
     from unittest.mock import patch as _patch
 
-    from PyQt5.QtCore import QEvent
-    from PyQt5.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication, QPushButton, QVBoxLayout, QWidget
 
     from app.widgets.simple_hover_tooltip import _filters, install_hover_tooltip
 
@@ -142,8 +142,8 @@ def test_event_filter_mouse_press_hides_tooltip(qtbot):
     """
     from unittest.mock import patch as _patch
 
-    from PyQt5.QtCore import QEvent
-    from PyQt5.QtWidgets import QApplication, QPushButton
+    from PySide6.QtCore import QEvent
+    from PySide6.QtWidgets import QApplication, QPushButton
 
     from app.widgets.simple_hover_tooltip import _filters, install_hover_tooltip
 
@@ -178,8 +178,8 @@ def test_guard_hides_when_cursor_leaves_after_show(qtbot):
 
     from unittest.mock import patch as _patch
 
-    from PyQt5.QtCore import QPoint
-    from PyQt5.QtWidgets import QApplication, QLabel
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication, QLabel
 
     from app.widgets.simple_hover_tooltip import _filters
 
@@ -218,8 +218,8 @@ def test_guard_hides_on_app_deactivate(qtbot):
 
     from unittest.mock import patch as _patch
 
-    from PyQt5.QtCore import QPoint
-    from PyQt5.QtWidgets import QApplication, QLabel
+    from PySide6.QtCore import QPoint
+    from PySide6.QtWidgets import QApplication, QLabel
 
     from app.widgets.simple_hover_tooltip import _filters
 
@@ -251,9 +251,9 @@ def test_event_filter_mouse_press_does_not_block_click(qtbot):
     eventFilter 对 MouseButtonPress 必须返回 False（继续传播），否则按钮
     收不到按下事件，点击（clicked）失效。
     """
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtTest import QTest
-    from PyQt5.QtWidgets import QPushButton
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QPushButton
 
     from app.widgets.simple_hover_tooltip import _filters, install_hover_tooltip
 

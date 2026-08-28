@@ -8,7 +8,7 @@ from typing import Callable
 
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QRunnable, pyqtSlot
+from PySide6.QtCore import QRunnable, Slot
 
 from app.core.workers.error_handler import create_api_call_with_retry
 
@@ -128,7 +128,7 @@ class TopicSummaryTask(QRunnable):
                 lines.append(f"助手: {truncated}")
         return "\n".join(lines)
 
-    @pyqtSlot()
+    @Slot()
     def run(self):
         try:
             # 开头即检查取消状态，避免无谓的 API 调用

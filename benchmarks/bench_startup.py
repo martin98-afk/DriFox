@@ -54,7 +54,7 @@ def run_inner() -> dict:
 
     # 与 main.py 同款：禁用 qFatal 默认 abort 行为，改为记录
     from loguru import logger
-    from PyQt5.QtCore import QtMsgType, qInstallMessageHandler
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 
     def _qt_message_handler(msg_type, msg_context, msg_text):
         if msg_type == QtMsgType.QtFatalMsg:
@@ -64,8 +64,8 @@ def run_inner() -> dict:
 
     qInstallMessageHandler(_qt_message_handler)
 
-    from PyQt5.QtCore import Qt, QTimer
-    from PyQt5.QtWidgets import QApplication, QWidget
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtWidgets import QApplication, QWidget
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
@@ -75,7 +75,7 @@ def run_inner() -> dict:
 
     # WebEngine 必须在 QApplication 创建前导入（main.py 同款约束）
     t_i0 = time.perf_counter()
-    import PyQt5.QtWebEngineWidgets  # noqa: F401
+    import PySide6.QtWebEngineWidgets  # noqa: F401
 
     t_web_import = time.perf_counter() - t_i0
 
@@ -228,7 +228,7 @@ def run_inner() -> dict:
         logger.exception("[BENCH] init_shared_web_profile 失败")
 
     QTimer.singleShot(1000, _stage1)
-    app.exec_()
+    app.exec()
 
     # 清理（走 backend cleanup 释放路径）
     try:

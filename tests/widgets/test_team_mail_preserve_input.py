@@ -25,7 +25,7 @@ import pytest
 _PATCHES = [
     "app.main_widget.CommandManager.get_instance",
     "app.main_widget.get_model_capabilities",
-    "PyQt5.QtCore.QTimer.singleShot",  # _on_send_clicked / _process_team_task 内部 from PyQt5.QtCore import QTimer
+    "PySide6.QtCore.QTimer.singleShot",  # _on_send_clicked / _process_team_task 内部 from PySide6.QtCore import QTimer
 ]
 
 def _make_main_widget_instance():
@@ -70,8 +70,8 @@ def _patch_send_dependencies():
     stack = ExitStack()
     stack.enter_context(patch("app.main_widget.CommandManager.get_instance", return_value=MagicMock()))
     stack.enter_context(patch("app.main_widget.get_model_capabilities", return_value={}))
-    # _on_send_clicked / _process_team_task 内部 from PyQt5.QtCore import QTimer
-    stack.enter_context(patch("PyQt5.QtCore.QTimer.singleShot"))
+    # _on_send_clicked / _process_team_task 内部 from PySide6.QtCore import QTimer
+    stack.enter_context(patch("PySide6.QtCore.QTimer.singleShot"))
     return stack
 
 
@@ -102,7 +102,7 @@ def test_process_team_task_passes_preserve_input(qapp):
         "from_agent": "build",
         "from_window": "win_01",
     }
-    with patch("PyQt5.QtCore.QTimer.singleShot") as m_single_shot:
+    with patch("PySide6.QtCore.QTimer.singleShot") as m_single_shot:
         inst._process_team_task(mail)
 
     # 关键断言：必须传 preserve_input=True

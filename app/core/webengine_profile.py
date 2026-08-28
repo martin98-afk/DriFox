@@ -16,8 +16,8 @@
 
 from typing import Optional
 
-from PyQt5.QtCore import QObject
-from PyQt5.QtWebEngineWidgets import QWebEngineProfile
+from PySide6.QtCore import QObject
+from PySide6.QtWebEngineCore import QWebEngineProfile
 
 # 模块级单例
 _shared_profile: Optional[QWebEngineProfile] = None

@@ -7,8 +7,8 @@ import threading
 
 import requests
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QVBoxLayout,
@@ -140,10 +140,10 @@ class ProviderEditCard(QWidget):
     """服务商编辑卡片 - 紧凑设计"""
 
     # 信号
-    saved = pyqtSignal(str, dict)  # provider_name, provider_info
-    closed = pyqtSignal()
-    fetchSuccess = pyqtSignal(list)  # 获取成功信号
-    fetchFailed = pyqtSignal()  # 获取失败信号
+    saved = Signal(str, dict)  # provider_name, provider_info
+    closed = Signal()
+    fetchSuccess = Signal(list)  # 获取成功信号
+    fetchFailed = Signal()  # 获取失败信号
 
     def __init__(self, provider_name: str = "", provider_info: dict = None, is_new: bool = True, parent=None):
         super().__init__(parent)
@@ -606,7 +606,7 @@ class ProviderEditCard(QWidget):
         """打开模型列表管理对话框"""
         current_models = self.modelCombo.get_all_models()
         dialog = ModelListEditDialog(current_models, self.window())
-        if dialog.exec_() == dialog.Accepted:
+        if dialog.exec() == dialog.Accepted:
             new_models = dialog.get_models()
             self.modelCombo.blockSignals(True)
             self.modelCombo.clear()

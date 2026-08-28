@@ -15,7 +15,7 @@
 
 import sys
 
-from PyQt5.QtWidgets import QApplication, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QVBoxLayout, QWidget
 
 
 def _ensure_qapp():
@@ -199,7 +199,7 @@ class TestVirtualization:
         同步更新宽度，否则滚动重绑前一直错位。
         """
         _ensure_qapp()
-        from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout
 
         from app.widgets.cards.floating.command_card import CommandCard, CommandItemWidget
 

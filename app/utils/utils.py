@@ -23,8 +23,8 @@ from pathlib import Path
 import orjson as json
 import psutil
 from loguru import logger
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QFont, QIcon, QIconEngine
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QFont, QIcon, QIconEngine
 
 from app.utils.config import Settings
 
@@ -819,10 +819,10 @@ def deserialize_from_json(obj):
 
 
 class DownloadThread(QThread):
-    progress_signal = pyqtSignal(int)  # 进度信号
-    finished_signal = pyqtSignal(str)  # 完成信号（返回文件路径）
-    error_signal = pyqtSignal(str)  # 错误信号
-    canceled_signal = pyqtSignal()  # 取消信号（新增）
+    progress_signal = Signal(int)  # 进度信号
+    finished_signal = Signal(str)  # 完成信号（返回文件路径）
+    error_signal = Signal(str)  # 错误信号
+    canceled_signal = Signal()  # 取消信号（新增）
 
     def __init__(self, url, file_path, token):
         super().__init__()
@@ -865,8 +865,8 @@ class DownloadThread(QThread):
 
 
 class AsyncUpdateChecker(QThread):
-    check_finished = pyqtSignal(object)  # 返回 latest_release 或 None
-    error = pyqtSignal(str)
+    check_finished = Signal(object)  # 返回 latest_release 或 None
+    error = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)

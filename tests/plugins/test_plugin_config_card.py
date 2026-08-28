@@ -3,9 +3,9 @@
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("PySide6")
 
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from app.plugins.contracts.plugin_config import parse_config_schema
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
@@ -93,7 +93,7 @@ def test_password_field_uses_password_line_edit(qapp, schema_env):
     card = PluginConfigCard("plug-ui")
     assert isinstance(card._rows["secret"], PasswordLineEdit)
     # 默认 Password echo mode（不显示明文）
-    from PyQt5.QtWidgets import QLineEdit
+    from PySide6.QtWidgets import QLineEdit
 
     assert card._rows["secret"].echoMode() == QLineEdit.Password
 
@@ -258,7 +258,7 @@ def test_select_without_options_rejects_schema():
 
 def test_rich_types_render(qapp, rich_schema):
     """select/number/textarea 渲染为对应控件"""
-    from PyQt5.QtWidgets import QTextEdit
+    from PySide6.QtWidgets import QTextEdit
     from qfluentwidgets import SpinBox
 
     from app.widgets.cards.settings.plugin_config_card import SelectPillsRow

@@ -10,7 +10,7 @@ import os
 import traceback
 from typing import List, Optional, Set
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 from loguru import logger
 
 
@@ -70,8 +70,8 @@ class _DirEntry:
 class _TreeScanner(QObject):
     """后台线程目录扫描器"""
 
-    finished = pyqtSignal(object)  # List[_DirEntry]
-    error = pyqtSignal(str)
+    finished = Signal(object)  # List[_DirEntry]
+    error = Signal(str)
 
     def __init__(self):
         super().__init__()

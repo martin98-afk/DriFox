@@ -7,13 +7,13 @@ Gitee 账号绑定设置卡片
 """
 
 import hashlib
-import sip
+import shiboken6 as sip
 import threading
 import webbrowser
 from loguru import logger
-from PyQt5.QtCore import Qt, QSize, pyqtSignal, QPoint, QRectF, QTimer
-from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap
-from PyQt5.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QSize, Signal, QPoint, QRectF, QTimer
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SettingCard, SwitchButton
 
 from app.core import window_registry
@@ -73,7 +73,7 @@ class _AvatarCircleWidget(QWidget):
     避免物理像素四舍五入导致的逻辑尺寸不匹配和裁剪问题。
     """
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(self, text: str = "?", parent=None):
         super().__init__(parent)
@@ -140,14 +140,14 @@ class _AvatarCircleWidget(QWidget):
 
 
 class _ClickableAvatar(QLabel):
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clicked.emit()
 
 
 class _ClickableElidedLabel(_ElidedLabel):
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.LeftButton:
@@ -164,7 +164,7 @@ class _RepoVisibilityDialog(MaskDialogBase):
     PUBLIC = False
     PRIVATE = True
 
-    chosen = pyqtSignal(bool)  # True=私有, False=公开
+    chosen = Signal(bool)  # True=私有, False=公开
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -273,7 +273,7 @@ class _RepoVisibilityDialog(MaskDialogBase):
 class GiteeAccountRow(QFrame):
     """Tab 模式底部的紧凑 Gitee 账户快捷栏。"""
 
-    oauthResult = pyqtSignal(bool, str)
+    oauthResult = Signal(bool, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -550,7 +550,7 @@ class GiteeAccountRow(QFrame):
             return
         dialog = _RepoVisibilityDialog(self.window())
         dialog.chosen.connect(self._start_oauth_with_backup)
-        dialog.exec_()
+        dialog.exec()
 
     def _start_oauth_with_backup(self, repo_private: bool):
         self._sync_svc.backup_local()
@@ -624,7 +624,7 @@ class GiteeAccountRow(QFrame):
             parent=self.window(),
         )
         dialog.confirmed.connect(self._do_unbind)
-        dialog.exec_()
+        dialog.exec()
 
     def _do_unbind(self):
         try:
@@ -677,7 +677,7 @@ class GiteeAccountRow(QFrame):
 
     def close_popup(self):
         """关闭弹出的浮动卡片（供外部调用，如 TabPanel 切换时）"""
-        if self._popup is not None and sip.isdeleted(self._popup):
+        if self._popup is not None and not sip.isValid(self._popup):
             self._popup = None
             return
         if self._popup and self._popup.isVisible():
@@ -690,7 +690,7 @@ class GiteeAccountRow(QFrame):
             return
 
         # 防御性检查：如果 C++ 对象已被删除，清理引用
-        if self._popup is not None and sip.isdeleted(self._popup):
+        if self._popup is not None and not sip.isValid(self._popup):
             self._popup = None
 
         if self._popup and self._popup.isVisible():
@@ -1118,7 +1118,7 @@ class _GiteeMorePopup(QWidget):
 class GiteeCard(SettingCard):
     """Gitee 账号绑定 — SettingCard 子类，布局与其他设置卡片一致"""
 
-    oauthResult = pyqtSignal(bool, str)
+    oauthResult = Signal(bool, str)
 
     def __init__(self, parent=None):
         super().__init__(
@@ -1409,7 +1409,7 @@ class GiteeCard(SettingCard):
 
         dialog = _RepoVisibilityDialog(self.window())
         dialog.chosen.connect(self._start_oauth_with_backup)
-        dialog.exec_()
+        dialog.exec()
 
     def _start_oauth_with_backup(self, repo_private: bool):
         """绑定前先备份本地配置"""
@@ -1476,7 +1476,7 @@ class GiteeCard(SettingCard):
             parent=self.window(),
         )
         dialog.confirmed.connect(self._do_unbind)
-        dialog.exec_()
+        dialog.exec()
 
     def _do_unbind(self):
         try:

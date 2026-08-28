@@ -8,9 +8,9 @@ import json
 import os
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QThread, pyqtSlot
-from PyQt5.QtGui import QColor, QDragEnterEvent
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal, QThread, Slot
+from PySide6.QtGui import QColor, QDragEnterEvent
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -51,7 +51,7 @@ class _UrlImportThread(QThread):
     finished 信号携带 (content, error)，二者有且仅有一个非空。
     """
 
-    finished = pyqtSignal(str, str)
+    finished = Signal(str, str)
 
     def __init__(self, url: str):
         super().__init__()
@@ -189,9 +189,9 @@ def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) 
 class _HistoryItemCard(SimpleCardWidget):
     """历史会话项卡片"""
 
-    sessionClicked = pyqtSignal(int)
-    deleteRequested = pyqtSignal(int)
-    renameRequested = pyqtSignal(int, str)
+    sessionClicked = Signal(int)
+    deleteRequested = Signal(int)
+    renameRequested = Signal(int, str)
 
     def __init__(
         self,
@@ -468,9 +468,9 @@ class _HistoryItemCard(SimpleCardWidget):
 class _ArchivedItemCard(CardWidget):
     """归档会话项卡片 - 用于归档列表"""
 
-    restored = pyqtSignal(str)  # 文件路径
-    permanentlyDeleted = pyqtSignal(str)  # 文件路径
-    renameRequested = pyqtSignal(str, str)  # 旧路径, 新标题
+    restored = Signal(str)  # 文件路径
+    permanentlyDeleted = Signal(str)  # 文件路径
+    renameRequested = Signal(str, str)  # 旧路径, 新标题
 
     def __init__(
         self,
@@ -726,9 +726,9 @@ class _TeamGroupCard(CardWidget):
       （角色胶囊 + 标题 + 相对时间），点击成员行 → memberSelected(session_record)
     """
 
-    restoreRequested = pyqtSignal(str)  # run_id
-    archiveRequested = pyqtSignal(str)  # run_id
-    memberSelected = pyqtSignal(dict)  # 成员 session_record
+    restoreRequested = Signal(str)  # run_id
+    archiveRequested = Signal(str)  # run_id
+    memberSelected = Signal(dict)  # 成员 session_record
 
     def __init__(self, group: Dict, parent=None):
         super().__init__(parent)
@@ -980,17 +980,17 @@ class _TeamGroupCard(CardWidget):
 class HistoryCard(QWidget):
     """历史会话卡片内容 - 支持历史会话和归档会话切换"""
 
-    sessionSelected = pyqtSignal(int)
-    sessionArchived = pyqtSignal(int)
-    sessionRenamed = pyqtSignal(int, str)
-    refreshRequested = pyqtSignal()
-    sessionImported = pyqtSignal(dict)  # 导入会话时发出
-    sessionRestored = pyqtSignal(str)  # 恢复归档会话
-    sessionPermanentlyDeleted = pyqtSignal(str)  # 彻底删除归档会话
-    archivedSessionRenamed = pyqtSignal(str, str)  # 归档会话重命名
-    teamRestoreRequested = pyqtSignal(str)  # 恢复团队会话（参数 = run_id）
-    teamArchiveRequested = pyqtSignal(str)  # 归档团队会话（参数 = run_id）
-    memberSelected = pyqtSignal(dict)  # 团队成员 session_record 被选中进入会话
+    sessionSelected = Signal(int)
+    sessionArchived = Signal(int)
+    sessionRenamed = Signal(int, str)
+    refreshRequested = Signal()
+    sessionImported = Signal(dict)  # 导入会话时发出
+    sessionRestored = Signal(str)  # 恢复归档会话
+    sessionPermanentlyDeleted = Signal(str)  # 彻底删除归档会话
+    archivedSessionRenamed = Signal(str, str)  # 归档会话重命名
+    teamRestoreRequested = Signal(str)  # 恢复团队会话（参数 = run_id）
+    teamArchiveRequested = Signal(str)  # 归档团队会话（参数 = run_id）
+    memberSelected = Signal(dict)  # 团队成员 session_record 被选中进入会话
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1030,7 +1030,7 @@ class HistoryCard(QWidget):
         self._worktree_branch_cache: Dict[str, str] = {}
 
         # === 搜索防抖 ===
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         self._search_debounce_timer = QTimer(self)
         self._search_debounce_timer.setSingleShot(True)
@@ -1925,13 +1925,13 @@ class HistoryCard(QWidget):
             dialog = ImportOptionDialog(parent=self.window())
             dialog.fileImportRequested.connect(self._on_import_from_file)
             dialog.urlImportRequested.connect(self._on_import_from_url)
-            dialog.exec_()
+            dialog.exec()
 
         return handle_import
 
     def _on_import_from_file(self):
         """从文件导入"""
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         files, _ = QFileDialog.getOpenFileNames(self, "导入会话", "", "JSON 文件 (*.json)")
         if files:
@@ -1951,7 +1951,7 @@ class HistoryCard(QWidget):
             parent=self.window(),
         )
         dialog.confirmed.connect(self._on_url_import_confirmed)
-        dialog.exec_()
+        dialog.exec()
 
     def _on_url_import_confirmed(self, url: str):
         """URL确认后的导入处理（请求在后台线程执行，不阻塞 UI）"""
@@ -1969,7 +1969,7 @@ class HistoryCard(QWidget):
         self._url_import_thread.finished.connect(self._url_import_thread.deleteLater)
         self._url_import_thread.start()
 
-    @pyqtSlot(str, str)
+    @Slot(str, str)
     def _on_url_import_result(self, content: str, error: str):
         """后台导入线程完成后的回调（主线程执行）"""
         if error:
@@ -2003,8 +2003,8 @@ class HistoryCard(QWidget):
 class ImportOptionDialog(MaskDialogBase):
     """导入选项弹框：从文件导入 / 从URL导入，与 SingleInputDialog 同款样式"""
 
-    fileImportRequested = pyqtSignal()
-    urlImportRequested = pyqtSignal()
+    fileImportRequested = Signal()
+    urlImportRequested = Signal()
 
     DEFAULT_WIDTH = 400
     DEFAULT_HEIGHT = 300

@@ -16,9 +16,9 @@
 
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QEvent, QSize, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEvent, QSize, QThread, Qt, Signal
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -49,7 +49,7 @@ from .data import _DataWorker
 class ContextUsageStatsCard(QWidget):
     """上下文用量统计浮动卡片"""
 
-    closed = pyqtSignal()
+    closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,7 +76,7 @@ class ContextUsageStatsCard(QWidget):
         if self._context_provider is None or self._header_icon is None:
             return
         try:
-            from PyQt5.QtGui import QIcon
+            from PySide6.QtGui import QIcon
 
             ctx = self._context_provider()
             icon_info = ctx.get("plugin_icon", {})

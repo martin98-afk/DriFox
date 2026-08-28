@@ -71,7 +71,7 @@ def test_qss_font_overrides_setfont(monkeypatch):
     editor = SendableTextEdit()
 
     # 即使 setFont 新字体，QSS 中 font-family 仍优先（bug 前提）
-    from PyQt5.QtGui import QFont
+    from PySide6.QtGui import QFont
 
     editor.setFont(QFont("Consolas", 18))
     editor.refresh_style()

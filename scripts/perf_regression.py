@@ -40,7 +40,7 @@ JSON: {"meta": {...}, "rounds": [每轮数据...], "summary": 聚合指标}
 
 环境
 ----
-- Python 3.14+ / PyQt5 / psutil（必需）/ pympler（可选，未用）
+- Python 3.14+ / PySide6 / psutil（必需）/ pympler（可选，未用）
 - 不修改任何被测代码；数据目录 .drifox 自动备份并在结束后恢复
 
 注意
@@ -73,14 +73,14 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 # ── 与 main.py 一致：QApplication 创建前设置 Qt 属性 + 导入 WebEngine ──
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QApplication, QWidget
 
 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
 QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView  # noqa: F401
-
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings# noqa: F401
+from PySide6.QtWebEngineWidgets import QWebEngineView
 # ── 用量请求计数探针（运行时 patch，仅本次进程生效）──
 _FETCH_CALLS: list[dict] = []
 

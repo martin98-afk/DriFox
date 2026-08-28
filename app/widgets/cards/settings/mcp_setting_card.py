@@ -12,9 +12,9 @@ import time
 from typing import Dict
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -116,8 +116,8 @@ class MCPEditCard(QWidget):
     - JSON 模式：直接编辑 JSON 格式配置
     """
 
-    saved = pyqtSignal(dict)
-    closed = pyqtSignal()
+    saved = Signal(dict)
+    closed = Signal()
 
     def __init__(self, server_data: dict = None, parent=None):
         super().__init__(parent)
@@ -138,7 +138,7 @@ class MCPEditCard(QWidget):
         if hasattr(self, "jsonEdit"):
             self.jsonEdit.setStyleSheet(style)
         # QPlainTextEdit 不支持 CSS ::placeholder，通过 palette 设置
-        from PyQt5.QtGui import QColor, QPalette
+        from PySide6.QtGui import QColor, QPalette
 
         ph_color = self._parse_placeholder_color()
         for pte in self._plain_text_edits:
@@ -152,7 +152,7 @@ class MCPEditCard(QWidget):
     @staticmethod
     def _parse_placeholder_color() -> "QColor":
         """解析 Colors.INPUT_PLACEHOLDER 为 QColor（兼容 rgba/css 格式）"""
-        from PyQt5.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         s = Colors.INPUT_PLACEHOLDER.strip()
         if s.startswith("rgba("):
@@ -199,7 +199,7 @@ class MCPEditCard(QWidget):
         return json.dumps(result, indent=2, ensure_ascii=False)
 
     # 模式切换信号（通知外层更新头部按钮）
-    modeChanged = pyqtSignal(bool)  # True=JSON模式, False=表单模式
+    modeChanged = Signal(bool)  # True=JSON模式, False=表单模式
 
     def _init_ui(self):
         self._apply_edit_card_style()
@@ -621,9 +621,9 @@ class MCPEditCard(QWidget):
 class MCPServerRow(CardWidget):
     """单行 MCP Server 显示"""
 
-    removeRequested = pyqtSignal(str)
-    editRequested = pyqtSignal(str)
-    enabledChanged = pyqtSignal(str, bool)
+    removeRequested = Signal(str)
+    editRequested = Signal(str)
+    enabledChanged = Signal(str, bool)
 
     def __init__(self, server_data: dict, parent=None):
         super().__init__(parent)
@@ -731,13 +731,13 @@ class MCPServerRow(CardWidget):
 class MCPListSettingCard(ExpandSettingCard):
     """MCP Server 管理设置卡片"""
 
-    serversChanged = pyqtSignal()
-    showAddCard = pyqtSignal()
-    showEditCard = pyqtSignal(str, dict)
+    serversChanged = Signal()
+    showAddCard = Signal()
+    showEditCard = Signal(str, dict)
 
     # 内部信号（从后台线程桥接到主线程 UI 更新）
-    _hotConnectResult = pyqtSignal(str, bool, str)
-    _tokenCountReady = pyqtSignal(str)
+    _hotConnectResult = Signal(str, bool, str)
+    _tokenCountReady = Signal(str)
 
     def __init__(self, icon, title: str, content: str = None, parent=None):
         self.cfg = Settings.get_instance()
@@ -1047,7 +1047,7 @@ class MCPListSettingCard(ExpandSettingCard):
                 self.viewLayout.addWidget(row)
 
         # 处理异步删除（deleteLater）+ 强制布局计算，确保 sizeHint 正确
-        from PyQt5.QtCore import QCoreApplication
+        from PySide6.QtCore import QCoreApplication
 
         QCoreApplication.processEvents()
         self.viewLayout.activate()
@@ -1111,7 +1111,7 @@ class MCPListSettingCard(ExpandSettingCard):
             parent=self.window(),
         )
         dialog.confirmed.connect(_on_confirm)
-        dialog.exec_()
+        dialog.exec()
         if _confirmed[0]:
             self._do_remove(name)
 

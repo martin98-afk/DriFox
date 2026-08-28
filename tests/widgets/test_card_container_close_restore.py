@@ -24,7 +24,7 @@ import sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 # 必须在创建 QApplication 前设置 Qt 属性（QtWebEngine 依赖）
-from PyQt5.QtCore import Qt
+from PySide6.QtCore import Qt
 
 QApplication_ShareOpenGL = Qt.AA_ShareOpenGLContexts
 
@@ -32,8 +32,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from PyQt5.QtCore import QEventLoop, QTimer, pyqtSignal
-from PyQt5.QtWidgets import QApplication, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtCore import QEventLoop, QTimer, Signal
+from PySide6.QtWidgets import QApplication, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from app.widgets.cards.card_container import BottomCardContainer, TopCardContainer
 from app.widgets.cards.card_manager import CardManager, ContainerType
@@ -47,8 +47,8 @@ class DummyTopCard(QWidget):
     验证 CardContainer 折叠/min 锁行为。
     """
 
-    closed = pyqtSignal()
-    heightChanged = pyqtSignal()
+    closed = Signal()
+    heightChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

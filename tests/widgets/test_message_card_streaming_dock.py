@@ -11,7 +11,7 @@ import inspect
 import re
 import sys
 
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from app.widgets import message_card as mc
 from app.widgets.message_card import CodeWebViewer, MessageCard
@@ -325,7 +325,7 @@ def test_s1_dock_returns_after_last_tool_result():
     置 True → 归位条件恒 False → QTimer 永不注册 → 会话末轮 dock 永久沉底。
     修复：改用 MessageCard 层 self._streaming（stop_streaming_anim 置 False）判据。
     """
-    from PyQt5.QtCore import QTimer
+    from PySide6.QtCore import QTimer
 
     from app.widgets.message_card import MessageCard as _MC
 

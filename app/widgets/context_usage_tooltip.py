@@ -14,9 +14,9 @@
 
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import QRectF, Qt
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
+from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
@@ -147,7 +147,7 @@ class _StackedBar(QWidget):
 
         pct_text = f"{self._percent}%"
         fm = QFontMetrics(font)
-        text_w = fm.width(pct_text)
+        text_w = fm.horizontalAdvance(pct_text)
         text_x = w_total - text_w - 6  # 距右边缘 6px
         text_y = int((rect.height() + fm.ascent()) / 2) - 1
 

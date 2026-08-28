@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QFileSystemWatcher, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QMouseEvent
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QFileSystemWatcher, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -272,8 +272,8 @@ def _scan_tree(root_dir: str, rules: "IgnoreRules", max_items: int):
 class FileMentionItemWidget(QWidget):
     """文件列表单项"""
 
-    clicked = pyqtSignal()
-    hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
+    clicked = Signal()
+    hovered = Signal(object)  # 鼠标悬停时发射自身引用
 
     # 扩展名 → emoji 映射（复用 memory_card 的风格，比 IconWidget 轻量无数倍）
     _EMOJI_MAP = {
@@ -538,10 +538,10 @@ class FileMentionItemWidget(QWidget):
 class FileMentionCard(QWidget):
     """文件提及卡片 — 输入 @ 时展开显示当前目录文件"""
 
-    fileSelected = pyqtSignal(str)  # file path
-    dismissed = pyqtSignal()
+    fileSelected = Signal(str)  # file path
+    dismissed = Signal()
     # 后台扫描完成信号（跨线程发射，队列连接回主线程应用结果）
-    _scanFinished = pyqtSignal(object)
+    _scanFinished = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)

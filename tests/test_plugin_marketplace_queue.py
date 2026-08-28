@@ -26,7 +26,7 @@ if str(PLUGIN_MARKETPLACE) not in sys.path:
 def _wait_until(pred, timeout=6.0, interval=0.02):
     """轮询等待谓词成立（pump 事件循环）"""
     deadline = time.time() + timeout
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
     while time.time() < deadline:

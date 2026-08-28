@@ -2,8 +2,8 @@
 from typing import Dict, Optional
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QEasingCurve, QEvent, QPropertyAnimation, QTimer, pyqtSignal
-from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QEasingCurve, QEvent, QPropertyAnimation, QTimer, Signal
+from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from app.utils.design_tokens import Colors
 from app.widgets.cards.card_manager import CardManager, ContainerType
@@ -54,7 +54,7 @@ class CardContainer(QWidget):
     # ── 覆盖层模式信号 ──
     # 当容器处于覆盖层模式（overlay_mode）且卡片显隐状态变化时发射，
     # 携带 bool 参数：True=有可见卡片（需展示覆盖层），False=无可见卡片（需隐藏覆盖层）
-    overlayStateChanged = pyqtSignal(bool)
+    overlayStateChanged = Signal(bool)
 
     def __init__(self, container_type: ContainerType):
         super().__init__()

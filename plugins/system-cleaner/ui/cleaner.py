@@ -7,9 +7,9 @@
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
     QHBoxLayout,
@@ -29,7 +29,7 @@ from .scanner import _format_size
 class _CacheItemRow(QWidget):
     """单个缓存项行：勾选框 + 图标 + 名称 + 大小"""
 
-    toggled = pyqtSignal()
+    toggled = Signal()
 
     def __init__(self, cache_id: str, icon: str, label: str, parent=None):
         super().__init__(parent)
@@ -451,7 +451,7 @@ def _styled_cleaner_confirm(
         no_text=no_text,
         default_yes=default_yes,
     )
-    dialog.exec_()
+    dialog.exec()
     return dialog._result
 
 
@@ -488,4 +488,4 @@ def _styled_cleaner_info(parent: QWidget, title: str, text: str, *, color_source
         card_bg=card_bg,
         border_c=border_c,
     )
-    dialog.exec_()
+    dialog.exec()

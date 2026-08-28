@@ -168,7 +168,7 @@ class TestTeamMailLockRelease:
         """正常进入流式 → 锁保持（由流式结束 _on_task_stream_finished 释放）"""
         from unittest.mock import patch
 
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         fake = self._make_window(team_manager)
 

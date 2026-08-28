@@ -11,8 +11,8 @@
 """
 import webbrowser
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     ComboBox,
@@ -55,7 +55,7 @@ _LABEL_MIN_WIDTH = 80         # 标签最小宽度（让控件对齐）
 class ModelConfigCard(QWidget):
     """模型配置卡片内容 - 有变化自动保存"""
 
-    configApplied = pyqtSignal(dict)
+    configApplied = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)

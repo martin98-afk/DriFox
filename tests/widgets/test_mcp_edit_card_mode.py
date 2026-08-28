@@ -15,8 +15,8 @@
 import sys
 
 import pytest
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QStackedWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QStackedWidget
 
 
 def _headers_stretch(card):

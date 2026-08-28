@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, PropertyMock, call, patch
 
 import httpx
 import pytest
-from PyQt5.QtCore import QTimer
+from PySide6.QtCore import QTimer
 from qfluentwidgets import Theme
 from qfluentwidgets.common.config import EnumSerializer, OptionsConfigItem, OptionsValidator
 
@@ -707,7 +707,7 @@ class TestSuppressionWindow:
         """抑制窗口内收到变更 → 调度延迟检查（不直接跳过）"""
         svc._suppress_until = time.time() + 10.0  # 10s 抑制
 
-        with patch("PyQt5.QtCore.QTimer.singleShot") as mock_singleshot:
+        with patch("PySide6.QtCore.QTimer.singleShot") as mock_singleshot:
             svc._on_config_changed_main()
             # 应该调度了延迟检查
             assert svc._suppress_retry_scheduled is True
@@ -718,7 +718,7 @@ class TestSuppressionWindow:
         svc._suppress_until = time.time() + 10.0
         svc._suppress_retry_scheduled = True  # 已调度
 
-        with patch("PyQt5.QtCore.QTimer.singleShot") as mock_singleshot:
+        with patch("PySide6.QtCore.QTimer.singleShot") as mock_singleshot:
             svc._on_config_changed_main()
             # 不会重复调度
             assert mock_singleshot.called is False

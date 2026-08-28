@@ -7,8 +7,8 @@ import tempfile
 import time
 import weakref
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QApplication, QHBoxLayout, QProgressDialog, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QProgressDialog, QWidget
 from qfluentwidgets import (
     InfoBar,
     InfoBarIcon,
@@ -22,8 +22,8 @@ from app.utils.utils import AsyncUpdateChecker, DownloadThread
 
 class UpdateChecker(QWidget):
     """优化后的更新检查器：保留 InfoBar 交互，适配 Inno Setup EXE"""
-    finished = pyqtSignal(object)  # 供外部监听检查结果
-    error = pyqtSignal(str)  # 供外部监听错误
+    finished = Signal(object)  # 供外部监听检查结果
+    error = Signal(str)  # 供外部监听错误
     _instance = None
     _initialized = False
 
@@ -143,8 +143,8 @@ class UpdateChecker(QWidget):
         )
 
         # 创建按钮容器（水平布局）
-        from PyQt5.QtCore import QUrl
-        from PyQt5.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
         from qfluentwidgets import PushButton  # 普通按钮用于次要操作
 
         button_container = QWidget()

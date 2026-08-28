@@ -10,9 +10,9 @@
 推荐优先使用本模块替代 QMessageBox / qfluentwidgets MessageBox / QInputDialog。
 """
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout
 from qfluentwidgets import BodyLabel, MaskDialogBase
 
 from app.utils.design_tokens import Colors, font_size_css
@@ -34,11 +34,11 @@ class ConfirmDialog(MaskDialogBase):
         )
         dialog.confirmed.connect(lambda: ...)
         dialog.cancelled.connect(lambda: ...)
-        dialog.exec_()
+        dialog.exec()
     """
 
-    confirmed = pyqtSignal()
-    cancelled = pyqtSignal()
+    confirmed = Signal()
+    cancelled = Signal()
 
     DEFAULT_WIDTH = 400
     DEFAULT_HEIGHT = 140  # 最小高度=标题+12+1行内容+按钮+边距；高度按内容自适应
@@ -211,8 +211,8 @@ class InfoDialog(MaskDialogBase):
     可选传 dismiss_text 增加次级「不再提醒」按钮（点击 emit dismissed）。
     """
 
-    confirmed = pyqtSignal()
-    dismissed = pyqtSignal()
+    confirmed = Signal()
+    dismissed = Signal()
 
     DEFAULT_WIDTH = 400
     DEFAULT_HEIGHT = 120  # 最小高度=标题+12+1行内容+按钮+边距；高度按内容自适应

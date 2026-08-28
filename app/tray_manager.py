@@ -13,15 +13,16 @@ from pathlib import Path
 
 import keyboard
 from loguru import logger
-from PyQt5.QtCore import QAbstractNativeEventFilter, QObject, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
+from PySide6.QtCore import QAbstractNativeEventFilter, QObject, QTimer, Signal
+from PySide6.QtGui import QIcon
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 
 class _HotkeyBridge(QObject):
     """从 keyboard 库线程桥接到 Qt 主线程的信号桥"""
 
-    toggle_all_windows = pyqtSignal()
+    toggle_all_windows = Signal()
 
 
 # ========== Windows 原生全局热键（RegisterHotKey）相关 ==========
@@ -93,7 +94,7 @@ class TrayManager(QObject):
     """全局唯一托盘图标管理器，管理所有聊天窗口的托盘行为"""
 
     # 信号：当窗口数量变为0时发出
-    allWindowsClosed = pyqtSignal()
+    allWindowsClosed = Signal()
 
     _instance = None
 
@@ -307,14 +308,8 @@ class TrayManager(QObject):
         min_dist_x = self._SNAP_THRESHOLD + 1
         min_dist_y = self._SNAP_THRESHOLD + 1
 
-        # 获取当前屏幕号（跳过不同屏幕的窗口）
-        try:
-            from PyQt5.QtWidgets import QDesktopWidget
-
-            desktop = QDesktopWidget()
-            current_screen_idx = desktop.screenNumber(exclude_window) if exclude_window else -1
-        except Exception:
-            current_screen_idx = -1
+        # 获取当前屏幕（跳过不同屏幕的窗口）—— Qt6 已移除 QDesktopWidget，改用 QWidget.screen()
+        current_screen = exclude_window.screen() if exclude_window is not None else None
 
         for win in self._windows:
             if win is exclude_window:
@@ -328,11 +323,11 @@ class TrayManager(QObject):
                 if win.isHidden() or win.isMinimized():
                     continue
                 # 跳过不同屏幕的窗口
-                if current_screen_idx >= 0:
+                if current_screen is not None:
                     try:
-                        win_screen = desktop.screenNumber(win)
-                        # -1 表示窗口尚未映射到屏幕（新窗口初始化中），不跳过
-                        if win_screen >= 0 and win_screen != current_screen_idx:
+                        win_screen = win.screen()
+                        # None 表示窗口尚未映射到屏幕（新窗口初始化中），不跳过
+                        if win_screen is not None and win_screen is not current_screen:
                             continue
                     except Exception:
                         pass

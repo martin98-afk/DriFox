@@ -20,7 +20,7 @@ import sys
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 # 必须在创建 QApplication 前设置 Qt 属性（QtWebEngine 依赖）
-from PyQt5.QtCore import Qt
+from PySide6.QtCore import Qt
 
 QApplication_ShareOpenGL = Qt.AA_ShareOpenGLContexts
 
@@ -28,8 +28,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from PyQt5.QtCore import QEventLoop, QSize, QTimer
-from PyQt5.QtWidgets import QApplication, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtCore import QEventLoop, QSize, QTimer
+from PySide6.QtWidgets import QApplication, QSplitter, QVBoxLayout, QWidget
 
 from app.widgets.cards.card_container import BottomCardContainer, CardContainer
 from app.widgets.cards.card_manager import CardManager, ContainerType
@@ -42,7 +42,7 @@ def _app():
 def _pump(ms: int):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec_()
+    loop.exec()
 
 
 class _FakeCard(QWidget):

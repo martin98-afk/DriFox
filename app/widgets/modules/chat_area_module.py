@@ -47,8 +47,8 @@ class ChatAreaModule(UIModule):
     module_id = "chat_area"
 
     def build(self, host) -> None:
-        from PyQt5.QtCore import Qt, QTimer
-        from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
         from qfluentwidgets import SingleDirectionScrollArea
 
         # CHAT_SCROLL_STYLE 在 main_widget 模块级定义（避免循环引用）

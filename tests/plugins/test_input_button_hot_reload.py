@@ -6,7 +6,7 @@
 """
 
 import pytest
-from PyQt5.QtWidgets import QHBoxLayout, QToolButton, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QToolButton, QWidget
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.core import window_registry
@@ -59,7 +59,7 @@ def _hot_reload_result(plugin_name="demo"):
 
 def test_hot_reload_rebuilds_open_window_buttons(qtbot, widget, fresh_registry, monkeypatch):
     """已打开窗口 + 热重载(ui=True) → 新注册按钮出现在输入区"""
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     # backend 存在（守卫条件）
     widget.backend = object()
@@ -81,7 +81,7 @@ def test_hot_reload_fingerprint_dedup(qtbot, widget, fresh_registry):
     widget._on_plugin_hot_reload(_hot_reload_result())
     # 第二次同指纹事件 → 去重 return（不报错）
     widget._on_plugin_hot_reload(_hot_reload_result())
-    from PyQt5.QtWidgets import QToolButton
+    from PySide6.QtWidgets import QToolButton
 
     buttons = [b for b in widget._toolbar_capsule.findChildren(QToolButton) if b.toolTip() == "新按钮"]
     assert len(buttons) == 1
@@ -103,7 +103,7 @@ def test_hot_reload_rogue_window_does_not_block_broadcast(qtbot, widget, fresh_r
     monkeypatch.setattr(window_registry, "last_hot_reload_fingerprint", None)
     monkeypatch.setattr(OpenAIChatToolWindow, "_last_hot_reload_at", 0.0)
 
-    from PyQt5.QtWidgets import QToolButton
+    from PySide6.QtWidgets import QToolButton
 
     widget._on_plugin_hot_reload(_hot_reload_result())
     buttons = [b for b in widget._toolbar_capsule.findChildren(QToolButton) if b.toolTip() == "新按钮"]

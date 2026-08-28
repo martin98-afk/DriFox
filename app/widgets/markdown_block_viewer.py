@@ -21,9 +21,9 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QFile, QPropertyAnimation, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap, QTextOption
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QFile, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QTextOption
+from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -35,10 +35,10 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt5.QtWidgets import QSizePolicy
+from PySide6.QtWidgets import QSizePolicy
 
 try:  # QSvgRenderer：思考流式 spinner / qrc 图标渲染依赖
-    from PyQt5.QtSvg import QSvgRenderer
+    from PySide6.QtSvg import QSvgRenderer
 
     _HAS_QT_SVG = True
 except Exception:  # pragma: no cover
@@ -242,7 +242,7 @@ class _ThinkingSpinner(QWidget):
             except Exception:
                 pass
         # 兜底：无 SVG 时画简单圆弧
-        from PyQt5.QtCore import QRectF
+        from PySide6.QtCore import QRectF
 
         rect = QRectF(3, 3, self.width() - 6, self.height() - 6)
         p.setPen(QPen(QColor(255, 200, 50), 2.5, Qt.SolidLine, Qt.RoundCap))
@@ -509,7 +509,7 @@ class RichTextLabel(QLabel):
 class CodeBlockWidget(QFrame):
     """代码块：语言标签栏 + 行号列(主题色) + Pygments 高亮正文 + 复制按钮。"""
 
-    saveFileRequested = pyqtSignal(str, str)  # (code, lang)
+    saveFileRequested = Signal(str, str)  # (code, lang)
 
     @staticmethod
     def _code_bg() -> str:
@@ -1192,7 +1192,7 @@ class _SeparatorRow(QFrame):
     """可点击折叠的分隔条（对照 WebEngine 版 tool-separator/todo-separator：
     两侧细线 + 图标 + 标题 + 附加信息 + chevron）。"""
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(self, text: str, parent: Optional[QWidget] = None, icon_name: Optional[str] = None):
         super().__init__(parent)
@@ -1574,8 +1574,8 @@ class MarkdownBlockViewer(QWidget):
     任务列表：update_todo_list(todos)（签名同 MessageCard.update_todo_list）。
     """
 
-    contentHeightChanged = pyqtSignal(int)
-    saveFileRequested = pyqtSignal(str, str)  # (code, lang) — 兼容 MessageCard 工厂连接
+    contentHeightChanged = Signal(int)
+    saveFileRequested = Signal(str, str)  # (code, lang) — 兼容 MessageCard 工厂连接
 
     def __init__(self, parent: Optional[QWidget] = None, light: bool = False):
         super().__init__(parent)

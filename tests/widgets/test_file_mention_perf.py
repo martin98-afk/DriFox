@@ -14,7 +14,7 @@ import fnmatch
 import os
 import sys
 
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from app.widgets.cards.floating.file_mention_card import (
     INITIAL_RENDER_COUNT,

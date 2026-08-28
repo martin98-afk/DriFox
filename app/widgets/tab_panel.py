@@ -13,22 +13,22 @@ import re as _re
 from typing import List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
-from PyQt5.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap, QPen
-from PyQt5.QtGui import (
+from PySide6.QtCore import Qt, QTimer, Signal, Property, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap, QPen
+from PySide6.QtGui import (
     QColor as _QColor,
 )
-from PyQt5.QtGui import (
+from PySide6.QtGui import (
     QLinearGradient as _QLinearGradient,
 )
-from PyQt5.QtGui import (
+from PySide6.QtGui import (
     QPainterPath as _QPainterPath,
 )
-from PyQt5.QtGui import (
+from PySide6.QtGui import (
     QPen as _QPen,
 )
-from PyQt5.QtSvg import QSvgRenderer
-from PyQt5.QtWidgets import (
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -240,7 +240,7 @@ class _TabProjectIcon(QWidget):
 class TabItem(QFrame):
     """单个 Tab 项的 UI 组件"""
 
-    closeRequested = pyqtSignal()
+    closeRequested = Signal()
 
     def __init__(
         self, title: str, icon=None, parent=None, panel=None, project_initials: str = "", project_color: str = ""
@@ -748,7 +748,7 @@ class _RotatableArrow(QWidget):
         self._angle = a
         self.update()
 
-    angle = pyqtProperty(float, _get_angle, _set_angle)
+    angle = Property(float, _get_angle, _set_angle)
 
     def set_expanded(self, expanded: bool, animate: bool = True):
         target = 90.0 if expanded else 0.0
@@ -784,8 +784,8 @@ class _RotatableArrow(QWidget):
 class UIPluginRow(QFrame):
     """TabPanel 中的 UI 插件行，固定图标和文本的相对位置。"""
 
-    clicked = pyqtSignal()
-    positionRequested = pyqtSignal(str, str)  # (card_id, container) 右键选择插入方位
+    clicked = Signal()
+    positionRequested = Signal(str, str)  # (card_id, container) 右键选择插入方位
 
     def __init__(
         self,
@@ -935,7 +935,7 @@ class UIPluginRow(QFrame):
 
     def _show_position_menu(self, pos):
         """显示插入方位菜单（仅内存生效，不持久化）"""
-        self._build_position_menu().exec_(self.mapToGlobal(pos))
+        self._build_position_menu().exec(self.mapToGlobal(pos))
 
 
 def _sort_plugin_entries(entries: list) -> list:
@@ -950,15 +950,15 @@ def _sort_plugin_entries(entries: list) -> list:
 class TabPanel(QWidget):
     """左侧 Tab 列表面板"""
 
-    tabSelected = pyqtSignal(int)  # 选中 Tab 索引
-    tabCloseRequested = pyqtSignal(int)  # 关闭 Tab 索引
-    tabBranchRequested = pyqtSignal(int)  # 分支窗口 Tab 索引
-    newTabRequested = pyqtSignal()  # 新建 Tab
-    tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
-    sidebarToggled = pyqtSignal(bool)  # 侧边栏收起(true)/展开(false)
-    teamCloseRequested = pyqtSignal(str)  # 关闭整个团队（传 team_id）
-    teamAddMemberRequested = pyqtSignal(str)  # 团队框"快速新建成员"按钮（传 team_id，可重复角色）
-    teamNewTaskRequested = pyqtSignal(str)  # 团队框"新建任务"按钮（传 team_id：全员新会话 + 新 run_id）
+    tabSelected = Signal(int)  # 选中 Tab 索引
+    tabCloseRequested = Signal(int)  # 关闭 Tab 索引
+    tabBranchRequested = Signal(int)  # 分支窗口 Tab 索引
+    newTabRequested = Signal()  # 新建 Tab
+    tabsReordered = Signal(list)  # 拖拽排序后新顺序（索引列表）
+    sidebarToggled = Signal(bool)  # 侧边栏收起(true)/展开(false)
+    teamCloseRequested = Signal(str)  # 关闭整个团队（传 team_id）
+    teamAddMemberRequested = Signal(str)  # 团队框"快速新建成员"按钮（传 team_id，可重复角色）
+    teamNewTaskRequested = Signal(str)  # 团队框"新建任务"按钮（传 team_id：全员新会话 + 新 run_id）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1233,7 +1233,7 @@ class TabPanel(QWidget):
             self._collapsed_by_squeeze = True
             self._update_toggle_button()
             # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             QTimer.singleShot(0, lambda: self.sidebarToggled.emit(True))
             return
@@ -1247,7 +1247,7 @@ class TabPanel(QWidget):
             self._collapsed_by_squeeze = False
             self._update_toggle_button()
             # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             QTimer.singleShot(0, lambda: self.sidebarToggled.emit(False))
 
@@ -1855,7 +1855,7 @@ class TabPanel(QWidget):
         grp = self._team_groups.get(team_id)
         if grp is not None:
             return grp
-        from PyQt5.QtWidgets import QVBoxLayout as _QVBL
+        from PySide6.QtWidgets import QVBoxLayout as _QVBL
 
         grp = QFrame(self._list_widget)
         grp.setObjectName("teamGroup")
@@ -1962,9 +1962,9 @@ class TabPanel(QWidget):
                 # _HoverTooltipFilter 收不到 Enter，tooltip 计时不启动（hover
                 # 无提示）。手动查询鼠标所在控件，命中任一按钮则补发
                 # QEnterEvent，让 tooltip 计时正常启动。
-                from PyQt5.QtCore import QPointF as _QPointF
-                from PyQt5.QtGui import QCursor as _QCursor, QEnterEvent as _QEnterEvent
-                from PyQt5.QtWidgets import QApplication as _QApp
+                from PySide6.QtCore import QPointF as _QPointF
+                from PySide6.QtGui import QCursor as _QCursor, QEnterEvent as _QEnterEvent
+                from PySide6.QtWidgets import QApplication as _QApp
 
                 _w = _QApp.widgetAt(_QCursor.pos())
                 if _w in (_task, _add, _btn):
@@ -2141,7 +2141,7 @@ class TabPanel(QWidget):
                         team_icon.set_fallback_pixmap(data["fallback"])
                         team_icon.setVisible(getattr(grp, "_team_icon_orig_visible", False))
                     elif data.get("initials"):
-                        from PyQt5.QtGui import QColor as _QColor
+                        from PySide6.QtGui import QColor as _QColor
 
                         team_icon.set_project(data["initials"], data["color"].name(_QColor.HexArgb))
                         team_icon.setVisible(getattr(grp, "_team_icon_orig_visible", False))
@@ -2431,7 +2431,7 @@ class TabPanel(QWidget):
     def _ensure_anim_timer(self):
         """确保彩虹动画定时器已启动"""
         if self._anim_timer is None:
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             self._anim_timer = QTimer(self)
             self._anim_timer.setInterval(50)  # 50ms ≈ 20fps
@@ -2688,7 +2688,7 @@ class TabPanel(QWidget):
         self._inject_plugin_tab_actions(menu, context)
 
         try:
-            action = menu.exec_(event.globalPos())
+            action = menu.exec(event.globalPos())
         finally:
             self._current_context_menu = None
         if action == new_action:

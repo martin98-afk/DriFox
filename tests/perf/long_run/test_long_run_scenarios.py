@@ -83,7 +83,7 @@ def _pick_duration() -> float:
 
 @pytest.fixture(scope="module")
 def qapp():
-    """PyQt5 QApplication 单例。"""
+    """PySide6 QApplication 单例。"""
     return _ensure_qapp()
 
 
@@ -114,7 +114,7 @@ def test_scenario_a_message_stream_leak(qapp):
 
 
 # ── 场景 B / C 合并到 test_scenario_b_and_c_run_all_smoke ──
-#  单一 pytest 集中跑 B + C，避免每个用例都构造 PyQt5 app（PyQt5 单例约束）
+#  单一 pytest 集中跑 B + C，避免每个用例都构造 PySide6 app（PySide6 单例约束）
 
 
 @pytest.mark.parametrize("scenario", ["b", "c"])

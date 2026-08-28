@@ -184,7 +184,7 @@ class _StubViewer:
 
 
 def _make_streaming_card():
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     if QApplication.instance() is None:
         QApplication(sys.argv)

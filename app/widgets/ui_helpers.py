@@ -20,9 +20,9 @@ from datetime import datetime
 from typing import Any, Callable, List, Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.widgets import MessageCard
@@ -334,7 +334,7 @@ def setup_background_label(viewport: QLabel, parent: Optional[object] = None) ->
     Returns:
         配置好的背景标签
     """
-    from PyQt5.QtWidgets import QGraphicsOpacityEffect
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
 
     bg_label = QLabel(viewport)
     bg_label.setPixmap(QPixmap(":/icons/fox_bg.png"))
@@ -356,9 +356,8 @@ def is_widget_alive(widget: Optional[object]) -> bool:
     if widget is None:
         return False
     try:
-        import sip
-
-        return not sip.isdeleted(widget)
+        import shiboken6 as sip
+        return sip.isValid(widget)
     except Exception:
         return True
 
@@ -1412,7 +1411,7 @@ def restore_input_from_card(input_area, card) -> None:
         input_area: 输入区域控件
         card: 消息卡片
     """
-    from PyQt5.QtGui import QTextCursor
+    from PySide6.QtGui import QTextCursor
 
     user_input = card.get_plain_text()
 
@@ -1898,8 +1897,8 @@ class TitleEditWidget(QWidget):
     使得 main_widget.py 中 self.title_edit 的引用几乎无需修改。
     """
 
-    returnPressed = pyqtSignal()
-    editingFinished = pyqtSignal()
+    returnPressed = Signal()
+    editingFinished = Signal()
 
     def __init__(self, text: str = "", parent=None):
         super().__init__(parent)

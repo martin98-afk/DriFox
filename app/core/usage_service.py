@@ -27,7 +27,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.plugins.registries.provider_registry import ProviderRegistry
 
@@ -36,9 +36,9 @@ class UsageService(QObject):
     """用量聚合服务（进程级单例，风格对齐 PluginManager.get_instance）"""
 
     # (provider_name, config_id, result) — result 为套餐用量 dict 或 None
-    coding_plan_ready = pyqtSignal(str, str, object)
+    coding_plan_ready = Signal(str, str, object)
     # (provider_name, config_id, result) — result 为余额 dict / {"hide":...} / None
-    balance_ready = pyqtSignal(str, str, object)
+    balance_ready = Signal(str, str, object)
 
     _instance: Optional["UsageService"] = None
 

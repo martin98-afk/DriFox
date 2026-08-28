@@ -950,7 +950,7 @@ class PluginInstaller:
             # 尽量在主线程执行重载（与 backend watcher 的 _hot_reload_requested 信号同效）；
             # 失败则直接调用，异常被吞掉不影响安装结果
             try:
-                from PyQt5.QtCore import QTimer
+                from PySide6.QtCore import QTimer
 
                 QTimer.singleShot(0, lambda: svc.reload_plugin_targeted(plugin_name, action=action))
             except Exception:

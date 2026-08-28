@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import (
+from PySide6.QtCore import (
     QAbstractItemModel,
     QFileInfo,
     QMimeData,
@@ -30,10 +30,10 @@ from PyQt5.QtCore import (
     QSortFilterProxyModel,
     Qt,
     QUrl,
-    pyqtSignal,
+    Signal,
 )
-from PyQt5.QtGui import QColor, QIcon, QKeyEvent, QKeySequence
-from PyQt5.QtWidgets import (
+from PySide6.QtGui import QColor, QIcon, QKeyEvent, QKeySequence
+from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QFileIconProvider,
@@ -104,7 +104,7 @@ class _FileNode:
 class FileTreeModel(QAbstractItemModel):
     """自定义文件树 Model — 懒加载 + 排序（文件夹优先）"""
 
-    need_scan = pyqtSignal(str)  # 请求异步扫描 dir_path
+    need_scan = Signal(str)  # 请求异步扫描 dir_path
 
     COL_PATH = Qt.UserRole
     COL_IS_DIR = Qt.UserRole + 1
@@ -517,7 +517,7 @@ class FileTreeFilterProxy(QSortFilterProxyModel):
 class RenameDelegate(QStyledItemDelegate):
     """文件/文件夹原地重命名编辑器"""
 
-    rename_requested = pyqtSignal(str, str)  # old_path, new_name
+    rename_requested = Signal(str, str)  # old_path, new_name
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -580,15 +580,15 @@ class FileTreeView(QTreeView):
     """多选文件树视图 — 键盘/拖拽/右键"""
 
     # 请求卡片处理实际操作
-    delete_requested = pyqtSignal(list)  # List[str] paths
-    move_requested = pyqtSignal(list, str)  # paths, dest_dir
-    copy_requested = pyqtSignal(list, str)  # paths, dest_dir
-    context_menu_requested = pyqtSignal(QModelIndex, object)  # index, global_pos
-    double_clicked_file = pyqtSignal(str)  # file_path
-    enter_expand_requested = pyqtSignal(str)  # dir_path (Enter 键展开)
-    clipboard_copy = pyqtSignal()  # Ctrl+C
-    clipboard_cut = pyqtSignal()  # Ctrl+X
-    clipboard_paste = pyqtSignal()  # Ctrl+V
+    delete_requested = Signal(list)  # List[str] paths
+    move_requested = Signal(list, str)  # paths, dest_dir
+    copy_requested = Signal(list, str)  # paths, dest_dir
+    context_menu_requested = Signal(QModelIndex, object)  # index, global_pos
+    double_clicked_file = Signal(str)  # file_path
+    enter_expand_requested = Signal(str)  # dir_path (Enter 键展开)
+    clipboard_copy = Signal()  # Ctrl+C
+    clipboard_cut = Signal()  # Ctrl+X
+    clipboard_paste = Signal()  # Ctrl+V
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)

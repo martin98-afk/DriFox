@@ -28,7 +28,7 @@ import time
 import traceback
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer
 
 # 一键开关：定位完成后置 False，start()/stop() 变为空操作
 DRAG_PROFILER_ENABLED = False

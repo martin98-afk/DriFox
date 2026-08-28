@@ -6,7 +6,7 @@
     与 reload_agents，阻塞首屏。第一批尚未延迟该同步链（记录当前现象，作为基线）。
 
 (b) 本测试未修改任何业务代码，仅静态分析：用 pathlib 读取 app/main_widget.py 与
-    app/core/backend.py 源码文本 + re 匹配，不 import PyQt5、不实例化任何 GUI 对象。
+    app/core/backend.py 源码文本 + re 匹配，不 import PySide6、不实例化任何 GUI 对象。
 
 (c) 环境要求：pytest>=7 / Python3 / 对 app/ 源码有读权限 / 无需显示器 /
     无新三方依赖 / 跨平台 Windows 优先。

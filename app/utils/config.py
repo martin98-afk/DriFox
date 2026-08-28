@@ -304,7 +304,7 @@ class Settings(QConfig):
         if getattr(self, "_closing", False):
             return
         try:
-            from PyQt5.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication
 
             if QApplication.closingDown():
                 return

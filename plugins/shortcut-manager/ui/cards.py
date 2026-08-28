@@ -8,9 +8,9 @@ import re
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QKeySequence
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFont, QKeySequence
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -267,7 +267,7 @@ def _ctx_font(ctx: dict) -> tuple:
 class _KeyCapturePopup(QWidget):
     """弹出按键捕获窗口"""
 
-    key_captured = pyqtSignal(str)
+    key_captured = Signal(str)
 
     def __init__(self, parent: Optional[QWidget] = None, font_size: int = 14):
         super().__init__(parent)
@@ -350,8 +350,8 @@ class _KeyCapturePopup(QWidget):
 class _CommandRow(QFrame):
     """单个命令的展示行"""
 
-    edit_clicked = pyqtSignal(str)
-    restore_clicked = pyqtSignal(str)
+    edit_clicked = Signal(str)
+    restore_clicked = Signal(str)
 
     def __init__(
         self,
@@ -474,7 +474,7 @@ class _CommandRow(QFrame):
 class ShortcutManagerCard(QWidget):
     """快捷键管理器浮动卡片"""
 
-    closed = pyqtSignal()
+    closed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -501,7 +501,7 @@ class ShortcutManagerCard(QWidget):
         if self._context_provider is None or self._header_icon is None:
             return
         try:
-            from PyQt5.QtGui import QIcon
+            from PySide6.QtGui import QIcon
 
             ctx = self._context_provider()
             icon_info = ctx.get("plugin_icon", {})
@@ -674,7 +674,7 @@ class ShortcutManagerCard(QWidget):
     # ── 高度模式 ──
 
     def sizeHint(self):
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         base = super().sizeHint()
         win = self.window()
@@ -690,7 +690,7 @@ class ShortcutManagerCard(QWidget):
             self.updateGeometry()
 
     def eventFilter(self, obj, event):
-        from PyQt5.QtCore import QEvent
+        from PySide6.QtCore import QEvent
 
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()
@@ -842,7 +842,7 @@ class ShortcutManagerCard(QWidget):
                 confirmed = True
 
             dialog.confirmed.connect(_on_confirm)
-            dialog.exec_()
+            dialog.exec()
             if not confirmed:
                 self._count_lb.setText(f"⛔ 已取消：/{cmd_name}")
                 return

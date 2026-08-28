@@ -7,7 +7,7 @@ Shell 执行任务 - 异步执行系统命令
   Path B (shell=True):  含管道/重定向的命令
 """
 
-from PyQt5.QtCore import QRunnable, pyqtSlot
+from PySide6.QtCore import QRunnable, Slot
 
 from app.tools.command_safety import classify_command, needs_shell
 
@@ -21,7 +21,7 @@ class ShellExecutionTask(QRunnable):
         self.callback = callback
         self.setAutoDelete(True)
 
-    @pyqtSlot()
+    @Slot()
     def run(self):
         import subprocess
         import sys

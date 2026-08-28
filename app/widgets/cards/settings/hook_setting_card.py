@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
-from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import QSize
-from PyQt5.QtGui import QColor, QPainter
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QIcon
+from PySide6.QtCore import QSize
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -206,9 +206,9 @@ class _FlowLayout(QLayout):
 class HookItem(QWidget):
     """单个 Hook 条目"""
 
-    removed = pyqtSignal(str)  # hook_id
-    edited = pyqtSignal(str)  # hook_id
-    toggled = pyqtSignal(str, bool)  # hook_id, enabled
+    removed = Signal(str)  # hook_id
+    edited = Signal(str)  # hook_id
+    toggled = Signal(str, bool)  # hook_id, enabled
 
     def __init__(self, hook_data: dict, parent=None):
         super().__init__(parent=parent)
@@ -402,8 +402,8 @@ class HookEditCard(QWidget):
         "mcp_failed",
     ]
 
-    saved = pyqtSignal(dict)
-    closed = pyqtSignal()
+    saved = Signal(dict)
+    closed = Signal()
 
     def __init__(self, hook_data: dict = None, parent=None, hook_manager=None):
         super().__init__(parent=parent)
@@ -429,7 +429,7 @@ class HookEditCard(QWidget):
         style = CardStyles.edit_card_style()
         self.setStyleSheet(style)
         # QLineEdit::placeholder 由 CSS 覆盖，但仍设置 palette 确保兼容
-        from PyQt5.QtGui import QColor, QPalette
+        from PySide6.QtGui import QColor, QPalette
 
         ph_color = self._parse_placeholder_color()
         for le in self._line_edits:
@@ -451,7 +451,7 @@ class HookEditCard(QWidget):
     @staticmethod
     def _parse_placeholder_color() -> "QColor":
         """解析 Colors.INPUT_PLACEHOLDER 为 QColor（兼容 rgba/css 格式）"""
-        from PyQt5.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         s = Colors.INPUT_PLACEHOLDER.strip()
         if s.startswith("rgba("):
@@ -1095,10 +1095,10 @@ class HookEditCard(QWidget):
 class HookListSettingCard(ExpandSettingCard):
     """Hook 管理设置卡片"""
 
-    hooksChanged = pyqtSignal()
-    hookToggled = pyqtSignal(str, bool)  # (hook_id, enabled) 轻量信号，避免全量刷新
-    showAddHookCard = pyqtSignal()  # 显示添加 Hook 卡片
-    showEditHookCard = pyqtSignal(str, dict)  # 显示编辑 Hook 卡片: (hook_id, hook_data)
+    hooksChanged = Signal()
+    hookToggled = Signal(str, bool)  # (hook_id, enabled) 轻量信号，避免全量刷新
+    showAddHookCard = Signal()  # 显示添加 Hook 卡片
+    showEditHookCard = Signal(str, dict)  # 显示编辑 Hook 卡片: (hook_id, hook_data)
 
     def __init__(self, icon: QIcon, title: str, content: str = None, parent=None, home=None, hook_manager=None):
         self.home = home
@@ -1168,7 +1168,7 @@ class HookListSettingCard(ExpandSettingCard):
         self._hook_items.clear()
         self._render_hooks()
 
-        from PyQt5.QtCore import QCoreApplication
+        from PySide6.QtCore import QCoreApplication
 
         QCoreApplication.processEvents()
         self.viewLayout.activate()
@@ -1276,7 +1276,7 @@ class HookListSettingCard(ExpandSettingCard):
 
         if is_system:
             from app.widgets.simple_hover_tooltip import show_immediate_tooltip
-            from PyQt5.QtGui import QCursor
+            from PySide6.QtGui import QCursor
 
             show_immediate_tooltip(self, "系统级 Hook 不可删除", QCursor.pos(), duration_ms=1800)
             return
@@ -1305,14 +1305,14 @@ class HookListSettingCard(ExpandSettingCard):
             parent=self.window(),
         )
         dialog.confirmed.connect(_on_confirm)
-        dialog.exec_()
+        dialog.exec()
         if not _confirmed[0]:
             return
 
         success = self._hook_manager.delete_hook_by_id(hook_id)
         if not success:
             from app.widgets.simple_hover_tooltip import show_immediate_tooltip
-            from PyQt5.QtGui import QCursor
+            from PySide6.QtGui import QCursor
 
             show_immediate_tooltip(self, "删除失败", QCursor.pos(), duration_ms=1800)
             return

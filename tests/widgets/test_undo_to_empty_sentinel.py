@@ -92,7 +92,7 @@ def test_old_worker_finalize_blocked_after_undo_to_empty():
 def test_undo_from_message_sets_sentinel_before_stop():
     """F1（源码契约）：_undo_from_message 中哨兵设置必须先于 _on_stop_clicked
 
-    防止 stop 触发的 deferred finalize 在 FileUndoCard.exec_() 嵌套事件循环期间
+    防止 stop 触发的 deferred finalize 在 FileUndoCard.exec() 嵌套事件循环期间
     到达时无哨兵保护（此时截断尚未发生，_persist_session_after_mutation 未执行）。
     """
     src = inspect.getsource(mw.OpenAIChatToolWindow._undo_from_message)

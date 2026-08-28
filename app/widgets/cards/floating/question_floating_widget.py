@@ -9,14 +9,13 @@
 from functools import partial
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QKeySequence, QPalette
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QKeySequence, QPalette, QShortcut
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
-    QShortcut,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -100,7 +99,7 @@ class _AutoHeightScrollArea(QScrollArea):
 class _OptionRadioCard(QWidget):
     """单选选项卡片 — 标题 + 描述"""
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(self, label: str, description: str = "", parent=None):
         super().__init__(parent)
@@ -223,7 +222,7 @@ class _OptionRadioCard(QWidget):
 class _OptionCheckCard(QWidget):
     """多选选项卡片 — 标题 + 描述"""
 
-    toggled = pyqtSignal(bool)
+    toggled = Signal(bool)
 
     def __init__(self, label: str, description: str = "", parent=None):
         super().__init__(parent)
@@ -349,8 +348,8 @@ class _CustomInputCard(QWidget):
     """输入自己的答案选项 — 默认显示描述，选中后变成文本输入框"""
 
     PLACEHOLDER = "输入你的答案..."
-    activated = pyqtSignal()  # 用户主动点击选中时触发
-    heightNeedsUpdate = pyqtSignal()  # 高度需要更新时触发
+    activated = Signal()  # 用户主动点击选中时触发
+    heightNeedsUpdate = Signal()  # 高度需要更新时触发
 
     MAX_INPUT_HEIGHT = 220  # 输入框最大高度
     MIN_INPUT_HEIGHT = 32  # 输入框初始单行高度（一行文字 + 内边距）
@@ -381,7 +380,7 @@ class _CustomInputCard(QWidget):
         """控件变为可见时自动聚焦到文本输入框（如果处于激活态）"""
         super().showEvent(event)
         if self._active and event.isAccepted():
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             QTimer.singleShot(0, lambda: self._text_edit.setFocus() if self.isVisible() else None)
 
@@ -617,10 +616,10 @@ class _CustomInputCard(QWidget):
 class QuestionFloatingWidget(QWidget):
     """悬浮提问卡片，支持多问题分页"""
 
-    answered = pyqtSignal(str)
-    cancelled = pyqtSignal()
-    previewRequested = pyqtSignal(object)
-    heightChanged = pyqtSignal()
+    answered = Signal(str)
+    cancelled = Signal()
+    previewRequested = Signal(object)
+    heightChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -653,7 +652,7 @@ class QuestionFloatingWidget(QWidget):
         """
         super().showEvent(event)
         if event.isAccepted() and self._questions:
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             # 延迟到布局完成后聚焦，确保按钮在正确位置
             QTimer.singleShot(0, lambda: self._next_btn.setFocus() if self.isVisible() else None)

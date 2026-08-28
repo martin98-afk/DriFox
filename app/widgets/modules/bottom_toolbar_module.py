@@ -29,9 +29,9 @@ class BottomToolbarModule(UIModule):
     module_id = "bottom_toolbar"
 
     def build(self, host) -> None:
-        from PyQt5.QtCore import Qt
-        from PyQt5.QtGui import QColor
-        from PyQt5.QtWidgets import (
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import (
             QGraphicsDropShadowEffect,
             QLabel,
             QPushButton,

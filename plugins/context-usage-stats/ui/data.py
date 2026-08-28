@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 from loguru import logger
 
 
@@ -266,8 +266,8 @@ def _fetch_session_stats() -> dict:
 class _DataWorker(QObject):
     """后台线程执行数据库读取"""
 
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self):
         super().__init__()

@@ -5,7 +5,7 @@
 - 不直接实例化 OpenAIChatToolWindow（依赖过多，会崩溃）
 - 使用 AST 静态检查验证类结构和关键方法签名
 - 使用 importlib + __new__ + MagicMock 验证 __init__ 不抛异常
-- 使用 pytest.importorskip / @pytest.mark.skipif 处理 PyQt5/QApplication 不可用情况
+- 使用 pytest.importorskip / @pytest.mark.skipif 处理 PySide6/QApplication 不可用情况
 """
 
 import ast
@@ -23,7 +23,7 @@ from app.core import window_registry
 
 def _ensure_qapp():
     """确保 QApplication 已创建（返回现有实例，不重复创建）"""
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     return QApplication.instance() or QApplication(sys.argv)
 
@@ -36,7 +36,7 @@ def _qapp():
     """确保 QApplication 可用，返回实例"""
     global _qapp_ready
     if _qapp_ready is None:
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         _qapp_ready = QApplication.instance() or QApplication(sys.argv)
     return _qapp_ready
@@ -371,9 +371,9 @@ class TestInstanceAttributes:
 
 
 class TestSignals:
-    """验证所有 pyqtSignal 类属性存在"""
+    """验证所有 Signal 类属性存在"""
 
-    # 所有 pyqtSignal 定义。
+    # 所有 Signal 定义。
     # 演进记录：`_coding_plan_result_ready` 已移除（main_widget L855 注释）——
     # coding plan 结果改为进程级单例 UsageService.coding_plan_ready 广播
     # （L858 `UsageService.get_instance().coding_plan_ready.connect(self._on_coding_plan_result)`，
@@ -394,7 +394,7 @@ class TestSignals:
     }
 
     def test_all_signals_defined_in_ast(self):
-        """AST 层面：11 个 pyqtSignal 类属性全部定义"""
+        """AST 层面：11 个 Signal 类属性全部定义"""
         cls = _get_target_class()
         signal_names = set()
         for stmt in cls.body:
@@ -413,7 +413,7 @@ class TestSignals:
                         full_name = ".".join(reversed(parts))
                     elif isinstance(func, ast.Name):
                         full_name = func.id
-                    if full_name == "pyqtSignal" or full_name.endswith(".pyqtSignal"):
+                    if full_name == "Signal" or full_name.endswith(".Signal"):
                         signal_names.add(stmt.targets[0].id)
         # 按字母序对比，确保可读性
         missing = self._EXPECTED_SIGNALS - signal_names
@@ -524,18 +524,18 @@ class TestModuleLevel:
         assert hasattr(mw, "_BranchDetectSignals")
 
     def test_branch_detect_signals_has_pyqt_signal(self):
-        """_BranchDetectSignals 持有 pyqtSignal 属性"""
+        """_BranchDetectSignals 持有 Signal 属性"""
         import app.main_widget as mw
 
         cls = mw._BranchDetectSignals
-        # 检查类中至少定义了一个 pyqtSignal 类型的类属性
+        # 检查类中至少定义了一个 Signal 类型的类属性
         signal_found = False
         for attr_name in dir(cls):
             attr = getattr(cls, attr_name, None)
             if callable(attr) and "signal" in attr_name.lower():
                 signal_found = True
                 break
-        assert signal_found, "_BranchDetectSignals 应定义 pyqtSignal 属性"
+        assert signal_found, "_BranchDetectSignals 应定义 Signal 属性"
 
     def test_branch_detect_task_class_exists(self):
         """模块级 _BranchDetectTask 辅助类存在"""
@@ -643,7 +643,7 @@ class TestMethodSourceLogic:
         assert "_suspend_auto_scroll" in func_src, "_load_message_batch 应控制自动滚动"
 
     def test_safe_duplicate_window_has_error_handling(self):
-        """_safe_duplicate_window 用 try/BaseException 兜底防止 PyQt5 崩溃"""
+        """_safe_duplicate_window 用 try/BaseException 兜底防止 PySide6 崩溃"""
         cls = _get_target_class()
         method = _get_method(cls, "_safe_duplicate_window")
         assert method is not None
@@ -709,9 +709,9 @@ class TestMockedInit:
     def test_init_does_not_crash_with_full_mocks(self):
         """验证直接调用 OpenAIChatToolWindow() 不抛出业务逻辑异常。
 
-        注意：由于 __init__ 依赖大量 PyQt5 C++ 对象，完整 mock 成本极高。
-        这里退化为 smoke test：只验证调用不抛出非 PyQt5 异常。
-        PyQt5 C++ 层检测到 __new__ 绕过 __init__ 时的 RuntimeError 被接受。
+        注意：由于 __init__ 依赖大量 PySide6 C++ 对象，完整 mock 成本极高。
+        这里退化为 smoke test：只验证调用不抛出非 PySide6 异常。
+        PySide6 C++ 层检测到 __new__ 绕过 __init__ 时的 RuntimeError 被接受。
         """
         from app.main_widget import OpenAIChatToolWindow
 
@@ -721,8 +721,8 @@ class TestMockedInit:
         try:
             OpenAIChatToolWindow(fake_homepage)
         except RuntimeError:
-            # PyQt5 C++ 层检测到 __init__ 未正确调用（__new__ 绕过）。
-            # 这是 PyQt5 内部机制，与 OpenAIChatToolWindow 逻辑无关。
+            # PySide6 C++ 层检测到 __init__ 未正确调用（__new__ 绕过）。
+            # 这是 PySide6 内部机制，与 OpenAIChatToolWindow 逻辑无关。
             pass
 
     def test_instances_list_is_a_class_variable(self):

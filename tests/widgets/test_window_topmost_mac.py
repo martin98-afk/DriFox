@@ -9,10 +9,10 @@ NSStatusWindowLevel(8)，WindowServer 对非 normal 层级窗口丢弃标题栏
 from unittest.mock import patch
 
 import pytest
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QWidget
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("PySide6")
 
 
 @pytest.fixture()

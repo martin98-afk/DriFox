@@ -22,12 +22,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List
 
-# 让 PyQt5 / app.* 可被 import
+# 让 PySide6 / app.* 可被 import
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 from .sampler import Sample, env_full_mode, get_sample_interval, start_tracemalloc, stop_tracemalloc
 
@@ -53,7 +53,7 @@ def register_scenario(name: str):
 
 
 def _ensure_qapp() -> QApplication:
-    """确保 QApplication 单例存在（PyQt5 必要）。"""
+    """确保 QApplication 单例存在（PySide6 必要）。"""
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
@@ -330,13 +330,13 @@ def render_markdown_report(
     import platform
 
     try:
-        from PyQt5.QtCore import QT_VERSION_STR
-        from PyQt5.Qt import PYQT_VERSION_STR
+        from PySide6.QtCore import QT_VERSION_STR
+        from PySide6.Qt import PYQT_VERSION_STR
     except Exception:
         QT_VERSION_STR = PYQT_VERSION_STR = "n/a"
     lines.append(
         f"- 运行环境: Python {platform.python_version()} · "
-        f"PyQt5 {PYQT_VERSION_STR} · Qt {QT_VERSION_STR} · {platform.system()} {platform.machine()}"
+        f"PySide6 {PYQT_VERSION_STR} · Qt {QT_VERSION_STR} · {platform.system()} {platform.machine()}"
     )
     lines.append("")
 
@@ -457,7 +457,7 @@ def render_markdown_report(
 
 
 def _register_scenarios() -> None:
-    """延迟注册：场景函数依赖 PyQt5 / app.*，必须在 import 时才导入。"""
+    """延迟注册：场景函数依赖 PySide6 / app.*，必须在 import 时才导入。"""
     from .scenario_a_message_stream import run_message_stream_scenario
     from .scenario_b_session_switch import run_session_switch_scenario
     from .scenario_c_plugin_hot_reload import run_plugin_hot_reload_scenario

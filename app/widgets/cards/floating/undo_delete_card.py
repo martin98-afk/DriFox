@@ -10,9 +10,9 @@
 
 参考 CommandCard 的样式设计
 """
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QMouseEvent
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -26,8 +26,8 @@ from app.utils.utils import get_font_family_css
 class UndoDeleteCard(QWidget):
     """撤销删除卡片"""
 
-    restoreRequested = pyqtSignal()  # 用户点击恢复
-    dismissed = pyqtSignal()         # 卡片被关闭
+    restoreRequested = Signal()  # 用户点击恢复
+    dismissed = Signal()         # 卡片被关闭
 
     def __init__(self, parent=None):
         super().__init__(parent)

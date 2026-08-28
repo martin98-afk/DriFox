@@ -3,8 +3,8 @@
 极简模型列表编辑器
 Enter 新增，Delete 删除，双击编辑，拖拽排序
 """
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,

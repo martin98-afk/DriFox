@@ -29,8 +29,8 @@ if _REPO_ROOT not in sys.path:
 # ⚠ 必须先建 QApplication 再 import app.widgets.*：tab_manager_window →
 # theme_manager/design_tokens 在 import 时执行字体/样式测量，Windows
 # offscreen 下无 QApplication 会 0xC0000409 直接崩溃（无任何输出）
-from PyQt5.QtCore import QCoreApplication, QEventLoop, QSize, Qt, QTimer
-from PyQt5.QtWidgets import QApplication, QSplitter, QVBoxLayout, QWidget
+from PySide6.QtCore import QCoreApplication, QEventLoop, QSize, Qt, QTimer
+from PySide6.QtWidgets import QApplication, QSplitter, QVBoxLayout, QWidget
 
 QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 # ⚠ 必须持有 QApplication 引用：无引用时 Python GC 会销毁 C++ 实例，
@@ -47,7 +47,7 @@ _HOST = None  # 模块级持有，防 GC 后 Qt C++ 对象悬垂
 def _pump(ms: int):
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec_()
+    loop.exec()
 
 
 class _FakeCard(QWidget):
@@ -120,6 +120,12 @@ class _Host(QWidget):
 
 def _make_host():
     global _HOST
+    old = _HOST
+    if old is not None:
+        # 受控销毁旧实例：PySide6/shiboken 下悬垂回调（singleShot _sync 等）
+        # 触发 "Internal C++ object already deleted" 污染后续用例，必须先销毁并 pump
+        old.deleteLater()
+        _pump(60)
     _HOST = _Host()
     _HOST.resize(1000, 600)
     _HOST.show()

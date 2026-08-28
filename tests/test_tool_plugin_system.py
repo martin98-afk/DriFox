@@ -16,8 +16,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
@@ -696,7 +696,7 @@ class TestSourceLabelRender:
 
     def test_card_row_has_source_label(self, qt_app):
         """工具行构建后存在来源 QLabel（与 hook 卡片 sourceLabel 同位置/风格）"""
-        from PyQt5.QtWidgets import QLabel
+        from PySide6.QtWidgets import QLabel
         from app.tools.registry import ToolRegistry
         from app.core.tool_permission_controller import ToolPermissionController
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent

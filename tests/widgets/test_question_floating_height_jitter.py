@@ -29,12 +29,11 @@
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import Qt
+from PySide6.QtCore import Qt
 Qt.AA_ShareOpenGLContexts = Qt.AA_ShareOpenGLContexts
 try:
-    from PyQt5.QtWebEngineWidgets import (  # noqa: F401
-        QWebEnginePage, QWebEngineSettings, QWebEngineView,
-    )
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 except Exception:
     pass
 
@@ -46,9 +45,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from PyQt5.QtCore import QEvent, QEventLoop, QPoint, QTimer
-from PyQt5.QtGui import QMouseEvent
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import QEvent, QEventLoop, QPoint, QTimer
+from PySide6.QtGui import QMouseEvent
+from PySide6.QtWidgets import QApplication
 
 
 def _make_left_click():

@@ -41,7 +41,7 @@ def make_model_config() -> dict:
 def run(rounds: int, msgs_per_round: int) -> dict:
     tmp = bc.setup_isolation("sessleak")
 
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     app = QApplication(sys.argv)
 

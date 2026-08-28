@@ -62,13 +62,13 @@ def _build_mock_backend():
     - reload_plugin_subsystems 会读 self._agent_manager.get_builtin_tools()，
       我们注入 mock 的 agent_manager
 
-    QApplication 检测：用 gc.get_objects() 兜底（绕过 PyQt5.5.15+Python3.14
+    QApplication 检测：用 gc.get_objects() 兜底（绕过 PySide6.5.15+Python3.14
     下 QApplication.instance() 偶发返回 None 的 bug）
     """
     import gc
 
     from app.core.backend import ChatBackend
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     # 多路径找 QApplication
     app = QApplication.instance()
@@ -209,7 +209,7 @@ def run_plugin_hot_reload_scenario(
 
 
 if __name__ == "__main__":
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     _app = QApplication.instance() or QApplication(sys.argv)
 

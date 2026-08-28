@@ -11,9 +11,9 @@ import time
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QEvent, QSize, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEvent, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -96,7 +96,7 @@ def _adjust_color(hex_color: str, amount: int) -> str:
 class SystemCleanerCard(QWidget):
     """系统清理浮动卡片"""
 
-    closed = pyqtSignal()
+    closed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -143,7 +143,7 @@ class SystemCleanerCard(QWidget):
         if self._context_provider is None or self._header_icon is None:
             return
         try:
-            from PyQt5.QtGui import QIcon
+            from PySide6.QtGui import QIcon
 
             ctx = self._context_provider()
             icon_info = ctx.get("plugin_icon", {})

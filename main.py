@@ -35,8 +35,11 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 # （便于调试或快速回退，例如 QTWEBENGINE_CHROMIUM_FLAGS="" 即完全禁用本组开关）。
 _CHROMIUM_FLAGS = (
     "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
+    # PySide6 迁移注记：Qt6 的 Chromium（108+）在 --disable-gpu 后回退 SwiftShader
+    # 软件光栅化；若再加 --disable-software-rasterizer 会把唯一回退路径也禁掉，
+    # 导致所有 QWebEngineView 内容空白（Qt5/Chromium 83 无此问题）。
+    # 故 Qt6 下不再传 --disable-software-rasterizer。
     " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
-    " --disable-software-rasterizer"
     " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
     " --disable-extensions"
     " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
@@ -84,8 +87,8 @@ def main():
     _qt_pp = os.environ.pop("QT_PLUGIN_PATH", "")
 
     from loguru import logger
-    from PyQt5.QtCore import Qt, QTimer
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtWidgets import QApplication
 
     if _qt_pp:
         logger.info(f"[EnvCleanup] QT_PLUGIN_PATH 已清理: {_qt_pp}")
@@ -102,8 +105,8 @@ def main():
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，
     # 否则后续模块（如 message_card.py）中延迟导入会导致：
     #   ImportError: QtWebEngineWidgets must be imported before a QCoreApplication instance is created
-    from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineSettings  # noqa: F401
-
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
     # 创建应用 — 尽早创建 QApplication，让 Qt 事件循环尽快就绪
     app = QApplication(sys.argv)
 
@@ -170,8 +173,7 @@ def main():
         # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
         # 可复用已就绪的进程基础设施，避免首帧后突发 200-500ms 主线程阻塞。
         try:
-            from PyQt5.QtWebEngineWidgets import QWebEngineView
-
+            from PySide6.QtWebEngineWidgets import QWebEngineView
             _preheat_view = QWebEngineView()
             _preheat_view.setHtml("<html><body></body></html>")
             _preheat_view.hide()
@@ -204,7 +206,7 @@ def main():
 
     # 禁用 Qt 的 qFatal 默认行为（abort），改为记录 ERROR 日志
     from loguru import logger as _logger
-    from PyQt5.QtCore import QtMsgType, qInstallMessageHandler
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 
     def _qt_message_handler(msg_type, msg_context, msg_text):
         if msg_type == QtMsgType.QtFatalMsg:
@@ -277,7 +279,7 @@ def main():
     # 创建并显示窗口
     logger.info("LLM Chatter 启动中...")
 
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
     from app.main_widget import OpenAIChatToolWindow
 
     class FakePage(QWidget):
@@ -346,8 +348,10 @@ def main():
         chat_window = OpenAIChatToolWindow(fake_page)
         tm.add_window(chat_window)
         _guard.show_requested.connect(lambda: _activate_window(tm))
-        tm.show()
+        # 先应用置顶 flags 再 show：可见状态下 setWindowFlags 会重建原生窗口，
+        # 表现为窗口"闪没一下再重现"（PySide6/Qt6 下尤为明显）
         _apply_window_topmost(tm)
+        tm.show()
         logger.info("DriFox 以 Tab 管理器模式启动")
 
     # 应用退出时清理
@@ -378,7 +382,7 @@ def main():
     QTimer.singleShot(0, _show_popup)
     QTimer.singleShot(0, _deferred_startup)
 
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

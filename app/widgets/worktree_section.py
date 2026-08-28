@@ -12,9 +12,9 @@ import subprocess
 import sys
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QPaintEvent
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtGui import QPaintEvent
+from PySide6.QtWidgets import (
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -39,8 +39,8 @@ if sys.platform == "win32":
 class _WorktreeTaskSignals(QObject):
     """后台 git 任务的完成信号（跨线程 emit → 主线程槽）"""
 
-    finished = pyqtSignal(object)  # 任务成功：携带结果
-    failed = pyqtSignal(str)  # 任务失败：携带错误消息
+    finished = Signal(object)  # 任务成功：携带结果
+    failed = Signal(str)  # 任务失败：携带错误消息
 
 
 class _WorktreeTaskWorker(QRunnable):
@@ -212,8 +212,8 @@ def _create_worktree_job(repo_root: str, branch_name: str, worktree_dir: str, ba
 class _WorktreeRow(QWidget):
     """单行 worktree 分支"""
 
-    switched = pyqtSignal(str)  # worktree_path
-    deleted = pyqtSignal(str)  # worktree_path
+    switched = Signal(str)  # worktree_path
+    deleted = Signal(str)  # worktree_path
 
     def __init__(
         self,
@@ -439,7 +439,7 @@ class _WorktreeRow(QWidget):
 class _AddWorktreeRow(QWidget):
     """新建 worktree 行"""
 
-    createRequested = pyqtSignal(str, str)  # (branch_name, base_branch)
+    createRequested = Signal(str, str)  # (branch_name, base_branch)
 
     def __init__(self, repo_root: str, repo_name: str, current_branch: str, parent=None):
         super().__init__(parent)
@@ -483,7 +483,7 @@ class _AddWorktreeRow(QWidget):
             cancel_text="取消",
             parent=self.window(),
         )
-        if not dialog.exec_():
+        if not dialog.exec():
             return
 
         branch = dialog.input.text().strip()
@@ -500,10 +500,10 @@ class WorktreeSectionWidget(QWidget):
     │ ＋ 新建
     """
 
-    worktreeSwitched = pyqtSignal(str, str)  # (original_folder, worktree_path)
-    worktreeDeleted = pyqtSignal(str)  # 仅 UI 操作删除时发射
-    workingDirRestored = pyqtSignal(str)  # 外部删除导致工作目录恢复时发射（无重建）
-    sizeChanged = pyqtSignal(int)  # 高度变化通知
+    worktreeSwitched = Signal(str, str)  # (original_folder, worktree_path)
+    worktreeDeleted = Signal(str)  # 仅 UI 操作删除时发射
+    workingDirRestored = Signal(str)  # 外部删除导致工作目录恢复时发射（无重建）
+    sizeChanged = Signal(int)  # 高度变化通知
 
     def refresh_style(self):
         """刷新样式（用于系统字体大小切换时重绘）"""
@@ -790,4 +790,4 @@ class WorktreeSectionWidget(QWidget):
         ok.clicked.connect(dlg.accept)
         bl.addWidget(ok)
         vl.addLayout(bl)
-        dlg.exec_()
+        dlg.exec()

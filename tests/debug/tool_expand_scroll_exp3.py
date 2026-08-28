@@ -20,8 +20,8 @@
 import os
 import sys
 
-from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
@@ -186,7 +186,7 @@ def main():
 
     viewer.loadFinished.connect(lambda ok: ok and QTimer.singleShot(700, on_ready))
     QTimer.singleShot(30000, app.quit)
-    app.exec_()
+    app.exec()
     print("done")
 
 

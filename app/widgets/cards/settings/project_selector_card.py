@@ -11,9 +11,9 @@ import zlib
 from pathlib import Path
 from typing import Dict
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QPainter
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QScrollArea,
@@ -207,10 +207,10 @@ class _SquareAvatar(QWidget):
 class ProjectItem(QWidget):
     """单个项目项 - 卡片内项目选择列表项"""
 
-    clicked = pyqtSignal(str)
-    archiveClicked = pyqtSignal(str)
-    exportClicked = pyqtSignal(str)  # 导出项目压缩包
-    openFolderClicked = pyqtSignal(str, str)  # project_name, root_dir
+    clicked = Signal(str)
+    archiveClicked = Signal(str)
+    exportClicked = Signal(str)  # 导出项目压缩包
+    openFolderClicked = Signal(str, str)  # project_name, root_dir
 
     # 单行高度（无根目录）；有根目录时切换为 _DOUBLE_LINE_HEIGHT
     _SINGLE_LINE_HEIGHT = 30
@@ -417,14 +417,14 @@ class ProjectItem(QWidget):
 class ProjectSelectorCardContent(QWidget):
     """项目选择卡片内容"""
 
-    projectSelected = pyqtSignal(str)
-    newProjectCreated = pyqtSignal(str)
-    archiveProject = pyqtSignal(str)
-    exportProject = pyqtSignal(str)  # 导出项目压缩包
-    importProjectRequested = pyqtSignal()  # 导入项目压缩包（按钮触发）
-    projectFileDropped = pyqtSignal(str)  # 拖拽 .drifox_project 文件路径
-    openFolderRequested = pyqtSignal(str, str)  # project_name, root_dir
-    folderDropped = pyqtSignal(str)  # 拖拽文件夹路径
+    projectSelected = Signal(str)
+    newProjectCreated = Signal(str)
+    archiveProject = Signal(str)
+    exportProject = Signal(str)  # 导出项目压缩包
+    importProjectRequested = Signal()  # 导入项目压缩包（按钮触发）
+    projectFileDropped = Signal(str)  # 拖拽 .drifox_project 文件路径
+    openFolderRequested = Signal(str, str)  # project_name, root_dir
+    folderDropped = Signal(str)  # 拖拽文件夹路径
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -650,6 +650,6 @@ class ProjectSelectorCardContent(QWidget):
             parent=self.window(),
         )
         _dialog.confirmed.connect(_on_archive_confirm)
-        _dialog.exec_()
+        _dialog.exec()
         if _confirmed[0]:
             self.archiveProject.emit(project_name)

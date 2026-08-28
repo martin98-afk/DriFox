@@ -54,7 +54,7 @@ def _qrc_icon_exists(prefix: str, icon_name: str) -> bool:
         return cached
     exists = False
     try:
-        from PyQt5.QtCore import QFile
+        from PySide6.QtCore import QFile
         qrc_path = ":" + prefix[len("qrc:"):] if prefix.startswith("qrc:") else prefix
         exists = QFile.exists(f"{qrc_path}/{icon_name}.svg")
     except Exception:

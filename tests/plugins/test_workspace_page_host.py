@@ -2,7 +2,7 @@
 """WorkspacePageHost：懒创建/激活/refresh/teardown
 
 纯逻辑测试：用 mock 替代 _tab_window._content_area / QStackedWidget，
-避开 Windows 下 PyQt5 offscreen 平台不稳定导致的 QApplication 崩溃。
+避开 Windows 下 PySide6 offscreen 平台不稳定导致的 QApplication 崩溃。
 """
 
 from unittest.mock import MagicMock
@@ -11,7 +11,7 @@ import pytest
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-pytest.importorskip("PyQt5.QtWidgets", reason="仅在 PyQt5 环境加载 mock 类")
+pytest.importorskip("PySide6.QtWidgets", reason="仅在 PySide6 环境加载 mock 类")
 
 
 @pytest.fixture()

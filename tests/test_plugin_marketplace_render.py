@@ -21,7 +21,7 @@ if str(PLUGIN_MARKETPLACE) not in sys.path:
 
 
 def _app():
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     return QApplication.instance()
 
@@ -219,7 +219,7 @@ def test_proxy_tab_switches_without_error(monkeypatch):
     assert card._page_stack.currentIndex() == 2
     assert getattr(card, "_proxy_built", False) is True
     # 页面确实有内容（三张卡片 + 控件）
-    from PyQt5.QtWidgets import QLabel
+    from PySide6.QtWidgets import QLabel
 
     assert card._proxy_page.findChildren(QLabel), "加速页应有 QLabel 控件"
 
@@ -309,8 +309,8 @@ def test_proxy_switch_bounces_on_invalid_address(monkeypatch, tmp_path):
 
 def test_proxy_card_has_styled_background(monkeypatch):
     """加速页只有一个带边框背景的外层容器（WA_StyledBackground，否则 QSS background 不渲染 → 透明）"""
-    from PyQt5.QtCore import Qt as _Qt
-    from PyQt5.QtWidgets import QWidget as _QWidget
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtWidgets import QWidget as _QWidget
 
     card = _new_card(monkeypatch)
     card.show()
@@ -331,8 +331,8 @@ def test_proxy_card_has_styled_background(monkeypatch):
 
 def test_proxy_inner_sections_have_no_border(monkeypatch):
     """加速页内部段落（启用/配置/帮助）不得有边框"""
-    from PyQt5.QtCore import Qt as _Qt
-    from PyQt5.QtWidgets import QWidget as _QWidget
+    from PySide6.QtCore import Qt as _Qt
+    from PySide6.QtWidgets import QWidget as _QWidget
 
     card = _new_card(monkeypatch)
     card.show()
@@ -386,7 +386,7 @@ def test_filter_and_resize_no_blank(monkeypatch):
     覆盖：_reconcile_rows 只显隐行（不重建），widgetResizable=False 下
     content 高度需手动收缩；卡片 resize → 视口变化 → 行重排 → 高度同步。
     """
-    from PyQt5.QtWidgets import QMainWindow
+    from PySide6.QtWidgets import QMainWindow
 
     card = _new_card(monkeypatch)
     win = QMainWindow()

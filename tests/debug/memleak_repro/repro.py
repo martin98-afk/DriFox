@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""[DEBUG-memleak] DriFox PyQt5 内存泄漏复现 harness
+"""[DEBUG-memleak] DriFox PySide6 内存泄漏复现 harness
 
 目的：在不依赖 LLM/网络的前提下，构造 DriFox 长时间运行的典型操作路径
       （发消息 / 切会话 / 加载插件），稳定复现 RSS 单调增长与对象计数不收敛。
@@ -54,15 +54,15 @@ def _obj_counts() -> Dict[str, int]:
     """按类型统计当前存活对象数。"""
     counts: Dict[str, int] = {}
     keys = (
-        "PyQt5.QtCore.QObject",
-        "PyQt5.QtCore.QTimer",
-        "PyQt5.QtCore.QThread",
-        "PyQt5.QtWidgets.QWidget",
-        "PyQt5.QtWidgets.QLabel",
-        "PyQt5.QtWidgets.QLayout",
-        "PyQt5.QtWidgets.QVBoxLayout",
-        "PyQt5.QtWebEngineWidgets.QWebEngineView",
-        "PyQt5.QtWebEngineWidgets.QWebEnginePage",
+        "PySide6.QtCore.QObject",
+        "PySide6.QtCore.QTimer",
+        "PySide6.QtCore.QThread",
+        "PySide6.QtWidgets.QWidget",
+        "PySide6.QtWidgets.QLabel",
+        "PySide6.QtWidgets.QLayout",
+        "PySide6.QtWidgets.QVBoxLayout",
+        "PySide6.QtWebEngineWidgets.QWebEngineView",
+        "PySide6.QtWebEngineWidgets.QWebEnginePage",
     )
     for obj in gc.get_objects():
         try:
@@ -72,7 +72,7 @@ def _obj_counts() -> Dict[str, int]:
         if cn in keys:
             counts[cn] = counts.get(cn, 0) + 1
     try:
-        from PyQt5.QtCore import QObject  # type: ignore
+        from PySide6.QtCore import QObject  # type: ignore
         counts["QObject_total"] = sum(1 for o in gc.get_objects() if isinstance(o, QObject))
     except Exception:
         pass
@@ -92,7 +92,7 @@ def _snapshot(label: str) -> Dict[str, Any]:
 def _fmt_row(snap: Dict[str, Any]) -> str:
     objs = snap.get("obj", {})
     qobj = objs.get("QObject_total", 0)
-    qwid = objs.get("PyQt5.QtWidgets.QWidget", 0)
+    qwid = objs.get("PySide6.QtWidgets.QWidget", 0)
     base = (
         f"{snap['label']:<28} RSS={snap['rss_mb']:>8.2f}MB  "
         f"QObject={qobj:>5}  QWidget={qwid:>4}"
@@ -113,10 +113,10 @@ def _diff(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _pump_qt(app, ms: int = 60) -> None:
-    from PyQt5.QtCore import QEventLoop, QTimer  # type: ignore
+    from PySide6.QtCore import QEventLoop, QTimer  # type: ignore
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec_()
+    loop.exec()
     app.processEvents()
 
 
@@ -128,7 +128,7 @@ def scenario_message(app, rounds: int) -> List[Dict[str, Any]]:
     每 20 条做一次"清空"，模拟会话内追加后刷新/切回。
     复刻路径：MessageCard 创建 + 进 chat_layout + 旧卡 deleteLater。
     """
-    from PyQt5.QtWidgets import QWidget, QVBoxLayout  # type: ignore
+    from PySide6.QtWidgets import QWidget, QVBoxLayout  # type: ignore
 
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snapshot("msg:r0:init"))
@@ -169,7 +169,7 @@ def scenario_message(app, rounds: int) -> List[Dict[str, Any]]:
                     except Exception:
                         continue
         else:
-            from PyQt5.QtWidgets import QLabel  # type: ignore
+            from PySide6.QtWidgets import QLabel  # type: ignore
             card = QLabel(text)
             card.setWordWrap(True)
         chat_layout.addWidget(card)
@@ -208,7 +208,7 @@ def scenario_session(app, rounds: int) -> List[Dict[str, Any]]:
     """N 次切换会话：销毁旧 chat_widget 树 → 新建新会话树。
     复刻路径：ChatBackend.switch_session → 旧卡全删 + 新建。
     """
-    from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel  # type: ignore
+    from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel  # type: ignore
 
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snapshot("sess:r0:init"))
@@ -251,7 +251,7 @@ def scenario_session(app, rounds: int) -> List[Dict[str, Any]]:
 def scenario_plugin(app, rounds: int) -> List[Dict[str, Any]]:
     """反复加载/卸载最小"插件" QObject。复刻 runtime_component_loader 反复 reload。
     """
-    from PyQt5.QtCore import QObject, pyqtSignal  # type: ignore
+    from PySide6.QtCore import QObject, Signal  # type: ignore
 
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snapshot("plug:r0:init"))
@@ -259,7 +259,7 @@ def scenario_plugin(app, rounds: int) -> List[Dict[str, Any]]:
     registry: Dict[str, QObject] = {}
 
     class PluginObj(QObject):
-        ready = pyqtSignal()
+        ready = Signal()
 
         def __init__(self, name: str):
             super().__init__()
@@ -300,9 +300,9 @@ def scenario_plugin(app, rounds: int) -> List[Dict[str, Any]]:
 
 def scenario_signal(app, rounds: int) -> List[Dict[str, Any]]:
     """最小复现：source 持有 sink 引用，rounds 后只删 sink 列表但因 source 还活着
-    → sink 因信号连接被 source 持有无法释放（PyQt5 强引用）。
+    → sink 因信号连接被 source 持有无法释放（PySide6 强引用）。
     """
-    from PyQt5.QtCore import QObject, pyqtSignal  # type: ignore
+    from PySide6.QtCore import QObject, Signal  # type: ignore
 
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snapshot("sig:r0:init"))
@@ -310,7 +310,7 @@ def scenario_signal(app, rounds: int) -> List[Dict[str, Any]]:
     sources: List[QObject] = []
 
     class Source(QObject):
-        tick = pyqtSignal(int)
+        tick = Signal(int)
 
     class Sink(QObject):
         def __init__(self):
@@ -346,7 +346,7 @@ def scenario_signal(app, rounds: int) -> List[Dict[str, Any]]:
 def scenario_parent(app, rounds: int) -> List[Dict[str, Any]]:
     """N 个 QWidget 不设 parent，只 del Python 引用 —— 验证 Qt 父子树外对象的 GC。
     """
-    from PyQt5.QtWidgets import QWidget  # type: ignore
+    from PySide6.QtWidgets import QWidget  # type: ignore
 
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snapshot("par:r0:init"))
@@ -374,7 +374,7 @@ def scenario_parent(app, rounds: int) -> List[Dict[str, Any]]:
 def scenario_timer(app, rounds: int) -> List[Dict[str, Any]]:
     """每轮一个 QTimer.start(单次)，只 stop 不 deleteLater —— 验证 timer 堆积。
     """
-    from PyQt5.QtCore import QTimer  # type: ignore
+    from PySide6.QtCore import QTimer  # type: ignore
 
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snapshot("tmr:r0:init"))
@@ -426,9 +426,9 @@ SCENARIOS: Dict[str, Callable[[Any, int], List[Dict[str, Any]]]] = {
 
 
 def run(args: argparse.Namespace) -> int:
-    from PyQt5.QtCore import Qt  # type: ignore
-    import PyQt5.QtWebEngineWidgets  # noqa: F401
-    from PyQt5.QtWidgets import QApplication  # type: ignore
+    from PySide6.QtCore import Qt  # type: ignore
+    import PySide6.QtWebEngineWidgets  # noqa: F401
+    from PySide6.QtWidgets import QApplication  # type: ignore
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -467,7 +467,7 @@ def run(args: argparse.Namespace) -> int:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="DriFox PyQt5 内存泄漏复现 harness")
+    p = argparse.ArgumentParser(description="DriFox PySide6 内存泄漏复现 harness")
     p.add_argument(
         "--scenario",
         default="all",

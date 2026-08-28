@@ -112,7 +112,7 @@ def run_session_switch_scenario(
 
 
 if __name__ == "__main__":
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     _app = QApplication.instance() or QApplication(sys.argv)
 

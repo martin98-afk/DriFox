@@ -9,7 +9,7 @@
 """
 
 import pytest
-from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
@@ -60,7 +60,7 @@ def test_resolve_icon_theme_aware(qtbot, widget, fresh_registry, monkeypatch):
 
     from app.main_widget import OpenAIChatToolWindow
     from app.plugins.registries.ui_plugin_registry import InputButtonInfo
-    from PyQt5.QtGui import QIcon
+    from PySide6.QtGui import QIcon
 
     tmp = tempfile.mkdtemp()
     dark = os.path.join(tmp, "dark.svg")
@@ -95,7 +95,7 @@ def test_refresh_icons_updates_button(qtbot, widget, fresh_registry, monkeypatch
     import os
     import tempfile
 
-    from PyQt5.QtWidgets import QToolButton
+    from PySide6.QtWidgets import QToolButton
 
     tmp = tempfile.mkdtemp()
     dark = os.path.join(tmp, "dark.svg")
@@ -120,7 +120,7 @@ def test_refresh_icons_updates_button(qtbot, widget, fresh_registry, monkeypatch
 
 def test_build_buttons_renders(qtbot, widget, fresh_registry):
     """注册按钮 → 构建出 QToolButton（tooltip 正确）"""
-    from PyQt5.QtWidgets import QToolButton
+    from PySide6.QtWidgets import QToolButton
 
     clicks = []
 
@@ -142,7 +142,7 @@ def test_build_buttons_renders(qtbot, widget, fresh_registry):
 
 def test_rebuild_idempotent(qtbot, widget, fresh_registry):
     """重建幂等：重复调用不产生重复按钮；清空注册后按钮消失"""
-    from PyQt5.QtWidgets import QToolButton
+    from PySide6.QtWidgets import QToolButton
 
     fresh_registry.register_input_button("demo", "btn-1", tooltip="按钮A", on_click=lambda ctx: None)
     widget._build_plugin_input_buttons()
@@ -172,7 +172,7 @@ def test_click_exception_safe(qtbot, widget, fresh_registry):
 
     fresh_registry.register_input_button("demo", "btn-1", tooltip="坏按钮", on_click=_boom)
     widget._build_plugin_input_buttons()
-    from PyQt5.QtWidgets import QToolButton
+    from PySide6.QtWidgets import QToolButton
 
     btn = [b for b in widget._toolbar_capsule.findChildren(QToolButton) if b.toolTip() == "坏按钮"][0]
     btn.click()  # 不应抛异常

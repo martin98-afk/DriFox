@@ -21,7 +21,7 @@ import time
 from typing import Any, Dict, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 
 class PluginHostService(QObject):
@@ -30,9 +30,9 @@ class PluginHostService(QObject):
     _instance: Optional["PluginHostService"] = None
 
     # UI 广播：各窗口（OpenAIChatToolWindow）直连本信号刷新插件相关视图
-    plugin_changed = pyqtSignal(dict)
+    plugin_changed = Signal(dict)
     # watcher 线程 → 主线程（内部投递）
-    _hot_reload_requested = pyqtSignal(str, str)  # (插件名, 组件), ""=全量/空组件=全部组件
+    _hot_reload_requested = Signal(str, str)  # (插件名, 组件), ""=全量/空组件=全部组件
 
     _NEW_PLUGIN_SENTINEL = "__NEW__"
 
@@ -137,7 +137,7 @@ class PluginHostService(QObject):
     def _defer_non_critical_plugin_init(self, pm):
         """非关键插件初始化：主题/LSP/热更新，延迟执行不阻塞 UI"""
         # 使用 QTimer 延迟执行（backend 提供 _deferred_timer 供调用方关联到 Qt 事件循环）
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         def _do_deferred():
             # 内置组件 reloader 注册（幂等，进程一次 — chat_backend.py 顶层注册表
@@ -1181,7 +1181,7 @@ class PluginHostService(QObject):
         """风暴期合并重载：300ms 后执行一次全量 reload_plugin_subsystems（仅触发一次）
 
         修 #2 timer：改用 QTimer.singleShot 静态方法，不持有 QTimer 实例
-        （PyQt5 下即便 stop+deleteLater 仍残留 +1 QTimer，singleShot 零实例）。
+        （PySide6 下即便 stop+deleteLater 仍残留 +1 QTimer，singleShot 零实例）。
         用 _reload_pending 守卫保留"风暴期合并"语义：多次调用只在首个 300ms 后触发一次。
         """
         if getattr(self, "_reload_pending", False):

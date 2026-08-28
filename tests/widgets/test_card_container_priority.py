@@ -22,8 +22,8 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from PyQt5.QtCore import QEventLoop, Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import QApplication, QSplitter, QWidget
+from PySide6.QtCore import QEventLoop, Qt, QTimer, Signal
+from PySide6.QtWidgets import QApplication, QSplitter, QWidget
 
 from app.widgets.cards.card_container import CardContainer
 from app.widgets.cards.card_manager import ContainerType
@@ -57,7 +57,7 @@ def _card(min_w=0, min_h=0, fixed_h=None):
         card.setMinimumHeight(min_h)
 
     def _minimum_size_hint():
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         return QSize(card._min_hint_w, card._min_hint_h)
 
@@ -68,14 +68,14 @@ def _card(min_w=0, min_h=0, fixed_h=None):
 class _DynamicCard(QWidget):
     """带 heightChanged 信号的测试卡片（模拟 todo 等动态高度卡片）"""
 
-    heightChanged = pyqtSignal()
+    heightChanged = Signal()
 
     def __init__(self, h: int = 150):
         super().__init__()
         self.setFixedHeight(h)
 
     def minimumSizeHint(self):
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         return QSize(0, self.height())
 

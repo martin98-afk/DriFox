@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 import pytest
-from PyQt5.QtGui import QColor
+from PySide6.QtGui import QColor
 
 # context-usage-stats 插件重构（T8）：纯函数已从 ui/cards.py 迁出——
 # _fast_estimate_tokens/_estimate_messages_tokens → ui/data.py；

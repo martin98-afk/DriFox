@@ -11,10 +11,11 @@
 """
 
 import pytest
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QWidget, QStackedWidget, QShortcut, QApplication
-from PyQt5.QtTest import QTest
-from PyQt5.QtGui import QKeySequence
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QShortcut
+from PySide6.QtWidgets import QWidget, QStackedWidget, QApplication
+from PySide6.QtTest import QTest
+from PySide6.QtGui import QKeySequence
 
 
 def _make_hierarchy():

@@ -43,7 +43,7 @@ def fresh_registry():
 class _FakeBuiltinTools:
     """ToolExecutor.is_valid/_try_recover_mcp_prefix 所需的最小编成对象。
 
-    非 QObject：sip.isdeleted() 抛异常 → is_valid 走 except pass → True。
+    非 QObject：not sip.isValid() 抛异常 → is_valid 走 except pass → True。
     _mcp_manager 提供 is_connected=False 的假 MCP 管理器（生产单例恒存在）。
     """
 

@@ -6,7 +6,7 @@ import pytest
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-pytest.importorskip("PyQt5.QtWidgets")
+pytest.importorskip("PySide6.QtWidgets")
 
 
 @pytest.fixture()
@@ -18,7 +18,7 @@ def fresh_registry(monkeypatch):
 
 
 def test_stack_metadata_sets_widget_property(fresh_registry, qapp, monkeypatch):
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     class _StackableCard(QWidget):
         pass

@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QObject, QRunnable, QThreadPool, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from app.core.message_content import consolidate_messages, content_to_text
 from app.core.token_estimator import count_messages_tokens
@@ -190,7 +190,7 @@ def _build_archive_preview(messages: List[Dict], max_len: int = 50) -> str:
 class _ArchiveScanSignals(QObject):
     """归档扫描 worker 信号：用于从后台线程回到主线程交付结果。"""
 
-    finished = pyqtSignal(int, list)  # request_id, enriched_list
+    finished = Signal(int, list)  # request_id, enriched_list
 
 
 class _ArchiveScanTask(QRunnable):

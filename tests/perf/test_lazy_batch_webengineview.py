@@ -7,7 +7,7 @@
     Chromium 实例上限（_max_rendered_cards）+ LRU 回收（_recycle_lru_batches）。
 
 (b) 本测试未修改任何业务代码，仅静态分析：用 pathlib 读取 app/main_widget.py 源码文本
-    + re 匹配，不 import PyQt5、不实例化任何 GUI 对象。
+    + re 匹配，不 import PySide6、不实例化任何 GUI 对象。
 
 (c) 环境要求：pytest>=7 / Python3 / 对 app/ 源码有读权限 / 无需显示器 /
     无新三方依赖 / 跨平台 Windows 优先。

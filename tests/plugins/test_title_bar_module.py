@@ -12,7 +12,7 @@ import pytest
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-pytest.importorskip("PyQt5.QtWidgets")
+pytest.importorskip("PySide6.QtWidgets")
 
 _CONTRACT_ATTRS = (
     "_project_branch_container",
@@ -42,7 +42,7 @@ def test_module_id():
 
 
 def test_compose_builds_title_bar(fresh_registry, qapp):
-    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
 
     from app.widgets.modules.title_bar_module import TitleBarModule
     from app.widgets.ui_composition import compose

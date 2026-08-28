@@ -9,9 +9,9 @@ TabManagerWindow 拖拽性能诊断测试
 import time
 
 import pytest
-from PyQt5.QtCore import QPoint, Qt, QTimer
-from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication
 
 from app.widgets.tab_manager_window import TabManagerWindow
 
@@ -144,8 +144,8 @@ def test_window_stays_on_top_without(qtbot):
     """不带 WindowStaysOnTopHint 的拖拽性能基线（用独立窗口，避免 setWindowFlags 销毁对象）"""
     # 创建两个独立实例来对比，不修改已有窗口的标志
     # 直接从 QWidget 创建，模拟移除 StaysOnTopHint 的行为
-    from PyQt5.QtWidgets import QWidget, QHBoxLayout
-    from PyQt5.QtCore import Qt as QtCore
+    from PySide6.QtWidgets import QWidget, QHBoxLayout
+    from PySide6.QtCore import Qt as QtCore
 
     tm = QWidget()
     tm.setObjectName("tabManagerWindow")

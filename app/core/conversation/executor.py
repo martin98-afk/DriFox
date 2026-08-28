@@ -165,7 +165,7 @@ class ConversationExecutor:
     def _finalize_worker_cleanup(self, worker):
         """Worker 统一收尾：cleanup + deleteLater（线程已退出才安全执行）
 
-        T6-A: PyQt5 的 QThread 对象由 C++ 持有（"To be destroyed by: C/C++"），
+        T6-A: PySide6 的 QThread 对象由 C++ 持有（"To be destroyed by: C/C++"），
               必须 deleteLater() 排队销毁，否则 Python wrapper 残留。
         B6: 所有清理路径（finalize_stop/cleanup/_on_worker_finished/延迟清理）
               统一走此入口；_cleanup_lock 防止并发重复清理；线程仍在运行时
@@ -429,7 +429,7 @@ class ConversationExecutor:
             signal = getattr(worker, signal_name, None)
             if signal is not None:
                 if direct_signals:
-                    from PyQt5.QtCore import Qt
+                    from PySide6.QtCore import Qt
 
                     signal.connect(cb, Qt.DirectConnection)
                 else:

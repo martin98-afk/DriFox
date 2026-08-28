@@ -10,13 +10,13 @@ import platform
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
-from PyQt5 import sip as _sip
+import shiboken6 as _sip
 
 from loguru import logger
 from app.core import window_registry
-from PyQt5.QtCore import QEasingCurve, QEvent, Qt, QPoint, QTimer, QVariantAnimation, pyqtSignal
-from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEasingCurve, QEvent, Qt, QPoint, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import QCloseEvent, QIcon, QPixmap
+from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
     QFrame,
@@ -342,10 +342,10 @@ class TabManagerWindow(QWidget):
     _WM_EXITSIZEMOVE = 0x0232
     _WM_MOVING = 0x0216  # 仅"移动"触发；"缩放"发 WM_SIZING，二者互斥，可精确区分
 
-    tabCountChanged = pyqtSignal(int)
-    activeTabChanged = pyqtSignal(int)
+    tabCountChanged = Signal(int)
+    activeTabChanged = Signal(int)
     # 聚合 AI 状态 → 全局桌宠（仅当前激活窗的状态被转发，避免多窗串扰）
-    active_ai_state_changed = pyqtSignal(str)
+    active_ai_state_changed = Signal(str)
 
     @classmethod
     def get_instance(cls) -> Optional["TabManagerWindow"]:
@@ -583,7 +583,7 @@ class TabManagerWindow(QWidget):
     def _apply_theme_stylesheet(self):
         """应用主题样式表
 
-        使用 #objectName 选择器而非类选择器。PyQt5 中 Python QWidget 子类的
+        使用 #objectName 选择器而非类选择器。PySide6 中 Python QWidget 子类的
         metaObject().className() 统一返回 'QWidget'，类选择器（如
         'TabManagerWindow {...}'）无法匹配，导致样式失效。
 
@@ -940,7 +940,7 @@ class TabManagerWindow(QWidget):
         #   展开动画结束 → 释放轴向 max、锁定最小尺寸，占比交给 splitter 拖拽；
         #   折叠 → 记忆占比、动画收 0 后 hide() 并显式归还空间给内容区；
         #   重开 → 恢复上次拖出的占比。
-        from PyQt5.QtWidgets import QSplitter as _DockSplitter, QStackedWidget as _QStackedWidget
+        from PySide6.QtWidgets import QSplitter as _DockSplitter, QStackedWidget as _QStackedWidget
 
         # ── 覆盖层堆栈（QStackedWidget）：仅替换对话区，不覆盖 LEFT/RIGHT/BOTTOM ──
         # Page 0: 正常对话视图
@@ -1057,7 +1057,7 @@ class TabManagerWindow(QWidget):
         self._global_top_container.overlayStateChanged.connect(self._on_overlay_state_changed)
 
         # 使用 QSplitter 让左侧面板可拖拽
-        from PyQt5.QtWidgets import QSplitter
+        from PySide6.QtWidgets import QSplitter
 
         self._splitter = QSplitter(Qt.Horizontal, content_widget)
         self._splitter.addWidget(self._tab_frame)
@@ -1831,7 +1831,7 @@ class TabManagerWindow(QWidget):
             # 统一回调：标题变更时同步更新 Tab 标题 + 项目图标 + 宿主窗口标题 + 团队胶囊
             # ★ 使用 _window_to_index O(1) 字典查找，替代 _windows.index() O(n)
             def _on_win_title_changed(_new_title, _win=window):
-                if _sip.isdeleted(_win):
+                if not _sip.isValid(_win):
                     return
                 cur_idx = self._window_to_index.get(id(_win), -1)
                 if cur_idx < 0 or cur_idx >= len(self._windows):
@@ -1869,7 +1869,7 @@ class TabManagerWindow(QWidget):
 
             # 监听 AI 状态变化（流式/错误/提问 → Tab 边框指示 + 全局桌宠）
             def _on_ai_state_changed(state, _win=window):
-                if _sip.isdeleted(_win):
+                if not _sip.isValid(_win):
                     return
                 cur_idx = self._window_to_index.get(id(_win), -1)
                 if cur_idx < 0 or cur_idx >= len(self._windows):
@@ -2367,7 +2367,7 @@ class TabManagerWindow(QWidget):
         # 阻塞），保留"加速回收"意图，消除主路径同步等待析构。QTimer 已在
         # 文件头部导入，此处复用。lambda 经 try/except 包裹，不引用已销毁对象。
         try:
-            from PyQt5.QtCore import QCoreApplication, QEvent
+            from PySide6.QtCore import QCoreApplication, QEvent
 
             QTimer.singleShot(0, lambda: QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete))
         except Exception:
@@ -2476,10 +2476,10 @@ class TabManagerWindow(QWidget):
         提取自 MainWidget._duplicate_window 的创建逻辑，供 spawn_tab 统一编排。
         返回尚未加入 Tab 管理器的窗口实例；source 无效时返回 None。
         """
-        from PyQt5 import sip
+        import shiboken6 as sip
 
         try:
-            if sip.isdeleted(source_window) or sip.isdeleted(getattr(source_window, "homepage", None)):
+            if not sip.isValid(source_window) or not sip.isValid(getattr(source_window, "homepage", None)):
                 return None
         except Exception:
             return None
@@ -2635,7 +2635,7 @@ class TabManagerWindow(QWidget):
     @staticmethod
     def _create_fake_page():
         """创建一个临时的 FakePage 用于窗口初始化（与 main.py 类似）"""
-        from PyQt5.QtWidgets import QWidget
+        from PySide6.QtWidgets import QWidget
 
         class FakePage(QWidget):
             def __init__(self):

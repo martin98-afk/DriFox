@@ -18,7 +18,7 @@ GatewayEngine — Gateway 专用引擎，与 UI 的 ChatEngine 完全独立
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from app.core.chat_session import ChatSession
 from app.core.conversation.adapters import GatewayConversationAdapter
@@ -38,9 +38,9 @@ class GatewayEngine(QObject, BaseEngine):
     """Gateway 专用引擎，与 UI 的 ChatEngine 完全独立"""
 
     # 状态信号
-    worker_started = pyqtSignal()
-    worker_finished = pyqtSignal(str)  # response text
-    worker_error = pyqtSignal(str)  # error message
+    worker_started = Signal()
+    worker_finished = Signal(str)  # response text
+    worker_error = Signal(str)  # error message
 
     # 全局单例
     _global_instance: Optional["GatewayEngine"] = None

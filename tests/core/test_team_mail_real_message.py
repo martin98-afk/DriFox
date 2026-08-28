@@ -21,7 +21,7 @@ R6 修复：4 处过滤条件改为"跳过非 TeamMail 的 hook 事件"，邮件
 注：4 处过滤逻辑的"内容"（_on_send_clicked / _maybe_generate_topic_summary /
 _toggle_history_questions_popup / _update_history_questions_badge）在 main_widget.py
 中被各种 GUI / 业务逻辑包裹。本测试聚焦过滤条件本身（核心修复点），避免依赖
-重型 main_widget 初始化（OpenAIChatToolWindow.__init__ 涉及 PyQt5 C++ + 重依赖）。
+重型 main_widget 初始化（OpenAIChatToolWindow.__init__ 涉及 PySide6 C++ + 重依赖）。
 """
 
 import pytest

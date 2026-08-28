@@ -13,9 +13,9 @@ import math
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QPoint, QRect, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QMouseEvent, QPainter, QPen, QTextDocument
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QTextDocument
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -170,8 +170,8 @@ class _DescTooltipBubble(QLabel):
 class CommandItemWidget(QWidget):
     """命令/技能列表单项"""
 
-    clicked = pyqtSignal()
-    hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
+    clicked = Signal()
+    hovered = Signal(object)  # 鼠标悬停时发射自身引用
 
     def __init__(self, item_data: Dict[str, str], query: str, parent=None):
         super().__init__(parent)
@@ -484,8 +484,8 @@ class ParameterItemWidget(QWidget):
     样式与 CommandItemWidget 一致，但更简洁（无类型标签，固定显示名称+描述）
     """
 
-    clicked = pyqtSignal()
-    hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
+    clicked = Signal()
+    hovered = Signal(object)  # 鼠标悬停时发射自身引用
 
     def __init__(self, param: CommandParameter, parent=None):
         super().__init__(parent)
@@ -649,8 +649,8 @@ class ValueItemWidget(QWidget):
     顶部 tooltip 显示当前枚举值的描述（复用 CommandCard 的悬浮气泡系统）。
     """
 
-    clicked = pyqtSignal()
-    hovered = pyqtSignal(object)  # 鼠标悬停时发射自身引用
+    clicked = Signal()
+    hovered = Signal(object)  # 鼠标悬停时发射自身引用
 
     def __init__(self, value: str, description: str = "", parent=None):
         super().__init__(parent)
@@ -752,11 +752,11 @@ class ValueItemWidget(QWidget):
 class CommandCard(QWidget):
     """斜杠命令卡片"""
 
-    commandSelected = pyqtSignal(str, str)  # name, display_type（"command"/"prompt"/"agent"/"skill"/""）
-    dismissed = pyqtSignal()  # 卡片被关闭
-    parameterSelected = pyqtSignal(str, str)  # param_name, param_type — 参数项被点击
-    parameterDeselected = pyqtSignal(str, str)  # param_name, param_type — 已激活参数被再次点击（取消选中）
-    parameterValueSelected = pyqtSignal(str)  # value — --model= 的值被选中
+    commandSelected = Signal(str, str)  # name, display_type（"command"/"prompt"/"agent"/"skill"/""）
+    dismissed = Signal()  # 卡片被关闭
+    parameterSelected = Signal(str, str)  # param_name, param_type — 参数项被点击
+    parameterDeselected = Signal(str, str)  # param_name, param_type — 已激活参数被再次点击（取消选中）
+    parameterValueSelected = Signal(str)  # value — --model= 的值被选中
 
     def __init__(self, parent=None):
         super().__init__(parent)

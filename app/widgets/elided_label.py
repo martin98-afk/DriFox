@@ -8,8 +8,8 @@ ElidedLabel - 自动根据可用宽度省略文本的 QLabel（中间省略）
 import html
 from typing import List
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QLabel, QSizePolicy
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QLabel, QSizePolicy
 
 
 class _ElidedLabel(QLabel):

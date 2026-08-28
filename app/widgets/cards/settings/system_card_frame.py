@@ -8,8 +8,8 @@ SystemCardFrame — QFrame 基类 + 标准头部布局 + 固定边框
 - ScrollArea 内容区
 """
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -28,8 +28,8 @@ from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 class SystemCardFrame(QFrame):
     """系统卡片基类 — 固定边框样式，无动画"""
 
-    closed = pyqtSignal()
-    tabChanged = pyqtSignal(str)
+    closed = Signal()
+    tabChanged = Signal(str)
 
     # 高度模式：'proportional' = 随窗口缩放（默认），'content' = 按内容自适应
     _height_mode: str = "proportional"
@@ -482,7 +482,7 @@ class SystemCardFrame(QFrame):
         sizeHint 应基于当前有效布局缓存快速返回。布局失效由显式 updateGeometry()
         或 Qt 系统在 resize/layout pass 中统一处理。
         """
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         base = super().sizeHint()
         w = max(base.width(), 200)
@@ -522,7 +522,7 @@ class SystemCardFrame(QFrame):
 
     def eventFilter(self, obj, event):
         """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
-        from PyQt5.QtCore import QEvent
+        from PySide6.QtCore import QEvent
 
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()

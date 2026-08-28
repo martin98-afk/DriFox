@@ -5,7 +5,7 @@ import pytest
 
 from app.widgets.cards.card_manager import CardManager, ContainerType
 
-pytest.importorskip("PyQt5.QtWidgets")
+pytest.importorskip("PySide6.QtWidgets")
 
 
 @pytest.fixture()
@@ -23,7 +23,7 @@ def _mk_cm_window(cm):
 class TestCardStackContainer:
     def test_attach_and_sync(self, qapp, cm):
         _mk_cm_window(cm)
-        from PyQt5.QtWidgets import QWidget
+        from PySide6.QtWidgets import QWidget
 
         from app.widgets.cards.card_stack_container import CardStackContainer
 
@@ -42,7 +42,7 @@ class TestCardStackContainer:
 
     def test_active_switch(self, qapp, cm):
         _mk_cm_window(cm)
-        from PyQt5.QtWidgets import QWidget
+        from PySide6.QtWidgets import QWidget
 
         from app.widgets.cards.card_stack_container import CardStackContainer
 
@@ -71,7 +71,7 @@ class TestCardStackContainer:
 
     def test_detach_removes(self, qapp, cm):
         _mk_cm_window(cm)
-        from PyQt5.QtWidgets import QWidget
+        from PySide6.QtWidgets import QWidget
 
         from app.widgets.cards.card_stack_container import CardStackContainer
 

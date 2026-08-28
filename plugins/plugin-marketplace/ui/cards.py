@@ -22,11 +22,11 @@ from typing import Callable, Optional
 
 from loguru import logger
 
-from PyQt5 import sip
+import shiboken6 as sip
 
-from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QObject, QEvent, QRect, QSize, QThread, Qt, Signal
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QGridLayout,
@@ -133,8 +133,8 @@ def _ctx_font(ctx: dict) -> tuple:
 class _MarketplaceWorker(QObject):
     """在后台线程执行阻塞操作，通过信号返回结果"""
 
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, fn, *args, **kwargs):
         super().__init__()
@@ -159,10 +159,10 @@ class _MarketFetchWorker(QObject):
     时间从 15×N 秒降到 ~15 秒；并发上限 4。
     """
 
-    market_fetched = pyqtSignal(dict, int)  # (市场数据, gen) 单个市场数据 {"name":..., "plugins":[...]}
-    market_failed = pyqtSignal(list, int)  # (失败源名列表, gen) 拉取失败的源名列表（仅标记，不进列表）
-    all_done = pyqtSignal(int)  # gen
-    error = pyqtSignal(str, int)  # (错误信息, gen)
+    market_fetched = Signal(dict, int)  # (市场数据, gen) 单个市场数据 {"name":..., "plugins":[...]}
+    market_failed = Signal(list, int)  # (失败源名列表, gen) 拉取失败的源名列表（仅标记，不进列表）
+    all_done = Signal(int)  # gen
+    error = Signal(str, int)  # (错误信息, gen)
 
     def __init__(self, force: bool = False, gen: int = 0):
         super().__init__()
@@ -448,10 +448,10 @@ class _PluginDetailDialog(MaskDialogBase):
     滚动查看）。底部主操作按状态给出：安装 / 更新 / 已安装（禁用）。
     """
 
-    installRequested = pyqtSignal(dict)
-    updateRequested = pyqtSignal(dict)
+    installRequested = Signal(dict)
+    updateRequested = Signal(dict)
     # 依赖安装完成（worker 线程 emit，queued 到 GUI 线程刷新按钮）
-    _depsDone = pyqtSignal(object, object)
+    _depsDone = Signal(object, object)
 
     def __init__(
         self,
@@ -1073,14 +1073,14 @@ class _PluginRow(QFrame):
     - 操作中：显示「处理中…」按钮（禁用）
     """
 
-    installRequested = pyqtSignal(dict)  # plugin_meta
-    updateRequested = pyqtSignal(dict)  # plugin_meta（有新版时触发）
-    openUrlRequested = pyqtSignal(str)  # 打开插件官网 URL
-    openDirRequested = pyqtSignal(str)  # 打开插件所在本地目录
-    detailRequested = pyqtSignal(dict)  # 打开插件详情面板
-    enableRequested = pyqtSignal(dict)  # 启用已禁用插件
-    disableRequested = pyqtSignal(dict)  # 禁用已启用插件
-    uninstallRequested = pyqtSignal(dict)  # 卸载插件
+    installRequested = Signal(dict)  # plugin_meta
+    updateRequested = Signal(dict)  # plugin_meta（有新版时触发）
+    openUrlRequested = Signal(str)  # 打开插件官网 URL
+    openDirRequested = Signal(str)  # 打开插件所在本地目录
+    detailRequested = Signal(dict)  # 打开插件详情面板
+    enableRequested = Signal(dict)  # 启用已禁用插件
+    disableRequested = Signal(dict)  # 禁用已启用插件
+    uninstallRequested = Signal(dict)  # 卸载插件
 
     def __init__(
         self,
@@ -1139,7 +1139,7 @@ class _PluginRow(QFrame):
         未布局（width=0）时回退默认（该状态行处于隐藏、不参与布局
         sizeHint 累加，无影响）。
         """
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         base = super().sizeHint()
         lay = self.layout()
@@ -1785,9 +1785,9 @@ class _ExploreCard(QFrame):
     由 MarketplaceCard 统一连接安装/更新/详情处理。
     """
 
-    installRequested = pyqtSignal(dict)
-    updateRequested = pyqtSignal(dict)
-    detailRequested = pyqtSignal(dict)
+    installRequested = Signal(dict)
+    updateRequested = Signal(dict)
+    detailRequested = Signal(dict)
 
     def __init__(
         self,
@@ -1931,7 +1931,7 @@ class _ExploreCard(QFrame):
 
     def eventFilter(self, obj, event):
         try:
-            if event.type() == event.MouseButtonRelease and event.button() == Qt.LeftButton:
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.LeftButton:
                 if obj is not self._btn:
                     self.detailRequested.emit(self._meta)
                     return True
@@ -2184,7 +2184,7 @@ class _MarketListContent(QWidget):
     """
 
     def sizeHint(self):
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         base = super().sizeHint()
         if self.height() > 0:
@@ -2198,7 +2198,7 @@ class _MarketListContent(QWidget):
 class MarketplaceCard(QWidget):
     """插件市场浮动卡片"""
 
-    closed = pyqtSignal()
+    closed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -2271,7 +2271,7 @@ class MarketplaceCard(QWidget):
         self._search_debounce.stop()
         # 延迟 50ms 启动加载，避免阻塞 show 过程（self 子 timer，销毁自动取消）
         if self._load_timer is None:
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             self._load_timer = QTimer(self)
             self._load_timer.setSingleShot(True)
@@ -2291,7 +2291,7 @@ class MarketplaceCard(QWidget):
             return  # 卡片已销毁
         self._async_refresh()
         if self._initial_render_timer is None:
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             self._initial_render_timer = QTimer(self)
             self._initial_render_timer.setSingleShot(True)
@@ -2330,7 +2330,7 @@ class MarketplaceCard(QWidget):
         if self._context_provider is None or self._header_icon is None:
             return
         try:
-            from PyQt5.QtGui import QIcon
+            from PySide6.QtGui import QIcon
 
             ctx = self._context_provider()
             icon_info = ctx.get("plugin_icon", {})
@@ -2554,7 +2554,7 @@ class MarketplaceCard(QWidget):
         root.addWidget(sep)
 
         # ── 页面堆叠 ──
-        from PyQt5.QtWidgets import QStackedWidget
+        from PySide6.QtWidgets import QStackedWidget
 
         self._page_stack = QStackedWidget(self)
         self._page_stack.setStyleSheet("background: transparent;")
@@ -2620,7 +2620,7 @@ class MarketplaceCard(QWidget):
             f"background: rgba(128,128,128,0.1); border-radius: 8px; padding: 4px 8px; color: {_text_color()};"
         )
         # 防抖 300ms，避免每敲一个字就全量重建
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         self._search_debounce = QTimer(self)
         self._search_debounce.setSingleShot(True)
@@ -2845,7 +2845,7 @@ class MarketplaceCard(QWidget):
 
     def sizeHint(self):
         """与 SystemCardFrame proportional 模式一致：返回窗口高度的 85%"""
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         base = super().sizeHint()
         win = self.window()
@@ -2875,7 +2875,7 @@ class MarketplaceCard(QWidget):
 
     def eventFilter(self, obj, event):
         """监听窗口/视口 resize，同步 content 尺寸（widgetResizable=False）"""
-        from PyQt5.QtCore import QEvent
+        from PySide6.QtCore import QEvent
 
         if event.type() == QEvent.Resize:
             if obj is self.window():
@@ -2962,7 +2962,7 @@ class MarketplaceCard(QWidget):
             return
         self._render_pending = True
         if self._flush_timer is None:
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             self._flush_timer = QTimer(self)
             self._flush_timer.setSingleShot(True)
@@ -3591,7 +3591,7 @@ class MarketplaceCard(QWidget):
         销毁后触发回调触碰已删除控件（原生崩溃 0xC0000409）。
         """
         if self._reveal_timer is None:
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             self._reveal_timer = QTimer(self)
             self._reveal_timer.setSingleShot(True)
@@ -4306,7 +4306,7 @@ class MarketplaceCard(QWidget):
             card_bg=card_bg,
             border_c=border_c,
         )
-        return dialog.exec_() == 1
+        return dialog.exec() == 1
 
     def _on_manage_done(self, task: dict, success: bool):
         """启用/禁用/卸载完成"""
@@ -5465,7 +5465,7 @@ class MarketplaceCard(QWidget):
             card_bg=getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e"),
             border_c=(getattr(self, "_cached_theme_colors", {}) or {}).get("border", "rgba(128,128,128,0.15)"),
         )
-        if dialog.exec_():
+        if dialog.exec():
             self._active_tags = set(dialog.selected_tags())
             self._sync_tag_buttons()
             if self._plugin_data:
@@ -5500,7 +5500,7 @@ class MarketplaceCard(QWidget):
         )
         dialog.installRequested.connect(self._async_install)
         dialog.updateRequested.connect(self._async_update)
-        dialog.exec_()
+        dialog.exec()
 
     # ── 市场管理 ──
 
@@ -5829,7 +5829,7 @@ class MarketplaceCard(QWidget):
     def _alive(self) -> bool:
         """卡片 C++ 对象是否存活（销毁后迟到回调防护）"""
         try:
-            return not sip.isdeleted(self)
+            return sip.isValid(self)
         except RuntimeError, TypeError:
             return False
 
@@ -5846,7 +5846,7 @@ class MarketplaceCard(QWidget):
         if thread is None:
             return
         try:
-            if sip.isdeleted(thread):
+            if not sip.isValid(thread):
                 # C++ 对象已被前轮 finished→deleteLater 销毁：仅清理悬垂引用
                 try:
                     if thread in _orphan_threads:

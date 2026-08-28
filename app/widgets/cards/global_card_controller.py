@@ -20,7 +20,7 @@ from app.core import window_registry
 from typing import List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer, Qt
 
 from app.utils.config import Settings
 from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID, CardManager, ContainerType
@@ -313,7 +313,7 @@ class GlobalCardController:
                 confirm_text="知道了",
                 parent=self._tab_manager,
             )
-            _dialog.exec_()
+            _dialog.exec()
             return
 
         self.cfg.set(self.cfg.llm_saved_providers, saved_providers, save=True)
@@ -822,8 +822,8 @@ class GlobalCardController:
         if not self.cfg.gitee_sync_remind.value:
             return
 
-        from PyQt5.QtCore import Qt
-        from PyQt5.QtWidgets import QWidget, QHBoxLayout
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QWidget, QHBoxLayout
         from qfluentwidgets import InfoBar, InfoBarIcon, InfoBarPosition, PrimaryPushButton, PushButton
 
         infobar = InfoBar(
@@ -878,8 +878,8 @@ class GlobalCardController:
         if not self.cfg.gitee_sync_remind.value:
             return
 
-        from PyQt5.QtCore import Qt
-        from PyQt5.QtWidgets import QWidget, QHBoxLayout
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QWidget, QHBoxLayout
         from qfluentwidgets import InfoBar, InfoBarIcon, InfoBarPosition, PrimaryPushButton, PushButton
 
         infobar = InfoBar(

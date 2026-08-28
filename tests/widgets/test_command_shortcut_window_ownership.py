@@ -22,9 +22,9 @@
 import types
 
 import pytest
-from PyQt5 import sip
-from PyQt5.QtGui import QKeySequence
-from PyQt5.QtWidgets import QApplication, QWidget
+import shiboken6 as sip
+from PySide6.QtGui import QKeySequence
+from PySide6.QtWidgets import QApplication, QWidget
 
 from app.core import window_registry as window_registry_mod
 from app.core.command_manager import CommandManager, CommandType
@@ -123,7 +123,7 @@ def _live_seq_shortcuts(win: QWidget, seq: str) -> int:
     count = 0
     for qs in _window_cache(win):
         try:
-            if sip.isdeleted(qs):
+            if not sip.isValid(qs):
                 continue
             if qs.key()[0] == target:
                 count += 1

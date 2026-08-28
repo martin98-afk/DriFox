@@ -15,7 +15,7 @@ _apply_cost_style 开头 hasattr(self, 'cost_label') 守卫，无成本模型直
 import sys
 
 import pytest
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 
 @pytest.fixture(scope="module")

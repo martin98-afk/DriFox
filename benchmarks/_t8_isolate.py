@@ -35,10 +35,10 @@ import bench_common as bc  # noqa: E402
 def run_variant(variant: str, rounds: int, chunks: int) -> dict:
     tmp = bc.setup_isolation("t8")
 
-    from PyQt5.QtCore import Qt, QEvent
-    from PyQt5.QtWidgets import QApplication, QWidget
+    from PySide6.QtCore import Qt, QEvent
+    from PySide6.QtWidgets import QApplication, QWidget
 
-    import PyQt5.QtWebEngineWidgets  # noqa: F401
+    import PySide6.QtWebEngineWidgets  # noqa: F401
 
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
@@ -72,7 +72,7 @@ def run_variant(variant: str, rounds: int, chunks: int) -> dict:
         patches.append("CardSeparator→QWidget")
 
     if variant == "no_btn":
-        from PyQt5.QtWidgets import QToolButton
+        from PySide6.QtWidgets import QToolButton
 
         def _fake_btn(ic, parent=None):
             b = QToolButton(parent)
@@ -124,16 +124,16 @@ def run_variant(variant: str, rounds: int, chunks: int) -> dict:
                 state["tm"].append(bc.tracemalloc_current_mb())
                 state["rss"].append(bc.rss_mb())
             if state["i"] < rounds:
-                from PyQt5.QtCore import QTimer
+                from PySide6.QtCore import QTimer
 
                 QTimer.singleShot(10, _step)
             else:
                 app.quit()
 
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         QTimer.singleShot(10, _step)
-        app.exec_()
+        app.exec()
         xs, tm_mb, rss_mb = state["xs"], state["tm"], state["rss"]
         tm_slope, tm_r2 = bc.slope(xs, tm_mb)
         rss_slope, rss_r2 = bc.slope(xs, rss_mb)
@@ -172,13 +172,12 @@ def run_variant(variant: str, rounds: int, chunks: int) -> dict:
             keep.append(card)
             card = None
         elif variant == "sipdel":
-            import sip
-
+            import shiboken6 as sip
             sip.delete(card)
         else:
             card.deleteLater()
             if variant == "flush":
-                from PyQt5.QtCore import QCoreApplication
+                from PySide6.QtCore import QCoreApplication
 
                 QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
                 app.processEvents()

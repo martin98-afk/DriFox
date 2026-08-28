@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from PyQt5.QtCore import QObject
+from PySide6.QtCore import QObject
 
 from app.core.plugin_host_service import PluginHostService
 
@@ -35,7 +35,7 @@ def deferred_spied(monkeypatch):
     def _fake_single_shot(msec, callback):
         fired.append((msec, callback))
 
-    monkeypatch.setattr("PyQt5.QtCore.QTimer.singleShot", _fake_single_shot)
+    monkeypatch.setattr("PySide6.QtCore.QTimer.singleShot", _fake_single_shot)
 
     svc = _make_host()
     monkeypatch.setattr(svc, "_reload_themes_from_plugins", lambda: None)

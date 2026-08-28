@@ -141,7 +141,7 @@ def test_config_changed_rebuilds_nav_style_on_font_size(qapp, monkeypatch):
     注：不端到端走 valueChanged —— 骨架 __new__ 绕过 QObject.__init__，
     sender() 对未初始化 QObject 未定义，sender 判定链由生产路径保证）
     """
-    from PyQt5.QtWidgets import QLabel
+    from PySide6.QtWidgets import QLabel
 
     from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
@@ -149,7 +149,7 @@ def test_config_changed_rebuilds_nav_style_on_font_size(qapp, monkeypatch):
     card.cfg = Settings.get_instance()
     card._nav_buttons = {"appearance": QLabel("外观样式")}
 
-    # __new__ 骨架未初始化 QObject：类级 pyqtSignal 的绑定 emit 不可用、
+    # __new__ 骨架未初始化 QObject：类级 Signal 的绑定 emit 不可用、
     # sender() 抛 RuntimeError，均替换掉让 _on_config_changed 全流程可跑。
     # sender 队列模拟真实 valueChanged 信号路径（返回对应 ConfigItem）
     from unittest.mock import MagicMock
@@ -183,7 +183,7 @@ def test_config_changed_rebuilds_nav_style_even_if_listener_clears_flag(qapp, mo
     会同步把 LLMSettingsCard._last_change_type 清零；emit 后必须还能判别
     是否需要重建导航 QSS，否则字号切换只能等切 tab 时触发。
     """
-    from PyQt5.QtWidgets import QLabel
+    from PySide6.QtWidgets import QLabel
 
     from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 

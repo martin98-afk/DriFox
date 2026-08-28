@@ -6,12 +6,12 @@
 """
 
 import pytest
-from PyQt5.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.widgets.ui_composition import compose
 
-pytest.importorskip("PyQt5.QtWidgets")
+pytest.importorskip("PySide6.QtWidgets")
 
 # 契约属性集（grep `self.[a-z_]+ *=` over 3122-3255）：None 占位 + 懒创建卡片 + 标题栏按钮
 _CONTRACT_ATTRS = (

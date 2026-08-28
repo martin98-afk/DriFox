@@ -16,8 +16,8 @@
 
 import sys
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 
 def _ensure_qapp():
@@ -94,7 +94,7 @@ class TestValueDescTooltip:
     def test_value_tooltip_shows_selected_desc(self):
         """值选择模式下 tooltip 显示当前选中枚举值的描述"""
         _ensure_qapp()
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
         from app.widgets.cards.floating.command_card import CommandCard, ValueItemWidget
 
         # 有父窗口，使 tooltip 可创建（_ensure_desc_tooltip 需要 window()）
@@ -130,7 +130,7 @@ class TestValueDescTooltip:
     def test_value_tooltip_hidden_when_no_desc(self):
         """选中项无描述 → tooltip 隐藏（不显示空白气泡）"""
         _ensure_qapp()
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
         from app.widgets.cards.floating.command_card import CommandCard, ValueItemWidget
 
         parent = QWidget()
@@ -156,7 +156,7 @@ class TestValueDescTooltip:
     def test_update_desc_tooltip_value_branch(self):
         """_update_desc_tooltip 在值选择模式走枚举值描述分支而非隐藏"""
         _ensure_qapp()
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
         from app.widgets.cards.floating.command_card import CommandCard, ValueItemWidget
 
         parent = QWidget()
@@ -182,7 +182,7 @@ class TestValueDescTooltip:
     def test_non_value_detail_mode_hides_tooltip(self):
         """非值选择的 detail 模式（参数列表）仍隐藏 tooltip（回归保护）"""
         _ensure_qapp()
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
         from app.widgets.cards.floating.command_card import CommandCard
 
         parent = QWidget()
@@ -207,7 +207,7 @@ class TestValueDescTooltip:
     def test_exit_value_selection_hides_tooltip(self):
         """退出值选择模式后气泡隐藏（选中值描述不残留）"""
         _ensure_qapp()
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
         from app.widgets.cards.floating.command_card import CommandCard, ValueItemWidget
 
         parent = QWidget()
@@ -248,7 +248,7 @@ class TestValueDescTooltip:
         _ensure_qapp()
         import html as html_mod
 
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
         from app.widgets.cards.floating.command_card import CommandCard, ValueItemWidget
 
         parent = QWidget()
@@ -282,7 +282,7 @@ class TestValueDescTooltip:
         _ensure_qapp()
         import html as html_mod
 
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
         from app.widgets.cards.floating.command_card import CommandCard
 
         parent = QWidget()
@@ -312,7 +312,7 @@ class TestValueDescTooltip:
         _ensure_qapp()
         import html as html_mod
 
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
         from app.core.command_manager import CommandManager, CommandType
         from app.widgets.cards.floating.command_card import CommandCard
 

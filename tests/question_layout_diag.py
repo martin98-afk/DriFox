@@ -15,12 +15,12 @@ os.environ.setdefault("QT_QPA_PLATFORM", "minimal")
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
-from PyQt5.QtWebEngineWidgets import QWebEngineView  # noqa: F401
-
+from PySide6.QtWebEngineWidgets import QWebEngineView
+# noqa: F401
 
 class FakeSplitter:
     def __init__(self, initial_sizes):
@@ -108,7 +108,7 @@ def report(label, container, fake_sp, q):
 
 
 def main():
-    from PyQt5.QtCore import QTimer
+    from PySide6.QtCore import QTimer
 
     app = QApplication(sys.argv)
 
@@ -136,11 +136,11 @@ def main():
 
     def _flush(ms=300):
         """让 Qt 事件循环跑够时间，确保动画 on_finished 回调已触发"""
-        from PyQt5.QtCore import QEventLoop
+        from PySide6.QtCore import QEventLoop
 
         loop = QEventLoop()
         QTimer.singleShot(ms, loop.quit)
-        loop.exec_()
+        loop.exec()
 
     print("\n========== 场景 A：splitter 缓存分配 500px（远大于 natural_h ~397）==========")
     container, q, sp = make_container_and_question([500, 500], SHORT_Q)
@@ -207,7 +207,7 @@ def main():
     ]
 
     def _real_env(win_w):
-        from PyQt5.QtWidgets import QSplitter, QVBoxLayout, QWidget
+        from PySide6.QtWidgets import QSplitter, QVBoxLayout, QWidget
 
         from app.widgets.cards.card_container import BottomCardContainer
         from app.widgets.cards.floating.question_floating_widget import QuestionFloatingWidget

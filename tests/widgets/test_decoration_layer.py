@@ -16,7 +16,7 @@ from app.widgets.decoration_layer import DecorationLayer
 @pytest.fixture()
 def host(qapp, tmp_path):
     """模拟 chat_area_module 的挂载结构：chat_container/_input_card 是 host 的子 widget（兄弟节点）"""
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     host = QWidget()
     host.resize(960, 720)
@@ -27,7 +27,7 @@ def host(qapp, tmp_path):
 
     # 有效图片（apply_config 需 pixmap 非 null 才会走到 _position_item）
     png = tmp_path / "dec.png"
-    from PyQt5.QtGui import QImage
+    from PySide6.QtGui import QImage
 
     QImage(20, 8, QImage.Format_ARGB32).save(str(png))
 

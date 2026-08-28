@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """Phase 1/2: Investigate Qt destruction order behavior.
 
-We need to understand when _cleanup is actually called in PyQt5.
+We need to understand when _cleanup is actually called in PySide6.
 """
 
 import pytest
 
 
 def _flush_events(ms=100):
-    from PyQt5.QtCore import QEventLoop, QTimer
+    from PySide6.QtCore import QEventLoop, QTimer
 
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
@@ -18,8 +18,8 @@ def _flush_events(ms=100):
 def test_destroyed_signal_after_child_destruction(_qt_app):
     """Verify: when parent is destroyed, does the destroyed slot run
     even though the filter (a Qt child) is also destroyed?"""
-    from PyQt5.QtCore import QObject
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtCore import QObject
+    from PySide6.QtWidgets import QWidget
 
     cleanup_called = []
     filter_ref = []
@@ -59,8 +59,8 @@ def test_destroyed_signal_after_child_destruction(_qt_app):
 def test_destroyed_with_external_widget_deleteLater(_qt_app):
     """Test: when parent is destroyed AND the standalone widget is also
     deleteLater'd externally before, does cleanup get called and fail?"""
-    from PyQt5.QtCore import QObject, QTimer
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtCore import QObject, QTimer
+    from PySide6.QtWidgets import QWidget
 
     cleanup_called = []
 

@@ -4,13 +4,13 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
 
 
 class _FakeConfigItem(QObject):
-    valueChanged = pyqtSignal(object)
+    valueChanged = Signal(object)
 
     def __init__(self, value):
         super().__init__()

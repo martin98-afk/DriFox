@@ -24,7 +24,7 @@ import concurrent.futures
 from typing import Any, Callable, Dict, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from app.core.backend import _extract_markdown_images, _gw_str_platform
 
@@ -37,7 +37,7 @@ class GatewayService(QObject):
     _instance: Optional["GatewayService"] = None
 
     # 平台线程 → 主线程（与原 backend 相同的信号机制）
-    gateway_input_received = pyqtSignal(object)  # dict: {text, chat_id, user_id, platform, future}
+    gateway_input_received = Signal(object)  # dict: {text, chat_id, user_id, platform, future}
 
     @classmethod
     def get_instance(cls) -> "GatewayService":

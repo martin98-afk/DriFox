@@ -5,9 +5,9 @@
 
 from typing import List, Optional, Tuple
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFontMetrics
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QFontMetrics
+from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
@@ -150,7 +150,7 @@ class ProviderHeader(QWidget):
 class ModelItem(QWidget):
     """单个模型项 - 可点击，模型名同行显示能力徽章、成本与描述"""
 
-    clicked = pyqtSignal(str, str)  # provider_name, model_name
+    clicked = Signal(str, str)  # provider_name, model_name
 
     # 能力徽章配色（文字胶囊：推理-琥珀 / 多模态-青靛 / 思考强度-紫）
     # 颜色不再硬编码：由 _cap_badge_colors() 按主题明暗动态计算（深色提亮）。
@@ -390,8 +390,8 @@ class ModelItem(QWidget):
 class ModelSelectorCardContent(QWidget):
     """模型选择卡片内容"""
 
-    modelSelected = pyqtSignal(str, str)  # provider_name, model_name
-    stickyProviderChanged = pyqtSignal(str)  # 滚动时正在吸顶的服务商名（空字符串=无）
+    modelSelected = Signal(str, str)  # provider_name, model_name
+    stickyProviderChanged = Signal(str)  # 滚动时正在吸顶的服务商名（空字符串=无）
 
     def __init__(self, parent=None):
         super().__init__(parent)

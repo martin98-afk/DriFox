@@ -25,15 +25,12 @@ import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import Qt
+from PySide6.QtCore import Qt
 
 Qt.AA_ShareOpenGLContexts = Qt.AA_ShareOpenGLContexts
 try:
-    from PyQt5.QtWebEngineWidgets import (  # noqa: F401
-        QWebEnginePage,
-        QWebEngineSettings,
-        QWebEngineView,
-    )
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 except Exception:
     pass
 
@@ -41,7 +38,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.utils.design_tokens import Colors  # noqa: E402
 

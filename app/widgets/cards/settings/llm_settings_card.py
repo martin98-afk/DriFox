@@ -5,9 +5,9 @@
 """
 
 from loguru import logger
-from PyQt5.QtCore import QPointF, QRectF, QPoint, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QPointF, QRectF, QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PySide6.QtWidgets import (
     QFontComboBox,
     QFrame,
     QHBoxLayout,
@@ -84,7 +84,7 @@ class _FontStepTrack(QWidget):
     刷新时调用 update() 即可重绘。
     """
 
-    stepClicked = pyqtSignal(str)
+    stepClicked = Signal(str)
 
     _NODE_Y = 14  # 节点中心线 y
     _PAD = 18  # 首末节点距两侧边距
@@ -106,7 +106,7 @@ class _FontStepTrack(QWidget):
 
     def _recompute_metrics(self) -> None:
         """按最大档位实际字号(14+10=24px)预留标签行高与最小高度（防大字号标签被裁切）"""
-        from PyQt5.QtGui import QFontMetrics
+        from PySide6.QtGui import QFontMetrics
 
         fm = QFontMetrics(QFont(_ui_font_family(), 24))
         self._label_h = max(14, fm.height() + 2)
@@ -341,8 +341,8 @@ class LLMSettingsCard(SystemCardFrame):
 
     _autostart_toggling = False  # 类级防重入标志
     _last_change_type: str | None = None  # "theme" | "font_family" | "font_size" | None(=全部)
-    closed = pyqtSignal()
-    configChanged = pyqtSignal()
+    closed = Signal()
+    configChanged = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)

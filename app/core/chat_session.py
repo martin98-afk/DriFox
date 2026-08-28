@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import QObject
+from PySide6.QtCore import QObject
 
 from app.core.message_content import consolidate_messages
 from app.core.token_estimator import count_messages_tokens

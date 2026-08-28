@@ -110,7 +110,7 @@ def _read_rss_mb() -> tuple[float, bool]:
 def _count_qobjects() -> tuple[int, Dict[str, int], bool]:
     """遍历所有 QObject 实例，返回总数 + 按类名前 10 分布。
 
-    PyQt5 5.15.11 + Python 3.14 在 Windows 下有怪现象：
+    PySide6 5.15.11 + Python 3.14 在 Windows 下有怪现象：
     - QApplication.instance() 可能返回 None
     - gc.get_objects() 能找到 QApplication，但访问 .children() 会抛
       "wrapped C/C++ object of type QApplication has been deleted"
@@ -121,7 +121,7 @@ def _count_qobjects() -> tuple[int, Dict[str, int], bool]:
     try:
         import gc
 
-        from PyQt5.QtCore import QObject
+        from PySide6.QtCore import QObject
     except Exception:
         return 0, {}, False
 

@@ -16,7 +16,7 @@
 from typing import Any, Dict, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from app.tools.tool_classifier import get_all_tools, get_default_toggles
 from app.utils.config import Settings
@@ -50,15 +50,15 @@ class ToolPermissionController(QObject):
     """工具权限控制器(per-window)"""
 
     # 当前生效状态变化
-    togglesChanged = pyqtSignal(dict)  # 引擎读取这个来获取最新 toggles
-    behaviorChanged = pyqtSignal(str)  # 关闭行为变化
-    policiesChanged = pyqtSignal(dict)  # per-tool 关闭策略变化(active 层)
-    activeAgentChanged = pyqtSignal(str)  # 当前激活的智能体(空字符串=用户模式)
+    togglesChanged = Signal(dict)  # 引擎读取这个来获取最新 toggles
+    behaviorChanged = Signal(str)  # 关闭行为变化
+    policiesChanged = Signal(dict)  # per-tool 关闭策略变化(active 层)
+    activeAgentChanged = Signal(str)  # 当前激活的智能体(空字符串=用户模式)
 
     # 用户偏好状态变化(用于 UI 反映"用户原始设置")
-    userTogglesChanged = pyqtSignal(dict)
-    userBehaviorChanged = pyqtSignal(str)
-    userPoliciesChanged = pyqtSignal(dict)
+    userTogglesChanged = Signal(dict)
+    userBehaviorChanged = Signal(str)
+    userPoliciesChanged = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)

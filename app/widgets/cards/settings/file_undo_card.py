@@ -4,8 +4,8 @@ from pathlib import Path
 import difflib
 from typing import Dict, List
 
-from PyQt5.QtCore import QEventLoop, Qt, pyqtSignal
-from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtCore import QEventLoop, Qt, Signal
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import PrimaryPushButton, PushButton, ToolButton, TransparentToolButton, isDarkTheme
 
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
@@ -17,8 +17,8 @@ from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 class FileUndoCard(BaseSettingsCard):
     """在全局卡片容器中确认文件撤销。"""
 
-    finished = pyqtSignal(int, list)
-    diffRequested = pyqtSignal(str, str)
+    finished = Signal(int, list)
+    diffRequested = Signal(str, str)
     CANCEL, KEEP_CARD, RESTORE = 0, 1, 2
 
     def __init__(self, operations: List[Dict], file_recorder=None, parent=None):
@@ -38,7 +38,7 @@ class FileUndoCard(BaseSettingsCard):
             return self.CANCEL
         controller.show_file_undo(self.operations, self.file_recorder, self._finish)
         self._loop = QEventLoop()
-        self._loop.exec_()
+        self._loop.exec()
         return self._result
 
     def _finish(self, result, selected):

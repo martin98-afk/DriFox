@@ -19,9 +19,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from PyQt5.QtCore import Qt, QTimer, QEventLoop  # noqa: E402
-import PyQt5.QtWebEngineWidgets  # noqa: F401,E402  # 必须先于 QApplication 创建
-from PyQt5.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget  # noqa: E402
+from PySide6.QtCore import Qt, QTimer, QEventLoop  # noqa: E402
+import PySide6.QtWebEngineWidgets  # noqa: F401,E402  # 必须先于 QApplication 创建
+from PySide6.QtWidgets import QApplication, QScrollArea, QVBoxLayout, QWidget  # noqa: E402
 
 from app.widgets.message_card import PlainTextViewer  # noqa: E402
 
@@ -121,7 +121,7 @@ def run(app, text: str, cap: int, vw: int, vh: int) -> dict:
     t.setInterval(SAMPLE_MS)
     t.timeout.connect(tick)
     t.start()
-    loop.exec_()
+    loop.exec()
     t.stop()
 
     def flips(states, key):

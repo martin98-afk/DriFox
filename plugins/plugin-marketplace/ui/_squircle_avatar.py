@@ -11,7 +11,7 @@
 闭包约束（来自 plugin-manager 注释）：
 - 不导入 app.core 或 app.widgets
 - 不导入 app.utils.utils（避免与 Settings 单例耦合）
-- 仅依赖 PyQt5 + stdlib
+- 仅依赖 PySide6 + stdlib
 """
 
 import colorsys
@@ -21,11 +21,11 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from PyQt5.QtCore import Qt, QUrl, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QPixmap
-from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
-from PyQt5.QtSvg import QSvgWidget
-from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
+from PySide6.QtSvgWidgets import QSvgWidget
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import isDarkTheme
 
 
@@ -504,9 +504,9 @@ class PluginIconWidget(QWidget):
     """
 
     # 下载完成 signal：theme, svg_bytes（bytes，外部可写盘/读字节流）
-    iconDownloaded = pyqtSignal(str, bytes)
+    iconDownloaded = Signal(str, bytes)
     # 下载失败 signal：theme, error_str
-    iconFailed = pyqtSignal(str, str)
+    iconFailed = Signal(str, str)
 
     # 单次下载传输超时（ms）：raw.githubusercontent 偶发挂起，避免 icon 永久停在缩写头像
     _ICON_TIMEOUT_MS = 15000
@@ -651,7 +651,7 @@ class PluginIconWidget(QWidget):
 
         保持与 SVG 一致的尺寸表现：按 icon_size 等比缩放，居中显示。
         """
-        from PyQt5.QtCore import Qt as _Qt
+        from PySide6.QtCore import Qt as _Qt
 
         size = self._icon_size()
         pixmap = QPixmap(str(img_path))
@@ -819,7 +819,7 @@ class PluginIconWidget(QWidget):
             self._retry_count[theme] = retries + 1
             self._pending_idx[theme] = 0
             delay_ms = 2000 * (2 ** retries)  # 2s → 4s → 8s
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             QTimer.singleShot(delay_ms, lambda t=theme: self._retry_download(t))
             return
@@ -845,7 +845,7 @@ class PluginIconWidget(QWidget):
         """
         if not self._should_update_inline():
             # 延后到下一轮事件循环批量应用（合并多次重绘）
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             QTimer.singleShot(0, lambda p=cache_path: self._do_show_svg_safe(p))
             return

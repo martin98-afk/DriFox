@@ -12,8 +12,8 @@
 import sys
 
 import pytest
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 
 def _ensure_qapp():
@@ -159,8 +159,8 @@ class TestMergedEntryExpand:
         """mousePressEvent 只切换展开/收起，不触发 restoreRequested。"""
         _ensure_qapp()
         from app.widgets.cards.settings.history_card import _TeamGroupCard
-        from PyQt5.QtCore import QEvent, QPointF
-        from PyQt5.QtGui import QMouseEvent
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
 
         card = _TeamGroupCard(_merged_entry())
         restored = []
@@ -185,7 +185,7 @@ class TestMergedEntryExpand:
         card._toggle_members()
 
         # 模拟成员行点击（直接调槽，成员记录来自 _members）
-        from PyQt5.QtCore import Qt as _QtLeft
+        from PySide6.QtCore import Qt as _QtLeft
 
         fake_event = type("E", (), {"button": lambda self: _QtLeft.LeftButton})()
         card._on_member_row_clicked(fake_event, card._members[0], None)

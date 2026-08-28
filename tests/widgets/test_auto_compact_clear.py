@@ -16,7 +16,7 @@
 3. 子智能体被取消（task 不在 _finished_tasks） → session.messages 不清空
 4. 清空后 _post_compact_guard=True，能拦截后续 worker 延迟消息（短对话阈值）
 
-本测试不依赖 PyQt5/UI 启动，专注核心清空逻辑。
+本测试不依赖 PySide6/UI 启动，专注核心清空逻辑。
 """
 
 import os
@@ -87,7 +87,7 @@ def _setup_widget_with_running_executor(session, executor=None, finished_task=No
 
 # ──────────────────────────────────────────────────────
 # 把 main_widget 中的 _on_compact_clear_finished 逻辑提取为独立函数
-# 这样测试不依赖 PyQt5 widget 启动
+# 这样测试不依赖 PySide6 widget 启动
 # ──────────────────────────────────────────────────────
 def clear_session_for_compact(widget, task_id: str, result: str, session_id: str):
     """精简版的 _on_compact_clear_finished 核心清空逻辑

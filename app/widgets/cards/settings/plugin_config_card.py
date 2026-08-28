@@ -21,9 +21,9 @@ import base64
 import re
 from typing import Any, Dict, Optional
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QIcon, QPixmap
-from PyQt5.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
     ExpandSettingCard,
@@ -50,7 +50,7 @@ class _PlainEdit(TextEdit):
     继承 qfluentwidgets TextEdit（QSS 随深浅主题），而非 Qt 原生 QPlainTextEdit。
     """
 
-    editingFinished = pyqtSignal()
+    editingFinished = Signal()
 
     def focusOutEvent(self, e):
         super().focusOutEvent(e)
@@ -60,7 +60,7 @@ class _PlainEdit(TextEdit):
 class _OptionPill(QLabel):
     """单个可点击选项胶囊：点击即选中（选中态 accent 高亮）"""
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
@@ -105,7 +105,7 @@ class SelectPillsRow(QWidget):
     valueChanged 信号在用户点击切换时发射。
     """
 
-    valueChanged = pyqtSignal(object)
+    valueChanged = Signal(object)
 
     def __init__(self, options, parent=None):
         """options: List[(value, label)]，保持 schema 声明顺序"""
@@ -450,8 +450,8 @@ def make_card_class(plugin_name: str) -> type:
 class _ToolActionWorker(QThread):
     """后台执行工具调用 + 轮询循环（同步 impl 跑在子线程，不阻塞 UI）"""
 
-    result_ready = pyqtSignal(object)  # ToolResult（每轮：初始/轮询各发一次）
-    finished_state = pyqtSignal(str, str)  # (终态, 说明)：done/error/stopped
+    result_ready = Signal(object)  # ToolResult（每轮：初始/轮询各发一次）
+    finished_state = Signal(str, str)  # (终态, 说明)：done/error/stopped
 
     def __init__(self, tool: str, args: Dict[str, Any], poll, parent=None):
         super().__init__(parent)

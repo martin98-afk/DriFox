@@ -9,7 +9,7 @@
   5. 删除插件目录热卸载 → 页面与入口消失，回退对话页
 """
 
-from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 
 class KanbanPage(QWidget):

@@ -134,7 +134,7 @@ class TestCooldownRecheck:
         _drop_mail(team_manager, "win_02", mail_id="mail_1", status="pending")
         win._last_stop_time = time.monotonic()  # 刚停止，冷却中
 
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         fired = []
         monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda ms, cb: fired.append((ms, cb))))
@@ -159,7 +159,7 @@ class TestCooldownRecheck:
         _drop_mail(team_manager, "win_02", mail_id="mail_1", status="pending")
         win._last_stop_time = time.monotonic()
 
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         fired = []
         monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda ms, cb: fired.append((ms, cb))))

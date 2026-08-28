@@ -16,7 +16,7 @@ import sys
 import time
 from pathlib import Path
 
-from PyQt5.QtWidgets import QApplication, QTreeView
+from PySide6.QtWidgets import QApplication, QTreeView
 
 _PLUGIN_UI = Path(__file__).resolve().parent.parent.parent / "plugins" / "file-tree" / "ui"
 
@@ -66,7 +66,7 @@ def _scan_dir(d):
 
 
 # ── 同步桩：替换 QThread / _TreeScanner，规避无头环境 QThread 崩溃 ──
-# 说明：真实 QThread 异步扫描在 Python3.14 + PyQt5 无头环境会 STATUS_STACK_BUFFER_OVERRUN，
+# 说明：真实 QThread 异步扫描在 Python3.14 + PySide6 无头环境会 STATUS_STACK_BUFFER_OVERRUN，
 # 此处用同步桩验证回调链路逻辑。
 
 

@@ -13,8 +13,8 @@
 import sys
 
 import pytest
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication, QLabel
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QLabel
 
 
 def _ensure_qapp():
@@ -1708,9 +1708,9 @@ class TestTeamMergedCard:
         restored = []
         card.restoreRequested.connect(restored.append)
         # 模拟鼠标左键点击卡片空白区
-        from PyQt5.QtGui import QMouseEvent
-        from PyQt5.QtCore import QEvent, QPointF
-        from PyQt5.QtCore import Qt as _Qt
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtCore import Qt as _Qt
 
         ev = QMouseEvent(QEvent.MouseButtonPress, QPointF(5, 5), _Qt.LeftButton, _Qt.LeftButton, _Qt.NoModifier)
         card.mousePressEvent(ev)
@@ -1733,7 +1733,7 @@ class TestTeamMergedCard:
         assert "build 会话" in texts and "plan 会话" in texts, "展开后应显示成员标题"
 
         # 触发成员行点击（直接调用槽，模拟 memberSelected 链路）
-        from PyQt5.QtCore import Qt as _QtLeft
+        from PySide6.QtCore import Qt as _QtLeft
 
         fake_event = type("E", (), {"button": lambda self: _QtLeft.LeftButton})()
         card._on_member_row_clicked(fake_event, card._members[0], None)
@@ -1898,7 +1898,7 @@ class TestCommandShortcutDestroyedGuard:
 
     def test_is_sip_deleted_util(self):
         """_is_sip_deleted 工具函数：正常对象 False，销毁后 True，异常兜底 False。"""
-        from PyQt5 import sip
+        import shiboken6 as sip
 
         from app.main_widget import OpenAIChatToolWindow, _is_sip_deleted
 
@@ -1907,12 +1907,12 @@ class TestCommandShortcutDestroyedGuard:
         assert _is_sip_deleted(None) is False
         assert _is_sip_deleted(123) is False  # 非 Qt 对象 → 异常兜底 False
         sip.delete(w)  # 立即销毁 C++ 对象（确定性，不等事件循环）
-        assert sip.isdeleted(w) is True
+        assert sip.isValid(w) is False
         assert _is_sip_deleted(w) is True
 
     def test_clear_command_shortcuts_sip_deleted_silent(self):
         """F1：C++ 对象已销毁后调用 _clear_command_shortcuts 静默返回，不抛 RuntimeError。"""
-        from PyQt5 import sip
+        import shiboken6 as sip
 
         from app.main_widget import OpenAIChatToolWindow, _is_sip_deleted
 

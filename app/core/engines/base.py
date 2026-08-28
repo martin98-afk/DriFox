@@ -5,7 +5,7 @@
 所有对话引擎（UI/Gateway/AutoLoop）继承此基类，
 确保对外暴露一致的属性与方法，方便后续扩展新引擎。
 
-注意：不使用 ABC 以避免与 PyQt5 QObject 的元类冲突。
+注意：不使用 ABC 以避免与 PySide6 QObject 的元类冲突。
 各引擎通过重写方法提供实现，不实现时抛出 NotImplementedError。
 """
 from typing import Any, Dict, List

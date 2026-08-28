@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 
-from PyQt5.QtCore import QPoint, QRectF, Qt, QTimer
-from PyQt5.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
-from PyQt5.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QApplication, QWidget
 
 from app.utils.design_tokens import Colors
 from app.widgets.context_usage_tooltip import ContextBreakdownTooltip

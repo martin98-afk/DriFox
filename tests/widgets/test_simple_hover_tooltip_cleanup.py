@@ -11,7 +11,7 @@ from app.widgets import simple_hover_tooltip as sht_mod
 
 
 def _flush_events(ms=100):
-    from PyQt5.QtCore import QEventLoop, QTimer
+    from PySide6.QtCore import QEventLoop, QTimer
 
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
@@ -20,7 +20,7 @@ def _flush_events(ms=100):
 
 def _make_app_widget_tree():
     """Build a small tree with tooltip-installed widgets."""
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
@@ -51,7 +51,7 @@ def test_scenario_a_simple_destroy(_qt_app):
 
 def test_scenario_b_destroy_with_shown_tooltip(_qt_app):
     """Show tooltips on some children, then destroy."""
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     root, children = _make_app_widget_tree()
     _flush_events(20)
@@ -99,7 +99,7 @@ def test_scenario_c_hide_then_destroy(_qt_app):
 
 def test_scenario_d_deleteLater_then_immediate_access(_qt_app):
     """deleteLater on parent, then try to access tooltip."""
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     parent = QWidget()
     parent.show()
@@ -115,8 +115,8 @@ def test_scenario_d_deleteLater_then_immediate_access(_qt_app):
     _flush_events(50)
 
     # Trigger leave event to hide tooltip
-    from PyQt5.QtCore import QEvent, QPoint
-    from PyQt5.QtGui import QHoverEvent
+    from PySide6.QtCore import QEvent, QPoint
+    from PySide6.QtGui import QHoverEvent
 
     leave = QHoverEvent(QEvent.HoverLeave, QPoint(0, 0), QPoint(0, 0))
     # Don't actually send — just destroy
@@ -147,7 +147,7 @@ def test_scenario_e_close_main_window(_qt_app):
 
 def test_scenario_f_quit_app_subprocess(_qt_app):
     """Destroy all top-level windows like QApplication.quit() would."""
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     roots = []
     for _ in range(3):
@@ -168,8 +168,8 @@ def test_scenario_f_quit_app_subprocess(_qt_app):
 
 def test_scenario_g_timer_fires_during_destruction(_qt_app):
     """Tooltip timer fires after parent starts destroying."""
-    from PyQt5.QtCore import QTimer
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QWidget
 
     from app.widgets.simple_hover_tooltip import install_hover_tooltip
 

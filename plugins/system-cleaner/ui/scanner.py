@@ -15,7 +15,7 @@ import traceback
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 from loguru import logger
 
 
@@ -276,7 +276,7 @@ def _release_memory():
 
     # ── 2. Qt 像素图缓存 ──
     try:
-        from PyQt5.QtGui import QPixmapCache
+        from PySide6.QtGui import QPixmapCache
 
         QPixmapCache.clear()
     except Exception:
@@ -340,8 +340,8 @@ def _release_memory():
 class _ScanWorker(QObject):
     """后台扫描所有缓存目录大小"""
 
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, drifox_dir: Path):
         super().__init__()
@@ -364,9 +364,9 @@ class _ScanWorker(QObject):
 class _CleanWorker(QObject):
     """后台执行文件删除"""
 
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+    progress = Signal(str)
+    finished = Signal(dict)
+    error = Signal(str)
 
     def __init__(self, drifox_dir: Path, targets: List[Tuple[str, str, str, str, bool]]):
         super().__init__()

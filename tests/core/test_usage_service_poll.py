@@ -15,7 +15,7 @@ import threading
 import time
 
 import pytest
-from PyQt5.QtCore import QTimer
+from PySide6.QtCore import QTimer
 
 from app.core.usage_service import UsageService
 

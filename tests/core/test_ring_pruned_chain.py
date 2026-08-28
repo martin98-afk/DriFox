@@ -7,7 +7,7 @@ set_usage(pruned_tokens=...) 必须存储并在 tooltip 数据中透传。
 （main_widget 两处调用点已补齐接线，代码走读确认）
 """
 import pytest
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 
 @pytest.fixture(scope="module")

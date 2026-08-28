@@ -28,10 +28,10 @@ import tracemalloc  # noqa: E402
 def run(cards: int, switch_sessions: int, switches: int) -> dict:
     tmp = bc.setup_isolation("longrun")
 
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
 
-    import PyQt5.QtWebEngineWidgets  # noqa: F401
+    import PySide6.QtWebEngineWidgets  # noqa: F401
 
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)

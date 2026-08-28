@@ -4,7 +4,7 @@
 from types import SimpleNamespace
 
 import pytest
-from PyQt5.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel
 
 from app.widgets.tab_manager_window import TabManagerWindow, EmptyStateWidget
 
@@ -119,7 +119,7 @@ class TestTabManagerWindowShowEvent:
         """窗口重新显示时必须调用 _tab_panel.refresh_ui_plugins 补刷"""
         from unittest.mock import MagicMock
 
-        from PyQt5.QtGui import QShowEvent
+        from PySide6.QtGui import QShowEvent
 
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)
@@ -137,7 +137,7 @@ class TestChatWrapperWheelForward:
     @staticmethod
     def _make_scroll_area(qtbot, inner_height=2000):
         """构造带内容的滚动区域（内容高于视口，可滚动）"""
-        from PyQt5.QtWidgets import QScrollArea, QWidget
+        from PySide6.QtWidgets import QScrollArea, QWidget
 
         area = QScrollArea()
         inner = QWidget()
@@ -150,8 +150,8 @@ class TestChatWrapperWheelForward:
 
     def test_wheel_forward_to_current_window_chat_area(self, qtbot):
         """滚轮事件应转发到当前窗口的 chat_scroll_area"""
-        from PyQt5.QtCore import QPoint, QPointF, Qt
-        from PyQt5.QtGui import QWheelEvent
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
 
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)
@@ -178,8 +178,8 @@ class TestChatWrapperWheelForward:
 
     def test_wheel_forward_no_window_falls_back_to_content(self, qtbot):
         """无当前窗口时回退查找内容区下第一个可见滚动区域"""
-        from PyQt5.QtCore import QPoint, QPointF, Qt
-        from PyQt5.QtGui import QWheelEvent
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
 
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)
@@ -203,7 +203,7 @@ class TestChatWrapperWheelForward:
 
         # 内容区挂上滚动区域后回退查找生效
         tm._content_stack.setCurrentIndex(1)  # 覆盖层页面
-        from PyQt5.QtWidgets import QVBoxLayout
+        from PySide6.QtWidgets import QVBoxLayout
 
         layout = tm._global_overlay.layout()
         if layout is None:
@@ -215,8 +215,8 @@ class TestChatWrapperWheelForward:
 
     def test_event_filter_wheel_accepted(self, qtbot):
         """eventFilter 收到 Wheel 且转发成功时返回 True 并 accept"""
-        from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
-        from PyQt5.QtGui import QWheelEvent
+        from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
 
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)
@@ -241,9 +241,9 @@ class TestChatWrapperWheelForward:
 
     def test_event_filter_other_widget_ignored(self, qtbot):
         """非 wrapper 对象上的 Wheel 不拦截"""
-        from PyQt5.QtCore import QEvent, QPoint, QPointF, Qt
-        from PyQt5.QtGui import QWheelEvent
-        from PyQt5.QtWidgets import QLabel
+        from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
+        from PySide6.QtWidgets import QLabel
 
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)

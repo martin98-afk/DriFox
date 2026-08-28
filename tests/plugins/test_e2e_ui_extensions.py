@@ -15,7 +15,7 @@ from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 _PLUGIN_CODE = '''
 # -*- coding: utf-8 -*-
 """E2E 验收插件：注册四类 Phase D 扩展点"""
-from PyQt5.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget
 
 
 class DemoSettingsCard(QWidget):
@@ -113,7 +113,7 @@ def test_legacy_plugins_unaffected(fresh_registry, tmp_path):
     (legacy_dir / "ui" / "__init__.py").write_text(
         '''
 # -*- coding: utf-8 -*-
-from PyQt5.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget
 
 
 class LegacyCard(QWidget):

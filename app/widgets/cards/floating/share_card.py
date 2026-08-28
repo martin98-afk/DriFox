@@ -14,8 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
+from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
@@ -953,7 +953,7 @@ class _ShareUploadThread(QThread):
     finished_signal 携带 upload_file 返回值 (url, err)，二者有且仅有一个非空。
     """
 
-    finished_signal = pyqtSignal(object)
+    finished_signal = Signal(object)
 
     def __init__(self, uploader, file_path, parent=None):
         super().__init__(parent)

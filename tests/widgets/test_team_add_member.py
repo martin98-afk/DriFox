@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """团队框"新建任务" + "快速新建成员"按钮测试（F14 返工版）
 
 覆盖范围：
@@ -14,7 +14,7 @@
 设计说明：
 - qapp 由 pytest-qt 提供（session 级 QApplication）
 - 重依赖（backend/QWebEngine/TrayManager）一律用 __new__ 绕过 + MagicMock 隔离
-- 菜单交互通过 patch PyQt5.QtWidgets.QMenu 模拟用户选择
+- 菜单交互通过 patch PySide6.QtWidgets.QMenu 模拟用户选择
 """
 
 from unittest.mock import MagicMock, patch
@@ -30,7 +30,7 @@ from app.core import window_registry
 
 def test_tabpanel_has_team_add_member_signal(qapp):
     """TabPanel 暴露 teamAddMemberRequested(str) 信号"""
-    from PyQt5.QtCore import pyqtSignal
+    from PySide6.QtCore import Signal
 
     from app.widgets.tab_panel import TabPanel
 
@@ -38,14 +38,14 @@ def test_tabpanel_has_team_add_member_signal(qapp):
     try:
         assert hasattr(panel, "teamAddMemberRequested")
         sig = getattr(TabPanel, "teamAddMemberRequested", None)
-        assert isinstance(sig, pyqtSignal)
+        assert isinstance(sig, Signal)
     finally:
         panel.deleteLater()
 
 
 def test_tabpanel_has_team_new_task_signal(qapp):
     """TabPanel 暴露 teamNewTaskRequested(str) 信号（F14 新增）"""
-    from PyQt5.QtCore import pyqtSignal
+    from PySide6.QtCore import Signal
 
     from app.widgets.tab_panel import TabPanel
 
@@ -53,7 +53,7 @@ def test_tabpanel_has_team_new_task_signal(qapp):
     try:
         assert hasattr(panel, "teamNewTaskRequested")
         sig = getattr(TabPanel, "teamNewTaskRequested", None)
-        assert isinstance(sig, pyqtSignal)
+        assert isinstance(sig, Signal)
     finally:
         panel.deleteLater()
 
@@ -180,8 +180,8 @@ def test_buttons_visible_on_header_hover(qapp):
 
 def test_team_enter_sends_enter_to_button_under_cursor(qapp):
     """问题A：_enter 显示按钮后，若鼠标已在某按钮上方则补发 QEnterEvent"""
-    from PyQt5.QtCore import QPoint
-    from PyQt5.QtGui import QEnterEvent
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QEnterEvent
 
     from app.widgets.tab_panel import TabPanel
 
@@ -193,10 +193,10 @@ def test_team_enter_sends_enter_to_button_under_cursor(qapp):
 
         sent = []
         with (
-            patch("PyQt5.QtWidgets.QApplication.widgetAt", return_value=close_btn),
-            patch("PyQt5.QtGui.QCursor.pos", return_value=QPoint(100, 100)),
+            patch("PySide6.QtWidgets.QApplication.widgetAt", return_value=close_btn),
+            patch("PySide6.QtGui.QCursor.pos", return_value=QPoint(100, 100)),
             patch(
-                "PyQt5.QtWidgets.QApplication.sendEvent",
+                "PySide6.QtWidgets.QApplication.sendEvent",
                 side_effect=lambda w, e: sent.append((w, e)) or True,
             ),
         ):
@@ -212,7 +212,7 @@ def test_team_enter_sends_enter_to_button_under_cursor(qapp):
 
 def test_team_enter_no_send_when_cursor_not_on_button(qapp):
     """问题A：鼠标不在任一按钮上 → 不补发 QEnterEvent"""
-    from PyQt5.QtCore import QPoint
+    from PySide6.QtCore import QPoint
 
     from app.widgets.tab_panel import TabPanel
 
@@ -222,9 +222,9 @@ def test_team_enter_no_send_when_cursor_not_on_button(qapp):
         header = grp._team_header
 
         with (
-            patch("PyQt5.QtWidgets.QApplication.widgetAt", return_value=header),
-            patch("PyQt5.QtGui.QCursor.pos", return_value=QPoint(5, 5)),
-            patch("PyQt5.QtWidgets.QApplication.sendEvent") as m_send,
+            patch("PySide6.QtWidgets.QApplication.widgetAt", return_value=header),
+            patch("PySide6.QtGui.QCursor.pos", return_value=QPoint(5, 5)),
+            patch("PySide6.QtWidgets.QApplication.sendEvent") as m_send,
         ):
             header.enterEvent(None)
 
@@ -235,7 +235,7 @@ def test_team_enter_no_send_when_cursor_not_on_button(qapp):
 
 def test_team_enter_no_send_in_compact_mode(qapp):
     """问题A：折叠态（紧凑模式）不显示按钮 → 不补发 QEnterEvent"""
-    from PyQt5.QtCore import QPoint
+    from PySide6.QtCore import QPoint
 
     from app.widgets.tab_panel import TabPanel
 
@@ -246,9 +246,9 @@ def test_team_enter_no_send_in_compact_mode(qapp):
         header = grp._team_header
 
         with (
-            patch("PyQt5.QtWidgets.QApplication.widgetAt", return_value=grp._team_close_btn),
-            patch("PyQt5.QtGui.QCursor.pos", return_value=QPoint(100, 100)),
-            patch("PyQt5.QtWidgets.QApplication.sendEvent") as m_send,
+            patch("PySide6.QtWidgets.QApplication.widgetAt", return_value=grp._team_close_btn),
+            patch("PySide6.QtGui.QCursor.pos", return_value=QPoint(100, 100)),
+            patch("PySide6.QtWidgets.QApplication.sendEvent") as m_send,
         ):
             header.enterEvent(None)
 
@@ -259,7 +259,7 @@ def test_team_enter_no_send_in_compact_mode(qapp):
 
 def test_team_replayed_enter_starts_tooltip_timer(qapp):
     """问题A（行为化）：真实补发 Enter 后 close_btn 的 tooltip filter 计时激活"""
-    from PyQt5.QtCore import QPoint
+    from PySide6.QtCore import QPoint
 
     from app.widgets import simple_hover_tooltip as sht
     from app.widgets.tab_panel import TabPanel
@@ -272,8 +272,8 @@ def test_team_replayed_enter_starts_tooltip_timer(qapp):
 
         # 不 mock sendEvent：真实发送，验证 filter 链路（Enter → timer.start）
         with (
-            patch("PyQt5.QtWidgets.QApplication.widgetAt", return_value=close_btn),
-            patch("PyQt5.QtGui.QCursor.pos", return_value=QPoint(100, 100)),
+            patch("PySide6.QtWidgets.QApplication.widgetAt", return_value=close_btn),
+            patch("PySide6.QtGui.QCursor.pos", return_value=QPoint(100, 100)),
         ):
             header.enterEvent(None)
 
@@ -722,7 +722,7 @@ def test_handle_team_add_member_menu_lists_template_and_members(qapp):
     inst._spawn_team_members = MagicMock(return_value=1)
 
     fake_menu_cls, actions = _setup_add_member_menu_patch("build")
-    with patch("PyQt5.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success"):
+    with patch("PySide6.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success"):
         inst._handle_team_add_member()
 
     # 已加入角色也可选（重复创建）：菜单含 build + plan，点击 build 创建
@@ -745,7 +745,7 @@ def test_handle_team_add_member_no_template_uses_member_roles(qapp):
     inst._spawn_team_members = MagicMock(return_value=1)
 
     fake_menu_cls, actions = _setup_add_member_menu_patch("build")
-    with patch("PyQt5.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success"):
+    with patch("PySide6.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success"):
         inst._handle_team_add_member()
 
     inst._spawn_team_members.assert_called_once_with(["build"], run_id="run-A", team_label="团队A", team_name="团队A")
@@ -793,7 +793,7 @@ def test_handle_team_add_member_single_create(qapp):
     inst._spawn_team_members = MagicMock(return_value=1)
 
     fake_menu_cls, actions = _setup_add_member_menu_patch("plan")
-    with patch("PyQt5.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success") as m_success:
+    with patch("PySide6.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success") as m_success:
         inst._handle_team_add_member()
 
     inst._spawn_team_members.assert_called_once_with(["plan"], run_id="run-A", team_label="团队A", team_name="团队A")
@@ -817,7 +817,7 @@ def test_handle_team_add_member_no_batch_fill_action(qapp):
     inst._spawn_team_members = MagicMock(return_value=1)
 
     fake_menu_cls, actions = _setup_add_member_menu_patch("build")
-    with patch("PyQt5.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success"):
+    with patch("PySide6.QtWidgets.QMenu", fake_menu_cls), patch.object(InfoBar, "success"):
         inst._handle_team_add_member()
 
     # 只 addAction 角色（3 个），无批量补齐项
@@ -873,7 +873,7 @@ def test_handle_team_new_task_rotates_run_id(qapp):
             inst._handle_team_new_task()
             # 链式调度：step0(win1) 同步 → 0ms → step1(win2) → 0ms → step2(收尾)。
             # 每轮 processEvents 触发一个已到期 timer，多轮推进完整链。
-            from PyQt5.QtCore import QCoreApplication
+            from PySide6.QtCore import QCoreApplication
 
             for _ in range(8):
                 QCoreApplication.processEvents()

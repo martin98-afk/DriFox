@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import orjson as json
-import sip
+import shiboken6 as sip
 from loguru import logger
-from PyQt5.QtCore import (
+from PySide6.QtCore import (
     QEvent,
     QEventLoop,
     QFileSystemWatcher,
@@ -31,11 +31,11 @@ from PyQt5.QtCore import (
     QThreadPool,
     QTimer,
     QUrl,
-    pyqtSignal,
-    pyqtSlot,
+    Signal,
+    Slot,
 )
-from PyQt5.QtGui import QColor, QDesktopServices, QIcon, QPainter
-from PyQt5.QtWidgets import (
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter
+from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -200,7 +200,7 @@ from app.widgets.ui_helpers import (
 class _BranchDetectSignals(QObject):
     """后台 git 分支检测的信号桥接（后台线程 → 主线程）。"""
 
-    finished = pyqtSignal(int, str)  # request_id, branch_name（空字符串=无分支/出错）
+    finished = Signal(int, str)  # request_id, branch_name（空字符串=无分支/出错）
 
 
 class _BranchDetectTask(QRunnable):
@@ -258,7 +258,7 @@ class _ProjectUrlImportThread(QThread):
     finished 信号携带 (file_path, error)，二者有且仅有一个非空。
     """
 
-    finished = pyqtSignal(str, str)
+    finished = Signal(str, str)
 
     def __init__(self, url: str):
         super().__init__()
@@ -299,7 +299,7 @@ class _ProjectExportThread(QThread):
     exportDone 信号携带 (zip_path, error)，二者有且仅有一个非空。
     """
 
-    exportDone = pyqtSignal(str, str)
+    exportDone = Signal(str, str)
 
     def __init__(self, history_manager, project_name: str, root_dir: str):
         super().__init__()
@@ -324,7 +324,7 @@ class _ProjectUploadThread(QThread):
     finished 信号携带 (url, error)，二者有且仅有一个非空。
     """
 
-    finished = pyqtSignal(str, str)
+    finished = Signal(str, str)
 
     def __init__(self, zip_path: str):
         super().__init__()
@@ -357,7 +357,7 @@ class _ProjectExportChoiceDialog(MaskDialogBase):
     EXPORT_LOCAL = 1
     EXPORT_UPLOAD = 2
 
-    exportChosen = pyqtSignal(int)  # 携带 EXPORT_LOCAL 或 EXPORT_UPLOAD
+    exportChosen = Signal(int)  # 携带 EXPORT_LOCAL 或 EXPORT_UPLOAD
 
     def __init__(self, project_name: str, parent=None):
         super().__init__(parent)
@@ -490,8 +490,8 @@ class _ProjectImportOptionDialog(MaskDialogBase):
     提供：📁 从文件导入 / 🔗 从URL导入
     """
 
-    fileImportRequested = pyqtSignal()
-    urlImportRequested = pyqtSignal()
+    fileImportRequested = Signal()
+    urlImportRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -668,7 +668,7 @@ def _abort_team_window(win) -> None:
 class ToolWindowTitleBar(QWidget):
     """窗口标题栏（原 app/tool_popup.py 定义，随 ToolPopupDialog 下线迁移至此）"""
 
-    popupRequested = pyqtSignal()
+    popupRequested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -908,8 +908,8 @@ class _ToolReloadNoticeBridge(QObject):
     跨线程自动 QueuedConnection，确保外部槽在主线程执行。
     """
 
-    reloaded = pyqtSignal()
-    notified = pyqtSignal()
+    reloaded = Signal()
+    notified = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -932,8 +932,8 @@ def _image_path_to_data_uri(img_path: str) -> "str | None":
     import base64 as _base64
     import os as _os
 
-    from PyQt5.QtCore import QByteArray, QBuffer, QIODevice
-    from PyQt5.QtGui import QImage
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+    from PySide6.QtGui import QImage
 
     _MIME_MAP = {
         ".png": "image/png",
@@ -1127,22 +1127,22 @@ class OpenAIChatToolWindow(ToolWindow):
     _models_dev_fetch_inflight: bool = False
     # OpenCode Zen 免费模型列表 inflight 守卫（同上语义）
     _opencode_fetch_inflight: bool = False
-    insertResponse = pyqtSignal(str)
-    createResponse = pyqtSignal(str)
-    contextActionRequested = pyqtSignal(str, str)
-    skillExecutionRequested = pyqtSignal(str, dict)
+    insertResponse = Signal(str)
+    createResponse = Signal(str)
+    contextActionRequested = Signal(str, str)
+    skillExecutionRequested = Signal(str, dict)
     # 线程安全桥接信号：从后台线程发射，主线程槽函数自动执行
-    _topic_summary_ready = pyqtSignal(object, object)
-    _interrupt_complete = pyqtSignal(object)  # 中断完成后主线程回调
-    userInterventionRequested = pyqtSignal(dict)
-    executionResultProduced = pyqtSignal(str)
-    toolStartUiSyncRequested = pyqtSignal(str, str, object, str)
+    _topic_summary_ready = Signal(object, object)
+    _interrupt_complete = Signal(object)  # 中断完成后主线程回调
+    userInterventionRequested = Signal(dict)
+    executionResultProduced = Signal(str)
+    toolStartUiSyncRequested = Signal(str, str, object, str)
     # 桌宠用：AI 状态变化信号（idle / thinking / streaming / question / error）
-    ai_state_changed = pyqtSignal(str)
+    ai_state_changed = Signal(str)
     # OpenCode Zen 免费模型列表异步刷新完成（后台线程 → 主线程）
-    _opencode_models_ready = pyqtSignal(object)
+    _opencode_models_ready = Signal(object)
     # models.dev 动态模型数据后台刷新完成（后台线程 → 主线程）
-    _models_dev_ready = pyqtSignal(object)
+    _models_dev_ready = Signal(object)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -1377,9 +1377,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._stop_elapsed = None  # 手动停止时暂存的耗时
         # 使用 try-except 保护 homepage 操作，防止 C++ 对象已删除错误
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if not sip.isdeleted(homepage):
+            if sip.isValid(homepage):
                 homepage.installEventFilter(self)
                 self._window_active = homepage.isActiveWindow()
             else:
@@ -1996,16 +1996,16 @@ class OpenAIChatToolWindow(ToolWindow):
         open_docs()
 
     def _safe_duplicate_window(self, branch: bool = False):
-        """安全包装 _duplicate_window，确保任何异常都不会传播到 PyQt5 信号槽链
+        """安全包装 _duplicate_window，确保任何异常都不会传播到 PySide6 信号槽链
 
-        PyQt5 中信号槽内的未捕获异常会调用 pyqt5_err_print() → qFatal() → abort()，
-        导致整个进程崩溃（macOS 上的经典崩溃模式）。
-        此方法在最外层用 BaseException 兜底，确保异常不会逃逸到 PyQt5 的信号调度器。
+        PyQt5 中信号槽内的未捕获异常会调用 qFatal() → abort() 导致整个进程崩溃
+        （macOS 上的经典崩溃模式）；PySide6 默认改为打印 traceback，行为更温和，
+        但本兜底保留以防御历史版本差异。
+        此方法在最外层用 BaseException 兜底，确保异常不会逃逸到 PySide6 的信号调度器。
 
         调用链：分支/复制窗口按钮的 clicked 信号直接连接 lambda，lambda 内部通过
         本方法用 BaseException 兜底。如果连本方法都进不去（信号来自已析构的 widget
-        等极端情况），异常会由 PyQt5 内部的 C++ 异常处理器捕获 → pyqt5_err_print，
-        其中部分 PyQt5 版本会不可阻止地调用 qFatal → abort。
+        等极端情况），异常会由 PySide6 内部的 C++ 异常处理器捕获。
         头尾通过日志确认入口/出口状态。
         """
         logger.debug(f"[_safe_duplicate_window] ENTER branch={branch}")
@@ -2047,10 +2047,10 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         try:
             # 验证 self 和 homepage 是否有效
-            from PyQt5 import sip
+            import shiboken6 as sip
 
             try:
-                if sip.isdeleted(self) or sip.isdeleted(self.homepage):
+                if not sip.isValid(self) or not sip.isValid(self.homepage):
                     InfoBar.error(
                         "窗口错误",
                         "主窗口已关闭，无法创建新窗口",
@@ -2220,9 +2220,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 路径时,_initial_session_delay_ms 仍是 0（普通窗口）。
         """
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(self) or sip.isdeleted(self.homepage):
+            if not sip.isValid(self) or not sip.isValid(self.homepage):
                 return None
             valid_homepage = self.homepage
             if valid_homepage is None:
@@ -2376,9 +2376,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(self):
+            if not sip.isValid(self):
                 return
         except Exception:
             pass
@@ -2522,9 +2522,9 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug(f"[OpenAIChatToolWindow] Skipping timer callback {func.__name__}: widget destroyed")
             return
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(self):
+            if not sip.isValid(self):
                 logger.debug(f"[OpenAIChatToolWindow] Skipping timer callback {func.__name__}: C++ object deleted")
                 return
         except Exception:
@@ -2532,7 +2532,7 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             func()
         except RuntimeError as e:
-            # PyQt5 在访问已删除 C++ 对象时抛出 RuntimeError
+            # PySide6 在访问已删除 C++ 对象时抛出 RuntimeError
             if "C++" in str(e) or "wrapped C/C++" in str(e):
                 logger.debug(f"[OpenAIChatToolWindow] Skipping timer callback {func.__name__}: {e}")
                 return
@@ -2542,7 +2542,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """处理窗口大小变化"""
         # 输入卡 wrapper / 容器尺寸变化 → 同步胶囊光晕底层几何，
         # 否则输入框高度自适应（输入多行内容时）会让光晕"卡"在旧位置
-        if event.type() == event.Type.Resize and obj in (
+        if event.type() == QEvent.Type.Resize and obj in (
             getattr(self, "_input_card_wrapper", None),
             getattr(self, "_bottom_input_container", None),
         ):
@@ -2628,9 +2628,9 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug("[OpenAIChatToolWindow] Window destroyed before branch session creation, skipping")
             return
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(self):
+            if not sip.isValid(self):
                 logger.debug("[OpenAIChatToolWindow] C++ object deleted before branch session creation, skipping")
                 return
         except Exception:
@@ -2661,9 +2661,9 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug("[OpenAIChatToolWindow] Window destroyed before branched session creation, skipping")
             return
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(self):
+            if not sip.isValid(self):
                 logger.debug("[OpenAIChatToolWindow] C++ object deleted before branched session creation, skipping")
                 return
         except Exception:
@@ -3505,7 +3505,7 @@ class OpenAIChatToolWindow(ToolWindow):
     @staticmethod
     def _resolve_input_button_icon(info) -> "QIcon":
         """按当前主题解析插件输入按钮图标（浅色优先 icon_light_path，回退 icon_path）"""
-        from PyQt5.QtGui import QIcon
+        from PySide6.QtGui import QIcon
 
         try:
             is_light = theme_manager.is_light_theme()
@@ -3705,8 +3705,8 @@ class OpenAIChatToolWindow(ToolWindow):
         handler 在运行时解析当前激活的 MainWidget（Tab 模式取 _content_area 当前页），
         不捕获 self，避免命中被隐藏或已关闭的标签页。
         """
-        from PyQt5.QtGui import QKeySequence
-        from PyQt5.QtWidgets import QShortcut
+        from PySide6.QtGui import QKeySequence
+        from PySide6.QtGui import QShortcut
 
         from app.core.command_manager import CommandManager
 
@@ -4429,7 +4429,7 @@ class OpenAIChatToolWindow(ToolWindow):
             parent=self.window(),
         )
         _dialog.confirmed.connect(_on_load_confirm)
-        _dialog.exec_()
+        _dialog.exec()
         if not _confirmed[0]:
             return
 
@@ -4874,8 +4874,8 @@ class OpenAIChatToolWindow(ToolWindow):
             )
             return
 
-        from PyQt5.QtGui import QCursor
-        from PyQt5.QtWidgets import QMenu
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QMenu
 
         menu = QMenu(self.window())
         menu.setStyleSheet(
@@ -4900,7 +4900,7 @@ class OpenAIChatToolWindow(ToolWindow):
         for agent_name in all_agents:
             menu.addAction(agent_name)  # 可重复选，不置灰不去重（F14）
 
-        chosen = menu.exec_(QCursor.pos())
+        chosen = menu.exec(QCursor.pos())
         if chosen is None:
             return
         agent_name = chosen.text()
@@ -4973,7 +4973,7 @@ class OpenAIChatToolWindow(ToolWindow):
         #    独立交错（C2），此处不重复。
         #    顺序约束（防历史串台）：全部 _create_new_session 完成（旧 run_id
         #    落库）→ 才 start_team_run(force) → 更新 _team_run_id → 刷新分组。
-        from PyQt5.QtCore import QTimer as _QTimer
+        from PySide6.QtCore import QTimer as _QTimer
 
         def _run_new_task_steps(_idx: int):
             # 🛡️ 窗口销毁守卫：PyQt 实例属性访问可能抛 RuntimeError
@@ -5460,7 +5460,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_pending_recheck_scheduled", False):
             return
         self._pending_recheck_scheduled = True
-        from PyQt5.QtCore import QTimer as _QTimer
+        from PySide6.QtCore import QTimer as _QTimer
 
         _QTimer.singleShot(1150, self._pending_recheck_fire)
 
@@ -5556,7 +5556,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 兜底（Bug2 防线 2）：_do_deferred_send 内 send_message_to_engine 失败会
         # 把 _is_streaming 置回 False（下一 tick 异步发生，同步检查看不到），
         # 1.5s 后若锁仍持有且未流式 → 复位，杜绝任何漏网路径造成永久死锁。
-        from PyQt5.QtCore import QTimer as _QTimer
+        from PySide6.QtCore import QTimer as _QTimer
 
         _QTimer.singleShot(1500, self._delayed_team_mail_lock_guard)
 
@@ -6885,7 +6885,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         refresh_dynamic_models_async(on_done=_on_done)
 
-    @pyqtSlot(object)
+    @Slot(object)
     def _on_models_dev_ready(self, _result):
         """models.dev 动态数据后台刷新完成（主线程）：刷新依赖动态数据的 UI。"""
         if getattr(self, "_is_destroyed", False):
@@ -6962,7 +6962,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         threading.Thread(target=_do_fetch, daemon=True).start()
 
-    @pyqtSlot(object)
+    @Slot(object)
     def _on_opencode_models_ready(self, result: tuple):
         """主线程处理 OpenCode Zen 免费模型异步刷新结果。"""
         config_id, free_models = result
@@ -9037,7 +9037,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # ── Debounce: 30ms 内的多次配置变更合并为一次刷新 ──
         if cls._theme_batch_timer is not None:
             cls._theme_batch_timer.stop()
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         if cls._theme_batch_timer is None:
             cls._theme_batch_timer = QTimer()  # 无 parent，跨窗口存活
@@ -9291,7 +9291,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 parent=parent,
             )
             dialog.dismissed.connect(lambda: cfg.set(cfg.tool_reload_risk_notice, False, save=True))
-            dialog.exec_()
+            dialog.exec()
         except Exception as e:
             logger.warning(f"[ToolReloadNotice] 弹框失败: {e}")
 
@@ -9641,7 +9641,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # SystemCardFrame 单独扫：_settings_popup 由 GlobalCardController 持有，
         # 不在 self 的 widget 树内。
         ThemeRefreshCoordinator.timer_start("findChildren")
-        from PyQt5.QtWidgets import QWidget as _QWidget
+        from PySide6.QtWidgets import QWidget as _QWidget
 
         _all_widgets = self.findChildren(_QWidget) if (is_color or is_font) else []
         if is_color or is_font_family:
@@ -10308,9 +10308,9 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug("[OpenAIChatToolWindow] Window destroyed before session creation, skipping")
             return
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(self):
+            if not sip.isValid(self):
                 logger.debug("[OpenAIChatToolWindow] C++ object deleted before session creation, skipping")
                 return
         except Exception:
@@ -10619,9 +10619,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if card is None:
             return
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(card):
+            if not sip.isValid(card):
                 return
         except Exception:
             pass
@@ -10664,9 +10664,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if cached is None:
             return
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(cached):
+            if not sip.isValid(cached):
                 return
         except Exception:
             pass
@@ -11632,9 +11632,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if cached is None:
             return False
         try:
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(cached):
+            if not sip.isValid(cached):
                 return False
         except Exception:
             pass
@@ -11653,9 +11653,9 @@ class OpenAIChatToolWindow(ToolWindow):
         cached = self._welcome_card_cache.get(self._window_id)
         if cached is not None:
             try:
-                from PyQt5 import sip
+                import shiboken6 as sip
 
-                if not sip.isdeleted(cached):
+                if sip.isValid(cached):
                     return cached
             except Exception:
                 pass
@@ -11789,7 +11789,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
 
             # 过滤掉已删除的卡片（sip.isdeleted）
-            alive_cards = [w for w in cards if not sip.isdeleted(w)]
+            alive_cards = [w for w in cards if sip.isValid(w)]
             if len(alive_cards) != len(cards):
                 self._batch_cards[batch_idx] = alive_cards if alive_cards else None
                 cleaned_any = True
@@ -11862,7 +11862,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
             if getattr(widget, "_is_welcome", False):
                 continue
-            if sip.isdeleted(widget):
+            if not sip.isValid(widget):
                 continue
             alive_cards.append(widget)
 
@@ -11982,7 +11982,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if elapsed is not None or token_usage is not None:
             card.set_meta_info(elapsed=elapsed, token_usage=token_usage)
         # 延迟刷新分隔点：等父级布局完成后再检查 isVisible()，避免加载时父级隐藏导致误判
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         QTimer.singleShot(0, card._refresh_footer_separators)
 
@@ -12794,7 +12794,7 @@ class OpenAIChatToolWindow(ToolWindow):
             parent=self.window(),
         )
         _dialog.confirmed.connect(_on_delete_confirm)
-        _dialog.exec_()
+        _dialog.exec()
         if not _confirmed[0]:
             # 取消操作，恢复正常状态
             self._pet_set_state("idle")
@@ -13325,7 +13325,7 @@ class OpenAIChatToolWindow(ToolWindow):
             cards = self._batch_cards[batch_idx] if batch_idx < len(self._batch_cards) else None
             if cards:
                 for card in cards:
-                    if sip.isdeleted(card):
+                    if not sip.isValid(card):
                         continue
                     if isinstance(card, MessageCard) and card.role == "user":
                         user_card_info.append(
@@ -13536,7 +13536,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if not cards:
             return None
         for card in cards:
-            if sip.isdeleted(card):
+            if not sip.isValid(card):
                 continue
             if isinstance(card, MessageCard) and card.role == "user":
                 return card
@@ -13896,7 +13896,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     batch = self._batch_cards[batch_idx]
                     if not batch:
                         continue
-                    alive = [w for w in batch if not sip.isdeleted(w)]
+                    alive = [w for w in batch if sip.isValid(w)]
                     if len(alive) != len(batch):
                         self._batch_cards[batch_idx] = alive if alive else None
 
@@ -14353,7 +14353,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🛡️ 设置截断哨兵，必须领先于 _on_stop_clicked（与 _delete_message 同理）：
         # stop 触发的 deferred finalize（_on_finalize_complete / finished_with_messages）
-        # 可能在 FileUndoCard.exec_() 嵌套事件循环期间到达，此时截断尚未执行；
+        # 可能在 FileUndoCard.exec() 嵌套事件循环期间到达，此时截断尚未执行；
         # 且若撤销最终截断至空会话，_persist_session_after_mutation 空分支曾不设哨兵，
         # old worker 快照会复活已撤销消息并落盘（UI 卡片已删但消息残留）。
         if self._is_streaming:
@@ -14376,7 +14376,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             if operations:
                 dialog = FileUndoCard(operations, self.backend.file_recorder, self)
-                result = dialog.exec_()
+                result = dialog.exec()
 
                 if result == FileUndoCard.CANCEL:
                     # 🛡️ 取消撤销 = 会话保持原样，恢复「正常 stop」语义：
@@ -14398,7 +14398,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     result = self.backend.file_recorder.rollback_operations(selected_ops)
                     self._show_undo_result(result)
 
-        # 再次验证 round_index 是否仍有效（dialog.exec_() 期间 session 可能变化）
+        # 再次验证 round_index 是否仍有效（dialog.exec() 期间 session 可能变化）
         session_final = self.session_manager.get_current_session()
         if session_final:
             canonical_final = consolidate_messages(session_final.messages)
@@ -15134,7 +15134,7 @@ class OpenAIChatToolWindow(ToolWindow):
         default_name = get_default_save_filename(lang, code)
 
         # 弹出文件保存对话框
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         file_path, _ = QFileDialog.getSaveFileName(
             self, "保存代码文件", default_name, f"代码文件 (*{ext});;所有文件 (*.*)"
@@ -15173,7 +15173,7 @@ class OpenAIChatToolWindow(ToolWindow):
             elif action == "create":
                 self.createResponse.emit(code)
             elif action == "copy":
-                from PyQt5.QtWidgets import QApplication
+                from PySide6.QtWidgets import QApplication
 
                 clipboard = QApplication.clipboard()
                 clipboard.setText(code)
@@ -15290,7 +15290,7 @@ class OpenAIChatToolWindow(ToolWindow):
             for batch in reversed(self._batch_cards):
                 if batch is not None and batch:
                     # 过滤掉已删除的卡片，防止 sender in batch 触发 RuntimeError
-                    alive_batch = [w for w in batch if not sip.isdeleted(w)]
+                    alive_batch = [w for w in batch if sip.isValid(w)]
                     if not alive_batch:
                         continue
                     # 检查当前 sender 是否在最后批次中
@@ -15642,7 +15642,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
 
-        from PyQt5.QtCore import QTimer  # 推迟 send_message 用
+        from PySide6.QtCore import QTimer  # 推迟 send_message 用
 
         # 🛡️ 清零会话切换哨兵：用户即将发起新 AI 请求，worker 的旧回调通道已无意义，
         # 后续 _on_messages_updated / _do_post_stream_cleanup 应正常处理新会话。
@@ -16572,7 +16572,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     args_preview = json.dumps(arguments, ensure_ascii=False)[:200]
                 except Exception:
                     args_preview = str(arguments)[:200]
-            from PyQt5.QtWidgets import QMessageBox
+            from PySide6.QtWidgets import QMessageBox
 
             box = QMessageBox(self)
             box.setWindowTitle("子智能体工具权限请求")
@@ -16582,7 +16582,7 @@ class OpenAIChatToolWindow(ToolWindow):
             deny_btn = box.addButton("拒绝", QMessageBox.RejectRole)
             box.setDefaultButton(deny_btn)
             box.setEscapeButton(deny_btn)
-            box.exec_()
+            box.exec()
             allow = box.clickedButton() is allow_btn
             self.backend.sub_agent_manager.respond_permission(task_id, allow)
         except Exception as e:
@@ -17736,13 +17736,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     if card and not _is_sip_deleted(card):
                         card.set_meta_info(token_usage={"total": last_tc})
                     # 继续调度节流刷新，补全各类型上下文占比条（breakdown）
-                    from PyQt5.QtCore import QTimer
+                    from PySide6.QtCore import QTimer
 
                     QTimer.singleShot(0, self._refresh_context_usage_indicator)
                     return
 
         # 工具迭代中或没有 API 数据时：本地估算 + compaction 信息
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         QTimer.singleShot(0, self._refresh_context_usage_indicator)
 
@@ -17859,7 +17859,7 @@ class OpenAIChatToolWindow(ToolWindow):
             card.set_meta_info(token_usage={"total": token_count})
         # 流式期间也调度一次补全各类型占比 breakdown（_refresh_context_usage_indicator
         # 已不再在 _is_streaming 时拦截，0.5s 节流保护）
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         QTimer.singleShot(0, self._refresh_context_usage_indicator)
 
@@ -18160,7 +18160,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 previous_summary = self.history_manager.get_topic_summary(idx)
 
         # 线程安全包装：QRunnable 在后台线程直接调用 callback，
-        # 通过 pyqtSignal emit 桥接到主线程，避免 GUI 操作崩溃
+        # 通过 Signal emit 桥接到主线程，避免 GUI 操作崩溃
         def _thread_safe_callback(result, error=None):
             self._topic_summary_ready.emit(result, error)
 
@@ -18329,13 +18329,13 @@ class OpenAIChatToolWindow(ToolWindow):
         无需再次执行 `git branch --show-current`（最坏可达 3s 阻塞主线程）。
         直接复制源窗口已渲染的分支标签 UI 状态（文本/可见性/提示/项目 avatar 提示）即可。
         """
-        from PyQt5 import sip
+        import shiboken6 as sip
 
         try:
-            if sip.isdeleted(source) or not hasattr(source, "_branch_widget"):
+            if not sip.isValid(source) or not hasattr(source, "_branch_widget"):
                 self._update_branch()
                 return
-            if sip.isdeleted(source._branch_widget):
+            if not sip.isValid(source._branch_widget):
                 self._update_branch()
                 return
             branch_visible = source._branch_widget.isVisible()
@@ -19021,7 +19021,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._export_thread.start()
 
         dialog.exportChosen.connect(_on_choice)
-        dialog.exec_()
+        dialog.exec()
 
     def _on_project_export_done(self, zip_path: str, error: str, project_name: str, mode: int):
         """后台导出完成回调（主线程）"""
@@ -19135,7 +19135,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 复制链接到剪贴板
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         QApplication.clipboard().setText(url)
         InfoBar.success(
@@ -19161,11 +19161,11 @@ class OpenAIChatToolWindow(ToolWindow):
         dialog = _ProjectImportOptionDialog(parent=self.window())
         dialog.fileImportRequested.connect(self._on_import_project_from_file)
         dialog.urlImportRequested.connect(self._on_import_project_from_url)
-        dialog.exec_()
+        dialog.exec()
 
     def _on_import_project_from_file(self):
         """从文件导入项目压缩包"""
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         files, _ = QFileDialog.getOpenFileNames(
             self,
@@ -19209,7 +19209,7 @@ class OpenAIChatToolWindow(ToolWindow):
             parent=self.window(),
         )
         dialog.confirmed.connect(self._on_url_project_import_confirmed)
-        dialog.exec_()
+        dialog.exec()
 
     def _on_url_project_import_confirmed(self, url: str):
         """URL确认后的项目导入处理（后台线程下载）"""
@@ -19233,7 +19233,7 @@ class OpenAIChatToolWindow(ToolWindow):
             parent=TabManagerWindow.get_instance() or self.window(),
         )
 
-    @pyqtSlot(str, str)
+    @Slot(str, str)
     def _on_project_url_import_result(self, file_path: str, error: str):
         """后台下载完成后的回调（主线程执行）"""
         if error:
@@ -19462,7 +19462,7 @@ class OpenAIChatToolWindow(ToolWindow):
             parent=self.window(),
         )
         _dialog.confirmed.connect(_on_project_created)
-        _dialog.exec_()
+        _dialog.exec()
         project_name = _project_name[0]
 
         if not project_name:
@@ -19546,7 +19546,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_project_open_folder_btn(self):
         """选择文件夹按钮：弹出文件夹选择器，选取文件夹后走拖拽建项目流程"""
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         folder_path = QFileDialog.getExistingDirectory(
             self,
@@ -20308,9 +20308,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._pending_lazy_cards.clear()
             wc = self._welcome_card_cache.pop(self._window_id, None)
             if wc is not None:
-                from PyQt5 import sip
+                import shiboken6 as sip
 
-                if not sip.isdeleted(wc):
+                if sip.isValid(wc):
                     if hasattr(wc, "cleanup"):
                         wc.cleanup()
                     wc.deleteLater()
@@ -20328,9 +20328,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
             for card in self.findChildren(MessageCard):
                 try:
-                    from PyQt5 import sip
+                    import shiboken6 as sip
 
-                    if sip.isdeleted(card):
+                    if not sip.isValid(card):
                         continue
                     if hasattr(card, "cleanup"):
                         card.cleanup()
@@ -20918,7 +20918,7 @@ def _is_sip_deleted(obj) -> bool:
     用于 destroyed 回调 / 清理路径的入口守卫，静默返回 False 兜底。
     """
     try:
-        return sip.isdeleted(obj)
+        return not sip.isValid(obj)
     except Exception:
         return False
 

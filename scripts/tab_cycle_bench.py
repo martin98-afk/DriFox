@@ -129,7 +129,7 @@ class TabCycleBench:
 def _make_qt_callbacks() -> tuple[Callable[[int], None], Callable[[int], None], Callable[[], None]]:
     """构造内置 QTabWidget 仿真回调（headless offscreen），仅供框架演示。"""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-    from PyQt5.QtWidgets import QApplication, QTabWidget, QWidget
+    from PySide6.QtWidgets import QApplication, QTabWidget, QWidget
 
     app = QApplication.instance() or QApplication([])
     widget = QTabWidget()
@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             open_tab, close_tab, cleanup = _make_qt_callbacks()
         except ImportError:
-            print("警告: 未找到 PyQt5，回退到 --no-qt 模式（仅测框架开销）")
+            print("警告: 未找到 PySide6，回退到 --no-qt 模式（仅测框架开销）")
             args.no_qt = True
 
     bench = TabCycleBench(

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-DriFox 性能基线测试脚本（PyQt5 GUI）
+DriFox 性能基线测试脚本（PySide6 GUI）
 
 无侵入式性能基线采集：启动耗时 / 内存基线 / 帧率 / 长时运行内存增长。
 所有插桩通过运行时 monkey-patch 完成，不修改任何业务代码。
@@ -34,7 +34,7 @@ import time
 import tracemalloc
 from datetime import datetime, timezone
 
-# ---- 必须在任何 PyQt5 导入前设置 Qt 平台 ----
+# ---- 必须在任何 PySide6 导入前设置 Qt 平台 ----
 # 默认 offscreen 以便无显示器环境可复现；可用环境变量或父进程传入覆盖。
 if "QT_QPA_PLATFORM" not in os.environ:
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -55,10 +55,10 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
     在独立进程内运行一次采集，返回指标 dict。
     mode: timing | mem | fps | longevity
     """
-    import PyQt5.QtCore as QtCore
-    from PyQt5.QtCore import QTimer, QMetaObject, Qt
-    from PyQt5.QtWidgets import QApplication
-    import PyQt5.QtWidgets as qw
+    import PySide6.QtCore as QtCore
+    from PySide6.QtCore import QTimer, QMetaObject, Qt
+    from PySide6.QtWidgets import QApplication
+    import PySide6.QtWidgets as qw
     import psutil
 
     proc = psutil.Process(os.getpid())
@@ -146,7 +146,7 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
             _timers.append(ft)
 
         if mode == "longevity" and ops > 0:
-            from PyQt5.QtWidgets import QWidget, QLabel
+            from PySide6.QtWidgets import QWidget, QLabel
             # 长时运行：模拟定时操作 ops 次，记录 RSS/对象数增长
             def op_tick():
                 # 模拟一次定时操作：创建并销毁临时控件 + 周期 gc
@@ -199,12 +199,12 @@ def run_once(mode, entry="main", duration_ms=3000, frame_ms=16,
             tracemalloc.start()
         state["t_import_done"] = time.monotonic()
         app = QApplication(sys.argv)
-        from PyQt5.QtWidgets import QMainWindow
+        from PySide6.QtWidgets import QMainWindow
         win = QMainWindow()
         win.setWindowTitle("DriFox-baseline-synthetic")
         win.resize(800, 600)
         win.show()
-        app.exec_()
+        app.exec()
         # 立即退出，跳过 Qt 原生拆卸（offscreen 下拆卸会触发原生层崩溃）
         _emit_and_exit(state, mode, entry, synthetic, enable_tracemalloc, proc)
 
@@ -404,7 +404,7 @@ def collect_startup(repeats, entry, platform, duration_ms, synthetic=False, retr
 
 
 def build_meta(entry, platform):
-    import PyQt5.QtCore as QtCore
+    import PySide6.QtCore as QtCore
     return {
         "tool": "DriFox baseline.py",
         "generated_at": datetime.now(timezone.utc).isoformat(),

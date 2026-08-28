@@ -11,8 +11,8 @@
 import os
 import sys
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 
 def _ensure_qapp():
@@ -63,7 +63,7 @@ def _widget_for_item(card, item_idx):
 
 def _card_with_tooltip():
     """创建 CommandCard，让 tooltip 可见（选中第一个有描述的 item）"""
-    from PyQt5.QtWidgets import QWidget, QVBoxLayout
+    from PySide6.QtWidgets import QWidget, QVBoxLayout
     from app.widgets.cards.floating.command_card import CommandCard
     from app.widgets.cards.card_container import BottomCardContainer
 
@@ -85,7 +85,7 @@ def _card_with_tooltip():
     parent.show()
     card.setVisible(True)
     # 确保布局生效
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance()
     for _ in range(10):
@@ -171,7 +171,7 @@ class TestCommandCardDivider:
 
         # 放到一个有合理高度的窗口中，避免 _available_card_budget() 因
         # self.window() == self（无父窗口）而错误压缩高度
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
 
         _parent = QWidget()
         _parent.resize(800, 600)
@@ -197,7 +197,7 @@ class TestCommandCardDivider:
             MAX_VISIBLE_ITEMS,
             ITEM_HEIGHT,
         )
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
 
         _parent = QWidget()
         _parent.resize(800, 600)
@@ -266,7 +266,7 @@ class TestCommandCardDivider:
             MAX_VISIBLE_ITEMS,
             ITEM_HEIGHT,
         )
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
 
         # 放到合理高度的窗口中，避免矮窗口压缩分支掩盖 bug
         _parent = QWidget()
@@ -345,8 +345,8 @@ class TestCommandCardDivider:
         修复：showEvent 补一次 _apply_style，首次显示即保证样式落地。
         """
         _ensure_qapp()
-        from PyQt5.QtGui import QColor, QPalette
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtGui import QColor, QPalette
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
 
         from app.widgets.cards.floating.command_card import CommandCard, _qcolor_from_rgba
         from app.utils.design_tokens import Colors
@@ -398,7 +398,7 @@ class TestCommandCardDivider:
         _ensure_qapp()
         import html as html_mod
 
-        from PyQt5.QtWidgets import QWidget, QVBoxLayout
+        from PySide6.QtWidgets import QWidget, QVBoxLayout
         from app.widgets.cards.floating.command_card import CommandCard
 
         parent = QWidget()

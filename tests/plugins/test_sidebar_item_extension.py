@@ -35,7 +35,7 @@ def panel(qtbot):
 @pytest.fixture()
 def host(qtbot):
     """侧边栏宿主窗口（含 get_current_window）——fixture 持有，规避局部变量 GC 连带删 panel"""
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     class _FakeHost(QWidget):
         def get_current_window(self):

@@ -27,8 +27,8 @@ class SystemCardsModule(UIModule):
     module_id = "system_cards"
 
     def build(self, host) -> None:
-        from PyQt5.QtCore import QTimer
-        from PyQt5.QtWidgets import QLineEdit
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QLineEdit
         from qfluentwidgets import FluentIcon, TransparentToolButton
 
         from app.utils.design_tokens import Colors, font_size_css

@@ -1006,7 +1006,7 @@ def test_load_plugin_only_refreshes_welcome_cards_for_welcome_tab_plugins(tmp_pa
     同一事件循环批次内的多次 load/unload 只刷新一次（插件批量加载时不逐个
     重建 QWebEngineView）。断言点相应改为 processEvents 后统计。
     """
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     reg = UIPluginRegistry.get_instance()
     reg.reset()

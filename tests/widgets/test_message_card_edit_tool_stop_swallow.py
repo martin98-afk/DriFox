@@ -26,16 +26,13 @@ tests/widgets/test_message_card_tool_box_disappear.py 风格一致）。
 
 import sys
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 try:
-    from PyQt5.QtWebEngineWidgets import (  # noqa: F401
-        QWebEnginePage,
-        QWebEngineSettings,
-        QWebEngineView,
-    )
+    from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
+    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
 except Exception:
     pass
 

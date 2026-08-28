@@ -26,7 +26,7 @@ if str(_REPO_ROOT / "plugins") not in sys.path:
 
 from app.core import hook_manager as hm_mod
 from app.core.backend import ChatBackend, _format_hook_output
-from PyQt5.QtCore import QObject
+from PySide6.QtCore import QObject
 
 from app.core.plugin_host_service import PluginHostService
 from app.core.hook_manager import Hook, HookManager, HookMatchRule, HookType
@@ -284,7 +284,7 @@ class TestChatWorkerConsumesPluginChangedQueue:
 
     def test_inject_pending_consumes_plugin_changed_msg(self, isolated_hook_states, monkeypatch):
         """队列里有一条 PluginChanged 消息 → _inject_pending_hook_messages 注入会话"""
-        from PyQt5.QtCore import QThread
+        from PySide6.QtCore import QThread
 
         backend = ChatBackend.__new__(ChatBackend)
         backend._ui_valid = True
@@ -514,7 +514,7 @@ class TestFullPipelinePluginChangedToConversation:
         backend._hook_messages_updated.emit.assert_called()
 
         # 6) chat_worker 消费
-        from PyQt5.QtCore import QThread
+        from PySide6.QtCore import QThread
 
         worker = ChatWorker.__new__(ChatWorker)
         QThread.__init__(worker)

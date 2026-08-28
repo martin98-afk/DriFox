@@ -6,8 +6,8 @@
 通过 BaseSettingsCard 包裹后嵌入 TopCardContainer。
 """
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -25,7 +25,7 @@ _ITEM_SPACING = 6
 class _QuestionItem(QWidget):
     """单个历史问题条目"""
 
-    clicked = pyqtSignal(int)
+    clicked = Signal(int)
 
     def __init__(self, index: int, text: str, parent=None):
         super().__init__(parent)
@@ -106,7 +106,7 @@ class _QuestionItem(QWidget):
 class HistoryQuestionsCardContent(QWidget):
     """历史问题卡片的内容（问题条目列表），由 BaseSettingsCard 包裹"""
 
-    questionClicked = pyqtSignal(int)
+    questionClicked = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -116,7 +116,7 @@ class HistoryQuestionsCardContent(QWidget):
 
     def sizeHint(self):
         """显式返回高度，确保 BaseSettingsCard 的 content 模式正确展开"""
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         if not self._items:
             return super().sizeHint()

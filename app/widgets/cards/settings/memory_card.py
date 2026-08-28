@@ -9,9 +9,9 @@
 import os
 from typing import Dict, Optional
 
-from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QKeyEvent
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent, QKeyEvent
+from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
     QHBoxLayout,
@@ -67,7 +67,7 @@ TAB_KEY_DOCUMENTS = "docs"
 class DocDropListWidget(ListWidget):
     """支持拖拽文件的列表控件"""
 
-    files_dropped = pyqtSignal(list)
+    files_dropped = Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -107,9 +107,9 @@ class DocDropListWidget(ListWidget):
 class EntryMemoryItemWidget(QWidget):
     """条目记忆项组件"""
 
-    deleted = pyqtSignal(str)  # memory_id
-    toggled = pyqtSignal(str, bool)
-    edited = pyqtSignal(str, str)  # memory_id, new_content
+    deleted = Signal(str)  # memory_id
+    toggled = Signal(str, bool)
+    edited = Signal(str, str)  # memory_id, new_content
 
     def __init__(
         self,
@@ -311,13 +311,13 @@ class SingleInputDialog(MaskDialogBase):
             parent=parent,
         )
         dialog.confirmed.connect(handler)
-        dialog.exec_()
+        dialog.exec()
     """
 
     # 通用信号
-    confirmed = pyqtSignal(str)
+    confirmed = Signal(str)
     # 兼容旧 URL 场景的别名
-    urlConfirmed = pyqtSignal(str)
+    urlConfirmed = Signal(str)
 
     DEFAULT_WIDTH = 420
     DEFAULT_HEIGHT = 220
@@ -493,11 +493,11 @@ UrlInputDialog = SingleInputDialog
 class KeyDocumentItemWidget(QWidget):
     """关键文档项组件"""
 
-    removed = pyqtSignal(str)  # doc_id
-    open_file = pyqtSignal(str)  # file_path
-    open_folder = pyqtSignal(str)  # folder_path
-    setAsWorkingDir = pyqtSignal(str)  # file_path
-    worktreeChanged = pyqtSignal(str, str)  # (original_folder, worktree_path)
+    removed = Signal(str)  # doc_id
+    open_file = Signal(str)  # file_path
+    open_folder = Signal(str)  # folder_path
+    setAsWorkingDir = Signal(str)  # file_path
+    worktreeChanged = Signal(str, str)  # (original_folder, worktree_path)
 
     @staticmethod
     def _is_url(path: str) -> bool:
@@ -733,7 +733,7 @@ class KeyDocumentItemWidget(QWidget):
 class DropZoneWidget(QWidget):
     """拖拽区域组件"""
 
-    files_dropped = pyqtSignal(list)  # file_paths
+    files_dropped = Signal(list)  # file_paths
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -810,9 +810,9 @@ class DropZoneWidget(QWidget):
 class MemoryCardContent(QWidget):
     """记忆卡片内容区域 - 3 Tab 结构"""
 
-    memorySaved = pyqtSignal(list)
-    projectNoteChanged = pyqtSignal(str, str)  # project, content
-    workingDirChanged = pyqtSignal(str)  # 工作目录路径，空字符串=清除
+    memorySaved = Signal(list)
+    projectNoteChanged = Signal(str, str)  # project, content
+    workingDirChanged = Signal(str)  # 工作目录路径，空字符串=清除
 
     def __init__(self, memory_manager, parent=None):
         super().__init__(parent)
@@ -1173,7 +1173,7 @@ class MemoryCardContent(QWidget):
 
     def _on_add_file_clicked(self):
         """点击添加文件按钮"""
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         files, _ = QFileDialog.getOpenFileNames(self, "选择关键文档", "", "所有文件 (*.*)")
         if files:
@@ -1181,7 +1181,7 @@ class MemoryCardContent(QWidget):
 
     def _on_add_folder_clicked(self):
         """点击添加文件夹按钮"""
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         folder = QFileDialog.getExistingDirectory(self, "选择文件夹", "", QFileDialog.ShowDirsOnly)
         if folder:
@@ -1199,7 +1199,7 @@ class MemoryCardContent(QWidget):
             parent=self.window(),
         )
         dialog.confirmed.connect(self._on_url_confirmed)
-        dialog.exec_()
+        dialog.exec()
 
     def _on_url_confirmed(self, url: str):
         """URL 确认后的处理"""
@@ -1393,7 +1393,7 @@ class MemoryCardContent(QWidget):
 
     def _get_entry_item_size(self, content: str):
         """仅作为 fallback 使用"""
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         return QSize(0, 44)
 
@@ -1411,7 +1411,7 @@ class MemoryCardContent(QWidget):
         """在笔记编辑器内搜索文本"""
         if not self._search_filter:
             return
-        from PyQt5.QtGui import QTextCursor
+        from PySide6.QtGui import QTextCursor
 
         # 查找文本并选中
         cursor = self.notes_editor.textCursor()
@@ -1661,7 +1661,7 @@ class MemoryCardContent(QWidget):
 
     def _get_worktree_section_size(self, repo_info):
         """计算 worktree 树状组件的高度"""
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         # 宽度随列表自适应，不设定固定宽度避免溢出
         wt_count = len(repo_info.worktrees) if repo_info.worktrees else 1
@@ -1669,7 +1669,7 @@ class MemoryCardContent(QWidget):
         return QSize(0, height)
 
     def _get_doc_item_size(self):
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
 
         # 宽度随列表自适应，不设定固定宽度避免溢出
         return QSize(0, 44)

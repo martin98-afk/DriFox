@@ -43,8 +43,8 @@ import random
 import sys
 from pathlib import Path
 
-from PyQt5 import sip
-from PyQt5.QtCore import (
+import shiboken6 as sip
+from PySide6.QtCore import (
     QEasingCurve,
     QElapsedTimer,
     QPoint,
@@ -53,10 +53,10 @@ from PyQt5.QtCore import (
     QRect,
     QTimer,
     Qt,
-    pyqtSignal,
+    Signal,
 )
-from PyQt5.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QPixmap
-from PyQt5.QtWidgets import QWidget
+from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QWidget
 from loguru import logger
 
 
@@ -196,7 +196,7 @@ STATE_EMOJI = {
 class PixelPetWidget(QWidget):
     """像素小狐桌宠 v2 — 增强版浮动互动吉祥物"""
 
-    state_changed = pyqtSignal(str)
+    state_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -901,7 +901,7 @@ class PixelPetWidget(QWidget):
 
         def state_step():
             # ★ widget 已被销毁时跳过（如窗口关闭后触发的残留 singleShot）
-            if sip.isdeleted(self):
+            if not sip.isValid(self):
                 return
             # ★ 状态被外部(AI信号等)改变时中止行为，避免闭包覆写新状态
             if self._current_state != state_name:

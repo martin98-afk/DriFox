@@ -12,8 +12,8 @@ UsageService 统一驱动，结果经 balance_ready 信号广播回来。
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QWidget
 
 from app.utils.design_tokens import scale_font_size
 from app.utils.utils import get_font_family_css
@@ -23,7 +23,7 @@ class BalanceDisplay(QWidget):
     """余额显示组件（显示层，请求委托 UsageService 全局单例）"""
 
     # 信号：当余额更新时发出
-    balance_updated = pyqtSignal(float, str)  # balance, currency
+    balance_updated = Signal(float, str)  # balance, currency
 
     def __init__(self, parent=None):
         super().__init__(parent)

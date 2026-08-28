@@ -9,10 +9,10 @@
 import time
 from typing import Dict
 
-from PyQt5.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QPixmap
-from PyQt5.QtSvg import QSvgRenderer
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -98,9 +98,9 @@ class _RotatingIcon(QWidget):
 class _AgentTaskRow(QFrame):
     """单行子智能体任务 - 点击可展开显示详情"""
 
-    toggled = pyqtSignal(str)  # task_id, 当展开/收起时发出
-    enter_session_requested = pyqtSignal(str)  # task_id, 当用户点击"进入会话"时发出
-    stop_requested = pyqtSignal(str)  # task_id, 当用户点击停止按钮时发出
+    toggled = Signal(str)  # task_id, 当展开/收起时发出
+    enter_session_requested = Signal(str)  # task_id, 当用户点击"进入会话"时发出
+    stop_requested = Signal(str)  # task_id, 当用户点击停止按钮时发出
 
     def __init__(self, task_id: str, agent_name: str, task_desc: str, model_name: str = "", parent=None):
         super().__init__(parent)
@@ -506,9 +506,9 @@ class SubAgentCompactFloatingWidget(QWidget):
     - 每行详情中提供"进入会话"按钮，弹出对应子智能体会话窗口
     """
 
-    closed = pyqtSignal()
-    enter_session_requested = pyqtSignal(str, str)  # task_id, agent_name
-    stop_subagent_requested = pyqtSignal(str)  # task_id, 用户点击停止按钮时发出
+    closed = Signal()
+    enter_session_requested = Signal(str, str)  # task_id, agent_name
+    stop_subagent_requested = Signal(str)  # task_id, 用户点击停止按钮时发出
 
     def __init__(self, parent=None):
         super().__init__(parent)

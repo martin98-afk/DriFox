@@ -14,7 +14,7 @@ import sys
 import pytest
 
 # 必须在创建 QApplication 前设置 Qt 属性
-from PyQt5.QtCore import Qt
+from PySide6.QtCore import Qt
 
 sys.modules  # noqa: B018  (仅确保 sys 导入)
 
@@ -22,7 +22,7 @@ QApplication_ShareOpenGL = Qt.AA_ShareOpenGLContexts  # noqa: F841
 
 
 def _ensure_qapp():
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     return QApplication.instance() or QApplication(sys.argv)
 

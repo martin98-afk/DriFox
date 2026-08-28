@@ -18,8 +18,8 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget
 
 from app.widgets.tab_manager_window import TabManagerWindow
 
@@ -60,8 +60,8 @@ class TestResizeBlockingBgLabel:
         tm._bg_label = bg_label
 
         # ── 第一次 resize 事件：阶段一，setUpdatesEnabled(True) ──
-        from PyQt5.QtGui import QResizeEvent
-        from PyQt5.QtCore import QSize
+        from PySide6.QtGui import QResizeEvent
+        from PySide6.QtCore import QSize
 
         old_size = tm.size()
         new_size = QSize(820, 610)
@@ -111,8 +111,8 @@ class TestResizeBlockingBgLabel:
         tm.resize(800, 600)
         qtbot.waitExposed(tm)
 
-        from PyQt5.QtCore import QSize
-        from PyQt5.QtGui import QResizeEvent
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QResizeEvent
 
         # 触发阶段一
         old_size = tm.size()
@@ -143,10 +143,10 @@ class TestWindowsResizeBlockingNotification:
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)
 
-        # 让 _sip.isdeleted(win) 返回 False（默认会被 MagicMock 拦截返回 truthy）
+        # 让 _sip.isValid(win) 返回 False（默认会被 MagicMock 拦截返回 truthy）
         import app.widgets.tab_manager_window as tm_module
 
-        monkeypatch.setattr(tm_module._sip, "isdeleted", lambda w: False)
+        monkeypatch.setattr(tm_module._sip, "isValid", lambda w: True)
 
         # 准备两个 mock 窗口：跟踪 _set_external_resize_blocking 调用
         win1 = MagicMock()
@@ -171,10 +171,10 @@ class TestWindowsResizeBlockingNotification:
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)
 
-        # 让 _sip.isdeleted(win) 返回 False（否则 MagicMock 返回 truthy → 跳过）
+        # 让 _sip.isValid(win) 返回 False（否则 MagicMock 返回 truthy → 跳过）
         import app.widgets.tab_manager_window as tm_module
 
-        monkeypatch.setattr(tm_module._sip, "isdeleted", lambda w: False)
+        monkeypatch.setattr(tm_module._sip, "isValid", lambda w: True)
 
         # mock 嵌入窗口
         win = MagicMock()
@@ -185,8 +185,8 @@ class TestWindowsResizeBlockingNotification:
         bg_label = MagicMock()
         tm._bg_label = bg_label
 
-        from PyQt5.QtCore import QSize
-        from PyQt5.QtGui import QResizeEvent
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QResizeEvent
 
         # 阶段一：super().resizeEvent() → 嵌入窗口收到 resize → 切换 preview 模式
         old_size = tm.size()
@@ -301,7 +301,7 @@ class TestExternalResizeBlocking:
         class _StubWindow(QWidget):
             def __init__(self):
                 super().__init__()
-                from PyQt5.QtCore import QTimer
+                from PySide6.QtCore import QTimer
 
                 self._resize_debounce_timer = QTimer(self)
                 self._resize_debounce_timer.setSingleShot(True)
@@ -345,8 +345,8 @@ class TestExternalResizeBlocking:
         用 monkeypatch 复制 resizeEvent 函数体（而非 __get__），
         避免 super(type, obj) 类型不匹配问题。
         """
-        from PyQt5.QtCore import QSize
-        from PyQt5.QtGui import QResizeEvent
+        from PySide6.QtCore import QSize
+        from PySide6.QtGui import QResizeEvent
         from app.main_widget import OpenAIChatToolWindow
 
         # 直接复制 resizeEvent 函数体的早退分支（去掉 super 链路）
@@ -370,7 +370,7 @@ class TestExternalResizeBlocking:
         class _StubWindow(QWidget):
             def __init__(self):
                 super().__init__()
-                from PyQt5.QtCore import QTimer
+                from PySide6.QtCore import QTimer
 
                 self._resize_debounce_timer = QTimer(self)
                 self._resize_debounce_timer.setSingleShot(True)

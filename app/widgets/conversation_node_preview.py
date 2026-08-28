@@ -1,11 +1,11 @@
-from PyQt5.QtCore import QPoint, Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QPainter, QPen
-from PyQt5.QtWidgets import QWidget
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import QBrush, QColor, QPainter, QPen
+from PySide6.QtWidgets import QWidget
 from app.widgets.simple_hover_tooltip import SimpleHoverTooltip
 
 
 class ConversationNodePreview(QWidget):
-    nodeClicked = pyqtSignal(int)
+    nodeClicked = Signal(int)
 
     # 主题颜色缓存
     _colors_initialized = False

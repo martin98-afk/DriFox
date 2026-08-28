@@ -8,7 +8,7 @@
 import os
 from typing import Dict
 
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 from loguru import logger
 
 
@@ -25,11 +25,11 @@ class _DirWatcher(QObject):
     - 路径增删接口
     """
 
-    dir_changed = pyqtSignal(str)
+    dir_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        from PyQt5.QtCore import QFileSystemWatcher
+        from PySide6.QtCore import QFileSystemWatcher
 
         self._watcher = QFileSystemWatcher(self)
         self._debounce_timers: Dict[str, QTimer] = {}

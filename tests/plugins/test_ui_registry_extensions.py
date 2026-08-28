@@ -218,7 +218,7 @@ class TestHideFloatingCardGlobally:
 
 
 class _FakeCardManager:
-    """记录 hide_card 调用，最小 stub（避免 PyQt5 真实构造开销）"""
+    """记录 hide_card 调用，最小 stub（避免 PySide6 真实构造开销）"""
 
     def __init__(self):
         self.calls: list = []

@@ -8,7 +8,7 @@
 """
 
 import pytest
-from PyQt5.QtWidgets import QMenu, QWidget
+from PySide6.QtWidgets import QMenu, QWidget
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 

@@ -22,8 +22,8 @@ import sys
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QApplication  # noqa: F401  # 须先于 design_tokens 导入
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication  # noqa: F401  # 须先于 design_tokens 导入
 
 from app.widgets.message_card import PlainTextViewer
 

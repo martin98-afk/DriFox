@@ -10,8 +10,8 @@ Tooltip 改造为自定义弹出控件（带 3 个进度条），显示用量百
 重置倒计时，进度条末端显示百分比数字。
 """
 
-from PyQt5.QtCore import QPoint, QRectF, Qt, QTimer
-from PyQt5.QtGui import (
+from PySide6.QtCore import QPoint, QRectF, Qt, QTimer
+from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetrics,
@@ -19,7 +19,7 @@ from PyQt5.QtGui import (
     QPainterPath,
     QPen,
 )
-from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
 from app.utils.design_tokens import Colors, _get_global_font, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
@@ -182,7 +182,7 @@ class _PlanProgressBar(QWidget):
 
         pct_text = f"{self._percent}%"
         fm = QFontMetrics(font)
-        text_w = fm.width(pct_text)
+        text_w = fm.horizontalAdvance(pct_text)
         text_x = w - text_w - 6  # 距右边缘 6px
         text_y = int((h + fm.ascent()) / 2) - 1
 

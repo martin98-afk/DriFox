@@ -21,7 +21,7 @@ def test_chat_area_module_contract():
 
 
 def test_compose_builds_chat_area(fresh_registry, qapp):
-    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
     from app.widgets.modules.chat_area_module import ChatAreaModule
     from app.widgets.ui_composition import compose
 

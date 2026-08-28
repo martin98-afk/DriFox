@@ -25,7 +25,7 @@ def test_bottom_toolbar_module_id():
 
 
 def test_compose_builds_bottom_toolbar(fresh_registry, qapp):
-    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
     from app.widgets.modules.bottom_toolbar_module import BottomToolbarModule
     from app.widgets.ui_composition import compose
 

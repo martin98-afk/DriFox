@@ -24,9 +24,9 @@
 
 from typing import Optional
 
-from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer
-from PyQt5.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPainterPath
-from PyQt5.QtWidgets import QApplication, QWidget
+from PySide6.QtCore import QEvent, QObject, QPoint, QRectF, Qt, QTimer
+from PySide6.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPainterPath
+from PySide6.QtWidgets import QApplication, QWidget
 
 # ── 泄漏修复（6a）：_filters 缓存改弱值字典 ──
 # filter 实例由 widget.installEventFilter 以 parent 链持有（widget 销毁即释放），
@@ -48,7 +48,7 @@ def _get_skip_tooltip_types():
     """懒加载跳过类型，避免模块加载时 QWidget 子类还未准备就绪。"""
     global _SKIP_TOOLTIP_TYPES
     if _SKIP_TOOLTIP_TYPES is None:
-        from PyQt5.QtWidgets import QAbstractScrollArea, QLineEdit, QTextEdit
+        from PySide6.QtWidgets import QAbstractScrollArea, QLineEdit, QTextEdit
 
         _SKIP_TOOLTIP_TYPES = (QAbstractScrollArea, QLineEdit, QTextEdit)
     return _SKIP_TOOLTIP_TYPES
@@ -146,12 +146,12 @@ _MAX_TOOLTIP_INSTANCES = 256
 
 def _prune_dead_tooltips():
     """清理注册表中已销毁（sip.isdeleted）的 tooltip 实例。"""
-    from PyQt5 import sip
+    import shiboken6 as sip
 
     alive = []
     for tt in _tooltip_instances:
         try:
-            if tt is None or sip.isdeleted(tt):
+            if tt is None or not sip.isValid(tt):
                 continue
             alive.append(tt)
         except RuntimeError:
@@ -240,7 +240,7 @@ class SimpleHoverTooltip(QWidget):
         """根据文本（支持多行 \\n） + padding 计算 widget 尺寸。"""
         fm = QFontMetrics(self._font)
         lines = self._text.split("\n") if self._text else [""]
-        max_w = max((fm.width(line) for line in lines), default=0)
+        max_w = max((fm.horizontalAdvance(line) for line in lines), default=0)
         line_h = fm.lineSpacing()  # 含行间距，多行不挤
         w = max_w + self._padding_h * 2
         h = line_h * len(lines) + self._padding_v * 2
@@ -354,21 +354,21 @@ class _HoverTooltipFilter(QObject):
         if obj is not self._parent():
             return False
         t = event.type()
-        if t == event.ToolTip:
+        if t == QEvent.Type.ToolTip:
             return True  # 拦截原生
-        elif t in (event.Enter, event.HoverEnter):
+        elif t in (QEvent.Type.Enter, QEvent.Type.HoverEnter):
             tip = self._parent().toolTip() or ""
             if tip:
                 self._text = tip
                 self._timer.start()
-        elif t in (event.Leave, event.HoverLeave, event.Hide, event.HideToParent):
+        elif t in (QEvent.Type.Leave, QEvent.Type.HoverLeave, QEvent.Type.Hide, QEvent.Type.HideToParent):
             # 🛡️ B2 修复：目标随父容器隐藏时 Qt 发 HideToParent（27）而非 Hide（18）。
             # 团队 header 按钮（关闭团队 close_btn 等）在团队关闭时随 header 容器
             # 隐藏，旧分支只捕 Hide/Leave/HoverLeave → tooltip 不隐藏 → 屏幕残留
             # "飘着的 tooltip"。补上 HideToParent 使容器隐藏即收掉 tooltip。
             self._timer.stop()
             self._hide()
-        elif t in (event.MouseButtonPress, event.MouseButtonDblClick):
+        elif t in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
             # 🛡️ B3 修复：点击即收起 tooltip（与 Qt 原生 QToolTip / qfluentwidgets
             # ToolTipFilter 在 MouseButtonPress 时 hideToolTip() 的行为对齐）。
             # 此前漏捕：点击关闭团队按钮时 tooltip 仍显示，随后团队组
@@ -496,7 +496,7 @@ def batch_install_hover_tooltips(container: QWidget, delay_ms: int = 400):
         container: 父容器
         delay_ms: 悬停延迟
     """
-    from PyQt5.QtWidgets import QAbstractScrollArea, QLineEdit, QTextEdit
+    from PySide6.QtWidgets import QAbstractScrollArea, QLineEdit, QTextEdit
 
     skipped_types = (QAbstractScrollArea, QLineEdit, QTextEdit)
 

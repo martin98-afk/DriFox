@@ -31,11 +31,11 @@ import tracemalloc  # noqa: E402
 def run(rounds: int, chunks: int, render: bool = True) -> dict:
     tmp = bc.setup_isolation("chatpipe")
 
-    from PyQt5.QtCore import Qt
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
 
     # WebEngine 约束：必须在 QApplication 创建前导入（bench_startup 同款）
-    import PyQt5.QtWebEngineWidgets  # noqa: F401
+    import PySide6.QtWebEngineWidgets  # noqa: F401
 
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)

@@ -10,7 +10,7 @@
 from collections import OrderedDict
 from pathlib import Path
 
-from PyQt5.QtGui import QIcon
+from PySide6.QtGui import QIcon
 
 # LRU 缓存（max 256），超限驱逐最久未访问条目，避免插件图标字典无限膨胀。
 _ICON_CACHE: OrderedDict = OrderedDict()

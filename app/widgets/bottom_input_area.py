@@ -10,8 +10,8 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import QMimeData, QRectF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import (
+from PySide6.QtCore import QMimeData, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import (
     QColor,
     QFont,
     QImage,
@@ -25,13 +25,13 @@ from PyQt5.QtGui import (
     QTextCharFormat,
     QTextCursor,
 )
-from PyQt5.QtWidgets import (
+from PySide6.QtGui import QShortcut
+from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
-    QShortcut,
     QWidget,
 )
 from qfluentwidgets import ComboBox, FluentIcon, IconWidget, TextEdit, TransparentToolButton
@@ -184,22 +184,22 @@ _PLACEHOLDER_ROTATE_INTERVAL_MS = 15000
 
 
 class SendableTextEdit(TextEdit):
-    sendMessageRequested = pyqtSignal()
-    stopMessageRequested = pyqtSignal()
-    clearRequested = pyqtSignal()
-    newSessionRequested = pyqtSignal()
-    historyUpRequested = pyqtSignal()
-    historyDownRequested = pyqtSignal()
-    agentChanged = pyqtSignal(str)
-    slashTriggered = pyqtSignal(str)  # 检测到 / 触发，携带查询文本
-    slashDismissed = pyqtSignal()  # / 触发结束
-    slashShowHint = pyqtSignal(str, str)  # cmd_name, selected_display_type
-    atTriggered = pyqtSignal(str)  # 检测到 @ 触发，携带查询文本
-    atDismissed = pyqtSignal()  # @ 触发结束
-    files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
-    enteringHistoryMode = pyqtSignal()  # 即将进入历史浏览模式（main_widget 需保存当前附件）
-    historyAttachmentsRestored = pyqtSignal(list)  # 恢复附件路径列表
-    historyModeExited = pyqtSignal()  # 退出历史浏览模式（main_widget 从备份恢复附件）
+    sendMessageRequested = Signal()
+    stopMessageRequested = Signal()
+    clearRequested = Signal()
+    newSessionRequested = Signal()
+    historyUpRequested = Signal()
+    historyDownRequested = Signal()
+    agentChanged = Signal(str)
+    slashTriggered = Signal(str)  # 检测到 / 触发，携带查询文本
+    slashDismissed = Signal()  # / 触发结束
+    slashShowHint = Signal(str, str)  # cmd_name, selected_display_type
+    atTriggered = Signal(str)  # 检测到 @ 触发，携带查询文本
+    atDismissed = Signal()  # @ 触发结束
+    files_dropped = Signal(list)  # list[str] 拖入/粘贴的文件路径
+    enteringHistoryMode = Signal()  # 即将进入历史浏览模式（main_widget 需保存当前附件）
+    historyAttachmentsRestored = Signal(list)  # 恢复附件路径列表
+    historyModeExited = Signal()  # 退出历史浏览模式（main_widget 从备份恢复附件）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1489,7 +1489,7 @@ class SendableTextEdit(TextEdit):
 
         self._waiting_image_saves = True
         try:
-            from PyQt5.QtCore import QEventLoop, QTimer as _QTimer
+            from PySide6.QtCore import QEventLoop, QTimer as _QTimer
 
             deadline = time.monotonic() + timeout
             while True:
@@ -1502,7 +1502,7 @@ class SendableTextEdit(TextEdit):
                     return False
                 loop = QEventLoop()
                 _QTimer.singleShot(int(min(0.05, remaining) * 1000), loop.quit)
-                loop.exec_()
+                loop.exec()
         finally:
             self._waiting_image_saves = False
 
@@ -1743,7 +1743,7 @@ class SendableTextEdit(TextEdit):
 
     def contextMenuEvent(self, event):
         """Phase E：接管输入框右键菜单——保留基础 cut/copy/paste + 追加插件项"""
-        from PyQt5.QtWidgets import QMenu
+        from PySide6.QtWidgets import QMenu
 
         menu = QMenu(self)
         cut_act = menu.addAction("剪切")
@@ -1760,7 +1760,7 @@ class SendableTextEdit(TextEdit):
                 builder(menu)
             except Exception:
                 pass
-        menu.exec_(event.globalPos())
+        menu.exec(event.globalPos())
 
 
 class InputGlowUnderlay(QWidget):
@@ -1939,7 +1939,7 @@ class PlaceholderHighlighter(QSyntaxHighlighter):
 class AttachmentChip(QFrame):
     """附件标签块：显示文件类型图标 + 文件名 + 删除按钮，响应式圆角矩形"""
 
-    removed = pyqtSignal(str)  # file path
+    removed = Signal(str)  # file path
 
     # 文件扩展名 → FluentIcon 映射
     _FILE_ICON_MAP: dict[tuple[str, ...], FluentIcon] = {

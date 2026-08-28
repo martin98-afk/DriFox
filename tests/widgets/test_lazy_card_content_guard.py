@@ -20,14 +20,14 @@ from types import MethodType
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt5.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget
 
 
 def _qapp():
     """确保 QApplication 可用，返回实例"""
     import sys
 
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     return QApplication.instance() or QApplication(sys.argv)
 

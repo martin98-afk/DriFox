@@ -1,5 +1,5 @@
-from PyQt5.QtCore import QStringListModel, Qt
-from PyQt5.QtWidgets import QCompleter
+from PySide6.QtCore import QStringListModel, Qt
+from PySide6.QtWidgets import QCompleter
 from qfluentwidgets import EditableComboBox
 
 from app.utils.design_tokens import Colors, font_size_css

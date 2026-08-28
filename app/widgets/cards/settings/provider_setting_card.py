@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 import requests
 from loguru import logger
-from PyQt5.QtCore import QRect, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon, QPainter
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QRect, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -211,9 +211,9 @@ class ProviderIconWidget(IconWidget):
 
 
 class ProviderItem(QWidget):
-    removed = pyqtSignal(QWidget)
-    selected = pyqtSignal(QWidget)
-    editRequested = pyqtSignal(str, dict)  # config_id, provider_info
+    removed = Signal(QWidget)
+    selected = Signal(QWidget)
+    editRequested = Signal(str, dict)  # config_id, provider_info
 
     def __init__(self, config_id: str, provider_info: dict, is_default: bool, parent=None):
         super().__init__(parent=parent)
@@ -350,11 +350,11 @@ class ProviderItem(QWidget):
 
 
 class ProviderListSettingCard(ExpandSettingCard):
-    providerChanged = pyqtSignal(dict)
-    defaultProviderChanged = pyqtSignal(str)
+    providerChanged = Signal(dict)
+    defaultProviderChanged = Signal(str)
     # 新增信号：用于触发卡片显示
-    showAddProviderCard = pyqtSignal()  # 显示添加服务商卡片
-    showEditProviderCard = pyqtSignal(str, dict)  # config_id, provider_info
+    showAddProviderCard = Signal()  # 显示添加服务商卡片
+    showEditProviderCard = Signal(str, dict)  # config_id, provider_info
 
     # 重入屏障：防止 qconfig.set() → valueChanged → _refresh_items 重入同一对象
     _is_deleting = False
@@ -494,7 +494,7 @@ class ProviderListSettingCard(ExpandSettingCard):
             parent=self.window(),
         )
         dialog.confirmed.connect(_on_confirm)
-        dialog.exec_()
+        dialog.exec()
         if _confirmed[0]:
             self._remove_provider(item)
 

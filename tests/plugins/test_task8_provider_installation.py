@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from app.core.plugin_host_service import PluginHostService
-from PyQt5.QtCore import QObject
+from PySide6.QtCore import QObject
 
 
 def _make_host():

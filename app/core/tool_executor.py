@@ -116,9 +116,9 @@ class ToolExecutor:
         # 检查 QObject 是否已被删除
         try:
             # 如果对象已删除，尝试访问 sip 会有异常
-            from PyQt5 import sip
+            import shiboken6 as sip
 
-            if sip.isdeleted(self._builtin_tools):
+            if not sip.isValid(self._builtin_tools):
                 return False
         except Exception:
             pass

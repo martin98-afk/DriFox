@@ -6,8 +6,8 @@
 from typing import Optional
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QSharedMemory, pyqtSignal
-from PyQt5.QtNetwork import QLocalServer, QLocalSocket
+from PySide6.QtCore import QObject, QSharedMemory, Signal
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
 class SingleInstanceGuard(QObject):
@@ -22,7 +22,7 @@ class SingleInstanceGuard(QObject):
     注意：必须在 QApplication 创建之后使用（依赖 QtNetwork）
     """
 
-    show_requested = pyqtSignal()
+    show_requested = Signal()
 
     def __init__(self, app_name: str = "Drifox"):
         super().__init__(parent=None)

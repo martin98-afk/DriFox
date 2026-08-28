@@ -6,7 +6,7 @@ primary.isVisible() 恒为 False（祖先链遮蔽），_sync 永远走收起分
 导致左右侧 UI 插件浮动卡片无法显示。
 """
 
-from PyQt5.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 import pytest
 

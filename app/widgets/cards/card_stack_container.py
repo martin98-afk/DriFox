@@ -8,7 +8,7 @@
 
 from typing import Dict, Optional
 
-from PyQt5.QtWidgets import QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QStackedWidget, QVBoxLayout, QWidget
 from qfluentwidgets import Pivot
 
 from app.widgets.cards.card_manager import CardManager, ContainerType

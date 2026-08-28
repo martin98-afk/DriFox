@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-DriFox 性能基线扩展脚本（PyQt5 GUI）— 补充 baseline.py 未覆盖的维度
+DriFox 性能基线扩展脚本（PySide6 GUI）— 补充 baseline.py 未覆盖的维度
 
 覆盖 leader 子任务 #3 重点指标缺口：
   A) 1000 项 QListWidget 滚动平均帧率（交互态，列表已加载、事件循环空闲后驱动）
@@ -43,8 +43,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from PyQt5.QtCore import QTimer, Qt, QMetaObject, QElapsedTimer
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QListWidget, QListWidgetItem,
+from PySide6.QtCore import QTimer, Qt, QMetaObject, QElapsedTimer
+from PySide6.QtWidgets import (QApplication, QMainWindow, QListWidget, QListWidgetItem,
                              QStackedWidget, QLabel)
 
 SELF = os.path.abspath(__file__)
@@ -66,7 +66,7 @@ def _pct(sorted_vals, p):
 
 
 def _meta(platform):
-    import PyQt5.QtCore as QtCore
+    import PySide6.QtCore as QtCore
     from datetime import datetime, timezone
     return {
         "tool": "DriFox baseline_extra.py",

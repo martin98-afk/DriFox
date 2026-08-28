@@ -8,8 +8,8 @@
 
 from typing import Dict, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -42,8 +42,8 @@ GLOBAL_REPLACE_TITLES = {
 class ReplaceTabButton(QWidget):
     """单个替换内容 tab：标题 + × 关闭按钮"""
 
-    clicked = pyqtSignal(str)  # card_id
-    closeClicked = pyqtSignal(str)  # card_id
+    clicked = Signal(str)  # card_id
+    closeClicked = Signal(str)  # card_id
 
     def __init__(self, card_id: str, title: str, parent: Optional[QWidget] = None, is_conversation: bool = False):
         super().__init__(parent)
@@ -116,8 +116,8 @@ class ReplaceTabButton(QWidget):
 class ReplaceTabBar(QWidget):
     """替换内容顶部居中切换栏"""
 
-    tabClicked = pyqtSignal(str)  # card_id
-    tabCloseClicked = pyqtSignal(str)  # card_id
+    tabClicked = Signal(str)  # card_id
+    tabCloseClicked = Signal(str)  # card_id
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)

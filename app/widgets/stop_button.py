@@ -4,8 +4,8 @@
 import math
 from typing import Optional
 
-from PyQt5.QtCore import QPointF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import (
+from PySide6.QtCore import QPointF, Qt, QTimer, Signal
+from PySide6.QtGui import (
     QColor,
     QIcon,
     QLinearGradient,
@@ -14,7 +14,7 @@ from PyQt5.QtGui import (
     QPainterPath,
     QRadialGradient,
 )
-from PyQt5.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget
 from qfluentwidgets import FluentIcon
 
 
@@ -28,7 +28,7 @@ class SendStopButton(QWidget):
     - 停止模式 (MODE_STOP)：金色渐变圆底 + 缩放呼吸方块
     """
 
-    clicked = pyqtSignal()
+    clicked = Signal()
 
     MODE_SEND = 0
     MODE_STOP = 1

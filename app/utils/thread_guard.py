@@ -25,7 +25,7 @@ import threading as _threading
 import time as _time
 from typing import Set
 
-from PyQt5.QtCore import QObject, QThread
+from PySide6.QtCore import QObject, QThread
 
 # ── 全局隐藏 QObject ──────────────────────────────────
 # 所有 QThread 的 parent 被重定向到此对象，生命周期 = 应用进程。

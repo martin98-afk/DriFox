@@ -33,8 +33,8 @@ from openai import (
     InternalServerError,
     RateLimitError,
 )
-from PyQt5.QtCore import QBuffer, QIODevice, QThread, QByteArray, pyqtSignal
-from PyQt5.QtGui import QImage
+from PySide6.QtCore import QBuffer, QIODevice, QThread, QByteArray, Signal
+from PySide6.QtGui import QImage
 
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
@@ -84,7 +84,7 @@ def _check_team_member(backend) -> bool:
 def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
     """压缩 data URI 图片，确保 base64 数据不超过 max_bytes。
 
-    使用 PyQt5 QImage（Python/PyInstaller 均可用）加载并等比缩小，
+    使用 PySide6 QImage（Python/PyInstaller 均可用）加载并等比缩小，
     避免依赖 PIL（PyInstaller 打包时已被移除）。
 
     Args:
@@ -160,21 +160,21 @@ def compress_data_uri(data_uri: str, max_bytes: int = 5 * 1024 * 1024) -> str:
 
 
 class OpenAIChatWorker(QThread):
-    content_received = pyqtSignal(str)
-    reasoning_content_received = pyqtSignal(str)  # DeepSeek thinking mode
-    thinking_started = pyqtSignal()  # 新一轮思考开始（多轮工具迭代时每轮触发）
-    error_occurred = pyqtSignal(str)
-    finished_with_content = pyqtSignal(str)
-    finished_with_messages = pyqtSignal(list)
-    compaction_status_changed = pyqtSignal(dict)
-    tool_call_started = pyqtSignal(str, str, dict, str)
-    tool_args_updated = pyqtSignal(str, str, dict)  # 工具参数流式更新 (tool_call_id, tool_name, partial_args)
-    tool_result_received = pyqtSignal(str, str, dict, object)
-    question_asked = pyqtSignal(str, list, object)  # id, questions, extra
-    permission_approval_requested = pyqtSignal(str, str, dict)
-    retry_status = pyqtSignal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
-    retry_resolved = pyqtSignal()  # 重试成功，恢复正常状态
-    context_updated = pyqtSignal(int, int, bool)  # token_count, limit, from_api，每轮 API 调用后实时更新
+    content_received = Signal(str)
+    reasoning_content_received = Signal(str)  # DeepSeek thinking mode
+    thinking_started = Signal()  # 新一轮思考开始（多轮工具迭代时每轮触发）
+    error_occurred = Signal(str)
+    finished_with_content = Signal(str)
+    finished_with_messages = Signal(list)
+    compaction_status_changed = Signal(dict)
+    tool_call_started = Signal(str, str, dict, str)
+    tool_args_updated = Signal(str, str, dict)  # 工具参数流式更新 (tool_call_id, tool_name, partial_args)
+    tool_result_received = Signal(str, str, dict, object)
+    question_asked = Signal(str, list, object)  # id, questions, extra
+    permission_approval_requested = Signal(str, str, dict)
+    retry_status = Signal(str, int, int, float)  # error_type, attempt, max_retries, wait_time
+    retry_resolved = Signal()  # 重试成功，恢复正常状态
+    context_updated = Signal(int, int, bool)  # token_count, limit, from_api，每轮 API 调用后实时更新
     _DEFERRED_PREVIEW_TOOLS = {"question", "subagent_para", "todowrite", "todoread"}
 
     # ========== 客户端主动循环检测（防止触发 Qwen 服务端 Repetitive tool calls 拒绝）==========
@@ -1035,8 +1035,8 @@ class OpenAIChatWorker(QThread):
                 self._emit_via_event_bus(event, *args)
 
             # 向后兼容：仍然发射 PyQt Signal（UI 层依赖）
-            # 注意：从 ThreadPoolExecutor 线程访问 pyqtSignal 时，
-            # 某些 PyQt5 版本可能返回 None，所以需要保护性发射。
+            # 注意：从 ThreadPoolExecutor 线程访问 Signal 时，
+            # 某些 PySide6 版本可能返回 None，所以需要保护性发射。
             if signal is not None:
                 try:
                     signal.emit(*args)

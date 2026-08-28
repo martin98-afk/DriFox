@@ -20,7 +20,7 @@ import sys
 from typing import Optional
 
 from loguru import logger
-from PyQt5.QtCore import QEventLoop
+from PySide6.QtCore import QEventLoop
 
 # CLI 独立版本号（与主应用版本解耦，可按需独立递增）
 CLI_VERSION = "0.2.12"
@@ -255,7 +255,7 @@ def _show_version():
 
 def _run_chat(args):
     """启动聊天模式"""
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     # 创建无头 QApplication（不创建任何窗口）
     app = QApplication.instance()
@@ -475,7 +475,7 @@ def _run_oneshot(backend, args):
         sys.exit(1)
 
     # 等待完成
-    event_loop.exec_()
+    event_loop.exec()
 
 
 def _run_repl(backend, args):
@@ -591,12 +591,12 @@ def _run_doctor():
     print(f"平台:     {platform.system()} {platform.release()}")
     print(f"架构:     {platform.machine()}")
 
-    # 检查 PyQt5
+    # 检查 PySide6
     try:
-        from PyQt5.QtCore import QT_VERSION_STR
-        print(f"PyQt5:    {QT_VERSION_STR} ✓")
+        from PySide6.QtCore import QT_VERSION_STR
+        print(f"PySide6:    {QT_VERSION_STR} ✓")
     except ImportError:
-        print("PyQt5:    ✗ 未安装")
+        print("PySide6:    ✗ 未安装")
 
     # 检查关键依赖
     deps = [

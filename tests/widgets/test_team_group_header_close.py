@@ -110,7 +110,7 @@ def test_close_button_hidden_by_default(qapp):
 def test_close_button_visible_on_header_hover(qapp):
     """鼠标进入 header 区域 → 关闭按钮 setVisible(True)；leave → setVisible(False)
 
-    注：PyQt5 中 isVisible() 受祖先链可见性影响，测试用 mock 跟踪 setVisible 调用。
+    注：PySide6 中 isVisible() 受祖先链可见性影响，测试用 mock 跟踪 setVisible 调用。
     """
     from app.widgets.tab_panel import TabPanel
 
@@ -151,7 +151,7 @@ def test_team_group_has_header_and_inner_layout(qapp):
         assert hasattr(grp, "_team_close_btn")
         assert hasattr(grp, "_team_inner_layout")
         # 内部布局是嵌套结构（外层 QVBoxLayout 包含 header + inner）
-        from PyQt5.QtWidgets import QVBoxLayout
+        from PySide6.QtWidgets import QVBoxLayout
 
         assert isinstance(grp.layout(), QVBoxLayout)
         # header 是布局第一项，inner 是第二项
@@ -163,7 +163,7 @@ def test_team_group_has_header_and_inner_layout(qapp):
 
 def test_team_group_close_btn_no_mouse_propagation(qapp):
     """关闭按钮设了 WA_NoMousePropagation，事件不向下层 TabItem 冒泡"""
-    from PyQt5.QtCore import Qt
+    from PySide6.QtCore import Qt
 
     from app.widgets.tab_panel import TabPanel
 
@@ -197,7 +197,7 @@ def _build_tm_instance(windows):
     """构造一个跳过 __init__ 的 TabManagerWindow 实例，便于独立测试
 
     __init__ 重依赖 TrayManager/TrayManager 等；用 __new__ 绕过 + 手动设属性。
-    tabCountChanged 用 MagicMock 替换（避免 pyqtSignal emit 检查 super().__init__）。
+    tabCountChanged 用 MagicMock 替换（避免 Signal emit 检查 super().__init__）。
     """
     from app.widgets.tab_manager_window import TabManagerWindow
 
@@ -318,7 +318,7 @@ def test_on_team_close_handles_index_drift_in_reverse(qapp):
 
 def test_tabpanel_has_team_close_signal(qapp):
     """TabPanel 暴露 teamCloseRequested(str) 信号（验证 Signal 而非具体行为）"""
-    from PyQt5.QtCore import pyqtSignal
+    from PySide6.QtCore import Signal
 
     from app.widgets.tab_panel import TabPanel
 
@@ -326,6 +326,6 @@ def test_tabpanel_has_team_close_signal(qapp):
     try:
         assert hasattr(panel, "teamCloseRequested")
         sig = getattr(TabPanel, "teamCloseRequested", None)
-        assert isinstance(sig, pyqtSignal)
+        assert isinstance(sig, Signal)
     finally:
         panel.deleteLater()

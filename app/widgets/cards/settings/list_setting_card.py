@@ -2,9 +2,9 @@
 from pathlib import Path
 from typing import List
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,
@@ -37,7 +37,7 @@ class ListValidator(ConfigValidator):
 class SkillItem(CardWidget):
     """Skill item with enable switch — 紧凑卡片风格，参考 MCPServerRow"""
 
-    enabled_changed = pyqtSignal(str, bool)
+    enabled_changed = Signal(str, bool)
 
     def __init__(self, name: str, description: str, is_enabled: bool, parent=None):
         super().__init__(parent=parent)
@@ -85,7 +85,7 @@ class SkillItem(CardWidget):
 class SkillListSettingCard(ExpandSettingCard):
     """Skill list setting card with enable/disable switches"""
 
-    skillsChanged = pyqtSignal(list)
+    skillsChanged = Signal(list)
 
     def __init__(
         self,

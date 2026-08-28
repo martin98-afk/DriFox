@@ -18,8 +18,8 @@ Exp2（EXP_IDX=2）：工具框展开 —— contentsSize 大，wheel 进入页�
 import sys
 import time
 
-from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtWidgets import QApplication
 
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
@@ -279,7 +279,7 @@ def main():
 
     viewer.loadFinished.connect(lambda ok: (ok and QTimer.singleShot(800, on_ready)))
     QTimer.singleShot(30000, app.quit)  # 兜底超时
-    app.exec_()
+    app.exec()
     print("done")
 
 

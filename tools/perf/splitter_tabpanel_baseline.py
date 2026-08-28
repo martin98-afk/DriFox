@@ -43,8 +43,8 @@ if os.environ.get("QT_QPA_PLATFORM") is None:
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
 
-from PyQt5.QtWidgets import (QApplication, QWidget, QSplitter, QVBoxLayout)
-from PyQt5.QtCore import Qt, QTimer, QElapsedTimer, QEvent
+from PySide6.QtWidgets import (QApplication, QWidget, QSplitter, QVBoxLayout)
+from PySide6.QtCore import Qt, QTimer, QElapsedTimer, QEvent
 
 import app.utils.icons_rc  # noqa: F401
 import app.utils.icons_light_rc  # noqa: F401
@@ -56,7 +56,7 @@ _DEFAULT_PANEL_WIDTH = 187
 _EXPANDED_MIN_FRAME_WIDTH = 200
 COLLAPSE_BUDGET_MS = 16.7  # 60FPS 单帧预算
 
-# PyQt5 下 QEvent.type() 返回 int，无 .name；手动映射关键事件类型名
+# PySide6 下 QEvent.type() 返回 int，无 .name；手动映射关键事件类型名
 _QEVENT_NAMES = {
     1: "Timer", 12: "Paint", 13: "Move", 14: "Resize", 17: "Show",
     26: "WindowStateChange", 43: "MetaCall", 67: "PolishRequest",
@@ -283,7 +283,7 @@ def main():
             "mode": args.mode,
             "platform": app.platformName(),
             "python": sys.version.split()[0],
-            "qt": __import__("PyQt5.QtCore", fromlist=["QT_VERSION_STR"]).QT_VERSION_STR,
+            "qt": __import__("PySide6.QtCore", fromlist=["QT_VERSION_STR"]).QT_VERSION_STR,
             "tabs": args.tabs,
             "runs": args.runs,
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

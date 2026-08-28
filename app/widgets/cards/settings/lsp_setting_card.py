@@ -10,8 +10,8 @@ from __future__ import annotations
 from typing import Dict
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QWidget,
@@ -38,7 +38,7 @@ from app.widgets.elided_label import _ElidedLabel
 class LspServerRow(CardWidget):
     """LSP 服务器单行展示：状态点 + 名称 + 扩展名列表 + [安装按钮]"""
 
-    installRequested = pyqtSignal(str, str)  # (server_name, install_hint)
+    installRequested = Signal(str, str)  # (server_name, install_hint)
 
     def __init__(self, name: str, extensions: list, is_running: bool, install_hint: str = "", parent=None):
         super().__init__(parent)
@@ -246,7 +246,7 @@ class LspListSettingCard(ExpandSettingCard):
                 self._rows[name] = row
                 self.viewLayout.addWidget(row)
 
-        from PyQt5.QtCore import QCoreApplication
+        from PySide6.QtCore import QCoreApplication
 
         QCoreApplication.processEvents()
         self.viewLayout.activate()
@@ -349,7 +349,7 @@ class LspListSettingCard(ExpandSettingCard):
                 _cmd = f'"{_python}" -m pip {pkg}'
 
         # 确认对话框（使用 qfluentwidgets.Dialog，自动应用 Fluent 主题色，
-        # 避免 PyQt5 原生 QMessageBox 在深色主题下显示为系统默认全黑窗口）
+        # 避免 PySide6 原生 QMessageBox 在深色主题下显示为系统默认全黑窗口）
         w = Dialog(
             f"安装 LSP 服务器 — {server_name}",
             f"即将在终端中执行以下安装命令：\n\n    {_cmd}\n\n安装完成后请点击「刷新」按钮重新连接。\n\n是否继续？",
@@ -359,7 +359,7 @@ class LspListSettingCard(ExpandSettingCard):
         w.cancelButton.setText("取消")
         w.setContentCopyable(True)  # 安装命令可选中复制
 
-        if not w.exec_():
+        if not w.exec():
             return
 
         import os

@@ -58,10 +58,10 @@ def _rss_mb() -> float:
 def _obj_counts() -> Dict[str, int]:
     counts: Dict[str, int] = {}
     keys = (
-        "PyQt5.QtCore.QObject",
-        "PyQt5.QtCore.QTimer",
-        "PyQt5.QtCore.QThread",
-        "PyQt5.QtCore.QSignalMapper",
+        "PySide6.QtCore.QObject",
+        "PySide6.QtCore.QTimer",
+        "PySide6.QtCore.QThread",
+        "PySide6.QtCore.QSignalMapper",
     )
     for obj in gc.get_objects():
         try:
@@ -71,7 +71,7 @@ def _obj_counts() -> Dict[str, int]:
         if cn in keys:
             counts[cn] = counts.get(cn, 0) + 1
     try:
-        from PyQt5.QtCore import QObject  # type: ignore
+        from PySide6.QtCore import QObject  # type: ignore
         counts["QObject_total"] = sum(1 for o in gc.get_objects() if isinstance(o, QObject))
     except Exception:
         pass
@@ -87,10 +87,10 @@ def _snap(label: str) -> Dict[str, Any]:
 
 
 def _pump(app, ms: int = 80) -> None:
-    from PyQt5.QtCore import QEventLoop, QTimer  # type: ignore
+    from PySide6.QtCore import QEventLoop, QTimer  # type: ignore
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec_()
+    loop.exec()
     app.processEvents()
 
 
@@ -99,12 +99,12 @@ def _pump(app, ms: int = 80) -> None:
 
 def stage_S0_baseline(app, rounds: int) -> List[Dict[str, Any]]:
     """S0：创建 source + sink 但不 connect。"""
-    from PyQt5.QtCore import QObject, pyqtSignal  # type: ignore
+    from PySide6.QtCore import QObject, Signal  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("S0:r0:init"))
 
     class Source(QObject):
-        tick = pyqtSignal(int)
+        tick = Signal(int)
 
     class Sink(QObject):
         def __init__(self):
@@ -132,12 +132,12 @@ def stage_S0_baseline(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_S1_strong_ref(app, rounds: int) -> List[Dict[str, Any]]:
     """S1：source.connect(sink.on_tick) — 默认强引用，模拟 T1 signal 场景。"""
-    from PyQt5.QtCore import QObject, pyqtSignal  # type: ignore
+    from PySide6.QtCore import QObject, Signal  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("S1:r0:init"))
 
     class Source(QObject):
-        tick = pyqtSignal(int)
+        tick = Signal(int)
 
     class Sink(QObject):
         def __init__(self):
@@ -171,12 +171,12 @@ def stage_S1_strong_ref(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_S2_explicit_disconnect(app, rounds: int) -> List[Dict[str, Any]]:
     """S2：S1 + 每轮显式 disconnect + del sink。验证 disconnect 修复。"""
-    from PyQt5.QtCore import QObject, pyqtSignal  # type: ignore
+    from PySide6.QtCore import QObject, Signal  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("S2:r0:init"))
 
     class Source(QObject):
-        tick = pyqtSignal(int)
+        tick = Signal(int)
 
     class Sink(QObject):
         def __init__(self):
@@ -215,12 +215,12 @@ def stage_S2_explicit_disconnect(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_S3_lambda(app, rounds: int) -> List[Dict[str, Any]]:
     """S3：source.connect(lambda: ...) — lambda 闭包持有什么？"""
-    from PyQt5.QtCore import QObject, pyqtSignal  # type: ignore
+    from PySide6.QtCore import QObject, Signal  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("S3:r0:init"))
 
     class Source(QObject):
-        tick = pyqtSignal(int)
+        tick = Signal(int)
 
     class Sink(QObject):
         def __init__(self):
@@ -252,12 +252,12 @@ def stage_S3_lambda(app, rounds: int) -> List[Dict[str, Any]]:
 def stage_S4_partial(app, rounds: int) -> List[Dict[str, Any]]:
     """S4：source.connect(partial(func, sink)) — partial 持 sink。"""
     import functools
-    from PyQt5.QtCore import QObject, pyqtSignal  # type: ignore
+    from PySide6.QtCore import QObject, Signal  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("S4:r0:init"))
 
     class Source(QObject):
-        tick = pyqtSignal(int)
+        tick = Signal(int)
 
     class Sink(QObject):
         def __init__(self):
@@ -291,12 +291,12 @@ def stage_S4_partial(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_S5_unique_connection(app, rounds: int) -> List[Dict[str, Any]]:
     """S5：Qt.UniqueConnection — 避免重复连接，但不解决强引用。"""
-    from PyQt5.QtCore import QObject, pyqtSignal, Qt  # type: ignore
+    from PySide6.QtCore import QObject, Signal, Qt  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("S5:r0:init"))
 
     class Source(QObject):
-        tick = pyqtSignal(int)
+        tick = Signal(int)
 
     class Sink(QObject):
         def __init__(self):
@@ -330,12 +330,12 @@ def stage_S5_unique_connection(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_S6_cross_thread(app, rounds: int) -> List[Dict[str, Any]]:
     """S6：跨线程 signal — QThread receiver + QueuedConnection。"""
-    from PyQt5.QtCore import QObject, QThread, pyqtSignal  # type: ignore
+    from PySide6.QtCore import QObject, QThread, Signal  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("S6:r0:init"))
 
     class Worker(QObject):
-        received = pyqtSignal(int)
+        received = Signal(int)
 
         def __init__(self):
             super().__init__()
@@ -396,7 +396,7 @@ def stage_T0_baseline(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_T1_stop_only(app, rounds: int) -> List[Dict[str, Any]]:
     """T1：QTimer.start + 只 stop()，不 deleteLater。"""
-    from PyQt5.QtCore import QTimer  # type: ignore
+    from PySide6.QtCore import QTimer  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("T1:r0:init"))
 
@@ -427,7 +427,7 @@ def stage_T1_stop_only(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_T2_deletelater_only(app, rounds: int) -> List[Dict[str, Any]]:
     """T2：QTimer.start + 只 deleteLater()，不 stop()。"""
-    from PyQt5.QtCore import QTimer  # type: ignore
+    from PySide6.QtCore import QTimer  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("T2:r0:init"))
 
@@ -459,7 +459,7 @@ def stage_T2_deletelater_only(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_T3_stop_then_delete(app, rounds: int) -> List[Dict[str, Any]]:
     """T3：QTimer.start + stop() + deleteLater() — 完整清理。"""
-    from PyQt5.QtCore import QTimer  # type: ignore
+    from PySide6.QtCore import QTimer  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("T3:r0:init"))
 
@@ -500,7 +500,7 @@ def stage_T4_singleshot_static(app, rounds: int) -> List[Dict[str, Any]]:
         pass
 
     for i in range(1, rounds + 1):
-        from PyQt5.QtCore import QTimer  # type: ignore
+        from PySide6.QtCore import QTimer  # type: ignore
         QTimer.singleShot(60_000, _fire)
         if i % 100 == 0:
             gc.collect()
@@ -514,7 +514,7 @@ def stage_T4_singleshot_static(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_T5_with_parent(app, rounds: int) -> List[Dict[str, Any]]:
     """T5：QTimer(parent) 带 parent — 父子树清理路径。"""
-    from PyQt5.QtCore import QObject, QTimer  # type: ignore
+    from PySide6.QtCore import QObject, QTimer  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("T5:r0:init"))
 
@@ -545,7 +545,7 @@ def stage_T5_with_parent(app, rounds: int) -> List[Dict[str, Any]]:
 
 def stage_T6_half_stop(app, rounds: int) -> List[Dict[str, Any]]:
     """T6：每 50 轮半数 stop+deleteLater，半数只 keep — 模拟生产"半数清理半数泄漏"。"""
-    from PyQt5.QtCore import QTimer  # type: ignore
+    from PySide6.QtCore import QTimer  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap("T6:r0:init"))
 
@@ -612,13 +612,13 @@ def _diff_obj(a: Dict[str, int], b: Dict[str, int]) -> Dict[str, int]:
 def _fmt(label: str, snap: Dict[str, Any]) -> str:
     objs = snap.get("obj", {})
     qobj = objs.get("QObject_total", 0)
-    qtimer = objs.get("PyQt5.QtCore.QTimer", 0)
+    qtimer = objs.get("PySide6.QtCore.QTimer", 0)
     return f"{label:<32} RSS={snap['rss_mb']:>8.2f}MB  QObj={qobj:>4}  QTimer={qtimer:>3}"
 
 
 def run(args: argparse.Namespace) -> int:
-    import PyQt5.QtWebEngineWidgets  # noqa: F401
-    from PyQt5.QtWidgets import QApplication  # type: ignore
+    import PySide6.QtWebEngineWidgets  # noqa: F401
+    from PySide6.QtWidgets import QApplication  # type: ignore
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

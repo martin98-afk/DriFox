@@ -22,9 +22,9 @@ import re
 import traceback
 from typing import Any, Callable, Optional
 
-from PyQt5.QtCore import QEvent, QObject, QSize, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEvent, QObject, QSize, QThread, Qt, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -114,8 +114,8 @@ def _adjust_color(hex_color: str, amount: int) -> str:
 class _Worker(QObject):
     """后台执行阻塞操作，通过信号返回结果"""
 
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, fn, *args, **kwargs):
         super().__init__()
@@ -142,7 +142,7 @@ class CardTemplate(QWidget):
     继承此类并实现 _load_data() + _render_data() 即可。
     """
 
-    closed = pyqtSignal()
+    closed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -177,7 +177,7 @@ class CardTemplate(QWidget):
         if self._context_provider is None or self._header_icon is None:
             return
         try:
-            from PyQt5.QtGui import QIcon
+            from PySide6.QtGui import QIcon
 
             ctx = self._context_provider()
             icon_info = ctx.get("plugin_icon", {})

@@ -36,13 +36,13 @@ from html import escape, unescape
 from typing import Any, Dict, List, Optional
 
 import orjson as json
-import sip
+import shiboken6
 from loguru import logger
 from markdown import Markdown
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
-from PyQt5.QtCore import (
+from PySide6.QtCore import (
     QEasingCurve,
     QObject,
     QPointF,
@@ -52,9 +52,9 @@ from PyQt5.QtCore import (
     QTimerEvent,
     QUrl,
     QVariantAnimation,
-    pyqtSignal,
+    Signal,
 )
-from PyQt5.QtGui import (
+from PySide6.QtGui import (
     QBrush,
     QColor,
     QFontMetrics,
@@ -65,9 +65,10 @@ from PyQt5.QtGui import (
     QPixmap,
     QWheelEvent,
 )
-from PyQt5.QtSvg import QSvgRenderer
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView
-from PyQt5.QtWidgets import (
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+from PySide6.QtWebEngineWidgets import QWebEngineView
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -2740,13 +2741,13 @@ def _get_mermaid_vendor_urls() -> tuple:
 
 # ======== WebViewer ========
 class ConsoleMonitorPage(QWebEnginePage):
-    codeActionRequested = pyqtSignal(str, str)
-    contextActionRequested = pyqtSignal(str, str)
-    heightReported = pyqtSignal(int)
-    contentReady = pyqtSignal()
-    toolDiffRequested = pyqtSignal(str)  # tool_call_id
-    subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
-    saveFileRequested = pyqtSignal(str, str)  # code, lang
+    codeActionRequested = Signal(str, str)
+    contextActionRequested = Signal(str, str)
+    heightReported = Signal(int)
+    contentReady = Signal()
+    toolDiffRequested = Signal(str)  # tool_call_id
+    subAgentLogRequested = Signal(str)  # task_ids (comma-separated)
+    saveFileRequested = Signal(str, str)  # code, lang
 
     def __init__(self, profile=None, parent=None):
         """创建一个 ConsoleMonitorPage。
@@ -2765,9 +2766,8 @@ class ConsoleMonitorPage(QWebEnginePage):
 
         用 PyQt 原生 navigation 钩子（不写 JS 拦截），符合"浏览器自带"语义。
         """
-        from PyQt5.QtGui import QDesktopServices
-        from PyQt5.QtWebEngineWidgets import QWebEnginePage
-
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWebEngineCore import QWebEnginePage
         if url.scheme() == "file" and nav_type == QWebEnginePage.NavigationTypeLinkClicked:
             QDesktopServices.openUrl(url)
             return False
@@ -2796,8 +2796,8 @@ class ConsoleMonitorPage(QWebEnginePage):
             elif "open_url:" in msg:
                 try:
                     url_str = msg.split("open_url:", 1)[1]
-                    from PyQt5.QtCore import QUrl
-                    from PyQt5.QtGui import QDesktopServices
+                    from PySide6.QtCore import QUrl
+                    from PySide6.QtGui import QDesktopServices
 
                     QDesktopServices.openUrl(QUrl(url_str))
                 except Exception:
@@ -2925,7 +2925,7 @@ class _DialogEventFilter(QObject):
         if self._attached:
             return
         try:
-            from PyQt5.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication
 
             app = QApplication.instance()
             if app is None:
@@ -2941,7 +2941,7 @@ class _DialogEventFilter(QObject):
         if not self._attached:
             return
         try:
-            from PyQt5.QtWidgets import QApplication
+            from PySide6.QtWidgets import QApplication
 
             app = QApplication.instance()
             if app is not None:
@@ -2952,10 +2952,9 @@ class _DialogEventFilter(QObject):
 
     @staticmethod
     def _is_viewer_alive(viewer) -> bool:
-        """判断 viewer 的 C++ 对象是否仍存活（sip 判活，销毁过程中调用安全）"""
+        """判断 viewer 的 C++ 对象是否仍存活（shiboken 判活，销毁过程中调用安全）"""
         try:
-            sip.unwrapinstance(viewer)
-            return True
+            return shiboken6.isValid(viewer)
         except RuntimeError:
             return False
 
@@ -3027,22 +3026,22 @@ _dialog_event_filter = _DialogEventFilter()
 
 
 class CodeWebViewer(QWebEngineView):
-    contentHeightChanged = pyqtSignal(int)
-    codeActionRequested = pyqtSignal(str, str)
-    contextActionRequested = pyqtSignal(str, str)
-    toolDiffRequested = pyqtSignal(str)  # tool_call_id
-    subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
-    saveFileRequested = pyqtSignal(str, str)  # code, lang
+    contentHeightChanged = Signal(int)
+    codeActionRequested = Signal(str, str)
+    contextActionRequested = Signal(str, str)
+    toolDiffRequested = Signal(str)  # tool_call_id
+    subAgentLogRequested = Signal(str)  # task_ids (comma-separated)
+    saveFileRequested = Signal(str, str)  # code, lang
     # WebEngine 上下文丢失信号
-    contextLost = pyqtSignal()
-    contextRestored = pyqtSignal()
-    needRecreate = pyqtSignal()  # 需要完全重建控件（恢复失败时）
+    contextLost = Signal()
+    contextRestored = Signal()
+    needRecreate = Signal()  # 需要完全重建控件（恢复失败时）
 
     # [B3] 线程池渲染完成信号（worker 线程 emit → 主线程槽执行）：
     # 不能从 worker 线程直接调用 QTimer.singleShot(0, ...)（worker 无事件循环，
     # 定时器事件不会投递到主线程）；Qt 信号跨线程 emit 是线程安全的，
     # 自动 QueuedConnection 到主线程执行 _apply_render_result。
-    renderDone = pyqtSignal(int, object)  # (seq, html)
+    renderDone = Signal(int, object)  # (seq, html)
 
     # WebEngine 最大尺寸限制，防止 GPU 内存溢出
     # 降低 MAX_HEIGHT 可大幅减少每个 Chromium 实例的离屏渲染缓冲区
@@ -7132,7 +7131,7 @@ class CodeWebViewer(QWebEngineView):
                 return
             if html is None:
                 return
-            if sip.isdeleted(self) or not self.page():
+            if not shiboken6.isValid(self) or not self.page():
                 return
             self._last_rendered_html = html
             self._height_report_pending = True
@@ -7588,7 +7587,7 @@ class CodeWebViewer(QWebEngineView):
         self._inject_plugin_context_actions(menu, context)
 
         try:
-            menu.exec_(self.mapToGlobal(pos))
+            menu.exec(self.mapToGlobal(pos))
         finally:
             self._current_context_menu = None
 
@@ -7685,8 +7684,8 @@ class CodeWebViewer(QWebEngineView):
             win32clipboard.SetClipboardText(text, win32clipboard.CF_UNICODETEXT)
             win32clipboard.CloseClipboard()
         except Exception:
-            # 兜底：使用 PyQt5 剪贴板
-            from PyQt5.QtWidgets import QApplication
+            # 兜底：使用 PySide6 剪贴板
+            from PySide6.QtWidgets import QApplication
 
             clipboard = QApplication.clipboard()
             clipboard.setText(text)
@@ -7724,7 +7723,7 @@ class CodeWebViewer(QWebEngineView):
         因为 _cleanup_render_cache 会将 _markdown_text 清空。
         get_plain_text() 会通过 _lazy_markdown_cb 或父 MessageCard 自动兜底。
         """
-        from PyQt5.QtWidgets import QFileDialog
+        from PySide6.QtWidgets import QFileDialog
 
         default_name = self._get_default_filename()
         file_path, selected_filter = QFileDialog.getSaveFileName(
@@ -7771,7 +7770,7 @@ class CodeWebViewer(QWebEngineView):
 
     def _run_js_sync(self, js_code: str, timeout_ms: int = 2000) -> str:
         """同步执行 JavaScript 并返回结果"""
-        from PyQt5.QtCore import QEventLoop, QTimer
+        from PySide6.QtCore import QEventLoop, QTimer
 
         page = self.page()
         if not page:
@@ -7787,19 +7786,19 @@ class CodeWebViewer(QWebEngineView):
 
         page.runJavaScript(js_code, callback)
         QTimer.singleShot(timeout_ms, lambda: loop.quit() if loop.isRunning() else None)
-        loop.exec_()
+        loop.exec()
 
         return result[0] or ""
 
     def _get_card_bg_color(self) -> "QColor":
         """沿父链查找 MessageCard，获取卡片背景色（强制实心化）
 
-        PyQt5 的 QColor() 字符串构造不支持 "rgba(r, g, b, a)" 格式
+        PySide6 的 QColor() 字符串构造不支持 "rgba(r, g, b, a)" 格式
         (isValid()=False)，需要手动解析提取 r/g/b 后用 QColor(r, g, b) 构造。
         """
         import re
 
-        from PyQt5.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         parent = self.parent()
         while parent:
@@ -7834,7 +7833,7 @@ class CodeWebViewer(QWebEngineView):
         Returns:
             填充实心卡片背景 + 绘制 source 的合成 pixmap
         """
-        from PyQt5.QtGui import QPainter, QPixmap
+        from PySide6.QtGui import QPainter, QPixmap
 
         if width <= 0 or height <= 0:
             return source
@@ -7860,8 +7859,8 @@ class CodeWebViewer(QWebEngineView):
         """
         import json as json_mod
 
-        from PyQt5.QtCore import QEventLoop, QPoint, QRect, QTimer
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtCore import QEventLoop, QPoint, QRect, QTimer
+        from PySide6.QtWidgets import QApplication
 
         page = self.page()
         view_w = self.width()
@@ -7909,7 +7908,7 @@ class CodeWebViewer(QWebEngineView):
         # ★ 单次 200ms 等待（替代 400ms×2）
         stable_loop = QEventLoop()
         QTimer.singleShot(200, stable_loop.quit)
-        stable_loop.exec_()
+        stable_loop.exec()
 
         # 4. 显式 grab 整个目标区域
         full_pix = self.grab(QRect(QPoint(0, 0), self.size()))
@@ -7943,7 +7942,7 @@ class CodeWebViewer(QWebEngineView):
         把 pixmap 按高度均匀切成 N 段，从左到右水平拼接。
         N 的选择使最终拼接图的宽高比尽量接近 3:2。
         """
-        from PyQt5.QtGui import QPainter, QPixmap
+        from PySide6.QtGui import QPainter, QPixmap
 
         w = pixmap.width()
         h = pixmap.height()
@@ -8168,7 +8167,7 @@ class CodeWebViewer(QWebEngineView):
         # 清理页面：先停加载并卸载到空白页（比 setHtml("") 更轻，避免 WebEngine 异步导航竞态）
         try:
             self.stop()  # 停止页面加载
-            from PyQt5.QtCore import QUrl
+            from PySide6.QtCore import QUrl
 
             self.setUrl(QUrl("about:blank"))  # 卸载，比 setHtml("") 更轻
         except RuntimeError:
@@ -8201,7 +8200,7 @@ class CodeWebViewer(QWebEngineView):
 
 
 class PlainTextViewer(QWidget):
-    contentHeightChanged = pyqtSignal(int)
+    contentHeightChanged = Signal(int)
 
     # 用户消息卡片最大高度（px）：超过此高度启用 QTextEdit 内部滚动条
     # 约可容纳 13 行 14px 文本，平衡阅读完整性与卡片视觉占位
@@ -8212,7 +8211,7 @@ class PlainTextViewer(QWidget):
         self._text = ""
         # 气泡宽度自适应：未换行内容理想宽度（ChatGPT 式紧凑气泡），
         # 由 MessageCard.sync_width 按容器宽度注入上限
-        # PyQt5 未导出 QWIDGETSIZE_MAX，16777215 即其值（未 sync 前的不限制初始态）
+        # PySide6 未导出 QWIDGETSIZE_MAX，16777215 即其值（未 sync 前的不限制初始态）
         self._width_cap = 16777215
         # [PERF] “超高”单调缓存：全文档实测高度撞上 MAX_HEIGHT 上限时的最大确认宽度（0=未确认）。
         # 文档高度在某宽度撞上限后，宽度变窄只会行数更多、高度更高，故后续宽度 ≤ 该值时
@@ -8308,7 +8307,7 @@ class PlainTextViewer(QWidget):
         """带存活性检查的 _update_height"""
         try:
             # 检查 C++ 对象是否已被销毁
-            if sip.isdeleted(self.text_edit):
+            if not shiboken6.isValid(self.text_edit):
                 return
             self._update_height()
         except RuntimeError:
@@ -8532,7 +8531,7 @@ class PlainTextViewer(QWidget):
         delete_action = menu.addAction(get_icon("删除"), "删除")
         delete_action.triggered.connect(lambda: self._request_delete())
 
-        menu.exec_(self.text_edit.mapToGlobal(pos))
+        menu.exec(self.text_edit.mapToGlobal(pos))
 
     def _copy_to_clipboard(self, copy_selection: bool = True):
         """复制内容到剪贴板
@@ -8542,7 +8541,7 @@ class PlainTextViewer(QWidget):
                             无选中时降级复制全文。
                             为 False 时直接复制全文（工具栏按钮行为）。
         """
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         clipboard = QApplication.clipboard()
         if copy_selection:
@@ -8630,21 +8629,21 @@ class PlainTextViewer(QWidget):
 
 
 class MessageCard(SimpleCardWidget):
-    heightChanged = pyqtSignal(int)
-    deleteRequested = pyqtSignal()
-    undoRequested = pyqtSignal()
-    actionRequested = pyqtSignal(str, str)
-    contextActionRequested = pyqtSignal(str, str)
-    optionSelected = pyqtSignal(dict)
-    interventionRequested = pyqtSignal(dict)
-    toolDiffRequested = pyqtSignal(str)  # tool_call_id
-    subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
-    cardDiffRequested = pyqtSignal(int, int)  # round_index, message_index（消息在 _message_batch 中的索引）
-    reviewRequested = pyqtSignal(int, int)  # round_index, message_index — 用户点击页脚 Review 按钮时触发
-    saveFileRequested = pyqtSignal(str, str)  # code, lang
-    lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
-    modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
-    welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / changelog）
+    heightChanged = Signal(int)
+    deleteRequested = Signal()
+    undoRequested = Signal()
+    actionRequested = Signal(str, str)
+    contextActionRequested = Signal(str, str)
+    optionSelected = Signal(dict)
+    interventionRequested = Signal(dict)
+    toolDiffRequested = Signal(str)  # tool_call_id
+    subAgentLogRequested = Signal(str)  # task_ids (comma-separated)
+    cardDiffRequested = Signal(int, int)  # round_index, message_index（消息在 _message_batch 中的索引）
+    reviewRequested = Signal(int, int)  # round_index, message_index — 用户点击页脚 Review 按钮时触发
+    saveFileRequested = Signal(str, str)  # code, lang
+    lazyRenderCompleted = Signal()  # 懒渲染完成信号，用于通知滚动保持
+    modelLabelClicked = Signal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
+    welcomeModeChanged = Signal(str)  # 欢迎卡片模式切换（sessions / projects / changelog）
 
     def __init__(
         self,
@@ -8940,7 +8939,7 @@ class MessageCard(SimpleCardWidget):
 
     def _normalBackgroundColor(self):
         """返回透明色，让 CSS background-color 透出"""
-        from PyQt5.QtGui import QColor
+        from PySide6.QtGui import QColor
 
         return QColor(0, 0, 0, 0)
 
@@ -12460,8 +12459,8 @@ _changelog_cache: dict = {}  # in-memory: {releases: [...], fetched_at: float, e
 class _ChangelogFetcher(QThread):
     """后台拉 GitHub Releases；走完 emit finished(list) 或 error(str)"""
 
-    finished = pyqtSignal(list)
-    error = pyqtSignal(str)
+    finished = Signal(list)
+    error = Signal(str)
 
     def __init__(self, etag: str = "", parent=None):
         super().__init__(parent)

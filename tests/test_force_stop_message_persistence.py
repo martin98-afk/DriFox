@@ -448,7 +448,7 @@ def test_close_event_handles_response_start_time_when_present():
     _response_start_time 是 stream 开始时记录的时间。在 closeEvent 期间通常未清空
     （_on_stop_clicked 才会清）。
 
-    注：完整 closeEvent 涉及 PyQt5 QObject 子类的 super().__init__()，
+    注：完整 closeEvent 涉及 PySide6 QObject 子类的 super().__init__()，
     单元测试用 __new__ 创建 stub 实例无法调真实方法。本测试改为：
     1. 算法层面验证 _stop_elapsed 计算正确性；
     2. 源码层面验证 closeEvent 确实执行了"读 _response_start_time → 计算 _stop_elapsed"

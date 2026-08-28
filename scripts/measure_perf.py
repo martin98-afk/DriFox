@@ -7,11 +7,11 @@
 
 设计原则（铁律：不修改任何产品代码、不引入新三方依赖）：
 - 仅做测量，不改产品代码；可 import 产品模块做测量，但不改动。
-- 仅用标准库 + 已在依赖中的 psutil / PyQt5 / requests。
+- 仅用标准库 + 已在依赖中的 psutil / PySide6 / requests。
 - 可在当前 dev 分支无产品代码改动下跑通（headless 安全）：
   * memory   : tracemalloc + psutil 测代表性负载的净分配（无需 GUI）
   * startup  : 子进程冷导入 openai（benchmarks 显示其占导入耗时 34%，启动导入瓶颈代理）
-  * animation: PyQt5.QColor 渐变插值（值类型，无需 QApplication）
+  * animation: PySide6.QColor 渐变插值（值类型，无需 QApplication）
   * upload   : 本地 loopback http.server + requests 往返（无外网依赖）
 
 说明：当前 scenario 测量器为「代表性代理负载」，用于打通框架与基线对比链路；
@@ -114,10 +114,10 @@ def measure_startup(iterations: int) -> tuple[list[dict], str, str]:
 
 
 def measure_animation(iterations: int) -> tuple[list[dict], str, str]:
-    """PyQt5.QColor 渐变插值（值类型，无需 QApplication）；失败则退化为纯 Python 插值。"""
+    """PySide6.QColor 渐变插值（值类型，无需 QApplication）；失败则退化为纯 Python 插值。"""
     frames = 600
     try:
-        from PyQt5.QtGui import QColor
+        from PySide6.QtGui import QColor
         use_qt = True
     except Exception:
         use_qt = False
@@ -145,8 +145,8 @@ def measure_animation(iterations: int) -> tuple[list[dict], str, str]:
                 ) for i in range(11)]
         dt_ms = (time.perf_counter() - t0) * 1000
         rows.append({"gradient_build_ms_per_600frames": dt_ms})
-    method = ("PyQt5.QColor 渐变插值（无需 QApplication）" if use_qt
-              else "纯 Python 颜色插值（PyQt5 不可用时的退化路径）")
+    method = ("PySide6.QColor 渐变插值（无需 QApplication）" if use_qt
+              else "纯 Python 颜色插值（PySide6 不可用时的退化路径）")
     note = "代理负载：代表消息卡片每帧渐变构建成本（Top① 动画高频绘制）；真实 paintEvent 待 #1 接入"
     return rows, method, note
 

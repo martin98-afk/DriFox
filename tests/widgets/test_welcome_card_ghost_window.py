@@ -156,7 +156,7 @@ def _build_tab_manager_like_tree():
 
     返回 (content_stack, content_area, overlay_page, window_page, card)。
     """
-    from PyQt5.QtWidgets import QStackedWidget, QWidget
+    from PySide6.QtWidgets import QStackedWidget, QWidget
 
     from app.widgets.message_card import MessageCard
 
@@ -219,7 +219,7 @@ def test_invalidate_welcome_card_hides_before_setparent_none(_qt_app):
     弹出原生窗口（白窗一闪），随后 deleteLater 才销毁。必须先 hide 摘除
     可见性，再脱离父链。
     """
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     # 行为验证：可见 widget setParent(None) 前 hide 不弹独立窗口
     top = QWidget()

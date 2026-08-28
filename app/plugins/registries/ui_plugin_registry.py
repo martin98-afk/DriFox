@@ -1486,7 +1486,7 @@ class UIPluginRegistry:
             return
         self._welcome_refresh_pending = True
         try:
-            from PyQt5.QtCore import QTimer
+            from PySide6.QtCore import QTimer
 
             QTimer.singleShot(0, self._flush_welcome_refresh)
         except Exception:

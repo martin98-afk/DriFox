@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
-from PyQt5.QtCore import QEvent, QModelIndex, QSize, Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon, QKeySequence
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEvent, QModelIndex, QSize, Qt, QThread, Signal
+from PySide6.QtGui import QColor, QFont, QIcon, QKeySequence, QShortcut
+from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -33,7 +33,6 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
-    QShortcut,
     QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
@@ -249,7 +248,7 @@ def _styled_message_box(
             self.widget.setMaximumSize(620, 720)
 
     dialog = _Dialog(parent_widget)
-    dialog.exec_()
+    dialog.exec()
     return dialog._result
 
 
@@ -261,7 +260,7 @@ def _styled_message_box(
 class FileTreeCard(QWidget):
     """项目文件树浮动卡片（重构版）"""
 
-    closed = pyqtSignal()
+    closed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -1124,7 +1123,7 @@ class FileTreeCard(QWidget):
                 action_open = menu.addAction("📄 用默认程序打开")
                 action_open.triggered.connect(lambda: self._open_file(item_path))
 
-        menu.exec_(global_pos)
+        menu.exec(global_pos)
 
     # ── 刷新与关闭 ──
 

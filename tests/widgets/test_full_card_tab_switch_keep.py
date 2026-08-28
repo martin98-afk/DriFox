@@ -21,7 +21,7 @@ UIPluginRegistry.tab_sync_guard()（与 sync_floating_cards_to_tab 一致），
 from types import SimpleNamespace
 
 import pytest
-from PyQt5.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QWidget
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID, CardManager

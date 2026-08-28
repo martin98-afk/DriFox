@@ -24,8 +24,8 @@ class InputCardModule(UIModule):
     module_id = "input_card"
 
     def build(self, host) -> None:
-        from PyQt5.QtCore import Qt, QTimer
-        from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
         from qfluentwidgets import setFont
 
         from app.utils.config import Settings as _Cfg

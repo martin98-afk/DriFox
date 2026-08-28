@@ -14,7 +14,7 @@ import os
 import threading
 import time
 
-from PyQt5.QtGui import QPixmap
+from PySide6.QtGui import QPixmap
 
 logger = logging.getLogger(__name__)
 

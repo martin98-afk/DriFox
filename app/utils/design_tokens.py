@@ -6,7 +6,7 @@
 主题完全从 app/themes/ 目录读取，不硬编码主题数据
 """
 
-from PyQt5.QtCore import QSize
+from PySide6.QtCore import QSize
 
 
 # ─── 字体/字号缓存 ──────────────────────────────────────────
@@ -139,7 +139,7 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
         widget: 要设置字体的 widget
         base_size: 基础字体大小（会经过 scale_font_size 缩放）
     """
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     scaled = scale_font_size(base_size)
     content_scaled = scale_font_size(11)
@@ -1184,8 +1184,8 @@ def get_content_bg_style() -> str:
 
 def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
     """为 widget 添加淡入动画（透明度 0→1），简洁克制"""
-    from PyQt5.QtCore import QPropertyAnimation
-    from PyQt5.QtWidgets import QGraphicsOpacityEffect
+    from PySide6.QtCore import QPropertyAnimation
+    from PySide6.QtWidgets import QGraphicsOpacityEffect
 
     effect = QGraphicsOpacityEffect(widget)
     widget.setGraphicsEffect(effect)
@@ -1208,8 +1208,8 @@ def apply_card_shadow(widget, shadow_type: str = "card"):
             - "glow*": 聚焦发光 halo，颜色取自 Colors.INPUT_FOCUS_BORDER（主题感知），
               alpha / blur_radius 来自对应 token
     """
-    from PyQt5.QtGui import QColor
-    from PyQt5.QtWidgets import QGraphicsDropShadowEffect
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QGraphicsDropShadowEffect
 
     config = getattr(Shadows, shadow_type.upper(), Shadows.CARD)
     effect = QGraphicsDropShadowEffect(widget)
@@ -1237,7 +1237,7 @@ def _rgba_to_qcolor(value: str) -> "QColor":
     QColor 构造函数不认 CSS rgba()/rgb() 写法，主题 YAML 中大量使用
     rgba(r,g,b,a)，直接丢给 QColor 会退化为黑色。此处手动解析。
     """
-    from PyQt5.QtGui import QColor
+    from PySide6.QtGui import QColor
 
     s = str(value or "").strip()
     try:
@@ -1292,7 +1292,7 @@ def _apply_tooltip_style() -> None:
     - 命令卡片悬浮描述气泡（_DescTooltipBubble）
     """
     try:
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         qapp = QApplication.instance()
         if qapp is None:
@@ -1326,8 +1326,8 @@ def _apply_tooltip_style() -> None:
         # 此处用主题色配置 QToolTip palette 和 font，
         # 确保直接调用 QToolTip.showText() 的组件（如图表）显示正确主题色，
         # 也作为任何未安装自绘 tooltip 的 widget 的兜底样式。
-        from PyQt5.QtWidgets import QToolTip as _QToolTip
-        from PyQt5.QtGui import QPalette as _QPalette, QFont as _QFont
+        from PySide6.QtWidgets import QToolTip as _QToolTip
+        from PySide6.QtGui import QPalette as _QPalette, QFont as _QFont
 
         _pal = _QPalette()
         _pal.setColor(_QPalette.ToolTipBase, _rgba_to_qcolor(bg))

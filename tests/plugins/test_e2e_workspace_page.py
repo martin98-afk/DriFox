@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""e2e：注册→attach→show 全链路（mock _content_area 避开 Windows PyQt5 offscreen 崩溃）"""
+"""e2e：注册→attach→show 全链路（mock _content_area 避开 Windows PySide6 offscreen 崩溃）"""
 
 from unittest.mock import MagicMock
 
@@ -7,7 +7,7 @@ import pytest
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-pytest.importorskip("PyQt5.QtWidgets", reason="仅在 PyQt5 环境加载 host")
+pytest.importorskip("PySide6.QtWidgets", reason="仅在 PySide6 环境加载 host")
 
 
 @pytest.fixture()

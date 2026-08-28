@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal, QTimer, QCoreApplication
+from PySide6.QtCore import QObject, QThreadPool, Signal, QTimer, QCoreApplication
 
 from app.constants import IMAGE_EXTENSIONS
 from app.utils.utils import invalidate_skills_cache
@@ -243,43 +243,43 @@ class ChatBackend(QObject):
 
     # ========== 信号定义 ==========
     # 会话相关
-    session_created = pyqtSignal(str)  # session_id
-    session_changed = pyqtSignal(str)  # session_id
-    session_deleted = pyqtSignal(int)  # index
+    session_created = Signal(str)  # session_id
+    session_changed = Signal(str)  # session_id
+    session_deleted = Signal(int)  # index
 
     # 消息相关
-    message_received = pyqtSignal(dict)  # 新消息
+    message_received = Signal(dict)  # 新消息
     # 内部信号：hook 回调添加消息后触发 UI 刷新（跨线程安全）
-    _hook_messages_updated = pyqtSignal()
-    stream_started = pyqtSignal()
-    stream_chunk = pyqtSignal(str)  # 流式内容片段
-    stream_finished = pyqtSignal(dict)  # 完成时的消息
-    reasoning_content = pyqtSignal(str)  # DeepSeek thinking mode
+    _hook_messages_updated = Signal()
+    stream_started = Signal()
+    stream_chunk = Signal(str)  # 流式内容片段
+    stream_finished = Signal(dict)  # 完成时的消息
+    reasoning_content = Signal(str)  # DeepSeek thinking mode
 
     # 工具相关
-    tool_call_started = pyqtSignal(str, str, dict)  # tool_call_id, tool_name, arguments
-    tool_result_received = pyqtSignal(str, str, dict, bool)  # tool_call_id, name, result, success
+    tool_call_started = Signal(str, str, dict)  # tool_call_id, tool_name, arguments
+    tool_result_received = Signal(str, str, dict, bool)  # tool_call_id, name, result, success
 
     # 权限相关
-    permission_requested = pyqtSignal(str, str, dict)  # tool_call_id, tool_name, arguments
+    permission_requested = Signal(str, str, dict)  # tool_call_id, tool_name, arguments
 
     # 错误
-    error_occurred = pyqtSignal(str)
+    error_occurred = Signal(str)
 
     # 上下文
-    context_updated = pyqtSignal(int, int)  # token_count, limit
+    context_updated = Signal(int, int)  # token_count, limit
 
     # Auto-compact 请求（由 tool_executor 在 PostToolUse hook 中检测阈值触发）
-    auto_compact_requested = pyqtSignal(float)  # ratio
+    auto_compact_requested = Signal(float)  # ratio
 
     # SubAgentManager 延迟创建完成信号（[审查 #8r Bug D] 窗口在 __init__ 时
     # sub_agent_manager 尚为 None 跳过信号连接，创建完成后据此补连）
-    sub_agent_ready = pyqtSignal()
+    sub_agent_ready = Signal()
 
     # Hook 执行状态信号（event_name, status_message, is_start）
     # TODO: 当前没有 UI 订阅此信号。状态消息字段 (`statusMessage`) 已可解析但尚未展示。
     #       待 hook_setting_card 或状态栏/通知组件接入后即可移除此 TODO。
-    hook_status_changed = pyqtSignal(str, str, bool)
+    hook_status_changed = Signal(str, str, bool)
 
     # 活跃 backend 实例集合：PluginHostService 触发 PluginChanged hook 时
     # 需要各 tab 的 hook_manager（hook 输出注入各自对话队列）。
@@ -657,7 +657,7 @@ class ChatBackend(QObject):
         UI 使用处均有 None 守卫（tool_executor/chat_engine 等访问都判空）。
         发送消息路径由 main_widget 调 ensure_deferred_components() 同步兜底。
         """
-        from PyQt5.QtCore import QTimer
+        from PySide6.QtCore import QTimer
 
         QTimer.singleShot(0, self._deferred_create_memory_manager)
         QTimer.singleShot(200, self._deferred_create_tool_executor)

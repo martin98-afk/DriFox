@@ -11,8 +11,8 @@ ListItem 工厂函数 - 使用组合模式生成通用列表项组件
 
 from typing import Callable, Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSizePolicy,

@@ -41,14 +41,14 @@ os.environ.pop("MEM_TRACE", None)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench_common as bc  # noqa: E402
 
-from PyQt5.QtCore import Qt, QTimer  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
+from PySide6.QtCore import Qt, QTimer  # noqa: E402
+from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
 QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
 QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView  # noqa: F401
-
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings# noqa: F401
+from PySide6.QtWebEngineWidgets import QWebEngineView
 import app.plugins.registries.coding_plan_fetcher as cpf  # noqa: E402
 
 # 用量请求计数探针：替换为无网络回调，仅计数（避免真实 fetch）

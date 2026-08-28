@@ -1,7 +1,7 @@
 # app/core/conversation/adapters/ui.py
 from typing import Callable, Dict, List
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 from app.core.conversation.adapters.base import BaseConversationAdapter
 from app.core.conversation.core import ConversationCore
@@ -12,25 +12,25 @@ class UIConversationAdapter(QObject):
     """UI 对话适配器 — Qt 信号转发
 
     使用组合（而非多继承）持有 BaseConversationAdapter，
-    避免 PyQt5 的 QObject 与普通 Python 类的 MRO 冲突。
+    避免 PySide6 的 QObject 与普通 Python 类的 MRO 冲突。
     """
 
     # Qt 信号
-    content_received = pyqtSignal(str)
-    reasoning_content_received = pyqtSignal(str)
-    thinking_started = pyqtSignal()
-    tool_call_started = pyqtSignal(str, str, dict, str)  # id, name, args, round
-    tool_args_updated = pyqtSignal(str, str, dict)
-    tool_result_received = pyqtSignal(str, str, dict, object)
-    question_asked = pyqtSignal(str, list, object)  # id, questions(list), extra(dict)
-    permission_approval_requested = pyqtSignal(str, str, dict)
-    stream_started = pyqtSignal()
-    stream_finished = pyqtSignal(str)
-    messages_updated = pyqtSignal(list)
-    error_occurred = pyqtSignal(str)
-    retry_status = pyqtSignal(str, int, int, float)
-    retry_resolved = pyqtSignal()
-    context_updated = pyqtSignal(int, int, bool)  # token_count, limit, from_api
+    content_received = Signal(str)
+    reasoning_content_received = Signal(str)
+    thinking_started = Signal()
+    tool_call_started = Signal(str, str, dict, str)  # id, name, args, round
+    tool_args_updated = Signal(str, str, dict)
+    tool_result_received = Signal(str, str, dict, object)
+    question_asked = Signal(str, list, object)  # id, questions(list), extra(dict)
+    permission_approval_requested = Signal(str, str, dict)
+    stream_started = Signal()
+    stream_finished = Signal(str)
+    messages_updated = Signal(list)
+    error_occurred = Signal(str)
+    retry_status = Signal(str, int, int, float)
+    retry_resolved = Signal()
+    context_updated = Signal(int, int, bool)  # token_count, limit, from_api
 
     def __init__(self, core: ConversationCore, executor: ConversationExecutor):
         super().__init__()

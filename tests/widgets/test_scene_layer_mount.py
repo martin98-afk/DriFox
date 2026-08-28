@@ -20,7 +20,7 @@ import pytest
 @pytest.fixture()
 def tab_manager(qapp, monkeypatch):
     """创建最小可用的 TabManagerWindow（_setup_ui 走完整路径）"""
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
 
     # 关闭 TabManagerWindow._setup_ui 中可能需要外部依赖的初始化副作用
     fake_tray = type("FakeTray", (), {"_tab_manager_window": None})()
@@ -66,7 +66,7 @@ def test_scene_layer_fills_chat_frame_rect(tab_manager):
 
 def test_chat_area_module_no_longer_creates_scene_layer(qapp, monkeypatch):
     """ChatAreaModule 应不再创建 _scene_layer（由 TabManagerWindow 接管）"""
-    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
     from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
     from app.widgets.modules.chat_area_module import ChatAreaModule
     from app.widgets.ui_composition import compose

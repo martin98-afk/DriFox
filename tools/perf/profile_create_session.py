@@ -39,7 +39,7 @@ PERF_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(PERF_DIR))  # 让 slow_hooks 可被标准 import
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 app = QApplication(sys.argv)
 

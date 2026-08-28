@@ -5,7 +5,7 @@
 - _welcome_card_cache 仅按 _window_id 缓存，但卡片内容依赖
   _current_project / _current_agent。
 - 切换项目/智能体/新建会话时必须显式失效，否则会展示上一个项目/智能体的陈旧数据。
-- 之前唯一的失效路径 sip.isdeleted(cached) 存在竞态：
+- 之前唯一的失效路径 not sip.isValid(cached) 存在竞态：
   _clear_chat_area 之后 QTimer.singleShot(0, _show_initial_welcome) 可能
   在 deleteLater 实际执行前先触发，导致缓存命中返回旧卡片。
 
@@ -94,7 +94,7 @@ class TestInvalidateWelcomeCardMethod:
         method = _get_method(cls, "_invalidate_welcome_card")
         assert method is not None
         src = ast.unparse(method)
-        assert "isdeleted" in src, "失效方法应检查 sip.isdeleted"
+        assert "isValid" in src, "失效方法应检查 shiboken6.isValid"
 
 
 class TestInvalidationCallSites:
@@ -226,7 +226,7 @@ class TestInvalidationBehavior:
 
     def test_handles_sip_deleted_widget(self, _qt_app):
         """sip.isdeleted 返回 True 时不应再操作 widget"""
-        from PyQt5.QtCore import QObject
+        from PySide6.QtCore import QObject
 
         widget = self._make_widget()
         cached = QObject()

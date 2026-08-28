@@ -31,8 +31,8 @@ class TitleBarModule(UIModule):
     module_id = "title_bar"
 
     def build(self, host) -> None:
-        from PyQt5.QtCore import Qt
-        from PyQt5.QtWidgets import QFrame, QLabel, QHBoxLayout
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QFrame, QLabel, QHBoxLayout
         from qfluentwidgets import (
             PushButton,
             TransparentToolButton,

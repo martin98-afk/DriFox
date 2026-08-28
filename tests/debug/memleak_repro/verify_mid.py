@@ -44,11 +44,11 @@ def _rss_mb() -> float:
 def _obj_counts() -> Dict[str, int]:
     counts: Dict[str, int] = {}
     keys = (
-        "PyQt5.QtCore.QObject",
-        "PyQt5.QtCore.QTimer",
-        "PyQt5.QtCore.QThread",
-        "PyQt5.QtCore.QEvent",
-        "PyQt5.QtCore.QAbstractEventDispatcher",
+        "PySide6.QtCore.QObject",
+        "PySide6.QtCore.QTimer",
+        "PySide6.QtCore.QThread",
+        "PySide6.QtCore.QEvent",
+        "PySide6.QtCore.QAbstractEventDispatcher",
     )
     for obj in gc.get_objects():
         try:
@@ -58,7 +58,7 @@ def _obj_counts() -> Dict[str, int]:
         if cn in keys:
             counts[cn] = counts.get(cn, 0) + 1
     try:
-        from PyQt5.QtCore import QObject  # type: ignore
+        from PySide6.QtCore import QObject  # type: ignore
         counts["QObject_total"] = sum(1 for o in gc.get_objects() if isinstance(o, QObject))
     except Exception:
         pass
@@ -74,10 +74,10 @@ def _snap(label: str) -> Dict[str, Any]:
 
 
 def _pump(app, ms: int = 80) -> None:
-    from PyQt5.QtCore import QEventLoop, QTimer  # type: ignore
+    from PySide6.QtCore import QEventLoop, QTimer  # type: ignore
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec_()
+    loop.exec()
     app.processEvents()
 
 
@@ -93,7 +93,7 @@ def verify_M1_eventfilter(app, rounds: int) -> Dict[str, Any]:
     """构造最小 (watched, filterObj) 对，反复 installEventFilter N 次，
     统计 eventFilter 回调被触发的次数（验证"重复安装→回调叠加"是否真发生）。
     """
-    from PyQt5.QtCore import QObject, QEvent  # type: ignore
+    from PySide6.QtCore import QObject, QEvent  # type: ignore
 
     class Filter(QObject):
         def __init__(self):
@@ -128,7 +128,7 @@ def verify_M2_eventfilter_same_object(app, rounds: int) -> Dict[str, Any]:
     """M2 等价：同一 host 对象在不同 build 调用中重复 installEventFilter。
     验证 Qt 是否报错或叠加（与 M1 同一机制，证实 host 不销毁时叠加）。
     """
-    from PyQt5.QtCore import QObject, QEvent  # type: ignore
+    from PySide6.QtCore import QObject, QEvent  # type: ignore
 
     class Host(QObject):
         pass
@@ -195,10 +195,10 @@ def verify_M5_timer_parent(app, rounds: int) -> Dict[str, Any]:
     """M5 等价：QTimer(self) 父销毁自动 stop + deleteLater。
     验证"父销毁兜底"是否成立——若成立则 M5 是低风险（仅跨会话保留时持续轮询）。
     """
-    from PyQt5.QtCore import QObject, QTimer  # type: ignore
+    from PySide6.QtCore import QObject, QTimer  # type: ignore
     snaps = [_snap("M5:r0:init")]
     parents: List[QObject] = []
-    timer_count_start = _obj_counts().get("PyQt5.QtCore.QTimer", 0)
+    timer_count_start = _obj_counts().get("PySide6.QtCore.QTimer", 0)
     for i in range(1, rounds + 1):
         p = QObject()
         t = QTimer(p)
@@ -221,7 +221,7 @@ def verify_M5_timer_parent(app, rounds: int) -> Dict[str, Any]:
         pp.deleteLater()
     _pump(app, 200)
     gc.collect()
-    timer_count_end = _obj_counts().get("PyQt5.QtCore.QTimer", 0)
+    timer_count_end = _obj_counts().get("PySide6.QtCore.QTimer", 0)
     result = {"timer_count_start": timer_count_start, "timer_count_end": timer_count_end,
               "parent_cleanup_works": timer_count_end <= timer_count_start + 1,
               "leak_when_parent_alive": "持续轮询但无对象累积（每3s一次回调）"}
@@ -236,7 +236,7 @@ def verify_M5_timer_parent(app, rounds: int) -> Dict[str, Any]:
 def verify_M6_orphan_threads(app, rounds):
     _orphan_threads = []
     snaps = [_snap('M6:r0:init')]
-    from PyQt5.QtCore import QThread
+    from PySide6.QtCore import QThread
     for i in range(1, rounds + 1):
         t = QThread()
         _orphan_threads.append(t)
@@ -279,8 +279,8 @@ VERIFY_FUNCS: List[Tuple[str, str, Callable[[Any, int], Dict[str, Any]]]] = [
 
 
 def run(args: argparse.Namespace) -> int:
-    import PyQt5.QtWebEngineWidgets  # noqa: F401
-    from PyQt5.QtWidgets import QApplication  # type: ignore
+    import PySide6.QtWebEngineWidgets  # noqa: F401
+    from PySide6.QtWidgets import QApplication  # type: ignore
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

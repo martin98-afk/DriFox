@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """回归测试：切换项目/新建会话打断对话时，Tab 状态复位 + 会话完整保存
 
 == 问题描述 ==
@@ -234,7 +234,7 @@ def _make_stub(streaming: bool, interrupted_messages=None):
 class TestStreamingInterruptBehavior:
     """行为验证：streaming 中调用 _create_new_session 的行为"""
 
-    @patch("PyQt5.sip.isdeleted", return_value=False)
+    @patch("shiboken6.isValid", return_value=True)
     def test_stop_streaming_returns_applied_to_session(self, _mock_isdeleted):
         """streaming 分支：stop_streaming 返回值必须应用回 session"""
         interrupted = [{"role": "assistant", "content": "partial 回复"}]
@@ -243,14 +243,14 @@ class TestStreamingInterruptBehavior:
         stub.backend.stop_streaming.assert_called_once()
         stub._apply_interrupted_messages_to_session.assert_called_once_with(interrupted)
 
-    @patch("PyQt5.sip.isdeleted", return_value=False)
+    @patch("shiboken6.isValid", return_value=True)
     def test_set_ai_state_idle_called(self, _mock_isdeleted):
         """streaming 分支：必须调用 _set_ai_state('idle') 复位 Tab 状态"""
         stub = _make_stub(streaming=True, interrupted_messages=[{"role": "assistant", "content": "x"}])
         stub._create_new_session()
         stub._set_ai_state.assert_any_call("idle")
 
-    @patch("PyQt5.sip.isdeleted", return_value=False)
+    @patch("shiboken6.isValid", return_value=True)
     def test_no_streaming_skips_stop(self, _mock_isdeleted):
         """非 streaming 分支：不调用 stop_streaming / 不应用中断消息"""
         stub = _make_stub(streaming=False)
@@ -258,7 +258,7 @@ class TestStreamingInterruptBehavior:
         stub.backend.stop_streaming.assert_not_called()
         stub._apply_interrupted_messages_to_session.assert_not_called()
 
-    @patch("PyQt5.sip.isdeleted", return_value=False)
+    @patch("shiboken6.isValid", return_value=True)
     def test_empty_interrupted_skips_apply(self, _mock_isdeleted):
         """streaming 但中断消息为空：不调用 _apply_interrupted_messages_to_session"""
         stub = _make_stub(streaming=True, interrupted_messages=[])

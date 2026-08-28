@@ -10,9 +10,9 @@
 
 import time as _time
 
-from PyQt5 import sip
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtWidgets import (
+import shiboken6 as sip
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -92,8 +92,8 @@ def _format_source_label(source: str, plugin_root_kind: str = "") -> tuple:
 class ToolControlCardContent(QWidget):
     """工具控制卡片内容 — 分组折叠 + 独立开关"""
 
-    togglesChanged = pyqtSignal(dict)
-    _registryChanged = pyqtSignal(int)  # registry 变更桥接（可能来自后台 watcher 线程）
+    togglesChanged = Signal(dict)
+    _registryChanged = Signal(int)  # registry 变更桥接（可能来自后台 watcher 线程）
 
     # version 稳定性重排上限：registry 持续变更（异常场景）时最多重排 50 轮后强制重建
     _REBUILD_RETRY_MAX = 50
@@ -149,14 +149,14 @@ class ToolControlCardContent(QWidget):
 
         ⚠️ 此回调可能来自后台 watcher 线程（PluginToolWatcher 轮询线程执行
         scan_now，registry.register/unregister 同步 notify 全部 listener）。
-        直接 emit 信号：pyqtSignal QueuedConnection 自动排队到 widget 所在
+        直接 emit 信号：Signal QueuedConnection 自动排队到 widget 所在
         线程（主线程）执行刷新，避免在后台线程直接操作 Qt 定时器。
 
         ★ 防崩溃：卡片底层 C++ 对象可能已被销毁（设置窗口关闭/卡片
         deleteLater 重建），而 PyQt wrapper 仍存活（weakref 未失效），
         此时访问 _registryChanged 会抛 RuntimeError。isdeleted 检查直接跳过。
         """
-        if sip.isdeleted(self):
+        if not sip.isValid(self):
             return
         self._registryChanged.emit(version)
 
@@ -739,7 +739,7 @@ class ToolControlCardContent(QWidget):
 class ToolControlCardFrame(SystemCardFrame):
     """工具控制卡片框架 — SystemCardFrame 包裹"""
 
-    togglesChanged = pyqtSignal(dict)
+    togglesChanged = Signal(dict)
 
     def __init__(self, parent=None, controller=None):
         super().__init__(parent)

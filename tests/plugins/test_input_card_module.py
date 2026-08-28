@@ -48,7 +48,7 @@ def test_module_id():
 
 
 def test_compose_builds_input_card(fresh_registry, qapp):
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     from app.widgets.modules.input_card_module import InputCardModule
 

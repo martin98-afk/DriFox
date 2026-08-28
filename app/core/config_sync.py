@@ -18,7 +18,7 @@ from typing import Optional
 
 import httpx
 from loguru import logger
-from PyQt5.QtCore import QObject, QTimer, pyqtSignal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from app.utils.config import Settings
 from app.utils.utils import get_app_data_dir
@@ -97,14 +97,14 @@ class ConfigSyncService(QObject):
     _instance: Optional["ConfigSyncService"] = None
 
     # 信号
-    stateChanged = pyqtSignal(str)  # idle / syncing / error / disabled
-    syncDone = pyqtSignal(bool, str)  # success, message
-    _configChanged = pyqtSignal()  # 文件变更通知（watch 线程 → 主线程）
-    _reloadSettings = pyqtSignal()  # 请求在主线程重新加载 Settings（后台线程 → 主线程）
+    stateChanged = Signal(str)  # idle / syncing / error / disabled
+    syncDone = Signal(bool, str)  # success, message
+    _configChanged = Signal()  # 文件变更通知（watch 线程 → 主线程）
+    _reloadSettings = Signal()  # 请求在主线程重新加载 Settings（后台线程 → 主线程）
     # 云端配置已在主线程全部写回 ConfigItem 内存后发射（syncDone 之前）。
     # 供窗口级 UI（如模型选择按钮）按云端值做一次性刷新，避免依赖
     # valueChanged（llm_selected_model 无监听器）而错过更新。
-    settingsRestored = pyqtSignal()
+    settingsRestored = Signal()
 
     def __init__(self):
         if ConfigSyncService._instance is not None:

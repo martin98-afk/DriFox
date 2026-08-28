@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 
 import requests
 from loguru import logger
-from PyQt5.QtCore import QObject, pyqtSignal
+from PySide6.QtCore import QObject, Signal
 
 
 class GiteeContentBackend:
@@ -71,7 +71,7 @@ class GiteeUploader(QObject):
     _instance: Optional["GiteeUploader"] = None
 
     # OAuth 绑定 token 真失效（上传 401 且刷新重试仍失败）→ UI 据此提示重新绑定
-    tokenInvalid = pyqtSignal()
+    tokenInvalid = Signal()
 
     # 公开下载链接模板（与 Gitee contents API 返回的 download_url 一致）
     DOWNLOAD_URL = "https://gitee.com/{owner}/{repo}/raw/{branch}/{path}"

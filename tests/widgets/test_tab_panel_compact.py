@@ -5,8 +5,8 @@ import re
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt5.QtCore import Qt
-from PyQt5.QtTest import QTest
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
 from app.widgets.tab_panel import TabItem, TabPanel
 
@@ -119,8 +119,8 @@ def test_tc_a2_set_collapsed_no_signal(panel, qtbot):
 
 def test_tc_a3_resize_auto_expand(panel, qtbot):
     """拖拽展开（resizeEvent）：_collapsed 变 False、控件恢复（矩阵 A3）"""
-    from PyQt5.QtCore import QSize
-    from PyQt5.QtGui import QResizeEvent
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QResizeEvent
 
     panel.add_tab("会话A")
     panel.set_collapsed(True)
@@ -142,8 +142,8 @@ def test_tc_a3_resize_auto_expand_gray_zone_stays_collapsed(panel, qtbot):
     表现为"拉开一半又弹回去"。修复后展开阈值与折叠阈值对齐(>=100)，
     灰色区间内保持收起态，不再震荡。
     """
-    from PyQt5.QtCore import QSize
-    from PyQt5.QtGui import QResizeEvent
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QResizeEvent
 
     panel.add_tab("会话A")
     panel.set_collapsed(True)
@@ -174,8 +174,8 @@ def test_tc_a4_resize_auto_collapse_no_bounce_back(panel, qtbot):
     回弹展开——表现为"往里拉时又往外回弹"。修复后展开阈值需跨过滞回区
     （> _auto_collapse_width + 10）才允许再次展开。
     """
-    from PyQt5.QtCore import QSize
-    from PyQt5.QtGui import QResizeEvent
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QResizeEvent
 
     panel.add_tab("会话A")
     panel.set_collapsed(False)
@@ -212,8 +212,8 @@ def test_tc_a4_resize_auto_collapse_no_bounce_back(panel, qtbot):
 
 def test_tc_a4_resize_auto_collapse(panel, qtbot):
     """拖窄自动折叠（resizeEvent）：展开态收窄到阈值以下 → 自动折叠（矩阵 A3'）"""
-    from PyQt5.QtCore import QSize
-    from PyQt5.QtGui import QResizeEvent
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QResizeEvent
 
     panel.add_tab("会话A")
     panel.set_collapsed(False)
@@ -235,8 +235,8 @@ def test_tc_a4_resize_auto_collapse(panel, qtbot):
 
 def test_tc_a4_resize_auto_collapse_animation_suppressed(panel, qtbot):
     """宽度动画进行中收窄不触发自动折叠（_animating 守卫，矩阵 A3' 防打断）"""
-    from PyQt5.QtCore import QSize
-    from PyQt5.QtGui import QResizeEvent
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QResizeEvent
 
     panel.add_tab("会话A")
     panel.set_collapsed(False)
@@ -637,7 +637,7 @@ def test_refresh_style_preserves_collapsed_alpha(panel, qtbot):
 
 def _add_custom_plugin_row(panel, title="测试插件"):
     """手动注入一个自定义插件行（绕过 registry，聚焦折叠态 UI 行为）"""
-    from PyQt5.QtWidgets import QHBoxLayout
+    from PySide6.QtWidgets import QHBoxLayout
 
     from app.widgets.tab_panel import UIPluginRow
 

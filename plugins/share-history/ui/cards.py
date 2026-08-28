@@ -21,9 +21,9 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from PyQt5.QtCore import QEvent, QObject, QSize, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEvent, QObject, QSize, QThread, Qt, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
@@ -127,8 +127,8 @@ _TYPE_LABELS = {"session": "会话", "project": "项目"}
 class _LoadWorker(QObject):
     """后台加载分享记录"""
 
-    finished = pyqtSignal(list)
-    error = pyqtSignal(str)
+    finished = Signal(list)
+    error = Signal(str)
 
     def run(self):
         try:
@@ -146,8 +146,8 @@ class _LoadWorker(QObject):
 class _RecordItem(QFrame):
     """单条分享记录展示行"""
 
-    deleted = pyqtSignal(int)  # 删除请求，携带 record id
-    downloaded = pyqtSignal(int)  # 下载完成，携带 record id（通知父卡片刷新）
+    deleted = Signal(int)  # 删除请求，携带 record id
+    downloaded = Signal(int)  # 下载完成，携带 record id（通知父卡片刷新）
 
     def __init__(
         self,
@@ -579,8 +579,8 @@ class _RecordItem(QFrame):
 class _DownloadWorker(QObject):
     """文件下载 Worker — 与 app.utils.utils.DownloadThread 同模式，QThread + signals"""
 
-    finished = pyqtSignal(str)  # 文件路径
-    error = pyqtSignal(str)  # 错误信息
+    finished = Signal(str)  # 文件路径
+    error = Signal(str)  # 错误信息
 
     def __init__(self, url: str, file_path: str):
         super().__init__()
@@ -614,7 +614,7 @@ class _DownloadWorker(QObject):
 class ShareHistoryCard(QWidget):
     """分享记录管理浮动卡片"""
 
-    closed = pyqtSignal()
+    closed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -648,7 +648,7 @@ class ShareHistoryCard(QWidget):
         if self._context_provider is None or self._header_icon is None:
             return
         try:
-            from PyQt5.QtGui import QIcon
+            from PySide6.QtGui import QIcon
 
             ctx = self._context_provider()
             icon_info = ctx.get("plugin_icon", {})

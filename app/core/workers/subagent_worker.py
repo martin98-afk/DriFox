@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 import orjson
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
+from PySide6.QtCore import QCoreApplication, QObject, QThread, QTimer, Signal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
@@ -100,15 +100,15 @@ def _compute_context_budget(llm_config: Dict) -> int:
 class SubAgentExecutor(QThread):
     """子智能体执行器 - 独立线程运行子智能体任务"""
 
-    finished_with_result = pyqtSignal(str, str)  # task_id, result
-    error_occurred = pyqtSignal(str, str)  # task_id, error
-    progress_updated = pyqtSignal(str, str)  # task_id, message
-    tool_call_started = pyqtSignal(str, str, dict)  # task_id, tool_name, args
-    tool_result_received = pyqtSignal(str, str, str, bool)  # task_id, tool_name, result, success
-    token_usage_updated = pyqtSignal(str, int, int, int)  # task_id, prompt_tokens, completion_tokens, total_tokens
-    thinking_received = pyqtSignal(str, str)  # task_id, reasoning_content
+    finished_with_result = Signal(str, str)  # task_id, result
+    error_occurred = Signal(str, str)  # task_id, error
+    progress_updated = Signal(str, str)  # task_id, message
+    tool_call_started = Signal(str, str, dict)  # task_id, tool_name, args
+    tool_result_received = Signal(str, str, str, bool)  # task_id, tool_name, result, success
+    token_usage_updated = Signal(str, int, int, int)  # task_id, prompt_tokens, completion_tokens, total_tokens
+    thinking_received = Signal(str, str)  # task_id, reasoning_content
     # ★ T24：ask 行为权限请求（task_id, tool_name, arguments）→ 主线程弹窗
-    permission_requested = pyqtSignal(str, str, dict)
+    permission_requested = Signal(str, str, dict)
 
     def __init__(
         self,
@@ -1613,11 +1613,11 @@ class SubAgentExecutor(QThread):
 class SubAgentManager(QObject):
     """子智能体管理器 - 管理子智能体任务分发"""
 
-    task_started = pyqtSignal(str, str, str)  # task_id, agent_name, task_description
-    task_finished = pyqtSignal(str, str)  # task_id, result
-    batch_finished = pyqtSignal()  # 批次内所有任务都完成时触发
+    task_started = Signal(str, str, str)  # task_id, agent_name, task_description
+    task_finished = Signal(str, str)  # task_id, result
+    batch_finished = Signal()  # 批次内所有任务都完成时触发
     # ★ T24：子智能体 ask 权限请求转发（window_id, task_id, tool_name, arguments）→ 主线程弹窗
-    permission_requested = pyqtSignal(str, str, str, dict)
+    permission_requested = Signal(str, str, str, dict)
 
     def __init__(self, agent_manager, tool_executor, get_llm_config: Callable):
         super().__init__()
@@ -2163,7 +2163,7 @@ class SubAgentManager(QObject):
         # 节点完成回调
         # 【第N次修复】不在 _start_dag_node 中直接连接 finished_with_result，
         # 而是延后到 task_started 信号处理过程中连接（与 UI 回调完全一致）。
-        # 原因：PyQt5 对在嵌套信号上下文（_start_dag_node 被 _check_dag_downstream
+        # 原因：PySide6 对在嵌套信号上下文（_start_dag_node 被 _check_dag_downstream
         # 调用，_check_dag_downstream 被 finished_with_result 信号处理器调用）中
         # 创建的 lambda 连接可能有微妙行为差异，导致 callback 被静默丢弃。
         # 通过在这里只记录元数据，在 _on_dag_task_started_slot 中真正连接，
@@ -2200,7 +2200,7 @@ class SubAgentManager(QObject):
 
         关键设计：不直接在 _start_dag_node 中连接 DAG 回调，而是延后到
         task_started 的信号处理过程中。这与 UI 回调（_on_sub_agent_task_started）
-        完全相同的连接时机，消除了 PyQt5 对嵌套信号上下文中创建 lambda 的潜在
+        完全相同的连接时机，消除了 PySide6 对嵌套信号上下文中创建 lambda 的潜在
         行为差异（这种差异会导致 DAG 回调被静默丢弃而 UI 回调正常工作）。
         """
         # 只处理属于 DAG 的任务（在 _task_to_dag 中有记录的）
@@ -2225,8 +2225,8 @@ class SubAgentManager(QObject):
     def _safe_dag_node_finished(self, dag_id: str, nid: str, task_id: str, result: str):
         """
         DAG 完成回调的安全包装 —— 关键作用：
-        1. 在 lambda 边界上 100% 捕获异常，**不让任何异常抛给 PyQt5**。
-           PyQt5 在某些版本下，如果 slot 抛异常会自动 disconnect，
+        1. 在 lambda 边界上 100% 捕获异常，**不让任何异常抛给 PySide6**。
+           PySide6 在某些版本下，如果 slot 抛异常会自动 disconnect，
            这会让下游节点永远不被启动。
         2. 添加诊断日志，确认这个 lambda 真的被发射信号触发了。
         """
@@ -2240,7 +2240,7 @@ class SubAgentManager(QObject):
             )
 
     def _safe_dag_node_error(self, dag_id: str, nid: str, task_id: str, error: str):
-        """DAG 错误回调的安全包装（防 PyQt5 异常自动断开连接）"""
+        """DAG 错误回调的安全包装（防 PySide6 异常自动断开连接）"""
         logger.info(f"[DAG] 🔥 DAG error callback FIRED: nid={nid}, task_id={task_id[:8]}, error={error[:50]}")
         try:
             self._on_dag_node_error(dag_id, nid, task_id, error)

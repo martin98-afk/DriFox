@@ -11,7 +11,7 @@ import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QEventLoop, QThread
+from PySide6.QtCore import QEventLoop, QThread
 
 from app.core.agent import PermissionResolver
 from app.core.chat_session import (

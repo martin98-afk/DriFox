@@ -427,7 +427,7 @@ def test_replace_open_isolated_per_conversation(qtbot, monkeypatch):
 
 def test_overlay_limit_width_config_only(qtbot):
     """覆盖层限宽只针对配置类卡片：settings → True，diff_viewer/sub_agent_session → False"""
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
 
     tm = TabManagerWindow.create_instance()
     qtbot.addWidget(tm)

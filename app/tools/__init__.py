@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QObject
+from PySide6.QtCore import QObject
 
 # [PERF] 以下重依赖导入全部延迟到实例化/调用点，避免 import app.tools 时拉起
 # mcp(247ms)/lsprotocol(255ms)/plugin_tool_loader(262ms) 三条重链：

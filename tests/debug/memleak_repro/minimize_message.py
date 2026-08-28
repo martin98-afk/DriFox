@@ -45,19 +45,19 @@ def _rss_mb() -> float:
 def _obj_counts(extra_keys: Tuple[str, ...] = ()) -> Dict[str, int]:
     counts: Dict[str, int] = {}
     keys = (
-        "PyQt5.QtCore.QObject",
-        "PyQt5.QtCore.QTimer",
-        "PyQt5.QtCore.QPropertyAnimation",
-        "PyQt5.QtCore.QVariantAnimation",
-        "PyQt5.QtWidgets.QWidget",
-        "PyQt5.QtWidgets.QLabel",
-        "PyQt5.QtWidgets.QPushButton",
-        "PyQt5.QtWidgets.QTextEdit",
-        "PyQt5.QtWidgets.QTextDocument",
-        "PyQt5.QtWidgets.QVBoxLayout",
-        "PyQt5.QtGui.QColor",
-        "PyQt5.QtGui.QLinearGradient",
-        "PyQt5.QtGui.QPainterPath",
+        "PySide6.QtCore.QObject",
+        "PySide6.QtCore.QTimer",
+        "PySide6.QtCore.QPropertyAnimation",
+        "PySide6.QtCore.QVariantAnimation",
+        "PySide6.QtWidgets.QWidget",
+        "PySide6.QtWidgets.QLabel",
+        "PySide6.QtWidgets.QPushButton",
+        "PySide6.QtWidgets.QTextEdit",
+        "PySide6.QtWidgets.QTextDocument",
+        "PySide6.QtWidgets.QVBoxLayout",
+        "PySide6.QtGui.QColor",
+        "PySide6.QtGui.QLinearGradient",
+        "PySide6.QtGui.QPainterPath",
     ) + extra_keys
     for obj in gc.get_objects():
         try:
@@ -67,7 +67,7 @@ def _obj_counts(extra_keys: Tuple[str, ...] = ()) -> Dict[str, int]:
         if cn in keys:
             counts[cn] = counts.get(cn, 0) + 1
     try:
-        from PyQt5.QtCore import QObject  # type: ignore
+        from PySide6.QtCore import QObject  # type: ignore
         counts["QObject_total"] = sum(1 for o in gc.get_objects() if isinstance(o, QObject))
     except Exception:
         pass
@@ -84,15 +84,15 @@ def _snap(label: str) -> Dict[str, Any]:
 
 
 def _pump(app, ms: int = 80) -> None:
-    from PyQt5.QtCore import QEventLoop, QTimer  # type: ignore
+    from PySide6.QtCore import QEventLoop, QTimer  # type: ignore
     loop = QEventLoop()
     QTimer.singleShot(ms, loop.quit)
-    loop.exec_()
+    loop.exec()
     app.processEvents()
 
 
 def _make_chat_widget():
-    from PyQt5.QtWidgets import QWidget, QVBoxLayout  # type: ignore
+    from PySide6.QtWidgets import QWidget, QVBoxLayout  # type: ignore
     w = QWidget()
     layout = QVBoxLayout(w)
     layout.setSpacing(8)
@@ -118,7 +118,7 @@ def _flush_layout(layout, app, pump_ms: int = 80):
 
 def stage_M0_baseline(app, rounds: int) -> List[Dict[str, Any]]:
     """M0：纯 QWidget，不引入 MessageCard。"""
-    from PyQt5.QtWidgets import QWidget  # type: ignore
+    from PySide6.QtWidgets import QWidget  # type: ignore
     snaps: List[Dict[str, Any]] = []
     snaps.append(_snap(f"M0:r0:init"))
     chat_widget, layout = _make_chat_widget()
@@ -370,13 +370,13 @@ def _diff_obj(a: Dict[str, int], b: Dict[str, int]) -> Dict[str, int]:
 def _fmt(label: str, snap: Dict[str, Any]) -> str:
     objs = snap.get("obj", {})
     qobj = objs.get("QObject_total", 0)
-    qwid = objs.get("PyQt5.QtWidgets.QWidget", 0)
-    qtext = objs.get("PyQt5.QtWidgets.QTextEdit", 0)
-    qcolor = objs.get("PyQt5.QtGui.QColor", 0)
-    qgrad = objs.get("PyQt5.QtGui.QLinearGradient", 0)
-    qpp = objs.get("PyQt5.QtGui.QPainterPath", 0)
-    qtimer = objs.get("PyQt5.QtCore.QTimer", 0)
-    qanim = objs.get("PyQt5.QtCore.QVariantAnimation", 0)
+    qwid = objs.get("PySide6.QtWidgets.QWidget", 0)
+    qtext = objs.get("PySide6.QtWidgets.QTextEdit", 0)
+    qcolor = objs.get("PySide6.QtGui.QColor", 0)
+    qgrad = objs.get("PySide6.QtGui.QLinearGradient", 0)
+    qpp = objs.get("PySide6.QtGui.QPainterPath", 0)
+    qtimer = objs.get("PySide6.QtCore.QTimer", 0)
+    qanim = objs.get("PySide6.QtCore.QVariantAnimation", 0)
     base = f"{label:<32} RSS={snap['rss_mb']:>8.2f}MB  QObj={qobj:>4}  QWid={qwid:>4}"
     base += f"  QTextEdit={qtext:>3}  QColor={qcolor:>3}  Grad={qgrad:>2}  PainterPath={qpp:>2}  QTimer={qtimer:>3}  QVariantAnim={qanim:>2}"
     if "py_alloc_mb" in snap:
@@ -385,8 +385,8 @@ def _fmt(label: str, snap: Dict[str, Any]) -> str:
 
 
 def run(args: argparse.Namespace) -> int:
-    import PyQt5.QtWebEngineWidgets  # noqa: F401
-    from PyQt5.QtWidgets import QApplication  # type: ignore
+    import PySide6.QtWebEngineWidgets  # noqa: F401
+    from PySide6.QtWidgets import QApplication  # type: ignore
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

@@ -17,9 +17,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from PyQt5.QtCore import QTimer, QEventLoop  # noqa: E402
-import PyQt5.QtWebEngineWidgets  # noqa: F401,E402  # 必须先于 QApplication 创建
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtCore import QTimer, QEventLoop  # noqa: E402
+import PySide6.QtWebEngineWidgets  # noqa: F401,E402  # 必须先于 QApplication 创建
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from app.widgets.message_card import PlainTextViewer  # noqa: E402
 
@@ -79,7 +79,7 @@ def run_trial(app, text: str, cap: int) -> dict:
     t.setInterval(SAMPLE_MS)
     t.timeout.connect(tick)
     t.start()
-    loop.exec_()
+    loop.exec()
     t.stop()
 
     sb_flips = sum(

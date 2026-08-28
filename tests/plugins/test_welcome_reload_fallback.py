@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("PyQt5.QtWidgets")
+pytest.importorskip("PySide6.QtWidgets")
 
 
 def _read_source(path: str) -> str:

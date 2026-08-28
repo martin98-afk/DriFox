@@ -28,7 +28,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 
 def _ensure_qapp():
@@ -50,7 +50,7 @@ def _make_mcp_card():
     from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 
     card = MCPListSettingCard.__new__(MCPListSettingCard)
-    # 信号用 mock 遮蔽（避免未初始化 QObject 上访问 pyqtSignal）
+    # 信号用 mock 遮蔽（避免未初始化 QObject 上访问 Signal）
     card.serversChanged = MagicMock()
     card._server_rows = {}
     card._pending_server_switches = {}

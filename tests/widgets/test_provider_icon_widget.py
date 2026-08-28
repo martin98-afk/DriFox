@@ -11,13 +11,13 @@
 import sys
 
 import pytest
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication
 
 
 def _ensure_qapp():
     app = QApplication.instance()
     if app is None:
-        from PyQt5.QtCore import Qt as _Qt
+        from PySide6.QtCore import Qt as _Qt
 
         QApplication.setAttribute(_Qt.AA_ShareOpenGLContexts)
         app = QApplication(sys.argv)
@@ -96,7 +96,7 @@ class TestProviderIconWidgetInitIconClearText:
 
     def test_known_provider_uses_icon_not_text(self, monkeypatch):
         """DeepSeek 是内置服务商 → _text 应当为空，调用 _init_icon 走图标分支"""
-        from PyQt5.QtGui import QIcon, QPixmap
+        from PySide6.QtGui import QIcon, QPixmap
 
         from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 
@@ -128,7 +128,7 @@ class TestProviderIconWidgetFontScale:
 
         通过 monkeypatch 替换 scale_font_size 验证 paintEvent 内确实调用了它
         """
-        from PyQt5.QtGui import QFont, QPixmap
+        from PySide6.QtGui import QFont, QPixmap
 
         from app.utils import design_tokens
         from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget

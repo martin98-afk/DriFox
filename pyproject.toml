@@ -8,7 +8,7 @@ license = {text = "MIT"}
 authors = [
     {name = "98-afk", email = "98-afk@drifox.com"}
 ]
-keywords = ["ai", "chat", "llm", "desktop", "pyqt5"]
+keywords = ["ai", "chat", "llm", "desktop", "pyside6"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
@@ -22,10 +22,8 @@ classifiers = [
 
 # 核心运行时依赖
 dependencies = [
-    "PyQt5>=5.15.0,<5.15.16",
-    "PyQtWebEngine>=5.15.0,<5.15.7",
-    "PyQt-Fluent-Widgets",
-    "qtpy>=2.0.0",
+    "PySide6>=6.9",
+    "PySide6-Fluent-Widgets",
     "loguru>=0.7.0",
     "openai>=1.0.0",
     "httpx>=0.25.0",
@@ -50,9 +48,7 @@ dependencies = [
     # LSP 集成 (Language Server Protocol)
     "pygls>=2.0.0",
     "lsprotocol",
-    # Windows 平台上 pyqt5-qt5 / pyqtwebengine-qt5 仅 5.15.2 提供 win_amd64 wheel
-    "pyqt5-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",
-    "pyqtwebengine-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",
+    # Windows 平台 pywinpty 仅提供 win_amd64 wheel
     "pywinpty>=3.0.5 ; sys_platform == 'win32'",
 ]
 

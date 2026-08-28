@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from uuid import uuid4
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QRunnable, QThread, QThreadPool, pyqtSignal
+from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, Signal
 
 # 常见脚本扩展名（用于从 hook command 中解析脚本路径，以确定 cwd）
 _SCRIPT_EXTENSIONS = r"cmd|bat|ps1|sh|bash|py"
@@ -195,7 +195,7 @@ def trigger_plugin_changed_hook(context: dict) -> None:
 def _is_ui_thread() -> bool:
     """检测当前是否运行在 Qt 主线程（UI 线程）上"""
     try:
-        from PyQt5.QtWidgets import QApplication
+        from PySide6.QtWidgets import QApplication
 
         app = QApplication.instance()
         if app is None:
@@ -560,8 +560,8 @@ class HookExecutionResult:
 class HookWorkerSignals(QObject):
     """Worker 信号，用于执行完后回调"""
 
-    finished = pyqtSignal(str, str, bool, str)  # event_name, output, success, status_message
-    status_changed = pyqtSignal(str, str, bool)  # event_name, status_message, is_start
+    finished = Signal(str, str, bool, str)  # event_name, output, success, status_message
+    status_changed = Signal(str, str, bool)  # event_name, status_message, is_start
 
 
 class HookWorker(QRunnable):
@@ -1834,7 +1834,7 @@ class HookManager:
         现改为：每轮先查 done（快路径，常见情况零等待直接返回），
         轮询间隔 50ms→5ms，等待地板从 50ms 降到 ~5ms。
         """
-        from PyQt5.QtCore import QEventLoop, QTimer
+        from PySide6.QtCore import QEventLoop, QTimer
 
         pending = set(future_to_idx.keys())
         check_interval = 5  # 每 5ms 检查一次（原 50ms：等待地板 50ms，团队加载瓶颈）
@@ -1871,7 +1871,7 @@ class HookManager:
             # 处理 Qt 事件 5ms，保持 UI 响应
             loop = QEventLoop()
             QTimer.singleShot(check_interval, loop.quit)
-            loop.exec_()
+            loop.exec()
             elapsed += check_interval
 
     @staticmethod

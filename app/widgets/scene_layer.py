@@ -24,8 +24,8 @@
 
 from typing import Optional
 
-from PyQt5.QtCore import QEvent, Qt
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtWidgets import (
     QGraphicsBlurEffect,
     QGraphicsOpacityEffect,
     QLabel,
@@ -37,8 +37,8 @@ _CHAT_FRAME_RADIUS = 8
 
 from typing import Optional
 
-from PyQt5.QtCore import QEvent, Qt
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QEvent, Qt
+from PySide6.QtWidgets import (
     QGraphicsBlurEffect,
     QGraphicsOpacityEffect,
     QLabel,
@@ -92,7 +92,7 @@ class SceneLayer(QWidget):
         image = cfg.get("image")
         if image and image_resolver:
             resolved = image_resolver(image)
-            from PyQt5.QtGui import QPixmap
+            from PySide6.QtGui import QPixmap
 
             pix = QPixmap(resolved)
             if not pix.isNull():

@@ -4,20 +4,20 @@ import os
 import sys
 
 # 必须在创建 QApplication 前设置 Qt 属性
-from PyQt5.QtCore import Qt
+from PySide6.QtCore import Qt
 QApplication_ShareOpenGL = Qt.AA_ShareOpenGLContexts
 QtCore = Qt
 
 
 def _ensure_qapp():
     """确保 QApplication 可用（在 conftest 中已经设置，这里 fallback）"""
-    from PyQt5.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication
     return QApplication.instance() or QApplication(sys.argv)
 
 
 def test_register_external_card():
     """注册外部卡片"""
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
     from app.widgets.cards.card_manager import CardManager, ContainerType
 
     _ensure_qapp()
@@ -42,7 +42,7 @@ def test_register_external_card():
 
 def test_unregister_external_card():
     """注销外部卡片"""
-    from PyQt5.QtWidgets import QWidget
+    from PySide6.QtWidgets import QWidget
     from app.widgets.cards.card_manager import CardManager, ContainerType
 
     _ensure_qapp()
