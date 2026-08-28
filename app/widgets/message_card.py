@@ -95,6 +95,7 @@ from app.core import (
 from app.core.message_content import make_tool_result_block
 from app.core.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
+    BorderRadius,
     Colors,
     _get_global_font,
     current_theme,
@@ -104,6 +105,10 @@ from app.utils.design_tokens import (
     scale_font_size,
     scale_icon_size,
 )
+
+# 正文 HTML 的圆角变量串：与 design_tokens.BorderRadius 同源，
+# 保证 Web 侧（消息正文）与 Qt 侧（控件）使用同一套圆角节奏。
+_BORDER_RADIUS_CSS_VARS = BorderRadius.CSS_VARS
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.markdown_block_viewer import MarkdownBlockViewer
 
@@ -3632,6 +3637,11 @@ class CodeWebViewer(QWebEngineView):
                     --accent-glow: {_accent_rgba(theme["accent"], 0.10)};
                     --row-alt: {"rgba(15, 23, 42, 0.03)" if _is_light else "rgba(255, 255, 255, 0.02)"};
                     --row-hover: {"rgba(15, 23, 42, 0.05)" if _is_light else "rgba(255, 255, 255, 0.05)"};
+                    /* 表头底色：比 --row-hover 更实一层，浅色主题下用深色叠加而非白叠加，
+                       否则白底上叠白 = 表头与表体完全无分界（此前的硬编码缺陷）。 */
+                    --row-header: {"rgba(15, 23, 42, 0.06)" if _is_light else "rgba(255, 255, 255, 0.04)"};
+                    /* 圆角节奏（与 design_tokens.BorderRadius 同源，4/6/10/14/18/全圆） */
+                    {_BORDER_RADIUS_CSS_VARS}
                 }}
                 html {{
                     overflow: hidden;
@@ -3686,7 +3696,7 @@ class CodeWebViewer(QWebEngineView):
                 #content-placeholder img {{
                     max-width: 100%;
                     height: auto;
-                    border-radius: 8px;
+                    border-radius: var(--r-md);
                     display: block;
                     margin: 8px 0;
                     object-fit: contain;
@@ -3713,10 +3723,10 @@ class CodeWebViewer(QWebEngineView):
                 strong {{ color: var(--text) !important; font-weight: 600; }}
                 em {{ color: var(--text-secondary) !important; font-style: italic; }}
                 code:not(.code-content *):not(pre code) {{ 
-                    background: rgba(102, 198, 255, 0.12) !important; 
-                    color: #9bddff !important;
+                    background: var(--accent-glow) !important; 
+                    color: var(--accent-text) !important;
                     padding: 2px 6px; 
-                    border-radius: 5px; 
+                    border-radius: var(--r-sm); 
                     font-family: {mono_font};
                     font-size: {code_font_size}px;
                 }}
@@ -3748,7 +3758,9 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {body_font_size}px;
                 }}
                 table:not(.code-table) th {{
-                    background: rgba(255, 255, 255, 0.04);
+                    /* 原为硬编码 rgba(255,255,255,0.04)：浅色主题下白叠白，表头
+                       与表体完全无分界。改用主题感知的 --row-header。 */
+                    background: var(--row-header);
                     padding: 8px 12px;
                     text-align: left;
                     font-weight: 600;
@@ -3760,8 +3772,11 @@ class CodeWebViewer(QWebEngineView):
                     border-bottom: 1px solid var(--border);
                     color: var(--text-secondary) !important;
                 }}
-                table:not(.code-table) tr:nth-child(even) {{ background: rgba(255, 255, 255, 0.02); }}
-                table:not(.code-table) tr:hover {{ background: rgba(255, 255, 255, 0.05); }}
+                /* 原为硬编码白色叠加，浅色主题不可见 → 改用已定义的语义变量 */
+                table:not(.code-table) tr:nth-child(even) {{ background: var(--row-alt); }}
+                table:not(.code-table) tr:hover {{ background: var(--row-hover); }}
+                /* 表体行 hover 时文字提亮，增强可扫描性 */
+                table:not(.code-table) tr:hover td {{ color: var(--text) !important; }}
 
                 /* ── 表格滚动容器（JS 在 updateContent 中自动包裹每个 <table>） ── */
                 .table-scroll-wrapper {{
