@@ -270,7 +270,7 @@ def get_capsule_style() -> str:
     return f"""
         background: {theme["capsule_bg"]};
         border: 1px solid {theme["capsule_border"]};
-        border-radius: 12px;
+        border-radius: {BorderRadius.LG};
     """
 
 
@@ -722,14 +722,7 @@ class BorderRadius:
 
     # CSS 变量声明串：供 QWebEngine 正文样式注入，保证 Web 侧与 Qt 侧同源。
     # 用法：在 :root 中插入 BORDER_RADIUS_CSS_VARS，正文 CSS 用 var(--r-md) 引用。
-    CSS_VARS = (
-        "--r-xs: 4px; "
-        "--r-sm: 6px; "
-        "--r-md: 10px; "
-        "--r-lg: 14px; "
-        "--r-xl: 18px; "
-        "--r-pill: 999px;"
-    )
+    CSS_VARS = "--r-xs: 4px; --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-xl: 18px; --r-pill: 999px;"
 
 
 # ============ 间距系统 ============
@@ -794,7 +787,7 @@ class CardStyles:
             CardWidget, SimpleCardWidget {{
                 background-color: {Colors.CARD_BG.format(alpha=alpha)};
                 border: 1px solid {Colors.BORDER};
-                border-radius: 8px;
+                border-radius: {BorderRadius.MD};
             }}
         """
 
@@ -804,7 +797,7 @@ class CardStyles:
         Colors.refresh()
         return f"""
             background-color: {Colors.CONTENT_BG};
-            border-radius: 6px;
+            border-radius: {BorderRadius.SM};
         """
 
     @staticmethod
@@ -826,7 +819,7 @@ class CardStyles:
             }}
             QScrollBar::handle:vertical {{
                 background: {Colors.SCROLLBAR_HANDLE_BG};
-                border-radius: 3px;
+                border-radius: {BorderRadius.XS};
                 min-height: 30px;
             }}
             QScrollBar::handle:vertical:hover {{
@@ -858,7 +851,7 @@ class CardStyles:
             background-color: {Colors.CONTENT_BG};
             color: {Colors.TEXT_PRIMARY};
             border: 1px solid {Colors.BORDER};
-            border-radius: 4px;
+            border-radius: {BorderRadius.XS};
             padding: 4px 8px;
             {_get_font_family_css()}
             {font_size_css(12)}
@@ -873,7 +866,7 @@ class CardStyles:
             background-color: {Colors.CONTENT_BG};
             color: {Colors.TEXT_PRIMARY};
             border: 1px solid {Colors.BORDER};
-            border-radius: 4px;
+            border-radius: {BorderRadius.XS};
             padding: 4px 8px;
             {_get_font_family_css()}
             {font_size_css(12)}
@@ -912,7 +905,7 @@ class TabStyles:
                 {font_size_css(11)}
                 font-weight: bold;
                 padding: 3px 8px;
-                border-radius: 4px;
+                border-radius: {BorderRadius.XS};
                 background-color: {Colors.TAB_ACTIVE_BG};
                 font-family: '{_get_global_font()}';
             }}
@@ -926,7 +919,7 @@ class TabStyles:
                 color: {Colors.TEXT_SECONDARY};
                 {font_size_css(11)}
                 padding: 3px 8px;
-                border-radius: 4px;
+                border-radius: {BorderRadius.XS};
                 cursor: pointer;
                 font-family: '{_get_global_font()}';
             }}
@@ -947,6 +940,8 @@ class ItemStyles:
             QRadioButton::indicator {
                 width: 16px;
                 height: 16px;
+                /* 刻意保持 8px 字面量：等于尺寸的一半 = 正圆指示器。
+                   此处语义是"半径"而非"圆角档位"，套用 token 会丢失该语义。 */
                 border-radius: 8px;
                 border: 2px solid #8e8e8e;
                 background-color: transparent;
@@ -960,11 +955,11 @@ class ItemStyles:
     @staticmethod
     def tag() -> str:
         """标签样式"""
-        return """
+        return f"""
             color: #fff; 
             font-weight: bold; 
             background-color: rgba(102, 198, 255, 0.35); 
-            border-radius: 4px; 
+            border-radius: {BorderRadius.XS}; 
             padding: 2px 8px;
         """
 
@@ -975,7 +970,7 @@ class ButtonStyles:
     @staticmethod
     def tool_button() -> str:
         """ToolButton 透明背景样式"""
-        return "background-color: transparent; border-radius: 4px;"
+        return f"background-color: transparent; border-radius: {BorderRadius.XS};"
 
     @staticmethod
     def primary_action() -> str:
@@ -985,7 +980,7 @@ class ButtonStyles:
                 background-color: #0078d4;
                 color: #ffffff;
                 border: none;
-                border-radius: 5px;
+                border-radius: {BorderRadius.SM};
                 padding: 5px 16px;
                 {font_size_css(13)}
                 font-weight: bold;
@@ -1025,7 +1020,7 @@ class ComboBoxStyles:
                 color: {Colors.TEXT_PRIMARY};
                 background-color: {Colors.CONTENT_BG};
                 border: 1px solid {Colors.BORDER};
-                border-radius: 5px;
+                border-radius: {BorderRadius.SM};
                 padding: 5px 12px 5px 10px;
                 min-height: 28px;
                 {font_size_css(12)}
@@ -1065,7 +1060,7 @@ class ComboBoxStyles:
                 color: {Colors.TEXT_PRIMARY};
                 background-color: {Colors.CONTENT_BG};
                 border: 1px solid {Colors.BORDER};
-                border-radius: 6px;
+                border-radius: {BorderRadius.SM};
                 padding: 4px;
                 outline: none;
                 show-decoration-selected: 1;
@@ -1073,7 +1068,7 @@ class ComboBoxStyles:
             QAbstractItemView::item {{
                 padding: 6px 14px 6px 12px;
                 min-height: 36px;
-                border-radius: 3px;
+                border-radius: {BorderRadius.XS};
             }}
             QAbstractItemView::item:hover {{
                 background-color: {Colors.HOVER_BG};
@@ -1183,7 +1178,7 @@ def get_content_bg_style() -> str:
     """获取内容区背景样式"""
     return f"""
         background-color: {Colors.CONTENT_BG};
-        border-radius: 6px;
+        border-radius: {BorderRadius.SM};
     """
 
 
@@ -1373,11 +1368,11 @@ def _ensure_qfluentwidgets_tooltip_patch() -> None:
             if tt:
                 # 完全替换 ToolTip 的样式表（覆盖 FluentStyleSheet.TOOL_TIP）
                 self.setStyleSheet(f"""
-                    ToolTip {{ border-radius: 6px; }}
+                    ToolTip {{ border-radius: {BorderRadius.SM}; }}
                     ToolTip>#container {{
                         background-color: {tt["bg"]};
                         border: 1px solid {tt["border_c"]};
-                        border-radius: 6px;
+                        border-radius: {BorderRadius.SM};
                     }}
                     ToolTip>#container[transparent=true] {{
                         background-color: transparent;

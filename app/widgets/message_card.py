@@ -460,10 +460,10 @@ def _wrap_code_blocks_with_copy_button_web(
             <!-- 顶部工具栏区域 -->
             <div style="
                 display: flex; justify-content: space-between; align-items: center;
-                padding: 6px 10px; height: 30px; background: rgba(255, 255, 255, 0.03);
+                padding: 6px 10px; height: 30px; background: var(--code-toolbar, rgba(255, 255, 255, 0.03));
                 border-bottom: 1px solid var(--code-border, rgba(45, 45, 57, 0.5)); border-radius: 10px 10px 0 0;
             ">
-                {f'<span style="color: #FFA500; font-size: {_font_size}px; font-weight: bold;">{lang}</span>' if lang else '<span style="color: #888;">Plain Text</span>'}
+                {f'<span style="color: var(--accent-warm, #FFA500); font-size: {_font_size}px; font-weight: bold;">{lang}</span>' if lang else '<span style="color: var(--text-muted, #888);">Plain Text</span>'}
                 <div style="display: flex; gap: 12px; align-items: center; padding-right: 4px;">
                     <button type="button" data-action="save_file" data-lang="{lang}" data-copy="{b64_copy}" class="code-btn" data-tooltip="保存本地文件" style="width: 30px; height: 30px; background: transparent; border: none; cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; border-radius: 6px;">
                         <img src="{_icon_prefix}/导入.svg" style="width:22px; height:22px; pointer-events: none;" />
@@ -2350,9 +2350,14 @@ _STREAMING_DOCK_CSS = """
                     order: 2;
                     margin: 8px 0 0 0;
                 }
-                /* 坞态限高：≈3-4 行条目（行高约 26px + 上下 padding） */
+                /* 坞态限高：流式期间工具区保持内滚，但需能看到足够多的实时条目。
+                   原值 110px 仅 ≈3-4 行，工具/思考稍多就只能看到一小截，
+                   视觉上与"折叠"难区分 —— 用户反馈误以为工具区默认收起了。
+                   放宽到 220px（≈8 行）后，常规工具序列可完整看到实时进度，
+                   同时仍为 max-height（非无限增长），保持"卡片总高不随流式膨胀"
+                   的坞态设计意图。 */
                 body.streaming-dock #tool-content {
-                    max-height: 110px;
+                    max-height: 220px;
                 }
                 /* 任务列表坞态：固定高度（非仅 max-height）——切断工具区流式抖动向 todo 传导，
                    项目增减时限高内高度也不变，流式期间观感稳定 */
@@ -3711,14 +3716,24 @@ class CodeWebViewer(QWebEngineView):
                     margin: 0;
                     max-width: none;
                 }}
-                h1, h2, h3, h4, h5, h6 {{ color: var(--text) !important; font-weight: 700; letter-spacing: 0.01em; }}
-                h1 {{ font-size: 1.45em; margin: 12px 0 8px; }}
-                h2 {{ font-size: 1.25em; margin: 10px 0 6px; }}
-                h3 {{ font-size: 1.1em; margin: 8px 0 4px; }}
-                p {{ margin: 8px 0; color: var(--text-secondary); }}
+                /* 排版优化：标题改用负字距（-0.01em）——字号越大越需收紧字距，
+                   这是通行排版实践；正字距会让大标题显得松散。
+                   同时统一标题行高 1.3，避免大字号下默认行高过松。 */
+                h1, h2, h3, h4, h5, h6 {{
+                    color: var(--text) !important;
+                    font-weight: 700;
+                    letter-spacing: -0.01em;
+                    line-height: 1.3;
+                }}
+                /* 上边距 > 下边距：标题在视觉上归属于其后的内容（格式塔接近原则） */
+                h1 {{ font-size: 1.45em; margin: 18px 0 8px; }}
+                h2 {{ font-size: 1.25em; margin: 16px 0 6px; }}
+                h3 {{ font-size: 1.1em; margin: 14px 0 4px; }}
+                /* 正文行高 1.65：中英混排下兼顾可读性与密度（浏览器默认 ~1.2 过挤） */
+                p {{ margin: 8px 0; color: var(--text-secondary); line-height: 1.65; }}
                 a {{ color: var(--accent) !important; text-decoration: none; }}
                 a:hover {{ text-decoration: underline; }}
-                ul, ol {{ margin: 8px 0; padding-left: 24px; }}
+                ul, ol {{ margin: 8px 0; padding-left: 24px; line-height: 1.65; }}
                 li {{ margin: 4px 0; color: var(--text-secondary); }}
                 strong {{ color: var(--text) !important; font-weight: 600; }}
                 em {{ color: var(--text-secondary) !important; font-style: italic; }}
@@ -3752,7 +3767,7 @@ class CodeWebViewer(QWebEngineView):
                     margin: 10px 0;
                     background: transparent;
                     border: 1px solid var(--border);
-                    border-radius: 10px;
+                    border-radius: var(--r-md);
                     overflow: hidden;
                     font-family: '{font_family}', sans-serif;
                     font-size: {body_font_size}px;
@@ -3784,14 +3799,14 @@ class CodeWebViewer(QWebEngineView):
                     overflow-y: hidden;
                     margin: 10px 0;
                     border: 1px solid var(--border);
-                    border-radius: 10px;
+                    border-radius: var(--r-md);
                 }}
                 .table-scroll-wrapper::-webkit-scrollbar {{
                     height: 8px;
                 }}
                 .table-scroll-wrapper::-webkit-scrollbar-thumb {{
                     background: var(--border);
-                    border-radius: 4px;
+                    border-radius: var(--r-xs);
                 }}
                 .table-scroll-wrapper::-webkit-scrollbar-thumb:hover {{
                     background: var(--border-strong);
@@ -3816,7 +3831,8 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 /* 继承 wrapper 内部表格的行样式 */
                 .table-scroll-wrapper > table th {{
-                    background: rgba(255, 255, 255, 0.04);
+                    /* 与上方 table th 同步：改用主题感知变量，修复浅色主题白叠白 */
+                    background: var(--row-header);
                     padding: 8px 12px;
                     text-align: left;
                     font-weight: 600;
@@ -4092,7 +4108,11 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 .code-line {{ padding-left: 12px !important; white-space: pre; font-family: {mono_font}; }}
 
-                .code-btn:hover {{ background: rgba(255,255,255,0.08) !important; }}
+                /* 代码工具按钮 hover：原为硬编码白色叠加，浅色主题下几乎不可见。
+                   改为按主题取反色叠加，保证两种主题下都有明确反馈。 */
+                .code-btn:hover {{
+                    background: {"rgba(15, 23, 42, 0.08)" if _is_light_diff else "rgba(255,255,255,0.08)"} !important;
+                }}
 
                 .cm-collapsible {{
                     overflow: hidden;
@@ -4225,13 +4245,15 @@ class CodeWebViewer(QWebEngineView):
                     overflow-x: hidden;
                     transition: opacity 200ms ease;
                 }}
-                /* 思考内容加载骨架屏动画 */
+                /* 思考内容加载骨架屏动画
+                   原为硬编码白色渐变：浅色主题下白叠白，骨架屏完全看不见
+                   （用户会误以为内容没加载）。改为按主题选择反色叠加。 */
                 .think-content.loading {{
                     background-image: linear-gradient(
                         90deg,
-                        rgba(255, 255, 255, 0.02) 25%,
-                        rgba(255, 255, 255, 0.05) 50%,
-                        rgba(255, 255, 255, 0.02) 75%
+                        {"rgba(15, 23, 42, 0.03)" if _is_light_diff else "rgba(255, 255, 255, 0.02)"} 25%,
+                        {"rgba(15, 23, 42, 0.07)" if _is_light_diff else "rgba(255, 255, 255, 0.05)"} 50%,
+                        {"rgba(15, 23, 42, 0.03)" if _is_light_diff else "rgba(255, 255, 255, 0.02)"} 75%
                     );
                     background-size: 200% 100%;
                     animation: think-shimmer 1.5s ease-in-out infinite;
@@ -4266,8 +4288,10 @@ class CodeWebViewer(QWebEngineView):
                 .think-block .think-block__summary {{
                     transition: background-color 220ms ease;
                 }}
+                /* 流式思考中的标题底色：原为硬编码白色叠加，浅色主题下不可见
+                   （用户感知不到"思考中"的状态反馈）。改为主题感知反色叠加。 */
                 .think-block[data-streaming="true"] .think-block__summary {{
-                    background: rgba(255, 255, 255, 0.04);
+                    background: {"rgba(15, 23, 42, 0.05)" if _is_light_diff else "rgba(255, 255, 255, 0.04)"};
                 }}
                 .think-snake {{
                     display: inline-block;
@@ -7167,9 +7191,13 @@ class CodeWebViewer(QWebEngineView):
         # 才会渲染为 think-block（折叠）。强制重渲染会把流式期间的
         # 展开态误转为折叠态，违背"流式展开 / 历史折叠"的产品预期。
         self._schedule_render(immediate=True)
-        # 🚀 [PERF] 延迟工具区折叠，让 WebEngine 先完成 _schedule_render 的
-        # 布局/绘制后再执行 DOM 属性操作，分离连续 runJavaScript 阻塞。
-        QTimer.singleShot(0, self._auto_collapse_tool_section)
+        # 🐛 产品诉求：流式结束后工具与思考区**保持展开**（默认展开）。
+        # 旧行为在此处调用 _auto_collapse_tool_section() 自动折叠工具区，
+        # 用户回看时只看到一条"工具与思考 · N 项"的标题栏、内容全隐藏，
+        # 每次都要手动点开 —— 与研究 AI 执行过程的核心场景相悖。
+        # 现改为不自动折叠；方法本身保留，若需恢复「结束后收起」的旧行为，
+        # 取消下面这行注释即可（它内部已做"仍有流式块则跳过"的守卫）。
+        # QTimer.singleShot(0, self._auto_collapse_tool_section)
 
     def _auto_collapse_tool_section(self):
         """流式结束时自动折叠工具与思考区
@@ -8441,6 +8469,11 @@ class MessageCard(SimpleCardWidget):
         if role == "assistant" and reasoning_content:
             self._content_data.append({"type": "reasoning", "content": reasoning_content})
         self._streaming = False
+        # 本轮对话是否已完成流式输出。用于区分"本轮已结束的消息"与
+        # "从磁盘加载的历史会话"——两者 _streaming 都是 False，但产品诉求
+        # 是前者工具区保持展开，后者折叠（避免长会话加载时信息过载）。
+        # 缺失此标志时，本轮消息在虚拟滚动回收重建后会被误判为历史而突然折叠。
+        self._streaming_finished = False
         self._retrying = False  # 重试模式标志
         # 任务列表快照（卡片底部内嵌 todo 区数据）：viewer 未创建/JS 未就绪时
         # 暂存，viewer 就绪后补推；骨架重载后据此恢复。
@@ -8673,8 +8706,8 @@ class MessageCard(SimpleCardWidget):
                     QLabel {{
                         {get_font_family_css()} font-size: {scale_font_size(11)}px;
                         color: {self._theme["muted"]};
-                        background: rgba(255,255,255,0.03);
-                        border: 1px solid rgba(255,255,255,0.06);
+                        background: {Colors.CONTENT_BG};
+                        border: 1px solid {Colors.BORDER};
                         border-radius: 9px;
                         padding: 2px 8px;
                     }}
@@ -8737,8 +8770,8 @@ class MessageCard(SimpleCardWidget):
                 QLabel {{
                     {get_font_family_css()} font-size: {scale_font_size(11)}px;
                     color: {self._theme["muted"]};
-                    background: rgba(255,255,255,0.03);
-                    border: 1px solid rgba(255,255,255,0.06);
+                    background: {Colors.CONTENT_BG};
+                    border: 1px solid {Colors.BORDER};
                     border-radius: 9px;
                     padding: 2px 8px;
                 }}
@@ -9336,8 +9369,8 @@ class MessageCard(SimpleCardWidget):
                 QLabel {{
                     {get_font_family_css()} font-size: {scale_font_size(11)}px;
                     color: {self._theme["muted"]};
-                    background: rgba(255,255,255,0.03);
-                    border: 1px solid rgba(255,255,255,0.06);
+                    background: {Colors.CONTENT_BG};
+                    border: 1px solid {Colors.BORDER};
                     border-radius: 9px;
                     padding: 2px 8px;
                 }}
@@ -9589,6 +9622,9 @@ class MessageCard(SimpleCardWidget):
         if self._streaming:
             return
         self._streaming = True
+        # 新一轮开始：清除上一轮的"已完成流式"标记，使本轮重新按流式语义
+        # 走展开路径（同 _is_history 的修正，见下方）。
+        self._streaming_finished = False
         # 🐛 修复"工具结果冒出又消失"：新轮流式开始时恢复 viewer 流式模式，
         # 避免 finish_streaming 后 viewer._streaming=False 导致工具结果到达时
         # append_tool_result 跳过 callback 更新，被后续 _perform_update 覆盖。
@@ -9670,6 +9706,9 @@ class MessageCard(SimpleCardWidget):
 
     def stop_streaming_anim(self):
         self._streaming = False
+        # 标记本轮已走过流式（含用户中断/出错中断）：viewer 创建或虚拟滚动
+        # 回收重建时据此保持工具区展开，不再被判为"历史"而折叠。
+        self._streaming_finished = True
         self._retrying = False
         self.error = False  # 重试成功后清除错误状态
         try:
@@ -10472,7 +10511,10 @@ class MessageCard(SimpleCardWidget):
                 self.viewer = MarkdownBlockViewer(self)
                 self.viewer.contentHeightChanged.connect(self._on_qt_viewer_height)
                 self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
-                self.viewer._is_history = not self._streaming
+                # 仅"从磁盘加载的历史会话"折叠；本轮对话（流式进行中或已完成）
+                # 保持展开 —— 后者若按 _streaming=False 判为历史，会在虚拟滚动
+                # 回收重建后突然折叠，与首次渲染的展开态不一致。
+                self.viewer._is_history = not (self._streaming or self._streaming_finished)
                 self._viewer_layout.addWidget(self.viewer)
                 self._lazy_rendered = True
                 self._render_deferred = False
@@ -10492,7 +10534,10 @@ class MessageCard(SimpleCardWidget):
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             if not is_welcome:
                 # 标记是否为历史会话：非流式加载的历史消息自动折叠工具区
-                self.viewer._is_history = not self._streaming
+                # 仅"从磁盘加载的历史会话"折叠；本轮对话（流式进行中或已完成）
+                # 保持展开 —— 后者若按 _streaming=False 判为历史，会在虚拟滚动
+                # 回收重建后突然折叠，与首次渲染的展开态不一致。
+                self.viewer._is_history = not (self._streaming or self._streaming_finished)
                 # 让 viewer 的 restore 逻辑知道哪些工具结果已到达，
                 # 避免全量重渲染时把已完成的运行框以“运行中”状态复活。
                 self.viewer._restore_finished_ids = self._finished_streaming_ids

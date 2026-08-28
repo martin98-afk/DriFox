@@ -100,7 +100,9 @@ _BODY_MAX_HEIGHT = 400  # 代码区内部滚动上限(px)
 _FENCE_RE = re.compile(r"^([ \t]*)```([\w+#.-]*)[ \t]*\n", re.M)
 
 # ── 流式活动坞（Streaming Dock）常量（对齐 WebEngine 版 _STREAMING_DOCK_CSS）──
-_DOCK_LOG_MAX = 110  # 工具卡区内滚限高 ≈3-4 行（web #tool-content max-height）
+# 与 WebEngine 版 body.streaming-dock #tool-content 的 max-height 保持一致。
+# 原值 110（≈3-4 行）视觉上与"折叠"难区分，用户反馈误以为工具区默认收起。
+_DOCK_LOG_MAX = 220  # 工具卡区内滚限高 ≈8 行（web #tool-content max-height）
 _DOCK_TODO_H = 96  # 任务列表坞态固定高（web #todo-content height:96px）
 
 _QWIDGETSIZE_MAX = 16777215
@@ -1324,8 +1326,10 @@ class ToolSectionWidget(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        # 默认折叠（对齐 WebEngine 版简洁模式：加载时工具区收起，点击分隔条展开）
-        self._collapsed = True
+        # 默认展开（与 WebEngine 版对齐：流式结束后工具区保持展开）
+        # 旧值为 True —— 加载即收起，用户每次都要手动点开才能看到工具/思考内容，
+        # 与研究 AI 执行过程的场景相悖。改为展开，需要收起时点分隔条即可。
+        self._collapsed = False
         self._anim: Optional[QPropertyAnimation] = None
         self._keys: List[Tuple[str, str]] = []
         self._widgets: List[QWidget] = []
@@ -1335,11 +1339,12 @@ class ToolSectionWidget(QWidget):
         root.setSpacing(2)
         self._separator = _SeparatorRow("工具与思考", self, icon_name="工具")
         self._separator.clicked.connect(self.toggle)
-        self._separator.set_collapsed(True)
+        self._separator.set_collapsed(False)  # 默认展开：箭头 ▾，与 _collapsed=False 一致
         root.addWidget(self._separator)
 
         self._content_wrap = QFrame(self)
-        self._content_wrap.setMaximumHeight(0)  # 初始收起：内容高度为 0，展开走 toggle 动画
+        # 默认展开：不限高（0 会让内容区完全不可见）
+        self._content_wrap.setMaximumHeight(_QWIDGETSIZE_MAX)
         cv = QVBoxLayout(self._content_wrap)
         cv.setContentsMargins(0, 0, 0, 0)
         cv.setSpacing(2)
@@ -1407,10 +1412,13 @@ class ToolSectionWidget(QWidget):
             self._set_collapsed_instant(False)
 
     def exit_dock(self) -> None:
-        """退出坞态：解除限高 + 折叠（对齐 web finish 后 auto_collapse_tool_section）。"""
+        """退出坞态：解除限高，但**保持展开**。
+
+        旧实现在此处折叠（对齐 WebEngine 版 _auto_collapse_tool_section）。
+        WebEngine 侧该自动折叠已按产品诉求移除（流式结束后默认展开），
+        此处同步调整，避免两条渲染路径行为不一致。
+        """
         self._cards_scroll.setMaximumHeight(_QWIDGETSIZE_MAX)
-        if not self._collapsed:
-            self._set_collapsed_instant(True)
 
     def _set_collapsed_instant(self, collapsed: bool) -> None:
         """无动画切换折叠态（坞态进出用，避免与 dock 布局搬移叠加抖动）。"""

@@ -30,7 +30,9 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 #   现有的「按 PID kill 离屏 renderer」回收机制冲突（kill 一个会误伤全部卡片）。
 #
 # 其余开关均为本地 setHtml 渲染场景下的纯开销，关闭后无功能损失。
-# 可用 DRIFOX_CHROMIUM_FLAGS 环境变量整体覆盖（调试/回退用）。
+#
+# 覆盖方式：用 setdefault，外部若已设置 QTWEBENGINE_CHROMIUM_FLAGS 则以其为准
+# （便于调试或快速回退，例如 QTWEBENGINE_CHROMIUM_FLAGS="" 即完全禁用本组开关）。
 _CHROMIUM_FLAGS = (
     "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
     " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
