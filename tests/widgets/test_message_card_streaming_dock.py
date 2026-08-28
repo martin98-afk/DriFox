@@ -66,64 +66,51 @@ def test_skeleton_template_includes_dock_assets():
     assert "_STREAMING_DOCK_JS" in src
 
 
-def test_content_autoscroll_respects_user_scroll():
-    """回归：工具/思考区更新不得拉底正文容器（区域独立）。
+def test_content_autoscroll_pure_geometric():
+    """回归：自动滚底必须是纯几何判定语义（仅接近底部才跟随）。
 
-    坞态下 #content-placeholder（正文）与 #tool-content（工具与思考）是两个
-    独立内滚动容器。_autoScrollStreamingBody 被工具/思考更新路径共用（流式块
-    注入/完成块替换/_apply_viewer_height 高度回调），原实现无条件
-    _cp.scrollTop = _cp.scrollHeight 置底正文——而 _userScrolledWithin 只由
-    body 的 scroll 事件置位，用户滚正文容器时 body 不滚，保护恒失效，
-    工具区每来新内容就把正文拉底打断阅读。
+    历史方案用 _userScrolledWithin/_userScrolledUp/_progScroll/_suppressScrollEvent
+    等标志位 + delta 启发式推断"用户是否滚过"，但内容钳制/anchor 补偿/程序置底
+    产生的 scroll 事件与用户滚动无法区分，标志位必然误置/漏置，导致
+    "跟随中断漂移"或"无条件拉底覆盖阅读位置"（输出固定到莫名其妙的位置）。
+    新语义：读取几何位置 |scrollHeight - scrollTop - clientHeight| < 阈值，
+    接近底部才滚底，否则零干预——几何位置本身就是用户意图的可靠信号。
     """
     js = mc._CONTENT_AUTOSCROLL_JS
-    # 置底正文容器前必须检查用户上滚标志（与 _scrollToolContentToBottom 同款）
-    assert "if (!_cp._userScrolledUp)" in js, "正文容器置底必须尊重用户上滚"
-    # 程序置底必须打 _progScroll 标记（防 scroll 事件误判为用户滚动）
-    assert "_cp._progScroll = true" in js, "程序置底必须打 _progScroll 标记"
-    # 正文容器必须有 scroll 监听跟踪用户滚动（滚回底部附近恢复跟随）
-    assert "getElementById('content-placeholder')?.addEventListener('scroll'" in js, "正文容器必须有独立 scroll 监听"
-    # 监听内恢复跟随：滚回底部清 _userScrolledUp
-    assert "cp._userScrolledUp = false" in js, "滚回底部附近必须恢复自动跟随"
-    # DOM 操作期间程序性 scroll 必须忽略（防误标正文上滚→置顶），与 body 监听对称
-    assert "if (window._suppressScrollEvent) return;" in js, "DOM 操作期间的程序 scroll 必须忽略"
-    # 程序滚动事件吞掉（不误标用户）
-    assert "if (cp._progScroll) { cp._progScroll = false; return; }" in js
+    # 核心判定函数必须存在
+    assert "function _nearBottom(" in js, "必须有几何判定函数"
+    assert "function _maybeScrollToBottom(" in js
+    assert "Math.abs(max - el.scrollTop) <= threshold" in js, "必须用几何位置判定接近底部"
+    assert "max <= 0) return true" in js, "无溢出容器视为在底部（无需处理）"
+    # _autoScrollStreamingBody 必须走几何判定，禁止无条件置底
+    assert "document.body.scrollTop = document.body.scrollHeight" not in js, (
+        "禁止无条件拉底 body（旧实现跟随态标志缺失时强制置底的根因）"
+    )
+    assert "_maybeScrollToBottom(document.body" in js
+    # 坞态正文容器仅接近底部才跟随
+    assert "_maybeScrollToBottom(_cp" in js
+    # 禁止任何标志位/事件跟踪残留
+    for forbidden in ("_userScrolledWithin", "_userScrolledUp", "_progScroll", "_suppressScrollEvent"):
+        assert forbidden not in js, f"禁止残留标志位机制: {forbidden}"
+    for forbidden_event in ("addEventListener('wheel'", "addEventListener('scroll'"):
+        assert forbidden_event not in js, f"禁止滚动跟踪监听器: {forbidden_event}"
 
 
-def test_content_autoscroll_marks_user_scroll_via_wheel():
-    """回归：用户上滚意图必须由 wheel 事件同步标记，不得依赖 scroll 事件推断。
-
-    根因（流式滚动位置被拉到固定偏上位置）：_userScrolledUp 原由 scroll 事件
-    （异步派发）的 atBottom 推断置位。两条失效链：
-    1. 竞争窗口：用户滚轮后 scroll 事件尚未派发（标志仍 false），流式渲染
-       JS（_autoScrollStreamingBody 无参调用）抢先执行 → 无条件拉底覆盖
-       用户位置；后续 updateContent 保存被污染的 _cpPrevTop → 每次恢复到
-       同一错误值 → 表现为"正文更新时滚轮跳到固定偏上位置"。
-    2. 钳制误标：innerHTML 重建/高度回调使内容变短 → scrollTop 被浏览器
-       钳制 → 触发 scroll 事件 → atBottom 误判 false → userUp 误置 true
-       → 停止跟随、位置自行漂移。
-    wheel 事件同步派发且仅由用户触发（滚轮/触控板），无程序来源，用它标记
-    上滚意图可同时消除两条失效链。
-    """
-    js = mc._CONTENT_AUTOSCROLL_JS
-    # wheel 上滚同步置位（deltaY < 0）
-    assert "addEventListener('wheel'" in js, "必须有 wheel 监听同步标记用户上滚"
-    assert "deltaY < 0" in js, "wheel 上滚方向判定（deltaY<0）必须存在"
-    assert "this._userScrolledUp = true" in js, "wheel 上滚必须同步置 _userScrolledUp"
-    # scroll 监听只做恢复跟随（atBottom 清标志），不得置位（防钳制 scroll 误标）
-    assert "_userScrolledUp = !atBottom" not in js, "scroll 事件不得置位 _userScrolledUp（异步派发有竞争窗口）"
-    # wheel 监听必须是 passive（不阻断浏览器原生滚动）
-    assert "{passive: true}" in js, "wheel 监听必须 passive"
-    # 🐛 回归（工具折叠框展开→视口弹到随机位置）：
-    # 1) wheel 置位必须门控"容器实际可滚"——无溢出时 wheel 属冒泡残留
-    #    （本应转发外层聊天列表），误置位会锁死正文跟随；
-    assert "scrollHeight > this.clientHeight" in js, "wheel 置位必须检查 cp 实际可滚（防冒泡残留误置位）"
-    # 2) scroll 清标志必须有时间窗门控——折叠框动画/高度报告应用引发 viewport
-    #    resize → Chromium 钳制/anchor 补偿被动贴底 → 原实现距底<30px 即清标志
-    #    → 下个 chunk 无条件拉底。要求近期真实滚轮行为才允许恢复跟随。
-    assert "_lastUserWheelAt" in js, "必须有用户滚轮时间戳用于清标志门控"
-    assert "800" in js, "清标志必须限制在最近一次用户滚轮后 800ms 内（防程序性贴底误清）"
+def test_tool_scroll_pure_geometric():
+    """工具区/任务列表滚动同样必须是纯几何判定，无 scroll 跟踪监听器。"""
+    src = inspect.getsource(CodeWebViewer._load_skeleton)
+    # 工具区滚底函数走几何判定
+    assert "function _scrollToolContentToBottom" in src
+    assert "_maybeScrollToBottom(tc, 30)" in src, "工具区必须几何判定滚底"
+    # 旧式跟踪监听器必须移除（body/_cp/tool-content/todo-content）
+    for forbidden in (
+        "window._userScrolledWithin",
+        "_userScrolledUp",
+        "_progScroll",
+        "_suppressScrollEvent",
+        "_prevScrollTop",
+    ):
+        assert forbidden not in src, f"骨架不得残留旧滚动标志: {forbidden}"
 
 
 def test_skeleton_template_includes_content_autoscroll():

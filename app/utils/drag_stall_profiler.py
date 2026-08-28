@@ -18,7 +18,7 @@
     drag_profiler.start()          # 拖拽开始（WM_ENTERSIZEMOVE）
     drag_profiler.stop_deferred()  # 拖拽结束（延迟 1.5s 停止，覆盖松手卡顿）
 
-日志关键字：`[DRAG-PROF]`，与主日志同文件（logs/llm_chatter.log）。
+日志关键字：`[DRAG-PROF]`，与主日志同文件（logs/all.log）。
 定位完成后可将 `DRAG_PROFILER_ENABLED` 置 False 一键关闭。
 """
 
@@ -225,7 +225,9 @@ class DragStallProfiler:
     def _report(self):
         total = time.perf_counter() - self._started_at
         if self._stall_count == 0:
-            logger.info("[DRAG-PROF] 采样结束（{:.1f}s）：未检测到 ≥{}ms 的主线程阻塞", total, int(_STALL_THRESHOLD * 1000))
+            logger.info(
+                "[DRAG-PROF] 采样结束（{:.1f}s）：未检测到 ≥{}ms 的主线程阻塞", total, int(_STALL_THRESHOLD * 1000)
+            )
             return
         logger.warning(
             "[DRAG-PROF] 采样结束（{:.1f}s）：卡顿 {} 次，最长阻塞 {:.0f}ms，热点 Top{}：",

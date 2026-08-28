@@ -2066,7 +2066,7 @@ _SKELETON_CACHE_MAX = 48
 # 原 tailText 纯文本）；新增 updateTailHtml 尾部行内渲染；_append_text_incremental
 # 新增 data-rendered 分支（渲染节点后新建纯文本节点）。旧骨架无 updateTailHtml /
 # data-rendered 分支会导致新代码调用 ReferenceError → 尾部不渲染。
-_SKELETON_CACHE_VERSION = 16
+_SKELETON_CACHE_VERSION = 17
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2438,7 +2438,8 @@ _CONTENT_AUTOSCROLL_JS = """
                     if (!bodyOnly && document.body.classList.contains('streaming-dock') && _cp) {
                         _maybeScrollToBottom(_cp, 40);
                     }
-                    _maybeScrollToBottom(document.body, {AUTO_SCROLL_THRESHOLD});
+                    // 80 = AUTO_SCROLL_THRESHOLD（本常量非 f-string，无法引用占位符）
+                    _maybeScrollToBottom(document.body, 80);
                 }
 """
 
@@ -5819,9 +5820,9 @@ class CodeWebViewer(QWebEngineView):
                 }};
 
                 // ===== 用户滚动语义：纯几何判定，无需跟踪 =====
-                // 用户是否在底部由 _nearBottom() 实时读取几何位置得出，
-                // 不再维护 _userScrolledWithin/_prevScrollTop 标志（旧 delta
-                // 启发式会被钳制/anchor 补偿误置位，导致跟随中断或无条件拉底）。
+                // 用户是否在底部由 _nearBottom() 实时读取几何位置得出；
+                // 旧版"标志位 + delta 启发式"方案已整体移除（会被钳制/
+                // anchor 补偿误置位，导致跟随中断或无条件拉底）。
                 // =====================================================
 
                 // ===== JS驱动的蛇形思考动画（替代CSS animation）=====

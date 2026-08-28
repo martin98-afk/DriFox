@@ -194,6 +194,7 @@ class EngineSessionImpl:
             llm_config=llm_config,
             tools=tools or [],
             callbacks=wrapped,
+            direct_signals=True,  # 本方法运行在调用方线程（常为插件后台线程），必须直连才能收到完成信号
         )
         if not started:
             return ChatResult(error="worker 启动失败（可能上轮仍在运行）")
