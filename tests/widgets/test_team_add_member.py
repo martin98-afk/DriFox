@@ -443,7 +443,7 @@ def test_spawn_team_member_window_reuses_run_id(qapp):
     fake_win = MagicMock()
     fake_win._window_id = "win-99"
     fake_tm = MagicMock()
-    fake_tm.get_template.return_value = {"name": "default-team", "agents": [{"agent_name": "build"}]}
+    fake_tm.get_template_for_run_id.return_value = {"name": "default-team", "agents": [{"agent_name": "build"}]}
     fake_tm.get_team_run_id.return_value = "run-ABC"
     fake_tm.get_team_project.return_value = ""
 
@@ -565,7 +565,7 @@ def test_spawn_team_member_window_inherits_source_project_when_team_empty(qapp):
     fake_win = MagicMock()
     fake_win._window_id = "win-9"
     fake_tm = MagicMock()
-    fake_tm.get_template.return_value = {"name": "t", "agents": []}
+    fake_tm.get_template_for_run_id.return_value = {"name": "t", "agents": []}
     fake_tm.get_team_run_id.return_value = "run-X"
     fake_tm.get_project_for_run_id.return_value = ""  # 团队级项目未设置
     fake_tm.get_team_project.return_value = ""  # 团队级项目未设置（回退接口）
@@ -784,7 +784,7 @@ def test_handle_team_add_member_single_create(qapp):
     inst.__dict__["_team_run_id"] = "run-A"
     inst.__dict__["_team_name"] = "团队A"
     fake_tm = MagicMock()
-    fake_tm.get_template.return_value = {
+    fake_tm.get_template_for_run_id.return_value = {
         "name": "t",
         "agents": [{"agent_name": "build"}, {"agent_name": "plan"}],
     }
@@ -946,7 +946,7 @@ def test_spawn_team_member_window_passes_team_marks_to_create_fresh(qapp):
     fake_win = MagicMock()
     fake_win._window_id = "win-99"
     fake_tm = MagicMock()
-    fake_tm.get_template.return_value = {"name": "dev-team", "agents": []}
+    fake_tm.get_template_for_run_id.return_value = {"name": "dev-team", "agents": []}
     fake_tm.get_team_run_id.return_value = "run-D2"
     fake_tm.get_team_project.return_value = ""
     inst._create_fresh_window = MagicMock(return_value=fake_win)

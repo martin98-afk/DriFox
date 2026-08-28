@@ -2378,20 +2378,20 @@ _STREAMING_DOCK_JS = """
                         // 归位后滚到底部展示最新条目——仅当用户未在上方阅读时；
                         // 用户上滚查看中则保持其位置（内容未更新，不打扰阅读）
                         var tc = document.getElementById('tool-content');
-                        if (tc && !tc._userScrolledUp) { tc._progScroll = true; tc.scrollTop = tc.scrollHeight; }
+                        // 纯几何判定：仅当工具区接近底部才跟随展示最新条目；
+                        // 用户在上方阅读时零干预。
+                        if (tc) _maybeScrollToBottom(tc, 30);
                     } else if (on && !wasOn) {
                         // 顶部 → 坞态：正文上移，做对称补偿
                         if (!_atBottom && _dockH > 0) {
                             document.body.scrollTop = Math.max(0, document.body.scrollTop - _dockH);
                         }
-                        // 🐛 修复：进入坞态时正文容器开始限高内滚，切换瞬间内容溢出
-                        // 会触发一次程序性 scroll 事件；重置正文容器用户滚动标志并程序
-                        // 置底跟随，避免遗留状态/切换抖动误判为正文上滚而卡在顶部。
+                        // 🐛 切入坞态时正文容器开始限高内滚，切换瞬间内容溢出
+                        // 会触发一次程序性 scroll 事件；切换后仅当正文容器接近底部
+                        // 才跟随置底（几何判定，无标志位）。
                         var _cp = document.getElementById('content-placeholder');
                         if (_cp) {
-                            _cp._userScrolledUp = false;
-                            _cp._progScroll = true;
-                            _cp.scrollTop = _cp.scrollHeight;
+                            _maybeScrollToBottom(_cp, 40);
                         }
                     }
                     // 高度变化（110px ↔ 600px max-height）后报告文档高度。
@@ -2406,85 +2406,40 @@ _STREAMING_DOCK_JS = """
                 }
 """
 
-# 正文容器（#content-placeholder）自动滚底 + 用户滚动跟踪。
-# 🐛 修复（区域独立）：坞态下正文容器与工具区（#tool-content）是两个独立内滚动
-# 容器。工具/思考区更新路径（流式块注入/完成块替换/_apply_viewer_height 高度
-# 回调）同样会调用 _autoScrollStreamingBody()——原实现无条件
-# _cp.scrollTop = _cp.scrollHeight 置底正文容器，而 _userScrolledWithin 只由
-# body 的 scroll 事件置位（用户滚正文容器时 body 不滚，标志恒 false），
-# 保护完全失效 → 工具区每来新内容就把正文拉底，打断阅读。
-# 修复对齐工具区 _scrollToolContentToBottom 模式：用户主动上滚正文
-# （_userScrolledUp）时不拉底，滚回底部附近自动恢复跟随；程序置底打
-# _progScroll 标记防误判为用户滚动。
-# 🐛 修复（区域独立 II）：_userScrolledUp 保护只覆盖"用户上滚过"的场景，
-# 跟随态（标志 false）下工具/思考更新仍会把正文拉底——"工具与思考更新时
-# 正文滚到固定位置"。语义修正：正文容器只在**正文自身更新**时置底；
-# 工具/思考路径传 bodyOnly=true 仅滚 body（非坞态跟随），不碰正文容器。
-# 🐛 修复（wheel 标记意图）：_userScrolledUp 原由 scroll 事件（异步派发）
-# 的 atBottom 推断置位，两条失效链：
-# 1. 竞争窗口——用户滚轮后 scroll 事件尚未派发（标志仍 false），流式渲染
-#    JS（_autoScrollStreamingBody 无参调用）抢先执行 → 无条件拉底覆盖用户
-#    位置；后续 updateContent 保存被污染的 _cpPrevTop → 每次恢复到同一错误
-#    值 → 表现为"正文更新时滚轮跳到固定偏上位置"。
-# 2. 钳制误标——innerHTML 重建/高度回调使内容变短 → scrollTop 被浏览器钳制
-#    → 触发 scroll 事件 → atBottom 误判 → userUp 误置 true → 停止跟随漂移。
-# 改用 wheel 事件（同步派发、仅用户滚轮/触控板触发，无程序来源）标记上滚
-# 意图；scroll 事件只做"滚回底部恢复跟随"，不再置位。
+# 正文容器（#content-placeholder）自动滚底：纯几何判定语义。
+# 【设计原则（唯一规则）】只有当容器**当前已接近底部**时才跟随滚底；
+# 否则（用户在中间/顶部阅读）**零干预**——不碰 scrollTop、不跟踪用户行为。
+# 几何位置本身就是用户意图的可靠信号：用户滚离底部 → 不在阈值内 → 不动；
+# 用户滚回底部 → 回到阈值内 → 自动恢复跟随。无需任何标志位/事件跟踪。
+# 【为什么不用标志位】历史上用 _userScrolledWithin/_userScrolledUp/_progScroll/
+# _suppressScrollEvent/delta 启发式推断"用户是否滚过"，但内容钳制/anchor 补偿/
+# 程序置底都会产生与用户滚动无法区分的 scroll 事件，标志位必然误置/漏置，
+# 导致"跟随中断漂移"或"无条件拉底覆盖阅读位置"两类 bug 反复出现。
+# 【bodyOnly 语义】工具/思考更新路径传 bodyOnly=true：正文内容未变，
+# 严禁碰正文容器（#content-placeholder）滚动位置，仅 body 参与跟随判定。
 _CONTENT_AUTOSCROLL_JS = """
+                function _nearBottom(el, threshold) {
+                    if (!el) return false;
+                    var max = el.scrollHeight - el.clientHeight;
+                    if (max <= 0) return true;
+                    return Math.abs(max - el.scrollTop) <= threshold;
+                }
+                function _maybeScrollToBottom(el, threshold) {
+                    if (_nearBottom(el, threshold)) {
+                        el.scrollTop = el.scrollHeight;
+                        return true;
+                    }
+                    return false;
+                }
                 function _autoScrollStreamingBody(bodyOnly) {
-                    // bodyOnly=true：调用方是工具/思考更新路径（流式块注入/
-                    // 完成块替换/高度回调），正文内容未变 → 严禁触碰正文容器
-                    // 滚动位置（否则跟随态下正文被拉到固定底部）。
-                    // 坞态（流式中）：#content-placeholder 自身限高滚动 → 跟滚正文容器
-                    // 保持最新输出可见；body 高度被钳不溢出，滚动赋值无害。
+                    // 坞态（流式中）：#content-placeholder 自身限高内滚 →
+                    // 仅当它接近底部时跟随；用户在坞内阅读时零干预。
                     var _cp = document.getElementById('content-placeholder');
                     if (!bodyOnly && document.body.classList.contains('streaming-dock') && _cp) {
-                        if (!_cp._userScrolledUp) {
-                            _cp._progScroll = true;
-                            _cp.scrollTop = _cp.scrollHeight;
-                        }
+                        _maybeScrollToBottom(_cp, 40);
                     }
-                    document.body.scrollTop = document.body.scrollHeight;
+                    _maybeScrollToBottom(document.body, {AUTO_SCROLL_THRESHOLD});
                 }
-                // 正文容器滚动跟踪：用户主动上滚时停止自动置底跟随，
-                // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为。
-                // wheel/键盘**同步**标记上滚意图（scroll 事件异步派发，与流式
-                // 渲染 JS 存在竞争窗口，不得作为置位依据）；scroll 事件仅恢复跟随。
-                document.getElementById('content-placeholder')?.addEventListener('wheel', function(e) {
-                    // 上滚（deltaY<0）：同步置位，抢占任何在途渲染 JS 的拉底。
-                    // 🐛 门控：仅当容器实际可滚（内容溢出）才记为"上滚正文"——
-                    // 无溢出时 wheel 本应转发外层聊天列表（Qt wheelEvent 转发分支），
-                    // 页面内收到的事件属冒泡残留，置位会让跟随被无关操作误锁死。
-                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {
-                        this._userScrolledUp = true;
-                        // 记录用户滚轮时刻：scroll 监听清标志前用它区分
-                        // "用户真滚回底部"与"程序性 clamp/anchor 被动贴底"
-                        this._lastUserWheelAt = performance.now();
-                    }
-                }, {passive: true});
-                document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
-                    var cp = this;
-                    // DOM 操作期间（updateContent 重写 innerHTML / reorganizeContent
-                    // 搬移 think 块）触发的程序性 scroll 事件必须忽略——与 body 监听的
-                    // _suppressScrollEvent 抑制对称。
-                    if (window._suppressScrollEvent) return;
-                    if (cp._progScroll) { cp._progScroll = false; return; }
-                    // 只做恢复跟随：滚回底部附近清标志。**不置位**——内容高度
-                    // 变化导致的 scrollTop 钳制也会触发 scroll（非用户行为），
-                    // 置位会误停跟随导致位置漂移。
-                    var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
-                    // 🐛 清标志门控：viewport resize / 折叠框展开动画 / 高度报告应用
-                    // 会引发 Chromium 对超界 scrollTop 的钳制与 overflow-anchor 补偿，
-                    // 被动贴底的 scroll 事件会被误判为"用户滚回底部"→ 标志误清 →
-                    // 下一个 chunk 无条件拉底（视口弹到随机位置的根因）。要求清标志
-                    // 前确有近期用户滚轮行为（触控板惯性最后一段也 <800ms 到达底部）。
-                    var recentUserWheel = cp._lastUserWheelAt !== undefined &&
-                                          (performance.now() - cp._lastUserWheelAt) < 800;
-                    if (atBottom && recentUserWheel) {
-                        cp._userScrolledUp = false;
-                        cp._lastUserWheelAt = undefined;
-                    }
-                });
 """
 
 
@@ -5141,13 +5096,12 @@ class CodeWebViewer(QWebEngineView):
                         }})();
                         _freezeEl.textContent = '.cm-collapsible,.cm-collapsible *,.think-block,.think-block *,.tool-block,.tool-block *,.think-streaming,.think-streaming *,.tool-streaming-block,.tool-streaming-block *,.think-compact,.think-compact *{{transition:none!important}}';
 
-                        // 🐛 修复：innerHTML 替换会重置 scrollTop=0 并触发 scroll 事件，
-                        // 导致"置顶闪烁"和用户滚动后永久卡顶的问题。
-                        // 解决方案：保存 scrollTop 前置位 + _userScrolledWithin 快照，
-                        // innerHTML 后立即恢复滚动位置，避免 paint 间隙闪烁。
-                        var _scrollThreshold = {AUTO_SCROLL_THRESHOLD};
-                        var _prevScrollTop = document.body.scrollTop;
-                        var _wasUserScrolled = window._userScrolledWithin;
+                        // 🐛 修复：innerHTML 替换会重置 scrollTop=0 并触发 scroll 事件。
+                        // 【几何判定语义】重建前快照"用户是否接近底部"（唯一可靠信号），
+                        // 重建后据此决定：接近底部 → 跟随置底；在中间/顶部阅读 →
+                        // 恢复原位置，零干预。无任何标志位。
+                        var _wasAtBottomBody = _nearBottom(document.body, {AUTO_SCROLL_THRESHOLD});
+                        var _bodyPrevTop = document.body.scrollTop;
                         // 🐛 修复（区域独立 II）：同步保存**正文容器**的 scrollTop——
                         // innerHTML 全量重写会把它重置为 0，而下方只恢复了 body 的。
                         // 思考/工具更新同样触发全量渲染，若不恢复，正文阅读位置
@@ -5191,7 +5145,6 @@ class CodeWebViewer(QWebEngineView):
                             void container.offsetHeight;  // 强制同步样式，使跳变立即生效
                             container.style.transition = 'opacity 120ms ease';
                         }}
-                        window._suppressScrollEvent = true;
                         try {{
                             container.innerHTML = newHtml;
                         }} catch(e) {{
@@ -5209,9 +5162,10 @@ class CodeWebViewer(QWebEngineView):
                                 console.error('updateContent textContent fallback also failed:', e2);
                             }}
                         }}
-                        // 立即恢复滚动位置，防止浏览器在下一次 paint 时呈现 scrollTop=0
+                        // 立即恢复 body 滚动位置，防止浏览器在下一次 paint 时呈现 scrollTop=0；
+                        // 底部跟随态由末尾 _autoScrollStreamingBody 置底覆盖。
                         var _maxScroll = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
-                        document.body.scrollTop = Math.min(_prevScrollTop, _maxScroll);
+                        document.body.scrollTop = Math.min(_bodyPrevTop, _maxScroll);
 
                         // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
                         container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
@@ -5276,49 +5230,23 @@ class CodeWebViewer(QWebEngineView):
                         }}
 
                         // 将工具/思考块分流到独立滚动容器（仅简洁模式）
-                        // 必须在 _suppressScrollEvent=false 之前执行，
-                        // 否则移动 DOM 触发的 scroll 事件会错误标记 _userScrolledWithin=true
                         if (window._toolCompactMode) reorganizeContent();
 
-                        // 🐛 修复（区域独立 II）：所有影响正文高度的 DOM 操作（reorganize
-                        // 搬移/折叠恢复/ECharts）完成后，恢复重建前的阅读位置。
-                        // 钐到新 max（内容变短时不越界）；值实际变化才打 _progScroll
-                        // （防 scroll 事件在 _suppressScrollEvent=false 后异步到达被
-                        // 误判为用户滚动）；值未变不打标记（避免残留吞掉下次真实滚动）。
-                        // 跟随态（_userScrolledUp=false）时下方 _autoScrollStreamingBody
-                        // 置底会覆盖此值（正文有新内容需跟随）；上滚态则保持原位。
+                        // 所有影响正文高度的 DOM 操作（reorganize 搬移/折叠恢复/
+                        // ECharts）完成后：仅当用户在中间阅读（非底部）时才恢复
+                        // 重建前的正文容器阅读位置；底部跟随态由上方置底覆盖。
                         var _cpEl2 = document.getElementById('content-placeholder');
-                        if (_cpEl2 && _cpPrevTop > 0) {{
+                        if (_cpEl2 && _cpPrevTop > 0 && !_wasAtBottomBody) {{
                             var _cpMax = Math.max(0, _cpEl2.scrollHeight - _cpEl2.clientHeight);
-                            var _cpTarget = Math.min(_cpPrevTop, _cpMax);
-                            if (_cpEl2.scrollTop !== _cpTarget) {{
-                                _cpEl2._progScroll = true;
-                                _cpEl2.scrollTop = _cpTarget;
-                            }}
+                            _cpEl2.scrollTop = Math.min(_cpPrevTop, _cpMax);
                         }}
 
-                        // 🐛 修复：auto-scroll 延后到所有 DOM 操作（table 包裹、折叠框状态恢复、
-                        // think-block 展开、ECharts 初始化、reorganizeContent）之后执行，
-                        // 确保 scrollHeight 值反映最终渲染结果，避免因 collapsible 展开 /
-                        // tool-block restore 等操作在 auto-scroll 后增加高度而导致的
-                        // "滚不到底部"问题。
-                        // 附加修复：打 auto-scroll 时间戳，让 scroll 事件回调识别
-                        // 程序触发的滚动事件（解决 suppress=false 之后异步派发 scroll 的 race）。
-                        // 此时 _suppressScrollEvent 仍为 true，所有 scroll 事件仍被抑制。
-                        if (!_wasUserScrolled) {{
+                        // 【几何判定跟随】重建后：仅当重建前用户接近底部才跟随置底；
+                        // 否则完全不动 body（用户阅读位置由浏览器保持）。
+                        if (_wasAtBottomBody) {{
                             _autoScrollStreamingBody();
-                            window._userScrolledWithin = false;
-                        }} else {{
-                            var _wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < _scrollThreshold;
-                            if (_wasAtBottom) {{
-                                _autoScrollStreamingBody();
-                                window._userScrolledWithin = false;
-                            }}
                         }}
-                        // 同步 _prevScrollTop，让 delta 检测有正确基线
-                        window._prevScrollTop = document.body.scrollTop;
                         window._autoScrollTime = performance.now();
-                        window._suppressScrollEvent = false;
 
                         // ── 恢复全透明度：在下一帧前 fade in，CSS transition 驱动平滑淡入 ──
                         // 🛡️ 竞态防护：递增 token + 定时器引用，防止连续 updateContent 时
@@ -5391,20 +5319,9 @@ class CodeWebViewer(QWebEngineView):
                     }});
                     // 恢复展开状态
                     restoreCollapsibleStates(container);
-                    // 同步滚动到底（流式期间通常期望跟到底部）
-                    window._suppressScrollEvent = true;
-                    if (!window._userScrolledWithin) {{
-                        _autoScrollStreamingBody();
-                    }} else {{
-                        var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
-                        if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            _autoScrollStreamingBody();
-                            window._userScrolledWithin = false;
-                        }}
-                    }}
-                    window._prevScrollTop = document.body.scrollTop;
+                    // 几何判定跟随：仅接近底部才滚底，否则零干预
+                    _autoScrollStreamingBody();
                     window._autoScrollTime = performance.now();
-                    window._suppressScrollEvent = false;
                     // 初始化 ECharts 图表（追加的闭合段可能含 echarts 代码块）
                     if (window.echarts) {{
                         container.querySelectorAll('.echarts-container').forEach(function(el) {{
@@ -5454,19 +5371,9 @@ class CodeWebViewer(QWebEngineView):
                         wrapper.appendChild(table);
                     }});
                     restoreCollapsibleStates(container);
-                    window._suppressScrollEvent = true;
-                    if (!window._userScrolledWithin) {{
-                        _autoScrollStreamingBody();
-                    }} else {{
-                        var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
-                        if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            _autoScrollStreamingBody();
-                            window._userScrolledWithin = false;
-                        }}
-                    }}
-                    window._prevScrollTop = document.body.scrollTop;
+                    // 几何判定跟随：仅接近底部才滚底，否则零干预
+                    _autoScrollStreamingBody();
                     window._autoScrollTime = performance.now();
-                    window._suppressScrollEvent = false;
                     setTimeout(() => reportHeight(), 30);
                 }}
                 {_CONTENT_AUTOSCROLL_JS}
@@ -5911,38 +5818,11 @@ class CodeWebViewer(QWebEngineView):
                     console.log('pywebview_action:subagent_log:' + taskIds);
                 }};
 
-                // ===== 用户滚动跟踪：判断用户是否主动滚动卡片内部内容 =====
-                // 🐛 修复：当卡片内容超出 MAX_HEIGHT 时，body 出现内部滚动条。
-                // 初始状态 scrollTop=0 导致 wasAtBottom 判断失败，auto-scroll 不触发。
-                // 跟踪用户主动滚动行为，未滚动时强制 auto-scroll 到底部。
-                window._userScrolledWithin = false;
-                window._suppressScrollEvent = false;
-                // 🐛 修复 race condition：用 scrollTop 差值区分用户滚动 vs 程序自动滚动。
-                // 原实现用 200ms 时间窗抑制 auto-scroll 事件，但快速流式时 auto-scroll
-                // 频繁触发导致时间窗永不过期，用户所有滚轮事件被永久忽略（卡在底部）。
-                // 新方案：用户滚轮单次增量 < 300px，auto-scroll（scrollTop=scrollHeight）
-                // 跳变 > 300px。通过 delta 判断替代时间窗，不受流式频率影响。
-                window._prevScrollTop = 0;
-                document.body.addEventListener('scroll', function() {{
-                    var _st = document.body.scrollTop;
-                    // 即使被抑制也保持 _prevScrollTop 同步，避免 auto-scroll 后首次
-                    // 用户滚动因 _prevScrollTop 陈旧而导致 delta 误判（大跳变）。
-                    if (window._suppressScrollEvent) {{
-                        window._prevScrollTop = _st;
-                        return;
-                    }}
-                    var delta = Math.abs(_st - window._prevScrollTop);
-                    window._prevScrollTop = _st;
-                    // 用户滚轮单步增量 ~35-120px（取决于滚轮设置和滚动速度）。
-                    // auto-scroll 跳变 > 500px（内容显著增长）。
-                    // Page Down / 键盘滚动 增量可能更大（~视口高度），
-                    // 但用户触发的也应该标记为主动滚动——将阈值设为 2000px，
-                    // 仅过滤 auto-scroll 直接跳到底部的大跳变。
-                    if (delta > 0 && delta < 2000) {{
-                        window._userScrolledWithin = true;
-                    }}
-                }});
-                // ======================================================
+                // ===== 用户滚动语义：纯几何判定，无需跟踪 =====
+                // 用户是否在底部由 _nearBottom() 实时读取几何位置得出，
+                // 不再维护 _userScrolledWithin/_prevScrollTop 标志（旧 delta
+                // 启发式会被钳制/anchor 补偿误置位，导致跟随中断或无条件拉底）。
+                // =====================================================
 
                 // ===== JS驱动的蛇形思考动画（替代CSS animation）=====
                 // 使用 requestAnimationFrame 持续更新 stroke-dashoffset，
@@ -6008,11 +5888,12 @@ class CodeWebViewer(QWebEngineView):
                                 '<span class="todo-text">' + (t.content || '') + '</span></div>';
                     }}
                     window._todoCount = todos.length;
-                    // 重建前保存用户滚动状态：innerHTML 重建会把 scrollTop 归零，
-                    // 且归零触发的 scroll 事件会误置 _userScrolledUp（用 _progScroll 吞掉）
-                    var _wasUp = !!content._userScrolledUp;
+                    // 重建前快照：innerHTML 重建会把 scrollTop 归零。
+                    // 几何判定语义：重建前用户在底部 → 定位进行中项（跟随）；
+                    // 在上方阅读 → 恢复原位置，零干预。
+                    var _wasBottom = _nearBottom(content, 30);
                     var _prevTop = content.scrollTop;
-                    content._progScroll = true;
+                    content.innerHTML = html;
                     content.innerHTML = html;
                     var progText = ' ' + done + '/' + todos.length + ' 完成';
                     window._todoProgressText = progText;
@@ -6024,14 +5905,13 @@ class CodeWebViewer(QWebEngineView):
                     // 始终保持第一个进行中任务可见（列表超出限高时滚动到可视区）
                     // 双 rAF：面板可能刚 display:''，等布局完成后再读 offsetTop/clientHeight。
                     // 手动设 scrollTop 只动本容器，不扰动祖先链（scrollIntoView 会连带滚 body/工具区）。
-                    // 用户上滚查看中 → 恢复原位置；未滚动 → 定位到进行中项
+                    // 用户在上方阅读 → 恢复原位置；在底部 → 定位到进行中项
                     window._todoScrollToken = (window._todoScrollToken || 0) + 1;
                     var _tk = window._todoScrollToken;
                     requestAnimationFrame(function() {{
                         requestAnimationFrame(function() {{
                             if (_tk !== window._todoScrollToken) return;  // 已有更新，放弃旧滚动
-                            content._progScroll = true;
-                            if (_wasUp) {{
+                            if (!_wasBottom) {{
                                 var _maxT = Math.max(0, content.scrollHeight - content.clientHeight);
                                 content.scrollTop = Math.min(_prevTop, _maxT);
                                 return;
@@ -6047,36 +5927,14 @@ class CodeWebViewer(QWebEngineView):
                 }};
 
                 // ===== 工具区（#tool-content）自动滚底 =====
-                // 当工具/思考区有新内容时，自动滚动到底部，让用户始终看到最新状态。
-                // 用户主动上滚后不再打扰（_userScrolledUp），滚回底部附近自动恢复跟随。
+                // 当工具/思考区有新内容时，仅当用户已接近工具区底部才跟随滚底
+                // （几何判定）；用户在上方阅读时零干预，滚回底部自动恢复跟随。
                 function _scrollToolContentToBottom() {{
                     var tc = document.getElementById('tool-content');
-                    if (!tc) return;
-                    // 用户主动向上滚动了工具区则不自动滚底
-                    if (tc._userScrolledUp) return;
-                    // 抑制本次程序滚底触发的 scroll 事件：异步 scroll 到达时
-                    // scrollHeight 可能已增长（流式新块加入），atBottom 误判 false
-                    // 会错误置位 _userScrolledUp 导致跟随中断。
-                    tc._progScroll = true;
-                    tc.scrollTop = tc.scrollHeight;
+                    if (tc) _maybeScrollToBottom(tc, 30);
                 }}
-                // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
-                document.getElementById('tool-content')?.addEventListener('scroll', function() {{
-                    var tc = this;
-                    // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
-                    if (tc._progScroll) {{ tc._progScroll = false; return; }}
-                    var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
-                    tc._userScrolledUp = !atBottom;
-                    if (atBottom) tc._userScrolledUp = false;
-                }});
-                // 任务列表滚动跟踪：与工具区同款（程序滚动/重建不算用户行为）
-                document.getElementById('todo-content')?.addEventListener('scroll', function() {{
-                    var td = this;
-                    if (td._progScroll) {{ td._progScroll = false; return; }}
-                    var atBottom = Math.abs(td.scrollHeight - td.scrollTop - td.clientHeight) < 30;
-                    td._userScrolledUp = !atBottom;
-                    if (atBottom) td._userScrolledUp = false;
-                }});
+                // 任务列表（#todo-content）同理：重建/更新时仅接近底部才跟随。
+                // 无监听器：跟随判定在重建函数内部用重建前快照完成。
                 {_STREAMING_DOCK_JS}
 
                 // ===== 流式工具块：移除超时自动标记 ====
@@ -6340,26 +6198,10 @@ class CodeWebViewer(QWebEngineView):
                         c.appendChild(p);
                     }}
                 }}
-                // 🐛 修复：同步 auto-scroll（无 setTimeout 渲染间隙），
-                // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
-                // 附加修复：auto-scroll 成功后复位 _userScrolledWithin，
-                // 防止用户一次滚轮操作后永久丧失粘性滚底能力。
-                // 用 scrollTop 差值识别用户滚动（替代原 200ms 时间窗，避免
-                // 快速流式时时间窗永不过期导致用户滚轮被永久忽略）。
-                window._suppressScrollEvent = true;
-                if (!window._userScrolledWithin) {{
-                    _autoScrollStreamingBody();
-                }} else {{
-                    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
-                    if (wasAtBottom) {{
-                        _autoScrollStreamingBody();
-                        window._userScrolledWithin = false;
-                    }}
-                }}
-                // 同步 _prevScrollTop，使 delta 检测有正确的基线
-                window._prevScrollTop = document.body.scrollTop;
+                // 同步 auto-scroll（无渲染间隙）：几何判定跟随，
+                // 仅接近底部才滚底，否则零干预。
+                _autoScrollStreamingBody();
                 window._autoScrollTime = performance.now();
-                window._suppressScrollEvent = false;
                 reportHeightDebounced();
             }})();
             """
@@ -6915,20 +6757,15 @@ class CodeWebViewer(QWebEngineView):
             if _card is not None and _card.__class__.__name__ == "MessageCard":
                 _card._content_just_loaded = True
             # 流式分支：复用共享的 save+restore 模板，末尾追加 auto-scroll 逻辑
-            # （工具块 restore 后 scrollHeight 可能增加，需要重新判断滚到底）
+            # （工具块 restore 后 scrollHeight 可能增加，需要重新判断滚到底）。
+            # 几何判定：仅接近底部才跟随，否则零干预。
             auto_scroll_js = (
-                "window._suppressScrollEvent=true;"
-                "if(!window._userScrolledWithin){"
-                "document.body.scrollTop=document.body.scrollHeight;"
+                "if(typeof _autoScrollStreamingBody==='function'){"
+                "_autoScrollStreamingBody();"
                 "}else{"
-                f"var _prd=Math.abs(document.body.scrollHeight-document.body.scrollTop-document.body.clientHeight);"
-                f"if(_prd<{AUTO_SCROLL_THRESHOLD}){{"
                 "document.body.scrollTop=document.body.scrollHeight;"
-                "window._userScrolledWithin=false;"
-                "}}"
-                "window._prevScrollTop=document.body.scrollTop;"
+                "}"
                 "window._autoScrollTime=performance.now();"
-                "window._suppressScrollEvent=false;"
             )
             # [B2] IPC 瘦身：仅当工具 DOM 被 JS 增量注入（_tool_dom_dirty）或存在
             # 已完成工具块待 restore（_restore_finished_ids）时才走 save/restore 包装
@@ -10171,37 +10008,23 @@ class MessageCard(SimpleCardWidget):
             return
         self.viewer.setFixedHeight(height)
         self.heightChanged.emit(height)
-        # viewer 高度变化后 body 视口可能改变，仅在用户已处于底部时重新滚动到底部
-        # 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
-        # wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
-        # 未滚动时强制 auto-scroll 到底部。
+        # viewer 高度变化后 body 视口可能改变。几何判定：仅在用户已处于
+        # 底部时重新跟随到底部；阅读中零干预。
         if self._streaming and hasattr(self.viewer, "page") and self.viewer.page():
             try:
-                # 🐛 修复：同步 auto-scroll 取代 setTimeout(0)，避免渲染间隙置顶闪烁
-                # 🐛 修复：auto-scroll 成功后复位 _userScrolledWithin，
-                # 防止用户一次滚轮操作后永久丧失粘性滚底能力。
-                # 🐛 修复 race condition：打 auto-scroll 时间戳，防止异步派发的
-                # scroll 事件在 _suppressScrollEvent=false 后被误判为用户主动滚动，
-                # 导致后续流式输出卡顶部。
+                # 区域独立 II：高度回调由任何内容变化（含工具/思考区高度）触发，
+                # 不代表正文更新 → bodyOnly 不碰正文容器滚动位置
                 self.viewer.page().runJavaScript(
                     "(function(){"
-                    "  window._suppressScrollEvent = true;"
-                    # 区域独立 II：高度回调由任何内容变化（含工具/思考区高度）触发，
-                    # 不代表正文更新 → bodyOnly 不碰正文容器滚动位置
-                    "  if (!window._userScrolledWithin) {"
+                    "  if (typeof _autoScrollStreamingBody === 'function') {"
                     "    _autoScrollStreamingBody(true);"
                     "  } else {"
-                    "    var wasAtBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < "
+                    "    var max = document.body.scrollHeight - document.body.clientHeight;"
+                    "    if (max <= 0 || Math.abs(max - document.body.scrollTop) < "
                     + str(AUTO_SCROLL_THRESHOLD)
-                    + ";"
-                    "    if (wasAtBottom) {"
-                    "      _autoScrollStreamingBody(true);"
-                    "      window._userScrolledWithin = false;"
-                    "    }"
+                    + ") { document.body.scrollTop = document.body.scrollHeight; }"
                     "  }"
-                    "  window._prevScrollTop = document.body.scrollTop;"
                     "  window._autoScrollTime = performance.now();"
-                    "  window._suppressScrollEvent = false;"
                     "})();"
                 )
             except RuntimeError:
@@ -10966,19 +10789,9 @@ class MessageCard(SimpleCardWidget):
                         if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
                     // 区域独立 II：完成块替换是纯工具区更新 → bodyOnly 不碰正文容器
-                    window._suppressScrollEvent = true;
-                    if (!window._userScrolledWithin) {{
-                        _autoScrollStreamingBody(true);
-                    }} else {{
-                        var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
-                        if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            _autoScrollStreamingBody(true);
-                            window._userScrolledWithin = false;
-                        }}
-                    }}
-                    window._prevScrollTop = document.body.scrollTop;
+                    // 几何判定跟随：仅接近底部才滚底，否则零干预
+                    _autoScrollStreamingBody(true);
                     window._autoScrollTime = performance.now();
-                    window._suppressScrollEvent = false;
                     if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
                     reportHeight();
                     return;
@@ -10997,22 +10810,10 @@ class MessageCard(SimpleCardWidget):
                     _newBlock.setAttribute('data-order', {_order_value_js});
                     tc.appendChild(_newBlock);
                 }}
-                // 🐛 修复：追加新块后同步滚动 document.body，替换旧的 tc.scrollTop
-                // 区域独立 II：追加完成块是纯工具区更新 → bodyOnly 不碰正文容器
-                window._suppressScrollEvent = true;
-                if (!window._userScrolledWithin) {{
-                    _autoScrollStreamingBody(true);
-                }} else {{
-                    var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
-                    if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
-                        _autoScrollStreamingBody(true);
-                        window._userScrolledWithin = false;
-                    }}
-                }}
-                window._prevScrollTop = document.body.scrollTop;
+                // 🐛 追加新块后：几何判定跟随（bodyOnly 不碰正文容器）
+                _autoScrollStreamingBody(true);
                 window._autoScrollTime = performance.now();
-                window._suppressScrollEvent = false;
-                // 🐛 修复：工具区内部自动滚底
+                // 🐛 工具区内部自动滚底
                 if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
                 // 确保 tool-section 可见
                 if (window._toolCompactMode) {{
@@ -11262,17 +11063,11 @@ class MessageCard(SimpleCardWidget):
                     // text-only 模式：仅更新 data-streaming 状态，不碰文字
                     if ({_text_only_js}) {{
                         el.setAttribute('data-streaming', '{streaming_flag}');
-                        // 🐛 修复：状态更新后 body 自动滚底
-                        // 区域独立 II：状态更新是纯工具区更新 → bodyOnly
-                        window._suppressScrollEvent = true;
-                        if (!window._userScrolledWithin) {{
-                            _autoScrollStreamingBody(true);
-                        }}
-                        // 🐛 修复：工具区内部自动滚底
+                        // 状态更新后几何判定跟随（bodyOnly 不碰正文容器）
+                        _autoScrollStreamingBody(true);
+                        // 工具区内部几何判定跟随
                         if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
-                        window._prevScrollTop = document.body.scrollTop;
                         window._autoScrollTime = performance.now();
-                        window._suppressScrollEvent = false;
                         hr();
                         return;
                     }}
@@ -11290,23 +11085,11 @@ class MessageCard(SimpleCardWidget):
                             previewEl.innerHTML = {safe_preview};
                         }}
                     }}
-                    // 🐛 修复：预览内容更新后 body 自动滚底
-                    // 区域独立 II：预览内容更新是纯工具区更新 → bodyOnly
-                    window._suppressScrollEvent = true;
-                    if (!window._userScrolledWithin) {{
-                        _autoScrollStreamingBody(true);
-                    }} else {{
-                        var _bd = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
-                        if (_bd < {AUTO_SCROLL_THRESHOLD}) {{
-                            _autoScrollStreamingBody(true);
-                            window._userScrolledWithin = false;
-                        }}
-                    }}
-                    // 🐛 修复：工具区（#tool-content）内部自动滚底
+                    // 预览内容更新后几何判定跟随（bodyOnly 不碰正文容器）
+                    _autoScrollStreamingBody(true);
+                    // 工具区（#tool-content）内部几何判定跟随
                     if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
-                    window._prevScrollTop = document.body.scrollTop;
                     window._autoScrollTime = performance.now();
-                    window._suppressScrollEvent = false;
                     hr();
                 }} else {{
                     // text-only 模式下不存在块：不创建
@@ -11322,22 +11105,10 @@ class MessageCard(SimpleCardWidget):
                         block.setAttribute('data-order', {_order_value_js});
                         tc.appendChild(block);
                     }}
-                    // 🐛 修复：追加新块后 body 自动滚底，替换旧的 tc.scrollTop
-                    // 区域独立 II：新流式块追加是纯工具区更新 → bodyOnly
-                    window._suppressScrollEvent = true;
-                    if (!window._userScrolledWithin) {{
-                        _autoScrollStreamingBody(true);
-                    }} else {{
-                        var _bd2 = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight);
-                        if (_bd2 < {AUTO_SCROLL_THRESHOLD}) {{
-                            _autoScrollStreamingBody(true);
-                            window._userScrolledWithin = false;
-                        }}
-                    }}
-                    window._prevScrollTop = document.body.scrollTop;
+                    // 追加新块后几何判定跟随（bodyOnly 不碰正文容器）
+                    _autoScrollStreamingBody(true);
                     window._autoScrollTime = performance.now();
-                    window._suppressScrollEvent = false;
-                    // 工具区内部自动滚底（新块追加后）
+                    // 工具区内部几何判定跟随（新块追加后）
                     if (typeof _scrollToolContentToBottom === 'function') _scrollToolContentToBottom();
                     // 确保 tool-section 可见
                     if (window._toolCompactMode) {{

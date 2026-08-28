@@ -99,36 +99,14 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] migrate_app_data_if_needed 失败")
 
-        # 设置日志
+        # 设置日志（全量 all.log + 按子系统拆分的分文件，见 app/core/logging_setup.py）
         try:
+            from app.core.logging_setup import setup_logging
             from app.utils.utils import get_app_data_dir
 
-            log_dir = get_app_data_dir() / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            logger.add(
-                log_dir / "llm_chatter.log",
-                rotation="10 MB",
-                level="DEBUG",
-                format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-            )
+            setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
         except Exception:
             pass
-
-        # 单独的内存诊断日志文件
-        if MEM_DIAG_ENABLED:
-            try:
-                from app.utils.utils import get_app_data_dir
-
-                log_dir = get_app_data_dir() / "logs"
-                logger.add(
-                    log_dir / "mem_diag.log",
-                    rotation="10 MB",
-                    level="DEBUG",
-                    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
-                    filter=lambda r: "[MEM]" in r["message"],
-                )
-            except Exception:
-                pass
 
         # 同步开机自启注册表状态
         try:

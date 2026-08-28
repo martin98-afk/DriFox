@@ -4116,8 +4116,6 @@ class OpenAIChatToolWindow(ToolWindow):
         self._on_agent_changed(agent_name)
         self._apply_agent_command_permissions(agent_name)
         tm = self._get_team_manager()
-        # 团队名：优先取当前模板名，无模板回退 default（与 TeamManager.DEFAULT_TEAM 一致）
-        self._team_name = (tm.get_template() or {}).get("name") or "default"
         # 方案 A：复用团队已有 run_id（模板加载生成的）；手动加入老团队
         # （无 run_id）时保持空串，团队会话不注入团队元数据（行为与现状一致）
         # 🛡️ F3 可选收尾（根因 B）：手动加入且团队无 run_id → start_team_run()
@@ -4128,6 +4126,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not run_id:
             run_id = tm.start_team_run()
         self._team_run_id = run_id
+        # 🛡️ M1'：按 run_id 粒度读模板名，多团队并存下不再被顶层 template
+        # 单槽的最新一次写入覆盖（A 团队成员 /team --join 时不会拿到
+        # B 团队的模板名）。未命中 run_id 时回退顶层 template 字段
+        # （兼容仅用旧 set_template 写入的老团队）。
+        self._team_name = (tm.get_template_for_run_id(run_id) or {}).get("name") or "default"
         # 🛡️ M1：手动 join 路径也透传 run_id / team_label 到 TeamManager，
         # 让成员记录带上团队归属（多团队分组、跨团队拦截的前置条件）。
         team_label = tm.get_team_label()
@@ -4289,10 +4292,13 @@ class OpenAIChatToolWindow(ToolWindow):
         active_count = len(active_windows)
         # 角色描述复用：若当前团队已加载过模板（/team --load），该模板 agents 中
         # 带有的角色描述可直接复用到保存的模板；手动加入的成员无描述则保持旧格式（兼容）
+        # 🛡️ M1'：按当前 run_id 读模板，避免多团队并存下顶层 template 单槽
+        # 覆盖导致角色描述取错（/team --save 时混进其他团队的描述）。
         role_descs = {}
         try:
             _tm_mgr = self._get_team_manager()
-            _tpl = _tm_mgr.get_template()
+            _tpl_run_id = _tm_mgr.get_team_run_id()
+            _tpl = _tm_mgr.get_template_for_run_id(_tpl_run_id)
             for item in (_tpl or {}).get("agents") or []:
                 if isinstance(item, dict) and item.get("agent_name"):
                     desc = str(item.get("description") or "").strip()
@@ -4421,22 +4427,28 @@ class OpenAIChatToolWindow(ToolWindow):
         if not _confirmed[0]:
             return
 
-        # 记录团队模板上下文（供 SessionStart hook 注入团队描述 + 各成员角色描述）
-        tm_mgr = self._get_team_manager()
-        tm_mgr.set_template(
-            {
-                "name": template.template_name,
-                "description": template.description,
-                "agents": [{"agent_name": a.agent_name, "description": a.description} for a in template.agents],
-            }
-        )
         # 方案 A：开始一次团队运行（force=True 强制生成新 run_id），
         # 每次新建团队对话都是独立运行，不复用旧 run_id，与一键恢复路径
         # force=True 语义对齐；本次模板加载的所有新窗口共享同一 run_id，
         # 团队会话自动保存时落库。
         # 🛡️ M1：捕获返回值 new_run_id，批量透传给后续 _spawn_team_members，
         # 保证一次 /team --load 创建的所有成员共享同一团队归属（多团队分组）。
+        # 🛡️ M1'：必须在 set_template_for_run_id 之前——后者按 run_id 粒度
+        # 写入 templates_by_run_id[run_id]，需要先有 run_id。
+        tm_mgr = self._get_team_manager()
         new_run_id = tm_mgr.start_team_run(force=True)
+        # 记录团队模板上下文（供 SessionStart hook 注入团队描述 + 各成员角色描述）
+        # 🛡️ M1'：按 run_id 粒度写入 templates_by_run_id[run_id]，避免
+        # 多次 /team --load=不同模板 时顶层 template 单槽互相覆盖（A 团队
+        # 成员窗口 _team_name 变成 B 的模板名）。
+        tm_mgr.set_template_for_run_id(
+            {
+                "name": template.template_name,
+                "description": template.description,
+                "agents": [{"agent_name": a.agent_name, "description": a.description} for a in template.agents],
+            },
+            run_id=new_run_id,
+        )
 
         # 🐛 构建团队默认项目继承：团队级项目是持久化的（team.json 顶层，
         # 任一成员切项目即写入）。若不在此重置，新团队会沿用上次构建残留的
@@ -4593,15 +4605,19 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         try:
             tm_mgr = self._get_team_manager()
+            # 🛡️ M1：run_id 同样以调用方透传优先；空串回退到 team.json 顶层
+            # （兼容历史单团队时代的隐式行为，但多团队并存时应由调用方显式传入）。
+            # 🛡️ M1'：run_id 提前计算——下面模板名回退按 run_id 粒度读。
+            team_run_id = run_id or tm_mgr.get_team_run_id()
             # 🛡️ D2 根治：团队标记前置传入 _create_fresh_window（add_window
             # 之前写入），Tab 管理器 add_window 时直接命中团队分组，消除
             # "tab 先落独立区、依赖 300ms 后置 refresh 补救"的竞态窗口期。
             # 🛡️ M1：调用方透传的 team_name 优先（_handle_team_add_member 透传
             # self._team_name 锁定目标团队）；空串回退到模板名（_handle_team_load 场景）。
-            team_name = team_name or (tm_mgr.get_template() or {}).get("name") or "default"
-            # 🛡️ M1：run_id 同样以调用方透传优先；空串回退到 team.json 顶层
-            # （兼容历史单团队时代的隐式行为，但多团队并存时应由调用方显式传入）。
-            team_run_id = run_id or tm_mgr.get_team_run_id()
+            # 🛡️ M1'：模板名按 run_id 粒度读，避免多团队并存下顶层 template
+            # 单槽覆盖导致新窗口 _team_name 取错（/team --load=A 后 /team --load=B
+            # 时 A 团队的成员 _team_name 全变成 B 的模板名）。
+            team_name = team_name or (tm_mgr.get_template_for_run_id(team_run_id) or {}).get("name") or "default"
             win = self._create_fresh_window(
                 team_agent=agent_name,
                 team_name=team_name,
@@ -4647,8 +4663,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # 访问 Qt 子类实例属性会触发 super().__init__ 检查抛 RuntimeError。
             # #5a-fix Plan C：按 run_id 粒度读取/写入新团队项目，避免与其他团队
             # 残留的 DEFAULT_TEAM.project 互相覆盖。
+            # 🛡️ M1'：team_name_local 同样按 run_id 粒度读模板名，避免多团队并存下
+            # 顶层 template 单槽覆盖导致写入 projects_by_run_id 时定位错团队。
             team_run_id_local = getattr(win, "_team_run_id", "") or tm_mgr.get_team_run_id()
-            team_name_local = getattr(win, "_team_name", "") or (tm_mgr.get_template() or {}).get("name") or "default"
+            team_name_local = getattr(win, "_team_name", "") or (tm_mgr.get_template_for_run_id(team_run_id_local) or {}).get("name") or "default"
             team_project = ""
             if team_run_id_local:
                 team_project = tm_mgr.get_project_for_run_id(team_run_id_local, team_name=team_name_local)
@@ -4816,9 +4834,14 @@ class OpenAIChatToolWindow(ToolWindow):
         - 无模板且无成员 → InfoBar 提示先 /team --load=<模板> 或先加入成员
         """
         tm_mgr = self._get_team_manager()
+        # 🛡️ M1'：get_template 必须按当前 run_id 过滤——多团队并存下顶层
+        # template 单槽被最新一次 /team --load 覆盖，导致快速新建成员弹窗
+        # 展示错误模板的角色（"快速新建混入其他团队角色"bug 根因）。
+        # 与 get_members(run_id=...) 的 M1' 过滤对齐——同源上下文同源过滤。
+        _target_run_id = self._team_run_id or tm_mgr.get_team_run_id()
+        template = tm_mgr.get_template_for_run_id(_target_run_id)
         # 可选角色：模板 agents ∪ 当前成员角色（去重展示；选择时可重复创建）
         all_agents: List[str] = []
-        template = tm_mgr.get_template()
         if template and template.get("agents"):
             all_agents = [a.get("agent_name") for a in template["agents"] if a.get("agent_name")]
         # 🛡️ M1'：get_members 必须按当前 run_id 过滤——多团队并存下 tm_mgr 全量
@@ -4826,7 +4849,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # （"弹窗全部团队显示最新新建的团队的成员"bug 根因）。ref_win 的
         # _team_run_id 即为目标 run_id（团队框 UI 上下文）；空串时回退到
         # team.json 顶层（兼容历史单团队语义）。
-        _target_run_id = self._team_run_id or tm_mgr.get_team_run_id()
         member_agents = [
             m.get("agent_name") for m in tm_mgr.get_members(run_id=_target_run_id or None) if m.get("agent_name")
         ]
@@ -5079,11 +5101,14 @@ class OpenAIChatToolWindow(ToolWindow):
             win._team_agent_name = agent_name
             tm_mgr = self._get_team_manager()
             if not keep_team_name:
-                win._team_name = (tm_mgr.get_template() or {}).get("name") or "default"
+                # 🛡️ M1'：按当前 run_id 粒度读模板名，多团队并存下顶层 template
+                # 单槽覆盖不再影响本路径（老窗口加入新团队时取对模板名）。
+                _tpl_run_id = tm_mgr.get_team_run_id()
+                win._team_name = (tm_mgr.get_template_for_run_id(_tpl_run_id) or {}).get("name") or "default"
                 # 🛡️ 恢复路径 keep_team_name=True 时保留调用方已设的 run_id
-                # （恢复窗口已设 new_run_id，避免延后期内被中途 start_team_run
+                # （恢复窗口已设 new_run_id，避免延长期内被中途 start_team_run
                 # 刷新覆盖，导致恢复窗口归入错误 run_id 分组漂移）
-                win._team_run_id = tm_mgr.get_team_run_id()
+                win._team_run_id = _tpl_run_id
             # 🛡️ C3：不再重复 join_team（调用方已同步前置执行，恰好一次写盘）
             # 应用团队级统一项目（若已设置）：延迟补注册后与团队共享同一项目。
             # #5a-fix Plan C：按 run_id 粒度读取，与 tab_panel 团队框分组对齐。
