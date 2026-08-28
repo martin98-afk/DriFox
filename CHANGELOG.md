@@ -24,6 +24,7 @@ All notable changes to this project will be documented in this file.
 - **插件流式支持与动作按钮** (`app/core/backend.py` + `app/gateway/base.py` + `app/plugins/loaders/plugin_tool_loader.py` + `app/tools/`): 跨插件实现流式支持与动作按钮功能。
 - **TabManager tab 生成统一** (`app/main_widget.py`): 统一 tab 生成逻辑并增强流式 session 处理。
 - **工具区行为与 UI 一致性增强** (`app/main_widget.py` + `app/widgets/message_card.py` + `app/widgets/cards/floating/file_mention_card.py` + `app/utils/design_tokens.py` + `app/widgets/bottom_input_area.py` + `plugins/system/tools/file_tools.py`): 流式 dock 日志最大高度调整为 220px 提升工具内容可见性；`ToolSectionWidget` 默认展开状态对齐用户反馈与 WebEngine 行为；`exit_dock` 退出后保留展开状态；代码块与工具按钮改用主题感知变量提升多主题可见性；补充 `FileMentionCard` 性能优化回归测试。
+- **Mermaid 图表渲染支持与 Chromium 83 兼容** (`app/widgets/message_card.py` + `build.py` + `app/resources/web/vendor/mermaid.min.js` + `app/resources/web/vendor/chromium83-polyfill.js`): 新增 Mermaid 代码块动态渲染能力；按需懒加载 polyfill 与 Mermaid 库减少首载体积；提升 skeleton 缓存版本失效旧缓存；新增 Mermaid 容器 CSS 与错误处理；`build.py` 打包本地资源以兼容无 CDN 环境。
 
 ### 🐛 问题修复 (Bug Fixes)
 
