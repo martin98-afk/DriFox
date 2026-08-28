@@ -1148,26 +1148,63 @@ class TeamManager:
 
     # ── 团队级统一工作目录/工作树（一人改工作目录全员同步）──
 
-    def set_team_workdir(self, workdir: str, team_name: str = DEFAULT_TEAM):
-        """设置团队级统一工作目录/工作树（写入 team.json **顶层**，与 project 平级）
+    def set_team_workdir(
+        self,
+        workdir: str,
+        run_id: str = "",
+        team_name: str = DEFAULT_TEAM,
+    ):
+        """设置团队级统一工作目录/工作树
 
-        工作目录/工作树是团队共享状态：任一成员切换工作目录或 git worktree 时
-        写入，供同团队其他成员同步应用与恢复路径读取。
+        run_id 非空时写入 team.json ``workdirs_by_run_id[run_id]``（与
+        projects_by_run_id 平级，#5a-fix Plan C 同款粒度）；run_id 为空时
+        写入顶层 ``workdir`` 字段（兼容老调用方）。
+
+        🐛 run_id 粒度修复：旧版仅顶层单槽且持久化——上次团队运行残留的
+        旧工作目录（其他项目/已删 worktree 路径）被后续 join 路径读到后
+        套到成员窗口当前项目上（"标签页工作路径与当前项目不匹配"根因）。
 
         Args:
             workdir: 工作目录绝对路径（空串表示清除）
+            run_id: 团队运行标识（uuid hex，空串时回退顶层兼容行为）
+            team_name: 团队名（仅用于定位 team.json 路径，默认 DEFAULT_TEAM）
         """
         with self._data_lock:
             data = self._get_team_data(team_name)
+            if run_id:
+                mapping = data.get("workdirs_by_run_id") or {}
+                if mapping.get(run_id) == workdir:
+                    return
+                new_mapping = dict(mapping)
+                new_mapping[run_id] = workdir
+                data["workdirs_by_run_id"] = new_mapping
+                self._save_team_data(team_name)
+                return
+            # 兼容：无 run_id 时维持旧顶层行为
             if data.get("workdir") == workdir:
                 return
             data["workdir"] = workdir
             self._save_team_data(team_name)
 
-    def get_team_workdir(self, team_name: str = DEFAULT_TEAM) -> str:
-        """获取团队级统一工作目录/工作树（未设置 / 老团队无 workdir 时返回空串）"""
+    def get_team_workdir(self, run_id: str = "", team_name: str = DEFAULT_TEAM) -> str:
+        """获取团队级统一工作目录/工作树
+
+        run_id 非空时按 ``workdirs_by_run_id[run_id]`` 读取；**未命中不回退
+        顶层**——顶层是跨 run_id 的污染单槽（历史残留值会串台到新团队），
+        未命中返回空串，调用方回退 _sync_working_directory 从项目 DB 取
+        权威值。run_id 为空时读取顶层 ``workdir``（兼容老数据）。
+
+        Args:
+            run_id: 团队运行标识（uuid hex，空串时读顶层兼容行为）
+            team_name: 团队名（默认 DEFAULT_TEAM）
+        """
         with self._data_lock:
             data = self._get_team_data(team_name)
+            if run_id:
+                mapping = data.get("workdirs_by_run_id") or {}
+                if run_id in mapping:
+                    return mapping[run_id] or ""
+                return ""
             return data.get("workdir", "") or ""
 
     # ── 邮件系统 ─────────────────────────────────────

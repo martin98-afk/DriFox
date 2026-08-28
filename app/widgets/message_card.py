@@ -2464,9 +2464,6 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 页面内收到的事件属冒泡残留，置位会让跟随被无关操作误锁死。
                     if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {
                         this._userScrolledUp = true;
-                        // 记录用户滚轮时刻：scroll 监听清标志前用它区分
-                        // "用户真滚回底部"与"程序性 clamp/anchor 被动贴底"
-                        this._lastUserWheelAt = performance.now();
                     }
                 }, {passive: true});
                 document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
@@ -2476,21 +2473,17 @@ _CONTENT_AUTOSCROLL_JS = """
                     // _suppressScrollEvent 抑制对称。
                     if (window._suppressScrollEvent) return;
                     if (cp._progScroll) { cp._progScroll = false; return; }
-                    // 只做恢复跟随：滚回底部附近清标志。**不置位**——内容高度
-                    // 变化导致的 scrollTop 钳制也会触发 scroll（非用户行为），
-                    // 置位会误停跟随导致位置漂移。
+                    // 位置判定（与 body / #tool-content 监听完全一致）：
+                    // 接近底部 = 恢复跟随（_userScrolledUp=false），离开底部 =
+                    // 用户主动阅读（_userScrolledUp=true），保留其阅读位置——
+                    // 「不强制控制滚轮、不跳到怪异位置」的关键。
+                    // 仅程序性滚动（_progScroll，由 _autoScrollStreamingBody /
+                    // _cpPrevTop 还原显式打标）被排除，不再依赖"近期滚轮"启发式：
+                    // 旧逻辑只在「上滚」时刷新 _lastUserWheelAt，下滚回底不刷新，
+                    // 一旦间隔 >800ms 标志卡死为"已离开"→ 内容更新时跟随失效、
+                    // 视口被 _cpPrevTop 还原拖回旧阅读位置（弹回中间的根因）。
                     var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
-                    // 🐛 清标志门控：viewport resize / 折叠框展开动画 / 高度报告应用
-                    // 会引发 Chromium 对超界 scrollTop 的钳制与 overflow-anchor 补偿，
-                    // 被动贴底的 scroll 事件会被误判为"用户滚回底部"→ 标志误清 →
-                    // 下一个 chunk 无条件拉底（视口弹到随机位置的根因）。要求清标志
-                    // 前确有近期用户滚轮行为（触控板惯性最后一段也 <800ms 到达底部）。
-                    var recentUserWheel = cp._lastUserWheelAt !== undefined &&
-                                          (performance.now() - cp._lastUserWheelAt) < 800;
-                    if (atBottom && recentUserWheel) {
-                        cp._userScrolledUp = false;
-                        cp._lastUserWheelAt = undefined;
-                    }
+                    cp._userScrolledUp = !atBottom;
                 });
 """
 

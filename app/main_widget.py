@@ -4159,7 +4159,13 @@ class OpenAIChatToolWindow(ToolWindow):
         if team_project:
             self._apply_team_project(team_project)
         # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
-        team_workdir = tm.get_team_workdir()
+        if join_run_id:
+            # 🐛 按 run_id 粒度读取（与 projects_by_run_id 对齐），未命中不回退
+            # 顶层——顶层是跨 run_id 的污染单槽（残留值串台到新团队）。
+            team_workdir = tm.get_team_workdir(join_run_id, team_name=join_team_name)
+        else:
+            # run_id 尚未生成（手动 join 早期）：回退顶层兼容行为
+            team_workdir = tm.get_team_workdir(team_name=join_team_name)
         if team_workdir:
             self._apply_team_workdir(team_workdir)
         self._refresh_team_ui(agent_name)
@@ -4463,14 +4469,15 @@ class OpenAIChatToolWindow(ToolWindow):
             # header icon 被新团队项目覆盖）
             tm_mgr.set_project_for_run_id(src_project, new_run_id)
 
-        # 🐛 构建团队默认工作目录继承：与团队级项目同理，team_workdir 也是
-        # 持久化的（team.json 顶层，用户切换工作目录/git worktree 即写入），
+        # 🐛 构建团队默认工作目录继承：团队 workdir 与团队级项目同理按 run_id
+        # 粒度存储（workdirs_by_run_id[run_id]，与 projects_by_run_id 平级），
         # 若不在此重置，新团队会沿用上次构建残留的旧工作目录，导致新成员窗口
         # 左上角分支标签显示旧工作目录（其他项目/worktree）的分支，而非当前
-        # 团队项目。修复：开新团队时把团队级工作目录重置为源标签页当前工作目录，
-        # 使本次所有新成员窗口在 _apply_team_workdir 时共享同一工作树。
+        # 团队项目。修复：开新团队时把本次 run_id 的团队工作目录重置为源标签页
+        # 当前工作目录，使本次所有新成员窗口在 _apply_team_workdir 时共享同一
+        # 工作树。带 run_id 写入后不再污染顶层/其他 run_id 槽位。
         src_workdir = self._resolve_project_workdir() or ""
-        tm_mgr.set_team_workdir(src_workdir)
+        tm_mgr.set_team_workdir(src_workdir, run_id=new_run_id)
 
         # 为模板的每个角色新建一个全新空白窗口（复用公共创建链路：
         # _create_fresh_window + 同步前置 join + 300ms 延迟 join）。
@@ -4683,7 +4690,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if team_project:
                 win._apply_team_project(team_project)
             # 应用团队级统一工作目录/工作树（若已设置）：新窗口与团队共享同一工作树
-            team_workdir = tm_mgr.get_team_workdir()
+            # 🐛 按 run_id 粒度读取（与 projects_by_run_id 对齐），未命中不回退
+            # 顶层——顶层是跨 run_id 的污染单槽（残留值串台到新团队）。
+            team_workdir = tm_mgr.get_team_workdir(team_run_id_local, team_name=team_name_local)
             if team_workdir:
                 win._apply_team_workdir(team_workdir)
             # 延迟 join（确保 backend.agent_manager 已初始化）
@@ -5122,7 +5131,9 @@ class OpenAIChatToolWindow(ToolWindow):
             if team_project:
                 win._apply_team_project(team_project)
             # 应用团队级统一工作目录/工作树（若已设置）：与团队共享同一工作树
-            team_workdir = tm_mgr.get_team_workdir()
+            # 🐛 按 run_id 粒度读取（与 projects_by_run_id 对齐），未命中不回退
+            # 顶层——顶层是跨 run_id 的污染单槽（残留值串台到新团队）。
+            team_workdir = tm_mgr.get_team_workdir(join_run_id_local, team_name=join_team_name_local)
             if team_workdir:
                 win._apply_team_workdir(team_workdir)
             if hasattr(win, "_refresh_team_ui"):
@@ -18512,12 +18523,17 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.core.team_manager import TeamManager
 
         tm_mgr = TeamManager.get_instance()
-        # 写团队级统一工作目录/工作树（team.json 顶层，与 project/run_id 平级）
-        tm_mgr.set_team_workdir(workdir or "")
+        # 写团队级统一工作目录/工作树：按 run_id 粒度（workdirs_by_run_id），
+        # 避免顶层单槽残留值串台到后续新团队的其他项目（标签页 workdir 错配根因）
+        tm_mgr.set_team_workdir(workdir or "", run_id=getattr(self, "_team_run_id", ""))
         # 本窗口团队 key：run_id 优先（同一次 /team --load 共享），回退团队名
         my_key = getattr(self, "_team_run_id", "") or getattr(self, "_team_name", "") or TeamManager.DEFAULT_TEAM
         for win in window_registry.alive_window_instances():
             if win is self or getattr(win, "_is_destroyed", False):
+                continue
+            # P2-B 对称校验：接收方当前项目必须与发送方一致才应用广播，
+            # 防止工作目录广播串台到不同项目的窗口（_broadcast_team_project 同款防御）
+            if getattr(win, "_current_project", "") != self._current_project:
                 continue
             if not getattr(win, "_team_agent_name", ""):
                 continue
