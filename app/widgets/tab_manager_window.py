@@ -351,6 +351,22 @@ class TabManagerWindow(QWidget):
     def get_instance(cls) -> Optional["TabManagerWindow"]:
         return cls._instance
 
+    # ── [FLASH_DEBUG] 闪烁定位插桩：确认后删除 ──
+    def showEvent(self, event):
+        import traceback
+        logger.warning("[FLASH_DEBUG] TabManagerWindow SHOW")
+        stack = "".join(traceback.format_stack(limit=6)[:-1])
+        logger.warning(f"[FLASH_DEBUG] show stack:\n{stack}")
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        import traceback
+        logger.warning("[FLASH_DEBUG] TabManagerWindow HIDE")
+        stack = "".join(traceback.format_stack(limit=6)[:-1])
+        logger.warning(f"[FLASH_DEBUG] hide stack:\n{stack}")
+        super().hideEvent(event)
+    # ── [FLASH_DEBUG] 结束 ──
+
     @classmethod
     def create_instance(cls, parent=None) -> "TabManagerWindow":
         if cls._instance is None:
@@ -362,6 +378,8 @@ class TabManagerWindow(QWidget):
         if TabManagerWindow._instance is not None:
             raise RuntimeError("TabManagerWindow 是单例，请使用 get_instance() 获取")
         TabManagerWindow._instance = self
+        # [FLASH_DEBUG] 销毁追踪
+        self.destroyed.connect(lambda *_: logger.warning("[FLASH_DEBUG] TabManagerWindow DESTROYED"))
 
         self._windows: List = []  # List[OpenAIChatToolWindow]
         # ── 几何防抖保存：拖拽/缩放结束后 200ms 才写盘 ──
