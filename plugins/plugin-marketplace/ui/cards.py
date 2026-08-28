@@ -1056,7 +1056,7 @@ class _ConfirmUninstallDialog(MaskDialogBase):
         self.widget.setFixedSize(400, 200)
 
     def _on_confirm(self):
-        """确认卸载：accept() 使 exec_() 返回 1（close() 会被 QDialog 转为 reject）"""
+        """确认卸载：accept() 使 exec() 返回 1（close() 会被 QDialog 转为 reject）"""
         self.accept()
 
     def _on_cancel(self):

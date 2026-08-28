@@ -141,7 +141,7 @@ def test_unbind_requires_confirmation(row_factory):
         row._on_unbind()
 
     dialog.confirmed.connect.assert_called_once_with(row._do_unbind)
-    dialog.exec_.assert_called_once_with()
+    dialog.exec.assert_called_once_with()
 
 
 def test_do_unbind_stops_sync_and_resets_state(row_factory):

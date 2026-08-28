@@ -772,7 +772,7 @@ def _setup_add_member_menu_patch(choice):
         return action
 
     fake_menu.addAction.side_effect = _make_action
-    fake_menu.exec_ = MagicMock(side_effect=lambda pos: actions_by_text.get(choice))
+    fake_menu.exec = MagicMock(side_effect=lambda pos: actions_by_text.get(choice))
     return fake_menu_cls, actions_by_text
 
 

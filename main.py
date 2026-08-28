@@ -40,6 +40,12 @@ _CHROMIUM_FLAGS = (
     # 导致所有 QWebEngineView 内容空白（Qt5/Chromium 83 无此问题）。
     # 故 Qt6 下不再传 --disable-software-rasterizer。
     " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
+    " --disable-gpu-compositing"  # 纯软件合成：绕开 DirectComposition 视觉树（窗口闪没的扰动源）
+    # Windows 遮挡计算误判：Chromium 会把宿主窗口判定为"被遮挡"而 cloak 掉
+    # → 主窗口整个消失后重现（setHtml/首次渲染时触发，QtWebEngine on Windows
+    # 已知问题）。两个 feature 名都禁，覆盖新旧 Chromium 版本。
+    " --disable-features=CalculateNativeWinOcclusion,NativeWindowOcclusionTracking"
+    " --disable-backgrounding-occluded-windows"  # 配套：被误判遮挡时也不降速/挂起
     " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
     " --disable-extensions"
     " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
@@ -87,7 +93,7 @@ def main():
     _qt_pp = os.environ.pop("QT_PLUGIN_PATH", "")
 
     from loguru import logger
-    from PySide6.QtCore import Qt, QTimer
+    from PySide6.QtCore import QCoreApplication, Qt, QTimer
     from PySide6.QtWidgets import QApplication
 
     if _qt_pp:
@@ -97,9 +103,14 @@ def main():
     # 这些设置必须在任何 Qt 模块导入之前或 QApplication 创建之前完成
 
     # DPI 缩放设置
+    # 迁移注记：Qt6 高 DPI 永远启用，AA_EnableHighDpiScaling/AA_UseHighDpiPixmaps
+    # 已无效果（Qt6 中设置会触发弃用警告），仅保留 rounding policy。
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+
+    # 共享 OpenGL contexts —— Qt6 WebEngine 官方要求（tests/conftest.py 同款）。
+    # 缺失时 WebEngine 首次初始化 Chromium 会重设 GL context，扰动原生窗口层级，
+    # 表现为主窗口短暂 HIDE 再 SHOW（启动闪烁）。
+    QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，
@@ -169,19 +180,9 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] openai resources 预导入失败（非致命）")
 
-        # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
-        # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
-        # 可复用已就绪的进程基础设施，避免首帧后突发 200-500ms 主线程阻塞。
-        try:
-            from PySide6.QtWebEngineWidgets import QWebEngineView
-            _preheat_view = QWebEngineView()
-            _preheat_view.setHtml("<html><body></body></html>")
-            _preheat_view.hide()
-            # 保持引用，防止 GC 回收导致进程退出
-            app._preheat_webengine = _preheat_view
-            logger.debug("[DeferredStartup] WebEngine 预热视图已创建")
-        except Exception:
-            logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
+        # [PERF] WebEngine 预热已前移到 _show_popup 中窗口显示前同步完成
+        # （Qt6 迁移：Chromium 首次初始化的 native 扰动发生在显示前，避免启动闪烁），
+        # 此处不再重复预热。
 
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
@@ -348,9 +349,29 @@ def main():
         chat_window = OpenAIChatToolWindow(fake_page)
         tm.add_window(chat_window)
         _guard.show_requested.connect(lambda: _activate_window(tm))
-        # 先应用置顶 flags 再 show：可见状态下 setWindowFlags 会重建原生窗口，
-        # 表现为窗口"闪没一下再重现"（PySide6/Qt6 下尤为明显）
+        # 强制提前物化原生窗口句柄：Qt6 WebEngine 首次渲染（setHtml）会在顶层
+        # HWND 下创建 Chromium 原生子窗口，若顶层句柄彼时才物化，会触发原生
+        # 层级扰动 → 主窗口短暂 HIDE 再 SHOW（启动闪烁，hideEvent 已插桩实证）。
+        tm.winId()
         _apply_window_topmost(tm)
+        # ── 同步预热 Chromium（Qt6 迁移关键）──
+        # 本机 GPU 探测失败重试（GLES3 fallback / shared context 虚拟化失败）期间，
+        # 首次 setHtml 会让主窗口短暂 HIDE（插桩实证：hideEvent 栈在 setHtml 内）。
+        # 把首次初始化 + setHtml 挪到窗口显示之前同步完成，抖动发生在显示前，不可见。
+        try:
+            from PySide6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView
+            from PySide6.QtCore import QEventLoop as _QEventLoop, QTimer as _QTimer
+
+            _preheat = _QWebEngineView()
+            _loop = _QEventLoop()
+            _preheat.loadFinished.connect(_loop.quit)
+            _preheat.setHtml("<html><body></body></html>")
+            _QTimer.singleShot(2000, _loop.quit)  # 兜底：Chromium 异常时不无限等
+            _loop.exec()
+            app._preheat_webengine = _preheat  # 保持引用防 GC
+            logger.debug("[Startup] WebEngine 同步预热完成（Chromium 已就绪）")
+        except Exception:
+            logger.exception("[Startup] WebEngine 同步预热失败（非致命）")
         tm.show()
         logger.info("DriFox 以 Tab 管理器模式启动")
 

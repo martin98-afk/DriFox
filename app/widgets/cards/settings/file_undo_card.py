@@ -31,7 +31,7 @@ class FileUndoCard(BaseSettingsCard):
         self._loop = None
         self._build()
 
-    def exec_(self):
+    def exec(self):
         from app.widgets.cards.global_card_controller import get_global_card_controller
         controller = get_global_card_controller()
         if controller is None:

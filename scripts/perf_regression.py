@@ -382,7 +382,7 @@ def _run_single_shot(args: argparse.Namespace) -> int:
         mw._compact_process_heap_after_cleanup = lambda: None
 
     QTimer.singleShot(0, _phase_startup)
-    app.exec_()  # 事件循环结束后返回（_finish 已 app.quit）
+    app.exec()  # 事件循环结束后返回（_finish 已 app.quit）
     return 0
 
 
