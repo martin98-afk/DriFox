@@ -37,7 +37,7 @@ dist/
 *.spec
 check_format.py
 debug_*.py
-_diag_analyze.py
+_diag*.py
 /test_*.py
 *.json
 !/marketplace.json
