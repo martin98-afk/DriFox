@@ -15189,6 +15189,16 @@ class OpenAIChatToolWindow(ToolWindow):
             # session_id 直接就是 content
             session_id = content.strip()
             self._switch_to_session_by_id(session_id)
+        else:
+            # 插件注册的自定义欢迎动作（如 marketplace-recommend 的点击安装）：
+            # 无人接手则静默忽略，保持旧行为
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().dispatch_welcome_action(
+                action,
+                content,
+                {"window_id": self._window_id, "main_widget": self},
+            )
         # 注：mode 切换由 MessageCard.welcomeModeChanged（PyQt 层）触发，不走 contextActionRequested
 
     def _switch_to_session_by_id(self, session_id: str):

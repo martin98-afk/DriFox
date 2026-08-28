@@ -1036,9 +1036,9 @@ class TabPanel(QWidget):
 
         # 右侧：侧边栏收起/展开按钮
         self._sidebar_toggle_btn = TransparentToolButton(self._brand_widget)
-        self._sidebar_toggle_btn.setIcon(get_icon("收起侧边栏"))
+        self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
         self._sidebar_toggle_btn.setFixedSize(28, 28)
-        self._sidebar_toggle_btn.setToolTip("收起侧边栏")
+        self._sidebar_toggle_btn.setToolTip("收起/展开侧边栏")
         self._sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
         brand_layout.addWidget(self._sidebar_toggle_btn)
 
@@ -1463,10 +1463,10 @@ class TabPanel(QWidget):
                 走宽度动画，UI 切换由动画跨阈值时驱动）。
         """
         if self._collapsed:
-            self._sidebar_toggle_btn.setIcon(get_icon("展开侧边栏"))
+            self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
             self._sidebar_toggle_btn.setToolTip("展开侧边栏")
         else:
-            self._sidebar_toggle_btn.setIcon(get_icon("收起侧边栏"))
+            self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
             self._sidebar_toggle_btn.setToolTip("收起侧边栏")
 
         # switch_ui=False（按钮点击走宽度动画）时只更新按钮图标/tooltip，

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """插件配置统一存储（E1）。
 
-路径：<app_data_dir>/plugins/<plugin_name>/config.json
+路径：<app_data_dir>/plugin_data/<plugin_name>/config.json
+迁移：首次读取时若发现老路径 <app_data_dir>/plugins/<plugin_name>/config.json
+存在且新路径不存在，自动迁移并写入 logger.info；与 cron-tasks 的 plugin_data
+存储约定保持一致。
 读取优先级：环境变量 → 存储值 → schema 默认（与 websearch 迁移前
 _api_key 三级链逐点等价：env 最高、空串=清除、内置默认兜底）。
 独立于主程序 Settings（插件数据不占用主程序配置文件）。
@@ -29,7 +32,21 @@ class PluginConfigStore:
     def _path(self, plugin_name: str) -> Path:
         from app.utils.utils import get_app_data_dir
 
-        return Path(get_app_data_dir()) / "plugins" / plugin_name / "config.json"
+        new_path = Path(get_app_data_dir()) / "plugin_data" / plugin_name / "config.json"
+        legacy_path = Path(get_app_data_dir()) / "plugins" / plugin_name / "config.json"
+        # 一次性迁移：旧路径 plugins/<name>/config.json → 新路径 plugin_data/<name>/config.json
+        # 与 cron-tasks 一致：所有插件配置统一落 plugin_data/<plugin_name>/ 下
+        if legacy_path.exists() and not new_path.exists():
+            try:
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                legacy_path.rename(new_path)
+                logger.info(
+                    f"[PluginConfigStore] {plugin_name} 配置已迁移 "
+                    f"plugins/ → plugin_data/"
+                )
+            except Exception as e:
+                logger.warning(f"[PluginConfigStore] {plugin_name} 旧配置迁移失败: {e}")
+        return new_path
 
     def _read_raw(self, plugin_name: str) -> Dict[str, Any]:
         try:

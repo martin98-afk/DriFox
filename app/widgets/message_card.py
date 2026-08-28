@@ -102,6 +102,7 @@ from app.utils.design_tokens import (
     font_size_css,
     get_unified_scrollbar_style,
     scale_font_size,
+    scale_icon_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.markdown_block_viewer import MarkdownBlockViewer
@@ -1035,8 +1036,9 @@ def _classify_think_tag(content: str) -> str:
     return best_tag if best_score >= 3.0 else ""
 
 
+_THINK_SNAKE_SIZE: int = scale_icon_size(18)
 _THINK_SNAKE_SVG = (
-    '<svg class="think-snake" width="18" height="18" viewBox="0 0 24 24">'
+    f'<svg class="think-snake" width="{_THINK_SNAKE_SIZE}" height="{_THINK_SNAKE_SIZE}" viewBox="0 0 24 24">'
     '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.06)" stroke-width="2.5" />'
     '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.2)" stroke-width="2.5"'
     ' stroke-linecap="round" stroke-dasharray="20 30" class="think-snake-arc" />'
@@ -1218,7 +1220,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 15px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: {scale_font_size(15)}px;">
         {spinner_html}
         <span>深度思考中...</span>
     </span>
@@ -1257,7 +1259,7 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
-    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 15px;">
+    <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: {scale_font_size(15)}px;">
         {spinner_html}
         <span>深度思考中...</span>
     </span>
@@ -8157,12 +8159,28 @@ class PlainTextViewer(QWidget):
         doc.setTextWidth(bubble_w - 16)
         h = int(math.ceil(doc.size().height())) + 12  # 上下边距
 
+        # 🛡️ 短消息收缩分支测出超高 = longest 测量伪信号（如字体 fallback 未就绪时
+        # naturalTextWidth 异常偏小 → bubble_w 收到 ~80 → tiny 宽度下短文本折出
+        # 十几行 → h 必然撞 MAX_HEIGHT）。回退全宽重测一次自愈，避免：
+        # 1) 气泡真的收缩成 80px 孤条；2) 下方 _tall_cap 把该 cap 记为"确认超高"，
+        # 之后所有 ≤cap 的宽度永久走 O(1) 快速路径 → 2 行短消息被锁死
+        # (cap, MAX_HEIGHT)，气泡全宽 300 高全是空白（实测截图症状）。
+        if h > self.MAX_HEIGHT and bubble_w < self._width_cap:
+            bubble_w = self._width_cap
+            if self.maximumWidth() != bubble_w:
+                self.setMaximumWidth(bubble_w)
+            doc.setTextWidth(bubble_w - 16)
+            h = int(math.ceil(doc.size().height())) + 12
+
         # 限制最大高度：内容超出 MAX_HEIGHT 后由 QTextEdit 内部滚动条处理滚动
         h = max(40, min(h, self.MAX_HEIGHT))
 
         # [PERF] 更新“超高”单调缓存：撞上限 → 记录确认宽度（取 max 保留最宽确认点），
         # 后续更窄宽度走 O(1) 快速路径；未撞上限不更新（更宽时结论仍可能对更窄宽度有效）。
-        if h >= self.MAX_HEIGHT and self._width_cap < 100000:
+        # 🛡️ 仅在 bubble_w 用满上限（bubble_w >= cap，真·内容超高）时记录：
+        # 短消息收缩分支的撞限是 tiny 宽度测量伪信号，一旦记录，后续宽度
+        # 全部被 O(1) 快速路径锁死 (cap, MAX_HEIGHT)（见上方回退重测注释）。
+        if h >= self.MAX_HEIGHT and self._width_cap < 100000 and bubble_w >= self._width_cap:
             self._tall_cap = max(self._tall_cap, self._width_cap)
 
         # ⚠️ 必须 setFixedSize：仅设 maximumWidth 时布局仍按 QTextEdit 的
