@@ -843,8 +843,10 @@ class PluginInstaller:
             # 整个仓库：直接浅克隆
             _run(["git", *extra, "clone", "--depth=1", "--single-branch", "--branch", ref, url, str(cache_dir)])
         else:
-            # 子目录：稀疏克隆
-            _run(["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)])
+            # 子目录：稀疏克隆（--branch 必须显式指定，否则只会拉默认分支，
+            # 导致 ref=pyside6 的清单装出 main 的源码）
+            _run(["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse",
+                  "--branch", ref, url, str(cache_dir)])
             _run(["git", "-C", str(cache_dir), "sparse-checkout", "set", subpath])
 
     @staticmethod
