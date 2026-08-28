@@ -210,6 +210,9 @@ params = [
     "--name=Drifox",  # 直接指定名称，省去后期改名麻烦
     # 数据文件包含
     f"--add-data=plugins{os.pathsep}plugins",
+    # mermaid vendor：polyfill 无 CDN 降级（Chromium 83 必需），mermaid 降级 jsdelivr 国内不稳
+    f"--add-data=app/resources/web/vendor/chromium83-polyfill.js{os.pathsep}app/resources/web/vendor",
+    f"--add-data=app/resources/web/vendor/mermaid.min.js{os.pathsep}app/resources/web/vendor",
     # 隐藏导入：gateway adapter 模块（importlib.import_module 动态加载，PyInstaller 无法自动发现）
     *[f"--hidden-import={m}" for m in _hidden_imports],
     # 排除插件自包含依赖（由插件 deps/ 目录运行时提供）

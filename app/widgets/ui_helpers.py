@@ -1348,7 +1348,7 @@ def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
                 diff=msg.get("diff"),
                 echarts=msg.get("echarts"),
             )
-    assistant_card.finish_streaming()
+    assistant_card.finish_streaming(history=True)
 
 
 _scroll_last_time = [0.0]  # 使用 list 实现可变闭包
