@@ -1036,7 +1036,7 @@ def _classify_think_tag(content: str) -> str:
     return best_tag if best_score >= 3.0 else ""
 
 
-_THINK_SNAKE_SIZE: int = scale_icon_size(18)
+_THINK_SNAKE_SIZE: int = scale_icon_size(12)
 _THINK_SNAKE_SVG = (
     f'<svg class="think-snake" width="{_THINK_SNAKE_SIZE}" height="{_THINK_SNAKE_SIZE}" viewBox="0 0 24 24">'
     '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.06)" stroke-width="2.5" />'

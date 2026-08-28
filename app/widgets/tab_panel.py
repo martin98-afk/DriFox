@@ -1122,7 +1122,18 @@ class TabPanel(QWidget):
         # ── 分隔线：UI 插件区域 ↔ 新建标签页 ──
         self._plugin_separator_2 = QFrame(self)
         self._plugin_separator_2.setFrameShape(QFrame.HLine)
-        self._plugin_separator_2.setStyleSheet(self._SEPARATOR_STYLE)
+        self._plugin_separator_2.setStyleSheet(
+            f"""
+            QFrame {{
+                background: {Colors.DIVIDER_COLOR};
+                border: none;
+                min-height: 1px;
+                max-height: 1px;
+                margin-top: 4px;
+                margin-bottom: 2px;
+            }}
+            """
+        )
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
@@ -2535,7 +2546,7 @@ class TabPanel(QWidget):
         if not hasattr(self, "_custom_plugin_card"):
             return
         Colors.refresh()
-        margin = "2px 2px" if compact else "2px 6px"
+        margin = "3px 4px" if compact else "5px 8px"
         self._custom_plugin_card.setStyleSheet(f"""
             #customPluginCard {{
                 background: {Colors.CARD_BG.format(alpha=40)};
