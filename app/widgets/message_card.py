@@ -1223,7 +1223,9 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
 </div>"""
 
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
-    font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(15)}px;"
+    # 字号与折叠框正文 _get_think_block_styles() 对齐（13px），避免 spinner 旁的提示文字
+    # 在消息正文中显得过粗过大。
+    font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
@@ -1263,7 +1265,9 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
 </div>"""
 
     # ── 流式态：无折叠UI，显示金色圆环 + "深度思考中"文字 ──
-    font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(15)}px;"
+    # 字号与折叠框正文 _get_think_block_styles() 对齐（13px），避免 spinner 旁的提示文字
+    # 在消息正文中显得过粗过大。
+    font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
     return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
