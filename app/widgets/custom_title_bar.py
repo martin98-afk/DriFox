@@ -12,12 +12,13 @@ from typing import Callable, Dict, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QHBoxLayout, QPushButton, QWidget
+from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from qframelesswindow.titlebar import TitleBarBase
 
+from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css
-from app.utils.utils import get_icon
+from app.utils.utils import get_font_family_css, get_icon
 
 
 class CustomTabButton(QPushButton):
@@ -71,13 +72,16 @@ class CustomTitleBar(TitleBarBase):
 
         self.setFixedHeight(self.HEIGHT)
 
-        # ── 左区：侧栏开关（复用 TabPanel 同款图标；点击转发射信号由窗口接线） ──
+        # ── 左区：侧栏开关（透明无边框，样式随主题） + 品牌（自 TabPanel 移入） ──
         self._sidebar_btn = QPushButton(self)
         self._sidebar_btn.setIcon(get_icon("侧边栏"))
         self._sidebar_btn.setFixedSize(30, 26)
         self._sidebar_btn.setCursor(Qt.PointingHandCursor)
         self._sidebar_btn.setToolTip("收起/展开侧边栏")
         self._sidebar_btn.clicked.connect(self.sidebar_toggle_requested.emit)
+
+        self._brand_title = QLabel("DriFox", self)
+        self._brand_version = QLabel(Settings.current_version, self)
 
         # ── 中央区：tab 容器 ──
         self._tab_container = QWidget(self)
@@ -91,6 +95,9 @@ class CustomTitleBar(TitleBarBase):
         layout.setContentsMargins(left_pad, 6, 0, 6)
         layout.setSpacing(4)
         layout.addWidget(self._sidebar_btn)
+        layout.addSpacing(4)
+        layout.addWidget(self._brand_title)
+        layout.addWidget(self._brand_version)
         layout.addStretch(1)
         layout.addWidget(self._tab_container, 0, Qt.AlignCenter)
         layout.addStretch(1)
@@ -102,6 +109,8 @@ class CustomTitleBar(TitleBarBase):
             self.minBtn.hide()
             self.maxBtn.hide()
             self.closeBtn.hide()
+
+        self.refresh_style()
 
     # ── tab 扩展 API ──
 
@@ -152,6 +161,18 @@ class CustomTitleBar(TitleBarBase):
         """主题切换后刷新样式（Colors.refresh() 由调用方先执行）"""
         for b in self._tabs.values():
             b.refresh_style()
+        # 侧栏开关：透明背景无边框，仅 hover 显底
+        self._sidebar_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
+            f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
+        )
+        # 品牌：标题 + 版本号（样式对齐 TabPanel 原品牌区）
+        self._brand_title.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
+        )
+        self._brand_version.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
+        )
 
     # ── 内部 ──
 

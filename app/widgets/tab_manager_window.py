@@ -415,8 +415,13 @@ class TabManagerWindow(FramelessWindow):
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         # 注：macOS 置顶与最小化互斥（WindowStaysOnTopHint → NSStatusWindowLevel
         # 会丢标题栏最小化点击），置顶统一走 _apply_window_topmost 的软置顶分支
-        # 无边框窗口：FramelessWindow 自管 flags（FramelessWindowHint），
-        # Aero Snap / 任务栏预览 / 摇动等由 qframelesswindow 原生 WM_NCHITTEST 保留
+        # 无边框窗口：显式 Qt.Window 顶级窗口标志（WS_OVERLAPPEDWINDOW 样式基础）——
+        # 若缺省（Qt.Widget → WS_POPUP），系统级 Aero Snap（拖到屏幕边缘填充）与
+        # NCHITTEST 边缘 resize 全部失效；随后 updateFrameless() 重新叠加
+        # FramelessWindowHint + DWM 阴影/窗口动画
+        self.setWindowFlags(Qt.Window)
+        self.updateFrameless()
+
         from app.widgets.custom_title_bar import CustomTitleBar
 
         self.setTitleBar(CustomTitleBar(self))

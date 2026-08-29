@@ -1502,12 +1502,12 @@ class TabPanel(QWidget):
             self._brand_layout.setStretch(1, 1)
             self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.AlignHCenter)
         else:
-            # 展开时恢复产品标识
-            self._brand_left.setVisible(True)
-            # 展开态：恢复默认边距与拉伸，按钮回到右上角
+            # 展开态不再显示品牌（DriFox+版本已移至窗口标题栏 CustomTitleBar）
+            self._brand_left.setVisible(False)
+            # 展开态：品牌区只剩侧栏按钮，保持右上角位置
             self._brand_layout.setContentsMargins(10, 4, 6, 4)
-            self._brand_layout.setStretch(0, 1)
-            self._brand_layout.setStretch(1, 0)
+            self._brand_layout.setStretch(0, 0)
+            self._brand_layout.setStretch(1, 1)
             self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.Alignment())
             # 展开时恢复文字新建按钮，隐藏图标按钮
             self._branch_btn.setVisible(True)

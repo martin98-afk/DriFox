@@ -24,6 +24,20 @@ def test_instantiates_with_system_buttons(qtbot, container):
     assert tb.minimumHeight() == 38
     assert tb.minBtn is not None and tb.maxBtn is not None and tb.closeBtn is not None
     assert tb._is_mac is False
+    # 品牌区（自 TabPanel 移入）：DriFox + 版本号
+    assert tb._brand_title.text() == "DriFox"
+    assert tb._brand_version.text() != ""
+
+
+def test_sidebar_button_transparent_style(qtbot, container):
+    """侧栏折叠按钮：透明背景无边框，refresh_style 后样式非空"""
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    tb.refresh_style()
+    qss = tb._sidebar_btn.styleSheet()
+    assert qss != ""
+    assert "background: transparent" in qss
+    assert "border: none" in qss
 
 
 def test_add_tab_sets_active_and_emits_signal(qtbot, container):
