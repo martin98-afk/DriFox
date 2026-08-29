@@ -4878,7 +4878,7 @@ class CodeWebViewer(QWebEngineView):
                     height: auto;
                     margin: 12px 0;
                     border-radius: 10px;
-                    background: rgba(22, 27, 34, 0.6);
+                    background: {"rgba(255, 255, 255, 0.75)" if _is_light_diff else "rgba(22, 27, 34, 0.6)"};
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
                 /* ===== 图表 hover 浮动工具栏（放大 / 导出） ===== */
@@ -5621,7 +5621,7 @@ class CodeWebViewer(QWebEngineView):
                                     // 用 TextDecoder('utf-8') 还原为正确字符串后再 JSON.parse，避免 mojibake。
                                     var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
                                     var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
-                                    var chart = echarts.init(el, 'dark');
+                                    var chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
                                     chart.setOption(option);
                                     el._echartInited = true;
                                     el._chartInstance = chart;
@@ -6269,6 +6269,8 @@ class CodeWebViewer(QWebEngineView):
                 window.pywebview = {{ reportHeight: reportHeight }};
 
                 // ===== 图表工具栏：echarts / mermaid 放大查看 + 3x PNG 导出 =====
+                var _CHART_IS_DARK = {str(not _is_light).lower()};
+                var _CHART_BG = _CHART_IS_DARK ? '#1B1E24' : '#FFFFFF';
                 function _b64EncodeUtf8(str) {{
                     return btoa(unescape(encodeURIComponent(str)));
                 }}
@@ -6296,7 +6298,7 @@ class CodeWebViewer(QWebEngineView):
                         canvas.width = Math.round(w * scale);
                         canvas.height = Math.round(h * scale);
                         var ctx = canvas.getContext('2d');
-                        ctx.fillStyle = '#1B1E24';
+                        ctx.fillStyle = _CHART_BG;
                         ctx.fillRect(0, 0, canvas.width, canvas.height);
                         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
                         _emitChartPng(canvas.toDataURL('image/png'));
@@ -6337,7 +6339,7 @@ class CodeWebViewer(QWebEngineView):
                         try {{
                             if (type === 'echarts' && el._chartInstance) {{
                                 el._chartInstance.resize();  // 防实例内部宽度过期导致导出畸形
-                                _emitChartPng(el._chartInstance.getDataURL({{ type: 'png', pixelRatio: 3, backgroundColor: '#1B1E24' }}));
+                                _emitChartPng(el._chartInstance.getDataURL({{ type: 'png', pixelRatio: 3, backgroundColor: _CHART_BG }}));
                             }} else if (type === 'mermaid') {{
                                 _exportMermaidSvgPng(el.querySelector('svg'), 3);
                             }}

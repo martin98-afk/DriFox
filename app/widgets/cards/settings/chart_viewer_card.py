@@ -36,8 +36,9 @@ from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
 # payload b64 上限（与消息卡 JS 侧拦截一致，防御异常大图打爆 console 通道）
 _MAX_PAYLOAD_B64 = 8 * 1024 * 1024
-# 大图背景/导出底色：与卡片内 echarts dark 渲染观感一致
-_CHART_BG = "#1B1E24"
+# 大图背景/导出底色：跟随主题（深色 #1B1E24 / 浅色白底），与卡片内 echarts 观感一致
+_CHART_BG_DARK = "#1B1E24"
+_CHART_BG_LIGHT = "#FFFFFF"
 
 _ECHARTS_LOCAL = "app/resources/web/vendor/echarts.min.js"
 _ECHARTS_CDN = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"
@@ -128,12 +129,13 @@ window._exportChartPng = function (scale) {
 """
 
 
-def build_chart_viewer_html(chart_type: str, payload_b64: str) -> str:
+def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = True) -> str:
     """构建图表大图查看 HTML
 
     Args:
         chart_type: "echarts" | "mermaid"
         payload_b64: echarts option JSON / mermaid SVG outerHTML 的 UTF-8 b64
+        is_dark: 深色主题（背景与 echarts init 主题跟随）
 
     Raises:
         ValueError: payload 超上限或类型未知
@@ -143,7 +145,8 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str) -> str:
     if len(payload_b64) > _MAX_PAYLOAD_B64:
         raise ValueError("图表数据超过 8MB 上限")
 
-    js_common = _EXPORT_JS % {"max_b64": _MAX_PAYLOAD_B64, "bg": _CHART_BG}
+    bg = _CHART_BG_DARK if is_dark else _CHART_BG_LIGHT
+    js_common = _EXPORT_JS % {"max_b64": _MAX_PAYLOAD_B64, "bg": bg}
 
     if chart_type == "echarts":
         echarts_tag = _echarts_script_tag()
@@ -164,7 +167,9 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str) -> str:
             + "    try {\n"
             + "        var bytes = Uint8Array.from(atob(_PAYLOAD), function (c) { return c.charCodeAt(0); });\n"
             + "        var option = JSON.parse(new TextDecoder('utf-8').decode(bytes));\n"
-            + "        chart = echarts.init(el, 'dark');\n"
+            + "        chart = echarts.init(el, "
+    + repr("dark" if is_dark else None)
+    + ");\n"
             + "        chart.setOption(option);\n"
             + "    } catch (e) {\n"
             + "        el.innerHTML = '<pre style=\"color:#e06c75;padding:16px;\">图表渲染失败: ' + e + '" + pre_end + "';\n"
@@ -211,7 +216,7 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str) -> str:
             " .chart-body svg { max-width: 100%%; height: auto; }"
         )
 
-    style_full = style % {"bg": _CHART_BG}
+    style_full = (style % {"bg": bg}).replace("100%%", "100%")
     head_open = "<" + "head" + ">"
     body_open = "<" + "body" + ">"
     style_open = "<" + "style" + ">"
@@ -279,11 +284,17 @@ class ChartViewerCard(BaseSettingsCard):
         self.add_header_button(FluentIcon.SAVE, "导出 PNG（3x 高清）", self._on_export_clicked)
 
     def load_chart(self, chart_type: str, payload_b64: str, title: str = "图表查看"):
-        """加载图表（echarts option b64 / mermaid svg b64）并更新标题"""
+        """加载图表（echarts option b64 / mermaid svg b64）并更新标题（背景跟随主题）"""
         self.set_title_text(title)
         _cleanup_temp_files(self._tmp_files)
         try:
-            html = build_chart_viewer_html(chart_type, payload_b64)
+            from app.utils.theme_manager import theme_manager
+
+            is_dark = not theme_manager.is_light_theme()
+        except Exception:
+            is_dark = True
+        try:
+            html = build_chart_viewer_html(chart_type, payload_b64, is_dark=is_dark)
         except ValueError as e:
             logger.warning(f"[ChartViewer] {e}")
             err_html = (
