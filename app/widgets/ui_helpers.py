@@ -1291,6 +1291,63 @@ def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
     return viewer
 
 
+def save_png_from_b64(parent, png_b64: str, default_name: str = "图表") -> Optional[str]:
+    """把 PNG b64 保存为文件（弹保存对话框）
+
+    Args:
+        parent: 父控件
+        png_b64: PNG 文件内容的 base64 字符串
+        default_name: 默认文件名主体
+
+    Returns:
+        保存路径；用户取消返回 None
+    """
+    import base64 as _b64mod
+
+    from PyQt5.QtWidgets import QFileDialog
+
+    default_file = f"{default_name}_{time.strftime('%Y%m%d_%H%M%S')}.png"
+    file_path, _ = QFileDialog.getSaveFileName(parent, "导出图表 PNG", default_file, "PNG 图片 (*.png)")
+    if not file_path:
+        return None
+    if not file_path.lower().endswith(".png"):
+        file_path += ".png"
+    try:
+        with open(file_path, "wb") as f:
+            f.write(_b64mod.b64decode(png_b64))
+        return file_path
+    except Exception as e:
+        logger.error(f"[ChartViewer] PNG 保存失败: {e}")
+        return None
+
+
+def show_chart_viewer(parent, chart_type: str, payload_b64: str) -> Any:
+    """显示图表放大查看器（内嵌卡覆盖对话区域；无全局卡片容器时回退弹窗）
+
+    Args:
+        parent: 父控件（仅弹窗回退时使用）
+        chart_type: "echarts" | "mermaid"
+        payload_b64: 图表数据 b64
+    """
+    logger.debug(f"[ChartViewer] show_chart_viewer type={chart_type}, payload_len={len(payload_b64 or '')}")
+    try:
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        controller = get_global_card_controller()
+        if controller is not None:
+            controller.show_chart_viewer(chart_type, payload_b64)
+            return controller
+    except Exception as e:
+        logger.warning(f"[ChartViewer] 内嵌模式失败，回退弹窗: {e}")
+
+    from app.widgets.cards.settings.chart_viewer_card import ChartViewerWindow
+
+    win = ChartViewerWindow(parent=parent)
+    win.load_chart(chart_type, payload_b64)
+    win.show()
+    return win
+
+
 # 预编译 hook 内容格式正则（与 message_content.py 中的 _is_hook_message 保持一致）
 _HOOK_CONTENT_PATTERN = re.compile(
     r"<system-reminder>\s*<[a-z0-9-]+-hook>.*?</[a-z0-9-]+-hook>\s*</system-reminder>", re.DOTALL
@@ -1685,8 +1742,21 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
 
     Returns:
         删除的数量
+
+    [PERF] 布局成员一次性建索引：原实现对每个待删 widget 都从头线性扫描
+    ``chat_layout``（O(n×m)）。批量回收场景下（``_recycle_out_of_view_batches``
+    一次传入几十张卡）卡片数上千时是滚动卡顿的隐性来源。
+    改为先建一次 ``id(widget)`` 索引集合，整体降为 O(n+m)。
     """
     deleted = 0
+    # 一次性快照布局成员（removeWidget 会改变布局索引，故必须预先建索引）
+    layout_member_ids = set()
+    for i in range(chat_layout.count()):
+        item = chat_layout.itemAt(i)
+        w = item.widget() if item is not None else None
+        if w is not None:
+            layout_member_ids.add(id(w))
+
     for widget in widgets_to_remove:
         if not is_widget_alive(widget):
             logger.warning(f"[DELETE] Widget already deleted: {widget}")
@@ -1706,17 +1776,18 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
         # HWND）直接脱离父窗口树会变独立顶层窗口 → 白窗一闪（切换项目/新建
         # 标签页清理旧卡片时 Chromium 弹出原生窗口）。
         layout_removed = False
-        for i in range(chat_layout.count()):
-            item = chat_layout.itemAt(i)
-            if item and item.widget() is widget:
-                widget.hide()
-                chat_layout.removeWidget(widget)
-                try:
-                    widget.setParent(None)
-                except Exception:
-                    pass
-                layout_removed = True
-                break
+        widget_id = id(widget)
+        if widget_id in layout_member_ids:
+            # 命中后即从索引中摘除，保证同一 widget 被重复传入时行为与原实现
+            # 一致（第二次视为「已不在布局中」，走 warning 分支）
+            layout_member_ids.discard(widget_id)
+            widget.hide()
+            chat_layout.removeWidget(widget)
+            try:
+                widget.setParent(None)
+            except Exception:
+                pass
+            layout_removed = True
 
         if layout_removed:
             widget.deleteLater()

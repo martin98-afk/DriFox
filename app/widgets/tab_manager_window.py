@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-TabManagerWindow — Tab 管理器宿主窗口（标准系统窗口）
+TabManagerWindow — Tab 管理器宿主窗口（无边框现代化窗口）
 
 左侧 TabPanel + 右侧 QStackedWidget 嵌入 OpenAIChatToolWindow 实例。
-使用标准系统标题栏，Windows 自动提供 Aero Snap / 摇动 / 任务栏预览等。
+基于 qframelesswindow.FramelessWindow：自绘标题栏（CustomTitleBar），
+Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 """
 
 import platform
+import sys
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +30,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from qframelesswindow import FramelessWindow
+
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.theme_manager import theme_manager
@@ -43,6 +47,33 @@ _MAX_CHAT_WIDTH = 1000
 # 会话等内容型卡片不限宽，铺满对话区。
 _MAX_OVERLAY_WIDTH = _MAX_CHAT_WIDTH + 100
 _CONFIG_REPLACE_CARDS = frozenset({"settings", "provider_edit", "hook_edit", "mcp_edit"})
+
+# ── 标题栏 tab：内置「聊天」常驻 tab + 已知「内置替换」全局卡片 ──
+# full 容器卡片（UI 插件 full 卡 + 下列内置全局卡）打开时在标题栏 tab 区显示
+# （非常驻可关闭，× 点击真实隐藏卡片）；「聊天」为常驻 tab，active 时表示对话视图。
+CHAT_TAB_ID = "chat"
+KNOWN_GLOBAL_REPLACE_CARDS = frozenset(
+    {
+        "settings",
+        "provider_edit",
+        "hook_edit",
+        "mcp_edit",
+        "diff_viewer",
+        "sub_agent_session",
+        "file_undo",
+        "chart_viewer",
+    }
+)
+GLOBAL_REPLACE_TITLES = {
+    "settings": "系统设置",
+    "provider_edit": "服务商编辑",
+    "hook_edit": "Hook 编辑",
+    "mcp_edit": "MCP 编辑",
+    "diff_viewer": "文件差异对比",
+    "sub_agent_session": "子智能体会话",
+    "file_undo": "文件撤销",
+    "chart_viewer": "图表查看",
+}
 
 # ── 侧边栏展开最小宽度（px，frame 宽，含 margins 12 + border 2）──
 
@@ -62,12 +93,30 @@ _DEFAULT_PANEL_WIDTH = 187
 # （窗口总宽未变），不走增长条件。
 _AUTO_EXPAND_GROWTH = 200
 
+# ── 聊天区最小可用宽度（px）──
+# 判定"侧边栏是否真的被挤压"的下限：窗口总宽放得下
+# 「常规展开宽度 + 该值」就不算挤压，侧边栏必须保持展开。
+_MIN_CHAT_WIDTH = 400
+
 # ── nativeEvent 热路径缓存（模块级，进程内只算一次）──
 # 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
 # 这里预先缓存平台判定与 ctypes cast 函数，避免 per-message 开销。
 _IS_WINDOWS = platform.system() == "Windows"
 _IS_MAC = platform.system() == "Darwin"
+
+# ── Win32 绑定默认值 ──
+# 非 Windows 平台（或绑定失败）保持占位值，调用方一律用 `_IS_WINDOWS and
+# _user32 is not None` 守卫，避免 NameError 打断窗口构造。
 _MSG_CAST = None
+_user32 = None
+_GWL_STYLE = -16
+_SNAP_STYLES = 0
+_SWP_FRAMECHANGED = 0
+_HTCLIENT = 1
+_HTLEFT = _HTRIGHT = _HTTOP = 0
+_HTTOPLEFT = _HTTOPRIGHT = 0
+_HTBOTTOM = _HTBOTTOMLEFT = _HTBOTTOMRIGHT = 0
+
 if _IS_WINDOWS:
     try:
         import ctypes as _ctypes
@@ -90,8 +139,59 @@ if _IS_WINDOWS:
 
         def _MSG_CAST(addr, _cast=_ctypes.cast, _ptr=_MSG_STRUCT_PTR):  # noqa: E731
             return _cast(addr, _ptr)
+
+        # ── Win32 函数绑定（WM_NCHITTEST 边缘判定用，进程内绑定一次）──
+        _user32 = _ctypes.windll.user32
+        _user32.ScreenToClient.argtypes = [_wintypes.HWND, _ctypes.POINTER(_wintypes.POINT)]
+        _user32.ScreenToClient.restype = _ctypes.c_bool
+        _user32.GetClientRect.argtypes = [_wintypes.HWND, _ctypes.POINTER(_wintypes.RECT)]
+        _user32.GetClientRect.restype = _ctypes.c_bool
+        _user32.IsZoomed.argtypes = [_wintypes.HWND]
+        _user32.IsZoomed.restype = _ctypes.c_bool
+
+        # 补回窗口样式位需要 GWL_STYLE / SetWindowPos
+        _user32.GetWindowLongPtrW.argtypes = [_wintypes.HWND, _ctypes.c_int]
+        _user32.GetWindowLongPtrW.restype = _ctypes.c_ssize_t
+        _user32.SetWindowLongPtrW.argtypes = [_wintypes.HWND, _ctypes.c_int, _ctypes.c_ssize_t]
+        _user32.SetWindowLongPtrW.restype = _ctypes.c_ssize_t
+        _user32.SetWindowPos.argtypes = [
+            _wintypes.HWND,
+            _wintypes.HWND,
+            _ctypes.c_int,
+            _ctypes.c_int,
+            _ctypes.c_int,
+            _ctypes.c_int,
+            _wintypes.UINT,
+        ]
+        _user32.SetWindowPos.restype = _ctypes.c_bool
+
+        # GetWindowLongPtr 索引
+        _GWL_STYLE = -16
+
+        # 补回的窗口样式位（Qt 的 FramelessWindowHint 会连带清掉这些，
+        # 详见 TabManagerWindow._ensure_native_window_styles 的说明）
+        _WS_MINIMIZEBOX = 0x00020000
+        _WS_MAXIMIZEBOX = 0x00010000
+        _WS_SYSMENU = 0x00080000
+        _WS_THICKFRAME = 0x00040000
+        _SNAP_STYLES = _WS_THICKFRAME | _WS_SYSMENU | _WS_MINIMIZEBOX | _WS_MAXIMIZEBOX
+
+        # SetWindowPos flags：NOSIZE | NOMOVE | NOZORDER | NOACTIVATE | FRAMECHANGED
+        _SWP_FRAMECHANGED = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020
+
+        # WM_NCHITTEST 返回值（边缘/角落 resize）
+        _HTCLIENT = 1
+        _HTLEFT = 10
+        _HTRIGHT = 11
+        _HTTOP = 12
+        _HTTOPLEFT = 13
+        _HTTOPRIGHT = 14
+        _HTBOTTOM = 15
+        _HTBOTTOMLEFT = 16
+        _HTBOTTOMRIGHT = 17
     except Exception:
         _MSG_CAST = None
+        _user32 = None
 
 
 class EmptyStateWidget(QWidget):
@@ -331,7 +431,7 @@ class _DockSideWrapper(QWidget):
                 self.hide()
 
 
-class TabManagerWindow(QWidget):
+class TabManagerWindow(FramelessWindow):
     """Tab 管理器宿主窗口（单例）"""
 
     _instance: Optional["TabManagerWindow"] = None
@@ -341,6 +441,13 @@ class TabManagerWindow(QWidget):
     _WM_ENTERSIZEMOVE = 0x0231
     _WM_EXITSIZEMOVE = 0x0232
     _WM_MOVING = 0x0216  # 仅"移动"触发；"缩放"发 WM_SIZING，二者互斥，可精确区分
+    _WM_NCHITTEST = 0x0084  # 边缘/角落 resize 热区判定（自建，见 _native_hit_test）
+
+    # resize 热区宽度（逻辑 px，按窗口 DPI 缩放）。系统默认无边框热区为 0，
+    # 基类 qframelesswindow 固定 5px 不随 DPI 变化，高 DPI 下几乎抓不到。
+    _RESIZE_BORDER = 6
+    # 顶边热区高度：只在窗口最上沿开一条窄带，避免吞掉标题栏主体及其按钮
+    _TOP_RESIZE_BAND = 5
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
@@ -411,19 +518,35 @@ class TabManagerWindow(QWidget):
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         # 注：macOS 置顶与最小化互斥（WindowStaysOnTopHint → NSStatusWindowLevel
         # 会丢标题栏最小化点击），置顶统一走 _apply_window_topmost 的软置顶分支
-        # 标准系统窗口：原生标题栏 + Aero Snap + 任务栏预览 + 摇动等全部恢复
+        # 无边框窗口：显式 Qt.Window 顶级窗口标志（WS_OVERLAPPEDWINDOW 样式基础）——
+        # 若缺省（Qt.Widget → WS_POPUP），系统级 Aero Snap（拖到屏幕边缘填充）与
+        # NCHITTEST 边缘 resize 全部失效；随后 updateFrameless() 重新叠加
+        # FramelessWindowHint + DWM 阴影/窗口动画
         self.setWindowFlags(Qt.Window)
+        self.updateFrameless()
+
+        from app.widgets.custom_title_bar import CustomTitleBar
+
+        self.setTitleBar(CustomTitleBar(self))
+        # 顶栏接线：侧栏开关 → 复用 TabPanel 折叠链（sidebarToggled → 宽度动画）
+        self.titleBar.sidebar_toggle_requested.connect(lambda: self._tab_panel._toggle_sidebar())
+        # 顶栏 tab 切换：「聊天」→ 对话视图；full 卡片 tab → 切换显示
+        self.titleBar.tab_clicked.connect(self._on_titlebar_tab_clicked)
+        # 顶栏 tab × 关闭（仅 full 卡片 tab 有）：真实隐藏卡片并从 open 集合移除
+        self.titleBar.tab_close_clicked.connect(self._on_replace_tab_close_clicked)
         self.setWindowIcon(QIcon(":/icons/drifox.ico"))
 
         # 确保 Colors 已刷新（主题色初始化）
         Colors.refresh()
 
-        # 替换类型(full 容器)卡片顶部居中切换栏状态
-        # replace tab 栏状态按对话标签页隔离：{window_id: {card_id: title}}
+        # 替换类型(full 容器)卡片标题栏 tab 状态
+        # full 卡片 tab 状态按对话标签页隔离：{window_id: {card_id: title}}
         self._replace_open: "Dict[str, OrderedDict[str, str]]" = {}
         self._replace_active: "Dict[str, Optional[str]]" = {}
         self._replace_timers: Dict[str, "QTimer"] = {}
         self._suppress_replace_close: bool = False
+        # 插件注册的常驻标题栏 tab id 集合（插件卸载/刷新时移除用）
+        self._plugin_titlebar_tab_ids: set = set()
 
         self._setup_ui()
         self._setup_signals()
@@ -496,6 +619,39 @@ class TabManagerWindow(QWidget):
         # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
         QTimer.singleShot(0, self._apply_bg_from_theme)
 
+        # 顶栏内置「聊天」常驻 tab（full 卡片 tab 由显隐事件动态增删，
+        # 插件常驻 tab 由 _sync_plugin_titlebar_tabs 挂载）
+        self.titleBar.add_tab(CHAT_TAB_ID, "聊天")
+        self._sync_plugin_titlebar_tabs()
+
+    def _on_titlebar_tab_clicked(self, tab_id: str):
+        """顶栏 tab 点击：「聊天」→ 对话视图；full 卡片 tab → 切换/显示；
+        插件常驻 tab 的展示由注册时的 on_click 回调处理，此处忽略。"""
+        logger.debug(f"[TitleBar] tab clicked: {tab_id}")
+        if tab_id == CHAT_TAB_ID:
+            self._show_conversation_view()
+            return
+        if tab_id in self._plugin_titlebar_tab_ids:
+            return
+        self._on_replace_tab_clicked(tab_id)
+
+    def _apply_win11_round_corner(self):
+        """Win11 DWM 圆角；Win10 及更早静默跳过
+
+        DWMWA_WINDOW_CORNER_PREFERENCE(33) = DWMCP_ROUND(2)，
+        调用失败（Win10 无此属性）不影响窗口功能。
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+            pref = ctypes.c_int(2)  # DWMCP_ROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+        except Exception:
+            pass
+
     def _on_theme_changed(self):
         """主题切换时刷新配色
 
@@ -508,6 +664,10 @@ class TabManagerWindow(QWidget):
 
         # 重建样式表
         self._apply_theme_stylesheet()
+
+        # 刷新自绘顶栏（tab 胶囊/按钮样式随主题；Colors 已由调用方 refresh）
+        if hasattr(self.titleBar, "refresh_style"):
+            self.titleBar.refresh_style()
         # 刷新空状态页（字体/颜色随主题或字号刷新）
         if hasattr(self, "_empty_state"):
             self._empty_state.refresh_style()
@@ -547,12 +707,11 @@ class TabManagerWindow(QWidget):
         # 刷新全局背景图
         self._apply_bg_from_theme()
 
-        # 刷新替换类型卡片 tab 栏
-        if hasattr(self, "_replace_tab_bar"):
-            try:
-                self._replace_tab_bar.refresh_style()
-            except Exception:
-                pass
+        # 刷新标题栏（含 full 卡片 tab 与插件常驻 tab 样式）
+        try:
+            self.titleBar.refresh_style()
+        except Exception:
+            pass
 
         ThemeRefreshCoordinator.timer_end("tab_manager")
 
@@ -607,7 +766,11 @@ class TabManagerWindow(QWidget):
             }}
             #tabManagerWindow {{
                 background: {Colors.CONTENT_BG};
-                border-radius: 8px;
+                /* ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
+                   圆角外侧的三角区不会被绘制，底层透出系统默认窗口色 —— 表现为
+                   窗口四角隐约有一圈"系统窗口"的白边，resize 重绘时尤其明显。
+                   窗口圆角由 DWM 负责（_apply_win11_round_corner / 补回的
+                   WS_THICKFRAME），Qt 侧保持矩形即可。 */
             }}
             #tabManagerContent {{
                 background: transparent;
@@ -806,9 +969,12 @@ class TabManagerWindow(QWidget):
                 pass
 
     def _setup_ui(self):
-        # ── 外层纵向布局：直接放内容区（标准系统窗口自带标题栏） ──
+        # ── 外层纵向布局：直接放内容区（顶部让位自绘无边框标题栏） ──
+        from app.widgets.custom_title_bar import CustomTitleBar
+
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        # 顶部让位自绘无边框标题栏；mac 上标题栏只有 28（与系统交通灯配套）
+        main_layout.setContentsMargins(0, self.titleBar.height(), 0, 0)
         main_layout.setSpacing(0)
 
         # ── 内容区（水平：TabPanel + QStackedWidget） ──
@@ -862,8 +1028,7 @@ class TabManagerWindow(QWidget):
 
         # ── PR3：场景背景层（scene_layer）撑满整个右侧圆角矩形 ──
         # scene_layer 作为 _chat_frame 子 widget，绝对定位铺满 _chat_frame.rect()，
-        # 覆盖整个右侧区域（含 replace_tab_bar / 对话区 / LEFT/RIGHT/BOTTOM
-        # 停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）。
+        # 覆盖整个右侧区域（含对话区 / LEFT/RIGHT/BOTTOM 停靠区 / UI 插件槽位等所有 _chat_frame 内的内容）。
         # 这是 aurora 等主题的 scene 图片/纯色底的真实挂载点。
         # 注意：scene_layer 在 _chat_frame 内部的其它 layout 之前创建，
         # 后续 .lower() 确保它在所有 UI 控件之下。
@@ -1029,20 +1194,12 @@ class TabManagerWindow(QWidget):
         # wrapper 关联 splitter：联动 setSizes 维持收起态
         self._global_left_wrapper.attach_to_splitter(self._dock_splitter, 0)
         self._global_right_wrapper.attach_to_splitter(self._dock_splitter, 2)
-        # ── 替换类型(full 容器)卡片顶部居中切换栏 ──
-        # 只要有 ≥1 个 full 卡片打开即显示（单卡片显示标题+关闭，多卡片支持切换，
-        # 见 ReplaceTabBar 显隐逻辑与 _on_card_visibility_changed）。挂在 _chat_frame 内容区顶部
-        # （chat_frame_layout），对话区与覆盖层切换时固定可见（覆盖层模式不吞掉 tab 栏）。
-        from app.widgets.replace_tab_bar import ReplaceTabBar
+        # ── full 容器卡片标题栏 tab（替代原 ReplaceTabBar）──
+        # full 卡片（UI 插件 full 卡 + 内置全局卡）打开时在标题栏 tab 区显示
+        # （带 × 关闭钮，见 _on_card_visibility_changed）。这里仅订阅显隐事件。
         from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
 
-        self._replace_tab_bar = ReplaceTabBar(self._chat_frame)
-        self._replace_tab_bar.setVisible(False)
-        self._replace_tab_bar.tabClicked.connect(self._on_replace_tab_clicked)
-        self._replace_tab_bar.tabCloseClicked.connect(self._on_replace_tab_close_clicked)
-        chat_frame_layout.insertWidget(0, self._replace_tab_bar)
-
-        # 订阅 full 卡片显隐事件，同步 tab 栏 open 集合与显隐
+        # 订阅 full 卡片显隐事件，同步标题栏 tab open 集合与显隐
         UIEventBus.get_instance().subscribe(EV_CARD_VISIBILITY_CHANGED, self._on_card_visibility_changed)
 
         chat_frame_layout.addWidget(self._dock_splitter, 1)
@@ -1256,6 +1413,58 @@ class TabManagerWindow(QWidget):
                 if mw is not None and hasattr(mw, "_set_cards_resize_preview_mode"):
                     mw._set_cards_resize_preview_mode(False)
 
+    def _evaluate_squeeze_collapse(self) -> bool:
+        """按稳定后的几何判定"侧边栏确实被挤压"→ 自动折叠
+
+        背景：resize 周期内（尤其 _deferred_resize_complete 的 _force_relayout
+        全量重算）左面板宽度会瞬时跌到折叠阈值（100px）以下。TabPanel.resizeEvent
+        只看宽度，会把最大化/还原、覆盖层 relayout 这类几何瞬变误判为"用户
+        把面板拖窄"而折叠；而折叠后窗口总宽往往不增反减，自动展开的相对增长
+        条件（≥ 折叠时总宽 + _AUTO_EXPAND_GROWTH）永不满足 → 折叠态永久残留。
+        因此 resize 周期内置 _auto_collapse_suppressed 抑制该判定，改在这里
+        基于收拢后的真实几何决定。
+
+        判定标准（"被挤压"）：左面板最终宽度低于折叠阈值，且窗口总宽已放不下
+        「常规展开宽度 + 聊天区最小可用宽度」。空间其实够的（纯 relayout 瞬时
+        压窄）保持展开，不折叠。
+
+        Returns:
+            True 表示本次触发了折叠（调用方应跳过随后的自动展开检测，
+            否则刚折叠就可能被 _maybe_auto_expand_after_squeeze 弹回）。
+        """
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None or panel._collapsed or panel._animating:
+            return False
+        if not hasattr(self, "_splitter") or self._splitter.count() == 0:
+            return False
+        try:
+            sizes = self._splitter.sizes()
+        except Exception:
+            return False
+        if not sizes:
+            return False
+        total = sum(sizes)
+        left = sizes[0]
+        if total <= 0 or left >= panel._auto_collapse_width:
+            return False  # 宽度正常：没有挤压，无需折叠
+        # 空间仍放得下"常规展开宽度 + 聊天区最小宽度" → 只是瞬时压窄，不折叠：
+        # 把左面板恢复到常规展开宽度，避免停留在被压扁的窄条上。
+        needed = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        if total >= needed + _MIN_CHAT_WIDTH:
+            tab_frame = getattr(self, "_tab_frame", None)
+            cap = tab_frame.maximumWidth() if tab_frame is not None else needed
+            frame_w = max(0, min(needed, cap))
+            if frame_w > 0 and frame_w != left:
+                self._splitter.setSizes([frame_w, max(0, total - frame_w)])
+                panel.sync_collapsed_ui()
+            return False
+        # 确实被挤压：交接给折叠动画（与 TabPanel.resizeEvent 折叠路径一致）
+        panel._collapsed = True
+        panel._collapsed_by_squeeze = True
+        panel._update_toggle_button()
+        QTimer.singleShot(0, lambda: self._on_sidebar_toggled(True))
+        return True
+
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
         """挤压折叠后空间恢复：自动展开回常规宽度
 
@@ -1298,7 +1507,7 @@ class TabManagerWindow(QWidget):
             return
         total = sum(self._splitter.sizes()) if hasattr(self, "_splitter") else self.width()
         target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
-        chat_min = 400  # 聊天区最小可用宽度
+        chat_min = _MIN_CHAT_WIDTH  # 聊天区最小可用宽度
         # 条件1：相对增长（仅窗口 resize 类触发需要；overlay 布局恢复传 False）
         if growth_required:
             base = getattr(self, "_squeeze_total_width", None)
@@ -1376,23 +1585,18 @@ class TabManagerWindow(QWidget):
     # ── 替换类型(full 容器)卡片顶部居中切换栏 ──
 
     def _on_card_visibility_changed(self, payload: Dict[str, Any]) -> None:
-        """同步 replace 卡片（UI 插件 full 卡 + 内置全局卡）显隐到顶部 tab 栏
+        """同步 replace 卡片（UI 插件 full 卡 + 内置全局卡）显隐到标题栏 tab 区
 
         仅处理覆盖对话区的 replace 卡片：container=="full" 浮动卡，或已知全局卡
         （settings/diff_viewer/sub_agent_session 等）；其余卡片忽略。
-        shown → 加入 open 集合并高亮；hidden → 120ms 去抖区分「互斥切换」
-        与「用户关闭」：窗口内仍有其他 replace 卡片可见则为切换（保留），否则移除。
+        shown → 加入 open 集合并高亮（标题栏 tab 带 × 关闭钮）；hidden → 120ms 去抖区分
+        「互斥切换」与「用户关闭」：窗口内仍有其他 replace 卡片可见则为切换（保留），否则移除。
         """
-        from app.widgets.replace_tab_bar import (
-            CONVERSATION_ID,
-            GLOBAL_REPLACE_TITLES,
-            KNOWN_GLOBAL_REPLACE_CARDS,
-        )
         from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
 
         card_id = payload.get("card_id")
         visible = payload.get("visible", False)
-        if not card_id or card_id == CONVERSATION_ID:
+        if not card_id or card_id == CHAT_TAB_ID:
             return
         # 仅处理全局对话区（GLOBAL_WINDOW_ID）作用域的 replace 卡片
         if payload.get("window_id") and payload.get("window_id") != GLOBAL_WINDOW_ID:
@@ -1419,16 +1623,15 @@ class TabManagerWindow(QWidget):
             open_dict = self._replace_open.setdefault(cur_wid, OrderedDict())
             if card_id not in open_dict:
                 open_dict[card_id] = title
-                self._replace_tab_bar.add_tab(card_id, title)
+                self.titleBar.add_tab(card_id, title, closable=True)
             self._set_replace_active(card_id)
         else:
             if getattr(self, "_suppress_replace_close", False):
-                # 点「对话」主动隐藏 replace 卡片：保留 open（tab 栏常驻对话项），仅取消其关闭计时
+                # 点「聊天」主动隐藏 replace 卡片：保留 open（标题栏 tab 常驻聊天项），仅取消其关闭计时
                 self._cancel_replace_timer(card_id)
             else:
                 # 120ms 去抖：紧接的 shown(其他) 会保留本卡片；无则视为关闭
                 self._schedule_replace_close(card_id)
-        self._update_replace_tab_visibility()
         # 覆盖层互斥切换（如 settings ↔ diff_viewer）stack 页不变、wrapper 不 resize，
         # 限宽策略随可见卡片类型变化，主动刷新一次 pad
         if self._content_stack.currentIndex() == 1:
@@ -1460,10 +1663,9 @@ class TabManagerWindow(QWidget):
                     self._replace_active[wid] = None
             # tab 栏仅反映当前对话：仅当卡片归属当前对话时改 tab 栏
             if owners:
-                self._replace_tab_bar.remove_tab(card_id)
+                self.titleBar.remove_tab(card_id)
                 # 关掉当前卡片且 open 仍有其他 full 卡片 → 自动激活（互斥显示）最近一个
                 self._activate_remaining_replace_card()
-        self._update_replace_tab_visibility()
 
     def _activate_remaining_replace_card(self) -> None:
         """当前对话 open 集合非空时，自动激活（互斥显示）最近一个 full 卡片，避免关掉
@@ -1487,7 +1689,6 @@ class TabManagerWindow(QWidget):
         """窗口内是否有其他 replace 卡片当前可见（用于区分切换/关闭）"""
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
         from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
-        from app.widgets.replace_tab_bar import KNOWN_GLOBAL_REPLACE_CARDS
 
         reg = UIPluginRegistry.get_instance()
         cm = CardManager.get_instance()
@@ -1508,7 +1709,7 @@ class TabManagerWindow(QWidget):
 
     def _set_replace_active(self, card_id: str) -> None:
         self._replace_active[self._current_window_id()] = card_id
-        self._replace_tab_bar.set_active(card_id)
+        self.titleBar.set_active_tab(card_id or CHAT_TAB_ID)
 
     def _current_window_id(self) -> str:
         """当前活跃对话标签页的 window_id（用于隔离 replace tab 栏状态）"""
@@ -1518,29 +1719,36 @@ class TabManagerWindow(QWidget):
         wid = getattr(win, "_window_id", None)
         return wid or GLOBAL_WINDOW_ID
 
-    def _refresh_replace_tab_bar(self) -> None:
-        """按当前活跃对话标签页重建顶部 replace tab 栏（打开列表 + 高亮独立）"""
+    def _refresh_titlebar_cards(self) -> None:
+        """按当前活跃对话标签页重建标题栏 full 卡片 tab（打开列表 + 高亮独立）
+
+        全量同步：移除不在 open 集合的卡片 tab（保留「聊天」与插件常驻 tab），
+        补齐缺失项，最后同步高亮。"""
         cur_wid = self._current_window_id()
         open_dict = self._replace_open.get(cur_wid, {})
         active = self._replace_active.get(cur_wid)
-        self._replace_tab_bar.set_tabs(open_dict, active)
-        self._replace_tab_bar.setVisible(len(open_dict) >= 1)
+        for cid in list(self.titleBar._tabs.keys()):
+            if cid != CHAT_TAB_ID and cid not in self._plugin_titlebar_tab_ids and cid not in open_dict:
+                self.titleBar.remove_tab(cid)
+        for cid, title in open_dict.items():
+            if cid not in self.titleBar._tabs:
+                self.titleBar.add_tab(cid, title, closable=True)
+        self.titleBar.set_active_tab(active or CHAT_TAB_ID)
 
     def _on_active_tab_changed(self, index: int) -> None:
-        """切换对话标签页 → 同步覆盖层卡片显隐 + 重建顶部 replace tab 栏"""
+        """切换对话标签页 → 同步覆盖层卡片显隐 + 重建标题栏 full 卡片 tab"""
         self._sync_overlay_cards_to_active_window()
-        self._refresh_replace_tab_bar()
+        self._refresh_titlebar_cards()
 
     def _sync_overlay_cards_to_active_window(self) -> None:
         """覆盖层全局卡按目标对话标签页恢复显隐
 
         全局 replace 卡片是单例（对话间共享显示权），切换标签页时按目标对话的
         open/active 状态恢复：active 卡显示、其余可见卡隐藏；目标对话停留在
-        「对话」视图或无打开卡片时隐藏全部。隐藏走 _suppress_replace_close
-        保护，open 集合保留（tab 栏仍可点回）。
+        「聊天」视图或无打开卡片时隐藏全部。隐藏走 _suppress_replace_close
+        保护，open 集合保留（标题栏 tab 仍可点回）。
         """
         from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID, CardManager
-        from app.widgets.replace_tab_bar import CONVERSATION_ID, KNOWN_GLOBAL_REPLACE_CARDS
 
         cm = CardManager.get_instance()
         if cm is None:
@@ -1549,7 +1757,7 @@ class TabManagerWindow(QWidget):
         cur_wid = self._current_window_id()
         open_ids = self._replace_open.get(cur_wid, {})
         active = self._replace_active.get(cur_wid)
-        if active == CONVERSATION_ID:
+        if active == CHAT_TAB_ID:
             active = None
         if active is not None and active not in open_ids:
             active = None
@@ -1594,21 +1802,10 @@ class TabManagerWindow(QWidget):
         finally:
             self._suppress_replace_close = False
 
-    def _update_replace_tab_visibility(self) -> None:
-        """按当前对话标签页的 open 集合决定是否显示顶部 replace tab 栏"""
-        cur_wid = self._current_window_id()
-        open_dict = self._replace_open.get(cur_wid, {})
-        self._replace_tab_bar.setVisible(len(open_dict) >= 1)
-
     def _on_replace_tab_clicked(self, card_id: str) -> None:
-        """点 tab → 切换/显示对应 replace 卡片；点「对话」返回对话区；点当前 active 不动作"""
-        from app.widgets.replace_tab_bar import CONVERSATION_ID, KNOWN_GLOBAL_REPLACE_CARDS
+        """点 full 卡片 tab → 切换/显示对应卡片；点当前 active 不动作"""
         from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
 
-        if card_id == CONVERSATION_ID:
-            # 返回对话视图：隐藏所有 replace 卡片，但保留 open（tab 栏常驻对话项，可随时切回）
-            self._show_conversation_view()
-            return
         if card_id == self._replace_active.get(self._current_window_id()):
             return
         if card_id in KNOWN_GLOBAL_REPLACE_CARDS:
@@ -1634,9 +1831,8 @@ class TabManagerWindow(QWidget):
             self._set_replace_active(card_id)
 
     def _show_conversation_view(self) -> None:
-        """点「对话」→ 隐藏所有 replace 卡片回到对话区，但保留 open（tab 栏常驻对话项，可随时切回）"""
+        """点「聊天」→ 隐藏所有 replace 卡片回到对话区，但保留 open（标题栏 tab 常驻聊天项，可随时切回）"""
         from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
-        from app.widgets.replace_tab_bar import CONVERSATION_ID
 
         cm = CardManager.get_instance()
         wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
@@ -1651,10 +1847,8 @@ class TabManagerWindow(QWidget):
                     pass
         finally:
             self._suppress_replace_close = False
-        self._replace_active[cur_wid] = CONVERSATION_ID
-        self._replace_tab_bar.set_active(CONVERSATION_ID)
-        # open 非空 → tab 栏仍显示（含对话高亮 + 各 replace 项）
-        self._update_replace_tab_visibility()
+        self._replace_active[cur_wid] = CHAT_TAB_ID
+        self.titleBar.set_active_tab(CHAT_TAB_ID)
 
     def _on_replace_tab_close_clicked(self, card_id: str) -> None:
         """点 tab × → 真正关闭对应卡片并从 open 移除 tab 项（同 close_replace_card）"""
@@ -1671,7 +1865,6 @@ class TabManagerWindow(QWidget):
         真正隐藏；full 浮动卡经 registry.hide_floating_card_globally 隐藏（该 API 仅对
         注册在 UI 插件注册表的浮动卡有效，对内置全局卡返回 False 不生效）。
         """
-        from app.widgets.replace_tab_bar import KNOWN_GLOBAL_REPLACE_CARDS
         from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID
 
         # 卡片是全局单例：从所有对话的 open 集合中移除并清 active（避免切回其他对话仍显示已关卡片）
@@ -1682,8 +1875,7 @@ class TabManagerWindow(QWidget):
             if self._replace_active.get(wid) == card_id:
                 self._replace_active[wid] = None
         if owners:
-            self._replace_tab_bar.remove_tab(card_id)
-        self._update_replace_tab_visibility()
+            self.titleBar.remove_tab(card_id)
 
         # 真正隐藏卡片本身（避免「tab 消失但卡片仍显示」）
         if card_id in KNOWN_GLOBAL_REPLACE_CARDS:
@@ -2619,9 +2811,39 @@ class TabManagerWindow(QWidget):
 
     # ── Tab 面板 UI 插件列表 ──
 
+    def _sync_plugin_titlebar_tabs(self) -> None:
+        """同步插件注册的常驻标题栏 tab（无 × 关闭钮；点击走插件 on_click 回调自展示）
+
+        幂等：已挂载的跳过；已卸载插件的 tab 移除。注册表为空时仅做清理。
+        """
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            infos = UIPluginRegistry.get_instance().get_titlebar_tabs()
+        except Exception:
+            infos = []
+        valid_ids = {info.tab_id for info in infos}
+        # 移除已卸载/不再注册的常驻 tab
+        for tab_id in list(self._plugin_titlebar_tab_ids):
+            if tab_id not in valid_ids:
+                self.titleBar.remove_tab(tab_id)
+                self._plugin_titlebar_tab_ids.discard(tab_id)
+        for info in infos:
+            if info.tab_id in self.titleBar._tabs:
+                continue
+            self.titleBar.add_tab(
+                info.tab_id,
+                info.label,
+                on_click=info.on_click,
+                closable=False,
+                icon_path=info.icon_path or "",
+            )
+            self._plugin_titlebar_tab_ids.add(info.tab_id)
+
     def _update_shared_launcher(self) -> None:
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
         self._tab_panel.refresh_ui_plugins()
+        self._sync_plugin_titlebar_tabs()
         # 工作区页面刷新（Phase G）：注册集变化后重建 sidebar 入口 + 销毁被卸载页面
         if hasattr(self, "_workspace_page_host"):
             self._workspace_page_host.refresh_pages()
@@ -2629,6 +2851,7 @@ class TabManagerWindow(QWidget):
     def _show_shared_launcher(self) -> None:
         """兼容模式切换调用：刷新始终显示在 TabPanel 中的插件列表"""
         self._tab_panel.refresh_ui_plugins()
+        self._sync_plugin_titlebar_tabs()
         if hasattr(self, "_workspace_page_host"):
             self._workspace_page_host.refresh_pages()
 
@@ -2680,6 +2903,10 @@ class TabManagerWindow(QWidget):
         已按需求移除记忆，保留此调用点 + timer 空转，避免改动
         moveEvent/resizeEvent 等大量调用点。
         """
+        # FramelessWindow.__init__ 内部 resize(500,500)/winId 创建会同步触发
+        # resize/move 事件，早于本类 __init__ 创建 _geo_save_timer；此时跳过
+        if not hasattr(self, "_geo_save_timer"):
+            return
         from app.utils.window_drag_state import any_window_dragging
 
         if any_window_dragging:
@@ -2718,9 +2945,19 @@ class TabManagerWindow(QWidget):
         运行中用户可自由拖动/缩放窗口，不再重置；重启后恢复默认居中。
         """
         super().showEvent(event)
+        # 原生窗口能力补全（边缘 resize + Aero Snap）并压掉 DWM 白边。
+        # hwnd 会因 setWindowFlags / 跨屏 DPI 变化重建，故每次显示都校验。
+        self._ensure_native_window_styles()
+        # 标题栏宽度必须显式同步：构造期几何恢复走的是 resize 节流路径，
+        # 基类那次 titleBar.resize() 会被跳过（详见 _sync_title_bar_width）。
+        self._sync_title_bar_width()
         if not self._geometry_applied:
             self._geometry_applied = True
             self._restore_geometry()
+            # Win11 DWM 圆角（winId 此刻已有效；仅首次）
+            self._apply_win11_round_corner()
+        # 几何恢复可能改变窗口宽度，再同步一次标题栏
+        self._sync_title_bar_width()
         # 对话区限宽居中：首次显示同步 wrapper margins（Resize 事件链可能晚到）
         if hasattr(self, "_chat_wrapper"):
             try:
@@ -2733,6 +2970,11 @@ class TabManagerWindow(QWidget):
         # → 列表停留在旧状态（全关重开才恢复）。重新显示时补刷一次。
         if self._tab_panel is not None:
             self._tab_panel.refresh_ui_plugins()
+        # 插件常驻标题栏 tab 同步补刷（同 refresh_ui_plugins 的可见性门控根因）
+        try:
+            self._sync_plugin_titlebar_tabs()
+        except Exception:
+            pass
 
     def moveEvent(self, event):
         super().moveEvent(event)
@@ -2744,13 +2986,144 @@ class TabManagerWindow(QWidget):
         # 造成周期性掉帧卡顿。
         # 非 Windows：无原生模态循环消息，保留防抖检测作为回退。
         if not _IS_WINDOWS:
-            # _suppress_drag_detection 用于阻止编程式 setGeometry 误触
-            if not self._suppress_drag_detection:
+            # _suppress_drag_detection 用于阻止编程式 setGeometry 误触。
+            # FramelessWindow.__init__ 内部 resize/winId 会同步触发 move 事件，
+            # 早于本类 __init__ 创建 _suppress_drag_detection/_window_dragging_timer，
+            # 此时跳过（与 _save_geometry 的 hasattr 守卫同理）
+            if hasattr(self, "_suppress_drag_detection") and not self._suppress_drag_detection:
                 if not self._window_dragging_timer.isActive():
                     self._on_window_drag_start()
                 self._window_dragging_timer.start()  # 持续重置防抖
         # 几何保存防抖（拖拽期间由 _save_geometry 内部守卫跳过）
         self._save_geometry()
+
+    # ── 原生窗口能力：边缘/角落 resize + Aero Snap 分屏 ──
+
+    def _sync_title_bar_width(self) -> None:
+        """把标题栏宽度同步到当前窗口宽度
+
+        ★ 必须显式同步：``WindowsFramelessWindow.resizeEvent`` 负责把标题栏
+        resize 到窗口宽度，而本类的 resize 节流（``_resize_blocking`` 阶段二）
+        会跳过 ``super().resizeEvent()``，标题栏宽度因此停留在进入节流前的旧
+        值 —— 表现为"最小化/最大化/关闭按钮不在最右边、跑到了屏幕中间"，
+        直到下一次非节流路径的 resize（例如最大化）才被纠正。
+        """
+        tb = getattr(self, "titleBar", None)
+        if tb is None:
+            return
+        try:
+            if tb.width() != self.width():
+                tb.resize(self.width(), tb.height())
+        except Exception:
+            pass
+
+    def _ensure_native_window_styles(self) -> None:
+        """补全无边框窗口丢失的原生能力（边缘 resize + Aero Snap）
+
+        Qt 设置 ``Qt.FramelessWindowHint`` 时，Windows 端会一并清掉
+        WS_THICKFRAME / WS_SYSMENU / WS_MINIMIZEBOX / WS_MAXIMIZEBOX。系统据此
+        判定窗口"不可调整大小"，于是**边缘与角落的 resize 完全失效**，拖到屏幕
+        边缘也不触发 Aero Snap / Win11 分屏布局。本方法把这些位补回来。
+
+        ★ 不要再用 ``DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED`` 去压边框。
+        关闭 DWM 的非客户区渲染后，系统会退回**传统 GDI 路径**绘制非客户区，
+        表现为 resize 时隐约闪出原生窗口边框（比不关时更明显）。正确做法是保留
+        DWM 渲染，靠 ``DwmExtendFrameIntoClientArea(-1)``（qframelesswindow 的
+        ``addShadowEffect``）把窗口框架吃进客户区——框架落在客户区里，DWM 就没有
+        独立的位置可以画边框，阴影也还在。
+
+        所以这里只做两件事：补样式位 + 确保框架扩展已生效。幂等。
+        """
+        if not _IS_WINDOWS or _user32 is None or not _SNAP_STYLES:
+            return
+        try:
+            hwnd = _wintypes.HWND(int(self.winId()))
+
+            style = _user32.GetWindowLongPtrW(hwnd, _GWL_STYLE)
+            if style & _SNAP_STYLES != _SNAP_STYLES:
+                _user32.SetWindowLongPtrW(hwnd, _GWL_STYLE, style | _SNAP_STYLES)
+                # ★ 只在样式位真的变了才 SetWindowPos(FRAMECHANGED)：该方法会
+                # 强制系统重算整个非客户区并重绘窗口，无条件调用（例如每次
+                # showEvent）会让窗口肉眼可见地"闪一下系统边框"。
+                # 不带 ACTIVATE，避免抢焦点引发重入。
+                _user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, _SWP_FRAMECHANGED)
+
+            # 补回样式位后重新扩展框架（hwnd 重建 / DWM 状态变化都可能让它失效）
+            if self.windowEffect is not None:
+                self.windowEffect.addShadowEffect(self.winId())
+        except Exception:
+            pass
+
+    def _system_buttons_left(self) -> int:
+        """标题栏三个系统按钮的左边界 x（顶边热区需让开这段范围）"""
+        btn = getattr(getattr(self, "titleBar", None), "minBtn", None)
+        if btn is None or btn.isHidden():
+            return self.width()
+        return max(0, btn.x())
+
+    def _native_hit_test(self, hwnd: int, lparam: int):
+        """WM_NCHITTEST 自建判定：四边 + 四角的 resize 热区
+
+        ★ 为何不直接复用基类实现：基类用 ``win32api.GetCursorPos()`` 取坐标，
+        拖到屏幕边缘时游标位置与消息自带的 lParam 不同步；且热区固定 5px 不随
+        DPI 缩放，高 DPI 屏上几乎抓不到。这里改用消息自带的 lParam（光标屏幕
+        坐标）换算，热区按窗口 DPI 放大。
+
+        顶边只在最上沿 ``_TOP_RESIZE_BAND`` px 内生效，并让开标题栏右侧系统
+        按钮的横向范围——否则返回 HTTOP/HTTOPRIGHT 会让按钮收不到点击。
+
+        返回 None 表示"本层不判定"，交由基类与 Qt 继续处理。
+        """
+        if not _IS_WINDOWS or _user32 is None:
+            return None
+        try:
+            if _user32.IsZoomed(_wintypes.HWND(hwnd)):
+                return None  # 最大化 / 全屏态没有可拉伸的边缘
+            pt = _wintypes.POINT(
+                _ctypes.c_int16(lparam & 0xFFFF).value,
+                _ctypes.c_int16((lparam >> 16) & 0xFFFF).value,
+            )
+            _user32.ScreenToClient(_wintypes.HWND(hwnd), _ctypes.byref(pt))
+            rect = _wintypes.RECT()
+            _user32.GetClientRect(_wintypes.HWND(hwnd), _ctypes.byref(rect))
+            w, h = rect.right, rect.bottom
+            if w <= 0 or h <= 0:
+                return None
+
+            scale = max(1.0, self.logicalDpiX() / 96.0)
+            side = max(3, int(round(self._RESIZE_BORDER * scale)))
+            top_band = max(2, int(round(self._TOP_RESIZE_BAND * scale)))
+
+            x, y = pt.x, pt.y
+            # 标题栏系统按钮所在的一小条顶部区域：明确判为客户区，
+            # 既让按钮可点击，也阻止基类按自己的固定 5px 规则再判成边缘。
+            if y < max(side, top_band) and x >= self._system_buttons_left():
+                return _HTCLIENT
+
+            left = x < side
+            right = x >= w - side
+            top = y < top_band
+            bottom = y >= h - side
+
+            if left and top:
+                return _HTTOPLEFT
+            if right and top:
+                return _HTTOPRIGHT
+            if left and bottom:
+                return _HTBOTTOMLEFT
+            if right and bottom:
+                return _HTBOTTOMRIGHT
+            if top:
+                return _HTTOP
+            if bottom:
+                return _HTBOTTOM
+            if left:
+                return _HTLEFT
+            if right:
+                return _HTRIGHT
+        except Exception:
+            return None
+        return None
 
     def nativeEvent(self, eventType, message):
         """Windows 原生消息处理：精确捕获拖拽/缩放模态循环的起止
@@ -2765,10 +3138,17 @@ class TabManagerWindow(QWidget):
         # 禁止在此函数内做 import 或 platform.system() 调用。
         if _IS_WINDOWS and _MSG_CAST is not None and eventType == "windows_generic_MSG":
             try:
-                msg_id = _MSG_CAST(int(message))[0].message
+                msg = _MSG_CAST(int(message))[0]
+                msg_id = msg.message
                 if msg_id == self._WM_ENTERSIZEMOVE:
                     self._window_dragging_timer.stop()  # 原生信号权威，停用防抖回退
                     self._on_window_drag_start()
+                elif msg_id == self._WM_NCHITTEST:
+                    # 边缘/角落 resize：先于基类判定（基类热区固定 5px 且不
+                    # 处理标题栏系统按钮让位）。返回 None 时落回 super() 链。
+                    hit = self._native_hit_test(int(msg.hwnd), int(msg.lParam))
+                    if hit is not None:
+                        return True, hit
                 elif msg_id == self._WM_MOVING:
                     # ★ 纯移动：客户区内容不随位置变化，禁用整窗重绘。
                     # DWM 仅平移已有纹理即可，无需 app 重绘；这能消除拖拽时标题栏
@@ -2842,6 +3222,40 @@ class TabManagerWindow(QWidget):
     def changeEvent(self, event):
         """窗口状态变化：标准系统窗口的最大化/还原由 OS 处理，无需自定义逻辑"""
         super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            # 最大化 / 还原 / 全屏由系统直接改窗口几何，Qt 不一定走完整的
+            # resizeEvent 链（节流阶段二会跳过基类同步），这里补一次，
+            # 保证标题栏宽度始终等于窗口宽度（系统按钮不会跑到中间）。
+            self._sync_title_bar_width()
+            # 几何瞬变保护：状态切换会连带改标题栏高度/窗口边距并触发额外
+            # relayout（左面板被瞬时压窄）。抑制侧边栏自动折叠，避免把
+            # 最大化/还原误判为"用户拖窄"。resize 周期结束会提前解除，
+            # 这里的定时器只是兜底。
+            self._begin_window_state_guard()
+
+    def _begin_window_state_guard(self):
+        """窗口状态切换（最大化/还原/全屏）期间抑制侧边栏自动折叠"""
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None:
+            return
+        panel.set_auto_collapse_suppressed(True)
+        guard = getattr(self, "_window_state_guard_timer", None)
+        if guard is None:
+            guard = QTimer(self)
+            guard.setSingleShot(True)
+            guard.timeout.connect(self._end_window_state_guard)
+            self._window_state_guard_timer = guard
+        guard.start(600)
+
+    def _end_window_state_guard(self):
+        """兜底解除状态切换抑制（resize 周期正常结束会先于此解除）"""
+        # resize 周期仍在进行：抑制交由 _deferred_resize_complete 统一解除，
+        # 此处不提前解除，否则后续 relayout 瞬变会重新误折叠。
+        if getattr(self, "_resize_blocking", False):
+            return
+        panel = getattr(self, "_tab_panel", None)
+        if panel is not None:
+            panel.set_auto_collapse_suppressed(False)
 
     def _on_app_state_changed(self, state):
         """macOS 软置顶：应用激活时若开启置顶配置则抬升主窗口
@@ -2996,6 +3410,10 @@ class TabManagerWindow(QWidget):
         # 强制 Qt 从顶层布局开始重新计算整棵 widget 树。
         self._force_relayout()
 
+        # 标题栏宽度收拢：节流期间的多次 resize 只保证最后一次与窗口同宽，
+        # 这里再补一次，确保任何退出路径下系统按钮都贴在最右侧。
+        self._sync_title_bar_width()
+
         # 恢复 splitter sizes（阻止 stretch factor 重算覆盖用户拖拽尺寸）
         if saved_splitter_sizes is not None and hasattr(self, "_splitter"):
             try:
@@ -3024,8 +3442,16 @@ class TabManagerWindow(QWidget):
         # 全局桌宠跟随窗体缩放：resize 结束后精确重定位到激活窗 send_btn
         if getattr(self, "pixel_pet", None) is not None:
             self.pixel_pet.reposition_to_active_window()
-        # 窗口 resize 结束：若左面板因挤压已自动折叠且空间已恢复，自动展开
-        self._maybe_auto_expand_after_squeeze()
+
+        # ── 几何已收拢：解除抑制 + 按最终宽度判定"是否真被挤压" ──
+        # 整个 resize 周期（含 _force_relayout 瞬变）内 TabPanel 不自动折叠，
+        # 这里基于稳定后的真实几何决定，避免最大化/还原这类几何瞬变把
+        # 侧边栏误折叠（折叠后窗口总宽不增反减，自动展开条件永不满足）。
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_auto_collapse_suppressed(False)
+        if not self._evaluate_squeeze_collapse():
+            # 窗口 resize 结束：若左面板因挤压已自动折叠且空间已恢复，自动展开
+            self._maybe_auto_expand_after_squeeze()
 
     def _force_relayout(self):
         """blocking 结束后强制完整布局收拢
@@ -3058,15 +3484,29 @@ class TabManagerWindow(QWidget):
         resize 停止 100ms 后 blocking 解除，_on_resize_finished 触发
         一次完整 relayout 收拢到正确尺寸。
         """
+        if not hasattr(self, "_resize_blocking"):
+            # FramelessWindow.__init__ 内部 resize(500,500) 同步触发的首个 Resize：
+            # 本类节流状态尚未初始化，直接走基类布局（含顶栏宽度同步）并返回
+            super().resizeEvent(event)
+            return
+
         if self._resize_blocking:
             # ── 阶段二：blocking 活跃，跳过布局传播 ──
             self._resize_timer.start()  # 重置防抖
             self._save_geometry()
+            # 标题栏宽度同步：基类是在 super().resizeEvent() 里做的，
+            # 阶段二跳过了 super，必须手动补，否则系统按钮停在旧位置。
+            self._sync_title_bar_width()
             # 背景图尺寸跟随（轻量操作，不触发布局）
             self._resize_bg_labels()
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
+        # ★ 先抑制再布局：super().resizeEvent() 会把新几何一次性传播到子控件，
+        # 左面板宽度在此期间是瞬时中间值（relayout 重算会先压到最小宽度），
+        # 必须在传播前就抑制，否则会被误判为"用户拖窄"而自动折叠。
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_auto_collapse_suppressed(True)
         super().resizeEvent(event)
         # 背景图尺寸跟随（轻量操作，不触发布局）
         self._resize_bg_labels()

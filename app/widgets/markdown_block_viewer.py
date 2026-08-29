@@ -204,6 +204,61 @@ def _measure_expanded_height(wrap: QWidget) -> int:
     return int(total)
 
 
+# ── 思考 spinner：SVG 预渲染缓存 ──────────────────────────────────
+# [PERF] 原实现在 paintEvent 里 `QSvgRenderer(svg.encode())` —— 每帧都重新构造
+# 渲染器并重新解析一遍 SVG XML（含 4 个 circle + dasharray），40ms 定时器即 25fps，
+# 每个可见思考块每秒 25 次解析，多思考块线性放大。
+# 改为：模块级单例渲染器 + 按 devicePixelRatio 缓存位图，每帧只剩 drawPixmap。
+# 旋转仍交给 painter 变换（省内存，无需缓存 30 个角度）。
+_SPINNER_RENDERER: Any = None  # None=未初始化 / False=不可用 / QSvgRenderer=就绪
+_SPINNER_PIXMAP_CACHE: Dict[float, QPixmap] = {}
+_SPINNER_PIXMAP_CACHE_MAX = 8  # DPR 取值极少（1.0/1.25/1.5/2.0…），封顶防异常环境膨胀
+
+
+def _get_spinner_renderer() -> Any:
+    """惰性构造全局唯一的 QSvgRenderer（解析一次，终身复用）。"""
+    global _SPINNER_RENDERER
+    if _SPINNER_RENDERER is None:
+        if not _HAS_QT_SVG:
+            _SPINNER_RENDERER = False
+        else:
+            try:
+                from app.widgets.message_card import _THINK_SNAKE_SVG
+
+                r = QSvgRenderer(_THINK_SNAKE_SVG.encode("utf-8"))
+                _SPINNER_RENDERER = r if r.isValid() else False
+            except Exception:
+                _SPINNER_RENDERER = False
+    return _SPINNER_RENDERER or None
+
+
+def _get_spinner_pixmap(dpr: float) -> Optional[QPixmap]:
+    """按 devicePixelRatio 返回预渲染好的 spinner 位图，失败返回 None。"""
+    renderer = _get_spinner_renderer()
+    if renderer is None:
+        return None
+    cached = _SPINNER_PIXMAP_CACHE.get(dpr)
+    if cached is not None:
+        return cached
+    try:
+        sz = renderer.defaultSize()
+        w = int(sz.width()) if sz.width() > 0 else 18
+        h = int(sz.height()) if sz.height() > 0 else 18
+        pm = QPixmap(int(w * dpr), int(h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.Antialiasing)
+        renderer.render(painter)
+        painter.end()
+    except Exception:
+        return None
+    if len(_SPINNER_PIXMAP_CACHE) >= _SPINNER_PIXMAP_CACHE_MAX:
+        _SPINNER_PIXMAP_CACHE.clear()
+    _SPINNER_PIXMAP_CACHE[dpr] = pm
+    return pm
+
+
 class _ThinkingSpinner(QWidget):
     """思考流式 spinner：金色 snake 圆环旋转（复刻 WebEngine 版 _THINK_SNAKE_SVG 观感）。"""
 
@@ -229,24 +284,23 @@ class _ThinkingSpinner(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        drawn = False
         if _HAS_QT_SVG:
             try:
-                from app.widgets.message_card import _THINK_SNAKE_SVG
-
-                p.translate(self.width() / 2, self.height() / 2)
-                p.rotate(self._angle)
-                p.translate(-self.width() / 2, -self.height() / 2)
-                QSvgRenderer(_THINK_SNAKE_SVG.encode("utf-8")).render(p)
-                p.end()
-                return
+                pm = _get_spinner_pixmap(self.devicePixelRatioF())
+                if pm is not None:
+                    p.translate(self.width() / 2, self.height() / 2)
+                    p.rotate(self._angle)
+                    p.translate(-self.width() / 2, -self.height() / 2)
+                    p.drawPixmap(0, 0, pm)
+                    drawn = True
             except Exception:
-                pass
-        # 兜底：无 SVG 时画简单圆弧
-        from PyQt5.QtCore import QRectF
-
-        rect = QRectF(3, 3, self.width() - 6, self.height() - 6)
-        p.setPen(QPen(QColor(255, 200, 50), 2.5, Qt.SolidLine, Qt.RoundCap))
-        p.drawArc(rect, self._angle * 16, 100 * 16)
+                drawn = False
+        if not drawn:
+            # 兜底：无 SVG / 渲染失败时画简单圆弧
+            rect = QRectF(3, 3, self.width() - 6, self.height() - 6)
+            p.setPen(QPen(QColor(255, 200, 50), 2.5, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(rect, self._angle * 16, 100 * 16)
         p.end()
 
 

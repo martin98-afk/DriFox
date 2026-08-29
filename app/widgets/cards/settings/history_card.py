@@ -1042,7 +1042,12 @@ class HistoryCard(QWidget):
         self._render_batch_index = 0
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
-        self._render_timer.setInterval(0)  # 下一个事件循环立即执行
+        # [PERF] 原为 0ms：0 间隔的定时器在事件循环空闲时会连续抢占，
+        # 历史列表上千条（30/批 → 数十批）期间主线程被批处理独占，
+        # 输入法/滚动/流式渲染全部饿死（表现为打开历史面板时界面卡住）。
+        # 改为 8ms：每批之间让出事件循环，整体仍在一两百毫秒内完成，
+        # 但不再阻塞其它交互。
+        self._render_timer.setInterval(8)
         self._render_timer.timeout.connect(self._process_render_batch)
         self._batch_size = 30  # 每批渲染 30 个 widget（增大批次减少事件循环次数）
 
@@ -1349,8 +1354,11 @@ class HistoryCard(QWidget):
         layout.addStretch(1)
 
         if content_widget:
+            # [PERF] 原此处在 setUpdatesEnabled(True) 后又调 repaint()：
+            # setUpdatesEnabled(True) 本身已会调度一次 update()，额外的
+            # repaint() 强制同步重绘整棵子树，本次渲染的内容还是空的
+            # （widget 尚未创建），纯粹是白开销。
             content_widget.setUpdatesEnabled(True)
-            content_widget.repaint()
 
         # 分批渲染 widget
         # 关键修复：第一批也延迟到下一个事件循环执行，确保 _on_system_card_opened
@@ -1439,8 +1447,8 @@ class HistoryCard(QWidget):
                 layout.insertWidget(layout.count() - 1, empty_label)
 
         if suspend_repaint:
+            # [PERF] 同上：去掉每批一次的强制同步 repaint()，交给事件循环合并重绘。
             parent_widget.setUpdatesEnabled(True)
-            parent_widget.repaint()
 
         self._render_batch_index = end
 

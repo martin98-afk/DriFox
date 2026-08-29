@@ -4,7 +4,10 @@
 
 #define MyAppName "Drifox"
 #ifndef MyAppVersion
-  #define MyAppVersion "v0.5.5"
+  #define MyAppVersion "v0.5.6"
+#endif
+#ifndef MyAppSuffix
+  #define MyAppSuffix "dev"
 #endif
 #define MyAppPublisher "Jinshan Psychiatric Hospital"
 #define MyAppURL "https://Drifox-sphinx-build.readthedocs.io/zh-cn/latest/"
@@ -26,7 +29,14 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
-OutputBaseFilename=Drifox-Windows-Setup-{#MyAppVersion}
+; 产物名由 CI 决定后通过 /DOutputBaseFilename= 传入（见 release.yml build-windows step）
+; 单边后缀：dev (PyQt5) → Drifox-Windows-Setup-{version}.exe（历史文件名，更新器识别）
+;         pyside6      → Drifox-Windows-Setup-{version}-pyside6.exe（区分用）
+; 本地测试 fallback：使用 {version}（不带后缀，符合历史格式）
+#ifndef OutputBaseFilename
+  #define OutputBaseFilename "Drifox-Windows-Setup-{#MyAppVersion}"
+#endif
+OutputBaseFilename={#OutputBaseFilename}
 Compression=lzma2
 SolidCompression=yes
 SetupIconFile=drifox.ico

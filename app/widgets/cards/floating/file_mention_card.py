@@ -269,6 +269,38 @@ def _scan_tree(root_dir: str, rules: "IgnoreRules", max_items: int):
     return items, snapshots, watched, truncated
 
 
+# ── 条目背景样式表缓存 ──────────────────────────────────────────
+# key = (状态, 选中底色, 悬停底色)。颜色本身来自主题感知的 Colors 大写属性，
+# 因此主题切换会让 key 自然变化 → 生成新样式，无需显式失效缓存。
+_FILE_ITEM_BG_CSS_CACHE: Dict[tuple, str] = {}
+_FILE_ITEM_BG_CSS_CACHE_MAX = 16  # 状态×主题组合极少，封顶防异常环境膨胀
+
+
+def _file_item_bg_css(state: int, selected_bg: str, hover_bg: str) -> str:
+    """按 (状态, 主题色) 缓存条目背景样式表字符串。
+
+    [PERF] `load_items` 批量渲染时每个条目都要走一次 setStyleSheet。
+    字符串拼接本身不贵，但要构造 3 个 f-string 片段并让 Qt 逐次解析同样的
+    CSS 文本；缓存后同一状态的条目共用同一个 str 对象。
+    """
+    key = (state, selected_bg, hover_bg)
+    css = _FILE_ITEM_BG_CSS_CACHE.get(key)
+    if css is not None:
+        return css
+    bg = selected_bg if state == 1 else hover_bg if state == 2 else "transparent"
+    css = (
+        "FileMentionItemWidget {"
+        f" background-color: {bg};"
+        " border: none;"
+        " border-radius: 4px;"
+        " }"
+    )
+    if len(_FILE_ITEM_BG_CSS_CACHE) >= _FILE_ITEM_BG_CSS_CACHE_MAX:
+        _FILE_ITEM_BG_CSS_CACHE.clear()
+    _FILE_ITEM_BG_CSS_CACHE[key] = css
+    return css
+
+
 class FileMentionItemWidget(QWidget):
     """文件列表单项"""
 
@@ -368,6 +400,8 @@ class FileMentionItemWidget(QWidget):
         self._query = query
         self._hovered = False
         self._selected = False
+        # 背景样式的「上次状态」指纹，用于跳过无变化的重复 setStyleSheet
+        self._bg_state = None
         self.setFixedHeight(ITEM_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
         self._setup_ui()
@@ -427,21 +461,22 @@ class FileMentionItemWidget(QWidget):
         setStyleSheet 只设置自身背景，不触碰子 QLabel 样式。
         调用 unpolish/polish 强制 Qt 立即重新计算样式，防止新/复用 widget
         的 setStyleSheet 延迟到下一帧才生效导致选中高亮不可见。
-        """
-        if self._selected:
-            bg = Colors.REALTIME_TAG_BG
-        elif self._hovered:
-            bg = Colors.HOVER_BG
-        else:
-            bg = "transparent"
 
-        self.setStyleSheet(f"""
-            FileMentionItemWidget {{
-                background-color: {bg};
-                border: none;
-                border-radius: 4px;
-            }}
-        """)
+        [PERF] 原实现每次调用都无条件执行「拼字符串 + setStyleSheet +
+        unpolish + polish」四步。`load_items` 批量渲染 N 个条目就是 N×4，
+        而其中绝大多数条目状态完全相同（未选中、未悬停）。
+        改为：
+        - 用 (状态, 当前主题色) 做指纹，无变化直接返回；
+        - 变化时才生成样式，且样式字符串按 (状态, 颜色) 缓存（主题切换时
+          颜色变化会让缓存键自然失效，无需手动清理）。
+        """
+        selected_bg = Colors.REALTIME_TAG_BG
+        hover_bg = Colors.HOVER_BG
+        state = (1 if self._selected else 2 if self._hovered else 0, selected_bg, hover_bg)
+        if state == self._bg_state:
+            return
+        self._bg_state = state
+        self.setStyleSheet(_file_item_bg_css(state[0], selected_bg, hover_bg))
         self.style().unpolish(self)
         self.style().polish(self)
 

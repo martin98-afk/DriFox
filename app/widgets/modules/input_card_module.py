@@ -25,7 +25,7 @@ class InputCardModule(UIModule):
 
     def build(self, host) -> None:
         from PyQt5.QtCore import Qt, QTimer
-        from PyQt5.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+        from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
         from qfluentwidgets import setFont
 
         from app.utils.config import Settings as _Cfg
@@ -35,6 +35,7 @@ class InputCardModule(UIModule):
         from app.widgets.cards.floating.command_card import CommandCard
         from app.widgets.cards.floating.file_mention_card import FileMentionCard
         from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
+        from app.widgets.flow_layout import FlowLayout
 
         # ===== 底部输入区域（输入卡 + 工具栏紧贴拼接）=====
         # 视觉目标：输入框 + toolbar 等宽，无间距，无外 padding，紧贴 chat 区。
@@ -71,14 +72,22 @@ class InputCardModule(UIModule):
         wrapper_layout.addWidget(host._input_card)
 
         # 附件预览行（拖拽/粘贴文件时显示 AttachmentChip）
+        # ⚠️ 必须用 FlowLayout，不能用 QHBoxLayout：
+        #    QHBoxLayout.minimumWidth() 是所有 chip 宽度之和，会随附件数量线性增长，
+        #    并沿 _input_card → wrapper → bottom_container → MainWidget → _chat_frame
+        #    一路冒泡到 QSplitter。QSplitter 为满足右侧窗格的 minimumWidth，会把左侧
+        #    边栏压到下限 60px；低于 TabPanel 的自动折叠阈值 100px 即触发折叠 ——
+        #    表现就是「多拖几个文件，左边栏就自己收起来了」。
+        #    FlowLayout.minimumWidth() 取最宽单个 chip，容器可被压到「一行一个」，
+        #    宽度不足时换行而非撑开父布局。
         host._attach_container = QWidget(host._input_card)
         host._attach_container.setVisible(False)
         host._attach_container.setAcceptDrops(True)
         host._attach_container.installEventFilter(host)
-        host._attach_layout = QHBoxLayout(host._attach_container)
-        host._attach_layout.setContentsMargins(6, 6, 6, 0)
-        host._attach_layout.setSpacing(3)
-        host._attach_layout.addStretch()
+        # Preferred/Minimum：宽度跟随父布局、高度紧贴内容，不主动索要额外高度
+        host._attach_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        host._attach_layout = FlowLayout(host._attach_container, spacing=6, margins=0)
+        host._attach_layout.setContentsMargins(8, 8, 8, 2)
         host._attachments: list[str] = []
         host._history_working_attachments: list[str] = []  # 进入历史模式时保存的附件（退出时恢复）
         card_layout.addWidget(host._attach_container)
@@ -106,6 +115,8 @@ class InputCardModule(UIModule):
         host.input_area.enteringHistoryMode.connect(host._on_entering_history_mode)
         host.input_area.historyAttachmentsRestored.connect(host._on_history_attachments_restored)
         host.input_area.historyModeExited.connect(host._on_history_mode_exited)
+        # 正文里的 [[basename]] 被删除 → 同步移除附件栏对应的 chip（反向同步）
+        host.input_area.attachmentsRemoved.connect(host._on_attachments_removed_from_text)
         # ★ 用户输入时通知桌宠好奇看向输入框
         host.input_area.textChanged.connect(host._on_pet_typing)
         card_layout.addWidget(host.input_area)

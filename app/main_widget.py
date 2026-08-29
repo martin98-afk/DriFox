@@ -83,6 +83,7 @@ from app.core import (
 from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
+from app.core.rss_sampler import rss_sampler
 from app.core.tool_permission_controller import ToolPermissionController
 from app.core import window_registry
 
@@ -106,6 +107,7 @@ from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.bottom_input_area import (
     AttachmentChip,
+    AttachmentOverflowChip,
     InputGlowUnderlay,
     SendableTextEdit,
 )
@@ -1055,6 +1057,10 @@ class OpenAIChatToolWindow(ToolWindow):
     # resize 防抖间隔（（ms）：80ms 已足够覆盖感知刷新率，减少慢速 resize
     # 拖拽场景下的冗余布局重算（每帧比 16ms/32ms 少一次）。
     _RESIZE_DEBOUNCE_MS: int = 80
+    # 判定"视口内卡片"的上下缓冲（px）：resize 结束后该范围内的卡片一次性
+    # 恢复真实内容，其余离屏卡片分批恢复。缓冲略大于一屏可避免滚动时
+    # 立刻撞上尚未恢复的占位卡片。
+    _RESTORE_VISIBLE_BUFFER: int = 400
     # 新建任务：相邻成员窗口会话创建的交错间隔（C3，避免 N 窗同步链冻结 UI）
     _TEAM_NEW_TASK_STAGGER_MS: int = 50
     # 模板加载时待排列的新窗口计数（延迟 join 完成后递减，归零时触发自动排列）
@@ -1363,6 +1369,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.timeout.connect(self._sync_all_cards_width)
         self._pending_resize_sync = False
         self._resize_preview_active = False
+        # 🐛 恢复链代次：每轮 resize 递增，用于作废旧的单次恢复链。
+        # 没有它时连续拖拽会并存多条链，互相清空 _restore_queue，
+        # 导致部分卡片永久停留在 placeholder 空白态。
+        self._restore_epoch = 0
+        self._restore_queue = []
+        self._restore_batch_idx = 0
         self._last_chat_viewport_width = 0
         # [PERF] 滚动同步定时器：100ms 已足够跟踪滚动停止
         self._scroll_sync_timer = QTimer(self)
@@ -5923,7 +5935,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 清空输入框（和函数型命令一样处理）
-        self.input_area.clear()
+        self._clear_input_area()
 
         # 检查 AgentManager 中是否存在该智能体
         agent_mgr = self.backend.agent_manager
@@ -6662,18 +6674,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._file_mention_card.dismiss()
         self._card_manager.hide_card("file_mention", self._window_id)
 
-        # 移除输入框中的 @query 文本
+        # 移除输入框中的 @query 文本（不再插入 [[basename]]，附件栏是唯一真相源）
         self.input_area.insert_file_mention(file_path)
 
         # 添加到附件列表（复用拖拽文件的 chip 机制）
-        if file_path not in self._attachments:
-            self._attachments.append(file_path)
-            from app.widgets.bottom_input_area import AttachmentChip
-
-            chip = AttachmentChip(file_path, self._attach_container)
-            chip.removed.connect(lambda path=file_path: self._remove_attachment(path))
-            self._attach_layout.insertWidget(self._attach_layout.count() - 1, chip)
-        self._attach_container.setVisible(bool(self._attachments))
+        if self._add_attachment(file_path):
+            self._rebuild_attachment_chips()
 
         # 聚焦输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
@@ -8851,24 +8857,69 @@ class OpenAIChatToolWindow(ToolWindow):
             except RuntimeError:
                 pass
 
-        # 第二步：收集卡片，分批退出 preview 模式
-        self._restore_queue = []
+        # 第二步：分区恢复 —— 视口内立即全量恢复，离屏大批量快恢复。
+        #
+        # 🐛 竞态修复（窗口拖拽时部分卡片永久空白的根因）：
+        # 旧实现把全部卡片塞进同一个 _restore_queue，用 QTimer.singleShot 链式
+        # 分批推进，但**没有任何机制取消上一条链**。连续 resize（拖拽必然产生）
+        # 会启动多条链，它们共享 _restore_queue / _restore_batch_idx：
+        # 先结束的那条把 _restore_queue 清空并置 _resize_preview_active=False，
+        # 另一条链随后读到空队列直接收尾 → 大量卡片从未被 set_resize_preview_mode(False)
+        # → 永远停留在 placeholder 空白态，表现为"窗口变大后内容迟迟不刷新"。
+        # 引入 epoch 令牌作废旧链，保证同一时刻只有一条恢复链存活。
+        #
+        # 🐛 性能修复：固定 5 张/80ms 的节奏下，100 张卡片需 20 批 × 80ms ≈ 1.6s。
+        # 视口内卡片是用户正在看的，数量有限（通常 <20）且本来就要渲染，一次性
+        # 恢复没有额外 GPU 风险，却能让内容"立刻"适配；离屏卡片不参与渲染，
+        # 放宽到 20 张/30ms 快速收尾。
+        self._restore_epoch += 1
+        epoch = self._restore_epoch
+
+        visible_cards = []
+        offscreen_cards = []
+        viewport_rect = scroll_area.viewport().rect() if scroll_area else None
+        if viewport_rect is not None:
+            viewport_top = scroll_area.verticalScrollBar().value()
+            viewport_bottom = viewport_top + viewport_rect.height()
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), MessageCard):
-                self._restore_queue.append(item.widget())
+            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
+                continue
+            card = item.widget()
+            if viewport_rect is None:
+                visible_cards.append(card)
+                continue
+            card_rect = card.geometry()
+            if card_rect.bottom() < viewport_top - self._RESTORE_VISIBLE_BUFFER or card_rect.top() > viewport_bottom + self._RESTORE_VISIBLE_BUFFER:
+                offscreen_cards.append(card)
+            else:
+                visible_cards.append(card)
 
-        if not self._restore_queue:
-            self._resize_preview_active = False
-            return
+        for card in visible_cards:
+            try:
+                card.set_resize_preview_mode(False)
+            except RuntimeError:
+                pass
 
+        self._restore_queue = offscreen_cards
         self._restore_batch_idx = 0
-        self._process_restore_batch()
+        if self._restore_queue:
+            self._process_restore_batch(epoch)
+        else:
+            self._restore_queue = []
+            self._resize_preview_active = False
 
-    def _process_restore_batch(self):
-        """分批恢复卡片 viewer（触发 GPU 分配，必须分批以避免峰值）"""
-        BATCH_SIZE = 5
-        INTERVAL_MS = 80
+    def _process_restore_batch(self, epoch: int | None = None):
+        """分批恢复离屏卡片 viewer（触发 GPU 分配，故分批以避免峰值）
+
+        Args:
+            epoch: 恢复链代次。与 self._restore_epoch 不符说明本链已被新一轮
+                resize 作废，立即退出，避免多链并存互相清空队列。
+        """
+        if epoch is not None and epoch != self._restore_epoch:
+            return
+        BATCH_SIZE = 20
+        INTERVAL_MS = 30
         end = min(self._restore_batch_idx + BATCH_SIZE, len(self._restore_queue))
         for i in range(self._restore_batch_idx, end):
             card = self._restore_queue[i]
@@ -8878,7 +8929,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 pass
         self._restore_batch_idx = end
         if end < len(self._restore_queue):
-            QTimer.singleShot(INTERVAL_MS, self._process_restore_batch)
+            QTimer.singleShot(INTERVAL_MS, lambda: self._process_restore_batch(epoch))
         else:
             self._restore_queue = []
             self._resize_preview_active = False
@@ -9185,7 +9236,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=1500,
                 position=InfoBarPosition.BOTTOM,
             )
-        self.input_area.clear()
+        self._clear_input_area()
         if not self._is_streaming:
             self.input_area.toggle_send_button(True)
 
@@ -10939,7 +10990,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._batch_cards[batch_idx] = None
         # 只减已渲染的卡数（_rendered_card_count 语义 = 已渲染未卸载）
         rendered_in_batch = sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
-        self._rendered_card_count = max(0, self._rendered_card_count - rendered_in_batch)
+        self._decr_rendered_count(rendered_in_batch)
         return removed_h
 
     def _batch_is_protected(self, batch_idx: int) -> bool:
@@ -10973,10 +11024,41 @@ class OpenAIChatToolWindow(ToolWindow):
             return batch_idx - (self._visible_batch_end + 1)
         return 0
 
+    def _effective_max_rendered_cards(self) -> int:
+        """本窗口当前的并发渲染页配额（全局闸门 + 每窗口下限保护）。
+
+        [PERF] 见 ``_MAX_GLOBAL_RENDERED_PAGES`` 处的说明：per-window 配额在
+        多窗口下会线性放大内存占用。这里按「全局剩余配额」动态收缩本窗口上限，
+        同时用保底值避免窗口被饿死。
+        """
+        try:
+            others = max(0, _global_rendered_pages - self._rendered_card_count)
+            remaining = _MAX_GLOBAL_RENDERED_PAGES - others
+        except Exception:
+            return self._max_rendered_cards
+        return max(_MIN_RENDERED_CARDS_PER_WINDOW, min(self._max_rendered_cards, remaining))
+
+    def _sync_global_rendered_pages(self, new_count: int) -> None:
+        """把本窗口已渲染计数校准为 new_count，并同步增减全局闸门计数。
+
+        所有「重算/清零」计数的地方都必须走这里，否则全局计数会漂移，
+        进而让闸门误判（配额被永久占用 → 其他窗口被饿死）。
+        """
+        global _global_rendered_pages
+        new_count = max(0, new_count)
+        _global_rendered_pages = max(0, _global_rendered_pages - self._rendered_card_count + new_count)
+        self._rendered_card_count = new_count
+
+    def _decr_rendered_count(self, n: int) -> None:
+        """已渲染卡片数递减 n（卸载批次路径），同步全局闸门计数。"""
+        if n <= 0:
+            return
+        self._sync_global_rendered_pages(self._rendered_card_count - n)
+
     def _recycle_lru_batches(self):
         """B4 温和层：并发页超限时按「距可视区最远优先」淘汰批次 UI。
 
-        仅回收超过 _max_rendered_cards 的部分；受保护批次跳过；
+        仅回收超过配额（见 _effective_max_rendered_cards）的部分；受保护批次跳过；
         每卸一批做滚动补偿（setValue(值 - removed_h)）防止视口跳动。
         """
         if self._is_virtual_recycling or not self._batch_cards:
@@ -10989,12 +11071,13 @@ class OpenAIChatToolWindow(ToolWindow):
             for cards in self._batch_cards:
                 if cards:
                     actual += sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
-            self._rendered_card_count = actual
+            self._sync_global_rendered_pages(actual)
 
-        if self._rendered_card_count <= self._max_rendered_cards:
+        quota = self._effective_max_rendered_cards()
+        if self._rendered_card_count <= quota:
             return
 
-        over = self._rendered_card_count - self._max_rendered_cards
+        over = self._rendered_card_count - quota
         # 候选：所有非空批次（跳过受保护），按距离降序（最远先淘汰）
         candidates = []
         for idx, cards in enumerate(self._batch_cards):
@@ -11010,7 +11093,7 @@ class OpenAIChatToolWindow(ToolWindow):
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
             removed_total = 0
             for dist, idx in candidates:
-                if self._rendered_card_count <= self._max_rendered_cards:
+                if self._rendered_card_count <= quota:
                     break
                 removed_h = self._unload_batch(idx)
                 removed_total += removed_h
@@ -11021,7 +11104,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
                 logger.debug(
                     f"[B4-recycle] 淘汰 {len(candidates)} 候选中的超限批次，"
-                    f"_rendered_card_count={self._rendered_card_count}/{self._max_rendered_cards}"
+                    f"_rendered_card_count={self._rendered_card_count}/{quota}"
+                    f" (global={_global_rendered_pages}/{_MAX_GLOBAL_RENDERED_PAGES})"
                 )
         finally:
             self._is_virtual_recycling = False
@@ -11111,22 +11195,14 @@ class OpenAIChatToolWindow(ToolWindow):
         T30 双判据的 WebEngine 侧：renderer/GPU/network 子进程各自数百 MB，
         累计 RSS 反映 WebEngine 内存压力是否值得强回收（kill 离屏 renderer）。
         无 psutil 或找不到子进程时返回 0.0（退化：不触发 WebEngine 判据）。
-        """
-        try:
-            import psutil
 
-            self_proc = psutil.Process()
-            total = 0.0
-            for child in self_proc.children(recursive=True):
-                try:
-                    name = (child.name() or "").lower()
-                    if "qwebengine" in name or "webengine" in name or "chrome" in name:
-                        total += child.memory_info().rss / (1024 * 1024)
-                except Exception:
-                    continue
-            return total
-        except Exception:
-            return 0.0
+        ⚡ [PERF] 本方法位于流式热路径（每 content chunk 一次）。原实现在此
+        直接执行 ``psutil.Process().children(recursive=True)`` + 逐子进程
+        ``memory_info()``，单次 20-80ms，与 chat_worker 的 80ms 批处理周期
+        同量级 → 主线程 25%-50% 时间用于遍历进程表，是流式卡顿主因之一。
+        现改为读取后台采样器缓存（`app.core.rss_sampler`），主线程零 psutil 调用。
+        """
+        return rss_sampler.web_rss_mb()
 
     def _over_memory_threshold(self, active: bool = False) -> bool:
         """内存阈值判定（T30 双判据）：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB
@@ -11138,30 +11214,41 @@ class OpenAIChatToolWindow(ToolWindow):
                 触发阈值（_MEM_THRESHOLD_TOTAL_MB_ACTIVE）避免频繁 kill 造成
                 滚动回看时的重建抖动；但绝不再完全跳过（旧实现跳过 = 内存泄漏）。
 
-        无 psutil 时退化判定：并发页 > _MAX_RENDERED_CARDS 且存在
+        ⚡ [PERF] 采样值来自后台线程（`app.core.rss_sampler`）。本方法每
+        content chunk 调用一次，绝不能在这里执行 psutil 系统调用。
+
+        无 psutil 或采样不可用时退化：并发页 > _MAX_RENDERED_CARDS 且存在
         距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL 的已卸载批次（说明内存压力来自 WebEngine）。
         """
         try:
-            import psutil
-
+            rss_mb = rss_sampler.rss_mb()
+            if rss_mb <= 0.0:
+                # 采样不可用（无 psutil / 首帧未完成）→ 退化判定
+                return self._over_memory_threshold_fallback()
             threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
-            rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
             if rss_mb <= threshold:
                 return False
             # 主进程已超总阈值：再核对 WebEngine 侧，避免误杀
-            web_mb = self._web_children_rss_mb()
+            web_mb = rss_sampler.web_rss_mb()
             if web_mb > 0 and web_mb < _WEB_MEM_THRESHOLD_MB:
                 return False
             return True
         except Exception:
-            # 退化：有已卸载 PID 且存在远距批次 + 并发页仍超限
-            if not self._unloaded_pids:
-                return False
-            offscreen = any(
-                (self._batch_distance(idx) if 0 <= idx < len(self._batch_cards) else 0) >= _OFFSCREEN_BATCHES_FOR_KILL
-                for _, _, idx in self._unloaded_pids
-            )
-            return offscreen and self._rendered_card_count > self._max_rendered_cards
+            return self._over_memory_threshold_fallback()
+
+    def _over_memory_threshold_fallback(self) -> bool:
+        """psutil 不可用时的退化判定：并发页超限 + 存在远距已卸载批次。
+
+        从 `_over_memory_threshold` 拆出，保证异常路径与「采样不可用」路径
+        共用同一套退化逻辑，避免两处逻辑漂移。
+        """
+        if not self._unloaded_pids:
+            return False
+        offscreen = any(
+            (self._batch_distance(idx) if 0 <= idx < len(self._batch_cards) else 0) >= _OFFSCREEN_BATCHES_FOR_KILL
+            for _, _, idx in self._unloaded_pids
+        )
+        return offscreen and self._rendered_card_count > self._max_rendered_cards
 
     def _kill_lru_unloaded_renderers(self, keep: int = None, min_offscreen: int = 0) -> int:
         """按卸载时间升序（最老在前）kill 超 keep 部分，每轮 ≤ _KILL_BATCH_MAX。
@@ -11383,7 +11470,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_lazy_cards.clear()
         self._lazy_batch_timer_active = False
         # ★ B4：清空聊天区 = 本窗口已渲染卡片数归零（_batch_cards 由调用方重建）
-        self._rendered_card_count = 0
+        self._sync_global_rendered_pages(0)
         # 先收集所有 widget（不能在迭代中修改 layout），再统一处理
         widgets = []
         while self.chat_layout.count():
@@ -12159,7 +12246,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._rendered_card_count += new_count
             global _global_rendered_pages
             _global_rendered_pages += new_count
-            if self._rendered_card_count > self._max_rendered_cards:
+            if self._rendered_card_count > self._effective_max_rendered_cards():
                 QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
         # 批次全部渲染完成，统一更新滚动
@@ -15317,7 +15404,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def handle_recommended_question(self, content: str, action: str):
         if action == "ask":
-            self.input_area.clear()
+            self._clear_input_area()
             self.send_preset_question(content)
         elif action == "session":
             # session_id 直接就是 content
@@ -15468,77 +15555,143 @@ class OpenAIChatToolWindow(ToolWindow):
         然后根据历史条目保存的路径列表重建 AttachmentChip。
         """
         self._clear_attachments()
-        for p in paths:
-            if p not in self._attachments and os.path.exists(p):
-                self._attachments.append(p)
-                chip = AttachmentChip(p, self._attach_container)
-                chip.removed.connect(lambda path=p: self._remove_attachment(path))
-                self._attach_layout.insertWidget(self._attach_layout.count() - 1, chip)
-        self._attach_container.setVisible(bool(self._attachments))
+        for p in paths or []:
+            # 文件可能已被删除/移动，失效的不予恢复（chip 会标红提示）
+            if os.path.exists(p):
+                self._add_attachment(p)
+        self._rebuild_attachment_chips()
 
     def _on_history_mode_exited(self):
         """退出历史浏览模式 — 恢复进入时保存的附件"""
         self._on_history_attachments_restored(self._history_working_attachments)
 
     # ==================== 附件管理 ====================
+    #
+    # 设计原则：**附件栏是唯一真相源**。
+    # 附件不在正文里以 [[...]] 文本形式重复存在，因此不存在「两处状态需要对齐」的
+    # 问题。正文里若仍出现 [[...]]（历史记录恢复的文本、用户手动键入），
+    # 走 _on_attachments_removed_from_text 做反向同步兜底。
+
+    #: 附件栏最多渲染多少个 chip，超出折叠为一枚「+N」
+    _MAX_VISIBLE_CHIPS = 12
 
     def _on_files_dropped(self, paths: list[str]):
-        """文件拖入/粘贴 → 添加 AttachmentChip"""
+        """文件拖入/粘贴 → 登记附件并重建芯片"""
+        added = False
         for p in paths:
-            if p not in self._attachments:
-                self._attachments.append(p)
-                chip = AttachmentChip(p, self._attach_container)
-                chip.removed.connect(lambda path=p: self._remove_attachment(path))
-                # 插入到 stretch 之前
-                self._attach_layout.insertWidget(self._attach_layout.count() - 1, chip)
+            if self._add_attachment(p):
+                added = True
+        if added:
+            self._rebuild_attachment_chips()
+
+    def _add_attachment(self, path: str) -> bool:
+        """登记一个附件（去重）。返回是否实际新增
+
+        只维护数据、不碰 UI —— UI 由 :meth:`_rebuild_attachment_chips` 统一重建。
+        分开是为了让「一次拖入 20 个文件」只触发一次布局重排，而不是 20 次。
+        """
+        if not path or path in self._attachments:
+            return False
+        self._attachments.append(path)
+        return True
+
+    def _clear_attachment_chips(self):
+        """移除附件栏中所有 chip widget（不动 self._attachments）"""
+        while self._attach_layout.count():
+            item = self._attach_layout.takeAt(0)
+            widget = item.widget() if item else None
+            if widget is None:
+                continue
+            self._attach_layout.removeWidget(widget)
+            try:
+                widget.setParent(None)
+            except RuntimeError:
+                # C++ 对象已被回收（窗口关闭竞态），忽略
+                pass
+            widget.deleteLater()
+
+    def _rebuild_attachment_chips(self):
+        """按 self._attachments 全量重建附件栏
+
+        渲染上限 :attr:`_MAX_VISIBLE_CHIPS`：附件栏没有滚动条，靠限制渲染数量
+        控制高度，避免几十个附件时把输入框挤到看不见。超限的附件 **仍然会随消息
+        一起发送**，只是不再单独渲染 chip，末尾用一枚「+N」提示还有多少。
+        """
+        self._clear_attachment_chips()
+        visible = self._attachments[: self._MAX_VISIBLE_CHIPS]
+        overflow = len(self._attachments) - len(visible)
+        for path in visible:
+            chip = AttachmentChip(path, self._attach_container)
+            # 直连槽而非 lambda：removed 自带 path 参数，语义等价，
+            # 且不会像循环内的 lambda 那样因闭包迟绑定捕获到错误的变量。
+            chip.removed.connect(self._remove_attachment)
+            self._attach_layout.addWidget(chip)
+        if overflow > 0:
+            self._attach_layout.addWidget(
+                AttachmentOverflowChip(overflow, len(self._attachments), self._attach_container)
+            )
         self._attach_container.setVisible(bool(self._attachments))
 
     def _remove_attachment(self, path: str):
-        """移除指定附件"""
-        if path in self._attachments:
-            self._attachments.remove(path)
-            # 清理对应的 chip widget
-            for i in range(self._attach_layout.count()):
-                item = self._attach_layout.itemAt(i)
-                if item and item.widget() and isinstance(item.widget(), AttachmentChip):
-                    if item.widget().filepath == path:
-                        item.widget().deleteLater()
-                        break
-        self._attach_container.setVisible(bool(self._attachments))
+        """移除指定附件（点 chip 的 × 触发）"""
+        if path not in self._attachments:
+            return
+        self._attachments.remove(path)
+        self._rebuild_attachment_chips()
+        # 同步清理正文里的引用：inline 胶囊优先，兼容遗留的 [[basename]] 字面文本
+        if not self.input_area.remove_mention_objects(path):
+            self.input_area.remove_placeholder(os.path.basename(path))
 
-        # 清理输入框中对应的 [[basename]] 占位符
-        try:
-            basename = os.path.basename(path)
-            placeholder = f"[[{basename}]]"
-            current = self.input_area.toPlainText()
-            if placeholder in current:
-                new_text = current.replace(placeholder, "")
-                # 清理多余空格
-                new_text = new_text.replace("  ", " ").strip()
-                self.input_area.setPlainText(new_text)
-        except Exception:
-            pass
+    def _on_attachments_removed_from_text(self, names: list):
+        """正文里的 [[basename]] 被删除 → 同步移除附件栏对应的 chip
+
+        胶囊被删除同样走到这里：toPlainText() 把胶囊展开成 [[basename]]，
+        胶囊没了，展开结果里对应的占位符也就消失了。
+
+        与 :meth:`_remove_attachment` 互为反向，共同构成双向同步：
+        删附件 → 删正文引用；删正文引用 → 删附件。
+        """
+        if not self._attachments:
+            return
+        removed_any = False
+        for name in names:
+            # 只删一个匹配项：两个同名文件删掉其中一个的引用，不应连带删掉另一个
+            for path in self._attachments:
+                if os.path.basename(path) == name:
+                    self._attachments.remove(path)
+                    removed_any = True
+                    break
+        if removed_any:
+            self._rebuild_attachment_chips()
 
     def _clear_attachments(self):
         """清空所有附件"""
         self._attachments.clear()
-        # 先收集 widgets 再统一 removeWidget（不能在迭代中修改 layout）
-        chips = []
-        while self._attach_layout.count() > 1:
-            item = self._attach_layout.takeAt(0)
-            if item and item.widget():
-                chips.append(item.widget())
-        for chip in chips:
-            self._attach_layout.removeWidget(chip)
-            try:
-                chip.setParent(None)
-            except Exception:
-                pass
-            chip.deleteLater()
+        self._clear_attachment_chips()
         self._attach_container.hide()
+
+    def _clear_input_area(self):
+        """清空输入框，且不触发「文本 → 附件」反向同步
+
+        发送 / 命令执行路径会连续改动文本与附件列表。若直接 input_area.clear()，
+        正文里残留的 [[...]] 占位符随文本一起消失，会被反向同步误判成
+        「用户删除了附件引用」，进而把附件也删掉。
+
+        这在命令降级时是实打实的数据丢失：_execute_command 返回 False 时附件应当
+        保留、继续走普通发送流程（review#15-#2 的修复），若被这层误删就会静默吞掉。
+        """
+        self.input_area.set_attachment_sync_enabled(False)
+        try:
+            self.input_area.clear()
+        finally:
+            self.input_area.set_attachment_sync_enabled(True)
 
     def _build_user_text_with_attachments(self, user_text: str) -> str:
         """将附件文件路径拼接到用户文本末尾，支持 [[basename]] 内联占位符替换
+
+        常规路径下正文不再含 [[...]]（附件栏是唯一真相源），所有附件走「拼到末尾」
+        分支。保留占位符替换是为了兼容两类遗留文本：历史输入记录恢复的文本、
+        用户手动键入的引用 —— 它们能精确指定附件在句子中的位置。
 
         文本中出现 [[filename.ext]] 占位符的 → 替换为完整路径（精确定位）
         未出现占位符的附件 → 照旧拼接到末尾（优雅降级）
@@ -15684,7 +15837,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 插件 FUNCTION 命令无处理器注册）——_execute_command 捕获后
                     # 写 _pending_command 并置 _team_load_degraded=True。
                     if not preserve_input:
-                        self.input_area.clear()
+                        self._clear_input_area()
                     # ⚠️ review#15-#2：附件仅在 handler 实际执行成功后清除
                     # （_execute_command 返回 True）。降级到 prompt 注入时命令
                     # 未真正执行（如插件无 handler 命令 /team --create=），附件
@@ -15849,7 +16002,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hide_welcome_cards()
 
         if not preserve_input:
-            self.input_area.clear()
+            self._clear_input_area()
             self._clear_attachments()
         self._append_user_message(user_text)
 
@@ -18259,9 +18412,20 @@ class OpenAIChatToolWindow(ToolWindow):
         self._toggle_project_selector_card()
 
     def _refresh_branch_widget_style(self):
-        """刷新分支按钮的文字样式"""
+        """刷新分支标签的样式（兼容 _BranchChip 与传统 PushButton）。
+
+        极简化：_branch_widget 现在是 _BranchChip（QFrame + git 分支线稿 icon + 文字），
+        由其自身 _apply_style() 统一管样式；主程序只需转发调用。
+        """
+        bw = getattr(self, "_branch_widget", None)
+        if bw is None:
+            return
+        if hasattr(bw, "refresh_style"):
+            bw.refresh_style()
+            return
+        # 兜底：传统 PushButton 路径
         Colors.refresh()
-        self._branch_widget.setStyleSheet(f"""
+        bw.setStyleSheet(f"""
             #_branchWidget {{
                 background: transparent;
                 border: none;
@@ -18278,17 +18442,18 @@ class OpenAIChatToolWindow(ToolWindow):
         """)
 
     def _refresh_project_branch_style(self):
-        """刷新项目+分支组合控件的整体样式（面包屑风格）"""
+        """刷新项目+分支组合控件的整体样式（极简：仅容器，hover 由子元素各自处理）
+
+        极简化：移除容器级 hover 底色（避免与 avatar / branch_widget 各自的 hover 嵌套双层）。
+        avatar 点击 = 切项目，branch 点击 = 打开关键文档，语义不同，必须各自独立 hover。
+        """
         Colors.refresh()
-        # 容器 — 面包屑整体底框
+        # 容器 — 仅保留透明占位（占 layout 宽度，无视觉装饰）
         self._project_branch_container.setStyleSheet(f"""
             QFrame#projectBranchContainer {{
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 6px;
-            }}
-            QFrame#projectBranchContainer:hover {{
-                background: {Colors.HOVER_BG};
             }}
         """)
         # 项目标签 — 面包屑第一级（粗体 + 项目专属色）
@@ -18306,17 +18471,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 background: transparent;
                 border: none;
                 border-radius: 4px;
-            }}
-        """)
-        # 分隔符 — 三角箭头（小号 + 次级色）
-        self._pb_separator.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_MUTED};
-                {get_font_family_css()}
-                {font_size_css(16)}
-                background: transparent;
-                border: none;
-                padding: 2px;
             }}
         """)
         # 同步刷新分支按钮样式
@@ -18342,8 +18496,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._branch_widget.setText(source._branch_widget.text())
             self._branch_widget.setVisible(branch_visible)
             self._branch_widget.setToolTip(source._branch_widget.toolTip())
-            if hasattr(self, "_pb_separator"):
-                self._pb_separator.setVisible(branch_visible)
             # 同步项目 avatar tooltip（含完整项目名、路径、分支）
             if hasattr(self, "_project_avatar") and hasattr(source, "_project_avatar"):
                 self._project_avatar.setToolTip(source._project_avatar.toolTip())
@@ -18378,7 +18530,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 先隐藏分支标签，等后台检测完成再决定显示
         self._branch_widget.setVisible(False)
-        self._pb_separator.setVisible(False)
 
         # Phase B（异步）：git 分支检测
         if not workdir or not os.path.isdir(workdir):
@@ -18432,10 +18583,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._branch_widget.setText(display)
             self._branch_widget.setToolTip(f"分支: {branch}\n点击打开关键文档")
             self._branch_widget.setVisible(True)
-            self._pb_separator.setVisible(True)
         else:
             self._branch_widget.setVisible(False)
-            self._pb_separator.setVisible(False)
 
     def _on_branch_label_clicked(self, event):
         """分支标签点击 — 打开关键文档卡片"""
@@ -20780,7 +20929,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if not first:
             return
         # 清空输入框内容
-        self.input_area.clear()
+        self._clear_input_area()
         # 隐藏消息列表（保持滚动位置不变）
         self.chat_scroll_area.setVisible(False)
         # 隐藏输入容器 + 工具栏
@@ -20933,6 +21082,16 @@ _gc_hook_pending = False
 # 强回收层（kill 离屏 renderer）依赖 message_card 的 renderer_pid 记录，暂缓。
 _MAX_RENDERED_CARDS = 18
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
+
+# ── B4 温和层：跨窗口全局渲染页闸门 ──
+# [PERF] _MAX_RENDERED_CARDS 原本是 **per-window** 常量，多窗口场景下
+# N 窗口 = N×18 张已渲染卡片常驻。每张卡片的 DOM/JS heap 都要挤在
+# --renderer-process-limit 封顶的那几个 renderer 进程里，内存随窗口数线性增长
+# （4 窗口 ≈ 72 页）。改为全局配额：新窗口只能分到「全局剩余配额」，
+# 但每窗口至少保留 _MIN_RENDERED_CARDS_PER_WINDOW 张 —— 宁可全局超限，
+# 也不能让某个窗口白屏（可用性优先于内存）。
+_MAX_GLOBAL_RENDERED_PAGES = 32  # 跨窗口并发渲染页硬闸门
+_MIN_RENDERED_CARDS_PER_WINDOW = 6  # 每窗口保底页数（闸门的下限保护）
 _MAX_BRANCH_CACHE = 64  # workdir→branch 缓存上限（M5-B）：超出时淘汰最早插入项，防长期累积渗漏
 
 # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──

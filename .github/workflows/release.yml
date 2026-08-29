@@ -23,6 +23,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -60,6 +63,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -71,14 +77,45 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-groups
 
-      # ── 解析版本号 ──
-      - name: Resolve version
+      # ── 解析版本号 + 分支后缀 ──
+      # suffix 规则（单边后缀）：
+      #   dev 分支     → suffix=""         产物名保持原样 Drifox-Windows-Setup-v0.5.6.exe
+      #   pyside6 分支 → suffix="pyside6"  产物名 Drifox-Windows-Setup-v0.5.6-pyside6.exe
+      # 理由：dev (PyQt5) 是历史版本，更新器按 Drifox-Windows-Setup-v0.5.6.exe 找包；
+      #       不加后缀避免破坏 update checker；pyside6 是新分支必须显式区分。
+      #
+      # 注意：push tag 触发时 ${{ github.ref_name }} 是 tag 名（如 v0.5.6-rc1）
+      # 不是分支名。需要用 git branch --contains HEAD 反查 tag 所在分支。
+      - name: Resolve version & suffix
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          echo "💡 Version: $v"
+          # 取所有包含当前 commit 的 origin/* 分支名（detached HEAD 下依然有效）
+          candidates="$(git branch -r --contains HEAD 2>/dev/null | sed 's|^[[:space:]]*origin/||' || true)"
+          # 优先级：pyside6 > dev > master > 其他
+          branch=""
+          for b in pyside6 dev master; do
+            if echo "$candidates" | grep -qx "$b"; then
+              branch="$b"
+              break
+            fi
+          done
+          branch="${branch:-unknown}"
+          # 单边后缀：只有 pyside6 加后缀，dev 保持历史文件名
+          case "$branch" in
+            pyside6)  suffix="pyside6"; file_suffix="-pyside6" ;;
+            *)        suffix="";        file_suffix=""         ;;
+          esac
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+          echo "file_suffix=$file_suffix" >> "$GITHUB_OUTPUT"
+          if [ -z "$file_suffix" ]; then
+            echo "💡 Version: $v | Detected branch: $branch | Suffix: (none, 保持历史文件名)"
+          else
+            echo "💡 Version: $v | Detected branch: $branch | Suffix: $file_suffix"
+          fi
+          echo "    (candidates: $(echo "$candidates" | tr '\n' ' '))"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -101,8 +138,10 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          Write-Host "💡 编译安装包，版本号: $tag"
-          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" dist\installer.iss /DMyAppVersion=$tag
+          $fileSuffix = "${{ steps.version.outputs.file_suffix }}"  # "" 或 "-pyside6"
+          $outputBase = "Drifox-Windows-Setup-$tag$fileSuffix"
+          Write-Host "💡 编译安装包: $outputBase  (tag=$tag, file_suffix='$fileSuffix')"
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" dist\installer.iss /DMyAppVersion=$tag /DOutputBaseFilename=$outputBase
           if ($LASTEXITCODE -ne 0) {
             Write-Error "❌ Inno Setup 编译失败 (exit code: $LASTEXITCODE)"
             exit 1
@@ -112,7 +151,9 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $installer = "dist/output/Drifox-Windows-Setup-$tag.exe"
+          $fileSuffix = "${{ steps.version.outputs.file_suffix }}"  # "" 或 "-pyside6"
+          $base = "Drifox-Windows-Setup-$tag$fileSuffix"
+          $installer = "dist/output/$base.exe"
           if (-not (Test-Path $installer)) {
             Write-Error "❌ 安装包未生成: $installer"
             exit 1
@@ -124,15 +165,17 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $installer = "dist/output/Drifox-Windows-Setup-$tag.exe"
+          $fileSuffix = "${{ steps.version.outputs.file_suffix }}"
+          $base = "Drifox-Windows-Setup-$tag$fileSuffix"
+          $installer = "dist/output/$base.exe"
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  Drifox-Windows-Setup-$tag.exe"
+          Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  $base.exe"
           Write-Host "✅ SHA256: $hash"
 
       - name: Upload artifact (Windows)
         uses: actions/upload-artifact@v4
         with:
-          name: Drifox-Windows-${{ steps.version.outputs.tag }}
+          name: Drifox-Windows-${{ steps.version.outputs.tag }}${{ steps.version.outputs.file_suffix }}
           path: |
             dist/output/*
           if-no-files-found: error
@@ -148,6 +191,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -159,14 +205,35 @@ jobs:
       - name: Sync dependencies (build + mac-build)
         run: uv sync --group build --group mac-build
 
-      # ── 解析版本号 ──
-      - name: Resolve version
+      # ── 解析版本号 + 分支后缀 ──
+      - name: Resolve version & suffix
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          echo "💡 Version: $v"
+          candidates="$(git branch -r --contains HEAD 2>/dev/null | sed 's|^[[:space:]]*origin/||' || true)"
+          branch=""
+          for b in pyside6 dev master; do
+            if echo "$candidates" | grep -qx "$b"; then
+              branch="$b"
+              break
+            fi
+          done
+          branch="${branch:-unknown}"
+          # 单边后缀：只有 pyside6 加后缀，dev 保持历史文件名
+          case "$branch" in
+            pyside6)  suffix="pyside6"; file_suffix="-pyside6" ;;
+            *)        suffix="";        file_suffix=""         ;;
+          esac
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+          echo "file_suffix=$file_suffix" >> "$GITHUB_OUTPUT"
+          if [ -z "$file_suffix" ]; then
+            echo "💡 Version: $v | Detected branch: $branch | Suffix: (none, 保持历史文件名)"
+          else
+            echo "💡 Version: $v | Detected branch: $branch | Suffix: $file_suffix"
+          fi
+          echo "    (candidates: $(echo "$candidates" | tr '\n' ' '))"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -248,12 +315,14 @@ jobs:
         run: uv run python create_dmg.py
         env:
           DMG_VERSION: ${{ steps.version.outputs.tag }}
+          DMG_SUFFIX: ${{ steps.version.outputs.suffix }}
 
       - name: Verify DMG output
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          dmg="dist/Drifox-macOS-${tag}.dmg"
+          file_suffix="${{ steps.version.outputs.file_suffix }}"  # "" 或 "-pyside6"
+          dmg="dist/Drifox-macOS-${tag}${file_suffix}.dmg"
           if [ ! -f "$dmg" ]; then
             echo "❌ DMG 未生成: $dmg"
             exit 1
@@ -265,13 +334,14 @@ jobs:
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          sha256sum "dist/Drifox-macOS-${tag}.dmg" | tee dist/SHA256SUMS
+          file_suffix="${{ steps.version.outputs.file_suffix }}"
+          sha256sum "dist/Drifox-macOS-${tag}${file_suffix}.dmg" | tee dist/SHA256SUMS
 
       # ── 上传产物 ──
       - name: Upload artifact (macOS)
         uses: actions/upload-artifact@v4
         with:
-          name: Drifox-macOS-${{ steps.version.outputs.tag }}
+          name: Drifox-macOS-${{ steps.version.outputs.tag }}${{ steps.version.outputs.file_suffix }}
           path: |
             dist/Drifox-macOS-*.dmg
             dist/SHA256SUMS
@@ -288,6 +358,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -308,14 +381,35 @@ jobs:
       - name: Sync dependencies
         run: uv sync --group linux-build
 
-      # ── 解析版本号 ──
-      - name: Resolve version
+      # ── 解析版本号 + 分支后缀 ──
+      - name: Resolve version & suffix
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          echo "💡 Version: $v"
+          candidates="$(git branch -r --contains HEAD 2>/dev/null | sed 's|^[[:space:]]*origin/||' || true)"
+          branch=""
+          for b in pyside6 dev master; do
+            if echo "$candidates" | grep -qx "$b"; then
+              branch="$b"
+              break
+            fi
+          done
+          branch="${branch:-unknown}"
+          # 单边后缀：只有 pyside6 加后缀，dev 保持历史文件名
+          case "$branch" in
+            pyside6)  suffix="pyside6"; file_suffix="-pyside6" ;;
+            *)        suffix="";        file_suffix=""         ;;
+          esac
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+          echo "file_suffix=$file_suffix" >> "$GITHUB_OUTPUT"
+          if [ -z "$file_suffix" ]; then
+            echo "💡 Version: $v | Detected branch: $branch | Suffix: (none, 保持历史文件名)"
+          else
+            echo "💡 Version: $v | Detected branch: $branch | Suffix: $file_suffix"
+          fi
+          echo "    (candidates: $(echo "$candidates" | tr '\n' ' '))"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -336,15 +430,17 @@ jobs:
         run: |
           cd dist
           tag="${{ steps.version.outputs.tag }}"
-          tar czf "Drifox-Linux-${tag}.tar.gz" Drifox/
-          echo "✅ tar.gz: $(du -h Drifox-Linux-${tag}.tar.gz | cut -f1)"
+          file_suffix="${{ steps.version.outputs.file_suffix }}"  # "" 或 "-pyside6"
+          tar czf "Drifox-Linux-${tag}${file_suffix}.tar.gz" Drifox/
+          echo "✅ tar.gz: $(du -h Drifox-Linux-${tag}${file_suffix}.tar.gz | cut -f1)"
 
       - name: Verify tar.gz output
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          if [ ! -f "dist/Drifox-Linux-${tag}.tar.gz" ]; then
-            echo "❌ tar.gz 未生成: dist/Drifox-Linux-${tag}.tar.gz"
+          file_suffix="${{ steps.version.outputs.file_suffix }}"
+          if [ ! -f "dist/Drifox-Linux-${tag}${file_suffix}.tar.gz" ]; then
+            echo "❌ tar.gz 未生成: dist/Drifox-Linux-${tag}${file_suffix}.tar.gz"
             exit 1
           fi
 
@@ -353,14 +449,15 @@ jobs:
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
+          file_suffix="${{ steps.version.outputs.file_suffix }}"
           cd dist
-          sha256sum "Drifox-Linux-${tag}.tar.gz" | tee SHA256SUMS
+          sha256sum "Drifox-Linux-${tag}${file_suffix}.tar.gz" | tee SHA256SUMS
 
       # ── 上传产物 ──
       - name: Upload artifact (Linux)
         uses: actions/upload-artifact@v4
         with:
-          name: Drifox-Linux-${{ steps.version.outputs.tag }}
+          name: Drifox-Linux-${{ steps.version.outputs.tag }}${{ steps.version.outputs.file_suffix }}
           path: |
             dist/Drifox-Linux-*.tar.gz
             dist/SHA256SUMS
@@ -419,6 +516,20 @@ jobs:
               print(f'WARNING: no version entry found in CHANGELOG.md for tag {tag}, using empty body')
               open('release_body.txt', 'w').close()
           "
+
+      - name: Annotate suffix in release body
+        shell: bash
+        run: |
+          # 仅 pyside6 分支的 release body 加 PySide6 标记；dev 保持原样（更新器期望）
+          suffix="${{ steps.version.outputs.suffix }}"
+          if [ "$suffix" = "pyside6" ]; then
+            echo "" >> release_body.txt
+            echo "---" >> release_body.txt
+            echo "" >> release_body.txt
+            echo "**PySide6 构建版本** （分支: \`${{ github.ref_name }}\`）" >> release_body.txt
+            echo "" >> release_body.txt
+            echo "> 此版本为 PySide6 移植版，产物名带 \`-pyside6\` 后缀；dev 分支的 PyQt5 正式版请访问同 tag 的另一个 release asset。" >> release_body.txt
+          fi
 
       - name: Create / Update Release
         uses: softprops/action-gh-release@v2

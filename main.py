@@ -154,6 +154,29 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] init_shared_web_profile 失败")
 
+        # 启动后台 RSS 采样器：把 psutil 进程表遍历从主线程搬走。
+        # 采样结果供 B4 强回收阈值判定使用（原为每 content chunk 同步采样，
+        # 单次 20-80ms，是流式卡顿主因之一）。
+        try:
+            from app.core.rss_sampler import rss_sampler
+
+            rss_sampler.ensure_started()
+        except Exception:
+            logger.exception("[DeferredStartup] rss_sampler 启动失败（降级为同步采样）")
+
+        # 预热纯 Qt 块级渲染器（仅灰度开启时）。
+        # [PERF] markdown_block_viewer 已从启动关键路径移除（延迟导入），
+        # 开启灰度的实例在这里补热，避免首张 assistant 卡片渲染时抖动 ~340ms。
+        try:
+            from app.utils.config import Settings
+
+            if Settings.get_instance().qt_message_renderer.value:
+                from app.widgets.message_card import prewarm_markdown_block_viewer
+
+                prewarm_markdown_block_viewer()
+        except Exception:
+            logger.exception("[DeferredStartup] prewarm_markdown_block_viewer 失败")
+
         # 预导入 openai resources 子模块（chat/responses 等）
         # 必须在任何 worker 线程启动前完成：openai SDK 懒加载 + Python 3.14
         # import 锁死锁检测，多线程首次并发访问 client.chat/client.responses

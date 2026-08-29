@@ -3,6 +3,48 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.6] - 2026-08-30
+
+自上一版本以来的变更 | 提交数：30 · 文件变更：134 · +122724/-114821 | 贡献者：dingma, drifox-bot
+
+### ✨ 新功能 (New Features)
+
+- **`agent_trace` 插件完整实现** (`plugins/agent_trace/`): 新增 agent_trace 插件，含 trace collector、models 与 UI 组件（TurnListWidget、TraceCard、TimelinePanel、DetailPanel、SegmentedWidget），完整打通 agent 执行轨迹的采集、渲染与交互。
+- **TraceCard 时间线增强** (`plugins/agent_trace/ui/trace_card.py`): 时间线改为可滚动 + 固定高度布局，长链路可平移浏览。
+- **Mermaid 图表模式增强** (`app/widgets/chart_viewer.py`): 支持容器级 pan/zoom；新增图表展开与 PNG 导出能力。
+- **CustomTitleBar 自绘标题栏** (`app/widgets/custom_title_bar.py` + `app/widgets/tab_manager_window.py`): TabManagerWindow 切换无边框窗口（FramelessWindow + 自绘顶栏 + Win11 圆角 + 构造期几何事件守卫）；CustomTitleBar 提供 tab 扩展 API、macOS 分支与主题适配；现代化系统按钮与 tab 管理；增加 hover 效果、动效与样式改进。
+- **CustomTabButton 增强** (`app/widgets/custom_title_bar.py`): 增加动画与样式改进；新增居中 tab 的 balance widgets；macOS 分支高度调整。
+- **主题感知 icon label** (`app/widgets/custom_title_bar.py`): 标题栏图标 label 支持主题感知动态颜色更新。
+- **CI 双轨发布流程** (`.github/workflows/release.yml`): dev/pyside6 共用 tag，产物加 `-qt5` / `-pyside6` 后缀，避免 PySide6 与 PyQt5 分支产物互盖。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **message_card 增量渲染** (`app/widgets/message_card.py`): 修复流式增量渲染的文本碎片化与段落处理；改进流式增量文本渲染并修复布局抖动问题。
+- **SegmentedWidget 字体与详情面板可见性** (`plugins/agent_trace/ui/segmented_widget.py` + `plugins/agent_trace/ui/detail_panel.py`): 更新 SegmentedWidget 字体处理；改进详情面板可见性逻辑。
+- **sidebar resize 过渡** (`app/widgets/tab_panel.py`): 防止 resize 过渡期间的 sidebar 自动折叠。
+- **CI 单边后缀** (`.github/workflows/release.yml` + `dist/installer.iss`): dev 保持原名；pyside6 加 `-pyside6` 后缀；Inno Setup `#if` 字符串比较不稳定导致产物名缺失后缀，改为 CI 决定 `OutputBaseFilename` 通过 `/D` 传入 `iscc.exe`。
+- **CI 检出与触发逻辑** (`.github/workflows/release.yml`): checkout 加 `fetch-depth:0` + `fetch-tags:true`，让 `git branch --contains` 能拿到完整 ref；tag 触发时 `github.ref_name` 是 tag 名不是分支，改用 `git branch --contains HEAD` 反查。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **TurnListWidget UI 与功能重构** (`plugins/agent_trace/ui/turn_list_widget.py`): 重塑 entry 布局对齐 DeepSeek Harness 风格；引入带圆角的 type badges 与色彩编码；右侧列区分 TOOL/ASSISTANT 精确时长与 SYSTEM/USER/CONTEXT 绝对时间；增加类型筛选 chips 与搜索功能；改用尾增量更新避免全列表重建，减少更新闪烁；按 turn 分组添加视觉分隔与编号；统一颜色为 hex + alpha 透明度防止渲染异常。
+- **CustomTitleBar 简化与现代化** (`app/widgets/custom_title_bar.py`): 移除 brand 与 version 显示以保持极简风；现代化系统按钮；重构 TabManagerWindow native window style 处理。
+- **TabPanel 图标与布局** (`app/widgets/tab_panel.py`): 调整图标尺寸与布局 margin 提升 UI 一致性。
+
+### 🎨 样式改进 (Style)
+
+- **agent_trace 动态字号与样式** (`plugins/agent_trace/ui/`): 跨组件实现动态字号与样式调整，让轨迹详情面板在多主题与多密度下保持可读。
+
+### 🔧 其他 (Chores & Build)
+
+- **marketplace 自动重新生成** (`marketplace.json`): `[skip ci]` 从 plugin.json 自动同步。
+- **23:00 自动提交**: 定时任务自动提交累积改动。
+
+### 🔄 其他变更 (Other)
+
+- **CustomTitleBar 功能与样式测试** (`tests/widgets/test_custom_title_bar.py`): 补充 CustomTitleBar 功能与样式测试用例；TabManagerWindow 与 titlebar tab 功能测试增强。
+- **Mermaid pan/zoom 增强** (`app/widgets/chart_viewer.py`): 容器级 pan/zoom 支持（Mermaid 模式）。
+
 ## [v0.5.5] - 2026-08-29
 
 自上一版本以来的变更 | 提交数：49 · 文件变更：111 · +10739/-4406 | 贡献者：dingma, mading, martin98-afk

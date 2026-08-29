@@ -13,7 +13,7 @@ import re as _re
 from typing import List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap, QPen
 from PyQt5.QtGui import (
     QColor as _QColor,
@@ -42,7 +42,6 @@ from qfluentwidgets import (
     FluentIcon as FIF,
 )
 from qfluentwidgets import (
-    TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
 )
@@ -147,6 +146,59 @@ def _shimmer_rainbow_colors(idx: int):
     )
     _SHIMMER_RAINBOW_CACHE[idx] = colors
     return colors
+
+
+# ── 绘制原语（模块级）──────────────────────────────────────────────
+# [PERF] 这两个函数原先定义在 paintEvent 内部，每帧都要新建 2 个闭包对象
+# （函数 + cell）。标签动画以 15fps 持续运行，流式期间每个可见 streaming tab
+# 每帧一次 paint —— 闭包与画笔的重复创建是纯浪费。提为模块级函数后，
+# 画笔与渐变对象也得以复用（GUI 单线程，跨 paint 复用 QPen/QGradient 安全）。
+_SHIMMER_STOPS = (0.0, 0.3, 0.5, 0.7, 1.0)
+_INDICATOR_PEN = _QPen()
+_INDICATOR_PEN.setWidth(3)
+_INDICATOR_PEN.setCapStyle(Qt.RoundCap)
+_SHIMMER_GRAD = _QLinearGradient(0, 0, 0, 0)
+
+
+def _draw_left_indicator(painter, round_rect, h: int, color) -> None:
+    """左侧指示条：用 3px 粗笔沿圆角路径描边，clip 到左 5px 显示。
+
+    沿圆角路径描边自然呈现贴合圆角的曲线（与 hover 背景同一路径）。
+    """
+    painter.save()
+    painter.setClipRect(0, 0, 5, h)
+    _INDICATOR_PEN.setColor(color)
+    painter.setPen(_INDICATOR_PEN)
+    # ⚠️ 必须显式清掉画刷：QPainter.drawPath 同时具备「描边 + 填充」两种语义，
+    # 若调用方此前做过 setBrush(...)，这里会把整个圆角矩形再填充一遍，
+    # 覆盖刚画好的背景与流光。当前背景绘制走 fillPath（不修改 painter 的
+    # brush 属性），此行是防御性保险，成本可忽略。
+    painter.setBrush(Qt.NoBrush)
+    painter.drawPath(round_rect)
+    painter.restore()
+
+
+def _draw_shimmer(painter, round_rect, w: int, phase: float, colors, is_resizing: bool = False) -> None:
+    """整条标签内部的来回脉冲流光。
+
+    sin 相位 → 光斑从 -20% 扫到 120% 再折回：内部来回移动的流光脉冲。
+    colors 为 5 段渐层色（透明→主体→透明）；流式传彩虹色循环，报错传红色渐层。
+
+    [PERF] 原实现用 ``setClipPath + fillRect(整个标签矩形)``：设置路径裁剪会
+    让 Qt 走非矩形裁剪路径（生成裁剪 mask），且填充区域是外接矩形而非圆角内部。
+    改为直接 ``fillPath(round_rect)``，省掉 clip 的 save/restore 与多余填充面积。
+    """
+    if is_resizing:
+        return  # resize 期间跳过昂贵渐层
+    sweep = _math.sin(_math.radians(phase))
+    sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
+    # 光斑中心在标签上从 -20% 扫到 120%
+    shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
+    _SHIMMER_GRAD.setStart(shimmer_center - 80, 0)
+    _SHIMMER_GRAD.setFinalStop(shimmer_center + 80, 0)
+    for stop, color in zip(_SHIMMER_STOPS, colors):
+        _SHIMMER_GRAD.setColorAt(stop, color)
+    painter.fillPath(round_rect, _SHIMMER_GRAD)
 
 
 class _TabProjectIcon(QWidget):
@@ -604,43 +656,8 @@ class TabItem(QFrame):
                 hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
             painter.fillPath(_round_rect, hover_grad)
 
-        # ── 左侧指示条通用绘制函数：沿圆角路径描边 3px，clip 到左侧 5px 显示 ──
-        def _draw_left_indicator(painter_obj, color):
-            """用 3px 粗笔沿 _round_rect 描边，clip 到左 5px，自然呈现贴合圆角的曲线"""
-            painter_obj.save()
-            painter_obj.setClipRect(0, 0, 5, h)
-            pen = _QPen(color, 3)
-            pen.setCapStyle(Qt.RoundCap)
-            painter_obj.setPen(pen)
-            painter_obj.setBrush(_QColor(0, 0, 0, 0))
-            painter_obj.drawPath(_round_rect)
-            painter_obj.restore()
-
-        # ── 整条标签内部来回脉冲流光 ──
-        def _draw_shimmer(painter_obj, phase, colors):
-            """sin 相位 → 光斑从 -20% 扫到 120% 再折回：内部来回移动的流光脉冲
-
-            colors 为 5 段渐层色（透明→主体→透明）；流式传彩虹色循环，
-            报错传红色渐层。
-            """
-            if self._panel and self._panel._is_resizing:
-                return  # resize 期间跳过昂贵渐层
-            sweep = _math.sin(_math.radians(phase))
-            sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
-            # 光斑中心在标签上从 -20% 扫到 120%
-            shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
-            shimmer_grad = _QLinearGradient(shimmer_center - 80, 0, shimmer_center + 80, 0)
-            shimmer_grad.setColorAt(0.0, colors[0])
-            shimmer_grad.setColorAt(0.3, colors[1])
-            shimmer_grad.setColorAt(0.5, colors[2])
-            shimmer_grad.setColorAt(0.7, colors[3])
-            shimmer_grad.setColorAt(1.0, colors[4])
-            painter_obj.save()
-            painter_obj.setClipPath(_round_rect)
-            painter_obj.fillRect(self.rect(), shimmer_grad)
-            painter_obj.restore()
-
         # ── 流式/错误状态 ──
+        _is_resizing = bool(self._panel and self._panel._is_resizing)
         if self._streaming or self._stream_error:
             # 共用扫描相位：流式彩虹循环 / 报错红色循环
             phase = self._panel._anim_phase if self._panel else 0
@@ -649,34 +666,34 @@ class TabItem(QFrame):
                 # 报错：内部红色流光脉冲（选中时叠加红色指示条）
                 _err_color = _QColor(_CACHED_ERROR_RED)
                 if self._selected:
-                    _draw_left_indicator(painter, _err_color)
-                _draw_shimmer(painter, phase, _SHIMMER_ERROR_COLORS)
+                    _draw_left_indicator(painter, _round_rect, h, _err_color)
+                _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_ERROR_COLORS, _is_resizing)
             else:
                 # 流式：内部彩虹流光（选中时叠加彩色循环指示条，相位驱动颜色循环）
                 idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
                 if self._selected:
-                    _draw_left_indicator(painter, _RAINBOW_COLORS[idx])
-                _draw_shimmer(painter, phase, _shimmer_rainbow_colors(idx))
+                    _draw_left_indicator(painter, _round_rect, h, _RAINBOW_COLORS[idx])
+                _draw_shimmer(painter, _round_rect, w, phase, _shimmer_rainbow_colors(idx), _is_resizing)
         elif self._question:
             # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
             phase = self._panel._question_phase if self._panel else 0
             # 内部橙黄流光脉冲（选中时叠加橙黄指示条，与流式同款流光动效）
             if not self._selected:
-                _draw_shimmer(painter, phase, _SHIMMER_QUESTION_COLORS)
+                _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
             else:
                 # resize 期间跳过 sin 计算取固定亮度
-                if self._panel and self._panel._is_resizing:
+                if _is_resizing:
                     alpha = 150
                 else:
-                    # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
+                    # 动画帧速 +8°/帧 ≈ 3s 一周期；亮度在 ~80~220 间脉动
                     alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
                 _question_color = _QColor(245, 158, 11)
                 _question_color.setAlpha(max(0, min(255, alpha)))
-                _draw_left_indicator(painter, _question_color)
-                _draw_shimmer(painter, phase, _SHIMMER_QUESTION_COLORS)
+                _draw_left_indicator(painter, _round_rect, h, _question_color)
+                _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
         elif self._selected:
             # 左侧选中指示条（贴合圆角曲线）
-            _draw_left_indicator(painter, _CACHED_INFO)
+            _draw_left_indicator(painter, _round_rect, h, _CACHED_INFO)
 
         super().paintEvent(event)
 
@@ -990,6 +1007,12 @@ class TabPanel(QWidget):
         self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
         self._auto_collapse_width: int = 100  # 展开态拖窄到该宽度(panel px)时自动折叠
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
+        # 窗口 resize / relayout 过渡期抑制自动折叠：几何瞬变（_force_relayout
+        # 重算、最大化/还原）会把左面板瞬时压到折叠阈值以下，若 resizeEvent
+        # 据此折叠会误判为"用户拖窄"。由 TabManagerWindow 在 resize 周期开始
+        # 时置 True、几何收拢后置 False，之后改由 _evaluate_squeeze_collapse
+        # 按稳定后的最终宽度统一判定。
+        self._auto_collapse_suppressed: bool = False
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
@@ -1008,47 +1031,10 @@ class TabPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ── 顶部：品牌区（水平布局：左侧产品标识 + 右侧侧边栏收起/展开按钮）──
-        self._brand_widget = QWidget(self)
-        self._brand_layout = QHBoxLayout(self._brand_widget)
-        self._brand_layout.setContentsMargins(10, 4, 6, 4)
-        self._brand_layout.setSpacing(4)
-
-        # 左侧：产品标识（水平：标题 + 版本号同排，降低整体高度）
-        self._brand_left = QWidget(self._brand_widget)
-        brand_left_layout = QHBoxLayout(self._brand_left)
-        brand_left_layout.setContentsMargins(0, 0, 0, 0)
-        brand_left_layout.setSpacing(4)
-        self._brand_title = QLabel("DriFox", self._brand_left)
-        self._brand_title.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
-        )
-        self._brand_version = QLabel(Settings.current_version, self._brand_left)
-        self._brand_version.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
-        )
-        brand_left_layout.addWidget(self._brand_title)
-        brand_left_layout.addWidget(self._brand_version)
-        # 末尾 stretch 吸收多余空间，保证标题+版本号整体左对齐（QLabel 默认
-        # Preferred 策略会平分多余空间，把版本号挤到中间）
-        brand_left_layout.addStretch(1)
-        self._brand_layout.addWidget(self._brand_left, 1)
-
-        # 右侧：侧边栏收起/展开按钮
-        self._sidebar_toggle_btn = TransparentToolButton(self._brand_widget)
-        self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
-        self._sidebar_toggle_btn.setFixedSize(28, 28)
-        self._sidebar_toggle_btn.setToolTip("收起/展开侧边栏")
-        self._sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
-        self._brand_layout.addWidget(self._sidebar_toggle_btn)
-
-        layout.addWidget(self._brand_widget)
-
-        # ── 品牌区下分隔线 ──
-        self._brand_separator = QFrame(self)
-        self._brand_separator.setFrameShape(QFrame.HLine)
-        self._brand_separator.setStyleSheet(self._SEPARATOR_STYLE)
-        layout.addWidget(self._brand_separator)
+        # ── 顶部品牌区已移除 ──
+        # 原「DriFox + 版本号 + 侧栏折叠按钮 + 分隔线」整块上移到窗口标题栏
+        # （CustomTitleBar 左区）。TabPanel 首行直接是系统 UI 插件区，
+        # 侧栏折叠改由标题栏按钮驱动（sidebar_toggle_requested → _toggle_sidebar）。
 
         # ── 系统 UI 插件（常驻显示，无滚动） ──
         self._system_plugin_section = QWidget(self)
@@ -1137,34 +1123,35 @@ class TabPanel(QWidget):
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
-        # ── 顶部：分支 + 新建按钮 ──
+        # ── 顶部：左「对话页」标题 + 右 分支/新建 纯图标按钮 ──
+        # 布局：标题左对齐占满剩余空间（stretch=1），两个 24px 图标按钮靠右。
+        # 收起态隐藏标题与分支按钮，只保留新建（46px 窄条容不下两个按钮）。
         self._top_bar = QWidget(self)
         top_layout = QHBoxLayout(self._top_bar)
-        top_layout.setContentsMargins(6, 6, 6, 4)
-        top_layout.setSpacing(2)
+        top_layout.setContentsMargins(8, 4, 4, 2)
+        top_layout.setSpacing(0)
 
-        self._branch_btn = TransparentPushButton(get_icon("分支"), "分支", self._top_bar)
+        self._sessions_label = QLabel("对话页", self._top_bar)
+        self._sessions_label.setObjectName("sessionsLabel")
+        top_layout.addWidget(self._sessions_label, 1)
+
+        self._branch_btn = TransparentToolButton(self._top_bar)
+        self._branch_btn.setIcon(get_icon("分支"))
+        self._branch_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
+        self._branch_btn.setFixedSize(24, 24)
         self._branch_btn.setCursor(Qt.PointingHandCursor)
-        self._branch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._branch_btn.setToolTip("从当前标签页分支")
         self._branch_btn.clicked.connect(self._on_branch_clicked)
         top_layout.addWidget(self._branch_btn)
 
-        self._new_btn = TransparentPushButton(FIF.ADD, "新建", self._top_bar)
+        self._new_btn = TransparentToolButton(self._top_bar)
+        self._new_btn.setIcon(FIF.ADD)
+        self._new_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
+        self._new_btn.setFixedSize(24, 24)
         self._new_btn.setCursor(Qt.PointingHandCursor)
-        self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._new_btn.setToolTip("新建空白标签页")
         self._new_btn.clicked.connect(self.newTabRequested.emit)
         top_layout.addWidget(self._new_btn)
-
-        # 收起态专用：纯图标新建按钮（与 _new_btn 共享点击事件）
-        self._new_icon_btn = TransparentToolButton(self._top_bar)
-        self._new_icon_btn.setIcon(FIF.ADD)
-        self._new_icon_btn.setFixedSize(28, 28)
-        self._new_icon_btn.setToolTip("新建空白标签页")
-        self._new_icon_btn.clicked.connect(self.newTabRequested.emit)
-        self._new_icon_btn.setVisible(False)
-        top_layout.addWidget(self._new_icon_btn)
 
         layout.addWidget(self._top_bar)
 
@@ -1209,6 +1196,9 @@ class TabPanel(QWidget):
         self._gitee_account_row = GiteeAccountRow(self)
         layout.addWidget(self._gitee_account_row)
 
+        # 顶部行样式（标题颜色/字体、图标尺寸）首帧应用
+        self._refresh_top_bar_style()
+
     def resizeEvent(self, event):
         """手动拖拽 splitter 把手时自动折叠/展开
 
@@ -1223,6 +1213,12 @@ class TabPanel(QWidget):
         表现为"往里拉时又往外回弹"。滞回区（100~109）内保持当前状态不动。
         """
         super().resizeEvent(event)
+        # 窗口 resize / relayout 过渡期：宽度是瞬时中间值，不代表用户意图，
+        # 跳过自动折叠/展开。几何收拢完成后由 TabManagerWindow 按最终宽度
+        # 统一判定（_evaluate_squeeze_collapse），避免最大化/还原等几何瞬变
+        # 被误判成"用户把面板拖窄"。
+        if self._auto_collapse_suppressed:
+            return
         # 拖窄自动折叠（展开态 → 收起态）
         if not self._collapsed and not self._animating and self.width() < self._auto_collapse_width:
             self._collapsed = True
@@ -1437,6 +1433,16 @@ class TabPanel(QWidget):
         """
         self._animating = animating
 
+    def set_auto_collapse_suppressed(self, suppressed: bool):
+        """开关"resize/relayout 过渡期抑制自动折叠"
+
+        由 TabManagerWindow 在窗口 resize 周期开始时置 True（几何尚未收拢，
+        左面板宽度会瞬时跌到折叠阈值以下）、在几何收拢完成后置 False。
+        抑制期内 resizeEvent 不自动折叠/展开，改由窗口在稳定几何上判定，
+        否则最大化/还原这类几何瞬变会让侧边栏无故收起。
+        """
+        self._auto_collapse_suppressed = suppressed
+
     def sync_collapsed_ui(self):
         """按当前 _collapsed 状态同步紧凑/展开 UI（宽度动画跨阈值时调用）
 
@@ -1465,6 +1471,22 @@ class TabPanel(QWidget):
         self._collapsed = collapsed
         self._update_toggle_button()
 
+    def _title_bar_toggle_btn(self):
+        """窗口标题栏上的侧栏折叠按钮（品牌区上移后 TabPanel 不再自持）
+
+        返回 None 表示无窗口宿主（单测 / TabPanel 独立构造）或标题栏尚未
+        创建，调用方静默跳过即可。
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is None:
+                return None
+            return getattr(getattr(tm, "titleBar", None), "_sidebar_btn", None)
+        except Exception:
+            return None
+
     def _update_toggle_button(self, switch_ui: bool = True):
         """更新收起/展开按钮的图标和提示，以及收起态下的可见元素
 
@@ -1473,12 +1495,13 @@ class TabPanel(QWidget):
                 所有路径）；False 时仅更新按钮图标与 tooltip（按钮点击
                 走宽度动画，UI 切换由动画跨阈值时驱动）。
         """
-        if self._collapsed:
-            self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
-            self._sidebar_toggle_btn.setToolTip("展开侧边栏")
-        else:
-            self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
-            self._sidebar_toggle_btn.setToolTip("收起侧边栏")
+        # 侧栏折叠按钮已上移到窗口标题栏（CustomTitleBar 左区），此处仅同步其
+        # tooltip 文案（图标由标题栏自身维护）；标题栏按钮缺失时静默跳过，
+        # 保证 TabPanel 在独立测试/无窗口宿主场景下不报错。
+        button = self._title_bar_toggle_btn()
+        if button is not None:
+            button.setIcon(get_icon("侧边栏"))
+            button.setToolTip("展开侧边栏" if self._collapsed else "收起侧边栏")
 
         # switch_ui=False（按钮点击走宽度动画）时只更新按钮图标/tooltip，
         # 紧凑/展开 UI 由动画跨阈值时驱动，避免文字在窄条里被挤压。
@@ -1486,35 +1509,17 @@ class TabPanel(QWidget):
             return
 
         if self._collapsed:
-            # 收起时隐藏产品标识
-            self._brand_left.setVisible(False)
-            # 收起时仅保留新建图标按钮，隐藏分支和文字新建按钮
+            # 收起时隐藏标题与分支按钮，仅保留新建图标按钮（46px 窄条）
+            self._sessions_label.setVisible(False)
             self._branch_btn.setVisible(False)
-            self._new_btn.setVisible(False)
-            self._new_icon_btn.setVisible(True)
+            self._new_btn.setVisible(True)
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
-            # 折叠态：品牌区只剩收起/展开按钮，让其在窄条内水平居中
-            # （_brand_left 隐藏后无 stretch 会把按钮顶到左对齐，故显式居中）。
-            # 左右 margin 对称 + 按钮 cell 拉伸 + 居中对齐，保证 46px 窄条内居中。
-            self._brand_layout.setContentsMargins(8, 4, 8, 4)
-            self._brand_layout.setStretch(0, 0)
-            self._brand_layout.setStretch(1, 1)
-            self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.AlignHCenter)
         else:
-            # 展开时恢复产品标识
-            self._brand_left.setVisible(True)
-            # 展开态：恢复默认边距与拉伸，按钮回到右上角
-            self._brand_layout.setContentsMargins(10, 4, 6, 4)
-            self._brand_layout.setStretch(0, 1)
-            self._brand_layout.setStretch(1, 0)
-            self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.Alignment())
-            # 展开时恢复文字新建按钮，隐藏图标按钮
+            # 展开时恢复标题 + 分支/新建图标按钮
+            self._sessions_label.setVisible(True)
             self._branch_btn.setVisible(True)
-            self._branch_btn.setText("分支")
-            self._branch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             self._new_btn.setVisible(True)
-            self._new_icon_btn.setVisible(False)
             # 展开时恢复 Gitee 完整显示
             self._gitee_account_row.set_show_only_avatar(False)
 
@@ -1639,18 +1644,8 @@ class TabPanel(QWidget):
 
     def _refresh_plugin_style(self):
         """刷新插件区域的主题和字号样式"""
-        # 品牌区
-        if hasattr(self, "_brand_title"):
-            self._brand_title.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
-            )
-        if hasattr(self, "_brand_version"):
-            self._brand_version.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
-            )
-        if hasattr(self, "_sidebar_toggle_btn"):
-            # 按钮样式由 TransparentToolButton 处理，无需额外样式
-            pass
+        # 品牌区（DriFox + 版本号 + 折叠按钮）已上移到窗口标题栏 CustomTitleBar，
+        # 其样式由标题栏 refresh_style() 负责；此处不再处理。
         # 系统插件
         for row in self._system_plugin_buttons:
             row.refresh_style()
@@ -1661,10 +1656,25 @@ class TabPanel(QWidget):
         self._apply_custom_card_style(compact=self._collapsed)
         if hasattr(self, "_custom_plugin_arrow"):
             self._custom_plugin_arrow.update()
-        # ── 顶部：分支 + 新建按钮字体随字号设置刷新 ──
+        # ── 顶部：「对话页」标题 + 分支/新建图标按钮随主题/字号刷新 ──
+        self._refresh_top_bar_style()
+
+    def _refresh_top_bar_style(self):
+        """刷新顶部行样式：「对话页」标题（颜色/字体）+ 图标按钮（主题图标/图标尺寸）
+
+        分支图标存在浅/深色两套资源，主题切换后需重新 setIcon，否则会沿用旧主题资源。
+        """
+        if hasattr(self, "_sessions_label") and self._sessions_label is not None:
+            self._sessions_label.setFont(get_unified_font(12))
+            self._sessions_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}; font-weight: bold;"
+            )
+        if hasattr(self, "_branch_btn") and self._branch_btn is not None:
+            self._branch_btn.setIcon(get_icon("分支"))
+        _icon_px = scale_icon_size(14)
         for _btn in (getattr(self, "_branch_btn", None), getattr(self, "_new_btn", None)):
             if _btn is not None:
-                _btn.setFont(get_unified_font(9))
+                _btn.setIconSize(QSize(_icon_px, _icon_px))
 
     def begin_batch_add(self):
         """开始批量添加 tab：期间 add_tab 跳过 _rebuild_team_layout，end_batch_add 统一重建。
@@ -2433,8 +2443,11 @@ class TabPanel(QWidget):
         if self._anim_timer is None:
             from PyQt5.QtCore import QTimer
 
+            # [PERF] 66ms ≈ 15fps（原 50ms/20fps）。流光是慢速扫动的渐层，
+            # 15fps 与 20fps 视觉无差异，但绘制开销降低 25%。相位增量同步放大
+            # （12→16、6→8）以保持角速度与动画周期完全不变。
             self._anim_timer = QTimer(self)
-            self._anim_timer.setInterval(50)  # 50ms ≈ 20fps
+            self._anim_timer.setInterval(66)
             self._anim_timer.timeout.connect(self._on_anim_tick)
         if not self._anim_timer.isActive():
             self._anim_timer.start()
@@ -2464,10 +2477,13 @@ class TabPanel(QWidget):
         resize 期间动画定时器已完全暂停（见 set_resizing），
         此处不再需要 _is_resizing 判断。
         """
-        self._anim_phase = (self._anim_phase + 12) % 360
-        self._question_phase = (self._question_phase + 6) % 360  # 1.2s 一周期（慢呼吸）
+        # 相位增量按 66ms 帧长换算（保持角速度与 50ms/12° 完全一致）
+        self._anim_phase = (self._anim_phase + 16) % 360
+        self._question_phase = (self._question_phase + 8) % 360  # ≈3s 一周期（慢呼吸）
         for item in self._items:
-            if item._streaming or item._stream_error or item._question:
+            # 跳过不可见标签（多标签横向滚动时大部分 item 已滚出视口）：
+            # update() 对不可见控件只是排队一次无效重绘。
+            if item.isVisible() and (item._streaming or item._stream_error or item._question):
                 item.update()
 
     def _reapply_scroll_styles(self):

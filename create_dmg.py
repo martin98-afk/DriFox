@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 创建 Drifox DMG 安装包
-可通过环境变量 DMG_VERSION 指定版本号（如 v0.2.10），输出为 Drifox-macOS-$tag.dmg
+可通过环境变量指定：
+  - DMG_VERSION: 主版本号（如 v0.5.6）
+  - DMG_SUFFIX:  分支后缀（如 pyside6）；空字符串表示不带后缀
+
+单边后缀规则（与 release.yml / installer.iss 保持一致）：
+  - DMG_SUFFIX 留空  → Drifox-macOS-v0.5.6.dmg          （dev 正式版，更新器期望）
+  - DMG_SUFFIX=pyside6 → Drifox-macOS-v0.5.6-pyside6.dmg（PySide6 移植版）
 """
 import os
 import dmgbuild
@@ -9,10 +15,14 @@ import dmgbuild
 def build_dmg():
     app_path = "dist/Drifox.app"
 
-    # 版本号（可选，默认无后缀）
     version = os.environ.get("DMG_VERSION", "").strip()
-    suffix = f"-{version}" if version else ""
-    dmg_path = f"dist/Drifox-macOS{suffix}.dmg"
+    suffix = os.environ.get("DMG_SUFFIX", "").strip()
+
+    # 版本号段
+    ver_part = f"-{version}" if version else ""
+    # 后缀段（空后缀表示不带，连字符也省掉；非空则拼 -suffix）
+    suffix_part = f"-{suffix}" if suffix else ""
+    dmg_path = f"dist/Drifox-macOS{ver_part}{suffix_part}.dmg"
 
     # 删除旧的 dmg
     if os.path.exists(dmg_path):

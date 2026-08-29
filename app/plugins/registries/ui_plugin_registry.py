@@ -125,6 +125,33 @@ class FloatingCardInfo:
 
 
 @dataclass(frozen=True)
+class TitlebarTabInfo:
+    """标题栏常驻 tab 注册信息
+
+    常驻 tab 显示在无边框窗口标题栏中央 tab 区（「聊天」tab 右侧），
+    无 × 关闭钮；点击仅触发插件回调自展示，主程序不接管内容区。
+    （full 容器卡片是「非常驻可关闭」tab，走事件同步动态增删，不经过本槽位。）
+
+    Attributes:
+        plugin_name: 所属插件名
+        tab_id: tab 唯一 ID（与 full 卡片 card_id 共用标题栏 tab 命名空间，勿冲突）
+        label: tab 显示文本
+        icon_path: 图标资源路径（可选，按钮内左侧 14px）
+        on_click: 点击回调（签名 () -> None），由插件自行决定展示方式
+        priority: 优先级（同 tab_id 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    tab_id: str
+    label: str
+    icon_path: str = ""
+    on_click: Optional[Callable[[], None]] = None
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class SidebarItemInfo:
     """侧边栏插件项注册信息（Phase D：与 floating card 解耦的独立扩展点）
 
@@ -247,6 +274,8 @@ class UIPluginRegistry:
         self._input_buttons: Dict[str, InputButtonInfo] = {}
         self._context_actions: Dict[str, ContextMenuActionInfo] = {}
         self._settings_cards: Dict[str, SettingsCardInfo] = {}
+        # 标题栏常驻 tab 槽位：{tab_id: TitlebarTabInfo}
+        self._titlebar_tabs: Dict[str, TitlebarTabInfo] = {}
         # 工作区页面槽（Phase G）：{page_id: WorkspacePageInfo}，页面级扩展
         self._workspace_pages: Dict[str, Any] = {}
         # 通用区域挂载模型（Phase E）：宿主声明区域 → 插件挂载条目
@@ -549,6 +578,44 @@ class UIPluginRegistry:
         system = [v for v in items if v.group == "system"]
         custom = [v for v in items if v.group != "system"]
         return system + custom
+
+    # ── 标题栏常驻 tab 槽位 ──
+
+    def register_titlebar_tab(
+        self,
+        plugin_name: str,
+        tab_id: str,
+        label: str,
+        icon_path: str = "",
+        on_click: Optional[Callable[[], None]] = None,
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册标题栏常驻 tab（无 × 关闭钮；点击走 on_click 回调自展示）"""
+        if metadata is None:
+            metadata = {}
+        info = TitlebarTabInfo(
+            plugin_name=plugin_name,
+            tab_id=tab_id,
+            label=label,
+            icon_path=icon_path,
+            on_click=on_click,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._titlebar_tabs.get(tab_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._titlebar_tabs[tab_id] = info
+
+    def unregister_titlebar_tabs(self, plugin_name: str) -> None:
+        """注销某插件的全部常驻 tab（插件卸载时调用）"""
+        for tab_id in [tid for tid, v in self._titlebar_tabs.items() if v.plugin_name == plugin_name]:
+            del self._titlebar_tabs[tab_id]
+
+    def get_titlebar_tabs(self) -> List[TitlebarTabInfo]:
+        """获取全部常驻 tab（按注册序返回，tab 栏位置即注册顺序）"""
+        return list(self._titlebar_tabs.values())
 
     # ── Phase G：WorkspacePage 页面槽 ──
 
@@ -1451,6 +1518,8 @@ class UIPluginRegistry:
         self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
         # 清理工作区页面槽（Phase G）
         self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
+        # 清理标题栏常驻 tab 槽位
+        self.unregister_titlebar_tabs(plugin_name)
         # 清理通用区域条目（Phase E）
         for region in self._regions.values():
             region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}

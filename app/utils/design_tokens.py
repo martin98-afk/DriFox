@@ -1263,6 +1263,12 @@ def _rgba_to_qcolor(value: str) -> "QColor":
         return QColor(33, 33, 38, 246)
 
 
+#: 公开别名 —— 主题色值（主题 YAML 里大量使用 rgba(r,g,b,a)）转 QColor 的唯一入口。
+#: 新代码请用这个名字，不要自己写解析，也不要直接 ``QColor(Colors.X)``
+#: （对 rgba() 会得到一个 invalid 的 QColor，渲染时表现为颜色不生效）。
+qcolor_from_token = _rgba_to_qcolor
+
+
 # 模块级状态：供 monkey-patched qfluentwidgets ToolTip.showEvent 读取当前主题色
 _tooltip_theme: dict = {}
 _tooltip_qf_patched: bool = False
