@@ -42,6 +42,19 @@ def init_shared_web_profile(parent: Optional[QObject] = None) -> QWebEngineProfi
     profile.setHttpCacheType(QWebEngineProfile.MemoryHttpCache)
     profile.setPersistentCookiesPolicy(QWebEngineProfile.NoPersistentCookies)
 
+    # [PERF] 消息卡渲染场景用不到的 Web 能力统一关闭（profile 级，所有 page 生效）：
+    # - WebGL：聊天正文/欢迎卡 echarts 均为 canvas2D，不需要 WebGL context；
+    # - PDF Viewer / Plugins：本地 setHtml 渲染无 PDF 内嵌/插件需求；
+    # - ScrollAnimator：软件合成（--disable-gpu-compositing）下滚动动画
+    #   每帧都走 CPU 光栅，关闭后滚轮直接步进，减少合成帧数、滚动更跟手。
+    from PySide6.QtWebEngineCore import QWebEngineSettings
+
+    web = profile.settings()
+    web.setAttribute(QWebEngineSettings.WebAttribute.WebGLEnabled, False)
+    web.setAttribute(QWebEngineSettings.WebAttribute.PdfViewerEnabled, False)
+    web.setAttribute(QWebEngineSettings.WebAttribute.PluginsEnabled, False)
+    web.setAttribute(QWebEngineSettings.WebAttribute.ScrollAnimatorEnabled, False)
+
     _shared_profile = profile
     return profile
 

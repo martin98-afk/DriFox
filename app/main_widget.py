@@ -10781,6 +10781,22 @@ class OpenAIChatToolWindow(ToolWindow):
                         card.ensure_rendered()
                         lazy_render_count += 1
 
+            # 1.5 步：离屏 LifecycleState 冻结（Qt 6.5+）。
+            # 可视区 ±1 批恢复 Active（与 _batch_is_protected 同口径）；
+            # 可视区 ±2 批之外、active 缓冲区之内的卡片冻结 Suspended
+            # （留 1 批过渡带，防往返滚动反复冻结/恢复抖动）。
+            # 这些卡片 UI 未卸载、滚回零重建成本，但 renderer JS/合成已停，
+            # 后台 CPU/内存双降。500ms 滚动防抖已天然限频，无额外节流需求。
+            for batch_idx in range(active_start, min(active_end + 1, len(self._batch_cards))):
+                cards = self._batch_cards[batch_idx]
+                if not cards:
+                    continue
+                in_core = self._visible_batch_start - 1 <= batch_idx <= self._visible_batch_end + 1
+                in_suspend_zone = self._visible_batch_start - 2 >= batch_idx or batch_idx >= self._visible_batch_end + 2
+                for card in cards:
+                    if isinstance(card, MessageCard) and self._is_widget_alive(card):
+                        card.set_viewer_suspended(False if in_core else in_suspend_zone)
+
             # 第二步：回收超出缓冲区的批次
             recycled_count = 0
             recycled_card_ids = set()

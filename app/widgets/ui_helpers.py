@@ -25,6 +25,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
 
 from app.utils.design_tokens import Colors, font_size_css
+from app.utils.utils import get_font_family_css
 from app.widgets import MessageCard
 from app.widgets.elided_label import _ElidedLabel
 
@@ -302,7 +303,7 @@ def _get_model_btn_style():
 def _get_model_btn_text_style():
     """获取模型按钮文字样式（响应主题）"""
     Colors.refresh()
-    return f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} font-weight: bold; background: transparent;"
+    return f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)} font-weight: bold; background: transparent;"
 
 
 # 兼容旧引用

@@ -1021,7 +1021,7 @@ class TabPanel(QWidget):
         brand_left_layout.setSpacing(4)
         self._brand_title = QLabel("DriFox", self._brand_left)
         self._brand_title.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(15)}; font-weight: bold; background: transparent;"
         )
         self._brand_version = QLabel(Settings.current_version, self._brand_left)
         self._brand_version.setStyleSheet(
@@ -1642,7 +1642,7 @@ class TabPanel(QWidget):
         # 品牌区
         if hasattr(self, "_brand_title"):
             self._brand_title.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
+                f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(15)}; font-weight: bold; background: transparent;"
             )
         if hasattr(self, "_brand_version"):
             self._brand_version.setStyleSheet(

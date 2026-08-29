@@ -31,26 +31,40 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 #
 # 其余开关均为本地 setHtml 渲染场景下的纯开销，关闭后无功能损失。
 #
+# GPU 加速开关（Qt6 WebEngine 调优）：默认纯软件光栅（省 GPU 进程常驻内存、
+# 绕开 DirectComposition 历史闪烁问题）。设 DRIFOX_WEBENGINE_GPU=1 可试用
+# GPU 光栅+合成（Qt 6.9 / Chromium 122+ 上 DirectComposition 遮挡 bug 已修复
+# 多轮，软件光栅是流式重排/滚动掉帧的 CPU 瓶颈来源）；若闪烁回归，
+# 不设该变量即回退现状。遮挡误判双禁 flags 与 GPU 无关（独立 bug 的
+# workaround），任何模式下都保留。
+#
 # 覆盖方式：用 setdefault，外部若已设置 QTWEBENGINE_CHROMIUM_FLAGS 则以其为准
 # （便于调试或快速回退，例如 QTWEBENGINE_CHROMIUM_FLAGS="" 即完全禁用本组开关）。
+_GPU_RENDER_FLAGS = (
+    ""
+    if os.environ.get("DRIFOX_WEBENGINE_GPU") == "1"
+    else (
+        " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
+        " --disable-gpu-compositing"  # 纯软件合成：绕开 DirectComposition 视觉树（窗口闪没的扰动源）
+    )
+)
 _CHROMIUM_FLAGS = (
-    "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
     # PySide6 迁移注记：Qt6 的 Chromium（108+）在 --disable-gpu 后回退 SwiftShader
     # 软件光栅化；若再加 --disable-software-rasterizer 会把唯一回退路径也禁掉，
     # 导致所有 QWebEngineView 内容空白（Qt5/Chromium 83 无此问题）。
     # 故 Qt6 下不再传 --disable-software-rasterizer。
-    " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
-    " --disable-gpu-compositing"  # 纯软件合成：绕开 DirectComposition 视觉树（窗口闪没的扰动源）
+    "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
+    + _GPU_RENDER_FLAGS
     # Windows 遮挡计算误判：Chromium 会把宿主窗口判定为"被遮挡"而 cloak 掉
     # → 主窗口整个消失后重现（setHtml/首次渲染时触发，QtWebEngine on Windows
     # 已知问题）。两个 feature 名都禁，覆盖新旧 Chromium 版本。
-    " --disable-features=CalculateNativeWinOcclusion,NativeWindowOcclusionTracking"
-    " --disable-backgrounding-occluded-windows"  # 配套：被误判遮挡时也不降速/挂起
-    " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
-    " --disable-extensions"
-    " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
-    " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染
-    " --js-flags=--max-old-space-size=128"  # 限制单 renderer JS 堆，防单页膨胀
+    + " --disable-features=CalculateNativeWinOcclusion,NativeWindowOcclusionTracking"
+    + " --disable-backgrounding-occluded-windows"  # 配套：被误判遮挡时也不降速/挂起
+    + " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
+    + " --disable-extensions"
+    + " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
+    + " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染
+    + " --js-flags=--max-old-space-size=128"  # 限制单 renderer JS 堆，防单页膨胀
 )
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _CHROMIUM_FLAGS)
 

@@ -3191,6 +3191,54 @@ class CodeWebViewer(QWebEngineView):
         self._hidden_dialogs = set()
 
     # ──────────────────────────────────────────────
+    # 离屏 LifecycleState 冻结（Qt 6.5+）
+    # ──────────────────────────────────────────────
+    # 滚出可视区（但仍在 active 缓冲区内）的卡片，用官方 LifecycleState
+    # 把 renderer 冻结（Suspended：JS 定时器/合成器停、内存可回收），
+    # 滚回可视区再恢复（Active）。比「等 500ms 后整批卸载」多保一层：
+    # 缓冲区内卡片不销毁 UI，滚回时零重建成本；比直接放任不冻结省
+    # 后台 CPU/内存。仅 Suspended，不用 Discarded（后者与 _unload_batch
+    # 的卸载重建路径重叠，且恢复需 reload）。
+
+    def set_page_suspended(self, suspended: bool) -> None:
+        """冻结/恢复本卡片的 renderer（Qt 6.5+ LifecycleState API）。
+
+        守卫：流式中、在途渲染、JS 未就绪、上下文丢失、渲染被推迟时
+        拒绝冻结——冻结会暂停 JS，叠加这些状态会出现丢内容/丢渲染。
+
+        枚举成员名兼容：Qt 6.10 起上游把 Suspended 改名 Frozen
+        （PySide6 6.11 实测仅剩 Frozen），项目声明 PySide6>=6.9，两者都认。
+
+        ⚠️ 实测前置条件（Chromium 侧硬性校验，不满足则静默忽略冻结）：
+        1. page 已加载过内容（空 page 的 renderer frame 未就绪，冻结无效）；
+        2. Chromium 侧 visibility 为 HIDDEN——Qt widget isVisible()==True 的
+           离屏卡片（滚出视口但未隐藏）不满足，必须先 page.setVisible(False)
+           （Qt 6.5+ page 级可见性覆盖，不影响 Qt 布局占位，仅让 Chromium
+           停止合成新帧）。恢复时反向操作：Active + setVisible(True)。
+        """
+        if self._context_lost or self._streaming or self._render_inflight:
+            return
+        if not self._is_js_ready or self._render_deferred:
+            return
+        page = self.page()
+        if page is None:
+            return
+        try:
+            states = QWebEnginePage.LifecycleState
+            frozen = getattr(states, "Frozen", None) or getattr(states, "Suspended", None)
+            if frozen is None:  # pragma: no cover - Qt<6.5 无此 API
+                return
+            if suspended:
+                page.setVisible(False)
+                page.setLifecycleState(frozen)
+            else:
+                page.setLifecycleState(states.Active)
+                page.setVisible(True)
+        except (RuntimeError, AttributeError):
+            # Qt < 6.5 无此 API / page 已销毁：静默跳过（冻结是纯优化）
+            pass
+
+    # ──────────────────────────────────────────────
     # 对话框 HWND 穿透防护
     # ──────────────────────────────────────────────
     # QWebEngineView 在 Windows 上创建原生 HWND 子窗口，
@@ -10688,6 +10736,19 @@ class MessageCard(SimpleCardWidget):
                 # 本层通过，继续向上检查外层 QStackedWidget（覆盖层级）
             p = p.parentWidget()
         return True
+
+    def set_viewer_suspended(self, suspended: bool) -> None:
+        """转发离屏冻结请求给正文 viewer（Qt 6.5+ LifecycleState）。
+
+        - user 卡无 viewer / viewer 未创建：跳过；
+        - welcome 卡：JS 交互复杂（tab 切换/渲染编排），不参与冻结；
+        - MarkdownBlockViewer（纯 Qt 灰度渲染器）：无 renderer，天然 no-op。
+        """
+        if suspended and getattr(self, "_is_welcome", False):
+            return
+        viewer = self.viewer
+        if viewer is not None and isinstance(viewer, CodeWebViewer):
+            viewer.set_page_suspended(suspended)
 
     def ensure_rendered(self, delay_ms: int = 0):
         """如果还没渲染，懒加载创建QWebViewer并渲染内容
