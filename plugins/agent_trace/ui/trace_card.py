@@ -24,12 +24,15 @@ from typing import Any, Dict, Optional
 from loguru import logger
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import QSplitter, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QFrame, QScrollArea, QSplitter, QVBoxLayout, QWidget
 
 from .detail_panel import DetailPanel
 from .timeline_panel import TimelinePanel
 from .trace_collector import TraceCollector
 from .turn_list_widget import TurnListWidget
+
+# Timeline 区域最大高度（超出则内部滚动），保证下方列表有足够空间
+TIMELINE_MAX_H = 200
 
 
 class TraceCardWidget(QWidget):
@@ -57,14 +60,26 @@ class TraceCardWidget(QWidget):
         splitter.setChildrenCollapsible(False)
         outer.addWidget(splitter, 1)
 
-        # 左：Timeline + TurnList
+        # 左：Timeline（可滚动，固定高度上限）+ TurnList
         left = QWidget(splitter)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
-        self._timeline = TimelinePanel(left)
+
+        # Timeline 包一层 ScrollArea：记录多时内部滚动，不挤压下方列表。
+        # 直接 addWidget(timeline) 时它只拿到 minimumSizeHint（约 84px），
+        # 6 条以上记录会被截断看不见 —— 这是"时间轴只显示两行"的根因。
+        self._timeline_scroll = QScrollArea(left)
+        self._timeline_scroll.setWidgetResizable(True)
+        self._timeline_scroll.setFrameShape(QFrame.NoFrame)
+        self._timeline_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._timeline_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._timeline_scroll.setFixedHeight(TIMELINE_MAX_H)
+        self._timeline = TimelinePanel()
+        self._timeline_scroll.setWidget(self._timeline)
+        left_layout.addWidget(self._timeline_scroll)
+
         self._turn_list = TurnListWidget(left)
-        left_layout.addWidget(self._timeline)
         left_layout.addWidget(self._turn_list, 1)
 
         # 右：Detail
@@ -74,7 +89,7 @@ class TraceCardWidget(QWidget):
         splitter.addWidget(self._detail)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([780, 460])
+        splitter.setSizes([820, 460])
 
         # 信号：turn list 点击 → 同步 detail
         self._turn_list.recordSelected.connect(self._on_record_selected)
@@ -100,24 +115,26 @@ class TraceCardWidget(QWidget):
             # 未注入 main_widget 时不强求（测试场景）
             pass
 
+        # 首次显示时主动拉一次，避免"卡片打开了但空白"
+        self._pull_records()
+
     def _apply_latest_theme(self) -> None:
-        colors = self._ctx.get("colors") or {}
+        colors = dict(self._ctx.get("colors") or {})
         if not colors:
             return
+        # 子面板需要 is_dark 判断深浅（判断 grid / hover / alt 行的 alpha 方向）
+        colors.setdefault("is_dark", bool(self._ctx.get("is_dark", True)))
         self._timeline.set_colors(colors)
         self._turn_list.set_colors(colors)
         self._detail.set_colors(colors)
-        # 字体
+
         font_family = self._ctx.get("font_family") or "Segoe UI"
         font_size = self._ctx.get("font_size") or 12
         f = QFont(font_family, font_size)
         self.setFont(f)
-        # 把字号缩放传递给子面板
-        if hasattr(self._timeline, "_apply_font"):
-            self._timeline._apply_font(f)
-        # list 行高与字号近似
-        if hasattr(self._turn_list, "_apply_font"):
-            self._turn_list._apply_font(f)
+        self._timeline._apply_font(f)
+        self._turn_list._apply_font(f)
+        self._detail._apply_font(f)
 
     # ──────────────────── 采集器绑定 ────────────────────
 
@@ -155,6 +172,18 @@ class TraceCardWidget(QWidget):
 
     # ──────────────────── 信号回调 ────────────────────
 
+    def _pull_records(self) -> None:
+        """把 collector 当前快照推给三个面板（首次显示 / 手动刷新用）。"""
+        if self._collector is None:
+            return
+        records = self._collector.records
+        self._timeline.set_records(records)
+        self._turn_list.set_records(records, keep_selection=True)
+        self._detail.set_records(records)
+        sel = self._turn_list._selected_idx
+        if sel is not None and sel < len(records):
+            self._detail.select(sel)
+
     def _on_records_reset(self) -> None:
         self._timeline.clear()
         self._turn_list.clear()
@@ -162,13 +191,19 @@ class TraceCardWidget(QWidget):
         # 一次清空后立即 lazy-bind（首次 set_context 时 backend 可能尚未就绪）
         self._ensure_bound()
 
-    def _on_records_appended(self, _start_idx: int) -> None:
+    def _on_records_appended(self, start_idx: int) -> None:
+        """新记录追加 —— 增量加列表项，避免长会话下全量重建卡顿。"""
         if self._collector is None:
             return
         records = self._collector.records
-        self._timeline.set_records(records)  # 全刷一次以更新 turn 边界
-        self._turn_list.set_records(records)
-        # 详情面板如已选中某 idx，则刷新其内容（in-flight 结束后内容变化）
+        # timeline 需要重算 turn 边界（纯计算，成本低）
+        self._timeline.set_records(records)
+        # 列表走增量（保留既有 item 与选中态）
+        if start_idx <= len(self._turn_list._records):
+            self._turn_list.append_records(records[start_idx:])
+        else:
+            self._turn_list.set_records(records, keep_selection=True)
+        self._detail.set_records(records)
         sel = self._turn_list._selected_idx
         if sel is not None and sel < len(records):
             self._detail.select(sel)
@@ -176,19 +211,20 @@ class TraceCardWidget(QWidget):
     def _on_record_updated(self, idx: int) -> None:
         if self._collector is None:
             return
-        records = self._collector.records
         self._timeline.update_record(idx)
         self._turn_list.update_record(idx)
-        sel = self._turn_list._selected_idx
-        if sel == idx:
+        if self._turn_list._selected_idx == idx:
+            self._detail.set_records(self._collector.records)
             self._detail.select(idx)
 
     def _on_record_clicked(self, idx: int) -> None:
-        if self._collector is None:
-            return
+        """时间线条带被点击 → 选中列表对应行（会连带刷新右侧详情）。"""
         self._turn_list.select(idx)
 
     def _on_record_selected(self, idx: int) -> None:
+        """列表选中变化 → 刷新右侧详情。"""
+        if self._collector is not None:
+            self._detail.set_records(self._collector.records)
         self._detail.select(idx)
 
     # ──────────────────── 生命周期 ────────────────────

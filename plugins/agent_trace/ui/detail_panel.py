@@ -1,25 +1,26 @@
 # -*- coding: utf-8 -*-
-"""agent_trace.DetailPanel — 右侧详情面板。
+"""agent_trace.DetailPanel — 右侧详情面板（DevTools 风格键值表 + 内容区）。
 
-4 个 sub-tabs：Summary / Preview / Raw / Source。
-- Summary：关键信息表（kind / duration / timestamps / 来源）
-- Preview：raw 内容首段预览（用于快速识别）
-- Raw：完整原始内容（可滚动文本）
-- Source：结构化元数据（meta dict 的 JSON dump + 内部来源字符串）
+4 个 sub-tabs：Summary / Preview / Raw / Source
+- Summary：等宽键值表（Kind / Label / Status / Duration / Start / Source）
+- Preview：内容首段（可滚动，等宽）
+- Raw：完整原始内容（等宽，自动换行关闭）
+- Source：来源 + meta 结构化 JSON
 """
 
 from __future__ import annotations
 
 import json
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
-    QSizePolicy,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -27,6 +28,11 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import SegmentedWidget
 
 from .trace_models import TraceRecord, format_duration
+
+MONO_FAMILY = "Cascadia Mono, Consolas, Menlo, monospace"
+
+# Summary 展示的字段（键 → 取值函数）
+_SUMMARY_FIELDS = ("Kind", "Label", "Status", "Duration", "Start", "Source")
 
 
 class DetailPanel(QWidget):
@@ -36,7 +42,11 @@ class DetailPanel(QWidget):
         super().__init__(parent)
         self._records: List[TraceRecord] = []
         self._current_idx: Optional[int] = None
+        self._value_labels: Dict[str, QLabel] = {}
+        self._colors: Dict[str, Any] = {}
         self._build_ui()
+
+    # ──────────────────── 搭建 ────────────────────
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -53,59 +63,71 @@ class DetailPanel(QWidget):
         self._segmented.currentItemChanged.connect(self._on_seg_changed)
         outer.addWidget(self._segmented)
 
-        # 4 个内容面板
         self._stack = QStackedWidget(self)
         outer.addWidget(self._stack, 1)
 
-        # Summary
+        # Summary：等宽键值表
         self._summary = self._build_summary_panel()
         self._stack.addWidget(self._summary)
-        # Preview
-        self._preview = QPlainTextEdit()
-        self._preview.setReadOnly(True)
-        self._preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._preview.setFrameShape(QFrame.NoFrame)
-        self._stack.addWidget(self._preview)
-        # Raw
-        self._raw = QPlainTextEdit()
-        self._raw.setReadOnly(True)
-        self._raw.setFrameShape(QFrame.NoFrame)
-        self._stack.addWidget(self._raw)
-        # Source
-        self._source = QPlainTextEdit()
-        self._source.setReadOnly(True)
-        self._source.setFrameShape(QFrame.NoFrame)
-        self._stack.addWidget(self._source)
+
+        # 其余三页：等宽只读文本
+        self._preview = self._build_text_page()
+        self._raw = self._build_text_page()
+        self._source = self._build_text_page()
+        for w in (self._preview, self._raw, self._source):
+            self._stack.addWidget(w)
 
         self._apply_idle_message()
 
-    @staticmethod
-    def _build_summary_panel() -> QWidget:
-        wrap = QWidget()
-        outer = QVBoxLayout(wrap)
-        outer.setContentsMargins(16, 12, 16, 12)
-        outer.setSpacing(6)
+    def _build_summary_panel(self) -> QWidget:
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setObjectName("agentTraceSummaryScroll")
 
-        self_kind = QLabel("Kind", wrap)
-        self_kind.setStyleSheet("color: #808080; font-size: 11px;")
-        outer.addWidget(self_kind)
-        outer.addWidget(_value_label("kind_value", wrap))
+        body = QWidget()
+        body.setObjectName("agentTraceSummaryBody")
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(12, 10, 12, 12)
+        layout.setSpacing(0)
 
-        for label in ("Label", "Status", "Duration", "Start", "Source"):
-            outer.addWidget(_small_label(label, wrap))
-            outer.addWidget(_value_label(label.lower().replace(" ", "_") + "_value", wrap))
+        for field in _SUMMARY_FIELDS:
+            row = QWidget(body)
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+            key = QLabel(field, row)
+            key.setObjectName(f"agentTraceKey_{field}")
+            key.setFixedWidth(76)
+            val = QLabel("-", row)
+            val.setObjectName(f"agentTraceVal_{field}")
+            val.setWordWrap(True)
+            val.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            row_layout.addWidget(key, 0, Qt.AlignTop)
+            row_layout.addWidget(val, 1)
+            layout.addWidget(row)
+            self._value_labels[field] = val
 
-        outer.addStretch(1)
-        return wrap
+        layout.addStretch(1)
+        scroll.setWidget(body)
+        return scroll
+
+    def _build_text_page(self) -> QPlainTextEdit:
+        edit = QPlainTextEdit()
+        edit.setReadOnly(True)
+        edit.setFrameShape(QFrame.NoFrame)
+        edit.setLineWrapMode(QPlainTextEdit.NoWrap)
+        edit.setUndoRedoEnabled(False)
+        edit.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        return edit
 
     # ──────────────────── 公开 API ────────────────────
 
     def set_records(self, records: List[TraceRecord]) -> None:
         self._records = list(records)
-        if self._current_idx is None or self._current_idx >= len(self._records):
-            self._refresh_current()
-        else:
-            self._refresh_current()
+        if self._current_idx is not None and self._current_idx >= len(self._records):
+            self._current_idx = None
+        self._refresh_current()
 
     def select(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._records):
@@ -118,96 +140,88 @@ class DetailPanel(QWidget):
         self._current_idx = None
         self._apply_idle_message()
 
-    def set_colors(self, colors: dict) -> None:
-        """主题色注入。"""
+    def set_colors(self, colors: Dict[str, Any]) -> None:
         if not colors:
             return
-        text = colors.get("text_primary", "#D0D0D0")
-        secondary = colors.get("text_secondary", "#909090")
-        border = colors.get("border", "#333")
-        bg = colors.get("card_bg", "transparent")
-        self._stack.setStyleSheet(
-            f"QStackedWidget {{ background: {bg}; }}"
-            f"QPlainTextEdit {{ background: {bg}; color: {text}; border: 1px solid {border}; "
-            f"font-family: Consolas, monospace; font-size: 11px; }}"
-        )
-        for label in self.findChildren(QLabel):
-            label.setStyleSheet(f"color: {secondary}; font-size: 11px;")
+        self._colors = dict(colors)
+        self._apply_theme()
 
-    # ──────────────────── 内部刷新 ────────────────────
+    # ──────────────────── 主题 ────────────────────
 
-    def _on_seg_changed(self, key: str) -> None:
-        self._stack.setCurrentWidget(self._stack.currentWidget())
-        # segmented 已自动切 stack；无需额外处理
-        self._refresh_current()  # 只为刷新依赖 seg 的文本
+    def _apply_theme(self) -> None:
+        c = self._colors
+        text = c.get("text_primary", "#D8D8D8")
+        secondary = c.get("text_secondary", "#8A8A8A")
+        dim = c.get("text_dim") or secondary
+        border = c.get("border", "#333333")
+        bg = c.get("card_bg", "transparent")
+
+        for field in _SUMMARY_FIELDS:
+            key_lbl = self._summary.findChild(QLabel, f"agentTraceKey_{field}")
+            if key_lbl is not None:
+                key_lbl.setStyleSheet(f"color: {dim}; font-family: {MONO_FAMILY}; font-size: 11px; padding: 4px 0;")
+            val_lbl = self._value_labels.get(field)
+            if val_lbl is not None:
+                val_lbl.setStyleSheet(f"color: {text}; font-family: {MONO_FAMILY}; font-size: 11px; padding: 4px 0;")
+
+        self._summary.setStyleSheet(f"QScrollArea#agentTraceSummaryScroll {{ background: {bg}; border: none; }}")
+        body = self._summary.findChild(QWidget, "agentTraceSummaryBody")
+        if body is not None:
+            body.setStyleSheet(f"QWidget#agentTraceSummaryBody {{ background: {bg}; }}")
+
+        for edit in (self._preview, self._raw, self._source):
+            edit.setStyleSheet(
+                f"QPlainTextEdit {{ background: {bg}; color: {text}; border: none; "
+                f"font-family: {MONO_FAMILY}; font-size: 11px; padding: 10px 12px; }}"
+            )
+        _ = border, secondary  # 预留：边框/次要色后续按需使用
+
+    # ──────────────────── 刷新 ────────────────────
+
+    def _on_seg_changed(self, _key: str) -> None:
+        self._refresh_current()
 
     def _refresh_current(self) -> None:
         if not self._records or self._current_idx is None or self._current_idx >= len(self._records):
             self._apply_idle_message()
             return
         rec = self._records[self._current_idx]
-        # Summary
-        self._set_value("kind_value", f"{rec.kind.label}   ({rec.kind.value})")
-        # 重写一下 Summary 的键
-        all_labels = self._summary.findChildren(QLabel)
-        value_widgets = [w for w in all_labels if w.objectName().endswith("_value")]
-        # kind_value 在创建时第一个；按顺序对应 Label/Status/Duration/Start/Source
-        # 把 widget 顺序存起来以便更新更精确
-        for w in value_widgets[:6]:
-            key = w.objectName()
-            if key == "kind_value":
-                w.setText(f"{rec.kind.label}   ({rec.kind.value})")
-            elif key == "label_value":
-                w.setText(rec.label)
-            elif key == "status_value":
-                if rec.is_error:
-                    w.setText("失败")
-                elif rec.is_pending:
-                    w.setText("进行中…")
-                else:
-                    w.setText("完成")
-            elif key == "duration_value":
-                w.setText(format_duration(rec.duration_ms))
-            elif key == "start_value":
-                w.setText(rec.absolute_time)
-            elif key == "source_value":
-                w.setText(rec.source)
-        # Preview / Raw / Source
-        self._preview.setPlainText(rec.preview)
-        self._raw.setPlainText(rec.raw if rec.raw else rec.preview)
-        source_text = rec.source or ""
+
+        values = {
+            "Kind": f"{rec.kind.label}",
+            "Label": rec.label,
+            "Status": "失败" if rec.is_error else ("进行中…" if rec.is_pending else "完成"),
+            "Duration": format_duration(rec.duration_ms),
+            "Start": rec.absolute_time,
+            "Source": rec.source or "-",
+        }
+        for field, text in values.items():
+            lbl = self._value_labels.get(field)
+            if lbl is not None:
+                lbl.setText(text)
+
+        self._preview.setPlainText(rec.preview or "（空）")
+        self._raw.setPlainText(rec.raw or rec.preview or "（空）")
+
+        source_text = rec.source or "-"
         if rec.meta:
             try:
                 meta_json = json.dumps(rec.meta, ensure_ascii=False, indent=2)
             except Exception:
                 meta_json = str(rec.meta)
-            source_text = f"{source_text}\n\nMeta:\n{meta_json}"
+            source_text = f"{source_text}\n\n── meta ──\n{meta_json}"
         self._source.setPlainText(source_text)
 
-    def _set_value(self, key: str, text: str) -> None:
-        for w in self._summary.findChildren(QLabel):
-            if w.objectName() == key:
-                w.setText(text)
-                return
-
     def _apply_idle_message(self) -> None:
-        for w in self._summary.findChildren(QLabel):
-            if w.objectName().endswith("_value"):
-                w.setText("-" if w.objectName() != "kind_value" else "（未选中）")
-        self._preview.setPlainText("点击列表条目查看预览内容…")
-        self._raw.setPlainText("点击列表条目查看完整内容…")
-        self._source.setPlainText("点击列表条目查看来源信息…")
+        for field in _SUMMARY_FIELDS:
+            lbl = self._value_labels.get(field)
+            if lbl is not None:
+                lbl.setText("-")
+        self._preview.setPlainText("点击左侧条目查看内容…")
+        self._raw.setPlainText("点击左侧条目查看完整原始内容…")
+        self._source.setPlainText("点击左侧条目查看来源…")
 
+    # ──────────────────── 字体 ────────────────────
 
-def _small_label(text: str, parent: QWidget) -> QLabel:
-    lbl = QLabel(text, parent)
-    lbl.setStyleSheet("color: #808080; font-size: 11px;")
-    return lbl
-
-
-def _value_label(obj_name: str, parent: QWidget) -> QLabel:
-    lbl = QLabel("-", parent)
-    lbl.setObjectName(obj_name)
-    lbl.setWordWrap(True)
-    lbl.setStyleSheet("color: #D0D0D0; font-size: 12px; padding: 2px 0 8px 0;")
-    return lbl
+    def _apply_font(self, font: QFont) -> None:
+        _ = font  # 字号统一由 set_colors 的样式表控制，避免与主题样式打架

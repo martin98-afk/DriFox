@@ -150,6 +150,9 @@ def register_ui(registry) -> None:
             # 全窗口卡（与已有设置卡同款：可被标题栏 full tab 接管；
             # 「常驻 tab」自身由 register_titlebar_tab 注册）。
             "full_card": True,
+            # 不进 Tab 侧边栏插件列表：入口只有标题栏「轨迹」常驻 tab，
+            # 侧边栏再列一份是冗余（tab_panel.py 按此键过滤）。
+            "hide_sidebar": True,
         },
     )
 
