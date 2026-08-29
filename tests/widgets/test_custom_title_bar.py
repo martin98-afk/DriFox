@@ -27,9 +27,9 @@ def test_instantiates_with_system_buttons(qtbot, container):
     assert tb.minimumHeight() == 38
     assert tb.minBtn is not None and tb.maxBtn is not None and tb.closeBtn is not None
     assert tb._is_mac is False
-    # 品牌区（自 TabPanel 移入）：DriFox + 版本号
-    assert tb._brand_title.text() == "DriFox"
-    assert tb._brand_version.text() != ""
+    # 顶栏走极简：不再显示品牌（DriFox + 版本号）
+    assert not hasattr(tb, "_brand_title")
+    assert not hasattr(tb, "_brand_version")
 
 
 def test_sidebar_button_transparent_style(qtbot, container):

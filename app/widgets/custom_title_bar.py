@@ -28,7 +28,6 @@ from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 from qframelesswindow.titlebar import TitleBarBase
 from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton, TitleBarButtonState
 
-from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
 
@@ -474,7 +473,8 @@ class CustomTitleBar(TitleBarBase):
         # ── 用自绘主题按钮替换基类内置的黑色老式按钮 ──
         self._replace_system_buttons()
 
-        # ── 左区：侧栏开关（透明无边框，图标主题感知） + 品牌 + 版本徽章 ──
+        # ── 左区：仅侧栏开关（透明无边框，图标主题感知） ──
+        # 品牌（DriFox + 版本号）已移除：顶栏走极简，只保留功能控件。
         self._sidebar_btn = QPushButton(self)
         self._sidebar_btn.setIcon(get_icon("侧边栏"))
         self._sidebar_btn.setFixedSize(30, 28)
@@ -483,19 +483,17 @@ class CustomTitleBar(TitleBarBase):
         self._sidebar_btn.setToolTip("收起/展开侧边栏")
         self._sidebar_btn.clicked.connect(self.sidebar_toggle_requested.emit)
 
-        self._brand_title = QLabel("DriFox", self)
-        self._brand_version = QLabel(Settings.current_version, self)
-
-        # ── 中央区：tab 容器（分段控件槽：浅底胶囊包住全部 tab）──
+        # ── 中央区：tab 容器 ──
         self._tab_container = QWidget(self)
         self._tab_container.setObjectName("titlebarTabSegment")
         self._tab_layout = QHBoxLayout(self._tab_container)
         self._tab_layout.setContentsMargins(3, 3, 3, 3)
         self._tab_layout.setSpacing(0)
-        # 无 tab 时隐藏空胶囊槽（add/remove_tab 时同步）
+        # 无 tab 时隐藏空容器（add/remove_tab 时同步）
         self._tab_container.hide()
 
-        # ── 三区布局（mac 隐藏系统按钮 + 左侧留白给交通灯）──
+        # ── 三区布局 ──
+        # mac：左侧留白给系统交通灯；Windows：常规 8px
         left_pad = self.MAC_TRAFFIC_LIGHT_PAD if self._is_mac else 8
         layout = QHBoxLayout(self)
         # 上下 margin 必须为 0：系统按钮高度 = 标题栏高度，hover 底色才能
@@ -503,13 +501,9 @@ class CustomTitleBar(TitleBarBase):
         # 视觉上就是"hover 和窗口对不齐"）。
         layout.setContentsMargins(left_pad, 0, 0, 0)
         layout.setSpacing(4)
-        # AlignVCenter 保证左侧控件（30x28 折叠钮、文字）在栏内垂直居中
+        # AlignVCenter 保证左侧 30x28 折叠钮在 38px 栏内垂直居中
         layout.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         layout.addWidget(self._sidebar_btn)
-        layout.addSpacing(2)
-        layout.addWidget(self._brand_title)
-        layout.addSpacing(2)
-        layout.addWidget(self._brand_version)
         layout.addStretch(1)
         layout.addWidget(self._tab_container, 0, Qt.AlignVCenter)
         layout.addStretch(1)
@@ -521,6 +515,16 @@ class CustomTitleBar(TitleBarBase):
             self.minBtn.hide()
             self.maxBtn.hide()
             self.closeBtn.hide()
+            # ★ macOS 的系统交通灯（关闭/最小化/最大化）由 NSWindow 提供，
+            # 但 qframelesswindow 的 updateFrameless() 默认把它关掉了
+            # （_isSystemButtonVisible=False），必须显式打开才显示得出来。
+            try:
+                self.window().setSystemTitleBarButtonVisible(True)
+            except Exception:
+                pass
+            # ★ 右侧补等宽占位：mac 上交通灯 + 折叠钮只占左侧，不补的话
+            # 两个 stretch 的中点会右偏，tab 看起来不在窗口正中。
+            layout.addSpacing(left_pad + self._sidebar_btn.width())
 
         self.refresh_style()
 
@@ -679,17 +683,7 @@ class CustomTitleBar(TitleBarBase):
             "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
             f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
         )
-        # 品牌：标题 + 版本号徽章
-        self._brand_title.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {font_size_css(14)}; font-weight: 600;"
-            f" background: transparent; {get_font_family_css()}"
-        )
-        # 版本号：纯文字（无背景/无边框），与标题同一基线的次要信息
-        self._brand_version.setStyleSheet(
-            f"QLabel {{ color: {Colors.TEXT_MUTED}; background: transparent;"
-            f" border: none; padding: 0 0 0 1px;"
-            f" {get_font_family_css()} {font_size_css(11)}; }}"
-        )
+        # 品牌（DriFox + 版本号）已按极简要求移除，顶栏只留功能控件。
 
     # ── 内部 ──
 
