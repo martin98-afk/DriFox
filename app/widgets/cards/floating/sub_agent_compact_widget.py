@@ -9,6 +9,8 @@
 import time
 from typing import Dict
 
+from loguru import logger
+
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
@@ -873,6 +875,8 @@ class SubAgentCompactFloatingWidget(QWidget):
         """标记任务完成"""
         row = self._task_rows.get(task_id)
         if not row:
+            # 行缺失 = 完成信号到达但启动行从未建立（连接链断裂的旁证），需排查
+            logger.warning(f"[SubAgentCompact] finish_task 未命中行: task={task_id[:8]} success={success}")
             return
         row.finish(success)
 
@@ -953,6 +957,9 @@ class SubAgentCompactFloatingWidget(QWidget):
         row = self._task_rows.get(task_id)
         if row:
             row.increment_tool_count()
+        else:
+            # 行缺失 = add_task 从未执行或行被误清 → 工具计数将永久停 0，需排查
+            logger.warning(f"[SubAgentCompact] add_tool_call 未命中行: task={task_id[:8]} tool={tool_name}")
 
     def remove_task(self, task_id: str):
         """移除指定任务行

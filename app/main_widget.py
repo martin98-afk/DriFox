@@ -4673,7 +4673,11 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🛡️ M1'：team_name_local 同样按 run_id 粒度读模板名，避免多团队并存下
             # 顶层 template 单槽覆盖导致写入 projects_by_run_id 时定位错团队。
             team_run_id_local = getattr(win, "_team_run_id", "") or tm_mgr.get_team_run_id()
-            team_name_local = getattr(win, "_team_name", "") or (tm_mgr.get_template_for_run_id(team_run_id_local) or {}).get("name") or "default"
+            team_name_local = (
+                getattr(win, "_team_name", "")
+                or (tm_mgr.get_template_for_run_id(team_run_id_local) or {}).get("name")
+                or "default"
+            )
             team_project = ""
             if team_run_id_local:
                 team_project = tm_mgr.get_project_for_run_id(team_run_id_local, team_name=team_name_local)
@@ -7151,7 +7155,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _get_model_btn_text_style(self) -> str:
         """动态构建模型按钮文字样式（运行时重新计算 font_size_css）"""
         Colors.refresh()
-        return f"color: {Colors.TEXT_PRIMARY}; {font_size_css(13)} font-weight: bold; background: transparent;"
+        return f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)} font-weight: bold; background: transparent;"
 
     def _update_model_selector_btn(self):
         """更新模型选择按钮的图标和文字显示"""
@@ -7953,6 +7957,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._is_any_system_card_visible():
             # 只有当所有系统卡片都关闭时才重置标志
             self._is_system_card_visible = False
+            # 恢复被系统卡片延迟弹出的子智能体紧凑卡片（有任务行时才显示）
+            compact = getattr(self, "_sub_agent_compact_widget", None)
+            if compact is not None and compact._task_rows and not compact.isVisible():
+                compact.setVisible(True)
 
     # ══════════════════════════════════════════════════════════════
     # 像素小狐桌宠 — 集中 AI 状态管理
@@ -16352,6 +16360,8 @@ class OpenAIChatToolWindow(ToolWindow):
             llm_cfg = getattr(executor, "llm_config", {}) or {}
             model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
             compact.add_task(task_id, executor.agent_name, executor.task_description, model_name=model_name)
+            # 恢复路径同样必须绑定实时信号（此前缺失 → 恢复的行永不更新）
+            self._bind_executor_ui_signals(task_id)
 
         compact._batch_started = True
         self._card_manager.show_card("sub_agent_compact", self._window_id)
@@ -16513,20 +16523,52 @@ class OpenAIChatToolWindow(ToolWindow):
         if card.is_detail_mode and card.detail_cmd_name == cmd_name:
             card._refresh_detail_view()
 
+    def _bind_executor_ui_signals(self, task_id: str):
+        """将 executor 实时信号绑定到紧凑卡片 UI（幂等）
+
+        所有 add_task 路径（task_started 信号 / /subagents 命令恢复）必须经过此处。
+        修复：绑定缺失会导致工具计数停 0 + finished_with_result 无人接收，
+        compact 卡片永远显示"运行中"（2026-08-29 build 任务卡死根因）。
+        """
+        sub_agent_mgr = self.backend.sub_agent_manager
+        executor = sub_agent_mgr._running_tasks.get(task_id) if sub_agent_mgr else None
+        if executor is None:
+            logger.warning(f"[SubAgent] 绑定 UI 信号失败，executor 不在 _running_tasks: task={task_id[:8]}")
+            return
+        # 幂等：同一 executor 只绑一次（task_started 与 /subagents 可能双入口）
+        if getattr(executor, "_ui_signals_bound", False):
+            return
+        executor._ui_signals_bound = True
+        # ⚠️ 必须连接 bound method（receiver=self=主窗口），禁止连接裸 lambda：
+        # lambda 的 receiver 归属为 sender（executor）。executor 在 ChatWorker 子线程
+        # 创建 → thread affinity 在子线程 → emit 时 Auto 判定 queued 到子线程，
+        # 而工作线程无 Qt 事件循环 → 信号永不派发（工具计数停 0、完成无通知的根因）。
+        # bound method 的 receiver=主窗口（主线程）→ queued 必投主线程事件循环。
+        executor.tool_call_started.connect(self._on_sub_executor_tool_call)
+        executor.token_usage_updated.connect(self._on_sub_agent_token_usage)
+        executor.finished_with_result.connect(self._on_sub_agent_finished)
+        # 兜底：绑定晚于任务完成（信号已错过）→ 直接按完成态渲染
+        if executor.isFinished():
+            err = executor.execution_error or ""
+            self._sub_agent_compact_widget.finish_task(task_id, success=not err)
+
+    def _on_sub_executor_tool_call(self, task_id: str, tool_name: str, arguments: dict):
+        """executor 工具调用信号 → 紧凑卡片计数（queued 回主线程后执行）"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        self._sub_agent_compact_widget.add_tool_call(task_id, tool_name, arguments)
+
     def _on_sub_agent_task_started(self, task_id: str, agent_name: str, task_description: str):
         """子智能体任务启动（通过 SubAgentManager 信号触发）
 
         策略：
         - 紧凑卡片（sub_agent_compact_widget）：自动弹出，显示运行状态（旋转图标+agent名+任务描述）
+        - 信号订阅无条件执行；系统卡片守卫只阻止卡片弹出显示
         """
         if getattr(self, "_is_destroyed", False):
             return
 
-        # 系统卡片打开时，阻止子智能体卡片显示
-        if self._is_system_card_visible:
-            return
-
-        # ── 紧凑卡片：自动弹出 ──
+        # ── 紧凑卡片：清理已完成行 + 加入新任务行 ──
         compact = self._sub_agent_compact_widget
         if not compact._batch_started:
             # 只清空已完成的任务，保留运行中的任务行（避免关闭再打开后统计数据重置）
@@ -16544,32 +16586,16 @@ class OpenAIChatToolWindow(ToolWindow):
             model_name = str(llm_cfg.get("模型名称", "") or llm_cfg.get("model", "") or "")
 
         compact.add_task(task_id, agent_name, task_description, model_name=model_name)
-        if not compact.isVisible():
-            compact.setVisible(True)
 
-        # 连接 executor 信号（紧凑卡片实时更新）
-        sub_agent_mgr = self.backend.sub_agent_manager
-        executor = sub_agent_mgr._running_tasks.get(task_id)
-        if executor:
-            executor.tool_call_started.connect(
-                lambda tid, name, args: (
-                    self._sub_agent_compact_widget.add_tool_call(tid, name, args)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
-            executor.token_usage_updated.connect(
-                lambda tid, pt, ct, tt: (
-                    self._on_sub_agent_token_usage(tid, pt, ct, tt)
-                    if not getattr(self, "_is_destroyed", False)
-                    else None
-                )
-            )
-            executor.finished_with_result.connect(
-                lambda tid, result: (
-                    self._on_sub_agent_finished(tid, result) if not getattr(self, "_is_destroyed", False) else None
-                )
-            )
+        # 系统卡片打开时只延迟弹出显示，数据订阅照常（否则错过启动瞬间的连接将永久失联）
+        if self._is_system_card_visible:
+            logger.debug(f"[SubAgent] 系统卡片打开，延迟弹出紧凑卡片: task={task_id[:8]}")
+        else:
+            if not compact.isVisible():
+                compact.setVisible(True)
+
+        # 连接 executor 信号（紧凑卡片实时更新；幂等）
+        self._bind_executor_ui_signals(task_id)
 
     def _on_subagent_permission_requested(self, window_id: str, task_id: str, tool_name: str, arguments: dict):
         """子智能体 ask 权限弹窗（主线程，T24）。
@@ -20143,8 +20169,7 @@ class OpenAIChatToolWindow(ToolWindow):
             _cid = getattr(self, "_current_provider_name", "")
             if _cid:
                 _same_config_alive = any(
-                    w is not self
-                    and getattr(w, "_current_provider_name", "") == _cid
+                    w is not self and getattr(w, "_current_provider_name", "") == _cid
                     for w in window_registry.alive_window_instances()
                 )
                 if not _same_config_alive:
@@ -20241,10 +20266,8 @@ class OpenAIChatToolWindow(ToolWindow):
             try:
                 from app.core.plugin_host_service import PluginHostService
 
-                PluginHostService.get_instance().plugin_changed.disconnect(
-                    self._on_plugin_hot_reload
-                )
-            except (TypeError, RuntimeError):
+                PluginHostService.get_instance().plugin_changed.disconnect(self._on_plugin_hot_reload)
+            except TypeError, RuntimeError:
                 pass
 
             # 🔧 泄漏修复（M6）：断开全局单例 coding_plan_ready，关窗后不再幽灵回调
@@ -21047,5 +21070,3 @@ def _compact_process_heap_after_cleanup():
     内存管理自行处理，gc 收集足够。
     """
     gc.collect()
-
-

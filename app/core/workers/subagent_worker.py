@@ -54,6 +54,7 @@ class _BoundedTaskDict(dict):
             oldest = next(iter(self))  # dict 保序：首个即最旧
             super().__delitem__(oldest)
 
+
 # 最终总结提示词兕底文案（激活策略无 final_summary_prompt 时使用，内容与原硬编码等价）
 _FALLBACK_FINAL_SUMMARY_PROMPT = """
 
@@ -1626,7 +1627,9 @@ class SubAgentManager(QObject):
         self._get_llm_config = get_llm_config
         self._running_tasks: Dict[str, SubAgentExecutor] = {}
         # H1：有界字典，防止 _finished_tasks 无限增长（进程生命周期内巨漏）；上限 200，超出弹最旧
-        self._finished_tasks = _BoundedTaskDict(maxlen=200)  # task_id -> {"result": str, "error": str, "session_id": str}
+        self._finished_tasks = _BoundedTaskDict(
+            maxlen=200
+        )  # task_id -> {"result": str, "error": str, "session_id": str}
         self._session_store = None  # 使用 SessionStore 替代 SubAgentLogStore
         # 批次计数：本次启动的任务总数
         self._batch_total = 0
@@ -1791,6 +1794,36 @@ class SubAgentManager(QObject):
             if task_id in self._running_tasks:
                 del self._running_tasks[task_id]
 
+    def _dispatch_executor_finished(self, task_id: str, result: str):
+        """executor finished_with_result → 外部 on_finished 回调（queued 回主线程后执行）"""
+        executor = self._running_tasks.get(task_id)
+        cb = getattr(executor, "_cb_finished", None) if executor else None
+        if cb:
+            try:
+                cb(task_id, result)
+            except Exception as e:
+                logger.error(f"[SubAgentManager] on_finished 回调异常: task={task_id[:8]}: {e}", exc_info=True)
+
+    def _dispatch_executor_error(self, task_id: str, error: str):
+        """executor error_occurred → 外部 on_error 回调（queued 回主线程后执行）"""
+        executor = self._running_tasks.get(task_id)
+        cb = getattr(executor, "_cb_error", None) if executor else None
+        if cb:
+            try:
+                cb(task_id, error)
+            except Exception as e:
+                logger.error(f"[SubAgentManager] on_error 回调异常: task={task_id[:8]}: {e}", exc_info=True)
+
+    def _dispatch_executor_progress(self, task_id: str, message: str):
+        """executor progress_updated → 外部 on_progress 回调（queued 回主线程后执行）"""
+        executor = self._running_tasks.get(task_id)
+        cb = getattr(executor, "_cb_progress", None) if executor else None
+        if cb:
+            try:
+                cb(task_id, message)
+            except Exception as e:
+                logger.error(f"[SubAgentManager] on_progress 回调异常: task={task_id[:8]}: {e}", exc_info=True)
+
     def execute_task(
         self,
         task_id: str,
@@ -1918,12 +1951,15 @@ class SubAgentManager(QObject):
             if executor_ref is not None:
                 executor_ref["executor"] = executor
 
-            if on_finished:
-                executor.finished_with_result.connect(on_finished)
-            if on_error:
-                executor.error_occurred.connect(on_error)
-            if on_progress:
-                executor.progress_updated.connect(on_progress)
+            # ⚠️ 外部回调不能直接 connect（lambda/closure 的 receiver 归属 sender=executor，
+            # 而 executor 在 ChatWorker 子线程创建 → queued 投到无事件循环的线程 → 永不执行）。
+            # 统一存到 executor 上，由 Manager 的 bound method（receiver=主线程）分发。
+            executor._cb_finished = on_finished
+            executor._cb_error = on_error
+            executor._cb_progress = on_progress
+            executor.finished_with_result.connect(self._dispatch_executor_finished)
+            executor.error_occurred.connect(self._dispatch_executor_error)
+            executor.progress_updated.connect(self._dispatch_executor_progress)
 
             # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
             executor.permission_requested.connect(self._forward_permission_request)
@@ -2215,12 +2251,35 @@ class SubAgentManager(QObject):
             logger.warning(f"[DAG] _on_dag_task_started_slot: executor not found for task_id={task_id[:8]}")
             return
 
-        # 连接 DAG 回调 —— 与 UI 回调完全相同的连接时机和方式
-        executor.finished_with_result.connect(
-            lambda tid, result: self._safe_dag_node_finished(dag_id, nid, tid, result)
-        )
-        executor.error_occurred.connect(lambda tid, error: self._safe_dag_node_error(dag_id, nid, tid, error))
+        # 连接 DAG 回调 —— ⚠️ 必须连接 bound method（receiver=self=Manager，主线程），
+        # 禁止连接裸 lambda：lambda 的 receiver 归属 sender（executor），而 executor
+        # 在 ChatWorker 子线程创建（thread affinity 在子线程），emit 时 Auto 判定
+        # queued 到子线程 —— 工作线程无 Qt 事件循环，回调永不执行（DAG 永远卡在等节点）。
+        # bound method receiver=Manager（主线程）→ queued 必投主线程事件循环。
+        # dag_id/nid 通过 task_id 反查 _task_to_dag（信号参数自带 task_id）。
+        executor.finished_with_result.connect(self._on_dag_executor_finished)
+        executor.error_occurred.connect(self._on_dag_executor_error)
         logger.info(f"[DAG] 🔗 DAG callbacks connected for nid={nid} (via task_started slot)")
+
+    def _dag_route(self, task_id: str):
+        """按 task_id 反查 DAG 路由信息（dag_id, nid）；不在映射中返回 None"""
+        return getattr(self, "_task_to_dag", {}).get(task_id)
+
+    def _on_dag_executor_finished(self, task_id: str, result: str):
+        """executor finished_with_result → DAG 节点完成（queued 回主线程后执行）"""
+        route = self._dag_route(task_id)
+        if not route:
+            return
+        dag_id, nid = route
+        self._safe_dag_node_finished(dag_id, nid, task_id, result)
+
+    def _on_dag_executor_error(self, task_id: str, error: str):
+        """executor error_occurred → DAG 节点失败（queued 回主线程后执行）"""
+        route = self._dag_route(task_id)
+        if not route:
+            return
+        dag_id, nid = route
+        self._safe_dag_node_error(dag_id, nid, task_id, error)
 
     def _safe_dag_node_finished(self, dag_id: str, nid: str, task_id: str, result: str):
         """

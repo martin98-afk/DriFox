@@ -3624,6 +3624,9 @@ class CodeWebViewer(QWebEngineView):
         mmd_line_color = Colors.TEXT_SECONDARY
         mmd_node_bg = Colors.CONTENT_BG
         mmd_border = Colors.BORDER
+        # 骨架 JS 里的 {`{_icon_prefix}`} 需在此解析（f-string 插值），
+        # 否则整段 JS 字符串会因变量未定义而炸 NameError。
+        _icon_prefix = _ICON_PREFIX_CACHE
         cache_key = (
             # 🆕 方案 A（#33）：骨架缓存版本号——骨架 JS/DOM 结构变更时递增，
             # 防止旧版骨架缓存与新代码混合导致 JS 行为不一致（卡片空白根因之一）。
@@ -3643,6 +3646,7 @@ class CodeWebViewer(QWebEngineView):
             mmd_line_color,
             mmd_node_bg,
             mmd_border,
+            _icon_prefix,
         )
         cached = _skeleton_cache.get(cache_key)
         if cached is not None:
@@ -4842,6 +4846,7 @@ class CodeWebViewer(QWebEngineView):
                 '''
                 /* ===== ECharts 图表容器 ===== */
                 .echarts-container {{
+                    position: relative;
                     width: 100%;
                     min-height: 300px;
                     height: auto;
@@ -4850,10 +4855,46 @@ class CodeWebViewer(QWebEngineView):
                     background: rgba(22, 27, 34, 0.6);
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
+                /* ===== 图表 hover 浮动工具栏（放大 / 导出） ===== */
+                .chart-toolbar {{
+                    position: absolute;
+                    top: 8px;
+                    right: 8px;
+                    display: flex;
+                    gap: 6px;
+                    opacity: 0;
+                    transition: opacity 150ms ease;
+                    z-index: 10;
+                }}
+                .echarts-container:hover .chart-toolbar,
+                .mermaid-block:hover .chart-toolbar {{
+                    opacity: 1;
+                }}
+                .chart-toolbar button {{
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 6px;
+                    border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
+                    background: rgba(22, 27, 34, 0.85);
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 0;
+                }}
+                .chart-toolbar button:hover {{
+                    background: rgba(40, 46, 56, 0.95);
+                }}
+                .chart-toolbar button img {{
+                    width: 16px;
+                    height: 16px;
+                    pointer-events: none;
+                }}
                 '''
 
                 /* ===== Mermaid 图表容器 ===== */
                 .mermaid-block {{
+                    position: relative;
                     width: 100%;
                     margin: 12px 0;
                     padding: 12px 10px;
@@ -5393,6 +5434,7 @@ class CodeWebViewer(QWebEngineView):
                                     el.classList.remove('mermaid-pending');
                                     el.innerHTML = svg;
                                     el.setAttribute('data-mermaid-src', '');   // 渲染完释放 b64
+                                    if (window._attachChartToolbar) window._attachChartToolbar(el, 'mermaid');
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                 }})['catch'](function (e) {{
                                     // 失败不吞内容：退回原始源码，用户仍可复制
@@ -5558,6 +5600,8 @@ class CodeWebViewer(QWebEngineView):
                                     var chart = echarts.init(el, 'dark');
                                     chart.setOption(option);
                                     el._echartInited = true;
+                                    el._chartInstance = chart;
+                                    if (window._attachChartToolbar) window._attachChartToolbar(el, 'echarts');
                                     // 卡片 resize 时自适应
                                     var _ro = new ResizeObserver(function() {{ chart.resize(); }});
                                     _ro.observe(el);
@@ -5711,6 +5755,8 @@ class CodeWebViewer(QWebEngineView):
                                 var chart = echarts.init(el, 'dark');
                                 chart.setOption(option);
                                 el._echartInited = true;
+                                el._chartInstance = chart;
+                                if (window._attachChartToolbar) window._attachChartToolbar(el, 'echarts');
                                 var _ro = new ResizeObserver(function() {{ chart.resize(); }});
                                 _ro.observe(el);
                             }} catch(e) {{
@@ -6197,6 +6243,72 @@ class CodeWebViewer(QWebEngineView):
                     reportHeight();
                 }}, false);
                 window.pywebview = {{ reportHeight: reportHeight }};
+
+                // ===== 图表工具栏：echarts / mermaid 放大查看 + 3x PNG 导出 =====
+                function _b64EncodeUtf8(str) {{
+                    return btoa(unescape(encodeURIComponent(str)));
+                }}
+                function _emitChartPng(dataUrl) {{
+                    var b64 = (dataUrl || '').split(',', 2)[1] || '';
+                    if (!b64 || b64.length > 8 * 1024 * 1024) {{ console.error('[chart] png too large or empty'); return; }}
+                    console.log('pywebview_action:save_chart_png:' + _b64EncodeUtf8('chart') + ':' + b64);
+                }}
+                function _exportMermaidSvgPng(svg, scale) {{
+                    if (!svg) return;
+                    var serialized = new XMLSerializer().serializeToString(svg);
+                    var w = parseFloat(svg.getAttribute('width')) || (svg.viewBox && svg.viewBox.baseVal.width) || 800;
+                    var h = parseFloat(svg.getAttribute('height')) || (svg.viewBox && svg.viewBox.baseVal.height) || 600;
+                    var img = new Image();
+                    img.onload = function () {{
+                        var canvas = document.createElement('canvas');
+                        canvas.width = Math.round(w * scale);
+                        canvas.height = Math.round(h * scale);
+                        var ctx = canvas.getContext('2d');
+                        ctx.fillStyle = '#1B1E24';
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        _emitChartPng(canvas.toDataURL('image/png'));
+                    }};
+                    img.src = 'data:image/svg+xml;base64,' + _b64EncodeUtf8(serialized);
+                }}
+                window._attachChartToolbar = function (el, type) {{
+                    if (!el || el._toolbarAttached) return;
+                    el._toolbarAttached = true;
+                    var bar = document.createElement('div');
+                    bar.className = 'chart-toolbar';
+                    var btnExpand = document.createElement('button');
+                    btnExpand.title = '放大查看';
+                    btnExpand.innerHTML = '<img src="{_icon_prefix}/最大化.svg" />';
+                    var btnExport = document.createElement('button');
+                    btnExport.title = '导出 PNG（3x）';
+                    btnExport.innerHTML = '<img src="{_icon_prefix}/导入.svg" />';
+                    bar.appendChild(btnExpand);
+                    bar.appendChild(btnExport);
+                    el.appendChild(bar);
+                    btnExpand.addEventListener('click', function (ev) {{
+                        ev.stopPropagation();
+                        try {{
+                            if (type === 'echarts' && el._chartInstance) {{
+                                var opt = JSON.stringify(el._chartInstance.getOption());
+                                console.log('pywebview_action:chart_expand:echarts:' + _b64EncodeUtf8(opt));
+                            }} else if (type === 'mermaid') {{
+                                var svg = el.querySelector('svg');
+                                if (!svg) return;
+                                console.log('pywebview_action:chart_expand:mermaid:' + _b64EncodeUtf8(svg.outerHTML));
+                            }}
+                        }} catch (e) {{ console.error('[chart] expand failed:', e); }}
+                    }});
+                    btnExport.addEventListener('click', function (ev) {{
+                        ev.stopPropagation();
+                        try {{
+                            if (type === 'echarts' && el._chartInstance) {{
+                                _emitChartPng(el._chartInstance.getDataURL({{ type: 'png', pixelRatio: 3, backgroundColor: '#1B1E24' }}));
+                            }} else if (type === 'mermaid') {{
+                                _exportMermaidSvgPng(el.querySelector('svg'), 3);
+                            }}
+                        }} catch (e) {{ console.error('[chart] export failed:', e); }}
+                    }});
+                }};
 
                 // 工具差异对比请求函数
                 window._requestToolDiff = function(toolCallId) {{
