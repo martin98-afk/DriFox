@@ -6277,11 +6277,19 @@ class CodeWebViewer(QWebEngineView):
                     if (!b64 || b64.length > 8 * 1024 * 1024) {{ console.error('[chart] png too large or empty'); return; }}
                     console.log('pywebview_action:save_chart_png:' + _b64EncodeUtf8('chart') + ':' + b64);
                 }}
+                function _svgIntrinsicSize(svg) {{
+                    // mermaid 输出 svg 带 width="100%"：parseFloat 会得 100 导致导出窄条，必须排除百分比、viewBox 优先
+                    var vb = svg.viewBox && svg.viewBox.baseVal;
+                    var num = function (v) {{ var n = parseFloat(v); return (n && String(v).indexOf('%') === -1) ? n : 0; }};
+                    var w = (vb && vb.width) || num(svg.getAttribute('width')) || 800;
+                    var h = (vb && vb.height) || num(svg.getAttribute('height')) || 600;
+                    return [w, h];
+                }}
                 function _exportMermaidSvgPng(svg, scale) {{
                     if (!svg) return;
                     var serialized = new XMLSerializer().serializeToString(svg);
-                    var w = parseFloat(svg.getAttribute('width')) || (svg.viewBox && svg.viewBox.baseVal.width) || 800;
-                    var h = parseFloat(svg.getAttribute('height')) || (svg.viewBox && svg.viewBox.baseVal.height) || 600;
+                    var wh = _svgIntrinsicSize(svg);
+                    var w = wh[0], h = wh[1];
                     var img = new Image();
                     img.onload = function () {{
                         var canvas = document.createElement('canvas');

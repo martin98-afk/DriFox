@@ -104,8 +104,10 @@ function _exportMermaidPng(scale) {
     var svg = document.querySelector('.chart-body svg');
     if (!svg) return;
     var serialized = new XMLSerializer().serializeToString(svg);
-    var w = parseFloat(svg.getAttribute('width')) || (svg.viewBox && svg.viewBox.baseVal.width) || 800;
-    var h = parseFloat(svg.getAttribute('height')) || (svg.viewBox && svg.viewBox.baseVal.height) || 600;
+    var vb = svg.viewBox && svg.viewBox.baseVal;
+    var num = function (v) { var n = parseFloat(v); return (n && String(v).indexOf('%%') === -1) ? n : 0; };
+    var w = (vb && vb.width) || num(svg.getAttribute('width')) || 800;
+    var h = (vb && vb.height) || num(svg.getAttribute('height')) || 600;
     var img = new Image();
     img.onload = function () {
         var canvas = document.createElement('canvas');
