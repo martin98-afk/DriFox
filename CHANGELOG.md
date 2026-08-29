@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.6] - 2026-08-30
 
-自上一版本以来的变更 | 提交数：30 · 文件变更：134 · +122724/-114821 | 贡献者：dingma, drifox-bot
+自上一版本以来的变更 | 提交数：34 · 文件变更：138 · +123285/-115066 | 贡献者：dingma
 
 ### ✨ 新功能 (New Features)
 
@@ -23,6 +23,10 @@ All notable changes to this project will be documented in this file.
 - **SegmentedWidget 字体与详情面板可见性** (`plugins/agent_trace/ui/segmented_widget.py` + `plugins/agent_trace/ui/detail_panel.py`): 更新 SegmentedWidget 字体处理；改进详情面板可见性逻辑。
 - **sidebar resize 过渡** (`app/widgets/tab_panel.py`): 防止 resize 过渡期间的 sidebar 自动折叠。
 - **CI 单边后缀** (`.github/workflows/release.yml` + `dist/installer.iss`): dev 保持原名；pyside6 加 `-pyside6` 后缀；Inno Setup `#if` 字符串比较不稳定导致产物名缺失后缀，改为 CI 决定 `OutputBaseFilename` 通过 `/D` 传入 `iscc.exe`。
+- **零时长显示** (`plugins/agent_trace/ui/detail_panel.py` + `plugins/agent_trace/ui/turn_list_widget.py` + `plugins/agent_trace/ui/trace_collector.py`): 详情面板与条目代理中零时长（0ms）正确展示，避免被误判为未知。
+- **文件行尾保留** (`plugins/system/tools/file_tools.py`): write/edit/multi_edit 写回时保留原文件行尾（CRLF/LF），避免跨平台编辑破坏既有文件格式。
+- **关闭临时 tab 时永久插件 tab 自动激活** (`app/widgets/tab_manager_window.py` + `tests/widgets/test_titlebar_replace_cards.py`): 修复关闭最后一个临时 tab 后永久插件 tab 被自动激活的问题；补充 titlebar replace cards 测试覆盖。
+- **自定义插件滚动高度动态调整** (`app/widgets/tab_panel.py`): 修复自定义插件 scroll 高度在内容更新后未及时重算的 bug，改为依据内容动态更新。
 - **CI 检出与触发逻辑** (`.github/workflows/release.yml`): checkout 加 `fetch-depth:0` + `fetch-tags:true`，让 `git branch --contains` 能拿到完整 ref；tag 触发时 `github.ref_name` 是 tag 名不是分支，改用 `git branch --contains HEAD` 反查。
 
 ### ♻️ 代码重构 (Refactoring)

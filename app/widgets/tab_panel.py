@@ -1395,6 +1395,19 @@ class TabPanel(QWidget):
         if not self._collapsed and getattr(self, "_custom_plugin_saved_state", None) is None:
             self._custom_plugin_scroll.setVisible(prev_custom_expanded)
             self._custom_plugin_arrow.set_expanded(prev_custom_expanded)
+        # 行重建后按内容自适应高度（重载/安装/卸载插件后行数变化）
+        self._update_custom_plugin_scroll_height()
+
+    def _update_custom_plugin_scroll_height(self):
+        """自定义插件列表高度自适应：未达上限时贴合内容，超出上限(200px)时封顶滚动
+
+        QScrollArea 默认 sizeHint 不随内容变化，重建行后需手动按内容高度
+        重设固定高度，否则插件重载/安装后出现内容变少仍占高、变多不扩展。
+        """
+        if not hasattr(self, "_custom_plugin_scroll"):
+            return
+        content_h = self._custom_plugin_section.sizeHint().height()
+        self._custom_plugin_scroll.setFixedHeight(min(content_h, 200))
 
     def _on_sidebar_item_clicked(self, info):
         """独立侧边栏项点击：组上下文（当前窗口 + item_id）派发 info.on_click"""
@@ -1552,6 +1565,7 @@ class TabPanel(QWidget):
                 self._custom_plugin_scroll.setVisible(bool(self._custom_plugin_saved_state["scroll_visible"]))
                 self._custom_plugin_arrow.set_expanded(self._custom_plugin_scroll.isVisible())
                 self._apply_custom_card_style(compact=True)
+                self._update_custom_plugin_scroll_height()
             else:
                 # 展开恢复：按 saved_state 恢复折叠前现场（saved_state 为 None 时
                 # 保持当前 scroll 可见性——避免 refresh_ui_plugins 在展开态刷新
@@ -1563,6 +1577,7 @@ class TabPanel(QWidget):
                     self._custom_plugin_scroll.setVisible(bool(saved.get("scroll_visible", False)))
                     self._custom_plugin_arrow.set_expanded(self._custom_plugin_scroll.isVisible())
                     self._custom_plugin_saved_state = None
+                    self._update_custom_plugin_scroll_height()
                 self._apply_custom_card_style(compact=False)
         for row in self._custom_plugin_buttons:
             row.set_compact(compact)
@@ -1579,8 +1594,9 @@ class TabPanel(QWidget):
         # 状态恢复（避免回到"折叠前"旧状态造成体验割裂）
         if self._collapsed and getattr(self, "_custom_plugin_saved_state", None) is not None:
             self._custom_plugin_saved_state["scroll_visible"] = expanded
-        # 展开时刷新样式，确保折叠期间的主题变更被应用
+        # 展开时刷新样式，确保折叠期间的主题变更被应用；并按内容自适应高度
         if expanded:
+            self._update_custom_plugin_scroll_height()
             for row in self._custom_plugin_buttons:
                 row.refresh_style()
 

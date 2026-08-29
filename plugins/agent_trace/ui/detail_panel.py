@@ -276,7 +276,8 @@ class DetailPanel(QWidget):
             "Kind": rec.kind.label,
             "Label": rec.label,
             "Status": "失败" if rec.is_error else ("进行中…" if rec.is_pending else "完成"),
-            "Duration": format_duration(rec.duration_ms),
+            # 0 = 瞬时/无精确数据 → "-"（0 ms 有误导性）
+            "Duration": format_duration(rec.duration_ms) if rec.duration_ms > 0 else "-",
             "Start": rec.absolute_time,
             "Source": rec.source or "-",
         }

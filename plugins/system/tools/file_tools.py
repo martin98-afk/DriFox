@@ -322,11 +322,11 @@ def _write_impl(tool_ctx, **kwargs):
         old_content = ""
         try:
             if full_path.exists():
-                old_content = full_path.read_text(encoding="utf-8")
+                old_content = full_path.read_text(encoding="utf-8", newline="")
         except Exception:
             old_content = ""
         full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_text(content, encoding="utf-8")
+        full_path.write_text(content, encoding="utf-8", newline="")
         _record_mtime(tool_ctx, full_path)
         # unified diff（新建/覆盖均生成，与主程序行为一致）
         diff_str = ""
@@ -345,6 +345,30 @@ def _write_impl(tool_ctx, **kwargs):
 
 
 # ========== edit ==========
+
+
+def _normalize_eol_pair(old_content: str, old_s: str, new_s: str):
+    """行尾归一化：直配失败时按文件主导行尾翻转 oldString/newString 后重试。
+
+    读文件用 newline="" 保留原行尾后，CRLF 文件中 LLM 提供的 LF 文本无法直配
+    （反之亦然）。文件含 \\r\\n 即视为 CRLF：把待匹配文本统一按 LF 归一后再
+    翻成文件行尾。可匹配时返回 (old, new)，否则返回 None（调用方走原有错误路径）。
+    """
+    if old_s in old_content:
+        return None
+    if "\r\n" in old_content:
+        # CRLF 文件：文本先按 LF 归一，再整体翻成 CRLF 匹配
+        old_alt = old_s.replace("\r\n", "\n").replace("\n", "\r\n")
+        if old_alt == old_s or old_alt not in old_content:
+            return None
+        new_alt = new_s.replace("\r\n", "\n").replace("\n", "\r\n")
+        return old_alt, new_alt
+    # LF 文件：CRLF 文本翻成 LF 匹配
+    old_alt = old_s.replace("\r\n", "\n")
+    if old_alt == old_s or old_alt not in old_content:
+        return None
+    new_alt = new_s.replace("\r\n", "\n")
+    return old_alt, new_alt
 
 _EDIT_SCHEMA = {
     "type": "function",
@@ -378,8 +402,11 @@ def _edit_impl(tool_ctx, **kwargs):
         check = _check_modified(tool_ctx, workdir, full_path, path)
         if check:
             return check
-        old_content = full_path.read_text(encoding="utf-8", errors="replace")
-        count = old_content.count(old_string)
+        old_content = full_path.read_text(encoding="utf-8", errors="replace", newline="")
+        # 直配失败时按文件行尾风格归一化 oldString/newString 后重试
+        pair = _normalize_eol_pair(old_content, old_string, new_string)
+        old_used, new_used = pair if pair is not None else (old_string, new_string)
+        count = old_content.count(old_used)
         if count == 0:
             return ToolResult(
                 False,
@@ -392,8 +419,8 @@ def _edit_impl(tool_ctx, **kwargs):
                 error=f"The 'oldString' appears {count} times in the file. "
                 f"Please provide a more specific context to ensure uniqueness, or set replaceAll=True.",
             )
-        new_content = old_content.replace(old_string, new_string, -1 if replace_all else 1)
-        full_path.write_text(new_content, encoding="utf-8")
+        new_content = old_content.replace(old_used, new_used, -1 if replace_all else 1)
+        full_path.write_text(new_content, encoding="utf-8", newline="")
         _record_mtime(tool_ctx, full_path)
         diff_lines = list(
             difflib.unified_diff(
@@ -449,7 +476,7 @@ def _multi_edit_impl(tool_ctx, **kwargs):
         check = _check_modified(tool_ctx, workdir, full_path, path)
         if check:
             return check
-        old_content = full_path.read_text(encoding="utf-8", errors="replace")
+        old_content = full_path.read_text(encoding="utf-8", errors="replace", newline="")
         current = old_content
         failures = []
         for i, edit in enumerate(edits or []):
@@ -464,17 +491,21 @@ def _multi_edit_impl(tool_ctx, **kwargs):
             if old_s in current:
                 current = current.replace(old_s, new_s, 1)
             else:
-                snippet = old_s[:50].replace("\n", "\\n")
-                failures.append(
-                    f"Edit #{i + 1} failed: oldString 未找到。oldString 开头: {snippet!r}"
-                )
+                pair = _normalize_eol_pair(current, old_s, new_s)
+                if pair is not None:
+                    current = current.replace(pair[0], pair[1], 1)
+                else:
+                    snippet = old_s[:50].replace("\n", "\\n")
+                    failures.append(
+                        f"Edit #{i + 1} failed: oldString 未找到。oldString 开头: {snippet!r}"
+                    )
         if failures and current == old_content:
             # 全部失败：不写文件，避免破坏原内容
             return ToolResult(
                 False,
                 error="批量编辑全部失败（文件未改动）：\n" + "\n".join(failures),
             )
-        full_path.write_text(current, encoding="utf-8")
+        full_path.write_text(current, encoding="utf-8", newline="")
         _record_mtime(tool_ctx, full_path)
         diff_lines = list(
             difflib.unified_diff(

@@ -1669,9 +1669,21 @@ class TabManagerWindow(FramelessWindow):
 
     def _activate_remaining_replace_card(self) -> None:
         """当前对话 open 集合非空时，自动激活（互斥显示）最近一个 full 卡片，避免关掉
-        当前后剩余卡片停在隐藏态（无论关闭来自 tab × 还是卡片自身按钮）。"""
-        remaining = list(self._replace_open.get(self._current_window_id(), {}).keys())
+        当前后剩余卡片停在隐藏态（无论关闭来自 tab × 还是卡片自身按钮）。
+
+        🛡️ 常驻 titlebar tab（插件 register_titlebar_tab 注册，如轨迹卡：常驻 tab
+        与 full 浮动卡共用同一 card_id）不属于「临时可关闭 tab」：从剩余集合中
+        排除，不自动激活——关闭最后一个临时 tab 后回到聊天，而不是自动弹出
+        常驻插件的页面（用户需要时手动点击其常驻 tab）。
+        """
+        cur_wid = self._current_window_id()
+        remaining = [cid for cid in self._replace_open.get(cur_wid, {}) if cid not in self._plugin_titlebar_tab_ids]
         if not remaining:
+            # 只剩常驻插件的 full 卡（或全部关闭）：高亮/状态回聊天。
+            # remove_tab 移除激活 tab 时已把高亮设为剩余第一个（聊天），此处
+            # 同步 _replace_active 语义并幂等设高亮（防御 tab 注册顺序变化）。
+            self._replace_active[cur_wid] = CHAT_TAB_ID
+            self.titleBar.set_active_tab(CHAT_TAB_ID)
             return
         nid = remaining[-1]
         from app.widgets.cards.card_manager import CardManager, GLOBAL_WINDOW_ID

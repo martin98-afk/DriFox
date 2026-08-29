@@ -248,7 +248,7 @@ class TraceCollector(QObject):
         records: List[TraceRecord] = []
         turn = 0
         assistant_seq = 0
-        # 先解析全部时间戳，供「duration = 下一条时刻 − 本条时刻」使用
+        # 解析全部时间戳（秒级）作为条目起始时刻
         ts_list = [self._parse_timestamp(m.get("timestamp")) or 0.0 for m in messages]
 
         for i, msg in enumerate(messages):
@@ -256,8 +256,11 @@ class TraceCollector(QObject):
             label = message_label(msg)
             raw_text = content_to_text(msg.get("content"))
             start = ts_list[i]
-            # 默认结束时刻 = 下一条消息时刻（存续间隔）；最后一条瞬时
-            end = ts_list[i + 1] if i + 1 < len(messages) and ts_list[i + 1] > start else 0.0
+            # 消息写入本身是瞬时事件：默认 end=0（时长 0）。
+            # ⚠️ 不能用「下一条时刻 − 本条时刻」当存续间隔 —— 用户隔 1 小时
+            # 再问下一条，上一条消息就会显示 1 小时时长（闲置时间被算成时长）。
+            # 真实时长只来自 TOOL/ASSISTANT 的实时 timing 回填（毫秒级）。
+            end = 0.0
 
             meta: Dict[str, Any] = {}
             is_error = False
