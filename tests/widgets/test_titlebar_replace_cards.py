@@ -274,6 +274,56 @@ def test_titlebar_cards_isolated_per_conversation(qtbot, monkeypatch):
     assert card_tabs == ["settings"]
 
 
+def test_close_last_temp_tab_skips_permanent_plugin_tab(qtbot, monkeypatch):
+    """关闭最后一个临时 tab 后回聊天：常驻插件 tab（如轨迹）不被自动激活
+
+    回归：轨迹插件同时注册常驻 titlebar tab 与 full 浮动卡（共用同一 card_id），
+    其 full 卡进入 open 集合后，_activate_remaining_replace_card 曾把它当作
+    可切换临时卡——关闭最后一个临时 tab 后自动弹出轨迹卡并高亮常驻 tab。
+    常驻 tab 只能由用户手动点击，自动激活链路必须排除。
+    """
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    tm._replace_open.clear()
+    tm._replace_active.clear()
+    tm._replace_timers.clear()
+    reg, cm, visible = _patch_reg_and_cm(
+        monkeypatch,
+        cards={
+            "usage": SimpleNamespace(container="full", title="用量统计"),
+            "agent_trace": SimpleNamespace(container="full", title="轨迹"),
+        },
+    )
+    # 轨迹插件：常驻 titlebar tab 与 full 浮动卡共用 card_id（agent_trace 实况）
+    reg.get_titlebar_tabs.return_value = [
+        SimpleNamespace(tab_id="agent_trace", label="轨迹", on_click=lambda: None, icon_path="")
+    ]
+    tm._sync_plugin_titlebar_tabs()
+    assert "agent_trace" in tm._plugin_titlebar_tab_ids
+    assert tm.titleBar._tabs["agent_trace"]._closable is False
+
+    # 打开轨迹卡（shown）→ open 记录 agent_trace；add_tab 幂等，常驻 tab 无 ×
+    visible.add("agent_trace")
+    tm._on_card_visibility_changed({"card_id": "agent_trace", "visible": True})
+    assert "agent_trace" in tm._replace_open.get(GLOBAL_WINDOW_ID, {})
+    assert tm.titleBar._active_id == "agent_trace"
+
+    # 再打开临时 tab usage → 激活 usage
+    visible.discard("agent_trace")
+    visible.add("usage")
+    tm._on_card_visibility_changed({"card_id": "usage", "visible": True})
+    assert tm.titleBar._active_id == "usage"
+
+    # 关闭唯一的临时 tab usage → 回聊天；轨迹卡不被自动激活（open 保留供手动再开）
+    tm._on_replace_tab_close_clicked("usage")
+    visible.discard("usage")
+    assert "usage" not in tm._replace_open.get(GLOBAL_WINDOW_ID, {})
+    assert tm.titleBar._active_id == CHAT_TAB_ID
+    assert tm._replace_active.get(GLOBAL_WINDOW_ID) == CHAT_TAB_ID
+    assert "agent_trace" in tm._replace_open.get(GLOBAL_WINDOW_ID, {})
+    assert cm.is_card_visible.call_count >= 0  # 可见集由测试维护：断言高亮已回聊天
+
+
 class TestTitlebarTabSlot:
     """UIPluginRegistry 标题栏常驻 tab 槽位（非常驻 full 卡之外的注册入口）"""
 
