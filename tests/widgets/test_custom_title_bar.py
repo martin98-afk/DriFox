@@ -110,12 +110,37 @@ def test_closable_tab_emits_close_signal(qtbot, container):
 
 
 def test_refresh_style_applies_qss(qtbot, container):
-    """refresh_style 后激活 tab 拥有非空样式表（胶囊高亮）"""
+    """refresh_style 后激活 tab 的文字样式已应用
+
+    tab 的底色/指示条是自绘（paintEvent 按动画进度插值），文字颜色仍走
+    stylesheet，挂在内部 _label 上。
+    """
     tb = CustomTitleBar(container)
     qtbot.addWidget(tb)
     tb.add_tab("chat", "聊天")
     tb.refresh_style()
-    assert tb._tabs["chat"].styleSheet() != ""
+    assert tb._tabs["chat"]._label.styleSheet() != ""
+
+
+def test_tab_active_animates_progress(qtbot, container):
+    """选中态切换：_active 立即翻转，底色进度由动画从 0 走向 1"""
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    tb.add_tab("chat", "聊天")
+    tb.add_tab("usage", "用量")
+    btn = tb._tabs["usage"]
+
+    assert btn._active is False
+    assert btn._active_t == 0.0
+
+    tb.set_active_tab("usage")
+    assert btn._active is True  # 状态立即翻转
+    assert btn._anim_active.state() == btn._anim_active.Running  # 进度走动画
+
+    # 动画结束后进度收拢到 1
+    btn._anim_active.stop()
+    btn._anim_active.setCurrentTime(btn._anim_active.duration())
+    assert btn._active_t == 1.0
 
 
 def test_mac_branch_hides_system_buttons(qtbot, container, monkeypatch):

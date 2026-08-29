@@ -21,7 +21,7 @@
 import sys
 from typing import Callable, Dict, Optional
 
-from PyQt5.QtCore import QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QEasingCurve, QRect, QRectF, QSize, Qt, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPainterPath
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
@@ -254,15 +254,40 @@ class CloseButton(_BaseWinButton):
 
 
 class CustomTabButton(QWidget):
-    """顶栏胶囊 tab 按钮（激活态高亮，样式随主题 token 刷新）
+    """顶栏 tab（分段控件风格）：自绘胶囊底 + 状态过渡动画
 
-    可选关闭钮（closable=True）：右侧 × 子按钮，hover 显现；点击只发射
-    ``close_clicked``，不触发 tab 切换（对齐 ReplaceTabButton 的事件模式：
-    子控件事件不传播给父 widget，× 点击天然不会触发整卡点击）。
+    ★ 为什么自绘而不用 stylesheet：stylesheet 只能做离散状态切换，做不了
+    进度插值，hover 淡入淡出只能靠 CSS transition（Qt 不支持）。这里把状态
+    量化成两个 0..1 的进度（``_hover_t`` / ``_active_t``），由
+    QVariantAnimation 驱动，paintEvent 按当前进度插值绘制。
+
+    选中态的表达（三档拉开，不靠花哨的指示条）：
+
+    ============  =====================================================
+    未选中         透明底，文字 TEXT_SECONDARY，400 字重
+    hover          前景色 6% 淡入，文字提亮到半程
+    选中           前景色 14% 底，文字 TEXT_PRIMARY，600 字重
+    ============  =====================================================
+
+    可选关闭钮（closable=True）：右侧 × 子按钮；点击只发射 ``close_clicked``，
+    不触发 tab 切换（对齐 ReplaceTabButton 的事件模式：子控件事件不传播给
+    父 widget，× 点击天然不会触发整卡点击）。
     """
 
     clicked = pyqtSignal(str)  # tab_id（整卡点击）
     close_clicked = pyqtSignal(str)  # tab_id（× 关闭钮）
+
+    HEIGHT = 28
+    #: 圆角取 BorderRadius.SM(6px)：窗口圆角是 8px，但那是相对整窗尺寸的；
+    #: 放在 28px 高的 tab 上 8px 会显得过圆。6px 是"和窗口同一弧度语言、
+    #: 但按控件尺寸收敛"的结果。
+    RADIUS = 6
+
+    # 叠加不透明度（相对前景色）：三档拉开，取消指示条后靠底+字重区分选中
+    ALPHA_HOVER = 0.06
+    ALPHA_ACTIVE = 0.14
+
+    ANIM_MS = 180
 
     def __init__(
         self,
@@ -277,8 +302,13 @@ class CustomTabButton(QWidget):
         self.tab_id = tab_id
         self._closable = closable
         self._active = False
+        self._hovered = False
+        # 动画进度（0..1），paintEvent 按此插值
+        self._hover_t = 0.0
+        self._active_t = 0.0
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(26)
+        self.setFixedHeight(self.HEIGHT)
+        self.setAttribute(Qt.WA_Hover, True)  # 确保 enter/leave 事件可达
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(11, 0, 4 if closable else 11, 0)
@@ -300,53 +330,119 @@ class CustomTabButton(QWidget):
             self._close_btn.setCursor(Qt.PointingHandCursor)
             self._close_btn.clicked.connect(lambda: self.close_clicked.emit(self.tab_id))
             layout.addWidget(self._close_btn)
+
+        self._anim_hover = self._make_anim(self._on_hover_value)
+        self._anim_active = self._make_anim(self._on_active_value)
         self.refresh_style()
+
+    # ── 动画 ──
+
+    def _make_anim(self, slot) -> QVariantAnimation:
+        anim = QVariantAnimation(self)
+        anim.setDuration(self.ANIM_MS)
+        anim.setEasingCurve(QEasingCurve.InOutQuad)
+        anim.valueChanged.connect(slot)
+        return anim
+
+    @staticmethod
+    def _start(anim: QVariantAnimation, current: float, target: float) -> None:
+        """从当前进度续接到目标进度（避免连续 hover 时跳变）"""
+        if abs(current - target) < 0.001:
+            return
+        anim.stop()
+        anim.setStartValue(current)
+        anim.setEndValue(target)
+        anim.start()
+
+    def _on_hover_value(self, value) -> None:
+        self._hover_t = float(value)
+        self._apply_label_color()
+        self.update()
+
+    def _on_active_value(self, value) -> None:
+        self._active_t = float(value)
+        self._apply_label_color()
+        self.update()
+
+    # ── 交互 ──
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self.clicked.emit(self.tab_id)
         super().mousePressEvent(event)
 
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self._start(self._anim_hover, self._hover_t, 1.0)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self._start(self._anim_hover, self._hover_t, 0.0)
+        super().leaveEvent(event)
+
     def set_active(self, active: bool) -> None:
-        if self._active != active:
-            self._active = active
-            self.refresh_style()
+        """切换选中态：底色 / 文字 / 指示条全部走动画"""
+        if self._active == active:
+            return
+        self._active = active
+        self._start(self._anim_active, self._active_t, 1.0 if active else 0.0)
+        self._apply_label_color()
+
+    # ── 绘制 ──
+
+    def _fg(self) -> QColor:
+        """前景基色（用于叠加出 hover/active 底色与文字色插值）"""
+        return _qcolor(Colors.TEXT_PRIMARY, "#ffffff")
+
+    def _bg_alpha(self) -> float:
+        """当前底色不透明度：选中与 hover 取较大者，不叠加（避免过深）"""
+        return min(1.0, max(self._active_t * self.ALPHA_ACTIVE, self._hover_t * self.ALPHA_HOVER))
+
+    def paintEvent(self, e):  # pragma: no cover - 纯绘制
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        painter.setPen(Qt.NoPen)
+
+        # 只画胶囊底色：选中态靠"底更深 + 文字更亮更粗"表达
+        # （早期版本在 tab 下方画过 accent 指示条，反馈太花，已移除）
+        alpha = self._bg_alpha()
+        if alpha > 0.002:
+            c = self._fg()
+            c.setAlphaF(alpha)
+            painter.setBrush(c)
+            painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
 
     def refresh_style(self):
-        """按当前主题 token 重建样式（Colors.refresh() 由调用方负责）
+        """按当前主题 token 刷新（Colors.refresh() 由调用方负责）
 
-        分段控件风格（segmented control）：容器统一提供浅底胶囊槽，激活 tab
-        是卡色「滑块」（浮起块），非激活透明——参考 Win11/飞书分段切换。
+        不重置动画进度——主题切换时保持当前 hover/active 视觉状态。
         """
-        if self._active:
-            self.setStyleSheet(
-                "CustomTabButton {"
-                f" background: {Colors.CARD_BG_SOLID};"
-                " border: none; border-radius: 13px; }"
-            )
-            label_color = Colors.TEXT_PRIMARY
-            close_hover = Colors.TEXT_PRIMARY
-        else:
-            self.setStyleSheet(
-                "CustomTabButton {"
-                " background: transparent;"
-                " border: none; border-radius: 13px; }"
-                "CustomTabButton:hover {"
-                f" background: {Colors.HOVER_BG}; }}"
-            )
-            label_color = Colors.TEXT_SECONDARY
-            close_hover = Colors.TEXT_PRIMARY
-        self._label.setStyleSheet(
-            f"color: {label_color}; background: transparent;"
-            f" {get_font_family_css()} {font_size_css(13)};"
-        )
+        self._apply_label_color()
         if self._close_btn is not None:
             self._close_btn.setStyleSheet(
                 f"QPushButton {{ color: {Colors.TEXT_MUTED}; background: transparent;"
                 " border: none; border-radius: 8px; font-size: 13px; padding: 0; }"
-                f"QPushButton:hover {{ color: {close_hover};"
+                f"QPushButton:hover {{ color: {Colors.TEXT_PRIMARY};"
                 f" background: {Colors.HOVER_BG}; }}"
             )
+        self.update()
+
+    def _apply_label_color(self) -> None:
+        """按进度插值文字颜色：未选中 → hover(半程) → 选中(全程)"""
+        if not hasattr(self, "_label"):
+            return
+        from_c = _qcolor(Colors.TEXT_SECONDARY, "rgba(255,255,255,0.65)")
+        to_c = _qcolor(Colors.TEXT_PRIMARY, "#ffffff")
+        t = min(1.0, max(self._active_t, self._hover_t * 0.5))
+        r = int(round(from_c.red() + (to_c.red() - from_c.red()) * t))
+        g = int(round(from_c.green() + (to_c.green() - from_c.green()) * t))
+        b = int(round(from_c.blue() + (to_c.blue() - from_c.blue()) * t))
+        weight = 600 if self._active else 400
+        self._label.setStyleSheet(
+            f"color: rgb({r}, {g}, {b}); background: transparent;"
+            f" {get_font_family_css()} {font_size_css(13)}; font-weight: {weight};"
+        )
 
 
 class CustomTitleBar(TitleBarBase):
@@ -567,13 +663,12 @@ class CustomTitleBar(TitleBarBase):
         """主题切换后刷新样式（Colors.refresh() 由调用方先执行）"""
         for b in self._tabs.values():
             b.refresh_style()
-        # tab 分段槽：胶囊底（capsule token 深浅主题自适应），激活滑块由
-        # CustomTabButton 自身用卡色绘制
+        # tab 分段槽：整体透明，不画外围胶囊。
+        # 早期版本给整组 tab 套了一层淡底 + 1px 边框的胶囊槽，反馈是"多了一圈
+        # 多余的框"；现在改由每个 tab 自己的底色（hover 6% / 选中 14%）承担状态表达，
+        # tab 直接浮在标题栏上，更干净也更接近 VS Code / Edge 的顶栏。
         self._tab_container.setStyleSheet(
-            "QWidget#titlebarTabSegment {"
-            f" background: {Colors.CAPSULE_BG};"
-            f" border: 1px solid {Colors.CAPSULE_BORDER};"
-            " border-radius: 16px; }"
+            "QWidget#titlebarTabSegment { background: transparent; border: none; }"
         )
         # 系统按钮：自绘色取自主题 token（深色主题下不再是黑叠黑）
         for b in (self.minBtn, self.maxBtn, self.closeBtn):

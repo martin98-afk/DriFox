@@ -788,7 +788,11 @@ class TabManagerWindow(FramelessWindow):
             }}
             #tabManagerWindow {{
                 background: {Colors.CONTENT_BG};
-                border-radius: 8px;
+                /* ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
+                   圆角外侧的三角区不会被绘制，底层透出系统默认窗口色 —— 表现为
+                   窗口四角隐约有一圈"系统窗口"的白边，resize 重绘时尤其明显。
+                   窗口圆角由 DWM 负责（_apply_win11_round_corner / 补回的
+                   WS_THICKFRAME），Qt 侧保持矩形即可。 */
             }}
             #tabManagerContent {{
                 background: transparent;
@@ -2951,8 +2955,11 @@ class TabManagerWindow(FramelessWindow):
         # 造成周期性掉帧卡顿。
         # 非 Windows：无原生模态循环消息，保留防抖检测作为回退。
         if not _IS_WINDOWS:
-            # _suppress_drag_detection 用于阻止编程式 setGeometry 误触
-            if not self._suppress_drag_detection:
+            # _suppress_drag_detection 用于阻止编程式 setGeometry 误触。
+            # FramelessWindow.__init__ 内部 resize/winId 会同步触发 move 事件，
+            # 早于本类 __init__ 创建 _suppress_drag_detection/_window_dragging_timer，
+            # 此时跳过（与 _save_geometry 的 hasattr 守卫同理）
+            if hasattr(self, "_suppress_drag_detection") and not self._suppress_drag_detection:
                 if not self._window_dragging_timer.isActive():
                     self._on_window_drag_start()
                 self._window_dragging_timer.start()  # 持续重置防抖
@@ -3000,10 +3007,12 @@ class TabManagerWindow(FramelessWindow):
             return
         try:
             hwnd = _wintypes.HWND(int(self.winId()))
+            changed = False
 
             style = _user32.GetWindowLongPtrW(hwnd, _GWL_STYLE)
             if style & _SNAP_STYLES != _SNAP_STYLES:
                 _user32.SetWindowLongPtrW(hwnd, _GWL_STYLE, style | _SNAP_STYLES)
+                changed = True
 
             # 关闭 DWM 非客户区渲染 → 消除补回样式位带来的 1px 亮边
             if _dwmapi is not None:
@@ -3020,9 +3029,14 @@ class TabManagerWindow(FramelessWindow):
                 class_style = _user32.GetClassLongPtrW(hwnd, _GCL_STYLE)
                 if class_style & _CS_DROPSHADOW != _CS_DROPSHADOW:
                     _user32.SetClassLongPtrW(hwnd, _GCL_STYLE, class_style | _CS_DROPSHADOW)
+                    changed = True
 
-            # 通知系统重算非客户区（不带 ACTIVATE，避免抢焦点引发重入）
-            _user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, _SWP_FRAMECHANGED)
+            # ★ 只在真的改了窗口属性时才 SetWindowPos(FRAMECHANGED)。
+            # 该方法会强制系统重算整个非客户区并重绘窗口，无条件调用（例如每次
+            # showEvent）会让窗口肉眼可见地"闪一下系统边框"，resize 期间尤其明显。
+            if changed:
+                # 不带 ACTIVATE，避免抢焦点引发重入
+                _user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, _SWP_FRAMECHANGED)
         except Exception:
             pass
 

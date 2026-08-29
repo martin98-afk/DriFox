@@ -18,9 +18,16 @@ def register_ui(registry):
     registry.register_input_button(plugin_name, button_id, icon_path, tooltip, group="plugin", priority=0, on_click=..., position="end", metadata=...)
     registry.register_context_menu_action(plugin_name, action_id, label, on_click, target="message_card", group="plugin", priority=0)
     registry.register_settings_card(plugin_name, card_id, title, widget_class, section="plugins", icon="", priority=0)
+
+    # 标题栏常驻 tab（无 × 关闭钮；点击走 on_click 回调自展示，主程序不接管内容区）
+    registry.register_titlebar_tab(plugin_name, tab_id, label, icon_path="", on_click=..., priority=0, metadata=...)
 ```
 
 详见 [`docs/plugin-architecture.md`](../plugin-architecture.md) 466-477 行。
+
+> **标题栏 tab 两类形态**：
+> - **常驻**（`register_titlebar_tab`）：始终显示在标题栏 tab 区（「聊天」右侧），不可关闭，点击触发插件回调。
+> - **非常驻**（`register_floating_card(container="full")`）：卡片打开时动态出现在标题栏（带 × 关闭钮），关闭即从标题栏移除；点击 tab 切换覆盖层显示。
 
 ---
 
