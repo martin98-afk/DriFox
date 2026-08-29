@@ -216,10 +216,212 @@ def test_card_instantiation() -> None:
     print(f"OK card instantiated, records={len(records)}")
 
 
+# ═══════════════════════════════════════════════════════════
+# v3 回归：tail 稳定化 / hub 隔离 / detail tab 切换 / 流基线 / SYSTEM 投影 / 闲置间隔
+# ═══════════════════════════════════════════════════════════
+
+
+def _ts(seconds_ago: float) -> str:
+    import datetime as dt
+
+    return dt.datetime.fromtimestamp(time.time() - seconds_ago).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _fake_backend():
+    """构造带信号的 fake backend + fake session + fake main_widget。"""
+    from PyQt5.QtCore import QObject, pyqtSignal
+
+    class _BE(QObject):
+        tool_call_started = pyqtSignal(str, str, dict)
+        tool_result_received = pyqtSignal(str, str, dict, bool)
+        stream_started = pyqtSignal()
+        stream_finished = pyqtSignal(dict)
+        _hook_messages_updated = pyqtSignal()
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.session = type(
+                "S",
+                (),
+                {
+                    "session_id": "sess-1",
+                    "messages": [
+                        {"role": "user", "content": "hi", "timestamp": _ts(10.0)},
+                        {"role": "assistant", "content": "old-1", "timestamp": _ts(9.0)},
+                        {"role": "assistant", "content": "old-2", "timestamp": _ts(8.0)},
+                    ],
+                },
+            )()
+
+        def get_current_session(self):
+            return self.session
+
+    be = _BE()
+    mw = type("MW", (), {"_window_id": "win-A", "backend": be})()
+    return be, mw
+
+
+def test_v3_tail_stability() -> None:
+    """tail 内容不变时不得重复发 tailChanged（修「历史记录一直在刷新」）。"""
+    sys.path.insert(0, str(PLUGIN_ROOT))
+    from PyQt5.QtCore import QCoreApplication
+
+    _app = QCoreApplication.instance() or QCoreApplication([])
+    from ui.trace_collector import TraceCollector
+    from ui.trace_models import EntryKind, TraceRecord
+
+    c = TraceCollector()
+    count = {"n": 0}
+    c.tailChanged.connect(lambda: count.__setitem__("n", count["n"] + 1))
+    r = TraceRecord(kind=EntryKind.ASSISTANT, label="A", preview="p", raw="x", start_ts=1.0, is_pending=True)
+    c._set_tail([r])
+    assert_true(count["n"] == 1, f"first set_tail emits once, got {count['n']}")
+    c._set_tail([r])
+    assert_true(count["n"] == 1, f"same-content set_tail must not emit, got {count['n']}")
+    r2 = TraceRecord(kind=EntryKind.TOOL, label="T", preview="p", raw="y", start_ts=2.0, is_pending=True)
+    c._set_tail([r, r2])
+    assert_true(count["n"] == 2, f"changed tail emits, got {count['n']}")
+    print("✓ v3 tail stability")
+
+
+def test_v3_hub_isolation() -> None:
+    """每个 window_id 一个常驻 collector；同窗口幂等。"""
+    sys.path.insert(0, str(PLUGIN_ROOT))
+    from PyQt5.QtCore import QCoreApplication
+
+    _app = QCoreApplication.instance() or QCoreApplication([])
+    from ui.trace_collector import TraceCollectorHub
+
+    be, mw = _fake_backend()
+    be2, mw2 = _fake_backend()
+    mw2._window_id = "win-B"
+    hub = TraceCollectorHub()
+    c1 = hub.collector_for(mw)
+    c1b = hub.collector_for(mw)
+    c2 = hub.collector_for(mw2)
+    assert_true(c1 is not None and c1b is c1, "same window returns same collector")
+    assert_true(c2 is not None and c2 is not c1, "different windows get different collectors")
+    hub.dispose()
+    print("✓ v3 hub per-window isolation")
+
+
+def test_v3_detail_tabs() -> None:
+    """Summary/Preview/Raw/Source 切换必须真的换 QStackedWidget 页面。"""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+
+    _app = QApplication.instance() or QApplication([])
+    sys.path.insert(0, str(PLUGIN_ROOT))
+    from ui.detail_panel import DetailPanel
+    from ui.trace_models import EntryKind, TraceRecord
+
+    p = DetailPanel()
+    rec = TraceRecord(kind=EntryKind.TOOL, label="skill", preview="p", raw="RAW-CONTENT", start_ts=time.time())
+    p.set_records([rec])
+    p.select(0)
+    p._on_seg_changed("raw")
+    assert_true(p._stack.currentIndex() == 2, f"raw tab -> stack index 2, got {p._stack.currentIndex()}")
+    assert_true("RAW-CONTENT" in p._raw.toPlainText(), "raw page shows content")
+    p._on_seg_changed("preview")
+    assert_true(p._stack.currentIndex() == 1, "preview tab -> stack index 1")
+    p._on_seg_changed("source")
+    assert_true(p._stack.currentIndex() == 3, "source tab -> stack index 3")
+    p._on_seg_changed("summary")
+    assert_true(p._stack.currentIndex() == 0, "summary tab -> stack index 0")
+    print("✓ v3 detail panel tab switching")
+
+
+def test_v3_stream_baseline() -> None:
+    """历史 assistant 消息不得抢占新流的 timing（LLM 时长不再全 0）。"""
+    sys.path.insert(0, str(PLUGIN_ROOT))
+    from PyQt5.QtCore import QCoreApplication
+
+    _app = QCoreApplication.instance() or QCoreApplication([])
+    from ui.trace_collector import TraceCollector
+
+    be, mw = _fake_backend()
+    c = TraceCollector()
+    c.attach(be, mw)
+    assert_true(c._stream_base == 2, f"stream_base == historical assistant count, got {c._stream_base}")
+    emit_start = time.time()
+    be.stream_started.emit()
+    time.sleep(0.2)
+    be.session.messages.append({"role": "assistant", "content": "new reply", "timestamp": _ts(0.0)})
+    be.stream_finished.emit({})
+    recs = c.records
+    last = recs[-1]
+    assert_true(last.kind.value == "ASSISTANT", "last record is assistant")
+    assert_true(abs(last.start_ts - emit_start) < 0.5, f"assistant start from stream, {last.start_ts} vs {emit_start}")
+    assert_true(last.duration_ms >= 100, f"assistant duration from stream >=100ms, got {last.duration_ms}")
+    c.detach()
+    print("✓ v3 stream baseline (no more LLM 0ms)")
+
+
+def test_v3_system_prompt() -> None:
+    """session.system_prompt（messages 外）必须投影为头部 SYSTEM 条目。"""
+    sys.path.insert(0, str(PLUGIN_ROOT))
+    from PyQt5.QtCore import QCoreApplication
+
+    _app = QCoreApplication.instance() or QCoreApplication([])
+    from ui.trace_collector import TraceCollector
+    from ui.trace_models import EntryKind
+
+    be, mw = _fake_backend()
+    be.session.system_prompt = "You are DriFox assistant."
+    c = TraceCollector()
+    c.attach(be, mw)
+    recs = c.records
+    assert_true(
+        len(recs) >= 1 and recs[0].kind == EntryKind.SYSTEM,
+        f"first record is SYSTEM, got {recs[0].kind if recs else None}",
+    )
+    assert_true(recs[0].raw == "You are DriFox assistant.", "system prompt content projected")
+    assert_true(recs[0].source == "session.system_prompt", "source marks synthesized entry")
+    c.detach()
+    be2, mw2 = _fake_backend()
+    c2 = TraceCollector()
+    c2.attach(be2, mw2)
+    assert_true(all(r.kind != EntryKind.SYSTEM for r in c2.records), "no SYSTEM when prompt empty")
+    c2.detach()
+    print("✓ v3 system prompt projection")
+
+
+def test_v3_idle_gap_not_duration() -> None:
+    """两条消息间隔 1 小时 → 前一条时长不得膨胀成 1h（闲置≠时长）。"""
+    sys.path.insert(0, str(PLUGIN_ROOT))
+    from PyQt5.QtCore import QCoreApplication
+
+    _app = QCoreApplication.instance() or QCoreApplication([])
+    from ui.trace_collector import TraceCollector
+
+    be, mw = _fake_backend()
+    be.session.messages = [
+        {"role": "user", "content": "q1", "timestamp": _ts(3600.0)},
+        {"role": "assistant", "content": "a1", "timestamp": _ts(3599.0)},
+        # 用户隔了 1 小时才问下一条
+        {"role": "user", "content": "q2", "timestamp": _ts(0.0)},
+        {"role": "assistant", "content": "a2", "timestamp": _ts(0.001)},
+    ]
+    c = TraceCollector()
+    c.attach(be, mw)
+    recs = c.records
+    a1 = next(r for r in recs if r.raw == "a1")
+    assert_true(a1.duration_ms == 0, f"idle gap must not count as duration, got {a1.duration_ms}")
+    assert_true(a1.end_ts == 0.0, "instant message end_ts==0")
+    c.detach()
+    print("✓ v3 idle gap not duration")
+
+
 if __name__ == "__main__":
     test_plugin_json()
     test_icons_exist()
     test_models_behavior()
     test_register_ui_signature()
     test_card_instantiation()
+    test_v3_tail_stability()
+    test_v3_hub_isolation()
+    test_v3_detail_tabs()
+    test_v3_stream_baseline()
+    test_v3_system_prompt()
+    test_v3_idle_gap_not_duration()
     print("\nALL SMOKE TESTS PASSED")

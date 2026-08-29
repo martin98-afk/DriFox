@@ -200,7 +200,8 @@ class _EntryDelegate(QStyledItemDelegate):
                     painter.setPen(QColor("#E0AF68"))
                 else:
                     painter.setPen(QColor(c["text_dim"]))
-                meta_text = format_duration(rec.duration_ms)
+                # 0 = 无精确耗时数据（历史回放）→ 显示 "-" 而非误导性 "0 ms"
+                meta_text = format_duration(rec.duration_ms) if rec.duration_ms > 0 else "-"
             else:
                 painter.setPen(QColor(c["text_dim"]))
                 meta_text = rec.absolute_time
