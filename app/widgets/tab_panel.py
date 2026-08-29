@@ -148,6 +148,59 @@ def _shimmer_rainbow_colors(idx: int):
     return colors
 
 
+# ── 绘制原语（模块级）──────────────────────────────────────────────
+# [PERF] 这两个函数原先定义在 paintEvent 内部，每帧都要新建 2 个闭包对象
+# （函数 + cell）。标签动画以 15fps 持续运行，流式期间每个可见 streaming tab
+# 每帧一次 paint —— 闭包与画笔的重复创建是纯浪费。提为模块级函数后，
+# 画笔与渐变对象也得以复用（GUI 单线程，跨 paint 复用 QPen/QGradient 安全）。
+_SHIMMER_STOPS = (0.0, 0.3, 0.5, 0.7, 1.0)
+_INDICATOR_PEN = _QPen()
+_INDICATOR_PEN.setWidth(3)
+_INDICATOR_PEN.setCapStyle(Qt.RoundCap)
+_SHIMMER_GRAD = _QLinearGradient(0, 0, 0, 0)
+
+
+def _draw_left_indicator(painter, round_rect, h: int, color) -> None:
+    """左侧指示条：用 3px 粗笔沿圆角路径描边，clip 到左 5px 显示。
+
+    沿圆角路径描边自然呈现贴合圆角的曲线（与 hover 背景同一路径）。
+    """
+    painter.save()
+    painter.setClipRect(0, 0, 5, h)
+    _INDICATOR_PEN.setColor(color)
+    painter.setPen(_INDICATOR_PEN)
+    # ⚠️ 必须显式清掉画刷：QPainter.drawPath 同时具备「描边 + 填充」两种语义，
+    # 若调用方此前做过 setBrush(...)，这里会把整个圆角矩形再填充一遍，
+    # 覆盖刚画好的背景与流光。当前背景绘制走 fillPath（不修改 painter 的
+    # brush 属性），此行是防御性保险，成本可忽略。
+    painter.setBrush(Qt.NoBrush)
+    painter.drawPath(round_rect)
+    painter.restore()
+
+
+def _draw_shimmer(painter, round_rect, w: int, phase: float, colors, is_resizing: bool = False) -> None:
+    """整条标签内部的来回脉冲流光。
+
+    sin 相位 → 光斑从 -20% 扫到 120% 再折回：内部来回移动的流光脉冲。
+    colors 为 5 段渐层色（透明→主体→透明）；流式传彩虹色循环，报错传红色渐层。
+
+    [PERF] 原实现用 ``setClipPath + fillRect(整个标签矩形)``：设置路径裁剪会
+    让 Qt 走非矩形裁剪路径（生成裁剪 mask），且填充区域是外接矩形而非圆角内部。
+    改为直接 ``fillPath(round_rect)``，省掉 clip 的 save/restore 与多余填充面积。
+    """
+    if is_resizing:
+        return  # resize 期间跳过昂贵渐层
+    sweep = _math.sin(_math.radians(phase))
+    sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
+    # 光斑中心在标签上从 -20% 扫到 120%
+    shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
+    _SHIMMER_GRAD.setStart(shimmer_center - 80, 0)
+    _SHIMMER_GRAD.setFinalStop(shimmer_center + 80, 0)
+    for stop, color in zip(_SHIMMER_STOPS, colors):
+        _SHIMMER_GRAD.setColorAt(stop, color)
+    painter.fillPath(round_rect, _SHIMMER_GRAD)
+
+
 class _TabProjectIcon(QWidget):
     """标签页项目图标 — 与 _SquareAvatar（project_selector_card.py）一致的 DPI 感知方案
 
@@ -603,43 +656,8 @@ class TabItem(QFrame):
                 hover_grad.setColorAt(1.0, _HOVER_LIGHT_COLORS[1])
             painter.fillPath(_round_rect, hover_grad)
 
-        # ── 左侧指示条通用绘制函数：沿圆角路径描边 3px，clip 到左侧 5px 显示 ──
-        def _draw_left_indicator(painter_obj, color):
-            """用 3px 粗笔沿 _round_rect 描边，clip 到左 5px，自然呈现贴合圆角的曲线"""
-            painter_obj.save()
-            painter_obj.setClipRect(0, 0, 5, h)
-            pen = _QPen(color, 3)
-            pen.setCapStyle(Qt.RoundCap)
-            painter_obj.setPen(pen)
-            painter_obj.setBrush(_QColor(0, 0, 0, 0))
-            painter_obj.drawPath(_round_rect)
-            painter_obj.restore()
-
-        # ── 整条标签内部来回脉冲流光 ──
-        def _draw_shimmer(painter_obj, phase, colors):
-            """sin 相位 → 光斑从 -20% 扫到 120% 再折回：内部来回移动的流光脉冲
-
-            colors 为 5 段渐层色（透明→主体→透明）；流式传彩虹色循环，
-            报错传红色渐层。
-            """
-            if self._panel and self._panel._is_resizing:
-                return  # resize 期间跳过昂贵渐层
-            sweep = _math.sin(_math.radians(phase))
-            sweep_t = (sweep + 1.0) / 2.0  # 0.0 ~ 1.0
-            # 光斑中心在标签上从 -20% 扫到 120%
-            shimmer_center = sweep_t * (w + 0.4 * w) - 0.2 * w
-            shimmer_grad = _QLinearGradient(shimmer_center - 80, 0, shimmer_center + 80, 0)
-            shimmer_grad.setColorAt(0.0, colors[0])
-            shimmer_grad.setColorAt(0.3, colors[1])
-            shimmer_grad.setColorAt(0.5, colors[2])
-            shimmer_grad.setColorAt(0.7, colors[3])
-            shimmer_grad.setColorAt(1.0, colors[4])
-            painter_obj.save()
-            painter_obj.setClipPath(_round_rect)
-            painter_obj.fillRect(self.rect(), shimmer_grad)
-            painter_obj.restore()
-
         # ── 流式/错误状态 ──
+        _is_resizing = bool(self._panel and self._panel._is_resizing)
         if self._streaming or self._stream_error:
             # 共用扫描相位：流式彩虹循环 / 报错红色循环
             phase = self._panel._anim_phase if self._panel else 0
@@ -648,34 +666,34 @@ class TabItem(QFrame):
                 # 报错：内部红色流光脉冲（选中时叠加红色指示条）
                 _err_color = _QColor(_CACHED_ERROR_RED)
                 if self._selected:
-                    _draw_left_indicator(painter, _err_color)
-                _draw_shimmer(painter, phase, _SHIMMER_ERROR_COLORS)
+                    _draw_left_indicator(painter, _round_rect, h, _err_color)
+                _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_ERROR_COLORS, _is_resizing)
             else:
                 # 流式：内部彩虹流光（选中时叠加彩色循环指示条，相位驱动颜色循环）
                 idx = int((phase / 360) * _RAINBOW_N) % _RAINBOW_N
                 if self._selected:
-                    _draw_left_indicator(painter, _RAINBOW_COLORS[idx])
-                _draw_shimmer(painter, phase, _shimmer_rainbow_colors(idx))
+                    _draw_left_indicator(painter, _round_rect, h, _RAINBOW_COLORS[idx])
+                _draw_shimmer(painter, _round_rect, w, phase, _shimmer_rainbow_colors(idx), _is_resizing)
         elif self._question:
             # AI 提问等待回答：橙黄 #F59E0B 慢呼吸脉动（1.2s 一周期）
             phase = self._panel._question_phase if self._panel else 0
             # 内部橙黄流光脉冲（选中时叠加橙黄指示条，与流式同款流光动效）
             if not self._selected:
-                _draw_shimmer(painter, phase, _SHIMMER_QUESTION_COLORS)
+                _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
             else:
                 # resize 期间跳过 sin 计算取固定亮度
-                if self._panel and self._panel._is_resizing:
+                if _is_resizing:
                     alpha = 150
                 else:
-                    # 50ms 帧速 +6°/帧 ≈ 1.2s 一周期；亮度在 ~80~220 间脉动
+                    # 动画帧速 +8°/帧 ≈ 3s 一周期；亮度在 ~80~220 间脉动
                     alpha = int(150 + _math.sin(_math.radians(phase)) * 70)
                 _question_color = _QColor(245, 158, 11)
                 _question_color.setAlpha(max(0, min(255, alpha)))
-                _draw_left_indicator(painter, _question_color)
-                _draw_shimmer(painter, phase, _SHIMMER_QUESTION_COLORS)
+                _draw_left_indicator(painter, _round_rect, h, _question_color)
+                _draw_shimmer(painter, _round_rect, w, phase, _SHIMMER_QUESTION_COLORS, _is_resizing)
         elif self._selected:
             # 左侧选中指示条（贴合圆角曲线）
-            _draw_left_indicator(painter, _CACHED_INFO)
+            _draw_left_indicator(painter, _round_rect, h, _CACHED_INFO)
 
         super().paintEvent(event)
 
@@ -2425,8 +2443,11 @@ class TabPanel(QWidget):
         if self._anim_timer is None:
             from PyQt5.QtCore import QTimer
 
+            # [PERF] 66ms ≈ 15fps（原 50ms/20fps）。流光是慢速扫动的渐层，
+            # 15fps 与 20fps 视觉无差异，但绘制开销降低 25%。相位增量同步放大
+            # （12→16、6→8）以保持角速度与动画周期完全不变。
             self._anim_timer = QTimer(self)
-            self._anim_timer.setInterval(50)  # 50ms ≈ 20fps
+            self._anim_timer.setInterval(66)
             self._anim_timer.timeout.connect(self._on_anim_tick)
         if not self._anim_timer.isActive():
             self._anim_timer.start()
@@ -2456,10 +2477,13 @@ class TabPanel(QWidget):
         resize 期间动画定时器已完全暂停（见 set_resizing），
         此处不再需要 _is_resizing 判断。
         """
-        self._anim_phase = (self._anim_phase + 12) % 360
-        self._question_phase = (self._question_phase + 6) % 360  # 1.2s 一周期（慢呼吸）
+        # 相位增量按 66ms 帧长换算（保持角速度与 50ms/12° 完全一致）
+        self._anim_phase = (self._anim_phase + 16) % 360
+        self._question_phase = (self._question_phase + 8) % 360  # ≈3s 一周期（慢呼吸）
         for item in self._items:
-            if item._streaming or item._stream_error or item._question:
+            # 跳过不可见标签（多标签横向滚动时大部分 item 已滚出视口）：
+            # update() 对不可见控件只是排队一次无效重绘。
+            if item.isVisible() and (item._streaming or item._stream_error or item._question):
                 item.update()
 
     def _reapply_scroll_styles(self):

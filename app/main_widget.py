@@ -83,6 +83,7 @@ from app.core import (
 from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
+from app.core.rss_sampler import rss_sampler
 from app.core.tool_permission_controller import ToolPermissionController
 from app.core import window_registry
 
@@ -10989,7 +10990,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._batch_cards[batch_idx] = None
         # 只减已渲染的卡数（_rendered_card_count 语义 = 已渲染未卸载）
         rendered_in_batch = sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
-        self._rendered_card_count = max(0, self._rendered_card_count - rendered_in_batch)
+        self._decr_rendered_count(rendered_in_batch)
         return removed_h
 
     def _batch_is_protected(self, batch_idx: int) -> bool:
@@ -11023,10 +11024,41 @@ class OpenAIChatToolWindow(ToolWindow):
             return batch_idx - (self._visible_batch_end + 1)
         return 0
 
+    def _effective_max_rendered_cards(self) -> int:
+        """本窗口当前的并发渲染页配额（全局闸门 + 每窗口下限保护）。
+
+        [PERF] 见 ``_MAX_GLOBAL_RENDERED_PAGES`` 处的说明：per-window 配额在
+        多窗口下会线性放大内存占用。这里按「全局剩余配额」动态收缩本窗口上限，
+        同时用保底值避免窗口被饿死。
+        """
+        try:
+            others = max(0, _global_rendered_pages - self._rendered_card_count)
+            remaining = _MAX_GLOBAL_RENDERED_PAGES - others
+        except Exception:
+            return self._max_rendered_cards
+        return max(_MIN_RENDERED_CARDS_PER_WINDOW, min(self._max_rendered_cards, remaining))
+
+    def _sync_global_rendered_pages(self, new_count: int) -> None:
+        """把本窗口已渲染计数校准为 new_count，并同步增减全局闸门计数。
+
+        所有「重算/清零」计数的地方都必须走这里，否则全局计数会漂移，
+        进而让闸门误判（配额被永久占用 → 其他窗口被饿死）。
+        """
+        global _global_rendered_pages
+        new_count = max(0, new_count)
+        _global_rendered_pages = max(0, _global_rendered_pages - self._rendered_card_count + new_count)
+        self._rendered_card_count = new_count
+
+    def _decr_rendered_count(self, n: int) -> None:
+        """已渲染卡片数递减 n（卸载批次路径），同步全局闸门计数。"""
+        if n <= 0:
+            return
+        self._sync_global_rendered_pages(self._rendered_card_count - n)
+
     def _recycle_lru_batches(self):
         """B4 温和层：并发页超限时按「距可视区最远优先」淘汰批次 UI。
 
-        仅回收超过 _max_rendered_cards 的部分；受保护批次跳过；
+        仅回收超过配额（见 _effective_max_rendered_cards）的部分；受保护批次跳过；
         每卸一批做滚动补偿（setValue(值 - removed_h)）防止视口跳动。
         """
         if self._is_virtual_recycling or not self._batch_cards:
@@ -11039,12 +11071,13 @@ class OpenAIChatToolWindow(ToolWindow):
             for cards in self._batch_cards:
                 if cards:
                     actual += sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
-            self._rendered_card_count = actual
+            self._sync_global_rendered_pages(actual)
 
-        if self._rendered_card_count <= self._max_rendered_cards:
+        quota = self._effective_max_rendered_cards()
+        if self._rendered_card_count <= quota:
             return
 
-        over = self._rendered_card_count - self._max_rendered_cards
+        over = self._rendered_card_count - quota
         # 候选：所有非空批次（跳过受保护），按距离降序（最远先淘汰）
         candidates = []
         for idx, cards in enumerate(self._batch_cards):
@@ -11060,7 +11093,7 @@ class OpenAIChatToolWindow(ToolWindow):
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
             removed_total = 0
             for dist, idx in candidates:
-                if self._rendered_card_count <= self._max_rendered_cards:
+                if self._rendered_card_count <= quota:
                     break
                 removed_h = self._unload_batch(idx)
                 removed_total += removed_h
@@ -11071,7 +11104,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
                 logger.debug(
                     f"[B4-recycle] 淘汰 {len(candidates)} 候选中的超限批次，"
-                    f"_rendered_card_count={self._rendered_card_count}/{self._max_rendered_cards}"
+                    f"_rendered_card_count={self._rendered_card_count}/{quota}"
+                    f" (global={_global_rendered_pages}/{_MAX_GLOBAL_RENDERED_PAGES})"
                 )
         finally:
             self._is_virtual_recycling = False
@@ -11161,22 +11195,14 @@ class OpenAIChatToolWindow(ToolWindow):
         T30 双判据的 WebEngine 侧：renderer/GPU/network 子进程各自数百 MB，
         累计 RSS 反映 WebEngine 内存压力是否值得强回收（kill 离屏 renderer）。
         无 psutil 或找不到子进程时返回 0.0（退化：不触发 WebEngine 判据）。
-        """
-        try:
-            import psutil
 
-            self_proc = psutil.Process()
-            total = 0.0
-            for child in self_proc.children(recursive=True):
-                try:
-                    name = (child.name() or "").lower()
-                    if "qwebengine" in name or "webengine" in name or "chrome" in name:
-                        total += child.memory_info().rss / (1024 * 1024)
-                except Exception:
-                    continue
-            return total
-        except Exception:
-            return 0.0
+        ⚡ [PERF] 本方法位于流式热路径（每 content chunk 一次）。原实现在此
+        直接执行 ``psutil.Process().children(recursive=True)`` + 逐子进程
+        ``memory_info()``，单次 20-80ms，与 chat_worker 的 80ms 批处理周期
+        同量级 → 主线程 25%-50% 时间用于遍历进程表，是流式卡顿主因之一。
+        现改为读取后台采样器缓存（`app.core.rss_sampler`），主线程零 psutil 调用。
+        """
+        return rss_sampler.web_rss_mb()
 
     def _over_memory_threshold(self, active: bool = False) -> bool:
         """内存阈值判定（T30 双判据）：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB
@@ -11188,30 +11214,41 @@ class OpenAIChatToolWindow(ToolWindow):
                 触发阈值（_MEM_THRESHOLD_TOTAL_MB_ACTIVE）避免频繁 kill 造成
                 滚动回看时的重建抖动；但绝不再完全跳过（旧实现跳过 = 内存泄漏）。
 
-        无 psutil 时退化判定：并发页 > _MAX_RENDERED_CARDS 且存在
+        ⚡ [PERF] 采样值来自后台线程（`app.core.rss_sampler`）。本方法每
+        content chunk 调用一次，绝不能在这里执行 psutil 系统调用。
+
+        无 psutil 或采样不可用时退化：并发页 > _MAX_RENDERED_CARDS 且存在
         距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL 的已卸载批次（说明内存压力来自 WebEngine）。
         """
         try:
-            import psutil
-
+            rss_mb = rss_sampler.rss_mb()
+            if rss_mb <= 0.0:
+                # 采样不可用（无 psutil / 首帧未完成）→ 退化判定
+                return self._over_memory_threshold_fallback()
             threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
-            rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
             if rss_mb <= threshold:
                 return False
             # 主进程已超总阈值：再核对 WebEngine 侧，避免误杀
-            web_mb = self._web_children_rss_mb()
+            web_mb = rss_sampler.web_rss_mb()
             if web_mb > 0 and web_mb < _WEB_MEM_THRESHOLD_MB:
                 return False
             return True
         except Exception:
-            # 退化：有已卸载 PID 且存在远距批次 + 并发页仍超限
-            if not self._unloaded_pids:
-                return False
-            offscreen = any(
-                (self._batch_distance(idx) if 0 <= idx < len(self._batch_cards) else 0) >= _OFFSCREEN_BATCHES_FOR_KILL
-                for _, _, idx in self._unloaded_pids
-            )
-            return offscreen and self._rendered_card_count > self._max_rendered_cards
+            return self._over_memory_threshold_fallback()
+
+    def _over_memory_threshold_fallback(self) -> bool:
+        """psutil 不可用时的退化判定：并发页超限 + 存在远距已卸载批次。
+
+        从 `_over_memory_threshold` 拆出，保证异常路径与「采样不可用」路径
+        共用同一套退化逻辑，避免两处逻辑漂移。
+        """
+        if not self._unloaded_pids:
+            return False
+        offscreen = any(
+            (self._batch_distance(idx) if 0 <= idx < len(self._batch_cards) else 0) >= _OFFSCREEN_BATCHES_FOR_KILL
+            for _, _, idx in self._unloaded_pids
+        )
+        return offscreen and self._rendered_card_count > self._max_rendered_cards
 
     def _kill_lru_unloaded_renderers(self, keep: int = None, min_offscreen: int = 0) -> int:
         """按卸载时间升序（最老在前）kill 超 keep 部分，每轮 ≤ _KILL_BATCH_MAX。
@@ -11433,7 +11470,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_lazy_cards.clear()
         self._lazy_batch_timer_active = False
         # ★ B4：清空聊天区 = 本窗口已渲染卡片数归零（_batch_cards 由调用方重建）
-        self._rendered_card_count = 0
+        self._sync_global_rendered_pages(0)
         # 先收集所有 widget（不能在迭代中修改 layout），再统一处理
         widgets = []
         while self.chat_layout.count():
@@ -12209,7 +12246,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._rendered_card_count += new_count
             global _global_rendered_pages
             _global_rendered_pages += new_count
-            if self._rendered_card_count > self._max_rendered_cards:
+            if self._rendered_card_count > self._effective_max_rendered_cards():
                 QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
         # 批次全部渲染完成，统一更新滚动
@@ -21045,6 +21082,16 @@ _gc_hook_pending = False
 # 强回收层（kill 离屏 renderer）依赖 message_card 的 renderer_pid 记录，暂缓。
 _MAX_RENDERED_CARDS = 18
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
+
+# ── B4 温和层：跨窗口全局渲染页闸门 ──
+# [PERF] _MAX_RENDERED_CARDS 原本是 **per-window** 常量，多窗口场景下
+# N 窗口 = N×18 张已渲染卡片常驻。每张卡片的 DOM/JS heap 都要挤在
+# --renderer-process-limit 封顶的那几个 renderer 进程里，内存随窗口数线性增长
+# （4 窗口 ≈ 72 页）。改为全局配额：新窗口只能分到「全局剩余配额」，
+# 但每窗口至少保留 _MIN_RENDERED_CARDS_PER_WINDOW 张 —— 宁可全局超限，
+# 也不能让某个窗口白屏（可用性优先于内存）。
+_MAX_GLOBAL_RENDERED_PAGES = 32  # 跨窗口并发渲染页硬闸门
+_MIN_RENDERED_CARDS_PER_WINDOW = 6  # 每窗口保底页数（闸门的下限保护）
 _MAX_BRANCH_CACHE = 64  # workdir→branch 缓存上限（M5-B）：超出时淘汰最早插入项，防长期累积渗漏
 
 # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──

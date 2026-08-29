@@ -1742,8 +1742,21 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
 
     Returns:
         删除的数量
+
+    [PERF] 布局成员一次性建索引：原实现对每个待删 widget 都从头线性扫描
+    ``chat_layout``（O(n×m)）。批量回收场景下（``_recycle_out_of_view_batches``
+    一次传入几十张卡）卡片数上千时是滚动卡顿的隐性来源。
+    改为先建一次 ``id(widget)`` 索引集合，整体降为 O(n+m)。
     """
     deleted = 0
+    # 一次性快照布局成员（removeWidget 会改变布局索引，故必须预先建索引）
+    layout_member_ids = set()
+    for i in range(chat_layout.count()):
+        item = chat_layout.itemAt(i)
+        w = item.widget() if item is not None else None
+        if w is not None:
+            layout_member_ids.add(id(w))
+
     for widget in widgets_to_remove:
         if not is_widget_alive(widget):
             logger.warning(f"[DELETE] Widget already deleted: {widget}")
@@ -1763,17 +1776,18 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
         # HWND）直接脱离父窗口树会变独立顶层窗口 → 白窗一闪（切换项目/新建
         # 标签页清理旧卡片时 Chromium 弹出原生窗口）。
         layout_removed = False
-        for i in range(chat_layout.count()):
-            item = chat_layout.itemAt(i)
-            if item and item.widget() is widget:
-                widget.hide()
-                chat_layout.removeWidget(widget)
-                try:
-                    widget.setParent(None)
-                except Exception:
-                    pass
-                layout_removed = True
-                break
+        widget_id = id(widget)
+        if widget_id in layout_member_ids:
+            # 命中后即从索引中摘除，保证同一 widget 被重复传入时行为与原实现
+            # 一致（第二次视为「已不在布局中」，走 warning 分支）
+            layout_member_ids.discard(widget_id)
+            widget.hide()
+            chat_layout.removeWidget(widget)
+            try:
+                widget.setParent(None)
+            except Exception:
+                pass
+            layout_removed = True
 
         if layout_removed:
             widget.deleteLater()

@@ -1,0 +1,18 @@
+{
+    "icon": {
+        "light": "icons/icon_light.svg",
+        "dark": "icons/icon.svg"
+    },
+    "name": "agent_trace",
+    "description": "智能体轨迹查看器 — 常驻顶部 tab，一键展开当前消息列表所有隐藏内容（system / user / hook / assistant / tool）以及每个步骤的耗时，类似 DeepSeek Harness 的轨迹面板",
+    "version": "0.1.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "system",
+    "components": {
+        "ui": true
+    }
+}

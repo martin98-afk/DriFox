@@ -110,7 +110,32 @@ from app.utils.design_tokens import (
 # 保证 Web 侧（消息正文）与 Qt 侧（控件）使用同一套圆角节奏。
 _BORDER_RADIUS_CSS_VARS = BorderRadius.CSS_VARS
 from app.utils.utils import get_font_family_css, get_icon
-from app.widgets.markdown_block_viewer import MarkdownBlockViewer
+
+# 纯 Qt 块级渲染器（灰度功能，默认关闭）——**延迟导入**。
+# [PERF] markdown_block_viewer 顶层会导入 pygments/qrc 资源并定义 30+ 个渲染
+# 控件类，累计导入耗时约 340ms（其中模块自身顶层代码约 100ms）。而灰度开关
+# qt_message_renderer 默认关闭，启动时无条件导入纯属启动开销 —— 首屏时间
+# 是最贵的时间。改为首次真正需要渲染时才导入；开启灰度的实例可在启动后
+# 由 main.py 的 _deferred_startup 预热，避免首张卡片渲染时抖动。
+_MarkdownBlockViewerCls = None
+
+
+def _get_markdown_block_viewer_cls():
+    """返回 MarkdownBlockViewer 类（首次调用时导入并缓存）。"""
+    global _MarkdownBlockViewerCls
+    if _MarkdownBlockViewerCls is None:
+        from app.widgets.markdown_block_viewer import MarkdownBlockViewer
+
+        _MarkdownBlockViewerCls = MarkdownBlockViewer
+    return _MarkdownBlockViewerCls
+
+
+def prewarm_markdown_block_viewer() -> None:
+    """预热块级渲染器（供开启灰度的实例在启动后调用）。"""
+    try:
+        _get_markdown_block_viewer_cls()
+    except Exception:
+        pass
 
 
 def _qt_renderer_enabled() -> bool:
@@ -11241,7 +11266,7 @@ class MessageCard(SimpleCardWidget):
             is_welcome = self.role == "welcome"
             if not is_welcome and _qt_renderer_enabled():
                 # 灰度：纯 Qt 块级渲染器（无 Chromium/JS 层）
-                self.viewer = MarkdownBlockViewer(self)
+                self.viewer = _get_markdown_block_viewer_cls()(self)
                 self.viewer.contentHeightChanged.connect(self._on_qt_viewer_height)
                 self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
                 # 仅"从磁盘加载的历史会话"折叠；本轮对话（流式进行中或已完成）
@@ -12351,7 +12376,10 @@ class MessageCard(SimpleCardWidget):
         if v is None:
             return
         # 灰度：纯 Qt viewer 走原生任务列表面板
-        if isinstance(v, MarkdownBlockViewer):
+        # 延迟导入：未开启灰度时 _MarkdownBlockViewerCls 为 None，
+        # 此时 viewer 必然是 CodeWebViewer，跳过判断即可。
+        _qt_cls = _MarkdownBlockViewerCls
+        if _qt_cls is not None and isinstance(v, _qt_cls):
             v.update_todo_list(self._todos_snapshot or [])
             return
         if not isinstance(v, CodeWebViewer):

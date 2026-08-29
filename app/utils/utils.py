@@ -291,6 +291,17 @@ _ICON_CACHE: OrderedDict = OrderedDict()
 _ICON_CACHE_MAX = 256
 
 
+# 主题感知图标缓存：key=(icon_name, is_light)。
+# [PERF] 原 `_load()` 注释自承「无缓存，每次调用都检查」——即每次 paint 都执行
+# `QIcon(":/icons/xxx.svg")`：从 qrc 读取数据 + 解析 SVG。自绘控件
+# （CustomTitleBar 的 3 个系统按钮、main_widget._ThemedIconLabel 等）每次重绘
+# 都会走到这里，是重绘路径的固定开销。
+# 缓存按 (名称, 主题) 分桶：主题切换由 `key()` 实时判定驱动 Qt pixmap 缓存失效，
+# 随后 `_load()` 用新的 is_light 命中另一个分桶 —— 语义与无缓存版本完全一致。
+_ICON_ENGINE_CACHE: OrderedDict = OrderedDict()
+_ICON_ENGINE_CACHE_MAX = 512
+
+
 class _ThemeIconEngine(QIconEngine):
     """主题感知图标引擎 — 每次 paint 时自动根据当前主题加载对应颜色图标。
 
@@ -303,10 +314,22 @@ class _ThemeIconEngine(QIconEngine):
         self._icon_name = icon_name
 
     def _load(self) -> QIcon:
-        """根据当前主题加载正确颜色的图标（无缓存，每次调用都检查）"""
+        """根据当前主题加载正确颜色的图标（按 (名称, 主题) 缓存）。"""
+        is_light = _is_current_theme_light()
+        cache_key = (self._icon_name, is_light)
+        cached = _ICON_ENGINE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        icon = self._load_uncached(is_light)
+        _ICON_ENGINE_CACHE[cache_key] = icon
+        if len(_ICON_ENGINE_CACHE) > _ICON_ENGINE_CACHE_MAX:
+            _ICON_ENGINE_CACHE.popitem(last=False)
+        return icon
+
+    def _load_uncached(self, is_light: bool) -> QIcon:
+        """真正执行一次图标加载（缓存未命中时调用）。"""
         from app.utils.icon_name_map import ICON_NAME_TO_FILE
 
-        is_light = _is_current_theme_light()
         prefix = ":/icons_light" if is_light else ":/icons"
 
         # 浅色模式：优先查浅色映射表
@@ -392,6 +415,7 @@ def invalidate_icon_cache():
     """清除图标缓存（主题切换时调用，已不再必需——引擎自动感知）"""
     global _ICON_CACHE
     _ICON_CACHE.clear()
+    _ICON_ENGINE_CACHE.clear()
 
 
 
