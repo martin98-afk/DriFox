@@ -168,7 +168,7 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
             + "        var bytes = Uint8Array.from(atob(_PAYLOAD), function (c) { return c.charCodeAt(0); });\n"
             + "        var option = JSON.parse(new TextDecoder('utf-8').decode(bytes));\n"
             + "        chart = echarts.init(el, "
-    + repr("dark" if is_dark else None)
+    + ("'dark'" if is_dark else "null")
     + ");\n"
             + "        chart.setOption(option);\n"
             + "    } catch (e) {\n"
