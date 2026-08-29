@@ -989,6 +989,12 @@ class TabPanel(QWidget):
         self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
         self._auto_collapse_width: int = 100  # 展开态拖窄到该宽度(panel px)时自动折叠
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
+        # 窗口 resize / relayout 过渡期抑制自动折叠：几何瞬变（_force_relayout
+        # 重算、最大化/还原）会把左面板瞬时压到折叠阈值以下，若 resizeEvent
+        # 据此折叠会误判为"用户拖窄"。由 TabManagerWindow 在 resize 周期开始
+        # 时置 True、几何收拢后置 False，之后改由 _evaluate_squeeze_collapse
+        # 按稳定后的最终宽度统一判定。
+        self._auto_collapse_suppressed: bool = False
         self._setup_ui()
         # 注册主题刷新回调：主题/字体变更后刷新所有 Tab 项样式
         theme_manager.register_refresh_target(self)
@@ -1189,6 +1195,12 @@ class TabPanel(QWidget):
         表现为"往里拉时又往外回弹"。滞回区（100~109）内保持当前状态不动。
         """
         super().resizeEvent(event)
+        # 窗口 resize / relayout 过渡期：宽度是瞬时中间值，不代表用户意图，
+        # 跳过自动折叠/展开。几何收拢完成后由 TabManagerWindow 按最终宽度
+        # 统一判定（_evaluate_squeeze_collapse），避免最大化/还原等几何瞬变
+        # 被误判成"用户把面板拖窄"。
+        if self._auto_collapse_suppressed:
+            return
         # 拖窄自动折叠（展开态 → 收起态）
         if not self._collapsed and not self._animating and self.width() < self._auto_collapse_width:
             self._collapsed = True
@@ -1402,6 +1414,16 @@ class TabPanel(QWidget):
         由 TabManagerWindow 宽度动画开始/结束时调用。
         """
         self._animating = animating
+
+    def set_auto_collapse_suppressed(self, suppressed: bool):
+        """开关"resize/relayout 过渡期抑制自动折叠"
+
+        由 TabManagerWindow 在窗口 resize 周期开始时置 True（几何尚未收拢，
+        左面板宽度会瞬时跌到折叠阈值以下）、在几何收拢完成后置 False。
+        抑制期内 resizeEvent 不自动折叠/展开，改由窗口在稳定几何上判定，
+        否则最大化/还原这类几何瞬变会让侧边栏无故收起。
+        """
+        self._auto_collapse_suppressed = suppressed
 
     def sync_collapsed_ui(self):
         """按当前 _collapsed 状态同步紧凑/展开 UI（宽度动画跨阈值时调用）

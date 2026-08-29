@@ -18320,9 +18320,20 @@ class OpenAIChatToolWindow(ToolWindow):
         self._toggle_project_selector_card()
 
     def _refresh_branch_widget_style(self):
-        """刷新分支按钮的文字样式"""
+        """刷新分支标签的样式（兼容 _BranchChip 与传统 PushButton）。
+
+        极简化：_branch_widget 现在是 _BranchChip（QFrame + git 分支线稿 icon + 文字），
+        由其自身 _apply_style() 统一管样式；主程序只需转发调用。
+        """
+        bw = getattr(self, "_branch_widget", None)
+        if bw is None:
+            return
+        if hasattr(bw, "refresh_style"):
+            bw.refresh_style()
+            return
+        # 兜底：传统 PushButton 路径
         Colors.refresh()
-        self._branch_widget.setStyleSheet(f"""
+        bw.setStyleSheet(f"""
             #_branchWidget {{
                 background: transparent;
                 border: none;
@@ -18339,17 +18350,18 @@ class OpenAIChatToolWindow(ToolWindow):
         """)
 
     def _refresh_project_branch_style(self):
-        """刷新项目+分支组合控件的整体样式（面包屑风格）"""
+        """刷新项目+分支组合控件的整体样式（极简：仅容器，hover 由子元素各自处理）
+
+        极简化：移除容器级 hover 底色（避免与 avatar / branch_widget 各自的 hover 嵌套双层）。
+        avatar 点击 = 切项目，branch 点击 = 打开关键文档，语义不同，必须各自独立 hover。
+        """
         Colors.refresh()
-        # 容器 — 面包屑整体底框
+        # 容器 — 仅保留透明占位（占 layout 宽度，无视觉装饰）
         self._project_branch_container.setStyleSheet(f"""
             QFrame#projectBranchContainer {{
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 6px;
-            }}
-            QFrame#projectBranchContainer:hover {{
-                background: {Colors.HOVER_BG};
             }}
         """)
         # 项目标签 — 面包屑第一级（粗体 + 项目专属色）
@@ -18367,17 +18379,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 background: transparent;
                 border: none;
                 border-radius: 4px;
-            }}
-        """)
-        # 分隔符 — 三角箭头（小号 + 次级色）
-        self._pb_separator.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_MUTED};
-                {get_font_family_css()}
-                {font_size_css(16)}
-                background: transparent;
-                border: none;
-                padding: 2px;
             }}
         """)
         # 同步刷新分支按钮样式
@@ -18403,8 +18404,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._branch_widget.setText(source._branch_widget.text())
             self._branch_widget.setVisible(branch_visible)
             self._branch_widget.setToolTip(source._branch_widget.toolTip())
-            if hasattr(self, "_pb_separator"):
-                self._pb_separator.setVisible(branch_visible)
             # 同步项目 avatar tooltip（含完整项目名、路径、分支）
             if hasattr(self, "_project_avatar") and hasattr(source, "_project_avatar"):
                 self._project_avatar.setToolTip(source._project_avatar.toolTip())
@@ -18439,7 +18438,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 先隐藏分支标签，等后台检测完成再决定显示
         self._branch_widget.setVisible(False)
-        self._pb_separator.setVisible(False)
 
         # Phase B（异步）：git 分支检测
         if not workdir or not os.path.isdir(workdir):
@@ -18493,10 +18491,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._branch_widget.setText(display)
             self._branch_widget.setToolTip(f"分支: {branch}\n点击打开关键文档")
             self._branch_widget.setVisible(True)
-            self._pb_separator.setVisible(True)
         else:
             self._branch_widget.setVisible(False)
-            self._pb_separator.setVisible(False)
 
     def _on_branch_label_clicked(self, event):
         """分支标签点击 — 打开关键文档卡片"""

@@ -93,6 +93,11 @@ _DEFAULT_PANEL_WIDTH = 187
 # （窗口总宽未变），不走增长条件。
 _AUTO_EXPAND_GROWTH = 200
 
+# ── 聊天区最小可用宽度（px）──
+# 判定"侧边栏是否真的被挤压"的下限：窗口总宽放得下
+# 「常规展开宽度 + 该值」就不算挤压，侧边栏必须保持展开。
+_MIN_CHAT_WIDTH = 400
+
 # ── nativeEvent 热路径缓存（模块级，进程内只算一次）──
 # 拖拽窗口时每秒有上千条原生消息进入 nativeEvent，
 # 这里预先缓存平台判定与 ctypes cast 函数，避免 per-message 开销。
@@ -1408,6 +1413,58 @@ class TabManagerWindow(FramelessWindow):
                 if mw is not None and hasattr(mw, "_set_cards_resize_preview_mode"):
                     mw._set_cards_resize_preview_mode(False)
 
+    def _evaluate_squeeze_collapse(self) -> bool:
+        """按稳定后的几何判定"侧边栏确实被挤压"→ 自动折叠
+
+        背景：resize 周期内（尤其 _deferred_resize_complete 的 _force_relayout
+        全量重算）左面板宽度会瞬时跌到折叠阈值（100px）以下。TabPanel.resizeEvent
+        只看宽度，会把最大化/还原、覆盖层 relayout 这类几何瞬变误判为"用户
+        把面板拖窄"而折叠；而折叠后窗口总宽往往不增反减，自动展开的相对增长
+        条件（≥ 折叠时总宽 + _AUTO_EXPAND_GROWTH）永不满足 → 折叠态永久残留。
+        因此 resize 周期内置 _auto_collapse_suppressed 抑制该判定，改在这里
+        基于收拢后的真实几何决定。
+
+        判定标准（"被挤压"）：左面板最终宽度低于折叠阈值，且窗口总宽已放不下
+        「常规展开宽度 + 聊天区最小可用宽度」。空间其实够的（纯 relayout 瞬时
+        压窄）保持展开，不折叠。
+
+        Returns:
+            True 表示本次触发了折叠（调用方应跳过随后的自动展开检测，
+            否则刚折叠就可能被 _maybe_auto_expand_after_squeeze 弹回）。
+        """
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None or panel._collapsed or panel._animating:
+            return False
+        if not hasattr(self, "_splitter") or self._splitter.count() == 0:
+            return False
+        try:
+            sizes = self._splitter.sizes()
+        except Exception:
+            return False
+        if not sizes:
+            return False
+        total = sum(sizes)
+        left = sizes[0]
+        if total <= 0 or left >= panel._auto_collapse_width:
+            return False  # 宽度正常：没有挤压，无需折叠
+        # 空间仍放得下"常规展开宽度 + 聊天区最小宽度" → 只是瞬时压窄，不折叠：
+        # 把左面板恢复到常规展开宽度，避免停留在被压扁的窄条上。
+        needed = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        if total >= needed + _MIN_CHAT_WIDTH:
+            tab_frame = getattr(self, "_tab_frame", None)
+            cap = tab_frame.maximumWidth() if tab_frame is not None else needed
+            frame_w = max(0, min(needed, cap))
+            if frame_w > 0 and frame_w != left:
+                self._splitter.setSizes([frame_w, max(0, total - frame_w)])
+                panel.sync_collapsed_ui()
+            return False
+        # 确实被挤压：交接给折叠动画（与 TabPanel.resizeEvent 折叠路径一致）
+        panel._collapsed = True
+        panel._collapsed_by_squeeze = True
+        panel._update_toggle_button()
+        QTimer.singleShot(0, lambda: self._on_sidebar_toggled(True))
+        return True
+
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
         """挤压折叠后空间恢复：自动展开回常规宽度
 
@@ -1450,7 +1507,7 @@ class TabManagerWindow(FramelessWindow):
             return
         total = sum(self._splitter.sizes()) if hasattr(self, "_splitter") else self.width()
         target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
-        chat_min = 400  # 聊天区最小可用宽度
+        chat_min = _MIN_CHAT_WIDTH  # 聊天区最小可用宽度
         # 条件1：相对增长（仅窗口 resize 类触发需要；overlay 布局恢复传 False）
         if growth_required:
             base = getattr(self, "_squeeze_total_width", None)
@@ -3170,6 +3227,35 @@ class TabManagerWindow(FramelessWindow):
             # resizeEvent 链（节流阶段二会跳过基类同步），这里补一次，
             # 保证标题栏宽度始终等于窗口宽度（系统按钮不会跑到中间）。
             self._sync_title_bar_width()
+            # 几何瞬变保护：状态切换会连带改标题栏高度/窗口边距并触发额外
+            # relayout（左面板被瞬时压窄）。抑制侧边栏自动折叠，避免把
+            # 最大化/还原误判为"用户拖窄"。resize 周期结束会提前解除，
+            # 这里的定时器只是兜底。
+            self._begin_window_state_guard()
+
+    def _begin_window_state_guard(self):
+        """窗口状态切换（最大化/还原/全屏）期间抑制侧边栏自动折叠"""
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None:
+            return
+        panel.set_auto_collapse_suppressed(True)
+        guard = getattr(self, "_window_state_guard_timer", None)
+        if guard is None:
+            guard = QTimer(self)
+            guard.setSingleShot(True)
+            guard.timeout.connect(self._end_window_state_guard)
+            self._window_state_guard_timer = guard
+        guard.start(600)
+
+    def _end_window_state_guard(self):
+        """兜底解除状态切换抑制（resize 周期正常结束会先于此解除）"""
+        # resize 周期仍在进行：抑制交由 _deferred_resize_complete 统一解除，
+        # 此处不提前解除，否则后续 relayout 瞬变会重新误折叠。
+        if getattr(self, "_resize_blocking", False):
+            return
+        panel = getattr(self, "_tab_panel", None)
+        if panel is not None:
+            panel.set_auto_collapse_suppressed(False)
 
     def _on_app_state_changed(self, state):
         """macOS 软置顶：应用激活时若开启置顶配置则抬升主窗口
@@ -3356,8 +3442,16 @@ class TabManagerWindow(FramelessWindow):
         # 全局桌宠跟随窗体缩放：resize 结束后精确重定位到激活窗 send_btn
         if getattr(self, "pixel_pet", None) is not None:
             self.pixel_pet.reposition_to_active_window()
-        # 窗口 resize 结束：若左面板因挤压已自动折叠且空间已恢复，自动展开
-        self._maybe_auto_expand_after_squeeze()
+
+        # ── 几何已收拢：解除抑制 + 按最终宽度判定"是否真被挤压" ──
+        # 整个 resize 周期（含 _force_relayout 瞬变）内 TabPanel 不自动折叠，
+        # 这里基于稳定后的真实几何决定，避免最大化/还原这类几何瞬变把
+        # 侧边栏误折叠（折叠后窗口总宽不增反减，自动展开条件永不满足）。
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_auto_collapse_suppressed(False)
+        if not self._evaluate_squeeze_collapse():
+            # 窗口 resize 结束：若左面板因挤压已自动折叠且空间已恢复，自动展开
+            self._maybe_auto_expand_after_squeeze()
 
     def _force_relayout(self):
         """blocking 结束后强制完整布局收拢
@@ -3408,6 +3502,11 @@ class TabManagerWindow(FramelessWindow):
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
+        # ★ 先抑制再布局：super().resizeEvent() 会把新几何一次性传播到子控件，
+        # 左面板宽度在此期间是瞬时中间值（relayout 重算会先压到最小宽度），
+        # 必须在传播前就抑制，否则会被误判为"用户拖窄"而自动折叠。
+        if hasattr(self, "_tab_panel"):
+            self._tab_panel.set_auto_collapse_suppressed(True)
         super().resizeEvent(event)
         # 背景图尺寸跟随（轻量操作，不触发布局）
         self._resize_bg_labels()

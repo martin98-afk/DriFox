@@ -73,10 +73,32 @@ def _qcolor(css: str, fallback: str) -> QColor:
 
     token 可能是 ``#ffffff`` / ``rgba(255, 255, 255, 0.5)`` 等形式；解析失败时
     回退到 fallback，保证任何主题下按钮图标都可见（不出现黑叠黑）。
+
+    ★ 必须用 ``qcolor_from_token``，不能直接 ``QColor(css)``：
+    PyQt5 的 QColor 构造函数不认 CSS 的 ``rgba(r,g,b,a)`` 写法，会静默
+    返回 invalid 的黑色 QColor，导致深色主题（text_secondary 为
+    ``rgba(..., 0.74)``）下 tab 未选中的文字渲染成黑叠黑，肉眼"看不见"。
     """
-    c = QColor(css)
-    if not c.isValid():
-        c = QColor(fallback)
+    from app.utils.design_tokens import qcolor_from_token
+
+    c = qcolor_from_token(css)
+    # qcolor_from_token 在解析失败时返回 QColor(33, 33, 38, 246)（不会 invalid）
+    # 但仍按 fallback 语义优先：解析失败时回退到 fallback
+    if c.alpha() == 255 and c.red() == 33 and c.green() == 33 and c.blue() == 38:
+        # 仅在主值"明显解析失败"时尝试 fallback（避免主题恰好用同色误判）
+        try:
+            # 主值若本身就是合法 CSS 颜色，qcolor_from_token 不会走到 fallback 分支
+            # 简单判别：QColor(css).isValid() 为真就直接用主值
+            if QColor(css).isValid():
+                return c
+        except Exception:
+            pass
+        fb = qcolor_from_token(fallback)
+        # 同样：fallback 若 invalid，qcolor_from_token 也只会返回上面那个默认深灰
+        # 这里再保险一次：如果两者都解析不出来，给一个不会黑叠黑的安全色
+        if fb.alpha() == 255 and fb.red() == 33 and fb.green() == 33 and fb.blue() == 38:
+            return QColor(255, 255, 255, 200)  # 浅灰半透明，保证不黑叠黑
+        return fb
     return c
 
 

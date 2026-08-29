@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
-"""title_bar 模块 — 会话栏（项目/分支/标题/右侧按钮组）
+"""title_bar 模块 — 会话栏（项目/标题/右侧按钮组）
 
 源 main_widget.py L2878-L3013（setup_ui 段，搬运时基线）。
 属性契约（host.setattr，全量搬运原 self.* 赋值）：
 - _project_branch_container  QFrame（项目+分支组合容器）
 - _project_avatar           _SquareAvatar（项目缩写方形 icon）
 - _project_label            QLabel（隐藏，仅 avatar 展示缩写）
-- _pb_separator             QLabel（分支三角分隔符 ▸）
 - _branch_widget            PushButton（Git 分支标签）
 - title_edit                TitleEditWidget（行内标题编辑）
 - balance_display           BalanceDisplay（余额/用量，稍后入底部工具栏）
@@ -18,11 +17,88 @@
 - _share_btn                TransparentToolButton（分享）
 - diff_btn                  TransparentToolButton（差异对比）
 
+极简化：移除 _pb_separator（▸ 三角连接符），avatar 与分支之间靠 8px 留白 + 视觉重量差分组。
+容器不再 hover，avatar 与 branch 各自独立 hover（语义不同：切项目 vs 打开关键文档）。
+
 host 方法/属性引用均经 getattr 兜底（模块对宿主弱耦合：主程序路径下解析为真实方法，
 行为零变化；测试 stub 缺失时静默跳过）。
 """
 
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel
 from app.plugins.contracts.ui_module import UIModule
+from app.utils.utils import get_icon
+
+class _BranchChip(QFrame):
+    """Git 分支 chip — git 分支线稿 icon + 分支名 + hover 底色。
+
+    设计目标：「一眼看出是工作树」—— git 分支线稿 icon (get_icon("分支")) 让用户
+    立即知道这是 git 分支而不是普通文字。QFrame 自绘，保留 setText/text() 兼容
+    主程序 _apply_branch_to_ui / _copy_branch_from 等处的接口。
+    """
+
+    def __init__(self, text: str = "main", parent=None):
+        super().__init__(parent)
+        self.setObjectName("_branchWidget")
+        self.setCursor(Qt.PointingHandCursor)
+        from PyQt5.QtWidgets import QSizePolicy
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(5, 2, 7, 2)
+        lay.setSpacing(4)
+
+        # git 分支线稿 icon（12px，主题感知：浅色 #333 / 深色 #fff）
+        self._icon_label = QLabel(self)
+        self._icon_label.setObjectName("_branchIcon")
+        self._icon_label.setFixedSize(12, 12)
+        self._icon_label.setStyleSheet("background: transparent;")
+        self._icon_label.setPixmap(get_icon("分支").pixmap(12, 12))
+        lay.addWidget(self._icon_label)
+
+        # 文字
+        self._text_label = QLabel(text, self)
+        self._text_label.setObjectName("_branchText")
+        self._text_label.setStyleSheet("background: transparent;")
+        lay.addWidget(self._text_label)
+
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._apply_style()
+
+    def text(self) -> str:
+        return self._text_label.text()
+
+    def setText(self, t: str) -> None:
+        self._text_label.setText(t)
+        self._text_label.adjustSize()
+        self.adjustSize()
+
+    def _apply_style(self) -> None:
+        from app.utils.design_tokens import Colors, font_size_css
+        from app.utils.utils import get_font_family_css
+
+        Colors.refresh()
+        self.setStyleSheet(f"""
+            #_branchWidget {{
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+            }}
+            #_branchWidget:hover {{
+                background: {Colors.HOVER_BG};
+            }}
+            #_branchText {{
+                color: {Colors.TEXT_SECONDARY};
+                {get_font_family_css()}
+                {font_size_css(12)};
+            }}
+            #_branchWidget:hover #_branchText {{
+                color: {Colors.TEXT_PRIMARY};
+            }}
+        """)
+
+    def refresh_style(self) -> None:
+        """主程序 _refresh_branch_widget_style 调用入口（保持向后兼容）"""
+        self._apply_style()
 
 
 class TitleBarModule(UIModule):
@@ -81,15 +157,17 @@ class TitleBarModule(UIModule):
         session_bar_layout = QHBoxLayout()
 
         # ===== 项目+分支组合控件（一体感布局） =====
+        # 极简风格：项目 avatar 与分支文字之间靠 8px 留白分组，不再画三角连接符。
         host._project_branch_container = QFrame(host)
         host._project_branch_container.setObjectName("projectBranchContainer")
         pb_layout = QHBoxLayout(host._project_branch_container)
-        pb_layout.setContentsMargins(8, 0, 8, 0)  # 左侧留出 padding，与标题编辑区保持间距
-        pb_layout.setSpacing(2)
+        pb_layout.setContentsMargins(4, 0, 8, 0)  # 左侧贴近标题编辑区，间距由 spacing 提供
+        pb_layout.setSpacing(8)  # avatar ↔ 分支的连接：纯留白
 
         # 项目方形 icon（缩写字母，flat design squircle 风格）
+        # 极简化但保留可识别：22px（20 偏小，24 偏大），暖棕低饱和色
         host._project_avatar = _SquareAvatar(
-            extract_project_initials(_current_project), get_project_color(_current_project), host, size=24
+            extract_project_initials(_current_project), get_project_color(_current_project), host, size=22
         )
         host._project_avatar.setCursor(Qt.PointingHandCursor)
         if on_project_label_clicked is not None:
@@ -105,19 +183,16 @@ class TitleBarModule(UIModule):
         host._project_label.setToolTip("点击切换项目")
         host._project_label.setVisible(False)
 
-        # 分支分隔符（三角箭头，面包屑风格）
-        host._pb_separator = QLabel("▸", host)
-        host._pb_separator.setAlignment(Qt.AlignCenter)
-        host._pb_separator.setVisible(False)
-        pb_layout.addWidget(host._pb_separator)
-
-        # Git 分支标签
-        host._branch_widget = PushButton(text="main", parent=host)
-        host._branch_widget.setObjectName("_branchWidget")
+        # Git 分支 chip（含 git 分支线稿 icon + 文字，hover 出底色）
+        # 极简化：去掉「▸」三角连接符；avatar 和分支靠 8px 留白 + 视觉重量差分组。
+        # 分支 icon 让用户「一眼看出是工作树」—— git 分支线稿是通用 git 语义。
+        # 分支点击 = 打开关键文档，avatar 点击 = 切项目，两者各自 hover。
+        # _BranchChip 是 QFrame 自绘，setText/text() 接口与原 PushButton 兼容。
+        host._branch_widget = _BranchChip(text="main", parent=host)
         if on_branch_label_clicked is not None:
-            host._branch_widget.clicked.connect(on_branch_label_clicked)
+            # 与 _project_avatar 一致：直接绑定 mousePressEvent，event 由 Qt 自动传入
+            host._branch_widget.mousePressEvent = on_branch_label_clicked
         host._branch_widget.setToolTip("当前 Git 分支 — 点击打开关键文档")
-        host._branch_widget.setAutoDefault(False)  # 防止 QDialog 在 Enter 时误触发
         host._branch_widget.setVisible(False)
         refresh_branch_widget_style()
         pb_layout.addWidget(host._branch_widget)
