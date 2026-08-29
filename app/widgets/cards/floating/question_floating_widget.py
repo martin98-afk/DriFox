@@ -45,6 +45,49 @@ class _AutoHeightScrollArea(QScrollArea):
         # 垂直改为 Preferred：布局尊重 sizeHint，不再把滚动区拉伸占满剩余空间
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
+    def hasHeightForWidth(self):
+        """声明支持 heightForWidth
+
+        父布局（QVBoxLayout.heightForWidth）据此用**传入宽度**测量本区，
+        而不是退回到 sizeHint 里读 viewport 的瞬时宽度——后者会随滚动条
+        出现/消失跳变，是布局自激循环的根源（见 _height_for_width 注释）。
+        """
+        return True
+
+    def heightForWidth(self, w):
+        return self._height_for_width(w)
+
+    def _height_for_width(self, outer_w):
+        """按外层可用宽度 outer_w 计算本区高度（纯函数，无副作用）
+
+        ⚠ 测量基准必须与"布局最终给到内容的宽度"一致，否则形成反馈环：
+        viewport().width() 随滚动条出现/消失跳变 → sizeHint 变化 → 容器重排
+        → 内容重排 → 滚动条状态再变 → 无限循环。实测超长问题（标题区触发
+        滚动条）时 1.5s 内 CardContainer._do_expand 被调用 1.7 万次，主线程
+        被布局占满，卡片内文字上下横跳。
+
+        这里以**控件外宽**为唯一输入，内部自行扣除 frame 与"需要滚动时"的
+        滚动条宽度，同一 outer_w 恒定输出同一高度 → 存在不动点 → 循环收敛。
+        """
+        w = self.widget()
+        if w is None:
+            return super().sizeHint().height()
+        frame = 2 * self.frameWidth()
+        sb_w = self.verticalScrollBar().sizeHint().width()
+        vw = max(1, outer_w - frame)
+        content_h = w.heightForWidth(vw) if w.hasHeightForWidth() else w.sizeHint().height()
+        if content_h + frame > self.maximumHeight() and sb_w > 0:
+            # 需要滚动：滚动条会占掉宽度 → 内容按更窄视口重排 → 更高。
+            # 只迭代一次即可收敛：内容高度关于宽度单调不增，第二次迭代
+            # 不会让"是否需要滚动"的结论翻转。
+            vw2 = max(1, vw - sb_w)
+            content_h = w.heightForWidth(vw2) if w.hasHeightForWidth() else w.sizeHint().height()
+        return max(self.minimumHeight(), min(content_h + frame, self.maximumHeight()))
+
+    def _outer_width(self, base: QSize) -> int:
+        """测量用的控件外宽（唯一输入，不读 viewport 的瞬时宽度）"""
+        return self.width() if self.width() > 0 else base.width()
+
     def minimumSizeHint(self):
         # QAbstractScrollArea 默认 minimumSizeHint 含滚动条尺寸（~42px），
         # 会把短内容强行垫高，因此不复用默认值。改为返回"内容高度下限"：
@@ -55,41 +98,14 @@ class _AutoHeightScrollArea(QScrollArea):
         w = self.widget()
         if w is None:
             return QSize(0, 0)
-        frame = 2 * self.frameWidth()
-        vw = self.viewport().width()
-        if vw <= 0:
-            vw = max(1, base.width() - frame)
-        else:
-            # 预留垂直滚动条宽度：内容高度临界时滚动条出现会使视口宽骤减，
-            # wordWrap 内容重折行 → 高度变化 → 滚动条消失 → 宽度反馈环抖动。
-            # 按“含滚动条”的最窄视口测高，滚动条出现后测量基准不变，环闭合。
-            vw = max(1, vw - self.verticalScrollBar().sizeHint().width())
-        if w.hasHeightForWidth():
-            content_h = w.heightForWidth(vw)
-        else:
-            content_h = w.sizeHint().height()
-        h = max(self.minimumHeight(), min(content_h + frame, self.maximumHeight()))
-        return QSize(base.width(), h)
+        return QSize(base.width(), self._height_for_width(self._outer_width(base)))
 
     def sizeHint(self):
         base = super().sizeHint()
         w = self.widget()
         if w is None:
             return base
-        frame = 2 * self.frameWidth()
-        # 用当前视口宽度估算换行后内容高度（QLabel wordWrap 时 heightForWidth 最准）
-        vw = self.viewport().width()
-        if vw <= 0:
-            vw = max(1, base.width() - frame)
-        else:
-            # 同 minimumSizeHint：预留垂直滚动条宽度，消除滚动条出现/消失的宽度反馈环
-            vw = max(1, vw - self.verticalScrollBar().sizeHint().width())
-        if w.hasHeightForWidth():
-            content_h = w.heightForWidth(vw)
-        else:
-            content_h = w.sizeHint().height()
-        h = max(self.minimumHeight(), min(content_h + frame, self.maximumHeight()))
-        return QSize(base.width(), h)
+        return QSize(base.width(), self._height_for_width(self._outer_width(base)))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -632,6 +648,8 @@ class QuestionFloatingWidget(QWidget):
         self._show_custom_input = True
         self._preview_payload = None
         self._collapsed = False
+        # 高度通知合并标志（见 _emit_height_changed）
+        self._height_emit_pending = False
         # 高度严格跟随内容：即使容器处于 dock 模式（高度由 QSplitter 分配、
         # 默认不随内容收缩），也锁定容器高度 = 卡片 sizeHint，
         # 避免"容器比内容高 → 卡片内部/底部出现空白"。
@@ -670,7 +688,7 @@ class QuestionFloatingWidget(QWidget):
         if not self.isVisible():
             return
         self.updateGeometry()
-        self.heightChanged.emit()
+        self._emit_height_changed()
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -907,7 +925,7 @@ class QuestionFloatingWidget(QWidget):
         if new_w != getattr(self, "_last_layout_width", -1):
             self._last_layout_width = new_w
             self.updateGeometry()
-            QTimer.singleShot(0, self.heightChanged.emit)
+            self._emit_height_changed()
 
     def heightForWidth(self, w):
         """按宽度 w 计算真实内容高度
@@ -964,6 +982,23 @@ class QuestionFloatingWidget(QWidget):
         q_max = max(40, min(int(win_h * 0.30), 320))
         self._question_scroll.setMaximumHeight(q_max)
 
+    def _emit_height_changed(self):
+        """合并同一轮事件循环内的多次 heightChanged（防布局自激循环）
+
+        卡片有多个高度通知源（问题区重排 / 选项区变化 / 卡片 resize /
+        自定义输入框增高 / 折叠切换），同一帧内叠加会逼迫 CardContainer
+        连续 _do_expand，每次都重排整条布局链。合并成一次后，容器每轮
+        最多展开一次，配合 _AutoHeightScrollArea 的确定性测量即可收敛。
+        """
+        if self._height_emit_pending:
+            return
+        self._height_emit_pending = True
+        QTimer.singleShot(0, self._flush_height_changed)
+
+    def _flush_height_changed(self):
+        self._height_emit_pending = False
+        self.heightChanged.emit()
+
     def _sync_question_area(self):
         """问题区高度跟随内容：短内容收缩、长内容限高滚动
 
@@ -974,7 +1009,7 @@ class QuestionFloatingWidget(QWidget):
         want_h = sc.sizeHint().height()
         if want_h != sc.height():
             sc.updateGeometry()
-            QTimer.singleShot(0, self.heightChanged.emit)
+            self._emit_height_changed()
 
     def _toggle_collapse(self):
         """折叠/展开提问卡片，仅保留顶栏"""
@@ -986,7 +1021,7 @@ class QuestionFloatingWidget(QWidget):
         self._footer_widget.setVisible(visible)
         self._collapse_btn.setIcon(get_icon("展开" if self._collapsed else "折叠"))
         self._collapse_btn.setToolTip("展开问题" if self._collapsed else "折叠问题")
-        QTimer.singleShot(0, self.heightChanged.emit)
+        self._emit_height_changed()
 
     def _setup_shortcuts(self):
         """设置键盘快捷键"""
@@ -1024,7 +1059,7 @@ class QuestionFloatingWidget(QWidget):
         # 强制几何重新计算，确保 _options_container 的 sizeHint 反映最新内容
         # 避免 CardContainer._do_expand 读到过期的 sizeHint 而跳过展开
         self.updateGeometry()
-        QTimer.singleShot(0, self.heightChanged.emit)
+        self._emit_height_changed()
 
     def clear(self):
         self._questions = []
@@ -1183,7 +1218,7 @@ class QuestionFloatingWidget(QWidget):
 
     def _on_options_height_changed(self):
         """选项区域高度变化时，更新卡片高度"""
-        QTimer.singleShot(0, self.heightChanged.emit)
+        self._emit_height_changed()
 
     def _recycle_options(self):
         """仅隐藏 old option widgets（不销毁），供下次 _render_current 复用"""
@@ -1285,7 +1320,7 @@ class QuestionFloatingWidget(QWidget):
             self.setUpdatesEnabled(True)
             # 内容变更后强制几何重新计算，确保容器高度同步更新
             self.updateGeometry()
-            QTimer.singleShot(0, self.heightChanged.emit)
+            self._emit_height_changed()
 
     def _on_next(self):
         self._save_current_answer()
@@ -1297,7 +1332,7 @@ class QuestionFloatingWidget(QWidget):
             self.setUpdatesEnabled(True)
             # 内容变更后强制几何重新计算，确保容器高度同步更新
             self.updateGeometry()
-            QTimer.singleShot(0, self.heightChanged.emit)
+            self._emit_height_changed()
         else:
             self._build_and_emit_answer()
 
