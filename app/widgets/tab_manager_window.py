@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-TabManagerWindow — Tab 管理器宿主窗口（标准系统窗口）
+TabManagerWindow — Tab 管理器宿主窗口（无边框现代化窗口）
 
 左侧 TabPanel + 右侧 QStackedWidget 嵌入 OpenAIChatToolWindow 实例。
-使用标准系统标题栏，Windows 自动提供 Aero Snap / 摇动 / 任务栏预览等。
+基于 qframelesswindow.FramelessWindow：自绘标题栏（CustomTitleBar），
+Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 """
 
 import platform
+import sys
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +29,8 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from qframelesswindow import FramelessWindow
 
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
@@ -331,7 +335,7 @@ class _DockSideWrapper(QWidget):
                 self.hide()
 
 
-class TabManagerWindow(QWidget):
+class TabManagerWindow(FramelessWindow):
     """Tab 管理器宿主窗口（单例）"""
 
     _instance: Optional["TabManagerWindow"] = None
@@ -411,8 +415,15 @@ class TabManagerWindow(QWidget):
         self.setAttribute(Qt.WA_DeleteOnClose, False)
         # 注：macOS 置顶与最小化互斥（WindowStaysOnTopHint → NSStatusWindowLevel
         # 会丢标题栏最小化点击），置顶统一走 _apply_window_topmost 的软置顶分支
-        # 标准系统窗口：原生标题栏 + Aero Snap + 任务栏预览 + 摇动等全部恢复
-        self.setWindowFlags(Qt.Window)
+        # 无边框窗口：FramelessWindow 自管 flags（FramelessWindowHint），
+        # Aero Snap / 任务栏预览 / 摇动等由 qframelesswindow 原生 WM_NCHITTEST 保留
+        from app.widgets.custom_title_bar import CustomTitleBar
+
+        self.setTitleBar(CustomTitleBar(self))
+        # 顶栏接线：侧栏开关 → 复用 TabPanel 折叠链（sidebarToggled → 宽度动画）
+        self.titleBar.sidebar_toggle_requested.connect(lambda: self._tab_panel._toggle_sidebar())
+        # 顶栏 tab 切换（第一版仅内置「聊天」，无额外视图）
+        self.titleBar.tab_clicked.connect(self._on_titlebar_tab_clicked)
         self.setWindowIcon(QIcon(":/icons/drifox.ico"))
 
         # 确保 Colors 已刷新（主题色初始化）
@@ -496,6 +507,30 @@ class TabManagerWindow(QWidget):
         # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
         QTimer.singleShot(0, self._apply_bg_from_theme)
 
+        # 顶栏内置「聊天」tab（首个 tab 自动激活；后续视图扩展按 id 注册）
+        self.titleBar.add_tab("chat", "聊天")
+
+    def _on_titlebar_tab_clicked(self, tab_id: str):
+        """顶栏 tab 点击（第一版仅内置「聊天」占位，后续视图扩展挂这里）"""
+        logger.debug(f"[TitleBar] tab clicked: {tab_id}")
+
+    def _apply_win11_round_corner(self):
+        """Win11 DWM 圆角；Win10 及更早静默跳过
+
+        DWMWA_WINDOW_CORNER_PREFERENCE(33) = DWMCP_ROUND(2)，
+        调用失败（Win10 无此属性）不影响窗口功能。
+        """
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            hwnd = int(self.winId())
+            pref = ctypes.c_int(2)  # DWMCP_ROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+        except Exception:
+            pass
+
     def _on_theme_changed(self):
         """主题切换时刷新配色
 
@@ -508,6 +543,10 @@ class TabManagerWindow(QWidget):
 
         # 重建样式表
         self._apply_theme_stylesheet()
+
+        # 刷新自绘顶栏（tab 胶囊/按钮样式随主题；Colors 已由调用方 refresh）
+        if hasattr(self.titleBar, "refresh_style"):
+            self.titleBar.refresh_style()
         # 刷新空状态页（字体/颜色随主题或字号刷新）
         if hasattr(self, "_empty_state"):
             self._empty_state.refresh_style()
@@ -806,9 +845,11 @@ class TabManagerWindow(QWidget):
                 pass
 
     def _setup_ui(self):
-        # ── 外层纵向布局：直接放内容区（标准系统窗口自带标题栏） ──
+        # ── 外层纵向布局：直接放内容区（顶部让位自绘无边框标题栏） ──
+        from app.widgets.custom_title_bar import CustomTitleBar
+
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(0, CustomTitleBar.HEIGHT, 0, 0)
         main_layout.setSpacing(0)
 
         # ── 内容区（水平：TabPanel + QStackedWidget） ──
@@ -2680,6 +2721,10 @@ class TabManagerWindow(QWidget):
         已按需求移除记忆，保留此调用点 + timer 空转，避免改动
         moveEvent/resizeEvent 等大量调用点。
         """
+        # FramelessWindow.__init__ 内部 resize(500,500)/winId 创建会同步触发
+        # resize/move 事件，早于本类 __init__ 创建 _geo_save_timer；此时跳过
+        if not hasattr(self, "_geo_save_timer"):
+            return
         from app.utils.window_drag_state import any_window_dragging
 
         if any_window_dragging:
@@ -2721,6 +2766,8 @@ class TabManagerWindow(QWidget):
         if not self._geometry_applied:
             self._geometry_applied = True
             self._restore_geometry()
+            # Win11 DWM 圆角（winId 此刻已有效；仅首次）
+            self._apply_win11_round_corner()
         # 对话区限宽居中：首次显示同步 wrapper margins（Resize 事件链可能晚到）
         if hasattr(self, "_chat_wrapper"):
             try:
@@ -3058,6 +3105,12 @@ class TabManagerWindow(QWidget):
         resize 停止 100ms 后 blocking 解除，_on_resize_finished 触发
         一次完整 relayout 收拢到正确尺寸。
         """
+        if not hasattr(self, "_resize_blocking"):
+            # FramelessWindow.__init__ 内部 resize(500,500) 同步触发的首个 Resize：
+            # 本类节流状态尚未初始化，直接走基类布局（含顶栏宽度同步）并返回
+            super().resizeEvent(event)
+            return
+
         if self._resize_blocking:
             # ── 阶段二：blocking 活跃，跳过布局传播 ──
             self._resize_timer.start()  # 重置防抖
