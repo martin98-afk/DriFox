@@ -18449,7 +18449,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         Colors.refresh()
         # 容器 — 仅保留透明占位（占 layout 宽度，无视觉装饰）
-        self._project_branch_container.setStyleSheet(f"""
+        self._project_branch_container.setStyleSheet("""
             QFrame#projectBranchContainer {{
                 background: transparent;
                 border: 1px solid transparent;
