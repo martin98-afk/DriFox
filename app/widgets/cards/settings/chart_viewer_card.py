@@ -46,8 +46,9 @@ _ECHARTS_CDN = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"
 def _echarts_script_tag() -> str:
     """本地 vendor 优先、缺失降级 CDN（与 message_card._get_vendor_script_tags 同逻辑）"""
     base_dirs = [os.getcwd()]
-    if hasattr(sys, "_MEIPASS"):
-        base_dirs.append(sys._MEIPASS)
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        base_dirs.append(meipass)
     for base in base_dirs:
         candidate = os.path.join(base, _ECHARTS_LOCAL)
         if os.path.isfile(candidate):
@@ -296,7 +297,7 @@ class ChartViewerCard(BaseSettingsCard):
 
         # 导出依赖 window._chartType 就绪；页面 load 完成后再放行导出（防点击空跑）
         self._export_ready = False
-        self._webview.loadFinished.connect(self._on_load_finished, Qt.UniqueConnection)
+        self._webview.loadFinished.connect(self._on_load_finished, Qt.ConnectionType.UniqueConnection)
 
     def _on_load_finished(self, ok: bool):
         try:
