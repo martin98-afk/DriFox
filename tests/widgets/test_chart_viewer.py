@@ -199,3 +199,43 @@ class TestSignalChain:
         page.chartExpandRequested.connect(lambda t, p: got.append(p))
         page.javaScriptConsoleMessage(0, "pywebview_action:chart_expand:evil:AAAA", 0, "")
         assert got == []
+
+
+class TestComposeWithDpr:
+    @staticmethod
+    def _make_viewer(qapp):
+        """CodeWebViewer 需要共享 profile 先初始化（应用启动时由 main.py 调用）"""
+        from app.core.webengine_profile import init_shared_web_profile
+
+        init_shared_web_profile(qapp)
+        from app.widgets.message_card import CodeWebViewer
+
+        return CodeWebViewer()
+
+    def test_compose_scales_physical_pixels(self, qapp):
+        """compose 带 dpr=3 → 输出物理像素 3x、逻辑尺寸还原"""
+        from PySide6.QtGui import QPixmap
+
+        viewer = self._make_viewer(qapp)
+        src = QPixmap(30, 20)
+        out = viewer._compose_with_solid_bg(src, 100, 50, dpr=3.0)
+        assert out.width() == 300 and out.height() == 150
+        assert abs(out.devicePixelRatio() - 3.0) < 1e-6
+        assert out.width() / out.devicePixelRatio() == 100  # 逻辑宽还原
+
+    def test_compose_default_dpr_unchanged(self, qapp):
+        """dpr 缺省 1.0 行为与旧版一致"""
+        from PySide6.QtGui import QPixmap
+
+        viewer = self._make_viewer(qapp)
+        out = viewer._compose_with_solid_bg(QPixmap(), 80, 40)
+        assert out.width() == 80 and out.height() == 40
+
+    def test_compose_dpr_below_one_clamped(self, qapp):
+        """dpr<1 被钳制为 1.0（防止导出反而降采样）"""
+        from PySide6.QtGui import QPixmap
+
+        viewer = self._make_viewer(qapp)
+        out = viewer._compose_with_solid_bg(QPixmap(), 60, 30, dpr=0.5)
+        assert out.width() == 60 and out.height() == 30
+        assert abs(out.devicePixelRatio() - 1.0) < 1e-6

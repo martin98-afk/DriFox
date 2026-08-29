@@ -8034,13 +8034,14 @@ class CodeWebViewer(QWebEngineView):
         # 兜底：暗色主题背景
         return QColor("#2B2B2B")
 
-    def _compose_with_solid_bg(self, source: "QPixmap", width: int, height: int) -> "QPixmap":
-        """在 QPixmap 上填充实心卡片背景，再合成 source
+    def _compose_with_solid_bg(self, source: "QPixmap", width: int, height: int, dpr: float = 1.0) -> "QPixmap":
+        """在 QPixmap 上填充实心卡片背景，再合成 source（dpr>1 时输出高清物理像素）
 
         Args:
             source:  从 widget.grab() 拿到的 pixmap（可能含透明区）
-            width:   目标宽度
-            height:  目标高度
+            width:   目标逻辑宽度
+            height:  目标逻辑高度
+            dpr:     输出 devicePixelRatio（物理像素 = 逻辑 × dpr；<1 钳制为 1）
 
         Returns:
             填充实心卡片背景 + 绘制 source 的合成 pixmap
@@ -8049,104 +8050,111 @@ class CodeWebViewer(QWebEngineView):
 
         if width <= 0 or height <= 0:
             return source
-        result = QPixmap(width, height)
+        dpr = max(1.0, float(dpr))
+        result = QPixmap(round(width * dpr), round(height * dpr))
+        result.setDevicePixelRatio(dpr)
         result.fill(self._get_card_bg_color())
         if not source.isNull():
             painter = QPainter(result)
-            painter.drawPixmap(0, 0, source)
+            painter.drawPixmap(0, 0, source)  # source 与 result 同 DPR 时按物理像素 1:1 绘制
             painter.end()
         return result
 
     def _capture_full_content(self) -> "QPixmap":
-        """截取消息的完整内容为一张大图（实心背景 + 内容合成）
+        """截取消息的完整内容为一张高清大图（3x 物理像素 + 实心背景合成）
 
-        策略：临时解除 body max-height 限制并撑大视图到完整内容高度，
-        让全部内容一次性渲染可见，然后通过一次 grab() 截取整张图片，
-        最后用 QPixmap 主动填充实心卡片背景 + 合成 grab 结果。
+        策略：临时 setZoomFactor(3) 并把控件尺寸×3（布局视口 CSS 宽度 = w*3/3 = w
+        不变，排版不重排，内容以 3x 物理像素渲染），grab 后按实际物理/逻辑比设置
+        devicePixelRatio 还原逻辑尺寸。导出 PNG 保存物理像素，高分屏/放大查看均清晰。
 
-        相比原实现：
-        - 主动 QPixmap.fill 卡片色（实心），避免半透明 rgba 在 PNG 中呈现为黑
-        - 单次 200ms 等待 + processEvents() 强制布局（替代 400ms×2）
-        - grab(QRect) 显式指定区域，避免 setFixedHeight 后未生效导致漏抓
+        长消息：临时解除 body max-height 并撑高到完整内容高度后单次 grab。
+        任何异常兜底回退 1x grab 路径，保证导出功能永不失败。
         """
         import json as json_mod
 
         from PySide6.QtCore import QEventLoop, QPoint, QRect, QTimer
         from PySide6.QtWidgets import QApplication
 
+        _SCALE = 3.0
+
         page = self.page()
         view_w = self.width()
         cur_h = self.height()
+        if view_w <= 0:
+            return self._compose_with_solid_bg(self.grab(), max(1, view_w), cur_h)
 
-        # 1. 获取完整内容高度
+        # 1. 获取完整内容高度（CSS 逻辑像素，与 zoom 无关）
         dims_raw = self._run_js_sync("JSON.stringify({sh: document.body.scrollHeight})")
-        if not dims_raw:
-            # 拿不到高度 → 兜底：直接 grab + 强制实心背景
-            return self._compose_with_solid_bg(self.grab(), view_w, cur_h)
-
-        try:
-            scroll_h = json_mod.loads(dims_raw).get("sh", 0)
-        except Exception:
-            scroll_h = 0
-
-        # 2. 短消息：内容不超出 → 不展开
-        if scroll_h <= cur_h or scroll_h <= 0:
-            grabbed = self.grab()
-            return self._compose_with_solid_bg(
-                grabbed,
-                view_w,
-                max(cur_h, grabbed.height() if not grabbed.isNull() else cur_h),
-            )
-
-        # 3. 长消息：临时展开
-        old_styles = self._run_js_sync("""
-            var s = document.body.style;
-            JSON.stringify({maxHeight: s.maxHeight, overflowY: s.overflowY})
-        """)
-        self._run_js_sync("""
-            document.body.style.maxHeight = 'none';
-            document.body.style.overflowY = 'hidden';
-        """)
-
-        orig_height = self.height()
-        target_h = scroll_h + 20
-        self.setFixedHeight(target_h)
-        self.update()
-        # ★ 强制布局：让 setFixedHeight 真的撑大 widget
-        QApplication.processEvents()
-
-        self._run_js_sync("window.scrollTo(0, 0);")
-
-        # ★ 单次 200ms 等待（替代 400ms×2）
-        stable_loop = QEventLoop()
-        QTimer.singleShot(200, stable_loop.quit)
-        stable_loop.exec()
-
-        # 4. 显式 grab 整个目标区域
-        full_pix = self.grab(QRect(QPoint(0, 0), self.size()))
-
-        # 5. 合成：实心背景 + grab 内容
-        final_w = full_pix.width() if not full_pix.isNull() else view_w
-        final_h = max(target_h, full_pix.height() if not full_pix.isNull() else 0)
-        result = self._compose_with_solid_bg(full_pix, final_w, final_h)
-
-        # 6. 恢复视图和样式
-        self.setFixedHeight(orig_height)
-        if old_styles:
+        scroll_h = 0
+        if dims_raw:
             try:
-                prev = json_mod.loads(old_styles)
-                js_restore = f"""
-                    document.body.style.maxHeight = {json_mod.dumps(prev.get("maxHeight", ""))};
-                    document.body.style.overflowY = {json_mod.dumps(prev.get("overflowY", "auto"))};
-                    window.scrollTo(0, 0);
-                """
-                self._run_js_sync(js_restore)
+                scroll_h = json_mod.loads(dims_raw).get("sh", 0)
             except Exception:
-                self._run_js_sync("window.scrollTo(0, 0);")
+                scroll_h = 0
+        if scroll_h <= 0:
+            # 拿不到高度 → 按当前视口高度走 zoom 高清路径
+            scroll_h = cur_h
 
-        if result.isNull() or result.width() <= 0 or result.height() <= 0:
-            return self.grab()
-        return result
+        # 2. 目标逻辑高度：内容超出视图时展开全部
+        is_long = scroll_h > cur_h
+        target_logical_h = (scroll_h + 20) if is_long else cur_h
+
+        orig_zoom = self.zoomFactor()
+        orig_size = self.size()
+        old_styles = None
+        try:
+            # 3. 长消息：临时解除 body max-height
+            if is_long:
+                old_styles = self._run_js_sync("""
+                    var s = document.body.style;
+                    JSON.stringify({maxHeight: s.maxHeight, overflowY: s.overflowY})
+                """)
+                self._run_js_sync("""
+                    document.body.style.maxHeight = 'none';
+                    document.body.style.overflowY = 'hidden';
+                """)
+
+            # 4. zoom 3x + 控件尺寸×3：内容物理渲染 3x，布局视口 CSS 宽度不变
+            self.setZoomFactor(_SCALE)
+            self.setFixedSize(round(view_w * _SCALE), round(target_logical_h * _SCALE))
+            self.update()
+            # ★ 强制布局：让 setFixedSize 真的撑大 widget
+            QApplication.processEvents()
+            self._run_js_sync("window.scrollTo(0, 0);")
+
+            # ★ 等待 zoom 重排 + 渲染稳定
+            stable_loop = QEventLoop()
+            QTimer.singleShot(250, stable_loop.quit)
+            stable_loop.exec()
+
+            # 5. 显式 grab 整个目标区域，按实际物理/逻辑比还原逻辑尺寸
+            full_pix = self.grab(QRect(QPoint(0, 0), self.size()))
+            if full_pix.isNull() or full_pix.width() <= 0:
+                return self._compose_with_solid_bg(self.grab(), view_w, target_logical_h)
+            dpr = full_pix.width() / view_w  # 物理/逻辑（= 窗口 DPR × zoom）
+            final_h = max(target_logical_h, round(full_pix.height() / dpr))
+            return self._compose_with_solid_bg(full_pix, view_w, final_h, dpr=dpr)
+        except Exception:
+            logger.exception("[export] zoom 3x 抓取失败，回退 1x")
+            return self._compose_with_solid_bg(self.grab(), view_w, cur_h)
+        finally:
+            # 6. 恢复 zoom / 尺寸 / 样式
+            try:
+                self.setZoomFactor(orig_zoom)
+                self.setFixedSize(orig_size)
+            except Exception:
+                pass
+            if old_styles:
+                try:
+                    prev = json_mod.loads(old_styles)
+                    js_restore = f"""
+                        document.body.style.maxHeight = {json_mod.dumps(prev.get("maxHeight", ""))};
+                        document.body.style.overflowY = {json_mod.dumps(prev.get("overflowY", "auto"))};
+                        window.scrollTo(0, 0);
+                    """
+                    self._run_js_sync(js_restore)
+                except Exception:
+                    self._run_js_sync("window.scrollTo(0, 0);")
 
     def _split_and_stitch(self, pixmap: "QPixmap", max_cols: int = 6) -> "QPixmap":
         """将纵向长图均匀分段后水平拼接为宽高合理的矩形图
