@@ -21,8 +21,8 @@
 import sys
 from typing import Callable, Dict, Optional
 
-from PyQt5.QtCore import QRect, QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon, QPainter
+from PyQt5.QtCore import QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPainterPath
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from qframelesswindow.titlebar import TitleBarBase
@@ -44,6 +44,27 @@ _WHITE_ICON_PATH = ":/icons/{name}.svg"
 # 关闭按钮的 hover / pressed 底色（Windows 系统红，与主题无关）
 _CLOSE_HOVER_BG = QColor(232, 17, 35)
 _CLOSE_PRESSED_BG = QColor(241, 112, 122)
+
+
+def _hover_tint() -> tuple:
+    """按当前主题明暗给出 hover / pressed 的叠加底色（前景色低透明度）
+
+    浅色主题 → 叠黑（淡灰）；深色主题 → 叠白（淡白）。这样在任何主题下
+    都只是一层干净的明暗变化，不会出现"hover 发黑/发脏"的色块。
+    """
+    try:
+        from app.utils.utils import _is_current_theme_light
+
+        light = _is_current_theme_light()
+    except Exception:
+        light = False
+
+    base = QColor(0, 0, 0) if light else QColor(255, 255, 255)
+    hover = QColor(base)
+    hover.setAlpha(8 if light else 12)
+    pressed = QColor(base)
+    pressed.setAlpha(14 if light else 18)
+    return hover, pressed
 
 
 def _qcolor(css: str, fallback: str) -> QColor:
@@ -78,22 +99,33 @@ class _BaseWinButton(TitleBarButton):
     ICON_NAME = ""  # 图标名（不含扩展名），子类覆盖
     ICON_SIZE = 12  # 图标渲染边长（px）
 
+    #: 按钮占满标题栏高度（不留上下边距），hover 区域才能贴齐窗口顶边，
+    #: 关闭按钮的圆角也才能与窗口圆角同心。
+    HEIGHT = 38
+    WIDTH = 46
+
     @property
     def ICON(self) -> int:  # noqa: N802 - 兼容旧命名
         return self.ICON_SIZE
 
     def __init__(self, parent=None, *, danger: bool = False):
         super().__init__(parent)
-        self.setFixedSize(46, 32)
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
         self._danger = danger
         self.apply_theme_colors()
 
     def apply_theme_colors(self) -> None:
-        """按当前主题 token 重设四态颜色（Colors.refresh() 由调用方先执行）"""
-        # 图标色：三态一致，取主题次级文字色（浅色=柔和灰，深色=柔和白）
+        """按当前主题的明暗重设四态颜色
+
+        ★ hover 底色**不用** ``Colors.HOVER_BG``：那是"内容区"的悬停色，
+        各主题取值差异很大（深色主题里可能是带饱和度的蓝/紫的 12%），
+        铺在窗口标题栏这块大面积上会显脏；而且部分主题给了接近黑的取值，
+        直接表现为"hover 变黑块"。这里改为对齐 Win11 的做法——**用前景色的
+        低透明度叠加**：浅色主题叠黑、深色主题叠白，任何主题下都是干净的
+        一层轻灰/轻白。
+        """
         fg = _qcolor(Colors.TEXT_SECONDARY, "rgba(255,255,255,0.65)")
-        hover_bg = _qcolor(Colors.HOVER_BG, "rgba(255,255,255,0.08)")
-        pressed_bg = _qcolor(Colors.HOVER_BG_STRONG, "rgba(255,255,255,0.14)")
+        hover_bg, pressed_bg = _hover_tint()
 
         self.setNormalColor(fg)
         self.setHoverColor(fg)
@@ -173,9 +205,17 @@ class MaximizeButton(_BaseWinButton):
 
 
 class CloseButton(_BaseWinButton):
-    """关闭：normal 用主题图标，hover/pressed（红底）强制白色图标"""
+    """关闭：normal 用主题图标，hover/pressed（红底）强制白色图标
+
+    额外处理圆角：本按钮紧贴窗口右上角，而窗口是 DWM 圆角。若 hover 底色
+    画成直角矩形，右上角会"戳出"窗口圆角之外，看起来和窗口对不齐。
+    这里把**右上角**裁成与窗口相同的圆角（最大化/全屏时窗口无圆角 → 直角）。
+    """
 
     ICON_NAME = "窗体-关闭"
+
+    #: 与 DWM 圆角（Win11 DWMCP_ROUND）一致
+    WINDOW_CORNER = 8
 
     def _icon(self) -> QIcon:
         if self._state == TitleBarButtonState.NORMAL:
@@ -183,6 +223,34 @@ class CloseButton(_BaseWinButton):
         # 红底上必须用白色版本：浅色主题的 #333 变体在红底上几乎看不见
         icon = QIcon(_WHITE_ICON_PATH.format(name=self.ICON_NAME))
         return icon if not icon.isNull() else get_icon(self.ICON_NAME)
+
+    def _corner_radius(self) -> int:
+        """窗口右上角的圆角半径（最大化 / 全屏时为 0）"""
+        win = self.window()
+        if win is not None and (win.isMaximized() or win.isFullScreen()):
+            return 0
+        return min(self.WINDOW_CORNER, self.width(), self.height())
+
+    def _draw_bg(self, painter: QPainter, bg_color: QColor) -> None:
+        if bg_color.alpha() == 0:
+            return  # normal 态全透明，不必绘制
+        r = self._corner_radius()
+        if r <= 0:
+            super()._draw_bg(painter, bg_color)
+            return
+
+        painter.setBrush(bg_color)
+        painter.setPen(Qt.NoPen)
+        path = QPainterPath()
+        w, h = self.width(), self.height()
+        path.moveTo(0, 0)
+        path.lineTo(w - r, 0)
+        # 右上角圆弧：外接正方形 (w-2r, 0, 2r, 2r)，从 90°(顶) 顺时针到 0°(右)
+        path.arcTo(QRectF(w - 2 * r, 0, 2 * r, 2 * r), 90, -90)
+        path.lineTo(w, h)
+        path.lineTo(0, h)
+        path.closeSubpath()
+        painter.fillPath(path, bg_color)
 
 
 class CustomTabButton(QWidget):
@@ -213,7 +281,7 @@ class CustomTabButton(QWidget):
         self.setFixedHeight(26)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 0, 6 if closable else 12, 0)
+        layout.setContentsMargins(11, 0, 4 if closable else 11, 0)
         layout.setSpacing(2)
         self._icon_label: Optional[QLabel] = None
         if icon_path:
@@ -245,11 +313,15 @@ class CustomTabButton(QWidget):
             self.refresh_style()
 
     def refresh_style(self):
-        """按当前主题 token 重建样式（Colors.refresh() 由调用方负责）"""
+        """按当前主题 token 重建样式（Colors.refresh() 由调用方负责）
+
+        分段控件风格（segmented control）：容器统一提供浅底胶囊槽，激活 tab
+        是卡色「滑块」（浮起块），非激活透明——参考 Win11/飞书分段切换。
+        """
         if self._active:
             self.setStyleSheet(
                 "CustomTabButton {"
-                f" background: {Colors.TAB_ACTIVE_BG};"
+                f" background: {Colors.CARD_BG_SOLID};"
                 " border: none; border-radius: 13px; }"
             )
             label_color = Colors.TEXT_PRIMARY
@@ -260,14 +332,13 @@ class CustomTabButton(QWidget):
                 " background: transparent;"
                 " border: none; border-radius: 13px; }"
                 "CustomTabButton:hover {"
-                f" background: {Colors.TAB_HOVER_BG}; }}"
+                f" background: {Colors.HOVER_BG}; }}"
             )
             label_color = Colors.TEXT_SECONDARY
             close_hover = Colors.TEXT_PRIMARY
         self._label.setStyleSheet(
             f"color: {label_color}; background: transparent;"
             f" {get_font_family_css()} {font_size_css(13)};"
-            + (" font-weight: bold;" if self._active else "")
         )
         if self._close_btn is not None:
             self._close_btn.setStyleSheet(
@@ -319,18 +390,24 @@ class CustomTitleBar(TitleBarBase):
         self._brand_title = QLabel("DriFox", self)
         self._brand_version = QLabel(Settings.current_version, self)
 
-        # ── 中央区：tab 容器 ──
+        # ── 中央区：tab 容器（分段控件槽：浅底胶囊包住全部 tab）──
         self._tab_container = QWidget(self)
+        self._tab_container.setObjectName("titlebarTabSegment")
         self._tab_layout = QHBoxLayout(self._tab_container)
-        self._tab_layout.setContentsMargins(0, 0, 0, 0)
-        self._tab_layout.setSpacing(6)
+        self._tab_layout.setContentsMargins(3, 3, 3, 3)
+        self._tab_layout.setSpacing(0)
+        # 无 tab 时隐藏空胶囊槽（add/remove_tab 时同步）
+        self._tab_container.hide()
 
         # ── 三区布局（mac 隐藏系统按钮 + 左侧留白给交通灯）──
         left_pad = self.MAC_TRAFFIC_LIGHT_PAD if self._is_mac else 8
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(left_pad, 3, 0, 3)
+        # 上下 margin 必须为 0：系统按钮高度 = 标题栏高度，hover 底色才能
+        # 贴齐窗口顶边，关闭按钮的圆角也才能与窗口圆角同心（否则圆角差 3px，
+        # 视觉上就是"hover 和窗口对不齐"）。
+        layout.setContentsMargins(left_pad, 0, 0, 0)
         layout.setSpacing(4)
-        # AlignVCenter 保证 32px 系统按钮在 38px 栏内垂直居中
+        # AlignVCenter 保证左侧控件（30x28 折叠钮、文字）在栏内垂直居中
         layout.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         layout.addWidget(self._sidebar_btn)
         layout.addSpacing(2)
@@ -338,7 +415,7 @@ class CustomTitleBar(TitleBarBase):
         layout.addSpacing(2)
         layout.addWidget(self._brand_version)
         layout.addStretch(1)
-        layout.addWidget(self._tab_container, 0, Qt.AlignCenter)
+        layout.addWidget(self._tab_container, 0, Qt.AlignVCenter)
         layout.addStretch(1)
         if not self._is_mac:
             layout.addWidget(self.minBtn, 0, Qt.AlignRight)
@@ -460,6 +537,7 @@ class CustomTitleBar(TitleBarBase):
         self._tab_layout.addWidget(btn)
         self._tabs[tab_id] = btn
         btn.refresh_style()
+        self._tab_container.setVisible(True)
         if self._active_id is None:
             self.set_active_tab(tab_id)
 
@@ -470,6 +548,8 @@ class CustomTitleBar(TitleBarBase):
             return
         self._tab_layout.removeWidget(btn)
         btn.deleteLater()
+        if not self._tabs:
+            self._tab_container.setVisible(False)
         if self._active_id == tab_id:
             self._active_id = None
             if self._tabs:
@@ -487,6 +567,14 @@ class CustomTitleBar(TitleBarBase):
         """主题切换后刷新样式（Colors.refresh() 由调用方先执行）"""
         for b in self._tabs.values():
             b.refresh_style()
+        # tab 分段槽：胶囊底（capsule token 深浅主题自适应），激活滑块由
+        # CustomTabButton 自身用卡色绘制
+        self._tab_container.setStyleSheet(
+            "QWidget#titlebarTabSegment {"
+            f" background: {Colors.CAPSULE_BG};"
+            f" border: 1px solid {Colors.CAPSULE_BORDER};"
+            " border-radius: 16px; }"
+        )
         # 系统按钮：自绘色取自主题 token（深色主题下不再是黑叠黑）
         for b in (self.minBtn, self.maxBtn, self.closeBtn):
             if hasattr(b, "apply_theme_colors"):
