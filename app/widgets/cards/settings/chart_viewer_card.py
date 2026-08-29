@@ -44,16 +44,24 @@ _ECHARTS_CDN = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"
 
 
 def _echarts_script_tag() -> str:
-    """本地 vendor 优先、缺失降级 CDN（与 message_card._get_vendor_script_tags 同逻辑）"""
-    base_dirs = [os.getcwd()]
+    """本地 vendor 优先、缺失降级 CDN（与 message_card._get_vendor_script_tags 同逻辑）
+
+    返回完整的 <script src=...>...</script> 对；闭合缺失会被 HTML 解析器把后续
+    DOM/脚本全部吞进 script 文本，导致整页黑屏（曾踩坑）。
+    """
+    # 项目根从本文件上溯 5 级（app/widgets/cards/settings/xxx.py → 项目根）
+    project_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    )
+    base_dirs = [project_root]
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         base_dirs.append(meipass)
     for base in base_dirs:
         candidate = os.path.join(base, _ECHARTS_LOCAL)
         if os.path.isfile(candidate):
-            return f'<script src="{QUrl.fromLocalFile(candidate).toString()}">'
-    return f'<script src="{_ECHARTS_CDN}">'
+            return '<script src="' + QUrl.fromLocalFile(candidate).toString() + '">' + _END_SCRIPT
+    return '<script src="' + _ECHARTS_CDN + '">' + _END_SCRIPT
 
 
 def decode_chart_payload(payload_b64: str) -> str:
@@ -88,6 +96,8 @@ function _emitPng(dataUrl) {
     console.log('pywebview_action:save_chart_png:' + _b64EncodeUtf8(window._chartName || 'chart') + ':' + b64);
 }
 function _exportEchartsPng(scale) {
+    if (!chart) { console.error('[chart] echarts not ready'); return; }
+    chart.resize();  // 强制按当前容器尺寸重算，防止实例内部宽度过期导致导出畸形
     _emitPng(chart.getDataURL({ type: 'png', pixelRatio: scale, backgroundColor: '%(bg)s' }));
 }
 function _exportMermaidPng(scale) {
@@ -155,11 +165,7 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str) -> str:
             + "        chart = echarts.init(el, 'dark');\n"
             + "        chart.setOption(option);\n"
             + "    } catch (e) {\n"
-            + "        el.innerHTML = '<pre style=\"color:#e06c75;padding:16px;\">' + '图表渲染失败: ' + e + '"
-            + "'"
-            + pre_end
-            + "'"
-            + ";\n"
+            + "        el.innerHTML = '<pre style=\"color:#e06c75;padding:16px;\">图表渲染失败: ' + e + '" + pre_end + "';\n"
             + "        return;\n"
             + "    }\n"
             + "    window.addEventListener('resize', function () { chart && chart.resize(); });\n"
@@ -190,11 +196,7 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str) -> str:
             + "        if (/<script/i.test(svgHtml)) throw new Error('svg contains script');\n"
             + "        wrap.innerHTML = svgHtml;\n"
             + "    } catch (e) {\n"
-            + "        wrap.innerHTML = '<pre style=\"color:#e06c75;padding:16px;\">' + '图表渲染失败: ' + e + '"
-            + "'"
-            + pre_end
-            + "'"
-            + ";\n"
+            + "        wrap.innerHTML = '<pre style=\"color:#e06c75;padding:16px;\">图表渲染失败: ' + e + '" + pre_end + "';\n"
             + "    }\n"
             + "})();\n"
             + "window._chartType = 'mermaid';\n"
@@ -288,7 +290,7 @@ class ChartViewerCard(BaseSettingsCard):
                 + _BODY_OPEN
                 + "<p style='color:#e06c75'>"
                 + str(e)
-                + ""
+                + _close("p")
                 + _END_BODY
                 + _END_HTML
             )

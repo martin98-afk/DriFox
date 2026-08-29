@@ -4885,7 +4885,7 @@ class CodeWebViewer(QWebEngineView):
                 .chart-toolbar {{
                     position: absolute;
                     top: 8px;
-                    right: 8px;
+                    right: 24px;
                     display: flex;
                     gap: 6px;
                     opacity: 0;
@@ -6328,6 +6328,7 @@ class CodeWebViewer(QWebEngineView):
                         ev.stopPropagation();
                         try {{
                             if (type === 'echarts' && el._chartInstance) {{
+                                el._chartInstance.resize();  // 防实例内部宽度过期导致导出畸形
                                 _emitChartPng(el._chartInstance.getDataURL({{ type: 'png', pixelRatio: 3, backgroundColor: '#1B1E24' }}));
                             }} else if (type === 'mermaid') {{
                                 _exportMermaidSvgPng(el.querySelector('svg'), 3);
