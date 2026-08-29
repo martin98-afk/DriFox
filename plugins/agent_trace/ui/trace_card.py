@@ -238,17 +238,25 @@ class TraceCardWidget(QWidget):
         if not colors:
             return
         colors.setdefault("is_dark", bool(self._ctx.get("is_dark", True)))
+        # ctx.font_size 是「已应用缩放的像素值」→ 必须 setPixelSize（勿当磅值用）
+        self._fs = max(10, int(self._ctx.get("font_size") or 12))
         self._timeline.set_colors(colors)
         self._turn_list.set_colors(colors)
         self._detail.set_colors(colors)
         self._style_bars(colors)
 
         font_family = self._ctx.get("font_family") or "Segoe UI"
-        font_size = self._ctx.get("font_size") or 12
-        f = QFont(font_family, font_size)
+        f = QFont(font_family)
+        f.setPixelSize(self._fs)
         self.setFont(f)
         self._timeline._apply_font(f)
         self._turn_list._apply_font(f)
+        try:  # SegmentedWidget（qfluentwidgets）字体跟随
+            seg_font = QFont(font_family)
+            seg_font.setPixelSize(max(10, self._fs - 1))
+            self._view_mode.setFont(seg_font)
+        except Exception:
+            pass
 
     def _style_bars(self, colors: Dict[str, Any]) -> None:
         is_dark = colors.get("is_dark", True)
@@ -257,6 +265,8 @@ class TraceCardWidget(QWidget):
         border = colors.get("border", "#333333")
         accent = colors.get("accent", "#7AA2F7")
         mono = _mono_css()
+        fs = getattr(self, "_fs", 12)
+        fs_small = max(10, fs - 2)
         line_c = "255,255,255" if is_dark else "0,0,0"
         top = self.findChild(QFrame, "agentTraceTopBar")
         if top is not None:
@@ -264,19 +274,19 @@ class TraceCardWidget(QWidget):
                 f"#agentTraceTopBar {{ background: transparent; border-bottom: 1px solid {border}; }}"
                 f"#agentTraceTopBar QPushButton {{ background: transparent; color: {secondary};"
                 f"  border: 1px solid transparent; border-radius: 4px; padding: 0 12px;"
-                f"  font-size: 12px; font-family: {mono}; }}"
+                f"  font-size: {max(10, fs - 1)}px; font-family: {mono}; }}"
                 f"#agentTraceTopBar QPushButton:hover {{ background: rgba({line_c},0.08); }}"
                 f"#agentTraceTopBar QPushButton:checked {{ color: {accent}; border: 1px solid {accent}; }}"
             )
         self._search_box.setStyleSheet(
             f"SearchLineEdit {{ background: rgba({line_c},0.05); border: 1px solid {border};"
-            f"  border-radius: 4px; color: {text}; font-size: 12px; }}"
+            f"  border-radius: 4px; color: {text}; font-size: {max(10, fs - 1)}px; }}"
         )
         bottom = self.findChild(QFrame, "agentTraceBottomBar")
         if bottom is not None:
             bottom.setStyleSheet(f"#agentTraceBottomBar {{ border-top: 1px solid {border}; }}")
         for lbl in (self._stats_turns, self._stats_time, self._stats_ctx):
-            lbl.setStyleSheet(f"color: {secondary}; font-family: {mono}; font-size: 11px;")
+            lbl.setStyleSheet(f"color: {secondary}; font-family: {mono}; font-size: {fs_small}px;")
 
     # ──────────────────── collector 切换 ────────────────────
 
@@ -339,7 +349,7 @@ class TraceCardWidget(QWidget):
         ):
             try:
                 getattr(self._collector, sig).disconnect(slot)
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass
 
     def _unbind_backend_stats_signals(self) -> None:
@@ -350,7 +360,7 @@ class TraceCardWidget(QWidget):
             if be is not None and hasattr(be, "context_updated"):
                 try:
                     be.context_updated.disconnect(self._on_context_updated)
-                except (TypeError, RuntimeError):
+                except TypeError, RuntimeError:
                     pass
 
     # ──────────────────── collector 信号 → UI ────────────────────
@@ -425,9 +435,7 @@ class TraceCardWidget(QWidget):
         tool_ms = sum(max(0, r.duration_ms) for r in records if r.kind == EntryKind.TOOL)
         self._stats_turns.setText(f"{turns} 轮 · {len(records)} 步")
         self._stats_time.setText(
-            f"LLM {format_duration(llm_ms)} · 工具 {format_duration(tool_ms)}"
-            if records
-            else "LLM - · 工具 -"
+            f"LLM {format_duration(llm_ms)} · 工具 {format_duration(tool_ms)}" if records else "LLM - · 工具 -"
         )
         if self._context_tokens > 0:
             ctx_text = f"上下文 {self._context_tokens / 1000:.1f}K tok"

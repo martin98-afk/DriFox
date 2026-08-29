@@ -4,12 +4,13 @@
 实现要点：
 - ``QListWidget`` + 自定义 ``QStyledItemDelegate`` 自绘行（无动态 widget 时序坑）。
 - **类型徽章**：圆角小块 + 类型色文字 + 12% 透明类型色底（deepseek 风格）。
+  徽章宽度按最长标签（ASSISTANT）以 QFontMetrics 实测，杜绝文字被裁。
 - **右侧列语义**：TOOL / ASSISTANT 显示精确时长；SYSTEM / USER / CONTEXT
   显示绝对时间（消息类 hook 同秒注入时长的 0ms 满屏没有信息量）。
-- **类型过滤 chips** + **搜索过滤**：可见索引映射（``Qt.UserRole+1`` 存 record 索引）。
+- **字体跟随系统设置**：ctx.font_size 是「已应用缩放的像素值」，一律
+  ``QFont.setPixelSize``（v3 曾误传给 QFont 当磅值 → 字体过大遮挡）。
 - **tail 增量化**（v3）：``set_tail`` 只增删尾部 in-flight 行，主列表 items
   不再全量重建 → 修「历史记录一直在刷新」的滚动跳顶/闪烁。
-- turn 分组：真实 USER 行顶部画分隔线 + 右上角「Turn N」。
 - 颜色一律 hex + :func:`with_alpha` 派生（禁 rgba 字符串，防黑块，坑 P022）。
 """
 
@@ -41,14 +42,6 @@ from .trace_models import (
     with_alpha,
 )
 
-# ── 行布局常量 ──
-ROW_H = 28
-COL_TYPE = 12
-TYPE_W = 78
-COL_MAIN = COL_TYPE + TYPE_W + 10
-META_W = 78
-PAD_R = 14
-
 FILTER_CHIPS = (
     ("all", "全部", None),
     ("system", "系统", EntryKind.SYSTEM),
@@ -61,24 +54,15 @@ FILTER_CHIPS = (
 # 这些类型的行右侧显示精确时长；其余显示绝对时间
 DURATION_KINDS = (EntryKind.TOOL, EntryKind.ASSISTANT)
 
-
-def _mono_font(base: QFont, size_delta: float = -1.0) -> QFont:
-    f = QFont(base)
-    f.setFamily("Cascadia Mono")
-    f.setStyleHint(QFont.Monospace)
-    f.setPointSizeF(max(7.5, base.pointSizeF() + size_delta))
-    return f
-
-
-def _row_main_text(rec: TraceRecord) -> str:
-    """行主文本：TOOL 行带 tool 名前缀（对齐 deepseek `skill {"name":...}`）；其余为内容首行。"""
-    if rec.kind == EntryKind.TOOL:
-        return f"{rec.label} {rec.preview}".strip()
-    return rec.preview
+_MONO_FAMILY = "Cascadia Mono"
 
 
 class _EntryDelegate(QStyledItemDelegate):
-    """自绘单条 entry 行（徽章 + 内容 + 右侧时间/时长）。"""
+    """自绘单条 entry 行（徽章 + 内容 + 右侧时间/时长）。
+
+    列宽 / 行高按当前字体实测（set_base_font 时重算）→ 高 DPI / 大字号
+    下不遮挡。
+    """
 
     def __init__(self, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -90,7 +74,40 @@ class _EntryDelegate(QStyledItemDelegate):
             "line": "#FFFFFF",
         }
         self._is_dark = True
-        self._mono_base = QFont("Cascadia Mono", 9)
+        self._base_px = 12
+        self._row_h = 28
+        self._badge_w = 78
+        self._meta_w = 78
+        self._turn_w = 80
+        self._apply_metrics()
+
+    # ── 字体 / 度量 ──
+
+    def _mono_font(self, delta_px: int = 0, bold: bool = False) -> QFont:
+        f = QFont(_MONO_FAMILY)
+        f.setStyleHint(QFont.Monospace)
+        f.setPixelSize(max(9, self._base_px + delta_px))
+        f.setBold(bold)
+        return f
+
+    def _apply_metrics(self) -> None:
+        """按当前字号实测列宽与行高。"""
+        bfm = QFontMetrics(self._mono_font(-2, bold=True))
+        self._badge_w = bfm.horizontalAdvance("ASSISTANT") + 16
+        mfm = QFontMetrics(self._mono_font(-2))
+        self._meta_w = max(mfm.horizontalAdvance("00:00:00"), mfm.horizontalAdvance("18m 31s")) + 16
+        self._turn_w = mfm.horizontalAdvance("Turn 999") + 12
+        self._row_h = max(26, self._base_px + 14)
+
+    def set_base_font(self, font: QFont) -> None:
+        px = font.pixelSize()
+        if px <= 0:
+            px = font.pointSizeF()
+            px = int(round(px * 4 / 3)) if px > 0 else 12  # pt → px 兜底
+        self._base_px = max(10, min(24, px))
+        self._apply_metrics()
+
+    # ── 主题 ──
 
     def set_colors(self, colors: Dict[str, Any]) -> None:
         if not colors:
@@ -107,11 +124,10 @@ class _EntryDelegate(QStyledItemDelegate):
             }
         )
 
-    def set_base_font(self, font: QFont) -> None:
-        self._mono_base = font
+    # ── 绘制 ──
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
-        return QSize(option.rect.width(), ROW_H)
+        return QSize(option.rect.width(), self._row_h)
 
     def paint(self, painter: QPainter, option, index) -> None:  # noqa: N802
         rec: Optional[TraceRecord] = index.data(Qt.UserRole)
@@ -130,7 +146,6 @@ class _EntryDelegate(QStyledItemDelegate):
             # ── 行背景（透明度全部 with_alpha 派生，杜绝 rgba 字符串黑块）──
             if selected:
                 painter.fillRect(rect, with_alpha(QColor(c["selected"]), 26))
-                # 左侧选中竖条（deepseek 风格）
                 painter.fillRect(rect.x(), rect.y(), 3, rect.height(), QColor(c["selected"]))
             elif hovered:
                 painter.fillRect(rect, with_alpha(QColor(c["line"]), 10))
@@ -144,38 +159,40 @@ class _EntryDelegate(QStyledItemDelegate):
             painter.setPen(with_alpha(QColor(c["line"]), 18))
             painter.drawLine(rect.x() + 3, rect.bottom(), rect.right(), rect.bottom())
 
-            mono = _mono_font(self._mono_base, -1.0)
-            color = kind_color(rec.kind)
+            main_font = self._mono_font()
+            small_font = self._mono_font(-2)
 
-            # ① 类型徽章：类型色底(12%) + 类型色等宽粗体
-            badge = QRect(COL_TYPE, rect.y() + (rect.height() - 18) // 2, TYPE_W, 18)
-            bg = with_alpha(color, 30)
+            # ① 类型徽章：固定宽（按 ASSISTANT 实测）+ 类型色底/字
+            color = kind_color(rec.kind)
+            badge_w = self._badge_w
+            badge = QRect(12, rect.y() + (rect.height() - 18) // 2, badge_w, 18)
             painter.setPen(Qt.NoPen)
-            painter.setBrush(bg)
+            painter.setBrush(with_alpha(color, 30))
             painter.drawRoundedRect(badge, 3, 3)
-            badge_font = QFont(mono)
-            badge_font.setBold(True)
-            badge_font.setPointSizeF(max(6.5, mono.pointSizeF() - 1.0))
-            painter.setFont(badge_font)
+            painter.setFont(small_font)
             painter.setPen(color)
             painter.drawText(badge, Qt.AlignCenter, rec.kind.label)
 
             # ② 主文本：内容首行（TOOL 行含 tool 名前缀）
-            painter.setFont(mono)
-            fm = QFontMetrics(mono)
-            avail_w = max(40, rect.width() - COL_MAIN - META_W - PAD_R)
+            col_main = 12 + badge_w + 10
+            right_reserve = self._meta_w + 14
+            is_turn_start = bool(rec.meta.get("turn_start")) and rec.turn_no > 0
+            if is_turn_start:
+                right_reserve += self._turn_w  # 预留 Turn N 标注位，防重叠
+            avail_w = max(40, rect.width() - col_main - right_reserve)
+            painter.setFont(main_font)
+            fm = QFontMetrics(main_font)
+            main_text = _row_main_text(rec)
             painter.setPen(QColor(c["text"]))
             painter.drawText(
-                QRect(COL_MAIN, rect.y(), avail_w, rect.height()),
+                QRect(col_main, rect.y(), avail_w, rect.height()),
                 Qt.AlignVCenter | Qt.AlignLeft,
-                fm.elidedText(_row_main_text(rec), Qt.ElideRight, avail_w),
+                fm.elidedText(main_text, Qt.ElideRight, avail_w),
             )
 
             # ③ 右侧列：TOOL/ASSISTANT 显示时长（错误红/进行中金/完成暗）；
             #    消息类显示绝对时间
-            meta_font = QFont(mono)
-            meta_font.setPointSizeF(max(6.5, mono.pointSizeF() - 1.0))
-            painter.setFont(meta_font)
+            painter.setFont(small_font)
             if rec.kind in DURATION_KINDS:
                 if rec.is_error:
                     painter.setPen(QColor("#F7768E"))
@@ -188,22 +205,29 @@ class _EntryDelegate(QStyledItemDelegate):
                 painter.setPen(QColor(c["text_dim"]))
                 meta_text = rec.absolute_time
             painter.drawText(
-                QRect(rect.width() - META_W - PAD_R, rect.y(), META_W, rect.height()),
+                QRect(rect.width() - self._meta_w - 14, rect.y(), self._meta_w, rect.height()),
                 Qt.AlignVCenter | Qt.AlignRight,
                 meta_text,
             )
 
-            # ④ turn 标注（turn 分组行右上角）
-            if rec.meta.get("turn_start") and rec.turn_no > 0:
-                painter.setFont(meta_font)
-                painter.setPen(with_alpha(QColor(c["selected"]), 200))
+            # ④ turn 标注（turn 分组行右侧、时长列左边）
+            if is_turn_start:
+                painter.setFont(small_font)
+                painter.setPen(with_alpha(QColor(c["selected"]), 210))
                 painter.drawText(
-                    QRect(rect.width() - META_W - PAD_R - 90, rect.y(), 84, rect.height()),
+                    QRect(rect.width() - right_reserve, rect.y(), self._turn_w - 6, rect.height()),
                     Qt.AlignVCenter | Qt.AlignRight,
                     f"Turn {rec.turn_no}",
                 )
         finally:
             painter.restore()
+
+
+def _row_main_text(rec: TraceRecord) -> str:
+    """行主文本：TOOL 行带 tool 名前缀（对齐 deepseek `skill {"name":...}`）；其余为内容首行。"""
+    if rec.kind == EntryKind.TOOL:
+        return f"{rec.label} {rec.preview}".strip()
+    return rec.preview
 
 
 class TurnListWidget(QWidget):
@@ -275,6 +299,10 @@ class TurnListWidget(QWidget):
 
     # ──────────────────── 公开 API ────────────────────
 
+    @property
+    def _row_h(self) -> int:
+        return self._delegate._row_h
+
     def set_records(self, records: List[TraceRecord]) -> None:
         """整体重置（保留过滤与选中）。"""
         self._records = list(records)
@@ -320,7 +348,7 @@ class TurnListWidget(QWidget):
                 item = QListWidgetItem()
                 item.setData(Qt.UserRole, rec)
                 item.setFlags(Qt.NoItemFlags)
-                item.setSizeHint(QSize(0, ROW_H))
+                item.setSizeHint(QSize(0, self._row_h))
                 self._list.addItem(item)
         self._update_empty()
         self._update_count()
@@ -343,22 +371,21 @@ class TurnListWidget(QWidget):
         if not colors:
             return
         is_dark = colors.get("is_dark", True)
-        text = colors.get("text_primary", "#C8C8D0")
         secondary = colors.get("text_secondary", "#8A8A94")
         border = colors.get("border", "#333333")
         accent = colors.get("accent", "#7AA2F7")
         line_c = "255,255,255" if is_dark else "0,0,0"
-        mono = "Cascadia Mono, Consolas, monospace"
+        fs = self._delegate._base_px
 
         self._bar.setStyleSheet(
             f"#agentTraceFilterBar {{ background: transparent; border-bottom: 1px solid {border}; }}"
             f"QPushButton {{ background: transparent; color: {secondary}; border: 1px solid transparent;"
-            f"  border-radius: 4px; padding: 0 10px; font-size: 12px; font-family: {mono}; }}"
+            f"  border-radius: 4px; padding: 0 10px; font-size: {max(10, fs - 1)}px; }}"
             f"QPushButton:hover {{ background: rgba({line_c},0.08); }}"
             f"QPushButton:checked {{ color: {accent}; border: 1px solid {accent}; background: transparent; }}"
         )
-        self._count_label.setStyleSheet(f"color: {secondary}; font-family: {mono}; font-size: 11px;")
-        self._empty_label.setStyleSheet(f"color: {secondary}; font-size: 12px; background: transparent;")
+        self._count_label.setStyleSheet(f"color: {secondary}; font-size: {max(10, fs - 2)}px;")
+        self._empty_label.setStyleSheet(f"color: {secondary}; font-size: {fs}px; background: transparent;")
         self._list.setStyleSheet(
             "QListWidget { background: transparent; border: none; outline: none; }"
             "QListWidget::item { border: none; }"
@@ -367,7 +394,13 @@ class TurnListWidget(QWidget):
         self._list.viewport().update()
 
     def _apply_font(self, font: QFont) -> None:
+        """字体跟随系统设置（pixelSize）→ 重算列宽/行高并刷新既有行高。"""
         self._delegate.set_base_font(font)
+        rh = QSize(0, self._row_h)
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item is not None:
+                item.setSizeHint(rh)
         self._list.viewport().update()
 
     @property
@@ -414,7 +447,7 @@ class TurnListWidget(QWidget):
             item = QListWidgetItem()
             item.setData(Qt.UserRole, rec)
             item.setFlags(Qt.NoItemFlags)
-            item.setSizeHint(QSize(0, ROW_H))
+            item.setSizeHint(QSize(0, self._row_h))
             self._list.addItem(item)
         self._update_empty()
         self._update_count()
@@ -436,7 +469,7 @@ class TurnListWidget(QWidget):
         item = QListWidgetItem()
         item.setData(Qt.UserRole, rec)
         item.setData(Qt.UserRole + 1, idx)
-        item.setSizeHint(QSize(0, ROW_H))
+        item.setSizeHint(QSize(0, self._row_h))
         item.setToolTip(f"{rec.kind.label} · {rec.label}\n{rec.source}")
         return item
 

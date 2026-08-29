@@ -42,7 +42,7 @@ _SUMMARY_FIELDS = ("Kind", "Label", "Status", "Duration", "Start", "Source")
 _SEG_TO_INDEX = {"summary": 0, "preview": 1, "raw": 2, "source": 3}
 
 
-def _badge_stylesheet(color: QColor, is_dark: bool) -> str:
+def _badge_stylesheet(color: QColor, fs: int) -> str:
     """类型徽章样式：类型色文字 + 12% 透明类型色底（with_alpha 派生，防 rgba 黑块）。"""
     bg = with_alpha(color, 30)
     hexv = color.name()
@@ -52,7 +52,7 @@ def _badge_stylesheet(color: QColor, is_dark: bool) -> str:
         f" background: rgba({bg.red()},{bg.green()},{bg.blue()},{bg.alpha()});"
         " border-radius: 3px;"
         f" font-family: {MONO_FAMILY};"
-        " font-size: 10px; font-weight: 700; letter-spacing: 0.5px;"
+        f" font-size: {max(9, fs - 3)}px; font-weight: 700; letter-spacing: 0.5px;"
         "}"
     )
 
@@ -69,6 +69,8 @@ class DetailPanel(QWidget):
         self._value_labels: Dict[str, QLabel] = {}
         self._colors: Dict[str, Any] = {}
         self._is_dark = True
+        self._fs = 12  # 基准字号（像素，由 _apply_font 注入）
+        self._font_family = "Segoe UI"
         self._build_ui()
 
     # ──────────────────── 搭建 ────────────────────
@@ -87,7 +89,7 @@ class DetailPanel(QWidget):
         title.setSpacing(8)
         self._badge = QLabel("----", self._title_bar)
         self._badge.setAlignment(Qt.AlignCenter)
-        self._badge.setFixedWidth(78)
+        self._badge.setFixedWidth(86)
         self._badge.setFixedHeight(20)
         title.addWidget(self._badge)
         self._title_label = QLabel("未选中条目", self._title_bar)
@@ -212,34 +214,40 @@ class DetailPanel(QWidget):
         border = c.get("border", "#333333")
         bg = c.get("card_bg", "transparent")
         hover_bg = "rgba(128,128,128,0.15)"
+        fs = self._fs
+        ff = self._font_family
 
         self._title_bar.setStyleSheet(
             f"#agentTraceDetailTitle {{ background: transparent; border-bottom: 1px solid {border}; }}"
-            f"#agentTraceDetailTitle QLabel {{ color: {text}; font-size: 12px; }}"
+            f"#agentTraceDetailTitle QLabel {{ color: {text}; font-family: '{ff}'; font-size: {fs}px; }}"
         )
-        self._badge.setStyleSheet(_badge_stylesheet(QColor("#888888"), self._is_dark))
+        self._badge.setStyleSheet(_badge_stylesheet(QColor("#888888"), fs))
         for field in _SUMMARY_FIELDS:
             val_lbl = self._value_labels.get(field)
             if val_lbl is not None:
-                val_lbl.setStyleSheet(f"color: {text}; font-family: {MONO_FAMILY}; font-size: 11px; padding: 2px 0;")
+                val_lbl.setStyleSheet(
+                    f"color: {text}; font-family: {MONO_FAMILY}; font-size: {max(9, fs - 1)}px; padding: 2px 0;"
+                )
         # summary 键列（取 body 内所有非值 label 统一设暗色）
         body = self._summary.findChild(QWidget, "agentTraceSummaryBody")
         if body is not None:
             for lbl in body.findChildren(QLabel):
                 if lbl not in self._value_labels.values():
-                    lbl.setStyleSheet(f"color: {dim}; font-size: 11px; padding: 2px 0;")
+                    lbl.setStyleSheet(
+                        f"color: {dim}; font-family: '{ff}'; font-size: {max(9, fs - 1)}px; padding: 2px 0;"
+                    )
             body.setStyleSheet(f"QWidget#agentTraceSummaryBody {{ background: {bg}; }}")
         self._summary.setStyleSheet(f"QScrollArea#agentTraceSummaryScroll {{ background: {bg}; border: none; }}")
 
         for edit in (self._preview, self._raw, self._source):
             edit.setStyleSheet(
                 f"QPlainTextEdit {{ background: {bg}; color: {text}; border: none; "
-                f"font-family: {MONO_FAMILY}; font-size: 12px; padding: 12px 16px; }}"
+                f"font-family: {MONO_FAMILY}; font-size: {fs}px; padding: 12px 16px; }}"
             )
         self._close_btn.setStyleSheet(
             f"QFrame#agentTraceDetailClose {{ background: transparent; border-radius: 4px; }}"
             f"QFrame#agentTraceDetailClose:hover {{ background: {hover_bg}; }}"
-            f"QFrame#agentTraceDetailClose QLabel {{ color: {secondary}; font-size: 12px; }}"
+            f"QFrame#agentTraceDetailClose QLabel {{ color: {secondary}; font-size: {max(9, fs - 2)}px; }}"
         )
 
     # ──────────────────── 刷新 ────────────────────
@@ -260,7 +268,7 @@ class DetailPanel(QWidget):
 
         color = kind_color(rec.kind)
         self._badge.setText(rec.kind.label)
-        self._badge.setStyleSheet(_badge_stylesheet(color, self._is_dark))
+        self._badge.setStyleSheet(_badge_stylesheet(color, self._fs))
         turn_part = f"Turn {rec.turn_no} · " if rec.turn_no > 0 else ""
         self._title_label.setText(f"{turn_part}{rec.label}")
 
@@ -279,6 +287,7 @@ class DetailPanel(QWidget):
 
         if hasattr(self, "_preview"):
             self._preview.setPlainText(rec.raw or "（空）")
+            self._raw.setPlainText(rec.raw or "（空）")
 
         source_text = rec.source or "-"
         if rec.meta:
@@ -291,7 +300,7 @@ class DetailPanel(QWidget):
 
     def _apply_idle(self) -> None:
         self._badge.setText("----")
-        self._badge.setStyleSheet(_badge_stylesheet(QColor("#888888"), self._is_dark))
+        self._badge.setStyleSheet(_badge_stylesheet(QColor("#888888"), self._fs))
         self._title_label.setText("未选中条目")
         for field in _SUMMARY_FIELDS:
             lbl = self._value_labels.get(field)
@@ -304,4 +313,23 @@ class DetailPanel(QWidget):
     # ──────────────────── 字体 ────────────────────
 
     def _apply_font(self, font: QFont) -> None:
-        _ = font  # 字号统一由样式表控制，避免与主题样式打架
+        """字体跟随系统设置（pixelSize）→ 重刷 QSS 字号。"""
+        px = font.pixelSize()
+        if px <= 0:
+            ptf = font.pointSizeF()
+            px = int(round(ptf * 4 / 3)) if ptf > 0 else 12  # pt → px 兜底
+        px = max(10, min(24, px))
+        changed = px != self._fs
+        self._fs = px
+        fam = font.family()
+        if fam:
+            self._font_family = fam
+        if changed and self._colors:
+            self._apply_theme()
+            self._refresh_current()
+        try:  # SegmentedWidget（qfluentwidgets）字体跟随
+            seg_font = QFont(font)
+            seg_font.setPixelSize(max(10, px - 1))
+            self._segmented.setFont(seg_font)
+        except Exception:
+            pass

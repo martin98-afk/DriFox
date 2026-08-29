@@ -65,9 +65,16 @@ class TimelinePanel(QWidget):
             "grid": "#FFFFFF",
             "selected": "#7AA2F7",
         }
-        self._base_font = QFont("Cascadia Mono", 9)
+        self._base_px = 12  # 基准字号（像素，由 _apply_font 注入）
         self.setMouseTracking(True)
         self.setFixedHeight(PANEL_H)
+
+    def _font(self, delta_px: int = 0) -> QFont:
+        """等宽字体（像素字号，跟随系统设置）。"""
+        f = QFont("Cascadia Mono")
+        f.setStyleHint(QFont.Monospace)
+        f.setPixelSize(max(9, self._base_px + delta_px))
+        return f
 
     # ──────────────────── 公开 API ────────────────────
 
@@ -105,7 +112,12 @@ class TimelinePanel(QWidget):
         self.update()
 
     def _apply_font(self, font: QFont) -> None:
-        self._base_font = QFont(font)
+        """字体跟随系统设置（pixelSize）。"""
+        px = font.pixelSize()
+        if px <= 0:
+            ptf = font.pointSizeF()
+            px = int(round(ptf * 4 / 3)) if ptf > 0 else 12  # pt → px 兜底
+        self._base_px = max(10, min(24, px))
         self.update()
 
     # ──────────────────── 数据切片 ────────────────────
@@ -200,8 +212,8 @@ class TimelinePanel(QWidget):
         recs: List[TraceRecord],
     ) -> None:
         # 泳道标签
-        f = QFont(self._base_font)
-        f.setPointSizeF(max(8.0, self._base_font.pointSizeF() - 0.5))
+        # 泳道标签
+        f = self._font(-1)
         painter.setFont(f)
         painter.setPen(QColor(self._colors["text_dim"]))
         painter.drawText(QRect(0, int(y), LANE_LABEL_W - 8, int(h)), Qt.AlignVCenter | Qt.AlignRight, lane.value)
@@ -236,7 +248,11 @@ class TimelinePanel(QWidget):
                 label = f"{rec.label} {format_duration_compact(rec.duration_ms)}"
                 if rec.is_pending:
                     label += " …"
-                painter.drawText(bar.adjusted(6, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, fm.elidedText(label, Qt.ElideRight, bar.width() - 10))
+                painter.drawText(
+                    bar.adjusted(6, 0, -4, 0),
+                    Qt.AlignVCenter | Qt.AlignLeft,
+                    fm.elidedText(label, Qt.ElideRight, bar.width() - 10),
+                )
 
     def _paint_selection(self, painter: QPainter) -> None:
         if self._selected_idx is None:
@@ -251,8 +267,7 @@ class TimelinePanel(QWidget):
 
     def _paint_ticks(self, painter: QPainter, track_x: int, track_w: int, t0: float, t1: float) -> None:
         """顶部时间刻度（4 等分 + 总时长标注）。"""
-        f = QFont(self._base_font)
-        f.setPointSizeF(max(7.0, self._base_font.pointSizeF() - 1.0))
+        f = self._font(-2)
         painter.setFont(f)
         painter.setPen(QColor(self._colors["text_dim"]))
         total_ms = int((t1 - t0) * 1000)
@@ -267,8 +282,7 @@ class TimelinePanel(QWidget):
             painter.drawLine(gx, TICK_H, gx, self.height() - 2)
 
     def _paint_empty(self, painter: QPainter) -> None:
-        f = QFont(self._base_font)
-        painter.setFont(f)
+        painter.setFont(self._font())
         painter.setPen(QColor(self._colors["text_dim"]))
         painter.drawText(self.rect(), Qt.AlignCenter, "暂无轨迹 — 发送一条消息开始记录")
 

@@ -63,6 +63,8 @@ class TraceCollector(QObject):
         self._timing: Dict[str, Dict[str, Any]] = {}
         # assistant 流列表（按完成序）：{"start": float, "end": float}
         self._streams: List[Dict[str, float]] = []
+        # 首次投影时已存在的 assistant 消息数（历史消息数），实时流序号 = k - base
+        self._stream_base = 0
         self._active_session_id: str = ""
         self._bound_backend: Optional[Any] = None
         self._bound_main_widget: Optional[Any] = None
@@ -104,7 +106,7 @@ class TraceCollector(QObject):
         ):
             try:
                 getattr(self._bound_backend, sig).disconnect(slot)
-            except (TypeError, RuntimeError):
+            except TypeError, RuntimeError:
                 pass  # 未连接 / 已析构
         self._bound_backend = None
         self._bound_main_widget = None
@@ -168,10 +170,18 @@ class TraceCollector(QObject):
             emit_reset = True
 
         messages = getattr(session, "messages", None) or []
-        new_records = self._project_messages(messages)
+        sys_prompt = ""
+        try:
+            sys_prompt = (getattr(session, "system_prompt", "") or "").strip()
+        except Exception:
+            pass
+        new_records = self._project_messages(messages, system_prompt=sys_prompt)
 
         if emit_reset or not self._records:
             self._records = new_records
+            # 重置点重算流基线：基线之前的历史 assistant 消息永远不会有实时流
+            # （修「历史 assistant 消息抢占新流 timing → LLM 时长全 0」的序号错位）
+            self._stream_base = sum(1 for r in new_records if r.kind == EntryKind.ASSISTANT)
             self.recordsReset.emit()
             self._set_tail(self._tail)  # clear/reset 可能清了 tail → 让 UI 收敛
             return
@@ -208,6 +218,7 @@ class TraceCollector(QObject):
         self._set_tail([])
         self._timing.clear()
         self._streams.clear()
+        self._stream_base = 0
         self._active_session_id = ""
 
     def _reset_runtime_state(self, sid: str) -> None:
@@ -221,9 +232,7 @@ class TraceCollector(QObject):
 
     @staticmethod
     def _tail_signature(tail: List[TraceRecord]) -> tuple:
-        return tuple(
-            (r.kind, r.label[:32], round(r.start_ts, 3), r.is_pending, r.raw[:48]) for r in tail
-        )
+        return tuple((r.kind, r.label[:32], round(r.start_ts, 3), r.is_pending, r.raw[:48]) for r in tail)
 
     def _set_tail(self, new_tail: List[TraceRecord]) -> None:
         """tail 稳定化赋值：内容没变不发信号（修「历史记录一直在刷新」）。"""
@@ -235,7 +244,7 @@ class TraceCollector(QObject):
 
     # ──────────────────── messages → records 投影 ────────────────────
 
-    def _project_messages(self, messages: List[Dict[str, Any]]) -> List[TraceRecord]:
+    def _project_messages(self, messages: List[Dict[str, Any]], system_prompt: str = "") -> List[TraceRecord]:
         records: List[TraceRecord] = []
         turn = 0
         assistant_seq = 0
@@ -285,15 +294,32 @@ class TraceCollector(QObject):
             elif kind == EntryKind.ASSISTANT:
                 if msg.get("tool_calls"):
                     meta["has_tool_calls"] = True
-                # 第 k 条 assistant 消息 ↔ 第 k 个已记录的流
-                s = self._streams[assistant_seq] if assistant_seq < len(self._streams) else None
+                # 第 k 条 assistant 消息 ↔ 第 (k - _stream_base) 个实时流；
+                # k < base 的是历史消息（collector 出生前落盘），无流可配
+                s = None
+                if assistant_seq >= self._stream_base:
+                    si = assistant_seq - self._stream_base
+                    if si < len(self._streams):
+                        s = self._streams[si]
                 assistant_seq += 1
                 if s:
                     if s.get("start"):
                         start = s["start"]
                     if s.get("end"):
                         end = s["end"]
-                preview = truncate(raw_text, 140)
+                preview = truncate(raw_text, 140) if raw_text.strip() else ""
+                if not preview and msg.get("tool_calls"):
+                    names = []
+                    try:
+                        for tc in msg["tool_calls"]:
+                            n = (tc.get("function") or {}).get("name") or ""
+                            if n:
+                                names.append(n)
+                    except Exception:
+                        pass
+                    preview = "→ 调用工具: " + ", ".join(names) if names else "→ 工具调用"
+                if not preview:
+                    preview = "（空）"
             else:
                 preview = truncate(raw_text, 140)
 
@@ -315,6 +341,25 @@ class TraceCollector(QObject):
                     turn_no=turn,
                     meta=meta,
                 )
+            )
+
+        # 合成 SYSTEM 条目：DriFox 的系统提示词不在 session.messages 里
+        # （引擎构建请求时由 context_builder 动态拼装），只存在
+        # session.system_prompt 属性上 → 不合成的话轨迹里永远看不到。
+        if system_prompt and not any(r.kind == EntryKind.SYSTEM for r in records):
+            head_ts = records[0].start_ts if records else 0.0
+            records.insert(
+                0,
+                TraceRecord(
+                    kind=EntryKind.SYSTEM,
+                    label="System Prompt",
+                    preview=truncate(system_prompt, 140),
+                    raw=system_prompt,
+                    source="session.system_prompt",
+                    start_ts=head_ts,
+                    end_ts=head_ts,
+                    turn_no=0,
+                ),
             )
         return records
 
