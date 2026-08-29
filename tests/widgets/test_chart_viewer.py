@@ -53,13 +53,14 @@ class TestBuildHtml:
         assert _b64('{"series": []}') in html  # payload 原样嵌入
 
     def test_mermaid_mode(self):
-        """mermaid 模式：不引 echarts，SVG 注入 + 自适应 CSS + canvas 导出（无 dataZoom）"""
+        """mermaid 模式：不引 echarts，SVG 注入 + 自适应 CSS + canvas 导出 + 容器级平移缩放"""
         svg = '<svg width="800" height="600">'
         html = build_chart_viewer_html("mermaid", _b64(svg))
         assert "echarts.min.js" not in html
         assert "new Image" in html  # SVG → Image → canvas 导出链路
         assert "max-width: 100%" in html
-        assert "dataZoom" not in html  # dataZoom 是 echarts 专属，mermaid 不注入
+        assert "_enablePanZoom(wrap" in html  # mermaid 用容器级平移缩放（dataZoom 不适用）
+        assert "chart.setOption({ dataZoom:" not in html  # 不注入 echarts dataZoom
 
     def test_payload_too_large_rejected(self):
         """payload 超 8MB 上限 → ValueError（防御，JS 侧也有同限拦截）"""

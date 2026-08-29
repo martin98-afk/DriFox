@@ -126,6 +126,48 @@ window._exportChartPng = function (scale) {
     if (window._chartType === 'echarts') _exportEchartsPng(scale);
     else _exportMermaidPng(scale);
 };
+// 容器级平移缩放（mermaid SVG / 饼图等 dataZoom 不适用的图表）：
+// Ctrl+滚轮以鼠标为中心缩放 · 拖拽平移 · 双击复位
+function _enablePanZoom(container, content) {
+    if (!container || !content || container._panZoom) return;
+    container._panZoom = true;
+    var scale = 1, tx = 0, ty = 0, dragging = false, lx = 0, ly = 0;
+    function apply() {
+        content.style.transformOrigin = '0 0';
+        content.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+    }
+    container.addEventListener('wheel', function (ev) {
+        if (!ev.ctrlKey) return;
+        ev.preventDefault();
+        var factor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
+        var ns = Math.min(8, Math.max(0.4, scale * factor));
+        var rect = container.getBoundingClientRect();
+        var mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+        tx = mx - (mx - tx) * (ns / scale);
+        ty = my - (my - ty) * (ns / scale);
+        scale = ns;
+        apply();
+    }, { passive: false });
+    container.addEventListener('mousedown', function (ev) {
+        if (scale <= 1) return;
+        dragging = true; lx = ev.clientX; ly = ev.clientY;
+        container.style.cursor = 'grabbing';
+    });
+    window.addEventListener('mousemove', function (ev) {
+        if (!dragging) return;
+        tx += ev.clientX - lx; ty += ev.clientY - ly;
+        lx = ev.clientX; ly = ev.clientY;
+        apply();
+    });
+    window.addEventListener('mouseup', function () { dragging = false; container.style.cursor = ''; });
+    container.addEventListener('dblclick', function () { scale = 1; tx = 0; ty = 0; apply(); });
+    var tip = document.createElement('div');
+    tip.textContent = 'Ctrl+滚轮缩放 · 拖拽平移 · 双击复位';
+    tip.style.cssText = 'position:absolute;top:8px;left:12px;font-size:11px;opacity:.5;pointer-events:none;color:%(tip_color)s;z-index:5;';
+    container.style.position = 'relative';
+    container.appendChild(tip);
+}
+window._enablePanZoom = _enablePanZoom;
 """
 
 
@@ -146,7 +188,7 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
         raise ValueError("图表数据超过 8MB 上限")
 
     bg = _CHART_BG_DARK if is_dark else _CHART_BG_LIGHT
-    js_common = _EXPORT_JS % {"max_b64": _MAX_PAYLOAD_B64, "bg": bg}
+    js_common = _EXPORT_JS % {"max_b64": _MAX_PAYLOAD_B64, "bg": bg, "tip_color": "#333" if bg == _CHART_BG_LIGHT else "#aaa"}
 
     if chart_type == "echarts":
         echarts_tag = _echarts_script_tag()
@@ -186,6 +228,9 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
             + "                    { type: 'inside', zoomOnMouseWheel: true, moveOnMouseMove: true },\n"
             + "                    { type: 'slider', height: 20, bottom: 8 }\n"
             + "                ]});\n"
+            + "            } else if (!_isCartesian) {\n"
+            + "                // 饱图/仪表盘等非直角系：dataZoom 不适用，走容器级平移缩放\n"
+            + "                window._enablePanZoom(el, el.firstElementChild || el);\n"
             + "            }\n"
             + "        } catch (dzErr) { console.error('[chart] dataZoom init:', dzErr); }\n"
             + "    } catch (e) {\n"
@@ -219,6 +264,7 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
             + "        var svgHtml = new TextDecoder('utf-8').decode(bytes);\n"
             + "        if (/<script/i.test(svgHtml)) throw new Error('svg contains script');\n"
             + "        wrap.innerHTML = svgHtml;\n"
+            + "        window._enablePanZoom(wrap, wrap.firstElementChild || wrap);\n"
             + "    } catch (e) {\n"
             + "        wrap.innerHTML = '<pre style=\"color:#e06c75;padding:16px;\">图表渲染失败: ' + e + '" + pre_end + "';\n"
             + "    }\n"
@@ -248,10 +294,10 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
         + '<meta charset="utf-8">'
         + _END_HEAD
         + body_open
-        + body_script
         + _SCRIPT_OPEN
-        + js_common
+        + js_common  # 工具函数必须先于 body_script 定义：mermaid/echarts 的同步 IIFE 会调用 _enablePanZoom
         + _END_SCRIPT
+        + body_script
         + _END_BODY
         + _END_HTML
     )

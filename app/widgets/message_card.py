@@ -8021,11 +8021,34 @@ class CodeWebViewer(QWebEngineView):
             painter.end()
         return result
 
+    def _grab_render_widget(self) -> "QPixmap":
+        """抓取 WebEngine 渲染内容（GPU 合成环境下 QWebEngineView.grab() 拿不到内容）
+
+        QWebEngineView 的内容由 Chromium 进程远程合成，QWidget::grab 抓自身
+        往往得到空白/纯背景（Qt 已知限制）；实际渲染发生在内部 RenderWidget
+        （focusProxy）上，必须对它 grab。拿不到 focusProxy 或结果为空时回退
+        QWidget 原生 grab（软件渲染环境该路径可用）。
+        """
+        target = self.focusProxy()
+        if target is not None:
+            try:
+                pix = target.grab()
+                if pix is not None and not pix.isNull() and pix.width() > 0 and pix.height() > 0:
+                    return pix
+            except Exception:
+                logger.warning("[export] RenderWidget grab 为空，回退 QWidget grab")
+        return super().grab()
+
     def _capture_looks_healthy(self, pix: "QPixmap") -> bool:
-        """粗采样检查抓取结果：非背景像素占比过低视为合成未完成（黑屏/空白图）
+        """粗采样检查抓取结果：整体内容占比过低或出现大面积连续空白块视为合成未完成
 
         zoom 3x 撑大控件后 WebEngine 走异步合成，弱 GPU/大纹理时定时等待可能
         不够——合成器未画完的 tile 抓出来是纯背景色。粗采样 ≤64×64 点毫秒级。
+
+        两级判据（部分渲染的"窄条内容"能骗过整体占比，拦不住连续空块）：
+        1. 整体非背景采样点占比 ≥ 1%
+        2. 8×8 分块中"整块皆背景"的空块占比 < 50%（正常内容散布多数块，
+           部分渲染会出现大段连续空白）
         """
         from PyQt5.QtGui import QImage
 
@@ -8035,21 +8058,53 @@ class CodeWebViewer(QWebEngineView):
         bg = self._get_card_bg_color()
         w, h = img.width(), img.height()
         step = max(4, min(w, h) // 64)
+        grid_n = 64  # 采样网格 64×64 点
+        cols = max(1, (w + step - 1) // step)
+        if cols > grid_n:
+            cols = grid_n
+        rows = max(1, (h + step - 1) // step)
+        if rows > grid_n:
+            rows = grid_n
         total = 0
         diff = 0
+        block_size = 8  # 每 8×8 采样点为一块
+        block_empty = [0] * ((grid_n // block_size + 1) * (grid_n // block_size + 1))
+        yi = 0
         y = 0
         while y < h:
             x = 0
+            xi = 0
             while x < w:
                 c = img.pixelColor(x, y)
                 total += 1
-                if abs(c.red() - bg.red()) + abs(c.green() - bg.green()) + abs(c.blue() - bg.blue()) > 24:
+                is_bg = (
+                    abs(c.red() - bg.red()) + abs(c.green() - bg.green()) + abs(c.blue() - bg.blue()) <= 24
+                )
+                if not is_bg:
                     diff += 1
+                else:
+                    bi = (yi // block_size) * (grid_n // block_size + 1) + (xi // block_size)
+                    block_empty[bi] += 1
                 x += step
+                xi += 1
             y += step
+            yi += 1
         if total == 0:
             return False
-        return (diff / total) >= 0.01  # 正常内容截图非背景占比远高于 1%
+        if (diff / total) < 0.01:
+            return False
+        # 分块：块内采样点全部为背景 → 空块
+        bw = grid_n // block_size + 1
+        empty_blocks = 0
+        total_blocks = 0
+        for r in range(min(rows, grid_n) // block_size + (1 if min(rows, grid_n) % block_size else 0)):
+            for c in range(min(cols, grid_n) // block_size + (1 if min(cols, grid_n) % block_size else 0)):
+                total_blocks += 1
+                if block_empty[r * bw + c] == block_size * block_size:
+                    empty_blocks += 1
+        if total_blocks == 0:
+            return False
+        return (empty_blocks / total_blocks) < 0.5
 
     def _wait_render_stable(self, deadline_ms: int = 1200) -> None:
         """轮询等待 WebEngine 布局/合成稳定：body.scrollHeight 连续两次读数一致即放行
@@ -8106,7 +8161,7 @@ class CodeWebViewer(QWebEngineView):
 
         dims_raw = self._run_js_sync("JSON.stringify({sh: document.body.scrollHeight})")
         if not dims_raw:
-            return self._compose_with_solid_bg(self.grab(), view_w, cur_h)
+            return self._compose_with_solid_bg(self._grab_render_widget(), view_w, cur_h)
 
         try:
             scroll_h = json_mod.loads(dims_raw).get("sh", 0)
@@ -8114,7 +8169,7 @@ class CodeWebViewer(QWebEngineView):
             scroll_h = 0
 
         if scroll_h <= cur_h or scroll_h <= 0:
-            grabbed = self.grab()
+            grabbed = self._grab_render_widget()
             return self._compose_with_solid_bg(
                 grabbed,
                 view_w,
@@ -8142,7 +8197,7 @@ class CodeWebViewer(QWebEngineView):
         QTimer.singleShot(200, stable_loop.quit)
         stable_loop.exec_()
 
-        full_pix = self.grab(QRect(QPoint(0, 0), self.size()))
+        full_pix = self._grab_render_widget()
 
         final_w = full_pix.width() if not full_pix.isNull() else view_w
         final_h = max(target_h, full_pix.height() if not full_pix.isNull() else 0)
@@ -8162,7 +8217,7 @@ class CodeWebViewer(QWebEngineView):
                 self._run_js_sync("window.scrollTo(0, 0);")
 
         if result.isNull() or result.width() <= 0 or result.height() <= 0:
-            return self.grab()
+            return self._grab_render_widget()
         return result
 
     def _capture_full_content(self) -> "QPixmap":
@@ -8187,7 +8242,7 @@ class CodeWebViewer(QWebEngineView):
         view_w = self.width()
         cur_h = self.height()
         if view_w <= 0:
-            return self._compose_with_solid_bg(self.grab(), max(1, view_w), cur_h)
+            return self._compose_with_solid_bg(self._grab_render_widget(), max(1, view_w), cur_h)
 
         # 1. 获取完整内容高度（CSS 逻辑像素，与 zoom 无关）
         dims_raw = self._run_js_sync("JSON.stringify({sh: document.body.scrollHeight})")
@@ -8232,7 +8287,7 @@ class CodeWebViewer(QWebEngineView):
             self._wait_render_stable(deadline_ms=1200)
 
             # 5. 显式 grab 整个目标区域，按实际物理/逻辑比还原逻辑尺寸
-            full_pix = self.grab(QRect(QPoint(0, 0), self.size()))
+            full_pix = self._grab_render_widget()
             if full_pix.isNull() or full_pix.width() <= 0:
                 logger.warning("[export] zoom 3x 抓到空图，回退 1x")
             elif not self._capture_looks_healthy(full_pix):
