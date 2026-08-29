@@ -251,12 +251,15 @@ class TraceCardWidget(QWidget):
         self.setFont(f)
         self._timeline._apply_font(f)
         self._turn_list._apply_font(f)
-        try:  # SegmentedWidget（qfluentwidgets）字体跟随
-            seg_font = QFont(font_family)
-            seg_font.setPixelSize(max(10, self._fs - 1))
-            self._view_mode.setFont(seg_font)
-        except Exception:
-            pass
+        try:
+            # qfluentwidgets 控件内部 setFont(widget, 18) 硬编码像素字号，
+            # 外部 QWidget.setFont 无效 → 必须用它们的专用 API
+            self._view_mode.setItemFontSize(max(10, self._fs - 1))
+            from qfluentwidgets.common.font import setFont as _qw_set_font
+
+            _qw_set_font(self._search_box, max(10, self._fs - 1))
+        except Exception as e:
+            logger.debug(f"[agent_trace] qfluentwidgets 字体适配跳过: {e}")
 
     def _style_bars(self, colors: Dict[str, Any]) -> None:
         is_dark = colors.get("is_dark", True)
@@ -413,6 +416,7 @@ class TraceCardWidget(QWidget):
     # ──────────────────── 选中联动 ────────────────────
 
     def _on_record_selected(self, idx: int) -> None:
+        self._detail.show()  # 点击新条目恢复被 × 隐藏的详情面板
         self._detail.set_records(self._visible())
         self._detail.select(idx)
         self._timeline.set_selected(idx)
@@ -421,7 +425,8 @@ class TraceCardWidget(QWidget):
         self._turn_list.select_record(idx)
 
     def _on_detail_dismissed(self) -> None:
-        self._detail.select(None)
+        # × = 整块隐藏详情面板；点选新条目时再恢复（_on_record_selected）
+        self._detail.hide()
         self._timeline.set_selected(None)
         self._turn_list.clear_selection()
 

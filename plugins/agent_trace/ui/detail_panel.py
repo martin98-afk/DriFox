@@ -327,9 +327,7 @@ class DetailPanel(QWidget):
         if changed and self._colors:
             self._apply_theme()
             self._refresh_current()
-        try:  # SegmentedWidget（qfluentwidgets）字体跟随
-            seg_font = QFont(font)
-            seg_font.setPixelSize(max(10, px - 1))
-            self._segmented.setFont(seg_font)
+        try:  # SegmentedWidget（qfluentwidgets）项内部 setFont(18) 硬编码，专用 API 才生效
+            self._segmented.setItemFontSize(max(10, px - 1))
         except Exception:
             pass

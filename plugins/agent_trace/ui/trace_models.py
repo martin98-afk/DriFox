@@ -22,11 +22,14 @@ from PyQt5.QtGui import QColor
 
 
 class EntryKind(str, Enum):
-    """轨迹条目类型 — 对应 DeepSeek Harness 的彩色 type 标签。"""
+    """轨迹条目类型 — 对应 DeepSeek Harness 的彩色 type 标签。
+
+    CONTEXT 的徽章显示文本为 "HOOK"（DriFox 语义：hook 注入消息）。
+    """
 
     SYSTEM = "SYSTEM"
     USER = "USER"
-    CONTEXT = "CONTEXT"  # hook 注入（user 角色 + _hook_event）
+    CONTEXT = "HOOK"  # hook 注入（user 角色 + _hook_event），徽章显示 HOOK
     ASSISTANT = "ASSISTANT"
     TOOL = "TOOL"
 
