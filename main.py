@@ -362,7 +362,13 @@ def main():
             from PySide6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView
             from PySide6.QtCore import QEventLoop as _QEventLoop, QTimer as _QTimer
 
-            _preheat = _QWebEngineView()
+            # parent 必须挂进真实窗口树：offscreen 预热只暖了 Chromium 进程，
+            # 「首次在已显示窗口树中创建 WebEngine native delegate」的层级扰动
+            # 仍会在 welcome 卡 ensure_rendered → setHtml 时发生（顶层窗口 HIDE 闪，
+            # hideEvent 插桩实证）。挂到 tm 后首次 native 嵌入发生在 tm.show() 之前，
+            # 抖动不可见（对齐 Qt 论坛已知结论：dummy view 不进 layout 则无效）。
+            _preheat = _QWebEngineView(tm)
+            _preheat.hide()  # 显式隐藏：否则 tm.show() 的 showChildren 会把它显示出来（左上角白框）
             _loop = _QEventLoop()
             _preheat.loadFinished.connect(_loop.quit)
             _preheat.setHtml("<html><body></body></html>")
