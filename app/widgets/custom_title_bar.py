@@ -21,6 +21,8 @@
 import sys
 from typing import Callable, Dict, Optional
 
+_IS_MAC = sys.platform == "darwin"
+
 from PyQt5.QtCore import QEasingCurve, QRect, QRectF, QSize, Qt, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPainterPath
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
@@ -276,7 +278,10 @@ class CustomTabButton(QWidget):
     clicked = pyqtSignal(str)  # tab_id（整卡点击）
     close_clicked = pyqtSignal(str)  # tab_id（× 关闭钮）
 
-    HEIGHT = 28
+    HEIGHT = 28  # Windows / Linux（标题栏 38，容器上下各留 5）
+    #: macOS 用 22：标题栏只有 28pt，tab 加容器 3px 内边距正好铺满
+    MAC_HEIGHT = 22
+
     #: 圆角取 BorderRadius.SM(6px)：窗口圆角是 8px，但那是相对整窗尺寸的；
     #: 放在 28px 高的 tab 上 8px 会显得过圆。6px 是"和窗口同一弧度语言、
     #: 但按控件尺寸收敛"的结果。
@@ -306,7 +311,7 @@ class CustomTabButton(QWidget):
         self._hover_t = 0.0
         self._active_t = 0.0
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(self.HEIGHT)
+        self.setFixedHeight(self.MAC_HEIGHT if _IS_MAC else self.HEIGHT)
         self.setAttribute(Qt.WA_Hover, True)  # 确保 enter/leave 事件可达
 
         layout = QHBoxLayout(self)
@@ -455,7 +460,11 @@ class CustomTitleBar(TitleBarBase):
     外部（含基类的 ``eventFilter``）无需改动。
     """
 
-    HEIGHT = 38
+    HEIGHT = 38  # Windows / Linux
+    #: macOS 用 28 —— 与 NSWindow 标题栏容器同高。系统交通灯由 AppKit 绘制，
+    #: 尺寸固定（约 12pt），放进 38pt 高的栏里比例会明显偏小；设为 28 才是
+    #: macOS 的标准观感。
+    MAC_HEIGHT = 28
     MAC_TRAFFIC_LIGHT_PAD = 70  # macOS 系统交通灯左侧留白
 
     tab_clicked = pyqtSignal(str)
@@ -468,7 +477,7 @@ class CustomTitleBar(TitleBarBase):
         self._tabs: Dict[str, CustomTabButton] = {}
         self._active_id: Optional[str] = None
 
-        self.setFixedHeight(self.HEIGHT)
+        self.setFixedHeight(self.MAC_HEIGHT if self._is_mac else self.HEIGHT)
 
         # ── 用自绘主题按钮替换基类内置的黑色老式按钮 ──
         self._replace_system_buttons()

@@ -968,7 +968,8 @@ class TabManagerWindow(FramelessWindow):
         from app.widgets.custom_title_bar import CustomTitleBar
 
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, CustomTitleBar.HEIGHT, 0, 0)
+        # 顶部让位自绘无边框标题栏；mac 上标题栏只有 28（与系统交通灯配套）
+        main_layout.setContentsMargins(0, self.titleBar.height(), 0, 0)
         main_layout.setSpacing(0)
 
         # ── 内容区（水平：TabPanel + QStackedWidget） ──
