@@ -7902,31 +7902,6 @@ class CodeWebViewer(QWebEngineView):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"{session_name}_{ts}"
 
-    def _on_chart_expand(self, chart_type: str, payload_b64: str):
-        """图表放大查看 → 打开覆盖右侧对话区域的 chart_viewer 全局卡
-
-        内部直接处理（不走 main_widget 回调），assistant/welcome/历史卡统一生效；
-        ui_helpers 顶部反向 import MessageCard，必须延迟导入避免循环依赖。
-        """
-        try:
-            from app.widgets.ui_helpers import show_chart_viewer
-
-            show_chart_viewer(self, chart_type, payload_b64)
-        except Exception as e:
-            logger.error(f"[MessageCard] 图表放大失败: {e}")
-
-    def _on_save_chart_png(self, name_b64: str, png_b64: str):
-        """图表 PNG 导出保存（消息卡小图导出与放大视图共用通道）"""
-        try:
-            name = base64.b64decode(name_b64).decode("utf-8") if name_b64 else "图表"
-        except Exception:
-            name = "图表"
-        from app.widgets.ui_helpers import save_png_from_b64
-
-        path = save_png_from_b64(self, png_b64, name or "图表")
-        if path:
-            logger.info(f"[MessageCard] 图表 PNG 已导出: {path}")
-
     def _export_message(self):
         """导出消息为 Markdown、HTML 或 PNG 图片文件
 
@@ -10239,6 +10214,31 @@ class MessageCard(SimpleCardWidget):
             """
         )
         self._retry_wait_label.setText(f"等待 {self._retry_wait_time:.0f}s")
+
+    def _on_chart_expand(self, chart_type: str, payload_b64: str):
+        """图表放大查看 → 打开覆盖右侧对话区域的 chart_viewer 全局卡
+
+        内部直接处理（不走 main_widget 回调），assistant/welcome/历史卡统一生效；
+        ui_helpers 顶部反向 import MessageCard，必须延迟导入避免循环依赖。
+        """
+        try:
+            from app.widgets.ui_helpers import show_chart_viewer
+
+            show_chart_viewer(self, chart_type, payload_b64)
+        except Exception as e:
+            logger.error(f"[MessageCard] 图表放大失败: {e}")
+
+    def _on_save_chart_png(self, name_b64: str, png_b64: str):
+        """图表 PNG 导出保存（消息卡小图导出与放大视图共用通道）"""
+        try:
+            name = base64.b64decode(name_b64).decode("utf-8") if name_b64 else "图表"
+        except Exception:
+            name = "图表"
+        from app.widgets.ui_helpers import save_png_from_b64
+
+        path = save_png_from_b64(self, png_b64, name or "图表")
+        if path:
+            logger.info(f"[MessageCard] 图表 PNG 已导出: {path}")
 
     def _on_webengine_context_lost(self):
         """WebEngine 上下文丢失时显示恢复提示"""
