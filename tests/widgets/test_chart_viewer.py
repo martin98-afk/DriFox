@@ -119,3 +119,27 @@ class TestRegistry:
 
         assert callable(ui_helpers.show_chart_viewer)
         assert callable(ui_helpers.save_png_from_b64)
+
+
+class TestCardSkeletonHooks:
+    def test_skeleton_contains_toolbar_js(self):
+        """消息卡源码包含图表工具栏 JS 与导出/放大通道"""
+        import inspect
+
+        from app.widgets import message_card
+
+        src = inspect.getsource(message_card)
+        assert "_attachChartToolbar" in src
+        assert "pywebview_action:chart_expand:" in src
+        assert "pywebview_action:save_chart_png:" in src
+        assert "_chartInstance" in src
+
+    def test_skeleton_css_position_relative(self):
+        """容器 CSS 含 position: relative（工具栏绝对定位前提）"""
+        import inspect
+
+        from app.widgets import message_card
+
+        src = inspect.getsource(message_card)
+        assert ".chart-toolbar" in src
+        assert "position: relative" in src
