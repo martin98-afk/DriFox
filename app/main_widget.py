@@ -1056,6 +1056,10 @@ class OpenAIChatToolWindow(ToolWindow):
     # resize 防抖间隔（（ms）：80ms 已足够覆盖感知刷新率，减少慢速 resize
     # 拖拽场景下的冗余布局重算（每帧比 16ms/32ms 少一次）。
     _RESIZE_DEBOUNCE_MS: int = 80
+    # 判定"视口内卡片"的上下缓冲（px）：resize 结束后该范围内的卡片一次性
+    # 恢复真实内容，其余离屏卡片分批恢复。缓冲略大于一屏可避免滚动时
+    # 立刻撞上尚未恢复的占位卡片。
+    _RESTORE_VISIBLE_BUFFER: int = 400
     # 新建任务：相邻成员窗口会话创建的交错间隔（C3，避免 N 窗同步链冻结 UI）
     _TEAM_NEW_TASK_STAGGER_MS: int = 50
     # 模板加载时待排列的新窗口计数（延迟 join 完成后递减，归零时触发自动排列）
@@ -1364,6 +1368,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.timeout.connect(self._sync_all_cards_width)
         self._pending_resize_sync = False
         self._resize_preview_active = False
+        # 🐛 恢复链代次：每轮 resize 递增，用于作废旧的单次恢复链。
+        # 没有它时连续拖拽会并存多条链，互相清空 _restore_queue，
+        # 导致部分卡片永久停留在 placeholder 空白态。
+        self._restore_epoch = 0
+        self._restore_queue = []
+        self._restore_batch_idx = 0
         self._last_chat_viewport_width = 0
         # [PERF] 滚动同步定时器：100ms 已足够跟踪滚动停止
         self._scroll_sync_timer = QTimer(self)
@@ -8846,24 +8856,69 @@ class OpenAIChatToolWindow(ToolWindow):
             except RuntimeError:
                 pass
 
-        # 第二步：收集卡片，分批退出 preview 模式
-        self._restore_queue = []
+        # 第二步：分区恢复 —— 视口内立即全量恢复，离屏大批量快恢复。
+        #
+        # 🐛 竞态修复（窗口拖拽时部分卡片永久空白的根因）：
+        # 旧实现把全部卡片塞进同一个 _restore_queue，用 QTimer.singleShot 链式
+        # 分批推进，但**没有任何机制取消上一条链**。连续 resize（拖拽必然产生）
+        # 会启动多条链，它们共享 _restore_queue / _restore_batch_idx：
+        # 先结束的那条把 _restore_queue 清空并置 _resize_preview_active=False，
+        # 另一条链随后读到空队列直接收尾 → 大量卡片从未被 set_resize_preview_mode(False)
+        # → 永远停留在 placeholder 空白态，表现为"窗口变大后内容迟迟不刷新"。
+        # 引入 epoch 令牌作废旧链，保证同一时刻只有一条恢复链存活。
+        #
+        # 🐛 性能修复：固定 5 张/80ms 的节奏下，100 张卡片需 20 批 × 80ms ≈ 1.6s。
+        # 视口内卡片是用户正在看的，数量有限（通常 <20）且本来就要渲染，一次性
+        # 恢复没有额外 GPU 风险，却能让内容"立刻"适配；离屏卡片不参与渲染，
+        # 放宽到 20 张/30ms 快速收尾。
+        self._restore_epoch += 1
+        epoch = self._restore_epoch
+
+        visible_cards = []
+        offscreen_cards = []
+        viewport_rect = scroll_area.viewport().rect() if scroll_area else None
+        if viewport_rect is not None:
+            viewport_top = scroll_area.verticalScrollBar().value()
+            viewport_bottom = viewport_top + viewport_rect.height()
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), MessageCard):
-                self._restore_queue.append(item.widget())
+            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
+                continue
+            card = item.widget()
+            if viewport_rect is None:
+                visible_cards.append(card)
+                continue
+            card_rect = card.geometry()
+            if card_rect.bottom() < viewport_top - self._RESTORE_VISIBLE_BUFFER or card_rect.top() > viewport_bottom + self._RESTORE_VISIBLE_BUFFER:
+                offscreen_cards.append(card)
+            else:
+                visible_cards.append(card)
 
-        if not self._restore_queue:
-            self._resize_preview_active = False
-            return
+        for card in visible_cards:
+            try:
+                card.set_resize_preview_mode(False)
+            except RuntimeError:
+                pass
 
+        self._restore_queue = offscreen_cards
         self._restore_batch_idx = 0
-        self._process_restore_batch()
+        if self._restore_queue:
+            self._process_restore_batch(epoch)
+        else:
+            self._restore_queue = []
+            self._resize_preview_active = False
 
-    def _process_restore_batch(self):
-        """分批恢复卡片 viewer（触发 GPU 分配，必须分批以避免峰值）"""
-        BATCH_SIZE = 5
-        INTERVAL_MS = 80
+    def _process_restore_batch(self, epoch: int | None = None):
+        """分批恢复离屏卡片 viewer（触发 GPU 分配，故分批以避免峰值）
+
+        Args:
+            epoch: 恢复链代次。与 self._restore_epoch 不符说明本链已被新一轮
+                resize 作废，立即退出，避免多链并存互相清空队列。
+        """
+        if epoch is not None and epoch != self._restore_epoch:
+            return
+        BATCH_SIZE = 20
+        INTERVAL_MS = 30
         end = min(self._restore_batch_idx + BATCH_SIZE, len(self._restore_queue))
         for i in range(self._restore_batch_idx, end):
             card = self._restore_queue[i]
@@ -8873,7 +8928,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 pass
         self._restore_batch_idx = end
         if end < len(self._restore_queue):
-            QTimer.singleShot(INTERVAL_MS, self._process_restore_batch)
+            QTimer.singleShot(INTERVAL_MS, lambda: self._process_restore_batch(epoch))
         else:
             self._restore_queue = []
             self._resize_preview_active = False

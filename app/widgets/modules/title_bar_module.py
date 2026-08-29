@@ -29,6 +29,29 @@ from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel
 from app.plugins.contracts.ui_module import UIModule
 from app.utils.utils import get_icon
 
+class _ThemeIconLabel(QLabel):
+    """主题感知图标标签 — 不缓存 pixmap 快照。
+
+    QLabel.setPixmap(icon.pixmap()) 会把当前主题的像素快照固化下来，主题切换后图标不刷新。
+    本类改为持有 QIcon，每次 paintEvent 都经 _ThemeIconEngine 重新取色，
+    与项目里 TransparentToolButton(get_icon(...)) 的行为一致。
+    """
+
+    def __init__(self, icon_name: str, size: int = 12, parent=None):
+        super().__init__(parent)
+        self._icon_name = icon_name
+        self._size = size
+        self.setFixedSize(size, size)
+        self.setStyleSheet("background: transparent;")
+
+    def paintEvent(self, event):
+        from PyQt5.QtGui import QPainter
+
+        p = QPainter(self)
+        get_icon(self._icon_name).paint(p, self.rect(), Qt.AlignCenter)
+        p.end()
+
+
 class _BranchChip(QFrame):
     """Git 分支 chip — git 分支线稿 icon + 分支名 + hover 底色。
 
@@ -48,11 +71,9 @@ class _BranchChip(QFrame):
         lay.setSpacing(4)
 
         # git 分支线稿 icon（12px，主题感知：浅色 #333 / 深色 #fff）
-        self._icon_label = QLabel(self)
+        # 用 _ThemeIconLabel 而非 setPixmap 快照，保证深浅主题切换后自动重取色
+        self._icon_label = _ThemeIconLabel("分支", 12, self)
         self._icon_label.setObjectName("_branchIcon")
-        self._icon_label.setFixedSize(12, 12)
-        self._icon_label.setStyleSheet("background: transparent;")
-        self._icon_label.setPixmap(get_icon("分支").pixmap(12, 12))
         lay.addWidget(self._icon_label)
 
         # 文字
@@ -95,6 +116,8 @@ class _BranchChip(QFrame):
                 color: {Colors.TEXT_PRIMARY};
             }}
         """)
+        # 主题切换时强制重绘 icon（_ThemeIconLabel 的 paintEvent 会重新取色）
+        self._icon_label.update()
 
     def refresh_style(self) -> None:
         """主程序 _refresh_branch_widget_style 调用入口（保持向后兼容）"""

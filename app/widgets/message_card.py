@@ -295,6 +295,26 @@ def _get_formatter_cached():
 # ======== 滚动行为常量 ========
 SCROLL_BOUNDARY_TOLERANCE = 5.0  # 滚动边界判定容差(px)，用于判断是否到达顶部/底部
 AUTO_SCROLL_THRESHOLD = 80  # "接近底部"判定阈值(px)：仅真接近底部才恢复自动跟随；过大会把用户阅读位置反复拉回底部
+# 🐛 滚动自愈：内部被判定为"可滚"却始终滚不动时，连续多少次后强制转发外部。
+# 兜底所有几何缓存滞后场景，消除"怎么滚都没反应"的粘性失效。
+WHEEL_STUCK_LIMIT = 4
+# 两次滚轮间隔小于该值时不计入 stuck（Chromium 滚动与 reportHeight 上报均有
+# 帧级延迟，密集滚动期间 scrollTop 未刷新属正常，不得误判为卡死）。
+WHEEL_STUCK_MIN_INTERVAL = 0.1
+
+
+def wheel_delta_to_px(delta: int) -> int:
+    """滚轮角位移 → 滚动条位移（px），三处 wheelEvent 共用。
+
+    🐛 原实现 `-delta // 2` 有两个缺陷：
+    1) 归零：delta = -1（触控板精细滚动）→ -(-1)//2 = 0 → 向下滚完全无反应；
+    2) 不对称：Python 整除向下取整，±3 分别得到 -2 / +1，上下滚速度不一致。
+    改为四舍五入并保底 ±1，保证任何幅度都至少有 1px 响应。
+    """
+    step = int(round(delta / 2.0))
+    if step == 0 and delta != 0:
+        step = 1 if delta > 0 else -1
+    return step
 
 
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
@@ -2745,6 +2765,13 @@ class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
     heightReported = pyqtSignal(int)
+    # 🐛 滚动判据修复：wheelEvent 原先只能用 page().scrollPosition()（文档级），
+    # 但真正的滚动容器是 body（CSS: body{overflow-y:scroll}），文档级 scrollTop
+    # 恒为 0 → at_top 恒真 / at_bottom 恒假 → 向下滚动永远被判为"内部处理"，
+    # 而内部其实滚不动，事件被吞 → 卡片内滚动完全失效。
+    # 故在 reportHeight 回传时顺带携带 body 的真实滚动几何：
+    # (scrollHeight, scrollTop, clientHeight)。
+    bodyGeometryReported = pyqtSignal(int, int, int)
     contentReady = pyqtSignal()
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
@@ -2782,8 +2809,19 @@ class ConsoleMonitorPage(QWebEnginePage):
         # [PERF] pywebview_height 是最高频信号（流式时每周期多次触发），
         # 放在首位快速短路，避免对每条 height 消息都做 startswith("pywebview_ready") 等冗余判断
         if msg.startswith("pywebview_height:"):
+            # 协议：'pywebview_height:<scrollHeight>[|<scrollTop>|<clientHeight>]'
+            # 后两字段由 body 几何上报新增；旧格式（仅高度）仍兼容——骨架在 JS
+            # 尚未注入、或第三方/降级路径下可能只发高度，此时不发射几何信号，
+            # wheelEvent 回退到保守策略。
             try:
-                self.heightReported.emit(int(float(msg.split(":")[1])))
+                payload = msg.split(":", 1)[1]
+                if "|" in payload:
+                    h_str, st_str, ch_str = payload.split("|", 2)
+                    h = int(float(h_str))
+                    self.heightReported.emit(h)
+                    self.bodyGeometryReported.emit(h, int(float(st_str)), int(float(ch_str)))
+                else:
+                    self.heightReported.emit(int(float(payload)))
             except Exception:
                 pass
         elif msg == "pywebview_ready":
@@ -3166,6 +3204,20 @@ class CodeWebViewer(QWebEngineView):
 
         # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
         self._document_height = 0
+        # 🐛 滚动判据修复：body 的真实滚动几何（由 reportHeight 顺带回传）。
+        # _body_client_height: body 可视高度；_body_scroll_top: body 已滚动距离。
+        # 真实可滚动量 = _document_height - _body_client_height，
+        # 该值是"卡片内部能否滚动"的唯一正确判据。
+        self._body_client_height = 0
+        self._body_scroll_top = 0
+        self._body_geom_valid = False
+        # 自愈计数：连续判定为"内部处理"但 body.scrollTop 纹丝不动的滚轮次数。
+        # 达到阈值说明内部其实滚不动（几何缓存滞后/内容未溢出），强制转发外部，
+        # 彻底消除"怎么滚都没反应"的粘性失效。
+        self._wheel_stuck_streak = 0
+        self._wheel_last_scroll_top = -1
+        self._wheel_last_ts = 0.0
+        self._wheel_delegated_inner = False
 
         # 1. 渲染定时器
         self._render_timer = QTimer(self)
@@ -3204,6 +3256,7 @@ class CodeWebViewer(QWebEngineView):
         self._page.codeActionRequested.connect(self.codeActionRequested.emit)
         self._page.contextActionRequested.connect(self.contextActionRequested.emit)
         self._page.heightReported.connect(self._on_height_reported)
+        self._page.bodyGeometryReported.connect(self._on_body_geometry_reported)
         self._page.contentReady.connect(self._on_js_ready)
         self._page.toolDiffRequested.connect(self.toolDiffRequested.emit)
         self._page.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
@@ -3337,56 +3390,64 @@ class CodeWebViewer(QWebEngineView):
                 super().wheelEvent(event)
                 return
 
-            # 检查内部 WebView 是否有可滚动内容（文档高度 > 视口高度）
-            viewport_h = self.height()
-            # 🐛 修复：用 page().contentsSize() 获取更实时的文档高度，
-            # 替代仅靠 JS 异步上报的 _document_height（流式期间滞后 ~100-200ms）。
-            # contentsSize 由 Chromium 在每帧渲染后更新，滞后 < 1 帧（~16ms）。
-            doc_h = 0
-            page = self.page()
-            if page:
-                contents_size = page.contentsSize()
-                if contents_size and contents_size.height() > 0:
-                    doc_h = contents_size.height()
-            if doc_h <= 0:
-                doc_h = self._document_height
-
-            # 🐛 修复竞态：_document_height 通过 JS 异步上报，初始值为 0，
-            # 此时保守处理——让内部先处理（super().wheelEvent），
-            # 等 _on_height_reported 上报实际高度后再启用边界转发逻辑。
-            if doc_h <= 0:
+            delta = event.angleDelta().y()
+            if delta == 0:
                 super().wheelEvent(event)
                 return
 
-            inner_has_overflow = doc_h > viewport_h and viewport_h >= 40
+            # ── 核心修复：判据必须是 body 的滚动几何，而非文档级指标 ──
+            # CSS 为 body 设置了 overflow-y:scroll + max-height，body 才是唯一
+            # 的滚动容器。而 page().scrollPosition() 是文档级指标，在 body-scroller
+            # 架构下恒为 0 → at_top 恒真、at_bottom 恒假 → 所有向下滚动都被判为
+            # "内部处理"，但内部其实滚不动，事件被吞 → 卡片内滚动完全失效。
+            # contentsSize() 同样不含 body 的内部溢出，也不能用作判据。
+            scroll_y, max_scroll = self._inner_scroll_range()
 
-            if not inner_has_overflow:
-                # 内部没有溢出 → 转发到外部
-                delta = event.angleDelta().y()
-                outer_vbar.setValue(outer_vbar.value() - delta // 2)
+            if not self._body_geom_valid:
+                # 几何尚未上报（首帧 / JS 未就绪 / 上报丢失）→ 必须转发外部。
+                # ⚠️ 绝不能退化成"交给内部处理"：那正是本次修复的核心失效模式——
+                # 绝大多卡片的 viewer 高度 == 内容高度（内部本就不可滚），
+                # 一旦把事件交给内部就会被无声吞掉，表现为怎么滚都没反应。
+                # 转发外部是这个不确定状态下的正确默认；真正需要内部滚动的
+                # 只有内容超过 MAX_HEIGHT 的长卡片，而其内容渲染完必然已上报几何。
+                outer_vbar.setValue(outer_vbar.value() - wheel_delta_to_px(delta))
                 event.accept()
                 return
 
-            # 内部有溢出：检查当前滚动位置是否在边界
-            scroll_pos = self.page().scrollPosition() if self.page() else QPointF(0, 0)
-            scroll_y = scroll_pos.y()
+            # ── 消除滞后假信号 ──
+            # viewer 高度已等于文档高度 ⇒ 内容已完全展开，body 不可能还有可滚动量。
+            # 此时残留的 max_scroll 只可能来自 resize/重排前的旧几何（内容变宽后
+            # 高度已收拢，但 body 几何缓存尚未刷新），必须清零，否则会误判内部可滚。
+            if max_scroll > SCROLL_BOUNDARY_TOLERANCE and abs(self.height() - self._document_height) <= 12:
+                max_scroll = 0
 
-            scrolling_down = event.angleDelta().y() < 0
-            scrolling_up = event.angleDelta().y() > 0
+            # ── 自愈：连续委托内部却毫无位移 → 强制转外部 ──
+            # 覆盖所有残余的缓存不同步场景（如高度收敛窗口期内反复误判）。
+            # 密集滚动期间（间隔 <100ms）不计入，避免帧级上报延迟造成误判。
+            now = time.monotonic()
+            if self._wheel_delegated_inner:
+                if scroll_y == self._wheel_last_scroll_top and (now - self._wheel_last_ts) > WHEEL_STUCK_MIN_INTERVAL:
+                    self._wheel_stuck_streak += 1
+                else:
+                    self._wheel_stuck_streak = 0
+            self._wheel_delegated_inner = False
 
-            # 判断是否到达滚动边界
             at_top = scroll_y <= SCROLL_BOUNDARY_TOLERANCE
-            at_bottom = scroll_y >= (doc_h - viewport_h - SCROLL_BOUNDARY_TOLERANCE)
+            at_bottom = scroll_y >= (max_scroll - SCROLL_BOUNDARY_TOLERANCE)
+            inner_can_scroll = max_scroll > SCROLL_BOUNDARY_TOLERANCE and self._wheel_stuck_streak < WHEEL_STUCK_LIMIT
 
-            if (scrolling_down and at_bottom) or (scrolling_up and at_top):
-                # 内部已到达边界 → 转发到外部
-                delta = event.angleDelta().y()
-                outer_vbar.setValue(outer_vbar.value() - delta // 2)
-                event.accept()
+            if inner_can_scroll and not ((delta < 0 and at_bottom) or (delta > 0 and at_top)):
+                # 内部还有可滚动空间 → 让内部处理
+                self._wheel_delegated_inner = True
+                self._wheel_last_scroll_top = scroll_y
+                self._wheel_last_ts = now
+                super().wheelEvent(event)
                 return
 
-            # 内部还有可滚动空间 → 让内部处理
-            super().wheelEvent(event)
+            # 内部不可滚 / 已到边界 → 转发到外部
+            self._wheel_stuck_streak = 0
+            outer_vbar.setValue(outer_vbar.value() - wheel_delta_to_px(delta))
+            event.accept()
         except Exception:
             super().wheelEvent(event)
 
@@ -3474,6 +3535,40 @@ class CodeWebViewer(QWebEngineView):
         final_h = h + 2
         if abs(self.height() - final_h) > 2:
             self.contentHeightChanged.emit(final_h)
+
+    def _on_body_geometry_reported(self, scroll_height: int, scroll_top: int, client_height: int):
+        """缓存 body 的真实滚动几何（reportHeight 顺带回传）。
+
+        body 是唯一的滚动容器（CSS: body{overflow-y:scroll; max-height}），
+        因此"卡片内部能否滚动"只能由这三个值判定：
+            可滚动量 = scrollHeight - clientHeight
+        而 Qt 侧的 page().scrollPosition()/contentsSize() 是文档级指标，
+        在 body-scroller 架构下恒为 0 / 不含 body 内部溢出，不能作为判据。
+        """
+        self._document_height = scroll_height
+        self._body_scroll_top = scroll_top
+        self._body_client_height = client_height
+        self._body_geom_valid = client_height > 0
+
+    def _inner_scroll_range(self) -> tuple:
+        """返回 (scroll_top, max_scroll)：body 当前滚动位置与最大可滚动距离。
+
+        无有效几何缓存时返回 (0, 0)，调用方据此走保守策略。
+        """
+        if not self._body_geom_valid:
+            return 0, 0
+        max_scroll = max(0, self._document_height - self._body_client_height)
+        return self._body_scroll_top, max_scroll
+
+    def update_height(self):
+        """主动触发一次高度/几何上报（供外部宽度同步后驱动）。
+
+        sync_width 原本只对 PlainTextViewer 生效（CodeWebViewer 无此方法），
+        导致 resize 恢复后完全被动等待 JS 的 ResizeObserver + rAF×3 才上报，
+        卡片高度收敛慢（表现为"窗口变大后内容迟迟不适配"）。补此方法后，
+        宽度同步可主动驱动一次上报，无需等 ResizeObserver 的三帧延迟。
+        """
+        self._do_resize_check()
 
     def showEvent(self, event):
         """[V1] 可见性恢复：隐藏 tab 期间被门控的渲染请求在此补渲。
@@ -5815,8 +5910,16 @@ class CodeWebViewer(QWebEngineView):
                     // 用 body.scrollHeight 获取完整内容高度。
                     // getBoundingClientRect 在 html{{overflow:hidden}} 下
                     // 返回视口高度而非内容高度，导致卡片无法完全展开。
-                    const h = document.body.scrollHeight;
-                    console.log('pywebview_height:' + h);
+                    const _b = document.body;
+                    if (!_b) return;
+                    const h = _b.scrollHeight;
+                    // 🐛 滚动判据修复：body 才是真正的滚动容器
+                    // （CSS body{{overflow-y:scroll; max-height}}），而 Qt 侧的
+                    // page().scrollPosition() 是文档级、恒为 0，无法用于边界判定。
+                    // 故在高频回传中顺带携带 body 的 scrollTop / clientHeight，
+                    // Python 侧据此算出真实可滚动量 = scrollHeight - clientHeight。
+                    // 注意保持'|'分隔协议，旧解析器（仅高度）仍可工作。
+                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0));
                 }}
                 // 批量报告高度：流式每 chunk 一次 IPC 开销高，改为 3 帧合并
                 // （rAF ×3 后 reportHeight 一次），动画期间仍暂停报告
@@ -8477,7 +8580,7 @@ class CodeWebViewer(QWebEngineView):
                 vbar = scroll_area.verticalScrollBar()
                 if vbar and vbar.minimum() != vbar.maximum():
                     delta = event.angleDelta().y()
-                    vbar.setValue(vbar.value() - delta // 2)
+                    vbar.setValue(vbar.value() - wheel_delta_to_px(delta))
                     event.accept()
                     return
         except Exception:
@@ -11049,7 +11152,7 @@ class MessageCard(SimpleCardWidget):
             if scroll_area:
                 vbar = scroll_area.verticalScrollBar()
                 if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
-                    vbar.setValue(vbar.value() - event.angleDelta().y() // 2)
+                    vbar.setValue(vbar.value() - wheel_delta_to_px(event.angleDelta().y()))
                     event.accept()
                     return
         except Exception:
