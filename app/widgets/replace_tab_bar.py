@@ -26,7 +26,16 @@ CONVERSATION_ID = "__drifox_conversation__"
 
 # 已知「内置替换」全局卡片 card_id（与 UI 插件 full 浮动卡片共用 TOP 覆盖层、互斥显示）
 KNOWN_GLOBAL_REPLACE_CARDS = frozenset(
-    {"settings", "provider_edit", "hook_edit", "mcp_edit", "diff_viewer", "sub_agent_session", "file_undo"}
+    {
+        "settings",
+        "provider_edit",
+        "hook_edit",
+        "mcp_edit",
+        "diff_viewer",
+        "sub_agent_session",
+        "file_undo",
+        "chart_viewer",
+    }
 )
 GLOBAL_REPLACE_TITLES = {
     "settings": "系统设置",
@@ -36,6 +45,7 @@ GLOBAL_REPLACE_TITLES = {
     "diff_viewer": "文件差异对比",
     "sub_agent_session": "子智能体会话",
     "file_undo": "文件撤销",
+    "chart_viewer": "图表查看",
 }
 
 

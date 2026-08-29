@@ -2648,6 +2648,8 @@ def _accent_rgba(accent: str, alpha: float) -> str:
 
 
 # ======== 本地 Vendor JS 脚本（离线优先，CDN 降级） ========
+# 图表放大/导出通道 payload b64 上限（与 chart_viewer_card._MAX_PAYLOAD_B64 一致）
+_MAX_CHART_PAYLOAD_B64 = 8 * 1024 * 1024
 _vendor_script_tags_cache: Optional[str] = None
 
 
@@ -2747,6 +2749,8 @@ class ConsoleMonitorPage(QWebEnginePage):
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     saveFileRequested = pyqtSignal(str, str)  # code, lang
+    chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — echarts/mermaid 放大查看
+    saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
 
     def __init__(self, profile=None, parent=None):
         """创建一个 ConsoleMonitorPage。
@@ -2847,6 +2851,24 @@ class ConsoleMonitorPage(QWebEnginePage):
                         b64_code, lang = sub_parts
                         code = base64.b64decode(b64_code).decode("utf-8")
                         self.saveFileRequested.emit(code, lang)
+                except Exception:
+                    pass
+            elif msg.startswith("pywebview_action:chart_expand:"):
+                # 图表放大查看请求：console.log('pywebview_action:chart_expand:<type>:<b64>')
+                try:
+                    rest = msg.split("pywebview_action:chart_expand:", 1)[1]
+                    chart_type, payload = rest.split(":", 1)
+                    if chart_type in ("echarts", "mermaid") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
+                        self.chartExpandRequested.emit(chart_type, payload)
+                except Exception:
+                    pass
+            elif msg.startswith("pywebview_action:save_chart_png:"):
+                # 图表 PNG 导出回传：console.log('pywebview_action:save_chart_png:<name_b64>:<png_b64>')
+                try:
+                    rest = msg.split("pywebview_action:save_chart_png:", 1)[1]
+                    name_b64, png_b64 = rest.split(":", 1)
+                    if len(png_b64) <= _MAX_CHART_PAYLOAD_B64:
+                        self.saveChartPngRequested.emit(name_b64, png_b64)
                 except Exception:
                     pass
             else:
@@ -3033,6 +3055,8 @@ class CodeWebViewer(QWebEngineView):
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     saveFileRequested = pyqtSignal(str, str)  # code, lang
+    chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — 图表放大查看
+    saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
     # WebEngine 上下文丢失信号
     contextLost = pyqtSignal()
     contextRestored = pyqtSignal()
@@ -3184,6 +3208,8 @@ class CodeWebViewer(QWebEngineView):
         self._page.toolDiffRequested.connect(self.toolDiffRequested.emit)
         self._page.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
         self._page.saveFileRequested.connect(self.saveFileRequested.emit)
+        self._page.chartExpandRequested.connect(self.chartExpandRequested.emit)
+        self._page.saveChartPngRequested.connect(self.saveChartPngRequested.emit)
 
         self._load_skeleton()
 
@@ -4792,21 +4818,81 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary) !important;
                 }}
 
-                '''
                 /* ===== ECharts 图表容器 ===== */
                 .echarts-container {{
+                    position: relative;
                     width: 100%;
                     min-height: 300px;
                     height: auto;
                     margin: 12px 0;
                     border-radius: 10px;
-                    background: rgba(22, 27, 34, 0.6);
+                    background: {"rgba(255, 255, 255, 0.75)" if _is_light_diff else "rgba(22, 27, 34, 0.6)"};
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
-                '''
+                /* ===== 图表 hover 浮动工具栏（放大 / 导出）；按钮底色与 icon 目录由 _CHART_IS_DARK 同源驱动 ===== */
+                .chart-toolbar {{
+                    position: absolute;
+                    top: 8px;
+                    right: 24px;
+                    display: flex;
+                    gap: 6px;
+                    opacity: 0;
+                    transition: opacity 150ms ease;
+                    z-index: 10;
+                }}
+                .echarts-container:hover .chart-toolbar,
+                .mermaid-block:hover .chart-toolbar {{
+                    opacity: 1;
+                }}
+                .chart-toolbar button {{
+                    position: relative;
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 6px;
+                    border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
+                    background: {"rgba(255, 255, 255, 0.92)" if _is_light_diff else "rgba(22, 27, 34, 0.85)"};
+                    cursor: pointer;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 0;
+                }}
+                .chart-toolbar button:hover {{
+                    background: {"rgba(228, 233, 240, 1)" if _is_light_diff else "rgba(40, 46, 56, 0.95)"};
+                }}
+                /* 自绘 tooltip（代替 HTML title，避免 Chromium 原生 tooltip 黑块）；向下弹避免被容器 overflow:hidden 裁剪 */
+                .chart-toolbar button::after {{
+                    content: attr(data-tooltip);
+                    position: absolute;
+                    top: calc(100% + 6px);
+                    right: 0;
+                    white-space: nowrap;
+                    background: var(--panel, rgba(30,30,32,250));
+                    color: var(--text, #ffffff);
+                    font-size: 11px;
+                    padding: 4px 8px;
+                    border-radius: 6px;
+                    border: 1px solid var(--border, rgba(128,128,128,0.15));
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                    pointer-events: none;
+                    z-index: 100;
+                    line-height: 1.4;
+                    opacity: 0;
+                    transition: opacity 140ms ease;
+                }}
+                .chart-toolbar button:hover::after {{
+                    opacity: 1;
+                    z-index: 100;
+                }}
+                .chart-toolbar button img {{
+                    width: 16px;
+                    height: 16px;
+                    pointer-events: none;
+                }}
 
                 /* ===== Mermaid 图表容器 ===== */
                 .mermaid-block {{
+                    position: relative;
                     width: 100%;
                     margin: 12px 0;
                     padding: 12px 10px;
@@ -5346,6 +5432,7 @@ class CodeWebViewer(QWebEngineView):
                                     el.classList.remove('mermaid-pending');
                                     el.innerHTML = svg;
                                     el.setAttribute('data-mermaid-src', '');   // 渲染完释放 b64
+                                    if (window._attachChartToolbar) window._attachChartToolbar(el, 'mermaid');
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                 }})['catch'](function (e) {{
                                     // 失败不吞内容：退回原始源码，用户仍可复制
@@ -5508,9 +5595,11 @@ class CodeWebViewer(QWebEngineView):
                                     // 用 TextDecoder('utf-8') 还原为正确字符串后再 JSON.parse，避免 mojibake。
                                     var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
                                     var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
-                                    var chart = echarts.init(el, 'dark');
+                                    var chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
                                     chart.setOption(option);
                                     el._echartInited = true;
+                                    el._chartInstance = chart;
+                                    if (window._attachChartToolbar) window._attachChartToolbar(el, 'echarts');
                                     // 卡片 resize 时自适应
                                     var _ro = new ResizeObserver(function() {{ chart.resize(); }});
                                     _ro.observe(el);
@@ -5664,6 +5753,8 @@ class CodeWebViewer(QWebEngineView):
                                 var chart = echarts.init(el, 'dark');
                                 chart.setOption(option);
                                 el._echartInited = true;
+                                el._chartInstance = chart;
+                                if (window._attachChartToolbar) window._attachChartToolbar(el, 'echarts');
                                 var _ro = new ResizeObserver(function() {{ chart.resize(); }});
                                 _ro.observe(el);
                             }} catch(e) {{
@@ -6150,6 +6241,87 @@ class CodeWebViewer(QWebEngineView):
                     reportHeight();
                 }}, false);
                 window.pywebview = {{ reportHeight: reportHeight }};
+
+                // ===== 图表工具栏：echarts / mermaid 放大查看 + 3x PNG 导出 =====
+                var _CHART_IS_DARK = {str(not _is_light).lower()};
+                var _CHART_BG = _CHART_IS_DARK ? '#1B1E24' : '#FFFFFF';
+                // icon 目录与按钮底色同源（_CHART_IS_DARK），避免主题切换时 prefix 缓存滞后致白底白 icon
+                var _ICON_BASE = _CHART_IS_DARK ? 'qrc:/icons' : 'qrc:/icons_light';
+                function _b64EncodeUtf8(str) {{
+                    return btoa(unescape(encodeURIComponent(str)));
+                }}
+                function _emitChartPng(dataUrl) {{
+                    var b64 = (dataUrl || '').split(',', 2)[1] || '';
+                    if (!b64 || b64.length > 8 * 1024 * 1024) {{ console.error('[chart] png too large or empty'); return; }}
+                    console.log('pywebview_action:save_chart_png:' + _b64EncodeUtf8('chart') + ':' + b64);
+                }}
+                function _svgIntrinsicSize(svg) {{
+                    // mermaid 输出 svg 带 width="100%"：parseFloat 会得 100 导致导出窄条，必须排除百分比、viewBox 优先
+                    var vb = svg.viewBox && svg.viewBox.baseVal;
+                    var num = function (v) {{ var n = parseFloat(v); return (n && String(v).indexOf('%') === -1) ? n : 0; }};
+                    var w = (vb && vb.width) || num(svg.getAttribute('width')) || 800;
+                    var h = (vb && vb.height) || num(svg.getAttribute('height')) || 600;
+                    return [w, h];
+                }}
+                function _exportMermaidSvgPng(svg, scale) {{
+                    if (!svg) return;
+                    var serialized = new XMLSerializer().serializeToString(svg);
+                    var wh = _svgIntrinsicSize(svg);
+                    var w = wh[0], h = wh[1];
+                    var img = new Image();
+                    img.onload = function () {{
+                        var canvas = document.createElement('canvas');
+                        canvas.width = Math.round(w * scale);
+                        canvas.height = Math.round(h * scale);
+                        var ctx = canvas.getContext('2d');
+                        ctx.fillStyle = _CHART_BG;
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        _emitChartPng(canvas.toDataURL('image/png'));
+                    }};
+                    img.src = 'data:image/svg+xml;base64,' + _b64EncodeUtf8(serialized);
+                }}
+                window._attachChartToolbar = function (el, type) {{
+                    if (!el || el._toolbarAttached) return;
+                    el._toolbarAttached = true;
+                    // 防御兜底：absolute 定位基准必须是容器自身（历史 CSS 曾被字面 ''' 破坏）
+                    if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
+                    var bar = document.createElement('div');
+                    bar.className = 'chart-toolbar';
+                    var btnExpand = document.createElement('button');
+                    btnExpand.setAttribute('data-tooltip', '放大查看');
+                    btnExpand.innerHTML = '<img src="' + _ICON_BASE + '/最大化.svg" />';
+                    var btnExport = document.createElement('button');
+                    btnExport.setAttribute('data-tooltip', '导出 PNG（3x）');
+                    btnExport.innerHTML = '<img src="' + _ICON_BASE + '/导入.svg" />';
+                    bar.appendChild(btnExpand);
+                    bar.appendChild(btnExport);
+                    el.appendChild(bar);
+                    btnExpand.addEventListener('click', function (ev) {{
+                        ev.stopPropagation();
+                        try {{
+                            if (type === 'echarts' && el._chartInstance) {{
+                                var opt = JSON.stringify(el._chartInstance.getOption());
+                                console.log('pywebview_action:chart_expand:echarts:' + _b64EncodeUtf8(opt));
+                            }} else if (type === 'mermaid') {{
+                                var svg = el.querySelector('svg');
+                                if (!svg) return;
+                                console.log('pywebview_action:chart_expand:mermaid:' + _b64EncodeUtf8(svg.outerHTML));
+                            }}
+                        }} catch (e) {{ console.error('[chart] expand failed:', e); }}
+                    }});
+                    btnExport.addEventListener('click', function (ev) {{
+                        ev.stopPropagation();
+                        try {{
+                            if (type === 'echarts' && el._chartInstance) {{
+                                el._chartInstance.resize();  // 防实例内部宽度过期导致导出畸形
+                                _emitChartPng(el._chartInstance.getDataURL({{ type: 'png', pixelRatio: 3, backgroundColor: _CHART_BG }}));
+                            }} else if (type === 'mermaid') {{
+                                _exportMermaidSvgPng(el.querySelector('svg'), 3);
+                            }}
+                        }} catch (e) {{ console.error('[chart] export failed:', e); }}
+                    }});
+                }};
 
                 // 工具差异对比请求函数
                 window._requestToolDiff = function(toolCallId) {{
@@ -7823,13 +7995,14 @@ class CodeWebViewer(QWebEngineView):
         # 兜底：暗色主题背景
         return QColor("#2B2B2B")
 
-    def _compose_with_solid_bg(self, source: "QPixmap", width: int, height: int) -> "QPixmap":
-        """在 QPixmap 上填充实心卡片背景，再合成 source
+    def _compose_with_solid_bg(self, source: "QPixmap", width: int, height: int, dpr: float = 1.0) -> "QPixmap":
+        """在 QPixmap 上填充实心卡片背景，再合成 source（dpr>1 时输出高清物理像素）
 
         Args:
             source:  从 widget.grab() 拿到的 pixmap（可能含透明区）
-            width:   目标宽度
-            height:  目标高度
+            width:   目标逻辑宽度
+            height:  目标逻辑高度
+            dpr:     输出 devicePixelRatio（物理像素 = 逻辑 × dpr；<1 钳制为 1）
 
         Returns:
             填充实心卡片背景 + 绘制 source 的合成 pixmap
@@ -7838,39 +8011,101 @@ class CodeWebViewer(QWebEngineView):
 
         if width <= 0 or height <= 0:
             return source
-        result = QPixmap(width, height)
+        dpr = max(1.0, float(dpr))
+        result = QPixmap(round(width * dpr), round(height * dpr))
+        result.setDevicePixelRatio(dpr)
         result.fill(self._get_card_bg_color())
         if not source.isNull():
             painter = QPainter(result)
-            painter.drawPixmap(0, 0, source)
+            painter.drawPixmap(0, 0, source)  # source 与 result 同 DPR 时按物理像素 1:1 绘制
             painter.end()
         return result
 
-    def _capture_full_content(self) -> "QPixmap":
-        """截取消息的完整内容为一张大图（实心背景 + 内容合成）
+    def _capture_looks_healthy(self, pix: "QPixmap") -> bool:
+        """粗采样检查抓取结果：非背景像素占比过低视为合成未完成（黑屏/空白图）
 
-        策略：临时解除 body max-height 限制并撑大视图到完整内容高度，
-        让全部内容一次性渲染可见，然后通过一次 grab() 截取整张图片，
-        最后用 QPixmap 主动填充实心卡片背景 + 合成 grab 结果。
-
-        相比原实现：
-        - 主动 QPixmap.fill 卡片色（实心），避免半透明 rgba 在 PNG 中呈现为黑
-        - 单次 200ms 等待 + processEvents() 强制布局（替代 400ms×2）
-        - grab(QRect) 显式指定区域，避免 setFixedHeight 后未生效导致漏抓
+        zoom 3x 撑大控件后 WebEngine 走异步合成，弱 GPU/大纹理时定时等待可能
+        不够——合成器未画完的 tile 抓出来是纯背景色。粗采样 ≤64×64 点毫秒级。
         """
+        from PyQt5.QtGui import QImage
+
+        img = pix.toImage()
+        if img.isNull():
+            return False
+        bg = self._get_card_bg_color()
+        w, h = img.width(), img.height()
+        step = max(4, min(w, h) // 64)
+        total = 0
+        diff = 0
+        y = 0
+        while y < h:
+            x = 0
+            while x < w:
+                c = img.pixelColor(x, y)
+                total += 1
+                if abs(c.red() - bg.red()) + abs(c.green() - bg.green()) + abs(c.blue() - bg.blue()) > 24:
+                    diff += 1
+                x += step
+            y += step
+        if total == 0:
+            return False
+        return (diff / total) >= 0.01  # 正常内容截图非背景占比远高于 1%
+
+    def _wait_render_stable(self, deadline_ms: int = 1200) -> None:
+        """轮询等待 WebEngine 布局/合成稳定：body.scrollHeight 连续两次读数一致即放行
+
+        替代固定 250ms 定时——大尺寸重排（zoom 3x 撑到 4K+）时固定等待可能不足，
+        或小页面白白等满。最长 deadline_ms 兜底，卡死不可能（_run_js_sync 有超时）。
+        """
+        import json as json_mod
+
+        from PyQt5.QtCore import QElapsedTimer, QEventLoop, QTimer
+
+        loop = QEventLoop()
+        elapsed = QElapsedTimer()
+        elapsed.start()
+        state = {"last": None, "stable": 0}
+
+        def _tick():
+            try:
+                raw = self._run_js_sync("JSON.stringify({sh: document.body ? document.body.scrollHeight : 0})")
+                cur = json_mod.loads(raw).get("sh", 0) if raw else 0
+            except Exception:
+                cur = 0
+            if cur == state["last"]:
+                state["stable"] += 1
+            else:
+                state["stable"] = 0
+            state["last"] = cur
+            # 至少 240ms（2 tick）且读数连续两次一致 → 布局稳定
+            if state["stable"] >= 2 and elapsed.elapsed() >= 240:
+                loop.quit()
+                return
+            if elapsed.elapsed() >= deadline_ms:
+                loop.quit()
+                return
+
+        timer = QTimer()
+        timer.setInterval(120)
+        timer.timeout.connect(_tick)
+        timer.start()
+        try:
+            loop.exec_()
+        finally:
+            timer.stop()
+
+    def _capture_full_content_1x(self) -> "QPixmap":
+        """1x 兜底抓取（旧逻辑完整保留）：解除 max-height 撑高后单次 grab + 实心合成"""
         import json as json_mod
 
         from PyQt5.QtCore import QEventLoop, QPoint, QRect, QTimer
         from PyQt5.QtWidgets import QApplication
 
-        page = self.page()
         view_w = self.width()
         cur_h = self.height()
 
-        # 1. 获取完整内容高度
         dims_raw = self._run_js_sync("JSON.stringify({sh: document.body.scrollHeight})")
         if not dims_raw:
-            # 拿不到高度 → 兜底：直接 grab + 强制实心背景
             return self._compose_with_solid_bg(self.grab(), view_w, cur_h)
 
         try:
@@ -7878,7 +8113,6 @@ class CodeWebViewer(QWebEngineView):
         except Exception:
             scroll_h = 0
 
-        # 2. 短消息：内容不超出 → 不展开
         if scroll_h <= cur_h or scroll_h <= 0:
             grabbed = self.grab()
             return self._compose_with_solid_bg(
@@ -7887,7 +8121,6 @@ class CodeWebViewer(QWebEngineView):
                 max(cur_h, grabbed.height() if not grabbed.isNull() else cur_h),
             )
 
-        # 3. 长消息：临时展开
         old_styles = self._run_js_sync("""
             var s = document.body.style;
             JSON.stringify({maxHeight: s.maxHeight, overflowY: s.overflowY})
@@ -7901,25 +8134,20 @@ class CodeWebViewer(QWebEngineView):
         target_h = scroll_h + 20
         self.setFixedHeight(target_h)
         self.update()
-        # ★ 强制布局：让 setFixedHeight 真的撑大 widget
         QApplication.processEvents()
 
         self._run_js_sync("window.scrollTo(0, 0);")
 
-        # ★ 单次 200ms 等待（替代 400ms×2）
         stable_loop = QEventLoop()
         QTimer.singleShot(200, stable_loop.quit)
         stable_loop.exec_()
 
-        # 4. 显式 grab 整个目标区域
         full_pix = self.grab(QRect(QPoint(0, 0), self.size()))
 
-        # 5. 合成：实心背景 + grab 内容
         final_w = full_pix.width() if not full_pix.isNull() else view_w
         final_h = max(target_h, full_pix.height() if not full_pix.isNull() else 0)
         result = self._compose_with_solid_bg(full_pix, final_w, final_h)
 
-        # 6. 恢复视图和样式
         self.setFixedHeight(orig_height)
         if old_styles:
             try:
@@ -7936,6 +8164,106 @@ class CodeWebViewer(QWebEngineView):
         if result.isNull() or result.width() <= 0 or result.height() <= 0:
             return self.grab()
         return result
+
+    def _capture_full_content(self) -> "QPixmap":
+        """截取消息的完整内容为一张高清大图（3x 物理像素 + 实心背景合成）
+
+        策略：临时 setZoomFactor(3) 并把控件尺寸×3（布局视口 CSS 宽度 = w*3/3 = w
+        不变，排版不重排，内容以 3x 物理像素渲染），grab 后按实际物理/逻辑比设置
+        devicePixelRatio 还原逻辑尺寸。导出 PNG 保存物理像素，高分屏/放大查看均清晰。
+
+        长消息：临时解除 body max-height 并撑高到完整内容高度后单次 grab。
+        稳健性：渲染稳定用 scrollHeight 轮询（非固定定时）；grab 后做像素健康
+        检查——3x 结果大面积空白/黑块（合成未完成或视口重排异常）时自动回退
+        1x 完整路径，保证导出功能永不失败。
+        """
+        import json as json_mod
+
+        from PyQt5.QtCore import QPoint, QRect
+        from PyQt5.QtWidgets import QApplication
+
+        _SCALE = 3.0
+
+        view_w = self.width()
+        cur_h = self.height()
+        if view_w <= 0:
+            return self._compose_with_solid_bg(self.grab(), max(1, view_w), cur_h)
+
+        # 1. 获取完整内容高度（CSS 逻辑像素，与 zoom 无关）
+        dims_raw = self._run_js_sync("JSON.stringify({sh: document.body.scrollHeight})")
+        scroll_h = 0
+        if dims_raw:
+            try:
+                scroll_h = json_mod.loads(dims_raw).get("sh", 0)
+            except Exception:
+                scroll_h = 0
+        if scroll_h <= 0:
+            # 拿不到高度 → 按当前视口高度走 zoom 高清路径
+            scroll_h = cur_h
+
+        # 2. 目标逻辑高度：内容超出视图时展开全部
+        is_long = scroll_h > cur_h
+        target_logical_h = (scroll_h + 20) if is_long else cur_h
+
+        orig_zoom = self.zoomFactor()
+        orig_size = self.size()
+        old_styles = None
+        try:
+            # 3. 长消息：临时解除 body max-height
+            if is_long:
+                old_styles = self._run_js_sync("""
+                    var s = document.body.style;
+                    JSON.stringify({maxHeight: s.maxHeight, overflowY: s.overflowY})
+                """)
+                self._run_js_sync("""
+                    document.body.style.maxHeight = 'none';
+                    document.body.style.overflowY = 'hidden';
+                """)
+
+            # 4. zoom 3x + 控件尺寸×3：内容物理渲染 3x，布局视口 CSS 宽度不变
+            self.setZoomFactor(_SCALE)
+            self.setFixedSize(round(view_w * _SCALE), round(target_logical_h * _SCALE))
+            self.update()
+            # ★ 强制布局：让 setFixedSize 真的撑大 widget
+            QApplication.processEvents()
+            self._run_js_sync("window.scrollTo(0, 0);")
+
+            # ★ 轮询等待 zoom 重排 + 合成稳定（大纹理时固定 250ms 不够）
+            self._wait_render_stable(deadline_ms=1200)
+
+            # 5. 显式 grab 整个目标区域，按实际物理/逻辑比还原逻辑尺寸
+            full_pix = self.grab(QRect(QPoint(0, 0), self.size()))
+            if full_pix.isNull() or full_pix.width() <= 0:
+                logger.warning("[export] zoom 3x 抓到空图，回退 1x")
+            elif not self._capture_looks_healthy(full_pix):
+                logger.warning("[export] zoom 3x 抓取疑似未完成合成（大面积空白），回退 1x")
+            else:
+                dpr = full_pix.width() / view_w  # 物理/逻辑（= 窗口 DPR × zoom）
+                final_h = max(target_logical_h, round(full_pix.height() / dpr))
+                return self._compose_with_solid_bg(full_pix, view_w, final_h, dpr=dpr)
+        except Exception:
+            logger.exception("[export] zoom 3x 抓取失败，回退 1x")
+        finally:
+            # 6. 恢复 zoom / 尺寸 / 样式
+            try:
+                self.setZoomFactor(orig_zoom)
+                self.setFixedSize(orig_size)
+            except Exception:
+                pass
+            if old_styles:
+                try:
+                    prev = json_mod.loads(old_styles)
+                    js_restore = f"""
+                        document.body.style.maxHeight = {json_mod.dumps(prev.get("maxHeight", ""))};
+                        document.body.style.overflowY = {json_mod.dumps(prev.get("overflowY", "auto"))};
+                        window.scrollTo(0, 0);
+                    """
+                    self._run_js_sync(js_restore)
+                except Exception:
+                    self._run_js_sync("window.scrollTo(0, 0);")
+
+        # 7. 回退：1x 完整路径（健康检查通过才返回，异常仍有裸 grab 兜底）
+        return self._capture_full_content_1x()
 
     def _split_and_stitch(self, pixmap: "QPixmap", max_cols: int = 6) -> "QPixmap":
         """将纵向长图均匀分段后水平拼接为宽高合理的矩形图
@@ -8645,6 +8973,7 @@ class MessageCard(SimpleCardWidget):
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
     modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
     welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / changelog）
+    saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出（内部处理保存，不透传）
 
     def __init__(
         self,
@@ -10021,6 +10350,31 @@ class MessageCard(SimpleCardWidget):
         )
         self._retry_wait_label.setText(f"等待 {self._retry_wait_time:.0f}s")
 
+    def _on_chart_expand(self, chart_type: str, payload_b64: str):
+        """图表放大查看 → 打开覆盖右侧对话区域的 chart_viewer 全局卡
+
+        内部直接处理（不走 main_widget 回调），assistant/welcome/历史卡统一生效；
+        ui_helpers 顶部反向 import MessageCard，必须延迟导入避免循环依赖。
+        """
+        try:
+            from app.widgets.ui_helpers import show_chart_viewer
+
+            show_chart_viewer(self, chart_type, payload_b64)
+        except Exception as e:
+            logger.error(f"[MessageCard] 图表放大失败: {e}")
+
+    def _on_save_chart_png(self, name_b64: str, png_b64: str):
+        """图表 PNG 导出保存（消息卡小图导出与放大视图共用通道）"""
+        try:
+            name = base64.b64decode(name_b64).decode("utf-8") if name_b64 else "图表"
+        except Exception:
+            name = "图表"
+        from app.widgets.ui_helpers import save_png_from_b64
+
+        path = save_png_from_b64(self, png_b64, name or "图表")
+        if path:
+            logger.info(f"[MessageCard] 图表 PNG 已导出: {path}")
+
     def _on_webengine_context_lost(self):
         """WebEngine 上下文丢失时显示恢复提示"""
         # 设置卡片为错误状态样式（根据深浅模式选择边框色）
@@ -10070,6 +10424,8 @@ class MessageCard(SimpleCardWidget):
         self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
         self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
         self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+        self.viewer.chartExpandRequested.connect(self._on_chart_expand)
+        self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
         self.viewer.contextLost.connect(self._on_webengine_context_lost)
         self.viewer.contextRestored.connect(self._on_webengine_context_restored)
         self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
@@ -10768,6 +11124,8 @@ class MessageCard(SimpleCardWidget):
             self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
             self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
             self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+            self.viewer.chartExpandRequested.connect(self._on_chart_expand)
+            self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
             # WebEngine 上下文丢失处理
             self.viewer.contextLost.connect(self._on_webengine_context_lost)
             self.viewer.contextRestored.connect(self._on_webengine_context_restored)
