@@ -106,6 +106,7 @@ from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.balance_display import BalanceDisplay
 from app.widgets.bottom_input_area import (
     AttachmentChip,
+    AttachmentOverflowChip,
     InputGlowUnderlay,
     SendableTextEdit,
 )
@@ -5923,7 +5924,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 清空输入框（和函数型命令一样处理）
-        self.input_area.clear()
+        self._clear_input_area()
 
         # 检查 AgentManager 中是否存在该智能体
         agent_mgr = self.backend.agent_manager
@@ -6662,18 +6663,12 @@ class OpenAIChatToolWindow(ToolWindow):
         self._file_mention_card.dismiss()
         self._card_manager.hide_card("file_mention", self._window_id)
 
-        # 移除输入框中的 @query 文本
+        # 移除输入框中的 @query 文本（不再插入 [[basename]]，附件栏是唯一真相源）
         self.input_area.insert_file_mention(file_path)
 
         # 添加到附件列表（复用拖拽文件的 chip 机制）
-        if file_path not in self._attachments:
-            self._attachments.append(file_path)
-            from app.widgets.bottom_input_area import AttachmentChip
-
-            chip = AttachmentChip(file_path, self._attach_container)
-            chip.removed.connect(lambda path=file_path: self._remove_attachment(path))
-            self._attach_layout.insertWidget(self._attach_layout.count() - 1, chip)
-        self._attach_container.setVisible(bool(self._attachments))
+        if self._add_attachment(file_path):
+            self._rebuild_attachment_chips()
 
         # 聚焦输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
@@ -9185,7 +9180,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=1500,
                 position=InfoBarPosition.BOTTOM,
             )
-        self.input_area.clear()
+        self._clear_input_area()
         if not self._is_streaming:
             self.input_area.toggle_send_button(True)
 
@@ -15317,7 +15312,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def handle_recommended_question(self, content: str, action: str):
         if action == "ask":
-            self.input_area.clear()
+            self._clear_input_area()
             self.send_preset_question(content)
         elif action == "session":
             # session_id 直接就是 content
@@ -15468,77 +15463,139 @@ class OpenAIChatToolWindow(ToolWindow):
         然后根据历史条目保存的路径列表重建 AttachmentChip。
         """
         self._clear_attachments()
-        for p in paths:
-            if p not in self._attachments and os.path.exists(p):
-                self._attachments.append(p)
-                chip = AttachmentChip(p, self._attach_container)
-                chip.removed.connect(lambda path=p: self._remove_attachment(path))
-                self._attach_layout.insertWidget(self._attach_layout.count() - 1, chip)
-        self._attach_container.setVisible(bool(self._attachments))
+        for p in paths or []:
+            # 文件可能已被删除/移动，失效的不予恢复（chip 会标红提示）
+            if os.path.exists(p):
+                self._add_attachment(p)
+        self._rebuild_attachment_chips()
 
     def _on_history_mode_exited(self):
         """退出历史浏览模式 — 恢复进入时保存的附件"""
         self._on_history_attachments_restored(self._history_working_attachments)
 
     # ==================== 附件管理 ====================
+    #
+    # 设计原则：**附件栏是唯一真相源**。
+    # 附件不在正文里以 [[...]] 文本形式重复存在，因此不存在「两处状态需要对齐」的
+    # 问题。正文里若仍出现 [[...]]（历史记录恢复的文本、用户手动键入），
+    # 走 _on_attachments_removed_from_text 做反向同步兜底。
+
+    #: 附件栏最多渲染多少个 chip，超出折叠为一枚「+N」
+    _MAX_VISIBLE_CHIPS = 12
 
     def _on_files_dropped(self, paths: list[str]):
-        """文件拖入/粘贴 → 添加 AttachmentChip"""
+        """文件拖入/粘贴 → 登记附件并重建芯片"""
+        added = False
         for p in paths:
-            if p not in self._attachments:
-                self._attachments.append(p)
-                chip = AttachmentChip(p, self._attach_container)
-                chip.removed.connect(lambda path=p: self._remove_attachment(path))
-                # 插入到 stretch 之前
-                self._attach_layout.insertWidget(self._attach_layout.count() - 1, chip)
+            if self._add_attachment(p):
+                added = True
+        if added:
+            self._rebuild_attachment_chips()
+
+    def _add_attachment(self, path: str) -> bool:
+        """登记一个附件（去重）。返回是否实际新增
+
+        只维护数据、不碰 UI —— UI 由 :meth:`_rebuild_attachment_chips` 统一重建。
+        分开是为了让「一次拖入 20 个文件」只触发一次布局重排，而不是 20 次。
+        """
+        if not path or path in self._attachments:
+            return False
+        self._attachments.append(path)
+        return True
+
+    def _clear_attachment_chips(self):
+        """移除附件栏中所有 chip widget（不动 self._attachments）"""
+        while self._attach_layout.count():
+            item = self._attach_layout.takeAt(0)
+            widget = item.widget() if item else None
+            if widget is None:
+                continue
+            self._attach_layout.removeWidget(widget)
+            try:
+                widget.setParent(None)
+            except RuntimeError:
+                # C++ 对象已被回收（窗口关闭竞态），忽略
+                pass
+            widget.deleteLater()
+
+    def _rebuild_attachment_chips(self):
+        """按 self._attachments 全量重建附件栏
+
+        渲染上限 :attr:`_MAX_VISIBLE_CHIPS`：附件栏没有滚动条，靠限制渲染数量
+        控制高度，避免几十个附件时把输入框挤到看不见。超限的附件 **仍然会随消息
+        一起发送**，只是不再单独渲染 chip，末尾用一枚「+N」提示还有多少。
+        """
+        self._clear_attachment_chips()
+        visible = self._attachments[: self._MAX_VISIBLE_CHIPS]
+        overflow = len(self._attachments) - len(visible)
+        for path in visible:
+            chip = AttachmentChip(path, self._attach_container)
+            # 直连槽而非 lambda：removed 自带 path 参数，语义等价，
+            # 且不会像循环内的 lambda 那样因闭包迟绑定捕获到错误的变量。
+            chip.removed.connect(self._remove_attachment)
+            self._attach_layout.addWidget(chip)
+        if overflow > 0:
+            self._attach_layout.addWidget(
+                AttachmentOverflowChip(overflow, len(self._attachments), self._attach_container)
+            )
         self._attach_container.setVisible(bool(self._attachments))
 
     def _remove_attachment(self, path: str):
-        """移除指定附件"""
-        if path in self._attachments:
-            self._attachments.remove(path)
-            # 清理对应的 chip widget
-            for i in range(self._attach_layout.count()):
-                item = self._attach_layout.itemAt(i)
-                if item and item.widget() and isinstance(item.widget(), AttachmentChip):
-                    if item.widget().filepath == path:
-                        item.widget().deleteLater()
-                        break
-        self._attach_container.setVisible(bool(self._attachments))
+        """移除指定附件（点 chip 的 × 触发）"""
+        if path not in self._attachments:
+            return
+        self._attachments.remove(path)
+        self._rebuild_attachment_chips()
+        # 同步清理正文中对应的 [[basename]] 引用（遗留文本 / 手动键入的引用）
+        self.input_area.remove_placeholder(os.path.basename(path))
 
-        # 清理输入框中对应的 [[basename]] 占位符
-        try:
-            basename = os.path.basename(path)
-            placeholder = f"[[{basename}]]"
-            current = self.input_area.toPlainText()
-            if placeholder in current:
-                new_text = current.replace(placeholder, "")
-                # 清理多余空格
-                new_text = new_text.replace("  ", " ").strip()
-                self.input_area.setPlainText(new_text)
-        except Exception:
-            pass
+    def _on_attachments_removed_from_text(self, names: list):
+        """正文里的 [[basename]] 被删除 → 同步移除附件栏对应的 chip
+
+        与 :meth:`_remove_attachment` 互为反向，共同构成双向同步：
+        删附件 → 删正文引用；删正文引用 → 删附件。
+        """
+        if not self._attachments:
+            return
+        removed_any = False
+        for name in names:
+            # 只删一个匹配项：两个同名文件删掉其中一个的引用，不应连带删掉另一个
+            for path in self._attachments:
+                if os.path.basename(path) == name:
+                    self._attachments.remove(path)
+                    removed_any = True
+                    break
+        if removed_any:
+            self._rebuild_attachment_chips()
 
     def _clear_attachments(self):
         """清空所有附件"""
         self._attachments.clear()
-        # 先收集 widgets 再统一 removeWidget（不能在迭代中修改 layout）
-        chips = []
-        while self._attach_layout.count() > 1:
-            item = self._attach_layout.takeAt(0)
-            if item and item.widget():
-                chips.append(item.widget())
-        for chip in chips:
-            self._attach_layout.removeWidget(chip)
-            try:
-                chip.setParent(None)
-            except Exception:
-                pass
-            chip.deleteLater()
+        self._clear_attachment_chips()
         self._attach_container.hide()
+
+    def _clear_input_area(self):
+        """清空输入框，且不触发「文本 → 附件」反向同步
+
+        发送 / 命令执行路径会连续改动文本与附件列表。若直接 input_area.clear()，
+        正文里残留的 [[...]] 占位符随文本一起消失，会被反向同步误判成
+        「用户删除了附件引用」，进而把附件也删掉。
+
+        这在命令降级时是实打实的数据丢失：_execute_command 返回 False 时附件应当
+        保留、继续走普通发送流程（review#15-#2 的修复），若被这层误删就会静默吞掉。
+        """
+        self.input_area.set_attachment_sync_enabled(False)
+        try:
+            self.input_area.clear()
+        finally:
+            self.input_area.set_attachment_sync_enabled(True)
 
     def _build_user_text_with_attachments(self, user_text: str) -> str:
         """将附件文件路径拼接到用户文本末尾，支持 [[basename]] 内联占位符替换
+
+        常规路径下正文不再含 [[...]]（附件栏是唯一真相源），所有附件走「拼到末尾」
+        分支。保留占位符替换是为了兼容两类遗留文本：历史输入记录恢复的文本、
+        用户手动键入的引用 —— 它们能精确指定附件在句子中的位置。
 
         文本中出现 [[filename.ext]] 占位符的 → 替换为完整路径（精确定位）
         未出现占位符的附件 → 照旧拼接到末尾（优雅降级）
@@ -15684,7 +15741,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 插件 FUNCTION 命令无处理器注册）——_execute_command 捕获后
                     # 写 _pending_command 并置 _team_load_degraded=True。
                     if not preserve_input:
-                        self.input_area.clear()
+                        self._clear_input_area()
                     # ⚠️ review#15-#2：附件仅在 handler 实际执行成功后清除
                     # （_execute_command 返回 True）。降级到 prompt 注入时命令
                     # 未真正执行（如插件无 handler 命令 /team --create=），附件
@@ -15849,7 +15906,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hide_welcome_cards()
 
         if not preserve_input:
-            self.input_area.clear()
+            self._clear_input_area()
             self._clear_attachments()
         self._append_user_message(user_text)
 
@@ -20780,7 +20837,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if not first:
             return
         # 清空输入框内容
-        self.input_area.clear()
+        self._clear_input_area()
         # 隐藏消息列表（保持滚动位置不变）
         self.chat_scroll_area.setVisible(False)
         # 隐藏输入容器 + 工具栏

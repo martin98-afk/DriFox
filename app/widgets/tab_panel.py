@@ -13,7 +13,7 @@ import re as _re
 from typing import List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap, QPen
 from PyQt5.QtGui import (
     QColor as _QColor,
@@ -42,7 +42,6 @@ from qfluentwidgets import (
     FluentIcon as FIF,
 )
 from qfluentwidgets import (
-    TransparentPushButton,
     TransparentToolButton,
     isDarkTheme,
 )
@@ -1100,34 +1099,35 @@ class TabPanel(QWidget):
         self._plugin_separator_2.setVisible(False)
         layout.addWidget(self._plugin_separator_2)
 
-        # ── 顶部：分支 + 新建按钮 ──
+        # ── 顶部：左「对话页」标题 + 右 分支/新建 纯图标按钮 ──
+        # 布局：标题左对齐占满剩余空间（stretch=1），两个 28px 图标按钮靠右。
+        # 收起态隐藏标题与分支按钮，只保留新建（46px 窄条容不下两个按钮）。
         self._top_bar = QWidget(self)
         top_layout = QHBoxLayout(self._top_bar)
-        top_layout.setContentsMargins(6, 6, 6, 4)
+        top_layout.setContentsMargins(8, 6, 6, 4)
         top_layout.setSpacing(2)
 
-        self._branch_btn = TransparentPushButton(get_icon("分支"), "分支", self._top_bar)
+        self._sessions_label = QLabel("对话页", self._top_bar)
+        self._sessions_label.setObjectName("sessionsLabel")
+        top_layout.addWidget(self._sessions_label, 1)
+
+        self._branch_btn = TransparentToolButton(self._top_bar)
+        self._branch_btn.setIcon(get_icon("分支"))
+        self._branch_btn.setIconSize(QSize(scale_icon_size(16), scale_icon_size(16)))
+        self._branch_btn.setFixedSize(28, 28)
         self._branch_btn.setCursor(Qt.PointingHandCursor)
-        self._branch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._branch_btn.setToolTip("从当前标签页分支")
         self._branch_btn.clicked.connect(self._on_branch_clicked)
         top_layout.addWidget(self._branch_btn)
 
-        self._new_btn = TransparentPushButton(FIF.ADD, "新建", self._top_bar)
+        self._new_btn = TransparentToolButton(self._top_bar)
+        self._new_btn.setIcon(FIF.ADD)
+        self._new_btn.setIconSize(QSize(scale_icon_size(16), scale_icon_size(16)))
+        self._new_btn.setFixedSize(28, 28)
         self._new_btn.setCursor(Qt.PointingHandCursor)
-        self._new_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._new_btn.setToolTip("新建空白标签页")
         self._new_btn.clicked.connect(self.newTabRequested.emit)
         top_layout.addWidget(self._new_btn)
-
-        # 收起态专用：纯图标新建按钮（与 _new_btn 共享点击事件）
-        self._new_icon_btn = TransparentToolButton(self._top_bar)
-        self._new_icon_btn.setIcon(FIF.ADD)
-        self._new_icon_btn.setFixedSize(28, 28)
-        self._new_icon_btn.setToolTip("新建空白标签页")
-        self._new_icon_btn.clicked.connect(self.newTabRequested.emit)
-        self._new_icon_btn.setVisible(False)
-        top_layout.addWidget(self._new_icon_btn)
 
         layout.addWidget(self._top_bar)
 
@@ -1171,6 +1171,9 @@ class TabPanel(QWidget):
         # ── 底部：Gitee 账户（头像/名称右侧为 ⚙ 设置按钮） ──
         self._gitee_account_row = GiteeAccountRow(self)
         layout.addWidget(self._gitee_account_row)
+
+        # 顶部行样式（标题颜色/字体、图标尺寸）首帧应用
+        self._refresh_top_bar_style()
 
     def resizeEvent(self, event):
         """手动拖拽 splitter 把手时自动折叠/展开
@@ -1466,19 +1469,17 @@ class TabPanel(QWidget):
             return
 
         if self._collapsed:
-            # 收起时仅保留新建图标按钮，隐藏分支和文字新建按钮
+            # 收起时隐藏标题与分支按钮，仅保留新建图标按钮（46px 窄条）
+            self._sessions_label.setVisible(False)
             self._branch_btn.setVisible(False)
-            self._new_btn.setVisible(False)
-            self._new_icon_btn.setVisible(True)
+            self._new_btn.setVisible(True)
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
         else:
-            # 展开时恢复文字新建按钮，隐藏图标按钮
+            # 展开时恢复标题 + 分支/新建图标按钮
+            self._sessions_label.setVisible(True)
             self._branch_btn.setVisible(True)
-            self._branch_btn.setText("分支")
-            self._branch_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             self._new_btn.setVisible(True)
-            self._new_icon_btn.setVisible(False)
             # 展开时恢复 Gitee 完整显示
             self._gitee_account_row.set_show_only_avatar(False)
 
@@ -1615,10 +1616,25 @@ class TabPanel(QWidget):
         self._apply_custom_card_style(compact=self._collapsed)
         if hasattr(self, "_custom_plugin_arrow"):
             self._custom_plugin_arrow.update()
-        # ── 顶部：分支 + 新建按钮字体随字号设置刷新 ──
+        # ── 顶部：「对话页」标题 + 分支/新建图标按钮随主题/字号刷新 ──
+        self._refresh_top_bar_style()
+
+    def _refresh_top_bar_style(self):
+        """刷新顶部行样式：「对话页」标题（颜色/字体）+ 图标按钮（主题图标/图标尺寸）
+
+        分支图标存在浅/深色两套资源，主题切换后需重新 setIcon，否则会沿用旧主题资源。
+        """
+        if hasattr(self, "_sessions_label") and self._sessions_label is not None:
+            self._sessions_label.setFont(get_unified_font(12))
+            self._sessions_label.setStyleSheet(
+                f"color: {Colors.TEXT_SECONDARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
+            )
+        if hasattr(self, "_branch_btn") and self._branch_btn is not None:
+            self._branch_btn.setIcon(get_icon("分支"))
+        _icon_px = scale_icon_size(16)
         for _btn in (getattr(self, "_branch_btn", None), getattr(self, "_new_btn", None)):
             if _btn is not None:
-                _btn.setFont(get_unified_font(9))
+                _btn.setIconSize(QSize(_icon_px, _icon_px))
 
     def begin_batch_add(self):
         """开始批量添加 tab：期间 add_tab 跳过 _rebuild_team_layout，end_batch_add 统一重建。

@@ -79,6 +79,7 @@ def test_compose_builds_input_card(fresh_registry, qapp):
                 "_on_entering_history_mode",
                 "_on_history_attachments_restored",
                 "_on_history_mode_exited",
+                "_on_attachments_removed_from_text",
                 "_on_pet_typing",
                 "_on_file_mention_selected",
                 "_restore_deleted_message",
