@@ -4870,7 +4870,6 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text-secondary) !important;
                 }}
 
-                '''
                 /* ===== ECharts 图表容器 ===== */
                 .echarts-container {{
                     position: relative;
@@ -4917,7 +4916,6 @@ class CodeWebViewer(QWebEngineView):
                     height: 16px;
                     pointer-events: none;
                 }}
-                '''
 
                 /* ===== Mermaid 图表容器 ===== */
                 .mermaid-block {{
@@ -4951,7 +4949,6 @@ class CodeWebViewer(QWebEngineView):
                     font-size: 12px;
                     color: var(--text-secondary, #c9d1d9);
                 }}
-                '''
 
                 /* 内容区图片可点击打开 */
                 #content-placeholder img {{
@@ -6301,6 +6298,8 @@ class CodeWebViewer(QWebEngineView):
                 window._attachChartToolbar = function (el, type) {{
                     if (!el || el._toolbarAttached) return;
                     el._toolbarAttached = true;
+                    // 防御兜底：absolute 定位基准必须是容器自身（历史 CSS 曾被字面 ''' 破坏）
+                    if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
                     var bar = document.createElement('div');
                     bar.className = 'chart-toolbar';
                     var btnExpand = document.createElement('button');
