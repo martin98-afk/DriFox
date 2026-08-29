@@ -131,8 +131,14 @@ jobs:
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
           $suffix = "${{ steps.version.outputs.suffix }}"
-          Write-Host "💡 编译安装包，版本号: $tag-$suffix"
-          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" dist\installer.iss /DMyAppVersion=$tag /DMyAppSuffix=$suffix
+          # dev 后缀省略保持历史文件名兼容（v0.5.5 之前 Drifox-Windows-Setup-vX.Y.Z.exe）
+          if ($suffix -eq "dev") {
+            $outputBase = "Drifox-Windows-Setup-$tag"
+          } else {
+            $outputBase = "Drifox-Windows-Setup-$tag-$suffix"
+          }
+          Write-Host "💡 编译安装包: $outputBase  (tag=$tag, suffix=$suffix)"
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" dist\installer.iss /DMyAppVersion=$tag /DOutputBaseFilename=$outputBase
           if ($LASTEXITCODE -ne 0) {
             Write-Error "❌ Inno Setup 编译失败 (exit code: $LASTEXITCODE)"
             exit 1
@@ -143,7 +149,12 @@ jobs:
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
           $suffix = "${{ steps.version.outputs.suffix }}"
-          $installer = "dist/output/Drifox-Windows-Setup-$tag-$suffix.exe"
+          if ($suffix -eq "dev") {
+            $base = "Drifox-Windows-Setup-$tag"
+          } else {
+            $base = "Drifox-Windows-Setup-$tag-$suffix"
+          }
+          $installer = "dist/output/$base.exe"
           if (-not (Test-Path $installer)) {
             Write-Error "❌ 安装包未生成: $installer"
             exit 1
@@ -156,9 +167,14 @@ jobs:
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
           $suffix = "${{ steps.version.outputs.suffix }}"
-          $installer = "dist/output/Drifox-Windows-Setup-$tag-$suffix.exe"
+          if ($suffix -eq "dev") {
+            $base = "Drifox-Windows-Setup-$tag"
+          } else {
+            $base = "Drifox-Windows-Setup-$tag-$suffix"
+          }
+          $installer = "dist/output/$base.exe"
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  Drifox-Windows-Setup-$tag-$suffix.exe"
+          Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  $base.exe"
           Write-Host "✅ SHA256: $hash"
 
       - name: Upload artifact (Windows)

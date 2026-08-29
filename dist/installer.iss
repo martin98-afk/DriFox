@@ -29,14 +29,12 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
-; 产物名带分支后缀：Drifox-Windows-Setup-v0.5.6-qt5.exe / -pyside6.exe
-; CI 用 /DMyAppSuffix=qt5|pyside6 传入；dev 后缀与 MyAppVersion 重复时省略
-#if MyAppSuffix == "dev"
-  #define OutputFile "Drifox-Windows-Setup-{#MyAppVersion}"
-#else
-  #define OutputFile "Drifox-Windows-Setup-{#MyAppVersion}-{#MyAppSuffix}"
+; 产物名由 CI 决定后通过 /DOutputBaseFilename= 传入（见 release.yml build-windows step）
+; 本地测试 fallback：dev 后缀（CI 默认传 -pyside6 / -qt5；本地不带后缀走默认值）
+#ifndef OutputBaseFilename
+  #define OutputBaseFilename "Drifox-Windows-Setup-{#MyAppVersion}-{#MyAppSuffix}"
 #endif
-OutputBaseFilename={#OutputFile}
+OutputBaseFilename={#OutputBaseFilename}
 Compression=lzma2
 SolidCompression=yes
 SetupIconFile=drifox.ico
