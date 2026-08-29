@@ -501,6 +501,13 @@ class CustomTitleBar(TitleBarBase):
         # 无 tab 时隐藏空容器（add/remove_tab 时同步）
         self._tab_container.hide()
 
+        # ── 左右平衡占位（见 _sync_tab_centering 的说明）──
+        self._left_balance = QWidget(self)
+        self._right_balance = QWidget(self)
+        for w in (self._left_balance, self._right_balance):
+            w.setFixedWidth(0)
+            w.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+
         # ── 三区布局 ──
         # mac：左侧留白给系统交通灯；Windows：常规 8px
         left_pad = self.MAC_TRAFFIC_LIGHT_PAD if self._is_mac else 8
@@ -513,9 +520,11 @@ class CustomTitleBar(TitleBarBase):
         # AlignVCenter 保证左侧 30x28 折叠钮在 38px 栏内垂直居中
         layout.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         layout.addWidget(self._sidebar_btn)
+        layout.addWidget(self._left_balance)
         layout.addStretch(1)
         layout.addWidget(self._tab_container, 0, Qt.AlignVCenter)
         layout.addStretch(1)
+        layout.addWidget(self._right_balance)
         if not self._is_mac:
             layout.addWidget(self.minBtn, 0, Qt.AlignRight)
             layout.addWidget(self.maxBtn, 0, Qt.AlignRight)
@@ -531,11 +540,46 @@ class CustomTitleBar(TitleBarBase):
                 self.window().setSystemTitleBarButtonVisible(True)
             except Exception:
                 pass
-            # ★ 右侧补等宽占位：mac 上交通灯 + 折叠钮只占左侧，不补的话
-            # 两个 stretch 的中点会右偏，tab 看起来不在窗口正中。
-            layout.addSpacing(left_pad + self._sidebar_btn.width())
 
         self.refresh_style()
+        self._sync_tab_centering()
+
+    # ── 布局 ──
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._sync_tab_centering()
+
+    def _sync_tab_centering(self) -> None:
+        """让中央 tab 容器真正落在窗口正中
+
+        两个等分 stretch 只在**两侧固定占位等宽**时才能让中间控件居中。实际
+        布局并不对称：左边是折叠钮（约 30，mac 上还要加上交通灯留白 70），
+        右边是三个系统按钮（46×3 + 间距，mac 上为 0）。窄的一侧缺少的那一截
+        会让 tab 中心整体偏向它——Windows 上约偏左 52px。
+
+        这里给窄的一侧补一个等宽占位 widget，使两侧固定宽度相等。
+        """
+        layout = self.layout()
+        if layout is None:
+            return
+        spacing = layout.spacing()
+
+        left = self._sidebar_btn.width() + layout.contentsMargins().left()
+        right = 0
+        if not self._is_mac:
+            right = (
+                self.minBtn.width() + self.maxBtn.width() + self.closeBtn.width() + spacing * 2
+            )
+
+        if left < right:
+            left_pad, right_pad = right - left, 0
+        else:
+            left_pad, right_pad = 0, left - right
+
+        for widget, width in ((self._left_balance, left_pad), (self._right_balance, right_pad)):
+            if widget.width() != width:
+                widget.setFixedWidth(width)
 
     # ── 系统按钮 ──
 

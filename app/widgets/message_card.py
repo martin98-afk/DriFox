@@ -9932,29 +9932,36 @@ class MessageCard(SimpleCardWidget):
             av.setFixedSize(30, 30)
             av.setAlignment(Qt.AlignCenter)
 
-        title_wrap = QWidget(self)
-        title_layout = QVBoxLayout(title_wrap)
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(1)
-
         font_css = get_font_family_css()
-        nm_l = QLabel(self._theme["title"], self)
-        self._name_label = nm_l
-        nm_l.setStyleSheet(f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;")
-        sub_l = QLabel(self._theme["subtitle"], self)
-        self._subtitle_label = sub_l
-        sub_l.setStyleSheet(
-            f"{font_css} font-size:{scale_font_size(11)}px;color:{self._theme['muted']};font-weight:500;letter-spacing:0.02em;"
-        )
-        title_layout.addWidget(nm_l)
-        title_layout.addWidget(sub_l)
-
         top.addWidget(av)
-        top.addWidget(title_wrap)
-        # 欢迎卡片：右上角 mode 切换 segmented tabs（PyQt 层）
+        # 欢迎卡片：极简头部，只剩头像 + 右侧 mode 切换 tabs（无标题/副标题文字）
+        # 其他角色（assistant/user）：保留原 title_wrap + 模型名/时间戳 + 顶部操作按钮
         if self.role == "welcome":
+            # 仍创建 label 引用占位以兼容 hasattr 守卫（refresh_theme 等），但不显示
+            nm_l = QLabel(self._theme["title"], self)
+            self._name_label = nm_l
+            nm_l.setVisible(False)
+            sub_l = QLabel(self._theme["subtitle"], self)
+            self._subtitle_label = sub_l
+            sub_l.setVisible(False)
             self._build_welcome_mode_tabs(top)
         else:
+            title_wrap = QWidget(self)
+            title_layout = QVBoxLayout(title_wrap)
+            title_layout.setContentsMargins(0, 0, 0, 0)
+            title_layout.setSpacing(1)
+
+            nm_l = QLabel(self._theme["title"], self)
+            self._name_label = nm_l
+            nm_l.setStyleSheet(f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;")
+            sub_l = QLabel(self._theme["subtitle"], self)
+            self._subtitle_label = sub_l
+            sub_l.setStyleSheet(
+                f"{font_css} font-size:{scale_font_size(11)}px;color:{self._theme['muted']};font-weight:500;letter-spacing:0.02em;"
+            )
+            title_layout.addWidget(nm_l)
+            title_layout.addWidget(sub_l)
+            top.addWidget(title_wrap)
             # 助手卡片显示模型名称
             label_text = self.model_name if (self.role == "assistant" and self.model_name) else self.timestamp
             ts = QLabel(label_text, self)
