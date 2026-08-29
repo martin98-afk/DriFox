@@ -1291,6 +1291,63 @@ def show_diff_viewer(parent, html, title: str = "文件差异对比") -> Any:
     return viewer
 
 
+def save_png_from_b64(parent, png_b64: str, default_name: str = "图表") -> Optional[str]:
+    """把 PNG b64 保存为文件（弹保存对话框）
+
+    Args:
+        parent: 父控件
+        png_b64: PNG 文件内容的 base64 字符串
+        default_name: 默认文件名主体
+
+    Returns:
+        保存路径；用户取消返回 None
+    """
+    import base64 as _b64mod
+
+    from PySide6.QtWidgets import QFileDialog
+
+    default_file = f"{default_name}_{time.strftime('%Y%m%d_%H%M%S')}.png"
+    file_path, _ = QFileDialog.getSaveFileName(parent, "导出图表 PNG", default_file, "PNG 图片 (*.png)")
+    if not file_path:
+        return None
+    if not file_path.lower().endswith(".png"):
+        file_path += ".png"
+    try:
+        with open(file_path, "wb") as f:
+            f.write(_b64mod.b64decode(png_b64))
+        return file_path
+    except Exception as e:
+        logger.error(f"[ChartViewer] PNG 保存失败: {e}")
+        return None
+
+
+def show_chart_viewer(parent, chart_type: str, payload_b64: str) -> Any:
+    """显示图表放大查看器（内嵌卡覆盖对话区域；无全局卡片容器时回退弹窗）
+
+    Args:
+        parent: 父控件（仅弹窗回退时使用）
+        chart_type: "echarts" | "mermaid"
+        payload_b64: 图表数据 b64
+    """
+    logger.debug(f"[ChartViewer] show_chart_viewer type={chart_type}, payload_len={len(payload_b64 or '')}")
+    try:
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        controller = get_global_card_controller()
+        if controller is not None:
+            controller.show_chart_viewer(chart_type, payload_b64)
+            return controller
+    except Exception as e:
+        logger.warning(f"[ChartViewer] 内嵌模式失败，回退弹窗: {e}")
+
+    from app.widgets.cards.settings.chart_viewer_card import ChartViewerWindow
+
+    win = ChartViewerWindow(parent=parent)
+    win.load_chart(chart_type, payload_b64)
+    win.show()
+    return win
+
+
 # 预编译 hook 内容格式正则（与 message_content.py 中的 _is_hook_message 保持一致）
 _HOOK_CONTENT_PATTERN = re.compile(
     r"<system-reminder>\s*<[a-z0-9-]+-hook>.*?</[a-z0-9-]+-hook>\s*</system-reminder>", re.DOTALL

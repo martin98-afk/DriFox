@@ -64,6 +64,7 @@ class GlobalCardController:
         self._hook_edit_popup = None
         self._mcp_edit_popup = None
         self._diff_viewer_card = None
+        self._chart_viewer_card = None
         self._file_undo_card = None
         self._sub_agent_session_card = None
         # Gitee 绑定提醒去重标记：仅 tab 管理器初始化后提示一次，不随每个对话窗口重复弹出
@@ -646,6 +647,36 @@ class GlobalCardController:
         # 隐藏其他全局系统卡片（如设置），避免覆盖层堆叠
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
         self._card_manager.show_card("diff_viewer", GLOBAL_WINDOW_ID)
+
+    def ensure_chart_viewer(self):
+        """懒构建内嵌图表查看卡片，仅构建一次"""
+        if self._chart_viewer_card is not None:
+            return
+        from app.widgets.cards.settings.chart_viewer_card import ChartViewerCard
+
+        self._chart_viewer_card = ChartViewerCard(self._tab_manager)
+        self._chart_viewer_card.setVisible(False)
+        self._chart_viewer_card.closed.connect(lambda: self._card_manager.hide_card("chart_viewer", GLOBAL_WINDOW_ID))
+
+        mgr = self._card_manager
+        mgr.register_card(
+            GLOBAL_WINDOW_ID, ContainerType.TOP, "chart_viewer", self._chart_viewer_card, system_card=True
+        )
+        self._global_card_container.add_card("chart_viewer", self._chart_viewer_card)
+
+    def show_chart_viewer(self, chart_type: str, payload_b64: str):
+        """内嵌显示图表查看面板（覆盖右侧对话区域）
+
+        Args:
+            chart_type: "echarts" | "mermaid"
+            payload_b64: 图表数据 b64（option JSON / svg outerHTML）
+        """
+        self.ensure_chart_viewer()
+        self._chart_viewer_card.load_chart(chart_type, payload_b64)
+        # 隐藏其他全局系统卡片，避免覆盖层堆叠（同 show_diff_viewer）
+        self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
+        self._card_manager.hide_card("diff_viewer", GLOBAL_WINDOW_ID)
+        self._card_manager.show_card("chart_viewer", GLOBAL_WINDOW_ID)
 
     def show_file_undo(self, operations, file_recorder, on_finished):
         """显示文件撤销卡片；差异关闭后返回此卡片。"""

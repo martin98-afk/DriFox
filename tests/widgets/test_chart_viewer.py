@@ -103,3 +103,19 @@ class TestSavePngFromB64:
             staticmethod(lambda *a, **k: ("", "")),
         )
         assert save_png_from_b64(None, _b64("x"), "n") is None
+
+
+class TestRegistry:
+    def test_replace_tab_bar_whitelist(self):
+        """chart_viewer 进白名单 + 中文标题（tab 栏出现可关闭「图表查看」）"""
+        from app.widgets.replace_tab_bar import GLOBAL_REPLACE_TITLES, KNOWN_GLOBAL_REPLACE_CARDS
+
+        assert "chart_viewer" in KNOWN_GLOBAL_REPLACE_CARDS
+        assert GLOBAL_REPLACE_TITLES.get("chart_viewer") == "图表查看"
+
+    def test_ui_helpers_exports(self):
+        """ui_helpers 导出新顶层函数"""
+        from app.widgets import ui_helpers
+
+        assert callable(ui_helpers.show_chart_viewer)
+        assert callable(ui_helpers.save_png_from_b64)
