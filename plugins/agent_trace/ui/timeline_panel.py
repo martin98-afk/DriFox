@@ -1,107 +1,92 @@
 # -*- coding: utf-8 -*-
-"""agent_trace.TimelinePanel — DeepSeek Harness / DevTools 风格时间线。
+"""agent_trace.TimelinePanel — 三泳道甘特图时间线（对齐 DeepSeek Harness）。
 
-布局：
+布局（固定高度，不再内部滚动 — 泳道恒定 3 行）：
 
-    ┌──────────────────────────────────────────────────────────┐
-    │ Duration 8.24s    Turns 2    Calls 3                     │  摘要条 32px
-    ├──────────────────────────────────────────────────────────┤
-    │ SYSTEM      ▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
-    │ USER         ▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
-    │ CONTEXT        ▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
-    │ ASSISTANT         ▓▓▓▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
-    │ TOOL                     ▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░ │
-    └──────────────────────────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────────┐
+    │ 0s        25%        50%        75%       100%      │ 刻度区 TICK_H
+    │ Input  ▓▓▓▓░░░░▓▓▓▓▓▓▓▓░░░░░░░░░░                   │
+    │ Model     ░░░▓▓▓▓▓▓▓░░░░▓▓▓▓▓░░                     │ 泳道区 3×LANE_ROW_H
+    │ Tools           ░░▓▓░░░▓▓░░░▓▓░                      │
+    └─────────────────────────────────────────────────────┘
 
-与 ``TurnListWidget`` 共享配色与列宽常量，保证视觉对齐。
+三种模式（顶栏 Duration / Turns / Calls 切换）：
+- duration：真实时间比例（全 session 时间轴）
+- turns：每个 turn 等宽一段，段内仍按真实时间比例
+- calls：只画 Tools 泳道
+
+交互：hover 显示 tooltip（类型 · 名称 · 时长 · 绝对时间），点击条带选中记录。
 """
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QRect, QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
+from PyQt5.QtCore import QRect, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import QWidget
 
 from .trace_models import (
-    ENTRY_KIND_COLORS,
+    LANE_ORDER,
     EntryKind,
+    Lane,
     TraceRecord,
-    format_duration,
+    format_duration_compact,
+    kind_color,
+    with_alpha,
 )
 
-# ── 与 TurnListWidget 对齐的列常量 ──
-COL_DOT = 10
-COL_TYPE = 26
-TYPE_W = 76
-COL_MAIN = COL_TYPE + TYPE_W + 8
+TICK_H = 18
+LANE_ROW_H = 30
+LANE_LABEL_W = 64
+PANEL_H = TICK_H + len(LANE_ORDER) * LANE_ROW_H + 6
 PAD_R = 12
+BAR_INSET = 6
 
-ROW_H = 22
-SUMMARY_H = 32
-BAR_INSET = 5  # 条带上下内缩
-
-MONO_FAMILY = "Cascadia Mono, Consolas, Menlo, monospace"
-
-
-@dataclass
-class _Turn:
-    """单轮 turn 的派生信息。"""
-
-    start_ts: float
-    end_ts: float
-    records: List[int]
+MODES = ("duration", "turns", "calls")
 
 
 class TimelinePanel(QWidget):
-    """顶部时间线：摘要条 + 每条记录一行横条。"""
+    """三泳道甘特图。"""
 
-    recordClicked = pyqtSignal(int)
+    recordClicked = pyqtSignal(int)  # record index（visible 列表索引）
 
     def __init__(self, parent: QWidget = None) -> None:
         super().__init__(parent)
         self._records: List[TraceRecord] = []
-        self._turns: List[_Turn] = []
+        self._mode: str = "duration"
+        self._selected_idx: Optional[int] = None
         self._hover_idx: Optional[int] = None
+        self._hit_areas: List[Tuple[QRect, int]] = []
         self._colors: Dict[str, str] = {
-            "text": "#D8D8D8",
-            "text_secondary": "#8A8A8A",
-            "text_dim": "#6E6E6E",
-            "border": "#333333",
-            "summary_bg": "transparent",
-            "row_hover": "rgba(255,255,255,0.045)",
-            "row_alt": "rgba(255,255,255,0.018)",
-            "grid": "rgba(255,255,255,0.05)",
-            "track": "rgba(255,255,255,0.035)",
+            "text": "#C8C8D0",
+            "text_dim": "#6E6E78",
+            "track": "#000000",
+            "grid": "#FFFFFF",
+            "selected": "#7AA2F7",
         }
         self._base_font = QFont("Cascadia Mono", 9)
         self.setMouseTracking(True)
-        self.setMinimumHeight(SUMMARY_H + ROW_H * 2 + 8)
+        self.setFixedHeight(PANEL_H)
 
     # ──────────────────── 公开 API ────────────────────
 
     def set_records(self, records: List[TraceRecord]) -> None:
         self._records = list(records)
-        self._rebuild_turns()
         self.update()
 
-    def append_records(self, records: List[TraceRecord], _start_idx: int = 0) -> None:
-        self._records.extend(records)
-        self._rebuild_turns()
+    def set_selected(self, idx: Optional[int]) -> None:
+        self._selected_idx = idx
         self.update()
 
-    def update_record(self, _idx: int) -> None:
-        self._rebuild_turns()
-        self.update()
+    def set_mode(self, mode: str) -> None:
+        if mode in MODES and mode != self._mode:
+            self._mode = mode
+            self.update()
 
-    def clear(self) -> None:
-        self._records = []
-        self._turns = []
-        self._hover_idx = None
-        self.update()
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     def set_colors(self, colors: Dict[str, Any]) -> None:
         if not colors:
@@ -110,231 +95,214 @@ class TimelinePanel(QWidget):
         self._colors.update(
             {
                 "text": colors.get("text_primary", self._colors["text"]),
-                "text_secondary": colors.get("text_secondary", self._colors["text_secondary"]),
-                "border": colors.get("border", self._colors["border"]),
-                "row_hover": colors.get("hover_bg") or ("rgba(255,255,255,0.045)" if is_dark else "rgba(0,0,0,0.040)"),
-                "row_alt": "rgba(255,255,255,0.018)" if is_dark else "rgba(0,0,0,0.022)",
-                "grid": "rgba(255,255,255,0.05)" if is_dark else "rgba(0,0,0,0.06)",
-                "track": "rgba(255,255,255,0.035)" if is_dark else "rgba(0,0,0,0.045)",
+                "text_dim": colors.get("text_secondary", self._colors["text_dim"]),
+                # 泳道底色：深色主题叠白、浅色主题叠黑（低透明度，用 with_alpha 派生）
+                "track": "#FFFFFF" if is_dark else "#000000",
+                "grid": "#FFFFFF" if is_dark else "#000000",
+                "selected": colors.get("accent") or self._colors["selected"],
             }
         )
         self.update()
 
     def _apply_font(self, font: QFont) -> None:
-        self._base_font = font
+        self._base_font = QFont(font)
         self.update()
 
-    # ──────────────────── turn 划分 ────────────────────
+    # ──────────────────── 数据切片 ────────────────────
 
-    def _rebuild_turns(self) -> None:
-        if not self._records:
-            self._turns = []
-            return
-        recs = self._records
-        turns: List[_Turn] = []
-        cur: List[int] = []
-        for i, rec in enumerate(recs):
-            if rec.kind == EntryKind.USER and cur:
-                turns.append(self._mk_turn(recs, cur))
-                cur = []
-            cur.append(i)
-        if cur:
-            turns.append(self._mk_turn(recs, cur))
-        self._turns = turns
+    def _visible_records(self) -> List[TraceRecord]:
+        """当前模式下参与绘制的记录（calls 模式只看工具）。"""
+        if self._mode == "calls":
+            return [r for r in self._records if r.kind == EntryKind.TOOL]
+        return self._records
+
+    def _time_bounds(self, recs: List[TraceRecord]) -> Tuple[float, float]:
+        """返回 (t0, t1)。无有效时间时返回 (0, 1) 防除零。"""
+        starts = [r.start_ts for r in recs if r.start_ts > 0]
+        if not starts:
+            return 0.0, 1.0
+        t0 = min(starts)
+        ends = [max(r.end_ts, r.start_ts) for r in recs if r.start_ts > 0]
+        t1 = max(ends) if ends else t0
+        if t1 <= t0:
+            t1 = t0 + 1.0
+        return t0, t1
+
+    def _x_ratio(self, rec: TraceRecord, t0: float, t1: float, lane_x0: float, lane_w: float) -> Tuple[float, float]:
+        """计算一条记录在泳道内的 (x0, x1) 像素坐标。"""
+        duration_mode = self._mode == "duration"
+        if duration_mode:
+            a, b = self._ratio_global(rec, t0, t1)
+            return lane_x0 + a * lane_w, lane_x0 + b * lane_w
+        # turns 模式：turn 等分，段内按真实时间线性
+        turns = max(1, max((r.turn_no for r in self._records), default=1))
+        k = max(0, rec.turn_no - 1)
+        seg_x0 = lane_x0 + k / turns * lane_w
+        seg_w = lane_w / turns
+        turn_recs = [r for r in self._records if r.turn_no == rec.turn_no and r.start_ts > 0]
+        if not turn_recs:
+            return seg_x0, max(seg_x0 + 3, seg_x0 + seg_w * 0.5)
+        tt0, tt1 = self._time_bounds(turn_recs)
+        a, b = self._ratio_global(rec, tt0, tt1)
+        return seg_x0 + a * seg_w, seg_x0 + b * seg_w
 
     @staticmethod
-    def _mk_turn(recs: List[TraceRecord], idxs: List[int]) -> _Turn:
-        start = min((recs[j].start_ts for j in idxs if recs[j].start_ts > 0), default=time.time())
-        end = max((recs[j].end_ts if recs[j].end_ts > 0 else recs[j].start_ts) for j in idxs)
-        if any(recs[j].is_pending for j in idxs):
-            end = max(end, time.time())
-        return _Turn(start_ts=start, end_ts=end, records=list(idxs))
-
-    # ──────────────────── 尺寸 ────────────────────
-
-    def sizeHint(self) -> QSize:  # noqa: N802
-        rows = max(1, len(self._records))
-        return QSize(800, SUMMARY_H + rows * ROW_H + 8)
-
-    def minimumSizeHint(self) -> QSize:  # noqa: N802
-        return QSize(360, SUMMARY_H + ROW_H * 2 + 8)
+    def _ratio_global(rec: TraceRecord, t0: float, t1: float) -> Tuple[float, float]:
+        span = max(1e-6, t1 - t0)
+        s = rec.start_ts if rec.start_ts > 0 else t0
+        e = rec.end_ts if rec.end_ts > s else s
+        a = max(0.0, min(1.0, (s - t0) / span))
+        b = max(0.0, min(1.0, (e - t0) / span))
+        return a, max(b, a + 0.004)  # 最小可见宽度
 
     # ──────────────────── 绘制 ────────────────────
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
+        self._hit_areas = []
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setRenderHint(QPainter.TextAntialiasing, True)
 
-            self._paint_summary(painter)
-
-            if not self._records:
+            recs = self._visible_records()
+            if not recs:
                 self._paint_empty(painter)
                 return
 
-            x0 = COL_MAIN
-            track_w = max(20, self.width() - x0 - PAD_R)
+            track_x = LANE_LABEL_W
+            track_w = max(40, self.width() - track_x - PAD_R)
+            t0, t1 = self._time_bounds(recs)
 
-            anchor = min((r.start_ts for r in self._records if r.start_ts > 0), default=time.time())
-            now = time.time()
-            g_end = max(
-                ((r.end_ts if r.end_ts > 0 else r.start_ts) for r in self._records),
-                default=now,
-            )
-            g_end = max(g_end, now) if any(r.is_pending for r in self._records) else g_end
-            span = max(1e-6, g_end - anchor)
+            lanes = [Lane.TOOLS] if self._mode == "calls" else list(LANE_ORDER)
+            h = (self.height() - TICK_H - 4) / len(lanes)
 
-            def x_at(ts: float) -> int:
-                ratio = (ts - anchor) / span
-                return int(x0 + max(0.0, min(1.0, ratio)) * track_w)
+            for lane_i, lane in enumerate(lanes):
+                y = TICK_H + lane_i * h
+                self._paint_lane(painter, lane, y, h, track_x, track_w, t0, t1, recs)
 
-            self._paint_grid(painter, x0, track_w)
-
-            y = SUMMARY_H
-            for i, rec in enumerate(self._records):
-                rect = QRect(0, y, self.width(), ROW_H)
-                if self._hover_idx == i:
-                    painter.fillRect(rect, QColor(self._colors["row_hover"]))
-                elif i % 2 == 1:
-                    painter.fillRect(rect, QColor(self._colors["row_alt"]))
-
-                self._paint_row_label(painter, rec, rect)
-
-                start = rec.start_ts if rec.start_ts > 0 else anchor
-                end = rec.end_ts if rec.end_ts > 0 else (now if rec.is_pending else start)
-                bx0 = x_at(start)
-                bx1 = max(bx0 + 3, x_at(end))
-                bar = QRect(bx0, y + BAR_INSET, bx1 - bx0, ROW_H - BAR_INSET * 2)
-
-                color = QColor(ENTRY_KIND_COLORS.get(rec.kind, "#888888"))
-                painter.setBrush(QBrush(color if not rec.is_pending else _alpha(color, 150)))
-                painter.setPen(Qt.NoPen)
-                painter.drawRoundedRect(bar, 3, 3)
-
-                # 条内文字（窄条不画）
-                if bar.width() > 56:
-                    txt_color = QColor("#101010") if _is_light(color) else QColor("#FFFFFF")
-                    f = QFont(self._base_font)
-                    f.setPointSizeF(max(7.0, self._base_font.pointSizeF() - 1.0))
-                    painter.setFont(f)
-                    painter.setPen(txt_color)
-                    fm = QFontMetrics(f)
-                    label = rec.label + (" …" if rec.is_pending else "")
-                    painter.drawText(
-                        bar.adjusted(6, 0, -4, 0),
-                        Qt.AlignVCenter | Qt.AlignLeft,
-                        fm.elidedText(label, Qt.ElideRight, bar.width() - 10),
-                    )
-                y += ROW_H
+            # 选中描边最后补画（保证高亮在最上层）
+            self._paint_selection(painter)
+            if self._mode != "calls":
+                self._paint_ticks(painter, track_x, track_w, t0, t1)
         finally:
             painter.end()
 
-    def _paint_summary(self, painter: QPainter) -> None:
-        rect = QRect(0, 0, self.width(), SUMMARY_H)
-        painter.fillRect(rect, QColor(self._colors["summary_bg"]))
-
-        painter.setPen(QColor(self._colors["border"]))
-        painter.drawLine(0, SUMMARY_H - 1, self.width(), SUMMARY_H - 1)
-
+    def _paint_lane(
+        self,
+        painter: QPainter,
+        lane: Lane,
+        y: float,
+        h: float,
+        track_x: int,
+        track_w: int,
+        t0: float,
+        t1: float,
+        recs: List[TraceRecord],
+    ) -> None:
+        # 泳道标签
         f = QFont(self._base_font)
-        f.setPointSizeF(max(7.5, self._base_font.pointSizeF() - 0.5))
-        painter.setFont(f)
-
-        if not self._records:
-            painter.setPen(QColor(self._colors["text_dim"]))
-            painter.drawText(rect.adjusted(COL_MAIN, 0, 0, 0), Qt.AlignVCenter | Qt.AlignLeft, "等待会话开始…")
-            return
-
-        anchor = min((r.start_ts for r in self._records if r.start_ts > 0), default=time.time())
-        g_end = max(((r.end_ts if r.end_ts > 0 else r.start_ts) for r in self._records), default=time.time())
-        total_ms = max(0, int((g_end - anchor) * 1000))
-
-        items = [
-            ("Duration", format_duration(total_ms)),
-            ("Turns", str(len(self._turns))),
-            ("Calls", str(sum(1 for r in self._records if r.kind == EntryKind.TOOL))),
-        ]
-        x = COL_MAIN
-        for label, value in items:
-            painter.setPen(QColor(self._colors["text_dim"]))
-            painter.drawText(QRect(x, 0, 62, SUMMARY_H - 1), Qt.AlignVCenter | Qt.AlignLeft, label)
-            painter.setPen(QColor(self._colors["text"]))
-            painter.drawText(QRect(x + 62, 0, 96, SUMMARY_H - 1), Qt.AlignVCenter | Qt.AlignLeft, value)
-            x += 186
-
-    def _paint_grid(self, painter: QPainter, x0: int, w: int) -> None:
-        """时间刻度竖线（4 等分）。"""
-        painter.setPen(QPen(QColor(self._colors["grid"]), 1, Qt.DotLine))
-        for k in range(1, 4):
-            gx = x0 + int(w * k / 4)
-            painter.drawLine(gx, SUMMARY_H, gx, self.height())
-
-    def _paint_row_label(self, painter: QPainter, rec: TraceRecord, rect: QRect) -> None:
-        color = QColor(ENTRY_KIND_COLORS.get(rec.kind, "#888888"))
-        cy = rect.center().y()
-        painter.setBrush(color)
-        painter.setPen(Qt.NoPen)
-        painter.drawEllipse(COL_DOT, cy - 3, 6, 6)
-
-        f = QFont(self._base_font)
-        f.setBold(True)
-        f.setPointSizeF(max(7.0, self._base_font.pointSizeF() - 0.5))
-        painter.setFont(f)
-        painter.setPen(color)
-        painter.drawText(
-            QRect(COL_TYPE, rect.y(), TYPE_W, rect.height()), Qt.AlignVCenter | Qt.AlignLeft, rec.kind.label
-        )
-
-        f.setBold(False)
+        f.setPointSizeF(max(8.0, self._base_font.pointSizeF() - 0.5))
         painter.setFont(f)
         painter.setPen(QColor(self._colors["text_dim"]))
-        fm = QFontMetrics(f)
+        painter.drawText(QRect(0, int(y), LANE_LABEL_W - 8, int(h)), Qt.AlignVCenter | Qt.AlignRight, lane.value)
+
+        # 泳道底轨（极淡空槽，圆角）
+        track = QRect(track_x, int(y + 4), track_w, int(h - 8))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(with_alpha(QColor(self._colors["track"]), 10))
+        painter.drawRoundedRect(track, 4, 4)
+
+        # 条带（收窄居中，留出轨道呼吸感）
+        bar_h = min(16, max(10, track.height() - 8))
+        bar_y = track.y() + (track.height() - bar_h) // 2
+        for idx, rec in enumerate(recs):
+            if rec.lane != lane:
+                continue
+            bx0, bx1 = self._x_ratio(rec, t0, t1, track_x, track_w)
+            bar = QRect(int(bx0), bar_y, max(4, int(bx1 - bx0)), bar_h)
+            color = kind_color(rec.kind)
+            if idx == self._hover_idx:
+                painter.setBrush(color)
+            else:
+                painter.setBrush(with_alpha(color, 150) if rec.is_pending else with_alpha(color, 200))
+            painter.setPen(Qt.NoPen)
+            painter.drawRoundedRect(bar, 3, 3)
+            self._hit_areas.append((QRect(bar), idx))
+
+            if bar.width() > 52:
+                txt = QColor("#101010") if _is_light(color) else QColor("#FFFFFF")
+                painter.setPen(txt)
+                fm = QFontMetrics(f)
+                label = f"{rec.label} {format_duration_compact(rec.duration_ms)}"
+                if rec.is_pending:
+                    label += " …"
+                painter.drawText(bar.adjusted(6, 0, -4, 0), Qt.AlignVCenter | Qt.AlignLeft, fm.elidedText(label, Qt.ElideRight, bar.width() - 10))
+
+    def _paint_selection(self, painter: QPainter) -> None:
+        if self._selected_idx is None:
+            return
+        accent = self._colors.get("selected") or self._colors["text"]
+        for rect, idx in self._hit_areas:
+            if idx == self._selected_idx:
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor(accent), 2))
+                painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 4, 4)
+                return
+
+    def _paint_ticks(self, painter: QPainter, track_x: int, track_w: int, t0: float, t1: float) -> None:
+        """顶部时间刻度（4 等分 + 总时长标注）。"""
+        f = QFont(self._base_font)
+        f.setPointSizeF(max(7.0, self._base_font.pointSizeF() - 1.0))
+        painter.setFont(f)
+        painter.setPen(QColor(self._colors["text_dim"]))
+        total_ms = int((t1 - t0) * 1000)
+        painter.drawText(QRect(track_x, 0, track_w, TICK_H - 2), Qt.AlignVCenter | Qt.AlignLeft, "0s")
         painter.drawText(
-            QRect(COL_TYPE, rect.y(), 0, rect.height()),
-            Qt.AlignVCenter | Qt.AlignLeft,
-            "",
+            QRect(track_x, 0, track_w, TICK_H - 2), Qt.AlignVCenter | Qt.AlignRight, format_duration_compact(total_ms)
         )
-        _ = fm
+        pen = QPen(with_alpha(QColor(self._colors["grid"]), 28), 1, Qt.DotLine)
+        for k in range(1, 4):
+            gx = track_x + int(track_w * k / 4)
+            painter.setPen(pen)
+            painter.drawLine(gx, TICK_H, gx, self.height() - 2)
 
     def _paint_empty(self, painter: QPainter) -> None:
         f = QFont(self._base_font)
         painter.setFont(f)
         painter.setPen(QColor(self._colors["text_dim"]))
-        rect = QRect(0, SUMMARY_H, self.width(), max(0, self.height() - SUMMARY_H))
-        painter.drawText(rect, Qt.AlignCenter, "暂无轨迹数据")
+        painter.drawText(self.rect(), Qt.AlignCenter, "暂无轨迹 — 发送一条消息开始记录")
 
     # ──────────────────── 交互 ────────────────────
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        idx = self._row_at(event.y())
-        if idx is not None:
-            self.recordClicked.emit(idx)
+        for rect, idx in self._hit_areas:
+            if rect.contains(event.pos()):
+                self.recordClicked.emit(idx)
+                return
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        idx = self._row_at(event.y())
-        if idx != self._hover_idx:
-            self._hover_idx = idx
+        from PyQt5.QtWidgets import QToolTip
+
+        hit = None
+        for rect, idx in self._hit_areas:
+            if rect.contains(event.pos()):
+                hit = idx
+                break
+        if hit != self._hover_idx:
+            self._hover_idx = hit
             self.update()
+        if hit is not None and 0 <= hit < len(self._records):
+            rec = self._records[hit]
+            QToolTip.showText(
+                event.globalPos(),
+                f"{rec.kind.label} · {rec.label}\n{rec.absolute_time} · {format_duration_compact(rec.duration_ms)}",
+                self,
+            )
 
     def leaveEvent(self, _event) -> None:  # noqa: N802
         if self._hover_idx is not None:
             self._hover_idx = None
             self.update()
-
-    def _row_at(self, y: int) -> Optional[int]:
-        if y < SUMMARY_H:
-            return None
-        row = (y - SUMMARY_H) // ROW_H
-        if 0 <= row < len(self._records):
-            return int(row)
-        return None
-
-
-def _alpha(c: QColor, a: int) -> QColor:
-    out = QColor(c)
-    out.setAlpha(a)
-    return out
 
 
 def _is_light(c: QColor) -> bool:

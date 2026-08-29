@@ -1,15 +1,24 @@
 # -*- coding: utf-8 -*-
-"""agent_trace.TraceCollector — 后台轨迹采集器。
+"""agent_trace.TraceCollector — 后台轨迹采集器（v3）。
 
-职责：
-1. 把当前会话的 ``session.messages`` 1-to-1 投影成 ``TraceRecord`` 列表。
-2. 订阅 ``ChatBackend`` 信号，给 in-flight 调用补齐开始/结束时间戳。
-3. 监听 session 切换 / 新建会话 → 清空轨迹。
+核心设计（在 v2「messages 唯一事实源」基础上强化）：
 
-设计原则（不修改 messages，不修改 signals）：
-- 采集器**只读** sessions.messages，不注入、不删除。
-- 实时信号仅用于精度调整（in-flight 起止）。
-- 信号连接在 ``attach(backend, main_widget)`` 时建立，``detach()`` 时断开。
+1. **session.messages 是唯一事实源**：records 是 messages 的 1:1 稳定投影。
+2. **实时信号只写 timing 表**：tool/stream 起止时间记到 ``_timing`` /
+   ``_streams``，投影时按 tool_call_id / assistant 序号回填精确毫秒时长。
+3. **in-flight 尾巴**放 ``_tail`` 单独展示，落盘后自动被正式记录取代。
+4. **tail 稳定化**：``_set_tail`` 内部比对签名，内容没变就**不发信号** —
+   修复 v2 每次 ``_sync`` 无条件 emit tailChanged 导致列表全量重建
+   （「历史记录一直在刷新」）的问题。
+5. **TraceCollectorHub**：per-window 常驻采集器管理。每个对话标签页的
+   backend 各挂一个 collector **持续收集**（后台标签页的工具耗时/流耗时不
+   丢失），轨迹卡切换标签页时只是切换「展示哪个 collector」。
+
+时长语义：
+- 消息类条目 duration = 下一条消息 timestamp − 本条 timestamp；同秒注入
+  （hook 连发）为 0 — UI 侧对消息类显示绝对时间而非时长。
+- TOOL / ASSISTANT 优先用实时信号给的精确起止。
+- ``TraceRecord.duration_ms`` 不对已完成记录回退 ``time.time()``（P023）。
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ from .trace_models import (
     TraceRecord,
     content_to_text,
     infer_message_kind,
+    is_real_user_message,
     message_label,
     message_source,
     truncate,
@@ -34,85 +44,101 @@ from .trace_models import (
 
 
 class TraceCollector(QObject):
-    """常驻 Qt 对象，订阅后端信号并维护当前会话轨迹快照。"""
+    """常驻 Qt 对象：订阅一个对话窗口的 backend 信号，维护该会话的轨迹快照。"""
 
-    # 列表刷新（增删 entry）— 增量模式（新增段尾）
-    recordsAppended = pyqtSignal(int)  # 起始 index
-    # 单条记录 in-flight/end 状态翻转
-    recordUpdated = pyqtSignal(int)  # entry index
-    # 整体清空（session 切换）
+    # 会话切换 / 不可恢复变化 → UI 全量重置
     recordsReset = pyqtSignal()
+    # 尾部追加（start, count）— 相对已落盘投影 _records
+    recordsAppended = pyqtSignal(int, int)
+    # 区段回填变化（start, count）— timing 回填 / 状态收尾
+    recordsUpdated = pyqtSignal(int, int)
+    # in-flight 尾部临时记录变化（仅在 tail 内容实际变化时发射）
+    tailChanged = pyqtSignal()
 
     def __init__(self, parent: QObject = None) -> None:
         super().__init__(parent)
         self._records: List[TraceRecord] = []
-        # session.messages 长度快照（增量 sync 用）
-        self._last_session_messages_len: int = 0
-        # 区分 in-flight 的工具调用：tool_call_id → TraceRecord index
-        self._pending_tool_records: Dict[str, int] = {}
-        # 当前 in-flight 的 assistant stream：TraceRecord index 或 None
-        self._active_assistant_idx: Optional[int] = None
-        # 当前 session_id（用于判断会话切换）
+        self._tail: List[TraceRecord] = []
+        # tool_call_id → {"start", "end", "success", "name", "args", "result"}
+        self._timing: Dict[str, Dict[str, Any]] = {}
+        # assistant 流列表（按完成序）：{"start": float, "end": float}
+        self._streams: List[Dict[str, float]] = []
         self._active_session_id: str = ""
-        # 当前正在处理的 hook 事件：event_name → TraceRecord index
-        self._active_hook_records: Dict[str, int] = {}
-        # 已绑定的 backend（用于 detach）
         self._bound_backend: Optional[Any] = None
         self._bound_main_widget: Optional[Any] = None
 
     # ──────────────────── 公共 API ────────────────────
 
     def attach(self, backend: Any, main_widget: Any) -> None:
-        """把采集器挂到指定 backend / 主窗口。
-
-        必须由主窗口在 ``backend.initialize`` 完成之后、``messages_updated``
-        首次到达之前调用（注册信号回调 + 拉首条 session 同步）。
-        """
+        """挂到指定 backend / 主窗口（幂等，backend 变化时重挂）。"""
         if backend is None:
             return
-        self.detach()  # 幂等：先拆再装
+        if self._bound_backend is backend:
+            self._bound_main_widget = main_widget
+            return
+        self.detach()
         self._bound_backend = backend
         self._bound_main_widget = main_widget
-
         try:
             backend.tool_call_started.connect(self._on_tool_call_started)
             backend.tool_result_received.connect(self._on_tool_result_received)
-            backend.hook_status_changed.connect(self._on_hook_status_changed)
+            backend.stream_started.connect(self._on_stream_started)
             backend.stream_finished.connect(self._on_stream_finished)
-            # 主程序无独立的 ``messages_updated`` pyqtSignal；
-            # ``_hook_messages_updated`` 是主程序在所有 hook 注入消息 / 工具结果
-            # 写入 session.messages 后同步触发的 cross-thread-safe 信号 — 当作
-            # 「消息列表已就绪」节拍，每拍做一次增量同步即可保证轨迹不会漏消息。
+            # 主程序在 hook 注入 / 工具结果写入 messages 后触发的节拍信号
             if hasattr(backend, "_hook_messages_updated"):
                 backend._hook_messages_updated.connect(self._on_messages_updated)
         except Exception as e:
             logger.warning(f"[agent_trace] attach signals failed: {e}")
-        # 首条同步（拉取当前已存在的 messages）
-        self._sync_session_state(emit_reset=True)
+        self._sync(emit_reset=True)
 
     def detach(self) -> None:
-        """解除所有 signal 连接。"""
-        if self._bound_backend is not None:
+        """解除所有信号连接。"""
+        if self._bound_backend is None:
+            return
+        for sig, slot in (
+            ("tool_call_started", self._on_tool_call_started),
+            ("tool_result_received", self._on_tool_result_received),
+            ("stream_started", self._on_stream_started),
+            ("stream_finished", self._on_stream_finished),
+            ("_hook_messages_updated", self._on_messages_updated),
+        ):
             try:
-                self._bound_backend.tool_call_started.disconnect(self._on_tool_call_started)
-                self._bound_backend.tool_result_received.disconnect(self._on_tool_result_received)
-                self._bound_backend.hook_status_changed.disconnect(self._on_hook_status_changed)
-                self._bound_backend.stream_finished.disconnect(self._on_stream_finished)
-                if hasattr(self._bound_backend, "_hook_messages_updated"):
-                    self._bound_backend._hook_messages_updated.disconnect(self._on_messages_updated)
-            except TypeError, RuntimeError:
+                getattr(self._bound_backend, sig).disconnect(slot)
+            except (TypeError, RuntimeError):
                 pass  # 未连接 / 已析构
         self._bound_backend = None
         self._bound_main_widget = None
 
     @property
+    def bound_main_widget(self) -> Optional[Any]:
+        return self._bound_main_widget
+
+    @property
     def records(self) -> List[TraceRecord]:
+        """已落盘消息的稳定投影。"""
         return list(self._records)
+
+    @property
+    def tail(self) -> List[TraceRecord]:
+        """in-flight 尾部临时记录（流式生成中 / 工具执行中）。"""
+        return list(self._tail)
+
+    @property
+    def visible_records(self) -> List[TraceRecord]:
+        """UI 展示列表 = 稳定投影 + in-flight 尾巴。"""
+        return self._records + self._tail
+
+    @property
+    def has_pending(self) -> bool:
+        return any(r.is_pending for r in self._tail)
 
     # ──────────────────── 会话同步 ────────────────────
 
+    def refresh(self) -> None:
+        """外部驱动的一次全量同步（切回标签页时调用）。"""
+        self._sync()
+
     def _current_session(self) -> Optional[Any]:
-        """获取 backend 当前会话（可能为 None）。"""
         be = self._bound_backend
         if be is None:
             return None
@@ -121,216 +147,336 @@ class TraceCollector(QObject):
         except Exception:
             return None
 
-    def _sync_session_state(self, emit_reset: bool = False) -> None:
-        """全量重同步当前 session 的 messages。"""
+    def _on_messages_updated(self, *_args: Any) -> None:
+        try:
+            self._sync()
+        except Exception as e:
+            logger.warning(f"[agent_trace] _sync failed: {e}\n{traceback.format_exc()}")
+
+    def _sync(self, emit_reset: bool = False) -> None:
+        """从 session.messages 全量重建投影，与旧列表 diff 后发增量信号。"""
         session = self._current_session()
         if session is None:
-            if self._records:
-                self._records.clear()
-                self._last_session_messages_len = 0
-                self._active_session_id = ""
-                self._recordsReset.emit()
+            if self._records or emit_reset:
+                self._clear_all()
+                self.recordsReset.emit()
             return
 
         sid = getattr(session, "session_id", "")
         if sid and sid != self._active_session_id:
-            self._active_session_id = sid
-            self._records.clear()
-            self._last_session_messages_len = 0
-            self._pending_tool_records.clear()
-            self._active_assistant_idx = None
-            self._active_hook_records.clear()
+            self._reset_runtime_state(sid)
             emit_reset = True
 
         messages = getattr(session, "messages", None) or []
-        if not messages:
-            if emit_reset and not self._records:
-                self.recordsReset.emit()
+        new_records = self._project_messages(messages)
+
+        if emit_reset or not self._records:
+            self._records = new_records
+            self.recordsReset.emit()
+            self._set_tail(self._tail)  # clear/reset 可能清了 tail → 让 UI 收敛
             return
 
-        # 增量追加
-        start_idx = len(self._records)
-        now = time.time()
-        appended: List[TraceRecord] = []
-        for offset, msg in enumerate(messages[self._last_session_messages_len :]):
-            record = self._record_from_message(
-                msg,
-                idx=self._last_session_messages_len + offset,
-                now=now,
-            )
-            appended.append(record)
-        if appended:
-            self._records.extend(appended)
-            self.recordsAppended.emit(start_idx)
-        self._last_session_messages_len = len(messages)
+        old = self._records
+        n_common = min(len(old), len(new_records))
+        first_diff = n_common
+        for i in range(n_common):
+            if self._signature(old[i]) != self._signature(new_records[i]):
+                first_diff = i
+                break
 
-        if emit_reset and start_idx == 0 and not appended:
+        if first_diff == n_common and len(new_records) >= len(old):
+            # 纯尾部追加
+            self._records = new_records
+            if len(new_records) > len(old):
+                self.recordsAppended.emit(len(old), len(new_records) - len(old))
+        elif len(new_records) == len(old):
+            # 等长回填（timing 补齐 / 状态收尾）
+            self._records = new_records
+            if first_diff < n_common:
+                self.recordsUpdated.emit(first_diff, n_common - first_diff)
+        else:
+            # 头部内容变化 / 缩短（截断、压缩等）→ 整体重置
+            self._records = new_records
             self.recordsReset.emit()
 
-    def _on_messages_updated(self, *_args: Any) -> None:
-        """backend 推送 messages 更新 — 增量同步。"""
-        try:
-            self._sync_session_state(emit_reset=False)
-        except Exception as e:
-            logger.warning(f"[agent_trace] _sync_session_state failed: {e}\n{traceback.format_exc()}")
+        # hook 注入落盘后，清掉「hook 执行中」的尾巴（经 _set_tail 判重）
+        if self._tail:
+            self._set_tail([r for r in self._tail if r.kind != EntryKind.CONTEXT])
 
-    def _record_from_message(self, msg: Dict[str, Any], idx: int, now: float) -> TraceRecord:
-        """从一条 session.message dict 派生 TraceRecord。"""
-        kind = infer_message_kind(msg)
-        label = message_label(msg)
-        raw_text = content_to_text(msg.get("content"))
-        preview = truncate(raw_text, 140)
-        source = message_source(idx)
+    def _clear_all(self) -> None:
+        self._records = []
+        self._set_tail([])
+        self._timing.clear()
+        self._streams.clear()
+        self._active_session_id = ""
 
-        # 工具结果记录额外标记成功/失败
-        meta: Dict[str, Any] = {}
-        if kind == EntryKind.TOOL:
-            tool_call_id = msg.get("tool_call_id") or ""
-            if tool_call_id:
-                meta["tool_call_id"] = tool_call_id
-            meta["name"] = msg.get("name") or msg.get("tool_name") or "tool"
-
-        is_pending = False
-        is_error = False
-        # tool_calls（含在 assistant message 中）— 单独的工具调用条目由实时信号负责
-        if kind == EntryKind.ASSISTANT and msg.get("tool_calls"):
-            meta["has_tool_calls"] = True
-
-        timestamp_str = msg.get("timestamp")
-        start_ts = self._parse_timestamp(timestamp_str) or now
-        # session.messages 中的 hook 注入消息和真实 user 消息间隔通常很短，
-        # end_ts 暂留 0，in-flight 时由 stream_finished 补齐。
-        return TraceRecord(
-            kind=kind,
-            label=label,
-            preview=preview,
-            raw=raw_text,
-            source=source,
-            start_ts=start_ts,
-            end_ts=0.0,
-            is_pending=is_pending,
-            is_error=is_error,
-            meta=meta,
-        )
+    def _reset_runtime_state(self, sid: str) -> None:
+        self._clear_all()
+        self._active_session_id = sid
 
     @staticmethod
-    def _parse_timestamp(s: str) -> Optional[float]:
-        """把 'YYYY-MM-DD HH:MM:SS' 解析为 epoch（浮点秒）。失败返回 None。"""
+    def _signature(r: TraceRecord) -> tuple:
+        """轻量签名 — diff 判断内容是否变化。"""
+        return (r.kind, r.label[:32], round(r.start_ts, 3), round(r.end_ts, 3), r.is_error, r.is_pending, r.raw[:64])
+
+    @staticmethod
+    def _tail_signature(tail: List[TraceRecord]) -> tuple:
+        return tuple(
+            (r.kind, r.label[:32], round(r.start_ts, 3), r.is_pending, r.raw[:48]) for r in tail
+        )
+
+    def _set_tail(self, new_tail: List[TraceRecord]) -> None:
+        """tail 稳定化赋值：内容没变不发信号（修「历史记录一直在刷新」）。"""
+        new_sig = self._tail_signature(new_tail)
+        if new_sig == self._tail_signature(self._tail):
+            return
+        self._tail = list(new_tail)
+        self.tailChanged.emit()
+
+    # ──────────────────── messages → records 投影 ────────────────────
+
+    def _project_messages(self, messages: List[Dict[str, Any]]) -> List[TraceRecord]:
+        records: List[TraceRecord] = []
+        turn = 0
+        assistant_seq = 0
+        # 先解析全部时间戳，供「duration = 下一条时刻 − 本条时刻」使用
+        ts_list = [self._parse_timestamp(m.get("timestamp")) or 0.0 for m in messages]
+
+        for i, msg in enumerate(messages):
+            kind = infer_message_kind(msg)
+            label = message_label(msg)
+            raw_text = content_to_text(msg.get("content"))
+            start = ts_list[i]
+            # 默认结束时刻 = 下一条消息时刻（存续间隔）；最后一条瞬时
+            end = ts_list[i + 1] if i + 1 < len(messages) and ts_list[i + 1] > start else 0.0
+
+            meta: Dict[str, Any] = {}
+            is_error = False
+
+            if kind == EntryKind.TOOL:
+                tool_call_id = msg.get("tool_call_id") or ""
+                meta["tool_call_id"] = tool_call_id
+                t = self._timing.get(tool_call_id)
+                if t:
+                    # 实时信号给的精确起止优先
+                    if t.get("start"):
+                        start = t["start"]
+                    if t.get("end"):
+                        end = t["end"]
+                    is_error = not t.get("success", True)
+                    meta["name"] = t.get("name") or label
+                    if t.get("args"):
+                        meta["arguments"] = t["args"]
+                    if t.get("result"):
+                        meta["result"] = t["result"]
+                        raw_text = f"{t['args'] or ''}\n\n── result ──\n{t['result']}".strip()
+                else:
+                    meta["name"] = msg.get("name") or msg.get("tool_name") or "tool"
+                    args_obj = msg.get("arguments")
+                    if args_obj:
+                        try:
+                            meta["arguments"] = (
+                                json.dumps(args_obj, ensure_ascii=False) if not isinstance(args_obj, str) else args_obj
+                            )
+                        except Exception:
+                            meta["arguments"] = str(args_obj)
+                preview = self._tool_preview(meta.get("arguments") or "", raw_text)
+
+            elif kind == EntryKind.ASSISTANT:
+                if msg.get("tool_calls"):
+                    meta["has_tool_calls"] = True
+                # 第 k 条 assistant 消息 ↔ 第 k 个已记录的流
+                s = self._streams[assistant_seq] if assistant_seq < len(self._streams) else None
+                assistant_seq += 1
+                if s:
+                    if s.get("start"):
+                        start = s["start"]
+                    if s.get("end"):
+                        end = s["end"]
+                preview = truncate(raw_text, 140)
+            else:
+                preview = truncate(raw_text, 140)
+
+            if is_real_user_message(msg):
+                turn += 1
+                meta["turn_start"] = True
+
+            records.append(
+                TraceRecord(
+                    kind=kind,
+                    label=label,
+                    preview=preview,
+                    raw=raw_text,
+                    source=message_source(i, label),
+                    start_ts=start,
+                    end_ts=end,
+                    is_pending=False,
+                    is_error=is_error,
+                    turn_no=turn,
+                    meta=meta,
+                )
+            )
+        return records
+
+    @staticmethod
+    def _tool_preview(args_text: str, raw_text: str) -> str:
+        """TOOL 行预览：优先参数 JSON 摘要，其次结果首行。"""
+        if args_text:
+            return truncate(args_text.replace("\n", " "), 140)
+        return truncate(raw_text, 140)
+
+    @staticmethod
+    def _parse_timestamp(s: Any) -> Optional[float]:
+        """把 'YYYY-MM-DD HH:MM:SS[.f]' 解析为 epoch，失败返回 None。"""
         if not s or not isinstance(s, str):
             return None
         import datetime as _dt
 
         for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
             try:
-                dt = _dt.datetime.strptime(s, fmt)
-                return dt.timestamp()
+                return _dt.datetime.strptime(s, fmt).timestamp()
             except ValueError:
                 continue
         return None
 
-    # ──────────────────── 实时信号回调 ────────────────────
+    # ──────────────────── 实时信号 → timing 表 / tail ────────────────────
 
     def _on_tool_call_started(self, tool_call_id: str, tool_name: str, arguments: Dict[str, Any]) -> None:
-        """工具调用开始 — 创建 in-flight TOOL 记录。"""
-        if not tool_call_id:
+        if not tool_call_id or tool_call_id in self._timing:
             return
-        # 去重
-        if tool_call_id in self._pending_tool_records:
-            return
-        preview_args = json.dumps(arguments, ensure_ascii=False)[:140] if arguments else ""
-        record = TraceRecord(
-            kind=EntryKind.TOOL,
-            label=tool_name or "tool",
-            preview=preview_args or "（调用中…）",
-            raw=json.dumps(
-                {"tool_call_id": tool_call_id, "name": tool_name, "arguments": arguments}, ensure_ascii=False, indent=2
-            ),
-            source=f"tool_call_started · {tool_name}",
-            start_ts=time.time(),
-            end_ts=0.0,
-            is_pending=True,
-            is_error=False,
-            meta={"tool_call_id": tool_call_id, "name": tool_name},
+        try:
+            args_text = json.dumps(arguments, ensure_ascii=False) if arguments else ""
+        except Exception:
+            args_text = str(arguments or "")
+        self._timing[tool_call_id] = {
+            "start": time.time(),
+            "end": 0.0,
+            "success": True,
+            "name": tool_name or "tool",
+            "args": args_text,
+            "result": "",
+        }
+        self._append_tail(
+            TraceRecord(
+                kind=EntryKind.TOOL,
+                label=tool_name or "tool",
+                preview=args_text or "（调用中…）",
+                raw=args_text,
+                source=f"tool · {tool_name}",
+                start_ts=time.time(),
+                is_pending=True,
+                meta={"tool_call_id": tool_call_id},
+            )
         )
-        self._records.append(record)
-        idx = len(self._records) - 1
-        self._pending_tool_records[tool_call_id] = idx
-        self.recordsAppended.emit(idx)
 
     def _on_tool_result_received(self, tool_call_id: str, name: str, result: Any, success: bool) -> None:
-        """工具调用结果 — 标记对应 in-flight 记录结束。"""
-        idx = self._pending_tool_records.pop(tool_call_id, None)
-        if idx is None or idx >= len(self._records):
-            # 没找到对应 pending：作为一条新 TOOL 记录加入（结果先于调用信号到达的兜底）
-            if not tool_call_id:
-                return
-            record = TraceRecord(
-                kind=EntryKind.TOOL,
-                label=name or "tool",
-                preview=truncate(content_to_text(result), 140),
-                raw=content_to_text(result),
-                source=f"tool_result_received · {name}",
-                start_ts=time.time(),
-                end_ts=time.time(),
-                is_pending=False,
-                is_error=not success,
-                meta={"tool_call_id": tool_call_id, "name": name},
-            )
-            self._records.append(record)
-            self.recordsAppended.emit(len(self._records) - 1)
-            return
-        rec = self._records[idx]
-        rec.end_ts = time.time()
-        rec.is_pending = False
-        rec.is_error = not success
-        # 若结果存在且记录 preview 还是占位，覆盖之
-        if result is not None:
-            text = content_to_text(result)
-            rec.preview = truncate(text, 140)
-            rec.raw = text
-        self.recordUpdated.emit(idx)
+        t = self._timing.get(tool_call_id)
+        if t is not None:
+            t["end"] = time.time()
+            t["success"] = bool(success)
+            t["result"] = content_to_text(result)
+        # 落盘消息通常在 result 信号之后写入，这里先清尾巴，_sync 由
+        # _hook_messages_updated 驱动；若已落盘则立即同步回填。
+        self._set_tail([r for r in self._tail if r.meta.get("tool_call_id") != tool_call_id])
+        if t is None:
+            # 结果先于 started 到达的兜底：直接记 timing 并同步
+            self._timing[tool_call_id or f"anon-{time.time()}"] = {
+                "start": 0.0,
+                "end": time.time(),
+                "success": bool(success),
+                "name": name or "tool",
+                "args": "",
+                "result": content_to_text(result),
+            }
+        self._sync()
 
-    def _on_hook_status_changed(self, event_name: str, status_message: str, is_start: bool) -> None:
-        """Hook 状态变化 — 引入临时 CONTEXT 条目（生命周期独立于 session.messages）。
-
-        仅用于右侧面板的「模型执行 → hook 注入」时间线展示。
-        """
-        if not event_name:
-            return
-        if is_start:
-            label = event_name
-            preview = status_message or "Hook 注入中…"
-            record = TraceRecord(
-                kind=EntryKind.CONTEXT,
-                label=label,
-                preview=preview,
-                raw=status_message or "",
-                source=f"hook · {event_name}",
+    def _on_stream_started(self) -> None:
+        self._streams.append({"start": time.time(), "end": 0.0})
+        self._append_tail(
+            TraceRecord(
+                kind=EntryKind.ASSISTANT,
+                label="Assistant",
+                preview="正在生成…",
+                raw="",
+                source="stream",
                 start_ts=time.time(),
-                end_ts=0.0,
                 is_pending=True,
-                is_error=False,
-                meta={"hook_event": event_name},
             )
-            self._records.append(record)
-            idx = len(self._records) - 1
-            self._active_hook_records[event_name] = idx
-            self.recordsAppended.emit(idx)
-        else:
-            idx = self._active_hook_records.pop(event_name, None)
-            if idx is not None and idx < len(self._records):
-                rec = self._records[idx]
-                rec.end_ts = time.time()
-                rec.is_pending = False
-                self.recordUpdated.emit(idx)
+        )
 
     def _on_stream_finished(self, _payload: Dict[str, Any]) -> None:
-        """一个 assistant turn 流结束 — 标记所有仍 in-flight 的辅助记录收尾。"""
-        # 兜底：任何仍 is_pending 的记录盖上 end_ts（避免「永久 in-flight」）
         now = time.time()
-        for i, rec in enumerate(self._records):
-            if rec.is_pending and rec.end_ts <= 0:
-                rec.end_ts = now
-                rec.is_pending = False
-                self.recordUpdated.emit(i)
-        self._active_assistant_idx = None
+        for s in reversed(self._streams):
+            if not s.get("end"):
+                s["end"] = now
+                break
+        self._set_tail([r for r in self._tail if not (r.kind == EntryKind.ASSISTANT and r.is_pending)])
+        self._sync()
+
+    def _append_tail(self, rec: TraceRecord) -> None:
+        self._set_tail(self._tail + [rec])
+
+
+class TraceCollectorHub(QObject):
+    """per-window 常驻采集器管理（轨迹卡单实例持有）。
+
+    每个对话标签页的 backend 各挂一个 :class:`TraceCollector`，**后台持续
+    收集**（不展示的标签页也在记 timing）→ 切换标签页时精确耗时数据不丢。
+    """
+
+    def __init__(self, parent: QObject = None) -> None:
+        super().__init__(parent)
+        self._collectors: Dict[str, TraceCollector] = {}
+
+    def collector_for(self, main_widget: Any) -> Optional[TraceCollector]:
+        """取（或创建）绑定该窗口的 collector；窗口/ backend 未就绪返回 None。"""
+        if main_widget is None:
+            return None
+        wid = getattr(main_widget, "_window_id", "") or ""
+        if not wid:
+            return None
+        backend = getattr(main_widget, "backend", None)
+        if backend is None:
+            logger.debug("[agent_trace] hub: backend 未就绪，延迟建 collector")
+            return None
+        c = self._collectors.get(wid)
+        if c is None:
+            c = TraceCollector(self)
+            c.attach(backend, main_widget)
+            self._collectors[wid] = c
+            logger.debug(f"[agent_trace] hub: 为窗口 {wid[:8]} 创建 collector")
+        elif c._bound_backend is not backend:
+            # 同窗口 backend 被替换 → 重挂（attach 幂等保留 timing）
+            c.attach(backend, main_widget)
+        return c
+
+    def get(self, window_id: str) -> Optional[TraceCollector]:
+        return self._collectors.get(window_id)
+
+    def cleanup_closed(self, active_window_ids: Optional[set] = None) -> None:
+        """清理已关闭窗口的 collector（切标签页时顺手调用）。"""
+        for wid in list(self._collectors.keys()):
+            c = self._collectors[wid]
+            mw = c.bound_main_widget
+            gone = mw is None
+            if not gone:
+                try:
+                    mw.windowHandle()  # C++ 已析构时抛 RuntimeError
+                except RuntimeError:
+                    gone = True
+                except Exception:
+                    pass
+            if not gone and active_window_ids is not None:
+                gone = wid not in active_window_ids
+            if gone:
+                try:
+                    c.detach()
+                except RuntimeError:
+                    pass
+                c.deleteLater()
+                del self._collectors[wid]
+                logger.debug(f"[agent_trace] hub: 清理窗口 {wid[:8]} 的 collector")
+
+    def dispose(self) -> None:
+        """销毁全部 collector（卡片析构时调用）。"""
+        self.cleanup_closed(active_window_ids=set())
