@@ -3,6 +3,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.6] - 2026-08-29
+
+PySide6 系列的图表主题适配里程碑：从「深色硬编码」升级为「主题联动」。
+
+### ✨ 新功能 (New Features)
+
+- **图表背景跟随主题** (`app/widgets/message_card.py` + 图表视图): 深色 `#1B1E24` / 浅色白底；echarts init 主题联动（消息卡导出 + 放大视图 + 容器背景同步）。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **浅色模式 init 主题 None 泄漏进 JS 致 ReferenceError** (`app/widgets/message_card.py`): 改为 `null`，避免 JS 端字符串拼接报错。
+- **图表工具栏浅色模式适配** (`app/widgets/message_card.py`): 自绘 tooltip 替代原生 `title`（黑块）；按钮底色按主题条件化（浅底配深色 icon）。
+- **图表按钮 icon 目录改由 `_CHART_IS_DARK` 同源驱动** (`app/widgets/message_card.py`): 修复主题切换后 prefix 缓存滞后致浅底白 icon。
+
+### 🔧 工程 (Chore)
+
+- **双轨发布流程**：dev（PyQt5）/ pyside6（PySide6）共用同一 tag 名，产物自动加 `-qt5` / `-pyside6` 后缀区分。详见 `scripts/sync_tag.sh`。
+
 ## [v0.5.5] - 2026-08-29
 
 自上一版本以来的变更 | 提交数：49 · 文件变更：111 · +10739/-4406 | 贡献者：dingma, mading, martin98-afk
