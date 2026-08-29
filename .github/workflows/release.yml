@@ -74,20 +74,34 @@ jobs:
       # ── 解析版本号 + 分支后缀 ──
       # suffix 用法：dev 分支发布 → -qt5（PyQt5 版）；pyside6 分支发布 → -pyside6
       # 用 scripts/sync_tag.sh 同时在两分支打同一 tag，产物名靠 suffix 区分
+      #
+      # 注意：push tag 触发时 ${{ github.ref_name }} 是 tag 名（如 v0.5.6-rc1）
+      # 不是分支名。需要用 git branch --contains HEAD 反查 tag 所在分支。
       - name: Resolve version & suffix
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          branch="${{ github.ref_name }}"
+          # 取所有包含当前 commit 的 origin/* 分支名（detached HEAD 下依然有效）
+          candidates="$(git branch -r --contains HEAD 2>/dev/null | sed 's|^[[:space:]]*origin/||' || true)"
+          # 优先级：pyside6 > dev > master > 其他
+          branch=""
+          for b in pyside6 dev master; do
+            if echo "$candidates" | grep -qx "$b"; then
+              branch="$b"
+              break
+            fi
+          done
+          branch="${branch:-unknown}"
           case "$branch" in
             dev)              suffix="qt5"     ;;
             pyside6)          suffix="pyside6" ;;
             *)                suffix="dev"     ;;  # 兜底：未识别分支用 dev
           esac
           echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
-          echo "💡 Version: $v | Branch: $branch | Suffix: -$suffix"
+          echo "💡 Version: $v | Detected branch: $branch | Suffix: -$suffix"
+          echo "    (candidates: $(echo "$candidates" | tr '\n' ' '))"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -178,14 +192,23 @@ jobs:
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          branch="${{ github.ref_name }}"
+          candidates="$(git branch -r --contains HEAD 2>/dev/null | sed 's|^[[:space:]]*origin/||' || true)"
+          branch=""
+          for b in pyside6 dev master; do
+            if echo "$candidates" | grep -qx "$b"; then
+              branch="$b"
+              break
+            fi
+          done
+          branch="${branch:-unknown}"
           case "$branch" in
             dev)              suffix="qt5"     ;;
             pyside6)          suffix="pyside6" ;;
             *)                suffix="dev"     ;;
           esac
           echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
-          echo "💡 Version: $v | Branch: $branch | Suffix: -$suffix"
+          echo "💡 Version: $v | Detected branch: $branch | Suffix: -$suffix"
+          echo "    (candidates: $(echo "$candidates" | tr '\n' ' '))"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -337,14 +360,23 @@ jobs:
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          branch="${{ github.ref_name }}"
+          candidates="$(git branch -r --contains HEAD 2>/dev/null | sed 's|^[[:space:]]*origin/||' || true)"
+          branch=""
+          for b in pyside6 dev master; do
+            if echo "$candidates" | grep -qx "$b"; then
+              branch="$b"
+              break
+            fi
+          done
+          branch="${branch:-unknown}"
           case "$branch" in
             dev)              suffix="qt5"     ;;
             pyside6)          suffix="pyside6" ;;
             *)                suffix="dev"     ;;
           esac
           echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
-          echo "💡 Version: $v | Branch: $branch | Suffix: -$suffix"
+          echo "💡 Version: $v | Detected branch: $branch | Suffix: -$suffix"
+          echo "    (candidates: $(echo "$candidates" | tr '\n' ' '))"
 
       # ── PyInstaller ──
       - name: PyInstaller build
