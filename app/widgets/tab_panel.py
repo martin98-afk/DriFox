@@ -1100,12 +1100,12 @@ class TabPanel(QWidget):
         layout.addWidget(self._plugin_separator_2)
 
         # ── 顶部：左「对话页」标题 + 右 分支/新建 纯图标按钮 ──
-        # 布局：标题左对齐占满剩余空间（stretch=1），两个 28px 图标按钮靠右。
+        # 布局：标题左对齐占满剩余空间（stretch=1），两个 24px 图标按钮靠右。
         # 收起态隐藏标题与分支按钮，只保留新建（46px 窄条容不下两个按钮）。
         self._top_bar = QWidget(self)
         top_layout = QHBoxLayout(self._top_bar)
-        top_layout.setContentsMargins(8, 6, 6, 4)
-        top_layout.setSpacing(2)
+        top_layout.setContentsMargins(8, 4, 4, 2)
+        top_layout.setSpacing(0)
 
         self._sessions_label = QLabel("对话页", self._top_bar)
         self._sessions_label.setObjectName("sessionsLabel")
@@ -1113,8 +1113,8 @@ class TabPanel(QWidget):
 
         self._branch_btn = TransparentToolButton(self._top_bar)
         self._branch_btn.setIcon(get_icon("分支"))
-        self._branch_btn.setIconSize(QSize(scale_icon_size(16), scale_icon_size(16)))
-        self._branch_btn.setFixedSize(28, 28)
+        self._branch_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
+        self._branch_btn.setFixedSize(24, 24)
         self._branch_btn.setCursor(Qt.PointingHandCursor)
         self._branch_btn.setToolTip("从当前标签页分支")
         self._branch_btn.clicked.connect(self._on_branch_clicked)
@@ -1122,8 +1122,8 @@ class TabPanel(QWidget):
 
         self._new_btn = TransparentToolButton(self._top_bar)
         self._new_btn.setIcon(FIF.ADD)
-        self._new_btn.setIconSize(QSize(scale_icon_size(16), scale_icon_size(16)))
-        self._new_btn.setFixedSize(28, 28)
+        self._new_btn.setIconSize(QSize(scale_icon_size(14), scale_icon_size(14)))
+        self._new_btn.setFixedSize(24, 24)
         self._new_btn.setCursor(Qt.PointingHandCursor)
         self._new_btn.setToolTip("新建空白标签页")
         self._new_btn.clicked.connect(self.newTabRequested.emit)
@@ -1627,11 +1627,11 @@ class TabPanel(QWidget):
         if hasattr(self, "_sessions_label") and self._sessions_label is not None:
             self._sessions_label.setFont(get_unified_font(12))
             self._sessions_label.setStyleSheet(
-                f"color: {Colors.TEXT_SECONDARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}"
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent; {get_font_family_css()} {font_size_css(12)}; font-weight: bold;"
             )
         if hasattr(self, "_branch_btn") and self._branch_btn is not None:
             self._branch_btn.setIcon(get_icon("分支"))
-        _icon_px = scale_icon_size(16)
+        _icon_px = scale_icon_size(14)
         for _btn in (getattr(self, "_branch_btn", None), getattr(self, "_new_btn", None)):
             if _btn is not None:
                 _btn.setIconSize(QSize(_icon_px, _icon_px))

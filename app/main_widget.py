@@ -15546,11 +15546,15 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         self._attachments.remove(path)
         self._rebuild_attachment_chips()
-        # 同步清理正文中对应的 [[basename]] 引用（遗留文本 / 手动键入的引用）
-        self.input_area.remove_placeholder(os.path.basename(path))
+        # 同步清理正文里的引用：inline 胶囊优先，兼容遗留的 [[basename]] 字面文本
+        if not self.input_area.remove_mention_objects(path):
+            self.input_area.remove_placeholder(os.path.basename(path))
 
     def _on_attachments_removed_from_text(self, names: list):
         """正文里的 [[basename]] 被删除 → 同步移除附件栏对应的 chip
+
+        胶囊被删除同样走到这里：toPlainText() 把胶囊展开成 [[basename]]，
+        胶囊没了，展开结果里对应的占位符也就消失了。
 
         与 :meth:`_remove_attachment` 互为反向，共同构成双向同步：
         删附件 → 删正文引用；删正文引用 → 删附件。
