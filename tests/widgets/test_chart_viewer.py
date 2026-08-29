@@ -107,8 +107,8 @@ class TestSavePngFromB64:
 
 class TestRegistry:
     def test_replace_tab_bar_whitelist(self):
-        """chart_viewer 进白名单 + 中文标题（tab 栏出现可关闭「图表查看」）"""
-        from app.widgets.replace_tab_bar import GLOBAL_REPLACE_TITLES, KNOWN_GLOBAL_REPLACE_CARDS
+        """chart_viewer 进白名单 + 中文标题（标题栏出现可关闭「图表查看」tab）"""
+        from app.widgets.tab_manager_window import GLOBAL_REPLACE_TITLES, KNOWN_GLOBAL_REPLACE_CARDS
 
         assert "chart_viewer" in KNOWN_GLOBAL_REPLACE_CARDS
         assert GLOBAL_REPLACE_TITLES.get("chart_viewer") == "图表查看"

@@ -7,6 +7,9 @@ from PyQt5.QtWidgets import QWidget
 
 from app.widgets.custom_title_bar import CustomTitleBar
 
+# 内置常驻「聊天」tab id（与 tab_manager_window.CHAT_TAB_ID 一致）
+CHAT = "chat"
+
 
 @pytest.fixture
 def container(qtbot):
@@ -52,11 +55,11 @@ def test_add_tab_sets_active_and_emits_signal(qtbot, container):
 
     received = []
     tb.tab_clicked.connect(received.append)
-    tb._tabs["channel"].click()
+    tb._tabs["channel"].clicked.emit("channel")
     assert received == ["channel"]
     assert tb._active_id == "channel"
-    assert tb._tabs["channel"].isChecked() is True
-    assert tb._tabs["chat"].isChecked() is False
+    assert tb._tabs["channel"]._active is True
+    assert tb._tabs["chat"]._active is False
 
 
 def test_add_tab_with_callback(qtbot, container):
@@ -65,7 +68,7 @@ def test_add_tab_with_callback(qtbot, container):
     qtbot.addWidget(tb)
     hits = []
     tb.add_tab("chat", "聊天", on_click=lambda: hits.append(1))
-    tb._tabs["chat"].click()
+    tb._tabs["chat"].clicked.emit("chat")
     assert hits == [1]
 
 
@@ -81,6 +84,29 @@ def test_remove_tab_reactivates_remaining(qtbot, container):
     tb.remove_tab("nonexistent")  # 不抛异常
     tb.remove_tab("b")
     assert tb._active_id is None
+
+
+def test_closable_tab_emits_close_signal(qtbot, container):
+    """closable=True 的 tab 有 × 钮：点击只发 tab_close_clicked，不切换 tab
+
+    full 卡片 tab 为非常驻可关闭形态；常驻 tab（聊天/插件页）无 × 钮。"""
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    tb.add_tab(CHAT, "聊天")
+    tb.add_tab("usage", "用量统计", closable=True)
+
+    # 形态差异：× 钮仅 closable tab 存在
+    assert tb._tabs[CHAT]._close_btn is None
+    assert tb._tabs["usage"]._close_btn is not None
+
+    closes, clicks = [], []
+    tb.tab_close_clicked.connect(closes.append)
+    tb.tab_clicked.connect(clicks.append)
+    tb._tabs["usage"]._close_btn.click()
+    assert closes == ["usage"]
+    # × 点击不触发整卡切换（子按钮事件不传播给父 widget）
+    assert clicks == []
+    assert tb._active_id == CHAT
 
 
 def test_refresh_style_applies_qss(qtbot, container):
