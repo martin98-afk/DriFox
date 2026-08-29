@@ -4881,7 +4881,7 @@ class CodeWebViewer(QWebEngineView):
                     background: {"rgba(255, 255, 255, 0.75)" if _is_light_diff else "rgba(22, 27, 34, 0.6)"};
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
-                /* ===== 图表 hover 浮动工具栏（放大 / 导出）；按钮底色/tooltip 已按主题条件化 ===== */
+                /* ===== 图表 hover 浮动工具栏（放大 / 导出）；按钮底色与 icon 目录由 _CHART_IS_DARK 同源驱动 ===== */
                 .chart-toolbar {{
                     position: absolute;
                     top: 8px;
@@ -6296,6 +6296,8 @@ class CodeWebViewer(QWebEngineView):
                 // ===== 图表工具栏：echarts / mermaid 放大查看 + 3x PNG 导出 =====
                 var _CHART_IS_DARK = {str(not _is_light).lower()};
                 var _CHART_BG = _CHART_IS_DARK ? '#1B1E24' : '#FFFFFF';
+                // icon 目录与按钮底色同源（_CHART_IS_DARK），避免主题切换时 prefix 缓存滞后致白底白 icon
+                var _ICON_BASE = _CHART_IS_DARK ? 'qrc:/icons' : 'qrc:/icons_light';
                 function _b64EncodeUtf8(str) {{
                     return btoa(unescape(encodeURIComponent(str)));
                 }}
@@ -6339,10 +6341,10 @@ class CodeWebViewer(QWebEngineView):
                     bar.className = 'chart-toolbar';
                     var btnExpand = document.createElement('button');
                     btnExpand.setAttribute('data-tooltip', '放大查看');
-                    btnExpand.innerHTML = '<img src="{_icon_prefix}/最大化.svg" />';
+                    btnExpand.innerHTML = '<img src="' + _ICON_BASE + '/最大化.svg" />';
                     var btnExport = document.createElement('button');
                     btnExport.setAttribute('data-tooltip', '导出 PNG（3x）');
-                    btnExport.innerHTML = '<img src="{_icon_prefix}/导入.svg" />';
+                    btnExport.innerHTML = '<img src="' + _ICON_BASE + '/导入.svg" />';
                     bar.appendChild(btnExpand);
                     bar.appendChild(btnExport);
                     el.appendChild(bar);
