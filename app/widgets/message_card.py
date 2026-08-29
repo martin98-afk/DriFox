@@ -2145,7 +2145,13 @@ _SKELETON_CACHE_MAX = 48
 # v17（2026-08-29）：新增 Mermaid 渲染链路（_mmdEnsure / renderMermaidBlocks
 # 与 .mermaid-block 样式）。旧骨架无 renderMermaidBlocks，调用点已用
 # typeof 守卫，不会报错，但会静默不渲染——必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 17
+# v18（2026-08-30）：修复流式正文"碎片化"——_append_text_incremental 对
+# data-rendered 尾部节点改为**就地追加文本节点**（原为每 chunk 新建 <p>，
+# 流式期间正文被切成一堆带段落间距的碎片行，随后又被 updateTailHtml 合并回
+# 正文，观感是"文字先在最后几行冒出来再跳回正文"）；新增 data-pending-break
+# 挂起分段标记（纯 \\n\\n chunk 不再堆空段落），旧骨架无 removeAttribute 清理
+# 逻辑会导致标记残留 → 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 18
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -5818,6 +5824,8 @@ class CodeWebViewer(QWebEngineView):
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
                         el.remove();
                     }});
+                    // 段落分隔已由本次渲染的 HTML 表达，清掉挂起分段标记
+                    container.removeAttribute('data-pending-break');
                     // 追加格式化 HTML（含 table 包裹等后续处理）
                     container.insertAdjacentHTML('beforeend', newHtml);
                     // 🐛 修复（正文尾部丢失）：未闭合尾部重建为增量渲染节点。
@@ -5899,6 +5907,8 @@ class CodeWebViewer(QWebEngineView):
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
                         el.remove();
                     }});
+                    // 段落分隔已由本次尾部 HTML 表达，清掉挂起分段标记
+                    container.removeAttribute('data-pending-break');
                     // ⚠️ 用 <div> 而非 <p> 包裹：html 是 md.convert 产物（块级元素），
                     // <p> 内嵌块级会触发解析器自动闭合，结构错乱。
                     var tailDiv = document.createElement('div');
@@ -6865,14 +6875,20 @@ class CodeWebViewer(QWebEngineView):
                 if (newlines >= 2) {{
                     // 段落分隔：去掉前导换行，创建独立 <p>
                     var clean = text.replace(/^[\\n\\r]+/, '');
-                    // 末尾已有"空的增量段落"→ 复用，避免纯换行 chunk 堆出空段落造成高度抖动
-                    if (last && last.tagName === 'P' && last.getAttribute('data-incremental') === 'true'
-                        && !last.textContent) {{
-                        last.textContent = clean;
-                    }} else if (clean) {{
+                    if (clean) {{
                         _newIncrementalP(clean);
+                    }} else {{
+                        // 纯分隔换行（chunk 里只有 \\n\\n）：**不建空节点** ——
+                        // 空 <p> 的上下 margin 会凭空撑高一行，150~500ms 后又被
+                        // tail 渲染移除，表现为"正文下方闪一段空白"。改为打挂起标记，
+                        // 由下一个文字 chunk 建新段落（无空行抖动 + 段落立即正确）。
+                        c.setAttribute('data-pending-break', '1');
                     }}
-                    // clean 为空（纯分隔换行）：不建空节点，下次 tail 渲染自然带出段落结构
+                }} else if (c.getAttribute('data-pending-break') === '1') {{
+                    // 上一段以纯分隔换行收尾：新文字必须另起一段。
+                    // 否则会短暂粘在上一段末尾，等下次 tail 渲染才分开 → 又是一次跳位。
+                    c.removeAttribute('data-pending-break');
+                    _newIncrementalP(text);
                 }} else if (last && last.getAttribute('data-incremental') === 'true') {{
                     // 🐛 修复（流式文字碎片化）：增量节点（含 data-rendered 的尾部渲染节点）
                     // **就地追加文本节点**承接新文字，保持与已有内容连续。
