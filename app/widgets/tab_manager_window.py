@@ -104,14 +104,9 @@ _IS_MAC = platform.system() == "Darwin"
 # _user32 is not None` 守卫，避免 NameError 打断窗口构造。
 _MSG_CAST = None
 _user32 = None
-_dwmapi = None
 _GWL_STYLE = -16
-_GCL_STYLE = -26
 _SNAP_STYLES = 0
 _SWP_FRAMECHANGED = 0
-_CS_DROPSHADOW = 0
-_DWMWA_NCRENDERING_POLICY = 2
-_DWMNCRP_DISABLED = 1
 _HTCLIENT = 1
 _HTLEFT = _HTRIGHT = _HTTOP = 0
 _HTTOPLEFT = _HTTOPRIGHT = 0
@@ -149,17 +144,11 @@ if _IS_WINDOWS:
         _user32.IsZoomed.argtypes = [_wintypes.HWND]
         _user32.IsZoomed.restype = _ctypes.c_bool
 
-        # 补回窗口样式位后需关闭 DWM 非客户区渲染（去白边），此时
-        # DwmExtendFrameIntoClientArea（qframelesswindow 的 addShadowEffect）
-        # 不再产生阴影，改用窗口类样式 CS_DROPSHADOW 补回。
+        # 补回窗口样式位需要 GWL_STYLE / SetWindowPos
         _user32.GetWindowLongPtrW.argtypes = [_wintypes.HWND, _ctypes.c_int]
         _user32.GetWindowLongPtrW.restype = _ctypes.c_ssize_t
         _user32.SetWindowLongPtrW.argtypes = [_wintypes.HWND, _ctypes.c_int, _ctypes.c_ssize_t]
         _user32.SetWindowLongPtrW.restype = _ctypes.c_ssize_t
-        _user32.GetClassLongPtrW.argtypes = [_wintypes.HWND, _ctypes.c_int]
-        _user32.GetClassLongPtrW.restype = _ctypes.c_ssize_t
-        _user32.SetClassLongPtrW.argtypes = [_wintypes.HWND, _ctypes.c_int, _ctypes.c_ssize_t]
-        _user32.SetClassLongPtrW.restype = _ctypes.c_ssize_t
         _user32.SetWindowPos.argtypes = [
             _wintypes.HWND,
             _wintypes.HWND,
@@ -171,9 +160,8 @@ if _IS_WINDOWS:
         ]
         _user32.SetWindowPos.restype = _ctypes.c_bool
 
-        # GetWindowLongPtr / GetClassLongPtr 索引
+        # GetWindowLongPtr 索引
         _GWL_STYLE = -16
-        _GCL_STYLE = -26
 
         # 补回的窗口样式位（Qt 的 FramelessWindowHint 会连带清掉这些，
         # 详见 TabManagerWindow._ensure_native_window_styles 的说明）
@@ -183,23 +171,8 @@ if _IS_WINDOWS:
         _WS_THICKFRAME = 0x00040000
         _SNAP_STYLES = _WS_THICKFRAME | _WS_SYSMENU | _WS_MINIMIZEBOX | _WS_MAXIMIZEBOX
 
-        # 窗口类样式：自绘阴影（NC 渲染关闭后补回）
-        _CS_DROPSHADOW = 0x00020000
-
         # SetWindowPos flags：NOSIZE | NOMOVE | NOZORDER | NOACTIVATE | FRAMECHANGED
         _SWP_FRAMECHANGED = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020
-
-        # DWM：关闭非客户区渲染，消除补回 WS_THICKFRAME 后 DWM 画的 1px 亮边
-        _DWMWA_NCRENDERING_POLICY = 2
-        _DWMNCRP_DISABLED = 1
-        _dwmapi = _ctypes.windll.dwmapi
-        _dwmapi.DwmSetWindowAttribute.argtypes = [
-            _wintypes.HWND,
-            _wintypes.DWORD,
-            _ctypes.c_void_p,
-            _wintypes.DWORD,
-        ]
-        _dwmapi.DwmSetWindowAttribute.restype = _ctypes.c_long  # HRESULT
 
         # WM_NCHITTEST 返回值（边缘/角落 resize）
         _HTCLIENT = 1
@@ -2987,56 +2960,39 @@ class TabManagerWindow(FramelessWindow):
             pass
 
     def _ensure_native_window_styles(self) -> None:
-        """补全无边框窗口丢失的原生能力，并压掉由此产生的 DWM 白边
+        """补全无边框窗口丢失的原生能力（边缘 resize + Aero Snap）
 
         Qt 设置 ``Qt.FramelessWindowHint`` 时，Windows 端会一并清掉
         WS_THICKFRAME / WS_SYSMENU / WS_MINIMIZEBOX / WS_MAXIMIZEBOX。系统据此
         判定窗口"不可调整大小"，于是**边缘与角落的 resize 完全失效**，拖到屏幕
-        边缘也不触发 Aero Snap / Win11 分屏布局。
+        边缘也不触发 Aero Snap / Win11 分屏布局。本方法把这些位补回来。
 
-        补回样式位会带来副作用：DWM 为"可缩放窗口"在窗口四周合成 1px 亮边
-        （最大化/全屏时同样出现）。因此紧接着关闭 DWM 的非客户区渲染
-        （``DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED``），白边随之消失；
-        代价是 DWM 阴影也一并消失，改用窗口类样式 ``CS_DROPSHADOW`` 补回
-        （``DwmExtendFrameIntoClientArea`` 在 NC 渲染关闭后不再产生阴影）。
+        ★ 不要再用 ``DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED`` 去压边框。
+        关闭 DWM 的非客户区渲染后，系统会退回**传统 GDI 路径**绘制非客户区，
+        表现为 resize 时隐约闪出原生窗口边框（比不关时更明显）。正确做法是保留
+        DWM 渲染，靠 ``DwmExtendFrameIntoClientArea(-1)``（qframelesswindow 的
+        ``addShadowEffect``）把窗口框架吃进客户区——框架落在客户区里，DWM 就没有
+        独立的位置可以画边框，阴影也还在。
 
-        幂等：样式位与 DWM 属性都先读后写，已生效时直接返回，可安全地在每次
-        showEvent 调用。
+        所以这里只做两件事：补样式位 + 确保框架扩展已生效。幂等。
         """
         if not _IS_WINDOWS or _user32 is None or not _SNAP_STYLES:
             return
         try:
             hwnd = _wintypes.HWND(int(self.winId()))
-            changed = False
 
             style = _user32.GetWindowLongPtrW(hwnd, _GWL_STYLE)
             if style & _SNAP_STYLES != _SNAP_STYLES:
                 _user32.SetWindowLongPtrW(hwnd, _GWL_STYLE, style | _SNAP_STYLES)
-                changed = True
-
-            # 关闭 DWM 非客户区渲染 → 消除补回样式位带来的 1px 亮边
-            if _dwmapi is not None:
-                policy = _ctypes.c_int(_DWMNCRP_DISABLED)
-                _dwmapi.DwmSetWindowAttribute(
-                    hwnd,
-                    _DWMWA_NCRENDERING_POLICY,
-                    _ctypes.byref(policy),
-                    _ctypes.sizeof(policy),
-                )
-
-            # NC 渲染关闭后补回阴影
-            if _CS_DROPSHADOW:
-                class_style = _user32.GetClassLongPtrW(hwnd, _GCL_STYLE)
-                if class_style & _CS_DROPSHADOW != _CS_DROPSHADOW:
-                    _user32.SetClassLongPtrW(hwnd, _GCL_STYLE, class_style | _CS_DROPSHADOW)
-                    changed = True
-
-            # ★ 只在真的改了窗口属性时才 SetWindowPos(FRAMECHANGED)。
-            # 该方法会强制系统重算整个非客户区并重绘窗口，无条件调用（例如每次
-            # showEvent）会让窗口肉眼可见地"闪一下系统边框"，resize 期间尤其明显。
-            if changed:
-                # 不带 ACTIVATE，避免抢焦点引发重入
+                # ★ 只在样式位真的变了才 SetWindowPos(FRAMECHANGED)：该方法会
+                # 强制系统重算整个非客户区并重绘窗口，无条件调用（例如每次
+                # showEvent）会让窗口肉眼可见地"闪一下系统边框"。
+                # 不带 ACTIVATE，避免抢焦点引发重入。
                 _user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, _SWP_FRAMECHANGED)
+
+            # 补回样式位后重新扩展框架（hwnd 重建 / DWM 状态变化都可能让它失效）
+            if self.windowEffect is not None:
+                self.windowEffect.addShadowEffect(self.winId())
         except Exception:
             pass
 
