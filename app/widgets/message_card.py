@@ -6825,66 +6825,74 @@ class CodeWebViewer(QWebEngineView):
                 var text = {json.dumps(text_clean).decode("utf-8")};
                 var c = document.getElementById('content-placeholder');
                 if (!c || !text) return;
-                // ── 智能段落处理 ──
-                // 检测 chunk 是否以换行开头（对应 Markdown 段落分隔），
-                // 让增量文本的段落结构与最终 Markdown 渲染对齐，
-                // 减少全量渲染时因段落重组引起的视觉跳跃。
-                var startsWithNewline = text.length > 0 && (text[0] === '\\n' || text[0] === '\\r');
-                if (startsWithNewline) {{
-                    // 新段落：去掉前导换行，创建独立 <p>（即使内容为空也创建空段落，
-                    // 保持与全量 Markdown 渲染的段落结构一致，避免段落计数偏移）
-                    var clean = text.replace(/^[\\n\\r]+/, '');
-                    var p = document.createElement('p');
-                    // [B1] 标记为增量纯文本节点：差量渲染追加格式化 HTML 时会先移除
-                    p.setAttribute('data-incremental', 'true');
-                    p.textContent = clean;
-                    c.appendChild(p);
-                }} else {{
-                    var last = c.lastElementChild;
-                    if (last && last.hasAttribute('data-incremental')) {{
-                        if (last.hasAttribute('data-rendered')) {{
-                            // [B1] 🐛 修复：last 是"行内渲染的尾部节点"（updateTailHtml /
-                            // updateContentAppend 重建，含 <strong> 等子元素 HTML）。
-                            // textContent += 会把 innerHTML 整体覆盖为纯文本（已渲染的
-                            // 加粗/行内代码/链接瞬间丢失回 markdown 源码形态）。
-                            // 新建独立纯文本增量节点承载后续文本。
-                            var p = document.createElement('p');
-                            p.setAttribute('data-incremental', 'true');
-                            p.textContent = text;
-                            c.appendChild(p);
-                        }} else if (last.tagName === 'P') {{
-                            // [B1] 增量纯文本节点：同一未闭合段落内直接追加累积
-                            last.textContent += text;
-                        }} else {{
-                            // 其他增量节点（理论不出现）：独立新节点承载
-                            var p = document.createElement('p');
-                            p.setAttribute('data-incremental', 'true');
-                            p.textContent = text;
-                            c.appendChild(p);
+                // ── 尾部文本宿主定位 ──
+                // rendered 尾部节点的 innerHTML 是 md.convert 产物（<p>/<ul>/<li>/<pre>…），
+                // 直接把文本追加到节点本身会落在最后一个块级元素**之后**（另起一段）。
+                // 下潜到最后一块级元素内，让文字接在已有文字后面**连续增长**。
+                var _BLOCK_TAGS = {{P:1, UL:1, OL:1, LI:1, BLOCKQUOTE:1, PRE:1, H1:1, H2:1, H3:1, H4:1, H5:1, H6:1}};
+                function _tailTextHost(node) {{
+                    var host = node;
+                    for (var _g = 0; _g < 6; _g++) {{
+                        var lc = host.lastElementChild;
+                        if (!lc) break;
+                        if (lc.tagName === 'PRE') {{
+                            // 代码块：文本承载在 <code> 内（行内 <code> 不下潜，
+                            // 避免后续正文钻进行内代码）
+                            host = (lc.lastElementChild && lc.lastElementChild.tagName === 'CODE')
+                                ? lc.lastElementChild : lc;
+                            break;
                         }}
-                    }} else if (last && last.tagName === 'P') {{
-                        // 🐛 修复（正文段落丢失）：最后是已格式化渲染的稳定段落（非增量节点）。
-                        // 不能打 data-incremental 标记/原地追加——否则下次差量渲染
-                        // updateContentAppend 移除全部 data-incremental 节点时会连带
-                        // 删除该稳定段落（已渲染正文永久丢失，"内容显示不全"）。
-                        // 新建增量节点承载：格式化段落必为已闭合段（\\n\\n 结尾），
-                        // 后续文本属新段落，独立 <p> 结构正确。
-                        var p = document.createElement('p');
-                        p.setAttribute('data-incremental', 'true');
-                        p.textContent = text;
-                        c.appendChild(p);
-                    }} else if (last && last.classList.contains('think-block')) {{
-                        // 最后是思考块：追加到思考块之后的新段落
-                        var p = document.createElement('p');
-                        p.setAttribute('data-incremental', 'true');
-                        p.textContent = text;
-                        c.appendChild(p);
-                    }} else {{
-                        var p = document.createElement('p');
-                        p.setAttribute('data-incremental', 'true');
-                        p.textContent = text;
-                        c.appendChild(p);
+                        if (!_BLOCK_TAGS[lc.tagName]) break;
+                        host = lc;
                     }}
+                    return host;
+                }}
+                function _newIncrementalP(txt) {{
+                    var _p = document.createElement('p');
+                    // [B1] 标记为增量纯文本节点：差量渲染追加格式化 HTML 时会先移除
+                    _p.setAttribute('data-incremental', 'true');
+                    _p.textContent = txt;
+                    c.appendChild(_p);
+                    return _p;
+                }}
+                // ── 智能段落处理 ──
+                // 只有**段落分隔**（>=2 个换行）才新建 <p>；单个换行是 Markdown 软换行
+                // （最终渲染为空格），必须接在当前段内 —— 否则每个 chunk 独占一行，
+                // 流式期间整段正文被切成一堆碎片行。
+                var lead = text.match(/^[\\r\\n]+/);
+                var newlines = lead ? lead[0].replace(/\\r\\n/g, '\\n').length : 0;
+                var last = c.lastElementChild;
+                if (newlines >= 2) {{
+                    // 段落分隔：去掉前导换行，创建独立 <p>
+                    var clean = text.replace(/^[\\n\\r]+/, '');
+                    // 末尾已有"空的增量段落"→ 复用，避免纯换行 chunk 堆出空段落造成高度抖动
+                    if (last && last.tagName === 'P' && last.getAttribute('data-incremental') === 'true'
+                        && !last.textContent) {{
+                        last.textContent = clean;
+                    }} else if (clean) {{
+                        _newIncrementalP(clean);
+                    }}
+                    // clean 为空（纯分隔换行）：不建空节点，下次 tail 渲染自然带出段落结构
+                }} else if (last && last.getAttribute('data-incremental') === 'true') {{
+                    // 🐛 修复（流式文字碎片化）：增量节点（含 data-rendered 的尾部渲染节点）
+                    // **就地追加文本节点**承接新文字，保持与已有内容连续。
+                    // 旧逻辑对 data-rendered 节点新建独立 <p> —— 流式期间每个 chunk 都堆出
+                    // 一个带段落间距的新行，观感就是"文字先在最后几行以片段形式冒出来，
+                    // 随后 updateTailHtml 又把碎片合并回正文"（文字不断跳位重排）。
+                    // appendChild(textNode) 既不覆盖已渲染的行内 HTML（textContent += 会把
+                    // <strong>/<code> 抹回 markdown 源码形态），又让文字连续增长。
+                    _tailTextHost(last).appendChild(document.createTextNode(text));
+                }} else if (last && last.tagName === 'P') {{
+                    // 🐛 修复（正文段落丢失）：最后是已格式化渲染的稳定段落（非增量节点）。
+                    // 不能打 data-incremental 标记/原地追加——否则下次差量渲染
+                    // updateContentAppend 移除全部 data-incremental 节点时会连带
+                    // 删除该稳定段落（已渲染正文永久丢失，"内容显示不全"）。
+                    // 新建增量节点承载：格式化段落必为已闭合段（\\n\\n 结尾），
+                    // 后续文本属新段落，独立 <p> 结构正确。
+                    _newIncrementalP(text);
+                }} else {{
+                    // 思考块 / 工具块 / 空容器等：新段落承载
+                    _newIncrementalP(text);
                 }}
                 // 🐛 修复：同步 auto-scroll（无 setTimeout 渲染间隙），
                 // 避免浏览器在异步间隙中 paint 出滚动位置不一致的画面。
