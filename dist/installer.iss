@@ -30,9 +30,11 @@ AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 ; 产物名由 CI 决定后通过 /DOutputBaseFilename= 传入（见 release.yml build-windows step）
-; 本地测试 fallback：dev 后缀（CI 默认传 -pyside6 / -qt5；本地不带后缀走默认值）
+; 单边后缀：dev (PyQt5) → Drifox-Windows-Setup-{version}.exe（历史文件名，更新器识别）
+;         pyside6      → Drifox-Windows-Setup-{version}-pyside6.exe（区分用）
+; 本地测试 fallback：使用 {version}（不带后缀，符合历史格式）
 #ifndef OutputBaseFilename
-  #define OutputBaseFilename "Drifox-Windows-Setup-{#MyAppVersion}-{#MyAppSuffix}"
+  #define OutputBaseFilename "Drifox-Windows-Setup-{#MyAppVersion}"
 #endif
 OutputBaseFilename={#OutputBaseFilename}
 Compression=lzma2
