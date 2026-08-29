@@ -71,7 +71,20 @@ _AUTO_EXPAND_GROWTH = 200
 # 这里预先缓存平台判定与 ctypes cast 函数，避免 per-message 开销。
 _IS_WINDOWS = platform.system() == "Windows"
 _IS_MAC = platform.system() == "Darwin"
+
+# ── Win32 绑定默认值 ──
+# 非 Windows 平台（或绑定失败）保持占位值，调用方一律用 `_IS_WINDOWS and
+# _user32 is not None` 守卫，避免 NameError 打断窗口构造。
 _MSG_CAST = None
+_user32 = None
+_GWL_STYLE = -16  # GetWindowLongPtr 索引：窗口样式
+_SNAP_STYLES = 0
+_SWP_FRAMECHANGED = 0
+_HTCLIENT = 1
+_HTLEFT = _HTRIGHT = _HTTOP = 0
+_HTTOPLEFT = _HTTOPRIGHT = 0
+_HTBOTTOM = _HTBOTTOMLEFT = _HTBOTTOMRIGHT = 0
+
 if _IS_WINDOWS:
     try:
         import ctypes as _ctypes
@@ -94,8 +107,55 @@ if _IS_WINDOWS:
 
         def _MSG_CAST(addr, _cast=_ctypes.cast, _ptr=_MSG_STRUCT_PTR):  # noqa: E731
             return _cast(addr, _ptr)
+
+        # ── Win32 函数绑定（边缘 resize / Aero Snap 用，进程内绑定一次）──
+        # 注意 64 位下必须走 *PtrW 版本，否则 GWL_STYLE 的高 32 位被截断。
+        _user32 = _ctypes.windll.user32
+        _user32.ScreenToClient.argtypes = [_wintypes.HWND, _ctypes.POINTER(_wintypes.POINT)]
+        _user32.ScreenToClient.restype = _ctypes.c_bool
+        _user32.GetClientRect.argtypes = [_wintypes.HWND, _ctypes.POINTER(_wintypes.RECT)]
+        _user32.GetClientRect.restype = _ctypes.c_bool
+        _user32.IsZoomed.argtypes = [_wintypes.HWND]
+        _user32.IsZoomed.restype = _ctypes.c_bool
+        _user32.GetWindowLongPtrW.argtypes = [_wintypes.HWND, _ctypes.c_int]
+        _user32.GetWindowLongPtrW.restype = _ctypes.c_ssize_t
+        _user32.SetWindowLongPtrW.argtypes = [_wintypes.HWND, _ctypes.c_int, _ctypes.c_ssize_t]
+        _user32.SetWindowLongPtrW.restype = _ctypes.c_ssize_t
+        _user32.SetWindowPos.argtypes = [
+            _wintypes.HWND,
+            _wintypes.HWND,
+            _ctypes.c_int,
+            _ctypes.c_int,
+            _ctypes.c_int,
+            _ctypes.c_int,
+            _wintypes.UINT,
+        ]
+        _user32.SetWindowPos.restype = _ctypes.c_bool
+
+        # 补回的窗口样式位（FramelessWindowHint 会连带清掉这些，
+        # 详见 TabManagerWindow._ensure_native_window_styles 的说明）
+        _WS_MINIMIZEBOX = 0x00020000
+        _WS_MAXIMIZEBOX = 0x00010000
+        _WS_SYSMENU = 0x00080000
+        _WS_THICKFRAME = 0x00040000
+        _SNAP_STYLES = _WS_THICKFRAME | _WS_SYSMENU | _WS_MINIMIZEBOX | _WS_MAXIMIZEBOX
+
+        # SetWindowPos flags：NOSIZE | NOMOVE | NOZORDER | FRAMECHANGED
+        _SWP_FRAMECHANGED = 0x0001 | 0x0002 | 0x0004 | 0x0020
+
+        # WM_NCHITTEST 返回值（边缘/角落 resize）
+        _HTCLIENT = 1
+        _HTLEFT = 10
+        _HTRIGHT = 11
+        _HTTOP = 12
+        _HTTOPLEFT = 13
+        _HTTOPRIGHT = 14
+        _HTBOTTOM = 15
+        _HTBOTTOMLEFT = 16
+        _HTBOTTOMRIGHT = 17
     except Exception:
         _MSG_CAST = None
+        _user32 = None
 
 
 class EmptyStateWidget(QWidget):
@@ -345,6 +405,13 @@ class TabManagerWindow(FramelessWindow):
     _WM_ENTERSIZEMOVE = 0x0231
     _WM_EXITSIZEMOVE = 0x0232
     _WM_MOVING = 0x0216  # 仅"移动"触发；"缩放"发 WM_SIZING，二者互斥，可精确区分
+    _WM_NCHITTEST = 0x0084  # 边缘/角落 resize 热区判定（自建，见 _native_hit_test）
+
+    # resize 热区宽度（逻辑 px，按窗口 DPI 缩放）。系统默认无边框热区为 0，
+    # 基类 qframelesswindow 固定 5px 不随 DPI 变化，高 DPI 下几乎抓不到。
+    _RESIZE_BORDER = 6
+    # 顶边热区高度：只在窗口最上沿开一条窄带，避免吞掉标题栏主体及其按钮
+    _TOP_RESIZE_BAND = 5
 
     tabCountChanged = pyqtSignal(int)
     activeTabChanged = pyqtSignal(int)
@@ -2768,11 +2835,19 @@ class TabManagerWindow(FramelessWindow):
         运行中用户可自由拖动/缩放窗口，不再重置；重启后恢复默认居中。
         """
         super().showEvent(event)
+        # 无边框窗口的原生能力补全：补回 WS_THICKFRAME 等样式位（Aero Snap /
+        # 分屏布局依赖它），hwnd 可能因 setWindowFlags 重建，故每次显示都校验。
+        self._ensure_native_window_styles()
+        # 标题栏宽度必须显式同步：构造期几何恢复走的是 resize 节流路径，
+        # 基类那次 titleBar.resize() 会被跳过（详见 _sync_title_bar_width）。
+        self._sync_title_bar_width()
         if not self._geometry_applied:
             self._geometry_applied = True
             self._restore_geometry()
             # Win11 DWM 圆角（winId 此刻已有效；仅首次）
             self._apply_win11_round_corner()
+        # 几何恢复可能改变窗口宽度，再同步一次标题栏
+        self._sync_title_bar_width()
         # 对话区限宽居中：首次显示同步 wrapper margins（Resize 事件链可能晚到）
         if hasattr(self, "_chat_wrapper"):
             try:
@@ -2804,6 +2879,125 @@ class TabManagerWindow(FramelessWindow):
         # 几何保存防抖（拖拽期间由 _save_geometry 内部守卫跳过）
         self._save_geometry()
 
+    # ── 原生窗口能力：边缘/角落 resize + Aero Snap 分屏 ──
+
+    def _sync_title_bar_width(self) -> None:
+        """把标题栏宽度同步到当前窗口宽度
+
+        ★ 必须显式同步：``WindowsFramelessWindow.resizeEvent`` 负责把标题栏
+        resize 到窗口宽度，而本类的 resize 节流（``_resize_blocking`` 阶段二）
+        会跳过 ``super().resizeEvent()``，标题栏宽度因此停留在进入节流前的旧
+        值 —— 表现为"最小化/最大化/关闭按钮不在最右边、跑到了屏幕中间"，
+        直到下一次非节流路径的 resize（例如最大化）才被纠正。
+        """
+        tb = getattr(self, "titleBar", None)
+        if tb is None:
+            return
+        try:
+            if tb.width() != self.width():
+                tb.resize(self.width(), tb.height())
+        except Exception:
+            pass
+
+    def _ensure_native_window_styles(self) -> None:
+        """补回被 ``Qt.FramelessWindowHint`` 连带清掉的窗口样式位
+
+        Qt 设置无边框标志时，Windows 端会一并清掉 WS_THICKFRAME / WS_SYSMENU /
+        WS_MINIMIZEBOX / WS_MAXIMIZEBOX。Windows 据此判定该窗口"不可调整大小"，
+        于是：
+          - 拖到屏幕左/右/上边缘不触发 Aero Snap 与 Win11 分屏布局浮层；
+          - 任务栏右键菜单缺少"还原 / 最小化 / 最大化"项。
+
+        补回样式位**不会**画出原生边框：WM_NCCALCSIZE 让客户区铺满整个窗口
+        矩形（qframelesswindow 基类已实现，本类 nativeEvent 原样放行），系统
+        没有剩余空间绘制非客户区，视觉上仍是无边框。
+
+        幂等：样式位齐全时直接返回，可安全地在每次 showEvent 调用
+        （``setWindowFlags`` / 跨屏 DPI 变化都会重建 hwnd）。
+        """
+        if not _IS_WINDOWS or _user32 is None or not _SNAP_STYLES:
+            return
+        try:
+            hwnd = _wintypes.HWND(int(self.winId()))
+            style = _user32.GetWindowLongPtrW(hwnd, _GWL_STYLE)
+            if style & _SNAP_STYLES == _SNAP_STYLES:
+                return
+            _user32.SetWindowLongPtrW(hwnd, _GWL_STYLE, style | _SNAP_STYLES)
+            _user32.SetWindowPos(hwnd, None, 0, 0, 0, 0, _SWP_FRAMECHANGED)
+        except Exception:
+            pass
+
+    def _system_buttons_left(self) -> int:
+        """标题栏三个系统按钮的左边界 x（顶边热区需让开这段范围）"""
+        btn = getattr(getattr(self, "titleBar", None), "minBtn", None)
+        if btn is None or btn.isHidden():
+            return self.width()
+        return max(0, btn.x())
+
+    def _native_hit_test(self, hwnd: int, lparam: int):
+        """WM_NCHITTEST 自建判定：四边 + 四角的 resize 热区
+
+        ★ 为何不直接复用基类实现：基类用 ``win32api.GetCursorPos()`` 取坐标，
+        拖到屏幕边缘时游标位置与消息自带的 lParam 不同步；且热区固定 5px 不随
+        DPI 缩放，高 DPI 屏上几乎抓不到。这里改用消息自带的 lParam（光标屏幕
+        坐标）换算，热区按窗口 DPI 放大。
+
+        顶边只在最上沿 ``_TOP_RESIZE_BAND`` px 内生效，并让开标题栏右侧系统
+        按钮的横向范围——否则返回 HTTOP/HTTOPRIGHT 会让按钮收不到点击。
+
+        返回 None 表示"本层不判定"，交由基类与 Qt 继续处理。
+        """
+        if not _IS_WINDOWS or _user32 is None:
+            return None
+        try:
+            if _user32.IsZoomed(_wintypes.HWND(hwnd)):
+                return None  # 最大化 / 全屏态没有可拉伸的边缘
+            pt = _wintypes.POINT(
+                _ctypes.c_int16(lparam & 0xFFFF).value,
+                _ctypes.c_int16((lparam >> 16) & 0xFFFF).value,
+            )
+            _user32.ScreenToClient(_wintypes.HWND(hwnd), _ctypes.byref(pt))
+            rect = _wintypes.RECT()
+            _user32.GetClientRect(_wintypes.HWND(hwnd), _ctypes.byref(rect))
+            w, h = rect.right, rect.bottom
+            if w <= 0 or h <= 0:
+                return None
+
+            scale = max(1.0, self.logicalDpiX() / 96.0)
+            side = max(3, int(round(self._RESIZE_BORDER * scale)))
+            top_band = max(2, int(round(self._TOP_RESIZE_BAND * scale)))
+
+            x, y = pt.x, pt.y
+            # 标题栏系统按钮所在的一小条顶部区域：明确判为客户区，
+            # 既让按钮可点击，也阻止基类按自己的固定 5px 规则再判成边缘。
+            if y < max(side, top_band) and x >= self._system_buttons_left():
+                return _HTCLIENT
+
+            left = x < side
+            right = x >= w - side
+            top = y < top_band
+            bottom = y >= h - side
+
+            if left and top:
+                return _HTTOPLEFT
+            if right and top:
+                return _HTTOPRIGHT
+            if left and bottom:
+                return _HTBOTTOMLEFT
+            if right and bottom:
+                return _HTBOTTOMRIGHT
+            if top:
+                return _HTTOP
+            if bottom:
+                return _HTBOTTOM
+            if left:
+                return _HTLEFT
+            if right:
+                return _HTRIGHT
+        except Exception:
+            return None
+        return None
+
     def nativeEvent(self, eventType, message):
         """Windows 原生消息处理：精确捕获拖拽/缩放模态循环的起止
 
@@ -2817,10 +3011,17 @@ class TabManagerWindow(FramelessWindow):
         # 禁止在此函数内做 import 或 platform.system() 调用。
         if _IS_WINDOWS and _MSG_CAST is not None and eventType == "windows_generic_MSG":
             try:
-                msg_id = _MSG_CAST(int(message))[0].message
+                msg = _MSG_CAST(int(message))[0]
+                msg_id = msg.message
                 if msg_id == self._WM_ENTERSIZEMOVE:
                     self._window_dragging_timer.stop()  # 原生信号权威，停用防抖回退
                     self._on_window_drag_start()
+                elif msg_id == self._WM_NCHITTEST:
+                    # 边缘/角落 resize：先于基类判定（基类热区固定 5px 且不
+                    # 处理标题栏系统按钮让位）。返回 None 时落回 super() 链。
+                    hit = self._native_hit_test(int(msg.hwnd), int(msg.lParam))
+                    if hit is not None:
+                        return True, hit
                 elif msg_id == self._WM_MOVING:
                     # ★ 纯移动：客户区内容不随位置变化，禁用整窗重绘。
                     # DWM 仅平移已有纹理即可，无需 app 重绘；这能消除拖拽时标题栏
@@ -3048,6 +3249,10 @@ class TabManagerWindow(FramelessWindow):
         # 强制 Qt 从顶层布局开始重新计算整棵 widget 树。
         self._force_relayout()
 
+        # 标题栏宽度收拢：节流期间的多次 resize 只保证最后一次与窗口同宽，
+        # 这里再补一次，确保任何退出路径下系统按钮都贴在最右侧。
+        self._sync_title_bar_width()
+
         # 恢复 splitter sizes（阻止 stretch factor 重算覆盖用户拖拽尺寸）
         if saved_splitter_sizes is not None and hasattr(self, "_splitter"):
             try:
@@ -3120,6 +3325,9 @@ class TabManagerWindow(FramelessWindow):
             # ── 阶段二：blocking 活跃，跳过布局传播 ──
             self._resize_timer.start()  # 重置防抖
             self._save_geometry()
+            # 标题栏宽度同步：基类是在 super().resizeEvent() 里做的，
+            # 阶段二跳过了 super，必须手动补，否则系统按钮停在旧位置。
+            self._sync_title_bar_width()
             # 背景图尺寸跟随（轻量操作，不触发布局）
             self._resize_bg_labels()
             return

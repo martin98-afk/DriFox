@@ -1008,47 +1008,10 @@ class TabPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # ── 顶部：品牌区（水平布局：左侧产品标识 + 右侧侧边栏收起/展开按钮）──
-        self._brand_widget = QWidget(self)
-        self._brand_layout = QHBoxLayout(self._brand_widget)
-        self._brand_layout.setContentsMargins(10, 4, 6, 4)
-        self._brand_layout.setSpacing(4)
-
-        # 左侧：产品标识（水平：标题 + 版本号同排，降低整体高度）
-        self._brand_left = QWidget(self._brand_widget)
-        brand_left_layout = QHBoxLayout(self._brand_left)
-        brand_left_layout.setContentsMargins(0, 0, 0, 0)
-        brand_left_layout.setSpacing(4)
-        self._brand_title = QLabel("DriFox", self._brand_left)
-        self._brand_title.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
-        )
-        self._brand_version = QLabel(Settings.current_version, self._brand_left)
-        self._brand_version.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
-        )
-        brand_left_layout.addWidget(self._brand_title)
-        brand_left_layout.addWidget(self._brand_version)
-        # 末尾 stretch 吸收多余空间，保证标题+版本号整体左对齐（QLabel 默认
-        # Preferred 策略会平分多余空间，把版本号挤到中间）
-        brand_left_layout.addStretch(1)
-        self._brand_layout.addWidget(self._brand_left, 1)
-
-        # 右侧：侧边栏收起/展开按钮
-        self._sidebar_toggle_btn = TransparentToolButton(self._brand_widget)
-        self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
-        self._sidebar_toggle_btn.setFixedSize(28, 28)
-        self._sidebar_toggle_btn.setToolTip("收起/展开侧边栏")
-        self._sidebar_toggle_btn.clicked.connect(self._toggle_sidebar)
-        self._brand_layout.addWidget(self._sidebar_toggle_btn)
-
-        layout.addWidget(self._brand_widget)
-
-        # ── 品牌区下分隔线 ──
-        self._brand_separator = QFrame(self)
-        self._brand_separator.setFrameShape(QFrame.HLine)
-        self._brand_separator.setStyleSheet(self._SEPARATOR_STYLE)
-        layout.addWidget(self._brand_separator)
+        # ── 顶部品牌区已移除 ──
+        # 原「DriFox + 版本号 + 侧栏折叠按钮 + 分隔线」整块上移到窗口标题栏
+        # （CustomTitleBar 左区）。TabPanel 首行直接是系统 UI 插件区，
+        # 侧栏折叠改由标题栏按钮驱动（sidebar_toggle_requested → _toggle_sidebar）。
 
         # ── 系统 UI 插件（常驻显示，无滚动） ──
         self._system_plugin_section = QWidget(self)
@@ -1465,6 +1428,22 @@ class TabPanel(QWidget):
         self._collapsed = collapsed
         self._update_toggle_button()
 
+    def _title_bar_toggle_btn(self):
+        """窗口标题栏上的侧栏折叠按钮（品牌区上移后 TabPanel 不再自持）
+
+        返回 None 表示无窗口宿主（单测 / TabPanel 独立构造）或标题栏尚未
+        创建，调用方静默跳过即可。
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is None:
+                return None
+            return getattr(getattr(tm, "titleBar", None), "_sidebar_btn", None)
+        except Exception:
+            return None
+
     def _update_toggle_button(self, switch_ui: bool = True):
         """更新收起/展开按钮的图标和提示，以及收起态下的可见元素
 
@@ -1473,12 +1452,13 @@ class TabPanel(QWidget):
                 所有路径）；False 时仅更新按钮图标与 tooltip（按钮点击
                 走宽度动画，UI 切换由动画跨阈值时驱动）。
         """
-        if self._collapsed:
-            self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
-            self._sidebar_toggle_btn.setToolTip("展开侧边栏")
-        else:
-            self._sidebar_toggle_btn.setIcon(get_icon("侧边栏"))
-            self._sidebar_toggle_btn.setToolTip("收起侧边栏")
+        # 侧栏折叠按钮已上移到窗口标题栏（CustomTitleBar 左区），此处仅同步其
+        # tooltip 文案（图标由标题栏自身维护）；标题栏按钮缺失时静默跳过，
+        # 保证 TabPanel 在独立测试/无窗口宿主场景下不报错。
+        button = self._title_bar_toggle_btn()
+        if button is not None:
+            button.setIcon(get_icon("侧边栏"))
+            button.setToolTip("展开侧边栏" if self._collapsed else "收起侧边栏")
 
         # switch_ui=False（按钮点击走宽度动画）时只更新按钮图标/tooltip，
         # 紧凑/展开 UI 由动画跨阈值时驱动，避免文字在窄条里被挤压。
@@ -1486,29 +1466,13 @@ class TabPanel(QWidget):
             return
 
         if self._collapsed:
-            # 收起时隐藏产品标识
-            self._brand_left.setVisible(False)
             # 收起时仅保留新建图标按钮，隐藏分支和文字新建按钮
             self._branch_btn.setVisible(False)
             self._new_btn.setVisible(False)
             self._new_icon_btn.setVisible(True)
             # 收起时 Gitee 仅显示头像
             self._gitee_account_row.set_show_only_avatar(True)
-            # 折叠态：品牌区只剩收起/展开按钮，让其在窄条内水平居中
-            # （_brand_left 隐藏后无 stretch 会把按钮顶到左对齐，故显式居中）。
-            # 左右 margin 对称 + 按钮 cell 拉伸 + 居中对齐，保证 46px 窄条内居中。
-            self._brand_layout.setContentsMargins(8, 4, 8, 4)
-            self._brand_layout.setStretch(0, 0)
-            self._brand_layout.setStretch(1, 1)
-            self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.AlignHCenter)
         else:
-            # 展开态不再显示品牌（DriFox+版本已移至窗口标题栏 CustomTitleBar）
-            self._brand_left.setVisible(False)
-            # 展开态：品牌区只剩侧栏按钮，保持右上角位置
-            self._brand_layout.setContentsMargins(10, 4, 6, 4)
-            self._brand_layout.setStretch(0, 0)
-            self._brand_layout.setStretch(1, 1)
-            self._brand_layout.setAlignment(self._sidebar_toggle_btn, Qt.Alignment())
             # 展开时恢复文字新建按钮，隐藏图标按钮
             self._branch_btn.setVisible(True)
             self._branch_btn.setText("分支")
@@ -1639,18 +1603,8 @@ class TabPanel(QWidget):
 
     def _refresh_plugin_style(self):
         """刷新插件区域的主题和字号样式"""
-        # 品牌区
-        if hasattr(self, "_brand_title"):
-            self._brand_title.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; {font_size_css(15)}; font-weight: bold; background: transparent;"
-            )
-        if hasattr(self, "_brand_version"):
-            self._brand_version.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
-            )
-        if hasattr(self, "_sidebar_toggle_btn"):
-            # 按钮样式由 TransparentToolButton 处理，无需额外样式
-            pass
+        # 品牌区（DriFox + 版本号 + 折叠按钮）已上移到窗口标题栏 CustomTitleBar，
+        # 其样式由标题栏 refresh_style() 负责；此处不再处理。
         # 系统插件
         for row in self._system_plugin_buttons:
             row.refresh_style()
