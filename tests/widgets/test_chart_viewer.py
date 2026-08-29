@@ -143,3 +143,59 @@ class TestCardSkeletonHooks:
         src = inspect.getsource(message_card)
         assert ".chart-toolbar" in src
         assert "position: relative" in src
+
+
+class TestSignalChain:
+    def test_console_message_emits_chart_expand(self, qapp):
+        """console 消息 chart_expand → ConsoleMonitorPage 信号 (type, payload)"""
+        from PySide6.QtWebEngineCore import QWebEngineProfile
+
+        from app.widgets.message_card import ConsoleMonitorPage
+
+        profile = QWebEngineProfile("test-chart", None)
+        page = ConsoleMonitorPage(profile, None)
+        got = []
+        page.chartExpandRequested.connect(lambda t, p: got.append((t, p)))
+        page.javaScriptConsoleMessage(0, "pywebview_action:chart_expand:echarts:eyJhIjoxfQ==", 0, "")
+        assert got == [("echarts", "eyJhIjoxfQ==")]
+
+    def test_console_message_emits_save_png(self, qapp):
+        """console 消息 save_chart_png → (name, png_b64) 信号"""
+        from PySide6.QtWebEngineCore import QWebEngineProfile
+
+        from app.widgets.message_card import ConsoleMonitorPage
+
+        profile = QWebEngineProfile("test-chart2", None)
+        page = ConsoleMonitorPage(profile, None)
+        got = []
+        page.saveChartPngRequested.connect(lambda n, p: got.append((n, p)))
+        page.javaScriptConsoleMessage(0, "pywebview_action:save_chart_png:aGVsbG8=:UENHXg==", 0, "")
+        assert got == [("aGVsbG8=", "UENHXg==")]  # page 层透传原始 b64，name 解码在 MessageCard 槽
+
+    def test_oversize_payload_rejected(self, qapp):
+        """超 8MB payload 拒绝发射"""
+        from PySide6.QtWebEngineCore import QWebEngineProfile
+
+        from app.widgets.message_card import _MAX_CHART_PAYLOAD_B64, ConsoleMonitorPage
+
+        profile = QWebEngineProfile("test-chart3", None)
+        page = ConsoleMonitorPage(profile, None)
+        got = []
+        page.chartExpandRequested.connect(lambda t, p: got.append(p))
+        page.javaScriptConsoleMessage(
+            0, "pywebview_action:chart_expand:echarts:" + "A" * (_MAX_CHART_PAYLOAD_B64 + 1), 0, ""
+        )
+        assert got == []
+
+    def test_unknown_chart_type_rejected(self, qapp):
+        """非 echarts/mermaid 类型拒绝发射"""
+        from PySide6.QtWebEngineCore import QWebEngineProfile
+
+        from app.widgets.message_card import ConsoleMonitorPage
+
+        profile = QWebEngineProfile("test-chart4", None)
+        page = ConsoleMonitorPage(profile, None)
+        got = []
+        page.chartExpandRequested.connect(lambda t, p: got.append(p))
+        page.javaScriptConsoleMessage(0, "pywebview_action:chart_expand:evil:AAAA", 0, "")
+        assert got == []

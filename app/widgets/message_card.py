@@ -2649,6 +2649,9 @@ def _accent_rgba(accent: str, alpha: float) -> str:
 
 
 # ======== 本地 Vendor JS 脚本（离线优先，CDN 降级） ========
+# 图表放大/导出通道 payload b64 上限（与 chart_viewer_card._MAX_PAYLOAD_B64 一致）
+_MAX_CHART_PAYLOAD_B64 = 8 * 1024 * 1024
+
 _vendor_script_tags_cache: Optional[str] = None
 
 
@@ -2748,6 +2751,8 @@ class ConsoleMonitorPage(QWebEnginePage):
     toolDiffRequested = Signal(str)  # tool_call_id
     subAgentLogRequested = Signal(str)  # task_ids (comma-separated)
     saveFileRequested = Signal(str, str)  # code, lang
+    chartExpandRequested = Signal(str, str)  # (chart_type, payload_b64) — echarts/mermaid 放大查看
+    saveChartPngRequested = Signal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
 
     def __init__(self, profile=None, parent=None):
         """创建一个 ConsoleMonitorPage。
@@ -2847,6 +2852,24 @@ class ConsoleMonitorPage(QWebEnginePage):
                         b64_code, lang = sub_parts
                         code = base64.b64decode(b64_code).decode("utf-8")
                         self.saveFileRequested.emit(code, lang)
+                except Exception:
+                    pass
+            elif msg.startswith("pywebview_action:chart_expand:"):
+                # 图表放大查看请求：console.log('pywebview_action:chart_expand:<type>:<b64>')
+                try:
+                    rest = msg.split("pywebview_action:chart_expand:", 1)[1]
+                    chart_type, payload = rest.split(":", 1)
+                    if chart_type in ("echarts", "mermaid") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
+                        self.chartExpandRequested.emit(chart_type, payload)
+                except Exception:
+                    pass
+            elif msg.startswith("pywebview_action:save_chart_png:"):
+                # 图表 PNG 导出回传：console.log('pywebview_action:save_chart_png:<name_b64>:<png_b64>')
+                try:
+                    rest = msg.split("pywebview_action:save_chart_png:", 1)[1]
+                    name_b64, png_b64 = rest.split(":", 1)
+                    if len(png_b64) <= _MAX_CHART_PAYLOAD_B64:
+                        self.saveChartPngRequested.emit(name_b64, png_b64)
                 except Exception:
                     pass
             else:
@@ -3032,6 +3055,8 @@ class CodeWebViewer(QWebEngineView):
     toolDiffRequested = Signal(str)  # tool_call_id
     subAgentLogRequested = Signal(str)  # task_ids (comma-separated)
     saveFileRequested = Signal(str, str)  # code, lang
+    chartExpandRequested = Signal(str, str)  # (chart_type, payload_b64) — 图表放大查看
+    saveChartPngRequested = Signal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
     # WebEngine 上下文丢失信号
     contextLost = Signal()
     contextRestored = Signal()
@@ -3183,6 +3208,8 @@ class CodeWebViewer(QWebEngineView):
         self._page.toolDiffRequested.connect(self.toolDiffRequested.emit)
         self._page.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
         self._page.saveFileRequested.connect(self.saveFileRequested.emit)
+        self._page.chartExpandRequested.connect(self.chartExpandRequested.emit)
+        self._page.saveChartPngRequested.connect(self.saveChartPngRequested.emit)
 
         self._load_skeleton()
 
@@ -7876,6 +7903,31 @@ class CodeWebViewer(QWebEngineView):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"{session_name}_{ts}"
 
+    def _on_chart_expand(self, chart_type: str, payload_b64: str):
+        """图表放大查看 → 打开覆盖右侧对话区域的 chart_viewer 全局卡
+
+        内部直接处理（不走 main_widget 回调），assistant/welcome/历史卡统一生效；
+        ui_helpers 顶部反向 import MessageCard，必须延迟导入避免循环依赖。
+        """
+        try:
+            from app.widgets.ui_helpers import show_chart_viewer
+
+            show_chart_viewer(self, chart_type, payload_b64)
+        except Exception as e:
+            logger.error(f"[MessageCard] 图表放大失败: {e}")
+
+    def _on_save_chart_png(self, name_b64: str, png_b64: str):
+        """图表 PNG 导出保存（消息卡小图导出与放大视图共用通道）"""
+        try:
+            name = base64.b64decode(name_b64).decode("utf-8") if name_b64 else "图表"
+        except Exception:
+            name = "图表"
+        from app.widgets.ui_helpers import save_png_from_b64
+
+        path = save_png_from_b64(self, png_b64, name or "图表")
+        if path:
+            logger.info(f"[MessageCard] 图表 PNG 已导出: {path}")
+
     def _export_message(self):
         """导出消息为 Markdown、HTML 或 PNG 图片文件
 
@@ -8804,6 +8856,7 @@ class MessageCard(SimpleCardWidget):
     lazyRenderCompleted = Signal()  # 懒渲染完成信号，用于通知滚动保持
     modelLabelClicked = Signal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
     welcomeModeChanged = Signal(str)  # 欢迎卡片模式切换（sessions / projects / changelog）
+    saveChartPngRequested = Signal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出（内部处理保存，不透传）
 
     def __init__(
         self,
@@ -10229,6 +10282,8 @@ class MessageCard(SimpleCardWidget):
         self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
         self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
         self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+        self.viewer.chartExpandRequested.connect(self._on_chart_expand)
+        self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
         self.viewer.contextLost.connect(self._on_webengine_context_lost)
         self.viewer.contextRestored.connect(self._on_webengine_context_restored)
         self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
@@ -10940,6 +10995,8 @@ class MessageCard(SimpleCardWidget):
             self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
             self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
             self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
+            self.viewer.chartExpandRequested.connect(self._on_chart_expand)
+            self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
             # WebEngine 上下文丢失处理
             self.viewer.contextLost.connect(self._on_webengine_context_lost)
             self.viewer.contextRestored.connect(self._on_webengine_context_restored)
@@ -12345,6 +12402,7 @@ class MessageCard(SimpleCardWidget):
             self.saveFileRequested,
             self.lazyRenderCompleted,
             self.modelLabelClicked,
+            self.saveChartPngRequested,
         ]
         for sig in signals:
             try:
