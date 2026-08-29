@@ -71,14 +71,23 @@ jobs:
       - name: Sync dependencies
         run: uv sync --all-groups
 
-      # ── 解析版本号 ──
-      - name: Resolve version
+      # ── 解析版本号 + 分支后缀 ──
+      # suffix 用法：dev 分支发布 → -qt5（PyQt5 版）；pyside6 分支发布 → -pyside6
+      # 用 scripts/sync_tag.sh 同时在两分支打同一 tag，产物名靠 suffix 区分
+      - name: Resolve version & suffix
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          echo "💡 Version: $v"
+          branch="${{ github.ref_name }}"
+          case "$branch" in
+            dev)              suffix="qt5"     ;;
+            pyside6)          suffix="pyside6" ;;
+            *)                suffix="dev"     ;;  # 兜底：未识别分支用 dev
+          esac
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+          echo "💡 Version: $v | Branch: $branch | Suffix: -$suffix"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -101,8 +110,9 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          Write-Host "💡 编译安装包，版本号: $tag"
-          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" dist\installer.iss /DMyAppVersion=$tag
+          $suffix = "${{ steps.version.outputs.suffix }}"
+          Write-Host "💡 编译安装包，版本号: $tag-$suffix"
+          & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" dist\installer.iss /DMyAppVersion=$tag /DMyAppSuffix=$suffix
           if ($LASTEXITCODE -ne 0) {
             Write-Error "❌ Inno Setup 编译失败 (exit code: $LASTEXITCODE)"
             exit 1
@@ -112,7 +122,8 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $installer = "dist/output/Drifox-Windows-Setup-$tag.exe"
+          $suffix = "${{ steps.version.outputs.suffix }}"
+          $installer = "dist/output/Drifox-Windows-Setup-$tag-$suffix.exe"
           if (-not (Test-Path $installer)) {
             Write-Error "❌ 安装包未生成: $installer"
             exit 1
@@ -124,15 +135,16 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $installer = "dist/output/Drifox-Windows-Setup-$tag.exe"
+          $suffix = "${{ steps.version.outputs.suffix }}"
+          $installer = "dist/output/Drifox-Windows-Setup-$tag-$suffix.exe"
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  Drifox-Windows-Setup-$tag.exe"
+          Set-Content -Path "dist/output/SHA256SUMS" -Value "$hash  Drifox-Windows-Setup-$tag-$suffix.exe"
           Write-Host "✅ SHA256: $hash"
 
       - name: Upload artifact (Windows)
         uses: actions/upload-artifact@v4
         with:
-          name: Drifox-Windows-${{ steps.version.outputs.tag }}
+          name: Drifox-Windows-${{ steps.version.outputs.tag }}-${{ steps.version.outputs.suffix }}
           path: |
             dist/output/*
           if-no-files-found: error
@@ -159,14 +171,21 @@ jobs:
       - name: Sync dependencies (build + mac-build)
         run: uv sync --group build --group mac-build
 
-      # ── 解析版本号 ──
-      - name: Resolve version
+      # ── 解析版本号 + 分支后缀 ──
+      - name: Resolve version & suffix
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          echo "💡 Version: $v"
+          branch="${{ github.ref_name }}"
+          case "$branch" in
+            dev)              suffix="qt5"     ;;
+            pyside6)          suffix="pyside6" ;;
+            *)                suffix="dev"     ;;
+          esac
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+          echo "💡 Version: $v | Branch: $branch | Suffix: -$suffix"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -248,12 +267,14 @@ jobs:
         run: uv run python create_dmg.py
         env:
           DMG_VERSION: ${{ steps.version.outputs.tag }}
+          DMG_SUFFIX: ${{ steps.version.outputs.suffix }}
 
       - name: Verify DMG output
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          dmg="dist/Drifox-macOS-${tag}.dmg"
+          suffix="${{ steps.version.outputs.suffix }}"
+          dmg="dist/Drifox-macOS-${tag}-${suffix}.dmg"
           if [ ! -f "$dmg" ]; then
             echo "❌ DMG 未生成: $dmg"
             exit 1
@@ -265,13 +286,14 @@ jobs:
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          sha256sum "dist/Drifox-macOS-${tag}.dmg" | tee dist/SHA256SUMS
+          suffix="${{ steps.version.outputs.suffix }}"
+          sha256sum "dist/Drifox-macOS-${tag}-${suffix}.dmg" | tee dist/SHA256SUMS
 
       # ── 上传产物 ──
       - name: Upload artifact (macOS)
         uses: actions/upload-artifact@v4
         with:
-          name: Drifox-macOS-${{ steps.version.outputs.tag }}
+          name: Drifox-macOS-${{ steps.version.outputs.tag }}-${{ steps.version.outputs.suffix }}
           path: |
             dist/Drifox-macOS-*.dmg
             dist/SHA256SUMS
@@ -308,14 +330,21 @@ jobs:
       - name: Sync dependencies
         run: uv sync --group linux-build
 
-      # ── 解析版本号 ──
-      - name: Resolve version
+      # ── 解析版本号 + 分支后缀 ──
+      - name: Resolve version & suffix
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          echo "💡 Version: $v"
+          branch="${{ github.ref_name }}"
+          case "$branch" in
+            dev)              suffix="qt5"     ;;
+            pyside6)          suffix="pyside6" ;;
+            *)                suffix="dev"     ;;
+          esac
+          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
+          echo "💡 Version: $v | Branch: $branch | Suffix: -$suffix"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -336,15 +365,17 @@ jobs:
         run: |
           cd dist
           tag="${{ steps.version.outputs.tag }}"
-          tar czf "Drifox-Linux-${tag}.tar.gz" Drifox/
-          echo "✅ tar.gz: $(du -h Drifox-Linux-${tag}.tar.gz | cut -f1)"
+          suffix="${{ steps.version.outputs.suffix }}"
+          tar czf "Drifox-Linux-${tag}-${suffix}.tar.gz" Drifox/
+          echo "✅ tar.gz: $(du -h Drifox-Linux-${tag}-${suffix}.tar.gz | cut -f1)"
 
       - name: Verify tar.gz output
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          if [ ! -f "dist/Drifox-Linux-${tag}.tar.gz" ]; then
-            echo "❌ tar.gz 未生成: dist/Drifox-Linux-${tag}.tar.gz"
+          suffix="${{ steps.version.outputs.suffix }}"
+          if [ ! -f "dist/Drifox-Linux-${tag}-${suffix}.tar.gz" ]; then
+            echo "❌ tar.gz 未生成: dist/Drifox-Linux-${tag}-${suffix}.tar.gz"
             exit 1
           fi
 
@@ -353,14 +384,15 @@ jobs:
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
+          suffix="${{ steps.version.outputs.suffix }}"
           cd dist
-          sha256sum "Drifox-Linux-${tag}.tar.gz" | tee SHA256SUMS
+          sha256sum "Drifox-Linux-${tag}-${suffix}.tar.gz" | tee SHA256SUMS
 
       # ── 上传产物 ──
       - name: Upload artifact (Linux)
         uses: actions/upload-artifact@v4
         with:
-          name: Drifox-Linux-${{ steps.version.outputs.tag }}
+          name: Drifox-Linux-${{ steps.version.outputs.tag }}-${{ steps.version.outputs.suffix }}
           path: |
             dist/Drifox-Linux-*.tar.gz
             dist/SHA256SUMS
@@ -419,6 +451,18 @@ jobs:
               print(f'WARNING: no version entry found in CHANGELOG.md for tag {tag}, using empty body')
               open('release_body.txt', 'w').close()
           "
+
+      - name: Annotate suffix in release body
+        shell: bash
+        run: |
+          # 如果不是默认 dev 后缀，给 body 加一行标记便于用户区分两种构建
+          suffix="${{ steps.version.outputs.suffix }}"
+          if [ "$suffix" != "dev" ]; then
+            echo "" >> release_body.txt
+            echo "---" >> release_body.txt
+            echo "" >> release_body.txt
+            echo "**构建版本**: \`$suffix\` （分支: \`${{ github.ref_name }}\`）" >> release_body.txt
+          fi
 
       - name: Create / Update Release
         uses: softprops/action-gh-release@v2
