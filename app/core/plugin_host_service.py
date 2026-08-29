@@ -634,11 +634,9 @@ class PluginHostService(QObject):
                                 # 特殊 case：插件根目录被删除（整个插件被移出），此时 path 精确等于
                                 # plugin_path，被 _identify_all_components_from_changes 跳过（continue），
                                 # 导致 all_components 为空。需要在此处兜底检测并触发全组件卸载。
-                                _root_deleted = any(
-                                    ct == 3 and cp.lower() == path
-                                    for path, name in current_prefixes.items()
-                                    if name == pname
-                                    for ct, cp in relevant_changes
+                                # 磁盘二次核实：watchfiles 误报删除时忽略，避免卸载→重载风暴卡死主线程。
+                                _root_deleted = self._confirm_plugin_root_deleted(
+                                    pname, current_prefixes, relevant_changes
                                 )
                                 if _root_deleted:
                                     logger.info(
@@ -678,11 +676,9 @@ class PluginHostService(QObject):
                             # 特殊 case：插件根目录被删除（整个插件被移出），此时 path 精确等于
                             # plugin_path，被 _identify_all_components_from_changes 跳过（continue），
                             # 导致 all_components 为空。需要在此处兜底检测并触发全组件卸载。
-                            _root_deleted = any(
-                                ct == 3 and cp.lower() == path
-                                for path, name in current_prefixes.items()
-                                if name == plugin_name
-                                for ct, cp in relevant_changes
+                            # 磁盘二次核实：watchfiles 误报删除时忽略，避免卸载→重载风暴卡死主线程。
+                            _root_deleted = self._confirm_plugin_root_deleted(
+                                plugin_name, current_prefixes, relevant_changes
                             )
                             if _root_deleted:
                                 logger.info(f"[PluginHost] 插件 [{plugin_name}] 目录已被删除，触发全组件卸载...")
@@ -829,6 +825,35 @@ class PluginHostService(QObject):
                 pass
         self._plugin_watcher_thread = None
         self._plugin_watcher_started = False
+
+    @staticmethod
+    def _confirm_plugin_root_deleted(plugin_name: str, plugin_prefixes: Dict[str, str], relevant_changes: list) -> bool:
+        """核实「插件根目录被删除」事件是否属实（磁盘二次确认）。
+
+        watchfiles 在 Windows 上可能对仍存在的目录误报 Deleted（杀毒扫描/索引服务/
+        资源管理器刷新等批量触碰目录句柄，表现为多个插件根在数百 ms 内连续"被删除"）。
+        若不核实直接全组件卸载，目录实际仍在 → 随后变更事件又触发重载 → 主线程同步
+        重建全部 UI 组件（设置卡/欢迎卡/输入按钮），UI 插件越多阻塞越久，形成用户可
+        感知的整软件卡死风暴。
+
+        Returns:
+            True: 删除事件属实（磁盘上目录确实不存在），调用方可安全触发全组件卸载；
+            False: 无删除事件，或磁盘上目录仍存在（误报，忽略）。
+        """
+        for path, name in plugin_prefixes.items():
+            if name != plugin_name:
+                continue
+            if not any(ct == 3 and cp.lower() == path for ct, cp in relevant_changes):
+                continue
+            # prefix 为小写路径；Windows 文件系统大小写不敏感，isdir 可直接核实
+            if os.path.isdir(path):
+                logger.info(
+                    f"[PluginHost] 插件 [{plugin_name}] 收到根目录删除事件，"
+                    f"但磁盘上目录仍存在（watchfiles 误报），忽略全组件卸载"
+                )
+                return False
+            return True
+        return False
 
     def _build_plugin_path_index(self) -> Dict[str, str]:
         """构建插件路径前缀 → 插件名的映射表
