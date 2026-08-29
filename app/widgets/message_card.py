@@ -4881,7 +4881,7 @@ class CodeWebViewer(QWebEngineView):
                     background: {"rgba(255, 255, 255, 0.75)" if _is_light_diff else "rgba(22, 27, 34, 0.6)"};
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
                 }}
-                /* ===== 图表 hover 浮动工具栏（放大 / 导出） ===== */
+                /* ===== 图表 hover 浮动工具栏（放大 / 导出）；按钮底色/tooltip 已按主题条件化 ===== */
                 .chart-toolbar {{
                     position: absolute;
                     top: 8px;
@@ -4897,11 +4897,12 @@ class CodeWebViewer(QWebEngineView):
                     opacity: 1;
                 }}
                 .chart-toolbar button {{
+                    position: relative;
                     width: 28px;
                     height: 28px;
                     border-radius: 6px;
                     border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
-                    background: rgba(22, 27, 34, 0.85);
+                    background: {"rgba(255, 255, 255, 0.92)" if _is_light_diff else "rgba(22, 27, 34, 0.85)"};
                     cursor: pointer;
                     display: flex;
                     align-items: center;
@@ -4909,7 +4910,31 @@ class CodeWebViewer(QWebEngineView):
                     padding: 0;
                 }}
                 .chart-toolbar button:hover {{
-                    background: rgba(40, 46, 56, 0.95);
+                    background: {"rgba(228, 233, 240, 1)" if _is_light_diff else "rgba(40, 46, 56, 0.95)"};
+                }}
+                /* 自绘 tooltip（代替 HTML title，避免 Chromium 原生 tooltip 黑块）；向下弹避免被容器 overflow:hidden 裁剪 */
+                .chart-toolbar button::after {{
+                    content: attr(data-tooltip);
+                    position: absolute;
+                    top: calc(100% + 6px);
+                    right: 0;
+                    white-space: nowrap;
+                    background: var(--panel, rgba(30,30,32,250));
+                    color: var(--text, #ffffff);
+                    font-size: 11px;
+                    padding: 4px 8px;
+                    border-radius: 6px;
+                    border: 1px solid var(--border, rgba(128,128,128,0.15));
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+                    pointer-events: none;
+                    z-index: 100;
+                    line-height: 1.4;
+                    opacity: 0;
+                    transition: opacity 140ms ease;
+                }}
+                .chart-toolbar button:hover::after {{
+                    opacity: 1;
+                    z-index: 100;
                 }}
                 .chart-toolbar button img {{
                     width: 16px;
@@ -6313,10 +6338,10 @@ class CodeWebViewer(QWebEngineView):
                     var bar = document.createElement('div');
                     bar.className = 'chart-toolbar';
                     var btnExpand = document.createElement('button');
-                    btnExpand.title = '放大查看';
+                    btnExpand.setAttribute('data-tooltip', '放大查看');
                     btnExpand.innerHTML = '<img src="{_icon_prefix}/最大化.svg" />';
                     var btnExport = document.createElement('button');
-                    btnExport.title = '导出 PNG（3x）';
+                    btnExport.setAttribute('data-tooltip', '导出 PNG（3x）');
                     btnExport.innerHTML = '<img src="{_icon_prefix}/导入.svg" />';
                     bar.appendChild(btnExpand);
                     bar.appendChild(btnExport);
