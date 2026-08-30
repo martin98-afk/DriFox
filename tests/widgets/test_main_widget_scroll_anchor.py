@@ -252,3 +252,79 @@ def test_scroll_to_bottom_if_following_guarded():
     bar.value.return_value = 0
     win._scroll_to_bottom_if_following()
     win._scroll_to_bottom.assert_not_called()
+
+
+# ─── 批次卸载等高占位 ───────────────────────────────────────────
+# 背景：B4 回收把卡片移出布局后容器高度瞬间塌陷，随后卡片高度再异步上报，
+# 与 _ensure_at_bottom 的 8×300ms 重试链重叠 → 长对话滚动期抖动。
+# 占位让总高度在回收瞬间保持不变。
+
+
+def _make_placeholder_window():
+    """造一个带真实 chat_layout / chat_container 的最小实例"""
+    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+
+    win = _make_window()
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    win.chat_container = container
+    win.chat_layout = layout
+    win._batch_placeholders = {}
+    return win, container, layout
+
+
+def test_install_batch_placeholder_keeps_height(qapp):
+    """占位等高且落在原位；摘掉卡片后布局里仍留着它 → 高度不塌陷"""
+    from PyQt5.QtWidgets import QWidget
+
+    win, container, layout = _make_placeholder_window()
+    card = QWidget(container)
+    card.setFixedHeight(120)
+    layout.addWidget(card)
+    idx = layout.indexOf(card)
+
+    assert win._install_batch_placeholder(3, 120, idx) is True
+    ph = win._batch_placeholders[3]
+    assert ph.minimumHeight() == 120  # 等高
+    assert layout.indexOf(ph) == idx  # 原位
+
+    layout.removeWidget(card)
+    card.setParent(None)
+    assert layout.count() == 1  # 占位还在 → 容器总高度没塌
+
+
+def test_take_batch_placeholder_returns_index_and_removes(qapp):
+    """取回占位要还回原索引 —— 否则重建的卡片会被追加到末尾，顺序错乱"""
+    from PyQt5.QtWidgets import QWidget
+
+    win, container, layout = _make_placeholder_window()
+    card = QWidget(container)
+    layout.addWidget(card)
+    idx = layout.indexOf(card)
+
+    win._install_batch_placeholder(7, 80, idx)
+    assert win._take_batch_placeholder(7) == idx
+    assert win._take_batch_placeholder(7) is None  # 幂等：取过就没了
+
+
+def test_install_batch_placeholder_rejects_bad_args(qapp):
+    """高度 0 / 索引非法时不安装，调用方必须回退到旧的滚动值补偿"""
+    win, _container, _layout = _make_placeholder_window()
+    assert win._install_batch_placeholder(0, 0, 0) is False
+    assert win._install_batch_placeholder(0, 100, -1) is False
+    assert win._batch_placeholders == {}
+
+
+def test_clear_batch_placeholders(qapp):
+    """清空会话 / 重建布局时必须能一次性摘干净，防止索引错位"""
+    from PyQt5.QtWidgets import QWidget
+
+    win, container, layout = _make_placeholder_window()
+    card = QWidget(container)
+    layout.addWidget(card)
+    win._install_batch_placeholder(1, 60, layout.indexOf(card))
+    win._install_batch_placeholder(2, 60, layout.indexOf(card))
+    assert len(win._batch_placeholders) == 2
+    win._clear_batch_placeholders(remove_from_layout=True)
+    assert win._batch_placeholders == {}
+    assert layout.count() == 1  # 只剩原来那张 card，占位已摘掉
