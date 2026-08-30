@@ -2568,8 +2568,13 @@ class TabPanel(QWidget):
         if mode == PANEL_MODE_TREE and mode != self._mode:
             self._warn_tree_mode_in_dev()
         if persist and mode != self._mode:
+            # ⚠️ 必须走 Settings.set(..., save=True)：直接给 item.value 赋值只改内存，
+            # 不落盘。Settings.save() 在退出流程里被三层防护拦住（_closing_down /
+            # _closing / QApplication.closingDown），靠「之后某个别的设置顺带 save」
+            # 才能写进 app.config —— 表现为「退出前切回列表，重开又变回树模式」。
             try:
-                Settings.get_instance().tab_panel_mode.value = mode
+                cfg = Settings.get_instance()
+                cfg.set(cfg.tab_panel_mode, mode, save=True)
             except Exception:
                 pass
         self._mode = mode
@@ -2649,9 +2654,32 @@ class TabPanel(QWidget):
         self._rebuild_layout()
 
     def _on_tree_expansion_changed(self, state):
-        """树的折叠态变化 → 落 Settings（重启后保持展开现场）"""
+        """树的折叠态变化 → 落 Settings（重启后保持展开现场）
+
+        ⚠️ 走 Settings.set(..., save=True)，理由同 set_mode —— 直接改 item.value
+        不落盘。折叠态每次点箭头都会变，这里做一次 400ms 去抖合并写盘，避免
+        连点箭头时反复整份序列化 app.config。
+        """
         try:
-            Settings.get_instance().workspace_tree_expansion.value = dict(state or {})
+            # ⚠️ 不能先写 item.value：Settings.set() 有「值未变化就 return」的短路，
+            # 先改内存会让 save=True 也变成空操作。
+            self._pending_expansion = dict(state or {})
+            timer = getattr(self, "_expansion_save_timer", None)
+            if timer is None:
+                timer = QTimer(self)
+                timer.setSingleShot(True)
+                timer.setInterval(400)
+                timer.timeout.connect(self._flush_expansion_state)
+                self._expansion_save_timer = timer
+            timer.start()
+        except Exception:
+            pass
+
+    def _flush_expansion_state(self):
+        """去抖到期：把折叠态真正写盘"""
+        try:
+            cfg = Settings.get_instance()
+            cfg.set(cfg.workspace_tree_expansion, dict(self._pending_expansion or {}), save=True)
         except Exception:
             pass
 
@@ -2814,11 +2842,12 @@ class TabPanel(QWidget):
             # ⚠️ 归一：目录已不存在 / 主仓库根目录 / 临时工作目录 一律回落到主仓库("")。
             # 否则会话会挂到一个「与项目同名的幽灵工作树」下 —— 典型是
             # ~/.drifox/workspaces/<项目名> 这类没落地的临时工作目录。
+            registered_norm = self._norm_registered(registered)
             plain_pairs = [
-                (r, self._resolve_worktree((r.get("worktree_path") or "").strip(), registered)) for r in plain
+                (r, self._resolve_worktree((r.get("worktree_path") or "").strip(), registered_norm)) for r in plain
             ]
             opened_pairs = [
-                (i, self._resolve_worktree(wt, registered), tid)
+                (i, self._resolve_worktree(wt, registered_norm), tid)
                 for i, (p, wt, tid) in enumerate(owners)
                 if p == project
             ]
@@ -2924,7 +2953,20 @@ class TabPanel(QWidget):
         return specs
 
     @staticmethod
-    def _resolve_worktree(wt: str, registered) -> str:
+    def _norm_registered(registered) -> list:
+        """预计算已登记 worktree 的归一化三元组 (原路径, norm, norm+分隔符)
+
+        ⚠️ normpath/normcase 不能放在 _resolve_worktree 里逐条会话重算：那是
+        O(会话数 × 已登记工作树数)，历史一多就把侧栏重建拖成秒级。
+        """
+        out = []
+        for p in registered or ():
+            kn = os.path.normcase(os.path.normpath(p))
+            out.append((p, kn, kn.rstrip(os.sep) + os.sep))
+        return out
+
+    @staticmethod
+    def _resolve_worktree(wt: str, registered_norm) -> str:
         """把一个「工作目录路径」归一到树里的一个工作树节点，"" 表示主仓库
 
         会话记录里的 worktree_path 存的是**当前工作目录**，不一定是工作树：它可能是
@@ -2942,11 +2984,8 @@ class TabPanel(QWidget):
         if not wt or not os.path.isdir(wt):
             return ""
         norm = os.path.normcase(os.path.normpath(wt))
-        for known in registered or ():
-            kn = os.path.normcase(os.path.normpath(known))
-            if norm == kn:
-                return known
-            if norm.startswith(kn.rstrip(os.sep) + os.sep):
+        for known, kn, kn_slash in registered_norm:
+            if norm == kn or norm.startswith(kn_slash):
                 return known
         return wt if os.path.isfile(os.path.join(wt, ".git")) else ""
 
