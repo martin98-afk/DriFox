@@ -25,7 +25,17 @@ from typing import Dict, List, Optional, Set
 
 from loguru import logger
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import (
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+    QHBoxLayout,
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+)
 from qfluentwidgets import (
     ExpandSettingCard,
     FluentIcon,
@@ -77,6 +87,11 @@ _PAGE_SIZE = 40
 _SEARCH_PAGE_SIZE = 120
 # 每次「显示更多」扩充的小节数
 _PAGE_STEP = 40
+# 首帧立即构建的小节数——先让用户看到内容并能交互，其余分批补齐。
+# 实测整卡构建 ~250ms（65 插件 / 104 组件），首帧只做 6 个可把阻塞压到几十毫秒。
+_FIRST_BATCH = 6
+# 后续每批构建的小节数（singleShot(0) 之间让出事件循环，滚动/点击不被饿死）
+_BATCH_SIZE = 12
 # 搜索输入去抖
 _SEARCH_DEBOUNCE_MS = 220
 # 细项搜索的最小关键词长度（1 个字符命中过多，构建索引不划算）
@@ -184,6 +199,8 @@ class ComponentRow(QWidget):
         self._item_rows: Dict[str, ItemRow] = {}
         # 首次展开时由 PluginSectionWidget 注入（请求卡片现枚举细项）
         self.expand_requested_cb = None
+        # 高度变化通知（细项展开/收起后由宿主卡片重算 fixedHeight）
+        self.height_changed_cb = None
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -249,6 +266,12 @@ class ComponentRow(QWidget):
         self._items_widget.setVisible(expanded)
         if expanded and not self._items_loaded and self.expand_requested_cb is not None:
             self.expand_requested_cb(self._component)
+        self._notify_height_changed()
+
+    def _notify_height_changed(self):
+        """细项列表显隐会改变整卡高度，通知宿主卡片重新同步 fixedHeight"""
+        if self.height_changed_cb is not None:
+            self.height_changed_cb()
 
     def _set_chevron(self, expanded: bool):
         self._expand_btn.setIcon(FluentIcon.CHEVRON_DOWN_MED if expanded else FluentIcon.CHEVRON_RIGHT_MED)
@@ -310,6 +333,7 @@ class ComponentRow(QWidget):
         if silent:
             self._expand_btn.blockSignals(False)
         self._items_widget.setVisible(expanded)
+        self._notify_height_changed()
 
     def apply_item_filter(self, keyword: str, hits: Optional[Set[str]] = None):
         """按关键词过滤细项行；hits 为搜索命中的 item_id 集合（优先级更高）"""
@@ -362,6 +386,7 @@ class PluginSectionWidget(QWidget):
     component_toggled = pyqtSignal(str, str, bool)  # (plugin_name, component, enabled)
     item_toggled = pyqtSignal(str, str, str, bool)  # (plugin_name, component, item_id, enabled)
     items_expanding = pyqtSignal(str, str)  # (plugin_name, component) 首次展开，请求加载细项
+    size_changed = pyqtSignal()  # 内部高度变化（细项展开/收起）
 
     def __init__(self, plugin_name: str, description: str, is_system: bool, components: list, parent=None):
         super().__init__(parent)
@@ -426,6 +451,7 @@ class PluginSectionWidget(QWidget):
                 )
             )
             row.expand_requested_cb = lambda component=comp: self.items_expanding.emit(self._plugin_name, component)
+            row.height_changed_cb = self.size_changed.emit
             section_layout.addWidget(row)
             self._rows[comp] = row
 
@@ -492,9 +518,24 @@ class PluginComponentsCard(ExpandSettingCard):
         self._total = 0
         self._component_off = 0
         self._item_off = 0
+        # ── 分批构建状态 ──
+        self._pending: List[tuple] = []  # 待构建的 (entry, matched)
+        self._built = 0  # 已构建并挂载的数量
+        self._token = 0  # 重建令牌：用于作废过期的分批回调
+        self._adjusting = False  # resizeEvent → _adjust_view_size 的重入保护
+        self._height_resync_queued = False  # 下一帧高度校正是否已排队
+        self._batch_timer = QTimer(self)
+        self._batch_timer.setSingleShot(True)
+        self._batch_timer.setInterval(0)
+        self._batch_timer.timeout.connect(self._build_next_batch)
         # 复用的尾部控件（分页按钮 / 空态提示），避免每次重建堆积孤儿 widget
         self._more_btn: Optional[PushButton] = None
         self._empty_label: Optional[QLabel] = None
+        # 尾部容器：始终留在布局最后，分批构建时会被临时摘下再挂回
+        self._tail_widget = QWidget(self)
+        self._tail_layout = QVBoxLayout(self._tail_widget)
+        self._tail_layout.setContentsMargins(0, 2, 0, 2)
+        self._tail_layout.setSpacing(4)
 
         # 组件行直接进 viewLayout：外层分页自身是滚动区，内嵌滚动区会导高度塌缩
         self.viewLayout.setSpacing(4)
@@ -596,24 +637,57 @@ class PluginComponentsCard(ExpandSettingCard):
     # ── 重建 / 挂载 ──
 
     def _rebuild(self):
+        """重算过滤结果并**分批**挂载
+
+        一次性挂载全部小节会阻塞主线程 ~250ms（65 插件 / 104 组件），
+        表现为「打开设置面板卡一下」。这里首帧只构建 _FIRST_BATCH 个，
+        剩余部分在后续事件循环里分批补齐，用户立刻就能滚动和点击。
+        """
+        self._token += 1
         self._sig = self._signature()
         self._entries = self._collect_entries()
         self._visible, self._item_hits = self._match(self._keyword)
         self._recompute_counts()
-        self._mount()
 
-    def _mount(self):
-        """按当前过滤结果与分页上限挂载小节（不销毁任何已建小节）"""
-        # takeAt 只解绑、不删除，小节留在 _pool 里复用
+        # 重置布局：takeAt 只解绑、不删除，小节留在 _pool 里复用
         while self._body_layout.count():
             self._body_layout.takeAt(0)
+        self._body_layout.addWidget(self._search_bar)
         # 脱离布局的子 widget 不会自动隐藏，会浮到卡片左上角——必须显式 hide
         for section in self._pool.values():
             section.hide()
-        self._body_layout.addWidget(self._search_bar)
 
+        self._pending = self._visible[: self._page_limit]
+        self._built = 0
+        self._build_next_batch(first=True)
+
+    def _build_next_batch(self, first: bool = False):
+        """构建下一批小节
+
+        Args:
+            first: 首帧批次，数量用 _FIRST_BATCH（更小，让首屏更快出现）
+        """
+        token = self._token
+        # 折叠态不构建：内容不可见，没必要付这份开销（展开时会自动续上）
+        if not self.isExpand:
+            self._finish_mount()
+            return
+        if self._built >= len(self._pending):
+            self._finish_mount()
+            return
+
+        batch = _FIRST_BATCH if first else _BATCH_SIZE
+        target = min(self._built + batch, len(self._pending))
         pm = self._pm()
-        for entry, matched in self._visible[: self._page_limit]:
+
+        # 尾部容器先摘下，保证加完小节后它仍在布局最后
+        tail_index = self._body_layout.indexOf(self._tail_widget)
+        if tail_index >= 0:
+            self._body_layout.takeAt(tail_index)
+
+        for entry, matched in self._pending[self._built : target]:
+            if token != self._token:
+                return  # 期间又发生了重建/搜索，本批次作废
             name = entry[0]
             section = self._pool.get(name)
             if section is None:
@@ -622,10 +696,132 @@ class PluginComponentsCard(ExpandSettingCard):
             self._apply_state(section, entry, matched, pm)
             self._body_layout.addWidget(section)
             section.show()
+        self._built = target
+        self._body_layout.addWidget(self._tail_widget)
 
-        self._mount_more_button(len(self._visible) - self._page_limit)
-        self._mount_empty_state(not self._visible)
+        self._finish_mount()
+        if self._built < len(self._pending):
+            self._batch_timer.start()
+
+    def _finish_mount(self):
+        """批次结束后的收尾：尾部控件 + 摘要 + 高度同步"""
+        done = self._built >= len(self._pending)
+        remaining = len(self._visible) - self._page_limit
+        self._mount_more_button(remaining if done else 0)
+        self._mount_empty_state(done and not self._visible)
         self._refresh_summary_text()
+        self._adjust_view_size()
+
+    # ── 高度同步与滚轮 ──
+
+    def setExpand(self, isExpand: bool):
+        """接管基类的展开/折叠
+
+        基类 ExpandSettingCard 的做法是：内容下方塞一个等高的 spaceWidget 占位，
+        再用动画驱动 verticalScrollBar 的 value，配合 `_onExpandValueChanged`
+        反推 fixedHeight。这套方案假设内容高度在动画期间**固定不变**。
+
+        我们的内容是分批挂载 / 可展开细项的——高度会在动画进行中继续变化，
+        于是「scrollBar 的 maximum」与「实际内容高度」失配，表现为折叠后残留
+        大片空白、或展开后底部被裁掉。这里改为直接按内容实测高度设 fixedHeight：
+        折叠 = 只留 header，展开 = header + 内容。
+        """
+        if self.isExpand == isExpand:
+            return
+        self.expandAni.stop()
+        self.isExpand = isExpand
+        self.setProperty("isExpand", isExpand)
+        self.setStyle(QApplication.style())
+        self.card.expandButton.setExpand(isExpand)
+        # spaceWidget 是基类滚动动画的占位件，接管后不再需要
+        self.spaceWidget.setFixedHeight(0)
+        # 折叠时彻底隐藏内容：QLayout.sizeHint() 会忽略隐藏控件，
+        # 不隐藏的话搜索过滤留下的隐藏行仍会被算进高度
+        self.view.setVisible(isExpand)
+        self._adjust_view_size()
+        # 折叠期间会暂停分批构建（见 _build_next_batch），展开时接着做
+        if isExpand and self._built < len(self._pending):
+            self._batch_timer.start()
+
+    def toggleExpand(self):
+        self.setExpand(not self.isExpand)
+
+    def _adjust_view_size(self):
+        """同步高度：立刻做一次，下一帧再校一次
+
+        子控件的 `setVisible(False)` 只投递异步的 LayoutRequest，当前帧读到的
+        `sizeHint()` 往往还是旧值（收起细项后会残留一截空白）。所以先同步一次
+        保证即时响应，再用 singleShot(0) 补一次拿到布局稳定后的真实高度。
+        """
+        self._sync_height_now()
+        if not self._height_resync_queued:
+            self._height_resync_queued = True
+            QTimer.singleShot(0, self._sync_height_deferred)
+
+    def _sync_height_deferred(self):
+        self._height_resync_queued = False
+        self._sync_height_now()
+
+    def _invalidate_layouts(self):
+        """递归失效 view 下所有布局的 sizeHint 缓存
+
+        ⚠️ 关键：子控件 `setVisible(False)` 只向上投递**异步**的 LayoutRequest，
+        父布局的 sizeHint 缓存不会同步清理。只失效 viewLayout 是不够的——
+        中间层（section / 组件行）的布局缓存仍带着已隐藏行的高度，
+        读出来的 sizeHint 偏大，表现为「收起后残留一截空白」。
+        """
+        self.viewLayout.invalidate()
+        for child in self.view.findChildren(QWidget):
+            lay = child.layout()
+            if lay is not None:
+                lay.invalidate()
+
+    def _sync_height_now(self):
+        if not self.isExpand:
+            self.verticalScrollBar().setValue(0)
+            target = self.card.height()
+        else:
+            self._invalidate_layouts()
+            self.viewLayout.activate()
+            target = self.card.height() + self.viewLayout.sizeHint().height()
+        if target != self.height():
+            self.setFixedHeight(target)
+        area = self._ancestor_scroll_area(self)
+        if area is not None:
+            inner = area.widget()
+            if inner is not None:
+                inner.updateGeometry()
+
+    def resizeEvent(self, e):
+        """宽度变化会改变文本换行 → 内容高度跟着变，需重新同步"""
+        super().resizeEvent(e)
+        if self.isExpand and not self._adjusting:
+            self._adjusting = True
+            try:
+                self._adjust_view_size()
+            finally:
+                self._adjusting = False
+
+    @staticmethod
+    def _ancestor_scroll_area(widget: QWidget):
+        """向上找最近的祖先 QScrollArea（本类自身就是，故从 parent 起找）"""
+        from PyQt5.QtWidgets import QScrollArea
+
+        node = widget.parentWidget()
+        while node is not None:
+            if isinstance(node, QScrollArea):
+                return node
+            node = node.parentWidget()
+        return None
+
+    def wheelEvent(self, e):
+        """把滚轮事件交还给外层分页滚动区
+
+        基类 ExpandSettingCard 把 wheelEvent 空实现（它自身不开滚动条、滚轮
+        事件对它无意义），但空实现不会 ignore 事件 → 事件被吞掉，外层分页的
+        QScrollArea 收不到 → 鼠标停在卡片区域内时滚轮完全无反应。
+        """
+        e.ignore()
 
     def _create_section(self, entry: tuple) -> PluginSectionWidget:
         name, is_system, description, comps = entry
@@ -633,6 +829,7 @@ class PluginComponentsCard(ExpandSettingCard):
         section.component_toggled.connect(self._on_component_toggled)
         section.item_toggled.connect(self._on_item_toggled)
         section.items_expanding.connect(self._on_items_expanding)
+        section.size_changed.connect(self._adjust_view_size)
         return section
 
     def _apply_state(self, section: PluginSectionWidget, entry: tuple, matched: Optional[List[str]], pm):
@@ -679,6 +876,7 @@ class PluginComponentsCard(ExpandSettingCard):
         if self._keyword:
             hits = self._item_hits.get(plugin_name, {}).get(component)
             section.apply_item_filter(component, self._keyword.lower(), hits)
+        self._adjust_view_size()
 
     def _mount_more_button(self, remaining: int):
         """「显示更多」按钮复用同一个实例（每次新建会在卡片上堆积孤儿控件）"""
@@ -687,30 +885,32 @@ class PluginComponentsCard(ExpandSettingCard):
                 self._more_btn.hide()
             return
         if self._more_btn is None:
-            self._more_btn = PushButton(self)
+            self._more_btn = PushButton(self._tail_widget)
             self._more_btn.clicked.connect(self._on_show_more)
+            self._tail_layout.addWidget(self._more_btn)
         self._more_btn.setText(f"显示更多（还有 {remaining} 个插件）")
         self._more_btn.show()
-        self._body_layout.addWidget(self._more_btn)
 
     def _mount_empty_state(self, show: bool):
         if show:
             if self._empty_label is None:
-                self._empty_label = QLabel(self)
+                self._empty_label = QLabel(self._tail_widget)
                 self._empty_label.setAlignment(Qt.AlignCenter)
+                self._tail_layout.addWidget(self._empty_label)
             self._empty_label.setText("没有匹配的插件或组件")
             self._empty_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; background: transparent; "
                 f"{get_font_family_css()} font-size: {scale_font_size(12)}px;"
             )
             self._empty_label.show()
-            self._body_layout.addWidget(self._empty_label)
         elif self._empty_label is not None:
             self._empty_label.hide()
 
     def _on_show_more(self):
+        """扩页后继续分批——不重置已构建部分，视觉上连续补在下面"""
         self._page_limit += _PAGE_STEP
-        self._mount()
+        self._pending = self._visible[: self._page_limit]
+        self._batch_timer.start()
 
     # ── 统计 ──
 
@@ -773,6 +973,7 @@ class PluginComponentsCard(ExpandSettingCard):
                 section.reload_component_items(
                     component, items, lambda item_id: pm.is_item_enabled(plugin_name, component, item_id)
                 )
+                self._adjust_view_size()
             self._defer_hot_reload(
                 PluginHostService.get_instance().on_plugin_component_toggled, plugin_name, component, enabled
             )

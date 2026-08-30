@@ -701,6 +701,58 @@ class LLMSettingsCard(SystemCardFrame):
 
             card.setExpand = _wrapped_set_expand
 
+        # 插件组件卡默认展开：它是「插件启用」页的主体，折叠态下用户看不到
+        # 任何组件。必须在包装完成之后调用，这样走的是包装版 setExpand，
+        # 手风琴语义仍然成立（会先收起其他已展开的列表卡片）。
+        try:
+            self.pluginComponentsCard.setExpand(True)
+        except Exception as e:
+            logger.warning(f"[LLMSettingsCard] 插件组件卡默认展开失败: {e}")
+
+    def _ensure_hot_reload_connected(self):
+        """订阅插件热重载广播，让设置面板在热重载后就地刷新
+
+        ⚠️ 不能在 __init__ / _apply_list_accordion 里调：那会触发
+        PluginHostService 单例的惰性初始化，连带拉起 AgentManager 全量加载
+        智能体并启动 watchfiles 监听（实测 ~330ms，且是不必要的副作用）。
+        放到首次显示阶段，此时服务早已由主窗口初始化完毕。
+
+        面板不可见时跳过重建——下次打开时 rebuild_plugin_cards 会因内容
+        签名变化自动刷新，没必要在后台付这份开销。
+        连续热重载用 350ms 去抖合并，避免一次批量更新触发多次全量重建。
+        """
+        if getattr(self, "_hot_reload_connected", False):
+            return
+        try:
+            from app.core.plugin_host_service import PluginHostService
+
+            self._hot_reload_connected = True
+            self._hot_reload_timer = QTimer(self)
+            self._hot_reload_timer.setSingleShot(True)
+            self._hot_reload_timer.setInterval(350)
+            self._hot_reload_timer.timeout.connect(self._refresh_after_hot_reload)
+            PluginHostService.get_instance().plugin_changed.connect(self._on_plugin_changed, Qt.UniqueConnection)
+        except Exception as e:
+            logger.warning(f"[LLMSettingsCard] 订阅插件热重载广播失败: {e}")
+
+    def _on_plugin_changed(self, payload: dict):
+        """插件变更广播回调（去重后统一刷新）"""
+        if not self.isVisible():
+            return
+        self._hot_reload_timer.start()
+
+    def _refresh_after_hot_reload(self):
+        if not self.isVisible():
+            return
+        try:
+            self.rebuild_plugin_cards()
+            # force=True：热重载可能只改了组件内部的细项（工具/hook 增删），
+            # 插件清单未变 → 签名相同 → 非 force 的脏检查会跳过，必须强制重建
+            self.pluginComponentsCard.refresh_components(force=True)
+            logger.info("[LLMSettingsCard] 插件热重载后已刷新设置面板")
+        except Exception as e:
+            logger.warning(f"[LLMSettingsCard] 热重载后刷新设置面板失败: {e}")
+
     def _scroll_focus_item_to_top(self, card):
         """把卡片 header 滚到所在分页滚动区顶部，让卡片标题 + 下方 item 都在可见区
 
@@ -1229,6 +1281,9 @@ class LLMSettingsCard(SystemCardFrame):
     def showEvent(self, event):
         if hasattr(self, "llmProviderCard"):
             self.llmProviderCard._refresh_items()
+        # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，
+        # 后者会连带全量加载智能体 + 启动文件监听，实测约 330ms）
+        self._ensure_hot_reload_connected()
         # 每次打开设置时刷新插件组件列表（插件热重载/启停后保持最新）
         if hasattr(self, "pluginComponentsCard"):
             self.pluginComponentsCard.refresh_components()
