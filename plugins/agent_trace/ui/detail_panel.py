@@ -182,8 +182,8 @@ class _KVPage(QScrollArea):
         fs = max(9, self._base_px - 1)
         ui = pal.font_family
         self.setStyleSheet(
-            f"QScrollArea {{ background: transparent; border: none; }}"
-            f"QWidget {{ background: transparent; }}"
+            "QScrollArea { background: transparent; border: none; }"
+            "QWidget { background: transparent; }"
             + (unified_scrollbar(8) or "")
         )
         for _row, k, v in self._rows:
@@ -744,9 +744,12 @@ class DetailPanel(QWidget):
         offset_ms = max(0.0, (rec.start_ts - t0) * 1000) if rec.start_ts > 0 and t0 > 0 else 0.0
         rows = [
             ("Start", rec.absolute_time),
+            # Duration = 真实耗时（TOOL/ASSISTANT 由实时信号回填；消息类为 0）
             ("Duration", format_duration(rec.duration_ms) if rec.duration_ms > 0 else "—"),
+            # Span = 时间线上的占用宽度（瞬时项 —，封顶项 ≥3.00 s）
+            ("Span", rec.span_label),
             ("Offset", format_duration(int(offset_ms)) if offset_ms > 0 else "—"),
-            ("End", _hms(rec.end_ts) if rec.end_ts > 0 else "—"),
+            ("End", _hms(rec.span_end_ts) if rec.span_end_ts > 0 else "—"),
             ("Status", rec.status),
         ]
         if rec.meta.get("tool_call_id"):
@@ -757,7 +760,8 @@ class DetailPanel(QWidget):
         t0, t1 = self._bounds
         total_ms = max(1.0, (t1 - t0) * 1000)
         offset = max(0.0, (rec.start_ts - t0) * 1000) if rec.start_ts > 0 else 0.0
-        dur = max(0.0, float(rec.duration_ms)) if rec.duration_ms > 0 else 0.0
+        # 条带按 span（占用）画，与列表 Waterfall 保持一致
+        dur = max(0.0, float(rec.span_ms))
         return offset, dur, total_ms
 
 

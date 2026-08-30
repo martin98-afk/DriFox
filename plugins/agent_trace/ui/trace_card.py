@@ -53,7 +53,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import SearchLineEdit, SegmentedWidget
+from qfluentwidgets import SearchLineEdit
 
 from .detail_panel import DetailPanel
 from .timeline_panel import TimelinePanel
@@ -173,9 +173,11 @@ class TraceCardWidget(QWidget):
         # 信号
         self._turn_list.recordSelected.connect(self._on_record_selected)
         self._timeline.recordClicked.connect(self._on_record_clicked)
+        self._timeline.rangeSelected.connect(self._turn_list.set_time_range)
+        self._timeline.rangeCleared.connect(self._turn_list.clear_time_range)
+        self._turn_list.timeRangeCleared.connect(self._timeline.clear_range)
         self._detail.dismissRequested.connect(self._on_detail_dismissed)
         self._search_box.textChanged.connect(self._turn_list.set_search)
-        self._view_mode.currentItemChanged.connect(self._on_view_switch)
         self._clear_btn.clicked.connect(self._on_clear_clicked)
         self._follow_btn.clicked.connect(self._on_follow_toggled)
 
@@ -196,13 +198,26 @@ class TraceCardWidget(QWidget):
 
         layout.addStretch(1)
 
-        self._view_mode = SegmentedWidget(bar)
-        self._view_mode.addItem("duration", "Duration")
-        self._view_mode.addItem("turns", "Turns")
-        self._view_mode.addItem("calls", "Calls")
-        self._view_mode.setCurrentItem("duration")
-        self._view_mode.setFixedHeight(28)
-        layout.addWidget(self._view_mode)
+        # 三个**独立开关**（不是互斥 tab）：
+        #   Duration 开=按真实时间比例画条带，关=每条固定宽度
+        #   Turns    开=先按轮次等分整条轴
+        #   Calls    开=只画 Tools 泳道
+        self._flag_btns: Dict[str, QPushButton] = {}
+        for key, label, tip in (
+            ("duration", "Duration", "开：条带宽度按真实时间比例；关：每条等宽"),
+            ("turns", "Turns", "开：按对话轮次等分时间轴"),
+            ("calls", "Calls", "开：只显示 Tools 泳道"),
+        ):
+            btn = QPushButton(label, bar)
+            btn.setCheckable(True)
+            # 默认全关：Duration 关 = 每条等宽（固定长度），开启才按真实时间比例
+            btn.setChecked(False)
+            btn.setFixedHeight(26)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(tip)
+            btn.toggled.connect(lambda _c=False, k=key: self._on_flag_toggled(k))
+            self._flag_btns[key] = btn
+            layout.addWidget(btn)
 
         self._search_box = SearchLineEdit(bar)
         self._search_box.setPlaceholderText("搜索内容 / 工具名…")
@@ -370,14 +385,6 @@ class TraceCardWidget(QWidget):
             f"  border-radius: 5px; color: {pal.q('text')};"
             f"  font-family: '{pal.font_family}'; font-size: {max(10, fs - 1)}px; }}"
         )
-        try:
-            self._view_mode.setItemFontSize(max(10, fs - 1))
-            from PyQt5.QtGui import QColor as _QColor
-
-            self._view_mode.setIndicatorColor(_QColor(pal.accent), _QColor(pal.accent))
-        except Exception as e:
-            logger.debug(f"[agent_trace] SegmentedWidget 主题适配跳过: {e}")
-
         bottom = self.findChild(QFrame, "agentTraceBottomBar")
         if bottom is not None:
             bottom.setStyleSheet(
@@ -477,6 +484,10 @@ class TraceCardWidget(QWidget):
         # 反过来写等于把刚推入的数据抹掉（详情面板恒显示"未选中条目"）。
         self._detail.clear()
         self._detail.set_records(vis)
+        # 全量重置（切会话 / 切标签页 / 清除）时丢掉时间选区：旧区间在新会话里没意义。
+        # 两处都直接设空值、不 emit，避免互相回环。
+        self._timeline.clear_range()
+        self._turn_list.clear_time_range()
         self._refresh_stats(vis)
         self._maybe_refresh_schema(force=self._schema_ts <= 0)
         self._refresh_system_sections()
@@ -620,9 +631,13 @@ class TraceCardWidget(QWidget):
         self._timeline.set_selected(None)
         self._turn_list.clear_selection()
 
-    def _on_view_switch(self, key: str) -> None:
-        if isinstance(key, str) and key in ("duration", "turns", "calls"):
-            self._timeline.set_mode(key)
+    def _on_flag_toggled(self, key: str) -> None:
+        """顶栏三个开关 → 时间线 flags（可任意组合）。"""
+        self._timeline.set_flags(
+            self._flag_btns["duration"].isChecked(),
+            self._flag_btns["turns"].isChecked(),
+            self._flag_btns["calls"].isChecked(),
+        )
 
     def _on_follow_toggled(self, checked: bool) -> None:
         self._follow_tail = bool(checked)

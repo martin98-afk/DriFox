@@ -45,6 +45,16 @@ ENTRY_KIND_COLORS: Dict["EntryKind", str] = {
 
 _RGBA_RE = re.compile(r"rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*(?:,\s*([0-9.]+)\s*)?\)", re.I)
 
+# ── 「占用区间」参数（让时间线连贯，而不是一堆 0ms 碎片）──
+# 消息写入是瞬时事件（end=0），若直接用 end 画条带，整条时间线会碎成一排
+# 最小宽度的点 —— 视觉上就是「全部 0ms、不连贯」。
+# 改为把每条的占用延伸到「下一条的起点」，即 DeepSeek Harness / DevTools
+# Waterfall 的语义：这一项占用这段时间。
+# ⚠️ 同秒注入的多条消息间隔为 0（消息时间戳只有秒级精度）→ 间隔 0 就是瞬时，
+# **不要**保底成某个最小宽度，否则时长列会退化成「全是最小值 / 全是封顶值」。
+MIN_SPAN_S = 0.0  # 瞬时项的最小占用（秒）；仅作绘制保底，不参与数值
+GAP_CAP_S = 3.0  # 空闲间隔上限：用户思考 1 小时不该把条带拉成 1 小时
+
 
 class EntryKind(str, Enum):
     """轨迹条目类型 — 对应 DeepSeek Harness 的彩色 type 标签。
@@ -259,6 +269,47 @@ class TraceRecord:
         if self.end_ts <= self.start_ts:
             return 0
         return int((self.end_ts - self.start_ts) * 1000)
+
+    @property
+    def span_end_ts(self) -> float:
+        """占用区间终点（绘制用）。
+
+        有真实耗时（TOOL / ASSISTANT 由实时信号回填）→ 用 end_ts；
+        瞬时消息 → 延伸到「下一条的起点」（由 collector 算好放 meta["span_end"]），
+        上限 ``GAP_CAP_S``，让时间线是一条连续的带子而不是一排碎点。
+        """
+        if self.is_pending:
+            return time.time()
+        if self.end_ts > self.start_ts:
+            return self.end_ts
+        e = self.meta.get("span_end")
+        if e:
+            try:
+                return max(self.start_ts, float(e))
+            except Exception:
+                pass
+        # 兜底：collector 没预填（例如手工构造的记录）→ 视为瞬时，不伪造时长
+        return self.start_ts
+
+    @property
+    def span_ms(self) -> int:
+        """占用时长（毫秒）—— 与条带宽度一致。
+
+        ⚠️ 0 = 瞬时事件（同秒注入的消息写入，**没有**伪造一个保底值）。
+        早期版本给 0 间隔保底 80ms，导致时长列全是 80ms / 3s 两个怪值。
+        """
+        if self.start_ts <= 0:
+            return 0
+        return max(0, int((self.span_end_ts - self.start_ts) * 1000))
+
+    @property
+    def span_label(self) -> str:
+        """占用时长文案：``—`` / ``1.20 s`` / ``≥3.00 s``（被封顶时加 ≥）。"""
+        ms = self.span_ms
+        if ms <= 0:
+            return "—"
+        text = format_duration(ms)
+        return f"≥{text}" if self.meta.get("span_capped") else text
 
     @property
     def absolute_time(self) -> str:
@@ -499,12 +550,16 @@ def pretty_json(text: str, indent: int = 2) -> str:
 
 
 def time_bounds(records: list) -> Tuple[float, float]:
-    """一组记录的时间边界 (t0, t1)；无有效时间返回 (0.0, 1.0) 防除零。"""
+    """一组记录的时间边界 (t0, t1)；无有效时间返回 (0.0, 1.0) 防除零。
+
+    右端用 :attr:`TraceRecord.span_end_ts`（占用终点）而不是 ``end_ts`` ——
+    否则全是瞬时消息时 t1 == t0，时间线退化成一个点。
+    """
     starts = [r.start_ts for r in records if getattr(r, "start_ts", 0) > 0]
     if not starts:
         return 0.0, 1.0
     t0 = min(starts)
-    ends = [max(r.end_ts, r.start_ts) for r in records if getattr(r, "start_ts", 0) > 0]
+    ends = [max(r.span_end_ts, r.start_ts) for r in records if getattr(r, "start_ts", 0) > 0]
     t1 = max(ends) if ends else t0
     if t1 <= t0:
         t1 = t0 + 1.0

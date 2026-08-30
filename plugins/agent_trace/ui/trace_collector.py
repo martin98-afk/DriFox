@@ -32,6 +32,8 @@ from loguru import logger
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from .trace_models import (
+    GAP_CAP_S,
+    MIN_SPAN_S,
     EntryKind,
     TraceRecord,
     content_to_text,
@@ -388,7 +390,38 @@ class TraceCollector(QObject):
                     turn_no=0,
                 ),
             )
+        # ⚠️ 必须在 SYSTEM 合成**之后**再算占用终点：SYSTEM 插在最前面，
+        # 它会成为原第一条的「下一条」，直接影响第一条的 span。
+        self._fill_span_ends(records)
         return records
+
+    @staticmethod
+    def _fill_span_ends(records: List[TraceRecord]) -> None:
+        """给**没有真实耗时**的条目补占用终点 → 时间线连贯。
+
+        规则（写 ``meta["span_end"]`` / ``meta["span_capped"]``）：
+        - 有真实耗时（TOOL/ASSISTANT 由实时信号回填）→ 用 end_ts，不动；
+        - 否则占用 = 到下一条起点的间隔，封顶 ``GAP_CAP_S``（用户思考很久不该
+          把条带拉爆），封顶时打 ``span_capped`` 标记 → UI 显示 ``≥3.00 s``；
+        - ⚠️ 间隔为 0（**同秒注入**，消息时间戳只有秒级精度）就是瞬时事件，
+          span = 0。早期版本保底 80ms，结果时长列只剩「80ms / 3s」两个怪值。
+        """
+        for i, rec in enumerate(records):
+            if rec.start_ts <= 0:
+                continue
+            if rec.end_ts > rec.start_ts:
+                rec.meta["span_end"] = rec.end_ts
+                rec.meta.pop("span_capped", None)
+                continue
+            nxt = records[i + 1] if i + 1 < len(records) else None
+            gap = 0.0
+            if nxt is not None and nxt.start_ts > rec.start_ts:
+                gap = min(nxt.start_ts - rec.start_ts, GAP_CAP_S)
+            rec.meta["span_end"] = rec.start_ts + max(gap, MIN_SPAN_S)
+            if gap >= GAP_CAP_S:
+                rec.meta["span_capped"] = True
+            else:
+                rec.meta.pop("span_capped", None)
 
     def _tokens_for(self, msg_index: int, text: str) -> int:
         """带缓存的 token 估算。

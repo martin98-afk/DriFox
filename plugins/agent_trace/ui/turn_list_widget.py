@@ -57,14 +57,13 @@ FILTER_CHIPS = (
 )
 
 # 列定义：(key, 标题, 默认宽, 对齐)
-# 全部列宽按「紧凑优先」调过：Waterfall 不再内嵌时长文字（Time 列已有），
-# 所以能从 190 压到 128；Size 列换成更短的 Tokens（占用）。
+# 列宽按「紧凑优先」：Time 列已并入 Waterfall（条 + 右侧占用时长），
+# Size 列换成更短的 Tokens（占用）。
 _COLUMNS = (
     ("name", "Name", 0, Qt.AlignLeft),  # 0 = 自适应
     ("type", "Type", 78, Qt.AlignLeft),  # 实际宽由 set_type_width 按最长标签实测
     ("tokens", "Tokens", 58, Qt.AlignRight),
-    ("time", "Time", 66, Qt.AlignRight),
-    ("waterfall", "Waterfall", 128, Qt.AlignLeft),
+    ("waterfall", "Waterfall", 176, Qt.AlignLeft),
 )
 _PAD_L = 12
 _PAD_R = 12
@@ -109,7 +108,7 @@ class _HeaderWidget(QFrame):
 
     sortChanged = pyqtSignal(str, bool)  # (column_key, descending)
 
-    _ORDER = ("name", "type", "tokens", "time")
+    _ORDER = ("name", "type", "tokens", "waterfall")
 
     def __init__(self, cols: _Columns, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -194,7 +193,7 @@ class _HeaderWidget(QFrame):
                     else:
                         self._desc = True
                 else:
-                    self._sort_key, self._desc = key, key in ("tokens", "time")
+                    self._sort_key, self._desc = key, key in ("tokens", "waterfall")
                 self.sortChanged.emit(self._sort_key or "index", self._desc)
                 self.update()
                 return
@@ -345,19 +344,7 @@ class _RowDelegate(QStyledItemDelegate):
             painter.setPen(QColor(pal.text_muted))
             painter.drawText(tk_rect.adjusted(0, 0, -8, 0), Qt.AlignVCenter | Qt.AlignRight, format_tokens(rec.tokens))
 
-            # ── Time 列 ──
-            time_rect = cols.rect_of("time", rect.width(), rect.y(), rect.height())
-            if rec.is_error:
-                painter.setPen(QColor(pal.danger))
-            elif rec.is_pending:
-                painter.setPen(QColor(pal.warning))
-            else:
-                painter.setPen(QColor(pal.text_muted))
-            # 0 = 无精确耗时（瞬时消息写入）→ "—" 而非误导性 "0 ms"
-            meta_text = format_duration(rec.duration_ms) if rec.duration_ms > 0 else "—"
-            painter.drawText(time_rect.adjusted(0, 0, -8, 0), Qt.AlignVCenter | Qt.AlignRight, meta_text)
-
-            # ── Waterfall 列 ──
+            # ── Waterfall 列（条 + 右侧占用时长；点列头按时间排序）──
             wf_rect = cols.rect_of("waterfall", rect.width(), rect.y(), rect.height())
             self._paint_waterfall(painter, rec, wf_rect, color)
 
@@ -368,38 +355,52 @@ class _RowDelegate(QStyledItemDelegate):
             painter.restore()
 
     def _paint_waterfall(self, painter: QPainter, rec: TraceRecord, rect: QRect, color: QColor) -> None:
-        """行内迷你甘特条（Chrome Network 的 Waterfall 列）。
+        """行内迷你甘特条 + 右侧占用时长（Time 列已并入本列）。
 
-        列内**不再画时长文字** —— Time 列已经给了精确值，重复标注只会让列
-        变宽（旧版因此要 190px，现在 128px 够用）。
+        条带用 **span（占用区间）** 而不是 end_ts：瞬时消息 end=0，用 end 会让
+        所有条塌成最小宽度的碎点；数字同样显示 span_ms，与条宽一致。
         """
+        pal = self._pal
         t0, t1 = self._bounds
         span = max(1e-6, t1 - t0)
         track_y = rect.y() + (rect.height() - 10) // 2
-        track_w = max(30, rect.width() - 8)
+        label_w = 64  # 右侧占用时长文字位
+        track_w = max(30, rect.width() - label_w - 8)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(self._pal.track)
+        painter.setBrush(pal.track)
         painter.drawRoundedRect(QRectF(rect.x(), track_y, track_w, 10), 3, 3)
+
+        # 右侧时长文字（错误红 / 进行中金 / 完成暗）
+        painter.setFont(self._num_font(-2))
+        painter.setPen(QColor(pal.danger if rec.is_error else (pal.warning if rec.is_pending else pal.text_muted)))
+        painter.drawText(
+            QRect(rect.x() + track_w + 8, rect.y(), label_w, rect.height()),
+            Qt.AlignVCenter | Qt.AlignLeft,
+            rec.span_label,
+        )
 
         if rec.start_ts <= 0:
             return
         s = rec.start_ts
-        e = rec.end_ts if rec.end_ts > s else s
+        e = max(rec.span_end_ts, s)
         a = max(0.0, min(1.0, (s - t0) / span))
         b = max(0.0, min(1.0, (e - t0) / span))
         x0 = rect.x() + a * track_w
-        w = max(3.0, (b - a) * track_w)
+        w = (b - a) * track_w
+        # 瞬时事件（同秒注入，span=0）→ 画成 3px 竖线标记，而不是最小条带
         painter.setBrush(with_alpha(color, 150) if rec.is_pending else with_alpha(color, 215))
-        painter.drawRoundedRect(QRectF(x0, track_y, w, 10), 2, 2)
+        painter.drawRoundedRect(QRectF(x0, track_y, max(3.0, w), 10), 2 if w > 3 else 1, 2 if w > 3 else 1)
         if rec.is_pending:  # 未完成：条尾渐隐，视觉上"还在跑"
             painter.setBrush(with_alpha(color, 70))
-            painter.drawRoundedRect(QRectF(x0 + w, track_y, min(8, rect.right() - x0 - w), 10), 2, 2)
+            painter.drawRoundedRect(QRectF(x0 + w, track_y, min(8, rect.x() + track_w - x0 - w), 10), 2, 2)
 
 
 class TurnListWidget(QWidget):
     """中央表格：可排序列头 + QListWidget 条目（+ in-flight 尾巴）。"""
 
     recordSelected = pyqtSignal(int)  # record 索引（visible_records 空间）
+    # 用户点掉「时间区间」chip → 卡片同步清掉时间线上的选区
+    timeRangeCleared = pyqtSignal()
 
     def __init__(self, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -409,6 +410,8 @@ class TurnListWidget(QWidget):
         self._selected_rec_idx: Optional[int] = None
         self._filter_kind: Optional[EntryKind] = None
         self._search_text: str = ""
+        self._time_range: Optional[Tuple[float, float]] = None  # 时间线拖选出的区间
+        self._bounds = (0.0, 1.0)  # 会话时间边界（算区间相对秒数用）
         self._sort_key = "index"
         self._sort_desc = False
         self._pal = ThemePalette()
@@ -466,6 +469,17 @@ class TurnListWidget(QWidget):
             btn.clicked.connect(lambda _=False, k=kind: self.set_filter_kind(k))
             self._chip_group.addButton(btn)
             lay.addWidget(btn)
+
+        # 时间线拖选出的区间 chip（默认隐藏，点它清除时间过滤）
+        self._range_chip = QPushButton(bar)
+        self._range_chip.setObjectName("agentTraceRangeChip")
+        self._range_chip.setFixedHeight(24)
+        self._range_chip.setCursor(Qt.PointingHandCursor)
+        self._range_chip.setToolTip("点击清除时间区间过滤")
+        self._range_chip.clicked.connect(self._on_range_chip_clicked)
+        self._range_chip.hide()
+        lay.addWidget(self._range_chip)
+
         lay.addStretch(1)
         self._count_label = QLabel(bar)
         lay.addWidget(self._count_label)
@@ -524,9 +538,45 @@ class TurnListWidget(QWidget):
         self._filter_kind = kind
         self._refilter()
 
+    # ──────────────────── 时间区间过滤（时间线拖选）────────────────────
+
+    def set_time_range(self, t0: Optional[float], t1: Optional[float]) -> None:
+        """只保留与 [t0, t1] **有重叠**的条目；传 None 清除过滤。"""
+        if t0 is None or t1 is None:
+            self._time_range = None
+        else:
+            self._time_range = (min(t0, t1), max(t0, t1))
+        self._update_range_chip()
+        self._refilter()
+
+    def clear_time_range(self) -> None:
+        """外部（时间线空白单击）清除过滤 —— 不回发 timeRangeCleared，避免回环。"""
+        self._time_range = None
+        self._update_range_chip()
+        self._refilter()
+
+    def _on_range_chip_clicked(self) -> None:
+        self._time_range = None
+        self._update_range_chip()
+        self._refilter()
+        self.timeRangeCleared.emit()
+
+    def _update_range_chip(self) -> None:
+        rng = self._time_range
+        if rng is None:
+            self._range_chip.hide()
+            return
+        base = self._bounds[0] if self._bounds[0] > 0 else 0.0
+        a = max(0.0, rng[0] - base)
+        b = max(0.0, rng[1] - base)
+        self._range_chip.setText(f"{a:.1f}s – {b:.1f}s  ✕")
+        self._range_chip.show()
+
     def set_bounds(self, t0: float, t1: float) -> None:
-        """注入时间边界（与顶部时间线共用比例）→ Waterfall 列。"""
+        """注入时间边界（与顶部时间线共用比例）→ Waterfall 列 + 区间 chip 文案。"""
+        self._bounds = (t0, t1)
         self._delegate.set_bounds(t0, t1)
+        self._update_range_chip()
         self._list.viewport().update()
 
     def repaint_pending(self) -> None:
@@ -601,6 +651,13 @@ class TurnListWidget(QWidget):
             f"QFrame#agentTraceFilterBar QPushButton:checked {{"
             f"  color: {pal.q('accent')}; border: 1px solid {pal.q('accent')};"
             f"  background: {pal.q('accent', 26)}; }}"
+            # 时间区间 chip：虚线边框 + 更具体的选择器（盖掉上面的通用规则）
+            f"QFrame#agentTraceFilterBar QPushButton#agentTraceRangeChip {{"
+            f"  color: {pal.q('accent')}; border: 1px dashed {pal.q('accent')};"
+            f"  background: {pal.q('accent', 22)}; padding: 0 8px;"
+            f"  font-family: '{pal.font_family}'; font-size: {max(10, fs - 2)}px; }}"
+            f"QFrame#agentTraceFilterBar QPushButton#agentTraceRangeChip:hover {{"
+            f"  background: {pal.q('accent', 44)}; }}"
         )
         self._count_label.setStyleSheet(
             f"color: {pal.q('text_muted')}; font-family: '{pal.font_family}'; font-size: {max(10, fs - 2)}px;"
@@ -629,6 +686,11 @@ class TurnListWidget(QWidget):
     def _match(self, rec: TraceRecord) -> bool:
         if self._filter_kind is not None and rec.kind != self._filter_kind:
             return False
+        if self._time_range is not None:
+            # 用「占用区间与选区是否重叠」判定：跨越选区边界的长条目也该留下
+            t0, t1 = self._time_range
+            if rec.start_ts <= 0 or rec.start_ts > t1 or rec.span_end_ts < t0:
+                return False
         if self._search_text:
             hay = f"{rec.label}\n{rec.preview}\n{rec.raw}".lower()
             if self._search_text not in hay:
@@ -642,8 +704,8 @@ class TurnListWidget(QWidget):
         reverse = self._sort_desc
         if self._sort_key == "tokens":
             key = lambda i: self._records[i].tokens  # noqa: E731
-        elif self._sort_key == "time":
-            key = lambda i: max(0, self._records[i].duration_ms)  # noqa: E731
+        elif self._sort_key == "waterfall":
+            key = lambda i: self._records[i].start_ts or 0.0  # noqa: E731
         elif self._sort_key == "type":
             key = lambda i: self._records[i].kind.value  # noqa: E731
         else:  # name
