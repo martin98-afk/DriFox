@@ -689,7 +689,12 @@ class TurnListWidget(QWidget):
         if self._time_range is not None:
             # 用「占用区间与选区是否重叠」判定：跨越选区边界的长条目也该留下
             t0, t1 = self._time_range
-            if rec.start_ts <= 0 or rec.start_ts > t1 or rec.span_end_ts < t0:
+            s = rec.start_ts if rec.start_ts > 0 else 0.0
+            e = rec.span_end_ts if rec.span_end_ts > s else s
+            # 完全无时间信息（s==e==0）→ 无法判断与选区关系，剔除
+            if e <= 0:
+                return False
+            if s > t1 or e < t0:
                 return False
         if self._search_text:
             hay = f"{rec.label}\n{rec.preview}\n{rec.raw}".lower()

@@ -78,6 +78,10 @@ class TimelinePanel(QWidget):
         self._selected_idx: Optional[int] = None
         self._hover_idx: Optional[int] = None
         self._hit_areas: List[Tuple[QRect, int]] = []
+        # 条带像素几何（idx → (bx0, bx1)）。让 _x_to_time / _time_to_x 与
+        # _x_ratio 走同一套几何，避免等宽模式下拖选算出来的时间戳跟视觉位置
+        # 对不上（根因 1）。
+        self._bar_x: Dict[int, Tuple[int, int]] = {}
         self._pal = ThemePalette()
         self._base_px = 13
         # ── 选区状态 ──
@@ -211,6 +215,7 @@ class TimelinePanel(QWidget):
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
         self._hit_areas = []
+        self._bar_x = {}
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setRenderHint(QPainter.TextAntialiasing, True)
@@ -242,13 +247,61 @@ class TimelinePanel(QWidget):
     # ──────────────────── 时间选区（DevTools Overview 拖选）────────────────────
 
     def _x_to_time(self, x: int) -> float:
-        w = max(1, self._track_w)
-        ratio = (x - self._track_x) / w
-        return self._t0 + max(0.0, min(1.0, ratio)) * (self._t1 - self._t0)
+        """x → 时间戳。与 ``_x_ratio`` 走同一套几何（条带宽度语义由 flag 决定）。
+
+        - 落在某条条带 [bx0, bx1] 内 → 在该记录的 (start_ts, span_end_ts) 上插值
+        - 落在空白处（段间隙 / 最左/最右外） → 边界外推 + 兜底到 _t0/_t1
+        """
+        if not self._bar_x:
+            return self._t0
+        idx, bx0, bx1 = self._bar_x_lookup(x)
+        rec = self._records[idx] if 0 <= idx < len(self._records) else None
+        if rec is None:
+            return self._t0
+        s = rec.start_ts if rec.start_ts > 0 else self._t0
+        e = max(rec.span_end_ts, s)
+        if e <= s:
+            return s
+        ratio = max(0.0, min(1.0, (x - bx0) / max(1, bx1 - bx0)))
+        return s + ratio * (e - s)
 
     def _time_to_x(self, t: float) -> int:
-        span = max(1e-6, self._t1 - self._t0)
-        return int(self._track_x + max(0.0, min(1.0, (t - self._t0) / span)) * self._track_w)
+        """时间戳 → x。与 ``_x_to_time`` 对称，保证选区高亮画到正确位置。"""
+        if not self._bar_x:
+            return self._track_x
+        for idx, (bx0, bx1) in self._bar_x.items():
+            rec = self._records[idx] if 0 <= idx < len(self._records) else None
+            if rec is None:
+                continue
+            s = rec.start_ts if rec.start_ts > 0 else self._t0
+            e = max(rec.span_end_ts, s)
+            if s <= t <= e:
+                span = max(1e-6, e - s)
+                ratio = (t - s) / span
+                return int(bx0 + ratio * (bx1 - bx0))
+        # t 在所有条带外：取首/尾端点
+        keys = sorted(self._bar_x.keys(), key=lambda i: self._bar_x[i][0])
+        if not keys:
+            return self._track_x
+        if t < self._t0:
+            return int(self._bar_x[keys[0]][0])
+        return int(self._bar_x[keys[-1]][1])
+
+    def _bar_x_lookup(self, x: int) -> Tuple[int, int, int]:
+        """在 ``_bar_x`` 里找 x 落点 → (idx, bx0, bx1)。找不到时取最近端点。"""
+        # 落在哪个条带内（条带可能重叠：同一 idx 在多泳道被画，但 _bar_x 用 idx
+        # 去重，最后一个写入为准——按当前实现 _paint_lane 是按泳道循环，同一
+        # 条目只会出现在自己所属泳道，重叠只在 Calls 关时极少发生）。
+        for idx, (bx0, bx1) in self._bar_x.items():
+            if bx0 <= x <= bx1:
+                return idx, bx0, bx1
+        # 空白处：取最左/最右端点
+        keys = sorted(self._bar_x.keys(), key=lambda i: self._bar_x[i][0])
+        if x < self._bar_x[keys[0]][0]:
+            first = keys[0]
+            return first, self._bar_x[first][0], self._bar_x[first][0]
+        last = keys[-1]
+        return last, self._bar_x[last][1], self._bar_x[last][1]
 
     def _paint_range(self, painter: QPainter) -> None:
         """已确认选区（半透明高亮 + 两侧边界线）与拖拽中的橡皮筋。"""
@@ -319,6 +372,7 @@ class TimelinePanel(QWidget):
             if rec.lane != lane:
                 continue
             bx0, bx1 = self._x_ratio(rec, idx, len(recs), t0, t1, track_x, track_w)
+            self._bar_x[idx] = (int(bx0), int(bx1))
             raw_w = int(bx1 - bx0)
             # 瞬时事件（span=0，同秒注入）画成 3px 竖线标记，圆角也收敛
             instant = raw_w <= 4

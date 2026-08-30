@@ -20,7 +20,7 @@
     └──────────────────────────────────────────────────────────────┘
 
 v4 相对 v3 的变化：
-- **工具条独占一行**（过滤 chips + 搜索 + 视图切换 + 清除 / 跟随）。
+- **工具条独占一行**（过滤 chips + 搜索 + 视图切换）。
 - **时间线独占一行且横跨全宽**（v3 挤在左栏顶部，宽度只有一半）。
 - **列表与详情同一行**（水平 splitter）。
 - 列表升级为 Network 风格多列表格（Name/Type/Size/Time/Waterfall + 排序）。
@@ -132,7 +132,6 @@ class TraceCardWidget(QWidget):
         self._context_limit: int = 0
         self._pal = ThemePalette()
         self._fs = 13
-        self._follow_tail = True
         self._schema_ts = 0.0
         self._build_ui()
         self._build_timer()
@@ -178,8 +177,6 @@ class TraceCardWidget(QWidget):
         self._turn_list.timeRangeCleared.connect(self._timeline.clear_range)
         self._detail.dismissRequested.connect(self._on_detail_dismissed)
         self._search_box.textChanged.connect(self._turn_list.set_search)
-        self._clear_btn.clicked.connect(self._on_clear_clicked)
-        self._follow_btn.clicked.connect(self._on_follow_toggled)
 
     def _build_top_bar(self) -> QWidget:
         bar = QFrame(self)
@@ -225,20 +222,6 @@ class TraceCardWidget(QWidget):
         self._search_box.setFixedHeight(28)
         self._search_box.setClearButtonEnabled(True)
         layout.addWidget(self._search_box)
-
-        self._follow_btn = QPushButton("跟随", bar)
-        self._follow_btn.setCheckable(True)
-        self._follow_btn.setChecked(True)
-        self._follow_btn.setFixedHeight(26)
-        self._follow_btn.setCursor(Qt.PointingHandCursor)
-        self._follow_btn.setToolTip("有新条目时自动滚动到最新一条")
-        layout.addWidget(self._follow_btn)
-
-        self._clear_btn = QPushButton("清除", bar)
-        self._clear_btn.setFixedHeight(26)
-        self._clear_btn.setCursor(Qt.PointingHandCursor)
-        self._clear_btn.setToolTip("清空当前轨迹缓存并重新采集（不影响会话消息）")
-        layout.addWidget(self._clear_btn)
         return bar
 
     def _build_bottom_bar(self) -> QWidget:
@@ -502,8 +485,6 @@ class TraceCardWidget(QWidget):
         self._sync_bounds(vis)
         self._detail.set_records(vis)
         self._refresh_stats(vis)
-        if self._follow_tail:
-            self._scroll_to_last()
 
     def _on_records_updated(self, start: int, count: int) -> None:
         self._turn_list.update_records(start, count)
@@ -522,8 +503,6 @@ class TraceCardWidget(QWidget):
         self._turn_list.set_tail(tail)
         self._timeline.set_records(self._visible())
         self._refresh_stats(self._visible())
-        if self._follow_tail and tail:
-            self._scroll_to_last()
 
     def _on_context_updated(self, tokens: int, limit: int) -> None:
         self._context_tokens, self._context_limit = tokens, limit
@@ -537,9 +516,6 @@ class TraceCardWidget(QWidget):
             self._turn_list.repaint_pending()
         if c is not None:
             self._dot.set_state("busy" if c.has_pending else "idle")
-
-    def _scroll_to_last(self) -> None:
-        self._turn_list.scroll_to_bottom()
 
     # ──────────────────── 工具 schema / 系统提示词 ────────────────────
 
@@ -638,20 +614,6 @@ class TraceCardWidget(QWidget):
             self._flag_btns["turns"].isChecked(),
             self._flag_btns["calls"].isChecked(),
         )
-
-    def _on_follow_toggled(self, checked: bool) -> None:
-        self._follow_tail = bool(checked)
-        if checked:
-            self._scroll_to_last()
-
-    def _on_clear_clicked(self) -> None:
-        """清空轨迹缓存（timing / in-flight）并重新采集 — 对齐 Network 的 Clear。"""
-        c = self._collector
-        if c is None:
-            return
-        self._schema_ts = 0.0
-        c.reset()
-        self._pull_records()
 
     # ──────────────────── 底部汇总 ────────────────────
 
