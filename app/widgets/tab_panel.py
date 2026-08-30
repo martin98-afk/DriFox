@@ -103,6 +103,12 @@ _PANEL_MODE_OPTIONS = (
     (PANEL_MODE_TREE, "工作区树模式", "按项目 / 工作树归组"),
 )
 
+# 顶部标题文案随模式切换（列表模式=「对话页」/树模式=「工作区」）
+_PANEL_MODE_TITLES = {
+    PANEL_MODE_LIST: "对话页",
+    PANEL_MODE_TREE: "工作区",
+}
+
 
 # 项目头像（缩写 + 稳定色）缓存：颜色由 crc32(name) 决定，与会话无关，可安全缓存。
 # ⚠️ 延迟导入 project_selector_card —— 它是设置页的重模块，模块级 import 会拖慢启动。
@@ -2557,6 +2563,10 @@ class TabPanel(QWidget):
             persist: 是否写入 Settings（启动时恢复上次选择）
         """
         mode = PANEL_MODE_TREE if mode == PANEL_MODE_TREE else PANEL_MODE_LIST
+        # 实际发生切换 + 目标是工作区树模式 → 弹「开发测试中」提醒
+        # 启动恢复路径不走 set_mode，所以启动不会触发；同模式重复点选也不会触发。
+        if mode == PANEL_MODE_TREE and mode != self._mode:
+            self._warn_tree_mode_in_dev()
         if persist and mode != self._mode:
             try:
                 Settings.get_instance().tab_panel_mode.value = mode
@@ -2564,6 +2574,29 @@ class TabPanel(QWidget):
                 pass
         self._mode = mode
         self._apply_mode_visibility()
+
+    def _warn_tree_mode_in_dev(self):
+        """切到工作区树模式时弹出 mask dialog 提醒「开发测试中，谨慎使用」
+
+        复用 app.widgets.common_dialogs.InfoDialog，保持项目统一弹窗风格。
+        弹窗失败/异常不影响切换 —— 提醒是辅助的，不应阻断用户操作。
+        """
+        try:
+            from app.widgets.common_dialogs import InfoDialog
+
+            host = self.window()
+            dialog = InfoDialog(
+                title="工作区模式 · 开发中",
+                content=(
+                    "工作区模式（按项目 / 工作树归组）功能仍在开发测试中，\n"
+                    "可能存在不稳定或边界 case，请谨慎使用并留意后续更新。"
+                ),
+                confirm_text="知道了",
+                parent=host if host is not None else self,
+            )
+            dialog.exec_()
+        except Exception:
+            logger.exception("工作区模式提醒弹窗失败")
 
     def _apply_mode_visibility(self, rebuild: bool = True):
         """按「当前模式 + 折叠态」决定两个滚动区的可见性并重建对应布局
@@ -2582,6 +2615,12 @@ class TabPanel(QWidget):
             self._scroll_area.setVisible(not tree_active)
         if self._tree_widget is not None:
             self._tree_widget.set_compact(self._collapsed)
+        # 顶部标题文案跟模式走：列表模式=「对话页」/树模式=「工作区」
+        # 折叠态下标题被收起隐藏，文字不影响视觉，但保持同步避免展开后闪现旧文案。
+        title = _PANEL_MODE_TITLES.get(self._mode, "对话页")
+        if hasattr(self, "_sessions_label") and self._sessions_label is not None:
+            if self._sessions_label.text() != title:
+                self._sessions_label.setText(title)
         # ⚠️ 切换容器后两侧布局都被搬空过，必须作废两边的快照缓存：
         # 否则 _rebuild_team_layout / _rebuild_tree_layout 会因签名未变直接
         # return —— 表现为「切回列表后空白」或「树模式专属状态没复位」。
@@ -2721,7 +2760,7 @@ class TabPanel(QWidget):
             backend = history = memory = None
 
         open_sids = self._open_session_ids(windows)
-        owners = self._normalize_owners(self._tab_owners(windows))
+        owners = self._tab_owners(windows)
 
         # ── 项目集合：历史项目 + 已打开 Tab 的项目，当前项目置顶 ──
         try:
@@ -2760,10 +2799,32 @@ class TabPanel(QWidget):
 
         for project in projects:
             plain = plain_by_project.get(project, [])
-            opened_here = [o for o in owners if o[0] == project]
-            has_open = bool(opened_here)
+            # ── 已登记的真实 git worktree（关键文档里 added_by=git_worktree）──
+            registered: List[str] = []
+            try:
+                if memory is not None:
+                    for doc in memory.get_key_documents(project) or []:
+                        if str(doc.get("added_by") or "") != "git_worktree":
+                            continue
+                        path = (doc.get("file_path") or "").strip()
+                        if path and os.path.isdir(path) and path not in registered:
+                            registered.append(path)
+            except Exception:
+                pass
+            # ⚠️ 归一：目录已不存在 / 主仓库根目录 / 临时工作目录 一律回落到主仓库("")。
+            # 否则会话会挂到一个「与项目同名的幽灵工作树」下 —— 典型是
+            # ~/.drifox/workspaces/<项目名> 这类没落地的临时工作目录。
+            plain_pairs = [
+                (r, self._resolve_worktree((r.get("worktree_path") or "").strip(), registered)) for r in plain
+            ]
+            opened_pairs = [
+                (i, self._resolve_worktree(wt, registered), tid)
+                for i, (p, wt, tid) in enumerate(owners)
+                if p == project
+            ]
+            has_open = bool(opened_pairs)
             # 含已激活对话页的工作树默认展开：占着后端的会话不能被折叠藏起来
-            open_worktrees = {wt for p, wt, _tid in owners if p == project}
+            open_worktrees = {wt for _i, wt, _tid in opened_pairs if wt}
             p_initials, p_color = _project_icon_data(project)
             specs.append(
                 TreeNodeSpec(
@@ -2782,46 +2843,36 @@ class TabPanel(QWidget):
                             lambda _p=project: self._open_project_memory(_p),
                         ),
                     ),
-                    count=len(plain) + len(opened_here),
-                    active_count=len(opened_here),
+                    count=len(plain_pairs) + len(opened_pairs),
+                    active_count=len(opened_pairs),
                     project=project,
                     worktree="",
-                    tooltip=f"项目：{project}\n历史会话 {len(plain)} · 已激活 {len(opened_here)}",
+                    tooltip=f"项目：{project}\n历史会话 {len(plain_pairs)} · 已激活 {len(opened_pairs)}",
                     bold=True,
                     expanded_by_default=(project == cur_project or has_open),
                 )
             )
 
-            # 工作树：主仓库() + 会话记录里的 + 已登记的 git worktree + 已打开 Tab 的
+            # 工作树：主仓库("") + 会话记录里的 + 已登记的 git worktree + 已打开 Tab 的
+            # 三路来源都已经过 _resolve_worktree 归一，非真工作树 / 已删除目录不会进来。
             worktrees = [""]
             seen = {""}
-            for rec in plain:
-                wt = (rec.get("worktree_path") or "").strip()
+            for _rec, wt in plain_pairs:
                 if wt not in seen:
                     seen.add(wt)
                     worktrees.append(wt)
-            try:
-                if memory is not None:
-                    for doc in memory.get_key_documents(project) or []:
-                        if str(doc.get("added_by") or "") != "git_worktree":
-                            continue
-                        path = (doc.get("file_path") or "").strip()
-                        if path and path not in seen:
-                            seen.add(path)
-                            worktrees.append(path)
-            except Exception:
-                pass
-            for proj, wt, _team in owners:
-                if proj == project and wt not in seen:
+            for wt in registered:
+                if wt not in seen:
                     seen.add(wt)
                     worktrees.append(wt)
-            # ⚠️ 目录已被外部删除（手工删目录 / git worktree prune）的工作树不再显示，
-            # 否则会残留一堆点开就报错的幽灵节点。主仓库（""）恒保留。
-            worktrees = [wt for wt in worktrees if not wt or os.path.isdir(wt)]
+            for _i, wt, _tid in opened_pairs:
+                if wt not in seen:
+                    seen.add(wt)
+                    worktrees.append(wt)
 
             for wt in worktrees:
                 label = "主仓库" if not wt else (os.path.basename(wt.rstrip("/\\")) or wt)
-                children = [r for r in plain if (r.get("worktree_path") or "").strip() == wt]
+                children = [r for r, w in plain_pairs if w == wt]
                 specs.append(
                     TreeNodeSpec(
                         key=f"worktree:{project}|{wt}",
@@ -2831,7 +2882,7 @@ class TabPanel(QWidget):
                         icon="根目录" if not wt else "分支",
                         count=len(children),
                         # 该工作树下已激活的对话页（团队成员会话也平铺在这里，一并计入）
-                        active_count=len([o for o in opened_here if o[1] == wt]),
+                        active_count=len([1 for _i, w, _t in opened_pairs if w == wt]),
                         project=project,
                         worktree=wt,
                         tooltip=wt or f"{project} · 主仓库",
@@ -2839,8 +2890,8 @@ class TabPanel(QWidget):
                     )
                 )
                 # 已打开的对话页（含团队成员：树模式不渲染团队框，成员平铺到这里）
-                for i, (proj, wt_i, _team_id) in enumerate(owners):
-                    if proj != project or wt_i != wt:
+                for i, w, _tid in opened_pairs:
+                    if w != wt:
                         continue
                     self._items[i].set_indent(_TREE_INDENT_TAB)
                     specs.append(
@@ -2873,13 +2924,31 @@ class TabPanel(QWidget):
         return specs
 
     @staticmethod
-    def _normalize_owners(owners):
-        """工作树目录已被删除的已打开对话页回落到主仓库（""）
+    def _resolve_worktree(wt: str, registered) -> str:
+        """把一个「工作目录路径」归一到树里的一个工作树节点，"" 表示主仓库
 
-        一箭双雕：既让消失的工作树节点不再出现在树里，也保证这些对话页不会因为
-        失去归属节点而从树中蒸发（树里看不到 = 关不掉，是最糟的失败形态）。
+        会话记录里的 worktree_path 存的是**当前工作目录**，不一定是工作树：它可能是
+        主仓库根目录、~/.drifox/workspaces/<项目名> 这类临时目录，或者指向一个已被
+        外部删除的路径。直接拿它建节点就会长出「与项目同名的幽灵工作树」。
+
+        判定顺序（全走文件系统判断，**不起 git 子进程** —— 本方法在树每次重建时
+        对每条会话调用一次，起子进程会把侧栏卡住）：
+        1. 空 / 目录已不存在 → 主仓库
+        2. 命中已登记的真实 worktree（关键文档 added_by=git_worktree）→ 原样
+        3. 位于某个已登记 worktree 之下 → 归到该 worktree
+        4. .git 是**文件**（git worktree 的特征）→ 原样
+        5. 其余（主仓库根目录 / 临时工作目录 / 非 git 目录）→ 主仓库
         """
-        return [(p, (wt if (not wt or os.path.isdir(wt)) else ""), t) for p, wt, t in owners]
+        if not wt or not os.path.isdir(wt):
+            return ""
+        norm = os.path.normcase(os.path.normpath(wt))
+        for known in registered or ():
+            kn = os.path.normcase(os.path.normpath(known))
+            if norm == kn:
+                return known
+            if norm.startswith(kn.rstrip(os.sep) + os.sep):
+                return known
+        return wt if os.path.isfile(os.path.join(wt, ".git")) else ""
 
     def _open_project_memory(self, project: str):
         """项目根「管理工作树」快捷入口

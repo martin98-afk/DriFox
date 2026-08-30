@@ -278,12 +278,20 @@ class _NodeHeader(QFrame):
         self._title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         layout.addWidget(self._title, 1)
 
-        # 「已激活 N」胶囊：折叠时也能看到还有几个会话占着后端
-        self._active_label = QLabel("", self)
-        self._active_label.setStyleSheet("background: transparent;")
-        self._active_label.setToolTip("已激活的对话页（每个占用一个后端）")
-        self._active_label.setVisible(False)
-        layout.addWidget(self._active_label)
+        # 「已激活」标记：左侧 INFO 蓝小圆点 + 数字
+        # 之前是满色蓝底白字胶囊，跟旁边 muted 灰计数对比权重过大，太扎眼；
+        # 拆成 dot + 数字后只剩一个 6px 的色点，远看像列表里常见的「未读/激活」点。
+        self._active_dot = QLabel("", self)
+        self._active_dot.setFixedSize(6, 6)
+        self._active_dot.setStyleSheet(f"background: {Colors.INFO}; border-radius: 3px;")
+        self._active_dot.setVisible(False)
+        layout.addWidget(self._active_dot)
+
+        self._active_num = QLabel("", self)
+        self._active_num.setStyleSheet("background: transparent;")
+        self._active_num.setToolTip("已激活的对话页（每个占用一个后端）")
+        self._active_num.setVisible(False)
+        layout.addWidget(self._active_num)
 
         self._count_label = QLabel("", self)
         self._count_label.setStyleSheet("background: transparent;")
@@ -319,9 +327,9 @@ class _NodeHeader(QFrame):
         if self._count_label.text() != count_text:
             self._count_label.setText(count_text)
         self._active_count = int(spec.active_count or 0)
-        active_text = f"{self._active_count} 激活" if self._active_count > 0 else ""
-        if self._active_label.text() != active_text:
-            self._active_label.setText(active_text)
+        num_text = str(self._active_count) if self._active_count > 0 else ""
+        if self._active_num.text() != num_text:
+            self._active_num.setText(num_text)
         self._sync_badges()
         if spec.icon != self._icon_name:
             self._icon_name = spec.icon
@@ -367,7 +375,8 @@ class _NodeHeader(QFrame):
                 btn.setVisible(False)
                 # ⚠️ 不设这个，点击会同时冒泡到头行的 mousePressEvent → 折叠/展开
                 btn.setAttribute(Qt.WA_NoMousePropagation, True)
-                btn.clicked.connect(cb)
+                # ⚠️ QToolButton.clicked 带 checked 形参，包一层转成无参回调
+                btn.clicked.connect(lambda _c=False, _cb=cb: _cb())
                 lay.insertWidget(lay.indexOf(self._new_btn), btn)
                 self._action_btns.append(btn)
         else:
@@ -377,7 +386,7 @@ class _NodeHeader(QFrame):
                     btn.clicked.disconnect()
                 except Exception:
                     pass
-                btn.clicked.connect(cb)
+                btn.clicked.connect(lambda _c=False, _cb=cb: _cb())
 
     def _sync_badges(self):
         """计数徽标 / 已激活胶囊的可见性：有文本 且 非紧凑态才显示
@@ -386,8 +395,10 @@ class _NodeHeader(QFrame):
         setVisible(True) 又会在文本为空时渲染出空药丸。统一收敛到这里。
         """
         shown = not self._compact
+        has_active = self._active_count > 0
+        self._active_dot.setVisible(has_active and shown)
+        self._active_num.setVisible(has_active and shown)
         self._count_label.setVisible(bool(self._count_label.text()) and shown)
-        self._active_label.setVisible(bool(self._active_label.text()) and shown)
 
     # ── 状态 ─────────────────────────────────────────────────────
     def set_expanded(self, expanded: bool, animate: bool = True):
@@ -418,10 +429,14 @@ class _NodeHeader(QFrame):
             f"{get_font_family_css()} {font_size_css(12)};"
             + (" font-weight: bold;" if self._spec_bold else "")
         )
-        self._active_label.setFont(get_unified_font(10))
-        self._active_label.setStyleSheet(
-            f"color: white; background: {Colors.INFO}; border-radius: 7px; "
-            f"padding: 0px 6px; {get_font_family_css()} {font_size_css(10)};"
+        # 已激活指示：6px INFO 圆点 + muted 灰数字（不再是满色胶囊）
+        self._active_dot.setStyleSheet(
+            f"background: {Colors.INFO}; border-radius: 3px;"
+        )
+        self._active_num.setFont(get_unified_font(10))
+        self._active_num.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} {font_size_css(10)};"
         )
         self._count_label.setFont(get_unified_font(10))
         self._count_label.setStyleSheet(
