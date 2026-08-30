@@ -86,12 +86,24 @@ def _desc_param(example: str) -> dict:
     return mod.description_param(example)
 
 
-def _desc_preview(preview_fn):
-    """包装 preview 闭包：优先展示大模型填写的 description（模块缺失时原样返回）"""
+def _desc_preview(preview_fn, tail_fn=None):
+    """包装 preview 闭包：优先展示大模型填写的 description（模块缺失时原样返回）
+
+    tail_fn 非空时拼成 "description (tail)"——编辑类工具用它把文件路径留在折叠头上。
+    """
     mod = _tool_desc_loader()
     if not mod:
         return preview_fn
-    return mod.prefer_description(preview_fn)
+    return mod.prefer_description(preview_fn, tail_fn)
+
+
+def _file_path_tail(tool_args: dict) -> str:
+    """编辑类工具的 tail：相对路径（与 _make_file_preview 取路径的键一致）"""
+    tool_args = tool_args or {}
+    raw = tool_args.get("path") or tool_args.get("file_path") or ""
+    if not raw:
+        return ""
+    return _to_rel_path_loader()(raw)
 
 
 GROUP_READ = "文件读取"
@@ -1076,7 +1088,7 @@ def register(registry):
         danger="dangerous", icon="编辑", cn_name="写入",
         group=GROUP_WRITE, description="覆盖/创建文件",
         aliases=["Write", "WriteFile", "CreateFile", "create_file"],
-        preview=_desc_preview(_make_file_preview("write")),
+        preview=_desc_preview(_make_file_preview("write"), _file_path_tail),
         summarize=_make_file_summarize("write"),
         render=_render_edit_diff_body,  # 全部 diff 渲染走插件闭包（主程序无兜底）
         keep_in_content=True,  # diff 卡常驻正文，不迁入工具折叠区
@@ -1089,7 +1101,7 @@ def register(registry):
         aliases=["Edit", "TextEdit", "ReplaceInFile", "replace"],
         render=_render_edit_diff_body,
         keep_in_content=True,
-        preview=_desc_preview(_make_file_preview("edit")),
+        preview=_desc_preview(_make_file_preview("edit"), _file_path_tail),
         summarize=_make_file_summarize("edit"),
         # reconstruct_diff：历史消息 diff 缺失时，渲染层按 operations 参数重建伪 diff
         # （仅 edit 的 operations/anchor/lines 结构支持重建）
@@ -1102,7 +1114,7 @@ def register(registry):
         aliases=["MultiEdit", "MultiEditTool"],
         render=_render_edit_diff_body,
         keep_in_content=True,
-        preview=_desc_preview(_make_file_preview("multi_edit")),
+        preview=_desc_preview(_make_file_preview("multi_edit"), _file_path_tail),
         summarize=_make_file_summarize("multi_edit"),
         metadata={"permission_arg": "filePath"},
     )
