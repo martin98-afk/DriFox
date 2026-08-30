@@ -1278,7 +1278,13 @@ class TabPanel(QWidget):
         system_infos: list[tuple[str, str, str, str, int]] = []
         custom_infos: list[tuple[str, str, str, str, int]] = []
         for info in sidebar_items:
-            entry = ("sidebar", info.item_id, (info.label or "").strip() or info.item_id, info.plugin_name, info.priority)
+            entry = (
+                "sidebar",
+                info.item_id,
+                (info.label or "").strip() or info.item_id,
+                info.plugin_name,
+                info.priority,
+            )
             if info.group == "system":
                 system_infos.append(entry)
             else:
@@ -1370,6 +1376,12 @@ class TabPanel(QWidget):
                 row.clicked.connect(lambda cid=key: self._on_ui_plugin_clicked(cid))
                 row.positionRequested.connect(self._on_ui_plugin_position_requested)
             self._custom_plugin_layout.addWidget(row)
+            # 显式 show：清除 Qt 的 hidden 标志。折叠/展开态刷新时 scroll 被强制
+            # 隐藏重建，未 show 的新行会被 QWidgetItem 视为空（sizeHint 贡献 0），
+            # section.sizeHint 塌成 margins 高（4px），刷新末尾
+            # _update_custom_plugin_scroll_height 读到 4 把列表高度锁死为"最矮"，
+            # 需手动折叠/展开才能恢复。show() 仅清标志，父链隐藏时不会实际显示。
+            row.show()
             self._custom_plugin_buttons.append(row)
         has_custom = bool(custom_infos)
         self._custom_plugin_card.setVisible(has_custom)
@@ -1387,16 +1399,12 @@ class TabPanel(QWidget):
         self._refresh_plugin_style()
 
         # 重建后重新应用紧凑 UI：
-        # - 折叠态（self._collapsed=True）：_update_toggle_button 已按 saved_state
-        #   恢复 scroll 可见性，无需二次干预。
-        # - 展开态（self._collapsed=False）：force reset 把 scroll 藏起来了，需按
-        #   重建前的用户选择 prev_custom_expanded 恢复。去掉对
-        #   `_custom_plugin_saved_state is None` 的依赖——prev_custom_expanded
-        #   在 force reset 前已记录，覆盖了 saved_state 的展开分支遗留场景，
-        #   避免任何 saved_state 残留（如初始化期未清空）导致恢复被跳过、
-        #   用户手动展开的列表在刷新后被强制折叠。
+        # - 折叠态：按 saved_state 应用（上面 scroll 被重置为默认折叠，新行未 compact）
+        # - 展开态：无 saved_state 时 _update_toggle_button 保持当前状态不变；
+        #   但上面已强制 setVisible(False)，需用重建前的用户选择恢复，
+        #   避免手动展开的自定义插件列表在刷新（热更新/新增插件）后被强制折叠
         self._update_toggle_button()
-        if not self._collapsed:
+        if not self._collapsed and getattr(self, "_custom_plugin_saved_state", None) is None:
             self._custom_plugin_scroll.setVisible(prev_custom_expanded)
             self._custom_plugin_arrow.set_expanded(prev_custom_expanded)
         # 行重建后按内容自适应高度（重载/安装/卸载插件后行数变化）

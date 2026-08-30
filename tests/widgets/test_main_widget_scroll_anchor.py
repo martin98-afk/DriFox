@@ -23,12 +23,16 @@ import pytest
 
 sys.path.insert(0, "app")
 
-from app.main_widget import OpenAIChatToolWindow  # noqa: E402
+from app.main_widget import AT_BOTTOM_TOLERANCE, OpenAIChatToolWindow  # noqa: E402
 
 
 def _make_window(**overrides):
     """构造 _process_next_lazy_batch 可运行的最小实例"""
     win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    # ⚠️ 必须显式给值：PyQt 对象未经 __init__ 时 getattr(self, "_is_destroyed", False)
+    # 会抛 RuntimeError（super-class __init__ was never called），而带默认值的
+    # getattr 兜不住这个异常。凡走 _is_destroyed 守卫的方法都要靠它。
+    win._is_destroyed = False
     win._pending_lazy_cards = []
     win._loading_session = False
     win._lazy_batch_timer_active = False
@@ -173,3 +177,78 @@ def test_away_flag_set_when_scroll_up_then_cleared_at_bottom():
     scroll_bar.value.return_value = 990
     win._on_scroll_changed(990)
     assert win._user_intentionally_away_from_bottom is False
+
+
+# ─── 统一守卫：AT_BOTTOM_TOLERANCE / _should_follow_bottom ───────
+# 背景：同一语义曾散落 5 套阈值（20/30/50/80），且 4 处滚底入口绕过 away 守卫，
+# 导致「流式输出时无法自由阅读」。以下用例锁定收敛后的单点裁决语义。
+
+
+def test_is_view_at_bottom_uses_single_tolerance():
+    """贴底判定只认 AT_BOTTOM_TOLERANCE，边界值不得有两套解释"""
+    win = _make_window()
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+
+    bar.value.return_value = 1000 - AT_BOTTOM_TOLERANCE  # 恰好在阈值内
+    assert win._is_view_at_bottom() is True
+    bar.value.return_value = 1000 - AT_BOTTOM_TOLERANCE - 1  # 越过阈值 1px
+    assert win._is_view_at_bottom() is False
+
+
+def test_is_view_at_bottom_true_when_content_shorter_than_viewport():
+    """内容不足一屏（maximum==0，无处可滚）必须判为贴底"""
+    win = _make_window()
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 0
+    bar.value.return_value = 0
+    assert win._is_view_at_bottom() is True
+
+
+def test_should_follow_bottom_falls_back_to_actual_position():
+    """away 标志与实际位置冲突时以实际位置为准，避免标志卡死后永不跟随"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+
+    bar.value.return_value = 1000
+    assert win._should_follow_bottom() is True
+    bar.value.return_value = 0
+    assert win._should_follow_bottom() is False
+
+
+def test_reset_bottom_follow_clears_away():
+    """用户点击发送 → 恢复跟随（否则「发了消息没反应」）"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    win._reset_bottom_follow()
+    assert win._user_intentionally_away_from_bottom is False
+
+
+def test_away_cleared_when_content_shorter_than_viewport():
+    """回归：旧实现 `elif maximum > 0` 在 maximum==0 时不复位 → away 永久卡 True"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 0
+    bar.value.return_value = 0
+    win._on_scroll_changed(0)
+    assert win._user_intentionally_away_from_bottom is False
+
+
+def test_ensure_at_bottom_skipped_when_user_away():
+    """回归：流式结束兜底重试链曾靠「2s 宽限期」显式忽略 away，强行拽回视口"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+    bar.value.return_value = 0
+    win._ensure_at_bottom(retries=0)
+    bar.setValue.assert_not_called()
+
+
+def test_scroll_to_bottom_if_following_guarded():
+    """延迟兜底滚底（500ms/1000ms）同样要过守卫"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+    bar.value.return_value = 0
+    win._scroll_to_bottom_if_following()
+    win._scroll_to_bottom.assert_not_called()

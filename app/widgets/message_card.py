@@ -3140,9 +3140,17 @@ class CodeWebViewer(QWebEngineView):
     # WebEngine 最大尺寸限制，防止 GPU 内存溢出
     # 降低 MAX_HEIGHT 可大幅减少每个 Chromium 实例的离屏渲染缓冲区
     # 4000→2000 将单视图 GPU 缓冲区从 ~28.8MB 降至 ~14.4MB
-    # 标准消息卡片在正常宽度(400~700px)下，1500px 高度已覆盖绝大多数内容
+    #
+    # 🐛 滚动体验重构（2026-08-30）：原 3000px 会让长回复（多个代码块 + 工具结果）
+    # **在卡片内部**出现滚动条 —— 消息列表于是变成「外层 1 个 QScrollArea + 每张卡
+    # 各自 1 个内滚区」，滚轮要先问「里面还能滚吗」再决定转发，是滚动发黏的根因。
+    # 现在把上限抬到 10000px：真实内容几乎不可能触及，卡内滚动条不再出现，
+    # 滚动统一由外层 chat_scroll_area 承载。
+    # 保留上限的原因（**不能删**）：这是 Chromium 合成表面的硬约束兜底 ——
+    # 卡片宽度 ~700px 时 10000px 高 ≈ 28MB 合成表面，再往上会明显放大 GPU 内存。
+    # 极端长内容仍会回退到内滚（wheel 转发逻辑因此必须保留），但那是安全网而非常态。
     MAX_WIDTH = 1800
-    MAX_HEIGHT = 3000
+    MAX_HEIGHT = 10000
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
@@ -3400,6 +3408,12 @@ class CodeWebViewer(QWebEngineView):
     def wheelEvent(self, event: QWheelEvent):
         # 策略：只有当内部 WebView 无法继续滚动时，才将滚动事件转发到外部 chat_scroll_area。
         # 如果内部有可滚动内容且未到达边界，让内部 WebView 自己处理滚动。
+        #
+        # ⚠️ **这段转发不能删**：QWebEngineView 会把滚轮事件喂给内嵌 Chromium 并吞掉，
+        # 不会自动冒泡到外层 QScrollArea。所以哪怕卡片内部不可滚，也必须显式转发，
+        # 否则鼠标停在消息上滚轮毫无反应。
+        # 现状（MAX_HEIGHT 抬到 10000 之后）：body 几乎恒不溢出 → max_scroll 恒为 0 →
+        # 每次滚轮都走「转发外层」这条最短路，内层判定的分支基本不再命中。
         try:
             widget = self
             for _ in range(5):
@@ -3904,6 +3918,11 @@ class CodeWebViewer(QWebEngineView):
                     /* 右侧 8px = 14px 视觉边距 - 6px 常驻滚动轨道：轨道占位使
                        内容右视觉边距比左侧多 6px，扣减后左右对称 */
                     padding: 6px 8px 0 14px;
+                    /* ⚠️ 安全网，非常态：MAX_HEIGHT 已抬到 10000px（见类常量注释），
+                       真实内容几乎不会触及 → body 不会溢出 → 不出现内滚条 →
+                       滚动统一由外层 chat_scroll_area 承载。
+                       触及上限时（极端长内容）才回退为卡内滚动，此时 wheelEvent 的
+                       内外转发逻辑仍然生效，是最后一道兜底。 */
                     max-height: {self.MAX_HEIGHT}px;
                     /* 🛡️ 稳定性修复：滚动条轨道常驻，内容可用宽度恒定。
                        overflow-y:auto 时滚动条出现/消失会使内容宽度 ±6px 波动 →
@@ -8740,6 +8759,10 @@ class PlainTextViewer(QWidget):
 
     # 用户消息卡片最大高度（px）：超过此高度启用 QTextEdit 内部滚动条
     # 约可容纳 13 行 14px 文本，平衡阅读完整性与卡片视觉占位
+    #
+    # ⚠️ 用户明确要求保持 300（2026-08-30）：用户气泡不应因正文变长而撑开整屏，
+    # 长内容在气泡内部滚动是**预期行为**，不是缺陷。不要为了「减少滚动区域」
+    # 擅自抬高它 —— 本轮滚动体验改动只针对 assistant 卡片与自动滚底守卫。
     MAX_HEIGHT = 300
 
     def __init__(self, parent=None):

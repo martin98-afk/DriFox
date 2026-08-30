@@ -112,6 +112,25 @@ class ChatAreaModule(UIModule):
         host._decoration_layer.refresh_theme = host._apply_decorations
         theme_manager.register_refresh_target(host._decoration_layer)
 
+        # ── 「回到底部」浮动胶囊 ──
+        # 必须在 _decoration_layer.raise_() 之后创建，否则会被装饰层盖住。
+        # 滚动守卫变强后用户上滚不会被拽回，靠它补上「新内容到了」的感知与一键归位。
+        from app.widgets.scroll_to_bottom_button import ScrollToBottomButton
+
+        host._scroll_to_bottom_button = ScrollToBottomButton(
+            host,
+            anchor=host.chat_scroll_area,
+            on_click=lambda: host._on_scroll_to_bottom_clicked(),
+        )
+        # 位置变化（valueChanged）与内容高度变化（rangeChanged）都要刷新显隐：
+        # 后者覆盖「内容撑高把用户推离底部」这一场景 —— 此时 value 并没变。
+        try:
+            _bar = host.chat_scroll_area.verticalScrollBar()
+            _bar.valueChanged.connect(lambda *_: host._update_scroll_to_bottom_button())
+            _bar.rangeChanged.connect(lambda *_: host._update_scroll_to_bottom_button())
+        except Exception:
+            pass
+
         # 初始加载（延迟到首帧后，避免阻塞 setup_ui 关键路径）
         QTimer.singleShot(0, host._apply_decorations)
 
