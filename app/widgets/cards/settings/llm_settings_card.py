@@ -717,14 +717,9 @@ class LLMSettingsCard(SystemCardFrame):
 
             card.setExpand = _wrapped_set_expand
 
-        # 「工具启用」默认展开：它是最常用的一个，折叠态下用户看不到内容。
-        # 必须在包装完成之后调用，这样走的是包装版 setExpand，
-        # 手风琴语义仍然成立（会先收起其他已展开的列表卡片）。
-        # 「智能体启用」保持折叠——同一页内两张卡同时展开会把内容挤得太长。
-        try:
-            self.pluginToolCard.setExpand(True)
-        except Exception as e:
-            logger.warning(f"[LLMSettingsCard] 工具启用卡默认展开失败: {e}")
+        # 两张开关卡都保持折叠（用户要求），点标题展开即可。
+        # 若以后要恢复默认展开，必须在包装完成之后调用 setExpand——
+        # 那样走的是包装版，手风琴语义才成立（会先收起其他已展开的列表卡片）。
 
     def _ensure_hot_reload_connected(self):
         """订阅插件热重载广播，让设置面板在热重载后就地刷新
@@ -757,6 +752,17 @@ class LLMSettingsCard(SystemCardFrame):
         if not self.isVisible():
             return
         self._hot_reload_timer.start()
+
+    def _prefetch_skills(self):
+        """空闲帧预热：提前跑一次技能发现，让展开技能卡更跟手"""
+        try:
+            card = getattr(self, "llmSkillsCard", None)
+            if card is None or getattr(card, "_discovered", True):
+                return
+            card._discover_skills()
+            card._update_skill_token_count()
+        except Exception as e:
+            logger.debug(f"[LLMSettingsCard] 技能发现预热失败: {e}")
 
     def _refresh_after_hot_reload(self):
         if not self.isVisible():
@@ -1303,6 +1309,9 @@ class LLMSettingsCard(SystemCardFrame):
         # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，
         # 后者会连带全量加载智能体 + 启动文件监听，实测约 330ms）
         self._ensure_hot_reload_connected()
+        # 预热技能发现：展开技能卡时要同步扫盘 + parse 每个 SKILL.md（~90ms），
+        # 挪到打开设置后的空闲帧做，用户点开卡片时就不必再等
+        QTimer.singleShot(300, self._prefetch_skills)
         # 每次打开设置时刷新工具/智能体列表（插件热重载/启停后保持最新）
         for card_name in ("pluginToolCard", "pluginAgentCard"):
             card = getattr(self, card_name, None)

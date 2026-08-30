@@ -621,7 +621,7 @@ class TabManagerWindow(FramelessWindow):
 
         # 顶栏内置「聊天」常驻 tab（full 卡片 tab 由显隐事件动态增删，
         # 插件常驻 tab 由 _sync_plugin_titlebar_tabs 挂载）
-        self.titleBar.add_tab(CHAT_TAB_ID, "聊天")
+        self.titleBar.add_tab(CHAT_TAB_ID, "对话")
         self._sync_plugin_titlebar_tabs()
 
     def _on_titlebar_tab_clicked(self, tab_id: str):

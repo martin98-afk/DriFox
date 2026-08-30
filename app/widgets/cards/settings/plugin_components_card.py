@@ -47,6 +47,7 @@ from qfluentwidgets import (
 
 from app.plugins.component_items import ComponentItem, build_item_index, invalidate_item_index, supports_items
 from app.plugins.kernel import COMPONENT_ORDER
+from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
 from app.utils.design_tokens import Colors, SwitchStyles, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.elided_label import _ElidedLabel
@@ -507,10 +508,11 @@ class PluginSectionWidget(QWidget):
             row.refresh_style()
 
 
-class PluginComponentsCard(ExpandSettingCard):
+class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
     """插件组件开关卡 — 按插件分组控制某一类组件（工具 / 智能体）的启停
 
     一张卡只管一类组件：设置页用两张卡分别承载「工具启用」与「智能体启用」。
+    动态高度与滚轮行为由 DynamicHeightExpandCardMixin 接管。
     """
 
     def __init__(
@@ -738,116 +740,12 @@ class PluginComponentsCard(ExpandSettingCard):
         self._refresh_summary_text()
         self._adjust_view_size()
 
-    # ── 高度同步与滚轮 ──
+    # ── 高度同步与滚轮：由 DynamicHeightExpandCardMixin 统一提供 ──
 
-    def setExpand(self, isExpand: bool):
-        """接管基类的展开/折叠
-
-        基类 ExpandSettingCard 的做法是：内容下方塞一个等高的 spaceWidget 占位，
-        再用动画驱动 verticalScrollBar 的 value，配合 `_onExpandValueChanged`
-        反推 fixedHeight。这套方案假设内容高度在动画期间**固定不变**。
-
-        我们的内容是分批挂载 / 可展开细项的——高度会在动画进行中继续变化，
-        于是「scrollBar 的 maximum」与「实际内容高度」失配，表现为折叠后残留
-        大片空白、或展开后底部被裁掉。这里改为直接按内容实测高度设 fixedHeight：
-        折叠 = 只留 header，展开 = header + 内容。
-        """
-        if self.isExpand == isExpand:
-            return
-        self.expandAni.stop()
-        self.isExpand = isExpand
-        self.setProperty("isExpand", isExpand)
-        self.setStyle(QApplication.style())
-        self.card.expandButton.setExpand(isExpand)
-        # spaceWidget 是基类滚动动画的占位件，接管后不再需要
-        self.spaceWidget.setFixedHeight(0)
-        # 折叠时彻底隐藏内容：QLayout.sizeHint() 会忽略隐藏控件，
-        # 不隐藏的话搜索过滤留下的隐藏行仍会被算进高度
-        self.view.setVisible(isExpand)
-        self._adjust_view_size()
-        # 折叠期间会暂停分批构建（见 _build_next_batch），展开时接着做
-        if isExpand and self._built < len(self._pending):
+    def on_after_expand(self, is_expand: bool) -> None:
+        """折叠期间会暂停分批构建（见 _build_next_batch），展开时接着做"""
+        if is_expand and self._built < len(self._pending):
             self._batch_timer.start()
-
-    def toggleExpand(self):
-        self.setExpand(not self.isExpand)
-
-    def _adjust_view_size(self):
-        """同步高度：立刻做一次，下一帧再校一次
-
-        子控件的 `setVisible(False)` 只投递异步的 LayoutRequest，当前帧读到的
-        `sizeHint()` 往往还是旧值（收起细项后会残留一截空白）。所以先同步一次
-        保证即时响应，再用 singleShot(0) 补一次拿到布局稳定后的真实高度。
-        """
-        self._sync_height_now()
-        if not self._height_resync_queued:
-            self._height_resync_queued = True
-            QTimer.singleShot(0, self._sync_height_deferred)
-
-    def _sync_height_deferred(self):
-        self._height_resync_queued = False
-        self._sync_height_now()
-
-    def _invalidate_layouts(self):
-        """递归失效 view 下所有布局的 sizeHint 缓存
-
-        ⚠️ 关键：子控件 `setVisible(False)` 只向上投递**异步**的 LayoutRequest，
-        父布局的 sizeHint 缓存不会同步清理。只失效 viewLayout 是不够的——
-        中间层（section / 组件行）的布局缓存仍带着已隐藏行的高度，
-        读出来的 sizeHint 偏大，表现为「收起后残留一截空白」。
-        """
-        self.viewLayout.invalidate()
-        for child in self.view.findChildren(QWidget):
-            lay = child.layout()
-            if lay is not None:
-                lay.invalidate()
-
-    def _sync_height_now(self):
-        if not self.isExpand:
-            self.verticalScrollBar().setValue(0)
-            target = self.card.height()
-        else:
-            self._invalidate_layouts()
-            self.viewLayout.activate()
-            target = self.card.height() + self.viewLayout.sizeHint().height()
-        if target != self.height():
-            self.setFixedHeight(target)
-        area = self._ancestor_scroll_area(self)
-        if area is not None:
-            inner = area.widget()
-            if inner is not None:
-                inner.updateGeometry()
-
-    def resizeEvent(self, e):
-        """宽度变化会改变文本换行 → 内容高度跟着变，需重新同步"""
-        super().resizeEvent(e)
-        if self.isExpand and not self._adjusting:
-            self._adjusting = True
-            try:
-                self._adjust_view_size()
-            finally:
-                self._adjusting = False
-
-    @staticmethod
-    def _ancestor_scroll_area(widget: QWidget):
-        """向上找最近的祖先 QScrollArea（本类自身就是，故从 parent 起找）"""
-        from PyQt5.QtWidgets import QScrollArea
-
-        node = widget.parentWidget()
-        while node is not None:
-            if isinstance(node, QScrollArea):
-                return node
-            node = node.parentWidget()
-        return None
-
-    def wheelEvent(self, e):
-        """把滚轮事件交还给外层分页滚动区
-
-        基类 ExpandSettingCard 把 wheelEvent 空实现（它自身不开滚动条、滚轮
-        事件对它无意义），但空实现不会 ignore 事件 → 事件被吞掉，外层分页的
-        QScrollArea 收不到 → 鼠标停在卡片区域内时滚轮完全无反应。
-        """
-        e.ignore()
 
     def _create_section(self, entry: tuple) -> PluginSectionWidget:
         name, is_system, description, comps = entry
