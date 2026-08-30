@@ -76,6 +76,55 @@ def _is_plugin_enabled(plugin_name: str) -> bool:
         return True
 
 
+def _is_component_enabled(plugin_name: str, component: str) -> bool:
+    """按组件级禁用集过滤运行时组件加载（D9：插件内部子项开关）
+
+    与 _is_plugin_enabled 同源策略：pm 已初始化时走 pm（带进程内缓存），
+    否则直接读 Settings（导入期可用）。检查失败一律默认加载——
+    宁可多加载，也不要静默吞掉插件功能。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            if not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_component_enabled(plugin_name, component)
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        return f"{plugin_name}:{component}" not in set(cfg.disabled_plugin_components.value or [])
+    except Exception as e:
+        logger.warning(f"[RuntimeLoader] 组件启停检查失败，默认加载 {plugin_name}: {e}")
+        return True
+
+
+def _is_item_enabled(plugin_name: str, component: str, item_id: str) -> bool:
+    """按细项级禁用集过滤单个组件实现的注册（D10）
+
+    语义同 _is_component_enabled，粒度到 item id（如某个 model_adapter 的 id）。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            if not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_item_enabled(plugin_name, component, item_id)
+        from app.utils.config import Settings
+
+        cfg = Settings.get_instance()
+        disabled = set(cfg.disabled_plugin_components.value or [])
+        if f"{plugin_name}:{component}" in disabled:
+            return False
+        return f"{plugin_name}:{component}:{item_id}" not in disabled
+    except Exception as e:
+        logger.warning(f"[RuntimeLoader] 细项启停检查失败，默认加载 {plugin_name}:{component}:{item_id} ({e})")
+        return True
+
+
 class _RegistryProxy:
     """注册代理 — 强制 source + 跨根覆盖规则（user > system，对齐 provider_loader）
 
@@ -94,9 +143,12 @@ class _RegistryProxy:
         kind: str,
         occupied: Dict[str, str],
         lock: threading.Lock,
+        component: str = "",
     ):
         object.__setattr__(self, "_registry", registry)
         object.__setattr__(self, "_source", f"plugin:{plugin_name}")
+        object.__setattr__(self, "_plugin_name", plugin_name)
+        object.__setattr__(self, "_component", component)
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_occupied", occupied)  # id -> kind
         object.__setattr__(self, "_lock", lock)
@@ -109,6 +161,12 @@ class _RegistryProxy:
 
     def register(self, item, source: str = "") -> None:
         item_id = getattr(item, "id", None)
+        # D10 细项级停用：单个实现被关掉时直接跳过注册（不占用 id 槽位，
+        # 低优先级根的同类实现因此有机会补位）
+        if item_id is not None and self._component:
+            if not _is_item_enabled(self._plugin_name, self._component, item_id):
+                logger.debug(f"[RuntimeLoader] {item_id} 细项已停用，跳过注册")
+                return
         if item_id is not None:
             with self._lock:
                 held = self._occupied.get(item_id)
@@ -187,6 +245,9 @@ class RuntimeComponentLoader:
                         continue
                     if not _is_plugin_enabled(plugin_dir.name):
                         continue
+                    # D9：组件整类停用时跳过该插件的这一类组件
+                    if not _is_component_enabled(plugin_dir.name, self._comp_dir):
+                        continue
                     for py in sorted(comp.glob("*.py")):
                         if py.name.startswith("_"):
                             continue
@@ -212,6 +273,9 @@ class RuntimeComponentLoader:
                 if not comp.is_dir():
                     continue
                 if not _is_plugin_enabled(plugin_dir.name):
+                    continue
+                # D9：组件整类停用时跳过（与 scan_roots 保持一致）
+                if not _is_component_enabled(plugin_dir.name, self._comp_dir):
                     continue
                 for py in sorted(comp.glob("*.py")):
                     if py.name.startswith("_"):
@@ -264,6 +328,10 @@ class RuntimeComponentLoader:
             if not _is_plugin_enabled(plugin_name):
                 logger.info(f"[RuntimeLoader] 跳过已禁用插件的组件: {plugin_name}")
                 return
+            # D9：组件整类被停用 → 只注销不重注册（与 scan_roots 过滤一致）
+            if not _is_component_enabled(plugin_name, self._comp_dir):
+                logger.info(f"[RuntimeLoader] 跳过已停用组件的重载: {plugin_name}:{self._comp_dir}")
+                return
             roots = self._scan_roots_cache or _plugin_roots()
             for root in roots:
                 if not (root / plugin_name).is_dir():
@@ -291,7 +359,9 @@ class RuntimeComponentLoader:
             if not callable(register):
                 logger.warning(f"[RuntimeLoader] {py} 缺少 register(registry)，跳过")
                 return False
-            proxy = _RegistryProxy(self._registry, plugin_name, kind, self._occupied, self._lock)
+            proxy = _RegistryProxy(
+                self._registry, plugin_name, kind, self._occupied, self._lock, component=self._comp_dir
+            )
             register(proxy)
             # 注册成功（即使代理内部跳过）即记录 source，便于下次重扫清理
             with self._lock:

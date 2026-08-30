@@ -131,6 +131,11 @@ class _PluginRegistryProxy:
 
     def register(self, name, schema, impl=None, danger=None, source=None, metadata=None, **meta) -> bool:
         """注册（透传全部元数据：icon/cn_name/group/description/aliases）"""
+        # D10：单个工具被停用 → 不注册（且不让其占用 root_tracker 槽位，
+        # 低优先级根的同名工具因此有机会补位）
+        if not _is_item_enabled(self._plugin_name, name):
+            logger.debug(f"[PluginToolLoader] 工具已停用，跳过注册: {self._plugin_name}:{name}")
+            return False
         # 同名工具覆盖判定（root_kind 优先级）
         # - 同根/无 root/首次注册：已被其他插件占用 → 拒绝（先注册者优先；同插件重扫由 watcher 卸载兜底）
         # - 跨根：高等级根（user）可覆盖低等级根（system）的同名工具；同级/反向拒绝
@@ -326,6 +331,44 @@ def _is_plugin_enabled(plugin_name: str) -> bool:
         return True
 
 
+def _is_component_enabled(plugin_name: str, component: str = "tools") -> bool:
+    """按组件级禁用集过滤工具加载（D9：插件内部 tools 子项开关）。
+
+    与 _is_plugin_enabled 同源策略：直接读 Settings（import 期可用，不依赖
+    pm 初始化状态）。组件未禁用即启用；读取失败默认加载（与 _is_plugin_enabled 对齐）。
+    """
+    try:
+        from app.utils.config import Settings
+
+        disabled = Settings.get_instance().disabled_plugin_components.value or []
+        return f"{plugin_name}:{component}" not in set(disabled)
+    except Exception as e:
+        logger.warning(f"[PluginToolLoader] 组件启停检查失败，默认加载 {plugin_name}: {e}")
+        return True
+
+
+def _is_item_enabled(plugin_name: str, item_id: str, component: str = "tools") -> bool:
+    """按细项级禁用集过滤单个工具的注册（D10：只关掉某一个工具）
+
+    语义：整类停用 ⇒ 其下全部工具停用；整类启用时再看该工具自身。
+    与 _is_component_enabled 同源策略：直接读 Settings，失败默认加载。
+
+    选择在**注册阶段**过滤而非执行阶段，是为了让下游（LLM schema、工具执行、
+    权限卡片、危险等级统计）自动保持一致——工具不在 registry 里，
+    所有消费方自然都看不到它。
+    """
+    try:
+        from app.utils.config import Settings
+
+        disabled = set(Settings.get_instance().disabled_plugin_components.value or [])
+        if f"{plugin_name}:{component}" in disabled:
+            return False
+        return f"{plugin_name}:{component}:{item_id}" not in disabled
+    except Exception as e:
+        logger.warning(f"[PluginToolLoader] 细项启停检查失败，默认加载 {plugin_name}:{item_id} ({e})")
+        return True
+
+
 def _run_register(
     registry: ToolRegistry,
     plugin_name: str,
@@ -386,6 +429,10 @@ def load_plugin_tools(
             # P0-1：安全边界——插件被 Settings 禁用后其工具不再注册
             if not _is_plugin_enabled(plugin_name):
                 logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")
+                continue
+            # D9：组件级禁用——tools 子项被关后不再注册
+            if not _is_component_enabled(plugin_name):
+                logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {plugin_name}")
                 continue
             try:
                 new_tools = _run_register(registry, plugin_name, py_path, Path(root), root_tracker)
@@ -558,6 +605,10 @@ class PluginToolWatcher:
                 # 重注册该插件当前模块（enabled 过滤与 load_plugin_tools 一致）
                 if not _is_plugin_enabled(plugin_name):
                     logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")
+                    return
+                # D9：组件级禁用——tools 子项被关后不再重注册
+                if not _is_component_enabled(plugin_name):
+                    logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {plugin_name}")
                     return
                 new_names: Set[str] = set()
                 for root in self._roots:

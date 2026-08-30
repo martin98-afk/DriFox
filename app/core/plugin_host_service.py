@@ -23,6 +23,12 @@ from typing import Any, Dict, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
+# 读取期过滤型组件：细项开关在**读取/执行链路上**判定，改配置即生效，
+# 不需要重载 registry（见 PluginHostService.on_plugin_item_toggled）。
+# 其余组件属于注册期过滤型（条目是否进 registry 由 loader 在注册阶段决定），
+# 细项开关必须重载该组件的注册才能落地。
+_READ_THROUGH_COMPONENTS = frozenset({"hooks", "team_templates"})
+
 
 class PluginHostService(QObject):
     """插件宿主服务（应用级单例，主线程创建）"""
@@ -1434,6 +1440,65 @@ class PluginHostService(QObject):
             f"[PluginHost] Plugin '{plugin_name}' cleanup done via kernel: { {k: result[k] for k in result_keys} }"
         )
         return result
+
+    def on_plugin_component_toggled(self, plugin_name: str, component: str, enabled: bool) -> dict:
+        """插件组件开关后的热生效入口（系统设置「插件组件」卡调用，D9）
+
+        - enabled=True  → 复用 _reload_single_plugin 精准重载（内部资源查询
+          已过滤组件级禁用集，只载入未禁用部分）
+        - enabled=False → plugin=None 走 reloader 清理分支（精准卸载该组件，
+          不波及其他插件）；mcp 走 invalidate_mcp_cache 懒生效
+
+        Returns:
+            {component: 卸载/重载结果}；PluginManager 未初始化时返回 {}
+        """
+        from app.plugins.kernel import ReloadContext, get_reloader_registry
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if not pm.is_initialized():
+            logger.warning("[PluginHost] PluginManager not initialized, skip component toggle")
+            return {}
+        if enabled:
+            return self._reload_single_plugin(plugin_name, component)
+        registry = get_reloader_registry()
+        reloaded = registry.reload(
+            ReloadContext(plugin_name=plugin_name, plugin=None, component=component, is_new_plugin=False)
+        )
+        # mcp 依赖 30s TTL 缓存失效懒生效；其余组件卸载即时
+        pm.invalidate_mcp_cache()
+        logger.info(f"[PluginHost] Plugin '{plugin_name}' component '{component}' disabled → unloaded={reloaded}")
+        return {component: reloaded if reloaded is not None else False}
+
+    def on_plugin_item_toggled(self, plugin_name: str, component: str, item_id: str, enabled: bool) -> dict:
+        """插件细项开关后的热生效入口（系统设置「插件组件」卡调用，D10）
+
+        细项 = 组件下的单个条目（某个 tool / 某条 hook / 某个模板）。
+        热生效策略按组件分两类：
+
+        - **注册期过滤型**（tools / model_adapters / storages / …）：条目是否
+          注册由 loader 在注册阶段判定，必须重载该插件的这一类组件才能让
+          开关落到 registry 上 → 走 _reload_single_plugin。
+        - **读取期过滤型**（hooks / team_templates）：过滤发生在执行/读取
+          链路上，开关本身就即时生效，无需重载，直接返回成功。
+
+        Returns:
+            {component: 重载结果}；PluginManager 未初始化时返回 {}
+        """
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if not pm.is_initialized():
+            logger.warning("[PluginHost] PluginManager not initialized, skip item toggle")
+            return {}
+
+        # 读取期过滤：开关即时生效，不需要动 registry
+        if component in _READ_THROUGH_COMPONENTS:
+            logger.debug(f"[PluginHost] {plugin_name}:{component}:{item_id} 读取期过滤，无需重载")
+            return {component: True}
+
+        # 注册期过滤：重载该插件的这一类组件（内部会重新走一遍细项过滤）
+        return self._reload_single_plugin(plugin_name, component)
 
     def _reload_single_plugin(self, plugin_name: str, component: str = "") -> dict:
         """增量重载单个插件（不清除其他插件的数据）

@@ -3562,6 +3562,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         plugin_dirs = []
         for plugin in pm.get_enabled_plugins():
+            # D9：ui 组件被整类停用的插件不挂载其界面扩展
+            if not pm.is_component_enabled(plugin.name, "ui"):
+                continue
             if plugin.has_component("ui"):
                 plugin_dirs.append((plugin.name, plugin.path))
         logger.info(f"[MainWidget] Found {len(plugin_dirs)} UI-enabled plugins: {[p[0] for p in plugin_dirs]}")

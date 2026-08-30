@@ -1644,6 +1644,24 @@ class HookManager:
 
     # ========== 事件触发 ==========
 
+    @staticmethod
+    def _disabled_component_keys():
+        """取插件组件/细项禁用 key 集合（每轮触发取一次，热路径优化）
+
+        Returns:
+            frozenset；PluginManager 未初始化（单测 / 启动早期）时返回 None，
+            调用方据此整体跳过细项判断。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                return None
+            return pm.disabled_keys()
+        except Exception:
+            return None
+
     def trigger_event(
         self, event_name: str, context: Dict[str, Any] = None, current_message: str = "", trigger_async: bool = True
     ) -> List[HookExecutionResult]:
@@ -1668,12 +1686,23 @@ class HookManager:
             return []
 
         # Phase 1: 收集所有匹配的 hook（串行，仅做规则匹配，不执行实际 hook）
+        # D10：细项级停用集合整轮只取一次，避免热路径里逐条查询 Settings
+        disabled_keys = self._disabled_component_keys()
         all_hooks: List[Hook] = []
         for rule in self._hooks[event_name]:
             if not rule.matches(context):
                 continue
+            if disabled_keys is not None:
+                # 整类停用（D9 加载链已过滤，这里是热切换后的兜底）
+                if f"{rule.skill_name}:hooks" in disabled_keys:
+                    continue
             for hook in rule.hooks:
                 if not hook.enabled:
+                    continue
+                # 单条 hook 被停用（D10）。与 hook_states 的 enabled 是串联
+                # 关系：二者都为真才执行。这里在执行时判断而非加载时过滤，
+                # 所以开关切换即时生效，无需重载 hooks。
+                if disabled_keys is not None and f"{rule.skill_name}:hooks:{hook.id}" in disabled_keys:
                     continue
                 if not self._check_conditions(hook, context):
                     logger.debug(f"[HookManager] Hook conditions not met: {event_name}")
@@ -2840,6 +2869,11 @@ class HookManager:
                 self.unregister_skill_hooks(plugin.name)
                 if hooks_file.exists():
                     self._clear_config_watcher(str(hooks_file))
+                # D9：hooks 组件整类停用时只卸载、不重新注册
+                # （细项级停用走 trigger_event 的 hook id 过滤，无需重载）
+                if not pm.is_component_enabled(plugin.name, "hooks"):
+                    logger.debug(f"[HookManager] hooks 组件已停用，跳过重载: {plugin.name}")
+                    continue
                 # 重新注册
                 count = self.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
                 if count > 0:

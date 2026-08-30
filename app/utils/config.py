@@ -430,6 +430,8 @@ class Settings(QConfig):
     # ========== 插件系统配置 ==========
     enabled_plugins = ConfigItem("Plugin", "EnabledPlugins", [])
     disabled_plugins = ConfigItem("Plugin", "DisabledPlugins", [])
+    # 组件级禁用（D9）：["plugin:component", ...]，如 "calendar:hooks"
+    disabled_plugin_components = ConfigItem("Plugin", "DisabledComponents", [])
 
     # ========== Gateway 通讯平台配置 ==========
     # 企业微信

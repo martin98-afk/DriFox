@@ -183,6 +183,9 @@ class PluginManager:
         self._plugins: Dict[str, PluginInfo] = {}
         self._initialized = False
         self._app_data_dir: Optional[Path] = None
+        # 组件/细项禁用集缓存（None = 未加载）。Settings 里该项变更极低频，
+        # 但 hooks 触发等热路径会高频查询，故缓存到进程内，写操作同步更新。
+        self._disabled_components_cache: Optional[frozenset] = None
 
     @classmethod
     def get_instance(cls) -> "PluginManager":
@@ -527,6 +530,10 @@ class PluginManager:
         plugin = self._plugins.get(name)
         if plugin is None or not plugin.has_component("ui"):
             return
+        # D9：ui 组件被整类停用时不再挂载（插件的浮动卡/侧边栏等槽位随之消失）
+        if not self.is_component_enabled(name, "ui"):
+            logger.debug(f"[PluginManager] ui 组件已停用，跳过加载: {name}")
+            return
         UIPluginRegistry.get_instance().load_plugin(name, plugin.path)
 
     def _unload_plugin_ui(self, name: str):
@@ -576,6 +583,130 @@ class PluginManager:
             cfg.set(cfg.disabled_plugins, list(disabled), save=True)
         except (ImportError, Exception):
             pass
+
+    # ============================================================
+    # 组件级禁用（D9：插件内部子项开关，如关闭某插件的 hooks/lsp）
+    # 细项级禁用（D10：单个 tool / 单条 hook / 单个模板）
+    #
+    # key 约定（":" 分隔，整类优先于细项）：
+    #   "<plugin>:<component>"            → 整类停用（D9 语义，向后兼容旧配置）
+    #   "<plugin>:<component>:<item_id>"  → 单个条目停用（D10 细项粒度）
+    # 判定规则：整类停用 ⇒ 其下所有细项均停用；整类启用时再看细项自身。
+    # ============================================================
+
+    def _get_disabled_components(self) -> frozenset:
+        """读取组件/细项禁用集合（进程内缓存，写操作或 invalidate 时刷新）"""
+        cached = self._disabled_components_cache
+        if cached is not None:
+            return cached
+        try:
+            from app.utils.config import Settings
+
+            cfg = Settings.get_instance()
+            self._disabled_components_cache = frozenset(cfg.disabled_plugin_components.value or [])
+        except (ImportError, Exception):
+            self._disabled_components_cache = frozenset()
+        return self._disabled_components_cache
+
+    def _save_disabled_components(self, disabled: set):
+        """保存禁用集合到 Settings，并同步刷新进程内缓存"""
+        try:
+            from app.utils.config import Settings
+
+            cfg = Settings.get_instance()
+            cfg.set(cfg.disabled_plugin_components, sorted(disabled), save=True)
+            self._disabled_components_cache = frozenset(disabled)
+        except (ImportError, Exception):
+            pass
+
+    def invalidate_component_cache(self):
+        """丢弃禁用集缓存（外部绕过本类直接改写 Settings 后调用）"""
+        self._disabled_components_cache = None
+
+    def disabled_keys(self) -> frozenset:
+        """返回完整的禁用 key 集合（只读视图，供热路径批量判断）
+
+        hook 触发等热路径若逐条调 is_item_enabled，会反复构造 key 字符串；
+        这里一次取走整个集合，由调用方自己做 in 判断。
+        注意：拿到的是不可变集合，**不要**就地修改——改动请走
+        set_component_enabled / set_item_enabled，否则缓存会与磁盘失同步。
+        """
+        return self._get_disabled_components()
+
+    @staticmethod
+    def component_key(plugin_name: str, component: str) -> str:
+        """整类禁用 key"""
+        return f"{plugin_name}:{component}"
+
+    @staticmethod
+    def item_key(plugin_name: str, component: str, item_id: str) -> str:
+        """细项禁用 key"""
+        return f"{plugin_name}:{component}:{item_id}"
+
+    def is_component_enabled(self, plugin_name: str, component: str) -> bool:
+        """检查插件的某组件是否启用（未被组件级禁用即为启用）
+
+        插件整体禁用不在本方法职责内（调用方已用 _iter_enabled_plugins 过滤）。
+        """
+        return f"{plugin_name}:{component}" not in self._get_disabled_components()
+
+    def is_item_enabled(self, plugin_name: str, component: str, item_id: str) -> bool:
+        """检查插件某组件下的单个条目是否启用
+
+        整类被停用 ⇒ 返回 False；否则取决于该条目自身是否被停用。
+        插件整体禁用同样不在本方法职责内。
+        """
+        disabled = self._get_disabled_components()
+        if f"{plugin_name}:{component}" in disabled:
+            return False
+        return f"{plugin_name}:{component}:{item_id}" not in disabled
+
+    def set_component_enabled(self, plugin_name: str, component: str, enabled: bool):
+        """设置插件组件启停（仅持久化；热重载由调用方触发 PluginHostService）
+
+        - mcp 组件即时失效缓存（get_mcp_servers 30s TTL 需主动失效）
+        - 其余组件由 reloader 在重载路径消费资源查询时自然过滤
+        """
+        disabled = set(self._get_disabled_components())
+        key = f"{plugin_name}:{component}"
+        if enabled:
+            if key not in disabled:
+                return  # 幂等
+            disabled.discard(key)
+        else:
+            if key in disabled:
+                return  # 幂等
+            disabled.add(key)
+        self._save_disabled_components(disabled)
+        if component == "mcp":
+            self.invalidate_mcp_cache()
+        logger.info(f"[PluginManager] Component '{component}' of plugin '{plugin_name}' → {'enabled' if enabled else 'disabled'}")
+
+    def set_item_enabled(self, plugin_name: str, component: str, item_id: str, enabled: bool):
+        """设置插件组件下单个条目的启停（D10 细项粒度）
+
+        与 set_component_enabled 同构：只做持久化，热生效由调用方触发
+        PluginHostService.on_plugin_item_toggled。
+        """
+        disabled = set(self._get_disabled_components())
+        key = f"{plugin_name}:{component}:{item_id}"
+        if enabled:
+            if key not in disabled:
+                return  # 幂等
+            disabled.discard(key)
+        else:
+            if key in disabled:
+                return  # 幂等
+            disabled.add(key)
+        self._save_disabled_components(disabled)
+        if component == "mcp":
+            self.invalidate_mcp_cache()
+        logger.info(f"[PluginManager] Item '{item_id}' of {plugin_name}:{component} → {'enabled' if enabled else 'disabled'}")
+
+    def disabled_items(self, plugin_name: str, component: str) -> List[str]:
+        """列出该插件该组件下被单独停用的条目 id"""
+        prefix = f"{plugin_name}:{component}:"
+        return [k[len(prefix) :] for k in self._get_disabled_components() if k.startswith(prefix)]
 
     # ============================================================
     # 插件发现
@@ -809,12 +940,21 @@ class PluginManager:
     # 资源路径查询（供各子系统使用）
     # ============================================================
 
-    def _iter_enabled_plugins(self):
-        """迭代所有已启用插件"""
+    def _iter_enabled_plugins(self, component: str = ""):
+        """迭代所有已启用插件
+
+        Args:
+            component: 可选组件名；传入时额外过滤掉组件被禁用的插件（D9），
+                如 _iter_enabled_plugins("hooks") 跳过 hooks 组件被关的插件。
+        """
         enabled_names = self._get_enabled_set()
+        disabled_components = self._get_disabled_components() if component else set()
         for plugin in self._plugins.values():
-            if plugin.name in enabled_names:
-                yield plugin
+            if plugin.name not in enabled_names:
+                continue
+            if component and f"{plugin.name}:{component}" in disabled_components:
+                continue
+            yield plugin
 
     def get_plugin_dirs(self, item_type: str, include_user: bool = True) -> List[Path]:
         """获取所有已启用插件中某一类型资源的目录列表
@@ -825,7 +965,7 @@ class PluginManager:
         """
         dirs = []
 
-        for plugin in self._iter_enabled_plugins():
+        for plugin in self._iter_enabled_plugins(item_type):
             if not include_user and plugin.is_system is False:
                 continue
             if not plugin.has_component(item_type):
@@ -835,6 +975,23 @@ class PluginManager:
                 dirs.append(p)
 
         return dirs
+
+    def get_plugin_dirs_named(self, item_type: str, include_user: bool = True) -> List[tuple]:
+        """同 get_plugin_dirs，但保留插件名：[(plugin_name, dir), ...]
+
+        细项级过滤需要知道目录归属哪个插件（否则无法拼 `plugin:component:item`
+        这样的 key），而纯路径列表会丢失这个信息。
+        """
+        result: List[tuple] = []
+        for plugin in self._iter_enabled_plugins(item_type):
+            if not include_user and plugin.is_system is False:
+                continue
+            if not plugin.has_component(item_type):
+                continue
+            p = plugin.path / item_type
+            if p.exists():
+                result.append((plugin.name, p))
+        return result
 
     def get_command_files(self) -> List[Path]:
         """获取所有已启用插件的命令文件，同名去重（系统→用户，用户覆盖系统）
@@ -846,7 +1003,7 @@ class PluginManager:
         result = []
         name_order: Dict[str, int] = {}
 
-        for plugin in self._iter_enabled_plugins():
+        for plugin in self._iter_enabled_plugins("commands"):
             cmd_dir = plugin.path / "commands"
             if not cmd_dir.exists():
                 continue
@@ -890,7 +1047,7 @@ class PluginManager:
         用于 get_local_skills() 给用户插件技能添加命名空间前缀。
         """
         result: List[dict] = []
-        for plugin in self._iter_enabled_plugins():
+        for plugin in self._iter_enabled_plugins("skills"):
             if not plugin.has_component("skills"):
                 continue
             d = plugin.path / "skills"
@@ -925,7 +1082,7 @@ class PluginManager:
     def get_mcp_configs(self) -> List[Path]:
         """获取所有已启用插件的 .mcp.json 文件路径"""
         configs = []
-        for plugin in self._iter_enabled_plugins():
+        for plugin in self._iter_enabled_plugins("mcp"):
             if not plugin.has_component("mcp"):
                 continue
             mcp_file = plugin.path / ".mcp.json"
@@ -950,9 +1107,11 @@ class PluginManager:
         configs = []
         seen_plugins = set()
 
-        # 1. 扫描已启用插件
+        # 1. 扫描已启用插件（lsp 组件被禁用的插件跳过，但仍记入 seen_plugins 防兜底扫描捡回）
         for plugin in self._iter_enabled_plugins():
             seen_plugins.add(plugin.name)
+            if not self.is_component_enabled(plugin.name, "lsp"):
+                continue
             lsp_file = plugin.path / ".lsp.json"
             if lsp_file.exists():
                 try:
@@ -963,12 +1122,17 @@ class PluginManager:
 
         # 2. 额外扫描：用户插件目录下没有 manifest 但有 .lsp.json 的目录
         if self._app_data_dir:
+            disabled_components = self._get_disabled_components()
             user_plugins_dir = self._app_data_dir / self._USER_PLUGIN_DIR_NAME
             if user_plugins_dir.exists():
                 for item in user_plugins_dir.iterdir():
                     if not item.is_dir():
                         continue
                     if item.name in seen_plugins:
+                        continue
+                    # 兜底目录同样受组件级禁用约束（D9）：该目录 lsp 组件被禁时跳过，
+                    # 防止「无 manifest 兜底」路径绕过第 1 段的组件过滤
+                    if f"{item.name}:lsp" in disabled_components:
                         continue
                     lsp_file = item / ".lsp.json"
                     if not lsp_file.exists():
@@ -995,6 +1159,9 @@ class PluginManager:
         plugin = self._plugins.get(plugin_name)
         if not plugin:
             return None
+        # lsp 组件被禁用时返回 None（增量重载路径不会注册该插件 LSP，D9）
+        if not self.is_component_enabled(plugin_name, "lsp"):
+            return None
         lsp_file = plugin.path / ".lsp.json"
         if not lsp_file.exists():
             return None
@@ -1013,7 +1180,7 @@ class PluginManager:
         files: List[Path] = []
         seen: Set[str] = set()
 
-        for plugin in self._iter_enabled_plugins():
+        for plugin in self._iter_enabled_plugins(subdir):
             d = plugin.path / subdir
             if not d.exists():
                 continue

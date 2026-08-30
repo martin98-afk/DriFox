@@ -47,6 +47,7 @@ from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
+from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
@@ -372,6 +373,7 @@ class LLMSettingsCard(SystemCardFrame):
             ("common", "通用设置"),
             ("appearance", "外观样式"),
             ("update", "版本更新"),
+            ("plugin_enable", "插件启用"),
             ("plugins", "插件设置"),
         ]
         body = QWidget(self)
@@ -582,6 +584,11 @@ class LLMSettingsCard(SystemCardFrame):
         update_layout.addWidget(self.manualUpdateCard)
         update_layout.addStretch(1)
 
+        # ════ 插件启用页（D9：插件组件开关，常驻页签）════
+        self.pluginComponentsCard = PluginComponentsCard(self)
+        self._page_layouts["plugin_enable"].addWidget(self.pluginComponentsCard)
+        self._page_layouts["plugin_enable"].addStretch(1)
+
         # ════ 插件设置页（初始隐藏，有注册卡片时显示）════
         self._plugin_cards_widget = QWidget(self)
         self._plugin_cards_layout = QVBoxLayout(self._plugin_cards_widget)
@@ -612,6 +619,7 @@ class LLMSettingsCard(SystemCardFrame):
             self.hookListCard,
             self.mcpListCard,
             self.lspListCard,
+            self.pluginComponentsCard,
         ]
         self._apply_list_accordion()
 
@@ -622,6 +630,11 @@ class LLMSettingsCard(SystemCardFrame):
         无注册卡片时整个分区隐藏（行为零变化）。设置弹窗每次打开时调用，
         保证插件增删/热重载后分区内容最新。
         """
+        # 插件组件开关卡同步重建（插件增删/热重载后组件列表可能变化）
+        try:
+            self.pluginComponentsCard.refresh_components()
+        except Exception as e:
+            logger.warning(f"[LLMSettingsCard] 插件组件列表刷新失败: {e}")
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
@@ -1071,7 +1084,13 @@ class LLMSettingsCard(SystemCardFrame):
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
         # 手风琴类卡片（ExpandSettingCard 子类，不在以上遍历范围）
-        for card_name in ("llmSkillsCard", "llmProviderCard", "mcpListCard", "lspListCard"):
+        for card_name in (
+            "llmSkillsCard",
+            "llmProviderCard",
+            "mcpListCard",
+            "lspListCard",
+            "pluginComponentsCard",
+        ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
@@ -1210,6 +1229,9 @@ class LLMSettingsCard(SystemCardFrame):
     def showEvent(self, event):
         if hasattr(self, "llmProviderCard"):
             self.llmProviderCard._refresh_items()
+        # 每次打开设置时刷新插件组件列表（插件热重载/启停后保持最新）
+        if hasattr(self, "pluginComponentsCard"):
+            self.pluginComponentsCard.refresh_components()
         super().showEvent(event)
 
     def set_opacity(self, opacity: float):

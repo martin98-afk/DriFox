@@ -94,6 +94,29 @@ def _is_plugin_enabled(plugin_name: str) -> bool:
         return True
 
 
+def _is_component_enabled(plugin_name: str, component: str = "providers") -> bool:
+    """按组件级禁用集过滤服务商加载（D9：插件内部 providers 子项开关）
+
+    与 _is_plugin_enabled 同源策略：pm 已初始化时走 pm（带进程内缓存），
+    否则直接读 Settings（导入期可用）。读取失败默认加载。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            if not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_component_enabled(plugin_name, component)
+        from app.utils.config import Settings
+
+        disabled = Settings.get_instance().disabled_plugin_components.value or []
+        return f"{plugin_name}:{component}" not in set(disabled)
+    except Exception as e:
+        logger.warning(f"[ProviderLoader] 组件启停检查失败，默认加载 {plugin_name}: {e}")
+        return True
+
+
 def _iter_provider_modules(plugin_root: Path):
     """遍历插件目录下所有 providers/*.py"""
     if not plugin_root.is_dir():
@@ -258,6 +281,10 @@ def load_providers(
             if not _is_plugin_enabled(plugin_name):
                 logger.info(f"[ProviderLoader] 跳过已禁用插件的服务商: {plugin_name}")
                 continue
+            # D9：providers 组件整类停用时跳过
+            if not _is_component_enabled(plugin_name):
+                logger.info(f"[ProviderLoader] 跳过 providers 组件已停用的插件: {plugin_name}")
+                continue
             try:
                 new_names = _run_register(registry, plugin_name, py_path, Path(root), root_tracker)
                 loaded.setdefault(plugin_name, set()).update(new_names)
@@ -365,6 +392,10 @@ class ProviderWatcher:
             # 重注册该插件当前模块（enabled 过滤与 load_providers 一致）
             if not _is_plugin_enabled(plugin_name):
                 logger.info(f"[ProviderLoader] 跳过已禁用插件的服务商: {plugin_name}")
+                return
+            # D9：providers 组件整类被停用 → 只注销不重注册（与全量扫描一致）
+            if not _is_component_enabled(plugin_name):
+                logger.info(f"[ProviderLoader] 跳过 providers 组件已停用的重载: {plugin_name}")
                 return
             for root in self._roots:
                 root_path = Path(root)
