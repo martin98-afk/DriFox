@@ -565,8 +565,13 @@ _BASH_SCHEMA = {
             "properties": {
                 "command": {"type": "string", "description": "命令"},
                 "timeout": {"type": "integer", "description": "超时秒数"},
+                "description": {
+                    "type": "string",
+                    "description": "必填。一句话自然语言描述这条命令在做什么（展示给用户看，替代原始命令），"
+                    "例如命令为 'pytest tests/ -x' 时填 '运行全量单元测试'。不要复述命令本身。",
+                },
             },
-            "required": ["command"],
+            "required": ["command", "description"],
         },
     },
 }
@@ -581,8 +586,13 @@ _BG_START_SCHEMA = {
             "properties": {
                 "command": {"type": "string", "description": "要执行的命令"},
                 "cwd": {"type": "string", "description": "工作目录（可选，默认为项目根目录）"},
+                "description": {
+                    "type": "string",
+                    "description": "必填。一句话自然语言描述这个后台任务在做什么（展示给用户看，替代原始命令），"
+                    "例如命令为 'npm run dev' 时填 '启动前端开发服务器'。不要复述命令本身。",
+                },
             },
-            "required": ["command"],
+            "required": ["command", "description"],
         },
     },
 }
@@ -683,6 +693,11 @@ def _render_bg_body(result, tool_name, tool_args, success):
 
 
 def _preview_bash(tool_args: dict) -> str:
+    """bash 预览：优先展示大模型给出的自然语言 description，无则回退命令片段"""
+    tool_args = tool_args or {}
+    desc = (tool_args.get("description") or "").strip()
+    if desc:
+        return desc
     cmd = tool_args.get("command", "")
     return f'执行 "{cmd[:60]}"' if cmd else "执行命令"
 
@@ -693,6 +708,9 @@ def _make_bg_preview(tool_name: str):
     def _preview(tool_args: dict) -> str:
         tool_args = tool_args or {}
         if tool_name == "bg_start":
+            desc = (tool_args.get("description") or "").strip()
+            if desc:
+                return f"后台启动：{desc}"
             cmd = tool_args.get("command", "")
             return f'后台启动 "{cmd[:40]}"' if cmd else "后台启动"
         if tool_name == "bg_stop":
@@ -719,7 +737,10 @@ def _summarize_bash(tool_name, tool_args, tool_content):
     exit_match = _re.search(r'"exit_code"\s*:\s*(-?\d+)', content)
     exit_code = exit_match.group(1) if exit_match else "?"
     line_count = content.count("\n") + 1 if content.strip() else 0
-    return f"[{tool_name}] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
+    # 有自然语言描述时以描述为主，命令作为事实留档（压缩后仍需知道到底跑了什么）
+    desc = (args.get("description") or "").strip()
+    label = f"{desc} (`{cmd}`)" if desc and cmd else (desc or f"`{cmd}`")
+    return f"[{tool_name}] ran {label} -> exit {exit_code}, {line_count} lines output"
 
 
 def _make_bg_summarize(preview_fn):
