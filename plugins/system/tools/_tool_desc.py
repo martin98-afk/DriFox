@@ -53,9 +53,9 @@ def prefer_description(preview_fn=None, tail_fn=None):
     两种形态：
     - 默认（tail_fn=None）：description **替换**原预览。适用于原始参数对用户
       没有信息量的工具（bash 命令串）。
-    - tail_fn 非空：拼成两行——第一行 description，第二行 tail。
-      适用于**原始参数本身仍要留着**的工具——典型是编辑类工具的文件路径：
-      光看"抽离 token 估算函数"不知道改了哪个文件，路径必须留在折叠头上。
+    - tail_fn 非空：拼成 "description (tail)"。适用于**原始参数本身仍要留着**
+      的工具——典型是编辑类工具的文件路径：光看"抽离 token 估算函数"不知道改了
+      哪个文件，路径必须留在折叠头上。
 
     Args:
         preview_fn: 原 preview 闭包 (tool_args) -> str，作为无 description 时的兜底
@@ -76,6 +76,6 @@ def prefer_description(preview_fn=None, tail_fn=None):
             tail = tail_fn(args) or ""
         except Exception:
             tail = ""
-        return f"{desc}\n{tail}" if tail else desc
+        return f"{desc} {tail}" if tail else desc
 
     return _wrapped

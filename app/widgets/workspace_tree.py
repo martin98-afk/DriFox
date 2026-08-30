@@ -283,6 +283,7 @@ class _NodeHeader(QFrame):
         # 样式纪元收敛（见 _STYLE_EPOCH）
         self._spec_sig = None
         self._style_epoch = -1
+        self._theme_sig = None
 
         self.setFixedHeight(_HEADER_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
@@ -378,10 +379,15 @@ class _NodeHeader(QFrame):
             spec.avatar_sig,
             spec.bold,
         )
-        if sig == self._spec_sig and self._style_epoch == _STYLE_EPOCH:
+        if (
+            sig == self._spec_sig
+            and self._style_epoch == _STYLE_EPOCH
+            and _theme_sig() == self._theme_sig
+        ):
             return
         self._spec_sig = sig
         self._style_epoch = _STYLE_EPOCH
+        self._theme_sig = _theme_sig()
         self._apply_appearance()
 
     def _apply_avatar(self, spec: "TreeNodeSpec"):
@@ -566,6 +572,7 @@ class _SessionRow(QFrame):
         # 样式纪元收敛（见 _STYLE_EPOCH）
         self._spec_sig = None
         self._style_epoch = -1
+        self._theme_sig = None
 
         self.setFixedHeight(_ROW_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
@@ -604,10 +611,15 @@ class _SessionRow(QFrame):
     def _sync_appearance(self, spec: "TreeNodeSpec"):
         """内容签名 + 样式纪元双条件下才真正重刷 QSS（见 _STYLE_EPOCH 注释）"""
         sig = (spec.key, spec.title, spec.tooltip, spec.indent, self._meta.text())
-        if sig == self._spec_sig and self._style_epoch == _STYLE_EPOCH:
+        if (
+            sig == self._spec_sig
+            and self._style_epoch == _STYLE_EPOCH
+            and _theme_sig() == self._theme_sig
+        ):
             return
         self._spec_sig = sig
         self._style_epoch = _STYLE_EPOCH
+        self._theme_sig = _theme_sig()
         self._apply_appearance()
 
     def set_compact(self, compact: bool):
