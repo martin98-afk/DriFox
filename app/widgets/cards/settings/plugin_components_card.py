@@ -1015,9 +1015,14 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             self._component_off += -1 if enabled else 1
             self._sig = self._signature()
             self._refresh_summary_text()
-            # 组件整类开关会改变该组件下细项的可用性，已展开的要重建
+            # 组件整类开关后细项可用性会变。仅「关闭」方向在此同步重建——
+            # 此刻热重载（singleShot(0)）尚未执行，registry 里该插件工具还在，
+            # 枚举仍是全量。「开启」方向此刻 registry 还是空的（工具要等
+            # 热重载才注册回来），同步重建只会得到空列表（用户看到的「开启
+            # 总项后列表不全」）；开启方向交给 _run_hot_reload 完成后按
+            # _rebuild_target 重建（_refresh_after_reload），届时枚举才正确。
             section = self._pool.get(plugin_name)
-            if section is not None:
+            if section is not None and not enabled:
                 items = self._component_items(plugin_name, component)
                 section.reload_component_items(
                     component, items, lambda item_id: pm.is_item_enabled(plugin_name, component, item_id)
@@ -1080,7 +1085,11 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             # 重载后工具/智能体集合可能变了，两套缓存都要失效
             invalidate_item_index()
             invalidate_token_cache()
-            self._refresh_after_reload()
+            # ★ 必须把 _defer_hot_reload 存下的 _rebuild_target 传进去：
+            # 组件「开启」方向的细项行要等这步（热重载完成后 registry 已
+            # 恢复）才重建得出来。此前无参调用丢弃了目标，热重载后没人
+            # 重建细项行，列表停留在空/不全状态。
+            self._refresh_after_reload(self._rebuild_target)
 
     def _refresh_after_reload(self, rebuild_items=None):
         """热重载后按实际状态刷新：token 汇总 + （按需）细项行
@@ -1109,7 +1118,15 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
                     row.set_tokens(tokens, count)
                     # 只重建目标组件：整类开关会改变该组件下细项的可用性。
                     # 单个条目开关时 rebuild_items 为 None，列表原样保留。
-                    if rebuild_items is not None and (section.plugin_name, comp) == rebuild_items and row.is_expanded:
+                    # ★ 且仅组件当前「启用」时重建：关闭方向的热重载会把工具
+                    # 从 registry 注销，此刻枚举拿不到全量——重建会把 toggle
+                    # 同步路径建好的全量列表冲成空列表。
+                    if (
+                        rebuild_items is not None
+                        and (section.plugin_name, comp) == rebuild_items
+                        and row.is_expanded
+                        and pm.is_component_enabled(section.plugin_name, comp)
+                    ):
                         items = self._component_items(section.plugin_name, comp)
                         section.reload_component_items(
                             comp,
