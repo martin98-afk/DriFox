@@ -407,6 +407,12 @@ class Settings(QConfig):
 
     # ========== 像素桌宠 ==========
     pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())
+    # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树
+    tab_panel_mode = OptionsConfigItem(
+        "UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"])
+    )
+    # 工作区树折叠态：{节点 key: 是否展开}
+    workspace_tree_expansion = ConfigItem("UI", "WorkspaceTreeExpansion", {})
     pet_size = OptionsConfigItem("UI", "PetSize", "small", OptionsValidator(["small", "medium", "large"]))
 
     # ========== 会话项目管理 ==========

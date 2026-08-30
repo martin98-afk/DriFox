@@ -1265,6 +1265,11 @@ class TabManagerWindow(FramelessWindow):
         self._tab_panel.teamCloseRequested.connect(self._on_team_close_requested)
         self._tab_panel.teamAddMemberRequested.connect(self._on_team_add_member_requested)
         self._tab_panel.teamNewTaskRequested.connect(self._on_team_new_task_requested)
+        # 工作区树模式：在项目 + 工作树下新建对话页 / 打开历史会话
+        self._tab_panel.newSessionInWorkspaceRequested.connect(self._on_new_session_in_workspace)
+        self._tab_panel.openSessionRecordRequested.connect(self._on_open_session_record)
+        # Tab 增删后同步工作区树（会话归属/历史列表会变）
+        self.tabCountChanged.connect(self._on_tab_count_changed_for_tree)
         # 用户手动拖拽 splitter 把手 → 折叠是用户主动，不标记挤压，
         # 关闭卡片/空间恢复时不得自动展开（尊重手动意图）
         if hasattr(self, "_splitter"):
@@ -2875,6 +2880,61 @@ class TabManagerWindow(FramelessWindow):
             window = self._windows[index]
             if window is not None:
                 self.spawn_tab(window, branch=True)
+
+    def _on_new_session_in_workspace(self, project: str, worktree_path: str):
+        """工作区树：在指定项目 + 工作树下新建对话页
+
+        spawn_tab(project=...) 只切窗口的 _current_project，工作树由窗口的
+        _current_workdir[project] 单独维护，必须显式切（_switch_to_worktree 幂等）。
+        """
+        from loguru import logger
+
+        source = self.get_current_window()
+        if source is None:
+            self._on_new_tab_requested()
+            return
+        project = (project or "").strip() or getattr(source, "_current_project", "") or "默认项目"
+        new_window = self.spawn_tab(source, new_session=True, project=project)
+        if new_window is None:
+            return
+        worktree_path = (worktree_path or "").strip()
+        if worktree_path and hasattr(new_window, "_switch_to_worktree"):
+            try:
+                new_window._switch_to_worktree(worktree_path)
+            except Exception as e:
+                logger.warning(f"[TabManagerWindow] 切换到工作树失败: {e}")
+
+    def _on_open_session_record(self, record):
+        """工作区树：打开一条历史会话（新开标签页，不动当前页）
+
+        session_record 只需含 session_id —— _load_session_from_record 会按 id
+        重新拉全量消息，并自动同步项目 / 工作树。
+        """
+        from loguru import logger
+
+        record = record if isinstance(record, dict) else {}
+        if not str(record.get("session_id") or ""):
+            return
+        source = self.get_current_window()
+        if source is None:
+            return
+        project = (record.get("project") or "").strip() or None
+        try:
+            self.spawn_tab(source, session_record=record, project=project)
+        except Exception as e:
+            logger.warning(f"[TabManagerWindow] 打开历史会话失败: {e}")
+
+    def refresh_workspace_tree(self):
+        """刷新左侧工作区树（历史会话增删改后调用）"""
+        panel = getattr(self, "_tab_panel", None)
+        if panel is not None and hasattr(panel, "refresh_tree"):
+            panel.refresh_tree()
+
+    def _on_tab_count_changed_for_tree(self, _count: int):
+        """Tab 数量变化 → 刷新工作区树（历史会话与已打开 Tab 会互相挤位）"""
+        panel = getattr(self, "_tab_panel", None)
+        if panel is not None and getattr(panel, "current_mode", lambda: "list")() == "tree":
+            self.refresh_workspace_tree()
 
     def _on_new_tab_requested(self):
         """新建窗口 — 走当前窗口的复制逻辑，复用后端状态"""
