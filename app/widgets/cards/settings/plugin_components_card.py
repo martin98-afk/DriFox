@@ -639,6 +639,7 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self._total = 0
         self._component_off = 0
         self._tokens = 0  # 当前启用组件的 token 占用合计
+        self._rebuild_target = None  # 热重载后需要重建细项行的 (plugin, component)
         # ── 分批构建状态 ──
         self._pending: List[tuple] = []  # 待构建的 (entry, matched)
         self._built = 0  # 已构建并挂载的数量
@@ -1023,7 +1024,11 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
                 )
                 self._adjust_view_size()
             self._defer_hot_reload(
-                PluginHostService.get_instance().on_plugin_component_toggled, plugin_name, component, enabled
+                PluginHostService.get_instance().on_plugin_component_toggled,
+                plugin_name,
+                component,
+                enabled,
+                rebuild_items=(plugin_name, component),
             )
         except Exception as e:
             logger.error(f"[PluginComponentsCard] 切换 {plugin_name}:{component} 失败: {e}")
@@ -1039,18 +1044,26 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             pm.set_item_enabled(plugin_name, component, item_id, enabled)
             self._sig = self._signature()
             self._refresh_summary_text()
+            # 不重建细项行：列表里这一项本来就在（_component_items 会从
+            # 禁用集里补回被停用的项），重建只会让整片开关闪一下
             self._defer_hot_reload(
                 PluginHostService.get_instance().on_plugin_item_toggled, plugin_name, component, item_id, enabled
             )
         except Exception as e:
             logger.error(f"[PluginComponentsCard] 切换细项 {plugin_name}:{component}:{item_id} 失败: {e}")
 
-    def _defer_hot_reload(self, fn, *args):
+    def _defer_hot_reload(self, fn, *args, rebuild_items=None):
         """把热重载挪到下一轮事件循环
 
         重载涉及写盘、模块导入与 registry 重建，同步做会卡住 SwitchButton
         的动画；延后一轮让开关先渲染出按下状态，再显示等待光标。
+
+        Args:
+            rebuild_items: 重载后需要重建细项行的 (plugin_name, component)。
+                传 None 表示一行都不重建（只刷 token）——单个条目开关时用，
+                否则用户会看到整片开关闪一下。
         """
+        self._rebuild_target = rebuild_items
         QTimer.singleShot(0, lambda: self._run_hot_reload(fn, *args))
 
     def _run_hot_reload(self, fn, *args):
@@ -1069,14 +1082,13 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             invalidate_token_cache()
             self._refresh_after_reload()
 
-    def _refresh_after_reload(self):
-        """热重载后按实际状态刷新：token 汇总 + 已展开的细项行
+    def _refresh_after_reload(self, rebuild_items=None):
+        """热重载后按实际状态刷新：token 汇总 + （按需）细项行
 
-        这两样在开关切换那一刻都算不准，因为热重载延后了一帧：
-        1. token 占用 —— 开启时工具还没重新注册（估成 0）、关闭时还没卸载，
-           等重载跑完重算一次，否则「关掉少了、打开却回不来」。
-        2. 细项行 —— 关闭总项会让工具从 registry 消失、列表被清空；重新开启
-           后必须等工具注册回来再重建，否则列表一直是空的（用户报的 bug）。
+        Args:
+            rebuild_items: (plugin_name, component)。只重建这一处的细项行；
+                其余组件一律不动——重建是 deleteLater + 新建，用户会看到
+                整片开关闪一下，代价太大。单个条目开关时传 None。
         """
         invalidate_token_cache()
         try:
@@ -1095,8 +1107,9 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
                         continue
                     tokens, count = estimate_component_tokens(section.plugin_name, comp)
                     row.set_tokens(tokens, count)
-                    # 已展开的细项行按重载后的真实集合重建
-                    if row.is_expanded:
+                    # 只重建目标组件：整类开关会改变该组件下细项的可用性。
+                    # 单个条目开关时 rebuild_items 为 None，列表原样保留。
+                    if rebuild_items is not None and (section.plugin_name, comp) == rebuild_items and row.is_expanded:
                         items = self._component_items(section.plugin_name, comp)
                         section.reload_component_items(
                             comp,

@@ -53,6 +53,47 @@ def _to_rel_path_loader():
     return _path_utils_module
 
 
+# ========== 共享 description 参数约定（同目录 _tool_desc.py，下划线前缀 → loader 跳过） ==========
+_tool_desc_module = None
+
+
+def _tool_desc_loader():
+    """加载共享的 description 参数约定（进程级缓存一次；失败返回 None，调用方走原预览）"""
+    global _tool_desc_module
+    if _tool_desc_module is not None:
+        return _tool_desc_module
+    import importlib.util
+
+    plugin_path = Path(__file__).resolve().parent / "_tool_desc.py"
+    if not plugin_path.exists():
+        _tool_desc_module = False
+        return _tool_desc_module
+    spec = importlib.util.spec_from_file_location("_plugin_tool_desc", plugin_path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        _tool_desc_module = mod
+    except Exception:
+        _tool_desc_module = False
+    return _tool_desc_module
+
+
+def _desc_param(example: str) -> dict:
+    """生成 description 参数的 schema 片段（模块缺失时返回空 dict，schema 退化为原样）"""
+    mod = _tool_desc_loader()
+    if not mod:
+        return {}
+    return mod.description_param(example)
+
+
+def _desc_preview(preview_fn):
+    """包装 preview 闭包：优先展示大模型填写的 description（模块缺失时原样返回）"""
+    mod = _tool_desc_loader()
+    if not mod:
+        return preview_fn
+    return mod.prefer_description(preview_fn)
+
+
 GROUP_READ = "文件读取"
 GROUP_WRITE = "文件写入"
 
@@ -302,8 +343,9 @@ _WRITE_SCHEMA = {
             "properties": {
                 "path": {"type": "string", "description": "文件相对路径"},
                 "content": {"type": "string", "description": "完整的文件内容"},
+                **_desc_param("新增 token 估算缓存模块"),
             },
-            "required": ["path", "content"],
+            "required": ["path", "content", "description"],
         },
     },
 }
@@ -382,8 +424,9 @@ _EDIT_SCHEMA = {
                 "oldString": {"type": "string", "description": "旧文本(精确匹配，含空白)"},
                 "newString": {"type": "string", "description": "替换后的新文本"},
                 "replaceAll": {"type": "boolean", "description": "替换全部匹配(默认False)。oldString重复时设True", "default": False},
+                **_desc_param("修掉空列表导致的崩溃"),
             },
-            "required": ["path", "oldString", "newString"],
+            "required": ["path", "oldString", "newString", "description"],
         },
     },
 }
@@ -458,8 +501,9 @@ _MULTI_EDIT_SCHEMA = {
                         "required": ["oldString", "newString"],
                     },
                 },
+                **_desc_param("把 token 估算抽成独立函数并加缓存"),
             },
-            "required": ["path", "edits"],
+            "required": ["path", "edits", "description"],
         },
     },
 }
@@ -996,7 +1040,11 @@ def _make_file_summarize(tool_name: str):
         if name in ("write", "edit", "multi_edit"):
             path = args.get("path", "?")
             written_lines = args.get("content", "").count("\n") + 1 if args.get("content") else "?"
-            return f"[{name}] wrote to {path} ({written_lines} lines)"
+            # 有自然语言描述时以描述为主，路径作为事实留档（压缩后仍需知道改的是哪个文件）
+            _desc_mod = _tool_desc_loader()
+            desc = _desc_mod.get_description(args) if _desc_mod else ""
+            label = f"{desc} ({path})" if desc else path
+            return f"[{name}] wrote to {label} ({written_lines} lines)"
         if name == "grep":
             pattern = args.get("pattern", "?")
             path = args.get("path", ".")
@@ -1028,7 +1076,7 @@ def register(registry):
         danger="dangerous", icon="编辑", cn_name="写入",
         group=GROUP_WRITE, description="覆盖/创建文件",
         aliases=["Write", "WriteFile", "CreateFile", "create_file"],
-        preview=_make_file_preview("write"),
+        preview=_desc_preview(_make_file_preview("write")),
         summarize=_make_file_summarize("write"),
         render=_render_edit_diff_body,  # 全部 diff 渲染走插件闭包（主程序无兜底）
         keep_in_content=True,  # diff 卡常驻正文，不迁入工具折叠区
@@ -1041,7 +1089,7 @@ def register(registry):
         aliases=["Edit", "TextEdit", "ReplaceInFile", "replace"],
         render=_render_edit_diff_body,
         keep_in_content=True,
-        preview=_make_file_preview("edit"),
+        preview=_desc_preview(_make_file_preview("edit")),
         summarize=_make_file_summarize("edit"),
         # reconstruct_diff：历史消息 diff 缺失时，渲染层按 operations 参数重建伪 diff
         # （仅 edit 的 operations/anchor/lines 结构支持重建）
@@ -1054,7 +1102,7 @@ def register(registry):
         aliases=["MultiEdit", "MultiEditTool"],
         render=_render_edit_diff_body,
         keep_in_content=True,
-        preview=_make_file_preview("multi_edit"),
+        preview=_desc_preview(_make_file_preview("multi_edit")),
         summarize=_make_file_summarize("multi_edit"),
         metadata={"permission_arg": "filePath"},
     )

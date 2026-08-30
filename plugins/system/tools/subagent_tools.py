@@ -510,18 +510,24 @@ def _render_dag_body(result, tool_name, tool_args, success):
 
 
 def _preview_subagent_para(tool_args: dict) -> str:
+    """分发任务预览：优先展示子任务各自的 description（比"分发 N 个子任务"更有信息量）"""
     tasks = tool_args.get("tasks", [])
     count = len(tasks) if isinstance(tasks, list) else 0
-    if count:
-        agents = set()
-        for t in tasks:
-            if isinstance(t, dict):
-                agents.add(t.get("agent", "?"))
-        agent_names = ", ".join(sorted(agents)) if agents else ""
-        desc = f"分发 {count} 个子任务" + (f" → {agent_names}" if agent_names else "")
-    else:
-        desc = "分发子智能体任务"
-    return desc
+    if not count:
+        return "分发子智能体任务"
+    descs = []
+    for t in tasks:
+        if isinstance(t, dict):
+            d = str(t.get("description") or "").strip()
+            if d:
+                descs.append(d)
+    if not descs:
+        return f"分发 {count} 个子任务"
+    if count == 1:
+        return descs[0]
+    if len(descs) == 2:
+        return " / ".join(d[:40] for d in descs)
+    return f"{descs[0][:40]} 等 {count} 个子任务"
 
 
 def _preview_subagent_status(tool_args: dict) -> str:
@@ -532,9 +538,17 @@ def _preview_subagent_status(tool_args: dict) -> str:
 
 
 def _preview_subagent_dag(tool_args: dict) -> str:
+    """DAG 预览：展示首个节点的 description + 节点数（比纯"DAG 工作流"更有信息量）"""
     nodes = tool_args.get("nodes", [])
     count = len(nodes) if isinstance(nodes, list) else 0
-    return "DAG 工作流" + (f" ({count}节点)" if count else "")
+    if not count:
+        return "DAG 工作流"
+    head = ""
+    if isinstance(nodes[0], dict):
+        head = str(nodes[0].get("description") or "").strip()
+    if not head:
+        return f"DAG 工作流 ({count} 节点)"
+    return f"{head[:40]} 等 {count} 步工作流" if count > 1 else head
 
 
 def register(registry):
