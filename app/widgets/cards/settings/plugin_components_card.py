@@ -51,6 +51,13 @@ from app.utils.design_tokens import Colors, SwitchStyles, font_size_css, scale_f
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.elided_label import _ElidedLabel
 
+# 只对这两类组件提供开关。
+#
+# 其余组件（hooks / mcp / lsp / ui / providers …）整类关掉后要么感知不到差别，
+# 要么本来就有各自的专用设置页，列在这里只是让设置页变长、构建变慢。
+# 需要重新开放某一类时，往这个元组里加即可——下面的过滤、统计、搜索全部按它走。
+_MANAGED_COMPONENTS = ("tools", "agents")
+
 # 组件中文名（KNOWN_COMPONENTS 全集；未知组件回退显示原名）
 _COMPONENT_CN = {
     "agents": "智能体",
@@ -89,7 +96,9 @@ _SEARCH_PAGE_SIZE = 120
 _PAGE_STEP = 40
 # 首帧立即构建的小节数——先让用户看到内容并能交互，其余分批补齐。
 # 实测整卡构建 ~250ms（65 插件 / 104 组件），首帧只做 6 个可把阻塞压到几十毫秒。
-_FIRST_BATCH = 6
+# 现在只对 tools / agents 提供开关，实际条目通常不到 20 个，首帧一次性建完即可，
+# 免得列表在用户眼前「一点点长出来」；条目变多时分批机制仍会自动接管。
+_FIRST_BATCH = 20
 # 后续每批构建的小节数（singleShot(0) 之间让出事件循环，滚动/点击不被饿死）
 _BATCH_SIZE = 12
 # 搜索输入去抖
@@ -505,7 +514,7 @@ class PluginComponentsCard(ExpandSettingCard):
         super().__init__(
             get_icon("配置管理"),
             "插件组件",
-            "控制插件内部子项（Hooks/LSP/工具等）的启停",
+            "按插件控制其工具与智能体的启停",
             parent,
         )
         self._pool: Dict[str, PluginSectionWidget] = {}
@@ -548,7 +557,7 @@ class PluginComponentsCard(ExpandSettingCard):
 
     def _build_search_bar(self):
         self._search_bar = SearchLineEdit(self)
-        self._search_bar.setPlaceholderText("搜索插件名 / 组件名 / 细项（工具名、hook id…）")
+        self._search_bar.setPlaceholderText("搜索插件名 / 工具名 / 智能体名")
         self._search_bar.setClearButtonEnabled(True)
         self._search_bar.setFixedHeight(32)
         self._search_timer = QTimer(self)
@@ -563,12 +572,15 @@ class PluginComponentsCard(ExpandSettingCard):
         return PluginManager.get_instance()
 
     def _collect_entries(self) -> List[tuple]:
-        """[(name, is_system, description, [components])]，system 优先、同名按字母序"""
+        """[(name, is_system, description, [components])]，system 优先、同名按字母序
+
+        只保留 _MANAGED_COMPONENTS 里的组件；一个都不含的插件不出现。
+        """
         pm = self._pm()
         plugins = sorted(pm.get_enabled_plugins(), key=lambda p: (not p.is_system, p.name.lower()))
         entries = []
         for plugin in plugins:
-            comps = [c for c, v in plugin.components.items() if v]
+            comps = [c for c, v in plugin.components.items() if v and c in _MANAGED_COMPONENTS]
             if not comps:
                 continue
             entries.append((plugin.name, plugin.is_system, plugin.description or "", sorted(comps, key=_order_key)))

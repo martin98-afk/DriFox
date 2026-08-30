@@ -101,7 +101,10 @@ class SkillListSettingCard(ExpandSettingCard):
         self.title = title
         self.configItem = configItem
         self.enabled_skills = qconfig.get(configItem).copy() if qconfig.get(configItem) else []
-        self._discover_skills()
+        # 技能项延迟到首次展开时构建（见 _ensure_items_built）。
+        # all_skills 必须先初始化为空列表——外部在折叠态下也可能读它
+        self.all_skills = []
+        self._items_built = False
         self.__initWidget()
 
     def _discover_skills(self):
@@ -219,11 +222,31 @@ class SkillListSettingCard(ExpandSettingCard):
 
         self.viewLayout.addWidget(header_widget)
 
-        for skill in self.all_skills:
-            self._add_skill_item(skill["name"], skill["description"])
+        # 技能行延迟到首次展开时构建（见 _ensure_items_built）：
+        # 逐个 new SkillItem 是设置面板首屏最大的单项开销，而折叠态下这些
+        # 行用户根本看不到。这里只留表头，subtitle 保持构造时传入的静态文案。
+        self._adjustViewSize()
 
+    def _ensure_items_built(self):
+        """首次需要时填充技能行（发现 → 建行 → 更新计数）
+
+        幂等；重复调用直接返回。展开、刷新、外部读取前都应先调一次。
+        """
+        if self._items_built:
+            return
+        self._items_built = True
+        self._discover_skills()
+        # 批量建行期间不逐个 _adjustViewSize（那是 N 次全布局重算）
+        for skill in self.all_skills:
+            self._add_skill_item(skill["name"], skill["description"], adjust=False)
         self._update_skill_token_count()
         self._adjustViewSize()
+
+    def setExpand(self, isExpand: bool):
+        """展开前补齐技能行，保证展开动画算到的是完整高度"""
+        if isExpand:
+            self._ensure_items_built()
+        super().setExpand(isExpand)
 
     def refresh_style(self):
         """主题变更时刷新表头文字颜色"""
@@ -252,7 +275,9 @@ class SkillListSettingCard(ExpandSettingCard):
             w = self.viewLayout.itemAt(i).widget()
             if isinstance(w, SkillItem):
                 w.switch.setChecked(w.name in self.enabled_skills)
-        self._update_skill_token_count()
+        # 行还没建时 all_skills 是空的，此时更新计数会把 subtitle 写成 0/0
+        if self._items_built:
+            self._update_skill_token_count()
 
     def _refresh_skills(self):
         # 从配置重新读取启用状态（跨窗口同步需要）
@@ -268,17 +293,25 @@ class SkillListSettingCard(ExpandSettingCard):
                 self.viewLayout.removeItem(item)
                 widget.deleteLater()
         for skill in self.all_skills:
-            self._add_skill_item(skill["name"], skill["description"])
+            self._add_skill_item(skill["name"], skill["description"], adjust=False)
+        self._items_built = True
         self._update_skill_token_count()
         self._adjustViewSize()
 
-    def _add_skill_item(self, name: str, description: str):
+    def _add_skill_item(self, name: str, description: str, adjust: bool = True):
+        """添加一行技能
+
+        Args:
+            adjust: 是否立即重算卡片高度。批量添加时传 False，
+                末尾统一调一次 _adjustViewSize()——每次都算会退化成 N 次全布局重算。
+        """
         is_enabled = name in self.enabled_skills
         item = SkillItem(name, description, is_enabled, self.view)
         item.enabled_changed.connect(self._on_skill_enabled_changed)
         self.viewLayout.addWidget(item)
         item.show()
-        self._adjustViewSize()
+        if adjust:
+            self._adjustViewSize()
 
     def _update_skill_token_count(self):
         """更新头部 subtitle：已启用计数 + token 占用估算"""

@@ -141,10 +141,25 @@ class LspListSettingCard(ExpandSettingCard):
         self._setup_ui()
         # 将 refresh_style 指向私有方法（避免在 _setup_ui 前定义）
         self.refresh_style = self._refresh_lsp_style
-        self._rebuild()
+        # 列表行延迟到首次展开时构建（见 _ensure_built）：_get_lsp_manager()
+        # 会首次导入 app.core.lsp.lsp_manager，实测约 0.27s，折叠态下不必付
+        self._built = False
         # 首次加载后延迟刷新一次状态
         QTimer.singleShot(500, self._refresh_status)
         self._refresh_timer.start()
+
+    def _ensure_built(self):
+        """首次需要时构建列表行（幂等）"""
+        if self._built:
+            return
+        self._built = True
+        self._rebuild()
+
+    def setExpand(self, isExpand: bool):
+        """展开前补齐列表行，保证展开动画算到的是完整高度"""
+        if isExpand:
+            self._ensure_built()
+        super().setExpand(isExpand)
 
     def _get_lsp_manager(self):
         """获取 LspManager 实例"""
