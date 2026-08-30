@@ -199,8 +199,7 @@ def test_template_source_carries_plugin_name(pm_memory):
 
 def test_component_row_signal_carries_component_then_enabled(qapp):
     """回归：ComponentRow.toggled 的 lambda 形参曾写成 (enabled, component)"""
-    from app.plugins.component_items import ComponentItem
-    from app.widgets.cards.settings.plugin_components_card import ComponentRow, ItemRow
+    from app.widgets.cards.settings.plugin_components_card import ComponentRow
 
     row = ComponentRow("tools", True)
     got = []
@@ -208,11 +207,18 @@ def test_component_row_signal_carries_component_then_enabled(qapp):
     row.switch.setChecked(False)
     assert got == [("tools", False)], "组件开关信号必须按 (component, enabled) 传递"
 
-    irow = ItemRow(ComponentItem(id="read_file", label="读取文件"), True)
-    got = []
-    irow.toggled.connect(lambda item_id, enabled: got.append((item_id, enabled)))
-    irow.switch.setChecked(False)
-    assert got == [("read_file", False)], "细项开关信号必须按 (item_id, enabled) 传递"
+
+def test_component_row_shows_token_cost(qapp):
+    """组件行右侧展示 token 占用（细项开关已改为成本展示）"""
+    from app.widgets.cards.settings.plugin_components_card import ComponentRow
+
+    row = ComponentRow("tools", True)
+    assert row._token_label.text() == "", "无成本时应留空"
+    row.set_tokens(1234, 7)
+    assert "1,234" in row._token_label.text()
+    assert "7 项" in row._token_label.text()
+    row.set_tokens(0, 0)
+    assert row._token_label.text() == ""
 
 
 def test_section_forwards_plugin_name(qapp):

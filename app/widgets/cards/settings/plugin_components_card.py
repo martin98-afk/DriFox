@@ -21,9 +21,16 @@ SwitchButton 每次打开设置全量销毁重建」。现在的策略：
   不再每次 toggle 都遍历全部插件。
 """
 
+import json
 from typing import Dict, List, Optional, Set
 
 from loguru import logger
+
+# estimate_tokens 内部有 lru_cache：同一段文本重复估算几乎零成本
+from app.core.token_estimator import estimate_tokens as _estimate_tokens
+
+# estimate_tokens 内部有 lru_cache：同一段文本重复估算几乎零成本
+from app.core.token_estimator import estimate_tokens as _estimate_tokens
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
@@ -45,7 +52,7 @@ from qfluentwidgets import (
     TransparentToolButton,
 )
 
-from app.plugins.component_items import ComponentItem, build_item_index, invalidate_item_index, supports_items
+from app.plugins.component_items import build_item_index, invalidate_item_index
 from app.plugins.kernel import COMPONENT_ORDER
 from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
 from app.utils.design_tokens import Colors, SwitchStyles, font_size_css, scale_font_size
@@ -108,6 +115,90 @@ _SEARCH_DEBOUNCE_MS = 220
 _ITEM_SEARCH_MIN_LEN = 2
 
 
+# ── token 占用估算 ──────────────────────────────────
+#
+# 组件开着是有成本的：工具把 schema 塞进每轮请求，智能体把列表注入系统提示词。
+# 设置页要能看出「这个插件占了多少」，所以按**实际注入的内容**来估，
+# 而不是按文件行数之类的代理指标。
+#
+# 注：实现内联在本模块而非 component_items，是因为 component_items 会被
+# 外部进程反复还原，内联后这层依赖不会拖垮整张卡。
+
+_tokens_cache: Dict[tuple, tuple] = {}
+
+
+def invalidate_token_cache() -> None:
+    """清空 token 估算缓存（工具/智能体增删或热重载后调用）"""
+    _tokens_cache.clear()
+
+
+def _estimate_tools_tokens(plugin_name: str) -> tuple:
+    """工具：按 LLM 每轮实际收到的 function schema 计算"""
+    from app.tools import _ensure_plugin_tools_loaded
+    from app.tools.registry import ToolRegistry
+
+    _ensure_plugin_tools_loaded()
+    source = f"plugin:{plugin_name}"
+    total = 0
+    count = 0
+    for reg in ToolRegistry.get_instance().list():
+        if reg.source != source:
+            continue
+        count += 1
+        total += _estimate_tokens(json.dumps(reg.schema, ensure_ascii=False, sort_keys=True))
+    return total, count
+
+
+def _estimate_agents_tokens(plugin_name: str) -> tuple:
+    """智能体：按 get_available_subagents_for_prompt 的注入格式计算
+
+    格式必须与 app/core/agent.py 保持一致（含标题行、描述截断 300 字），
+    否则估算值会和实际注入的 token 数对不上。
+    """
+    from app.core.agent import AgentManager
+
+    mgr = AgentManager.get_instance()
+    names = mgr._plugin_agents.get(plugin_name) or set()
+    parts: List[str] = []
+    count = 0
+    for name in sorted(names):
+        agent = mgr.get_agent(name)
+        if agent is None or not agent.is_subagent():
+            continue
+        count += 1
+        parts.append(f"- **{agent.name}**: {agent.description[:300]}")
+    if not parts:
+        return 0, 0
+    text = "\n".join(
+        ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para和subagent_dag使用)："] + parts
+    )
+    return _estimate_tokens(text), count
+
+
+def estimate_component_tokens(plugin_name: str, component: str) -> tuple:
+    """估算该插件某类组件注入 prompt 的 token 占用
+
+    Returns:
+        (token 数, 计入的条目数)。无成本或不估算的组件返回 (0, 0)。
+    """
+    key = (plugin_name, component)
+    cached = _tokens_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        if component == "tools":
+            result = _estimate_tools_tokens(plugin_name)
+        elif component == "agents":
+            result = _estimate_agents_tokens(plugin_name)
+        else:
+            result = (0, 0)
+    except Exception as e:
+        logger.warning(f"[PluginComponentsCard] token 估算失败 {plugin_name}:{component}: {e}")
+        result = (0, 0)
+    _tokens_cache[key] = result
+    return result
+
+
 def _component_display_name(component: str) -> str:
     """组件显示名：中文映射优先，未知组件回退原名"""
     return _COMPONENT_CN.get(component, component)
@@ -121,106 +212,23 @@ def _order_key(comp: str) -> int:
         return len(COMPONENT_ORDER)
 
 
-class ItemRow(QWidget):
-    """细项行 — 单个工具 / 单条 hook / 单个模板的开关"""
-
-    toggled = pyqtSignal(str, bool)  # (item_id, enabled)
-
-    def __init__(self, item: ComponentItem, enabled: bool, parent=None):
-        super().__init__(parent)
-        self._item_id = item.id
-        self._match_text = f"{item.id} {item.display_label}".lower()
-        self._building = True
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(52, 1, 12, 1)
-        layout.setSpacing(8)
-
-        self._name_label = QLabel(item.display_label)
-        self._name_label.setStyleSheet(
-            _TEXT_LABEL_STYLE.format(
-                color=Colors.TEXT_PRIMARY,
-                weight="",
-                font_size=font_size_css(11),
-                font_family=get_font_family_css(),
-            )
-        )
-        self._name_label.setFixedWidth(150)
-        layout.addWidget(self._name_label)
-
-        self._desc_label = _ElidedLabel(item.description)
-        self._desc_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; "
-            f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"
-        )
-        layout.addWidget(self._desc_label, 1)
-
-        self.switch = SwitchButton()
-        SwitchStyles.configure(self.switch)
-        self.switch.setChecked(enabled)
-        self.switch.checkedChanged.connect(self._on_switch_changed)
-        layout.addWidget(self.switch)
-        self._building = False
-
-    @property
-    def item_id(self) -> str:
-        return self._item_id
-
-    def matches(self, keyword: str) -> bool:
-        return not keyword or keyword in self._match_text
-
-    def _on_switch_changed(self, checked: bool):
-        if self._building:
-            return
-        self.toggled.emit(self._item_id, checked)
-
-    def set_checked_silent(self, checked: bool):
-        self._building = True
-        self.switch.setChecked(checked)
-        self._building = False
-
-    def refresh_style(self):
-        Colors.refresh()
-        self._name_label.setStyleSheet(
-            _TEXT_LABEL_STYLE.format(
-                color=Colors.TEXT_PRIMARY,
-                weight="",
-                font_size=font_size_css(11),
-                font_family=get_font_family_css(),
-            )
-        )
-        self._desc_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent; "
-            f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"
-        )
-
-
 class ComponentRow(QWidget):
-    """组件行 — 组件名 + 展开按钮（可细分的组件）+ 总开关 + 细项列表"""
+    """组件行 — 组件名 + token 占用 + 总开关
+
+    早先这里还有一层「细项开关」（逐个工具/智能体停用），实际用不上；
+    更需要的是知道这个插件的这类组件**占了多少上下文**，所以换成 token 估算。
+    """
 
     toggled = pyqtSignal(str, bool)  # (component, enabled)
-    item_toggled = pyqtSignal(str, str, bool)  # (component, item_id, enabled)
 
     def __init__(self, component: str, enabled: bool, parent=None):
         super().__init__(parent)
         self._component = component
-        self._building = True
-        self._items_loaded = False
-        self._item_rows: Dict[str, ItemRow] = {}
-        # 首次展开时由 PluginSectionWidget 注入（请求卡片现枚举细项）
-        self.expand_requested_cb = None
-        # 高度变化通知（细项展开/收起后由宿主卡片重算 fixedHeight）
-        self.height_changed_cb = None
+        self._building = True  # 构建期屏蔽 checkedChanged 误触发
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-
-        # ── 头行 ──
-        header = QWidget(self)
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(28, 2, 12, 2)
-        header_layout.setSpacing(8)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(28, 2, 12, 2)
+        layout.setSpacing(8)
 
         self._name_label = QLabel(_component_display_name(component))
         self._name_label.setStyleSheet(
@@ -232,135 +240,37 @@ class ComponentRow(QWidget):
             )
         )
         self._name_label.setFixedWidth(110)
-        header_layout.addWidget(self._name_label)
+        layout.addWidget(self._name_label)
 
-        self._component_tag = _ElidedLabel(component)
-        self._component_tag.setStyleSheet(
+        self._muted_style = (
             f"color: {Colors.TEXT_MUTED}; background: transparent; "
             f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"
         )
-        header_layout.addWidget(self._component_tag, 1)
 
-        # 展开按钮：细项是否真的存在要枚举后才知道，因此先无条件提供，
-        # 展开后若无细项则显示一行提示（比预先枚举全部组件便宜得多）
-        self._expand_btn = TransparentToolButton(FluentIcon.CHEVRON_RIGHT_MED, self)
-        self._expand_btn.setFixedSize(22, 22)
-        self._expand_btn.setCheckable(True)
-        self._expand_btn.setToolTip("展开细项（可单独关闭其中某一项）")
-        self._expand_btn.toggled.connect(self._on_expand_toggled)
-        header_layout.addWidget(self._expand_btn)
+        # 只管 tools / agents 两类，中文名已足够，不再显示英文组件名
+        layout.addStretch(1)
+
+        # token 占用：工具 = 每轮请求带上的 function schema，
+        # 智能体 = 注入系统提示词的子智能体列表
+        self._token_label = QLabel("")
+        self._token_label.setStyleSheet(self._muted_style)
+        self._token_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._token_label.setMinimumWidth(120)
+        layout.addWidget(self._token_label)
 
         self.switch = SwitchButton()
         SwitchStyles.configure(self.switch)
         self.switch.setChecked(enabled)
         self.switch.checkedChanged.connect(self._on_switch_changed)
-        header_layout.addWidget(self.switch)
-
-        outer.addWidget(header)
-
-        # ── 细项容器（默认隐藏，展开时才构建内容）──
-        self._items_widget = QWidget(self)
-        self._items_layout = QVBoxLayout(self._items_widget)
-        self._items_layout.setContentsMargins(0, 0, 0, 2)
-        self._items_layout.setSpacing(0)
-        self._items_widget.setVisible(False)
-        outer.addWidget(self._items_widget)
-
-        self._expand_btn.setVisible(supports_items(component))
+        layout.addWidget(self.switch)
         self._building = False
 
-    # ── 细项懒加载 ──
-
-    def _on_expand_toggled(self, expanded: bool):
-        self._set_chevron(expanded)
-        self._items_widget.setVisible(expanded)
-        if expanded and not self._items_loaded and self.expand_requested_cb is not None:
-            self.expand_requested_cb(self._component)
-        self._notify_height_changed()
-
-    def _notify_height_changed(self):
-        """细项列表显隐会改变整卡高度，通知宿主卡片重新同步 fixedHeight"""
-        if self.height_changed_cb is not None:
-            self.height_changed_cb()
-
-    def _set_chevron(self, expanded: bool):
-        self._expand_btn.setIcon(FluentIcon.CHEVRON_DOWN_MED if expanded else FluentIcon.CHEVRON_RIGHT_MED)
-
-    @property
-    def is_expanded(self) -> bool:
-        return self._expand_btn.isChecked()
-
-    def load_items(self, items: List[ComponentItem], enabled_fn) -> None:
-        """构建（或重建）细项行
-
-        Args:
-            items: 细项列表
-            enabled_fn: (item_id) -> bool，取该条目当前是否启用
-        """
-        # 重建：清掉旧行（细项列表会随插件/工具注册变化，不复用）
-        while self._items_layout.count():
-            item = self._items_layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-        self._item_rows.clear()
-
-        if not items:
-            empty = QLabel("该组件没有可单独配置的细项")
-            empty.setStyleSheet(
-                _MUTED_LABEL_STYLE.format(
-                    color=Colors.TEXT_MUTED,
-                    font_size=font_size_css(11),
-                    font_family=get_font_family_css(),
-                )
-            )
-            empty.setContentsMargins(52, 2, 12, 2)
-            self._items_layout.addWidget(empty)
-            self._items_loaded = True
+    def set_tokens(self, tokens: int, count: int) -> None:
+        """显示 token 占用；tokens<=0 表示该组件无上下文成本（留空）"""
+        if tokens <= 0:
+            self._token_label.setText("")
             return
-
-        for it in items:
-            row = ItemRow(it, enabled_fn(it.id), self)
-            # 形参顺序必须匹配信号签名 (item_id, enabled)——按位置传参，
-            # 把第一个写成 enabled 会让 bool 落进 str 槽位直接抛 TypeError
-            row.toggled.connect(
-                lambda item_id, enabled, component=self._component: self.item_toggled.emit(component, item_id, enabled)
-            )
-            self._items_layout.addWidget(row)
-            self._item_rows[it.id] = row
-        self._items_loaded = True
-
-    def reload_items(self, items: List[ComponentItem], enabled_fn) -> None:
-        """强制重建已展开的细项列表（组件整类开关后细项状态会整体变化）"""
-        self._items_loaded = False
-        self.load_items(items, enabled_fn)
-
-    def set_expanded(self, expanded: bool, silent: bool = True):
-        if silent:
-            self._expand_btn.blockSignals(True)
-        self._expand_btn.setChecked(expanded)
-        self._set_chevron(expanded)
-        if silent:
-            self._expand_btn.blockSignals(False)
-        self._items_widget.setVisible(expanded)
-        self._notify_height_changed()
-
-    def apply_item_filter(self, keyword: str, hits: Optional[Set[str]] = None):
-        """按关键词过滤细项行；hits 为搜索命中的 item_id 集合（优先级更高）"""
-        if not self._items_loaded:
-            return
-        for item_id, row in self._item_rows.items():
-            if hits is not None:
-                row.setVisible(item_id in hits)
-            else:
-                row.setVisible(row.matches(keyword))
-
-    def sync_item_states(self, enabled_fn):
-        """外部（如重载后）回写细项开关状态"""
-        for item_id, row in self._item_rows.items():
-            row.set_checked_silent(enabled_fn(item_id))
-
-    # ── 交互 ──
+        self._token_label.setText(f"{count} 项 · ≈{tokens:,} tokens")
 
     def _on_switch_changed(self, checked: bool):
         if self._building:
@@ -368,6 +278,7 @@ class ComponentRow(QWidget):
         self.toggled.emit(self._component, checked)
 
     def set_checked_silent(self, checked: bool):
+        """外部回写开关状态（不触发 toggled 信号）"""
         self._building = True
         self.switch.setChecked(checked)
         self._building = False
@@ -382,21 +293,17 @@ class ComponentRow(QWidget):
                 font_family=get_font_family_css(),
             )
         )
-        self._component_tag.setStyleSheet(
+        self._muted_style = (
             f"color: {Colors.TEXT_MUTED}; background: transparent; "
             f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"
         )
-        for row in self._item_rows.values():
-            row.refresh_style()
+        self._token_label.setStyleSheet(self._muted_style)
 
 
 class PluginSectionWidget(QWidget):
     """插件小节 — 插件名 + 来源标签 + 组件行列表"""
 
     component_toggled = pyqtSignal(str, str, bool)  # (plugin_name, component, enabled)
-    item_toggled = pyqtSignal(str, str, str, bool)  # (plugin_name, component, item_id, enabled)
-    items_expanding = pyqtSignal(str, str)  # (plugin_name, component) 首次展开，请求加载细项
-    size_changed = pyqtSignal()  # 内部高度变化（细项展开/收起）
 
     def __init__(self, plugin_name: str, description: str, is_system: bool, components: list, parent=None):
         super().__init__(parent)
@@ -406,7 +313,7 @@ class PluginSectionWidget(QWidget):
         section_layout.setContentsMargins(0, 2, 0, 2)
         section_layout.setSpacing(0)
 
-        # ── 插件头行：色条 + 插件名 + 来源标签 + 描述 ──
+        # ── 插件头行：色条 + 插件名 + 来源标签 + 描述（无框，色条作分组锚点）──
         header = QWidget(self)
         header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(8, 6, 8, 2)
@@ -447,21 +354,14 @@ class PluginSectionWidget(QWidget):
         header_layout.addWidget(desc_label, 1)
         section_layout.addWidget(header)
 
-        # ── 组件行 ──
+        # ── 组件行（按 COMPONENT_ORDER 稳定排序，未知组件排最后） ──
         self._rows: Dict[str, ComponentRow] = {}
         for comp in sorted(components, key=_order_key):
             row = ComponentRow(comp, True, self)
-            # 同 ItemRow：信号签名是 (component, enabled)，按位置传参
+            # 信号签名是 (component, enabled)，按位置传参
             row.toggled.connect(
                 lambda component, enabled, name=self._plugin_name: self.component_toggled.emit(name, component, enabled)
             )
-            row.item_toggled.connect(
-                lambda component, item_id, enabled: self.item_toggled.emit(
-                    self._plugin_name, component, item_id, enabled
-                )
-            )
-            row.expand_requested_cb = lambda component=comp: self.items_expanding.emit(self._plugin_name, component)
-            row.height_changed_cb = self.size_changed.emit
             section_layout.addWidget(row)
             self._rows[comp] = row
 
@@ -477,30 +377,11 @@ class PluginSectionWidget(QWidget):
         if row is not None:
             row.set_checked_silent(checked)
 
-    def load_component_items(self, component: str, items: List[ComponentItem], enabled_fn):
+    def set_component_tokens(self, component: str, tokens: int, count: int):
+        """回写该组件的 token 占用估算"""
         row = self.component_row(component)
         if row is not None:
-            row.load_items(items, enabled_fn)
-
-    def reload_component_items(self, component: str, items: List[ComponentItem], enabled_fn):
-        """重建细项行（组件整类开关后可用性会整体变化）
-
-        只对**已展开**的组件做——未展开时构建几十个 ItemRow 纯属浪费。
-        """
-        row = self.component_row(component)
-        if row is not None and row.is_expanded:
-            row.reload_items(items, enabled_fn)
-            row.sync_item_states(enabled_fn)
-
-    def set_component_expanded(self, component: str, expanded: bool):
-        row = self._rows.get(component)
-        if row is not None:
-            row.set_expanded(expanded)
-
-    def apply_item_filter(self, component: str, keyword: str, hits: Optional[Set[str]]):
-        row = self._rows.get(component)
-        if row is not None:
-            row.apply_item_filter(keyword, hits)
+            row.set_tokens(tokens, count)
 
     def refresh_style(self):
         Colors.refresh()
@@ -535,13 +416,12 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self._pool: Dict[str, PluginSectionWidget] = {}
         self._entries: List[tuple] = []  # [(name, is_system, description, [components])]
         self._visible: List[tuple] = []  # [(entry, matched_components | None)]
-        self._item_hits: Dict[str, Dict[str, Set[str]]] = {}  # {plugin: {component: {item_id}}}
         self._keyword = ""
         self._page_limit = _PAGE_SIZE
         self._sig: Optional[tuple] = None
         self._total = 0
         self._component_off = 0
-        self._item_off = 0
+        self._tokens = 0  # 当前启用组件的 token 占用合计
         # ── 分批构建状态 ──
         self._pending: List[tuple] = []  # 待构建的 (entry, matched)
         self._built = 0  # 已构建并挂载的数量
@@ -623,16 +503,13 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         """按关键词过滤条目
 
         Returns:
-            (visible, item_hits)
-            - visible: [(entry, matched_components | None)]，None 表示该插件全组件显示
-            - item_hits: {plugin: {component: {item_id}}}，细项命中的集合
+            [(entry, matched_components | None)]，None 表示该插件全组件显示
         """
         if not keyword:
-            return [(e, None) for e in self._entries], {}
+            return [(e, None) for e in self._entries]
 
         kw = keyword.lower()
         visible: List[tuple] = []
-        item_hits: Dict[str, Dict[str, Set[str]]] = {}
         # 只有关键词足够长才做细项匹配（否则命中过多且要付索引构建成本）
         index = build_item_index() if len(kw) >= _ITEM_SEARCH_MIN_LEN else {}
 
@@ -644,23 +521,17 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
                 continue
 
             matched: List[str] = []
-            hits: Dict[str, Set[str]] = {}
             for comp in comps:
                 if kw in comp.lower() or kw in _component_display_name(comp).lower():
                     matched.append(comp)
                     continue
                 # 细项命中
                 items = index.get(name, {}).get(comp) or []
-                if items:
-                    ids = {it.id for it in items if kw in f"{it.id} {it.display_label}".lower()}
-                    if ids:
-                        matched.append(comp)
-                        hits[comp] = ids
+                if items and any(kw in f"{it.id} {it.display_label}".lower() for it in items):
+                    matched.append(comp)
             if matched:
                 visible.append((entry, matched))
-                if hits:
-                    item_hits[name] = hits
-        return visible, item_hits
+        return visible
 
     # ── 重建 / 挂载 ──
 
@@ -674,7 +545,7 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self._token += 1
         self._sig = self._signature()
         self._entries = self._collect_entries()
-        self._visible, self._item_hits = self._match(self._keyword)
+        self._visible = self._match(self._keyword)
         self._recompute_counts()
 
         # 重置布局：takeAt 只解绑、不删除，小节留在 _pool 里复用
@@ -751,16 +622,11 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         name, is_system, description, comps = entry
         section = PluginSectionWidget(name, description, is_system, comps, self)
         section.component_toggled.connect(self._on_component_toggled)
-        section.item_toggled.connect(self._on_item_toggled)
-        section.items_expanding.connect(self._on_items_expanding)
-        section.size_changed.connect(self._adjust_view_size)
         return section
 
     def _apply_state(self, section: PluginSectionWidget, entry: tuple, matched: Optional[List[str]], pm):
-        """回写开关状态、按匹配结果过滤、处理搜索命中的自动展开"""
+        """回写开关状态、按匹配结果过滤、刷新 token 占用"""
         name, _is_system, _desc, comps = entry
-        keyword = self._keyword.lower()
-        hits = self._item_hits.get(name, {})
 
         for comp in comps:
             visible = matched is None or comp in matched
@@ -768,39 +634,13 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             row = section.component_row(comp)
             if row is not None:
                 row.setVisible(visible)
-                if visible:
-                    row.set_checked_silent(pm.is_component_enabled(name, comp))
-
             if not visible:
                 continue
-            # 搜索命中细项 → 自动展开并只显示命中的条目
-            if comp in hits:
-                self._ensure_items_loaded(section, name, comp, pm)
-                section.set_component_expanded(comp, True)
-                section.apply_item_filter(comp, keyword, hits[comp])
-            elif keyword:
-                section.set_component_expanded(comp, False)
-
-    def _ensure_items_loaded(self, section: PluginSectionWidget, plugin_name: str, component: str, pm):
-        from app.plugins.component_items import list_component_items
-
-        items = list_component_items(plugin_name, component)
-        section.load_component_items(
-            component, items, lambda item_id: pm.is_item_enabled(plugin_name, component, item_id)
-        )
-
-    def _on_items_expanding(self, plugin_name: str, component: str):
-        """组件行首次展开：现枚举细项并构建行"""
-        section = self._pool.get(plugin_name)
-        if section is None:
-            return
-        pm = self._pm()
-        self._ensure_items_loaded(section, plugin_name, component, pm)
-        # 若当前有搜索词，展开后立即应用过滤
-        if self._keyword:
-            hits = self._item_hits.get(plugin_name, {}).get(component)
-            section.apply_item_filter(component, self._keyword.lower(), hits)
-        self._adjust_view_size()
+            if row is not None:
+                row.set_checked_silent(pm.is_component_enabled(name, comp))
+                # token 占用：工具=每轮请求的 schema，智能体=注入系统提示词的列表
+                tokens, count = estimate_component_tokens(name, comp)
+                row.set_tokens(tokens, count)
 
     def _mount_more_button(self, remaining: int):
         """「显示更多」按钮复用同一个实例（每次新建会在卡片上堆积孤儿控件）"""
@@ -839,25 +679,27 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
     # ── 统计 ──
 
     def _recompute_counts(self):
-        """重算摘要计数（仅在重建时执行，toggle 走增量）"""
+        """重算摘要计数（仅在重建时执行，toggle 走增量）
+
+        token 汇总只统计**当前启用**的组件——停用掉的不会进 prompt，
+        算进来会让「这个插件到底占多少」失真。
+        """
         try:
             pm = self._pm()
             keys = pm.disabled_keys()
             total = 0
             component_off = 0
-            item_off = 0
+            tokens = 0
             for name, _is_system, _desc, comps in self._entries:
                 for comp in comps:
                     total += 1
                     if f"{name}:{comp}" in keys:
                         component_off += 1
-            for key in keys:
-                parts = key.split(":", 2)
-                if len(parts) == 3 and parts[2]:
-                    item_off += 1
+                        continue
+                    tokens += estimate_component_tokens(name, comp)[0]
             self._total = total
             self._component_off = component_off
-            self._item_off = item_off
+            self._tokens = tokens
         except Exception as e:
             logger.warning(f"[PluginComponentsCard] 统计组件数量失败: {e}")
 
@@ -868,9 +710,9 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         if not self._total:
             card.contentLabel.setText("暂无组件")
             return
-        text = f"共 {self._total} 个组件 · 已停用 {self._component_off} 个"
-        if self._item_off:
-            text += f" · 细项停用 {self._item_off} 个"
+        text = f"共 {self._total} 个 · 停用 {self._component_off} 个"
+        if self._tokens:
+            text += f" · 启用中 ≈{self._tokens:,} tokens"
         if self._keyword:
             text += f" · 匹配 {len(self._visible)} 个插件"
         card.contentLabel.setText(text)
@@ -885,41 +727,17 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             if pm.is_component_enabled(plugin_name, component) == enabled:
                 return  # 幂等（重建后的陈旧信号）
             pm.set_component_enabled(plugin_name, component, enabled)
+            # 停用后该组件不再进 prompt，token 汇总要跟着变
+            tokens, _count = estimate_component_tokens(plugin_name, component)
+            self._tokens += tokens if enabled else -tokens
             self._component_off += -1 if enabled else 1
             self._sig = self._signature()
             self._refresh_summary_text()
-            # 组件整类开关会改变该组件下细项的可用性，已展开的要重建
-            section = self._pool.get(plugin_name)
-            if section is not None:
-                from app.plugins.component_items import list_component_items
-
-                items = list_component_items(plugin_name, component)
-                section.reload_component_items(
-                    component, items, lambda item_id: pm.is_item_enabled(plugin_name, component, item_id)
-                )
-                self._adjust_view_size()
             self._defer_hot_reload(
                 PluginHostService.get_instance().on_plugin_component_toggled, plugin_name, component, enabled
             )
         except Exception as e:
             logger.error(f"[PluginComponentsCard] 切换 {plugin_name}:{component} 失败: {e}")
-
-    def _on_item_toggled(self, plugin_name: str, component: str, item_id: str, enabled: bool):
-        try:
-            from app.core.plugin_host_service import PluginHostService
-
-            pm = self._pm()
-            if pm.is_item_enabled(plugin_name, component, item_id) == enabled:
-                return  # 幂等
-            pm.set_item_enabled(plugin_name, component, item_id, enabled)
-            self._item_off += -1 if enabled else 1
-            self._sig = self._signature()
-            self._refresh_summary_text()
-            self._defer_hot_reload(
-                PluginHostService.get_instance().on_plugin_item_toggled, plugin_name, component, item_id, enabled
-            )
-        except Exception as e:
-            logger.error(f"[PluginComponentsCard] 切换细项 {plugin_name}:{component}:{item_id} 失败: {e}")
 
     def _defer_hot_reload(self, fn, *args):
         """把热重载挪到下一轮事件循环
@@ -940,7 +758,38 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             logger.error(f"[PluginComponentsCard] 热重载失败: {e}")
         finally:
             QApplication.restoreOverrideCursor()
+            # 重载后工具/智能体集合可能变了，两套缓存都要失效
             invalidate_item_index()
+            invalidate_token_cache()
+            self._refresh_tokens_after_reload()
+
+    def _refresh_tokens_after_reload(self):
+        """热重载后按实际状态重算 token（修正 toggle 时的乐观更新）
+
+        开关切换那一刻的增减只是「乐观值」：开启时工具还没重新注册、
+        关闭时工具还没卸载，两边的估算都不准。等重载跑完再按真实状态
+        重算一次，否则会出现「关掉少了、打开却回不来」。
+        """
+        invalidate_token_cache()
+        try:
+            pm = self._pm()
+            total = 0
+            for name, _is_system, _desc, comps in self._entries:
+                for comp in comps:
+                    if not pm.is_component_enabled(name, comp):
+                        continue
+                    total += estimate_component_tokens(name, comp)[0]
+            self._tokens = total
+            # 同步已挂载行上的显示
+            for section in self._pool.values():
+                for comp, row in section._rows.items():
+                    if not row.isVisible():
+                        continue
+                    tokens, count = estimate_component_tokens(section.plugin_name, comp)
+                    row.set_tokens(tokens, count)
+            self._refresh_summary_text()
+        except Exception as e:
+            logger.warning(f"[PluginComponentsCard] 重载后重算 token 失败: {e}")
 
     # ── 外部刷新 ──
 
@@ -948,10 +797,11 @@ class PluginComponentsCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         """重建插件小节（设置卡打开 / 插件热重载后调用）
 
         Args:
-            force: True 时忽略脏检查强制重建，并丢弃细项索引缓存
+            force: True 时忽略脏检查强制重建，并丢弃细项与 token 缓存
         """
         if force:
             invalidate_item_index()
+            invalidate_token_cache()
         elif self._sig is not None and self._sig == self._signature():
             return  # 插件清单与禁用集都没变，无需重建
         self._rebuild()

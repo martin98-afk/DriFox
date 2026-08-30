@@ -396,6 +396,9 @@ class LLMSettingsCard(SystemCardFrame):
         # ════ 大模型页 ════
         llm_layout = self._page_layouts["llm"]
 
+        # ── 本页卡片顺序（用户指定）：服务商 → hooks → mcp → 工具 → 智能体 → 技能 → lsp ──
+        # Gitee 账号绑定保持在顶部（原有设计，不参与上面的排序）
+
         # Gitee 账号绑定（保持原默认页顶部位置）
         self.giteeCard = GiteeCard(self)
         llm_layout.addWidget(self.giteeCard)
@@ -410,16 +413,6 @@ class LLMSettingsCard(SystemCardFrame):
             home=self,
         )
         llm_layout.addWidget(self.llmProviderCard)
-
-        self.llmSkillsCard = SkillListSettingCard(
-            icon=get_icon("智能体"),
-            configItem=self.cfg.llm_enabled_skills,
-            title="启用技能",
-            content="选择要注入的技能",
-            parent=self,
-            home=self,
-        )
-        llm_layout.addWidget(self.llmSkillsCard)
 
         # Hooks 管理
         from app.widgets.cards.settings.hook_setting_card import HookListSettingCard
@@ -447,17 +440,6 @@ class LLMSettingsCard(SystemCardFrame):
         )
         llm_layout.addWidget(self.mcpListCard)
 
-        # LSP 语言服务器状态
-        from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
-
-        self.lspListCard = LspListSettingCard(
-            icon=get_icon("lsp"),
-            title="LSP 语言服务器",
-            content="代码智能与诊断",
-            parent=self,
-        )
-        llm_layout.addWidget(self.lspListCard)
-
         # ════ 工具 / 智能体 启停（按插件维度，D9/D10）════
         # 原先是独立的「插件启用」页签，实际要管的只有这两类，收进大模型页
         self.pluginToolCard = PluginComponentsCard(
@@ -477,6 +459,28 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         llm_layout.addWidget(self.pluginAgentCard)
+
+        # 技能启用（按插件/内置/用户分组，行在展开后分批构建）
+        self.llmSkillsCard = SkillListSettingCard(
+            icon=get_icon("智能体"),
+            configItem=self.cfg.llm_enabled_skills,
+            title="技能启用",
+            content="选择要注入的技能",
+            parent=self,
+            home=self,
+        )
+        llm_layout.addWidget(self.llmSkillsCard)
+
+        # LSP 语言服务器状态
+        from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
+
+        self.lspListCard = LspListSettingCard(
+            icon=get_icon("lsp"),
+            title="LSP 语言服务器",
+            content="代码智能与诊断",
+            parent=self,
+        )
+        llm_layout.addWidget(self.lspListCard)
         llm_layout.addStretch(1)
 
         # ════ 通用设置页 ════
@@ -629,12 +633,12 @@ class LLMSettingsCard(SystemCardFrame):
         # 列表形式配置卡片手风琴：展开一个时自动收起其他
         self._list_cards = [
             self.llmProviderCard,
-            self.llmSkillsCard,
             self.hookListCard,
             self.mcpListCard,
-            self.lspListCard,
             self.pluginToolCard,
             self.pluginAgentCard,
+            self.llmSkillsCard,
+            self.lspListCard,
         ]
         self._apply_list_accordion()
 
