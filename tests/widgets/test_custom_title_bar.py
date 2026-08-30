@@ -143,6 +143,116 @@ def test_tab_active_animates_progress(qtbot, container):
     assert btn._active_t == 1.0
 
 
+def test_set_active_heals_stuck_progress(qtbot, container):
+    """进度卡在中途时，重复 set_active 必须补一次收尾（早期版本是 no-op）
+
+    场景：动画被新事件打断后 ``_active_t`` 停在 0.4，此时若因为「意图没变」
+    就直接 return，高亮会永久停在半亮状态、再也无法自愈——这就是
+    「选中效果卡住」的成因。
+    """
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    tb.add_tab("chat", "聊天")
+    btn = tb._tabs["chat"]
+
+    # 人为把进度卡在中途（模拟动画被打断）
+    btn._anim_active.stop()
+    btn._active_t = 0.4
+
+    tb.set_active_tab("chat")  # 意图未变，但进度没到位 → 必须重启
+    assert btn._anim_active.state() == btn._anim_active.Running
+
+
+def test_set_active_is_noop_when_settled(qtbot, container):
+    """进度已到位时重复 set_active 不重启动画
+
+    反向保险：若每次都无条件重启，缓动曲线会被反复重置，进度永远走不到
+    1.0（表现为 hover / 选中淡入永远差一口气）。
+    """
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    tb.add_tab("chat", "聊天")
+    btn = tb._tabs["chat"]
+
+    btn._anim_active.stop()
+    btn._active_t = 1.0
+    tb.set_active_tab("chat")
+    assert btn._anim_active.state() != btn._anim_active.Running
+
+
+def test_sync_tab_hover_picks_the_tab_under_cursor(qtbot, container, monkeypatch):
+    """hover 由光标位置仲裁：至多一个 tab 处于 hover，且是光标下那一个
+
+    ★ 覆盖的是「增删 tab / 居中重排让整组 tab 在光标静止时平移，Qt 不补发
+    enter/leave」这一类顽疾——单靠事件边沿无法自愈，必须按 QCursor 重算。
+    """
+    from PyQt5.QtCore import QPoint
+
+    from app.widgets import custom_title_bar
+
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    tb.add_tab("chat", "聊天")
+    tb.add_tab("usage", "用量")
+    container.resize(900, 400)
+    container.show()
+    qtbot.wait(30)  # 等布局跑完，否则 rect 还是默认几何
+
+    target = tb._tabs["usage"]
+    gp = target.mapToGlobal(target.rect().center())
+    monkeypatch.setattr(custom_title_bar.QCursor, "pos", staticmethod(lambda: QPoint(gp)))
+
+    tb.sync_tab_hover()
+    assert [tid for tid, b in tb._tabs.items() if b._hovered] == ["usage"]
+
+    # 光标移出 tab 区：所有 hover 清空（leaveEvent 可能收不到，靠这层兜底）
+    monkeypatch.setattr(
+        custom_title_bar.QCursor, "pos", staticmethod(lambda: QPoint(-500, -500))
+    )
+    tb.sync_tab_hover()
+    assert not any(b._hovered for b in tb._tabs.values())
+
+
+def test_add_and_remove_tab_schedule_hover_resync(qtbot, container):
+    """增删 tab 会排一次 hover 重算（合并到同一事件循环，只排一次）"""
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    tb._hover_sync_pending = False
+
+    tb.add_tab("chat", "聊天")
+    assert tb._hover_sync_pending is True
+
+    tb._hover_sync_pending = False
+    tb.add_tab("usage", "用量")
+    tb.remove_tab("usage")
+    assert tb._hover_sync_pending is True
+
+
+def test_label_color_qss_is_cached(qtbot, container):
+    """同一进度的 _apply_label_color 不重复 setStyleSheet
+
+    ``setStyleSheet`` 会触发整棵子树的 QSS 重解析 + polish，在 180ms 动画里
+    逐帧调用是标题栏掉帧的主要来源；量化缓存把次数从 ~11 降到 ~4。
+    """
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    tb.add_tab("chat", "聊天")
+    btn = tb._tabs["chat"]
+
+    calls = []
+    real = btn._label.setStyleSheet
+    btn._label.setStyleSheet = lambda s: (calls.append(s), real(s))
+
+    btn._active_t = 0.5
+    btn._apply_label_color()
+    assert len(calls) == 1
+    btn._apply_label_color()  # 进度未变 → 命中缓存
+    assert len(calls) == 1
+    btn._active_t = 0.9  # 量化档位变化 → 必须重新应用
+    btn._apply_label_color()
+    assert len(calls) == 2
+
+
 def test_mac_branch_hides_system_buttons(qtbot, container, monkeypatch):
     """mac 分支：隐藏三系统按钮，左区留白 ≥70px"""
     monkeypatch.setattr(sys, "platform", "darwin")

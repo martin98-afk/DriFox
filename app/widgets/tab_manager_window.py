@@ -547,6 +547,8 @@ class TabManagerWindow(FramelessWindow):
         self._suppress_replace_close: bool = False
         # 插件注册的常驻标题栏 tab id 集合（插件卸载/刷新时移除用）
         self._plugin_titlebar_tab_ids: set = set()
+        # 标题栏高亮重算合并标志（见 _schedule_replace_highlight）
+        self._replace_highlight_pending = False
 
         self._setup_ui()
         self._setup_signals()
@@ -626,14 +628,18 @@ class TabManagerWindow(FramelessWindow):
 
     def _on_titlebar_tab_clicked(self, tab_id: str):
         """顶栏 tab 点击：「聊天」→ 对话视图；full 卡片 tab → 切换/显示；
-        插件常驻 tab 的展示由注册时的 on_click 回调处理，此处忽略。"""
+        插件常驻 tab 的展示由注册时的 on_click 回调处理，此处忽略。
+
+        无论走哪条分支，最后都调度一次高亮收敛（见 ``_sync_replace_highlight``）：
+        插件常驻 tab 的 on_click 内部若把卡片 toggle 成隐藏，高亮必须回退，
+        而这条路径此前完全没有同步点。
+        """
         logger.debug(f"[TitleBar] tab clicked: {tab_id}")
         if tab_id == CHAT_TAB_ID:
             self._show_conversation_view()
-            return
-        if tab_id in self._plugin_titlebar_tab_ids:
-            return
-        self._on_replace_tab_clicked(tab_id)
+        elif tab_id not in self._plugin_titlebar_tab_ids:
+            self._on_replace_tab_clicked(tab_id)
+        self._schedule_replace_highlight()
 
     def _apply_win11_round_corner(self):
         """Win11 DWM 圆角；Win10 及更早静默跳过
@@ -1636,6 +1642,9 @@ class TabManagerWindow(FramelessWindow):
         # 限宽策略随可见卡片类型变化，主动刷新一次 pad
         if self._content_stack.currentIndex() == 1:
             QTimer.singleShot(0, self._sync_chat_wrapper_width)
+        # 卡片被隐藏后高亮若还停在它身上，原本要等 120ms 去抖走完才纠正；
+        # 这里额外插一次 0ms 收敛，让高亮即时跟随真实可见性。
+        self._schedule_replace_highlight()
 
     def _schedule_replace_close(self, card_id: str) -> None:
         """启动/重置某卡片的关闭去抖计时器（区分切换与关闭）"""
@@ -1722,6 +1731,62 @@ class TabManagerWindow(FramelessWindow):
     def _set_replace_active(self, card_id: str) -> None:
         self._replace_active[self._current_window_id()] = card_id
         self.titleBar.set_active_tab(card_id or CHAT_TAB_ID)
+
+    def _is_replace_visible(self, card_id: str) -> bool:
+        """replace 卡片在当前窗口是否**真实**可见（权威判定）
+
+        走 CardManager 的 ``visible_cards`` 快照而非任何本地缓存标志：
+        ``show_card`` / ``hide_card`` 都是在发布显隐事件**之前**更新它，
+        所以在事件回调里读到的就是最新值。
+        """
+        try:
+            from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID, CardManager
+
+            cm = CardManager.get_instance()
+            if cm is None:
+                return False
+            wid = getattr(self, "_window_id", None) or GLOBAL_WINDOW_ID
+            return bool(cm.is_card_visible(card_id, wid))
+        except Exception:
+            return False
+
+    def _sync_replace_highlight(self) -> None:
+        """按卡片真实可见状态纠正标题栏高亮（自愈收敛点）
+
+        ★ 背景：高亮原本由 6 处命令式写入（显隐事件 / tab 点击 / 关闭去抖 /
+        切标签页 / tab × / 插件常驻 tab）各自维护，任何一处时序错位都会留下
+        「高亮停在已经关掉的 tab 上」。这里改成从事后可见性反推并纠正。
+
+        只做**降级**：高亮所指的 tab 已被移除、或对应卡片已不可见时，退回
+        当前仍可见的最后一个，都没有则回「对话」。
+
+        刻意不做升级——显示卡片必经显隐事件，那里已经同步置活；若在此处
+        反向提升，``_show_conversation_view`` 里被静默吞掉的 hide_card 失败
+        会把用户刚点下的「对话」又顶回卡片。
+        """
+        cur_wid = self._current_window_id()
+        open_dict = self._replace_open.get(cur_wid, {})
+        active = self._replace_active.get(cur_wid)
+        if not active or active == CHAT_TAB_ID:
+            return
+        tabs = getattr(self.titleBar, "_tabs", {})
+        if active in open_dict and active in tabs and self._is_replace_visible(active):
+            return
+        visibles = [cid for cid in open_dict if cid in tabs and self._is_replace_visible(cid)]
+        target = visibles[-1] if visibles else CHAT_TAB_ID
+        self._replace_active[cur_wid] = target
+        self.titleBar.set_active_tab(target)
+
+    def _schedule_replace_highlight(self) -> None:
+        """合并同一事件循环内的高亮重算请求（延迟一拍等卡片状态落定）"""
+        if self._replace_highlight_pending:
+            return
+        self._replace_highlight_pending = True
+        QTimer.singleShot(0, self._run_replace_highlight)
+
+    def _run_replace_highlight(self) -> None:
+        self._replace_highlight_pending = False
+        self._sync_replace_highlight()
 
     def _current_window_id(self) -> str:
         """当前活跃对话标签页的 window_id（用于隔离 replace tab 栏状态）"""
@@ -1840,7 +1905,10 @@ class TabManagerWindow(FramelessWindow):
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             UIPluginRegistry.get_instance().toggle_floating_card(card_id)
-            self._set_replace_active(card_id)
+            # ★ toggle 是「取反」语义：卡片原本可见时这次调用是把它藏起来。
+            # 早期版本在这里无条件置活，于是出现「tab 亮着、卡片其实已关」。
+            # 显示分支会经显隐事件走到 _set_replace_active，这里只补一次收敛。
+            self._schedule_replace_highlight()
 
     def _show_conversation_view(self) -> None:
         """点「聊天」→ 隐藏所有 replace 卡片回到对话区，但保留 open（标题栏 tab 常驻聊天项，可随时切回）"""
@@ -1906,6 +1974,9 @@ class TabManagerWindow(FramelessWindow):
 
         if self._replace_open.get(cur_wid):
             self._activate_remaining_replace_card()
+        # 关掉的是当前高亮项时，_activate_remaining_replace_card 未必命中
+        # （例如剩余项都是常驻插件 tab），补一次收敛兜底
+        self._schedule_replace_highlight()
 
     def _on_splitter_idle(self):
         """splitter 拖拽防抖超时：松手后恢复内容区绘制 + 解除 TabPanel 节流
