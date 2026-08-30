@@ -63,6 +63,29 @@ _HEADER_HEIGHT = 28
 _HOVER_DARK = QColor(99, 102, 241, 32)
 _HOVER_LIGHT = QColor(120, 130, 160, 30)
 
+# ── 样式纪元 ───────────────────────────────────────────────────────
+# 树每次 rebuild 都会对**所有**行调用 apply_spec，而 apply_spec 末尾的
+# _apply_appearance() 会跑 3~5 次 setStyleSheet —— Qt 的 setStyleSheet 要重新
+# 解析 CSS 并向下传播，是这一路径上最贵的一步。实测 50 行会话 + 5 个头 ≈ 10ms/次，
+# 其中绝大部分是重复设置一模一样的 QSS（内容没变、主题也没变）。
+# 用「内容签名 + 样式纪元」双条件收敛：只有内容变了、或主题/字体刷新把纪元推进了，
+# 才真正重刷样式。纪元由 WorkspaceTree.refresh_style() 推进。
+_STYLE_EPOCH = 0
+
+
+def _bump_style_epoch() -> None:
+    global _STYLE_EPOCH
+    _STYLE_EPOCH += 1
+
+
+def _theme_sig() -> tuple:
+    """主题指纹：Colors 没有版本号，拿几个必变色拼一个廉价签名
+
+    兜底「主题换了但没走 WorkspaceTree.refresh_style」的路径 —— 本项目里
+    「颜色没跟着主题变」是反复出现的缺陷模式，宁可多一次字符串比较。
+    """
+    return (Colors.TEXT_PRIMARY, Colors.TEXT_MUTED, Colors.HOVER_BG)
+
 
 def _parse_rgba(rgba_str: str) -> QColor:
     """解析 'rgba(r,g,b,a)' / '#rrggbb' / 颜色名 → QColor。
@@ -257,6 +280,9 @@ class _NodeHeader(QFrame):
         self._actions: tuple = ()
         self._actions_sig: tuple = ()
         self._action_btns: List[QWidget] = []
+        # 样式纪元收敛（见 _STYLE_EPOCH）
+        self._spec_sig = None
+        self._style_epoch = -1
 
         self.setFixedHeight(_HEADER_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
@@ -337,6 +363,25 @@ class _NodeHeader(QFrame):
         self._spec_bold = spec.bold
         self._apply_avatar(spec)
         self._apply_actions(spec)
+        self._sync_appearance(spec)
+
+    def _sync_appearance(self, spec: "TreeNodeSpec"):
+        """内容签名 + 样式纪元双条件下才真正重刷 QSS（见 _STYLE_EPOCH 注释）"""
+        sig = (
+            spec.key,
+            spec.title,
+            spec.tooltip,
+            spec.indent,
+            self._count_label.text(),
+            self._active_num.text(),
+            self._icon_name,
+            spec.avatar_sig,
+            spec.bold,
+        )
+        if sig == self._spec_sig and self._style_epoch == _STYLE_EPOCH:
+            return
+        self._spec_sig = sig
+        self._style_epoch = _STYLE_EPOCH
         self._apply_appearance()
 
     def _apply_avatar(self, spec: "TreeNodeSpec"):
@@ -465,6 +510,7 @@ class _NodeHeader(QFrame):
             btn.setIconSize(self._icon_label.size())
 
     def refresh_style(self):
+        self._style_epoch = _STYLE_EPOCH
         self._apply_appearance()
 
     # ── 交互 ─────────────────────────────────────────────────────
@@ -517,6 +563,9 @@ class _SessionRow(QFrame):
         self._indent = 0
         self._record: dict = {}
         self._compact = False
+        # 样式纪元收敛（见 _STYLE_EPOCH）
+        self._spec_sig = None
+        self._style_epoch = -1
 
         self.setFixedHeight(_ROW_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
@@ -550,6 +599,15 @@ class _SessionRow(QFrame):
         if spec.indent != self._indent:
             self._indent = spec.indent
             self.layout().setContentsMargins(6 + spec.indent, 0, 6, 0)
+        self._sync_appearance(spec)
+
+    def _sync_appearance(self, spec: "TreeNodeSpec"):
+        """内容签名 + 样式纪元双条件下才真正重刷 QSS（见 _STYLE_EPOCH 注释）"""
+        sig = (spec.key, spec.title, spec.tooltip, spec.indent, self._meta.text())
+        if sig == self._spec_sig and self._style_epoch == _STYLE_EPOCH:
+            return
+        self._spec_sig = sig
+        self._style_epoch = _STYLE_EPOCH
         self._apply_appearance()
 
     def set_compact(self, compact: bool):
@@ -574,6 +632,7 @@ class _SessionRow(QFrame):
         )
 
     def refresh_style(self):
+        self._style_epoch = _STYLE_EPOCH
         self._apply_appearance()
 
     def enterEvent(self, event):  # noqa: N802 - Qt 约定
@@ -778,6 +837,9 @@ class WorkspaceTree(QWidget):
 
     # ── 主题 ─────────────────────────────────────────────────────
     def refresh_style(self):
+        # ⚠️ 先推进纪元：否则各行的 apply_spec 会以为「内容没变」而跳过重刷，
+        # 主题/字体切换后颜色不更新。
+        _bump_style_epoch()
         for h in self._headers.values():
             h.refresh_style()
         for r in self._rows.values():
