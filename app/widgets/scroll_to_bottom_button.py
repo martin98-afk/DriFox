@@ -9,16 +9,18 @@
 - **浮动浮层**，不占静态布局空间（与 QUESTION 卡片 / 输入区按钮的视觉语言一致）。
 - 圆形图标按钮，**不带文字**：图标本体已经表达「向下到底」，加文字反而让浮层变宽、
   遮挡消息。语义靠 tooltip 兜底。
-- 图标是**内联 SVG**（见 `_ICON_PATH_D`），不落 icons/ 也不进 qrc：
-  1. 打包后无需关心资源收集；
-  2. 可以直接按当前主题把 fill 换成 `Colors.TEXT_PRIMARY`，一套图形通吃深浅色，
-     不必像 register_input_button 那样维护 icon_path / icon_light_path 两份文件。
+- **图标资源走项目统一机制**：`icons/scroll_to_bottom.svg`（深色主题，白色填充）+
+  `icons/light/scroll_to_bottom.svg`（浅色主题，`#333333`），由
+  `generate_icon_qrc.py` 自动生成浅色变体，qrc 编译进 `app/utils/icons_*.py`。
+  加载顺序见 `_load_theme_icon()`：qrc → 源码树文件 → 内联 SVG 按主题着色（兜底）。
 - 定位锚点是 `chat_scroll_area`（不是 host）：它天然位于 top/bottom 卡容器之间，
   底边正好是「对话区结束、输入区开始」的位置，不需要去推算输入框高度。
 - 事件过滤父级与锚点的 Resize/Move/Show 来重定位，不引入额外定时器。
 """
 
-from PyQt5.QtCore import QByteArray, QEvent, QSize, Qt
+from pathlib import Path
+
+from PyQt5.QtCore import QByteArray, QEvent, QFile, QSize, Qt
 from PyQt5.QtGui import QIcon, QPainter, QPixmap
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import QPushButton
@@ -26,14 +28,30 @@ from PyQt5.QtWidgets import QPushButton
 from app.utils.design_tokens import Colors
 from app.utils.theme_manager import theme_manager
 
+# qrc 编译产物：**导入即注册资源**。主程序链路只 import 了深色 icons_rc，
+# 浅色 icons_light_rc 从未被引入（见 markdown_block_viewer.py 的同款补齐），
+# 不在这里补一次，`:/icons_light/...` 会全部解析失败。
+try:
+    from app.utils import icons_light_rc as _icons_light_rc  # noqa: F401
+    from app.utils import icons_rc as _icons_rc  # noqa: F401
+except Exception:  # noqa: BLE001
+    pass
+
 # 圆形按钮直径（px）
 _BUTTON_SIZE = 32
 _MARGIN_RIGHT = 20  # 距 chat_scroll_area 右边缘
 _MARGIN_BOTTOM = 14  # 距 chat_scroll_area 下边缘
 _ICON_SIZE = 18
 
+# 图标资源名（qrc 前缀 / 源码树相对路径共用同一个文件名）
+_ICON_DARK_REL = "icons/scroll_to_bottom.svg"
+_ICON_LIGHT_REL = "icons/light/scroll_to_bottom.svg"
+_ICON_DARK_QRC = ":/icons/scroll_to_bottom.svg"
+_ICON_LIGHT_QRC = ":/icons_light/scroll_to_bottom.svg"
+
 # 内联 SVG：向下箭头 + 底部横线（viewBox 1024×1024）
-# 来源：用户提供的 回到底部.svg；fill 在渲染时按主题替换。
+# 与 icons/scroll_to_bottom.svg 同形，只在**图标文件整体缺失**时兜底渲染，
+# fill 在渲染时按主题替换。改图标请改 icons/ 下的文件，别改这里。
 _ICON_PATH_D = (
     "M512 1.28c-34.986667 0-63.573333 29.013333-63.573333 64.853333l-0.426667 544.426667"
     "-212.053333-212.053333c-24.746667-25.173333-64.853333-25.173333-89.6 0"
@@ -48,11 +66,45 @@ _ICON_PATH_D = (
 )
 
 
+def _load_theme_icon(is_light: bool) -> QIcon:
+    """按主题取「回到底部」图标。
+
+    三级回退，越靠前越"正统"：
+    1. **qrc**（`:/icons/...` 深色 / `:/icons_light/...` 浅色）—— 项目统一机制，
+       打包后唯一可用路径；浅色变体由 `generate_icon_qrc.py` 自动生成。
+    2. **源码树文件** —— qrc 尚未重新编译时的开发态兜底。
+    3. **内联 SVG 按主题着色** —— 图标文件整体缺失时仍不至于空白。
+
+    Args:
+        is_light: 当前是否浅色主题
+    """
+    qrc_path = _ICON_LIGHT_QRC if is_light else _ICON_DARK_QRC
+    file_rel = _ICON_LIGHT_REL if is_light else _ICON_DARK_REL
+    candidates = []
+    # 1) qrc：只有资源确实注册进去了才加入候选，否则 QIcon 会拿到空图标
+    if QFile.exists(qrc_path):
+        candidates.append(qrc_path)
+    # 2) 源码树
+    try:
+        root = Path(__file__).resolve().parents[2]
+        candidates.append(str(root / file_rel))
+    except Exception:  # noqa: BLE001
+        pass
+    for path in candidates:
+        try:
+            icon = QIcon(path)
+            if not icon.isNull():
+                return icon
+        except Exception:  # noqa: BLE001
+            continue
+    # 3) 内联 SVG 兜底
+    return _build_icon(Colors.TEXT_PRIMARY)
+
+
 def _build_icon(color: str, size: int = _ICON_SIZE) -> QIcon:
-    """按给定颜色把内联 SVG 渲染成 QIcon
+    """按给定颜色把内联 SVG 渲染成 QIcon（资源缺失时的兜底路径）
 
     QSvgRenderer 不支持 CSS 的 currentColor，只能把颜色烧进 fill。
-    按主题重烧一遍即可，比维护深浅两套图标文件更省事。
     """
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" '
@@ -120,7 +172,6 @@ class ScrollToBottomButton(QPushButton):
         except Exception:
             bg = "rgba(33, 33, 38, 0.92)"
         border = Colors.BORDER
-        text = Colors.TEXT_PRIMARY
         # 浅色主题下 HOVER_BG 是白色半透明，叠在按钮上太淡，改用中性灰
         hover = "rgba(0, 0, 0, 0.06)" if light else Colors.HOVER_BG
 
@@ -140,8 +191,8 @@ class ScrollToBottomButton(QPushButton):
             }}
             """
         )
-        # 图标颜色跟随正文色 —— 深浅主题自动适配
-        self.setIcon(_build_icon(text))
+        # 图标走 icons/ + icons/light/ 两套资源，按主题选（内部还有两级回退）
+        self.setIcon(_load_theme_icon(light))
 
     # ── 定位 ──────────────────────────────────────────────────
     def eventFilter(self, obj, event):

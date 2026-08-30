@@ -8,6 +8,7 @@ ICON_NAME_TO_FILE_LIGHT = {
     "MCP": "MCP.svg",
     "question": "question.svg",
     "read": "read.svg",
+    "scroll_to_bottom": "scroll_to_bottom.svg",
     "Search": "Search.svg",
     "shell": "shell.svg",
     "tab切换": "tab切换.svg",
