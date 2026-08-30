@@ -67,6 +67,49 @@ def _get_shell_compressor():
         return lambda command, output: output
 
 
+# ============================================================
+# 共享 description 参数约定（同目录 _tool_desc.py，下划线前缀 → loader 跳过）
+# ============================================================
+_tool_desc_module = None
+
+
+def _tool_desc_loader():
+    """加载共享的 description 参数约定（进程级缓存一次；失败返回 None，调用方走原预览）"""
+    global _tool_desc_module
+    if _tool_desc_module is not None:
+        return _tool_desc_module
+    import importlib.util
+
+    plugin_path = Path(__file__).resolve().parent / "_tool_desc.py"
+    if not plugin_path.exists():
+        _tool_desc_module = False
+        return _tool_desc_module
+    spec = importlib.util.spec_from_file_location("_plugin_tool_desc", plugin_path)
+    mod = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+        _tool_desc_module = mod
+    except Exception:
+        _tool_desc_module = False
+    return _tool_desc_module
+
+
+def _desc_param(example: str) -> dict:
+    """生成 description 参数的 schema 片段（模块缺失时返回空 dict，schema 退化为原样）"""
+    mod = _tool_desc_loader()
+    if not mod:
+        return {}
+    return mod.description_param(example)
+
+
+def _desc_preview(preview_fn):
+    """包装 preview 闭包：优先展示大模型填写的 description（模块缺失时原样返回）"""
+    mod = _tool_desc_loader()
+    if not mod:
+        return preview_fn
+    return mod.prefer_description(preview_fn)
+
+
 from loguru import logger
 
 # ── findstr 管道符修复 ────────────────────────────────────────────────
@@ -565,8 +608,9 @@ _BASH_SCHEMA = {
             "properties": {
                 "command": {"type": "string", "description": "命令"},
                 "timeout": {"type": "integer", "description": "超时秒数"},
+                **_desc_param("运行全量单元测试"),
             },
-            "required": ["command"],
+            "required": ["command", "description"],
         },
     },
 }
@@ -581,8 +625,9 @@ _BG_START_SCHEMA = {
             "properties": {
                 "command": {"type": "string", "description": "要执行的命令"},
                 "cwd": {"type": "string", "description": "工作目录（可选，默认为项目根目录）"},
+                **_desc_param("启动前端开发服务器"),
             },
-            "required": ["command"],
+            "required": ["command", "description"],
         },
     },
 }
@@ -683,6 +728,8 @@ def _render_bg_body(result, tool_name, tool_args, success):
 
 
 def _preview_bash(tool_args: dict) -> str:
+    """bash 预览：命令片段兜底（有 description 时由 _desc_preview 优先接管）"""
+    tool_args = tool_args or {}
     cmd = tool_args.get("command", "")
     return f'执行 "{cmd[:60]}"' if cmd else "执行命令"
 
@@ -719,7 +766,11 @@ def _summarize_bash(tool_name, tool_args, tool_content):
     exit_match = _re.search(r'"exit_code"\s*:\s*(-?\d+)', content)
     exit_code = exit_match.group(1) if exit_match else "?"
     line_count = content.count("\n") + 1 if content.strip() else 0
-    return f"[{tool_name}] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
+    # 有自然语言描述时以描述为主，命令作为事实留档（压缩后仍需知道到底跑了什么）
+    _desc_mod = _tool_desc_loader()
+    desc = _desc_mod.get_description(args) if _desc_mod else ""
+    label = f"{desc} (`{cmd}`)" if desc and cmd else (desc or f"`{cmd}`")
+    return f"[{tool_name}] ran {label} -> exit {exit_code}, {line_count} lines output"
 
 
 def _make_bg_summarize(preview_fn):
@@ -734,13 +785,15 @@ def _make_bg_summarize(preview_fn):
 
 
 def register(registry):
+    # bg_start 的预览/摘要都走带 description 优先的版本
+    _bg_start_preview = _desc_preview(_make_bg_preview("bg_start"))
     registry.register(
         "bash", _BASH_SCHEMA, impl=_bash_impl,
         danger="dangerous", icon="shell", cn_name="执行命令",
         group=GROUP_TERMINAL, description="执行shell命令",
         aliases=["Bash", "Terminal", "RunCommand", "execute_command", "shell", "Command"],
         render=_render_bash_body,
-        preview=_preview_bash,
+        preview=_desc_preview(_preview_bash),
         summarize=_summarize_bash,
         metadata={"permission_arg": "command"},
     )
@@ -750,8 +803,8 @@ def register(registry):
         group=GROUP_TERMINAL, description="启动后台命令",
         aliases=["BgStart", "bg_start"],
         render=_render_bg_body,
-        preview=_make_bg_preview("bg_start"),
-        summarize=_make_bg_summarize(_make_bg_preview("bg_start")),
+        preview=_bg_start_preview,
+        summarize=_make_bg_summarize(_bg_start_preview),
     )
     registry.register(
         "bg_stop", _BG_STOP_SCHEMA, impl=_bg_stop_impl,

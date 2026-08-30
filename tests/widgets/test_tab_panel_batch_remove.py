@@ -20,6 +20,10 @@ from app.widgets.tab_panel import TabPanel
 def panel(qtbot):
     with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
         p = TabPanel()
+    # 固定为列表模式：本文件断言的是列表布局（_list_layout / 团队框顺序）。
+    # TabPanel 会恢复上次持久化的显示模式（Settings.tab_panel_mode），本地存了
+    # tree 时会把整组用例误判成回归。
+    p.set_mode("list", persist=False)
     qtbot.addWidget(p)
     return p
 

@@ -24,6 +24,10 @@ from app.widgets.tab_panel import TabPanel
 def panel(qtbot):
     with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
         p = TabPanel()
+    # ⚠️ Settings 是真机持久化的：本机上次选了「工作区树模式」后，新建的 TabPanel
+    # 会直接是树模式，而团队框只在列表模式创建（_get_or_create_team_group 只被
+    # _rebuild_team_layout 调用）→ 断言团队框的用例全部 KeyError。必须显式 pin。
+    p.set_mode("list", persist=False)
     qtbot.addWidget(p)
     return p
 

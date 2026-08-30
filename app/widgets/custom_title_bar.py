@@ -23,8 +23,18 @@ from typing import Callable, Dict, Optional
 
 _IS_MAC = sys.platform == "darwin"
 
-from PyQt5.QtCore import QEasingCurve, QRect, QRectF, QSize, Qt, QVariantAnimation, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon, QPainter, QPainterPath
+from PyQt5.QtCore import (
+    QAbstractAnimation,
+    QEasingCurve,
+    QRect,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QColor, QCursor, QIcon, QPainter, QPainterPath
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
 from qframelesswindow.titlebar import TitleBarBase
@@ -332,6 +342,8 @@ class CustomTabButton(QWidget):
         # 动画进度（0..1），paintEvent 按此插值
         self._hover_t = 0.0
         self._active_t = 0.0
+        # 文字色 QSS 缓存键（量化进度 + 字重 + 主题色），见 _apply_label_color
+        self._label_css_key = None
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(self.MAC_HEIGHT if _IS_MAC else self.HEIGHT)
         self.setAttribute(Qt.WA_Hover, True)  # 确保 enter/leave 事件可达
@@ -398,21 +410,49 @@ class CustomTabButton(QWidget):
         super().mousePressEvent(event)
 
     def enterEvent(self, event) -> None:
-        self._hovered = True
-        self._start(self._anim_hover, self._hover_t, 1.0)
+        self.set_hover(True)
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
-        self._hovered = False
-        self._start(self._anim_hover, self._hover_t, 0.0)
+        self.set_hover(False)
         super().leaveEvent(event)
 
+    # ── 状态写入（幂等 + 可自愈）──
+    #
+    # 两个 set_* 都是「意图去重 + 进度收敛」，而不是早期版本的「值相同即
+    # return」：动画可能被新事件打断而停在中途（_hover_t / _active_t 停在
+    # 0.4 之类），此时若因为「意图没变」就什么都不做，视觉状态会永久错位
+    # ——这正是「高亮/悬浮赖在 tab 上退不掉」的根因。
+    # 用 Running 状态兜住：动画在跑时绝不重启，否则缓动曲线被反复重置，
+    # 进度永远走不到 1.0（表现为 hover 淡入淡出永远差一口气）。
+
+    @staticmethod
+    def _settled(current: float, target: float) -> bool:
+        """进度是否已就位（收尾误差 0.001 内视作到位）"""
+        return abs(current - target) < 0.001
+
+    def set_hover(self, hovered: bool) -> None:
+        """设置悬浮态（幂等；进度卡在中途会自动补一次收尾）"""
+        target = 1.0 if hovered else 0.0
+        if self._hovered == hovered and (
+            self._anim_hover.state() == QAbstractAnimation.Running
+            or self._settled(self._hover_t, target)
+        ):
+            return
+        self._hovered = hovered
+        self._start(self._anim_hover, self._hover_t, target)
+        self._apply_label_color()
+
     def set_active(self, active: bool) -> None:
-        """切换选中态：底色 / 文字 / 指示条全部走动画"""
-        if self._active == active:
+        """切换选中态：底色 / 文字 / 字重全部走动画（幂等 + 自愈）"""
+        target = 1.0 if active else 0.0
+        if self._active == active and (
+            self._anim_active.state() == QAbstractAnimation.Running
+            or self._settled(self._active_t, target)
+        ):
             return
         self._active = active
-        self._start(self._anim_active, self._active_t, 1.0 if active else 0.0)
+        self._start(self._anim_active, self._active_t, target)
         self._apply_label_color()
 
     # ── 绘制 ──
@@ -454,17 +494,32 @@ class CustomTabButton(QWidget):
             )
         self.update()
 
+    #: 文字色插值量化步长。``setStyleSheet`` 会触发整棵子树的 QSS 重解析 +
+    #: polish，在 180ms 动画里逐帧调用是标题栏掉帧的主要来源；量化到 1/64
+    #: 色阶（肉眼无差）后，一次状态切换的 setStyleSheet 次数从 ~11 降到 ~4。
+    COLOR_STEPS = 64
+
     def _apply_label_color(self) -> None:
-        """按进度插值文字颜色：未选中 → hover(半程) → 选中(全程)"""
+        """按进度插值文字颜色：未选中 → hover(半程) → 选中(全程)
+
+        结果按「量化进度 + 字重 + 主题色」缓存，key 不变则跳过 setStyleSheet。
+        主题色进了 key，所以 refresh_style() 走同一条路径也能正确失效。
+        """
         if not hasattr(self, "_label"):
             return
         from_c = _qcolor(Colors.TEXT_SECONDARY, "rgba(255,255,255,0.65)")
         to_c = _qcolor(Colors.TEXT_PRIMARY, "#ffffff")
         t = min(1.0, max(self._active_t, self._hover_t * 0.5))
+        weight = 600 if self._active else 400
+        q = int(t * self.COLOR_STEPS + 0.5)
+        key = (q, weight, from_c.rgb(), to_c.rgb())
+        if key == self._label_css_key:
+            return
+        self._label_css_key = key
+        t = q / self.COLOR_STEPS
         r = int(round(from_c.red() + (to_c.red() - from_c.red()) * t))
         g = int(round(from_c.green() + (to_c.green() - from_c.green()) * t))
         b = int(round(from_c.blue() + (to_c.blue() - from_c.blue()) * t))
-        weight = 600 if self._active else 400
         self._label.setStyleSheet(
             f"color: rgb({r}, {g}, {b}); background: transparent;"
             f" {get_font_family_css()} {font_size_css(13)}; font-weight: {weight};"
@@ -498,6 +553,8 @@ class CustomTitleBar(TitleBarBase):
         super().__init__(parent)
         self._tabs: Dict[str, CustomTabButton] = {}
         self._active_id: Optional[str] = None
+        # hover 重算合并标志（见 _schedule_tab_hover_sync）
+        self._hover_sync_pending = False
 
         self.setFixedHeight(self.MAC_HEIGHT if self._is_mac else self.HEIGHT)
 
@@ -571,6 +628,8 @@ class CustomTitleBar(TitleBarBase):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._sync_tab_centering()
+        # 居中占位随宽度变化 → 整组 tab 平移，光标静止时 Qt 不补发 enter/leave
+        self._schedule_tab_hover_sync()
 
     def _sync_tab_centering(self) -> None:
         """让中央 tab 容器真正落在窗口正中
@@ -602,6 +661,8 @@ class CustomTitleBar(TitleBarBase):
         for widget, width in ((self._left_balance, left_pad), (self._right_balance, right_pad)):
             if widget.width() != width:
                 widget.setFixedWidth(width)
+        # 占位宽度变化会让整组 tab 平移，重算 hover
+        self._schedule_tab_hover_sync()
 
     # ── 系统按钮 ──
 
@@ -715,6 +776,9 @@ class CustomTitleBar(TitleBarBase):
         self._tab_container.setVisible(True)
         if self._active_id is None:
             self.set_active_tab(tab_id)
+        # 新增 tab 会让后面的 tab 右移；若光标正好落在某个新位置上，
+        # Qt 不会补发 enter/leave
+        self._schedule_tab_hover_sync()
 
     def remove_tab(self, tab_id: str) -> None:
         """移除 tab；若移除的是激活 tab 则自动激活剩余第一个"""
@@ -729,14 +793,81 @@ class CustomTitleBar(TitleBarBase):
             self._active_id = None
             if self._tabs:
                 self.set_active_tab(next(iter(self._tabs)))
+        # 剩余 tab 会平移到光标下；被删的 tab 若正处于 hover 态，它的
+        # leaveEvent 永远不会到达（对象已被 deleteLater）
+        self._schedule_tab_hover_sync()
 
     def set_active_tab(self, tab_id: str) -> None:
-        """设置激活 tab（胶囊高亮）"""
+        """设置激活 tab（胶囊高亮）
+
+        全量遍历而非只改差异项：``CustomTabButton.set_active`` 自带「去重 +
+        收敛」，重复设置同一项不会重启动画，但会把**卡在中途的进度**补回
+        目标——这是高亮与当前状态错位后的自愈通道。
+        """
         if tab_id not in self._tabs:
             return
         self._active_id = tab_id
         for tid, b in self._tabs.items():
             b.set_active(tid == tab_id)
+
+    # ── hover 仲裁 ──
+
+    def sync_tab_hover(self) -> None:
+        """按光标真实位置重新仲裁 hover（自愈入口，可安全重复调用）
+
+        ★ 为什么不能只靠 enter/leave：``add_tab`` / ``remove_tab`` /
+        ``_sync_tab_centering`` 都会在**光标静止**时让整组 tab 平移，而 Qt
+        既不为「被移到光标下」的 widget 补发 enterEvent、也不为「被移走」的
+        widget 补发 leaveEvent。两种后果：
+
+        - 鼠标压在新 tab 上却不亮（缺 enter → 与当前不同步）
+        - 底色糊在被删掉的 tab 上 / 相邻 tab 一直亮着（缺 leave → 卡住）
+
+        这里显式按 ``QCursor.pos()`` 做命中测试，天然保证任意时刻**至多一个**
+        tab 处于 hover，并在每次布局变化后立刻重算。
+        """
+        if not self._tabs or not self._tab_container.isVisible():
+            return
+        global_pos = QCursor.pos()
+        hit_id: Optional[str] = None
+        if self._tab_container.rect().contains(self._tab_container.mapFromGlobal(global_pos)):
+            for tab_id, btn in self._tabs.items():
+                if btn.isVisible() and btn.rect().contains(btn.mapFromGlobal(global_pos)):
+                    hit_id = tab_id
+                    break
+        for tab_id, btn in self._tabs.items():
+            btn.set_hover(tab_id == hit_id)
+
+    def _schedule_tab_hover_sync(self) -> None:
+        """合并同一事件循环内的多次重算请求（resize / 增删 tab 常成串到达）
+
+        延迟一拍是必要的：增删 tab 后要等布局真正跑完才能拿到新几何，
+        立刻命中测试会读到旧 rect。
+        """
+        if self._hover_sync_pending:
+            return
+        self._hover_sync_pending = True
+        QTimer.singleShot(0, self._run_tab_hover_sync)
+
+    def _run_tab_hover_sync(self) -> None:
+        self._hover_sync_pending = False
+        self.sync_tab_hover()
+
+    def _clear_tab_hover(self) -> None:
+        """光标离开标题栏：清掉所有 hover"""
+        for btn in self._tabs.values():
+            btn.set_hover(False)
+
+    def leaveEvent(self, event) -> None:
+        # 拖到屏幕边缘触发分屏、或被系统菜单/其它窗口抢走焦点时，子 widget 的
+        # leaveEvent 不保证到达 —— 在标题栏这一层兜底清空
+        self._clear_tab_hover()
+        super().leaveEvent(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # show 之前 widget 无有效几何，命中测试无意义；首帧后再补一次
+        self._schedule_tab_hover_sync()
 
     def refresh_style(self) -> None:
         """主题切换后刷新样式（Colors.refresh() 由调用方先执行）"""

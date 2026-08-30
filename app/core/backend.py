@@ -165,6 +165,8 @@ def _make_hook_message(event_name: str, output: str, status_message: str = "") -
         "content": _format_hook_output(event_name, output, status_message),
         "_hook_event": event_name,
         "timestamp": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        # 毫秒级：hook 常常同秒连发多条，秒级时间戳排不出先后
+        "ts_ms": int(time.time() * 1000),
     }
 
 
@@ -253,12 +255,15 @@ class ChatBackend(QObject):
     _hook_messages_updated = pyqtSignal()
     stream_started = pyqtSignal()
     stream_chunk = pyqtSignal(str)  # 流式内容片段
-    stream_finished = pyqtSignal(dict)  # 完成时的消息
+    # ⚠️ 签名与引擎侧一致（response: str），不再是旧的 dict —— 见 _TRACE_SIGNAL_ARITY
+    stream_finished = pyqtSignal(str)
     reasoning_content = pyqtSignal(str)  # DeepSeek thinking mode
 
     # 工具相关
     tool_call_started = pyqtSignal(str, str, dict)  # tool_call_id, tool_name, arguments
-    tool_result_received = pyqtSignal(str, str, dict, bool)  # tool_call_id, name, result, success
+    # ⚠️ 与引擎回调一致：(tool_call_id, name, arguments, result)；
+    # 旧签名 (id, name, result, success) 与 emit 源对不上，从来没有数据。
+    tool_result_received = pyqtSignal(str, str, dict, object)
 
     # 权限相关
     permission_requested = pyqtSignal(str, str, dict)  # tool_call_id, tool_name, arguments
@@ -815,8 +820,46 @@ class ChatBackend(QObject):
         if self._sub_agent_manager is None:
             self._deferred_create_sub_agent_and_misc()
 
+    # 引擎回调 → 本对象同名 Qt 信号的转发表：{回调名: 透传给信号的参数个数}
+    #
+    # 背景：上面这一组信号（tool_call_started / tool_result_received /
+    # stream_started / stream_finished / context_updated）历史上**没有任何 emit
+    # 点**——实时事件实际走的是「回调字典」链路（conversation/adapters/ui.py
+    # emit → engines/ui/engine.py 转发 → backend.set_all_callbacks →
+    # main_widget._setup_engine_callbacks），只有主程序那一份消费者。
+    # 插件若再注册同名回调会把主程序的顶掉（工具卡片/流式渲染全废），所以这里
+    # 在注册时统一包一层：先跑原回调，再把事件原样 emit 到 Qt 信号供插件订阅。
+    _TRACE_SIGNAL_ARITY: Dict[str, int] = {
+        "stream_started": 0,
+        "stream_finished": 1,  # (response,)
+        "tool_call_started": 3,  # (tool_call_id, tool_name, arguments)；引擎第 4 参 round_id 不透传
+        "tool_result_received": 4,  # (tool_call_id, name, arguments, result)
+        "context_updated": 2,  # (token_count, limit)；引擎第 3 参 from_api 不透传
+    }
+
+    def _wrap_trace_callback(self, name: str, callback: Callable) -> Callable:
+        """把引擎回调包一层：原回调照跑，之后把事件 emit 到同名 Qt 信号。"""
+        arity = self._TRACE_SIGNAL_ARITY.get(name)
+        if arity is None:
+            return callback
+        sig = getattr(self, name, None)
+        if sig is None or not hasattr(sig, "emit"):
+            return callback
+
+        def wrapped(*args, **kwargs):
+            try:
+                return callback(*args, **kwargs)
+            finally:
+                try:
+                    sig.emit(*args[:arity])
+                except Exception as e:  # 转发失败绝不能影响主流程
+                    logger.debug(f"[ChatBackend] {name} 事件转发到信号失败: {e}")
+
+        return wrapped
+
     def set_callback(self, name: str, callback: Callable):
-        """设置回调（代理到 ChatEngine）"""
+        """设置回调（代理到 ChatEngine），并顺带把事件转发到同名 Qt 信号。"""
+        callback = self._wrap_trace_callback(name, callback)
         if self._chat_engine:
             self._chat_engine.set_callback(name, callback)
         else:
@@ -825,13 +868,14 @@ class ChatBackend(QObject):
             self._pending_engine_callbacks[name] = callback
 
     def set_all_callbacks(self, callbacks: Dict[str, Callable]):
-        """批量设置回调"""
+        """批量设置回调（同样会包装出事件转发）"""
+        wrapped = {name: self._wrap_trace_callback(name, cb) for name, cb in callbacks.items()}
         if self._chat_engine:
-            for name, callback in callbacks.items():
+            for name, callback in wrapped.items():
                 self._chat_engine.set_callback(name, callback)
         else:
             # [审查 #8r Bug C] 同上：先缓存，ChatEngine 创建后统一补注册
-            self._pending_engine_callbacks.update(callbacks)
+            self._pending_engine_callbacks.update(wrapped)
 
     def _flush_pending_engine_callbacks(self):
         """ChatEngine 创建完成后补注册暂存的 UI 回调（审查 #8r Bug C）"""

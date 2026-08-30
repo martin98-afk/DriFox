@@ -320,7 +320,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.5.6"
+    current_version = "v0.5.7"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -407,6 +407,12 @@ class Settings(QConfig):
 
     # ========== 像素桌宠 ==========
     pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())
+    # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树
+    tab_panel_mode = OptionsConfigItem(
+        "UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"])
+    )
+    # 工作区树折叠态：{节点 key: 是否展开}
+    workspace_tree_expansion = ConfigItem("UI", "WorkspaceTreeExpansion", {})
     pet_size = OptionsConfigItem("UI", "PetSize", "small", OptionsValidator(["small", "medium", "large"]))
 
     # ========== 会话项目管理 ==========
@@ -430,6 +436,8 @@ class Settings(QConfig):
     # ========== 插件系统配置 ==========
     enabled_plugins = ConfigItem("Plugin", "EnabledPlugins", [])
     disabled_plugins = ConfigItem("Plugin", "DisabledPlugins", [])
+    # 组件级禁用（D9）：["plugin:component", ...]，如 "calendar:hooks"
+    disabled_plugin_components = ConfigItem("Plugin", "DisabledComponents", [])
 
     # ========== Gateway 通讯平台配置 ==========
     # 企业微信

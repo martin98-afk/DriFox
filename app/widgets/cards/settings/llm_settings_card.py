@@ -47,6 +47,7 @@ from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
+from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
@@ -395,6 +396,9 @@ class LLMSettingsCard(SystemCardFrame):
         # ════ 大模型页 ════
         llm_layout = self._page_layouts["llm"]
 
+        # ── 本页卡片顺序（用户指定）：服务商 → hooks → mcp → 工具 → 智能体 → 技能 → lsp ──
+        # Gitee 账号绑定保持在顶部（原有设计，不参与上面的排序）
+
         # Gitee 账号绑定（保持原默认页顶部位置）
         self.giteeCard = GiteeCard(self)
         llm_layout.addWidget(self.giteeCard)
@@ -409,16 +413,6 @@ class LLMSettingsCard(SystemCardFrame):
             home=self,
         )
         llm_layout.addWidget(self.llmProviderCard)
-
-        self.llmSkillsCard = SkillListSettingCard(
-            icon=get_icon("智能体"),
-            configItem=self.cfg.llm_enabled_skills,
-            title="启用技能",
-            content="选择要注入的技能",
-            parent=self,
-            home=self,
-        )
-        llm_layout.addWidget(self.llmSkillsCard)
 
         # Hooks 管理
         from app.widgets.cards.settings.hook_setting_card import HookListSettingCard
@@ -445,6 +439,37 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         llm_layout.addWidget(self.mcpListCard)
+
+        # ════ 工具 / 智能体 启停（按插件维度，D9/D10）════
+        # 原先是独立的「插件启用」页签，实际要管的只有这两类，收进大模型页
+        self.pluginToolCard = PluginComponentsCard(
+            components=("tools",),
+            title="工具启用",
+            content="按插件控制其工具的启停",
+            icon=FluentIcon.DEVELOPER_TOOLS,
+            parent=self,
+        )
+        llm_layout.addWidget(self.pluginToolCard)
+
+        self.pluginAgentCard = PluginComponentsCard(
+            components=("agents",),
+            title="智能体启用",
+            content="按插件控制其智能体的启停",
+            icon=get_icon("智能体"),
+            parent=self,
+        )
+        llm_layout.addWidget(self.pluginAgentCard)
+
+        # 技能启用（按插件/内置/用户分组，行在展开后分批构建）
+        self.llmSkillsCard = SkillListSettingCard(
+            icon=get_icon("智能体"),
+            configItem=self.cfg.llm_enabled_skills,
+            title="技能启用",
+            content="选择要注入的技能",
+            parent=self,
+            home=self,
+        )
+        llm_layout.addWidget(self.llmSkillsCard)
 
         # LSP 语言服务器状态
         from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
@@ -608,9 +633,11 @@ class LLMSettingsCard(SystemCardFrame):
         # 列表形式配置卡片手风琴：展开一个时自动收起其他
         self._list_cards = [
             self.llmProviderCard,
-            self.llmSkillsCard,
             self.hookListCard,
             self.mcpListCard,
+            self.pluginToolCard,
+            self.pluginAgentCard,
+            self.llmSkillsCard,
             self.lspListCard,
         ]
         self._apply_list_accordion()
@@ -622,6 +649,12 @@ class LLMSettingsCard(SystemCardFrame):
         无注册卡片时整个分区隐藏（行为零变化）。设置弹窗每次打开时调用，
         保证插件增删/热重载后分区内容最新。
         """
+        # 工具/智能体开关卡同步重建（插件增删/热重载后组件列表可能变化）
+        for card_name in ("pluginToolCard", "pluginAgentCard"):
+            try:
+                getattr(self, card_name).refresh_components()
+            except Exception as e:
+                logger.warning(f"[LLMSettingsCard] {card_name} 刷新失败: {e}")
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
@@ -687,6 +720,66 @@ class LLMSettingsCard(SystemCardFrame):
                     QTimer.singleShot(350, lambda c=_card: self._scroll_focus_item_to_top(c))
 
             card.setExpand = _wrapped_set_expand
+
+        # 两张开关卡都保持折叠（用户要求），点标题展开即可。
+        # 若以后要恢复默认展开，必须在包装完成之后调用 setExpand——
+        # 那样走的是包装版，手风琴语义才成立（会先收起其他已展开的列表卡片）。
+
+    def _ensure_hot_reload_connected(self):
+        """订阅插件热重载广播，让设置面板在热重载后就地刷新
+
+        ⚠️ 不能在 __init__ / _apply_list_accordion 里调：那会触发
+        PluginHostService 单例的惰性初始化，连带拉起 AgentManager 全量加载
+        智能体并启动 watchfiles 监听（实测 ~330ms，且是不必要的副作用）。
+        放到首次显示阶段，此时服务早已由主窗口初始化完毕。
+
+        面板不可见时跳过重建——下次打开时 rebuild_plugin_cards 会因内容
+        签名变化自动刷新，没必要在后台付这份开销。
+        连续热重载用 350ms 去抖合并，避免一次批量更新触发多次全量重建。
+        """
+        if getattr(self, "_hot_reload_connected", False):
+            return
+        try:
+            from app.core.plugin_host_service import PluginHostService
+
+            self._hot_reload_connected = True
+            self._hot_reload_timer = QTimer(self)
+            self._hot_reload_timer.setSingleShot(True)
+            self._hot_reload_timer.setInterval(350)
+            self._hot_reload_timer.timeout.connect(self._refresh_after_hot_reload)
+            PluginHostService.get_instance().plugin_changed.connect(self._on_plugin_changed, Qt.UniqueConnection)
+        except Exception as e:
+            logger.warning(f"[LLMSettingsCard] 订阅插件热重载广播失败: {e}")
+
+    def _on_plugin_changed(self, payload: dict):
+        """插件变更广播回调（去重后统一刷新）"""
+        if not self.isVisible():
+            return
+        self._hot_reload_timer.start()
+
+    def _prefetch_skills(self):
+        """空闲帧预热：提前跑一次技能发现，让展开技能卡更跟手"""
+        try:
+            card = getattr(self, "llmSkillsCard", None)
+            if card is None or getattr(card, "_discovered", True):
+                return
+            card._discover_skills()
+            card._update_skill_token_count()
+        except Exception as e:
+            logger.debug(f"[LLMSettingsCard] 技能发现预热失败: {e}")
+
+    def _refresh_after_hot_reload(self):
+        if not self.isVisible():
+            return
+        try:
+            self.rebuild_plugin_cards()
+            # force=True：热重载可能只改了组件内部的细项（工具/智能体增删），
+            # 插件清单未变 → 签名相同 → 非 force 的脏检查会跳过，必须强制重建
+            for card_name in ("pluginToolCard", "pluginAgentCard"):
+                getattr(self, card_name).refresh_components(force=True)
+            logger.info("[LLMSettingsCard] 插件热重载后已刷新设置面板")
+        except Exception as e:
+            logger.warning(f"[LLMSettingsCard] 热重载后刷新设置面板失败: {e}")
 
     def _scroll_focus_item_to_top(self, card):
         """把卡片 header 滚到所在分页滚动区顶部，让卡片标题 + 下方 item 都在可见区
@@ -1071,7 +1164,14 @@ class LLMSettingsCard(SystemCardFrame):
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
         # 手风琴类卡片（ExpandSettingCard 子类，不在以上遍历范围）
-        for card_name in ("llmSkillsCard", "llmProviderCard", "mcpListCard", "lspListCard"):
+        for card_name in (
+            "llmSkillsCard",
+            "llmProviderCard",
+            "mcpListCard",
+            "lspListCard",
+            "pluginToolCard",
+            "pluginAgentCard",
+        ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
@@ -1210,6 +1310,17 @@ class LLMSettingsCard(SystemCardFrame):
     def showEvent(self, event):
         if hasattr(self, "llmProviderCard"):
             self.llmProviderCard._refresh_items()
+        # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，
+        # 后者会连带全量加载智能体 + 启动文件监听，实测约 330ms）
+        self._ensure_hot_reload_connected()
+        # 预热技能发现：展开技能卡时要同步扫盘 + parse 每个 SKILL.md（~90ms），
+        # 挪到打开设置后的空闲帧做，用户点开卡片时就不必再等
+        QTimer.singleShot(300, self._prefetch_skills)
+        # 每次打开设置时刷新工具/智能体列表（插件热重载/启停后保持最新）
+        for card_name in ("pluginToolCard", "pluginAgentCard"):
+            card = getattr(self, card_name, None)
+            if card is not None:
+                card.refresh_components()
         super().showEvent(event)
 
     def set_opacity(self, opacity: float):

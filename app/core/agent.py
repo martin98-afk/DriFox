@@ -467,6 +467,12 @@ class AgentManager:
         self._hook_manager.unregister_skill_hooks(plugin.name)
         if hooks_file.exists():
             self._hook_manager._clear_config_watcher(str(hooks_file))
+        # D9：hooks 组件整类停用时只卸载、不重载。
+        # 注：单条 hook 的停用（细项级）不在这里处理——走 HookManager 执行链
+        # 按 hook id 过滤，开关即可立即生效，无需重载。
+        if not pm.is_component_enabled(plugin_name, "hooks"):
+            logger.info(f"[AgentManager] hooks 组件已停用，跳过重载: {plugin_name}")
+            return False
         if hooks_dir.exists() and hooks_dir.is_dir():
             # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
             self._hook_manager.load_hooks_from_directory_flat(
@@ -535,6 +541,9 @@ class AgentManager:
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
+                    # D9：hooks 组件被整类停用的插件不注册其 hooks
+                    if not pm.is_component_enabled(plugin.name, "hooks"):
+                        continue
                     hooks_dir = plugin.path / "hooks"
                     if not hooks_dir.exists() or not hooks_dir.is_dir():
                         continue

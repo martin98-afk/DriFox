@@ -1,24 +1,59 @@
 # -*- coding: utf-8 -*-
-"""agent_trace 数据模型。
+"""agent_trace 数据模型与主题色板。
 
 定义轨迹查看器用到的核心数据结构：
 - ``EntryKind``：条目类型枚举（SYSTEM/USER/CONTEXT/ASSISTANT/TOOL）
 - ``Lane``：时间线泳道（Input / Model / Tools，对齐 DeepSeek Harness）
 - ``TraceRecord``：单条轨迹记录
-- 工具函数：颜色辅助（修 QColor("rgba(...)") 解析失败变黑的坑）、时长格式化、内容提取
+- ``ThemePalette``：**统一主题色板**（见下方 ⚠️ P022）
 
-⚠️ 坑点 P022：QColor 不支持 "rgba(r,g,b,a)" 字符串（解析失败静默返回黑色），
-所有带透明度的颜色必须用 :func:`with_alpha` 从 hex 派生。
+⚠️ 坑点 P022：``QColor("rgba(r,g,b,a)")`` **解析失败并静默返回黑色**。
+而 DriFox 的主题 YAML 里 ``text_secondary`` / ``card_bg`` / ``hover_bg`` 等
+**大量使用 rgba() 字符串**：
+
+    text_secondary: rgba(226, 235, 249, 0.72)
+    card_bg:        rgba(22, 30, 45, 230)
+
+凡是把主题色直接喂给 QPainter / QColor 的自绘代码都会画出**纯黑**（历史 bug：
+深色主题下时间线泳道标签 "Input / Model / Tools" 与刻度文字是黑字）。
+统一入口 :func:`to_qcolor` + :class:`ThemePalette` 是本插件唯一的取色方式，
+禁止再写 ``QColor(colors.get("text_secondary"))``。
+
+⚠️ 坑点 P024：alpha 参数语义。主题里 ``card_bg: rgba(22,30,45,230)`` 的
+0-255 与 ``hover_bg: rgba(255,255,255,0.08)`` 的 0.0-1.0 **混用**；
+:func:`to_qcolor` 按字段是否含小数点自动判定。
 """
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from PyQt5.QtGui import QColor
+
+# ── 类型主色（hex，深浅主题通吃；对齐 DeepSeek Harness 的彩色标签）──
+ENTRY_KIND_COLORS: Dict["EntryKind", str] = {
+    "SYSTEM": "#7AA2F7",  # 蓝
+    "USER": "#E0AF68",  # 金橙
+    "CONTEXT": "#9ECE6A",  # 绿
+    "ASSISTANT": "#BB9AF7",  # 紫
+    "TOOL": "#7DCFFF",  # 青
+}
+
+_RGBA_RE = re.compile(r"rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*(?:,\s*([0-9.]+)\s*)?\)", re.I)
+
+# ── 「占用区间」参数（让时间线连贯，而不是一堆 0ms 碎片）──
+# 消息写入是瞬时事件（end=0），若直接用 end 画条带，整条时间线会碎成一排
+# 最小宽度的点 —— 视觉上就是「全部 0ms、不连贯」。
+# 改为把每条的占用延伸到「下一条的起点」，即 DeepSeek Harness / DevTools
+# Waterfall 的语义：这一项占用这段时间。
+# ⚠️ 同秒注入的多条消息间隔为 0（消息时间戳只有秒级精度）→ 间隔 0 就是瞬时，
+# **不要**保底成某个最小宽度，否则时长列会退化成「全是最小值 / 全是封顶值」。
+MIN_SPAN_S = 0.0  # 瞬时项的最小占用（秒）；仅作绘制保底，不参与数值
+GAP_CAP_S = 3.0  # 空闲间隔上限：用户思考 1 小时不该把条带拉成 1 小时
 
 
 class EntryKind(str, Enum):
@@ -57,19 +92,10 @@ class Lane(Enum):
 
 LANE_ORDER: tuple = (Lane.INPUT, Lane.MODEL, Lane.TOOLS)
 
-# 类型主色（hex，深浅主题通吃）
-ENTRY_KIND_COLORS: Dict[EntryKind, str] = {
-    EntryKind.SYSTEM: "#7AA2F7",  # 蓝灰
-    EntryKind.USER: "#E0AF68",  # 金橙
-    EntryKind.CONTEXT: "#9ECE6A",  # 绿
-    EntryKind.ASSISTANT: "#BB9AF7",  # 紫
-    EntryKind.TOOL: "#7DCFFF",  # 青
-}
-
 
 def kind_color(kind: EntryKind) -> QColor:
     """类型主色（不透明 QColor）。"""
-    return QColor(ENTRY_KIND_COLORS.get(kind, "#888888"))
+    return QColor(ENTRY_KIND_COLORS.get(getattr(kind, "value", kind), "#888888"))
 
 
 def with_alpha(color: QColor, alpha: int) -> QColor:
@@ -77,6 +103,120 @@ def with_alpha(color: QColor, alpha: int) -> QColor:
     c = QColor(color)
     c.setAlpha(max(0, min(255, int(alpha))))
     return c
+
+
+def to_qcolor(value: Any, fallback: Any = "#888888") -> QColor:
+    """把任意主题色值安全转成 QColor（**修 P022 黑字 bug 的唯一入口**）。
+
+    支持：``QColor`` / ``"#RRGGBB"`` / ``"#RGB"`` / ``"rgb(r,g,b)"`` /
+    ``"rgba(r,g,b,a)"``（a 既接受 0-255 也接受 0.0-1.0）。
+    解析失败返回 fallback 的 QColor。
+    """
+    if isinstance(value, QColor):
+        return QColor(value)
+    if not isinstance(value, str):
+        return QColor(fallback)  # type: ignore[arg-type]
+    text = value.strip()
+    if not text:
+        return QColor(fallback)  # type: ignore[arg-type]
+    m = _RGBA_RE.match(text)
+    if m:
+        r, g, b = (int(float(m.group(i))) for i in (1, 2, 3))
+        a_raw = m.group(4)
+        if a_raw is None:
+            a = 255
+        else:
+            # 主题里两种 alpha 语义混用：含小数点按 0.0-1.0，否则按 0-255
+            a = int(round(float(a_raw) * 255)) if ("." in a_raw and float(a_raw) <= 1.0) else int(float(a_raw))
+        c = QColor(r, g, b, max(0, min(255, a)))
+        if c.isValid():
+            return c
+        return QColor(fallback)  # type: ignore[arg-type]
+    c = QColor(text)
+    return c if c.isValid() else QColor(fallback)  # type: ignore[arg-type]
+
+
+def css(color: QColor, alpha: Optional[int] = None) -> str:
+    """QColor → CSS ``rgba(...)`` 字符串（QSS 用；QSS 能正确解析 rgba）。"""
+    c = QColor(color)
+    if alpha is not None:
+        c.setAlpha(max(0, min(255, int(alpha))))
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {c.alpha() / 255:.3g})"
+
+
+@dataclass
+class ThemePalette:
+    """统一主题色板 — 三个面板共用，保证「同一语义色处处一致」。
+
+    所有字段都是 **QColor**（已解析 rgba），可直接喂 QPainter；
+    需要写 QSS 时用 :meth:`q` 取 rgba 字符串。
+    """
+
+    is_dark: bool = True
+    text: QColor = field(default_factory=lambda: QColor("#E6E9F0"))
+    text_secondary: QColor = field(default_factory=lambda: QColor(226, 235, 249, 184))
+    text_muted: QColor = field(default_factory=lambda: QColor("#8B98AD"))
+    border: QColor = field(default_factory=lambda: QColor("#3D4A60"))
+    accent: QColor = field(default_factory=lambda: QColor("#66C6FF"))
+    card_bg: QColor = field(default_factory=lambda: QColor(22, 30, 45, 230))
+    hover_bg: QColor = field(default_factory=lambda: QColor(255, 255, 255, 20))
+    selected_bg: QColor = field(default_factory=lambda: QColor(102, 198, 255, 82))
+    line: QColor = field(default_factory=lambda: QColor("#FFFFFF"))
+    danger: QColor = field(default_factory=lambda: QColor("#FF6B7A"))
+    warning: QColor = field(default_factory=lambda: QColor("#E0AF68"))
+    success: QColor = field(default_factory=lambda: QColor("#9ECE6A"))
+    track: QColor = field(default_factory=lambda: QColor(255, 255, 255, 18))
+    # ⚠️ ui 字体族必须是**系统字体**（ctx.font_family），否则整个面板会掉回
+    # Qt 默认字体，跟主程序其它界面不是一套（用户反馈「全部字体都没应用系统字体」）。
+    font_family: str = "Segoe UI"
+    # 仅代码 / JSON / 数字列使用；逗号分隔 → Qt 按序回退
+    mono_family: str = "Cascadia Mono, Consolas, Courier New, monospace"
+    font_px: int = 13
+
+    # ── 构造 ──
+
+    @classmethod
+    def from_theme(cls, colors: Optional[Dict[str, Any]], is_dark: bool = True, **extra: Any) -> "ThemePalette":
+        """从 ``ctx["colors"]`` 构造；缺键逐字段回退，永不产生黑色。"""
+        c = dict(colors or {})
+        line = QColor("#FFFFFF") if is_dark else QColor("#000000")
+        track = to_qcolor(c.get("card_bg_dim"), QColor(255, 255, 255, 18) if is_dark else QColor(0, 0, 0, 20))
+        if not track.isValid() or track.alpha() == 0:
+            track = QColor(255, 255, 255, 18) if is_dark else QColor(0, 0, 0, 20)
+        pal = cls(
+            is_dark=bool(is_dark),
+            text=to_qcolor(c.get("text_primary"), "#E6E9F0" if is_dark else "#1A1F2B"),
+            text_secondary=to_qcolor(
+                c.get("text_secondary"), "#B9C3D4" if is_dark else "rgba(60,70,90,0.75)"
+            ),
+            text_muted=to_qcolor(c.get("text_muted"), "#8B98AD" if is_dark else "#6B7688"),
+            border=to_qcolor(c.get("border"), "#3D4A60" if is_dark else "#D6DCE6"),
+            accent=to_qcolor(c.get("accent"), "#66C6FF"),
+            card_bg=to_qcolor(c.get("card_bg"), QColor(22, 30, 45, 230) if is_dark else QColor(255, 255, 255, 245)),
+            hover_bg=to_qcolor(c.get("hover_bg"), QColor(255, 255, 255, 20) if is_dark else QColor(0, 0, 0, 18)),
+            selected_bg=to_qcolor(
+                c.get("selected_bg"), QColor(102, 198, 255, 82) if is_dark else QColor(0, 110, 200, 48)
+            ),
+            line=line,
+            danger=to_qcolor(c.get("status_error") or c.get("syntax_error"), "#FF6B7A"),
+            warning=to_qcolor(c.get("accent_warm"), "#E0AF68"),
+            success=to_qcolor(c.get("syntax_success"), "#9ECE6A"),
+            track=track,
+        )
+        for k, v in extra.items():
+            if hasattr(pal, k):
+                setattr(pal, k, v)
+        return pal
+
+    # ── 工具 ──
+
+    def q(self, name: str, alpha: Optional[int] = None) -> str:
+        """取 CSS rgba 字符串（写 QSS 用）。"""
+        return css(getattr(self, name, self.text), alpha)
+
+    def line_at(self, alpha: int) -> QColor:
+        """分隔线/底色用的半透明线色（深色叠白、浅色叠黑）。"""
+        return with_alpha(self.line, alpha)
 
 
 @dataclass
@@ -131,11 +271,86 @@ class TraceRecord:
         return int((self.end_ts - self.start_ts) * 1000)
 
     @property
+    def span_end_ts(self) -> float:
+        """占用区间终点（绘制用）。
+
+        有真实耗时（TOOL / ASSISTANT 由实时信号回填）→ 用 end_ts；
+        瞬时消息 → 延伸到「下一条的起点」（由 collector 算好放 meta["span_end"]），
+        上限 ``GAP_CAP_S``，让时间线是一条连续的带子而不是一排碎点。
+        """
+        if self.is_pending:
+            return time.time()
+        if self.end_ts > self.start_ts:
+            return self.end_ts
+        e = self.meta.get("span_end")
+        if e:
+            try:
+                return max(self.start_ts, float(e))
+            except Exception:
+                pass
+        # 兜底：collector 没预填（例如手工构造的记录）→ 视为瞬时，不伪造时长
+        return self.start_ts
+
+    @property
+    def span_ms(self) -> int:
+        """占用时长（毫秒）—— 与条带宽度一致。
+
+        ⚠️ 0 = 瞬时事件（同秒注入的消息写入，**没有**伪造一个保底值）。
+        早期版本给 0 间隔保底 80ms，导致时长列全是 80ms / 3s 两个怪值。
+        """
+        if self.start_ts <= 0:
+            return 0
+        return max(0, int((self.span_end_ts - self.start_ts) * 1000))
+
+    @property
+    def span_label(self) -> str:
+        """占用时长文案：``—`` / ``1.20 s`` / ``≥3.00 s``（被封顶时加 ≥）。"""
+        ms = self.span_ms
+        if ms <= 0:
+            return "—"
+        text = format_duration(ms)
+        return f"≥{text}" if self.meta.get("span_capped") else text
+
+    @property
     def absolute_time(self) -> str:
         """绝对时间戳（HH:MM:SS），未知返回 '-'。"""
         if self.start_ts <= 0:
             return "-"
         return _format_hms(self.start_ts)
+
+    @property
+    def size(self) -> int:
+        """内容体量（字节数，UTF-8）。"""
+        try:
+            return len((self.raw or "").encode("utf-8", errors="ignore"))
+        except Exception:
+            return 0
+
+    @property
+    def tokens(self) -> int:
+        """内容占用的 token 数（懒计算 + 写回 meta 缓存）。
+
+        collector 会用主程序的 ``token_estimator``（tiktoken）预填
+        ``meta["tokens"]``；没有预填时按字符比例兜底估算，并缓存回 meta，
+        避免自绘时每行重算。
+        """
+        t = self.meta.get("tokens")
+        if t is None:
+            t = estimate_tokens_text(self.raw)
+            self.meta["tokens"] = t
+        try:
+            return int(t)
+        except Exception:
+            return 0
+
+    @property
+    def status(self) -> str:
+        """状态文案（失败 / 进行中 / 完成 / 已记录）。"""
+        if self.is_error:
+            return "失败"
+        if self.is_pending:
+            return "进行中"
+        return "完成"
 
 
 def _format_hms(epoch: float) -> str:
@@ -147,7 +362,7 @@ def _format_hms(epoch: float) -> str:
 
 def format_duration(ms: int) -> str:
     """人类可读时长：<1000ms → ``830 ms``；<60s → ``2.45 s``；其余 → ``1m 23s``。"""
-    if ms < 0:
+    if ms is None or ms < 0:
         return "-"
     if ms < 1000:
         return f"{ms} ms"
@@ -160,7 +375,7 @@ def format_duration(ms: int) -> str:
 
 def format_duration_compact(ms: int) -> str:
     """压缩版时长（时间线条内文字用）。"""
-    if ms < 0:
+    if ms is None or ms < 0:
         return "-"
     if ms < 1000:
         return f"{ms}ms"
@@ -169,6 +384,62 @@ def format_duration_compact(ms: int) -> str:
     minutes, rem = divmod(ms, 60_000)
     seconds = rem // 1000
     return f"{minutes}m{seconds}s"
+
+
+def format_size(nbytes: int) -> str:
+    """Network 面板风格体量：<1024 → ``812 B``；<1MB → ``12.4 kB``；其余 MB。"""
+    if not nbytes or nbytes < 0:
+        return "—"
+    if nbytes < 1024:
+        return f"{nbytes} B"
+    if nbytes < 1024 * 1024:
+        return f"{nbytes / 1024:.1f} kB"
+    return f"{nbytes / 1024 / 1024:.2f} MB"
+
+
+def format_tokens(n: int) -> str:
+    """紧凑 token 显示（列宽有限）：``812`` / ``1.2k`` / ``24k``。"""
+    if not n or n <= 0:
+        return "—"
+    if n < 1000:
+        return str(n)
+    if n < 10_000:
+        return f"{n / 1000:.1f}k"
+    return f"{round(n / 1000)}k"
+
+
+_TOKEN_ESTIMATOR: Any = None
+
+
+def estimate_tokens_text(text: str, model: str = "gpt-4") -> int:
+    """文本 token 估算：优先主程序 ``app.core.token_estimator``（tiktoken），
+    失败/导入不到时按「中文 0.7 / 西文 1/3.5」比例兜底。
+
+    ⚠️ 结果是**逐条缓存**的（写回 ``TraceRecord.meta``），不要在绘制热路径上
+    对长文本反复调用。
+    """
+    if not text:
+        return 0
+    global _TOKEN_ESTIMATOR
+    if _TOKEN_ESTIMATOR is None:
+        try:
+            from app.core.token_estimator import estimate_tokens as _est
+
+            _TOKEN_ESTIMATOR = _est
+        except Exception:
+            _TOKEN_ESTIMATOR = _fallback_tokens
+    try:
+        return int(_TOKEN_ESTIMATOR(text, model))
+    except Exception:
+        return _fallback_tokens(text)
+
+
+def _fallback_tokens(text: str) -> int:
+    """无 tiktoken 时的兜底估算（中文按字、西文按 3.5 字符/token）。"""
+    if not text:
+        return 0
+    cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
+    return max(1, int(cjk * 0.7 + (len(text) - cjk) / 3.5))
 
 
 def truncate(text: str, max_chars: int = 120) -> str:
@@ -261,3 +532,35 @@ def message_source(idx: int, extra: str = "") -> str:
     """把内部来源信息格式化为可读字符串。"""
     base = f"messages[{idx}]"
     return f"{base}{(' · ' + extra) if extra else ''}"
+
+
+def pretty_json(text: str, indent: int = 2) -> str:
+    """能解析成 JSON 就 pretty print，否则原样返回（详情面板通用）。"""
+    if not text:
+        return ""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "{[":
+        return text
+    try:
+        import json as _json
+
+        return _json.dumps(_json.loads(stripped), ensure_ascii=False, indent=indent)
+    except Exception:
+        return text
+
+
+def time_bounds(records: list) -> Tuple[float, float]:
+    """一组记录的时间边界 (t0, t1)；无有效时间返回 (0.0, 1.0) 防除零。
+
+    右端用 :attr:`TraceRecord.span_end_ts`（占用终点）而不是 ``end_ts`` ——
+    否则全是瞬时消息时 t1 == t0，时间线退化成一个点。
+    """
+    starts = [r.start_ts for r in records if getattr(r, "start_ts", 0) > 0]
+    if not starts:
+        return 0.0, 1.0
+    t0 = min(starts)
+    ends = [max(r.span_end_ts, r.start_ts) for r in records if getattr(r, "start_ts", 0) > 0]
+    t1 = max(ends) if ends else t0
+    if t1 <= t0:
+        t1 = t0 + 1.0
+    return t0, t1

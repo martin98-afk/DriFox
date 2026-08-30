@@ -197,6 +197,21 @@ from app.widgets.ui_helpers import (
 
 
 # ───────────────────────────────────────────────────────────────────────────
+# 消息列表滚动：统一的「视口是否贴底」判定阈值（px）
+# ───────────────────────────────────────────────────────────────────────────
+# 历史债务：同一语义曾散落 5 套阈值（20 / 30 / 50 / 80），造成「上滚一点就被判
+# 离底、再动一点又判贴底」的状态抖动，是「强制滚动太多」体感的直接来源。
+# 全项目只允许存在这一个常量，判定一律走 MainWidget._is_view_at_bottom()。
+AT_BOTTOM_TOLERANCE = 24
+
+# 「回到底部」胶囊的显示阈值（px）：视口离底超过它才浮出。
+# ⚠️ 故意比 AT_BOTTOM_TOLERANCE 大一个数量级 —— 两者语义不同：
+#   - AT_BOTTOM_TOLERANCE 问的是「还算贴底吗」（决定是否跟随流式输出）
+#   - SCROLL_JUMP_SHOW_THRESHOLD 问的是「值得给个按钮吗」
+# 共用阈值会让胶囊在跟随边界上反复闪现/消失。
+SCROLL_JUMP_SHOW_THRESHOLD = 120
+
+# ───────────────────────────────────────────────────────────────────────────
 # 项目 icon tooltip 异步分支检测
 # ───────────────────────────────────────────────────────────────────────────
 class _BranchDetectSignals(QObject):
@@ -1251,6 +1266,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._message_batch: List[List[Dict[str, Any]]] = []
         # 存储每个batch对应的UI卡片：None表示已回收（只存数据不存UI）
         self._batch_cards: List[Optional[List[MessageCard]]] = []
+        # 卸载批次后留在原位的等高空白占位：batch_idx → spacer。
+        # 见 `_install_batch_placeholder` —— 没有它，回收会让容器高度瞬间塌陷，
+        # 随后卡片高度再异步上报，与滚底重试链叠加成长对话滚动期抖动。
+        self._batch_placeholders: Dict[int, QWidget] = {}
         # 前缀和缓存：_user_prefix[i] = 前 i 个 batch 中有多少个 user（用于 O(1) 的 round_index 计算）
         self._user_prefix_cache: List[int] = []
         self._visible_batch_start = 0
@@ -1349,11 +1368,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_session_hook = False
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
-        self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
-        # 🆕 流式结束滚底宽限截止（monotonic 时间戳，0 = 无宽限）：
-        # 流式刚结束 2s 内忽略 _user_intentionally_away_from_bottom 拦截，
-        # 防止用户流式中途上滚导致结束时的兜底滚底被跳过（详见 _ensure_at_bottom）。
-        self._stream_finished_grace_until: float = 0.0
+        # 用户主动滚上去标记。置/复位只在 `_on_scroll_changed`（用户真实滚动）
+        # 与 `_reset_bottom_follow`（用户点击发送 / 切会话 / 清空聊天区）两处；
+        # 判定一律走 `_should_follow_bottom()`。禁止在别处直接读写这个标志。
+        self._user_intentionally_away_from_bottom = False
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
         self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
         # resize 防抖定时器 - 性能优化：32ms（~30fps）已足够覆盖感知刷新率
@@ -3562,6 +3580,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         plugin_dirs = []
         for plugin in pm.get_enabled_plugins():
+            # D9：ui 组件被整类停用的插件不挂载其界面扩展
+            if not pm.is_component_enabled(plugin.name, "ui"):
+                continue
             if plugin.has_component("ui"):
                 plugin_dirs.append((plugin.name, plugin.path))
         logger.info(f"[MainWidget] Found {len(plugin_dirs)} UI-enabled plugins: {[p[0] for p in plugin_dirs]}")
@@ -10746,6 +10767,10 @@ class OpenAIChatToolWindow(ToolWindow):
         visible_batches = self._message_batch[self._visible_batch_start : self._visible_batch_end]
         self._suspend_auto_scroll = not initial
         self._loading_session = True  # 标记加载状态，懒渲染期间保持滚动
+        # 🐛 切会话时必须清掉上一个会话遗留的「用户在读历史」状态：否则加载期间
+        # 内容一边撑高、滚动条 maximum 一边增大，_on_scroll_changed 会把 away 置
+        # True，于是加载完成的强制滚底被守卫拦下 → 新会话停在历史中间而不是底部。
+        self._reset_bottom_follow()
         self._initial_scroll_to_bottom = False  # 重置滚底标记，让首次懒渲染强制滚底
         try:
             self._render_message_to_card(
@@ -10798,6 +10823,85 @@ class OpenAIChatToolWindow(ToolWindow):
 
         QTimer.singleShot(0, restore_anchor)
 
+    # ── 批次卸载占位：消除回收导致的高度塌陷 ────────────────────
+
+    def _install_batch_placeholder(self, batch_idx: int, height: int, layout_index: int) -> bool:
+        """卸载批次后在原位留一个等高空白占位。
+
+        目的：B4 回收把卡片从 chat_layout 移除后，容器高度会瞬间归零，随后卡片
+        高度再异步上报（WebEngine 80ms 防抖）。这段窗口里滚动条的 maximum
+        先塌后涨，正好与 `_ensure_at_bottom` 的 8×300ms 重试链重叠 —— 长对话
+        滚动时会持续抖动。留一个等高占位可让总高度在回收瞬间保持不变。
+
+        Args:
+            batch_idx: 被卸载的批次索引
+            height: 被移除卡片的总高度（<=0 时不安装）
+            layout_index: 被移除的第一张卡片在 chat_layout 中的位置
+
+        Returns:
+            是否成功安装。False = 调用方必须回退到「滚动值补偿」的旧行为。
+        """
+        if height <= 0 or layout_index < 0:
+            return False
+        try:
+            spacer = QWidget(self.chat_container)
+            spacer.setFixedHeight(height)
+            spacer.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            spacer.setFocusPolicy(Qt.NoFocus)
+            self.chat_layout.insertWidget(min(layout_index, self.chat_layout.count()), spacer)
+            old = self._batch_placeholders.get(batch_idx)
+            if old is not None:
+                self._remove_placeholder_widget(old)
+            self._batch_placeholders[batch_idx] = spacer
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[virtual-scroll] 批次 {batch_idx} 占位安装失败，回退补偿: {e}")
+            return False
+
+    def _remove_placeholder_widget(self, widget) -> None:
+        """从布局摘掉并销毁一个占位控件（全程吞异常，不能影响回收主流程）"""
+        try:
+            if widget is None or sip.isdeleted(widget):
+                return
+            self.chat_layout.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+        except Exception:
+            pass
+
+    def _take_batch_placeholder(self, batch_idx: int):
+        """取出并移除 batch_idx 的占位，返回它当时在 chat_layout 中的位置。
+
+        供 `_render_message_to_card` 在重建该批次时把新卡片插回原位 —— 这是
+        「用占位换来的高度稳定」必须付的代价：顺序要显式还回去，否则新卡片
+        会被追加到末尾，消息顺序错乱。
+        """
+        widget = self._batch_placeholders.pop(batch_idx, None)
+        if widget is None:
+            return None
+        try:
+            if sip.isdeleted(widget):
+                return None
+            index = self.chat_layout.indexOf(widget)
+            self._remove_placeholder_widget(widget)
+            return index if index >= 0 else None
+        except Exception:
+            return None
+
+    def _clear_batch_placeholders(self, remove_from_layout: bool = True):
+        """清空全部批次占位。会话切换 / 布局重建时必须调用，防止索引错位。
+
+        Args:
+            remove_from_layout: 是否同时从 chat_layout 摘除并销毁。
+                布局本身马上要被整体清空时传 False，省一轮开销。
+        """
+        widgets = list(self._batch_placeholders.values())
+        self._batch_placeholders.clear()
+        if not remove_from_layout:
+            return
+        for w in widgets:
+            self._remove_placeholder_widget(w)
+
     def _recycle_out_of_view_batches(self):
         """回收超出可视缓冲区范围的批次UI，只保留数据，节省内存
         同时确保当前可视范围内的批次都已经懒渲染完成
@@ -10838,6 +10942,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # ── 收集上方（历史方向）需要回收的卡片 ──
             above_widgets = []
+            # 只有占位失败的高度才需要下面的滚动值补偿
             above_removed_height = 0
             for batch_idx in range(0, active_start):
                 if self._batch_cards[batch_idx] is not None:
@@ -10846,11 +10951,22 @@ class OpenAIChatToolWindow(ToolWindow):
                     if cards and self._current_assistant_card in cards:
                         continue
                     if cards:
+                        batch_cards = []
+                        batch_height = 0
+                        first_index = -1
                         for card in cards:
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
-                                above_removed_height += card.height()
+                                if first_index < 0:
+                                    first_index = self.chat_layout.indexOf(card)
+                                batch_height += card.height()
                                 recycled_card_ids.add(id(card))
-                                above_widgets.append(card)
+                                batch_cards.append(card)
+                        if batch_cards:
+                            # 🐛 等高占位优先：总高度在回收瞬间保持不变，下面的
+                            # setValue 补偿就成了空操作 —— 不再与滚底重试链打架。
+                            if not self._install_batch_placeholder(batch_idx, batch_height, first_index):
+                                above_removed_height += batch_height
+                            above_widgets.extend(batch_cards)
                         recycled_count += 1
                     # 🛡️ B9 修复：只卸载 UI（_batch_cards=None），
                     # 保留 _message_batch 数据（上滚回可重建，数据不丢失）
@@ -10864,10 +10980,20 @@ class OpenAIChatToolWindow(ToolWindow):
                     if cards and self._current_assistant_card in cards:
                         continue
                     if cards:
+                        batch_cards = []
+                        batch_height = 0
+                        first_index = -1
                         for card in cards:
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
+                                if first_index < 0:
+                                    first_index = self.chat_layout.indexOf(card)
+                                batch_height += card.height()
                                 recycled_card_ids.add(id(card))
-                                below_widgets.append(card)
+                                batch_cards.append(card)
+                        if batch_cards:
+                            # 同上方批次：优先留等高占位，保持容器总高度不变
+                            self._install_batch_placeholder(batch_idx, batch_height, first_index)
+                            below_widgets.extend(batch_cards)
                         recycled_count += 1
                     # 🛡️ B9 修复：只卸载 UI，保留数据
                     self._batch_cards[batch_idx] = None
@@ -10962,7 +11088,8 @@ class OpenAIChatToolWindow(ToolWindow):
             batch_idx: 批次索引
 
         Returns:
-            被移除卡片的总高度（用于滚动补偿）
+            布局实际丢失的**净**高度（用于滚动补偿）。安装等高占位成功时为 0
+            —— 总高度没变，无需补偿，也就不会与滚底重试链相互拉扯。
         """
         if not (0 <= batch_idx < len(self._batch_cards)):
             return 0
@@ -10977,21 +11104,30 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._register_unloaded_pid(pid, now, batch_idx)
         removed_h = 0
         alive_cards = []
+        first_index = -1
         for card in cards:
             if isinstance(card, MessageCard) and self._is_widget_alive(card):
                 try:
+                    if first_index < 0:
+                        first_index = self.chat_layout.indexOf(card)
                     removed_h += card.height()
                 except RuntimeError:
                     pass
                 alive_cards.append(card)
+        placeholder_ok = False
         if alive_cards:
             delete_widgets_from_layout(alive_cards, self.chat_layout, call_cleanup=True)
+            # 🐛 等高占位优先：总高度不变 → 调用方无需补偿，也就不会与
+            # _ensure_at_bottom 的重试链相互拉扯。失败则回退旧的补偿行为。
+            placeholder_ok = self._install_batch_placeholder(batch_idx, removed_h, first_index)
+        # 占位成功 = 布局没丢高度 → 返回 0，调用方的 setValue(value - 0) 成为空操作
+        net_removed_h = 0 if placeholder_ok else removed_h
         # 🛡️ B9：只置 _batch_cards=None（卸载 UI），保留 _message_batch 数据
         self._batch_cards[batch_idx] = None
         # 只减已渲染的卡数（_rendered_card_count 语义 = 已渲染未卸载）
         rendered_in_batch = sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
         self._decr_rendered_count(rendered_in_batch)
-        return removed_h
+        return net_removed_h
 
     def _batch_is_protected(self, batch_idx: int) -> bool:
         """判断批次是否受保护（不可淘汰）：
@@ -11469,6 +11605,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_loading_history_batches = False
         self._pending_lazy_cards.clear()
         self._lazy_batch_timer_active = False
+        # 🐛 清空聊天区 = 会话上下文已切换，必须复位底部跟随。
+        # 否则上一个会话遗留的 away=True 会让新会话首屏停在历史中间。
+        self._reset_bottom_follow()
         # ★ B4：清空聊天区 = 本窗口已渲染卡片数归零（_batch_cards 由调用方重建）
         self._sync_global_rendered_pages(0)
         # 先收集所有 widget（不能在迭代中修改 layout），再统一处理
@@ -11936,6 +12075,9 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 按顺序分配到 _batch_cards，同步更新每个 card 的 _message_index
         """
         new_len = len(self._message_batch)
+        # 🛡️ 布局即将按存活卡片重建，占位必须一并摘掉：否则它们会留在
+        # chat_layout 里占位，且与重建后的 _batch_cards 索引错位。
+        self._clear_batch_placeholders(remove_from_layout=True)
         new_batch_cards: List[Optional[List[MessageCard]]] = [None] * new_len
 
         # 收集 layout 中所有存活的非 welcome MessageCard（按 layout 顺序）
@@ -12103,6 +12245,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
 
             # 需要重新创建
+            # 🐛 等高占位归还：卸载时留过占位的批次必须在其原位重建，
+            # 否则新卡片会被追加到末尾 → 消息顺序错乱。
+            ph_index = self._take_batch_placeholder(global_batch_index)
+            if ph_index is not None:
+                insert_index = ph_index
             cards = []
             if role == "user":
                 content = self._sanitize_user_message_for_display(batch[0].get("content", ""))
@@ -12252,9 +12399,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 批次全部渲染完成，统一更新滚动
         # 🐛 修复：用户已主动滚离底部时禁止在此强制置底——否则向上滚动
         # 到顶加载历史批次时，懒渲染完成会把视口拉回底部（滚轮自动置底回归）。
-        if self._loading_session and not self._user_intentionally_away_from_bottom:
+        if self._loading_session and self._should_follow_bottom():
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
-            if not self._initial_scroll_to_bottom or scroll_bar.value() >= scroll_bar.maximum() - 50:
+            if not self._initial_scroll_to_bottom or self._is_view_at_bottom():
                 scroll_bar.setValue(scroll_bar.maximum())
                 self._initial_scroll_to_bottom = True
 
@@ -13225,7 +13372,9 @@ class OpenAIChatToolWindow(ToolWindow):
         setup_user_card_signals(card, self._delete_message, self._undo_from_message, self._on_code_action)
 
         self._add_chat_widget(card, insert_index=insert_index)
-        if scroll and not self._suspend_auto_scroll:
+        # 🐛 补 away 守卫：此前只看 _suspend_auto_scroll，用户正在阅读历史时
+        # 任何一次新卡片插入（含团队成员消息回填）都会把视口拽到底。
+        if scroll and not self._suspend_auto_scroll and self._should_follow_bottom():
             self._scroll_to_bottom()
 
         # 使用辅助函数后处理
@@ -13285,7 +13434,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         if custom_widget is not None:
             self._add_chat_widget(custom_widget, insert_index=insert_index)
-            if scroll and not self._suspend_auto_scroll:
+            if scroll and not self._suspend_auto_scroll and self._should_follow_bottom():
                 self._scroll_to_bottom()
             return custom_widget
 
@@ -13319,7 +13468,10 @@ class OpenAIChatToolWindow(ToolWindow):
             and any(isinstance(t, dict) and t.get("status") != "completed" for t in self._latest_todos)
         ):
             card.update_todo_list(self._latest_todos)
-        if scroll and not self._suspend_auto_scroll:
+        # 🐛 这是流式输出期间最热的强制滚底点（`_append_assistant_message`）：
+        # 每个工具轮次都会新建 assistant 卡片。此前无条件置底，用户上滚读历史时
+        # 只要后台有工具回调就会被拽回。纳入统一守卫。
+        if scroll and not self._suspend_auto_scroll and self._should_follow_bottom():
             self._scroll_to_bottom()
         return card
 
@@ -13928,12 +14080,15 @@ class OpenAIChatToolWindow(ToolWindow):
             if value < scroll_bar.maximum():
                 self._bottom_anchor_deadline = 0.0
                 self._bottom_anchor_timer.stop()
-        # 检测用户是否主动滚离底部（距离底部超过 30px）；
-        # 滚回底部附近时复位，保证 away 标志状态机闭合（置 True 处见上）
-        if value < scroll_bar.maximum() - 30:
-            self._user_intentionally_away_from_bottom = True
-        elif scroll_bar.maximum() > 0:
+        # away 状态机 —— 全项目**唯一**的置/复位点，阈值统一走 AT_BOTTOM_TOLERANCE。
+        # 程序置底（setValue(maximum)）会同步触发本回调 → 自动复位 away，
+        # 所以 `_do_scroll_to_bottom` 里不需要（也绝不能再）手动复位。
+        # 旧实现 `elif scroll_bar.maximum() > 0` 在「内容不足一屏」(maximum==0)
+        # 时不复位，会把 away 永久卡在 True —— 这里用 _is_view_at_bottom 覆盖。
+        if self._is_view_at_bottom():
             self._user_intentionally_away_from_bottom = False
+        else:
+            self._user_intentionally_away_from_bottom = True
         if value <= self._history_load_threshold:
             self._load_more_history_batches()
         # 滚动时复用单个防抖定时器，避免堆积大量 singleShot 回调
@@ -15276,6 +15431,77 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[_on_code_action] 异常: {e}")
 
+    def _is_view_at_bottom(self, tolerance: int = AT_BOTTOM_TOLERANCE) -> bool:
+        """视口是否贴在底部（全项目唯一权威判定）。
+
+        Args:
+            tolerance: 距底部多少 px 内算「贴底」，默认 `AT_BOTTOM_TOLERANCE`。
+
+        Returns:
+            True = 视口在底部附近（或内容不足一屏，无处可滚）。
+        """
+        scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        return scroll_bar.maximum() - scroll_bar.value() <= tolerance
+
+    def _should_follow_bottom(self) -> bool:
+        """程序是否应该把视口拽回底部。
+
+        语义：用户**明确**滚离底部阅读历史时不跟随；除此之外（含视口本来就贴底、
+        用户刚发送消息、内容不足一屏）都跟随。
+
+        ⚠️ 所有自动滚底调用点都必须先过这道守卫。此前多处绕过它（见
+        `_do_scroll_to_bottom` / `_ensure_at_bottom` 的修改记录），正是
+        「流式输出时无法自由阅读」的根因。
+        """
+        if not self._user_intentionally_away_from_bottom:
+            return True
+        # 兜底：away 标志与实际位置不一致时以实际位置为准，避免标志卡死
+        return self._is_view_at_bottom()
+
+    def _scroll_to_bottom_if_following(self):
+        """延迟兜底滚底：只有用户仍在跟随底部时才真的滚。
+
+        供 `QTimer.singleShot` 直接连接 —— 兜底触发时用户可能已经上滚，
+        此时再滚一次就是纯粹的打断。
+        """
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
+
+    def _reset_bottom_follow(self):
+        """用户明确表达「我要看最新内容」→ 恢复自动跟随。
+
+        调用点：用户点击发送 / 会话加载 / 清空聊天区。不在这里复位的话，
+        用户上滚看过历史后再发消息，新回复会因为 away 守卫而不滚底
+        —— 表现为「发了消息没反应」。守卫越强，这个复位点就越不能少。
+        """
+        self._user_intentionally_away_from_bottom = False
+
+    def _update_scroll_to_bottom_button(self):
+        """同步「回到底部」浮动胶囊的显隐。
+
+        由滚动条的 valueChanged（用户滚动）与 rangeChanged（内容高度变化）驱动：
+        后者覆盖「内容撑高把用户推离底部」这一场景 —— 此时 value 并没变，
+        只监听 valueChanged 会漏掉。
+        """
+        btn = getattr(self, "_scroll_to_bottom_button", None)
+        if btn is None:
+            return
+        try:
+            scroll_bar = self.chat_scroll_area.verticalScrollBar()
+            away = scroll_bar.maximum() - scroll_bar.value() > SCROLL_JUMP_SHOW_THRESHOLD
+            btn.set_visible_pref(away)
+        except RuntimeError:
+            pass
+
+    def _on_scroll_to_bottom_clicked(self):
+        """点击「回到底部」胶囊：恢复跟随并滚到底。
+
+        sticky 900ms 与懒渲染批次结束的 sticky 一致，覆盖后续卡片高度上报
+        把视口重新推离底部的那段窗口。
+        """
+        self._reset_bottom_follow()
+        self._scroll_to_bottom(sticky_ms=900)
+
     def _scroll_to_bottom(self, sticky_ms: int = 0):
         self._pending_scroll_to_bottom = True
         if sticky_ms > 0:
@@ -15297,7 +15523,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 再次设置确保卡片高度变化后仍在底部
         scroll_bar.setValue(max_val)
         self._pending_scroll_to_bottom = False
-        self._user_intentionally_away_from_bottom = False
+        # 🐛 原此处无条件 `self._user_intentionally_away_from_bottom = False`：
+        # 任何一次程序置底都会清空用户的「我在读历史」意图，于是守卫形同虚设
+        # （下一次 token 批/工具回调立刻把视口拽回）。away 只由两处驱动：
+        #   1. 用户真实滚动 → `_on_scroll_changed` 按 AT_BOTTOM_TOLERANCE 置/复位
+        #   2. 用户点击发送 / 切会话 / 清空 → `_reset_bottom_follow`
+        # 程序置底本身会触发 valueChanged → _on_scroll_changed → 自动复位 away，
+        # 因此这里不需要（也绝不能再）手动复位。
         if self._bottom_anchor_deadline > time.monotonic():
             self._bottom_anchor_timer.start()
         else:
@@ -15319,14 +15551,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 访问已释放的 chat_scroll_area 触发 RuntimeError
         if getattr(self, "_is_destroyed", False):
             return
-        # 如果用户已经主动滚离底部，不再强制拉回。
-        # 🆕 例外：流式刚结束的 2s 宽限期内仍强制滚底（防止用户流式中途上滚
-        # 导致结束时的兜底滚底被跳过 —— 用户意图此时通常仍是"看最新回复"，
-        # 2s 后恢复拦截，避免打断用户读取历史）。
-        if self._user_intentionally_away_from_bottom and time.monotonic() >= self._stream_finished_grace_until:
+        # 🐛 原此处有「流式结束 2s 宽限期」例外：用户流式中途上滚后，
+        # 结束时的兜底滚底会强行覆盖其阅读位置。用户意图已由
+        # `_user_intentionally_away_from_bottom` 精确表达，不需要宽限期来猜。
+        if not self._should_follow_bottom():
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        if scroll_bar.value() < scroll_bar.maximum() - 20:
+        if not self._is_view_at_bottom():
             scroll_bar.setValue(scroll_bar.maximum())
             # 懒渲染可能需要更长时间，延迟再次检查
             # 如果还有重试次数，即使 bottom anchor 过期也继续重试
@@ -15388,17 +15619,18 @@ class OpenAIChatToolWindow(ToolWindow):
                     break
 
         # 判断规则
-        # 🐛 away 守卫：流式中用户已主动滚离底部时不再强制拽回（位置保持）。
-        # is_last_card 保留原语义（初始加载完成保证到底），不受守卫影响。
-        if is_last_card or (self._is_streaming and not self._user_intentionally_away_from_bottom):
+        # 🐛 原实现里 `is_last_card` 完全绕过 away 守卫：卡片高度变化回调在流式中
+        # 每 ~80ms 一次，最后一张卡几乎恒为真 → 用户上滚后必然被拽回。
+        # 现在「是否跟随底部」由 `_should_follow_bottom()` 单点裁决：
+        #   - 用户未滚离底部（含刚发送、内容不足一屏）→ 跟随
+        #   - 用户明确滚离 → 不跟随，位置保持
+        # is_last_card 只影响「初始加载完成必须到底」这一类一次性场景，同样纳入守卫，
+        # 因为「用户正在读历史时又有新卡片渲染完成」不应当抢走视口。
+        if self._should_follow_bottom() and (is_last_card or self._is_streaming):
             self._scroll_to_bottom()
-        else:
-            scroll_bar = self.chat_scroll_area.verticalScrollBar()
-            max_val = scroll_bar.maximum()
-            current_val = scroll_bar.value()
-            # 如果滚动条已经在底部附近 → 滚底（严格阈值，避免误触发）
-            if max_val - current_val < 20:
-                self._scroll_to_bottom()
+        elif self._is_view_at_bottom():
+            # 视口已经在底部附近 → 补一次滚底，吸收卡片高度增量（阈值统一）
+            self._scroll_to_bottom()
 
         sender._content_just_loaded = False
 
@@ -15802,6 +16034,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._session_switched = False
         # 🛡️ 压缩守卫同步清零：新对话轮次开始，旧 worker 快照已无意义
         self._post_compact_guard = False
+        # 🐛 用户主动发消息 = 明确表达「我要看最新内容」，必须恢复底部跟随。
+        # 否则：用户上滚看过历史后再发消息，新回复会被 away 守卫拦住不滚底，
+        # 表现为「发了消息没反应」。守卫越强，这个复位点就越不能少。
+        self._reset_bottom_follow()
 
         # 独占模式拦截已移除（用户决策 2026-08-21）：同新建会话——其他标签页
         # 对话不受 autoloop 运行影响（运行卡仅物理覆盖发起 tab 的对话区）。
@@ -17136,7 +17372,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 echarts=echarts_val,
             )
 
-        self._scroll_to_bottom()
+        # 🐛 工具结果回填是流式期间最高频的强制滚底源（长任务一次跑十几轮工具，
+        # 每轮一次），此前完全不看用户位置 → 「强制滚动太多」的主要来源之一。
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
 
         # 字段驱动：任何工具结果携带 diff 时实时更新差异统计（插件声明，主程序不写死工具名）
         if diff_val:
@@ -17279,16 +17518,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 流式完成后显式滚底：finish_streaming 触发的最后一次全量渲染
         # 替换 DOM 后，contentHeightChanged 可能因高度不变而不触发，或
         # 触发时 _is_streaming 已为 False 导致 _on_message_card_height_changed
-        # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
-        self._scroll_to_bottom()
-        # 🆕 流式结束滚底宽限 2s：此窗口内 _ensure_at_bottom 忽略用户滚离拦截
-        # （防止用户流式中途上滚导致兜底滚底被跳过）。
-        self._stream_finished_grace_until = time.monotonic() + 2.0
-        # 🆕 延迟兜底滚底：finish_streaming 的 WebEngine 全量重渲染是异步的，
-        # 立即滚底时 scrollbar.maximum() 可能仍是旧值；500ms/1000ms 两次
-        # 延迟兜底覆盖重渲染完成后的最终高度（长消息渲染可能更久）。
-        QTimer.singleShot(500, self._scroll_to_bottom)
-        QTimer.singleShot(1000, self._scroll_to_bottom)
+        # 不滚底。此处显式调用（内部有 50ms 定时器等待 WebEngine 布局完成）。
+        # 🐛 但必须过守卫：原实现无条件滚底 + 「流式结束 2s 宽限期」显式忽略
+        # away，用户流式中途上滚读历史后，结束瞬间必被拽回 —— 这是最被诟病的一处。
+        # 现在改为「用户已离开底部就保持位置」，等用户自己滚回底部再恢复跟随。
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
+            # 🆕 延迟兜底滚底：finish_streaming 的 WebEngine 全量重渲染是异步的，
+            # 立即滚底时 scrollbar.maximum() 可能仍是旧值；500ms/1000ms 两次
+            # 延迟兜底覆盖重渲染完成后的最终高度（长消息渲染可能更久）。
+            # ⚠️ 兜底同样要守卫：用户可能在等待期间上滚去看别的内容。
+            QTimer.singleShot(500, self._scroll_to_bottom_if_following)
+            QTimer.singleShot(1000, self._scroll_to_bottom_if_following)
 
         # 🚀 [PERF] 拆分持久化：save 立即执行（快，仅序列化），flush 延迟执行
         # 原同步执行 save + flush 与 finish_streaming 的 WebEngine 重渲染连续阻塞主线程。
@@ -18033,7 +18274,8 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         new_card.update_content(str(content))
         new_card.finish_streaming()
-        self._scroll_to_bottom()
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
 
     def _hide_all_cards_for_question(self):
         """Question 卡片显示时，隐藏所有其他卡片（最高优先级）"""
@@ -19860,6 +20102,29 @@ class OpenAIChatToolWindow(ToolWindow):
             # 同时更新 BaseSettingsCard 的 tab 状态
             if hasattr(self._memory_card, "set_current_tab"):
                 self._memory_card.set_current_tab(default_tab)
+
+    def open_memory_card(self, tab_key: str = "entries"):
+        """打开（而非切换）当前页的长期记忆面板，并跳到指定页签
+
+        与 :meth:`_toggle_memory_card` 的唯一区别是**只开不关**：本方法给「一键直达」
+        类入口（对话页树的项目根「管理工作树」按钮）使用，点第二次不应该把面板收起。
+
+        Args:
+            tab_key: entries=条目记忆 / notes=项目笔记 / docs=关键文档
+                （工作树的增删与切换 UI 挂在 docs 页签里）
+        """
+        self._ensure_memory_card()
+        self._card_manager.show_card("memory", self._window_id)
+        # 内容由 _build_deferred_card_memory 惰性构建；用户提前点击时兜底立即构建
+        if getattr(self, "_memory_card_popup", None) is None:
+            self._build_deferred_card_memory()
+        popup = getattr(self, "_memory_card_popup", None)
+        if popup is not None and hasattr(popup, "switch_tab"):
+            popup._current_tab = None  # 置空，确保 switch_tab 不被幂等判等跳过
+            popup.switch_tab(tab_key)
+        card = getattr(self, "_memory_card", None)
+        if card is not None and hasattr(card, "set_current_tab"):
+            card.set_current_tab(tab_key)
 
     def _on_memory_card_saved(self, memories: list):
         """记忆卡片保存后的回调"""

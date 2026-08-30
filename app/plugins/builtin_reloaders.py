@@ -143,6 +143,13 @@ def _reload_ui(ctx: ReloadContext) -> Any:
         return True
     if not ctx.plugin.has_component("ui"):
         return False
+    # D9：ui 组件整类停用时只卸载、不重新挂载
+    from app.plugins.managers.plugin_manager import PluginManager
+
+    if not PluginManager.get_instance().is_component_enabled(ctx.plugin_name, "ui"):
+        UIPluginRegistry.get_instance().unload_plugin(ctx.plugin_name)
+        logger.info(f"[builtin_reloaders] ui 组件已停用，已卸载: {ctx.plugin_name}")
+        return True
     UIPluginRegistry.get_instance().reload_plugin(ctx.plugin_name, ctx.plugin.path)
     return True
 
@@ -190,8 +197,14 @@ def _reload_providers(ctx: ReloadContext) -> Any:
 
 
 def _reload_team_templates(ctx: ReloadContext) -> Any:
-    """team_templates 分支：懒加载，无缓存需失效 — 记日志即成功"""
-    logger.debug(f"[builtin_reloaders] team_templates for '{ctx.plugin_name}' (lazy)")
+    """team_templates 分支：无缓存可失效，读取时实时过滤
+
+    模板不驻留内存——TemplateManager.list_templates / load 每次都按
+    _template_sources() 现读磁盘并应用组件级 + 细项级过滤，因此开关本身
+    就是立即生效的，这里无需做任何事。返回 True 表示「该组件已处理」，
+    不代表有缓存被刷新。
+    """
+    logger.debug(f"[builtin_reloaders] team_templates for '{ctx.plugin_name}' (read-through, no cache)")
     return True
 
 

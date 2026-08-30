@@ -12,6 +12,7 @@ ICON_NAME_TO_FILE = {
     "pet": "pet.png",
     "question": "question.svg",
     "read": "read.svg",
+    "scroll_to_bottom": "scroll_to_bottom.svg",
     "Search": "Search.svg",
     "shell": "shell.svg",
     "slack": "slack.svg",

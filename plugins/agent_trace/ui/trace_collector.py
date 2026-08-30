@@ -32,9 +32,12 @@ from loguru import logger
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from .trace_models import (
+    GAP_CAP_S,
+    MIN_SPAN_S,
     EntryKind,
     TraceRecord,
     content_to_text,
+    estimate_tokens_text,
     infer_message_kind,
     is_real_user_message,
     message_label,
@@ -68,6 +71,8 @@ class TraceCollector(QObject):
         self._active_session_id: str = ""
         self._bound_backend: Optional[Any] = None
         self._bound_main_widget: Optional[Any] = None
+        # (消息序号, 文本长度) → token 数
+        self._token_cache: Dict[tuple, int] = {}
 
     # ──────────────────── 公共 API ────────────────────
 
@@ -139,6 +144,20 @@ class TraceCollector(QObject):
     def refresh(self) -> None:
         """外部驱动的一次全量同步（切回标签页时调用）。"""
         self._sync()
+
+    def reset(self) -> None:
+        """清空采集缓存并重新投影 — 对应 UI 顶栏「清除」按钮。
+
+        只清 **运行时缓存**（tool timing / stream timing / in-flight 尾巴），
+        **不动 session.messages**：消息历史是事实源，清了就没了。
+        清完立即从 messages 重新投影并 emit recordsReset。
+        """
+        self._records = []
+        self._tail = []
+        self._timing.clear()
+        self._streams.clear()
+        self._stream_base = 0
+        self._sync(emit_reset=True)
 
     def _current_session(self) -> Optional[Any]:
         be = self._bound_backend
@@ -220,6 +239,7 @@ class TraceCollector(QObject):
         self._streams.clear()
         self._stream_base = 0
         self._active_session_id = ""
+        self._token_cache.clear()
 
     def _reset_runtime_state(self, sid: str) -> None:
         self._clear_all()
@@ -256,6 +276,10 @@ class TraceCollector(QObject):
             label = message_label(msg)
             raw_text = content_to_text(msg.get("content"))
             start = ts_list[i]
+            # 毫秒时间戳优先：``timestamp`` 只有秒级精度，同秒注入的多条消息
+            # 无法区分先后（hook 连发时尤其明显）→ ts_ms 由主程序写入（见
+            # chat_session / backend / chat_worker 三处写入点）。
+            start = _epoch_from_ts_ms(msg.get("ts_ms")) or start
             # 消息写入本身是瞬时事件：默认 end=0（时长 0）。
             # ⚠️ 不能用「下一条时刻 − 本条时刻」当存续间隔 —— 用户隔 1 小时
             # 再问下一条，上一条消息就会显示 1 小时时长（闲置时间被算成时长）。
@@ -265,10 +289,28 @@ class TraceCollector(QObject):
             meta: Dict[str, Any] = {}
             is_error = False
 
+            if kind == EntryKind.ASSISTANT:
+                # 真实 token 用量优先：worker 会把 API 响应的 usage 落成
+                # msg["token_usage"] = {"input","output","total"}（chat_worker）。
+                # 只在第一条 assistant 上写，所以其余条目仍回退到估算。
+                usage = msg.get("token_usage")
+                if isinstance(usage, dict):
+                    total = usage.get("total") or (
+                        (usage.get("input") or 0) + (usage.get("output") or 0)
+                    )
+                    if isinstance(total, (int, float)) and total > 0:
+                        meta["tokens"] = int(total)
+                        meta["tokens_exact"] = True
+
             if kind == EntryKind.TOOL:
                 tool_call_id = msg.get("tool_call_id") or ""
                 meta["tool_call_id"] = tool_call_id
+                # 分阶段耗时（perm=权限含弹窗等待 / exec=执行 / other / total）
+                phases = msg.get("trace_phases")
+                if isinstance(phases, dict) and phases:
+                    meta["phases"] = dict(phases)
                 t = self._timing.get(tool_call_id)
+                args_text = ""
                 if t:
                     # 实时信号给的精确起止优先
                     if t.get("start"):
@@ -277,39 +319,67 @@ class TraceCollector(QObject):
                         end = t["end"]
                     is_error = not t.get("success", True)
                     meta["name"] = t.get("name") or label
-                    if t.get("args"):
-                        meta["arguments"] = t["args"]
+                    args_text = t.get("args") or ""
                     if t.get("result"):
                         meta["result"] = t["result"]
-                        raw_text = f"{t['args'] or ''}\n\n── result ──\n{t['result']}".strip()
                 else:
                     meta["name"] = msg.get("name") or msg.get("tool_name") or "tool"
+                if end <= 0 and isinstance(phases, dict) and phases:
+                    # 没有实时 end（重新加载会话 / 历史消息）→ 用持久化的总耗时
+                    # 反推起止：ts_ms = 结果返回时刻，起点 = 它 − total。
+                    total = phases.get("total")
+                    if isinstance(total, (int, float)) and total > 0 and start > 0:
+                        end = start
+                        start = start - total / 1000.0
+                if not args_text:
+                    # 实时参数是占位（流式未接收完，见 _is_placeholder_args）或
+                    # 根本没有 timing → 用**落盘消息**的 arguments 兜底：
+                    # tool 消息写入时参数必然已解析完整，这才是最可靠的来源。
                     args_obj = msg.get("arguments")
                     if args_obj:
                         try:
-                            meta["arguments"] = (
+                            args_text = (
                                 json.dumps(args_obj, ensure_ascii=False) if not isinstance(args_obj, str) else args_obj
                             )
                         except Exception:
-                            meta["arguments"] = str(args_obj)
+                            args_text = str(args_obj)
+                if args_text:
+                    meta["arguments"] = args_text
+                if meta.get("result"):
+                    raw_text = f"{args_text}\n\n── result ──\n{meta['result']}".strip()
                 preview = self._tool_preview(meta.get("arguments") or "", raw_text)
 
             elif kind == EntryKind.ASSISTANT:
                 if msg.get("tool_calls"):
                     meta["has_tool_calls"] = True
-                # 第 k 条 assistant 消息 ↔ 第 (k - _stream_base) 个实时流；
-                # k < base 的是历史消息（collector 出生前落盘），无流可配
-                s = None
-                if assistant_seq >= self._stream_base:
-                    si = assistant_seq - self._stream_base
-                    if si < len(self._streams):
-                        s = self._streams[si]
+                # ① 优先用 worker 落盘的真实耗时（elapsed_ms，毫秒）。
+                #    这样**重新加载会话后耗时依然在**——实时信号测出来的
+                #    值只存在于内存，重启即丢。
+                #    ⚠️ ts_ms 是「响应完成」时刻（消息写入时打点），
+                #    所以起点 = 完成时刻 − 耗时，终点 = 完成时刻。
+                llm_ms = msg.get("elapsed_ms")
+                if isinstance(llm_ms, (int, float)) and llm_ms > 0:
+                    meta["elapsed_ms"] = float(llm_ms)
+                    if start > 0:
+                        end = start
+                        start = start - llm_ms / 1000.0
+                else:
+                    # ② 兜底：实时流配对。⚠️ stream_started/stream_finished 是
+                    #    **整个 worker 线程**级别的（executor.py 在 worker.start()
+                    #    后只发一次），一轮含多次工具迭代时只能测到「整轮总时长」，
+                    #    第一条 assistant 会虚高、其余拿不到值 —— 只在没有
+                    #    elapsed_ms 的老消息上用它。
+                    s = None
+                    if assistant_seq >= self._stream_base:
+                        si = assistant_seq - self._stream_base
+                        if si < len(self._streams):
+                            s = self._streams[si]
+                    if s:
+                        if s.get("start"):
+                            start = s["start"]
+                        if s.get("end"):
+                            end = s["end"]
                 assistant_seq += 1
-                if s:
-                    if s.get("start"):
-                        start = s["start"]
-                    if s.get("end"):
-                        end = s["end"]
                 preview = truncate(raw_text, 140) if raw_text.strip() else ""
                 if not preview and msg.get("tool_calls"):
                     names = []
@@ -330,6 +400,11 @@ class TraceCollector(QObject):
                 turn += 1
                 meta["turn_start"] = True
 
+            # token 占用（列表 Tokens 列）：优先用 worker 落盘的真实 usage，
+            # 没有才按字符估算并逐条缓存（key = 消息序号 + 文本长度）
+            if not meta.get("tokens"):
+                meta["tokens"] = self._tokens_for(i, raw_text)
+
             records.append(
                 TraceRecord(
                     kind=kind,
@@ -349,14 +424,17 @@ class TraceCollector(QObject):
         # 合成 SYSTEM 条目：DriFox 的系统提示词不在 session.messages 里
         # （引擎构建请求时由 context_builder 动态拼装），只存在
         # session.system_prompt 属性上 → 不合成的话轨迹里永远看不到。
-        if system_prompt and not any(r.kind == EntryKind.SYSTEM for r in records):
+        # ⚠️ 条件只看「有没有消息」而不是「有没有 system_prompt」：SYSTEM 行是
+        # 详情面板 System Prompt / Tools Schema 的唯一入口，会话即使没设系统
+        # 提示词也应能查看当前挂载的工具 schema。
+        if records and not any(r.kind == EntryKind.SYSTEM for r in records):
             head_ts = records[0].start_ts if records else 0.0
             records.insert(
                 0,
                 TraceRecord(
                     kind=EntryKind.SYSTEM,
                     label="System Prompt",
-                    preview=truncate(system_prompt, 140),
+                    preview=truncate(system_prompt, 140) if system_prompt else "（无系统提示词 · 可查看 Tools Schema）",
                     raw=system_prompt,
                     source="session.system_prompt",
                     start_ts=head_ts,
@@ -364,7 +442,78 @@ class TraceCollector(QObject):
                     turn_no=0,
                 ),
             )
+        # ⚠️ 必须在 SYSTEM 合成**之后**再算占用终点：SYSTEM 插在最前面，
+        # 它会成为原第一条的「下一条」，直接影响第一条的 span。
+        self._fill_span_ends(records)
         return records
+
+    @staticmethod
+    def _fill_span_ends(records: List[TraceRecord]) -> None:
+        """给**没有真实耗时**的条目补占用终点 → 时间线连贯。
+
+        规则（写 ``meta["span_end"]`` / ``meta["span_capped"]``）：
+        - 有真实耗时（TOOL/ASSISTANT 由实时信号回填）→ 用 end_ts，不动；
+        - 否则占用 = 到下一条起点的间隔，封顶 ``GAP_CAP_S``（用户思考很久不该
+          把条带拉爆），封顶时打 ``span_capped`` 标记 → UI 显示 ``≥3.00 s``；
+        - ⚠️ 间隔为 0（**同秒注入**，消息时间戳只有秒级精度）就是瞬时事件，
+          span = 0。早期版本保底 80ms，结果时长列只剩「80ms / 3s」两个怪值。
+        """
+        for i, rec in enumerate(records):
+            if rec.start_ts <= 0:
+                continue
+            if rec.end_ts > rec.start_ts:
+                rec.meta["span_end"] = rec.end_ts
+                rec.meta.pop("span_capped", None)
+                continue
+            nxt = records[i + 1] if i + 1 < len(records) else None
+            gap = 0.0
+            if nxt is not None and nxt.start_ts > rec.start_ts:
+                gap = min(nxt.start_ts - rec.start_ts, GAP_CAP_S)
+            rec.meta["span_end"] = rec.start_ts + max(gap, MIN_SPAN_S)
+            if gap >= GAP_CAP_S:
+                rec.meta["span_capped"] = True
+            else:
+                rec.meta.pop("span_capped", None)
+
+    def _tokens_for(self, msg_index: int, text: str) -> int:
+        """带缓存的 token 估算。
+
+        tiktoken 编码不算便宜，而 ``_sync`` 会随 hook 高频触发 → 必须缓存。
+        key 用 ``(消息序号, 文本长度)``：消息内容改写时长度几乎必然变化。
+        """
+        if not text:
+            return 0
+        key = (msg_index, len(text))
+        hit = self._token_cache.get(key)
+        if hit is not None:
+            return hit
+        value = estimate_tokens_text(text)
+        if len(self._token_cache) > 4000:  # 防止长会话无限增长
+            self._token_cache.clear()
+        self._token_cache[key] = value
+        return value
+
+    @staticmethod
+    def _result_success(result: Any) -> bool:
+        """从工具结果里判定成功与否。
+
+        引擎回调给的 ``result`` 形态不固定（dict / 带 success 属性的对象 /
+        纯文本），只能逐个探测；探测不到就当成功（宁可不标红，也不误报）。
+        """
+        if isinstance(result, dict):
+            for key in ("success", "ok", "is_error"):
+                if key in result:
+                    v = result[key]
+                    return (not bool(v)) if key == "is_error" else bool(v)
+            if result.get("error"):
+                return False
+            return True
+        for attr in ("success", "ok"):
+            v = getattr(result, attr, None)
+            if isinstance(v, bool):
+                return v
+        err = getattr(result, "error", None)
+        return not bool(err)
 
     @staticmethod
     def _tool_preview(args_text: str, raw_text: str) -> str:
@@ -390,12 +539,30 @@ class TraceCollector(QObject):
     # ──────────────────── 实时信号 → timing 表 / tail ────────────────────
 
     def _on_tool_call_started(self, tool_call_id: str, tool_name: str, arguments: Dict[str, Any]) -> None:
-        if not tool_call_id or tool_call_id in self._timing:
+        """工具开始 —— 同一个 tool_call_id 会来**两次**（见下方 ⚠️）。
+
+        ⚠️ worker 在流式参数**还没接收完**时就先发一次预览，arguments 是占位
+        字典 ``{"_status": "loading"}``（chat_worker.py:3452），真实参数在
+        ``_execute_tools_*`` 里解析完整后再发一次。旧代码用
+        ``if tool_call_id in self._timing: return`` 直接挡掉第二次 → 所有工具的
+        入参永远显示成 ``{"_status": "loading"}``，且计时起点早于真实执行。
+        """
+        if not tool_call_id:
             return
-        try:
-            args_text = json.dumps(arguments, ensure_ascii=False) if arguments else ""
-        except Exception:
-            args_text = str(arguments or "")
+
+        placeholder = _is_placeholder_args(arguments)
+        args_text = _dump_arguments(arguments)
+
+        existing = self._timing.get(tool_call_id)
+        if existing is not None:
+            # 第二次到达：参数已解析完整 → 覆盖占位并重起计时（真实执行起点）
+            if not placeholder:
+                existing["args"] = args_text
+                existing["start"] = time.time()
+                existing.pop("args_placeholder", None)
+                self._update_tail_args(tool_call_id, args_text)
+            return
+
         self._timing[tool_call_id] = {
             "start": time.time(),
             "end": 0.0,
@@ -404,26 +571,54 @@ class TraceCollector(QObject):
             "args": args_text,
             "result": "",
         }
+        if placeholder:
+            self._timing[tool_call_id]["args_placeholder"] = True
         self._append_tail(
             TraceRecord(
                 kind=EntryKind.TOOL,
                 label=tool_name or "tool",
-                preview=args_text or "（调用中…）",
+                preview=_pending_preview(args_text, placeholder),
                 raw=args_text,
                 source=f"tool · {tool_name}",
                 start_ts=time.time(),
                 is_pending=True,
-                meta={"tool_call_id": tool_call_id},
+                meta={
+                    "tool_call_id": tool_call_id,
+                    **({"args_placeholder": True} if placeholder else {}),
+                },
             )
         )
 
-    def _on_tool_result_received(self, tool_call_id: str, name: str, result: Any, success: bool) -> None:
+    def _update_tail_args(self, tool_call_id: str, args_text: str) -> None:
+        """真实参数到达后，同步刷新 in-flight 尾巴上那条记录（就地改，不重建列表）。"""
+        for rec in self._tail:
+            if rec.meta.get("tool_call_id") != tool_call_id:
+                continue
+            rec.meta.pop("args_placeholder", None)
+            rec.raw = args_text
+            rec.preview = _pending_preview(args_text, False)
+            break
+        self._set_tail(self._tail)
+
+    def _on_tool_result_received(self, tool_call_id: str, name: str, arguments: Any, result: Any) -> None:
+        """工具结果回调 —— 签名与引擎侧一致 ``(id, name, arguments, result)``。
+
+        ⚠️ 旧签名是 ``(id, name, result, success)``，与 backend 实际 emit 的参数
+        对不上（第 3 位是 arguments、第 4 位是 result 对象），success 只能自己
+        从 result 里探测（:meth:`_result_success`）。
+        """
+        success = self._result_success(result)
         t = self._timing.get(tool_call_id)
         if t is not None:
             t["end"] = time.time()
-            t["success"] = bool(success)
+            t["success"] = success
             t["result"] = content_to_text(result)
-        # 落盘消息通常在 result 信号之后写入，这里先清尾巴，_sync 由
+            # 结果回调带的 arguments 是解析后的真实值，可用来补齐；占位字典跳过
+            if arguments and not _is_placeholder_args(arguments):
+                text = _dump_arguments(arguments)
+                if text and not t.get("args"):
+                    t["args"] = text
+        # 落盘消息通常在 result 回调之后写入，这里先清尾巴，_sync 由
         # _hook_messages_updated 驱动；若已落盘则立即同步回填。
         self._set_tail([r for r in self._tail if r.meta.get("tool_call_id") != tool_call_id])
         if t is None:
@@ -431,7 +626,7 @@ class TraceCollector(QObject):
             self._timing[tool_call_id or f"anon-{time.time()}"] = {
                 "start": 0.0,
                 "end": time.time(),
-                "success": bool(success),
+                "success": success,
                 "name": name or "tool",
                 "args": "",
                 "result": content_to_text(result),
@@ -463,6 +658,50 @@ class TraceCollector(QObject):
 
     def _append_tail(self, rec: TraceRecord) -> None:
         self._set_tail(self._tail + [rec])
+
+
+def _is_placeholder_args(arguments: Any) -> bool:
+    """是否「参数还没接收完」的占位字典。
+
+    worker 在流式阶段会先发两类占位（chat_worker.py）：
+    - ``{"_status": "loading"}`` / ``{"_status": "loading", "_args_len": N}`` —— 接收中
+    - ``{"_raw_args": "...", "_status": "parse_failed"}`` —— 解析失败，但带原始截断
+    两者都**不是真实入参**，不能直接展示在 Request 面板里。
+    """
+    return isinstance(arguments, dict) and "_status" in arguments
+
+
+def _dump_arguments(arguments: Any) -> str:
+    """参数序列化成可展示文本；占位字典只保留有信息量的 ``_raw_args``。"""
+    if arguments is None:
+        return ""
+    if _is_placeholder_args(arguments):
+        raw = arguments.get("_raw_args")
+        return str(raw) if raw else ""
+    try:
+        return json.dumps(arguments, ensure_ascii=False) if not isinstance(arguments, str) else arguments
+    except Exception:
+        return str(arguments)
+
+
+def _pending_preview(args_text: str, placeholder: bool) -> str:
+    """in-flight 行的预览文案。"""
+    if args_text:
+        return args_text
+    return "（正在接收参数…）" if placeholder else "（调用中…）"
+
+
+def _epoch_from_ts_ms(value: Any) -> Optional[float]:
+    """毫秒时间戳 → epoch 秒；非法/缺失返回 None。
+
+    ``timestamp`` 字段只有秒级精度，同秒注入的多条消息排不出先后，所以主程序
+    额外写了毫秒级 ``ts_ms``。这里兼容秒级误写（值 < 1e11 当秒处理）。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value <= 0:
+        return None
+    return float(value) / 1000.0 if value > 1e11 else float(value)
 
 
 class TraceCollectorHub(QObject):

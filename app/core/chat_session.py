@@ -13,6 +13,7 @@ ChatSession & SessionManager - 会话管理模块
 - 压缩合并：支持多轮对话的历史压缩合并（保留摘要或固定尾部）
 """
 
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -96,6 +97,9 @@ class ChatSession:
             "role": "assistant",
             "content": content,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            # 毫秒级时间戳：``timestamp`` 只有秒级精度，同秒连发的多条消息
+            # 排不出先后（轨迹/耗时分析需要）。消费方：agent_trace 插件。
+            "ts_ms": int(time.time() * 1000),
         }
         if model_name:
             msg["model_name"] = model_name
@@ -107,7 +111,12 @@ class ChatSession:
 
     def add_user_message(self, content, **kwargs):
         """添加用户消息，支持 str 和 list（multimodal content）"""
-        msg = {"role": "user", "content": content, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        msg = {
+            "role": "user",
+            "content": content,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ts_ms": int(time.time() * 1000),  # 毫秒级，同秒连发时用于排序（见上）
+        }
         if kwargs.get("params"):
             msg["params"] = kwargs["params"]
         hook_event = kwargs.get("_hook_event")
