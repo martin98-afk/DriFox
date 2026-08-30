@@ -328,3 +328,54 @@ def test_clear_batch_placeholders(qapp):
     win._clear_batch_placeholders(remove_from_layout=True)
     assert win._batch_placeholders == {}
     assert layout.count() == 1  # 只剩原来那张 card，占位已摘掉
+
+
+# ─── 主题切换刷新 ───────────────────────────────────────────────
+
+
+def test_theme_changed_event_refreshes_button(qapp):
+    """回归：按钮必须靠 EV_THEME_CHANGED 刷新，光注册 refresh_target 收不到
+
+    🐛 主程序主题切换走 `main_widget._execute_batched_theme_refresh`，它只做
+    Colors.refresh() + theme_manager.on_theme_changed() + per-window
+    `_apply_runtime_ui_settings()`，**从不调用 theme_manager.dispatch_refresh()**
+    → 注册进 `_refresh_targets` 的 widget 一个都收不到 refresh_theme()。
+    （main_widget.py 的批量刷新注释里也点明了这一点。）
+    """
+    from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+    from app.utils.design_tokens import Colors
+    from app.utils.theme_manager import theme_manager
+    from app.widgets.scroll_to_bottom_button import ScrollToBottomButton
+
+    _win, container, _layout = _make_placeholder_window()
+    btn = ScrollToBottomButton(container, anchor=None, on_click=None)
+    before = btn.styleSheet()
+
+    # 订阅必须真实存在（模块级只订阅一次）
+    assert UIEventBus.get_instance().subscriptions().get(EV_THEME_CHANGED, 0) >= 1
+
+    saved = (Colors.CARD_BG, Colors.BORDER, Colors.HOVER_BG)
+    try:
+        Colors.CARD_BG = "rgba(250, 250, 250, {alpha})"
+        Colors.BORDER = "#dddddd"
+        Colors.HOVER_BG = "rgba(0, 0, 0, 0.12)"
+        # 模拟主程序主题切换：Colors 刷新 + on_theme_changed（内部 publish 事件）
+        theme_manager.on_theme_changed()
+        assert btn.styleSheet() != before
+        assert "#dddddd" in btn.styleSheet()
+    finally:
+        Colors.CARD_BG, Colors.BORDER, Colors.HOVER_BG = saved
+        theme_manager.on_theme_changed()
+
+
+def test_apply_style_skips_when_signature_unchanged(qapp):
+    """签名未变时不重复渲染 SVG（按钮每次浮出都会调 _apply_style）"""
+    from app.widgets.scroll_to_bottom_button import ScrollToBottomButton
+
+    _win, container, _layout = _make_placeholder_window()
+    btn = ScrollToBottomButton(container, anchor=None, on_click=None)
+    sig = btn._style_sig
+    btn._apply_style()
+    assert btn._style_sig == sig  # 没变 → 没重刷
+    btn._apply_style(force=True)
+    assert btn._style_sig == sig  # 强制重刷后签名依然一致

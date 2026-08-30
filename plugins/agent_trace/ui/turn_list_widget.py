@@ -1,25 +1,27 @@
 # -*- coding: utf-8 -*-
-"""agent_trace.TurnListWidget — 中央条目列表（对齐 DeepSeek Harness）。
+"""agent_trace.TurnListWidget — 中央条目表格（对齐 Chrome DevTools Network）。
 
-实现要点：
-- ``QListWidget`` + 自定义 ``QStyledItemDelegate`` 自绘行（无动态 widget 时序坑）。
-- **类型徽章**：圆角小块 + 类型色文字 + 12% 透明类型色底（deepseek 风格）。
-  徽章宽度按最长标签（ASSISTANT）以 QFontMetrics 实测，杜绝文字被裁。
-- **右侧列语义**：TOOL / ASSISTANT 显示精确时长；SYSTEM / USER / CONTEXT
-  显示绝对时间（消息类 hook 同秒注入时长的 0ms 满屏没有信息量）。
-- **字体跟随系统设置**：ctx.font_size 是「已应用缩放的像素值」，一律
-  ``QFont.setPixelSize``（v3 曾误传给 QFont 当磅值 → 字体过大遮挡）。
-- **tail 增量化**（v3）：``set_tail`` 只增删尾部 in-flight 行，主列表 items
-  不再全量重建 → 修「历史记录一直在刷新」的滚动跳顶/闪烁。
-- 颜色一律 hex + :func:`with_alpha` 派生（禁 rgba 字符串，防黑块，坑 P022）。
+与旧版（纯 label + 时长两列）的差异：
+
+- **多列表格**：``Name | Type | Size | Time | Waterfall`` —— 与浏览器 Network
+  面板同构（Name/Status/Type/Size/Time/Waterfall）。
+- **Waterfall 列**：每行内嵌迷你甘特条，比例与顶部时间线共用同一 ``(t0, t1)``。
+- **列头可点击排序**：Size / Time / Type / Name（再点一次反向，第三次回到
+  时间序）。
+- **滚动条用主程序统一样式**（``get_unified_scrollbar_style``），不再用默认
+  系统滚动条。
+- 颜色一律走 :class:`ThemePalette`（QColor 已解析 rgba）—— 修深色主题下
+  次级文字变黑的历史 bug。
+- **tail 增量化**：``set_tail`` 只增删尾部 in-flight 行，主列表 items 不重建
+  → 不会滚动跳顶/闪烁。
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import QRect, QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PyQt5.QtCore import QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -36,98 +38,212 @@ from PyQt5.QtWidgets import (
 
 from .trace_models import (
     EntryKind,
+    ThemePalette,
     TraceRecord,
     format_duration,
+    format_tokens,
     kind_color,
     with_alpha,
 )
 
+# 类型过滤 chips（label 与 kind）
 FILTER_CHIPS = (
     ("all", "全部", None),
     ("system", "系统", EntryKind.SYSTEM),
     ("user", "用户", EntryKind.USER),
-    ("context", "上下文", EntryKind.CONTEXT),
+    ("context", "钩子", EntryKind.CONTEXT),
     ("assistant", "助手", EntryKind.ASSISTANT),
     ("tool", "工具", EntryKind.TOOL),
 )
 
-# 这些类型的行右侧显示精确时长；其余显示绝对时间
-DURATION_KINDS = (EntryKind.TOOL, EntryKind.ASSISTANT)
+# 列定义：(key, 标题, 默认宽, 对齐)
+# 全部列宽按「紧凑优先」调过：Waterfall 不再内嵌时长文字（Time 列已有），
+# 所以能从 190 压到 128；Size 列换成更短的 Tokens（占用）。
+_COLUMNS = (
+    ("name", "Name", 0, Qt.AlignLeft),  # 0 = 自适应
+    ("type", "Type", 78, Qt.AlignLeft),  # 实际宽由 set_type_width 按最长标签实测
+    ("tokens", "Tokens", 58, Qt.AlignRight),
+    ("time", "Time", 66, Qt.AlignRight),
+    ("waterfall", "Waterfall", 128, Qt.AlignLeft),
+)
+_PAD_L = 12
+_PAD_R = 12
+_HEADER_H = 28
+_FILTER_H = 36
 
-_MONO_FAMILY = "Cascadia Mono"
+
+class _Columns:
+    """列宽计算器 — 表头与行 delegate 共用，保证像素级对齐。"""
+
+    def __init__(self) -> None:
+        self.fixed = {k: w for k, _t, w, _a in _COLUMNS if w}
+        self.min_waterfall = 120
+
+    def set_type_width(self, width: int) -> None:
+        """Type 列宽按最长类型标签（ASSISTANT）实测，杜绝文字被裁。"""
+        self.fixed["type"] = max(64, width)
+
+    def name_w(self, total_w: int) -> int:
+        rest = sum(self.fixed.values())
+        return max(120, total_w - _PAD_L - _PAD_R - rest)
+
+    def waterfall_w(self, total_w: int) -> int:
+        w = self.fixed["waterfall"]
+        spare = total_w - (_PAD_L + _PAD_R + sum(v for k, v in self.fixed.items() if k != "waterfall") + 120)
+        if spare < w:
+            return max(self.min_waterfall, spare)
+        return w
+
+    def rect_of(self, key: str, total_w: int, y: int, h: int) -> QRect:
+        x = _PAD_L
+        for k, _t, _w, _a in _COLUMNS:
+            w = self.name_w(total_w) if k == "name" else (self.waterfall_w(total_w) if k == "waterfall" else self.fixed[k])
+            if k == key:
+                return QRect(x, y, w, h)
+            x += w
+        return QRect(x, y, 0, h)
 
 
-class _EntryDelegate(QStyledItemDelegate):
-    """自绘单条 entry 行（徽章 + 内容 + 右侧时间/时长）。
+class _HeaderWidget(QFrame):
+    """可点击排序的列头（Network 面板风格：底边线 + 排序箭头）。"""
 
-    列宽 / 行高按当前字体实测（set_base_font 时重算）→ 高 DPI / 大字号
-    下不遮挡。
-    """
+    sortChanged = pyqtSignal(str, bool)  # (column_key, descending)
 
-    def __init__(self, parent: QWidget = None) -> None:
+    _ORDER = ("name", "type", "tokens", "time")
+
+    def __init__(self, cols: _Columns, parent: QWidget = None) -> None:
         super().__init__(parent)
-        self._colors: Dict[str, Any] = {
-            "text": "#C8C8D0",
-            "text_secondary": "#8A8A94",
-            "text_dim": "#6E6E78",
-            "selected": "#7AA2F7",
-            "line": "#FFFFFF",
-        }
-        self._is_dark = True
-        self._base_px = 12
-        self._row_h = 28
-        self._badge_w = 78
-        self._meta_w = 78
-        self._turn_w = 80
-        self._apply_metrics()
+        self._cols = cols
+        self._pal = ThemePalette()
+        self._base_px = 13
+        self._sort_key: Optional[str] = None
+        self._desc = False
+        self.setFixedHeight(_HEADER_H)
+        self.setCursor(Qt.ArrowCursor)
 
-    # ── 字体 / 度量 ──
+    def set_palette(self, pal: ThemePalette, base_px: int) -> None:
+        self._pal = pal
+        self._base_px = base_px
+        # Type 列宽按最长标签实测（ASSISTANT），否则徽章文字会被裁掉
+        f = QFont(pal.font_family)
+        f.setPixelSize(max(9, base_px - 2))
+        f.setBold(True)
+        self._cols.set_type_width(QFontMetrics(f).horizontalAdvance("ASSISTANT") + 18)
+        self.update()
 
-    def _mono_font(self, delta_px: int = 0, bold: bool = False) -> QFont:
-        f = QFont(_MONO_FAMILY)
+    def set_sort(self, key: Optional[str], desc: bool) -> None:
+        self._sort_key, self._desc = key, desc
+        self.update()
+
+    def _font(self, bold: bool = False) -> QFont:
+        """列头用**系统 UI 字体**（不是等宽）：与主程序界面同一套字。"""
+        f = QFont(self._pal.font_family)
+        f.setPixelSize(max(9, self._base_px - 2))
+        f.setBold(bold)
+        return f
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        try:
+            p.setRenderHint(QPainter.TextAntialiasing, True)
+            p.setFont(self._font())
+            total = self.width()
+            for key, title, _w, align in _COLUMNS:
+                if key == "waterfall":
+                    w = self._cols.waterfall_w(total)
+                elif key == "name":
+                    w = self._cols.name_w(total)
+                else:
+                    w = self._cols.fixed[key]
+                x = _PAD_L
+                for k2, _t2, _w2, _a2 in _COLUMNS:
+                    if k2 == key:
+                        break
+                    x += (
+                        self._cols.name_w(total)
+                        if k2 == "name"
+                        else (self._cols.waterfall_w(total) if k2 == "waterfall" else self._cols.fixed[k2])
+                    )
+                rect = QRect(x, 0, w, self.height())
+                active = self._sort_key == key
+                p.setPen(QColor(self._pal.accent if active else self._pal.text_muted))
+                label = title
+                if active:
+                    label = f"{title} {'▼' if self._desc else '▲'}"
+                if key in self._ORDER and key != self._sort_key:
+                    p.setPen(QColor(self._pal.text_muted))
+                p.drawText(rect.adjusted(0, 0, -6 if align == Qt.AlignRight else 0, 0), align | Qt.AlignVCenter, label)
+            p.setPen(QPen(self._pal.line_at(30), 1))
+            p.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
+        finally:
+            p.end()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        total = self.width()
+        x = _PAD_L
+        for key, _t, _w, _a in _COLUMNS:
+            w = (
+                self._cols.name_w(total)
+                if key == "name"
+                else (self._cols.waterfall_w(total) if key == "waterfall" else self._cols.fixed[key])
+            )
+            if key in self._ORDER and x <= event.pos().x() < x + w:
+                if self._sort_key == key:
+                    if self._desc:
+                        self._sort_key, self._desc = None, False  # 第三次 → 回到时间序
+                    else:
+                        self._desc = True
+                else:
+                    self._sort_key, self._desc = key, key in ("tokens", "time")
+                self.sortChanged.emit(self._sort_key or "index", self._desc)
+                self.update()
+                return
+            x += w
+        super().mousePressEvent(event)
+
+
+class _RowDelegate(QStyledItemDelegate):
+    """自绘一行 entry（状态点 + Name + Type 徽章 + Size + Time + Waterfall）。"""
+
+    def __init__(self, cols: _Columns, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        self._cols = cols
+        self._pal = ThemePalette()
+        self._base_px = 13
+        self._bounds = (0.0, 1.0)
+
+    # ── 配置 ──
+
+    def set_palette(self, pal: ThemePalette, base_px: int) -> None:
+        self._pal = pal
+        self._base_px = max(10, min(24, base_px))
+
+    def set_bounds(self, t0: float, t1: float) -> None:
+        self._bounds = (t0, t1 if t1 > t0 else t0 + 1.0)
+
+    @property
+    def row_h(self) -> int:
+        return max(24, self._base_px + 13)
+
+    def _font(self, delta_px: int = 0, bold: bool = False) -> QFont:
+        """正文用**系统 UI 字体**（Name 列 / 类型徽章 / Turn 徽章）。"""
+        f = QFont(self._pal.font_family)
+        f.setPixelSize(max(9, self._base_px + delta_px))
+        f.setBold(bold)
+        return f
+
+    def _num_font(self, delta_px: int = 0, bold: bool = False) -> QFont:
+        """数字列（Size / Time / Waterfall）用等宽，保证右对齐时列位对齐。"""
+        f = QFont(self._pal.mono_family)
         f.setStyleHint(QFont.Monospace)
         f.setPixelSize(max(9, self._base_px + delta_px))
         f.setBold(bold)
         return f
 
-    def _apply_metrics(self) -> None:
-        """按当前字号实测列宽与行高。"""
-        bfm = QFontMetrics(self._mono_font(-2, bold=True))
-        self._badge_w = bfm.horizontalAdvance("ASSISTANT") + 16
-        mfm = QFontMetrics(self._mono_font(-2))
-        self._meta_w = max(mfm.horizontalAdvance("00:00:00"), mfm.horizontalAdvance("18m 31s")) + 16
-        self._turn_w = mfm.horizontalAdvance("Turn 999") + 12
-        self._row_h = max(26, self._base_px + 14)
-
-    def set_base_font(self, font: QFont) -> None:
-        px = font.pixelSize()
-        if px <= 0:
-            px = font.pointSizeF()
-            px = int(round(px * 4 / 3)) if px > 0 else 12  # pt → px 兜底
-        self._base_px = max(10, min(24, px))
-        self._apply_metrics()
-
-    # ── 主题 ──
-
-    def set_colors(self, colors: Dict[str, Any]) -> None:
-        if not colors:
-            return
-        self._is_dark = colors.get("is_dark", True)
-        line = QColor("#FFFFFF") if self._is_dark else QColor("#000000")
-        self._colors.update(
-            {
-                "text": colors.get("text_primary", self._colors["text"]),
-                "text_secondary": colors.get("text_secondary", self._colors["text_secondary"]),
-                "text_dim": colors.get("text_dim") or self._colors["text_dim"],
-                "selected": colors.get("accent") or self._colors["selected"],
-                "line": line,
-            }
-        )
-
     # ── 绘制 ──
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
-        return QSize(option.rect.width(), self._row_h)
+        return QSize(option.rect.width(), self.row_h)
 
     def paint(self, painter: QPainter, option, index) -> None:  # noqa: N802
         rec: Optional[TraceRecord] = index.data(Qt.UserRole)
@@ -137,102 +253,151 @@ class _EntryDelegate(QStyledItemDelegate):
         rect = option.rect
         selected = bool(option.state & QStyle.State_Selected)
         hovered = bool(option.state & QStyle.State_MouseOver)
-        c = self._colors
+        pal = self._pal
+        cols = self._cols
 
         painter.save()
         try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
             painter.setRenderHint(QPainter.TextAntialiasing, True)
 
-            # ── 行背景（透明度全部 with_alpha 派生，杜绝 rgba 字符串黑块）──
+            # 行背景
             if selected:
-                painter.fillRect(rect, with_alpha(QColor(c["selected"]), 26))
-                painter.fillRect(rect.x(), rect.y(), 3, rect.height(), QColor(c["selected"]))
+                painter.fillRect(rect, QColor(pal.selected_bg))
+                painter.fillRect(QRect(rect.x(), rect.y(), 3, rect.height()), QColor(pal.accent))
             elif hovered:
-                painter.fillRect(rect, with_alpha(QColor(c["line"]), 10))
+                painter.fillRect(rect, pal.line_at(14))
+            elif index.row() % 2 == 1:
+                painter.fillRect(rect, pal.line_at(7))
 
-            # turn 分组线（真实 USER 行的上边线）
+            # turn 分组线
             if rec.meta.get("turn_start"):
-                painter.setPen(with_alpha(QColor(c["selected"]), 120))
-                painter.drawLine(rect.x() + 3, rect.y(), rect.right(), rect.y())
+                painter.setPen(QPen(with_alpha(QColor(pal.accent), 90), 1))
+                painter.drawLine(rect.x(), rect.y(), rect.right(), rect.y())
 
-            # 行分隔线
-            painter.setPen(with_alpha(QColor(c["line"]), 18))
-            painter.drawLine(rect.x() + 3, rect.bottom(), rect.right(), rect.bottom())
+            main_font = self._font()
+            small_font = self._font(-2, bold=True)  # 徽章：小号加粗 UI 字体
+            num_font = self._num_font(-1)
+            color = pal.danger if rec.is_error else kind_color(rec.kind)
 
-            main_font = self._mono_font()
-            small_font = self._mono_font(-2)
-
-            # ① 类型徽章：固定宽（按 ASSISTANT 实测）+ 类型色底/字
-            color = kind_color(rec.kind)
-            badge_w = self._badge_w
-            badge = QRect(12, rect.y() + (rect.height() - 18) // 2, badge_w, 18)
+            # ── Name 列 ──
+            name_rect = cols.rect_of("name", rect.width(), rect.y(), rect.height())
+            x = name_rect.x()
+            # 状态点
+            dot_d = 6
+            dot_y = rect.y() + (rect.height() - dot_d) // 2
             painter.setPen(Qt.NoPen)
-            painter.setBrush(with_alpha(color, 30))
-            painter.drawRoundedRect(badge, 3, 3)
+            painter.setBrush(QColor(pal.danger if rec.is_error else (pal.warning if rec.is_pending else pal.success)))
+            painter.drawEllipse(x, dot_y, dot_d, dot_d)
+            x += dot_d + 8
+
+            # Turn 前缀徽章
+            if rec.meta.get("turn_start") and rec.turn_no > 0:
+                tfm = QFontMetrics(small_font)
+                tag = f"T{rec.turn_no}"
+                tw = tfm.horizontalAdvance(tag) + 10
+                painter.setBrush(with_alpha(QColor(pal.accent), 36))
+                painter.drawRoundedRect(QRectF(x, dot_y - 2, tw, dot_d + 4), 3, 3)
+                painter.setPen(QColor(pal.accent))
+                painter.setFont(small_font)
+                painter.drawText(QRect(x, rect.y(), tw, rect.height()), Qt.AlignCenter, tag)
+                x += tw + 6
+
+            # 主文本：label（亮） + preview（暗）
+            avail = max(30, name_rect.right() - x)
+            painter.setFont(main_font)
+            fm = QFontMetrics(main_font)
+            head = rec.label + "  "
+            painter.setPen(QColor(pal.text))
+            head_w = fm.horizontalAdvance(head)
+            if head_w > avail:
+                painter.drawText(
+                    QRect(x, rect.y(), avail, rect.height()),
+                    Qt.AlignVCenter | Qt.AlignLeft,
+                    fm.elidedText(rec.label, Qt.ElideRight, avail),
+                )
+            else:
+                painter.drawText(QRect(x, rect.y(), head_w, rect.height()), Qt.AlignVCenter | Qt.AlignLeft, head)
+                rest = avail - head_w
+                if rest > 20:
+                    painter.setPen(QColor(pal.text_muted))
+                    painter.drawText(
+                        QRect(x + head_w, rect.y(), rest, rect.height()),
+                        Qt.AlignVCenter | Qt.AlignLeft,
+                        fm.elidedText(rec.preview.replace("\n", " "), Qt.ElideRight, rest),
+                    )
+
+            # ── Type 列：类型徽章 ──
+            type_rect = cols.rect_of("type", rect.width(), rect.y(), rect.height())
             painter.setFont(small_font)
+            bfm = QFontMetrics(small_font)
+            bw = min(type_rect.width() - 6, bfm.horizontalAdvance(rec.kind.label) + 14)
+            badge = QRect(type_rect.x(), rect.y() + (rect.height() - 17) // 2, bw, 17)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(with_alpha(color, 34))
+            painter.drawRoundedRect(QRectF(badge), 3, 3)
             painter.setPen(color)
             painter.drawText(badge, Qt.AlignCenter, rec.kind.label)
 
-            # ② 主文本：内容首行（TOOL 行含 tool 名前缀）
-            col_main = 12 + badge_w + 10
-            right_reserve = self._meta_w + 14
-            is_turn_start = bool(rec.meta.get("turn_start")) and rec.turn_no > 0
-            if is_turn_start:
-                right_reserve += self._turn_w  # 预留 Turn N 标注位，防重叠
-            avail_w = max(40, rect.width() - col_main - right_reserve)
-            painter.setFont(main_font)
-            fm = QFontMetrics(main_font)
-            main_text = _row_main_text(rec)
-            painter.setPen(QColor(c["text"]))
-            painter.drawText(
-                QRect(col_main, rect.y(), avail_w, rect.height()),
-                Qt.AlignVCenter | Qt.AlignLeft,
-                fm.elidedText(main_text, Qt.ElideRight, avail_w),
-            )
+            # ── Tokens 列（占用）──
+            tk_rect = cols.rect_of("tokens", rect.width(), rect.y(), rect.height())
+            painter.setFont(num_font)
+            painter.setPen(QColor(pal.text_muted))
+            painter.drawText(tk_rect.adjusted(0, 0, -8, 0), Qt.AlignVCenter | Qt.AlignRight, format_tokens(rec.tokens))
 
-            # ③ 右侧列：TOOL/ASSISTANT 显示时长（错误红/进行中金/完成暗）；
-            #    消息类显示绝对时间
-            painter.setFont(small_font)
-            if rec.kind in DURATION_KINDS:
-                if rec.is_error:
-                    painter.setPen(QColor("#F7768E"))
-                elif rec.is_pending:
-                    painter.setPen(QColor("#E0AF68"))
-                else:
-                    painter.setPen(QColor(c["text_dim"]))
-                # 0 = 无精确耗时数据（历史回放）→ 显示 "-" 而非误导性 "0 ms"
-                meta_text = format_duration(rec.duration_ms) if rec.duration_ms > 0 else "-"
+            # ── Time 列 ──
+            time_rect = cols.rect_of("time", rect.width(), rect.y(), rect.height())
+            if rec.is_error:
+                painter.setPen(QColor(pal.danger))
+            elif rec.is_pending:
+                painter.setPen(QColor(pal.warning))
             else:
-                painter.setPen(QColor(c["text_dim"]))
-                meta_text = rec.absolute_time
-            painter.drawText(
-                QRect(rect.width() - self._meta_w - 14, rect.y(), self._meta_w, rect.height()),
-                Qt.AlignVCenter | Qt.AlignRight,
-                meta_text,
-            )
+                painter.setPen(QColor(pal.text_muted))
+            # 0 = 无精确耗时（瞬时消息写入）→ "—" 而非误导性 "0 ms"
+            meta_text = format_duration(rec.duration_ms) if rec.duration_ms > 0 else "—"
+            painter.drawText(time_rect.adjusted(0, 0, -8, 0), Qt.AlignVCenter | Qt.AlignRight, meta_text)
 
-            # ④ turn 标注（turn 分组行右侧、时长列左边）
-            if is_turn_start:
-                painter.setFont(small_font)
-                painter.setPen(with_alpha(QColor(c["selected"]), 210))
-                painter.drawText(
-                    QRect(rect.width() - right_reserve, rect.y(), self._turn_w - 6, rect.height()),
-                    Qt.AlignVCenter | Qt.AlignRight,
-                    f"Turn {rec.turn_no}",
-                )
+            # ── Waterfall 列 ──
+            wf_rect = cols.rect_of("waterfall", rect.width(), rect.y(), rect.height())
+            self._paint_waterfall(painter, rec, wf_rect, color)
+
+            # 行分隔线
+            painter.setPen(QPen(pal.line_at(16), 1))
+            painter.drawLine(rect.x() + 3, rect.bottom(), rect.right(), rect.bottom())
         finally:
             painter.restore()
 
+    def _paint_waterfall(self, painter: QPainter, rec: TraceRecord, rect: QRect, color: QColor) -> None:
+        """行内迷你甘特条（Chrome Network 的 Waterfall 列）。
 
-def _row_main_text(rec: TraceRecord) -> str:
-    """行主文本：TOOL 行带 tool 名前缀（对齐 deepseek `skill {"name":...}`）；其余为内容首行。"""
-    if rec.kind == EntryKind.TOOL:
-        return f"{rec.label} {rec.preview}".strip()
-    return rec.preview
+        列内**不再画时长文字** —— Time 列已经给了精确值，重复标注只会让列
+        变宽（旧版因此要 190px，现在 128px 够用）。
+        """
+        t0, t1 = self._bounds
+        span = max(1e-6, t1 - t0)
+        track_y = rect.y() + (rect.height() - 10) // 2
+        track_w = max(30, rect.width() - 8)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._pal.track)
+        painter.drawRoundedRect(QRectF(rect.x(), track_y, track_w, 10), 3, 3)
+
+        if rec.start_ts <= 0:
+            return
+        s = rec.start_ts
+        e = rec.end_ts if rec.end_ts > s else s
+        a = max(0.0, min(1.0, (s - t0) / span))
+        b = max(0.0, min(1.0, (e - t0) / span))
+        x0 = rect.x() + a * track_w
+        w = max(3.0, (b - a) * track_w)
+        painter.setBrush(with_alpha(color, 150) if rec.is_pending else with_alpha(color, 215))
+        painter.drawRoundedRect(QRectF(x0, track_y, w, 10), 2, 2)
+        if rec.is_pending:  # 未完成：条尾渐隐，视觉上"还在跑"
+            painter.setBrush(with_alpha(color, 70))
+            painter.drawRoundedRect(QRectF(x0 + w, track_y, min(8, rect.right() - x0 - w), 10), 2, 2)
 
 
 class TurnListWidget(QWidget):
-    """中央列表：过滤条 + QListWidget 条目列表（+ in-flight 尾巴）。"""
+    """中央表格：可排序列头 + QListWidget 条目（+ in-flight 尾巴）。"""
 
     recordSelected = pyqtSignal(int)  # record 索引（visible_records 空间）
 
@@ -243,9 +408,12 @@ class TurnListWidget(QWidget):
         self._visible_map: List[int] = []  # 可见行 → record 索引
         self._selected_rec_idx: Optional[int] = None
         self._filter_kind: Optional[EntryKind] = None
-        self._filter_kind_label: str = "all"
         self._search_text: str = ""
-        self._delegate = _EntryDelegate(self)
+        self._sort_key = "index"
+        self._sort_desc = False
+        self._pal = ThemePalette()
+        self._base_px = 13
+        self._cols = _Columns()
         self._build_ui()
 
     # ──────────────────── 搭建 ────────────────────
@@ -255,29 +423,16 @@ class TurnListWidget(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # 过滤条：类型 chips + 结果计数
-        self._bar = QFrame(self)
-        self._bar.setFixedHeight(36)
-        self._bar.setObjectName("agentTraceFilterBar")
-        bar = QHBoxLayout(self._bar)
-        bar.setContentsMargins(10, 0, 12, 0)
-        bar.setSpacing(4)
-        self._chip_group = QButtonGroup(self)
-        self._chip_group.setExclusive(True)
-        for key, label, kind in FILTER_CHIPS:
-            btn = QPushButton(label, self._bar)
-            btn.setCheckable(True)
-            btn.setFixedHeight(24)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setChecked(key == "all")
-            btn.clicked.connect(lambda _=False, k=key: self._on_chip(k))
-            self._chip_group.addButton(btn)
-            bar.addWidget(btn)
-        bar.addStretch(1)
-        self._count_label = QLabel(self._bar)
-        bar.addWidget(self._count_label)
-        outer.addWidget(self._bar)
+        # ① 类型过滤条（时间线下方、列表上方 —— 顶栏只留搜索/视图/操作）
+        self._filter_bar = self._build_filter_bar()
+        outer.addWidget(self._filter_bar)
 
+        # ② 可排序列表头
+        self._header = _HeaderWidget(self._cols, self)
+        self._header.sortChanged.connect(self._on_sort_changed)
+        outer.addWidget(self._header)
+
+        self._delegate = _RowDelegate(self._cols, self)
         self._list = QListWidget(self)
         self._list.setItemDelegate(self._delegate)
         self._list.setUniformItemSizes(True)
@@ -287,25 +442,38 @@ class TurnListWidget(QWidget):
         self._list.currentRowChanged.connect(self._on_current_row_changed)
         outer.addWidget(self._list, 1)
 
-        # 空态提示（records+tail 全空时显示）
-        self._empty_label = QLabel("暂无轨迹 — 发送一条消息后这里会实时出现", self._list)
-        self._empty_label.setAlignment(Qt.AlignCenter)
+        # 空态提示（无脚本运行时）
+        self._empty_label = _EmptyHint(self._list)
         self._empty_label.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._empty_label.hide()
 
-    def _on_chip(self, key: str) -> None:
-        self._filter_kind_label = key
-        self._filter_kind = dict((k, kind) for k, _l, kind in FILTER_CHIPS).get(key)
-        self._refilter()
+    def _build_filter_bar(self) -> QWidget:
+        """类型过滤 chips + 结果计数（独占一行，放在时间线与列表之间）。"""
+        bar = QFrame(self)
+        bar.setFixedHeight(_FILTER_H)
+        bar.setObjectName("agentTraceFilterBar")
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(10, 0, 12, 0)
+        lay.setSpacing(4)
+        self._chip_group = QButtonGroup(bar)
+        self._chip_group.setExclusive(True)
+        for key, label, kind in FILTER_CHIPS:
+            btn = QPushButton(label, bar)
+            btn.setCheckable(True)
+            btn.setFixedHeight(24)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setChecked(key == "all")
+            btn.clicked.connect(lambda _=False, k=kind: self.set_filter_kind(k))
+            self._chip_group.addButton(btn)
+            lay.addWidget(btn)
+        lay.addStretch(1)
+        self._count_label = QLabel(bar)
+        lay.addWidget(self._count_label)
+        return bar
 
     # ──────────────────── 公开 API ────────────────────
 
-    @property
-    def _row_h(self) -> int:
-        return self._delegate._row_h
-
     def set_records(self, records: List[TraceRecord]) -> None:
-        """整体重置（保留过滤与选中）。"""
         self._records = list(records)
         self._refilter()
 
@@ -325,20 +493,14 @@ class TurnListWidget(QWidget):
         self._list.viewport().update()
 
     def set_tail(self, tail: List[TraceRecord]) -> None:
-        """v3 增量化：只调整尾部 in-flight 行，主列表 items 不动、滚动不跳。
-
-        tail 行固定排在可见 records 段之后，无选中状态（NoItemFlags）。
-        """
+        """增量化：只调整尾部 in-flight 行，主列表 items 不动、滚动不跳。"""
         old_tail = self._tail
         self._tail = list(tail)
         old_n, new_n = len(old_tail), len(self._tail)
-
-        # 删多余的旧行
         if new_n < old_n:
             for _ in range(old_n - new_n):
                 if self._list.count() > len(self._visible_map):
                     self._list.takeItem(self._list.count() - 1)
-        # 补缺的新行 / 刷新既有行内容
         for i, rec in enumerate(self._tail):
             row = len(self._visible_map) + i
             if row < self._list.count():
@@ -349,60 +511,35 @@ class TurnListWidget(QWidget):
                 item = QListWidgetItem()
                 item.setData(Qt.UserRole, rec)
                 item.setFlags(Qt.NoItemFlags)
-                item.setSizeHint(QSize(0, self._row_h))
+                item.setSizeHint(QSize(0, self._delegate.row_h))
                 self._list.addItem(item)
         self._update_empty()
-        self._update_count()
         self._list.viewport().update()
 
     def set_search(self, text: str) -> None:
         self._search_text = (text or "").strip().lower()
         self._refilter()
 
-    def repaint_pending(self) -> None:
-        """心跳重绘（pending 行时长实时计算，刷 viewport 即可）。"""
+    def set_filter_kind(self, kind: Optional[EntryKind]) -> None:
+        self._filter_kind = kind
+        self._refilter()
+
+    def set_bounds(self, t0: float, t1: float) -> None:
+        """注入时间边界（与顶部时间线共用比例）→ Waterfall 列。"""
+        self._delegate.set_bounds(t0, t1)
         self._list.viewport().update()
+
+    def repaint_pending(self) -> None:
+        """心跳重绘（pending 行时长实时计算）。"""
+        self._list.viewport().update()
+
+    def scroll_to_bottom(self) -> None:
+        """跟随最新条目（对齐 Network 面板的 auto-scroll）。"""
+        self._list.scrollToBottom()
 
     def clear_selection(self) -> None:
         self._selected_rec_idx = None
         self._list.setCurrentRow(-1)
-
-    def set_colors(self, colors: Dict[str, Any]) -> None:
-        self._delegate.set_colors(colors)
-        if not colors:
-            return
-        is_dark = colors.get("is_dark", True)
-        secondary = colors.get("text_secondary", "#8A8A94")
-        border = colors.get("border", "#333333")
-        accent = colors.get("accent", "#7AA2F7")
-        line_c = "255,255,255" if is_dark else "0,0,0"
-        fs = self._delegate._base_px
-
-        self._bar.setStyleSheet(
-            f"#agentTraceFilterBar {{ background: transparent; border-bottom: 1px solid {border}; }}"
-            f"QPushButton {{ background: transparent; color: {secondary}; border: 1px solid transparent;"
-            f"  border-radius: 4px; padding: 0 10px; font-size: {max(10, fs - 1)}px; }}"
-            f"QPushButton:hover {{ background: rgba({line_c},0.08); }}"
-            f"QPushButton:checked {{ color: {accent}; border: 1px solid {accent}; background: transparent; }}"
-        )
-        self._count_label.setStyleSheet(f"color: {secondary}; font-size: {max(10, fs - 2)}px;")
-        self._empty_label.setStyleSheet(f"color: {secondary}; font-size: {fs}px; background: transparent;")
-        self._list.setStyleSheet(
-            "QListWidget { background: transparent; border: none; outline: none; }"
-            "QListWidget::item { border: none; }"
-            "QListWidget::item:selected { background: transparent; }"
-        )
-        self._list.viewport().update()
-
-    def _apply_font(self, font: QFont) -> None:
-        """字体跟随系统设置（pixelSize）→ 重算列宽/行高并刷新既有行高。"""
-        self._delegate.set_base_font(font)
-        rh = QSize(0, self._row_h)
-        for i in range(self._list.count()):
-            item = self._list.item(i)
-            if item is not None:
-                item.setSizeHint(rh)
-        self._list.viewport().update()
 
     @property
     def selected_record_idx(self) -> Optional[int]:
@@ -415,15 +552,79 @@ class TurnListWidget(QWidget):
         self._selected_rec_idx = None
         self._list.clear()
         self._update_empty()
-        self._update_count()
 
     def select_record(self, idx: int) -> None:
-        """按 record 索引选中（必要时滚动到可见）。"""
         row = self._row_of_record(idx)
         if row is not None:
             self._list.setCurrentRow(row)
 
+    @property
+    def shown_count(self) -> int:
+        return len(self._visible_map) + len(self._tail)
+
+    @property
+    def total_count(self) -> int:
+        return len(self._records) + len(self._tail)
+
+    # ──────────────────── 主题 / 字体 ────────────────────
+
+    def set_colors(self, colors: dict, is_dark: bool = True) -> None:
+        if not colors:
+            return
+        self._pal = ThemePalette.from_theme(colors, is_dark, mono_family=self._pal.mono_family)
+        self._apply_palette()
+
+    def set_palette(self, pal: ThemePalette) -> None:
+        self._pal = pal
+        self._apply_palette()
+
+    def _apply_palette(self) -> None:
+        pal = self._pal
+        fs = self._base_px
+        self._delegate.set_palette(pal, self._base_px)
+        self._header.set_palette(pal, self._base_px)
+        rh = QSize(0, self._delegate.row_h)
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item is not None:
+                item.setSizeHint(rh)
+        self.setStyleSheet(_list_qss(pal))
+        # 过滤条：chips 用系统 UI 字体
+        self._filter_bar.setStyleSheet(
+            f"QFrame#agentTraceFilterBar {{ background: transparent;"
+            f" border-bottom: 1px solid {pal.q('border')}; }}"
+            f"QFrame#agentTraceFilterBar QPushButton {{"
+            f"  background: transparent; color: {pal.q('text_secondary')};"
+            f"  border: 1px solid transparent; border-radius: 5px; padding: 0 10px;"
+            f"  font-family: '{pal.font_family}'; font-size: {max(10, fs - 1)}px; }}"
+            f"QFrame#agentTraceFilterBar QPushButton:hover {{ background: {pal.q('line', 22)}; }}"
+            f"QFrame#agentTraceFilterBar QPushButton:checked {{"
+            f"  color: {pal.q('accent')}; border: 1px solid {pal.q('accent')};"
+            f"  background: {pal.q('accent', 26)}; }}"
+        )
+        self._count_label.setStyleSheet(
+            f"color: {pal.q('text_muted')}; font-family: '{pal.font_family}'; font-size: {max(10, fs - 2)}px;"
+        )
+        self._empty_label.set_palette(pal)
+        self._list.viewport().update()
+
+    def _apply_font(self, font: QFont) -> None:
+        px = font.pixelSize()
+        if px <= 0:
+            ptf = font.pointSizeF()
+            px = int(round(ptf * 4 / 3)) if ptf > 0 else 13
+        self._base_px = max(10, min(24, px))
+        fam = font.family()
+        if fam:
+            self._pal.font_family = fam
+        self._apply_palette()
+
     # ──────────────────── 内部 ────────────────────
+
+    def _on_sort_changed(self, key: str, desc: bool) -> None:
+        self._sort_key = key or "index"
+        self._sort_desc = desc
+        self._refilter()
 
     def _match(self, rec: TraceRecord) -> bool:
         if self._filter_kind is not None and rec.kind != self._filter_kind:
@@ -434,8 +635,26 @@ class TurnListWidget(QWidget):
                 return False
         return True
 
+    def _sorted_indices(self) -> List[int]:
+        idxs = [i for i, r in enumerate(self._records) if self._match(r)]
+        if self._sort_key == "index":
+            return idxs
+        reverse = self._sort_desc
+        if self._sort_key == "tokens":
+            key = lambda i: self._records[i].tokens  # noqa: E731
+        elif self._sort_key == "time":
+            key = lambda i: max(0, self._records[i].duration_ms)  # noqa: E731
+        elif self._sort_key == "type":
+            key = lambda i: self._records[i].kind.value  # noqa: E731
+        else:  # name
+            key = lambda i: (self._records[i].label or "").lower()  # noqa: E731
+        try:
+            return sorted(idxs, key=key, reverse=reverse)
+        except Exception:
+            return idxs
+
     def _refilter(self) -> None:
-        self._visible_map = [i for i, r in enumerate(self._records) if self._match(r)]
+        self._visible_map = self._sorted_indices()
         self._rebuild_items()
         self._restore_selection()
 
@@ -443,17 +662,19 @@ class TurnListWidget(QWidget):
         self._list.clear()
         for i in self._visible_map:
             self._list.addItem(self._make_item(i, self._records[i]))
-        # in-flight 尾巴（固定追加在末尾，不可选中）
         for rec in self._tail:
             item = QListWidgetItem()
             item.setData(Qt.UserRole, rec)
             item.setFlags(Qt.NoItemFlags)
-            item.setSizeHint(QSize(0, self._row_h))
+            item.setSizeHint(QSize(0, self._delegate.row_h))
             self._list.addItem(item)
         self._update_empty()
-        self._update_count()
 
     def _append_if_visible(self, record_indices: List[int]) -> None:
+        if self._sort_key != "index":
+            # 非时间序 → 增量插入会破坏排序，直接整体重建（追加频率低）
+            self._refilter()
+            return
         tail_start_row = self._list.count() - len(self._tail)
         inserted = 0
         for i in record_indices:
@@ -461,17 +682,21 @@ class TurnListWidget(QWidget):
                 row = tail_start_row + inserted
                 self._list.insertItem(row, self._make_item(i, self._records[i]))
                 self._visible_map.append(i)
-                self._visible_map.sort()
                 inserted += 1
+        if inserted:
+            self._visible_map.sort()
         self._update_empty()
-        self._update_count()
 
     def _make_item(self, idx: int, rec: TraceRecord) -> QListWidgetItem:
         item = QListWidgetItem()
         item.setData(Qt.UserRole, rec)
         item.setData(Qt.UserRole + 1, idx)
-        item.setSizeHint(QSize(0, self._row_h))
-        item.setToolTip(f"{rec.kind.label} · {rec.label}\n{rec.source}")
+        item.setSizeHint(QSize(0, self._delegate.row_h))
+        item.setToolTip(
+            f"{rec.kind.label} · {rec.label}\n"
+            f"{rec.absolute_time} · {format_duration(rec.duration_ms)} · {rec.tokens} tok\n"
+            f"{rec.source}"
+        )
         return item
 
     def _row_of_record(self, idx: int) -> Optional[int]:
@@ -500,16 +725,78 @@ class TurnListWidget(QWidget):
         self._empty_label.setVisible(empty)
         if empty:
             self._empty_label.setGeometry(self._list.viewport().rect())
+        self._update_count()
 
     def _update_count(self) -> None:
-        total = len(self._records) + len(self._tail)
-        shown = len(self._visible_map) + len(self._tail)
-        if shown == total:
-            self._count_label.setText(f"{total} 条")
-        else:
-            self._count_label.setText(f"{shown} / {total} 条")
+        total = self.total_count
+        shown = self.shown_count
+        self._count_label.setText(f"{total} 条" if shown == total else f"{shown} / {total} 条")
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
         if self._empty_label.isVisible():
             self._empty_label.setGeometry(self._list.viewport().rect())
+        self._header.update()
+
+
+class _EmptyHint(QFrame):
+    """空态提示（列表无内容时居中显示）。"""
+
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        self._pal = ThemePalette()
+        self._text = "暂无轨迹记录"
+
+    def set_palette(self, pal: ThemePalette) -> None:
+        self._pal = pal
+        self.update()
+
+    def set_text(self, text: str) -> None:
+        self._text = text
+        self.update()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        try:
+            f = QFont(self._pal.font_family)
+            f.setPixelSize(max(11, self._pal.font_px))
+            p.setFont(f)
+            p.setPen(QColor(self._pal.text_muted))
+            p.drawText(self.rect(), Qt.AlignCenter, self._text)
+        finally:
+            p.end()
+
+
+def _fallback_scrollbar(pal: ThemePalette) -> str:
+    """主程序样式不可用时的兜底（同一套视觉：细长圆角、无箭头）。"""
+    return (
+        "QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }"
+        f"QScrollBar::handle:vertical {{ background: {pal.q('line', 60)}; border-radius: 4px; min-height: 30px; }}"
+        f"QScrollBar::handle:vertical:hover {{ background: {pal.q('line', 95)}; }}"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }"
+        "QScrollBar:horizontal { background: transparent; height: 8px; margin: 0; }"
+        f"QScrollBar::handle:horizontal {{ background: {pal.q('line', 60)}; border-radius: 4px; min-width: 30px; }}"
+        "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+        "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"
+    )
+
+
+def unified_scrollbar(width: int = 8) -> str:
+    """主程序统一滚动条样式（``app.utils.design_tokens``），失败回退内联。"""
+    try:
+        from app.utils.design_tokens import get_unified_scrollbar_style
+
+        return get_unified_scrollbar_style(width)
+    except Exception:
+        return ""
+
+
+def _list_qss(pal: ThemePalette) -> str:
+    bar = unified_scrollbar(8) or _fallback_scrollbar(pal)
+    return (
+        "QListWidget { background: transparent; border: none; outline: none; }"
+        "QListWidget::item { border: none; background: transparent; }"
+        "QListWidget::item:selected { background: transparent; }"
+        + bar
+    )

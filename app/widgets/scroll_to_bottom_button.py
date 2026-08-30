@@ -18,6 +18,7 @@
 - 事件过滤父级与锚点的 Resize/Move/Show 来重定位，不引入额外定时器。
 """
 
+import weakref
 from pathlib import Path
 
 from PyQt5.QtCore import QByteArray, QEvent, QFile, QSize, Qt
@@ -122,6 +123,45 @@ def _build_icon(color: str, size: int = _ICON_SIZE) -> QIcon:
     return QIcon(pixmap)
 
 
+# ── 主题切换刷新：走 UIEventBus，不是 theme_manager.register_refresh_target ──
+# 🐛 根因（2026-08-30 实修）：主程序的主题切换走
+# `main_widget._execute_batched_theme_refresh`，它只做 Colors.refresh() +
+# theme_manager.on_theme_changed() + per-window `_apply_runtime_ui_settings()`，
+# **从不调用 theme_manager.dispatch_refresh()** → 注册进 _refresh_targets 的
+# widget 一个都收不到 refresh_theme()（main_widget.py:9185 的注释也点明了这一点）。
+# dispatch_refresh() 只在 theme_manager.reload() / config_sync 里被调用。
+# 可靠的广播源是 `on_theme_changed()` 发布的 EV_THEME_CHANGED 事件。
+#
+# ⚠️ UIEventBus.subscribe 持有回调的**强引用**，直接传 self._apply_style 会让
+# 按钮永远不被回收（父窗口销毁后仍滞留）。因此这里用模块级 WeakSet 登记实例，
+# 只订阅一次模块级函数。
+_BUTTONS: "weakref.WeakSet" = weakref.WeakSet()
+_theme_subscribed = False
+
+
+def _on_theme_changed_event(payload):
+    """EV_THEME_CHANGED 回调：把刷新分发给所有存活的按钮"""
+    for btn in list(_BUTTONS):
+        try:
+            btn.refresh_theme()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _ensure_theme_subscription():
+    """订阅主题切换事件（幂等，只在第一个按钮创建时真正执行一次）"""
+    global _theme_subscribed
+    if _theme_subscribed:
+        return
+    try:
+        from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+
+        UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, _on_theme_changed_event)
+        _theme_subscribed = True
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class ScrollToBottomButton(QPushButton):
     """浮在对话区右下角的「回到底部」圆形图标按钮
 
@@ -136,6 +176,7 @@ class ScrollToBottomButton(QPushButton):
         self._anchor = anchor
         self._on_click_cb = on_click
         self._visible_pref = False  # 宿主要求的显示状态（实际显示还要看有无可滚内容）
+        self._style_sig = None  # 已应用样式的主题签名（用于跳过重复刷新）
 
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
@@ -146,6 +187,17 @@ class ScrollToBottomButton(QPushButton):
         if on_click is not None:
             self.clicked.connect(on_click)
 
+        # 主题切换：EV_THEME_CHANGED 才是真正会被派发的广播
+        # （register_refresh_target 走的 dispatch_refresh 在主题切换路径上没人调，
+        #  但 reload() / config_sync 会调，两条都留着，靠签名去重）
+        self.refresh_theme = self._apply_style
+        try:
+            _BUTTONS.add(self)
+            _ensure_theme_subscription()
+            theme_manager.register_refresh_target(self)
+        except Exception:  # noqa: BLE001
+            pass
+
         self._apply_style()
         self.hide()
 
@@ -155,17 +207,27 @@ class ScrollToBottomButton(QPushButton):
         if anchor is not None:
             anchor.installEventFilter(self)
 
-        # 主题切换自动重刷样式
-        self.refresh_theme = self._apply_style
-        try:
-            theme_manager.register_refresh_target(self)
-        except Exception:
-            pass
-
     # ── 样式 ──────────────────────────────────────────────────
-    def _apply_style(self):
-        """按当前主题重刷按钮样式与图标颜色"""
+    def _apply_style(self, force: bool = False):
+        """按当前主题重刷按钮样式与图标（签名未变则跳过，避免重复渲染 SVG）
+
+        Args:
+            force: 忽略签名强制重刷（一般不用；签名已覆盖主题 id + 全部用到的颜色）
+        """
         light = theme_manager.is_light_theme()
+        # 签名 = 主题 id + 本方法实际读取的全部颜色 token —— 任一变化都必然重刷
+        sig = (
+            theme_manager.get_current_theme_id(),
+            light,
+            Colors.CARD_BG,
+            Colors.BORDER,
+            Colors.HOVER_BG,
+            Colors.TEXT_PRIMARY,
+        )
+        if not force and sig == self._style_sig:
+            return
+        self._style_sig = sig
+
         # Colors.CARD_BG 是带 {alpha} 占位符的模板，这里给足不透明度当作实心底
         try:
             bg = Colors.CARD_BG.format(alpha=0.92)
@@ -215,6 +277,15 @@ class ScrollToBottomButton(QPushButton):
             pass
 
     # ── 显隐 ──────────────────────────────────────────────────
+    def showEvent(self, event):
+        """浮出前按当前主题校准样式（第二道保险）
+
+        按钮大部分时间是隐藏的（只在离底时浮出），主题切换事件虽然也会刷，
+        但这里再补一道：签名未变时 `_apply_style` 直接 return，几乎零成本。
+        """
+        self._apply_style()
+        super().showEvent(event)
+
     def set_visible_pref(self, visible: bool):
         """宿主调用：请求显示/隐藏
 

@@ -35,6 +35,7 @@ from .trace_models import (
     EntryKind,
     TraceRecord,
     content_to_text,
+    estimate_tokens_text,
     infer_message_kind,
     is_real_user_message,
     message_label,
@@ -68,6 +69,8 @@ class TraceCollector(QObject):
         self._active_session_id: str = ""
         self._bound_backend: Optional[Any] = None
         self._bound_main_widget: Optional[Any] = None
+        # (消息序号, 文本长度) → token 数
+        self._token_cache: Dict[tuple, int] = {}
 
     # ──────────────────── 公共 API ────────────────────
 
@@ -139,6 +142,20 @@ class TraceCollector(QObject):
     def refresh(self) -> None:
         """外部驱动的一次全量同步（切回标签页时调用）。"""
         self._sync()
+
+    def reset(self) -> None:
+        """清空采集缓存并重新投影 — 对应 UI 顶栏「清除」按钮。
+
+        只清 **运行时缓存**（tool timing / stream timing / in-flight 尾巴），
+        **不动 session.messages**：消息历史是事实源，清了就没了。
+        清完立即从 messages 重新投影并 emit recordsReset。
+        """
+        self._records = []
+        self._tail = []
+        self._timing.clear()
+        self._streams.clear()
+        self._stream_base = 0
+        self._sync(emit_reset=True)
 
     def _current_session(self) -> Optional[Any]:
         be = self._bound_backend
@@ -220,6 +237,7 @@ class TraceCollector(QObject):
         self._streams.clear()
         self._stream_base = 0
         self._active_session_id = ""
+        self._token_cache.clear()
 
     def _reset_runtime_state(self, sid: str) -> None:
         self._clear_all()
@@ -330,6 +348,9 @@ class TraceCollector(QObject):
                 turn += 1
                 meta["turn_start"] = True
 
+            # token 占用（列表 Tokens 列）：逐条缓存，key = (消息序号, 文本长度)
+            meta["tokens"] = self._tokens_for(i, raw_text)
+
             records.append(
                 TraceRecord(
                     kind=kind,
@@ -349,14 +370,17 @@ class TraceCollector(QObject):
         # 合成 SYSTEM 条目：DriFox 的系统提示词不在 session.messages 里
         # （引擎构建请求时由 context_builder 动态拼装），只存在
         # session.system_prompt 属性上 → 不合成的话轨迹里永远看不到。
-        if system_prompt and not any(r.kind == EntryKind.SYSTEM for r in records):
+        # ⚠️ 条件只看「有没有消息」而不是「有没有 system_prompt」：SYSTEM 行是
+        # 详情面板 System Prompt / Tools Schema 的唯一入口，会话即使没设系统
+        # 提示词也应能查看当前挂载的工具 schema。
+        if records and not any(r.kind == EntryKind.SYSTEM for r in records):
             head_ts = records[0].start_ts if records else 0.0
             records.insert(
                 0,
                 TraceRecord(
                     kind=EntryKind.SYSTEM,
                     label="System Prompt",
-                    preview=truncate(system_prompt, 140),
+                    preview=truncate(system_prompt, 140) if system_prompt else "（无系统提示词 · 可查看 Tools Schema）",
                     raw=system_prompt,
                     source="session.system_prompt",
                     start_ts=head_ts,
@@ -365,6 +389,24 @@ class TraceCollector(QObject):
                 ),
             )
         return records
+
+    def _tokens_for(self, msg_index: int, text: str) -> int:
+        """带缓存的 token 估算。
+
+        tiktoken 编码不算便宜，而 ``_sync`` 会随 hook 高频触发 → 必须缓存。
+        key 用 ``(消息序号, 文本长度)``：消息内容改写时长度几乎必然变化。
+        """
+        if not text:
+            return 0
+        key = (msg_index, len(text))
+        hit = self._token_cache.get(key)
+        if hit is not None:
+            return hit
+        value = estimate_tokens_text(text)
+        if len(self._token_cache) > 4000:  # 防止长会话无限增长
+            self._token_cache.clear()
+        self._token_cache[key] = value
+        return value
 
     @staticmethod
     def _tool_preview(args_text: str, raw_text: str) -> str:
