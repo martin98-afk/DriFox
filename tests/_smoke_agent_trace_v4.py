@@ -224,6 +224,107 @@ def check_engine_event_forwarding() -> None:
     print("  engine event forwarding OK")
 
 
+def check_placeholder_args() -> None:
+    """同一个 tool_call_id 会收到**两次** tool_call_started。
+
+    worker 在流式参数没接收完时先发一次占位 ``{"_status": "loading"}``
+    （chat_worker.py:3452），真实参数在 ``_execute_tools_*`` 解析完后再发一次。
+    旧代码用 ``if tool_call_id in self._timing: return`` 把第二次挡掉 →
+    所有工具的 Request 面板恒显示 ``{"_status": "loading"}``。
+    """
+    from ui.trace_collector import (
+        TraceCollector,
+        _dump_arguments,
+        _is_placeholder_args,
+    )
+
+    # 1) 先到的是占位
+    c = TraceCollector()
+    c._on_tool_call_started("c1", "read_file", {"_status": "loading"})
+    assert c._timing["c1"]["args"] == "", c._timing["c1"]["args"]
+    assert c._timing["c1"].get("args_placeholder") is True
+    assert c._tail[-1].preview == "（正在接收参数…）", c._tail[-1].preview
+
+    # 2) 真实参数必须能覆盖，且 tail 上那条同步刷新（不能变成两条）
+    c._on_tool_call_started("c1", "read_file", {"path": "README.md"})
+    assert c._timing["c1"]["args"] == '{"path": "README.md"}', c._timing["c1"]["args"]
+    assert "args_placeholder" not in c._timing["c1"]
+    assert c._tail[-1].preview == '{"path": "README.md"}', c._tail[-1].preview
+    assert len(c._tail) == 1, len(c._tail)
+
+    # 3) 占位识别与降级：parse_failed 保留 _raw_args，纯 loading 返回空
+    assert _is_placeholder_args({"_status": "loading", "_args_len": 120}) is True
+    assert _is_placeholder_args({"path": "x"}) is False
+    assert _dump_arguments({"_raw_args": '{"a":', "_status": "parse_failed"}) == '{"a":'
+    assert _dump_arguments({"_status": "loading"}) == ""
+
+    # 4) 若第二次 started 没来，结果回调带的真实参数也要能补上
+    c2 = TraceCollector()
+    c2._on_tool_call_started("c9", "bash", {"_status": "loading"})
+    c2._on_tool_result_received("c9", "bash", {"command": "ls"}, "ok")
+    assert c2._timing["c9"]["args"] == '{"command": "ls"}', c2._timing["c9"]
+    print("  placeholder args OK")
+
+
+def check_llm_elapsed_from_message() -> None:
+    """assistant 耗时必须来自**落盘消息**而不是实时流。
+
+    ``stream_started`` / ``stream_finished`` 是整个 worker 线程级别的回调
+    （executor.py 在 ``worker.start()`` 之后只发一次），一轮含多次工具迭代时
+    只能测到「整轮总时长」—— 表现为第一条 assistant 虚高、其余为 0。
+    正解是读 worker 写入的 ``elapsed_ms``，顺带解决「重新加载会话耗时丢失」。
+    """
+    from ui.trace_collector import TraceCollector
+    from ui.trace_models import EntryKind
+
+    base = 1_700_000_000.0  # 秒
+    msgs = [
+        {"role": "user", "content": "hi", "timestamp": "x", "ts_ms": int(base * 1000)},
+        # 第 1 段 assistant：耗时 2.5s，完成于 base+3s
+        {"role": "assistant", "content": "a1", "timestamp": "x", "ts_ms": int((base + 3) * 1000), "elapsed_ms": 2500.0},
+        # 第 2 段 assistant：耗时 1.2s，完成于 base+9s（中间是工具执行）
+        {"role": "assistant", "content": "a2", "timestamp": "x", "ts_ms": int((base + 9) * 1000), "elapsed_ms": 1200.0},
+    ]
+    recs = TraceCollector()._project_messages(msgs)
+    assistants = [r for r in recs if r.kind == EntryKind.ASSISTANT]
+    assert len(assistants) == 2, len(assistants)
+
+    # 工具耗时同理：实时信号丢失后靠 trace_phases.total 反推
+    tools = [
+        r
+        for r in TraceCollector()._project_messages(
+            [
+                {"role": "user", "content": "hi", "timestamp": "x", "ts_ms": int(base * 1000)},
+                {
+                    "role": "tool",
+                    "content": "out",
+                    "name": "bash",
+                    "tool_call_id": "t1",
+                    "timestamp": "x",
+                    "ts_ms": int((base + 5) * 1000),
+                    "trace_phases": {"perm": 1200.0, "exec": 830.0, "other": 2.0, "total": 2032.0},
+                },
+            ]
+        )
+        if r.kind == EntryKind.TOOL
+    ]
+    assert len(tools) == 1, len(tools)
+    assert tools[0].duration_ms == 2032, tools[0].duration_ms
+    assert abs(tools[0].end_ts - (base + 5)) < 0.01, tools[0].end_ts
+    assert abs(tools[0].start_ts - (base + 5 - 2.032)) < 0.01, tools[0].start_ts
+
+    a1, a2 = assistants
+    # 每段各自真实耗时，而不是整轮 9s
+    assert a1.duration_ms == 2500, a1.duration_ms
+    assert a2.duration_ms == 1200, a2.duration_ms
+    # 终点 = 消息写入时刻，起点 = 终点 − 耗时
+    assert abs(a1.end_ts - (base + 3)) < 0.01, a1.end_ts
+    assert abs(a1.start_ts - (base + 0.5)) < 0.01, a1.start_ts
+    assert abs(a2.end_ts - (base + 9)) < 0.01, a2.end_ts
+    assert abs(a2.start_ts - (base + 7.8)) < 0.01, a2.start_ts
+    print("  llm elapsed from message OK")
+
+
 def check_ts_ms_persisted() -> None:
     """新字段必须进 ``normalize_message`` 白名单，否则会被 consolidate 剥掉。"""
     from app.core.message_content import normalize_message
@@ -237,13 +338,40 @@ def check_ts_ms_persisted() -> None:
         assert norm is not None and norm.get("ts_ms") == msg["ts_ms"], (msg["role"], norm)
     # 缺失/非法时不应写入字段
     assert "ts_ms" not in (normalize_message({"role": "user", "content": "x"}) or {}), "空值不应写入"
+
+    # LLM 单次耗时（毫秒）—— 持久化后重新加载会话仍能看到真实耗时
+    am = normalize_message(
+        {
+            "role": "assistant",
+            "content": "yo",
+            "timestamp": "2026-08-30 18:00:00",
+            "ts_ms": 1_700_000_003_000,
+            "elapsed_ms": 2500.0,
+        }
+    )
+    assert am["elapsed_ms"] == 2500.0, am
+    assert "elapsed_ms" not in (normalize_message({"role": "assistant", "content": "x"}) or {})
+
+    # 工具分阶段耗时（perm=权限等待 / exec=执行 / other / total）
+    tool = normalize_message(
+        {
+            "role": "tool",
+            "content": "out",
+            "tool_call_id": "c1",
+            "name": "bash",
+            "trace_phases": {"perm": 1200.0, "exec": 830.5, "other": 3.0, "total": 2033.5},
+        }
+    )
+    assert tool["trace_phases"]["perm"] == 1200.0 and tool["trace_phases"]["exec"] == 830.5, tool
     print("  ts_ms persisted OK")
 
 
 def main() -> int:
     check_span_ends()
+    check_llm_elapsed_from_message()
     check_ts_ms_persisted()
     app = QApplication(sys.argv)
+    check_placeholder_args()
     check_engine_event_forwarding()
     card = TraceCardWidget()
     card.resize(1400, 820)

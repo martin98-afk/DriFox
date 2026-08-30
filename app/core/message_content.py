@@ -771,6 +771,11 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if isinstance(ts_ms, (int, float)) and not isinstance(ts_ms, bool) and ts_ms > 0:
         normalized["ts_ms"] = int(ts_ms)
 
+    # 工具执行分阶段耗时 {perm, exec, other, total}（毫秒，chat_worker 写入）
+    phases = message.get("trace_phases")
+    if isinstance(phases, dict) and phases:
+        normalized["trace_phases"] = {str(k): float(v) for k, v in phases.items() if isinstance(v, (int, float))}
+
     if role == "assistant":
         content = content_to_text(message.get("content", ""))
         if content:
@@ -800,6 +805,11 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["config_id"] = str(message.get("config_id"))
         if message.get("elapsed") is not None:
             normalized["elapsed"] = float(message["elapsed"])
+        # 单次 LLM 调用耗时（毫秒，chat_worker 写入）—— 持久化后重新加载
+        # 会话也能看到真实耗时，不再依赖只存在于内存里的实时信号。
+        llm_ms = message.get("elapsed_ms")
+        if isinstance(llm_ms, (int, float)) and not isinstance(llm_ms, bool) and llm_ms > 0:
+            normalized["elapsed_ms"] = float(llm_ms)
         if isinstance(message.get("token_usage"), dict):
             normalized["token_usage"] = dict(message["token_usage"])
         # 保留 _hook_event 标记，确保能通过 save/load 持久化

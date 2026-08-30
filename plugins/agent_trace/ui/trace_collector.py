@@ -305,7 +305,12 @@ class TraceCollector(QObject):
             if kind == EntryKind.TOOL:
                 tool_call_id = msg.get("tool_call_id") or ""
                 meta["tool_call_id"] = tool_call_id
+                # 分阶段耗时（perm=权限含弹窗等待 / exec=执行 / other / total）
+                phases = msg.get("trace_phases")
+                if isinstance(phases, dict) and phases:
+                    meta["phases"] = dict(phases)
                 t = self._timing.get(tool_call_id)
+                args_text = ""
                 if t:
                     # 实时信号给的精确起止优先
                     if t.get("start"):
@@ -314,39 +319,67 @@ class TraceCollector(QObject):
                         end = t["end"]
                     is_error = not t.get("success", True)
                     meta["name"] = t.get("name") or label
-                    if t.get("args"):
-                        meta["arguments"] = t["args"]
+                    args_text = t.get("args") or ""
                     if t.get("result"):
                         meta["result"] = t["result"]
-                        raw_text = f"{t['args'] or ''}\n\n── result ──\n{t['result']}".strip()
                 else:
                     meta["name"] = msg.get("name") or msg.get("tool_name") or "tool"
+                if end <= 0 and isinstance(phases, dict) and phases:
+                    # 没有实时 end（重新加载会话 / 历史消息）→ 用持久化的总耗时
+                    # 反推起止：ts_ms = 结果返回时刻，起点 = 它 − total。
+                    total = phases.get("total")
+                    if isinstance(total, (int, float)) and total > 0 and start > 0:
+                        end = start
+                        start = start - total / 1000.0
+                if not args_text:
+                    # 实时参数是占位（流式未接收完，见 _is_placeholder_args）或
+                    # 根本没有 timing → 用**落盘消息**的 arguments 兜底：
+                    # tool 消息写入时参数必然已解析完整，这才是最可靠的来源。
                     args_obj = msg.get("arguments")
                     if args_obj:
                         try:
-                            meta["arguments"] = (
+                            args_text = (
                                 json.dumps(args_obj, ensure_ascii=False) if not isinstance(args_obj, str) else args_obj
                             )
                         except Exception:
-                            meta["arguments"] = str(args_obj)
+                            args_text = str(args_obj)
+                if args_text:
+                    meta["arguments"] = args_text
+                if meta.get("result"):
+                    raw_text = f"{args_text}\n\n── result ──\n{meta['result']}".strip()
                 preview = self._tool_preview(meta.get("arguments") or "", raw_text)
 
             elif kind == EntryKind.ASSISTANT:
                 if msg.get("tool_calls"):
                     meta["has_tool_calls"] = True
-                # 第 k 条 assistant 消息 ↔ 第 (k - _stream_base) 个实时流；
-                # k < base 的是历史消息（collector 出生前落盘），无流可配
-                s = None
-                if assistant_seq >= self._stream_base:
-                    si = assistant_seq - self._stream_base
-                    if si < len(self._streams):
-                        s = self._streams[si]
+                # ① 优先用 worker 落盘的真实耗时（elapsed_ms，毫秒）。
+                #    这样**重新加载会话后耗时依然在**——实时信号测出来的
+                #    值只存在于内存，重启即丢。
+                #    ⚠️ ts_ms 是「响应完成」时刻（消息写入时打点），
+                #    所以起点 = 完成时刻 − 耗时，终点 = 完成时刻。
+                llm_ms = msg.get("elapsed_ms")
+                if isinstance(llm_ms, (int, float)) and llm_ms > 0:
+                    meta["elapsed_ms"] = float(llm_ms)
+                    if start > 0:
+                        end = start
+                        start = start - llm_ms / 1000.0
+                else:
+                    # ② 兜底：实时流配对。⚠️ stream_started/stream_finished 是
+                    #    **整个 worker 线程**级别的（executor.py 在 worker.start()
+                    #    后只发一次），一轮含多次工具迭代时只能测到「整轮总时长」，
+                    #    第一条 assistant 会虚高、其余拿不到值 —— 只在没有
+                    #    elapsed_ms 的老消息上用它。
+                    s = None
+                    if assistant_seq >= self._stream_base:
+                        si = assistant_seq - self._stream_base
+                        if si < len(self._streams):
+                            s = self._streams[si]
+                    if s:
+                        if s.get("start"):
+                            start = s["start"]
+                        if s.get("end"):
+                            end = s["end"]
                 assistant_seq += 1
-                if s:
-                    if s.get("start"):
-                        start = s["start"]
-                    if s.get("end"):
-                        end = s["end"]
                 preview = truncate(raw_text, 140) if raw_text.strip() else ""
                 if not preview and msg.get("tool_calls"):
                     names = []
@@ -506,12 +539,30 @@ class TraceCollector(QObject):
     # ──────────────────── 实时信号 → timing 表 / tail ────────────────────
 
     def _on_tool_call_started(self, tool_call_id: str, tool_name: str, arguments: Dict[str, Any]) -> None:
-        if not tool_call_id or tool_call_id in self._timing:
+        """工具开始 —— 同一个 tool_call_id 会来**两次**（见下方 ⚠️）。
+
+        ⚠️ worker 在流式参数**还没接收完**时就先发一次预览，arguments 是占位
+        字典 ``{"_status": "loading"}``（chat_worker.py:3452），真实参数在
+        ``_execute_tools_*`` 里解析完整后再发一次。旧代码用
+        ``if tool_call_id in self._timing: return`` 直接挡掉第二次 → 所有工具的
+        入参永远显示成 ``{"_status": "loading"}``，且计时起点早于真实执行。
+        """
+        if not tool_call_id:
             return
-        try:
-            args_text = json.dumps(arguments, ensure_ascii=False) if arguments else ""
-        except Exception:
-            args_text = str(arguments or "")
+
+        placeholder = _is_placeholder_args(arguments)
+        args_text = _dump_arguments(arguments)
+
+        existing = self._timing.get(tool_call_id)
+        if existing is not None:
+            # 第二次到达：参数已解析完整 → 覆盖占位并重起计时（真实执行起点）
+            if not placeholder:
+                existing["args"] = args_text
+                existing["start"] = time.time()
+                existing.pop("args_placeholder", None)
+                self._update_tail_args(tool_call_id, args_text)
+            return
+
         self._timing[tool_call_id] = {
             "start": time.time(),
             "end": 0.0,
@@ -520,18 +571,34 @@ class TraceCollector(QObject):
             "args": args_text,
             "result": "",
         }
+        if placeholder:
+            self._timing[tool_call_id]["args_placeholder"] = True
         self._append_tail(
             TraceRecord(
                 kind=EntryKind.TOOL,
                 label=tool_name or "tool",
-                preview=args_text or "（调用中…）",
+                preview=_pending_preview(args_text, placeholder),
                 raw=args_text,
                 source=f"tool · {tool_name}",
                 start_ts=time.time(),
                 is_pending=True,
-                meta={"tool_call_id": tool_call_id},
+                meta={
+                    "tool_call_id": tool_call_id,
+                    **({"args_placeholder": True} if placeholder else {}),
+                },
             )
         )
+
+    def _update_tail_args(self, tool_call_id: str, args_text: str) -> None:
+        """真实参数到达后，同步刷新 in-flight 尾巴上那条记录（就地改，不重建列表）。"""
+        for rec in self._tail:
+            if rec.meta.get("tool_call_id") != tool_call_id:
+                continue
+            rec.meta.pop("args_placeholder", None)
+            rec.raw = args_text
+            rec.preview = _pending_preview(args_text, False)
+            break
+        self._set_tail(self._tail)
 
     def _on_tool_result_received(self, tool_call_id: str, name: str, arguments: Any, result: Any) -> None:
         """工具结果回调 —— 签名与引擎侧一致 ``(id, name, arguments, result)``。
@@ -546,11 +613,11 @@ class TraceCollector(QObject):
             t["end"] = time.time()
             t["success"] = success
             t["result"] = content_to_text(result)
-            if arguments and not t.get("args"):
-                try:
-                    t["args"] = json.dumps(arguments, ensure_ascii=False)
-                except Exception:
-                    t["args"] = str(arguments)
+            # 结果回调带的 arguments 是解析后的真实值，可用来补齐；占位字典跳过
+            if arguments and not _is_placeholder_args(arguments):
+                text = _dump_arguments(arguments)
+                if text and not t.get("args"):
+                    t["args"] = text
         # 落盘消息通常在 result 回调之后写入，这里先清尾巴，_sync 由
         # _hook_messages_updated 驱动；若已落盘则立即同步回填。
         self._set_tail([r for r in self._tail if r.meta.get("tool_call_id") != tool_call_id])
@@ -591,6 +658,37 @@ class TraceCollector(QObject):
 
     def _append_tail(self, rec: TraceRecord) -> None:
         self._set_tail(self._tail + [rec])
+
+
+def _is_placeholder_args(arguments: Any) -> bool:
+    """是否「参数还没接收完」的占位字典。
+
+    worker 在流式阶段会先发两类占位（chat_worker.py）：
+    - ``{"_status": "loading"}`` / ``{"_status": "loading", "_args_len": N}`` —— 接收中
+    - ``{"_raw_args": "...", "_status": "parse_failed"}`` —— 解析失败，但带原始截断
+    两者都**不是真实入参**，不能直接展示在 Request 面板里。
+    """
+    return isinstance(arguments, dict) and "_status" in arguments
+
+
+def _dump_arguments(arguments: Any) -> str:
+    """参数序列化成可展示文本；占位字典只保留有信息量的 ``_raw_args``。"""
+    if arguments is None:
+        return ""
+    if _is_placeholder_args(arguments):
+        raw = arguments.get("_raw_args")
+        return str(raw) if raw else ""
+    try:
+        return json.dumps(arguments, ensure_ascii=False) if not isinstance(arguments, str) else arguments
+    except Exception:
+        return str(arguments)
+
+
+def _pending_preview(args_text: str, placeholder: bool) -> str:
+    """in-flight 行的预览文案。"""
+    if args_text:
+        return args_text
+    return "（正在接收参数…）" if placeholder else "（调用中…）"
 
 
 def _epoch_from_ts_ms(value: Any) -> Optional[float]:

@@ -491,6 +491,61 @@ class OpenAIChatWorker(QThread):
         self._api_messages_cache = s.api_cache.cache
         self._api_messages_built = s.api_cache.built
         self._event_bus = s.event_bus
+        # 工具执行分阶段计时（tool_call_id → 单调时钟打点）。
+        # 权限弹窗等待原本完全不可见（用户点确认要几秒），这里把它单独拆出来，
+        # 落进 tool 消息的 trace_phases 字段供轨迹面板展示。
+        self._tool_phase_marks: Dict[str, Dict[str, float]] = {}
+        # 单次 LLM 调用耗时（毫秒）。⚠️ 不要用 stream_started/stream_finished 测：
+        # 那一对回调是**整个 worker 线程**级别的（executor.py:134 在 worker.start()
+        # 之后只发一次），一轮含多次工具迭代时只能测到「整轮总时长」。
+        self._last_llm_elapsed_ms = 0.0
+
+    # ── 工具执行分阶段计时 ──
+
+    def _mark_tool_start(self, tool_call_id: str) -> None:
+        """工具进入执行流程（emit tool_call_started 时打点）。"""
+        if not tool_call_id:
+            return
+        if len(self._tool_phase_marks) > 500:  # 长会话防膨胀
+            self._tool_phase_marks.clear()
+        self._tool_phase_marks[tool_call_id] = {"t0": time.monotonic()}
+
+    def _mark_tool_phase(self, tool_call_id: str, phase: str) -> None:
+        """记录阶段完成时刻：``perm``（权限检查结束）/ ``exec``（工具执行结束）。"""
+        marks = self._tool_phase_marks.get(tool_call_id)
+        if marks is None:
+            return
+        marks[phase] = time.monotonic()
+
+    def _take_tool_phases(self, tool_call_id: str) -> Optional[Dict[str, float]]:
+        """取出并消费该工具的阶段耗时（毫秒）。
+
+        - ``perm``：进入工具 → 权限检查结束（**含用户点确认的等待**）
+        - ``exec``：权限结束 → 工具返回
+        - ``total``：进入工具 → 结果构建
+        - ``other``：total − perm − exec（参数解析 / 结果序列化等杂项）
+        """
+        marks = self._tool_phase_marks.pop(tool_call_id, None)
+        if not marks:
+            return None
+        t0 = marks.get("t0")
+        if t0 is None:
+            return None
+        perm_end = marks.get("perm")
+        exec_end = marks.get("exec")
+        now = time.monotonic()
+        phases: Dict[str, float] = {}
+        prev = t0
+        for key, end in (("perm", perm_end), ("exec", exec_end)):
+            if end is None:
+                continue
+            phases[key] = round(max(0.0, end - prev) * 1000, 1)
+            prev = end
+        total = round(max(0.0, now - t0) * 1000, 1)
+        phases["total"] = total
+        spent = sum(v for k, v in phases.items() if k != "total")
+        phases["other"] = round(max(0.0, total - spent), 1)
+        return phases
 
     def _sync_state(self):
         """
@@ -1779,7 +1834,12 @@ class OpenAIChatWorker(QThread):
                 self._last_usage = None
                 self._state.session.last_usage = None
                 self._last_context_token_count = 0
+                # 单次 LLM 调用计时（含重试与流式处理）。先清零：若本次未走
+                # API 调用就构建消息，不会误用上一轮的耗时。
+                self._last_llm_elapsed_ms = 0.0
+                _llm_t0 = time.monotonic()
                 tool_calls_found, tool_args_pending = self._make_api_call(current_messages, use_cache=True)
+                self._last_llm_elapsed_ms = round((time.monotonic() - _llm_t0) * 1000, 1)
                 if self._is_cancelled:
                     self._cancel_with_stop_hook(current_messages, current_session_messages)
                     return
@@ -2196,6 +2256,11 @@ class OpenAIChatWorker(QThread):
         # ts_ms：毫秒级时间戳。timestamp 只有秒级精度，同轮内连发的多条
         # assistant/tool 消息排不出先后（轨迹分析需要顺序与间隔）。
         msg = {"role": "assistant", "timestamp": timestamp, "ts_ms": int(time.time() * 1000)}
+        # 本次 LLM 调用耗时（毫秒，来自 _make_api_call 前后打点）。落盘 →
+        # 重新加载会话后仍然看得到（实时信号测出来的耗时重启即丢）。
+        elapsed_ms = getattr(self, "_last_llm_elapsed_ms", 0.0) or 0.0
+        if elapsed_ms > 0:
+            msg["elapsed_ms"] = round(float(elapsed_ms), 1)
         if content:
             msg["content"] = content
         if reasoning_content:
@@ -4088,6 +4153,7 @@ class OpenAIChatWorker(QThread):
 
             # ====== 权限检查（统一检查所有工具，包括 question）======
             should_continue = self._check_permission(tool_name, arguments, tool_call_id, round_id, results)
+            self._mark_tool_phase(tool_call_id, "perm")
             if not should_continue:
                 return None  # 取消
             if results and results[-1] and results[-1].get("tool_call_id") == tool_call_id:
@@ -4099,6 +4165,7 @@ class OpenAIChatWorker(QThread):
 
             # ====== 执行工具 ======
             result_obj, result_content, success = self._execute_tool(tool_name, arguments, tool_call_id)
+            self._mark_tool_phase(tool_call_id, "exec")
             if result_obj is self._TOOL_CANCELLED:
                 return None
 
@@ -4291,7 +4358,11 @@ class OpenAIChatWorker(QThread):
         return None
 
     def _emit_tool_started(self, tool_call_id, tool_name, arguments, round_id):
-        """发射 tool_call_started 信号"""
+        """发射 tool_call_started 信号
+
+        ⚠️ 这是顺序 / 并行两条执行路径的公共起点，分阶段计时的 t0 打在这里。
+        """
+        self._mark_tool_start(tool_call_id)
         if self.tool_start_callback:
             self.tool_start_callback(tool_call_id, tool_name, arguments, round_id)
         else:
@@ -4544,6 +4615,9 @@ class OpenAIChatWorker(QThread):
             # 毫秒级时间戳（工具结果返回时刻）—— 与 ts_ms(assistant/user/hook)
             # 配套，供轨迹面板排序与计算间隔。
             "ts_ms": int(time.time() * 1000),
+            # 分阶段耗时 {perm, exec, other, total}（毫秒）。perm 含权限弹窗里
+            # 用户点确认的等待 —— 这段原本完全不可见。消费方：agent_trace 插件。
+            "trace_phases": self._take_tool_phases(tool_call_id),
             "diff": getattr(result_obj, "diff", None) if result_obj else None,
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
             "echarts": getattr(result_obj, "echarts", None) if result_obj else None,
@@ -4586,6 +4660,9 @@ class OpenAIChatWorker(QThread):
             except Exception as e:
                 logger.warning(f"[ToolCall] 权限检查失败: {e}")
                 should_continue = True  # 权限检查失败时默认放行
+            finally:
+                # ⚠️ finally：权限检查抛异常也要记下这一段的耗时
+                self._mark_tool_phase(tool_call_id, "perm")
 
             if not should_continue:
                 return None  # 取消
@@ -4594,6 +4671,7 @@ class OpenAIChatWorker(QThread):
 
             # ====== 执行工具 ======
             result_obj, result_content, success = self._execute_tool(tool_name, arguments, tool_call_id)
+            self._mark_tool_phase(tool_call_id, "exec")
             if result_obj is self._TOOL_CANCELLED:
                 return None
 

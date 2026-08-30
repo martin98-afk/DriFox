@@ -710,9 +710,12 @@ class DetailPanel(QWidget):
         args = rec.meta.get("arguments") or ""
         if not args and rec.raw:
             args = rec.raw.split("\n\n── result ──\n")[0]
-        if not args:
-            return "（该工具调用没有入参）"
-        return pretty_json(args)
+        if args:
+            return pretty_json(args)
+        # 入参为空：区分「占位（流式还没接收完）」和「真的没有参数」
+        if rec.meta.get("args_placeholder"):
+            return "（参数仍在接收中，尚未拿到完整入参）"
+        return "（该工具调用没有入参）"
 
     @staticmethod
     def _tool_response(rec: TraceRecord) -> str:
@@ -752,6 +755,20 @@ class DetailPanel(QWidget):
             ("End", _hms(rec.span_end_ts) if rec.span_end_ts > 0 else "—"),
             ("Status", rec.status),
         ]
+        # 分阶段耗时（仅 TOOL）：perm 里包含权限弹窗等待用户点确认的时间，
+        # 这段原本完全不可见（worker 侧是 sleep(0.1) 轮询）。
+        phases = rec.meta.get("phases")
+        if isinstance(phases, dict) and phases:
+            rows.append(("── 分阶段 ──", ""))
+            for key, title in (
+                ("perm", "权限等待"),
+                ("exec", "执行"),
+                ("other", "其它"),
+                ("total", "合计"),
+            ):
+                val = phases.get(key)
+                if isinstance(val, (int, float)):
+                    rows.append((title, format_duration(int(val))))
         if rec.meta.get("tool_call_id"):
             rows.append(("Tool Call", str(rec.meta["tool_call_id"])))
         return rows
