@@ -276,6 +276,10 @@ class TraceCollector(QObject):
             label = message_label(msg)
             raw_text = content_to_text(msg.get("content"))
             start = ts_list[i]
+            # 毫秒时间戳优先：``timestamp`` 只有秒级精度，同秒注入的多条消息
+            # 无法区分先后（hook 连发时尤其明显）→ ts_ms 由主程序写入（见
+            # chat_session / backend / chat_worker 三处写入点）。
+            start = _epoch_from_ts_ms(msg.get("ts_ms")) or start
             # 消息写入本身是瞬时事件：默认 end=0（时长 0）。
             # ⚠️ 不能用「下一条时刻 − 本条时刻」当存续间隔 —— 用户隔 1 小时
             # 再问下一条，上一条消息就会显示 1 小时时长（闲置时间被算成时长）。
@@ -284,6 +288,19 @@ class TraceCollector(QObject):
 
             meta: Dict[str, Any] = {}
             is_error = False
+
+            if kind == EntryKind.ASSISTANT:
+                # 真实 token 用量优先：worker 会把 API 响应的 usage 落成
+                # msg["token_usage"] = {"input","output","total"}（chat_worker）。
+                # 只在第一条 assistant 上写，所以其余条目仍回退到估算。
+                usage = msg.get("token_usage")
+                if isinstance(usage, dict):
+                    total = usage.get("total") or (
+                        (usage.get("input") or 0) + (usage.get("output") or 0)
+                    )
+                    if isinstance(total, (int, float)) and total > 0:
+                        meta["tokens"] = int(total)
+                        meta["tokens_exact"] = True
 
             if kind == EntryKind.TOOL:
                 tool_call_id = msg.get("tool_call_id") or ""
@@ -350,8 +367,10 @@ class TraceCollector(QObject):
                 turn += 1
                 meta["turn_start"] = True
 
-            # token 占用（列表 Tokens 列）：逐条缓存，key = (消息序号, 文本长度)
-            meta["tokens"] = self._tokens_for(i, raw_text)
+            # token 占用（列表 Tokens 列）：优先用 worker 落盘的真实 usage，
+            # 没有才按字符估算并逐条缓存（key = 消息序号 + 文本长度）
+            if not meta.get("tokens"):
+                meta["tokens"] = self._tokens_for(i, raw_text)
 
             records.append(
                 TraceRecord(
@@ -442,6 +461,28 @@ class TraceCollector(QObject):
         return value
 
     @staticmethod
+    def _result_success(result: Any) -> bool:
+        """从工具结果里判定成功与否。
+
+        引擎回调给的 ``result`` 形态不固定（dict / 带 success 属性的对象 /
+        纯文本），只能逐个探测；探测不到就当成功（宁可不标红，也不误报）。
+        """
+        if isinstance(result, dict):
+            for key in ("success", "ok", "is_error"):
+                if key in result:
+                    v = result[key]
+                    return (not bool(v)) if key == "is_error" else bool(v)
+            if result.get("error"):
+                return False
+            return True
+        for attr in ("success", "ok"):
+            v = getattr(result, attr, None)
+            if isinstance(v, bool):
+                return v
+        err = getattr(result, "error", None)
+        return not bool(err)
+
+    @staticmethod
     def _tool_preview(args_text: str, raw_text: str) -> str:
         """TOOL 行预览：优先参数 JSON 摘要，其次结果首行。"""
         if args_text:
@@ -492,13 +533,25 @@ class TraceCollector(QObject):
             )
         )
 
-    def _on_tool_result_received(self, tool_call_id: str, name: str, result: Any, success: bool) -> None:
+    def _on_tool_result_received(self, tool_call_id: str, name: str, arguments: Any, result: Any) -> None:
+        """工具结果回调 —— 签名与引擎侧一致 ``(id, name, arguments, result)``。
+
+        ⚠️ 旧签名是 ``(id, name, result, success)``，与 backend 实际 emit 的参数
+        对不上（第 3 位是 arguments、第 4 位是 result 对象），success 只能自己
+        从 result 里探测（:meth:`_result_success`）。
+        """
+        success = self._result_success(result)
         t = self._timing.get(tool_call_id)
         if t is not None:
             t["end"] = time.time()
-            t["success"] = bool(success)
+            t["success"] = success
             t["result"] = content_to_text(result)
-        # 落盘消息通常在 result 信号之后写入，这里先清尾巴，_sync 由
+            if arguments and not t.get("args"):
+                try:
+                    t["args"] = json.dumps(arguments, ensure_ascii=False)
+                except Exception:
+                    t["args"] = str(arguments)
+        # 落盘消息通常在 result 回调之后写入，这里先清尾巴，_sync 由
         # _hook_messages_updated 驱动；若已落盘则立即同步回填。
         self._set_tail([r for r in self._tail if r.meta.get("tool_call_id") != tool_call_id])
         if t is None:
@@ -506,7 +559,7 @@ class TraceCollector(QObject):
             self._timing[tool_call_id or f"anon-{time.time()}"] = {
                 "start": 0.0,
                 "end": time.time(),
-                "success": bool(success),
+                "success": success,
                 "name": name or "tool",
                 "args": "",
                 "result": content_to_text(result),
@@ -538,6 +591,19 @@ class TraceCollector(QObject):
 
     def _append_tail(self, rec: TraceRecord) -> None:
         self._set_tail(self._tail + [rec])
+
+
+def _epoch_from_ts_ms(value: Any) -> Optional[float]:
+    """毫秒时间戳 → epoch 秒；非法/缺失返回 None。
+
+    ``timestamp`` 字段只有秒级精度，同秒注入的多条消息排不出先后，所以主程序
+    额外写了毫秒级 ``ts_ms``。这里兼容秒级误写（值 < 1e11 当秒处理）。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value <= 0:
+        return None
+    return float(value) / 1000.0 if value > 1e11 else float(value)
 
 
 class TraceCollectorHub(QObject):

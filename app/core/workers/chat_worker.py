@@ -2193,7 +2193,9 @@ class OpenAIChatWorker(QThread):
 
     def _make_assistant_msg(self, content, model_name, reasoning_content, timestamp):
         """构建 assistant 消息 dict（消除 3 处重复构造）"""
-        msg = {"role": "assistant", "timestamp": timestamp}
+        # ts_ms：毫秒级时间戳。timestamp 只有秒级精度，同轮内连发的多条
+        # assistant/tool 消息排不出先后（轨迹分析需要顺序与间隔）。
+        msg = {"role": "assistant", "timestamp": timestamp, "ts_ms": int(time.time() * 1000)}
         if content:
             msg["content"] = content
         if reasoning_content:
@@ -4539,6 +4541,9 @@ class OpenAIChatWorker(QThread):
             "content": result_content,
             "success": success,
             "round_id": round_id,
+            # 毫秒级时间戳（工具结果返回时刻）—— 与 ts_ms(assistant/user/hook)
+            # 配套，供轨迹面板排序与计算间隔。
+            "ts_ms": int(time.time() * 1000),
             "diff": getattr(result_obj, "diff", None) if result_obj else None,
             "anchors": getattr(result_obj, "anchors", None) if result_obj else None,
             "echarts": getattr(result_obj, "echarts", None) if result_obj else None,

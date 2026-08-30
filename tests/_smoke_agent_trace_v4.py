@@ -160,9 +160,91 @@ def check_span_ends() -> None:
     print("  span ends OK:", [r.span_label for r in recs])
 
 
+def check_engine_event_forwarding() -> None:
+    """验证 backend 的「引擎回调 → Qt 信号」转发（本次真实数据的关键链路）。
+
+    背景：backend 上 tool_call_started / tool_result_received / stream_started /
+    stream_finished / context_updated **全仓没有 emit 点**，插件订阅了永远收不到。
+    修法是在 ``set_callback`` 注册时包一层转发。这里用探针对象借
+    ``ChatBackend._wrap_trace_callback`` 的纯逻辑做验证（不实例化重对象）：
+    - 原回调必须**照常收到全部参数**（不能被截断，否则主程序 UI 会坏）
+    - 信号只收到 arity 个参数（丢弃 round_id / from_api 等引擎专有参数）
+    """
+    from PyQt5.QtCore import QObject, pyqtSignal
+
+    from app.core.backend import ChatBackend
+    from ui.trace_collector import _epoch_from_ts_ms
+
+    class _Probe(QObject):
+        stream_started = pyqtSignal()
+        stream_finished = pyqtSignal(str)
+        tool_call_started = pyqtSignal(str, str, dict)
+        tool_result_received = pyqtSignal(str, str, dict, object)
+        context_updated = pyqtSignal(int, int)
+
+        _TRACE_SIGNAL_ARITY = ChatBackend._TRACE_SIGNAL_ARITY
+        _wrap_trace_callback = ChatBackend._wrap_trace_callback
+
+    probe = _Probe()
+    got: dict = {}
+    probe.tool_call_started.connect(lambda *a: got.__setitem__("tool", a))
+    probe.tool_result_received.connect(lambda *a: got.__setitem__("result", a))
+    probe.stream_started.connect(lambda: got.__setitem__("ss", ()))
+    probe.stream_finished.connect(lambda r: got.__setitem__("sf", (r,)))
+    probe.context_updated.connect(lambda c, lim: got.__setitem__("ctx", (c, lim)))
+
+    seen: list = []
+    # 引擎侧实际签名：tool_call_started 带第 4 个 round_id
+    probe._wrap_trace_callback("tool_call_started", lambda *a: seen.append(("start", a)))(
+        "call_1", "bash", {"command": "ls"}, "round-3"
+    )
+    assert seen[-1] == ("start", ("call_1", "bash", {"command": "ls"}, "round-3")), seen[-1]
+    assert got["tool"] == ("call_1", "bash", {"command": "ls"}), got["tool"]
+
+    probe._wrap_trace_callback(
+        "tool_result_received", lambda *a: seen.append(("res", len(a)))
+    )("call_1", "bash", {"command": "ls"}, {"success": True, "content": "ok"})
+    assert got["result"][0] == "call_1" and got["result"][3] == {"success": True, "content": "ok"}, got["result"]
+
+    probe._wrap_trace_callback("stream_started", lambda: seen.append(("ss",)))()
+    assert got.get("ss") == (), got.get("ss")
+    probe._wrap_trace_callback("stream_finished", lambda r: seen.append(("sf", r)))("hello")
+    assert got["sf"] == ("hello",), got["sf"]
+    # 引擎侧 context_updated 是 (count, limit, from_api)，第 3 参不透传
+    probe._wrap_trace_callback("context_updated", lambda *a: seen.append(("ctx", len(a))))(1234, 8192, True)
+    assert got["ctx"] == (1234, 8192), got["ctx"]
+    # 未登记的名字原样返回，不包装
+    plain = lambda: None  # noqa: E731
+    assert probe._wrap_trace_callback("error", plain) is plain
+
+    # ts_ms 换算：毫秒 / 秒级都吃，非法返回 None
+    assert abs((_epoch_from_ts_ms(1_700_000_000_123) or 0) - 1_700_000_000.123) < 0.01
+    assert _epoch_from_ts_ms(None) is None and _epoch_from_ts_ms(0) is None
+    assert _epoch_from_ts_ms("abc") is None
+    print("  engine event forwarding OK")
+
+
+def check_ts_ms_persisted() -> None:
+    """新字段必须进 ``normalize_message`` 白名单，否则会被 consolidate 剥掉。"""
+    from app.core.message_content import normalize_message
+
+    for msg in (
+        {"role": "user", "content": "hi", "timestamp": "2026-08-30 18:00:00", "ts_ms": 1_700_000_000_123},
+        {"role": "assistant", "content": "yo", "timestamp": "2026-08-30 18:00:00", "ts_ms": 1_700_000_001_456},
+        {"role": "tool", "content": "out", "tool_call_id": "c1", "name": "bash", "ts_ms": 1_700_000_002_789},
+    ):
+        norm = normalize_message(msg)
+        assert norm is not None and norm.get("ts_ms") == msg["ts_ms"], (msg["role"], norm)
+    # 缺失/非法时不应写入字段
+    assert "ts_ms" not in (normalize_message({"role": "user", "content": "x"}) or {}), "空值不应写入"
+    print("  ts_ms persisted OK")
+
+
 def main() -> int:
     check_span_ends()
+    check_ts_ms_persisted()
     app = QApplication(sys.argv)
+    check_engine_event_forwarding()
     card = TraceCardWidget()
     card.resize(1400, 820)
     card.show()

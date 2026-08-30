@@ -764,6 +764,13 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if message.get("timestamp"):
         normalized["timestamp"] = str(message.get("timestamp"))
 
+    # 毫秒级时间戳（所有 role 通用）。``timestamp`` 只有秒级精度，同秒连发的
+    # 多条消息（hook 注入、并行工具结果）排不出先后 → 轨迹分析必需的字段。
+    # ⚠️ 新字段必须加进这个白名单，否则会被 consolidate_messages 剥掉。
+    ts_ms = message.get("ts_ms")
+    if isinstance(ts_ms, (int, float)) and not isinstance(ts_ms, bool) and ts_ms > 0:
+        normalized["ts_ms"] = int(ts_ms)
+
     if role == "assistant":
         content = content_to_text(message.get("content", ""))
         if content:
