@@ -373,7 +373,6 @@ class LLMSettingsCard(SystemCardFrame):
             ("common", "通用设置"),
             ("appearance", "外观样式"),
             ("update", "版本更新"),
-            ("plugin_enable", "插件启用"),
             ("plugins", "插件设置"),
         ]
         body = QWidget(self)
@@ -458,6 +457,26 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         llm_layout.addWidget(self.lspListCard)
+
+        # ════ 工具 / 智能体 启停（按插件维度，D9/D10）════
+        # 原先是独立的「插件启用」页签，实际要管的只有这两类，收进大模型页
+        self.pluginToolCard = PluginComponentsCard(
+            components=("tools",),
+            title="工具启用",
+            content="按插件控制其工具的启停",
+            icon=FluentIcon.DEVELOPER_TOOLS,
+            parent=self,
+        )
+        llm_layout.addWidget(self.pluginToolCard)
+
+        self.pluginAgentCard = PluginComponentsCard(
+            components=("agents",),
+            title="智能体启用",
+            content="按插件控制其智能体的启停",
+            icon=get_icon("智能体"),
+            parent=self,
+        )
+        llm_layout.addWidget(self.pluginAgentCard)
         llm_layout.addStretch(1)
 
         # ════ 通用设置页 ════
@@ -584,11 +603,6 @@ class LLMSettingsCard(SystemCardFrame):
         update_layout.addWidget(self.manualUpdateCard)
         update_layout.addStretch(1)
 
-        # ════ 插件启用页（D9：插件组件开关，常驻页签）════
-        self.pluginComponentsCard = PluginComponentsCard(self)
-        self._page_layouts["plugin_enable"].addWidget(self.pluginComponentsCard)
-        self._page_layouts["plugin_enable"].addStretch(1)
-
         # ════ 插件设置页（初始隐藏，有注册卡片时显示）════
         self._plugin_cards_widget = QWidget(self)
         self._plugin_cards_layout = QVBoxLayout(self._plugin_cards_widget)
@@ -619,7 +633,8 @@ class LLMSettingsCard(SystemCardFrame):
             self.hookListCard,
             self.mcpListCard,
             self.lspListCard,
-            self.pluginComponentsCard,
+            self.pluginToolCard,
+            self.pluginAgentCard,
         ]
         self._apply_list_accordion()
 
@@ -630,11 +645,12 @@ class LLMSettingsCard(SystemCardFrame):
         无注册卡片时整个分区隐藏（行为零变化）。设置弹窗每次打开时调用，
         保证插件增删/热重载后分区内容最新。
         """
-        # 插件组件开关卡同步重建（插件增删/热重载后组件列表可能变化）
-        try:
-            self.pluginComponentsCard.refresh_components()
-        except Exception as e:
-            logger.warning(f"[LLMSettingsCard] 插件组件列表刷新失败: {e}")
+        # 工具/智能体开关卡同步重建（插件增删/热重载后组件列表可能变化）
+        for card_name in ("pluginToolCard", "pluginAgentCard"):
+            try:
+                getattr(self, card_name).refresh_components()
+            except Exception as e:
+                logger.warning(f"[LLMSettingsCard] {card_name} 刷新失败: {e}")
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
@@ -701,13 +717,14 @@ class LLMSettingsCard(SystemCardFrame):
 
             card.setExpand = _wrapped_set_expand
 
-        # 插件组件卡默认展开：它是「插件启用」页的主体，折叠态下用户看不到
-        # 任何组件。必须在包装完成之后调用，这样走的是包装版 setExpand，
+        # 「工具启用」默认展开：它是最常用的一个，折叠态下用户看不到内容。
+        # 必须在包装完成之后调用，这样走的是包装版 setExpand，
         # 手风琴语义仍然成立（会先收起其他已展开的列表卡片）。
+        # 「智能体启用」保持折叠——同一页内两张卡同时展开会把内容挤得太长。
         try:
-            self.pluginComponentsCard.setExpand(True)
+            self.pluginToolCard.setExpand(True)
         except Exception as e:
-            logger.warning(f"[LLMSettingsCard] 插件组件卡默认展开失败: {e}")
+            logger.warning(f"[LLMSettingsCard] 工具启用卡默认展开失败: {e}")
 
     def _ensure_hot_reload_connected(self):
         """订阅插件热重载广播，让设置面板在热重载后就地刷新
@@ -746,9 +763,10 @@ class LLMSettingsCard(SystemCardFrame):
             return
         try:
             self.rebuild_plugin_cards()
-            # force=True：热重载可能只改了组件内部的细项（工具/hook 增删），
+            # force=True：热重载可能只改了组件内部的细项（工具/智能体增删），
             # 插件清单未变 → 签名相同 → 非 force 的脏检查会跳过，必须强制重建
-            self.pluginComponentsCard.refresh_components(force=True)
+            for card_name in ("pluginToolCard", "pluginAgentCard"):
+                getattr(self, card_name).refresh_components(force=True)
             logger.info("[LLMSettingsCard] 插件热重载后已刷新设置面板")
         except Exception as e:
             logger.warning(f"[LLMSettingsCard] 热重载后刷新设置面板失败: {e}")
@@ -1141,7 +1159,8 @@ class LLMSettingsCard(SystemCardFrame):
             "llmProviderCard",
             "mcpListCard",
             "lspListCard",
-            "pluginComponentsCard",
+            "pluginToolCard",
+            "pluginAgentCard",
         ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
@@ -1284,9 +1303,11 @@ class LLMSettingsCard(SystemCardFrame):
         # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，
         # 后者会连带全量加载智能体 + 启动文件监听，实测约 330ms）
         self._ensure_hot_reload_connected()
-        # 每次打开设置时刷新插件组件列表（插件热重载/启停后保持最新）
-        if hasattr(self, "pluginComponentsCard"):
-            self.pluginComponentsCard.refresh_components()
+        # 每次打开设置时刷新工具/智能体列表（插件热重载/启停后保持最新）
+        for card_name in ("pluginToolCard", "pluginAgentCard"):
+            card = getattr(self, card_name, None)
+            if card is not None:
+                card.refresh_components()
         super().showEvent(event)
 
     def set_opacity(self, opacity: float):

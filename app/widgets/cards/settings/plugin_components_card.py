@@ -508,13 +508,26 @@ class PluginSectionWidget(QWidget):
 
 
 class PluginComponentsCard(ExpandSettingCard):
-    """插件组件开关卡 — 系统设置「插件启用」页，按插件分组控制子项启停"""
+    """插件组件开关卡 — 按插件分组控制某一类组件（工具 / 智能体）的启停
 
-    def __init__(self, parent=None):
+    一张卡只管一类组件：设置页用两张卡分别承载「工具启用」与「智能体启用」。
+    """
+
+    def __init__(
+        self,
+        parent=None,
+        components=("tools",),
+        title: str = "工具启用",
+        content: str = "按插件控制其工具的启停",
+        icon=None,
+    ):
+        # 白名单收敛：调用方误传 hooks 等未开放的组件时静默忽略（不留死开关）。
+        # 必须在 super().__init__ 之前——基类构造里就会走到 _collect_entries
+        self._components = tuple(c for c in components if c in _MANAGED_COMPONENTS) or ("tools",)
         super().__init__(
-            get_icon("配置管理"),
-            "插件组件",
-            "按插件控制其工具与智能体的启停",
+            icon if icon is not None else get_icon("配置管理"),
+            title,
+            content,
             parent,
         )
         self._pool: Dict[str, PluginSectionWidget] = {}
@@ -556,8 +569,9 @@ class PluginComponentsCard(ExpandSettingCard):
     # ── 构建 ──
 
     def _build_search_bar(self):
+        kinds = "/".join(_component_display_name(c) for c in self._components)
         self._search_bar = SearchLineEdit(self)
-        self._search_bar.setPlaceholderText("搜索插件名 / 工具名 / 智能体名")
+        self._search_bar.setPlaceholderText(f"搜索插件名 / {kinds}名")
         self._search_bar.setClearButtonEnabled(True)
         self._search_bar.setFixedHeight(32)
         self._search_timer = QTimer(self)
@@ -574,13 +588,13 @@ class PluginComponentsCard(ExpandSettingCard):
     def _collect_entries(self) -> List[tuple]:
         """[(name, is_system, description, [components])]，system 优先、同名按字母序
 
-        只保留 _MANAGED_COMPONENTS 里的组件；一个都不含的插件不出现。
+        只保留本卡负责的组件（self._components）；一个都不含的插件不出现。
         """
         pm = self._pm()
         plugins = sorted(pm.get_enabled_plugins(), key=lambda p: (not p.is_system, p.name.lower()))
         entries = []
         for plugin in plugins:
-            comps = [c for c, v in plugin.components.items() if v and c in _MANAGED_COMPONENTS]
+            comps = [c for c, v in plugin.components.items() if v and c in self._components]
             if not comps:
                 continue
             entries.append((plugin.name, plugin.is_system, plugin.description or "", sorted(comps, key=_order_key)))
