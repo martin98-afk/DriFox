@@ -57,7 +57,6 @@ from app.widgets.panel_mode_popup import PanelModePopup
 from app.widgets.workspace_tree import (
     KIND_PROJECT,
     KIND_SESSION,
-    KIND_TEAM,
     KIND_WIDGET,
     KIND_WORKTREE,
     TreeNodeSpec,
@@ -103,6 +102,29 @@ _PANEL_MODE_OPTIONS = (
     (PANEL_MODE_LIST, "列表模式", "按打开顺序平铺对话页"),
     (PANEL_MODE_TREE, "工作区树模式", "按项目 / 工作树归组"),
 )
+
+
+# 项目头像（缩写 + 稳定色）缓存：颜色由 crc32(name) 决定，与会话无关，可安全缓存。
+# ⚠️ 延迟导入 project_selector_card —— 它是设置页的重模块，模块级 import 会拖慢启动。
+_PROJECT_ICON_CACHE: dict = {}
+
+
+def _project_icon_data(name: str) -> tuple:
+    """返回项目头像的 (缩写, rgba 颜色)，与 TabItem 的项目 icon 同一套算法"""
+    cached = _PROJECT_ICON_CACHE.get(name)
+    if cached is not None:
+        return cached
+    try:
+        from app.widgets.cards.settings.project_selector_card import (
+            extract_project_initials,
+            get_project_color,
+        )
+
+        data = (extract_project_initials(name), get_project_color(name, alpha=255))
+    except Exception:
+        data = ("?", "rgba(128,128,128,255)")
+    _PROJECT_ICON_CACHE[name] = data
+    return data
 
 
 def _invalidate_cached_colors():
@@ -2611,13 +2633,16 @@ class TabPanel(QWidget):
         width = max(popup.sizeHint().width(), 196)
         height = popup.sizeHint().height()
         popup.setFixedSize(width, height)
-        anchor = self._mode_btn.mapToGlobal(self._mode_btn.rect().bottomLeft())
-        gx, gy = anchor.x(), anchor.y()
+        # 往左弹：按钮贴着面板右缘，往右弹会被窗口右边界裁掉。
+        # 用按钮的 bottomRight 做锚点，弹窗右边缘与按钮右边缘对齐。
+        anchor = self._mode_btn.mapToGlobal(self._mode_btn.rect().bottomRight())
+        gx, gy = anchor.x() - width, anchor.y()
         host = self.window()
         if host is not None:
             frame = host.frameGeometry()
-            if gx + width > frame.right():
-                gx = max(frame.left() + 4, frame.right() - width - 8)
+            # 左侧也放不下（极窄窗口）才回落成贴左边缘
+            if gx < frame.left():
+                gx = min(frame.left() + 4, frame.right() - width - 4)
             if gy + height > frame.bottom():
                 gy = max(frame.top() + 4, anchor.y() - height - self._mode_btn.height() - 4)
         popup.move(gx, gy)
@@ -2696,7 +2721,7 @@ class TabPanel(QWidget):
             backend = history = memory = None
 
         open_sids = self._open_session_ids(windows)
-        owners = self._tab_owners(windows)
+        owners = self._normalize_owners(self._tab_owners(windows))
 
         # ── 项目集合：历史项目 + 已打开 Tab 的项目，当前项目置顶 ──
         try:
@@ -2717,17 +2742,17 @@ class TabPanel(QWidget):
         else:
             projects.sort()
 
-        # ── 历史会话：团队按 run_id 聚合，其余按 项目+工作树 归组 ──
+        # ── 历史会话：只取非团队会话 ──
+        # ⚠️ 团队只在列表模式渲染（用户明确要求）：merge_team 聚合出来的团队条目
+        # 树模式整条跳过；已打开的团队成员对话页则平铺到所属工作树下，不会消失。
         try:
             sessions = list(history.get_history_list(merge_team=True) if history is not None else [])
         except Exception:
             sessions = []
-        team_by_project: dict = {}
         plain_by_project: dict = {}
         for rec in sessions:
             proj = (rec.get("project") or "").strip() or "默认项目"
             if rec.get("team_merged"):
-                team_by_project.setdefault(proj, []).append(rec)
                 continue
             if str(rec.get("session_id") or "") in open_sids:
                 continue  # 已作为 Tab 行出现，历史列表里不再重复
@@ -2738,7 +2763,8 @@ class TabPanel(QWidget):
             opened_here = [o for o in owners if o[0] == project]
             has_open = bool(opened_here)
             # 含已激活对话页的工作树默认展开：占着后端的会话不能被折叠藏起来
-            open_worktrees = {wt for p, wt, tid in owners if p == project and not tid}
+            open_worktrees = {wt for p, wt, _tid in owners if p == project}
+            p_initials, p_color = _project_icon_data(project)
             specs.append(
                 TreeNodeSpec(
                     key=f"project:{project}",
@@ -2746,6 +2772,16 @@ class TabPanel(QWidget):
                     title=project,
                     indent=_TREE_INDENT_PROJECT,
                     icon="folder",
+                    # 项目根用项目 icon（缩写字色块），与 Tab 上的项目头像同一套视觉
+                    initials=p_initials,
+                    color=p_color,
+                    actions=(
+                        (
+                            "分支",
+                            "管理工作树：打开本页长期记忆并跳到「关键文档」",
+                            lambda _p=project: self._open_project_memory(_p),
+                        ),
+                    ),
                     count=len(plain) + len(opened_here),
                     active_count=len(opened_here),
                     project=project,
@@ -2755,57 +2791,6 @@ class TabPanel(QWidget):
                     expanded_by_default=(project == cur_project or has_open),
                 )
             )
-
-            # 团队：先已打开的团队框，再历史团队条目（成员行可单独打开）
-            for team_id, grp in self._team_groups.items():
-                if self._team_project(team_id, owners) != project:
-                    continue
-                specs.append(
-                    TreeNodeSpec(
-                        key=f"teamwidget:{team_id}",
-                        kind=KIND_WIDGET,
-                        title="",
-                        indent=_TREE_INDENT_WORKTREE,
-                        widget=grp,
-                    )
-                )
-            for entry in team_by_project.get(project, []):
-                run_id = str(entry.get("team_run_id") or "")
-                label = (entry.get("team_name") or "").strip() or "团队"
-                specs.append(
-                    TreeNodeSpec(
-                        key=f"team:{run_id}",
-                        kind=KIND_TEAM,
-                        title=label,
-                        indent=_TREE_INDENT_WORKTREE,
-                        icon="团队",
-                        count=int(entry.get("member_count") or 0),
-                        project=project,
-                        worktree="",
-                        tooltip=f"团队：{label}",
-                    )
-                )
-                for member in list(entry.get("members") or [])[:_TREE_MAX_SESSIONS]:
-                    mid = str(member.get("session_id") or "")
-                    if not mid or mid in open_sids:
-                        continue
-                    title = (
-                        (member.get("agent_name") or "").strip()
-                        or (member.get("title") or "").strip()
-                        or "成员会话"
-                    )
-                    specs.append(
-                        TreeNodeSpec(
-                            key=f"session:{mid}",
-                            kind=KIND_SESSION,
-                            title=title,
-                            indent=_TREE_INDENT_SESSION,
-                            project=project,
-                            worktree=str(member.get("worktree_path") or ""),
-                            record=member,
-                            tooltip=f"{label} · {title}",
-                        )
-                    )
 
             # 工作树：主仓库() + 会话记录里的 + 已登记的 git worktree + 已打开 Tab 的
             worktrees = [""]
@@ -2830,6 +2815,9 @@ class TabPanel(QWidget):
                 if proj == project and wt not in seen:
                     seen.add(wt)
                     worktrees.append(wt)
+            # ⚠️ 目录已被外部删除（手工删目录 / git worktree prune）的工作树不再显示，
+            # 否则会残留一堆点开就报错的幽灵节点。主仓库（""）恒保留。
+            worktrees = [wt for wt in worktrees if not wt or os.path.isdir(wt)]
 
             for wt in worktrees:
                 label = "主仓库" if not wt else (os.path.basename(wt.rstrip("/\\")) or wt)
@@ -2842,17 +2830,17 @@ class TabPanel(QWidget):
                         indent=_TREE_INDENT_WORKTREE,
                         icon="根目录" if not wt else "分支",
                         count=len(children),
-                        # 该工作树下已激活的对话页（团队会话已在团队框里，不计入）
-                        active_count=len([o for o in opened_here if o[1] == wt and not o[2]]),
+                        # 该工作树下已激活的对话页（团队成员会话也平铺在这里，一并计入）
+                        active_count=len([o for o in opened_here if o[1] == wt]),
                         project=project,
                         worktree=wt,
                         tooltip=wt or f"{project} · 主仓库",
                         expanded_by_default=((project == cur_project and not wt) or wt in open_worktrees),
                     )
                 )
-                # 已打开的对话页（非团队，团队已单独成框）
-                for i, (proj, wt_i, team_id) in enumerate(owners):
-                    if proj != project or team_id or wt_i != wt:
+                # 已打开的对话页（含团队成员：树模式不渲染团队框，成员平铺到这里）
+                for i, (proj, wt_i, _team_id) in enumerate(owners):
+                    if proj != project or wt_i != wt:
                         continue
                     self._items[i].set_indent(_TREE_INDENT_TAB)
                     specs.append(
@@ -2885,12 +2873,40 @@ class TabPanel(QWidget):
         return specs
 
     @staticmethod
-    def _team_project(team_id: str, owners) -> str:
-        """团队框归属的项目（取第一个成员 Tab 的项目）"""
-        for proj, _wt, tid in owners:
-            if tid == team_id:
-                return proj
-        return ""
+    def _normalize_owners(owners):
+        """工作树目录已被删除的已打开对话页回落到主仓库（""）
+
+        一箭双雕：既让消失的工作树节点不再出现在树里，也保证这些对话页不会因为
+        失去归属节点而从树中蒸发（树里看不到 = 关不掉，是最糟的失败形态）。
+        """
+        return [(p, (wt if (not wt or os.path.isdir(wt)) else ""), t) for p, wt, t in owners]
+
+    def _open_project_memory(self, project: str):
+        """项目根「管理工作树」快捷入口
+
+        工作树的增删 / 切换 UI 就在记忆面板的「关键文档」页签里
+        （``WorktreeSectionWidget``），所以一键直达那里是管理工作树的最短路径。
+
+        ⚠️ 刻意用 show 而非 toggle：本按钮语义是「打开」，点第二次不应该把它关掉。
+        「当前页」= 当前激活的对话页窗口，而不是被点击的项目行。
+        """
+        try:
+            host = self._resolve_tab_host()
+            win = host.get_current_window() if hasattr(host, "get_current_window") else None
+            if win is None:
+                windows = list(getattr(host, "_windows", []) or [])
+                win = windows[-1] if windows else None
+            if win is None:
+                return
+            opener = getattr(win, "open_memory_card", None)
+            if callable(opener):
+                opener("docs")
+                return
+            toggler = getattr(win, "_toggle_memory_card", None)  # 兜底：只有 toggle 语义
+            if callable(toggler):
+                toggler()
+        except Exception as exc:
+            logger.warning(f"[TabPanel] 打开长期记忆面板失败: {exc}")
 
     def _rebuild_tree_layout(self):
         """树模式布局重建：把已打开的 Tab / 团队框 / 历史会话挂进 项目→工作树 树里
@@ -2907,16 +2923,16 @@ class TabPanel(QWidget):
             return
         self._tree_snapshot = snapshot
         self._tree_widget.rebuild(specs)
-        # 复用到树里的 TabItem / 团队框必须跟随折叠态
         compact = self._collapsed
         for item in self._items:
             # 已激活的对话页（一个会话一个后端）在树里要可辨识 + 可关闭
             item.set_open_marker(not compact)
             item.set_close_persistent(not compact)
             item.set_compact(compact)
+        # ⚠️ 团队只在列表模式渲染：树模式不生成团队框节点，但框体 widget 仍在
+        # _team_groups 里且上次可能入过布局 —— 不显式隐藏就会以旧几何继续绘制成残影。
         for grp in self._team_groups.values():
-            grp.setVisible(True)
-            self._apply_team_compact(grp, compact)
+            grp.setVisible(False)
 
     def remove_tab(self, index: int):
         """移除指定索引的 Tab"""

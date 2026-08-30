@@ -529,6 +529,18 @@ class DetailPanel(QWidget):
 
     # ──────────────────── 主题 ────────────────────
 
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        """面板底色 + 左侧 1px 分隔线：列表区全透明，靠底色差异区分两栏。"""
+        p = QPainter(self)
+        try:
+            p.setPen(Qt.NoPen)
+            p.setBrush(with_alpha(self._pal.line, 8))
+            p.drawRect(self.rect())
+            p.setBrush(QColor(self._pal.border))
+            p.drawRect(0, 0, 1, self.height())
+        finally:
+            p.end()
+
     def _apply_theme(self) -> None:
         pal = self._pal
         fs = max(9, self._base_px - 1)

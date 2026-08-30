@@ -152,7 +152,7 @@ class TraceCardWidget(QWidget):
 
         # ③ 列表 + 详情（同一行）
         splitter = QSplitter(Qt.Horizontal, self)
-        splitter.setHandleWidth(2)
+        splitter.setHandleWidth(6)
         splitter.setChildrenCollapsible(False)
         self._turn_list = TurnListWidget(splitter)
         self._turn_list.setMinimumWidth(420)
@@ -165,6 +165,8 @@ class TraceCardWidget(QWidget):
         splitter.setSizes([880, 520])
         outer.addWidget(splitter, 1)
         self._splitter = splitter
+        self._detail_sizes: Optional[List[int]] = None  # 详情收起前的宽度（展开时恢复）
+        self._detail.hide()  # 初始无选中 → 详情收起，点选条目再展开
 
         # ④ 汇总栏
         outer.addWidget(self._build_bottom_bar())
@@ -376,6 +378,9 @@ class TraceCardWidget(QWidget):
                 f"QFrame#agentTraceBottomBar QLabel {{ color: {pal.q('text_muted')};"
                 f"  font-family: '{pal.font_family}'; font-size: {small}px; background: transparent; }}"
             )
+        # splitter 手柄透明：详情面板自带底色 + 左分隔线（DetailPanel.paintEvent），
+        # 加宽手柄只为拖拽热区，视觉边界交给面板自身
+        self._splitter.setStyleSheet("QSplitter::handle:horizontal { background: transparent; }")
 
     # ──────────────────── collector 切换 ────────────────────
 
@@ -467,6 +472,7 @@ class TraceCardWidget(QWidget):
         # 反过来写等于把刚推入的数据抹掉（详情面板恒显示"未选中条目"）。
         self._detail.clear()
         self._detail.set_records(vis)
+        self._hide_detail()  # 全量重置后回到无选中态 → 详情收起
         # 全量重置（切会话 / 切标签页 / 清除）时丢掉时间选区：旧区间在新会话里没意义。
         # 两处都直接设空值、不 emit，避免互相回环。
         self._timeline.clear_range()
@@ -592,7 +598,7 @@ class TraceCardWidget(QWidget):
         self._detail.set_bounds(t0, t1)
 
     def _on_record_selected(self, idx: int) -> None:
-        self._detail.show()  # 点击新条目恢复被 × 隐藏的详情面板
+        self._show_detail()
         vis = self._visible()
         self._detail.set_records(vis)
         self._detail.select(idx)
@@ -601,11 +607,27 @@ class TraceCardWidget(QWidget):
     def _on_record_clicked(self, idx: int) -> None:
         self._turn_list.select_record(idx)
 
-    def _on_detail_dismissed(self) -> None:
-        # × = 整块隐藏详情面板；点选新条目时再恢复（_on_record_selected）
+    def _show_detail(self) -> None:
+        """点选条目 → 展开详情面板（恢复收起前的 splitter 宽度）。"""
+        if self._detail.isVisible():
+            return
+        self._detail.show()
+        sizes = self._detail_sizes or [880, 520]
+        total = sum(self._splitter.sizes()) or sum(sizes)
+        scale = total / sum(sizes)
+        self._splitter.setSizes([round(sizes[0] * scale), round(sizes[1] * scale)])
+
+    def _hide_detail(self) -> None:
+        """收起详情面板：点 × 或全量重置（切会话/切标签页 → 无选中态）时调用。"""
+        if self._detail.isVisible():
+            self._detail_sizes = self._splitter.sizes()
         self._detail.hide()
         self._timeline.set_selected(None)
         self._turn_list.clear_selection()
+
+    def _on_detail_dismissed(self) -> None:
+        # × = 整块隐藏详情面板；点选新条目时再恢复（_on_record_selected）
+        self._hide_detail()
 
     def _on_flag_toggled(self, key: str) -> None:
         """顶栏三个开关 → 时间线 flags（可任意组合）。"""

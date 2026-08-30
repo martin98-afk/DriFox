@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """工作区树 — TabPanel「树模式」的渲染容器
 
-层次：项目 → 工作树 → 会话（历史会话行 / 已打开的对话页行）；团队框挂在对应项目下。
+层次：项目 → 工作树 → 会话（历史会话行 / 已打开的对话页行）。
+
+⚠️ 团队不在此渲染：团队框只在列表模式出现（用户明确要求「团队只支持列表」），
+树模式下团队成员会话直接平铺到所属工作树下，行为与普通对话页一致。
 
 职责边界
 --------
@@ -110,6 +113,66 @@ class TreeNodeSpec:
     bold: bool = False  # 标题加粗（项目头用）
     record: Optional[dict] = None  # 会话记录（KIND_SESSION）
     widget: Optional[QWidget] = field(default=None, repr=False)  # KIND_WIDGET 的外部 widget
+    # ── 项目头像（与 TabItem 的项目 icon 同一套视觉）：非空时优先于 icon 渲染 ──
+    initials: str = ""  # 缩写（1-2 字符）
+    color: str = ""  # 色块颜色（rgba 字符串）
+    # ── 头行右侧快捷按钮：((图标名, tooltip, 无参回调), ...) ──
+    # 用途：项目根行的「管理工作树」等一键入口。hover 才显，与「新建」按钮一致。
+    actions: tuple = ()
+
+    @property
+    def avatar_sig(self) -> tuple:
+        """头像签名（用于判断是否需要重画色块）"""
+        return (self.initials, self.color)
+
+    @property
+    def actions_sig(self) -> tuple:
+        """快捷按钮签名：只比 (图标, tooltip)，回调允许换对象而不重建按钮"""
+        return tuple((str(a[0]), str(a[1])) for a in (self.actions or ()))
+
+
+class _ProjectBadge(QWidget):
+    """项目头像：圆角色块 + 白色缩写
+
+    与 TabItem 的项目 icon（``_TabProjectIcon``）保持同一套视觉，只是尺寸更小。
+    直接 QPainter 绘制，Qt 自动处理 devicePixelRatio，无需中间 QPixmap。
+    """
+
+    def __init__(self, parent=None, size: int = 14):
+        super().__init__(parent)
+        self._size = size
+        self._initials = ""
+        self._color = QColor(128, 128, 128)
+        self.setFixedSize(size, size)
+        self.setVisible(False)
+
+    def set_project(self, initials: str, color_rgba: str):
+        self._initials = (initials or "").strip() or "?"
+        self._color = _parse_rgba(color_rgba)
+        self.update()
+
+    def set_px(self, px: int):
+        if px == self._size:
+            return
+        self._size = px
+        self.setFixedSize(px, px)
+        self.update()
+
+    def paintEvent(self, event):  # noqa: N802 - Qt 约定
+        if not self._initials:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.TextAntialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(self._color)
+        painter.drawRoundedRect(QRectF(self.rect()), 4, 4)
+        painter.setPen(Qt.white)
+        font = get_unified_font()
+        font.setPixelSize(max(7, int(self._size * 0.58)))
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(self.rect(), Qt.AlignCenter, self._initials)
 
 
 class _TreeArrow(QWidget):
@@ -184,7 +247,16 @@ class _NodeHeader(QFrame):
         self._project = ""
         self._worktree = ""
         self._spec_bold = False
+        self._active_count = 0
         self._icon_px = scale_icon_size(14)
+        # ── 项目头像色块（initials 非空时顶替 _icon_label）──
+        self._badge = _ProjectBadge(self, size=self._icon_px)
+        self._initials = ""
+        self._color = ""
+        # ── 头行右侧快捷按钮（项目根的「管理工作树」等入口）──
+        self._actions: tuple = ()
+        self._actions_sig: tuple = ()
+        self._action_btns: List[QWidget] = []
 
         self.setFixedHeight(_HEADER_HEIGHT)
         self.setCursor(Qt.PointingHandCursor)
@@ -200,6 +272,7 @@ class _NodeHeader(QFrame):
         self._icon_label.setFixedSize(self._icon_px, self._icon_px)
         self._icon_label.setStyleSheet("background: transparent;")
         layout.addWidget(self._icon_label)
+        layout.addWidget(self._badge)
 
         self._title = _ElidedLabel("", self)
         self._title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -245,14 +318,76 @@ class _NodeHeader(QFrame):
         count_text = str(spec.count) if spec.count > 0 else ""
         if self._count_label.text() != count_text:
             self._count_label.setText(count_text)
-        active_text = f"{spec.active_count} 激活" if spec.active_count > 0 else ""
+        self._active_count = int(spec.active_count or 0)
+        active_text = f"{self._active_count} 激活" if self._active_count > 0 else ""
         if self._active_label.text() != active_text:
             self._active_label.setText(active_text)
+        self._sync_badges()
         if spec.icon != self._icon_name:
             self._icon_name = spec.icon
         self._new_btn.setToolTip(f"在「{spec.title}」下新建对话页")
         self._spec_bold = spec.bold
+        self._apply_avatar(spec)
+        self._apply_actions(spec)
         self._apply_appearance()
+
+    def _apply_avatar(self, spec: "TreeNodeSpec"):
+        """项目头像：initials 非空时用它画色块并顶掉 get_icon 图标"""
+        if spec.avatar_sig == (self._initials, self._color):
+            return
+        self._initials, self._color = spec.avatar_sig
+        if self._initials:
+            self._badge.set_px(self._icon_px)
+            self._badge.set_project(self._initials, self._color)
+
+    def _apply_actions(self, spec: "TreeNodeSpec"):
+        """同步头行右侧的快捷按钮
+
+        签名只比 (图标, tooltip)：回调每次重建都可能换对象（lambda 闭包捕获新的
+        project），若把回调也算进签名会每次重建都销毁重建按钮 —— 既浪费又会在
+        hover 时闪。这里只更新闭包引用。
+        """
+        sig = spec.actions_sig
+        self._actions = tuple(spec.actions or ())
+        if sig != self._actions_sig:
+            self._actions_sig = sig
+            for btn in self._action_btns:
+                self.layout().removeWidget(btn)
+                btn.hide()
+                btn.deleteLater()
+            self._action_btns = []
+            lay = self.layout()
+            for name, tip, cb in self._actions:
+                btn = TransparentToolButton(self)
+                btn.setIcon(get_icon(name))
+                btn.setFixedSize(20, 20)
+                btn.setIconSize(self._icon_label.size())
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.setToolTip(tip)
+                btn.setVisible(False)
+                # ⚠️ 不设这个，点击会同时冒泡到头行的 mousePressEvent → 折叠/展开
+                btn.setAttribute(Qt.WA_NoMousePropagation, True)
+                btn.clicked.connect(cb)
+                lay.insertWidget(lay.indexOf(self._new_btn), btn)
+                self._action_btns.append(btn)
+        else:
+            # 签名未变：只换掉回调（按钮对象复用，避免 hover 闪烁）
+            for btn, (_n, _t, cb) in zip(self._action_btns, self._actions):
+                try:
+                    btn.clicked.disconnect()
+                except Exception:
+                    pass
+                btn.clicked.connect(cb)
+
+    def _sync_badges(self):
+        """计数徽标 / 已激活胶囊的可见性：有文本 且 非紧凑态才显示
+
+        只setText不setVisible 会让胶囊永远不出现；而 set_compact(False) 无条件
+        setVisible(True) 又会在文本为空时渲染出空药丸。统一收敛到这里。
+        """
+        shown = not self._compact
+        self._count_label.setVisible(bool(self._count_label.text()) and shown)
+        self._active_label.setVisible(bool(self._active_label.text()) and shown)
 
     # ── 状态 ─────────────────────────────────────────────────────
     def set_expanded(self, expanded: bool, animate: bool = True):
@@ -265,11 +400,12 @@ class _NodeHeader(QFrame):
             return
         self._compact = compact
         self._title.setVisible(not compact)
-        self._count_label.setVisible(not compact)
-        self._active_label.setVisible(not compact)
+        self._sync_badges()
         self._arrow.setVisible(not compact)
         if compact:
             self._new_btn.setVisible(False)
+            for btn in self._action_btns:
+                btn.setVisible(False)
         self._apply_appearance()
 
     # ── 样式 ─────────────────────────────────────────────────────
@@ -293,16 +429,25 @@ class _NodeHeader(QFrame):
             f"border-radius: 7px; padding: 0px 6px; "
             f"{get_font_family_css()} {font_size_css(10)};"
         )
-        if self._icon_name:
-            px = scale_icon_size(14)
-            if px != self._icon_px:
-                self._icon_px = px
-                self._icon_label.setFixedSize(px, px)
+        px = scale_icon_size(14)
+        if px != self._icon_px:
+            self._icon_px = px
+            self._icon_label.setFixedSize(px, px)
+            self._badge.set_px(px)
+        # 项目头像优先：有色块就不画通用图标
+        if self._initials:
+            self._badge.setVisible(True)
+            self._icon_label.setVisible(False)
+        elif self._icon_name:
             self._icon_label.setPixmap(get_icon(self._icon_name).pixmap(self._icon_label.size()))
             self._icon_label.setVisible(True)
+            self._badge.setVisible(False)
         else:
             self._icon_label.setVisible(False)
+            self._badge.setVisible(False)
         self._new_btn.setIconSize(self._icon_label.size())
+        for btn in self._action_btns:
+            btn.setIconSize(self._icon_label.size())
 
     def refresh_style(self):
         self._apply_appearance()
@@ -312,12 +457,16 @@ class _NodeHeader(QFrame):
         self._hovered = True
         if not self._compact:
             self._new_btn.setVisible(True)
+            for btn in self._action_btns:
+                btn.setVisible(True)
         self.update()
         super().enterEvent(event)
 
     def leaveEvent(self, event):  # noqa: N802 - Qt 约定
         self._hovered = False
         self._new_btn.setVisible(False)
+        for btn in self._action_btns:
+            btn.setVisible(False)
         self.update()
         super().leaveEvent(event)
 

@@ -20103,6 +20103,29 @@ class OpenAIChatToolWindow(ToolWindow):
             if hasattr(self._memory_card, "set_current_tab"):
                 self._memory_card.set_current_tab(default_tab)
 
+    def open_memory_card(self, tab_key: str = "entries"):
+        """打开（而非切换）当前页的长期记忆面板，并跳到指定页签
+
+        与 :meth:`_toggle_memory_card` 的唯一区别是**只开不关**：本方法给「一键直达」
+        类入口（对话页树的项目根「管理工作树」按钮）使用，点第二次不应该把面板收起。
+
+        Args:
+            tab_key: entries=条目记忆 / notes=项目笔记 / docs=关键文档
+                （工作树的增删与切换 UI 挂在 docs 页签里）
+        """
+        self._ensure_memory_card()
+        self._card_manager.show_card("memory", self._window_id)
+        # 内容由 _build_deferred_card_memory 惰性构建；用户提前点击时兜底立即构建
+        if getattr(self, "_memory_card_popup", None) is None:
+            self._build_deferred_card_memory()
+        popup = getattr(self, "_memory_card_popup", None)
+        if popup is not None and hasattr(popup, "switch_tab"):
+            popup._current_tab = None  # 置空，确保 switch_tab 不被幂等判等跳过
+            popup.switch_tab(tab_key)
+        card = getattr(self, "_memory_card", None)
+        if card is not None and hasattr(card, "set_current_tab"):
+            card.set_current_tab(tab_key)
+
     def _on_memory_card_saved(self, memories: list):
         """记忆卡片保存后的回调"""
         # 数据已经在 MemoryCardContent 中通过 backend 保存
