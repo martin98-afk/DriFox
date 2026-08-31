@@ -6,10 +6,13 @@
 不进任何 layout，与桌宠（PixelPetWidget）同模式。由标题栏「右侧边栏」
 按钮 toggle 显隐。
 
-三个页签：
+三个内置区域：
+- 任务：todowrite 工具回传的待办列表（窗口级），进度 + 状态条目 —— 置顶常驻，不进页签
 - 产物：本会话 AI 写过的文件（file_recorder 会话级文件写入记录，按文件去重倒序）
-- 任务：todowrite 工具回传的待办列表（窗口级），进度 + 状态条目
 - 记忆：嵌入 MemoryCardContent 完整长期记忆面板（条目/项目笔记/关键文档）
+
+页签条复用顶栏 CustomTabButton 自绘风格；插件可通过
+UIPluginRegistry.register_workbench_tab 注册新页签（见 sync_plugin_pages）。
 
 数据由外部驱动（TabManagerWindow.refresh_workbench / MainWidget 推送），
 面板自身不持有 backend 引用，便于测试与解耦。
@@ -24,7 +27,6 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
@@ -34,8 +36,9 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import TransparentToolButton
 from qfluentwidgets import FluentIcon
 
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.custom_title_bar import CustomTabButton
 
 # ── 尺寸常量 ──
 PANEL_WIDTH_DEFAULT = 480  # 默认宽度
@@ -376,7 +379,14 @@ class TasksPage(QWidget):
 
 
 class MemoryPage(QWidget):
-    """记忆页：懒构建并嵌入 MemoryCardContent（完整长期记忆面板）"""
+    """记忆页：懒构建并嵌入 MemoryCardContent（完整长期记忆面板）
+
+    内置「条目记忆 / 项目笔记 / 关键文档」子页签（复用顶栏 CustomTabButton
+    风格）。原 MemoryCardContent 本身没有页签 UI（页签在弹窗头部），
+    嵌入工作台时必须自带，否则无法切到笔记/文档。
+    """
+
+    SUB_TABS = (("entries", "条目记忆"), ("notes", "项目笔记"), ("docs", "关键文档"))
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -384,10 +394,40 @@ class MemoryPage(QWidget):
         self._memory_manager = None
         self._project: str = ""
         self._workdir: Optional[str] = None
+        self._sub_buttons: List[CustomTabButton] = []
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(6)
+
+        # 子页签条（CustomTabButton 风格，与顶栏统一）
+        self._tabs_layout = QHBoxLayout()
+        self._tabs_layout.setSpacing(2)
+        for tab_id, label in self.SUB_TABS:
+            btn = CustomTabButton(tab_id, label, self)
+            btn.clicked.connect(self._on_sub_tab_clicked)
+            self._tabs_layout.addWidget(btn)
+            self._sub_buttons.append(btn)
+        self._tabs_layout.addStretch(1)
+        self._layout.addLayout(self._tabs_layout)
+
         self._hint = _EmptyHint("长期记忆未就绪", self)
         self._layout.addWidget(self._hint)
+        self._set_sub_tab_active(0)
+
+    def _on_sub_tab_clicked(self, tab_id: str) -> None:
+        """子页签点击：切换到 MemoryCardContent 对应页"""
+        if self._content is None:
+            return
+        try:
+            self._content.switch_tab(tab_id)
+        except Exception:
+            return
+        for i, btn in enumerate(self._sub_buttons):
+            btn.set_active(btn.tab_id == tab_id)
+
+    def _set_sub_tab_active(self, index: int) -> None:
+        for i, btn in enumerate(self._sub_buttons):
+            btn.set_active(i == index)
 
     def ensure_built(self, memory_manager: Any) -> None:
         """注入 memory_manager 并懒构建内容（避免初始化期拉起存储层）"""
@@ -400,6 +440,8 @@ class MemoryPage(QWidget):
             self._layout.addWidget(self._content, 1)
             if self._project:
                 self._content.set_project(self._project, self._workdir)
+            # 初始停留在条目记忆页签
+            self._set_sub_tab_active(0)
 
     def set_project(self, project: str, workdir: Optional[str] = None) -> None:
         self._project = project or ""
@@ -409,6 +451,8 @@ class MemoryPage(QWidget):
 
     def refresh_style(self) -> None:
         self._hint.refresh_style()
+        for btn in self._sub_buttons:
+            btn.refresh_style()
         if self._content is not None and hasattr(self._content, "refresh_style"):
             self._content.refresh_style()
 
@@ -428,7 +472,7 @@ class WorkbenchPanel(QWidget):
     close_requested = pyqtSignal()
     refresh_requested = pyqtSignal()
 
-    TAB_ARTIFACTS, TAB_TASKS, TAB_MEMORY = 0, 1, 2
+    TAB_ARTIFACTS, TAB_MEMORY = 0, 1
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -447,22 +491,13 @@ class WorkbenchPanel(QWidget):
         root.setContentsMargins(10, 8, 8, 8)
         root.setSpacing(6)
 
-        # ── 头部：标题 + 页签 + 关闭 ──
+        # ── 头部：标题 + 刷新 + 关闭 ──
         header = QHBoxLayout()
         header.setSpacing(4)
         self._title_label = QLabel("工作台", self)
         self._title_label.setStyleSheet("font-weight: 700;")
         header.addWidget(self._title_label)
         header.addStretch(1)
-        self._tab_buttons: List[QPushButton] = []
-        for label, idx in (("产物", self.TAB_ARTIFACTS), ("任务", self.TAB_TASKS), ("记忆", self.TAB_MEMORY)):
-            btn = QPushButton(label, self)
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setFixedHeight(24)
-            btn.clicked.connect(lambda _=False, i=idx: self.set_current_tab(i))
-            header.addWidget(btn)
-            self._tab_buttons.append(btn)
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self)
         self._refresh_btn.setToolTip("刷新产物与任务")
         self._refresh_btn.setFixedSize(24, 24)
@@ -474,18 +509,129 @@ class WorkbenchPanel(QWidget):
         header.addWidget(self._close_btn)
         root.addLayout(header)
 
+        # ── 任务区：置顶常驻（不进页签，类任务清单）──
+        self.tasks_page = TasksPage(self)
+        self.tasks_page.setMaximumHeight(200)
+        root.addWidget(self.tasks_page)
+
+        # ── 页签条：复用顶栏 CustomTabButton 自绘风格 ──
+        self._tab_bar_layout = QHBoxLayout()
+        self._tab_bar_layout.setSpacing(2)
+        root.addLayout(self._tab_bar_layout)
+        self._tab_buttons: List[CustomTabButton] = []
+        self._tab_ids: List[str] = []
+
         # ── 内容栈 ──
         self._stack = QStackedWidget(self)
         self.artifacts_page = ArtifactsPage(self._stack)
-        self.tasks_page = TasksPage(self._stack)
         self.memory_page = MemoryPage(self._stack)
         self._stack.addWidget(self.artifacts_page)
-        self._stack.addWidget(self.tasks_page)
         self._stack.addWidget(self.memory_page)
         root.addWidget(self._stack, 1)
 
+        # 插件页签：{page_id: widget}，按注册表 reconcile（见 sync_plugin_pages）
+        self._plugin_widgets: Dict[str, QWidget] = {}
+        self._plugin_infos: Dict[str, Any] = {}
+        self._plugin_sig: Optional[tuple] = None
+
+        self._rebuild_tab_bar()
         self.set_current_tab(self.TAB_ARTIFACTS)
         self.refresh_style()
+
+    # ── 页签条构建（内置 + 插件，顺序与 stack 一致） ──
+
+    def _tab_specs(self) -> List[tuple]:
+        """内置页签 + 插件页签（顺序与 QStackedWidget 保持一致）"""
+        specs: List[tuple] = [("artifacts", "产物"), ("memory", "记忆")]
+        for page_id, info in self._plugin_infos.items():
+            specs.append((page_id, info.label))
+        return specs
+
+    def _rebuild_tab_bar(self) -> None:
+        """按当前插件注册表重建页签条（内置页签在前，插件按注册序在后）"""
+        for btn in self._tab_buttons:
+            self._tab_bar_layout.removeWidget(btn)
+            btn.hide()
+            btn.deleteLater()
+        self._tab_buttons = []
+        self._tab_ids = []
+        for tab_id, label in self._tab_specs():
+            btn = CustomTabButton(tab_id, label, self)
+            btn.clicked.connect(self._on_tab_clicked)
+            self._tab_bar_layout.addWidget(btn)
+            self._tab_buttons.append(btn)
+            self._tab_ids.append(tab_id)
+        self._tab_bar_layout.addStretch(1)
+
+    def _on_tab_clicked(self, tab_id: str) -> None:
+        """页签点击：按 tab_id 定位 stack 索引（内置 0/1，插件 2+）"""
+        idx = self._tab_id_index(tab_id)
+        if idx is not None:
+            self.set_current_tab(idx)
+
+    def _tab_id_index(self, tab_id: str) -> Optional[int]:
+        if tab_id == "artifacts":
+            return self.TAB_ARTIFACTS
+        if tab_id == "memory":
+            return self.TAB_MEMORY
+        try:
+            return self.TAB_MEMORY + 1 + list(self._plugin_infos.keys()).index(tab_id)
+        except ValueError:
+            return None
+
+    # ── 插件页签 reconcile（宿主在 refresh_workbench 时调用） ──
+
+    def sync_plugin_pages(self, tabs: List[Any]) -> None:
+        """按 UIPluginRegistry 的 workbench_tabs 增删插件页（签名不变则跳过重建）"""
+        infos = {t.page_id: t for t in (tabs or [])}
+        sig = tuple((t.page_id, t.label) for t in (tabs or []))
+        if sig == self._plugin_sig and set(infos.keys()) == set(self._plugin_widgets.keys()):
+            return
+        self._plugin_infos = infos
+        # 当前页是否是被卸载的插件页（卸载后 Qt 会自动切到邻近页，需回落产物页）
+        cur = self._stack.currentWidget()
+        was_plugin_current = cur is not None and any(cur is w for w in self._plugin_widgets.values())
+        # 卸载已注销页
+        for page_id in list(self._plugin_widgets.keys()):
+            if page_id not in infos:
+                self._destroy_plugin_page(page_id)
+        # 挂载新页
+        for page_id, info in infos.items():
+            if page_id not in self._plugin_widgets:
+                self._mount_plugin_page(info)
+        self._plugin_sig = sig
+        current = self._stack.currentIndex()
+        self._rebuild_tab_bar()
+        # 当前页被移除（插件页）或越界时回落到产物页
+        if was_plugin_current or current >= self._stack.count():
+            current = self.TAB_ARTIFACTS
+        self.set_current_tab(current)
+
+    def _mount_plugin_page(self, info: Any) -> None:
+        """构建并挂载插件页 widget（构造 parent + context，兼容无 context 的老签名）"""
+        context = {}
+        try:
+            parent_win = self.parentWidget()
+            if parent_win is not None and hasattr(parent_win, "_build_ui_context"):
+                context = parent_win._build_ui_context()
+        except Exception:
+            context = {}
+        try:
+            widget = info.widget_class(parent=self._stack, context=context)
+        except TypeError:
+            widget = info.widget_class(parent=self._stack)
+        if widget is None:
+            return
+        self._stack.addWidget(widget)
+        self._plugin_widgets[info.page_id] = widget
+
+    def _destroy_plugin_page(self, page_id: str) -> None:
+        """销毁插件页 widget（显式隐藏 + 移除布局，避免残影）"""
+        widget = self._plugin_widgets.pop(page_id, None)
+        if widget is not None:
+            widget.hide()
+            self._stack.removeWidget(widget)
+            widget.deleteLater()
 
     # ── 展开折叠动画（沿 x 轴滑入滑出，右缘固定贴窗口边） ──
 
@@ -554,7 +700,7 @@ class WorkbenchPanel(QWidget):
         """切换页签；记忆页首次进入时构建（由宿主先调 ensure_memory）"""
         self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._tab_buttons):
-            btn.setChecked(i == index)
+            btn.set_active(i == index)
 
     def current_tab(self) -> int:
         return self._stack.currentIndex()
@@ -579,25 +725,17 @@ class WorkbenchPanel(QWidget):
     def refresh_style(self) -> None:
         Colors.refresh()
         self.setStyleSheet(
-            f"QWidget#workbenchPanel {{ background: {Colors.CARD_BG_SOLID}; border-left: 1px solid {Colors.BORDER}; }}"
+            f"QWidget#workbenchPanel {{ background: {Colors.CARD_BG_SOLID};"
+            f" border-left: 1px solid {Colors.BORDER};"
+            f" border-top-left-radius: {BorderRadius.LG};"
+            f" border-bottom-left-radius: {BorderRadius.LG}; }}"
         )
         self._title_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
             f" {get_font_family_css()} {font_size_css(14)}; font-weight: 700;"
         )
         for btn in self._tab_buttons:
-            checked = btn.isChecked()
-            btn.setStyleSheet(
-                "QPushButton {"
-                f" color: {'#ffffff' if checked else Colors.TEXT_SECONDARY};"
-                f" background: {Colors.SELECTED_BG if checked else 'transparent'};"
-                f" border: 1px solid {Colors.BORDER if checked else 'transparent'};"
-                " border-radius: 6px; padding: 0 12px;"
-                f" {get_font_family_css()} {font_size_css(12)}; }}"
-                "QPushButton:hover {"
-                f" background: {Colors.HOVER_BG};"
-                f" color: {Colors.TEXT_PRIMARY}; }}"
-            )
+            btn.refresh_style()
         self.artifacts_page.refresh_style()
         self.tasks_page.refresh_style()
         self.memory_page.refresh_style()

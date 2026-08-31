@@ -77,6 +77,33 @@ def test_slide_animation_lifecycle(panel):
     panel.hide()
 
 
+def test_tasks_pinned_outside_stack(panel):
+    # 任务区置顶常驻：不进内容栈，无对应页签
+    assert panel._stack.indexOf(panel.tasks_page) == -1
+    assert "任务" not in [b.tab_id for b in panel._tab_buttons]
+
+
+def test_plugin_page_mount_and_unmount(panel):
+    from types import SimpleNamespace
+
+    class FakePage(QWidget):
+        def __init__(self, parent=None, context=None):
+            super().__init__(parent)
+
+    info = SimpleNamespace(page_id="plug1", label="插件页", widget_class=FakePage, plugin_name="x")
+    panel.sync_plugin_pages([info])
+    assert panel._tab_id_index("plug1") == 2
+    assert panel._stack.count() == 3
+    assert panel._stack.indexOf(panel._plugin_widgets["plug1"]) == 2
+    panel.set_current_tab(2)
+    assert panel.current_tab() == 2
+    # 卸载后回落
+    panel.sync_plugin_pages([])
+    assert panel._stack.count() == 2
+    assert panel._tab_id_index("plug1") is None
+    assert panel.current_tab() == 0
+
+
 def test_refresh_style_idempotent(panel):
     panel.refresh_style()
     panel.refresh_style()

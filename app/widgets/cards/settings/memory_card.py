@@ -851,6 +851,9 @@ class MemoryCardContent(QWidget):
         # 强制刷新项目笔记和关键文档
         self._load_project_note()
         self._load_key_documents()
+        # 修复：首次进入/切换项目时同步加载条目记忆，避免空白
+        if self._current_tab == TAB_ENTRY_MEMORIES:
+            self._load_entries()
 
     def _get_effective_workdir(self, project: str):
         """获取有效工作目录（多窗口隔离：实例缓存优先，回退 DB）
@@ -931,6 +934,10 @@ class MemoryCardContent(QWidget):
         stack_layout.addWidget(self._tab_docs)
 
         main_layout.addWidget(self.content_stack, 1)
+
+        # 修复：构建完成后若已有 memory_manager，立即加载条目记忆
+        if self._memory_manager is not None and self._current_tab == TAB_ENTRY_MEMORIES:
+            self._load_entries()
 
     def _create_entries_tab(self) -> QWidget:
         """创建条目记忆 Tab（搜索移到了头部）"""

@@ -787,6 +787,13 @@ class TabManagerWindow(FramelessWindow):
         panel = getattr(self, "workbench_panel", None)
         if panel is None or not panel.isVisible():
             return
+        # 插件工作台页签 reconcile（内置产物/记忆 + 插件注册页）
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            panel.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs())
+        except Exception:
+            pass
         win = self.get_current_window()
         backend = getattr(win, "backend", None) if win is not None else None
         project = getattr(win, "_current_project", "") or ""
