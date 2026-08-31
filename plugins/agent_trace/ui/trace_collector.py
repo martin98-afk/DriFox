@@ -232,6 +232,13 @@ class TraceCollector(QObject):
         if self._tail:
             self._set_tail([r for r in self._tail if r.kind != EntryKind.CONTEXT])
 
+        # assistant 已有正式落盘记录时，同步清掉「正在生成」尾巴 —— README 承诺的
+        # 「落盘后自动被正式记录取代」。只靠 stream_finished 清会在 finished
+        # 丢失的路径（手动停止 / 异常中断）留下永久走动时长的僵尸尾巴。
+        n_assistant = sum(1 for r in new_records if r.kind == EntryKind.ASSISTANT)
+        if self._tail and n_assistant > self._stream_base:
+            self._set_tail([r for r in self._tail if not (r.kind == EntryKind.ASSISTANT and r.is_pending)])
+
     def _clear_all(self) -> None:
         self._records = []
         self._set_tail([])
@@ -637,6 +644,11 @@ class TraceCollector(QObject):
         self._sync()
 
     def _on_stream_started(self) -> None:
+        # 🛡️ 幂等：已存在未闭合流 / pending assistant 尾巴时不重复登记。
+        # 背景：stream_started 历史上被双发（executor + engine 各一次），
+        # 重入会产生 2 条「正在生成」尾巴（时长一模一样、永久走动）。
+        if any(not s.get("end") for s in self._streams):
+            return
         self._streams.append({"start": time.time(), "end": 0.0})
         self._append_tail(
             TraceRecord(
@@ -652,10 +664,11 @@ class TraceCollector(QObject):
 
     def _on_stream_finished(self, _payload: Dict[str, Any]) -> None:
         now = time.time()
-        for s in reversed(self._streams):
+        # 闭合**所有**未闭合流：一次 finished 对应一次流会话，重入/双发留下的
+        # end=0 僵尸流会被投影配对命中 → 记录时长为负/无限走动。
+        for s in self._streams:
             if not s.get("end"):
                 s["end"] = now
-                break
         self._set_tail([r for r in self._tail if not (r.kind == EntryKind.ASSISTANT and r.is_pending)])
         self._sync()
 
