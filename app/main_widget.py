@@ -702,7 +702,7 @@ class ToolWindowTitleBar(QWidget):
         layout.setSpacing(4)
 
         self._icon_widget = IconWidget(self)
-        self._icon_widget.setFixedSize(16, 16)
+        self._icon_widget.setFixedSize(20, 20)
 
         self._title_label = QLabel(self)
         self._title_label.setObjectName("titleLabel")
