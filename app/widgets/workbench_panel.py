@@ -23,7 +23,7 @@
 
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -43,6 +43,7 @@ from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_uni
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
 from app.widgets.custom_title_bar import CustomTabButton
+from app.widgets.markdown_block_viewer import _ThinkingSpinner
 
 # ── 尺寸常量 ──
 PANEL_WIDTH_DEFAULT = 480  # 默认宽度（splitter 初始分配用）
@@ -229,14 +230,31 @@ class TasksPage(QWidget):
         # 重建列表：empty_hint（按需可见）→ 任务项 → 底部 stretch
         self._empty_hint.setVisible(not todos)
         self._list_layout.addWidget(self._empty_hint)
+        active_item: QWidget | None = None
         for t in todos:
             status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
             content = (t.get("content") or "") if isinstance(t, dict) else str(t)
             priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
-            self._list_layout.addWidget(self._make_item(status, content, priority))
+            item = self._make_item(status, content, priority)
+            self._list_layout.addWidget(item)
+            if status == "in_progress" and active_item is None:
+                active_item = item
         self._list_layout.addStretch(1)
 
         self._notify_collapse_changed()
+
+        # 任务更新后始终把当前正在执行的任务滚进可视区
+        # （全量重建会丢滚动位置；layout 需一帧生效，用 singleShot(0) 延迟滚动）
+        if active_item is not None:
+            QTimer.singleShot(0, lambda: self._scroll_to_item(active_item))
+
+    def _scroll_to_item(self, item: QWidget) -> None:
+        """把指定任务条目滚进可视区（条目已被销毁时静默跳过）"""
+        try:
+            item.windowTitle()  # sip 探活：已销毁的 C++ 对象会抛 RuntimeError
+            self._scroll.ensureWidgetVisible(item, 0, 8)
+        except RuntimeError:
+            pass
 
     def _make_item(self, status: str, content: str, priority: str) -> QFrame:
         """单条任务：左状态符号 + 中内容（自动换行）+ 右标签（按需）
@@ -251,11 +269,17 @@ class TasksPage(QWidget):
         layout.setSpacing(8)
 
         mark, _color, status_text = self._STATUS_META.get(status, self._STATUS_META["pending"])
-        mark_label = QLabel(mark, frame)
-        mark_label.setObjectName("taskMark")
-        mark_label.setFixedWidth(16)
-        mark_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(mark_label)
+        if status == "in_progress":
+            # 进行中：金色 snake 旋转 spinner（与子智能体思考/compact 同一观感）
+            mark_widget: QWidget = _ThinkingSpinner(frame)
+            mark_widget.start()
+            layout.addWidget(mark_widget)
+        else:
+            mark_label = QLabel(mark, frame)
+            mark_label.setObjectName("taskMark")
+            mark_label.setFixedWidth(16)
+            mark_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(mark_label)
 
         content_label = QLabel(content, frame)
         content_label.setObjectName("taskContent")
@@ -471,6 +495,8 @@ class WorkbenchPanel(QWidget):
     refresh_requested = pyqtSignal()
     # 差异请求：file_paths 为 None 表示「查看所有产物差异」
     diff_requested = pyqtSignal(object)  # Optional[List[str]]
+    # 卡片 tab × 关闭钮点击（转发给宿主 registry，由其决定是否同步隐藏卡片状态）
+    card_tab_close_requested = pyqtSignal(str)  # card_id
 
     TAB_ARTIFACTS, TAB_MEMORY = 0, 1
 
@@ -581,6 +607,9 @@ class WorkbenchPanel(QWidget):
         self._plugin_widgets: Dict[str, QWidget] = {}
         self._plugin_infos: Dict[str, Any] = {}
         self._plugin_sig: Optional[tuple] = None
+        # 动态卡片 tab（right 容器 UI 插件卡片，见 open_card_tab）
+        # {card_id: {"label": str, "widget": QWidget}}；widget 生命周期归 registry 管
+        self._card_tabs: Dict[str, Dict[str, Any]] = {}
 
         self._rebuild_tab_bar()
         self.set_current_tab(self.TAB_ARTIFACTS)
@@ -648,6 +677,55 @@ class WorkbenchPanel(QWidget):
             h = max(TASKS_MIN_HEIGHT, min(TASKS_MAX_HEIGHT, self._tasks_height))
             self._body_splitter.setSizes([h, 1])
 
+    # ── 动态卡片 tab（right 容器 UI 插件卡片） ──
+
+    def open_card_tab(self, card_id: str, label: str, widget: QWidget) -> None:
+        """打开/激活一张卡片 tab（已存在则仅激活；同 id 换新实例则替换页内容）
+
+        卡片页追加在 stack 末尾（内置 2 页 + 插件页之后），与 _tab_specs
+        的追加顺序严格一致。widget 生命周期归调用方（registry）管理，
+        本面板只负责挂载/摘除（摘除不销毁，重复打开零重建）。
+        """
+        entry = self._card_tabs.get(card_id)
+        if entry is not None:
+            if entry["widget"] is not widget:
+                old = entry["widget"]
+                if self._stack.indexOf(old) >= 0:
+                    self._stack.removeWidget(old)
+                    old.setParent(None)
+                entry["widget"] = widget
+                self._stack.addWidget(widget)
+            entry["label"] = label
+        else:
+            self._card_tabs[card_id] = {"label": label, "widget": widget}
+            self._stack.addWidget(widget)
+        self._rebuild_tab_bar()
+        idx = self._stack.indexOf(widget)
+        if idx >= 0:
+            self.set_current_tab(idx)
+
+    def close_card_tab(self, card_id: str) -> bool:
+        """关闭卡片 tab：从页签条与内容栈摘除（widget 不销毁，交还调用方）
+
+        Returns:
+            True 表示确实移除了一个 tab；False 表示该 tab 不存在（幂等）
+        """
+        entry = self._card_tabs.pop(card_id, None)
+        if entry is None:
+            return False
+        widget = entry["widget"]
+        if self._stack.indexOf(widget) >= 0:
+            self._stack.removeWidget(widget)
+            widget.setParent(None)
+        self._rebuild_tab_bar()
+        # 当前页被移除时 QStackedWidget 已自动切到邻近页，这里同步按钮高亮；
+        # 极端情况（空栈）回落产物页
+        self.set_current_tab(max(0, self._stack.currentIndex()))
+        return True
+
+    def has_card_tab(self, card_id: str) -> bool:
+        return card_id in self._card_tabs
+
     # ── 页签条构建（内置 + 插件，顺序与 stack 一致） ──
 
     def _tab_specs(self) -> List[tuple]:
@@ -664,19 +742,31 @@ class WorkbenchPanel(QWidget):
         # _plugin_infos 已排除 artifacts（见 sync_plugin_pages），此处无需再过滤
         for page_id, info in self._plugin_infos.items():
             specs.append((page_id, info.label))
+        # 动态卡片 tab 追加在内置 + 插件页之后（与 stack 追加顺序一致）
+        for card_id, entry in self._card_tabs.items():
+            specs.append((card_id, entry["label"]))
         return specs
 
     def _rebuild_tab_bar(self) -> None:
-        """按当前插件注册表重建页签条（内置页签在前，插件按注册序在后）"""
-        for btn in self._tab_buttons:
-            self._tab_bar_layout.removeWidget(btn)
-            btn.hide()
-            btn.deleteLater()
+        """按当前插件注册表重建页签条（内置页签在前，插件按注册序在后）
+
+        布局：首尾各一个 stretch → 页签组整体居中（与标题栏居中 tab 同款视觉）。
+        """
+        while self._tab_bar_layout.count():
+            item = self._tab_bar_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
         self._tab_buttons = []
         self._tab_ids = []
+        self._tab_bar_layout.addStretch(1)
         for tab_id, label in self._tab_specs():
-            btn = CustomTabButton(tab_id, label, self)
+            closable = tab_id in self._card_tabs
+            btn = CustomTabButton(tab_id, label, self, closable=closable)
             btn.clicked.connect(self._on_tab_clicked)
+            if closable:
+                btn.close_clicked.connect(self.card_tab_close_requested.emit)
             self._tab_bar_layout.addWidget(btn)
             self._tab_buttons.append(btn)
             self._tab_ids.append(tab_id)

@@ -177,11 +177,14 @@ class SystemArtifactsPage(QWidget):
         """
         if operations is None:
             operations = self.get_operations()
-        while self._list_layout.count() > 1:
+        # 全部移出布局：条目销毁；empty_hint（实例复用）与 spacer 仅移出，随后统一重建。
+        # ★ 不能只删到 count>1：旧逻辑会把 empty_hint 或尾部 stretch 留/丢在错误位置
+        while self._list_layout.count():
             item = self._list_layout.takeAt(0)
             w = item.widget()
             if w is not None and w is not self._empty_hint:
                 w.deleteLater()
+            del item  # spacer 等 non-widget item 的 C++ 所有权已转到 Python，及时释放
         latest: Dict[str, Dict[str, Any]] = {}
         order: List[str] = []
         for op in operations or []:
@@ -198,10 +201,15 @@ class SystemArtifactsPage(QWidget):
             self._header.show_action()
         else:
             self._header.hide_action()
+        # 重建布局：[empty_hint] [条目…] [尾部 stretch]
+        # ★ 尾部 stretch 必须每次重建：缺了它 QScrollArea(widgetResizable) 会把
+        #   _list_wrap 拉到视口高，条目按 stretch 因子垂直摊满整页
+        self._list_layout.addWidget(self._empty_hint)
         for op in ordered:
             item = _SystemArtifactItem(op, self._list_wrap)
             item.diff_requested.connect(self._on_item_diff)
             self._list_layout.addWidget(item)
+        self._list_layout.addStretch(1)
 
     def set_operations(self, operations: List[Dict[str, Any]]) -> None:
         """宿主数据入口（与内置 ArtifactsPage 同名契约）

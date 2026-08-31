@@ -1106,14 +1106,17 @@ def _classify_think_tag(content: str) -> str:
 
 
 _THINK_SNAKE_SIZE: int = scale_icon_size(12)
+# ★ 着色用 #RRGGBB + stroke-opacity：QtSvg（QSvgRenderer）不支持 CSS rgba() 函数——
+# 解析失败后 stroke 无效，整个图标渲染成 0 像素全透明（原生 spinner 全空白）。
+# WebEngine 两种写法等价；stroke-opacity 对浏览器与 QtSvg 双兼容。
 _THINK_SNAKE_SVG = (
-    f'<svg class="think-snake" width="{_THINK_SNAKE_SIZE}" height="{_THINK_SNAKE_SIZE}" viewBox="0 0 24 24">'
-    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.06)" stroke-width="2.5" />'
-    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.2)" stroke-width="2.5"'
+    f'<svg xmlns="http://www.w3.org/2000/svg" width="{_THINK_SNAKE_SIZE}" height="{_THINK_SNAKE_SIZE}" viewBox="0 0 24 24">'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="0.06" stroke-width="2.5" />'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="0.2" stroke-width="2.5"'
     ' stroke-linecap="round" stroke-dasharray="20 30" class="think-snake-arc" />'
-    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,0.55)" stroke-width="2.5"'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="0.55" stroke-width="2.5"'
     ' stroke-linecap="round" stroke-dasharray="12 38" class="think-snake-arc think-snake-body" />'
-    '<circle cx="12" cy="12" r="8" fill="none" stroke="rgba(255,200,50,1)" stroke-width="2.5"'
+    '<circle cx="12" cy="12" r="8" fill="none" stroke="#ffc832" stroke-opacity="1" stroke-width="2.5"'
     ' stroke-linecap="round" stroke-dasharray="6 44" class="think-snake-arc think-snake-head" />'
     "</svg>"
 )

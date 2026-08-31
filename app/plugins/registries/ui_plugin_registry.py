@@ -302,6 +302,14 @@ class UIPluginRegistry:
         self._titlebar_tabs: Dict[str, TitlebarTabInfo] = {}
         # 右侧工作台页签槽位：{page_id: WorkbenchTabInfo}
         self._workbench_tabs: Dict[str, WorkbenchTabInfo] = {}
+        # right 容器卡片的工作区 tab 登记簿：{card_id: host_window_id}
+        # ★ right 容器卡片不再挂对话区右侧停靠区，改挂工作台（WorkbenchPanel）
+        #   动态 tab 页。此类卡片不走 CardManager（无互斥/堆叠需求，关闭即摘 tab），
+        #   也不参与 per-tab 显隐投影（与产物/记忆页同为宿主级全局页）。
+        self._workbench_card_tabs: Dict[str, str] = {}
+        # 工作台卡片 tab 的 per-tab 打开集合：{scope(window_id): set(card_id)}
+        # 切换对话标签页时按目标集合投影（open/close），实现各标签页工作区内容独立
+        self._workbench_card_scopes: Dict[str, set] = {}
         # 工作区页面槽（Phase G）：{page_id: WorkspacePageInfo}，页面级扩展
         self._workspace_pages: Dict[str, Any] = {}
         # 通用区域挂载模型（Phase E）：宿主声明区域 → 插件挂载条目
@@ -1052,20 +1060,21 @@ class UIPluginRegistry:
 
         self._floating_cards[card_id] = _dc_replace(info, container=container)
 
-        # 记录迁移前是否可见（任一窗口）
-        was_visible = False
-        host = self._resolve_global_host()
-        if host is not None:
-            cm = getattr(host, "_card_manager", None)
-            wid = getattr(host, "_window_id", None)
-            if cm is not None and wid is not None:
-                was_visible = cm.is_card_visible(card_id, wid)
+        # 记录迁移前是否可见（任一窗口；含工作台卡片 tab）
+        was_visible = card_id in self._workbench_card_tabs
         if not was_visible:
-            for win_id, mw in list(self._window_main_widgets.items()):
-                cm = getattr(mw, "_card_manager", None)
-                if cm is not None and cm.is_card_visible(card_id, win_id):
-                    was_visible = True
-                    break
+            host = self._resolve_global_host()
+            if host is not None:
+                cm = getattr(host, "_card_manager", None)
+                wid = getattr(host, "_window_id", None)
+                if cm is not None and wid is not None:
+                    was_visible = cm.is_card_visible(card_id, wid)
+            if not was_visible:
+                for win_id, mw in list(self._window_main_widgets.items()):
+                    cm = getattr(mw, "_card_manager", None)
+                    if cm is not None and cm.is_card_visible(card_id, win_id):
+                        was_visible = True
+                        break
 
         # 销毁所有已创建实例（下次显示时按新方位重建）
         for win_id, win_instances in list(self._card_widget_instances.items()):
@@ -1114,6 +1123,12 @@ class UIPluginRegistry:
         host = self._resolve_global_host()
         if host is None:
             return False
+        # right 工作台卡：不在 CardManager 登记，关 tab 即隐藏
+        if card_id in self._workbench_card_tabs:
+            if card_id not in self._floating_cards:
+                return False
+            self._close_workbench_card_tab(card_id)
+            return True
         card_manager = getattr(host, "_card_manager", None)
         host_wid = getattr(host, "_window_id", None)
         if card_manager is None or not host_wid:
@@ -1144,6 +1159,16 @@ class UIPluginRegistry:
         mw = host or main_widget or self._main_widget
         if mw is None:
             return
+        card_info = self._floating_cards.get(card_id)
+        if card_info is None:
+            return
+
+        # right 容器卡片 → 工作台动态 tab 页（Tab 模式；宿主无工作台时回退旧路径）
+        panel = getattr(host, "workbench_panel", None) if host is not None else None
+        if card_info.container == "right" and panel is not None:
+            self._show_floating_card_in_workbench(card_info, panel, host)
+            return
+
         card_manager = getattr(mw, "_card_manager", None)
         window_id = getattr(mw, "_window_id", None)
         if card_manager is None or window_id is None:
@@ -1151,10 +1176,6 @@ class UIPluginRegistry:
 
         # 记录 window_id → main_widget 映射，供 unload 时清理容器使用
         self._window_main_widgets[window_id] = mw
-
-        card_info = self._floating_cards.get(card_id)
-        if card_info is None:
-            return
 
         # 获取或创建 widget 实例（per-window 隔离缓存）
         win_instances = self._card_widget_instances.setdefault(window_id, {})
@@ -1261,6 +1282,120 @@ class UIPluginRegistry:
         if host is not None:
             self._record_tab_card_state(card_id, card_manager, window_id)
 
+    def _show_floating_card_in_workbench(self, card_info: Any, panel, host, auto_expand: bool = True) -> None:
+        """right 容器卡片 → 工作台动态 tab 页（v2：对话区右侧停靠区移除）
+
+        与旧路径的差异：
+        - 不走 CardManager（无互斥/堆叠/压制需求；关闭 = 摘 tab）
+        - 不注册系统卡（tab 页不覆盖对话区，不隐藏输入区）
+        - 不参与 per-tab 显隐投影（与产物/记忆页同为宿主级全局页）
+        - 保留实例缓存与上下文注入（热重载/卸载清理路径与旧卡片一致）
+        """
+        card_id = card_info.card_id
+        window_id = getattr(host, "_window_id", None)
+        if not window_id:
+            from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
+
+            window_id = GLOBAL_WINDOW_ID
+        # 记录 window_id → 宿主映射，供 unload 时清理容器使用
+        self._window_main_widgets[window_id] = host
+
+        win_instances = self._card_widget_instances.setdefault(window_id, {})
+        widget = win_instances.get(card_id)
+        if widget is None:
+            widget = card_info.widget_class(parent=panel)
+            if card_info.metadata.get("stack"):
+                try:
+                    widget.setProperty("stackInDock", True)
+                except Exception:
+                    pass
+            # 上下文注入（与旧路径同一优先级：拉模型 provider > 推模型 set_context > 兼容属性）
+            ctx_provider = self._make_context_provider(card_info, window_id)
+            if hasattr(widget, "set_context_provider") and callable(widget.set_context_provider):
+                widget.set_context_provider(ctx_provider)
+            elif hasattr(widget, "set_context") and callable(widget.set_context):
+                widget.set_context(ctx_provider())
+            else:
+                widget._card_context = ctx_provider()
+                widget._card_context_provider = ctx_provider
+            win_instances[card_id] = widget
+            # 卡片内部关闭按钮 → 摘除工作台 tab（与 tab × 同一入口）
+            if hasattr(widget, "closed"):
+                widget.closed.connect(lambda _c=card_id: self._close_workbench_card_tab(_c))
+
+        self._workbench_card_tabs[card_id] = window_id
+        # per-tab 归属：记录到当前活跃对话标签页的打开集合（切 tab 投影用）
+        scope = self._resolve_tab_scope() or window_id
+        self._workbench_card_scopes.setdefault(scope, set()).add(card_id)
+        panel.open_card_tab(card_id, card_info.title or card_id, widget)
+        # ★ 卡片数据加载入口：旧路径经 CardManager.show_card 调 widget.show_card()，
+        #   工作台路径必须显式补调，否则卡片只建骨架不拉数据（表现为 tab 空白）
+        show_card = getattr(widget, "show_card", None)
+        if callable(show_card):
+            try:
+                show_card()
+            except Exception:
+                pass
+        # 工作台隐藏时自动展开（否则用户点插件按钮无可见反馈）；
+        # 投影恢复路径（auto_expand=False）不抢焦点也不强开面板
+        if auto_expand:
+            try:
+                if not host.is_workbench_visible():
+                    host.set_workbench_visible(True)
+            except Exception:
+                pass
+
+    def _close_workbench_card_tab(self, card_id: str) -> None:
+        """摘除工作台卡片 tab（tab × / 卡片内部关闭按钮 / hide_floating_card_globally 共用）"""
+        self._workbench_card_tabs.pop(card_id, None)
+        # 从所有对话标签页的打开集合移除（用户关闭 = 任何标签页都不再恢复）
+        for cards in self._workbench_card_scopes.values():
+            cards.discard(card_id)
+        host = self._resolve_global_host()
+        panel = getattr(host, "workbench_panel", None) if host is not None else None
+        if panel is not None:
+            try:
+                panel.close_card_tab(card_id)
+            except Exception:
+                pass
+
+    def sync_workbench_cards_to_tab(self, scope: Optional[str]) -> None:
+        """切换对话标签页时按目标标签页投影工作台卡片 tab（per-tab 隔离）
+
+        卡片 widget 单实例；切换时摘除不属于目标标签页的卡片 tab、恢复
+        目标标签页曾打开的卡片 tab（auto_expand=False，不强开工作台）。
+        """
+        panel = None
+        try:
+            host = self._resolve_global_host()
+            panel = getattr(host, "workbench_panel", None) if host is not None else None
+        except Exception:
+            return
+        if panel is None or not scope:
+            return
+        target = self._workbench_card_scopes.get(scope, set())
+        # 关：当前挂载但不属于目标标签页的卡片 tab。
+        # ★ 只摘 tab 不清 scopes 集合——这是「临时隐藏」（其他标签页仍保留打开记录），
+        #   走 _close_workbench_card_tab 会把用户关闭语义混进来误清其他标签页的集合。
+        for card_id in list(self._workbench_card_tabs.keys()):
+            if card_id not in target:
+                self._workbench_card_tabs.pop(card_id, None)
+                try:
+                    panel.close_card_tab(card_id)
+                except Exception:
+                    pass
+        # 开：目标标签页曾打开但当前未挂载的卡片 tab
+        restored: Optional[str] = None
+        for card_id in target:
+            if card_id in self._workbench_card_tabs:
+                continue
+            card_info = self._floating_cards.get(card_id)
+            if card_info is None:
+                continue
+            self._show_floating_card_in_workbench(card_info, panel, self._resolve_global_host(), auto_expand=False)
+            restored = card_id
+        return restored
+
     def _record_tab_card_state(self, card_id: str, card_manager, host_window_id: str) -> None:
         """把卡片当前可见状态记录到活跃标签页的可见集合（Tab 模式）
 
@@ -1336,12 +1471,21 @@ class UIPluginRegistry:
         if cm is None or host_wid is None or not scope:
             return
         self._active_tab_scope = scope
+        # 工作台卡片 tab 投影（per-tab 独立）：先于 CardManager 卡片投影执行，
+        # 随后的 refresh_workbench 会按新活跃窗口拉取任务/产物/项目数据
+        try:
+            self.sync_workbench_cards_to_tab(scope)
+        except Exception:
+            pass
         target = self._tab_card_visibility.get(scope, set())
         instances = self._card_widget_instances.get(host_wid, {})
         with self.tab_sync_guard():
             for card_id in list(self._floating_cards.keys()):
                 if card_id not in instances:
                     # 从未实例化的卡片无需投影（首次打开时才创建）
+                    continue
+                if card_id in self._workbench_card_tabs:
+                    # 工作台卡片 tab：宿主级全局页，不参与 per-tab 显隐投影
                     continue
                 try:
                     want = card_id in target
@@ -1559,8 +1703,8 @@ class UIPluginRegistry:
                     # 避免「已打开标签页中的卡片视图不更新，必须重开标签页」
                     mw = self._window_main_widgets.get(win_id)
                     cm = getattr(mw, "_card_manager", None) if mw is not None else None
-                    was_visible = False
-                    if cm is not None:
+                    was_visible = cid in self._workbench_card_tabs
+                    if not was_visible and cm is not None:
                         try:
                             was_visible = cm.is_card_visible(cid, win_id)
                         except RuntimeError, AttributeError:
@@ -1702,6 +1846,19 @@ class UIPluginRegistry:
             widget: 要移除的 widget 控件
         """
         try:
+            # 0. 工作台卡片 tab：从工作台页签条摘除（widget 由下方统一销毁）
+            if card_id in self._workbench_card_tabs:
+                self._workbench_card_tabs.pop(card_id, None)
+                for cards in self._workbench_card_scopes.values():
+                    cards.discard(card_id)
+                host = self._resolve_global_host()
+                panel = getattr(host, "workbench_panel", None) if host is not None else None
+                if panel is not None:
+                    try:
+                        panel.close_card_tab(card_id)
+                    except Exception:
+                        pass
+
             # 1. 从 CardManager 隐藏并解除注册
             mw = self._window_main_widgets.get(window_id)
             if mw is not None:

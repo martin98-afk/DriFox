@@ -13459,15 +13459,8 @@ class OpenAIChatToolWindow(ToolWindow):
         card.modelLabelClicked.connect(self._on_footer_model_label_clicked)
 
         self._add_chat_widget(card, insert_index=insert_index)
-        # 流式新建卡片时同步最新任务列表（模型跨轮继续执行任务时，
-        # 新回复卡片底部延续显示当前任务进度；历史加载 scroll=False 不同步）
-        # 若已有任务全部完成，则不同步——避免新消息卡片底部残留旧任务完成态。
-        if (
-            scroll
-            and self._latest_todos
-            and any(isinstance(t, dict) and t.get("status") != "completed" for t in self._latest_todos)
-        ):
-            card.update_todo_list(self._latest_todos)
+        # 任务列表已迁至工作台（WorkbenchPanel 任务区），消息卡片不再内嵌 todo 区；
+        # _latest_todos 缓存仍由 todowrite 结果联动（工作台数据源，切 tab 时拉取）。
         # 🐛 这是流式输出期间最热的强制滚底点（`_append_assistant_message`）：
         # 每个工具轮次都会新建 assistant 卡片。此前无条件置底，用户上滚读历史时
         # 只要后台有工具回调就会被拽回。纳入统一守卫。
@@ -16601,9 +16594,7 @@ class OpenAIChatToolWindow(ToolWindow):
             todos = []
         if todos:
             self._latest_todos = todos
-            card = self._current_assistant_card or self._find_latest_assistant_card()
-            if card and hasattr(card, "update_todo_list"):
-                card.update_todo_list(todos)
+            # 任务列表已迁至工作台（不再内嵌消息卡片），仅刷新缓存 + 推工作台
             # 工作台浮层任务区同步
             self._push_workbench_updates(todos=todos)
         else:
@@ -17334,15 +17325,11 @@ class OpenAIChatToolWindow(ToolWindow):
             except TypeError, ValueError:
                 content = str(raw_content)
 
-        # 统一处理工具完成状态
-        # 字段驱动：任何工具结果携带 todos 字段 → 联动消息卡片内嵌任务列表
-        # （插件声明，主程序不写死工具名）
+        # 字段驱动：任何工具结果携带 todos 字段 → 更新任务列表缓存
+        # （插件声明，主程序不写死工具名）。显示在工作台任务区，不再内嵌消息卡片。
         todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
         if todos:
             self._latest_todos = todos
-            card = self._current_assistant_card or self._find_latest_assistant_card()
-            if card and hasattr(card, "update_todo_list"):
-                card.update_todo_list(todos)
         # 工作台浮层联动：任务到达推任务；文件写入类工具完成后重拉产物列表
         try:
             if todos:
@@ -20009,6 +19996,11 @@ class OpenAIChatToolWindow(ToolWindow):
     def _push_workbench_updates(self, todos: Optional[list] = None, refresh_artifacts: bool = False) -> None:
         """向右侧工作台浮层推送增量更新（面板隐藏/无宿主时零开销跳过）
 
+        ★ 标签页隔离：工作台是宿主级单例，数据投影自「当前活跃对话窗口」。
+        非活跃窗口的工具回调（如后台正在跑的另一个标签页）只更新自己的
+        ``_latest_todos`` 缓存，不写工作台 UI——否则当前标签页的工作台
+        会被其他标签页的任务/产物覆盖。切回时 refresh_workbench 会拉取。
+
         Args:
             todos: todowrite 等工具回传的最新任务列表；None 表示本次不更新任务区
             refresh_artifacts: True 时重拉产物列表（文件写入类工具完成后调用）
@@ -20018,9 +20010,15 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             tm = TabManagerWindow.get_instance()
             panel = getattr(tm, "workbench_panel", None) if tm is not None else None
-            if panel is None or not panel.isVisible():
+            if panel is None:
+                return
+            # 标签页隔离：仅活跃窗口可推送 UI 更新
+            if tm.get_current_window() is not self:
                 return
             if todos is not None:
+                # todo 更新自动展开工作台（set_workbench_visible 内部会 refresh_workbench）
+                if not tm.is_workbench_visible():
+                    tm.set_workbench_visible(True)
                 panel.update_todos(todos)
             if refresh_artifacts:
                 tm.refresh_workbench()
@@ -20028,13 +20026,20 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
     def _push_workbench_project(self, project: str, workdir: Optional[str] = None) -> None:
-        """向右侧工作台浮层同步当前项目（记忆页跟随当前窗口项目）"""
+        """向右侧工作台浮层同步当前项目（记忆页跟随当前窗口项目）
+
+        ★ 与 _push_workbench_updates 同一隔离语义：非活跃窗口不推送。
+        """
         if getattr(self, "_is_destroyed", False):
             return
         try:
             tm = TabManagerWindow.get_instance()
             panel = getattr(tm, "workbench_panel", None) if tm is not None else None
-            if panel is not None and panel.isVisible():
+            if panel is None:
+                return
+            if tm.get_current_window() is not self:
+                return
+            if panel.isVisible():
                 panel.update_project(project, workdir)
         except Exception:
             pass
