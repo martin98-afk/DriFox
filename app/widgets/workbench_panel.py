@@ -485,14 +485,17 @@ class WorkbenchPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("workbenchPanel")
-        # 实色背景（主题 content_bg）+ 自绘边框
+        # 外层为 native 实色底（主题 content_bg，方角无圆角）。
+        # 🛡️ 遮挡对抗：对话区消息卡片是 QWebEngineView（原生 HWND），普通
+        # child widget 会被其文字盖住。独立原生 HWND 后与 WebEngine 同级，
+        # Z-order 由 Windows 管理，raise/move 均生效。背景用主题实色杜绝
+        # 透字；native child window 不能依赖 QSS 圆角（只裁背景绘制，圆角
+        # 外会残留 HWND 旧内容黑角），也不能用 setMask（Windows 平台 child
+        # window 的 SetWindowRgn 坐标不稳，会把内容裁没）——圆角交给内部
+        # 卡片 QFrame（_card）绘制，外层保持实色矩形底，绝对无黑角。
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.setFixedWidth(PANEL_WIDTH_DEFAULT)
-        # 🛡️ 遮挡对抗：对话区消息卡片是 QWebEngineView（原生 HWND），普通
-        # child widget 会被其文字盖住。独立原生 HWND 后与 WebEngine 同级，
-        # Z-order 由 Windows 管理，raise/move 均生效；面板实色无圆角无
-        # 半透明，native child window 不会出现黑角/透明失效。
         self.setAttribute(Qt.WA_NativeWindow, True)
         self.setAttribute(Qt.WA_DontCreateNativeAncestors, True)
 
@@ -501,48 +504,58 @@ class WorkbenchPanel(QWidget):
         self._drag_start_width = PANEL_WIDTH_DEFAULT
         self._anim: Optional[QTimer] = None  # 滑入/滑出动画 timer（非 None 表示动画中）
 
+        # 外层：native 实色底 + 4px 边距（与左侧 #tabFrame / 右 #chatFrame
+        # 的 margin 对齐）；左 10px 为左缘拖拽热区缓冲（_in_drag_zone）。
         root = QVBoxLayout(self)
-        root.setContentsMargins(10, 6, 6, 6)
-        root.setSpacing(4)
+        root.setContentsMargins(10, 4, 4, 4)
+        root.setSpacing(0)
+
+        # 内层圆角卡片：8px 圆角 + 1px 边框，观感与 #tabFrame/#chatFrame 一致
+        self._card = QFrame(self)
+        self._card.setObjectName("workbenchCard")
+        card_layout = QVBoxLayout(self._card)
+        card_layout.setContentsMargins(4, 6, 6, 6)
+        card_layout.setSpacing(4)
+        root.addWidget(self._card)
 
         # ── 头部：标题 + 页签 + 刷新/关闭（紧凑间距） ──
         header = QHBoxLayout()
         header.setSpacing(2)
-        self._title_label = QLabel("工作台", self)
+        self._title_label = QLabel("工作台", self._card)
         header.addWidget(self._title_label)
         header.addStretch(1)
         self._tab_buttons: List[QPushButton] = []
         for label, idx in (("产物", self.TAB_ARTIFACTS), ("记忆", self.TAB_MEMORY)):
-            btn = QPushButton(label, self)
+            btn = QPushButton(label, self._card)
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setFixedHeight(22)
             btn.clicked.connect(lambda _=False, i=idx: self.set_current_tab(i))
             header.addWidget(btn)
             self._tab_buttons.append(btn)
-        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self)
+        self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._card)
         self._refresh_btn.setToolTip("刷新产物与任务")
         self._refresh_btn.setFixedSize(22, 22)
         self._refresh_btn.setIconSize(QSize(12, 12))
         self._refresh_btn.clicked.connect(self.refresh_requested.emit)
         header.addWidget(self._refresh_btn)
-        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
+        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, self._card)
         self._close_btn.setFixedSize(22, 22)
         self._close_btn.clicked.connect(self.close_requested.emit)
         header.addWidget(self._close_btn)
-        root.addLayout(header)
+        card_layout.addLayout(header)
 
         # ── 任务坞：常驻置顶（不进页签），空任务自动隐藏 ──
-        self.tasks_dock = TasksDock(self)
-        root.addWidget(self.tasks_dock)
+        self.tasks_dock = TasksDock(self._card)
+        card_layout.addWidget(self.tasks_dock)
 
         # ── 页签内容栈 ──
-        self._stack = QStackedWidget(self)
+        self._stack = QStackedWidget(self._card)
         self.artifacts_page = ArtifactsPage(self._stack)
         self.memory_page = MemoryPage(self._stack)
         self._stack.addWidget(self.artifacts_page)
         self._stack.addWidget(self.memory_page)
-        root.addWidget(self._stack, 1)
+        card_layout.addWidget(self._stack, 1)
 
         self.set_current_tab(self.TAB_ARTIFACTS)
         self.refresh_style()
@@ -655,9 +668,14 @@ class WorkbenchPanel(QWidget):
 
     def refresh_style(self) -> None:
         Colors.refresh()
-        # 实色底（主题 content_bg）+ 左缘边线；native child window 无透明问题
-        self.setStyleSheet(
-            f"QWidget#workbenchPanel {{ background: {Colors.CONTENT_BG}; border-left: 1px solid {Colors.BORDER}; }}"
+        # 外层 native 底：实色（content_bg）方角，无黑角、无残留；
+        # 圆角与边框全部由内部卡片 #workbenchCard 绘制，与 #tabFrame /
+        # #chatFrame 同风格（8px 圆角 + 1px 边框）。
+        self.setStyleSheet(f"QWidget#workbenchPanel {{ background: {Colors.CONTENT_BG}; }}")
+        self._card.setStyleSheet(
+            f"QFrame#workbenchCard {{ background: {Colors.CARD_BG_SOLID};"
+            f" border: 1px solid {Colors.BORDER};"
+            f" border-radius: 8px; }}"
         )
         self._title_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent;"

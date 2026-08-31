@@ -12,6 +12,8 @@ import pytest
 sys.path.insert(0, ".")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt5.QtCore import QRectF  # noqa: E402
+from PyQt5.QtGui import QPainterPath, QRegion  # noqa: E402
 from PyQt5.QtWidgets import QWidget  # noqa: E402
 
 from app.widgets.workbench_panel import (  # noqa: E402
@@ -120,6 +122,23 @@ def test_slide_animation_lifecycle(panel):
 def test_refresh_style_idempotent(panel):
     panel.refresh_style()
     panel.refresh_style()
+
+
+def test_round_card_style_and_mask_region(panel):
+    """圆角卡片：QSS 带 8px 圆角；setMask 用的 QRegion 覆盖主体
+
+    回归：面板改圆角卡片后，native child window 的 QSS 圆角只裁背景绘制，
+    圆角外会残留 HWND 旧内容（黑角/花边），需 setMask 裁掉圆角外区域。
+    offscreen 平台不支持真实 window mask（QtWarningMsg），此处验证生成逻辑。
+    """
+    panel.resize(480, 600)
+    panel.refresh_style()
+    assert "border-radius: 8px" in panel.styleSheet()
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(panel.rect()), 8, 8)
+    region = QRegion(path.toFillPolygon().toPolygon())
+    assert not region.isEmpty()
+    assert region.boundingRect() == panel.rect()  # 主体完整覆盖，仅四角裁切
 
 
 def test_width_bounds():

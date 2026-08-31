@@ -1,50 +1,92 @@
-"""窗口 resize 失效根因探针 v3（不修改业务代码，仅诊断）
+"""窗口 resize 命中测试验证探针（不修改业务代码，仅诊断/回归验证）
 
-v2 已确认：_system_buttons_left() 返回 0，导致顶边整条热区被判 HTCLIENT。
-本探针追查：为什么 minBtn.x() == 0 —— 是标题栏宽度没同步，还是按钮未布局？
-并实测"程序化 resize 是否真的改变窗口几何"，区分 hit-test 失效与布局冻结。
+判定依据：Windows 只把 WM_NCHITTEST 发给鼠标下的 HWND；主窗口 nativeEvent
+对命中测试的返回值决定系统是否进入 resize 模态循环：
+  HTCLIENT(1) → 客户区，不能 resize
+  HTLEFT/HTRIGHT/HTTOP/HTBOTTOM/角落 → 可 resize
+
+坐标基准用 mapToGlobal(QPoint(0,0)) 取客户区左上角，避免 frameGeometry 与
+DWM 阴影带来的偏移（v2 曾因此出现"中心点报 HTTOPRIGHT"的假阳性）。
 """
 
 import sys
 import time
+from ctypes import wintypes
 
-from PyQt5.QtCore import Qt
+import ctypes
+from PyQt5.QtCore import Qt, QPoint
 from PyQt5.QtWidgets import QApplication
 
+WM_NCHITTEST = 0x0084
+user32 = ctypes.windll.user32
+user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.SendMessageW.restype = ctypes.c_ssize_t
+user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
 
-def dump_geometry(win, tag: str) -> None:
-    tb = getattr(win, "titleBar", None)
+HT_NAMES = {
+    1: "HTCLIENT  ❌ 不能 resize",
+    2: "HTCAPTION  (可拖动)",
+    10: "HTLEFT     ✅",
+    11: "HTRIGHT    ✅",
+    12: "HTTOP      ✅",
+    13: "HTTOPLEFT  ✅",
+    14: "HTTOPRIGHT ✅",
+    15: "HTBOTTOM   ✅",
+    16: "HTBOTTOMLEFT  ✅",
+    17: "HTBOTTOMRIGHT ✅",
+}
+
+
+def makelong(lo: int, hi: int) -> int:
+    return (hi << 16) | (lo & 0xFFFF)
+
+
+def settle(app, n: int = 40, wait: float = 0.35) -> None:
+    for _ in range(n):
+        app.processEvents()
+    time.sleep(wait)
+    for _ in range(n):
+        app.processEvents()
+
+
+def probe(win, tag: str) -> None:
+    hwnd = int(win.winId())
+    # 客户区左上角的屏幕坐标（无边框窗口 ⇒ 即窗口左上角）
+    origin = win.mapToGlobal(QPoint(0, 0))
+    ox, oy = origin.x(), origin.y()
+    w, h = win.width(), win.height()
+
     print(f"\n══ {tag} ══")
-    print(f"主窗口: width={win.width()} height={win.height()} visible={win.isVisible()}")
-    if tb is None:
-        print("  titleBar = None ❌")
-        return
-    print(
-        f"titleBar: x={tb.x()} y={tb.y()} w={tb.width()} h={tb.height()} "
-        f"visible={tb.isVisible()} hidden={tb.isHidden()}"
-    )
-    print(f"  ★ 标题栏宽度是否同步到窗口宽度: {'✅' if tb.width() == win.width() else '❌ 未同步'}")
-
-    for name in ("minBtn", "maxBtn", "closeBtn"):
-        btn = getattr(tb, name, None)
-        if btn is None:
-            print(f"  {name}: None")
-            continue
-        print(
-            f"  {name}: x={btn.x()} y={btn.y()} w={btn.width()} "
-            f"hidden={btn.isHidden()} visible={btn.isVisible()}"
-        )
-
-    wb = getattr(tb, "_workbench_btn", None)
-    if wb is not None:
-        print(f"  workbench_btn: x={wb.x()} w={wb.width()} hidden={wb.isHidden()}")
+    print(f"HWND=0x{hwnd:X} 客户区原点=({ox},{oy}) 尺寸={w}x{h}")
+    style = user32.GetWindowLongPtrW(wintypes.HWND(hwnd), -16)
+    print(f"style=0x{style:08X}  WS_THICKFRAME={'✅' if style & 0x40000 else '❌'}")
 
     sbl = win._system_buttons_left()
-    print(f"\n  → _system_buttons_left() = {sbl}")
-    if sbl == 0:
-        print("    ❌ 返回 0 ⇒ `x >= 0` 恒真 ⇒ 顶部整条热区全部判 HTCLIENT ⇒ 顶边 resize 失效")
-    elif sbl >= win.width():
-        print("    ⚠️ 返回窗口宽度 ⇒ 顶边让位逻辑未生效（minBtn 缺失/隐藏分支）")
+    print(f"_system_buttons_left() = {sbl}   (0 ⇒ 顶边整条失效)")
+    if 0 < sbl < w:
+        print(f"  → 顶边 0..{sbl - 1}px 为 resize 热区，{sbl}..{w - 1}px 让位给按钮 ✅")
+    elif sbl == 0:
+        print("  → ❌ 顶边全部让位，顶边 resize 失效")
+    else:
+        print("  → ⚠️ 无让位（按钮未就绪），顶边整条可 resize")
+
+    cases = [
+        ("顶缘 左段 x=40", ox + 40, oy + 2),
+        ("顶缘 中段", ox + w // 2, oy + 2),
+        ("顶缘 右段(按钮区)", ox + w - 100, oy + 2),
+        ("左上角", ox + 2, oy + 2),
+        ("右上角", ox + w - 2, oy + 2),
+        ("左缘", ox + 2, oy + h // 2),
+        ("右缘", ox + w - 2, oy + h // 2),
+        ("底缘", ox + w // 2, oy + h - 2),
+        ("左下角", ox + 2, oy + h - 2),
+        ("右下角", ox + w - 2, oy + h - 2),
+        ("客户区中心", ox + w // 2, oy + h // 2),
+    ]
+    for name, px, py in cases:
+        v = user32.SendMessageW(wintypes.HWND(hwnd), WM_NCHITTEST, 0, makelong(px, py))
+        print(f"  {name:<20} → {HT_NAMES.get(v, f'未知 {v}')}")
 
 
 def main() -> int:
@@ -59,53 +101,20 @@ def main() -> int:
 
     win = TabManagerWindow.create_instance()
     win.resize(1000, 700)
+    win.move(200, 150)
     win.show()
+    settle(app)
 
-    # 充分推进事件循环，确保布局完成
-    for _ in range(60):
-        app.processEvents()
-    time.sleep(0.4)
-    for _ in range(60):
-        app.processEvents()
+    probe(win, "场景 A：默认启动（工作台关闭）")
 
-    dump_geometry(win, "启动后（布局完成后）")
-
-    # ── 实测：程序化 resize 是否真的改变几何 ──
-    print("\n══ 程序化 resize 实测 ══")
-    w0, h0 = win.width(), win.height()
-    win.resize(w0 + 120, h0 + 80)
-    for _ in range(40):
-        app.processEvents()
-    time.sleep(0.3)
-    for _ in range(40):
-        app.processEvents()
-    w1, h1 = win.width(), win.height()
-    print(f"  resize 前: {w0}x{h0}")
-    print(f"  resize 后: {w1}x{h1}")
-    print(f"  {'✅ 窗口几何已改变' if (w1, h1) != (w0, h0) else '❌ 窗口几何未改变'}")
-    print(f"  _resize_blocking = {getattr(win, '_resize_blocking', None)}（应回落 False）")
-
-    tb = getattr(win, "titleBar", None)
-    if tb is not None:
-        print(
-            f"  resize 后 titleBar.w={tb.width()} vs 窗口 w={win.width()} "
-            f"{'✅ 同步' if tb.width() == win.width() else '❌ 未同步'}"
-        )
-        for name in ("minBtn", "maxBtn", "closeBtn"):
-            btn = getattr(tb, name, None)
-            if btn is not None:
-                print(f"  resize 后 {name}.x = {btn.x()}")
-
-    # 再等防抖结束
-    time.sleep(0.5)
-    for _ in range(40):
-        app.processEvents()
-    print(f"\n  静置后 _resize_blocking = {win._resize_blocking}")
-    tb = getattr(win, "titleBar", None)
-    if tb is not None:
-        print(f"  静置后 titleBar.w={tb.width()} vs 窗口 w={win.width()}")
-        print(f"  静置后 minBtn.x = {tb.minBtn.x()}")
-        print(f"  静置后 _system_buttons_left() = {win._system_buttons_left()}")
+    if getattr(win, "workbench_panel", None) is not None:
+        win.reposition_workbench()
+        win.workbench_panel.show()
+        win.workbench_panel.raise_()
+        settle(app, 20, 0.2)
+        probe(win, "场景 B：工作台面板打开（贴右缘）")
+        win.workbench_panel.hide()
+        settle(app, 20, 0.2)
 
     print("\n完成。")
     return 0
