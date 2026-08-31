@@ -939,9 +939,10 @@ class TabManagerWindow(FramelessWindow):
             # ★ 必须显式 show panel：panel 构造后调过 hide()，
             #   Qt 中被显式 hide 的子 widget 不会因 parent.show() 自动恢复。
             panel.set_panel_visible(True)
-            # 首次打开默认第一个页签；再次打开恢复上次关闭时的页签（用户选择优先）
-            # （插件/记忆定向入口随后自行覆盖目标页签）
-            panel.restore_last_tab()
+            # ★ 不调 restore_last_tab：hide 期间 stack 当前页本就保持，
+            #   重新 show 天然恢复用户上次选择的页签；首次默认第一个页签由
+            #   面板 __init__ 保证。若在此恢复上次关闭时页签，会覆盖
+            #   「隐藏状态下定向打开」刚设置的页签（如插件卡片 tab）。
             self._set_chat_frame_wb_hidden(False)
             # 动画期间放开最小宽度约束，QSplitter 才允许窗格拉到中间值
             frame.setMinimumWidth(0)
@@ -958,8 +959,6 @@ class TabManagerWindow(FramelessWindow):
                 ),
             )
         else:
-            # 关闭时记录当前页签（下次打开恢复，不强制重置为工作树）
-            panel.remember_closed_tab()
             if start_w > 0:
                 self._workbench_frame_w = start_w
             frame.setMinimumWidth(0)

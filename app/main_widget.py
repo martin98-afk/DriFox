@@ -8211,7 +8211,11 @@ class OpenAIChatToolWindow(ToolWindow):
             panel.set_current_tab(panel.TAB_WORKTREE)
 
     def _close_history_panel(self):
-        """离开右侧工作台的「历史会话」页（卡片关闭钮/选中会话后的统一收出口）"""
+        """历史卡片关闭钮收出口：仅在用户显式点 × 时离开历史页
+
+        ★ 加载会话路径已不再调用本方法（页签按用户选择保持）；
+        本方法只服务 _history_card.closed 信号的显式关闭语义。
+        """
         try:
             tm = TabManagerWindow.get_instance()
             panel = getattr(tm, "workbench_panel", None) if tm is not None else None
@@ -8528,7 +8532,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     record = self._history_popup_card.get_history_at_index(index)
                     new = tm.spawn_tab(self, session_record=record) if record is not None else None
                 if new is not None:
-                    self._close_history_panel()
+                    # 页签保持：开新标签页不改变工作台当前页签（无历史页强切）
                     return
             # 降级原行为
         if index == -1:
@@ -8536,8 +8540,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._create_new_session()
         else:
             self._load_history_session_from_popup(index)
-        # 离开工作台历史页（原“关闭历史会话卡片”）
-        self._close_history_panel()
+        # ★ 页签保持：加载会话不再强制离开历史页/跳工作树，
+        # 工作台页签完全按用户选择保持（用户可继续点选其他会话）
 
     def _on_team_restore_requested(self, run_id: str):
         """从历史面板恢复团队会话（方案 A 一键恢复）
@@ -8801,8 +8805,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 会话数据变更统一通知：恢复团队会话产生新会话记录（新 run_id），
         # 历史面板/欢迎卡片需同步 + 跨窗口广播
         self._notify_history_data_changed()
-        # 离开工作台历史页（原“关闭历史会话卡片”）
-        self._close_history_panel()
+        # ★ 页签保持：团队恢复后不强制切页签（原跳工作树已移除）
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -13371,8 +13374,7 @@ class OpenAIChatToolWindow(ToolWindow):
         full_record = self.history_manager.get_session_by_session_id(session_id) if self.history_manager else None
         record = full_record or member_record
         self._load_session_from_record(record)
-        # 离开工作台历史页（原“关闭历史会话卡片”）
-        self._close_history_panel()
+        # ★ 页签保持：成员会话加载后不强制切页签（原跳工作树已移除）
 
     def _load_history_session_from_popup(self, index: int):
         # 🛡️ 使用历史面板缓存的 _all_history 列表来查找 session_id，
