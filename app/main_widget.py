@@ -3286,8 +3286,8 @@ class OpenAIChatToolWindow(ToolWindow):
         #   model_selector 加载模型数据、project_selector 加载项目列表等）
         _SYSTEM_CARD_COMMANDS = {
             "settings": ("打开设置面板", self._toggle_settings_card),
-            "history": ("打开对话历史", self._toggle_history_card),
-            "memory": ("打开记忆管理", self._toggle_workbench_memory),
+            "history": ("打开对话历史", self._open_workbench_history),
+            "memory": ("打开记忆管理", self._open_workbench_memory),
             "model_selector": ("选择模型", self._toggle_model_selector_card),
             "tool_control": ("打开工具控制面板", self._toggle_tool_control_card),
             "project_selector": ("选择项目", self._toggle_project_selector_card),
@@ -3305,6 +3305,28 @@ class OpenAIChatToolWindow(ToolWindow):
                 description=description,
                 argument_hint="",
             )
+
+    def _open_workbench_history(self):
+        """快捷键/命令入口：打开右侧工作台并跳转「历史会话」页签（直开语义）
+
+        历史会话已从对话区底部卡片迁移到工作台；不再走旧 toggle 包装，
+        直接复用 TabManagerWindow.open_workbench_history（含活跃窗口历史卡
+        懒创建/挂载 + 展开工作台 + 切页 + 数据刷新）。
+        """
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.open_workbench_history()
+
+    def _open_workbench_memory(self):
+        """快捷键/命令入口：打开右侧工作台并跳转「记忆」页签（直开语义）
+
+        记忆管理已迁移到工作台；直接复用
+        TabManagerWindow.open_workbench_memory("entries")（展开工作台 +
+        切记忆页 + 默认落在条目记忆子页）。
+        """
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.open_workbench_memory("entries")
 
     def _clear_command_shortcuts(self):
         """清空本实例对命令快捷键的引用

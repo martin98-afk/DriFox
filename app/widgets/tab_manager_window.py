@@ -939,7 +939,7 @@ class TabManagerWindow(FramelessWindow):
             # ★ 必须显式 show panel：panel 构造后调过 hide()，
             #   Qt 中被显式 hide 的子 widget 不会因 parent.show() 自动恢复。
             panel.set_panel_visible(True)
-            # 首次打开默认「工作树」页；再次打开恢复上次关闭时的页签
+            # 首次打开默认第一个页签；再次打开恢复上次关闭时的页签（用户选择优先）
             # （插件/记忆定向入口随后自行覆盖目标页签）
             panel.restore_last_tab()
             self._set_chat_frame_wb_hidden(False)

@@ -731,7 +731,7 @@ class WorkbenchPanel(QWidget):
         self._memory_content: Optional[QWidget] = None
         # 构建前收到的项目信息（ensure_memory 后补投递）
         self._pending_project: Optional[tuple] = None
-        # 页签记忆：None = 面板尚未打开过（首次打开默认工作树，之后恢复上次关闭时页签）
+        # 页签记忆：None = 面板尚未打开过（首次打开默认第一个页签，之后恢复上次关闭时页签）
         self._last_tab_index: Optional[int] = None
         # 历史会话页内容（宿主当前活跃窗口的历史卡片框架）；None = 未挂载（页签不出现）
         self._history_page: Optional[QWidget] = None
@@ -826,7 +826,8 @@ class WorkbenchPanel(QWidget):
         self._card_tabs: Dict[str, Dict[str, Any]] = {}
 
         self._rebuild_tab_bar()
-        self.set_current_tab(self.TAB_WORKTREE)
+        # 初始默认选中第一个页签（非「默认工作树」特判；当前首个页签恰为工作树）
+        self.set_current_tab(0)
         self.refresh_style()
 
     # ── 显隐（直接 show/hide，无折叠动画） ──
@@ -844,14 +845,12 @@ class WorkbenchPanel(QWidget):
     def restore_last_tab(self) -> None:
         """打开右侧边栏时的页签恢复
 
-        首次打开默认「工作树」页，之后恢复上次关闭时的页签；
-        页签越界（如卡片/插件页已卸载）时回落工作树。
+        首次打开默认第一个页签，之后完全按用户上次选择的页签恢复；
+        页签越界（如卡片/插件页已卸载）时回落第一个页签。
         """
-        if self._last_tab_index is None:
-            self._last_tab_index = self.TAB_WORKTREE
         idx = self._last_tab_index
-        if not 0 <= idx < self._stack.count():
-            idx = self.TAB_WORKTREE
+        if idx is None or not 0 <= idx < self._stack.count():
+            idx = 0
         self.set_current_tab(idx)
 
     def is_panel_visible(self) -> bool:
@@ -1140,7 +1139,7 @@ class WorkbenchPanel(QWidget):
         if sig == self._plugin_sig and set(infos.keys()) == set(self._plugin_widgets.keys()):
             return
         self._plugin_infos = infos
-        # 当前页是否是被卸载的插件页（卸载后 Qt 会自动切到邻近页，需回落工作树页）
+        # 当前页是否是被卸载的插件页（卸载后 Qt 会自动切到邻近页，需回落第一个页签）
         cur = self._stack.currentWidget()
         was_plugin_current = cur is not None and any(cur is w for w in self._plugin_widgets.values())
         # 卸载已注销页
@@ -1154,9 +1153,9 @@ class WorkbenchPanel(QWidget):
         self._plugin_sig = sig
         current = self._stack.currentIndex()
         self._rebuild_tab_bar()
-        # 当前页被移除（插件页）或越界时回落到工作树页（默认落点）
+        # 当前页被移除（插件页）或越界时回落第一个页签（默认落点，非工作树特判）
         if was_plugin_current or current >= self._stack.count() or current < 0:
-            current = self.TAB_WORKTREE
+            current = 0
         self.set_current_tab(current)
 
     # ── 产物页槽位（完全插件化，index 2 恒定） ──

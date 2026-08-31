@@ -14,6 +14,9 @@ tool_calls（call_id）命中的文件操作归属该组；组头部可折叠/�
 一键查看组内全部文件差异。消息不可用时回退平铺列表。
 """
 
+import os
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +34,7 @@ from qfluentwidgets import TransparentToolButton
 
 # 复用内置 _EmptyHint / _SectionHeader（共享模块，避免重复定义）
 from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
+from app.widgets.elided_label import _ElidedLabel
 
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_icon
@@ -71,6 +75,18 @@ def _message_text(content: Any) -> str:
     return ""
 
 
+def _is_hook_message(msg: Dict[str, Any]) -> bool:
+    """判断是否为 hook 注入的 user 消息（不开新分组，只有用户真实输入开组）
+
+    特征：_hook_event 结构化标记（主判）；旧数据无该字段时以
+    <system-reminder> 包裹 + <xxx-hook> 标记兜底。
+    """
+    if msg.get("_hook_event"):
+        return True
+    content = msg.get("content")
+    return isinstance(content, str) and content.lstrip().startswith("<system-reminder>") and "-hook>" in content
+
+
 def _question_summary(content: Any, limit: int = 80) -> str:
     """用户问题摘要：取首个非空行并截断"""
     text = _message_text(content)
@@ -104,6 +120,16 @@ class _SystemArtifactItem(QFrame):
         text_col.addWidget(self._name_label)
         text_col.addWidget(self._meta_label)
         layout.addLayout(text_col, 1)
+        self._open_btn = TransparentToolButton(get_icon("read"), self)
+        self._open_btn.setToolTip("打开文件")
+        self._open_btn.setFixedSize(24, 24)
+        self._open_btn.clicked.connect(self._open_file)
+        layout.addWidget(self._open_btn)
+        self._folder_btn = TransparentToolButton(get_icon("folder"), self)
+        self._folder_btn.setToolTip("打开文件路径")
+        self._folder_btn.setFixedSize(24, 24)
+        self._folder_btn.clicked.connect(self._reveal_file)
+        layout.addWidget(self._folder_btn)
         self._diff_btn = TransparentToolButton(get_icon("差异对比"), self)
         self._diff_btn.setToolTip("查看该文件差异")
         self._diff_btn.setFixedSize(24, 24)
@@ -136,6 +162,39 @@ class _SystemArtifactItem(QFrame):
         if self._file_path:
             self.diff_requested.emit([self._file_path])
 
+    def _open_file(self) -> None:
+        """用系统默认程序打开产物文件"""
+        p = Path(self._file_path)
+        if not self._file_path or not p.exists():
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(p))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(p)])
+            else:
+                subprocess.Popen(["xdg-open", str(p)])
+        except Exception:
+            pass
+
+    def _reveal_file(self) -> None:
+        """在文件管理器中定位产物文件"""
+        if not self._file_path:
+            return
+        p = Path(self._file_path)
+        try:
+            if sys.platform == "win32":
+                if p.exists():
+                    subprocess.Popen(["explorer", "/select,", str(p)])
+                elif p.parent.exists():
+                    subprocess.Popen(["explorer", str(p.parent)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(p)])
+            elif p.parent.exists():
+                subprocess.Popen(["xdg-open", str(p.parent)])
+        except Exception:
+            pass
+
 
 class _QuestionGroupCard(QFrame):
     """单个用户问题分组卡片：问题摘要 + 文件数 + 组差异按钮 + 可折叠文件列表"""
@@ -159,7 +218,7 @@ class _QuestionGroupCard(QFrame):
         self._arrow_label = QLabel(header)
         self._arrow_label.setFixedSize(14, 14)
         self._arrow_label.setScaledContents(True)
-        self._question_label = QLabel(question, header)
+        self._question_label = _ElidedLabel(question, header)
         self._question_label.setToolTip(question)
         self._count_label = QLabel(f"{len(ops)} 个文件", header)
         h_layout.addWidget(self._arrow_label)
@@ -185,6 +244,7 @@ class _QuestionGroupCard(QFrame):
 
         header.mousePressEvent = lambda _e: self.toggle()  # type: ignore[assignment]
         self._apply_expand()
+        self.refresh_style()
 
     # ── 折叠 ──
 
@@ -213,7 +273,7 @@ class _QuestionGroupCard(QFrame):
         self.setStyleSheet(
             "QFrame#questionGroupCard {"
             f" background: {Colors.CARD_BG.format(alpha=60)};"
-            f" border: 1px solid {Colors.BORDER};"
+            " border: none;"
             f" border-radius: {BorderRadius.MD};"
             " }"
             f" QLabel {{ background: transparent; {get_font_family_css()} }}"
@@ -349,7 +409,7 @@ class SystemArtifactsPage(QWidget):
             if not isinstance(msg, dict):
                 continue
             role = msg.get("role")
-            if role == "user":
+            if role == "user" and not _is_hook_message(msg):
                 groups.append(
                     {
                         "question": _question_summary(msg.get("content")) or "（空问题）",
