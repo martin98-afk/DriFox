@@ -65,11 +65,24 @@ def build(qapp, width):
 
 
 QUESTIONS = [
-    {"question": "选择实现方案：", "options": [
-        {"label": "方案A", "description": "使用状态机重构，保留现有对外接口不变，内部逻辑全部重写，测试覆盖率需要重新补齐"},
-        {"label": "方案B", "description": "最小改动，在现有回调里加判断分支，风险低但可维护性差，后续每次扩展都要碰这段代码"},
-        {"label": "方案C", "description": "引入第三方库直接替换，需要评估许可证兼容性和依赖体积变化，以及团队学习成本"},
-    ], "multiple": False},
+    {
+        "question": "选择实现方案：",
+        "options": [
+            {
+                "label": "方案A",
+                "description": "使用状态机重构，保留现有对外接口不变，内部逻辑全部重写，测试覆盖率需要重新补齐",
+            },
+            {
+                "label": "方案B",
+                "description": "最小改动，在现有回调里加判断分支，风险低但可维护性差，后续每次扩展都要碰这段代码",
+            },
+            {
+                "label": "方案C",
+                "description": "引入第三方库直接替换，需要评估许可证兼容性和依赖体积变化，以及团队学习成本",
+            },
+        ],
+        "multiple": False,
+    },
 ]
 
 
@@ -106,8 +119,11 @@ def main(qapp):
     print(f"  窄卡片(实际宽{w1}) 算出: {polluted}")
     print(f"  宽卡片(实际宽{w2}) 算出: {clean}")
     print(f"  差值: {delta} px")
-    verdict = "❌ 污染存在：heightForWidth 结果依赖卡片当前实际宽度，布局中间态必算错高" if delta > 2 \
+    verdict = (
+        "❌ 污染存在：heightForWidth 结果依赖卡片当前实际宽度，布局中间态必算错高"
+        if delta > 2
         else "OK：heightForWidth 不受实际宽度污染"
+    )
     print(f"  判定: {verdict}")
 
     # ── 反向：宽卡片问窄宽度 ──
@@ -124,8 +140,7 @@ def main(qapp):
             continue
         sh = w.sizeHint()
         hfw = w.heightForWidth(w1) if w.hasHeightForWidth() else None
-        print(f"  item{i} {type(w).__name__}: sizeHint={sh.width()}x{sh.height()} "
-              f"hfw({w1})={hfw} actual_w={w.width()}")
+        print(f"  item{i} {type(w).__name__}: sizeHint={sh.width()}x{sh.height()} hfw({w1})={hfw} actual_w={w.width()}")
 
     # 清理
     host1.hide()

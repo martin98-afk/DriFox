@@ -89,7 +89,7 @@ class Harness:
         self.mgr.mark_coexist_containers(self.wid, frozenset({ContainerType.BOTTOM}))
         self.mgr.register_card(self.wid, ContainerType.BOTTOM, "question", self.card)
 
-        self.trace = []          # 事件轨迹
+        self.trace = []  # 事件轨迹
         self._t0 = [0]
 
         # ── 仪表：_do_expand 目标轨迹 ──
@@ -102,8 +102,14 @@ class Harness:
             natural = self.container._follow_content_natural_h() if fc else -1
             self.trace.append(("expand.enter", f"cont={w}x{h} natural_h={natural}"))
             orig_expand(*a, **kw)
-            self.trace.append(("expand.exit", f"cont_h={self.container.height()} "
-                               f"min={self.container.minimumHeight()} max={self.container.maximumHeight()}"))
+            self.trace.append(
+                (
+                    "expand.exit",
+                    f"cont_h={self.container.height()} "
+                    f"min={self.container.minimumHeight()} max={self.container.maximumHeight()}",
+                )
+            )
+
         self.container._do_expand = traced_expand
 
         # ── 仪表：setSizes 轨迹 ──
@@ -112,6 +118,7 @@ class Harness:
         def traced_set_sizes(sizes):
             self.trace.append(("setSizes", list(sizes)))
             orig_set_sizes(sizes)
+
         self.vsplitter.setSizes = traced_set_sizes
 
         # ── 仪表：heightForWidth 轨迹 ──
@@ -121,6 +128,7 @@ class Harness:
             h = orig_hfw(w)
             self.trace.append(("hfw", f"w={w} card_w={self.card.width()} -> h={h}"))
             return h
+
         self.card.heightForWidth = traced_hfw
 
     def ask(self, questions):
@@ -138,10 +146,16 @@ class Harness:
 
     def record_frame(self):
         card = self.card
-        footer_y = card._footer_widget.mapTo(card, card._footer_widget.rect().topLeft()).y() \
-            if card._footer_widget.isVisible() else -1
-        opts_y = card._options_container.mapTo(card, card._options_container.rect().topLeft()).y() \
-            if card._options_container.isVisible() else -1
+        footer_y = (
+            card._footer_widget.mapTo(card, card._footer_widget.rect().topLeft()).y()
+            if card._footer_widget.isVisible()
+            else -1
+        )
+        opts_y = (
+            card._options_container.mapTo(card, card._options_container.rect().topLeft()).y()
+            if card._options_container.isVisible()
+            else -1
+        )
         return {
             "cont_h": self.container.height(),
             "card_y": card.y(),
@@ -203,8 +217,10 @@ def analyze(tag, records, harness=None, show_trace=False):
     for i in keys:
         if i < len(records):
             r = records[i]
-            print(f"  {i:3d} | {r['cont_h']:6d} {r['card_y']:6d} {r['card_h']:6d} {r['card_w']:6d}"
-                  f" {r['scroll_h']:8d} {r['opts_y']:6d} {r['footer_y']:8d} | {r['sp_sizes']}")
+            print(
+                f"  {i:3d} | {r['cont_h']:6d} {r['card_y']:6d} {r['card_h']:6d} {r['card_w']:6d}"
+                f" {r['scroll_h']:8d} {r['opts_y']:6d} {r['footer_y']:8d} | {r['sp_sizes']}"
+            )
     if show_trace and harness:
         harness.print_trace()
     return not anomalies
@@ -215,11 +231,15 @@ QS = {
         {"question": "继续吗？", "options": [{"label": "是"}, {"label": "否"}], "multiple": False},
     ],
     "desc": [
-        {"question": "选择实现方案：", "options": [
-            {"label": "方案A", "description": "使用状态机重构，保留现有对外接口不变，内部逻辑全部重写"},
-            {"label": "方案B", "description": "最小改动，在现有回调里加判断分支，风险低但可维护性差"},
-            {"label": "方案C", "description": "引入第三方库直接替换，需要评估许可证兼容性和依赖体积变化"},
-        ], "multiple": False},
+        {
+            "question": "选择实现方案：",
+            "options": [
+                {"label": "方案A", "description": "使用状态机重构，保留现有对外接口不变，内部逻辑全部重写"},
+                {"label": "方案B", "description": "最小改动，在现有回调里加判断分支，风险低但可维护性差"},
+                {"label": "方案C", "description": "引入第三方库直接替换，需要评估许可证兼容性和依赖体积变化"},
+            ],
+            "multiple": False,
+        },
     ],
 }
 

@@ -76,6 +76,7 @@ def main(qapp):
         anim_log.append((start_h, end_h))
         print(f"  [ANIM] 启动动画 {start_h} -> {end_h}")
         orig_anim(start_h, end_h, on_finished)
+
     container._animate_height = traced_anim
 
     host.show()
@@ -83,12 +84,18 @@ def main(qapp):
     assert container.isHidden(), "前置：容器应处于折叠隐藏态"
 
     # 填充内容（卡片仍隐藏、容器仍隐藏）
-    card.show_question([
-        {"question": "选择实现方案：", "options": [
-            {"label": "方案A", "description": "使用状态机重构，保留现有对外接口不变，内部逻辑全部重写"},
-            {"label": "方案B", "description": "最小改动，在现有回调里加判断分支，风险低但可维护性差"},
-        ], "multiple": False},
-    ])
+    card.show_question(
+        [
+            {
+                "question": "选择实现方案：",
+                "options": [
+                    {"label": "方案A", "description": "使用状态机重构，保留现有对外接口不变，内部逻辑全部重写"},
+                    {"label": "方案B", "description": "最小改动，在现有回调里加判断分支，风险低但可维护性差"},
+                ],
+                "multiple": False,
+            },
+        ]
+    )
     _flush(qapp, 30)
 
     # ── 真实时序：容器隐藏时 setVisible(True) ──
@@ -107,7 +114,7 @@ def main(qapp):
     if anim_log:
         print(f"  ❌ 动画被启动 {anim_log} —— 出现瞬间将先动画、后被 singleShot 链取消转 snap，高度多轮跳变")
     else:
-        print(f"  OK：未启动动画（snap 路径）")
+        print("  OK：未启动动画（snap 路径）")
     print(f"  此刻容器高度: {container.height()}, min={container.minimumHeight()}, max={container.maximumHeight()}")
 
     # 模拟后续 singleShot 链（show_question / showEvent 的 heightChanged）

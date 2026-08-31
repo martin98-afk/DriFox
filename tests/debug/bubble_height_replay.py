@@ -12,7 +12,16 @@ from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout
 
 from app.widgets.message_card import MessageCard, PlainTextViewer
 
-_WORDS = ["你好", "hello world", "测试消息", "🔥emoji👍", "https://example.com/long/path?q=1", "全角字符ＡＢＣ", "line1\nline2", "a" * 50]
+_WORDS = [
+    "你好",
+    "hello world",
+    "测试消息",
+    "🔥emoji👍",
+    "https://example.com/long/path?q=1",
+    "全角字符ＡＢＣ",
+    "line1\nline2",
+    "a" * 50,
+]
 
 SEED = int(sys.argv[1]) if len(sys.argv) > 1 else 24
 
@@ -55,8 +64,19 @@ def replay(qapp, seed):
     for i in range(20):
         op = rng.choice(
             [
-                "sync", "sync_force", "preview_on", "preview_off", "append", "set_text",
-                "resize_host", "update_height", "theme", "finish", "hide", "show", "flush",
+                "sync",
+                "sync_force",
+                "preview_on",
+                "preview_off",
+                "append",
+                "set_text",
+                "resize_host",
+                "update_height",
+                "theme",
+                "finish",
+                "hide",
+                "show",
+                "flush",
             ]
         )
         if op == "sync":
@@ -120,11 +140,15 @@ def _patched_update_height(self):
         doc.setTextWidth(cap if cap < 100000 else 4000)
         h_full = doc.size().height()
         lsp = fm.lineSpacing()
-        print(f"    MEASURE@cap: doc_h={h_full:.1f} lineSpacing={lsp} thr={3.0 * lsp:.1f} branch={'WIDE' if h_full > 3.0 * lsp else 'SHRINK'}")
+        print(
+            f"    MEASURE@cap: doc_h={h_full:.1f} lineSpacing={lsp} thr={3.0 * lsp:.1f} branch={'WIDE' if h_full > 3.0 * lsp else 'SHRINK'}"
+        )
         from PyQt5.QtCore import QCoreApplication
 
         QCoreApplication.processEvents()
-        print(f"    POST-flush: doc_h={doc.size().height():.1f} textWidth={doc.textWidth()} size={doc.size().width():.0f}x{doc.size().height():.0f}")
+        print(
+            f"    POST-flush: doc_h={doc.size().height():.1f} textWidth={doc.textWidth()} size={doc.size().width():.0f}x{doc.size().height():.0f}"
+        )
         if h_full <= 3.0 * lsp:
             longest = 0.0
             block = doc.begin()
@@ -136,7 +160,9 @@ def _patched_update_height(self):
                 block = block.next()
             bubble_w = max(80, min(int(__import__("math").ceil(longest)) + 40, cap))
             doc.setTextWidth(bubble_w - 16)
-            print(f"    MEASURE@bubble: bubble_w={bubble_w} doc_h={doc.size().height():.1f} vp={self.text_edit.viewport().width()}")
+            print(
+                f"    MEASURE@bubble: bubble_w={bubble_w} doc_h={doc.size().height():.1f} vp={self.text_edit.viewport().width()}"
+            )
     _orig_update_height(self)
     print(f"    EXIT: h={self.height()} w={self.width()} tall_cap={self._tall_cap}")
 

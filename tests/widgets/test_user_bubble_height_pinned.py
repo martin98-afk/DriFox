@@ -129,8 +129,19 @@ def test_height_consistent_across_repeated_updates(qapp):
 _WORDS = ["你好", "hello world", "测试消息", "🔥emoji👍", _URL_MSG, "全角字符ＡＢＣ", "line1\nline2", "a" * 50]
 
 _FUZZ_OPS = [
-    "sync", "sync_force", "preview_on", "preview_off", "append", "set_text",
-    "resize_host", "update_height", "theme", "finish", "hide", "show", "flush",
+    "sync",
+    "sync_force",
+    "preview_on",
+    "preview_off",
+    "append",
+    "set_text",
+    "resize_host",
+    "update_height",
+    "theme",
+    "finish",
+    "hide",
+    "show",
+    "flush",
 ]
 
 
@@ -189,8 +200,7 @@ def _replay_fuzz(qapp, rng_seed: int) -> None:
         doc.setTextWidth(max(20, viewer.width() - 16))
         need = max(40, min(doc.size().height() + 12, viewer.MAX_HEIGHT))
         assert viewer.height() <= need + 8, (
-            f"seed={rng_seed}: 气泡 h={viewer.height()} 超过内容需求 {need:.0f}"
-            f"（tall_cap={viewer._tall_cap} 污染钉死）"
+            f"seed={rng_seed}: 气泡 h={viewer.height()} 超过内容需求 {need:.0f}（tall_cap={viewer._tall_cap} 污染钉死）"
         )
     host.hide()
     card.cleanup()

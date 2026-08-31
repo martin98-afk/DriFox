@@ -17,7 +17,16 @@ from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout
 
 from app.widgets.message_card import MessageCard, PlainTextViewer
 
-_WORDS = ["你好", "hello world", "测试消息", "🔥emoji👍", "https://example.com/long/path?q=1", "全角字符ＡＢＣ", "line1\nline2", "a" * 50]
+_WORDS = [
+    "你好",
+    "hello world",
+    "测试消息",
+    "🔥emoji👍",
+    "https://example.com/long/path?q=1",
+    "全角字符ＡＢＣ",
+    "line1\nline2",
+    "a" * 50,
+]
 
 
 def _flush(qapp, ms=60):
@@ -108,8 +117,12 @@ def run(qapp, rounds=300, seed0=0):
             continue
         need = _need_height(viewer)
         if viewer.height() > need + 8 or viewer.height() < 40:
-            failures.append((seed0 + r, ops, viewer.height(), need, viewer._text[:60], viewer._width_cap, viewer._tall_cap))
-            print(f"❌ seed={seed0 + r} viewer_h={viewer.height()} need={need:.0f} cap={viewer._width_cap} tall_cap={viewer._tall_cap}")
+            failures.append(
+                (seed0 + r, ops, viewer.height(), need, viewer._text[:60], viewer._width_cap, viewer._tall_cap)
+            )
+            print(
+                f"❌ seed={seed0 + r} viewer_h={viewer.height()} need={need:.0f} cap={viewer._width_cap} tall_cap={viewer._tall_cap}"
+            )
             print(f"   text={viewer._text[:60]!r}")
             print(f"   ops={ops}")
         host.hide()
