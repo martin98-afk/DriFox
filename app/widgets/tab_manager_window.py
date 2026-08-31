@@ -618,17 +618,47 @@ class TabManagerWindow(FramelessWindow):
         # 初始定位到右下角（首个窗口加入 + 激活后会精确对齐 send_btn）
         self.pixel_pet.resize_handle(self.width(), self.height())
 
-        # ── 右侧工作台浮层（单例浮层，同桌宠模式：child widget + raise，不进 layout）──
-        # 标题栏「右侧边栏」按钮 toggle；显隐与数据刷新见 toggle_workbench/refresh_workbench
-        from app.widgets.workbench_panel import WorkbenchPanel
+        # ── 右侧工作台面板（**嵌入式**：对话区右侧第三窗格，与左侧 TabPanel 对称）──
+        # 放弃悬浮：QWebEngineView 是原生 HWND，悬浮面板必然与之争 z-order
+        # （child 盖不住 / WA_NativeWindow 吞主窗口边缘 resize / Tool 窗口跟随延迟）。
+        # 嵌入式与对话区并列不重叠，从根上无遮挡，也不需要任何 HWND 技巧。
+        from app.widgets.workbench_panel import (
+            PANEL_WIDTH_DEFAULT,
+            PANEL_WIDTH_MAX,
+            PANEL_WIDTH_MIN,
+            WorkbenchPanel,
+        )
 
         self.workbench_panel = WorkbenchPanel(self)
         self.workbench_panel.hide()
         self.workbench_panel.close_requested.connect(self._hide_workbench)
         self.workbench_panel.refresh_requested.connect(self.refresh_workbench)
+        self.workbench_panel.diff_requested.connect(self._open_workbench_diff)
         self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
         # 主题 / 字号刷新：与桌宠同路径注册
         theme_manager.register_refresh_target(self.workbench_panel)
+
+        # 圆角矩形容器（与 #tabFrame / #chatFrame 同款），作为 splitter 第三窗格。
+        # 直接给 #workbenchPanel 设 border 会被 splitter handle 绘制顺序吞掉，
+        # 故同左侧一样再包一层 QFrame 用 objectName 上样式。
+        self._workbench_frame = QFrame()
+        self._workbench_frame.setObjectName("workbenchFrame")
+        # QSplitter 直接子项是 frame，宽约束必须设在 frame 上：
+        #   min = panel min(320) + margins(12) + border(2) = 334
+        #   max = panel max(820) + margins(12) + border(2) = 834
+        self._workbench_frame.setMinimumWidth(PANEL_WIDTH_MIN + 14)
+        self._workbench_frame.setMaximumWidth(PANEL_WIDTH_MAX + 14)
+        _wb_frame_layout = QVBoxLayout(self._workbench_frame)
+        # 与 #chatFrame / #tabFrame 内边距完全对齐，视觉一致
+        _wb_frame_layout.setContentsMargins(6, 6, 6, 6)
+        _wb_frame_layout.setSpacing(0)
+        _wb_frame_layout.addWidget(self.workbench_panel)
+        self._workbench_frame.hide()  # 默认隐藏（标题栏「右侧边栏」按钮 toggle）
+        # 挂到 splitter：不拉伸（与左侧 tabFrame 同策略），宽度由 handle 拖拽
+        self._splitter.addWidget(self._workbench_frame)
+        self._splitter.setStretchFactor(2, 0)
+        # 初始宽度（隐藏态不占空间，展开时生效）
+        self._workbench_frame_w = PANEL_WIDTH_DEFAULT + 14
 
         # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
         QTimer.singleShot(0, self._apply_bg_from_theme)
@@ -747,34 +777,67 @@ class TabManagerWindow(FramelessWindow):
             # hide 而非 destroy：保留实例，便于再次开启无需重建
             pet.hide()
 
-    # ── 右侧工作台浮层（toggle / 定位 / 数据刷新） ──
+    # ── 右侧工作台（嵌入式：toggle 显隐 / 数据刷新） ──
 
     def toggle_workbench(self) -> None:
-        """标题栏「右侧边栏」按钮回调：显隐工作台浮层（带滑入/滑出动画）"""
+        """标题栏「右侧边栏」按钮回调：直接显示/隐藏工作台（无折叠动画）
+
+        工作台是 splitter 第三窗格，hide/show 后 QSplitter 自动把空间
+        归还/分配给对话区，无需手动 setSizes。
+        """
+        self.set_workbench_visible(not self.is_workbench_visible())
+
+    def is_workbench_visible(self) -> bool:
+        """工作台当前是否可见"""
+        frame = getattr(self, "_workbench_frame", None)
+        return bool(frame is not None and frame.isVisible())
+
+    def set_workbench_visible(self, visible: bool) -> None:
+        """显示/隐藏工作台（直接 hide/show，无动画）
+
+        隐藏时记忆当前宽度，展开时恢复。
+        """
+        frame = getattr(self, "_workbench_frame", None)
         panel = getattr(self, "workbench_panel", None)
-        if panel is None:
+        if frame is None or panel is None:
             return
-        if panel.isVisible() or panel.is_sliding:
-            panel.slide_out()
+        visible = bool(visible)
+        if visible == frame.isVisible():
+            # 状态一致时仍要确保 panel 同步（panel 曾被显式 hide，
+            # frame.show() 不会连带显示它 —— 下面有说明）
+            panel.set_panel_visible(visible)
             return
-        self.reposition_workbench()
-        panel.slide_in()
-        self.refresh_workbench()
+        if visible:
+            frame.show()
+            # ★ 必须显式 show panel：panel 构造后调过 hide()，
+            #   Qt 中**被显式 hide 的子 widget 不会因 parent.show() 自动恢复**，
+            #   而 layout 不给 hidden widget 分配空间 → panel 停在初始尺寸
+            #   （表现为「工作台出来了但里面没有内容」）。
+            panel.set_panel_visible(True)
+            try:
+                sizes = self._splitter.sizes()
+                if len(sizes) >= 3:
+                    # 从对话区借空间给工作台，保证总宽不变
+                    wb_w = max(frame.minimumWidth(), min(frame.maximumWidth(), self._workbench_frame_w))
+                    chat_w = max(0, sizes[1] - wb_w)
+                    self._splitter.setSizes([sizes[0], chat_w, wb_w])
+            except Exception:
+                pass
+            self.refresh_workbench()
+        else:
+            # 隐藏：先记忆当前宽度
+            try:
+                sizes = self._splitter.sizes()
+                if len(sizes) >= 3 and sizes[2] > 0:
+                    self._workbench_frame_w = sizes[2]
+            except Exception:
+                pass
+            panel.set_panel_visible(False)
+            frame.hide()
 
     def _hide_workbench(self) -> None:
-        """工作台关闭按钮：滑出动画收起（面板实例保留，再次开启零重建）"""
-        panel = getattr(self, "workbench_panel", None)
-        if panel is not None:
-            panel.slide_out()
-
-    def reposition_workbench(self) -> None:
-        """工作台贴窗口右缘（标题栏下方全高）；纯覆盖定位，不参与任何 layout"""
-        panel = getattr(self, "workbench_panel", None)
-        if panel is None or panel.is_sliding:
-            return
-        top = self.titleBar.height() if getattr(self, "titleBar", None) is not None else 0
-        panel.setFixedHeight(max(0, self.height() - top))
-        panel.move(max(0, self.width() - panel.width()), top)
+        """工作台关闭按钮：直接隐藏（实例保留，再次开启零重建）"""
+        self.set_workbench_visible(False)
 
     def refresh_workbench(self) -> None:
         """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
@@ -822,6 +885,139 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 todos = []
         panel.update_todos(todos or [])
+
+    def open_workbench_memory(self, sub_tab: str = "docs") -> None:
+        """展开工作台并定位到记忆页的指定子页签（记忆功能已迁移到工作台）
+
+        统一的「一键直达」入口：新建项目后自动展开关键文档、工作树「管理工作树」
+        按钮等场景都走这里，不再打开旧的独立记忆卡片。
+
+        Args:
+            sub_tab: entries=条目记忆 / notes=项目笔记 / docs=关键文档
+                    （工作树的增删与切换 UI 挂在 docs 页签里）
+        """
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None:
+            return
+        # 1) 展开工作台（不可见时 set_workbench_visible 内部会触发 refresh_workbench）
+        if not self.is_workbench_visible():
+            self.set_workbench_visible(True)
+        else:
+            self.refresh_workbench()
+        # 2) 切到记忆页签
+        panel.set_current_tab(panel.TAB_MEMORY)
+        # 3) 切到指定子页签（内容未构建时 MemoryPage 会记为 pending，构建后补切）
+        try:
+            panel.memory_page.switch_sub_tab(sub_tab)
+        except Exception as exc:
+            logger.warning(f"[Workbench] 切换记忆子页签失败: {exc}")
+
+    # ── 工作台差异入口（替代标题栏 diff_btn） ──
+
+    def _open_workbench_diff(self, file_paths: Optional[List[str]]) -> None:
+        """工作台产物页的差异请求：调 controller.show_diff_viewer 并自动隐藏工作台
+
+        file_paths 为 None 表示「查看所有产物差异」，由宿主从当前 backend 重新拉取 ops。
+        打开差异后挂 closed 监听，差异关闭时自动展开工作台（仅在
+        ``_workbench_diff_active`` 标志位下生效，避免与用户手动关闭工作台打架）。
+        """
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None:
+            return
+        win = self.get_current_window()
+        backend = getattr(win, "backend", None) if win is not None else None
+        session_id = getattr(win, "_current_session_id", None)
+        if backend is None or not session_id:
+            self._show_diff_toast("当前没有活动会话")
+            return
+        try:
+            from app.utils.file_operation_recorder import FileOperationRecorder
+            from app.utils.diff_viewer import DiffHtmlGenerator
+
+            file_recorder = FileOperationRecorder(backend.session_store)
+            operations = file_recorder.get_all_operations_for_session(session_id)
+        except Exception as e:
+            logger.warning(f"[WorkbenchDiff] 数据准备失败: {e}")
+            operations = []
+
+        # 决定最终要 diff 的文件路径列表
+        target_paths: List[str] = []
+        if file_paths:
+            # 单条目入口：仅取有效存在的
+            target_paths = [p for p in file_paths if p]
+        if not target_paths:
+            # 「所有产物差异」入口：从 ops 拿文件路径去重
+            target_paths = list({op.get("file_path") for op in operations if op.get("file_path")})
+        if not target_paths:
+            self._show_diff_toast("本次会话没有可对比的产物文件")
+            return
+
+        # 生成 diff html
+        try:
+            diff_text = DiffHtmlGenerator.get_diff_for_files(target_paths, session_id)
+            html = DiffHtmlGenerator.generate_html_report(diff_text or "", session_id)
+        except Exception as e:
+            logger.warning(f"[WorkbenchDiff] 生成 diff html 失败: {e}")
+            self._show_diff_toast("生成差异失败")
+            return
+
+        # 调 controller 显示差异卡片（覆盖对话区域）
+        try:
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            controller = get_global_card_controller()
+            if controller is None:
+                self._show_diff_toast("卡片控制器未就绪")
+                return
+            controller.show_diff_viewer(html, f"产物差异（{len(target_paths)} 个文件）")
+        except Exception as e:
+            logger.warning(f"[WorkbenchDiff] show_diff_viewer 失败: {e}")
+            self._show_diff_toast("打开差异卡片失败")
+            return
+
+        # 标记「由工作台打开的差异」，并隐藏工作台
+        self._workbench_diff_active = True
+        self.set_workbench_visible(False)
+
+        # 监听 diff viewer 关闭：仅在标志位为 True 时自动展开工作台
+        try:
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+            from app.widgets.cards.settings.diff_viewer_card import DiffViewerCard
+
+            controller = get_global_card_controller()
+            dvc = getattr(controller, "_diff_viewer_card", None)
+            if dvc is not None:
+                # UniqueConnection 避免重复挂载
+                try:
+                    dvc.closed.disconnect(self._on_workbench_diff_closed)
+                except (TypeError, RuntimeError):
+                    pass
+                dvc.closed.connect(self._on_workbench_diff_closed, type=Qt.UniqueConnection)
+        except Exception:
+            pass
+
+    def _on_workbench_diff_closed(self) -> None:
+        """工作台差异关闭：自动展开工作台并刷新数据"""
+        if not getattr(self, "_workbench_diff_active", False):
+            return
+        self._workbench_diff_active = False
+        if not self.is_workbench_visible():
+            self.set_workbench_visible(True)
+
+    def _show_diff_toast(self, msg: str) -> None:
+        """统一的轻量提示（InfoBar 顶层）"""
+        try:
+            from qfluentwidgets import InfoBar, InfoBarPosition
+
+            InfoBar.warning(
+                "提示",
+                msg,
+                parent=self,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=2500,
+            )
+        except Exception:
+            logger.warning(f"[WorkbenchDiff] {msg}")
 
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）
@@ -874,7 +1070,17 @@ class TabManagerWindow(FramelessWindow):
                 background: {Colors.CARD_BG.format(alpha=150)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 8px;
-                margin: 4px 4px 4px 0;  /* 左 0 让位给 splitter handle（矩形边框保持全宽） */
+                /* 左右 margin 均 0，让位给 splitter handle：三窗格布局下
+                   中间窗格两侧各有一个 4px handle，若此处保留右 4px margin，
+                   右间距会变成 8px 而左间距只有 4px，两侧不对称。 */
+                margin: 4px 0 4px 0;
+            }}
+            #workbenchFrame {{
+                /* 右侧工作台圆角矩形容器，与 #tabFrame / #chatFrame 同款 */
+                background: {Colors.CARD_BG.format(alpha=150)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                margin: 4px 4px 4px 0;  /* 右 4px 为窗口右边距，左 0 让位 handle */
             }}
             #contentArea {{
                 background: transparent;
@@ -2612,8 +2818,7 @@ class TabManagerWindow(FramelessWindow):
                 except Exception:
                     pass
             # 切 tab 时工作台跟随激活窗：重定位 + 刷新产物/任务/项目数据
-            if getattr(self, "workbench_panel", None) is not None and self.workbench_panel.isVisible():
-                self.reposition_workbench()
+            if getattr(self, "workbench_panel", None) is not None and self.is_workbench_visible():
                 self.refresh_workbench()
 
     def _on_tab_close_requested(self, index: int):
@@ -3210,8 +3415,6 @@ class TabManagerWindow(FramelessWindow):
             self._sync_plugin_titlebar_tabs()
         except Exception:
             pass
-        # 工作台浮层贴齐右缘（几何恢复后）
-        self.reposition_workbench()
 
     def moveEvent(self, event):
         super().moveEvent(event)
@@ -3679,8 +3882,6 @@ class TabManagerWindow(FramelessWindow):
         # 全局桌宠跟随窗体缩放：resize 结束后精确重定位到激活窗 send_btn
         if getattr(self, "pixel_pet", None) is not None:
             self.pixel_pet.reposition_to_active_window()
-        # 工作台浮层贴齐右缘（resize 结束后的最终几何）
-        self.reposition_workbench()
 
         # ── 几何已收拢：解除抑制 + 按最终宽度判定"是否真被挤压" ──
         # 整个 resize 周期（含 _force_relayout 瞬变）内 TabPanel 不自动折叠，
@@ -3738,8 +3939,6 @@ class TabManagerWindow(FramelessWindow):
             self._sync_title_bar_width()
             # 背景图尺寸跟随（轻量操作，不触发布局）
             self._resize_bg_labels()
-            # 工作台浮层拖拽缩放过程中实时贴右缘（setGeometry 轻量，不参与 layout）
-            self.reposition_workbench()
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
@@ -3751,8 +3950,6 @@ class TabManagerWindow(FramelessWindow):
         super().resizeEvent(event)
         # 背景图尺寸跟随（轻量操作，不触发布局）
         self._resize_bg_labels()
-        # 工作台浮层首次 resize 即贴齐右缘（后续 blocking 阶段由阶段二分支续跟）
-        self.reposition_workbench()
         # 通知 TabPanel 进入 resize 节流模式
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)

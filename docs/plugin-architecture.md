@@ -463,7 +463,7 @@ session.executor.execute(...)                               # 逃生舱（core/e
 UI 更新经 Qt 信号转发。
 
 | lsp/ (.lsp.json) | `plugins/*/.lsp.json` | LspManager（`app/core/lsp/`） | `add_plugin_servers` / `remove_plugin_servers` 增量 | backend watchfiles → 增量重载 |
-| ui/ | `plugins/*/ui/__init__.py`（必须暴露 register_ui） | UIPluginRegistry（`app/core/ui_plugin_registry.py`） | `load_plugin`：sys.path 注入 → importlib 动态加载 → `register_ui(self)`；4 扩展点：register_content_renderer / register_message_factory / register_floating_card / register_welcome_tab | backend watchfiles → reload_plugin（先卸旧后载新、清 sys.modules + pycache） |
+| ui/ | `plugins/*/ui/__init__.py`（必须暴露 register_ui） | UIPluginRegistry（`app/core/ui_plugin_registry.py`） | `load_plugin`：sys.path 注入 → importlib 动态加载 → `register_ui(self)`；4 扩展点：register_content_renderer / register_message_factory / register_floating_card / register_welcome_tab；右工作台 tab：register_workbench_tab | backend watchfiles → reload_plugin（先卸旧后载新、清 sys.modules + pycache） |
 | tools/ | `plugins/*/tools/*.py`（必须暴露 register(registry)） | ToolRegistry（`app/tools/registry.py`） | `plugin_tool_loader.load_plugin_tools`：source 强制 `plugin:<name>`、danger 必填、user 覆盖 system | 独立 PluginToolWatcher 轮询线程（2s 签名对比 → scan_now 全量重扫，幂等+锁） |
 | team_templates/ | `plugins/*/team_templates/*.yaml` | TeamManager + `app/core/team/template_manager.py` | `get_template` 查询 | 懒加载 |
 | engines/ | `plugins/*/engines/*.py`（必须暴露 register(registry)） | EngineRegistry（`app/plugins/registries/engine_registry.py`） | `runtime_component_loader._make_engine_loader` + `ensure_engine_watcher`；backend `create_engine_for_slot("ui", ChatEngine, ...)` 工厂化创建；替换类必须 `isinstance(ChatEngine)` 安全网回退内置 | `runtime_component_loader` watcher 轮询 → `builtin_reloaders._reload_engines` 精准卸载/重载单插件 |

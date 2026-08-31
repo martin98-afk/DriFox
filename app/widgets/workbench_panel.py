@@ -6,29 +6,32 @@
 不进任何 layout，与桌宠（PixelPetWidget）同模式。由标题栏「右侧边栏」
 按钮 toggle 显隐。
 
-三个内置区域：
-- 任务：todowrite 工具回传的待办列表（窗口级），进度 + 状态条目 —— 置顶常驻，不进页签
-- 产物：本会话 AI 写过的文件（file_recorder 会话级文件写入记录，按文件去重倒序）
+内置区域：
+- 任务：todowrite 工具回传的待办列表（窗口级）—— 置顶常驻，不进页签
 - 记忆：嵌入 MemoryCardContent 完整长期记忆面板（条目/项目笔记/关键文档）
 
-页签条复用顶栏 CustomTabButton 自绘风格；插件可通过
-UIPluginRegistry.register_workbench_tab 注册新页签（见 sync_plugin_pages）。
+★ 产物页已完全插件化：面板**不再内置**产物实现，改由插件通过
+``UIPluginRegistry.register_workbench_tab(plugin_name, page_id="artifacts", ...)``
+注册（系统插件见 ``plugins/system/ui/_artifacts_page.py``）。
+插件未注册时 index 0 显示 ``_PagePlaceholder`` 占位。
+
+其它 page_id 的插件页追加在「产物 / 记忆」之后（见 sync_plugin_pages）。
 
 数据由外部驱动（TabManagerWindow.refresh_workbench / MainWidget 推送），
 面板自身不持有 backend 引用，便于测试与解耦。
 """
 
-from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -38,259 +41,95 @@ from qfluentwidgets import FluentIcon
 
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
 from app.widgets.custom_title_bar import CustomTabButton
 
 # ── 尺寸常量 ──
-PANEL_WIDTH_DEFAULT = 480  # 默认宽度
-PANEL_WIDTH_MIN = 320  # 左缘拖拽最小宽
-PANEL_WIDTH_MAX = 820  # 左缘拖拽最大宽
-DRAG_HANDLE_WIDTH = 6  # 左缘拖拽热区宽
-SLIDE_DURATION_MS = 220  # 展开/折叠滑动动画时长
+PANEL_WIDTH_DEFAULT = 480  # 默认宽度（splitter 初始分配用）
+PANEL_WIDTH_MIN = 320  # 拖拽最小宽
+PANEL_WIDTH_MAX = 820  # 拖拽最大宽
+TASKS_MIN_HEIGHT = 0  # 任务区最小高度（无任务时折叠到此）
+TASKS_MAX_HEIGHT = 360  # 任务区最大高度（splitter 上限）
+TASKS_DEFAULT_HEIGHT = 180  # 任务区默认高度
 
 
-def _relative_time(created_at: str) -> str:
-    """把 "YYYY-MM-DD HH:MM:SS" 转成友好相对时间（解析失败返回原文）"""
-    try:
-        dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-    except TypeError, ValueError:
-        return created_at or ""
-    delta = datetime.now() - dt
-    seconds = delta.total_seconds()
-    if seconds < 60:
-        return "刚刚"
-    if seconds < 3600:
-        return f"{int(seconds // 60)} 分钟前"
-    if seconds < 86400:
-        return f"{int(seconds // 3600)} 小时前"
-    if seconds < 86400 * 7:
-        return f"{int(seconds // 86400)} 天前"
-    return dt.strftime("%m-%d %H:%M")
+# 注：_EmptyHint / _SectionHeader 已迁移到 app.widgets._workbench_helpers 共享模块，
+# 被 TasksPage / MemoryPage 和 plugins/system/ui/_artifacts_page.py 共用。
 
 
-class _EmptyHint(QLabel):
-    """页面空态提示"""
+class _PagePlaceholder(QWidget):
+    """页签占位页：插件页未注册 / 已卸载时的兜底内容
 
-    def __init__(self, text: str, parent=None):
-        super().__init__(text, parent)
-        self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
-        self.setWordWrap(True)
-        self.refresh_style()
+    产物页（page_id="artifacts"）已完全插件化——面板不再内置实现，
+    由 plugins/system/ui/_artifacts_page.py 的 SystemArtifactsPage 提供。
+    插件未加载时显示本占位，避免出现空白页。
+    """
 
-    def refresh_style(self) -> None:
-        self.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; background: transparent;"
-            f" {get_font_family_css()} {font_size_css(12)}; padding: 32px 16px;"
-        )
-
-
-class _SectionHeader(QFrame):
-    """页签内容小节头：图标 + 标题 + 右侧统计/操作"""
-
-    def __init__(self, title: str, icon_name: str = "", parent=None):
-        super().__init__(parent)
-        self.setObjectName("workbenchSectionHeader")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 0, 2, 0)
-        layout.setSpacing(6)
-        self._icon_label = QLabel(self)
-        self._icon_label.setFixedSize(16, 16)
-        self._icon_label.setScaledContents(True)
-        self._icon_label.setVisible(bool(icon_name))
-        if icon_name:
-            self.set_icon_name(icon_name)
-        self._title_label = QLabel(title, self)
-        self._extra_label = QLabel("", self)  # 统计信息（右侧）
-        layout.addWidget(self._icon_label)
-        layout.addWidget(self._title_label)
-        layout.addStretch(1)
-        layout.addWidget(self._extra_label)
-        self.refresh_style()
-
-    def set_icon_name(self, icon_name: str) -> None:
-        self._icon_label.setPixmap(get_icon(icon_name).pixmap(16, 16))
-
-    def set_extra(self, text: str) -> None:
-        self._extra_label.setText(text)
-
-    def refresh_style(self) -> None:
-        self.setStyleSheet(
-            "QFrame#workbenchSectionHeader { background: transparent; border: none; }"
-            f" QLabel {{ color: {Colors.TEXT_SECONDARY}; background: transparent;"
-            f" {get_font_family_css()} {font_size_css(12)}; }}"
-        )
-
-
-class ArtifactsPage(QWidget):
-    """产物页：本会话 AI 写过的文件（按文件去重，最近操作在前）"""
-
-    def __init__(self, parent=None):
+    def __init__(self, text: str = "产物页未加载\n\n插件未注册或已卸载", parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
-        self._header = _SectionHeader("产物", "根目录", self)
-        layout.addWidget(self._header)
+        self._hint = _EmptyHint(text, self)
+        layout.addWidget(self._hint)
 
-        self._scroll = QScrollArea(self)
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setFocusPolicy(Qt.NoFocus)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._scroll.setStyleSheet(
-            "QScrollArea { background: transparent; border: none; }\n" + get_unified_scrollbar_style(6)
-        )
-        self._list_wrap = QWidget()
-        self._list_wrap.setStyleSheet("background: transparent;")
-        self._scroll.setWidget(self._list_wrap)
-        self._list_layout = QVBoxLayout(self._list_wrap)
-        self._list_layout.setContentsMargins(0, 0, 2, 0)
-        self._list_layout.setSpacing(2)
-        self._empty_hint = _EmptyHint("本次会话暂无产物\n\nAI 写入或编辑过的文件会出现在这里", self._list_wrap)
-        self._list_layout.addWidget(self._empty_hint)
-        self._list_layout.addStretch(1)
-        layout.addWidget(self._scroll, 1)
-        self.refresh_style()
+    def set_operations(self, operations) -> None:
+        """宿主数据入口的空实现（插件版会覆盖；占位页无数据可渲染）"""
 
-    # ── 数据 ──
-
-    def set_operations(self, operations: List[Dict[str, Any]]) -> None:
-        """渲染文件操作记录（按 file_path 去重，保留最新一次；倒序展示）"""
-        while self._list_layout.count() > 1:  # 末尾是 stretch
-            item = self._list_layout.takeAt(0)
-            w = item.widget()
-            if w is not None and w is not self._empty_hint:
-                w.deleteLater()
-        # 去重：file_path → 最近一次操作
-        latest: Dict[str, Dict[str, Any]] = {}
-        order: List[str] = []
-        for op in operations or []:
-            fp = op.get("file_path") or ""
-            if not fp:
-                continue
-            if fp not in latest:
-                order.append(fp)
-            latest[fp] = op
-        ordered = [latest[fp] for fp in reversed(order)]  # 最新在前
-        self._empty_hint.setVisible(not ordered)
-        self._header.set_extra(f"{len(ordered)} 个文件" if ordered else "")
-        for op in ordered:
-            self._list_layout.addWidget(_ArtifactItem(op, self._list_wrap))
+    def set_diff_all_callback(self, callback) -> None:
+        """差异回调注入的空实现（占位页无差异入口）"""
 
     def refresh_style(self) -> None:
-        self._header.refresh_style()
-        self._empty_hint.refresh_style()
-        for i in range(self._list_layout.count()):
-            w = self._list_layout.itemAt(i).widget()
-            if isinstance(w, _ArtifactItem):
-                w.refresh_style()
-
-
-class _ArtifactItem(QFrame):
-    """单条产物条目：文件名 + 工具/时间 + 路径；hover 显示打开按钮"""
-
-    def __init__(self, op: Dict[str, Any], parent=None):
-        super().__init__(parent)
-        self.setObjectName("artifactItem")
-        self.setCursor(Qt.PointingHandCursor)
-        self._file_path = op.get("file_path", "")
-        self.setToolTip(self._file_path)
-
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 5, 6, 5)
-        layout.setSpacing(8)
-
-        text_col = QVBoxLayout()
-        text_col.setSpacing(1)
-        name = Path(self._file_path).name or self._file_path
-        parent_dir = str(Path(self._file_path).parent)
-        self._name_label = QLabel(name, self)
-        self._name_label.setStyleSheet("font-weight: 600;")
-        self._meta_label = QLabel(f"{op.get('tool_name', '')} · {_relative_time(op.get('created_at', ''))}", self)
-        self._meta_label.setToolTip(parent_dir)
-        text_col.addWidget(self._name_label)
-        text_col.addWidget(self._meta_label)
-        layout.addLayout(text_col, 1)
-
-        self._open_btn = TransparentToolButton(FluentIcon.LINK, self)
-        self._open_btn.setToolTip("打开文件")
-        self._open_btn.setFixedSize(24, 24)
-        self._open_btn.clicked.connect(self._open_file)
-        self._folder_btn = TransparentToolButton(FluentIcon.FOLDER, self)
-        self._folder_btn.setToolTip("打开所在目录")
-        self._folder_btn.setFixedSize(24, 24)
-        self._folder_btn.clicked.connect(self._open_folder)
-        layout.addWidget(self._open_btn)
-        layout.addWidget(self._folder_btn)
-        self.refresh_style()
-
-    def refresh_style(self) -> None:
-        self.setStyleSheet(
-            "QFrame#artifactItem {"
-            f" background: {Colors.CARD_BG.format(alpha=120)};"
-            f" border: 1px solid {Colors.BORDER};"
-            " border-radius: 6px; }"
-            "QFrame#artifactItem:hover {"
-            f" background: {Colors.HOVER_BG};"
-            f" border-color: {Colors.BORDER_ACCENT}; }}"
-            f" QLabel {{ color: {Colors.TEXT_PRIMARY}; background: transparent;"
-            f" {get_font_family_css()} {font_size_css(12)}; }}"
-        )
-        # meta 行用次级色（setStyleSheet 会覆盖 name 的 font-weight，重设）
-        self._name_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; font-weight: 600;"
-            f" {get_font_family_css()} {font_size_css(12)};"
-        )
-        self._meta_label.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; background: transparent; {get_font_family_css()} {font_size_css(11)};"
-        )
-
-    def _open_file(self) -> None:
-        """用系统默认程序打开文件（内联实现，对齐 diff_viewer_card 先例）"""
-        import os
-        import subprocess
-        import sys
-
-        if not self._file_path or not Path(self._file_path).exists():
-            return
-        try:
-            if sys.platform == "win32":
-                os.startfile(self._file_path)  # noqa: S606
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", self._file_path])  # noqa: S603,S607
-            else:
-                subprocess.Popen(["xdg-open", self._file_path])  # noqa: S603,S607
-        except OSError:
-            pass
-
-    def _open_folder(self) -> None:
-        import os
-        import subprocess
-        import sys
-
-        parent = str(Path(self._file_path).parent)
-        if not parent or not Path(parent).exists():
-            return
-        if sys.platform == "win32":
-            os.startfile(parent)  # noqa: S606
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", parent])  # noqa: S603,S607
-        else:
-            subprocess.Popen(["xdg-open", parent])  # noqa: S603,S607
+        self._hint.refresh_style()
 
 
 class TasksPage(QWidget):
-    """任务页：todowrite 待办列表（进度 + 状态条目）"""
+    """任务区：todowrite 待办列表（置顶常驻，不进内容栈；与下方 tab+stack 用 splitter 隔开）
+
+    结构：头部（图标 + 标题 + 进度统计 + 折叠按钮）→ 细进度条 → 行式任务清单。
+
+    视觉取舍：条目用**行式（无边框）**而非卡片堆叠——任务清单通常条目多，
+    每条目加边框会形成密集的"框中框"，视觉噪声重。改为默认透明、hover 淡背景，
+    靠左侧状态符号的颜色区分状态；右侧标签只在 in_progress / high 优先级时出现，
+    进一步降噪。
+    """
 
     _PRI_COLORS = {"high": "#ef4444", "medium": "#f59e0b", "low": "#3b82f6"}
+    # 状态 → (符号, 颜色, 右侧文字)
+    _STATUS_META = {
+        "completed": ("✓", "#3fb950", ""),
+        "in_progress": ("◐", "#f59e0b", "进行中"),
+        "pending": ("○", "#6b7280", ""),
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._collapsed = False
+        self._on_collapse_changed = None  # 折叠状态变化回调（宿主收敛 splitter 高度）
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(6)
+
+        # ── 头部：图标 + 标题 + 统计 + 折叠按钮 ──
         self._header = _SectionHeader("任务", "todo", self)
+        self._collapse_btn = TransparentToolButton(get_icon("折叠"), self)
+        self._collapse_btn.setFixedSize(22, 22)
+        self._collapse_btn.setToolTip("折叠任务区")
+        self._collapse_btn.clicked.connect(self._on_collapse_clicked)
+        # 折叠按钮插入到 header 末尾（统计之后）
+        hdr_layout = self._header.layout()
+        hdr_layout.insertWidget(hdr_layout.count(), self._collapse_btn)
         layout.addWidget(self._header)
 
+        # ── 进度条：细横条，显示完成比例 ──
+        self._progress = QProgressBar(self)
+        self._progress.setObjectName("taskProgressBar")
+        self._progress.setFixedHeight(3)
+        self._progress.setTextVisible(False)
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        layout.addWidget(self._progress)
+
+        # ── 任务列表 ──
         self._scroll = QScrollArea(self)
         self._scroll.setWidgetResizable(True)
         self._scroll.setFocusPolicy(Qt.NoFocus)
@@ -304,78 +143,203 @@ class TasksPage(QWidget):
         self._scroll.setWidget(self._list_wrap)
         self._list_layout = QVBoxLayout(self._list_wrap)
         self._list_layout.setContentsMargins(0, 0, 2, 0)
-        self._list_layout.setSpacing(2)
+        self._list_layout.setSpacing(1)  # 行式条目：紧凑行距
         self._empty_hint = _EmptyHint("暂无任务\n\nAI 使用 todowrite 建立的任务列表会显示在这里", self._list_wrap)
         self._list_layout.addWidget(self._empty_hint)
         self._list_layout.addStretch(1)
         layout.addWidget(self._scroll, 1)
+
+        # 初始无任务：整区隐藏（不占高度），折叠按钮一并隐藏
+        self._collapse_btn.hide()
+        self.hide()
         self.refresh_style()
 
-    def update_todos(self, todos: List[Dict[str, Any]]) -> None:
-        """刷新任务列表（签名对齐 MessageCard.update_todo_list 的数据约定）"""
-        while self._list_layout.count() > 1:
+    # ── 折叠 ──
+
+    def set_collapse_callback(self, callback) -> None:
+        """宿主注入折叠状态变化回调（用于收敛 splitter 上半高度）"""
+        self._on_collapse_changed = callback
+
+    def header_height(self) -> int:
+        """折叠态所需高度：头部 + 进度条 + 间距
+
+        折叠后不能保持展开时的高度，否则只剩 header 的任务区会留一大片空白
+        （用户看到「任务 title 跑中间」）。
+        """
+        lay = self.layout()
+        m = lay.contentsMargins()
+        return self._header.sizeHint().height() + self._progress.height() + lay.spacing() + m.top() + m.bottom()
+
+    def _set_collapsed(self, collapsed: bool) -> None:
+        """内部：设置折叠态（不触发回调，避免递归）"""
+        self._collapsed = collapsed
+        self._scroll.setVisible(not collapsed)
+        icon = "展开" if collapsed else "折叠"
+        self._collapse_btn.setIcon(get_icon(icon))
+        self._collapse_btn.setToolTip("展开任务区" if collapsed else "折叠任务区")
+
+    def _on_collapse_clicked(self) -> None:
+        """折叠按钮：切换折叠态并通知宿主收敛高度"""
+        self._set_collapsed(not self._collapsed)
+        self._notify_collapse_changed()
+
+    def _notify_collapse_changed(self) -> None:
+        if callable(self._on_collapse_changed):
+            try:
+                self._on_collapse_changed(self._collapsed)
+            except Exception:
+                pass
+
+    # ── 数据 ──
+
+    def _clear_items(self) -> None:
+        """清空列表项（保留 empty_hint 实例，其余彻底销毁）
+
+        ★ ``deleteLater()`` 只是"预约删除"——在事件循环真正处理前，widget 仍挂在
+        parent 的 children 链上并继续绘制。此前只 deleteLater 不 setParent(None)，
+        旧条目残影会盖在新列表第一项上（现象：第一项重复显示上一次的最后一项）。
+        """
+        while self._list_layout.count():
             item = self._list_layout.takeAt(0)
             w = item.widget()
-            if w is not None and w is not self._empty_hint:
-                w.deleteLater()
+            if w is None or w is self._empty_hint:
+                continue
+            w.setParent(None)  # ★ 先断开父子关系，立即停止绘制
+            w.deleteLater()
+
+    def update_todos(self, todos: List[Dict[str, Any]]) -> None:
+        """刷新任务列表（无任务时整区 hide，由宿主 splitter 收敛；非空时显示并默认展开）"""
+        self._clear_items()
         todos = list(todos or [])
         done = sum(1 for t in todos if (t.get("status") or "pending") == "completed")
+        total = len(todos)
+        pct = int(round(done * 100 / total)) if total else 0
+
+        # 头部统计 + 进度条 + 折叠按钮
+        self._header.set_extra(f"{done}/{total}" if todos else "")
+        self._progress.setValue(pct)
+        self._progress.setVisible(bool(todos))
+        self._collapse_btn.setVisible(bool(todos))
+        # 有新任务时若处于折叠态则自动展开（避免"有任务却看不见"）
+        if todos and self._collapsed:
+            self._set_collapsed(False)
+        # 整区可见性：无任务时 hide
+        self.setVisible(bool(todos))
+
+        # 重建列表：empty_hint（按需可见）→ 任务项 → 底部 stretch
         self._empty_hint.setVisible(not todos)
-        self._header.set_extra(f"{done}/{len(todos)} 已完成" if todos else "")
+        self._list_layout.addWidget(self._empty_hint)
         for t in todos:
             status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
             content = (t.get("content") or "") if isinstance(t, dict) else str(t)
             priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
             self._list_layout.addWidget(self._make_item(status, content, priority))
+        self._list_layout.addStretch(1)
+
+        self._notify_collapse_changed()
 
     def _make_item(self, status: str, content: str, priority: str) -> QFrame:
+        """单条任务：左状态符号 + 中内容（自动换行）+ 右标签（按需）
+
+        右侧标签只在两种噪声最值得暴露的情况出现：in_progress（"进行中"）、
+        pending 且 high 优先级（"高"）。medium/low 与 completed 一律不显示。
+        """
         frame = QFrame(self._list_wrap)
         frame.setObjectName("taskItem")
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(8, 5, 8, 5)
+        layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(8)
-        if status == "completed":
-            mark, color, weight = "✓", "#3fb950", "normal"
-        elif status == "in_progress":
-            mark, color, weight = "⟳", "#f59e0b", "700"
-        else:
-            mark = "○"
-            color = self._PRI_COLORS.get(priority, self._PRI_COLORS["medium"])
-            weight = "normal"
+
+        mark, _color, status_text = self._STATUS_META.get(status, self._STATUS_META["pending"])
         mark_label = QLabel(mark, frame)
-        mark_label.setFixedWidth(14)
+        mark_label.setObjectName("taskMark")
+        mark_label.setFixedWidth(16)
         mark_label.setAlignment(Qt.AlignCenter)
-        mark_label.setStyleSheet(f"color: {color}; font-weight: 700; background: transparent;")
-        content_label = QLabel(content, frame)
-        content_label.setWordWrap(True)
-        line = "text-decoration: line-through;" if status == "completed" else ""
-        content_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; {line}"
-            f" font-weight: {weight}; {get_font_family_css()} {font_size_css(12)};"
-        )
         layout.addWidget(mark_label)
+
+        content_label = QLabel(content, frame)
+        content_label.setObjectName("taskContent")
+        content_label.setWordWrap(True)
         layout.addWidget(content_label, 1)
-        frame.setStyleSheet(
-            "QFrame#taskItem {"
-            f" background: {Colors.CARD_BG.format(alpha=120)};"
-            f" border: 1px solid {Colors.BORDER};"
-            " border-radius: 6px; }"
-        )
+
+        tag_text, tag_kind = "", ""
+        if status == "in_progress":
+            tag_text, tag_kind = status_text, "status"
+        elif status == "pending" and priority == "high":
+            tag_text, tag_kind = "高", "prio_high"
+        if tag_text:
+            tag = QLabel(tag_text, frame)
+            tag.setObjectName("taskTag")
+            tag.setProperty("tagKind", tag_kind)
+            tag.setAlignment(Qt.AlignCenter)
+            layout.addWidget(tag)
+
+        frame.setProperty("status", status)
+        self._apply_item_style(frame)
         return frame
+
+    def _apply_item_style(self, frame: QFrame) -> None:
+        """应用条目样式（行式：默认透明，hover 淡背景；靠状态符号着色）"""
+        status = frame.property("status") or "pending"
+        _mark, color, _text = self._STATUS_META.get(status, self._STATUS_META["pending"])
+
+        frame.setStyleSheet(
+            "QFrame#taskItem { background: transparent; border: none;"
+            f" border-radius: {BorderRadius.SM}; }}"
+            "QFrame#taskItem:hover {"
+            f" background: {Colors.HOVER_BG}; }}"
+        )
+
+        mark_label = frame.findChild(QLabel, "taskMark")
+        if mark_label is not None:
+            mark_label.setStyleSheet(
+                f"color: {color}; background: transparent; font-weight: 700;"
+                f" {get_font_family_css()} {font_size_css(13)};"
+            )
+
+        content_label = frame.findChild(QLabel, "taskContent")
+        if content_label is not None:
+            line = "text-decoration: line-through;" if status == "completed" else ""
+            c = Colors.TEXT_MUTED if status == "completed" else Colors.TEXT_PRIMARY
+            weight = "normal" if status == "completed" else "500"
+            content_label.setStyleSheet(
+                f"color: {c}; background: transparent; {line}"
+                f" font-weight: {weight};"
+                f" {get_font_family_css()} {font_size_css(12)};"
+            )
+
+        tag = frame.findChild(QLabel, "taskTag")
+        if tag is not None:
+            if tag.property("tagKind") == "prio_high":
+                tc, bg = self._PRI_COLORS["high"], "rgba(239, 68, 68, 0.16)"
+            else:
+                tc, bg = self._STATUS_META["in_progress"][1], "rgba(245, 158, 11, 0.16)"
+            tag.setStyleSheet(
+                f"color: {tc}; background: {bg}; border: none;"
+                f" border-radius: {BorderRadius.XS}; padding: 1px 6px;"
+                f" {get_font_family_css()} {font_size_css(10)};"
+                " font-weight: 600;"
+            )
 
     def refresh_style(self) -> None:
         self._header.refresh_style()
         self._empty_hint.refresh_style()
-        # 条目为自绘局部样式（状态色），主题切换时整体重建由下次 update_todos 承担
+        # 进度条：轨道 = BORDER 色，已完成块 = completed 绿
+        self._progress.setStyleSheet(
+            "QProgressBar#taskProgressBar {"
+            f" background: {Colors.BORDER};"
+            " border: none;"
+            " border-radius: 2px;"
+            " }"
+            "QProgressBar#taskProgressBar::chunk {"
+            f" background: {self._STATUS_META['completed'][1]};"
+            " border-radius: 2px;"
+            " }"
+        )
         for i in range(self._list_layout.count()):
             w = self._list_layout.itemAt(i).widget()
-            if isinstance(w, QFrame):
-                w.setStyleSheet(
-                    "QFrame#taskItem {"
-                    f" background: {Colors.CARD_BG.format(alpha=120)};"
-                    f" border: 1px solid {Colors.BORDER};"
-                    " border-radius: 6px; }"
-                )
+            if isinstance(w, QFrame) and w.objectName() == "taskItem":
+                self._apply_item_style(w)
 
 
 class MemoryPage(QWidget):
@@ -395,6 +359,7 @@ class MemoryPage(QWidget):
         self._project: str = ""
         self._workdir: Optional[str] = None
         self._sub_buttons: List[CustomTabButton] = []
+        self._pending_sub_tab: Optional[str] = None  # 内容未构建时的待切页签
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(6)
@@ -416,21 +381,36 @@ class MemoryPage(QWidget):
 
     def _on_sub_tab_clicked(self, tab_id: str) -> None:
         """子页签点击：切换到 MemoryCardContent 对应页"""
+        self.switch_sub_tab(tab_id)
+
+    def switch_sub_tab(self, tab_id: str) -> None:
+        """切换到指定子页签（外部入口，供宿主"一键直达"用）
+
+        Args:
+            tab_id: entries=条目记忆 / notes=项目笔记 / docs=关键文档
+                    （工作树的增删与切换 UI 挂在 docs 页签里）
+        """
+        # 内容未构建时先记录目标，ensure_built 后再补切
         if self._content is None:
+            self._pending_sub_tab = tab_id
             return
         try:
             self._content.switch_tab(tab_id)
         except Exception:
             return
-        for i, btn in enumerate(self._sub_buttons):
+        for btn in self._sub_buttons:
             btn.set_active(btn.tab_id == tab_id)
+        self._pending_sub_tab = None
 
     def _set_sub_tab_active(self, index: int) -> None:
         for i, btn in enumerate(self._sub_buttons):
             btn.set_active(i == index)
 
     def ensure_built(self, memory_manager: Any) -> None:
-        """注入 memory_manager 并懒构建内容（避免初始化期拉起存储层）"""
+        """注入 memory_manager 并懒构建内容（避免初始化期拉起存储层）
+
+        构建完成后立即触发一次当前子页签刷新（默认 entries），避免「刚进去没有内容」。
+        """
         self._memory_manager = memory_manager
         if self._content is None and memory_manager is not None:
             from app.widgets.cards.settings.memory_card import MemoryCardContent
@@ -440,8 +420,13 @@ class MemoryPage(QWidget):
             self._layout.addWidget(self._content, 1)
             if self._project:
                 self._content.set_project(self._project, self._workdir)
-            # 初始停留在条目记忆页签
-            self._set_sub_tab_active(0)
+            # 有"一键直达"目标页签则切过去，否则停在条目记忆
+            target = self._pending_sub_tab or "entries"
+            self.switch_sub_tab(target)
+            try:
+                self._content._refresh_current_tab()
+            except Exception:
+                pass
 
     def set_project(self, project: str, workdir: Optional[str] = None) -> None:
         self._project = project or ""
@@ -458,40 +443,57 @@ class MemoryPage(QWidget):
 
 
 class WorkbenchPanel(QWidget):
-    """右侧工作台浮层容器
+    """右侧工作台面板（**嵌入式**：对话区右侧第三窗格，与左侧 TabPanel 对称）
 
-    使用方式（TabManagerWindow）：
-        panel = WorkbenchPanel(self)
-        panel.resize(PANEL_WIDTH_DEFAULT, height)
-        panel.move(width - panel.width, titleBar.height())
-        panel.show() / panel.hide()
+    形态：作为主窗口 splitter 的第三个窗格（左 #tabFrame | 中 #chatFrame |
+    右 #workbenchFrame），几何由 layout 管理，外层套同款圆角矩形容器。
+
+    ★ 为什么放弃悬浮：QWebEngineView 使用原生 HWND，Qt 中**原生 widget 永远
+    绘制在 alien（非原生）widget 之上**，与 Qt 内部 z-order 无关。悬浮面板必须
+    覆盖在对话区之上浮出，于是必然和 WebEngine 争 z-order，三条路全有硬伤：
+
+    - 普通 child widget → 盖不住 WebEngine：消息正文穿透面板（用户实测现象）
+    - ``WA_NativeWindow`` → 能盖住，但原生 HWND 会吞掉主窗口边缘的
+      ``WM_NCHITTEST``，**主窗口边框无法 resize**，且面板内点击命中异常
+    - 顶层 Tool 窗口 → 脱离父窗口几何管理，move/resize 跟随有延迟（用户否决）
+
+    嵌入式从根上绕开：工作台与对话区**并列不重叠**，WebEngine 只在自己的
+    窗格内绘制，既不会遮挡工作台，也不需要任何 HWND / raise 定时器 / 屏幕
+    坐标同步。副作用全部消失。
+
+    显隐：``set_panel_visible(bool)`` 直接 show/hide（用户要求无折叠动画）。
+    宽度：由 splitter handle 拖拽，本类只给 min/max 约束。
 
     主题：theme_manager.register_refresh_target(panel) → refresh_style()
     """
 
     close_requested = pyqtSignal()
     refresh_requested = pyqtSignal()
+    # 差异请求：file_paths 为 None 表示「查看所有产物差异」
+    diff_requested = pyqtSignal(object)  # Optional[List[str]]
 
     TAB_ARTIFACTS, TAB_MEMORY = 0, 1
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("workbenchPanel")
-        # 自行管理背景（圆角卡片），不继承父窗口透明
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.setFixedWidth(PANEL_WIDTH_DEFAULT)
+        # 嵌入式：宽度交给外层 splitter 拖拽，这里只给 min/max 约束
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumWidth(PANEL_WIDTH_MIN)
+        self.setMaximumWidth(PANEL_WIDTH_MAX)
 
-        self._dragging = False
-        self._drag_start_x = 0
-        self._drag_start_width = PANEL_WIDTH_DEFAULT
-        self._anim: Optional[QPropertyAnimation] = None  # 滑入/滑出动画（非 None 表示动画中）
+        # 当前任务区高度（splitter 拖拽持久化用）
+        self._tasks_height = TASKS_DEFAULT_HEIGHT
+        # 产物页：插件注册时的来源签名（None = 显示占位页）
+        self._artifacts_plugin_sig: Optional[tuple] = None
+        self._plugin_artifacts_widget: Optional[QWidget] = None
+        self._artifacts_plugin_info: Optional[Any] = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 8, 8)
         root.setSpacing(6)
 
-        # ── 头部：标题 + 刷新 + 关闭 ──
+        # ── 头部：标题 + 刷新 + 关闭（关闭 = 隐藏面板）──
         header = QHBoxLayout()
         header.setSpacing(4)
         self._title_label = QLabel("工作台", self)
@@ -505,29 +507,75 @@ class WorkbenchPanel(QWidget):
         header.addWidget(self._refresh_btn)
         self._close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
         self._close_btn.setFixedSize(24, 24)
+        self._close_btn.setToolTip("隐藏工作台")
         self._close_btn.clicked.connect(self.close_requested.emit)
         header.addWidget(self._close_btn)
         root.addLayout(header)
 
-        # ── 任务区：置顶常驻（不进页签，类任务清单）──
-        self.tasks_page = TasksPage(self)
-        self.tasks_page.setMaximumHeight(200)
-        root.addWidget(self.tasks_page)
+        # ── 主体：QSplitter(垂直) 切分任务区 / tabs+stack ──
+        # 上：TasksPage（置顶常驻，无任务时整区 hide）
+        # 下：tab 条 + QStackedWidget（产物 / 记忆 / 插件页）
+        self._body_splitter = QSplitter(Qt.Vertical, self)
+        self._body_splitter.setObjectName("workbenchBodySplitter")
+        self._body_splitter.setChildrenCollapsible(False)
+        self._body_splitter.setHandleWidth(4)
+        self._body_splitter.setStyleSheet(
+            "QSplitter#workbenchBodySplitter { background: transparent; border: none; }"
+            "QSplitter#workbenchBodySplitter::handle:vertical {"
+            f" background: transparent;"
+            f" border-top: 1px solid {Colors.BORDER};"
+            " margin: 0 4px;"
+            " }"
+            "QSplitter#workbenchBodySplitter::handle:vertical:hover {"
+            f" border-top: 1px solid {Colors.BORDER_ACCENT};"
+            " }"
+        )
 
-        # ── 页签条：复用顶栏 CustomTabButton 自绘风格 ──
+        # 上半：任务区
+        self.tasks_page = TasksPage(self)
+        self.tasks_page.setMinimumHeight(TASKS_MIN_HEIGHT)
+        self.tasks_page.setMaximumHeight(TASKS_MAX_HEIGHT)
+        # 折叠状态变化 → 收敛 splitter 上半高度（否则折叠后留大片空白）
+        self.tasks_page.set_collapse_callback(self._on_tasks_collapsed)
+        self._body_splitter.addWidget(self.tasks_page)
+
+        # 下半：tabs + stack 容器
+        self._bottom = QWidget(self)
+        self._bottom_layout = QVBoxLayout(self._bottom)
+        self._bottom_layout.setContentsMargins(0, 0, 0, 0)
+        self._bottom_layout.setSpacing(4)
+
+        # 页签条：复用顶栏 CustomTabButton 自绘风格
         self._tab_bar_layout = QHBoxLayout()
         self._tab_bar_layout.setSpacing(2)
-        root.addLayout(self._tab_bar_layout)
+        self._bottom_layout.addLayout(self._tab_bar_layout)
         self._tab_buttons: List[CustomTabButton] = []
         self._tab_ids: List[str] = []
 
-        # ── 内容栈 ──
-        self._stack = QStackedWidget(self)
-        self.artifacts_page = ArtifactsPage(self._stack)
+        # 内容栈
+        # index 0 = 产物页槽位（插件提供；未注册时为 _PagePlaceholder 占位）
+        # index 1 = 记忆页（内置）
+        # index 2+ = 其它插件页
+        self._stack = QStackedWidget(self._bottom)
+        self._artifacts_placeholder = _PagePlaceholder(parent=self._stack)
+        self.artifacts_page: QWidget = self._artifacts_placeholder
         self.memory_page = MemoryPage(self._stack)
-        self._stack.addWidget(self.artifacts_page)
+        self._stack.addWidget(self._artifacts_placeholder)
         self._stack.addWidget(self.memory_page)
-        root.addWidget(self._stack, 1)
+        self._bottom_layout.addWidget(self._stack, 1)
+
+        self._body_splitter.addWidget(self._bottom)
+        # 任务区固定高度（stretch 0），内容区吃掉剩余空间（stretch 1）。
+        # ★ 不能给下半区 setSizes 传 0：QSplitter 会把它压到 0 高度，
+        #   内容区（页签 + stack）就完全显示不出来。这里给最小值 1，
+        #   剩余空间由 stretch factor 分配给内容区。
+        self._body_splitter.setStretchFactor(0, 0)
+        self._body_splitter.setStretchFactor(1, 1)
+        self._body_splitter.setSizes([0, 1])
+        # splitter 拖拽结束时把上半尺寸持久化（无任务时 tasks_page hide 高度=0）
+        self._body_splitter.splitterMoved.connect(self._on_splitter_moved)
+
+        root.addWidget(self._body_splitter, 1)
 
         # 插件页签：{page_id: widget}，按注册表 reconcile（见 sync_plugin_pages）
         self._plugin_widgets: Dict[str, QWidget] = {}
@@ -538,11 +586,82 @@ class WorkbenchPanel(QWidget):
         self.set_current_tab(self.TAB_ARTIFACTS)
         self.refresh_style()
 
+    # ── 显隐（直接 show/hide，无折叠动画） ──
+
+    def set_panel_visible(self, visible: bool) -> None:
+        """显示/隐藏面板（用户要求：不做折叠动画，直接隐藏/显示）"""
+        self.setVisible(bool(visible))
+        if visible:
+            self.raise_()
+
+    def is_panel_visible(self) -> bool:
+        return self.isVisible()
+
+    # ── 差异信号（产物页 → 宿主） ──
+
+    def _emit_diff(self, file_paths: Optional[List[str]] = None) -> None:
+        """产物页差异按钮回调：转发 file_paths 到宿主的 diff_requested 信号
+
+        None 表示「查看所有产物差异」（由宿主从当前 ops 重新计算）。
+        """
+        self.diff_requested.emit(file_paths)
+
+    # ── splitter 拖拽 ──
+
+    def _on_splitter_moved(self, pos: int, index: int) -> None:
+        """splitter 拖拽结束：把上半高度持久化（折叠态与无任务态不记忆）"""
+        sizes = self._body_splitter.sizes()
+        if sizes and sizes[0] > 0 and not self.tasks_page._collapsed:
+            self._tasks_height = max(TASKS_MIN_HEIGHT, min(TASKS_MAX_HEIGHT, sizes[0]))
+
+    def _on_tasks_collapsed(self, collapsed: bool) -> None:
+        """任务区折叠/展开：收敛 splitter 上半高度
+
+        折叠时不能保持展开高度——否则任务区只剩 header 却仍占 ~180px，
+        表现为「折叠后高度没变、任务 title 跑中间」。这里把上半收敛到
+        header 高度（约 50px），展开时恢复记忆高度。
+        """
+        if not self.tasks_page.isVisible():
+            self._body_splitter.setSizes([0, 1])
+            return
+        if collapsed:
+            h = max(TASKS_MIN_HEIGHT, self.tasks_page.header_height())
+            self._body_splitter.setSizes([h, 1])
+        else:
+            self._body_splitter.setSizes([self._tasks_height, 1])
+
+    def apply_tasks_visible(self) -> None:
+        """根据 tasks_page 可见性收敛 splitter 上半高度
+
+        无任务时 tasks_page 已 hide → 上半置 0，内容区（stretch 1）占满。
+        有任务时按记忆高度恢复（折叠态则用 header 高度），剩余仍归内容区。
+
+        ★ 下半区永远给 >=1 的初值：setSizes 传 0 会让内容区塌成 0 高度
+          （表现为「工作台出来了但里面没有内容」）。
+        """
+        if not self.tasks_page.isVisible():
+            self._body_splitter.setSizes([0, 1])
+        elif self.tasks_page._collapsed:
+            h = max(TASKS_MIN_HEIGHT, self.tasks_page.header_height())
+            self._body_splitter.setSizes([h, 1])
+        else:
+            h = max(TASKS_MIN_HEIGHT, min(TASKS_MAX_HEIGHT, self._tasks_height))
+            self._body_splitter.setSizes([h, 1])
+
     # ── 页签条构建（内置 + 插件，顺序与 stack 一致） ──
 
     def _tab_specs(self) -> List[tuple]:
-        """内置页签 + 插件页签（顺序与 QStackedWidget 保持一致）"""
-        specs: List[tuple] = [("artifacts", "产物"), ("memory", "记忆")]
+        """内置页签 + 插件页签（顺序与 QStackedWidget 保持一致）
+
+        产物页标签：插件用 ``page_id="artifacts"`` 填充槽位时用插件的 label，
+        否则用 ``"产物"``（不会出现两个产物 tab）。
+        """
+        art_label = "产物"
+        art_info = getattr(self, "_artifacts_plugin_info", None)
+        if art_info is not None:
+            art_label = art_info.label or "产物"
+        specs: List[tuple] = [("artifacts", art_label), ("memory", "记忆")]
+        # _plugin_infos 已排除 artifacts（见 sync_plugin_pages），此处无需再过滤
         for page_id, info in self._plugin_infos.items():
             specs.append((page_id, info.label))
         return specs
@@ -564,27 +683,37 @@ class WorkbenchPanel(QWidget):
         self._tab_bar_layout.addStretch(1)
 
     def _on_tab_clicked(self, tab_id: str) -> None:
-        """页签点击：按 tab_id 定位 stack 索引（内置 0/1，插件 2+）"""
+        """页签点击：按 tab_id 定位 stack 索引（与 _tab_ids 顺序一致）"""
         idx = self._tab_id_index(tab_id)
         if idx is not None:
             self.set_current_tab(idx)
 
     def _tab_id_index(self, tab_id: str) -> Optional[int]:
-        if tab_id == "artifacts":
-            return self.TAB_ARTIFACTS
-        if tab_id == "memory":
-            return self.TAB_MEMORY
-        try:
-            return self.TAB_MEMORY + 1 + list(self._plugin_infos.keys()).index(tab_id)
-        except ValueError:
-            return None
+        # 注意：tab 顺序与 _tab_buttons 一致；与 _stack 顺序也一致（同步添加）
+        for i, t in enumerate(self._tab_ids):
+            if t == tab_id:
+                return i
+        return None
 
     # ── 插件页签 reconcile（宿主在 refresh_workbench 时调用） ──
 
     def sync_plugin_pages(self, tabs: List[Any]) -> None:
-        """按 UIPluginRegistry 的 workbench_tabs 增删插件页（签名不变则跳过重建）"""
-        infos = {t.page_id: t for t in (tabs or [])}
-        sig = tuple((t.page_id, t.label) for t in (tabs or []))
+        """按 UIPluginRegistry 的 workbench_tabs 增删插件页（签名不变则跳过重建）
+
+        产物页特例：``page_id="artifacts"`` 是**保留 id**，插件注册它即填充
+        index 0 的产物页槽位（面板本身不提供产物实现）。未注册时显示占位页。
+        其余 page_id 按注册序追加在「产物 / 记忆」之后。
+        """
+        all_infos = {t.page_id: t for t in (tabs or [])}
+        # ── 产物页槽位：page_id="artifacts" 被保留，不进普通插件页列表 ──
+        art_info = all_infos.get("artifacts")
+        if art_info is not None:
+            self._use_plugin_artifacts(art_info)
+        else:
+            self._use_placeholder_artifacts()
+
+        infos = {pid: info for pid, info in all_infos.items() if pid != "artifacts"}
+        sig = tuple((t.page_id, t.label) for t in (tabs or []) if t.page_id != "artifacts")
         if sig == self._plugin_sig and set(infos.keys()) == set(self._plugin_widgets.keys()):
             return
         self._plugin_infos = infos
@@ -603,23 +732,118 @@ class WorkbenchPanel(QWidget):
         current = self._stack.currentIndex()
         self._rebuild_tab_bar()
         # 当前页被移除（插件页）或越界时回落到产物页
-        if was_plugin_current or current >= self._stack.count():
+        if was_plugin_current or current >= self._stack.count() or current < 0:
             current = self.TAB_ARTIFACTS
         self.set_current_tab(current)
 
-    def _mount_plugin_page(self, info: Any) -> None:
-        """构建并挂载插件页 widget（构造 parent + context，兼容无 context 的老签名）"""
-        context = {}
+    # ── 产物页槽位（完全插件化，index 0 恒定） ──
+
+    def _use_plugin_artifacts(self, info: Any) -> None:
+        """用插件版产物页**替换** index 0 的当前内容（占位页或旧插件页）
+
+        ★ 必须是"替换"而非 insertWidget：QStackedWidget.insertWidget(0, w) 会把
+        原 index 0 及其后所有页**整体后移**，导致 TAB_MEMORY(=1) 落到产物页上
+        （表现为"记忆"页显示出产物内容）。因此这里先移除旧页再插入，
+        保证 stack 索引与 tab 顺序严格一致：0=产物 / 1=记忆 / 2+=其它插件页。
+        """
+        sig = (info.page_id, info.label)
+        if sig == self._artifacts_plugin_sig and self._plugin_artifacts_widget is not None:
+            return
+        widget = self._make_page_widget(info)
+        if widget is None:
+            return
+        # 先卸掉 index 0 上的旧页（占位页或上一个插件版），再插入新页
+        self._remove_artifacts_slot_widget()
+        self._stack.insertWidget(self.TAB_ARTIFACTS, widget)
+        self._plugin_artifacts_widget = widget
+        self.artifacts_page = widget
+        self._artifacts_plugin_sig = sig
+        self._artifacts_plugin_info = info
+        # 差异入口接到 panel 的 diff_requested（插件版若有 set_diff_all_callback）
+        self._wire_artifacts_diff(widget)
+        if self._stack.currentIndex() == self.TAB_ARTIFACTS:
+            self._stack.setCurrentIndex(self.TAB_ARTIFACTS)
+
+    def _use_placeholder_artifacts(self) -> None:
+        """插件未注册产物页 → 回落到占位页（产物功能完全插件化，无内置实现）"""
+        if self._artifacts_plugin_sig is None and self._plugin_artifacts_widget is None:
+            return  # 已是占位，跳过
+        self._remove_artifacts_slot_widget()
+        self._stack.insertWidget(self.TAB_ARTIFACTS, self._artifacts_placeholder)
+        self._artifacts_placeholder.show()
+        self.artifacts_page = self._artifacts_placeholder
+        self._artifacts_plugin_sig = None
+        self._artifacts_plugin_info = None
+        if self._stack.currentIndex() == self.TAB_ARTIFACTS:
+            self._stack.setCurrentIndex(self.TAB_ARTIFACTS)
+
+    def _remove_artifacts_slot_widget(self) -> None:
+        """移除产物页槽位（index 0）上的当前 widget
+
+        占位页不销毁（留作后续回落复用），插件版则销毁回收。
+        """
+        current = self._stack.widget(self.TAB_ARTIFACTS)
+        if current is None:
+            return
+        self._stack.removeWidget(current)
+        if current is self._artifacts_placeholder:
+            current.hide()  # 占位页保留实例
+        elif current is self._plugin_artifacts_widget:
+            current.hide()
+            current.deleteLater()
+            self._plugin_artifacts_widget = None
+        else:
+            current.hide()
+
+    def _dispose_plugin_artifacts(self) -> None:
+        """销毁当前插件版产物页 widget（保留占位页）"""
+        widget = self._plugin_artifacts_widget
+        if widget is not None:
+            widget.hide()
+            self._stack.removeWidget(widget)
+            widget.deleteLater()
+        self._plugin_artifacts_widget = None
+
+    def _wire_artifacts_diff(self, widget: QWidget) -> None:
+        """把产物页的差异入口接到 panel.diff_requested"""
+        setter = getattr(widget, "set_diff_all_callback", None)
+        if callable(setter):
+            try:
+                setter(self._emit_diff)
+            except Exception:
+                pass
+
+    def _host_window(self):
+        """返回宿主主窗口（TabManagerWindow）
+
+        嵌入式下 parentWidget() 可能只是中间容器（如 #workbenchFrame），
+        因此统一用 window() 上溯到顶层窗口取 UI context。
+        """
         try:
-            parent_win = self.parentWidget()
+            return self.window()
+        except Exception:
+            return self.parentWidget()
+
+    def _make_page_widget(self, info: Any) -> Optional[QWidget]:
+        """构建插件页 widget（构造 parent + context，兼容无 context 的老签名）"""
+        context: Dict[str, Any] = {}
+        try:
+            parent_win = self._host_window()
             if parent_win is not None and hasattr(parent_win, "_build_ui_context"):
                 context = parent_win._build_ui_context()
         except Exception:
             context = {}
+        # 差异回调注入 context，供插件版产物页触发
+        context.setdefault("diff_requested_callback", self._emit_diff)
         try:
             widget = info.widget_class(parent=self._stack, context=context)
         except TypeError:
             widget = info.widget_class(parent=self._stack)
+        return widget if isinstance(widget, QWidget) else None
+
+    def _mount_plugin_page(self, info: Any) -> None:
+        """构建并挂载插件页 widget（构造 parent + context，兼容无 context 的老签名）"""
+        widget = self._make_page_widget(info)
         if widget is None:
             return
         self._stack.addWidget(widget)
@@ -632,67 +856,6 @@ class WorkbenchPanel(QWidget):
             widget.hide()
             self._stack.removeWidget(widget)
             widget.deleteLater()
-
-    # ── 展开折叠动画（沿 x 轴滑入滑出，右缘固定贴窗口边） ──
-
-    @property
-    def is_sliding(self) -> bool:
-        """滑入/滑出动画进行中（宿主 reposition 需跳过，避免打架）"""
-        return self._anim is not None
-
-    def slide_in(self) -> None:
-        """从窗口右缘外滑入到位（宿主负责 show 前重定位与数据刷新）"""
-        parent = self.parentWidget()
-        if parent is None:
-            self.show()
-            return
-        self._stop_slide()
-        start = QPoint(parent.width(), self.y())
-        end = QPoint(max(0, parent.width() - self.width()), self.y())
-        self.move(start)
-        self.show()
-        self._anim = QPropertyAnimation(self, b"pos", self)
-        self._anim.setDuration(SLIDE_DURATION_MS)
-        self._anim.setStartValue(start)
-        self._anim.setEndValue(end)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._anim.finished.connect(self._on_slide_done)
-        self._anim.start()
-
-    def slide_out(self) -> None:
-        """滑出窗口右缘外，动画结束自动 hide（实例保留，再次开启零重建）"""
-        parent = self.parentWidget()
-        if parent is None or not self.isVisible():
-            self.hide()
-            return
-        self._stop_slide()
-        start = self.pos()
-        end = QPoint(parent.width(), self.y())
-        self._anim = QPropertyAnimation(self, b"pos", self)
-        self._anim.setDuration(SLIDE_DURATION_MS)
-        self._anim.setStartValue(start)
-        self._anim.setEndValue(end)
-        self._anim.setEasingCurve(QEasingCurve.InCubic)
-        self._anim.finished.connect(self._on_slide_out_done)
-        self._anim.start()
-
-    def _on_slide_done(self) -> None:
-        self._anim = None
-
-    def _on_slide_out_done(self) -> None:
-        self._anim = None
-        self.hide()
-
-    def _stop_slide(self) -> None:
-        """停掉进行中的动画（断开信号防误触 hide；toggle 快速切换时调用）"""
-        if self._anim is not None:
-            try:
-                self._anim.finished.disconnect()
-            except TypeError:
-                pass
-            self._anim.stop()
-            self._anim.deleteLater()
-            self._anim = None
 
     # ── 页签 ──
 
@@ -715,6 +878,11 @@ class WorkbenchPanel(QWidget):
         self.artifacts_page.set_operations(operations)
 
     def update_todos(self, todos: List[Dict[str, Any]]) -> None:
+        """刷新任务列表
+
+        高度收敛由 TasksPage 的折叠回调（``_on_tasks_collapsed``）驱动，
+        它已覆盖「无任务 / 折叠 / 展开」三种情形，此处不再重复 setSizes。
+        """
         self.tasks_page.update_todos(todos)
 
     def update_project(self, project: str, workdir: Optional[str] = None) -> None:
@@ -724,11 +892,9 @@ class WorkbenchPanel(QWidget):
 
     def refresh_style(self) -> None:
         Colors.refresh()
+        # 嵌入式：背景透明（由外层 #workbenchFrame 圆角矩形容器提供背景）
         self.setStyleSheet(
-            f"QWidget#workbenchPanel {{ background: {Colors.CARD_BG_SOLID};"
-            f" border-left: 1px solid {Colors.BORDER};"
-            f" border-top-left-radius: {BorderRadius.LG};"
-            f" border-bottom-left-radius: {BorderRadius.LG}; }}"
+            "QWidget#workbenchPanel { background: transparent; border: none; }"
         )
         self._title_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
@@ -739,46 +905,3 @@ class WorkbenchPanel(QWidget):
         self.artifacts_page.refresh_style()
         self.tasks_page.refresh_style()
         self.memory_page.refresh_style()
-
-    # ── 左缘拖拽调宽 ──
-
-    def _in_drag_zone(self, x: int) -> bool:
-        """左缘 DRAG_HANDLE_WIDTH 内为拖拽热区（面板自身 contentsMargins 含 10px 缓冲）"""
-        return x <= self.contentsMargins().left() + DRAG_HANDLE_WIDTH
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton and self._in_drag_zone(event.pos().x()):
-            self._stop_slide()  # 拖拽与动画互斥
-            self._dragging = True
-            self._drag_start_x = event.globalX()
-            self._drag_start_width = self.width()
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802
-        if self._dragging:
-            # 向左拖 → 变宽（面板贴右缘，宽度 = 起始宽 + 起始光标x - 当前光标x）
-            new_width = self._drag_start_width + (self._drag_start_x - event.globalX())
-            new_width = max(PANEL_WIDTH_MIN, min(PANEL_WIDTH_MAX, new_width))
-            if new_width != self.width():
-                self.setFixedWidth(new_width)
-                self._emit_geometry_change()
-            event.accept()
-            return
-        # hover 热区时显示水平调整光标
-        self.setCursor(Qt.SizeHorCursor if self._in_drag_zone(event.pos().x()) else Qt.ArrowCursor)
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if self._dragging:
-            self._dragging = False
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-    def _emit_geometry_change(self) -> None:
-        """宽度变化后通知宿主重定位（面板右缘固定贴窗口右边）"""
-        parent = self.parentWidget()
-        if parent is not None and hasattr(parent, "reposition_workbench"):
-            parent.reposition_workbench()

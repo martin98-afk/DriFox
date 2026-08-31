@@ -19241,22 +19241,19 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_working_directory()
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
-        # 自动弹出长期记忆卡片（已设根目录时跳过，避免干扰已绑定的文件夹）
+        # 自动展开工作台记忆页的「关键文档」（记忆功能已完全迁移到工作台，
+        # 不再弹出旧的独立记忆卡片）。
+        # suppress_memory_card=True 时跳过（拖拽/选择文件夹已设根目录，避免干扰）。
         if not suppress_memory_card:
-            # P0-1：卡片懒创建，未创建视为不可见 → toggle 内部会 ensure
-            if not getattr(self, "_memory_card", None) or not self._memory_card.isVisible():
-                self._toggle_memory_card()
-            # 卡片弹出后，再切换到关键文档标签
-            # 🐛 修复：TAB_KEY_DOCUMENTS 必须局部导入（此前未导入导致 NameError，
-            # 中断后续 _create_new_session / _update_tab_icon，新建会话与 Tab 图标
-            # 同步全部失效）；同时显式 switch_tab 内容层（对齐 _on_branch_label_clicked，
-            # 不依赖 set_current_tab → tabChanged 信号链）。
-            if hasattr(self, "_memory_card") and self._memory_card:
+            try:
                 from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
+                from app.widgets.tab_manager_window import TabManagerWindow
 
-                if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                    self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
-                self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
+                tm = TabManagerWindow.get_instance()
+                if tm is not None and hasattr(tm, "open_workbench_memory"):
+                    tm.open_workbench_memory(TAB_KEY_DOCUMENTS)
+            except Exception as e:
+                logger.warning(f"[NewProject] 展开工作台关键文档失败: {e}")
         # 自动触发新建会话
         self._create_new_session()
         # 隐藏项目选择卡片
