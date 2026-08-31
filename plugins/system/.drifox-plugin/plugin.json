@@ -1,52 +1,52 @@
 {
-    "icon": {
-        "light": "icon.svg",
-        "dark": "icon_dark.svg"
-    },
-    "name": "system",
-    "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks、MCP 配置、内置工具（工具插件化：schema/图标/中文名/危险/分组注册）和服务商（providers 插件化：icon/url/模型/余额/用量/额外配置由插件声明）",
-    "version": "2.0.0",
-    "author": {
-        "name": "DriFoxx Team"
-    },
-    "homepage": "https://github.com/martin98-afk/DriFox",
-    "license": "MIT",
-    "type": "system",
-    "components": {
-        "commands": true,
-        "agents": true,
-        "skills": true,
-        "themes": true,
-        "hooks": true,
-        "mcp": true,
-        "lsp": true,
-        "tools": true,
-        "providers": true,
-        "loop_policies": true,
-        "model_adapters": true,
-        "storages": true,
-        "serializers": true,
-        "ui": true
-    },
-    "config_schema": {
-        "title": "网页搜索 API Key",
-        "fields": [
-            {
-                "key": "tavily_api_key",
-                "label": "Tavily 搜索",
-                "type": "password",
-                "default": "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",
-                "env": "TAVILY_API_KEY",
-                "placeholder": "TAVILY_API_KEY"
-            },
-            {
-                "key": "tinyfish_api_key",
-                "label": "TinyFish 搜索",
-                "type": "password",
-                "default": "sk-tinyfish-fAcFQS87D9PVr6jj_-8eBKT4CnK5D7IU",
-                "env": "TINYFISH_API_KEY",
-                "placeholder": "TINYFISH_API_KEY"
-            }
-        ]
-    }
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system",
+  "description": "DriFoxx 系统内置插件，提供默认命令、智能体、技能、主题、Hooks、MCP 配置、内置工具（工具插件化：schema/图标/中文名/危险/分组注册）和服务商（providers 插件化：icon/url/模型/余额/用量/额外配置由插件声明）",
+  "version": "2.1.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "MIT",
+  "type": "system",
+  "components": {
+    "commands": true,
+    "agents": true,
+    "skills": true,
+    "themes": true,
+    "hooks": true,
+    "mcp": true,
+    "lsp": true,
+    "tools": true,
+    "providers": true,
+    "loop_policies": true,
+    "model_adapters": true,
+    "storages": true,
+    "serializers": true,
+    "ui": true
+  },
+  "config_schema": {
+    "title": "网页搜索 API Key",
+    "fields": [
+      {
+        "key": "tavily_api_key",
+        "label": "Tavily 搜索",
+        "type": "password",
+        "default": "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",
+        "env": "TAVILY_API_KEY",
+        "placeholder": "TAVILY_API_KEY"
+      },
+      {
+        "key": "tinyfish_api_key",
+        "label": "TinyFish 搜索",
+        "type": "password",
+        "default": "sk-tinyfish-fAcFQS87D9PVr6jj_-8eBKT4CnK5D7IU",
+        "env": "TINYFISH_API_KEY",
+        "placeholder": "TINYFISH_API_KEY"
+      }
+    ]
+  }
 }

@@ -283,15 +283,20 @@ class BottomToolbarModule(UIModule):
         host._memory_anchor.setObjectName("memory")
         host._memory_anchor.setFixedSize(0, 0)
         capsule_layout.addWidget(host._memory_anchor)
+        # hide()：hidden widget 不占布局空间也不产生 spacing（0×0 仍会引入两段
+        # 4px spacing，胶囊左侧挂 14px 空白）；QLayoutItem 保留 → objectName 锚定照常
+        host._memory_anchor.hide()
 
-        # 历史会话按钮（从右上移到右下）
-        host.history_btn = TransparentToolButton(get_icon("历史对话"), host._toolbar_capsule)
-        host.history_btn.setFixedSize(24, 24)
-        host.history_btn.setStyleSheet(btn_capsule_style)
-        host.history_btn.setToolTip("历史会话")
-        host.history_btn.setObjectName("history")  # Phase E：插件按钮 position 锚点
-        host.history_btn.clicked.connect(host._toggle_history_card)
-        capsule_layout.addWidget(host.history_btn)
+        # 历史会话按钮已移除 —— 历史会话完全迁移到右侧工作台（WorkbenchPanel「历史会话」页签）。
+        # 保留一个零尺寸锚点占位（objectName="history"）：插件可用
+        # position="before:history" / "after:history" 锚定按钮位置，
+        # 直接删掉按钮会让这类锚点静默降级到末尾追加。
+        host.history_btn = None  # 兼容：外部可能仍持有引用
+        host._history_anchor = QWidget(host._toolbar_capsule)
+        host._history_anchor.setObjectName("history")
+        host._history_anchor.setFixedSize(0, 0)
+        capsule_layout.addWidget(host._history_anchor)
+        host._history_anchor.hide()  # 同 memory：隐藏消除孤立 spacing，锚定语义保留
 
         # 新建对话按钮（从右上移到右下）
         host.new_session_btn = TransparentToolButton(get_icon("新会话"), host._toolbar_capsule)
@@ -303,8 +308,8 @@ class BottomToolbarModule(UIModule):
         capsule_layout.addWidget(host.new_session_btn)
 
         # 为工具栏按钮安装自绘 hover tooltip（绕开 QToolTip 样式问题）
-        # 注：memory_btn 已移除（记忆迁移到工作台），不再参与安装
-        for _tb in [host.history_btn, host.new_session_btn]:
+        # 注：memory_btn / history_btn 已移除（记忆、历史会话迁移到工作台），不再参与安装
+        for _tb in [host.new_session_btn]:
             install_hover_tooltip(_tb)
 
         # Phase D：输入区插件按钮（_init_ui_plugins_deferred 加载插件后再构建一次）

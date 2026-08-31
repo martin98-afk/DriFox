@@ -8,11 +8,15 @@ register_ui 完成），作为 register_workbench_tab 通道的示例。
 通过插件通道加载，便于后续彻底替代内置版。区别：
 - 数据由 context 注入（context["backend"] / context["session_id"]）
 - 差异请求通过 context["diff_requested_callback"] 转发
+
+产物按「用户问题」分组：每个 user 消息开启一组，该轮 assistant 的
+tool_calls（call_id）命中的文件操作归属该组；组头部可折叠/展开，并支持
+一键查看组内全部文件差异。消息不可用时回退平铺列表。
 """
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -23,7 +27,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, TransparentToolButton
+from qfluentwidgets import TransparentToolButton
 
 # 复用内置 _EmptyHint / _SectionHeader（共享模块，避免重复定义）
 from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
@@ -35,7 +39,7 @@ from app.utils.utils import get_font_family_css, get_icon
 def _relative_time(created_at: str) -> str:
     try:
         dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return created_at or ""
     delta = datetime.now() - dt
     seconds = delta.total_seconds()
@@ -48,6 +52,35 @@ def _relative_time(created_at: str) -> str:
     if seconds < 86400 * 7:
         return f"{int(seconds // 86400)} 天前"
     return dt.strftime("%m-%d %H:%M")
+
+
+def _message_text(content: Any) -> str:
+    """提取消息文本（兼容 str 与多模态 list 两种 content 形态）"""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: List[str] = []
+        for p in content:
+            if isinstance(p, dict):
+                t = p.get("text") or ""
+                if t:
+                    parts.append(str(t))
+            elif isinstance(p, str):
+                parts.append(p)
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _question_summary(content: Any, limit: int = 80) -> str:
+    """用户问题摘要：取首个非空行并截断"""
+    text = _message_text(content)
+    for line in text.splitlines():
+        line = line.strip()
+        if line:
+            text = line
+            break
+    text = text.replace("\n", " ").strip()
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 class _SystemArtifactItem(QFrame):
@@ -67,9 +100,7 @@ class _SystemArtifactItem(QFrame):
         text_col.setSpacing(1)
         name = Path(self._file_path).name or self._file_path
         self._name_label = QLabel(name, self)
-        self._meta_label = QLabel(
-            f"{op.get('tool_name', '')} · {_relative_time(op.get('created_at', ''))}", self
-        )
+        self._meta_label = QLabel(f"{op.get('tool_name', '')} · {_relative_time(op.get('created_at', ''))}", self)
         text_col.addWidget(self._name_label)
         text_col.addWidget(self._meta_label)
         layout.addLayout(text_col, 1)
@@ -106,6 +137,101 @@ class _SystemArtifactItem(QFrame):
             self.diff_requested.emit([self._file_path])
 
 
+class _QuestionGroupCard(QFrame):
+    """单个用户问题分组卡片：问题摘要 + 文件数 + 组差异按钮 + 可折叠文件列表"""
+
+    diff_requested = pyqtSignal(list)
+
+    def __init__(self, question: str, ops: List[Dict[str, Any]], expanded: bool = False, parent=None):
+        super().__init__(parent)
+        self.setObjectName("questionGroupCard")
+        self._expanded = expanded
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 6, 6, 6)
+        root.setSpacing(4)
+
+        # ── 头部：箭头 + 问题摘要 + 统计 + 组差异按钮 ──
+        header = QWidget(self)
+        header.setCursor(Qt.PointingHandCursor)
+        h_layout = QHBoxLayout(header)
+        h_layout.setContentsMargins(0, 0, 0, 0)
+        h_layout.setSpacing(6)
+        self._arrow_label = QLabel(header)
+        self._arrow_label.setFixedSize(14, 14)
+        self._arrow_label.setScaledContents(True)
+        self._question_label = QLabel(question, header)
+        self._question_label.setToolTip(question)
+        self._count_label = QLabel(f"{len(ops)} 个文件", header)
+        h_layout.addWidget(self._arrow_label)
+        h_layout.addWidget(self._question_label, 1)
+        h_layout.addWidget(self._count_label)
+        self._diff_btn = TransparentToolButton(get_icon("差异对比"), header)
+        self._diff_btn.setToolTip("查看该问题下全部文件差异")
+        self._diff_btn.setFixedSize(24, 24)
+        self._diff_btn.clicked.connect(self._emit_diff)
+        h_layout.addWidget(self._diff_btn)
+        root.addWidget(header)
+
+        # ── 主体：该问题下的产物条目（最新在前） ──
+        self._body = QWidget(self)
+        self._body_layout = QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(14, 0, 0, 0)
+        self._body_layout.setSpacing(2)
+        for op in reversed(ops):
+            item = _SystemArtifactItem(op, self._body)
+            item.diff_requested.connect(self.diff_requested)
+            self._body_layout.addWidget(item)
+        root.addWidget(self._body)
+
+        header.mousePressEvent = lambda _e: self.toggle()  # type: ignore[assignment]
+        self._apply_expand()
+
+    # ── 折叠 ──
+
+    def toggle(self) -> None:
+        self._expanded = not self._expanded
+        self._apply_expand()
+
+    def _apply_expand(self) -> None:
+        self._body.setVisible(self._expanded)
+        # 收起态显示「展开」箭头，展开态显示「折叠」箭头
+        self._arrow_label.setPixmap(get_icon("展开" if not self._expanded else "折叠").pixmap(14, 14))
+
+    def _emit_diff(self) -> None:
+        paths: List[str] = []
+        for i in range(self._body_layout.count()):
+            item = self._body_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if isinstance(w, _SystemArtifactItem) and w._file_path:
+                paths.append(w._file_path)
+        if paths:
+            self.diff_requested.emit(paths)
+
+    # ── 样式 ──
+
+    def refresh_style(self) -> None:
+        self.setStyleSheet(
+            "QFrame#questionGroupCard {"
+            f" background: {Colors.CARD_BG.format(alpha=60)};"
+            f" border: 1px solid {Colors.BORDER};"
+            f" border-radius: {BorderRadius.MD};"
+            " }"
+            f" QLabel {{ background: transparent; {get_font_family_css()} }}"
+        )
+        self._question_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; font-weight: 600;"
+            f" {get_font_family_css()} {font_size_css(12)};"
+        )
+        self._count_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; background: transparent; {get_font_family_css()} {font_size_css(11)};"
+        )
+        for i in range(self._body_layout.count()):
+            item = self._body_layout.itemAt(i)
+            w = item.widget() if item is not None else None
+            if isinstance(w, _SystemArtifactItem):
+                w.refresh_style()
+
+
 class SystemArtifactsPage(QWidget):
     """产物页（系统插件版）
 
@@ -136,7 +262,7 @@ class SystemArtifactsPage(QWidget):
         self._scroll.setWidget(self._list_wrap)
         self._list_layout = QVBoxLayout(self._list_wrap)
         self._list_layout.setContentsMargins(0, 0, 2, 0)
-        self._list_layout.setSpacing(2)
+        self._list_layout.setSpacing(4)
         self._empty_hint = _EmptyHint("本次会话暂无产物", self._list_wrap)
         self._list_layout.addWidget(self._empty_hint)
         self._list_layout.addStretch(1)
@@ -170,24 +296,122 @@ class SystemArtifactsPage(QWidget):
             return []
 
     def refresh_data(self, operations: Optional[List[Dict[str, Any]]] = None) -> None:
-        """渲染产物列表
+        """渲染产物列表（按用户问题分组，消息不可用时回退平铺）
 
         Args:
             operations: 宿主推送的文件操作记录；为 None 时从 context 自行拉取。
         """
         if operations is None:
             operations = self.get_operations()
-        # 全部移出布局：条目销毁；empty_hint（实例复用）与 spacer 仅移出，随后统一重建。
-        # ★ 不能只删到 count>1：旧逻辑会把 empty_hint 或尾部 stretch 留/丢在错误位置
+        self._clear_list()
+        groups, flat_mode = self._build_groups(operations or [])
+        if flat_mode:
+            self._render_flat(operations or [])
+        else:
+            self._render_groups(groups)
+
+    # ── 布局清理 ──
+
+    def _clear_list(self) -> None:
+        """全部移出布局：条目销毁；empty_hint（实例复用）与 spacer 仅移出，随后统一重建。"""
         while self._list_layout.count():
             item = self._list_layout.takeAt(0)
             w = item.widget()
             if w is not None and w is not self._empty_hint:
                 w.deleteLater()
             del item  # spacer 等 non-widget item 的 C++ 所有权已转到 Python，及时释放
+
+    # ── 分组构建 ──
+
+    def _build_groups(self, operations: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], bool]:
+        """按用户问题分组文件操作
+
+        Returns:
+            (groups, flat_mode)。groups 元素: {"question": str, "ops": list}，
+            时间倒序（最新问题在前）；flat_mode=True 表示应回退平铺渲染。
+        """
+        session = None
+        try:
+            # 宿主 _build_ui_context 不注入 backend，需从 main_widget 兜底获取
+            backend = self._context.get("backend")
+            if backend is None:
+                backend = getattr(self._context.get("main_widget"), "backend", None)
+            session = backend.get_current_session() if backend is not None else None
+        except Exception:
+            session = None
+        if session is None:
+            return [], True
+        messages = getattr(session, "messages", None) or []
+
+        # 1) 遍历消息：user 开新组，assistant 的 tool_calls 归入当前组
+        groups: List[Dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            role = msg.get("role")
+            if role == "user":
+                groups.append(
+                    {
+                        "question": _question_summary(msg.get("content")) or "（空问题）",
+                        "call_ids": set(),
+                        "files": {},
+                    }
+                )
+            elif role == "assistant" and groups:
+                for tc in msg.get("tool_calls") or []:
+                    if isinstance(tc, dict) and tc.get("id"):
+                        groups[-1]["call_ids"].add(tc["id"])
+        if not groups:
+            return [], True
+
+        # 2) 分配文件操作：call_id 命中归组；未命中（compaction 裁剪/旧数据）进兜底组
+        call_to_group: Dict[str, int] = {}
+        for i, g in enumerate(groups):
+            for cid in g["call_ids"]:
+                call_to_group[cid] = i
+        orphan: Dict[str, Dict[str, Any]] = {}
+        for op in operations:
+            fp = op.get("file_path") or ""
+            if not fp:
+                continue
+            cid = op.get("call_id")
+            idx = call_to_group.get(cid) if isinstance(cid, str) else None
+            target = groups[idx]["files"] if idx is not None else orphan
+            target[fp] = op  # 同文件多次操作只保留最新一条
+
+        # 3) 组装结果：有产物的组按时间倒序（最新问题在前），兜底组固定排最后
+        result = list(
+            reversed([{"question": g["question"], "ops": list(g["files"].values())} for g in groups if g["files"]])
+        )
+        if orphan:
+            result.append({"question": "更早的产物（未关联到当前问题）", "ops": list(orphan.values())})
+        if not result:
+            return [], True
+        return result, False
+
+    # ── 渲染 ──
+
+    def _render_groups(self, groups: List[Dict[str, Any]]) -> None:
+        """按问题分组渲染（最新组在前且默认展开）"""
+        total_files = sum(len(g["ops"]) for g in groups)
+        self._empty_hint.setVisible(not groups)
+        self._header.set_extra(f"{total_files} 个文件" if groups else "")
+        if groups:
+            self._header.show_action()
+        else:
+            self._header.hide_action()
+        self._list_layout.addWidget(self._empty_hint)
+        for i, g in enumerate(groups):
+            card = _QuestionGroupCard(g["question"], g["ops"], expanded=(i == 0), parent=self._list_wrap)
+            card.diff_requested.connect(self._on_item_diff)
+            self._list_layout.addWidget(card)
+        self._list_layout.addStretch(1)
+
+    def _render_flat(self, operations: List[Dict[str, Any]]) -> None:
+        """平铺渲染（消息不可用时的回退；与旧版行为一致）"""
         latest: Dict[str, Dict[str, Any]] = {}
         order: List[str] = []
-        for op in operations or []:
+        for op in operations:
             fp = op.get("file_path") or ""
             if not fp:
                 continue
@@ -201,15 +425,14 @@ class SystemArtifactsPage(QWidget):
             self._header.show_action()
         else:
             self._header.hide_action()
-        # 重建布局：[empty_hint] [条目…] [尾部 stretch]
-        # ★ 尾部 stretch 必须每次重建：缺了它 QScrollArea(widgetResizable) 会把
-        #   _list_wrap 拉到视口高，条目按 stretch 因子垂直摊满整页
         self._list_layout.addWidget(self._empty_hint)
         for op in ordered:
             item = _SystemArtifactItem(op, self._list_wrap)
             item.diff_requested.connect(self._on_item_diff)
             self._list_layout.addWidget(item)
         self._list_layout.addStretch(1)
+
+    # ── 宿主契约（与内置 ArtifactsPage 同名） ──
 
     def set_operations(self, operations: List[Dict[str, Any]]) -> None:
         """宿主数据入口（与内置 ArtifactsPage 同名契约）
@@ -236,5 +459,5 @@ class SystemArtifactsPage(QWidget):
         self._empty_hint.refresh_style()
         for i in range(self._list_layout.count()):
             w = self._list_layout.itemAt(i).widget()
-            if isinstance(w, _SystemArtifactItem):
+            if isinstance(w, (_SystemArtifactItem, _QuestionGroupCard)):
                 w.refresh_style()

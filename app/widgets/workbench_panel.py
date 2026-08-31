@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QProgressBar,
     QScrollArea,
     QSizePolicy,
@@ -476,6 +477,167 @@ class MemoryPage(QWidget):
         self._hint.refresh_style()
         for btn in self._sub_buttons:
             btn.refresh_style()
+
+
+class HistoryPage(QWidget):
+    """历史会话页（一级页签）：历史会话 / 归档 子页签 + 列表上方搜索框
+
+    由对话区底部历史卡片迁移而来，对齐记忆页的统一 tab 形态：去卡片框架，
+    内容直接平铺在工作台页签下。HistoryCard 内容（会话列表本体）由宿主
+    窗口 ``attach`` 挂载（每窗口单实例，显示内容跟随当前活跃窗口投影）。
+
+    接口兼容：保留原 SystemCardFrame 的 ``tabChanged`` / ``set_current_tab`` /
+    ``set_search_handler`` / ``set_extra_button_handler`` / ``_search_input`` /
+    ``_current_tab`` / ``set_opacity`` 契约，宿主侧逻辑零改动。
+    """
+
+    closed = pyqtSignal()  # 兼容契约：页内无关闭钮，保留信号位（宿主连接不失效）
+    tabChanged = pyqtSignal(str)  # 子页签切换（history / archived）
+
+    SUB_TABS = (("history", "历史会话"), ("archived", "归档"))
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._content: Optional[QWidget] = None
+        self._current_tab = "history"
+        self._search_input: Optional[QLineEdit] = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        # ── 行1：子页签（居中，与记忆页统一）+ 右端导入按钮 ──
+        tabs_row = QHBoxLayout()
+        tabs_row.setSpacing(2)
+        tabs_row.addStretch(1)
+        self._sub_buttons: List[CustomTabButton] = []
+        for tab_id, label in self.SUB_TABS:
+            btn = CustomTabButton(tab_id, label, self)
+            btn.clicked.connect(self._on_sub_tab_clicked)
+            tabs_row.addWidget(btn)
+            self._sub_buttons.append(btn)
+        tabs_row.addStretch(1)
+        self._import_btn = TransparentToolButton(get_icon("导入"), self)
+        self._import_btn.setFixedSize(26, 26)
+        self._import_btn.setToolTip("导入会话")
+        self._import_btn.hide()  # handler 注入前隐藏（懒挂载期无导入能力）
+        tabs_row.addWidget(self._import_btn)
+        layout.addLayout(tabs_row)
+
+        # ── 行2：搜索框（列表之上，整行） ──
+        self._search_input = QLineEdit(self)
+        self._search_input.setPlaceholderText("🔍 搜索会话...")
+        self._search_input.setFixedHeight(24)
+        self._apply_search_style()
+        layout.addWidget(self._search_input)
+
+        # ── 内容占位（attach 后隐藏） ──
+        self._hint = _EmptyHint("历史会话未加载", self)
+        layout.addWidget(self._hint, 1)
+
+        # ── 内容滚动区：复刻原 SystemCardFrame 的 scroll_area > content_widget
+        #    > content_layout 结构。★ HistoryCard 自己无布局，条目经
+        #    get_content_layout() 沿父链上溯找 content_layout 属性后直接插入，
+        #    去掉滚动容器会被压缩成一条条（2026-09-01 用户实测回归）。
+        self._scroll_area = QScrollArea(self)
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        Colors.refresh()
+        self._scroll_area.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+            + get_unified_scrollbar_style(8)
+        )
+        self._content_widget = QWidget()
+        self._content_widget.setStyleSheet("background: transparent;")
+        self._content_layout = QVBoxLayout(self._content_widget)
+        self._content_layout.setContentsMargins(4, 2, 4, 2)
+        self._content_layout.setSpacing(4)
+        self._scroll_area.setWidget(self._content_widget)
+        self._scroll_area.hide()  # attach 前隐藏（空滚动区会闪白底）
+        layout.addWidget(self._scroll_area, 1)
+        self._set_sub_tab_active(0)
+
+    @property
+    def content_layout(self):
+        """内容布局（HistoryCard.get_content_layout() 沿父链上溯命中本属性）"""
+        return self._content_layout
+
+    # ── 子页签 ──
+
+    def _on_sub_tab_clicked(self, tab_id: str) -> None:
+        self.set_current_tab(tab_id)
+
+    def set_current_tab(self, tab_id: str) -> None:
+        """程序化切换子页签（变化时发射 tabChanged，由宿主驱动列表刷新）"""
+        if tab_id not in {t for t, _ in self.SUB_TABS} or tab_id == self._current_tab:
+            return
+        self._current_tab = tab_id
+        for btn in self._sub_buttons:
+            btn.set_active(btn.tab_id == tab_id)
+        self.tabChanged.emit(tab_id)
+
+    def _set_sub_tab_active(self, index: int) -> None:
+        for i, btn in enumerate(self._sub_buttons):
+            btn.set_active(i == index)
+
+    # ── 宿主注入（兼容原 SystemCardFrame 接口） ──
+
+    def attach(self, content: Any) -> None:
+        """挂载 HistoryCard 内容（原 content_layout.addWidget 等价：放进滚动区内容布局）"""
+        if self._content is not None:
+            return
+        self._content = content
+        self._hint.hide()
+        self._content_layout.addWidget(content)
+        content.show()
+        self._scroll_area.show()
+
+    def set_search_handler(self, placeholder: str, callback) -> None:
+        """设置搜索框占位文本 + 文本变化回调（原卡片头部搜索框 → 列表上方）"""
+        if self._search_input is None:
+            return
+        self._search_input.setPlaceholderText(placeholder)
+        self._search_input.textChanged.connect(callback)
+
+    def set_extra_button_handler(self, handler, icon=None, tooltip="") -> None:
+        """注入导入按钮回调（原卡片标题栏额外按钮 → 子页签行右端）"""
+        if icon is not None:
+            self._import_btn.setIcon(icon)
+        self._import_btn.setToolTip(tooltip or "导入会话")
+        self._import_btn.clicked.connect(handler)
+        self._import_btn.show()
+
+    def set_opacity(self, opacity: float) -> None:
+        """透明度联动契约（原 SystemCardFrame 为空实现，此处同语义）"""
+
+    def _apply_search_style(self) -> None:
+        Colors.refresh()
+        self._search_input.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background: {Colors.HOVER_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                padding: 2px 8px;
+                {font_size_css(11)}
+                {get_font_family_css()}
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {Colors.TEXT_ACCENT};
+            }}
+            QLineEdit::placeholder {{
+                color: {Colors.INPUT_PLACEHOLDER};
+            }}
+        """
+        )
+
+    def refresh_style(self) -> None:
+        self._hint.refresh_style()
+        for btn in self._sub_buttons:
+            btn.refresh_style()
+        if self._search_input is not None:
+            self._apply_search_style()
 
 
 class WorktreePage(QWidget):

@@ -1686,28 +1686,20 @@ class OpenAIChatToolWindow(ToolWindow):
     # 保证「打开卡片 → 框架已就绪」行为不变。属性名/注册语义与改造前完全一致。
 
     def _ensure_history_card(self):
-        """确保历史会话卡片框架已创建（内容由 _build_deferred_card_history 填充）
+        """确保历史会话页已创建（内容由 _build_deferred_card_history 填充）
 
-        历史会话已从对话区底部卡片迁移到右侧工作台「历史会话」页签：
-        框架/搜索框/导入按钮/历史·归档子页内容不变，只是宿主从 BottomCardContainer
-        换成 WorkbenchPanel（workbench 为宿主级单例，与其他页同一投影语义）。
+        历史会话已从对话区底部卡片迁移到右侧工作台「历史会话」页签，并
+        对齐记忆页的统一 tab 形态：去卡片框架（HistoryPage：子页签 +
+        列表上方搜索框 + 导入按钮），HistoryCard 列表内容不变。
         """
         if self._history_card is not None:
             return
-        self._history_card = BaseSettingsCard("历史会话", "📜", self)
-        self._history_card.setMinimumHeight(300)  # 自适应窗口高度
-        # 设置历史/归档标签
-        self._history_card.setup_tabs(
-            [
-                ("history", "历史会话"),
-                ("archived", "归档"),
-            ],
-            "history",
-        )
-        # 强制触发首次 tab 渲染
+        from app.widgets.workbench_panel import HistoryPage
+
+        self._history_card = HistoryPage(self)
+        # 子页签切换 → 宿主刷新（历史/归档列表分流）；closed 信号为兼容契约
         self._history_card.tabChanged.connect(self._on_history_tab_changed)
         self._history_card.set_current_tab("history")
-        # 卡片自带的关闭钮 → 离开工作台历史页（不再走 CardManager BOTTOM 互斥）
         self._history_card.closed.connect(self._close_history_panel)
         # 挂到右侧工作台「历史会话」页签（幂等；面板未就绪时由
         # TabManagerWindow.refresh_workbench / open_workbench_history 兜底补挂）
@@ -1921,7 +1913,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._history_popup_card.get_import_button_handler(),
                 tooltip="导入会话",
             )
-            self._history_card.content_layout.addWidget(self._history_popup_card)
+            self._history_card.attach(self._history_popup_card)
             self._history_card.set_search_handler(
                 "🔍 搜索会话...",
                 lambda text: self._history_popup_card.set_search_filter(text),
@@ -3295,7 +3287,7 @@ class OpenAIChatToolWindow(ToolWindow):
         _SYSTEM_CARD_COMMANDS = {
             "settings": ("打开设置面板", self._toggle_settings_card),
             "history": ("打开对话历史", self._toggle_history_card),
-            "memory": ("打开记忆管理", self._toggle_memory_card),
+            "memory": ("打开记忆管理", self._toggle_workbench_memory),
             "model_selector": ("选择模型", self._toggle_model_selector_card),
             "tool_control": ("打开工具控制面板", self._toggle_tool_control_card),
             "project_selector": ("选择项目", self._toggle_project_selector_card),
@@ -18869,16 +18861,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._branch_widget.setVisible(False)
 
     def _on_branch_label_clicked(self, event):
-        """分支标签点击 — 打开关键文档卡片"""
-        self._toggle_memory_card()
-        # 确保切换到关键文档 Tab
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
-
-            self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
-            # 同步卡片 Tab 按钮
-            if hasattr(self, "_memory_card") and self._memory_card:
-                self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
+        """分支标签点击 — 打开工作台工作树页的关键文档（记忆已迁移工作台）"""
+        self._toggle_workbench_memory("docs")
 
     def _toggle_project_selector_card(self):
         """切换项目选择卡片的显示"""
@@ -20178,6 +20162,25 @@ class OpenAIChatToolWindow(ToolWindow):
     def _show_soul_memory(self):
         """切换记忆管理卡片的显示"""
         self._toggle_memory_card()
+
+    def _toggle_workbench_memory(self, tab_key: str = "entries"):
+        """切换记忆（快捷键/命令入口，已迁移到右侧工作台「记忆」页签）
+
+        - 工作台不可见 或 不在目标页 → 展开并定位（entries/notes=记忆页，
+          docs=工作树页的关键文档）
+        - 已在目标页 → 切回工作树页（等效原“关闭卡片”）
+        数据构建/刷新由 TabManagerWindow.open_workbench_memory +
+        refresh_workbench 驱动，不再弹出对话区底部旧记忆卡片。
+        """
+        tm = TabManagerWindow.get_instance()
+        panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+        if tm is None or panel is None:
+            return
+        target = panel.TAB_WORKTREE if tab_key == "docs" else panel.TAB_MEMORY
+        if not tm.is_workbench_visible() or panel.current_tab() != target:
+            tm.open_workbench_memory(tab_key)
+        else:
+            panel.set_current_tab(panel.TAB_WORKTREE)
 
     def _toggle_memory_card(self):
         """切换记忆管理卡片的显示"""
