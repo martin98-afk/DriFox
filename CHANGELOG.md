@@ -3,37 +3,44 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.5.7] - 2026-08-30
+## [v0.5.7] - 2026-08-31
 
-自上一版本以来的变更 | 提交数：28 · 文件变更：70 · +14374/-4980 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：37 · 文件变更：84 · +17407/-5717 | 贡献者：mading, dingma
 
 ### ✨ 新功能 (New Features)
 
-- **TabPanel 树模式** (`app/widgets/tab_panel.py`): 实现工作区树模式（含警告对话框 UI 更新）；优化样式应用以减少冗余 QSS 更新；增强设置持久化，覆盖树模式与展开状态。
+- **TabPanel 树模式与设置持久化** (`app/widgets/tab_panel.py`): 实现工作区树模式，含警告对话框 UI 更新；优化样式应用以减少冗余 QSS 更新；增强设置持久化，覆盖树模式与展开状态。
+- **WorkspaceTree 树视图** (`app/widgets/workspace_tree.py`): 新增工作区树视图组件，优化 appearance sync 逻辑与样式应用。
 - **时间线面板增强** (`plugins/agent_trace/ui/timeline_panel.py`): 改进时间映射与柱状几何处理，长链路展示更稳定。
 - **工具执行相位计时** (`plugins/agent_trace/ui/trace_collector.py`): 实现 phase timing 用于工具执行阶段追踪，并增强 trace collector 的参数处理。
 - **毫秒时间戳** (`app/core/`): 为消息与信号添加 `ts_ms`（毫秒时间戳），确保事件排序精确。
 - **CustomTitleBar 与 TabManagerWindow 增强** (`app/widgets/custom_title_bar.py` + `app/widgets/tab_manager_window.py`): 增加 hover 状态管理与动画改进，标题栏交互更细腻。
 - **TraceCard 时间范围过滤** (`plugins/agent_trace/ui/trace_card.py`): 新增时间范围过滤与 UI 改进，定位关键执行段更高效。
-- **滚动到底部按钮** (`app/widgets/scroll_to_bottom_button.py` 等): 实现 ScrollToBottomButton，支持主题感知图标；增强滚动体验并引入滚动守护补丁脚本（`scripts/apply_scroll_guard_patch.py`）。
-- **工具 description 参数约定** (`app/tools/`): 实现共享 description 参数约定；为文件工具增强 preview 功能；改善任务预览体验。
-- **插件组件卡** (`app/widgets/plugin_components_card.py`): 新增插件组件卡管理插件项开关；tools/agents 分管；显示 token 用量并优化组件行信号；引入 `DynamicHeightExpandCardMixin` 管理动态高度与滚动。
+- **滚动到底部按钮** (`app/widgets/scroll_to_bottom_button.py` 等): 实现 ScrollToBottomButton，支持主题感知图标；增强滚动体验并引入滚动守护补丁脚本。
+- **工具 description 参数约定** (`plugins/system/tools/`): 实现共享 description 参数约定；为文件工具增强 preview 功能；改善任务预览体验。
+- **插件组件卡** (`app/widgets/cards/settings/plugin_components_card.py`): 新增插件组件卡管理插件项开关；tools/agents 分管；显示 token 用量并优化组件行信号；引入 `DynamicHeightExpandCardMixin` 管理动态高度与滚动。
 - **技能与 LSP 懒加载** (`app/core/`): 实现 skills 与 LSP 组件的懒加载，启动性能更佳。
-- **插件组件热重载** (`app/core/plugin_manager.py`): 实现插件 components 的热重载，并优化渲染性能。
+- **插件组件热重载** (`app/plugins/managers/plugin_manager.py`): 实现插件 components 的热重载，并优化渲染性能。
 
 ### 🐛 问题修复 (Bug Fixes)
 
-- **插件组件卡细项列表** (`app/widgets/cards/settings/plugin_components_card.py`): 修复组件总项重新开启后细项列表不全的问题——同步枚举早于热重载且 `_rebuild_target` 未被消费，开启方向改由热重载完成后按目标重建；补回归测试 `tests/test_plugin_components_card_toggle.py`。
-- **测试图片更新** (`tests/images/`): 更新测试用图片文件内容。
+- **agent-trace stream 重复发射** (`plugins/agent_trace/ui/trace_collector.py` + `app/core/engines/ui/engine.py`): 移除重复的 `stream_started` 发射，加固 stream tail 生命周期，修复 turn list 底部残留僵尸 stream 问题。
+- **agent-trace turn list 水平滚动条** (`plugins/agent_trace/ui/turn_list_widget.py`): 修复 frozen row width 导致的死水平滚动条。
+- **trace-collector token 用量计算** (`plugins/agent_trace/ui/trace_collector.py`): 更新 token 用量计算以反映实际输出。
+- **message-card 短消息高度钉死** (`app/widgets/message_card.py`): 恢复 `_measure_document` 以防止短消息高度异常。
+- **message-card 文本布局** (`app/widgets/render_helpers.py`): 改进 PlainTextViewer 文本布局管理，防止错误高度计算。
+- **插件组件卡细项列表** (`app/widgets/cards/settings/plugin_components_card.py`): 修复组件总项重新开启后细项列表不全的问题——同步枚举早于热重载且 `_rebuild_target` 未被消费，开启方向改由热重载完成后按目标重建。
+- **tool-window 图标尺寸** (`app/widgets/`): 图标 widget 尺寸从 16x16 增大到 20x20。
 
 ### ♻️ 代码重构 (Refactoring)
 
 - **代码结构改进** (`app/`): 多处重构以提升可读性与可维护性。
-- **TabPanel 批量移除测试** (`tests/widgets/test_tab_panel.py`): 重构批量移除功能的测试用例，提升覆盖清晰度。
+- **TabPanel 批量移除测试** (`tests/widgets/test_tab_panel_batch_remove.py`): 重构批量移除功能的测试用例，提升覆盖清晰度。
 
-### 🔄 其他变更 (Other)
+### 🧪 测试 (Tests)
 
-- **ScrollToBottomButton 测试** (`tests/widgets/test_scroll_to_bottom_button.py`): 补充主题变更处理与样式应用的测试覆盖。
+- **ScrollToBottomButton 测试** (`tests/widgets/`): 补充主题变更处理与样式应用的测试覆盖。
+- **agent-trace 复现测试** (`tests/debug/`): 新增 stream 重复发射与 token 用量计算的复现测试。
 
 ## [v0.5.6] - 2026-08-30
 
