@@ -25,9 +25,10 @@ child widget（而非顶层窗口）保证与主窗口移动/缩放/最小化严
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Callable, Dict, List, Optional
 
-from PyQt5.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -41,7 +42,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import FluentIcon, TransparentToolButton
 
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_icon
 
 # ── 尺寸常量 ──
@@ -50,6 +51,7 @@ PANEL_WIDTH_MIN = 320  # 左缘拖拽最小宽
 PANEL_WIDTH_MAX = 820  # 左缘拖拽最大宽
 DRAG_HANDLE_WIDTH = 6  # 左缘拖拽热区宽
 SLIDE_DURATION_MS = 220  # 展开/折叠滑动动画时长
+SLIDE_FRAME_MS = 16  # 动画帧间隔（PreciseTimer，避免 Windows 默认 timer 精度抖动）
 TASKS_DOCK_MAX_H = 170  # 任务坞内容区最大高（超出内滚）
 
 
@@ -230,7 +232,7 @@ class TasksDock(QWidget):
             "QFrame#taskItem {"
             f" background: {Colors.CARD_BG.format(alpha=120)};"
             f" border: 1px solid {Colors.BORDER};"
-            " border-radius: 6px; }"
+            f" border-radius: {BorderRadius.MD}; }}"
         )
         return frame
 
@@ -252,7 +254,7 @@ class TasksDock(QWidget):
                     "QFrame#taskItem {"
                     f" background: {Colors.CARD_BG.format(alpha=120)};"
                     f" border: 1px solid {Colors.BORDER};"
-                    " border-radius: 6px; }"
+                    f" border-radius: {BorderRadius.MD}; }}"
                 )
 
 
@@ -298,19 +300,27 @@ class ArtifactsPage(QWidget):
                 w.deleteLater()
         # 去重：file_path → 最近一次操作
         latest: Dict[str, Dict[str, Any]] = {}
-        order: List[str] = []
         for op in operations or []:
             fp = op.get("file_path") or ""
             if not fp:
                 continue
-            if fp not in latest:
-                order.append(fp)
-            latest[fp] = op
-        ordered = [latest[fp] for fp in reversed(order)]  # 最新在前
+            prev = latest.get(fp)
+            if prev is None or str(op.get("created_at", "")) >= str(prev.get("created_at", "")):
+                latest[fp] = op
+        # 按 created_at 倒序（最新在前）；解析失败的排最后
+        def _sort_key(op: Dict[str, Any]) -> datetime:
+            try:
+                return datetime.strptime(op.get("created_at", ""), "%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError):
+                return datetime.min
+
+        ordered = sorted(latest.values(), key=_sort_key, reverse=True)
         self._empty_hint.setVisible(not ordered)
         self._header.set_extra(f"{len(ordered)} 个文件" if ordered else "")
+        # 🐛 必须插在末尾 stretch 之前：addWidget 会追加到 stretch 之后，
+        # stretch 在顶部把所有条目压到面板底部（贴底 bug）
         for op in ordered:
-            self._list_layout.addWidget(_ArtifactItem(op, self._list_wrap))
+            self._list_layout.insertWidget(self._list_layout.count() - 1, _ArtifactItem(op, self._list_wrap))
 
     def refresh_style(self) -> None:
         self._header.refresh_style()
@@ -362,7 +372,7 @@ class _ArtifactItem(QFrame):
             "QFrame#artifactItem {"
             f" background: {Colors.CARD_BG.format(alpha=120)};"
             f" border: 1px solid {Colors.BORDER};"
-            " border-radius: 6px; }"
+            f" border-radius: {BorderRadius.MD}; }}"
             "QFrame#artifactItem:hover {"
             f" background: {Colors.HOVER_BG};"
             f" border-color: {Colors.BORDER_ACCENT}; }}"
@@ -489,7 +499,7 @@ class WorkbenchPanel(QWidget):
         self._dragging = False
         self._drag_start_x = 0
         self._drag_start_width = PANEL_WIDTH_DEFAULT
-        self._anim: Optional[QPropertyAnimation] = None  # 滑入/滑出动画（非 None 表示动画中）
+        self._anim: Optional[QTimer] = None  # 滑入/滑出动画 timer（非 None 表示动画中）
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 6, 6, 6)
@@ -576,19 +586,12 @@ class WorkbenchPanel(QWidget):
         if parent is None:
             self.show()
             return
-        self._stop_slide()
         start = QPoint(parent.width(), self.y())
         end = QPoint(max(0, parent.width() - self.width()), self.y())
         self.move(start)
         self.show()
         self.raise_()
-        self._anim = QPropertyAnimation(self, b"pos", self)
-        self._anim.setDuration(SLIDE_DURATION_MS)
-        self._anim.setStartValue(start)
-        self._anim.setEndValue(end)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._anim.finished.connect(self._on_slide_done)
-        self._anim.start()
+        self._start_slide(end.x(), self._on_slide_done)
 
     def slide_out(self) -> None:
         """滑出主窗口右缘外，动画结束自动 hide（实例保留，再次开启零重建）"""
@@ -596,16 +599,8 @@ class WorkbenchPanel(QWidget):
         if parent is None or not self.isVisible():
             self.hide()
             return
-        self._stop_slide()
-        start = self.pos()
         end = QPoint(parent.width(), self.y())
-        self._anim = QPropertyAnimation(self, b"pos", self)
-        self._anim.setDuration(SLIDE_DURATION_MS)
-        self._anim.setStartValue(start)
-        self._anim.setEndValue(end)
-        self._anim.setEasingCurve(QEasingCurve.InCubic)
-        self._anim.finished.connect(self._on_slide_out_done)
-        self._anim.start()
+        self._start_slide(end.x(), self._on_slide_out_done)
 
     def _on_slide_done(self) -> None:
         self._anim = None
@@ -614,18 +609,47 @@ class WorkbenchPanel(QWidget):
         self._anim = None
         self.hide()
 
+    def _start_slide(self, end_x: int, on_done: Callable[[], None]) -> None:
+        """滑动动画：PreciseTimer 16ms 手动 OutCubic 插值
+
+        不用 QPropertyAnimation：其底层默认 timer 在 Windows 上精度差
+        （~15.6ms 粒度 + 合并延迟），配合 native child window 的每帧
+        位块传输容易跳帧；手动插值按真实耗时计算进度，帧间无漂移。
+        """
+        self._stop_slide()
+        start_x = self.x()
+        if start_x == end_x:
+            on_done()
+            return
+        duration_s = SLIDE_DURATION_MS / 1000.0
+        info = {"t0": time.monotonic(), "start_x": start_x}
+
+        def _tick() -> None:
+            t = min(1.0, (time.monotonic() - info["t0"]) / duration_s)
+            eased = 1.0 - (1.0 - t) ** 3  # OutCubic
+            self.move(round(info["start_x"] + (end_x - info["start_x"]) * eased), self.y())
+            if t >= 1.0:
+                self._stop_slide()
+                on_done()
+
+        timer = QTimer(self)
+        timer.setTimerType(Qt.PreciseTimer)
+        timer.setInterval(SLIDE_FRAME_MS)
+        timer.timeout.connect(_tick)
+        self._anim = timer  # 非 None 即 is_sliding（语义与旧实现一致）
+        timer.start()
+
     def _stop_slide(self) -> None:
         """停掉进行中的动画（断开信号防误触 hide；toggle 快速切换时调用）"""
         if self._anim is not None:
+            timer = self._anim
+            self._anim = None
             try:
-                self._anim.finished.disconnect()
+                timer.timeout.disconnect()
             except TypeError:
                 pass
-            self._anim.stop()
-            self._anim.deleteLater()
-            self._anim = None
-
-    # ── 主题 ──
+            timer.stop()
+            timer.deleteLater()
 
     # ── 主题 ──
 
@@ -646,7 +670,7 @@ class WorkbenchPanel(QWidget):
                 f" color: {Colors.TEXT_SECONDARY};"
                 " background: transparent;"
                 " border: 1px solid transparent;"
-                " border-radius: 5px; padding: 0 8px;"
+                " border-radius: " + BorderRadius.SM + "; padding: 0 8px;"
                 f" {get_font_family_css()} {font_size_css(12)}; }}"
                 "QPushButton:checked {"
                 " color: #ffffff;"
@@ -696,6 +720,12 @@ class WorkbenchPanel(QWidget):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        # 兑底：面板隐藏时若还有动画未收尾，强制停掉，
+        # 避免下次 show 时动画状态残留（旧版本曾导致鼠标事件被屏蔽后拖拽失灵）
+        self._stop_slide()
 
     def _emit_geometry_change(self) -> None:
         """宽度变化后通知宿主重定位（面板右缘固定贴主窗口右边）"""
