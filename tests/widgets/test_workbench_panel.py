@@ -86,6 +86,10 @@ def test_artifacts_dedup_and_empty(panel):
     frames = [w for w in frames if w is not page._empty_hint and w is not None]
     assert len(frames) == 2  # 按文件路径去重
     assert page._header._extra_label.text() == "2 个文件"
+    # 最新在前 + 条目在 stretch 之前（贴顶，不被 stretch 压底）
+    assert frames[0]._file_path.endswith("a.py")
+    last = page._list_layout.itemAt(page._list_layout.count() - 1)
+    assert last.widget() is None  # 末尾是 stretch
     panel.update_artifacts([])
     assert page._header._extra_label.text() == ""
 
@@ -105,6 +109,8 @@ def test_slide_animation_lifecycle(panel):
     assert panel.is_sliding
     panel._stop_slide()
     assert not panel.is_sliding
+    # 模拟滑入完成态（贴主窗口右缘内），再滑出才有动画距离
+    panel.move(720, 0)
     panel.slide_out()
     assert panel.is_sliding
     panel._stop_slide()
