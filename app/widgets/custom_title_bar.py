@@ -617,9 +617,15 @@ class CustomTitleBar(TitleBarBase):
         layout.addWidget(self._right_balance)
         if not self._is_mac:
             layout.addWidget(self._workbench_btn, 0, Qt.AlignRight)
-            layout.addWidget(self.minBtn, 0, Qt.AlignRight)
-            layout.addWidget(self.maxBtn, 0, Qt.AlignRight)
-            layout.addWidget(self.closeBtn, 0, Qt.AlignRight)
+            # ── 系统三按钮容器：内部 0 间距贴紧（对齐 Win11 原生观感）──
+            # 主布局 spacing=4 会把 min/max/close 撑散；包一层容器隔离。
+            self._sys_btn_box = QWidget(self)
+            sys_layout = QHBoxLayout(self._sys_btn_box)
+            sys_layout.setContentsMargins(0, 0, 0, 0)
+            sys_layout.setSpacing(0)
+            for b in (self.minBtn, self.maxBtn, self.closeBtn):
+                sys_layout.addWidget(b)
+            layout.addWidget(self._sys_btn_box, 0, Qt.AlignRight)
         else:
             layout.addWidget(self._workbench_btn, 0, Qt.AlignRight)
             self.minBtn.hide()
@@ -660,11 +666,12 @@ class CustomTitleBar(TitleBarBase):
         spacing = layout.spacing()
 
         left = self._sidebar_btn.width() + layout.contentsMargins().left()
-        right = self._workbench_btn.width()
+        right = self._workbench_btn.width() + (
+            self.minBtn.width() + self.maxBtn.width() + self.closeBtn.width()
+        )
         if not self._is_mac:
-            right += (
-                self.minBtn.width() + self.maxBtn.width() + self.closeBtn.width() + spacing * 3
-            )
+            # 右侧两个间隙：工作台按钮 ↔ 系统按钮容器（容器内部 0 间距贴紧）
+            right += spacing
         else:
             right += spacing
 
