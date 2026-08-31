@@ -232,6 +232,13 @@ class TraceCollector(QObject):
         if self._tail:
             self._set_tail([r for r in self._tail if r.kind != EntryKind.CONTEXT])
 
+        # assistant 已有正式落盘记录时，同步清掉「正在生成」尾巴 —— README 承诺的
+        # 「落盘后自动被正式记录取代」。只靠 stream_finished 清会在 finished
+        # 丢失的路径（手动停止 / 异常中断）留下永久走动时长的僵尸尾巴。
+        n_assistant = sum(1 for r in new_records if r.kind == EntryKind.ASSISTANT)
+        if self._tail and n_assistant > self._stream_base:
+            self._set_tail([r for r in self._tail if not (r.kind == EntryKind.ASSISTANT and r.is_pending)])
+
     def _clear_all(self) -> None:
         self._records = []
         self._set_tail([])
@@ -292,14 +299,17 @@ class TraceCollector(QObject):
             if kind == EntryKind.ASSISTANT:
                 # 真实 token 用量优先：worker 会把 API 响应的 usage 落成
                 # msg["token_usage"] = {"input","output","total"}（chat_worker）。
-                # 只在第一条 assistant 上写，所以其余条目仍回退到估算。
+                # ⚠️ 口径：input = prompt_tokens = 本次请求的**完整上下文**
+                # （系统提示 + 全部历史 + 本轮提问），total 随会话增长且包含
+                # 之前所有轮次 → 不能当「本条回复占用」显示（每条都像总量）。
+                # Tokens 列用 output（completion_tokens = 本次回复实际输出），
+                # 与无 usage 时的文本估算口径一致（都是本条内容）；
+                # output 缺失 / 为 0（estimated 兜底）时回退文本估算。
                 usage = msg.get("token_usage")
                 if isinstance(usage, dict):
-                    total = usage.get("total") or (
-                        (usage.get("input") or 0) + (usage.get("output") or 0)
-                    )
-                    if isinstance(total, (int, float)) and total > 0:
-                        meta["tokens"] = int(total)
+                    output = usage.get("output")
+                    if isinstance(output, (int, float)) and output > 0:
+                        meta["tokens"] = int(output)
                         meta["tokens_exact"] = True
 
             if kind == EntryKind.TOOL:
@@ -634,6 +644,11 @@ class TraceCollector(QObject):
         self._sync()
 
     def _on_stream_started(self) -> None:
+        # 🛡️ 幂等：已存在未闭合流 / pending assistant 尾巴时不重复登记。
+        # 背景：stream_started 历史上被双发（executor + engine 各一次），
+        # 重入会产生 2 条「正在生成」尾巴（时长一模一样、永久走动）。
+        if any(not s.get("end") for s in self._streams):
+            return
         self._streams.append({"start": time.time(), "end": 0.0})
         self._append_tail(
             TraceRecord(
@@ -649,10 +664,11 @@ class TraceCollector(QObject):
 
     def _on_stream_finished(self, _payload: Dict[str, Any]) -> None:
         now = time.time()
-        for s in reversed(self._streams):
+        # 闭合**所有**未闭合流：一次 finished 对应一次流会话，重入/双发留下的
+        # end=0 僵尸流会被投影配对命中 → 记录时长为负/无限走动。
+        for s in self._streams:
             if not s.get("end"):
                 s["end"] = now
-                break
         self._set_tail([r for r in self._tail if not (r.kind == EntryKind.ASSISTANT and r.is_pending)])
         self._sync()
 

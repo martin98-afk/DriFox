@@ -736,14 +736,16 @@ class UIEngine(BaseEngine):
     ):
         """启动 Worker（委托 ConversationExecutor + UIConversationAdapter）"""
         callbacks = self._adapter.get_callbacks()
-        success = self._conversation_executor.execute(
+        # ⚠️ stream_started 由 executor.execute() 统一发射（执行 callbacks 里的
+        # adapter 回调 → 本类 _emit → 各消费者）。这里**不能再补发一次**：
+        # 2026-05 重构后两处各发一次 → 双信号 → agent_trace 每轮多出 2 条
+        # 「正在生成」尾巴 + 流 timing 表错位（end=0 僵尸流 → 时长异常）。
+        self._conversation_executor.execute(
             messages=messages,
             llm_config=llm_config,
             tools=tools,
             callbacks=callbacks,
         )
-        if success and not self._api_mode:
-            self._emit("stream_started")
 
     def _on_worker_finished(self, response: str):
         # 🛡️ 防御性检查：如果 Executor 已不在流式状态（stop() 已调用或被新 worker 覆盖），

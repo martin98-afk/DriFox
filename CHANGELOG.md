@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 
 ## [v0.5.7] - 2026-08-30
 
-自上一版本以来的变更 | 提交数：25 · 文件变更：68 · +14118/-4980 | 贡献者：dingma
+自上一版本以来的变更 | 提交数：28 · 文件变更：70 · +14374/-4980 | 贡献者：dingma
 
 ### ✨ 新功能 (New Features)
 
@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 
 ### 🐛 问题修复 (Bug Fixes)
 
+- **插件组件卡细项列表** (`app/widgets/cards/settings/plugin_components_card.py`): 修复组件总项重新开启后细项列表不全的问题——同步枚举早于热重载且 `_rebuild_target` 未被消费，开启方向改由热重载完成后按目标重建；补回归测试 `tests/test_plugin_components_card_toggle.py`。
 - **测试图片更新** (`tests/images/`): 更新测试用图片文件内容。
 
 ### ♻️ 代码重构 (Refactoring)
