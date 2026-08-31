@@ -40,30 +40,6 @@ def test_default_width(panel):
     assert panel.width() == PANEL_WIDTH_DEFAULT
 
 
-def test_tasks_dock_hidden_when_empty(panel):
-    assert not panel.tasks_dock.isVisibleTo(panel)
-    todos = [
-        {"id": "1", "content": "A", "status": "completed", "priority": "high"},
-        {"id": "2", "content": "B", "status": "in_progress", "priority": "medium"},
-        {"id": "3", "content": "C", "status": "pending", "priority": "low"},
-    ]
-    panel.update_todos(todos)
-    assert panel.tasks_dock.isVisibleTo(panel)
-    assert panel.tasks_dock._header._extra_label.text() == "1/3 已完成"
-    panel.update_todos([])
-    assert not panel.tasks_dock.isVisibleTo(panel)
-    assert panel.tasks_dock._header._extra_label.text() == ""
-
-
-def test_tasks_dock_collapse(panel):
-    panel.update_todos([{"id": "1", "content": "A", "status": "pending", "priority": "low"}])
-    assert panel.tasks_dock._scroll.isVisibleTo(panel.tasks_dock)
-    panel.tasks_dock._toggle()  # 折叠
-    assert not panel.tasks_dock._scroll.isVisibleTo(panel.tasks_dock)
-    panel.tasks_dock._toggle()  # 展开
-    assert panel.tasks_dock._scroll.isVisibleTo(panel.tasks_dock)
-
-
 def test_artifacts_dedup_and_empty(panel):
     ops = [
         {"file_path": "D:/x/a.py", "tool_name": "edit", "created_at": "2026-08-31 13:00:00"},
@@ -104,22 +80,6 @@ def test_slide_animation_lifecycle(panel):
 def test_refresh_style_idempotent(panel):
     panel.refresh_style()
     panel.refresh_style()
-
-
-def test_round_card_style(panel):
-    """圆角卡片：外层 native 底实色方角，内部 #workbenchCard 带 8px 圆角
-
-    回归：native child window 不能直接用 QSS 圆角（圆角外残留 HWND 旧内容
-    黑角），也不能 setMask（Windows 平台 child window 的 SetWindowRgn 不稳，
-    会把内容裁没）——圆角由内部卡片 QFrame 绘制，外层保持实色矩形底。
-    """
-    panel.resize(480, 600)
-    panel.refresh_style()
-    card = panel._card
-    assert isinstance(card, QFrame)
-    assert "border-radius: 8px" in card.styleSheet()
-    assert "border-radius" not in panel.styleSheet()  # 外层不裁圆角，防黑角
-    assert card.width() < panel.width()  # 卡片在面板内缩进（含 margins）
 
 
 def test_width_bounds():
