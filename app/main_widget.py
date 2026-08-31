@@ -16604,6 +16604,8 @@ class OpenAIChatToolWindow(ToolWindow):
             card = self._current_assistant_card or self._find_latest_assistant_card()
             if card and hasattr(card, "update_todo_list"):
                 card.update_todo_list(todos)
+            # 工作台浮层任务区同步
+            self._push_workbench_updates(todos=todos)
         else:
             from qfluentwidgets import InfoBar, InfoBarPosition
 
@@ -17341,6 +17343,14 @@ class OpenAIChatToolWindow(ToolWindow):
             card = self._current_assistant_card or self._find_latest_assistant_card()
             if card and hasattr(card, "update_todo_list"):
                 card.update_todo_list(todos)
+        # 工作台浮层联动：任务到达推任务；文件写入类工具完成后重拉产物列表
+        try:
+            if todos:
+                self._push_workbench_updates(todos=todos)
+            elif tool_name and self.backend.file_recorder is not None and self.backend.file_recorder.is_tracked_operation(tool_name):
+                self._push_workbench_updates(refresh_artifacts=True)
+        except Exception:
+            pass
         # （T11-3c：原 if/elif 空分支已删——todo 更新由上方完成；
         #   工具结果块由 append_tool_result 原地转换处理，无需额外动作）
 
@@ -19997,6 +20007,41 @@ class OpenAIChatToolWindow(ToolWindow):
         if resolved_path:
             self._broadcast_team_workdir(resolved_path)
 
+    # ── 右侧工作台浮层联动 ──
+
+    def _push_workbench_updates(self, todos: Optional[list] = None, refresh_artifacts: bool = False) -> None:
+        """向右侧工作台浮层推送增量更新（面板隐藏/无宿主时零开销跳过）
+
+        Args:
+            todos: todowrite 等工具回传的最新任务列表；None 表示本次不更新任务区
+            refresh_artifacts: True 时重拉产物列表（文件写入类工具完成后调用）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is None or not panel.isVisible():
+                return
+            if todos is not None:
+                panel.update_todos(todos)
+            if refresh_artifacts:
+                tm.refresh_workbench()
+        except Exception:
+            pass
+
+    def _push_workbench_project(self, project: str, workdir: Optional[str] = None) -> None:
+        """向右侧工作台浮层同步当前项目（记忆页跟随当前窗口项目）"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is not None and panel.isVisible():
+                panel.update_project(project, workdir)
+        except Exception:
+            pass
+
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录
 
@@ -20037,6 +20082,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 工作目录变化后刷新分支标签
         self._update_branch()
+        # 工作台浮层记忆页跟随当前项目
+        self._push_workbench_project(project, workdir)
 
         from loguru import logger
 

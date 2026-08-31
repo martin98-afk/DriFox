@@ -618,6 +618,18 @@ class TabManagerWindow(FramelessWindow):
         # 初始定位到右下角（首个窗口加入 + 激活后会精确对齐 send_btn）
         self.pixel_pet.resize_handle(self.width(), self.height())
 
+        # ── 右侧工作台浮层（单例浮层，同桌宠模式：child widget + raise，不进 layout）──
+        # 标题栏「右侧边栏」按钮 toggle；显隐与数据刷新见 toggle_workbench/refresh_workbench
+        from app.widgets.workbench_panel import WorkbenchPanel
+
+        self.workbench_panel = WorkbenchPanel(self)
+        self.workbench_panel.hide()
+        self.workbench_panel.close_requested.connect(self._hide_workbench)
+        self.workbench_panel.refresh_requested.connect(self.refresh_workbench)
+        self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
+        # 主题 / 字号刷新：与桌宠同路径注册
+        theme_manager.register_refresh_target(self.workbench_panel)
+
         # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
         QTimer.singleShot(0, self._apply_bg_from_theme)
 
@@ -734,6 +746,75 @@ class TabManagerWindow(FramelessWindow):
         else:
             # hide 而非 destroy：保留实例，便于再次开启无需重建
             pet.hide()
+
+    # ── 右侧工作台浮层（toggle / 定位 / 数据刷新） ──
+
+    def toggle_workbench(self) -> None:
+        """标题栏「右侧边栏」按钮回调：显隐工作台浮层（带滑入/滑出动画）"""
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None:
+            return
+        if panel.isVisible() or panel.is_sliding:
+            panel.slide_out()
+            return
+        self.reposition_workbench()
+        panel.slide_in()
+        self.refresh_workbench()
+
+    def _hide_workbench(self) -> None:
+        """工作台关闭按钮：滑出动画收起（面板实例保留，再次开启零重建）"""
+        panel = getattr(self, "workbench_panel", None)
+        if panel is not None:
+            panel.slide_out()
+
+    def reposition_workbench(self) -> None:
+        """工作台贴窗口右缘（标题栏下方全高）；纯覆盖定位，不参与任何 layout"""
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None or panel.is_sliding:
+            return
+        top = self.titleBar.height() if getattr(self, "titleBar", None) is not None else 0
+        panel.setFixedHeight(max(0, self.height() - top))
+        panel.move(max(0, self.width() - panel.width()), top)
+
+    def refresh_workbench(self) -> None:
+        """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
+
+        数据源均为既有单一数据源：
+        - 产物：backend.file_recorder 会话级文件写入记录
+        - 任务：窗口 _latest_todos（todowrite 结果联动缓存），缺失回退 tool_executor
+        - 项目：win._current_project + _current_workdir → MemoryCardContent
+        """
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None or not panel.isVisible():
+            return
+        win = self.get_current_window()
+        backend = getattr(win, "backend", None) if win is not None else None
+        project = getattr(win, "_current_project", "") or ""
+        if backend is not None:
+            # 记忆页懒构建（backend 未就绪时保持"未就绪"提示）
+            panel.ensure_memory(backend.memory_manager)
+            try:
+                workdir = (getattr(win, "_current_workdir", None) or {}).get(project)
+            except Exception:
+                workdir = None
+            panel.update_project(project, workdir)
+            # 产物：本会话文件写入记录（会话未落库时跳过）
+            session_id = getattr(win, "_current_session_id", None)
+            ops: list = []
+            try:
+                if backend.file_recorder is not None and session_id:
+                    ops = backend.file_recorder.get_all_operations_for_session(session_id)
+            except Exception:
+                ops = []
+            panel.update_artifacts(ops)
+        # 任务：优先窗口缓存（todowrite 结果联动），缺失回退 tool_executor 实时读
+        todos = getattr(win, "_latest_todos", None)
+        if not todos and backend is not None and getattr(backend, "_tool_executor", None) is not None:
+            try:
+                todos = backend._tool_executor.get_todos()
+            except Exception:
+                todos = []
+        panel.update_todos(todos or [])
 
     def refresh_theme(self):
         """ThemeManager 统一刷新入口（dispatch_refresh 调用）
@@ -2523,6 +2604,10 @@ class TabManagerWindow(FramelessWindow):
                     self.pixel_pet._on_ai_state_changed(getattr(win, "_ai_state", "idle"))
                 except Exception:
                     pass
+            # 切 tab 时工作台跟随激活窗：重定位 + 刷新产物/任务/项目数据
+            if getattr(self, "workbench_panel", None) is not None and self.workbench_panel.isVisible():
+                self.reposition_workbench()
+                self.refresh_workbench()
 
     def _on_tab_close_requested(self, index: int):
         """标签关闭按钮回调：按索引关闭单个窗口"""
@@ -3118,6 +3203,8 @@ class TabManagerWindow(FramelessWindow):
             self._sync_plugin_titlebar_tabs()
         except Exception:
             pass
+        # 工作台浮层贴齐右缘（几何恢复后）
+        self.reposition_workbench()
 
     def moveEvent(self, event):
         super().moveEvent(event)
@@ -3585,6 +3672,8 @@ class TabManagerWindow(FramelessWindow):
         # 全局桌宠跟随窗体缩放：resize 结束后精确重定位到激活窗 send_btn
         if getattr(self, "pixel_pet", None) is not None:
             self.pixel_pet.reposition_to_active_window()
+        # 工作台浮层贴齐右缘（resize 结束后的最终几何）
+        self.reposition_workbench()
 
         # ── 几何已收拢：解除抑制 + 按最终宽度判定"是否真被挤压" ──
         # 整个 resize 周期（含 _force_relayout 瞬变）内 TabPanel 不自动折叠，
@@ -3642,6 +3731,8 @@ class TabManagerWindow(FramelessWindow):
             self._sync_title_bar_width()
             # 背景图尺寸跟随（轻量操作，不触发布局）
             self._resize_bg_labels()
+            # 工作台浮层拖拽缩放过程中实时贴右缘（setGeometry 轻量，不参与 layout）
+            self.reposition_workbench()
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
@@ -3653,6 +3744,8 @@ class TabManagerWindow(FramelessWindow):
         super().resizeEvent(event)
         # 背景图尺寸跟随（轻量操作，不触发布局）
         self._resize_bg_labels()
+        # 工作台浮层首次 resize 即贴齐右缘（后续 blocking 阶段由阶段二分支续跟）
+        self.reposition_workbench()
         # 通知 TabPanel 进入 resize 节流模式
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)

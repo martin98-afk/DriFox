@@ -547,6 +547,7 @@ class CustomTitleBar(TitleBarBase):
     tab_clicked = pyqtSignal(str)
     tab_close_clicked = pyqtSignal(str)
     sidebar_toggle_requested = pyqtSignal()
+    workbench_toggle_requested = pyqtSignal()  # 右侧工作台浮层开关（按钮在最小化左侧）
 
     def __init__(self, parent):
         self._is_mac: bool = sys.platform == "darwin"
@@ -570,6 +571,16 @@ class CustomTitleBar(TitleBarBase):
         self._sidebar_btn.setCursor(Qt.PointingHandCursor)
         self._sidebar_btn.setToolTip("收起/展开侧边栏")
         self._sidebar_btn.clicked.connect(self.sidebar_toggle_requested.emit)
+
+        # ── 右区：工作台浮层开关（右侧边栏图标，位于最小化按钮左侧）──
+        # mac 上系统交通灯由 NSWindow 提供且系统按钮隐藏，此按钮仍保留（浮层开关独立于系统按钮）
+        self._workbench_btn = QPushButton(self)
+        self._workbench_btn.setIcon(get_icon("右侧边栏"))
+        self._workbench_btn.setFixedSize(30, 28)
+        self._workbench_btn.setIconSize(QSize(17, 17))
+        self._workbench_btn.setCursor(Qt.PointingHandCursor)
+        self._workbench_btn.setToolTip("打开/关闭工作台")
+        self._workbench_btn.clicked.connect(self.workbench_toggle_requested.emit)
 
         # ── 中央区：tab 容器 ──
         self._tab_container = QWidget(self)
@@ -605,10 +616,12 @@ class CustomTitleBar(TitleBarBase):
         layout.addStretch(1)
         layout.addWidget(self._right_balance)
         if not self._is_mac:
+            layout.addWidget(self._workbench_btn, 0, Qt.AlignRight)
             layout.addWidget(self.minBtn, 0, Qt.AlignRight)
             layout.addWidget(self.maxBtn, 0, Qt.AlignRight)
             layout.addWidget(self.closeBtn, 0, Qt.AlignRight)
         else:
+            layout.addWidget(self._workbench_btn, 0, Qt.AlignRight)
             self.minBtn.hide()
             self.maxBtn.hide()
             self.closeBtn.hide()
@@ -647,11 +660,13 @@ class CustomTitleBar(TitleBarBase):
         spacing = layout.spacing()
 
         left = self._sidebar_btn.width() + layout.contentsMargins().left()
-        right = 0
+        right = self._workbench_btn.width()
         if not self._is_mac:
-            right = (
-                self.minBtn.width() + self.maxBtn.width() + self.closeBtn.width() + spacing * 2
+            right += (
+                self.minBtn.width() + self.maxBtn.width() + self.closeBtn.width() + spacing * 3
             )
+        else:
+            right += spacing
 
         if left < right:
             left_pad, right_pad = right - left, 0
@@ -886,6 +901,11 @@ class CustomTitleBar(TitleBarBase):
                 b.apply_theme_colors()
         # 侧栏开关：透明背景无边框，仅 hover 显底（图标由 _ThemeIconEngine 主题感知）
         self._sidebar_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
+            f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
+        )
+        # 工作台开关：与侧栏开关同款（图标"右侧边栏"主题感知）
+        self._workbench_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
             f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
         )
