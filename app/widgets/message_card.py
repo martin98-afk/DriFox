@@ -63,6 +63,7 @@ from PyQt5.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
+    QTextDocument,
     QWheelEvent,
 )
 from PyQt5.QtSvg import QSvgRenderer
@@ -6514,7 +6515,9 @@ class CodeWebViewer(QWebEngineView):
                     // 程序性滚底同样落在底部 → 自动恢复跟随；用户滚轮上滚 → 立即停止
                     // 跟随；滚回底部附近 → 恢复跟随。彻底消除 delta 竞态导致的
                     // “输出跳到莫名其妙位置 / 滚轮被永久锁死”问题。
-                    var _nearBottom = Math.abs(document.body.scrollHeight - _st - document.body.clientHeight) < {AUTO_SCROLL_THRESHOLD};
+                    var _nearBottom = Math.abs(document.body.scrollHeight - _st - document.body.clientHeight) < {
+            AUTO_SCROLL_THRESHOLD
+        };
                     window._userScrolledWithin = !_nearBottom;
                 }});
                 // ======================================================
@@ -8248,9 +8251,7 @@ class CodeWebViewer(QWebEngineView):
             while x < w:
                 c = img.pixelColor(x, y)
                 total += 1
-                is_bg = (
-                    abs(c.red() - bg.red()) + abs(c.green() - bg.green()) + abs(c.blue() - bg.blue()) <= 24
-                )
+                is_bg = abs(c.red() - bg.red()) + abs(c.green() - bg.green()) + abs(c.blue() - bg.blue()) <= 24
                 if not is_bg:
                     diff += 1
                 else:
@@ -8907,6 +8908,20 @@ class PlainTextViewer(QWidget):
         # 填满 MAX_HEIGHT 所需行数（行高 1.5×字号）× 4000px 宽下每行最多容纳字符数
         return int((self.MAX_HEIGHT / (1.5 * fs)) * (4000.0 / (0.35 * fs)))
 
+    def _measure_document(self) -> QTextDocument:
+        """新建独立测量文档（同步布局，字体/边距与 text_edit 对齐）。
+
+        text_edit 的共享文档会被 QTextEdit 钉在 viewport 宽，且 QTextDocument
+        布局是 layoutTimer 异步的——setTextWidth(w) 后立即读 size() 拿到旧宽
+        排版缓存，短消息被误判"多行"钉死 MAX_HEIGHT（气泡下方大片空白根因）。
+        独立新文档无历史布局状态，size() 同步正确。调用方用完交由 GC 释放。
+        """
+        src = self.text_edit.document()
+        doc = QTextDocument()
+        doc.setDefaultFont(src.defaultFont())
+        doc.setDocumentMargin(src.documentMargin())
+        return doc
+
     def _update_height(self):
         """宽度自适应 + 高度重算：气泡按未换行理想宽度收缩，不占满整行"""
         # [PERF] 超大文本快速路径：跳过全文档布局，O(1) 判定 (cap, MAX_HEIGHT)。
@@ -8926,14 +8941,11 @@ class PlainTextViewer(QWidget):
                     self.contentHeightChanged.emit(self.MAX_HEIGHT)
                 return
 
-        # 先让 QTextEdit 重新布局
-        self.text_edit.update()
-        self.text_edit.document().markContentsDirty(0, self.text_edit.document().characterCount())
-
-        # 强制更新几何信息
-        self.text_edit.ensurePolished()
-
-        doc = self.text_edit.document()
+        # 测量用独立同步文档：共享文档被 QTextEdit 钉在 viewport 宽且布局异步，
+        # setTextWidth(w) 后立即读 size() 拿到旧宽缓存 → 短消息误判"多行"
+        # 走 WIDE 分支钉死 MAX_HEIGHT（气泡下方大片空白的根因）
+        doc = self._measure_document()
+        doc.setPlainText(self._text)
         fm = QFontMetrics(self.text_edit.font())
 
         # ── 宽度自适应（ChatGPT 式）──
@@ -10128,7 +10140,9 @@ class MessageCard(SimpleCardWidget):
 
             nm_l = QLabel(self._theme["title"], self)
             self._name_label = nm_l
-            nm_l.setStyleSheet(f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;")
+            nm_l.setStyleSheet(
+                f"{font_css} font-size:{scale_font_size(14)}px;color:{self._theme['text']};font-weight:700;"
+            )
             sub_l = QLabel(self._theme["subtitle"], self)
             self._subtitle_label = sub_l
             sub_l.setStyleSheet(
