@@ -135,7 +135,8 @@ class _BaseWinButton(TitleBarButton):
     #: 按钮占满标题栏高度（不留上下边距），hover 区域才能贴齐窗口顶边，
     #: 关闭按钮的圆角也才能与窗口圆角同心。
     HEIGHT = 38
-    WIDTH = 46
+    #: 36：三按钮 + 0 间距时整组 108px，图标 12px 居中，观感紧凑（对齐 Win11 密度）
+    WIDTH = 36
 
     @property
     def ICON(self) -> int:  # noqa: N802 - 兼容旧命名
@@ -547,6 +548,7 @@ class CustomTitleBar(TitleBarBase):
     tab_clicked = pyqtSignal(str)
     tab_close_clicked = pyqtSignal(str)
     sidebar_toggle_requested = pyqtSignal()
+    workbench_toggle_requested = pyqtSignal()  # 右侧工作台浮层开关（按钮在最小化左侧）
 
     def __init__(self, parent):
         self._is_mac: bool = sys.platform == "darwin"
@@ -570,6 +572,16 @@ class CustomTitleBar(TitleBarBase):
         self._sidebar_btn.setCursor(Qt.PointingHandCursor)
         self._sidebar_btn.setToolTip("收起/展开侧边栏")
         self._sidebar_btn.clicked.connect(self.sidebar_toggle_requested.emit)
+
+        # ── 右区：工作台浮层开关（右侧边栏图标，位于最小化按钮左侧）──
+        # mac 上系统交通灯由 NSWindow 提供且系统按钮隐藏，此按钮仍保留（浮层开关独立于系统按钮）
+        self._workbench_btn = QPushButton(self)
+        self._workbench_btn.setIcon(get_icon("右侧边栏"))
+        self._workbench_btn.setFixedSize(30, 28)
+        self._workbench_btn.setIconSize(QSize(17, 17))
+        self._workbench_btn.setCursor(Qt.PointingHandCursor)
+        self._workbench_btn.setToolTip("打开/关闭工作台")
+        self._workbench_btn.clicked.connect(self.workbench_toggle_requested.emit)
 
         # ── 中央区：tab 容器 ──
         self._tab_container = QWidget(self)
@@ -595,7 +607,9 @@ class CustomTitleBar(TitleBarBase):
         # 贴齐窗口顶边，关闭按钮的圆角也才能与窗口圆角同心（否则圆角差 3px，
         # 视觉上就是"hover 和窗口对不齐"）。
         layout.setContentsMargins(left_pad, 0, 0, 0)
-        layout.setSpacing(4)
+        # 0：右区四按钮（工作台开关/最小化/最大化/关闭）hover 底色无缝相连，
+        # 与 Win11 系统标题栏行为一致；间距由按钮自身宽度内的图标留白提供
+        layout.setSpacing(0)
         # AlignVCenter 保证左侧 30x28 折叠钮在 38px 栏内垂直居中
         layout.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         layout.addWidget(self._sidebar_btn)
@@ -605,10 +619,12 @@ class CustomTitleBar(TitleBarBase):
         layout.addStretch(1)
         layout.addWidget(self._right_balance)
         if not self._is_mac:
+            layout.addWidget(self._workbench_btn, 0, Qt.AlignRight)
             layout.addWidget(self.minBtn, 0, Qt.AlignRight)
             layout.addWidget(self.maxBtn, 0, Qt.AlignRight)
             layout.addWidget(self.closeBtn, 0, Qt.AlignRight)
         else:
+            layout.addWidget(self._workbench_btn, 0, Qt.AlignRight)
             self.minBtn.hide()
             self.maxBtn.hide()
             self.closeBtn.hide()
@@ -636,7 +652,7 @@ class CustomTitleBar(TitleBarBase):
 
         两个等分 stretch 只在**两侧固定占位等宽**时才能让中间控件居中。实际
         布局并不对称：左边是折叠钮（约 30，mac 上还要加上交通灯留白 70），
-        右边是三个系统按钮（46×3 + 间距，mac 上为 0）。窄的一侧缺少的那一截
+        右边是三个系统按钮（36×3，间距 0；mac 上为 0）。窄的一侧缺少的那一截
         会让 tab 中心整体偏向它——Windows 上约偏左 52px。
 
         这里给窄的一侧补一个等宽占位 widget，使两侧固定宽度相等。
@@ -647,11 +663,13 @@ class CustomTitleBar(TitleBarBase):
         spacing = layout.spacing()
 
         left = self._sidebar_btn.width() + layout.contentsMargins().left()
-        right = 0
+        right = self._workbench_btn.width()
         if not self._is_mac:
-            right = (
-                self.minBtn.width() + self.maxBtn.width() + self.closeBtn.width() + spacing * 2
+            right += (
+                self.minBtn.width() + self.maxBtn.width() + self.closeBtn.width() + spacing * 3
             )
+        else:
+            right += spacing
 
         if left < right:
             left_pad, right_pad = right - left, 0
@@ -886,6 +904,11 @@ class CustomTitleBar(TitleBarBase):
                 b.apply_theme_colors()
         # 侧栏开关：透明背景无边框，仅 hover 显底（图标由 _ThemeIconEngine 主题感知）
         self._sidebar_btn.setStyleSheet(
+            "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
+            f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
+        )
+        # 工作台开关：与侧栏开关同款（图标"右侧边栏"主题感知）
+        self._workbench_btn.setStyleSheet(
             "QPushButton { background: transparent; border: none; border-radius: 6px; padding: 3px; }"
             f"QPushButton:hover {{ background: {Colors.TAB_HOVER_BG}; }}"
         )

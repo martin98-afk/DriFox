@@ -284,19 +284,17 @@ class _WorktreeRow(QWidget):
             )
             layout.addWidget(tag)
 
-        # 落后/超前提交数显示（仅非主 worktree）
+        # 落后/超前提交数显示（仅非主 worktree）：落后红、领先深绿
         if not self._is_main and (self._behind_main > 0 or self._ahead_main > 0):
-            parts = []
-            color = "#8b949e"  # 默认灰
+            base_ss = f"{get_font_family_css()} {font_size_css(10)}padding: 0 2px;"
             if self._behind_main > 0:
-                parts.append(f"-{self._behind_main}")
-                color = "#d29922"  # 黄色-落后警告
+                behind_label = QLabel(f"-{self._behind_main}", self)
+                behind_label.setStyleSheet(f"color: #f85149; {base_ss}")  # 红色-落后
+                layout.addWidget(behind_label)
             if self._ahead_main > 0:
-                parts.append(f"+{self._ahead_main}")
-                color = "#7ee787"  # 绿色-超前
-            diff_label = QLabel(" ".join(parts), self)
-            diff_label.setStyleSheet(f"color: {color}; {get_font_family_css()} {font_size_css(10)}padding: 0 2px;")
-            layout.addWidget(diff_label)
+                ahead_label = QLabel(f"+{self._ahead_main}", self)
+                ahead_label.setStyleSheet(f"color: #3fb950; {base_ss}")  # 深绿-领先
+                layout.addWidget(ahead_label)
 
         layout.addStretch()
 
@@ -460,7 +458,7 @@ class _AddWorktreeRow(QWidget):
         bar.setStyleSheet(f"background-color: {Colors.DIVIDER_COLOR};")
         layout.addWidget(bar)
 
-        add_label = QLabel("＋ 新建 worktree", self)
+        add_label = QLabel("＋ 新建工作树", self)
         add_label.setStyleSheet(
             f"color: {Colors.TEXT_ACCENT}; font-weight: 600; {get_font_family_css()} {font_size_css(11)}"
         )

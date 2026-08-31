@@ -163,7 +163,9 @@ class TitleBarModule(UIModule):
         on_title_edit_finished = getattr(host, "_on_title_edit_finished", None)
         toggle_history_questions_popup = getattr(host, "_toggle_history_questions_popup", None)
         on_share_clicked = getattr(host, "_on_share_clicked", None)
-        open_diff_viewer = getattr(host, "_open_diff_viewer", None)
+        # 差异按钮已迁移到工作台产物页；保留 host.diff_btn = None 的兼容，
+        # 防止外部代码仍持有引用（见 main_widget._open_diff_viewer）。
+        host.diff_btn = None
 
         layout = host.layout()
 
@@ -188,9 +190,9 @@ class TitleBarModule(UIModule):
         pb_layout.setSpacing(8)  # avatar ↔ 分支的连接：纯留白
 
         # 项目方形 icon（缩写字母，flat design squircle 风格）
-        # 极简化但保留可识别：22px（20 偏小，24 偏大），暖棕低饱和色
+        # 26px：用户反馈 22px 偏小，调大一点（字号随 size 自适应）
         host._project_avatar = _SquareAvatar(
-            extract_project_initials(_current_project), get_project_color(_current_project), host, size=22
+            extract_project_initials(_current_project), get_project_color(_current_project), host, size=26
         )
         host._project_avatar.setCursor(Qt.PointingHandCursor)
         if on_project_label_clicked is not None:
@@ -307,14 +309,8 @@ class TitleBarModule(UIModule):
             host._share_btn.clicked.connect(on_share_clicked)
         right_layout.addWidget(host._share_btn)
 
-        # 差异对比按钮（从右下移到右上）
-        host.diff_btn = TransparentToolButton(get_icon("差异对比"), host)
-        host.diff_btn.setFixedSize(28, 28)
-        host.diff_btn.setToolTip("会话级差异对比")
-        if open_diff_viewer is not None:
-            host.diff_btn.clicked.connect(open_diff_viewer)
-        right_layout.addWidget(host.diff_btn)
-
+        # 差异对比按钮已迁移到工作台产物页（见 WorkbenchPanel.diff_requested），
+        # 此处不再创建 diff_btn，避免按钮无处不在。
         right_layout.addSpacing(8)  # 右侧留白
 
         session_bar_layout.addLayout(right_layout)

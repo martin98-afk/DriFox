@@ -80,6 +80,15 @@ class _StubWindow:
     def _on_sidebar_toggled(self, collapsed):
         self.toggled.append(collapsed)
 
+    def _splitter_sizes_with_left(self, left_w):
+        """与 TabManagerWindow 真实现同构的最小版（stub 无工作台窗格，走两窗格分支）"""
+        sizes = self._splitter.sizes()
+        total = sum(sizes) if sizes else 0
+        if len(sizes) >= 3:
+            wb = sizes[2]
+            return [left_w, max(0, total - left_w - wb), wb]
+        return [left_w, max(0, total - left_w)]
+
 
 @pytest.fixture
 def panel(qtbot):

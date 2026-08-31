@@ -558,7 +558,7 @@ class TraceCardWidget(QWidget):
             return []
 
     def _refresh_system_sections(self) -> None:
-        """System Prompt tab 的分段内容：会话 system_prompt + 当前 agent 提示词。"""
+        """System Prompt tab 的分段内容：仅会话 system_prompt（已含智能体身份，不再追加）。"""
         sections: List[Tuple[str, str]] = []
         c = self._collector
         sys_prompt = ""
@@ -570,24 +570,7 @@ class TraceCardWidget(QWidget):
                 pass
         if sys_prompt:
             sections.append(("Session System Prompt", sys_prompt))
-        agent_prompt = self._fetch_agent_prompt()
-        if agent_prompt:
-            sections.append((f"Agent Prompt · {self._current_agent_name()}", agent_prompt))
         self._detail.set_system_sections(sections)
-
-    def _current_agent_name(self) -> str:
-        mw = self._ctx.get("main_widget")
-        return str(getattr(mw, "_current_agent", "build") or "build") if mw is not None else "build"
-
-    def _fetch_agent_prompt(self) -> str:
-        services = self._ctx.get("services") or {}
-        getter = services.get("get_agent_prompt")
-        if not callable(getter):
-            return ""
-        try:
-            return (getter(self._current_agent_name()) or "").strip()
-        except Exception:
-            return ""
 
     # ──────────────────── 联动 ────────────────────
 

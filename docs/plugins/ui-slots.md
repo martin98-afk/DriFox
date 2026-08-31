@@ -21,6 +21,9 @@ def register_ui(registry):
 
     # 标题栏常驻 tab（无 × 关闭钮；点击走 on_click 回调自展示，主程序不接管内容区）
     registry.register_titlebar_tab(plugin_name, tab_id, label, icon_path="", on_click=..., priority=0, metadata=...)
+
+    # 右侧工作台 tab（WorkbenchPanel 页签条：产物 / 记忆 之后追加）
+    registry.register_workbench_tab(plugin_name, page_id, label, widget_class, priority=0, metadata=...)
 ```
 
 详见 [`docs/plugin-architecture.md`](../plugin-architecture.md) 466-477 行。
@@ -28,6 +31,8 @@ def register_ui(registry):
 > **标题栏 tab 两类形态**：
 > - **常驻**（`register_titlebar_tab`）：始终显示在标题栏 tab 区（「聊天」右侧），不可关闭，点击触发插件回调。
 > - **非常驻**（`register_floating_card(container="full")`）：卡片打开时动态出现在标题栏（带 × 关闭钮），关闭即从标题栏移除；点击 tab 切换覆盖层显示。
+
+> **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台浮层（WorkbenchPanel）的页签条，自动出现在「产物」「记忆」之后；宿主在 `refresh_workbench` 时调用 `panel.sync_plugin_pages(tabs)` reconcile（签名不变则跳过重建）。同 page_id 高优先级覆盖低优先级，插件卸载时自动注销。系统插件 `plugins/system/ui/_artifacts_page.py` 提供 `SystemArtifactsPage` 作为参考实现，演示如何通过 `context["backend"]` / `context["session_id"]` / `context["diff_requested_callback"]` 从宿主拉取数据与触发回调。
 
 ---
 

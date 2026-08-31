@@ -1136,6 +1136,8 @@ class OpenAIChatToolWindow(ToolWindow):
         "team": "_handle_team_command",
         "toggle-window": "_handle_toggle_window_command",
         "clear": "_handle_clear_command",
+        "toggle-sidebar": "_handle_toggle_sidebar_command",
+        "toggle-workbench": "_handle_toggle_workbench_command",
     }
     # git 分支缓存：类级共享（workdir → branch）。
     # 同项目多窗口共享，避免重复 git 探测；信号路由仍由实例级 _branch_detect_signals
@@ -1387,6 +1389,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.timeout.connect(self._sync_all_cards_width)
         self._pending_resize_sync = False
         self._resize_preview_active = False
+        # #31 侧栏/工作台宽度动画期间由宿主置 True：动画每帧 resize 对话区，
+        # 但不应把卡片 WebView 藏进静态预览（用户要求中间区域原样实时显示）。
+        # 宽度同步仍由上方防抖定时器在动画结束后一次完成。
+        self._suppress_resize_preview = False
         # 🐛 恢复链代次：每轮 resize 递增，用于作废旧的单次恢复链。
         # 没有它时连续拖拽会并存多条链，互相清空 _restore_queue，
         # 导致部分卡片永久停留在 placeholder 空白态。
@@ -1680,33 +1686,30 @@ class OpenAIChatToolWindow(ToolWindow):
     # 保证「打开卡片 → 框架已就绪」行为不变。属性名/注册语义与改造前完全一致。
 
     def _ensure_history_card(self):
-        """确保历史会话卡片框架已创建（内容由 _build_deferred_card_history 填充）"""
+        """确保历史会话页已创建（内容由 _build_deferred_card_history 填充）
+
+        历史会话已从对话区底部卡片迁移到右侧工作台「历史会话」页签，并
+        对齐记忆页的统一 tab 形态：去卡片框架（HistoryPage：子页签 +
+        列表上方搜索框 + 导入按钮），HistoryCard 列表内容不变。
+        """
         if self._history_card is not None:
             return
-        self._history_card = BaseSettingsCard("历史会话", "📜", self)
-        self._history_card.setMinimumHeight(300)  # 自适应窗口高度
-        # 设置历史/归档标签
-        self._history_card.setup_tabs(
-            [
-                ("history", "历史会话"),
-                ("archived", "归档"),
-            ],
-            "history",
-        )
-        # 强制触发首次 tab 渲染
+        from app.widgets.workbench_panel import HistoryPage
+
+        self._history_card = HistoryPage(self)
+        # 子页签切换 → 宿主刷新（历史/归档列表分流）；closed 信号为兼容契约
         self._history_card.tabChanged.connect(self._on_history_tab_changed)
         self._history_card.set_current_tab("history")
-        self._history_card.setVisible(False)
-        self._history_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("history", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._card_manager.register_card(
-            self._window_id, ContainerType.BOTTOM, "history", self._history_card, system_card=True
-        )
-        self._bottom_card_container.add_card("history", self._history_card)
+        self._history_card.closed.connect(self._close_history_panel)
+        # 挂到右侧工作台「历史会话」页签（幂等；面板未就绪时由
+        # TabManagerWindow.refresh_workbench / open_workbench_history 兜底补挂）
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is not None:
+                panel.attach_history_page(self._history_card)
+        except Exception:
+            logger.exception("[MainWidget] 历史会话页挂载到工作台失败")
 
     def _ensure_share_card(self):
         """确保分享卡片框架已创建（内容由 _build_deferred_card_share 填充）"""
@@ -1910,7 +1913,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._history_popup_card.get_import_button_handler(),
                 tooltip="导入会话",
             )
-            self._history_card.content_layout.addWidget(self._history_popup_card)
+            self._history_card.attach(self._history_popup_card)
             self._history_card.set_search_handler(
                 "🔍 搜索会话...",
                 lambda text: self._history_popup_card.set_search_filter(text),
@@ -3283,8 +3286,8 @@ class OpenAIChatToolWindow(ToolWindow):
         #   model_selector 加载模型数据、project_selector 加载项目列表等）
         _SYSTEM_CARD_COMMANDS = {
             "settings": ("打开设置面板", self._toggle_settings_card),
-            "history": ("打开对话历史", self._toggle_history_card),
-            "memory": ("打开记忆管理", self._toggle_memory_card),
+            "history": ("打开对话历史", self._open_workbench_history),
+            "memory": ("打开记忆管理", self._open_workbench_memory),
             "model_selector": ("选择模型", self._toggle_model_selector_card),
             "tool_control": ("打开工具控制面板", self._toggle_tool_control_card),
             "project_selector": ("选择项目", self._toggle_project_selector_card),
@@ -3302,6 +3305,28 @@ class OpenAIChatToolWindow(ToolWindow):
                 description=description,
                 argument_hint="",
             )
+
+    def _open_workbench_history(self):
+        """快捷键/命令入口：打开右侧工作台并跳转「历史会话」页签（直开语义）
+
+        历史会话已从对话区底部卡片迁移到工作台；不再走旧 toggle 包装，
+        直接复用 TabManagerWindow.open_workbench_history（含活跃窗口历史卡
+        懒创建/挂载 + 展开工作台 + 切页 + 数据刷新）。
+        """
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.open_workbench_history()
+
+    def _open_workbench_memory(self):
+        """快捷键/命令入口：打开右侧工作台并跳转「记忆」页签（直开语义）
+
+        记忆管理已迁移到工作台；直接复用
+        TabManagerWindow.open_workbench_memory("entries")（展开工作台 +
+        切记忆页 + 默认落在条目记忆子页）。
+        """
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.open_workbench_memory("entries")
 
     def _clear_command_shortcuts(self):
         """清空本实例对命令快捷键的引用
@@ -7922,7 +7947,6 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         cards = [
             self._model_config_card,
-            self._history_card,
             self._memory_card,
         ]
         return [c for c in cards if c is not None]
@@ -8169,12 +8193,36 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_config_popup.set_config(current_name, config, self._current_model_name)
 
     def _toggle_history_card(self):
-        """切换历史会话卡片的显示"""
-        self._ensure_history_card()  # P0-1：框架懒创建，确保注册/入容器
-        self._card_manager.toggle_card("history", self._window_id)
-        # 显示时刷新历史会话数据
-        if self._card_manager.is_card_visible("history", self._window_id):
-            self._refresh_history_toggle_panel()
+        """切换历史会话（已迁移到右侧工作台「历史会话」页签）
+
+        - 工作台不可见 → 展开并定位历史页
+        - 可见但不在历史页 → 切到历史页
+        - 已在历史页 → 切回工作树页（等效原“关闭卡片”）
+        切页后的数据刷新由 history_tab_shown → TabManagerWindow 驱动。
+        """
+        self._ensure_history_card()  # 懒创建 + 挂载工作台（幂等）
+        tm = TabManagerWindow.get_instance()
+        panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+        if tm is None or panel is None:
+            return
+        if not tm.is_workbench_visible() or panel.current_tab() != panel.TAB_HISTORY:
+            tm.open_workbench_history()
+        else:
+            panel.set_current_tab(panel.TAB_WORKTREE)
+
+    def _close_history_panel(self):
+        """历史卡片关闭钮收出口：仅在用户显式点 × 时离开历史页
+
+        ★ 加载会话路径已不再调用本方法（页签按用户选择保持）；
+        本方法只服务 _history_card.closed 信号的显式关闭语义。
+        """
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is not None and panel.current_tab() == panel.TAB_HISTORY:
+                panel.set_current_tab(panel.TAB_WORKTREE)
+        except Exception:
+            pass
 
     def _sync_search_box_visibility(self):
         """同步搜索框：两个标签页都显示搜索框"""
@@ -8484,7 +8532,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     record = self._history_popup_card.get_history_at_index(index)
                     new = tm.spawn_tab(self, session_record=record) if record is not None else None
                 if new is not None:
-                    self._card_manager.hide_card("history", self._window_id)
+                    # 页签保持：开新标签页不改变工作台当前页签（无历史页强切）
                     return
             # 降级原行为
         if index == -1:
@@ -8492,8 +8540,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._create_new_session()
         else:
             self._load_history_session_from_popup(index)
-        # 关闭历史会话卡片（通过 CardManager 更新显隐状态）
-        self._card_manager.hide_card("history", self._window_id)
+        # ★ 页签保持：加载会话不再强制离开历史页/跳工作树，
+        # 工作台页签完全按用户选择保持（用户可继续点选其他会话）
 
     def _on_team_restore_requested(self, run_id: str):
         """从历史面板恢复团队会话（方案 A 一键恢复）
@@ -8757,8 +8805,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 会话数据变更统一通知：恢复团队会话产生新会话记录（新 run_id），
         # 历史面板/欢迎卡片需同步 + 跨窗口广播
         self._notify_history_data_changed()
-        # 关闭历史会话卡片
-        self._card_manager.hide_card("history", self._window_id)
+        # ★ 页签保持：团队恢复后不强制切页签（原跳工作树已移除）
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -8782,7 +8829,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 target_min_w = 0
             if self.chat_scroll_area.minimumWidth() != target_min_w:
                 self.chat_scroll_area.setMinimumWidth(target_min_w)
-        self._set_cards_resize_preview_mode(True)
+        # 动画期间宿主会抑制预览模式：中间对话区原样实时显示（#31）
+        if not getattr(self, "_suppress_resize_preview", False):
+            self._set_cards_resize_preview_mode(True)
         # resize 期间持续重置防抖，避免在拖拽过程中提前批量重排
         self._pending_resize_sync = True
         self._resize_debounce_timer.stop()
@@ -13325,9 +13374,7 @@ class OpenAIChatToolWindow(ToolWindow):
         full_record = self.history_manager.get_session_by_session_id(session_id) if self.history_manager else None
         record = full_record or member_record
         self._load_session_from_record(record)
-        # 关闭历史会话卡片
-        if self._card_manager:
-            self._card_manager.hide_card("history", self._window_id)
+        # ★ 页签保持：成员会话加载后不强制切页签（原跳工作树已移除）
 
     def _load_history_session_from_popup(self, index: int):
         # 🛡️ 使用历史面板缓存的 _all_history 列表来查找 session_id，
@@ -13459,15 +13506,8 @@ class OpenAIChatToolWindow(ToolWindow):
         card.modelLabelClicked.connect(self._on_footer_model_label_clicked)
 
         self._add_chat_widget(card, insert_index=insert_index)
-        # 流式新建卡片时同步最新任务列表（模型跨轮继续执行任务时，
-        # 新回复卡片底部延续显示当前任务进度；历史加载 scroll=False 不同步）
-        # 若已有任务全部完成，则不同步——避免新消息卡片底部残留旧任务完成态。
-        if (
-            scroll
-            and self._latest_todos
-            and any(isinstance(t, dict) and t.get("status") != "completed" for t in self._latest_todos)
-        ):
-            card.update_todo_list(self._latest_todos)
+        # 任务列表已迁至工作台（WorkbenchPanel 任务区），消息卡片不再内嵌 todo 区；
+        # _latest_todos 缓存仍由 todowrite 结果联动（工作台数据源，切 tab 时拉取）。
         # 🐛 这是流式输出期间最热的强制滚底点（`_append_assistant_message`）：
         # 每个工具轮次都会新建 assistant 卡片。此前无条件置底，用户上滚读历史时
         # 只要后台有工具回调就会被拽回。纳入统一守卫。
@@ -16601,9 +16641,9 @@ class OpenAIChatToolWindow(ToolWindow):
             todos = []
         if todos:
             self._latest_todos = todos
-            card = self._current_assistant_card or self._find_latest_assistant_card()
-            if card and hasattr(card, "update_todo_list"):
-                card.update_todo_list(todos)
+            # 任务列表已迁至工作台（不再内嵌消息卡片），仅刷新缓存 + 推工作台
+            # 工作台浮层任务区同步
+            self._push_workbench_updates(todos=todos)
         else:
             from qfluentwidgets import InfoBar, InfoBarPosition
 
@@ -16825,6 +16865,18 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.tray_manager import TrayManager
 
         TrayManager.get_instance()._toggle_all_windows()
+
+    def _handle_toggle_sidebar_command(self, args: str):
+        """/toggle-sidebar 命令：切换左侧边栏收起/展开（同标题栏左侧按钮）"""
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm._tab_panel._toggle_sidebar()
+
+    def _handle_toggle_workbench_command(self, args: str):
+        """/toggle-workbench 命令：切换右侧工作台显示/隐藏（同标题栏右侧按钮）"""
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.toggle_workbench()
 
     def _handle_clear_command(self, args: str):
         """/clear 命令：清空当前会话的所有消息（重新显示欢迎页）"""
@@ -17332,15 +17384,19 @@ class OpenAIChatToolWindow(ToolWindow):
             except TypeError, ValueError:
                 content = str(raw_content)
 
-        # 统一处理工具完成状态
-        # 字段驱动：任何工具结果携带 todos 字段 → 联动消息卡片内嵌任务列表
-        # （插件声明，主程序不写死工具名）
+        # 字段驱动：任何工具结果携带 todos 字段 → 更新任务列表缓存
+        # （插件声明，主程序不写死工具名）。显示在工作台任务区，不再内嵌消息卡片。
         todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
         if todos:
             self._latest_todos = todos
-            card = self._current_assistant_card or self._find_latest_assistant_card()
-            if card and hasattr(card, "update_todo_list"):
-                card.update_todo_list(todos)
+        # 工作台浮层联动：任务到达推任务；文件写入类工具完成后重拉产物列表
+        try:
+            if todos:
+                self._push_workbench_updates(todos=todos)
+            elif tool_name and self.backend.file_recorder is not None and self.backend.file_recorder.is_tracked_operation(tool_name):
+                self._push_workbench_updates(refresh_artifacts=True)
+        except Exception:
+            pass
         # （T11-3c：原 if/elif 空分支已删——todo 更新由上方完成；
         #   工具结果块由 append_tool_result 原地转换处理，无需额外动作）
 
@@ -18829,16 +18885,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._branch_widget.setVisible(False)
 
     def _on_branch_label_clicked(self, event):
-        """分支标签点击 — 打开关键文档卡片"""
-        self._toggle_memory_card()
-        # 确保切换到关键文档 Tab
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
-
-            self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
-            # 同步卡片 Tab 按钮
-            if hasattr(self, "_memory_card") and self._memory_card:
-                self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
+        """分支标签点击 — 打开工作台工作树页的关键文档（记忆已迁移工作台）"""
+        self._toggle_workbench_memory("docs")
 
     def _toggle_project_selector_card(self):
         """切换项目选择卡片的显示"""
@@ -19231,22 +19279,19 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_working_directory()
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
-        # 自动弹出长期记忆卡片（已设根目录时跳过，避免干扰已绑定的文件夹）
+        # 自动展开工作台记忆页的「关键文档」（记忆功能已完全迁移到工作台，
+        # 不再弹出旧的独立记忆卡片）。
+        # suppress_memory_card=True 时跳过（拖拽/选择文件夹已设根目录，避免干扰）。
         if not suppress_memory_card:
-            # P0-1：卡片懒创建，未创建视为不可见 → toggle 内部会 ensure
-            if not getattr(self, "_memory_card", None) or not self._memory_card.isVisible():
-                self._toggle_memory_card()
-            # 卡片弹出后，再切换到关键文档标签
-            # 🐛 修复：TAB_KEY_DOCUMENTS 必须局部导入（此前未导入导致 NameError，
-            # 中断后续 _create_new_session / _update_tab_icon，新建会话与 Tab 图标
-            # 同步全部失效）；同时显式 switch_tab 内容层（对齐 _on_branch_label_clicked，
-            # 不依赖 set_current_tab → tabChanged 信号链）。
-            if hasattr(self, "_memory_card") and self._memory_card:
+            try:
                 from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
+                from app.widgets.tab_manager_window import TabManagerWindow
 
-                if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                    self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
-                self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
+                tm = TabManagerWindow.get_instance()
+                if tm is not None and hasattr(tm, "open_workbench_memory"):
+                    tm.open_workbench_memory(TAB_KEY_DOCUMENTS)
+            except Exception as e:
+                logger.warning(f"[NewProject] 展开工作台关键文档失败: {e}")
         # 自动触发新建会话
         self._create_new_session()
         # 隐藏项目选择卡片
@@ -19997,6 +20042,59 @@ class OpenAIChatToolWindow(ToolWindow):
         if resolved_path:
             self._broadcast_team_workdir(resolved_path)
 
+    # ── 右侧工作台浮层联动 ──
+
+    def _push_workbench_updates(self, todos: Optional[list] = None, refresh_artifacts: bool = False) -> None:
+        """向右侧工作台浮层推送增量更新（面板隐藏/无宿主时零开销跳过）
+
+        ★ 标签页隔离：工作台是宿主级单例，数据投影自「当前活跃对话窗口」。
+        非活跃窗口的工具回调（如后台正在跑的另一个标签页）只更新自己的
+        ``_latest_todos`` 缓存，不写工作台 UI——否则当前标签页的工作台
+        会被其他标签页的任务/产物覆盖。切回时 refresh_workbench 会拉取。
+
+        Args:
+            todos: todowrite 等工具回传的最新任务列表；None 表示本次不更新任务区
+            refresh_artifacts: True 时重拉产物列表（文件写入类工具完成后调用）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is None:
+                return
+            # 标签页隔离：仅活跃窗口可推送 UI 更新
+            if tm.get_current_window() is not self:
+                return
+            if todos is not None:
+                # todo 更新自动展开工作台（set_workbench_visible 内部会 refresh_workbench）
+                if not tm.is_workbench_visible():
+                    tm.set_workbench_visible(True)
+                panel.update_todos(todos)
+            if refresh_artifacts:
+                tm.refresh_workbench()
+        except Exception:
+            pass
+
+    def _push_workbench_project(self, project: str, workdir: Optional[str] = None) -> None:
+        """向右侧工作台浮层同步当前项目（记忆页跟随当前窗口项目）
+
+        ★ 与 _push_workbench_updates 同一隔离语义：非活跃窗口不推送。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is None:
+                return
+            if tm.get_current_window() is not self:
+                return
+            if panel.isVisible():
+                panel.update_project(project, workdir)
+        except Exception:
+            pass
+
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录
 
@@ -20037,6 +20135,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 工作目录变化后刷新分支标签
         self._update_branch()
+        # 工作台浮层记忆页跟随当前项目
+        self._push_workbench_project(project, workdir)
 
         from loguru import logger
 
@@ -20086,6 +20186,25 @@ class OpenAIChatToolWindow(ToolWindow):
     def _show_soul_memory(self):
         """切换记忆管理卡片的显示"""
         self._toggle_memory_card()
+
+    def _toggle_workbench_memory(self, tab_key: str = "entries"):
+        """切换记忆（快捷键/命令入口，已迁移到右侧工作台「记忆」页签）
+
+        - 工作台不可见 或 不在目标页 → 展开并定位（entries/notes=记忆页，
+          docs=工作树页的关键文档）
+        - 已在目标页 → 切回工作树页（等效原“关闭卡片”）
+        数据构建/刷新由 TabManagerWindow.open_workbench_memory +
+        refresh_workbench 驱动，不再弹出对话区底部旧记忆卡片。
+        """
+        tm = TabManagerWindow.get_instance()
+        panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+        if tm is None or panel is None:
+            return
+        target = panel.TAB_WORKTREE if tab_key == "docs" else panel.TAB_MEMORY
+        if not tm.is_workbench_visible() or panel.current_tab() != target:
+            tm.open_workbench_memory(tab_key)
+        else:
+            panel.set_current_tab(panel.TAB_WORKTREE)
 
     def _toggle_memory_card(self):
         """切换记忆管理卡片的显示"""
@@ -20597,6 +20716,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
             CardManager.get_instance().unregister_window(self._window_id)
             logger.debug(f"[OpenAIChatToolWindow] 注销窗口卡片: {self._window_id}")
+        except Exception:
+            pass
+
+        # 历史会话页已迁移到右侧工作台：窗口关闭时摘除自己的历史卡片，
+        # 防止 workbench stack 持有已关闭窗口的悬空 widget（C++ 对象泄漏/残影）
+        try:
+            if self._history_card is not None:
+                tm = TabManagerWindow.get_instance()
+                panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+                if panel is not None:
+                    panel.detach_history_page(self._history_card)
         except Exception:
             pass
 
