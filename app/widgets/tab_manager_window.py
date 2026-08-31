@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -431,6 +432,23 @@ class _DockSideWrapper(QWidget):
                 self.hide()
 
 
+class _SidebarSplitter(QSplitter):
+    """左侧边栏分隔条：handle 显式设置左右调整光标
+
+    Qt 的 QSplitterHandle 默认本就带 SplitHCursor，但项目给 handle 应用了
+    QSS（background: transparent 融入背景），部分平台/版本下样式化后光标
+    不再随 hover 更新（表现为悬停分隔条时鼠标无变化）。这里在 createHandle
+    时显式 setCursor 兜底，保证拖拽热区始终有 resize 光标提示。
+    """
+
+    def createHandle(self):  # noqa: N802
+        handle = super().createHandle()
+        handle.setCursor(
+            Qt.SplitHCursor if self.orientation() == Qt.Horizontal else Qt.SplitVCursor
+        )
+        return handle
+
+
 class TabManagerWindow(FramelessWindow):
     """Tab 管理器宿主窗口（单例）"""
 
@@ -768,13 +786,20 @@ class TabManagerWindow(FramelessWindow):
             panel.slide_out()
 
     def reposition_workbench(self) -> None:
-        """工作台贴窗口右缘（标题栏下方全高）；纯覆盖定位，不参与任何 layout"""
+        """工作台贴窗口右缘（标题栏下方）；与左右卡片 4px 边距对齐
+
+        #tabFrame / #chatFrame 的 margin 为 4px（见 _apply_theme_stylesheet），
+        工作台浮层同样在标题栏下方留 4px、下/右各留 4px，上边界与左侧边栏、
+        右对话框严格对齐，圆角卡片观感一致。纯覆盖定位，不参与任何 layout。
+        """
         panel = getattr(self, "workbench_panel", None)
         if panel is None or panel.is_sliding:
             return
         top = self.titleBar.height() if getattr(self, "titleBar", None) is not None else 0
-        panel.setFixedHeight(max(0, self.height() - top))
-        panel.move(max(0, self.width() - panel.width()), top)
+        margin = 4  # 与 #tabFrame / #chatFrame 的 margin 对齐
+        top += margin
+        panel.setFixedHeight(max(0, self.height() - top - margin))
+        panel.move(max(0, self.width() - panel.width() - margin), top)
 
     def refresh_workbench(self) -> None:
         """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
@@ -881,9 +906,13 @@ class TabManagerWindow(FramelessWindow):
             }}
         """)
         # splitter handle 区域：融入窗口背景，让两侧 frame border 自然形成分隔线
-        # 这样不会和 frame border 形成"双重线"叠加，保持 4px 拖拽热区
+        # 这样不会和 frame border 形成"双重线"叠加，保持 4px 拖拽热区。
+        # cursor 与 _SidebarSplitter.createHandle 的显式 setCursor 双保险，
+        # 保证样式化后 hover 分隔条仍有左右调整光标。
         if getattr(self, "_splitter", None) is not None:
-            self._splitter.setStyleSheet("QSplitter::handle:horizontal { background: transparent; }")
+            self._splitter.setStyleSheet(
+                "QSplitter::handle:horizontal { background: transparent; cursor: size-hor; }"
+            )
         # ── 停靠区 splitter：handle 绘制可见分隔线（明确 UI 卡片与对话区边界）──
         # 6px 热区中画 2px 居中线（BORDER 色），hover 时变主题强调色提示可拖拽。
         # 停靠容器折叠时自身 hide()，对应 handle 由 Qt 自动隐藏，不留缝。
@@ -1301,9 +1330,7 @@ class TabManagerWindow(FramelessWindow):
         self._global_top_container.overlayStateChanged.connect(self._on_overlay_state_changed)
 
         # 使用 QSplitter 让左侧面板可拖拽
-        from PyQt5.QtWidgets import QSplitter
-
-        self._splitter = QSplitter(Qt.Horizontal, content_widget)
+        self._splitter = _SidebarSplitter(Qt.Horizontal, content_widget)
         self._splitter.addWidget(self._tab_frame)
         # 矩形边框（_chat_frame）保持全宽填满 splitter 右侧；
         # 内部对话内容限宽居中逻辑在 chat_frame 内的 _chat_wrapper 中处理
@@ -3285,11 +3312,37 @@ class TabManagerWindow(FramelessWindow):
             pass
 
     def _system_buttons_left(self) -> int:
-        """标题栏三个系统按钮的左边界 x（顶边热区需让开这段范围）"""
-        btn = getattr(getattr(self, "titleBar", None), "minBtn", None)
-        if btn is None or btn.isHidden():
+        """标题栏右侧按钮组的左边界 x（顶边热区需让开这段范围）
+
+        ★ 必须换算到**本窗口坐标系**再比较。系统三按钮（min/max/close）被包在
+        ``CustomTitleBar._sys_btn_box`` 容器内（提交 28727046 为消除主布局
+        spacing 引入），``minBtn.x()`` 只是**容器内局部坐标**——minBtn 是容器里
+        第一个控件，恒为 0。拿它直接参与命中判定会让 ``x >= 0`` 恒真，于是顶部
+        整条 ``max(_RESIZE_BORDER, _TOP_RESIZE_BAND)`` 热区全部返回 HTCLIENT，
+        **顶边 resize 彻底失效**，且这 6px 连窗口拖拽都不响应。
+
+        这里用 ``mapTo(self, ...)`` 换算，无论按钮是直接子控件还是嵌在容器里都正确。
+
+        同时把工作台开关按钮一并纳入：它在系统按钮容器左侧，若只让位到 minBtn，
+        按钮最上沿的几 px 会被判成 HTTOP 而吞掉点击。
+        """
+        tb = getattr(self, "titleBar", None)
+        if tb is None:
             return self.width()
-        return max(0, btn.x())
+        try:
+            lefts = []
+            # 越靠左越先让位：工作台按钮 → 系统按钮容器 → 兜底到 minBtn 本身
+            for attr in ("_workbench_btn", "_sys_btn_box", "minBtn"):
+                w = getattr(tb, attr, None)
+                if w is None or w.isHidden():
+                    continue
+                lefts.append(w.mapTo(self, QPoint(0, 0)).x())
+            if not lefts:
+                return self.width()
+            return max(0, min(lefts))
+        except Exception:
+            # 坐标换算失败时退回"不让位"，宁可顶边可 resize 也不吞掉按钮点击
+            return self.width()
 
     def _native_hit_test(self, hwnd: int, lparam: int):
         """WM_NCHITTEST 自建判定：四边 + 四角的 resize 热区

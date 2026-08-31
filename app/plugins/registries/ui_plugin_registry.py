@@ -152,6 +152,32 @@ class TitlebarTabInfo:
 
 
 @dataclass(frozen=True)
+class WorkbenchTabInfo:
+    """工作台页签注册信息（右侧工作台浮层的插件页签槽位）
+
+    Attributes:
+        plugin_name: 所属插件名
+        tab_id: 页签唯一 ID
+        label: 页签显示文本
+        icon_name: 项目图标名（get_icon 查表，可选）
+        widget_factory: 页面工厂，签名 (context: dict) -> QWidget。
+            context 含 "main_widget"（当前活跃窗口，可为 None）/"host"
+            （TabManagerWindow）/"window_id"。工厂在页签首次激活时才调用
+            （懒构建），返回的 widget 由工作台面板接管生命周期。
+        priority: 优先级（同 tab_id 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    tab_id: str
+    label: str
+    icon_name: str = ""
+    widget_factory: Optional[Callable[[Dict[str, Any]], Any]] = None
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class SidebarItemInfo:
     """侧边栏插件项注册信息（Phase D：与 floating card 解耦的独立扩展点）
 
@@ -276,6 +302,8 @@ class UIPluginRegistry:
         self._settings_cards: Dict[str, SettingsCardInfo] = {}
         # 标题栏常驻 tab 槽位：{tab_id: TitlebarTabInfo}
         self._titlebar_tabs: Dict[str, TitlebarTabInfo] = {}
+        # 工作台页签槽位：{tab_id: WorkbenchTabInfo}（插件页签追加在内置页签之后）
+        self._workbench_tabs: Dict[str, WorkbenchTabInfo] = {}
         # 工作区页面槽（Phase G）：{page_id: WorkspacePageInfo}，页面级扩展
         self._workspace_pages: Dict[str, Any] = {}
         # 通用区域挂载模型（Phase E）：宿主声明区域 → 插件挂载条目
@@ -616,6 +644,44 @@ class UIPluginRegistry:
     def get_titlebar_tabs(self) -> List[TitlebarTabInfo]:
         """获取全部常驻 tab（按注册序返回，tab 栏位置即注册顺序）"""
         return list(self._titlebar_tabs.values())
+
+    # ── 工作台页签槽位 ──
+
+    def register_workbench_tab(
+        self,
+        plugin_name: str,
+        tab_id: str,
+        label: str,
+        icon_name: str = "",
+        widget_factory: Optional[Callable[[Dict[str, Any]], Any]] = None,
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册工作台页签（右侧工作台浮层的插件页签，追加在内置页签之后）"""
+        if metadata is None:
+            metadata = {}
+        info = WorkbenchTabInfo(
+            plugin_name=plugin_name,
+            tab_id=tab_id,
+            label=label,
+            icon_name=icon_name,
+            widget_factory=widget_factory,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._workbench_tabs.get(tab_id)
+        if existing is not None and existing.priority > priority:
+            return
+        self._workbench_tabs[tab_id] = info
+
+    def unregister_workbench_tabs(self, plugin_name: str) -> None:
+        """注销某插件的全部工作台页签（插件卸载时调用）"""
+        for tab_id in [tid for tid, v in self._workbench_tabs.items() if v.plugin_name == plugin_name]:
+            del self._workbench_tabs[tab_id]
+
+    def get_workbench_tabs(self) -> List[WorkbenchTabInfo]:
+        """获取全部工作台页签（按注册序返回）"""
+        return list(self._workbench_tabs.values())
 
     # ── Phase G：WorkspacePage 页面槽 ──
 
@@ -1520,6 +1586,8 @@ class UIPluginRegistry:
         self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
         # 清理标题栏常驻 tab 槽位
         self.unregister_titlebar_tabs(plugin_name)
+        # 清理工作台页签槽位
+        self.unregister_workbench_tabs(plugin_name)
         # 清理通用区域条目（Phase E）
         for region in self._regions.values():
             region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}

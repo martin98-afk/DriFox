@@ -4,6 +4,7 @@
 覆盖：任务坞常驻/进度/空态、产物去重/空态、双页签切换、滑入滑出动画接口、
 主题刷新、宽度边界。纯离屏（offscreen）运行，不依赖真实显示环境。
 """
+
 import os
 import sys
 
@@ -12,7 +13,7 @@ import pytest
 sys.path.insert(0, ".")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QWidget  # noqa: E402
+from PyQt5.QtWidgets import QFrame, QWidget  # noqa: E402
 
 from app.widgets.workbench_panel import (  # noqa: E402
     PANEL_WIDTH_DEFAULT,
@@ -20,14 +21,6 @@ from app.widgets.workbench_panel import (  # noqa: E402
     PANEL_WIDTH_MIN,
     WorkbenchPanel,
 )
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    from PyQt5.QtWidgets import QApplication
-
-    app = QApplication.instance() or QApplication([])
-    yield app
 
 
 @pytest.fixture()
@@ -79,10 +72,7 @@ def test_artifacts_dedup_and_empty(panel):
     ]
     panel.update_artifacts(ops)
     page = panel.artifacts_page
-    frames = [
-        page._list_layout.itemAt(i).widget()
-        for i in range(page._list_layout.count())
-    ]
+    frames = [page._list_layout.itemAt(i).widget() for i in range(page._list_layout.count())]
     frames = [w for w in frames if w is not page._empty_hint and w is not None]
     assert len(frames) == 2  # 按文件路径去重
     assert page._header._extra_label.text() == "2 个文件"
@@ -120,6 +110,22 @@ def test_slide_animation_lifecycle(panel):
 def test_refresh_style_idempotent(panel):
     panel.refresh_style()
     panel.refresh_style()
+
+
+def test_round_card_style(panel):
+    """圆角卡片：外层 native 底实色方角，内部 #workbenchCard 带 8px 圆角
+
+    回归：native child window 不能直接用 QSS 圆角（圆角外残留 HWND 旧内容
+    黑角），也不能 setMask（Windows 平台 child window 的 SetWindowRgn 不稳，
+    会把内容裁没）——圆角由内部卡片 QFrame 绘制，外层保持实色矩形底。
+    """
+    panel.resize(480, 600)
+    panel.refresh_style()
+    card = panel._card
+    assert isinstance(card, QFrame)
+    assert "border-radius: 8px" in card.styleSheet()
+    assert "border-radius" not in panel.styleSheet()  # 外层不裁圆角，防黑角
+    assert card.width() < panel.width()  # 卡片在面板内缩进（含 margins）
 
 
 def test_width_bounds():
