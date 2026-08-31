@@ -292,14 +292,17 @@ class TraceCollector(QObject):
             if kind == EntryKind.ASSISTANT:
                 # 真实 token 用量优先：worker 会把 API 响应的 usage 落成
                 # msg["token_usage"] = {"input","output","total"}（chat_worker）。
-                # 只在第一条 assistant 上写，所以其余条目仍回退到估算。
+                # ⚠️ 口径：input = prompt_tokens = 本次请求的**完整上下文**
+                # （系统提示 + 全部历史 + 本轮提问），total 随会话增长且包含
+                # 之前所有轮次 → 不能当「本条回复占用」显示（每条都像总量）。
+                # Tokens 列用 output（completion_tokens = 本次回复实际输出），
+                # 与无 usage 时的文本估算口径一致（都是本条内容）；
+                # output 缺失 / 为 0（estimated 兜底）时回退文本估算。
                 usage = msg.get("token_usage")
                 if isinstance(usage, dict):
-                    total = usage.get("total") or (
-                        (usage.get("input") or 0) + (usage.get("output") or 0)
-                    )
-                    if isinstance(total, (int, float)) and total > 0:
-                        meta["tokens"] = int(total)
+                    output = usage.get("output")
+                    if isinstance(output, (int, float)) and output > 0:
+                        meta["tokens"] = int(output)
                         meta["tokens_exact"] = True
 
             if kind == EntryKind.TOOL:
