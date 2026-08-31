@@ -636,8 +636,9 @@ class TabManagerWindow(FramelessWindow):
         # 初始定位到右下角（首个窗口加入 + 激活后会精确对齐 send_btn）
         self.pixel_pet.resize_handle(self.width(), self.height())
 
-        # ── 右侧工作台浮层（单例浮层，同桌宠模式：child widget + raise，不进 layout）──
-        # 标题栏「右侧边栏」按钮 toggle；显隐与数据刷新见 toggle_workbench/refresh_workbench
+        # ── 右侧工作台浮层（child widget，同桌宠模式：不进 layout）──
+        # 遮挡对抗：面板设 WA_NativeWindow 获得独立原生 HWND，与 WebEngine
+        # 同级，Z-order 由 Windows 管理，文字不会再透上来（详见面板模块注释）。
         from app.widgets.workbench_panel import WorkbenchPanel
 
         self.workbench_panel = WorkbenchPanel(self)
