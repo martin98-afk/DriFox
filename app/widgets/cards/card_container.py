@@ -598,9 +598,15 @@ class CardContainer(QWidget):
         """当前可见卡片中是否存在声明跳过容器动画的卡片
 
         用于 resize 等高频高度变化场景，避免容器动画造成视觉延迟。
+
+        判定用 isHidden()（意图语义）而非 isVisible()：容器折叠态（hide）
+        时显示 followContent 卡片，isVisible() 因父链断开返回 False，
+        会误判为"未声明跳过"→ 首次展开误启动 200ms 动画，随后被
+        heightChanged 链取消转 snap → 出现瞬间高度多轮跳变（抖动根因）。
+        与 has_visible / _visible_cards_follow_content 的 isHidden 语义对齐。
         """
         for w in self._cards.values():
-            if w.isVisible() and w.property(self.NO_ANIMATION_PROP):
+            if not w.isHidden() and w.property(self.NO_ANIMATION_PROP):
                 return True
         return False
 
