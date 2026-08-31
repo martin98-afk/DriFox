@@ -188,9 +188,9 @@ class TitleBarModule(UIModule):
         pb_layout.setSpacing(8)  # avatar ↔ 分支的连接：纯留白
 
         # 项目方形 icon（缩写字母，flat design squircle 风格）
-        # 26px：用户反馈 22px 偏小，调大一点（字号随 size 自适应）
+        # 极简化但保留可识别：22px（20 偏小，24 偏大），暖棕低饱和色
         host._project_avatar = _SquareAvatar(
-            extract_project_initials(_current_project), get_project_color(_current_project), host, size=26
+            extract_project_initials(_current_project), get_project_color(_current_project), host, size=22
         )
         host._project_avatar.setCursor(Qt.PointingHandCursor)
         if on_project_label_clicked is not None:

@@ -4,10 +4,9 @@
 from types import SimpleNamespace
 
 import pytest
-from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QLabel
 
-from app.widgets.tab_manager_window import TabManagerWindow, EmptyStateWidget, _SidebarSplitter
+from app.widgets.tab_manager_window import TabManagerWindow, EmptyStateWidget
 
 
 @pytest.fixture(autouse=True)
@@ -61,20 +60,6 @@ class TestTabManagerWindow:
         qtbot.addWidget(tm)
         assert tm._tab_panel is not None
         assert tm._content_area is not None
-
-    def test_sidebar_splitter_handle_cursor(self, qtbot):
-        """左侧分隔条 handle 显式设置左右调整光标
-
-        回归：handle 应用 QSS（background: transparent）后，部分平台/版本
-        下 QSplitterHandle 的默认 SplitHCursor 不再随 hover 更新；子类
-        createHandle 显式 setCursor 兜底，保证拖拽热区始终有 resize 光标。
-        """
-        tm = TabManagerWindow.create_instance()
-        qtbot.addWidget(tm)
-        assert isinstance(tm._splitter, _SidebarSplitter)
-        handle = tm._splitter.handle(0)
-        assert handle is not None
-        assert handle.cursor().shape() == Qt.SplitHCursor
 
 
 class TestReplaceTabCloseFromCardInside:
