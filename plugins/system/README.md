@@ -10,7 +10,7 @@ system/
 │   └── plugin.json            # 插件元数据
 ├── .mcp.json                  # MCP 服务器配置
 ├── agents/                    # 系统智能体（11 个）
-├── commands/                  # 系统命令（25 个）
+├── commands/                  # 系统命令（27 个）
 ├── skills/                    # 系统技能（25 个）
 │   └── SKILLS.md              # 技能索引
 ├── themes/                    # 主题（21 个）
@@ -64,7 +64,9 @@ system/
 | `theme` | 生成/切换主题颜色 |
 | `title-gen` | 切换标题生成使用的默认模型 |
 | `todos` | 手动显示/刷新待办事项卡片 |
+| `toggle-sidebar` | 收起/展开左侧边栏（默认快捷键 alt+q，可在快捷键管理卡改绑） |
 | `toggle-window` | 一键隐藏/显示所有 DriFox 窗口 |
+| `toggle-workbench` | 打开/关闭右侧工作台（默认快捷键 alt+e，可在快捷键管理卡改绑） |
 | `verify` | 完成前验证工作 |
 | `webresearch` | 深度网络研究，支持快速查询与多跳调研 |
 | `wordcloud` | 将当前会话内容快速总结为 ECharts 词云 |

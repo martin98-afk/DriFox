@@ -1436,6 +1436,41 @@ class MemoryCardContent(QWidget):
             self._current_tab = tab_id
             self._on_tab_changed(tab_id)
 
+    def detach_tab(self, tab_id: str):
+        """从内容栈摘除指定子页 widget（工作台一级页签拆分显示用）
+
+        摘除后该子页不再受 switch_tab/_on_tab_changed 的可见性管理
+        （可见性由外部一级页签容器接管），但数据加载/刷新入口不受影响。
+
+        Returns:
+            摘除的 QWidget；tab_id 非法时返回 None
+        """
+        mapping = {
+            TAB_ENTRY_MEMORIES: self._tab_entries,
+            TAB_PROJECT_NOTES: self._tab_notes,
+            TAB_KEY_DOCUMENTS: self._tab_docs,
+        }
+        widget = mapping.get(tab_id)
+        if widget is None:
+            return None
+        self.content_stack.layout().removeWidget(widget)
+        return widget
+
+    def set_active_tab(self, tab_id: str, refresh: bool = True):
+        """外部容器模式下同步激活子页（不动可见性，可见性由一级页签管）
+
+        Args:
+            tab_id: entries / notes / docs
+            refresh: True 时同时刷新该子页数据；False 仅同步内部状态
+                     （供一级页签切换时保持 _current_tab 与可见页一致，
+                      让 set_search_filter / set_project 的分发落对页）
+        """
+        if tab_id not in (TAB_ENTRY_MEMORIES, TAB_PROJECT_NOTES, TAB_KEY_DOCUMENTS):
+            return
+        self._current_tab = tab_id
+        if refresh:
+            self._refresh_current_tab()
+
     def _add_entry(self):
         """添加条目"""
         content = self.entry_input.text().strip()

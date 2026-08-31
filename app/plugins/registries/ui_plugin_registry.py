@@ -1303,6 +1303,13 @@ class UIPluginRegistry:
         win_instances = self._card_widget_instances.setdefault(window_id, {})
         widget = win_instances.get(card_id)
         if widget is None:
+            # tab × 关闭钮 → registry 同步清理卡片状态并摘 tab。
+            # UniqueConnection 防止多次 open 重复连接导致 _close_workbench_card_tab 多次调用。
+            if not getattr(self, "_workbench_card_signal_wired", False):
+                from PyQt5.QtCore import Qt as _Qt
+
+                panel.card_tab_close_requested.connect(self._close_workbench_card_tab, type=_Qt.UniqueConnection)
+                self._workbench_card_signal_wired = True
             widget = card_info.widget_class(parent=panel)
             if card_info.metadata.get("stack"):
                 try:
@@ -1385,7 +1392,6 @@ class UIPluginRegistry:
                 except Exception:
                     pass
         # 开：目标标签页曾打开但当前未挂载的卡片 tab
-        restored: Optional[str] = None
         for card_id in target:
             if card_id in self._workbench_card_tabs:
                 continue
@@ -1393,8 +1399,6 @@ class UIPluginRegistry:
             if card_info is None:
                 continue
             self._show_floating_card_in_workbench(card_info, panel, self._resolve_global_host(), auto_expand=False)
-            restored = card_id
-        return restored
 
     def _record_tab_card_state(self, card_id: str, card_manager, host_window_id: str) -> None:
         """把卡片当前可见状态记录到活跃标签页的可见集合（Tab 模式）

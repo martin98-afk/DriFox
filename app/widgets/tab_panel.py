@@ -2992,12 +2992,14 @@ class TabPanel(QWidget):
     def _open_project_memory(self, project: str):
         """项目根「管理工作树」快捷入口
 
-        工作树的增删 / 切换 UI 在工作台记忆页的「关键文档」子页签里
-        （``WorktreeSectionWidget``），所以一键直达那里是管理工作树的最短路径。
+        工作树的增删 / 切换 UI 在工作台一级「工作树」页签里
+        （``WorktreeSectionWidget`` 插在关键文档列表内），所以一键直达那里是
+        管理工作树的最短路径。
 
         ★ 记忆功能已完全迁移到右侧工作台（WorkbenchPanel），不再打开旧的
         独立记忆卡片。统一走 ``TabManagerWindow.open_workbench_memory("docs")``：
-        展开工作台 → 切记忆页签 → 切关键文档子页签。
+        展开工作台 → 切「工作树」页签（关键文档+工作树，原记忆页 docs 子页
+        已升为一级页签）。
 
         ⚠️ 刻意用 show 而非 toggle：本按钮语义是「打开」，点第二次不应该把它关掉。
         「当前页」= 当前激活的对话页窗口，而不是被点击的项目行。

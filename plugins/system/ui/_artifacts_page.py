@@ -137,7 +137,7 @@ class SystemArtifactsPage(QWidget):
         self._list_layout = QVBoxLayout(self._list_wrap)
         self._list_layout.setContentsMargins(0, 0, 2, 0)
         self._list_layout.setSpacing(2)
-        self._empty_hint = _EmptyHint("本次会话暂无产物（系统插件版）", self._list_wrap)
+        self._empty_hint = _EmptyHint("本次会话暂无产物", self._list_wrap)
         self._list_layout.addWidget(self._empty_hint)
         self._list_layout.addStretch(1)
         layout.addWidget(self._scroll, 1)

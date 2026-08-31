@@ -10,7 +10,7 @@ Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 import platform
 import sys
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5 import sip as _sip
 
@@ -493,6 +493,9 @@ class TabManagerWindow(FramelessWindow):
         # 动画方向（True=收起），供 valueChanged 里判断跨阈值时机
         self._sidebar_anim_collapsing: bool = False
         self._sidebar_anim_ui_switched: bool = False  # 动画中是否已跨阈值切换 UI
+        # ── 工作台显隐宽度动画（复用对象 + 挂起的收尾回调） ──
+        self._wb_anim: Optional[QVariantAnimation] = None
+        self._wb_anim_finished_cb: Optional[Callable[[], None]] = None
 
         self._geo_save_timer.timeout.connect(self._do_save_geometry)
 
@@ -788,52 +791,159 @@ class TabManagerWindow(FramelessWindow):
         self.set_workbench_visible(not self.is_workbench_visible())
 
     def is_workbench_visible(self) -> bool:
-        """工作台当前是否可见"""
+        """工作台当前是否可见（动画期间返回目标状态，避免半途状态误判）"""
+        if getattr(self, "_wb_visible_target", None) is not None:
+            return bool(self._wb_visible_target)
         frame = getattr(self, "_workbench_frame", None)
         return bool(frame is not None and frame.isVisible())
 
-    def set_workbench_visible(self, visible: bool) -> None:
-        """显示/隐藏工作台（直接 hide/show，无动画）
+    # ── 工作台显隐动画 ──
 
-        隐藏时记忆当前宽度，展开时恢复。
+    def _apply_wb_width(self, w: int) -> None:
+        """动画帧：把工作台窗格宽度推到指定值（从对话区借/还空间，总宽不变）"""
+        frame = getattr(self, "_workbench_frame", None)
+        if frame is None:
+            return
+        try:
+            sizes = self._splitter.sizes()
+            if len(sizes) < 3:
+                return
+            wb = max(0, min(int(w), frame.maximumWidth()))
+            total = sum(sizes)
+            chat = max(0, total - sizes[0] - wb)
+            self._splitter.setSizes([sizes[0], chat, wb])
+        except Exception:
+            pass
+
+    def _start_wb_anim(self, start_w: int, end_w: int, on_finished=None) -> None:
+        """启动工作台宽度动画（200ms OutCubic）；复用动画对象，stop 后重设起止值
+
+        对齐左侧边栏动画的 P0 优化（OPT-1）：动画期间冻结对话内容区重绘——
+        splitter 动画只改子控件 geometry，不触发顶层 resizeEvent，故该冻结
+        无法被 resize 节流路径覆盖，需在此显式冻结，由 _on_wb_anim_finished
+        统一恢复。"""
+        if hasattr(self, "_content_area"):
+            self._content_area.setUpdatesEnabled(False)
+        anim = self._wb_anim
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.setDuration(200)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.valueChanged.connect(lambda v: self._apply_wb_width(int(v)))
+            anim.finished.connect(self._on_wb_anim_finished)
+            self._wb_anim = anim
+        # 中途反向重启时旧收尾回调直接丢弃，只执行最新一次的回调
+        self._wb_anim_finished_cb = on_finished
+        anim.stop()
+        anim.setStartValue(float(start_w))
+        anim.setEndValue(float(end_w))
+        anim.start()
+
+    def _on_wb_anim_finished(self) -> None:
+        """动画结束：执行收尾回调 + 恢复对话内容区绘制（对齐侧栏 OPT-1）
+
+        若本回调又同步启动了新动画（反向重启），则跳过恢复绘制，
+        交由其 finished 恢复，避免动画中途解冻造成卡顿回潮。"""
+        cb = getattr(self, "_wb_anim_finished_cb", None)
+        self._wb_anim_finished_cb = None
+        if cb is not None:
+            cb()
+        try:
+            if hasattr(self, "_content_area") and not (
+                self._wb_anim is not None and self._wb_anim.state() == QVariantAnimation.Running
+            ):
+                self._content_area.setUpdatesEnabled(True)
+                # ── #10 对齐恢复：与解冻同步显式恢复 WebView 预览（幂等） ──
+                # 冻结期 MainWidget.resizeEvent 已自动 _set_cards_resize_preview_mode(True)
+                # 隐藏 WebView，此处与 setUpdatesEnabled(True) 同步恢复，消除潜在空窗。
+                mw = self._content_area.currentWidget()
+                if mw is not None and hasattr(mw, "_set_cards_resize_preview_mode"):
+                    mw._set_cards_resize_preview_mode(False)
+        except Exception:
+            pass
+
+    def _stop_wb_anim(self) -> None:
+        anim = getattr(self, "_wb_anim", None)
+        if anim is not None:
+            anim.stop()  # stop 不发射 finished；动画对象保留供复用，
+            # 挂起的收尾回调由下一次 _start_wb_anim 覆盖或 _on_wb_anim_finished 丢弃
+
+    def _set_chat_frame_wb_hidden(self, hidden: bool) -> None:
+        """工作台隐藏后给对话区右侧补 4px 窗口边距（否则圆角矩形贴死窗口边）
+
+        显示时 chatFrame 右侧靠 splitter handle 与 workbenchFrame 隔开（margin 右 0）;
+        隐藏后没有 handle 兑底，需切到 margin 右 4px。用 QSS 属性选择器切换。
+        """
+        cf = getattr(self, "_chat_frame", None)
+        if cf is None or cf.property("wbHidden") == hidden:
+            return
+        cf.setProperty("wbHidden", hidden)
+        st = cf.style()
+        st.unpolish(cf)
+        st.polish(cf)
+
+    def set_workbench_visible(self, visible: bool) -> None:
+        """显示/隐藏工作台（带 200ms 宽度展开/收拢动画）
+
+        隐藏时记忆当前宽度，展开时恢复。动画期间重复触发会重启反向动画。
         """
         frame = getattr(self, "_workbench_frame", None)
         panel = getattr(self, "workbench_panel", None)
         if frame is None or panel is None:
             return
         visible = bool(visible)
-        if visible == frame.isVisible():
+        if visible == getattr(self, "_wb_visible_target", frame.isVisible()):
             # 状态一致时仍要确保 panel 同步（panel 曾被显式 hide，
-            # frame.show() 不会连带显示它 —— 下面有说明）
+            # frame.show() 不会连带显示它）
             panel.set_panel_visible(visible)
             return
+        from app.widgets.workbench_panel import PANEL_WIDTH_DEFAULT, PANEL_WIDTH_MIN
+
+        self._wb_visible_target = visible
+        self._stop_wb_anim()
+        try:
+            sizes = self._splitter.sizes()
+            start_w = sizes[2] if len(sizes) >= 3 else 0
+        except Exception:
+            start_w = 0
         if visible:
             frame.show()
             # ★ 必须显式 show panel：panel 构造后调过 hide()，
-            #   Qt 中**被显式 hide 的子 widget 不会因 parent.show() 自动恢复**，
-            #   而 layout 不给 hidden widget 分配空间 → panel 停在初始尺寸
-            #   （表现为「工作台出来了但里面没有内容」）。
+            #   Qt 中被显式 hide 的子 widget 不会因 parent.show() 自动恢复。
             panel.set_panel_visible(True)
-            try:
-                sizes = self._splitter.sizes()
-                if len(sizes) >= 3:
-                    # 从对话区借空间给工作台，保证总宽不变
-                    wb_w = max(frame.minimumWidth(), min(frame.maximumWidth(), self._workbench_frame_w))
-                    chat_w = max(0, sizes[1] - wb_w)
-                    self._splitter.setSizes([sizes[0], chat_w, wb_w])
-            except Exception:
-                pass
-            self.refresh_workbench()
+            # 首次打开默认「工作树」页；再次打开恢复上次关闭时的页签
+            # （插件/记忆定向入口随后自行覆盖目标页签）
+            panel.restore_last_tab()
+            self._set_chat_frame_wb_hidden(False)
+            # 动画期间放开最小宽度约束，QSplitter 才允许窗格拉到中间值
+            frame.setMinimumWidth(0)
+            target_w = max(0, min(getattr(self, "_workbench_frame_w", PANEL_WIDTH_DEFAULT + 14), frame.maximumWidth()))
+            self._start_wb_anim(
+                start_w,
+                target_w,
+                # 数据填充（refresh_workbench 含页签 reconcile + 树/列表刷新）
+                # 延后到动画结束，避免与首帧布局争抢主线程
+                on_finished=lambda: (
+                    frame.setMinimumWidth(PANEL_WIDTH_MIN + 14),
+                    self.refresh_workbench(),
+                ),
+            )
         else:
-            # 隐藏：先记忆当前宽度
-            try:
-                sizes = self._splitter.sizes()
-                if len(sizes) >= 3 and sizes[2] > 0:
-                    self._workbench_frame_w = sizes[2]
-            except Exception:
-                pass
-            panel.set_panel_visible(False)
-            frame.hide()
+            # 关闭时记录当前页签（下次打开恢复，不强制重置为工作树）
+            panel.remember_closed_tab()
+            if start_w > 0:
+                self._workbench_frame_w = start_w
+            frame.setMinimumWidth(0)
+            self._start_wb_anim(
+                start_w,
+                0,
+                on_finished=lambda: (
+                    panel.set_panel_visible(False),
+                    frame.hide(),
+                    frame.setMinimumWidth(PANEL_WIDTH_MIN + 14),
+                    self._set_chat_frame_wb_hidden(True),
+                ),
+            )
 
     def _hide_workbench(self) -> None:
         """工作台关闭按钮：直接隐藏（实例保留，再次开启零重建）"""
@@ -887,14 +997,14 @@ class TabManagerWindow(FramelessWindow):
         panel.update_todos(todos or [])
 
     def open_workbench_memory(self, sub_tab: str = "docs") -> None:
-        """展开工作台并定位到记忆页的指定子页签（记忆功能已迁移到工作台）
+        """展开工作台并定位（记忆功能已迁移到工作台）
 
         统一的「一键直达」入口：新建项目后自动展开关键文档、工作树「管理工作树」
         按钮等场景都走这里，不再打开旧的独立记忆卡片。
 
         Args:
-            sub_tab: entries=条目记忆 / notes=项目笔记 / docs=关键文档
-                    （工作树的增删与切换 UI 挂在 docs 页签里）
+            sub_tab: docs=工作树页（关键文档+工作树，一级页签）/
+                     entries|notes=记忆页对应子页签
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None:
@@ -904,9 +1014,12 @@ class TabManagerWindow(FramelessWindow):
             self.set_workbench_visible(True)
         else:
             self.refresh_workbench()
-        # 2) 切到记忆页签
+        # 2) 按子页签路由：docs 已升为一级「工作树」页签，其余落记忆页
+        if sub_tab == "docs":
+            panel.set_current_tab(panel.TAB_WORKTREE)
+            return
         panel.set_current_tab(panel.TAB_MEMORY)
-        # 3) 切到指定子页签（内容未构建时 MemoryPage 会记为 pending，构建后补切）
+        # 3) 切到指定子页签（内容未挂载时 MemoryPage 会记为 pending，挂载后补切）
         try:
             panel.memory_page.switch_sub_tab(sub_tab)
         except Exception as exc:
@@ -915,11 +1028,9 @@ class TabManagerWindow(FramelessWindow):
     # ── 工作台差异入口（替代标题栏 diff_btn） ──
 
     def _open_workbench_diff(self, file_paths: Optional[List[str]]) -> None:
-        """工作台产物页的差异请求：调 controller.show_diff_viewer 并自动隐藏工作台
+        """工作台产物页的差异请求：调 controller.show_diff_viewer（保持工作台显示）
 
         file_paths 为 None 表示「查看所有产物差异」，由宿主从当前 backend 重新拉取 ops。
-        打开差异后挂 closed 监听，差异关闭时自动展开工作台（仅在
-        ``_workbench_diff_active`` 标志位下生效，避免与用户手动关闭工作台打架）。
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None:
@@ -974,35 +1085,6 @@ class TabManagerWindow(FramelessWindow):
             logger.warning(f"[WorkbenchDiff] show_diff_viewer 失败: {e}")
             self._show_diff_toast("打开差异卡片失败")
             return
-
-        # 标记「由工作台打开的差异」，并隐藏工作台
-        self._workbench_diff_active = True
-        self.set_workbench_visible(False)
-
-        # 监听 diff viewer 关闭：仅在标志位为 True 时自动展开工作台
-        try:
-            from app.widgets.cards.global_card_controller import get_global_card_controller
-            from app.widgets.cards.settings.diff_viewer_card import DiffViewerCard
-
-            controller = get_global_card_controller()
-            dvc = getattr(controller, "_diff_viewer_card", None)
-            if dvc is not None:
-                # UniqueConnection 避免重复挂载
-                try:
-                    dvc.closed.disconnect(self._on_workbench_diff_closed)
-                except (TypeError, RuntimeError):
-                    pass
-                dvc.closed.connect(self._on_workbench_diff_closed, type=Qt.UniqueConnection)
-        except Exception:
-            pass
-
-    def _on_workbench_diff_closed(self) -> None:
-        """工作台差异关闭：自动展开工作台并刷新数据"""
-        if not getattr(self, "_workbench_diff_active", False):
-            return
-        self._workbench_diff_active = False
-        if not self.is_workbench_visible():
-            self.set_workbench_visible(True)
 
     def _show_diff_toast(self, msg: str) -> None:
         """统一的轻量提示（InfoBar 顶层）"""
@@ -1074,6 +1156,11 @@ class TabManagerWindow(FramelessWindow):
                    中间窗格两侧各有一个 4px handle，若此处保留右 4px margin，
                    右间距会变成 8px 而左间距只有 4px，两侧不对称。 */
                 margin: 4px 0 4px 0;
+            }}
+            /* 工作台隐藏后右侧 handle 消失，需补回窗口右边距，
+               否则对话区圆角矩形贴死窗口边框 */
+            #chatFrame[wbHidden="true"] {{
+                margin: 4px 4px 4px 0;
             }}
             #workbenchFrame {{
                 /* 右侧工作台圆角矩形容器，与 #tabFrame / #chatFrame 同款 */
@@ -1322,6 +1409,9 @@ class TabManagerWindow(FramelessWindow):
         # ── 右侧对话区域圆角矩形包裹框架 ──
         self._chat_frame = QFrame(content_widget)
         self._chat_frame.setObjectName("chatFrame")
+        # 工作台默认隐藏：对话区先按“右侧无边距”以外的隐藏态样式渲染，
+        # 首次展开时由 set_workbench_visible 切回三窗格 margin
+        self._chat_frame.setProperty("wbHidden", True)
         chat_frame_layout = QVBoxLayout(self._chat_frame)
         chat_frame_layout.setContentsMargins(6, 6, 6, 6)
         chat_frame_layout.setSpacing(0)

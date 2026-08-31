@@ -1136,6 +1136,8 @@ class OpenAIChatToolWindow(ToolWindow):
         "team": "_handle_team_command",
         "toggle-window": "_handle_toggle_window_command",
         "clear": "_handle_clear_command",
+        "toggle-sidebar": "_handle_toggle_sidebar_command",
+        "toggle-workbench": "_handle_toggle_workbench_command",
     }
     # git 分支缓存：类级共享（workdir → branch）。
     # 同项目多窗口共享，避免重复 git 探测；信号路由仍由实例级 _branch_detect_signals
@@ -16818,6 +16820,18 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.tray_manager import TrayManager
 
         TrayManager.get_instance()._toggle_all_windows()
+
+    def _handle_toggle_sidebar_command(self, args: str):
+        """/toggle-sidebar 命令：切换左侧边栏收起/展开（同标题栏左侧按钮）"""
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm._tab_panel._toggle_sidebar()
+
+    def _handle_toggle_workbench_command(self, args: str):
+        """/toggle-workbench 命令：切换右侧工作台显示/隐藏（同标题栏右侧按钮）"""
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.toggle_workbench()
 
     def _handle_clear_command(self, args: str):
         """/clear 命令：清空当前会话的所有消息（重新显示欢迎页）"""

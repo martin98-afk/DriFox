@@ -42,9 +42,7 @@ def _load_system_artifacts_cls():
     ui_dir = str(_SYSTEM_UI_DIR)
     if ui_dir not in sys.path:
         sys.path.insert(0, ui_dir)
-    spec = importlib.util.spec_from_file_location(
-        "_test_system_artifacts_page", _SYSTEM_UI_DIR / "_artifacts_page.py"
-    )
+    spec = importlib.util.spec_from_file_location("_test_system_artifacts_page", _SYSTEM_UI_DIR / "_artifacts_page.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -117,13 +115,16 @@ def test_artifacts_dedup_and_empty(panel_with_artifacts):
     assert page._header._extra_label.text() == ""
 
 
-def test_two_tabs_switch(panel):
-    assert panel.current_tab() == WorkbenchPanel.TAB_ARTIFACTS
+def test_three_tabs_switch(panel):
+    """默认落工作树页；工作树/记忆/产物三内置页签可切换"""
+    assert panel.current_tab() == WorkbenchPanel.TAB_WORKTREE
     panel.set_current_tab(WorkbenchPanel.TAB_MEMORY)
     assert panel.current_tab() == WorkbenchPanel.TAB_MEMORY
     assert panel._stack.currentIndex() == WorkbenchPanel.TAB_MEMORY
     panel.set_current_tab(WorkbenchPanel.TAB_ARTIFACTS)
     assert panel._stack.currentIndex() == WorkbenchPanel.TAB_ARTIFACTS
+    panel.set_current_tab(WorkbenchPanel.TAB_WORKTREE)
+    assert panel._stack.currentIndex() == WorkbenchPanel.TAB_WORKTREE
 
 
 def test_visible_toggle_is_immediate(panel):
@@ -137,6 +138,25 @@ def test_visible_toggle_is_immediate(panel):
     # 无动画残留：不应存在滑入滑出动画接口
     assert not hasattr(panel, "slide_in")
     assert not hasattr(panel, "slide_out")
+
+
+def test_first_open_defaults_to_worktree_then_remembers(panel):
+    """页签记忆：首次打开默认工作树；之后恢复上次关闭时的页签（不强制重置）"""
+    # 首次打开：尚未记录过关闭页签 → 默认工作树
+    assert panel._last_tab_index is None
+    panel.restore_last_tab()
+    assert panel.current_tab() == WorkbenchPanel.TAB_WORKTREE
+    # 用户切到产物页后关闭 → 记录
+    panel.set_current_tab(WorkbenchPanel.TAB_ARTIFACTS)
+    panel.remember_closed_tab()
+    assert panel._last_tab_index == WorkbenchPanel.TAB_ARTIFACTS
+    # 再次打开：恢复上次关闭时的产物页，而非强制重置工作树
+    panel.restore_last_tab()
+    assert panel.current_tab() == WorkbenchPanel.TAB_ARTIFACTS
+    # 越界兜底（卡片/插件页已卸载）：回落工作树
+    panel._last_tab_index = 99
+    panel.restore_last_tab()
+    assert panel.current_tab() == WorkbenchPanel.TAB_WORKTREE
 
 
 def test_tasks_pinned_outside_stack(panel):
@@ -154,16 +174,16 @@ def test_plugin_page_mount_and_unmount(panel):
 
     info = SimpleNamespace(page_id="plug1", label="插件页", widget_class=FakePage, plugin_name="x")
     panel.sync_plugin_pages([info])
-    assert panel._tab_id_index("plug1") == 2
-    assert panel._stack.count() == 3
-    assert panel._stack.indexOf(panel._plugin_widgets["plug1"]) == 2
-    panel.set_current_tab(2)
-    assert panel.current_tab() == 2
-    # 卸载后回落
+    assert panel._tab_id_index("plug1") == 3
+    assert panel._stack.count() == 4
+    assert panel._stack.indexOf(panel._plugin_widgets["plug1"]) == 3
+    panel.set_current_tab(3)
+    assert panel.current_tab() == 3
+    # 卸载后回落（默认落点 = 工作树页）
     panel.sync_plugin_pages([])
-    assert panel._stack.count() == 2
+    assert panel._stack.count() == 3
     assert panel._tab_id_index("plug1") is None
-    assert panel.current_tab() == 0
+    assert panel.current_tab() == WorkbenchPanel.TAB_WORKTREE
 
 
 def test_refresh_style_idempotent(panel):
@@ -193,24 +213,26 @@ def test_tasks_collapse_button_hidden_when_empty(panel):
 
 def test_tasks_show_when_populated(panel):
     """有任务时 tasks_page 可见，整区出现并显示折叠按钮"""
-    panel.update_todos([
-        {"status": "pending", "content": "搞事情", "priority": "high"},
-        {"status": "in_progress", "content": "写代码", "priority": "medium"},
-        {"status": "completed", "content": "提交", "priority": "low"},
-    ])
+    panel.update_todos(
+        [
+            {"status": "pending", "content": "搞事情", "priority": "high"},
+            {"status": "in_progress", "content": "写代码", "priority": "medium"},
+            {"status": "completed", "content": "提交", "priority": "low"},
+        ]
+    )
     assert panel.tasks_page.isVisible() is True
     assert panel.tasks_page._collapse_btn.isVisible() is True
 
 
 def test_tasks_hide_when_cleared(panel):
-    """任务清空后 tasks_page 应隐藏，splitter 上半高度收敛为 0"""
+    """任务清空后 tasks_page 应隐藏，splitter 下半（任务区）高度收敛为 0"""
     panel.update_todos([{"status": "pending", "content": "临时任务", "priority": "low"}])
     assert panel.tasks_page.isVisible() is True
     panel.update_todos([])
     assert panel.tasks_page.isVisible() is False
-    # splitter 上半高度应已收敛
+    # splitter 下半高度应已收敛（新布局：index0=内容栈，index1=任务区）
     sizes = panel._body_splitter.sizes()
-    assert sizes[0] == 0
+    assert sizes[1] == 0
 
 
 def test_tasks_collapse_toggle(panel):
@@ -234,12 +256,14 @@ def test_tasks_tag_only_when_worth_showing(panel):
 
     medium/low 的 pending 与 completed 一律不带标签（降噪）。
     """
-    panel.update_todos([
-        {"status": "pending", "content": "A", "priority": "high"},
-        {"status": "in_progress", "content": "B", "priority": "medium"},
-        {"status": "pending", "content": "C", "priority": "medium"},
-        {"status": "completed", "content": "D", "priority": "low"},
-    ])
+    panel.update_todos(
+        [
+            {"status": "pending", "content": "A", "priority": "high"},
+            {"status": "in_progress", "content": "B", "priority": "medium"},
+            {"status": "pending", "content": "C", "priority": "medium"},
+            {"status": "completed", "content": "D", "priority": "low"},
+        ]
+    )
     items = _task_items(panel.tasks_page)
     assert len(items) == 4
     tags = [it.findChild(QLabel, "taskTag") for it in items]
@@ -260,10 +284,12 @@ def test_tasks_no_stale_widget_after_refresh(panel):
     assert len(_task_items(page)) == 1
 
     # 刷新为不同的任务
-    panel.update_todos([
-        {"status": "pending", "content": "新任务1", "priority": "medium"},
-        {"status": "pending", "content": "新任务2", "priority": "medium"},
-    ])
+    panel.update_todos(
+        [
+            {"status": "pending", "content": "新任务1", "priority": "medium"},
+            {"status": "pending", "content": "新任务2", "priority": "medium"},
+        ]
+    )
     items = _task_items(page)
     assert len(items) == 2, f"应恰好 2 条，实际 {len(items)}（含残影则说明未彻底清理）"
     texts = [it.findChild(QLabel, "taskContent").text() for it in items]
@@ -280,30 +306,32 @@ def test_tasks_no_stale_widget_after_refresh(panel):
 
 
 def test_tasks_collapse_shrinks_splitter(panel):
-    """★ 折叠后 splitter 上半应收缩到 header 高度（否则留空白、title 跑中间）"""
+    """★ 折叠后 splitter 下半（任务区）应收缩到 header 高度（否则留空白）"""
     panel.update_todos([{"status": "pending", "content": "A", "priority": "medium"}])
-    expanded_h = panel._body_splitter.sizes()[0]
+    expanded_h = panel._body_splitter.sizes()[1]
     assert expanded_h >= panel.tasks_page.header_height()
 
     panel.tasks_page._collapse_btn.click()
-    collapsed_h = panel._body_splitter.sizes()[0]
+    collapsed_h = panel._body_splitter.sizes()[1]
     assert collapsed_h < expanded_h, f"折叠后高度应收缩: {collapsed_h} vs {expanded_h}"
     assert collapsed_h <= panel.tasks_page.header_height() + 2
 
     # 展开恢复
     panel.tasks_page._collapse_btn.click()
-    assert panel._body_splitter.sizes()[0] == expanded_h
+    assert panel._body_splitter.sizes()[1] == expanded_h
 
 
 def test_tasks_progress_bar_reflects_done(panel):
     """进度条应反映完成比例"""
     page = panel.tasks_page
-    panel.update_todos([
-        {"status": "completed", "content": "A", "priority": "medium"},
-        {"status": "completed", "content": "B", "priority": "medium"},
-        {"status": "pending", "content": "C", "priority": "medium"},
-        {"status": "pending", "content": "D", "priority": "medium"},
-    ])
+    panel.update_todos(
+        [
+            {"status": "completed", "content": "A", "priority": "medium"},
+            {"status": "completed", "content": "B", "priority": "medium"},
+            {"status": "pending", "content": "C", "priority": "medium"},
+            {"status": "pending", "content": "D", "priority": "medium"},
+        ]
+    )
     assert page._progress.value() == 50
     assert page._header._extra_label.text() == "2/4"
     panel.update_todos([])
@@ -317,9 +345,11 @@ def test_tasks_progress_bar_reflects_done(panel):
 def test_artifacts_diff_all_button_emits_signal(panel_with_artifacts):
     """产物页 header 的「查看所有产物差异」按钮应触发 panel.diff_requested(None)"""
     panel = panel_with_artifacts
-    panel.update_artifacts([
-        {"file_path": "D:/x/a.py", "tool_name": "edit", "created_at": "2026-08-31 13:00:00"},
-    ])
+    panel.update_artifacts(
+        [
+            {"file_path": "D:/x/a.py", "tool_name": "edit", "created_at": "2026-08-31 13:00:00"},
+        ]
+    )
     captured = []
     panel.diff_requested.connect(lambda p: captured.append(p))
     panel.artifacts_page._header._action_btn.click()
@@ -329,17 +359,78 @@ def test_artifacts_diff_all_button_emits_signal(panel_with_artifacts):
 def test_artifacts_item_diff_emits_signal(panel_with_artifacts):
     """单条目「差异」按钮应触发 panel.diff_requested([file_path])"""
     panel = panel_with_artifacts
-    panel.update_artifacts([
-        {"file_path": "D:/x/b.md", "tool_name": "write", "created_at": "2026-08-31 12:30:00"},
-    ])
+    panel.update_artifacts(
+        [
+            {"file_path": "D:/x/b.md", "tool_name": "write", "created_at": "2026-08-31 12:30:00"},
+        ]
+    )
     captured = []
     panel.diff_requested.connect(lambda p: captured.append(p))
     page = panel.artifacts_page
     frames = [page._list_layout.itemAt(i).widget() for i in range(page._list_layout.count())]
-    items = [w for w in frames if isinstance(w, QFrame)]
+    # 不能用 isinstance(QFrame)：占位 hint 也是 QFrame 子类，且现在固定留在布局 index 0
+    items = [w for w in frames if hasattr(w, "_diff_btn")]
     assert items
     items[0]._diff_btn.click()
     assert captured == [["D:/x/b.md"]]
+
+
+# ── 动态卡片 tab（right 容器 UI 插件卡片，v2 迁移工作台） ──
+
+
+def test_card_tab_open_close_and_activate(panel):
+    """open → 追加 tab 并激活；重复 open → 幂等激活；close → 摘除不销毁 widget"""
+    card = QLabel("卡片内容")
+    panel.open_card_tab("my-card", "我的卡片", card)
+    assert panel.has_card_tab("my-card")
+    assert panel.current_tab() == panel._stack.indexOf(card)
+    assert panel._tab_ids[-1] == "my-card"  # 卡片 tab 追加在内置页之后
+
+    # 重复 open 同一 widget：不重复挂载，仅激活
+    panel.set_current_tab(WorkbenchPanel.TAB_MEMORY)
+    panel.open_card_tab("my-card", "我的卡片", card)
+    assert panel._stack.indexOf(card) >= 0
+    assert panel.current_tab() == panel._stack.indexOf(card)
+
+    # 关闭：从 stack 与页签条摘除，widget 不销毁（交还调用方）
+    assert panel.close_card_tab("my-card") is True
+    assert not panel.has_card_tab("my-card")
+    assert panel._stack.indexOf(card) == -1
+    assert card.parent() is None
+    # 幂等：再关返回 False
+    assert panel.close_card_tab("my-card") is False
+    card.deleteLater()
+
+
+def test_card_tab_close_signal_emitted(panel):
+    """tab × 关闭钮 → panel 发射 card_tab_close_requested(card_id)，宿主 registry 接管"""
+    card = QLabel("卡片内容")
+    panel.open_card_tab("my-card", "我的卡片", card)
+    captured = []
+    # 与 registry 的真实接线一致：信号 → close_card_tab
+    panel.card_tab_close_requested.connect(panel.close_card_tab)
+    panel.card_tab_close_requested.connect(lambda cid: captured.append(cid))
+    btn = panel._tab_buttons[-1]._close_btn
+    assert btn is not None
+    btn.click()
+    assert captured == ["my-card"]
+    assert not panel.has_card_tab("my-card")
+    card.deleteLater()
+
+
+def test_card_tab_rebuild_keeps_builtin_and_plugin_order(panel_with_artifacts):
+    """sync_plugin_pages 与卡片 tab 共存：tab 顺序 = 内置(工作树/记忆/产物) + 插件 + 卡片"""
+    panel = panel_with_artifacts
+    card = QLabel("卡片内容")
+    panel.open_card_tab("my-card", "我的卡片", card)
+    assert panel._tab_ids == ["worktree", "memory", "artifacts", "my-card"]
+    for i, tab_id in enumerate(panel._tab_ids):
+        assert panel._tab_buttons[i].tab_id == tab_id
+        assert panel._stack.widget(i) is not None
+    # 卡片 tab 带 × 关闭钮，内置页不带
+    assert panel._tab_buttons[3]._close_btn is not None
+    assert panel._tab_buttons[0]._close_btn is None
+    card.deleteLater()
 
 
 def test_artifacts_diff_all_button_hidden_when_empty(panel_with_artifacts):
@@ -351,8 +442,9 @@ def test_artifacts_diff_all_button_hidden_when_empty(panel_with_artifacts):
 
 
 def test_artifacts_placeholder_before_plugin_registered(panel):
-    """插件未注册产物页时，index 0 应是占位页（面板不再内置产物实现）"""
+    """插件未注册产物页时，index 2（TAB_ARTIFACTS）应是占位页（面板不再内置产物实现）"""
     assert panel.artifacts_page is panel._artifacts_placeholder
+    assert panel._stack.indexOf(panel._artifacts_placeholder) == WorkbenchPanel.TAB_ARTIFACTS
     # 占位页有宿主契约所需的空实现，update_artifacts 不会抛错
     panel.update_artifacts([{"file_path": "D:/x/a.py"}])
 
@@ -408,18 +500,19 @@ def test_plugin_artifacts_fills_slot_no_duplicate_tab(panel, artifacts_plugins):
 
 
 def test_plugin_artifacts_keeps_stack_index_aligned(panel, artifacts_plugins):
-    """★ 回归：填槽位后 stack 索引仍与 tab 顺序一致（0=产物 / 1=记忆）
+    """★ 回归：填槽位后 stack 索引仍与 tab 顺序一致（0=工作树 / 1=记忆 / 2=产物）
 
     早期实现用 insertWidget(0, w) 会把原 index 0 及其后所有页整体后移，
-    导致 TAB_MEMORY(=1) 落到产物页上 —— 表现为「记忆」tab 显示出产物内容。
+    导致 tab 与内容错位 —— 表现为「记忆」tab 显示出产物内容。
     """
     panel.sync_plugin_pages(artifacts_plugins)
-    assert panel._stack.indexOf(panel.artifacts_page) == WorkbenchPanel.TAB_ARTIFACTS
+    assert panel._stack.indexOf(panel.worktree_page) == WorkbenchPanel.TAB_WORKTREE
     assert panel._stack.indexOf(panel.memory_page) == WorkbenchPanel.TAB_MEMORY
-    assert panel._stack.count() == 2
-    # 切到记忆页，确认拿到的确实是记忆页
-    panel.set_current_tab(WorkbenchPanel.TAB_MEMORY)
-    assert panel._stack.currentWidget() is panel.memory_page
+    assert panel._stack.indexOf(panel.artifacts_page) == WorkbenchPanel.TAB_ARTIFACTS
+    assert panel._stack.count() == 3
+    # 切到工作树页，确认拿到的确实是工作树页
+    panel.set_current_tab(WorkbenchPanel.TAB_WORKTREE)
+    assert panel._stack.currentWidget() is panel.worktree_page
 
 
 def test_plugin_artifacts_unload_falls_back_to_placeholder(panel, artifacts_plugins):
@@ -446,7 +539,7 @@ def test_other_plugin_page_id_still_appended(panel):
     info = SimpleNamespace(page_id="mystats", label="统计", widget_class=FakePage, plugin_name="x")
     panel.sync_plugin_pages([info])
     tab_ids = [b.tab_id for b in panel._tab_buttons]
-    assert tab_ids == ["artifacts", "memory", "mystats"], f"实际 tab: {tab_ids}"
+    assert tab_ids == ["worktree", "memory", "artifacts", "mystats"], f"实际 tab: {tab_ids}"
     assert panel.artifacts_page is panel._artifacts_placeholder
 
 
