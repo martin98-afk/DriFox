@@ -1389,6 +1389,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.timeout.connect(self._sync_all_cards_width)
         self._pending_resize_sync = False
         self._resize_preview_active = False
+        # #31 侧栏/工作台宽度动画期间由宿主置 True：动画每帧 resize 对话区，
+        # 但不应把卡片 WebView 藏进静态预览（用户要求中间区域原样实时显示）。
+        # 宽度同步仍由上方防抖定时器在动画结束后一次完成。
+        self._suppress_resize_preview = False
         # 🐛 恢复链代次：每轮 resize 递增，用于作废旧的单次恢复链。
         # 没有它时连续拖拽会并存多条链，互相清空 _restore_queue，
         # 导致部分卡片永久停留在 placeholder 空白态。
@@ -1682,7 +1686,12 @@ class OpenAIChatToolWindow(ToolWindow):
     # 保证「打开卡片 → 框架已就绪」行为不变。属性名/注册语义与改造前完全一致。
 
     def _ensure_history_card(self):
-        """确保历史会话卡片框架已创建（内容由 _build_deferred_card_history 填充）"""
+        """确保历史会话卡片框架已创建（内容由 _build_deferred_card_history 填充）
+
+        历史会话已从对话区底部卡片迁移到右侧工作台「历史会话」页签：
+        框架/搜索框/导入按钮/历史·归档子页内容不变，只是宿主从 BottomCardContainer
+        换成 WorkbenchPanel（workbench 为宿主级单例，与其他页同一投影语义）。
+        """
         if self._history_card is not None:
             return
         self._history_card = BaseSettingsCard("历史会话", "📜", self)
@@ -1698,17 +1707,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 强制触发首次 tab 渲染
         self._history_card.tabChanged.connect(self._on_history_tab_changed)
         self._history_card.set_current_tab("history")
-        self._history_card.setVisible(False)
-        self._history_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("history", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._card_manager.register_card(
-            self._window_id, ContainerType.BOTTOM, "history", self._history_card, system_card=True
-        )
-        self._bottom_card_container.add_card("history", self._history_card)
+        # 卡片自带的关闭钮 → 离开工作台历史页（不再走 CardManager BOTTOM 互斥）
+        self._history_card.closed.connect(self._close_history_panel)
+        # 挂到右侧工作台「历史会话」页签（幂等；面板未就绪时由
+        # TabManagerWindow.refresh_workbench / open_workbench_history 兜底补挂）
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is not None:
+                panel.attach_history_page(self._history_card)
+        except Exception:
+            logger.exception("[MainWidget] 历史会话页挂载到工作台失败")
 
     def _ensure_share_card(self):
         """确保分享卡片框架已创建（内容由 _build_deferred_card_share 填充）"""
@@ -7924,7 +7933,6 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         cards = [
             self._model_config_card,
-            self._history_card,
             self._memory_card,
         ]
         return [c for c in cards if c is not None]
@@ -8171,12 +8179,32 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_config_popup.set_config(current_name, config, self._current_model_name)
 
     def _toggle_history_card(self):
-        """切换历史会话卡片的显示"""
-        self._ensure_history_card()  # P0-1：框架懒创建，确保注册/入容器
-        self._card_manager.toggle_card("history", self._window_id)
-        # 显示时刷新历史会话数据
-        if self._card_manager.is_card_visible("history", self._window_id):
-            self._refresh_history_toggle_panel()
+        """切换历史会话（已迁移到右侧工作台「历史会话」页签）
+
+        - 工作台不可见 → 展开并定位历史页
+        - 可见但不在历史页 → 切到历史页
+        - 已在历史页 → 切回工作树页（等效原“关闭卡片”）
+        切页后的数据刷新由 history_tab_shown → TabManagerWindow 驱动。
+        """
+        self._ensure_history_card()  # 懒创建 + 挂载工作台（幂等）
+        tm = TabManagerWindow.get_instance()
+        panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+        if tm is None or panel is None:
+            return
+        if not tm.is_workbench_visible() or panel.current_tab() != panel.TAB_HISTORY:
+            tm.open_workbench_history()
+        else:
+            panel.set_current_tab(panel.TAB_WORKTREE)
+
+    def _close_history_panel(self):
+        """离开右侧工作台的「历史会话」页（卡片关闭钮/选中会话后的统一收出口）"""
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is not None and panel.current_tab() == panel.TAB_HISTORY:
+                panel.set_current_tab(panel.TAB_WORKTREE)
+        except Exception:
+            pass
 
     def _sync_search_box_visibility(self):
         """同步搜索框：两个标签页都显示搜索框"""
@@ -8486,7 +8514,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     record = self._history_popup_card.get_history_at_index(index)
                     new = tm.spawn_tab(self, session_record=record) if record is not None else None
                 if new is not None:
-                    self._card_manager.hide_card("history", self._window_id)
+                    self._close_history_panel()
                     return
             # 降级原行为
         if index == -1:
@@ -8494,8 +8522,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._create_new_session()
         else:
             self._load_history_session_from_popup(index)
-        # 关闭历史会话卡片（通过 CardManager 更新显隐状态）
-        self._card_manager.hide_card("history", self._window_id)
+        # 离开工作台历史页（原“关闭历史会话卡片”）
+        self._close_history_panel()
 
     def _on_team_restore_requested(self, run_id: str):
         """从历史面板恢复团队会话（方案 A 一键恢复）
@@ -8759,8 +8787,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 会话数据变更统一通知：恢复团队会话产生新会话记录（新 run_id），
         # 历史面板/欢迎卡片需同步 + 跨窗口广播
         self._notify_history_data_changed()
-        # 关闭历史会话卡片
-        self._card_manager.hide_card("history", self._window_id)
+        # 离开工作台历史页（原“关闭历史会话卡片”）
+        self._close_history_panel()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -8784,7 +8812,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 target_min_w = 0
             if self.chat_scroll_area.minimumWidth() != target_min_w:
                 self.chat_scroll_area.setMinimumWidth(target_min_w)
-        self._set_cards_resize_preview_mode(True)
+        # 动画期间宿主会抑制预览模式：中间对话区原样实时显示（#31）
+        if not getattr(self, "_suppress_resize_preview", False):
+            self._set_cards_resize_preview_mode(True)
         # resize 期间持续重置防抖，避免在拖拽过程中提前批量重排
         self._pending_resize_sync = True
         self._resize_debounce_timer.stop()
@@ -13327,9 +13357,8 @@ class OpenAIChatToolWindow(ToolWindow):
         full_record = self.history_manager.get_session_by_session_id(session_id) if self.history_manager else None
         record = full_record or member_record
         self._load_session_from_record(record)
-        # 关闭历史会话卡片
-        if self._card_manager:
-            self._card_manager.hide_card("history", self._window_id)
+        # 离开工作台历史页（原“关闭历史会话卡片”）
+        self._close_history_panel()
 
     def _load_history_session_from_popup(self, index: int):
         # 🛡️ 使用历史面板缓存的 _all_history 列表来查找 session_id，
@@ -20660,6 +20689,17 @@ class OpenAIChatToolWindow(ToolWindow):
 
             CardManager.get_instance().unregister_window(self._window_id)
             logger.debug(f"[OpenAIChatToolWindow] 注销窗口卡片: {self._window_id}")
+        except Exception:
+            pass
+
+        # 历史会话页已迁移到右侧工作台：窗口关闭时摘除自己的历史卡片，
+        # 防止 workbench stack 持有已关闭窗口的悬空 widget（C++ 对象泄漏/残影）
+        try:
+            if self._history_card is not None:
+                tm = TabManagerWindow.get_instance()
+                panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+                if panel is not None:
+                    panel.detach_history_page(self._history_card)
         except Exception:
             pass
 

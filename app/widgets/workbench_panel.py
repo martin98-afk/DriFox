@@ -11,6 +11,8 @@
 - 工作树（排第一，默认落点）：git 工作树切换 + 关键文档（原「记忆」页
   的 docs 子页原样上移，从二级子页签升为一级页签）
 - 记忆：条目记忆 / 项目笔记（原 MemoryCardContent 共享单实例拆挂）
+- 历史会话：宿主挂载当前活跃窗口的历史卡片（原对话区底部卡片迁移至此，
+  懒挂载——窗口侧 _ensure_history_card / open_workbench_history 首次触发）
 
 ★ 产物页已完全插件化：面板**不再内置**产物实现，改由插件通过
 ``UIPluginRegistry.register_workbench_tab(plugin_name, page_id="artifacts", ...)``
@@ -26,6 +28,7 @@
 from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -546,8 +549,11 @@ class WorkbenchPanel(QWidget):
     diff_requested = pyqtSignal(object)  # Optional[List[str]]
     # 卡片 tab × 关闭钮点击（registry 连接本信号，同步清理卡片归属状态并摘 tab）
     card_tab_close_requested = pyqtSignal(str)  # card_id
+    # 切到「历史会话」页时发射：宿主窗口此时刷新历史列表数据（面板隐藏期间
+    # isVisible()=False 会被 refresh_history_card_if_visible 跳过，靠本信号补刷）
+    history_tab_shown = pyqtSignal()
 
-    TAB_WORKTREE, TAB_MEMORY, TAB_ARTIFACTS = 0, 1, 2
+    TAB_WORKTREE, TAB_MEMORY, TAB_ARTIFACTS, TAB_HISTORY = 0, 1, 2, 3
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -565,6 +571,8 @@ class WorkbenchPanel(QWidget):
         self._pending_project: Optional[tuple] = None
         # 页签记忆：None = 面板尚未打开过（首次打开默认工作树，之后恢复上次关闭时页签）
         self._last_tab_index: Optional[int] = None
+        # 历史会话页内容（宿主当前活跃窗口的历史卡片框架）；None = 未挂载（页签不出现）
+        self._history_page: Optional[QWidget] = None
         # 产物页：插件注册时的来源签名（None = 显示占位页）
         self._artifacts_plugin_sig: Optional[tuple] = None
         self._plugin_artifacts_widget: Optional[QWidget] = None
@@ -785,6 +793,53 @@ class WorkbenchPanel(QWidget):
     def has_card_tab(self, card_id: str) -> bool:
         return card_id in self._card_tabs
 
+    # ── 历史会话页（宿主挂载当前活跃窗口的历史卡片） ──
+
+    def attach_history_page(self, widget: Optional[QWidget]) -> None:
+        """挂载「历史会话」页内容（宿主当前活跃窗口的历史卡片框架）
+
+        工作台是宿主级单例，历史页与其他页同一投影语义：内容始终来自
+        「当前活跃对话窗口」，窗口切换时由 refresh_workbench → 本方法换挂。
+        换挂时旧页不销毁（setParent(None) 还给它所属窗口，其 MainWidget
+        仍持有引用与信号连接，切回时再挂回来）。
+
+        Args:
+            widget: 窗口的历史卡片框架（SystemCardFrame）；None 跳过（幂等）
+        """
+        if widget is None or self._history_page is widget:
+            return
+        was_current = self._history_page is not None and self._stack.currentIndex() == self.TAB_HISTORY
+        if self._history_page is not None:
+            old = self._history_page
+            idx = self._stack.indexOf(old)
+            self._history_page = None
+            if idx >= 0:
+                self._stack.removeWidget(old)
+                old.setParent(None)
+        self._history_page = widget
+        # 固定插在 index 3（工作树/记忆/产物之后、插件页之前），页签顺序稳定
+        self._stack.insertWidget(self.TAB_HISTORY, widget)
+        self._rebuild_tab_bar()
+        if was_current:
+            # 换挂前正显示历史页 → 继续显示新窗口的历史页（跨窗口切换不跳页）
+            self.set_current_tab(self.TAB_HISTORY)
+
+    def detach_history_page(self, widget: QWidget) -> None:
+        """摘除「历史会话」页（窗口关闭时由宿主窗口调用，防 stack 悬空引用）
+
+        仅当当前挂载的就是该 widget 时生效（幂等）。摘除后页签条同步重建，
+        当前正显示历史页时 QStackedWidget 已自动切到邻近页，这里同步按钮高亮。
+        """
+        if self._history_page is not widget:
+            return
+        self._history_page = None
+        idx = self._stack.indexOf(widget)
+        if idx >= 0:
+            self._stack.removeWidget(widget)
+            widget.setParent(None)
+        self._rebuild_tab_bar()
+        self.set_current_tab(max(0, self._stack.currentIndex()))
+
     # ── 页签条构建（内置 + 插件，顺序与 stack 一致） ──
 
     def _tab_specs(self) -> List[tuple]:
@@ -802,6 +857,10 @@ class WorkbenchPanel(QWidget):
             ("memory", "记忆"),
             ("artifacts", art_label),
         ]
+        # 历史会话页：宿主挂载历史卡片后常驻（懒挂载，见 attach_history_page），
+        # 顺序与 stack.insertWidget(TAB_HISTORY) 严格一致
+        if self._history_page is not None:
+            specs.append(("history", "历史会话"))
         # _plugin_infos 已排除 artifacts（见 sync_plugin_pages），此处无需再过滤
         for page_id, info in self._plugin_infos.items():
             specs.append((page_id, info.label))
@@ -832,6 +891,57 @@ class WorkbenchPanel(QWidget):
             self._tab_bar_layout.addWidget(btn)
             self._tab_buttons.append(btn)
             self._tab_ids.append(tab_id)
+        # 增删 tab 后布局会平移旧 tab：光标静止时 Qt 不补发 enter/leave，需重算
+        self._schedule_tab_hover_sync()
+
+    # ── tab hover 仲裁（对齐 CustomTitleBar 的残留修复） ──
+
+    def sync_tab_hover(self) -> None:
+        """按光标真实位置重新仲裁 tab hover（自愈入口，可安全重复调用）
+
+        ★ 为什么不能只靠 enter/leave：工作台宽度动画 / splitter 拖拽会让
+        tab 在**光标静止**时平移（FlowLayout 右对齐），而 Qt 既不为「被移到
+        光标下」的 widget 补发 enterEvent、也不为「被移走」的 widget 补发
+        leaveEvent → hover 高亮残留（与标题栏居中 tab 同源，修复方式同款）。"""
+        if not self._tab_buttons or not self.isVisible():
+            return
+        global_pos = QCursor.pos()
+        hit_btn = None
+        for btn in self._tab_buttons:
+            if btn.isVisible() and btn.rect().contains(btn.mapFromGlobal(global_pos)):
+                hit_btn = btn
+                break
+        for btn in self._tab_buttons:
+            btn.set_hover(btn is hit_btn)
+
+    def _schedule_tab_hover_sync(self) -> None:
+        """合并同一事件循环内的多次重算请求（宽度动画每帧都 resize）"""
+        if getattr(self, "_hover_sync_pending", False):
+            return
+        self._hover_sync_pending = True
+        QTimer.singleShot(0, self._run_tab_hover_sync)
+
+    def _run_tab_hover_sync(self) -> None:
+        self._hover_sync_pending = False
+        self.sync_tab_hover()
+
+    def leaveEvent(self, event) -> None:
+        # 鼠标离开面板时兜底清空（动画/其它窗口抢焦点时子 widget 的
+        # leaveEvent 不保证到达）
+        for btn in self._tab_buttons:
+            btn.set_hover(False)
+        super().leaveEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # 面板宽度变化 → FlowLayout 右对齐平移 tab → 光标静止时 Qt 不补发
+        # enter/leave，必须重算 hover（对齐标题栏 tab 残留修复）
+        self._schedule_tab_hover_sync()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        # show 之前无有效几何，命中测试无意义；首帧布局后补一次
+        self._schedule_tab_hover_sync()
 
     def _on_tab_clicked(self, tab_id: str) -> None:
         """页签点击：按 tab_id 定位 stack 索引（与 _tab_ids 顺序一致）"""
@@ -1020,6 +1130,8 @@ class WorkbenchPanel(QWidget):
         # （MemoryCardContent._current_tab 驱动 set_search_filter 等分发）
         if index == self.TAB_WORKTREE and self._memory_content is not None:
             self._memory_content.set_active_tab("docs", refresh=False)
+        if index == self.TAB_HISTORY:
+            self.history_tab_shown.emit()
 
     def current_tab(self) -> int:
         return self._stack.currentIndex()

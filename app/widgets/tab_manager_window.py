@@ -637,6 +637,8 @@ class TabManagerWindow(FramelessWindow):
         self.workbench_panel.close_requested.connect(self._hide_workbench)
         self.workbench_panel.refresh_requested.connect(self.refresh_workbench)
         self.workbench_panel.diff_requested.connect(self._open_workbench_diff)
+        # 切到「历史会话」页时刷新当前活跃窗口的历史列表（面板隐藏期间 isVisible 跳过的补刷）
+        self.workbench_panel.history_tab_shown.connect(self._on_workbench_history_shown)
         self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
         # 主题 / 字号刷新：与桌宠同路径注册
         theme_manager.register_refresh_target(self.workbench_panel)
@@ -782,6 +784,37 @@ class TabManagerWindow(FramelessWindow):
 
     # ── 右侧工作台（嵌入式：toggle 显隐 / 数据刷新） ──
 
+    def _splitter_sizes_with_left(self, left_w: int) -> List[int]:
+        """按目标左侧宽度生成完整 splitter sizes（含工作台窗格）
+
+        ★ setSizes 传值少于窗格数时，QSplitter 会把缺省窗格压到 0（实测：
+        三窗格 [200,300,400] → setSizes([60,840]) → [59,819,0]）。三窗格布局
+        下折叠左侧若只传两值，右侧工作台宽度会被清掉/回退到最小宽度。
+        这里显式保留工作台当前宽度，chat 吃剩余空间。"""
+        try:
+            sizes = self._splitter.sizes()
+        except Exception:
+            sizes = []
+        total = sum(sizes) if sizes else self.width()
+        if len(sizes) >= 3:
+            wb = sizes[2]
+            return [left_w, max(0, total - left_w - wb), wb]
+        return [left_w, max(0, total - left_w)]
+
+    def _set_windows_resize_preview_suppressed(self, suppressed: bool) -> None:
+        """动画期抑制所有窗口卡片进入 resize 预览模式（WebView 保持可见）
+
+        MainWidget.resizeEvent 默认会 _set_cards_resize_preview_mode(True)
+        把 WebView 藏成静态预览——侧栏/工作台动画每帧 resize 对话区，
+        若不抑制，动画全程中间区域都是被隐藏的状态。动画结束后解除，
+        宽度同步由既有的防抖定时器一次完成。"""
+        if not hasattr(self, "_content_area"):
+            return
+        for i in range(self._content_area.count()):
+            w = self._content_area.widget(i)
+            if w is not None:
+                w._suppress_resize_preview = suppressed
+
     def toggle_workbench(self) -> None:
         """标题栏「右侧边栏」按钮回调：直接显示/隐藏工作台（无折叠动画）
 
@@ -818,12 +851,17 @@ class TabManagerWindow(FramelessWindow):
     def _start_wb_anim(self, start_w: int, end_w: int, on_finished=None) -> None:
         """启动工作台宽度动画（200ms OutCubic）；复用动画对象，stop 后重设起止值
 
-        对齐左侧边栏动画的 P0 优化（OPT-1）：动画期间冻结对话内容区重绘——
-        splitter 动画只改子控件 geometry，不触发顶层 resizeEvent，故该冻结
-        无法被 resize 节流路径覆盖，需在此显式冻结，由 _on_wb_anim_finished
-        统一恢复。"""
-        if hasattr(self, "_content_area"):
-            self._content_area.setUpdatesEnabled(False)
+        对齐侧栏 #31：动画期间不再冻结 _content_area 重绘（中间区域原样实时
+        显示），改为抑制卡片 resize 预览模式，由 _on_wb_anim_finished 统一恢复。
+
+        ★ 动画期间必须同时放开 panel 自身的最小宽度：frame.setMinimumWidth(0)
+        管不住 minimumSizeHint——panel 的 setMinimumWidth(PANEL_WIDTH_MIN) 会把
+        frame 实际下限顶在 334px，导致展开/收起动画前段被硬性钳住不动、尾段猛跳
+        （用户感知的"动画卡顿"主因）。"""
+        self._set_windows_resize_preview_suppressed(True)
+        panel = getattr(self, "workbench_panel", None)
+        if panel is not None:
+            panel.setMinimumWidth(0)
         anim = self._wb_anim
         if anim is None:
             anim = QVariantAnimation(self)
@@ -840,27 +878,17 @@ class TabManagerWindow(FramelessWindow):
         anim.start()
 
     def _on_wb_anim_finished(self) -> None:
-        """动画结束：执行收尾回调 + 恢复对话内容区绘制（对齐侧栏 OPT-1）
+        """动画结束：执行收尾回调 + 恢复卡片 resize 预览能力
 
-        若本回调又同步启动了新动画（反向重启），则跳过恢复绘制，
-        交由其 finished 恢复，避免动画中途解冻造成卡顿回潮。"""
+        若本回调又同步启动了新动画（反向重启），则跳过恢复（预览抑制与
+        panel 最小宽度都交由其 finished 恢复），避免动画中途解除。"""
         cb = getattr(self, "_wb_anim_finished_cb", None)
         self._wb_anim_finished_cb = None
         if cb is not None:
             cb()
-        try:
-            if hasattr(self, "_content_area") and not (
-                self._wb_anim is not None and self._wb_anim.state() == QVariantAnimation.Running
-            ):
-                self._content_area.setUpdatesEnabled(True)
-                # ── #10 对齐恢复：与解冻同步显式恢复 WebView 预览（幂等） ──
-                # 冻结期 MainWidget.resizeEvent 已自动 _set_cards_resize_preview_mode(True)
-                # 隐藏 WebView，此处与 setUpdatesEnabled(True) 同步恢复，消除潜在空窗。
-                mw = self._content_area.currentWidget()
-                if mw is not None and hasattr(mw, "_set_cards_resize_preview_mode"):
-                    mw._set_cards_resize_preview_mode(False)
-        except Exception:
-            pass
+        if self._wb_anim is not None and self._wb_anim.state() == QVariantAnimation.Running:
+            return
+        self._set_windows_resize_preview_suppressed(False)
 
     def _stop_wb_anim(self) -> None:
         anim = getattr(self, "_wb_anim", None)
@@ -925,6 +953,7 @@ class TabManagerWindow(FramelessWindow):
                 # 延后到动画结束，避免与首帧布局争抢主线程
                 on_finished=lambda: (
                     frame.setMinimumWidth(PANEL_WIDTH_MIN + 14),
+                    panel.setMinimumWidth(PANEL_WIDTH_MIN),
                     self.refresh_workbench(),
                 ),
             )
@@ -941,6 +970,7 @@ class TabManagerWindow(FramelessWindow):
                     panel.set_panel_visible(False),
                     frame.hide(),
                     frame.setMinimumWidth(PANEL_WIDTH_MIN + 14),
+                    panel.setMinimumWidth(PANEL_WIDTH_MIN),
                     self._set_chat_frame_wb_hidden(True),
                 ),
             )
@@ -970,6 +1000,8 @@ class TabManagerWindow(FramelessWindow):
         win = self.get_current_window()
         backend = getattr(win, "backend", None) if win is not None else None
         project = getattr(win, "_current_project", "") or ""
+        # 历史会话页：跟随当前活跃窗口换挂（与其他页同一投影语义；未构建时保持现状）
+        panel.attach_history_page(getattr(win, "_history_card", None) if win is not None else None)
         if backend is not None:
             # 记忆页懒构建（backend 未就绪时保持"未就绪"提示）
             panel.ensure_memory(backend.memory_manager)
@@ -1024,6 +1056,42 @@ class TabManagerWindow(FramelessWindow):
             panel.memory_page.switch_sub_tab(sub_tab)
         except Exception as exc:
             logger.warning(f"[Workbench] 切换记忆子页签失败: {exc}")
+
+    def open_workbench_history(self) -> None:
+        """展开工作台并定位「历史会话」页（历史会话已从对话区底部卡片迁移至此）
+
+        统一直达入口：底部工具栏历史按钮 / /history 命令都走这里。历史页内容
+        是当前活跃窗口的历史卡片（懒创建，首次进入时构建并挂载）；切页后的
+        数据刷新由 history_tab_shown → _on_workbench_history_shown 驱动。
+        """
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None:
+            return
+        # 确保当前活跃窗口的历史卡片已构建并挂载（幂等；未挂载时页签不出现）
+        win = self.get_current_window()
+        if win is not None and hasattr(win, "_ensure_history_card"):
+            try:
+                win._ensure_history_card()
+            except Exception:
+                logger.exception("[Workbench] 构建历史会话卡片失败")
+        card = getattr(win, "_history_card", None) if win is not None else None
+        if card is not None:
+            panel.attach_history_page(card)
+        # 展开工作台（不可见时 set_workbench_visible 内部会触发 refresh_workbench）
+        if not self.is_workbench_visible():
+            self.set_workbench_visible(True)
+        else:
+            self.refresh_workbench()
+        panel.set_current_tab(panel.TAB_HISTORY)
+
+    def _on_workbench_history_shown(self) -> None:
+        """「历史会话」页显示 → 刷新当前活跃窗口的历史列表数据"""
+        win = self.get_current_window()
+        if win is not None and hasattr(win, "_refresh_history_toggle_panel"):
+            try:
+                win._refresh_history_toggle_panel()
+            except Exception:
+                pass
 
     # ── 工作台差异入口（替代标题栏 diff_btn） ──
 
@@ -1710,13 +1778,13 @@ class TabManagerWindow(FramelessWindow):
         # 持久化收起状态已移除：不做记忆，侧边栏收起/展开只在本次会话内生效
         if not animate:
             # 启动恢复等瞬时路径：直接 setSizes
-            self._splitter.setSizes([target_w, max(0, total_w - target_w)])
+            self._splitter.setSizes(self._splitter_sizes_with_left(target_w))
             return
 
         # 平滑动画过渡
         if abs(cur_w - target_w) < 3:
             # 距离过近（如拖拽已到位）：瞬时落位，省一次空动画
-            self._splitter.setSizes([target_w, max(0, total_w - target_w)])
+            self._splitter.setSizes(self._splitter_sizes_with_left(target_w))
             if hasattr(self, "_tab_panel"):
                 self._tab_panel.sync_collapsed_ui()
             return
@@ -1726,12 +1794,10 @@ class TabManagerWindow(FramelessWindow):
 
     def _start_sidebar_anim(self, start_w: int, end_w: int, collapsing: bool):
         """启动侧边栏宽度动画（200ms OutCubic）"""
-        # ── P0 性能优化 OPT-1：动画期间冻结右侧 _content_area 重绘 ──
-        # splitter 拖拽/动画只改子控件 geometry，不触发顶层 resizeEvent，
-        # 故该冻结无法被 resize 节流路径覆盖，需在此显式冻结，
-        # 由 _on_sidebar_anim_finished 的 try/finally 统一恢复。
-        if hasattr(self, "_content_area"):
-            self._content_area.setUpdatesEnabled(False)
+        # ── #31 中间对话区原样实时显示：不再冻结 _content_area 重绘 ──
+        # 改为抑制卡片进入 resize 预览模式（WebView 保持可见），动画期
+        # 每帧 restart 的宽度同步防抖在动画结束后一次执行。
+        self._set_windows_resize_preview_suppressed(True)
         anim = self._sidebar_anim
         if anim is None:
             anim = QVariantAnimation(self)
@@ -1754,9 +1820,8 @@ class TabManagerWindow(FramelessWindow):
     def _on_sidebar_anim_value(self, value):
         """动画每帧：更新 splitter 宽度；跨阈值时切换 TabPanel 紧凑/展开 UI"""
         w = int(round(value))
-        sizes = self._splitter.sizes()
-        total_w = sum(sizes) if sizes else self.width()
-        self._splitter.setSizes([w, max(0, total_w - w)])
+        # ★ 必须三值：缺工作台窗格会被 QSplitter 压到 0/最小宽度（见 helper 注释）
+        self._splitter.setSizes(self._splitter_sizes_with_left(w))
 
         # 跨阈值切换 UI：收起时宽度 < 100 切紧凑；展开时宽度 >= 120 切完整。
         # 阈值取收起最小宽度(46)与展开最小宽度(120) 的中间值，避免展开时
@@ -1775,14 +1840,13 @@ class TabManagerWindow(FramelessWindow):
             if hasattr(self, "_tab_panel"):
                 self._tab_panel.set_animating(False)
             # 最终宽度精确落位（插值收尾可能差 1px）
-            sizes = self._splitter.sizes()
-            total_w = sum(sizes) if sizes else self.width()
+            # ★ 三值 setSizes：保留工作台宽度，否则折叠左侧会连带清掉右侧
             if self._sidebar_anim_collapsing:
                 target_w = self._tab_panel._collapsed_min_width + 14
             else:
                 target_w = getattr(self, "_saved_panel_frame_width", 250)
                 target_w = max(_EXPANDED_MIN_FRAME_WIDTH, target_w)
-            self._splitter.setSizes([target_w, max(0, total_w - target_w)])
+            self._splitter.setSizes(self._splitter_sizes_with_left(target_w))
             # UI 最终状态兜底（动画中途未跨阈值时强制同步，如目标宽度恰为阈值）
             if hasattr(self, "_tab_panel"):
                 self._tab_panel.sync_collapsed_ui()
@@ -1792,21 +1856,11 @@ class TabManagerWindow(FramelessWindow):
             if self._sidebar_anim_collapsing:
                 self._maybe_auto_expand_after_squeeze()
         finally:
-            # ── P0 性能优化 OPT-1：保证 _content_area 必定恢复绘制 ──
-            # 所有退出路径（含 _maybe_auto_expand_after_squeeze 触发的嵌套展开动画、
-            # 以及任何异常）都在此恢复 True，否则内容区黑屏。
+            # ── #31 动画结束恢复卡片 resize 预览能力 ──
             # 若本回调又同步启动了新动画（_maybe_auto_expand 走 _start_sidebar_anim
-            # 重新冻结），则交由其 _on_sidebar_anim_finished 恢复，此处跳过。
-            if hasattr(self, "_content_area") and not (
-                self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running
-            ):
-                self._content_area.setUpdatesEnabled(True)
-                # ── #10 对齐恢复：与解冻同步显式恢复 WebView 预览（幂等） ──
-                # 冻结期 MainWidget.resizeEvent 已自动 _set_cards_resize_preview_mode(True)
-                # 隐藏 WebView，此处与 setUpdatesEnabled(True) 同步恢复，消除潜在空窗。
-                mw = self._content_area.currentWidget()
-                if mw is not None and hasattr(mw, "_set_cards_resize_preview_mode"):
-                    mw._set_cards_resize_preview_mode(False)
+            # 重新抑制），则交由其 _on_sidebar_anim_finished 恢复，此处跳过。
+            if not (self._sidebar_anim is not None and self._sidebar_anim.state() == QVariantAnimation.Running):
+                self._set_windows_resize_preview_suppressed(False)
 
     def _evaluate_squeeze_collapse(self) -> bool:
         """按稳定后的几何判定"侧边栏确实被挤压"→ 自动折叠
@@ -1850,7 +1904,7 @@ class TabManagerWindow(FramelessWindow):
             cap = tab_frame.maximumWidth() if tab_frame is not None else needed
             frame_w = max(0, min(needed, cap))
             if frame_w > 0 and frame_w != left:
-                self._splitter.setSizes([frame_w, max(0, total - frame_w)])
+                self._splitter.setSizes(self._splitter_sizes_with_left(frame_w))
                 panel.sync_collapsed_ui()
             return False
         # 确实被挤压：交接给折叠动画（与 TabPanel.resizeEvent 折叠路径一致）
