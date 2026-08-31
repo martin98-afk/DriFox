@@ -242,7 +242,11 @@ class _RowDelegate(QStyledItemDelegate):
     # ── 绘制 ──
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
-        return QSize(option.rect.width(), self.row_h)
+        # 宽度必须返回 0：行宽由 QListView 静态布局给出（恒=视口宽）。
+        # 若返回 option.rect.width()，contents 宽会回流成下次 sizeHint 的输入，
+        # 形成正反馈自锁——窗口变窄后行宽冻结在旧值，横向滚动条出现且拖动时
+        # 内容不随 option.rect.x() 平移（表现为「滚动无作用」）。
+        return QSize(0, self.row_h)
 
     def paint(self, painter: QPainter, option, index) -> None:  # noqa: N802
         rec: Optional[TraceRecord] = index.data(Qt.UserRole)
@@ -442,6 +446,9 @@ class TurnListWidget(QWidget):
         self._list.setSelectionMode(QListWidget.SingleSelection)
         self._list.setFrameShape(QFrame.NoFrame)
         self._list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        # 列为自适应压缩设计（对齐 Chrome DevTools Network：窄时省略/裁剪，
+        # 无横向滚动概念）——显式关掉横向滚动条，防 sizeHint 回归再引入横滚。
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list.currentRowChanged.connect(self._on_current_row_changed)
         outer.addWidget(self._list, 1)
 
