@@ -265,12 +265,12 @@ def test_render_inline_tail_filters_think_tool_tags():
 
 
 def test_stream_long_paragraph_tail_render_aligns_with_full():
-    """模拟流式：无空行分隔的长段落（核心场景）——软边界切段 + 尾部行内渲染，
+    """模拟流式：无空行分隔的长段落（核心场景）——尾部整体行内渲染，
     最终 DOM 可见文本与全量渲染一致（markdown 源码不再滞留）。
 
-    软边界切分后，长段落（>= _MIN_SOFT_SEGMENT_CHARS 字符）按句号增量切段走
-    _render_stable_segment 差量渲染；不足阈值的尾部仍走 _render_inline_tail
-    行内渲染。两条路径都必须即时格式化 markdown 语法，不得字面显示源码。
+    无空行长段落无闭合段可差量渲染（闭合段只按 \n\n 硬边界切），
+    整段落在未闭合尾部走 _render_tail_inline 行内渲染：单 convert
+    保持段落结构，markdown 语法即时格式化，不得字面显示源码。
     """
     md = (
         "首先感谢您的提问。这个问题涉及到多个方面的考量，我们需要从整体架构、"
@@ -281,6 +281,7 @@ def test_stream_long_paragraph_tail_render_aligns_with_full():
     # 模拟流式 chunk 注入 + 差量切段 + 尾部行内渲染（复刻 _perform_update 差量快路径）
     stable = 0
     rendered_text = ""
+    rendered_p_count = 0  # 已渲染稳定段 HTML 的 <p> 总数（段落拆裂回归断言用）
     pos = 0
     while pos < len(md):
         pos += 7
@@ -288,12 +289,20 @@ def test_stream_long_paragraph_tail_render_aligns_with_full():
         stable_len, segs = _extract_closed_segments(chunk_md[stable:])
         if segs:
             for seg in segs:
-                rendered_text += _strip_tags(_render_stable_segment(seg, compact=False))
+                seg_html = _render_stable_segment(seg, compact=False)
+                rendered_text += _strip_tags(seg_html)
+                rendered_p_count += seg_html.count("<p>")
             stable += stable_len
         tail = chunk_md[stable:]
         tail_text = ""
         if tail and not _has_unclosed_think_or_tool(tail):
             tail_text = _strip_tags(_render_inline_tail(tail, compact=False))
+            # 🐛 回归断言（拆段 bug）：源文同段（无空行）在流式任意时刻，
+            # 稳定段 + 尾部合计只能是同一个 <p>。若软边界切段回归，
+            # 闭合段封口 + tail 另起新段会把 <p> 计数抬到 2+（视觉跳位）。
+            assert rendered_p_count + _render_inline_tail(tail, compact=False).count("<p>") == 1, (
+                f"无空行同段被拆成多个 <p>（pos={pos}）: stable_p={rendered_p_count}"
+            )
         visible = rendered_text + tail_text
     # 流式结束：完整内容已闭合，最终可见文本**不出现** markdown 源码
     # （中间态未闭合语法字面显示是 markdown 固有行为，由
@@ -301,7 +310,7 @@ def test_stream_long_paragraph_tail_render_aligns_with_full():
     assert "**" not in visible, f"流式期间仍显示 markdown 源码: {visible!r}"
     assert "`" not in visible, f"流式期间仍显示反引号源码: {visible!r}"
     # 流式结束全量渲染：可见文本（去空白）与全量一致
-    # （软边界切段会把句号后的软换行吞掉，属差量渲染可接受差异，故比较时去空白）
+    # （中间态未闭合行内语法字面保留导致的空白差异，比较时去空白）
     full_text = _strip_tags(_render_markdown_to_html_cached_impl(md, compact=False))
     strip_ws = lambda s: re.sub(r"\s+", "", s)
     assert strip_ws(visible) == strip_ws(full_text), (
@@ -309,16 +318,23 @@ def test_stream_long_paragraph_tail_render_aligns_with_full():
     )
 
 
-def test_extract_closed_segments_splits_long_paragraph_by_sentence():
-    """软边界：无空行的大段中文正文（>= 阈值）应按句号增量切段，稳定区向前推进。"""
+def test_extract_closed_segments_keeps_paragraph_intact_without_blank_line():
+    """🐛 回归（拆段 bug）：无空行的同一段正文（无论多长）不得被句号切段。
+
+    历史 bug：软边界在句号处切闭合段，把源文同一段切成多个独立 <p>，
+    流式时新片段先换行出现在最下面、全量渲染时又跳回正文合并（视觉跳位）。
+    句号不是 markdown 段落边界，闭合段只允许按 \n\n 硬边界切。
+    """
     md = (
         "这是第一句话内容比较长用来测试。这是第二句话内容也比较长用来测试。"
         "这是第三句话内容继续比较长用来测试。这是第四句话内容仍然比较长用来测试。"
         "这是第五句话内容还要比较长用来测试。这是第六句话内容终于比较长用来测试。"
     )
     stable_len, segs = _extract_closed_segments(md)
-    assert len(segs) >= 1, "大段正文应至少切出 1 段"
-    assert stable_len > 0, "软边界应推进稳定区"
-    # 每段必须以句号结尾（软边界切在句号后，句号保留在段尾）
-    for seg in segs:
-        assert seg.endswith("。"), f"软边界段应以句号结尾: {seg[-10:]!r}"
+    assert segs == [], "无空行同段不得被句号切段（拆段回归）"
+    assert stable_len == 0, "无闭合段时稳定区不得推进"
+    # 对照：出现 \n\n 空行后正常切段（硬边界语义不受影响）
+    md_hard = md + "\n\n第二段正文。"
+    stable_len2, segs2 = _extract_closed_segments(md_hard)
+    assert len(segs2) == 1 and segs2[0] == md, f"硬边界切段应产出第一段: {segs2!r}"
+    assert stable_len2 == len(md) + 2, f"稳定区应推进到空行之后: {stable_len2}"

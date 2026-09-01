@@ -2196,41 +2196,17 @@ def _has_unclosed_think_or_tool(md: str) -> bool:
     return md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>")
 
 
-# ===== 软段落边界（中文句子边界）=====
-# 大段中文正文常无 \n\n 空行（长报告/解释性输出多为连续段落），
-# 仅靠硬边界（空行）会导致差量渲染对大段正文完全失效（_extract_closed_segments
-# 恒返回空 → _stable_md_len 永不前进 → 尾部整体重转 O(n²)）。
-# 软边界：句号类标点（。！？；… + 英文 !?;）作为可增量闭合的句子边界。
-# 约束：仅纯文本区间生效（fence 内不切），段长达到阈值才切（避免切分过碎、
-# 每句一次 runJavaScript 开销过大）。
+# ===== 句号类标点（软边界触发器）=====
+# 句号类标点仅用于 **触发即时渲染**（_has_reached_soft_boundary →
+# _schedule_render(immediate=True)）：句号到达时立刻把未闭合尾部整体行内渲染
+# （_render_tail_inline，单 convert 保持段落结构），缩短 markdown 语法
+# 源码形态的滞留时间。
+# ⚠️ 历史教训（2026-09-01 拆段 bug）：曾用句号作差量渲染的**切段边界**
+# （_extract_closed_segments 软边界切闭合段），但句号不是 markdown 段落边界——
+# 无空行连续正文的同一段被切成多个独立 <p>，闭合段封口 + tail 另起新段，
+# 观感是"正在蹦字的片段先换行出现在最下面，全量渲染时又跳回正文合并"。
+# 因此闭合段**只**按 \n\n 硬边界切，段落完整性优先于 stable 推进。
 _SENTENCE_END_CHARS = frozenset("。！？；…!?;")
-# 软边界最小段长：累积到该长度才在句号处闭合，避免每句话都切一段
-_MIN_SOFT_SEGMENT_CHARS = 100
-
-
-def _find_sentence_boundary(md: str, start: int, end: int, fence_open: bool) -> int:
-    """在 [start, end) 内找第一个「满足最小段长」的句号类标点软边界。
-
-    感知 ``` 代码块状态（fence 内不切，避免切坏代码/高亮结构）。
-    返回句号类标点之后的偏移（切分点，句号保留在段尾）；找不到返回 -1。
-
-    Args:
-        md: 待扫描的 markdown 文本
-        start: 扫描起点
-        end: 扫描终点（不含）
-        fence_open: 进入该区间时是否处于 ``` 代码块内
-    """
-    fence = fence_open
-    i = start
-    while i < end:
-        if md.startswith("```", i):
-            fence = not fence
-            i += 3
-            continue
-        if not fence and md[i] in _SENTENCE_END_CHARS and i + 1 - start >= _MIN_SOFT_SEGMENT_CHARS:
-            return i + 1
-        i += 1
-    return -1
 
 
 def _extract_closed_segments(md: str):
@@ -2268,17 +2244,14 @@ def _extract_closed_segments(md: str):
     i = 0
     n = len(md)
     fence_open = False  # 是否在 ``` 代码块内（跨段累计）
-
     while i < n:
-        # 1) 硬边界：空行 \n\n（markdown 段落分隔）
+        # 硬边界：空行 \n\n（markdown 段落分隔）——闭合段**唯一**切段边界。
+        # 句号类标点不是 markdown 段落边界，禁止在此切段（会拆裂同段文字，
+        # 详见上方 _SENTENCE_END_CHARS 注释块的历史教训）。
         seg_end = md.find("\n\n", i)
         boundary_len = 2  # 空行占 2 字符，跳过
-        # 2) 软边界：无空行时按句号类标点切分——大段中文正文无 \n\n 也能增量闭合
         if seg_end == -1:
-            seg_end = _find_sentence_boundary(md, i, n, fence_open)
-            boundary_len = 0  # 句号保留在段尾，不跳过
-        if seg_end == -1:
-            break  # 剩余文本无硬/软边界：整段未闭合（无稳定边界）→ 停止
+            break  # 剩余文本无段落边界：整段未闭合（无稳定边界）→ 停止
 
         seg = md[i:seg_end]
         if not seg:
