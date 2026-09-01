@@ -291,6 +291,9 @@ def chat_once(
             reason = "引擎调用被取消"
         elif getattr(result, "error", None):
             reason = str(result.error)
+            # 引擎报错多半伴随残留状态（worker 未启动/上轮未收尾），
+            # 丢弃会话池重建后再试，比复用可能已污染的会话更稳。
+            fatal = True
         else:
             text = (getattr(result, "text", "") or "").strip()
             if text:

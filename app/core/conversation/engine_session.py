@@ -73,6 +73,14 @@ class _SyncAdapter:
 _HOOK_POLICIES = {p.value: p for p in HookPolicy}
 _PERM_STRATEGIES = {p.value: p for p in PermissionStrategy}
 
+# HookPolicy 枚举 → HookPolicy 插件 id（供 worker 按 id 直接取策略对象）。
+# ⚠️ 枚举值与插件 id 不同名：TOOL_EVENTS_ONLY="tool_events_only" 对应 id "tool_only"。
+_HOOK_POLICY_IDS = {
+    HookPolicy.ALL: "all",
+    HookPolicy.TOOL_EVENTS_ONLY: "tool_only",
+    HookPolicy.NONE: "none",
+}
+
 
 class EngineSessionImpl:
     """EngineSession 契约实现（同步阻塞驱动原语）
@@ -107,6 +115,14 @@ class EngineSessionImpl:
 
         if isinstance(hook_policy, str):
             hook_policy = _HOOK_POLICIES.get(hook_policy, HookPolicy.NONE)
+        # ★ 声明的枚举翻译成 hook_policy_id，否则形同虚设：
+        #   ChatWorker._hook_policy_obj_resolve() 只在**显式 id** 存在时按 id 取策略，
+        #   没给 id 时会忽略 ConversationConfig.hook_policy 枚举、直接回落
+        #   get_active(SCOPE_MAIN) —— 于是本引擎默认声明的 NONE（契约承诺
+        #   "插件循环不再被动触发全局 hooks"）实际等于 ALL。实测后果：Stop hook 的
+        #   续命提醒被注入 assistant_hub 记忆整理的消息流（多花一轮 API + 污染产物）。
+        if hook_policy_id is None and isinstance(hook_policy, HookPolicy):
+            hook_policy_id = _HOOK_POLICY_IDS.get(hook_policy)
         if isinstance(permission_strategy, str):
             permission_strategy = _PERM_STRATEGIES.get(permission_strategy, PermissionStrategy.AUTO_ALLOW)
 
@@ -258,10 +274,11 @@ class EngineSessionImpl:
         self._round_messages = list(messages or [])
 
     def _reset_stale_streaming(self):
-        """复位残留的流式状态（上轮 worker 已销毁但 is_streaming 仍 True）
+        """复位残留的流式状态（上轮 worker 线程已结束但 is_streaming 仍 True）
 
         收编 autoloop 死锁解锁：竞态残留时 execute() 被 "Already streaming"
-        拒绝，每轮 turn() 都失败。
+        拒绝，之后每轮 turn() 都失败。判定依据是「worker 线程已结束」而不是
+        「C++ wrapper 是否被 deleteLater」。
         """
         if not self._executor.is_streaming:
             return
@@ -269,15 +286,29 @@ class EngineSessionImpl:
         if not self._alive_worker(stale):
             self._executor._is_streaming = False
             self._executor._current_worker = None
-            logger.info(f"[EngineSession:{self.engine_name}] 复位残留流式状态（worker 已销毁）")
+            # 线程已退出：顺带回收 worker（cleanup + deleteLater），否则每轮 turn()
+            # 残留一个 QThread（daemon 线程无事件循环，deleteLater 不会被处理，
+            # 只能靠 cleanup() 释放业务资源）。
+            try:
+                self._executor._finalize_worker_cleanup(stale)
+            except Exception as e:
+                logger.debug(f"[EngineSession:{self.engine_name}] 残留 worker 回收失败（忽略）: {e}")
+            logger.info(f"[EngineSession:{self.engine_name}] 复位残留流式状态（worker 线程已结束）")
 
     @staticmethod
     def _alive_worker(w) -> bool:
-        """wrapper C++ 对象是否仍存活（deleteLater 后访问会 RuntimeError）"""
+        """worker 线程是否仍在运行（C++ wrapper 已销毁 → False）
+
+        ⚠️ 必须返回 isRunning() 的**实际结果**，不能只看"访问是否抛异常"：
+        插件后台线程（daemon / 无 Qt 事件循环）里 worker 的 finished 信号会丢
+        （跨线程黑洞），线程早已退出但 C++ wrapper 还在 —— 此时 isRunning()
+        返回 False 却不抛异常，旧实现会误判为"存活" → _reset_stale_streaming()
+        永不复位 → 之后每次 execute() 都被
+        "Already streaming (current_worker=..., is_alive=False)" 拒绝。
+        """
         if w is None:
             return False
         try:
-            w.isRunning()
-            return True
+            return bool(w.isRunning())
         except RuntimeError:
             return False
