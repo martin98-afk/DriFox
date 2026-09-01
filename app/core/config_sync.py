@@ -13,8 +13,9 @@ import os
 import shutil
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 import httpx
 from loguru import logger
@@ -69,6 +70,105 @@ def _get_user_custom_backup_path() -> Path:
 def _get_records_path() -> Path:
     """获取分享记录文件路径"""
     return get_app_data_dir() / "share" / "records.json"
+
+
+# ─────────────────────────────────────────────────────────────
+# 可注册同步内容（SyncContentProvider）
+#
+# Gitee 同步原本只覆盖 app.config / user-custom / share_records 三类。
+# 从 v0.4 起开放「可注册同步内容」通道：任何模块 / 插件可以注册一个
+# provider（本地目录 + 远端路径），同步时会被统一打包上传 / 解压下载，
+# 用于跨设备同步插件业务数据（如 assistant_hub 的助手信息与记忆）。
+#
+# 用法：
+#   from app.core.config_sync import register_sync_content_provider
+#   register_sync_content_provider(
+#       provider_id="assistant_hub",
+#       label="助手信息与记忆",
+#       local_dir=str(assistant_hub_root),   # 本地目录绝对路径
+#       remote_path="drifox/ext/assistant_hub.zip",  # 远端仓库内路径（可选）
+#   )
+# ─────────────────────────────────────────────────────────────
+
+# 远端扩展内容统一根目录
+EXT_SYNC_REMOTE_ROOT = "drifox/ext"
+
+
+@dataclass
+class SyncContentProvider:
+    """可注册的同步内容提供者
+
+    每个 provider 声明一个本地目录；同步时该目录会被整体打包为
+    ``remote_path`` 上传，下载时解压回 ``local_dir``。
+    """
+
+    provider_id: str = ""
+    label: str = ""
+    local_dir: str = ""          # 本地目录绝对路径
+    remote_path: str = ""        # 远端仓库内路径（缺省自动生成）
+    enabled: bool = True
+
+
+# 模块级注册表（插件/模块在初始化时注册，进程生命周期内常驻）
+_sync_content_providers: Dict[str, SyncContentProvider] = {}
+
+
+def register_sync_content_provider(
+    provider_id: str,
+    label: str = "",
+    local_dir: str = "",
+    remote_path: str = "",
+    enabled: bool = True,
+) -> bool:
+    """注册一个可同步内容 provider（幂等，重名覆盖）
+
+    Args:
+        provider_id: 唯一 ID（如 "assistant_hub"）
+        label: 人类可读名称（同步日志用）
+        local_dir: 本地目录绝对路径（打包内容根）
+        remote_path: 远端仓库内路径；缺省自动生成 ``drifox/ext/<id>.zip``
+        enabled: 是否参与同步
+
+    Returns:
+        是否注册成功
+    """
+    provider_id = (provider_id or "").strip()
+    if not provider_id:
+        logger.warning("[ConfigSync] register_sync_content_provider: provider_id 为空，忽略")
+        return False
+    if not local_dir:
+        logger.warning(f"[ConfigSync] register_sync_content_provider: {provider_id} local_dir 为空，忽略")
+        return False
+    if not remote_path:
+        remote_path = f"{EXT_SYNC_REMOTE_ROOT}/{provider_id}.zip"
+    provider = SyncContentProvider(
+        provider_id=provider_id,
+        label=label or provider_id,
+        local_dir=str(Path(local_dir).resolve()),
+        remote_path=remote_path,
+        enabled=enabled,
+    )
+    _sync_content_providers[provider_id] = provider
+    logger.info(
+        f"[ConfigSync] 注册同步内容: {provider_id} ({provider.label}) → {provider.remote_path}"
+    )
+    return True
+
+
+def unregister_sync_content_provider(provider_id: str) -> bool:
+    """注销一个同步内容 provider"""
+    if provider_id in _sync_content_providers:
+        del _sync_content_providers[provider_id]
+        logger.info(f"[ConfigSync] 注销同步内容: {provider_id}")
+        return True
+    return False
+
+
+def list_sync_content_providers() -> List[SyncContentProvider]:
+    """列出全部已注册的同步内容 provider（enabled 优先）"""
+    items = list(_sync_content_providers.values())
+    items.sort(key=lambda p: (not p.enabled, p.provider_id))
+    return items
 
 
 class TokenAuthError(Exception):
@@ -136,6 +236,8 @@ class ConfigSyncService(QObject):
         self._config_remote_sha: Optional[str] = None  # 远端 app.config SHA 缓存
         self._custom_remote_sha: Optional[str] = None  # 远端 user-custom.zip SHA 缓存
         self._records_remote_sha: Optional[str] = None  # 远端 share_records.json SHA 缓存
+        self._ext_remote_sha: Dict[str, str] = {}  # 远端 provider zip SHA 缓存 {provider_id: sha}
+        self._ext_dirty: Dict[str, bool] = {}  # provider 内容待上传标记 {provider_id: bool}
         self._sha_cache_path: Path = get_app_data_dir().resolve() / SHA_CACHE_FILE
         self._pending_sync_message: Optional[str] = None  # 延迟 syncDone 消息（Settings 在主线程重载完成后发射）
         self._initial_sync_completed: bool = False  # 初始同步是否已完成（禁止初始同步前上传）
@@ -313,6 +415,9 @@ class ConfigSyncService(QObject):
         self._config_dirty = True
         self._custom_dirty = True
         self._records_dirty = True
+        # 手动强制上传：所有 provider 一并全量推送
+        for p in list_sync_content_providers():
+            self._ext_dirty[p.provider_id] = True
         return self._do_upload()
 
     def download(self) -> bool:
@@ -397,6 +502,11 @@ class ConfigSyncService(QObject):
         elif self._records_path.parent.exists():
             watch_dirs.append(str(self._records_path.parent))
 
+        # 可注册同步内容（provider）目录：插件业务数据变更时触发自动上传
+        for p in list_sync_content_providers():
+            if p.enabled and p.local_dir and Path(p.local_dir).exists():
+                watch_dirs.append(p.local_dir)
+
         logger.info(f"[ConfigSync] watch 线程已启动，监控路径={watch_dirs}")
         try:
             for changes in watch(*watch_dirs, stop_event=self._watch_stop):
@@ -437,6 +547,19 @@ class ConfigSyncService(QObject):
                             logger.info("[ConfigSync] 检测到用户插件变更（批量）")
                             custom_logged = True
                         continue
+                    # 可注册同步内容（provider）目录下文件变更 → 标记对应 provider 待上传
+                    for _p in list_sync_content_providers():
+                        if not _p.enabled or not _p.local_dir:
+                            continue
+                        _pdir = Path(_p.local_dir)
+                        if _pdir.exists() and changed_p != _pdir and changed_p.is_relative_to(_pdir):
+                            if not self._ext_dirty.get(_p.provider_id):
+                                logger.info(
+                                    f"[ConfigSync] 检测到同步内容变更: {_p.provider_id} ({changed_path})"
+                                )
+                            self._ext_dirty[_p.provider_id] = True
+                            needs_notify = True
+                            break
 
                 if needs_notify:
                     self._on_config_changed()
@@ -467,7 +590,7 @@ class ConfigSyncService(QObject):
         """启动防抖计时器（仅在有脏标记时）"""
         if not self._debounce_timer:
             return
-        if not (self._config_dirty or self._custom_dirty or self._records_dirty):
+        if not (self._config_dirty or self._custom_dirty or self._records_dirty or any(self._ext_dirty.values())):
             return
         logger.info(f"[ConfigSync] 防抖计时器启动，{DEBOUNCE_MS}ms 后上传")
         self._debounce_timer.start(DEBOUNCE_MS)
@@ -1003,6 +1126,8 @@ class ConfigSyncService(QObject):
                 self._config_dirty = True
                 self._custom_dirty = True
                 self._records_dirty = True
+                for p in list_sync_content_providers():
+                    self._ext_dirty[p.provider_id] = True
                 ok = self._do_upload(initial_sync=True)
                 if ok:
                     self._initial_sync_completed = True
@@ -1161,7 +1286,37 @@ class ConfigSyncService(QObject):
                         # 本地无分享记录，跳过（不清除远端）
                         records_ok = True
 
-            if config_ok and custom_ok and records_ok:
+                # ── 4. 上传可注册同步内容（provider zip，仅脏时） ──
+                # 插件/模块通过 register_sync_content_provider 注册的业务目录
+                # （如 assistant_hub 的助手信息与记忆），打包后上传到各自远端路径。
+                # 与 user-custom 同策略：独立失败不影响 app.config 同步结果。
+                ext_ok = True
+                for provider in list_sync_content_providers():
+                    if not provider.enabled or not provider.local_dir:
+                        continue
+                    local_dir = Path(provider.local_dir)
+                    if not local_dir.exists():
+                        continue
+                    provider_id = provider.provider_id
+                    if (
+                        self._ext_dirty.get(provider_id, False)
+                        or upload_config  # 初始同步/全量上传时一起推
+                        or initial_sync
+                    ):
+                        ok = self._upload_provider_zip(
+                            provider=provider,
+                            local_dir=local_dir,
+                            client=client,
+                        )
+                        if ok:
+                            self._ext_dirty[provider_id] = False
+                        else:
+                            ext_ok = False
+                            logger.warning(f"[ConfigSync] 同步内容上传失败: {provider_id}")
+                if ext_ok:
+                    self._save_sha_cache()
+
+            if config_ok and custom_ok and records_ok and ext_ok:
                 self._set_state("idle")
                 return True
 
@@ -1312,6 +1467,8 @@ class ConfigSyncService(QObject):
                                 self._custom_remote_sha = sha
                             elif label == "share_records":
                                 self._records_remote_sha = sha
+                            elif label.startswith("ext:"):
+                                self._ext_remote_sha[label.split(":", 1)[1]] = sha
                             self._save_sha_cache()
                 except Exception:
                     pass
@@ -1343,6 +1500,8 @@ class ConfigSyncService(QObject):
                                         self._custom_remote_sha = sha2
                                     elif label == "share_records":
                                         self._records_remote_sha = sha2
+                                    elif label.startswith("ext:"):
+                                        self._ext_remote_sha[label.split(":", 1)[1]] = sha2
                                     self._save_sha_cache()
                         except Exception:
                             pass
@@ -1390,6 +1549,147 @@ class ConfigSyncService(QObject):
         if label == "share_records":
             return self._records_remote_sha
         return None
+
+    def _upload_provider_zip(
+        self,
+        provider: SyncContentProvider,
+        local_dir: Path,
+        client: Optional[httpx.Client] = None,
+    ) -> bool:
+        """将单个 provider 的本地目录压缩上传到其远端路径。
+
+        与 user-custom 同款策略：打包本地目录 → 上传 → 清理临时 zip。
+        SHA 缓存按 provider_id 独立记录（_ext_remote_sha）。
+
+        Args:
+            provider: provider 元数据（local_dir 已 resolve）
+            local_dir: 本地目录（zip 内以目录名作为顶层，避免不同 provider 文件名冲突）
+            client: 可复用的 httpx.Client
+        """
+        import zipfile
+
+        provider_id = provider.provider_id
+        tag = f"ext:{provider_id}"
+        zip_path = get_app_data_dir() / f"ext-{provider_id}.zip"
+        try:
+            # 压缩：zip 内以 provider_id 为顶层目录，下载解压时归位到各自目录
+            with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
+                for f in local_dir.rglob("*"):
+                    if f.is_file():
+                        arcname = f"{provider_id}/{str(f.relative_to(local_dir))}"
+                        zf.write(str(f), arcname)
+
+            ok = self._upload_file(
+                zip_path,
+                provider.remote_path,
+                label=tag,
+                client=client,
+            )
+            if ok:
+                logger.info(f"[ConfigSync] {tag} 上传成功（{provider.label}）")
+            return ok
+        except Exception as e:
+            logger.error(f"[ConfigSync] {tag} 压缩上传失败: {e}")
+            return False
+        finally:
+            try:
+                if zip_path.exists():
+                    zip_path.unlink()
+            except Exception:
+                pass
+
+    def _download_provider_zip(self, provider: SyncContentProvider) -> bool:
+        """下载单个 provider 的远端 zip 并解压归位到本地目录。
+
+        参考 _download_user_custom_zip 的原子解压策略：
+        备份现有目录 → 解压到临时目录 → 原子 rename 到目标路径。
+        """
+        import zipfile
+
+        provider_id = provider.provider_id
+        tag = f"ext:{provider_id}"
+        local_dir = Path(provider.local_dir)
+        zip_path = get_app_data_dir() / f"ext-{provider_id}.zip"
+        rollback_path = get_app_data_dir() / f"ext-{provider_id}.backup"
+        try:
+            ok = self._download_file(provider.remote_path, zip_path, label=tag)
+            if not ok:
+                return False
+
+            # 备份当前目录（异常时回滚）
+            if local_dir.exists():
+                if rollback_path.exists():
+                    shutil.rmtree(str(rollback_path))
+                shutil.move(str(local_dir), str(rollback_path))
+
+            try:
+                # 解压到临时目录（zip 内顶层为 provider_id/，剥掉一层归位）
+                _extract_ok = False
+                _tmp_extract = get_app_data_dir() / f"ext-{provider_id}.extract"
+                for _attempt in range(3):
+                    try:
+                        if _tmp_extract.exists():
+                            shutil.rmtree(str(_tmp_extract))
+                        _tmp_extract.mkdir(parents=True, exist_ok=True)
+                        with zipfile.ZipFile(str(zip_path), "r") as zf:
+                            zf.extractall(str(_tmp_extract))
+                        _extract_ok = True
+                        break
+                    except (PermissionError, OSError) as _e:
+                        logger.warning(
+                            f"[ConfigSync] {tag} 解压文件被占用，重试中 ({_attempt + 1}/3)... {_e}"
+                        )
+                        time.sleep(1.0)
+                if not _extract_ok:
+                    raise RuntimeError(f"{tag} 解压失败：文件持续被占用")
+
+                # 原子归位：临时目录/顶层/provider_id → local_dir
+                inner = _tmp_extract / provider_id
+                if not inner.exists():
+                    inner = _tmp_extract  # 兼容无顶层目录的旧包
+                if local_dir.exists():
+                    shutil.rmtree(str(local_dir))
+                shutil.move(str(inner), str(local_dir))
+            except (RuntimeError, zipfile.BadZipFile):
+                # 解压失败 → 回滚
+                if local_dir.exists():
+                    shutil.rmtree(str(local_dir))
+                if rollback_path.exists():
+                    shutil.move(str(rollback_path), str(local_dir))
+                raise
+            finally:
+                try:
+                    _tmp_extract = get_app_data_dir() / f"ext-{provider_id}.extract"
+                    if _tmp_extract.exists():
+                        shutil.rmtree(str(_tmp_extract))
+                except Exception:
+                    pass
+
+            logger.info(f"[ConfigSync] {tag} 已从云端恢复（{provider.label}）")
+            try:
+                zip_path.unlink()
+            except Exception:
+                pass
+            try:
+                if rollback_path.exists():
+                    shutil.rmtree(str(rollback_path))
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            logger.error(f"[ConfigSync] {tag} 下载恢复失败: {e}")
+            return False
+
+    def mark_provider_dirty(self, provider_id: str) -> None:
+        """标记某个 provider 内容待上传（插件数据变更时调用）。"""
+        if provider_id in self._ext_dirty or provider_id in _sync_content_providers:
+            self._ext_dirty[provider_id] = True
+
+    def get_ext_remote_sha(self, provider_id: str) -> Optional[str]:
+        return self._ext_remote_sha.get(provider_id)
+
+    def set_ext_remote_sha(self, provider_id: str, sha: str) -> None:
+        self._ext_remote_sha[provider_id] = sha
 
     def _get_remote_file_sha(self, remote_path: str, client: Optional[httpx.Client] = None) -> Optional[str]:
         """查询远端特定文件的 sha，不存在返回 None。可复用已打开的 httpx.Client。"""
@@ -1527,10 +1827,45 @@ class ConfigSyncService(QObject):
                 logger.error(f"[ConfigSync] share_records 下载异常: {e}")
                 results.append(False)
 
+            # ── 4. 可注册同步内容（provider zip）：独立下载 ──
+            # 插件注册的业务目录（如 assistant_hub 助手信息/记忆），远端有则
+            # 下载解压恢复；失败只影响该 provider，不否定 app.config 恢复。
+            ext_downloaded = False
+            for provider in list_sync_content_providers():
+                if not provider.enabled or not provider.local_dir:
+                    continue
+                provider_id = provider.provider_id
+                try:
+                    rc = self._check_remote_file(provider.remote_path)
+                    if rc is True:
+                        remote_ext_sha = self._get_remote_file_sha(provider.remote_path)
+                        if remote_ext_sha and remote_ext_sha == self._ext_remote_sha.get(provider_id):
+                            logger.debug(f"[ConfigSync] 远端 {provider_id} 未变化，跳过下载")
+                            results.append(True)
+                        else:
+                            ok = self._download_provider_zip(provider)
+                            if ok:
+                                logger.debug(f"[ConfigSync] {provider_id} 已解压恢复")
+                                ext_downloaded = True
+                            else:
+                                logger.warning(f"[ConfigSync] {provider_id} 恢复失败")
+                            results.append(ok)
+                    elif rc is None:
+                        logger.warning(f"[ConfigSync] 无法确认远端 {provider_id} 状态，跳过")
+                        results.append(False)
+                    else:
+                        # rc is False: 远端没有该 provider
+                        results.append(True)
+                except Exception as e:
+                    logger.error(f"[ConfigSync] {provider_id} 下载异常: {e}")
+                    results.append(False)
+
             # 清除下载本身触发的文件变更脏标记
             self._config_dirty = False
             self._custom_dirty = False
             self._records_dirty = False
+            for pid in list(self._ext_dirty):
+                self._ext_dirty[pid] = False
             logger.debug("[ConfigSync] 已清除下载触发的脏标记")
 
             # 本次拉取了新 app.config → 在所有下载（含 user-custom 解压落地）完成后，
@@ -1590,6 +1925,10 @@ class ConfigSyncService(QObject):
                     self._custom_remote_sha = remote_sha
                 elif label == "share_records":
                     self._records_remote_sha = remote_sha
+                elif label.startswith("ext:"):
+                    # ext:<provider_id> → 按 provider_id 记录
+                    pid = label.split(":", 1)[1]
+                    self._ext_remote_sha[pid] = remote_sha
                 self._save_sha_cache()
 
             return True
@@ -1689,6 +2028,9 @@ class ConfigSyncService(QObject):
                 self._config_remote_sha = data.get("config_sha") or None
                 self._custom_remote_sha = data.get("custom_sha") or None
                 self._records_remote_sha = data.get("records_sha") or None
+                ext_data = data.get("ext_shas") or {}
+                if isinstance(ext_data, dict):
+                    self._ext_remote_sha = {str(k): str(v) for k, v in ext_data.items() if v}
                 logger.debug(
                     f"[ConfigSync] SHA 缓存已加载: config={self._config_remote_sha[:12] if self._config_remote_sha else None}..."
                 )
@@ -1707,6 +2049,8 @@ class ConfigSyncService(QObject):
                 data["custom_sha"] = self._custom_remote_sha
             if self._records_remote_sha:
                 data["records_sha"] = self._records_remote_sha
+            if self._ext_remote_sha:
+                data["ext_shas"] = dict(self._ext_remote_sha)
             self._sha_cache_path.parent.mkdir(parents=True, exist_ok=True)
             self._sha_cache_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2),
