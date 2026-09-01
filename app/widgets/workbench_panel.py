@@ -1036,16 +1036,29 @@ class WorkbenchPanel(QWidget):
         """按当前插件注册表重建页签条（内置页签在前，插件按注册序在后）
 
         布局：FlowLayout（右对齐 + 自动换行），无需 stretch 占位。
-        """
+
+        ★ specs 未变时跳过重建：页签按钮是 hover/选中动画的载体，切窗换挂
+        历史页等高频路径若每次都销毁重建，按钮上的 hover/动画状态全丢，
+        且延迟删除的旧按钮在事件循环繁忙期间可能留下残影（用户实测 hover
+        混乱残留的主因）。"""
+        specs = self._tab_specs()
+        if [t for t, _ in specs] == self._tab_ids:
+            # 页签集合未变：仅重算 hover 仲裁（光标下的高亮跟随真实位置）
+            self._schedule_tab_hover_sync()
+            return
         while self._tab_bar_layout.count():
             item = self._tab_bar_layout.takeAt(0)
             w = item.widget()
             if w is not None:
+                # ★ 先断开父子关系再预约删除：deleteLater 只是延迟销毁，
+                # 不 setParent(None) 时旧按钮仍挂 children 链上，事件循环
+                # 繁忙期间可能残影（对齐 TasksPage._clear_items 同款教训）
+                w.setParent(None)
                 w.hide()
                 w.deleteLater()
         self._tab_buttons = []
         self._tab_ids = []
-        for tab_id, label in self._tab_specs():
+        for tab_id, label in specs:
             closable = tab_id in self._card_tabs
             btn = CustomTabButton(tab_id, label, self, closable=closable)
             btn.clicked.connect(self._on_tab_clicked)
@@ -1061,6 +1074,16 @@ class WorkbenchPanel(QWidget):
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == cur)
         # 增删 tab 后布局会平移旧 tab：光标静止时 Qt 不补发 enter/leave，需重算
+        self._schedule_tab_hover_sync()
+        # 布局重排在下一帧：0ms 仲裁可能拿旧 geometry 漏判，60ms 后补一次兜底
+        QTimer.singleShot(60, self._delayed_hover_resync)
+
+    def _delayed_hover_resync(self) -> None:
+        """重建后布局落定再仲裁一次 hover（sip 探活防面板已销毁）"""
+        try:
+            self._tab_buttons  # noqa: B018 - 访问即探活，已销毁抛 RuntimeError
+        except RuntimeError:
+            return
         self._schedule_tab_hover_sync()
 
     # ── tab hover 仲裁（对齐 CustomTitleBar 的残留修复） ──

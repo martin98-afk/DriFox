@@ -318,6 +318,31 @@ def _persona_block_tags() -> List[str]:
     return ["mood", "plan"]
 
 
+def refresh_persona_tag_renderers() -> None:
+    """把当前全部人格 tag 幂等注册为块渲染器（含运行期新增人格的新 tag）。
+
+    persona-creator 写盘新人格 → UI reload registry 后调用本函数，
+    新 tag（如 SNAP）即刻获得渲染卡，无需重启。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        registered = set(reg.get_registered_tag_names())
+        for tag in _persona_block_tags():
+            if tag in registered:
+                continue
+            reg.register_tag_renderer(
+                plugin_name="assistant_hub",
+                tag_name=tag,
+                render_func=_make_tag_renderer(tag),
+                priority=10,
+            )
+            logger.info(f"[assistant_hub] 已补注册人格块渲染器: {tag}")
+    except Exception as e:
+        logger.warning(f"[assistant_hub] 补注册 tag renderer 失败: {e}")
+
+
 def register_ui(registry) -> None:
     """注册 assistant_hub 的 UI 组件。"""
     # 热重载兼容
@@ -358,14 +383,8 @@ def register_ui(registry) -> None:
         priority=10,
     )
 
-    # ── 人格块标签卡（mood/plan 等，按 persona frontmatter tag 动态注册）──
-    for _tag in _persona_block_tags():
-        registry.register_tag_renderer(
-            plugin_name="assistant_hub",
-            tag_name=_tag,
-            render_func=_make_tag_renderer(_tag),
-            priority=10,
-        )
+    # ── 人格块标签卡（mood/plan/snap 等，按 persona frontmatter tag 动态注册）──
+    refresh_persona_tag_renderers()
 
     # ── Gitee 同步内容：助手信息 + 记忆 ──
     _register_sync_provider()

@@ -6,12 +6,12 @@
 - tag（思考块标签）：UI 方角小牌与思考块协议名（build=推演 / hanako=MOOD / 无=空）
 - avatar：personas/<id>/avatar.png
 
-存储（预设单独存文件夹：人格基底 / 身份 / 行为约束）：
-- 内置：plugins/assistant_hub/personas/<id>/persona.md（基底）
-        + <id>/identity.md（身份）+ <id>/agents.md（行为约束）+ <id>/avatar.png
-  兼容旧平铺布局：personas/<id>.md + <id>.identity.md / <id>.agents.md + avatars/<id>.png
+存储（人格只有一个自包含文件夹）：
+- 内置：plugins/assistant_hub/personas/<id>/persona.md + <id>/avatar.png
+  兼容旧平铺布局：personas/<id>.md + avatars/<id>.png
 - 自定义：<app_data>/assistant_hub/personas.json（builtin 不可删改）
 - "none"：恒存在的空人格（纯净助手，进 chips 行参与选择）
+- 新增人格走 persona-creator 技能落 personas/<id>/persona.md，热生效
 """
 
 from __future__ import annotations
@@ -36,10 +36,6 @@ class Persona:
     avatar: str = ""
     builtin: bool = False
     prompt: str = ""
-    # 可选伴随模板：personas/<id>.identity.md / personas/<id>.agents.md
-    # （设置页身份/AGENTS.md 回落链：落盘文件 → 人格专属模板 → 内置通用模板）
-    identity_template: str = ""
-    agents_template: str = ""
 
 
 def resolve_user_name() -> str:
@@ -102,17 +98,23 @@ class PersonaRegistry:
         return cls._instance
 
     # ── 加载 ──
+    def reload(self) -> None:
+        """重载全部人格（内置 + 自定义）。
+
+        persona-creator 技能写盘 personas/<id>/persona.md 后调用，
+        UI 进入助手中心时刷新，无需重启。
+        """
+        self._load_builtins()
+        self._load_custom()
+
     def _load_builtins(self) -> None:
         """加载内置人格。
 
-        新布局（自包含子文件夹，人格预设单独存档）：
+        新布局（自包含子文件夹）：
             personas/<id>/persona.md    # 人格基底（frontmatter + 正文）
-            personas/<id>/identity.md   # 身份简介伴随模板（可选）
-            personas/<id>/agents.md     # 行为约束伴随模板（可选）
             personas/<id>/avatar.png    # 头像（可选）
         旧布局（兼容，子文件夹优先）：
-            personas/<id>.md + personas/<id>.identity.md / <id>.agents.md
-            personas/avatars/<id>.png
+            personas/<id>.md + personas/avatars/<id>.png
         """
         self._builtin = {}
         # 新布局：子文件夹 personas/<id>/persona.md
@@ -125,23 +127,11 @@ class PersonaRegistry:
         # 旧布局：平铺 personas/*.md（已被子文件夹占用的 id 跳过）
         for md in sorted(self._builtin_dir.glob("*.md")):
             if ".identity." in md.name or ".agents." in md.name:
-                continue  # 旧布局伴随模板在下方单独挂
+                continue  # 旧伴随模板文件已废弃，跳过不加载
             pid = self._peek_persona_id(md)
             if pid and pid in self._builtin:
                 continue
             self._load_persona_md(md)
-        # 伴随模板：子文件夹 identity.md / agents.md 优先，回落平铺 <id>.identity.md / <id>.agents.md
-        for p in self._builtin.values():
-            sub = self._builtin_dir / p.id
-            ipath = sub / "identity.md" if (sub / "identity.md").exists() else self._builtin_dir / f"{p.id}.identity.md"
-            apath = sub / "agents.md" if (sub / "agents.md").exists() else self._builtin_dir / f"{p.id}.agents.md"
-            try:
-                if ipath.exists():
-                    p.identity_template = _parse_frontmatter(ipath.read_text(encoding="utf-8"))[1]
-                if apath.exists():
-                    p.agents_template = _parse_frontmatter(apath.read_text(encoding="utf-8"))[1]
-            except Exception:
-                continue
 
     def _peek_persona_id(self, md: Path) -> str:
         try:

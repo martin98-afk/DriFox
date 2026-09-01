@@ -7,7 +7,7 @@
     │        ArcCardStack 弧形卡片堆叠     │
     │   名称 + ★主助手 + 操作行（重命名等）  │
     │   基本信息（对话模型 / 记忆整理模型）    │
-    │   关于 Ta（人格 chips / 身份 / AGENTS.md）│
+    │   关于 Ta（人格 chips 切换）          │
     │   记忆（传送带 + Dream + 版本）        │
     │   经验（工具型 + 反思）               │
     │   专属技能                          │
@@ -43,7 +43,7 @@ from assistant_hub_manager import AssistantManager
 
 from .arc_stack import ArcCardStack
 from .assistant_avatar import RoundAvatar
-from .overlays import DreamRevisionOverlay, PersonaManageDialog, TextViewOverlay, _dialog_btn
+from .overlays import DreamRevisionOverlay, TextViewOverlay, _dialog_btn
 from .rename_dialog import RenameDialog
 from .sections import (
     AboutSection,
@@ -202,7 +202,7 @@ class AssistantCardWidget(QWidget):
         name_row = QHBoxLayout()
         name_row.setSpacing(10)
         self._avatar = RoundAvatar(size=44, text="?", color="#7C3AED", parent=self)
-        self._avatar.setToolTip("头像跟随元人格，在下方「关于 Ta」处更换")
+        self._avatar.setToolTip("头像跟随人格，切换人格自动更换")
         name_row.addWidget(self._avatar)
         self._name_label = QLabel("(未选择)")
         self._name_label.setStyleSheet(
@@ -241,10 +241,6 @@ class AssistantCardWidget(QWidget):
 
         self._about = AboutSection(self._persona_items(), "")
         self._about.personaChangeRequested.connect(self._on_persona_change)
-        self._about.personaManageRequested.connect(self._on_persona_manage)
-        self._about.personaAvatarChangeRequested.connect(self._on_persona_avatar_change)
-        self._about.personaAvatarResetRequested.connect(self._on_persona_avatar_reset)
-        self._about.saveRequested.connect(self._on_about_save)
         self._inner_v.addWidget(self._about)
 
         self._memory = MemorySection()
@@ -318,115 +314,30 @@ class AssistantCardWidget(QWidget):
         except Exception:
             return []
 
-    def _on_persona_avatar_change(self) -> None:
-        a = self._mgr.get(self._active_aid)
-        if not a or not a.yuan:
-            return
-        self._open_persona_avatar_dialog(a.yuan)
+    def refresh_personas_only(self) -> None:
+        """人格热刷新（只刷 chips 行与 tag 渲染器，不动编辑器绑定）。
 
-    def _on_persona_avatar_reset(self) -> None:
-        a = self._mgr.get(self._active_aid)
-        if not a or not a.yuan:
-            return
-        self._mgr.persona_registry().clear_avatar(a.yuan)
-        self._refresh_persona_avatar()
-        self._notify("已恢复人格默认头像")
-
-    def _open_persona_avatar_dialog(self, pid: str) -> None:
-        """人格头像选择器（预置/上传），确定后写入用户级覆盖（Mask 风格）。
-
-        ⚠ 内层类方法里的 self 是 dialog 实例——reg/pid 必须先捕获为局部变量。
+        persona-creator 技能写盘 personas/<id>/persona.md 后，切到
+        助手中心（showEvent）即生效，无需重启；幂等可重复调用。
         """
-        reg = self._mgr.persona_registry()
-        p = reg.get(pid)
-        if p is None:
-            return
-        from PyQt5.QtGui import QColor
-
-        from .avatar_picker import AvatarPicker
-
-        cur_ap = reg.avatar_path(pid)
-
-        class _AvatarDialog(MaskDialogBase):
-            def __init__(self, parent=None):
-                super().__init__(parent)
-                self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
-                self.setClosableOnMaskClicked(True)
-                self.setDraggable(True)
-                self.setMaskColor(QColor(0, 0, 0, 76))
-                self.widget.setObjectName("hubAvatarDialog")
-                self.widget.setStyleSheet(
-                    f"#hubAvatarDialog {{ background: {Colors.CARD_BG_SOLID};"
-                    f"border: 1px solid {Colors.BORDER}; border-radius: 14px; }}"
-                )
-                self.widget.setFixedSize(780, 620)
-                v = QVBoxLayout(self.widget)
-                v.setContentsMargins(20, 16, 20, 16)
-                picker = AvatarPicker(
-                    assistant_id="",
-                    parent=self.widget,
-                    upload_saver=lambda data, ext: reg.set_avatar(pid, data, ext),
-                )
-                picker.set_assistant(
-                    aid="",
-                    color="#7C3AED",
-                    name=p.name or pid,
-                    image_path=str(cur_ap) if cur_ap else "",
-                )
-                v.addWidget(picker, 1)
-                self._picker = picker  # 确定后外部取选择结果
-                row = QHBoxLayout()
-                row.addStretch()
-                cancel = _dialog_btn("取消")
-                cancel.clicked.connect(self.reject)
-                ok = _dialog_btn("确定", primary=True)
-                ok.clicked.connect(self.accept)
-                row.addWidget(cancel)
-                row.addWidget(ok)
-                v.addLayout(row)
-                # 对齐 plugin-marketplace 模式：widget 留在 _hBox 布局自动居中，不手动干预
-
-        dlg = _AvatarDialog(_host_window() or self.window())
-        if not _open_dialog(dlg):
-            return
-        sel = dlg._picker.get_selection()
         try:
-            if sel.get("image_path"):
-                data = Path(sel["image_path"]).read_bytes()
-                ext = Path(sel["image_path"]).suffix.lstrip(".") or "png"
-                if not reg.set_avatar(pid, data, ext):
-                    self._notify_error("头像保存失败：不支持的图片格式")
-                    return
-            else:
-                # 纯色选择/未选图 → 清除覆盖，回落人格默认头像
-                reg.clear_avatar(pid)
-        except Exception as e:
-            self._notify_error(f"头像保存失败: {e}")
-            return
-        self._refresh_persona_avatar()
-        self._notify("人格头像已更新")
+            self._mgr.persona_registry().reload()
+            from . import refresh_persona_tag_renderers
 
-    def _refresh_persona_avatar(self) -> None:
-        """人格头像变更/切换人格后刷新三处：About 预览、编辑区头像、弧形卡片。"""
-        aid = self._active_aid
-        a = self._mgr.get(aid) if aid else None
-        if not a:
-            return
-        reg = self._mgr.persona_registry()
-        p = reg.get(a.yuan)
-        ap = reg.avatar_path(a.yuan) if a.yuan else None
-        self._about.set_persona_avatar(
-            str(ap) if ap else "",
-            (p.name if p else "") or (a.yuan or ""),
-            has_override=reg.has_avatar_override(a.yuan) if a.yuan else False,
-        )
-        full = self._mgr.assistant_avatar_path(aid)
-        self._avatar.set_image(str(full) if full else None)
-        self._stack.set_avatar(aid, str(full) if full else "")
-        # 人格 chip 头像轻量同步（当前人格）
-        self._about.refresh_avatar(a.yuan, str(ap) if ap else "")
+            refresh_persona_tag_renderers()
+            self._about.rebuild_chips(self._persona_items())
+            a = self._mgr.get(self._active_aid)
+            if a:
+                self._about.set_persona(a.yuan)
+        except Exception:
+            pass
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.refresh_personas_only()
 
     def _reload_all(self, select_aid: str = "") -> None:
+        self.refresh_personas_only()
         assistants = self._mgr.list_assistants()
         self._stack.set_assistants(
             [
@@ -441,7 +352,6 @@ class AssistantCardWidget(QWidget):
         )
         primary = next((a.id for a in assistants if a.primary), "")
         self._stack.set_primary(primary)
-        self._about.rebuild_chips(self._persona_items())
         if select_aid and self._mgr.has(select_aid):
             self._bind_editor(select_aid)
         elif self._active_aid and self._mgr.has(self._active_aid):
@@ -479,10 +389,6 @@ class AssistantCardWidget(QWidget):
             mgr = self._mgr
             self._profile.bind(a.name or a.id, a.utility_model or "")
             self._about.set_persona(a.yuan)
-            self._refresh_persona_avatar()
-            identity, _ = mgr.read_identity_source(aid_capture)
-            agents_md, _ = mgr.read_agents_md_source(aid_capture)
-            self._about.bind_texts(identity, agents_md)
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_dream_auto(a.dream_auto_enabled)
             self._memory.reload_pins(mgr.read_pinned(aid_capture))
@@ -582,57 +488,15 @@ class AssistantCardWidget(QWidget):
             self._reload_all(select_aid=a.id)
 
     def _on_persona_change(self, pid: str) -> None:
+        """切换人格：只改 yuan 字段落盘，人格本身只读（新增走 persona-creator 技能）。"""
         a = self._mgr.get(self._active_aid)
         if not a or a.yuan == pid:
             return
-        # 身份/AGENTS 回落链依赖人格专属模板：若编辑框未被用户改过（内容 == 落盘/回落值），
-        # 切人格时清掉固化副本落盘文件 → 回落新人格模板；真自定义则保留并提示
-        identity, _ = self._mgr.read_identity_source(a.id)
-        agents_md, _ = self._mgr.read_agents_md_source(a.id)
-        cur_identity, cur_agents = self._about.texts()
-        identity_custom = cur_identity.strip() != identity.strip()
-        agents_custom = cur_agents.strip() != agents_md.strip()
-        if not identity_custom:
-            self._mgr.clear_identity(a.id)
-        if not agents_custom:
-            self._mgr.clear_agents_md(a.id)
         a.yuan = pid
         self._mgr.update(a)
         self._mgr.invalidate_context(a.id)
         self._about.set_persona(pid)
-        self._refresh_persona_avatar()
-        # 重读新人格回落内容刷新编辑框（bind_texts 内部 suspend 自动保存，不会误写盘）
-        new_identity, _ = self._mgr.read_identity_source(a.id)
-        new_agents_md, _ = self._mgr.read_agents_md_source(a.id)
-        self._about.bind_texts(new_identity, new_agents_md)
-        if identity_custom or agents_custom:
-            self._notify("身份/AGENTS 已自定义，切换人格不覆盖")
-        else:
-            self._notify(f"人格已切换：{'无（纯净助手）' if pid == 'none' else pid}")
-
-    def _on_persona_manage(self) -> None:
-        reg = self._mgr.persona_registry()
-        current = self._mgr.get(self._active_aid).yuan if self._active_aid else ""
-        dlg = PersonaManageDialog(reg, current, parent=_host_window() or self.window())
-        _open_dialog(dlg)
-        self._reload_all(select_aid=self._active_aid)
-
-    def _on_about_save(self, identity: str, agents_md: str) -> None:
-        """实时保存（节流触发）：静默落盘，不弹提示打断编辑。
-
-        防固化：内容与当前回落值一致（未真正自定义）时不写盘——否则回落态
-        模板副本会被固化成自定义文件，切人格永远不跟随。
-        """
-        aid = self._active_aid
-        if not aid:
-            return
-        cur_identity, _ = self._mgr.read_identity_source(aid)
-        if identity.strip() != cur_identity.strip():
-            self._mgr.write_identity(aid, identity)
-        cur_agents, _ = self._mgr.read_agents_md_source(aid)
-        if agents_md.strip() != cur_agents.strip():
-            self._mgr.write_agents_md(aid, agents_md)
-        self._mgr.invalidate_context(aid)
+        self._notify(f"人格已切换：{'无（纯净助手）' if pid == 'none' else pid}")
 
     # ══════════════════════════════════════════════════
     #  记忆
@@ -759,7 +623,9 @@ class AssistantCardWidget(QWidget):
         if not self._active_aid:
             return
         aid = self._active_aid
-        ret = _confirm_dialog(_host_window() or self.window(), "清除记忆", "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。")
+        ret = _confirm_dialog(
+            _host_window() or self.window(), "清除记忆", "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。"
+        )
         if not ret:
             return
         mem = self._mgr.memory_dir(aid)
@@ -803,7 +669,9 @@ class AssistantCardWidget(QWidget):
                 pass
 
         _open_dialog(
-            TextViewOverlay(f"经验 · {category}", text, editable=True, on_save=_save, parent=_host_window() or self.window())
+            TextViewOverlay(
+                f"经验 · {category}", text, editable=True, on_save=_save, parent=_host_window() or self.window()
+            )
         )
         self._experience.reload_categories(self._mgr.experience_list(aid))
 

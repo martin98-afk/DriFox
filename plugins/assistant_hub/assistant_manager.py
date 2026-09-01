@@ -4,7 +4,8 @@
 提供 AssistantManager 单例，负责：
 1. 助手 CRUD（创建 / 列表 / 删除 / 主助手 / 排序 / 切换）
 2. 助手元数据读写（assistant.yaml）
-3. 身份/提示词文件管理（identity.md / AGENTS.md / AGENTS.public.md，支持回落模板）
+3. 人格注入（identity_and_persona：只拼 personas/<yuan>/persona.md 基底；
+   人格由 PersonaRegistry 管理，新增人格走 persona-creator 技能）
 4. 头像管理（avatars/assistant.{png,jpg,webp,svg}）
 5. 置顶记忆（pinned.md，自动解析为 list[tuple[str, str]] = (title, content)）
 6. 当下记忆（memory/today.md，对应当下/今日记忆）
@@ -18,7 +19,7 @@ AssistantManager 与 AgentManager 解耦：
 - 通过 register_assistant_agent() 派生一个动态 agent（name = "assistant_<id>"，
   mode=subagent，仅含 assistant yaml 中的 skills 白名单）注入 AgentManager。
   调用 subagent_para(name="assistant_<id>") 即"调用助手"，被调用的助手看到
-  的是 identity.md + AGENTS.md + pinned.md + today.md + longterm.md 拼出的 system prompt。
+  的是 persona.md + pinned.md + today.md + longterm.md 拼出的 system prompt。
 
 存储根目录：<app_data_dir>/assistant_hub/<assistant_id>/
 """
@@ -313,43 +314,8 @@ def sys_modules():
 
 
 # ────────────────────────────────────────────────────────────────────
-# 模板回落（参考 openhanako core/persona-source.ts）
+# 对外描述模板（AGENTS.public.md：其他 agent 调用本助手时看到的简介）
 # ────────────────────────────────────────────────────────────────────
-
-
-_BUILTIN_IDENTITY_TEMPLATE = """# {name}
-
-{name} 是你的专属 AI 助手。
-
-## 性格
-
-- 沟通风格：直接、温和、有判断力。
-- 偏好：不啰嗦、不懂就问、不编造事实。
-
-## 目标
-
-帮你高效完成对话与编程任务，记住你的偏好，并在关键时刻给出可选方案。
-"""
-
-
-_BUILTIN_AGENTS_TEMPLATE = """# {name} — 行为准则
-
-## 1. 简洁优先
-- 不堆词、不绕弯。
-- 一步一步给出要点，避免一次性塞满大段文字。
-
-## 2. 先澄清，再动手
-- 任务有歧义或工具可能踩坑时，必须先问清楚或列出假设。
-- 不要替用户做主。
-
-## 3. 工具与代码
-- 修改代码前先读上下文，不要"顺手"改无关代码。
-- 自查循环：写 → 自测 → 修正，直到达到目标。
-
-## 4. 记忆与上下文
-- 在身份上下文中提到的「置顶 / 当下 / 长期」记忆都属于你。
-- 若用户语气稳定下来，可以主动提议「是否让我帮你整理进长期记忆」。
-"""
 
 
 _BUILTIN_PUBLIC_TEMPLATE = """# {name}
@@ -424,12 +390,6 @@ class AssistantManager:
     def _yaml_path(self, aid: str) -> Path:
         return self._assistant_dir(aid) / "assistant.yaml"
 
-    def _identity_path(self, aid: str) -> Path:
-        return self._assistant_dir(aid) / "identity.md"
-
-    def _agents_md_path(self, aid: str) -> Path:
-        return self._assistant_dir(aid) / "AGENTS.md"
-
     def _public_md_path(self, aid: str) -> Path:
         return self._assistant_dir(aid) / "AGENTS.public.md"
 
@@ -477,8 +437,38 @@ class AssistantManager:
         if not self._assistants:
             self._seed_defaults()
         self._restore_active_id()
+        self._converge_primary()
         self._loaded = True
         logger.info(f"[assistant_hub] 已加载 {len(self._assistants)} 个助手")
+
+    def _converge_primary(self) -> None:
+        """多主/无主收敛（读侧防御）。
+
+        双主来源：热重载窗口期旧实例 update() 整体写回旧 primary 态。
+        规则：唯一主 → 不动；多主 → 优先保留当前激活助手，否则保留
+        稳定排序首位；无主 → 稳定排序首位补主。结果写回磁盘。
+        """
+        if not self._assistants:
+            return
+        primaries = [a for a in self._assistants.values() if a.primary]
+        if len(primaries) == 1:
+            return
+        stable = self.list_assistants_sorted_by_stable()
+        if len(primaries) > 1 and AssistantManager._active_id in self._assistants:
+            keep = AssistantManager._active_id
+        else:
+            keep = stable[0].id
+        now = _now_iso()
+        for k, v in self._assistants.items():
+            new_primary = k == keep
+            if v.primary != new_primary:
+                v.primary = new_primary
+                v.updated_at = now
+                self._write_yaml(v)
+
+    def list_assistants_sorted_by_stable(self) -> List[Assistant]:
+        """稳定排序（不考虑 primary）：order 升序 → created_at 升序 → id。"""
+        return sorted(self._assistants.values(), key=lambda a: (a.order, a.created_at, a.id))
 
     def _seed_defaults(self) -> None:
         """首次启动（库为空）预置 3 个助手：build（主助手+默认激活）/ hanako / 纯净。
@@ -528,26 +518,13 @@ class AssistantManager:
         return aid in self._assistants
 
     def create(self, name: str, id: Optional[str] = None, yuan: str = "build") -> Assistant:
-        """创建新助手并落盘（同时写入默认 identity/AGENTS 模板）"""
+        """创建新助手并落盘（人格走 PersonaRegistry，不落盘身份/提示词文件）"""
         a = Assistant.new(name=name, id=id)
         a.yuan = yuan or a.yuan
         self._assistants[a.id] = a
         self._ensure_dir(self._assistant_dir(a.id))
         # 写 yaml
         self._write_yaml(a)
-        # 写默认 identity/AGENTS 模板（仅当文件不存在，避免覆盖用户已编辑）
-        ipath = self._identity_path(a.id)
-        if not ipath.exists():
-            ipath.write_text(
-                _BUILTIN_IDENTITY_TEMPLATE.format(name=a.name or a.id),
-                encoding="utf-8",
-            )
-        apath = self._agents_md_path(a.id)
-        if not apath.exists():
-            apath.write_text(
-                _BUILTIN_AGENTS_TEMPLATE.format(name=a.name or a.id),
-                encoding="utf-8",
-            )
         ppath = self._public_md_path(a.id)
         if not ppath.exists():
             ppath.write_text(
@@ -589,10 +566,22 @@ class AssistantManager:
         self._load_all()
 
     def update(self, a: Assistant) -> None:
-        """更新助手元数据落盘"""
+        """更新助手元数据落盘。
+
+        写侧互斥：热重载/多实例窗口期，其他实例的内存态可能过期
+        （曾把旧主助手整体写回造成双主），这里以 a 为准收敛——
+        a.primary=True 时清掉其余助手的主标记（内存+盘）。
+        """
         a.updated_at = _now_iso()
         self._assistants[a.id] = a
         self._write_yaml(a)
+        if a.primary:
+            now = a.updated_at
+            for k, v in self._assistants.items():
+                if k != a.id and v.primary:
+                    v.primary = False
+                    v.updated_at = now
+                    self._write_yaml(v)
 
     def set_primary(self, aid: str) -> bool:
         """设置主助手（互斥）"""
@@ -736,70 +725,7 @@ class AssistantManager:
 
             logger.debug(f"[assistant_hub] 清空 system prompt 缓存失败: {e}")
 
-    # ── 身份/提示词文件 (回落链：落盘文件 → 人格专属模板 → 内置通用模板) ──
-
-    def _persona_template(self, aid: str, kind: str) -> str:
-        """人格伴随模板（identity/agents），persona 不存在返回空。"""
-        try:
-            a = self.get(aid)
-            persona = self.persona_registry().get(a.yuan) if a else None
-            if persona is None:
-                return ""
-            return getattr(persona, f"{kind}_template", "") or ""
-        except Exception:
-            return ""
-
-    def read_identity_source(self, aid: str) -> Tuple[str, bool]:
-        """读取 identity.md（缺失时回落：人格模板 → 内置模板），返回 (content, from_template)"""
-        path = self._identity_path(aid)
-        if path.exists():
-            return path.read_text(encoding="utf-8"), False
-        a = self.get(aid)
-        name = a.name if a else aid
-        persona_tpl = self._persona_template(aid, "identity")
-        if persona_tpl.strip():
-            return persona_tpl, True
-        return _BUILTIN_IDENTITY_TEMPLATE.format(name=name), True
-
-    def write_identity(self, aid: str, content: str) -> bool:
-        path = self._identity_path(aid)
-        self._ensure_dir(path.parent)
-        path.write_text(content, encoding="utf-8")
-        return True
-
-    def clear_identity(self, aid: str) -> bool:
-        """删除 identity.md 落盘（回到回落链：人格模板 → 内置模板）。"""
-        try:
-            self._identity_path(aid).unlink(missing_ok=True)
-            return True
-        except OSError:
-            return False
-
-    def read_agents_md_source(self, aid: str) -> Tuple[str, bool]:
-        """读取 AGENTS.md（缺失时回落：人格模板 → 内置模板），返回 (content, from_template)"""
-        path = self._agents_md_path(aid)
-        if path.exists():
-            return path.read_text(encoding="utf-8"), False
-        a = self.get(aid)
-        name = a.name if a else aid
-        persona_tpl = self._persona_template(aid, "agents")
-        if persona_tpl.strip():
-            return persona_tpl, True
-        return _BUILTIN_AGENTS_TEMPLATE.format(name=name), True
-
-    def write_agents_md(self, aid: str, content: str) -> bool:
-        path = self._agents_md_path(aid)
-        self._ensure_dir(path.parent)
-        path.write_text(content, encoding="utf-8")
-        return True
-
-    def clear_agents_md(self, aid: str) -> bool:
-        """删除 AGENTS.md 落盘（回到回落链：人格模板 → 内置模板）。"""
-        try:
-            self._agents_md_path(aid).unlink(missing_ok=True)
-            return True
-        except OSError:
-            return False
+    # ── 对外描述 (AGENTS.public.md：其他 agent 调用本助手时看到的简介) ──
 
     def read_public_md(self, aid: str) -> str:
         path = self._public_md_path(aid)
@@ -1314,9 +1240,10 @@ class AssistantManager:
     # ── 人格段组装 ──
 
     def identity_and_persona(self, aid: str) -> str:
-        """人格段：identity（落盘/模板回落）+ persona.prompt + AGENTS.md，全部 fill 变量。
+        """人格段：只拼 personas/<yuan>/persona.md 基底，fill 模板变量。
 
-        persona="none" 时不注入 persona.prompt；identity/AGENTS.md 为空时回落内置模板。
+        persona="none" 时不注入（纯净助手）；人格不可编辑，新增人格走
+        persona-creator 技能写入 personas/<id>/persona.md 热生效。
         """
         a = self.get(aid)
         if a is None:
@@ -1325,22 +1252,10 @@ class AssistantManager:
         reg = persona_mod.PersonaRegistry.get_instance()
         user = self.user_name()
         agent_name = a.name or a.id
-        fill = lambda t: reg.render(a.yuan, t, agent_name=agent_name, user_name=user)  # noqa: E731
-
-        parts: List[str] = []
-        # 1. identity（落盘优先，否则回落内置模板）
-        identity, _ = self.read_identity_source(aid)
-        if identity.strip():
-            parts.append(fill(identity.strip()))
-        # 2. persona 底座（none = 空，纯净助手）
         persona = reg.get(a.yuan)
-        if persona is not None and persona.prompt.strip():
-            parts.append(fill(persona.prompt))
-        # 3. AGENTS.md（行为准则）
-        agents_md, _ = self.read_agents_md_source(aid)
-        if agents_md.strip():
-            parts.append(fill(agents_md.strip()))
-        return "\n\n".join(p for p in parts if p)
+        if persona is None or not persona.prompt.strip():
+            return ""
+        return reg.render(a.yuan, persona.prompt.strip(), agent_name=agent_name, user_name=user)
 
     # ── 记忆传送带 ──
 

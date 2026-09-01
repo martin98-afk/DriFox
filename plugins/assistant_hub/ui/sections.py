@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """sections.py — 助手中心单列分区组件（对齐 openhanako AgentTab 分区结构）
 
-分区：ProfileSection（名称/模型）→ AboutSection（人格/身份/AGENTS.md）→
+分区：ProfileSection（名称/模型）→ AboutSection（人格切换，只读）→
 MemorySection（记忆传送带）→ ExperienceSection（经验）→ SkillsSection（技能）。
 
 视觉基调（对齐原版纸张风）：细边框卡 + 12px 圆角 + 小字 hint + 大量留白；
@@ -20,7 +20,6 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -71,45 +70,6 @@ def _card_frame(parent=None) -> QFrame:
     """
     )
     return frame
-
-
-def _editor_style() -> str:
-    return f"""
-        QTextEdit {{
-            background: {Colors.CARD_BG.format(alpha=110)};
-            border: 1px solid {Colors.BORDER};
-            color: {Colors.TEXT_PRIMARY};
-            border-radius: 8px;
-            padding: 6px;
-            {get_font_family_css()} {font_size_css(12)}
-        }}
-        QTextEdit:focus {{ border-color: {Colors.TEXT_ACCENT}; }}
-        QTextEdit QScrollBar:vertical {{
-            background: transparent;
-            width: 6px;
-            margin: 0;
-        }}
-        QTextEdit QScrollBar::handle:vertical {{
-            background: {Colors.SCROLLBAR_HANDLE_BG};
-            border-radius: 3px;
-            min-height: 30px;
-        }}
-        QTextEdit QScrollBar::handle:vertical:hover {{
-            background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
-            width: 8px;
-        }}
-        QTextEdit QScrollBar::handle:vertical:pressed {{
-            background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
-        }}
-        QTextEdit QScrollBar::add-line:vertical,
-        QTextEdit QScrollBar::sub-line:vertical {{
-            height: 0;
-        }}
-        QTextEdit QScrollBar::add-page:vertical,
-        QTextEdit QScrollBar::sub-page:vertical {{
-            background: none;
-        }}
-    """
 
 
 def _input_style() -> str:
@@ -333,7 +293,7 @@ class ProfileSection(_Section):
         self.saveRequested.emit(self._name.text().strip(), util_key)
 
 
-# ── 关于 Ta（人格 / 身份 / AGENTS.md）────────────────────
+# ── 关于 Ta（人格切换）────────────────────
 
 
 class _PersonaChip(QFrame):
@@ -408,45 +368,13 @@ class _PersonaChip(QFrame):
 
 
 class AboutSection(_Section):
-    """人格选择（chips，含「纯净助手」）+ 人格头像 + 身份简介 + AGENTS.md（实时保存）。"""
+    """人格选择（chips，含「纯净助手」）。人格只读，只能切换；新增人格走 persona-creator 技能。"""
 
     personaChangeRequested = pyqtSignal(str)
-    personaManageRequested = pyqtSignal()
-    personaAvatarChangeRequested = pyqtSignal()  # 更换当前人格头像
-    personaAvatarResetRequested = pyqtSignal()  # 恢复人格默认头像
-    saveRequested = pyqtSignal(str, str)  # (identity, agents_md)
-    _DEBOUNCE_MS = 800
 
     def __init__(self, personas: List[dict], current_pid: str, parent=None):
         super().__init__("关于 Ta", parent)
-        self.body().addWidget(_hint("“元”是助手的潜意识，以此为基础搭建你独一无二的伙伴。", 10))
-
-        # 人格头像行：头像归属人格（切换助手/人格自动跟随），在此更换/恢复
-        avatar_row = QHBoxLayout()
-        avatar_row.setSpacing(12)
-        self._persona_avatar = RoundAvatar(size=56, text="?", color="#7C3AED", parent=self)
-        avatar_row.addWidget(self._persona_avatar)
-        av_info = QVBoxLayout()
-        av_info.setSpacing(2)
-        self._persona_avatar_name = QLabel("—")
-        self._persona_avatar_name.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
-            f"{get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
-        )
-        av_info.addWidget(self._persona_avatar_name)
-        av_info.addWidget(_hint("头像属于人格，切换人格自动跟随。", 10))
-        avatar_row.addLayout(av_info)
-        avatar_row.addStretch()
-        self._avatar_reset_btn = QPushButton("恢复默认")
-        self._avatar_reset_btn.setStyleSheet(_btn_style())
-        self._avatar_reset_btn.clicked.connect(self.personaAvatarResetRequested.emit)
-        self._avatar_reset_btn.setEnabled(False)
-        avatar_row.addWidget(self._avatar_reset_btn)
-        change_av_btn = QPushButton("更换头像")
-        change_av_btn.setStyleSheet(_btn_style())
-        change_av_btn.clicked.connect(self.personaAvatarChangeRequested.emit)
-        avatar_row.addWidget(change_av_btn)
-        self.body().addLayout(avatar_row)
+        self.body().addWidget(_hint("点卡片切换人格（内置预设，只读）；新增人格在对话里说「创建新人格」。", 10))
 
         chips_row = QHBoxLayout()
         chips_row.setSpacing(12)
@@ -456,54 +384,7 @@ class AboutSection(_Section):
         self._current_pid = current_pid
         self.body().addLayout(chips_row)
         self.rebuild_chips(personas)
-
-        manage_row = QHBoxLayout()
-        manage_row.addStretch()
-        manage_btn = QPushButton("管理人格…")
-        manage_btn.setStyleSheet(_btn_style())
-        manage_btn.clicked.connect(self.personaManageRequested.emit)
-        manage_row.addWidget(manage_btn)
-        manage_row.addStretch()
-        self.body().addLayout(manage_row)
-
-        # 身份
-        self.body().addWidget(_title_label("身份简介", 11))
-        self._identity = QTextEdit()
-        self._identity.setFixedHeight(140)
-        self._identity.setStyleSheet(_editor_style())
-        self._identity.setPlaceholderText(
-            "# {{agentName}}\n\n{{userName}}的个人助手。感性与理性兼备，既有温度也有判断力。"
-        )
-        self.body().addWidget(self._identity)
-        self.body().addWidget(
-            _hint("简短描述助手是谁、擅长什么。其他助手通过这段文字认识 Ta；支持 {{userName}} / {{agentName}} 变量。")
-        )
-        # AGENTS.md
-        self.body().addWidget(_title_label("AGENTS.md", 11))
-        self._agents_md = QTextEdit()
-        self._agents_md.setFixedHeight(240)
-        self._agents_md.setStyleSheet(_editor_style())
-        self._agents_md.setPlaceholderText("# 人格定义\n\n- 你是一个有温度的存在…")
-        self.body().addWidget(self._agents_md)
-        self.body().addWidget(
-            _hint("行为准则 / 工作流 / 偏好。激活该助手时会整体替换当前智能体提示词；修改后自动保存。")
-        )
-        # 实时保存：编辑节流后自动落盘，无保存按钮
-        self._save_debounce = QTimer(self)
-        self._save_debounce.setSingleShot(True)
-        self._save_debounce.setInterval(self._DEBOUNCE_MS)
-        self._save_debounce.timeout.connect(
-            lambda: self.saveRequested.emit(self._identity.toPlainText(), self._agents_md.toPlainText())
-        )
-        self._suspend_autosave = False
-        self._identity.textChanged.connect(self._schedule_autosave)
-        self._agents_md.textChanged.connect(self._schedule_autosave)
         self.set_persona(current_pid)
-
-    def _schedule_autosave(self) -> None:
-        if self._suspend_autosave:
-            return
-        self._save_debounce.start()
 
     def set_persona(self, pid: str) -> None:
         """刷新 chips 选中态。"""
@@ -528,29 +409,6 @@ class AboutSection(_Section):
             self._chips.append(chip)
         self._chips_row.addStretch()
         self.set_persona(self._current_pid)
-
-    def refresh_avatar(self, pid: str, image_path: str) -> None:
-        """轻量刷新单个 chip 头像（换人格头像后由宿主调用）。"""
-        for chip in self._chips:
-            if chip.persona_id == pid:
-                chip.set_avatar_image(image_path)
-                break
-
-    def set_persona_avatar(self, image_path: str, name: str, has_override: bool) -> None:
-        """刷新人格头像预览与「恢复默认」可用性（宿主在切人格/换头像后调用）。"""
-        self._persona_avatar.set_image(image_path or None)
-        self._persona_avatar_name.setText(name or "—")
-        self._avatar_reset_btn.setEnabled(bool(has_override))
-
-    def bind_texts(self, identity: str, agents_md: str) -> None:
-        self._suspend_autosave = True  # 回填期间不触发自动保存
-        self._identity.setPlainText(identity)
-        self._agents_md.setPlainText(agents_md)
-        self._suspend_autosave = False
-
-    def texts(self) -> tuple:
-        """当前编辑框内容 (identity, agents_md)（切人格时判断是否被用户改过用）。"""
-        return self._identity.toPlainText(), self._agents_md.toPlainText()
 
 
 # ── 记忆分区 ────────────────────────────────────────────

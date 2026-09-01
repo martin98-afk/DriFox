@@ -905,14 +905,18 @@ class TabManagerWindow(FramelessWindow):
         anim = self._wb_anim
         if anim is None:
             anim = QVariantAnimation(self)
-            anim.setDuration(200)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
             anim.valueChanged.connect(lambda v: self._apply_wb_width(v))
             anim.finished.connect(self._on_wb_anim_finished)
             self._wb_anim = anim
         # 中途反向重启时旧收尾回调直接丢弃，只执行最新一次的回调
         self._wb_anim_finished_cb = on_finished
         anim.stop()
+        # ★ 曲线/时长按方向分离：展开 OutCubic（快速露出内容）；收起 OutQuad
+        # + 160ms —— OutCubic 的尾段拖尾（后 12.5% 宽度要磨掉一半时间）在收起
+        # 时观感为“收到一半顿一下才收完”（用户实测反馈）
+        collapsing = end_w < start_w
+        anim.setDuration(160 if collapsing else 200)
+        anim.setEasingCurve(QEasingCurve.OutQuad if collapsing else QEasingCurve.OutCubic)
         anim.setStartValue(float(start_w))
         anim.setEndValue(float(end_w))
         anim.start()
@@ -995,8 +999,13 @@ class TabManagerWindow(FramelessWindow):
             frame.setMinimumWidth(0)
             target_w = max(0, min(getattr(self, "_workbench_frame_w", PANEL_WIDTH_DEFAULT + 14), frame.maximumWidth()))
             if animate:
+                # ★ 动画期冻结工作台内容渲染：新暴露区域显示背景色（空面板展开），
+                # 内部页（历史列表/树等大量子控件）不再逐帧重绘重排 —— 开关卡顿主因。
+                # 完全展开后再恢复渲染并填充数据（用户认可的“先不渲染后显示”）。
+                panel.setUpdatesEnabled(False)
 
                 def _wb_expand_finished() -> None:
+                    panel.setUpdatesEnabled(True)
                     frame.setMinimumWidth(PANEL_WIDTH_MIN + 14)
                     panel.setMinimumWidth(PANEL_WIDTH_MIN)
                     # 数据填充推迟一帧：refresh_workbench（页签 reconcile + 树/列表刷新）
@@ -1011,7 +1020,10 @@ class TabManagerWindow(FramelessWindow):
                     on_finished=_wb_expand_finished,
                 )
             else:
-                # 瞬切（per-tab 显隐恢复）：直接落位，不动画不延帧
+                # 瞬切（per-tab 显隐恢复）：直接落位，不动画不延帧。
+                # ★ 若此前动画被 stop 打断（finished 未跑），冻结标志残留，
+                # 必须在此恢复，否则面板内容永不重绘（空白面板）
+                panel.setUpdatesEnabled(True)
                 frame.setMinimumWidth(PANEL_WIDTH_MIN + 14)
                 panel.setMinimumWidth(PANEL_WIDTH_MIN)
                 self._set_wb_width_now(target_w)
@@ -1021,19 +1033,27 @@ class TabManagerWindow(FramelessWindow):
                 self._workbench_frame_w = start_w
             frame.setMinimumWidth(0)
             if animate:
+                # ★ 收起同样冻结内容渲染：面板显示最后一帧静态内容被逐渐裁剪，
+                # 内部页不再逐帧重绘（与展开期冻结同源同收益）
+                panel.setUpdatesEnabled(False)
                 self._start_wb_anim(
                     start_w,
                     0,
+                    # ★ 收尾顺序：先隐藏面板再恢复渲染标志——
+                    # setUpdatesEnabled(True) 会调度一次全量重绘，若在面板仍可见时
+                    # 恢复，收完瞬间会重绘一次大内容（感知为收尾顿一下）
                     on_finished=lambda: (
                         panel.set_panel_visible(False),
                         frame.hide(),
                         frame.setMinimumWidth(PANEL_WIDTH_MIN + 14),
                         panel.setMinimumWidth(PANEL_WIDTH_MIN),
                         self._set_chat_frame_wb_hidden(True),
+                        panel.setUpdatesEnabled(True),
                     ),
                 )
             else:
-                # 瞬切收起：对齐动画收尾动作，一次性完成
+                # 瞬切收起：对齐动画收尾动作，一次性完成（含恢复冻结标志）
+                panel.setUpdatesEnabled(True)
                 panel.set_panel_visible(False)
                 frame.hide()
                 frame.setMinimumWidth(PANEL_WIDTH_MIN + 14)

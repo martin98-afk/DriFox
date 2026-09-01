@@ -3,7 +3,7 @@
 
 两个 hook：
 1. BuildSystemPrompt（``hook``）：激活助手时**直接输出**助手信息块
-   （人格段 identity+persona+AGENTS.md → 记忆使用规则 → 置顶 → memory.md），
+   （人格段 persona → 记忆使用规则 → 置顶 → memory.md），
    并把 context 里预取的智能体提示词置空防重复。经验不注入 prompt
    （recall_experience 无参返回索引 = 渐进式披露）。
 2. Stop（``on_stop``）：主对话每轮结束计数，交给 MemoryTicker 驱动
@@ -113,7 +113,7 @@ def _assistant_prompt_block(aid: str) -> str:
 
     parts: list[str] = []
 
-    # 1. 人格段（identity + persona 底座 + AGENTS.md，fill 模板变量；none=纯净）
+    # 1. 人格段（personas/<yuan>/persona.md 基底，fill 模板变量；none=纯净）
     persona_block = mgr.identity_and_persona(aid)
     if persona_block.strip():
         parts.append(persona_block.strip())
