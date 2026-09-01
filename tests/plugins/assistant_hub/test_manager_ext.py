@@ -66,7 +66,11 @@ def test_persona_registry_via_facade(tmp_path, monkeypatch):
 
 
 def test_utility_llm_composite_key(tmp_path, monkeypatch):
-    """utility_model 复合键 "<config_id>||<model>"：解析 override 覆盖模型名；失效回退。"""
+    """utility_model 复合键 "<config_id>||<model>"：解析 override 覆盖模型名；失效回退全局。
+
+    调用链已改走主对话引擎（services["create_engine_session"]），断言点从
+    HTTP 请求体改为引擎会话的 model_config_override。
+    """
     mgr = _fresh_manager(tmp_path)
     a = mgr.create("模型助手")
     # 复合键：配置存在 → override 覆盖 模型名称
@@ -76,35 +80,25 @@ def test_utility_llm_composite_key(tmp_path, monkeypatch):
     captured = {}
     llm_mod = mgr._core_llm()
 
-    class _Resp:
-        def __enter__(self):
-            return self
+    class _FakeSession:
+        def turn(self, messages=None, **kwargs):
+            return _FakeResult("ok")
 
-        def __exit__(self, *a):
-            return False
+        def cleanup(self):
+            pass
 
-        def read(self):
-            import json as _json
+    class _FakeResult:
+        def __init__(self, text):
+            self.text = text
+            self.error = None
+            self.cancelled = False
+            self.timed_out = False
 
-            return _json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+    def _create_engine_session(engine_name, **kwargs):
+        captured["kwargs"] = kwargs
+        return _FakeSession()
 
-    def fake_urlopen(req, timeout=60):
-        import json as _json
-
-        captured["body"] = _json.loads(req.data.decode())
-        return _Resp()
-
-    monkeypatch.setattr(
-        llm_mod,
-        "resolve_model_config",
-        lambda config_id="": {
-            "base_url": "https://global/v1",
-            "api_key": "k",
-            "model": "global-m",
-            "provider_name": "p",
-        },
-    )
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    llm_mod.set_services({"create_engine_session": _create_engine_session})
 
     # mock 主路径：UIPluginRegistry 返回带 _valid_configs 的窗口（对齐真实调用链）
     fake_mw = type("MW", (), {})()
@@ -124,22 +118,30 @@ def test_utility_llm_composite_key(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_reg_mod, "UIPluginRegistry", _FakeReg)
 
+    def _override():
+        return captured["kwargs"].get("model_config_override") or {}
+
     call = mgr._utility_llm(a.id)
     out = call([{"role": "user", "content": "hi"}])
     assert out == "ok"
     # 复合键生效：URL 用 cfg-1，模型名被覆盖为 model-x
-    assert captured["body"]["model"] == "model-x"
+    assert _override()["API_URL"] == "https://cfg1/v1"
+    assert _override()["模型名称"] == "model-x"
 
-    # 无效复合键（配置不存在）→ 回退全局
+    # 无效复合键（配置不存在）→ 回退全局（无 override，只用工具型温度）
     b = mgr.create("回退助手")
     b.utility_model = "not-exist||m"
     mgr.update(b)
     call2 = mgr._utility_llm(b.id)
     call2([{"role": "user", "content": "hi"}])
-    assert captured["body"]["model"] == "global-m"  # 回退全局当前模型
+    assert "模型名称" not in _override()
 
     # 空键 → 跟随全局
     c = mgr.create("全局助手")
     call3 = mgr._utility_llm(c.id)
     call3([{"role": "user", "content": "hi"}])
-    assert captured["body"]["model"] == "global-m"
+    assert "模型名称" not in _override()
+
+    llm_mod.reset_sessions()
+    with llm_mod._services_lock:
+        llm_mod._services.clear()

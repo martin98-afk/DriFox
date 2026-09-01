@@ -184,6 +184,11 @@ class OpenAIChatWorker(QThread):
     _TOOL_LOOP_THRESHOLD = 3
     _model_adapter = None  # 懒解析缓存（首查时 resolve）
     _loop_policy_obj = None  # 懒解析缓存（激活策略）
+    # 引擎级循环策略 id（ConversationConfig.loop_policy_id 透传）。
+    # 类级默认值 None = 未声明 → 回落全局激活策略；声明为类属性（而非仅在
+    # __init__ 赋值）可让 __new__ 构造的测试桩安全读取（QObject 未初始化时
+    # 访问不存在的实例属性会抛 RuntimeError 而非 AttributeError）。
+    _loop_policy_id = None
 
     def __init__(
         self,

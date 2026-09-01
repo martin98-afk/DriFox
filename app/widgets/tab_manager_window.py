@@ -1071,12 +1071,18 @@ class TabManagerWindow(FramelessWindow):
         才发射（页签点击 / 定向入口 / 显式关闭），程序化切换（历史页换挂延续、
         切窗恢复 saved）不发射、不写记忆，避免后台切换覆盖活跃窗口的原记忆。
         无活跃窗口/面板未挂载时静默跳过（信号驱动，零轮询）。
+
+        ★ 按 tab_id 记忆而非裸 index：各窗口的 tab 集合可能不同（卡片 tab
+        per-tab 投影 / 历史页懒挂载 / 插件页），裸 index 在切窗恢复时会撞到
+        别的页签或越界 → 「选中残留/丢失」根因。restore 侧按 id 重新定位。
         """
         win = self.get_current_window()
         if win is None:
             return
         try:
-            win._workbench_tab_memory = int(index)
+            panel = getattr(self, "workbench_panel", None)
+            ids = panel._tab_ids if panel is not None else ()
+            win._workbench_tab_memory = ids[index] if 0 <= index < len(ids) else None
         except Exception:
             pass
 
@@ -3090,10 +3096,19 @@ class TabManagerWindow(FramelessWindow):
                     # 恢复该窗口上次停留的工作台页签（refresh_workbench 可能因
                     # 历史页保持/插件页 reconcile 改变当前页，故恢复放在其之后）。
                     # 仅处理窗口显式记忆过的页签；未记忆过的窗口保持现状不跳页。
+                    # ★ 记忆的是 tab_id（见 _remember_workbench_tab）：按 id 在
+                    # 当前页签集合中重新定位，找不到（页签已卸载）则保持现状，
+                    # 不越界跳页也不把全部按钮高亮熄灭。
                     if saved_tab is not None:
                         try:
-                            if self.workbench_panel.current_tab() != saved_tab:
-                                self.workbench_panel.set_current_tab(saved_tab)
+                            panel = self.workbench_panel
+                            if isinstance(saved_tab, int):
+                                # 旧版按 index 记忆的兼容（本次修复前写入的存量值）
+                                saved_tab = panel._tab_ids[saved_tab] if 0 <= saved_tab < len(panel._tab_ids) else None
+                            if saved_tab is not None:
+                                idx = panel._tab_id_index(saved_tab)
+                                if idx is not None and panel.current_tab() != idx:
+                                    panel.set_current_tab(idx)
                         except RuntimeError:
                             pass
 

@@ -782,6 +782,7 @@ class WorkbenchPanel(QWidget):
         self._bottom_layout.setSpacing(4)
         self._tab_buttons: List[CustomTabButton] = []
         self._tab_ids: List[str] = []
+        self._tab_labels: List[str] = []  # 与 _tab_ids 平行，供 _rebuild_tab_bar 标签变更判定
 
         # 内容栈
         # index 0 = 工作树页（git 工作树 + 关键文档，默认落点）
@@ -920,11 +921,16 @@ class WorkbenchPanel(QWidget):
         if entry is not None:
             if entry["widget"] is not widget:
                 old = entry["widget"]
-                if self._stack.indexOf(old) >= 0:
+                pos = self._stack.indexOf(old)
+                if pos >= 0:
                     self._stack.removeWidget(old)
                     old.setParent(None)
+                    # ★ 原位替换而非 remove+append：append 会把卡片移到栈尾，
+                    # 多卡片时栈顺序与页签顺序（按注册序）错位 → tab 与内容对不上
+                    self._stack.insertWidget(pos, widget)
+                else:
+                    self._stack.addWidget(widget)
                 entry["widget"] = widget
-                self._stack.addWidget(widget)
             entry["label"] = label
         else:
             self._card_tabs[card_id] = {"label": label, "widget": widget}
@@ -971,7 +977,12 @@ class WorkbenchPanel(QWidget):
         """
         if widget is None or self._history_page is widget:
             return
-        was_current = self._history_page is not None and self._stack.currentIndex() == self.TAB_HISTORY
+        # ★ 换挂/首次挂载后页签集合变化：后续页签 index 整体平移（insert 前插
+        # 时 Qt 递增 currentIndex、remove 前删时递减，保持同一 current widget），
+        # 依赖 Qt 的 index 记账容易在组合路径下错位。这里统一按「此前所在页签的
+        # tab_id」重新定位：正显示历史页则延续新窗口的历史页（跨窗口不跳页），
+        # 停在插件/卡片页则按 id 找回新 index，页面与高亮都不丢。
+        prev_id = self._tab_id_at(self._stack.currentIndex())
         if self._history_page is not None:
             old = self._history_page
             idx = self._stack.indexOf(old)
@@ -983,9 +994,12 @@ class WorkbenchPanel(QWidget):
         # 固定插在 index 3（工作树/记忆/产物之后、插件页之前），页签顺序稳定
         self._stack.insertWidget(self.TAB_HISTORY, widget)
         self._rebuild_tab_bar()
-        if was_current:
-            # 换挂前正显示历史页 → 继续显示新窗口的历史页（跨窗口切换不跳页）
-            self.set_current_tab(self.TAB_HISTORY)
+        # 还原用户此前所在页签：tab 集合变化后按 id 重新定位；此前正显示历史页
+        # 则延续显示新窗口的历史页（跨窗口切换不跳页的既有语义）
+        if prev_id is not None:
+            restore_idx = self._tab_id_index(prev_id)
+            if restore_idx is not None and restore_idx != self._stack.currentIndex():
+                self.set_current_tab(restore_idx)
 
     def detach_history_page(self, widget: QWidget) -> None:
         """摘除「历史会话」页（窗口关闭时由宿主窗口调用，防 stack 悬空引用）
@@ -1042,8 +1056,10 @@ class WorkbenchPanel(QWidget):
         且延迟删除的旧按钮在事件循环繁忙期间可能留下残影（用户实测 hover
         混乱残留的主因）。"""
         specs = self._tab_specs()
-        if [t for t, _ in specs] == self._tab_ids:
-            # 页签集合未变：仅重算 hover 仲裁（光标下的高亮跟随真实位置）
+        spec_ids = [t for t, _ in specs]
+        spec_labels = [label for _, label in specs]
+        if spec_ids == self._tab_ids and spec_labels == self._tab_labels:
+            # 页签集合与标签都未变：仅重算 hover 仲裁（光标下的高亮跟随真实位置）
             self._schedule_tab_hover_sync()
             return
         while self._tab_bar_layout.count():
@@ -1058,6 +1074,7 @@ class WorkbenchPanel(QWidget):
                 w.deleteLater()
         self._tab_buttons = []
         self._tab_ids = []
+        self._tab_labels = []
         for tab_id, label in specs:
             closable = tab_id in self._card_tabs
             btn = CustomTabButton(tab_id, label, self, closable=closable)
@@ -1067,6 +1084,7 @@ class WorkbenchPanel(QWidget):
             self._tab_bar_layout.addWidget(btn)
             self._tab_buttons.append(btn)
             self._tab_ids.append(tab_id)
+            self._tab_labels.append(label)
         # 重建后恢复选中态：历史页换挂等触发的重建不能让当前页高亮丢失
         # （按钮全部新建，默认非激活；此前仅 was_current 路径会经
         # set_current_tab 补高亮，其余场景高亮直接丢失）
@@ -1149,6 +1167,12 @@ class WorkbenchPanel(QWidget):
                 return i
         return None
 
+    def _tab_id_at(self, index: int) -> Optional[str]:
+        """按当前页签顺序取 index 对应的 tab_id（越界返回 None）"""
+        if 0 <= index < len(self._tab_ids):
+            return self._tab_ids[index]
+        return None
+
     # ── 插件页签 reconcile（宿主在 refresh_workbench 时调用） ──
 
     def sync_plugin_pages(self, tabs: List[Any]) -> None:
@@ -1169,6 +1193,10 @@ class WorkbenchPanel(QWidget):
         infos = {pid: info for pid, info in all_infos.items() if pid != "artifacts"}
         sig = tuple((t.page_id, t.label) for t in (tabs or []) if t.page_id != "artifacts")
         if sig == self._plugin_sig and set(infos.keys()) == set(self._plugin_widgets.keys()):
+            # 集合未变也补一次页签条 reconcile：产物页 label 未入 sig，
+            # 插件注册/改名后标签可能残留旧值（_rebuild_tab_bar 内部再做
+            # id+label 比对，集合未变时仅重算 hover，成本为零）
+            self._rebuild_tab_bar()
             return
         self._plugin_infos = infos
         # 当前页是否是被卸载的插件页（卸载后 Qt 会自动切到邻近页，需回落第一个页签）
@@ -1320,7 +1348,14 @@ class WorkbenchPanel(QWidget):
         user=True 表示用户主动切换（页签点击 / 定向入口），仅此路径发射
         current_tab_changed 驱动宿主写入 per-window 页签记忆；程序化切换
         （历史页换挂延续、切窗恢复 saved）不发射，避免污染活跃窗口记忆。
+
+        ★ 越界保护：按窗口记忆恢复的页签可能已被卸载（卡片 tab 关闭 / 插件
+        卸载 / 历史页摘除）。此时 setCurrentIndex 是空操作而下方按钮循环会把
+        全部按钮置非激活 —— 「tab 选中丢失」根因。越界时不强行跳页，仅把
+        按钮高亮与 stack 当前页重新对齐。
         """
+        if index < 0 or index >= self._stack.count():
+            index = self._stack.currentIndex()
         self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == index)
