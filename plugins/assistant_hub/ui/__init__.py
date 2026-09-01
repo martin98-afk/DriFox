@@ -140,7 +140,7 @@ def _register_sync_provider() -> None:
     try:
         from app.core.config_sync import register_sync_content_provider
 
-        from ..assistant_manager import AssistantManager
+        from assistant_hub_manager import AssistantManager
 
         mgr = AssistantManager.get_instance()
         register_sync_content_provider(

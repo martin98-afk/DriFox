@@ -541,11 +541,73 @@ class AssistantManager:
 
     @classmethod
     def set_active(cls, aid: str) -> bool:
+        """激活助手：记录 active_id 并清空所有窗口的 system prompt 缓存。
+
+        缓存清空是必须的：context_builder 会缓存 session.system_prompt，
+        若不失效，激活新助手后下次 build_messages 仍复用旧助手（或 build）
+        的身份注入，表现为"系统提示词里没有助手内容"。
+        """
         mgr = cls.get_instance()
         if not mgr.has(aid):
             return False
+        changed = cls._active_id != aid
         cls._active_id = aid
+        if changed:
+            cls._invalidate_session_prompt_caches()
         return True
+
+    @classmethod
+    def clear_active(cls) -> None:
+        """取消激活助手（回到默认 build 智能体身份）"""
+        if cls._active_id:
+            cls._active_id = ""
+            cls._invalidate_session_prompt_caches()
+
+    @staticmethod
+    def _invalidate_session_prompt_caches() -> None:
+        """清空所有窗口所有 session 的 system_prompt 缓存。
+
+        遍历 ChatBackend 活跃实例的 session manager，把每个 session 的
+        system_prompt 置空，下次 build_messages 强制重建（重新触发
+        BuildSystemPrompt hooks → 新助手身份注入）。
+        """
+        try:
+            from app.core.backend import ChatBackend
+
+            for backend in list(ChatBackend._active_instances):
+                sm = getattr(backend, "session_manager", None)
+                if sm is None:
+                    continue
+                sessions = getattr(sm, "sessions", None)
+                if isinstance(sessions, dict):
+                    items = sessions.values()
+                else:
+                    try:
+                        items = sm.get_all_sessions() or []
+                    except Exception:
+                        items = []
+                for session in items:
+                    try:
+                        session.system_prompt = ""
+                        if hasattr(session, "_system_prompt_agent"):
+                            session._system_prompt_agent = ""
+                    except Exception:
+                        pass
+            # 兜底：ChatBackend._active_instances 可能未暴露，走 engine 级缓存
+            try:
+                from app.core.engines.ui.engine import ChatEngine
+
+                for engine in list(getattr(ChatEngine, "_instances", []) or []):
+                    try:
+                        engine._invalidate_session_system_prompt_cache()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        except Exception as e:
+            from loguru import logger
+
+            logger.debug(f"[assistant_hub] 清空 system prompt 缓存失败: {e}")
 
     # ── 身份/提示词文件 (回落模板同 openhanako persona-source) ──
 

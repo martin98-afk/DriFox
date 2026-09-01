@@ -5,9 +5,9 @@
 - **助手 ≠ 智能体**。助手是比智能体高一个维度的抽象，不注册到 AgentManager，
   不参与 subagent 调用。原 build 智能体定义保持不变、仍可被子智能体调用。
 - **替换注入**：当某个助手被激活（``AssistantManager.active_id()``）时，
-  ``BuildSystemPrompt`` 事件中原先注入的**智能体提示词**
-  （``context["agent_identity_content"]``）被替换为**助手信息**
-  （identity.md + AGENTS.md + 置顶记忆 + 当下记忆 + 长期记忆 + 专属技能）。
+  本 hook **直接输出**助手信息（身份 + 人格 + 记忆 + 技能）作为 system prompt
+  的身份段，同时把 context 里预取的智能体提示词**置空**，避免系统
+  inject_agent_identity（若仍启用）重复输出 build 提示词。
 - 本插件自带 hook（hooks/hooks.json + 本文件），不改动系统 hooks.json。
 
 实现说明：
@@ -111,16 +111,17 @@ def _assistant_prompt_block(aid: str) -> str:
 
 
 def hook(event: str, context: Dict[str, Any]) -> str:
-    """BuildSystemPrompt hook：激活助手时替换智能体身份注入。
+    """BuildSystemPrompt hook：激活助手时直接输出助手信息块。
 
     Args:
         event: 事件名（BuildSystemPrompt）
         context: 由 get_agent_system_prompt() 预取的上下文，含
             - agent_name / current_role（primary|subagent）
-            - agent_identity_content（原智能体提示词，可被本 hook 替换）
+            - agent_identity_content（原智能体提示词，本 hook 会置空防重复）
 
     Returns:
-        空字符串（修改 context 由后续 inject_agent_identity hook 输出）。
+        助手信息块（激活助手时）；未激活 / 非主智能体返回空串。
+        返回内容由 HookManager add_output_to_context 注入 system prompt。
     """
     # 仅主智能体会话生效（子智能体保留系统定义，避免嵌套污染）
     if (context or {}).get("current_role") != "primary":
@@ -131,16 +132,17 @@ def hook(event: str, context: Dict[str, Any]) -> str:
         if mgr is None:
             return ""
         aid = mgr.active_id()
-        if not aid:
+        if not aid or not mgr.has(aid):
             return ""
 
         block = _assistant_prompt_block(aid)
         if not block:
             return ""
 
-        # ★ 替换注入：覆盖 context 中的智能体提示词，使系统 inject_agent_identity
-        # hook 输出助手信息而非 build 等原始智能体定义。
-        context["agent_identity_content"] = block
+        # 置空系统预取的智能体提示词：若系统 inject_agent_identity 仍启用，
+        # 它读到空串不会输出 build 提示词，避免与助手信息重复。
+        context["agent_identity_content"] = ""
+        return block
     except Exception as e:
         logger.warning(f"[assistant_hub.hooks] BuildSystemPrompt 处理失败: {e}")
-    return ""
+        return ""

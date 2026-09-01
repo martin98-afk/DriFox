@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -108,6 +109,19 @@ class _AssistantListWidget(QFrame):
         for a in assistants:
             item = QListWidgetItem()
             item.setData(Qt.UserRole, a.id)
+            # 头像图标（28px 圆形）+ 名称 + 主助手星标
+            ap = self._mgr.avatar_path(a.id)
+            avatar = RoundAvatar(
+                size=28,
+                text=a.name or a.id,
+                color=a.color,
+                image_path=str(ap) if ap else None,
+            )
+            item.setIcon(QIcon(avatar.grab()))
+            label = a.name or a.id
+            if a.primary:
+                label = "★ " + label
+            item.setText(label)
             self._list.addItem(item)
         if select_aid or self._active_aid:
             target = select_aid or self._active_aid
@@ -237,6 +251,7 @@ class AssistantCardWidget(QWidget):
         self._tab_prompt = PromptTab(wrap)
         self._tab_public = PublicTab(wrap)
         self._tab_avatar = AvatarTab(wrap)
+        self._tab_avatar.changed.connect(self._on_avatar_changed)
         self._tab_memory = MemoryTab(wrap)
         self._tab_skills = SkillsTab(wrap)
         self._tabs.addTab(self._tab_identity, "身份")
@@ -332,6 +347,20 @@ class AssistantCardWidget(QWidget):
     def _on_select(self, aid: str) -> None:
         if aid and self._mgr.has(aid):
             self._bind_editor(aid)
+
+    def _on_avatar_changed(self, aid: str) -> None:
+        """头像变更后刷新卡片头部 + 左侧列表（不重绑编辑器避免打断输入）"""
+        if aid != self._active_aid:
+            return
+        a = self._mgr.get(aid)
+        if not a:
+            return
+        ap = self._mgr.avatar_path(aid)
+        self._editor_avatar.set_text(a.name or a.id)
+        self._editor_avatar.set_color(a.color)
+        self._editor_avatar.set_image(str(ap) if ap else None)
+        self._list_widget.refresh(select_aid=aid)
+        self._notify("头像已更新")
 
     def _on_create(self) -> None:
         from .rename_dialog import RenameDialog

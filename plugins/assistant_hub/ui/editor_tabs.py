@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -257,10 +257,19 @@ class PublicTab(QWidget):
 
 
 class AvatarTab(QWidget):
-    """头像（预置剪影 / 纯色 / 本地文件）"""
+    """头像（预置剪影 / 纯色 / 本地文件）
+
+    - 选中预置头像：拷贝到助手 avatars/ 目录并更新 assistant.yaml
+    - 选中纯色：更新 color 字段（无图头像回落色块）
+    - 本地上传：写入助手目录
+    每次变更都会发 ``changed`` 信号，由 AssistantCardWidget 刷新顶部头像。
+    """
+
+    changed = pyqtSignal(str)  # assistant_id
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._aid: str = ""
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(4)
@@ -272,9 +281,11 @@ class AvatarTab(QWidget):
         hint.setStyleSheet(_label_style(11))
         v.addWidget(hint)
         self._picker = AvatarPicker(parent=self)
+        self._picker.avatarSelected.connect(self._on_avatar_selected)
         v.addWidget(self._picker, 1)
 
     def bind(self, mgr: AssistantManager, aid: str) -> None:
+        self._aid = aid
         a = mgr.get(aid)
         if not a:
             return
@@ -285,6 +296,45 @@ class AvatarTab(QWidget):
             name=a.name,
             image_path=str(ap) if ap else "",
         )
+
+    def _on_avatar_selected(self, payload: dict) -> None:
+        if not self._aid:
+            return
+        mgr = AssistantManager.get_instance()
+        a = mgr.get(self._aid)
+        if not a:
+            return
+
+        kind = payload.get("kind", "")
+        try:
+            if kind == "predefined":
+                # 拷贝预置头像到助手目录
+                src = Path(payload.get("image_path") or "")
+                if src.exists() and src.is_file():
+                    ext = src.suffix.lstrip(".").lower()
+                    if ext == "jpeg":
+                        ext = "jpg"
+                    data = src.read_bytes()
+                    saved = mgr.save_avatar_from_bytes(self._aid, data, ext)
+                    if saved:
+                        a.avatar_path = str(saved)
+                        a.color = payload.get("color") or a.color
+                        mgr.update(a)
+            elif kind == "color":
+                a.color = payload.get("color") or a.color
+                a.avatar_path = ""
+                mgr.update(a)
+            elif kind == "uploaded":
+                a.color = payload.get("color") or a.color
+                mgr.update(a)
+
+            mgr.invalidate_context(self._aid)
+            # 通知卡片刷新顶部头像 + 左侧列表
+            self.changed.emit(self._aid)
+        except Exception as e:
+            from loguru import logger
+
+            logger.warning(f"[assistant_hub] 保存头像失败: {e}")
 
 
 # ────────────────────────────────────────────────────────────────
