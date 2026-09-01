@@ -436,6 +436,17 @@ ChatWorker `_hook_policy` 归一化（None/非法 → ALL 兼容旧调用方）�
 `trigger_hooks` per-call 参数 → `tool_executor.execute(trigger_hooks=False)`
 跳过 PreToolUse/PostToolUse（per-call 线程安全，subagent 并发不受影响）。
 
+> ⚠️ **枚举必须翻译成 `hook_policy_id` 才生效**（2026-09-02 修复）。
+> `ChatWorker._hook_policy_obj_resolve()` 只在**显式 id** 存在时按 id 取策略；
+> 没给 id 时它会忽略枚举、直接回落 `get_active(SCOPE_MAIN)`（= `all`）。
+> 所以引擎只传 `hook_policy=HookPolicy.NONE` 而没传 `hook_policy_id` 时，
+> 声明形同虚设 —— Stop hook 的续命提醒照样会注入插件引擎的消息流。
+> `EngineSessionImpl.__init__` 现在负责翻译（`ALL→"all"` /
+> `TOOL_EVENTS_ONLY→"tool_only"` / `NONE→"none"`，注意枚举值与插件 id
+> **不同名**）；主对话 / Gateway 引擎不声明 `hook_policy`，枚举保持默认
+> `ALL` 且 `hook_policy_id=None`，仍按用户激活策略走，行为零变化。
+> 守卫：`tests/plugins/test_engine_session_stale_and_hook_policy.py`。
+
 ### EngineSession — 插件对话引擎最通用驱动原语（EP3）
 
 > 契约 `app/plugins/contracts/engine_session.py`；实现

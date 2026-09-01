@@ -8830,20 +8830,22 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # 极小窗口时对话区让出横向空间给左右 dock：
+        # 极小窗口时对话区让出横向空间给左 dock：
         # 卡片渲染下限 320 由 sync_width(target_width=max(320, ...)) 兜底，
         # 对话区被压窄/遮挡没关系。判据：
-        # - Tab 模式（宿主窗口有 dockSplitter）：用窗口总宽 - 左右 dock 最小
+        # - Tab 模式（宿主窗口有 dockSplitter）：用窗口总宽 - 左 dock 最小
         #   需求（含 handle），剩余不足 320 时让位为 0。不能只看 self.width()
         #   ——溢出时对话区窗格会被 clamp 在 min 320，永远 ≥320 造成死锁。
+        #   ★ 右侧 dock 停靠区已移除（container="right" 的卡片改道工作台），
+        #   dockSplitter 只有 [左停靠区, 内容区] 两格，不能再取 widget(2)。
         # - 无 dock（多窗口模式）：按自身可用宽判断。
         if hasattr(self, "chat_scroll_area"):
             target_min_w = 320
             host = self.window()
             sp = host.findChild(QSplitter, "dockSplitter") if host is not None else None
-            if sp is not None and sp.count() >= 3:
+            if sp is not None and sp.count() >= 2:
                 win_w = host.width()
-                dock_min = sp.widget(0).minimumWidth() + sp.widget(2).minimumWidth() + sp.handleWidth() * 2
+                dock_min = sp.widget(0).minimumWidth() + sp.handleWidth()
                 if win_w - dock_min < 320:
                     target_min_w = 0
             elif self.width() < 320:

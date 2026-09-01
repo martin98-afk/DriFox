@@ -767,12 +767,11 @@ class TabManagerWindow(FramelessWindow):
             self._tab_panel.refresh_style()
         except Exception:
             pass
-        # 刷新四向全局卡片容器背景（主题色/边框随主题切换）
+        # 刷新全局卡片容器背景（主题色/边框随主题切换）
         for _c in (
             getattr(self, "_global_top_container", None),
             getattr(self, "_global_bottom_container", None),
             getattr(self, "_global_left_container", None),
-            getattr(self, "_global_right_container", None),
         ):
             if _c is not None:
                 try:
@@ -1699,13 +1698,10 @@ class TabManagerWindow(FramelessWindow):
         self._global_bottom_container.setObjectName("globalBottomContainer")
         self._global_left_container = CardContainer(ContainerType.LEFT)
         self._global_left_container.setObjectName("globalLeftContainer")
-        self._global_right_container = CardContainer(ContainerType.RIGHT)
-        self._global_right_container.setObjectName("globalRightContainer")
         for _c in (
             self._global_top_container,
             self._global_bottom_container,
             self._global_left_container,
-            self._global_right_container,
         ):
             _c.bind_card_manager(_card_mgr, GLOBAL_WINDOW_ID)
 
@@ -1717,18 +1713,17 @@ class TabManagerWindow(FramelessWindow):
         self._top_card_container = self._global_top_container
         self._bottom_card_container = self._global_bottom_container
         self._left_card_container = self._global_left_container
-        self._right_card_container = self._global_right_container
 
-        # 标记 LEFT/RIGHT/BOTTOM 为共存容器：四向区域可同时存在、互不关闭。
-        # 覆盖层（TOP）通过 QStackedWidget 仅替换对话区，不影响 LEFT/RIGHT/BOTTOM。
+        # 标记 LEFT/BOTTOM 为共存容器：各向区域可同时存在、互不关闭。
+        # 覆盖层（TOP）通过 QStackedWidget 仅替换对话区，不影响 LEFT/BOTTOM。
         _card_mgr.mark_coexist_containers(
             GLOBAL_WINDOW_ID,
-            frozenset({ContainerType.LEFT, ContainerType.RIGHT, ContainerType.BOTTOM}),
+            frozenset({ContainerType.LEFT, ContainerType.BOTTOM}),
         )
 
-        # ── 停靠区双层 QSplitter：四向占比均可拖拽调整 ──
+        # ── 停靠区双层 QSplitter：左/下占比均可拖拽调整 ──
         # 结构：chatVsplitter(纵向)
-        #         ├─ dockSplitter(横向)：左停靠区 | 内容区(含覆盖层) | 右停靠区
+        #         ├─ dockSplitter(横向)：左停靠区 | 内容区(含覆盖层)
         #         └─ 下停靠区（bottom 容器）
         #
         # 内容区内嵌 QStackedWidget：
@@ -1798,8 +1793,6 @@ class TabManagerWindow(FramelessWindow):
 
         self._global_left_stack = CardStackContainer(self._chat_frame)
         self._global_left_stack.setObjectName("globalLeftStack")
-        self._global_right_stack = CardStackContainer(self._chat_frame)
-        self._global_right_stack.setObjectName("globalRightStack")
 
         # 停靠区侧 wrapper：默认收起，子控件 visibility 联动 wrapper 与 splitter 大小
         # （避免无卡片时 splitter 均分空间显示空白 splitter handle）
@@ -1810,25 +1803,15 @@ class TabManagerWindow(FramelessWindow):
         self._global_left_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.LEFT)
         self._global_left_container.set_stack_sibling(self._global_left_stack)
 
-        self._global_right_wrapper = _DockSideWrapper(
-            self._global_right_container, self._global_right_stack, self._chat_frame
-        )
-        self._global_right_wrapper.setObjectName("globalRightWrapper")
-        self._global_right_stack.set_container_context(GLOBAL_WINDOW_ID, ContainerType.RIGHT)
-        self._global_right_container.set_stack_sibling(self._global_right_stack)
-
         self._dock_splitter.addWidget(self._global_left_wrapper)
         self._dock_splitter.addWidget(self._chat_vsplitter)
-        self._dock_splitter.addWidget(self._global_right_wrapper)
         self._dock_splitter.setStretchFactor(0, 0)  # 左停靠区不随窗口拉伸
         self._dock_splitter.setStretchFactor(1, 1)  # 内容区(含覆盖层)吃掉多余空间
-        self._dock_splitter.setStretchFactor(2, 0)  # 右停靠区不随窗口拉伸
         self._dock_splitter.setHandleWidth(6)
         # 折叠依赖轴向 max=0 约束而非用户拖拽收起，禁止拖拽塌陷
         self._dock_splitter.setChildrenCollapsible(False)
         # wrapper 关联 splitter：联动 setSizes 维持收起态
         self._global_left_wrapper.attach_to_splitter(self._dock_splitter, 0)
-        self._global_right_wrapper.attach_to_splitter(self._dock_splitter, 2)
         # ── full 容器卡片标题栏 tab（替代原 ReplaceTabBar）──
         # full 卡片（UI 插件 full 卡 + 内置全局卡）打开时在标题栏 tab 区显示
         # （带 × 关闭钮，见 _on_card_visibility_changed）。这里仅订阅显隐事件。
@@ -1841,7 +1824,6 @@ class TabManagerWindow(FramelessWindow):
 
         # 全局容器启用停靠模式
         self._global_left_container.enable_dock_mode(self._dock_splitter)
-        self._global_right_container.enable_dock_mode(self._dock_splitter)
         # TOP 容器处于覆盖层模式，不启用 dock mode
         self._global_bottom_container.enable_dock_mode(self._chat_vsplitter)
 
