@@ -191,7 +191,7 @@ class AssistantCardWidget(QWidget):
 
         inner = QWidget()
         # 内容最大宽度：主窗口够宽时展开到上限，不够宽则自适应（无横向滚动）
-        inner.setMaximumWidth(1400)
+        inner.setMaximumWidth(1000)
         self._inner_v = QVBoxLayout(inner)
         self._inner_v.setContentsMargins(0, 0, 0, 0)
         self._inner_v.setSpacing(14)
@@ -268,9 +268,11 @@ class AssistantCardWidget(QWidget):
         self._inner_v.addStretch(1)
 
         center = QHBoxLayout()
-        center.addStretch()
-        center.addWidget(inner)
-        center.addStretch()
+        # stretch=1：内容区优先吃满剩余宽度；被 maxW(1400) 钳制后
+        # 剩余空间由布局两端均分 → 窗口够宽时内容区恰好 1400 且居中。
+        # （旧写法 addStretch+addWidget(inner) 无 stretch：inner 只拿 sizeHint
+        #   ~412px，maxW 永远够不到 —— 配置区"很窄"的根因）
+        center.addWidget(inner, 1)
         self._content_v.addLayout(center, 1)
         scroll.setWidget(content)
         # 透明背景：scroll 与内容容器都显式透明（viewport palette 底是插件内
