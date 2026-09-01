@@ -491,14 +491,26 @@ class AssistantCardWidget(QWidget):
         a = self._mgr.get(self._active_aid)
         if not a:
             return
-        if name:
+        changed = False
+        if name and name != a.name:
             a.name = name
-        a.model = chat_model
-        a.utility_model = utility_model
+            changed = True
+        if a.model != chat_model:
+            a.model = chat_model
+            changed = True
+        if a.utility_model != utility_model:
+            a.utility_model = utility_model
+            changed = True
+        if not changed:
+            return
         self._mgr.update(a)
         self._mgr.invalidate_context(a.id)
-        self._notify("已保存")
-        self._reload_all(select_aid=a.id)
+        # 轻量更新显示（不整页 reload，避免打断节流保存中的编辑）
+        if name:
+            self._name_label.setText(name)
+            self._avatar.set_text(name)
+        if a.primary:
+            self._reload_all(select_aid=a.id)
 
     def _on_persona_change(self, pid: str) -> None:
         a = self._mgr.get(self._active_aid)

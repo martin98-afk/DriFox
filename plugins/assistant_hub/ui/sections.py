@@ -12,10 +12,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QWheelEvent
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -26,7 +24,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import SwitchButton
+from qfluentwidgets import ComboBox, SwitchButton
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
@@ -122,33 +120,6 @@ def _btn_style(danger: bool = False) -> str:
     """
 
 
-class NoWheelComboBox(QComboBox):
-    """禁滚轮误切换的下拉框；弹层高度硬限制（样式表下 maxVisibleItems 不可靠）。"""
-
-    _MAX_VISIBLE = 10
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMaxVisibleItems(self._MAX_VISIBLE)
-
-    def showPopup(self) -> None:  # noqa: N802
-        super().showPopup()
-        # ⚠ 弹层高度必须同时设 view 和其容器（QFrame window），只设 view 会被容器撑爆
-        n = self.count()
-        if n <= 0:
-            return
-        view = self.view()
-        row_h = max(view.sizeHintForRow(0), 24)
-        h = min(n, self._MAX_VISIBLE) * row_h + 2 * view.frameWidth() + 6
-        view.setFixedHeight(h)
-        container = view.parentWidget() or view.window()
-        if container is not None:
-            container.setFixedHeight(h + view.frameWidth() + 4)
-
-    def wheelEvent(self, e: "QWheelEvent") -> None:  # noqa: N802
-        e.ignore()
-
-
 class _Section(QFrame):
     """分区卡片：标题行（+右侧 context 槽）+ 内容 VBox。
 
@@ -187,70 +158,73 @@ class _Section(QFrame):
 # ── 名称 / 模型分区 ──────────────────────────────────────
 
 
-class ProfileSection(_Section):
-    """助手名称 + 聊天模型 + 记忆整理模型。"""
+# ── 名称 / 模型分区 ──────────────────────────────────────
 
-    saveRequested = pyqtSignal(str, str, str)  # (name, chat_model_config_id, utility_model_config_id)
+
+class ProfileSection(_Section):
+    """助手名称 + 聊天模型 + 记忆整理模型（改动即节流保存，无保存按钮）。"""
+
+    saveRequested = pyqtSignal(str, str, str)  # (name, chat_model_key, utility_model_key)
+    _DEBOUNCE_MS = 600
 
     def __init__(self, parent=None):
         super().__init__("基本信息", parent)
+        self._model_keys: List[str] = [""]
+        self._suspend_autosave = True  # bind() 期间不触发自动保存
+
         row1 = QHBoxLayout()
         row1.addWidget(_title_label("名称", 11))
         self._name = QLineEdit()
         self._name.setStyleSheet(_input_style())
+        self._name.textEdited.connect(self._schedule_autosave)
         row1.addWidget(self._name, 1)
         self.body().addLayout(row1)
 
         row2 = QHBoxLayout()
         row2.addWidget(_title_label("对话模型", 11))
-        self._chat_model = NoWheelComboBox()
-        self._chat_model.setStyleSheet(self._combo_style())
+        self._chat_model = ComboBox()
+        self._chat_model.setMinimumWidth(220)
+        self._chat_model.currentIndexChanged.connect(self._schedule_autosave)
         row2.addWidget(self._chat_model, 1)
         self.body().addLayout(row2)
 
         row3 = QHBoxLayout()
         row3.addWidget(_title_label("记忆整理模型", 11))
-        self._utility_model = NoWheelComboBox()
-        self._utility_model.setStyleSheet(self._combo_style())
+        self._utility_model = ComboBox()
+        self._utility_model.setMinimumWidth(220)
+        self._utility_model.currentIndexChanged.connect(self._schedule_autosave)
         row3.addWidget(self._utility_model, 1)
         self.body().addLayout(row3)
         self.body().addWidget(_hint("记忆整理模型用于记忆编译 / Dream / 经验反思；跟随全局 = 使用当前对话模型。"))
+        self.body().addWidget(_hint("修改后自动保存。", 9))
 
-        row4 = QHBoxLayout()
-        row4.addStretch()
-        self._save = QPushButton("保存")
-        self._save.setStyleSheet(_btn_style())
-        self._save.clicked.connect(self._emit_save)
-        row4.addWidget(self._save)
-        self.body().addLayout(row4)
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(self._DEBOUNCE_MS)
+        self._debounce.timeout.connect(self._emit_save)
         self._reload_models()
 
-    @staticmethod
-    def _combo_style() -> str:
-        return f"""
-            QComboBox {{
-                background: {Colors.CARD_BG.format(alpha=90)};
-                border: 1px solid {Colors.BORDER};
-                color: {Colors.TEXT_PRIMARY};
-                border-radius: 6px;
-                padding: 4px 10px;
-                {get_font_family_css()} {font_size_css(11)}
-            }}
-            QComboBox:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
-            QComboBox QAbstractItemView {{
-                background: {Colors.CARD_BG_SOLID};
-                color: {Colors.TEXT_PRIMARY};
-                border: 1px solid {Colors.BORDER};
-                selection-background-color: {Colors.SELECTED_BG};
-            }}
-        """
+    def _schedule_autosave(self, *_a) -> None:
+        if self._suspend_autosave:
+            return
+        self._debounce.start()
+
+    def bind(self, name: str, chat_model: str, utility_model: str) -> None:
+        self._suspend_autosave = True
+        self._name.setText(name)
+        keys = self._model_keys
+        for combo, val in ((self._chat_model, chat_model), (self._utility_model, utility_model)):
+            key = val or ""
+            idx = keys.index(key) if key in keys else 0
+            combo.setCurrentIndex(idx)
+        self._suspend_autosave = False
 
     def _reload_models(self) -> None:
         """数据源（对齐 cron-tasks）：main_widget._valid_configs 展开「配置 × 模型列表」。
 
         复合键 "<config_id>||<model>"——一个服务商可选它模型列表里的任意模型；
         首项「跟随全局」= 空（执行时用当前全局对话模型，选中模型失效自动回退）。
-        双源兜底：UIPluginRegistry._main_widget → 任一窗口 main_widget。
+        用 qfluentwidgets.ComboBox：弹层样式/定位/滚动全部由其自管。
         """
         mw = None
         try:
@@ -265,11 +239,9 @@ class ProfileSection(_Section):
         valid = getattr(mw, "_valid_configs", None) if mw is not None else None
         current = getattr(mw, "_current_provider_name", None) if mw is not None else None
 
-        for combo in (self._chat_model, self._utility_model):
-            combo.clear()
-            combo.addItem("跟随全局", "")
-            if not isinstance(valid, dict):
-                continue
+        labels: List[str] = ["跟随全局"]
+        keys: List[str] = [""]
+        if isinstance(valid, dict):
             for key, cfg in valid.items():
                 if not isinstance(cfg, dict):
                     continue
@@ -282,20 +254,28 @@ class ProfileSection(_Section):
                     label = f"{display} · {model}"
                     if key == current and model == cur_model:
                         label += "（当前）"
-                    combo.addItem(label, f"{key}||{model}")
+                    labels.append(label)
+                    keys.append(f"{key}||{model}")
+        self._model_keys = keys
+        for combo in (self._chat_model, self._utility_model):
+            combo.clear()
+            combo.addItems(labels)
+            combo.setCurrentIndex(0)
 
     def bind(self, name: str, chat_model: str, utility_model: str) -> None:
         self._name.setText(name)
+        keys = self._model_keys
         for combo, val in ((self._chat_model, chat_model), (self._utility_model, utility_model)):
-            idx = combo.findData(val or "")
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
+            key = val or ""
+            idx = keys.index(key) if key in keys else 0
+            combo.setCurrentIndex(idx)
 
     def _emit_save(self) -> None:
-        self.saveRequested.emit(
-            self._name.text().strip(),
-            self._chat_model.currentData() or "",
-            self._utility_model.currentData() or "",
-        )
+        keys = getattr(self, "_model_keys", [""])
+        ci, ui_ = self._chat_model.currentIndex(), self._utility_model.currentIndex()
+        chat_key = keys[ci] if 0 <= ci < len(keys) else ""
+        util_key = keys[ui_] if 0 <= ui_ < len(keys) else ""
+        self.saveRequested.emit(self._name.text().strip(), chat_key, util_key)
 
 
 # ── 关于 Ta（人格 / 身份 / AGENTS.md）────────────────────
