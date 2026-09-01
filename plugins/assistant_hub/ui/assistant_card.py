@@ -423,6 +423,8 @@ class AssistantCardWidget(QWidget):
         full = self._mgr.assistant_avatar_path(aid)
         self._avatar.set_image(str(full) if full else None)
         self._stack.set_avatar(aid, str(full) if full else "")
+        # 人格 chip 头像轻量同步（当前人格）
+        self._about.refresh_avatar(a.yuan, str(ap) if ap else "")
 
     def _reload_all(self, select_aid: str = "") -> None:
         assistants = self._mgr.list_assistants()
@@ -439,6 +441,7 @@ class AssistantCardWidget(QWidget):
         )
         primary = next((a.id for a in assistants if a.primary), "")
         self._stack.set_primary(primary)
+        self._about.rebuild_chips(self._persona_items())
         if select_aid and self._mgr.has(select_aid):
             self._bind_editor(select_aid)
         elif self._active_aid and self._mgr.has(self._active_aid):
@@ -587,6 +590,11 @@ class AssistantCardWidget(QWidget):
         self._mgr.invalidate_context(a.id)
         self._about.set_persona(pid)
         self._refresh_persona_avatar()
+        # 身份/AGENTS 回落链依赖人格专属模板 → 切人格后重读刷新编辑框
+        # （bind_texts 内部 suspend 自动保存，不会误写盘）
+        identity, _ = self._mgr.read_identity_source(a.id)
+        agents_md, _ = self._mgr.read_agents_md_source(a.id)
+        self._about.bind_texts(identity, agents_md)
         self._notify(f"人格已切换：{'无（纯净助手）' if pid == 'none' else pid}")
 
     def _on_persona_manage(self) -> None:

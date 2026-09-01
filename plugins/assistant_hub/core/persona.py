@@ -230,9 +230,7 @@ class PersonaRegistry:
         """该人格是否存在用户级头像覆盖（控制「恢复默认」按钮可用性）。"""
         if not self._avatar_override_dir.exists():
             return False
-        return any(
-            (self._avatar_override_dir / f"{pid}.{ext}").exists() for ext in ("png", "jpg", "webp", "svg")
-        )
+        return any((self._avatar_override_dir / f"{pid}.{ext}").exists() for ext in ("png", "jpg", "webp", "svg"))
 
     def set_avatar(self, pid: str, data: bytes, ext: str) -> Optional[Path]:
         """写入用户级头像覆盖（同 pid 只保留一份，换扩展名时清旧文件）。"""

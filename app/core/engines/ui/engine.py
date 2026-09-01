@@ -380,6 +380,9 @@ class UIEngine(BaseEngine):
         _user_content = kwargs.pop("_user_content", None)
         content_to_store = _user_content or user_text
 
+        # ---- 提取图片附件路径（仅用户主动上传的图片，供 session 标记 + UI 预览）----
+        _image_attachments = kwargs.pop("_image_attachments", None)
+
         # ---- 提取 hook_event 标记（团队任务邮件等），写入 session 消息时打标 ----
         hook_event = kwargs.pop("_hook_event", None)
 
@@ -441,6 +444,7 @@ class UIEngine(BaseEngine):
             agent_manager=self._get_agent_manager(),
             tool_executor=self._tool_executor,
             hook_event=hook_event,
+            image_attachments=_image_attachments,
         )
         worker.start()
 
@@ -904,6 +908,7 @@ class _PreSendWorker(QThread):
         agent_manager,
         tool_executor,
         hook_event: str | None = None,
+        image_attachments: list | None = None,
     ):
         super().__init__()
         self._hook_mgr = hook_mgr
@@ -920,6 +925,7 @@ class _PreSendWorker(QThread):
         self._agent_manager = agent_manager
         self._tool_executor = tool_executor
         self._hook_event = hook_event
+        self._image_attachments = image_attachments
 
         # 结果
         self._messages: list = []
@@ -980,6 +986,8 @@ class _PreSendWorker(QThread):
             _add_kwargs = {}
             if self._hook_event:
                 _add_kwargs["_hook_event"] = self._hook_event
+            if self._image_attachments:
+                _add_kwargs["_image_attachments"] = self._image_attachments
             session.add_user_message(content=self._content_to_store, **_add_kwargs)
 
         # ---- 4. PostUserMessage hooks ----

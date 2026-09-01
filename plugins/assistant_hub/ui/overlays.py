@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+from loguru import logger
 from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QIcon
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -254,47 +256,63 @@ class DreamRevisionOverlay(OverlayBase):
 
 
 class PersonaManageDialog(OverlayBase):
-    """人格管理：新建/编辑/删除自定义人格（builtin 只读）。"""
+    """人格管理：新建/编辑/删除自定义人格（builtin 字段只读，头像均可自定义）。
+
+    布局：左列表（头像 + 名称 + 内置徽章）｜右侧 QStackedWidget（编辑页 / 选头像页）。
+    头像属于人格：换头像写用户级覆盖目录，所有助手自动跟随。
+    """
 
     def __init__(self, registry, current_pid: str, parent=None):
-        super().__init__("人格管理", parent, width=640, height=520)
+        super().__init__("人格管理", parent, width=720, height=560)
         self._registry = registry
         self._current_pid = current_pid
         self._editing_pid: str = ""
 
         body = QHBoxLayout()
+        body.setSpacing(14)
+
+        # ── 左：人格列表 ──
         left = QVBoxLayout()
+        left.setSpacing(6)
+        left.addWidget(_label("人格", 12))
         self._list = QListWidget()
         self._list.setStyleSheet(self._list_style())
         self._list.currentItemChanged.connect(self._on_select)
         left.addWidget(self._list, 1)
-        new_btn = _dialog_btn("新建人格")
+        list_btns = QHBoxLayout()
+        list_btns.setSpacing(6)
+        new_btn = _dialog_btn("新建")
         new_btn.clicked.connect(self._on_new)
-        left.addWidget(new_btn)
-        del_btn = _dialog_btn("删除所选")
-        del_btn.clicked.connect(self._on_delete)
-        left.addWidget(del_btn)
+        list_btns.addWidget(new_btn)
+        self._del_btn = QPushButton("删除")
+        self._del_btn.setFixedHeight(32)
+        self._del_btn.setCursor(Qt.PointingHandCursor)
+        self._del_btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent; color: {Colors.ERROR};
+                border: 1px solid {Colors.ERROR}; border-radius: 8px; padding: 4px 18px;
+                {get_font_family_css()} {font_size_css(12)};
+            }}
+            QPushButton:hover {{ background: rgba(220, 38, 38, 0.10); }}
+            QPushButton:disabled {{ color: {Colors.TEXT_MUTED}; border-color: {Colors.BORDER}; }}
+        """
+        )
+        self._del_btn.setEnabled(False)
+        self._del_btn.clicked.connect(self._on_delete)
+        list_btns.addWidget(self._del_btn)
+        left.addLayout(list_btns)
         body.addLayout(left, 1)
 
-        right = QVBoxLayout()
-        self._f_name = LineEdit()
-        self._f_name.setPlaceholderText("名称（id，小写英文/数字）")
-        self._f_desc = LineEdit()
-        self._f_desc.setPlaceholderText("副标题（如：更懂工程的搭档）")
-        self._f_tag = LineEdit()
-        self._f_tag.setPlaceholderText("思考块标签（如：推演 / MOOD，留空无）")
-        self._f_prompt = QPlainTextEdit()
-        self._f_prompt.setPlaceholderText("人格底座模板（支持 {{userName}} / {{agentName}}）")
-        self._f_prompt.setStyleSheet(self._edit_style())
-        for w in (self._f_name, self._f_desc, self._f_tag):
-            w.setStyleSheet(self._input_style())
-            right.addWidget(w)
-        right.addWidget(self._f_prompt, 1)
-        save_btn = _dialog_btn("保存", primary=True)
-        save_btn.clicked.connect(self._on_save)
-        right.addWidget(save_btn)
-        body.addLayout(right, 2)
+        # ── 右：编辑页 / 选头像页 ──
+        from PyQt5.QtWidgets import QStackedWidget
+
+        self._stack = QStackedWidget()
+        self._stack.addWidget(self._build_edit_page())
+        self._stack.addWidget(self._build_avatar_page())
+        body.addWidget(self._stack, 2)
         self._v.addLayout(body, 1)
+
         row = QHBoxLayout()
         row.addStretch()
         close = _dialog_btn("关闭")
@@ -302,6 +320,133 @@ class PersonaManageDialog(OverlayBase):
         row.addWidget(close)
         self._v.addLayout(row)
         self._reload()
+
+    # ── 编辑页 ──
+
+    def _build_edit_page(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+
+        # 头像行：预览 + 更换/恢复（头像属于人格，builtin 也可换）
+        av_row = QHBoxLayout()
+        av_row.setSpacing(10)
+        self._av_preview = RoundAvatar(size=64, text="?", color="#7C3AED")
+        av_row.addWidget(self._av_preview)
+        av_info = QVBoxLayout()
+        av_info.setSpacing(2)
+        self._av_name = QLabel("—")
+        self._av_name.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
+        )
+        av_info.addWidget(self._av_name)
+        av_info.addWidget(_label("头像属于人格，切换人格自动跟随。", 10, muted=True))
+        av_row.addLayout(av_info)
+        av_row.addStretch()
+        self._av_reset_btn = _dialog_btn("恢复默认")
+        self._av_reset_btn.setEnabled(False)
+        self._av_reset_btn.clicked.connect(self._on_avatar_reset)
+        av_row.addWidget(self._av_reset_btn)
+        self._av_change_btn = _dialog_btn("更换头像")
+        self._av_change_btn.clicked.connect(self._on_avatar_change)
+        av_row.addWidget(self._av_change_btn)
+        v.addLayout(av_row)
+
+        # 分组表单
+        v.addWidget(_label("名称（id，小写英文/数字）", 10, muted=True))
+        self._f_name = LineEdit()
+        self._f_name.setPlaceholderText("例如：coder / muse")
+        self._f_name.setStyleSheet(self._input_style())
+        v.addWidget(self._f_name)
+        v.addWidget(_label("副标题", 10, muted=True))
+        self._f_desc = LineEdit()
+        self._f_desc.setPlaceholderText("如：更懂工程的搭档")
+        self._f_desc.setStyleSheet(self._input_style())
+        v.addWidget(self._f_desc)
+        v.addWidget(_label("思考块标签（留空无）", 10, muted=True))
+        self._f_tag = LineEdit()
+        self._f_tag.setPlaceholderText("如：推演 / MOOD")
+        self._f_tag.setStyleSheet(self._input_style())
+        v.addWidget(self._f_tag)
+        v.addWidget(_label("人格底座模板（支持 {{userName}} / {{agentName}}）", 10, muted=True))
+        self._f_prompt = QPlainTextEdit()
+        self._f_prompt.setPlaceholderText("人格基底 prompt，注入 system prompt 的人格段…")
+        self._f_prompt.setStyleSheet(self._edit_style())
+        v.addWidget(self._f_prompt, 1)
+
+        save_row = QHBoxLayout()
+        save_row.addStretch()
+        save_btn = _dialog_btn("保存", primary=True)
+        save_btn.clicked.connect(self._on_save)
+        save_row.addWidget(save_btn)
+        v.addLayout(save_row)
+        return page
+
+    # ── 选头像页 ──
+
+    def _build_avatar_page(self) -> QWidget:
+        page = QWidget()
+        v = QVBoxLayout(page)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+        from .avatar_picker import AvatarPicker
+
+        def _saver(data: bytes, ext: str):
+            if not self._editing_pid:
+                return None
+            return self._registry.set_avatar(self._editing_pid, data, ext)
+
+        self._avatar_picker = AvatarPicker(assistant_id="", parent=page, upload_saver=_saver)
+        v.addWidget(self._avatar_picker, 1)
+        back_row = QHBoxLayout()
+        back_row.addStretch()
+        back_btn = _dialog_btn("返回编辑")
+        back_btn.clicked.connect(self._on_avatar_back)
+        back_row.addWidget(back_btn)
+        v.addLayout(back_row)
+        return page
+
+    def _on_avatar_change(self) -> None:
+        if not self._editing_pid:
+            return
+        ap = self._registry.avatar_path(self._editing_pid)
+        p = self._registry.get(self._editing_pid)
+        self._avatar_picker.set_assistant(
+            aid="",
+            color="#7C3AED",
+            name=(p.name if p else "") or self._editing_pid,
+            image_path=str(ap) if ap else "",
+        )
+        self._stack.setCurrentIndex(1)
+
+    def _on_avatar_back(self) -> None:
+        # 返回编辑时落盘当前选择：上传已在 saver 落盘；预置图此处补写；
+        # 纯色（无图）视作放弃本次更换，不改已有头像
+        sel = self._avatar_picker.get_selection()
+        if self._editing_pid and sel.get("image_path"):
+            try:
+                data = Path(sel["image_path"]).read_bytes()
+                ext = Path(sel["image_path"]).suffix.lstrip(".").lower() or "png"
+                self._registry.set_avatar(self._editing_pid, data, ext)
+            except Exception as e:
+                logger.warning(f"[assistant_hub] 人格头像落盘失败 ({self._editing_pid}): {e}")
+        self._sync_avatar_row(self._editing_pid)
+        self._stack.setCurrentIndex(0)
+
+    def _on_avatar_reset(self) -> None:
+        if self._editing_pid:
+            self._registry.clear_avatar(self._editing_pid)
+            self._sync_avatar_row(self._editing_pid)
+
+    def _sync_avatar_row(self, pid: str) -> None:
+        p = self._registry.get(pid) if pid else None
+        ap = self._registry.avatar_path(pid) if pid else None
+        self._av_preview.set_text((p.name if p else "") or pid or "?")
+        self._av_preview.set_image(str(ap) if ap else None)
+        self._av_name.setText((p.name if p else "") or pid or "—")
+        self._av_reset_btn.setEnabled(self._registry.has_avatar_override(pid) if pid else False)
 
     def _input_style(self) -> str:
         return f"""
@@ -327,16 +472,37 @@ class PersonaManageDialog(OverlayBase):
                 border: 1px solid {Colors.BORDER}; border-radius: 8px;
                 color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(11)}; padding: 6px;
             }}
+            QPlainTextEdit QScrollBar:vertical {{
+                background: transparent; width: 6px; margin: 0;
+            }}
+            QPlainTextEdit QScrollBar::handle:vertical {{
+                background: {Colors.SCROLLBAR_HANDLE_BG}; border-radius: 3px; min-height: 30px;
+            }}
+            QPlainTextEdit QScrollBar::handle:vertical:hover {{
+                background: {Colors.SCROLLBAR_HANDLE_HOVER_BG}; width: 8px;
+            }}
+            QPlainTextEdit QScrollBar::add-line:vertical,
+            QPlainTextEdit QScrollBar::sub-line:vertical {{ height: 0; }}
+            QPlainTextEdit QScrollBar::add-page:vertical,
+            QPlainTextEdit QScrollBar::sub-page:vertical {{ background: none; }}
         """
 
-    def _reload(self) -> None:
+    def _reload(self, keep_pid: str = "") -> None:
+        self._list.blockSignals(True)
         self._list.clear()
         for p in self._registry.list_all():
             if p.id == "none":
                 continue
-            item = QListWidgetItem(f"{p.name}（{p.id}）" + (" ·内置" if p.builtin else ""))
+            ap = self._registry.avatar_path(p.id)
+            icon = QIcon(str(ap)) if ap and ap.suffix.lower() in (".png", ".jpg", ".webp") else QIcon()
+            item = QListWidgetItem(icon, f"{p.name}（{p.id}）" + (" · 内置" if p.builtin else ""))
             item.setData(Qt.UserRole, p.id)
             self._list.addItem(item)
+            if p.id == keep_pid:
+                self._list.setCurrentItem(item)
+        self._list.blockSignals(False)
+        if self._list.currentItem() is None and self._list.count():
+            self._list.setCurrentRow(0)
 
     def _on_select(self, cur, _prev):
         if cur is None:
@@ -353,6 +519,8 @@ class PersonaManageDialog(OverlayBase):
         builtin = p.builtin
         for w in (self._f_name, self._f_desc, self._f_tag, self._f_prompt):
             w.setReadOnly(builtin)
+        self._del_btn.setEnabled(not builtin)
+        self._sync_avatar_row(pid)
 
     def _on_new(self):
         self._editing_pid = ""
@@ -360,26 +528,42 @@ class PersonaManageDialog(OverlayBase):
         self._f_desc.clear()
         self._f_tag.clear()
         self._f_prompt.clear()
+        for w in (self._f_name, self._f_desc, self._f_tag, self._f_prompt):
+            w.setReadOnly(False)
+        self._del_btn.setEnabled(False)
+        self._f_name.setFocus()
+        self._sync_avatar_row("")
 
     def _on_delete(self):
         cur = self._list.currentItem()
         if cur is None:
             return
-        self._registry.delete(cur.data(Qt.UserRole))
+        if not self._registry.delete(cur.data(Qt.UserRole)):
+            return
+        self._editing_pid = ""
         self._reload()
 
     def _on_save(self):
-        pid = self._f_name.text().strip().lower()
+        name = self._f_name.text().strip()
+        pid = name.lower()
         if not pid or pid == "none":
             return
+        if not all(c.isalnum() or c in "-_" for c in pid):
+            return
+        existed = self._registry.get(pid)
+        if existed is not None and existed.builtin:
+            return
+        if self._editing_pid and pid != self._editing_pid and existed is not None:
+            return  # 改名撞已有 id
         Persona = _persona_cls()
         p = Persona(
             id=pid,
-            name=pid,
+            name=name,
             description=self._f_desc.text().strip(),
             tag=self._f_tag.text().strip(),
             prompt=self._f_prompt.toPlainText(),
             builtin=False,
         )
         self._registry.upsert(p)
-        self._reload()
+        self._editing_pid = pid
+        self._reload(keep_pid=pid)

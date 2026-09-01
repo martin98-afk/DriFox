@@ -122,6 +122,11 @@ class ChatSession:
         hook_event = kwargs.get("_hook_event")
         if hook_event:
             msg["_hook_event"] = hook_event
+        # 图片附件路径标记：仅记录用户主动上传/粘贴的图片，供 UI 恢复会话时
+        # 渲染气泡上方缩略图预览（消息级字段，API 序列化只取 role/content，不会泄漏）
+        atts = kwargs.get("_image_attachments")
+        if isinstance(atts, list) and atts:
+            msg["_image_attachments"] = [str(p) for p in atts if p]
         self.messages.append(msg)
         # 追加操作不走全量 consolidate，由持久化层在 save 时统一做
         self._update_timestamp()

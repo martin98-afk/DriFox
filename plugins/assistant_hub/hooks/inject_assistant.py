@@ -28,13 +28,22 @@ _MANAGER_MODULE_NAME = "assistant_hub_manager"
 
 
 def _ensure_manager_module():
-    """按文件路径加载 assistant_manager.py（进程内单例语义一致）。"""
+    """按文件路径加载 assistant_manager.py（进程内单例语义一致）。
+
+    mtime 自检：manager 模块名固定（ui+hooks 共享），不在主程序 UI 热重载
+    清理前缀内；文件更新后此处重新 exec 替换，与 ui 侧同款自愈逻辑。
+    """
+    source = _PLUGIN_ROOT / "assistant_manager.py"
+    try:
+        mtime = source.stat().st_mtime
+    except OSError:
+        mtime = 0.0
     mod = sys.modules.get(_MANAGER_MODULE_NAME)
-    if mod is not None:
+    if mod is not None and getattr(mod, "_source_mtime", -1.0) >= mtime:
         return mod
     spec = importlib.util.spec_from_file_location(
         _MANAGER_MODULE_NAME,
-        str(_PLUGIN_ROOT / "assistant_manager.py"),
+        str(source),
     )
     if spec is None or spec.loader is None:
         return None
@@ -42,6 +51,7 @@ def _ensure_manager_module():
     sys.modules[_MANAGER_MODULE_NAME] = module
     try:
         spec.loader.exec_module(module)
+        module._source_mtime = mtime
     except Exception as e:
         logger.error(f"[assistant_hub.hooks] 加载 assistant_manager 失败: {e}")
         return None

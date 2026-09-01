@@ -30,7 +30,34 @@ def _get_manager():
 
 
 def _paused() -> ToolResult:
-    return ToolResult(True, content="经验功能已暂停。已有内容会保留，但现在不能读取或记录经验。")
+    """暂停提示 + 一次性诊断（定位宿主进程内实例与盘上数据不一致问题后可移除）。"""
+    mod = sys.modules.get(_MANAGER_MODULE_NAME)
+    mgr = mod.AssistantManager.get_instance() if mod is not None else None
+    aid = mgr.active_id() if mgr is not None else ""
+    a = mgr.get(aid) if mgr is not None and aid else None
+    root_val = "?"
+    try:
+        _r = getattr(mgr, "root", None)
+        root_val = str(_r() if callable(_r) else _r)
+    except Exception:
+        pass
+    diag = (
+        f"[diag] 模块={id(mod)} 实例={id(mgr)} active_id={aid!r} "
+        f"experience_enabled={getattr(a, 'experience_enabled', 'N/A')} root={root_val}"
+    )
+    return ToolResult(True, content=f"经验功能已暂停。已有内容会保留，但现在不能读取或记录经验。 {diag}")
+
+
+def _enabled_or_reload(mgr, aid: str, a) -> bool:
+    """经验开关判定：内存 False 时重读盘一次（热重载窗口期实例内存/盘分歧防御）。"""
+    if a is not None and getattr(a, "experience_enabled", False):
+        return True
+    try:
+        mgr.reload_from_disk()
+    except Exception:
+        return False
+    a2 = mgr.get(aid)
+    return a2 is not None and getattr(a2, "experience_enabled", False)
 
 
 def _recall_impl(tool_ctx, **kw):
@@ -41,7 +68,7 @@ def _recall_impl(tool_ctx, **kw):
     if not aid or not mgr.has(aid):
         return ToolResult(True, content="当前没有激活的助手。")
     a = mgr.get(aid)
-    if a is None or not getattr(a, "experience_enabled", False):
+    if not _enabled_or_reload(mgr, aid, a):
         return _paused()
     category = str(kw.get("category") or "").strip()
     if category:
@@ -60,7 +87,7 @@ def _record_impl(tool_ctx, **kw):
     if not aid or not mgr.has(aid):
         return ToolResult(True, content="当前没有激活的助手。")
     a = mgr.get(aid)
-    if a is None or not getattr(a, "experience_enabled", False):
+    if not _enabled_or_reload(mgr, aid, a):
         return _paused()
     category = str(kw.get("category") or "").strip()
     content = str(kw.get("content") or "").strip()

@@ -43,6 +43,7 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
 from PyQt5.QtCore import (
+    QByteArray,
     QEasingCurve,
     QObject,
     QPointF,
@@ -69,10 +70,12 @@ from PyQt5.QtGui import (
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView
 from PyQt5.QtWidgets import (
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
+    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -10267,6 +10270,15 @@ class MessageCard(SimpleCardWidget):
 
         # 底部操作行：stretch | 时间戳 | 复制/撤销/删除（hover 浮现）。
         # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
+
+        # 图片附件预览条：正文之上，set_image_attachments 时才显示（懒占位）
+        self._image_strip = QWidget(self)
+        self._image_strip_lay = QHBoxLayout(self._image_strip)
+        self._image_strip_lay.setContentsMargins(2, 0, 2, 4)
+        self._image_strip_lay.setSpacing(6)
+        self._image_strip.setVisible(False)
+        main.addWidget(self._image_strip)
+
         footer_wrap = QWidget(self)
         footer_wrap.setStyleSheet("background: transparent;")
         footer_wrap.setFixedHeight(28)  # 26px 按钮 + 垂直余量，紧凑
@@ -10300,6 +10312,105 @@ class MessageCard(SimpleCardWidget):
         btns.setVisible(False)  # hover 浮现，保持气泡简洁（高度占位由 wrap 固定）
         footer.addWidget(btns)
         main.addWidget(footer_wrap)
+
+    def set_image_attachments(self, paths, fallback_content=None):
+        """设置图片附件预览（用户气泡正文上方缩略图条）
+
+        Args:
+            paths: 附件图片本地路径列表。发送时来自输入区附件；恢复会话时
+                   来自 session 消息的 ``_image_attachments`` 标记。
+            fallback_content: 恢复会话时的原始消息 content（multimodal list）。
+                   路径文件已失效（如粘贴图 temp 被系统清理）时，按序取
+                   content 中前 N 个 image 块的 data URI 解码兑底
+                   （附件块在前、工具注入块在后追加，顺序可靠）。
+        """
+        if not isinstance(paths, list) or not paths:
+            return
+        image_uris = self._extract_image_uris(fallback_content)
+        shown = 0
+        for i, path in enumerate(paths):
+            if not isinstance(path, str) or not path:
+                continue
+            if os.path.exists(path):
+                source, data_uri = path, None
+            elif i < len(image_uris):
+                source, data_uri = None, image_uris[i]
+            else:
+                continue
+            thumb = self._build_image_thumb(source, data_uri, path)
+            if thumb is not None:
+                self._image_strip_lay.addWidget(thumb)
+                shown += 1
+        if shown:
+            self._image_strip_lay.addStretch()
+            self._image_strip.setVisible(True)
+
+    @staticmethod
+    def _extract_image_uris(content) -> list:
+        """从 multimodal content 按序提取 image 块的 data URI（仅 data: 格式）"""
+        uris = []
+        if not isinstance(content, list):
+            return uris
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            url = ""
+            if btype == "image_url":
+                img = block.get("image_url", {}) or {}
+                url = str(img.get("url", "") or "") if isinstance(img, dict) else str(img)
+            elif btype == "input_image":
+                url = str(block.get("image_url", "") or "")
+            elif btype == "image":
+                src = block.get("source", {}) or {}
+                if isinstance(src, dict) and src.get("type") == "base64":
+                    url = f"data:{src.get('media_type', 'image/png')};base64,{src.get('data', '')}"
+            if url.startswith("data:image"):
+                uris.append(url)
+        return uris
+
+    def _build_image_thumb(self, source, data_uri, path):
+        """构建单张缩略图 QLabel（等比 80px 高）；加载失败返回 None
+
+        记录原始 QPixmap 引用，点击弹出大图查看。
+        """
+        pixmap = QPixmap()
+        if source:
+            pixmap.load(source)
+        elif data_uri:
+            b64 = data_uri.split("base64,", 1)[-1]
+            pixmap.loadFromData(QByteArray.fromBase64(b64.encode("ascii")))
+        if pixmap.isNull():
+            return None
+        thumb = QLabel(self._image_strip)
+        dpr = thumb.devicePixelRatioF() or 1.0
+        scaled = pixmap.scaledToHeight(int(80 * dpr), Qt.SmoothTransformation)
+        scaled.setDevicePixelRatio(dpr)
+        thumb.setPixmap(scaled)
+        thumb.setFixedHeight(80)
+        thumb.setToolTip(os.path.basename(path))
+        thumb.setCursor(Qt.PointingHandCursor)
+        thumb.mousePressEvent = lambda e, pm=pixmap, p=path: self._show_image_dialog(pm, p)
+        return thumb
+
+    def _show_image_dialog(self, pixmap, path):
+        """点击缩略图放大查看（模态轻量弹窗，滚动支持大图）"""
+        if pixmap is None or pixmap.isNull():
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(os.path.basename(path) or "图片")
+        dlg.setModal(True)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(8, 8, 8, 8)
+        scroll = QScrollArea(dlg)
+        scroll.setWidgetResizable(True)
+        img_label = QLabel()
+        img_label.setPixmap(pixmap)
+        scroll.setWidget(img_label)
+        lay.addWidget(scroll)
+        top = self.window()
+        dlg.resize(min(900, top.width() - 80), min(640, top.height() - 120))
+        dlg.exec_()
 
     def _ensure_user_viewer(self) -> None:
         """懒创建用户气泡 PlainTextViewer（修 #2）。

@@ -40,12 +40,18 @@ _SHARED_MANAGER_MODULE = "assistant_hub_manager"
 
 
 def _ensure_shared_manager_module() -> None:
-    if _SHARED_MANAGER_MODULE in sys.modules:
-        return
     root = Path(__file__).resolve().parent.parent
+    source = root / "assistant_manager.py"
+    try:
+        mtime = source.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    mod = sys.modules.get(_SHARED_MANAGER_MODULE)
+    if mod is not None and getattr(mod, "_source_mtime", -1.0) >= mtime:
+        return
     spec = importlib.util.spec_from_file_location(
         _SHARED_MANAGER_MODULE,
-        str(root / "assistant_manager.py"),
+        str(source),
     )
     if spec is None or spec.loader is None:
         logger.error("[assistant_hub] 无法创建 shared manager spec")
@@ -54,6 +60,10 @@ def _ensure_shared_manager_module() -> None:
     sys.modules[_SHARED_MANAGER_MODULE] = module
     try:
         spec.loader.exec_module(module)
+        # 热重载指纹：assistant_hub_manager 是固定全局模块名（ui+hooks 共享单例），
+        # 不在主程序 UI 重载的 ui_plugin_* 清理前缀内 → 靠 mtime 自检自愈：
+        # 文件更新后下次进入本函数即重新 exec 替换，UI/hook 谁先发现谁刷新。
+        module._source_mtime = mtime
         logger.debug("[assistant_hub] shared assistant_hub_manager 已加载")
     except Exception as e:
         logger.error(f"[assistant_hub] shared manager 加载失败: {e}")

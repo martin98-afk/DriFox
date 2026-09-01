@@ -280,13 +280,21 @@ _CORE_MODULES: Dict[str, Any] = {}
 
 
 def _load_core_module(key: str, rel: str):
-    """按文件路径加载 plugins/assistant_hub/core/ 下模块并缓存（hook/UI 共享实例语义）。"""
-    cached = _CORE_MODULES.get(key)
-    if cached is not None:
-        return cached
+    """按文件路径加载 plugins/assistant_hub/core/ 下模块并缓存（hook/UI 共享实例语义）。
+
+    mtime 自检：manager 本身随 assistant_hub_manager 模块热重建，但本 dict 缓存
+    独立于 sys.modules——文件更新后按 mtime 重新加载，否则 core 改动不生效。
+    """
     import importlib.util
 
     path = Path(__file__).resolve().parent / "core" / rel
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    cached = _CORE_MODULES.get(key)
+    if cached is not None and getattr(cached, "_source_mtime", -1.0) >= mtime:
+        return cached
     spec = importlib.util.spec_from_file_location(f"assistant_hub_core.{key}", str(path))
     if spec is None or spec.loader is None:
         raise ImportError(f"无法加载 {path}")
@@ -294,6 +302,7 @@ def _load_core_module(key: str, rel: str):
     _CORE_MODULES[key] = module
     sys_modules()[f"assistant_hub_core.{key}"] = module
     spec.loader.exec_module(module)
+    module._source_mtime = mtime
     return module
 
 
@@ -570,6 +579,15 @@ class AssistantManager:
         logger.info(f"[assistant_hub] 删除助手: {aid}")
         return True
 
+    def reload_from_disk(self) -> None:
+        """重新从盘加载助手元数据。
+
+        热重载窗口期 UI 与工具可能各持一个实例（旧卡片持旧实例写内存+盘，
+        工具拿新实例读旧内存）→ 判定前重读盘消除分歧。update() 均即时落盘，
+        重读不会丢失已确认状态。
+        """
+        self._load_all()
+
     def update(self, a: Assistant) -> None:
         """更新助手元数据落盘"""
         a.updated_at = _now_iso()
@@ -799,20 +817,20 @@ class AssistantManager:
         return files[0] if files else None
 
     def assistant_avatar_path(self, aid: str) -> Optional[Path]:
-        """助手头像显示链：助手自有头像（存量兼容）→ 元人格头像 → None。
+        """助手头像显示链：元人格头像 → 助手自有头像（存量回落）→ None。
 
-        头像归属人格：切换助手/人格后所有 UI（编辑区、弧形卡）统一用本方法取图。
+        头像归属人格：人格头像（含用户级覆盖）优先，改一处全助手跟随；
+        助手自有 agent.png（含预置种子头像）仅在该人格无头像时兜底显示。
         """
-        own = self.avatar_path(aid)
-        if own:
-            return own
         a = self.get(aid)
         if a and a.yuan:
             try:
-                return self.persona_registry().avatar_path(a.yuan)
+                p = self.persona_registry().avatar_path(a.yuan)
+                if p:
+                    return p
             except Exception:
-                return None
-        return None
+                pass
+        return self.avatar_path(aid)
 
     def has_own_avatar(self, aid: str) -> bool:
         """助手是否有自有头像（区别于人格回落）。"""

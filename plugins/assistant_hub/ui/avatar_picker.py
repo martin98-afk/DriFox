@@ -178,6 +178,20 @@ class AvatarPicker(QWidget):
             else:
                 tile.setChecked(False)
 
+    def get_selection(self) -> dict:
+        """当前选择结果（弹窗确定后由宿主读取）。
+
+        image_path 非空 = 预置/上传图片；空 = 纯色块（无图片）。
+        ⚠ 此前缺失本方法，弹窗确定时 AttributeError 被静默吞掉 →
+        「改头像确定后什么都没发生」的根因。
+        """
+        return {
+            "kind": "predefined" if self._current_image else "color",
+            "name": self._current_name,
+            "image_path": self._current_image,
+            "color": self._current_color,
+        }
+
     def _init_ui(self) -> None:
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)

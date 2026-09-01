@@ -198,22 +198,40 @@ class ProfileSection(_Section):
         self._model_keys: List[str] = [""]
         self._suspend_autosave = True  # bind() 期间不触发自动保存
 
+        # 表单整体固定宽度、居中（不占满整行；两行 label 左缘对齐）
+        FORM_W = 520
+        form_holder = QWidget()
+        form_holder.setFixedWidth(FORM_W)
+        form = QVBoxLayout(form_holder)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(8)
+
         row1 = QHBoxLayout()
-        row1.addWidget(_title_label("名称", 11))
+        lbl1 = _title_label("名称", 11)
+        lbl1.setFixedWidth(104)  # 与下行 label 同宽 → 控件左缘对齐（须容纳"记忆整理模型"6 字）
+        row1.addWidget(lbl1)
         self._name = QLineEdit()
         self._name.setStyleSheet(_input_style())
         self._name.textEdited.connect(self._schedule_autosave)
         row1.addWidget(self._name, 1)
-        self.body().addLayout(row1)
+        form.addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.addWidget(_title_label("记忆整理模型", 11))
+        lbl2 = _title_label("记忆整理模型", 11)
+        lbl2.setFixedWidth(104)
+        row2.addWidget(lbl2)
         self._utility_model = ComboBox()
-        self._utility_model.setMinimumWidth(220)
         self._utility_model.setMaxVisibleItems(self._MAX_VISIBLE_ITEMS)
+        self._utility_model.setStyleSheet(self._combo_style())
         self._utility_model.currentIndexChanged.connect(self._schedule_autosave)
         row2.addWidget(self._utility_model, 1)
-        self.body().addLayout(row2)
+        form.addLayout(row2)
+
+        wrap = QHBoxLayout()
+        wrap.addStretch()
+        wrap.addWidget(form_holder)
+        wrap.addStretch()
+        self.body().addLayout(wrap)
         self.body().addWidget(
             _hint(
                 "对话模型跟随系统当前配置，无需在此设置；记忆整理模型用于记忆编译 / Dream / 经验反思，跟随全局 = 使用当前对话模型。"
@@ -226,6 +244,30 @@ class ProfileSection(_Section):
         self._debounce.setInterval(self._DEBOUNCE_MS)
         self._debounce.timeout.connect(self._emit_save)
         self._reload_models()
+
+    def _combo_style(self) -> str:
+        """记忆整理模型下拉：透明背景融入卡片（选择器名对齐 bottom_input_area 先例）。"""
+        return f"""
+            ComboBox {{
+                background: transparent;
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px 10px;
+                {get_font_family_css()} {font_size_css(12)};
+            }}
+            ComboBox:hover {{
+                background: {Colors.HOVER_BG};
+                border-color: {Colors.TEXT_ACCENT};
+            }}
+            ComboBox::drop-down {{ border: none; width: 16px; }}
+            ComboBox::down-arrow {{
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid {Colors.TEXT_PRIMARY};
+                margin-right: 2px;
+            }}
+        """
 
     def _schedule_autosave(self, *_a) -> None:
         if self._suspend_autosave:
@@ -329,6 +371,10 @@ class _PersonaChip(QFrame):
         v.addWidget(self._tag)
         self._apply_style()
 
+    def set_avatar_image(self, image_path: str) -> None:
+        """换人格头像后轻量刷新本 chip 头像。"""
+        self._avatar.set_image(image_path or None)
+
     def _apply_style(self) -> None:
         border = Colors.TEXT_ACCENT if self._selected else Colors.BORDER
         bg = "rgba(245, 158, 11, 0.07)" if self._selected else "transparent"
@@ -404,16 +450,12 @@ class AboutSection(_Section):
 
         chips_row = QHBoxLayout()
         chips_row.setSpacing(12)
-        chips_row.addStretch()
+        self._chips_row = chips_row
         self._chips: List[_PersonaChip] = []
         self._personas = personas  # 调用方已包含 none（纯净助手）
-        for p in self._personas:
-            chip = _PersonaChip(p)
-            chip.clicked.connect(lambda pid=p["id"]: self.personaChangeRequested.emit(pid))
-            chips_row.addWidget(chip)
-            self._chips.append(chip)
-        chips_row.addStretch()
+        self._current_pid = current_pid
         self.body().addLayout(chips_row)
+        self.rebuild_chips(personas)
 
         manage_row = QHBoxLayout()
         manage_row.addStretch()
@@ -465,8 +507,34 @@ class AboutSection(_Section):
 
     def set_persona(self, pid: str) -> None:
         """刷新 chips 选中态。"""
+        self._current_pid = pid
         for chip in self._chips:
             chip.set_selected(chip.persona_id == pid)
+
+    def rebuild_chips(self, personas: List[dict]) -> None:
+        """全量重建人格 chips（人格数据/头像变更后刷新，保留当前选中态）。"""
+        self._personas = personas
+        while self._chips_row.count():
+            item = self._chips_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._chips = []
+        self._chips_row.addStretch()
+        for p in personas:
+            chip = _PersonaChip(p)
+            chip.clicked.connect(lambda pid=p["id"]: self.personaChangeRequested.emit(pid))
+            self._chips_row.addWidget(chip)
+            self._chips.append(chip)
+        self._chips_row.addStretch()
+        self.set_persona(self._current_pid)
+
+    def refresh_avatar(self, pid: str, image_path: str) -> None:
+        """轻量刷新单个 chip 头像（换人格头像后由宿主调用）。"""
+        for chip in self._chips:
+            if chip.persona_id == pid:
+                chip.set_avatar_image(image_path)
+                break
 
     def set_persona_avatar(self, image_path: str, name: str, has_override: bool) -> None:
         """刷新人格头像预览与「恢复默认」可用性（宿主在切人格/换头像后调用）。"""

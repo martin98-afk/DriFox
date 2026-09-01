@@ -12345,6 +12345,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     insert_index=insert_index,
                     user_round_index=round_index,
                     update_preview=not insert_at_top,
+                    image_attachments=batch[0].get("_image_attachments"),
                 )
                 if user_card:
                     # 设置 message_index 用于卡片差异功能
@@ -13437,6 +13438,7 @@ class OpenAIChatToolWindow(ToolWindow):
         insert_index: Optional[int] = None,
         user_round_index: Optional[int] = None,
         update_preview: bool = True,
+        image_attachments: Optional[list] = None,
     ):
         session = self.session_manager.get_current_session()
         if session:
@@ -13454,6 +13456,10 @@ class OpenAIChatToolWindow(ToolWindow):
         card = MessageCard(parent=self, role="user", timestamp=timestamp)
         card._round_index = user_round_index
         card.update_content(content)
+        # 图片附件预览：正文上方缩略图条（恢复会话时 content 为 multimodal list，
+        # 传入作路径失效兑底；发送当下 content 是纯文本，路径必然有效）
+        if image_attachments:
+            card.set_image_attachments(image_attachments, fallback_content=content)
         card.finish_streaming()
 
         # 设置卡片信号
@@ -16321,7 +16327,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not preserve_input:
             self._clear_input_area()
             self._clear_attachments()
-        self._append_user_message(user_text)
+        # 视觉模型时图片以 multimodal 注入：卡片同步预览 + session 消息打标记（恢复会话可回显）
+        self._append_user_message(user_text, image_attachments=_image_paths or None)
 
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
