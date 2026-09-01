@@ -6948,6 +6948,12 @@ class CodeWebViewer(QWebEngineView):
                 var lead = text.match(/^[\\r\\n]+/);
                 var newlines = lead ? lead[0].replace(/\\r\\n/g, '\\n').length : 0;
                 var last = c.lastElementChild;
+                // 🐛 修复（流式文字跳位）：#char-count（字数统计空 DIV）拼在全量 HTML
+                // 末尾，是 container 的 lastElementChild。不跳过它的话，全量渲染后
+                // 的所有正文 chunk 都拿不到真实末块（稳定 <p>），落入"新建独立 <p>"
+                // 兜底分支 → 源文同段文字被拆成独立行先蹦在最底部，下一轮渲染才
+                // 合并回正文（用户感知"文字先换行出现在最下面，再跳回正确位置"）。
+                if (last && last.id === 'char-count') last = last.previousElementSibling;
                 if (newlines >= 2) {{
                     // 段落分隔：去掉前导换行，创建独立 <p>
                     var clean = text.replace(/^[\\n\\r]+/, '');
@@ -7551,8 +7557,43 @@ class CodeWebViewer(QWebEngineView):
             # 保持旧基线 → 下一次差量从 think 开头扫描，配对守卫正确 break，
             # 等思考完整闭合后整体差量/全量渲染（无重复：基线未推进期间不产出段）。
             if self._streaming and not _has_unclosed_think_or_tool(self._last_rendered_markdown):
-                self._stable_md_len = len(self._last_rendered_markdown)
+                # 🐛 修复（流式文字跳位）：stable 推进到最后一个 \n\n 之后，而非 md 末尾。
+                # 全量渲染的 DOM 末尾 <p> 往往是未闭合段的中间形态（md 尾部无空行），
+                # 若 stable 推到 md 末尾，这段半截文字会被划入"稳定区"——但下方打标 JS
+                # 已把它标为增量节点，updateTailHtml/updateContentAppend 移除 [inc]
+                # 时会删掉它，而 tail（从 stable 起）又不含它 → 内容丢失。
+                # 推进到最后段落边界后，末段整体划入 tail 区：打标删除与 tail 重建
+                # 语义闭环（删掉的正是 tail 会重建的），不丢不重。
+                _md_r = self._last_rendered_markdown
+                _last_break = _md_r.rfind("\n\n")
+                self._stable_md_len = _last_break + 2 if _last_break != -1 else 0
             self._needs_full_render = False
+            # 🐛 修复（流式文字跳位）：全量渲染的 DOM 末尾 <p> 可以是**未闭合段的
+            # 中间形态**（首渲染 / 工具后重渲等，md 尾部无 \n\n）。此时末尾 <p>
+            # 承载的是未写完的段落，后续同段 chunk 应继续接在它后面。若不补打
+            # data-incremental 标记，_append_text_incremental 拿不到增量节点，
+            # 新文字落入"新建独立 <p>"分支 → 源文同段被拆成独立行先蹦在最底部，
+            # 等下一轮渲染才合并回正文（视觉跳位）。
+            # 仅对 <p> 打标：代码块/列表/引用等复杂尾部结构不打（新内容应另起段，
+            # 维持原兜底行为，避免文字钻进 <pre>/<li>）。updateContentAppend /
+            # updateTailHtml 移除 [inc] 节点时会连带删除它，但闭合段 HTML / tail
+            # HTML 包含全文（stable 推进到全量末尾），内容不丢。
+            _mark_unclosed_para_js = ""
+            if self._streaming and not _has_unclosed_think_or_tool(self._last_rendered_markdown):
+                _tail_after_break = (
+                    self._last_rendered_markdown.rsplit("\n\n", 1)[-1] if self._last_rendered_markdown else ""
+                )
+                if _tail_after_break.strip():
+                    _mark_unclosed_para_js = (
+                        "(function(){"
+                        "var _c=document.getElementById('content-placeholder');"
+                        "if(!_c)return;"
+                        "var _l=_c.lastElementChild;"
+                        "if(_l&&_l.id==='char-count')_l=_l.previousElementSibling;"
+                        "if(!_l||_l.tagName!=='P'||_l.hasAttribute('data-incremental'))return;"
+                        "_l.setAttribute('data-incremental','true');"
+                        "})();"
+                    )
             # 🐛 修复：全量渲染后卡住不滚底。流式增量文本（_append_text_incremental）
             # 先触发 reportHeight 消费了 _content_just_loaded 标记，导致 50ms 后
             # updateContent 的 height report 到达时 _content_just_loaded 已为 False，
@@ -7586,6 +7627,8 @@ class CodeWebViewer(QWebEngineView):
                 )
             else:
                 js_code = f"updateContent({json.dumps(html).decode('utf-8')});" + auto_scroll_js
+            if _mark_unclosed_para_js:
+                js_code += _mark_unclosed_para_js
             # 🐛 修复（编辑工具框运行中消失）：dirty 清除延后到 JS 回调（pending + 代际守卫），
             # 原理同 _perform_update 非流式分支——避免异步 JS 未执行期间被下一次渲染
             # 误判"无工具 DOM"而裸 updateContent 抹掉 JS 注入的运行框。

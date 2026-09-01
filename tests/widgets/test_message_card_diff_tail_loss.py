@@ -144,12 +144,35 @@ def test_append_text_incremental_never_marks_formatted_paragraph():
     段落，已渲染正文永久丢失（"内容显示不全"）。
     """
     src = inspect.getsource(CodeWebViewer._append_text_incremental)
-    # 追加条件必须要求目标节点已带 data-incremental 标记
-    assert "last.hasAttribute('data-incremental')" in src, "追加分支必须要求 last 已是增量节点"
+    # 追加条件：last 是带 data-incremental 标记的增量节点（v18 实际写法）
+    assert "last.getAttribute('data-incremental') === 'true'" in src, "追加分支必须要求 last 已是增量节点"
+    # 🐛 回归（流式文字跳位）：#char-count 拼在全量 HTML 末尾，是 lastElementChild；
+    # 不跳过它，全量渲染后所有 chunk 都找不到真实末块（稳定 <p>）→ 每个同段文字
+    # 都新建独立 <p> 换行蹦在最底部，下一轮渲染才合并回正文
+    assert "last.id === 'char-count'" in src, "尾部宿主定位必须跳过 #char-count 字数统计节点"
     # 禁止旧实现：无条件把非增量 P 打标记（污染格式化段落）
     assert "last.setAttribute('data-incremental', 'true')" not in src, "不得给格式化稳定段落打 data-incremental 标记"
-    # 稳定段落后新建独立增量节点承载新文本
-    assert src.count("p.setAttribute('data-incremental', 'true')") >= 3, "稳定段落/思考块/兜底分支都应新建增量节点"
+    # 稳定段落后新建独立增量节点承载新文本（挂起分段/稳定段落/兜底三处分支）
+    assert src.count("_newIncrementalP(text)") + src.count("_newIncrementalP(clean)") >= 3, (
+        "挂起分段/稳定段落/兜底分支都应新建增量节点"
+    )
+
+
+def test_full_render_marks_unclosed_tail_paragraph_incremental():
+    """🐛 回归（流式文字跳位）：全量渲染应用后，md 尾部是未闭合段时，
+    DOM 末尾 <p> 必须补打 data-incremental 标记，让后续同段 chunk
+    走就地追加（连续增长），而非新建独立 <p> 换行蹦在最底部。
+
+    配套：stable 推进点必须是最后一个 \n\n 之后（而非 md 末尾），
+    使打标末段归属 tail 区——updateTailHtml/updateContentAppend 移除
+    [inc] 节点时删掉的正是 tail 会重建的内容，不丢不重。
+    """
+    src = inspect.getsource(CodeWebViewer._apply_render_result)
+    # 打标 JS 必须存在：限定 tagName==='P'（复杂尾部结构不标，维持兜底行为）
+    assert "tagName!=='P'" in src, "打标 JS 必须限定只给末尾 <p> 打增量标记"
+    assert "data-incremental" in src, "全量渲染后应给未闭合段末尾 <p> 补打增量标记"
+    # stable 推进必须到最后段落边界，而非 md 末尾（否则打标删除会丢内容）
+    assert 'rfind("\\n\\n")' in src, "全量渲染后 stable 必须推进到最后一个 \\n\n 之后"
 
 
 def _simulate_stream_dom(chunks, fixed=True):
