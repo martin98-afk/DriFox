@@ -1,19 +1,17 @@
 # -*- coding: utf-8 -*-
-"""assistant_hub hooks — 系统提示词注入（助手替换智能体身份）
+"""inject_assistant.py — assistant_hub hooks（身份替换注入 + 轮次计数）
 
-核心设计（用户澄清后定稿）：
-- **助手 ≠ 智能体**。助手是比智能体高一个维度的抽象，不注册到 AgentManager，
-  不参与 subagent 调用。原 build 智能体定义保持不变、仍可被子智能体调用。
-- **替换注入**：当某个助手被激活（``AssistantManager.active_id()``）时，
-  本 hook **直接输出**助手信息（身份 + 人格 + 记忆 + 技能）作为 system prompt
-  的身份段，同时把 context 里预取的智能体提示词**置空**，避免系统
-  inject_agent_identity（若仍启用）重复输出 build 提示词。
-- 本插件自带 hook（hooks/hooks.json + 本文件），不改动系统 hooks.json。
+两个 hook：
+1. BuildSystemPrompt（``hook``）：激活助手时**直接输出**助手信息块
+   （人格段 identity+persona+AGENTS.md → 记忆使用规则 → 置顶 → memory.md），
+   并把 context 里预取的智能体提示词置空防重复。经验不注入 prompt
+   （recall_experience 无参返回索引 = 渐进式披露）。
+2. Stop（``on_stop``）：主对话每轮结束计数，交给 MemoryTicker 驱动
+   记忆传送带（每 10 轮轻量链）。
 
 实现说明：
-- HookWorker 通过 ``spec_from_file_location`` 独立加载本文件（无 package
-  上下文），因此**不能使用相对导入**。assistant_manager 模块改用
-  importlib 按文件路径加载，并缓存在 sys.modules（进程内单例语义一致）。
+- HookWorker 经 spec_from_file_location 独立加载本文件（无 package 上下文），
+  禁止相对导入；assistant_manager 模块按路径加载并缓存 sys.modules。
 """
 from __future__ import annotations
 
@@ -29,11 +27,7 @@ _MANAGER_MODULE_NAME = "assistant_hub_manager"
 
 
 def _ensure_manager_module():
-    """按文件路径加载 assistant_manager.py（避免相对导入在 hook 独立加载时失败）。
-
-    模块名固定为 ``assistant_hub_manager`` 并缓存到 sys.modules：
-    多次加载共享同一份类定义，AssistantManager 类级单例语义保持一致。
-    """
+    """按文件路径加载 assistant_manager.py（进程内单例语义一致）。"""
     mod = sys.modules.get(_MANAGER_MODULE_NAME)
     if mod is not None:
         return mod
@@ -60,12 +54,45 @@ def _get_manager():
     return module.AssistantManager.get_instance()
 
 
-def _assistant_prompt_block(aid: str) -> str:
-    """组装助手信息块（身份 + 人格 + 记忆 + 技能），供替换注入。
+def _get_ticker(mgr):
+    """取 MemoryTicker 单例（失败返回 None：ticker 不可用只影响传送带，不影响注入）。"""
+    try:
+        module = _ensure_manager_module()
+        if module is None:
+            return None
+        return module.AssistantManager.get_instance().__class__ and _ticker_instance(mgr)
+    except Exception as e:
+        logger.debug(f"[assistant_hub.hooks] ticker 不可用: {e}")
+        return None
 
-    顺序参考 OpenHanako agent.ts 的 system prompt 组装：
-    identity（身份）→ AGENTS（人格/行为准则）→ 记忆（置顶/当下/长期）→ 技能。
-    """
+
+def _ticker_instance(mgr):
+    mod = sys.modules.get(_MANAGER_MODULE_NAME)
+    if mod is None:
+        return None
+    return mod._load_core_module("memory.ticker", "memory/ticker.py").MemoryTicker.get(mgr)
+
+
+# ── 记忆使用规则（无声记忆，对齐 openhanako agent.ts 中文版）──
+
+_MEMORY_RULES = """## 记忆使用规则
+
+记忆和用户档案是你内化的背景知识。你和{user}是认识很久的人，这些事你本来就知道。
+
+- **只有当{user}提到相关内容，记忆才参与**，而且方式是无声的：影响你的角度、语气、判断，不出现在文字里。{user}没提起的话题，不要主动从记忆里翻出来讲。
+- **永远不要让{user}感觉到"记忆"这个东西的存在。** 禁止"我记得""你之前说过""根据记忆"这类表述，除非{user}主动问"你还记得 xxx 吗"。
+- **记忆可能过时，当前对话永远优先。** 信息冲突时以对话为准，不要用旧记忆纠正{user}。"""
+
+
+def _user_name(mgr) -> str:
+    try:
+        return mgr.user_name()
+    except Exception:
+        return "用户"
+
+
+def _assistant_prompt_block(aid: str) -> str:
+    """组装助手信息块：人格段 → 记忆规则 → 置顶 → memory.md。"""
     mgr = _get_manager()
     if mgr is None:
         return ""
@@ -75,58 +102,41 @@ def _assistant_prompt_block(aid: str) -> str:
 
     parts: list[str] = []
 
-    # 1. 身份简介（identity.md，缺失回落模板）
-    identity, _from_template = mgr.read_identity_source(aid)
-    if identity.strip():
-        parts.append(identity.strip())
+    # 1. 人格段（identity + persona 底座 + AGENTS.md，fill 模板变量；none=纯净）
+    persona_block = mgr.identity_and_persona(aid)
+    if persona_block.strip():
+        parts.append(persona_block.strip())
 
-    # 2. 人格/行为准则（AGENTS.md，缺失回落模板）
-    agents_md, _ = mgr.read_agents_md_source(aid)
-    if agents_md.strip():
-        parts.append(agents_md.strip())
-
-    # 3. 记忆（仅当 memory_enabled）
+    # 2. 记忆段（memory_enabled 才注入）
     if a.memory_enabled:
-        ctx = mgr.get_context(aid)
-        ctx_block = ctx.to_prompt_block() if ctx else ""
-        if ctx_block:
-            parts.append(ctx_block)
-
-    # 4. 专属技能（skills/*.md）
-    skills = mgr.list_skills(aid)
-    if skills:
-        skill_parts = ["## 专属技能", ""]
-        for sk in skills:
-            content = mgr.read_skill(aid, sk["name"])
-            if content.strip():
-                skill_parts.append(f"### {sk['name']}\n{content.strip()}")
-        parts.append("\n".join(skill_parts))
+        user = _user_name(mgr)
+        rule = _MEMORY_RULES.replace("{user}", user)
+        mem_parts = [rule]
+        pinned = mgr.read_pinned(aid)
+        pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or "").strip()]
+        if pin_lines:
+            mem_parts.append("# 置顶记忆\n\n" + "\n".join(pin_lines))
+        memory_md = ""
+        try:
+            memory_md = (mgr.compiled_memory(aid) or "").strip()
+        except Exception as e:
+            logger.debug(f"[assistant_hub.hooks] 读取 memory.md 失败: {e}")
+        if memory_md:
+            mem_parts.append("# 长期记忆\n\n" + memory_md)
+        if len(mem_parts) > 1:  # 规则之外还有实际记忆内容才注入整段
+            parts.append("\n\n".join(mem_parts))
 
     if not parts:
         return ""
 
-    # 头部声明助手身份（比"当前智能体身份"更精确的语义）
     header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}——一个由用户创建的专属 AI 助手。"
     return header + "\n\n" + "\n\n".join(parts)
 
 
 def hook(event: str, context: Dict[str, Any]) -> str:
-    """BuildSystemPrompt hook：激活助手时直接输出助手信息块。
-
-    Args:
-        event: 事件名（BuildSystemPrompt）
-        context: 由 get_agent_system_prompt() 预取的上下文，含
-            - agent_name / current_role（primary|subagent）
-            - agent_identity_content（原智能体提示词，本 hook 会置空防重复）
-
-    Returns:
-        助手信息块（激活助手时）；未激活 / 非主智能体返回空串。
-        返回内容由 HookManager add_output_to_context 注入 system prompt。
-    """
-    # 仅主智能体会话生效（子智能体保留系统定义，避免嵌套污染）
+    """BuildSystemPrompt hook：激活助手时直接输出助手信息块。"""
     if (context or {}).get("current_role") != "primary":
         return ""
-
     try:
         mgr = _get_manager()
         if mgr is None:
@@ -134,15 +144,33 @@ def hook(event: str, context: Dict[str, Any]) -> str:
         aid = mgr.active_id()
         if not aid or not mgr.has(aid):
             return ""
-
         block = _assistant_prompt_block(aid)
         if not block:
             return ""
-
-        # 置空系统预取的智能体提示词：若系统 inject_agent_identity 仍启用，
-        # 它读到空串不会输出 build 提示词，避免与助手信息重复。
         context["agent_identity_content"] = ""
         return block
     except Exception as e:
         logger.warning(f"[assistant_hub.hooks] BuildSystemPrompt 处理失败: {e}")
         return ""
+
+
+def on_stop(event: str, context: Dict[str, Any]) -> str:
+    """Stop hook：主对话每轮结束 → MemoryTicker 计数（驱动记忆传送带）。
+
+    恒返回空串（不向对话注入任何内容）。
+    """
+    try:
+        if (context or {}).get("current_role") != "primary":
+            return ""
+        mgr = _get_manager()
+        if mgr is None:
+            return ""
+        aid = mgr.active_id()
+        if not aid or not mgr.has(aid):
+            return ""
+        ticker = _get_ticker(mgr)
+        if ticker is not None:
+            ticker.on_turn_finished()
+    except Exception as e:
+        logger.debug(f"[assistant_hub.hooks] Stop 计数失败: {e}")
+    return ""
