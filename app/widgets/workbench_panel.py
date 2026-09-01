@@ -910,12 +910,21 @@ class WorkbenchPanel(QWidget):
 
     # ── 动态卡片 tab（right 容器 UI 插件卡片） ──
 
-    def open_card_tab(self, card_id: str, label: str, widget: QWidget) -> None:
+    def open_card_tab(
+        self, card_id: str, label: str, widget: QWidget, *, activate: bool = True
+    ) -> None:
         """打开/激活一张卡片 tab（已存在则仅激活；同 id 换新实例则替换页内容）
 
         卡片页追加在 stack 末尾（内置 3 页 + 插件页之后），与 _tab_specs
         的追加顺序严格一致。widget 生命周期归调用方（registry）管理，
         本面板只负责挂载/摘除（摘除不销毁，重复打开零重建）。
+
+        Args:
+            activate: True（默认）= 挂载并激活为当前页，且走用户路径写入
+                per-window 页签记忆（用户主动打开卡片 = 切页，切走再切回应
+                停留在此）。False = 仅挂载/重建页签条，不改变当前页签也不
+                写记忆（对话标签页投影恢复用——恢复卡片 tab 不应把用户当前
+                停留的工作台页签抢走）。
         """
         entry = self._card_tabs.get(card_id)
         if entry is not None:
@@ -936,9 +945,11 @@ class WorkbenchPanel(QWidget):
             self._card_tabs[card_id] = {"label": label, "widget": widget}
             self._stack.addWidget(widget)
         self._rebuild_tab_bar()
+        if not activate:
+            return
         idx = self._stack.indexOf(widget)
         if idx >= 0:
-            self.set_current_tab(idx)
+            self.set_current_tab(idx, user=True)
 
     def close_card_tab(self, card_id: str) -> bool:
         """关闭卡片 tab：从页签条与内容栈摘除（widget 不销毁，交还调用方）

@@ -669,6 +669,40 @@ def test_artifacts_label_updates_on_registration(panel):
     assert labels == ["工作树", "记忆", "文件产物"], f"产物页标签应更新，实际: {labels}"
 
 
+def test_card_tab_activate_false_mounts_without_switching(panel):
+    """★ activate=False：挂载卡片 tab 但不改变当前页签（对话标签页投影恢复语义）
+
+    旧实现 open_card_tab 无条件激活 → 切换对话标签页恢复卡片时，工作台
+    当前页签被恢复的卡片抢走（用户停留页签丢失）。
+    """
+    panel.set_current_tab(WorkbenchPanel.TAB_MEMORY)
+    card = QLabel("卡片内容")
+    panel.open_card_tab("my-card", "我的卡片", card, activate=False)
+    assert panel.has_card_tab("my-card")
+    assert panel.current_tab() == WorkbenchPanel.TAB_MEMORY, "不激活时当前页签不得被抢走"
+    assert panel._stack.indexOf(card) >= 0
+    # 已挂载的卡片再以 activate=False 恢复：同样不跳页
+    panel.open_card_tab("my-card", "我的卡片", card, activate=False)
+    assert panel.current_tab() == WorkbenchPanel.TAB_MEMORY
+    card.deleteLater()
+
+
+def test_card_tab_activate_true_emits_user_signal(panel):
+    """★ activate=True：激活卡片页且走用户路径（写 per-window 页签记忆）
+
+    用户主动打开卡片 = 切页，应经 user 路径发射 current_tab_changed，宿主
+    据此把卡片记为该窗口的页签记忆（切走再切回才停得住）。
+    """
+    fired = []
+    panel.current_tab_changed.connect(lambda i: fired.append(i))
+    card = QLabel("卡片内容")
+    panel.open_card_tab("my-card", "我的卡片", card, activate=True)
+    idx = panel._stack.indexOf(card)
+    assert panel.current_tab() == idx
+    assert fired == [idx], f"应经 user 路径发射 current_tab_changed: {fired}"
+    card.deleteLater()
+
+
 def test_remember_workbench_tab_stores_tab_id(panel):
     """★ 宿主页签记忆按 tab_id 而非裸 index（跨窗口 tab 集合不同时的根因修复）
 

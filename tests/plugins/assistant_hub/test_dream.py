@@ -70,6 +70,46 @@ def test_dream_empty_memory(tmp_path):
     assert r["ok"] is False and "no_memory" in (r.get("error") or "")
 
 
+def test_dream_runs_with_only_today(tmp_path):
+    """facts/longterm 为空但 today.md 有内容时应放行。
+
+    compile_facts 依赖 sessions.db 的对话样本，全新助手往往还没产出 facts.md；
+    此时 Dream 的输入（today + daily）已经足够，不应报 dream_no_memory。
+    """
+    aid = tmp_path / "a2_today_only"
+    mem = aid / "memory"
+    mem.mkdir(parents=True)
+    (mem / "today.md").write_text("- 今天聊了部署\n- 用户偏好简洁", encoding="utf-8")
+
+    runner = m.DreamRunner(aid, llm=FakeLLM(list(_DREAM_REPLIES)))
+    r = runner.start("manual")
+    assert r["ok"] is True and r["changed"] is True
+    # 产出写回 facts.md / longterm.md
+    assert (mem / "facts.md").read_text(encoding="utf-8").strip()
+    assert (mem / "longterm.md").read_text(encoding="utf-8").strip()
+
+
+def test_dream_whitespace_only_counts_as_empty(tmp_path):
+    """只有空白字符仍视为无记忆（避免放行后被空 prompt 打到引擎）。"""
+    aid = tmp_path / "a2_blank"
+    mem = aid / "memory"
+    mem.mkdir(parents=True)
+    (mem / "today.md").write_text("   \n\t\n", encoding="utf-8")
+    runner = m.DreamRunner(aid, llm=FakeLLM([]))
+    r = runner.start("manual")
+    assert r["ok"] is False and "no_memory" in (r.get("error") or "")
+
+
+def test_has_any_memory_considers_all_sections():
+    """准入判定覆盖 facts / today / daily / longterm 四段。"""
+    S = m.DreamSections
+    assert m._has_any_memory(S(facts="", today="", daily=[], longterm="")) is False
+    assert m._has_any_memory(S(facts="- 事实", today="", daily=[], longterm="")) is True
+    assert m._has_any_memory(S(facts="", today="- 今日", daily=[], longterm="")) is True
+    assert m._has_any_memory(S(facts="", today="", daily=[{"date": "d", "body": "近期"}], longterm="")) is True
+    assert m._has_any_memory(S(facts="", today="", daily=[], longterm="- 长期")) is True
+
+
 def test_dream_reentry_locked(tmp_path):
     aid = tmp_path / "a3"
     _seed_memory(aid)

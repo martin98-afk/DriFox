@@ -1176,3 +1176,144 @@ def test_watchfiles_filter_ignores_pycache_paths():
     ]
     for path in normal_changes:
         assert not _should_filter(path), f"正常 .py 文件不应被过滤: {path}"
+
+
+# ═══════════════════════════════════════════════════════════════
+# right 容器卡片 → 工作台 tab 投影（per-tab 隔离）回归
+# ═══════════════════════════════════════════════════════════════
+
+
+class _FakeSignal:
+    """极小信号 stub（记录连接；不真发射）"""
+
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, slot, type=None):
+        self._slots.append(slot)
+
+    def emit(self, *args):
+        for s in list(self._slots):
+            s(*args)
+
+
+class _FakeWorkbenchPanel:
+    """WorkbenchPanel 投影语义 stub（记录 open/close 的 activate 参数）"""
+
+    def __init__(self):
+        self.card_tab_close_requested = _FakeSignal()
+        self.opened: list = []  # (card_id, activate)
+        self.closed: list = []
+        self._tab_ids = ["worktree", "memory", "artifacts"]
+        self._current = 0
+        self._cards: set = set()
+
+    def open_card_tab(self, card_id, label, widget, *, activate=True):
+        self.opened.append((card_id, activate))
+        if card_id not in self._cards:
+            self._tab_ids.append(card_id)
+        self._cards.add(card_id)
+        if activate:
+            self._current = self._tab_ids.index(card_id)
+
+    def close_card_tab(self, card_id):
+        self.closed.append(card_id)
+        if card_id not in self._cards:
+            return False
+        self._cards.discard(card_id)
+        self._tab_ids = [t for t in self._tab_ids if t != card_id]
+        if self._current >= len(self._tab_ids):
+            self._current = max(0, len(self._tab_ids) - 1)
+        return True
+
+    def has_card_tab(self, card_id):
+        return card_id in self._cards
+
+    def current_tab(self):
+        return self._current
+
+    def set_current_tab(self, index, *, user=False):
+        self._current = index
+
+    def _tab_id_at(self, index):
+        if 0 <= index < len(self._tab_ids):
+            return self._tab_ids[index]
+        return None
+
+    def _tab_id_index(self, tab_id):
+        for i, t in enumerate(self._tab_ids):
+            if t == tab_id:
+                return i
+        return None
+
+
+def test_workbench_card_projection_restore_does_not_steal_tab(monkeypatch):
+    """★ 切标签页恢复 right 卡片 tab 时不得抢走当前工作台页签（投影是挂载不是激活）
+
+    旧实现：恢复路径 _show_floating_card_in_workbench → open_card_tab 默认激活 →
+    切回标签页时工作台被强制跳到卡片页（用户停留的页签被抢走，与 per-window
+    页签记忆 restore 打架，表现为切 tab 后工作台页签乱跳/选中错乱）。
+    """
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    panel = _FakeWorkbenchPanel()
+    host = _TabFakeHost()
+    host.workbench_panel = panel
+    monkeypatch.setattr(UIPluginRegistry, "_resolve_global_host", lambda self: host)
+    reg.register_floating_card(
+        plugin_name="plug-right",
+        card_id="plug-right:card",
+        widget_class=_TabStatefulCard,
+        container="right",
+        title="右侧卡片",
+    )
+    # 标签页 1 打开卡片（用户路径 → activate=True + 激活 + 工作台展开）
+    reg.sync_floating_cards_to_tab("tab-1")
+    reg._show_floating_card("plug-right:card")
+    assert panel.has_card_tab("plug-right:card")
+    assert panel.current_tab() == panel._tab_ids.index("plug-right:card")
+    assert panel.opened[-1][1] is True, f"用户打开应 activate=True: {panel.opened[-1]}"
+    # 切到标签页 2：摘除卡片（投影关）
+    reg.sync_floating_cards_to_tab("tab-2")
+    assert not panel.has_card_tab("plug-right:card")
+    assert panel.closed == ["plug-right:card"]
+    # 切回标签页 1：恢复卡片 = 只挂载不激活（当前页签不被抢走）
+    reg.sync_floating_cards_to_tab("tab-1")
+    assert panel.has_card_tab("plug-right:card")
+    assert panel.opened[-1][1] is False, f"投影恢复应 activate=False: {panel.opened[-1]}"
+    assert panel.current_tab() != panel._tab_ids.index("plug-right:card"), "恢复不应激活卡片页"
+
+    reg.reset()
+
+
+def test_workbench_card_projection_preserves_current_tab(monkeypatch):
+    """★ 投影摘除/恢复前后保持当前页签（切 tab 时工作台页签不跳变）
+
+    用户停留在「记忆」页（index 1），切走（卡片被摘）再切回（卡片恢复挂载），
+    最终页签应还原为「记忆」页——投影只增减页签集合，不改用户停留页。
+    """
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    panel = _FakeWorkbenchPanel()
+    host = _TabFakeHost()
+    host.workbench_panel = panel
+    monkeypatch.setattr(UIPluginRegistry, "_resolve_global_host", lambda self: host)
+    reg.register_floating_card(
+        plugin_name="plug-right",
+        card_id="plug-right:card",
+        widget_class=_TabStatefulCard,
+        container="right",
+        title="右侧卡片",
+    )
+    # 标签页 1：打开卡片，然后用户手动切回「记忆」页（index 1）
+    reg.sync_floating_cards_to_tab("tab-1")
+    reg._show_floating_card("plug-right:card")
+    panel.set_current_tab(1)
+    # 切到标签页 2 再切回 1：当前页签应仍为「记忆」页
+    reg.sync_floating_cards_to_tab("tab-2")
+    assert not panel.has_card_tab("plug-right:card")
+    reg.sync_floating_cards_to_tab("tab-1")
+    assert panel.has_card_tab("plug-right:card")
+    assert panel.current_tab() == 1, f"投影前后应保持「记忆」页: current={panel.current_tab()}"
+
+    reg.reset()

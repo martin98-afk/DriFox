@@ -1358,7 +1358,9 @@ class UIPluginRegistry:
         if host is not None:
             self._record_tab_card_state(card_id, card_manager, window_id)
 
-    def _show_floating_card_in_workbench(self, card_info: Any, panel, host, auto_expand: bool = True) -> None:
+    def _show_floating_card_in_workbench(
+        self, card_info: Any, panel, host, auto_expand: bool = True, activate: bool = True
+    ) -> None:
         """right 容器卡片 → 工作台动态 tab 页（v2：对话区右侧停靠区移除）
 
         与旧路径的差异：
@@ -1366,6 +1368,12 @@ class UIPluginRegistry:
         - 不注册系统卡（tab 页不覆盖对话区，不隐藏输入区）
         - 不参与 per-tab 显隐投影（与产物/记忆页同为宿主级全局页）
         - 保留实例缓存与上下文注入（热重载/卸载清理路径与旧卡片一致）
+
+        Args:
+            auto_expand: 工作台隐藏时是否自动展开（用户打开=True；投影恢复=False）
+            activate: 是否激活为当前工作台页签（用户打开=True；投影恢复=False，
+                只挂载不抢当前页签——切换对话标签页时恢复卡片 tab 不应把用户
+                停留的工作台页签带走）
         """
         card_id = card_info.card_id
         window_id = getattr(host, "_window_id", None)
@@ -1410,7 +1418,7 @@ class UIPluginRegistry:
         # per-tab 归属：记录到当前活跃对话标签页的打开集合（切 tab 投影用）
         scope = self._resolve_tab_scope() or window_id
         self._workbench_card_scopes.setdefault(scope, set()).add(card_id)
-        panel.open_card_tab(card_id, card_info.title or card_id, widget)
+        panel.open_card_tab(card_id, card_info.title or card_id, widget, activate=activate)
         # ★ 卡片数据加载入口：旧路径经 CardManager.show_card 调 widget.show_card()，
         #   工作台路径必须显式补调，否则卡片只建骨架不拉数据（表现为 tab 空白）
         show_card = getattr(widget, "show_card", None)
@@ -1457,6 +1465,14 @@ class UIPluginRegistry:
         if panel is None or not scope:
             return
         target = self._workbench_card_scopes.get(scope, set())
+        # 摘除/恢复前后保持当前页签（按 tab_id）：投影只是页签集合的增减，
+        # 不应把用户当前停留的工作台页签带走（per-window 页签记忆 restore
+        # 是另一层兜底；这里保证不可见期间/无记忆窗口也不跳页）
+        prev_id = None
+        try:
+            prev_id = panel._tab_id_at(panel.current_tab())
+        except Exception:
+            prev_id = None
         # 关：当前挂载但不属于目标标签页的卡片 tab。
         # ★ 只摘 tab 不清 scopes 集合——这是「临时隐藏」（其他标签页仍保留打开记录），
         #   走 _close_workbench_card_tab 会把用户关闭语义混进来误清其他标签页的集合。
@@ -1467,14 +1483,25 @@ class UIPluginRegistry:
                     panel.close_card_tab(card_id)
                 except Exception:
                     pass
-        # 开：目标标签页曾打开但当前未挂载的卡片 tab
+        # 开：目标标签页曾打开但当前未挂载的卡片 tab（只挂载不激活——恢复
+        # 卡片不应抢走当前页签；该标签页的页签记忆由宿主的 restore 负责定稿）
         for card_id in target:
             if card_id in self._workbench_card_tabs:
                 continue
             card_info = self._floating_cards.get(card_id)
             if card_info is None:
                 continue
-            self._show_floating_card_in_workbench(card_info, panel, self._resolve_global_host(), auto_expand=False)
+            self._show_floating_card_in_workbench(
+                card_info, panel, self._resolve_global_host(), auto_expand=False, activate=False
+            )
+        # 还原摘除前所在页签（若摘除的正是当前卡片页，则保持 Qt 选定的邻近页）
+        if prev_id is not None:
+            try:
+                restore_idx = panel._tab_id_index(prev_id)
+                if restore_idx is not None and panel.current_tab() != restore_idx:
+                    panel.set_current_tab(restore_idx)
+            except Exception:
+                pass
 
     def _record_tab_card_state(self, card_id: str, card_manager, host_window_id: str) -> None:
         """把卡片当前可见状态记录到活跃标签页的可见集合（Tab 模式）

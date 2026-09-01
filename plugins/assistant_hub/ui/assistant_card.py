@@ -167,6 +167,20 @@ class AssistantCardWidget(QWidget):
         self._build_ui()
         self._reload_all()
 
+    def set_context(self, ctx: dict) -> None:
+        """主程序注入的卡片上下文（UIPluginRegistry 创建卡片时调用）。
+
+        把 ctx["services"]（含 create_engine_session）提前缓存进 core/llm_client：
+        记忆传送带 / Dream / 经验反思都在后台线程跑，拿不到卡片 context，只能靠
+        注册表兜底解析（多窗口时可能取到非本窗口的 services）。
+        """
+        try:
+            services = (ctx or {}).get("services")
+            if isinstance(services, dict):
+                self._mgr._core_llm().set_services(services)
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 注入 services 失败（走注册表兜底）: {e}")
+
     # ══════════════════════════════════════════════════
     #  UI 构建
     # ══════════════════════════════════════════════════
@@ -621,7 +635,7 @@ class AssistantCardWidget(QWidget):
         else:
             err = str(result.get("error", "未知错误"))
             if err == "dream_no_memory":
-                err = "暂无可整理的记忆（重要事实/长期记忆为空），先正常对话积累几轮后再试"
+                err = "暂无任何记忆内容（今日/近期/事实/长期全为空），先正常对话积累几轮后再试"
             elif err == "memory_changed":
                 err = "整理期间记忆发生了变化，请稍后再试"
             elif err == "dream_already_running":

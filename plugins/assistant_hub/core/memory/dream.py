@@ -117,8 +117,16 @@ def _sections_text(s: DreamSections) -> str:
     return "\n\n".join(p for p in parts if p.strip())
 
 
-def _editable_chars(s: DreamSections) -> int:
-    return len(s.facts.strip()) + len(s.longterm.strip())
+def _has_any_memory(s: DreamSections) -> bool:
+    """是否有任何可整理的记忆内容。
+
+    ⚠️ 准入判定用「任意段落有内容」，不是「facts/longterm 有内容」：
+    Dream 的实际输入是 ``_sections_text()``（facts + today + daily + longterm），
+    产出写回 facts.md 与 longterm.md。若按 facts/longterm 卡准入，全新助手
+    明明已有 today.md（记忆传送带跑通了）、却因 compile_facts 还没产出
+    facts.md 而永远报 dream_no_memory —— 手动 Dream 直接不可用。
+    """
+    return bool(_sections_text(s).strip())
 
 
 def _hash_sections(s: DreamSections) -> str:
@@ -270,7 +278,7 @@ class DreamRunner:
         state = _read_state(self._aid)
 
         before = snapshot_sections(self._aid)
-        if _editable_chars(before) == 0:
+        if not _has_any_memory(before):
             err = "dream_no_memory"
             state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed", "error": err, "at": _now()}
             _write_state(self._aid, state)

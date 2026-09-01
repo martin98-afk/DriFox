@@ -16,7 +16,7 @@ from PyQt5 import sip as _sip
 
 from loguru import logger
 from app.core import window_registry
-from PyQt5.QtCore import QEasingCurve, QEvent, Qt, QPoint, QTimer, QVariantAnimation, pyqtSignal
+from PyQt5.QtCore import QEasingCurve, QEvent, QPoint, QSize, Qt, QTimer, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractScrollArea,
@@ -431,6 +431,37 @@ class _DockSideWrapper(QWidget):
                 self.hide()
 
 
+class _WorkbenchFrame(QFrame):
+    """工作台外框：动画期间可临时把 minimumSizeHint 归零
+
+    QSplitter 经 QWidgetItemV2::minimumSize() 取窗格下限：显式 minimum 为
+    0 / 无效时会回落到 minimumSizeHint()，所以 setMinimumWidth(0) 压不住
+    内容最小宽——面板内容（页签条 / 正文页 / 任务区）把窗格硬顶在 ~230px。收起动画后半程宽度
+    被钳在 230px 完全静止（实测约占 160ms 动画中的 96ms），最后一帧才
+    frame.hide() 瞬间消失 → 用户感知「中途卡顿一会，然后才收起」。
+
+    动画期间覆写 minimumSizeHint 返回 (0,0)，从源头摘掉内容最小宽，
+    窗格才能真正收到 0；动画结束立刻恢复，不影响拖拽下限。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._min_hint_disabled = False
+
+    def set_min_hint_disabled(self, disabled: bool) -> None:
+        """切换「最小尺寸提示归零」；幂等，切换后主动 updateGeometry 让 splitter 重算"""
+        disabled = bool(disabled)
+        if self._min_hint_disabled == disabled:
+            return
+        self._min_hint_disabled = disabled
+        self.updateGeometry()
+
+    def minimumSizeHint(self):
+        if self._min_hint_disabled:
+            return QSize(0, 0)
+        return super().minimumSizeHint()
+
+
 class TabManagerWindow(FramelessWindow):
     """Tab 管理器宿主窗口（单例）"""
 
@@ -652,7 +683,7 @@ class TabManagerWindow(FramelessWindow):
         # 圆角矩形容器（与 #tabFrame / #chatFrame 同款），作为 splitter 第三窗格。
         # 直接给 #workbenchPanel 设 border 会被 splitter handle 绘制顺序吞掉，
         # 故同左侧一样再包一层 QFrame 用 objectName 上样式。
-        self._workbench_frame = QFrame()
+        self._workbench_frame = _WorkbenchFrame()
         self._workbench_frame.setObjectName("workbenchFrame")
         # QSplitter 直接子项是 frame，宽约束必须设在 frame 上：
         #   min = panel min(320) + margins(12) + border(2) = 334
@@ -887,11 +918,17 @@ class TabManagerWindow(FramelessWindow):
         ★ 动画期间必须同时放开 panel 自身的最小宽度：frame.setMinimumWidth(0)
         管不住 minimumSizeHint——panel 的 setMinimumWidth(PANEL_WIDTH_MIN) 会把
         frame 实际下限顶在 334px，导致展开/收起动画前段被硬性钳住不动、尾段猛跳
-        （用户感知的"动画卡顿"主因）。"""
+        （用户感知的"动画卡顿"主因）。
+        ★ 只放开 panel 显式最小宽还不够：面板内部内容（页签条 / 正文页 / 任务区）
+        经由 minimumSizeHint 继续把窗格顶在 ~230px —— 收起动画后半程（实测
+        160ms 中的 ~96ms）宽度卡在 230px 完全静止，最后一帧才 hide() 瞬间消失
+        （"中途卡顿一会然后才收起"的真正根因）。故动画期间一并覆写
+        frame.minimumSizeHint（见 _WorkbenchFrame）。"""
         self._set_windows_resize_preview_suppressed(True)
         panel = getattr(self, "workbench_panel", None)
         if panel is not None:
             panel.setMinimumWidth(0)
+        frame = getattr(self, "_workbench_frame", None)
         # 帧内几何快照：动画期间总宽与左（侧栏）窗格不变，每帧直接用快照算三值。
         # 不再每帧读回 splitter.sizes() —— 读回会被 QSplitter 的整数分配量化，
         # 左侧栏与对话区窗格产生 ±1px 帧间漂移（感知为动画抖动）。
@@ -911,27 +948,42 @@ class TabManagerWindow(FramelessWindow):
         # 中途反向重启时旧收尾回调直接丢弃，只执行最新一次的回调
         self._wb_anim_finished_cb = on_finished
         anim.stop()
+        # ★ 最小尺寸提示归零必须在 anim.stop() 之后：stop 不发射 finished，
+        # 旧回调被丢弃，此处统一保证新动画从"无下限"状态起跑。
+        if frame is not None:
+            frame.set_min_hint_disabled(True)
         # ★ 曲线/时长按方向分离：展开 OutCubic（快速露出内容）；收起 OutQuad
         # + 160ms —— OutCubic 的尾段拖尾（后 12.5% 宽度要磨掉一半时间）在收起
         # 时观感为“收到一半顿一下才收完”（用户实测反馈）
         collapsing = end_w < start_w
         anim.setDuration(160 if collapsing else 200)
         anim.setEasingCurve(QEasingCurve.OutQuad if collapsing else QEasingCurve.OutCubic)
+        # ★ 设值期间屏蔽信号：QVariantAnimation 在 setEndValue 后会立刻以
+        # 新终值补发一次 valueChanged，导致动画尚未 start 就先 _apply_wb_width(0)
+        # 把窗格瞬间推到下限（收起起手闪一下）。起止值就绪后再解除屏蔽。
+        anim.blockSignals(True)
         anim.setStartValue(float(start_w))
         anim.setEndValue(float(end_w))
+        anim.blockSignals(False)
         anim.start()
 
     def _on_wb_anim_finished(self) -> None:
         """动画结束：执行收尾回调 + 恢复卡片 resize 预览能力
 
         若本回调又同步启动了新动画（反向重启），则跳过恢复（预览抑制与
-        panel 最小宽度都交由其 finished 恢复），避免动画中途解除。"""
+        panel 最小宽度、frame 最小尺寸提示都交由其 finished 恢复），
+        避免动画中途解除。"""
         cb = getattr(self, "_wb_anim_finished_cb", None)
         self._wb_anim_finished_cb = None
         if cb is not None:
             cb()
         if self._wb_anim is not None and self._wb_anim.state() == QVariantAnimation.Running:
             return
+        # 收尾回调已把 frame/panel 的显式最小宽恢复（PANEL_WIDTH_MIN + 14），
+        # 此处解除 minimumSizeHint 覆写，拖拽下限回到内容最小宽。
+        frame = getattr(self, "_workbench_frame", None)
+        if frame is not None:
+            frame.set_min_hint_disabled(False)
         self._set_windows_resize_preview_suppressed(False)
 
     def _stop_wb_anim(self) -> None:
@@ -939,6 +991,11 @@ class TabManagerWindow(FramelessWindow):
         if anim is not None:
             anim.stop()  # stop 不发射 finished；动画对象保留供复用，
             # 挂起的收尾回调由下一次 _start_wb_anim 覆盖或 _on_wb_anim_finished 丢弃
+        # stop 不触发 finished → 最小尺寸提示覆写必须在此兜底恢复，
+        # 否则用户可把手柄拖到 0（拖拽下限被永久摘除）。
+        frame = getattr(self, "_workbench_frame", None)
+        if frame is not None:
+            frame.set_min_hint_disabled(False)
 
     def _set_chat_frame_wb_hidden(self, hidden: bool) -> None:
         """工作台隐藏后给对话区右侧补 4px 窗口边距（否则圆角矩形贴死窗口边）
