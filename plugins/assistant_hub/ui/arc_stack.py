@@ -122,7 +122,9 @@ class _AgentCard(QWidget):
     def _apply_scale(self, v: float) -> None:
         self._scale = v
         # 围绕圆心缩放头像，与 paintEvent 的 scale 变换保持一致。
-        # ⚠ 尺寸必须取偶：奇数尺寸中心落在 x.5，round 后偏离圆心 0.5px（视觉显歪）
+        # ⚠ 尺寸取偶：奇数尺寸中心落在 x.5，round 后偏离圆心 0.5px（视觉显歪）；
+        # ⚠ 必须经 set_avatar_size 同步真实尺寸：setFixedSize 钳制下 setGeometry
+        #   只改位置不改大小 → 位置按目标尺寸算、实际尺寸还是旧的 → 中心跑偏
         av = CARD_SIZE - 6
         size = int(round(av * v))
         if size % 2 == 1:
@@ -130,6 +132,7 @@ class _AgentCard(QWidget):
         cx = cy = CARD_SIZE / 2
         x = round(cx - size / 2)
         y = round(cy - size / 2 - round(self._lift))
+        self._avatar.set_avatar_size(size)
         self._avatar.setGeometry(x, y, size, size)
         self._update_badge_geom()
         self.update()

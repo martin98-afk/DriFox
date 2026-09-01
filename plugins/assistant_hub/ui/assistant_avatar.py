@@ -102,6 +102,12 @@ class RoundAvatar(QWidget):
         self._text = _initials_of(text, max_chars=2)
         self.update()
 
+    def set_avatar_size(self, size: int) -> None:
+        """运行期改头像尺寸（弧形卡选中缩放动画用）。"""
+        self._size = max(8, int(size))
+        self.setFixedSize(self._size, self._size)
+        self.update()
+
     def set_color(self, color: str) -> None:
         self._color = _parse_rgba(color)
         self.update()
