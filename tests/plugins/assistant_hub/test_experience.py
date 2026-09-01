@@ -36,7 +36,8 @@ def test_rebuild_index_and_list(tmp_path):
     assert "## 工作流（2 条）" in idx and "## 工具使用（1 条）" in idx
     docs = m.list_documents(aid)
     assert sorted(d["category"] for d in docs) == sorted(["工具使用", "工作流"])
-    assert docs[0]["count"] == 1
+    by_cat = {d["category"]: d["count"] for d in docs}
+    assert by_cat["工作流"] == 2 and by_cat["工具使用"] == 1
 
 
 def test_delete_entry(tmp_path):
