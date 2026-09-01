@@ -324,19 +324,21 @@ class ArcCardStack(QWidget):
 
     # ── 布局与动画 ──
     def _positions(self, expanded: bool) -> List[tuple]:
-        """每张卡的 (x, y) 位置。展开态按容器宽自适应均布（助手多也不会溢出被遮）。"""
+        """每张助手卡的 (x, y) 位置。
+
+        展开态按容器宽自适应均布；「新建」卡作为第 n+1 个元素与助手卡
+        共同参与居中（见 _add_position），整行视觉中心 = 容器中心。
+        """
         n = len(self._cards)
         if n == 0:
             return []
         total_w = self.width()
         base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
+        m = n + 1  # 助手卡 + 「新建」卡，整体对称分布
         if expanded:
             # 自适应步长：优先 SPREAD_STEP，超出容器宽则压缩（最小 34 防重叠）
-            if n > 1:
-                step = min(SPREAD_STEP, max(34.0, (total_w - CARD_SIZE - 24) / (n - 1)))
-            else:
-                step = 0.0
-            spread = step * (n - 1)
+            step = min(SPREAD_STEP, max(34.0, (total_w - CARD_SIZE - 24) / (m - 1)))
+            spread = step * (m - 1)
             x0 = (total_w - spread) / 2 - CARD_SIZE / 2
             return [(x0 + i * step, base_y) for i in range(n)]
         # 收起态：绕 (cx, base_y + CARD_SIZE/2 + ARC_RADIUS) 旋转 ±ARC_SPREAD_DEG
@@ -344,7 +346,7 @@ class ArcCardStack(QWidget):
         origin_y = base_y + CARD_SIZE / 2 + ARC_RADIUS
         out = []
         for i in range(n):
-            deg = (i - (n - 1) / 2) * ARC_SPREAD_DEG
+            deg = (i - (m - 1) / 2) * ARC_SPREAD_DEG
             rad = math.radians(deg)
             # 旋转 CARD 中心相对 origin 的位置（半径 ARC_RADIUS，垂直向上）
             px = cx + CARD_SIZE / 2 + ARC_RADIUS * math.sin(rad) - CARD_SIZE / 2
@@ -352,25 +354,38 @@ class ArcCardStack(QWidget):
             out.append((px, py))
         return out
 
-    def _expanded_step(self, n: int) -> float:
-        """展开态相邻卡间距（自适应容器宽，与 _positions 同口径）。"""
-        if n <= 1:
-            return 0.0
-        return min(SPREAD_STEP, max(34.0, (self.width() - CARD_SIZE - 24) / (n - 1)))
+    def _add_position(self, expanded: bool) -> tuple:
+        """「新建」卡位置：与助手卡同一几何体系的第 n+1 个元素（整体居中）。"""
+        n = len(self._cards)
+        total_w = self.width()
+        base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
+        m = n + 1
+        if expanded:
+            step = min(SPREAD_STEP, max(34.0, (total_w - CARD_SIZE - 24) / (m - 1)))
+            spread = step * (m - 1)
+            x0 = (total_w - spread) / 2 - CARD_SIZE / 2
+            return (x0 + n * step, base_y)
+        cx = total_w / 2 - CARD_SIZE / 2
+        origin_y = base_y + CARD_SIZE / 2 + ARC_RADIUS
+        rad = math.radians((n - (m - 1) / 2) * ARC_SPREAD_DEG)
+        px = cx + ARC_RADIUS * math.sin(rad)
+        py = origin_y - ARC_RADIUS * math.cos(rad) - CARD_SIZE / 2
+        return (px, py)
 
     def _relayout(self, animate: bool) -> None:
         positions = self._positions(self._expanded)
         n = len(self._cards)
+        base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
         for card in self._cards:
             card.set_expanded(self._expanded)
         add_x = None
         if self._add_card is not None:
-            if n > 0 and positions:
-                last_x, last_y = positions[-1]
-                add_x = last_x + self._expanded_step(n) if self._expanded else last_x + 26
+            if positions:
+                add_x, add_y = self._add_position(self._expanded)
             else:
+                # 仅剩「新建」卡（助手被清空）：单独居中
                 add_x = self.width() / 2 - CARD_SIZE / 2
-        base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
+                add_y = base_y
         self._anims.stop()
         self._anims = QParallelAnimationGroup(self)
         # z 序：从右往左 raise → 左侧盖右侧；选中卡最后 raise（最顶层）
@@ -406,10 +421,10 @@ class ArcCardStack(QWidget):
                 anim.setDuration(_DUR_EXPAND if self._expanded else _DUR_COLLAPSE)
                 anim.setEasingCurve(QEasingCurve.OutCubic)
                 anim.setStartValue(self._add_card.pos())
-                anim.setEndValue(QPoint(int(add_x), int(base_y)))
+                anim.setEndValue(QPoint(int(add_x), int(add_y)))
                 self._anims.addAnimation(anim)
             else:
-                self._add_card.move(int(add_x), int(base_y))
+                self._add_card.move(int(add_x), int(add_y))
         self._anims.start()
 
     # ── 事件 ──
