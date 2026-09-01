@@ -12,12 +12,14 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QFont, QFontMetrics
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QLayout,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -32,7 +34,30 @@ from assistant_hub_manager import AssistantManager
 
 from .assistant_avatar import RoundAvatar
 
-# ── 基础样式辅助 ─────────────────────────────────────────
+# ── 基础样式辅助 ─────────────────────────────────────
+
+
+def _elide_lines(text: str, fm, width: int, max_lines: int = 2) -> str:
+    """按像素宽度把 text 折行到 max_lines 行，超出部分末行截断加 …。
+
+    中文无空格需逐字累积；QLabel 原生无多行省略，chips 卡描述用。
+    """
+    if not text:
+        return ""
+    lines: List[str] = []
+    cur = ""
+    for ch in text:
+        if fm.horizontalAdvance(cur + ch) <= width:
+            cur += ch
+            continue
+        lines.append(cur)
+        if len(lines) == max_lines:
+            lines[-1] = lines[-1][:-1] + "…"
+            return "\n".join(lines)
+        cur = ch
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines[:max_lines])
 
 
 def _hint(text: str, size: int = 10) -> QLabel:
@@ -141,6 +166,86 @@ class _Section(QFrame):
 
 
 # ── 名称 / 模型分区 ──────────────────────────────────────
+
+
+class _CenterFlowLayout(QLayout):
+    """流式布局：空间不足自动换行，每行水平居中（chips 卡行用）。"""
+
+    def __init__(self, parent=None, spacing: int = 12):
+        super().__init__(parent)
+        self._items: list = []
+        self._spacing = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:  # noqa: N802
+        return len(self._items)
+
+    def itemAt(self, i):  # noqa: N802
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i):  # noqa: N802
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def expandingDirections(self) -> Qt.Orientations:  # noqa: N802
+        return Qt.Orientations(Qt.NoOrientation)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, w: int) -> int:  # noqa: N802
+        return self._do_layout(QRect(0, 0, w, 0), test_only=True)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        return size + QSize(m.left() + m.right(), m.top() + m.bottom())
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        m = self.contentsMargins()
+        avail_w = rect.width() - m.left() - m.right()
+        x = rect.x() + m.left()
+        y = rect.y() + m.top()
+        line: list = []  # [(item, w, h)]
+        line_w = 0
+        line_h = 0
+
+        def flush_line() -> None:
+            nonlocal y
+            if not line:
+                return
+            start_x = x + max(0, (avail_w - line_w) // 2)
+            cx = start_x
+            for it, iw, ih in line:
+                if not test_only:
+                    it.setGeometry(QRect(cx, y, iw, ih))
+                cx += iw + self._spacing
+            y += line_h + self._spacing
+
+        for item in self._items:
+            hint = item.sizeHint()
+            iw, ih = hint.width(), hint.height()
+            add_w = iw if not line else self._spacing + iw
+            if line and line_w + add_w > avail_w:
+                flush_line()
+                line, line_w, line_h = [], 0, 0
+                add_w = iw
+            line.append((item, iw, ih))
+            line_w += add_w
+            line_h = max(line_h, ih)
+        flush_line()
+        return (y - self._spacing) - rect.y() + m.bottom()
 
 
 # ── 名称 / 模型分区 ──────────────────────────────────────
@@ -321,7 +426,7 @@ class _PersonaChip(QFrame):
         v.addWidget(self._avatar, 0, Qt.AlignHCenter)
         self._name = QLabel(persona.get("name") or persona["id"])
         self._name.setAlignment(Qt.AlignCenter)
-        self._desc = QLabel(persona.get("description", ""))
+        self._desc = QLabel()
         self._desc.setAlignment(Qt.AlignCenter)
         self._desc.setWordWrap(True)
         self._tag = QLabel(f"[{persona['tag']}]" if persona.get("tag") else "")
@@ -330,6 +435,13 @@ class _PersonaChip(QFrame):
         v.addWidget(self._desc)
         v.addWidget(self._tag)
         self._apply_style()
+        # 描述限制 2 行：按像素宽度手动截断（超出加 …），并钉死高度，
+        # 防止长描述挤压/遮挡下方 tag（chips 卡固定 118x150）
+        fm = QFont(self._desc.font())
+        fm.setPixelSize(10)  # 与 _apply_style 中 desc font-size 一致
+        metrics = QFontMetrics(fm)
+        self._desc.setText(_elide_lines(persona.get("description", ""), metrics, 96, 2))
+        self._desc.setFixedHeight(metrics.lineSpacing() * 2)
 
     def set_avatar_image(self, image_path: str) -> None:
         """换人格头像后轻量刷新本 chip 头像。"""
@@ -376,13 +488,15 @@ class AboutSection(_Section):
         super().__init__("关于 Ta", parent)
         self.body().addWidget(_hint("点卡片切换人格（内置预设，只读）；新增人格在对话里说「创建新人格」。", 10))
 
-        chips_row = QHBoxLayout()
+        chips_host = QWidget()
+        chips_host.setStyleSheet("background: transparent;")
+        chips_row = _CenterFlowLayout(chips_host)
         chips_row.setSpacing(12)
         self._chips_row = chips_row
         self._chips: List[_PersonaChip] = []
         self._personas = personas  # 调用方已包含 none（纯净助手）
         self._current_pid = current_pid
-        self.body().addLayout(chips_row)
+        self.body().addWidget(chips_host)
         self.rebuild_chips(personas)
         self.set_persona(current_pid)
 
@@ -401,13 +515,11 @@ class AboutSection(_Section):
             if w is not None:
                 w.deleteLater()
         self._chips = []
-        self._chips_row.addStretch()
         for p in personas:
             chip = _PersonaChip(p)
             chip.clicked.connect(lambda pid=p["id"]: self.personaChangeRequested.emit(pid))
             self._chips_row.addWidget(chip)
             self._chips.append(chip)
-        self._chips_row.addStretch()
         self.set_persona(self._current_pid)
 
 
