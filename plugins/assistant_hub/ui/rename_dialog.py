@@ -71,11 +71,40 @@ class RenameDialog(MaskDialogBase):
         btns = QHBoxLayout()
         btns.addStretch()
         cancel = QPushButton("取消", self.widget)
-        cancel.setFixedHeight(30)
+        cancel.setFixedHeight(32)
+        cancel.setCursor(Qt.PointingHandCursor)
+        cancel.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent;
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)}
+            }}
+            QPushButton:hover {{ background: {Colors.HOVER_BG}; border-color: {Colors.TEXT_ACCENT}; }}
+        """
+        )
         cancel.clicked.connect(self.close)
         confirm = QPushButton("确定", self.widget)
-        confirm.setFixedHeight(30)
+        confirm.setFixedHeight(32)
+        confirm.setCursor(Qt.PointingHandCursor)
         confirm.setDefault(True)
+        confirm.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {Colors.TEXT_ACCENT};
+                color: #ffffff;
+                border: none;
+                border-radius: 8px;
+                padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)}
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Colors.TEXT_ACCENT}; }}
+        """
+        )
         confirm.clicked.connect(self._accept)
         btns.addWidget(cancel)
         btns.addWidget(confirm)

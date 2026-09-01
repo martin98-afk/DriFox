@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QWheelEvent
 from PyQt5.QtWidgets import (
     QComboBox,
     QFrame,
@@ -119,6 +120,17 @@ def _btn_style(danger: bool = False) -> str:
     """
 
 
+class NoWheelComboBox(QComboBox):
+    """禁滚轮误切换的下拉框；限制弹层最大可见行数。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMaxVisibleItems(12)
+
+    def wheelEvent(self, e: "QWheelEvent") -> None:  # noqa: N802
+        e.ignore()
+
+
 class _Section(QFrame):
     """分区卡片：标题行（+右侧 context 槽）+ 内容 VBox。
 
@@ -173,14 +185,14 @@ class ProfileSection(_Section):
 
         row2 = QHBoxLayout()
         row2.addWidget(_title_label("对话模型", 11))
-        self._chat_model = QComboBox()
+        self._chat_model = NoWheelComboBox()
         self._chat_model.setStyleSheet(self._combo_style())
         row2.addWidget(self._chat_model, 1)
         self.body().addLayout(row2)
 
         row3 = QHBoxLayout()
         row3.addWidget(_title_label("记忆整理模型", 11))
-        self._utility_model = QComboBox()
+        self._utility_model = NoWheelComboBox()
         self._utility_model.setStyleSheet(self._combo_style())
         row3.addWidget(self._utility_model, 1)
         self.body().addLayout(row3)

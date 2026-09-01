@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """test_sections.py — 分区/浮层组件冒烟测试。"""
 
 import importlib.util
@@ -12,7 +12,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PyQt5.QtWidgets")
 
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
 
 _APP = QApplication.instance() or QApplication([])
 
@@ -52,7 +52,8 @@ overlays = _load("overlays", "overlays.py")
 
 
 def test_profile_section_bind_emit(qtbot=None):
-    s = sections.ProfileSection()
+    host = QWidget()
+    s = sections.ProfileSection(host)
     s.bind("小狐", "cfg-1", "cfg-2")
     assert s._name.text() == "小狐"
     got = []
@@ -102,6 +103,8 @@ def test_experience_section_reload(qtbot=None):
 
 
 def test_text_view_overlay_readonly(qtbot=None):
-    d = overlays.TextViewOverlay("查看", "内容文本", editable=False)
+    host = QWidget()
+    host.resize(800, 600)
+    d = overlays.TextViewOverlay("查看", "内容文本", editable=False, parent=host)
     assert d._edit.toPlainText() == "内容文本"
     assert d._edit.isReadOnly()

@@ -94,20 +94,35 @@ def test_utility_llm_composite_key(tmp_path, monkeypatch):
         captured["body"] = _json.loads(req.data.decode())
         return _Resp()
 
-    monkeypatch.setattr(llm_mod, "resolve_model_config", lambda config_id="": {"base_url": "https://global/v1", "api_key": "k", "model": "global-m", "provider_name": "p"})
+    monkeypatch.setattr(
+        llm_mod,
+        "resolve_model_config",
+        lambda config_id="": {
+            "base_url": "https://global/v1",
+            "api_key": "k",
+            "model": "global-m",
+            "provider_name": "p",
+        },
+    )
     monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
-    # _valid_configs 兜底链不可用（无窗口）→ manager 走 llm_saved_providers 兜底
-    class _Item:
-        value = {"cfg-1": {"API_URL": "https://cfg1/v1", "API_KEY": "k1", "模型名称": "default-m", "provider_name": "P1"}}
 
-    class _Sel:
-        value = ""
+    # mock 主路径：UIPluginRegistry 返回带 _valid_configs 的窗口（对齐真实调用链）
+    fake_mw = type("MW", (), {})()
+    fake_mw._valid_configs = {
+        "cfg-1": {"API_URL": "https://cfg1/v1", "API_KEY": "k1", "模型名称": "default-m", "provider_name": "P1"}
+    }
 
-    class _Cfg:
-        llm_saved_providers = _Item()
-        llm_selected_model = _Sel()
+    class _FakeReg:
+        _main_widget = fake_mw
+        _window_main_widgets = {}
 
-    monkeypatch.setattr(llm_mod, "_settings", lambda: _Cfg())
+        @classmethod
+        def get_instance(cls):
+            return cls()
+
+    import app.plugins.registries.ui_plugin_registry as _reg_mod
+
+    monkeypatch.setattr(_reg_mod, "UIPluginRegistry", _FakeReg)
 
     call = mgr._utility_llm(a.id)
     out = call([{"role": "user", "content": "hi"}])

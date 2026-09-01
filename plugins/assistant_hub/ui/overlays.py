@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QDialog,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import LineEdit
+from qfluentwidgets import LineEdit, MaskDialogBase
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
@@ -56,39 +56,77 @@ def _label(text: str, size: int = 11, muted: bool = False) -> QLabel:
     lbl.setWordWrap(True)
     lbl.setStyleSheet(
         f"color: {Colors.TEXT_MUTED if muted else Colors.TEXT_PRIMARY};"
+        f"background: transparent; border: none;"
         f"{get_font_family_css()} {font_size_css(size)};" + ("font-weight: 600;" if not muted else "")
     )
     return lbl
 
 
-class OverlayBase(QDialog):
-    """浮层基类：圆角卡片 + 简单标题栏。"""
+def _dialog_btn(text: str, *, primary: bool = False) -> QPushButton:
+    """统一弹窗按钮：取消=边框款，确定=accent 填充；系统字体+字号。"""
+    btn = QPushButton(text)
+    btn.setFixedHeight(32)
+    btn.setCursor(Qt.PointingHandCursor)
+    if primary:
+        btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {Colors.TEXT_ACCENT}; color: #ffffff; border: none;
+                border-radius: 8px; padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)}; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {Colors.TEXT_ACCENT}; }}
+        """
+        )
+    else:
+        btn.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: transparent; color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER}; border-radius: 8px; padding: 4px 26px;
+                {get_font_family_css()} {font_size_css(12)};
+            }}
+            QPushButton:hover {{ background: {Colors.HOVER_BG}; border-color: {Colors.TEXT_ACCENT}; }}
+        """
+        )
+    return btn
+
+
+class OverlayBase(MaskDialogBase):
+    """浮层基类：遮罩 + 圆角卡片 + 标题栏（对齐主程序 MaskDialog 先例）。"""
 
     def __init__(self, title: str, parent: Optional[QWidget] = None, width: int = 560, height: int = 480):
         super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(width, height)
-        self._wrap = QWidget(self)
-        self._wrap.setObjectName("overlayCard")
-        self._wrap.setStyleSheet(
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 76))
+        self.widget.setObjectName("hubOverlayCard")
+        self.widget.setStyleSheet(
             f"""
-            #overlayCard {{
+            #hubOverlayCard {{
                 background: {Colors.CARD_BG_SOLID};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 14px;
             }}
         """
         )
+        self.setFixedSize(width + 48, height + 48)
+        self._wrap = self.widget
         self._v = QVBoxLayout(self._wrap)
         self._v.setContentsMargins(20, 16, 20, 16)
         self._v.setSpacing(8)
         self._v.addWidget(_label(title, 14))
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(self._wrap)
+        self._center()
+
+    def _center(self) -> None:
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._center()
 
 
 class TextViewOverlay(OverlayBase):
@@ -122,10 +160,10 @@ class TextViewOverlay(OverlayBase):
         self._v.addWidget(self._edit, 1)
         row = QHBoxLayout()
         row.addStretch()
-        close = QPushButton("关闭")
+        close = _dialog_btn("关闭")
         close.clicked.connect(self.accept)
         if editable and on_save is not None:
-            save = QPushButton("保存")
+            save = _dialog_btn("保存", primary=True)
             save.clicked.connect(self._do_save)
             row.addWidget(save)
         row.addWidget(close)
@@ -167,11 +205,20 @@ class DreamRevisionOverlay(OverlayBase):
         self._v.addWidget(self._preview, 1)
         row = QHBoxLayout()
         self._restore_btn = QPushButton("恢复此版本")
+        self._restore_btn.setCursor(Qt.PointingHandCursor)
+        self._restore_btn.setStyleSheet(
+            f"QPushButton {{"
+            f"    background: transparent; color: {Colors.TEXT_ACCENT};"
+            f"    border: 1px solid {Colors.TEXT_ACCENT}; border-radius: 8px; padding: 4px 18px;"
+            f"    {get_font_family_css()} {font_size_css(12)};"
+            f"}}"
+            f"QPushButton:hover {{ background: rgba(245, 158, 11, 0.12); }}"
+        )
         self._restore_btn.clicked.connect(self._do_restore)
         self._restore_btn.setEnabled(False)
         row.addWidget(self._restore_btn)
         row.addStretch()
-        close = QPushButton("关闭")
+        close = _dialog_btn("关闭")
         close.clicked.connect(self.accept)
         row.addWidget(close)
         self._v.addLayout(row)
@@ -227,10 +274,10 @@ class PersonaManageDialog(OverlayBase):
         self._list.setStyleSheet(self._list_style())
         self._list.currentItemChanged.connect(self._on_select)
         left.addWidget(self._list, 1)
-        new_btn = QPushButton("新建人格")
+        new_btn = _dialog_btn("新建人格")
         new_btn.clicked.connect(self._on_new)
         left.addWidget(new_btn)
-        del_btn = QPushButton("删除所选")
+        del_btn = _dialog_btn("删除所选")
         del_btn.clicked.connect(self._on_delete)
         left.addWidget(del_btn)
         body.addLayout(left, 1)
@@ -249,14 +296,14 @@ class PersonaManageDialog(OverlayBase):
             w.setStyleSheet(self._input_style())
             right.addWidget(w)
         right.addWidget(self._f_prompt, 1)
-        save_btn = QPushButton("保存")
+        save_btn = _dialog_btn("保存", primary=True)
         save_btn.clicked.connect(self._on_save)
         right.addWidget(save_btn)
         body.addLayout(right, 2)
         self._v.addLayout(body, 1)
         row = QHBoxLayout()
         row.addStretch()
-        close = QPushButton("关闭")
+        close = _dialog_btn("关闭")
         close.clicked.connect(self.accept)
         row.addWidget(close)
         self._v.addLayout(row)

@@ -59,9 +59,11 @@ def test_card_construct_and_bind(tmp_path, monkeypatch):
     a = mgr.create("小狐")
 
     card = card_mod.AssistantCardWidget()
-    assert len(card._stack._cards) == 1
-    assert card._active_aid == a.id
-    assert card._name_label.text() == "小狐"
+    # 空库自动 seed 3 个预设助手（build/hanako/pure）+ 测试新建 1 个
+    assert len(card._stack._cards) == 4
+    # 默认绑定主助手 build（seed 时 build 设为主助手，排序居首）
+    assert card._active_aid == "build"
+    assert card._name_label.text() == "Build"
 
     # 新建第二个 → 切换
     b = mgr.create("二号")
@@ -69,11 +71,11 @@ def test_card_construct_and_bind(tmp_path, monkeypatch):
     assert card._active_aid == b.id
     assert card._name_label.text() == "二号"
 
-    # 删除保护：至少保留一个助手 → 删 a 后自动绑定 b
+    # 删除：删 a 后当前助手不变（仍绑 b）
     mgr.delete(a.id)
-    card._reload_all()
+    card._reload_all(select_aid=b.id)
     assert card._active_aid == b.id
-    assert mgr.delete(b.id) is False  # 最后一个不可删
+    assert mgr.has(b.id)
 
 
 def test_card_persona_change(tmp_path):

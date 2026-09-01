@@ -28,13 +28,12 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import InfoBar, InfoBarPosition
+from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
@@ -43,7 +42,7 @@ from assistant_hub_manager import AssistantManager
 
 from .arc_stack import ArcCardStack
 from .assistant_avatar import RoundAvatar
-from .overlays import DreamRevisionOverlay, PersonaManageDialog, TextViewOverlay
+from .overlays import DreamRevisionOverlay, PersonaManageDialog, TextViewOverlay, _dialog_btn
 from .rename_dialog import RenameDialog
 from .sections import (
     AboutSection,
@@ -53,6 +52,63 @@ from .sections import (
     SkillsSection,
     _btn_style,
 )
+
+
+def _confirm_dialog(parent, title: str, text: str) -> bool:
+    """统一 Mask 风格确认弹窗（替代 QMessageBox，系统字体+主题色）。"""
+    from PyQt5.QtGui import QColor
+
+    class _Dialog(MaskDialogBase):
+        def __init__(self):
+            super().__init__(parent)
+            self._yes = False
+            self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+            self.setClosableOnMaskClicked(True)
+            self.setDraggable(True)
+            self.setMaskColor(QColor(0, 0, 0, 76))
+            self.widget.setObjectName("hubConfirm")
+            self.widget.setStyleSheet(
+                f"#hubConfirm {{ background: {Colors.CARD_BG_SOLID}; border: 1px solid {Colors.BORDER};"
+                f"border-radius: 12px; }}"
+            )
+            self.setFixedSize(640, 420)
+            v = QVBoxLayout(self.widget)
+            v.setContentsMargins(24, 20, 24, 18)
+            v.setSpacing(10)
+            t = QLabel(title)
+            t.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
+                f"{get_font_family_css()} {font_size_css(14)}; font-weight: 600;"
+            )
+            v.addWidget(t)
+            body = QLabel(text)
+            body.setWordWrap(True)
+            body.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+                f"{get_font_family_css()} {font_size_css(12)};"
+            )
+            v.addWidget(body)
+            v.addStretch()
+            row = QHBoxLayout()
+            row.addStretch()
+            cancel = _dialog_btn("取消")
+            cancel.clicked.connect(self.reject)
+            ok = _dialog_btn("确定", primary=True)
+            ok.clicked.connect(self._yes_accept)
+            row.addWidget(cancel)
+            row.addWidget(ok)
+            v.addLayout(row)
+            x = max(0, (self.width() - self.widget.width()) // 2)
+            y = max(0, (self.height() - self.widget.height()) // 2)
+            self.widget.move(x, y)
+
+        def _yes_accept(self):
+            self._yes = True
+            self.accept()
+
+    dlg = _Dialog()
+    dlg.exec_()
+    return dlg._yes
 
 
 class AssistantCardWidget(QWidget):
@@ -85,23 +141,19 @@ class AssistantCardWidget(QWidget):
         self._content_v.setContentsMargins(24, 8, 24, 24)
         self._content_v.setSpacing(14)
 
+        # 1. 弧形卡片堆叠：占满整行（不放进窄容器，助手多也能全展示）
+        self._stack = ArcCardStack()
+        self._stack.selectionChanged.connect(self._on_select)
+        self._stack.createRequested.connect(self._on_create)
+        self._content_v.addWidget(self._stack)
+
         inner = QWidget()
         inner.setMaximumWidth(900)
         self._inner_v = QVBoxLayout(inner)
         self._inner_v.setContentsMargins(0, 0, 0, 0)
         self._inner_v.setSpacing(14)
 
-        # 1. 弧形卡片堆叠
-        self._stack = ArcCardStack()
-        self._stack.selectionChanged.connect(self._on_select)
-        self._stack.createRequested.connect(self._on_create)
-        wrap = QHBoxLayout()
-        wrap.addStretch()
-        wrap.addWidget(self._stack)
-        wrap.addStretch()
-        self._inner_v.addLayout(wrap)
-
-        # 2. 名称行 + 操作（头像可点击更换）
+        # 2. 名称行 + 操作（头像可点击更换；当前助手 accent 高亮 + 徽章）
         name_row = QHBoxLayout()
         self._avatar = RoundAvatar(size=44, text="?", color="#7C3AED", parent=self)
         self._avatar.setCursor(Qt.PointingHandCursor)
@@ -109,10 +161,29 @@ class AssistantCardWidget(QWidget):
         self._avatar.installEventFilter(self)
         name_row.addWidget(self._avatar)
         self._name_label = QLabel("(未选择)")
-        self._name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} 20px; font-weight: 700;")
+        self._name_label.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT}; background: transparent; border: none;"
+            f"{get_font_family_css()} 20px; font-weight: 700;"
+        )
         name_row.addWidget(self._name_label)
+        self._active_badge = QLabel("当前助手")
+        self._active_badge.setStyleSheet(
+            f"""
+            QLabel {{
+                color: {Colors.TEXT_ACCENT}; background: rgba(245, 158, 11, 0.12);
+                border: 1px solid {Colors.TEXT_ACCENT}; border-radius: 9px;
+                padding: 1px 10px;
+                {get_font_family_css()} {font_size_css(10)}
+            }}
+        """
+        )
+        name_row.addWidget(self._active_badge)
         self._primary_badge = QLabel("★ 主助手")
-        self._primary_badge.setStyleSheet(f"color: {Colors.TEXT_ACCENT}; {get_font_family_css()} {font_size_css(11)};")
+        self._primary_badge.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: {Colors.HOVER_BG};"
+            f"border: 1px solid {Colors.BORDER}; border-radius: 9px; padding: 1px 10px;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
         self._primary_badge.hide()
         name_row.addWidget(self._primary_badge)
         name_row.addStretch()
@@ -202,40 +273,56 @@ class AssistantCardWidget(QWidget):
         return super().eventFilter(obj, event)
 
     def _on_change_avatar(self):
-        """弹出头像选择器（预置/纯色/上传），确定后落盘。"""
+        """弹出头像选择器（预置/纯色/上传），确定后落盘（Mask 风格）。"""
         a = self._mgr.get(self._active_aid)
         if not a:
             return
-        from PyQt5.QtWidgets import QDialog as _QDialog
+        from PyQt5.QtGui import QColor
 
         from .avatar_picker import AvatarPicker
 
-        dlg = _QDialog(self.window())
-        dlg.setWindowTitle("更换头像")
-        dlg.setModal(True)
-        dlg.setFixedWidth(560)
-        v = QVBoxLayout(dlg)
-        picker = AvatarPicker(assistant_id=a.id, parent=dlg)
-        ap = self._mgr.avatar_path(a.id)
-        picker.set_assistant(
-            aid=a.id,
-            color=a.color,
-            name=a.name or a.id,
-            image_path=str(ap) if ap else "",
-        )
-        v.addWidget(picker)
-        row = QHBoxLayout()
-        row.addStretch()
-        cancel = QPushButton("取消")
-        cancel.clicked.connect(dlg.reject)
-        ok = QPushButton("确定")
-        ok.clicked.connect(dlg.accept)
-        row.addWidget(cancel)
-        row.addWidget(ok)
-        v.addLayout(row)
-        if dlg.exec_() != _QDialog.Accepted:
+        class _AvatarDialog(MaskDialogBase):
+            def __init__(self, parent=None):
+                super().__init__(parent)
+                self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 100))
+                self.setClosableOnMaskClicked(True)
+                self.setDraggable(True)
+                self.setMaskColor(QColor(0, 0, 0, 76))
+                self.widget.setObjectName("hubAvatarDialog")
+                self.widget.setStyleSheet(
+                    f"#hubAvatarDialog {{ background: {Colors.CARD_BG_SOLID};"
+                    f"border: 1px solid {Colors.BORDER}; border-radius: 14px; }}"
+                )
+                self.setFixedSize(760, 640)
+                v = QVBoxLayout(self.widget)
+                v.setContentsMargins(20, 16, 20, 16)
+                picker = AvatarPicker(assistant_id=a.id, parent=self.widget)
+                ap = self._mgr.avatar_path(a.id)
+                picker.set_assistant(
+                    aid=a.id,
+                    color=a.color,
+                    name=a.name or a.id,
+                    image_path=str(ap) if ap else "",
+                )
+                v.addWidget(picker, 1)
+                self._picker = picker  # 确定后外部取选择结果
+                row = QHBoxLayout()
+                row.addStretch()
+                cancel = _dialog_btn("取消")
+                cancel.clicked.connect(self.reject)
+                ok = _dialog_btn("确定", primary=True)
+                ok.clicked.connect(self.accept)
+                row.addWidget(cancel)
+                row.addWidget(ok)
+                v.addLayout(row)
+                x = max(0, (self.width() - self.widget.width()) // 2)
+                y = max(0, (self.height() - self.widget.height()) // 2)
+                self.widget.move(x, y)
+
+        dlg = _AvatarDialog(self.window())
+        if not dlg.exec_():
             return
-        sel = picker.get_selection()
+        sel = dlg._picker.get_selection()
         if sel.get("image_path"):
             try:
                 data = Path(sel["image_path"]).read_bytes()
@@ -349,14 +436,12 @@ class AssistantCardWidget(QWidget):
         a = self._mgr.get(self._active_aid)
         if not a:
             return
-        ret = QMessageBox.question(
-            self,
+        ret = _confirm_dialog(
+            self.window(),
             "删除助手",
             f"确定删除助手「{a.name}」？\n其身份、提示词、记忆、头像将一并删除。\n（该操作不可撤销）",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
         )
-        if ret != QMessageBox.Yes:
+        if not ret:
             return
         if self._mgr.delete(a.id):
             self._active_aid = ""
@@ -534,14 +619,8 @@ class AssistantCardWidget(QWidget):
         if not self._active_aid:
             return
         aid = self._active_aid
-        ret = QMessageBox.question(
-            self,
-            "清除记忆",
-            "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if ret != QMessageBox.Yes:
+        ret = _confirm_dialog(self.window(), "清除记忆", "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。")
+        if not ret:
             return
         mem = self._mgr.memory_dir(aid)
         for name in ("today.md", "longterm.md", "facts.md", "memory.md"):

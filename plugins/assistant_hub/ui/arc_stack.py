@@ -133,7 +133,11 @@ class _AgentCard(QWidget):
         p.setBrush(QColor(0, 0, 0, shadow.get("alpha", 40) if isinstance(shadow, dict) else 40))
         p.drawEllipse(rect.adjusted(0, 2, 0, 2))
         # 边框
-        border = QColor(Colors.TEXT_MUTED if self._selected else Colors.BORDER)
+        # 选中卡：accent 粗边框（比灰色更醒目）
+        if self._selected:
+            border = QColor(Colors.TEXT_ACCENT)
+        else:
+            border = QColor(Colors.BORDER)
         p.setPen(QPen(border, 2.5 if self._selected else 2))
         try:
             frame_bg = QColor(Colors.CARD_BG.format(alpha=250))
@@ -253,16 +257,21 @@ class ArcCardStack(QWidget):
 
     # ── 布局与动画 ──
     def _positions(self, expanded: bool) -> List[tuple]:
-        """每张卡的 (x, y) 位置。"""
+        """每张卡的 (x, y) 位置。展开态按容器宽自适应均布（助手多也不会溢出被遮）。"""
         n = len(self._cards)
         if n == 0:
             return []
         total_w = self.width()
         base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
         if expanded:
-            spread = SPREAD_STEP * (n - 1)
+            # 自适应步长：优先 SPREAD_STEP，超出容器宽则压缩（最小 34 防重叠）
+            if n > 1:
+                step = min(SPREAD_STEP, max(34.0, (total_w - CARD_SIZE - 24) / (n - 1)))
+            else:
+                step = 0.0
+            spread = step * (n - 1)
             x0 = (total_w - spread) / 2 - CARD_SIZE / 2
-            return [(x0 + i * SPREAD_STEP, base_y) for i in range(n)]
+            return [(x0 + i * step, base_y) for i in range(n)]
         # 收起态：绕 (cx, base_y + CARD_SIZE/2 + ARC_RADIUS) 旋转 ±ARC_SPREAD_DEG
         cx = total_w / 2 - CARD_SIZE / 2
         origin_y = base_y + CARD_SIZE / 2 + ARC_RADIUS
@@ -276,6 +285,12 @@ class ArcCardStack(QWidget):
             out.append((px, py))
         return out
 
+    def _expanded_step(self, n: int) -> float:
+        """展开态相邻卡间距（自适应容器宽，与 _positions 同口径）。"""
+        if n <= 1:
+            return 0.0
+        return min(SPREAD_STEP, max(34.0, (self.width() - CARD_SIZE - 24) / (n - 1)))
+
     def _relayout(self, animate: bool) -> None:
         positions = self._positions(self._expanded)
         n = len(self._cards)
@@ -283,7 +298,7 @@ class ArcCardStack(QWidget):
         if self._add_card is not None:
             if n > 0 and positions:
                 last_x, last_y = positions[-1]
-                add_x = last_x + SPREAD_STEP if self._expanded else last_x + 26
+                add_x = last_x + self._expanded_step(n) if self._expanded else last_x + 26
             else:
                 add_x = self.width() / 2 - CARD_SIZE / 2
         base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE

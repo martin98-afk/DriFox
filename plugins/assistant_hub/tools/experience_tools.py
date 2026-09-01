@@ -7,43 +7,23 @@
 - record_experience：写入一条经验并重建索引（助手对话中自主记录）。
 
 开关：Assistant.experience_enabled（默认关）。关闭时工具返回暂停提示。
-manager 获取：优先 sys.modules["assistant_hub_manager"]（进程内单例），
+manager 获取：只读 sys.modules["assistant_hub_manager"]，
 兜底按路径加载（与 hooks/inject_assistant.py 同一模式）。
 """
 
-from __future__ import annotations
-
-import importlib.util
 import sys
-from pathlib import Path
 from typing import Any, Dict
 
 from app.tools.result import ToolResult
 
-_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 _MANAGER_MODULE_NAME = "assistant_hub_manager"
 
 _GROUP = "助手记忆"
 
 
-def _load_manager_module():
-    mod = sys.modules.get(_MANAGER_MODULE_NAME)
-    if mod is not None:
-        return mod
-    spec = importlib.util.spec_from_file_location(_MANAGER_MODULE_NAME, str(_PLUGIN_ROOT / "assistant_manager.py"))
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[_MANAGER_MODULE_NAME] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        return None
-    return module
-
-
 def _get_manager():
-    mod = _load_manager_module()
+    """只读共享 manager（绝不写 sys.modules：loader AST 安全网拒绝变异型入口）。"""
+    mod = sys.modules.get(_MANAGER_MODULE_NAME)
     if mod is None:
         return None
     return mod.AssistantManager.get_instance()

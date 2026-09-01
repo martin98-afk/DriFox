@@ -474,6 +474,7 @@ class AssistantManager:
         """首次启动（库为空）预置 3 个助手：build（主助手+默认激活）/ hanako / 纯净。
 
         只在根目录完全为空时执行一次；用户删除后不会复活（目录已存在 yaml）。
+        头像：从 personas/avatars/<persona>.png 复制到助手 avatars/agent.png。
         """
         seeds = [
             ("build", "Build", "build", True),
@@ -483,6 +484,14 @@ class AssistantManager:
         try:
             for name, display, yuan, primary in seeds:
                 a = self.create(display, id=name, yuan=yuan)
+                # 人格头像 → 助手头像
+                try:
+                    reg = self.persona_registry()
+                    pap = reg.avatar_path(yuan)
+                    if pap and pap.exists():
+                        self.save_avatar_from_bytes(a.id, pap.read_bytes(), pap.suffix.lstrip("."))
+                except Exception as e:
+                    logger.debug(f"[assistant_hub] seed 头像复制失败 ({name}): {e}")
                 if primary:
                     a.primary = True
                     self.update(a)
