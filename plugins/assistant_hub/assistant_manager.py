@@ -465,8 +465,35 @@ class AssistantManager:
                     logger.warning(f"[assistant_hub] 加载 {entry.name} 失败: {e}")
         except FileNotFoundError:
             pass
+        if not self._assistants:
+            self._seed_defaults()
         self._loaded = True
         logger.info(f"[assistant_hub] 已加载 {len(self._assistants)} 个助手")
+
+    def _seed_defaults(self) -> None:
+        """首次启动（库为空）预置 3 个助手：build（主助手+默认激活）/ hanako / 纯净。
+
+        只在根目录完全为空时执行一次；用户删除后不会复活（目录已存在 yaml）。
+        """
+        seeds = [
+            ("build", "Build", "build", True),
+            ("hanako", "Hanako", "hanako", False),
+            ("pure", "Pure", "none", False),
+        ]
+        try:
+            for name, display, yuan, primary in seeds:
+                a = self.create(display, id=name, yuan=yuan)
+                if primary:
+                    a.primary = True
+                    self.update(a)
+                    self._active_id = a.id
+                    try:
+                        self.set_active(a.id)
+                    except Exception:
+                        pass
+            logger.info("[assistant_hub] 已预置默认助手: build / hanako / pure")
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 预置助手失败: {e}")
 
     # ── CRUD ──
 
@@ -1092,15 +1119,65 @@ class AssistantManager:
         return _load_core_module("memory.ticker", "memory/ticker.py")
 
     def _utility_llm(self, aid: str):
-        """返回绑定了该助手记忆整理模型的 chat_once（utility_model 空 = 跟随全局）。"""
+        """返回绑定了该助手记忆整理模型的 chat_once。
+
+        utility_model 复合键格式（对齐 cron-tasks）："&lt;config_id&gt;||&lt;model_name&gt;"；
+        兼容旧纯 config_id。解析失败/配置不存在 → None override = 回退全局当前模型。
+        """
         a = self.get(aid)
-        config_id = (a.utility_model if a else "") or ""
+        model_key = (a.utility_model if a else "") or ""
         chat_once = self._core_llm().chat_once
+        override = self._resolve_model_override(model_key)
 
         def _call(messages, **kwargs):
-            return chat_once(messages, config_id=config_id, **kwargs)
+            if override is not None:
+                return chat_once(messages, model_config=override, **kwargs)
+            return chat_once(messages, **kwargs)
 
         return _call
+
+    def _resolve_model_override(self, model_key: str) -> Optional[Dict[str, Any]]:
+        """解析 "<config_id>||<model_name>" 复合键为完整配置覆盖。
+
+        未指定/配置缺失 → None（回退当前全局模型）。对齐 cron-tasks scheduler。
+        数据源：main_widget._valid_configs（双源兜底，同 ui/sections.py）。
+        """
+        if not model_key:
+            return None
+        config_id, _, model_name = str(model_key).partition("||")
+        mw = None
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            reg = UIPluginRegistry.get_instance()
+            mw = getattr(reg, "_main_widget", None) or next(
+                iter(getattr(reg, "_window_main_widgets", {}).values()), None
+            )
+        except Exception:
+            mw = None
+        valid = getattr(mw, "_valid_configs", None) if mw is not None else None
+        if not isinstance(valid, dict):
+            # 兜底 llm_saved_providers（无窗口场景）
+            try:
+                from app.utils.config import Settings
+
+                saved = Settings.get_instance().llm_saved_providers.value or {}
+            except Exception:
+                return None
+            cfg = saved.get(config_id)
+            if not isinstance(cfg, dict) or not cfg:
+                return None
+            override = dict(cfg)
+            if model_name:
+                override["模型名称"] = model_name
+            return override
+        cfg = valid.get(config_id)
+        if not isinstance(cfg, dict) or not cfg:
+            return None
+        override = dict(cfg)
+        if model_name:
+            override["模型名称"] = model_name
+        return override
 
     # ── 通用 ──
 

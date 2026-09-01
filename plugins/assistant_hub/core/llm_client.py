@@ -66,12 +66,23 @@ def chat_once(
     base_url: str = "",
     api_key: str = "",
     config_id: str = "",
+    model_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     """单轮补全：返回助手文本；失败抛 LLMUnavailableError。
 
-    config_id：指定 llm_saved_providers 键（助手记忆整理模型），空 = 跟随全局。
+    config_id：指定 llm_saved_providers 键（空 = 跟随全局）。
+    model_config：完整配置覆盖 dict（含 API_URL/模型名称，cron-tasks 同款
+    model_config_override 模式），优先级高于 config_id。
     """
-    cfg = resolve_model_config(config_id)
+    if isinstance(model_config, dict) and model_config.get("API_URL"):
+        cfg = {
+            "base_url": str(model_config["API_URL"]).rstrip("/"),
+            "api_key": str(model_config.get("API_KEY") or ""),
+            "model": str(model_config.get("模型名称") or ""),
+            "provider_name": str(model_config.get("provider_name") or ""),
+        }
+    else:
+        cfg = resolve_model_config(config_id)
     url = (base_url or cfg["base_url"]) + "/chat/completions"
     key = api_key or cfg["api_key"]
     body = {

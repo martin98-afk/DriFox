@@ -86,7 +86,7 @@ class AssistantCardWidget(QWidget):
         self._content_v.setSpacing(14)
 
         inner = QWidget()
-        inner.setMaximumWidth(720)
+        inner.setMaximumWidth(900)
         self._inner_v = QVBoxLayout(inner)
         self._inner_v.setContentsMargins(0, 0, 0, 0)
         self._inner_v.setSpacing(14)
@@ -101,9 +101,12 @@ class AssistantCardWidget(QWidget):
         wrap.addStretch()
         self._inner_v.addLayout(wrap)
 
-        # 2. 名称行 + 操作
+        # 2. 名称行 + 操作（头像可点击更换）
         name_row = QHBoxLayout()
         self._avatar = RoundAvatar(size=44, text="?", color="#7C3AED", parent=self)
+        self._avatar.setCursor(Qt.PointingHandCursor)
+        self._avatar.setToolTip("点击更换头像")
+        self._avatar.installEventFilter(self)
         name_row.addWidget(self._avatar)
         self._name_label = QLabel("(未选择)")
         self._name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} 20px; font-weight: 700;")
@@ -188,6 +191,65 @@ class AssistantCardWidget(QWidget):
             return items
         except Exception:
             return []
+
+    def eventFilter(self, obj, event):
+        """头像点击 → 更换头像。"""
+        from PyQt5.QtCore import QEvent
+
+        if obj is self._avatar and event.type() == QEvent.MouseButtonPress:
+            self._on_change_avatar()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _on_change_avatar(self):
+        """弹出头像选择器（预置/纯色/上传），确定后落盘。"""
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        from PyQt5.QtWidgets import QDialog as _QDialog
+
+        from .avatar_picker import AvatarPicker
+
+        dlg = _QDialog(self.window())
+        dlg.setWindowTitle("更换头像")
+        dlg.setModal(True)
+        dlg.setFixedWidth(560)
+        v = QVBoxLayout(dlg)
+        picker = AvatarPicker(assistant_id=a.id, parent=dlg)
+        ap = self._mgr.avatar_path(a.id)
+        picker.set_assistant(
+            aid=a.id,
+            color=a.color,
+            name=a.name or a.id,
+            image_path=str(ap) if ap else "",
+        )
+        v.addWidget(picker)
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(dlg.reject)
+        ok = QPushButton("确定")
+        ok.clicked.connect(dlg.accept)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        v.addLayout(row)
+        if dlg.exec_() != _QDialog.Accepted:
+            return
+        sel = picker.get_selection()
+        if sel.get("image_path"):
+            try:
+                data = Path(sel["image_path"]).read_bytes()
+                ext = Path(sel["image_path"]).suffix.lstrip(".") or "png"
+                self._mgr.save_avatar_from_bytes(a.id, data, ext)
+            except Exception as e:
+                self._notify_error(f"头像保存失败: {e}")
+                return
+        else:
+            self._mgr.clear_avatar(a.id)
+            a.color = sel.get("color") or a.color
+            self._mgr.update(a)
+        self._reload_all(select_aid=a.id)
+        self._notify("头像已更新")
 
     def _reload_all(self, select_aid: str = "") -> None:
         assistants = self._mgr.list_assistants()

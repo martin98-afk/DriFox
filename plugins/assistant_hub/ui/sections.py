@@ -39,25 +39,35 @@ from assistant_hub_manager import AssistantManager
 def _hint(text: str, size: int = 10) -> QLabel:
     lbl = QLabel(text)
     lbl.setWordWrap(True)
-    lbl.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(size)};")
+    lbl.setStyleSheet(
+        f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+        f"{get_font_family_css()} {font_size_css(size)};"
+    )
     return lbl
 
 
 def _title_label(text: str, size: int = 12) -> QLabel:
     lbl = QLabel(text)
-    lbl.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(size)}; font-weight: 600;")
+    lbl.setStyleSheet(
+        f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
+        f"{get_font_family_css()} {font_size_css(size)}; font-weight: 600;"
+    )
     return lbl
 
 
 def _card_frame(parent=None) -> QFrame:
+    """卡片容器。⚠ 样式用 #objectName 限定：QLabel 是 QFrame 子类，
+    裸 QFrame 选择器会污染所有子标签（边框泄漏）。"""
     frame = QFrame(parent)
+    frame.setObjectName("hubSectionCard")
     frame.setStyleSheet(
         f"""
-        QFrame {{
+        QFrame#hubSectionCard {{
             background: {Colors.CARD_BG.format(alpha=140)};
             border: 1px solid {Colors.BORDER};
             border-radius: 12px;
         }}
+        QFrame#hubSectionCard QLabel {{ background: transparent; border: none; }}
     """
     )
     return frame
@@ -110,17 +120,22 @@ def _btn_style(danger: bool = False) -> str:
 
 
 class _Section(QFrame):
-    """分区卡片：标题行（+右侧 context 槽）+ 内容 VBox。"""
+    """分区卡片：标题行（+右侧 context 槽）+ 内容 VBox。
+
+    样式限定 objectName：防止 QFrame 规则波及子 QLabel/QFrame（边框泄漏）。
+    """
 
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
+        self.setObjectName("hubSectionCard")
         self.setStyleSheet(
             f"""
-            QFrame {{
+            QFrame#hubSectionCard {{
                 background: {Colors.CARD_BG.format(alpha=140)};
                 border: 1px solid {Colors.BORDER};
                 border-radius: 12px;
             }}
+            QFrame#hubSectionCard QLabel {{ background: transparent; border: none; }}
         """
         )
         self._v = QVBoxLayout(self)
@@ -195,27 +210,43 @@ class ProfileSection(_Section):
         """
 
     def _reload_models(self) -> None:
-        """数据源：llm_saved_providers（name + 模型名称）；首项「跟随全局」。"""
-        try:
-            from app.utils.config import Settings
+        """数据源（对齐 cron-tasks）：main_widget._valid_configs 展开「配置 × 模型列表」。
 
-            cfg = Settings.get_instance()
-            saved = cfg.llm_saved_providers.value or {}
-            selected = cfg.llm_selected_model.value or ""
+        复合键 "<config_id>||<model>"——一个服务商可选它模型列表里的任意模型；
+        首项「跟随全局」= 空（执行时用当前全局对话模型，选中模型失效自动回退）。
+        双源兜底：UIPluginRegistry._main_widget → 任一窗口 main_widget。
+        """
+        mw = None
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            reg = UIPluginRegistry.get_instance()
+            mw = getattr(reg, "_main_widget", None) or next(
+                iter(getattr(reg, "_window_main_widgets", {}).values()), None
+            )
         except Exception:
-            saved, selected = {}, ""
+            mw = None
+        valid = getattr(mw, "_valid_configs", None) if mw is not None else None
+        current = getattr(mw, "_current_provider_name", None) if mw is not None else None
+
         for combo in (self._chat_model, self._utility_model):
             combo.clear()
             combo.addItem("跟随全局", "")
-        for cid, info in saved.items():
-            if not isinstance(info, dict):
+            if not isinstance(valid, dict):
                 continue
-            label = f"{info.get('name') or info.get('provider_name') or cid}（{info.get('模型名称') or ''}）"
-            combo.addItem(label, cid)
-        # 选中项
-        idx = self._chat_model.findData(selected)
-        self._chat_model.setCurrentIndex(idx if idx >= 0 else 0)
-        self._utility_model.setCurrentIndex(0)
+            for key, cfg in valid.items():
+                if not isinstance(cfg, dict):
+                    continue
+                display = str(cfg.get("display_name") or cfg.get("name") or cfg.get("provider_name") or key)
+                cur_model = str(cfg.get("模型名称") or "")
+                models = [str(m) for m in (cfg.get("模型列表") or []) if str(m).strip()]
+                if not models:
+                    models = [cur_model] if cur_model else []
+                for model in models:
+                    label = f"{display} · {model}"
+                    if key == current and model == cur_model:
+                        label += "（当前）"
+                    combo.addItem(label, f"{key}||{model}")
 
     def bind(self, name: str, chat_model: str, utility_model: str) -> None:
         self._name.setText(name)

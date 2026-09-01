@@ -65,27 +65,16 @@ def test_persona_registry_via_facade(tmp_path, monkeypatch):
     assert "build" in ids and "hanako" in ids and "none" in ids
 
 
-def test_utility_llm_binding(tmp_path, monkeypatch):
+def test_utility_llm_composite_key(tmp_path, monkeypatch):
+    """utility_model 复合键 "<config_id>||<model>"：解析 override 覆盖模型名；失效回退。"""
     mgr = _fresh_manager(tmp_path)
     a = mgr.create("模型助手")
-    a.utility_model = "cfg-123"
+    # 复合键：配置存在 → override 覆盖 模型名称
+    a.utility_model = "cfg-1||model-x"
     mgr.update(a)
 
     captured = {}
-
-    class _Item:
-        value = {}
-
-    class _Sel:
-        value = ""
-
     llm_mod = mgr._core_llm()
-
-    def fake_resolve(config_id=""):
-        captured["config_id"] = config_id
-        return {"base_url": "https://x/v1", "api_key": "k", "model": "m", "provider_name": "p"}
-
-    monkeypatch.setattr(llm_mod, "resolve_model_config", fake_resolve)
 
     class _Resp:
         def __enter__(self):
@@ -99,16 +88,43 @@ def test_utility_llm_binding(tmp_path, monkeypatch):
 
             return _json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
 
-    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", lambda req, timeout=60: _Resp())
+    def fake_urlopen(req, timeout=60):
+        import json as _json
+
+        captured["body"] = _json.loads(req.data.decode())
+        return _Resp()
+
+    monkeypatch.setattr(llm_mod, "resolve_model_config", lambda config_id="": {"base_url": "https://global/v1", "api_key": "k", "model": "global-m", "provider_name": "p"})
+    monkeypatch.setattr(llm_mod.urllib.request, "urlopen", fake_urlopen)
+    # _valid_configs 兜底链不可用（无窗口）→ manager 走 llm_saved_providers 兜底
+    class _Item:
+        value = {"cfg-1": {"API_URL": "https://cfg1/v1", "API_KEY": "k1", "模型名称": "default-m", "provider_name": "P1"}}
+
+    class _Sel:
+        value = ""
+
+    class _Cfg:
+        llm_saved_providers = _Item()
+        llm_selected_model = _Sel()
+
+    monkeypatch.setattr(llm_mod, "_settings", lambda: _Cfg())
 
     call = mgr._utility_llm(a.id)
-    # 验证 config_id 透传到 resolve
     out = call([{"role": "user", "content": "hi"}])
     assert out == "ok"
-    assert captured["config_id"] == "cfg-123"
+    # 复合键生效：URL 用 cfg-1，模型名被覆盖为 model-x
+    assert captured["body"]["model"] == "model-x"
 
-    # 空 utility_model → config_id 空 = 跟随全局
-    b = mgr.create("全局助手")
+    # 无效复合键（配置不存在）→ 回退全局
+    b = mgr.create("回退助手")
+    b.utility_model = "not-exist||m"
+    mgr.update(b)
     call2 = mgr._utility_llm(b.id)
     call2([{"role": "user", "content": "hi"}])
-    assert captured["config_id"] == ""
+    assert captured["body"]["model"] == "global-m"  # 回退全局当前模型
+
+    # 空键 → 跟随全局
+    c = mgr.create("全局助手")
+    call3 = mgr._utility_llm(c.id)
+    call3([{"role": "user", "content": "hi"}])
+    assert captured["body"]["model"] == "global-m"
