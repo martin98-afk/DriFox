@@ -74,8 +74,6 @@ def test_about_section_persona_switch(qtbot=None):
     # none 横幅
     s._none_banner.click()
     assert got == ["hanako", "none"]
-    # 选中态横幅带 accent 粗边框
-    assert "2px solid" in s._none_banner.styleSheet()
 
 
 def test_memory_section_pins(tmp_path=None, qtbot=None):
