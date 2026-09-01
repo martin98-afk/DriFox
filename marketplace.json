@@ -47,7 +47,8 @@
                 "ui": true,
                 "hooks": true,
                 "tools": true,
-                "skills": true
+                "skills": true,
+                "loop_policies": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
