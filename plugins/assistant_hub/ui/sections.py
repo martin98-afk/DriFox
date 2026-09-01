@@ -126,18 +126,24 @@ class NoWheelComboBox(QComboBox):
     """禁滚轮误切换的下拉框；弹层高度硬限制（样式表下 maxVisibleItems 不可靠）。"""
 
     _MAX_VISIBLE = 10
-    _ROW_H = 30
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMaxVisibleItems(self._MAX_VISIBLE)
-        self._view = self.view()  # QComboBox 自带 popup view
 
     def showPopup(self) -> None:  # noqa: N802
         super().showPopup()
+        # ⚠ 弹层高度必须同时设 view 和其容器（QFrame window），只设 view 会被容器撑爆
         n = self.count()
-        if n > 0:
-            self.view().setFixedHeight(min(n, self._MAX_VISIBLE) * self._ROW_H)
+        if n <= 0:
+            return
+        view = self.view()
+        row_h = max(view.sizeHintForRow(0), 24)
+        h = min(n, self._MAX_VISIBLE) * row_h + 2 * view.frameWidth() + 6
+        view.setFixedHeight(h)
+        container = view.parentWidget() or view.window()
+        if container is not None:
+            container.setFixedHeight(h + view.frameWidth() + 4)
 
     def wheelEvent(self, e: "QWheelEvent") -> None:  # noqa: N802
         e.ignore()
