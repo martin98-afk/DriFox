@@ -91,6 +91,7 @@ class EngineSessionImpl:
         permission_strategy: Any = PermissionStrategy.AUTO_ALLOW,
         model_config_override: Optional[Dict[str, Any]] = None,
         hook_policy_id: Optional[str] = None,
+        loop_policy_id: Optional[str] = None,
     ):
         self.engine_name = engine_name
         self._is_cancelled = False
@@ -121,6 +122,7 @@ class EngineSessionImpl:
                 permission_strategy=permission_strategy,
                 hook_policy=hook_policy,
                 hook_policy_id=hook_policy_id,
+                loop_policy_id=loop_policy_id,
             ),
             tool_executor=tool_executor,
             agent_manager=agent_manager,

@@ -203,6 +203,7 @@ class OpenAIChatWorker(QThread):
         session_id: str = "",
         hook_policy=None,
         hook_policy_id: Optional[str] = None,
+        loop_policy_id: Optional[str] = None,
     ):
         super().__init__()
         self.messages = messages
@@ -223,6 +224,8 @@ class OpenAIChatWorker(QThread):
         # 未设置时按枚举回落（ALL→"all" / TOOL_EVENTS_ONLY→"tool_only" / NONE→"none"）。
         self._hook_policy_id = hook_policy_id
         self._hook_policy_obj = None  # 懒解析缓存（首查时从 registry 取策略对象）
+        # 可选：LoopPolicy 插件 id（引擎级声明，优先级高于全局激活策略）
+        self._loop_policy_id = loop_policy_id
         if self.session_id:
             logger.debug(f"[ChatWorker] session_id={self.session_id[:12]}...")
         else:
@@ -2873,11 +2876,24 @@ class OpenAIChatWorker(QThread):
         return registry.resolve(self.llm_config or {})
 
     def _loop_policy(self):
-        """当前激活的循环策略（系统插件 default 兜底，可 set_active 覆盖）"""
+        """当前生效的循环策略：引擎显式 loop_policy_id > 全局激活策略
+
+        loop_policy_id 由 ConversationConfig 声明（插件自建引擎），按 id 直接从
+        registry.policies() 取对象 —— 不调用 set_active，因此不会污染主对话的
+        全局激活槽。未设置或 id 不存在时回落 get_active()，零行为变化。
+        """
         if self._loop_policy_obj is None:
             from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
 
-            self._loop_policy_obj = LoopPolicyRegistry.get_instance().get_active()
+            registry = LoopPolicyRegistry.get_instance()
+            policy = None
+            policy_id = self._loop_policy_id
+            if policy_id:
+                # 指定 id（如 "assistant_hub_single_turn"）：按 id 直接定位策略对象
+                policy = registry.policies().get(policy_id)
+                if policy is None:
+                    logger.warning(f"[LoopPolicy] 未找到 id={policy_id!r}，回落全局激活策略")
+            self._loop_policy_obj = policy if policy is not None else registry.get_active()
         return self._loop_policy_obj
 
     def _hook_policy_obj_resolve(self):

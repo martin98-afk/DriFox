@@ -115,6 +115,8 @@ class ConversationExecutor:
             "hook_policy": getattr(self._config, "hook_policy", None),
             # 可选：HookPolicy 插件 id（优先级高于 hook_policy 枚举）
             "hook_policy_id": getattr(self._config, "hook_policy_id", None),
+            # 可选：LoopPolicy 插件 id（引擎级声明，不改全局激活槽）
+            "loop_policy_id": getattr(self._config, "loop_policy_id", None),
         }
         self._current_worker = self._worker_factory(**worker_kwargs)
 

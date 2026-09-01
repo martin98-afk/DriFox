@@ -1154,10 +1154,13 @@ class AssistantManager:
         return _load_core_module("memory.ticker", "memory/ticker.py")
 
     def _utility_llm(self, aid: str):
-        """返回绑定了该助手记忆整理模型的 chat_once。
+        """返回绑定了该助手记忆整理模型的 chat_once（走主对话引擎，单回合）。
 
         utility_model 复合键格式（对齐 cron-tasks）："&lt;config_id&gt;||&lt;model_name&gt;"；
         兼容旧纯 config_id。解析失败/配置不存在 → None override = 回退全局当前模型。
+
+        调用链：chat_once → services["create_engine_session"] → 主对话引擎，
+        并用本插件的 single_turn 循环策略钳制成一回合（见 core/llm_client.py）。
         """
         a = self.get(aid)
         model_key = (a.utility_model if a else "") or ""

@@ -19,6 +19,10 @@
                      callbacks={"content_received": on_chunk})
     session.executor.execute(...)                            # 逃生舱
 
+kwargs：create_engine_session(name, **kwargs) 透传给 EngineSessionImpl，
+常用项：model_config_override / hook_policy / hook_policy_id /
+loop_policy_id（引擎级循环策略 id，按 id 取对象，不改全局激活槽）。
+
 守卫：tests/plugins/test_hook_policy_and_chat_client.py
 """
 
