@@ -44,9 +44,7 @@ class RenameDialog(MaskDialogBase):
         if hint:
             h = QLabel(hint, self.widget)
             h.setWordWrap(True)
-            h.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
-            )
+            h.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
             v.addWidget(h)
 
         self._input = LineEdit(self.widget)

@@ -11,6 +11,7 @@
 - 自定义：<app_data>/assistant_hub/personas.json（builtin 不可删改）
 - "none"：恒存在的空人格（纯净助手，UI 走横幅不进 chips）
 """
+
 from __future__ import annotations
 
 import getpass
@@ -184,9 +185,7 @@ class PersonaRegistry:
             }
             for p in self._custom.values()
         ]
-        self._custom_path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        self._custom_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # ── 渲染 ──
     def render(self, pid: str, template: str, *, agent_name: str, user_name: str) -> str:

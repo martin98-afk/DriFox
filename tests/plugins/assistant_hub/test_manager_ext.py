@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_manager_ext.py — AssistantManager v2 门面扩展测试。"""
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -21,9 +22,7 @@ def _fresh_manager(tmp_path):
 def test_yuan_migration_on_load(tmp_path):
     aid_dir = tmp_path / "hub" / "legacy"
     aid_dir.mkdir(parents=True)
-    (aid_dir / "assistant.yaml").write_text(
-        "id: legacy\nname: 旧助手\nyuan: kong\n", encoding="utf-8"
-    )
+    (aid_dir / "assistant.yaml").write_text("id: legacy\nname: 旧助手\nyuan: kong\n", encoding="utf-8")
     mgr = _fresh_manager(tmp_path)
     a = mgr.get("legacy")
     assert a is not None and a.yuan == "none"

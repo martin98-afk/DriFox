@@ -7,6 +7,7 @@
 
 反思（reflect）：日批时从近期记忆提炼 0-3 条工作心得，经 LLM 输出 JSON 数组后逐条记录。
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -28,9 +29,7 @@ def _prompts():
     mod = sys.modules.get(key)
     if mod is not None:
         return mod
-    spec = importlib.util.spec_from_file_location(
-        key, str(_THIS.parent / "memory" / "prompts.py")
-    )
+    spec = importlib.util.spec_from_file_location(key, str(_THIS.parent / "memory" / "prompts.py"))
     module = importlib.util.module_from_spec(spec)
     sys.modules[key] = module
     spec.loader.exec_module(module)

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_dream.py — Dream 管线测试（fake LLM + tmp 目录）。"""
+
 import importlib.util
 import json
 import sys
@@ -35,8 +36,8 @@ def _seed_memory(aid: Path, facts: str = "- 用户偏好简洁", longterm: str =
 
 
 _DREAM_REPLIES = [
-    "- 单元A\n- 单元B",              # atomize
-    "- 单元A\n- 单元B",              # dedupe
+    "- 单元A\n- 单元B",  # atomize
+    "- 单元A\n- 单元B",  # dedupe
     "- 单元A（优化）\n- 单元B（优化）",  # optimize
     "## 主题\n\n- 单元A（优化）\n- 单元B（优化）",  # compose
     '{"semantic_ok": true, "provenance_ok": true, "sufficient_compression": true, "feedback": ""}',  # verify

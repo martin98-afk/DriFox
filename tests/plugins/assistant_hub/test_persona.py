@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_persona.py — assistant_hub core/persona 单元测试。"""
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -21,8 +22,7 @@ _BUILTIN_DIR = _ROOT / "plugins" / "assistant_hub" / "personas"
 
 
 def _fresh_registry(tmp_path):
-    return m.PersonaRegistry.get_instance(custom_path=tmp_path / "personas.json",
-                                          builtin_dir=_BUILTIN_DIR, reset=True)
+    return m.PersonaRegistry.get_instance(custom_path=tmp_path / "personas.json", builtin_dir=_BUILTIN_DIR, reset=True)
 
 
 def test_list_all_contains_builtin(tmp_path):
@@ -52,8 +52,7 @@ def test_custom_upsert_delete(tmp_path):
     reg.upsert(p)
     assert "my-p" in [x.id for x in reg.list_all()]
     # 持久化：重建实例仍在
-    reg2 = m.PersonaRegistry.get_instance(custom_path=tmp_path / "personas.json",
-                                          builtin_dir=_BUILTIN_DIR)
+    reg2 = m.PersonaRegistry.get_instance(custom_path=tmp_path / "personas.json", builtin_dir=_BUILTIN_DIR)
     assert "my-p" in [x.id for x in reg2.list_all()]
     assert reg2.get("my-p").builtin is False
     # builtin 不可删
@@ -63,7 +62,9 @@ def test_custom_upsert_delete(tmp_path):
 
 
 def test_resolve_user_name_fallback(monkeypatch):
-    monkeypatch.setattr(m, "getpass", type("G", (), {"getuser": staticmethod(lambda: (_ for _ in ()).throw(Exception("x")))}))
+    monkeypatch.setattr(
+        m, "getpass", type("G", (), {"getuser": staticmethod(lambda: (_ for _ in ()).throw(Exception("x")))})
+    )
     assert m.resolve_user_name() == "用户"
     monkeypatch.setattr(m, "getpass", type("G", (), {"getuser": staticmethod(lambda: "martin")}))
     assert m.resolve_user_name() == "martin"

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_ticker.py — 记忆调度器测试（fake manager/llm）。"""
+
 import importlib.util
 import sys
 import threading

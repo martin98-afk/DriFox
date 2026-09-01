@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_arc_stack.py — 弧形卡片堆叠冒烟测试（QApplication 必需）。"""
+
 import importlib.util
 import os
 import sys

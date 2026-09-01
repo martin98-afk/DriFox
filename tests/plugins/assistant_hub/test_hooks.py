@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_hooks.py — inject_assistant hook 测试（独立加载场景）。"""
+
 import importlib.util
 import sys
 from pathlib import Path

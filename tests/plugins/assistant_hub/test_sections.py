@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_sections.py — 分区/浮层组件冒烟测试。"""
+
 import importlib.util
 import os
 import sys

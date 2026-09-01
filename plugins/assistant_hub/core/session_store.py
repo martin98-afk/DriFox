@@ -7,6 +7,7 @@
 - clean_messages 只留 user/assistant 文本轮次，剥 <think>、滤 <system-reminder>。
 - logical_day：逻辑日边界 04:00（对齐 openhanako time-utils 的 DAY_BOUNDARY_HOUR）。
 """
+
 from __future__ import annotations
 
 import json

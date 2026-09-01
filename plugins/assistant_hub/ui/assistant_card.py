@@ -15,6 +15,7 @@
 
 宿主契约：widget_class=AssistantCardWidget、refresh_style()（主题切换回调）。
 """
+
 from __future__ import annotations
 
 import json
@@ -105,14 +106,10 @@ class AssistantCardWidget(QWidget):
         self._avatar = RoundAvatar(size=44, text="?", color="#7C3AED", parent=self)
         name_row.addWidget(self._avatar)
         self._name_label = QLabel("(未选择)")
-        self._name_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} 20px; font-weight: 700;"
-        )
+        self._name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} 20px; font-weight: 700;")
         name_row.addWidget(self._name_label)
         self._primary_badge = QLabel("★ 主助手")
-        self._primary_badge.setStyleSheet(
-            f"color: {Colors.TEXT_ACCENT}; {get_font_family_css()} {font_size_css(11)};"
-        )
+        self._primary_badge.setStyleSheet(f"color: {Colors.TEXT_ACCENT}; {get_font_family_css()} {font_size_css(11)};")
         self._primary_badge.hide()
         name_row.addWidget(self._primary_badge)
         name_row.addStretch()
@@ -179,25 +176,32 @@ class AssistantCardWidget(QWidget):
                 if p.id == "none":
                     continue  # none 走横幅
                 ap = reg.avatar_path(p.id)
-                items.append({
-                    "id": p.id, "name": p.name, "description": p.description,
-                    "tag": p.tag, "avatar_path": str(ap or ""),
-                })
+                items.append(
+                    {
+                        "id": p.id,
+                        "name": p.name,
+                        "description": p.description,
+                        "tag": p.tag,
+                        "avatar_path": str(ap or ""),
+                    }
+                )
             return items
         except Exception:
             return []
 
     def _reload_all(self, select_aid: str = "") -> None:
         assistants = self._mgr.list_assistants()
-        self._stack.set_assistants([
-            {
-                "id": a.id,
-                "name": a.name or a.id,
-                "color": a.color,
-                "avatar_path": str(self._mgr.avatar_path(a.id) or ""),
-            }
-            for a in assistants
-        ])
+        self._stack.set_assistants(
+            [
+                {
+                    "id": a.id,
+                    "name": a.name or a.id,
+                    "color": a.color,
+                    "avatar_path": str(self._mgr.avatar_path(a.id) or ""),
+                }
+                for a in assistants
+            ]
+        )
         primary = next((a.id for a in assistants if a.primary), "")
         self._stack.set_primary(primary)
         if select_aid and self._mgr.has(select_aid):
@@ -240,9 +244,7 @@ class AssistantCardWidget(QWidget):
             self._memory.set_dream_auto(a.dream_auto_enabled)
             self._memory.reload_pins([c for _pid, c in mgr.read_pinned(aid_capture)])
             self._memory.set_status(self._memory_status(aid_capture))
-            self._memory.set_dream_hint(
-                "每日自动 Dream 已开启" if a.dream_auto_enabled else "每日自动 Dream 未开启"
-            )
+            self._memory.set_dream_hint("每日自动 Dream 已开启" if a.dream_auto_enabled else "每日自动 Dream 未开启")
             self._experience.set_enabled(a.experience_enabled)
             self._experience.reload_categories(mgr.experience_list(aid_capture))
             self._skills.reload_skills(mgr.list_skills(aid_capture), self._on_view_skill)
@@ -265,8 +267,12 @@ class AssistantCardWidget(QWidget):
             self._bind_editor(aid)
 
     def _on_create(self) -> None:
-        dlg = RenameDialog(title="新建助手", hint="输入助手名称（例如：小助手 / 翻译官 / 代码审查员）：",
-                           default="", parent=self.window())
+        dlg = RenameDialog(
+            title="新建助手",
+            hint="输入助手名称（例如：小助手 / 翻译官 / 代码审查员）：",
+            default="",
+            parent=self.window(),
+        )
         dlg.confirmed.connect(self._do_create)
         dlg.exec_()
 
@@ -282,9 +288,11 @@ class AssistantCardWidget(QWidget):
         if not a:
             return
         ret = QMessageBox.question(
-            self, "删除助手",
+            self,
+            "删除助手",
             f"确定删除助手「{a.name}」？\n其身份、提示词、记忆、头像将一并删除。\n（该操作不可撤销）",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         if ret != QMessageBox.Yes:
             return
@@ -465,9 +473,11 @@ class AssistantCardWidget(QWidget):
             return
         aid = self._active_aid
         ret = QMessageBox.question(
-            self, "清除记忆",
+            self,
+            "清除记忆",
             "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
         )
         if ret != QMessageBox.Yes:
             return
@@ -522,8 +532,11 @@ class AssistantCardWidget(QWidget):
 
         def _worker():
             r = self._mgr.experience_reflect(aid)
-            msg = (f"反思完成：新增 {r.get('added', 0)} 条经验" if r.get("added")
-                   else f"反思完成：暂无新经验 {('(' + r.get('error', '') + ')') if r.get('error') else ''}")
+            msg = (
+                f"反思完成：新增 {r.get('added', 0)} 条经验"
+                if r.get("added")
+                else f"反思完成：暂无新经验 {('(' + r.get('error', '') + ')') if r.get('error') else ''}"
+            )
             QTimer.singleShot(0, lambda: self._notify(msg))
 
         threading.Thread(target=_worker, daemon=True).start()
@@ -532,9 +545,13 @@ class AssistantCardWidget(QWidget):
         if not self._active_aid:
             return
         text = self._mgr.read_skill(self._active_aid, name)
-        TextViewOverlay(f"技能 · {name}", text, editable=True,
-                        on_save=lambda c: self._mgr.write_skill(self._active_aid, name, c),
-                        parent=self.window()).exec_()
+        TextViewOverlay(
+            f"技能 · {name}",
+            text,
+            editable=True,
+            on_save=lambda c: self._mgr.write_skill(self._active_aid, name, c),
+            parent=self.window(),
+        ).exec_()
 
     # ══════════════════════════════════════════════════
     #  通知 / 宿主契约
@@ -542,15 +559,29 @@ class AssistantCardWidget(QWidget):
 
     def _notify(self, text: str) -> None:
         try:
-            InfoBar.success(title="助手中心", content=text, orient=Qt.Horizontal, isClosable=True,
-                            position=InfoBarPosition.TOP_RIGHT, duration=2500, parent=self.window())
+            InfoBar.success(
+                title="助手中心",
+                content=text,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=2500,
+                parent=self.window(),
+            )
         except Exception:
             pass
 
     def _notify_error(self, text: str) -> None:
         try:
-            InfoBar.error(title="助手中心", content=text, orient=Qt.Horizontal, isClosable=True,
-                          position=InfoBarPosition.TOP_RIGHT, duration=3000, parent=self.window())
+            InfoBar.error(
+                title="助手中心",
+                content=text,
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP_RIGHT,
+                duration=3000,
+                parent=self.window(),
+            )
         except Exception:
             pass
 

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_prompts.py — prompt 模板 sanity 检查。"""
+
 import importlib.util
 import sys
 from pathlib import Path

@@ -3,6 +3,7 @@
 
 统一视觉：半透明遮罩 + 圆角卡片（对齐原版 agent-create-overlay）。
 """
+
 from __future__ import annotations
 
 import sys
@@ -55,8 +56,7 @@ def _label(text: str, size: int = 11, muted: bool = False) -> QLabel:
     lbl.setWordWrap(True)
     lbl.setStyleSheet(
         f"color: {Colors.TEXT_MUTED if muted else Colors.TEXT_PRIMARY};"
-        f"{get_font_family_css()} {font_size_css(size)};"
-        + ("font-weight: 600;" if not muted else "")
+        f"{get_font_family_css()} {font_size_css(size)};" + ("font-weight: 600;" if not muted else "")
     )
     return lbl
 
@@ -94,8 +94,15 @@ class OverlayBase(QDialog):
 class TextViewOverlay(OverlayBase):
     """只读/可编辑文本查看浮层（查看当下记忆 / 查看记忆 / 经验分类）。"""
 
-    def __init__(self, title: str, text: str, *, editable: bool = False,
-                 on_save: Optional[Callable[[str], None]] = None, parent=None):
+    def __init__(
+        self,
+        title: str,
+        text: str,
+        *,
+        editable: bool = False,
+        on_save: Optional[Callable[[str], None]] = None,
+        parent=None,
+    ):
         super().__init__(title, parent, width=620, height=520)
         self._on_save = on_save
         self._edit = QPlainTextEdit(text)
@@ -133,8 +140,13 @@ class TextViewOverlay(OverlayBase):
 class DreamRevisionOverlay(OverlayBase):
     """Dream 版本浏览器：列表 + 预览 + 恢复。"""
 
-    def __init__(self, revisions: List[Dict[str, Any]], preview_fn: Callable[[str], str],
-                 restore_fn: Callable[[str], Dict[str, Any]], parent=None):
+    def __init__(
+        self,
+        revisions: List[Dict[str, Any]],
+        preview_fn: Callable[[str], str],
+        restore_fn: Callable[[str], Dict[str, Any]],
+        parent=None,
+    ):
         super().__init__("Dream 版本历史", parent, width=640, height=520)
         self._preview_fn = preview_fn
         self._restore_fn = restore_fn

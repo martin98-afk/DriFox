@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_session_store.py — assistant_hub core/session_store 单元测试。"""
+
 import importlib.util
 import json
 import sqlite3
@@ -31,7 +32,11 @@ def _make_db(tmp_path: Path) -> Path:
     )
     msgs = [
         {"role": "user", "content": "帮我看看这段代码", "timestamp": "2026-09-01 10:00:00"},
-        {"role": "assistant", "content": "<think>内部推理</think>好的，问题在第三行", "timestamp": "2026-09-01 10:00:05"},
+        {
+            "role": "assistant",
+            "content": "<think>内部推理</think>好的，问题在第三行",
+            "timestamp": "2026-09-01 10:00:05",
+        },
         {"role": "system", "content": "<system-reminder>注入</system-reminder>", "timestamp": "2026-09-01 10:00:06"},
         {"role": "user", "content": [{"type": "text", "text": "谢谢"}], "timestamp": "2026-09-01 10:01:00"},
     ]

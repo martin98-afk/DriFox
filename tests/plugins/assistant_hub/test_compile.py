@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_compile.py — 四段传送带编译器测试（fake LLM + tmp 目录）。"""
+
 import importlib.util
 import json
 import sys
@@ -45,8 +46,7 @@ def _seed_sessions(tmp_path, session_rows):
         ]
         conn.execute(
             "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)",
-            (sid, f"标题{sid}", "proj", 2, updated, updated, "预览",
-             b"JSON\x01" + json.dumps(msgs).encode()),
+            (sid, f"标题{sid}", "proj", 2, updated, updated, "预览", b"JSON\x01" + json.dumps(msgs).encode()),
         )
     conn.commit()
     conn.close()
@@ -54,10 +54,13 @@ def _seed_sessions(tmp_path, session_rows):
 
 
 def test_compile_today_watermark_increment(tmp_path, monkeypatch):
-    db = _seed_sessions(tmp_path, [
-        ("s1", "2026-09-01 10:00:00", "第一轮对话：我在做脱硫项目"),
-        ("s2", "2026-09-01 15:00:00", "第二轮对话：记住我喜欢简洁回复"),
-    ])
+    db = _seed_sessions(
+        tmp_path,
+        [
+            ("s1", "2026-09-01 10:00:00", "第一轮对话：我在做脱硫项目"),
+            ("s2", "2026-09-01 15:00:00", "第二轮对话：记住我喜欢简洁回复"),
+        ],
+    )
     store = m._core("session_store")
     monkeypatch.setattr(store, "find_db", lambda: db)
     from datetime import datetime as _dt
@@ -67,16 +70,14 @@ def test_compile_today_watermark_increment(tmp_path, monkeypatch):
     llm = FakeLLM(["- 用户在做脱硫项目\n- 用户偏好简洁回复\n- 新增：记住 Ctrl+S 习惯"])
 
     # 第一轮：只看到 s1（水位线截取）
-    r1 = m.compile_today(aid, llm=llm, now=_dt(2026, 9, 1, 20, 0),
-                         _session_filter=lambda s: s["session_id"] == "s1")
+    r1 = m.compile_today(aid, llm=llm, now=_dt(2026, 9, 1, 20, 0), _session_filter=lambda s: s["session_id"] == "s1")
     assert r1["changed"] is True
     today_md = (aid / "memory" / "today.md").read_text(encoding="utf-8")
     assert "脱硫" in today_md
 
     # 第二轮：水位线推进，只编译 s2 增量
     llm2 = FakeLLM(["- 用户偏好简洁回复（强调）"])
-    r2 = m.compile_today(aid, llm=llm2, now=_dt(2026, 9, 1, 21, 0),
-                         _session_filter=lambda s: s["session_id"] == "s2")
+    r2 = m.compile_today(aid, llm=llm2, now=_dt(2026, 9, 1, 21, 0), _session_filter=lambda s: s["session_id"] == "s2")
     assert r2["changed"] is True
     # fake llm 只收到增量合并的输入（不再含第一轮文本）
     assert "第一轮对话" not in llm2.calls[0]

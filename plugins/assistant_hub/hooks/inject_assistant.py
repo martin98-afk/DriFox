@@ -13,6 +13,7 @@
 - HookWorker 经 spec_from_file_location 独立加载本文件（无 package 上下文），
   禁止相对导入；assistant_manager 模块按路径加载并缓存 sys.modules。
 """
+
 from __future__ import annotations
 
 import importlib.util

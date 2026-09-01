@@ -11,6 +11,7 @@
 LLM 不可用：compile_chain 内部静默降级，日批后续步骤照常（各步独立）。
 计数持久化：<state_dir>/turn-state.json（重启不清零）。
 """
+
 from __future__ import annotations
 
 import json

@@ -8,6 +8,7 @@
 
 单一 ResultPanel：左侧"当前头像预览"，右侧"选择面板"（三 Tab）。
 """
+
 from __future__ import annotations
 
 import base64
@@ -86,9 +87,7 @@ class _AvatarTile(QToolButton):
                 if pm is None:
                     pm = _fallback_pixmap(name, color, 48)
             else:
-                pm = QPixmap(str(image_path)).scaled(
-                    48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation
-                )
+                pm = QPixmap(str(image_path)).scaled(48, 48, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.setIcon(QIcon(pm))
         else:
             pm = _fallback_pixmap(name, color, 48)
@@ -189,9 +188,7 @@ class AvatarPicker(QWidget):
         pv.setContentsMargins(12, 12, 12, 12)
         pv.setSpacing(8)
         self._preview_label = QLabel("当前头像", preview_box)
-        self._preview_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
-        )
+        self._preview_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
         pv.addWidget(self._preview_label)
         self._preview_widget = RoundAvatar(size=96, text="?", color=self._current_color)
         pv.addWidget(self._preview_widget, 0, Qt.AlignCenter)
@@ -238,9 +235,7 @@ class AvatarPicker(QWidget):
 
         up_info = QLabel("支持 PNG / JPG / WebP / SVG。可上传多张，会自动覆盖旧头像。", upload_tab)
         up_info.setWordWrap(True)
-        up_info.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
-        )
+        up_info.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
         ul.addWidget(up_info)
         ul.addStretch()
         tabs.addTab(upload_tab, "📁 本地")
@@ -257,9 +252,7 @@ class AvatarPicker(QWidget):
         v.setSpacing(4)
 
         info = QLabel("预置头像库 — 选中即应用到当前助手（可放更多图片到插件 icons/avatars/）", wrap)
-        info.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
-        )
+        info.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
         v.addWidget(info)
 
         scroll = QScrollArea(wrap)
@@ -291,12 +284,24 @@ class AvatarPicker(QWidget):
             for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.svg"):
                 files.extend(sorted(_PREDEFINED_AVATAR_DIR.glob(ext)))
         palette = [
-            ("#7C3AED", "紫"), ("#DB2777", "粉"), ("#DC2626", "朱"),
-            ("#EA580C", "橙"), ("#D97706", "琥"), ("#CA8A04", "黄"),
-            ("#65A30D", "苔"), ("#16A34A", "翠"), ("#059669", "碧"),
-            ("#0891B2", "青"), ("#0284C7", "空"), ("#2563EB", "蓝"),
-            ("#4F46E5", "群"), ("#6D28D9", "萄"), ("#9333EA", "紫"),
-            ("#475569", "灰"), ("#0F766E", "tide"), ("#A21CAF", "fuchsia"),
+            ("#7C3AED", "紫"),
+            ("#DB2777", "粉"),
+            ("#DC2626", "朱"),
+            ("#EA580C", "橙"),
+            ("#D97706", "琥"),
+            ("#CA8A04", "黄"),
+            ("#65A30D", "苔"),
+            ("#16A34A", "翠"),
+            ("#059669", "碧"),
+            ("#0891B2", "青"),
+            ("#0284C7", "空"),
+            ("#2563EB", "蓝"),
+            ("#4F46E5", "群"),
+            ("#6D28D9", "萄"),
+            ("#9333EA", "紫"),
+            ("#475569", "灰"),
+            ("#0F766E", "tide"),
+            ("#A21CAF", "fuchsia"),
         ]
 
         for i, f in enumerate(files[:24]):
@@ -322,9 +327,7 @@ class AvatarPicker(QWidget):
         v.setSpacing(4)
 
         info = QLabel("选一个纯色作为头像背景 + 缩写字符（按姓名生成）", wrap)
-        info.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
-        )
+        info.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
         v.addWidget(info)
 
         scroll = QScrollArea(wrap)
@@ -336,13 +339,28 @@ class AvatarPicker(QWidget):
         grid.setSpacing(4)
 
         palette = [
-            "#7C3AED", "#DB2777", "#DC2626", "#EA580C", "#D97706", "#CA8A04",
-            "#65A30D", "#16A34A", "#059669", "#0891B2", "#0284C7", "#2563EB",
-            "#4F46E5", "#6D28D9", "#9333EA", "#475569", "#0F766E", "#A21CAF",
+            "#7C3AED",
+            "#DB2777",
+            "#DC2626",
+            "#EA580C",
+            "#D97706",
+            "#CA8A04",
+            "#65A30D",
+            "#16A34A",
+            "#059669",
+            "#0891B2",
+            "#0284C7",
+            "#2563EB",
+            "#4F46E5",
+            "#6D28D9",
+            "#9333EA",
+            "#475569",
+            "#0F766E",
+            "#A21CAF",
         ]
         self._color_tiles = []
         for i, color in enumerate(palette):
-            tile = _AvatarTile(f"色块-{i+1}", None, color)
+            tile = _AvatarTile(f"色块-{i + 1}", None, color)
             tile.clicked.connect(lambda checked=False, t=tile: self._on_color_clicked(t))
             grid.addWidget(tile, i // 6, i % 6)
             self._color_tiles.append(tile)

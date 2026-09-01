@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """test_assistant_card.py — 单列主页面冒烟测试。"""
+
 import importlib.util
 import os
 import sys

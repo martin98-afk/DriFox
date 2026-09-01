@@ -10,6 +10,7 @@
 每日自动：lastAutomaticAttemptDate / lastSuccessfulManualDate 双水位，每逻辑日各最多一次。
 并发：per-aid threading.Lock，重入直接返回 running 错误（不阻塞）。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -159,8 +160,15 @@ def _rev_dir(aid_dir: Path) -> Path:
     return aid_dir / "memory" / "dream" / "revisions"
 
 
-def create_revision(aid_dir: Path, *, run_id: str, trigger: str, before: DreamSections,
-                    kind: str = "dream", restores_revision_id: str = "") -> str:
+def create_revision(
+    aid_dir: Path,
+    *,
+    run_id: str,
+    trigger: str,
+    before: DreamSections,
+    kind: str = "dream",
+    restores_revision_id: str = "",
+) -> str:
     revision_id = f"{datetime.now().isoformat(timespec='seconds').replace(':', '-')}-{hashlib.sha1(run_id.encode()).hexdigest()[:6]}"
     doc = {
         "revisionId": revision_id,
@@ -256,8 +264,7 @@ class DreamRunner:
         before = snapshot_sections(self._aid)
         if _editable_chars(before) == 0:
             err = "dream_no_memory"
-            state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed",
-                                "error": err, "at": _now()}
+            state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed", "error": err, "at": _now()}
             _write_state(self._aid, state)
             return {"ok": False, "error": err}
         before_hash = _hash_sections(before)
@@ -273,23 +280,26 @@ class DreamRunner:
             if not verdict.get("sufficient_compression", True):
                 # 压缩不足：回炉重 compose 一次（软目标），再校验一次
                 composed = (
-                    llm(prompts.build_dream_compose(f"【上一稿压缩不足，请更激进地聚合：】\n{optimized}"))
-                    or ""
+                    llm(prompts.build_dream_compose(f"【上一稿压缩不足，请更激进地聚合：】\n{optimized}")) or ""
                 ).strip()
                 verdict = self._verify(prompts, before, composed)
             if not (verdict.get("semantic_ok") and verdict.get("provenance_ok")):
                 raise RuntimeError(f"dream_verify_failed: {verdict.get('feedback') or '语义/溯源校验未通过'}")
         except Exception as e:
-            state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed",
-                                "error": str(e), "at": _now()}
+            state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed", "error": str(e), "at": _now()}
             _write_state(self._aid, state)
             return {"ok": False, "error": str(e)}
 
         # 快照对比：Dream 期间记忆被改 → 放弃
         current = snapshot_sections(self._aid)
         if _hash_sections(current) != before_hash:
-            state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed",
-                                "error": "memory_changed", "at": _now()}
+            state["lastRun"] = {
+                "runId": run_id,
+                "trigger": trigger,
+                "status": "failed",
+                "error": "memory_changed",
+                "at": _now(),
+            }
             _write_state(self._aid, state)
             return {"ok": False, "error": "memory_changed"}
 
@@ -303,8 +313,10 @@ class DreamRunner:
 
         revision_id = create_revision(self._aid, run_id=run_id, trigger=trigger, before=before)
         # pending-apply：崩溃恢复标记
-        _write(self._aid / "memory" / "dream" / "pending-apply.json",
-               json.dumps({"revisionId": revision_id, "after": after.to_json()}, ensure_ascii=False))
+        _write(
+            self._aid / "memory" / "dream" / "pending-apply.json",
+            json.dumps({"revisionId": revision_id, "after": after.to_json()}, ensure_ascii=False),
+        )
         apply_sections(self._aid, after)
         try:
             (self._aid / "memory" / "dream" / "pending-apply.json").unlink()
@@ -329,8 +341,9 @@ class DreamRunner:
             return {}
 
     @staticmethod
-    def _finalize(state: Dict, run_id: str, trigger: str, status: str, revision_id: str,
-                  before_hash: str, after_hash: str) -> Dict:
+    def _finalize(
+        state: Dict, run_id: str, trigger: str, status: str, revision_id: str, before_hash: str, after_hash: str
+    ) -> Dict:
         state["lastRun"] = {
             "runId": run_id,
             "trigger": trigger,
@@ -378,8 +391,13 @@ class DreamRunner:
             )
             apply_sections(self._aid, before)
             state = _read_state(self._aid)
-            state["lastRun"] = {"runId": f"restore-{revision_id[:16]}", "trigger": "restore",
-                                "status": "succeeded", "revisionId": revision_id, "at": _now()}
+            state["lastRun"] = {
+                "runId": f"restore-{revision_id[:16]}",
+                "trigger": "restore",
+                "status": "succeeded",
+                "revisionId": revision_id,
+                "at": _now(),
+            }
             _write_state(self._aid, state)
             return {"ok": True, "restored": revision_id}
         finally:

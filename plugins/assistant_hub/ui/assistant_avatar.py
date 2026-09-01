@@ -9,6 +9,7 @@
 2. 无头像文件：纯色 + 白色缩写（与 _SquareAvatar 同种风格），同时可作为
    fallback avatar，在左侧列表 / TabPanel 投影里都能复用。
 """
+
 from __future__ import annotations
 
 from pathlib import Path

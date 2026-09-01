@@ -10,6 +10,7 @@
 manager 获取：优先 sys.modules["assistant_hub_manager"]（进程内单例），
 兜底按路径加载（与 hooks/inject_assistant.py 同一模式）。
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -29,9 +30,7 @@ def _load_manager_module():
     mod = sys.modules.get(_MANAGER_MODULE_NAME)
     if mod is not None:
         return mod
-    spec = importlib.util.spec_from_file_location(
-        _MANAGER_MODULE_NAME, str(_PLUGIN_ROOT / "assistant_manager.py")
-    )
+    spec = importlib.util.spec_from_file_location(_MANAGER_MODULE_NAME, str(_PLUGIN_ROOT / "assistant_manager.py"))
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
@@ -97,15 +96,10 @@ _RECALL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "recall_experience",
-        "description": (
-            "回忆你的工作经验。无参调用返回经验索引（分类列表）；"
-            "带 category 返回该分类下的全部经验条目。"
-        ),
+        "description": ("回忆你的工作经验。无参调用返回经验索引（分类列表）；带 category 返回该分类下的全部经验条目。"),
         "parameters": {
             "type": "object",
-            "properties": {
-                "category": {"type": "string", "description": "经验分类名（不传返回索引）"}
-            },
+            "properties": {"category": {"type": "string", "description": "经验分类名（不传返回索引）"}},
         },
     },
 }
@@ -114,10 +108,7 @@ _RECORD_SCHEMA = {
     "type": "function",
     "function": {
         "name": "record_experience",
-        "description": (
-            "记录一条工作经验（用户偏好、有效工作流、踩坑教训等），"
-            "供未来的自己做类似事情时回忆。"
-        ),
+        "description": ("记录一条工作经验（用户偏好、有效工作流、踩坑教训等），供未来的自己做类似事情时回忆。"),
         "parameters": {
             "type": "object",
             "properties": {
@@ -133,14 +124,24 @@ _RECORD_SCHEMA = {
 def register(registry):
     """工具插件化注册入口（PluginToolLoader 调用）"""
     registry.register(
-        "recall_experience", _RECALL_SCHEMA, impl=_recall_impl,
-        danger="safe", icon="memory", cn_name="回忆经验",
-        group=_GROUP, description="回忆助手的工作经验（索引/分类）",
+        "recall_experience",
+        _RECALL_SCHEMA,
+        impl=_recall_impl,
+        danger="safe",
+        icon="memory",
+        cn_name="回忆经验",
+        group=_GROUP,
+        description="回忆助手的工作经验（索引/分类）",
         aliases=["回忆经验", "经验"],
     )
     registry.register(
-        "record_experience", _RECORD_SCHEMA, impl=_record_impl,
-        danger="safe", icon="memory", cn_name="记录经验",
-        group=_GROUP, description="记录一条工作经验到经验库",
+        "record_experience",
+        _RECORD_SCHEMA,
+        impl=_record_impl,
+        danger="safe",
+        icon="memory",
+        cn_name="记录经验",
+        group=_GROUP,
+        description="记录一条工作经验到经验库",
         aliases=["记录经验", "记经验"],
     )

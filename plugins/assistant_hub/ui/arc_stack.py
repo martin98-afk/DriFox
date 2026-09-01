@@ -8,6 +8,7 @@
 - 末尾「+」虚线圆卡：新建助手
 - 卡片下方操作行由宿主（assistant_card）自行布局，本组件只发信号
 """
+
 from __future__ import annotations
 
 import math
@@ -30,17 +31,17 @@ from app.utils.design_tokens import Colors, Shadows
 from .assistant_avatar import RoundAvatar
 
 # ── 几何常量（single source of truth，对齐原版 CSS 变量）──
-CARD_SIZE = 62          # 圆卡直径
-ARC_RADIUS = 340        # 扇形弧半径（原版 transform-origin center 340px）
-ARC_SPREAD_DEG = 4.0    # 收起态相邻卡圆心角
-SPREAD_STEP = 70        # 展开态相邻卡水平间距
-REST_GAP = 14           # 卡片底部留白
-NAME_AREA = 22          # 名字行高
-ARC_HEADROOM = 32       # 顶部弧度余量（收起态上摆溢出）
-LIFT_HOVER = 6          # 单卡悬停上浮
+CARD_SIZE = 62  # 圆卡直径
+ARC_RADIUS = 340  # 扇形弧半径（原版 transform-origin center 340px）
+ARC_SPREAD_DEG = 4.0  # 收起态相邻卡圆心角
+SPREAD_STEP = 70  # 展开态相邻卡水平间距
+REST_GAP = 14  # 卡片底部留白
+NAME_AREA = 22  # 名字行高
+ARC_HEADROOM = 32  # 顶部弧度余量（收起态上摆溢出）
+LIFT_HOVER = 6  # 单卡悬停上浮
 CONTAINER_H = ARC_HEADROOM + CARD_SIZE + REST_GAP + NAME_AREA
 
-_DUR_EXPAND = 800       # 展开动画时长（原版 0.8s ease-out）
+_DUR_EXPAND = 800  # 展开动画时长（原版 0.8s ease-out）
 _DUR_COLLAPSE = 600
 Anim = QPropertyAnimation
 
@@ -59,8 +60,9 @@ class _AgentCard(QWidget):
         self._hover = False
         self._lift = 0.0
         self._scale = 1.0
-        self._avatar = RoundAvatar(size=CARD_SIZE - 6, text=name, color=color,
-                                   image_path=image_path or None, parent=self)
+        self._avatar = RoundAvatar(
+            size=CARD_SIZE - 6, text=name, color=color, image_path=image_path or None, parent=self
+        )
         self._avatar.move(3, 3)
         self._avatar.show()
         self.setFixedSize(CARD_SIZE, CARD_SIZE + NAME_AREA)
@@ -218,8 +220,7 @@ class ArcCardStack(QWidget):
             c.deleteLater()
         self._cards.clear()
         for it in items:
-            card = _AgentCard(it["id"], it["name"], it.get("color", "#7C3AED"),
-                              it.get("avatar_path", ""), self)
+            card = _AgentCard(it["id"], it["name"], it.get("color", "#7C3AED"), it.get("avatar_path", ""), self)
             card.clicked.connect(lambda aid=it["id"]: self._on_card_clicked(aid))
             card.installEventFilter(self)
             self._cards.append(card)

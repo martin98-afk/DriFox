@@ -22,6 +22,7 @@ AssistantManager 与 AgentManager 解耦：
 
 存储根目录：<app_data_dir>/assistant_hub/<assistant_id>/
 """
+
 from __future__ import annotations
 
 import io
@@ -39,6 +40,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from loguru import logger
+
 
 # 复用项目里 yaml 加载的兼容写法：safe_load + 失败兜底 {}
 def _safe_yaml_load(text: str) -> Dict[str, Any]:
@@ -75,10 +77,10 @@ class Assistant:
 
     id: str
     name: str = ""
-    yuan: str = "build"      # 体系（openhanako 概念：DriFox 这里映射为系统智能体名）
-    color: str = "#7C3AED"   # 头像主色
-    avatar_path: str = ""    # 相对 avatars/ 的文件路径，空表示内置色块
-    primary: bool = False    # 是否主助手
+    yuan: str = "build"  # 体系（openhanako 概念：DriFox 这里映射为系统智能体名）
+    color: str = "#7C3AED"  # 头像主色
+    avatar_path: str = ""  # 相对 avatars/ 的文件路径，空表示内置色块
+    primary: bool = False  # 是否主助手
     order: int = 0
     # assistant 派生 subagent 的 tool 白名单；空 list 表示继承 yuan
     skills_whitelist: List[str] = field(default_factory=list)
@@ -191,7 +193,7 @@ class Assistant:
 class AssistantContext:
     """助手运行时上下文（单实例，随当前活跃助手可变）"""
 
-    pinned: List[Tuple[str, str]] = field(default_factory=list)   # (pin_id, content)
+    pinned: List[Tuple[str, str]] = field(default_factory=list)  # (pin_id, content)
     today: str = ""
     longterm: str = ""
 
@@ -773,9 +775,7 @@ class AssistantManager:
     @staticmethod
     def _dump_pinned(items: List[Tuple[str, str]]) -> str:
         lines = ["# 置顶记忆", ""]
-        lines.append(
-            "本文件的内容会始终注入到助手的 system prompt，永不衰减或被 Dream 覆盖。"
-        )
+        lines.append("本文件的内容会始终注入到助手的 system prompt，永不衰减或被 Dream 覆盖。")
         lines.append("可以直接编辑保存；在 UI 中也可以一条条增删。")
         lines.append("")
         for pid, content in items:
@@ -1179,8 +1179,11 @@ class AssistantManager:
         try:
             if not light:
                 # 日批顺序铁律：先蒸馏昨日草稿，再增量编译今日
-                prev_today = (aid_dir / "memory" / "today.md").read_text(encoding="utf-8") if (
-                    aid_dir / "memory" / "today.md").exists() else ""
+                prev_today = (
+                    (aid_dir / "memory" / "today.md").read_text(encoding="utf-8")
+                    if (aid_dir / "memory" / "today.md").exists()
+                    else ""
+                )
                 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
                 result["steps"]["compile_daily"] = cm.compile_daily(aid_dir, prev_today, yesterday, llm=llm)
             result["steps"]["compile_today"] = cm.compile_today(aid_dir, llm=llm)
@@ -1202,9 +1205,7 @@ class AssistantManager:
     # ── Dream ──
 
     def dream_runner(self, aid: str):
-        return self._core_dream().DreamRunner(
-            self._assistant_dir(aid), llm=self._utility_llm(aid)
-        )
+        return self._core_dream().DreamRunner(self._assistant_dir(aid), llm=self._utility_llm(aid))
 
     def dream_start(self, aid: str, trigger: str = "manual") -> Dict[str, Any]:
         return self.dream_runner(aid).start(trigger)

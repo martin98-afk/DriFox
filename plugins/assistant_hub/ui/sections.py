@@ -7,6 +7,7 @@ MemorySection（记忆传送带）→ ExperienceSection（经验）→ SkillsSec
 视觉基调（对齐原版纸张风）：细边框卡 + 12px 圆角 + 小字 hint + 大量留白；
 去 emoji，统一 FluentIcon / 文字标签。
 """
+
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional
@@ -38,17 +39,13 @@ from assistant_hub_manager import AssistantManager
 def _hint(text: str, size: int = 10) -> QLabel:
     lbl = QLabel(text)
     lbl.setWordWrap(True)
-    lbl.setStyleSheet(
-        f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(size)};"
-    )
+    lbl.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(size)};")
     return lbl
 
 
 def _title_label(text: str, size: int = 12) -> QLabel:
     lbl = QLabel(text)
-    lbl.setStyleSheet(
-        f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(size)}; font-weight: 600;"
-    )
+    lbl.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(size)}; font-weight: 600;")
     return lbl
 
 
@@ -285,9 +282,13 @@ class AboutSection(_Section):
         self._identity = QTextEdit()
         self._identity.setFixedHeight(72)
         self._identity.setStyleSheet(_editor_style())
-        self._identity.setPlaceholderText("# {{agentName}}\n\n{{userName}}的个人助手。感性与理性兼备，既有温度也有判断力。")
+        self._identity.setPlaceholderText(
+            "# {{agentName}}\n\n{{userName}}的个人助手。感性与理性兼备，既有温度也有判断力。"
+        )
         self.body().addWidget(self._identity)
-        self.body().addWidget(_hint("简短描述助手是谁、擅长什么。其他助手通过这段文字认识 Ta；支持 {{userName}} / {{agentName}} 变量。"))
+        self.body().addWidget(
+            _hint("简短描述助手是谁、擅长什么。其他助手通过这段文字认识 Ta；支持 {{userName}} / {{agentName}} 变量。")
+        )
         # AGENTS.md
         self.body().addWidget(_title_label("AGENTS.md", 11))
         self._agents_md = QTextEdit()

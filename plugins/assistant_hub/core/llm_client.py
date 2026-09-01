@@ -8,6 +8,7 @@
 - 空 API_KEY（免 key 匿名端点）不带 Authorization 头。
 - 任何失败抛 LLMUnavailableError，由调用方（ticker/dream/experience）静默降级。
 """
+
 from __future__ import annotations
 
 import json
@@ -83,9 +84,7 @@ def chat_once(
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
-    req = urllib.request.Request(
-        url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST"
-    )
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read())
