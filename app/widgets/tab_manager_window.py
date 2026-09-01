@@ -639,6 +639,8 @@ class TabManagerWindow(FramelessWindow):
         self.workbench_panel.diff_requested.connect(self._open_workbench_diff)
         # 切到「历史会话」页时刷新当前活跃窗口的历史列表（面板隐藏期间 isVisible 跳过的补刷）
         self.workbench_panel.history_tab_shown.connect(self._on_workbench_history_shown)
+        # 🆕 页签按对话窗口独立记忆：页签变化 → 写入当前活跃窗口；切回窗口时恢复
+        self.workbench_panel.current_tab_changed.connect(self._remember_workbench_tab)
         self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
         # 主题 / 字号刷新：与桌宠同路径注册
         theme_manager.register_refresh_target(self.workbench_panel)
@@ -977,6 +979,22 @@ class TabManagerWindow(FramelessWindow):
     def _hide_workbench(self) -> None:
         """工作台关闭按钮：直接隐藏（实例保留，再次开启零重建）"""
         self.set_workbench_visible(False)
+
+    def _remember_workbench_tab(self, index: int) -> None:
+        """页签变化回调：把当前页签记到当前活跃对话窗口（按窗口独立记忆）
+
+        工作台是宿主级单例，页签状态原先全局共享——标签页 A 停在「记忆」页，
+        切到标签页 B 也跟着停在「记忆」页。现在每次页签变化都写入活跃窗口的
+        ``_workbench_tab_memory``，切换对话窗口时由 _on_tab_changed 恢复该窗口
+        自己的记忆。无活跃窗口/面板未挂载时静默跳过（信号驱动，零轮询）。
+        """
+        win = self.get_current_window()
+        if win is None:
+            return
+        try:
+            win._workbench_tab_memory = int(index)
+        except Exception:
+            pass
 
     def refresh_workbench(self) -> None:
         """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
@@ -2963,6 +2981,16 @@ class TabManagerWindow(FramelessWindow):
             # 切 tab 时工作台跟随激活窗：重定位 + 刷新产物/任务/项目数据
             if getattr(self, "workbench_panel", None) is not None and self.is_workbench_visible():
                 self.refresh_workbench()
+                # 🆕 恢复该窗口上次停留的工作台页签（refresh_workbench 可能因
+                # 历史页保持/插件页 reconcile 改变当前页，故恢复放在其之后）。
+                # 仅处理窗口显式记忆过的页签；未记忆过的窗口保持现状不跳页。
+                saved = getattr(win, "_workbench_tab_memory", None)
+                if saved is not None:
+                    try:
+                        if self.workbench_panel.current_tab() != saved:
+                            self.workbench_panel.set_current_tab(saved)
+                    except RuntimeError:
+                        pass
 
     def _on_tab_close_requested(self, index: int):
         """标签关闭按钮回调：按索引关闭单个窗口"""

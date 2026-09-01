@@ -714,6 +714,8 @@ class WorkbenchPanel(QWidget):
     # 切到「历史会话」页时发射：宿主窗口此时刷新历史列表数据（面板隐藏期间
     # isVisible()=False 会被 refresh_history_card_if_visible 跳过，靠本信号补刷）
     history_tab_shown = pyqtSignal()
+    # 当前页签变化（含程序化切换）：宿主用于按对话窗口独立记忆页签
+    current_tab_changed = pyqtSignal(int)
 
     TAB_WORKTREE, TAB_MEMORY, TAB_ARTIFACTS, TAB_HISTORY = 0, 1, 2, 3
 
@@ -1293,6 +1295,8 @@ class WorkbenchPanel(QWidget):
             self._memory_content.set_active_tab("docs", refresh=False)
         if index == self.TAB_HISTORY:
             self.history_tab_shown.emit()
+        # 通知宿主记录（当前页签按对话窗口独立记忆，见 TabManagerWindow 回调）
+        self.current_tab_changed.emit(index)
 
     def current_tab(self) -> int:
         return self._stack.currentIndex()

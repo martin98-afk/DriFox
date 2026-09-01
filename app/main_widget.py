@@ -2440,6 +2440,17 @@ class OpenAIChatToolWindow(ToolWindow):
         # 判断是否为复制/分支窗口（__init__ 中通过 source_window 参数设置）
         is_duplicate = getattr(self, "_is_duplicate_window", False)
 
+        # 🐛 修复（启动时工作目录未定义）：workdir 同步提前到会话创建之前执行。
+        # 原先非复制窗口延迟 2000ms，而会话创建 QTimer(0) 先跑：0~2s 窗口内
+        # _current_workdir 缓存为空 + frozen 环境 initial_workdir=None，欢迎卡/
+        # 工作台/插件 UI 读 project_root 全拿到空串（"workdir unset" 警告），
+        # 手动切换项目后才恢复。_sync_working_directory 在团队/项目切换路径本就
+        # 被同步调用（内部全量判空，安全性已验证）；singleShot(0) 在下一轮
+        # 事件循环执行，不阻塞首帧绘制。singleShot 同延迟按注册顺序执行，
+        # 故此调用必须先于下方会话加载定时器注册。
+        if not is_duplicate:
+            QTimer.singleShot(0, lambda: self._safe_timer_call(self._sync_working_directory))
+
         # 如果有分支数据，延迟调用分支会话处理，避免与 _restore_latest_or_create_session 冲突
         # 注：_load_agent_list 由 _create_new_session / _apply_branch_or_create_session 内部调用，此处不需要重复触发
         if getattr(self, "_target_session_record", None) is not None:
@@ -2475,8 +2486,8 @@ class OpenAIChatToolWindow(ToolWindow):
             # _sync_working_directory 文件系统检测（20-50ms），
             # 均匀分散到 1.5s-2.5s 窗口内，避免同时爆发导致 UI 冻结
             QTimer.singleShot(1500, lambda: self._safe_timer_call(self._load_model_configs))
-            # 初始化当前项目的工作目录
-            QTimer.singleShot(2000, lambda: self._safe_timer_call(self._sync_working_directory))
+            # 工作目录同步已提前到上方 QTimer(0)（先于会话创建，修复启动时
+            # workdir 未定义），此处不再重复调度。
             # 初始化完成后解除保护
             QTimer.singleShot(2500, lambda: self._safe_timer_call(self._on_initialization_complete))
         self._connect_opacity_signal()
@@ -10604,6 +10615,11 @@ class OpenAIChatToolWindow(ToolWindow):
         session = self.session_manager.get_current_session()
         if not session:
             self._clear_chat_area()
+            # 🐛 修复（产物区刷新不及时）：会话显示出口同步重拉工作台产物/任务，
+            # 否则切换会话后产物区仍显示上一会话的文件记录。
+            # _push_workbench_updates 自带活跃窗口隔离（非活跃窗口跳过）与
+            # 面板不可见零开销（refresh_workbench 首行 return），可安全调用。
+            self._push_workbench_updates(refresh_artifacts=True)
             return
 
         self.title_edit.setText(session.topic_summary or session.name or "新对话")
@@ -10620,6 +10636,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._scroll_to_bottom(sticky_ms=900)
             # 滚动完成后同步时间线节点到最后一个
             QTimer.singleShot(100, self._sync_node_preview_to_last)
+            # 🐛 修复（产物区刷新不及时）：缓存恢复也是一次会话切换，同步刷新工作台
+            self._push_workbench_updates(refresh_artifacts=True)
             return
 
         self._clear_chat_area()
@@ -10640,11 +10658,17 @@ class OpenAIChatToolWindow(ToolWindow):
             # _switch_to_session_by_id 等全部调用方，无需在每处重复失效。
             self._invalidate_welcome_card()
             self._show_initial_welcome()
+            # 🐛 修复（产物区刷新不及时）：切到空会话也需刷新工作台（清掉上一会话产物）
+            self._push_workbench_updates(refresh_artifacts=True)
             return
 
         self._load_message_batch(initial=True)
         # 同步 batch 结构：确保 _batch_cards 和 _message_index 与布局一致
         self._sync_batch_structures()
+        # 🐛 修复（产物区刷新不及时）：会话显示完成的统一出口，按新 session_id
+        # 重拉工作台产物/任务/项目数据（_load_session_from_record / _create_new_session /
+        # _switch_to_session_by_id 等所有加载路径都经过本方法，无需逐处补刷）
+        self._push_workbench_updates(refresh_artifacts=True)
 
     def _show_initial_welcome(self):
         """仅在UI上显示欢迎卡片，不改动Session数据
@@ -13318,6 +13342,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(session_project)
+        # 🐛 修复（跨项目会话加载后 workdir 不跟随）：按会话所属项目同步工作
+        # 目录（实例缓存 → DB → 临时目录），同时刷新分支标签并推送工作台
+        # 项目/工作树数据。否则加载其他项目的历史会话后，工作树页仍指向
+        # 加载前项目的工作目录。
+        self._sync_working_directory()
 
         # 🛡️ F4：加载历史会话后同步窗口团队标记，防止普通/团队会话互相污染。
         # 判定依据：team_run_id 非空 = 团队会话（权威字段；普通会话恒为空串）。
