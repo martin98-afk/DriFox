@@ -467,6 +467,7 @@ class AssistantManager:
             pass
         if not self._assistants:
             self._seed_defaults()
+        self._restore_active_id()
         self._loaded = True
         logger.info(f"[assistant_hub] 已加载 {len(self._assistants)} 个助手")
 
@@ -495,7 +496,6 @@ class AssistantManager:
                 if primary:
                     a.primary = True
                     self.update(a)
-                    self._active_id = a.id
                     try:
                         self.set_active(a.id)
                     except Exception:
@@ -564,8 +564,9 @@ class AssistantManager:
                 shutil.rmtree(path)
         except Exception as e:
             logger.warning(f"[assistant_hub] 删除 {path} 失败: {e}")
-        if self._active_id == aid:
-            self._active_id = next(iter(self._assistants), "")
+        if AssistantManager._active_id == aid:
+            AssistantManager._active_id = next(iter(self._assistants), "")
+            self._save_active_id(AssistantManager._active_id)
         logger.info(f"[assistant_hub] 删除助手: {aid}")
         return True
 
@@ -616,6 +617,31 @@ class AssistantManager:
 
     # ── 活跃助手 ──
 
+    def _active_file(self) -> Path:
+        return self._root / "active.json"
+
+    def _save_active_id(self, aid: str) -> None:
+        """持久化 active_id（空串=明确取消激活；无文件=从未选择，启动回落主助手）"""
+        try:
+            self._ensure_dir(self._root)
+            self._active_file().write_text(json.dumps({"active_id": aid}, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 保存 active_id 失败: {e}")
+
+    def _restore_active_id(self) -> None:
+        """启动恢复 active_id：文件存在则尊重记录（含明确空值）；缺失时回落主助手"""
+        try:
+            path = self._active_file()
+            if path.exists():
+                aid = str(json.loads(path.read_text(encoding="utf-8")).get("active_id") or "")
+                if aid and self.has(aid):
+                    AssistantManager._active_id = aid
+                return
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 读取 active_id 失败: {e}")
+        primary = next((a.id for a in self._assistants.values() if a.primary), "")
+        AssistantManager._active_id = primary or next(iter(self._assistants), "")
+
     @classmethod
     def active_id(cls) -> str:
         return cls._active_id
@@ -635,14 +661,16 @@ class AssistantManager:
         cls._active_id = aid
         if changed:
             cls._invalidate_session_prompt_caches()
+        mgr._save_active_id(aid)
         return True
 
     @classmethod
     def clear_active(cls) -> None:
-        """取消激活助手（回到默认 build 智能体身份）"""
+        """取消激活助手（回到默认 build 智能体身份）；写空串使重启后保持未激活"""
         if cls._active_id:
             cls._active_id = ""
             cls._invalidate_session_prompt_caches()
+        cls.get_instance()._save_active_id("")
 
     @staticmethod
     def _invalidate_session_prompt_caches() -> None:
