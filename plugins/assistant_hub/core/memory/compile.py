@@ -238,7 +238,7 @@ def compile_facts(aid_dir: Path, *, llm: Callable) -> Dict:
     """重要事实增量编译（输入：今日+近 3 日 daily 的对话尾部样本）。"""
     facts_path = memory_dir(aid_dir) / "facts.md"
     existing = _read(facts_path)
-    today = logical_day()
+    today = logical_today()
     conn = _core("session_store").connect_ro()
     if conn is None:
         return {"ok": False, "error": "sessions.db 不可用"}

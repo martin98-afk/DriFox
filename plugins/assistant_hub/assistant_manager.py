@@ -1305,11 +1305,11 @@ class AssistantManager:
 
     # ── Dream ──
 
-    def dream_runner(self, aid: str):
-        return self._core_dream().DreamRunner(self._assistant_dir(aid), llm=self._utility_llm(aid))
+    def dream_runner(self, aid: str, progress=None):
+        return self._core_dream().DreamRunner(self._assistant_dir(aid), llm=self._utility_llm(aid), progress=progress)
 
-    def dream_start(self, aid: str, trigger: str = "manual") -> Dict[str, Any]:
-        return self.dream_runner(aid).start(trigger)
+    def dream_start(self, aid: str, trigger: str = "manual", progress=None) -> Dict[str, Any]:
+        return self.dream_runner(aid, progress=progress).start(trigger)
 
     def dream_status(self, aid: str) -> Dict[str, Any]:
         return self.dream_runner(aid).status()

@@ -190,7 +190,7 @@ class _CenterFlowLayout(QLayout):
         return self._items.pop(i) if 0 <= i < len(self._items) else None
 
     def expandingDirections(self) -> Qt.Orientations:  # noqa: N802
-        return Qt.Orientations(Qt.NoOrientation)
+        return Qt.Orientations()
 
     def hasHeightForWidth(self) -> bool:  # noqa: N802
         return True
@@ -482,10 +482,65 @@ class _PersonaChip(QFrame):
         self.clicked.emit()
 
 
+class _NewPersonaChip(QFrame):
+    """「新建人格」卡：虚线边框 + 加号，点击跳回对话拉起 persona-creator。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("personaChip")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(140, 170)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 14, 10, 12)
+        v.setSpacing(6)
+        v.setAlignment(Qt.AlignHCenter)
+        plus = QLabel("+")
+        plus.setAlignment(Qt.AlignCenter)
+        plus.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(30)};"
+        )
+        v.addWidget(plus, 0, Qt.AlignHCenter)
+        lbl = QLabel("新建人格")
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
+        )
+        v.addWidget(lbl)
+        hint = QLabel("对话向导创建")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        v.addWidget(hint)
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        self.setStyleSheet(
+            f"""
+            QFrame#personaChip {{
+                background: transparent;
+                border: 1.5px dashed {Colors.BORDER};
+                border-radius: 12px;
+            }}
+            QFrame#personaChip:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
+            QFrame#personaChip QLabel {{ background: transparent; border: none; }}
+        """
+        )
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        self.clicked.emit()
+
+
 class AboutSection(_Section):
     """人格选择（chips，含「纯净助手」）。人格只读，只能切换；新增人格走 persona-creator 技能。"""
 
     personaChangeRequested = pyqtSignal(str)
+    createPersonaRequested = pyqtSignal()
 
     def __init__(self, personas: List[dict], current_pid: str, parent=None):
         super().__init__("关于 Ta", parent)
@@ -523,6 +578,9 @@ class AboutSection(_Section):
             chip.clicked.connect(lambda pid=p["id"]: self.personaChangeRequested.emit(pid))
             self._chips_row.addWidget(chip)
             self._chips.append(chip)
+        new_chip = _NewPersonaChip()
+        new_chip.clicked.connect(self.createPersonaRequested.emit)
+        self._chips_row.addWidget(new_chip)
         self.set_persona(self._current_pid)
 
 

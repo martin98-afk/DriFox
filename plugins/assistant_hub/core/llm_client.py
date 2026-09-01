@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import urllib.request
 from typing import Any, Dict, List, Optional
 
@@ -61,18 +62,20 @@ def chat_once(
     *,
     model: str = "",
     temperature: float = 0.3,
-    max_tokens: int = 2000,
-    timeout: int = 60,
+    max_tokens: int = 4000,
+    timeout: int = 120,
     base_url: str = "",
     api_key: str = "",
     config_id: str = "",
     model_config: Optional[Dict[str, Any]] = None,
+    retries: int = 1,
 ) -> str:
     """单轮补全：返回助手文本；失败抛 LLMUnavailableError。
 
     config_id：指定 llm_saved_providers 键（空 = 跟随全局）。
     model_config：完整配置覆盖 dict（含 API_URL/模型名称，cron-tasks 同款
     model_config_override 模式），优先级高于 config_id。
+    retries：空响应自动重试次数（瞬时空回包/网关吞 content 的容错）。
     """
     if isinstance(model_config, dict) and model_config.get("API_URL"):
         cfg = {
@@ -96,15 +99,27 @@ def chat_once(
     if key:
         headers["Authorization"] = f"Bearer {key}"
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
-        content = (data["choices"][0]["message"].get("content") or "").strip()
-    except LLMUnavailableError:
-        raise
-    except Exception as e:
-        logger.warning(f"[assistant_hub.llm] 请求失败: {e}")
-        raise LLMUnavailableError(f"LLM 请求失败: {e}") from e
-    if not content:
-        raise LLMUnavailableError("LLM 返回空内容")
-    return content
+    finish_reason = ""
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read())
+            choice = (data.get("choices") or [{}])[0]
+            message = choice.get("message") or {}
+            content = (message.get("content") or "").strip()
+            finish_reason = choice.get("finish_reason") or ""
+            if content:
+                return content
+            # 空响应：reasoning 模型可能把额度全耗在思考段，或网关吞 content；重试
+            logger.warning(
+                f"[assistant_hub.llm] 空响应 (finish_reason={finish_reason!r}, "
+                f"has_reasoning={bool(message.get('reasoning_content'))})，重试 {attempt + 1}/{retries + 1}"
+            )
+        except LLMUnavailableError:
+            raise
+        except Exception as e:
+            logger.warning(f"[assistant_hub.llm] 请求失败: {e}")
+            if attempt >= retries:
+                raise LLMUnavailableError(f"LLM 请求失败: {e}") from e
+            time.sleep(2)
+    raise LLMUnavailableError(f"LLM 返回空内容 (finish_reason={finish_reason!r})")

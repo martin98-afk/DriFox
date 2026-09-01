@@ -242,9 +242,17 @@ def list_revisions(aid_dir: Path) -> List[Dict]:
 
 
 class DreamRunner:
-    def __init__(self, aid_dir: Path, *, llm: Callable):
+    def __init__(self, aid_dir: Path, *, llm: Callable, progress: Optional[Callable] = None):
         self._aid = Path(aid_dir)
         self._llm = llm
+        self._progress = progress  # progress(step: int, total: int, name: str)
+
+    def _report(self, step: int, total: int, name: str) -> None:
+        if self._progress:
+            try:
+                self._progress(step, total, name)
+            except Exception:
+                pass
 
     # ── 主流程 ──
     def start(self, trigger: str, logical_date: str = "") -> Dict:
@@ -270,12 +278,18 @@ class DreamRunner:
         before_hash = _hash_sections(before)
 
         prompts = _prompts()
+        total = 5
         try:
             llm = self._llm
+            self._report(1, total, "原子化")
             units = (llm(prompts.build_dream_atomize(_sections_text(before))) or "").strip()
+            self._report(2, total, "去重")
             deduped = (llm(prompts.build_dream_dedupe(units)) or "").strip()
+            self._report(3, total, "优化")
             optimized = (llm(prompts.build_dream_optimize(deduped)) or "").strip()
+            self._report(4, total, "合成")
             composed = (llm(prompts.build_dream_compose(optimized)) or "").strip()
+            self._report(5, total, "校验")
             verdict = self._verify(prompts, before, composed)
             if not verdict.get("sufficient_compression", True):
                 # 压缩不足：回炉重 compose 一次（软目标），再校验一次

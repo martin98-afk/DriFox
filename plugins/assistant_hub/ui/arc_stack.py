@@ -25,7 +25,7 @@ from PyQt5.QtCore import (
     pyqtSignal,
 )
 from PyQt5.QtGui import QColor, QPainter, QPen
-from PyQt5.QtWidgets import QWidget
+from PyQt5.QtWidgets import QLabel, QWidget
 
 from app.utils.design_tokens import Colors, Shadows
 
@@ -67,6 +67,16 @@ class _AgentCard(QWidget):
         )
         self._avatar.move(3, 3)
         self._avatar.show()
+        # 主助手徽章：独立子控件（z 序高于头像，不被遮挡），set_primary 时显示
+        self._badge = QLabel("★", self)
+        self._badge.setAlignment(Qt.AlignCenter)
+        self._badge.setFixedSize(16, 16)
+        self._badge.setStyleSheet(
+            f"QLabel {{ background: {Colors.TEXT_ACCENT}; color: #FFFFFF;"
+            f"border: 2px solid {Colors.CARD_BG_SOLID}; border-radius: 8px;"
+            f"font-size: 9px; font-weight: bold; }}"
+        )
+        self._badge.hide()
         self.setFixedSize(CARD_SIZE, CARD_SIZE + NAME_AREA)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -85,7 +95,20 @@ class _AgentCard(QWidget):
     def set_primary(self, on: bool) -> None:
         if self._primary != on:
             self._primary = on
+            if on:
+                self._badge.show()
+                self._badge.raise_()
+            else:
+                self._badge.hide()
+            self._update_badge_geom()
             self.update()
+
+    def _update_badge_geom(self) -> None:
+        """徽章几何：底部中央，随 scale（绕圆心）与 lift 动画同步移动。"""
+        size = 16
+        cx = CARD_SIZE / 2
+        cy = CARD_SIZE / 2 + (CARD_SIZE - 4 - CARD_SIZE / 2) * self._scale - self._lift
+        self._badge.setGeometry(round(cx - size / 2), round(cy - size / 2), size, size)
 
     def set_avatar_image(self, image_path: Optional[str]) -> None:
         """换人格头像后轻量刷新单卡（不重建堆叠，保留动画状态）。"""
@@ -98,18 +121,23 @@ class _AgentCard(QWidget):
     #    避免 paintEvent 的 translate/scale 只作用于自绘部分、头像掉队）──
     def _apply_scale(self, v: float) -> None:
         self._scale = v
-        # 围绕圆心缩放头像，与 paintEvent 的 scale 变换保持一致
+        # 围绕圆心缩放头像，与 paintEvent 的 scale 变换保持一致。
+        # ⚠ 尺寸必须取偶：奇数尺寸中心落在 x.5，round 后偏离圆心 0.5px（视觉显歪）
         av = CARD_SIZE - 6
-        size = av * v
+        size = int(round(av * v))
+        if size % 2 == 1:
+            size -= 1
         cx = cy = CARD_SIZE / 2
-        x = cx - size / 2
-        y = cy - size / 2 - round(self._lift)
-        self._avatar.setGeometry(round(x), round(y), round(size), round(size))
+        x = round(cx - size / 2)
+        y = round(cy - size / 2 - round(self._lift))
+        self._avatar.setGeometry(x, y, size, size)
+        self._update_badge_geom()
         self.update()
 
     def _apply_lift(self, v: float) -> None:
         self._lift = v
         self._avatar.move(3, 3 - round(v))
+        self._update_badge_geom()
         self.update()
 
     def _animate_scale(self, target: float) -> None:
@@ -176,20 +204,6 @@ class _AgentCard(QWidget):
         # ⚠ QColor 不认 "rgba(...)" 字符串（无效色不报错、绘制成黑），必须经 qcolor_from 解析
         p.setBrush(qcolor_from(Colors.CARD_BG.format(alpha=250)))
         p.drawEllipse(rect)
-        # 主助手徽章：底部中央 accent 圆徽 + 白色小星（替代裸圆点）
-        if self._primary:
-            cx = CARD_SIZE / 2
-            cy = CARD_SIZE - 4.0
-            r = 8.0
-            p.setPen(QPen(qcolor_from(Colors.CARD_BG_SOLID), 2))
-            p.setBrush(QColor(Colors.TEXT_ACCENT))
-            p.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
-            p.setPen(QColor("#FFFFFF"))
-            f = self.font()
-            f.setPixelSize(10)
-            f.setBold(True)
-            p.setFont(f)
-            p.drawText(QRectF(cx - r, cy - r, 2 * r, 2 * r), Qt.AlignCenter, "★")
         # 名字（仅展开态显示，选中时 accent 强调）
         if self._expanded:
             p.setPen(QColor(Colors.TEXT_ACCENT if self._selected else Colors.TEXT_MUTED))

@@ -36,6 +36,8 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SingleDirectionScrollArea
 
+from loguru import logger
+
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
@@ -44,6 +46,8 @@ from assistant_hub_manager import AssistantManager
 from .arc_stack import ArcCardStack
 from .assistant_avatar import RoundAvatar
 from .overlays import DreamRevisionOverlay, TextViewOverlay, _dialog_btn
+
+CARD_ID = "assistant_hub"
 from .rename_dialog import RenameDialog
 from .sections import (
     AboutSection,
@@ -241,6 +245,7 @@ class AssistantCardWidget(QWidget):
 
         self._about = AboutSection(self._persona_items(), "")
         self._about.personaChangeRequested.connect(self._on_persona_change)
+        self._about.createPersonaRequested.connect(self._on_create_persona)
         self._inner_v.addWidget(self._about)
 
         self._memory = MemorySection()
@@ -335,6 +340,24 @@ class AssistantCardWidget(QWidget):
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         self.refresh_personas_only()
+
+    def _on_create_persona(self) -> None:
+        """新建人格：关闭助手中心 → 跳回对话 → 输入框填入 /persona-creator。"""
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().hide_floating_card_globally(CARD_ID)
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 关闭助手中心失败: {e}")
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            active = TabManagerWindow.get_instance().get_current_window()
+            if active is None:
+                raise RuntimeError("无活跃对话窗口")
+            active._insert_command_text_fallback("persona-creator")
+        except Exception as e:
+            self._notify_error(f"无法跳转对话：{e}")
 
     def _reload_all(self, select_aid: str = "") -> None:
         self.refresh_personas_only()
@@ -574,9 +597,12 @@ class AssistantCardWidget(QWidget):
         self._dream_running = True
         self._memory.set_dream_running(True)
 
+        def _progress(step: int, total: int, name: str) -> None:
+            QTimer.singleShot(0, lambda: self._memory.set_dream_hint(f"Dream 整理中…（{step}/{total} {name}）"))
+
         def _worker():
             try:
-                result = self._mgr.dream_start(aid, "manual")
+                result = self._mgr.dream_start(aid, "manual", progress=_progress)
             except Exception as e:
                 result = {"ok": False, "error": str(e)}
             QTimer.singleShot(0, lambda: self._dream_done(result))
@@ -586,11 +612,21 @@ class AssistantCardWidget(QWidget):
     def _dream_done(self, result: dict) -> None:
         self._dream_running = False
         self._memory.set_dream_running(False)
+        a = self._mgr.get(self._active_aid)
+        if a is not None:
+            self._memory.set_dream_hint("每日自动 Dream 已开启" if a.dream_auto_enabled else "每日自动 Dream 未开启")
         if result.get("ok"):
             self._memory.set_status(self._memory_status(self._active_aid))
             self._notify("Dream 整理完成" + ("（内容无变化）" if not result.get("changed") else ""))
         else:
-            self._notify_error(f"Dream 失败：{result.get('error', '未知错误')}")
+            err = str(result.get("error", "未知错误"))
+            if err == "dream_no_memory":
+                err = "暂无可整理的记忆（重要事实/长期记忆为空），先正常对话积累几轮后再试"
+            elif err == "memory_changed":
+                err = "整理期间记忆发生了变化，请稍后再试"
+            elif err == "dream_already_running":
+                err = "上一次整理仍在进行中，请稍候"
+            self._notify_error(f"Dream 失败：{err}")
 
     def _on_dream_restore(self) -> None:
         if not self._active_aid:
