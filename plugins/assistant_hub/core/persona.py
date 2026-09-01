@@ -2,14 +2,16 @@
 """persona.py — 助手人格注册表（DriFox 特色预置 + 用户自定义）。
 
 人格 = 三类资产合一（对齐 openhanako yuan 概念，但内容 DriFox 原创优先）：
-- prompt（人格底座模板）：注入 system prompt 的人格段，支持 {{userName}}/{{agentName}}
+- prompt（人格基底模板）：注入 system prompt 的人格段，支持 {{userName}}/{{agentName}}
 - tag（思考块标签）：UI 方角小牌与思考块协议名（build=推演 / hanako=MOOD / 无=空）
-- avatar：personas/avatars/<id>.png
+- avatar：personas/<id>/avatar.png
 
-存储：
-- 内置：plugins/assistant_hub/personas/*.md（frontmatter + 正文，随插件分发）
+存储（预设单独存文件夹：人格基底 / 身份 / 行为约束）：
+- 内置：plugins/assistant_hub/personas/<id>/persona.md（基底）
+        + <id>/identity.md（身份）+ <id>/agents.md（行为约束）+ <id>/avatar.png
+  兼容旧平铺布局：personas/<id>.md + <id>.identity.md / <id>.agents.md + avatars/<id>.png
 - 自定义：<app_data>/assistant_hub/personas.json（builtin 不可删改）
-- "none"：恒存在的空人格（纯净助手，UI 走横幅不进 chips）
+- "none"：恒存在的空人格（纯净助手，进 chips 行参与选择）
 """
 
 from __future__ import annotations
@@ -96,28 +98,38 @@ class PersonaRegistry:
 
     # ── 加载 ──
     def _load_builtins(self) -> None:
+        """加载内置人格。
+
+        新布局（自包含子文件夹，人格预设单独存档）：
+            personas/<id>/persona.md    # 人格基底（frontmatter + 正文）
+            personas/<id>/identity.md   # 身份简介伴随模板（可选）
+            personas/<id>/agents.md     # 行为约束伴随模板（可选）
+            personas/<id>/avatar.png    # 头像（可选）
+        旧布局（兼容，子文件夹优先）：
+            personas/<id>.md + personas/<id>.identity.md / <id>.agents.md
+            personas/avatars/<id>.png
+        """
         self._builtin = {}
+        # 新布局：子文件夹 personas/<id>/persona.md
+        for d in sorted(self._builtin_dir.iterdir()) if self._builtin_dir.exists() else []:
+            if not d.is_dir():
+                continue
+            pmd = d / "persona.md"
+            if pmd.exists():
+                self._load_persona_md(pmd)
+        # 旧布局：平铺 personas/*.md（已被子文件夹占用的 id 跳过）
         for md in sorted(self._builtin_dir.glob("*.md")):
             if ".identity." in md.name or ".agents." in md.name:
-                continue  # 伴随模板在下方单独挂
-            try:
-                meta, body = _parse_frontmatter(md.read_text(encoding="utf-8"))
-            except Exception:
+                continue  # 旧布局伴随模板在下方单独挂
+            pid = self._peek_persona_id(md)
+            if pid and pid in self._builtin:
                 continue
-            pid = meta.get("id") or md.stem
-            self._builtin[pid] = Persona(
-                id=pid,
-                name=meta.get("name") or pid,
-                description=meta.get("description") or "",
-                tag=meta.get("tag") or "",
-                avatar=meta.get("avatar") or "",
-                builtin=True,
-                prompt=body if pid != "none" else "",
-            )
-        # 伴随模板：personas/<id>.identity.md / <id>.agents.md
+            self._load_persona_md(md)
+        # 伴随模板：子文件夹 identity.md / agents.md 优先，回落平铺 <id>.identity.md / <id>.agents.md
         for p in self._builtin.values():
-            ipath = self._builtin_dir / f"{p.id}.identity.md"
-            apath = self._builtin_dir / f"{p.id}.agents.md"
+            sub = self._builtin_dir / p.id
+            ipath = sub / "identity.md" if (sub / "identity.md").exists() else self._builtin_dir / f"{p.id}.identity.md"
+            apath = sub / "agents.md" if (sub / "agents.md").exists() else self._builtin_dir / f"{p.id}.agents.md"
             try:
                 if ipath.exists():
                     p.identity_template = _parse_frontmatter(ipath.read_text(encoding="utf-8"))[1]
@@ -125,6 +137,30 @@ class PersonaRegistry:
                     p.agents_template = _parse_frontmatter(apath.read_text(encoding="utf-8"))[1]
             except Exception:
                 continue
+
+    def _peek_persona_id(self, md: Path) -> str:
+        try:
+            meta, _ = _parse_frontmatter(md.read_text(encoding="utf-8"))
+            return meta.get("id") or md.stem
+        except Exception:
+            return md.stem
+
+    def _load_persona_md(self, md: Path) -> None:
+        try:
+            meta, body = _parse_frontmatter(md.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        # id：frontmatter 优先；子文件夹布局回落文件夹名，平铺布局回落文件名
+        pid = meta.get("id") or (md.parent.name if md.parent == self._builtin_dir else md.stem) or md.stem
+        self._builtin[pid] = Persona(
+            id=pid,
+            name=meta.get("name") or pid,
+            description=meta.get("description") or "",
+            tag=meta.get("tag") or "",
+            avatar=meta.get("avatar") or "",
+            builtin=True,
+            prompt=body if pid != "none" else "",
+        )
 
     def _load_custom(self) -> None:
         self._custom = {}
@@ -160,7 +196,7 @@ class PersonaRegistry:
         return None
 
     def avatar_path(self, pid: str) -> Optional[Path]:
-        """内置头像优先 personas/avatars/<avatar 或 id>.png；自定义 avatar 存绝对路径。"""
+        """头像解析：显式 avatar 字段 → 子文件夹 avatar.png（新布局）→ avatars/<id>.png（旧布局）。"""
         p = self.get(pid)
         if p is None:
             return None
@@ -168,9 +204,14 @@ class PersonaRegistry:
             cand = Path(p.avatar)
             if cand.is_absolute() and cand.exists():
                 return cand
-            rel = self._builtin_dir / "avatars" / p.avatar
+            rel = self._builtin_dir / p.avatar
             if rel.exists():
                 return rel
+        # 新布局：personas/<id>/avatar.png
+        sub = self._builtin_dir / pid / "avatar.png"
+        if sub.exists():
+            return sub
+        # 旧布局：personas/avatars/<avatar 或 id>.png
         rel = self._builtin_dir / "avatars" / f"{pid}.png"
         return rel if rel.exists() else None
 

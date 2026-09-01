@@ -3,7 +3,6 @@ id: none
 name: 无
 description: 不附加人格底座
 tag: ""
-avatar: ""
 builtin: true
 ---
 

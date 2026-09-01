@@ -111,6 +111,9 @@ class RenameDialog(MaskDialogBase):
         v.addLayout(btns)
 
         self.widget.setFixedSize(380, self.widget.sizeHint().height() + 40)
+        # ⚠ MaskDialogBase.__init__ 把 self 钉在屏幕 (0,0)：与宿主窗口（parent）几何对齐
+        if parent is not None:
+            self.setGeometry(parent.geometry())
         self._center()
 
     def _center(self) -> None:

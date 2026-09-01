@@ -18,6 +18,7 @@ from PyQt5.QtCore import (
     QEasingCurve,
     QParallelAnimationGroup,
     QPropertyAnimation,
+    QVariantAnimation,
     QPoint,
     QRectF,
     Qt,
@@ -28,7 +29,7 @@ from PyQt5.QtWidgets import QWidget
 
 from app.utils.design_tokens import Colors, Shadows
 
-from .assistant_avatar import RoundAvatar
+from .assistant_avatar import RoundAvatar, qcolor_from
 
 # ── 几何常量（single source of truth，对齐原版 CSS 变量）──
 CARD_SIZE = 62  # 圆卡直径
@@ -61,10 +62,6 @@ class _AgentCard(QWidget):
         self._lift = 0.0
         self._scale = 1.0
         self._expanded = False  # 容器展开时才画名字（收起态名字重叠）
-
-    def stackOrder(self) -> int:  # 调试用：z 序近似（父内索引）
-        p = self.parentWidget()
-        return p.children().index(self) if p else -1
         self._avatar = RoundAvatar(
             size=CARD_SIZE - 6, text=name, color=color, image_path=image_path or None, parent=self
         )
@@ -93,23 +90,43 @@ class _AgentCard(QWidget):
     def set_hover_lift(self, on: bool) -> None:
         self._animate_lift(LIFT_HOVER if on else 0.0)
 
+    # ── 动画（QVariantAnimation 回调式：valueChanged 同步 avatar 子控件几何，
+    #    避免 paintEvent 的 translate/scale 只作用于自绘部分、头像掉队）──
+    def _apply_scale(self, v: float) -> None:
+        self._scale = v
+        # 围绕圆心缩放头像，与 paintEvent 的 scale 变换保持一致
+        av = CARD_SIZE - 6
+        size = av * v
+        cx = cy = CARD_SIZE / 2
+        x = cx - size / 2
+        y = cy - size / 2 - round(self._lift)
+        self._avatar.setGeometry(round(x), round(y), round(size), round(size))
+        self.update()
+
+    def _apply_lift(self, v: float) -> None:
+        self._lift = v
+        self._avatar.move(3, 3 - round(v))
+        self.update()
+
     def _animate_scale(self, target: float) -> None:
-        anim = Anim(self, b"_scale")
+        anim = QVariantAnimation(self)
         anim.setDuration(180)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.setStartValue(self._scale)
         anim.setEndValue(target)
+        anim.valueChanged.connect(lambda v: self._apply_scale(float(v)))
+        anim.finished.connect(anim.deleteLater)
         anim.start()
-        anim.deleteLater()
 
     def _animate_lift(self, target: float) -> None:
-        anim = Anim(self, b"_lift")
+        anim = QVariantAnimation(self)
         anim.setDuration(160)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.setStartValue(self._lift)
         anim.setEndValue(target)
+        anim.valueChanged.connect(lambda v: self._apply_lift(float(v)))
+        anim.finished.connect(anim.deleteLater)
         anim.start()
-        anim.deleteLater()
 
     # ── 事件 ──
     def enterEvent(self, e):  # noqa: N802
@@ -149,15 +166,12 @@ class _AgentCard(QWidget):
         else:
             border = QColor(Colors.BORDER)
         p.setPen(QPen(border, 2.5 if self._selected else 2))
-        try:
-            frame_bg = QColor(Colors.CARD_BG.format(alpha=250))
-        except Exception:
-            frame_bg = QColor(30, 30, 34)
-        p.setBrush(frame_bg)
+        # ⚠ QColor 不认 "rgba(...)" 字符串（无效色不报错、绘制成黑），必须经 qcolor_from 解析
+        p.setBrush(qcolor_from(Colors.CARD_BG.format(alpha=250)))
         p.drawEllipse(rect)
         # 主助手角标（底部 accent 圆点）
         if self._primary:
-            p.setPen(QPen(QColor(Colors.CARD_BG_SOLID), 1.5))
+            p.setPen(QPen(qcolor_from(Colors.CARD_BG_SOLID), 1.5))
             p.setBrush(QColor(Colors.TEXT_ACCENT))
             p.drawEllipse(int(CARD_SIZE / 2 - 4), CARD_SIZE - 8, 8, 8)
         # 名字（仅展开态显示，对齐原版 agent-card-name opacity 切换）

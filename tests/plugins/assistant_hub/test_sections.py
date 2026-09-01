@@ -54,10 +54,10 @@ overlays = _load("overlays", "overlays.py")
 def test_profile_section_bind_emit(qtbot=None):
     host = QWidget()
     s = sections.ProfileSection(host)
-    s.bind("小狐", "cfg-1", "cfg-2")
+    s.bind("小狐", "cfg-2")  # 两参签名：对话模型跟随系统配置，不再单独设置
     assert s._name.text() == "小狐"
     got = []
-    s.saveRequested.connect(lambda n, c, u: got.append((n, c, u)))
+    s.saveRequested.connect(lambda n, u: got.append((n, u)))
     s._emit_save()
     assert got and got[0][0] == "小狐"
 
@@ -66,16 +66,17 @@ def test_about_section_persona_switch(qtbot=None):
     personas = [
         {"id": "build", "name": "build", "description": "更懂工程的搭档", "tag": "推演"},
         {"id": "hanako", "name": "hanako", "description": "温暖的共鸣者", "tag": "MOOD"},
+        {"id": "none", "name": "纯净助手", "description": "不附加人格底座", "tag": ""},
     ]
     host = QWidget()
     s = sections.AboutSection(personas, "build", parent=host)
-    assert len(s._chips) == 2
+    # 「无」= 纯净助手作为普通 chip 参与选择（不再单独横幅）
+    assert len(s._chips) == 3
     got = []
     s.personaChangeRequested.connect(got.append)
     s._chips[1].mousePressEvent(None)
     assert got == ["hanako"]
-    # none 横幅
-    s._none_banner.click()
+    s._chips[2].mousePressEvent(None)
     assert got == ["hanako", "none"]
 
 

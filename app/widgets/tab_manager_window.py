@@ -32,6 +32,7 @@ from PyQt5.QtWidgets import (
 
 from qframelesswindow import FramelessWindow
 
+from app.utils import drag_pos_probe as _drag_pos_probe  # [DRAG-POS] 临时诊断
 from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.theme_manager import theme_manager
@@ -678,6 +679,11 @@ class TabManagerWindow(FramelessWindow):
         # 插件常驻 tab 由 _sync_plugin_titlebar_tabs 挂载）
         self.titleBar.add_tab(CHAT_TAB_ID, "对话")
         self._sync_plugin_titlebar_tabs()
+
+        # ── [DRAG-POS] 诊断探针（临时）：抓"拖完跳回原位置"现场，定位后拆除 ──
+        from app.utils.drag_pos_probe import install_drag_pos_probe
+
+        install_drag_pos_probe(self)
 
     def _on_titlebar_tab_clicked(self, tab_id: str):
         """顶栏 tab 点击：「聊天」→ 对话视图；full 卡片 tab → 切换/显示；
@@ -3766,6 +3772,8 @@ class TabManagerWindow(FramelessWindow):
                 if msg_id == self._WM_ENTERSIZEMOVE:
                     self._window_dragging_timer.stop()  # 原生信号权威，停用防抖回退
                     self._on_window_drag_start()
+                    # [DRAG-POS] 诊断：记录拖拽起点几何
+                    _drag_pos_probe.mark_drag_start()
                 elif msg_id == self._WM_NCHITTEST:
                     # 边缘/角落 resize：先于基类判定（基类热区固定 5px 且不
                     # 处理标题栏系统按钮让位）。返回 None 时落回 super() 链。
@@ -3784,6 +3792,8 @@ class TabManagerWindow(FramelessWindow):
                     # 恢复；缩放路径的子面板重绘由 _deferred_resize_complete 负责，
                     # 此处恢复顶层窗口不会与之冲突（顶层本就可重绘标题栏）。
                     self.setUpdatesEnabled(True)
+                    # [DRAG-POS] 诊断：记录拖拽终点几何
+                    _drag_pos_probe.mark_drag_end()
                     if self._resize_blocking:
                         # 本次模态循环是"缩放"：布局/绘制恢复交给
                         # _on_resize_finished（防抖 100ms 后触发），

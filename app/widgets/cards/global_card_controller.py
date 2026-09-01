@@ -132,6 +132,17 @@ class GlobalCardController:
         """
         if self._settings_popup is not None:
             return
+        # ★ 拖动守卫：窗口拖拽期间禁止同步构建。LLMSettingsCard 构造链
+        # （MCPListSettingCard._refresh 含 QCoreApplication.processEvents）
+        # 会创建原生子窗口/干扰焦点捕获，Windows 据此取消标题栏拖动的
+        # SC_MOVE 模态循环 → 窗口被系统弹回拖动起点（用户看到的
+        # "拖完又跳回原位置"，[DRAG-POS] 日志 2026-09-01 现场定位）。
+        # 延迟重试而非丢弃，保证懒构建语义不变；读模块属性避免值拷贝。
+        from app.utils import window_drag_state as _wds
+
+        if _wds.any_window_dragging:
+            QTimer.singleShot(800, self.ensure_settings_popup)
+            return
         if self._settings_popup_building:
             # 事件重入：正在构建中，直接返回（外层构建完成后 _settings_popup 已赋值）
             return

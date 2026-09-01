@@ -19,6 +19,32 @@ from PyQt5.QtCore import QRectF, Qt
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPixmap
 from PyQt5.QtWidgets import QWidget
 
+from app.utils.design_tokens import Colors
+
+
+def qcolor_from(spec: str, fallback: QColor = QColor(33, 33, 38, 250)) -> QColor:
+    """安全解析颜色字符串：支持 "#hex" 与 "rgba(r,g,b,a)"。
+
+    ⚠ QColor 构造器不认 "rgba(...)" 字符串：返回无效色且**不抛异常**，
+    QPainter 拿无效 brush 会直接画成黑色（折叠列表头像黑块的根因）。
+    解析失败回落 fallback（深色卡片底）。
+    """
+    c = QColor(spec or "")
+    if c.isValid():
+        return c
+    import re
+
+    m = re.match(r"rgba?\s*\(([^)]+)\)", spec or "")
+    if m:
+        parts = [p.strip() for p in m.group(1).split(",")]
+        try:
+            r, g, b = (int(float(parts[i])) for i in range(3))
+            a = int(float(parts[3])) if len(parts) > 3 else 255
+            return QColor(r, g, b, a)
+        except ValueError, IndexError:
+            pass
+    return fallback
+
 
 def _parse_rgba(rgba_str: str) -> QColor:
     if rgba_str.startswith("#"):
@@ -99,10 +125,7 @@ class RoundAvatar(QWidget):
             p.setClipPath(path)
             # 剪影类 PNG 下半透明：先铺卡片底色，避免透明区透出页面背景
             p.setPen(Qt.NoPen)
-            try:
-                base = QColor(Colors.CARD_BG_SOLID)
-            except Exception:
-                base = QColor(30, 30, 34)
+            base = qcolor_from(Colors.CARD_BG_SOLID)
             p.setBrush(base)
             p.drawRect(rect)
             scaled = self._pixmap.scaled(

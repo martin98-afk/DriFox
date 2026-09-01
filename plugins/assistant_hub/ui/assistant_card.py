@@ -35,7 +35,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase
 
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import CardStyles, Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
 from assistant_hub_manager import AssistantManager
@@ -54,8 +54,49 @@ from .sections import (
 )
 
 
+def _open_dialog(dlg) -> int:
+    """Mask 弹窗与宿主窗口几何对齐后再 exec_，返回 exec_ 结果码。
+
+    ⚠ qfluentwidgets MaskDialogBase.__init__ 里 setGeometry(0, 0, parent.width(), parent.height())：
+    顶层 QDialog 的 geometry 是屏幕坐标——不重定位时弹窗会钉在屏幕左上角，
+    与不在原点的主窗口错位（窗口还原态尤其明显）。
+    所有 MaskDialog 必须以完整主窗口为 parent（见 _host_window），并经本函数弹出。
+    """
+    host = dlg.parent()
+    if host is not None:
+        dlg.setGeometry(host.geometry())
+    return dlg.exec_()
+
+
+def _host_window():
+    """弹窗 parent：完整主窗口（TabManagerWindow 单例，对齐 plugin-marketplace 做法）。
+
+    self.window() 在 full 卡容器内可能返回卡片容器而非主窗口，导致
+    MaskDialog 遮罩只盖住容器、定位异常。回退链：TabManagerWindow 单例
+    → UIPluginRegistry 主 widget 的 window() → None（调用方自行兜底）。
+    """
+    try:
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        win = TabManagerWindow.get_instance()
+        if win is not None:
+            return win
+    except Exception:
+        pass
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        for mw in (getattr(reg, "_main_widget", None), *getattr(reg, "_window_main_widgets", {}).values()):
+            if mw is not None:
+                return mw.window()
+    except Exception:
+        pass
+    return None
+
+
 def _confirm_dialog(parent, title: str, text: str) -> bool:
-    """统一 Mask 风格确认弹窗（替代 QMessageBox，系统字体+主题色）。"""
+    """统一 Mask 风格确认弹窗（替代 QMessageBox，系统字体+主题色）。parent 传 _host_window()。"""
     from PyQt5.QtGui import QColor
 
     class _Dialog(MaskDialogBase):
@@ -98,6 +139,9 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
             row.addWidget(cancel)
             row.addWidget(ok)
             v.addLayout(row)
+            # ⚠ MaskDialogBase.__init__ 把 self 钉在屏幕 (0,0)：与宿主窗口对齐后再居中卡片
+            if parent is not None:
+                self.setGeometry(parent.geometry())
             x = max(0, (self.width() - self.widget.width()) // 2)
             y = max(0, (self.height() - self.widget.height()) // 2)
             self.widget.move(x, y)
@@ -107,7 +151,7 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
             self.accept()
 
     dlg = _Dialog()
-    dlg.exec_()
+    _open_dialog(dlg)
     return dlg._yes
 
 
@@ -119,6 +163,9 @@ class AssistantCardWidget(QWidget):
         self._mgr = AssistantManager.get_instance()
         self._active_aid: str = ""
         self._dream_running = False
+        # 助手区域背景透明（融入宿主主题背景）
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet("AssistantCardWidget { background: transparent; }")
         self._build_ui()
         self._reload_all()
 
@@ -133,7 +180,8 @@ class AssistantCardWidget(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        # 系统统一滚动区域样式：透明背景 + 全局统一滚动条（CardStyles.scroll_area）
+        scroll.setStyleSheet(CardStyles.scroll_area())
         outer.addWidget(scroll)
 
         content = QWidget()
@@ -247,9 +295,19 @@ class AssistantCardWidget(QWidget):
             reg = self._mgr.persona_registry()
             items = []
             for p in reg.list_all():
-                if p.id == "none":
-                    continue  # none 走横幅
                 ap = reg.avatar_path(p.id)
+                if p.id == "none":
+                    # 「无」= 纯净助手，作为普通人格卡片参与选择（不再单独横幅）
+                    items.append(
+                        {
+                            "id": "none",
+                            "name": "纯净助手",
+                            "description": "不附加人格底座",
+                            "tag": "",
+                            "avatar_path": str(ap or ""),
+                        }
+                    )
+                    continue
                 items.append(
                     {
                         "id": p.id,
@@ -321,12 +379,15 @@ class AssistantCardWidget(QWidget):
                 row.addWidget(cancel)
                 row.addWidget(ok)
                 v.addLayout(row)
+                # ⚠ MaskDialogBase.__init__ 把 self 钉在屏幕 (0,0)：与宿主窗口对齐后再居中卡片
+                if parent is not None:
+                    self.setGeometry(parent.geometry())
                 x = max(0, (self.width() - self.widget.width()) // 2)
                 y = max(0, (self.height() - self.widget.height()) // 2)
                 self.widget.move(x, y)
 
-        dlg = _AvatarDialog(self.window())
-        if not dlg.exec_():
+        dlg = _AvatarDialog(_host_window())
+        if not _open_dialog(dlg):
             return
         sel = dlg._picker.get_selection()
         if sel.get("image_path"):
@@ -393,7 +454,7 @@ class AssistantCardWidget(QWidget):
 
         def _do_bind() -> None:
             mgr = self._mgr
-            self._profile.bind(a.name or a.id, a.model or "", a.utility_model or "")
+            self._profile.bind(a.name or a.id, a.utility_model or "")
             self._about.set_persona(a.yuan)
             identity, _ = mgr.read_identity_source(aid_capture)
             agents_md, _ = mgr.read_agents_md_source(aid_capture)
@@ -429,10 +490,10 @@ class AssistantCardWidget(QWidget):
             title="新建助手",
             hint="输入助手名称（例如：小助手 / 翻译官 / 代码审查员）：",
             default="",
-            parent=self.window(),
+            parent=_host_window(),
         )
         dlg.confirmed.connect(self._do_create)
-        dlg.exec_()
+        _open_dialog(dlg)
 
     def _do_create(self, name: str) -> None:
         a = self._mgr.create(name=name)
@@ -446,7 +507,7 @@ class AssistantCardWidget(QWidget):
         if not a:
             return
         ret = _confirm_dialog(
-            self.window(),
+            _host_window(),
             "删除助手",
             f"确定删除助手「{a.name}」？\n其身份、提示词、记忆、头像将一并删除。\n（该操作不可撤销）",
         )
@@ -463,9 +524,9 @@ class AssistantCardWidget(QWidget):
         a = self._mgr.get(self._active_aid) if self._active_aid else None
         if not a:
             return
-        dlg = RenameDialog(title="重命名助手", hint="新的名称：", default=a.name, parent=self.window())
+        dlg = RenameDialog(title="重命名助手", hint="新的名称：", default=a.name, parent=_host_window())
         dlg.confirmed.connect(self._do_rename)
-        dlg.exec_()
+        _open_dialog(dlg)
 
     def _do_rename(self, name: str) -> None:
         a = self._mgr.get(self._active_aid)
@@ -487,7 +548,8 @@ class AssistantCardWidget(QWidget):
     #  基本信息 / 关于 Ta
     # ══════════════════════════════════════════════════
 
-    def _on_profile_save(self, name: str, chat_model: str, utility_model: str) -> None:
+    def _on_profile_save(self, name: str, utility_model: str) -> None:
+        """基本信息实时保存（对话模型跟随系统当前配置，不再持久化覆盖）。"""
         a = self._mgr.get(self._active_aid)
         if not a:
             return
@@ -495,8 +557,8 @@ class AssistantCardWidget(QWidget):
         if name and name != a.name:
             a.name = name
             changed = True
-        if a.model != chat_model:
-            a.model = chat_model
+        if a.model:  # 历史遗留的对话模型覆盖一并清除，避免旧值暗中生效
+            a.model = ""
             changed = True
         if a.utility_model != utility_model:
             a.utility_model = utility_model
@@ -525,18 +587,18 @@ class AssistantCardWidget(QWidget):
     def _on_persona_manage(self) -> None:
         reg = self._mgr.persona_registry()
         current = self._mgr.get(self._active_aid).yuan if self._active_aid else ""
-        dlg = PersonaManageDialog(reg, current, parent=self.window())
-        dlg.exec_()
+        dlg = PersonaManageDialog(reg, current, parent=_host_window())
+        _open_dialog(dlg)
         self._reload_all(select_aid=self._active_aid)
 
     def _on_about_save(self, identity: str, agents_md: str) -> None:
+        """实时保存（节流触发）：静默落盘，不弹提示打断编辑。"""
         aid = self._active_aid
         if not aid:
             return
         self._mgr.write_identity(aid, identity)
         self._mgr.write_agents_md(aid, agents_md)
         self._mgr.invalidate_context(aid)
-        self._notify("人格已保存")
 
     # ══════════════════════════════════════════════════
     #  记忆
@@ -572,13 +634,13 @@ class AssistantCardWidget(QWidget):
             return
         path = self._mgr.memory_dir(self._active_aid) / "today.md"
         text = path.read_text(encoding="utf-8") if Path(path).exists() else ""
-        TextViewOverlay("当下记忆", text or "（暂无当下记忆）", parent=self.window()).exec_()
+        _open_dialog(TextViewOverlay("当下记忆", text or "（暂无当下记忆）", parent=_host_window()))
 
     def _on_view_all(self) -> None:
         if not self._active_aid:
             return
         text = self._mgr.compiled_memory(self._active_aid)
-        TextViewOverlay("所有记忆", text or "（暂无记忆）", parent=self.window()).exec_()
+        _open_dialog(TextViewOverlay("所有记忆", text or "（暂无记忆）", parent=_host_window()))
 
     def _on_dream_run(self) -> None:
         if not self._active_aid or self._dream_running:
@@ -631,16 +693,16 @@ class AssistantCardWidget(QWidget):
             revisions,
             preview_fn=_preview,
             restore_fn=lambda rid: self._mgr.dream_restore(aid, rid),
-            parent=self.window(),
+            parent=_host_window(),
         )
-        dlg.exec_()
+        _open_dialog(dlg)
         self._memory.set_status(self._memory_status(aid))
 
     def _on_clear_all(self) -> None:
         if not self._active_aid:
             return
         aid = self._active_aid
-        ret = _confirm_dialog(self.window(), "清除记忆", "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。")
+        ret = _confirm_dialog(_host_window(), "清除记忆", "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。")
         if not ret:
             return
         mem = self._mgr.memory_dir(aid)
@@ -683,7 +745,9 @@ class AssistantCardWidget(QWidget):
             except Exception:
                 pass
 
-        TextViewOverlay(f"经验 · {category}", text, editable=True, on_save=_save, parent=self.window()).exec_()
+        _open_dialog(
+            TextViewOverlay(f"经验 · {category}", text, editable=True, on_save=_save, parent=_host_window())
+        )
         self._experience.reload_categories(self._mgr.experience_list(aid))
 
     def _on_reflect(self) -> None:
@@ -707,13 +771,15 @@ class AssistantCardWidget(QWidget):
         if not self._active_aid:
             return
         text = self._mgr.read_skill(self._active_aid, name)
-        TextViewOverlay(
-            f"技能 · {name}",
-            text,
-            editable=True,
-            on_save=lambda c: self._mgr.write_skill(self._active_aid, name, c),
-            parent=self.window(),
-        ).exec_()
+        _open_dialog(
+            TextViewOverlay(
+                f"技能 · {name}",
+                text,
+                editable=True,
+                on_save=lambda c: self._mgr.write_skill(self._active_aid, name, c),
+                parent=_host_window(),
+            )
+        )
 
     # ══════════════════════════════════════════════════
     #  通知 / 宿主契约
@@ -728,7 +794,7 @@ class AssistantCardWidget(QWidget):
                 isClosable=True,
                 position=InfoBarPosition.TOP_RIGHT,
                 duration=2500,
-                parent=self.window(),
+                parent=_host_window(),
             )
         except Exception:
             pass
@@ -742,7 +808,7 @@ class AssistantCardWidget(QWidget):
                 isClosable=True,
                 position=InfoBarPosition.TOP_RIGHT,
                 duration=3000,
-                parent=self.window(),
+                parent=_host_window(),
             )
         except Exception:
             pass

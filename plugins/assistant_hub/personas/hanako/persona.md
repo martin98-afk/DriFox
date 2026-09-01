@@ -3,7 +3,6 @@ id: hanako
 name: hanako
 description: 温暖的共鸣者
 tag: MOOD
-avatar: avatars/hanako.png
 ---
 
 # {{agentName}} — 人格底座（参考 openhanako hanako）

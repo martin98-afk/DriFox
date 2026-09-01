@@ -162,10 +162,11 @@ class _Section(QFrame):
 
 
 class ProfileSection(_Section):
-    """助手名称 + 聊天模型 + 记忆整理模型（改动即节流保存，无保存按钮）。"""
+    """助手名称 + 记忆整理模型（对话模型跟随系统当前配置，不单独设置；改动即节流保存）。"""
 
-    saveRequested = pyqtSignal(str, str, str)  # (name, chat_model_key, utility_model_key)
+    saveRequested = pyqtSignal(str, str)  # (name, utility_model_key)
     _DEBOUNCE_MS = 600
+    _MAX_VISIBLE_ITEMS = 12  # 下拉弹层最大可见条目数，超出滚动
 
     def __init__(self, parent=None):
         super().__init__("基本信息", parent)
@@ -181,21 +182,18 @@ class ProfileSection(_Section):
         self.body().addLayout(row1)
 
         row2 = QHBoxLayout()
-        row2.addWidget(_title_label("对话模型", 11))
-        self._chat_model = ComboBox()
-        self._chat_model.setMinimumWidth(220)
-        self._chat_model.currentIndexChanged.connect(self._schedule_autosave)
-        row2.addWidget(self._chat_model, 1)
-        self.body().addLayout(row2)
-
-        row3 = QHBoxLayout()
-        row3.addWidget(_title_label("记忆整理模型", 11))
+        row2.addWidget(_title_label("记忆整理模型", 11))
         self._utility_model = ComboBox()
         self._utility_model.setMinimumWidth(220)
+        self._utility_model.setMaxVisibleItems(self._MAX_VISIBLE_ITEMS)
         self._utility_model.currentIndexChanged.connect(self._schedule_autosave)
-        row3.addWidget(self._utility_model, 1)
-        self.body().addLayout(row3)
-        self.body().addWidget(_hint("记忆整理模型用于记忆编译 / Dream / 经验反思；跟随全局 = 使用当前对话模型。"))
+        row2.addWidget(self._utility_model, 1)
+        self.body().addLayout(row2)
+        self.body().addWidget(
+            _hint(
+                "对话模型跟随系统当前配置，无需在此设置；记忆整理模型用于记忆编译 / Dream / 经验反思，跟随全局 = 使用当前对话模型。"
+            )
+        )
         self.body().addWidget(_hint("修改后自动保存。", 9))
 
         self._debounce = QTimer(self)
@@ -209,14 +207,13 @@ class ProfileSection(_Section):
             return
         self._debounce.start()
 
-    def bind(self, name: str, chat_model: str, utility_model: str) -> None:
+    def bind(self, name: str, utility_model: str) -> None:
         self._suspend_autosave = True
         self._name.setText(name)
         keys = self._model_keys
-        for combo, val in ((self._chat_model, chat_model), (self._utility_model, utility_model)):
-            key = val or ""
-            idx = keys.index(key) if key in keys else 0
-            combo.setCurrentIndex(idx)
+        key = utility_model or ""
+        idx = keys.index(key) if key in keys else 0
+        self._utility_model.setCurrentIndex(idx)
         self._suspend_autosave = False
 
     def _reload_models(self) -> None:
@@ -257,25 +254,16 @@ class ProfileSection(_Section):
                     labels.append(label)
                     keys.append(f"{key}||{model}")
         self._model_keys = keys
-        for combo in (self._chat_model, self._utility_model):
-            combo.clear()
-            combo.addItems(labels)
-            combo.setCurrentIndex(0)
-
-    def bind(self, name: str, chat_model: str, utility_model: str) -> None:
-        self._name.setText(name)
-        keys = self._model_keys
-        for combo, val in ((self._chat_model, chat_model), (self._utility_model, utility_model)):
-            key = val or ""
-            idx = keys.index(key) if key in keys else 0
-            combo.setCurrentIndex(idx)
+        combo = self._utility_model
+        combo.clear()
+        combo.addItems(labels)
+        combo.setCurrentIndex(0)
 
     def _emit_save(self) -> None:
         keys = getattr(self, "_model_keys", [""])
-        ci, ui_ = self._chat_model.currentIndex(), self._utility_model.currentIndex()
-        chat_key = keys[ci] if 0 <= ci < len(keys) else ""
+        ui_ = self._utility_model.currentIndex()
         util_key = keys[ui_] if 0 <= ui_ < len(keys) else ""
-        self.saveRequested.emit(self._name.text().strip(), chat_key, util_key)
+        self.saveRequested.emit(self._name.text().strip(), util_key)
 
 
 # ── 关于 Ta（人格 / 身份 / AGENTS.md）────────────────────
@@ -349,11 +337,12 @@ class _PersonaChip(QFrame):
 
 
 class AboutSection(_Section):
-    """人格选择（chips + 无横幅）+ 身份简介 + AGENTS.md。"""
+    """人格选择（chips，含「纯净助手」）+ 身份简介 + AGENTS.md（实时保存）。"""
 
     personaChangeRequested = pyqtSignal(str)
     personaManageRequested = pyqtSignal()
     saveRequested = pyqtSignal(str, str)  # (identity, agents_md)
+    _DEBOUNCE_MS = 800
 
     def __init__(self, personas: List[dict], current_pid: str, parent=None):
         super().__init__("关于 Ta", parent)
@@ -362,7 +351,7 @@ class AboutSection(_Section):
         chips_row.setSpacing(12)
         chips_row.addStretch()
         self._chips: List[_PersonaChip] = []
-        self._personas = [p for p in personas if p["id"] != "none"]
+        self._personas = personas  # 调用方已包含 none（纯净助手）
         for p in self._personas:
             chip = _PersonaChip(p)
             chip.clicked.connect(lambda pid=p["id"]: self.personaChangeRequested.emit(pid))
@@ -379,19 +368,6 @@ class AboutSection(_Section):
         manage_row.addWidget(manage_btn)
         manage_row.addStretch()
         self.body().addLayout(manage_row)
-
-        # 「无」横幅
-        self._none_banner = QPushButton()
-        self._none_banner.setFixedHeight(46)
-        self._none_banner.setCursor(Qt.PointingHandCursor)
-        self._none_banner.setStyleSheet(self._banner_style(False))
-        self._none_banner.setText("无　· 不附加人格底座，纯净助手")
-        self._none_banner.clicked.connect(lambda: self.personaChangeRequested.emit("none"))
-        banner_wrap = QHBoxLayout()
-        banner_wrap.addStretch()
-        banner_wrap.addWidget(self._none_banner, 0)
-        banner_wrap.addStretch()
-        self.body().addLayout(banner_wrap)
 
         # 身份
         self.body().addWidget(_title_label("身份简介", 11))
@@ -412,46 +388,36 @@ class AboutSection(_Section):
         self._agents_md.setStyleSheet(_editor_style())
         self._agents_md.setPlaceholderText("# 人格定义\n\n- 你是一个有温度的存在…")
         self.body().addWidget(self._agents_md)
-        self.body().addWidget(_hint("行为准则 / 工作流 / 偏好。激活该助手时会整体替换当前智能体提示词。"))
-        row = QHBoxLayout()
-        row.addStretch()
-        save = QPushButton("保存")
-        save.setStyleSheet(_btn_style())
-        save.clicked.connect(
+        self.body().addWidget(
+            _hint("行为准则 / 工作流 / 偏好。激活该助手时会整体替换当前智能体提示词；修改后自动保存。")
+        )
+        # 实时保存：编辑节流后自动落盘，无保存按钮
+        self._save_debounce = QTimer(self)
+        self._save_debounce.setSingleShot(True)
+        self._save_debounce.setInterval(self._DEBOUNCE_MS)
+        self._save_debounce.timeout.connect(
             lambda: self.saveRequested.emit(self._identity.toPlainText(), self._agents_md.toPlainText())
         )
-        row.addWidget(save)
-        row.addStretch()
-        self.body().addLayout(row)
+        self._suspend_autosave = False
+        self._identity.textChanged.connect(self._schedule_autosave)
+        self._agents_md.textChanged.connect(self._schedule_autosave)
         self.set_persona(current_pid)
 
-    @staticmethod
-    def _banner_style(selected: bool) -> str:
-        accent = Colors.TEXT_ACCENT
-        border = ("2px solid " + accent) if selected else "1px solid rgba(255,255,255,0.25)"
-        return f"""
-            QPushButton {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(20, 22, 30, 235), stop:1 rgba(38, 34, 28, 235));
-                border: {border};
-                border-radius: 10px;
-                color: #fff;
-                text-align: left;
-                padding-left: 16px;
-                {get_font_family_css()} {font_size_css(12)}
-            }}
-            QPushButton:hover {{ border-color: rgba(255,255,255,0.5); }}
-        """
+    def _schedule_autosave(self) -> None:
+        if self._suspend_autosave:
+            return
+        self._save_debounce.start()
 
     def set_persona(self, pid: str) -> None:
-        """刷新 chips / 横幅选中态。"""
+        """刷新 chips 选中态。"""
         for chip in self._chips:
             chip.set_selected(chip.persona_id == pid)
-        self._none_banner.setStyleSheet(self._banner_style(pid == "none"))
 
     def bind_texts(self, identity: str, agents_md: str) -> None:
+        self._suspend_autosave = True  # 回填期间不触发自动保存
         self._identity.setPlainText(identity)
         self._agents_md.setPlainText(agents_md)
+        self._suspend_autosave = False
 
 
 # ── 记忆分区 ────────────────────────────────────────────

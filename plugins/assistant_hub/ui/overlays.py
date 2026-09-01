@@ -118,6 +118,9 @@ class OverlayBase(MaskDialogBase):
         self._v.setContentsMargins(20, 16, 20, 16)
         self._v.setSpacing(8)
         self._v.addWidget(_label(title, 14))
+        # ⚠ MaskDialogBase.__init__ 把 self 钉在屏幕 (0,0)：这里与宿主窗口（parent）几何对齐
+        if parent is not None:
+            self.setGeometry(parent.geometry())
         self._center()
 
     def _center(self) -> None:
