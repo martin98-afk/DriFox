@@ -28,12 +28,18 @@ def _settings():
     return Settings.get_instance()
 
 
-def resolve_model_config() -> Dict[str, str]:
-    """解析当前全局模型配置；优先选中项，兜底第一个可用配置。"""
+def resolve_model_config(config_id: str = "") -> Dict[str, str]:
+    """解析模型配置；优先指定 config_id（助手记忆整理模型），缺省跟随全局选中项。"""
     cfg = _settings()
     saved = cfg.llm_saved_providers.value or {}
-    selected = cfg.llm_selected_model.value or ""
-    info: Optional[Dict[str, Any]] = saved.get(selected) if selected else None
+    info: Optional[Dict[str, Any]] = None
+    if config_id:
+        info = saved.get(config_id)
+        if not isinstance(info, dict):
+            raise LLMUnavailableError(f"记忆整理模型配置不存在: {config_id}")
+    if not isinstance(info, dict):
+        selected = cfg.llm_selected_model.value or ""
+        info = saved.get(selected) if selected else None
     if not isinstance(info, dict):
         for v in saved.values():
             if isinstance(v, dict) and v.get("API_URL"):
@@ -58,9 +64,13 @@ def chat_once(
     timeout: int = 60,
     base_url: str = "",
     api_key: str = "",
+    config_id: str = "",
 ) -> str:
-    """单轮补全：返回助手文本；失败抛 LLMUnavailableError。"""
-    cfg = resolve_model_config()
+    """单轮补全：返回助手文本；失败抛 LLMUnavailableError。
+
+    config_id：指定 llm_saved_providers 键（助手记忆整理模型），空 = 跟随全局。
+    """
+    cfg = resolve_model_config(config_id)
     url = (base_url or cfg["base_url"]) + "/chat/completions"
     key = api_key or cfg["api_key"]
     body = {

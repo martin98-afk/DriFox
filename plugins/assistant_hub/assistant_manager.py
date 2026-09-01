@@ -33,6 +33,7 @@ import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -93,6 +94,10 @@ class Assistant:
     steps: Optional[int] = None
     # 对外人格（控制其他 agent 调用本助手时看到的描述）
     public_description: str = ""
+    # 经验体系（recall/record_experience 工具 + 每日反思）：默认关闭
+    experience_enabled: bool = False
+    # 记忆整理模型（llm_saved_providers 的 config_id）：空 = 跟随全局当前模型
+    utility_model: str = ""
     # 创建/更新时间戳
     created_at: str = ""
     updated_at: str = ""
@@ -114,6 +119,8 @@ class Assistant:
             "temperature": self.temperature,
             "steps": self.steps,
             "public_description": self.public_description,
+            "experience_enabled": self.experience_enabled,
+            "utility_model": self.utility_model,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -124,7 +131,7 @@ class Assistant:
         data = _safe_yaml_load(text)
         if not isinstance(data, dict):
             data = {}
-        return cls(
+        a = cls(
             id=str(data.get("id") or default_id),
             name=str(data.get("name") or ""),
             yuan=str(data.get("yuan") or "build"),
@@ -140,9 +147,14 @@ class Assistant:
             temperature=data.get("temperature"),
             steps=data.get("steps"),
             public_description=str(data.get("public_description") or ""),
+            experience_enabled=bool(data.get("experience_enabled", False)),
+            utility_model=str(data.get("utility_model") or ""),
             created_at=str(data.get("created_at") or ""),
             updated_at=str(data.get("updated_at") or ""),
         )
+        # 旧 yuan 值映射到 v2 persona id（kong→none、butter/ming→build）
+        a.yuan = _MIGRATE_YUAN.get(a.yuan, a.yuan)
+        return a
 
     @classmethod
     def new(cls, name: str, id: Optional[str] = None) -> "Assistant":
@@ -256,6 +268,37 @@ def _pick_stable_color(seed: str) -> str:
 
 def _avatar_supported_exts() -> Tuple[str, ...]:
     return ("png", "jpg", "jpeg", "webp", "svg")
+
+
+# 旧 yuan 值 → v2 persona id（v2 人格体系：build/hanako/none + 自定义）
+_MIGRATE_YUAN = {"kong": "none", "butter": "build", "ming": "build"}
+
+# core 子包加载器缓存（模块名 assistant_hub_core.<key>）
+_CORE_MODULES: Dict[str, Any] = {}
+
+
+def _load_core_module(key: str, rel: str):
+    """按文件路径加载 plugins/assistant_hub/core/ 下模块并缓存（hook/UI 共享实例语义）。"""
+    cached = _CORE_MODULES.get(key)
+    if cached is not None:
+        return cached
+    import importlib.util
+
+    path = Path(__file__).resolve().parent / "core" / rel
+    spec = importlib.util.spec_from_file_location(f"assistant_hub_core.{key}", str(path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 {path}")
+    module = importlib.util.module_from_spec(spec)
+    _CORE_MODULES[key] = module
+    sys_modules()[f"assistant_hub_core.{key}"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def sys_modules():
+    import sys
+
+    return sys.modules
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -1017,8 +1060,195 @@ class AssistantManager:
             "primary": a.primary,
             "memory_enabled": a.memory_enabled,
             "dream_auto_enabled": a.dream_auto_enabled,
+            "experience_enabled": a.experience_enabled,
             "model": a.model,
             "public_description": a.public_description,
             "created_at": a.created_at,
             "updated_at": a.updated_at,
         }
+
+    # ════════════════════════════════════════════════════════════════
+    #  v2 门面：人格 / 记忆传送带 / Dream / 经验（转发 core 子包）
+    # ════════════════════════════════════════════════════════════════
+
+    # ── core 模块懒加载 ──
+
+    def _core_persona(self):
+        return _load_core_module("persona", "persona.py")
+
+    def _core_llm(self):
+        return _load_core_module("llm_client", "llm_client.py")
+
+    def _core_compile(self):
+        return _load_core_module("memory.compile", "memory/compile.py")
+
+    def _core_dream(self):
+        return _load_core_module("memory.dream", "memory/dream.py")
+
+    def _core_experience(self):
+        return _load_core_module("experience", "experience.py")
+
+    def _core_ticker(self):
+        return _load_core_module("memory.ticker", "memory/ticker.py")
+
+    def _utility_llm(self, aid: str):
+        """返回绑定了该助手记忆整理模型的 chat_once（utility_model 空 = 跟随全局）。"""
+        a = self.get(aid)
+        config_id = (a.utility_model if a else "") or ""
+        chat_once = self._core_llm().chat_once
+
+        def _call(messages, **kwargs):
+            return chat_once(messages, config_id=config_id, **kwargs)
+
+        return _call
+
+    # ── 通用 ──
+
+    def user_name(self) -> str:
+        return self._core_persona().resolve_user_name()
+
+    def persona_registry(self):
+        return self._core_persona().PersonaRegistry.get_instance()
+
+    def assistant_dir(self, aid: str) -> Path:
+        return self._assistant_dir(aid)
+
+    def memory_dir(self, aid: str) -> Path:
+        return self._assistant_dir(aid) / "memory"
+
+    def experience_dir(self, aid: str) -> Path:
+        return self._assistant_dir(aid) / "experience"
+
+    def experience_index_path(self, aid: str) -> Path:
+        return self._assistant_dir(aid) / "experience.md"
+
+    def dream_dir(self, aid: str) -> Path:
+        return self._assistant_dir(aid) / "memory" / "dream"
+
+    # ── 人格段组装 ──
+
+    def identity_and_persona(self, aid: str) -> str:
+        """人格段：identity（落盘/模板回落）+ persona.prompt + AGENTS.md，全部 fill 变量。
+
+        persona="none" 时不注入 persona.prompt；identity/AGENTS.md 为空时回落内置模板。
+        """
+        a = self.get(aid)
+        if a is None:
+            return ""
+        persona_mod = self._core_persona()
+        reg = persona_mod.PersonaRegistry.get_instance()
+        user = self.user_name()
+        agent_name = a.name or a.id
+        fill = lambda t: reg.render(a.yuan, t, agent_name=agent_name, user_name=user)  # noqa: E731
+
+        parts: List[str] = []
+        # 1. identity（落盘优先，否则回落内置模板）
+        identity, _ = self.read_identity_source(aid)
+        if identity.strip():
+            parts.append(fill(identity.strip()))
+        # 2. persona 底座（none = 空，纯净助手）
+        persona = reg.get(a.yuan)
+        if persona is not None and persona.prompt.strip():
+            parts.append(fill(persona.prompt))
+        # 3. AGENTS.md（行为准则）
+        agents_md, _ = self.read_agents_md_source(aid)
+        if agents_md.strip():
+            parts.append(fill(agents_md.strip()))
+        return "\n\n".join(p for p in parts if p)
+
+    # ── 记忆传送带 ──
+
+    def compiled_memory(self, aid: str) -> str:
+        """assemble 产物 memory.md（缺失/空返回 ""）。"""
+        return self._core_compile().assemble(self._assistant_dir(aid))
+
+    def compile_chain(self, aid: str, *, light: bool = False) -> Dict[str, Any]:
+        """跑编译链（ticker/手动入口）。
+
+        light=True：只 compile_today + assemble（每 10 轮轻量链）
+        light=False：完整日批（daily→today→roll→facts→assemble）
+        LLM 不可用时各步静默降级（返回各步状态）。
+        """
+        aid_dir = self._assistant_dir(aid)
+        cm = self._core_compile()
+        result: Dict[str, Any] = {"ok": True, "steps": {}}
+        try:
+            llm = self._utility_llm(aid)
+        except Exception as e:
+            return {"ok": False, "error": f"llm_unavailable: {e}"}
+        try:
+            if not light:
+                # 日批顺序铁律：先蒸馏昨日草稿，再增量编译今日
+                prev_today = (aid_dir / "memory" / "today.md").read_text(encoding="utf-8") if (
+                    aid_dir / "memory" / "today.md").exists() else ""
+                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                result["steps"]["compile_daily"] = cm.compile_daily(aid_dir, prev_today, yesterday, llm=llm)
+            result["steps"]["compile_today"] = cm.compile_today(aid_dir, llm=llm)
+            if not light:
+                result["steps"]["roll_daily_window"] = {"folded": cm.roll_daily_window(aid_dir)}
+                result["steps"]["compile_facts"] = cm.compile_facts(aid_dir, llm=llm)
+            text = cm.assemble(aid_dir)
+            result["steps"]["assemble"] = {"chars": len(text)}
+            if not text:
+                result["memory_empty"] = True
+            # 同步失效旧 context 缓存
+            self.invalidate_context(aid)
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 编译链异常: {e}")
+            result["ok"] = False
+            result["error"] = str(e)
+        return result
+
+    # ── Dream ──
+
+    def dream_runner(self, aid: str):
+        return self._core_dream().DreamRunner(
+            self._assistant_dir(aid), llm=self._utility_llm(aid)
+        )
+
+    def dream_start(self, aid: str, trigger: str = "manual") -> Dict[str, Any]:
+        return self.dream_runner(aid).start(trigger)
+
+    def dream_status(self, aid: str) -> Dict[str, Any]:
+        return self.dream_runner(aid).status()
+
+    def dream_revisions(self, aid: str) -> List[Dict[str, Any]]:
+        return self.dream_runner(aid).list_revisions()
+
+    def dream_restore(self, aid: str, revision_id: str) -> Dict[str, Any]:
+        return self.dream_runner(aid).restore_revision(revision_id)
+
+    def dream_start_auto_if_eligible(self, aid: str, logical_date: str) -> Optional[Dict[str, Any]]:
+        return self.dream_runner(aid).start_automatic_if_eligible(logical_date)
+
+    # ── 经验 ──
+
+    def experience_record(self, aid: str, category: str, content: str) -> Dict[str, Any]:
+        r = self._core_experience().record_entry(self._assistant_dir(aid), category, content)
+        self.invalidate_context(aid)
+        return r
+
+    def experience_list(self, aid: str) -> List[Dict[str, Any]]:
+        return self._core_experience().list_documents(self._assistant_dir(aid))
+
+    def experience_read(self, aid: str, category: str) -> str:
+        return self._core_experience().read_document(self._assistant_dir(aid), category)
+
+    def experience_read_index(self, aid: str) -> str:
+        return self._core_experience().read_index(self._assistant_dir(aid))
+
+    def experience_delete(self, aid: str, category: str, index: int) -> Dict[str, Any]:
+        return self._core_experience().delete_entry(self._assistant_dir(aid), category, index)
+
+    def experience_reflect(self, aid: str) -> Dict[str, Any]:
+        """经验反思：从 memory.md 提炼工作心得（需 LLM；LLM 不可用静默返回）。"""
+        try:
+            llm = self._utility_llm(aid)
+        except Exception as e:
+            return {"added": 0, "items": [], "error": f"llm_unavailable: {e}"}
+        return self._core_experience().reflect(
+            self._assistant_dir(aid),
+            identity_and_persona=self.identity_and_persona(aid),
+            memory_md=self.compiled_memory(aid),
+            llm=llm,
+        )
