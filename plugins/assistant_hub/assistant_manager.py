@@ -767,6 +767,14 @@ class AssistantManager:
         path.write_text(content, encoding="utf-8")
         return True
 
+    def clear_identity(self, aid: str) -> bool:
+        """删除 identity.md 落盘（回到回落链：人格模板 → 内置模板）。"""
+        try:
+            self._identity_path(aid).unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
+
     def read_agents_md_source(self, aid: str) -> Tuple[str, bool]:
         """读取 AGENTS.md（缺失时回落：人格模板 → 内置模板），返回 (content, from_template)"""
         path = self._agents_md_path(aid)
@@ -784,6 +792,14 @@ class AssistantManager:
         self._ensure_dir(path.parent)
         path.write_text(content, encoding="utf-8")
         return True
+
+    def clear_agents_md(self, aid: str) -> bool:
+        """删除 AGENTS.md 落盘（回到回落链：人格模板 → 内置模板）。"""
+        try:
+            self._agents_md_path(aid).unlink(missing_ok=True)
+            return True
+        except OSError:
+            return False
 
     def read_public_md(self, aid: str) -> str:
         path = self._public_md_path(aid)

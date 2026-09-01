@@ -123,28 +123,79 @@ class TestParseBlocksTag:
         assert blocks[0]["completed"] is False
 
 
-# ── assistant_hub <mood> 渲染器 ─────────────────────────
+# ── assistant_hub 人格标签卡（mood / plan）───────────────
 
 
-class TestMoodCardRenderer:
-    def test_four_sections(self):
-        from plugins.assistant_hub.ui import _render_mood_card
+class TestPersonaTagCards:
+    def test_mood_card_four_sections(self):
+        from plugins.assistant_hub.ui import _make_tag_renderer
 
+        render = _make_tag_renderer("mood")
         content = "感受：开心\n联想：昨天的对话\n反思：没有偏差\n意志：温柔而坚定"
-        html = _render_mood_card(content, {"tag": "mood", "completed": True, "compact": False})
+        html = render(content, {"tag": "mood", "completed": True, "compact": False})
         assert "MOOD" in html
         for kw in ("感受", "联想", "反思", "意志"):
             assert kw in html
+        # 布局 table 必须带 layout-table class（主程序全局表格样式按此排除）
+        assert 'class="layout-table"' in html
+        # 标题与副题同行（之间无 <br>）
+        header_part = html.split("<br>")[0]
+        assert "MOOD" in header_part and "内心独白" in header_part
+
+    def test_font_size_scales_with_system(self):
+        """字号必须经 scale_font_size 派生（跟随系统 UI 字号），禁止写死 px。"""
+        import re
+
+        from app.utils.design_tokens import scale_font_size
+        from plugins.assistant_hub.ui import _make_tag_renderer
+
+        html = _make_tag_renderer("mood")("感受：x", {"tag": "mood", "completed": True})
+        sizes = {int(m) for m in re.findall(r"font-size:(\d+)px", html)}
+        # 渲染器使用的基准集合（值 13 / 键名与标题 12 / 副题 11），每个输出字号
+        # 都必须等于某基准经系统缩放后的结果
+        expected = {scale_font_size(b) for b in (11, 12, 13)}
+        assert sizes and sizes.issubset(expected), f"{sizes} ⊄ {expected}"
+
+    def test_plan_card_skin(self):
+        from plugins.assistant_hub.ui import _make_tag_renderer
+
+        render = _make_tag_renderer("plan")
+        content = "目标：修 bug\n路径：先复现\n风险：改错文件\n取舍：小步提交"
+        html = render(content, {"tag": "plan", "completed": True, "compact": False})
+        assert "PLAN" in html
+        for kw in ("目标", "路径", "风险", "取舍"):
+            assert kw in html
+        assert "#6c8ebf" in html  # plan 靛蓝皮肤
+
+    def test_unknown_tag_neutral_skin(self):
+        from plugins.assistant_hub.ui import _make_tag_renderer
+
+        render = _make_tag_renderer("custom_x")
+        html = render("状态：正常", {"tag": "custom_x", "completed": True})
+        assert "CUSTOM_X" in html
+        assert 'class="layout-table"' in html
 
     def test_xss_escaped(self):
-        from plugins.assistant_hub.ui import _render_mood_card
+        from plugins.assistant_hub.ui import _make_tag_renderer
 
-        html = _render_mood_card("感受：<script>alert(1)</script>", {"completed": True})
+        render = _make_tag_renderer("mood")
+        html = render("感受：<script>alert(1)</script>", {"tag": "mood", "completed": True})
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
 
     def test_streaming_placeholder(self):
-        from plugins.assistant_hub.ui import _render_mood_card
+        from plugins.assistant_hub.ui import _make_tag_renderer
 
-        html = _render_mood_card("感受：开心", {"completed": False})
-        assert "内心独白中" in html
+        mood_html = _make_tag_renderer("mood")("感受：开心", {"tag": "mood", "completed": False})
+        assert "解析中" in mood_html
+        plan_html = _make_tag_renderer("plan")("目标：x", {"tag": "plan", "completed": False})
+        assert "推演中" in plan_html
+
+    def test_persona_block_tags_fallback(self):
+        """PersonaRegistry 不可用时回退内置 mood/plan。"""
+        from plugins.assistant_hub.ui import _persona_block_tags
+
+        tags = _persona_block_tags()
+        assert isinstance(tags, list) and tags
+        for t in tags:
+            assert t == t.lower()

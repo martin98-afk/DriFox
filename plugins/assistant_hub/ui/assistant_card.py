@@ -585,17 +585,30 @@ class AssistantCardWidget(QWidget):
         a = self._mgr.get(self._active_aid)
         if not a or a.yuan == pid:
             return
+        # 身份/AGENTS 回落链依赖人格专属模板：若编辑框未被用户改过（内容 == 落盘/回落值），
+        # 切人格时清掉固化副本落盘文件 → 回落新人格模板；真自定义则保留并提示
+        identity, _ = self._mgr.read_identity_source(a.id)
+        agents_md, _ = self._mgr.read_agents_md_source(a.id)
+        cur_identity, cur_agents = self._about.texts()
+        identity_custom = cur_identity.strip() != identity.strip()
+        agents_custom = cur_agents.strip() != agents_md.strip()
+        if not identity_custom:
+            self._mgr.clear_identity(a.id)
+        if not agents_custom:
+            self._mgr.clear_agents_md(a.id)
         a.yuan = pid
         self._mgr.update(a)
         self._mgr.invalidate_context(a.id)
         self._about.set_persona(pid)
         self._refresh_persona_avatar()
-        # 身份/AGENTS 回落链依赖人格专属模板 → 切人格后重读刷新编辑框
-        # （bind_texts 内部 suspend 自动保存，不会误写盘）
-        identity, _ = self._mgr.read_identity_source(a.id)
-        agents_md, _ = self._mgr.read_agents_md_source(a.id)
-        self._about.bind_texts(identity, agents_md)
-        self._notify(f"人格已切换：{'无（纯净助手）' if pid == 'none' else pid}")
+        # 重读新人格回落内容刷新编辑框（bind_texts 内部 suspend 自动保存，不会误写盘）
+        new_identity, _ = self._mgr.read_identity_source(a.id)
+        new_agents_md, _ = self._mgr.read_agents_md_source(a.id)
+        self._about.bind_texts(new_identity, new_agents_md)
+        if identity_custom or agents_custom:
+            self._notify("身份/AGENTS 已自定义，切换人格不覆盖")
+        else:
+            self._notify(f"人格已切换：{'无（纯净助手）' if pid == 'none' else pid}")
 
     def _on_persona_manage(self) -> None:
         reg = self._mgr.persona_registry()
@@ -605,12 +618,20 @@ class AssistantCardWidget(QWidget):
         self._reload_all(select_aid=self._active_aid)
 
     def _on_about_save(self, identity: str, agents_md: str) -> None:
-        """实时保存（节流触发）：静默落盘，不弹提示打断编辑。"""
+        """实时保存（节流触发）：静默落盘，不弹提示打断编辑。
+
+        防固化：内容与当前回落值一致（未真正自定义）时不写盘——否则回落态
+        模板副本会被固化成自定义文件，切人格永远不跟随。
+        """
         aid = self._active_aid
         if not aid:
             return
-        self._mgr.write_identity(aid, identity)
-        self._mgr.write_agents_md(aid, agents_md)
+        cur_identity, _ = self._mgr.read_identity_source(aid)
+        if identity.strip() != cur_identity.strip():
+            self._mgr.write_identity(aid, identity)
+        cur_agents, _ = self._mgr.read_agents_md_source(aid)
+        if agents_md.strip() != cur_agents.strip():
+            self._mgr.write_agents_md(aid, agents_md)
         self._mgr.invalidate_context(aid)
 
     # ══════════════════════════════════════════════════

@@ -548,6 +548,10 @@ class AboutSection(_Section):
         self._agents_md.setPlainText(agents_md)
         self._suspend_autosave = False
 
+    def texts(self) -> tuple:
+        """当前编辑框内容 (identity, agents_md)（切人格时判断是否被用户改过用）。"""
+        return self._identity.toPlainText(), self._agents_md.toPlainText()
+
 
 # ── 记忆分区 ────────────────────────────────────────────
 

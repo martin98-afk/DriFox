@@ -190,8 +190,11 @@ def _promote_build_system_prompt_hook() -> None:
         logger.warning(f"[assistant_hub] 提升 hook 顺序失败: {e}")
 
 
-def _mood_sections(content: str) -> List[tuple]:
-    """解析 mood 块「键：值」行 → [(key, value)]；无键行 key 为空串。"""
+def _kv_sections(content: str) -> List[tuple]:
+    """解析标签块「键：值」行 → [(key, value)]；无键行 key 为空串。
+
+    mood（感受/联想/反思/意志）与 plan（目标/路径/风险/取舍）同构。
+    """
     sections: List[tuple] = []
     for raw in content.strip().splitlines():
         line = raw.strip()
@@ -208,51 +211,111 @@ def _mood_sections(content: str) -> List[tuple]:
     return sections
 
 
-# mood 卡点缀色（玫瑰灰，明暗主题下均可读）
-_MOOD_ACCENT = "#c9767e"
+# 人格标签卡皮肤：title（标签名）/ subtitle（副题）/ icon（HTML entity）/ accent（点缀色，
+# 固定色明暗主题均可读；文字主色继承消息卡片主题色）
+_TAG_SKINS = {
+    "mood": {"title": "MOOD", "subtitle": "内心独白", "icon": "&#9829;", "accent": "#c9767e"},
+    "plan": {"title": "PLAN", "subtitle": "行动推演", "icon": "&#9678;", "accent": "#6c8ebf"},
+}
+_NEUTRAL_SKIN = {"title": "", "subtitle": "", "icon": "&#9671;", "accent": "#8a8f98"}
+
+# 副标题兜底灰（不透明度写法 QTextDocument 不支持，用固定灰）
+_MUTED = "#9aa0a8"
 
 
-def _render_mood_card(content: str, ctx: dict) -> str:
-    """<mood> 内心独白卡渲染器（hanako 人格 MOOD 块协议）。
+def _tag_skin(tag: str) -> dict:
+    skin = _TAG_SKINS.get(tag) or dict(_NEUTRAL_SKIN)
+    if not skin["title"]:
+        skin["title"] = tag.upper()
+    return skin
 
-    纯函数：可在后台渲染线程调用，禁止触碰 Qt widget。输出为单格
-    <table> 结构 HTML，双端兼容 QLabel 富文本（QTextDocument）与
-    QWebEngineView。文字色继承消息卡片主题色，仅点缀用固定暖色。
+
+def _render_kv_tag_card(content: str, ctx: dict, skin: dict) -> str:
+    """人格标签块通用键值卡渲染核心。
+
+    纯函数：可在后台渲染线程调用，禁止触碰 Qt widget。结构为单格
+    <table class="layout-table">（主程序全局表格样式与滚动包裹均排除
+    layout-table，避免命中斑马纹/边框/圆角外框），td 内 <br> 分行，
+    双端兼容 QLabel 富文本（QTextDocument）与 QWebEngineView。
 
     ctx: {tag, completed, compact}；流式未闭合（completed=False）渲染
     单行占位，避免逐 chunk 闪大卡。
     """
     import html as _html
 
+    from app.utils.design_tokens import scale_font_size
+
+    accent = skin["accent"]
+    title_esc = _html.escape(skin["title"])
+    subtitle_esc = _html.escape(skin["subtitle"])
+    # 字号跟随系统 UI 字号缩放：正文较消息卡正文（14）稍小一档
+    body_sz = scale_font_size(13)
+    key_sz = scale_font_size(12)
+    title_sz = scale_font_size(12)
+    sub_sz = scale_font_size(11)
     if not bool(ctx.get("completed", True)):
+        verb = "推演中" if subtitle_esc == "行动推演" else "解析中"
         return (
-            '<table width="100%" style="margin:4px 0; border-collapse:collapse;">'
-            f'<tr><td style="border-left:3px solid {_MOOD_ACCENT}; padding:4px 10px;">'
-            f'<span style="color:{_MOOD_ACCENT}; font-size:12px;">&#9829; mood</span>'
-            '<span style="font-size:12px;"> · 内心独白中&#8230;</span>'
+            '<table class="layout-table" border="0" cellspacing="0" cellpadding="0" width="100%" '
+            'style="margin:6px 0; border:none; background:transparent;">'
+            '<tr><td style="border:none; border-left:2px solid '
+            f'{accent}; padding:3px 0 3px 12px; line-height:1.6;">'
+            f'<span style="color:{accent}; font-size:{title_sz}px; font-weight:bold;">{skin["icon"]} {title_esc}</span>'
+            f'<span style="color:{_MUTED}; font-size:{sub_sz}px;"> &#183; {verb}&#8230;</span>'
             "</td></tr></table>"
         )
 
-    rows: List[str] = []
-    for key, val in _mood_sections(content):
+    # 标题 + 副题同一行（不换行），键值行以 <br> 分隔
+    header = (
+        f'<span style="color:{accent}; font-size:{title_sz}px; font-weight:bold;">{skin["icon"]} {title_esc}</span>'
+    )
+    if subtitle_esc:
+        header += f'<span style="color:{_MUTED}; font-size:{sub_sz}px;"> &#183; {subtitle_esc}</span>'
+    body: List[str] = []
+    for key, val in _kv_sections(content):
         key_esc = _html.escape(key)
         val_esc = _html.escape(val)
         if key:
-            rows.append(
-                '<tr><td style="padding:1px 10px;">'
-                f'<span style="color:{_MOOD_ACCENT}; font-size:12px;">{key_esc}</span>'
-                f'<span style="font-size:13px;">&nbsp;&nbsp;{val_esc}</span>'
-                "</td></tr>"
+            body.append(
+                f'<span style="color:{accent}; font-size:{key_sz}px;">{key_esc}</span>'
+                f'<span style="font-size:{body_sz}px;">&nbsp;&nbsp;{val_esc}</span>'
             )
         else:
-            rows.append(f'<tr><td style="padding:1px 10px;"><span style="font-size:13px;">{val_esc}</span></td></tr>')
-    header = (
-        f'<tr><td style="border-left:3px solid {_MOOD_ACCENT}; padding:5px 10px 2px;">'
-        f'<span style="color:{_MOOD_ACCENT}; font-size:12px; font-weight:bold;">&#9829; MOOD</span>'
-        '<span style="font-size:11px;"> · 内心独白</span>'
-        "</td></tr>"
+            body.append(f'<span style="font-size:{body_sz}px;">{val_esc}</span>')
+    inner = "<br>".join([header] + body)
+    return (
+        '<table class="layout-table" border="0" cellspacing="0" cellpadding="0" width="100%" '
+        'style="margin:6px 0; border:none; background:transparent;">'
+        '<tr><td style="border:none; border-left:2px solid '
+        f'{accent}; padding:3px 0 3px 12px; line-height:1.6;">{inner}</td></tr></table>'
     )
-    return f'<table width="100%" style="margin:4px 0; border-collapse:collapse;">{header}{"".join(rows)}</table>'
+
+
+def _make_tag_renderer(tag: str):
+    """为指定 tag 生成渲染闭包（persona tag → 皮肤映射）。"""
+    skin = _tag_skin(tag)
+
+    def _render(content: str, ctx: dict) -> str:
+        return _render_kv_tag_card(content, ctx, skin)
+
+    return _render
+
+
+def _persona_block_tags() -> List[str]:
+    """收集全部人格 frontmatter 声明的块标签（去重小写排序）。
+
+    读 PersonaRegistry 失败时回退内置 mood/plan（v2 人格的两个预置 tag）。
+    """
+    try:
+        from assistant_hub_manager import AssistantManager
+
+        reg = AssistantManager.get_instance().persona_registry()
+        tags = sorted({p.tag.strip().lower() for p in reg.list_all() if p.tag and p.tag.strip()})
+        if tags:
+            return tags
+    except Exception as e:
+        logger.debug(f"[assistant_hub] 读取 persona tag 失败，回退内置列表: {e}")
+    return ["mood", "plan"]
 
 
 def register_ui(registry) -> None:
@@ -295,13 +358,14 @@ def register_ui(registry) -> None:
         priority=10,
     )
 
-    # ── <mood> 内心独白卡（hanako 人格 MOOD 块协议）──
-    registry.register_tag_renderer(
-        plugin_name="assistant_hub",
-        tag_name="mood",
-        render_func=_render_mood_card,
-        priority=10,
-    )
+    # ── 人格块标签卡（mood/plan 等，按 persona frontmatter tag 动态注册）──
+    for _tag in _persona_block_tags():
+        registry.register_tag_renderer(
+            plugin_name="assistant_hub",
+            tag_name=_tag,
+            render_func=_make_tag_renderer(_tag),
+            priority=10,
+        )
 
     # ── Gitee 同步内容：助手信息 + 记忆 ──
     _register_sync_provider()
@@ -309,4 +373,7 @@ def register_ui(registry) -> None:
     # ── BuildSystemPrompt hook 顺序提升（先于系统身份注入）──
     _promote_build_system_prompt_hook()
 
-    logger.info("[assistant_hub] UI 组件已注册：titlebar_tab(助手) + floating_card(assistant_hub/full) + gitee sync")
+    logger.info(
+        f"[assistant_hub] UI 组件已注册：titlebar_tab(助手) + floating_card(assistant_hub/full)"
+        f" + tag_renderer({_persona_block_tags()}) + gitee sync"
+    )

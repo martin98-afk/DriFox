@@ -10,50 +10,30 @@
   consolidate_messages 白名单剥掉）；卡片渲染时路径失效则从 content 的
   image 块按序解码 data URI 兜底（附件块在前、工具注入块在后，顺序可靠）
 
-覆盖点
-------
-1. add_user_message 透传 ``_image_attachments``
-2. normalize_message 白名单保留 ``_image_attachments``
-3. set_image_attachments：本地路径 / 失效路径 + data URI 兜底 / 全部失效
-4. _extract_image_uris 三种 image 块格式（image_url 字典 / 字符串 / image base64）
-5. 工具注入块不影响兜底取序（前 N 块对齐附件数）
+测试范围
+-------
+- 数据层：add_user_message 标记透传、normalize_message 白名单保留
+- 决策层：plan_image_attachment_sources / extract_image_data_uris 纯函数
+- UI 薄壳（缩略图构建、addWidget、点击放大）为 Qt 侧人工验证——pytest +
+  offscreen 环境下 QPixmap 像素操作触发 native crash（环境固有问题）
 """
 
 import os
 import sys
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import QApplication
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from app.core.chat_session import ChatSession
 from app.core.message_content import normalize_message
-from app.widgets.message_card import MessageCard
+from app.widgets.message_card import extract_image_data_uris, plan_image_attachment_sources
 
 
-def _ensure_qapp():
-    return QApplication.instance() or QApplication(sys.argv)
-
-
-def _make_card() -> MessageCard:
-    _ensure_qapp()
-    return MessageCard(role="user")
-
-
-def _make_png(tmp_path, name: str = "img.png") -> str:
-    """生成真实 PNG 文件（缩略图加载需要可解码数据）。"""
-    path = os.path.join(str(tmp_path), name)
-    pm = QPixmap(4, 4)
-    pm.fill(Qt.red)
-    assert pm.save(path, "PNG")
-    return path
-
-
-def _data_uri_of(path: str) -> str:
-    import base64
-
-    with open(path, "rb") as f:
-        return "data:image/png;base64," + base64.b64encode(f.read()).decode("ascii")
+def _data_uri_png() -> str:
+    """1x1 红色 PNG 的 data URI（固定字节，无需生成文件）"""
+    return (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
 
 
 # ==================== 数据层：session 消息标记 ====================
@@ -62,15 +42,13 @@ def _data_uri_of(path: str) -> str:
 def test_add_user_message_persists_image_attachments():
     s = ChatSession(name="t")
     s.add_user_message("看图", _image_attachments=["D:/a.png", "D:/b.png"])
-    msg = s.messages[-1]
-    assert msg["_image_attachments"] == ["D:/a.png", "D:/b.png"]
+    assert s.messages[-1]["_image_attachments"] == ["D:/a.png", "D:/b.png"]
 
 
 def test_add_user_message_skips_empty_attachments():
     s = ChatSession(name="t")
     s.add_user_message("纯文本", _image_attachments=[])
-    msg = s.messages[-1]
-    assert "_image_attachments" not in msg
+    assert "_image_attachments" not in s.messages[-1]
 
 
 def test_normalize_message_keeps_image_attachments():
@@ -86,53 +64,65 @@ def test_normalize_message_drops_invalid_attachments():
     assert "_image_attachments" not in msg
 
 
-# ==================== UI 层：缩略图条 ====================
+# ==================== 决策层：渲染来源规划 ====================
 
 
-def test_set_image_attachments_with_existing_paths(tmp_path):
-    p1, p2 = _make_png(tmp_path, "a.png"), _make_png(tmp_path, "b.png")
-    card = _make_card()
-    card.set_image_attachments([p1, p2])
-    assert card._image_strip.isVisible()
-    # 2 张缩略图 + 末尾 stretch
-    assert card._image_strip_lay.count() == 3
+def test_plan_existing_path_uses_file(tmp_path):
+    """路径存在（发送当下的常态）→ 缩略图走本地文件加载"""
+    p = os.path.join(str(tmp_path), "a.png")
+    with open(p, "wb") as f:
+        f.write(b"fake")
+    assert plan_image_attachment_sources([p]) == [(p, None, p)]
 
 
-def test_set_image_attachments_fallback_to_data_uri(tmp_path):
-    """路径失效 → 按序取 content 前 N 个 image 块 data URI 解码兜底。"""
-    p = _make_png(tmp_path, "gone.png")
-    uri = _data_uri_of(p)
-    card = _make_card()
+def test_plan_missing_path_falls_back_in_order():
+    """路径失效（恢复会话 temp 被清理）→ 按序取 content 前 N 个 image 块兜底。
+
+    附件块在前、工具注入块在后追加：N=1 时只取序 0（附件），
+    序 1 的注入块不得被消费。
+    """
+    uri = _data_uri_png()
     content = [
         {"type": "text", "text": "看图"},
-        {"type": "image_url", "image_url": {"url": uri}},  # 附件块
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},  # 工具注入块
+        {"type": "image_url", "image_url": {"url": uri}},  # 附件块（序 0）
+        {"type": "image_url", "image_url": {"url": uri}},  # 工具注入块（序 1）
     ]
-    card.set_image_attachments([os.path.join(str(tmp_path), "missing.png")], fallback_content=content)
-    assert card._image_strip.isVisible()
-    # 只取前 1 块（附件），工具注入块不显示
-    assert card._image_strip_lay.count() == 2  # 1 缩略图 + stretch
+    plan = plan_image_attachment_sources(["D:/missing.png"], fallback_content=content)
+    assert plan == [(None, uri, "D:/missing.png")]
 
 
-def test_set_image_attachments_all_missing_no_fallback(tmp_path):
-    card = _make_card()
-    card.set_image_attachments([os.path.join(str(tmp_path), "missing.png")])
-    assert not card._image_strip.isVisible()
+def test_plan_mixed_existing_and_fallback():
+    """两张附件一张存活一张失效 → 各走各的来源"""
+    p = os.path.join(str(tmp_path_d()), "alive.png")
+    with open(p, "wb") as f:
+        f.write(b"fake")
+    uri = _data_uri_png()
+    content = [{"type": "image_url", "image_url": {"url": uri}}]
+    plan = plan_image_attachment_sources(["D:/gone.png", p], fallback_content=content)
+    assert plan == [(None, uri, "D:/gone.png"), (p, None, p)]
 
 
-def test_set_image_attachments_empty_or_invalid():
-    card = _make_card()
-    card.set_image_attachments(None)
-    card.set_image_attachments([])
-    card.set_image_attachments([None, "", 123])
-    assert not card._image_strip.isVisible()
+def tmp_path_d():
+    import tempfile
+
+    return tempfile.mkdtemp()
+
+
+def test_plan_all_missing_no_fallback():
+    assert plan_image_attachment_sources(["D:/missing.png"]) == []
+
+
+def test_plan_invalid_input():
+    assert plan_image_attachment_sources(None) == []
+    assert plan_image_attachment_sources([]) == []
+    assert plan_image_attachment_sources([None, "", 123]) == []
 
 
 # ==================== image 块格式提取 ====================
 
 
 def test_extract_image_uris_three_formats():
-    uri = "data:image/png;base64,AAAA"
+    uri = _data_uri_png()
     content = [
         {"type": "text", "text": "x"},
         {"type": "image_url", "image_url": {"url": uri}},
@@ -140,11 +130,11 @@ def test_extract_image_uris_three_formats():
         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
         {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},  # 非 data URI 排除
     ]
-    uris = MessageCard._extract_image_uris(content)
+    uris = extract_image_data_uris(content)
     assert len(uris) == 3
     assert all(u.startswith("data:image") for u in uris)
 
 
 def test_extract_image_uris_non_list():
-    assert MessageCard._extract_image_uris(None) == []
-    assert MessageCard._extract_image_uris("text") == []
+    assert extract_image_data_uris(None) == []
+    assert extract_image_data_uris("text") == []

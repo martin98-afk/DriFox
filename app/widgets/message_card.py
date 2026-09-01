@@ -70,18 +70,18 @@ from PyQt5.QtGui import (
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView
 from PyQt5.QtWidgets import (
-    QDialog,
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
-    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
+    MaskDialogBase,
     SegmentedWidget,
     TransparentToolButton,
 )
@@ -4073,7 +4073,7 @@ class CodeWebViewer(QWebEngineView):
                 p {{ margin: 8px 0; }}
 
                 /* ── 原生 <table> 样式（保留 display:table，自动拉伸填满） ── */
-                table:not(.code-table) {{
+                table:not(.code-table):not(.layout-table) {{
                     width: 100%;
                     border-collapse: collapse;
                     margin: 10px 0;
@@ -4084,7 +4084,7 @@ class CodeWebViewer(QWebEngineView):
                     font-family: '{font_family}', sans-serif;
                     font-size: {body_font_size}px;
                 }}
-                table:not(.code-table) th {{
+                table:not(.code-table):not(.layout-table) th {{
                     /* 原为硬编码 rgba(255,255,255,0.04)：浅色主题下白叠白，表头
                        与表体完全无分界。改用主题感知的 --row-header。 */
                     background: var(--row-header);
@@ -4094,16 +4094,16 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text) !important;
                     border-bottom: 1px solid var(--border-strong);
                 }}
-                table:not(.code-table) td {{
+                table:not(.code-table):not(.layout-table) td {{
                     padding: 8px 12px;
                     border-bottom: 1px solid var(--border);
                     color: var(--text-secondary) !important;
                 }}
                 /* 原为硬编码白色叠加，浅色主题不可见 → 改用已定义的语义变量 */
-                table:not(.code-table) tr:nth-child(even) {{ background: var(--row-alt); }}
-                table:not(.code-table) tr:hover {{ background: var(--row-hover); }}
+                table:not(.code-table):not(.layout-table) tr:nth-child(even) {{ background: var(--row-alt); }}
+                table:not(.code-table):not(.layout-table) tr:hover {{ background: var(--row-hover); }}
                 /* 表体行 hover 时文字提亮，增强可扫描性 */
-                table:not(.code-table) tr:hover td {{ color: var(--text) !important; }}
+                table:not(.code-table):not(.layout-table) tr:hover td {{ color: var(--text) !important; }}
 
                 /* ── 表格滚动容器（JS 在 updateContent 中自动包裹每个 <table>） ── */
                 .table-scroll-wrapper {{
@@ -5746,7 +5746,7 @@ class CodeWebViewer(QWebEngineView):
                         document.body.scrollTop = Math.min(_prevScrollTop, _maxScroll);
 
                         // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
-                        container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                        container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
                             // 已被包裹则跳过（如多次调用 updateContent）
                             if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
                             var wrapper = document.createElement('div');
@@ -5921,7 +5921,7 @@ class CodeWebViewer(QWebEngineView):
                     // #content-placeholder，视觉上"思考内容在正文闪现，随后消失回折叠区"。
                     if (window._toolCompactMode) reorganizeContent();
                     // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
-                    container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                    container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
                         if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
                         var wrapper = document.createElement('div');
                         wrapper.className = 'table-scroll-wrapper';
@@ -5991,7 +5991,7 @@ class CodeWebViewer(QWebEngineView):
                     tailDiv.innerHTML = html;
                     container.appendChild(tailDiv);
                     // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
-                    container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                    container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
                         if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
                         var wrapper = document.createElement('div');
                         wrapper.className = 'table-scroll-wrapper';
@@ -9297,6 +9297,111 @@ class PlainTextViewer(QWidget):
             parent = parent.parent()
 
 
+def extract_image_data_uris(content) -> list:
+    """从 multimodal content 按序提取 image 块的 data URI（仅 data: 格式）。
+
+    支持 chat/completions（image_url.url 为 dict/str）、Responses（input_image）、
+    Anthropic（image.source.base64）三种块格式。
+    """
+    uris = []
+    if not isinstance(content, list):
+        return uris
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        url = ""
+        if btype == "image_url":
+            img = block.get("image_url", {}) or {}
+            url = str(img.get("url", "") or "") if isinstance(img, dict) else str(img)
+        elif btype == "input_image":
+            url = str(block.get("image_url", "") or "")
+        elif btype == "image":
+            src = block.get("source", {}) or {}
+            if isinstance(src, dict) and src.get("type") == "base64":
+                url = f"data:{src.get('media_type', 'image/png')};base64,{src.get('data', '')}"
+        if url.startswith("data:image"):
+            uris.append(url)
+    return uris
+
+
+def plan_image_attachment_sources(paths, fallback_content=None) -> list:
+    """规划图片附件缩略图渲染来源（纯函数，无 Qt 依赖，便于测试）。
+
+    路径优先；路径失效（如粘贴图 temp 被系统清理）时按序取 fallback_content
+    中前 N 个 image 块的 data URI 兜底——附件块在前、工具注入块在后追加，
+    序号对齐可靠，注入块天然不进入预览。
+
+    Returns:
+        list[tuple[source, data_uri, path]]：source 为本地路径（data_uri 为 None）
+        或兜底 data URI（source 为 None）；无法渲染的项不出现。
+    """
+    if not isinstance(paths, list):
+        return []
+    image_uris = extract_image_data_uris(fallback_content)
+    plan = []
+    for i, path in enumerate(paths):
+        if not isinstance(path, str) or not path:
+            continue
+        if os.path.exists(path):
+            plan.append((path, None, path))
+        elif i < len(image_uris):
+            plan.append((None, image_uris[i], path))
+    return plan
+
+
+class _ImagePreviewDialog(MaskDialogBase):
+    """图片查看弹窗：Mask 遮罩风格，完整等比显示（适配屏幕可用区 60%），无滚动，点遮罩关闭。"""
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        Colors.refresh()
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 120))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 160))
+
+        self.widget.setObjectName("imagePreviewWidget")
+        self.widget.setStyleSheet(f"""
+            #imagePreviewWidget {{
+                background-color: #1E1E1E;
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        lay = QVBoxLayout(self.widget)
+        lay.setContentsMargins(6, 6, 6, 6)
+
+        # 等比适配屏幕可用区 60%：完整显示、非原图尺寸、无滚动
+        screen = QApplication.primaryScreen().availableGeometry()
+        scaled = pixmap.scaled(
+            int(screen.width() * 0.6),
+            int(screen.height() * 0.6),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        img_label = QLabel(self.widget)
+        img_label.setPixmap(scaled)
+        img_label.setScaledContents(False)
+        lay.addWidget(img_label)
+
+        # MaskDialogBase 的 QHBoxLayout 会把 widget 拉伸到全屏：
+        # 取出后自管几何并居中（与 ConfirmDialog._fit_widget_to_content 同法）
+        self.layout().removeWidget(self.widget)
+        self.widget.setParent(self)
+        self.widget.adjustSize()
+        self._center_widget()
+
+    def _center_widget(self):
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._center_widget()
+
+
 class MessageCard(SimpleCardWidget):
     heightChanged = pyqtSignal(int)
     deleteRequested = pyqtSignal()
@@ -10362,55 +10467,19 @@ class MessageCard(SimpleCardWidget):
         Args:
             paths: 附件图片本地路径列表。发送时来自输入区附件；恢复会话时
                    来自 session 消息的 ``_image_attachments`` 标记。
-            fallback_content: 恢复会话时的原始消息 content（multimodal list）。
-                   路径文件已失效（如粘贴图 temp 被系统清理）时，按序取
-                   content 中前 N 个 image 块的 data URI 解码兑底
-                   （附件块在前、工具注入块在后追加，顺序可靠）。
+            fallback_content: 恢复会话时的原始消息 content（multimodal list），
+                   传给 plan_image_attachment_sources 做路径失效兑底。
         """
-        if not isinstance(paths, list) or not paths:
-            return
-        image_uris = self._extract_image_uris(fallback_content)
-        shown = 0
-        for i, path in enumerate(paths):
-            if not isinstance(path, str) or not path:
-                continue
-            if os.path.exists(path):
-                source, data_uri = path, None
-            elif i < len(image_uris):
-                source, data_uri = None, image_uris[i]
-            else:
-                continue
+        # stretch 放头部：缩略图右对齐（与用户气泡 AlignRight 同侧）
+        thumb_count = 0
+        for source, data_uri, path in plan_image_attachment_sources(paths, fallback_content):
             thumb = self._build_image_thumb(source, data_uri, path)
             if thumb is not None:
                 self._image_strip_lay.addWidget(thumb)
-                shown += 1
-        if shown:
-            self._image_strip_lay.addStretch()
+                thumb_count += 1
+        if thumb_count:
+            self._image_strip_lay.insertStretch(0)
             self._image_strip.setVisible(True)
-
-    @staticmethod
-    def _extract_image_uris(content) -> list:
-        """从 multimodal content 按序提取 image 块的 data URI（仅 data: 格式）"""
-        uris = []
-        if not isinstance(content, list):
-            return uris
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            btype = block.get("type")
-            url = ""
-            if btype == "image_url":
-                img = block.get("image_url", {}) or {}
-                url = str(img.get("url", "") or "") if isinstance(img, dict) else str(img)
-            elif btype == "input_image":
-                url = str(block.get("image_url", "") or "")
-            elif btype == "image":
-                src = block.get("source", {}) or {}
-                if isinstance(src, dict) and src.get("type") == "base64":
-                    url = f"data:{src.get('media_type', 'image/png')};base64,{src.get('data', '')}"
-            if url.startswith("data:image"):
-                uris.append(url)
-        return uris
 
     def _build_image_thumb(self, source, data_uri, path):
         """构建单张缩略图 QLabel（等比 80px 高）；加载失败返回 None
@@ -10433,27 +10502,14 @@ class MessageCard(SimpleCardWidget):
         thumb.setFixedHeight(80)
         thumb.setToolTip(os.path.basename(path))
         thumb.setCursor(Qt.PointingHandCursor)
-        thumb.mousePressEvent = lambda e, pm=pixmap, p=path: self._show_image_dialog(pm, p)
+        thumb.mousePressEvent = lambda e, pm=pixmap: self._show_image_dialog(pm)
         return thumb
 
-    def _show_image_dialog(self, pixmap, path):
-        """点击缩略图放大查看（模态轻量弹窗，滚动支持大图）"""
+    def _show_image_dialog(self, pixmap):
+        """点击缩略图放大查看（Mask 遮罩弹窗，完整等比显示、无滚动、点遮罩关闭）"""
         if pixmap is None or pixmap.isNull():
             return
-        dlg = QDialog(self)
-        dlg.setWindowTitle(os.path.basename(path) or "图片")
-        dlg.setModal(True)
-        lay = QVBoxLayout(dlg)
-        lay.setContentsMargins(8, 8, 8, 8)
-        scroll = QScrollArea(dlg)
-        scroll.setWidgetResizable(True)
-        img_label = QLabel()
-        img_label.setPixmap(pixmap)
-        scroll.setWidget(img_label)
-        lay.addWidget(scroll)
-        top = self.window()
-        dlg.resize(min(900, top.width() - 80), min(640, top.height() - 120))
-        dlg.exec_()
+        _ImagePreviewDialog(pixmap, parent=self.window()).exec_()
 
     def _ensure_user_viewer(self) -> None:
         """懒创建用户气泡 PlainTextViewer（修 #2）。

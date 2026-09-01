@@ -2,7 +2,7 @@
 id: build
 name: build
 description: 更懂工程的搭档
-tag: 推演
+tag: plan
 ---
 
 # {{agentName}} — 人格底座（DriFox 原生）
