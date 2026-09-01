@@ -180,6 +180,71 @@ def _promote_build_system_prompt_hook() -> None:
         logger.warning(f"[assistant_hub] 提升 hook 顺序失败: {e}")
 
 
+def _mood_sections(content: str) -> List[tuple]:
+    """解析 mood 块「键：值」行 → [(key, value)]；无键行 key 为空串。"""
+    sections: List[tuple] = []
+    for raw in content.strip().splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if "：" in line:
+            key, _, val = line.partition("：")
+            sections.append((key.strip(), val.strip()))
+        elif ":" in line:
+            key, _, val = line.partition(":")
+            sections.append((key.strip(), val.strip()))
+        else:
+            sections.append(("", line))
+    return sections
+
+
+# mood 卡点缀色（玫瑰灰，明暗主题下均可读）
+_MOOD_ACCENT = "#c9767e"
+
+
+def _render_mood_card(content: str, ctx: dict) -> str:
+    """<mood> 内心独白卡渲染器（hanako 人格 MOOD 块协议）。
+
+    纯函数：可在后台渲染线程调用，禁止触碰 Qt widget。输出为单格
+    <table> 结构 HTML，双端兼容 QLabel 富文本（QTextDocument）与
+    QWebEngineView。文字色继承消息卡片主题色，仅点缀用固定暖色。
+
+    ctx: {tag, completed, compact}；流式未闭合（completed=False）渲染
+    单行占位，避免逐 chunk 闪大卡。
+    """
+    import html as _html
+
+    if not bool(ctx.get("completed", True)):
+        return (
+            '<table width="100%" style="margin:4px 0; border-collapse:collapse;">'
+            f'<tr><td style="border-left:3px solid {_MOOD_ACCENT}; padding:4px 10px;">'
+            f'<span style="color:{_MOOD_ACCENT}; font-size:12px;">&#9829; mood</span>'
+            '<span style="font-size:12px;"> · 内心独白中&#8230;</span>'
+            "</td></tr></table>"
+        )
+
+    rows: List[str] = []
+    for key, val in _mood_sections(content):
+        key_esc = _html.escape(key)
+        val_esc = _html.escape(val)
+        if key:
+            rows.append(
+                '<tr><td style="padding:1px 10px;">'
+                f'<span style="color:{_MOOD_ACCENT}; font-size:12px;">{key_esc}</span>'
+                f'<span style="font-size:13px;">&nbsp;&nbsp;{val_esc}</span>'
+                "</td></tr>"
+            )
+        else:
+            rows.append(f'<tr><td style="padding:1px 10px;"><span style="font-size:13px;">{val_esc}</span></td></tr>')
+    header = (
+        f'<tr><td style="border-left:3px solid {_MOOD_ACCENT}; padding:5px 10px 2px;">'
+        f'<span style="color:{_MOOD_ACCENT}; font-size:12px; font-weight:bold;">&#9829; MOOD</span>'
+        '<span style="font-size:11px;"> · 内心独白</span>'
+        "</td></tr>"
+    )
+    return f'<table width="100%" style="margin:4px 0; border-collapse:collapse;">{header}{"".join(rows)}</table>'
+
+
 def register_ui(registry) -> None:
     """注册 assistant_hub 的 UI 组件。"""
     # 热重载兼容
@@ -217,6 +282,14 @@ def register_ui(registry) -> None:
         tab_id=CARD_ID,
         label="助手",
         on_click=_on_tab_clicked,
+        priority=10,
+    )
+
+    # ── <mood> 内心独白卡（hanako 人格 MOOD 块协议）──
+    registry.register_tag_renderer(
+        plugin_name="assistant_hub",
+        tag_name="mood",
+        render_func=_render_mood_card,
         priority=10,
     )
 

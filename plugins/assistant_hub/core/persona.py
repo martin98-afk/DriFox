@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from loguru import logger
+
 
 @dataclass
 class Persona:
@@ -82,6 +84,9 @@ class PersonaRegistry:
     def __init__(self, custom_path: Optional[Path] = None, builtin_dir: Optional[Path] = None):
         self._custom_path = custom_path or (_persona_data_dir() / "personas.json")
         self._builtin_dir = builtin_dir or _builtin_dir()
+        # 用户级头像覆盖目录：换头像不写插件目录（内置人格只读，部署目录可能无写权限），
+        # 存 <app_data>/assistant_hub/persona_avatars/<pid>.<ext>
+        self._avatar_override_dir = self._custom_path.parent / "persona_avatars"
         self._custom: Dict[str, Persona] = {}
         self._builtin: Dict[str, Persona] = {}
         self._load_builtins()
@@ -196,10 +201,16 @@ class PersonaRegistry:
         return None
 
     def avatar_path(self, pid: str) -> Optional[Path]:
-        """头像解析：显式 avatar 字段 → 子文件夹 avatar.png（新布局）→ avatars/<id>.png（旧布局）。"""
+        """头像解析：用户级覆盖 → 显式 avatar 字段 → 子文件夹 avatar.png → avatars/<id>.png。"""
         p = self.get(pid)
         if p is None:
             return None
+        # 用户级覆盖（换头像落这里，内置/自定义人格统一）
+        if self._avatar_override_dir.exists():
+            for ext in ("png", "jpg", "jpeg", "webp", "svg"):
+                cand = self._avatar_override_dir / f"{pid}.{ext}"
+                if cand.exists():
+                    return cand
         if p.avatar:
             cand = Path(p.avatar)
             if cand.is_absolute() and cand.exists():
@@ -214,6 +225,50 @@ class PersonaRegistry:
         # 旧布局：personas/avatars/<avatar 或 id>.png
         rel = self._builtin_dir / "avatars" / f"{pid}.png"
         return rel if rel.exists() else None
+
+    def has_avatar_override(self, pid: str) -> bool:
+        """该人格是否存在用户级头像覆盖（控制「恢复默认」按钮可用性）。"""
+        if not self._avatar_override_dir.exists():
+            return False
+        return any(
+            (self._avatar_override_dir / f"{pid}.{ext}").exists() for ext in ("png", "jpg", "webp", "svg")
+        )
+
+    def set_avatar(self, pid: str, data: bytes, ext: str) -> Optional[Path]:
+        """写入用户级头像覆盖（同 pid 只保留一份，换扩展名时清旧文件）。"""
+        ext = (ext or "png").lower().lstrip(".")
+        if ext == "jpeg":
+            ext = "jpg"
+        if ext not in ("png", "jpg", "webp", "svg"):
+            return None
+        try:
+            self._avatar_override_dir.mkdir(parents=True, exist_ok=True)
+            for old_ext in ("png", "jpg", "webp", "svg"):
+                if old_ext != ext:
+                    old = self._avatar_override_dir / f"{pid}.{old_ext}"
+                    if old.exists():
+                        old.unlink()
+            target = self._avatar_override_dir / f"{pid}.{ext}"
+            target.write_bytes(data)
+            return target
+        except OSError as e:
+            logger.warning(f"[assistant_hub] 写入人格头像失败 ({pid}): {e}")
+            return None
+
+    def clear_avatar(self, pid: str) -> bool:
+        """删除用户级头像覆盖（回落人格默认头像）。"""
+        if not self._avatar_override_dir.exists():
+            return True
+        removed = False
+        for ext in ("png", "jpg", "webp", "svg"):
+            f = self._avatar_override_dir / f"{pid}.{ext}"
+            if f.exists():
+                try:
+                    f.unlink()
+                    removed = True
+                except OSError:
+                    pass
+        return removed or True
 
     # ── 自定义维护 ──
     def upsert(self, p: Persona) -> bool:

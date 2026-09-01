@@ -1703,11 +1703,17 @@ class OpenAIChatToolWindow(ToolWindow):
         self._history_card.closed.connect(self._close_history_panel)
         # 挂到右侧工作台「历史会话」页签（幂等；面板未就绪时由
         # TabManagerWindow.refresh_workbench / open_workbench_history 兜底补挂）
+        # 🛡️ 仅活跃窗口才挂载：后台/新建窗口的懒构建若无条件挂载，会把工作台上
+        # 活跃窗口有数据的历史页顶掉，挂上一个未填充的空白页 —— 打开历史会话
+        # 新建标签页后历史页签「什么都不显示」的根因（2026-09-01 用户实测）。
+        # 未挂载的窗口切回时由 _on_tab_selected → refresh_workbench →
+        # attach_history_page(win._history_card) 换挂补上。
         try:
             tm = TabManagerWindow.get_instance()
             panel = getattr(tm, "workbench_panel", None) if tm is not None else None
             if panel is not None:
-                panel.attach_history_page(self._history_card)
+                if tm.get_current_window() is self:
+                    panel.attach_history_page(self._history_card)
         except Exception:
             logger.exception("[MainWidget] 历史会话页挂载到工作台失败")
 
@@ -1918,6 +1924,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 "🔍 搜索会话...",
                 lambda text: self._history_popup_card.set_search_filter(text),
             )
+            # 首批评数据：卡片挂载后立即填充。此前依赖后续 _notify_history_data_changed
+            # 补刷，若历史会话加载提前返回（空消息）或异常，页面将永远空白（连
+            # 「暂无历史对话记录」提示都没有，因为 _update_display 从未执行过）。
+            self._refresh_history_toggle_panel()
         except Exception:
             logger.exception("[DeferredBuild] HistoryCard 构建失败")
         finally:
@@ -8219,7 +8229,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if not tm.is_workbench_visible() or panel.current_tab() != panel.TAB_HISTORY:
             tm.open_workbench_history()
         else:
-            panel.set_current_tab(panel.TAB_WORKTREE)
+            panel.set_current_tab(panel.TAB_WORKTREE, user=True)
 
     def _close_history_panel(self):
         """历史卡片关闭钮收出口：仅在用户显式点 × 时离开历史页
@@ -8231,7 +8241,7 @@ class OpenAIChatToolWindow(ToolWindow):
             tm = TabManagerWindow.get_instance()
             panel = getattr(tm, "workbench_panel", None) if tm is not None else None
             if panel is not None and panel.current_tab() == panel.TAB_HISTORY:
-                panel.set_current_tab(panel.TAB_WORKTREE)
+                panel.set_current_tab(panel.TAB_WORKTREE, user=True)
         except Exception:
             pass
 
@@ -20235,7 +20245,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if not tm.is_workbench_visible() or panel.current_tab() != target:
             tm.open_workbench_memory(tab_key)
         else:
-            panel.set_current_tab(panel.TAB_WORKTREE)
+            panel.set_current_tab(panel.TAB_WORKTREE, user=True)
 
     def _toggle_memory_card(self):
         """切换记忆管理卡片的显示"""

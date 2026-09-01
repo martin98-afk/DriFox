@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 from pathlib import Path
 from typing import List
 
@@ -174,7 +175,14 @@ class AssistantCardWidget(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        outer.addWidget(scroll)
+
+        # 1. 弧形卡片堆叠：置顶固定（不随下方分区滚动）
+        self._stack = ArcCardStack()
+        self._stack.selectionChanged.connect(self._on_select)
+        self._stack.createRequested.connect(self._on_create)
+        outer.addWidget(self._stack)
+
+        outer.addWidget(scroll, 1)
 
         # 内容容器透明（对齐主程序对话区 chat_container 做法）
         content = QWidget()
@@ -182,12 +190,6 @@ class AssistantCardWidget(QWidget):
         self._content_v = QVBoxLayout(content)
         self._content_v.setContentsMargins(24, 8, 24, 24)
         self._content_v.setSpacing(14)
-
-        # 1. 弧形卡片堆叠：占满整行（不放进窄容器，助手多也能全展示）
-        self._stack = ArcCardStack()
-        self._stack.selectionChanged.connect(self._on_select)
-        self._stack.createRequested.connect(self._on_create)
-        self._content_v.addWidget(self._stack)
 
         inner = QWidget()
         # 内容最大宽度：主窗口够宽时展开到上限，不够宽则自适应（无横向滚动）
@@ -200,9 +202,7 @@ class AssistantCardWidget(QWidget):
         name_row = QHBoxLayout()
         name_row.setSpacing(10)
         self._avatar = RoundAvatar(size=44, text="?", color="#7C3AED", parent=self)
-        self._avatar.setCursor(Qt.PointingHandCursor)
-        self._avatar.setToolTip("点击更换头像")
-        self._avatar.installEventFilter(self)
+        self._avatar.setToolTip("头像跟随元人格，在下方「关于 Ta」处更换")
         name_row.addWidget(self._avatar)
         self._name_label = QLabel("(未选择)")
         self._name_label.setStyleSheet(
@@ -242,6 +242,8 @@ class AssistantCardWidget(QWidget):
         self._about = AboutSection(self._persona_items(), "")
         self._about.personaChangeRequested.connect(self._on_persona_change)
         self._about.personaManageRequested.connect(self._on_persona_manage)
+        self._about.personaAvatarChangeRequested.connect(self._on_persona_avatar_change)
+        self._about.personaAvatarResetRequested.connect(self._on_persona_avatar_reset)
         self._about.saveRequested.connect(self._on_about_save)
         self._inner_v.addWidget(self._about)
 
@@ -253,7 +255,9 @@ class AssistantCardWidget(QWidget):
         self._memory.dreamRestore.connect(self._on_dream_restore)
         self._memory.viewAll.connect(self._on_view_all)
         self._memory.clearAll.connect(self._on_clear_all)
-        self._memory.pinsChanged.connect(self._on_pins_changed)
+        self._memory.pinAddRequested.connect(self._on_pin_add)
+        self._memory.pinEdited.connect(self._on_pin_edit)
+        self._memory.pinDeleteRequested.connect(self._on_pin_delete)
         self._inner_v.addWidget(self._memory)
 
         self._experience = ExperienceSection()
@@ -314,29 +318,34 @@ class AssistantCardWidget(QWidget):
         except Exception:
             return []
 
-    def eventFilter(self, obj, event):
-        """头像点击 → 更换头像。"""
-        from PyQt5.QtCore import QEvent
-
-        if obj is self._avatar and event.type() == QEvent.MouseButtonPress:
-            self._on_change_avatar()
-            return True
-        return super().eventFilter(obj, event)
-
-    def _on_change_avatar(self):
-        """弹出头像选择器（预置/纯色/上传），确定后落盘（Mask 风格）。
-
-        ⚠ 内层类方法里的 self 是 dialog 实例——mgr/aid 必须先捕获为局部变量。
-        """
+    def _on_persona_avatar_change(self) -> None:
         a = self._mgr.get(self._active_aid)
-        if not a:
+        if not a or not a.yuan:
+            return
+        self._open_persona_avatar_dialog(a.yuan)
+
+    def _on_persona_avatar_reset(self) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a or not a.yuan:
+            return
+        self._mgr.persona_registry().clear_avatar(a.yuan)
+        self._refresh_persona_avatar()
+        self._notify("已恢复人格默认头像")
+
+    def _open_persona_avatar_dialog(self, pid: str) -> None:
+        """人格头像选择器（预置/上传），确定后写入用户级覆盖（Mask 风格）。
+
+        ⚠ 内层类方法里的 self 是 dialog 实例——reg/pid 必须先捕获为局部变量。
+        """
+        reg = self._mgr.persona_registry()
+        p = reg.get(pid)
+        if p is None:
             return
         from PyQt5.QtGui import QColor
 
         from .avatar_picker import AvatarPicker
 
-        mgr, aid = self._mgr, self._active_aid  # 局部捕获（闭包内禁用 self._mgr）
-        name, color = a.name or a.id, a.color
+        cur_ap = reg.avatar_path(pid)
 
         class _AvatarDialog(MaskDialogBase):
             def __init__(self, parent=None):
@@ -353,13 +362,16 @@ class AssistantCardWidget(QWidget):
                 self.widget.setFixedSize(780, 620)
                 v = QVBoxLayout(self.widget)
                 v.setContentsMargins(20, 16, 20, 16)
-                picker = AvatarPicker(assistant_id=aid, parent=self.widget)
-                ap = mgr.avatar_path(aid)
+                picker = AvatarPicker(
+                    assistant_id="",
+                    parent=self.widget,
+                    upload_saver=lambda data, ext: reg.set_avatar(pid, data, ext),
+                )
                 picker.set_assistant(
-                    aid=aid,
-                    color=color,
-                    name=name,
-                    image_path=str(ap) if ap else "",
+                    aid="",
+                    color="#7C3AED",
+                    name=p.name or pid,
+                    image_path=str(cur_ap) if cur_ap else "",
                 )
                 v.addWidget(picker, 1)
                 self._picker = picker  # 确定后外部取选择结果
@@ -378,20 +390,39 @@ class AssistantCardWidget(QWidget):
         if not _open_dialog(dlg):
             return
         sel = dlg._picker.get_selection()
-        if sel.get("image_path"):
-            try:
+        try:
+            if sel.get("image_path"):
                 data = Path(sel["image_path"]).read_bytes()
                 ext = Path(sel["image_path"]).suffix.lstrip(".") or "png"
-                self._mgr.save_avatar_from_bytes(a.id, data, ext)
-            except Exception as e:
-                self._notify_error(f"头像保存失败: {e}")
-                return
-        else:
-            self._mgr.clear_avatar(a.id)
-            a.color = sel.get("color") or a.color
-            self._mgr.update(a)
-        self._reload_all(select_aid=a.id)
-        self._notify("头像已更新")
+                if not reg.set_avatar(pid, data, ext):
+                    self._notify_error("头像保存失败：不支持的图片格式")
+                    return
+            else:
+                # 纯色选择/未选图 → 清除覆盖，回落人格默认头像
+                reg.clear_avatar(pid)
+        except Exception as e:
+            self._notify_error(f"头像保存失败: {e}")
+            return
+        self._refresh_persona_avatar()
+        self._notify("人格头像已更新")
+
+    def _refresh_persona_avatar(self) -> None:
+        """人格头像变更/切换人格后刷新三处：About 预览、编辑区头像、弧形卡片。"""
+        aid = self._active_aid
+        a = self._mgr.get(aid) if aid else None
+        if not a:
+            return
+        reg = self._mgr.persona_registry()
+        p = reg.get(a.yuan)
+        ap = reg.avatar_path(a.yuan) if a.yuan else None
+        self._about.set_persona_avatar(
+            str(ap) if ap else "",
+            (p.name if p else "") or (a.yuan or ""),
+            has_override=reg.has_avatar_override(a.yuan) if a.yuan else False,
+        )
+        full = self._mgr.assistant_avatar_path(aid)
+        self._avatar.set_image(str(full) if full else None)
+        self._stack.set_avatar(aid, str(full) if full else "")
 
     def _reload_all(self, select_aid: str = "") -> None:
         assistants = self._mgr.list_assistants()
@@ -401,7 +432,7 @@ class AssistantCardWidget(QWidget):
                     "id": a.id,
                     "name": a.name or a.id,
                     "color": a.color,
-                    "avatar_path": str(self._mgr.avatar_path(a.id) or ""),
+                    "avatar_path": str(self._mgr.assistant_avatar_path(a.id) or ""),
                 }
                 for a in assistants
             ]
@@ -430,7 +461,7 @@ class AssistantCardWidget(QWidget):
         # 选中即激活：经验工具 / 记忆注入 / ticker 都以 active_id 为准
         if self._mgr.active_id() != aid:
             self._mgr.set_active(aid)
-        ap = self._mgr.avatar_path(aid)
+        ap = self._mgr.assistant_avatar_path(aid)
         self._avatar.set_text(a.name or a.id)
         self._avatar.set_color(a.color)
         self._avatar.set_image(str(ap) if ap else None)
@@ -445,12 +476,13 @@ class AssistantCardWidget(QWidget):
             mgr = self._mgr
             self._profile.bind(a.name or a.id, a.utility_model or "")
             self._about.set_persona(a.yuan)
+            self._refresh_persona_avatar()
             identity, _ = mgr.read_identity_source(aid_capture)
             agents_md, _ = mgr.read_agents_md_source(aid_capture)
             self._about.bind_texts(identity, agents_md)
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_dream_auto(a.dream_auto_enabled)
-            self._memory.reload_pins([c for _pid, c in mgr.read_pinned(aid_capture)])
+            self._memory.reload_pins(mgr.read_pinned(aid_capture))
             self._memory.set_status(self._memory_status(aid_capture))
             self._memory.set_dream_hint("每日自动 Dream 已开启" if a.dream_auto_enabled else "每日自动 Dream 未开启")
             self._experience.set_enabled(a.experience_enabled)
@@ -554,6 +586,7 @@ class AssistantCardWidget(QWidget):
         self._mgr.update(a)
         self._mgr.invalidate_context(a.id)
         self._about.set_persona(pid)
+        self._refresh_persona_avatar()
         self._notify(f"人格已切换：{'无（纯净助手）' if pid == 'none' else pid}")
 
     def _on_persona_manage(self) -> None:
@@ -593,13 +626,36 @@ class AssistantCardWidget(QWidget):
         self._mgr.update(a)
         self._memory.set_dream_hint("每日自动 Dream 已开启" if on else "每日自动 Dream 未开启")
 
-    def _on_pins_changed(self, pins: List) -> None:
+    def _reload_pinned(self, aid: str) -> None:
+        """写盘后回刷置顶列表：UI 永远以盘上数据为准（增删改即时可见）。"""
+        self._memory.reload_pins(self._mgr.read_pinned(aid))
+
+    def _on_pin_add(self, text: str) -> None:
         aid = self._active_aid
         if not aid:
             return
-        items = [(f"pin-{i}-{abs(hash(t)) % 100000}", t) for i, t in enumerate(pins)]
+        items = self._mgr.read_pinned(aid)
+        items.append((f"pin-{uuid.uuid4().hex[:12]}", text))
         self._mgr.write_pinned(aid, items)
         self._mgr.invalidate_context(aid)
+        self._reload_pinned(aid)
+
+    def _on_pin_edit(self, pid: str, text: str) -> None:
+        aid = self._active_aid
+        if not aid or not text:
+            return  # 空内容忽略，避免误清
+        items = [(p, text if p == pid else c) for p, c in self._mgr.read_pinned(aid)]
+        self._mgr.write_pinned(aid, items)
+        self._mgr.invalidate_context(aid)
+
+    def _on_pin_delete(self, pid: str) -> None:
+        aid = self._active_aid
+        if not aid:
+            return
+        items = [(p, c) for p, c in self._mgr.read_pinned(aid) if p != pid]
+        self._mgr.write_pinned(aid, items)
+        self._mgr.invalidate_context(aid)
+        self._reload_pinned(aid)
 
     def _on_view_today(self) -> None:
         if not self._active_aid:

@@ -87,6 +87,10 @@ class _AgentCard(QWidget):
             self._primary = on
             self.update()
 
+    def set_avatar_image(self, image_path: Optional[str]) -> None:
+        """换人格头像后轻量刷新单卡（不重建堆叠，保留动画状态）。"""
+        self._avatar.set_image(image_path or None)
+
     def set_hover_lift(self, on: bool) -> None:
         self._animate_lift(LIFT_HOVER if on else 0.0)
 
@@ -272,6 +276,13 @@ class ArcCardStack(QWidget):
         self._primary_aid = aid
         self._sync_states()
 
+    def set_avatar(self, aid: str, avatar_path: str) -> None:
+        """更新单卡头像（人格头像变更后由宿主调用）。"""
+        for c in self._cards:
+            if c.aid == aid:
+                c.set_avatar_image(avatar_path or None)
+                break
+
     def _sync_states(self) -> None:
         for c in self._cards:
             c.set_selected(c.aid == self._selected_aid)
@@ -356,7 +367,11 @@ class ArcCardStack(QWidget):
             else:
                 card.move(int(tx), int(ty))
         if self._add_card is not None and add_x is not None:
-            self._add_card.raise_()
+            if self._expanded:
+                self._add_card.raise_()
+            else:
+                # 收起态：新建卡压在扇形最下层（z 轴正确层级），hover 展开时才抬起
+                self._add_card.lower()
             if animate:
                 anim = Anim(self._add_card, b"pos")
                 anim.setDuration(_DUR_EXPAND if self._expanded else _DUR_COLLAPSE)

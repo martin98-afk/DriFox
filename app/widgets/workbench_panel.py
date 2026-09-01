@@ -1054,6 +1054,12 @@ class WorkbenchPanel(QWidget):
             self._tab_bar_layout.addWidget(btn)
             self._tab_buttons.append(btn)
             self._tab_ids.append(tab_id)
+        # 重建后恢复选中态：历史页换挂等触发的重建不能让当前页高亮丢失
+        # （按钮全部新建，默认非激活；此前仅 was_current 路径会经
+        # set_current_tab 补高亮，其余场景高亮直接丢失）
+        cur = self._stack.currentIndex()
+        for i, btn in enumerate(self._tab_buttons):
+            btn.set_active(i == cur)
         # 增删 tab 后布局会平移旧 tab：光标静止时 Qt 不补发 enter/leave，需重算
         self._schedule_tab_hover_sync()
 
@@ -1110,7 +1116,8 @@ class WorkbenchPanel(QWidget):
         """页签点击：按 tab_id 定位 stack 索引（与 _tab_ids 顺序一致）"""
         idx = self._tab_id_index(tab_id)
         if idx is not None:
-            self.set_current_tab(idx)
+            # user=True：用户主动切换才发射 current_tab_changed → 宿主写页签记忆
+            self.set_current_tab(idx, user=True)
 
     def _tab_id_index(self, tab_id: str) -> Optional[int]:
         # 注意：tab 顺序与 _tab_buttons 一致；与 _stack 顺序也一致（同步添加）
@@ -1284,8 +1291,13 @@ class WorkbenchPanel(QWidget):
 
     # ── 页签 ──
 
-    def set_current_tab(self, index: int) -> None:
-        """切换页签；记忆内容首次进入前由宿主调 ensure_memory 构建"""
+    def set_current_tab(self, index: int, *, user: bool = False) -> None:
+        """切换页签；记忆内容首次进入前由宿主调 ensure_memory 构建
+
+        user=True 表示用户主动切换（页签点击 / 定向入口），仅此路径发射
+        current_tab_changed 驱动宿主写入 per-window 页签记忆；程序化切换
+        （历史页换挂延续、切窗恢复 saved）不发射，避免污染活跃窗口记忆。
+        """
         self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == index)
@@ -1296,7 +1308,8 @@ class WorkbenchPanel(QWidget):
         if index == self.TAB_HISTORY:
             self.history_tab_shown.emit()
         # 通知宿主记录（当前页签按对话窗口独立记忆，见 TabManagerWindow 回调）
-        self.current_tab_changed.emit(index)
+        if user:
+            self.current_tab_changed.emit(index)
 
     def current_tab(self) -> int:
         return self._stack.currentIndex()

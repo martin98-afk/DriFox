@@ -5,6 +5,7 @@
 插件通过 register_ui(registry) 在加载时注册组件。
 """
 
+import re
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional
@@ -31,6 +32,33 @@ class ContentRendererInfo:
     plugin_name: str
     type_name: str
     render_func: Callable[[Dict[str, Any], Optional[Any]], str]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TagRendererInfo:
+    """消息文本内联标签渲染器
+
+    LLM 输出文本中的 <tag>...</tag> 块（如 assistant_hub 人格的
+    <mood> 内心独白），由插件注册渲染函数转成卡片 HTML 展示。
+    未注册的 tag 保持默认行为（当作普通文本）。
+
+    Attributes:
+        plugin_name: 所属插件名
+        tag_name: 标签名（小写；对应文本中的 <tag_name>...</tag_name>）
+        render_func: 渲染函数，签名 (content: str, ctx: dict) -> str(HTML)。
+                     content 为标签内文本；ctx 含 tag/completed/compact。
+                     输出需双端兼容：QWebEngineView（全 HTML/CSS）与
+                     QLabel 富文本（QTextDocument 子集，无 border-radius/flex，
+                     卡片建议单格 <table> 写法）。
+        priority: 优先级（同 tag_name 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    tag_name: str
+    render_func: Callable[[str, Dict[str, Any]], str]
     priority: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -288,6 +316,8 @@ class UIPluginRegistry:
 
     def __init__(self):
         self._content_renderers: Dict[str, ContentRendererInfo] = {}
+        # 消息文本内联标签渲染器：{tag_name(小写): TagRendererInfo}
+        self._tag_renderers: Dict[str, TagRendererInfo] = {}
         self._message_factories: List[MessageFactoryInfo] = []
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
         self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
@@ -407,6 +437,52 @@ class UIPluginRegistry:
             # 低优先级注册被忽略
             return
         self._content_renderers[type_name] = info
+
+    def register_tag_renderer(
+        self,
+        plugin_name: str,
+        tag_name: str,
+        render_func: Callable[[str, Dict[str, Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息文本内联标签渲染器
+
+        Args:
+            plugin_name: 所属插件名
+            tag_name: 标签名（自动转小写；对应文本中的 <tag_name>...</tag_name>）
+            render_func: 渲染函数 (content: str, ctx: dict) -> str(HTML)，
+                         需双端兼容 QLabel 富文本与 WebEngine；
+                         ctx 含 tag/completed/compact。须为纯函数（可能在
+                         后台渲染线程调用，禁止触碰 Qt widget）
+            priority: 优先级（同 tag_name 时高者覆盖低者）
+            metadata: 附加元数据
+        """
+        if metadata is None:
+            metadata = {}
+        key = tag_name.strip().lower()
+        if not key or not re.fullmatch(r"[a-z0-9_-]+", key):
+            raise ValueError(f"invalid tag_name {tag_name!r}: must match [a-z0-9_-]+")
+        info = TagRendererInfo(
+            plugin_name=plugin_name,
+            tag_name=key,
+            render_func=render_func,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._tag_renderers.get(key)
+        if existing is not None and existing.priority > priority:
+            # 低优先级注册被忽略
+            return
+        self._tag_renderers[key] = info
+
+    def get_tag_renderer(self, tag_name: str) -> Optional[TagRendererInfo]:
+        """按标签名查询渲染器（未注册返回 None，调用方回退默认渲染）"""
+        return self._tag_renderers.get(tag_name.strip().lower())
+
+    def get_registered_tag_names(self) -> List[str]:
+        """全部已注册标签名（小写）"""
+        return list(self._tag_renderers.keys())
 
     def register_welcome_tab(
         self,
@@ -1636,6 +1712,7 @@ class UIPluginRegistry:
         return (
             any(v.plugin_name == plugin_name for v in self._content_renderers.values())
             or any(f.plugin_name == plugin_name for f in self._message_factories)
+            or any(v.plugin_name == plugin_name for v in self._tag_renderers.values())
             or any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
             or any(v.plugin_name == plugin_name for v in self._welcome_actions.values())
             or any(v.plugin_name == plugin_name for v in self._floating_cards.values())
@@ -1682,6 +1759,8 @@ class UIPluginRegistry:
             logger.warning(f"[UIPluginRegistry] unload_ui 回调失败 ({plugin_name}): {e}")
         # 清理 content renderers
         self._content_renderers = {k: v for k, v in self._content_renderers.items() if v.plugin_name != plugin_name}
+        # 清理 tag renderers
+        self._tag_renderers = {k: v for k, v in self._tag_renderers.items() if v.plugin_name != plugin_name}
         # 清理 message factories
         self._message_factories = [f for f in self._message_factories if f.plugin_name != plugin_name]
         # 记录该插件是否注册过欢迎卡片 tab（决定卸载后是否刷新欢迎卡片）

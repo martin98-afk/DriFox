@@ -10,7 +10,7 @@ MemorySection（记忆传送带）→ ExperienceSection（经验）→ SkillsSec
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -84,6 +84,31 @@ def _editor_style() -> str:
             {get_font_family_css()} {font_size_css(12)}
         }}
         QTextEdit:focus {{ border-color: {Colors.TEXT_ACCENT}; }}
+        QTextEdit QScrollBar:vertical {{
+            background: transparent;
+            width: 6px;
+            margin: 0;
+        }}
+        QTextEdit QScrollBar::handle:vertical {{
+            background: {Colors.SCROLLBAR_HANDLE_BG};
+            border-radius: 3px;
+            min-height: 30px;
+        }}
+        QTextEdit QScrollBar::handle:vertical:hover {{
+            background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
+            width: 8px;
+        }}
+        QTextEdit QScrollBar::handle:vertical:pressed {{
+            background: {Colors.SCROLLBAR_HANDLE_HOVER_BG};
+        }}
+        QTextEdit QScrollBar::add-line:vertical,
+        QTextEdit QScrollBar::sub-line:vertical {{
+            height: 0;
+        }}
+        QTextEdit QScrollBar::add-page:vertical,
+        QTextEdit QScrollBar::sub-page:vertical {{
+            background: none;
+        }}
     """
 
 
@@ -337,16 +362,46 @@ class _PersonaChip(QFrame):
 
 
 class AboutSection(_Section):
-    """人格选择（chips，含「纯净助手」）+ 身份简介 + AGENTS.md（实时保存）。"""
+    """人格选择（chips，含「纯净助手」）+ 人格头像 + 身份简介 + AGENTS.md（实时保存）。"""
 
     personaChangeRequested = pyqtSignal(str)
     personaManageRequested = pyqtSignal()
+    personaAvatarChangeRequested = pyqtSignal()  # 更换当前人格头像
+    personaAvatarResetRequested = pyqtSignal()  # 恢复人格默认头像
     saveRequested = pyqtSignal(str, str)  # (identity, agents_md)
     _DEBOUNCE_MS = 800
 
     def __init__(self, personas: List[dict], current_pid: str, parent=None):
         super().__init__("关于 Ta", parent)
         self.body().addWidget(_hint("“元”是助手的潜意识，以此为基础搭建你独一无二的伙伴。", 10))
+
+        # 人格头像行：头像归属人格（切换助手/人格自动跟随），在此更换/恢复
+        avatar_row = QHBoxLayout()
+        avatar_row.setSpacing(12)
+        self._persona_avatar = RoundAvatar(size=56, text="?", color="#7C3AED", parent=self)
+        avatar_row.addWidget(self._persona_avatar)
+        av_info = QVBoxLayout()
+        av_info.setSpacing(2)
+        self._persona_avatar_name = QLabel("—")
+        self._persona_avatar_name.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
+        )
+        av_info.addWidget(self._persona_avatar_name)
+        av_info.addWidget(_hint("头像属于人格，切换人格自动跟随。", 10))
+        avatar_row.addLayout(av_info)
+        avatar_row.addStretch()
+        self._avatar_reset_btn = QPushButton("恢复默认")
+        self._avatar_reset_btn.setStyleSheet(_btn_style())
+        self._avatar_reset_btn.clicked.connect(self.personaAvatarResetRequested.emit)
+        self._avatar_reset_btn.setEnabled(False)
+        avatar_row.addWidget(self._avatar_reset_btn)
+        change_av_btn = QPushButton("更换头像")
+        change_av_btn.setStyleSheet(_btn_style())
+        change_av_btn.clicked.connect(self.personaAvatarChangeRequested.emit)
+        avatar_row.addWidget(change_av_btn)
+        self.body().addLayout(avatar_row)
+
         chips_row = QHBoxLayout()
         chips_row.setSpacing(12)
         chips_row.addStretch()
@@ -413,6 +468,12 @@ class AboutSection(_Section):
         for chip in self._chips:
             chip.set_selected(chip.persona_id == pid)
 
+    def set_persona_avatar(self, image_path: str, name: str, has_override: bool) -> None:
+        """刷新人格头像预览与「恢复默认」可用性（宿主在切人格/换头像后调用）。"""
+        self._persona_avatar.set_image(image_path or None)
+        self._persona_avatar_name.setText(name or "—")
+        self._avatar_reset_btn.setEnabled(bool(has_override))
+
     def bind_texts(self, identity: str, agents_md: str) -> None:
         self._suspend_autosave = True  # 回填期间不触发自动保存
         self._identity.setPlainText(identity)
@@ -433,7 +494,9 @@ class MemorySection(_Section):
     dreamRestore = pyqtSignal()
     viewAll = pyqtSignal()
     clearAll = pyqtSignal()
-    pinsChanged = pyqtSignal(list)
+    pinAddRequested = pyqtSignal(str)
+    pinEdited = pyqtSignal(str, str)  # (pin_id, 新内容)
+    pinDeleteRequested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__("记忆", parent)
@@ -449,7 +512,7 @@ class MemorySection(_Section):
 
         # 置顶记忆
         self.body().addWidget(_title_label("置顶记忆", 11))
-        self.body().addWidget(_hint("你主动告诉助手一定要记住的东西，也可以手动编辑与添加。"))
+        self.body().addWidget(_hint("你主动告诉助手一定要记住的东西，一条一条管理，可增删改。"))
         self._pin_list = QVBoxLayout()
         self._pin_list.setSpacing(3)
         self.body().addLayout(self._pin_list)
@@ -519,46 +582,31 @@ class MemorySection(_Section):
         if not text:
             return
         self._pin_input.clear()
-        pins = self.pins()
-        pins.append(text)
-        self.pinsChanged.emit(pins)
+        self.pinAddRequested.emit(text)
 
-    def pins(self) -> List[str]:
-        out = []
-        for i in range(self._pin_list.count()):
-            row = self._pin_list.itemAt(i)
-            w = row.widget() if row else None
-            edit = w.findChild(QLineEdit) if w else None
-            if edit is not None and edit.text().strip():
-                out.append(edit.text().strip())
-        return out
+    def reload_pins(self, items: List[Tuple[str, str]]) -> None:
+        """重建置顶列表：一条一行，行内绑定 pin_id（编辑/删除按 id 上报）。
 
-    def reload_pins(self, pins: List[str]) -> None:
-        """重建置顶列表（pin 行：输入框 + 删除按钮）。"""
+        UI 永远以盘上数据重绘（宿主写盘后回调本方法），增删改即时可见。
+        """
         while self._pin_list.count():
             item = self._pin_list.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
-        for text in pins:
+        for pid, content in items:
             row = QFrame()
             h = QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
-            edit = QLineEdit(text)
+            edit = QLineEdit(content)
             edit.setStyleSheet(_input_style())
-            edit.editingFinished.connect(lambda e=edit: self.pinsChanged.emit(self.pins()))
+            edit.editingFinished.connect(lambda pid=pid, e=edit: self.pinEdited.emit(pid, e.text().strip()))
             h.addWidget(edit, 1)
             del_btn = QPushButton("×")
             del_btn.setFixedSize(26, 26)
+            del_btn.setToolTip("删除这条记忆")
             del_btn.setStyleSheet(_btn_style(danger=True))
-
-            def _remove(_checked=False, w=row, e=edit):
-                if self._pin_list.indexOf(w) >= 0:
-                    pins = self.pins()
-                    pins.remove(e.text().strip()) if e.text().strip() in pins else None
-                    self.pinsChanged.emit(pins)
-
-            del_btn.clicked.connect(_remove)
+            del_btn.clicked.connect(lambda _checked=False, pid=pid: self.pinDeleteRequested.emit(pid))
             h.addWidget(del_btn)
             self._pin_list.addWidget(row)
 

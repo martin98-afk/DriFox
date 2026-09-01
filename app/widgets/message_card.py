@@ -1425,6 +1425,76 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
     return "".join(parts)
 
 
+def _render_tag_block(tag: str, content: str, completed: bool, compact: bool = False) -> str:
+    """单个已注册标签 → 插件渲染器 HTML。
+
+    渲染器缺失或失败时返回空串：内联标签通常是人格内心独白类内容
+    （如 <mood>），回退原文会把本应隐藏的内容泄漏到正文，丢弃比泄漏安全。
+    """
+    if not content.strip():
+        return ""
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        info = UIPluginRegistry.get_instance().get_tag_renderer(tag)
+    except Exception:
+        info = None
+    if info is None:
+        return ""
+    try:
+        html = info.render_func(content, {"tag": tag, "completed": completed, "compact": compact})
+        return f'<div class="plugin-tag-block" data-tag="{escape(tag)}">{html}</div>'
+    except Exception as e:
+        logger.warning(f"[message_card] 标签渲染器 <{tag}> 失败: {e}")
+        return ""
+
+
+def _inject_tag_cards(md_text: str, completed: bool = True, compact: bool = False) -> str:
+    """注入插件注册的内联标签卡片（<tag>...</tag> → 插件 render_func 的 HTML）。
+
+    标签集合来自 UIPluginRegistry 的 tag renderer 注册表（如 assistant_hub
+    人格的 <mood> 内心独白）。无注册标签时零开销直通；切分策略与
+    _inject_think_cards 一致：open 到「下一个 open 前的最后一个 close」，
+    未闭合按流式态透传给渲染器自行降级。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        tag_names = UIPluginRegistry.get_instance().get_registered_tag_names()
+    except Exception:
+        return md_text
+    if not tag_names:
+        return md_text
+
+    # 逐标签切分：已注册标签整体替换为渲染结果，剩余文本原样保留
+    result = md_text
+    for tag in tag_names:
+        open_tag, close_tag = f"<{tag}>", f"</{tag}>"
+        if open_tag not in result and close_tag not in result:
+            continue
+        parts: List[str] = []
+        i = 0
+        while i < len(result):
+            start = result.find(open_tag, i)
+            if start == -1:
+                # 防御：无 open 的段清理孤立 close（流式半截产物）
+                parts.append(result[i:].replace(close_tag, ""))
+                break
+            parts.append(result[i:start])
+            t0 = start + len(open_tag)
+            nxt = result.find(open_tag, t0)
+            search_end = nxt if nxt != -1 else len(result)
+            close = result.rfind(close_tag, t0, search_end)
+            if close != -1:
+                parts.append(_render_tag_block(tag, result[t0:close], True, compact))
+                i = close + len(close_tag)
+            else:
+                parts.append(_render_tag_block(tag, result[t0:search_end], False, compact))
+                i = search_end
+        result = "".join(parts)
+    return result
+
+
 @lru_cache(maxsize=128)
 def _render_tool_block_content(content: str, compact: bool = False) -> str:
     """
@@ -1962,6 +2032,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
+    processed_md = _inject_tag_cards(processed_md, True, compact=compact)
 
     try:
         md = get_markdown_instance()
@@ -2063,6 +2134,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
         processed_md = _inject_think_cards(safe_md, True, compact=compact)
         processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
         processed_md = _inject_hook_blocks(processed_md, True)
+        processed_md = _inject_tag_cards(processed_md, True, compact=compact)
         md.reset()
         html_content = md.convert(processed_md)
         html_content = _wrap_code_blocks_with_copy_button_web(
@@ -2086,6 +2158,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     processed_md = _inject_think_cards(safe_md, False, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, False, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, False)
+    processed_md = _inject_tag_cards(processed_md, False, compact=compact)
 
     md.reset()
     html_content = md.convert(processed_md)
@@ -2316,6 +2389,7 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
+    processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
@@ -2365,6 +2439,7 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
+    processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
@@ -6981,6 +7056,7 @@ class CodeWebViewer(QWebEngineView):
         processed_md = _inject_think_cards(safe_md, self._streaming is False, compact=self._tool_compact_mode)
         processed_md = _inject_tool_blocks(processed_md, self._streaming is False, compact=self._tool_compact_mode)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
+        processed_md = _inject_tag_cards(processed_md, self._streaming is False, compact=self._tool_compact_mode)
 
         # [PERF] 实例级哈希缓存：processed_md 未变时直接返回缓存的 HTML，
         # 跳过 md.convert() + _wrap_code_blocks（最昂贵的步骤）。

@@ -798,6 +798,26 @@ class AssistantManager:
         files = self.avatar_files(aid)
         return files[0] if files else None
 
+    def assistant_avatar_path(self, aid: str) -> Optional[Path]:
+        """助手头像显示链：助手自有头像（存量兼容）→ 元人格头像 → None。
+
+        头像归属人格：切换助手/人格后所有 UI（编辑区、弧形卡）统一用本方法取图。
+        """
+        own = self.avatar_path(aid)
+        if own:
+            return own
+        a = self.get(aid)
+        if a and a.yuan:
+            try:
+                return self.persona_registry().avatar_path(a.yuan)
+            except Exception:
+                return None
+        return None
+
+    def has_own_avatar(self, aid: str) -> bool:
+        """助手是否有自有头像（区别于人格回落）。"""
+        return self.avatar_path(aid) is not None
+
     def save_avatar_from_bytes(self, aid: str, data: bytes, ext: str) -> Optional[Path]:
         ext = ext.lower().lstrip(".")
         if ext not in _avatar_supported_exts():

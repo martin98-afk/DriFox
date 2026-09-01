@@ -15,7 +15,7 @@ import base64
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt5.QtCore import QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap
@@ -143,13 +143,23 @@ def _fallback_pixmap(text: str, color: str, size: int) -> QPixmap:
 
 
 class AvatarPicker(QWidget):
-    """三栏头像面板：预置 / 上传 / 纯色"""
+    """三栏头像面板：预置 / 上传 / 纯色
+
+    upload_saver：可选落盘回调 (data: bytes, ext: str) -> Path | None。
+    传入时上传走该回调（如存到人格头像覆盖目录）；不传走旧助手头像逻辑。
+    """
 
     avatarSelected = pyqtSignal(dict)  # {"kind", "name", "image_path", "color"}
 
-    def __init__(self, assistant_id: str = "", parent=None):
+    def __init__(
+        self,
+        assistant_id: str = "",
+        parent=None,
+        upload_saver: Optional[Callable[[bytes, str], Optional[Path]]] = None,
+    ):
         super().__init__(parent)
         self._assistant_id = assistant_id
+        self._upload_saver = upload_saver
         self._current_color = "#7C3AED"
         self._current_name = ""
         self._current_image = ""
@@ -251,7 +261,7 @@ class AvatarPicker(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(4)
 
-        info = QLabel("预置头像库 — 选中即应用到当前助手（可放更多图片到插件 icons/avatars/）", wrap)
+        info = QLabel("预置头像库 — 选中即应用（可放更多图片到插件 icons/avatars/）", wrap)
         info.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}")
         v.addWidget(info)
 
@@ -406,7 +416,7 @@ class AvatarPicker(QWidget):
         self.avatarSelected.emit(sel)
 
     def _on_upload(self) -> None:
-        if not self._assistant_id:
+        if not self._upload_saver and not self._assistant_id:
             return
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -416,16 +426,17 @@ class AvatarPicker(QWidget):
         )
         if not path:
             return
-        # 拷贝到 assistant 头像目录
+        ext = Path(path).suffix.lstrip(".").lower()
+        if ext == "jpeg":
+            ext = "jpg"
+        data = Path(path).read_bytes()
         try:
-            from assistant_hub_manager import AssistantManager
+            if self._upload_saver is not None:
+                saved = self._upload_saver(data, ext)
+            else:
+                from assistant_hub_manager import AssistantManager
 
-            mgr = AssistantManager.get_instance()
-            ext = Path(path).suffix.lstrip(".").lower()
-            if ext == "jpeg":
-                ext = "jpg"
-            data = Path(path).read_bytes()
-            saved = mgr.save_avatar_from_bytes(self._assistant_id, data, ext)
+                saved = AssistantManager.get_instance().save_avatar_from_bytes(self._assistant_id, data, ext)
             if saved:
                 image_path = str(saved)
                 self._apply_selection(
