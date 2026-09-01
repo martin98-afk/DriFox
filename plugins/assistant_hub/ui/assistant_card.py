@@ -39,7 +39,7 @@ from qfluentwidgets import InfoBar, InfoBarPosition
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
-from ..assistant_manager import Assistant, AssistantManager
+from assistant_hub_manager import Assistant, AssistantManager
 from .assistant_avatar import RoundAvatar
 from .avatar_picker import AvatarPicker
 from .editor_tabs import (

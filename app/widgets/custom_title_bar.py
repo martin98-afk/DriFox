@@ -725,6 +725,14 @@ class CustomTitleBar(TitleBarBase):
     def mouseMoveEvent(self, e):
         if sys.platform != "win32" or not self.canDrag(e.pos()):
             return super().mouseMoveEvent(e)
+        # ★ 无左键按住不发起系统移动：双击最大化后的残留 move / 模态循环被
+        # 弹窗或 Alt+Tab 打断后的 move 若在此触发 SC_MOVE，会导致窗口无按键
+        # 跟随鼠标（经典"诡异移动"）。最大化态同理交给系统原生处理。
+        if not (e.buttons() & Qt.LeftButton):
+            return super().mouseMoveEvent(e)
+        _win = self.window()
+        if _win is not None and _win.isMaximized():
+            return super().mouseMoveEvent(e)
         self._start_system_move(e.globalPos())
 
     def _start_system_move(self, global_pos) -> None:
@@ -743,7 +751,17 @@ class CustomTitleBar(TitleBarBase):
             if win is None:
                 return
             hwnd = int(win.winId())
-            lparam = (global_pos.y() << 16) | (global_pos.x() & 0xFFFF)
+            # ★ 用物理屏幕坐标（GetCursorPos）：e.globalPos() 是 Qt 逻辑坐标，
+            # HiDPI（125%/150%）下与 WM_SYSCOMMAND 期望的物理像素错位，
+            # 进入移动循环瞬间窗口跳变。GetCursorPos 失败时退回 Qt 坐标。lParam
+            # 两侧都 & 0xFFFF：y 未 mask 时负坐标（上方副屏）会污染高位，
+            # HIWORD 解析错乱 → 拖拽锚点错乱窗口跳飞。
+            _pt = wintypes.POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(_pt)):
+                _x, _y = _pt.x, _pt.y
+            else:
+                _x, _y = global_pos.x(), global_pos.y()
+            lparam = ((_y & 0xFFFF) << 16) | (_x & 0xFFFF)
             ctypes.windll.user32.ReleaseCapture()
             ctypes.windll.user32.SendMessageW(
                 wintypes.HWND(hwnd), _WM_SYSCOMMAND, _SC_MOVE | _HTCAPTION, wintypes.LPARAM(lparam)

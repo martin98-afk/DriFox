@@ -400,7 +400,7 @@ class AvatarPicker(QWidget):
             return
         # 拷贝到 assistant 头像目录
         try:
-            from ..assistant_manager import AssistantManager
+            from assistant_hub_manager import AssistantManager
 
             mgr = AssistantManager.get_instance()
             ext = Path(path).suffix.lstrip(".").lower()

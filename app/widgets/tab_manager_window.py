@@ -550,6 +550,10 @@ class TabManagerWindow(FramelessWindow):
         self._suppress_replace_close: bool = False
         # 插件注册的常驻标题栏 tab id 集合（插件卸载/刷新时移除用）
         self._plugin_titlebar_tab_ids: set = set()
+        # tab_id → 上次挂载的 TitlebarTabInfo 对象：插件热重载后 registry 中是
+        # 全新 info 对象，身份不同 → 摘除旧 tab 重建；否则 titleBar 上挂的还是
+        # 旧模块的 on_click 闭包，插件代码改动不生效
+        self._plugin_titlebar_tab_infos: dict = {}
         # 标题栏高亮重算合并标志（见 _schedule_replace_highlight）
         self._replace_highlight_pending = False
 
@@ -3425,7 +3429,8 @@ class TabManagerWindow(FramelessWindow):
     def _sync_plugin_titlebar_tabs(self) -> None:
         """同步插件注册的常驻标题栏 tab（无 × 关闭钮；点击走插件 on_click 回调自展示）
 
-        幂等：已挂载的跳过；已卸载插件的 tab 移除。注册表为空时仅做清理。
+        幂等：info 对象未变（未重载）的已挂载 tab 跳过；插件热重载后 registry
+        中是全新 info → 摘旧挂新；已卸载插件的 tab 移除。注册表为空时仅做清理。
         """
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -3439,9 +3444,15 @@ class TabManagerWindow(FramelessWindow):
             if tab_id not in valid_ids:
                 self.titleBar.remove_tab(tab_id)
                 self._plugin_titlebar_tab_ids.discard(tab_id)
+                self._plugin_titlebar_tab_infos.pop(tab_id, None)
         for info in infos:
+            mounted = self._plugin_titlebar_tab_infos.get(info.tab_id)
             if info.tab_id in self.titleBar._tabs:
-                continue
+                if mounted is info:
+                    continue  # 未重载，幂等跳过
+                # 插件热重载后 info 是全新对象（label/icon/on_click 均可能更新）
+                # → 摘除旧 tab 再挂新，否则 titleBar 一直引用旧模块闭包
+                self.titleBar.remove_tab(info.tab_id)
             self.titleBar.add_tab(
                 info.tab_id,
                 info.label,
@@ -3450,6 +3461,7 @@ class TabManagerWindow(FramelessWindow):
                 icon_path=info.icon_path or "",
             )
             self._plugin_titlebar_tab_ids.add(info.tab_id)
+            self._plugin_titlebar_tab_infos[info.tab_id] = info
 
     def _update_shared_launcher(self) -> None:
         """兼容旧调用方（main_widget.py 热重载和模式切换）并刷新内嵌列表"""
@@ -3776,10 +3788,12 @@ class TabManagerWindow(FramelessWindow):
                         # 本次模态循环是"缩放"：布局/绘制恢复交给
                         # _on_resize_finished（防抖 100ms 后触发），
                         # 此处仅复位全局拖拽标志，避免双重恢复冲突
-                        from app.utils.window_drag_state import any_window_dragging
+                        from app.utils import window_drag_state as _wds
                         from app.utils.drag_stall_profiler import drag_profiler
 
-                        any_window_dragging = False
+                        # ★ 必须写模块属性：from-import 后赋值只改局部名，
+                        # 全局标志永远不变（拖拽节流失效的根因）
+                        _wds.any_window_dragging = False
                         # 循环期间几何保存被守卫跳过，此处补一次防抖保存
                         self._save_geometry()
                         drag_profiler.stop_deferred()
@@ -3805,10 +3819,11 @@ class TabManagerWindow(FramelessWindow):
         这正是"松手卡一下"的根因。缩放路径仍由 resizeEvent 的 blocking
         机制独立管理（缩放确实需要冻结绘制）。
         """
-        from app.utils.window_drag_state import any_window_dragging
+        from app.utils import window_drag_state as _wds
         from app.utils.drag_stall_profiler import drag_profiler
 
-        any_window_dragging = True
+        # ★ 必须写模块属性：from-import 后赋值只改局部名，全局标志永远不变
+        _wds.any_window_dragging = True
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(True)  # 暂停动画定时器
         # 诊断：拖拽期间抓取主线程阻塞现场（定位偶发卡顿元凶）
@@ -3819,10 +3834,11 @@ class TabManagerWindow(FramelessWindow):
 
         无 setUpdatesEnabled(True) → 无积压重绘炸弹，松手零代价。
         """
-        from app.utils.window_drag_state import any_window_dragging
+        from app.utils import window_drag_state as _wds
         from app.utils.drag_stall_profiler import drag_profiler
 
-        any_window_dragging = False
+        # ★ 必须写模块属性：from-import 后赋值只改局部名，全局标志永远不变
+        _wds.any_window_dragging = False
         if hasattr(self, "_tab_panel"):
             self._tab_panel.set_resizing(False)  # 如有流式则恢复动画
         # 拖拽期间 moveEvent 跳过了几何保存防抖，此处统一补一次（200ms 后落盘）

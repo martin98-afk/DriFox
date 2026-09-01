@@ -45,13 +45,6 @@
             "add_output_to_context": true,
             "statusMessage": "子智能体列表:",
             "id": "builtin_inject_subagents"
-          },
-          {
-            "type": "python",
-            "function": ".inject_agent_identity:hook",
-            "add_output_to_context": true,
-            "statusMessage": "智能体身份:",
-            "id": "builtin_inject_agent_identity"
           }
         ]
       },

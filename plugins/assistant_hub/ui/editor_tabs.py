@@ -44,7 +44,7 @@ from qfluentwidgets import (
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
-from ..assistant_manager import AssistantManager
+from assistant_hub_manager import AssistantManager
 from .avatar_picker import AvatarPicker
 
 # ────────────────────────────────────────────────────────────────

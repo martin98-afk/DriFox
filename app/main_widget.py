@@ -9716,9 +9716,11 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
             # Tab 模式下刷新共享 Launcher（热重载可能新增 / 卸载了 UI 插件）
+            # ★ 不加 isVisible() 门槛：隐藏窗口的 titleBar tab / 工作区页同样
+            # 需要同步（刷新链幂等），否则隐藏期间重载的插件在重新显示后仍是旧版。
             try:
                 _tm = TabManagerWindow.get_instance()
-                if _tm is not None and _tm.isVisible():
+                if _tm is not None:
                     _tm._update_shared_launcher()
             except Exception:
                 logger.exception("[HotReload] 刷新共享 Launcher 异常")

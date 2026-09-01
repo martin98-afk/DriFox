@@ -141,7 +141,7 @@ def avatar_pixmap_for_assistant(
 ) -> QPixmap:
     """便捷：根据 assistant_id 从 AssistantManager 取头像，失败返回色块头像"""
     try:
-        from ..assistant_manager import AssistantManager
+        from assistant_hub_manager import AssistantManager
 
         mgr = AssistantManager.get_instance()
         a = mgr.get(aid)

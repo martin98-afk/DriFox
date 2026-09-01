@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 from typing import List
@@ -29,6 +30,36 @@ from typing import List
 from loguru import logger
 
 CARD_ID = "assistant_hub"
+
+# ── 共享 manager 模块 ──────────────────────────────────────────
+# ui 子模块与 hooks/inject_assistant.py 都通过 importlib 按文件路径加载
+# assistant_manager.py（模块名固定 assistant_hub_manager 缓存到 sys.modules）。
+# 保证两处拿到同一个 AssistantManager 类 → 单例一致，不会出现 UI 建助手、
+# hook 读不到的双实例问题。
+_SHARED_MANAGER_MODULE = "assistant_hub_manager"
+
+
+def _ensure_shared_manager_module() -> None:
+    if _SHARED_MANAGER_MODULE in sys.modules:
+        return
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        _SHARED_MANAGER_MODULE,
+        str(root / "assistant_manager.py"),
+    )
+    if spec is None or spec.loader is None:
+        logger.error("[assistant_hub] 无法创建 shared manager spec")
+        return
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_SHARED_MANAGER_MODULE] = module
+    try:
+        spec.loader.exec_module(module)
+        logger.debug("[assistant_hub] shared assistant_hub_manager 已加载")
+    except Exception as e:
+        logger.error(f"[assistant_hub] shared manager 加载失败: {e}")
+
+
+_ensure_shared_manager_module()
 
 
 def _plugin_icons_dir() -> str:
