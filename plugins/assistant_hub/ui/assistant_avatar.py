@@ -97,6 +97,14 @@ class RoundAvatar(QWidget):
             path = QPainterPath()
             path.addEllipse(rect)
             p.setClipPath(path)
+            # 剪影类 PNG 下半透明：先铺卡片底色，避免透明区透出页面背景
+            p.setPen(Qt.NoPen)
+            try:
+                base = QColor(Colors.CARD_BG_SOLID)
+            except Exception:
+                base = QColor(30, 30, 34)
+            p.setBrush(base)
+            p.drawRect(rect)
             scaled = self._pixmap.scaled(
                 self._size,
                 self._size,

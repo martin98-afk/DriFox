@@ -32,6 +32,10 @@ class Persona:
     avatar: str = ""
     builtin: bool = False
     prompt: str = ""
+    # 可选伴随模板：personas/<id>.identity.md / personas/<id>.agents.md
+    # （设置页身份/AGENTS.md 回落链：落盘文件 → 人格专属模板 → 内置通用模板）
+    identity_template: str = ""
+    agents_template: str = ""
 
 
 def resolve_user_name() -> str:
@@ -94,6 +98,8 @@ class PersonaRegistry:
     def _load_builtins(self) -> None:
         self._builtin = {}
         for md in sorted(self._builtin_dir.glob("*.md")):
+            if ".identity." in md.name or ".agents." in md.name:
+                continue  # 伴随模板在下方单独挂
             try:
                 meta, body = _parse_frontmatter(md.read_text(encoding="utf-8"))
             except Exception:
@@ -108,6 +114,17 @@ class PersonaRegistry:
                 builtin=True,
                 prompt=body if pid != "none" else "",
             )
+        # 伴随模板：personas/<id>.identity.md / <id>.agents.md
+        for p in self._builtin.values():
+            ipath = self._builtin_dir / f"{p.id}.identity.md"
+            apath = self._builtin_dir / f"{p.id}.agents.md"
+            try:
+                if ipath.exists():
+                    p.identity_template = _parse_frontmatter(ipath.read_text(encoding="utf-8"))[1]
+                if apath.exists():
+                    p.agents_template = _parse_frontmatter(apath.read_text(encoding="utf-8"))[1]
+            except Exception:
+                continue
 
     def _load_custom(self) -> None:
         self._custom = {}

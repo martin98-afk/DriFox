@@ -378,6 +378,9 @@ class AssistantCardWidget(QWidget):
         a = self._mgr.get(aid)
         if not a:
             return
+        # 选中即激活：经验工具 / 记忆注入 / ticker 都以 active_id 为准
+        if self._mgr.active_id() != aid:
+            self._mgr.set_active(aid)
         ap = self._mgr.avatar_path(aid)
         self._avatar.set_text(a.name or a.id)
         self._avatar.set_color(a.color)

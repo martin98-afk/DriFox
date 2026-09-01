@@ -61,6 +61,10 @@ class _AgentCard(QWidget):
         self._lift = 0.0
         self._scale = 1.0
         self._expanded = False  # 容器展开时才画名字（收起态名字重叠）
+
+    def stackOrder(self) -> int:  # 调试用：z 序近似（父内索引）
+        p = self.parentWidget()
+        return p.children().index(self) if p else -1
         self._avatar = RoundAvatar(
             size=CARD_SIZE - 6, text=name, color=color, image_path=image_path or None, parent=self
         )
@@ -234,10 +238,12 @@ class ArcCardStack(QWidget):
             card = _AgentCard(it["id"], it["name"], it.get("color", "#7C3AED"), it.get("avatar_path", ""), self)
             card.clicked.connect(lambda aid=it["id"]: self._on_card_clicked(aid))
             card.installEventFilter(self)
+            card.show()  # ⚠ 父容器已可见后重建的子控件必须显式 show，否则整排"消失"
             self._cards.append(card)
         if self._add_card is None:
             self._add_card = _AddCard(self)
             self._add_card.clicked.connect(self.createRequested.emit)
+            self._add_card.show()
         self._selected_aid = items[0]["id"] if items else ""
         self._relayout(animate=False)
 
@@ -313,9 +319,17 @@ class ArcCardStack(QWidget):
         base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
         self._anims.stop()
         self._anims = QParallelAnimationGroup(self)
-        for i, card in enumerate(self._cards):
+        # z 序：从右往左 raise → 左侧盖右侧；选中卡最后 raise（最顶层）
+        ordered = list(reversed(list(enumerate(self._cards))))
+        if self._selected_aid:
+            ordered = [(i, c) for i, c in ordered if c.aid != self._selected_aid]
+            for i, c in enumerate(self._cards):
+                if c.aid == self._selected_aid:
+                    ordered.append((i, c))
+                    break
+        for i, card in ordered:
             if i >= len(positions):
-                break
+                continue
             tx, ty = positions[i]
             card.raise_()
             if animate:

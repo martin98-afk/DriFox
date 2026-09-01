@@ -123,11 +123,21 @@ def _btn_style(danger: bool = False) -> str:
 
 
 class NoWheelComboBox(QComboBox):
-    """禁滚轮误切换的下拉框；限制弹层最大可见行数。"""
+    """禁滚轮误切换的下拉框；弹层高度硬限制（样式表下 maxVisibleItems 不可靠）。"""
+
+    _MAX_VISIBLE = 10
+    _ROW_H = 30
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMaxVisibleItems(12)
+        self.setMaxVisibleItems(self._MAX_VISIBLE)
+        self._view = self.view()  # QComboBox 自带 popup view
+
+    def showPopup(self) -> None:  # noqa: N802
+        super().showPopup()
+        n = self.count()
+        if n > 0:
+            self.view().setFixedHeight(min(n, self._MAX_VISIBLE) * self._ROW_H)
 
     def wheelEvent(self, e: "QWheelEvent") -> None:  # noqa: N802
         e.ignore()
@@ -292,6 +302,7 @@ class _PersonaChip(QFrame):
 
     def __init__(self, persona: dict, parent=None):
         super().__init__(parent)
+        self.setObjectName("personaChip")  # ⚠ 样式选择器依赖，缺失则无边框
         self.persona_id = persona["id"]
         self._selected = False
         self.setCursor(Qt.PointingHandCursor)

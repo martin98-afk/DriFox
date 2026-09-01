@@ -690,15 +690,29 @@ class AssistantManager:
 
             logger.debug(f"[assistant_hub] 清空 system prompt 缓存失败: {e}")
 
-    # ── 身份/提示词文件 (回落模板同 openhanako persona-source) ──
+    # ── 身份/提示词文件 (回落链：落盘文件 → 人格专属模板 → 内置通用模板) ──
+
+    def _persona_template(self, aid: str, kind: str) -> str:
+        """人格伴随模板（identity/agents），persona 不存在返回空。"""
+        try:
+            a = self.get(aid)
+            persona = self.persona_registry().get(a.yuan) if a else None
+            if persona is None:
+                return ""
+            return getattr(persona, f"{kind}_template", "") or ""
+        except Exception:
+            return ""
 
     def read_identity_source(self, aid: str) -> Tuple[str, bool]:
-        """读取 identity.md（缺失时回落模板），返回 (content, from_template)"""
+        """读取 identity.md（缺失时回落：人格模板 → 内置模板），返回 (content, from_template)"""
         path = self._identity_path(aid)
         if path.exists():
             return path.read_text(encoding="utf-8"), False
         a = self.get(aid)
         name = a.name if a else aid
+        persona_tpl = self._persona_template(aid, "identity")
+        if persona_tpl.strip():
+            return persona_tpl, True
         return _BUILTIN_IDENTITY_TEMPLATE.format(name=name), True
 
     def write_identity(self, aid: str, content: str) -> bool:
@@ -708,11 +722,15 @@ class AssistantManager:
         return True
 
     def read_agents_md_source(self, aid: str) -> Tuple[str, bool]:
+        """读取 AGENTS.md（缺失时回落：人格模板 → 内置模板），返回 (content, from_template)"""
         path = self._agents_md_path(aid)
         if path.exists():
             return path.read_text(encoding="utf-8"), False
         a = self.get(aid)
         name = a.name if a else aid
+        persona_tpl = self._persona_template(aid, "agents")
+        if persona_tpl.strip():
+            return persona_tpl, True
         return _BUILTIN_AGENTS_TEMPLATE.format(name=name), True
 
     def write_agents_md(self, aid: str, content: str) -> bool:
