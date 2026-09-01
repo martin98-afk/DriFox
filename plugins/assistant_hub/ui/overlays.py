@@ -111,26 +111,16 @@ class OverlayBase(MaskDialogBase):
             }}
         """
         )
-        # 卡片本体定尺寸；遮罩层（self）保持全屏
+        # 卡片本体定尺寸；遮罩层（self）保持全屏。
+        # ⚠ 对齐 plugin-marketplace 模式：widget 留在 MaskDialogBase 的 _hBox
+        # 布局里自动居中——不要手动 move/resizeEvent 干预，否则与布局互相
+        # 覆盖，卡片位置随重排时序漂移（此前弹窗偏位的根因）。
         self.widget.setFixedSize(width, height)
         self._wrap = self.widget
         self._v = QVBoxLayout(self._wrap)
         self._v.setContentsMargins(20, 16, 20, 16)
         self._v.setSpacing(8)
         self._v.addWidget(_label(title, 14))
-        # ⚠ MaskDialogBase.__init__ 把 self 钉在屏幕 (0,0)：这里与宿主窗口（parent）几何对齐
-        if parent is not None:
-            self.setGeometry(parent.geometry())
-        self._center()
-
-    def _center(self) -> None:
-        x = max(0, (self.width() - self.widget.width()) // 2)
-        y = max(0, (self.height() - self.widget.height()) // 2)
-        self.widget.move(x, y)
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._center()
 
 
 class TextViewOverlay(OverlayBase):

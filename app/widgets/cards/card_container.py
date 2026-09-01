@@ -9,6 +9,9 @@ from app.utils.design_tokens import Colors
 from app.widgets.cards.card_manager import CardManager, ContainerType
 
 
+TRANSPARENT_OVERLAY_PROP = "transparentOverlay"
+
+
 class CardContainer(QWidget):
     """通用卡片容器 - 每个容器只管理一个位置的卡片
 
@@ -50,6 +53,11 @@ class CardContainer(QWidget):
     # 卡片 sizeHint，杜绝"容器比内容高 → 卡片内部/底部出现空白"。
     # 适用场景：Question 等短时模态卡片——用户关注内容本身，容器不应被撑大。
     FOLLOW_CONTENT_PROP = "followContent"
+
+    # 卡片可通过 setProperty(TRANSPARENT_OVERLAY_PROP, True) 声明覆盖层透明：
+    # 覆盖层模式下不再画容器面板背景/边框，透出宿主窗口背景，由卡片自绘表面。
+    # 适用场景：助手中心等整页卡片——需要与主窗口视觉无缝衔接。
+    TRANSPARENT_OVERLAY_PROP = "transparentOverlay"
 
     # ── 覆盖层模式信号 ──
     # 当容器处于覆盖层模式（overlay_mode）且卡片显隐状态变化时发射，
@@ -140,6 +148,13 @@ class CardContainer(QWidget):
         # 应用主题背景
         self._apply_background_style()
 
+    def _has_transparent_card(self) -> bool:
+        """任一可见卡片声明了 TRANSPARENT_OVERLAY_PROP → 容器不画面板背景。"""
+        for w in self._cards.values():
+            if w.property(TRANSPARENT_OVERLAY_PROP) and not w.isHidden():
+                return True
+        return False
+
     def _apply_background_style(self):
         """应用主题背景 + 边框
 
@@ -150,6 +165,15 @@ class CardContainer(QWidget):
         Colors.refresh()
         bg = Colors.CARD_BG.format(alpha=232)
         if self._overlay_mode:
+            # 覆盖层模式：卡片声明透明 → 容器只做透明承托，透出宿主背景
+            if self._has_transparent_card():
+                self.setStyleSheet("""
+                    CardContainer {
+                        background: transparent;
+                        border: none;
+                    }
+                """)
+                return
             # 覆盖层模式：四角圆角独立面板视觉 + 较实背景，与对话区形成明确边界
             self.setStyleSheet(f"""
                 CardContainer {{
@@ -584,6 +608,9 @@ class CardContainer(QWidget):
         容器需要重新展开（之前因父窗口隐藏，_do_expand 未正确展开）。
         """
         super().showEvent(event)
+        # 覆盖层模式：按当前可见卡片重判透明/面板样式（透明卡片显隐会切换容器可见性）
+        if self._overlay_mode:
+            self._apply_background_style()
         # 延迟到当前 show 事件处理完成后再展开（此时布局已激活）
         # not isHidden()：容器自身隐藏期间被 setVisible(True) 的卡片
         # isVisible()/WA_WState_Visible 均为 False，但 isHidden() 能正确反映意图

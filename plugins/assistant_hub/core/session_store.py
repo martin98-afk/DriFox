@@ -22,8 +22,15 @@ ROLES = ("user", "assistant")
 
 
 def _candidate_db_paths() -> List[Path]:
-    """sessions.db 常见位置：AppData/DriFox（打包）→ ~/.drifox（开发默认）。"""
+    """sessions.db 常见位置：主程序 app_data（开发=.drifox / 打包=~/.drifox）→ APPDATA → home。"""
     out: List[Path] = []
+    try:
+        # 主程序同源定位（开发环境 get_app_data_dir 返回相对 .drifox，依赖 cwd；resolve 兜底）
+        from app.utils.utils import get_app_data_dir
+
+        out.append(Path(get_app_data_dir()).resolve() / "sessions.db")
+    except Exception:
+        pass
     appdata = None
     try:
         import os

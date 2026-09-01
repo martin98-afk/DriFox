@@ -1265,7 +1265,12 @@ class TabManagerWindow(FramelessWindow):
                 background: transparent;
             }}
             #globalOverlay {{
-                background: {Colors.CARD_BG.format(alpha=246)};
+                /* 覆盖层页面透明：面板底由内部 CardContainer 按卡片状态自绘
+                   （transparentOverlay 卡片 → 容器透明，透出 #chatFrame 半透明
+                   面板与对话区无缝衔接；普通卡片 → 容器自画 alpha=246 面板底）。
+                   此处若画实色底（旧值 CARD_BG alpha=246）会盖住对话区，导致
+                   assistant_hub 等透明卡打开时整页呈不透明面板。 */
+                background: transparent;
                 border-radius: 8px;
             }}
         """)

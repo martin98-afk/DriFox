@@ -111,19 +111,8 @@ class RenameDialog(MaskDialogBase):
         v.addLayout(btns)
 
         self.widget.setFixedSize(380, self.widget.sizeHint().height() + 40)
-        # ⚠ MaskDialogBase.__init__ 把 self 钉在屏幕 (0,0)：与宿主窗口（parent）几何对齐
-        if parent is not None:
-            self.setGeometry(parent.geometry())
-        self._center()
-
-    def _center(self) -> None:
-        x = max(0, (self.width() - self.widget.width()) // 2)
-        y = max(0, (self.height() - self.widget.height()) // 2)
-        self.widget.move(x, y)
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        self._center()
+        # 对齐 plugin-marketplace 模式：widget 留在 MaskDialogBase 的 _hBox
+        # 布局里自动居中，不手动 move/resizeEvent 干预（会与布局互相覆盖）。
 
     def _accept(self) -> None:
         txt = self._input.text().strip()

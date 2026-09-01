@@ -33,9 +33,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase
+from qfluentwidgets import InfoBar, InfoBarPosition, MaskDialogBase, SingleDirectionScrollArea
 
-from app.utils.design_tokens import CardStyles, Colors, font_size_css
+from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
 from assistant_hub_manager import AssistantManager
@@ -55,16 +55,11 @@ from .sections import (
 
 
 def _open_dialog(dlg) -> int:
-    """Mask 弹窗与宿主窗口几何对齐后再 exec_，返回 exec_ 结果码。
+    """统一弹窗入口：直接 exec_（对齐 plugin-marketplace 模式，零几何干预）。
 
-    ⚠ qfluentwidgets MaskDialogBase.__init__ 里 setGeometry(0, 0, parent.width(), parent.height())：
-    顶层 QDialog 的 geometry 是屏幕坐标——不重定位时弹窗会钉在屏幕左上角，
-    与不在原点的主窗口错位（窗口还原态尤其明显）。
-    所有 MaskDialog 必须以完整主窗口为 parent（见 _host_window），并经本函数弹出。
+    ⚠ 不要对 MaskDialog 做 setGeometry / widget.move：MaskDialogBase 的
+    _hBox 布局是卡片位置的权威，手动干预会与布局互相覆盖导致卡片漂移。
     """
-    host = dlg.parent()
-    if host is not None:
-        dlg.setGeometry(host.geometry())
     return dlg.exec_()
 
 
@@ -112,7 +107,7 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
                 f"#hubConfirm {{ background: {Colors.CARD_BG_SOLID}; border: 1px solid {Colors.BORDER};"
                 f"border-radius: 12px; }}"
             )
-            self.setFixedSize(640, 420)
+            self.widget.setFixedSize(640, 420)
             v = QVBoxLayout(self.widget)
             v.setContentsMargins(24, 20, 24, 18)
             v.setSpacing(10)
@@ -139,12 +134,7 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
             row.addWidget(cancel)
             row.addWidget(ok)
             v.addLayout(row)
-            # ⚠ MaskDialogBase.__init__ 把 self 钉在屏幕 (0,0)：与宿主窗口对齐后再居中卡片
-            if parent is not None:
-                self.setGeometry(parent.geometry())
-            x = max(0, (self.width() - self.widget.width()) // 2)
-            y = max(0, (self.height() - self.widget.height()) // 2)
-            self.widget.move(x, y)
+            # 对齐 plugin-marketplace 模式：widget 留在 _hBox 布局自动居中，不手动干预
 
         def _yes_accept(self):
             self._yes = True
@@ -163,9 +153,12 @@ class AssistantCardWidget(QWidget):
         self._mgr = AssistantManager.get_instance()
         self._active_aid: str = ""
         self._dream_running = False
-        # 助手区域背景透明（融入宿主主题背景）
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setStyleSheet("AssistantCardWidget { background: transparent; }")
+        # ── 插件背景完全透明（对齐主程序对话区做法）──
+        # 不叠加任何背景层：Tab 内嵌时由 #chatFrame 半透明面板透出。
+        # transparentOverlay：声明覆盖层容器（CardContainer）不画面板底。
+        self.setProperty("transparentOverlay", True)
+        self.setAutoFillBackground(False)
+        self.setStyleSheet("")
         self._build_ui()
         self._reload_all()
 
@@ -177,14 +170,15 @@ class AssistantCardWidget(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        scroll = QScrollArea()
+        scroll = SingleDirectionScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        # 系统统一滚动区域样式：透明背景 + 全局统一滚动条（CardStyles.scroll_area）
-        scroll.setStyleSheet(CardStyles.scroll_area())
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         outer.addWidget(scroll)
 
+        # 内容容器透明（对齐主程序对话区 chat_container 做法）
         content = QWidget()
+        content.setStyleSheet("background: transparent;")
         self._content_v = QVBoxLayout(content)
         self._content_v.setContentsMargins(24, 8, 24, 24)
         self._content_v.setSpacing(14)
@@ -196,13 +190,15 @@ class AssistantCardWidget(QWidget):
         self._content_v.addWidget(self._stack)
 
         inner = QWidget()
-        inner.setMaximumWidth(900)
+        # 内容最大宽度：主窗口够宽时展开到上限，不够宽则自适应（无横向滚动）
+        inner.setMaximumWidth(1400)
         self._inner_v = QVBoxLayout(inner)
         self._inner_v.setContentsMargins(0, 0, 0, 0)
         self._inner_v.setSpacing(14)
 
-        # 2. 名称行 + 操作（头像可点击更换；当前助手 accent 高亮 + 徽章）
+        # 2. 名称行：头像/名字（左）· 设为主助手/删除（右）；改名走基本信息输入框
         name_row = QHBoxLayout()
+        name_row.setSpacing(10)
         self._avatar = RoundAvatar(size=44, text="?", color="#7C3AED", parent=self)
         self._avatar.setCursor(Qt.PointingHandCursor)
         self._avatar.setToolTip("点击更换头像")
@@ -210,40 +206,32 @@ class AssistantCardWidget(QWidget):
         name_row.addWidget(self._avatar)
         self._name_label = QLabel("(未选择)")
         self._name_label.setStyleSheet(
-            f"color: {Colors.TEXT_ACCENT}; background: transparent; border: none;"
-            f"{get_font_family_css()} 20px; font-weight: 700;"
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(20)}; font-weight: 700;"
         )
         name_row.addWidget(self._name_label)
-        self._active_badge = QLabel("当前助手")
-        self._active_badge.setStyleSheet(
-            f"""
-            QLabel {{
-                color: {Colors.TEXT_ACCENT}; background: rgba(245, 158, 11, 0.12);
-                border: 1px solid {Colors.TEXT_ACCENT}; border-radius: 9px;
-                padding: 1px 10px;
-                {get_font_family_css()} {font_size_css(10)}
-            }}
-        """
-        )
-        name_row.addWidget(self._active_badge)
-        self._primary_badge = QLabel("★ 主助手")
+        # 主助手星标：仅色点+tooltip，不做胶囊徽章
+        self._primary_badge = QLabel("★")
+        self._primary_badge.setToolTip("主助手")
         self._primary_badge.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; background: {Colors.HOVER_BG};"
-            f"border: 1px solid {Colors.BORDER}; border-radius: 9px; padding: 1px 10px;"
-            f"{get_font_family_css()} {font_size_css(10)};"
+            f"color: {Colors.TEXT_ACCENT}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(14)};"
         )
         self._primary_badge.hide()
         name_row.addWidget(self._primary_badge)
         name_row.addStretch()
         for text, handler, danger in (
             ("设为主助手", self._on_set_primary, False),
-            ("重命名", self._on_rename, False),
             ("删除此助手", self._on_delete, True),
         ):
             btn = QPushButton(text)
+            btn.setFixedHeight(30)
+            btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet(_btn_style(danger=danger))
             btn.clicked.connect(handler)
             name_row.addWidget(btn)
+            if text == "设为主助手":
+                self._set_primary_btn = btn  # 已是主助手时隐藏
         self._inner_v.addLayout(name_row)
 
         # 3-6. 分区
@@ -285,6 +273,9 @@ class AssistantCardWidget(QWidget):
         center.addStretch()
         self._content_v.addLayout(center, 1)
         scroll.setWidget(content)
+        # 透明背景：scroll 与内容容器都显式透明（viewport palette 底是插件内
+        # 白色面板的根因，原生 QScrollArea 的后代选择器盖不住它）
+        scroll.enableTransparentBackground()
 
     # ══════════════════════════════════════════════════
     #  数据绑定
@@ -357,7 +348,7 @@ class AssistantCardWidget(QWidget):
                     f"#hubAvatarDialog {{ background: {Colors.CARD_BG_SOLID};"
                     f"border: 1px solid {Colors.BORDER}; border-radius: 14px; }}"
                 )
-                self.setFixedSize(780, 620)
+                self.widget.setFixedSize(780, 620)
                 v = QVBoxLayout(self.widget)
                 v.setContentsMargins(20, 16, 20, 16)
                 picker = AvatarPicker(assistant_id=aid, parent=self.widget)
@@ -379,14 +370,9 @@ class AssistantCardWidget(QWidget):
                 row.addWidget(cancel)
                 row.addWidget(ok)
                 v.addLayout(row)
-                # ⚠ MaskDialogBase.__init__ 把 self 钉在屏幕 (0,0)：与宿主窗口对齐后再居中卡片
-                if parent is not None:
-                    self.setGeometry(parent.geometry())
-                x = max(0, (self.width() - self.widget.width()) // 2)
-                y = max(0, (self.height() - self.widget.height()) // 2)
-                self.widget.move(x, y)
+                # 对齐 plugin-marketplace 模式：widget 留在 _hBox 布局自动居中，不手动干预
 
-        dlg = _AvatarDialog(_host_window())
+        dlg = _AvatarDialog(_host_window() or self.window())
         if not _open_dialog(dlg):
             return
         sel = dlg._picker.get_selection()
@@ -448,6 +434,7 @@ class AssistantCardWidget(QWidget):
         self._avatar.set_image(str(ap) if ap else None)
         self._name_label.setText(a.name or a.id)
         self._primary_badge.setVisible(a.primary)
+        self._set_primary_btn.setVisible(not a.primary)
         self._stack.set_selected(aid)
 
         aid_capture = aid
@@ -490,7 +477,7 @@ class AssistantCardWidget(QWidget):
             title="新建助手",
             hint="输入助手名称（例如：小助手 / 翻译官 / 代码审查员）：",
             default="",
-            parent=_host_window(),
+            parent=_host_window() or self.window(),
         )
         dlg.confirmed.connect(self._do_create)
         _open_dialog(dlg)
@@ -507,7 +494,7 @@ class AssistantCardWidget(QWidget):
         if not a:
             return
         ret = _confirm_dialog(
-            _host_window(),
+            _host_window() or self.window(),
             "删除助手",
             f"确定删除助手「{a.name}」？\n其身份、提示词、记忆、头像将一并删除。\n（该操作不可撤销）",
         )
@@ -519,23 +506,6 @@ class AssistantCardWidget(QWidget):
             self._notify(f"助手「{a.name}」已删除")
         else:
             self._notify_error("至少保留一个助手，无法删除")
-
-    def _on_rename(self) -> None:
-        a = self._mgr.get(self._active_aid) if self._active_aid else None
-        if not a:
-            return
-        dlg = RenameDialog(title="重命名助手", hint="新的名称：", default=a.name, parent=_host_window())
-        dlg.confirmed.connect(self._do_rename)
-        _open_dialog(dlg)
-
-    def _do_rename(self, name: str) -> None:
-        a = self._mgr.get(self._active_aid)
-        if a is None or not name:
-            return
-        a.name = name
-        self._mgr.update(a)
-        self._mgr.invalidate_context(a.id)
-        self._reload_all(select_aid=a.id)
 
     def _on_set_primary(self) -> None:
         if not self._active_aid:
@@ -587,7 +557,7 @@ class AssistantCardWidget(QWidget):
     def _on_persona_manage(self) -> None:
         reg = self._mgr.persona_registry()
         current = self._mgr.get(self._active_aid).yuan if self._active_aid else ""
-        dlg = PersonaManageDialog(reg, current, parent=_host_window())
+        dlg = PersonaManageDialog(reg, current, parent=_host_window() or self.window())
         _open_dialog(dlg)
         self._reload_all(select_aid=self._active_aid)
 
@@ -634,13 +604,13 @@ class AssistantCardWidget(QWidget):
             return
         path = self._mgr.memory_dir(self._active_aid) / "today.md"
         text = path.read_text(encoding="utf-8") if Path(path).exists() else ""
-        _open_dialog(TextViewOverlay("当下记忆", text or "（暂无当下记忆）", parent=_host_window()))
+        _open_dialog(TextViewOverlay("当下记忆", text or "（暂无当下记忆）", parent=_host_window() or self.window()))
 
     def _on_view_all(self) -> None:
         if not self._active_aid:
             return
         text = self._mgr.compiled_memory(self._active_aid)
-        _open_dialog(TextViewOverlay("所有记忆", text or "（暂无记忆）", parent=_host_window()))
+        _open_dialog(TextViewOverlay("所有记忆", text or "（暂无记忆）", parent=_host_window() or self.window()))
 
     def _on_dream_run(self) -> None:
         if not self._active_aid or self._dream_running:
@@ -693,7 +663,7 @@ class AssistantCardWidget(QWidget):
             revisions,
             preview_fn=_preview,
             restore_fn=lambda rid: self._mgr.dream_restore(aid, rid),
-            parent=_host_window(),
+            parent=_host_window() or self.window(),
         )
         _open_dialog(dlg)
         self._memory.set_status(self._memory_status(aid))
@@ -702,7 +672,7 @@ class AssistantCardWidget(QWidget):
         if not self._active_aid:
             return
         aid = self._active_aid
-        ret = _confirm_dialog(_host_window(), "清除记忆", "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。")
+        ret = _confirm_dialog(_host_window() or self.window(), "清除记忆", "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。")
         if not ret:
             return
         mem = self._mgr.memory_dir(aid)
@@ -746,7 +716,7 @@ class AssistantCardWidget(QWidget):
                 pass
 
         _open_dialog(
-            TextViewOverlay(f"经验 · {category}", text, editable=True, on_save=_save, parent=_host_window())
+            TextViewOverlay(f"经验 · {category}", text, editable=True, on_save=_save, parent=_host_window() or self.window())
         )
         self._experience.reload_categories(self._mgr.experience_list(aid))
 
@@ -777,7 +747,7 @@ class AssistantCardWidget(QWidget):
                 text,
                 editable=True,
                 on_save=lambda c: self._mgr.write_skill(self._active_aid, name, c),
-                parent=_host_window(),
+                parent=_host_window() or self.window(),
             )
         )
 
@@ -794,7 +764,7 @@ class AssistantCardWidget(QWidget):
                 isClosable=True,
                 position=InfoBarPosition.TOP_RIGHT,
                 duration=2500,
-                parent=_host_window(),
+                parent=_host_window() or self.window(),
             )
         except Exception:
             pass
@@ -808,7 +778,7 @@ class AssistantCardWidget(QWidget):
                 isClosable=True,
                 position=InfoBarPosition.TOP_RIGHT,
                 duration=3000,
-                parent=_host_window(),
+                parent=_host_window() or self.window(),
             )
         except Exception:
             pass
