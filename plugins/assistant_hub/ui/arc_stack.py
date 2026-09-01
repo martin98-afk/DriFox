@@ -163,24 +163,36 @@ class _AgentCard(QWidget):
         p.setPen(Qt.NoPen)
         p.setBrush(QColor(0, 0, 0, shadow.get("alpha", 40) if isinstance(shadow, dict) else 40))
         p.drawEllipse(rect.adjusted(0, 2, 0, 2))
-        # 边框
-        # 选中卡：accent 粗边框（比灰色更醒目）
+        # 选中柔光环：外侧低透明度 accent 圈，柔化实色描边的生硬感
         if self._selected:
-            border = QColor(Colors.TEXT_ACCENT)
-        else:
-            border = QColor(Colors.BORDER)
-        p.setPen(QPen(border, 2.5 if self._selected else 2))
+            glow = QColor(Colors.TEXT_ACCENT)
+            glow.setAlpha(64)
+            p.setPen(QPen(glow, 4))
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(rect.adjusted(-2.5, -2.5, 2.5, 2.5))
+        # 边框：选中 accent，其余灰
+        border = QColor(Colors.TEXT_ACCENT) if self._selected else QColor(Colors.BORDER)
+        p.setPen(QPen(border, 2))
         # ⚠ QColor 不认 "rgba(...)" 字符串（无效色不报错、绘制成黑），必须经 qcolor_from 解析
         p.setBrush(qcolor_from(Colors.CARD_BG.format(alpha=250)))
         p.drawEllipse(rect)
-        # 主助手角标（底部 accent 圆点）
+        # 主助手徽章：底部中央 accent 圆徽 + 白色小星（替代裸圆点）
         if self._primary:
-            p.setPen(QPen(qcolor_from(Colors.CARD_BG_SOLID), 1.5))
+            cx = CARD_SIZE / 2
+            cy = CARD_SIZE - 4.0
+            r = 8.0
+            p.setPen(QPen(qcolor_from(Colors.CARD_BG_SOLID), 2))
             p.setBrush(QColor(Colors.TEXT_ACCENT))
-            p.drawEllipse(int(CARD_SIZE / 2 - 4), CARD_SIZE - 8, 8, 8)
-        # 名字（仅展开态显示，对齐原版 agent-card-name opacity 切换）
+            p.drawEllipse(QRectF(cx - r, cy - r, 2 * r, 2 * r))
+            p.setPen(QColor("#FFFFFF"))
+            f = self.font()
+            f.setPixelSize(10)
+            f.setBold(True)
+            p.setFont(f)
+            p.drawText(QRectF(cx - r, cy - r, 2 * r, 2 * r), Qt.AlignCenter, "★")
+        # 名字（仅展开态显示，选中时 accent 强调）
         if self._expanded:
-            p.setPen(QColor(Colors.TEXT_MUTED if not self._selected else Colors.TEXT_PRIMARY))
+            p.setPen(QColor(Colors.TEXT_ACCENT if self._selected else Colors.TEXT_MUTED))
             font = self.font()
             font.setPixelSize(11)
             p.setFont(font)

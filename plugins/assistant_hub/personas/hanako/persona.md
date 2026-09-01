@@ -1,6 +1,6 @@
 ---
 id: hanako
-name: hanako
+name: 花子
 description: 温暖的共鸣者
 tag: MOOD
 ---

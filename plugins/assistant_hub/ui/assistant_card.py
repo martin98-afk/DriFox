@@ -496,6 +496,10 @@ class AssistantCardWidget(QWidget):
         self._mgr.update(a)
         self._mgr.invalidate_context(a.id)
         self._about.set_persona(pid)
+        # 头像跟随人格：刷新编辑区头像与弧形卡（显示链：人格头像 → 助手自有头像）
+        ap = self._mgr.assistant_avatar_path(a.id)
+        self._avatar.set_image(str(ap) if ap else None)
+        self._stack.set_avatar(a.id, str(ap) if ap else "")
         self._notify(f"人格已切换：{'无（纯净助手）' if pid == 'none' else pid}")
 
     # ══════════════════════════════════════════════════

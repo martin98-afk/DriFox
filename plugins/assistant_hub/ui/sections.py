@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import ComboBox, SwitchButton
 
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
 
 from assistant_hub_manager import AssistantManager
@@ -412,7 +412,7 @@ class _PersonaChip(QFrame):
         self.persona_id = persona["id"]
         self._selected = False
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(118, 150)
+        self.setFixedSize(140, 170)  # 预留全局字体缩放后两行 desc + tag 的空间
         v = QVBoxLayout(self)
         v.setContentsMargins(10, 14, 10, 12)
         v.setSpacing(6)
@@ -437,11 +437,14 @@ class _PersonaChip(QFrame):
         self._apply_style()
         # 描述限制 2 行：按像素宽度手动截断（超出加 …），并钉死高度，
         # 防止长描述挤压/遮挡下方 tag（chips 卡固定 118x150）
+        # 字号必须与 desc QSS 实际渲染一致（含全局字体缩放 delta），
+        # 否则度量偏小 → QLabel 自动折出第三行被裁/遮挡 tag
         fm = QFont(self._desc.font())
-        fm.setPixelSize(10)  # 与 _apply_style 中 desc font-size 一致
+        fm.setPixelSize(scale_font_size(10))
         metrics = QFontMetrics(fm)
-        self._desc.setText(_elide_lines(persona.get("description", ""), metrics, 96, 2))
+        self._desc.setText(_elide_lines(persona.get("description", ""), metrics, 118, 2))
         self._desc.setFixedHeight(metrics.lineSpacing() * 2)
+        self._desc.setWordWrap(False)  # 兑底：已手动折行，禁自动折行防溢出
 
     def set_avatar_image(self, image_path: str) -> None:
         """换人格头像后轻量刷新本 chip 头像。"""
