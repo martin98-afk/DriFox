@@ -33,6 +33,7 @@ from app.utils.utils import get_font_family_css
 
 from assistant_hub_manager import AssistantManager
 
+from .assistant_avatar import RoundAvatar
 
 # ── 基础样式辅助 ─────────────────────────────────────────
 
@@ -89,16 +90,17 @@ def _editor_style() -> str:
 
 
 def _input_style() -> str:
+    """中性输入框：不依赖主题 INPUT_*（亮色主题下不发蓝）。"""
     return f"""
         QLineEdit {{
-            background: {Colors.INPUT_BG_START};
-            border: 1px solid {Colors.INPUT_BORDER};
-            color: {Colors.INPUT_TEXT};
+            background: {Colors.CARD_BG.format(alpha=90)};
+            border: 1px solid {Colors.BORDER};
+            color: {Colors.TEXT_PRIMARY};
             padding: 5px 10px;
             border-radius: 6px;
             {get_font_family_css()} {font_size_css(12)}
         }}
-        QLineEdit:focus {{ border-color: {Colors.TEXT_ACCENT}; }}
+        QLineEdit:focus {{ border-color: {Colors.TEXT_ACCENT}; background: {Colors.CARD_BG.format(alpha=160)}; }}
     """
 
 
@@ -211,12 +213,18 @@ class ProfileSection(_Section):
     def _combo_style() -> str:
         return f"""
             QComboBox {{
-                background: {Colors.INPUT_BG_START}; border: 1px solid {Colors.INPUT_BORDER};
-                color: {Colors.INPUT_TEXT}; border-radius: 6px; padding: 4px 8px;
+                background: {Colors.CARD_BG.format(alpha=90)};
+                border: 1px solid {Colors.BORDER};
+                color: {Colors.TEXT_PRIMARY};
+                border-radius: 6px;
+                padding: 4px 10px;
                 {get_font_family_css()} {font_size_css(11)}
             }}
+            QComboBox:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
             QComboBox QAbstractItemView {{
-                background: {Colors.CARD_BG_SOLID}; color: {Colors.INPUT_TEXT};
+                background: {Colors.CARD_BG_SOLID};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
                 selection-background-color: {Colors.SELECTED_BG};
             }}
         """
@@ -277,6 +285,72 @@ class ProfileSection(_Section):
 # ── 关于 Ta（人格 / 身份 / AGENTS.md）────────────────────
 
 
+class _PersonaChip(QFrame):
+    """人格选择卡：40px 圆头像 + 名 + 描述 + tag 方角牌（对齐原版 yuan-chip）。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, persona: dict, parent=None):
+        super().__init__(parent)
+        self.persona_id = persona["id"]
+        self._selected = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(118, 150)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(10, 14, 10, 12)
+        v.setSpacing(6)
+        v.setAlignment(Qt.AlignHCenter)
+        self._avatar = RoundAvatar(
+            size=44,
+            text=persona.get("name") or persona["id"],
+            color="#7C3AED",
+            image_path=persona.get("avatar_path") or None,
+        )
+        v.addWidget(self._avatar, 0, Qt.AlignHCenter)
+        self._name = QLabel(persona.get("name") or persona["id"])
+        self._name.setAlignment(Qt.AlignCenter)
+        self._desc = QLabel(persona.get("description", ""))
+        self._desc.setAlignment(Qt.AlignCenter)
+        self._desc.setWordWrap(True)
+        self._tag = QLabel(f"[{persona['tag']}]" if persona.get("tag") else "")
+        self._tag.setAlignment(Qt.AlignCenter)
+        v.addWidget(self._name)
+        v.addWidget(self._desc)
+        v.addWidget(self._tag)
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        border = Colors.TEXT_ACCENT if self._selected else Colors.BORDER
+        bg = "rgba(245, 158, 11, 0.07)" if self._selected else "transparent"
+        self.setStyleSheet(
+            f"""
+            QFrame#personaChip {{
+                background: {bg};
+                border: {"2px solid " + Colors.TEXT_ACCENT if self._selected else "1.5px solid " + border};
+                border-radius: 12px;
+            }}
+            QFrame#personaChip:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
+            QFrame#personaChip QLabel {{ background: transparent; border: none; }}
+        """
+        )
+        self._name.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
+        )
+        self._desc.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        self._tag.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT if self._selected else Colors.TEXT_MUTED};"
+            f"{get_font_family_css()} {font_size_css(9)}; letter-spacing: 1px;"
+        )
+
+    def set_selected(self, on: bool) -> None:
+        if self._selected != on:
+            self._selected = on
+            self._apply_style()
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        self.clicked.emit()
+
+
 class AboutSection(_Section):
     """人格选择（chips + 无横幅）+ 身份简介 + AGENTS.md。"""
 
@@ -286,15 +360,17 @@ class AboutSection(_Section):
 
     def __init__(self, personas: List[dict], current_pid: str, parent=None):
         super().__init__("关于 Ta", parent)
-        self.body().addWidget(_hint("人格是助手的潜意识，以此为基础搭建你独一无二的伙伴。", 10))
+        self.body().addWidget(_hint("“元”是助手的潜意识，以此为基础搭建你独一无二的伙伴。", 10))
         chips_row = QHBoxLayout()
-        chips_row.setSpacing(10)
+        chips_row.setSpacing(12)
         chips_row.addStretch()
-        self._chip_buttons: List[QPushButton] = []
+        self._chips: List[_PersonaChip] = []
         self._personas = [p for p in personas if p["id"] != "none"]
         for p in self._personas:
-            btn = self._make_chip(p)
-            chips_row.addWidget(btn)
+            chip = _PersonaChip(p)
+            chip.clicked.connect(lambda pid=p["id"]: self.personaChangeRequested.emit(pid))
+            chips_row.addWidget(chip)
+            self._chips.append(chip)
         chips_row.addStretch()
         self.body().addLayout(chips_row)
 
@@ -323,7 +399,7 @@ class AboutSection(_Section):
         # 身份
         self.body().addWidget(_title_label("身份简介", 11))
         self._identity = QTextEdit()
-        self._identity.setFixedHeight(72)
+        self._identity.setFixedHeight(140)
         self._identity.setStyleSheet(_editor_style())
         self._identity.setPlaceholderText(
             "# {{agentName}}\n\n{{userName}}的个人助手。感性与理性兼备，既有温度也有判断力。"
@@ -335,7 +411,7 @@ class AboutSection(_Section):
         # AGENTS.md
         self.body().addWidget(_title_label("AGENTS.md", 11))
         self._agents_md = QTextEdit()
-        self._agents_md.setFixedHeight(180)
+        self._agents_md.setFixedHeight(240)
         self._agents_md.setStyleSheet(_editor_style())
         self._agents_md.setPlaceholderText("# 人格定义\n\n- 你是一个有温度的存在…")
         self.body().addWidget(self._agents_md)
@@ -370,42 +446,10 @@ class AboutSection(_Section):
             QPushButton:hover {{ border-color: rgba(255,255,255,0.5); }}
         """
 
-    def _make_chip(self, p: dict) -> QPushButton:
-        """人格 chip 卡：头像 + 名 + 描述 + tag 小牌（纵向）。"""
-        btn = QPushButton()
-        btn.setFixedSize(104, 116)
-        btn.setCursor(Qt.PointingHandCursor)
-        tag_line = f"\n[{p['tag']}]" if p.get("tag") else ""
-        btn.setText(f"{p['name']}\n{p.get('description', '')}{tag_line}")
-        btn.setStyleSheet(self._chip_style(False))
-        btn.clicked.connect(lambda: self.personaChangeRequested.emit(p["id"]))
-        btn.setToolTip(p.get("prompt_preview", ""))
-        self._chip_buttons.append(btn)
-        btn._persona_id = p["id"]  # type: ignore[attr-defined]
-        return btn
-
-    @staticmethod
-    def _chip_style(selected: bool) -> str:
-        border = Colors.TEXT_ACCENT if selected else Colors.BORDER
-        bg = "rgba(245, 158, 11, 0.08)" if selected else "transparent"
-        color = Colors.TEXT_PRIMARY if selected else Colors.TEXT_MUTED
-        border_line = f"2px solid {border}" if selected else f"1px solid {border}"
-        return f"""
-            QPushButton {{
-                background: {bg};
-                border: {border_line};
-                border-radius: 10px;
-                color: {color};
-                {get_font_family_css()} {font_size_css(11)}
-            }}
-            QPushButton:hover {{ border-color: {Colors.TEXT_ACCENT}; color: {Colors.TEXT_PRIMARY}; }}
-        """
-
     def set_persona(self, pid: str) -> None:
         """刷新 chips / 横幅选中态。"""
-        for btn in self._chip_buttons:
-            sel = getattr(btn, "_persona_id", "") == pid
-            btn.setStyleSheet(self._chip_style(sel))
+        for chip in self._chips:
+            chip.set_selected(chip.persona_id == pid)
         self._none_banner.setStyleSheet(self._banner_style(pid == "none"))
 
     def bind_texts(self, identity: str, agents_md: str) -> None:

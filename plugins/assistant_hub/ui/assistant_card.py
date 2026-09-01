@@ -273,13 +273,19 @@ class AssistantCardWidget(QWidget):
         return super().eventFilter(obj, event)
 
     def _on_change_avatar(self):
-        """弹出头像选择器（预置/纯色/上传），确定后落盘（Mask 风格）。"""
+        """弹出头像选择器（预置/纯色/上传），确定后落盘（Mask 风格）。
+
+        ⚠ 内层类方法里的 self 是 dialog 实例——mgr/aid 必须先捕获为局部变量。
+        """
         a = self._mgr.get(self._active_aid)
         if not a:
             return
         from PyQt5.QtGui import QColor
 
         from .avatar_picker import AvatarPicker
+
+        mgr, aid = self._mgr, self._active_aid  # 局部捕获（闭包内禁用 self._mgr）
+        name, color = a.name or a.id, a.color
 
         class _AvatarDialog(MaskDialogBase):
             def __init__(self, parent=None):
@@ -293,15 +299,15 @@ class AssistantCardWidget(QWidget):
                     f"#hubAvatarDialog {{ background: {Colors.CARD_BG_SOLID};"
                     f"border: 1px solid {Colors.BORDER}; border-radius: 14px; }}"
                 )
-                self.setFixedSize(760, 640)
+                self.setFixedSize(780, 620)
                 v = QVBoxLayout(self.widget)
                 v.setContentsMargins(20, 16, 20, 16)
-                picker = AvatarPicker(assistant_id=a.id, parent=self.widget)
-                ap = self._mgr.avatar_path(a.id)
+                picker = AvatarPicker(assistant_id=aid, parent=self.widget)
+                ap = mgr.avatar_path(aid)
                 picker.set_assistant(
-                    aid=a.id,
-                    color=a.color,
-                    name=a.name or a.id,
+                    aid=aid,
+                    color=color,
+                    name=name,
                     image_path=str(ap) if ap else "",
                 )
                 v.addWidget(picker, 1)

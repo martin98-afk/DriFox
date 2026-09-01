@@ -60,6 +60,7 @@ class _AgentCard(QWidget):
         self._hover = False
         self._lift = 0.0
         self._scale = 1.0
+        self._expanded = False  # 容器展开时才画名字（收起态名字重叠）
         self._avatar = RoundAvatar(
             size=CARD_SIZE - 6, text=name, color=color, image_path=image_path or None, parent=self
         )
@@ -73,6 +74,11 @@ class _AgentCard(QWidget):
         if self._selected != on:
             self._selected = on
             self._animate_scale(1.06 if on else 1.0)
+            self.update()
+
+    def set_expanded(self, on: bool) -> None:
+        if self._expanded != on:
+            self._expanded = on
             self.update()
 
     def set_primary(self, on: bool) -> None:
@@ -150,12 +156,13 @@ class _AgentCard(QWidget):
             p.setPen(QPen(QColor(Colors.CARD_BG_SOLID), 1.5))
             p.setBrush(QColor(Colors.TEXT_ACCENT))
             p.drawEllipse(int(CARD_SIZE / 2 - 4), CARD_SIZE - 8, 8, 8)
-        # 名字
-        p.setPen(QColor(Colors.TEXT_MUTED if not self._selected else Colors.TEXT_PRIMARY))
-        font = self.font()
-        font.setPixelSize(11)
-        p.setFont(font)
-        p.drawText(QRectF(0, CARD_SIZE + 2, CARD_SIZE, NAME_AREA), Qt.AlignCenter, self.name)
+        # 名字（仅展开态显示，对齐原版 agent-card-name opacity 切换）
+        if self._expanded:
+            p.setPen(QColor(Colors.TEXT_MUTED if not self._selected else Colors.TEXT_PRIMARY))
+            font = self.font()
+            font.setPixelSize(11)
+            p.setFont(font)
+            p.drawText(QRectF(0, CARD_SIZE + 2, CARD_SIZE, NAME_AREA), Qt.AlignCenter, self.name)
         p.end()
 
 
@@ -294,6 +301,8 @@ class ArcCardStack(QWidget):
     def _relayout(self, animate: bool) -> None:
         positions = self._positions(self._expanded)
         n = len(self._cards)
+        for card in self._cards:
+            card.set_expanded(self._expanded)
         add_x = None
         if self._add_card is not None:
             if n > 0 and positions:

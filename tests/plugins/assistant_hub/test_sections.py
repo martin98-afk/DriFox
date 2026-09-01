@@ -67,11 +67,12 @@ def test_about_section_persona_switch(qtbot=None):
         {"id": "build", "name": "build", "description": "更懂工程的搭档", "tag": "推演"},
         {"id": "hanako", "name": "hanako", "description": "温暖的共鸣者", "tag": "MOOD"},
     ]
-    s = sections.AboutSection(personas, "build")
-    assert len(s._chip_buttons) == 2
+    host = QWidget()
+    s = sections.AboutSection(personas, "build", parent=host)
+    assert len(s._chips) == 2
     got = []
     s.personaChangeRequested.connect(got.append)
-    s._chip_buttons[1].click()
+    s._chips[1].mousePressEvent(None)
     assert got == ["hanako"]
     # none 横幅
     s._none_banner.click()

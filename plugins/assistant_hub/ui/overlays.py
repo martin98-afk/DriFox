@@ -111,7 +111,8 @@ class OverlayBase(MaskDialogBase):
             }}
         """
         )
-        self.setFixedSize(width + 48, height + 48)
+        # 卡片本体定尺寸；遮罩层（self）保持全屏
+        self.widget.setFixedSize(width, height)
         self._wrap = self.widget
         self._v = QVBoxLayout(self._wrap)
         self._v.setContentsMargins(20, 16, 20, 16)
