@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "BuildSystemPrompt": [
+      {
+        "matcher": "primary",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_assistant:hook",
+            "add_output_to_context": true,
+            "statusMessage": "助手身份:",
+            "id": "assistant_hub_inject_identity"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_assistant:on_stop",
+            "add_output_to_context": false,
+            "statusMessage": "助手记忆:",
+            "id": "assistant_hub_turn"
+          }
+        ]
+      }
+    ]
+  }
+}
