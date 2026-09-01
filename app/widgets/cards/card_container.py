@@ -40,6 +40,9 @@ class CardContainer(QWidget):
     # 容器被压成极矮细条。用户已手动拖拽调过比例（按卡片记忆 >0）后
     # 不再覆盖其设定。左右栏为横向轴、卡片天然较宽，沿用最小宽即可。
     _DOCK_DEFAULT_RATIO_V = 0.30
+    # 展开/收起动画参数（按方向分离，与 TabManagerWindow._start_wb_anim 对齐）
+    _EXPAND_ANIM_MS = 200
+    _COLLAPSE_ANIM_MS = 160
 
     # 卡片可通过 setProperty(NO_ANIMATION_PROP, True) 声明不参与容器的展开/折叠动画
     # 适用场景：卡片自带 resize / 拖拽 等会持续触发 heightChanged 的交互，
@@ -921,18 +924,27 @@ class CardContainer(QWidget):
             self._animate_height(current_h, 0, on_finished=_on_collapsed)
 
     def _animate_height(self, start_h: int, end_h: int, on_finished=None):
-        """用 QPropertyAnimation 动画轴向 max 属性（纵向 maximumHeight / 横向 maximumWidth），200ms OutCubic
+        """用 QPropertyAnimation 动画轴向 max 属性（纵向 maximumHeight / 横向 maximumWidth）
+
+        ★ 曲线/时长按方向分离：展开 OutCubic 200ms（快速露出内容）；
+        收起 OutQuad 160ms。OutCubic 的尾段拖尾在收起方向特别明显——
+        轴向尺寸按 (1-t)^3 衰减，最后 12.5% 的距离要磨掉一半的时间，
+        观感为"收到一半顿一下才收完"（工作台面板实测反馈的同款成因，
+        已在 _start_wb_anim 修过，dock 容器此前未跟进）。OutQuad 把尾段
+        压到 25% 的距离磨一半时间，配合更短的 160ms，收尾明显更利落。
 
         性能优化：复用 _expand_animation 对象，避免每次展开/折叠都创建新动画实例。
         动画已停止时：直接重置 start/end 值并 restart。
         动画运行中：stop 后被 _do_expand 截获并取消，不会进入此方法。
         """
         anim = self._expand_animation
+        collapsing = end_h < start_h
         if anim is None:
             anim = QPropertyAnimation(self, self._axis_property())
-            anim.setDuration(200)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
             self._expand_animation = anim
+        # 每次都重设：复用同一对象时方向可能反转
+        anim.setDuration(self._COLLAPSE_ANIM_MS if collapsing else self._EXPAND_ANIM_MS)
+        anim.setEasingCurve(QEasingCurve.OutQuad if collapsing else QEasingCurve.OutCubic)
 
         # 断开上次的 on_finished 回调（避免重复连接）
         try:
@@ -940,8 +952,13 @@ class CardContainer(QWidget):
         except TypeError, RuntimeError:
             pass
 
+        # ★ 设值期间屏蔽信号：QVariantAnimation 在 setStartValue/setEndValue
+        # 后会以新值补发一次 valueChanged，动画尚未 start 就先把轴向 max 推到
+        # 终值（收起时表现为起手闪一下）。起止值就绪后再解除屏蔽。
+        anim.blockSignals(True)
         anim.setStartValue(start_h)
         anim.setEndValue(end_h)
+        anim.blockSignals(False)
 
         if on_finished is not None:
 

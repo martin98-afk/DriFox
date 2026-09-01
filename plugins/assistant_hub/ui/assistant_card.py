@@ -24,7 +24,7 @@ import uuid
 from pathlib import Path
 from typing import List
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -153,11 +153,20 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
 class AssistantCardWidget(QWidget):
     """助手中心主卡片（单列滚动页）。"""
 
+    # 后台线程 → 主线程调度的唯一通道。
+    # ⚠️ 不能用 QTimer.singleShot(0, fn)：Qt 的 singleShot 会在**调用方线程**
+    # 创建 QSingleShotTimer，而 Dream / 经验反思跑在纯 Python daemon 线程里
+    # （没有 Qt 事件循环）→ 计时器永不触发 → _dream_done() 永不执行 →
+    # _dream_running 永远为 True，UI 一直卡在"Dream 整理中…"且后续点击全被忽略。
+    # 信号 + QueuedConnection 会把调用投递到本 widget 所在线程（主线程）的事件循环。
+    _main_thread_call = pyqtSignal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._mgr = AssistantManager.get_instance()
         self._active_aid: str = ""
         self._dream_running = False
+        self._main_thread_call.connect(self._run_on_main_thread, Qt.QueuedConnection)
         # ── 插件背景完全透明（对齐主程序对话区做法）──
         # 不叠加任何背景层：Tab 内嵌时由 #chatFrame 半透明面板透出。
         # transparentOverlay：声明覆盖层容器（CardContainer）不画面板底。
@@ -166,6 +175,14 @@ class AssistantCardWidget(QWidget):
         self.setStyleSheet("")
         self._build_ui()
         self._reload_all()
+
+    def _run_on_main_thread(self, fn) -> None:
+        """执行后台线程投递过来的 UI 回调（异常不外溢到 Qt 事件循环）。"""
+        try:
+            if callable(fn):
+                fn()
+        except Exception as e:
+            logger.warning(f"[assistant_hub] 主线程回调异常: {e}")
 
     def set_context(self, ctx: dict) -> None:
         """主程序注入的卡片上下文（UIPluginRegistry 创建卡片时调用）。
@@ -612,14 +629,15 @@ class AssistantCardWidget(QWidget):
         self._memory.set_dream_running(True)
 
         def _progress(step: int, total: int, name: str) -> None:
-            QTimer.singleShot(0, lambda: self._memory.set_dream_hint(f"Dream 整理中…（{step}/{total} {name}）"))
+            # daemon 线程 → 必须走信号投递（QTimer.singleShot 在这里永不触发）
+            self._main_thread_call.emit(lambda: self._memory.set_dream_hint(f"Dream 整理中…（{step}/{total} {name}）"))
 
         def _worker():
             try:
                 result = self._mgr.dream_start(aid, "manual", progress=_progress)
             except Exception as e:
                 result = {"ok": False, "error": str(e)}
-            QTimer.singleShot(0, lambda: self._dream_done(result))
+            self._main_thread_call.emit(lambda: self._dream_done(result))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -742,7 +760,8 @@ class AssistantCardWidget(QWidget):
                 if r.get("added")
                 else f"反思完成：暂无新经验 {('(' + r.get('error', '') + ')') if r.get('error') else ''}"
             )
-            QTimer.singleShot(0, lambda: self._notify(msg))
+            # daemon 线程 → 走信号投递（QTimer.singleShot 在这里永不触发）
+            self._main_thread_call.emit(lambda: self._notify(msg))
 
         threading.Thread(target=_worker, daemon=True).start()
 
