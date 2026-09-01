@@ -1,37 +1,35 @@
 # -*- coding: utf-8 -*-
-"""assistant_card.py — 助手中心主卡片（full 容器浮动卡）
+"""assistant_card.py — 助手中心主页面（full 容器浮动卡 · 单列滚动版）
 
-布局（参考 OpenHanako AgentCardStack / DriFox 设置卡）：
+复刻 openhanako AgentTab 的单列结构（DriFox 化）：
 
-    ┌──────────────────────────────────────────────────────────────┐
-    │  🤖 助手中心   [新建助手]   N 个 · 主助手: xxx                │ 头部
-    ├───────────────┬──────────────────────────────────────────────┤
-    │ 助手列表       │  头像 + 名称 + 副标题 + 激活按钮              │
-    │ [avatar] 名称 │  ┌ 身份 │ 提示词 │ 对外 │ 头像 │ 记忆 │ 技能 ┐ │
-    │ [avatar] 名称 │  └───────────────────────────────────────────┘ │
-    │ [avatar] 名称 │  编辑器内容                                     │
-    └───────────────┴──────────────────────────────────────────────┘
+    ┌────────────────────────────────────┐
+    │        ArcCardStack 弧形卡片堆叠     │
+    │   名称 + ★主助手 + 操作行（重命名等）  │
+    │   基本信息（对话模型 / 记忆整理模型）    │
+    │   关于 Ta（人格 chips / 身份 / AGENTS.md）│
+    │   记忆（传送带 + Dream + 版本）        │
+    │   经验（工具型 + 反思）               │
+    │   专属技能                          │
+    └────────────────────────────────────┘
 
-- 左侧列表：每个助手一个头像 + 名称行；主助手带 ★；激活项高亮。
-- 右侧编辑器：Tab 切换（身份/提示词/对外人格/头像/记忆/技能）。
-- 记忆 Tab 内置 Dream 一键整理 + 自动开关。
+宿主契约：widget_class=AssistantCardWidget、refresh_style()（主题切换回调）。
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import json
+import threading
+from pathlib import Path
+from typing import List
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QSplitter,
-    QTabWidget,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -40,277 +38,181 @@ from qfluentwidgets import InfoBar, InfoBarPosition
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
-from assistant_hub_manager import Assistant, AssistantManager
+from assistant_hub_manager import AssistantManager
+
+from .arc_stack import ArcCardStack
 from .assistant_avatar import RoundAvatar
-from .avatar_picker import AvatarPicker
-from .editor_tabs import (
-    AvatarTab,
-    IdentityTab,
-    MemoryTab,
-    PromptTab,
-    PublicTab,
-    SkillsTab,
+from .overlays import DreamRevisionOverlay, PersonaManageDialog, TextViewOverlay
+from .rename_dialog import RenameDialog
+from .sections import (
+    AboutSection,
+    ExperienceSection,
+    MemorySection,
+    ProfileSection,
+    SkillsSection,
+    _btn_style,
 )
 
 
-class _AssistantListWidget(QFrame):
-    """左侧助手列表：头像 + 名称 + ★ 主助手标记"""
-
-    assistantSelected = pyqtSignal(str)  # assistant_id
-    assistantCreated = pyqtSignal()
-    assistantDeleted = pyqtSignal(str)  # assistant_id
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._mgr = AssistantManager.get_instance()
-        self._active_aid: str = ""
-        v = QVBoxLayout(self)
-        v.setContentsMargins(4, 4, 4, 4)
-        v.setSpacing(4)
-
-        header = QHBoxLayout()
-        title = QLabel("助手", self)
-        title.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
-        )
-        header.addWidget(title)
-        header.addStretch()
-        new_btn = QPushButton("＋", self)
-        new_btn.setFixedSize(26, 26)
-        new_btn.setToolTip("新建助手")
-        new_btn.clicked.connect(self._on_create)
-        header.addWidget(new_btn)
-        v.addLayout(header)
-
-        self._list = QListWidget(self)
-        self._list.setFrameShape(QFrame.NoFrame)
-        self._list.setStyleSheet(
-            f"""
-            QListWidget {{
-                background: transparent;
-                border: none;
-                {get_font_family_css()} {font_size_css(12)}
-            }}
-            QListWidget::item {{
-                padding: 2px 4px;
-                border-radius: 6px;
-                color: {Colors.TEXT_PRIMARY};
-            }}
-            QListWidget::item:hover {{ background: {Colors.HOVER_BG}; }}
-            QListWidget::item:selected {{ background: {Colors.SELECTED_BG}; }}
-        """
-        )
-        self._list.currentItemChanged.connect(self._on_current_changed)
-        v.addWidget(self._list, 1)
-
-    def refresh(self, select_aid: str = "") -> None:
-        self._list.clear()
-        assistants = self._mgr.list_assistants()
-        for a in assistants:
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, a.id)
-            # 头像图标（28px 圆形）+ 名称 + 主助手星标
-            ap = self._mgr.avatar_path(a.id)
-            avatar = RoundAvatar(
-                size=28,
-                text=a.name or a.id,
-                color=a.color,
-                image_path=str(ap) if ap else None,
-            )
-            item.setIcon(QIcon(avatar.grab()))
-            label = a.name or a.id
-            if a.primary:
-                label = "★ " + label
-            item.setText(label)
-            self._list.addItem(item)
-        if select_aid or self._active_aid:
-            target = select_aid or self._active_aid
-            for i in range(self._list.count()):
-                it = self._list.item(i)
-                if it.data(Qt.UserRole) == target:
-                    self._list.setCurrentRow(i)
-                    break
-
-    def set_active(self, aid: str) -> None:
-        self._active_aid = aid
-        self.refresh(select_aid=aid)
-
-    def _on_current_changed(self, current: Optional[QListWidgetItem], _prev) -> None:
-        if current is None:
-            return
-        aid = current.data(Qt.UserRole)
-        if aid:
-            self._active_aid = aid
-            self.assistantSelected.emit(aid)
-
-    def _on_create(self) -> None:
-        self.assistantCreated.emit()
-
-
 class AssistantCardWidget(QWidget):
-    """助手中心主卡片（full 容器）"""
+    """助手中心主卡片（单列滚动页）。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._mgr = AssistantManager.get_instance()
         self._active_aid: str = ""
+        self._dream_running = False
         self._build_ui()
         self._reload_all()
 
-    # ── UI 构建 ──────────────────────────────────────────
+    # ══════════════════════════════════════════════════
+    #  UI 构建
+    # ══════════════════════════════════════════════════
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(6)
+        outer.setContentsMargins(0, 0, 0, 0)
 
-        # 头部
-        head = QHBoxLayout()
-        self._head_icon = QLabel("🤖", self)
-        self._head_title = QLabel("助手中心", self)
-        self._head_title.setStyleSheet(
-            f"color: {Colors.TEXT_ACCENT}; {get_font_family_css()} {font_size_css(14)}; font-weight: 700;"
-        )
-        self._head_count = QLabel("", self)
-        self._head_count.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
-        )
-        head.addWidget(self._head_icon)
-        head.addWidget(self._head_title)
-        head.addWidget(self._head_count)
-        head.addStretch()
-        self._activate_btn = QPushButton("设为当前助手", self)
-        self._activate_btn.setFixedHeight(30)
-        self._activate_btn.clicked.connect(self._on_activate)
-        head.addWidget(self._activate_btn)
-        self._create_btn = QPushButton("新建助手", self)
-        self._create_btn.setFixedHeight(30)
-        self._create_btn.clicked.connect(self._on_create)
-        head.addWidget(self._create_btn)
-        outer.addLayout(head)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        outer.addWidget(scroll)
 
-        # 主体：左列表 + 右编辑器
-        splitter = QSplitter(Qt.Horizontal, self)
-        self._list_widget = _AssistantListWidget(splitter)
-        self._list_widget.assistantSelected.connect(self._on_select)
-        self._list_widget.assistantCreated.connect(self._on_create)
-        splitter.addWidget(self._list_widget)
+        content = QWidget()
+        self._content_v = QVBoxLayout(content)
+        self._content_v.setContentsMargins(24, 8, 24, 24)
+        self._content_v.setSpacing(14)
 
-        self._editor = self._build_editor(splitter)
-        splitter.addWidget(self._editor)
-        splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([220, 760])
-        outer.addWidget(splitter, 1)
+        inner = QWidget()
+        inner.setMaximumWidth(720)
+        self._inner_v = QVBoxLayout(inner)
+        self._inner_v.setContentsMargins(0, 0, 0, 0)
+        self._inner_v.setSpacing(14)
 
-    def _build_editor(self, parent) -> QWidget:
-        wrap = QFrame(parent)
-        wrap.setStyleSheet(
-            f"""
-            QFrame {{
-                background: {Colors.CARD_BG.format(alpha=180)};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 8px;
-            }}
-        """
-        )
-        v = QVBoxLayout(wrap)
-        v.setContentsMargins(8, 6, 8, 6)
-        v.setSpacing(4)
+        # 1. 弧形卡片堆叠
+        self._stack = ArcCardStack()
+        self._stack.selectionChanged.connect(self._on_select)
+        self._stack.createRequested.connect(self._on_create)
+        wrap = QHBoxLayout()
+        wrap.addStretch()
+        wrap.addWidget(self._stack)
+        wrap.addStretch()
+        self._inner_v.addLayout(wrap)
 
-        # 当前助手标题行
-        self._editor_header = QHBoxLayout()
-        self._editor_avatar = RoundAvatar(size=40, text="?", color="#7C3AED", parent=wrap)
-        self._editor_header.addWidget(self._editor_avatar)
-        name_col = QVBoxLayout()
-        name_col.setSpacing(0)
-        self._editor_name = QLabel("(未选择)", wrap)
-        self._editor_name.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
+        # 2. 名称行 + 操作
+        name_row = QHBoxLayout()
+        self._avatar = RoundAvatar(size=44, text="?", color="#7C3AED", parent=self)
+        name_row.addWidget(self._avatar)
+        self._name_label = QLabel("(未选择)")
+        self._name_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} 20px; font-weight: 700;"
         )
-        self._editor_desc = QLabel("", wrap)
-        self._editor_desc.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)}"
-        )
-        name_col.addWidget(self._editor_name)
-        name_col.addWidget(self._editor_desc)
-        self._editor_header.addLayout(name_col, 1)
-        # 主助手标记
-        self._primary_badge = QLabel("★ 主助手", wrap)
+        name_row.addWidget(self._name_label)
+        self._primary_badge = QLabel("★ 主助手")
         self._primary_badge.setStyleSheet(
-            f"color: {Colors.BORDER_ACCENT}; {get_font_family_css()} {font_size_css(11)};"
+            f"color: {Colors.TEXT_ACCENT}; {get_font_family_css()} {font_size_css(11)};"
         )
         self._primary_badge.hide()
-        self._editor_header.addWidget(self._primary_badge)
-        v.addLayout(self._editor_header)
+        name_row.addWidget(self._primary_badge)
+        name_row.addStretch()
+        for text, handler, danger in (
+            ("设为主助手", self._on_set_primary, False),
+            ("重命名", self._on_rename, False),
+            ("删除此助手", self._on_delete, True),
+        ):
+            btn = QPushButton(text)
+            btn.setStyleSheet(_btn_style(danger=danger))
+            btn.clicked.connect(handler)
+            name_row.addWidget(btn)
+        self._inner_v.addLayout(name_row)
 
-        # Tab
-        self._tabs = QTabWidget(wrap)
-        self._tabs.setDocumentMode(True)
-        self._tab_identity = IdentityTab(wrap)
-        self._tab_prompt = PromptTab(wrap)
-        self._tab_public = PublicTab(wrap)
-        self._tab_avatar = AvatarTab(wrap)
-        self._tab_avatar.changed.connect(self._on_avatar_changed)
-        self._tab_memory = MemoryTab(wrap)
-        self._tab_skills = SkillsTab(wrap)
-        self._tabs.addTab(self._tab_identity, "身份")
-        self._tabs.addTab(self._tab_prompt, "提示词")
-        self._tabs.addTab(self._tab_public, "对外")
-        self._tabs.addTab(self._tab_avatar, "头像")
-        self._tabs.addTab(self._tab_memory, "记忆")
-        self._tabs.addTab(self._tab_skills, "技能")
-        v.addWidget(self._tabs, 1)
+        # 3-6. 分区
+        self._profile = ProfileSection()
+        self._profile.saveRequested.connect(self._on_profile_save)
+        self._inner_v.addWidget(self._profile)
 
-        # 底部删除行
-        bottom = QHBoxLayout()
-        bottom.addStretch()
-        self._delete_btn = QPushButton("删除此助手", wrap)
-        self._delete_btn.setFixedHeight(28)
-        self._delete_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                color: {Colors.ERROR};
-                border: 1px solid {Colors.ERROR};
-                border-radius: 6px;
-                padding: 3px 14px;
-                background: transparent;
-                {get_font_family_css()} {font_size_css(12)}
-            }}
-            QPushButton:hover {{ background: rgba(250, 81, 81, 0.1); }}
-        """
-        )
-        self._delete_btn.clicked.connect(self._on_delete)
-        bottom.addWidget(self._delete_btn)
-        v.addLayout(bottom)
-        return wrap
+        self._about = AboutSection(self._persona_items(), "")
+        self._about.personaChangeRequested.connect(self._on_persona_change)
+        self._about.personaManageRequested.connect(self._on_persona_manage)
+        self._about.saveRequested.connect(self._on_about_save)
+        self._inner_v.addWidget(self._about)
 
-    # ── 数据刷新 ─────────────────────────────────────────
+        self._memory = MemorySection()
+        self._memory.toggleMemory.connect(self._on_memory_toggle)
+        self._memory.toggleDreamAuto.connect(self._on_dream_auto_toggle)
+        self._memory.viewToday.connect(self._on_view_today)
+        self._memory.dreamRun.connect(self._on_dream_run)
+        self._memory.dreamRestore.connect(self._on_dream_restore)
+        self._memory.viewAll.connect(self._on_view_all)
+        self._memory.clearAll.connect(self._on_clear_all)
+        self._memory.pinsChanged.connect(self._on_pins_changed)
+        self._inner_v.addWidget(self._memory)
+
+        self._experience = ExperienceSection()
+        self._experience.toggleExperience.connect(self._on_experience_toggle)
+        self._experience.viewCategory.connect(self._on_view_experience)
+        self._experience.reflectRequested.connect(self._on_reflect)
+        self._inner_v.addWidget(self._experience)
+
+        self._skills = SkillsSection()
+        self._inner_v.addWidget(self._skills)
+
+        self._inner_v.addStretch(1)
+
+        center = QHBoxLayout()
+        center.addStretch()
+        center.addWidget(inner)
+        center.addStretch()
+        self._content_v.addLayout(center, 1)
+        scroll.setWidget(content)
+
+    # ══════════════════════════════════════════════════
+    #  数据绑定
+    # ══════════════════════════════════════════════════
+
+    def _persona_items(self) -> List[dict]:
+        try:
+            reg = self._mgr.persona_registry()
+            items = []
+            for p in reg.list_all():
+                if p.id == "none":
+                    continue  # none 走横幅
+                ap = reg.avatar_path(p.id)
+                items.append({
+                    "id": p.id, "name": p.name, "description": p.description,
+                    "tag": p.tag, "avatar_path": str(ap or ""),
+                })
+            return items
+        except Exception:
+            return []
 
     def _reload_all(self, select_aid: str = "") -> None:
         assistants = self._mgr.list_assistants()
-        self._head_count.setText(f"{len(assistants)} 个")
-        if not assistants:
-            self._show_empty()
-            self._list_widget.refresh()
-            return
-        self._list_widget.refresh(select_aid=select_aid)
-        if select_aid:
+        self._stack.set_assistants([
+            {
+                "id": a.id,
+                "name": a.name or a.id,
+                "color": a.color,
+                "avatar_path": str(self._mgr.avatar_path(a.id) or ""),
+            }
+            for a in assistants
+        ])
+        primary = next((a.id for a in assistants if a.primary), "")
+        self._stack.set_primary(primary)
+        if select_aid and self._mgr.has(select_aid):
             self._bind_editor(select_aid)
         elif self._active_aid and self._mgr.has(self._active_aid):
             self._bind_editor(self._active_aid)
+        elif assistants:
+            self._bind_editor(assistants[0].id)
         else:
-            first = assistants[0].id
-            self._bind_editor(first)
+            self._show_empty()
 
     def _show_empty(self) -> None:
         self._active_aid = ""
-        self._editor_avatar.set_text("?")
-        self._editor_name.setText("(无助手)")
-        self._editor_desc.setText("点击「新建助手」创建第一个")
-        self._primary_badge.hide()
-        self._activate_btn.setEnabled(False)
-        self._delete_btn.setEnabled(False)
+        self._name_label.setText("(无助手)")
+        self._avatar.set_text("?")
 
     def _bind_editor(self, aid: str) -> None:
         self._active_aid = aid
@@ -318,59 +220,53 @@ class AssistantCardWidget(QWidget):
         if not a:
             return
         ap = self._mgr.avatar_path(aid)
-        self._editor_avatar.set_text(a.name or a.id)
-        self._editor_avatar.set_color(a.color)
-        self._editor_avatar.set_image(str(ap) if ap else None)
-        self._editor_name.setText(a.name or a.id)
-        self._editor_desc.setText(
-            f"id: {a.id} · yuan: {a.yuan}" + (" · 记忆开" if a.memory_enabled else " · 记忆关")
-        )
+        self._avatar.set_text(a.name or a.id)
+        self._avatar.set_color(a.color)
+        self._avatar.set_image(str(ap) if ap else None)
+        self._name_label.setText(a.name or a.id)
         self._primary_badge.setVisible(a.primary)
-        self._activate_btn.setEnabled(True)
-        self._delete_btn.setEnabled(True)
+        self._stack.set_selected(aid)
 
-        # Tab 绑定（节流到下一帧，避免编辑器 setText 触发保存回调误写新助手）
         aid_capture = aid
 
         def _do_bind() -> None:
-            self._tab_identity.bind(self._mgr, aid_capture)
-            self._tab_prompt.bind(self._mgr, aid_capture)
-            self._tab_public.bind(self._mgr, aid_capture)
-            self._tab_avatar.bind(self._mgr, aid_capture)
-            self._tab_memory.bind(aid_capture)
-            self._tab_skills.bind(aid_capture)
+            mgr = self._mgr
+            self._profile.bind(a.name or a.id, a.model or "", a.utility_model or "")
+            self._about.set_persona(a.yuan)
+            identity, _ = mgr.read_identity_source(aid_capture)
+            agents_md, _ = mgr.read_agents_md_source(aid_capture)
+            self._about.bind_texts(identity, agents_md)
+            self._memory.set_memory_enabled(a.memory_enabled)
+            self._memory.set_dream_auto(a.dream_auto_enabled)
+            self._memory.reload_pins([c for _pid, c in mgr.read_pinned(aid_capture)])
+            self._memory.set_status(self._memory_status(aid_capture))
+            self._memory.set_dream_hint(
+                "每日自动 Dream 已开启" if a.dream_auto_enabled else "每日自动 Dream 未开启"
+            )
+            self._experience.set_enabled(a.experience_enabled)
+            self._experience.reload_categories(mgr.experience_list(aid_capture))
+            self._skills.reload_skills(mgr.list_skills(aid_capture), self._on_view_skill)
 
         QTimer.singleShot(0, _do_bind)
 
-    # ── 信号 ─────────────────────────────────────────────
+    def _memory_status(self, aid: str) -> str:
+        try:
+            text = self._mgr.compiled_memory(aid)
+            return f"已编译 {len(text)} 字" if text else "暂无记忆"
+        except Exception:
+            return "暂无记忆"
+
+    # ══════════════════════════════════════════════════
+    #  选择 / 创建 / 删除 / 主助手 / 重命名
+    # ══════════════════════════════════════════════════
 
     def _on_select(self, aid: str) -> None:
         if aid and self._mgr.has(aid):
             self._bind_editor(aid)
 
-    def _on_avatar_changed(self, aid: str) -> None:
-        """头像变更后刷新卡片头部 + 左侧列表（不重绑编辑器避免打断输入）"""
-        if aid != self._active_aid:
-            return
-        a = self._mgr.get(aid)
-        if not a:
-            return
-        ap = self._mgr.avatar_path(aid)
-        self._editor_avatar.set_text(a.name or a.id)
-        self._editor_avatar.set_color(a.color)
-        self._editor_avatar.set_image(str(ap) if ap else None)
-        self._list_widget.refresh(select_aid=aid)
-        self._notify("头像已更新")
-
     def _on_create(self) -> None:
-        from .rename_dialog import RenameDialog
-
-        dlg = RenameDialog(
-            title="新建助手",
-            hint="输入助手名称（例如：小助手 / 翻译官 / 代码审查员）：",
-            default="",
-            parent=self.window(),
-        )
+        dlg = RenameDialog(title="新建助手", hint="输入助手名称（例如：小助手 / 翻译官 / 代码审查员）：",
+                           default="", parent=self.window())
         dlg.confirmed.connect(self._do_create)
         dlg.exec_()
 
@@ -379,13 +275,6 @@ class AssistantCardWidget(QWidget):
         self._reload_all(select_aid=a.id)
         self._notify(f"助手「{a.name}」已创建")
 
-    def _on_activate(self) -> None:
-        if not self._active_aid:
-            return
-        if self._mgr.set_active(self._active_aid):
-            self._notify(f"已将「{self._active_aid}」设为当前助手")
-            self._list_widget.set_active(self._active_aid)
-
     def _on_delete(self) -> None:
         if not self._active_aid:
             return
@@ -393,11 +282,9 @@ class AssistantCardWidget(QWidget):
         if not a:
             return
         ret = QMessageBox.question(
-            self,
-            "删除助手",
+            self, "删除助手",
             f"确定删除助手「{a.name}」？\n其身份、提示词、记忆、头像将一并删除。\n（该操作不可撤销）",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if ret != QMessageBox.Yes:
             return
@@ -408,37 +295,264 @@ class AssistantCardWidget(QWidget):
         else:
             self._notify_error("至少保留一个助手，无法删除")
 
-    # ── 通知 ─────────────────────────────────────────────
+    def _on_rename(self) -> None:
+        a = self._mgr.get(self._active_aid) if self._active_aid else None
+        if not a:
+            return
+        dlg = RenameDialog(title="重命名助手", hint="新的名称：", default=a.name, parent=self.window())
+        dlg.confirmed.connect(self._do_rename)
+        dlg.exec_()
+
+    def _do_rename(self, name: str) -> None:
+        a = self._mgr.get(self._active_aid)
+        if a is None or not name:
+            return
+        a.name = name
+        self._mgr.update(a)
+        self._mgr.invalidate_context(a.id)
+        self._reload_all(select_aid=a.id)
+
+    def _on_set_primary(self) -> None:
+        if not self._active_aid:
+            return
+        if self._mgr.set_primary(self._active_aid):
+            self._reload_all(select_aid=self._active_aid)
+            self._notify("已设为主助手")
+
+    # ══════════════════════════════════════════════════
+    #  基本信息 / 关于 Ta
+    # ══════════════════════════════════════════════════
+
+    def _on_profile_save(self, name: str, chat_model: str, utility_model: str) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        if name:
+            a.name = name
+        a.model = chat_model
+        a.utility_model = utility_model
+        self._mgr.update(a)
+        self._mgr.invalidate_context(a.id)
+        self._notify("已保存")
+        self._reload_all(select_aid=a.id)
+
+    def _on_persona_change(self, pid: str) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a or a.yuan == pid:
+            return
+        a.yuan = pid
+        self._mgr.update(a)
+        self._mgr.invalidate_context(a.id)
+        self._about.set_persona(pid)
+        self._notify(f"人格已切换：{'无（纯净助手）' if pid == 'none' else pid}")
+
+    def _on_persona_manage(self) -> None:
+        reg = self._mgr.persona_registry()
+        current = self._mgr.get(self._active_aid).yuan if self._active_aid else ""
+        dlg = PersonaManageDialog(reg, current, parent=self.window())
+        dlg.exec_()
+        self._reload_all(select_aid=self._active_aid)
+
+    def _on_about_save(self, identity: str, agents_md: str) -> None:
+        aid = self._active_aid
+        if not aid:
+            return
+        self._mgr.write_identity(aid, identity)
+        self._mgr.write_agents_md(aid, agents_md)
+        self._mgr.invalidate_context(aid)
+        self._notify("人格已保存")
+
+    # ══════════════════════════════════════════════════
+    #  记忆
+    # ══════════════════════════════════════════════════
+
+    def _on_memory_toggle(self, on: bool) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        a.memory_enabled = bool(on)
+        self._mgr.update(a)
+        self._mgr.invalidate_context(a.id)
+        self._memory.setEnabled_all(bool(on))
+
+    def _on_dream_auto_toggle(self, on: bool) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        a.dream_auto_enabled = bool(on)
+        self._mgr.update(a)
+        self._memory.set_dream_hint("每日自动 Dream 已开启" if on else "每日自动 Dream 未开启")
+
+    def _on_pins_changed(self, pins: List) -> None:
+        aid = self._active_aid
+        if not aid:
+            return
+        items = [(f"pin-{i}-{abs(hash(t)) % 100000}", t) for i, t in enumerate(pins)]
+        self._mgr.write_pinned(aid, items)
+        self._mgr.invalidate_context(aid)
+
+    def _on_view_today(self) -> None:
+        if not self._active_aid:
+            return
+        path = self._mgr.memory_dir(self._active_aid) / "today.md"
+        text = path.read_text(encoding="utf-8") if Path(path).exists() else ""
+        TextViewOverlay("当下记忆", text or "（暂无当下记忆）", parent=self.window()).exec_()
+
+    def _on_view_all(self) -> None:
+        if not self._active_aid:
+            return
+        text = self._mgr.compiled_memory(self._active_aid)
+        TextViewOverlay("所有记忆", text or "（暂无记忆）", parent=self.window()).exec_()
+
+    def _on_dream_run(self) -> None:
+        if not self._active_aid or self._dream_running:
+            return
+        aid = self._active_aid
+        self._dream_running = True
+        self._memory.set_dream_running(True)
+
+        def _worker():
+            try:
+                result = self._mgr.dream_start(aid, "manual")
+            except Exception as e:
+                result = {"ok": False, "error": str(e)}
+            QTimer.singleShot(0, lambda: self._dream_done(result))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _dream_done(self, result: dict) -> None:
+        self._dream_running = False
+        self._memory.set_dream_running(False)
+        if result.get("ok"):
+            self._memory.set_status(self._memory_status(self._active_aid))
+            self._notify("Dream 整理完成" + ("（内容无变化）" if not result.get("changed") else ""))
+        else:
+            self._notify_error(f"Dream 失败：{result.get('error', '未知错误')}")
+
+    def _on_dream_restore(self) -> None:
+        if not self._active_aid:
+            return
+        aid = self._active_aid
+        revisions = self._mgr.dream_revisions(aid)
+        if not revisions:
+            self._notify_error("暂无 Dream 版本")
+            return
+
+        def _preview(rid: str) -> str:
+            try:
+                p = self._mgr.dream_dir(aid) / "revisions" / f"{rid}.json"
+                if not p.exists():
+                    return "（无法读取版本内容）"
+                before = (json.loads(p.read_text(encoding="utf-8")) or {}).get("before") or {}
+                parts = [f"# 事实\n{before.get('facts', '')}", f"# 长期\n{before.get('longterm', '')}"]
+                for d in before.get("daily") or []:
+                    parts.append(f"# {d.get('date')}\n{d.get('body', '')}")
+                return "\n\n".join(parts)
+            except Exception:
+                return "（无法读取版本内容）"
+
+        dlg = DreamRevisionOverlay(
+            revisions,
+            preview_fn=_preview,
+            restore_fn=lambda rid: self._mgr.dream_restore(aid, rid),
+            parent=self.window(),
+        )
+        dlg.exec_()
+        self._memory.set_status(self._memory_status(aid))
+
+    def _on_clear_all(self) -> None:
+        if not self._active_aid:
+            return
+        aid = self._active_aid
+        ret = QMessageBox.question(
+            self, "清除记忆",
+            "确定清除该助手的全部记忆（置顶记忆保留）？\n该操作不可撤销。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if ret != QMessageBox.Yes:
+            return
+        mem = self._mgr.memory_dir(aid)
+        for name in ("today.md", "longterm.md", "facts.md", "memory.md"):
+            p = mem / name
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
+        self._mgr.invalidate_context(aid)
+        self._memory.set_status(self._memory_status(aid))
+        self._notify("记忆已清除")
+
+    # ══════════════════════════════════════════════════
+    #  经验 / 技能
+    # ══════════════════════════════════════════════════
+
+    def _on_experience_toggle(self, on: bool) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        a.experience_enabled = bool(on)
+        self._mgr.update(a)
+        self._experience.set_enabled(bool(on))
+
+    def _on_view_experience(self, category: str) -> None:
+        if not self._active_aid:
+            return
+        aid = self._active_aid
+        text = self._mgr.experience_read(aid, category)
+
+        def _save(content: str):
+            lines = [ln.rstrip() for ln in content.splitlines() if ln.strip()]
+            doc_path = self._mgr.experience_dir(aid) / f"{category}.md"
+            doc_path.parent.mkdir(parents=True, exist_ok=True)
+            doc_path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+            try:
+                self._mgr._core_experience().rebuild_index(self._mgr.assistant_dir(aid))
+            except Exception:
+                pass
+
+        TextViewOverlay(f"经验 · {category}", text, editable=True, on_save=_save, parent=self.window()).exec_()
+        self._experience.reload_categories(self._mgr.experience_list(aid))
+
+    def _on_reflect(self) -> None:
+        if not self._active_aid or self._dream_running:
+            return
+        aid = self._active_aid
+        self._notify("反思进行中…")
+
+        def _worker():
+            r = self._mgr.experience_reflect(aid)
+            msg = (f"反思完成：新增 {r.get('added', 0)} 条经验" if r.get("added")
+                   else f"反思完成：暂无新经验 {('(' + r.get('error', '') + ')') if r.get('error') else ''}")
+            QTimer.singleShot(0, lambda: self._notify(msg))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_view_skill(self, name: str) -> None:
+        if not self._active_aid:
+            return
+        text = self._mgr.read_skill(self._active_aid, name)
+        TextViewOverlay(f"技能 · {name}", text, editable=True,
+                        on_save=lambda c: self._mgr.write_skill(self._active_aid, name, c),
+                        parent=self.window()).exec_()
+
+    # ══════════════════════════════════════════════════
+    #  通知 / 宿主契约
+    # ══════════════════════════════════════════════════
 
     def _notify(self, text: str) -> None:
         try:
-            InfoBar.success(
-                title="助手中心",
-                content=text,
-                orient=Qt.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP_RIGHT,
-                duration=2500,
-                parent=self.window(),
-            )
+            InfoBar.success(title="助手中心", content=text, orient=Qt.Horizontal, isClosable=True,
+                            position=InfoBarPosition.TOP_RIGHT, duration=2500, parent=self.window())
         except Exception:
             pass
 
     def _notify_error(self, text: str) -> None:
         try:
-            InfoBar.error(
-                title="助手中心",
-                content=text,
-                orient=Qt.Horizontal,
-                isClosable=True,
-                position=InfoBarPosition.TOP_RIGHT,
-                duration=3000,
-                parent=self.window(),
-            )
+            InfoBar.error(title="助手中心", content=text, orient=Qt.Horizontal, isClosable=True,
+                          position=InfoBarPosition.TOP_RIGHT, duration=3000, parent=self.window())
         except Exception:
             pass
-
-    # ── 外部入口 ─────────────────────────────────────────
 
     def refresh_style(self) -> None:
         """主题切换后刷新（宿主契约）"""
