@@ -634,7 +634,7 @@ class AssistantCardWidget(QWidget):
 
         def _progress(step: int, total: int, name: str) -> None:
             # daemon 线程 → 必须走信号投递（QTimer.singleShot 在这里永不触发）
-            self._main_thread_call.emit(lambda: self._memory.set_dream_hint(f"Dream 整理中…（{step}/{total} {name}）"))
+            self._main_thread_call.emit(lambda: self._memory.set_dream_hint(f"（{step}/{total} {name}）"))
 
         def _worker():
             try:
@@ -652,7 +652,11 @@ class AssistantCardWidget(QWidget):
         self._memory.set_dream_hint("")
         if result.get("ok"):
             self._memory.set_status(self._memory_status(self._active_aid))
-            self._notify("Dream 整理完成" + ("（内容无变化）" if not result.get("changed") else ""))
+            msg = "Dream 整理完成" + ("（内容无变化）" if not result.get("changed") else "")
+            warn = str(result.get("warning") or "")
+            if warn:
+                msg += f"（质检提示：{warn}）"
+            self._notify(msg)
         else:
             err = str(result.get("error", "未知错误"))
             if err == "dream_no_memory":

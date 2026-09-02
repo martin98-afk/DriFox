@@ -183,8 +183,10 @@ class DreamRevisionOverlay(OverlayBase):
             item = QListWidgetItem()
             item.setData(Qt.UserRole, rev.get("revisionId", ""))
             self._list.addItem(item)
-            self._list.setItemWidget(item, self._make_row(rev))
-            item.setSizeHint(QSize(0, 46))
+            row_w = self._make_row(rev)
+            self._list.setItemWidget(item, row_w)
+            # 行高按内容实测：全局字体缩放下写死值会裁切文字
+            item.setSizeHint(QSize(0, row_w.sizeHint().height() + 6))
         columns.addWidget(self._list)
 
         self._preview = QPlainTextEdit()
@@ -218,12 +220,12 @@ class DreamRevisionOverlay(OverlayBase):
         v.setContentsMargins(8, 5, 8, 5)
         v.setSpacing(1)
 
-        created = str(rev.get("createdAt", "")).split(".")[0].replace("T", " ")
+        created = str(rev.get("createdAt", "")).split(".")[0].replace("T", " ")[:16]  # 到分钟，秒冗余
         kind = str(rev.get("kind", "dream"))
         trigger = str(rev.get("trigger", ""))
         trigger_label = self._KIND_LABEL.get(kind) or self._TRIGGER_LABEL.get(trigger) or trigger or "未知"
         main = _label(f"{created} · {trigger_label}", 12)
-        sub_text = f"事实 {rev.get('factsChars', 0)} 字 · 长期 {rev.get('longtermChars', 0)} 字 · 当下 {rev.get('dailyCount', 0)} 天"
+        sub_text = f"事实 {rev.get('factsChars', 0)} · 长期 {rev.get('longtermChars', 0)} · 当下 {rev.get('dailyCount', 0)} 天"
         sub = _label(sub_text, 10, muted=True)
         sub.setWordWrap(False)
         v.addWidget(main)

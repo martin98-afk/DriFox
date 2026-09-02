@@ -84,9 +84,38 @@ def test_dream_runs_with_only_today(tmp_path):
     runner = m.DreamRunner(aid, llm=FakeLLM(list(_DREAM_REPLIES)))
     r = runner.start("manual")
     assert r["ok"] is True and r["changed"] is True
-    # 产出写回 facts.md / longterm.md
+    # 产出单写 facts.md；longterm 保持日记沉淀语义，不被 Dream 覆盖
     assert (mem / "facts.md").read_text(encoding="utf-8").strip()
-    assert (mem / "longterm.md").read_text(encoding="utf-8").strip()
+    assert not (mem / "longterm.md").exists() or not (mem / "longterm.md").read_text(encoding="utf-8").strip()
+
+
+def test_dream_legacy_duplication_migrated(tmp_path):
+    """旧版双写污染（facts==longterm）：Dream 后 longterm 清空，内容已随 composed 落入 facts。"""
+    aid = tmp_path / "a2_dup"
+    mem = aid / "memory"
+    mem.mkdir(parents=True)
+    dup = "- 事实甲\n- 事实乙"
+    (mem / "facts.md").write_text(dup, encoding="utf-8")
+    (mem / "longterm.md").write_text(dup, encoding="utf-8")
+    (mem / "today.md").write_text("- 今天聊了部署", encoding="utf-8")
+
+    runner = m.DreamRunner(aid, llm=FakeLLM(list(_DREAM_REPLIES)))
+    r = runner.start("manual")
+    assert r["ok"] is True
+    assert (mem / "longterm.md").read_text(encoding="utf-8").strip() == ""
+    assert (mem / "facts.md").read_text(encoding="utf-8").strip()
+
+
+def test_sections_text_dedupes_legacy_duplication():
+    """facts==longterm 时 _sections_text 只拼一份，避免双倍重复输入。"""
+    S = m.DreamSections
+    dup = "- 事实甲"
+    s = S(facts=dup, today="", daily=[], longterm=dup)
+    assert s.facts in m._sections_text(s)
+    assert m._sections_text(s).count("事实甲") == 1
+    # 不同内容不误伤
+    s2 = S(facts="- 事实甲", today="", daily=[], longterm="- 长期沉淀")
+    assert "长期沉淀" in m._sections_text(s2)
 
 
 def test_dream_whitespace_only_counts_as_empty(tmp_path):
@@ -120,7 +149,8 @@ def test_dream_reentry_locked(tmp_path):
         assert r["ok"] is False and "running" in (r.get("error") or "")
 
 
-def test_dream_verify_semantic_fail_aborts(tmp_path):
+def test_dream_verify_semantic_fail_degrades_to_warning(tmp_path):
+    """verify 语义/溯源不通过：降级为警告（lastRun.warning + result.warning），整理照常落盘。"""
     aid = tmp_path / "a4"
     _seed_memory(aid)
     bad_verify = (
@@ -128,13 +158,28 @@ def test_dream_verify_semantic_fail_aborts(tmp_path):
         ' "feedback": "编造了原文没有的事实"}'
     )
     llm = FakeLLM(["- 单元A", "- 单元A", "- 单元A", "## 主题\n\n- 单元A", bad_verify])
-    before_longterm = (aid / "memory" / "longterm.md").read_text(encoding="utf-8")
     runner = m.DreamRunner(aid, llm=llm)
     r = runner.start("manual")
-    assert r["ok"] is False and "verify" in (r.get("error") or "")
-    # 未应用：longterm 保持原样，无 revision
-    assert (aid / "memory" / "longterm.md").read_text(encoding="utf-8") == before_longterm
-    assert runner.list_revisions() == []
+    assert r["ok"] is True and r["changed"] is True
+    assert "编造了原文没有的事实" in (r.get("warning") or "")
+    # 应用成功：longterm 已被整理内容覆盖，revision 已建
+    assert (aid / "memory" / "longterm.md").read_text(encoding="utf-8").strip()
+    assert len(runner.list_revisions()) == 1
+    # lastRun.warning 留痕
+    state = runner.status()
+    assert "编造了原文没有的事实" in (state.get("lastRun", {}).get("warning") or "")
+    assert state["lastRun"]["status"] == "succeeded"
+
+
+def test_dream_verify_pass_no_warning(tmp_path):
+    """verify 全部通过：无 warning 字段，行为与旧成功路径一致。"""
+    aid = tmp_path / "a4_ok"
+    _seed_memory(aid)
+    llm = FakeLLM(list(_DREAM_REPLIES))
+    runner = m.DreamRunner(aid, llm=llm)
+    r = runner.start("manual")
+    assert r["ok"] is True and r.get("warning") == ""
+    assert "warning" not in runner.status().get("lastRun", {})
 
 
 def test_dream_restore_revision(tmp_path):

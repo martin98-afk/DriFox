@@ -113,7 +113,10 @@ def _write(p: Path, text: str) -> None:
 def _sections_text(s: DreamSections) -> str:
     parts = [s.facts, s.today]
     parts.extend(d["body"] for d in s.daily)
-    parts.append(s.longterm)
+    # 历史污染防御：旧版 Dream 将合成结果双写进 facts/longterm，导致两段逐字相同；
+    # 输入拼接时去重，避免同一内容占双倍 token、压缩后仍保留双份重复。
+    lt = "" if s.longterm.strip() and s.longterm.strip() == s.facts.strip() else s.longterm
+    parts.append(lt)
     return "\n\n".join(p for p in parts if p.strip())
 
 
@@ -305,8 +308,11 @@ class DreamRunner:
                     llm(prompts.build_dream_compose(f"【上一稿压缩不足，请更激进地聚合：】\n{optimized}")) or ""
                 ).strip()
                 verdict = self._verify(prompts, before, composed)
-            if not (verdict.get("semantic_ok") and verdict.get("provenance_ok")):
-                raise RuntimeError(f"dream_verify_failed: {verdict.get('feedback') or '语义/溯源校验未通过'}")
+            # verify 降级为警告：语义/溯源不通过不再阻断（LLM 质检对长条目压缩误杀率高），
+            # 结果记入 lastRun.warning 留痕，整理照常落盘。
+            verify_warning = ""
+            if not (verdict.get("semantic_ok", True) and verdict.get("provenance_ok", True)):
+                verify_warning = str(verdict.get("feedback") or "语义/溯源校验未通过（仅警告）")
         except Exception as e:
             state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed", "error": str(e), "at": _now()}
             _write_state(self._aid, state)
@@ -325,13 +331,22 @@ class DreamRunner:
             _write_state(self._aid, state)
             return {"ok": False, "error": "memory_changed"}
 
-        after = DreamSections(facts=composed, today=before.today, daily=before.daily, longterm=composed)
+        # 单写 facts：Dream 输出只落入 facts.md；longterm 保持「过期日记沉淀」语义
+        # （roll_daily_window 专属），不再被合成结果覆盖 → 消除 facts/longterm 永久双份重复。
+        # 迁移：检测到 longterm 与 facts 逐字相同（旧版双写污染），清空 longterm，
+        # 其内容已随 composed 落入 facts。
+        longterm_after = before.longterm
+        if before.facts.strip() and before.longterm.strip() == before.facts.strip():
+            longterm_after = ""
+        after = DreamSections(facts=composed, today=before.today, daily=before.daily, longterm=longterm_after)
         if _hash_sections(after) == before_hash:
             state.update(self._finalize(state, run_id, trigger, "succeeded", "", before_hash, before_hash))
+            if verify_warning:
+                state["lastRun"]["warning"] = verify_warning
             if trigger == "manual":
                 state["lastSuccessfulManualDate"] = self._logical_date
             _write_state(self._aid, state)
-            return {"ok": True, "run_id": run_id, "changed": False, "revision_id": ""}
+            return {"ok": True, "run_id": run_id, "changed": False, "revision_id": "", "warning": verify_warning}
 
         revision_id = create_revision(self._aid, run_id=run_id, trigger=trigger, before=before)
         # pending-apply：崩溃恢复标记
@@ -346,12 +361,14 @@ class DreamRunner:
             pass
 
         state = self._finalize(state, run_id, trigger, "succeeded", revision_id, before_hash, _hash_sections(after))
+        if verify_warning:
+            state["lastRun"]["warning"] = verify_warning
         if trigger == "manual":
             state["lastSuccessfulManualDate"] = self._logical_date
         else:
             state["lastAutomaticAttemptDate"] = self._logical_date
         _write_state(self._aid, state)
-        return {"ok": True, "run_id": run_id, "changed": True, "revision_id": revision_id}
+        return {"ok": True, "run_id": run_id, "changed": True, "revision_id": revision_id, "warning": verify_warning}
 
     def _verify(self, prompts, before: DreamSections, composed: str) -> Dict:
         raw = (self._llm(prompts.build_dream_verify(_sections_text(before), composed)) or "").strip()
