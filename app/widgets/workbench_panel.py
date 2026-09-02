@@ -1431,6 +1431,18 @@ class WorkbenchPanel(QWidget):
         Colors.refresh()
         # 嵌入式：背景透明（由外层 #workbenchFrame 圆角矩形容器提供背景）
         self.setStyleSheet("QWidget#workbenchPanel { background: transparent; border: none; }")
+        # splitter handle 边框色随主题（构造时用旧 Colors 固化）
+        self._body_splitter.setStyleSheet(
+            "QSplitter#workbenchBodySplitter { background: transparent; border: none; }"
+            "QSplitter#workbenchBodySplitter::handle:vertical {"
+            f" background: transparent;"
+            f" border-top: 1px solid {Colors.BORDER};"
+            " margin: 0 4px;"
+            " }"
+            "QSplitter#workbenchBodySplitter::handle:vertical:hover {"
+            f" border-top: 1px solid {Colors.BORDER_ACCENT};"
+            " }"
+        )
         for btn in self._tab_buttons:
             btn.refresh_style()
         self.artifacts_page.refresh_style()
@@ -1439,3 +1451,14 @@ class WorkbenchPanel(QWidget):
         self.memory_page.refresh_style()
         if self._memory_content is not None and hasattr(self._memory_content, "refresh_style"):
             self._memory_content.refresh_style()
+        if self._history_page is not None and hasattr(self._history_page, "refresh_style"):
+            self._history_page.refresh_style()
+        # 插件页签 / 卡片 tab（right 容器 UI 插件卡片）：外部不广播主题事件，
+        # 面板统一分发；无 refresh_style 的插件页跳过
+        for widget in self._plugin_widgets.values():
+            if hasattr(widget, "refresh_style"):
+                widget.refresh_style()
+        for entry in self._card_tabs.values():
+            widget = entry.get("widget")
+            if widget is not None and hasattr(widget, "refresh_style"):
+                widget.refresh_style()

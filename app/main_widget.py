@@ -10023,6 +10023,10 @@ class OpenAIChatToolWindow(ToolWindow):
                     "llmProviderCard",
                     "mcpListCard",
                     "lspListCard",
+                    # 手风琴类卡片（ExpandSettingCard 子类，不在 SystemCardFrame
+                    # findChildren 范围，漏刷会导致内部选项颜色停留旧主题）
+                    "pluginToolCard",
+                    "pluginAgentCard",
                 ):
                     card = getattr(self._settings_popup, card_name, None)
                     if card is not None and hasattr(card, "refresh_style"):
