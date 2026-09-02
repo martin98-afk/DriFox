@@ -6,6 +6,7 @@ LLM Chatter 主入口
 
 import os
 import sys
+import time
 import warnings
 
 from qfluentwidgets import setFontFamilies
@@ -235,6 +236,16 @@ def main():
             threading.Thread(target=_sync_models_dev, daemon=True).start()
         except Exception:
             logger.exception("[DeferredStartup] 启动 models.dev 后台同步线程失败")
+
+        # 崩溃取证自检（仅调试）：DRIFOX_CRASH_TEST=1 时在 faulthandler 安装后
+        # 触发真实 SIGSEGV，验证 crash log/WER 链路。正常运行永不设置此变量。
+        # ⚠️ 必须在主线程触发：Windows CRT 的 signal handler 只在主线程路由
+        # 硬件异常，子线程触发时 faulthandler 不落盘（实测）。
+        if os.environ.get("DRIFOX_CRASH_TEST") == "1":
+            logger.warning("[CrashHandler] DRIFOX_CRASH_TEST=1，3 秒后触发测试性段错误")
+            import faulthandler as _fh
+
+            _fh._sigsegv()
 
     # 禁用 Qt 的 qFatal 默认行为（abort），改为记录 ERROR 日志
     from loguru import logger as _logger

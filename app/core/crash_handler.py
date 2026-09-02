@@ -11,6 +11,8 @@ dump 并弹窗告知报告位置，解决「闪退后无从排查」的问题。
 - dump 文件非空且无 clean-exit 标记 → 发生过原生崩溃，弹窗报告
 - 含 clean-exit 标记 → 正常退出，静默清理
 - 空文件（taskkill 强杀/断电，faulthandler 未触发）→ 静默清理，不误报
+
+已弹窗确认的报告重命名为 *.log.reported（保留取证，不再弹窗）。
 """
 import atexit
 import os
@@ -207,8 +209,12 @@ def prompt_crash_report(dump_path: Path, parent=None) -> None:
         box.exec_()
         if box.clickedButton() is open_btn:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(dump_path.parent)))
-        # 报告已告知 → 清理，避免下次重复弹
-        _silent_remove(dump_path)
+        # 报告已告知 → 重命名标记已读：文件保留供排查（崩溃证据不可再生），
+        # 后缀变化使 check_last_crash 不再命中，避免下次启动重复弹窗
+        try:
+            dump_path.rename(dump_path.with_name(dump_path.name + ".reported"))
+        except Exception:
+            pass
     except Exception:
         pass
 
