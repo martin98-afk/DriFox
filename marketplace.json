@@ -52,8 +52,8 @@
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
-                "light": "icons/icon_light.svg",
-                "dark": "icons/icon.svg"
+                "light": "D:/work/DriFox/plugins/assistant_hub/icons/avatars/avatar-13.png",
+                "dark": "D:/work/DriFox/plugins/assistant_hub/icons/avatars/avatar-13.png"
             }
         },
         {
@@ -239,6 +239,26 @@
                 "light": "icon.svg",
                 "dark": "icon_dark.svg"
             }
+        },
+        {
+            "name": "welcome_changelog",
+            "description": "欢迎卡片「更新」tab — 拉取 DriFox GitHub Releases 作为更新日志展示。禁用插件后该 tab 消失。",
+            "version": "1.0.0",
+            "author": "DriFox Contributors",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/welcome_changelog",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox"
         }
     ]
 }
