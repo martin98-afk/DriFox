@@ -143,7 +143,8 @@ class MarketplaceSourceManager:
             )
             return
         try:
-            existing = json.loads(self._sources_file.read_text(encoding="utf-8"))
+            # utf-8-sig 兼容带 BOM 的文件（用户用记事本编辑后可能引入 BOM）
+            existing = json.loads(self._sources_file.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError) as e:
             logger.warning(f"[Marketplace] 读取市场源配置失败，跳过默认源合并: {e}")
             return
@@ -232,7 +233,7 @@ class MarketplaceSourceManager:
         if not self._sources_file.exists():
             self._ensure_defaults()
         try:
-            return json.loads(self._sources_file.read_text(encoding="utf-8"))
+            return json.loads(self._sources_file.read_text(encoding="utf-8-sig"))
         except Exception:
             return list(_DEFAULT_SOURCES)
 

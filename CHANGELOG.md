@@ -3,6 +3,78 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.8-beta] - 2026-09-03
+
+自上一版本以来的变更 | 提交数：100 · 文件变更：654 · +61169/-44175 | 贡献者：mading, dingma
+
+> ⚠️ Pre-release 版本：用于测试，包含 assistant_hub、workbench、crash 报告与 persona 等大量新增与重构功能，稳定性尚未充分验证。
+
+### ✨ 新功能 (New Features)
+
+- **原生崩溃处理与上报机制** (`app/core/`): 实现 native crash handling；集成 Windows WER；persona 创建流程新增头像处理；崩溃报告注册表与上报链路打通。
+- **插件安装器 git 命令防护** (`plugins/system/`): git 命令增加超时与停滞检测，避免长时间挂起阻塞插件安装。
+- **assistant_hub 全套能力** (`plugins/system/assistant_hub/`): 落地完整 assistant_hub 子系统——
+  - persona 注册表与内置构建模板（build / hanako / none / viper-mei / butter / ming）
+  - 默认助手种子化、活跃助手高亮、自适应全宽卡片行、屏蔽对话框、ComboBox 替代
+  - 弧形卡片堆叠（扇形折叠 / hover 展开）、分区控件（persona chips / memory / experience）
+  - 提示注入重写（persona + 静默记忆规则 + Stop turn counter）、`recall` / `record_experience` 工具
+  - 记忆 ticker（基于轮次的轻链 + 逻辑日批处理）、经验存储与 reflect、Dream LLM 流水线（修订快照 + 日级自动）
+  - 四段式记忆传送带编译器（水位递增）、memory/dream/reflect 提示模板、read-only 会话存储、单次 llm_client
+- **WorkbenchPanel 工作台** (`app/widgets/workbench_panel.py` 等): 新增右侧工作台面板与切换功能——
+  - 任务 dock、artifacts 管理、独立 tab 记忆、动态 tab 处理（迁移历史卡 / 任务列表 / 内存页）
+  - `WorkbenchTabInfo` 注册方法、`_SidebarSplitter` 光标处理、插件 tab 支持、内存页子标签
+  - 系统插件 UI 组件、SystemArtifactsPage 文件处理、OpenAIChatToolWindow 命令增强
+- **PinnedSection 与项目笔记** (`plugins/system/assistant_hub/` 等): 实现手动提示的 PinnedSection；新增项目笔记与助手上下文注入。
+- **Dream 与记忆增强** (`plugins/system/assistant_hub/`): Dream 处理流水线消除长期重复并加强验证警告；增强 dream 进度上报与 LLM 请求上限。
+- **用户称呼与画像** (`plugins/system/assistant_hub/`): 新增用户称呼功能个性化助手交互。
+- **图像附件透传** (`app/core/engines/ui/engine.py`): 发送消息时透传图像附件至引擎，确保历史记录渲染正确。
+- **主线程回调守护** (`app/widgets/cards/`): `AssistantCardWidget` 守护线程回调主线程执行，避免守护线程 UI 更新崩溃。
+- **Hook 策略 ID 映射** (`app/core/engines/`): EngineSession 增加 hook 策略 ID 映射与陈旧 worker 处理。
+- **循环策略集成与标签管理** (`app/core/`): 增强 loop policy 集成与 tab 管理；AssistantHub 改用主对话引擎 + 单轮循环策略。
+- **标签页删除保护** (`app/widgets/`): 标题栏永久标签禁止关闭；卡片定位增强新增卡片对齐方式。
+- **插件组件主题刷新** (`app/widgets/`): Workbench 面板与插件组件主题变化时样式自动刷新，保证 UI 一致性。
+- **动态头像尺寸** (`app/widgets/`): `set_avatar_size` 动态调整头像尺寸支持缩放动画。
+- **persona 头像与人格定义** (`plugins/system/assistant_hub/personas/`): 新增 butter / ming / viper-mei 人格定义与头像图；persona 创建指南补充访谈阶段与行为洞察描述。
+- **assistant 编辑标签页** (`plugins/system/assistant_hub/`): 编辑器标签页覆盖 identity / prompts / public persona / avatar / memory / skills；utility model 与 session prompt cache 失效；移除未使用的 identity injection hook。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **流式文本内联渲染** (`app/widgets/render_helpers.py`): 修复完整重渲染后流式文本被切到新块；停止软边界句子分割撕裂同一段落。
+- **active assistant id 持久化** (`plugins/system/assistant_hub/`): 修复重启后活动助手丢失并回退到主助手。
+- **assistant_hub UI 一组修复** (`plugins/system/assistant_hub/`): 切到 qfluentwidgets ComboBox + 防抖自动保存；弹窗容器高度（含 view+window）而非仅 view；卡片重新加载后 show() 显示；persona 模板兜底 identity/AGENTS.md；chip objectName 与 z-order；头像剪影底色填充；头像对话框关闭缺陷；persona chips 带头像 + 加高编辑器 + 中性输入框 + 折叠名称隐藏 + 遮罩尺寸。
+- **assistant_hub hooks 解忽略** (`.gitignore`): 取消忽略 `assistant_hub/hooks.json` 与 personas/build 模板，避免被误删。
+- **窗口拖拽防回弹** (`app/widgets/`): 嵌套 `SC_MOVE` 重入守护防止拖拽回弹到原点。
+- **workbench 头像尺寸还原** (`app/widgets/`): 还原头像尺寸到 26px，并清理依赖被回滚实现的测试。
+- **标题栏头像尺寸** (`app/widgets/custom_title_bar.py`): 项目头像尺寸 22px → 26px（用户反馈）。
+- **插件安装器 BOM 修复** (`plugins/system/`): 修复 marketplace 源管理器读取 UTF-8 with BOM 的 JSON 文件。
+- **不可禁用核心插件** (`app/plugins/managers/`): 引入黑名单机制，核心插件不可被禁用。
+- **内层宽度自适应** (`app/widgets/`): 调整内层内容区域最大宽度以改善布局响应。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **assistant_hub 单列滚动** (`plugins/system/assistant_hub/`): 主卡片重写为单列滚动页面；提示注入统一。
+- **代码结构与可读性** (`app/`): 重构改进代码结构与会话存储路径获取 + 对话处理；增强编码实践与问题求解准则。
+- **批量移除测试覆盖** (`tests/widgets/test_tab_panel_batch_remove.py`): 重构批量移除功能测试用例，提升覆盖清晰度。
+- **ChangelogFetcher 与欢迎卡失效** (`tests/`): 测试用例更新与重构。
+
+### 🧪 测试 (Tests)
+
+- **assistant_hub 测试完善** (`tests/`): 修复 `fake resolve` 签名适配 `config_id`；放弃 qt-normalized 样式断言；放宽横幅样式断言；修复体验列表断言。
+- **WorkbenchPanel 测试** (`tests/`): 复用 session `qapp` fixture 修复跨文件隔离；断言圆角卡片样式。
+- **`_SidebarSplitter` 测试** (`tests/`): 补充光标行为测试。
+
+### 🔧 其他 (Chores & Build)
+
+- **全项目死代码清理** (`app/` + `plugins/system/`): 三轮存量死代码清理——存量 175 处自动修复 + 47 处人工验证（F841 带副作用保留 / F811 重定义删除）+ 保留 `__init__` 公共转口；记忆/项目笔记迁移残留 19 个失联方法；标签页与主窗口 25 死方法 / 20 死导入 / 9 死变量，存量失败测试已排除。
+- **代码格式与插件类型** (`app/` + `plugins/`): 全项目 ruff format；插件类型统一为 `user`；移除过时图标文件。
+- **marketplace 自动同步** (`marketplace.json`): 多次自动重新生成（`[skip ci]`）。
+- **assistant_hub 整理** (`plugins/system/assistant_hub/`): ruff format 并删除旧版 `editor_tabs`。
+
+### 🔄 其他变更 (Other Changes)
+
+- **Revert workbench 系列提交**: 回滚 workbench / tab-manager / avatar 相关 4 个提交（afc64241, 814decc1, 501fd11a, 28727046），随后以更稳态路径重新实现。
+- **删除过时测试**: 移除 `format_memory_context` hook 的过时测试。
+
 ## [v0.5.7] - 2026-08-31
 
 自上一版本以来的变更 | 提交数：37 · 文件变更：84 · +17407/-5717 | 贡献者：mading, dingma

@@ -164,7 +164,7 @@ class Assistant:
             created_at=str(data.get("created_at") or ""),
             updated_at=str(data.get("updated_at") or ""),
         )
-        # 旧 yuan 值映射到 v2 persona id（kong→none、butter/ming→build）
+        # 旧 yuan 值映射到 v2 persona id（kong→none）
         a.yuan = _MIGRATE_YUAN.get(a.yuan, a.yuan)
         return a
 
@@ -284,8 +284,8 @@ def _avatar_supported_exts() -> Tuple[str, ...]:
     return ("png", "jpg", "jpeg", "webp", "svg")
 
 
-# 旧 yuan 值 → v2 persona id（v2 人格体系：build/hanako/none + 自定义）
-_MIGRATE_YUAN = {"kong": "none", "butter": "build", "ming": "build"}
+# 旧 yuan 值 → v2 persona id（kong→none；butter/ming 仍为合法内置人格，不迁移）
+_MIGRATE_YUAN = {"kong": "none"}
 
 # core 子包加载器缓存（模块名 assistant_hub_core.<key>）
 _CORE_MODULES: Dict[str, Any] = {}
@@ -478,19 +478,25 @@ class AssistantManager:
         return sorted(self._assistants.values(), key=lambda a: (a.order, a.created_at, a.id))
 
     def _seed_defaults(self) -> None:
-        """首次启动（库为空）预置 3 个助手：DriFox（主助手+默认激活）/ 花子 / 空。
+        """首次启动（库为空）预置 4 个助手：DriFox（主助手+默认激活）/ 花子 / 空 / 毒蛇妹。
 
         只在根目录完全为空时执行一次；用户删除后不会复活（目录已存在 yaml）。
-        头像：从 personas/avatars/<persona>.png 复制到助手 avatars/agent.png。
+        头像：从 personas/<id>/avatar.png 复制到助手 avatars/agent.png。
+        毒蛇妹：默认关闭记忆（不沉淀跨会话上下文）、开启经验（保留经验库与反思）。
         """
         seeds = [
-            ("build", "DriFox", "build", True),
-            ("hanako", "花子", "hanako", False),
-            ("pure", "空", "none", False),
+            ("build", "DriFox", "build", True, None, None),
+            ("hanako", "花子", "hanako", False, None, None),
+            ("pure", "空", "none", False, None, None),
+            ("viper-mei", "毒蛇妹", "viper-mei", False, False, True),
         ]
         try:
-            for name, display, yuan, primary in seeds:
+            for name, display, yuan, primary, memory, experience in seeds:
                 a = self.create(display, id=name, yuan=yuan)
+                if memory is not None:
+                    a.memory_enabled = bool(memory)
+                if experience is not None:
+                    a.experience_enabled = bool(experience)
                 # 人格头像 → 助手头像
                 try:
                     reg = self.persona_registry()
@@ -501,8 +507,8 @@ class AssistantManager:
                     logger.debug(f"[assistant_hub] seed 头像复制失败 ({name}): {e}")
                 if primary:
                     a.primary = True
-                    self.update(a)
-            logger.info("[assistant_hub] 已预置默认助手: build / hanako / pure")
+                self.update(a)
+            logger.info("[assistant_hub] 已预置默认助手: build / hanako / pure / viper-mei")
         except Exception as e:
             logger.warning(f"[assistant_hub] 预置助手失败: {e}")
 

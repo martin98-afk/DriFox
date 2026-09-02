@@ -62,9 +62,26 @@ def test_custom_upsert_delete(tmp_path):
 
 
 def test_resolve_user_name_fallback(monkeypatch):
-    monkeypatch.setattr(
-        m, "getpass", type("G", (), {"getuser": staticmethod(lambda: (_ for _ in ()).throw(Exception("x")))})
-    )
+    # getuser 抛异常 + 环境变量缺失 → 回落「用户」
+    monkeypatch.setitem(sys.modules, "getpass", None)
+    monkeypatch.delenv("USERNAME", raising=False)
+    monkeypatch.delenv("USER", raising=False)
     assert m.resolve_user_name() == "用户"
-    monkeypatch.setattr(m, "getpass", type("G", (), {"getuser": staticmethod(lambda: "martin")}))
+    # getuser 正常返回 → 原样使用
+    fake = type("G", (), {"getuser": staticmethod(lambda: "martin")})
+    monkeypatch.setitem(sys.modules, "getpass", fake)
     assert m.resolve_user_name() == "martin"
+
+
+def test_module_loads_without_getpass(monkeypatch):
+    """打包回归：PyInstaller 不分析动态加载的插件源文件，getpass 可能未进 PYZ。
+
+    模拟打包环境（import getpass 失败）下 persona.py 必须仍可加载，
+    否则 PersonaRegistry 全挂 → 助手中心人格卡片空白。
+    """
+    monkeypatch.setitem(sys.modules, "getpass", None)  # None → import 直接 ImportError
+    spec = importlib.util.spec_from_file_location("test_persona_no_getpass", str(_MODULE))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["test_persona_no_getpass"] = mod
+    spec.loader.exec_module(mod)  # 修复前：ModuleNotFoundError: No module named 'getpass'
+    assert mod.resolve_user_name()  # 回落链兜底，非空即可

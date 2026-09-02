@@ -39,6 +39,12 @@ _COUNT_API_BASE = "https://countapi.mileshilliard.com/api/v1"
 _COUNT_KEY_PREFIX = "drifox-plugins-"
 _COUNT_UA = "DriFox/0.5 (+https://github.com/martin98-afk/drifox-plugins)"
 
+# git 传输停滞自断：连续 30s 平均速度 < 1KB/s 视为连接已死（代理失效/半开），
+# git 自行断开报错。覆盖绝大多数网络挂死场景，避免走到总超时强杀。
+_GIT_STALL_ARGS = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30")
+# git 单命令总超时兜底（大仓库浅克隆 + 慢网络留足余量）
+_GIT_CMD_TIMEOUT = 300.0
+
 
 def report_plugin_install(plugin_name: str):
     """异步上报插件安装/更新计数（后台线程，绝不阻塞/影响安装流程）"""
@@ -748,6 +754,12 @@ class PluginInstaller:
                 for i, (cu, ce) in enumerate(candidates):
                     if i > 0:
                         logger.info(f"[Installer] retry #{i}: {cu}")
+                    if cache_tmp.exists() and not _rmtree_readonly(cache_tmp):
+                        # Windows 下 git 残留句柄会让删除静默失败，沿用同名目录
+                        # 重试必报「already exists」→ 换新目录名（真实案例：
+                        # 2026-09 使用者 attempt #0 checkout 失败后 retry 全灭）
+                        logger.warning(f"[Installer] 残留下载目录删除失败，改用新目录: {cache_tmp}")
+                        cache_tmp = self._cache_dir / f"{name}_{int(time.time())}_r{i}"
                     shutil.rmtree(cache_tmp, ignore_errors=True)
                     cache_tmp.mkdir(parents=True, exist_ok=True)
                     try:
@@ -826,12 +838,23 @@ class PluginInstaller:
             logger.error(f"[Installer] Download {name} failed: {self.last_error}")
             return False
 
-    def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path, extra_args: Optional[list] = None):
+    def _sparse_clone(
+        self,
+        url: str,
+        subpath: str,
+        ref: str,
+        cache_dir: Path,
+        extra_args: Optional[list] = None,
+        timeout: Optional[float] = None,
+    ):
         """克隆仓库指定子目录到 cache_dir
 
         对 subpath="." 的情况，全量浅克隆（不用 sparse-checkout）。
         extra_args: git 前置参数（如 ['-c', 'http.proxy=...']），
         插在 git 与子命令之间。
+        timeout: 单条 git 命令总超时秒数（默认 _GIT_CMD_TIMEOUT）。超时后
+            强杀整棵进程树并抛 CalledProcessError，防止 git 对半开连接无限
+            等待导致安装任务永久卡在「安装中…」。
 
         失败时把 git 的 stderr 一起抛（不要直接 ``check=True`` —— 那样
         ``CalledProcessError.stderr`` 是 ``None``，外层日志看不到真实错误）。
@@ -839,16 +862,44 @@ class PluginInstaller:
         kwargs = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        extra = list(extra_args or [])
+        extra = list(extra_args or []) + list(_GIT_STALL_ARGS)
+        cmd_timeout = _GIT_CMD_TIMEOUT if timeout is None else float(timeout)
 
         def _run(cmd):
-            result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-            if result.returncode != 0:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs
+            )
+            try:
+                out, err = proc.communicate(timeout=cmd_timeout)
+            except subprocess.TimeoutExpired:
+                # Windows 上 proc.kill() 只杀 git 主进程，孙进程（git-remote-http）
+                # 持有管道句柄会让随后的 communicate 再次挂死；必须杀整棵树。
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                else:
+                    proc.kill()
+                try:
+                    out, err = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    out, err = "", ""
+                tail = (err or "").strip().splitlines()[-3:]
                 raise subprocess.CalledProcessError(
-                    result.returncode,
-                    result.args,
-                    output=result.stdout,
-                    stderr=result.stderr,
+                    124,
+                    cmd,
+                    output=out,
+                    stderr=(f"git 命令超过 {cmd_timeout:.0f}s 未完成，已强制终止"
+                            f"（网络停滞或仓库过大）" + ("; ".join(tail) if tail else "")),
+                ) from None
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    proc.returncode,
+                    cmd,
+                    output=out,
+                    stderr=err,
                 )
 
         if subpath in (".", ""):
@@ -857,7 +908,7 @@ class PluginInstaller:
         else:
             # 子目录：稀疏克隆
             _run(["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse", url, str(cache_dir)])
-            _run(["git", "-C", str(cache_dir), "sparse-checkout", "set", subpath])
+            _run(["git", *extra, "-C", str(cache_dir), "sparse-checkout", "set", subpath])
 
     @staticmethod
     def _format_git_err(e: Exception) -> str:

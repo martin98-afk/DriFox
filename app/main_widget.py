@@ -10513,6 +10513,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     _WELCOME_SLOT_MS = 50  # 相邻窗口 welcome 渲染的最小间隔
     _WELCOME_SLOT_COUNT = 20  # 槽位数：50ms × 20 = 1000ms 上限轮转
+    # pending 守卫超时：slot 回调丢失（QTimer 竞态）时强制放行重建，防永久熔断
+    _WELCOME_PENDING_TIMEOUT_S = 3.0
 
     def _schedule_initial_welcome(self):
         """QTimer 交错调度欢迎卡片渲染（C2：并发会话创建不卡 UI）
@@ -10531,16 +10533,31 @@ class OpenAIChatToolWindow(ToolWindow):
         在同事件批次内可能连续调度，无守卫会双次重建 QWebEngineView（100-500ms×2）。
         渲染回调读 _get_or_create_welcome_card 时缓存已被 invalidate，合并调度
         仍拿到最新数据，不丢失更新。
+
+        🛡️ pending 超时兜底（2026-09-02 bug fix）：守卫依赖 slot 回调必然执行来
+        复位 pending；实测插件热重载风暴中 slot 回调可能丢失（QTimer 竞态，
+        win_676 案例：21:58:01 调度后回调未 fire，pending 永久 True），此后该
+        窗口所有欢迎卡片重建请求被永久拦截 → 插件启停/更新后欢迎卡片无法
+        刷新出来。pending 超过 3s 未回调即视为泄漏，强制放行重建。
         """
+        now = time.monotonic()
         try:
             if self._welcome_render_pending:
-                logger.debug(
-                    f"[OpenAIChatToolWindow] _schedule_initial_welcome: 已有 pending 渲染，跳过（wid={self._window_id}）"
+                since = getattr(self, "_welcome_render_pending_since", None)
+                if since is not None and (now - since) < self._WELCOME_PENDING_TIMEOUT_S:
+                    logger.debug(
+                        f"[OpenAIChatToolWindow] _schedule_initial_welcome: 已有 pending 渲染，跳过（wid={self._window_id}）"
+                    )
+                    return
+                # pending 超时：slot 回调丢失，强制放行（防永久熔断）
+                logger.warning(
+                    f"[OpenAIChatToolWindow] _schedule_initial_welcome: pending 超 "
+                    f"{self._WELCOME_PENDING_TIMEOUT_S:.0f}s 未回调，视为泄漏强制重建（wid={self._window_id}）"
                 )
-                return
         except AttributeError, RuntimeError:
             pass  # stub（__new__ 绕过 __init__）实例无此属性，视为未 pending
         self._welcome_render_pending = True
+        self._welcome_render_pending_since = now
         cls = type(self)
         slot = getattr(cls, "_welcome_slot", 0) + 1
         setattr(cls, "_welcome_slot", slot)

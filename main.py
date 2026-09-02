@@ -6,6 +6,7 @@ LLM Chatter 主入口
 
 import os
 import sys
+import time
 import warnings
 
 from qfluentwidgets import setFontFamilies
@@ -137,6 +138,17 @@ def main():
         except Exception:
             pass
 
+        # 原生崩溃捕获（faulthandler）：Qt/C++ 层段错误不经过 Python excepthook，
+        # 打包版表现为「闪退且 all.log 无任何记录」。启用后崩溃栈 dump 到
+        # logs/crash/，下次启动由 crash_handler.check_last_crash 检测并弹窗。
+        try:
+            from app.core.crash_handler import install_crash_handler
+            from app.utils.utils import get_app_data_dir
+
+            install_crash_handler(get_app_data_dir() / "logs")
+        except Exception:
+            pass
+
         # 同步开机自启注册表状态
         try:
             from app.utils.startup_manager import sync_auto_start_from_config
@@ -224,6 +236,16 @@ def main():
             threading.Thread(target=_sync_models_dev, daemon=True).start()
         except Exception:
             logger.exception("[DeferredStartup] 启动 models.dev 后台同步线程失败")
+
+        # 崩溃取证自检（仅调试）：DRIFOX_CRASH_TEST=1 时在 faulthandler 安装后
+        # 触发真实 SIGSEGV，验证 crash log/WER 链路。正常运行永不设置此变量。
+        # ⚠️ 必须在主线程触发：Windows CRT 的 signal handler 只在主线程路由
+        # 硬件异常，子线程触发时 faulthandler 不落盘（实测）。
+        if os.environ.get("DRIFOX_CRASH_TEST") == "1":
+            logger.warning("[CrashHandler] DRIFOX_CRASH_TEST=1，3 秒后触发测试性段错误")
+            import faulthandler as _fh
+
+            _fh._sigsegv()
 
     # 禁用 Qt 的 qFatal 默认行为（abort），改为记录 ERROR 日志
     from loguru import logger as _logger
@@ -372,6 +394,21 @@ def main():
         tm.show()
         _apply_window_topmost(tm)
         logger.info("DriFox 以 Tab 管理器模式启动")
+
+        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后弹窗，不抢首帧
+        def _check_last_crash():
+            try:
+                from app.core.crash_handler import check_last_crash, prompt_crash_report
+                from app.utils.utils import get_app_data_dir
+
+                dump = check_last_crash(get_app_data_dir() / "logs")
+                if dump is not None:
+                    logger.warning(f"[CrashHandler] 检测到上次崩溃报告: {dump}")
+                    prompt_crash_report(dump, parent=tm)
+            except Exception:
+                pass
+
+        QTimer.singleShot(8000, _check_last_crash)
 
     # 应用退出时清理
     app.aboutToQuit.connect(_guard.cleanup)

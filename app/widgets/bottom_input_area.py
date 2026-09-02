@@ -631,7 +631,11 @@ class SendableTextEdit(TextEdit):
             return
 
         try:
-            text = self.toPlainText()
+            # ⚠ 必须用原始文档文本（胶囊=U+FFFC 占 1 字符），与 textCursor 坐标
+            # 同系。override 的 toPlainText 会把胶囊展开成 "@名字 "（多字符），
+            # 混用会让 text[:cursor_pos] 切出幽灵 "@"（含胶囊自带的空白终止位
+            # 被切掉）→ 插入胶囊后每次输入都误弹 @ 卡片。
+            text = TextEdit.toPlainText(self)
             cursor = self.textCursor()
             cursor_pos = cursor.position()
 
@@ -2492,7 +2496,7 @@ class FileMentionObject(QObject, QTextObjectInterface):
         """胶囊尺寸（由文档布局在排版时查询）"""
         name, fm = self._name_and_metrics(doc, format)
         text_w = fm.horizontalAdvance(fm.elidedText(name, Qt.ElideMiddle, self._MAX_TEXT_WIDTH))
-        width = self._PAD_LEFT + text_w + self._PAD_RIGHT
+        width = self._PAD_LEFT + self._ICON_SIZE + self._GAP + text_w + self._PAD_RIGHT
         return QSizeF(width, self._HEIGHT)
 
     def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002
@@ -2579,7 +2583,7 @@ class AssistantMentionObject(QObject, QTextObjectInterface):
     def intrinsicSize(self, doc, posInDocument, format) -> QSizeF:  # noqa: A002
         name, fm = self._name_and_metrics(doc, format)
         text_w = fm.horizontalAdvance(fm.elidedText(name, Qt.ElideRight, self._MAX_TEXT_WIDTH))
-        width = self._PAD_LEFT + self._ICON_SIZE + self._GAP + text_w + self._PAD_RIGHT
+        width = self._PAD_LEFT + text_w + self._PAD_RIGHT
         return QSizeF(width, self._HEIGHT)
 
     def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002

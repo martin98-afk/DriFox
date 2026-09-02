@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import getpass
 import importlib.util
 import json
 import sys
@@ -39,11 +38,21 @@ class Persona:
 
 
 def resolve_user_name() -> str:
-    """用户名：系统账号，空回落「用户」。（{{userName}} 模板变量来源）"""
+    """用户名：系统账号，空回落「用户」。（{{userName}} 模板变量来源）
+
+    ⚠ getpass 必须局部导入：本模块由运行时按路径动态加载（PyInstaller
+    datas 复制的源文件，不参与依赖分析），getpass 未进 PYZ 时模块级
+    import 会炸掉整个 persona.py → 人格卡片全空。缺失时回落环境变量。
+    """
+    name = ""
     try:
+        import getpass
+
         name = (getpass.getuser() or "").strip()
     except Exception:
-        name = ""
+        import os
+
+        name = (os.environ.get("USERNAME") or os.environ.get("USER") or "").strip()
     return name or "用户"
 
 

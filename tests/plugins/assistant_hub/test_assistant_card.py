@@ -61,8 +61,8 @@ def test_card_construct_and_bind(tmp_path, monkeypatch):
     a = mgr.create("小狐")
 
     card = card_mod.AssistantCardWidget()
-    # 空库自动 seed 3 个预设助手（build/hanako/pure）+ 测试新建 1 个
-    assert len(card._stack._cards) == 4
+    # 空库自动 seed 4 个预设助手（build/hanako/pure/viper-mei）+ 测试新建 1 个
+    assert len(card._stack._cards) == 5
     # 默认绑定主助手 build（seed 时 build 设为主助手，排序居首，显示名 DriFox）
     assert card._active_aid == "build"
     assert card._name_label.text() == "DriFox"
