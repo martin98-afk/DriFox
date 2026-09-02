@@ -16,7 +16,7 @@ from PyQt5 import sip as _sip
 
 from loguru import logger
 from app.core import window_registry
-from PyQt5.QtCore import QEasingCurve, QEvent, QPoint, QSize, Qt, QTimer, QVariantAnimation, pyqtSignal
+from PyQt5.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, pyqtSignal
 from PyQt5.QtGui import QCloseEvent, QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QAbstractScrollArea,
@@ -33,7 +33,7 @@ from PyQt5.QtWidgets import (
 from qframelesswindow import FramelessWindow
 
 from app.utils.config import Settings
-from app.utils.design_tokens import Colors, font_size_css, scale_font_size
+from app.utils.design_tokens import Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 
@@ -1606,8 +1606,6 @@ class TabManagerWindow(FramelessWindow):
 
     def _setup_ui(self):
         # ── 外层纵向布局：直接放内容区（顶部让位自绘无边框标题栏） ──
-        from app.widgets.custom_title_bar import CustomTitleBar
-
         main_layout = QVBoxLayout(self)
         # 顶部让位自绘无边框标题栏；mac 上标题栏只有 28（与系统交通灯配套）
         main_layout.setContentsMargins(0, self.titleBar.height(), 0, 0)
@@ -3111,7 +3109,6 @@ class TabManagerWindow(FramelessWindow):
             if getattr(win, "_theme_needs_refresh", False):
                 try:
                     win._theme_needs_refresh = False
-                    from app.main_widget import OpenAIChatToolWindow
 
                     # P5b（V2 方案 A）：按置位时记录的 scope 精确补刷——
                     # theme→只刷颜色、font_family→只刷字体、font_size→只刷字号、
@@ -3296,8 +3293,6 @@ class TabManagerWindow(FramelessWindow):
         # 已关闭窗口已从 _instances 移除且 _is_destroyed=True，取任一存活
         # 窗口实例执行即可覆盖全量活跃集；无存活窗口时无需同步。
         try:
-            from app.main_widget import OpenAIChatToolWindow
-
             for inst in list(window_registry.alive_window_instances()):
                 if not getattr(inst, "_is_destroyed", False) and callable(
                     getattr(inst, "_sync_active_windows_to_team_manager", None)
@@ -3634,13 +3629,6 @@ class TabManagerWindow(FramelessWindow):
         self._tab_panel.refresh_ui_plugins()
         self._sync_plugin_titlebar_tabs()
         # 工作区页面刷新（Phase G）：注册集变化后重建 sidebar 入口 + 销毁被卸载页面
-        if hasattr(self, "_workspace_page_host"):
-            self._workspace_page_host.refresh_pages()
-
-    def _show_shared_launcher(self) -> None:
-        """兼容模式切换调用：刷新始终显示在 TabPanel 中的插件列表"""
-        self._tab_panel.refresh_ui_plugins()
-        self._sync_plugin_titlebar_tabs()
         if hasattr(self, "_workspace_page_host"):
             self._workspace_page_host.refresh_pages()
 
