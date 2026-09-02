@@ -368,10 +368,9 @@ class PluginInstaller:
                 for entry in os.scandir(system_dir):
                     if not entry.is_dir() or entry.name in result:
                         continue
-                    # 按 manifest type 区分：type=system → 真系统插件（仅更新）；
-                    # 其余（type=user/缺失）→ 内置非 system 插件，可禁用/启用
-                    manifest = self._read_manifest_at(Path(entry.path))
-                    if manifest is not None and manifest.get("type") == "system":
+                    # 名单制分类：黑名单（system/plugin-marketplace）→ 核心插件（仅更新，
+                    # 不可禁用）；其余（含 manifest type=system 的内置插件）→ 可禁用/启用
+                    if entry.name in self._non_disableable_names():
                         result[entry.name] = "system"
                     else:
                         result[entry.name] = "builtin_disabled" if entry.name in disabled_set else "builtin_enabled"
@@ -382,6 +381,19 @@ class PluginInstaller:
             self._status_map_cache = result
             self._status_map_ts = now
         return result
+
+    @staticmethod
+    def _non_disableable_names() -> set:
+        """不可禁用核心插件名单（单一数据源：PluginManager._NON_DISABLEABLE）。
+
+        getattr 兼底：兼容测试用 __new__ 手赋属性的构造（import 失败等）。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            return set(PluginManager._NON_DISABLEABLE)
+        except Exception:
+            return {"system", "plugin-marketplace"}
 
     @staticmethod
     def _read_version_full(plugin_dir: Path) -> Tuple[Optional[str], Optional[dict]]:
@@ -1272,11 +1284,10 @@ class PluginInstaller:
                 # 恢复 watcher（不重载），避免抑制窗口残留
                 self._resume_backend_watcher(reload=False)
                 return False
-        # 内置非 system 插件（项目根 plugins/ 且 type != system）→ 配置禁用
+        # 内置插件（项目根 plugins/ 且非黑名单）→ 配置禁用
         system_dir = getattr(self, "_system_dir", None)
         if system_dir is not None and (system_dir / name).is_dir():
-            manifest = self._read_manifest_at(system_dir / name)
-            if manifest is None or manifest.get("type") != "system":
+            if name not in self._non_disableable_names():
                 return self._set_managed_enabled(name, enabled=False)
         return False
 
@@ -1284,7 +1295,7 @@ class PluginInstaller:
         """启用已禁用的插件
 
         - 用户插件（plugins-disabled/）：移回 plugins/
-        - 内置非 system 插件（项目根 plugins/ 且 type != system）：
+        - 内置插件（项目根 plugins/ 且非黑名单）：
           通过 PluginManager 写 Settings 启用
         """
         src = self._disabled_dir / name
@@ -1308,11 +1319,10 @@ class PluginInstaller:
                 # 恢复 watcher（不重载），避免抑制窗口残留
                 self._resume_backend_watcher(reload=False)
                 return False
-        # 内置非 system 插件 → 配置启用
+        # 内置插件 → 配置启用
         system_dir = getattr(self, "_system_dir", None)
         if system_dir is not None and (system_dir / name).is_dir():
-            manifest = self._read_manifest_at(system_dir / name)
-            if manifest is None or manifest.get("type") != "system":
+            if name not in self._non_disableable_names():
                 return self._set_managed_enabled(name, enabled=True)
         return False
 
