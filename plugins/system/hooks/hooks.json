@@ -108,6 +108,17 @@
         "hooks": [
           {
             "type": "python",
+            "function": ".format_key_documents:hook",
+            "add_output_to_context": true,
+            "statusMessage": "关键文档:",
+            "id": "7b4f8d2c9a1e4f6b8c0d2e4a6b8d0f2a"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "python",
             "function": ".inject_command_prompt:hook",
             "add_output_to_context": true,
             "statusMessage": "命令提示词:",

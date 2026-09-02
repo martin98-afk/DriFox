@@ -53,6 +53,7 @@ from .sections import (
     AboutSection,
     ExperienceSection,
     MemorySection,
+    PinnedSection,
     ProfileSection,
     ProjectSection,
     SkillsSection,
@@ -287,6 +288,12 @@ class AssistantCardWidget(QWidget):
         self._project.toggleContext.connect(self._on_project_context_toggle)
         self._inner_v.addWidget(self._project)
 
+        self._pinned = PinnedSection()
+        self._pinned.pinAddRequested.connect(self._on_pin_add)
+        self._pinned.pinEdited.connect(self._on_pin_edit)
+        self._pinned.pinDeleteRequested.connect(self._on_pin_delete)
+        self._inner_v.addWidget(self._pinned)
+
         self._memory = MemorySection()
         self._memory.toggleMemory.connect(self._on_memory_toggle)
         self._memory.toggleDreamAuto.connect(self._on_dream_auto_toggle)
@@ -295,9 +302,6 @@ class AssistantCardWidget(QWidget):
         self._memory.dreamRestore.connect(self._on_dream_restore)
         self._memory.viewAll.connect(self._on_view_all)
         self._memory.clearAll.connect(self._on_clear_all)
-        self._memory.pinAddRequested.connect(self._on_pin_add)
-        self._memory.pinEdited.connect(self._on_pin_edit)
-        self._memory.pinDeleteRequested.connect(self._on_pin_delete)
         self._inner_v.addWidget(self._memory)
 
         self._experience = ExperienceSection()
@@ -457,7 +461,7 @@ class AssistantCardWidget(QWidget):
             self._project.set_context_enabled(a.project_context_enabled)
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_dream_auto(a.dream_auto_enabled)
-            self._memory.reload_pins(mgr.read_pinned(aid_capture))
+            self._pinned.reload_pins(mgr.read_pinned(aid_capture))
             self._memory.set_status(self._memory_status(aid_capture))
             self._memory.set_dream_hint("")
             self._experience.set_enabled(a.experience_enabled)
@@ -610,7 +614,7 @@ class AssistantCardWidget(QWidget):
 
     def _reload_pinned(self, aid: str) -> None:
         """写盘后回刷置顶列表：UI 永远以盘上数据为准（增删改即时可见）。"""
-        self._memory.reload_pins(self._mgr.read_pinned(aid))
+        self._pinned.reload_pins(self._mgr.read_pinned(aid))
 
     def _on_pin_add(self, text: str) -> None:
         aid = self._active_aid

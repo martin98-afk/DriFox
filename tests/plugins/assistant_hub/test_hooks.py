@@ -59,7 +59,7 @@ def test_block_contains_persona_memory_rules_pinned(monkeypatch):
     block = m._assistant_prompt_block("xiaohu-x1")
     assert "# 小狐" in block
     assert "记忆使用规则" in block  # 无声记忆规则
-    assert "置顶记忆" in block and "用户喜欢简洁回复" in block
+    assert "人工提示" in block and "用户喜欢简洁回复" in block
     assert "今日" in block
     # 经验不注入 prompt（渐进式披露走工具）
     assert "经验索引" not in block
@@ -74,7 +74,9 @@ def test_block_memory_disabled(monkeypatch):
     mgr.get = lambda aid: _A2()
     block = m._assistant_prompt_block("xiaohu-x1")
     assert "记忆使用规则" not in block
+    assert "人工提示" in block and "用户喜欢简洁回复" in block  # 人工提示不受记忆开关控制
     assert "小狐" in block  # persona 段仍在
+    assert "今日" not in block  # memory.md 不注入
 
 
 def test_hook_replaces_identity_context(monkeypatch):

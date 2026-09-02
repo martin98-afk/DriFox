@@ -15642,6 +15642,9 @@ class OpenAIChatToolWindow(ToolWindow):
             # session_id 直接就是 content
             session_id = content.strip()
             self._switch_to_session_by_id(session_id)
+        elif action == "workbench_history":
+            # 欢迎卡片「全部」快捷按钮：直开右侧工作台并跳转「历史会话」页签
+            self._open_workbench_history()
         else:
             # 插件注册的自定义欢迎动作（如 marketplace-recommend 的点击安装）：
             # 无人接手则静默忽略，保持旧行为

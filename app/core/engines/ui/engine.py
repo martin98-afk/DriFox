@@ -405,6 +405,7 @@ class UIEngine(BaseEngine):
             try:
                 if self._backend:
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
+                    worktree_ctx.update(self._backend.build_key_documents_context() or {})
             except Exception:
                 pass
             # ⚠️ metadata.pop 必须在主线程（避免与 worker 线程竞态）

@@ -11,6 +11,7 @@ import os
 import queue
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import orjson as json
@@ -1271,6 +1272,48 @@ class ChatBackend(QObject):
         except Exception:
             pass
 
+        return ctx
+
+    def build_key_documents_context(self) -> Dict[str, Any]:
+        """构建 PreUserMessage hook 关键文档上下文 — 预取当前项目的关键文档
+
+        数据源：MemoryManager.key_documents（SQLite）。条目记忆不再注入
+        （已由 assistant_hub 的人工提示/长期记忆体系取代），仅保留关键文档。
+        """
+        ctx: Dict[str, Any] = {}
+        if not self._memory_manager:
+            return ctx
+        try:
+            wd_path = self._tool_executor.get_workdir() if self._tool_executor else ""
+            docs = self._memory_manager.get_key_documents(self._current_project)[:50]
+            if docs:
+                doc_items = []
+                for doc in docs:
+                    file_path = doc.get("file_path", "")
+                    file_name = doc.get("file_name", "")
+                    is_url = file_path.startswith(("http://", "https://"))
+                    is_wd = file_path == wd_path
+                    if not is_url and not is_wd and file_path and wd_path:
+                        try:
+                            display = str(Path(file_path).relative_to(Path(wd_path)))
+                        except ValueError:
+                            display = file_path
+                    elif is_url:
+                        display = file_path
+                    else:
+                        display = file_path
+                    doc_items.append(
+                        {
+                            "file_name": file_name,
+                            "display": display,
+                            "is_url": is_url,
+                            "is_wd": is_wd,
+                        }
+                    )
+                if doc_items:
+                    ctx["key_documents"] = doc_items
+        except Exception:
+            pass
         return ctx
 
     def _warm_git_cache(self, project_root: str):

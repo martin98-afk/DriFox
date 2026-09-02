@@ -103,7 +103,7 @@ def _user_name(mgr) -> str:
 
 
 def _assistant_prompt_block(aid: str) -> str:
-    """组装助手信息块：人格段 → 记忆规则 → 置顶 → memory.md。"""
+    """组装助手信息块：人格段 → 人工提示 → 记忆段（规则+memory.md，受开关控制）。"""
     mgr = _get_manager()
     if mgr is None:
         return ""
@@ -118,15 +118,17 @@ def _assistant_prompt_block(aid: str) -> str:
     if persona_block.strip():
         parts.append(persona_block.strip())
 
-    # 2. 记忆段（memory_enabled 才注入）
+    # 2a. 人工提示（pinned）：人工添加，无自动记忆风险，不受 memory_enabled 控制，始终注入
+    pinned = mgr.read_pinned(aid)
+    pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or "").strip()]
+    if pin_lines:
+        parts.append("# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines))
+
+    # 2b. 记忆段（memory_enabled 才注入）：无声规则 + 编译记忆（自动整理产物，有风险）
     if a.memory_enabled:
         user = _user_name(mgr)
         rule = _MEMORY_RULES.replace("{user}", user)
         mem_parts = [rule]
-        pinned = mgr.read_pinned(aid)
-        pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or "").strip()]
-        if pin_lines:
-            mem_parts.append("# 置顶记忆\n\n" + "\n".join(pin_lines))
         memory_md = ""
         try:
             memory_md = (mgr.compiled_memory(aid) or "").strip()

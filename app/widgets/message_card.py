@@ -4227,6 +4227,25 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: 999px;
                     line-height: 1.7;
                 }}
+                /* 分区右侧「全部」快捷按钮：打开工作台历史会话页（复用 context-tag 点击链） */
+                .session-header-more {{
+                    margin-left: auto;
+                    margin-right: 0;
+                    font-size: {tiny_font_size}px;
+                    font-weight: 500;
+                    color: var(--accent-text);
+                    background: var(--accent-soft);
+                    border: 1px solid var(--accent-border-weak);
+                    padding: 0 10px;
+                    border-radius: 999px;
+                    line-height: 1.7;
+                    cursor: pointer;
+                    transition: 0.18s ease;
+                }}
+                .session-header-more:hover {{
+                    background: var(--accent-soft-strong);
+                    border-color: var(--accent);
+                }}
                 .session-list {{
                     display: grid;
                     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -13251,30 +13270,50 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
         )
 
     def _render_section(
-        title: str, icon: str, items: list, count_mode: bool = False, start_idx: int = 0, suppress_anim: bool = False
+        title: str,
+        icon: str,
+        items: list,
+        count_mode: bool = False,
+        start_idx: int = 0,
+        suppress_anim: bool = False,
+        more_btn: str = "",
     ) -> str:
         """渲染单个分类 section；items 为空则返回空串
 
         start_idx: 全局连续卡片序号起点，保证跨分区的 stagger 动画连贯
         （否则两个分区各自从 0 开始，动画同时播放显得凌乱）。
+        more_btn: 非空时在分区 header 右侧渲染快捷按钮，值为 data-type（action 名）。
         """
         if not items:
             return ""
         shown = items[: _SESSION_ROWS * _SESSION_COLS]
         rows = "".join(_render_item(s, count_mode, start_idx + i, suppress_anim) for i, s in enumerate(shown))
+        more = ""
+        if more_btn:
+            more = (
+                f'<span class="context-tag session-header-more" data-type="{escape(more_btn)}" '
+                f'data-content="" title="打开右侧工作台的历史会话页">全部 ›</span>'
+            )
         return (
             f'<div class="session-section">'
             f'<div class="session-header">'
             f'<span class="session-header-icon">{icon}</span>'
             f'<span class="session-header-title">{title}</span>'
             f'<span class="session-header-count">{len(shown)}</span>'
+            f"{more}"
             f"</div>"
             f'<div class="session-list">{rows}</div>'
             f"</div>"
         )
 
     recent_block = _render_section(
-        "最近会话", "📅", recent_sessions, count_mode=False, start_idx=0, suppress_anim=suppress_anim
+        "最近会话",
+        "📅",
+        recent_sessions,
+        count_mode=False,
+        start_idx=0,
+        suppress_anim=suppress_anim,
+        more_btn="workbench_history",
     )
     top_start = len(recent_sessions[: _SESSION_ROWS * _SESSION_COLS])
     top_block = _render_section(

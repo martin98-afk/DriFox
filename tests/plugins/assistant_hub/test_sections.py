@@ -80,16 +80,20 @@ def test_about_section_persona_switch(qtbot=None):
     assert got == ["hanako", "none"]
 
 
-def test_memory_section_pins(tmp_path=None, qtbot=None):
-    s = sections.MemorySection()
-    s.reload_pins(["第一条", "第二条"])
-    assert s.pins() == ["第一条", "第二条"]
+def test_pinned_section(tmp_path=None, qtbot=None):
+    # 人工提示独立分区（原置顶记忆，从 MemorySection 拆出）
+    s = sections.PinnedSection()
+    s.reload_pins([("pin-1", "第一条"), ("pin-2", "第二条")])
     got = []
-    s.pinsChanged.connect(got.append)
+    s.pinAddRequested.connect(got.append)
     s._pin_input.setText("第三条")
     s._emit_add_pin()
-    assert got[-1] == ["第一条", "第二条", "第三条"]
-    # 开关灰置不崩溃
+    assert got == ["第三条"]
+
+
+def test_memory_section_toggle_hides_body(tmp_path=None, qtbot=None):
+    s = sections.MemorySection()
+    # 记忆开关灰置只作用于记忆内容；人工提示已不在本分区
     s.setEnabled_all(False)
     s.setEnabled_all(True)
 

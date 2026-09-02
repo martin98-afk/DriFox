@@ -662,18 +662,82 @@ class ProjectSection(_Section):
     def set_notes(self, on: bool) -> None:
         self._notes_switch.setChecked(on)
 
-    def set_notes(self, on: bool) -> None:
-        self._notes_switch.setChecked(on)
-
     def set_context_enabled(self, on: bool) -> None:
         self._context_switch.setChecked(on)
+
+
+# ── 人工提示分区 ────────────────────────────────────────
+
+
+class PinnedSection(_Section):
+    """人工提示：人工添加，无自动记忆风险。
+
+    独立于记忆分区（MemorySection）：不受记忆开关控制，始终可见可编辑、始终注入。
+    数据源与原置顶记忆同（pinned.md）。
+    """
+
+    pinAddRequested = pyqtSignal(str)
+    pinEdited = pyqtSignal(str, str)  # (pin_id, 新内容)
+    pinDeleteRequested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__("人工提示", parent)
+        self.body().addWidget(_hint("人工添加的明确要求，始终注入，不受记忆开关影响。一条一条管理，可增删改。"))
+        self._pin_list = QVBoxLayout()
+        self._pin_list.setSpacing(3)
+        self.body().addLayout(self._pin_list)
+        add_row = QHBoxLayout()
+        self._pin_input = QLineEdit()
+        self._pin_input.setPlaceholderText("添加一条人工提示...")
+        self._pin_input.setStyleSheet(_input_style())
+        self._pin_input.returnPressed.connect(self._emit_add_pin)
+        add_row.addWidget(self._pin_input, 1)
+        add_btn = QPushButton("+")
+        add_btn.setFixedSize(30, 28)
+        add_btn.setStyleSheet(_btn_style())
+        add_btn.clicked.connect(self._emit_add_pin)
+        add_row.addWidget(add_btn)
+        self.body().addLayout(add_row)
+
+    def _emit_add_pin(self) -> None:
+        text = self._pin_input.text().strip()
+        if not text:
+            return
+        self._pin_input.clear()
+        self.pinAddRequested.emit(text)
+
+    def reload_pins(self, items: List[Tuple[str, str]]) -> None:
+        """重建列表：一条一行，行内绑定 pin_id（编辑/删除按 id 上报）。
+
+        UI 永远以盘上数据重绘（宿主写盘后回调本方法），增删改即时可见。
+        """
+        while self._pin_list.count():
+            item = self._pin_list.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        for pid, content in items:
+            row = QFrame()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            edit = QLineEdit(content)
+            edit.setStyleSheet(_input_style())
+            edit.editingFinished.connect(lambda pid=pid, e=edit: self.pinEdited.emit(pid, e.text().strip()))
+            h.addWidget(edit, 1)
+            del_btn = QPushButton("×")
+            del_btn.setFixedSize(26, 26)
+            del_btn.setToolTip("删除这条提示")
+            del_btn.setStyleSheet(_btn_style(danger=True))
+            del_btn.clicked.connect(lambda _checked=False, pid=pid: self.pinDeleteRequested.emit(pid))
+            h.addWidget(del_btn)
+            self._pin_list.addWidget(row)
 
 
 # ── 记忆分区 ────────────────────────────────────────────
 
 
 class MemorySection(_Section):
-    """记忆传送带 UI：开关 + 状态 + 置顶 + 当下 + Dream + 所有记忆。"""
+    """记忆传送带 UI：开关 + 状态 + 当下 + Dream + 所有记忆（人工提示已独立为 PinnedSection）。"""
 
     toggleMemory = pyqtSignal(bool)
     toggleDreamAuto = pyqtSignal(bool)
@@ -682,9 +746,6 @@ class MemorySection(_Section):
     dreamRestore = pyqtSignal()
     viewAll = pyqtSignal()
     clearAll = pyqtSignal()
-    pinAddRequested = pyqtSignal(str)
-    pinEdited = pyqtSignal(str, str)  # (pin_id, 新内容)
-    pinDeleteRequested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__("记忆", parent)
@@ -699,31 +760,6 @@ class MemorySection(_Section):
         self.body().addWidget(self._status)
 
         self.body().addWidget(_sep())
-
-        # 置顶记忆
-        self.body().addWidget(_title_label("置顶记忆", 11))
-        self.body().addWidget(_hint("必须让助手记住的要点，一条一条管理，可增删改。"))
-        self._pin_list = QVBoxLayout()
-        self._pin_list.setSpacing(3)
-        self.body().addLayout(self._pin_list)
-        add_row = QHBoxLayout()
-        self._pin_input = QLineEdit()
-        self._pin_input.setPlaceholderText("添加一条置顶记忆...")
-        self._pin_input.setStyleSheet(_input_style())
-        self._pin_input.returnPressed.connect(self._emit_add_pin)
-        add_row.addWidget(self._pin_input, 1)
-        add_btn = QPushButton("+")
-        add_btn.setFixedSize(30, 28)
-        add_btn.setStyleSheet(_btn_style())
-        add_btn.clicked.connect(self._emit_add_pin)
-        add_row.addWidget(add_btn)
-        self.body().addLayout(add_row)
-
-        self.body().addWidget(_sep())
-
-        self.body().addWidget(_sep())
-
-        # 当下记忆：标题行=标题+查看，说明独立一行（与其他子块节奏一致）
         today_row = QHBoxLayout()
         today_row.addWidget(_title_label("当下记忆", 11))
         today_row.addStretch()
@@ -784,39 +820,6 @@ class MemorySection(_Section):
         clear_btn.clicked.connect(self.clearAll.emit)
         all_row.addWidget(clear_btn)
         self.body().addLayout(all_row)
-
-    def _emit_add_pin(self) -> None:
-        text = self._pin_input.text().strip()
-        if not text:
-            return
-        self._pin_input.clear()
-        self.pinAddRequested.emit(text)
-
-    def reload_pins(self, items: List[Tuple[str, str]]) -> None:
-        """重建置顶列表：一条一行，行内绑定 pin_id（编辑/删除按 id 上报）。
-
-        UI 永远以盘上数据重绘（宿主写盘后回调本方法），增删改即时可见。
-        """
-        while self._pin_list.count():
-            item = self._pin_list.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-        for pid, content in items:
-            row = QFrame()
-            h = QHBoxLayout(row)
-            h.setContentsMargins(0, 0, 0, 0)
-            edit = QLineEdit(content)
-            edit.setStyleSheet(_input_style())
-            edit.editingFinished.connect(lambda pid=pid, e=edit: self.pinEdited.emit(pid, e.text().strip()))
-            h.addWidget(edit, 1)
-            del_btn = QPushButton("×")
-            del_btn.setFixedSize(26, 26)
-            del_btn.setToolTip("删除这条记忆")
-            del_btn.setStyleSheet(_btn_style(danger=True))
-            del_btn.clicked.connect(lambda _checked=False, pid=pid: self.pinDeleteRequested.emit(pid))
-            h.addWidget(del_btn)
-            self._pin_list.addWidget(row)
 
     def set_memory_enabled(self, on: bool) -> None:
         self._memory_switch.setChecked(on)
