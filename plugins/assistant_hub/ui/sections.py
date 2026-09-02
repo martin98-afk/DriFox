@@ -262,9 +262,9 @@ class _CenterFlowLayout(QLayout):
 
 
 class ProfileSection(_Section):
-    """助手名称 + 记忆整理模型（对话模型跟随系统当前配置，不单独设置；改动即节流保存）。"""
+    """助手名称 / 称呼 / 记忆整理模型（对话模型跟随系统当前配置，不单独设置；改动即节流保存）。"""
 
-    saveRequested = pyqtSignal(str, str)  # (name, utility_model_key)
+    saveRequested = pyqtSignal(str, str, str)  # (name, user_addressing, utility_model_key)
     _DEBOUNCE_MS = 600
     _MAX_VISIBLE_ITEMS = 12  # 下拉弹层最大可见条目数，超出滚动
 
@@ -282,7 +282,7 @@ class ProfileSection(_Section):
         form.setSpacing(6)
 
         row1 = QHBoxLayout()
-        lbl1 = _title_label("名称", 11)
+        lbl1 = _title_label("助手名称", 11)
         lbl1.setFixedWidth(104)  # 与下行 label 同宽 → 控件左缘对齐（须容纳"记忆整理模型"6 字）
         row1.addWidget(lbl1)
         self._name = QLineEdit()
@@ -290,6 +290,17 @@ class ProfileSection(_Section):
         self._name.textEdited.connect(self._schedule_autosave)
         row1.addWidget(self._name, 1)
         form.addLayout(row1)
+
+        row_addr = QHBoxLayout()
+        lbl_addr = _title_label("对你的称呼", 11)
+        lbl_addr.setFixedWidth(104)
+        row_addr.addWidget(lbl_addr)
+        self._addressing = QLineEdit()
+        self._addressing.setStyleSheet(_input_style())
+        self._addressing.setPlaceholderText("怎么称呼你，默认跟随系统用户名")
+        self._addressing.textEdited.connect(self._schedule_autosave)
+        row_addr.addWidget(self._addressing, 1)
+        form.addLayout(row_addr)
 
         row2 = QHBoxLayout()
         lbl2 = _title_label("记忆整理模型", 11)
@@ -348,9 +359,10 @@ class ProfileSection(_Section):
             return
         self._debounce.start()
 
-    def bind(self, name: str, utility_model: str) -> None:
+    def bind(self, name: str, addressing: str, utility_model: str) -> None:
         self._suspend_autosave = True
         self._name.setText(name)
+        self._addressing.setText(addressing)
         keys = self._model_keys
         key = utility_model or ""
         idx = keys.index(key) if key in keys else 0
@@ -404,7 +416,7 @@ class ProfileSection(_Section):
         keys = getattr(self, "_model_keys", [""])
         ui_ = self._utility_model.currentIndex()
         util_key = keys[ui_] if 0 <= ui_ < len(keys) else ""
-        self.saveRequested.emit(self._name.text().strip(), util_key)
+        self.saveRequested.emit(self._name.text().strip(), self._addressing.text().strip(), util_key)
 
 
 # ── 关于 Ta（人格切换）────────────────────
@@ -821,15 +833,19 @@ class ExperienceSection(_Section):
     def reload_categories(self, docs: List[Dict[str, Any]]) -> None:
         while self._list_area.count():
             item = self._list_area.takeAt(0)
+            # 行必须包在 widget 容器里：直接 addLayout 的行 takeAt 后
+            # 拿不到 widget，旧按钮不销毁 → 新旧行叠加文字重叠
             w = item.widget()
-            if w:
+            if w is not None:
                 w.deleteLater()
         if not docs:
             empty = _hint("（暂无经验分类）")
             self._list_area.addWidget(empty)
             return
         for doc in docs:
-            row = QHBoxLayout()
+            row_wrap = QWidget()
+            row_wrap.setStyleSheet("background: transparent;")
+            row = QHBoxLayout(row_wrap)
             row.setContentsMargins(0, 0, 0, 0)
             row.setSpacing(6)
             btn = QPushButton(f"{doc['category']}（{doc['count']} 条）")
@@ -842,7 +858,7 @@ class ExperienceSection(_Section):
             del_btn.setStyleSheet(_btn_style(danger=True))
             del_btn.clicked.connect(lambda _c=False, cat=doc["category"]: self.deleteCategoryRequested.emit(cat))
             row.addWidget(del_btn)
-            self._list_area.addLayout(row)
+            self._list_area.addWidget(row_wrap)
 
 
 # ── 技能分区 ────────────────────────────────────────────

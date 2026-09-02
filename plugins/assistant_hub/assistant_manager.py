@@ -101,6 +101,8 @@ class Assistant:
     experience_enabled: bool = False
     # 记忆整理模型（llm_saved_providers 的 config_id）：空 = 跟随全局当前模型
     utility_model: str = ""
+    # 对用户的称呼（{{userName}} 模板变量覆盖）：空 = 跟随系统用户名
+    user_addressing: str = ""
     # 创建/更新时间戳
     created_at: str = ""
     updated_at: str = ""
@@ -124,6 +126,7 @@ class Assistant:
             "public_description": self.public_description,
             "experience_enabled": self.experience_enabled,
             "utility_model": self.utility_model,
+            "user_addressing": self.user_addressing,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -152,6 +155,7 @@ class Assistant:
             public_description=str(data.get("public_description") or ""),
             experience_enabled=bool(data.get("experience_enabled", False)),
             utility_model=str(data.get("utility_model") or ""),
+            user_addressing=str(data.get("user_addressing") or ""),
             created_at=str(data.get("created_at") or ""),
             updated_at=str(data.get("updated_at") or ""),
         )
@@ -1253,7 +1257,8 @@ class AssistantManager:
             return ""
         persona_mod = self._core_persona()
         reg = persona_mod.PersonaRegistry.get_instance()
-        user = self.user_name()
+        # 对用户的称呼：助手自定义优先，空回落系统用户名
+        user = (a.user_addressing or "").strip() or self.user_name()
         agent_name = a.name or a.id
         persona = reg.get(a.yuan)
         if persona is None or not persona.prompt.strip():

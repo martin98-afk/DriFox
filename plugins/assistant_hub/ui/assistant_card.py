@@ -442,7 +442,7 @@ class AssistantCardWidget(QWidget):
 
         def _do_bind() -> None:
             mgr = self._mgr
-            self._profile.bind(a.name or a.id, a.utility_model or "")
+            self._profile.bind(a.name or a.id, a.user_addressing or mgr.user_name(), a.utility_model or "")
             self._about.set_persona(a.yuan)
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_dream_auto(a.dream_auto_enabled)
@@ -516,7 +516,7 @@ class AssistantCardWidget(QWidget):
     #  基本信息 / 关于 Ta
     # ══════════════════════════════════════════════════
 
-    def _on_profile_save(self, name: str, utility_model: str) -> None:
+    def _on_profile_save(self, name: str, addressing: str, utility_model: str) -> None:
         """基本信息实时保存（对话模型跟随系统当前配置，不再持久化覆盖）。"""
         a = self._mgr.get(self._active_aid)
         if not a:
@@ -530,6 +530,9 @@ class AssistantCardWidget(QWidget):
             changed = True
         if a.utility_model != utility_model:
             a.utility_model = utility_model
+            changed = True
+        if a.user_addressing != addressing:
+            a.user_addressing = addressing
             changed = True
         if not changed:
             return
