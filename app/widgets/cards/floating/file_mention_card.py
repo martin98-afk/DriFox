@@ -1501,7 +1501,9 @@ class FileMentionCard(QWidget):
         # 有 query 按 name/description 包含匹配
         mention_items = self._collect_mention_items()
         if query:
-            mention_items = [m for m in mention_items if query in m["name"].lower() or query in m.get("description", "").lower()]
+            mention_items = [
+                m for m in mention_items if query in m["name"].lower() or query in m.get("description", "").lower()
+            ]
 
         if not query:
             # 按目录深度排序（浅的在前），同深度目录优先，再按名不区分大小写

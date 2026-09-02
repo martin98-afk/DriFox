@@ -36,6 +36,13 @@
             "add_output_to_context": true,
             "statusMessage": "项目上下文:",
             "id": "assistant_hub_project_context"
+          },
+          {
+            "type": "python",
+            "function": ".inject_assistant:on_pre_user",
+            "add_output_to_context": false,
+            "statusMessage": "@提及检测:",
+            "id": "assistant_hub_at_mention"
           }
         ]
       }

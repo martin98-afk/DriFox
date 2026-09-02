@@ -26,10 +26,7 @@ AssistantManager 与 AgentManager 解耦：
 
 from __future__ import annotations
 
-import io
 import json
-import logging
-import os
 import re
 import shutil
 import time
@@ -351,6 +348,10 @@ class AssistantManager:
     # 当前活跃助手 id（运行时，每次切换更新）
     _active_id: str = ""
 
+    # 会话级临时助手：{session_id: assistant_id}（运行时态，重启清零；
+    # 由 @提及触发，仅影响对应会话的 system prompt，不改变全局 active_id）
+    _session_overrides: Dict[str, str] = {}
+
     def __init__(self, root_dir: Optional[str] = None):
         self._root: Path = Path(root_dir) if root_dir else self._default_root()
         self._assistants: Dict[str, Assistant] = {}
@@ -376,6 +377,7 @@ class AssistantManager:
         """测试/重载用：清空单例"""
         cls._instance = None
         cls._active_id = ""
+        cls._session_overrides = {}
 
     # ── 根目录 ──
 
@@ -667,6 +669,41 @@ class AssistantManager:
     def active_id(cls) -> str:
         return cls._active_id
 
+    # ── 会话级临时助手（@提及触发，仅影响单个 session 的 system prompt）──
+
+    @classmethod
+    def set_session_override(cls, session_id: str, aid: str) -> bool:
+        """设置某会话的临时助手（aid 为空串 = 清除 override，跟随全局）。
+
+        与 set_active 的区别：不写 active.json、不清全局缓存，仅影响
+        session_id 对应会话的 BuildSystemPrompt 注入。返回是否发生变化。
+        """
+        if not session_id:
+            return False
+        if aid:
+            mgr = cls.get_instance()
+            if not mgr.has(aid):
+                return False
+        overrides = cls.get_instance()._session_overrides
+        if overrides.get(session_id, "") == aid:
+            return False
+        if aid:
+            overrides[session_id] = aid
+        else:
+            overrides.pop(session_id, None)
+        return True
+
+    @classmethod
+    def get_session_override(cls, session_id: str) -> str:
+        """读会话级临时助手；无 override 或助手已删除返回空串（跟随全局）。"""
+        if not session_id:
+            return ""
+        aid = cls.get_instance()._session_overrides.get(session_id, "")
+        if aid and not cls.get_instance().has(aid):
+            cls.get_instance()._session_overrides.pop(session_id, None)
+            return ""
+        return aid
+
     @classmethod
     def set_active(cls, aid: str) -> bool:
         """激活助手：记录 active_id 并清空所有窗口的 system prompt 缓存。
@@ -738,6 +775,38 @@ class AssistantManager:
             from loguru import logger
 
             logger.debug(f"[assistant_hub] 清空 system prompt 缓存失败: {e}")
+
+    @staticmethod
+    def _invalidate_session_prompt(session_id: str) -> None:
+        """只清空指定 session 的 system_prompt 缓存（会话级临时助手切换用）。
+
+        下次 build_messages 强制重建该会话的 system prompt，重新触发
+        BuildSystemPrompt hooks → 按会话 override 注入新助手身份。
+        其他会话缓存不动，避免全局闪烁。
+        """
+        if not session_id:
+            return
+        try:
+            from app.core.backend import ChatBackend
+
+            for backend in list(ChatBackend._active_instances):
+                sm = getattr(backend, "session_manager", None)
+                if sm is None:
+                    continue
+                sessions = getattr(sm, "sessions", None)
+                session = sessions.get(session_id) if isinstance(sessions, dict) else None
+                if session is None:
+                    continue
+                try:
+                    session.system_prompt = ""
+                    if hasattr(session, "_system_prompt_agent"):
+                        session._system_prompt_agent = ""
+                except Exception:
+                    pass
+        except Exception as e:
+            from loguru import logger
+
+            logger.debug(f"[assistant_hub] 清空会话 {session_id} prompt 缓存失败: {e}")
 
     # ── 对外描述 (AGENTS.public.md：其他 agent 调用本助手时看到的简介) ──
 

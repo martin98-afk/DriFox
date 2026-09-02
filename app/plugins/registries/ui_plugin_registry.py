@@ -631,7 +631,9 @@ class UIPluginRegistry:
         """获取所有 @ 提及条目提供者（插入序）"""
         return list(self._mention_providers.values())
 
-    def dispatch_mention_selected(self, provider_id: str, entry: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> bool:
+    def dispatch_mention_selected(
+        self, provider_id: str, entry: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
+    ) -> bool:
         """派发 @ 提及条目选中事件到提供者插件
 
         Returns:
@@ -1874,9 +1876,7 @@ class UIPluginRegistry:
         self._welcome_tabs = {k: v for k, v in self._welcome_tabs.items() if v.plugin_name != plugin_name}
         # 清理 welcome actions
         self._welcome_actions = {k: v for k, v in self._welcome_actions.items() if v.plugin_name != plugin_name}
-        self._mention_providers = {
-            k: v for k, v in self._mention_providers.items() if v.plugin_name != plugin_name
-        }
+        self._mention_providers = {k: v for k, v in self._mention_providers.items() if v.plugin_name != plugin_name}
         # 清理 floating cards + 对应命令
         cards_to_remove = [cid for cid, info in self._floating_cards.items() if info.plugin_name == plugin_name]
         for cid in cards_to_remove:

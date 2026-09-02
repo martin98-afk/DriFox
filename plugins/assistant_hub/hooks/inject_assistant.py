@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict
@@ -147,14 +148,21 @@ def _assistant_prompt_block(aid: str) -> str:
 
 
 def hook(event: str, context: Dict[str, Any]) -> str:
-    """BuildSystemPrompt hook：激活助手时直接输出助手信息块。"""
+    """BuildSystemPrompt hook：激活助手时直接输出助手信息块。
+
+    会话级临时助手（@提及）优先于全局 active_id：同一进程多会话
+    各自看到各自的助手身份，互不影响。
+    """
     if (context or {}).get("current_role") != "primary":
         return ""
     try:
         mgr = _get_manager()
         if mgr is None:
             return ""
-        aid = mgr.active_id()
+        sid = str((context or {}).get("session_id") or "")
+        aid = mgr.get_session_override(sid) if sid else ""
+        if not aid:
+            aid = mgr.active_id()
         if not aid or not mgr.has(aid):
             return ""
         block = _assistant_prompt_block(aid)
@@ -165,6 +173,54 @@ def hook(event: str, context: Dict[str, Any]) -> str:
     except Exception as e:
         logger.warning(f"[assistant_hub.hooks] BuildSystemPrompt 处理失败: {e}")
         return ""
+
+
+# @提及助手检测：@ 后到下一个空白之间的 token（支持中文名）
+_AT_MENTION_RE = re.compile(r"(?:^|\s)@([^\s@]+)")
+
+
+def _match_assistant_by_name(mgr, token: str) -> str:
+    """按名字/id 匹配助手，返回 aid；无匹配返回空串。"""
+    if not token:
+        return ""
+    token_lower = token.lower()
+    for a in mgr.list_assistants_sorted_by_stable():
+        if a.name == token or a.id == token_lower:
+            return a.id
+    return ""
+
+
+def on_pre_user(event: str, context: Dict[str, Any]) -> str:
+    """PreUserMessage hook：检测消息中的 @助手名 → 设置会话级临时助手。
+
+    恒返回空串（不向对话注入任何内容）。命中的变化是：
+    session override 更新 + 该会话 system_prompt 缓存失效，
+    使本轮 build_messages 即用新助手身份。
+    """
+    try:
+        if (context or {}).get("current_role") != "primary":
+            return ""
+        message = str((context or {}).get("message") or "")
+        sid = str((context or {}).get("session_id") or "")
+        if not message or not sid:
+            return ""
+        # 只看第一个 @token（多个时取最先出现的）
+        m = _AT_MENTION_RE.search(message)
+        if not m:
+            return ""
+        mgr = _get_manager()
+        if mgr is None:
+            return ""
+        aid = _match_assistant_by_name(mgr, m.group(1))
+        if not aid:
+            return ""
+        if mgr.set_session_override(sid, aid):
+            mgr._invalidate_session_prompt(sid)
+            a = mgr.get(aid)
+            logger.info(f"[assistant_hub] 会话 {sid[:8]} 临时切换助手: {a.name if a else aid}")
+    except Exception as e:
+        logger.debug(f"[assistant_hub.hooks] @提及检测失败: {e}")
+    return ""
 
 
 def on_stop(event: str, context: Dict[str, Any]) -> str:
