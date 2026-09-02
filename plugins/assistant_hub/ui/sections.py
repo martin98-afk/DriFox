@@ -112,14 +112,16 @@ def _input_style() -> str:
     """
 
 
-def _btn_style(danger: bool = False) -> str:
+def _btn_style(danger: bool = False, align_left: bool = False) -> str:
     color = Colors.ERROR if danger else Colors.TEXT_PRIMARY
+    align = "text-align: left; padding-left: 12px;" if align_left else ""
     return f"""
         QPushButton {{
             color: {color};
             border: 1px solid {Colors.ERROR if danger else Colors.BORDER};
             border-radius: 6px;
             padding: 4px 16px;
+            {align}
             background: transparent;
             {get_font_family_css()} {font_size_css(11)}
         }}
@@ -128,6 +130,14 @@ def _btn_style(danger: bool = False) -> str:
         }}
         QPushButton:disabled {{ opacity: 0.4; }}
     """
+
+
+def _sep() -> QFrame:
+    """分区内子块的细分隔线：给重排后的四个记忆子块一个轻视觉边界。"""
+    line = QFrame()
+    line.setFixedHeight(1)
+    line.setStyleSheet(f"background: {Colors.BORDER}; border: none;")
+    return line
 
 
 class _Section(QFrame):
@@ -150,8 +160,8 @@ class _Section(QFrame):
         """
         )
         self._v = QVBoxLayout(self)
-        self._v.setContentsMargins(16, 12, 16, 14)
-        self._v.setSpacing(8)
+        self._v.setContentsMargins(16, 10, 16, 12)
+        self._v.setSpacing(7)
         head = QHBoxLayout()
         head.addWidget(_title_label(title))
         head.addStretch()
@@ -269,7 +279,7 @@ class ProfileSection(_Section):
         form_holder.setFixedWidth(FORM_W)
         form = QVBoxLayout(form_holder)
         form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(8)
+        form.setSpacing(6)
 
         row1 = QHBoxLayout()
         lbl1 = _title_label("名称", 11)
@@ -299,10 +309,9 @@ class ProfileSection(_Section):
         self.body().addLayout(wrap)
         self.body().addWidget(
             _hint(
-                "对话模型跟随系统当前配置，无需在此设置；记忆整理模型用于记忆编译 / Dream / 经验反思，跟随全局 = 使用当前对话模型。"
+                "对话模型跟随系统配置；记忆整理模型用于记忆编译 / Dream / 经验反思，跟随全局即用当前对话模型。改动自动保存。"
             )
         )
-        self.body().addWidget(_hint("修改后自动保存。", 9))
 
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -412,13 +421,13 @@ class _PersonaChip(QFrame):
         self.persona_id = persona["id"]
         self._selected = False
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(140, 170)  # 预留全局字体缩放后两行 desc + tag 的空间
+        self.setFixedSize(140, 156)  # 预留全局字体缩放后两行 desc + tag 的空间
         v = QVBoxLayout(self)
-        v.setContentsMargins(10, 14, 10, 12)
-        v.setSpacing(6)
+        v.setContentsMargins(10, 12, 10, 10)
+        v.setSpacing(4)
         v.setAlignment(Qt.AlignHCenter)
         self._avatar = RoundAvatar(
-            size=44,
+            size=40,
             text=persona.get("name") or persona["id"],
             color="#7C3AED",
             image_path=persona.get("avatar_path") or None,
@@ -491,16 +500,16 @@ class _NewPersonaChip(QFrame):
         super().__init__(parent)
         self.setObjectName("personaChip")
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedSize(140, 170)
+        self.setFixedSize(140, 156)
         v = QVBoxLayout(self)
-        v.setContentsMargins(10, 14, 10, 12)
-        v.setSpacing(6)
+        v.setContentsMargins(10, 12, 10, 10)
+        v.setSpacing(4)
         v.setAlignment(Qt.AlignHCenter)
         plus = QLabel("+")
         plus.setAlignment(Qt.AlignCenter)
         plus.setStyleSheet(
             f"color: {Colors.TEXT_ACCENT}; background: transparent; border: none;"
-            f"{get_font_family_css()} {font_size_css(30)};"
+            f"{get_font_family_css()} {font_size_css(26)};"
         )
         v.addWidget(plus, 0, Qt.AlignHCenter)
         lbl = QLabel("新建人格")
@@ -544,7 +553,7 @@ class AboutSection(_Section):
 
     def __init__(self, personas: List[dict], current_pid: str, parent=None):
         super().__init__("关于 Ta", parent)
-        self.body().addWidget(_hint("点卡片切换人格（内置预设，只读）；新增人格在对话里说「创建新人格」。", 10))
+        self.body().addWidget(_hint("点卡片切换人格（内置只读）；新增在对话里说「创建新人格」。", 10))
 
         chips_host = QWidget()
         chips_host.setStyleSheet("background: transparent;")
@@ -613,9 +622,11 @@ class MemorySection(_Section):
         self._status = _hint("记忆状态：暂未编译", 10)
         self.body().addWidget(self._status)
 
+        self.body().addWidget(_sep())
+
         # 置顶记忆
         self.body().addWidget(_title_label("置顶记忆", 11))
-        self.body().addWidget(_hint("你主动告诉助手一定要记住的东西，一条一条管理，可增删改。"))
+        self.body().addWidget(_hint("必须让助手记住的要点，一条一条管理，可增删改。"))
         self._pin_list = QVBoxLayout()
         self._pin_list.setSpacing(3)
         self.body().addLayout(self._pin_list)
@@ -632,20 +643,33 @@ class MemorySection(_Section):
         add_row.addWidget(add_btn)
         self.body().addLayout(add_row)
 
-        # 当下记忆
-        self.body().addWidget(_title_label("当下记忆", 11))
-        self.body().addWidget(_hint("助手记住的关于你的、重要的与近期的事。"))
-        view_today = QPushButton("查看当下记忆")
+        self.body().addWidget(_sep())
+
+        self.body().addWidget(_sep())
+
+        # 当下记忆：标题行=标题+查看，说明独立一行（与其他子块节奏一致）
+        today_row = QHBoxLayout()
+        today_row.addWidget(_title_label("当下记忆", 11))
+        today_row.addStretch()
+        view_today = QPushButton("查看")
         view_today.setStyleSheet(_btn_style())
         view_today.clicked.connect(self.viewToday.emit)
-        self.body().addWidget(view_today)
+        today_row.addWidget(view_today)
+        self.body().addLayout(today_row)
+        self.body().addWidget(_hint("关于你的重要事项与近期动态。"))
 
-        # Dream
-        self.body().addWidget(_title_label("Dream 整理", 11))
-        self.body().addWidget(_hint("把重要事实与长期情况整理成一行一条，去重合并并清理过时内容。"))
+        self.body().addWidget(_sep())
+
+        # Dream：标题行右侧挂「每日自动」开关；运行状态并入按钮行右侧（空则隐藏）
         dream_row = QHBoxLayout()
-        dream_row.addWidget(_title_label("每日自动 Dream", 11))
+        dream_row.addWidget(_title_label("Dream 整理", 11))
         dream_row.addStretch()
+        auto_lbl = QLabel("每日自动")
+        auto_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        dream_row.addWidget(auto_lbl)
         self._dream_switch = SwitchButton()
         self._dream_switch.setOnText("开")
         self._dream_switch.setOffText("关")
@@ -653,24 +677,29 @@ class MemorySection(_Section):
         self._dream_switch.checkedChanged.connect(self.toggleDreamAuto.emit)
         dream_row.addWidget(self._dream_switch)
         self.body().addLayout(dream_row)
-        self.body().addWidget(_hint("仅对当前助手生效；默认关闭，每个逻辑日最多运行一次。"))
-        btn_row = QHBoxLayout()
-        self._dream_btn = QPushButton("整理当下记忆")
+        # 说明与操作同行：说明吃满剩余宽度，状态提示出现在按钮左侧（空则隐藏）
+        hint_row = QHBoxLayout()
+        hint_row.addWidget(_hint("去重合并重要事实与长期情况，清理过时内容。"), 1)
+        self._dream_hint = _hint("", 10)
+        self._dream_hint.setVisible(False)
+        hint_row.addWidget(self._dream_hint)
+        self._dream_btn = QPushButton("立即整理")
         self._dream_btn.setStyleSheet(_btn_style())
         self._dream_btn.clicked.connect(self.dreamRun.emit)
-        btn_row.addWidget(self._dream_btn)
+        hint_row.addWidget(self._dream_btn)
         restore_btn = QPushButton("恢复版本")
         restore_btn.setStyleSheet(_btn_style())
         restore_btn.clicked.connect(self.dreamRestore.emit)
-        btn_row.addWidget(restore_btn)
-        self.body().addLayout(btn_row)
-        self._dream_hint = _hint("", 10)
-        self.body().addWidget(self._dream_hint)
+        hint_row.addWidget(restore_btn)
+        self.body().addLayout(hint_row)
 
-        # 所有记忆
-        self.body().addWidget(_title_label("所有记忆", 11))
+        self.body().addWidget(_sep())
+
+        # 所有记忆：标题与入口同行
         all_row = QHBoxLayout()
-        view_all = QPushButton("查看记忆")
+        all_row.addWidget(_title_label("所有记忆", 11))
+        all_row.addStretch()
+        view_all = QPushButton("查看")
         view_all.setStyleSheet(_btn_style())
         view_all.clicked.connect(self.viewAll.emit)
         all_row.addWidget(view_all)
@@ -738,20 +767,22 @@ class MemorySection(_Section):
 
     def set_dream_hint(self, text: str) -> None:
         self._dream_hint.setText(text)
+        self._dream_hint.setVisible(bool(text))
 
     def set_dream_running(self, running: bool) -> None:
         self._dream_btn.setEnabled(not running)
-        self._dream_btn.setText("整理中…" if running else "整理当下记忆")
+        self._dream_btn.setText("整理中…" if running else "立即整理")
 
 
 # ── 经验分区 ────────────────────────────────────────────
 
 
 class ExperienceSection(_Section):
-    """经验：开关 + 分类列表 + 反思按钮。"""
+    """经验：开关 + 分类列表（查看/删除）+ 反思按钮。"""
 
     toggleExperience = pyqtSignal(bool)
     viewCategory = pyqtSignal(str)
+    deleteCategoryRequested = pyqtSignal(str)
     reflectRequested = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -766,17 +797,16 @@ class ExperienceSection(_Section):
         self._wrap_v = QVBoxLayout(self._body_wrap)
         self._wrap_v.setContentsMargins(0, 0, 0, 0)
         self._wrap_v.setSpacing(6)
+        top_row = QHBoxLayout()
         self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验；每日 Dream 后会自动反思整理。")
-        self._wrap_v.addWidget(self._hint)
-        self._list_area = QVBoxLayout()
-        self._wrap_v.addLayout(self._list_area)
-        reflect_row = QHBoxLayout()
+        top_row.addWidget(self._hint, 1)
         reflect_btn = QPushButton("反思整理")
         reflect_btn.setStyleSheet(_btn_style())
         reflect_btn.clicked.connect(self.reflectRequested.emit)
-        reflect_row.addWidget(reflect_btn)
-        reflect_row.addStretch()
-        self._wrap_v.addLayout(reflect_row)
+        top_row.addWidget(reflect_btn)
+        self._wrap_v.addLayout(top_row)
+        self._list_area = QVBoxLayout()
+        self._wrap_v.addLayout(self._list_area)
         self.body().addWidget(self._body_wrap)
 
     def set_enabled(self, on: bool) -> None:
@@ -799,10 +829,20 @@ class ExperienceSection(_Section):
             self._list_area.addWidget(empty)
             return
         for doc in docs:
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
             btn = QPushButton(f"{doc['category']}（{doc['count']} 条）")
-            btn.setStyleSheet(_btn_style())
+            btn.setStyleSheet(_btn_style(align_left=True))
             btn.clicked.connect(lambda _c=False, cat=doc["category"]: self.viewCategory.emit(cat))
-            self._list_area.addWidget(btn)
+            row.addWidget(btn, 1)
+            del_btn = QPushButton("×")
+            del_btn.setFixedSize(30, 28)
+            del_btn.setToolTip("删除该分类及其全部经验条目")
+            del_btn.setStyleSheet(_btn_style(danger=True))
+            del_btn.clicked.connect(lambda _c=False, cat=doc["category"]: self.deleteCategoryRequested.emit(cat))
+            row.addWidget(del_btn)
+            self._list_area.addLayout(row)
 
 
 # ── 技能分区 ────────────────────────────────────────────
@@ -815,7 +855,7 @@ class SkillsSection(_Section):
 
     def __init__(self, parent=None):
         super().__init__("专属技能", parent)
-        self.body().addWidget(_hint("技能是助手的专属知识文件（skills/*.md），可在对话中引用。"))
+        self.body().addWidget(_hint("助手的专属知识文件（skills/*.md），对话中可引用。"))
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
@@ -837,6 +877,6 @@ class SkillsSection(_Section):
             return
         for sk in skills:
             btn = QPushButton(f"{sk['name']} · {sk.get('description', '')[:30]}（{sk.get('content_chars', 0)} 字）")
-            btn.setStyleSheet(_btn_style())
+            btn.setStyleSheet(_btn_style(align_left=True))
             btn.clicked.connect(lambda _c=False, n=sk["name"]: on_open(n))
             self._list_v.addWidget(btn)

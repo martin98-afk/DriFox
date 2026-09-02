@@ -223,15 +223,15 @@ class AssistantCardWidget(QWidget):
         content = QWidget()
         content.setStyleSheet("background: transparent;")
         self._content_v = QVBoxLayout(content)
-        self._content_v.setContentsMargins(24, 8, 24, 24)
-        self._content_v.setSpacing(14)
+        self._content_v.setContentsMargins(24, 8, 24, 20)
+        self._content_v.setSpacing(12)
 
         inner = QWidget()
         # 内容最大宽度：主窗口够宽时展开到上限，不够宽则自适应（无横向滚动）
         inner.setMaximumWidth(1000)
         self._inner_v = QVBoxLayout(inner)
         self._inner_v.setContentsMargins(0, 0, 0, 0)
-        self._inner_v.setSpacing(14)
+        self._inner_v.setSpacing(12)
 
         # 2. 名称行：头像/名字（左）· 设为主助手/删除（右）；改名走基本信息输入框
         name_row = QHBoxLayout()
@@ -295,6 +295,7 @@ class AssistantCardWidget(QWidget):
         self._experience = ExperienceSection()
         self._experience.toggleExperience.connect(self._on_experience_toggle)
         self._experience.viewCategory.connect(self._on_view_experience)
+        self._experience.deleteCategoryRequested.connect(self._on_experience_delete)
         self._experience.reflectRequested.connect(self._on_reflect)
         self._inner_v.addWidget(self._experience)
 
@@ -447,7 +448,7 @@ class AssistantCardWidget(QWidget):
             self._memory.set_dream_auto(a.dream_auto_enabled)
             self._memory.reload_pins(mgr.read_pinned(aid_capture))
             self._memory.set_status(self._memory_status(aid_capture))
-            self._memory.set_dream_hint("每日自动 Dream 已开启" if a.dream_auto_enabled else "每日自动 Dream 未开启")
+            self._memory.set_dream_hint("")
             self._experience.set_enabled(a.experience_enabled)
             self._experience.reload_categories(mgr.experience_list(aid_capture))
             self._skills.reload_skills(mgr.list_skills(aid_capture), self._on_view_skill)
@@ -575,7 +576,7 @@ class AssistantCardWidget(QWidget):
             return
         a.dream_auto_enabled = bool(on)
         self._mgr.update(a)
-        self._memory.set_dream_hint("每日自动 Dream 已开启" if on else "每日自动 Dream 未开启")
+        # 开关状态本身可见，不重复展示文案
 
     def _reload_pinned(self, aid: str) -> None:
         """写盘后回刷置顶列表：UI 永远以盘上数据为准（增删改即时可见）。"""
@@ -644,9 +645,8 @@ class AssistantCardWidget(QWidget):
     def _dream_done(self, result: dict) -> None:
         self._dream_running = False
         self._memory.set_dream_running(False)
-        a = self._mgr.get(self._active_aid)
-        if a is not None:
-            self._memory.set_dream_hint("每日自动 Dream 已开启" if a.dream_auto_enabled else "每日自动 Dream 未开启")
+        # 开关状态本身可见，不再重复展示「已开启/未开启」文案（空 = 隐藏状态行）
+        self._memory.set_dream_hint("")
         if result.get("ok"):
             self._memory.set_status(self._memory_status(self._active_aid))
             self._notify("Dream 整理完成" + ("（内容无变化）" if not result.get("changed") else ""))
@@ -746,6 +746,33 @@ class AssistantCardWidget(QWidget):
             )
         )
         self._experience.reload_categories(self._mgr.experience_list(aid))
+
+    def _on_experience_delete(self, category: str) -> None:
+        """删除整个经验分类（文件 + 重建索引）。"""
+        if not self._active_aid:
+            return
+        aid = self._active_aid
+        ret = _confirm_dialog(
+            _host_window() or self.window(),
+            "删除经验分类",
+            f"确定删除经验分类「{category}」及其全部条目？\n该操作不可撤销。",
+        )
+        if not ret:
+            return
+        p = self._mgr.experience_dir(aid) / f"{category}.md"
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError as e:
+            self._notify_error(f"删除失败：{e}")
+            return
+        try:
+            self._mgr._core_experience().rebuild_index(self._mgr.assistant_dir(aid))
+        except Exception:
+            pass
+        self._mgr.invalidate_context(aid)
+        self._experience.reload_categories(self._mgr.experience_list(aid))
+        self._notify(f"经验分类「{category}」已删除")
 
     def _on_reflect(self) -> None:
         if not self._active_aid or self._dream_running:

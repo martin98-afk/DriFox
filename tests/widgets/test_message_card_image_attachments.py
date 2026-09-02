@@ -18,6 +18,7 @@
   offscreen 环境下 QPixmap 像素操作触发 native crash（环境固有问题）
 """
 
+import ast
 import os
 import sys
 
@@ -62,6 +63,21 @@ def test_normalize_message_keeps_image_attachments():
 def test_normalize_message_drops_invalid_attachments():
     msg = normalize_message({"role": "user", "content": "x", "_image_attachments": "not-a-list"})
     assert "_image_attachments" not in msg
+
+
+def test_write_to_render_roundtrip():
+    """端到端：add_user_message 打标 → group_messages_for_display → 渲染层可取到标记。
+
+    钉死"历史加载"路径的取值点 _render_message_to_card 中
+    batch[0].get("_image_attachments")。
+    """
+    from app.core.message_content import group_messages_for_display
+
+    s = ChatSession(name="t")
+    s.add_user_message("看图", _image_attachments=["D:/a.png"])
+    batches = group_messages_for_display(s.messages)
+    user_batch = next(b for b in batches if b[0].get("role") == "user")
+    assert user_batch[0].get("_image_attachments") == ["D:/a.png"]
 
 
 # ==================== 决策层：渲染来源规划 ====================
@@ -116,6 +132,48 @@ def test_plan_invalid_input():
     assert plan_image_attachment_sources(None) == []
     assert plan_image_attachment_sources([]) == []
     assert plan_image_attachment_sources([None, "", 123]) == []
+
+
+# ==================== 发送链路：engine_kwargs 透传 ====================
+
+
+def _find_nested_func(class_node: ast.ClassDef, name: str) -> ast.FunctionDef | None:
+    """在类方法体内查找嵌套函数定义（如 _do_deferred_send）"""
+    for node in ast.walk(class_node):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    return None
+
+
+def test_deferred_send_passes_image_attachments_to_engine():
+    """回归（2026-09-02）：发送时漏传 _image_attachments → session 消息无标记，
+    历史加载的会话用户气泡图片预览条永不显示。
+
+    _do_deferred_send 必须把 _image_attachments 放进 engine_kwargs，
+    engine 侧（_PreSendWorker）才能写入 session.add_user_message。
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    src = (repo_root / "app" / "main_widget.py").read_text(encoding="utf-8")
+    tree = ast.parse(src, filename="main_widget.py")
+    class_node = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "OpenAIChatToolWindow")
+    deferred = _find_nested_func(class_node, "_do_deferred_send")
+    assert deferred is not None, "未找到 _do_deferred_send 嵌套函数"
+
+    found = False
+    for node in ast.walk(deferred):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Subscript)
+            and isinstance(node.targets[0].value, ast.Name)
+            and node.targets[0].value.id == "engine_kwargs"
+            and isinstance(node.targets[0].slice, ast.Constant)
+            and node.targets[0].slice.value == "_image_attachments"
+        ):
+            found = True
+            break
+    assert found, "_do_deferred_send 未把 _image_attachments 透传进 engine_kwargs"
 
 
 # ==================== image 块格式提取 ====================

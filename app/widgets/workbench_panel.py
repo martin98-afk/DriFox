@@ -97,16 +97,16 @@ class TasksPage(QWidget):
 
     视觉取舍：条目用**行式（无边框）**而非卡片堆叠——任务清单通常条目多，
     每条目加边框会形成密集的"框中框"，视觉噪声重。改为默认透明、hover 淡背景，
-    靠左侧状态符号的颜色区分状态；右侧标签只在 in_progress / high 优先级时出现，
-    进一步降噪。
+    靠左侧状态符号的颜色区分状态：pending 实心圆点按优先级着色（高=红、中=黄、低=绿），
+    右侧不放文字标签，进一步降噪。
     """
 
-    _PRI_COLORS = {"high": "#ef4444", "medium": "#f59e0b", "low": "#3b82f6"}
-    # 状态 → (符号, 颜色, 右侧文字)
+    _PRI_COLORS = {"high": "#ef4444", "medium": "#f59e0b", "low": "#3fb950"}
+    # 状态 → (符号, 颜色, 右侧文字)；pending 颜色仅兑底，实际按优先级用 _PRI_COLORS 着色
     _STATUS_META = {
         "completed": ("✓", "#3fb950", ""),
-        "in_progress": ("◐", "#f59e0b", "进行中"),
-        "pending": ("○", "#6b7280", ""),
+        "in_progress": ("◐", "#f59e0b", ""),
+        "pending": ("●", "#6b7280", ""),
     }
 
     def __init__(self, parent=None):
@@ -264,10 +264,10 @@ class TasksPage(QWidget):
             pass
 
     def _make_item(self, status: str, content: str, priority: str) -> QFrame:
-        """单条任务：左状态符号 + 中内容（自动换行）+ 右标签（按需）
+        """单条任务：左状态符号 + 中内容（自动换行），右侧不放任何标签
 
-        右侧标签只在两种噪声最值得暴露的情况出现：in_progress（"进行中"）、
-        pending 且 high 优先级（"高"）。medium/low 与 completed 一律不显示。
+        视觉降噪：pending 用实心圆点按优先级着色（高=红、中=黄、低=绿），
+        in_progress 用旋转图标，completed 用绿勾；不出现右侧文字标签。
         """
         frame = QFrame(self._list_wrap)
         frame.setObjectName("taskItem")
@@ -275,7 +275,7 @@ class TasksPage(QWidget):
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(8)
 
-        mark, _color, status_text = self._STATUS_META.get(status, self._STATUS_META["pending"])
+        mark, _color, _status_text = self._STATUS_META.get(status, self._STATUS_META["pending"])
         if status == "in_progress":
             # 进行中：子智能体运行中同款旋转 SVG 图标（QPainter 原地旋转，无抖动）
             mark_widget: QWidget = _RotatingIcon(":/icons/执行中.svg", size=16, parent=frame)
@@ -306,19 +306,8 @@ class TasksPage(QWidget):
         content_label.setWordWrap(True)
         layout.addWidget(content_label, 1)
 
-        tag_text, tag_kind = "", ""
-        if status == "in_progress":
-            tag_text, tag_kind = status_text, "status"
-        elif status == "pending" and priority == "high":
-            tag_text, tag_kind = "高", "prio_high"
-        if tag_text:
-            tag = QLabel(tag_text, frame)
-            tag.setObjectName("taskTag")
-            tag.setProperty("tagKind", tag_kind)
-            tag.setAlignment(Qt.AlignCenter)
-            layout.addWidget(tag)
-
         frame.setProperty("status", status)
+        frame.setProperty("priority", priority)
         self._apply_item_style(frame)
         return frame
 
@@ -326,6 +315,9 @@ class TasksPage(QWidget):
         """应用条目样式（行式：默认透明，hover 淡背景；靠状态符号着色）"""
         status = frame.property("status") or "pending"
         _mark, color, _text = self._STATUS_META.get(status, self._STATUS_META["pending"])
+        if status == "pending":
+            # 实心圆点按优先级着色：高=红、中=黄、低=绿
+            color = self._PRI_COLORS.get(frame.property("priority") or "medium", self._PRI_COLORS["medium"])
 
         frame.setStyleSheet(
             "QFrame#taskItem { background: transparent; border: none;"
@@ -350,19 +342,6 @@ class TasksPage(QWidget):
                 f"color: {c}; background: transparent; {line}"
                 f" font-weight: {weight};"
                 f" {get_font_family_css()} {font_size_css(12)};"
-            )
-
-        tag = frame.findChild(QLabel, "taskTag")
-        if tag is not None:
-            if tag.property("tagKind") == "prio_high":
-                tc, bg = self._PRI_COLORS["high"], "rgba(239, 68, 68, 0.16)"
-            else:
-                tc, bg = self._STATUS_META["in_progress"][1], "rgba(245, 158, 11, 0.16)"
-            tag.setStyleSheet(
-                f"color: {tc}; background: {bg}; border: none;"
-                f" border-radius: {BorderRadius.XS}; padding: 1px 6px;"
-                f" {get_font_family_css()} {font_size_css(10)};"
-                " font-weight: 600;"
             )
 
     def refresh_style(self) -> None:

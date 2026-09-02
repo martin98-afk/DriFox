@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtGui import QColor, QIcon
 from PyQt5.QtWidgets import (
     QHBoxLayout,
@@ -147,7 +147,10 @@ class TextViewOverlay(OverlayBase):
 
 
 class DreamRevisionOverlay(OverlayBase):
-    """Dream 版本浏览器：列表 + 预览 + 恢复。"""
+    """Dream 版本浏览器：版本列表（两行条目）+ 快照预览 + 恢复。"""
+
+    _TRIGGER_LABEL = {"manual": "手动整理", "auto": "自动整理", "restore": "版本恢复"}
+    _KIND_LABEL = {"dream": "Dream 整理", "pre_restore": "恢复前快照"}
 
     def __init__(
         self,
@@ -156,37 +159,47 @@ class DreamRevisionOverlay(OverlayBase):
         restore_fn: Callable[[str], Dict[str, Any]],
         parent=None,
     ):
-        super().__init__("Dream 版本历史", parent, width=640, height=520)
+        super().__init__("Dream 版本历史", parent, width=900, height=620)
         self._preview_fn = preview_fn
         self._restore_fn = restore_fn
         self._revisions = revisions
+
+        # 标题行右侧：版本计数
+        head = QHBoxLayout()
+        head.addStretch()
+        count_lbl = _label(f"共 {len(revisions)} 个版本", 11, muted=True)
+        head.addWidget(count_lbl)
+        self._v.addLayout(head)
+
+        # 左右双栏：左=版本列表（两行条目），右=快照预览
+        columns = QHBoxLayout()
+        columns.setSpacing(10)
+
         self._list = QListWidget()
         self._list.setStyleSheet(self._list_style())
+        self._list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self._list.setFixedWidth(250)
         for rev in revisions:
-            item = QListWidgetItem(
-                f"[{rev.get('createdAt', '')}] {rev.get('kind', 'dream')} · "
-                f"{rev.get('trigger', '')} · 长期 {rev.get('longtermChars', 0)} 字"
-            )
+            item = QListWidgetItem()
             item.setData(Qt.UserRole, rev.get("revisionId", ""))
             self._list.addItem(item)
-        self._v.addWidget(self._list, 2)
+            self._list.setItemWidget(item, self._make_row(rev))
+            item.setSizeHint(QSize(0, 46))
+        columns.addWidget(self._list)
+
         self._preview = QPlainTextEdit()
         self._preview.setReadOnly(True)
+        self._preview.setPlaceholderText("选择左侧版本，查看它保存的记忆快照")
         self._preview.setStyleSheet(self._edit_style())
-        self._v.addWidget(self._preview, 1)
+        columns.addWidget(self._preview, 1)
+
+        self._v.addLayout(columns, 1)
+
+        # 底部按钮：主操作 accent 填充，与全局弹窗按钮一致
         row = QHBoxLayout()
-        self._restore_btn = QPushButton("恢复此版本")
-        self._restore_btn.setCursor(Qt.PointingHandCursor)
-        self._restore_btn.setStyleSheet(
-            f"QPushButton {{"
-            f"    background: transparent; color: {Colors.TEXT_ACCENT};"
-            f"    border: 1px solid {Colors.TEXT_ACCENT}; border-radius: 8px; padding: 4px 18px;"
-            f"    {get_font_family_css()} {font_size_css(12)};"
-            f"}}"
-            f"QPushButton:hover {{ background: rgba(245, 158, 11, 0.12); }}"
-        )
-        self._restore_btn.clicked.connect(self._do_restore)
+        self._restore_btn = _dialog_btn("恢复此版本", primary=True)
         self._restore_btn.setEnabled(False)
+        self._restore_btn.clicked.connect(self._do_restore)
         row.addWidget(self._restore_btn)
         row.addStretch()
         close = _dialog_btn("关闭")
@@ -194,11 +207,38 @@ class DreamRevisionOverlay(OverlayBase):
         row.addWidget(close)
         self._v.addLayout(row)
         self._list.currentItemChanged.connect(self._on_select)
+        if revisions:
+            self._list.setCurrentRow(0)
+
+    def _make_row(self, rev: Dict[str, Any]) -> QWidget:
+        """版本条目：主行 时间·触发方式，副行 事实/长期/当下规模。"""
+        w = QWidget()
+        w.setStyleSheet("background: transparent;")
+        v = QVBoxLayout(w)
+        v.setContentsMargins(8, 5, 8, 5)
+        v.setSpacing(1)
+
+        created = str(rev.get("createdAt", "")).split(".")[0].replace("T", " ")
+        kind = str(rev.get("kind", "dream"))
+        trigger = str(rev.get("trigger", ""))
+        trigger_label = self._KIND_LABEL.get(kind) or self._TRIGGER_LABEL.get(trigger) or trigger or "未知"
+        main = _label(f"{created} · {trigger_label}", 12)
+        sub_text = f"事实 {rev.get('factsChars', 0)} 字 · 长期 {rev.get('longtermChars', 0)} 字 · 当下 {rev.get('dailyCount', 0)} 天"
+        sub = _label(sub_text, 10, muted=True)
+        sub.setWordWrap(False)
+        v.addWidget(main)
+        v.addWidget(sub)
+        return w
 
     def _list_style(self) -> str:
         return f"""
-            QListWidget {{ background: transparent; border: none; {get_font_family_css()} {font_size_css(12)} }}
-            QListWidget::item {{ padding: 4px 6px; border-radius: 6px; color: {Colors.TEXT_PRIMARY}; }}
+            QListWidget {{
+                background: {Colors.CARD_BG.format(alpha=80)};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+                {get_font_family_css()} {font_size_css(12)};
+            }}
+            QListWidget::item {{ border-radius: 6px; margin: 1px 3px; }}
             QListWidget::item:hover {{ background: {Colors.HOVER_BG}; }}
             QListWidget::item:selected {{ background: {Colors.SELECTED_BG}; }}
         """

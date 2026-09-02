@@ -16388,6 +16388,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # （None 时不写入，保持历史行为不变）
             if hook_event:
                 engine_kwargs["_hook_event"] = hook_event
+            # 图片附件路径透传给引擎：session 消息打 _image_attachments 标记，
+            # 恢复会话时渲染缩略图预览条（此前漏传导致历史加载不显示图片预览）
+            if _image_paths:
+                engine_kwargs["_image_attachments"] = list(_image_paths)
             # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
             # add_user_message 修改 session.messages。即使后续被 / 命令拦截
             # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
