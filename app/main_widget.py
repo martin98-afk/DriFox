@@ -1745,36 +1745,6 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._top_card_container.add_card("history_questions", self._history_questions_card)
 
-    def _ensure_memory_card(self):
-        """确保记忆管理卡片框架已创建（内容由 _build_deferred_card_memory 填充）"""
-        if self._memory_card is not None:
-            return
-        self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
-        self._memory_card.setMinimumHeight(300)  # 自适应窗口高度
-        # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
-        self._memory_card.setup_tabs(
-            [
-                ("entries", "条目记忆"),
-                ("notes", "项目笔记"),
-                ("docs", "关键文档"),
-            ],
-            "entries",
-        )
-        self._memory_card.tabChanged.connect(self._on_memory_tab_changed)
-        # 强制触发首次 tab 渲染
-        self._memory_card.set_current_tab("entries")
-        self._memory_card.setVisible(False)
-        self._memory_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("memory", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._card_manager.register_card(
-            self._window_id, ContainerType.BOTTOM, "memory", self._memory_card, system_card=True
-        )
-        self._bottom_card_container.add_card("memory", self._memory_card)
-
     def _ensure_model_config_card(self):
         """确保模型配置卡片框架已创建（内容由 _build_deferred_card_model_config 填充）"""
         if self._model_config_card is not None:
@@ -1884,7 +1854,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._build_deferred_card_history,
             self._build_deferred_card_share,
             self._build_deferred_card_history_questions,
-            self._build_deferred_card_memory,
             self._build_deferred_card_model_config,
             self._build_deferred_card_model_selector,
         ]
@@ -1956,26 +1925,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
         except Exception:
             logger.exception("[DeferredBuild] HistoryQuestionsCard 构建失败")
-        finally:
-            self._schedule_next_deferred_card()
-
-    def _build_deferred_card_memory(self):
-        """── ④ 记忆管理卡片 ──"""
-        try:
-            from app.widgets.cards.settings.memory_card import MemoryCardContent
-
-            self._ensure_memory_card()  # P0-1：框架惰性创建
-            self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
-            self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
-            self._memory_card_popup.workingDirChanged.connect(self._on_working_dir_changed)
-            self._memory_card_popup.set_project(self._current_project)
-            self._memory_card.content_layout.addWidget(self._memory_card_popup)
-            self._memory_card.set_search_handler(
-                "🔍 搜索条目记忆...",
-                lambda text: self._memory_card_popup.set_search_filter(text),
-            )
-        except Exception:
-            logger.exception("[DeferredBuild] MemoryCard 构建失败")
         finally:
             self._schedule_next_deferred_card()
 
@@ -2650,9 +2599,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新历史会话卡片
         if self._history_card:
             self._history_card.set_opacity(opacity)
-        # 更新记忆管理卡片
-        if self._memory_card:
-            self._memory_card.set_opacity(opacity)
         # 更新设置卡片
         if self._settings_popup:
             self._settings_popup.set_opacity(opacity)
@@ -3308,7 +3254,7 @@ class OpenAIChatToolWindow(ToolWindow):
         _SYSTEM_CARD_COMMANDS = {
             "settings": ("打开设置面板", self._toggle_settings_card),
             "history": ("打开对话历史", self._open_workbench_history),
-            "memory": ("打开记忆管理", self._open_workbench_memory),
+            "memory": ("打开工作树管理", self._open_workbench_memory),
             "model_selector": ("选择模型", self._toggle_model_selector_card),
             "tool_control": ("打开工具控制面板", self._toggle_tool_control_card),
             "project_selector": ("选择项目", self._toggle_project_selector_card),
@@ -3339,15 +3285,14 @@ class OpenAIChatToolWindow(ToolWindow):
             tm.open_workbench_history()
 
     def _open_workbench_memory(self):
-        """快捷键/命令入口：打开右侧工作台并跳转「记忆」页签（直开语义）
+        """快捷键/命令入口：打开右侧工作台并跳转「工作树」页签（直开语义）
 
-        记忆管理已迁移到工作台；直接复用
-        TabManagerWindow.open_workbench_memory("entries")（展开工作台 +
-        切记忆页 + 默认落在条目记忆子页）。
+        记忆管理已下线：置顶记忆在助手中心管理，右侧工作台只保留
+        工作树页签（关键文档 + 工作树）。/memory 命令直达该页。
         """
         tm = TabManagerWindow.get_instance()
         if tm is not None:
-            tm.open_workbench_memory("entries")
+            tm.open_workbench_memory("docs")
 
     def _clear_command_shortcuts(self):
         """清空本实例对命令快捷键的引用
@@ -3899,7 +3844,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if FunctionCommandHandlers.has(name):
             return True
         # 硬编码内置命令
-        if name in ("new", "new-window", "branch", "remember"):
+        if name in ("new", "new-window", "branch"):
             return True
         return False
 
@@ -3983,9 +3928,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     tm.spawn_tab(self, branch=True)
                 else:
                     self._duplicate_window(branch=True)
-                return True
-            elif command_name == "remember":
-                self._remember_to_memory(args)
                 return True
             else:
                 # 无 Python 处理器注册 → 降级到 prompt 注入（缺处理器语义）
@@ -6585,37 +6527,6 @@ class OpenAIChatToolWindow(ToolWindow):
         finally:
             self._pending_session_hook = False
 
-    def _remember_to_memory(self, content: str):
-        """将内容存入长期记忆"""
-        content = content.strip()
-        if not content:
-            InfoBar.warning(
-                "记忆为空",
-                "请在 /remember 后输入要记忆的内容",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
-        from app.core.memory_manager import MemoryManagerCore
-
-        mm = MemoryManagerCore.get_instance()
-        success = mm.add_entry_memory(content, source="manual")
-        if success:
-            InfoBar.success(
-                "已记忆",
-                f'"{content[:30]}{"..." if len(content) > 30 else ""}" 已存入长期记忆',
-                parent=TabManagerWindow.get_instance() or self.window(),
-                position=InfoBarPosition.BOTTOM,
-            )
-        else:
-            InfoBar.error(
-                "记忆失败",
-                "无法保存到长期记忆",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                position=InfoBarPosition.BOTTOM,
-            )
-
     # ========== 命令卡片处理 ==========
 
     def _on_slash_triggered(self, query: str):
@@ -7968,7 +7879,6 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         cards = [
             self._model_config_card,
-            self._memory_card,
         ]
         return [c for c in cards if c is not None]
 
@@ -10086,9 +9996,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._project_selector_card_content.refresh_style()
             if hasattr(self, "_project_selector_card"):
                 self._project_selector_card.refresh_style()
-            # 记忆卡片
-            if hasattr(self, "_memory_card_popup") and hasattr(self._memory_card_popup, "refresh_style"):
-                self._memory_card_popup.refresh_style()
             # 工具控制卡片
             if hasattr(self, "_tool_control_card") and hasattr(self._tool_control_card, "refresh_style"):
                 self._tool_control_card.refresh_style()
@@ -10166,7 +10073,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._undo_delete_card,
             getattr(self, "_command_card", None),
             getattr(self, "_file_mention_card", None),
-            getattr(self, "_memory_card_popup", None),
             getattr(self, "_tool_control_card", None),
         ):
             if card and hasattr(card, "refresh_style"):
@@ -19046,12 +18952,6 @@ class OpenAIChatToolWindow(ToolWindow):
             workdir = self.backend.memory_manager.get_working_directory(project)
             if workdir:
                 self._current_workdir[project] = workdir
-        if getattr(self, "_memory_card_popup", None):
-            self._memory_card_popup.set_project(project, workdir=workdir)
-        # 🐛 修复：tool_executor 工作目录同步不能挂在记忆卡片 UI 的惰性构建状态上。
-        # PreUserMessage hook（format_memory_context 的 githook 项目根目录/Git 状态）
-        # 数据源是 tool_executor.get_workdir()，卡片未构建时跳过同步会导致切换项目后
-        # hook 仍注入旧项目的根目录与 Git 状态（残留）。
         self._sync_working_directory()
         # 刷新历史面板（切换项目过滤）
         self._current_history_project = project
@@ -19145,8 +19045,6 @@ class OpenAIChatToolWindow(ToolWindow):
             resolved = self._ensure_temp_workdir(project) or None
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_workdir(resolved or None)
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            self._memory_card_popup._instance_workdir[project] = resolved or ""
         self._update_branch()
         logger.info(f"[TeamWorkdir] 窗口 {self._window_id} 已应用团队工作目录: {resolved or 'cleared'}")
 
@@ -19219,23 +19117,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新 tool_executor 的当前项目
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(project)
-        # 性能优化：先算 workdir（实例缓存 / DB 单次读取），再下发给 memory_card_popup，
-        # 避免 set_project 内部又走一遍 _get_effective_workdir。
-        workdir = self._current_workdir.get(project)
-        if workdir is None and self.backend and self.backend.memory_manager:
-            workdir = self.backend.memory_manager.get_working_directory(project)
-            if workdir:
-                self._current_workdir[project] = workdir
-        # 刷新记忆卡片的项目（项目笔记、关键文档会跟着刷新）
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            from loguru import logger
-
-            logger.info(f"[MainWidget] Calling set_project({project}) on memory_card_popup")
-            self._memory_card_popup.set_project(project, workdir=workdir)
-        # 🐛 修复：workdir 同步移出 _memory_card_popup 惰性判断——卡片未构建时
-        # 也必须更新 tool_executor，否则 PreUserMessage hook 的 project_root
-        # 残留旧项目（githook 显示旧项目根目录 + Git 状态）。
-        # _sync_working_directory 内部已对 _memory_card_popup 判空，可安全无条件调用。
         self._sync_working_directory()
         # 刷新历史面板（切换项目过滤）
         self._current_history_project = project
@@ -19320,12 +19201,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保存到配置
         self.cfg.current_project.value = project
         self.cfg.save()
-        # 刷新记忆卡片的项目
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            self._memory_card_popup.set_project(project)
-        # 🐛 修复：切换项目时无条件同步工作目录（不依赖记忆卡片惰性构建状态），
+        # 🐛 修复：切换项目时无条件同步工作目录，
         # 否则 tool_executor.get_workdir() 残留旧项目 → PreUserMessage hook 的
-        # githook 显示旧项目根目录。
+        # 项目上下文显示旧项目根目录。
         # 指定了项目根目录：先预置实例缓存 + 写 DB，_sync_working_directory 直接
         # 使用该路径，不再走 _ensure_temp_workdir 创建默认项目文件夹；
         # 同时确保团队广播时其他窗口从 DB 也能读到正确路径（不会回退默认目录）。
@@ -19996,11 +19874,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 后续 _get_effective_workdir 返回 None，has_active_wd=False，
             # 关键文档 Tab 中工作目录条目下方的 worktree section 永远不显示。
             self._current_workdir[project_name] = folder_path
-            if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                self._memory_card_popup._instance_workdir[project_name] = folder_path
-                # 主动刷新关键文档 UI，确保 worktree section 立即显示
-                # （与 _switch_to_worktree 行为保持一致）
-                self._memory_card_popup._load_key_documents()
             # 同步到 tool_executor
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_workdir(folder_path)
@@ -20053,24 +19926,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 复用手动选择文件夹 → 弹出建项目对话框
         self._on_project_folder_dropped(folder_path)
 
-    def _on_memory_tab_changed(self, tab_id: str):
-        """处理记忆管理标签切换"""
-        # 清空搜索
-        search_input = getattr(self._memory_card, "_search_input", None)
-        if search_input:
-            search_input.clear()
-        # 更新占位文本
-        placeholders = {
-            "entries": "🔍 搜索条目记忆...",
-            "notes": "🔍 搜索项目笔记...",
-            "docs": "🔍 搜索关键文档...",
-        }
-        if search_input:
-            search_input.setPlaceholderText(placeholders.get(tab_id, "🔍 搜索..."))
-        # 切换内容（_deferred_build_cards 可能尚未运行）
-        if self._memory_card_popup:
-            self._memory_card_popup.switch_tab(tab_id)
-
     def _on_working_dir_changed(self, file_path: str):
         """工作目录变更 → 更新实例缓存 + 同步到工具执行器 + 刷新分支标签
 
@@ -20088,9 +19943,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_workdir(resolved_path or None)
             logger.info(f"[MainWidget] Working directory synced to tool executor: {resolved_path or 'cleared'}")
-        # 同步到记忆卡片的实例缓存（使内部 get_effective_workdir 保持一致）
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            self._memory_card_popup._instance_workdir[self._current_project] = resolved_path or ""
         # 工作目录变更后刷新分支标签
         self._update_branch()
         # 工作目录变更后重扫文件列表（预缓存，下次 @ 即时显示）
@@ -20187,10 +20039,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if new_wd != prev_wd:
             self._rerender_welcome_card()
 
-        # 同步到记忆卡片的实例缓存（确保关键文档能感知到当前工作目录）
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            self._memory_card_popup._instance_workdir[project] = workdir or ""
-
         # 工作目录变化后刷新分支标签
         self._update_branch()
         # 工作台浮层记忆页跟随当前项目
@@ -20227,11 +20075,13 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[MainWidget] Failed to sync temp workdir to key docs: {e}")
 
-            # 刷新关键文档卡片 UI，使新增的根目录立即可见
+            # 刷新右侧工作台关键文档 UI，使新增的根目录立即可见
             try:
-                if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                    self._memory_card_popup._instance_workdir[project] = temp_dir
-                    self._memory_card_popup._load_key_documents()
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    tm.refresh_workbench()
             except Exception as e:
                 logger.warning(f"[MainWidget] Failed to refresh key docs UI: {e}")
 
@@ -20240,90 +20090,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[MainWidget] Failed to create temp workdir: {e}")
             return ""
-
-    def _show_soul_memory(self):
-        """切换记忆管理卡片的显示"""
-        self._toggle_memory_card()
-
-    def _toggle_workbench_memory(self, tab_key: str = "entries"):
-        """切换记忆（快捷键/命令入口，已迁移到右侧工作台「记忆」页签）
-
-        - 工作台不可见 或 不在目标页 → 展开并定位（entries/notes=记忆页，
-          docs=工作树页的关键文档）
-        - 已在目标页 → 切回工作树页（等效原“关闭卡片”）
-        数据构建/刷新由 TabManagerWindow.open_workbench_memory +
-        refresh_workbench 驱动，不再弹出对话区底部旧记忆卡片。
-        """
-        tm = TabManagerWindow.get_instance()
-        panel = getattr(tm, "workbench_panel", None) if tm is not None else None
-        if tm is None or panel is None:
-            return
-        target = panel.TAB_WORKTREE if tab_key == "docs" else panel.TAB_MEMORY
-        if not tm.is_workbench_visible() or panel.current_tab() != target:
-            tm.open_workbench_memory(tab_key)
-        else:
-            panel.set_current_tab(panel.TAB_WORKTREE, user=True)
-
-    def _toggle_memory_card(self):
-        """切换记忆管理卡片的显示"""
-        self._ensure_memory_card()  # P0-1：框架懒创建，确保注册/入容器
-        self._card_manager.toggle_card("memory", self._window_id)
-        # 显示时刷新记忆数据
-        if self._card_manager.is_card_visible("memory", self._window_id) and hasattr(self, "_memory_card_popup"):
-            # 默认切换到条目记忆标签
-            default_tab = "entries"
-            # 强制切换 tab
-            if hasattr(self._memory_card_popup, "_current_tab"):
-                self._memory_card_popup._current_tab = None  # 临时改变，确保 switch_tab 执行
-                self._memory_card_popup.switch_tab(default_tab)
-            # 同时更新 BaseSettingsCard 的 tab 状态
-            if hasattr(self._memory_card, "set_current_tab"):
-                self._memory_card.set_current_tab(default_tab)
-
-    def open_memory_card(self, tab_key: str = "entries"):
-        """打开（而非切换）当前页的长期记忆面板，并跳到指定页签
-
-        与 :meth:`_toggle_memory_card` 的唯一区别是**只开不关**：本方法给「一键直达」
-        类入口（对话页树的项目根「管理工作树」按钮）使用，点第二次不应该把面板收起。
-
-        Args:
-            tab_key: entries=条目记忆 / notes=项目笔记 / docs=关键文档
-                （工作树的增删与切换 UI 挂在 docs 页签里）
-        """
-        self._ensure_memory_card()
-        self._card_manager.show_card("memory", self._window_id)
-        # 内容由 _build_deferred_card_memory 惰性构建；用户提前点击时兜底立即构建
-        if getattr(self, "_memory_card_popup", None) is None:
-            self._build_deferred_card_memory()
-        popup = getattr(self, "_memory_card_popup", None)
-        if popup is not None and hasattr(popup, "switch_tab"):
-            popup._current_tab = None  # 置空，确保 switch_tab 不被幂等判等跳过
-            popup.switch_tab(tab_key)
-        card = getattr(self, "_memory_card", None)
-        if card is not None and hasattr(card, "set_current_tab"):
-            card.set_current_tab(tab_key)
-
-    def _on_memory_card_saved(self, memories: list):
-        """记忆卡片保存后的回调"""
-        # 数据已经在 MemoryCardContent 中通过 backend 保存
-        # 这里只显示提示信息
-        InfoBar.success(
-            "已保存",
-            "长期记忆已更新",
-            parent=TabManagerWindow.get_instance() or self.window(),
-            duration=1500,
-            position=InfoBarPosition.BOTTOM,
-        )
-
-    def _on_memory_updated(self, memories: list):
-        self.backend.update_user_memories(memories)
-        InfoBar.success(
-            "已保存",
-            "长期记忆已更新",
-            parent=TabManagerWindow.get_instance() or self.window(),
-            duration=1500,
-            position=InfoBarPosition.BOTTOM,
-        )
 
     def _on_title_edit_finished(self):
         """标题编辑完成 - 保存用户编辑的标题"""
@@ -20423,12 +20189,13 @@ class OpenAIChatToolWindow(ToolWindow):
             self.backend.tool_executor.set_workdir(worktree_path)
         self._update_branch()
 
-        # 3. 同步记忆卡片 UI
+        # 3. 刷新右侧工作台关键文档/工作树 UI
         try:
-            if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                mc = self._memory_card_popup
-                mc._instance_workdir[project] = worktree_path
-                mc._load_key_documents()
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                tm.refresh_workbench()
         except Exception:
             pass
 
@@ -20469,10 +20236,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_branch()
 
         try:
-            if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                mc = self._memory_card_popup
-                mc._instance_workdir[project] = main_repo
-                mc._load_key_documents()
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                tm.refresh_workbench()
         except Exception:
             pass
 

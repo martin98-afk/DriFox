@@ -676,6 +676,8 @@ class TabManagerWindow(FramelessWindow):
         self.workbench_panel.history_tab_shown.connect(self._on_workbench_history_shown)
         # 🆕 页签按对话窗口独立记忆：页签变化 → 写入当前活跃窗口；切回窗口时恢复
         self.workbench_panel.current_tab_changed.connect(self._remember_workbench_tab)
+        # 工作树页内工作目录变更 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
+        self.workbench_panel.workingDirChanged.connect(self._on_workbench_working_dir_changed)
         self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
         # 主题 / 字号刷新：与桌宠同路径注册
         theme_manager.register_refresh_target(self.workbench_panel)
@@ -1174,7 +1176,7 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 pass
         if backend is not None:
-            # 记忆页懒构建（backend 未就绪时保持"未就绪"提示）
+            # 工作树内容懒构建（backend 未就绪时保持"未就绪"提示）
             panel.ensure_memory(backend.memory_manager)
             try:
                 workdir = (getattr(win, "_current_workdir", None) or {}).get(project)
@@ -1199,15 +1201,27 @@ class TabManagerWindow(FramelessWindow):
                 todos = []
         panel.update_todos(todos or [])
 
-    def open_workbench_memory(self, sub_tab: str = "docs") -> None:
-        """展开工作台并定位（记忆功能已迁移到工作台）
+    def _on_workbench_working_dir_changed(self, file_path: str) -> None:
+        """工作树页内工作目录变更 → 转发给当前活跃窗口
 
-        统一的「一键直达」入口：新建项目后自动展开关键文档、工作树「管理工作树」
-        按钮等场景都走这里，不再打开旧的独立记忆卡片。
+        右侧工作台是全局单例，workingDirChanged 来自共享的 MemoryCardContent；
+        工作目录是窗口级状态（实例缓存/tool_executor/团队广播），由活跃窗口消费。
+        """
+        win = self.get_current_window()
+        if win is not None and hasattr(win, "_on_working_dir_changed"):
+            try:
+                win._on_working_dir_changed(file_path)
+            except Exception:
+                logger.exception("[Workbench] 处理工作目录变更失败")
+
+    def open_workbench_memory(self, sub_tab: str = "docs") -> None:
+        """展开工作台并定位「工作树」页签（记忆功能已下线，保留兼容入口）
+
+        统一的「一键直达」入口：新建项目后自动展开、工作树「管理工作树」
+        按钮等场景都走这里。置顶记忆在助手中心管理，不再有记忆页。
 
         Args:
-            sub_tab: docs=工作树页（关键文档+工作树，一级页签）/
-                     entries|notes=记忆页对应子页签
+            sub_tab: 兼容旧签名；任何取值都落「工作树」页（关键文档+工作树）
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None:
@@ -1217,16 +1231,8 @@ class TabManagerWindow(FramelessWindow):
             self.set_workbench_visible(True)
         else:
             self.refresh_workbench()
-        # 2) 按子页签路由：docs 已升为一级「工作树」页签，其余落记忆页
-        if sub_tab == "docs":
-            panel.set_current_tab(panel.TAB_WORKTREE, user=True)
-            return
-        panel.set_current_tab(panel.TAB_MEMORY, user=True)
-        # 3) 切到指定子页签（内容未挂载时 MemoryPage 会记为 pending，挂载后补切）
-        try:
-            panel.memory_page.switch_sub_tab(sub_tab)
-        except Exception as exc:
-            logger.warning(f"[Workbench] 切换记忆子页签失败: {exc}")
+        # 2) 定位「工作树」页
+        panel.set_current_tab(panel.TAB_WORKTREE, user=True)
 
     def open_workbench_history(self) -> None:
         """展开工作台并定位「历史会话」页（历史会话已从对话区底部卡片迁移至此）
@@ -3759,6 +3765,55 @@ class TabManagerWindow(FramelessWindow):
             self._sync_plugin_titlebar_tabs()
         except Exception:
             pass
+        # macOS：close→show 循环后修复标题栏错位（见 _refresh_mac_fullsize_content）
+        if _IS_MAC:
+            self._refresh_mac_fullsize_content()
+
+    def _refresh_mac_fullsize_content(self) -> None:
+        """macOS：强制重算 NSWindow 的 fullSizeContentView 布局
+
+        现象：窗口关闭（红绿灯，closeEvent accept → NSWindow orderOut，对象保留）
+        后从 dock 唤起（show → orderFront），自定义标题栏整体下移一个标题栏
+        高度，顶部露出一条原生标题栏空白带。
+
+        根因：qframelesswindow 的 MacFramelessWindow 依赖 AppKit 侧
+        NSFullSizeContentViewWindowMask + titlebarAppearsTransparent 让 Qt
+        内容覆盖整个窗口；close→show 循环中 AppKit 会把 contentView 布局
+        重算回「标题栏之下」，而库只在 paintEvent/changeEvent 里重复设置
+        相同的 styleMask 值——AppKit 对相同值是 no-op，不会触发 contentView
+        重新布局，错位因此固化。
+
+        修法：先摘掉再戴回 fullSizeContentView 位，强制 AppKit 重算
+        contentView frame。摘/戴在同一事件栈内完成，不经过绘制循环，无闪烁。
+        """
+        try:
+            import Cocoa
+            from qframelesswindow.utils.mac_utils import getNSWindow
+        except ImportError:
+            return
+
+        def _apply():
+            try:
+                if not self.isVisible():
+                    return
+                ns_window = getNSWindow(int(self.winId()))
+                mask = int(ns_window.styleMask())
+                full = int(Cocoa.NSFullSizeContentViewWindowMask)
+                if mask & full:
+                    # 相同值是 no-op，必须先摘后戴才能触发布局重算
+                    ns_window.setStyleMask_(mask & ~full)
+                    ns_window.setStyleMask_(mask | full)
+                # 与 MacFramelessWindow._hideSystemTitleBar 保持一致的重申（幂等）
+                ns_window.setTitlebarAppearsTransparent_(True)
+                ns_window.setTitleVisibility_(Cocoa.NSWindowTitleHidden)
+                ns_window.setMovable_(False)
+            except Exception:
+                logger.warning("[mac] 刷新 fullSizeContentView 失败", exc_info=True)
+
+        _apply()
+        # orderFront 后 AppKit 可能还有一次异步布局，事件循环空转后再兜底
+        QTimer.singleShot(0, _apply)
+        QTimer.singleShot(100, _apply)
 
     def moveEvent(self, event):
         super().moveEvent(event)

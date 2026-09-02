@@ -99,6 +99,10 @@ class Assistant:
     public_description: str = ""
     # 经验体系（recall/record_experience 工具 + 每日反思）：默认关闭
     experience_enabled: bool = False
+    # 项目笔记（AGENTS.md）注入开关：主智能体按此开关控制；子智能体始终注入
+    project_notes_enabled: bool = True
+    # 项目上下文（项目根目录 + git 状态）注入开关：主智能体按此开关控制；子智能体始终注入
+    project_context_enabled: bool = True
     # 记忆整理模型（llm_saved_providers 的 config_id）：空 = 跟随全局当前模型
     utility_model: str = ""
     # 对用户的称呼（{{userName}} 模板变量覆盖）：空 = 跟随系统用户名
@@ -125,6 +129,8 @@ class Assistant:
             "steps": self.steps,
             "public_description": self.public_description,
             "experience_enabled": self.experience_enabled,
+            "project_notes_enabled": self.project_notes_enabled,
+            "project_context_enabled": self.project_context_enabled,
             "utility_model": self.utility_model,
             "user_addressing": self.user_addressing,
             "created_at": self.created_at,
@@ -154,6 +160,8 @@ class Assistant:
             steps=data.get("steps"),
             public_description=str(data.get("public_description") or ""),
             experience_enabled=bool(data.get("experience_enabled", False)),
+            project_notes_enabled=bool(data.get("project_notes_enabled", True)),
+            project_context_enabled=bool(data.get("project_context_enabled", True)),
             utility_model=str(data.get("utility_model") or ""),
             user_addressing=str(data.get("user_addressing") or ""),
             created_at=str(data.get("created_at") or ""),
@@ -184,6 +192,8 @@ class Assistant:
             temperature=None,
             steps=None,
             public_description="",
+            project_notes_enabled=True,
+            project_context_enabled=True,
             created_at=now,
             updated_at=now,
         )

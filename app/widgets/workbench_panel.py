@@ -62,7 +62,7 @@ TASKS_DEFAULT_HEIGHT = 180  # 任务区默认高度
 
 
 # 注：_EmptyHint / _SectionHeader 已迁移到 app.widgets._workbench_helpers 共享模块，
-# 被 TasksPage / MemoryPage 和 plugins/system/ui/_artifacts_page.py 共用。
+# 被 TasksPage 和 plugins/system/ui/_artifacts_page.py 共用。
 
 
 class _PagePlaceholder(QWidget):
@@ -365,99 +365,6 @@ class TasksPage(QWidget):
                 self._apply_item_style(w)
 
 
-class MemoryPage(QWidget):
-    """记忆页（一级页签）：条目记忆 + 项目笔记
-
-    关键文档（含工作树）已拆分到 WorktreePage（一级页签，排第一）。
-    本页懒挂载共享 MemoryCardContent 的 entries / notes 两个子页
-    （reparent 到本页，可见性由一级页签栈管理，不再走 switch_tab）。
-    """
-
-    SUB_TABS = (("entries", "条目记忆"), ("notes", "项目笔记"))
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._content: Optional[QWidget] = None
-        self._pages: Dict[str, QWidget] = {}  # {tab_id: 子页 widget}
-        self._sub_buttons: List[CustomTabButton] = []
-        self._pending_sub_tab: Optional[str] = None  # 内容未挂载时的待切页签
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(6)
-
-        # 子页签条（CustomTabButton 风格，与顶栏统一；整体居中）
-        self._tabs_layout = QHBoxLayout()
-        self._tabs_layout.setSpacing(2)
-        self._tabs_layout.addStretch(1)
-        for tab_id, label in self.SUB_TABS:
-            btn = CustomTabButton(tab_id, label, self)
-            btn.clicked.connect(self._on_sub_tab_clicked)
-            self._tabs_layout.addWidget(btn)
-            self._sub_buttons.append(btn)
-        self._tabs_layout.addStretch(1)
-        self._layout.addLayout(self._tabs_layout)
-
-        self._hint = _EmptyHint("长期记忆未就绪", self)
-        self._layout.addWidget(self._hint)
-        self._set_sub_tab_active(0)
-
-    def _on_sub_tab_clicked(self, tab_id: str) -> None:
-        """子页签点击：切换到对应子页"""
-        self.switch_sub_tab(tab_id)
-
-    def switch_sub_tab(self, tab_id: str) -> None:
-        """切换到指定子页签（外部入口，供宿主"一键直达"用）
-
-        Args:
-            tab_id: entries=条目记忆 / notes=项目笔记
-                    （docs=关键文档已升为一级"工作树"页签，见 WorktreePage）
-        """
-        # 内容未挂载时先记录目标，attach 后再补切
-        if self._content is None:
-            self._pending_sub_tab = tab_id
-            return
-        self._content.set_active_tab(tab_id)
-        for tab_id_, w in self._pages.items():
-            w.setVisible(tab_id_ == tab_id)
-        for btn in self._sub_buttons:
-            btn.set_active(btn.tab_id == tab_id)
-        self._pending_sub_tab = None
-
-    def _set_sub_tab_active(self, index: int) -> None:
-        for i, btn in enumerate(self._sub_buttons):
-            btn.set_active(i == index)
-
-    def attach(self, content: Any) -> None:
-        """挂载共享 MemoryCardContent（单实例，与 WorktreePage 共用）
-
-        把 entries / notes 子页 reparent 到本页并按子页签切换可见性；
-        docs 子页由 WorkbenchPanel 交给 WorktreePage。
-        """
-        if self._content is not None:
-            return
-        self._content = content
-        self._hint.hide()
-        for tab_id, _label in self.SUB_TABS:
-            w = content.detach_tab(tab_id)
-            if w is None:
-                continue
-            w.setParent(self)
-            self._layout.addWidget(w, 1)
-            self._pages[tab_id] = w
-        # 有"一键直达"目标页签则切过去，否则停在条目记忆
-        # （switch_sub_tab 统一处理数据刷新 + 子页可见性 + 按钮高亮）
-        self.switch_sub_tab(self._pending_sub_tab or "entries")
-
-    def set_project(self, project: str, workdir: Optional[str] = None) -> None:
-        if self._content is not None:
-            self._content.set_project(project, workdir)
-
-    def refresh_style(self) -> None:
-        self._hint.refresh_style()
-        for btn in self._sub_buttons:
-            btn.refresh_style()
-
-
 class HistoryPage(QWidget):
     """历史会话页（一级页签）：历史会话 / 归档 子页签 + 列表上方搜索框
 
@@ -686,6 +593,8 @@ class WorkbenchPanel(QWidget):
 
     close_requested = pyqtSignal()
     refresh_requested = pyqtSignal()
+    # 工作树页内工作目录变更（切 worktree/恢复主仓库/清除根目录）→ 宿主转发给活跃窗口
+    workingDirChanged = pyqtSignal(str)
     # 差异请求：file_paths 为 None 表示「查看所有产物差异」
     diff_requested = pyqtSignal(object)  # Optional[List[str]]
     # 卡片 tab × 关闭钮点击（registry 连接本信号，同步清理卡片归属状态并摘 tab）
@@ -696,7 +605,7 @@ class WorkbenchPanel(QWidget):
     # 当前页签变化（含程序化切换）：宿主用于按对话窗口独立记忆页签
     current_tab_changed = pyqtSignal(int)
 
-    TAB_WORKTREE, TAB_MEMORY, TAB_ARTIFACTS, TAB_HISTORY = 0, 1, 2, 3
+    TAB_WORKTREE, TAB_ARTIFACTS, TAB_HISTORY = 0, 1, 2
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -765,16 +674,13 @@ class WorkbenchPanel(QWidget):
 
         # 内容栈
         # index 0 = 工作树页（git 工作树 + 关键文档，默认落点）
-        # index 1 = 记忆页（条目记忆 / 项目笔记）
-        # index 2 = 产物页槽位（插件提供；未注册时为 _PagePlaceholder 占位）
-        # index 3+ = 其它插件页
+        # index 1 = 产物页槽位（插件提供；未注册时为 _PagePlaceholder 占位）
+        # index 2 = 历史会话页；index 3+ = 其它插件页
         self._stack = QStackedWidget(self._bottom)
         self._artifacts_placeholder = _PagePlaceholder(parent=self._stack)
         self.artifacts_page: QWidget = self._artifacts_placeholder
         self.worktree_page = WorktreePage(self._stack)
-        self.memory_page = MemoryPage(self._stack)
         self._stack.addWidget(self.worktree_page)
-        self._stack.addWidget(self.memory_page)
         self._stack.addWidget(self._artifacts_placeholder)
         self._bottom_layout.addWidget(self._stack, 1)
 
@@ -1021,7 +927,6 @@ class WorkbenchPanel(QWidget):
             art_label = art_info.label or "产物"
         specs: List[tuple] = [
             ("worktree", "工作树"),
-            ("memory", "记忆"),
             ("artifacts", art_label),
         ]
         # 历史会话页：宿主挂载历史卡片后常驻（懒挂载，见 attach_history_page），
@@ -1365,8 +1270,8 @@ class WorkbenchPanel(QWidget):
     def ensure_memory(self, memory_manager: Any) -> None:
         """懒构建记忆内容（宿主 refresh_workbench 调用；避免初始化期拉起存储层）
 
-        单实例 MemoryCardContent：docs 子页挂到 WorktreePage（关键文档+工作树），
-        entries/notes 子页挂到 MemoryPage。构建后补投递构建前收到的项目信息。
+        单实例 MemoryCardContent：docs 子页挂到 WorktreePage（关键文档+工作树）。
+        工作目录变更经 workingDirChanged 信号转发宿主（每窗口实例缓存/分支标签刷新）。
         """
         if memory_manager is None or self._memory_content is not None:
             return
@@ -1374,9 +1279,9 @@ class WorkbenchPanel(QWidget):
 
         content = MemoryCardContent(memory_manager, self)
         content.hide()  # 容器自身不显示，只有拆出的子页显示
+        content.workingDirChanged.connect(self.workingDirChanged.emit)
         self._memory_content = content
         self.worktree_page.attach(content)
-        self.memory_page.attach(content)
         if self._pending_project is not None:
             project, workdir = self._pending_project
             self._pending_project = None
@@ -1427,7 +1332,6 @@ class WorkbenchPanel(QWidget):
         self.artifacts_page.refresh_style()
         self.tasks_page.refresh_style()
         self.worktree_page.refresh_style()
-        self.memory_page.refresh_style()
         if self._memory_content is not None and hasattr(self._memory_content, "refresh_style"):
             self._memory_content.refresh_style()
         if self._history_page is not None and hasattr(self._history_page, "refresh_style"):

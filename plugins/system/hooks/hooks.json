@@ -56,13 +56,6 @@
             "add_output_to_context": true,
             "statusMessage": "技能配置:",
             "id": "builtin_inject_skills"
-          },
-          {
-            "type": "python",
-            "function": ".read_project_notes:hook",
-            "add_output_to_context": true,
-            "statusMessage": "项目上下文:",
-            "id": "builtin_read_project_notes"
           }
         ]
       },
@@ -108,28 +101,6 @@
             "add_output_to_context": true,
             "statusMessage": "系统时间:",
             "id": "e3886659a58a428094a185a054e87791"
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "python",
-            "function": ".format_memory_context:hook",
-            "add_output_to_context": true,
-            "statusMessage": "长期记忆:",
-            "id": "4926f722c2f54c058e16371e2b2d12df"
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "python",
-            "function": ".format_memory_context:hook_git",
-            "add_output_to_context": true,
-            "statusMessage": "项目上下文:",
-            "id": "7a3e8d1f5b2c4a6e9d0f1a2b3c4d5e6f"
           }
         ]
       },

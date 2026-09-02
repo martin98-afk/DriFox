@@ -1161,52 +1161,6 @@ class ChatBackend(QObject):
         if self._sub_agent_manager:
             self._sub_agent_manager.set_history_getter(getter)
 
-    # ========== MemoryManager 代理方法 ==========
-    def get_memory_context_string(self, limit: int = 100) -> str:
-        """获取记忆上下文字符串
-
-        多窗口隔离：优先使用 tool_executor 中的实例级 workdir，
-        避免 DB 中其他窗口写入的工作目录值。
-        """
-        if self._memory_manager:
-            # 多窗口隔离：从 tool_executor 获取实例级 workdir（而非 DB）
-            workdir = None
-            if self._tool_executor:
-                workdir = self._tool_executor.get_workdir()
-            # include_project_context=False：项目笔记/路径建议/Worktree 信息
-            # 已由 SessionStart hook 注入，无需在每个用户消息中重复写入
-            return self._memory_manager.format_memories_for_prompt(
-                project=self._current_project,
-                entry_limit=limit,
-                doc_limit=50,
-                workdir_override=workdir,
-                include_project_context=False,
-            )
-        return ""
-
-    def get_user_memories(self, memory_data: Dict = None) -> List[Dict]:
-        """获取用户记忆列表（兼容旧接口）"""
-        if self._memory_manager:
-            return self._memory_manager.get_entry_memories()
-        return []
-
-    def load_memory_data(self) -> Dict:
-        """加载记忆数据"""
-        if self._memory_manager:
-            return self._memory_manager.load_memory()
-        return {"version": "3.0", "user_memories": []}
-
-    def add_user_memory(self, content: str, **kwargs):
-        """添加用户记忆"""
-        if self._memory_manager:
-            self._memory_manager.add_entry_memory(content, kwargs.get("source", "assistant"))
-
-    def update_user_memories(self, memories: List[Dict]) -> bool:
-        """更新用户记忆"""
-        if self._memory_manager:
-            return self._memory_manager.save_entry_memories(memories)
-        return False
-
     # ========== AgentManager 代理方法 ==========
 
     def get_primary_agents(self) -> List:
@@ -1222,61 +1176,6 @@ class ChatBackend(QObject):
         return None
 
     # ========== 会话管理 ==========
-
-    def build_memory_context_dict(self) -> Dict[str, Any]:
-        """构建 PreUserMessage hook 记忆上下文 — 预取条目记忆 + 关键文档
-
-        Returns:
-            包含条目记忆和关键文档的 dict
-        """
-        from pathlib import Path
-
-        ctx: Dict[str, Any] = {}
-        if not self._memory_manager:
-            return ctx
-
-        # 条目记忆
-        try:
-            entries = self._memory_manager.get_entry_memories(limit=100)
-            if entries:
-                ctx["entry_memories"] = [e.get("content", "") for e in entries]
-        except Exception:
-            pass
-
-        # 关键文档（含路径显示）
-        try:
-            wd_path = self._tool_executor.get_workdir() if self._tool_executor else ""
-            docs = self._memory_manager.get_key_documents(self._current_project)[:50]
-            if docs:
-                doc_items = []
-                for doc in docs:
-                    file_path = doc.get("file_path", "")
-                    file_name = doc.get("file_name", "")
-                    is_url = file_path and (file_path.startswith("http://") or file_path.startswith("https://"))
-                    is_wd = file_path == wd_path
-                    if not is_url and not is_wd and file_path and wd_path:
-                        try:
-                            display = str(Path(file_path).relative_to(Path(wd_path)))
-                        except ValueError:
-                            display = file_path
-                    elif is_url:
-                        display = file_path
-                    else:
-                        display = file_path
-                    doc_items.append(
-                        {
-                            "file_name": file_name,
-                            "display": display,
-                            "is_url": is_url,
-                            "is_wd": is_wd,
-                        }
-                    )
-                if doc_items:
-                    ctx["key_documents"] = doc_items
-        except Exception:
-            pass
-
-        return ctx
 
     def _build_worktree_context_dict(self) -> Dict[str, Any]:
         """构建 worktree + 路径使用建议上下文（PreUserMessage 每次触发时更新）
@@ -1542,23 +1441,6 @@ class ChatBackend(QObject):
         return (0, 0)
 
     # ========== 上下文构建方法 ==========
-
-    def _build_memory_context(self, query: str = "", project: str = "默认项目") -> str:
-        """构建长期记忆上下文（供 ChatEngine 调用）
-
-        多窗口隔离：优先使用 tool_executor 中的实例级 workdir。
-        """
-        if not self._memory_manager:
-            return ""
-        workdir = None
-        if self._tool_executor:
-            workdir = self._tool_executor.get_workdir()
-        return self._memory_manager.format_memories_for_prompt(
-            project=project,
-            entry_limit=100,
-            doc_limit=50,
-            workdir_override=workdir,
-        )
 
     def _build_chat_cards_context(self) -> str:
         """构建卡片上下文"""

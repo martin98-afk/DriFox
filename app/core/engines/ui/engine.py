@@ -401,11 +401,9 @@ class UIEngine(BaseEngine):
 
         pre_user_ctx = None
         if hook_mgr:
-            memory_ctx = {}
             worktree_ctx = {}
             try:
                 if self._backend:
-                    memory_ctx = self._backend.build_memory_context_dict() or {}
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
             except Exception:
                 pass
@@ -416,7 +414,7 @@ class UIEngine(BaseEngine):
             pre_user_ctx = {
                 "message": user_text,
                 "session_id": _session_id,
-                **memory_ctx,
+                "current_role": "primary",
                 **worktree_ctx,
             }
             if pending_cmd:

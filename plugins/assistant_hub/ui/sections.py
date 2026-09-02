@@ -605,6 +605,70 @@ class AboutSection(_Section):
         self.set_persona(self._current_pid)
 
 
+# ── 项目注入分区 ────────────────────────────────────────
+
+
+class ProjectSection(_Section):
+    """项目注入开关：项目笔记（AGENTS.md）+ 项目上下文（根目录/git 状态）。
+
+    开关只控制主智能体的注入；子智能体始终注入（干活需要项目上下文）。
+    """
+
+    toggleNotes = pyqtSignal(bool)
+    toggleContext = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__("项目", parent)
+        self.body().addWidget(_hint("注入到系统提示词的项目信息，子智能体不受开关影响。"))
+
+        # 项目笔记
+        notes_row = QHBoxLayout()
+        notes_row.addWidget(_title_label("项目笔记", 11))
+        notes_row.addStretch()
+        notes_lbl = QLabel("注入")
+        notes_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        notes_row.addWidget(notes_lbl)
+        self._notes_switch = SwitchButton()
+        self._notes_switch.setOnText("开")
+        self._notes_switch.setOffText("关")
+        self._notes_switch.checkedChanged.connect(self.toggleNotes.emit)
+        notes_row.addWidget(self._notes_switch)
+        self.body().addLayout(notes_row)
+        self.body().addWidget(_hint("AGENTS.md 项目操作手册与约束，写入 {项目根目录}/AGENTS.md。"))
+
+        self.body().addWidget(_sep())
+
+        # 项目上下文
+        ctx_row = QHBoxLayout()
+        ctx_row.addWidget(_title_label("项目上下文", 11))
+        ctx_row.addStretch()
+        ctx_lbl = QLabel("注入")
+        ctx_lbl.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        ctx_row.addWidget(ctx_lbl)
+        self._context_switch = SwitchButton()
+        self._context_switch.setOnText("开")
+        self._context_switch.setOffText("关")
+        self._context_switch.checkedChanged.connect(self.toggleContext.emit)
+        ctx_row.addWidget(self._context_switch)
+        self.body().addLayout(ctx_row)
+        self.body().addWidget(_hint("项目根目录路径规则 + git 分支/工作树状态。"))
+
+    def set_notes(self, on: bool) -> None:
+        self._notes_switch.setChecked(on)
+
+    def set_notes(self, on: bool) -> None:
+        self._notes_switch.setChecked(on)
+
+    def set_context_enabled(self, on: bool) -> None:
+        self._context_switch.setChecked(on)
+
+
 # ── 记忆分区 ────────────────────────────────────────────
 
 

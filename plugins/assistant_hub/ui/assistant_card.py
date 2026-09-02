@@ -54,6 +54,7 @@ from .sections import (
     ExperienceSection,
     MemorySection,
     ProfileSection,
+    ProjectSection,
     SkillsSection,
     _btn_style,
 )
@@ -281,6 +282,11 @@ class AssistantCardWidget(QWidget):
         self._about.createPersonaRequested.connect(self._on_create_persona)
         self._inner_v.addWidget(self._about)
 
+        self._project = ProjectSection()
+        self._project.toggleNotes.connect(self._on_project_notes_toggle)
+        self._project.toggleContext.connect(self._on_project_context_toggle)
+        self._inner_v.addWidget(self._project)
+
         self._memory = MemorySection()
         self._memory.toggleMemory.connect(self._on_memory_toggle)
         self._memory.toggleDreamAuto.connect(self._on_dream_auto_toggle)
@@ -447,6 +453,8 @@ class AssistantCardWidget(QWidget):
             mgr = self._mgr
             self._profile.bind(a.name or a.id, a.user_addressing or mgr.user_name(), a.utility_model or "")
             self._about.set_persona(a.yuan)
+            self._project.set_notes(a.project_notes_enabled)
+            self._project.set_context_enabled(a.project_context_enabled)
             self._memory.set_memory_enabled(a.memory_enabled)
             self._memory.set_dream_auto(a.dream_auto_enabled)
             self._memory.reload_pins(mgr.read_pinned(aid_capture))
@@ -566,6 +574,22 @@ class AssistantCardWidget(QWidget):
     # ══════════════════════════════════════════════════
     #  记忆
     # ══════════════════════════════════════════════════
+
+    def _on_project_notes_toggle(self, on: bool) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        a.project_notes_enabled = bool(on)
+        self._mgr.update(a)
+        self._mgr.invalidate_context(a.id)
+
+    def _on_project_context_toggle(self, on: bool) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        a.project_context_enabled = bool(on)
+        self._mgr.update(a)
+        self._mgr.invalidate_context(a.id)
 
     def _on_memory_toggle(self, on: bool) -> None:
         a = self._mgr.get(self._active_aid)

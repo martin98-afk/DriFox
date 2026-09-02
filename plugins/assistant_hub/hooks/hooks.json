@@ -12,6 +12,32 @@
             "id": "assistant_hub_inject_identity"
           }
         ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".project_notes:hook_notes",
+            "add_output_to_context": true,
+            "statusMessage": "项目笔记:",
+            "id": "assistant_hub_project_notes"
+          }
+        ]
+      }
+    ],
+    "PreUserMessage": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".project_notes:hook_context",
+            "add_output_to_context": true,
+            "statusMessage": "项目上下文:",
+            "id": "assistant_hub_project_context"
+          }
+        ]
       }
     ],
     "Stop": [

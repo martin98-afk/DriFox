@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 记忆管理卡片 - 重构为 3 Tab 结构
-1. 条目记忆 - 列表 + 搜索 + 编辑
+1. 项目笔记 - Markdown 编辑器
 2. 项目笔记 - Markdown 编辑器
 3. 关键文档 - 列表 + 拖拽添加
 """
@@ -28,23 +28,9 @@ from qfluentwidgets import (
     MaskDialogBase,
     PrimaryPushButton,
     PushButton,
-    SwitchButton,
     TextEdit,
     TransparentToolButton,
 )
-
-
-class EntryInputLineEdit(LineEdit):
-    """自定义输入框 - 拦截回车键防止事件冒泡"""
-
-    def keyPressEvent(self, event: QKeyEvent):
-        """拦截回车键，阻止事件冒泡到父组件"""
-        if event.key() == Qt.Key_Return or event.key() == Qt.Key_Enter:
-            # 先让父类处理（触发 returnPressed 信号），然后接受事件防止冒泡
-            super().keyPressEvent(event)
-            event.accept()
-            return
-        super().keyPressEvent(event)
 
 
 from app.utils.design_tokens import Colors, font_size_css
@@ -59,8 +45,6 @@ from app.widgets.elided_label import _ElidedLabel
 from app.widgets.worktree_section import WorktreeSectionWidget
 
 # Tab 标识
-TAB_ENTRY_MEMORIES = "entries"
-TAB_PROJECT_NOTES = "notes"
 TAB_KEY_DOCUMENTS = "docs"
 
 
@@ -102,195 +86,6 @@ class DocDropListWidget(ListWidget):
 
         if file_paths:
             self.files_dropped.emit(file_paths)
-
-
-class EntryMemoryItemWidget(QWidget):
-    """条目记忆项组件"""
-
-    deleted = pyqtSignal(str)  # memory_id
-    toggled = pyqtSignal(str, bool)
-    edited = pyqtSignal(str, str)  # memory_id, new_content
-
-    def __init__(
-        self,
-        memory_id: str,
-        content: str,
-        enabled: bool = True,
-        source: str = "manual",
-        parent=None,
-    ):
-        super().__init__(parent)
-        self.memory_id = memory_id
-        self._content = content
-        self._editing = False
-        self._init_ui(enabled, source)
-
-    def _init_ui(self, enabled, source):
-        # 高度自适应内容，不固定高度
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
-        self.setMinimumHeight(44)
-
-        main_layout = QHBoxLayout(self)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(6)
-
-        # 内容区域（stretch=1 让文本区优先吃满剩余空间，按钮区固定宽度在尾部）
-        self.text_widget = QWidget(self)
-        # 允许收缩，适应小窗口
-        self.text_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.MinimumExpanding)
-        self.text_widget.setMinimumWidth(0)
-        text_layout = QVBoxLayout(self.text_widget)
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_layout.setSpacing(0)
-
-        Colors.refresh()
-        self.content_label = _ElidedLabel(self._content, self.text_widget)
-        self.content_label.setToolTip(self._content)  # 悬浮显示完整内容
-        self.content_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; padding: 4px; {get_font_family_css()} {font_size_css(12)}"
-        )
-        text_layout.addWidget(self.content_label)
-
-        main_layout.addWidget(self.text_widget, 1)
-
-        # 编辑输入框（初始隐藏，使用 TextEdit 支持多行）
-        self.edit_widget = QWidget(self)
-        self.edit_widget.setSizePolicy(1, QSizePolicy.MinimumExpanding)
-        self.edit_widget.setVisible(False)
-        edit_layout = QVBoxLayout(self.edit_widget)
-        edit_layout.setContentsMargins(0, 0, 0, 0)
-        edit_layout.setSpacing(0)
-
-        from qfluentwidgets import TextEdit
-
-        self.edit_text = TextEdit(self.edit_widget)
-        self.edit_text.setText(self._content)
-        self.edit_text.setPlaceholderText("编辑条目记忆...")
-        Colors.refresh()
-        self.edit_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 1px solid {Colors.BORDER_ACCENT};
-                color: {Colors.TEXT_PRIMARY};
-                padding: 4px 6px;
-                border-radius: 3px;
-                {get_font_family_css()} {font_size_css(12)}
-            }}
-        """)
-        self.edit_text.setMinimumHeight(36)
-        self.edit_text.setMaximumHeight(200)  # 限制最大高度，超出可滚动
-        self.edit_text.document().documentLayout().documentSizeChanged.connect(self._adjust_edit_height)
-        # 失去焦点自动保存
-        self.edit_text.focusOutEvent = lambda e: self._on_focus_out(e)
-        edit_layout.addWidget(self.edit_text)
-
-        main_layout.addWidget(self.edit_widget, 1)
-
-        # 操作按钮 — 直接加入 main_layout，固定宽度不放 stretch，始终靠右
-        self.edit_btn = TransparentToolButton(FluentIcon.EDIT, self)
-        self.edit_btn.setToolTip("编辑")
-        self.edit_btn.clicked.connect(self._start_edit)
-
-        self.delete_btn = TransparentToolButton(FluentIcon.DELETE, self)
-        self.delete_btn.setToolTip("删除")
-        self.delete_btn.clicked.connect(lambda: self.deleted.emit(self.memory_id))
-
-        self.switch = SwitchButton(self)
-        self.switch.setChecked(enabled)
-        from app.utils.design_tokens import SwitchStyles
-
-        SwitchStyles.configure(self.switch)
-        self.switch.checkedChanged.connect(lambda checked: self.toggled.emit(self.memory_id, checked))
-
-        # 按钮直接加入（text_widget stretch=1 自然将按钮推到右侧）
-        main_layout.addWidget(self.edit_btn)
-        main_layout.addWidget(self.delete_btn)
-        main_layout.addWidget(self.switch)
-
-    def sizeHint(self):
-        """单行省略预览 + 编辑模式自适应高度"""
-        if self._editing and self.edit_widget.isVisible():
-            edit_height = self.edit_text.height()
-            return QSize(0, max(44, edit_height + 16))
-
-        # 单行省略：固定高度，字体 12px + padding 8px(上下) = 行高 28px，但保持最小 44px
-        return QSize(0, 44)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_item_size()
-
-    def _update_item_size(self):
-        item = self._get_item()
-        if item:
-            item.setSizeHint(self.sizeHint())
-            lst = self.parent()
-            while lst and not isinstance(lst, ListWidget):
-                lst = lst.parent()
-            if lst:
-                lst.doItemsLayout()
-
-    def _adjust_edit_height(self):
-        """根据内容调整编辑框高度，不超过最大高度，超出可滚动"""
-        doc = self.edit_text.document()
-        doc_height = int(doc.size().height() + 10)
-        height = max(36, min(doc_height, 200))
-        self.edit_text.setFixedHeight(height)
-        self._update_item_size()
-
-    def _start_edit(self):
-        """开始编辑"""
-        self._editing = True
-        self.text_widget.setVisible(False)
-        self.edit_widget.setVisible(True)
-        self._adjust_edit_height()
-        self.edit_text.setFocus()
-        # 选中文本
-        cursor = self.edit_text.textCursor()
-        cursor.select(cursor.Document)
-        self.edit_text.setTextCursor(cursor)
-
-    def _finish_edit(self):
-        """完成编辑"""
-        new_content = self.edit_text.toPlainText().strip()
-        if new_content and new_content != self._content:
-            self.edited.emit(self.memory_id, new_content)
-            self._content = new_content
-            self.content_label.setText(new_content)
-        self._cancel_edit()
-        # 编辑后更新自身的 sizeHint，让列表行高自适应
-        self.updateGeometry()
-        item = self._get_item()
-        if item:
-            item.setSizeHint(self.sizeHint())
-
-    def _get_item(self):
-        """反向查找当前 widget 所在的 QListWidgetItem"""
-        from qfluentwidgets import ListWidget
-
-        lst = self.parent()
-        while lst and not isinstance(lst, ListWidget):
-            lst = lst.parent()
-        if lst:
-            for i in range(lst.count()):
-                if lst.itemWidget(lst.item(i)) is self:
-                    return lst.item(i)
-        return None
-
-    def _on_focus_out(self, event):
-        """失去焦点时自动保存完成编辑"""
-        if self._editing:
-            self._finish_edit()
-        # 继续传递事件
-        if event:
-            event.ignore()
-
-    def _cancel_edit(self):
-        """取消编辑"""
-        self._editing = False
-        self.text_widget.setVisible(True)
-        self.edit_widget.setVisible(False)
-        self.edit_text.setText(self._content)
 
 
 class SingleInputDialog(MaskDialogBase):
@@ -808,10 +603,9 @@ class DropZoneWidget(QWidget):
 
 
 class MemoryCardContent(QWidget):
-    """记忆卡片内容区域 - 3 Tab 结构"""
+    """记忆卡片内容区域 - 关键文档 + 工作树（docs 单页）"""
 
     memorySaved = pyqtSignal(list)
-    projectNoteChanged = pyqtSignal(str, str)  # project, content
     workingDirChanged = pyqtSignal(str)  # 工作目录路径，空字符串=清除
 
     def __init__(self, memory_manager, parent=None):
@@ -821,7 +615,7 @@ class MemoryCardContent(QWidget):
         # 多窗口隔离：实例级工作目录缓存（{project: workdir_path}）
         # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
         self._instance_workdir: Dict[str, str] = {}
-        self._current_tab = TAB_ENTRY_MEMORIES
+        self._current_tab = TAB_KEY_DOCUMENTS
         self._search_filter = ""  # 搜索过滤文本
         self._init_ui()
 
@@ -848,12 +642,8 @@ class MemoryCardContent(QWidget):
             self._instance_workdir[project] = workdir or ""
         if self._current_project != project:
             self._current_project = project
-        # 强制刷新项目笔记和关键文档
-        self._load_project_note()
+        # 强制刷新关键文档
         self._load_key_documents()
-        # 修复：首次进入/切换项目时同步加载条目记忆，避免空白
-        if self._current_tab == TAB_ENTRY_MEMORIES:
-            self._load_entries()
 
     def _get_effective_workdir(self, project: str):
         """获取有效工作目录（多窗口隔离：实例缓存优先，回退 DB）
@@ -919,160 +709,12 @@ class MemoryCardContent(QWidget):
         stack_layout.setContentsMargins(0, 0, 0, 0)
         stack_layout.setSpacing(0)
 
-        # Tab 1: 条目记忆
-        self._tab_entries = self._create_entries_tab()
-        stack_layout.addWidget(self._tab_entries)
-
-        # Tab 2: 项目笔记
-        self._tab_notes = self._create_notes_tab()
-        self._tab_notes.setVisible(False)
-        stack_layout.addWidget(self._tab_notes)
-
-        # Tab 3: 关键文档
+        # 关键文档
         self._tab_docs = self._create_docs_tab()
         self._tab_docs.setVisible(False)
         stack_layout.addWidget(self._tab_docs)
 
         main_layout.addWidget(self.content_stack, 1)
-
-        # 修复：构建完成后若已有 memory_manager，立即加载条目记忆
-        if self._memory_manager is not None and self._current_tab == TAB_ENTRY_MEMORIES:
-            self._load_entries()
-
-    def _create_entries_tab(self) -> QWidget:
-        """创建条目记忆 Tab（搜索移到了头部）"""
-        widget = QWidget()
-        layout = QVBoxLayout(widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        # 添加区域（放在列表上方，方便添加新记忆后立即可见）
-        add_layout = QHBoxLayout()
-        add_layout.setSpacing(6)
-        # 使用自定义输入框，拦截回车键防止事件冒泡
-        self.entry_input = EntryInputLineEdit(self)
-        self.entry_input.setFixedHeight(28)
-        self.entry_input.setPlaceholderText("添加新的条目记忆...")
-        self.entry_input.setStyleSheet(f"""
-            QLineEdit {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 1px solid {Colors.BORDER};
-                color: {Colors.TEXT_PRIMARY};
-                padding: 4px 8px;
-                border-radius: 4px;
-                {get_font_family_css()} {font_size_css(12)}
-            }}
-        """)
-        self.entry_add_btn = PrimaryPushButton("添加", self)
-        self.entry_add_btn.setFixedSize(50, 28)
-        self.entry_add_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {Colors.INFO};
-                color: white;
-                border: none;
-                border-radius: 4px;
-                {font_size_css(12)}
-            }}
-            QPushButton:hover {{
-                background-color: {Colors.BORDER_ACCENT};
-            }}
-        """)
-        self.entry_add_btn.clicked.connect(self._add_entry)
-        # 连接自定义输入框的回车信号
-        self.entry_input.returnPressed.connect(self._add_entry)
-        add_layout.addWidget(self.entry_input, 1)
-        add_layout.addWidget(self.entry_add_btn)
-        layout.addLayout(add_layout)
-
-        # 记忆列表
-        self.entries_list = ListWidget(self)
-        self.entries_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.entries_list.setResizeMode(ListWidget.Adjust)
-        self.entries_list.setStyleSheet(f"""
-            QListWidget {{
-                background-color: {Colors.CARD_BG.format(alpha=180)};
-                border: 1px solid {Colors.BORDER};
-                color: {Colors.TEXT_PRIMARY};
-                border-radius: 6px;
-                {get_font_family_css()}
-            }}
-            QListWidget::item {{
-                padding: 0;
-                border-bottom: 1px solid {Colors.BORDER};
-            }}
-        """)
-        layout.addWidget(self.entries_list, 1)
-
-        return widget
-
-    def _create_notes_tab(self) -> QWidget:
-        """创建项目笔记 Tab"""
-        widget = QWidget()
-        main_layout = QVBoxLayout(widget)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(6)
-
-        # 顶部水平布局：左边项目名，右边字数/token统计
-        top_layout = QHBoxLayout()
-        top_layout.setSpacing(0)
-
-        # 项目方形 icon（缩写字母，18px 小尺寸）
-        self._notes_project_avatar = _SquareAvatar(
-            extract_project_initials(self._current_project), get_project_color(self._current_project), self, size=18
-        )
-        top_layout.addWidget(self._notes_project_avatar)
-
-        # 项目名标签
-        self.project_name_label = BodyLabel(f" {self._current_project}", self)
-        Colors.refresh()
-        self.project_name_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
-        )
-        top_layout.addWidget(self.project_name_label)
-
-        # 占位拉伸
-        top_layout.addStretch()
-
-        # 字数/token统计标签
-        self.notes_stats_label = BodyLabel("0 字 / 0 token", self)
-        self.notes_stats_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
-        )
-        top_layout.addWidget(self.notes_stats_label)
-
-        main_layout.addLayout(top_layout)
-
-        # Markdown 编辑器
-        self.notes_editor = TextEdit(self)
-        self.notes_editor.setPlaceholderText("在此记录项目笔记，支持 Markdown 格式...")
-        # 监听内容变化更新统计并触发自动保存（带节流）
-        self.notes_editor.textChanged.connect(self._update_notes_stats)
-        self.notes_editor.textChanged.connect(self._on_notes_changed)
-
-        # 自动保存定时器（节流防频繁保存）
-        self._auto_save_timer = QTimer(self)
-        self._auto_save_timer.setSingleShot(True)
-        self._auto_save_timer.setInterval(300)  # 300ms 去抖后保存
-        self._auto_save_timer.timeout.connect(self._save_project_note)
-
-        main_layout.addWidget(self.notes_editor, 1)
-
-        return widget
-
-    def _update_notes_stats(self):
-        """更新字数和 token 统计"""
-        content = self.notes_editor.toPlainText()
-        char_count = len(content)
-        # 简单估算 token：按中文字符约 1:1，英文约 4:1，这里用近似算法
-        # 中文占比高，按字符数的 0.8 估算
-        token_estimate = int(char_count * 0.8)
-        self.notes_stats_label.setText(f"{char_count:,} 字 / {token_estimate:,} token")
-
-    def _on_notes_changed(self):
-        """内容变化时触发自动保存（带节流）"""
-        # 重置定时器，用户持续输入时不会保存，停止 1 秒后才保存
-        if hasattr(self, "_auto_save_timer") and self._auto_save_timer:
-            self._auto_save_timer.start()
 
     def _create_docs_tab(self) -> QWidget:
         """创建关键文档 Tab"""
@@ -1235,22 +877,16 @@ class MemoryCardContent(QWidget):
         """切换 Tab"""
         self._current_tab = tab_key
 
-        self._tab_entries.setVisible(tab_key == TAB_ENTRY_MEMORIES)
-        self._tab_notes.setVisible(tab_key == TAB_PROJECT_NOTES)
         self._tab_docs.setVisible(tab_key == TAB_KEY_DOCUMENTS)
 
         self._refresh_current_tab()
 
     def _refresh_current_tab(self):
         """刷新当前 Tab 的内容"""
-        if self._current_tab == TAB_ENTRY_MEMORIES:
-            self._load_entries()
-        elif self._current_tab == TAB_PROJECT_NOTES:
-            self._load_project_note()
-        elif self._current_tab == TAB_KEY_DOCUMENTS:
+        if self._current_tab == TAB_KEY_DOCUMENTS:
             self._load_key_documents()
 
-    # ==================== 条目记忆操作 ====================
+    # ==================== 样式刷新 ====================
 
     def refresh_style(self):
         """响应主题切换：刷新所有样式"""
@@ -1291,56 +927,6 @@ class MemoryCardContent(QWidget):
     def _refresh_child_styles(self):
         """刷新各个子组件独立样式（不继承自父级的）"""
         Colors.refresh()
-        # 条目列表
-        if hasattr(self, "entries_list"):
-            self.entries_list.setStyleSheet(f"""
-                QListWidget {{
-                    background-color: {Colors.CARD_BG.format(alpha=180)};
-                    border: 1px solid {Colors.BORDER};
-                    color: {Colors.TEXT_PRIMARY};
-                    border-radius: 6px;
-                    {get_font_family_css()}
-                }}
-                QListWidget::item {{
-                    padding: 0;
-                    border-bottom: 1px solid {Colors.BORDER};
-                }}
-            """)
-        # 条目输入框
-        if hasattr(self, "entry_input"):
-            self.entry_input.setStyleSheet(f"""
-                QLineEdit {{
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                        stop:0 {Colors.INPUT_BG_START}, stop:1 {Colors.INPUT_BG_END});
-                    border: 1px solid {Colors.INPUT_BORDER};
-                    color: {Colors.INPUT_TEXT};
-                    padding: 4px 8px;
-                    border-radius: 4px;
-                    {get_font_family_css()} {font_size_css(12)}
-                }}
-            """)
-        if hasattr(self, "entry_add_btn"):
-            self.entry_add_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: {Colors.INFO};
-                    color: white;
-                    border: none;
-                    border-radius: 4px;
-                    {font_size_css(12)}
-                }}
-                QPushButton:hover {{
-                    background-color: {Colors.BORDER_ACCENT};
-                }}
-            """)
-        # 项目笔记标签
-        if hasattr(self, "project_name_label"):
-            self.project_name_label.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
-            )
-        if hasattr(self, "notes_stats_label"):
-            self.notes_stats_label.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(11)} padding: 0 4px;"
-            )
         # 文档容器（虚线边框）
         docs_container = self.findChild(QWidget, "docsContainer")
         if docs_container:
@@ -1375,194 +961,7 @@ class MemoryCardContent(QWidget):
                 f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
             )
 
-    def _load_entries(self):
-        """加载条目记忆（使用 self._search_filter 过滤）"""
-        self.entries_list.clear()
-        memory_mgr = self._get_memory_manager()
-        if not memory_mgr:
-            return
-
-        entries = memory_mgr.get_entry_memories(self._search_filter, limit=9999)
-        for entry in entries:
-            memory_id = entry.get("id", "")
-            content = entry.get("content", "")
-            enabled = entry.get("enabled", True)
-            source = entry.get("source", "manual")
-
-            item = QListWidgetItem()
-            widget = EntryMemoryItemWidget(memory_id, content, enabled, source)
-            widget.deleted.connect(self._delete_entry)
-            widget.toggled.connect(self._toggle_entry)
-            widget.edited.connect(self._edit_entry)
-            self.entries_list.addItem(item)
-            self.entries_list.setItemWidget(item, widget)
-            item.setSizeHint(widget.sizeHint())
-
-    def _get_entry_item_size(self, content: str):
-        """仅作为 fallback 使用"""
-        from PyQt5.QtCore import QSize
-
-        return QSize(0, 44)
-
-    def set_search_filter(self, text: str):
-        """设置搜索过滤文本"""
-        self._search_filter = text.strip()
-        if self._current_tab == TAB_ENTRY_MEMORIES:
-            self._load_entries()
-        elif self._current_tab == TAB_PROJECT_NOTES:
-            self._search_in_notes()
-        elif self._current_tab == TAB_KEY_DOCUMENTS:
-            self._load_key_documents()
-
-    def _search_in_notes(self):
-        """在笔记编辑器内搜索文本"""
-        if not self._search_filter:
-            return
-        from PyQt5.QtGui import QTextCursor
-
-        # 查找文本并选中
-        cursor = self.notes_editor.textCursor()
-        cursor.movePosition(QTextCursor.Start)
-        self.notes_editor.setTextCursor(cursor)
-        found = self.notes_editor.find(self._search_filter)
-        if not found:
-            # 未找到时重置光标位置
-            cursor.movePosition(QTextCursor.Start)
-            self.notes_editor.setTextCursor(cursor)
-
-    def switch_tab(self, tab_id: str):
-        """切换标签（由头部标签按钮触发）"""
-        if self._current_tab != tab_id:
-            self._current_tab = tab_id
-            self._on_tab_changed(tab_id)
-
-    def detach_tab(self, tab_id: str):
-        """从内容栈摘除指定子页 widget（工作台一级页签拆分显示用）
-
-        摘除后该子页不再受 switch_tab/_on_tab_changed 的可见性管理
-        （可见性由外部一级页签容器接管），但数据加载/刷新入口不受影响。
-
-        Returns:
-            摘除的 QWidget；tab_id 非法时返回 None
-        """
-        mapping = {
-            TAB_ENTRY_MEMORIES: self._tab_entries,
-            TAB_PROJECT_NOTES: self._tab_notes,
-            TAB_KEY_DOCUMENTS: self._tab_docs,
-        }
-        widget = mapping.get(tab_id)
-        if widget is None:
-            return None
-        self.content_stack.layout().removeWidget(widget)
-        return widget
-
-    def set_active_tab(self, tab_id: str, refresh: bool = True):
-        """外部容器模式下同步激活子页（不动可见性，可见性由一级页签管）
-
-        Args:
-            tab_id: entries / notes / docs
-            refresh: True 时同时刷新该子页数据；False 仅同步内部状态
-                     （供一级页签切换时保持 _current_tab 与可见页一致，
-                      让 set_search_filter / set_project 的分发落对页）
-        """
-        if tab_id not in (TAB_ENTRY_MEMORIES, TAB_PROJECT_NOTES, TAB_KEY_DOCUMENTS):
-            return
-        self._current_tab = tab_id
-        if refresh:
-            self._refresh_current_tab()
-
-    def _add_entry(self):
-        """添加条目"""
-        content = self.entry_input.text().strip()
-        if not content:
-            return
-
-        memory_mgr = self._get_memory_manager()
-        if memory_mgr:
-            memory_mgr.add_entry_memory(content)
-
-        self.entry_input.clear()
-        # 清空后保持焦点在输入框，防止焦点转移导致卡片意外关闭
-        self.entry_input.setFocus()
-        self._load_entries()
-
-    def _delete_entry(self, memory_id: str):
-        """删除条目"""
-        memory_mgr = self._get_memory_manager()
-        if memory_mgr:
-            memory_mgr.delete_entry_memory(memory_id)
-        self._load_entries()
-
-    def _toggle_entry(self, memory_id: str, enabled: bool):
-        """切换条目"""
-        memory_mgr = self._get_memory_manager()
-        if memory_mgr:
-            memory_mgr.toggle_entry_memory(memory_id, enabled)
-
-    def _edit_entry(self, memory_id: str, content: str):
-        """编辑条目"""
-        memory_mgr = self._get_memory_manager()
-        if memory_mgr:
-            memory_mgr.update_entry_memory(memory_id, content)
-
     # ==================== 项目笔记操作 ====================
-
-    def _load_project_note(self, workdir_override: Optional[str] = None):
-        """加载项目笔记（从当前 workdir 的 AGENTS.md）
-
-        Args:
-            workdir_override: 调用方已算好的工作目录；非 None 时跳过 _get_effective_workdir 查询
-        """
-        memory_mgr = self._get_memory_manager()
-        if not memory_mgr:
-            return
-
-        workdir = (
-            (workdir_override or None)
-            if workdir_override is not None
-            else self._get_effective_workdir(self._current_project)
-        )
-        self.project_name_label.setText(f" {self._current_project}")
-        # 同步更新方形 avatar
-        if hasattr(self, "_notes_project_avatar"):
-            self._notes_project_avatar.set_project(self._current_project, get_project_color(self._current_project))
-
-        if not workdir:
-            # 未设定工作目录时，编辑器只读并显示提示
-            self.notes_editor.setPlainText("")
-            self.notes_editor.setPlaceholderText("⚠️ 请先在「关键文档」选项卡中添加项目根目录作为工作目录")
-            self.notes_editor.setReadOnly(True)
-            self._update_notes_stats()
-            return
-
-        # 有工作目录时，恢复正常可编辑状态
-        self.notes_editor.setReadOnly(False)
-        self.notes_editor.setPlaceholderText("在此记录项目笔记，支持 Markdown 格式...")
-
-        note = memory_mgr.get_or_create_project_note(self._current_project, workdir=workdir)
-        content = note.get("content", "") if note else ""
-        # 临时阻止 textChanged 信号（避免去抖保存触发）
-        self.notes_editor.blockSignals(True)
-        self.notes_editor.setPlainText(content)
-        self.notes_editor.blockSignals(False)
-        self._update_notes_stats()
-
-    def _save_project_note(self):
-        """保存项目笔记（写入当前 workdir 的 AGENTS.md）"""
-        memory_mgr = self._get_memory_manager()
-        if not memory_mgr:
-            return
-
-        workdir = self._get_effective_workdir(self._current_project)
-        if not workdir:
-            return  # 无工作目录时跳过保存
-
-        content = self.notes_editor.toPlainText()
-        success = memory_mgr.save_project_note(self._current_project, content, workdir=workdir)
-        if success:
-            self.projectNoteChanged.emit(self._current_project, content)
-
-    # ==================== 关键文档操作 ====================
 
     def _load_key_documents(self, workdir_override: Optional[str] = None):
         """加载关键文档（过滤掉 git_worktree 条目，但保留根目录视觉效果）

@@ -1,42 +1,244 @@
 # -*- coding: utf-8 -*-
-"""
-PreUserMessage Hook 函数 — 将条目记忆、关键文档、worktree 上下文格式化为 LLM 提示
+"""project_notes.py — assistant_hub hooks（项目笔记 + 项目上下文）
 
-所有数据由 backend 预取后通过 context 传入，本函数不做任何文件 I/O，
-仅负责格式化输出。
+两个 hook（替代原 system 插件的 read_project_notes / format_memory_context:hook_git）：
 
-注意：PreUserMessage hook 会在每轮用户消息前执行，每次注入最新状态的
-记忆和上下文到 session.messages 中。旧轮次的 hook 消息会在 round 截断时
-被自动清理（由 get_user_round_ranges 控制 round 边界），因此虽然 session
-中可能有多个 PreUserMessage 条目，但只有最近几轮才会保留在上下文中。
+1. ``hook_notes``（BuildSystemPrompt）：读取 {workdir}/AGENTS.md 项目笔记注入
+   （不存在时用默认模板创建）。
+2. ``hook_context``（PreUserMessage）：注入项目根目录路径规则 + git 仓库状态
+   （自动 git init / .gitignore 生成等副作用逻辑自原 system hook 原样迁移）。
 
-动态内容（worktree/分支信息/路径建议）从 SessionStart 移至此，
-确保分支切换等中途操作后 LLM 能感知最新状态。
+注入开关（助手级配置，主智能体生效）：
+- ``Assistant.project_notes_enabled``   → hook_notes
+- ``Assistant.project_context_enabled`` → hook_context
+子智能体（current_role=subagent）始终注入；主智能体无激活助手时不注入。
 
-项目上下文段优先复用 Git 状态输出（与原 .drifox/plugins/git-status 同款格式）：
-    - 项目已是 git 仓库 → 直接采集状态
-    - 项目不是 git 仓库但系统装了 git → 自动 git init + 空 commit，再采集
-    - git 未安装 / git init 失败 → fallback 到 backend 预取的 worktree 字段
+实现说明：
+- HookWorker 经 spec_from_file_location 独立加载本文件（无 package 上下文），
+  禁止相对导入；assistant_manager 模块按路径加载并缓存 sys.modules
+  （模块名与 ui/hooks 侧一致 → AssistantManager 单例共享）。
 """
 
 from __future__ import annotations
 
 import concurrent.futures
+import importlib.util
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 from loguru import logger
 
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_MANAGER_MODULE_NAME = "assistant_hub_manager"
+
 # Windows 专属：防止 subprocess 调 git 时弹出黑色 cmd 窗口
-# CREATE_NO_WINDOW = 0x08000000，仅 Windows 有效
 _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 # ============================================================
-# Git 状态收集（移植自 .drifox/plugins/git-status/hooks/git_status.py）
+# AssistantManager 加载（与 inject_assistant.py 同款约定）
+# ============================================================
+
+
+def _get_manager():
+    """按路径加载 assistant_manager.py（sys.modules 单例，与 ui/hooks 共享）。"""
+    mod = sys.modules.get(_MANAGER_MODULE_NAME)
+    if mod is not None:
+        return mod.AssistantManager.get_instance()
+    source = _PLUGIN_ROOT / "assistant_manager.py"
+    try:
+        mtime = source.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    spec = importlib.util.spec_from_file_location(_MANAGER_MODULE_NAME, str(source))
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[_MANAGER_MODULE_NAME] = module
+    try:
+        spec.loader.exec_module(module)
+        module._source_mtime = mtime
+    except Exception as e:
+        logger.error(f"[assistant_hub.project_notes] 加载 assistant_manager 失败: {e}")
+        return None
+    return module.AssistantManager.get_instance()
+
+
+def _enabled_for_primary(context: Dict[str, Any], attr: str) -> bool:
+    """判断当前会话是否允许注入。
+
+    - 子智能体（current_role != "primary"）→ 始终允许
+    - 主智能体 → 读当前激活助手的开关字段；无激活助手 → 不允许
+    """
+    ctx = context or {}
+    if ctx.get("current_role") != "primary":
+        return True
+    try:
+        mgr = _get_manager()
+        if mgr is None:
+            return False
+        aid = mgr.active_id()
+        if not aid or not mgr.has(aid):
+            return False
+        a = mgr.get(aid)
+        return bool(getattr(a, attr, True))
+    except Exception as e:
+        logger.warning(f"[assistant_hub.project_notes] 读取助手开关失败: {e}")
+        return False
+
+
+# ============================================================
+# 项目笔记 hook（原 system 插件 read_project_notes.py 迁移）
+# ============================================================
+
+INITIAL_TEMPLATE = """# 项目开发规范
+
+本文件为 AI Agent 提供项目操作手册与约束清单，确保 Agent 行为可控、可复现。
+
+---
+
+## 1. 目标与边界
+
+### 允许的操作
+- **有关键文档存在时，优先以关键文档作为项目路径进行探索**
+- 读取、修改顶层文档：`README.md`、`AGENTS.md`、`CONTRIBUTING.md` 等
+- 读取、修改 `docs/`、`prompts/`、`skills/`、`tools/config/`、`tools/external/` 下的文档与代码
+- 执行项目规定的 lint、检查、构建命令
+- 新增/修改功能、修复问题
+- 提交符合规范的 commit
+
+### 禁止的操作
+- 修改 `.github/workflows/` 中的 CI 配置（除非任务明确要求）
+- 修改 `LICENSE`、`CODE_OF_CONDUCT.md`
+- 在代码中硬编码密钥、Token 或敏感凭证
+- 未经确认的大范围重构
+
+### 敏感区域（禁止自动修改）
+- `.github/workflows/*.yml` - CI/CD 配置
+- `.env*` 文件（如存在）
+
+---
+
+## 2. 推荐执行路径
+
+```bash
+# 1. 拉取最新代码
+git pull --rebase origin develop
+
+# 2. 初始化依赖（如有需要）
+# ... 项目特有命令
+
+# 3. 运行 lint 检查
+# ... 项目特有命令
+
+# 4. 执行修改任务
+# ...
+
+# 5. 再次验证
+# ... 项目特有检查命令
+
+# 6. 提交变更
+git add -A
+git commit -m "feat|fix|docs|chore: scope - summary"
+git push origin develop
+```
+
+---
+
+## 3. 修改约束
+
+### 架构原则
+- 保持根目录扁平，避免巨石文件
+- 遵循项目现有架构，不随意改动
+
+### 禁止行为
+- 禁止"顺手重构/大范围改动"除非任务明确要求
+- 禁止删除现有测试用例（除非任务要求）
+- 禁止在代码中硬编码敏感信息
+
+---
+
+## 4. 风格与质量标准
+
+### 格式化工具
+- 遵循项目现有代码风格
+- 使用项目已有的格式化工具
+
+### 命名约定
+- 文档、注释、日志使用中文
+- 代码符号统一英文且语义直白
+- 文件名小写加中划线或下划线（遵循现有风格）
+
+### 设计品味
+- 优先消除分支与重复
+- 函数单一职责且短小
+
+---
+
+## 5. 提交规范
+
+遵循简化 Conventional Commits：
+```
+feat|fix|docs|chore|refactor|test: scope - summary
+```
+
+---
+
+## 6. 强制同步规则
+
+**任何功能/命令/配置/目录/工作流变化必须同步更新相关文档**
+
+不确定的内容用 TODO 标注，不允许猜测。
+"""
+
+
+def hook_notes(event: str, context: dict) -> str:
+    """BuildSystemPrompt hook：注入项目笔记（AGENTS.md），按助手开关控制"""
+    if not _enabled_for_primary(context, "project_notes_enabled"):
+        return ""
+
+    workdir = (context or {}).get("project_root", "")
+    project_name = (context or {}).get("project_name", "")
+
+    if not workdir:
+        # compaction/gateway 等无真实项目上下文的情况，跳过注入
+        logger.debug(f"[assistant_hub.project_notes] 无项目工作目录，跳过项目笔记: project_name={project_name}")
+        return ""
+
+    agents_path = Path(workdir) / "AGENTS.md"
+    notes_content = ""
+
+    if agents_path.exists():
+        try:
+            notes_content = agents_path.read_text(encoding="utf-8")
+            # 兜底修复：文件存在但内容为空/纯空白时，按"未初始化"处理
+            if not notes_content.strip():
+                logger.warning(f"[assistant_hub.project_notes] AGENTS.md 存在但内容为空，重新初始化: {agents_path}")
+                agents_path.write_text(INITIAL_TEMPLATE, encoding="utf-8")
+                notes_content = INITIAL_TEMPLATE
+        except Exception as e:
+            logger.error(f"[assistant_hub.project_notes] 读取 {agents_path} 失败: {e}")
+            notes_content = ""
+    else:
+        # 文件不存在 → 用默认模板创建（新建项目首次运行此路径）
+        try:
+            agents_path.parent.mkdir(parents=True, exist_ok=True)
+            agents_path.write_text(INITIAL_TEMPLATE, encoding="utf-8")
+            logger.info(f"[assistant_hub.project_notes] 已创建项目笔记文件: {agents_path}")
+            notes_content = INITIAL_TEMPLATE
+        except Exception as e:
+            logger.error(f"[assistant_hub.project_notes] 创建 {agents_path} 失败: {e}")
+
+    if notes_content:
+        return f"## 项目笔记\n[当前项目: {project_name}]\n{notes_content}"
+    return f"## 项目笔记\n[当前项目: {project_name}]\n（项目笔记为空）"
+
+
+# ============================================================
+# Git 状态采集（自 system 插件 format_memory_context.py 原样迁移）
 # ============================================================
 
 _GIT_TIMEOUT = 1.5
@@ -45,11 +247,10 @@ _MAX_STAGED_ITEMS = 30
 _MAX_UNSTAGED_ITEMS = 30
 _MAX_UNTRACKED_ITEMS = 20
 _MAX_RECENT_COMMITS = 5
-# 同一 cwd 只尝试一次自动 git init，避免每条用户消息都触发破坏性操作
+# 同一 cwd 只尝试一次自动 git init，避免重复触发破坏性操作
 _AUTO_INITED: set[str] = set()
 
-# === 性能优化（方案 A + B）===
-# 同 cwd 在 TTL 秒内复用 git 命令结果，避免每轮 PreUserMessage 反复跑 8 次 git
+# 同 cwd 在 TTL 秒内复用 git 命令结果，避免反复跑 git
 _GIT_CACHE_TTL = 5.0
 _GIT_CACHE: dict[str, tuple[float, Any]] = {}
 # git 是否安装：一个进程只检查一次
@@ -57,10 +258,7 @@ _GIT_AVAILABLE: bool | None = None
 
 
 def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
-    """执行 git 命令并返回 (stdout, stderr, returncode)
-
-    所有异常都被捕获并转为 returncode=-1，不抛错中断流程。
-    """
+    """执行 git 命令并返回 (stdout, stderr, returncode)，异常转为 returncode=-1"""
     try:
         result = subprocess.run(
             ["git", *args],
@@ -72,7 +270,6 @@ def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
             timeout=_GIT_TIMEOUT,
             creationflags=_CREATE_NO_WINDOW,
         )
-        # 只去末尾换行符，保留前导空格（porcelain X=' ' 是有效信息）
         return result.stdout.rstrip("\n"), result.stderr.rstrip("\n"), result.returncode
     except subprocess.TimeoutExpired:
         return "", "timeout", -1
@@ -83,10 +280,7 @@ def _run_git(cwd: str, *args: str) -> tuple[str, str, int]:
 
 
 def _is_git_available() -> bool:
-    """检查系统是否安装了 git（cwd='.' 不依赖具体目录）
-
-    进程级缓存：只在第一次调用时实际执行 git --version
-    """
+    """检查系统是否安装了 git（进程级缓存，只实际执行一次 git --version）"""
     global _GIT_AVAILABLE
     if _GIT_AVAILABLE is None:
         _, _, code = _run_git(".", "--version")
@@ -106,60 +300,34 @@ def _is_git_repo(cwd: str) -> bool:
 
 
 def _resolve_pyinstaller_path(cwd: str) -> str:
-    """处理 PyInstaller 打包后的路径问题
-
-    PyInstaller 打包后运行在 _internal 临时目录中，此时：
-    - cwd 可能是 _internal/.drifox/workspaces/xxx/，而非真实项目目录
-    - 真实的 git 仓库在 exe 同级目录或用户指定的源码目录
-
-    返回可用的真实项目路径。如果找不到，返回原始 cwd。
-    """
+    """处理 PyInstaller 打包后的路径问题（_internal 临时目录 → 真实项目目录）"""
     resolved = str(Path(cwd).resolve())
 
-    # 如果不在 _internal 目录下，直接返回
     if "_internal" not in resolved:
         return resolved
 
-    # 在 _internal 下，尝试向上查找可能的真实项目目录
-    # 常见模式：xxx/_internal/.drifox/workspaces/项目名
-    #           xxx/_internal/项目名/（单项目打包）
-    #           xxx/_internal/（直接运行在 _internal 内）
-
-    # 尝试向上查找真实项目目录
-    internal_dir = Path(resolved).parent  # 向上到 _internal
+    internal_dir = Path(resolved).parent
     parent_of_internal = internal_dir.parent
     project_name = Path(resolved).name
 
-    # 检查 _internal 同级是否有同名目录（源码）
     potential_src = parent_of_internal / project_name
     if potential_src.exists() and potential_src.is_dir():
-        logger.info(f"[format_memory_context] PyInstaller 检测：使用源码目录 {potential_src}")
+        logger.info(f"[assistant_hub.project_notes] PyInstaller 检测：使用源码目录 {potential_src}")
         return str(potential_src)
 
-    # 检查 _internal 同级是否有 .git
     if (parent_of_internal / ".git").exists():
-        logger.info(f"[format_memory_context] PyInstaller 检测：使用父目录 {parent_of_internal}")
+        logger.info(f"[assistant_hub.project_notes] PyInstaller 检测：使用父目录 {parent_of_internal}")
         return str(parent_of_internal)
 
-    # 返回 resolved，让后续逻辑自然失败并 fallback
     return resolved
 
 
 def _auto_git_init(cwd: str) -> bool:
-    """若项目不是 git 仓库但系统装了 git，则自动 git init + 空 commit
-
-    用于让 model 在非 git 项目里也能感知到默认分支名（init 后立刻有 main/master）。
-
-    Returns:
-        True  → 项目已经是 git 仓库（无论是否本次 init）
-        False → 没有 git 或 init 失败
-    """
+    """若项目不是 git 仓库但系统装了 git，则自动 git init + 空 commit"""
     if not cwd:
         return False
 
     resolved = str(Path(cwd).resolve())
-
-    # PyInstaller 打包后处理：尝试找到真实源码目录
     resolved = _resolve_pyinstaller_path(resolved)
 
     # 安全检查：避免在根目录 / 家目录 / PyInstaller 临时目录中 init
@@ -167,40 +335,30 @@ def _auto_git_init(cwd: str) -> bool:
     dangerous_parents = {Path("/"), Path.home(), Path(sys.executable).parent if getattr(sys, "frozen", False) else None}
     dangerous_parents.discard(None)
     if resolved_path in dangerous_parents or "_internal" in resolved:
-        logger.warning(f"[format_memory_context] 安全检查：拒绝在危险位置 git init: {resolved}")
+        logger.warning(f"[assistant_hub.project_notes] 安全检查：拒绝在危险位置 git init: {resolved}")
         return False
 
     if _is_git_repo(resolved):
         return True
     if not _is_git_available():
         return False
-    # 同一目录只 init 一次，避免每轮用户消息都触发
     if resolved in _AUTO_INITED:
         return _is_git_repo(resolved)
     _AUTO_INITED.add(resolved)
 
-    logger.info(f"[format_memory_context] 自动 git init: {resolved}")
+    logger.info(f"[assistant_hub.project_notes] 自动 git init: {resolved}")
     _, _, code = _run_git(resolved, "init")
     if code != 0:
         return False
-    # 空 commit 让默认分支立即产生（否则 branch --show-current 返回空）
     _, stderr, code = _run_git(resolved, "commit", "--allow-empty", "-m", "init")
     if code != 0:
-        logger.warning(f"[format_memory_context] 空 commit 失败: {stderr}")
+        logger.warning(f"[assistant_hub.project_notes] 空 commit 失败: {stderr}")
         return False
     return _is_git_repo(resolved)
 
 
 def _parse_branch_header(line: str) -> dict[str, Any]:
-    """解析 `git status --porcelain=v1 --branch` 输出里的 ## 头行
-
-    支持：
-        ## dev                              → branch=dev, ahead=0, behind=0
-        ## dev...origin/dev                 → branch=dev
-        ## dev...origin/dev [ahead 2, behind 0]
-        ## HEAD (detached at abc123)        → branch="(detached @ abc123)"
-        ## master (root-commit) ...         → branch=master
-    """
+    """解析 `git status --porcelain=v1 --branch` 输出里的 ## 头行"""
     out: dict[str, Any] = {"branch": "", "ahead": 0, "behind": 0, "is_detached": False}
     if line.startswith("## HEAD (detached at "):
         m = re.search(r"detached at ([0-9a-f]+)", line)
@@ -209,8 +367,6 @@ def _parse_branch_header(line: str) -> dict[str, Any]:
             out["is_detached"] = True
         return out
 
-    # 标准格式：## branch[...upstream] [ahead N, behind N]
-    # branch 用 greedy [^\s.]+：从首字符开始匹配，遇到空白或点停止
     m = re.match(
         r"^## (?P<branch>[^\s.]+)(?:\.{3}(?P<up>[^\s\[]+))?"
         r"(?: \[ahead (?P<ahead>\d+)(?:, behind (?P<behind>\d+))?\])?",
@@ -226,10 +382,7 @@ def _parse_branch_header(line: str) -> dict[str, Any]:
 
 
 def _parse_status_v1(out: str) -> dict[str, Any]:
-    """解析 git status --porcelain=v1 --branch 的输出
-
-    头行 ## ... 携带分支信息；其余 XY path 行携带文件状态。
-    """
+    """解析 git status --porcelain=v1 --branch 的输出"""
     files: dict[str, list] = {"staged": [], "unstaged": [], "untracked": []}
     branch_info: dict[str, Any] = {"branch": "", "ahead": 0, "behind": 0, "is_detached": False}
 
@@ -273,24 +426,7 @@ def _parse_numstat(out: str) -> dict[str, tuple[int, int]]:
 
 
 def _collect_all_git(cwd: str) -> dict[str, Any]:
-    """并发跑所有 git 命令并合并结果。结果按 cwd 缓存 5 秒。
-
-    命令合并：原本 8 个串行命令 → 4 个并行命令：
-        1. git status --porcelain=v1 --branch   （分支 + ahead/behind + 文件状态）
-        2. git diff --numstat                    （每个文件 diff 行数）
-        3. git log -n5 --pretty=format:%h %s (%cr) （最近 commits）
-        4. git stash list                        （stash 数）
-
-    Returns:
-        {
-            "branch": str, "ahead": int, "behind": int, "is_detached": bool,
-            "files": {"staged": [...], "unstaged": [...], "untracked": [...]},
-            "diff_stats": {path: (added, removed)},
-            "stash_count": int,
-            "commits": list[str],
-        }
-    """
-    # 5 秒内同 cwd 复用
+    """并发跑所有 git 命令并合并结果。结果按 cwd 缓存 5 秒。"""
     now = time.monotonic()
     cached = _GIT_CACHE.get(cwd)
     if cached is not None:
@@ -394,7 +530,7 @@ def _format_file_list(
     label: str,
     diff_stats: dict[str, tuple[int, int]] | None = None,
 ) -> list[str]:
-    """格式化文件列表，可选附加每文件 diff 行数 (Opt 1: 内联变更统计)"""
+    """格式化文件列表，可选附加每文件 diff 行数"""
     if not items:
         return []
     lines = [f"- {label} ({len(items)}):"]
@@ -438,7 +574,7 @@ def _format_recent_commits(commits: list[str]) -> str:
     return "\n".join(lines)
 
 
-# 疑似临时调试文件命名模式（Opt 4: 脏文件提示）
+# 疑似临时调试文件命名模式
 _TEMP_FILE_PATTERNS = (
     "_diag",
     ".diag",
@@ -496,7 +632,7 @@ _GITIGNORE_SECTIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
 )
-# 同一 cwd 只处理一次 .gitignore（避免每轮用户消息都写文件）
+# 同一 cwd 只处理一次 .gitignore
 _GITIGNORE_UPDATED: set[str] = set()
 
 
@@ -513,18 +649,7 @@ def _detect_temp_files(untracked: list[str]) -> list[str]:
 
 
 def _auto_generate_gitignore(cwd: str) -> dict[str, Any]:
-    """按需自动生成 .gitignore
-
-    策略：
-        1. 项目已有 .gitignore → 不修改（noop，尊重用户已有配置）
-        2. 项目无 .gitignore → 创建完整版（按 section 分组 + 注释）
-        3. 已处理过的 cwd 不再重复处理（同会话内 set 缓存）
-
-    Returns:
-        {"action": "created"|"noop",
-         "added": int,                # 写入的规则条数
-         "sections": list[str]}       # 涉及到的 section 名
-    """
+    """按需自动生成 .gitignore（已有则不动，同 cwd 只处理一次）"""
     if not cwd:
         return {"action": "noop", "added": 0, "sections": []}
     norm = str(Path(cwd).resolve())
@@ -534,13 +659,11 @@ def _auto_generate_gitignore(cwd: str) -> dict[str, Any]:
 
     gitignore = Path(cwd) / ".gitignore"
 
-    # 已有 .gitignore → 不强制修改
     if gitignore.exists():
         return {"action": "noop", "added": 0, "sections": []}
 
-    # 无 .gitignore → 整文件创建
     lines = [
-        "# .gitignore (auto-generated by format_memory_context hook)",
+        "# .gitignore (auto-generated by assistant_hub project_notes hook)",
         "# 按需调整即可。",
     ]
     total = 0
@@ -561,12 +684,7 @@ def _auto_generate_gitignore(cwd: str) -> dict[str, Any]:
 
 
 def _build_git_status_block(cwd: str) -> list[str] | None:
-    """组装 Git 状态段，返回 None 表示不可用（让调用方 fallback）
-
-    一次性从 _collect_all_git 拿到所有数据（已并发 + 已缓存），
-    本函数只负责格式化，不再做任何 subprocess 调用。
-    """
-    # 统一使用 resolved 绝对路径，确保与 _auto_git_init 内部一致
+    """组装 Git 状态段，返回 None 表示不可用"""
     resolved = str(Path(cwd).resolve())
     if not _auto_git_init(resolved):
         return None
@@ -587,9 +705,6 @@ def _build_git_status_block(cwd: str) -> list[str] | None:
         parts.append(f"**Stash**: {stash_count} 条未保存的工作")
     parts.extend(_format_status_section(files, diff_stats))
 
-    # 自动处理 .gitignore（无条件跑一次，缓存保证同 resolved 只处理一次）：
-    #   - 无 .gitignore → 创建完整版
-    #   - 已有 → 不修改（尊重已有配置）
     gi = _auto_generate_gitignore(resolved)
     if gi["action"] == "created":
         n = gi["added"]
@@ -598,7 +713,6 @@ def _build_git_status_block(cwd: str) -> list[str] | None:
             f"✅ 已自动创建 `.gitignore`（{n} 条规则，覆盖 {len(gi['sections'])} 类：{'、'.join(gi['sections'])}）"
         )
 
-    # 临时文件提示（Opt 4）
     temp_files = _detect_temp_files(files["untracked"])
     if temp_files:
         names = ", ".join(f"`{p}`" for p in temp_files[:3])
@@ -616,93 +730,27 @@ def _build_git_status_block(cwd: str) -> list[str] | None:
 
 
 # ============================================================
-# Hook 入口
+# 项目上下文 hook（原 format_memory_context:hook_git 迁移，保持 PreUserMessage）
 # ============================================================
 
 
-def hook(event: str, context: dict) -> str:
-    """注入条目记忆 + 关键文档（长期记忆）
-
-    Args:
-        event: 事件名称（PreUserMessage）
-        context: 由 backend 预取的上下文，含：
-            - entry_memories: list[str] 条目记忆列表
-            - key_documents: list[dict] 关键文档列表
-
-    Returns:
-        格式化的长期记忆字符串
-    """
-    entry_memories = context.get("entry_memories", [])
-    key_documents = context.get("key_documents", [])
-
-    mem_lines = ["### 条目记忆"]
-    if entry_memories:
-        for content in entry_memories:
-            mem_lines.append(f"- {content}")
-    else:
-        mem_lines.append("- 暂无条目记忆")
-    mem_lines.append("")
-
-    mem_lines.append("### 关键文档")
-    if key_documents:
-        for doc in key_documents:
-            file_name = doc.get("file_name", "")
-            display = doc.get("display", "")
-            is_url = doc.get("is_url", False)
-            is_wd = doc.get("is_wd", False)
-            if is_wd:
-                wd_display = display or file_name
-                mem_lines.append(f"- {file_name}（工作目录: {wd_display}）")
-            elif is_url:
-                mem_lines.append(f"- 🔗 [{file_name}]({display})")
-            else:
-                mem_lines.append(f"- {file_name} ({display})")
-    else:
-        mem_lines.append("- 暂无关键文档")
-
-    if not entry_memories and not key_documents:
+def hook_context(event: str, context: dict) -> str:
+    """PreUserMessage hook：注入项目根目录路径规则 + git 仓库状态，按助手开关控制"""
+    if not _enabled_for_primary(context, "project_context_enabled"):
         return ""
-    return "\n".join(mem_lines)
 
-
-def hook_git(event: str, context: dict) -> str:
-    """注入项目上下文 + Git 仓库状态
-
-    Args:
-        event: 事件名称（PreUserMessage）
-        context: 由 backend 预取的上下文，含：
-            - project_root: str 当前窗口工作目录
-            - project_name: str 当前项目名
-            - worktree: dict (可选) repo_name/current_branch/workdir/is_worktree/other_branches
-
-    Returns:
-        格式化的项目上下文字符串（含 Git 状态）
-    """
-    project_root = context.get("project_root", "")
-    worktree = context.get("worktree")
-
+    project_root = (context or {}).get("project_root", "")
     if not project_root:
         return ""
 
-    ctx_lines = []
+    ctx_lines = ["## 项目上下文"]
     ctx_lines.append(f"- 项目根目录: {project_root}")
     ctx_lines.append("- 根目录内：用相对路径（如 `src/main.py`），节省 token")
     ctx_lines.append("- 根目录外：用绝对路径")
 
-    git_block = _build_git_status_block(project_root) if project_root else None
+    git_block = _build_git_status_block(project_root)
     if git_block:
         ctx_lines.append("")
         ctx_lines.extend(git_block)
-    elif worktree:
-        ctx_lines.append("")
-        ctx_lines.append("### 当前 Worktree")
-        ctx_lines.append(f"- 仓库: {worktree.get('repo_name', '')}")
-        ctx_lines.append(f"- 当前分支: {worktree.get('current_branch', '')}")
-        ctx_lines.append(f"- 工作目录: {worktree.get('workdir', project_root)}")
-        if worktree.get("is_worktree"):
-            ctx_lines.append("- ⚠️ 当前在 worktree 分支上工作，文件操作不影响主仓库代码")
-        other_branches = worktree.get("other_branches", [])
-        if other_branches:
-            ctx_lines.append(f"- 其他分支: {', '.join(other_branches)}")
 
     return "\n".join(ctx_lines)
