@@ -2492,7 +2492,7 @@ class FileMentionObject(QObject, QTextObjectInterface):
         """胶囊尺寸（由文档布局在排版时查询）"""
         name, fm = self._name_and_metrics(doc, format)
         text_w = fm.horizontalAdvance(fm.elidedText(name, Qt.ElideMiddle, self._MAX_TEXT_WIDTH))
-        width = self._PAD_LEFT + text_w + self._PAD_RIGHT
+        width = self._PAD_LEFT + self._ICON_SIZE + self._GAP + text_w + self._PAD_RIGHT
         return QSizeF(width, self._HEIGHT)
 
     def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002
@@ -2579,7 +2579,7 @@ class AssistantMentionObject(QObject, QTextObjectInterface):
     def intrinsicSize(self, doc, posInDocument, format) -> QSizeF:  # noqa: A002
         name, fm = self._name_and_metrics(doc, format)
         text_w = fm.horizontalAdvance(fm.elidedText(name, Qt.ElideRight, self._MAX_TEXT_WIDTH))
-        width = self._PAD_LEFT + self._ICON_SIZE + self._GAP + text_w + self._PAD_RIGHT
+        width = self._PAD_LEFT + text_w + self._PAD_RIGHT
         return QSizeF(width, self._HEIGHT)
 
     def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002
