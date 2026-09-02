@@ -21,6 +21,10 @@ from typing import Optional
 
 _CLEAN_EXIT_MARK = "=== clean exit ==="
 
+# WER 报告根目录（ReportQueue/ReportArchive 存 AppCrash_<exe> 崩溃报告），
+# 模块常量便于测试 monkeypatch 重定向
+_WER_REPORT_BASE = Path(r"C:\ProgramData\Microsoft\Windows\WER")
+
 # 模块级持有文件句柄：faulthandler 要求 dump 期间 fd 存活，
 # 句柄被 GC 关闭后崩溃时将无法写入
 _crash_file = None
@@ -49,16 +53,16 @@ def install_crash_handler(logs_dir: Path) -> Optional[Path]:
 
 
 def _setup_wer_localdumps(crash_dir: Path) -> Optional[Path]:
-    """配置 WER LocalDumps：原生崩溃时系统自动写完整 minidump 到 crash_dir/dumps/。
+    """配置 WER LocalDumps（HKLM）：原生崩溃时系统自动写完整 minidump。
 
     faulthandler 在 Windows 拿不到 C 栈（CPython 实现依赖 glibc backtrace(3)，
     Windows 无此 API），WER 的 .dmp 由系统 DbgHelp 生成，含 C 栈/寄存器/模块
-    列表，是 Windows 上拿 C 栈的正道；与 faulthandler 兼容（微软文档明示二者
-    共存）。分析：``cdb -z xxx.dmp -c "!analyze -v;q"``。
+    列表。分析：``cdb -z xxx.dmp -c "!analyze -v;q"``。
 
-    仅打包环境（sys.frozen）写注册表：dev 环境给 python.exe 全局收集会误伤
-    其它 Python 进程。HKCU 无需管理员权限；失败静默，不阻塞启动。
-    返回 dumps 目录；未配置（非 Windows/非打包/失败）返回 None。
+    LocalDumps 只认 HKLM（HKCU 不生效，已实测），写 HKLM 需管理员权限：
+    打包运行期通常无权限 → 失败静默，降级靠 WER 默认报告（Report.wer，
+    见 _nearby_wer_report）；安装器提权场景可成功写入。
+    返回 dumps 目录；未配置返回 None。
     """
     if sys.platform != "win32" or not getattr(sys, "frozen", False):
         return None
@@ -68,8 +72,8 @@ def _setup_wer_localdumps(crash_dir: Path) -> Optional[Path]:
         dumps_dir = Path(crash_dir) / "dumps"
         dumps_dir.mkdir(parents=True, exist_ok=True)
         app_exe = Path(sys.executable).name  # PyInstaller 产物名，如 Drifox.exe
-        key_path = rf"Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\{app_exe}"
-        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+        key_path = rf"SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\{app_exe}"
+        with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
             winreg.SetValueEx(key, "DumpFolder", 0, winreg.REG_EXPAND_SZ, str(dumps_dir))
             winreg.SetValueEx(key, "DumpType", 0, winreg.REG_DWORD, 1)  # 1=minidump
             winreg.SetValueEx(key, "DumpCount", 0, winreg.REG_DWORD, 5)
@@ -133,6 +137,38 @@ def _nearby_wer_dump(crash_log: Path, window_s: float = 600.0) -> Optional[str]:
         return None
 
 
+def _nearby_wer_report(crash_log: Path, window_s: float = 600.0) -> Optional[str]:
+    """扫描系统 WER 报告目录，找同窗口期本应用的崩溃报告（Report.wer）。
+
+    WER 默认行为：崩溃后在 ReportQueue/ReportArchive 留 Report.wer
+    （UTF-16 文本，含崩溃模块签名如 P1=exe、P4=Qt5Core.dll、P7=异常码），
+    .dmp 则默认不保留。此路径零权限、零配置，是对 LocalDumps（需管理员
+    写 HKLM）失败时的兜底取证。返回提示文案；无关联报告返回 None。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        crash_log = Path(crash_log)
+        exe_name = Path(sys.executable).stem
+        best = None
+        for sub in ("ReportQueue", "ReportArchive"):
+            for rep in (_WER_REPORT_BASE / sub).glob(f"AppCrash_{exe_name}_*"):
+                wer = rep / "Report.wer"
+                if not wer.is_file():
+                    continue
+                mtime = wer.stat().st_mtime
+                if abs(mtime - crash_log.stat().st_mtime) > window_s:
+                    continue
+                if best is None or mtime > best.stat().st_mtime:
+                    best = wer
+        if best is None:
+            return None
+        ts = time.strftime("%H:%M:%S", time.localtime(best.stat().st_mtime))
+        return f"系统崩溃报告（含崩溃模块签名，请一并回传）：{best.parent}（{ts}）"
+    except Exception:
+        return None
+
+
 def prompt_crash_report(dump_path: Path, parent=None) -> None:
     """弹窗展示上次崩溃摘要，并提供打开报告目录的入口。
 
@@ -156,8 +192,8 @@ def prompt_crash_report(dump_path: Path, parent=None) -> None:
         if len(lines) > 12:
             excerpt += "\n..."
 
-        # 关联同一次崩溃的 WER minidump（±10 分钟窗口）：含 C 栈，一并提示发送
-        wer_note = _nearby_wer_dump(dump_path)
+        # 关联同一次崩溃的系统级取证（±10 分钟窗口）
+        wer_note = _nearby_wer_dump(dump_path) or _nearby_wer_report(dump_path)
         if wer_note:
             excerpt += f"\n\n{wer_note}"
 

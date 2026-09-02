@@ -164,7 +164,7 @@ class Assistant:
             created_at=str(data.get("created_at") or ""),
             updated_at=str(data.get("updated_at") or ""),
         )
-        # 旧 yuan 值映射到 v2 persona id（kong→none、butter/ming→build）
+        # 旧 yuan 值映射到 v2 persona id（kong→none）
         a.yuan = _MIGRATE_YUAN.get(a.yuan, a.yuan)
         return a
 
@@ -284,8 +284,8 @@ def _avatar_supported_exts() -> Tuple[str, ...]:
     return ("png", "jpg", "jpeg", "webp", "svg")
 
 
-# 旧 yuan 值 → v2 persona id（v2 人格体系：build/hanako/none + 自定义）
-_MIGRATE_YUAN = {"kong": "none", "butter": "build", "ming": "build"}
+# 旧 yuan 值 → v2 persona id（kong→none；butter/ming 仍为合法内置人格，不迁移）
+_MIGRATE_YUAN = {"kong": "none"}
 
 # core 子包加载器缓存（模块名 assistant_hub_core.<key>）
 _CORE_MODULES: Dict[str, Any] = {}

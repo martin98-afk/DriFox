@@ -13,6 +13,7 @@ from app.core.crash_handler import (
     _CLEAN_EXIT_MARK,
     _mark_clean_exit,
     _nearby_wer_dump,
+    _nearby_wer_report,
     _setup_wer_localdumps,
     check_last_crash,
     install_crash_handler,
@@ -83,7 +84,7 @@ def test_install_and_clean_exit(tmp_path):
 class _FakeWinReg:
     """winreg 替身：记录 SetValueEx 调用，不触碰真实注册表。"""
 
-    HKEY_CURRENT_USER = "HKCU"
+    HKEY_LOCAL_MACHINE = "HKLM"
     REG_EXPAND_SZ = 2
     REG_DWORD = 4
 
@@ -114,7 +115,7 @@ def test_wer_skipped_in_dev(tmp_path):
 
 
 def test_wer_configures_registry(tmp_path, monkeypatch):
-    """打包环境：HKCU 注册表写入 DumpFolder/DumpType/DumpCount。"""
+    """打包环境：HKLM 注册表写入 DumpFolder/DumpType/DumpCount。"""
     import sys as _sys
 
     fake = _FakeWinReg()
@@ -153,3 +154,34 @@ def test_nearby_wer_dump_window(tmp_path):
     old = _time.time() - 3600
     os.utime(dmp, (old, old))
     assert _nearby_wer_dump(log) is None
+
+
+def test_nearby_wer_report(tmp_path, monkeypatch):
+    """WER ReportQueue/ReportArchive 里同窗口期 AppCrash_<exe> 报告可检出。"""
+    import os
+    import sys as _sys
+    import time as _time
+
+    exe_name = Path(_sys.executable).stem
+    wer_base = tmp_path / "WER"
+    monkeypatch.setattr("app.core.crash_handler._WER_REPORT_BASE", wer_base)
+
+    crash_dir = tmp_path / "crash"
+    crash_dir.mkdir(parents=True)
+    log = crash_dir / "crash_1.log"
+    log.write_text("segfault", encoding="utf-8")
+
+    # 无报告 → None
+    assert _nearby_wer_report(log) is None
+
+    # 同窗口期报告 → 提示
+    rep_dir = wer_base / "ReportArchive" / f"AppCrash_{exe_name}_abc123"
+    rep_dir.mkdir(parents=True)
+    (rep_dir / "Report.wer").write_text("sig", encoding="utf-16")
+    note = _nearby_wer_report(log)
+    assert note is not None and str(rep_dir) in note
+
+    # 超窗口 → None
+    old = _time.time() - 3600
+    os.utime(rep_dir / "Report.wer", (old, old))
+    assert _nearby_wer_report(log) is None
