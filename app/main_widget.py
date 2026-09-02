@@ -3671,6 +3671,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "font_size": font_size,
             "colors": theme_colors,
             "main_widget": self,
+            "backend": self.backend,
             "services": self._build_ui_services(),
         }
 
@@ -18850,7 +18851,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_branch_label_clicked(self, event):
         """分支标签点击 — 打开工作台工作树页的关键文档（记忆已迁移工作台）"""
-        self._toggle_workbench_memory("docs")
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        tm = TabManagerWindow.get_instance()
+        if tm is not None and hasattr(tm, "open_workbench_memory"):
+            tm.open_workbench_memory("docs")
 
     def _toggle_project_selector_card(self):
         """切换项目选择卡片的显示"""
@@ -19220,12 +19225,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # suppress_memory_card=True 时跳过（拖拽/选择文件夹已设根目录，避免干扰）。
         if not suppress_memory_card:
             try:
-                from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
-                from app.widgets.tab_manager_window import TabManagerWindow
-
                 tm = TabManagerWindow.get_instance()
                 if tm is not None and hasattr(tm, "open_workbench_memory"):
-                    tm.open_workbench_memory(TAB_KEY_DOCUMENTS)
+                    tm.open_workbench_memory("docs")
             except Exception as e:
                 logger.warning(f"[NewProject] 展开工作台关键文档失败: {e}")
         # 自动触发新建会话
@@ -19566,7 +19568,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_import_project_from_url(self):
         """从URL导入项目压缩包"""
-        from app.widgets.cards.settings.memory_card import SingleInputDialog
+        from plugins.system.ui._worktree_page import SingleInputDialog
 
         dialog = SingleInputDialog(
             title="🔗 从URL导入项目",
@@ -19810,7 +19812,7 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 将拖入文件夹加入关键文档并设为工作目录（根目录）
         4. 刷新项目列表
         """
-        from app.widgets.cards.settings.memory_card import SingleInputDialog
+        from plugins.system.ui._worktree_page import SingleInputDialog
 
         # ── 提取文件夹名作为默认项目名 ──
         folder_name = os.path.basename(folder_path.rstrip("/\\"))

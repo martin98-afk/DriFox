@@ -1176,8 +1176,7 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 pass
         if backend is not None:
-            # 工作树内容懒构建（backend 未就绪时保持"未就绪"提示）
-            panel.ensure_memory(backend.memory_manager)
+            # 工作树/产物页数据推送（页面由插件填充，未挂载时面板内部缓存补投递）
             try:
                 workdir = (getattr(win, "_current_workdir", None) or {}).get(project)
             except Exception:

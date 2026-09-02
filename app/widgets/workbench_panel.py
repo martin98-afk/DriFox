@@ -10,7 +10,6 @@
 - 任务：todowrite 工具回传的待办列表（窗口级）—— 置顶常驻，不进页签
 - 工作树（排第一，默认落点）：git 工作树切换 + 关键文档（原「记忆」页
   的 docs 子页原样上移，从二级子页签升为一级页签）
-- 记忆：条目记忆 / 项目笔记（原 MemoryCardContent 共享单实例拆挂）
 - 历史会话：宿主挂载当前活跃窗口的历史卡片（原对话区底部卡片迁移至此，
   懒挂载——窗口侧 _ensure_history_card / open_workbench_history 首次触发）
 
@@ -526,46 +525,6 @@ class HistoryPage(QWidget):
             self._apply_search_style()
 
 
-class WorktreePage(QWidget):
-    """工作树页（一级页签，始终排第一）：git 工作树切换 + 关键文档
-
-    内容 = 共享 MemoryCardContent 的 docs 子页**原样上移**（关键文档从
-    「记忆」页的二级子页签升为一级页签；git 工作树组件本就插在关键文档
-    列表内，随子页一起上移，内容零改动）。默认页签：打开右侧边栏时
-    非插件定向入口都落在本页。
-    """
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._content: Optional[QWidget] = None
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-        self._hint = _EmptyHint("长期记忆未就绪", self)
-        self._layout.addWidget(self._hint)
-
-    def attach(self, content: Any) -> None:
-        """挂载共享 MemoryCardContent 的 docs 子页（reparent 到本页）"""
-        if self._content is not None:
-            return
-        self._content = content
-        self._hint.hide()
-        docs = content.detach_tab("docs")
-        if docs is not None:
-            docs.setParent(self)
-            self._layout.addWidget(docs, 1)
-            docs.show()
-        # 工作树页为默认落点：同步内部激活子页状态（不重复刷数据，
-        # 数据由宿主随后的 update_project 驱动）
-        content.set_active_tab("docs", refresh=False)
-
-    def set_project(self, project: str, workdir: Optional[str] = None) -> None:
-        if self._content is not None:
-            self._content.set_project(project, workdir)
-
-    def refresh_style(self) -> None:
-        self._hint.refresh_style()
-
-
 class WorkbenchPanel(QWidget):
     """右侧工作台面板（**嵌入式**：对话区右侧第三窗格，与左侧 TabPanel 对称）
 
@@ -617,9 +576,11 @@ class WorkbenchPanel(QWidget):
 
         # 当前任务区高度（splitter 拖拽持久化用）
         self._tasks_height = TASKS_DEFAULT_HEIGHT
-        # 记忆内容单实例（工作树/记忆两页共用，见 ensure_memory）；None = 未构建
-        self._memory_content: Optional[QWidget] = None
-        # 构建前收到的项目信息（ensure_memory 后补投递）
+        # 工作树槽位：page_id="worktree" 由系统插件填充（完全插件化，同产物页模式）
+        self._plugin_worktree_widget: Optional[QWidget] = None
+        self._worktree_plugin_sig: Optional[tuple] = None
+        self._worktree_plugin_info: Optional[Any] = None
+        # 构建前收到的项目信息（槽位页挂载后补投递）
         self._pending_project: Optional[tuple] = None
         # 页签记忆：None = 面板尚未打开过（首次打开默认第一个页签，之后恢复上次关闭时页签）
         self._last_tab_index: Optional[int] = None
@@ -677,10 +638,11 @@ class WorkbenchPanel(QWidget):
         # index 1 = 产物页槽位（插件提供；未注册时为 _PagePlaceholder 占位）
         # index 2 = 历史会话页；index 3+ = 其它插件页
         self._stack = QStackedWidget(self._bottom)
+        self._worktree_placeholder = _PagePlaceholder("工作树页未加载\n\n插件未注册或已卸载", parent=self._stack)
         self._artifacts_placeholder = _PagePlaceholder(parent=self._stack)
         self.artifacts_page: QWidget = self._artifacts_placeholder
-        self.worktree_page = WorktreePage(self._stack)
-        self._stack.addWidget(self.worktree_page)
+        self.worktree_page: QWidget = self._worktree_placeholder
+        self._stack.addWidget(self._worktree_placeholder)
         self._stack.addWidget(self._artifacts_placeholder)
         self._bottom_layout.addWidget(self._stack, 1)
 
@@ -1078,15 +1040,20 @@ class WorkbenchPanel(QWidget):
         其余 page_id 按注册序追加在「工作树 / 记忆 / 产物」之后。
         """
         all_infos = {t.page_id: t for t in (tabs or [])}
-        # ── 产物页槽位：page_id="artifacts" 被保留，不进普通插件页列表 ──
+        # ── 保留页签槽位：worktree（index 0）/ artifacts（index 1），不进普通插件页列表 ──
+        wt_info = all_infos.get("worktree")
+        if wt_info is not None:
+            self._use_plugin_worktree(wt_info)
+        else:
+            self._use_placeholder_worktree()
         art_info = all_infos.get("artifacts")
         if art_info is not None:
             self._use_plugin_artifacts(art_info)
         else:
             self._use_placeholder_artifacts()
 
-        infos = {pid: info for pid, info in all_infos.items() if pid != "artifacts"}
-        sig = tuple((t.page_id, t.label) for t in (tabs or []) if t.page_id != "artifacts")
+        infos = {pid: info for pid, info in all_infos.items() if pid not in ("worktree", "artifacts")}
+        sig = tuple((t.page_id, t.label) for t in (tabs or []) if t.page_id not in ("worktree", "artifacts"))
         if sig == self._plugin_sig and set(infos.keys()) == set(self._plugin_widgets.keys()):
             # 集合未变也补一次页签条 reconcile：产物页 label 未入 sig，
             # 插件注册/改名后标签可能残留旧值（_rebuild_tab_bar 内部再做
@@ -1112,6 +1079,76 @@ class WorkbenchPanel(QWidget):
         if was_plugin_current or current >= self._stack.count() or current < 0:
             current = 0
         self.set_current_tab(current)
+
+    # ── 工作树页槽位（完全插件化，index 0 恒定，默认落点） ──
+    def _use_plugin_worktree(self, info: Any) -> None:
+        """用插件版工作树页替换 index 0 的当前内容（占位页或旧插件页）"""
+        sig = (info.page_id, info.label)
+        if sig == self._worktree_plugin_sig and self._plugin_worktree_widget is not None:
+            return
+        widget = self._make_page_widget(info)
+        if widget is None:
+            return
+        self._remove_worktree_slot_widget()
+        self._stack.insertWidget(self.TAB_WORKTREE, widget)
+        self._plugin_worktree_widget = widget
+        self.worktree_page = widget
+        self._worktree_plugin_sig = sig
+        self._worktree_plugin_info = info
+        # 工作目录变更 → panel 信号（宿主转发给活跃窗口）
+        self._wire_worktree_dir_change(widget)
+        # 挂载前缓存的项目信息补投递
+        if self._pending_project is not None:
+            project, workdir = self._pending_project
+            self._pending_project = None
+            self._push_worktree_project(project, workdir)
+        if self._stack.currentIndex() == self.TAB_WORKTREE:
+            self._stack.setCurrentIndex(self.TAB_WORKTREE)
+
+    def _use_placeholder_worktree(self) -> None:
+        """插件未注册工作树页 → 回落到占位页"""
+        if self._worktree_plugin_sig is None and self._plugin_worktree_widget is None:
+            return  # 已是占位，跳过
+        self._remove_worktree_slot_widget()
+        self._stack.insertWidget(self.TAB_WORKTREE, self._worktree_placeholder)
+        self._worktree_placeholder.show()
+        self.worktree_page = self._worktree_placeholder
+        self._worktree_plugin_sig = None
+        self._worktree_plugin_info = None
+        if self._stack.currentIndex() == self.TAB_WORKTREE:
+            self._stack.setCurrentIndex(self.TAB_WORKTREE)
+
+    def _remove_worktree_slot_widget(self) -> None:
+        """移除工作树槽位（index 0）上的当前 widget（占位页保留实例）"""
+        current = self._stack.widget(self.TAB_WORKTREE)
+        if current is None:
+            return
+        self._stack.removeWidget(current)
+        if current is self._worktree_placeholder:
+            current.hide()
+        elif current is self._plugin_worktree_widget:
+            current.hide()
+            current.deleteLater()
+            self._plugin_worktree_widget = None
+        else:
+            current.hide()
+
+    def _wire_worktree_dir_change(self, widget: QWidget) -> None:
+        """把插件页的工作目录变更入口接到 panel.workingDirChanged"""
+        if hasattr(widget, "workingDirChanged"):
+            try:
+                widget.workingDirChanged.connect(self.workingDirChanged.emit)
+            except Exception:
+                pass
+
+    def _push_worktree_project(self, project: str, workdir: Optional[str] = None) -> None:
+        """向工作树槽位页推送当前项目（页未挂载时缓存，挂载后补投递）"""
+        setter = getattr(self.worktree_page, "set_project", None)
+        if callable(setter):
+            try:
+                setter(project, workdir)
+            except Exception:
+                pass
 
     # ── 产物页槽位（完全插件化，index 2 恒定） ──
 
@@ -1238,7 +1275,7 @@ class WorkbenchPanel(QWidget):
     # ── 页签 ──
 
     def set_current_tab(self, index: int, *, user: bool = False) -> None:
-        """切换页签；记忆内容首次进入前由宿主调 ensure_memory 构建
+        """切换页签
 
         user=True 表示用户主动切换（页签点击 / 定向入口），仅此路径发射
         current_tab_changed 驱动宿主写入 per-window 页签记忆；程序化切换
@@ -1254,10 +1291,6 @@ class WorkbenchPanel(QWidget):
         self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == index)
-        # 停在工作树页时同步内部激活子页状态
-        # （MemoryCardContent._current_tab 驱动 set_search_filter 等分发）
-        if index == self.TAB_WORKTREE and self._memory_content is not None:
-            self._memory_content.set_active_tab("docs", refresh=False)
         if index == self.TAB_HISTORY:
             self.history_tab_shown.emit()
         # 通知宿主记录（当前页签按对话窗口独立记忆，见 TabManagerWindow 回调）
@@ -1266,29 +1299,6 @@ class WorkbenchPanel(QWidget):
 
     def current_tab(self) -> int:
         return self._stack.currentIndex()
-
-    def ensure_memory(self, memory_manager: Any) -> None:
-        """懒构建记忆内容（宿主 refresh_workbench 调用；避免初始化期拉起存储层）
-
-        单实例 MemoryCardContent：docs 子页挂到 WorktreePage（关键文档+工作树）。
-        工作目录变更经 workingDirChanged 信号转发宿主（每窗口实例缓存/分支标签刷新）。
-        """
-        if memory_manager is None or self._memory_content is not None:
-            return
-        from app.widgets.cards.settings.memory_card import MemoryCardContent
-
-        content = MemoryCardContent(memory_manager, self)
-        content.hide()  # 容器自身不显示，只有拆出的子页显示
-        content.workingDirChanged.connect(self.workingDirChanged.emit)
-        self._memory_content = content
-        self.worktree_page.attach(content)
-        if self._pending_project is not None:
-            project, workdir = self._pending_project
-            self._pending_project = None
-            content.set_project(project, workdir)
-        # 当前一级页签若停在工作树页，同步内部激活子页状态（分发依赖）
-        if self._stack.currentIndex() == self.TAB_WORKTREE:
-            content.set_active_tab("docs", refresh=False)
 
     # ── 数据入口（宿主驱动） ──
 
@@ -1304,10 +1314,9 @@ class WorkbenchPanel(QWidget):
         self.tasks_page.update_todos(todos)
 
     def update_project(self, project: str, workdir: Optional[str] = None) -> None:
-        """同步当前项目到记忆内容（未构建时缓存，ensure_memory 后补投递）"""
+        """同步当前项目到工作树页（槽位未挂载时缓存，挂载后补投递）"""
         self._pending_project = (project or "", workdir)
-        if self._memory_content is not None:
-            self._memory_content.set_project(project, workdir)
+        self._push_worktree_project(project, workdir)
 
     # ── 主题 ──
 
@@ -1331,9 +1340,8 @@ class WorkbenchPanel(QWidget):
             btn.refresh_style()
         self.artifacts_page.refresh_style()
         self.tasks_page.refresh_style()
-        self.worktree_page.refresh_style()
-        if self._memory_content is not None and hasattr(self._memory_content, "refresh_style"):
-            self._memory_content.refresh_style()
+        if hasattr(self.worktree_page, "refresh_style"):
+            self.worktree_page.refresh_style()
         if self._history_page is not None and hasattr(self._history_page, "refresh_style"):
             self._history_page.refresh_style()
         # 插件页签 / 卡片 tab（right 容器 UI 插件卡片）：外部不广播主题事件，

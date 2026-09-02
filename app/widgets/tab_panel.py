@@ -3018,13 +3018,6 @@ class TabPanel(QWidget):
                 win = windows[-1] if windows else None
             if win is None:
                 return
-            opener = getattr(win, "open_memory_card", None)
-            if callable(opener):
-                opener("docs")
-                return
-            toggler = getattr(win, "_toggle_memory_card", None)  # 兜底：只有 toggle 语义
-            if callable(toggler):
-                toggler()
         except Exception as exc:
             logger.warning(f"[TabPanel] 打开长期记忆面板失败: {exc}")
 
