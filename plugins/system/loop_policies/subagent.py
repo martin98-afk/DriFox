@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from app.plugins.contracts.loop_policy import LoopDecision, LoopPolicy, LoopState
+from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 
 DEFAULT_SUBAGENT_MAX_ROUNDS = 30
 

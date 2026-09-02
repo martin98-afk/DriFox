@@ -274,7 +274,6 @@ class FileOperationRecorder:
             try:
                 file_path = op.get("file_path")
                 backup_path = op.get("backup_path")
-                tool_name = op.get("tool_name", "")
 
                 if not file_path:
                     continue

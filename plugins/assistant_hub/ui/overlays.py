@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtGui import QColor, QIcon
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -25,7 +25,6 @@ from qfluentwidgets import MaskDialogBase
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
 
-from assistant_hub_manager import AssistantManager
 
 
 def _label(text: str, size: int = 11, muted: bool = False) -> QLabel:

@@ -7,18 +7,15 @@
 - 内存读取通过 psutil 完成
 """
 
-import time
 from datetime import datetime
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple
 
 from PyQt5.QtCore import QEvent, QSize, Qt, QThread, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QScrollArea,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )

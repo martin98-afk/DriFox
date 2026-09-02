@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from loguru import logger
 
-from app.gateway.base import Platform, PlatformConfig, _platform_key
+from app.gateway.base import PlatformConfig, _platform_key
 
 
 def get_gateway_config() -> "GatewayConfigHelper":

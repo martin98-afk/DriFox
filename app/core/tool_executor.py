@@ -18,8 +18,6 @@ from loguru import logger
 
 from app.core.hook_manager import HookDecision
 from app.core.message_content import content_to_text
-from app.core.model_capabilities import resolve_context_limit
-from app.core.token_estimator import count_messages_tokens
 from app.tools.tool_name_mapper import ToolNameMapper
 
 # 预编译正则表达式

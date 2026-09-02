@@ -42,7 +42,6 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import TransparentToolButton
-from qfluentwidgets import FluentIcon
 
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon

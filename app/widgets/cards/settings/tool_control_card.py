@@ -13,7 +13,6 @@ import time as _time
 from PyQt5 import sip
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtWidgets import (
-    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -24,7 +23,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import ComboBox, SwitchButton
 
-from app.tools.registry import DANGER_DANGEROUS, DANGER_SAFE, ToolRegistry
+from app.tools.registry import DANGER_DANGEROUS, ToolRegistry
 from app.tools.tool_classifier import get_all_tools, get_default_toggles
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon

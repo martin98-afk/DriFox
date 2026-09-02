@@ -131,7 +131,6 @@ class Settings(QConfig):
         for old_key, info in saved_providers.items():
             if not isinstance(info, dict):
                 info = {}
-            api_key = info.get("API_KEY", "")
             # 构造临时表项走 apply_provider_save：
             #   1) 计算新 hash；2) 合并同 apikey 重复条目；3) 写入 config_id 字段
             tmp_info = dict(info)

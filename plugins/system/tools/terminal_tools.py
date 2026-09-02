@@ -19,16 +19,11 @@ import sys
 import tempfile
 import threading
 import time
-import uuid
-import weakref
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
-from app.tools.command_safety import _extract_cmd_name, classify_command, needs_shell, run_safe, run_with_shell
-from app.tools.process_job import ProcessJob
+from app.tools.command_safety import classify_command, needs_shell, run_safe, run_with_shell
 from app.tools.bg_manager import (
-    BackgroundTask,
     BackgroundTaskManager,
     _prepare_windows_encoding,
     _smart_decode,
@@ -298,7 +293,6 @@ def _scan_and_rewrite_chain(command: str) -> tuple[str, Optional[str]]:
     matches = list(pattern.finditer(result_cmd))
     for m in reversed(matches):
         interp = m.group(1)
-        flag = m.group(2)
         start = m.end()  # 引号开始位置
 
         # 找引号内的脚本

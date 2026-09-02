@@ -6600,6 +6600,37 @@ class OpenAIChatToolWindow(ToolWindow):
         # 聚焦输入框
         self.input_area.setFocus(Qt.OtherFocusReason)
 
+    def _on_mention_selected(self, entry: dict):
+        """插件提及条目被选中（@ 卡片顶部智能体区）
+
+        通用行为：@query 替换为 ``@名称 `` 字面文本；随后派发给
+        提供者插件接管语义行为（如 assistant_hub 临时切换会话助手）。
+        """
+        if not hasattr(self, "_file_mention_card"):
+            return
+        self._file_mention_card.dismiss()
+        self._card_manager.hide_card("file_mention", self._window_id)
+
+        self.input_area.insert_assistant_mention(entry.get("name", ""))
+
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            session = self.backend.get_current_session() if self.backend else None
+            UIPluginRegistry.get_instance().dispatch_mention_selected(
+                str(entry.get("provider_id", "")),
+                entry,
+                {
+                    "window_id": self._window_id,
+                    "main_widget": self,
+                    "session_id": getattr(session, "session_id", "") if session else "",
+                },
+            )
+        except Exception as e:
+            logger.warning(f"[MainWidget] 派发 mention 选中失败: {e}")
+
+        self.input_area.setFocus(Qt.OtherFocusReason)
+
     def _get_all_model_options_flat(self) -> list:
         """平展所有服务商:模型名选项列表（带描述）
 

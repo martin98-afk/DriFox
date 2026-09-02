@@ -61,7 +61,6 @@ class PtyShellSession:
         self._closed = False
         if not self.is_supported():
             raise RuntimeError("PtyShellSession 仅支持 Windows 且需安装 pywinpty")
-        import winpty
 
         self._spawn_session()
         # 等待 cmd 启动就绪（横幅延迟输出，读至连续 0.8s 无数据视为就绪）

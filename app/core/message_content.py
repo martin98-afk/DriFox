@@ -5,7 +5,6 @@ import threading
 from typing import Any, Dict, List, Optional
 
 import orjson as json
-from loguru import logger
 
 # ========== Gemini thought_signature 适配 ==========
 # Gemini 2.5+/3 在多轮工具调用时，要求把模型返回 functionCall 时携带的

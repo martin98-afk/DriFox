@@ -81,7 +81,7 @@ class DreamSections:
 
 
 def snapshot_sections(aid_dir: Path) -> DreamSections:
-    cm = _compile_mod()
+    _compile_mod()
     mem = aid_dir / "memory"
     daily: List[Dict[str, str]] = []
     ddir = mem / "daily"

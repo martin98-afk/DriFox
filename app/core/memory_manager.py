@@ -212,7 +212,6 @@ class MemoryManagerCore:
                             break
         # 获取当前项目的工作目录（多窗口隔离：优先使用实例缓存值）
         wd_path = workdir_override if workdir_override is not None else self.get_working_directory(project)
-        has_root_doc = False
         if docs:
             for doc in docs:
                 file_name = doc.get("file_name", "")
@@ -220,7 +219,6 @@ class MemoryManagerCore:
                 is_url = file_path and (file_path.startswith("http://") or file_path.startswith("https://"))
                 is_wd = file_path == wd_path
                 if is_wd:
-                    has_root_doc = True
                     lines.append(f"- {file_name} （项目根目录）./")
                 elif is_url:
                     lines.append(f"- 🔗 [{file_name}]({file_path})")

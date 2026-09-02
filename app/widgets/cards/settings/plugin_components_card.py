@@ -30,14 +30,9 @@ from loguru import logger
 from app.core.token_estimator import estimate_tokens as _estimate_tokens
 
 # estimate_tokens 内部有 lru_cache：同一段文本重复估算几乎零成本
-from app.core.token_estimator import estimate_tokens as _estimate_tokens
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
-    QHBoxLayout,
-    QLabel,
-    QVBoxLayout,
-    QWidget,
     QHBoxLayout,
     QLabel,
     QVBoxLayout,

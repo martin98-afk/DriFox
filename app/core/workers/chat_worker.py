@@ -43,7 +43,7 @@ from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.message_content import append_text_block, consolidate_messages
 
 from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
-from app.core.provider_profile import detect_provider_family, get_provider_profile
+from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.core.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
@@ -443,7 +443,6 @@ class OpenAIChatWorker(QThread):
         # === 异常检测 ===
         issues = []
         if rss_mb > 0 and self._mem_last_rss > 0:
-            delta_abs = abs(delta) if isinstance(delta, (int, float)) else 0
             if rss_mb - self._mem_last_rss > 50:
                 issues.append(f"单步RSS增长>{rss_mb - self._mem_last_rss:.0f}MB")
         if len(self._response_chunks) > 10000:
@@ -1495,7 +1494,6 @@ class OpenAIChatWorker(QThread):
 
         # 构建新的缓存
         api_key = self.llm_config.get("API_KEY", "").strip()
-        base_url = self.llm_config.get("API_URL") or None
         model = str(self.llm_config.get("模型名称", "gpt-4o"))
 
         extra_body = {}
@@ -2914,7 +2912,6 @@ class OpenAIChatWorker(QThread):
             from app.plugins.registries.hook_policy_registry import HookPolicyRegistry
             from app.plugins.contracts.hook_policy import (
                 SCOPE_MAIN,
-                HookPolicy,
                 HookDecision,
                 HookEvent,
             )
@@ -3056,7 +3053,6 @@ class OpenAIChatWorker(QThread):
             )
 
         retry_delay = 5
-        last_error = None
 
         for attempt in range(max_retries):
             # 用户取消时立即退出重试循环

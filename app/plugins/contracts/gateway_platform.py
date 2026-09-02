@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 
 if TYPE_CHECKING:  # 仅类型引用，不触发 SDK 导入
-    from app.gateway.base import BasePlatformAdapter, PlatformConfig
+    pass
 
 
 @dataclass(frozen=True)

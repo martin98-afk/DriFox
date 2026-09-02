@@ -107,6 +107,33 @@ class WelcomeActionInfo:
 
 
 @dataclass(frozen=True)
+class MentionProviderInfo:
+    """输入框 @ 提及条目提供者注册信息
+
+    提供者向 @ 卡片顶部贡献「非文件」类提及条目（如 assistant_hub 的
+    智能体角色）。主程序 file_mention_card 只负责渲染与选中，选中后的
+    语义行为（临时切换助手等）由 on_selected 接手。
+
+    Attributes:
+        plugin_name: 所属插件名
+        provider_id: 提供者唯一标识
+        list_func: 条目提供回调 list_func() -> List[dict]，每项含：
+                   key(str 唯一键) / name(str 显示名) / description(str 描述，可空)
+                   / icon_path(str 头像路径，可空) / color(str 主色，可空)
+        on_selected: 选中回调 (entry: dict, ctx: dict) -> None；
+                     entry 为 list_func 返回的单项，ctx 含 window_id / main_widget /
+                     session_id（当前会话，可能为空）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    provider_id: str
+    list_func: Callable[[], List[Dict[str, Any]]]
+    on_selected: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class MessageFactoryInfo:
     """消息元素工厂
 
@@ -323,6 +350,8 @@ class UIPluginRegistry:
         self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
         # 欢迎卡片插件点击动作：{action: WelcomeActionInfo}
         self._welcome_actions: Dict[str, WelcomeActionInfo] = {}
+        # @ 提及条目提供者：{provider_id: MentionProviderInfo}
+        self._mention_providers: Dict[str, MentionProviderInfo] = {}
         # Phase D：四类新扩展点（键为 item_id/button_id/action_id/card_id）
         self._sidebar_items: Dict[str, SidebarItemInfo] = {}
         self._input_buttons: Dict[str, InputButtonInfo] = {}
@@ -349,7 +378,7 @@ class UIPluginRegistry:
         # 多实现并存（system + 多个插件 override），胜者 = max(priority)
         self._ui_modules: Dict[str, list] = {}
         # 主程序内置区域（宿主在窗口装配时也可再声明，幂等）
-        from app.plugins.contracts.ui_slots import CONTENT, LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
+        from app.plugins.contracts.ui_slots import LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
 
         for rid, kind, desc in [
             ("sidebar", LIST_ITEM, "左侧边栏插件项"),
@@ -569,6 +598,49 @@ class UIPluginRegistry:
         if ctx is None:
             ctx = {}
         info.handler(content, ctx)
+        return True
+
+    def register_mention_provider(
+        self,
+        plugin_name: str,
+        provider_id: str,
+        list_func: Callable[[], List[Dict[str, Any]]],
+        on_selected: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册 @ 提及条目提供者（条目渲染在 @ 卡片顶部）
+
+        Args:
+            plugin_name: 所属插件名
+            provider_id: 提供者唯一标识（重复注册覆盖）
+            list_func: 条目提供回调，同步、主线程调用，禁止耗时 I/O
+            on_selected: 选中回调 (entry, ctx)；ctx 含 window_id/main_widget/session_id
+            metadata: 附加元数据
+        """
+        if metadata is None:
+            metadata = {}
+        self._mention_providers[provider_id] = MentionProviderInfo(
+            plugin_name=plugin_name,
+            provider_id=provider_id,
+            list_func=list_func,
+            on_selected=on_selected,
+            metadata=metadata,
+        )
+
+    def get_mention_providers(self) -> List[MentionProviderInfo]:
+        """获取所有 @ 提及条目提供者（插入序）"""
+        return list(self._mention_providers.values())
+
+    def dispatch_mention_selected(self, provider_id: str, entry: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None) -> bool:
+        """派发 @ 提及条目选中事件到提供者插件
+
+        Returns:
+            True 已派发；False 无该 provider 或未注册选中回调
+        """
+        info = self._mention_providers.get(provider_id)
+        if info is None or info.on_selected is None:
+            return False
+        info.on_selected(entry, ctx or {})
         return True
 
     def register_message_factory(
@@ -1747,6 +1819,7 @@ class UIPluginRegistry:
             or any(v.plugin_name == plugin_name for v in self._tag_renderers.values())
             or any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
             or any(v.plugin_name == plugin_name for v in self._welcome_actions.values())
+            or any(v.plugin_name == plugin_name for v in self._mention_providers.values())
             or any(v.plugin_name == plugin_name for v in self._floating_cards.values())
             or any(v.plugin_name == plugin_name for v in self._sidebar_items.values())
             or any(v.plugin_name == plugin_name for v in self._input_buttons.values())
@@ -1801,6 +1874,9 @@ class UIPluginRegistry:
         self._welcome_tabs = {k: v for k, v in self._welcome_tabs.items() if v.plugin_name != plugin_name}
         # 清理 welcome actions
         self._welcome_actions = {k: v for k, v in self._welcome_actions.items() if v.plugin_name != plugin_name}
+        self._mention_providers = {
+            k: v for k, v in self._mention_providers.items() if v.plugin_name != plugin_name
+        }
         # 清理 floating cards + 对应命令
         cards_to_remove = [cid for cid, info in self._floating_cards.items() if info.plugin_name == plugin_name]
         for cid in cards_to_remove:
@@ -2275,6 +2351,7 @@ class UIPluginRegistry:
         self._floating_cards.clear()
         self._welcome_tabs.clear()
         self._welcome_actions.clear()
+        self._mention_providers.clear()
         self._loaded_plugins.clear()
         self._main_widget = None
         self._ui_command_names.clear()

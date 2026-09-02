@@ -1364,7 +1364,6 @@ class GiteeCard(SettingCard):
             if main_win and getattr(main_win, "_is_destroyed", False):
                 return
 
-            from app.main_widget import OpenAIChatToolWindow
 
             # 1. 通过标准配置变更路径逐窗口刷新（与用户手动更改设置走同一路径）
             #    _apply_runtime_ui_settings 内部：

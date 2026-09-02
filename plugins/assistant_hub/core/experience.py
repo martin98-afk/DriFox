@@ -101,7 +101,6 @@ def delete_entry(aid_dir: Path, category: str, index: int) -> Dict:
 
 def rebuild_index(aid_dir: Path) -> str:
     """扫描 experience/*.md 重建 experience.md 索引；返回索引文本。"""
-    d = experience_dir(aid_dir)
     docs = list_documents(aid_dir)
     lines = ["# 经验索引", ""]
     if not docs:

@@ -15,16 +15,13 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 from app.plugins.contracts.hook_policy import (
     HookDecision,
     HookEvent,
-    HookPolicy,
     PluginChangedEvent,
     PostToolUseEvent,
     PostUserMessageEvent,
-    PreToolUseEvent,
     PreUserMessageEvent,
     SessionStartEvent,
     StopEvent,

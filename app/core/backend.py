@@ -6,7 +6,6 @@ ChatBackend - 统一后端接口
 
 from __future__ import annotations
 
-import asyncio
 import os
 import queue
 import re
@@ -16,10 +15,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal, QTimer, QCoreApplication
+from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal, QTimer
 
 from app.constants import IMAGE_EXTENSIONS
-from app.utils.utils import invalidate_skills_cache
 
 # Auto-compact 防重复触发冷却（秒）
 _AUTO_COMPACT_COOLDOWN = 30.0
@@ -610,7 +608,6 @@ class ChatBackend(QObject):
         UI 使用处均有 None 守卫（tool_executor/chat_engine 等访问都判空）。
         发送消息路径由 main_widget 调 ensure_deferred_components() 同步兜底。
         """
-        from PyQt5.QtCore import QTimer
 
         QTimer.singleShot(0, self._deferred_create_memory_manager)
         QTimer.singleShot(200, self._deferred_create_tool_executor)

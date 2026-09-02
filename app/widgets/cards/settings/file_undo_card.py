@@ -5,10 +5,10 @@ import difflib
 from typing import Dict, List
 
 from PyQt5.QtCore import QEventLoop, Qt, pyqtSignal
-from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget
-from qfluentwidgets import PrimaryPushButton, PushButton, ToolButton, TransparentToolButton, isDarkTheme
+from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QWidget
+from qfluentwidgets import PrimaryPushButton, PushButton, ToolButton, TransparentToolButton
 
-from app.utils.design_tokens import Colors, font_size_css, scale_font_size
+from app.utils.design_tokens import Colors, font_size_css
 from app.utils.diff_viewer import DiffHtmlGenerator
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard

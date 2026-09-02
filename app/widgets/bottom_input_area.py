@@ -448,7 +448,6 @@ class SendableTextEdit(TextEdit):
                 return
 
             # 仅当 / 在文本开头（位置0）时触发
-            text_before_cursor = text[:cursor_pos]
 
             if not text.startswith("/"):
                 # 没有在开头
@@ -755,10 +754,35 @@ class SendableTextEdit(TextEdit):
 
     # ==================== 命令文本插入 ====================
 
+    def insert_assistant_mention(self, name: str):
+        """@ 提及选中助手 → 把已键入的 @query 替换为字面 ``@助手名 ``
+
+        与文件提及（inline 胶囊）不同：助手提及保留字面 @文本，
+        作为发送时 PreUserMessage hook 识别「临时切换助手」的标记。
+        """
+        cursor = self.textCursor()
+        cursor_pos = cursor.position()
+        trigger_pos = self._at_trigger_pos
+
+        insert_text = f"@{name} "
+        if trigger_pos >= 0:
+            cursor.setPosition(trigger_pos)
+            cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
+            cursor.insertText(insert_text)
+            cursor.setPosition(trigger_pos + len(insert_text))
+            self.setTextCursor(cursor)
+        else:
+            # 无 @ 触发上下文（如欢迎卡片直接点击）：追加到光标处
+            cursor.insertText(insert_text)
+            self.setTextCursor(cursor)
+
+        self._cancel_at_throttle()
+        self._at_trigger_pos = -1
+        self.setFocus(Qt.OtherFocusReason)
+
     def insert_command_text(self, item_name: str):
         """将选中的命令/技能文本插入输入框（由 main_widget 调用）"""
         cursor = self.textCursor()
-        text = self.toPlainText()
         cursor_pos = cursor.position()
 
         trigger_pos = self._slash_trigger_pos

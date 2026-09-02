@@ -138,7 +138,7 @@ class MCPEditCard(QWidget):
         if hasattr(self, "jsonEdit"):
             self.jsonEdit.setStyleSheet(style)
         # QPlainTextEdit 不支持 CSS ::placeholder，通过 palette 设置
-        from PyQt5.QtGui import QColor, QPalette
+        from PyQt5.QtGui import QPalette
 
         ph_color = self._parse_placeholder_color()
         for pte in self._plain_text_edits:
@@ -188,7 +188,7 @@ class MCPEditCard(QWidget):
         data = dict(self._server_data)
         name = data.pop("name", "my-server")
         # 去掉内部字段
-        enabled = data.pop("enabled", True)
+        data.pop("enabled", True)
         server_type = data.pop("type", "stdio")
         # 如果是 stdio，type 不输出（标准格式默认 stdio）
         # 如果是 sse/http，输出 url/headers 标准结构

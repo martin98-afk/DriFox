@@ -21,7 +21,7 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import QApplication, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
-from app.utils.design_tokens import Colors, _get_global_font, font_size_css, scale_font_size
+from app.utils.design_tokens import _get_global_font, font_size_css
 from app.utils.utils import get_font_family_css
 
 # 各层对应的标签和颜色基调

@@ -20,11 +20,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from loguru import logger
 from PyQt5.QtCore import QEvent, QModelIndex, QSize, Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon, QKeySequence
+from PyQt5.QtGui import QColor, QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -33,8 +33,6 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
-    QShortcut,
-    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,

@@ -8,11 +8,11 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from loguru import logger
 
-from app.plugins.contracts.model_adapter import ModelAdapter, ProtocolFlags
+from app.plugins.contracts.model_adapter import ModelAdapter
 
 
 class ModelAdapterRegistry:

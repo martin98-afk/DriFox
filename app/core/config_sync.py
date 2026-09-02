@@ -1830,7 +1830,6 @@ class ConfigSyncService(QObject):
             # ── 4. 可注册同步内容（provider zip）：独立下载 ──
             # 插件注册的业务目录（如 assistant_hub 助手信息/记忆），远端有则
             # 下载解压恢复；失败只影响该 provider，不否定 app.config 恢复。
-            ext_downloaded = False
             for provider in list_sync_content_providers():
                 if not provider.enabled or not provider.local_dir:
                     continue
@@ -1846,7 +1845,6 @@ class ConfigSyncService(QObject):
                             ok = self._download_provider_zip(provider)
                             if ok:
                                 logger.debug(f"[ConfigSync] {provider_id} 已解压恢复")
-                                ext_downloaded = True
                             else:
                                 logger.warning(f"[ConfigSync] {provider_id} 恢复失败")
                             results.append(ok)

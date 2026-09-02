@@ -226,79 +226,6 @@ class SquircleAvatar(QWidget):
 # ── PluginIconWidget ──────────────────────────────────
 
 
-class PluginIconWidget(QWidget):
-    """插件图标组件：SVG 图标 + SquircleAvatar fallback
-
-    根据当前主题自动选择 light/dark SVG。
-    无 SVG 时回退到缩写哈希头像（SquircleAvatar）。
-    尺寸自适应：font_size * 1.7，最低 20px。
-    """
-
-    def __init__(
-        self,
-        plugin_dir: Path,
-        manifest: dict,
-        font_size: int = 0,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self._plugin_dir = plugin_dir
-        self._manifest = manifest
-        self._font_size = font_size
-        self._svg_widget: Optional["QSvgWidget"] = None
-        self._avatar: Optional[SquircleAvatar] = None
-        self._setup_ui()
-
-    def _resolve_icon_path(self) -> Optional[Path]:
-        """根据 manifest 和当前主题解析实际图标路径"""
-        raw = self._manifest.get("icon")
-        if not raw:
-            default = self._plugin_dir / "icon.svg"
-            return default if default.exists() else None
-        theme = "dark" if isDarkTheme() else "light"
-        if isinstance(raw, str):
-            p = self._plugin_dir / raw
-            return p if p.exists() else None
-        if isinstance(raw, dict):
-            path_str = raw.get(theme) or raw.get("light", "")
-            if path_str:
-                p = (self._plugin_dir / path_str).resolve()
-                return p if p.exists() else None
-        return None
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        icon_path = self._resolve_icon_path()
-        if icon_path is not None:
-            self._svg_widget = QSvgWidget(str(icon_path), self)
-            self._svg_widget.setFixedSize(self._icon_size(), self._icon_size())
-            layout.addWidget(self._svg_widget)
-        else:
-            plugin_name = self._manifest.get("name", "?")
-            # 把 icon_size 传给 SquircleAvatar，确保兜底头像与 SVG 图标尺寸一致
-            self._avatar = SquircleAvatar(
-                extract_initials(plugin_name),
-                name_color(plugin_name),
-                self,
-                size=self._icon_size_override,
-                font_size=self._font_size,
-            )
-            layout.addWidget(self._avatar)
-
-    def set_font_size(self, font_size: int):
-        """更新字号并重建组件（主题切换时也调用此方法）"""
-        self._font_size = font_size
-        while self.layout().count():
-            item = self.layout().takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._setup_ui()
-
-    def reload_icon(self):
-        """主题变化后刷新图标（深浅切换）"""
-        self.set_font_size(self._font_size)
 
 
 # ── 远程 icon 解析 ──────────────────────────────────
@@ -357,7 +284,6 @@ def _normalize_github_url(url: str) -> Optional[str]:
     if p.netloc and "github.com" not in p.netloc:
         return None
     parts = p.path.strip("/").split("/")
-    netloc = p.netloc or (stripped.split("/")[0] + "/" if False else "")
     if len(parts) < 2:
         return None
     return "/".join(parts[:2]).removesuffix(".git")

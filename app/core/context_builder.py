@@ -16,7 +16,6 @@ import re
 from typing import Any, Dict, List, Optional
 
 import anyio
-from loguru import logger
 
 from app.core.message_content import consolidate_messages
 from app.core.model_capabilities import resolve_context_limit
@@ -278,6 +277,10 @@ class ContextBudgetAllocator:
                 # 项目笔记由 read_project_notes hook 从本地 AGENTS.md 直接读取，不再预取
             except Exception:
                 pass
+        # 会话标识：assistant_hub 等插件按 session_id 做会话级助手覆盖
+        sid = getattr(session, "session_id", "")
+        if sid:
+            extra_context["session_id"] = sid
 
         # 复用缓存的 system prompt：避免每次 tool iteration 都重新触发 BuildSystemPrompt hooks
         # 仅在 agent 切换或首次调用时重建

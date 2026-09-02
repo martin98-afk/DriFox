@@ -22,10 +22,13 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
+import mimetypes
 import sys
+from html import escape
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Optional
 
 from loguru import logger
 
@@ -137,6 +140,217 @@ def _on_tab_clicked() -> None:
         logger.info("[assistant_hub] 已切换显示助手中心卡片")
     except Exception as e:
         logger.error(f"[assistant_hub] toggle_floating_card 失败: {e}")
+
+
+# ── @ 卡片智能体区（mention provider）────────────────────────────
+
+_MENTION_PROVIDER_ID = "assistant_hub"
+
+
+def _mention_list_func() -> List[dict]:
+    """@ 卡片顶部智能体条目（内存读取，无 I/O）"""
+    try:
+        from assistant_hub_manager import AssistantManager
+
+        mgr = AssistantManager.get_instance()
+        active = mgr.active_id()
+        items = []
+        for a in mgr.list_assistants_sorted_by_stable():
+            avatar = mgr.assistant_avatar_path(a.id)
+            items.append(
+                {
+                    "key": a.id,
+                    "name": a.name or a.id,
+                    "description": (a.public_description or "").strip()[:40],
+                    "icon_path": str(avatar) if avatar else "",
+                    "color": a.color,
+                    "active": a.id == active,
+                }
+            )
+        return items
+    except Exception as e:
+        logger.debug(f"[assistant_hub] mention 条目拉取失败: {e}")
+        return []
+
+
+def _on_mention_selected(entry: dict, ctx: dict) -> None:
+    """@ 卡片选中助手 → 会话级临时切换（立即刷新该会话 system prompt）"""
+    aid = str(entry.get("key", ""))
+    sid = str(ctx.get("session_id", ""))
+    if not aid or not sid:
+        return
+    try:
+        from assistant_hub_manager import AssistantManager
+
+        mgr = AssistantManager.get_instance()
+        if mgr.set_session_override(sid, aid):
+            mgr._invalidate_session_prompt(sid)
+            a = mgr.get(aid)
+            logger.info(f"[assistant_hub] 会话 {sid[:8]} 临时切换助手: {a.name if a else aid}")
+    except Exception as e:
+        logger.warning(f"[assistant_hub] 会话临时切换助手失败: {e}")
+
+
+def _register_mention_provider() -> None:
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        UIPluginRegistry.get_instance().register_mention_provider(
+            plugin_name="assistant_hub",
+            provider_id=_MENTION_PROVIDER_ID,
+            list_func=_mention_list_func,
+            on_selected=_on_mention_selected,
+        )
+        logger.debug("[assistant_hub] 已注册 @ 卡片 mention provider")
+    except Exception as e:
+        logger.warning(f"[assistant_hub] 注册 mention provider 失败: {e}")
+
+
+# ── 欢迎卡片「助手」tab ──────────────────────────────────────────
+
+_WELCOME_TAB_MODE = "assistants"
+_WELCOME_ACTION_INSERT = "assistant-hub-insert"
+
+# 头像 data-URI 缓存：{(path, mtime): data_uri}
+_avatar_uri_cache: Dict[str, str] = {}
+
+
+def _avatar_data_uri(aid: str, mgr) -> str:
+    """助手头像 → base64 data URI（mtime 入键，头像更换自动失效）"""
+    try:
+        p = mgr.assistant_avatar_path(aid)
+        if not p:
+            return ""
+        key = f"{p}:{int(p.stat().st_mtime)}"
+        cached = _avatar_uri_cache.get(key)
+        if cached:
+            return cached
+        mime = mimetypes.guess_type(str(p))[0] or "image/png"
+        uri = f"data:{mime};base64,{base64.b64encode(p.read_bytes()).decode('ascii')}"
+        if len(_avatar_uri_cache) > 64:
+            _avatar_uri_cache.clear()
+        _avatar_uri_cache[key] = uri
+        return uri
+    except Exception:
+        return ""
+
+
+def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
+    """欢迎卡片「助手」tab：助手卡片网格，点击填 @助手名 到输入区"""
+    try:
+        from assistant_hub_manager import AssistantManager
+
+        mgr = AssistantManager.get_instance()
+        assistants = mgr.list_assistants_sorted_by_stable()
+        active_id = mgr.active_id()
+    except Exception as e:
+        logger.debug(f"[assistant_hub] 欢迎卡片助手数据读取失败: {e}")
+        return ""
+
+    if not assistants:
+        return "<p style='color:#9aa0a8'>暂无助手，可在标题栏「助手」中创建。</p>"
+
+    is_dark = bool(ctx.get("is_dark")) if isinstance(ctx, dict) else False
+    card_bg = "#ffffff" if not is_dark else "#2b2b2b"
+    card_border = "#e5e7eb" if not is_dark else "#3f3f46"
+    muted = "#6b7280" if not is_dark else "#9ca3af"
+    accent_border = "#7c3aed" if not is_dark else "#8b5cf6"
+
+    cards = []
+    for a in assistants:
+        name = a.name or a.id
+        uri = _avatar_data_uri(a.id, mgr)
+        if uri:
+            avatar_html = f'<img class="ah-avatar" src="{uri}" alt=""/>'
+        else:
+            avatar_html = (
+                f'<div class="ah-avatar ah-avatar-fallback" style="background:{a.color}22;'
+                f'color:{a.color};border:1px solid {a.color}55">{(name[:1] or "?").upper()}</div>'
+            )
+        badges = []
+        if a.primary:
+            badges.append('<span class="ah-badge ah-badge-primary">主助手</span>')
+        if a.id == active_id:
+            badges.append('<span class="ah-badge ah-badge-active">使用中</span>')
+        badge_html = "".join(badges)
+        desc = (a.public_description or "").strip()
+        desc_html = f'<div class="ah-desc">{escape(desc)}</div>' if desc else ""
+        cards.append(
+            f'<div class="ah-card context-tag" data-type="{_WELCOME_ACTION_INSERT}" '
+            f'data-content="{escape(name)}" data-action="{_WELCOME_ACTION_INSERT}" '
+            f'title="点击在输入框填入 @{name}">'
+            f"{avatar_html}"
+            f'<div class="ah-info"><div class="ah-name">{escape(name)}{badge_html}</div>{desc_html}</div>'
+            f"</div>"
+        )
+
+    style = f"""
+<style>
+.ah-grid {{ display: flex; flex-wrap: wrap; gap: 10px; }}
+.ah-card {{
+  display: flex; align-items: center; gap: 10px; width: calc(50% - 5px);
+  box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
+  background: {card_bg}; border: 1px solid {card_border}; cursor: pointer;
+  transition: border-color .15s, transform .15s;
+}}
+.ah-card:hover {{ border-color: {accent_border}; transform: translateY(-1px); }}
+.ah-avatar {{
+  width: 34px; height: 34px; border-radius: 50%; object-fit: cover; flex: none;
+}}
+.ah-avatar-fallback {{
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 14px;
+}}
+.ah-info {{ min-width: 0; }}
+.ah-name {{ font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }}
+.ah-badge {{
+  font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 400; flex: none;
+}}
+.ah-badge-primary {{ background: #7c3aed22; color: #7c3aed; }}
+.ah-badge-active {{ background: #16a34a22; color: #16a34a; }}
+.ah-desc {{
+  font-size: 11px; color: {muted}; margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+</style>
+"""
+    return f'<div class="ah-grid">{"".join(cards)}</div>{style}'
+
+
+def _on_welcome_insert_action(content: str, ctx: dict) -> None:
+    """欢迎卡片点击助手 → 输入区填 @助手名（只填文本，不切换）"""
+    name = (content or "").strip()
+    if not name:
+        return
+    mw = ctx.get("main_widget")
+    if mw is None or not hasattr(mw, "input_area"):
+        return
+    try:
+        mw.input_area.insert_assistant_mention(name)
+    except Exception as e:
+        logger.warning(f"[assistant_hub] 欢迎卡片填入 @助手名 失败: {e}")
+
+
+def _register_welcome_tab() -> None:
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        reg.register_welcome_tab(
+            plugin_name="assistant_hub",
+            mode_key=_WELCOME_TAB_MODE,
+            label="🤖 助手",
+            render_func=_render_assistants_welcome,
+            priority=10,
+        )
+        reg.register_welcome_action(
+            plugin_name="assistant_hub",
+            action=_WELCOME_ACTION_INSERT,
+            handler=_on_welcome_insert_action,
+        )
+        logger.debug("[assistant_hub] 已注册欢迎卡片「助手」tab + 点击动作")
+    except Exception as e:
+        logger.warning(f"[assistant_hub] 注册欢迎卡片 tab 失败: {e}")
 
 
 def _register_sync_provider() -> None:
@@ -389,10 +603,17 @@ def register_ui(registry) -> None:
     # ── Gitee 同步内容：助手信息 + 记忆 ──
     _register_sync_provider()
 
+    # ── @ 卡片智能体区（mention provider，选中后会话级临时切换）──
+    _register_mention_provider()
+
+    # ── 欢迎卡片「助手」tab + 点击填 @助手名 ──
+    _register_welcome_tab()
+
     # ── BuildSystemPrompt hook 顺序提升（先于系统身份注入）──
     _promote_build_system_prompt_hook()
 
     logger.info(
         f"[assistant_hub] UI 组件已注册：titlebar_tab(助手) + floating_card(assistant_hub/full)"
         f" + tag_renderer({_persona_block_tags()}) + gitee sync"
+        f" + mention_provider + welcome_tab(助手)"
     )

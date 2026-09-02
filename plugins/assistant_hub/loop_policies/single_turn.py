@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from app.plugins.contracts.loop_policy import LoopDecision, LoopPolicy, LoopState
+from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 
 LOOP_POLICY_ID = "assistant_hub_single_turn"
 

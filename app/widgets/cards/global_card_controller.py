@@ -86,7 +86,6 @@ class GlobalCardController:
             w = tm.get_current_window()
             if w is not None and not getattr(w, "_is_destroyed", False):
                 return w
-        from app.main_widget import OpenAIChatToolWindow
 
         for w in window_registry.alive_window_instances():
             if not getattr(w, "_is_destroyed", False):
@@ -95,7 +94,6 @@ class GlobalCardController:
 
     def _all_windows(self) -> List:
         """所有未销毁的对话窗口"""
-        from app.main_widget import OpenAIChatToolWindow
 
         result = []
         for w in window_registry.alive_window_instances():

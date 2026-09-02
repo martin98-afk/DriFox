@@ -15,14 +15,13 @@ from PyQt5.QtCore import QCoreApplication, QObject, QThread, QTimer, pyqtSignal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
-from app.core.message_content import messages_to_responses_input, to_api_message
 from app.core.model_capabilities import (
     get_model_capabilities,
     normalize_reasoning_effort,
     resolve_context_limit,
     resolve_max_output_tokens,
 )
-from app.core.provider_profile import detect_provider_family, get_provider_profile
+from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 from app.tools.result import ToolResult

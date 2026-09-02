@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 from typing import Dict, Optional
 
-from loguru import logger
 from PyQt5.QtCore import Qt, QEasingCurve, QEvent, QPropertyAnimation, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 

@@ -1119,9 +1119,6 @@ class HistoryCompactor:
         else:
             summary_note = f"已压缩 {len(compacted)} 条较早消息"
 
-        # 计算摘要实际占用的 token 数（确保非负）
-        # 使用安全的 token 计数函数
-        summary_tokens = _safe_token_count([summary_message])
         recent_tokens_safe = _safe_token_count(recent_messages)
         summary_count = _safe_subtract(current_tokens, recent_tokens_safe)
 

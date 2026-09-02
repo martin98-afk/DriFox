@@ -1441,7 +1441,6 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
 
             elif ln.startswith("-") and not ln.startswith("---"):
                 # 收集删除块
-                del_start = i
                 del_texts = []
                 del_nums = []
                 while i < len(lines) and lines[i].startswith("-") and not lines[i].startswith("---"):
@@ -1452,7 +1451,6 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
                 dc = len(del_texts)
 
                 # 收集紧随的新增块
-                add_start = i
                 add_texts = []
                 add_nums = []
                 while i < len(lines) and lines[i].startswith("+") and not lines[i].startswith("+++"):

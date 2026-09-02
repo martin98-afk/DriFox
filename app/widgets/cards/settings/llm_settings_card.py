@@ -43,7 +43,6 @@ from app.utils.design_tokens import (
 from app.utils.startup_manager import set_auto_start
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
-from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 from app.widgets.cards.settings.gitee_card import GiteeCard
 from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard

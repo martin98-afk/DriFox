@@ -133,13 +133,12 @@ class TitleBarModule(UIModule):
         from PyQt5.QtCore import Qt
         from PyQt5.QtWidgets import QFrame, QLabel, QHBoxLayout
         from qfluentwidgets import (
-            PushButton,
             TransparentToolButton,
             FluentIcon,
             InfoBadge,
             InfoBadgePosition,
         )
-        from app.utils.utils import get_font_family_css, get_icon
+        from app.utils.utils import get_font_family_css
         from app.widgets.ui_helpers import TitleEditWidget, Colors, font_size_css
         from app.widgets.balance_display import BalanceDisplay
         from app.widgets.coding_plan_ring import CodingPlanRing

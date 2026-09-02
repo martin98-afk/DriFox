@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )

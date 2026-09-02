@@ -449,7 +449,6 @@ class KeyDocumentItemWidget(QWidget):
         # 显示绝对路径/URL（自动中间省略，窗口缩小时优先压缩）
         self._path_label = BodyLabel("", self)
         Colors.refresh()
-        path_display = self.file_path
         if self._is_url:
             # URL 显示完整链接，颜色用链接色
             self._path_label.setStyleSheet(

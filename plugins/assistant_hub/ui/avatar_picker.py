@@ -11,14 +11,11 @@
 
 from __future__ import annotations
 
-import base64
-import os
-import shutil
 from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt5.QtCore import QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap
+from PyQt5.QtGui import QIcon, QPainter, QPixmap
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QFileDialog,
@@ -28,14 +25,12 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
-    QStackedWidget,
     QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, ToolButton, TransparentToolButton
+from qfluentwidgets import FluentIcon
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css

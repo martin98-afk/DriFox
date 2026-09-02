@@ -10,7 +10,7 @@ MemorySection（记忆传送带）→ ExperienceSection（经验）→ SkillsSec
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from PyQt5.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QFontMetrics
@@ -30,7 +30,6 @@ from qfluentwidgets import ComboBox, SwitchButton
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
 
-from assistant_hub_manager import AssistantManager
 
 from .assistant_avatar import RoundAvatar
 

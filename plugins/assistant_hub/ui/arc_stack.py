@@ -374,7 +374,6 @@ class ArcCardStack(QWidget):
 
     def _relayout(self, animate: bool) -> None:
         positions = self._positions(self._expanded)
-        n = len(self._cards)
         base_y = self.height() - REST_GAP - NAME_AREA - CARD_SIZE
         for card in self._cards:
             card.set_expanded(self._expanded)

@@ -13,7 +13,7 @@ __getattr__），插件代码无需改动。
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Protocol, runtime_checkable
 
 
 @runtime_checkable

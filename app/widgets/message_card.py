@@ -26,7 +26,6 @@ import time
 import re
 import sys
 import threading
-import time
 import urllib.parse
 import weakref
 from collections import OrderedDict
@@ -46,7 +45,6 @@ from PyQt5.QtCore import (
     QByteArray,
     QEasingCurve,
     QObject,
-    QPointF,
     QThread,
     Qt,
     QTimer,
@@ -165,7 +163,6 @@ from app.widgets.render_helpers import (
     _get_tool_cn_name,
     _get_tool_icon,
     _get_tool_icon_html,
-    _get_tool_icon_name,
     _reg_metadata_flag,
     get_tool_qrc_prefix,
     render_tool_block,
@@ -3460,96 +3457,6 @@ class CodeWebViewer(QWebEngineView):
             pass
         return super().event(event)
 
-    def wheelEvent(self, event: QWheelEvent):
-        # 策略：只有当内部 WebView 无法继续滚动时，才将滚动事件转发到外部 chat_scroll_area。
-        # 如果内部有可滚动内容且未到达边界，让内部 WebView 自己处理滚动。
-        #
-        # ⚠️ **这段转发不能删**：QWebEngineView 会把滚轮事件喂给内嵌 Chromium 并吞掉，
-        # 不会自动冒泡到外层 QScrollArea。所以哪怕卡片内部不可滚，也必须显式转发，
-        # 否则鼠标停在消息上滚轮毫无反应。
-        # 现状（MAX_HEIGHT 抬到 10000 之后）：body 几乎恒不溢出 → max_scroll 恒为 0 →
-        # 每次滚轮都走「转发外层」这条最短路，内层判定的分支基本不再命中。
-        try:
-            widget = self
-            for _ in range(5):
-                if hasattr(widget, "chat_scroll_area"):
-                    break
-                parent_widget = widget.parent()
-                if parent_widget is None:
-                    break
-                widget = parent_widget
-
-            outer_area = getattr(widget, "chat_scroll_area", None) if hasattr(widget, "chat_scroll_area") else None
-            if not outer_area:
-                super().wheelEvent(event)
-                return
-
-            outer_vbar = outer_area.verticalScrollBar()
-            if not outer_vbar or outer_vbar.minimum() == outer_vbar.maximum():
-                # 外部没有可滚动范围 → 直接内部处理
-                super().wheelEvent(event)
-                return
-
-            delta = event.angleDelta().y()
-            if delta == 0:
-                super().wheelEvent(event)
-                return
-
-            # ── 核心修复：判据必须是 body 的滚动几何，而非文档级指标 ──
-            # CSS 为 body 设置了 overflow-y:scroll + max-height，body 才是唯一
-            # 的滚动容器。而 page().scrollPosition() 是文档级指标，在 body-scroller
-            # 架构下恒为 0 → at_top 恒真、at_bottom 恒假 → 所有向下滚动都被判为
-            # "内部处理"，但内部其实滚不动，事件被吞 → 卡片内滚动完全失效。
-            # contentsSize() 同样不含 body 的内部溢出，也不能用作判据。
-            scroll_y, max_scroll = self._inner_scroll_range()
-
-            if not self._body_geom_valid:
-                # 几何尚未上报（首帧 / JS 未就绪 / 上报丢失）→ 必须转发外部。
-                # ⚠️ 绝不能退化成"交给内部处理"：那正是本次修复的核心失效模式——
-                # 绝大多卡片的 viewer 高度 == 内容高度（内部本就不可滚），
-                # 一旦把事件交给内部就会被无声吞掉，表现为怎么滚都没反应。
-                # 转发外部是这个不确定状态下的正确默认；真正需要内部滚动的
-                # 只有内容超过 MAX_HEIGHT 的长卡片，而其内容渲染完必然已上报几何。
-                outer_vbar.setValue(outer_vbar.value() - wheel_delta_to_px(delta))
-                event.accept()
-                return
-
-            # ── 消除滞后假信号 ──
-            # viewer 高度已等于文档高度 ⇒ 内容已完全展开，body 不可能还有可滚动量。
-            # 此时残留的 max_scroll 只可能来自 resize/重排前的旧几何（内容变宽后
-            # 高度已收拢，但 body 几何缓存尚未刷新），必须清零，否则会误判内部可滚。
-            if max_scroll > SCROLL_BOUNDARY_TOLERANCE and abs(self.height() - self._document_height) <= 12:
-                max_scroll = 0
-
-            # ── 自愈：连续委托内部却毫无位移 → 强制转外部 ──
-            # 覆盖所有残余的缓存不同步场景（如高度收敛窗口期内反复误判）。
-            # 密集滚动期间（间隔 <100ms）不计入，避免帧级上报延迟造成误判。
-            now = time.monotonic()
-            if self._wheel_delegated_inner:
-                if scroll_y == self._wheel_last_scroll_top and (now - self._wheel_last_ts) > WHEEL_STUCK_MIN_INTERVAL:
-                    self._wheel_stuck_streak += 1
-                else:
-                    self._wheel_stuck_streak = 0
-            self._wheel_delegated_inner = False
-
-            at_top = scroll_y <= SCROLL_BOUNDARY_TOLERANCE
-            at_bottom = scroll_y >= (max_scroll - SCROLL_BOUNDARY_TOLERANCE)
-            inner_can_scroll = max_scroll > SCROLL_BOUNDARY_TOLERANCE and self._wheel_stuck_streak < WHEEL_STUCK_LIMIT
-
-            if inner_can_scroll and not ((delta < 0 and at_bottom) or (delta > 0 and at_top)):
-                # 内部还有可滚动空间 → 让内部处理
-                self._wheel_delegated_inner = True
-                self._wheel_last_scroll_top = scroll_y
-                self._wheel_last_ts = now
-                super().wheelEvent(event)
-                return
-
-            # 内部不可滚 / 已到边界 → 转发到外部
-            self._wheel_stuck_streak = 0
-            outer_vbar.setValue(outer_vbar.value() - wheel_delta_to_px(delta))
-            event.accept()
-        except Exception:
-            super().wheelEvent(event)
 
     def setFixedSize(self, *args, **kwargs):
         """限制最大尺寸，防止 GPU 内存溢出"""
@@ -8341,7 +8248,6 @@ class CodeWebViewer(QWebEngineView):
         2. 8×8 分块中"整块皆背景"的空块占比 < 50%（正常内容散布多数块，
            部分渲染会出现大段连续空白）
         """
-        from PyQt5.QtGui import QImage
 
         img = pix.toImage()
         if img.isNull():
@@ -8442,7 +8348,7 @@ class CodeWebViewer(QWebEngineView):
         """1x 兜底抓取（旧逻辑完整保留）：解除 max-height 撑高后单次 grab + 实心合成"""
         import json as json_mod
 
-        from PyQt5.QtCore import QEventLoop, QPoint, QRect, QTimer
+        from PyQt5.QtCore import QEventLoop, QTimer
         from PyQt5.QtWidgets import QApplication
 
         view_w = self.width()
@@ -8523,7 +8429,6 @@ class CodeWebViewer(QWebEngineView):
         """
         import json as json_mod
 
-        from PyQt5.QtCore import QPoint, QRect
         from PyQt5.QtWidgets import QApplication
 
         _SCALE = 3.0
@@ -11045,7 +10950,6 @@ class MessageCard(SimpleCardWidget):
             main_stops = [0.0, 0.12, 0.24, 0.36, 0.50, 0.64, 0.76, 0.88, 1.0]
             inner_stops = [0.0, 0.12, 0.24, 0.36, 0.48, 0.60, 0.72, 0.84, 0.92, 1.0]
             glow_stops = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-            shimmer_stops = [0.0, 0.5, 1.0]
         else:
             rainbow = None
             pulse = QColor(self._theme["accent"])
@@ -11089,8 +10993,6 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层2：外发光（霓虹光晕，7px宽，比主边框更宽更柔和）
         # ══════════════════════════════════════════════════════
-        outer_clip = self._clip_outer
-        inner_edge_clip = self._clip_inner_edge
         glow_region = self._clip_glow_region
         painter.setClipPath(glow_region)
         if self.role == "assistant":
@@ -11108,8 +11010,6 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层3：主彩色边框（4px，饱和鲜艳）
         # ══════════════════════════════════════════════════════
-        border_clip = self._clip_border
-        inner_border_clip = self._clip_inner_border
         border_region = self._clip_border_region
         painter.setClipPath(border_region)
         if self.role == "assistant":
@@ -12884,7 +12784,6 @@ class MessageCard(SimpleCardWidget):
         将 reasoning 直接写入 _content_data 的 reasoning block，
         使其与文本、工具结果按实际发生顺序交错渲染。
         """
-        t0 = time.time()
         # 🆕 Bug B：只追加到当前活动思考块（start_new_thinking_block 创建的新块）。
         # 兜底：无活动块时查找最后一个 reasoning block（兼容未走 start_new_thinking_block
         # 的流路径），仍未找到才新建块。活动块是 dict 对象引用，即使中间被工具结果
