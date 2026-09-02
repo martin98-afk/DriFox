@@ -267,6 +267,8 @@ class AssistantCardWidget(QWidget):
             name_row.addWidget(btn)
             if text == "设为主助手":
                 self._set_primary_btn = btn  # 已是主助手时隐藏
+            else:
+                self._delete_btn = btn  # 主助手时隐藏
         self._inner_v.addLayout(name_row)
 
         # 3-6. 分区
@@ -436,6 +438,7 @@ class AssistantCardWidget(QWidget):
         self._name_label.setText(a.name or a.id)
         self._primary_badge.setVisible(a.primary)
         self._set_primary_btn.setVisible(not a.primary)
+        self._delete_btn.setVisible(not a.primary)
         self._stack.set_selected(aid)
 
         aid_capture = aid
@@ -489,7 +492,7 @@ class AssistantCardWidget(QWidget):
         if not self._active_aid:
             return
         a = self._mgr.get(self._active_aid)
-        if not a:
+        if not a or a.primary:  # 主助手不可删除
             return
         ret = _confirm_dialog(
             _host_window() or self.window(),

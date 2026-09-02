@@ -544,8 +544,8 @@ class AssistantManager:
         """删除助手（连同目录），不存在或唯一助手时返回 False"""
         if aid not in self._assistants:
             return False
-        if len(self._assistants) <= 1:
-            return False
+        if self._assistants[aid].primary or len(self._assistants) <= 1:
+            return False  # 主助手与唯一助手不可删除
         path = self._assistant_dir(aid)
         self._assistants.pop(aid, None)
         self._contexts.pop(aid, None)
