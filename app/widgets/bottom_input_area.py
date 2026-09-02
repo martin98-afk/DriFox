@@ -631,7 +631,11 @@ class SendableTextEdit(TextEdit):
             return
 
         try:
-            text = self.toPlainText()
+            # ⚠ 必须用原始文档文本（胶囊=U+FFFC 占 1 字符），与 textCursor 坐标
+            # 同系。override 的 toPlainText 会把胶囊展开成 "@名字 "（多字符），
+            # 混用会让 text[:cursor_pos] 切出幽灵 "@"（含胶囊自带的空白终止位
+            # 被切掉）→ 插入胶囊后每次输入都误弹 @ 卡片。
+            text = TextEdit.toPlainText(self)
             cursor = self.textCursor()
             cursor_pos = cursor.position()
 

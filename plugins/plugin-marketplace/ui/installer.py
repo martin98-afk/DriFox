@@ -754,6 +754,12 @@ class PluginInstaller:
                 for i, (cu, ce) in enumerate(candidates):
                     if i > 0:
                         logger.info(f"[Installer] retry #{i}: {cu}")
+                    if cache_tmp.exists() and not _rmtree_readonly(cache_tmp):
+                        # Windows 下 git 残留句柄会让删除静默失败，沿用同名目录
+                        # 重试必报「already exists」→ 换新目录名（真实案例：
+                        # 2026-09 使用者 attempt #0 checkout 失败后 retry 全灭）
+                        logger.warning(f"[Installer] 残留下载目录删除失败，改用新目录: {cache_tmp}")
+                        cache_tmp = self._cache_dir / f"{name}_{int(time.time())}_r{i}"
                     shutil.rmtree(cache_tmp, ignore_errors=True)
                     cache_tmp.mkdir(parents=True, exist_ok=True)
                     try:

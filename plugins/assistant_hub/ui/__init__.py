@@ -236,7 +236,12 @@ def _avatar_data_uri(aid: str, mgr) -> str:
 
 
 def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
-    """欢迎卡片「助手」tab：助手卡片网格，点击填 @助手名 到输入区"""
+    """欢迎卡片「助手」tab：助手卡片网格，点击填助手胶囊到输入区。
+
+    视觉对齐会话导览 tab（CSS 变量 / hover 滑入 / stagger 动画），每张卡以
+    助手主色为个性色（头像描边环 + hover 边框与光晕）；字号与头像尺寸走
+    scale_font_size / scale_icon_size，随系统字号设置缩放。
+    """
     try:
         from assistant_hub_manager import AssistantManager
 
@@ -247,70 +252,114 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
         return ""
 
     if not assistants:
-        return "<p style='color:#9aa0a8'>暂无助手，可在标题栏「助手」中创建。</p>"
+        return '<div class="welcome-empty">暂无助手，可在标题栏「助手」中创建。</div>'
 
-    is_dark = bool(ctx.get("is_dark")) if isinstance(ctx, dict) else False
-    card_bg = "#ffffff" if not is_dark else "#2b2b2b"
-    card_border = "#e5e7eb" if not is_dark else "#3f3f46"
-    muted = "#6b7280" if not is_dark else "#9ca3af"
-    accent_border = "#7c3aed" if not is_dark else "#8b5cf6"
+    try:
+        from app.utils.design_tokens import scale_font_size, scale_icon_size
+
+        name_fs = scale_font_size(14)
+        desc_fs = scale_font_size(11)
+        badge_fs = scale_font_size(10)
+        avatar_initial_fs = scale_font_size(15)
+        avatar_px = scale_icon_size(38)
+    except Exception:
+        name_fs, desc_fs, badge_fs, avatar_initial_fs, avatar_px = 14, 11, 10, 15, 38
 
     cards = []
-    for a in assistants:
+    for idx, a in enumerate(assistants):
         name = a.name or a.id
         uri = _avatar_data_uri(a.id, mgr)
+        color = a.color or "#7C3AED"
         if uri:
-            avatar_html = f'<img class="ah-avatar" src="{uri}" alt=""/>'
+            avatar_html = (
+                f'<img class="ah-avatar" src="{uri}" alt="" '
+                f'style="width:{avatar_px}px;height:{avatar_px}px;border-color:{color}88"/>'
+            )
         else:
             avatar_html = (
-                f'<div class="ah-avatar ah-avatar-fallback" style="background:{a.color}22;'
-                f'color:{a.color};border:1px solid {a.color}55">{(name[:1] or "?").upper()}</div>'
+                f'<div class="ah-avatar ah-avatar-fallback" style="width:{avatar_px}px;height:{avatar_px}px;'
+                f"font-size:{avatar_initial_fs}px;background:{color}1f;color:{color};"
+                f'border:2px solid {color}66">{(name[:1] or "?").upper()}</div>'
             )
-        badges = []
-        if a.primary:
-            badges.append('<span class="ah-badge ah-badge-primary">主助手</span>')
-        badge_html = "".join(badges)
+        badge = '<span class="ah-badge">主助手</span>' if a.primary else ""
         desc = (a.public_description or "").strip()
-        desc_html = f'<div class="ah-desc">{escape(desc)}</div>' if desc else ""
+        desc_html = f'<span class="ah-desc">{escape(desc)}</span>' if desc else ""
+        anim = f"animation-delay:{idx * 55}ms"
         cards.append(
-            f'<div class="ah-card context-tag" data-type="{_WELCOME_ACTION_INSERT}" '
-            f'data-content="{escape(name)}" data-action="{_WELCOME_ACTION_INSERT}" '
-            f'title="点击在输入框填入 @{name}">'
+            f'<div class="ah-card context-tag" style="--ah-c:{color};--ah-glow:{color}59;{anim}" '
+            f'data-type="{_WELCOME_ACTION_INSERT}" data-content="{escape(name)}" '
+            f'data-action="{_WELCOME_ACTION_INSERT}">'
             f"{avatar_html}"
-            f'<div class="ah-info"><div class="ah-name">{escape(name)}{badge_html}</div>{desc_html}</div>'
+            f'<span class="ah-info"><span class="ah-name">{escape(name)}{badge}</span>{desc_html}</span>'
+            f'<span class="ah-arrow">›</span>'
             f"</div>"
         )
 
     style = f"""
 <style>
-.ah-grid {{ display: flex; flex-wrap: wrap; gap: 10px; }}
-.ah-card {{
-  display: flex; align-items: center; gap: 10px; width: calc(50% - 5px);
-  box-sizing: border-box; padding: 10px 12px; border-radius: 10px;
-  background: {card_bg}; border: 1px solid {card_border}; cursor: pointer;
-  transition: border-color .15s, transform .15s;
+.ah-hint {{
+  font-size: {desc_fs}px; color: var(--text-muted); opacity: .85;
+  margin-top: 10px;
 }}
-.ah-card:hover {{ border-color: {accent_border}; transform: translateY(-1px); }}
+.ah-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; }}
+.ah-card {{
+  display: flex; align-items: center; gap: 11px; min-width: 0; max-width: 100%;
+  box-sizing: border-box; padding: 10px 12px; border-radius: 11px;
+  background: var(--accent-soft); border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background .18s ease, border-color .18s ease, transform .18s ease, box-shadow .18s ease;
+  animation: ah-card-in .32s ease backwards;
+}}
+.ah-card:hover {{
+  background: var(--accent-soft-strong);
+  border-color: var(--ah-c, var(--accent));
+  transform: translateX(2px);
+  box-shadow: 0 2px 12px var(--ah-glow, var(--accent-glow));
+}}
 .ah-avatar {{
-  width: 34px; height: 34px; border-radius: 50%; object-fit: cover; flex: none;
+  flex: 0 0 auto; border-radius: 50%; object-fit: cover;
+  border: 2px solid transparent; background: var(--accent-soft-strong);
+  box-sizing: border-box;
 }}
 .ah-avatar-fallback {{
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 700; font-size: 14px;
+  display: flex; align-items: center; justify-content: center; font-weight: 700;
 }}
-.ah-info {{ min-width: 0; }}
-.ah-name {{ font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }}
+.ah-info {{ flex: 1; min-width: 0; }}
+.ah-name {{
+  display: flex; align-items: center; gap: 6px;
+  font-size: {name_fs}px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden;
+}}
 .ah-badge {{
-  font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 400; flex: none;
+  flex: none; font-size: {badge_fs}px; font-weight: 500; line-height: 1.6;
+  padding: 0 7px; border-radius: 999px;
+  background: var(--accent-soft-strong); color: var(--accent-text);
+  border: 1px solid var(--accent-border-weak);
 }}
-.ah-badge-primary {{ background: #7c3aed22; color: #7c3aed; }}
 .ah-desc {{
-  font-size: 11px; color: {muted}; margin-top: 2px;
+  display: block; font-size: {desc_fs}px; color: var(--text-muted); margin-top: 2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.ah-arrow {{
+  flex: 0 0 auto; font-size: {name_fs}px; color: var(--text-muted);
+  opacity: 0; transform: translateX(-4px); line-height: 1;
+  transition: opacity .18s ease, transform .18s ease;
+}}
+.ah-card:hover .ah-arrow {{ opacity: 1; transform: translateX(0); }}
+@keyframes ah-card-in {{
+  from {{ opacity: 0; transform: translateY(6px); }}
+  to {{ opacity: 1; transform: translateY(0); }}
+}}
+@media (prefers-reduced-motion: reduce) {{
+  .ah-card {{ animation: none; }}
 }}
 </style>
 """
-    return f'<div class="ah-grid">{"".join(cards)}</div>{style}'
+    return (
+        f'<div class="ah-grid">{"".join(cards)}</div>'
+        '<div class="ah-hint">点击填入助手胶囊，发送后临时切换为该助手对话（仅当前会话有效）</div>'
+        f"{style}"
+    )
 
 
 def _on_welcome_insert_action(content: str, ctx: dict) -> None:
