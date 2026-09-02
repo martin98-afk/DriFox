@@ -4,7 +4,8 @@
 交互对齐原版 Settings.module.css .agent-card-stack 段：
 - 收起态：62px 圆卡沿圆弧扇形叠放（等效原版 transform-origin: center 340px + rotate）
 - hover/展开态：0.8s OutCubic 动画展开为直线均布，名字浮现；离开回收
-- 选中卡：边框高亮 + 放大 1.06；主助手底部 accent 小圆点
+- 选中卡：边框高亮 + 放大 1.06；主助手底部 accent ★ 徽章；
+  当前激活助手右上角绿色 ✓ 徽章（选中=正在编辑，激活=对话生效，两者独立）
 - 末尾「+」虚线圆卡：新建助手
 - 卡片下方操作行由宿主（assistant_card）自行布局，本组件只发信号
 """
@@ -58,6 +59,7 @@ class _AgentCard(QWidget):
         self.name = name
         self._selected = False
         self._primary = False
+        self._active = False
         self._hover = False
         self._lift = 0.0
         self._scale = 1.0
@@ -77,6 +79,16 @@ class _AgentCard(QWidget):
             f"font-size: 9px; font-weight: bold; }}"
         )
         self._badge.hide()
+        # 激活徽章：右上角绿色 ✓（当前对话生效的助手），与主助手 ★（底部）区分
+        self._active_badge = QLabel("✓", self)
+        self._active_badge.setAlignment(Qt.AlignCenter)
+        self._active_badge.setFixedSize(14, 14)
+        self._active_badge.setStyleSheet(
+            f"QLabel {{ background: #22C55E; color: #FFFFFF;"
+            f"border: 2px solid {Colors.CARD_BG_SOLID}; border-radius: 7px;"
+            f"font-size: 8px; font-weight: bold; }}"
+        )
+        self._active_badge.hide()
         self.setFixedSize(CARD_SIZE, CARD_SIZE + NAME_AREA)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -85,6 +97,18 @@ class _AgentCard(QWidget):
         if self._selected != on:
             self._selected = on
             self._animate_scale(1.06 if on else 1.0)
+            self.update()
+
+    def set_active_state(self, on: bool) -> None:
+        """激活态徽章（✓）：当前全局 active_id 对应的助手，与选中态独立。"""
+        if self._active != on:
+            self._active = on
+            if on:
+                self._active_badge.show()
+                self._active_badge.raise_()
+            else:
+                self._active_badge.hide()
+            self._update_active_badge_geom()
             self.update()
 
     def set_expanded(self, on: bool) -> None:
@@ -109,6 +133,14 @@ class _AgentCard(QWidget):
         cx = CARD_SIZE / 2
         cy = CARD_SIZE / 2 + (CARD_SIZE - 4 - CARD_SIZE / 2) * self._scale - self._lift
         self._badge.setGeometry(round(cx - size / 2), round(cy - size / 2), size, size)
+
+    def _update_active_badge_geom(self) -> None:
+        """激活徽章几何：右上角 45° 方向，随 scale（绕圆心）与 lift 动画同步。"""
+        size = 14
+        r = (CARD_SIZE / 2 - 2) * 0.7071  # 徽章中心到圆心距离的 45° 分量
+        cx = CARD_SIZE / 2 + r * self._scale
+        cy = CARD_SIZE / 2 - r * self._scale - self._lift
+        self._active_badge.setGeometry(round(cx - size / 2), round(cy - size / 2), size, size)
 
     def set_avatar_image(self, image_path: Optional[str]) -> None:
         """换人格头像后轻量刷新单卡（不重建堆叠，保留动画状态）。"""
@@ -135,12 +167,14 @@ class _AgentCard(QWidget):
         self._avatar.set_avatar_size(size)
         self._avatar.setGeometry(x, y, size, size)
         self._update_badge_geom()
+        self._update_active_badge_geom()
         self.update()
 
     def _apply_lift(self, v: float) -> None:
         self._lift = v
         self._avatar.move(3, 3 - round(v))
         self._update_badge_geom()
+        self._update_active_badge_geom()
         self.update()
 
     def _animate_scale(self, target: float) -> None:
@@ -269,6 +303,7 @@ class ArcCardStack(QWidget):
         self._add_card: Optional[_AddCard] = None
         self._selected_aid = ""
         self._primary_aid = ""
+        self._active_aid = ""
         self._expanded = False
         self._anims: QParallelAnimationGroup = QParallelAnimationGroup(self)
         self.setFixedHeight(CONTAINER_H)
@@ -305,6 +340,13 @@ class ArcCardStack(QWidget):
         self._primary_aid = aid
         self._sync_states()
 
+    def set_active_aid(self, aid: str) -> None:
+        """设置「当前激活」徽章（与选中态独立：选中=正在编辑，激活=对话生效）。"""
+        if self._active_aid == aid:
+            return
+        self._active_aid = aid
+        self._sync_states()
+
     def set_avatar(self, aid: str, avatar_path: str) -> None:
         """更新单卡头像（人格头像变更后由宿主调用）。"""
         for c in self._cards:
@@ -316,6 +358,7 @@ class ArcCardStack(QWidget):
         for c in self._cards:
             c.set_selected(c.aid == self._selected_aid)
             c.set_primary(c.aid == self._primary_aid)
+            c.set_active_state(c.aid == self._active_aid)
 
     def _on_card_clicked(self, aid: str) -> None:
         self._selected_aid = aid

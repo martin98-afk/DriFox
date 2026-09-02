@@ -527,7 +527,7 @@ class UIPluginRegistry:
         Args:
             plugin_name: 所属插件名
             mode_key: tab 唯一标识（同时用作 welcome mode 值，需避免与
-                      系统内置 mode 冲突：sessions / projects / changelog）
+                      系统内置 mode 冲突：sessions / projects）
             label: tab 显示文本（SegmentedWidget 上展示）
             render_func: 渲染函数，签名 (context: dict) -> str(HTML 片段)，
                          片段会拼进欢迎卡片 body 的 markdown 管线渲染

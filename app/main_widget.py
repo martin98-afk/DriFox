@@ -6611,7 +6611,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._file_mention_card.dismiss()
         self._card_manager.hide_card("file_mention", self._window_id)
 
-        self.input_area.insert_assistant_mention(entry.get("name", ""))
+        self.input_area.insert_assistant_mention(entry.get("name", ""), entry.get("color", ""))
 
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -10590,7 +10590,7 @@ class OpenAIChatToolWindow(ToolWindow):
         mode = getattr(card, "_welcome_mode", "")
         if not mode:
             return
-        if mode in ("sessions", "changelog"):
+        if mode == "sessions":
             # 内置 mode 不依赖 project_root/workdir，跳过重渲染。
             # 否则每次 workdir 同步（启动 2s / 项目切换）都会全量重渲染：
             # _render_welcome_with_body 每次生成随机 greeting → markdown/HTML
@@ -11783,7 +11783,7 @@ class OpenAIChatToolWindow(ToolWindow):
         recent_sessions, top_by_count = self._collect_welcome_sessions()
 
         # 首次构建后按窗口缓存；会话数据变更点（删除/重命名等）可调用失效（见遗留）
-        # 模式：sessions（默认）/ changelog / 插件注册 tab
+        # 模式：sessions（默认）/ 插件注册 tab
         from app.utils.config import Settings
 
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -11816,7 +11816,7 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.utils.config import Settings
 
         cfg = Settings.get_instance()
-        if new_mode in ("sessions", "projects", "changelog"):
+        if new_mode in ("sessions", "projects"):
             # 内置 mode：写 welcome_mode 并清空插件 tab 记忆
             if cfg.welcome_plugin_tab.value:
                 cfg.welcome_plugin_tab.value = ""

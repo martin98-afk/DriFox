@@ -1,0 +1,14 @@
+{
+    "name": "welcome_changelog",
+    "description": "欢迎卡片「更新」tab — 拉取 DriFox GitHub Releases 作为更新日志展示。禁用插件后该 tab 消失。",
+    "version": "1.0.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "system",
+    "components": {
+        "ui": true
+    }
+}

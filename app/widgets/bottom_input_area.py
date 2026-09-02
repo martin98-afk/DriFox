@@ -72,6 +72,11 @@ _OBJECT_REPLACEMENT = "\ufffc"
 # 文件路径存在 charFormat 的自定义属性里（int key，见 QTextFormat.UserProperty）
 _FILE_MENTION_PATH_PROP = QTextFormat.UserProperty + 1
 
+# ── inline 助手提及胶囊（@ 智能体角色，圆角高亮胶囊）──
+_ASSISTANT_MENTION_TYPE = QTextFormat.UserObject + 2
+_ASSISTANT_MENTION_NAME_PROP = QTextFormat.UserProperty + 2
+_ASSISTANT_MENTION_COLOR_PROP = QTextFormat.UserProperty + 3
+
 # ======== 输入框 placeholder 定时轮播 tips ========
 PLACEHOLDER_TIPS = [
     # ════ 基本输入 ════
@@ -314,6 +319,9 @@ class SendableTextEdit(TextEdit):
         #    文档布局拿到悬空指针，绘制时直接崩溃。
         self._file_mention_object = FileMentionObject()
         self.document().documentLayout().registerHandler(_FILE_MENTION_TYPE, self._file_mention_object)
+        # 助手提及胶囊（@ 智能体角色）同款强引用要求
+        self._assistant_mention_object = AssistantMentionObject()
+        self.document().documentLayout().registerHandler(_ASSISTANT_MENTION_TYPE, self._assistant_mention_object)
 
         # detail 参数同步防抖（参考 / 命令触发节流：合并快速敲键 + IME 保护）
         # 值选择模式（枚举列表）每次 textChanged 都会触发 _sync_detail_params →
@@ -670,6 +678,16 @@ class SendableTextEdit(TextEdit):
                     self.atDismissed.emit()
                 return
 
+            # 空白终止：@ 后的过滤词不允许包含空白。已完成的提及
+            # （如胶囊展开的 "@助手名 "）之后的正文不应再触发补全
+            if any(ch in query for ch in (" ", "\t", "\u3000")):
+                self._cancel_at_throttle()
+                self._at_trigger_pos = -1
+                if file_card and file_card.is_card_visible:
+                    file_card.dismiss()
+                    self.atDismissed.emit()
+                return
+
             self._at_trigger_pos = at_pos
             # 使用节流发射（合并快速敲键，只发最后一次）
             self._apply_at_throttle(query)
@@ -692,7 +710,11 @@ class SendableTextEdit(TextEdit):
         return self._expand_mention_objects()
 
     def _expand_mention_objects(self) -> str:
-        """把文档中的 inline 文件胶囊展开为 [[basename]] 文本"""
+        """把文档中的 inline 胶囊展开为纯文本
+
+        文件胶囊 → ``[[basename]]``；助手胶囊 → ``@名字``（保留 @ 前缀，
+        发送链路的 @提及检测依赖它）。
+        """
         parts: list[str] = []
         block = self.document().begin()
         while block.isValid():
@@ -704,6 +726,9 @@ class SendableTextEdit(TextEdit):
                     if fmt.objectType() == _FILE_MENTION_TYPE:
                         path = fmt.stringProperty(_FILE_MENTION_PATH_PROP) or ""
                         parts.append(f"[[{os.path.basename(path)}]]")
+                    elif fmt.objectType() == _ASSISTANT_MENTION_TYPE:
+                        name = fmt.stringProperty(_ASSISTANT_MENTION_NAME_PROP) or ""
+                        parts.append(f"@{name}")
                     else:
                         parts.append(frag.text())
                 it += 1
@@ -754,27 +779,32 @@ class SendableTextEdit(TextEdit):
 
     # ==================== 命令文本插入 ====================
 
-    def insert_assistant_mention(self, name: str):
-        """@ 提及选中助手 → 把已键入的 @query 替换为字面 ``@助手名 ``
+    def insert_assistant_mention(self, name: str, color: str = ""):
+        """@ 提及选中助手 → 把已键入的 @query 替换为一枚助手胶囊
 
-        与文件提及（inline 胶囊）不同：助手提及保留字面 @文本，
-        作为发送时 PreUserMessage hook 识别「临时切换助手」的标记。
+        胶囊在文档里占一个字符（U+FFFC），整体删除不可拆坏；
+        ``toPlainText()`` 展开为 ``@名字``，发送后 PreUserMessage hook
+        依旧能识别并切换会话临时助手。
         """
         cursor = self.textCursor()
         cursor_pos = cursor.position()
         trigger_pos = self._at_trigger_pos
 
-        insert_text = f"@{name} "
+        fmt = QTextCharFormat()
+        fmt.setObjectType(_ASSISTANT_MENTION_TYPE)
+        fmt.setProperty(_ASSISTANT_MENTION_NAME_PROP, name)
+        fmt.setProperty(_ASSISTANT_MENTION_COLOR_PROP, color or "#7C3AED")
+        fmt.setToolTip(f"临时使用助手：{name}")
+
         if trigger_pos >= 0:
             cursor.setPosition(trigger_pos)
             cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
-            cursor.insertText(insert_text)
-            cursor.setPosition(trigger_pos + len(insert_text))
-            self.setTextCursor(cursor)
-        else:
-            # 无 @ 触发上下文（如欢迎卡片直接点击）：追加到光标处
-            cursor.insertText(insert_text)
-            self.setTextCursor(cursor)
+
+        # 与 insert_file_mention 同款两步插入：胶囊与后续空格分开，
+        # 避免空格带上 objectType 被渲染成第二个胶囊
+        cursor.insertText(_OBJECT_REPLACEMENT, fmt)
+        cursor.insertText(" ")
+        self.setTextCursor(cursor)
 
         self._cancel_at_throttle()
         self._at_trigger_pos = -1
@@ -2527,6 +2557,72 @@ class FileMentionObject(QObject, QTextObjectInterface):
             except Exception:  # noqa: BLE001
                 cls._icon_cache[key] = None
         return cls._icon_cache[key]
+
+
+class AssistantMentionObject(QObject, QTextObjectInterface):
+    """输入框正文中的 inline 助手提及胶囊（@ 智能体角色）
+
+    与 FileMentionObject 同款机制：文档里占一个字符（U+FFFC），
+    Backspace 整体删除；toPlainText() 展开为 ``@名字``，发送文本与
+    PreUserMessage hook 的 @提及检测保持兼容。
+
+    外观：助手主色圆角胶囊 + 🤖 + 名字，与文件胶囊（灰底）形成视觉区分。
+    名字/主色存在 charFormat 自定义属性（_ASSISTANT_MENTION_*_PROP）。
+    """
+
+    _PAD_LEFT = 6
+    _PAD_RIGHT = 6
+    _ICON_SIZE = 13
+    _GAP = 4
+    _HEIGHT = 20
+    _RADIUS = 6
+    _MAX_TEXT_WIDTH = 120
+
+    def intrinsicSize(self, doc, posInDocument, format) -> QSizeF:  # noqa: A002
+        name, fm = self._name_and_metrics(doc, format)
+        text_w = fm.horizontalAdvance(fm.elidedText(name, Qt.ElideRight, self._MAX_TEXT_WIDTH))
+        width = self._PAD_LEFT + self._ICON_SIZE + self._GAP + text_w + self._PAD_RIGHT
+        return QSizeF(width, self._HEIGHT)
+
+    def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002
+        """绘制胶囊（助手主色描边 + 淡色底 + 🤖 + 名字）"""
+        name, fm = self._name_and_metrics(doc, format)
+        color = (format.stringProperty(_ASSISTANT_MENTION_COLOR_PROP) or "#7C3AED") if format else "#7C3AED"
+
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+            h = min(self._HEIGHT, rect.height())
+            top = rect.top() + (rect.height() - h) / 2
+            pill = QRectF(rect.left(), top, rect.width(), h)
+
+            border = QColor(color)
+            bg = QColor(color)
+            bg.setAlpha(28)
+            painter.setPen(QPen(border, 1))
+            painter.setBrush(QBrush(bg))
+            painter.drawRoundedRect(pill, self._RADIUS, self._RADIUS)
+
+            x = pill.left() + self._PAD_LEFT
+            painter.setFont(doc.defaultFont() if doc else QFont())
+            painter.setPen(QPen(border))
+            painter.drawText(QRectF(x, pill.top(), self._ICON_SIZE + 2, h), Qt.AlignVCenter | Qt.AlignLeft, "🤖")
+            x += self._ICON_SIZE + self._GAP
+
+            text = fm.elidedText(name, Qt.ElideRight, self._MAX_TEXT_WIDTH)
+            text_rect = QRectF(x, pill.top(), max(0.0, pill.right() - self._PAD_RIGHT - x), h)
+            painter.setPen(QPen(QColor(Colors.INPUT_TEXT)))
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+        finally:
+            painter.restore()
+
+    @staticmethod
+    def _name_and_metrics(doc, format) -> tuple[str, QFontMetrics]:
+        name = (format.stringProperty(_ASSISTANT_MENTION_NAME_PROP) or "") if format else ""
+        font = doc.defaultFont() if doc else QFont()
+        return name or "?", QFontMetrics(font)
 
 
 class AttachmentOverflowChip(QLabel):

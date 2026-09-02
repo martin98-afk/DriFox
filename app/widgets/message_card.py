@@ -4246,59 +4246,6 @@ class CodeWebViewer(QWebEngineView):
                     padding: 8px 0;
                 }}
 
-                /* changelog 模式：左列版本列表 + 右列描述 */
-                .changelog-shell {{
-                    display: flex;
-                    gap: 12px;
-                    margin-top: 6px;
-                    min-height: 200px;
-                }}
-                .changelog-versions {{
-                    list-style: none;
-                    padding: 0;
-                    margin: 0;
-                    min-width: 130px;
-                    max-width: 160px;
-                    border-right: 1px solid var(--accent-border-weak);
-                    overflow-y: auto;
-                    max-height: 360px;
-                }}
-                .changelog-version {{
-                    padding: 6px 10px;
-                    cursor: pointer;
-                    border-radius: 6px;
-                    margin-bottom: 2px;
-                    transition: 0.15s ease;
-                }}
-                .changelog-version:hover {{
-                    background: var(--accent-soft);
-                }}
-                .changelog-version.active {{
-                    background: var(--accent-soft-strong);
-                }}
-                .changelog-version .ver-tag {{
-                    font-weight: 600;
-                    color: var(--accent-text);
-                    font-size: {tag_font_size}px;
-                }}
-                .changelog-version .ver-date {{
-                    font-size: {tiny_font_size}px;
-                    opacity: 0.6;
-                    margin-top: 2px;
-                }}
-                .changelog-detail {{
-                    flex: 1;
-                    min-width: 0;
-                    overflow-y: auto;
-                    max-height: 360px;
-                    padding-right: 4px;
-                }}
-                .changelog-body h1, .changelog-body h2, .changelog-body h3 {{
-                    color: var(--accent-text);
-                    margin-top: 0;
-                }}
-                .changelog-body img {{ max-width: 100%; }}
-
                 /* 代码块通用样式 */
                 .code-table {{ width: 100%; border-collapse: collapse; }}
                 .code-table td {{ padding: 0; vertical-align: top; }}
@@ -6282,21 +6229,6 @@ class CodeWebViewer(QWebEngineView):
                             // 动画开始前暂停高度报告
                             startCollapsibleAnimation();
                             animateCollapsible(block, block.dataset.expanded !== 'true');
-                        }}
-                        return;
-                    }}
-                    const verItem = e.target.closest('.changelog-version');
-                    if (verItem) {{
-                        e.stopPropagation();
-                        e.preventDefault();
-                        var vIdx = verItem.getAttribute('data-idx');
-                        var vShell = verItem.closest('.changelog-shell');
-                        if (vShell) {{
-                            vShell.querySelectorAll('.changelog-version').forEach(function(el){{ el.classList.remove('active'); }});
-                            vShell.querySelectorAll('.changelog-body').forEach(function(el){{ el.style.display = 'none'; }});
-                            verItem.classList.add('active');
-                            var vBody = vShell.querySelector('.changelog-body[data-idx="' + vIdx + '"]');
-                            if (vBody) vBody.style.display = 'block';
                         }}
                         return;
                     }}
@@ -9341,7 +9273,7 @@ class MessageCard(SimpleCardWidget):
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
     modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
-    welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / changelog）
+    welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / 插件注册 tab）
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出（内部处理保存，不透传）
 
     def __init__(
@@ -9464,13 +9396,12 @@ class MessageCard(SimpleCardWidget):
         self._welcome_top: list = []
         self._welcome_mode_tabs: Optional["SegmentedWidget"] = None
         self._pending_welcome_md: Optional[str] = None  # viewer 懒渲染前的等待内容
+        # 异步刷新事件回调引用（destroyed 退订时按 is 匹配）
+        self._welcome_refresh_cb: Optional[Callable[[Dict[str, Any]], None]] = None
         # 窗口上下文提供者（多窗口隔离）：欢迎卡片渲染插件 tab 时调用，注入
         # 当前窗口的 project_root / project_name / window_id，避免插件回读全局
         # 状态导致多标签页内容串项目（create_welcome_card 传入 window._build_ui_context）
         self._welcome_ctx_provider: Optional[Callable[[], Dict[str, Any]]] = None
-        # changelog 异步加载：单实例持有 fetcher + 已加载 releases
-        self._changelog_fetcher: Optional["_ChangelogFetcher"] = None
-        self._changelog_releases: list = []
         # 工具参数首次到达跟踪：每个 tool_call_id 第一次 update_tool_streaming 时
         # 触发"标记当前思考块为完成"，避免 reasoning→tool_call 切换时思考块残留"思考中"
         self._tool_args_first_seen_ids: set = set()
@@ -9494,6 +9425,11 @@ class MessageCard(SimpleCardWidget):
         self._viewer_layout = QVBoxLayout(self._viewer_container)
         self._viewer_layout.setContentsMargins(0, 0, 0, 0)
         self._setup_ui()
+        # 订阅欢迎卡片插件 tab 异步刷新事件（通用机制，与具体 mode_key 解耦）；
+        # fetcher / 数据源完成时插件通过 UIEventBus 通知，订阅者对当前 mode 重渲染。
+        # 仅 welcome 角色启用订阅，其他角色不必白订阅。
+        if role == "welcome":
+            self._subscribe_welcome_tab_refresh()
 
     def _build_theme(self, role: str, error: bool = False) -> Dict[str, str]:
         Colors.refresh()
@@ -9990,9 +9926,11 @@ class MessageCard(SimpleCardWidget):
         """
 
     # ========== 欢迎卡片 mode 切换（PyQt segmented tabs）==========
+    # 内置项仅保留消息卡片核心（会话列表）。其余 tab 由插件通过
+    # ``UIPluginRegistry.register_welcome_tab`` 动态注入（如 📜 更新），
+    # 卸载/禁用对应插件后该 tab 自动消失，无需主程序介入。
     _WELCOME_MODE_ITEMS = [
         ("sessions", "💬 会话"),
-        ("changelog", "📜 更新"),
     ]
 
     def _build_welcome_mode_tabs(self, top_layout):
@@ -10061,18 +9999,18 @@ class MessageCard(SimpleCardWidget):
         return {}
 
     def set_welcome_mode(self, mode: str):
-        """切换欢迎卡片模式（同步 active tab + 重渲染 body）"""
+        """切换欢迎卡片模式（同步 active tab + 重渲染 body）
+
+        所有 mode 统一走 ``_render_welcome_body`` 分发（内置 sessions /
+        插件注册 tab），插件 fetcher 完成后通过 UIEventBus 通知本卡片
+        再次调 ``set_welcome_mode`` 强制重渲染当前 mode（见 _subscribe_welcome_refresh）。
+        """
         self._welcome_mode = mode
         if self._welcome_mode_tabs is not None:
             try:
                 self._welcome_mode_tabs.setCurrentItem(mode)
             except Exception:
                 pass
-        if mode == "changelog":
-            self._render_welcome_with_body(_render_changelog_body(loading=True))
-            self._start_changelog_fetcher()
-            return
-        # sessions 走 markdown 渲染
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -10080,6 +10018,27 @@ class MessageCard(SimpleCardWidget):
             self._get_welcome_window_context(),
         )
         self._render_welcome_with_body(body_html)
+
+    # ── 欢迎 tab 异步刷新事件订阅（通用机制，零业务字面量）──────────────
+    def _subscribe_welcome_tab_refresh(self) -> None:
+        """订阅 ``EV_WELCOME_TAB_REFRESHED``：插件 fetcher / 数据源完成时通知卡片重渲。
+
+        仅匹配当前 ``self._welcome_mode`` 的 mode_key（payload 由插件声明），
+        不匹配则忽略。widget 销毁时自动退订，防止悬挂 callback。
+        """
+        from app.core.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
+
+        def _on_refresh(payload):
+            mode_key = payload.get("mode_key")
+            if not mode_key or mode_key != self._welcome_mode:
+                return
+            # 绕过 _on_welcome_mode_tab_clicked 的等值短路，强制重渲染当前 mode
+            self.set_welcome_mode(self._welcome_mode)
+
+        self._welcome_refresh_cb = _on_refresh
+        UIEventBus.get_instance().subscribe(EV_WELCOME_TAB_REFRESHED, _on_refresh)
+        # destroyed signal 在 widget 销毁时 emit，释放 UIEventBus 中的悬挂 callback
+        self.destroyed.connect(lambda: UIEventBus.get_instance().unsubscribe(EV_WELCOME_TAB_REFRESHED, _on_refresh))
 
     def _render_welcome_with_body(self, body_html: str):
         """统一的 body 渲染入口：拼接 greeting + 写入 viewer（markdown 路径）
@@ -10094,54 +10053,6 @@ class MessageCard(SimpleCardWidget):
         else:
             self._pending_welcome_md = welcome_md
 
-    def _start_changelog_fetcher(self):
-        """启动 changelog 后台拉取（幂等：缓存有效直接渲染；fetcher 在跑则跳过）"""
-        cache = _changelog_cache
-        if cache and (time.time() - cache.get("fetched_at", 0)) < _CHANGELOG_CACHE_TTL:
-            self._apply_changelog_releases(cache["releases"])
-            return
-        if self._changelog_fetcher is not None and self._changelog_fetcher.isRunning():
-            return
-        self._changelog_fetcher = _ChangelogFetcher(etag=cache.get("etag", ""))
-        self._changelog_fetcher.finished.connect(self._on_changelog_finished)
-        self._changelog_fetcher.error.connect(self._on_changelog_error)
-        self._changelog_fetcher.start()
-
-    def _apply_changelog_releases(self, releases: list):
-        """用 release 数据渲染 changelog body"""
-        self._changelog_releases = list(releases or [])
-        body_html = _render_changelog_body(releases=self._changelog_releases)
-        self._render_welcome_with_body(body_html)
-
-    def _on_changelog_finished(self, payload):
-        """_ChangelogFetcher.finished 回调：payload 是 list（304 → []，否则 [{releases, etag}]）"""
-        try:
-            if isinstance(payload, list) and payload and isinstance(payload[0], dict) and "releases" in payload[0]:
-                data = payload[0]
-                new_releases = data["releases"]
-                # 增量判断：拉回的 tag 列表与缓存前 N 个完全一致 → 无更新，跳过渲染
-                old_tags = [r.get("tag_name", "") for r in _changelog_cache.get("releases", [])]
-                new_tags = [r.get("tag_name", "") for r in new_releases]
-                if old_tags and old_tags == new_tags:
-                    # tag 列表未变（即使 etag 不同也可能是 GitHub 临时重生成）→ 不重渲染
-                    _changelog_cache["etag"] = data.get("etag", _changelog_cache.get("etag", ""))
-                    _changelog_cache["fetched_at"] = time.time()
-                    return
-                _changelog_cache["releases"] = new_releases
-                _changelog_cache["etag"] = data.get("etag", "")
-                _changelog_cache["fetched_at"] = time.time()
-                self._apply_changelog_releases(new_releases)
-            # 304：缓存仍新鲜（fetched_at 已存在），无需重渲染
-        except Exception as e:
-            logger.warning(f"[WelcomeChangelog] 处理 fetcher 结果失败：{e}")
-        finally:
-            self._changelog_fetcher = None
-
-    def _on_changelog_error(self, msg: str):
-        """_ChangelogFetcher.error 回调：渲染错误占位"""
-        self._render_welcome_with_body(_render_changelog_body(error_msg=msg))
-        self._changelog_fetcher = None
-
     def set_welcome_content(
         self,
         recent_sessions: list,
@@ -10154,7 +10065,7 @@ class MessageCard(SimpleCardWidget):
         Args:
             recent_sessions: 最近会话列表
             top_by_count: 最活跃会话列表
-            mode: 初始欢迎模式（sessions / changelog / 插件注册 tab）
+            mode: 初始欢迎模式（sessions / 插件注册 tab）
             context_provider: 窗口上下文提供者（无参回调 → dict）。多窗口隔离：
                 渲染插件 tab 时注入当前窗口的 project_root / project_name /
                 window_id，避免插件回读全局状态导致跨标签页内容串项目。
@@ -10168,10 +10079,6 @@ class MessageCard(SimpleCardWidget):
                 self._welcome_mode_tabs.setCurrentItem(mode)
             except Exception:
                 pass
-        if mode == "changelog":
-            # changelog 走异步：先存 loading 占位；viewer 就绪后会调 fetcher
-            self._pending_welcome_md = f"### 👋 {get_random_greeting()}\n\n{_render_changelog_body(loading=True)}\n"
-            return
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -10190,7 +10097,7 @@ class MessageCard(SimpleCardWidget):
         本方法在卡片已渲染时直接重渲染 DOM，避免调用方走「销毁缓存卡片 +
         重建 QWebEngineView」路径（100-500ms 主线程占用 + 视觉闪烁）。
 
-        仅 sessions 类 body 展示会话列表，changelog / 插件 tab 不依赖该数据，
+        仅 sessions 类 body 展示会话列表，插件 tab 不依赖该数据，
         跳过重渲染（插件 tab 的 render_func 也不应因会话变更被反复调用）。
         """
         old_recent, old_top = self._welcome_recent, self._welcome_top
@@ -11531,8 +11438,6 @@ class MessageCard(SimpleCardWidget):
                 elif self._pending_welcome_md is not None:
                     self.set_content(self._pending_welcome_md)
                     self._pending_welcome_md = None
-                    if self._welcome_mode == "changelog":
-                        self._start_changelog_fetcher()
                 self.lazyRenderCompleted.emit()
                 return
             self.viewer = CodeWebViewer(self, light=is_welcome)
@@ -11583,9 +11488,6 @@ class MessageCard(SimpleCardWidget):
                 # 欢迎卡片懒渲染：set_welcome_content 在 viewer 创建前存的内容
                 self.set_content(self._pending_welcome_md)
                 self._pending_welcome_md = None
-                # 欢迎卡片 viewer 就绪后，changelog 模式启动后台拉取
-                if self._welcome_mode == "changelog":
-                    self._start_changelog_fetcher()
 
             # 通知懒渲染完成，让父组件可以修正滚动位置
             self.lazyRenderCompleted.emit()
@@ -13062,7 +12964,7 @@ def create_welcome_card(
         agent_description: 智能体描述
         recent_sessions: 最近的历史会话列表，每项包含 title, last_time, session_id, message_count
         top_by_count: 消息最多的会话列表，每项包含 title, last_time, session_id, message_count
-        mode: 欢迎卡片模式（sessions / changelog / 插件注册 tab）
+        mode: 欢迎卡片模式（sessions / 插件注册 tab）
         context_provider: 窗口上下文提供者（无参回调 → dict）。多窗口隔离：
             渲染插件 tab 时注入当前窗口的 project_root / project_name /
             window_id，避免插件回读全局状态导致多标签页内容串项目。
@@ -13088,7 +12990,7 @@ def _render_welcome_body(
     """渲染欢迎卡片 body（不含标题和 tabs）；按 mode 分发
 
     Args:
-        mode: 欢迎卡片模式（sessions / changelog / 插件注册 tab）
+        mode: 欢迎卡片模式（sessions / 插件注册 tab）
         recent_sessions: 最近会话列表
         top_by_count: 最活跃会话列表
         window_context: 当前窗口的 UI 上下文（project_root / project_name /
@@ -13100,8 +13002,6 @@ def _render_welcome_body(
     缓存占位内容会导致数据永远不显示（project-dashboard 踩坑）。
     插件如需缓存应在自己内部做（如 collector 数据缓存），主程序不越俎代庖。
     """
-    if mode == "changelog":
-        return _render_changelog_body()
     # 插件注册的欢迎 tab：render_func 返回 HTML 片段，走现有 markdown 管线
     try:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -13221,119 +13121,3 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block
-
-
-def _render_changelog_body(releases: list = None, loading: bool = False, error_msg: str = "") -> str:
-    """渲染 changelog body：左列版本列表 + 右列描述（SPA，JS 切换不调 Python）
-
-    Args:
-        releases: 已加载的 release 列表（每项 {tag_name, name, body_html, published_at, html_url}）
-        loading: True 时显示 loading 占位
-        error_msg: 错误信息（网络失败等）
-    """
-    if error_msg:
-        return f'<div class="welcome-empty">⚠️ 加载更新日志失败：{escape(error_msg)}<br><span style="opacity:0.7">检查网络后切换 mode 重试</span></div>'
-
-    if loading or not releases:
-        return '<div class="welcome-empty">📜 正在从 GitHub Releases 拉取更新日志...</div>'
-
-    # 左列版本列表 + 右列描述（首条默认显示）
-    items = []
-    bodies = []
-    for i, r in enumerate(releases[:20]):
-        tag = escape(r.get("tag_name") or r.get("name") or f"v{i + 1}")
-        date = escape((r.get("published_at") or "")[:10])
-        body_html = r.get("body_html") or "<em>无更新说明</em>"
-        active = "active" if i == 0 else ""
-        # body 用 data-attr 存（HTML 字符串），切换时直接读 attr 替换右列
-        items.append(
-            f'<li class="changelog-version {active}" data-idx="{i}">'
-            f'<div class="ver-tag">{tag}</div>'
-            f'<div class="ver-date">{date}</div></li>'
-        )
-        bodies.append(
-            f'<div class="changelog-body" data-idx="{i}" style="{"display:block" if i == 0 else "display:none"}">{body_html}</div>'
-        )
-
-    return (
-        '<div class="changelog-shell">'
-        f'<ul class="changelog-versions">{"".join(items)}</ul>'
-        f'<div class="changelog-detail">{"".join(bodies)}</div>'
-        "</div>"
-    )
-
-
-# ───── 欢迎卡片 changelog 异步加载 ─────
-_CHANGELOG_REPO = "martin98-afk/DriFox"
-_CHANGELOG_CACHE_TTL = 3600  # 1h
-_changelog_cache: dict = {}  # in-memory: {releases: [...], fetched_at: float, etag: str}
-
-
-class _ChangelogFetcher(QThread):
-    """后台拉 GitHub Releases；走完 emit finished(list) 或 error(str)"""
-
-    finished = pyqtSignal(list)
-    error = pyqtSignal(str)
-
-    def __init__(self, etag: str = "", parent=None):
-        super().__init__(parent)
-        self._etag = etag
-
-    def run(self):
-        try:
-            import httpx
-        except ImportError:
-            self.error.emit("缺少 httpx 依赖")
-            return
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if self._etag:
-            headers["If-None-Match"] = self._etag
-        url = f"https://api.github.com/repos/{_CHANGELOG_REPO}/releases?per_page=5"
-        try:
-            with httpx.Client(timeout=httpx.Timeout(8.0)) as client:
-                resp = client.get(url, headers=headers)
-        except Exception as e:
-            self.error.emit(f"网络错误：{e}")
-            return
-        if resp.status_code == 304:
-            # 缓存仍新鲜（带 etag 才可能命中；用 fetched_at 判断也兜底）
-            self.finished.emit([])
-            return
-        if resp.status_code != 200:
-            self.error.emit(f"GitHub API {resp.status_code}：{resp.text[:120]}")
-            return
-        try:
-            data = resp.json()
-        except Exception as e:
-            self.error.emit(f"解析失败：{e}")
-            return
-        new_etag = resp.headers.get("ETag", "")
-        releases = []
-        # 线程私有实例：全局 _md_instance 禁止跨线程使用（Markdown.reset()/convert()
-        # 非线程安全）。本方法跑在 QThread 后台线程，若与主线程消息渲染并发共用全局
-        # 实例，会互相打乱解析状态——曾致消息卡片表格偶发渲染失败/内容串扰（约0.4%）。
-        md = Markdown(
-            extensions=["fenced_code", "nl2br", "tables"],
-            output_format="html5",
-            safe=False,
-        )
-        for item in data:
-            body_md = item.get("body") or ""
-            try:
-                body_html = md.convert(body_md)
-            except Exception:
-                body_html = escape(body_md).replace("\n", "<br>")
-            md.reset()
-            releases.append(
-                {
-                    "tag_name": item.get("tag_name", ""),
-                    "name": item.get("name", ""),
-                    "body_html": body_html,
-                    "published_at": item.get("published_at", ""),
-                    "html_url": item.get("html_url", ""),
-                }
-            )
-        self.finished.emit([{"releases": releases, "etag": new_etag}])

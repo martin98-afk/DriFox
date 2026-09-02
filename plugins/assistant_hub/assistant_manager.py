@@ -487,15 +487,15 @@ class AssistantManager:
         return sorted(self._assistants.values(), key=lambda a: (a.order, a.created_at, a.id))
 
     def _seed_defaults(self) -> None:
-        """首次启动（库为空）预置 3 个助手：build（主助手+默认激活）/ hanako / 纯净。
+        """首次启动（库为空）预置 3 个助手：DriFox（主助手+默认激活）/ 花子 / 空。
 
         只在根目录完全为空时执行一次；用户删除后不会复活（目录已存在 yaml）。
         头像：从 personas/avatars/<persona>.png 复制到助手 avatars/agent.png。
         """
         seeds = [
-            ("build", "Build", "build", True),
-            ("hanako", "Hanako", "hanako", False),
-            ("pure", "Pure", "none", False),
+            ("build", "DriFox", "build", True),
+            ("hanako", "花子", "hanako", False),
+            ("pure", "空", "none", False),
         ]
         try:
             for name, display, yuan, primary in seeds:
@@ -793,16 +793,24 @@ class AssistantManager:
                 sm = getattr(backend, "session_manager", None)
                 if sm is None:
                     continue
+                # SessionManager.sessions 是 List[ChatSession]（历史版曾为 dict，
+                # 两种形态都兼容），按 session_id 匹配
                 sessions = getattr(sm, "sessions", None)
-                session = sessions.get(session_id) if isinstance(sessions, dict) else None
-                if session is None:
+                if isinstance(sessions, dict):
+                    candidates = [sessions.get(session_id)]
+                elif isinstance(sessions, (list, tuple)):
+                    candidates = [s for s in sessions if getattr(s, "session_id", "") == session_id]
+                else:
                     continue
-                try:
-                    session.system_prompt = ""
-                    if hasattr(session, "_system_prompt_agent"):
-                        session._system_prompt_agent = ""
-                except Exception:
-                    pass
+                for session in candidates:
+                    if session is None:
+                        continue
+                    try:
+                        session.system_prompt = ""
+                        if hasattr(session, "_system_prompt_agent"):
+                            session._system_prompt_agent = ""
+                    except Exception:
+                        pass
         except Exception as e:
             from loguru import logger
 

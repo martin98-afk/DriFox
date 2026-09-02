@@ -360,9 +360,10 @@ class TestRerenderWelcomeCard:
         assert not other_widget_cache.deleteLater.called
 
     def test_skips_builtin_modes(self):
-        """内置 mode（sessions/changelog）跳过重渲染：不依赖 project_root，
-        重渲染只会因随机 greeting 使 HTML 变化、触发进入动画重复播放"""
-        for builtin_mode in ("sessions", "changelog"):
+        """内置 mode（sessions）跳过重渲染：不依赖 project_root，
+        重渲染只会因随机 greeting 使 HTML 变化、触发进入动画重复播放。
+        「更新」tab 已迁出为独立插件，由插件自管重渲策略。"""
+        for builtin_mode in ("sessions",):
             widget = self._make_widget()
             card = MagicMock()
             card._welcome_mode = builtin_mode

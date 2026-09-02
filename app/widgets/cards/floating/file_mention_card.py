@@ -568,11 +568,19 @@ class FileMentionItemWidget(QWidget):
         rel = self._data.get("relative_path", "")
         self._path_label.setText(rel)
         if self._data.get("type") == "mention":
-            # mention 条目：名称 + 右侧描述，无路径高亮
+            # mention 条目：名称 + 右侧「描述 · 来源插件」，无路径高亮
             self._path_label.setText(self._data.get("name", rel))
-            desc = self._data.get("description", "")
-            self._desc_label.setText(desc)
-            self._desc_label.setVisible(bool(desc))
+            desc = self._data.get("description", "").strip()
+            source = self._data.get("source", "").strip()
+            # QLabel 富文本：描述继承主题灰，来源更淡并加「·」分隔
+            if desc and source:
+                rich = f"{desc}&nbsp;&nbsp;<span style='color:{Colors.REALTIME_TEXT_SECONDARY}'>· {source}</span>"
+            elif source:
+                rich = f"<span style='color:{Colors.REALTIME_TEXT_SECONDARY}'>{source}</span>"
+            else:
+                rich = desc
+            self._desc_label.setText(rich)
+            self._desc_label.setVisible(bool(rich))
             self._apply_mention_icon()
             return
         self._desc_label.setVisible(False)
@@ -1472,6 +1480,7 @@ class FileMentionCard(QWidget):
                     {
                         "type": "mention",
                         "provider_id": provider.provider_id,
+                        "source": provider.plugin_name,
                         "key": key,
                         "name": name,
                         "description": str(entry.get("description", "")),

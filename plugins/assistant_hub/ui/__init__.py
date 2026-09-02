@@ -318,7 +318,7 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
 
 
 def _on_welcome_insert_action(content: str, ctx: dict) -> None:
-    """欢迎卡片点击助手 → 输入区填 @助手名（只填文本，不切换）"""
+    """欢迎卡片点击助手 → 输入区填助手胶囊（只填文本，不切换）"""
     name = (content or "").strip()
     if not name:
         return
@@ -326,7 +326,14 @@ def _on_welcome_insert_action(content: str, ctx: dict) -> None:
     if mw is None or not hasattr(mw, "input_area"):
         return
     try:
-        mw.input_area.insert_assistant_mention(name)
+        from assistant_hub_manager import AssistantManager
+
+        color = ""
+        for a in AssistantManager.get_instance().list_assistants_sorted_by_stable():
+            if (a.name or a.id) == name:
+                color = a.color
+                break
+        mw.input_area.insert_assistant_mention(name, color)
     except Exception as e:
         logger.warning(f"[assistant_hub] 欢迎卡片填入 @助手名 失败: {e}")
 

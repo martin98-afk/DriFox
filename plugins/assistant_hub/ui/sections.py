@@ -261,7 +261,7 @@ class _CenterFlowLayout(QLayout):
 
 
 class ProfileSection(_Section):
-    """助手名称 / 称呼 / 记忆整理模型（对话模型跟随系统当前配置，不单独设置；改动即节流保存）。"""
+    """对他/她的称呼 / 称呼 / 记忆整理模型（对话模型跟随系统当前配置，不单独设置；改动即节流保存）。"""
 
     saveRequested = pyqtSignal(str, str, str)  # (name, user_addressing, utility_model_key)
     _DEBOUNCE_MS = 600
@@ -281,8 +281,8 @@ class ProfileSection(_Section):
         form.setSpacing(6)
 
         row1 = QHBoxLayout()
-        lbl1 = _title_label("助手名称", 11)
-        lbl1.setFixedWidth(104)  # 与下行 label 同宽 → 控件左缘对齐（须容纳"记忆整理模型"6 字）
+        lbl1 = _title_label("对他/她的称呼", 11)
+        lbl1.setFixedWidth(118)  # 与下行 label 同宽 → 控件左缘对齐（须容纳"对他/她的称呼"7 字符）
         row1.addWidget(lbl1)
         self._name = QLineEdit()
         self._name.setStyleSheet(_input_style())
@@ -292,7 +292,7 @@ class ProfileSection(_Section):
 
         row_addr = QHBoxLayout()
         lbl_addr = _title_label("对你的称呼", 11)
-        lbl_addr.setFixedWidth(104)
+        lbl_addr.setFixedWidth(118)
         row_addr.addWidget(lbl_addr)
         self._addressing = QLineEdit()
         self._addressing.setStyleSheet(_input_style())
@@ -303,7 +303,7 @@ class ProfileSection(_Section):
 
         row2 = QHBoxLayout()
         lbl2 = _title_label("记忆整理模型", 11)
-        lbl2.setFixedWidth(104)
+        lbl2.setFixedWidth(118)
         row2.addWidget(lbl2)
         self._utility_model = ComboBox()
         self._utility_model.setMaxVisibleItems(self._MAX_VISIBLE_ITEMS)

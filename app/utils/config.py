@@ -417,8 +417,9 @@ class Settings(QConfig):
     # ========== 会话项目管理 ==========
     current_project = ConfigItem("Session", "CurrentProject", "默认项目")
 
-    # ========== 欢迎卡片模式（sessions / changelog）==========
-    welcome_mode = OptionsConfigItem("UI", "WelcomeMode", "sessions", OptionsValidator(["sessions", "changelog"]))
+    # ========== 欢迎卡片模式（sessions / 插件注册 tab）==========
+    # 内置 mode 仅保留 sessions；其余（📜 更新 等）由插件注册，禁用插件后自动消失。
+    welcome_mode = OptionsConfigItem("UI", "WelcomeMode", "sessions", OptionsValidator(["sessions"]))
     # 插件注册的欢迎 tab 记忆：welcome_mode 的 OptionsValidator.correct 会把
     # 插件 mode_key 纠正回 sessions，无法复用；用独立无验证器字段存任意字符串。
     welcome_plugin_tab = ConfigItem("UI", "WelcomePluginTab", "")
