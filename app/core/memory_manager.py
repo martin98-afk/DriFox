@@ -92,101 +92,14 @@ class MemoryManagerCore:
             return []
         return self._entry_memories_repo.search(query, limit)
 
-    def add_entry_memory(self, content: str, source: str = "manual") -> bool:
-        """添加条目记忆"""
-        if not self._entry_memories_repo or not content:
-            return False
-        return self._entry_memories_repo.save(
-            {
-                "content": content.strip(),
-                "enabled": True,
-                "confidence": 0.8,
-                "source": source,
-            }
-        )
 
-    def update_entry_memory(self, memory_id: str, content: str) -> bool:
-        """更新条目记忆"""
-        if not self._entry_memories_repo:
-            return False
-        return self._entry_memories_repo.update(memory_id, content)
 
-    def delete_entry_memory(self, memory_id: str) -> bool:
-        """删除条目记忆"""
-        if not self._entry_memories_repo:
-            return False
-        return self._entry_memories_repo.delete(memory_id)
 
-    def toggle_entry_memory(self, memory_id: str, enabled: bool) -> bool:
-        """切换条目记忆启用状态"""
-        if not self._entry_memories_repo:
-            return False
-        return self._entry_memories_repo.update_enabled(memory_id, enabled)
 
-    def save_entry_memories(self, memories: List[Dict]) -> bool:
-        """批量保存条目记忆"""
-        if not self._entry_memories_repo:
-            return False
-        return self._entry_memories_repo.save_all(memories)
 
     # ==================== 项目笔记（精简版，仅文件读写，无 SQLite） ====================
 
-    def get_or_create_project_note(self, project: str, workdir: Optional[str] = None) -> Dict:
-        """读取或创建项目笔记（直接从 workdir/AGENTS.md 读写，无 SQLite）
 
-        Args:
-            project: 项目名称
-            workdir: 工作目录路径
-
-        Returns:
-            Dict: {"project": str, "content": str, "path": str}
-        """
-        workdir = workdir or self.get_working_directory(project)
-        if not workdir:
-            return {"project": project, "content": "", "path": ""}
-
-        path = Path(workdir) / "AGENTS.md"
-        if not path.exists():
-            return {"project": project, "content": "", "path": str(path)}
-
-        try:
-            content = path.read_text(encoding="utf-8")
-            return {"project": project, "content": content, "path": str(path)}
-        except Exception as e:
-            logger.error(f"[MemoryManager] 读取 {path} 失败: {e}")
-            return {"project": project, "content": "", "path": str(path)}
-
-    def save_project_note(self, project: str, content: str, workdir: Optional[str] = None) -> bool:
-        """保存项目笔记（直接写入 workdir/AGENTS.md）
-
-        Args:
-            project: 项目名称
-            content: 笔记内容
-            workdir: 工作目录路径
-
-        Returns:
-            bool: 是否成功
-        """
-        workdir = workdir or self.get_working_directory(project)
-        if not workdir:
-            return False
-
-        path = Path(workdir) / "AGENTS.md"
-
-        # 防御:空内容/纯空白不写入,避免意外清空已有笔记
-        # 触发场景:UI 编辑器被全选删除后 300ms 防抖自动保存(最常见),
-        #          或 LLM/上游调用方传入空 content
-        if not (content or "").strip():
-            logger.warning(f"[MemoryManager] 拒绝写入空内容到 {path} (project={project}),已保留磁盘上原有内容")
-            return False
-
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
-            return True
-        except Exception as e:
-            logger.error(f"[MemoryManager] 写入 {path} 失败: {e}")
-            return False
 
     # ==================== 关键文档 API ====================
 
@@ -325,27 +238,10 @@ class MemoryManagerCore:
 
     # ==================== 兼容旧接口 ====================
 
-    def load_memory(self) -> Dict:
-        """兼容旧接口，返回条目记忆列表"""
-        return {
-            "version": "3.0",
-            "user_memories": self.get_entry_memories() if self._entry_memories_repo else [],
-        }
 
-    def save_memory(self, memory_data: Dict) -> bool:
-        """兼容旧接口"""
-        return True
 
     def search_memories(self, query: str = "", limit: int = 30) -> List[Dict]:
         """兼容旧接口"""
         return self.get_entry_memories(query, limit)
 
-    def get_context_string(self, project: str = "默认项目", limit: int = 30) -> str:
-        """兼容旧接口"""
-        return self.format_memories_for_prompt(project, entry_limit=limit)
 
-    def clear_memory(self) -> bool:
-        """清空所有记忆"""
-        if self._entry_memories_repo:
-            self._entry_memories_repo.clear_all()
-        return True

@@ -47,21 +47,6 @@ def get_session_storage():
         return registry.get_active()
 
 
-def _callback_holds_backend(callback, backend) -> bool:
-    """判断异步闭包是否捕获了指定 ChatBackend 实例（泄漏修复 6d 辅助）。
-
-    _do_init 中定义的 process_message / send_message 是 async 函数，
-    闭包通过自由变量捕获 self（backend）。检查闭包 cell 是否引用该实例，
-    用于 cleanup 时确认 PlatformManager 单例持有的回调是否指向本 backend。
-    """
-    try:
-        closure = getattr(callback, "__closure__", None) or ()
-        for cell in closure:
-            if cell.cell_contents is backend:
-                return True
-    except Exception:
-        pass
-    return False
 
 
 def _event_to_tag(event_name: str) -> str:
@@ -82,34 +67,6 @@ def _event_to_tag(event_name: str) -> str:
     return kebab.lower()
 
 
-def _strip_hook_wrapper(content: str) -> str:
-    """从 hook 消息格式中提取纯文本内容（兼容新旧格式）
-
-    Claude Code 格式: <{kebab-case-event}-hook>\\n...\\n</{kebab-case-event}-hook>
-    旧分隔线格式: ---\\n🔌 **Hook 内部通知** · 事件: `...`\\n\\n...\\n---
-    最早旧格式: <hook event=\"...\">\\n...\\n</hook>
-    """
-    if not content:
-        return content
-
-    # Claude Code 格式：<xxx-hook>...</xxx-hook>
-    # 用启发式：只要匹配 <xxx-hook>...</xxx-hook> 且标签以 -hook 结尾
-    m = re.search(r"<([a-z0-9-]+-hook)>\s*(.*?)\s*</\1>", content, re.DOTALL)
-    if m:
-        return m.group(2).strip()
-
-    # 旧分隔线格式
-    if content.startswith("---") and "🔌 **Hook 内部通知**" in content:
-        match = re.search(r"---\n.*?🔌\s*\*\*Hook 内部通知\*\*.*?\n\n(.+?)\n---", content, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        return content
-
-    # 最早旧格式
-    match = re.search(r"<hook[^>]*>(.*?)</hook>", content, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return content
 
 
 def _format_hook_output(
@@ -222,16 +179,6 @@ def _gw_str_platform(platform: Any):
         return platform
 
 
-def _safe_agent_manager(backend: "ChatBackend") -> Any:
-    """安全读取 _agent_manager：未 __init__ 时返回 None 而不触发 super().__init__ 异常
-
-    ChatBackend.__new__(...) 路径（测试场景）下，self._agent_manager 是 descriptor，
-    任何属性访问会触发 QObject.__init__() 链校验。bind_runtime 需 None 而非异常。
-    """
-    try:
-        return object.__getattribute__(backend, "_agent_manager")
-    except AttributeError, RuntimeError:
-        return None
 
 
 class ChatBackend(QObject):
@@ -1047,10 +994,6 @@ class ChatBackend(QObject):
 
         logger.info("[ChatBackend] 窗口资源清理完成")
 
-    def set_ui_valid(self, valid: bool):
-        """设置 UI 有效性标志（由 MainWidget.closeEvent 调用）"""
-        self._ui_valid = valid
-        logger.debug(f"[ChatBackend] UI valid set to: {valid}")
 
     def get_current_worker(self):
         """获取当前 Worker 实例"""
@@ -1458,11 +1401,6 @@ class ChatBackend(QObject):
 
     # ========== 状态查询 ==========
 
-    def get_current_agent(self) -> str:
-        """获取当前 Agent"""
-        if self._chat_engine:
-            return self._chat_engine.current_agent
-        return "plan"
 
     def set_current_agent(self, agent_name: str):
         """设置当前 Agent"""
@@ -1472,10 +1410,6 @@ class ChatBackend(QObject):
         if self._tool_executor and self._tool_executor._builtin_tools:
             self._tool_executor._builtin_tools.set_team_context(self._window_id, agent_name)
 
-    def set_streaming_state(self, is_streaming: bool):
-        """设置流式状态"""
-        if self._chat_engine:
-            self._chat_engine.set_streaming(is_streaming)
 
     def get_context_usage(self) -> tuple:
         """获取上下文使用情况"""

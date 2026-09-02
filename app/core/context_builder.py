@@ -414,31 +414,4 @@ class ContextBudgetAllocator:
         """
         return self._compactor.get_budget(llm_config)
 
-    def get_budget_breakdown(self, llm_config: Dict, system_content: str = None) -> Dict[str, int]:
-        """
-        获取预算分解（用于 UI 显示）。
 
-        Args:
-            llm_config: LLM 配置
-            system_content: 系统提示内容（可选）
-
-        Returns:
-            预算分解字典，包含 total、system、history 等
-        """
-        total = self._compactor.get_budget(llm_config)
-        result = {
-            "total": total,
-            "system": 0,
-            "history": total,
-        }
-
-        if system_content:
-            system_tokens = self._get_cached_system_tokens(system_content)
-            result["system"] = system_tokens
-            result["history"] = max(500, total - system_tokens)
-
-        return result
-
-    def count_tokens(self, messages: List[Dict]) -> int:
-        """计算消息列表的 token 数"""
-        return count_messages_tokens(messages)
