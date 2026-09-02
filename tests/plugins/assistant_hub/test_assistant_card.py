@@ -63,9 +63,9 @@ def test_card_construct_and_bind(tmp_path, monkeypatch):
     card = card_mod.AssistantCardWidget()
     # 空库自动 seed 3 个预设助手（build/hanako/pure）+ 测试新建 1 个
     assert len(card._stack._cards) == 4
-    # 默认绑定主助手 build（seed 时 build 设为主助手，排序居首）
+    # 默认绑定主助手 build（seed 时 build 设为主助手，排序居首，显示名 DriFox）
     assert card._active_aid == "build"
-    assert card._name_label.text() == "Build"
+    assert card._name_label.text() == "DriFox"
 
     # 新建第二个 → 切换
     b = mgr.create("二号")

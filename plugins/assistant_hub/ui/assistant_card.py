@@ -257,7 +257,6 @@ class AssistantCardWidget(QWidget):
         name_row.addWidget(self._primary_badge)
         name_row.addStretch()
         for text, handler, danger in (
-            ("设为当前", self._on_activate, False),
             ("设为主助手", self._on_set_primary, False),
             ("删除此助手", self._on_delete, True),
         ):
@@ -267,9 +266,7 @@ class AssistantCardWidget(QWidget):
             btn.setStyleSheet(_btn_style(danger=danger))
             btn.clicked.connect(handler)
             name_row.addWidget(btn)
-            if text == "设为当前":
-                self._activate_btn = btn  # 已是当前激活助手时隐藏
-            elif text == "设为主助手":
+            if text == "设为主助手":
                 self._set_primary_btn = btn  # 已是主助手时隐藏
             else:
                 self._delete_btn = btn  # 主助手时隐藏
@@ -421,7 +418,6 @@ class AssistantCardWidget(QWidget):
         )
         primary = next((a.id for a in assistants if a.primary), "")
         self._stack.set_primary(primary)
-        self._stack.set_active_aid(self._mgr.active_id())
         if select_aid and self._mgr.has(select_aid):
             self._bind_editor(select_aid)
         elif self._active_aid and self._mgr.has(self._active_aid):
@@ -441,9 +437,8 @@ class AssistantCardWidget(QWidget):
         a = self._mgr.get(aid)
         if not a:
             return
-        # 选中仅加载编辑器（记忆/经验/置顶数据源均显式传 aid，不依赖 active_id）；
-        # 全局激活须显式点「设为当前」——选中即激活曾导致仅浏览配置也切换全会话身份
-        self._activate_btn.setVisible(self._mgr.active_id() != aid)
+        # 选中仅加载编辑器（记忆/经验/置顶数据源均显式传 aid）；
+        # 全局身份只看主助手，@提及是会话级临时切换
         ap = self._mgr.assistant_avatar_path(aid)
         self._avatar.set_text(a.name or a.id)
         self._avatar.set_color(a.color)
@@ -453,7 +448,6 @@ class AssistantCardWidget(QWidget):
         self._set_primary_btn.setVisible(not a.primary)
         self._delete_btn.setVisible(not a.primary)
         self._stack.set_selected(aid)
-        self._stack.set_active_aid(self._mgr.active_id())
 
         aid_capture = aid
 
@@ -529,19 +523,7 @@ class AssistantCardWidget(QWidget):
             return
         if self._mgr.set_primary(self._active_aid):
             self._reload_all(select_aid=self._active_aid)
-            self._notify("已设为主助手")
-
-    def _on_activate(self) -> None:
-        """显式激活：切全局 active_id，全会话下一条消息生效（缓存已失效）。"""
-        if not self._active_aid:
-            return
-        a = self._mgr.get(self._active_aid)
-        if not a:
-            return
-        if self._mgr.set_active(self._active_aid):
-            self._activate_btn.hide()
-            self._stack.set_active_aid(self._active_aid)
-            self._notify(f"已切换为当前助手「{a.name or a.id}」")
+            self._notify("已设为主助手（全会话生效）")
 
     # ══════════════════════════════════════════════════
     #  基本信息 / 关于 Ta

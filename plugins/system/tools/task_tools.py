@@ -6,6 +6,7 @@ todowrite / todoread：待办状态**窗口级**（通用 services["window_state
 key="todo"，每窗口独立）；无窗口上下文（测试等）回退 app.tools.task_state
 模块级兑底。ToolResult 携带 todos 字段回传 UI（UI 从工具结果联动）。
 """
+import json
 from typing import Dict, List
 
 from app.tools.result import ToolResult
@@ -41,6 +42,9 @@ def _normalize_todos(todos) -> List[Dict]:
         status = str(lower_item.get("status", "")).lower()
         priority = str(lower_item.get("priority", "medium")).lower()
         content = lower_item.get("content") or lower_item.get("description") or ""
+        if not isinstance(content, str):
+            # LLM 传参类型不可控：对象/数组转 JSON 文本，其余 str()（UI QLabel/f-string 均要求 str）
+            content = json.dumps(content, ensure_ascii=False) if isinstance(content, (dict, list)) else str(content)
         normalized.append(
             {
                 "id": lower_item.get("id"),

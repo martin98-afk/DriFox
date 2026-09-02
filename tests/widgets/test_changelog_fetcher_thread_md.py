@@ -18,6 +18,20 @@ import re
 import textwrap
 from pathlib import Path
 
+import pytest
+
+_QT_APP_INSTALLED = False
+try:
+    from PyQt5.QtCore import QCoreApplication
+
+    if QCoreApplication.instance() is None:
+        _app = QCoreApplication([])
+        _QT_APP_INSTALLED = True
+    else:
+        _QT_APP_INSTALLED = True
+except ImportError:
+    pass
+
 _PLUGIN_FETCHER = (
     Path(__file__).resolve().parent.parent.parent
     / "plugins" / "welcome_changelog" / "ui" / "_fetcher.py"
@@ -65,3 +79,26 @@ def test_changelog_fetcher_run_builds_private_md_with_tables():
     assert re.search(r"extensions\s*=\s*\[[^\]]*['\"]tables['\"]", func_src, re.DOTALL), (
         "changelog 渲染需保留 tables 扩展（release note 含表格）"
     )
+
+
+@pytest.mark.skipif(not _QT_APP_INSTALLED, reason="需要 PyQt5")
+def test_ensure_fetcher_does_not_raise_name_error(monkeypatch):
+    """回归：_ensure_fetcher 使用 Qt.AutoConnection，曾漏 import Qt（NameError）。
+
+    症状：点「📜 更新」tab → render_changelog → start_fetch → _ensure_fetcher
+    抛 NameError: name 'Qt' is not defined，被 message_card._render_welcome_body
+    的 except: pass 吞掉后回退渲染空 sessions body → 卡片内容空白。
+    本测试 mock run() 后真实调用 _ensure_fetcher，覆盖 connect 链路。
+    """
+    from plugins.welcome_changelog.ui import _fetcher
+
+    _fetcher.clear_cache_for_tests()
+    monkeypatch.setattr(_fetcher.ChangelogFetcher, "run", lambda self: None)
+    try:
+        _fetcher._ensure_fetcher()  # 曾在此抛 NameError
+        assert _fetcher._active_fetcher is not None, "fetcher 应已创建并启动"
+    finally:
+        fetcher = _fetcher._active_fetcher
+        _fetcher.clear_cache_for_tests()
+        if fetcher is not None:
+            fetcher.wait(2000)

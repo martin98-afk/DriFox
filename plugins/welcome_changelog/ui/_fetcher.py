@@ -21,7 +21,7 @@ from html import escape
 from typing import List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QObject, QThread, pyqtSignal
+from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
 
 from app.core.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
 
@@ -106,8 +106,8 @@ def _ensure_fetcher() -> None:
         fetcher = ChangelogFetcher(etag=etag)
         bridge = _get_bridge()
         # 跨线程 QueuedConnection：fetcher 在子线程 emit，bridge slot 跑在主线程
-        fetcher.finished.connect(bridge.on_finished, Qt.AutoConnection)  # noqa: F821
-        fetcher.error.connect(bridge.on_error, Qt.AutoConnection)  # noqa: F821
+        fetcher.finished.connect(bridge.on_finished, Qt.AutoConnection)
+        fetcher.error.connect(bridge.on_error, Qt.AutoConnection)
         _active_fetcher = fetcher
     fetcher.start()
 

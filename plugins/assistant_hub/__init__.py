@@ -35,8 +35,8 @@
    下方单列分区（基本信息 / 人格切换 / 记忆 / 技能 / Dream）。
 
 4. **运行时**
-   在助手中心显式点「设为当前」（或 ``AssistantManager.set_active(assistant_id)``）
-   后会同步
+   主助手即不 @ 时的默认身份（``AssistantManager.active_id()`` 恒等于
+   主助手 id），切换主助手会同步
    AgentManager：注册一个动态 agent（name = ``assistant_<id>``，mode=subagent），
    把 personas/<yuan>/persona.md 拼成 prompt、内存 exclude 全部 skill =
    assistants.yaml 中明示放行的子集。这样子智能体上下文里"调用助手"

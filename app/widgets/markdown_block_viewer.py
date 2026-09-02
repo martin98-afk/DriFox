@@ -1639,7 +1639,9 @@ class TodoPanel(QWidget):
         done = 0
         for t in todos:
             status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
-            content = (t.get("content") or "") if isinstance(t, dict) else str(t)
+            raw = (t.get("content") if isinstance(t, dict) else t) or ""
+            # 兜存量脏数据：content 非 str 时 dict/list 转 JSON 文本（html.escape 只收 str）
+            content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
             priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
             if status == "completed":
                 done += 1

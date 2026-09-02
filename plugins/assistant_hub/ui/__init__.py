@@ -242,7 +242,6 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
 
         mgr = AssistantManager.get_instance()
         assistants = mgr.list_assistants_sorted_by_stable()
-        active_id = mgr.active_id()
     except Exception as e:
         logger.debug(f"[assistant_hub] 欢迎卡片助手数据读取失败: {e}")
         return ""
@@ -270,8 +269,6 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
         badges = []
         if a.primary:
             badges.append('<span class="ah-badge ah-badge-primary">主助手</span>')
-        if a.id == active_id:
-            badges.append('<span class="ah-badge ah-badge-active">使用中</span>')
         badge_html = "".join(badges)
         desc = (a.public_description or "").strip()
         desc_html = f'<div class="ah-desc">{escape(desc)}</div>' if desc else ""
@@ -307,7 +304,6 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
   font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 400; flex: none;
 }}
 .ah-badge-primary {{ background: #7c3aed22; color: #7c3aed; }}
-.ah-badge-active {{ background: #16a34a22; color: #16a34a; }}
 .ah-desc {{
   font-size: 11px; color: {muted}; margin-top: 2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;

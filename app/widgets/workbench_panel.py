@@ -238,7 +238,9 @@ class TasksPage(QWidget):
         active_item: QWidget | None = None
         for t in todos:
             status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
-            content = (t.get("content") or "") if isinstance(t, dict) else str(t)
+            raw = (t.get("content") if isinstance(t, dict) else t) or ""
+            # 兜存量脏数据：content 非 str 时 dict/list 转 JSON 文本（QLabel 只收 str）
+            content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
             priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
             item = self._make_item(status, content, priority)
             self._list_layout.addWidget(item)

@@ -2492,7 +2492,7 @@ class FileMentionObject(QObject, QTextObjectInterface):
         """胶囊尺寸（由文档布局在排版时查询）"""
         name, fm = self._name_and_metrics(doc, format)
         text_w = fm.horizontalAdvance(fm.elidedText(name, Qt.ElideMiddle, self._MAX_TEXT_WIDTH))
-        width = self._PAD_LEFT + self._ICON_SIZE + self._GAP + text_w + self._PAD_RIGHT
+        width = self._PAD_LEFT + text_w + self._PAD_RIGHT
         return QSizeF(width, self._HEIGHT)
 
     def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002
@@ -2566,14 +2566,12 @@ class AssistantMentionObject(QObject, QTextObjectInterface):
     Backspace 整体删除；toPlainText() 展开为 ``@名字``，发送文本与
     PreUserMessage hook 的 @提及检测保持兼容。
 
-    外观：助手主色圆角胶囊 + 🤖 + 名字，与文件胶囊（灰底）形成视觉区分。
+    外观：助手主色圆角胶囊 + 纯文字名字（无 emoji/图标），与文件胶囊（灰底）形成视觉区分。
     名字/主色存在 charFormat 自定义属性（_ASSISTANT_MENTION_*_PROP）。
     """
 
     _PAD_LEFT = 6
     _PAD_RIGHT = 6
-    _ICON_SIZE = 13
-    _GAP = 4
     _HEIGHT = 20
     _RADIUS = 6
     _MAX_TEXT_WIDTH = 120
@@ -2585,7 +2583,7 @@ class AssistantMentionObject(QObject, QTextObjectInterface):
         return QSizeF(width, self._HEIGHT)
 
     def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002
-        """绘制胶囊（助手主色描边 + 淡色底 + 🤖 + 名字）"""
+        """绘制胶囊（助手主色描边 + 淡色底 + 纯文字名字）"""
         name, fm = self._name_and_metrics(doc, format)
         color = (format.stringProperty(_ASSISTANT_MENTION_COLOR_PROP) or "#7C3AED") if format else "#7C3AED"
 
@@ -2607,9 +2605,6 @@ class AssistantMentionObject(QObject, QTextObjectInterface):
 
             x = pill.left() + self._PAD_LEFT
             painter.setFont(doc.defaultFont() if doc else QFont())
-            painter.setPen(QPen(border))
-            painter.drawText(QRectF(x, pill.top(), self._ICON_SIZE + 2, h), Qt.AlignVCenter | Qt.AlignLeft, "🤖")
-            x += self._ICON_SIZE + self._GAP
 
             text = fm.elidedText(name, Qt.ElideRight, self._MAX_TEXT_WIDTH)
             text_rect = QRectF(x, pill.top(), max(0.0, pill.right() - self._PAD_RIGHT - x), h)

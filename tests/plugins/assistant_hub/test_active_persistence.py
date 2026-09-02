@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""test_active_persistence.py — active_id 持久化与启动回落测试。"""
+"""test_active_persistence.py — 主助手即当前身份语义测试。
+
+active_id 恒等于主助手 id：无独立「当前/激活」层，@提及走会话级 override。
+"""
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -29,53 +31,28 @@ def mgr(tmp_path):
     AssistantManager.reset_instance()
 
 
-def test_seed_activates_primary_and_persists(mgr):
-    """首次 seed：build 主助手被激活，且 active.json 落盘"""
-    assert AssistantManager.active_id() == "build"
-    data = json.loads((mgr.root / "active.json").read_text(encoding="utf-8"))
-    assert data["active_id"] == "build"
-
-
-def test_restore_persists_across_reset(mgr, tmp_path):
-    """切换助手后重启（reset+reload），active_id 从磁盘恢复"""
-    assert mgr.set_active("hanako") is True
-    aid_before = AssistantManager.active_id()
-
-    AssistantManager.reset_instance()
-    m2 = AssistantManager.get_instance(root_dir=str(mgr.root))
-    assert AssistantManager.active_id() == aid_before == "hanako"
-
-
-def test_restore_falls_back_to_primary_when_no_file(mgr, tmp_path):
-    """无 active.json（老数据）→ 回落主助手 build"""
-    (mgr.root / "active.json").unlink()
-    AssistantManager.reset_instance()
-    m2 = AssistantManager.get_instance(root_dir=str(mgr.root))
+def test_seed_primary_is_active(mgr):
+    """首次 seed：主助手 build 即当前身份"""
     assert AssistantManager.active_id() == "build"
 
 
-def test_restore_respects_cleared_state(mgr):
-    """clear_active 写空串 → 重启后保持未激活（不回落）"""
-    mgr.clear_active()
-    assert AssistantManager.active_id() == ""
+def test_set_primary_switches_active(mgr):
+    """切主助手 = 切当前身份"""
+    assert mgr.set_primary("hanako") is True
+    assert AssistantManager.active_id() == "hanako"
+    assert mgr.get("build").primary is False
+
+
+def test_primary_survives_reload(mgr):
+    """切换主助手后重启（reset+reload），当前身份从 yaml primary 恢复"""
+    mgr.set_primary("hanako")
     AssistantManager.reset_instance()
-    m2 = AssistantManager.get_instance(root_dir=str(mgr.root))
-    assert AssistantManager.active_id() == ""
+    AssistantManager.get_instance(root_dir=str(mgr.root))
+    assert AssistantManager.active_id() == "hanako"
 
 
-def test_restore_skips_stale_id(mgr):
-    """active.json 指向已删除助手 → 保持未激活，不指向幽灵 id"""
+def test_delete_non_primary_keeps_active(mgr):
+    """删除非主助手：当前身份不变"""
     mgr.create("临时", id="temp_x")
-    mgr.set_active("temp_x")
-    mgr.delete("temp_x")
-    assert AssistantManager.active_id() != "temp_x"
-    data = json.loads((mgr.root / "active.json").read_text(encoding="utf-8"))
-    assert data["active_id"] == AssistantManager.active_id()
-
-
-def test_delete_active_falls_back_to_first(mgr):
-    """删除当前激活助手 → 回落到剩余第一个助手并同步落盘"""
-    mgr.set_active("hanako")
-    assert mgr.delete("hanako") is True
-    aid = AssistantManager.active_id()
-    assert aid and mgr.has(aid)
+    assert mgr.delete("temp_x") is True
+    assert AssistantManager.active_id() == "build"

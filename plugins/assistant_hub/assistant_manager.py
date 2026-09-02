@@ -345,11 +345,8 @@ class AssistantManager:
 
     _instance: Optional["AssistantManager"] = None
 
-    # 当前活跃助手 id（运行时，每次切换更新）
-    _active_id: str = ""
-
     # 会话级临时助手：{session_id: assistant_id}（运行时态，重启清零；
-    # 由 @提及触发，仅影响对应会话的 system prompt，不改变全局 active_id）
+    # 由 @提及触发，仅影响对应会话的 system prompt）
     _session_overrides: Dict[str, str] = {}
 
     def __init__(self, root_dir: Optional[str] = None):
@@ -376,7 +373,6 @@ class AssistantManager:
     def reset_instance(cls) -> None:
         """测试/重载用：清空单例"""
         cls._instance = None
-        cls._active_id = ""
         cls._session_overrides = {}
 
     # ── 根目录 ──
@@ -452,7 +448,6 @@ class AssistantManager:
             pass
         if not self._assistants:
             self._seed_defaults()
-        self._restore_active_id()
         self._converge_primary()
         self._loaded = True
         logger.info(f"[assistant_hub] 已加载 {len(self._assistants)} 个助手")
@@ -461,8 +456,7 @@ class AssistantManager:
         """多主/无主收敛（读侧防御）。
 
         双主来源：热重载窗口期旧实例 update() 整体写回旧 primary 态。
-        规则：唯一主 → 不动；多主 → 优先保留当前激活助手，否则保留
-        稳定排序首位；无主 → 稳定排序首位补主。结果写回磁盘。
+        规则：唯一主 → 不动；多主/无主 → 保留稳定排序首位。结果写回磁盘。
         """
         if not self._assistants:
             return
@@ -470,10 +464,7 @@ class AssistantManager:
         if len(primaries) == 1:
             return
         stable = self.list_assistants_sorted_by_stable()
-        if len(primaries) > 1 and AssistantManager._active_id in self._assistants:
-            keep = AssistantManager._active_id
-        else:
-            keep = stable[0].id
+        keep = stable[0].id
         now = _now_iso()
         for k, v in self._assistants.items():
             new_primary = k == keep
@@ -511,10 +502,6 @@ class AssistantManager:
                 if primary:
                     a.primary = True
                     self.update(a)
-                    try:
-                        self.set_active(a.id)
-                    except Exception:
-                        pass
             logger.info("[assistant_hub] 已预置默认助手: build / hanako / pure")
         except Exception as e:
             logger.warning(f"[assistant_hub] 预置助手失败: {e}")
@@ -566,9 +553,6 @@ class AssistantManager:
                 shutil.rmtree(path)
         except Exception as e:
             logger.warning(f"[assistant_hub] 删除 {path} 失败: {e}")
-        if AssistantManager._active_id == aid:
-            AssistantManager._active_id = next(iter(self._assistants), "")
-            self._save_active_id(AssistantManager._active_id)
         logger.info(f"[assistant_hub] 删除助手: {aid}")
         return True
 
@@ -600,9 +584,14 @@ class AssistantManager:
                     self._write_yaml(v)
 
     def set_primary(self, aid: str) -> bool:
-        """设置主助手（互斥）"""
+        """设置主助手（互斥）。
+
+        主助手即不 @ 时的默认身份：切换后清空 system prompt 缓存，
+        所有会话下一条消息生效。
+        """
         if aid not in self._assistants:
             return False
+        changed = not self._assistants[aid].primary
         now = _now_iso()
         for k, v in self._assistants.items():
             new_primary = k == aid
@@ -610,6 +599,8 @@ class AssistantManager:
                 v.primary = new_primary
                 v.updated_at = now
                 self._write_yaml(v)
+        if changed:
+            self._invalidate_session_prompt_caches()
         return True
 
     def save_order(self, ordered_ids: List[str]) -> bool:
@@ -638,45 +629,22 @@ class AssistantManager:
             return False
         return bool(re.match(r"^[a-z0-9][a-z0-9_\-]*$", aid.lower()))
 
-    # ── 活跃助手 ──
-
-    def _active_file(self) -> Path:
-        return self._root / "active.json"
-
-    def _save_active_id(self, aid: str) -> None:
-        """持久化 active_id（空串=明确取消激活；无文件=从未选择，启动回落主助手）"""
-        try:
-            self._ensure_dir(self._root)
-            self._active_file().write_text(json.dumps({"active_id": aid}, ensure_ascii=False), encoding="utf-8")
-        except Exception as e:
-            logger.warning(f"[assistant_hub] 保存 active_id 失败: {e}")
-
-    def _restore_active_id(self) -> None:
-        """启动恢复 active_id：文件存在则尊重记录（含明确空值）；缺失时回落主助手"""
-        try:
-            path = self._active_file()
-            if path.exists():
-                aid = str(json.loads(path.read_text(encoding="utf-8")).get("active_id") or "")
-                if aid and self.has(aid):
-                    AssistantManager._active_id = aid
-                return
-        except Exception as e:
-            logger.warning(f"[assistant_hub] 读取 active_id 失败: {e}")
-        primary = next((a.id for a in self._assistants.values() if a.primary), "")
-        AssistantManager._active_id = primary or next(iter(self._assistants), "")
+    # ── 当前助手（= 主助手，不 @ 时的默认身份）──
 
     @classmethod
     def active_id(cls) -> str:
-        return cls._active_id
+        """当前生效助手 id（= 主助手；@提及的会话级临时切换走 session override）。"""
+        inst = cls.get_instance()
+        return next((a.id for a in inst._assistants.values() if a.primary), next(iter(inst._assistants), ""))
 
     # ── 会话级临时助手（@提及触发，仅影响单个 session 的 system prompt）──
 
     @classmethod
     def set_session_override(cls, session_id: str, aid: str) -> bool:
-        """设置某会话的临时助手（aid 为空串 = 清除 override，跟随全局）。
+        """设置某会话的临时助手（aid 为空串 = 清除 override，跟随全局主助手）。
 
-        与 set_active 的区别：不写 active.json、不清全局缓存，仅影响
-        session_id 对应会话的 BuildSystemPrompt 注入。返回是否发生变化。
+        仅影响 session_id 对应会话的 BuildSystemPrompt 注入，不改变全局
+        主助手。返回是否发生变化。
         """
         if not session_id:
             return False
@@ -703,32 +671,6 @@ class AssistantManager:
             cls.get_instance()._session_overrides.pop(session_id, None)
             return ""
         return aid
-
-    @classmethod
-    def set_active(cls, aid: str) -> bool:
-        """激活助手：记录 active_id 并清空所有窗口的 system prompt 缓存。
-
-        缓存清空是必须的：context_builder 会缓存 session.system_prompt，
-        若不失效，激活新助手后下次 build_messages 仍复用旧助手（或 build）
-        的身份注入，表现为"系统提示词里没有助手内容"。
-        """
-        mgr = cls.get_instance()
-        if not mgr.has(aid):
-            return False
-        changed = cls._active_id != aid
-        cls._active_id = aid
-        if changed:
-            cls._invalidate_session_prompt_caches()
-        mgr._save_active_id(aid)
-        return True
-
-    @classmethod
-    def clear_active(cls) -> None:
-        """取消激活助手（回到默认 build 智能体身份）；写空串使重启后保持未激活"""
-        if cls._active_id:
-            cls._active_id = ""
-            cls._invalidate_session_prompt_caches()
-        cls.get_instance()._save_active_id("")
 
     @staticmethod
     def _invalidate_session_prompt_caches() -> None:
