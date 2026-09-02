@@ -128,7 +128,6 @@ class UpdateChecker(QWidget):
     def _show_update_infobar(self, latest_release):
         """保持原有的 InfoBar 交互方式，并增加查看详情按钮"""
         latest_version = latest_release.get("tag_name", "未知")
-        update_notes = latest_release.get("body", "无更新说明")
         html_url = latest_release.get("html_url", "").strip()  # 获取发布页面URL
 
         info_bar = InfoBar(

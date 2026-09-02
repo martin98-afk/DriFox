@@ -6,19 +6,18 @@ ChatBackend - 统一后端接口
 
 from __future__ import annotations
 
-import asyncio
 import os
 import queue
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import orjson as json
 from loguru import logger
-from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal, QTimer, QCoreApplication
+from PyQt5.QtCore import QObject, QThreadPool, pyqtSignal, QTimer
 
 from app.constants import IMAGE_EXTENSIONS
-from app.utils.utils import invalidate_skills_cache
 
 # Auto-compact 防重复触发冷却（秒）
 _AUTO_COMPACT_COOLDOWN = 30.0
@@ -46,21 +45,6 @@ def get_session_storage():
         return registry.get_active()
 
 
-def _callback_holds_backend(callback, backend) -> bool:
-    """判断异步闭包是否捕获了指定 ChatBackend 实例（泄漏修复 6d 辅助）。
-
-    _do_init 中定义的 process_message / send_message 是 async 函数，
-    闭包通过自由变量捕获 self（backend）。检查闭包 cell 是否引用该实例，
-    用于 cleanup 时确认 PlatformManager 单例持有的回调是否指向本 backend。
-    """
-    try:
-        closure = getattr(callback, "__closure__", None) or ()
-        for cell in closure:
-            if cell.cell_contents is backend:
-                return True
-    except Exception:
-        pass
-    return False
 
 
 def _event_to_tag(event_name: str) -> str:
@@ -81,34 +65,6 @@ def _event_to_tag(event_name: str) -> str:
     return kebab.lower()
 
 
-def _strip_hook_wrapper(content: str) -> str:
-    """从 hook 消息格式中提取纯文本内容（兼容新旧格式）
-
-    Claude Code 格式: <{kebab-case-event}-hook>\\n...\\n</{kebab-case-event}-hook>
-    旧分隔线格式: ---\\n🔌 **Hook 内部通知** · 事件: `...`\\n\\n...\\n---
-    最早旧格式: <hook event=\"...\">\\n...\\n</hook>
-    """
-    if not content:
-        return content
-
-    # Claude Code 格式：<xxx-hook>...</xxx-hook>
-    # 用启发式：只要匹配 <xxx-hook>...</xxx-hook> 且标签以 -hook 结尾
-    m = re.search(r"<([a-z0-9-]+-hook)>\s*(.*?)\s*</\1>", content, re.DOTALL)
-    if m:
-        return m.group(2).strip()
-
-    # 旧分隔线格式
-    if content.startswith("---") and "🔌 **Hook 内部通知**" in content:
-        match = re.search(r"---\n.*?🔌\s*\*\*Hook 内部通知\*\*.*?\n\n(.+?)\n---", content, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        return content
-
-    # 最早旧格式
-    match = re.search(r"<hook[^>]*>(.*?)</hook>", content, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return content
 
 
 def _format_hook_output(
@@ -221,16 +177,6 @@ def _gw_str_platform(platform: Any):
         return platform
 
 
-def _safe_agent_manager(backend: "ChatBackend") -> Any:
-    """安全读取 _agent_manager：未 __init__ 时返回 None 而不触发 super().__init__ 异常
-
-    ChatBackend.__new__(...) 路径（测试场景）下，self._agent_manager 是 descriptor，
-    任何属性访问会触发 QObject.__init__() 链校验。bind_runtime 需 None 而非异常。
-    """
-    try:
-        return object.__getattribute__(backend, "_agent_manager")
-    except AttributeError, RuntimeError:
-        return None
 
 
 class ChatBackend(QObject):
@@ -662,7 +608,6 @@ class ChatBackend(QObject):
         UI 使用处均有 None 守卫（tool_executor/chat_engine 等访问都判空）。
         发送消息路径由 main_widget 调 ensure_deferred_components() 同步兜底。
         """
-        from PyQt5.QtCore import QTimer
 
         QTimer.singleShot(0, self._deferred_create_memory_manager)
         QTimer.singleShot(200, self._deferred_create_tool_executor)
@@ -1046,10 +991,6 @@ class ChatBackend(QObject):
 
         logger.info("[ChatBackend] 窗口资源清理完成")
 
-    def set_ui_valid(self, valid: bool):
-        """设置 UI 有效性标志（由 MainWidget.closeEvent 调用）"""
-        self._ui_valid = valid
-        logger.debug(f"[ChatBackend] UI valid set to: {valid}")
 
     def get_current_worker(self):
         """获取当前 Worker 实例"""
@@ -1161,52 +1102,6 @@ class ChatBackend(QObject):
         if self._sub_agent_manager:
             self._sub_agent_manager.set_history_getter(getter)
 
-    # ========== MemoryManager 代理方法 ==========
-    def get_memory_context_string(self, limit: int = 100) -> str:
-        """获取记忆上下文字符串
-
-        多窗口隔离：优先使用 tool_executor 中的实例级 workdir，
-        避免 DB 中其他窗口写入的工作目录值。
-        """
-        if self._memory_manager:
-            # 多窗口隔离：从 tool_executor 获取实例级 workdir（而非 DB）
-            workdir = None
-            if self._tool_executor:
-                workdir = self._tool_executor.get_workdir()
-            # include_project_context=False：项目笔记/路径建议/Worktree 信息
-            # 已由 SessionStart hook 注入，无需在每个用户消息中重复写入
-            return self._memory_manager.format_memories_for_prompt(
-                project=self._current_project,
-                entry_limit=limit,
-                doc_limit=50,
-                workdir_override=workdir,
-                include_project_context=False,
-            )
-        return ""
-
-    def get_user_memories(self, memory_data: Dict = None) -> List[Dict]:
-        """获取用户记忆列表（兼容旧接口）"""
-        if self._memory_manager:
-            return self._memory_manager.get_entry_memories()
-        return []
-
-    def load_memory_data(self) -> Dict:
-        """加载记忆数据"""
-        if self._memory_manager:
-            return self._memory_manager.load_memory()
-        return {"version": "3.0", "user_memories": []}
-
-    def add_user_memory(self, content: str, **kwargs):
-        """添加用户记忆"""
-        if self._memory_manager:
-            self._memory_manager.add_entry_memory(content, kwargs.get("source", "assistant"))
-
-    def update_user_memories(self, memories: List[Dict]) -> bool:
-        """更新用户记忆"""
-        if self._memory_manager:
-            return self._memory_manager.save_entry_memories(memories)
-        return False
-
     # ========== AgentManager 代理方法 ==========
 
     def get_primary_agents(self) -> List:
@@ -1222,61 +1117,6 @@ class ChatBackend(QObject):
         return None
 
     # ========== 会话管理 ==========
-
-    def build_memory_context_dict(self) -> Dict[str, Any]:
-        """构建 PreUserMessage hook 记忆上下文 — 预取条目记忆 + 关键文档
-
-        Returns:
-            包含条目记忆和关键文档的 dict
-        """
-        from pathlib import Path
-
-        ctx: Dict[str, Any] = {}
-        if not self._memory_manager:
-            return ctx
-
-        # 条目记忆
-        try:
-            entries = self._memory_manager.get_entry_memories(limit=100)
-            if entries:
-                ctx["entry_memories"] = [e.get("content", "") for e in entries]
-        except Exception:
-            pass
-
-        # 关键文档（含路径显示）
-        try:
-            wd_path = self._tool_executor.get_workdir() if self._tool_executor else ""
-            docs = self._memory_manager.get_key_documents(self._current_project)[:50]
-            if docs:
-                doc_items = []
-                for doc in docs:
-                    file_path = doc.get("file_path", "")
-                    file_name = doc.get("file_name", "")
-                    is_url = file_path and (file_path.startswith("http://") or file_path.startswith("https://"))
-                    is_wd = file_path == wd_path
-                    if not is_url and not is_wd and file_path and wd_path:
-                        try:
-                            display = str(Path(file_path).relative_to(Path(wd_path)))
-                        except ValueError:
-                            display = file_path
-                    elif is_url:
-                        display = file_path
-                    else:
-                        display = file_path
-                    doc_items.append(
-                        {
-                            "file_name": file_name,
-                            "display": display,
-                            "is_url": is_url,
-                            "is_wd": is_wd,
-                        }
-                    )
-                if doc_items:
-                    ctx["key_documents"] = doc_items
-        except Exception:
-            pass
-
-        return ctx
 
     def _build_worktree_context_dict(self) -> Dict[str, Any]:
         """构建 worktree + 路径使用建议上下文（PreUserMessage 每次触发时更新）
@@ -1372,6 +1212,48 @@ class ChatBackend(QObject):
         except Exception:
             pass
 
+        return ctx
+
+    def build_key_documents_context(self) -> Dict[str, Any]:
+        """构建 PreUserMessage hook 关键文档上下文 — 预取当前项目的关键文档
+
+        数据源：MemoryManager.key_documents（SQLite）。条目记忆不再注入
+        （已由 assistant_hub 的人工提示/长期记忆体系取代），仅保留关键文档。
+        """
+        ctx: Dict[str, Any] = {}
+        if not self._memory_manager:
+            return ctx
+        try:
+            wd_path = self._tool_executor.get_workdir() if self._tool_executor else ""
+            docs = self._memory_manager.get_key_documents(self._current_project)[:50]
+            if docs:
+                doc_items = []
+                for doc in docs:
+                    file_path = doc.get("file_path", "")
+                    file_name = doc.get("file_name", "")
+                    is_url = file_path.startswith(("http://", "https://"))
+                    is_wd = file_path == wd_path
+                    if not is_url and not is_wd and file_path and wd_path:
+                        try:
+                            display = str(Path(file_path).relative_to(Path(wd_path)))
+                        except ValueError:
+                            display = file_path
+                    elif is_url:
+                        display = file_path
+                    else:
+                        display = file_path
+                    doc_items.append(
+                        {
+                            "file_name": file_name,
+                            "display": display,
+                            "is_url": is_url,
+                            "is_wd": is_wd,
+                        }
+                    )
+                if doc_items:
+                    ctx["key_documents"] = doc_items
+        except Exception:
+            pass
         return ctx
 
     def _warm_git_cache(self, project_root: str):
@@ -1516,11 +1398,6 @@ class ChatBackend(QObject):
 
     # ========== 状态查询 ==========
 
-    def get_current_agent(self) -> str:
-        """获取当前 Agent"""
-        if self._chat_engine:
-            return self._chat_engine.current_agent
-        return "plan"
 
     def set_current_agent(self, agent_name: str):
         """设置当前 Agent"""
@@ -1530,10 +1407,6 @@ class ChatBackend(QObject):
         if self._tool_executor and self._tool_executor._builtin_tools:
             self._tool_executor._builtin_tools.set_team_context(self._window_id, agent_name)
 
-    def set_streaming_state(self, is_streaming: bool):
-        """设置流式状态"""
-        if self._chat_engine:
-            self._chat_engine.set_streaming(is_streaming)
 
     def get_context_usage(self) -> tuple:
         """获取上下文使用情况"""
@@ -1542,23 +1415,6 @@ class ChatBackend(QObject):
         return (0, 0)
 
     # ========== 上下文构建方法 ==========
-
-    def _build_memory_context(self, query: str = "", project: str = "默认项目") -> str:
-        """构建长期记忆上下文（供 ChatEngine 调用）
-
-        多窗口隔离：优先使用 tool_executor 中的实例级 workdir。
-        """
-        if not self._memory_manager:
-            return ""
-        workdir = None
-        if self._tool_executor:
-            workdir = self._tool_executor.get_workdir()
-        return self._memory_manager.format_memories_for_prompt(
-            project=project,
-            entry_limit=100,
-            doc_limit=50,
-            workdir_override=workdir,
-        )
 
     def _build_chat_cards_context(self) -> str:
         """构建卡片上下文"""

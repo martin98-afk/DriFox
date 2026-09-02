@@ -108,6 +108,66 @@ def test_full_cards_titlebar_sync(qtbot, monkeypatch):
     assert tm.titleBar._active_id == "usage"
 
 
+def test_close_full_card_keeps_permanent_titlebar_tab(qtbot, monkeypatch):
+    """回归：常驻 titlebar tab 与 full 卡共用 card_id 时，hidden 去抖关闭不得删常驻 tab
+
+    assistant_hub 场景：插件注册常驻「助手」tab（tab_id=card_id=assistant_hub），
+    点「新建人格」→ hide_floating_card_globally → hidden 事件 → 120ms 去抖超时。
+    此前 _on_replace_close_timeout 无条件 remove_tab，把常驻 tab 也删了且无人恢复。
+    """
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    tm._replace_open.clear()
+    tm._replace_active.clear()
+    tm._replace_timers.clear()
+    _patch_reg_and_cm(
+        monkeypatch,
+        cards={"assistant_hub": SimpleNamespace(container="full", title="助手中心")},
+    )
+
+    # 模拟 _sync_plugin_titlebar_tabs 的产物：常驻 tab 已挂载（不可关闭）
+    tm.titleBar.add_tab("assistant_hub", "助手", on_click=lambda: None, closable=False)
+    tm._plugin_titlebar_tab_ids.add("assistant_hub")
+
+    # full 卡显示 → open 记录；add_tab 因 tab 已存在跳过（保持常驻形态）
+    tm._on_card_visibility_changed({"card_id": "assistant_hub", "visible": True})
+    assert "assistant_hub" in tm._replace_open.get(GLOBAL_WINDOW_ID, {})
+
+    # 关闭（hidden 事件 → 直接触发去抖超时，绕过 QTimer 跨测试时序污染）
+    tm._on_card_visibility_changed({"card_id": "assistant_hub", "visible": False})
+    tm._on_replace_close_timeout("assistant_hub")
+
+    # open/active 清除，但常驻 tab 必须保留（点击 on_click 可再打开卡片）
+    assert "assistant_hub" not in tm._replace_open.get(GLOBAL_WINDOW_ID, {})
+    assert "assistant_hub" in tm.titleBar._tabs
+    assert tm.titleBar._tabs["assistant_hub"]._closable is False
+    assert tm.titleBar._active_id == CHAT_TAB_ID
+
+
+def test_close_replace_card_keeps_permanent_titlebar_tab(qtbot, monkeypatch):
+    """回归：close_replace_card（tab × / 卡内关闭钮共用入口）同样不得删常驻 tab"""
+    tm = TabManagerWindow.create_instance()
+    qtbot.addWidget(tm)
+    tm._replace_open.clear()
+    tm._replace_active.clear()
+    tm._replace_timers.clear()
+    _patch_reg_and_cm(
+        monkeypatch,
+        cards={"assistant_hub": SimpleNamespace(container="full", title="助手中心")},
+    )
+
+    tm.titleBar.add_tab("assistant_hub", "助手", on_click=lambda: None, closable=False)
+    tm._plugin_titlebar_tab_ids.add("assistant_hub")
+
+    tm._on_card_visibility_changed({"card_id": "assistant_hub", "visible": True})
+    assert "assistant_hub" in tm._replace_open.get(GLOBAL_WINDOW_ID, {})
+
+    tm.close_replace_card("assistant_hub")
+
+    assert "assistant_hub" not in tm._replace_open.get(GLOBAL_WINDOW_ID, {})
+    assert "assistant_hub" in tm.titleBar._tabs
+
+
 def test_global_replace_cards_sync(qtbot, monkeypatch):
     tm = TabManagerWindow.create_instance()
     qtbot.addWidget(tm)

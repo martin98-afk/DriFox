@@ -29,6 +29,21 @@ def register_ui(registry) -> None:
         registry: UIPluginRegistry 单例
     """
     try:
+        from ._worktree_page import SystemWorktreePage
+
+        # 工作树页：page_id="worktree" 填工作树槽位（index 0，默认落点）
+        registry.register_workbench_tab(
+            plugin_name="system",
+            page_id="worktree",
+            label="工作树",
+            widget_class=SystemWorktreePage,
+            priority=20,
+            metadata={"source": "system"},
+        )
+        logger.info("[system.ui] 已注册工作台 tab: worktree（工作树·系统插件版）")
+    except Exception as e:
+        logger.warning(f"[system.ui] 注册 worktree tab 失败（工作树页将显示占位）: {e}")
+    try:
         from ._artifacts_page import SystemArtifactsPage
 
         # 产物页：page_id="artifacts" 填产物页槽位（面板无内置实现）

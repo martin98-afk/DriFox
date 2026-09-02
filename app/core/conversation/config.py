@@ -87,6 +87,12 @@ class ConversationConfig:
     # 未设置时按 hook_policy 枚举回落（ALL→"all" / TOOL_EVENTS_ONLY→"tool_only" /
     # NONE→"none"）。允许插件自建引擎（autoloop/象棋）声明更精细的策略。
     hook_policy_id: Optional[str] = None
+    # 可选：LoopPolicy 插件 id（plugins/*/loop_policies/ 注册）。
+    # 设置后本引擎的 worker 按 id 直接取策略对象，不调用
+    # LoopPolicyRegistry.set_active —— 避免污染全局激活槽（主对话仍用 default）。
+    # 用途：插件自建引擎声明自己的循环语义，如 assistant_hub 记忆整理
+    # 只需要一回合（assistant_hub_single_turn）。未设置时回落全局激活策略。
+    loop_policy_id: Optional[str] = None
 
 
 # ============================================================

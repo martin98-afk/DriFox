@@ -17,12 +17,11 @@
 from typing import Callable, Optional
 
 from PyQt5.QtCore import QEvent, QSize, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )

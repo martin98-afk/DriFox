@@ -475,7 +475,7 @@ def _parse_tool_block(content: str) -> Dict[str, Any]:
 
 
 def parse_blocks(md_text: str) -> List[Dict[str, Any]]:
-    """markdown 全文 → 块列表。type ∈ think/tool/code/html。"""
+    """markdown 全文 → 块列表。type ∈ think/tool/code/html/tag。"""
     blocks: List[Dict[str, Any]] = []
     for kind, content, closed in _split_tag_segments(md_text, _THINK_OPEN, _THINK_CLOSE):
         if kind == "tag":
@@ -490,8 +490,69 @@ def parse_blocks(md_text: str) -> List[Dict[str, Any]]:
                 if ckind == "code":
                     blocks.append({"type": "code", "lang": lang, "code": cbody, "closed": fence_closed})
                 else:
-                    blocks.append({"type": "html", "html": _md_to_html(cbody)})
+                    blocks.extend(_split_plugin_tags(cbody))
     return blocks
+
+
+def _split_plugin_tags(text: str) -> List[Dict[str, Any]]:
+    """文本段按插件注册的内联标签切分（如 assistant_hub 的 <mood>）。
+
+    无注册标签时零开销直通（单个 html 块）；命中时已注册标签段转
+    {type:"tag", tag, content, completed, html} 块，剩余文本保持
+    html 块不变。渲染失败/空内容的 tag 块丢弃（不原文泄漏）。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        tag_names = UIPluginRegistry.get_instance().get_registered_tag_names()
+    except Exception:
+        tag_names = []
+    if not tag_names:
+        return [{"type": "html", "html": _md_to_html(text)}]
+
+    # 逐标签切分：tag 段标记为 f"tag:{name}"，普通段继续下一层
+    queue: List[Tuple[str, str, bool]] = [("plain", text, True)]
+    for tag in tag_names:
+        open_tag, close_tag = f"<{tag}>", f"</{tag}>"
+        if not any(kind == "plain" and open_tag in body for kind, body, _c in queue):
+            continue
+        nxt: List[Tuple[str, str, bool]] = []
+        for kind, body, closed in queue:
+            if kind != "plain":
+                nxt.append((kind, body, closed))
+                continue
+            for skind, sbody, sclosed in _split_tag_segments(body, open_tag, close_tag):
+                if skind == "tag":
+                    nxt.append((f"tag:{tag}", sbody, sclosed))
+                else:
+                    nxt.append(("plain", sbody, True))
+        queue = nxt
+
+    out: List[Dict[str, Any]] = []
+    for kind, body, closed in queue:
+        if kind.startswith("tag:"):
+            tag = kind[4:]
+            html = _render_plugin_tag_html(tag, body, closed)
+            if html:
+                out.append({"type": "tag", "tag": tag, "content": body, "completed": closed, "html": html})
+        elif body.strip():
+            out.append({"type": "html", "html": _md_to_html(body)})
+    return out
+
+
+def _render_plugin_tag_html(tag: str, content: str, completed: bool) -> str:
+    """已注册内联标签 → 插件渲染器 HTML（Qt 路径）。失败/空内容返回空串（丢弃，不泄漏原文）。"""
+    if not content.strip():
+        return ""
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        info = UIPluginRegistry.get_instance().get_tag_renderer(tag)
+        if info is None:
+            return ""
+        return info.render_func(content, {"tag": tag, "completed": completed, "compact": False})
+    except Exception:
+        return ""
 
 
 SIDE_TYPES = ("think", "tool")
@@ -1578,7 +1639,9 @@ class TodoPanel(QWidget):
         done = 0
         for t in todos:
             status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
-            content = (t.get("content") or "") if isinstance(t, dict) else str(t)
+            raw = (t.get("content") if isinstance(t, dict) else t) or ""
+            # 兜存量脏数据：content 非 str 时 dict/list 转 JSON 文本（html.escape 只收 str）
+            content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
             priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
             if status == "completed":
                 done += 1
@@ -1816,7 +1879,7 @@ class MarkdownBlockViewer(QWidget):
             [b for b in blocks if b["type"] == "think" or (b["type"] == "tool" and not b.get("is_edit"))]
         )
         body_items = _slot_items(
-            [b for b in blocks if b["type"] in ("html", "code") or (b["type"] == "tool" and b.get("is_edit"))]
+            [b for b in blocks if b["type"] in ("html", "code", "tag") or (b["type"] == "tool" and b.get("is_edit"))]
         )
         self._widgets, self._keys = reconcile_widgets(
             self._body_lay, self._widgets, self._keys, body_items, self._build_block_widget, self._streaming
@@ -1829,4 +1892,6 @@ class MarkdownBlockViewer(QWidget):
             return CodeBlockWidget(b["code"], b["lang"])
         if b["type"] == "tool":
             return ToolCardWidget(b)  # 编辑类工具：结果展示在正文之中
+        if b["type"] == "tag":
+            return RichTextLabel(b["html"])  # 插件内联标签卡（已由渲染器生成 HTML）
         return RichTextLabel(b["html"])

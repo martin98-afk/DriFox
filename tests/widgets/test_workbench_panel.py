@@ -558,3 +558,174 @@ def test_system_plugin_ui_module_importable():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert callable(getattr(module, "register_ui", None))
+
+
+# ── 多标签页 tab 状态回归（2026-09-02：选中残留 / 选中丢失修复） ──
+
+
+def test_set_current_tab_out_of_range_keeps_highlight(panel):
+    """★ 越界 set_current_tab 不再把全部按钮熄灭（「tab 选中丢失」根因）
+
+    按窗口记忆恢复的页签可能已被卸载（卡片 tab 关闭 / 插件卸载 / 历史页摘除）。
+    旧实现：setCurrentIndex 越界是空操作，但下方按钮循环把所有按钮置非激活 →
+    内容停在旧页、高亮却全灭。
+    """
+    panel.set_current_tab(WorkbenchPanel.TAB_WORKTREE)
+    assert panel.current_tab() == WorkbenchPanel.TAB_WORKTREE
+    panel.set_current_tab(99)  # 越界
+    assert panel.current_tab() == WorkbenchPanel.TAB_WORKTREE  # 不强行跳页
+    active = [i for i, b in enumerate(panel._tab_buttons) if b._active]
+    assert active == [WorkbenchPanel.TAB_WORKTREE], f"越界后高亮应保留在工作树页: {active}"
+    panel.set_current_tab(-1)  # 负越界同样兜底
+    assert panel.current_tab() == WorkbenchPanel.TAB_WORKTREE
+    assert panel._tab_buttons[WorkbenchPanel.TAB_WORKTREE]._active
+
+
+def test_attach_history_preserves_current_page(panel):
+    """挂载历史页时保持用户当前页签（插件/卡片页不被历史页挤走）
+
+    ★ 行为锁定：Qt 的 insertWidget 前插会递增 currentIndex（当前 widget 不变），
+    但换挂组合路径（remove+insert）依赖 Qt 的 index 记账，语义脆弱。无论实现
+    走 was_current 特判还是按 tab_id 还原，最终行为都必须是：停在插件页时
+    挂载历史页，页面与高亮仍留在插件页（历史页插入后其 index 平移到 4）。
+    """
+    from types import SimpleNamespace
+
+    class FakePage(QWidget):
+        def __init__(self, parent=None, context=None):
+            super().__init__(parent)
+
+    info = SimpleNamespace(page_id="plug1", label="插件页", widget_class=FakePage, plugin_name="x")
+    panel.sync_plugin_pages([info])  # 插件页在 index 3
+    panel.set_current_tab(3)
+    assert panel.current_tab() == 3
+    history = QLabel("历史")
+    panel.attach_history_page(history)
+    # 历史页插入后插件页移到 index 4；用户此前所在的插件页必须保持显示
+    assert panel._stack.indexOf(history) == WorkbenchPanel.TAB_HISTORY
+    assert panel.current_tab() == 4
+    assert panel._stack.currentWidget() is panel._plugin_widgets["plug1"]
+    active_ids = [b.tab_id for i, b in enumerate(panel._tab_buttons) if b._active]
+    assert active_ids == ["plug1"], f"插件页应保持选中: {active_ids}"
+    history.deleteLater()
+
+
+def test_attach_history_stays_when_on_history(panel):
+    """挂载历史页时若正显示历史页 → 延续显示新历史页（跨窗口切换不跳页）"""
+    h1 = QLabel("历史A")
+    h2 = QLabel("历史B")
+    panel.attach_history_page(h1)
+    panel.set_current_tab(WorkbenchPanel.TAB_HISTORY)
+    panel.attach_history_page(h2)  # 换挂到另一窗口的历史页
+    assert panel.current_tab() == WorkbenchPanel.TAB_HISTORY
+    assert panel._stack.currentWidget() is h2
+    h1.deleteLater()
+    h2.deleteLater()
+
+
+def test_card_tab_replace_keeps_position(panel):
+    """★ 同 id 卡片换新实例：原位替换，不把卡片移到栈尾（「tab 与内容错位」根因）
+
+    旧实现 remove+append：两张卡片 A/B 时替换 A → 栈序变 [B, A] 而页签序
+    仍为 [A, B] → 点击 A tab 实际切到 B 的内容、高亮落错位。
+    """
+    card_a1 = QLabel("A-旧")
+    card_b = QLabel("B")
+    panel.open_card_tab("card-a", "A", card_a1)
+    panel.open_card_tab("card-b", "B", card_b)
+    assert panel._tab_ids == ["worktree", "memory", "artifacts", "card-a", "card-b"]
+    # 换 A 的新实例
+    card_a2 = QLabel("A-新")
+    panel.open_card_tab("card-a", "A", card_a2)
+    # 栈序保持 [.., A2, B]，与页签序一致
+    assert panel._stack.indexOf(card_a2) == 3
+    assert panel._stack.indexOf(card_b) == 4
+    assert panel._tab_id_index("card-a") == panel._stack.indexOf(card_a2)
+    assert panel._tab_id_index("card-b") == panel._stack.indexOf(card_b)
+    # 点击 A tab 切到 A2 内容（不是 B）
+    panel.set_current_tab(panel._tab_id_index("card-a"))
+    assert panel._stack.currentWidget() is card_a2
+    card_a1.deleteLater()
+    card_a2.deleteLater()
+    card_b.deleteLater()
+
+
+def test_artifacts_label_updates_on_registration(panel):
+    """★ 产物页标签跟随插件注册更新（label 未入 reconcile sig 的残留）
+
+    产物页 label 不在 sync_plugin_pages 的 sig 比较范围内，仅 artifacts 插件
+    注册/改名时集合未变 → 早退跳过重建 → tab 标签残留旧值。补一次 reconcile。
+    """
+    from types import SimpleNamespace
+
+    class FakePage(QWidget):
+        def __init__(self, parent=None, context=None):
+            super().__init__(parent)
+
+    assert [b._label.text() for b in panel._tab_buttons] == ["工作树", "记忆", "产物"]
+    info = SimpleNamespace(page_id="artifacts", label="文件产物", widget_class=FakePage, plugin_name="x")
+    panel.sync_plugin_pages([info])
+    labels = [b._label.text() for b in panel._tab_buttons]
+    assert labels == ["工作树", "记忆", "文件产物"], f"产物页标签应更新，实际: {labels}"
+
+
+def test_card_tab_activate_false_mounts_without_switching(panel):
+    """★ activate=False：挂载卡片 tab 但不改变当前页签（对话标签页投影恢复语义）
+
+    旧实现 open_card_tab 无条件激活 → 切换对话标签页恢复卡片时，工作台
+    当前页签被恢复的卡片抢走（用户停留页签丢失）。
+    """
+    panel.set_current_tab(WorkbenchPanel.TAB_MEMORY)
+    card = QLabel("卡片内容")
+    panel.open_card_tab("my-card", "我的卡片", card, activate=False)
+    assert panel.has_card_tab("my-card")
+    assert panel.current_tab() == WorkbenchPanel.TAB_MEMORY, "不激活时当前页签不得被抢走"
+    assert panel._stack.indexOf(card) >= 0
+    # 已挂载的卡片再以 activate=False 恢复：同样不跳页
+    panel.open_card_tab("my-card", "我的卡片", card, activate=False)
+    assert panel.current_tab() == WorkbenchPanel.TAB_MEMORY
+    card.deleteLater()
+
+
+def test_card_tab_activate_true_emits_user_signal(panel):
+    """★ activate=True：激活卡片页且走用户路径（写 per-window 页签记忆）
+
+    用户主动打开卡片 = 切页，应经 user 路径发射 current_tab_changed，宿主
+    据此把卡片记为该窗口的页签记忆（切走再切回才停得住）。
+    """
+    fired = []
+    panel.current_tab_changed.connect(lambda i: fired.append(i))
+    card = QLabel("卡片内容")
+    panel.open_card_tab("my-card", "我的卡片", card, activate=True)
+    idx = panel._stack.indexOf(card)
+    assert panel.current_tab() == idx
+    assert fired == [idx], f"应经 user 路径发射 current_tab_changed: {fired}"
+    card.deleteLater()
+
+
+def test_remember_workbench_tab_stores_tab_id(panel):
+    """★ 宿主页签记忆按 tab_id 而非裸 index（跨窗口 tab 集合不同时的根因修复）
+
+    各窗口 tab 集合可能不同（卡片 tab per-tab 投影 / 历史页懒挂载 / 插件页），
+    裸 index 在切窗恢复时会撞到别的页签或越界；改存 tab_id 后 restore 侧按 id
+    重新定位。直接以轻量 stub 绑定宿主方法验证存储语义。
+    """
+    from types import SimpleNamespace
+
+    from app.widgets.tab_manager_window import TabManagerWindow
+
+    class FakePage(QWidget):
+        def __init__(self, parent=None, context=None):
+            super().__init__(parent)
+
+    info = SimpleNamespace(page_id="plug1", label="插件页", widget_class=FakePage, plugin_name="x")
+    panel.sync_plugin_pages([info])  # _tab_ids = [worktree, memory, artifacts, plug1]
+
+    win = SimpleNamespace()
+    host = SimpleNamespace(workbench_panel=panel)
+    host.get_current_window = lambda: win
+    TabManagerWindow._remember_workbench_tab(host, 3)
+    assert win._workbench_tab_memory == "plug1", f"应存 tab_id 而非 index: {win._workbench_tab_memory!r}"
+    # 越界 index 不写脏数据
+    TabManagerWindow._remember_workbench_tab(host, 99)
+    assert win._workbench_tab_memory is None

@@ -147,7 +147,6 @@ def _complete_truncated_json(raw: str) -> Optional[str]:
 
     # 检查是否有未闭合的引号
     # 简单策略：如果引号数量为奇数，补一个 "
-    quote_count = result.count('"')
     # 排除转义的引号
     simple_quotes = 0
     in_escape = False

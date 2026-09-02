@@ -1617,20 +1617,6 @@ class HistoryCard(QWidget):
             grouped[category].append((original_index, session))
 
         order = ["今天", "昨天", "本周", "上周", "本月"]
-        month_names = [
-            "一月",
-            "二月",
-            "三月",
-            "四月",
-            "五月",
-            "六月",
-            "七月",
-            "八月",
-            "九月",
-            "十月",
-            "十一月",
-            "十二月",
-        ]
 
         extra_sections = [k for k in grouped if k not in order and k != "更早"]
         year_groups = {}

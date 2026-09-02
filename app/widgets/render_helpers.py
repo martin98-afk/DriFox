@@ -533,9 +533,7 @@ def _render_diff_preview(diff_text: str) -> str:
     while lines and lines[-1] == "":
         lines.pop()
     MAX_LINES = 500
-    truncated = False
     if len(lines) > MAX_LINES:
-        truncated = True
         half = MAX_LINES // 2
         shown = len(lines) - MAX_LINES
         lines = lines[:half] + [None] + lines[-half:]
@@ -1087,13 +1085,6 @@ def render_tool_block(
     badge_html = _render_tool_status_badge(success)
     icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name)
     cn_name = _get_tool_cn_name(tool_name)
-
-    # 子智能体任务特殊处理
-    if is_sub_agent_task:
-        agent_name = tool_args.get("agent", "unknown")
-        task_desc = tool_args.get("description", "")[:50]
-        if tool_args.get("description"):
-            task_desc = tool_args["description"][:50] + ("..." if len(tool_args["description"]) > 50 else "")
 
     # 参数展示型工具 → 紧凑单行卡片（无折叠、无 body；render_mode="inline"，read 风格）
     try:

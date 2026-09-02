@@ -41,10 +41,13 @@ class WorkspacePageHost:
         for item_id in self._sidebar_item_ids:
             self._remove_sidebar_item(reg, item_id)
         self._sidebar_item_ids = []
-        # 2. 对比销毁：已加载但 registry 中已不存在的页
-        current_page_ids = {i.page_id for i in reg.get_workspace_pages()}
+        # 2. 对比销毁：已加载但 registry 中已不存在 / 已被热重载替换（info 对象
+        #    身份不同）的页。插件热重载 = 卸载旧注册 + 重新注册同一 page_id，
+        #    仅按 page_id 集合对比发现不了 → 旧 widget 实例永不重建（热重载失效）。
+        current_pages = {i.page_id: i for i in reg.get_workspace_pages()}
         for page_id in list(self._loaded.keys()):
-            if page_id not in current_page_ids:
+            info = current_pages.get(page_id)
+            if info is None or info is not self._loaded[page_id][0]:
                 self._destroy_page(page_id)
         # 3. 注销旧命令（避免被卸载页面残留命令可调用）
         self._unregister_page_commands()

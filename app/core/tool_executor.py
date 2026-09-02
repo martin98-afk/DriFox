@@ -18,8 +18,6 @@ from loguru import logger
 
 from app.core.hook_manager import HookDecision
 from app.core.message_content import content_to_text
-from app.core.model_capabilities import resolve_context_limit
-from app.core.token_estimator import count_messages_tokens
 from app.tools.tool_name_mapper import ToolNameMapper
 
 # 预编译正则表达式
@@ -671,7 +669,7 @@ class ToolExecutor:
             self._builtin_tools.set_agent_manager(agent_manager)
 
     def set_current_project(self, project: str):
-        """设置当前项目（供 update_project_note 使用）"""
+        """设置当前项目"""
         if self._builtin_tools:
             self._builtin_tools.set_current_project(project)
             # 工具插件化：stage_files 已自包含，无需注入项目状态

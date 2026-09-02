@@ -1,0 +1,22 @@
+{
+    "icon": {
+        "light": "D:/work/DriFox/plugins/assistant_hub/icons/avatars/avatar-13.png",
+        "dark": "D:/work/DriFox/plugins/assistant_hub/icons/avatars/avatar-13.png"
+    },
+    "name": "assistant_hub",
+    "description": "智能体助手中心 — 助手切换 + 人格（persona）切换：人格是只读的内置预设（personas/<id>/persona.md），点卡片即切换；新增人格在对话里说「创建新人格」走 persona-creator 技能。含置顶记忆（pinned.md）、当下/长期记忆、Dream 自动整理、专属技能、头像库。激活助手后通过系统提示词替换当前智能体身份注入（不改动原 build 智能体，仍可被子智能体调用）。",
+    "version": "0.2.0",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "homepage": "https://github.com/martin98-afk/DriFox",
+    "license": "MIT",
+    "type": "user",
+    "components": {
+        "ui": true,
+        "hooks": true,
+        "tools": true,
+        "skills": true,
+        "loop_policies": true
+    }
+}

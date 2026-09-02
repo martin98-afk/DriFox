@@ -7,10 +7,8 @@ from uuid import uuid4
 
 from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import QSize
-from PyQt5.QtGui import QColor, QPainter
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -23,7 +21,6 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
-    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     PushButton,
@@ -38,13 +35,12 @@ from app.utils.design_tokens import (
     ButtonStyles,
     CardStyles,
     Colors,
-    ComboBoxStyles,
     Sizes,
     SwitchStyles,
     scale_font_size,
 )
-from app.utils.utils import get_app_data_dir, get_font_family_css, get_unified_font
-from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, NoWheelComboBox, _make_row
+from app.utils.utils import get_app_data_dir, get_font_family_css
+from app.widgets.cards.settings.mcp_setting_card import NoWheelComboBox, _make_row
 from app.widgets.elided_label import _ElidedLabel
 
 # 事件顺序定义（按实际会话触发先后排列）
@@ -153,9 +149,6 @@ class _FlowLayout(QLayout):
     def _do_layout(self, rect, test_only):
         x = rect.x()
         y = rect.y()
-        line_height = 0
-        line_widths = []  # 每行总宽度（含 spacing）
-        cur_line_items = []  # 当前行尚未布局的 items
 
         # 第一遍：分行 + 计算每行总宽度
         # 注意：不跳过不可见的 widget。offscreen/异步渲染下，
@@ -429,7 +422,7 @@ class HookEditCard(QWidget):
         style = CardStyles.edit_card_style()
         self.setStyleSheet(style)
         # QLineEdit::placeholder 由 CSS 覆盖，但仍设置 palette 确保兼容
-        from PyQt5.QtGui import QColor, QPalette
+        from PyQt5.QtGui import QPalette
 
         ph_color = self._parse_placeholder_color()
         for le in self._line_edits:
@@ -1038,7 +1031,6 @@ class HookEditCard(QWidget):
         agent_identity_hook = self._is_agent_identity_hook()
         if agent_identity_hook:
             # 从下拉框取选中的智能体名，matcher 固定为 "primary"
-            agent_name = self._agent_combo.currentText()
             matcher = "primary"
         else:
             matcher = self.matcherEdit.text().strip()

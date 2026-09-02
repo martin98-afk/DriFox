@@ -5,6 +5,7 @@
 插件通过 register_ui(registry) 在加载时注册组件。
 """
 
+import re
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional
@@ -31,6 +32,33 @@ class ContentRendererInfo:
     plugin_name: str
     type_name: str
     render_func: Callable[[Dict[str, Any], Optional[Any]], str]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TagRendererInfo:
+    """消息文本内联标签渲染器
+
+    LLM 输出文本中的 <tag>...</tag> 块（如 assistant_hub 人格的
+    <mood> 内心独白），由插件注册渲染函数转成卡片 HTML 展示。
+    未注册的 tag 保持默认行为（当作普通文本）。
+
+    Attributes:
+        plugin_name: 所属插件名
+        tag_name: 标签名（小写；对应文本中的 <tag_name>...</tag_name>）
+        render_func: 渲染函数，签名 (content: str, ctx: dict) -> str(HTML)。
+                     content 为标签内文本；ctx 含 tag/completed/compact。
+                     输出需双端兼容：QWebEngineView（全 HTML/CSS）与
+                     QLabel 富文本（QTextDocument 子集，无 border-radius/flex，
+                     卡片建议单格 <table> 写法）。
+        priority: 优先级（同 tag_name 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    tag_name: str
+    render_func: Callable[[str, Dict[str, Any]], str]
     priority: int = 0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -75,6 +103,33 @@ class WelcomeActionInfo:
     plugin_name: str
     action: str
     handler: Callable[[str, Dict[str, Any]], None]
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MentionProviderInfo:
+    """输入框 @ 提及条目提供者注册信息
+
+    提供者向 @ 卡片顶部贡献「非文件」类提及条目（如 assistant_hub 的
+    智能体角色）。主程序 file_mention_card 只负责渲染与选中，选中后的
+    语义行为（临时切换助手等）由 on_selected 接手。
+
+    Attributes:
+        plugin_name: 所属插件名
+        provider_id: 提供者唯一标识
+        list_func: 条目提供回调 list_func() -> List[dict]，每项含：
+                   key(str 唯一键) / name(str 显示名) / description(str 描述，可空)
+                   / icon_path(str 头像路径，可空) / color(str 主色，可空)
+        on_selected: 选中回调 (entry: dict, ctx: dict) -> None；
+                     entry 为 list_func 返回的单项，ctx 含 window_id / main_widget /
+                     session_id（当前会话，可能为空）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    provider_id: str
+    list_func: Callable[[], List[Dict[str, Any]]]
+    on_selected: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -288,11 +343,15 @@ class UIPluginRegistry:
 
     def __init__(self):
         self._content_renderers: Dict[str, ContentRendererInfo] = {}
+        # 消息文本内联标签渲染器：{tag_name(小写): TagRendererInfo}
+        self._tag_renderers: Dict[str, TagRendererInfo] = {}
         self._message_factories: List[MessageFactoryInfo] = []
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
         self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
         # 欢迎卡片插件点击动作：{action: WelcomeActionInfo}
         self._welcome_actions: Dict[str, WelcomeActionInfo] = {}
+        # @ 提及条目提供者：{provider_id: MentionProviderInfo}
+        self._mention_providers: Dict[str, MentionProviderInfo] = {}
         # Phase D：四类新扩展点（键为 item_id/button_id/action_id/card_id）
         self._sidebar_items: Dict[str, SidebarItemInfo] = {}
         self._input_buttons: Dict[str, InputButtonInfo] = {}
@@ -319,7 +378,7 @@ class UIPluginRegistry:
         # 多实现并存（system + 多个插件 override），胜者 = max(priority)
         self._ui_modules: Dict[str, list] = {}
         # 主程序内置区域（宿主在窗口装配时也可再声明，幂等）
-        from app.plugins.contracts.ui_slots import CONTENT, LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
+        from app.plugins.contracts.ui_slots import LIST_ITEM, MENU, PANEL, TOOLBAR_BUTTON
 
         for rid, kind, desc in [
             ("sidebar", LIST_ITEM, "左侧边栏插件项"),
@@ -408,6 +467,52 @@ class UIPluginRegistry:
             return
         self._content_renderers[type_name] = info
 
+    def register_tag_renderer(
+        self,
+        plugin_name: str,
+        tag_name: str,
+        render_func: Callable[[str, Dict[str, Any]], str],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息文本内联标签渲染器
+
+        Args:
+            plugin_name: 所属插件名
+            tag_name: 标签名（自动转小写；对应文本中的 <tag_name>...</tag_name>）
+            render_func: 渲染函数 (content: str, ctx: dict) -> str(HTML)，
+                         需双端兼容 QLabel 富文本与 WebEngine；
+                         ctx 含 tag/completed/compact。须为纯函数（可能在
+                         后台渲染线程调用，禁止触碰 Qt widget）
+            priority: 优先级（同 tag_name 时高者覆盖低者）
+            metadata: 附加元数据
+        """
+        if metadata is None:
+            metadata = {}
+        key = tag_name.strip().lower()
+        if not key or not re.fullmatch(r"[a-z0-9_-]+", key):
+            raise ValueError(f"invalid tag_name {tag_name!r}: must match [a-z0-9_-]+")
+        info = TagRendererInfo(
+            plugin_name=plugin_name,
+            tag_name=key,
+            render_func=render_func,
+            priority=priority,
+            metadata=metadata,
+        )
+        existing = self._tag_renderers.get(key)
+        if existing is not None and existing.priority > priority:
+            # 低优先级注册被忽略
+            return
+        self._tag_renderers[key] = info
+
+    def get_tag_renderer(self, tag_name: str) -> Optional[TagRendererInfo]:
+        """按标签名查询渲染器（未注册返回 None，调用方回退默认渲染）"""
+        return self._tag_renderers.get(tag_name.strip().lower())
+
+    def get_registered_tag_names(self) -> List[str]:
+        """全部已注册标签名（小写）"""
+        return list(self._tag_renderers.keys())
+
     def register_welcome_tab(
         self,
         plugin_name: str,
@@ -422,7 +527,7 @@ class UIPluginRegistry:
         Args:
             plugin_name: 所属插件名
             mode_key: tab 唯一标识（同时用作 welcome mode 值，需避免与
-                      系统内置 mode 冲突：sessions / projects / changelog）
+                      系统内置 mode 冲突：sessions / projects）
             label: tab 显示文本（SegmentedWidget 上展示）
             render_func: 渲染函数，签名 (context: dict) -> str(HTML 片段)，
                          片段会拼进欢迎卡片 body 的 markdown 管线渲染
@@ -493,6 +598,51 @@ class UIPluginRegistry:
         if ctx is None:
             ctx = {}
         info.handler(content, ctx)
+        return True
+
+    def register_mention_provider(
+        self,
+        plugin_name: str,
+        provider_id: str,
+        list_func: Callable[[], List[Dict[str, Any]]],
+        on_selected: Optional[Callable[[Dict[str, Any], Dict[str, Any]], None]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册 @ 提及条目提供者（条目渲染在 @ 卡片顶部）
+
+        Args:
+            plugin_name: 所属插件名
+            provider_id: 提供者唯一标识（重复注册覆盖）
+            list_func: 条目提供回调，同步、主线程调用，禁止耗时 I/O
+            on_selected: 选中回调 (entry, ctx)；ctx 含 window_id/main_widget/session_id
+            metadata: 附加元数据
+        """
+        if metadata is None:
+            metadata = {}
+        self._mention_providers[provider_id] = MentionProviderInfo(
+            plugin_name=plugin_name,
+            provider_id=provider_id,
+            list_func=list_func,
+            on_selected=on_selected,
+            metadata=metadata,
+        )
+
+    def get_mention_providers(self) -> List[MentionProviderInfo]:
+        """获取所有 @ 提及条目提供者（插入序）"""
+        return list(self._mention_providers.values())
+
+    def dispatch_mention_selected(
+        self, provider_id: str, entry: Dict[str, Any], ctx: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """派发 @ 提及条目选中事件到提供者插件
+
+        Returns:
+            True 已派发；False 无该 provider 或未注册选中回调
+        """
+        info = self._mention_providers.get(provider_id)
+        if info is None or info.on_selected is None:
+            return False
+        info.on_selected(entry, ctx or {})
         return True
 
     def register_message_factory(
@@ -1282,7 +1432,9 @@ class UIPluginRegistry:
         if host is not None:
             self._record_tab_card_state(card_id, card_manager, window_id)
 
-    def _show_floating_card_in_workbench(self, card_info: Any, panel, host, auto_expand: bool = True) -> None:
+    def _show_floating_card_in_workbench(
+        self, card_info: Any, panel, host, auto_expand: bool = True, activate: bool = True
+    ) -> None:
         """right 容器卡片 → 工作台动态 tab 页（v2：对话区右侧停靠区移除）
 
         与旧路径的差异：
@@ -1290,6 +1442,12 @@ class UIPluginRegistry:
         - 不注册系统卡（tab 页不覆盖对话区，不隐藏输入区）
         - 不参与 per-tab 显隐投影（与产物/记忆页同为宿主级全局页）
         - 保留实例缓存与上下文注入（热重载/卸载清理路径与旧卡片一致）
+
+        Args:
+            auto_expand: 工作台隐藏时是否自动展开（用户打开=True；投影恢复=False）
+            activate: 是否激活为当前工作台页签（用户打开=True；投影恢复=False，
+                只挂载不抢当前页签——切换对话标签页时恢复卡片 tab 不应把用户
+                停留的工作台页签带走）
         """
         card_id = card_info.card_id
         window_id = getattr(host, "_window_id", None)
@@ -1334,15 +1492,20 @@ class UIPluginRegistry:
         # per-tab 归属：记录到当前活跃对话标签页的打开集合（切 tab 投影用）
         scope = self._resolve_tab_scope() or window_id
         self._workbench_card_scopes.setdefault(scope, set()).add(card_id)
-        panel.open_card_tab(card_id, card_info.title or card_id, widget)
+        panel.open_card_tab(card_id, card_info.title or card_id, widget, activate=activate)
         # ★ 卡片数据加载入口：旧路径经 CardManager.show_card 调 widget.show_card()，
-        #   工作台路径必须显式补调，否则卡片只建骨架不拉数据（表现为 tab 空白）
-        show_card = getattr(widget, "show_card", None)
-        if callable(show_card):
-            try:
-                show_card()
-            except Exception:
-                pass
+        #   工作台路径必须显式补调，否则卡片只建骨架不拉数据（表现为 tab 空白）。
+        # ★ 仅激活路径调用：插件模板的 show_card() 末尾普遍带 setVisible(True)，
+        #   投影恢复路径（activate=False，切对话 tab 回来只挂载不激活）误调会把
+        #   QStackedWidget 的非当前页强行 show 出来——幽灵可见页被常驻页 raise
+        #   后压在背景层，与常驻页内容重叠且不可点击。恢复时数据此前已加载。
+        if activate:
+            show_card = getattr(widget, "show_card", None)
+            if callable(show_card):
+                try:
+                    show_card()
+                except Exception:
+                    pass
         # 工作台隐藏时自动展开（否则用户点插件按钮无可见反馈）；
         # 投影恢复路径（auto_expand=False）不抢焦点也不强开面板
         if auto_expand:
@@ -1381,6 +1544,14 @@ class UIPluginRegistry:
         if panel is None or not scope:
             return
         target = self._workbench_card_scopes.get(scope, set())
+        # 摘除/恢复前后保持当前页签（按 tab_id）：投影只是页签集合的增减，
+        # 不应把用户当前停留的工作台页签带走（per-window 页签记忆 restore
+        # 是另一层兜底；这里保证不可见期间/无记忆窗口也不跳页）
+        prev_id = None
+        try:
+            prev_id = panel._tab_id_at(panel.current_tab())
+        except Exception:
+            prev_id = None
         # 关：当前挂载但不属于目标标签页的卡片 tab。
         # ★ 只摘 tab 不清 scopes 集合——这是「临时隐藏」（其他标签页仍保留打开记录），
         #   走 _close_workbench_card_tab 会把用户关闭语义混进来误清其他标签页的集合。
@@ -1391,14 +1562,25 @@ class UIPluginRegistry:
                     panel.close_card_tab(card_id)
                 except Exception:
                     pass
-        # 开：目标标签页曾打开但当前未挂载的卡片 tab
+        # 开：目标标签页曾打开但当前未挂载的卡片 tab（只挂载不激活——恢复
+        # 卡片不应抢走当前页签；该标签页的页签记忆由宿主的 restore 负责定稿）
         for card_id in target:
             if card_id in self._workbench_card_tabs:
                 continue
             card_info = self._floating_cards.get(card_id)
             if card_info is None:
                 continue
-            self._show_floating_card_in_workbench(card_info, panel, self._resolve_global_host(), auto_expand=False)
+            self._show_floating_card_in_workbench(
+                card_info, panel, self._resolve_global_host(), auto_expand=False, activate=False
+            )
+        # 还原摘除前所在页签（若摘除的正是当前卡片页，则保持 Qt 选定的邻近页）
+        if prev_id is not None:
+            try:
+                restore_idx = panel._tab_id_index(prev_id)
+                if restore_idx is not None and panel.current_tab() != restore_idx:
+                    panel.set_current_tab(restore_idx)
+            except Exception:
+                pass
 
     def _record_tab_card_state(self, card_id: str, card_manager, host_window_id: str) -> None:
         """把卡片当前可见状态记录到活跃标签页的可见集合（Tab 模式）
@@ -1636,8 +1818,10 @@ class UIPluginRegistry:
         return (
             any(v.plugin_name == plugin_name for v in self._content_renderers.values())
             or any(f.plugin_name == plugin_name for f in self._message_factories)
+            or any(v.plugin_name == plugin_name for v in self._tag_renderers.values())
             or any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
             or any(v.plugin_name == plugin_name for v in self._welcome_actions.values())
+            or any(v.plugin_name == plugin_name for v in self._mention_providers.values())
             or any(v.plugin_name == plugin_name for v in self._floating_cards.values())
             or any(v.plugin_name == plugin_name for v in self._sidebar_items.values())
             or any(v.plugin_name == plugin_name for v in self._input_buttons.values())
@@ -1682,6 +1866,8 @@ class UIPluginRegistry:
             logger.warning(f"[UIPluginRegistry] unload_ui 回调失败 ({plugin_name}): {e}")
         # 清理 content renderers
         self._content_renderers = {k: v for k, v in self._content_renderers.items() if v.plugin_name != plugin_name}
+        # 清理 tag renderers
+        self._tag_renderers = {k: v for k, v in self._tag_renderers.items() if v.plugin_name != plugin_name}
         # 清理 message factories
         self._message_factories = [f for f in self._message_factories if f.plugin_name != plugin_name]
         # 记录该插件是否注册过欢迎卡片 tab（决定卸载后是否刷新欢迎卡片）
@@ -1690,6 +1876,7 @@ class UIPluginRegistry:
         self._welcome_tabs = {k: v for k, v in self._welcome_tabs.items() if v.plugin_name != plugin_name}
         # 清理 welcome actions
         self._welcome_actions = {k: v for k, v in self._welcome_actions.items() if v.plugin_name != plugin_name}
+        self._mention_providers = {k: v for k, v in self._mention_providers.items() if v.plugin_name != plugin_name}
         # 清理 floating cards + 对应命令
         cards_to_remove = [cid for cid, info in self._floating_cards.items() if info.plugin_name == plugin_name]
         for cid in cards_to_remove:
@@ -2164,6 +2351,7 @@ class UIPluginRegistry:
         self._floating_cards.clear()
         self._welcome_tabs.clear()
         self._welcome_actions.clear()
+        self._mention_providers.clear()
         self._loaded_plugins.clear()
         self._main_widget = None
         self._ui_command_names.clear()

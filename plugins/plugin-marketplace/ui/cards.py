@@ -58,7 +58,6 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
-from .data import get_marketplace
 from .downloads import get_downloads_fetcher
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
@@ -698,7 +697,7 @@ class _PluginDetailDialog(MaskDialogBase):
 
         # 依赖兑底：已安装且兼容但 pip 依赖缺失 → 「安装依赖」次按钮（手动重试）
         if self._installed and self._plat_ok:
-            dep_btn = self._make_deps_button(tc, fs, ff_qss, btn_layout, main_btn)
+            self._make_deps_button(tc, fs, ff_qss, btn_layout, main_btn)
 
         close_btn = TransparentPushButton("关闭", self.widget)
         close_btn.setCursor(Qt.PointingHandCursor)
@@ -2435,7 +2434,6 @@ class MarketplaceCard(QWidget):
         应用 font_size 偏移。其它标签使用 font_size 本身。
         """
         tc = getattr(self, "_cached_tc", "rgba(255,255,255,0.9)")
-        tcs = getattr(self, "_cached_tcs", "rgba(255,255,255,0.55)")
         ff = getattr(self, "_cached_font_family", "")
         fs = getattr(self, "_cached_font_size", 14)
 
@@ -4518,7 +4516,6 @@ class MarketplaceCard(QWidget):
         """
         if getattr(self, "_proxy_built", False):
             return
-        tc = getattr(self, "_cached_tc", None) or _text_color()
         tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
         card_bg = getattr(self, "_cached_theme_colors", {}).get("content_bg", "#2a2a2e")
         border_c = getattr(self, "_cached_theme_colors", {}).get("border", "rgba(128,128,128,0.15)")

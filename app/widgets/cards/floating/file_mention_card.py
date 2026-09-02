@@ -13,11 +13,11 @@ import os
 import re
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from loguru import logger
 from PyQt5.QtCore import QFileSystemWatcher, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QMouseEvent
+from PyQt5.QtGui import QMouseEvent, QPixmap
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -26,6 +26,9 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+if TYPE_CHECKING:
+    pass
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css
@@ -301,6 +304,38 @@ def _file_item_bg_css(state: int, selected_bg: str, hover_bg: str) -> str:
     return css
 
 
+# 头像 pixmap 缓存：{icon_path: QPixmap}（mention 条目头像，尺寸固定 20×20）
+_MENTION_ICON_CACHE: Dict[str, QPixmap] = {}
+_MENTION_ICON_SIZE = 20
+
+
+def _mention_icon_pixmap(icon_path: str) -> Optional[QPixmap]:
+    """读 mention 条目头像为圆形 pixmap；失败返回 None（回退 emoji）
+
+    主线程同步读小头像文件（助手头像通常 <100KB），数量有限，
+    命中模块级缓存后零 I/O。
+    """
+    if not icon_path:
+        return None
+    cached = _MENTION_ICON_CACHE.get(icon_path)
+    if cached is not None:
+        return cached
+    try:
+        pm = QPixmap(icon_path)
+        if pm.isNull():
+            return None
+        pm = pm.scaled(
+            _MENTION_ICON_SIZE,
+            _MENTION_ICON_SIZE,
+            Qt.KeepAspectRatioByExpanding,
+            Qt.SmoothTransformation,
+        )
+        _MENTION_ICON_CACHE[icon_path] = pm
+        return pm
+    except Exception:
+        return None
+
+
 class FileMentionItemWidget(QWidget):
     """文件列表单项"""
 
@@ -452,8 +487,31 @@ class FileMentionItemWidget(QWidget):
         """)
         layout.addWidget(self._path_label, 1)
 
+        # mention 条目专属：右侧描述小字（文件项恒隐藏）
+        self._desc_label = QLabel("")
+        self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._desc_label.setStyleSheet(f"""
+            QLabel {{
+                color: {Colors.TEXT_SECONDARY};
+                {get_font_family_css()} {font_size_css(12)};
+                background: transparent;
+            }}
+        """)
+        self._desc_label.hide()
+        layout.addWidget(self._desc_label, 0, Qt.AlignRight)
+
         self._apply_bg()
         self._update_display()
+
+    def _apply_mention_icon(self) -> None:
+        """mention 条目图标：有头像用 pixmap，否则 🤖 emoji"""
+        pm = _mention_icon_pixmap(self._data.get("icon_path", ""))
+        if pm is not None:
+            self._icon_label.setPixmap(pm)
+            self._icon_label.setText("")
+        else:
+            self._icon_label.setPixmap(QPixmap())
+            self._icon_label.setText("🤖")
 
     def _apply_bg(self):
         """只更新背景色——比完整的 _apply_style（4×setStyleSheet）轻量得多
@@ -509,6 +567,23 @@ class FileMentionItemWidget(QWidget):
         """更新路径显示（_ElidedLabel 自动处理省略，含多关键字高亮）"""
         rel = self._data.get("relative_path", "")
         self._path_label.setText(rel)
+        if self._data.get("type") == "mention":
+            # mention 条目：名称 + 右侧「描述 · 来源插件」，无路径高亮
+            self._path_label.setText(self._data.get("name", rel))
+            desc = self._data.get("description", "").strip()
+            source = self._data.get("source", "").strip()
+            # QLabel 富文本：描述继承主题灰，来源更淡并加「·」分隔
+            if desc and source:
+                rich = f"{desc}&nbsp;&nbsp;<span style='color:{Colors.REALTIME_TEXT_SECONDARY}'>· {source}</span>"
+            elif source:
+                rich = f"<span style='color:{Colors.REALTIME_TEXT_SECONDARY}'>{source}</span>"
+            else:
+                rich = desc
+            self._desc_label.setText(rich)
+            self._desc_label.setVisible(bool(rich))
+            self._apply_mention_icon()
+            return
+        self._desc_label.setVisible(False)
         if self._query:
             hls = self._all_highlight_queries(rel, self._query)
             if hls:
@@ -521,9 +596,11 @@ class FileMentionItemWidget(QWidget):
         """
         self._data = file_data
         self._query = query
-        # 更新 emoji（类型可能变化）
-        emoji = self._get_file_emoji(file_data["path"], file_data.get("type", ""))
-        self._icon_label.setText(emoji)
+        # 更新 emoji（类型可能变化；mention 条目由 _update_display 切头像）
+        if file_data.get("type") != "mention":
+            emoji = self._get_file_emoji(file_data["path"], file_data.get("type", ""))
+            self._icon_label.setPixmap(QPixmap())
+            self._icon_label.setText(emoji)
         # 更新路径显示
         self._update_display()
 
@@ -574,6 +651,7 @@ class FileMentionCard(QWidget):
     """文件提及卡片 — 输入 @ 时展开显示当前目录文件"""
 
     fileSelected = pyqtSignal(str)  # file path
+    mentionSelected = pyqtSignal(dict)  # 插件提及条目（含 provider_id）
     dismissed = pyqtSignal()
     # 后台扫描完成信号（跨线程发射，队列连接回主线程应用结果）
     _scanFinished = pyqtSignal(object)
@@ -1373,6 +1451,48 @@ class FileMentionCard(QWidget):
                 return True
         return False
 
+    def _collect_mention_items(self) -> List[Dict[str, str]]:
+        """从 UIPluginRegistry 拉取所有插件提及条目（@ 卡片顶部智能体区）
+
+        provider list_func 均为内存回调（无 I/O），同步拉取无阻塞。
+        条目补全 path（mention:// 唯一键，供 widget 复用映射）与
+        relative_path（= name，兼容既有过滤/评分逻辑）。
+        """
+        items: List[Dict[str, str]] = []
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            providers = UIPluginRegistry.get_instance().get_mention_providers()
+        except Exception:
+            return items
+        for provider in providers:
+            try:
+                entries = provider.list_func() or []
+            except Exception as e:
+                logger.debug(f"[FileMentionCard] provider {provider.provider_id} 拉取失败: {e}")
+                continue
+            for entry in entries:
+                key = str(entry.get("key", ""))
+                name = str(entry.get("name", ""))
+                if not key or not name:
+                    continue
+                items.append(
+                    {
+                        "type": "mention",
+                        "provider_id": provider.provider_id,
+                        "source": provider.plugin_name,
+                        "key": key,
+                        "name": name,
+                        "description": str(entry.get("description", "")),
+                        "icon_path": str(entry.get("icon_path", "")),
+                        "color": str(entry.get("color", "")),
+                        # 兼容字段：widget 复用映射与过滤评分都吃这两个键
+                        "path": f"mention://{provider.provider_id}/{key}",
+                        "relative_path": name,
+                    }
+                )
+        return items
+
     def load_items(self, query: str = ""):
         """根据 query 即时筛选并防抖渲染（多关键字 + fuzzy）
 
@@ -1386,9 +1506,17 @@ class FileMentionCard(QWidget):
         query = query.strip().lower()
         self._current_query = query
 
+        # 插件提及条目（智能体等）置顶：无 query 全量展示，
+        # 有 query 按 name/description 包含匹配
+        mention_items = self._collect_mention_items()
+        if query:
+            mention_items = [
+                m for m in mention_items if query in m["name"].lower() or query in m.get("description", "").lower()
+            ]
+
         if not query:
             # 按目录深度排序（浅的在前），同深度目录优先，再按名不区分大小写
-            self._filtered_items = sorted(
+            file_items = sorted(
                 self._file_cache,
                 key=lambda x: (
                     x["relative_path"].count("/"),  # 深度，浅在前
@@ -1401,13 +1529,15 @@ class FileMentionCard(QWidget):
 
             if "|" in query or "&" in query:
                 # 多关键字模式：布尔匹配
-                self._filtered_items = [item for item in self._file_cache if self._matches_multi(item, query)]
+                file_items = [item for item in self._file_cache if self._matches_multi(item, query)]
             else:
                 # 单关键字模式：全量评分 + 全排序
                 scored = [(self._score_item(item, q_lower), item) for item in self._file_cache]
                 scored = [(s, item) for s, item in scored if s > 0]
                 scored.sort(key=lambda x: -x[0])
-                self._filtered_items = [item for _, item in scored]
+                file_items = [item for _, item in scored]
+
+        self._filtered_items = mention_items + file_items
 
         # 防抖调度渲染
         self._filter_timer.stop()
@@ -1509,10 +1639,13 @@ class FileMentionCard(QWidget):
         return False
 
     def select_current(self):
-        """确认选中当前文件"""
+        """确认选中当前项（文件 → fileSelected；插件提及 → mentionSelected）"""
         if 0 <= self._selected_index < len(self._filtered_items):
             item = self._filtered_items[self._selected_index]
-            self.fileSelected.emit(item["path"])
+            if item.get("type") == "mention":
+                self.mentionSelected.emit(item)
+            else:
+                self.fileSelected.emit(item["path"])
             self.dismiss()
 
     def show_card(self, root_dir: str = "", query: str = ""):

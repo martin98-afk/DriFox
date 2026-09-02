@@ -45,6 +45,10 @@ _extract*
 !/marketplace.json
 !plugins/**/.drifox-plugin/
 !plugins/**/.drifox-plugin/**
+# 插件源文件白名单（hooks 配置、persona 模板，勿被 *.json / build/ 误伤）
+!plugins/**/hooks/hooks.json
+!plugins/**/personas/build/
+!plugins/**/personas/build/**
 fixed_extractor.py
 various_test.py
 app.config

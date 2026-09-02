@@ -41,7 +41,6 @@
 import math
 import random
 import sys
-from pathlib import Path
 
 from PyQt5 import sip
 from PyQt5.QtCore import (

@@ -1,0 +1,65 @@
+{
+  "hooks": {
+    "BuildSystemPrompt": [
+      {
+        "matcher": "primary",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_assistant:hook",
+            "add_output_to_context": true,
+            "statusMessage": "助手身份:",
+            "id": "assistant_hub_inject_identity"
+          }
+        ]
+      },
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".project_notes:hook_notes",
+            "add_output_to_context": true,
+            "statusMessage": "项目笔记:",
+            "id": "assistant_hub_project_notes"
+          }
+        ]
+      }
+    ],
+    "PreUserMessage": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".project_notes:hook_context",
+            "add_output_to_context": true,
+            "statusMessage": "项目上下文:",
+            "id": "assistant_hub_project_context"
+          },
+          {
+            "type": "python",
+            "function": ".inject_assistant:on_pre_user",
+            "add_output_to_context": false,
+            "statusMessage": "@提及检测:",
+            "id": "assistant_hub_at_mention"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_assistant:on_stop",
+            "add_output_to_context": false,
+            "statusMessage": "助手记忆:",
+            "id": "assistant_hub_turn"
+          }
+        ]
+      }
+    ]
+  }
+}

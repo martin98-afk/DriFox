@@ -9,7 +9,6 @@ HTML 加载统一走 diff_viewer._load_html_to_webview（临时文件 + setUrl�
 规避 Qt setHtml() 对较大内容（实测约 100KB+）无法可靠执行 JS 的问题。
 """
 
-from PyQt5.QtCore import QUrl
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
 
 from app.core.webengine_profile import create_transient_web_profile

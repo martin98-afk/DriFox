@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from loguru import logger
 
-from app.core.team.template_schema import SUPPORTED_SCHEMA_VERSIONS, Template, TemplateError
+from app.core.team.template_schema import Template, TemplateError
 
 
 # 模板名允许字符（Unicode 模式）：首字符为字母/数字（含中文），后续允许字母/数字/_/-；

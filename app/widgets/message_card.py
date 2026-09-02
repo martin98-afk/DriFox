@@ -26,7 +26,6 @@ import time
 import re
 import sys
 import threading
-import time
 import urllib.parse
 import weakref
 from collections import OrderedDict
@@ -43,9 +42,9 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexers import TextLexer, get_lexer_by_name
 from PyQt5.QtCore import (
+    QByteArray,
     QEasingCurve,
     QObject,
-    QPointF,
     QThread,
     Qt,
     QTimer,
@@ -69,6 +68,7 @@ from PyQt5.QtGui import (
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineSettings, QWebEngineView
 from PyQt5.QtWidgets import (
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -79,6 +79,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 from qfluentwidgets import (
+    MaskDialogBase,
     SegmentedWidget,
     TransparentToolButton,
 )
@@ -162,7 +163,6 @@ from app.widgets.render_helpers import (
     _get_tool_cn_name,
     _get_tool_icon,
     _get_tool_icon_html,
-    _get_tool_icon_name,
     _reg_metadata_flag,
     get_tool_qrc_prefix,
     render_tool_block,
@@ -1425,6 +1425,76 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
     return "".join(parts)
 
 
+def _render_tag_block(tag: str, content: str, completed: bool, compact: bool = False) -> str:
+    """单个已注册标签 → 插件渲染器 HTML。
+
+    渲染器缺失或失败时返回空串：内联标签通常是人格内心独白类内容
+    （如 <mood>），回退原文会把本应隐藏的内容泄漏到正文，丢弃比泄漏安全。
+    """
+    if not content.strip():
+        return ""
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        info = UIPluginRegistry.get_instance().get_tag_renderer(tag)
+    except Exception:
+        info = None
+    if info is None:
+        return ""
+    try:
+        html = info.render_func(content, {"tag": tag, "completed": completed, "compact": compact})
+        return f'<div class="plugin-tag-block" data-tag="{escape(tag)}">{html}</div>'
+    except Exception as e:
+        logger.warning(f"[message_card] 标签渲染器 <{tag}> 失败: {e}")
+        return ""
+
+
+def _inject_tag_cards(md_text: str, completed: bool = True, compact: bool = False) -> str:
+    """注入插件注册的内联标签卡片（<tag>...</tag> → 插件 render_func 的 HTML）。
+
+    标签集合来自 UIPluginRegistry 的 tag renderer 注册表（如 assistant_hub
+    人格的 <mood> 内心独白）。无注册标签时零开销直通；切分策略与
+    _inject_think_cards 一致：open 到「下一个 open 前的最后一个 close」，
+    未闭合按流式态透传给渲染器自行降级。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        tag_names = UIPluginRegistry.get_instance().get_registered_tag_names()
+    except Exception:
+        return md_text
+    if not tag_names:
+        return md_text
+
+    # 逐标签切分：已注册标签整体替换为渲染结果，剩余文本原样保留
+    result = md_text
+    for tag in tag_names:
+        open_tag, close_tag = f"<{tag}>", f"</{tag}>"
+        if open_tag not in result and close_tag not in result:
+            continue
+        parts: List[str] = []
+        i = 0
+        while i < len(result):
+            start = result.find(open_tag, i)
+            if start == -1:
+                # 防御：无 open 的段清理孤立 close（流式半截产物）
+                parts.append(result[i:].replace(close_tag, ""))
+                break
+            parts.append(result[i:start])
+            t0 = start + len(open_tag)
+            nxt = result.find(open_tag, t0)
+            search_end = nxt if nxt != -1 else len(result)
+            close = result.rfind(close_tag, t0, search_end)
+            if close != -1:
+                parts.append(_render_tag_block(tag, result[t0:close], True, compact))
+                i = close + len(close_tag)
+            else:
+                parts.append(_render_tag_block(tag, result[t0:search_end], False, compact))
+                i = search_end
+        result = "".join(parts)
+    return result
+
+
 @lru_cache(maxsize=128)
 def _render_tool_block_content(content: str, compact: bool = False) -> str:
     """
@@ -1962,6 +2032,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
+    processed_md = _inject_tag_cards(processed_md, True, compact=compact)
 
     try:
         md = get_markdown_instance()
@@ -2063,6 +2134,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
         processed_md = _inject_think_cards(safe_md, True, compact=compact)
         processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
         processed_md = _inject_hook_blocks(processed_md, True)
+        processed_md = _inject_tag_cards(processed_md, True, compact=compact)
         md.reset()
         html_content = md.convert(processed_md)
         html_content = _wrap_code_blocks_with_copy_button_web(
@@ -2086,6 +2158,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     processed_md = _inject_think_cards(safe_md, False, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, False, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, False)
+    processed_md = _inject_tag_cards(processed_md, False, compact=compact)
 
     md.reset()
     html_content = md.convert(processed_md)
@@ -2196,41 +2269,17 @@ def _has_unclosed_think_or_tool(md: str) -> bool:
     return md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>")
 
 
-# ===== 软段落边界（中文句子边界）=====
-# 大段中文正文常无 \n\n 空行（长报告/解释性输出多为连续段落），
-# 仅靠硬边界（空行）会导致差量渲染对大段正文完全失效（_extract_closed_segments
-# 恒返回空 → _stable_md_len 永不前进 → 尾部整体重转 O(n²)）。
-# 软边界：句号类标点（。！？；… + 英文 !?;）作为可增量闭合的句子边界。
-# 约束：仅纯文本区间生效（fence 内不切），段长达到阈值才切（避免切分过碎、
-# 每句一次 runJavaScript 开销过大）。
+# ===== 句号类标点（软边界触发器）=====
+# 句号类标点仅用于 **触发即时渲染**（_has_reached_soft_boundary →
+# _schedule_render(immediate=True)）：句号到达时立刻把未闭合尾部整体行内渲染
+# （_render_tail_inline，单 convert 保持段落结构），缩短 markdown 语法
+# 源码形态的滞留时间。
+# ⚠️ 历史教训（2026-09-01 拆段 bug）：曾用句号作差量渲染的**切段边界**
+# （_extract_closed_segments 软边界切闭合段），但句号不是 markdown 段落边界——
+# 无空行连续正文的同一段被切成多个独立 <p>，闭合段封口 + tail 另起新段，
+# 观感是"正在蹦字的片段先换行出现在最下面，全量渲染时又跳回正文合并"。
+# 因此闭合段**只**按 \n\n 硬边界切，段落完整性优先于 stable 推进。
 _SENTENCE_END_CHARS = frozenset("。！？；…!?;")
-# 软边界最小段长：累积到该长度才在句号处闭合，避免每句话都切一段
-_MIN_SOFT_SEGMENT_CHARS = 100
-
-
-def _find_sentence_boundary(md: str, start: int, end: int, fence_open: bool) -> int:
-    """在 [start, end) 内找第一个「满足最小段长」的句号类标点软边界。
-
-    感知 ``` 代码块状态（fence 内不切，避免切坏代码/高亮结构）。
-    返回句号类标点之后的偏移（切分点，句号保留在段尾）；找不到返回 -1。
-
-    Args:
-        md: 待扫描的 markdown 文本
-        start: 扫描起点
-        end: 扫描终点（不含）
-        fence_open: 进入该区间时是否处于 ``` 代码块内
-    """
-    fence = fence_open
-    i = start
-    while i < end:
-        if md.startswith("```", i):
-            fence = not fence
-            i += 3
-            continue
-        if not fence and md[i] in _SENTENCE_END_CHARS and i + 1 - start >= _MIN_SOFT_SEGMENT_CHARS:
-            return i + 1
-        i += 1
-    return -1
 
 
 def _extract_closed_segments(md: str):
@@ -2268,17 +2317,14 @@ def _extract_closed_segments(md: str):
     i = 0
     n = len(md)
     fence_open = False  # 是否在 ``` 代码块内（跨段累计）
-
     while i < n:
-        # 1) 硬边界：空行 \n\n（markdown 段落分隔）
+        # 硬边界：空行 \n\n（markdown 段落分隔）——闭合段**唯一**切段边界。
+        # 句号类标点不是 markdown 段落边界，禁止在此切段（会拆裂同段文字，
+        # 详见上方 _SENTENCE_END_CHARS 注释块的历史教训）。
         seg_end = md.find("\n\n", i)
         boundary_len = 2  # 空行占 2 字符，跳过
-        # 2) 软边界：无空行时按句号类标点切分——大段中文正文无 \n\n 也能增量闭合
         if seg_end == -1:
-            seg_end = _find_sentence_boundary(md, i, n, fence_open)
-            boundary_len = 0  # 句号保留在段尾，不跳过
-        if seg_end == -1:
-            break  # 剩余文本无硬/软边界：整段未闭合（无稳定边界）→ 停止
+            break  # 剩余文本无段落边界：整段未闭合（无稳定边界）→ 停止
 
         seg = md[i:seg_end]
         if not seg:
@@ -2343,6 +2389,7 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
+    processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
@@ -2392,6 +2439,7 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
+    processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
@@ -3409,96 +3457,6 @@ class CodeWebViewer(QWebEngineView):
             pass
         return super().event(event)
 
-    def wheelEvent(self, event: QWheelEvent):
-        # 策略：只有当内部 WebView 无法继续滚动时，才将滚动事件转发到外部 chat_scroll_area。
-        # 如果内部有可滚动内容且未到达边界，让内部 WebView 自己处理滚动。
-        #
-        # ⚠️ **这段转发不能删**：QWebEngineView 会把滚轮事件喂给内嵌 Chromium 并吞掉，
-        # 不会自动冒泡到外层 QScrollArea。所以哪怕卡片内部不可滚，也必须显式转发，
-        # 否则鼠标停在消息上滚轮毫无反应。
-        # 现状（MAX_HEIGHT 抬到 10000 之后）：body 几乎恒不溢出 → max_scroll 恒为 0 →
-        # 每次滚轮都走「转发外层」这条最短路，内层判定的分支基本不再命中。
-        try:
-            widget = self
-            for _ in range(5):
-                if hasattr(widget, "chat_scroll_area"):
-                    break
-                parent_widget = widget.parent()
-                if parent_widget is None:
-                    break
-                widget = parent_widget
-
-            outer_area = getattr(widget, "chat_scroll_area", None) if hasattr(widget, "chat_scroll_area") else None
-            if not outer_area:
-                super().wheelEvent(event)
-                return
-
-            outer_vbar = outer_area.verticalScrollBar()
-            if not outer_vbar or outer_vbar.minimum() == outer_vbar.maximum():
-                # 外部没有可滚动范围 → 直接内部处理
-                super().wheelEvent(event)
-                return
-
-            delta = event.angleDelta().y()
-            if delta == 0:
-                super().wheelEvent(event)
-                return
-
-            # ── 核心修复：判据必须是 body 的滚动几何，而非文档级指标 ──
-            # CSS 为 body 设置了 overflow-y:scroll + max-height，body 才是唯一
-            # 的滚动容器。而 page().scrollPosition() 是文档级指标，在 body-scroller
-            # 架构下恒为 0 → at_top 恒真、at_bottom 恒假 → 所有向下滚动都被判为
-            # "内部处理"，但内部其实滚不动，事件被吞 → 卡片内滚动完全失效。
-            # contentsSize() 同样不含 body 的内部溢出，也不能用作判据。
-            scroll_y, max_scroll = self._inner_scroll_range()
-
-            if not self._body_geom_valid:
-                # 几何尚未上报（首帧 / JS 未就绪 / 上报丢失）→ 必须转发外部。
-                # ⚠️ 绝不能退化成"交给内部处理"：那正是本次修复的核心失效模式——
-                # 绝大多卡片的 viewer 高度 == 内容高度（内部本就不可滚），
-                # 一旦把事件交给内部就会被无声吞掉，表现为怎么滚都没反应。
-                # 转发外部是这个不确定状态下的正确默认；真正需要内部滚动的
-                # 只有内容超过 MAX_HEIGHT 的长卡片，而其内容渲染完必然已上报几何。
-                outer_vbar.setValue(outer_vbar.value() - wheel_delta_to_px(delta))
-                event.accept()
-                return
-
-            # ── 消除滞后假信号 ──
-            # viewer 高度已等于文档高度 ⇒ 内容已完全展开，body 不可能还有可滚动量。
-            # 此时残留的 max_scroll 只可能来自 resize/重排前的旧几何（内容变宽后
-            # 高度已收拢，但 body 几何缓存尚未刷新），必须清零，否则会误判内部可滚。
-            if max_scroll > SCROLL_BOUNDARY_TOLERANCE and abs(self.height() - self._document_height) <= 12:
-                max_scroll = 0
-
-            # ── 自愈：连续委托内部却毫无位移 → 强制转外部 ──
-            # 覆盖所有残余的缓存不同步场景（如高度收敛窗口期内反复误判）。
-            # 密集滚动期间（间隔 <100ms）不计入，避免帧级上报延迟造成误判。
-            now = time.monotonic()
-            if self._wheel_delegated_inner:
-                if scroll_y == self._wheel_last_scroll_top and (now - self._wheel_last_ts) > WHEEL_STUCK_MIN_INTERVAL:
-                    self._wheel_stuck_streak += 1
-                else:
-                    self._wheel_stuck_streak = 0
-            self._wheel_delegated_inner = False
-
-            at_top = scroll_y <= SCROLL_BOUNDARY_TOLERANCE
-            at_bottom = scroll_y >= (max_scroll - SCROLL_BOUNDARY_TOLERANCE)
-            inner_can_scroll = max_scroll > SCROLL_BOUNDARY_TOLERANCE and self._wheel_stuck_streak < WHEEL_STUCK_LIMIT
-
-            if inner_can_scroll and not ((delta < 0 and at_bottom) or (delta > 0 and at_top)):
-                # 内部还有可滚动空间 → 让内部处理
-                self._wheel_delegated_inner = True
-                self._wheel_last_scroll_top = scroll_y
-                self._wheel_last_ts = now
-                super().wheelEvent(event)
-                return
-
-            # 内部不可滚 / 已到边界 → 转发到外部
-            self._wheel_stuck_streak = 0
-            outer_vbar.setValue(outer_vbar.value() - wheel_delta_to_px(delta))
-            event.accept()
-        except Exception:
-            super().wheelEvent(event)
 
     def setFixedSize(self, *args, **kwargs):
         """限制最大尺寸，防止 GPU 内存溢出"""
@@ -4022,7 +3980,7 @@ class CodeWebViewer(QWebEngineView):
                 p {{ margin: 8px 0; }}
 
                 /* ── 原生 <table> 样式（保留 display:table，自动拉伸填满） ── */
-                table:not(.code-table) {{
+                table:not(.code-table):not(.layout-table) {{
                     width: 100%;
                     border-collapse: collapse;
                     margin: 10px 0;
@@ -4033,7 +3991,7 @@ class CodeWebViewer(QWebEngineView):
                     font-family: '{font_family}', sans-serif;
                     font-size: {body_font_size}px;
                 }}
-                table:not(.code-table) th {{
+                table:not(.code-table):not(.layout-table) th {{
                     /* 原为硬编码 rgba(255,255,255,0.04)：浅色主题下白叠白，表头
                        与表体完全无分界。改用主题感知的 --row-header。 */
                     background: var(--row-header);
@@ -4043,16 +4001,16 @@ class CodeWebViewer(QWebEngineView):
                     color: var(--text) !important;
                     border-bottom: 1px solid var(--border-strong);
                 }}
-                table:not(.code-table) td {{
+                table:not(.code-table):not(.layout-table) td {{
                     padding: 8px 12px;
                     border-bottom: 1px solid var(--border);
                     color: var(--text-secondary) !important;
                 }}
                 /* 原为硬编码白色叠加，浅色主题不可见 → 改用已定义的语义变量 */
-                table:not(.code-table) tr:nth-child(even) {{ background: var(--row-alt); }}
-                table:not(.code-table) tr:hover {{ background: var(--row-hover); }}
+                table:not(.code-table):not(.layout-table) tr:nth-child(even) {{ background: var(--row-alt); }}
+                table:not(.code-table):not(.layout-table) tr:hover {{ background: var(--row-hover); }}
                 /* 表体行 hover 时文字提亮，增强可扫描性 */
-                table:not(.code-table) tr:hover td {{ color: var(--text) !important; }}
+                table:not(.code-table):not(.layout-table) tr:hover td {{ color: var(--text) !important; }}
 
                 /* ── 表格滚动容器（JS 在 updateContent 中自动包裹每个 <table>） ── */
                 .table-scroll-wrapper {{
@@ -4176,6 +4134,25 @@ class CodeWebViewer(QWebEngineView):
                     border-radius: 999px;
                     line-height: 1.7;
                 }}
+                /* 分区右侧「全部」快捷按钮：打开工作台历史会话页（复用 context-tag 点击链） */
+                .session-header-more {{
+                    margin-left: auto;
+                    margin-right: 0;
+                    font-size: {tiny_font_size}px;
+                    font-weight: 500;
+                    color: var(--accent-text);
+                    background: var(--accent-soft);
+                    border: 1px solid var(--accent-border-weak);
+                    padding: 0 10px;
+                    border-radius: 999px;
+                    line-height: 1.7;
+                    cursor: pointer;
+                    transition: 0.18s ease;
+                }}
+                .session-header-more:hover {{
+                    background: var(--accent-soft-strong);
+                    border-color: var(--accent);
+                }}
                 .session-list {{
                     display: grid;
                     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4268,59 +4245,6 @@ class CodeWebViewer(QWebEngineView):
                     font-size: {tag_font_size}px;
                     padding: 8px 0;
                 }}
-
-                /* changelog 模式：左列版本列表 + 右列描述 */
-                .changelog-shell {{
-                    display: flex;
-                    gap: 12px;
-                    margin-top: 6px;
-                    min-height: 200px;
-                }}
-                .changelog-versions {{
-                    list-style: none;
-                    padding: 0;
-                    margin: 0;
-                    min-width: 130px;
-                    max-width: 160px;
-                    border-right: 1px solid var(--accent-border-weak);
-                    overflow-y: auto;
-                    max-height: 360px;
-                }}
-                .changelog-version {{
-                    padding: 6px 10px;
-                    cursor: pointer;
-                    border-radius: 6px;
-                    margin-bottom: 2px;
-                    transition: 0.15s ease;
-                }}
-                .changelog-version:hover {{
-                    background: var(--accent-soft);
-                }}
-                .changelog-version.active {{
-                    background: var(--accent-soft-strong);
-                }}
-                .changelog-version .ver-tag {{
-                    font-weight: 600;
-                    color: var(--accent-text);
-                    font-size: {tag_font_size}px;
-                }}
-                .changelog-version .ver-date {{
-                    font-size: {tiny_font_size}px;
-                    opacity: 0.6;
-                    margin-top: 2px;
-                }}
-                .changelog-detail {{
-                    flex: 1;
-                    min-width: 0;
-                    overflow-y: auto;
-                    max-height: 360px;
-                    padding-right: 4px;
-                }}
-                .changelog-body h1, .changelog-body h2, .changelog-body h3 {{
-                    color: var(--accent-text);
-                    margin-top: 0;
-                }}
-                .changelog-body img {{ max-width: 100%; }}
 
                 /* 代码块通用样式 */
                 .code-table {{ width: 100%; border-collapse: collapse; }}
@@ -5695,7 +5619,7 @@ class CodeWebViewer(QWebEngineView):
                         document.body.scrollTop = Math.min(_prevScrollTop, _maxScroll);
 
                         // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
-                        container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                        container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
                             // 已被包裹则跳过（如多次调用 updateContent）
                             if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
                             var wrapper = document.createElement('div');
@@ -5870,7 +5794,7 @@ class CodeWebViewer(QWebEngineView):
                     // #content-placeholder，视觉上"思考内容在正文闪现，随后消失回折叠区"。
                     if (window._toolCompactMode) reorganizeContent();
                     // 包裹所有 <table>（不含 .code-table）到可横向滚动的容器中
-                    container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                    container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
                         if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
                         var wrapper = document.createElement('div');
                         wrapper.className = 'table-scroll-wrapper';
@@ -5940,7 +5864,7 @@ class CodeWebViewer(QWebEngineView):
                     tailDiv.innerHTML = html;
                     container.appendChild(tailDiv);
                     // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
-                    container.querySelectorAll('table:not(.code-table)').forEach(function(table) {{
+                    container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
                         if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
                         var wrapper = document.createElement('div');
                         wrapper.className = 'table-scroll-wrapper';
@@ -6305,21 +6229,6 @@ class CodeWebViewer(QWebEngineView):
                             // 动画开始前暂停高度报告
                             startCollapsibleAnimation();
                             animateCollapsible(block, block.dataset.expanded !== 'true');
-                        }}
-                        return;
-                    }}
-                    const verItem = e.target.closest('.changelog-version');
-                    if (verItem) {{
-                        e.stopPropagation();
-                        e.preventDefault();
-                        var vIdx = verItem.getAttribute('data-idx');
-                        var vShell = verItem.closest('.changelog-shell');
-                        if (vShell) {{
-                            vShell.querySelectorAll('.changelog-version').forEach(function(el){{ el.classList.remove('active'); }});
-                            vShell.querySelectorAll('.changelog-body').forEach(function(el){{ el.style.display = 'none'; }});
-                            verItem.classList.add('active');
-                            var vBody = vShell.querySelector('.changelog-body[data-idx="' + vIdx + '"]');
-                            if (vBody) vBody.style.display = 'block';
                         }}
                         return;
                     }}
@@ -6897,6 +6806,12 @@ class CodeWebViewer(QWebEngineView):
                 var lead = text.match(/^[\\r\\n]+/);
                 var newlines = lead ? lead[0].replace(/\\r\\n/g, '\\n').length : 0;
                 var last = c.lastElementChild;
+                // 🐛 修复（流式文字跳位）：#char-count（字数统计空 DIV）拼在全量 HTML
+                // 末尾，是 container 的 lastElementChild。不跳过它的话，全量渲染后
+                // 的所有正文 chunk 都拿不到真实末块（稳定 <p>），落入"新建独立 <p>"
+                // 兜底分支 → 源文同段文字被拆成独立行先蹦在最底部，下一轮渲染才
+                // 合并回正文（用户感知"文字先换行出现在最下面，再跳回正确位置"）。
+                if (last && last.id === 'char-count') last = last.previousElementSibling;
                 if (newlines >= 2) {{
                     // 段落分隔：去掉前导换行，创建独立 <p>
                     var clean = text.replace(/^[\\n\\r]+/, '');
@@ -7008,6 +6923,7 @@ class CodeWebViewer(QWebEngineView):
         processed_md = _inject_think_cards(safe_md, self._streaming is False, compact=self._tool_compact_mode)
         processed_md = _inject_tool_blocks(processed_md, self._streaming is False, compact=self._tool_compact_mode)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
+        processed_md = _inject_tag_cards(processed_md, self._streaming is False, compact=self._tool_compact_mode)
 
         # [PERF] 实例级哈希缓存：processed_md 未变时直接返回缓存的 HTML，
         # 跳过 md.convert() + _wrap_code_blocks（最昂贵的步骤）。
@@ -7499,8 +7415,43 @@ class CodeWebViewer(QWebEngineView):
             # 保持旧基线 → 下一次差量从 think 开头扫描，配对守卫正确 break，
             # 等思考完整闭合后整体差量/全量渲染（无重复：基线未推进期间不产出段）。
             if self._streaming and not _has_unclosed_think_or_tool(self._last_rendered_markdown):
-                self._stable_md_len = len(self._last_rendered_markdown)
+                # 🐛 修复（流式文字跳位）：stable 推进到最后一个 \n\n 之后，而非 md 末尾。
+                # 全量渲染的 DOM 末尾 <p> 往往是未闭合段的中间形态（md 尾部无空行），
+                # 若 stable 推到 md 末尾，这段半截文字会被划入"稳定区"——但下方打标 JS
+                # 已把它标为增量节点，updateTailHtml/updateContentAppend 移除 [inc]
+                # 时会删掉它，而 tail（从 stable 起）又不含它 → 内容丢失。
+                # 推进到最后段落边界后，末段整体划入 tail 区：打标删除与 tail 重建
+                # 语义闭环（删掉的正是 tail 会重建的），不丢不重。
+                _md_r = self._last_rendered_markdown
+                _last_break = _md_r.rfind("\n\n")
+                self._stable_md_len = _last_break + 2 if _last_break != -1 else 0
             self._needs_full_render = False
+            # 🐛 修复（流式文字跳位）：全量渲染的 DOM 末尾 <p> 可以是**未闭合段的
+            # 中间形态**（首渲染 / 工具后重渲等，md 尾部无 \n\n）。此时末尾 <p>
+            # 承载的是未写完的段落，后续同段 chunk 应继续接在它后面。若不补打
+            # data-incremental 标记，_append_text_incremental 拿不到增量节点，
+            # 新文字落入"新建独立 <p>"分支 → 源文同段被拆成独立行先蹦在最底部，
+            # 等下一轮渲染才合并回正文（视觉跳位）。
+            # 仅对 <p> 打标：代码块/列表/引用等复杂尾部结构不打（新内容应另起段，
+            # 维持原兜底行为，避免文字钻进 <pre>/<li>）。updateContentAppend /
+            # updateTailHtml 移除 [inc] 节点时会连带删除它，但闭合段 HTML / tail
+            # HTML 包含全文（stable 推进到全量末尾），内容不丢。
+            _mark_unclosed_para_js = ""
+            if self._streaming and not _has_unclosed_think_or_tool(self._last_rendered_markdown):
+                _tail_after_break = (
+                    self._last_rendered_markdown.rsplit("\n\n", 1)[-1] if self._last_rendered_markdown else ""
+                )
+                if _tail_after_break.strip():
+                    _mark_unclosed_para_js = (
+                        "(function(){"
+                        "var _c=document.getElementById('content-placeholder');"
+                        "if(!_c)return;"
+                        "var _l=_c.lastElementChild;"
+                        "if(_l&&_l.id==='char-count')_l=_l.previousElementSibling;"
+                        "if(!_l||_l.tagName!=='P'||_l.hasAttribute('data-incremental'))return;"
+                        "_l.setAttribute('data-incremental','true');"
+                        "})();"
+                    )
             # 🐛 修复：全量渲染后卡住不滚底。流式增量文本（_append_text_incremental）
             # 先触发 reportHeight 消费了 _content_just_loaded 标记，导致 50ms 后
             # updateContent 的 height report 到达时 _content_just_loaded 已为 False，
@@ -7534,6 +7485,8 @@ class CodeWebViewer(QWebEngineView):
                 )
             else:
                 js_code = f"updateContent({json.dumps(html).decode('utf-8')});" + auto_scroll_js
+            if _mark_unclosed_para_js:
+                js_code += _mark_unclosed_para_js
             # 🐛 修复（编辑工具框运行中消失）：dirty 清除延后到 JS 回调（pending + 代际守卫），
             # 原理同 _perform_update 非流式分支——避免异步 JS 未执行期间被下一次渲染
             # 误判"无工具 DOM"而裸 updateContent 抹掉 JS 注入的运行框。
@@ -8227,7 +8180,6 @@ class CodeWebViewer(QWebEngineView):
         2. 8×8 分块中"整块皆背景"的空块占比 < 50%（正常内容散布多数块，
            部分渲染会出现大段连续空白）
         """
-        from PyQt5.QtGui import QImage
 
         img = pix.toImage()
         if img.isNull():
@@ -8328,7 +8280,7 @@ class CodeWebViewer(QWebEngineView):
         """1x 兜底抓取（旧逻辑完整保留）：解除 max-height 撑高后单次 grab + 实心合成"""
         import json as json_mod
 
-        from PyQt5.QtCore import QEventLoop, QPoint, QRect, QTimer
+        from PyQt5.QtCore import QEventLoop, QTimer
         from PyQt5.QtWidgets import QApplication
 
         view_w = self.width()
@@ -8409,7 +8361,6 @@ class CodeWebViewer(QWebEngineView):
         """
         import json as json_mod
 
-        from PyQt5.QtCore import QPoint, QRect
         from PyQt5.QtWidgets import QApplication
 
         _SCALE = 3.0
@@ -9202,6 +9153,111 @@ class PlainTextViewer(QWidget):
             parent = parent.parent()
 
 
+def extract_image_data_uris(content) -> list:
+    """从 multimodal content 按序提取 image 块的 data URI（仅 data: 格式）。
+
+    支持 chat/completions（image_url.url 为 dict/str）、Responses（input_image）、
+    Anthropic（image.source.base64）三种块格式。
+    """
+    uris = []
+    if not isinstance(content, list):
+        return uris
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        url = ""
+        if btype == "image_url":
+            img = block.get("image_url", {}) or {}
+            url = str(img.get("url", "") or "") if isinstance(img, dict) else str(img)
+        elif btype == "input_image":
+            url = str(block.get("image_url", "") or "")
+        elif btype == "image":
+            src = block.get("source", {}) or {}
+            if isinstance(src, dict) and src.get("type") == "base64":
+                url = f"data:{src.get('media_type', 'image/png')};base64,{src.get('data', '')}"
+        if url.startswith("data:image"):
+            uris.append(url)
+    return uris
+
+
+def plan_image_attachment_sources(paths, fallback_content=None) -> list:
+    """规划图片附件缩略图渲染来源（纯函数，无 Qt 依赖，便于测试）。
+
+    路径优先；路径失效（如粘贴图 temp 被系统清理）时按序取 fallback_content
+    中前 N 个 image 块的 data URI 兜底——附件块在前、工具注入块在后追加，
+    序号对齐可靠，注入块天然不进入预览。
+
+    Returns:
+        list[tuple[source, data_uri, path]]：source 为本地路径（data_uri 为 None）
+        或兜底 data URI（source 为 None）；无法渲染的项不出现。
+    """
+    if not isinstance(paths, list):
+        return []
+    image_uris = extract_image_data_uris(fallback_content)
+    plan = []
+    for i, path in enumerate(paths):
+        if not isinstance(path, str) or not path:
+            continue
+        if os.path.exists(path):
+            plan.append((path, None, path))
+        elif i < len(image_uris):
+            plan.append((None, image_uris[i], path))
+    return plan
+
+
+class _ImagePreviewDialog(MaskDialogBase):
+    """图片查看弹窗：Mask 遮罩风格，完整等比显示（适配屏幕可用区 60%），无滚动，点遮罩关闭。"""
+
+    def __init__(self, pixmap, parent=None):
+        super().__init__(parent)
+        Colors.refresh()
+        self.setShadowEffect(60, (0, 10), QColor(0, 0, 0, 120))
+        self.setClosableOnMaskClicked(True)
+        self.setDraggable(True)
+        self.setMaskColor(QColor(0, 0, 0, 160))
+
+        self.widget.setObjectName("imagePreviewWidget")
+        self.widget.setStyleSheet(f"""
+            #imagePreviewWidget {{
+                background-color: #1E1E1E;
+                border: 1px solid {Colors.BORDER};
+                border-radius: 8px;
+            }}
+        """)
+        lay = QVBoxLayout(self.widget)
+        lay.setContentsMargins(6, 6, 6, 6)
+
+        # 等比适配屏幕可用区 60%：完整显示、非原图尺寸、无滚动
+        screen = QApplication.primaryScreen().availableGeometry()
+        scaled = pixmap.scaled(
+            int(screen.width() * 0.6),
+            int(screen.height() * 0.6),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        img_label = QLabel(self.widget)
+        img_label.setPixmap(scaled)
+        img_label.setScaledContents(False)
+        lay.addWidget(img_label)
+
+        # MaskDialogBase 的 QHBoxLayout 会把 widget 拉伸到全屏：
+        # 取出后自管几何并居中（与 ConfirmDialog._fit_widget_to_content 同法）
+        self.layout().removeWidget(self.widget)
+        self.widget.setParent(self)
+        self.widget.adjustSize()
+        self._center_widget()
+
+    def _center_widget(self):
+        x = max(0, (self.width() - self.widget.width()) // 2)
+        y = max(0, (self.height() - self.widget.height()) // 2)
+        self.widget.move(x, y)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._center_widget()
+
+
 class MessageCard(SimpleCardWidget):
     heightChanged = pyqtSignal(int)
     deleteRequested = pyqtSignal()
@@ -9217,7 +9273,7 @@ class MessageCard(SimpleCardWidget):
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     lazyRenderCompleted = pyqtSignal()  # 懒渲染完成信号，用于通知滚动保持
     modelLabelClicked = pyqtSignal(str, str)  # model_name, config_id — 用户点击页脚模型标签时触发
-    welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / changelog）
+    welcomeModeChanged = pyqtSignal(str)  # 欢迎卡片模式切换（sessions / projects / 插件注册 tab）
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出（内部处理保存，不透传）
 
     def __init__(
@@ -9340,13 +9396,12 @@ class MessageCard(SimpleCardWidget):
         self._welcome_top: list = []
         self._welcome_mode_tabs: Optional["SegmentedWidget"] = None
         self._pending_welcome_md: Optional[str] = None  # viewer 懒渲染前的等待内容
+        # 异步刷新事件回调引用（destroyed 退订时按 is 匹配）
+        self._welcome_refresh_cb: Optional[Callable[[Dict[str, Any]], None]] = None
         # 窗口上下文提供者（多窗口隔离）：欢迎卡片渲染插件 tab 时调用，注入
         # 当前窗口的 project_root / project_name / window_id，避免插件回读全局
         # 状态导致多标签页内容串项目（create_welcome_card 传入 window._build_ui_context）
         self._welcome_ctx_provider: Optional[Callable[[], Dict[str, Any]]] = None
-        # changelog 异步加载：单实例持有 fetcher + 已加载 releases
-        self._changelog_fetcher: Optional["_ChangelogFetcher"] = None
-        self._changelog_releases: list = []
         # 工具参数首次到达跟踪：每个 tool_call_id 第一次 update_tool_streaming 时
         # 触发"标记当前思考块为完成"，避免 reasoning→tool_call 切换时思考块残留"思考中"
         self._tool_args_first_seen_ids: set = set()
@@ -9370,6 +9425,11 @@ class MessageCard(SimpleCardWidget):
         self._viewer_layout = QVBoxLayout(self._viewer_container)
         self._viewer_layout.setContentsMargins(0, 0, 0, 0)
         self._setup_ui()
+        # 订阅欢迎卡片插件 tab 异步刷新事件（通用机制，与具体 mode_key 解耦）；
+        # fetcher / 数据源完成时插件通过 UIEventBus 通知，订阅者对当前 mode 重渲染。
+        # 仅 welcome 角色启用订阅，其他角色不必白订阅。
+        if role == "welcome":
+            self._subscribe_welcome_tab_refresh()
 
     def _build_theme(self, role: str, error: bool = False) -> Dict[str, str]:
         Colors.refresh()
@@ -9866,9 +9926,11 @@ class MessageCard(SimpleCardWidget):
         """
 
     # ========== 欢迎卡片 mode 切换（PyQt segmented tabs）==========
+    # 内置项仅保留消息卡片核心（会话列表）。其余 tab 由插件通过
+    # ``UIPluginRegistry.register_welcome_tab`` 动态注入（如 📜 更新），
+    # 卸载/禁用对应插件后该 tab 自动消失，无需主程序介入。
     _WELCOME_MODE_ITEMS = [
         ("sessions", "💬 会话"),
-        ("changelog", "📜 更新"),
     ]
 
     def _build_welcome_mode_tabs(self, top_layout):
@@ -9937,18 +9999,18 @@ class MessageCard(SimpleCardWidget):
         return {}
 
     def set_welcome_mode(self, mode: str):
-        """切换欢迎卡片模式（同步 active tab + 重渲染 body）"""
+        """切换欢迎卡片模式（同步 active tab + 重渲染 body）
+
+        所有 mode 统一走 ``_render_welcome_body`` 分发（内置 sessions /
+        插件注册 tab），插件 fetcher 完成后通过 UIEventBus 通知本卡片
+        再次调 ``set_welcome_mode`` 强制重渲染当前 mode（见 _subscribe_welcome_refresh）。
+        """
         self._welcome_mode = mode
         if self._welcome_mode_tabs is not None:
             try:
                 self._welcome_mode_tabs.setCurrentItem(mode)
             except Exception:
                 pass
-        if mode == "changelog":
-            self._render_welcome_with_body(_render_changelog_body(loading=True))
-            self._start_changelog_fetcher()
-            return
-        # sessions 走 markdown 渲染
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -9956,6 +10018,27 @@ class MessageCard(SimpleCardWidget):
             self._get_welcome_window_context(),
         )
         self._render_welcome_with_body(body_html)
+
+    # ── 欢迎 tab 异步刷新事件订阅（通用机制，零业务字面量）──────────────
+    def _subscribe_welcome_tab_refresh(self) -> None:
+        """订阅 ``EV_WELCOME_TAB_REFRESHED``：插件 fetcher / 数据源完成时通知卡片重渲。
+
+        仅匹配当前 ``self._welcome_mode`` 的 mode_key（payload 由插件声明），
+        不匹配则忽略。widget 销毁时自动退订，防止悬挂 callback。
+        """
+        from app.core.ui_event_bus import EV_WELCOME_TAB_REFRESHED, UIEventBus
+
+        def _on_refresh(payload):
+            mode_key = payload.get("mode_key")
+            if not mode_key or mode_key != self._welcome_mode:
+                return
+            # 绕过 _on_welcome_mode_tab_clicked 的等值短路，强制重渲染当前 mode
+            self.set_welcome_mode(self._welcome_mode)
+
+        self._welcome_refresh_cb = _on_refresh
+        UIEventBus.get_instance().subscribe(EV_WELCOME_TAB_REFRESHED, _on_refresh)
+        # destroyed signal 在 widget 销毁时 emit，释放 UIEventBus 中的悬挂 callback
+        self.destroyed.connect(lambda: UIEventBus.get_instance().unsubscribe(EV_WELCOME_TAB_REFRESHED, _on_refresh))
 
     def _render_welcome_with_body(self, body_html: str):
         """统一的 body 渲染入口：拼接 greeting + 写入 viewer（markdown 路径）
@@ -9970,54 +10053,6 @@ class MessageCard(SimpleCardWidget):
         else:
             self._pending_welcome_md = welcome_md
 
-    def _start_changelog_fetcher(self):
-        """启动 changelog 后台拉取（幂等：缓存有效直接渲染；fetcher 在跑则跳过）"""
-        cache = _changelog_cache
-        if cache and (time.time() - cache.get("fetched_at", 0)) < _CHANGELOG_CACHE_TTL:
-            self._apply_changelog_releases(cache["releases"])
-            return
-        if self._changelog_fetcher is not None and self._changelog_fetcher.isRunning():
-            return
-        self._changelog_fetcher = _ChangelogFetcher(etag=cache.get("etag", ""))
-        self._changelog_fetcher.finished.connect(self._on_changelog_finished)
-        self._changelog_fetcher.error.connect(self._on_changelog_error)
-        self._changelog_fetcher.start()
-
-    def _apply_changelog_releases(self, releases: list):
-        """用 release 数据渲染 changelog body"""
-        self._changelog_releases = list(releases or [])
-        body_html = _render_changelog_body(releases=self._changelog_releases)
-        self._render_welcome_with_body(body_html)
-
-    def _on_changelog_finished(self, payload):
-        """_ChangelogFetcher.finished 回调：payload 是 list（304 → []，否则 [{releases, etag}]）"""
-        try:
-            if isinstance(payload, list) and payload and isinstance(payload[0], dict) and "releases" in payload[0]:
-                data = payload[0]
-                new_releases = data["releases"]
-                # 增量判断：拉回的 tag 列表与缓存前 N 个完全一致 → 无更新，跳过渲染
-                old_tags = [r.get("tag_name", "") for r in _changelog_cache.get("releases", [])]
-                new_tags = [r.get("tag_name", "") for r in new_releases]
-                if old_tags and old_tags == new_tags:
-                    # tag 列表未变（即使 etag 不同也可能是 GitHub 临时重生成）→ 不重渲染
-                    _changelog_cache["etag"] = data.get("etag", _changelog_cache.get("etag", ""))
-                    _changelog_cache["fetched_at"] = time.time()
-                    return
-                _changelog_cache["releases"] = new_releases
-                _changelog_cache["etag"] = data.get("etag", "")
-                _changelog_cache["fetched_at"] = time.time()
-                self._apply_changelog_releases(new_releases)
-            # 304：缓存仍新鲜（fetched_at 已存在），无需重渲染
-        except Exception as e:
-            logger.warning(f"[WelcomeChangelog] 处理 fetcher 结果失败：{e}")
-        finally:
-            self._changelog_fetcher = None
-
-    def _on_changelog_error(self, msg: str):
-        """_ChangelogFetcher.error 回调：渲染错误占位"""
-        self._render_welcome_with_body(_render_changelog_body(error_msg=msg))
-        self._changelog_fetcher = None
-
     def set_welcome_content(
         self,
         recent_sessions: list,
@@ -10030,7 +10065,7 @@ class MessageCard(SimpleCardWidget):
         Args:
             recent_sessions: 最近会话列表
             top_by_count: 最活跃会话列表
-            mode: 初始欢迎模式（sessions / changelog / 插件注册 tab）
+            mode: 初始欢迎模式（sessions / 插件注册 tab）
             context_provider: 窗口上下文提供者（无参回调 → dict）。多窗口隔离：
                 渲染插件 tab 时注入当前窗口的 project_root / project_name /
                 window_id，避免插件回读全局状态导致跨标签页内容串项目。
@@ -10044,10 +10079,6 @@ class MessageCard(SimpleCardWidget):
                 self._welcome_mode_tabs.setCurrentItem(mode)
             except Exception:
                 pass
-        if mode == "changelog":
-            # changelog 走异步：先存 loading 占位；viewer 就绪后会调 fetcher
-            self._pending_welcome_md = f"### 👋 {get_random_greeting()}\n\n{_render_changelog_body(loading=True)}\n"
-            return
         body_html = _render_welcome_body(
             mode,
             self._welcome_recent,
@@ -10066,7 +10097,7 @@ class MessageCard(SimpleCardWidget):
         本方法在卡片已渲染时直接重渲染 DOM，避免调用方走「销毁缓存卡片 +
         重建 QWebEngineView」路径（100-500ms 主线程占用 + 视觉闪烁）。
 
-        仅 sessions 类 body 展示会话列表，changelog / 插件 tab 不依赖该数据，
+        仅 sessions 类 body 展示会话列表，插件 tab 不依赖该数据，
         跳过重渲染（插件 tab 的 render_func 也不应因会话变更被反复调用）。
         """
         old_recent, old_top = self._welcome_recent, self._welcome_top
@@ -10218,6 +10249,15 @@ class MessageCard(SimpleCardWidget):
 
         # 底部操作行：stretch | 时间戳 | 复制/撤销/删除（hover 浮现）。
         # 外层 wrap 固定高度：按钮显隐切换时 footer 占位不变，卡片不跳动
+
+        # 图片附件预览条：正文之上，set_image_attachments 时才显示（懒占位）
+        self._image_strip = QWidget(self)
+        self._image_strip_lay = QHBoxLayout(self._image_strip)
+        self._image_strip_lay.setContentsMargins(2, 0, 2, 4)
+        self._image_strip_lay.setSpacing(6)
+        self._image_strip.setVisible(False)
+        main.addWidget(self._image_strip)
+
         footer_wrap = QWidget(self)
         footer_wrap.setStyleSheet("background: transparent;")
         footer_wrap.setFixedHeight(28)  # 26px 按钮 + 垂直余量，紧凑
@@ -10251,6 +10291,56 @@ class MessageCard(SimpleCardWidget):
         btns.setVisible(False)  # hover 浮现，保持气泡简洁（高度占位由 wrap 固定）
         footer.addWidget(btns)
         main.addWidget(footer_wrap)
+
+    def set_image_attachments(self, paths, fallback_content=None):
+        """设置图片附件预览（用户气泡正文上方缩略图条）
+
+        Args:
+            paths: 附件图片本地路径列表。发送时来自输入区附件；恢复会话时
+                   来自 session 消息的 ``_image_attachments`` 标记。
+            fallback_content: 恢复会话时的原始消息 content（multimodal list），
+                   传给 plan_image_attachment_sources 做路径失效兑底。
+        """
+        # stretch 放头部：缩略图右对齐（与用户气泡 AlignRight 同侧）
+        thumb_count = 0
+        for source, data_uri, path in plan_image_attachment_sources(paths, fallback_content):
+            thumb = self._build_image_thumb(source, data_uri, path)
+            if thumb is not None:
+                self._image_strip_lay.addWidget(thumb)
+                thumb_count += 1
+        if thumb_count:
+            self._image_strip_lay.insertStretch(0)
+            self._image_strip.setVisible(True)
+
+    def _build_image_thumb(self, source, data_uri, path):
+        """构建单张缩略图 QLabel（等比 80px 高）；加载失败返回 None
+
+        记录原始 QPixmap 引用，点击弹出大图查看。
+        """
+        pixmap = QPixmap()
+        if source:
+            pixmap.load(source)
+        elif data_uri:
+            b64 = data_uri.split("base64,", 1)[-1]
+            pixmap.loadFromData(QByteArray.fromBase64(b64.encode("ascii")))
+        if pixmap.isNull():
+            return None
+        thumb = QLabel(self._image_strip)
+        dpr = thumb.devicePixelRatioF() or 1.0
+        scaled = pixmap.scaledToHeight(int(80 * dpr), Qt.SmoothTransformation)
+        scaled.setDevicePixelRatio(dpr)
+        thumb.setPixmap(scaled)
+        thumb.setFixedHeight(80)
+        thumb.setToolTip(os.path.basename(path))
+        thumb.setCursor(Qt.PointingHandCursor)
+        thumb.mousePressEvent = lambda e, pm=pixmap: self._show_image_dialog(pm)
+        return thumb
+
+    def _show_image_dialog(self, pixmap):
+        """点击缩略图放大查看（Mask 遮罩弹窗，完整等比显示、无滚动、点遮罩关闭）"""
+        if pixmap is None or pixmap.isNull():
+            return
+        _ImagePreviewDialog(pixmap, parent=self.window()).exec_()
 
     def _ensure_user_viewer(self) -> None:
         """懒创建用户气泡 PlainTextViewer（修 #2）。
@@ -10767,7 +10857,6 @@ class MessageCard(SimpleCardWidget):
             main_stops = [0.0, 0.12, 0.24, 0.36, 0.50, 0.64, 0.76, 0.88, 1.0]
             inner_stops = [0.0, 0.12, 0.24, 0.36, 0.48, 0.60, 0.72, 0.84, 0.92, 1.0]
             glow_stops = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-            shimmer_stops = [0.0, 0.5, 1.0]
         else:
             rainbow = None
             pulse = QColor(self._theme["accent"])
@@ -10811,8 +10900,6 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层2：外发光（霓虹光晕，7px宽，比主边框更宽更柔和）
         # ══════════════════════════════════════════════════════
-        outer_clip = self._clip_outer
-        inner_edge_clip = self._clip_inner_edge
         glow_region = self._clip_glow_region
         painter.setClipPath(glow_region)
         if self.role == "assistant":
@@ -10830,8 +10917,6 @@ class MessageCard(SimpleCardWidget):
         # ══════════════════════════════════════════════════════
         #  层3：主彩色边框（4px，饱和鲜艳）
         # ══════════════════════════════════════════════════════
-        border_clip = self._clip_border
-        inner_border_clip = self._clip_inner_border
         border_region = self._clip_border_region
         painter.setClipPath(border_region)
         if self.role == "assistant":
@@ -11353,8 +11438,6 @@ class MessageCard(SimpleCardWidget):
                 elif self._pending_welcome_md is not None:
                     self.set_content(self._pending_welcome_md)
                     self._pending_welcome_md = None
-                    if self._welcome_mode == "changelog":
-                        self._start_changelog_fetcher()
                 self.lazyRenderCompleted.emit()
                 return
             self.viewer = CodeWebViewer(self, light=is_welcome)
@@ -11405,9 +11488,6 @@ class MessageCard(SimpleCardWidget):
                 # 欢迎卡片懒渲染：set_welcome_content 在 viewer 创建前存的内容
                 self.set_content(self._pending_welcome_md)
                 self._pending_welcome_md = None
-                # 欢迎卡片 viewer 就绪后，changelog 模式启动后台拉取
-                if self._welcome_mode == "changelog":
-                    self._start_changelog_fetcher()
 
             # 通知懒渲染完成，让父组件可以修正滚动位置
             self.lazyRenderCompleted.emit()
@@ -12606,7 +12686,6 @@ class MessageCard(SimpleCardWidget):
         将 reasoning 直接写入 _content_data 的 reasoning block，
         使其与文本、工具结果按实际发生顺序交错渲染。
         """
-        t0 = time.time()
         # 🆕 Bug B：只追加到当前活动思考块（start_new_thinking_block 创建的新块）。
         # 兜底：无活动块时查找最后一个 reasoning block（兼容未走 start_new_thinking_block
         # 的流路径），仍未找到才新建块。活动块是 dict 对象引用，即使中间被工具结果
@@ -12885,7 +12964,7 @@ def create_welcome_card(
         agent_description: 智能体描述
         recent_sessions: 最近的历史会话列表，每项包含 title, last_time, session_id, message_count
         top_by_count: 消息最多的会话列表，每项包含 title, last_time, session_id, message_count
-        mode: 欢迎卡片模式（sessions / changelog / 插件注册 tab）
+        mode: 欢迎卡片模式（sessions / 插件注册 tab）
         context_provider: 窗口上下文提供者（无参回调 → dict）。多窗口隔离：
             渲染插件 tab 时注入当前窗口的 project_root / project_name /
             window_id，避免插件回读全局状态导致多标签页内容串项目。
@@ -12911,7 +12990,7 @@ def _render_welcome_body(
     """渲染欢迎卡片 body（不含标题和 tabs）；按 mode 分发
 
     Args:
-        mode: 欢迎卡片模式（sessions / changelog / 插件注册 tab）
+        mode: 欢迎卡片模式（sessions / 插件注册 tab）
         recent_sessions: 最近会话列表
         top_by_count: 最活跃会话列表
         window_context: 当前窗口的 UI 上下文（project_root / project_name /
@@ -12923,8 +13002,6 @@ def _render_welcome_body(
     缓存占位内容会导致数据永远不显示（project-dashboard 踩坑）。
     插件如需缓存应在自己内部做（如 collector 数据缓存），主程序不越俎代庖。
     """
-    if mode == "changelog":
-        return _render_changelog_body()
     # 插件注册的欢迎 tab：render_func 返回 HTML 片段，走现有 markdown 管线
     try:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -12992,30 +13069,50 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
         )
 
     def _render_section(
-        title: str, icon: str, items: list, count_mode: bool = False, start_idx: int = 0, suppress_anim: bool = False
+        title: str,
+        icon: str,
+        items: list,
+        count_mode: bool = False,
+        start_idx: int = 0,
+        suppress_anim: bool = False,
+        more_btn: str = "",
     ) -> str:
         """渲染单个分类 section；items 为空则返回空串
 
         start_idx: 全局连续卡片序号起点，保证跨分区的 stagger 动画连贯
         （否则两个分区各自从 0 开始，动画同时播放显得凌乱）。
+        more_btn: 非空时在分区 header 右侧渲染快捷按钮，值为 data-type（action 名）。
         """
         if not items:
             return ""
         shown = items[: _SESSION_ROWS * _SESSION_COLS]
         rows = "".join(_render_item(s, count_mode, start_idx + i, suppress_anim) for i, s in enumerate(shown))
+        more = ""
+        if more_btn:
+            more = (
+                f'<span class="context-tag session-header-more" data-type="{escape(more_btn)}" '
+                f'data-content="" title="打开右侧工作台的历史会话页">全部 ›</span>'
+            )
         return (
             f'<div class="session-section">'
             f'<div class="session-header">'
             f'<span class="session-header-icon">{icon}</span>'
             f'<span class="session-header-title">{title}</span>'
             f'<span class="session-header-count">{len(shown)}</span>'
+            f"{more}"
             f"</div>"
             f'<div class="session-list">{rows}</div>'
             f"</div>"
         )
 
     recent_block = _render_section(
-        "最近会话", "📅", recent_sessions, count_mode=False, start_idx=0, suppress_anim=suppress_anim
+        "最近会话",
+        "📅",
+        recent_sessions,
+        count_mode=False,
+        start_idx=0,
+        suppress_anim=suppress_anim,
+        more_btn="workbench_history",
     )
     top_start = len(recent_sessions[: _SESSION_ROWS * _SESSION_COLS])
     top_block = _render_section(
@@ -13024,119 +13121,3 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block
-
-
-def _render_changelog_body(releases: list = None, loading: bool = False, error_msg: str = "") -> str:
-    """渲染 changelog body：左列版本列表 + 右列描述（SPA，JS 切换不调 Python）
-
-    Args:
-        releases: 已加载的 release 列表（每项 {tag_name, name, body_html, published_at, html_url}）
-        loading: True 时显示 loading 占位
-        error_msg: 错误信息（网络失败等）
-    """
-    if error_msg:
-        return f'<div class="welcome-empty">⚠️ 加载更新日志失败：{escape(error_msg)}<br><span style="opacity:0.7">检查网络后切换 mode 重试</span></div>'
-
-    if loading or not releases:
-        return '<div class="welcome-empty">📜 正在从 GitHub Releases 拉取更新日志...</div>'
-
-    # 左列版本列表 + 右列描述（首条默认显示）
-    items = []
-    bodies = []
-    for i, r in enumerate(releases[:20]):
-        tag = escape(r.get("tag_name") or r.get("name") or f"v{i + 1}")
-        date = escape((r.get("published_at") or "")[:10])
-        body_html = r.get("body_html") or "<em>无更新说明</em>"
-        active = "active" if i == 0 else ""
-        # body 用 data-attr 存（HTML 字符串），切换时直接读 attr 替换右列
-        items.append(
-            f'<li class="changelog-version {active}" data-idx="{i}">'
-            f'<div class="ver-tag">{tag}</div>'
-            f'<div class="ver-date">{date}</div></li>'
-        )
-        bodies.append(
-            f'<div class="changelog-body" data-idx="{i}" style="{"display:block" if i == 0 else "display:none"}">{body_html}</div>'
-        )
-
-    return (
-        '<div class="changelog-shell">'
-        f'<ul class="changelog-versions">{"".join(items)}</ul>'
-        f'<div class="changelog-detail">{"".join(bodies)}</div>'
-        "</div>"
-    )
-
-
-# ───── 欢迎卡片 changelog 异步加载 ─────
-_CHANGELOG_REPO = "martin98-afk/DriFox"
-_CHANGELOG_CACHE_TTL = 3600  # 1h
-_changelog_cache: dict = {}  # in-memory: {releases: [...], fetched_at: float, etag: str}
-
-
-class _ChangelogFetcher(QThread):
-    """后台拉 GitHub Releases；走完 emit finished(list) 或 error(str)"""
-
-    finished = pyqtSignal(list)
-    error = pyqtSignal(str)
-
-    def __init__(self, etag: str = "", parent=None):
-        super().__init__(parent)
-        self._etag = etag
-
-    def run(self):
-        try:
-            import httpx
-        except ImportError:
-            self.error.emit("缺少 httpx 依赖")
-            return
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if self._etag:
-            headers["If-None-Match"] = self._etag
-        url = f"https://api.github.com/repos/{_CHANGELOG_REPO}/releases?per_page=5"
-        try:
-            with httpx.Client(timeout=httpx.Timeout(8.0)) as client:
-                resp = client.get(url, headers=headers)
-        except Exception as e:
-            self.error.emit(f"网络错误：{e}")
-            return
-        if resp.status_code == 304:
-            # 缓存仍新鲜（带 etag 才可能命中；用 fetched_at 判断也兜底）
-            self.finished.emit([])
-            return
-        if resp.status_code != 200:
-            self.error.emit(f"GitHub API {resp.status_code}：{resp.text[:120]}")
-            return
-        try:
-            data = resp.json()
-        except Exception as e:
-            self.error.emit(f"解析失败：{e}")
-            return
-        new_etag = resp.headers.get("ETag", "")
-        releases = []
-        # 线程私有实例：全局 _md_instance 禁止跨线程使用（Markdown.reset()/convert()
-        # 非线程安全）。本方法跑在 QThread 后台线程，若与主线程消息渲染并发共用全局
-        # 实例，会互相打乱解析状态——曾致消息卡片表格偶发渲染失败/内容串扰（约0.4%）。
-        md = Markdown(
-            extensions=["fenced_code", "nl2br", "tables"],
-            output_format="html5",
-            safe=False,
-        )
-        for item in data:
-            body_md = item.get("body") or ""
-            try:
-                body_html = md.convert(body_md)
-            except Exception:
-                body_html = escape(body_md).replace("\n", "<br>")
-            md.reset()
-            releases.append(
-                {
-                    "tag_name": item.get("tag_name", ""),
-                    "name": item.get("name", ""),
-                    "body_html": body_html,
-                    "published_at": item.get("published_at", ""),
-                    "html_url": item.get("html_url", ""),
-                }
-            )
-        self.finished.emit([{"releases": releases, "etag": new_etag}])

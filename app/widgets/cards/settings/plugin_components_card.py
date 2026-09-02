@@ -30,14 +30,9 @@ from loguru import logger
 from app.core.token_estimator import estimate_tokens as _estimate_tokens
 
 # estimate_tokens 内部有 lru_cache：同一段文本重复估算几乎零成本
-from app.core.token_estimator import estimate_tokens as _estimate_tokens
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication,
-    QHBoxLayout,
-    QLabel,
-    QVBoxLayout,
-    QWidget,
     QHBoxLayout,
     QLabel,
     QVBoxLayout,
@@ -514,8 +509,9 @@ class PluginSectionWidget(QWidget):
         anchor.setStyleSheet(f"background: {kind_color}; border: none; border-radius: 1px;")
         header_layout.addWidget(anchor)
 
-        name_label = QLabel(plugin_name)
-        name_label.setStyleSheet(
+        # 实例属性：refresh_style 主题刷新时需重建样式（构造时 Colors 为旧主题值）
+        self._name_label = QLabel(plugin_name)
+        self._name_label.setStyleSheet(
             _TEXT_LABEL_STYLE.format(
                 color=Colors.TEXT_PRIMARY,
                 weight="font-weight: 600; ",
@@ -523,7 +519,7 @@ class PluginSectionWidget(QWidget):
                 font_family=get_font_family_css(),
             )
         )
-        header_layout.addWidget(name_label)
+        header_layout.addWidget(self._name_label)
 
         kind_tag = QLabel("系统" if is_system else "用户")
         kind_tag.setStyleSheet(
@@ -536,6 +532,7 @@ class PluginSectionWidget(QWidget):
         header_layout.addWidget(kind_tag)
 
         desc_label = _ElidedLabel(description or "")
+        self._desc_label = desc_label
         desc_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; "
             f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"
@@ -601,6 +598,19 @@ class PluginSectionWidget(QWidget):
 
     def refresh_style(self):
         Colors.refresh()
+        # 插件名/描述标签颜色随主题（构造时用旧 Colors 固化，需重建）
+        self._name_label.setStyleSheet(
+            _TEXT_LABEL_STYLE.format(
+                color=Colors.TEXT_PRIMARY,
+                weight="font-weight: 600; ",
+                font_size=font_size_css(12),
+                font_family=get_font_family_css(),
+            )
+        )
+        self._desc_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; "
+            f"{get_font_family_css()} font-size: {scale_font_size(11)}px;"
+        )
         for row in self._rows.values():
             row.refresh_style()
 

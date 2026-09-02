@@ -15,10 +15,8 @@
 """
 
 import os
-import shutil
-import traceback
-from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from dataclasses import dataclass
+from typing import List, Optional
 
 from loguru import logger
 from PyQt5.QtCore import (
@@ -38,18 +36,12 @@ from PyQt5.QtWidgets import (
     QApplication,
     QFileIconProvider,
     QFrame,
-    QHBoxLayout,
     QLineEdit,
-    QMessageBox,
-    QPushButton,
     QStyle,
     QStyledItemDelegate,
-    QStyleOptionViewItem,
     QTreeView,
-    QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import BodyLabel, MaskDialogBase, isDarkTheme
 
 # ══════════════════════════════════════════════════════════
 # 文件图标工具

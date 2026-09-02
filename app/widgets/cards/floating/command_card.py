@@ -1734,7 +1734,6 @@ class CommandCard(QWidget):
 
         if self._detail_has_params and not self._value_selection_mode:
             # 交互参数列表高度
-            param_count = len(self._param_widgets)
             visible_params = sum(1 for w in self._param_widgets if w.isVisible())
             content_height = visible_params * ITEM_HEIGHT
             self._detail_params_scroll.setFixedHeight(min(content_height, 7 * ITEM_HEIGHT))
@@ -1850,7 +1849,6 @@ class CommandCard(QWidget):
             query: 搜索关键字（按子串过滤，用于实时搜索）
         """
         param_name = widget.param_name
-        param = widget._param
 
         # 获取可选值列表（统一查表：动态源 → data_provider；否则 → 静态 value_options）
         options = _get_value_options(param_name, self._data_provider)
@@ -3057,7 +3055,6 @@ class CommandCard(QWidget):
         cmd_name = self._detail_cmd_name
         if not cmd_name:
             return
-        selected_type = self._detail_selected_type or ""
         # 临时退出 detail 模式，绕过 show_command_detail 的"已在此命令则跳过"逻辑
         # 然后立即重新进入，触发完整重建
         # 注意：_reset_detail_mode 会清空 _detail_cmd_name，需要先备份

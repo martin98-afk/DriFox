@@ -436,6 +436,17 @@ ChatWorker `_hook_policy` 归一化（None/非法 → ALL 兼容旧调用方）�
 `trigger_hooks` per-call 参数 → `tool_executor.execute(trigger_hooks=False)`
 跳过 PreToolUse/PostToolUse（per-call 线程安全，subagent 并发不受影响）。
 
+> ⚠️ **枚举必须翻译成 `hook_policy_id` 才生效**（2026-09-02 修复）。
+> `ChatWorker._hook_policy_obj_resolve()` 只在**显式 id** 存在时按 id 取策略；
+> 没给 id 时它会忽略枚举、直接回落 `get_active(SCOPE_MAIN)`（= `all`）。
+> 所以引擎只传 `hook_policy=HookPolicy.NONE` 而没传 `hook_policy_id` 时，
+> 声明形同虚设 —— Stop hook 的续命提醒照样会注入插件引擎的消息流。
+> `EngineSessionImpl.__init__` 现在负责翻译（`ALL→"all"` /
+> `TOOL_EVENTS_ONLY→"tool_only"` / `NONE→"none"`，注意枚举值与插件 id
+> **不同名**）；主对话 / Gateway 引擎不声明 `hook_policy`，枚举保持默认
+> `ALL` 且 `hook_policy_id=None`，仍按用户激活策略走，行为零变化。
+> 守卫：`tests/plugins/test_engine_session_stale_and_hook_policy.py`。
+
 ### EngineSession — 插件对话引擎最通用驱动原语（EP3）
 
 > 契约 `app/plugins/contracts/engine_session.py`；实现
@@ -461,6 +472,37 @@ session.executor.execute(...)                               # 逃生舱（core/e
 同步 Adapter / stale worker 复位防御 / 会话初始化 / 空响应兜底恢复），
 插件只剩业务逻辑。插件应在自己的 QThread 中调用 `turn()`（阻塞），
 UI 更新经 Qt 信号转发。
+
+**kwargs（透传给 `EngineSessionImpl`）**：
+
+| kwarg | 说明 |
+|---|---|
+| `model_config_override` | 模型配置覆盖（在窗口当前配置之上叠加，如关思考/改温度） |
+| `hook_policy` / `hook_policy_id` | hook 参与级别（见上文 HookPolicy） |
+| `permission_strategy` | 权限策略（`auto_allow` / `auto_deny` / …） |
+| `loop_policy_id` | **引擎级循环策略 id**（见下） |
+
+#### 引擎级循环策略（loop_policy_id）
+
+插件自建引擎常只需要"一回合"（记忆整理 / 定时 prompt / 状态机判定）。
+`LoopPolicyRegistry` 的激活槽是**全局共享**的，`set_active()` 会连主对话
+一起改；正确姿势是用 `loop_policy_id` 让**本引擎**按 id 直接取策略对象：
+
+```python
+session = services["create_engine_session"](
+    "my-engine",
+    loop_policy_id="my-single-turn",   # 按 id 取，不碰全局激活槽
+)
+r = session.turn(messages=msgs, tools=[], timeout=180)
+```
+
+传导链：`ConversationConfig.loop_policy_id` → `ConversationExecutor.execute()`
+→ `OpenAIChatWorker._loop_policy_id`（类级默认 `None`）→ `_loop_policy()`
+按 id 解析，未设置/未注册时回落 `get_active()`（主对话零行为变化）。
+完整说明见 `docs/plugins/loop-policies.md` §4.2。
+
+参考实现：`plugins/assistant_hub/loop_policies/single_turn.py` +
+`plugins/assistant_hub/core/llm_client.py`（记忆/Dream/经验整理单回合调用）。
 
 | lsp/ (.lsp.json) | `plugins/*/.lsp.json` | LspManager（`app/core/lsp/`） | `add_plugin_servers` / `remove_plugin_servers` 增量 | backend watchfiles → 增量重载 |
 | ui/ | `plugins/*/ui/__init__.py`（必须暴露 register_ui） | UIPluginRegistry（`app/core/ui_plugin_registry.py`） | `load_plugin`：sys.path 注入 → importlib 动态加载 → `register_ui(self)`；4 扩展点：register_content_renderer / register_message_factory / register_floating_card / register_welcome_tab；右工作台 tab：register_workbench_tab | backend watchfiles → reload_plugin（先卸旧后载新、清 sys.modules + pycache） |

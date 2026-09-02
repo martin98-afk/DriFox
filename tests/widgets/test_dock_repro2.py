@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""回归：left/right 浮动卡片 toggle 后 dock wrapper 必须展开
+"""回归：左侧浮动卡片 toggle 后 dock wrapper 必须展开
 
 覆盖 _DockSideWrapper isVisible() 死锁：wrapper 默认 hide 时，子控件
 primary.isVisible() 恒为 False（祖先链遮蔽），_sync 永远走收起分支，
-导致左右侧 UI 插件浮动卡片无法显示。
+导致左侧 UI 插件浮动卡片无法显示。
+
+注：右侧 dock 停靠区已移除（container="right" 的卡片改道 WorkbenchPanel
+动态 tab），dockSplitter 现为 [左停靠区, 内容区] 两格。
 """
 
 from PyQt5.QtWidgets import QApplication, QWidget
@@ -24,14 +27,13 @@ def _toggle_left_card(tm, card_id):
 
 
 def test_initial_collapsed_state(qtbot):
-    """初始态（无卡片显示）：wrapper 保持收起、splitter 不给左右 dock 分宽（01edd48f/37933366 行为）"""
+    """初始态（无卡片显示）：wrapper 保持收起、splitter 不给左 dock 分宽（01edd48f/37933366 行为）"""
     tm = TabManagerWindow.create_instance()
     for _ in range(3):
         QApplication.processEvents()
     assert tm._global_left_wrapper.isHidden(), "无卡片时左 wrapper 应保持收起"
-    assert tm._global_right_wrapper.isHidden(), "无卡片时右 wrapper 应保持收起"
     sizes = tm._dock_splitter.sizes()
-    assert sizes[0] == 0 and sizes[2] == 0, f"左右 dock 不应分宽，实际 sizes={sizes}"
+    assert sizes[0] == 0, f"左 dock 不应分宽，实际 sizes={sizes}"
 
 
 def test_left_dock_expands_when_window_shown(qtbot):

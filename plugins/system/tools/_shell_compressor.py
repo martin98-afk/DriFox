@@ -90,7 +90,6 @@ def classify(command: str) -> str:
     - passthrough: 清理 ANSI 后直接返回（列表型输出需保持格式）
     - compress: 应用 pattern 压缩
     """
-    cmd = command.strip().lower()
 
     # protected 检查
     for pat in _PROTECTED_PATTERNS:
@@ -1210,7 +1209,6 @@ def _compress_typescript(output: str) -> str:
 
 def _compress_curl(command: str, output: str) -> str:
     """curl 压缩"""
-    lines = [l.strip() for l in output.split('\n') if l.strip()]
 
     # JSON 响应
     if output.strip().startswith('{') or output.strip().startswith('['):

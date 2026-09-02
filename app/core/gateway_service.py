@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 from loguru import logger
 from PyQt5.QtCore import QObject, pyqtSignal

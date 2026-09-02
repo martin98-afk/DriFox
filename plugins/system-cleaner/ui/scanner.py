@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QObject, pyqtSignal
-from loguru import logger
 
 
 # ── 路径常量 ──────────────────────────────────────────────

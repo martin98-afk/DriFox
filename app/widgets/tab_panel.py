@@ -10,12 +10,11 @@ import math as _math
 import os
 
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
-import re as _re
 from typing import List, Optional
 
 from loguru import logger
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
-from PyQt5.QtGui import QColor, QIcon, QMouseEvent, QPainter, QPixmap, QPen, QTransform
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap, QPen, QTransform
 from PyQt5.QtGui import (
     QColor as _QColor,
 )
@@ -3018,13 +3017,6 @@ class TabPanel(QWidget):
                 win = windows[-1] if windows else None
             if win is None:
                 return
-            opener = getattr(win, "open_memory_card", None)
-            if callable(opener):
-                opener("docs")
-                return
-            toggler = getattr(win, "_toggle_memory_card", None)  # 兜底：只有 toggle 语义
-            if callable(toggler):
-                toggler()
         except Exception as exc:
             logger.warning(f"[TabPanel] 打开长期记忆面板失败: {exc}")
 
@@ -3132,11 +3124,6 @@ class TabPanel(QWidget):
         """更新 Tab 标题"""
         if 0 <= index < len(self._items):
             self._items[index].set_title(title)
-
-    def update_tab_icon(self, index: int, icon):
-        """更新 Tab 图标（QPixmap/QIcon 兜底）"""
-        if 0 <= index < len(self._items):
-            self._items[index].set_icon(icon)
 
     def update_tab_project(self, index: int, initials: str, color_rgba: str):
         """更新 Tab 的项目头像（缩写+颜色，直接 QPainter 绘制）"""

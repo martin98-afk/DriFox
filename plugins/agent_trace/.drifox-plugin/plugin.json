@@ -11,7 +11,7 @@
     },
     "homepage": "https://github.com/martin98-afk/DriFox",
     "license": "MIT",
-    "type": "system",
+    "type": "user",
     "components": {
         "ui": true
     }

@@ -11,10 +11,8 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QCheckBox,
-    QFrame,
     QHBoxLayout,
     QLabel,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )

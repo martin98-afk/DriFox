@@ -31,7 +31,7 @@ from __future__ import annotations
 from abc import ABC
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Protocol, runtime_checkable
 
 SCOPE_MAIN = "main"
 SCOPE_SUBAGENT = "subagent"

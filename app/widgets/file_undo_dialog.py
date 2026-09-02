@@ -110,7 +110,6 @@ class FileUndoPreviewDialog(QDialog):
         for i, op in enumerate(self.operations):
             file_path = op.get("file_path", "")
             file_name = Path(file_path).name if file_path else "未知"
-            tool_name = op.get("tool_name", "")
 
             item = QListWidgetItem(list_widget)
             item_widget = QWidget()
@@ -330,13 +329,11 @@ class FileUndoPreviewDialog(QDialog):
                 list_widget.clear()
                 self.file_cbs = []
                 dark = isDarkTheme()
-                border_color = "#3a3a3a" if dark else "#d0d0d0"
                 text_color = "#e0e0e0" if dark else "#333333"
 
                 for i, op_cur in enumerate(self.operations):
                     file_path = op_cur.get("file_path", "")
                     file_name = Path(file_path).name if file_path else "未知"
-                    tool_name = op_cur.get("tool_name", "")
 
                     item = QListWidgetItem(list_widget)
                     item_widget = QWidget()

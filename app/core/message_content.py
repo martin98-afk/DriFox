@@ -5,7 +5,6 @@ import threading
 from typing import Any, Dict, List, Optional
 
 import orjson as json
-from loguru import logger
 
 # ========== Gemini thought_signature 适配 ==========
 # Gemini 2.5+/3 在多轮工具调用时，要求把模型返回 functionCall 时携带的
@@ -856,6 +855,11 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["content"] = content_to_text(raw_content)
         params = message.get("params")
         normalized["params"] = dict(params) if isinstance(params, dict) else {}
+        # 图片附件路径标记（UI 恢复会话时渲染缩略图预览用），同 _hook_event 一样
+        # 必须显式保留，否则会被 consolidate_messages 剥掉
+        atts = message.get("_image_attachments")
+        if isinstance(atts, list) and atts:
+            normalized["_image_attachments"] = [str(p) for p in atts if p]
     else:
         normalized["content"] = content_to_text(raw_content)
 

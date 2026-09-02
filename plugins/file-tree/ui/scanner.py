@@ -11,7 +11,6 @@ import traceback
 from typing import List, Optional, Set
 
 from PyQt5.QtCore import QObject, pyqtSignal
-from loguru import logger
 
 
 # ── 过滤规则 ──────────────────────────────────────────────

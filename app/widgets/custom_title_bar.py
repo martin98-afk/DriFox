@@ -37,6 +37,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QColor, QCursor, QIcon, QPainter, QPainterPath
 from PyQt5.QtWidgets import QHBoxLayout, QLabel, QPushButton, QWidget
 
+from loguru import logger
 from qframelesswindow.titlebar import TitleBarBase
 from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton, TitleBarButtonState
 
@@ -47,6 +48,10 @@ from app.utils.utils import get_font_family_css, get_icon
 _WM_SYSCOMMAND = 0x0112
 _SC_MOVE = 0xF010
 _HTCAPTION = 0x0002
+
+# SC_MOVE 模态循环进行中标志。模块级而非实例属性：titleBar 可能被 setTitleBar
+# 替换，实例属性会随替换丢失；重入守卫必须跨实例可靠。
+_system_move_active = False
 
 # 白色（深色主题）图标的资源路径模板：关闭按钮在红底上必须用它，
 # 浅色主题变体是 #333，红底上几乎不可见。
@@ -725,6 +730,14 @@ class CustomTitleBar(TitleBarBase):
     def mouseMoveEvent(self, e):
         if sys.platform != "win32" or not self.canDrag(e.pos()):
             return super().mouseMoveEvent(e)
+        # ★ 无左键按住不发起系统移动：双击最大化后的残留 move / 模态循环被
+        # 弹窗或 Alt+Tab 打断后的 move 若在此触发 SC_MOVE，会导致窗口无按键
+        # 跟随鼠标（经典"诡异移动"）。最大化态同理交给系统原生处理。
+        if not (e.buttons() & Qt.LeftButton):
+            return super().mouseMoveEvent(e)
+        _win = self.window()
+        if _win is not None and _win.isMaximized():
+            return super().mouseMoveEvent(e)
         self._start_system_move(e.globalPos())
 
     def _start_system_move(self, global_pos) -> None:
@@ -734,23 +747,50 @@ class CustomTitleBar(TitleBarBase):
         会把拖拽锚点当作屏幕左上角，Aero Snap / 分屏布局因此失效。这里自行发送
         ``WM_SYSCOMMAND``，lParam 低 16 位=光标 x、高 16 位=光标 y（屏幕坐标），
         系统据此计算拖拽偏移并在边缘触发 snap。
-        """
-        try:
-            import ctypes
-            from ctypes import wintypes
 
-            win = self.window()
-            if win is None:
-                return
-            hwnd = int(win.winId())
-            lparam = (global_pos.y() << 16) | (global_pos.x() & 0xFFFF)
-            ctypes.windll.user32.ReleaseCapture()
-            ctypes.windll.user32.SendMessageW(
-                wintypes.HWND(hwnd), _WM_SYSCOMMAND, _SC_MOVE | _HTCAPTION, wintypes.LPARAM(lparam)
-            )
-        except Exception:
-            # 失败不阻断 UI；退化到基类行为（可移动但没有 snap）
-            self._fallback_system_move(global_pos)
+        ★ 嵌套守卫：模态循环运行中 Qt 仍会派发 mouseMoveEvent（processEvents
+        事件重入 / 消息泵嵌套，如 MCPListSettingCard._refresh 的 processEvents），
+        若再次发起 SC_MOVE 会形成嵌套移动循环——两个循环互相踩位置状态，
+        Windows 取消时窗口被弹回拖动起点（"拖完又跳回原位置"根因，
+        [DRAG-POS] 日志 2026-09-01 两次连续 WM_EXITSIZEMOVE 实证）。
+        """
+        global _system_move_active
+
+        if _system_move_active:
+            logger.warning("[DRAG] 拦截嵌套 SC_MOVE（模态循环进行中，来自事件重入）")
+            return
+
+        _system_move_active = True
+        try:
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                win = self.window()
+                if win is None:
+                    return
+                hwnd = int(win.winId())
+                # ★ 用物理屏幕坐标（GetCursorPos）：e.globalPos() 是 Qt 逻辑坐标，
+                # HiDPI（125%/150%）下与 WM_SYSCOMMAND 期望的物理像素错位，
+                # 进入移动循环瞬间窗口跳变。GetCursorPos 失败时退回 Qt 坐标。lParam
+                # 两侧都 & 0xFFFF：y 未 mask 时负坐标（上方副屏）会污染高位，
+                # HIWORD 解析错乱 → 拖拽锚点错乱窗口跳飞。
+                _pt = wintypes.POINT()
+                if ctypes.windll.user32.GetCursorPos(ctypes.byref(_pt)):
+                    _x, _y = _pt.x, _pt.y
+                else:
+                    _x, _y = global_pos.x(), global_pos.y()
+                lparam = ((_y & 0xFFFF) << 16) | (_x & 0xFFFF)
+                ctypes.windll.user32.ReleaseCapture()
+                ctypes.windll.user32.SendMessageW(
+                    wintypes.HWND(hwnd), _WM_SYSCOMMAND, _SC_MOVE | _HTCAPTION, wintypes.LPARAM(lparam)
+                )
+            except Exception:
+                # 失败不阻断 UI；退化到基类行为（可移动但没有 snap）
+                self._fallback_system_move(global_pos)
+        finally:
+            # SendMessageW 返回 = 模态循环结束（正常松手或被系统取消），必须复位
+            _system_move_active = False
 
     def _fallback_system_move(self, global_pos) -> None:
         """兜底：走 qframelesswindow 内置实现（无 snap，但保证能拖动）"""

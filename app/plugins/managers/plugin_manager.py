@@ -173,6 +173,10 @@ class PluginManager:
     # 插件搜索路径（按优先级）
     # 系统插件：项目根目录 plugins/（打包在 exe 中）
     _SYSTEM_PLUGIN_DIR = Path(__file__).parent.parent.parent.parent / "plugins"
+    # 不可禁用核心插件名单（黑名单制）：禁用会断核心链路（组件宿主/插件市场自身）。
+    # 其余插件（含 manifest type=system 的内置插件）均可禁用；
+    # plugin-marketplace/ui/installer.py 状态分类与本名单保持单一数据源。
+    _NON_DISABLEABLE = frozenset({"system", "plugin-marketplace"})
     # 用户插件：~/.drifox/plugins/（相对于 app_data_dir）
     _USER_PLUGIN_DIR_NAME = "plugins"
     # Claude Code 插件目录（同时支持两种生态）
@@ -463,24 +467,22 @@ class PluginManager:
     def disable_plugin(self, name: str):
         """禁用插件（配置持久化，调用方需触发各子系统 reload）
 
-        系统插件保护：manifest type == "system" 的插件（如 plugin-marketplace、
-        system，目录随主程序分发）拒绝禁用——禁用配置会导致
-        资源加载链路不一致且用户无法恢复。
-        system-cleaner 等内置非 system 插件（manifest type=user）允许通过
-        Settings.disabled_plugins 禁用，与 installer 的 _set_managed_enabled 判定对齐。
+        系统插件保护改为名单制：仅 _NON_DISABLEABLE（system / plugin-marketplace）
+        拒绝禁用——禁用它们会断核心链路（组件宿主/插件市场自身）且用户无法恢复。
+        其余内置插件（包括 manifest type=system 的 shortcut-manager、agent_trace、
+        assistant_hub、welcome_changelog 等）允许通过 Settings.disabled_plugins
+        禁用，与 installer 的 _set_managed_enabled 判定对齐。
 
-        注意判定依据是 manifest type 而非 PluginInfo.is_system（plugin_type）：
+        判定依据是插件名名单而非 manifest type / PluginInfo.is_system（plugin_type）：
         项目根 plugins/ 下所有插件在扫描时 plugin_type 均为 "system"（目录位置
-        判定），用 is_system 会把内置非 system 插件（manifest type=user，如
-        context-usage-stats，可禁用）也一并拒绝。此处与 installer 的
-        _set_managed_enabled 判定（manifest type != system 才走配置禁用）对齐。
+        判定），用 is_system 会把内置插件全部拒绝；type 字段回归纯元数据语义。
         """
         p = self._plugins.get(name)
         if p is None:
             logger.warning(f"[PluginManager] Plugin not found: {name}")
             return
-        if p.manifest.get("type") == "system":
-            logger.warning(f"[PluginManager] 拒绝禁用系统插件: {name}")
+        if name in self._NON_DISABLEABLE:
+            logger.warning(f"[PluginManager] 拒绝禁用核心插件: {name}")
             return
         enabled = self._get_enabled_set()
         state_changed = False

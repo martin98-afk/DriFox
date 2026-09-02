@@ -14,9 +14,9 @@ SubAgentSessionCard — 内嵌子智能体会话卡片，覆盖右侧对话区�
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 from app.utils.design_tokens import Colors, scale_font_size
 from app.utils.diff_viewer import _cleanup_temp_files, _load_html_to_webview

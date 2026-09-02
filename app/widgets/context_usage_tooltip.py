@@ -12,12 +12,11 @@
 纯自绘 + 布局混合，深色主题自适应。
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from PyQt5.QtCore import QRectF, Qt
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt5.QtWidgets import (
-    QApplication,
     QHBoxLayout,
     QLabel,
     QVBoxLayout,

@@ -43,7 +43,7 @@ from app.core.conversation.config import HookPolicy, PermissionCache
 from app.core.message_content import append_text_block, consolidate_messages
 
 from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
-from app.core.provider_profile import detect_provider_family, get_provider_profile
+from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.core.token_estimator import count_messages_tokens
 from app.core.workers.cache_tracker import CacheHitRateTracker
@@ -184,6 +184,11 @@ class OpenAIChatWorker(QThread):
     _TOOL_LOOP_THRESHOLD = 3
     _model_adapter = None  # 懒解析缓存（首查时 resolve）
     _loop_policy_obj = None  # 懒解析缓存（激活策略）
+    # 引擎级循环策略 id（ConversationConfig.loop_policy_id 透传）。
+    # 类级默认值 None = 未声明 → 回落全局激活策略；声明为类属性（而非仅在
+    # __init__ 赋值）可让 __new__ 构造的测试桩安全读取（QObject 未初始化时
+    # 访问不存在的实例属性会抛 RuntimeError 而非 AttributeError）。
+    _loop_policy_id = None
 
     def __init__(
         self,
@@ -203,6 +208,7 @@ class OpenAIChatWorker(QThread):
         session_id: str = "",
         hook_policy=None,
         hook_policy_id: Optional[str] = None,
+        loop_policy_id: Optional[str] = None,
     ):
         super().__init__()
         self.messages = messages
@@ -223,6 +229,8 @@ class OpenAIChatWorker(QThread):
         # 未设置时按枚举回落（ALL→"all" / TOOL_EVENTS_ONLY→"tool_only" / NONE→"none"）。
         self._hook_policy_id = hook_policy_id
         self._hook_policy_obj = None  # 懒解析缓存（首查时从 registry 取策略对象）
+        # 可选：LoopPolicy 插件 id（引擎级声明，优先级高于全局激活策略）
+        self._loop_policy_id = loop_policy_id
         if self.session_id:
             logger.debug(f"[ChatWorker] session_id={self.session_id[:12]}...")
         else:
@@ -435,7 +443,6 @@ class OpenAIChatWorker(QThread):
         # === 异常检测 ===
         issues = []
         if rss_mb > 0 and self._mem_last_rss > 0:
-            delta_abs = abs(delta) if isinstance(delta, (int, float)) else 0
             if rss_mb - self._mem_last_rss > 50:
                 issues.append(f"单步RSS增长>{rss_mb - self._mem_last_rss:.0f}MB")
         if len(self._response_chunks) > 10000:
@@ -1487,7 +1494,6 @@ class OpenAIChatWorker(QThread):
 
         # 构建新的缓存
         api_key = self.llm_config.get("API_KEY", "").strip()
-        base_url = self.llm_config.get("API_URL") or None
         model = str(self.llm_config.get("模型名称", "gpt-4o"))
 
         extra_body = {}
@@ -2873,11 +2879,24 @@ class OpenAIChatWorker(QThread):
         return registry.resolve(self.llm_config or {})
 
     def _loop_policy(self):
-        """当前激活的循环策略（系统插件 default 兜底，可 set_active 覆盖）"""
+        """当前生效的循环策略：引擎显式 loop_policy_id > 全局激活策略
+
+        loop_policy_id 由 ConversationConfig 声明（插件自建引擎），按 id 直接从
+        registry.policies() 取对象 —— 不调用 set_active，因此不会污染主对话的
+        全局激活槽。未设置或 id 不存在时回落 get_active()，零行为变化。
+        """
         if self._loop_policy_obj is None:
             from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
 
-            self._loop_policy_obj = LoopPolicyRegistry.get_instance().get_active()
+            registry = LoopPolicyRegistry.get_instance()
+            policy = None
+            policy_id = self._loop_policy_id
+            if policy_id:
+                # 指定 id（如 "assistant_hub_single_turn"）：按 id 直接定位策略对象
+                policy = registry.policies().get(policy_id)
+                if policy is None:
+                    logger.warning(f"[LoopPolicy] 未找到 id={policy_id!r}，回落全局激活策略")
+            self._loop_policy_obj = policy if policy is not None else registry.get_active()
         return self._loop_policy_obj
 
     def _hook_policy_obj_resolve(self):
@@ -2893,7 +2912,6 @@ class OpenAIChatWorker(QThread):
             from app.plugins.registries.hook_policy_registry import HookPolicyRegistry
             from app.plugins.contracts.hook_policy import (
                 SCOPE_MAIN,
-                HookPolicy,
                 HookDecision,
                 HookEvent,
             )
@@ -3035,7 +3053,6 @@ class OpenAIChatWorker(QThread):
             )
 
         retry_delay = 5
-        last_error = None
 
         for attempt in range(max_retries):
             # 用户取消时立即退出重试循环
