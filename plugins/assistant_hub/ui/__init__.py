@@ -331,7 +331,7 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
   white-space: nowrap; overflow: hidden;
 }}
 .ah-badge {{
-  flex: none; font-size: {badge_fs}px; font-weight: 500; line-height: 1.6;
+  flex: none; margin-left: auto; font-size: {badge_fs}px; font-weight: 500; line-height: 1.6;
   padding: 0 7px; border-radius: 999px;
   background: var(--accent-soft-strong); color: var(--accent-text);
   border: 1px solid var(--accent-border-weak);
@@ -482,6 +482,7 @@ def _kv_sections(content: str) -> List[tuple]:
 _TAG_SKINS = {
     "mood": {"title": "MOOD", "subtitle": "内心独白", "icon": "&#9829;", "accent": "#c9767e"},
     "plan": {"title": "PLAN", "subtitle": "行动推演", "icon": "&#9678;", "accent": "#6c8ebf"},
+    "snap": {"title": "SNAP", "subtitle": "毒舌快攻", "icon": "&#9889;", "accent": "#db2777"},
 }
 _NEUTRAL_SKIN = {"title": "", "subtitle": "", "icon": "&#9671;", "accent": "#8a8f98"}
 

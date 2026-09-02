@@ -189,6 +189,9 @@ _hidden_imports = [
     # system 插件引用的第三方包
     "html2text",
     "bs4",
+    # 插件源文件（运行时动态加载，PyInstaller 不分析其依赖）引用的标准库：
+    # assistant_hub/core/persona.py import getpass，漏打会导致人格卡片全空
+    "getpass",
 ]
 
 # 打包排除：由插件自包含 deps/ 提供（codegraph-tools / desktop-automation），
