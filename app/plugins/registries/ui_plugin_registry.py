@@ -1420,13 +1420,18 @@ class UIPluginRegistry:
         self._workbench_card_scopes.setdefault(scope, set()).add(card_id)
         panel.open_card_tab(card_id, card_info.title or card_id, widget, activate=activate)
         # ★ 卡片数据加载入口：旧路径经 CardManager.show_card 调 widget.show_card()，
-        #   工作台路径必须显式补调，否则卡片只建骨架不拉数据（表现为 tab 空白）
-        show_card = getattr(widget, "show_card", None)
-        if callable(show_card):
-            try:
-                show_card()
-            except Exception:
-                pass
+        #   工作台路径必须显式补调，否则卡片只建骨架不拉数据（表现为 tab 空白）。
+        # ★ 仅激活路径调用：插件模板的 show_card() 末尾普遍带 setVisible(True)，
+        #   投影恢复路径（activate=False，切对话 tab 回来只挂载不激活）误调会把
+        #   QStackedWidget 的非当前页强行 show 出来——幽灵可见页被常驻页 raise
+        #   后压在背景层，与常驻页内容重叠且不可点击。恢复时数据此前已加载。
+        if activate:
+            show_card = getattr(widget, "show_card", None)
+            if callable(show_card):
+                try:
+                    show_card()
+                except Exception:
+                    pass
         # 工作台隐藏时自动展开（否则用户点插件按钮无可见反馈）；
         # 投影恢复路径（auto_expand=False）不抢焦点也不强开面板
         if auto_expand:

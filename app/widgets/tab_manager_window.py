@@ -2274,7 +2274,11 @@ class TabManagerWindow(FramelessWindow):
                     self._replace_active[wid] = None
             # tab 栏仅反映当前对话：仅当卡片归属当前对话时改 tab 栏
             if owners:
-                self.titleBar.remove_tab(card_id)
+                # 常驻插件 tab（register_titlebar_tab，tab_id 与 full 卡共用）只清
+                # open/active，不删 tab：它是插件固定入口，删了无人恢复（回归：
+                # assistant_hub 点「新建人格」后标题栏「助手」tab 消失）
+                if card_id not in self._plugin_titlebar_tab_ids:
+                    self.titleBar.remove_tab(card_id)
                 # 关掉当前卡片且 open 仍有其他 full 卡片 → 自动激活（互斥显示）最近一个
                 self._activate_remaining_replace_card()
 
@@ -2557,7 +2561,9 @@ class TabManagerWindow(FramelessWindow):
             if self._replace_active.get(wid) == card_id:
                 self._replace_active[wid] = None
         if owners:
-            self.titleBar.remove_tab(card_id)
+            # 常驻插件 tab 只清 open/active 不删 tab（同 _on_replace_close_timeout）
+            if card_id not in self._plugin_titlebar_tab_ids:
+                self.titleBar.remove_tab(card_id)
 
         # 真正隐藏卡片本身（避免「tab 消失但卡片仍显示」）
         if card_id in KNOWN_GLOBAL_REPLACE_CARDS:
