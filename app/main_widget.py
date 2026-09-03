@@ -15335,21 +15335,35 @@ class OpenAIChatToolWindow(ToolWindow):
         sender = self.sender()
         if not isinstance(sender, MessageCard):
             return
-        # 🐛 滚动锚定补偿：Qt 滚动区没有 scroll anchoring——卡片高度变化时
-        # scrollbar value 不动、视口内内容整体位移。工具折叠框展开瞬间卡片
-        # 可 +600px，用户正在看的内容被整个推走（感知为"滚轮位置被重置"）；
-        # 贴底时展开则实际距底被拉大而 away 标志未更新，下一次流式高度回调
-        # 又把视口拽回底部。补偿规则：卡片顶部已在视口上方 → value 同步
-        # += delta，视口锚定的内容纹丝不动。贴底跟随态随后由下方滚底逻辑
-        # 覆盖，互不冲突；卡片顶部在视口内时卡片顶部坐标不变，无需补偿。
+        # 🐛 滚动锚定补偿（v2）：Qt 滚动区没有 scroll anchoring——卡片高度变化时
+        # value 不动、视口内内容整体位移。补偿**只在增量确实发生在视口上方**
+        # 时才能执行，否则补偿本身会变成反向拖拽。
+        #
+        # 判据（按可信度排序）：
+        #   1. card_bottom <= value：整张卡片都在视口上方 → 增量必然在视口之上，
+        #      全额补偿（覆盖懒渲染/异步高度上报把下方内容顶走的场景）。
+        #   2. card_top >= value：卡片顶部已在视口内 → 卡片顶部坐标不变，
+        #      增量不可能整体位于视口之上 → 不补偿。
+        #   3. 卡片跨越视口顶部（card_top < value < card_bottom）：增量位置未知。
+        #      ⚠️ 流式卡片一律走「不补偿」：正文在卡片**底部**增长，而工具折叠框
+        #      展开后卡片常高于视口，此时 `card_top < value` 恒成立 → 每个流式
+        #      高度回调（~80ms 一次）都 += delta，视口被持续下拽、内容从用户
+        #      眼下漂走——这正是「滚轮位置反复被重置到奇怪位置」的根因。
+        #      非流式卡片（折叠框展开/收起、早期卡片异步高度上报）保留原补偿。
         try:
-            delta = getattr(sender, "_last_height_delta", 0)
+            delta = int(getattr(sender, "_last_height_delta", 0) or 0)
+            # 增量是一次性令牌：读取即清零。否则后续任何一次 heightChanged
+            # （如动画结束回调）都会把同一个 delta 再补偿一遍 → 视口累加漂移。
+            sender._last_height_delta = 0
             container = self.chat_scroll_area.widget()
             if delta and container is not None and sender.parentWidget() is container:
                 sb = self.chat_scroll_area.verticalScrollBar()
+                value = sb.value()
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()
-                if card_top < sb.value():
-                    sb.setValue(max(0, sb.value() + delta))
+                card_bottom = card_top + sender.height()
+                is_streaming_card = bool(getattr(sender, "_streaming", False))
+                if card_bottom <= value or (card_top < value and not is_streaming_card):
+                    sb.setValue(max(0, value + delta))
         except RuntimeError:
             pass
         if not sender._content_just_loaded:

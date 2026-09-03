@@ -11157,6 +11157,9 @@ class MessageCard(SimpleCardWidget):
         self._is_height_animating = state == QVariantAnimation.Running
         # 动画结束时触发一次高度变化信号，让父容器更新
         if state == QVariantAnimation.Stopped:
+            # 重发的是**已应用过**的高度，没有新的高度增量。必须清零，否则
+            # 外层列表会拿上一次的残值再补偿一次 → 视口被重复拖拽。
+            self._last_height_delta = 0
             self.heightChanged.emit(self._last_applied_viewer_height)
             layout = self.layout()
             if layout:
