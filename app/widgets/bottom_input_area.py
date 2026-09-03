@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt5.QtCore import (
+    QEasingCurve,
     QMimeData,
     QObject,
     QRectF,
@@ -19,6 +20,7 @@ from PyQt5.QtCore import (
     QSizeF,
     Qt,
     QTimer,
+    QVariantAnimation,
     pyqtSignal,
 )
 from PyQt5.QtGui import (
@@ -53,7 +55,7 @@ from qfluentwidgets import ComboBox, FluentIcon, IconWidget, TextEdit, Transpare
 
 from app.widgets.stop_button import SendStopButton
 
-from app.utils.design_tokens import Colors, font_size_css, qcolor_from_token
+from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token
 from app.utils.utils import get_font_family_css
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
@@ -2246,6 +2248,10 @@ class InputGlowUnderlay(QWidget):
         self._pill_w = 0
         self._pill_h = 0
         self._radius = self.DEFAULT_RADIUS
+        # 辉光过渡动画：0..1 归一化插值 + from/target 快照，retarget 时从当前值续接
+        self._glow_anim: Optional[QVariantAnimation] = None
+        self._glow_from: tuple = (0, 0, 0, 0)
+        self._glow_target: tuple = (0, 0, 0, 0)
 
     def set_color(self, color: QColor):
         c = QColor(color)
@@ -2273,6 +2279,61 @@ class InputGlowUnderlay(QWidget):
         self._ambient_alpha = max(0, int(ambient_alpha))
         self._ambient_blur = max(0, int(ambient_blur))
         self.update()
+
+    def animate_glow_to(
+        self,
+        primary_alpha: int,
+        primary_blur: int,
+        ambient_alpha: int,
+        ambient_blur: int,
+        duration: int = 200,
+    ):
+        """辉光参数平滑过渡到目标值（聚焦/失焦切换用）
+
+        中途反向切换时从当前实际值续接（retarget），不会跳回起点。
+        reduced-motion 开启时直接落终值。
+        """
+        target = (
+            max(0, int(primary_alpha)),
+            max(0, int(primary_blur)),
+            max(0, int(ambient_alpha)),
+            max(0, int(ambient_blur)),
+        )
+        current = (
+            self._primary_alpha,
+            self._primary_blur,
+            self._ambient_alpha,
+            self._ambient_blur,
+        )
+        if target == current:
+            return
+        if not Animations.motion_enabled() or duration <= 0:
+            self.set_glow(*target)
+            return
+        if self._glow_anim is None:
+            anim = QVariantAnimation(self)
+            anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+            anim.valueChanged.connect(self._on_glow_anim_tick)
+            self._glow_anim = anim
+        anim = self._glow_anim
+        anim.stop()
+        self._glow_from = current
+        self._glow_target = target
+        anim.setDuration(int(duration))
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.start()
+
+    def _on_glow_anim_tick(self, t: float):
+        t = max(0.0, min(1.0, float(t)))
+        f = self._glow_from
+        d = self._glow_target
+        self.set_glow(
+            f[0] + (d[0] - f[0]) * t,
+            f[1] + (d[1] - f[1]) * t,
+            f[2] + (d[2] - f[2]) * t,
+            f[3] + (d[3] - f[3]) * t,
+        )
 
     def set_pill_geometry(
         self,

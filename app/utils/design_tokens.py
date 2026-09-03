@@ -6,7 +6,10 @@
 主题完全从 app/themes/ 目录读取，不硬编码主题数据
 """
 
-from PyQt5.QtCore import QSize
+import ctypes
+import sys
+
+from PyQt5.QtCore import QEasingCurve, QSize
 
 
 # ─── 字体/字号缓存 ──────────────────────────────────────────
@@ -628,12 +631,43 @@ class Animations:
     NORMAL_MS = 200  # 卡片淡入、过渡
     SLOW_MS = 300  # 展开/折叠
 
-    # 缓动曲线
-    EASE_OUT = "QEasingCurve::OutCubic"
-    EASE_IN_OUT = "QEasingCurve::InOutQuad"
+    # 缓动曲线（QEasingCurve.Type，用法：QEasingCurve(Animations.EASE_OUT)）
+    EASE_OUT = QEasingCurve.OutCubic
+    EASE_IN_OUT = QEasingCurve.InOutQuad
+
+    # 展开/收起动画标准时长（轴向 maximumHeight/Width 动画）
+    EXPAND_MS = 180
 
     # 位移量
     FADE_SLIDE_Y = 8  # 淡入上滑像素数
+
+    # 「减少动态效果」检测结果缓存（None = 未检测）
+    _reduce_motion: bool | None = None
+
+    @classmethod
+    def motion_enabled(cls) -> bool:
+        """系统未开启「减少动态效果」时返回 True。
+
+        消费方约定：返回 False 时跳过动画、直接把属性置为终值
+        （保留状态反馈，去掉运动过程）。结果进程内缓存一次。
+        """
+        if cls._reduce_motion is None:
+            cls._reduce_motion = cls._detect_reduce_motion()
+        return not cls._reduce_motion
+
+    @staticmethod
+    def _detect_reduce_motion() -> bool:
+        """读取系统动画偏好；仅实现 Windows，其他平台视为开启动画。"""
+        if sys.platform == "win32":
+            try:
+                # SPI_GETCLIENTAREAANIMATION = 0x1042：pvParam 收到 BOOL，
+                # True = 客户区动画开启。查询失败按「开启动画」处理。
+                v = ctypes.c_bool(True)
+                ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(v), 0)
+                return not v.value
+            except Exception:
+                return False
+        return False
 
 
 # ============ 阴影系统 ============
@@ -1184,6 +1218,8 @@ def get_content_bg_style() -> str:
 
 def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
     """为 widget 添加淡入动画（透明度 0→1），简洁克制"""
+    if not Animations.motion_enabled():
+        return  # reduced-motion：跳过淡入（控件默认 opacity 即 1）
     from PyQt5.QtCore import QPropertyAnimation
     from PyQt5.QtWidgets import QGraphicsOpacityEffect
 

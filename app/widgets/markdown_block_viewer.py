@@ -21,7 +21,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QFile, QPropertyAnimation, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QFile, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap, QTextOption
 from PyQt5.QtWidgets import (
     QApplication,
@@ -46,7 +46,7 @@ except Exception:  # pragma: no cover
 
 import html as _html_mod
 
-from app.utils.design_tokens import Colors, get_unified_scrollbar_style, scale_font_size
+from app.utils.design_tokens import Animations, Colors, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon
 
 try:  # pygments 独立包，顶层安全导入
@@ -908,8 +908,16 @@ class ThinkCard(QFrame):
             target = 0
             self._expanded = False
         self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
+        if not Animations.motion_enabled():
+            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
+            self._on_anim_done()
+            return
+        if self._anim is not None:
+            self._anim.stop()
         self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        self._anim.setDuration(180)
+        self._anim.setDuration(Animations.EXPAND_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
         self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_anim_done)
@@ -1290,8 +1298,16 @@ class ToolCardWidget(QFrame):
             target = 0
             self._expanded = False
         self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
+        if not Animations.motion_enabled():
+            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
+            self._on_anim_done()
+            return
+        if self._anim is not None:
+            self._anim.stop()
         self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        self._anim.setDuration(180)
+        self._anim.setDuration(Animations.EXPAND_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
         self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_anim_done)
@@ -1567,8 +1583,14 @@ class ToolSectionWidget(QWidget):
             start = 0
             self._collapsed = False
         self._separator.set_collapsed(self._collapsed)
+        if not Animations.motion_enabled():
+            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
+            self._content_wrap.setMaximumHeight(0 if self._collapsed else _QWIDGETSIZE_MAX)
+            self._on_done()
+            return
         self._anim = QPropertyAnimation(self._content_wrap, b"maximumHeight", self)
-        self._anim.setDuration(180)
+        self._anim.setDuration(Animations.EXPAND_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
         self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_done)
