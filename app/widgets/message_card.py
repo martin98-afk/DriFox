@@ -471,6 +471,16 @@ def _wrap_code_blocks_with_copy_button_web(
             except Exception:
                 pass
 
+        # ===== SVG 代码块：透传 raw HTML，浏览器直渲 =====
+        # 协议上 SVG 应内联正文（visualization skill），但模型习惯性输出 ```svg 围栏，
+        # 这里兜底：语言为 svg 且内容以 <svg 开头时按 raw HTML 透传，
+        # 与正文内联 <svg>（markdown safe=False）走同一条渲染路径。
+        # 内容不以 <svg 开头（教学代码等）保持普通代码块渲染，避免误吞。
+        if lang == "svg":
+            svg_html = _unescape_html(code_content_raw)
+            if svg_html.lstrip().lower().startswith("<svg"):
+                return svg_html
+
         # --- 普通代码块处理 ---
         try:
             copy_text = _unescape_html(code_content_raw)

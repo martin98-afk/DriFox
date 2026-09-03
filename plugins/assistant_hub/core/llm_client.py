@@ -56,6 +56,27 @@ class LLMUnavailableError(RuntimeError):
     """无可用对话引擎 / 引擎返回错误 / 超时 / 空响应。"""
 
 
+def _strip_think(text: str) -> str:
+    """剥掉 <think>...</think> 思考块，只留正文。
+
+    与 core/session_store.py 同语义（两处独立加载解耦，各自持有一份）。
+    思考模型（R1/Qwen3/GLM 等）经引擎会把 reasoning_content 内联成
+    <think> 块混进正文，记忆整理入库前必须清掉。
+    """
+    if "<think>" not in text:
+        return text
+    out, rest = [], text
+    while True:
+        head, sep, rest = rest.partition("<think>")
+        out.append(head)
+        if not sep:
+            break
+        _, sep2, rest = rest.partition("</think>")
+        if not sep2:  # 未闭合：其后内容全部按推理丢弃
+            break
+    return "".join(out)
+
+
 # ── services 解析（create_engine_session / get_model_config）──────
 
 
@@ -297,8 +318,13 @@ def chat_once(
         else:
             text = (getattr(result, "text", "") or "").strip()
             if text:
-                return text
-            reason = "引擎返回空内容"
+                # 思考模型正文可能内联 <think> 块，剥掉再入库；剥后为空按空响应重试
+                cleaned = _strip_think(text).strip()
+                if cleaned:
+                    return cleaned
+                reason = "引擎返回内容仅含思考块"
+            else:
+                reason = "引擎返回空内容"
 
         if fatal:
             reset_sessions()
