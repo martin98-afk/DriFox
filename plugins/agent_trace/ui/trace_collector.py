@@ -91,6 +91,9 @@ class TraceCollector(QObject):
             backend.tool_result_received.connect(self._on_tool_result_received)
             backend.stream_started.connect(self._on_stream_started)
             backend.stream_finished.connect(self._on_stream_finished)
+            # 引擎报错：唯一能观测到「这一轮异常终止」的信号（见 _on_error_occurred）
+            if hasattr(backend, "error_occurred"):
+                backend.error_occurred.connect(self._on_error_occurred)
             # 主程序在 hook 注入 / 工具结果写入 messages 后触发的节拍信号
             if hasattr(backend, "_hook_messages_updated"):
                 backend._hook_messages_updated.connect(self._on_messages_updated)
@@ -107,6 +110,7 @@ class TraceCollector(QObject):
             ("tool_result_received", self._on_tool_result_received),
             ("stream_started", self._on_stream_started),
             ("stream_finished", self._on_stream_finished),
+            ("error_occurred", self._on_error_occurred),
             ("_hook_messages_updated", self._on_messages_updated),
         ):
             try:
@@ -237,7 +241,16 @@ class TraceCollector(QObject):
         # 丢失的路径（手动停止 / 异常中断）留下永久走动时长的僵尸尾巴。
         n_assistant = sum(1 for r in new_records if r.kind == EntryKind.ASSISTANT)
         if self._tail and n_assistant > self._stream_base:
-            self._set_tail([r for r in self._tail if not (r.kind == EntryKind.ASSISTANT and r.is_pending)])
+            self._set_tail(
+                [
+                    r
+                    for r in self._tail
+                    # 报错收尾态的 assistant 尾巴同样让位（正式记录已落盘）
+                    if not (
+                        r.kind == EntryKind.ASSISTANT and (r.is_pending or r.meta.get("terminal_error"))
+                    )
+                ]
+            )
 
     def _clear_all(self) -> None:
         self._records = []
@@ -640,7 +653,43 @@ class TraceCollector(QObject):
             }
         self._sync()
 
+    def _on_error_occurred(self, message: str = "") -> None:
+        """引擎/模型报错 → **in-flight 尾巴必须立刻收尾**。
+
+        ⚠️ 报错路径**不发** ``stream_finished``（chat_worker 只 emit
+        ``error_occurred``），主程序 ``_on_engine_error`` 也不走
+        ``_on_messages_updated``（注释明确写了）。缺了这条兜底，出错那一轮的
+        「正在生成…」尾巴会永远 ``is_pending=True`` —— UI 心跳每秒重绘、
+        ``duration_ms`` 按 ``time.time() - start`` 一直涨，表现为
+        **模型报错后计时还在继续跑**。
+
+        处理策略：保留这条记录（用户要看是哪一步挂的）但**停止计时** ——
+        ``is_pending=False`` 后 ``duration_ms`` 走「固定 end - start」分支；
+        打上 ``terminal_error`` 标记，等落盘记录到位或下一轮流开始时再清掉。
+        """
+        now = time.time()
+        for s in self._streams:
+            if not s.get("end"):
+                s["end"] = now
+        if not self._tail:
+            return
+        for rec in self._tail:
+            if not rec.is_pending:
+                continue
+            rec.is_pending = False
+            rec.is_error = True
+            rec.end_ts = now
+            rec.meta["terminal_error"] = True
+            text = str(message or "").strip()
+            if text:
+                rec.meta["error"] = text
+                rec.preview = truncate(text, 140)
+        self._set_tail(self._tail)
+
     def _on_stream_started(self) -> None:
+        # 新一轮开始：清掉上一轮遗留的终止态尾巴（报错行不再有意义）
+        if any(r.meta.get("terminal_error") for r in self._tail):
+            self._set_tail([r for r in self._tail if not r.meta.get("terminal_error")])
         # 🛡️ 幂等：已存在未闭合流 / pending assistant 尾巴时不重复登记。
         # 背景：stream_started 历史上被双发（executor + engine 各一次），
         # 重入会产生 2 条「正在生成」尾巴（时长一模一样、永久走动）。
@@ -659,7 +708,8 @@ class TraceCollector(QObject):
             )
         )
 
-    def _on_stream_finished(self, _payload: Dict[str, Any]) -> None:
+    def _on_stream_finished(self, _payload: str = "") -> None:
+        """流结束 —— 信号是 ``pyqtSignal(str)``（结束原因/文本），不是 dict。"""
         now = time.time()
         # 闭合**所有**未闭合流：一次 finished 对应一次流会话，重入/双发留下的
         # end=0 僵尸流会被投影配对命中 → 记录时长为负/无限走动。

@@ -128,6 +128,8 @@ class TraceCardWidget(QWidget):
         self._hub = TraceCollectorHub(self)
         self._collector: Optional[TraceCollector] = None
         self._active_wid: str = ""
+        # 当前展示的 session_id（同窗口幂等判据 —— 见 _switch_collector）
+        self._active_sid: str = ""
         self._context_tokens: int = 0
         self._context_limit: int = 0
         self._pal = ThemePalette()
@@ -402,32 +404,57 @@ class TraceCardWidget(QWidget):
     # ──────────────────── collector 切换 ────────────────────
 
     def _switch_collector(self, main_widget: Any) -> None:
-        """切换到目标窗口的常驻 collector（同窗口幂等）。"""
+        """切换到目标窗口的常驻 collector（同窗口 + 同会话幂等）。
+
+        ⚠️ 「同窗口直接 return」是有前提的：collector 的数据新鲜度依赖 backend
+        信号（``_hook_messages_updated`` / ``tool_*`` / ``stream_*``）。但
+        **加载历史会话不走任何 backend 信号** —— 主程序走的是
+        ``main_widget.session_manager.set_current_session(session)``，既不发
+        ``session_changed``（只有 ``backend.set_current_session`` 才发），也不发
+        ``_hook_messages_updated``。结果是：加载完历史会话后没有任何东西驱动
+        重新投影，卡片一直停在旧会话上（表现为「轨迹不显示 / 显示的还是上一个
+        会话」）。故同窗口分支也必须比对 session_id，变了就重投影。
+        """
         wid = getattr(main_widget, "_window_id", "") or ""
+        sid = self._session_id_of(main_widget)
         if wid and wid == self._active_wid and self._collector is not None:
-            # collector 常驻且由 backend 信号驱动同步（切走也在记 timing），
-            # 数据不过期，无需 refresh 全量投影（长会话投影是切换卡顿主源之一）
+            # 同窗口：collector 常驻且由 backend 信号驱动同步（切走也在记
+            # timing），常规链路数据不过期，无需全量重投影（长会话投影是切
+            # 标签卡顿主源之一）。仅当 session_id 变化（加载历史会话等静默
+            # 切换）才补一次投影 —— 比对是 O(1)，不是性能热点。
+            if sid and sid == self._active_sid:
+                return
+            self._active_sid = sid
+            self._collector.refresh()
             return
 
         self._unbind_collector_signals()
         self._unbind_backend_stats_signals()
         self._collector = self._hub.collector_for(main_widget)
         self._active_wid = wid if self._collector is not None else ""
+        self._active_sid = sid if self._collector is not None else ""
 
         if self._collector is not None:
             self._collector.refresh()
             self._bind_collector_signals(self._collector)
-            try:
-                backend = getattr(main_widget, "backend", None)
-                if backend is not None and hasattr(backend, "context_updated"):
-                    backend.context_updated.connect(self._on_context_updated)
-            except Exception:
-                pass
+            self._bind_backend_stats_signals(main_widget)
             self._pull_records()
             self._hub.cleanup_closed(self._active_window_ids())
         else:
             # backend 未就绪：清空展示，等下次 show/tab 切换重试
             self._pull_records()
+
+    @staticmethod
+    def _session_id_of(main_widget: Any) -> str:
+        """当前窗口 backend 的 session_id；解析不到返回空串（= 不做幂等短路）。"""
+        backend = getattr(main_widget, "backend", None)
+        if backend is None:
+            return ""
+        try:
+            session = backend.get_current_session()
+        except Exception:
+            return ""
+        return str(getattr(session, "session_id", "") or "")
 
     @staticmethod
     def _active_window_ids() -> Optional[set]:
@@ -462,14 +489,35 @@ class TraceCardWidget(QWidget):
             except TypeError, RuntimeError:
                 pass
 
+    def _bind_backend_stats_signals(self, main_widget: Any) -> None:
+        """订阅 backend 的上下文/会话信号（切窗口时与 collector 同步换绑）。"""
+        backend = getattr(main_widget, "backend", None)
+        if backend is None:
+            return
+        try:
+            if hasattr(backend, "context_updated"):
+                backend.context_updated.connect(self._on_context_updated)
+        except Exception:
+            pass
+        try:
+            if hasattr(backend, "session_changed"):
+                backend.session_changed.connect(self._on_session_changed)
+        except Exception:
+            pass
+
     def _unbind_backend_stats_signals(self) -> None:
         c = self._collector
         if c is None:
             return
         be = getattr(c, "_bound_backend", None)
-        if be is not None and hasattr(be, "context_updated"):
+        if be is None:
+            return
+        for name, slot in (("context_updated", self._on_context_updated), ("session_changed", self._on_session_changed)):
+            sig = getattr(be, name, None)
+            if sig is None:
+                continue
             try:
-                be.context_updated.disconnect(self._on_context_updated)
+                sig.disconnect(slot)
             except TypeError, RuntimeError:
                 pass
 
@@ -552,8 +600,35 @@ class TraceCardWidget(QWidget):
         self._context_tokens, self._context_limit = tokens, limit
         self._refresh_stats(self._visible())
 
+    def _on_session_changed(self, _sid: str = "") -> None:
+        """backend 信号驱动的会话切换 → 重新投影。
+
+        只覆盖「新建会话 / ``backend.set_current_session``」路径；**历史会话
+        加载**不发此信号（走 ``session_manager.set_current_session``），由
+        :meth:`_switch_collector` 的 session_id 比对 + :meth:`_on_tick` 心跳
+        探测兜底。
+        """
+        c = self._collector
+        if c is None:
+            return
+        try:
+            c.refresh()
+        except Exception as e:
+            logger.warning(f"[agent_trace] 会话切换后重投影失败: {e}")
+
     def _on_tick(self) -> None:
-        """心跳：仅当有 in-flight 记录时重绘（时长走动）。"""
+        """心跳：in-flight 时长走动（只重绘，不重建）+ 会话变更兜底探测。"""
+        if not self.isVisible():
+            return
+        # ⚠️ 历史会话加载是「静默切换」：不发 session_changed、不发
+        # _hook_messages_updated。卡片已打开时既没有 showEvent 也没有 tab
+        # 切换事件 → 只剩心跳能发现 session_id 变了。仅做 id 字符串比较，
+        # 不变就零开销；变了才走 _switch_collector 重投影。
+        mw = self._ctx.get("main_widget")
+        if mw is not None and self._collector is not None:
+            sid = self._session_id_of(mw)
+            if sid and sid != self._active_sid:
+                self._switch_collector(mw)
         c = self._collector
         if c is not None and c.has_pending:
             self._timeline.update()

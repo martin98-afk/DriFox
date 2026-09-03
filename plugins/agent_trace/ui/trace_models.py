@@ -34,15 +34,6 @@ from typing import Any, Dict, Optional, Tuple
 
 from PyQt5.QtGui import QColor
 
-# ── 类型主色（hex，深浅主题通吃；对齐 DeepSeek Harness 的彩色标签）──
-ENTRY_KIND_COLORS: Dict["EntryKind", str] = {
-    "SYSTEM": "#7AA2F7",  # 蓝
-    "USER": "#E0AF68",  # 金橙
-    "CONTEXT": "#9ECE6A",  # 绿
-    "ASSISTANT": "#BB9AF7",  # 紫
-    "TOOL": "#7DCFFF",  # 青
-}
-
 _RGBA_RE = re.compile(r"rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*(?:,\s*([0-9.]+)\s*)?\)", re.I)
 
 # ── 「占用区间」参数（让时间线连贯，而不是一堆 0ms 碎片）──
@@ -92,10 +83,35 @@ class Lane(Enum):
 
 LANE_ORDER: tuple = (Lane.INPUT, Lane.MODEL, Lane.TOOLS)
 
+# ── 类型主色（hex，深浅主题通吃；对齐 DeepSeek Harness 的彩色标签）──
+# ⚠️ 键必须是 **EntryKind 成员**（定义顺序：本表须在 EntryKind 之后）：
+# CONTEXT 的 value 是 "HOOK"（徽章文案），若按 value 查表会 miss →
+# 全部 HOOK 条目退化成兜底灰 #888888。
+ENTRY_KIND_COLORS: Dict[EntryKind, str] = {
+    EntryKind.SYSTEM: "#7AA2F7",  # 蓝
+    EntryKind.USER: "#E0AF68",  # 金橙
+    EntryKind.CONTEXT: "#9ECE6A",  # 绿（徽章显示 HOOK）
+    EntryKind.ASSISTANT: "#BB9AF7",  # 紫
+    EntryKind.TOOL: "#7DCFFF",  # 青
+}
 
-def kind_color(kind: EntryKind) -> QColor:
-    """类型主色（不透明 QColor）。"""
-    return QColor(ENTRY_KIND_COLORS.get(getattr(kind, "value", kind), "#888888"))
+# 按「枚举名 / 枚举值」反查成员 —— 兼容历史调用方传字符串的情况
+_KIND_BY_NAME: Dict[str, EntryKind] = {k.name: k for k in EntryKind}
+_KIND_BY_VALUE: Dict[str, EntryKind] = {k.value: k for k in EntryKind}
+
+
+def kind_color(kind: Any) -> QColor:
+    """类型主色（不透明 QColor）。
+
+    ⚠️ 必须按**枚举成员**取色，不能用 ``kind.value``：CONTEXT 的 value 是
+    "HOOK"（徽章显示文案，见 :class:`EntryKind`），按 value 查表必然 miss，
+    结果是所有 HOOK 条目的徽章/时间线条带/详情标题全退化成兜底灰 #888888。
+    """
+    k = kind
+    if not isinstance(k, EntryKind):
+        key = str(getattr(kind, "name", "") or kind)
+        k = _KIND_BY_NAME.get(key) or _KIND_BY_VALUE.get(str(kind)) or kind
+    return QColor(ENTRY_KIND_COLORS.get(k, "#888888"))
 
 
 def with_alpha(color: QColor, alpha: int) -> QColor:
