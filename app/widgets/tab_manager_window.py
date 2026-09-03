@@ -3786,18 +3786,20 @@ class TabManagerWindow(FramelessWindow):
         """macOS：强制重算 NSWindow 的 fullSizeContentView 布局
 
         现象：窗口关闭（红绿灯，closeEvent accept → NSWindow orderOut，对象保留）
-        后从 dock 唤起（show → orderFront），自定义标题栏整体下移一个标题栏
-        高度，顶部露出一条原生标题栏空白带。
+        后从 dock 唤起（show → orderFront），窗口整体退回原生样式：顶部出现
+        原生标题栏行，自定义标题栏被压到第二行。
 
-        根因：qframelesswindow 的 MacFramelessWindow 依赖 AppKit 侧
-        NSFullSizeContentViewWindowMask + titlebarAppearsTransparent 让 Qt
-        内容覆盖整个窗口；close→show 循环中 AppKit 会把 contentView 布局
-        重算回「标题栏之下」，而库只在 paintEvent/changeEvent 里重复设置
-        相同的 styleMask 值——AppKit 对相同值是 no-op，不会触发 contentView
-        重新布局，错位因此固化。
+        根因：close→show 循环中 AppKit 会把 NSFullSizeContentViewWindowMask
+        位清掉（或 Qt 重建 NSWindow），contentView 布局退回「标题栏之下」。
+        库（MacFramelessWindow）只在 paintEvent/changeEvent 里用 ``styleMask |
+        full`` 幂等置位——即使位从无到有加上，AppKit 也可能不再重算 contentView
+        frame；且 qframelesswindow 缓存的 ``__nsWindow`` 若指向已重建前的旧
+        窗口，库后续所有设置都会落空。
 
-        修法：先摘掉再戴回 fullSizeContentView 位，强制 AppKit 重算
-        contentView frame。摘/戴在同一事件栈内完成，不经过绘制循环，无闪烁。
+        修法：① ``updateFrameless()`` 让库重新绑定当前 NSWindow 并重置
+        titlebar（幂等）；② 无条件确保 full 位戴上，并用「先摘后戴」制造一次
+        真实变化，强制 AppKit 重算 contentView frame（对相同值 AppKit 是
+        no-op，必须先摘后戴）。摘/戴在同一事件栈内完成，不经过绘制循环，无闪烁。
         """
         try:
             import Cocoa
@@ -3809,13 +3811,20 @@ class TabManagerWindow(FramelessWindow):
             try:
                 if not self.isVisible():
                     return
+                # NSWindow 可能已被 Qt 重建：让库重新绑定当前窗口并重设
+                # titlebar（含交通灯可见性，幂等，失败不阻断摘戴）
+                try:
+                    self.updateFrameless()
+                except Exception:
+                    pass
                 ns_window = getNSWindow(int(self.winId()))
                 mask = int(ns_window.styleMask())
                 full = int(Cocoa.NSFullSizeContentViewWindowMask)
+                # close→show 后 full 位可能已被 AppKit 清掉：无条件确保戴上；
+                # 先摘后戴制造一次真实变化才能触发布局重算（相同值是 no-op）
                 if mask & full:
-                    # 相同值是 no-op，必须先摘后戴才能触发布局重算
                     ns_window.setStyleMask_(mask & ~full)
-                    ns_window.setStyleMask_(mask | full)
+                ns_window.setStyleMask_(mask | full)
                 # 与 MacFramelessWindow._hideSystemTitleBar 保持一致的重申（幂等）
                 ns_window.setTitlebarAppearsTransparent_(True)
                 ns_window.setTitleVisibility_(Cocoa.NSWindowTitleHidden)

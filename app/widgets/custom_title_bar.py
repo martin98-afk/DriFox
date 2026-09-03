@@ -605,13 +605,15 @@ class CustomTitleBar(TitleBarBase):
             w.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         # ── 三区布局 ──
-        # mac：左侧留白给系统交通灯；Windows：常规 8px
+        # mac：左侧留白给系统交通灯，右侧留 8px 让工作台开关不贴窗口圆角；
+        # Windows：右区四按钮 hover 底色无缝相连，右边距保持 0
         left_pad = self.MAC_TRAFFIC_LIGHT_PAD if self._is_mac else 8
+        right_pad = 8 if self._is_mac else 0
         layout = QHBoxLayout(self)
         # 上下 margin 必须为 0：系统按钮高度 = 标题栏高度，hover 底色才能
         # 贴齐窗口顶边，关闭按钮的圆角也才能与窗口圆角同心（否则圆角差 3px，
         # 视觉上就是"hover 和窗口对不齐"）。
-        layout.setContentsMargins(left_pad, 0, 0, 0)
+        layout.setContentsMargins(left_pad, 0, right_pad, 0)
         # 0：右区四按钮（工作台开关/最小化/最大化/关闭）hover 底色无缝相连，
         # 与 Win11 系统标题栏行为一致；间距由按钮自身宽度内的图标留白提供
         layout.setSpacing(0)
@@ -668,7 +670,7 @@ class CustomTitleBar(TitleBarBase):
         spacing = layout.spacing()
 
         left = self._sidebar_btn.width() + layout.contentsMargins().left()
-        right = self._workbench_btn.width()
+        right = self._workbench_btn.width() + layout.contentsMargins().right()
         if not self._is_mac:
             right += (
                 self.minBtn.width() + self.maxBtn.width() + self.closeBtn.width() + spacing * 3
