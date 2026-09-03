@@ -2556,9 +2556,9 @@ class OpenAIChatWorker(QThread):
                 if not isinstance(r, dict) or not r.get("success"):
                     continue
                 tn = r.get("name", "")
-                if tn in _provides_image:
-                    # T4d：放宽回基线语义——工具在视觉集合即提示（协议 A 工具天然产出路径，
-                    # 无需内容结构判定；read 有 image_data 亦命中）
+                if tn in _provides_image and self._result_has_image(
+                    r.get("content"), r.get("raw_content"), r.get("image_data")
+                ):
                     _non_vision_tools.add(tn)
             if _non_vision_tools:
                 _nv_hint = (
@@ -4601,6 +4601,20 @@ class OpenAIChatWorker(QThread):
         success = bool(getattr(result, "success", True)) if result else False
         return result, result_content, success
 
+    @staticmethod
+    def _result_has_image(content, raw_content=None, image_data=None) -> bool:
+        """工具结果本次是否实际产出图像（协议 B image_data / 协议 A 图片路径 dict）。
+
+        read 声明 provides_image 但读普通文件时无图像载荷，不能只按工具名判定，
+        否则 read 文本结果也会被追加视觉提示。
+        """
+        if isinstance(image_data, dict) and image_data.get("data"):
+            return True
+        for c in (content, raw_content):
+            if isinstance(c, dict) and (c.get("absolute_path") or c.get("path")):
+                return True
+        return False
+
     def _build_result_dict(self, tool_call_id, tool_name, arguments, result_content, success, round_id, result_obj):
         """构建标准的结果字典
 
@@ -4622,7 +4636,10 @@ class OpenAIChatWorker(QThread):
         except Exception:
             # T4d：registry 异常时保守回退，保持旧工具名兜底
             _provides_image = frozenset({"screenshot", "read"})
-        if tool_name in _provides_image and success:
+        if tool_name in _provides_image and success and self._result_has_image(
+            getattr(result_obj, "content", None) if result_obj else None,
+            image_data=getattr(result_obj, "image_data", None) if result_obj else None,
+        ):
             try:
                 from app.core.model_capabilities import get_model_capabilities
 

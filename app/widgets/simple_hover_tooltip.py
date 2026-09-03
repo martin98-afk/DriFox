@@ -24,7 +24,7 @@
 
 from typing import Optional
 
-from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer
+from PyQt5.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer
 from PyQt5.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt5.QtWidgets import QApplication, QWidget
 
@@ -120,6 +120,17 @@ def _get_tooltip_theme() -> dict:
     }
 
 
+def _max_tip_text_width() -> int:
+    """tooltip 单行文本最大宽度：取当前主窗口宽度，拿不到则兜底屏幕宽 1/3。"""
+    w = QApplication.activeWindow()
+    if w is not None and w.width() >= 200:
+        return w.width() - 24  # 留少量余量，避免 tooltip 贴满窗口宽
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        return max(240, screen.availableGeometry().width() // 3)
+    return 360
+
+
 def _get_tooltip_font() -> QFont:
     """获取 tooltip 字体（跟随用户设置）。"""
     try:
@@ -195,6 +206,7 @@ class SimpleHoverTooltip(QWidget):
         self._padding_h: int = 8
         self._padding_v: int = 4
         self._border_radius: int = 6
+        self._wrap_w: Optional[int] = None  # 非空表示文本已超限折行，值为折行宽度
 
         self._refresh_theme()
         if not transient:
@@ -242,8 +254,17 @@ class SimpleHoverTooltip(QWidget):
         lines = self._text.split("\n") if self._text else [""]
         max_w = max((fm.width(line) for line in lines), default=0)
         line_h = fm.lineSpacing()  # 含行间距，多行不挤
-        w = max_w + self._padding_h * 2
-        h = line_h * len(lines) + self._padding_v * 2
+        limit = _max_tip_text_width()
+        if max_w > limit:
+            # 超限：按限宽折行重算尺寸（绘制端用同一折行规则）
+            self._wrap_w = limit
+            rect = fm.boundingRect(QRect(0, 0, limit, 0), Qt.TextWordWrap, self._text)
+            w = limit + self._padding_h * 2
+            h = rect.height() + self._padding_v * 2
+        else:
+            self._wrap_w = None
+            w = max_w + self._padding_h * 2
+            h = line_h * len(lines) + self._padding_v * 2
         self.setFixedSize(max(w, 20), max(h, 20))
 
     def show_above(self, target: QWidget):
@@ -300,10 +321,18 @@ class SimpleHoverTooltip(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(rect, r, r)
 
-        # 文字（逐行绘制，行间距与 _recalc_size 一致）
+        # 文字（逐行绘制，行间距与 _recalc_size 一致；超限折行走整体 drawText）
         if self._text:
             painter.setPen(self._tc)
             painter.setFont(self._font)
+            if self._wrap_w is not None:
+                # 折行分支：与 _recalc_size 同宽度同规则，交由 Qt 折行
+                text_rect = QRect(self._padding_h, self._padding_v,
+                                  self._wrap_w, self.height() - self._padding_v * 2)
+                painter.drawText(text_rect,
+                                 Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap,
+                                 self._text)
+                return
             lines = self._text.split("\n")
             fm = QFontMetrics(self._font)
             line_h = fm.lineSpacing()
