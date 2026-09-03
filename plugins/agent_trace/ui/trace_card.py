@@ -293,8 +293,14 @@ class TraceCardWidget(QWidget):
         except Exception as e:
             logger.warning(f"[agent_trace] 订阅 EV_TAB_SWITCHED 失败: {e}")
 
-    def _on_tab_switched(self, _payload: Dict[str, Any]) -> None:
+    def _on_tab_switched(self, payload: Dict[str, Any]) -> None:
         if not self.isVisible():
+            return
+        # 🚀 同窗口切换零动作：collector 常驻且由 backend 信号驱动同步（切走
+        # 也在记 timing），数据不会过期；主题/字体未变，重刷样式与全量投影
+        # 纯冗余（长会话 _project_messages 全量遍历是切标签卡顿主源之一）。
+        wid = str(payload.get("window_id") or "")
+        if wid and wid == self._active_wid:
             return
         self._refresh_context()
 
@@ -314,7 +320,18 @@ class TraceCardWidget(QWidget):
         if not ctx:
             return
         self._ctx = dict(ctx)
-        self._apply_latest_theme()
+        # 🚀 主题/字体指纹未变时跳过全量样式重刷：QSS 重设会触发全面板重绘，
+        # 切标签/重复 showEvent 的高频路径纯冗余；主题切换时指纹变化才真刷。
+        fp = (
+            tuple(sorted((k, str(v)) for k, v in (ctx.get("colors") or {}).items())),
+            bool(ctx.get("is_dark", True)),
+            int(ctx.get("font_size") or 13),
+            str(ctx.get("font_family") or ""),
+        )
+        theme_changed = fp != getattr(self, "_theme_fp", None)
+        self._theme_fp = fp
+        if theme_changed:
+            self._apply_latest_theme()
         main_widget = self._ctx.get("main_widget")
         if main_widget is not None:
             self._switch_collector(main_widget)
@@ -388,7 +405,8 @@ class TraceCardWidget(QWidget):
         """切换到目标窗口的常驻 collector（同窗口幂等）。"""
         wid = getattr(main_widget, "_window_id", "") or ""
         if wid and wid == self._active_wid and self._collector is not None:
-            self._collector.refresh()
+            # collector 常驻且由 backend 信号驱动同步（切走也在记 timing），
+            # 数据不过期，无需 refresh 全量投影（长会话投影是切换卡顿主源之一）
             return
 
         self._unbind_collector_signals()
