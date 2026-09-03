@@ -5559,6 +5559,11 @@ class CodeWebViewer(QWebEngineView):
                         // 被抹成 0（上滚态卡顶）/被末尾置底拉到固定底部。
                         var _cpEl = document.getElementById('content-placeholder');
                         var _cpPrevTop = _cpEl ? _cpEl.scrollTop : 0;
+                        // 🐛 修复（流式滚动位置重置）：同步保存工具区 scrollTop——
+                        // reorganizeContent 增删/重排块导致 scrollHeight 变化时
+                        // scrollTop 被钳制，位置丢失；恢复点见下方 _tcEl0 块。
+                        var _tcEl0 = document.getElementById('tool-content');
+                        var _tcPrevTop0 = _tcEl0 ? _tcEl0.scrollTop : 0;
                         // ── 平滑过渡：新内容以轻微透明度淡入，替代生硬闪烁 ──
                         // 在全量 DOM 替换前设 opacity 略低，替换后在 rAF 中恢复全透明，
                         // CSS transition 驱动平滑淡入效果，减轻 innerHTML 重建的视觉突兀感。
@@ -5704,6 +5709,19 @@ class CodeWebViewer(QWebEngineView):
                             if (_cpEl2.scrollTop !== _cpTarget) {{
                                 _cpEl2._progScroll = true;
                                 _cpEl2.scrollTop = _cpTarget;
+                            }}
+                        }}
+                        // 🐛 修复（流式滚动位置重置）：恢复工具区滚动位置（钳制补偿）。
+                        // save/restore 包裹场景下此处恢复的是中间态（流式块尚未
+                        // restore 回来，scrollHeight 偏小），外层 save/restore 会做
+                        // 最终恢复，两层取 min 不冲突；裸 updateContent 路径（无活跃
+                        // 工具 DOM）此处即最终恢复。
+                        if (_tcEl0 && _tcPrevTop0 > 0) {{
+                            var _tcMax0 = Math.max(0, _tcEl0.scrollHeight - _tcEl0.clientHeight);
+                            var _tcTarget0 = Math.min(_tcPrevTop0, _tcMax0);
+                            if (_tcEl0.scrollTop !== _tcTarget0) {{
+                                _tcEl0._progScroll = true;
+                                _tcEl0.scrollTop = _tcTarget0;
                             }}
                         }}
 
@@ -6553,20 +6571,42 @@ class CodeWebViewer(QWebEngineView):
                 // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
                 document.getElementById('tool-content')?.addEventListener('scroll', function() {{
                     var tc = this;
+                    // 🐛 修复（流式滚动位置重置）：updateContent / save-restore 的 DOM
+                    // 操作窗口内 scrollTop 被钳制产生的程序性 scroll 事件（异步派发
+                    // 到达时 _suppressScrollEvent 已复位）不得误判为用户滚动——否则
+                    // 钳制位置恰在底部附近时 _userScrolledUp 被误复位 → 跟随重新激活
+                    // → 后续每次流式更新强制拉底，用户阅读位置反复丢失。与
+                    // #content-placeholder 监听的 _suppressScrollEvent 抑制对称。
+                    if (window._suppressScrollEvent) return;
                     // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
                     if (tc._progScroll) {{ tc._progScroll = false; return; }}
                     var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
                     tc._userScrolledUp = !atBottom;
                     if (atBottom) tc._userScrolledUp = false;
                 }});
+                // 🐛 修复（流式滚动位置重置）：wheel 事件同步标记上滚意图——scroll
+                // 事件异步派发，与流式 JS（_scrollToolContentToBottom）存在竞争窗口：
+                // 用户滚轮后 scroll 未派发，流式 JS 判 _userScrolledUp=false 抢先拉底
+                // 覆盖阅读位置。对齐 #content-placeholder 的 wheel 修复模式。
+                document.getElementById('tool-content')?.addEventListener('wheel', function(e) {{
+                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
+                        this._userScrolledUp = true;
+                    }}
+                }}, {{passive: true}});
                 // 任务列表滚动跟踪：与工具区同款（程序滚动/重建不算用户行为）
                 document.getElementById('todo-content')?.addEventListener('scroll', function() {{
                     var td = this;
+                    if (window._suppressScrollEvent) return;
                     if (td._progScroll) {{ td._progScroll = false; return; }}
                     var atBottom = Math.abs(td.scrollHeight - td.scrollTop - td.clientHeight) < 30;
                     td._userScrolledUp = !atBottom;
                     if (atBottom) td._userScrolledUp = false;
                 }});
+                document.getElementById('todo-content')?.addEventListener('wheel', function(e) {{
+                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
+                        this._userScrolledUp = true;
+                    }}
+                }}, {{passive: true}});
                 {_STREAMING_DOCK_JS}
 
                 // ===== 流式工具块：移除超时自动标记 ====
@@ -7556,6 +7596,11 @@ class CodeWebViewer(QWebEngineView):
             # "所有思考在前、所有工具在后"（坞态归位瞬间错乱）。
             "window.__pendingStreamFloors=[];"
             f"var _tc=document.getElementById('{_target_id}');"
+            # 🐛 修复（流式滚动位置重置）：save 会清空 #tool-content（el.remove()）
+            # → scrollHeight 骤减 → scrollTop 被浏览器钳制（常归 0），restore 后
+            # 无恢复逻辑 → 阅读态位置丢失（停在顶部，表现为滚动位置被重置）。
+            # save 前记录钳制前位置，restore 后恢复（见尾部 _tcPrevTop 块）。
+            "var _tcPrevTop=(_tc&&_tc.scrollHeight>_tc.clientHeight)?_tc.scrollTop:0;"
             # 🆕 修复（简洁模式编辑工具框消失）：save 阶段必须同时覆盖正文容器
             # #content-placeholder——编辑类工具（write/edit/multi_edit 等 _edit_tools() 派生）
             # 的流式/完成块由 JS 注入到正文（L9328 _stream_target），简洁模式下
@@ -7635,6 +7680,15 @@ class CodeWebViewer(QWebEngineView):
             "_home.appendChild(_bk);"
             "}}})"
             "}}"
+            # 🐛 修复（流式滚动位置重置）：恢复钳制前的工具区滚动位置（打
+            # _progScroll 吞掉恢复赋值触发的 scroll 事件，防止误判用户滚动），
+            # 随后 _scrollToolContentToBottom 仍按跟随态决定是否拉底——阅读态
+            # 保持原位，跟随态照常置底，两者不再互相覆盖。
+            "if(_tc&&_tcPrevTop>0){"
+            "var _tcMax=Math.max(0,_tc.scrollHeight-_tc.clientHeight);"
+            "var _tcTarget=Math.min(_tcPrevTop,_tcMax);"
+            "if(_tc.scrollTop!==_tcTarget){_tc._progScroll=true;_tc.scrollTop=_tcTarget;}"
+            "}"
             # 🐛 修复：save-restore 恢复块后工具区自动滚底
             "if(typeof _scrollToolContentToBottom==='function')_scrollToolContentToBottom();"
             "if(window._toolCompactMode){"
@@ -13091,7 +13145,7 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
         if more_btn:
             more = (
                 f'<span class="context-tag session-header-more" data-type="{escape(more_btn)}" '
-                f'data-content="" title="打开右侧工作台的历史会话页">全部 ›</span>'
+                f'data-content="">全部 ›</span>'
             )
         return (
             f'<div class="session-section">'

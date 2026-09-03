@@ -1190,7 +1190,7 @@ class TabManagerWindow(FramelessWindow):
                     ops = backend.file_recorder.get_all_operations_for_session(session_id)
             except Exception:
                 ops = []
-            panel.update_artifacts(ops)
+            panel.update_artifacts(ops, session_key=session_id)
         # 任务：优先窗口缓存（todowrite 结果联动），缺失回退 tool_executor 实时读
         todos = getattr(win, "_latest_todos", None)
         if not todos and backend is not None and getattr(backend, "_tool_executor", None) is not None:
@@ -1199,6 +1199,37 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 todos = []
         panel.update_todos(todos or [])
+
+    def _deferred_workbench_refresh(self, win, saved_tab) -> None:
+        """切标签后的工作台数据刷新（延迟一帧执行，见 _on_tab_selected）
+
+        含刷新后的页签恢复（refresh_workbench 可能因历史页保持/插件页
+        reconcile 改变当前页，故恢复放在其之后）。仅处理窗口显式记忆过的
+        页签；未记忆过的窗口保持现状不跳页。★ 记忆的是 tab_id（见
+        _remember_workbench_tab）：按 id 在当前页签集合中重新定位，找不到
+        （页签已卸载）则保持现状，不越界跳页也不把全部按钮高亮熄灭。
+        """
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None or not self.is_workbench_visible():
+            return
+        try:
+            if win is None or win not in self._windows:
+                return  # 延迟期间目标标签已被关闭
+        except RuntimeError:
+            return
+        self.refresh_workbench()
+        if saved_tab is None:
+            return
+        try:
+            if isinstance(saved_tab, int):
+                # 旧版按 index 记忆的兼容（本次修复前写入的存量值）
+                saved_tab = panel._tab_ids[saved_tab] if 0 <= saved_tab < len(panel._tab_ids) else None
+            if saved_tab is not None:
+                idx = panel._tab_id_index(saved_tab)
+                if idx is not None and panel.current_tab() != idx:
+                    panel.set_current_tab(idx)
+        except RuntimeError:
+            pass
 
     def _on_workbench_working_dir_changed(self, file_path: str) -> None:
         """工作树页内工作目录变更 → 转发给当前活跃窗口
@@ -3139,25 +3170,13 @@ class TabManagerWindow(FramelessWindow):
                 if saved_visible is not None and self.is_workbench_visible() != bool(saved_visible):
                     self.set_workbench_visible(bool(saved_visible), animate=False)
                 if self.is_workbench_visible():
-                    self.refresh_workbench()
-                    # 恢复该窗口上次停留的工作台页签（refresh_workbench 可能因
-                    # 历史页保持/插件页 reconcile 改变当前页，故恢复放在其之后）。
-                    # 仅处理窗口显式记忆过的页签；未记忆过的窗口保持现状不跳页。
-                    # ★ 记忆的是 tab_id（见 _remember_workbench_tab）：按 id 在
-                    # 当前页签集合中重新定位，找不到（页签已卸载）则保持现状，
-                    # 不越界跳页也不把全部按钮高亮熄灭。
-                    if saved_tab is not None:
-                        try:
-                            panel = self.workbench_panel
-                            if isinstance(saved_tab, int):
-                                # 旧版按 index 记忆的兼容（本次修复前写入的存量值）
-                                saved_tab = panel._tab_ids[saved_tab] if 0 <= saved_tab < len(panel._tab_ids) else None
-                            if saved_tab is not None:
-                                idx = panel._tab_id_index(saved_tab)
-                                if idx is not None and panel.current_tab() != idx:
-                                    panel.set_current_tab(idx)
-                        except RuntimeError:
-                            pass
+                    # 🚀 数据刷新延迟一帧：setCurrentWidget 先完成目标窗口渲染，
+                    # 工作台全量刷新（产物/任务/工作树/历史换挂）在下一帧执行，
+                    # 切标签的感知延迟不再叠加工作台刷新成本
+                    QTimer.singleShot(
+                        0,
+                        lambda w=win, sv=saved_tab: self._deferred_workbench_refresh(w, sv),
+                    )
 
     def _on_tab_close_requested(self, index: int):
         """标签关闭按钮回调：按索引关闭单个窗口"""

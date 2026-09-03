@@ -462,14 +462,32 @@ class TraceCardWidget(QWidget):
             return []
         return self._collector.visible_records
 
+    def _stable(self) -> List[TraceRecord]:
+        """纯落盘投影（不含 tail）—— turn_list 的索引空间基准。
+
+        ⚠️ collector 的增量信号（appended/updated）都发这个空间的索引；
+        turn_list._records 若混入 tail（visible_records），tail 每增减一次
+        索引就整体漂移，点列表行传给详情的 idx 从此对不上（「左侧选中 A
+        右侧显示 B」的根因）。
+
+        ⚠️ 用 ``records`` 而不是自建属性：插件热重载时 hub 常驻的 collector
+        可能还是旧类实例（没有新增的 property），访问新属性直接 AttributeError。
+        ``records`` 从旧版起就存在且语义相同（纯落盘投影）。
+        """
+        if self._collector is None:
+            return []
+        return self._collector.records
+
     def _pull_records(self) -> None:
         """全量推送（首次显示 / reset / 切换标签页）。"""
         vis = self._visible()
+        stable = self._stable()
         self._timeline.set_records(vis)
-        self._turn_list.set_records(vis)
+        self._turn_list.set_records(stable)
         self._sync_bounds(vis)
         # ⚠️ 先 clear 再 set_records：clear() 会把 _records 清空并回到 idle 态，
         # 反过来写等于把刚推入的数据抹掉（详情面板恒显示"未选中条目"）。
+        # 详情用 vis（含 tail）：列表 idx 是 stable = vis 的前缀，直接对齐。
         self._detail.clear()
         self._detail.set_records(vis)
         self._hide_detail()  # 全量重置后回到无选中态 → 详情收起
@@ -485,8 +503,10 @@ class TraceCardWidget(QWidget):
         self._pull_records()
 
     def _on_records_appended(self, start: int, count: int) -> None:
+        # ⚠️ start/count 是 stable（纯落盘）空间 → 切片也必须用 stable：
+        # vis[start:start+count] 会把 tail 头几条错当增量行插进主列表。
+        self._turn_list.append_records(self._stable()[start : start + count])
         vis = self._visible()
-        self._turn_list.append_records(vis[start : start + count])
         self._timeline.set_records(vis)
         self._sync_bounds(vis)
         self._detail.set_records(vis)

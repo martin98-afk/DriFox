@@ -2359,6 +2359,17 @@ class OpenAIChatWorker(QThread):
                     "echarts": item.get("echarts"),
                     "lsp_diagnostic": item.get("lsp_diagnostic"),
                 }
+                # ⚠️ 轨迹计时字段必须透传：ts_ms / trace_phases 由执行层
+                # _build_result_dict 写入，是 agent_trace 在**重载会话后**恢复
+                # 真实耗时的唯一数据源（运行时 timing 表只存在于内存）。
+                # 这里重建 dict 时漏掉 → 重载后所有工具条目耗时退化成
+                # 「下一条起点 − 本条起点」并封顶显示 ≥3.00 s。
+                _ts_ms = item.get("ts_ms")
+                if isinstance(_ts_ms, (int, float)) and not isinstance(_ts_ms, bool) and _ts_ms > 0:
+                    tool_result_map[tc_id]["ts_ms"] = int(_ts_ms)
+                _phases = item.get("trace_phases")
+                if isinstance(_phases, dict) and _phases:
+                    tool_result_map[tc_id]["trace_phases"] = dict(_phases)
 
         # ---- Phase 3: 过滤无结果的 tool_call（原地 del，避免重建 dict） ----
         if tool_result_map:
@@ -2401,7 +2412,12 @@ class OpenAIChatWorker(QThread):
                     asst_msg["reasoning_content"] = reasoning_content
                 if has_model_name:
                     asst_msg["model_name"] = model_name
-
+                # ⚠️ tool_calls assistant 也要落盘本次 API 调用耗时（含 thinking）：
+                # 纯文本回复走 _make_assistant_msg 已带 elapsed_ms，这里漏了
+                # 会导致「思考+决定调工具」的条目在轨迹里耗时为 0 / 拿整轮顶替。
+                _llm_ms = getattr(self, "_last_llm_elapsed_ms", 0.0) or 0.0
+                if _llm_ms > 0:
+                    asst_msg["elapsed_ms"] = round(float(_llm_ms), 1)
                 if asst_msg.get("content") or asst_msg.get("tool_calls"):
                     sequence.append(asst_msg)
 
@@ -2416,7 +2432,7 @@ class OpenAIChatWorker(QThread):
         for tc_id, tool_result in tool_result_map.items():
             if tc_id in added_tool_ids:
                 continue
-            tool_call = tool_call_map.get(tc_id)
+            tool_call = tool_result_map.get(tc_id)
             asst_msg = {"role": "assistant", "timestamp": now_ts}
             if has_reasoning:
                 asst_msg["reasoning_content"] = reasoning_content
@@ -2424,6 +2440,9 @@ class OpenAIChatWorker(QThread):
                 asst_msg["model_name"] = model_name
             if tool_call:
                 asst_msg["tool_calls"] = [tool_call]
+            _llm_ms = getattr(self, "_last_llm_elapsed_ms", 0.0) or 0.0
+            if _llm_ms > 0:
+                asst_msg["elapsed_ms"] = round(float(_llm_ms), 1)
             if asst_msg.get("tool_calls"):
                 sequence.append(asst_msg)
             sequence.append(tool_result)

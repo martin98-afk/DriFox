@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QRect, QRectF, Qt, pyqtSignal
+from PyQt5.QtCore import QTimer, QRect, QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFrame,
@@ -56,6 +56,7 @@ _SLOT_OF_TAB = {
     "system": "text",
     "content": "text",
     "preview": "text",
+    "thinking": "text",
     "request": "request",
     "response": "response",
     "raw": "raw",
@@ -121,6 +122,9 @@ class _KVPage(QScrollArea):
         self._layout.setSpacing(0)
         self._layout.addStretch(1)
         self.setWidget(body)
+        # 上次填充签名：recordsUpdated 高频触发 set_rows，内容没变就跳过，
+        # 否则行 widget 重建会把 QScrollArea 滚动位置打回顶部。
+        self._last_sig: Optional[Tuple[Tuple[Tuple[str, str], ...], Optional[Tuple[float, float, float]]]] = None
 
     def set_palette(self, pal: ThemePalette, base_px: int) -> None:
         self._pal = pal
@@ -129,6 +133,10 @@ class _KVPage(QScrollArea):
 
     def set_rows(self, rows: List[Tuple[str, str]], timing: Optional[Tuple[float, float, float]] = None) -> None:
         """填充键值行；``timing`` = (start_rel_ms, duration_ms, total_ms) 时显示时间条。"""
+        sig = (tuple(rows), timing)
+        if sig == self._last_sig:
+            return  # 内容没变 → 不重建（保持滚动位置，修「刷新即置顶」）
+        self._last_sig = sig
         self._clear_rows()
         if timing is not None:
             self._bar = _TimingBar(self._body)
@@ -149,8 +157,12 @@ class _KVPage(QScrollArea):
             v.setTextInteractionFlags(Qt.TextSelectableByMouse)
             rl.addWidget(k, 0, Qt.AlignTop)
             rl.addWidget(v, 1)
-            self._layout.addWidget(row)
-            self._layout.addSpacing(6)
+            # ⚠️ 行必须插到 stretch **之前**（stretch 恒在末位兜底）：
+            # 直接 addWidget 会排到 stretch 后面，整块内容被推到底部
+            # （「Timing 页内容贴底、上面一大片空白」的根因）。
+            at = max(0, self._layout.count() - 1)
+            self._layout.insertWidget(at, row)
+            self._layout.insertSpacing(at + 1, 6)
             self._rows.append((row, k, v))
         self._apply_theme()
 
@@ -303,6 +315,12 @@ class _ToolsPage(QWidget):
                 }
             )
         items.sort(key=lambda d: d["name"])
+        # 签名去重：_fill_active_tab 每次切到 Tools tab 都会调这里，
+        # schema 没变就别重建（保住用户在左列表的选中行和滚动位置）。
+        sig = tuple((it["name"], it["params"], len(it["json"])) for it in items)
+        if sig == getattr(self, "_sig", None):
+            return
+        self._sig = sig
         self._items = items
         self._list.clear()
         for it in items:
@@ -577,8 +595,20 @@ class DetailPanel(QWidget):
         )
 
     def _set_content(self, edit: QPlainTextEdit, text: str) -> None:
-        """填正文 + 同步字体（内容类型变了字体可能要换）。"""
-        edit.setPlainText(text or "")
+        """填正文 + 同步字体（内容类型变了字体可能要换）。
+
+        ⚠️ 内容没变就跳过 setPlainText：QPlainTextEdit.setPlainText 会把滚动
+        位置打回顶部。recordsUpdated（timing 回填）在会话进行中高频触发，
+        无条件重设会让用户正在看的详情「每秒被置顶一次」。
+        内容真变化时也尽力恢复原滚动值（新文档更短时由滚动条自行 clamp）。
+        """
+        text = text or ""
+        if edit.toPlainText() == text:
+            return
+        bar = edit.verticalScrollBar()
+        pos = bar.value()
+        edit.setPlainText(text)
+        QTimer.singleShot(0, lambda: bar.setValue(min(pos, bar.maximum())))
         if _MONO_FOR_JSON:
             edit.setStyleSheet(self._edit_qss(edit))
 
@@ -629,6 +659,10 @@ class DetailPanel(QWidget):
             self._set_content(self._page_text, self._system_prompt_text(rec))
         elif key in ("content", "preview"):
             self._set_content(self._page_text, rec.raw or "（空）")
+        elif key == "thinking":
+            # DeepSeek V4 / GLM-5 等思维链：worker 落盘在 msg["reasoning_content"]，
+            # collector 投影时搬进 meta["reasoning"]。
+            self._set_content(self._page_text, str(rec.meta.get("reasoning") or "").strip() or "（空）")
         elif key == "request":
             self._set_content(self._page_request, self._tool_request(rec))
         elif key == "response":
@@ -648,7 +682,11 @@ class DetailPanel(QWidget):
             return
         rec = self._records[self._current_idx]
 
-        self._rebuild_tabs(_TABS_BY_KIND.get(rec.kind, _TABS_BY_KIND[EntryKind.USER]))
+        # ASSISTANT 带思维链 → 在 Preview 后插入 Thinking tab（没 reasoning 不占位）
+        tabs = list(_TABS_BY_KIND.get(rec.kind, _TABS_BY_KIND[EntryKind.USER]))
+        if rec.kind == EntryKind.ASSISTANT and str(rec.meta.get("reasoning") or "").strip():
+            tabs.insert(1, ("thinking", "Thinking"))
+        self._rebuild_tabs(tuple(tabs))
         # 切换条目类型后原 tab 可能不存在 → 回落到第一个 tab。
         # ⚠️ clear() 会把 currentRouteKey 置空但不发信号，所以**每次重建后都要
         # 显式 setCurrentItem**，否则 segmented 无高亮而 stack 仍停在旧页面。

@@ -311,6 +311,12 @@ class TraceCollector(QObject):
                     if isinstance(output, (int, float)) and output > 0:
                         meta["tokens"] = int(output)
                         meta["tokens_exact"] = True
+                # 思维链（DeepSeek V4 / GLM-5 thinking mode）：worker 落盘在
+                # msg["reasoning_content"]，详情面板靠它出 Thinking tab；
+                # 分段耗时的 reasoning 阶段在 meta["phases"]（worker 落盘）。
+                reasoning = msg.get("reasoning_content")
+                if isinstance(reasoning, str) and reasoning.strip():
+                    meta["reasoning"] = reasoning
 
             if kind == EntryKind.TOOL:
                 tool_call_id = msg.get("tool_call_id") or ""
@@ -373,22 +379,13 @@ class TraceCollector(QObject):
                     if start > 0:
                         end = start
                         start = start - llm_ms / 1000.0
-                else:
-                    # ② 兜底：实时流配对。⚠️ stream_started/stream_finished 是
-                    #    **整个 worker 线程**级别的（executor.py 在 worker.start()
-                    #    后只发一次），一轮含多次工具迭代时只能测到「整轮总时长」，
-                    #    第一条 assistant 会虚高、其余拿不到值 —— 只在没有
-                    #    elapsed_ms 的老消息上用它。
-                    s = None
-                    if assistant_seq >= self._stream_base:
-                        si = assistant_seq - self._stream_base
-                        if si < len(self._streams):
-                            s = self._streams[si]
-                    if s:
-                        if s.get("start"):
-                            start = s["start"]
-                        if s.get("end"):
-                            end = s["end"]
+                # ⚠️ 不再用实时流配对兜底：stream_started/stream_finished 是
+                # **整个 worker 线程**级别的（executor.py 在 worker.start() 后
+                # 只发一次），一轮含多次工具迭代时只有一对 start/end。按序号
+                # 配对会把「整轮总时长」套到单条 assistant 上，实测出现过
+                # 7m41s 的巨型条带覆盖半条时间线、列表里却找不到对应记录。
+                # 没有 elapsed_ms 的历史消息宁可无耗时（— / span 语义），
+                # 也不展示必然错误的值。_streams 仍保留给 tail 防重入用。
                 assistant_seq += 1
                 preview = truncate(raw_text, 140) if raw_text.strip() else ""
                 if not preview and msg.get("tool_calls"):
