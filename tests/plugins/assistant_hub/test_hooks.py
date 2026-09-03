@@ -26,11 +26,21 @@ class _Mgr:
 
     last_on_stop = 0
 
+    def __init__(self):
+        self.session_overrides = {}
+        self.session_map = {}
+
     def active_id(self):
         return "xiaohu-x1"
 
     def has(self, aid):
         return bool(aid)
+
+    def get_session_override(self, sid):
+        return self.session_overrides.get(sid, "")
+
+    def record_session_aid(self, sid, aid):
+        self.session_map[sid] = aid
 
     def get(self, aid):
         return _A()
@@ -99,12 +109,45 @@ def test_on_stop_counts_turn(monkeypatch):
 
     class _Ticker:
         @staticmethod
-        def on_turn_finished():
-            calls.append(1)
+        def on_turn_finished(aid):
+            calls.append(aid)
 
     monkeypatch.setattr(m, "_get_ticker", lambda mgr_: _Ticker())
     out = m.on_stop("Stop", {"current_role": "primary", "session_id": "s1"})
-    assert out == "" and len(calls) == 1
+    assert out == "" and calls == ["xiaohu-x1"]  # 无 override → 主助手
+    assert mgr.session_map == {"s1": "xiaohu-x1"}  # 归属已记录
     # 无活跃助手：不异常
     mgr.active_id = lambda: ""
     assert m.on_stop("Stop", {"current_role": "primary"}) == ""
+
+
+def test_on_stop_uses_session_override(monkeypatch):
+    """临时助手会话：轮次计入临时助手并记录归属，不落主助手。"""
+    mgr = _patch_mgr(monkeypatch)
+    mgr.session_overrides["s2"] = "b-1"
+    calls = []
+
+    class _Ticker:
+        @staticmethod
+        def on_turn_finished(aid):
+            calls.append(aid)
+
+    monkeypatch.setattr(m, "_get_ticker", lambda mgr_: _Ticker())
+    out = m.on_stop("Stop", {"current_role": "primary", "session_id": "s2"})
+    assert out == "" and calls == ["b-1"]
+    assert mgr.session_map == {"s2": "b-1"}
+
+
+def test_on_stop_non_primary_noop(monkeypatch):
+    mgr = _patch_mgr(monkeypatch)
+    calls = []
+
+    class _Ticker:
+        @staticmethod
+        def on_turn_finished(aid):
+            calls.append(aid)
+
+    monkeypatch.setattr(m, "_get_ticker", lambda mgr_: _Ticker())
+    out = m.on_stop("Stop", {"current_role": "subagent", "session_id": "s1"})
+    assert out == "" and calls == []
+    assert mgr.session_map == {}

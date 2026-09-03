@@ -10742,7 +10742,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_node_preview()
         QTimer.singleShot(100, self._sync_node_preview_to_last)
         self._refresh_context_usage_indicator()
-        QTimer.singleShot(500, lambda: gc.collect())
+        # gc.collect(1)：仅扫年轻代（微秒级）。全代 collect 会 stop-the-world 20~80ms，
+        # 是切会话/翻历史顿挫的根因（与 chat_worker MEM_DIAG 先例同源）
+        QTimer.singleShot(500, lambda: gc.collect(1))
 
     def _has_more_history_batches(self) -> bool:
         return self._visible_batch_start > 0
@@ -10980,7 +10982,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     f"[virtual-scroll] 懒渲染 {lazy_render_count}，回收 {recycled_count} 个离屏批次（含数据清理）"
                 )
                 if recycled_count > 0:
-                    QTimer.singleShot(100, lambda: gc.collect())
+                    # 同上：降为年轻代回收，避免滚动中全代 GC 停顿
+                    QTimer.singleShot(100, lambda: gc.collect(1))
 
         finally:
             self._is_virtual_recycling = False

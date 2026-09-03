@@ -60,11 +60,24 @@ def _enabled_or_reload(mgr, aid: str, a) -> bool:
     return a2 is not None and getattr(a2, "experience_enabled", False)
 
 
+def _resolve_aid(mgr, tool_ctx) -> str:
+    """经验归属助手：按工具执行会话解析（override 优先，否则主助手）。"""
+    sid = ""
+    try:
+        sid = str((tool_ctx or {}).get("session_id") or "")
+    except Exception:
+        sid = ""
+    try:
+        return mgr.resolve_session_aid(sid)
+    except Exception:
+        return mgr.active_id()
+
+
 def _recall_impl(tool_ctx, **kw):
     mgr = _get_manager()
     if mgr is None:
         return ToolResult(False, error="assistant_manager 不可用")
-    aid = mgr.active_id()
+    aid = _resolve_aid(mgr, tool_ctx)
     if not aid or not mgr.has(aid):
         return ToolResult(True, content="当前没有激活的助手。")
     a = mgr.get(aid)
@@ -83,7 +96,7 @@ def _record_impl(tool_ctx, **kw):
     mgr = _get_manager()
     if mgr is None:
         return ToolResult(False, error="assistant_manager 不可用")
-    aid = mgr.active_id()
+    aid = _resolve_aid(mgr, tool_ctx)
     if not aid or not mgr.has(aid):
         return ToolResult(True, content="当前没有激活的助手。")
     a = mgr.get(aid)

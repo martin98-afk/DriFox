@@ -19,6 +19,70 @@ def _fresh_manager(tmp_path):
     return m.AssistantManager.get_instance(root_dir=str(tmp_path / "hub"))
 
 
+# ── 会话归属映射（记忆素材过滤数据源）──
+
+
+def test_session_map_record_and_resolve(tmp_path):
+    mgr = _fresh_manager(tmp_path)
+    a1 = mgr.create("主助手")
+    mgr.set_primary(a1.id)
+    a2 = mgr.create("临时助手")
+    # 无记录回落主助手
+    assert mgr.resolve_session_aid("s-none") == a1.id
+    # 记录后按映射解析
+    mgr.record_session_aid("s1", a1.id)
+    mgr.record_session_aid("s2", a2.id)
+    assert mgr.resolve_session_aid("s1") == a1.id
+    assert mgr.resolve_session_aid("s2") == a2.id
+    # 空参数防御
+    mgr.record_session_aid("", a1.id)
+    assert mgr.resolve_session_aid("") == a1.id
+
+
+def test_session_map_persist_and_reload(tmp_path):
+    mgr = _fresh_manager(tmp_path)
+    a1 = mgr.create("主助手")
+    mgr.set_primary(a1.id)
+    a2 = mgr.create("临时助手")
+    mgr.record_session_aid("s1", a1.id)
+    mgr.record_session_aid("s2", a2.id)
+    assert (tmp_path / "hub" / "_session_map.json").exists()
+    # 重载后映射保留
+    mgr2 = _fresh_manager(tmp_path)
+    assert mgr2.resolve_session_aid("s2") == a2.id
+
+
+def test_session_map_deleted_assistant_falls_back(tmp_path):
+    mgr = _fresh_manager(tmp_path)
+    a1 = mgr.create("主助手")
+    mgr.set_primary(a1.id)
+    a2 = mgr.create("将删助手")
+    mgr.record_session_aid("s1", a2.id)
+    mgr.delete(a2.id)
+    # 归属助手已删 → 回落主助手
+    assert mgr.resolve_session_aid("s1") == a1.id
+
+
+def test_set_session_override_records_map(tmp_path):
+    mgr = _fresh_manager(tmp_path)
+    mgr.create("主助手")
+    a2 = mgr.create("临时助手")
+    mgr.set_session_override("s9", a2.id)
+    assert mgr.resolve_session_aid("s9") == a2.id
+    mgr.set_session_override("s9", "")  # 清除 override
+    # override 清除不影响归属映射（归属以最后使用为准）
+
+
+def test_session_map_trimmed_when_overflow(tmp_path):
+    mgr = _fresh_manager(tmp_path)
+    mgr.create("主助手")
+    for i in range(1100):
+        mgr.record_session_aid(f"s{i}", mgr.active_id())
+    assert len(m.AssistantManager._session_map) <= 1000
+    # 最旧的被裁剪
+    assert "s0" not in m.AssistantManager._session_map
+
+
 def test_yuan_migration_on_load(tmp_path):
     aid_dir = tmp_path / "hub" / "legacy"
     aid_dir.mkdir(parents=True)

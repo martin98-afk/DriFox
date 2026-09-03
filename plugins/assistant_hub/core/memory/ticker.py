@@ -77,9 +77,15 @@ class MemoryTicker:
             pass
 
     # ── 对外入口（hook 调用）──
-    def on_turn_finished(self) -> None:
-        """Stop hook：活跃助手轮次 +1；每 10 轮触发轻量编译链。"""
-        aid = self._mgr.active_id()
+    def on_turn_finished(self, aid: Optional[str] = None) -> None:
+        """Stop hook：当前会话助手轮次 +1；每 10 轮触发轻量编译链。
+
+        aid 由调用方按会话归属解析（override 优先，否则主助手）；
+        缺省回落 active_id（兼容旧调用）。计数全局共享（只控制触发
+        频率，不影响归属）。
+        """
+        if not aid:
+            aid = self._mgr.active_id()
         if not aid or not self._mgr.has(aid):
             return
         count = int(self._turn_state.get("count", 0)) + 1
@@ -93,16 +99,23 @@ class MemoryTicker:
             self._save_turn_state()
 
     def daily_maintenance(self, logical_date: str) -> None:
-        """逻辑日批（daemon 线程检测日期变化后调用；每逻辑日一次）。"""
+        """逻辑日批（daemon 线程检测日期变化后调用；每逻辑日一次）。
+
+        遍历全部开启记忆的助手各跑一遍：各助手素材经归属过滤后
+        互不重叠，无新增的助手由 compile_chain(require_new) 短路。
+        """
         if self._last_daily_date == logical_date:
             return
         self._last_daily_date = logical_date
         self._turn_state["last_daily_date"] = logical_date
         self._save_turn_state()
-        aid = self._mgr.active_id()
-        if not aid or not self._mgr.has(aid):
-            return
-        self._enqueue(f"daily:{aid}", self._run_daily, aid, logical_date)
+        for a in self._mgr.list_assistants_sorted_by_stable():
+            aid = getattr(a, "id", "")
+            if not aid or not self._mgr.has(aid):
+                continue
+            if not getattr(a, "memory_enabled", False):
+                continue
+            self._enqueue(f"daily:{aid}", self._run_daily, aid, logical_date)
 
     # ── 工作项 ──
     def _run_light(self, aid: str) -> None:
@@ -112,13 +125,20 @@ class MemoryTicker:
             pass  # LLM 不可用等：静默（compile_chain 内部已降级）
 
     def _run_daily(self, aid: str, logical_date: str) -> None:
+        today_changed = True  # LLM 不可用等异常时保持原行为：后续步骤照常尝试
         try:
-            # 顺序铁律：compile_chain(False) 内部先 daily 后 today
-            self._mgr.compile_chain(aid, light=False)
+            # 顺序铁律：compile_chain(False) 内部先 daily 后 today；
+            # require_new=True：今日无新增时短路 facts（省 LLM 成本）
+            chain = self._mgr.compile_chain(aid, light=False, require_new=True)
+            if (chain or {}).get("ok") and chain.get("steps", {}).get("compile_today") is not None:
+                today_changed = bool(chain["steps"]["compile_today"].get("changed"))
         except Exception:
-            pass
+            chain = {}
         a = self._mgr.get(aid)
         if a is None:
+            return
+        # 今日确无新增：素材无变化，dream/经验反思无需跑
+        if not today_changed:
             return
         if getattr(a, "dream_auto_enabled", False):
             try:
@@ -163,8 +183,8 @@ class MemoryTicker:
             try:
                 today = self._logical_today()
                 if today and today != self._last_daily_date:
-                    # 只有存在活跃助手时才触发（内部再校验）
-                    if self._mgr.active_id():
+                    # 存在助手才触发（内部再按 memory_enabled 过滤）
+                    if self._mgr.list_assistants_sorted_by_stable():
                         self.daily_maintenance(today)
             except Exception:
                 pass

@@ -226,6 +226,10 @@ def on_pre_user(event: str, context: Dict[str, Any]) -> str:
 def on_stop(event: str, context: Dict[str, Any]) -> str:
     """Stop hook：主对话每轮结束 → MemoryTicker 计数（驱动记忆传送带）。
 
+    归属：会话级临时助手优先（override），否则主助手；每轮把
+    sid→aid 写入归属映射，供记忆传送带过滤素材，保证各助手
+    记忆互相独立。
+
     恒返回空串（不向对话注入任何内容）。
     """
     try:
@@ -234,12 +238,17 @@ def on_stop(event: str, context: Dict[str, Any]) -> str:
         mgr = _get_manager()
         if mgr is None:
             return ""
-        aid = mgr.active_id()
+        sid = str((context or {}).get("session_id") or "")
+        aid = mgr.get_session_override(sid) if sid else ""
+        if not aid:
+            aid = mgr.active_id()
         if not aid or not mgr.has(aid):
             return ""
+        if sid:
+            mgr.record_session_aid(sid, aid)
         ticker = _get_ticker(mgr)
         if ticker is not None:
-            ticker.on_turn_finished()
+            ticker.on_turn_finished(aid)
     except Exception as e:
         logger.debug(f"[assistant_hub.hooks] Stop 计数失败: {e}")
     return ""
