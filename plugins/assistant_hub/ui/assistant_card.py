@@ -139,10 +139,13 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
             row.addWidget(cancel)
             row.addWidget(ok)
             v.addLayout(row)
+            # ⚠ MaskDialogBase 默认 _hBoxLayout.addWidget 无对齐参数 → widget
+            # 被拉伸至 dialog 全屏（此前 setFixedSize 只是硬钳制侥幸正常）。
+            # 显式 AlignCenter 让卡片按内容自适应并居中；勿 removeWidget（钉左上角）。
+            self._hBoxLayout.addWidget(self.widget, 0, Qt.AlignCenter)
             # 宽度固定 420；高度按内容自适应（调用点均为显式换行的 2-3 行短句，sizeHint 高度准确）
             self.widget.setFixedWidth(420)
             self.widget.setFixedHeight(self.widget.sizeHint().height() + 40)
-            # 对齐 plugin-marketplace 模式：widget 留在 _hBox 布局自动居中，不手动干预。
 
         def _yes_accept(self):
             self._yes = True
@@ -638,8 +641,16 @@ class AssistantCardWidget(QWidget):
         aid = self._active_aid
         if not aid:
             return
-        items = [(p, c) for p, c in self._mgr.read_pinned(aid) if p != pid]
-        self._mgr.write_pinned(aid, items)
+        items = list(self._mgr.read_pinned(aid))
+        content = next((c for p, c in items if p == pid), "")
+        preview = content if len(content) <= 30 else content[:30] + "…"
+        if not _confirm_dialog(
+            _host_window() or self.window(),
+            "删除人工提示",
+            f"确定删除「{preview}」？\n该操作不可撤销。",
+        ):
+            return
+        self._mgr.write_pinned(aid, [(p, c) for p, c in items if p != pid])
         self._mgr.invalidate_context(aid)
         self._reload_pinned(aid)
 
