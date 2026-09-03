@@ -4256,7 +4256,6 @@ class CodeWebViewer(QWebEngineView):
                     align-items: center;
                     justify-content: center;
                     border-radius: 9px;
-                    background: var(--accent-soft-strong);
                     font-size: 14px;
                     line-height: 1;
                 }}
