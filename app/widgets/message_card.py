@@ -570,6 +570,58 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
     return md_text
 
 
+def _protect_inline_svg_blocks(md_text: str) -> str:
+    """把独立成段的多行内联 <svg> 包进块级 <div>，防止 markdown 撕碎 SVG 结构。
+
+    背景：模型按 visualization 协议内联输出多行 SVG 时，Python-Markdown 会把
+    <style>/<defs> 等块级子元素当段落分隔符，把 SVG 腰斩成多个 <p> 碎片，
+    nl2br 还会在 SVG 行间插 <br>，浏览器无法渲染（表现为"SVG 画不出来"）。
+    包一层 <div> 后 Python-Markdown 对块级容器内部原样保留，结构完整透传。
+
+    规则：
+    - 跳过 ``` 围栏内的行（围栏 SVG 由 _wrap_code_blocks_with_copy_button_web 透传）
+    - 行首 <svg 开、</svg> 行闭；单行自闭合的 SVG 不动（无撕碎风险）
+    - 未闭合的 SVG（流式中间态）保持原样，闭合后自然走包裹路径
+    """
+    if "<svg" not in md_text.lower():
+        return md_text
+
+    lines = md_text.split("\n")
+    out_lines = []
+    buf: list = []
+    in_svg = False
+    in_fence = False
+    for line in lines:
+        stripped = line.strip()
+        if not in_svg:
+            if stripped.startswith("```"):
+                in_fence = not in_fence
+            if (
+                not in_fence
+                and stripped[:4].lower() == "<svg"
+                and "</svg>" not in stripped.lower()
+            ):
+                in_svg = True
+                buf = [line]
+                continue
+            out_lines.append(line)
+        else:
+            buf.append(line)
+            if "</svg>" in stripped.lower():
+                in_svg = False
+                out_lines.append("")
+                out_lines.append("<div>")
+                out_lines.extend(buf)
+                out_lines.append("</div>")
+                out_lines.append("")
+                buf = []
+                continue
+    if in_svg and buf:
+        # 未闭合：原样还回，交给下一次渲染（流式下一轮或全量重渲）
+        out_lines.extend(buf)
+    return "\n".join(out_lines)
+
+
 def _get_think_icon_html(size: int = 18) -> str:
     """生成思考过程图标的 HTML <img> 标签（主题感知，自动适配深色/浅色模式）"""
     prefix = get_tool_qrc_prefix()
@@ -2037,6 +2089,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
     """
     safe_md = _sanitize_incomplete_markdown(raw_md)
+    safe_md = _protect_inline_svg_blocks(safe_md)
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
@@ -2394,6 +2447,7 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
         该段的 HTML（不含外层容器包裹，供 updateContentAppend 追加）
     """
     safe_md = _sanitize_incomplete_markdown(md_seg)
+    safe_md = _protect_inline_svg_blocks(safe_md)
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)

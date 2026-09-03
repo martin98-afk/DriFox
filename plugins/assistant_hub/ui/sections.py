@@ -13,7 +13,8 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Tuple
 
 from PyQt5.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QFontMetrics
+from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
+from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -111,15 +112,16 @@ def _input_style() -> str:
     """
 
 
-def _btn_style(danger: bool = False, align_left: bool = False) -> str:
+def _btn_style(danger: bool = False, align_left: bool = False, icon_only: bool = False) -> str:
     color = Colors.ERROR if danger else Colors.TEXT_PRIMARY
     align = "text-align: left; padding-left: 12px;" if align_left else ""
+    pad = "padding: 0;" if icon_only else "padding: 4px 16px;"
     return f"""
         QPushButton {{
             color: {color};
             border: 1px solid {Colors.ERROR if danger else Colors.BORDER};
             border-radius: 6px;
-            padding: 4px 16px;
+            {pad}
             {align}
             background: transparent;
             {get_font_family_css()} {font_size_css(11)}
@@ -129,6 +131,30 @@ def _btn_style(danger: bool = False, align_left: bool = False) -> str:
         }}
         QPushButton:disabled {{ opacity: 0.4; }}
     """
+
+
+def _del_btn(size: int) -> "QPushButton":
+    """列表行删除按钮：垃圾桶 SVG 图标（QSvgRenderer 直渲，颜色烧进 SVG）。"""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+        f'fill="none" stroke="{Colors.ERROR}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<polyline points="3 6 5 6 21 6"/>'
+        '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>'
+        '<line x1="10" y1="11" x2="10" y2="17"/>'
+        '<line x1="14" y1="11" x2="14" y2="17"/>'
+        "</svg>"
+    )
+    renderer = QSvgRenderer(svg.encode("utf-8"))
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    renderer.render(p)
+    p.end()
+    btn = QPushButton()
+    btn.setIcon(QIcon(pm))
+    btn.setIconSize(pm.size())
+    return btn
 
 
 def _sep() -> QFrame:
@@ -723,10 +749,10 @@ class PinnedSection(_Section):
             edit.setStyleSheet(_input_style())
             edit.editingFinished.connect(lambda pid=pid, e=edit: self.pinEdited.emit(pid, e.text().strip()))
             h.addWidget(edit, 1)
-            del_btn = QPushButton("×")
+            del_btn = _del_btn(14)
             del_btn.setFixedSize(26, 26)
             del_btn.setToolTip("删除这条提示")
-            del_btn.setStyleSheet(_btn_style(danger=True))
+            del_btn.setStyleSheet(_btn_style(danger=True, icon_only=True))
             del_btn.clicked.connect(lambda _checked=False, pid=pid: self.pinDeleteRequested.emit(pid))
             h.addWidget(del_btn)
             self._pin_list.addWidget(row)
@@ -924,10 +950,10 @@ class ExperienceSection(_Section):
             btn.setStyleSheet(_btn_style(align_left=True))
             btn.clicked.connect(lambda _c=False, cat=doc["category"]: self.viewCategory.emit(cat))
             row.addWidget(btn, 1)
-            del_btn = QPushButton("×")
+            del_btn = _del_btn(14)
             del_btn.setFixedSize(30, 28)
             del_btn.setToolTip("删除该分类及其全部经验条目")
-            del_btn.setStyleSheet(_btn_style(danger=True))
+            del_btn.setStyleSheet(_btn_style(danger=True, icon_only=True))
             del_btn.clicked.connect(lambda _c=False, cat=doc["category"]: self.deleteCategoryRequested.emit(cat))
             row.addWidget(del_btn)
             self._list_area.addWidget(row_wrap)
@@ -1017,10 +1043,10 @@ class SkillsSection(_Section):
                 lambda on, n=sk["name"]: self.skillToggleRequested.emit(n, on)
             )
             row.addWidget(sw)
-            del_btn = QPushButton("×")
+            del_btn = _del_btn(14)
             del_btn.setFixedSize(30, 28)
             del_btn.setToolTip("删除技能")
-            del_btn.setStyleSheet(_btn_style(danger=True))
+            del_btn.setStyleSheet(_btn_style(danger=True, icon_only=True))
             del_btn.clicked.connect(lambda _c=False, n=sk["name"]: self.skillDeleteRequested.emit(n))
             row.addWidget(del_btn)
             self._list_v.addWidget(row_wrap)
