@@ -202,9 +202,7 @@ class ThemePalette:
         pal = cls(
             is_dark=bool(is_dark),
             text=to_qcolor(c.get("text_primary"), "#E6E9F0" if is_dark else "#1A1F2B"),
-            text_secondary=to_qcolor(
-                c.get("text_secondary"), "#B9C3D4" if is_dark else "rgba(60,70,90,0.75)"
-            ),
+            text_secondary=to_qcolor(c.get("text_secondary"), "#B9C3D4" if is_dark else "rgba(60,70,90,0.75)"),
             text_muted=to_qcolor(c.get("text_muted"), "#8B98AD" if is_dark else "#6B7688"),
             border=to_qcolor(c.get("border"), "#3D4A60" if is_dark else "#D6DCE6"),
             accent=to_qcolor(c.get("accent"), "#66C6FF"),
@@ -580,3 +578,56 @@ def time_bounds(records: list) -> Tuple[float, float]:
     if t1 <= t0:
         t1 = t0 + 1.0
     return t0, t1
+
+
+def merge_overlapping(records: list) -> Tuple[int, int]:
+    """重叠时间区间的并集统计 → ``(总毫秒, 连通段数)``。
+
+    为什么不用「Σ duration_ms」求和（2026-09-03）：
+
+    宿主 chat_worker 落盘时把一次 API 响应里的**每个并行 tool_call 拆成
+    一条独立 assistant 消息**（``_build_response_message_sequence`` 对
+    ``tool_call_marker`` 逐个建条），这些消息共享**同一次 API 调用的
+    elapsed_ms**、同一时刻写入 → 投影出的 N 条 ASSISTANT 区间完全重叠。
+    求和会把同一次调用计时 N 遍（实测 LLM 总时长放大 2-4 倍）；并行执行
+    的工具同理。并集（墙钟口径）才是真实耗时。
+
+    段数 = 合并后的独立区间块数，可当「LLM 调用次数」用：同批拆条的
+    N 条 assistant 完全重叠 → 1 段 = 1 次真实调用。
+
+    口径细节：
+    - ``start_ts <= 0``（无时间）→ 跳过；瞬时条目（end <= start 且非
+      pending，如无 elapsed_ms 的历史消息）不贡献时长，与旧求和口径一致；
+    - in-flight（``is_pending``）按 ``now - start`` 计（与
+      :attr:`TraceRecord.duration_ms` 一致）；
+    - 相接区间（下一段 start == 当前段 end）视为连续 —— 毫秒打点上相接
+      基本只出现在同一次调用链内。
+    """
+    spans: list = []
+    now = time.time()
+    for r in records:
+        s = getattr(r, "start_ts", 0)
+        if s <= 0:
+            continue
+        e = getattr(r, "end_ts", 0)
+        if e <= s:
+            if getattr(r, "is_pending", False):
+                spans.append((s, now))
+            continue
+        spans.append((s, e))
+    if not spans:
+        return 0, 0
+    spans.sort()
+    total = 0.0
+    segments = 0
+    cs, ce = spans[0]
+    for s, e in spans[1:]:
+        if s > ce:
+            total += ce - cs
+            segments += 1
+            cs, ce = s, e
+        elif e > ce:
+            ce = e
+    total += ce - cs
+    segments += 1
+    return int(total * 1000), segments

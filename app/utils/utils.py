@@ -16,6 +16,7 @@ import os
 import re
 import socket
 import sys
+import time
 import weakref
 from collections import OrderedDict
 from pathlib import Path
@@ -503,6 +504,10 @@ def get_local_skills() -> list:
 # ========== Skills 缓存（性能优化：避免每次 /skill 命令都重读所有 SKILL.md）==========
 _skills_cache: list | None = None
 _skills_cache_key: tuple = ()
+# key 计算的二级 TTL 缓存（见 _compute_skills_cache_key docstring）
+_SKILLS_KEY_TTL = 1.0  # 秒
+_skills_key_cache: tuple | None = None
+_skills_key_cached_at: float = 0.0
 
 
 def _compute_skills_cache_key() -> tuple:
@@ -510,7 +515,17 @@ def _compute_skills_cache_key() -> tuple:
 
     比逐文件 stat 列表更轻：单次扫描 ~2 ms（vs 旧 12 ms）。
     任何 SKILL.md / skill.md 增删改都改 mtime 或 count，自动失效。
+
+    二级 TTL 缓存：key 计算本身要 stat 全部技能目录的 SKILL.md，
+    Windows + 杀软环境下单次可达数十 ms。技能开关切换等短时间
+    密集调用场景（每次 toggle 走 2~3 遍）没必要每遍都真扫盘，
+    1 秒内的重复调用直接复用上次结果；1 秒足以及时感知文件增删改。
     """
+    global _skills_key_cache, _skills_key_cached_at
+    now = time.monotonic()
+    if _skills_key_cache is not None and now - _skills_key_cached_at < _SKILLS_KEY_TTL:
+        return _skills_key_cache
+
     scan_dirs: list[Path] = []
 
     try:
@@ -558,14 +573,18 @@ def _compute_skills_cache_key() -> tuple:
         except OSError:
             pass
 
-    return (file_count, max_mtime, total_size)
+    key = (file_count, max_mtime, total_size)
+    _skills_key_cache = key
+    _skills_key_cached_at = now
+    return key
 
 
 def invalidate_skills_cache() -> None:
     """手动失效 skills 缓存。插件启用/禁用后如需立即生效可调用。"""
-    global _skills_cache, _skills_cache_key
+    global _skills_cache, _skills_cache_key, _skills_key_cache
     _skills_cache = None
     _skills_cache_key = ()
+    _skills_key_cache = None
 
 
 def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,

@@ -63,6 +63,7 @@ from .trace_models import (
     ThemePalette,
     TraceRecord,
     format_duration,
+    merge_overlapping,
     time_bounds,
     with_alpha,
 )
@@ -512,7 +513,10 @@ class TraceCardWidget(QWidget):
         be = getattr(c, "_bound_backend", None)
         if be is None:
             return
-        for name, slot in (("context_updated", self._on_context_updated), ("session_changed", self._on_session_changed)):
+        for name, slot in (
+            ("context_updated", self._on_context_updated),
+            ("session_changed", self._on_session_changed),
+        ):
             sig = getattr(be, name, None)
             if sig is None:
                 continue
@@ -739,17 +743,24 @@ class TraceCardWidget(QWidget):
         if not isinstance(records, list):
             records = []
         turns = sum(1 for r in records if r.kind == EntryKind.USER and r.turn_no > 0)
-        llm_ms = sum(max(0, r.duration_ms) for r in records if r.kind == EntryKind.ASSISTANT)
-        tool_ms = sum(max(0, r.duration_ms) for r in records if r.kind == EntryKind.TOOL)
+        # ⚠️ 时长必须用**区间并集**（墙钟），不能 Σ duration_ms：
+        # 宿主把一次 API 响应的 N 个并行 tool_calls 拆成 N 条 assistant 消息
+        # 落盘（同 elapsed_ms、同刻写入），求和会把同一次调用计时 N 遍。
+        llm_ms, llm_calls = merge_overlapping([r for r in records if r.kind == EntryKind.ASSISTANT])
+        tool_ms, _ = merge_overlapping([r for r in records if r.kind == EntryKind.TOOL])
         total = self._turn_list.total_count
         shown = self._turn_list.shown_count
         if shown == total:
             self._stats_turns.setText(f"{total} 条 · {turns} 轮")
         else:
             self._stats_turns.setText(f"{shown} / {total} 条 · {turns} 轮")
-        self._stats_time.setText(
-            f"LLM {format_duration(llm_ms)} · 工具 {format_duration(tool_ms)}" if records else "LLM - · 工具 -"
-        )
+        if records:
+            llm_text = f"LLM {format_duration(llm_ms)}"
+            if llm_calls > 1:
+                llm_text += f" · {llm_calls} 次调用"
+            self._stats_time.setText(f"{llm_text} · 工具 {format_duration(tool_ms)}")
+        else:
+            self._stats_time.setText("LLM - · 工具 -")
         if self._context_tokens > 0:
             ctx_text = f"上下文 {self._context_tokens / 1000:.1f}K tok"
             if self._context_limit > 0:

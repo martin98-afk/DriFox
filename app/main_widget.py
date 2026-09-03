@@ -15376,21 +15376,25 @@ class OpenAIChatToolWindow(ToolWindow):
         sender = self.sender()
         if not isinstance(sender, MessageCard):
             return
-        # 🐛 滚动锚定补偿（v2）：Qt 滚动区没有 scroll anchoring——卡片高度变化时
+        # 🐛 滚动锚定补偿（v3）：Qt 滚动区没有 scroll anchoring——卡片高度变化时
         # value 不动、视口内内容整体位移。补偿**只在增量确实发生在视口上方**
         # 时才能执行，否则补偿本身会变成反向拖拽。
         #
-        # 判据（按可信度排序）：
-        #   1. card_bottom <= value：整张卡片都在视口上方 → 增量必然在视口之上，
-        #      全额补偿（覆盖懒渲染/异步高度上报把下方内容顶走的场景）。
-        #   2. card_top >= value：卡片顶部已在视口内 → 卡片顶部坐标不变，
-        #      增量不可能整体位于视口之上 → 不补偿。
-        #   3. 卡片跨越视口顶部（card_top < value < card_bottom）：增量位置未知。
-        #      ⚠️ 流式卡片一律走「不补偿」：正文在卡片**底部**增长，而工具折叠框
-        #      展开后卡片常高于视口，此时 `card_top < value` 恒成立 → 每个流式
-        #      高度回调（~80ms 一次）都 += delta，视口被持续下拽、内容从用户
-        #      眼下漂走——这正是「滚轮位置反复被重置到奇怪位置」的根因。
-        #      非流式卡片（折叠框展开/收起、早期卡片异步高度上报）保留原补偿。
+        # ⚠️ 但补偿同时是流式期间**唯一的跟底通道**：下方滚底逻辑被
+        # `_content_just_loaded` 挡着，而流式 chunk / 工具·思考更新**故意**不置
+        # 该标记（见 message_card 注释「不应触发外部消息列表滚动」）。贴底时
+        # `value += delta` 恒等于滚到新的 maximum —— 跟底正是靠它维持的。
+        # 一刀切关掉补偿 → 视口停在原地、内容在下方越长越多 = 中途「置顶」。
+        #
+        # 因此补偿成立只需两个理由之一：
+        #   A. `card_bottom <= value`：整张卡片都在视口上方 → 增量必然在视口
+        #      之上，锚定补偿（覆盖懒渲染/异步高度上报顶走下方内容的场景）。
+        #   B. `_should_follow_bottom()`：视口处于跟随态 → 补偿 == 保持贴底。
+        #
+        # 用户已上滚阅读（非跟随态）且卡片跨视口顶部时一律不动：此时正文在
+        # 卡片**底部**增长，增量在视口之下，补偿会把视口每 ~80ms 下拽 Δ →
+        # 内容持续从用户眼下漂走（「滚轮位置反复被重置到奇怪位置」的根因）。
+        # 代价：非跟随态下跨视口顶部的折叠框展开不再补偿，会有一次性位移。
         try:
             delta = int(getattr(sender, "_last_height_delta", 0) or 0)
             # 增量是一次性令牌：读取即清零。否则后续任何一次 heightChanged
@@ -15402,8 +15406,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 value = sb.value()
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()
                 card_bottom = card_top + sender.height()
-                is_streaming_card = bool(getattr(sender, "_streaming", False))
-                if card_bottom <= value or (card_top < value and not is_streaming_card):
+                if card_bottom <= value or self._should_follow_bottom():
                     sb.setValue(max(0, value + delta))
         except RuntimeError:
             pass
