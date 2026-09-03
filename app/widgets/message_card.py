@@ -9416,6 +9416,8 @@ class MessageCard(SimpleCardWidget):
         self._height_anim.setDuration(0)  # 设置为0相当于禁用插值
         self._target_viewer_height = 40
         self._last_applied_viewer_height = 40
+        # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
+        self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
         self._stream_height_timer = QTimer(self)
         self._stream_height_timer.setSingleShot(True)
@@ -11182,12 +11184,17 @@ class MessageCard(SimpleCardWidget):
     def _on_qt_viewer_height(self, h: int) -> None:
         """灰度：纯 Qt viewer 高度自治（layout 自适应，不 setFixedHeight），
         仅转发高度变化给父容器（滚底跟随依赖 heightChanged 链路）。"""
+        # 灰度路径无增量语义：清零防止外层列表用残留 delta 做错误锚定补偿
+        self._last_height_delta = 0
         self.heightChanged.emit(max(40, int(h)))
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
         if height == self._last_applied_viewer_height:
             return
+        # 🐛 记录本次高度增量：外层聊天列表（main_widget）据此做滚动锚定补偿
+        # （Qt 滚动区无 scroll anchoring，卡片高度变化时视口内容会被推走）。
+        self._last_height_delta = height - self.viewer.height()
         self._last_applied_viewer_height = height
         # [PERF] resize preview 期间 viewer 已 hide + setUpdatesEnabled(False)，
         # 此时 setFixedHeight 仍会触发 Qt 布局链 → QWebEngineView Chromium
@@ -11343,6 +11350,8 @@ class MessageCard(SimpleCardWidget):
         pending_h = getattr(self, "_pending_viewer_height", None)
         if pending_h is not None and self.role != "user" and self.viewer is not None:
             try:
+                # resize 占位恢复无增量语义：清零防止外层误锚定补偿
+                self._last_height_delta = 0
                 self.viewer.setFixedHeight(pending_h)
                 self.heightChanged.emit(pending_h)
             except RuntimeError:

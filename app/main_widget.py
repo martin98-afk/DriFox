@@ -15335,6 +15335,23 @@ class OpenAIChatToolWindow(ToolWindow):
         sender = self.sender()
         if not isinstance(sender, MessageCard):
             return
+        # 🐛 滚动锚定补偿：Qt 滚动区没有 scroll anchoring——卡片高度变化时
+        # scrollbar value 不动、视口内内容整体位移。工具折叠框展开瞬间卡片
+        # 可 +600px，用户正在看的内容被整个推走（感知为"滚轮位置被重置"）；
+        # 贴底时展开则实际距底被拉大而 away 标志未更新，下一次流式高度回调
+        # 又把视口拽回底部。补偿规则：卡片顶部已在视口上方 → value 同步
+        # += delta，视口锚定的内容纹丝不动。贴底跟随态随后由下方滚底逻辑
+        # 覆盖，互不冲突；卡片顶部在视口内时卡片顶部坐标不变，无需补偿。
+        try:
+            delta = getattr(sender, "_last_height_delta", 0)
+            container = self.chat_scroll_area.widget()
+            if delta and container is not None and sender.parentWidget() is container:
+                sb = self.chat_scroll_area.verticalScrollBar()
+                card_top = sender.mapTo(container, sender.rect().topLeft()).y()
+                if card_top < sb.value():
+                    sb.setValue(max(0, sb.value() + delta))
+        except RuntimeError:
+            pass
         if not sender._content_just_loaded:
             return
 

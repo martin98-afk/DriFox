@@ -1200,7 +1200,7 @@ class TabManagerWindow(FramelessWindow):
                 todos = []
         panel.update_todos(todos or [])
 
-    def _deferred_workbench_refresh(self, win, saved_tab) -> None:
+    def _deferred_workbench_refresh(self, win, saved_tab, seq: int = 0) -> None:
         """切标签后的工作台数据刷新（延迟一帧执行，见 _on_tab_selected）
 
         含刷新后的页签恢复（refresh_workbench 可能因历史页保持/插件页
@@ -1208,7 +1208,11 @@ class TabManagerWindow(FramelessWindow):
         页签；未记忆过的窗口保持现状不跳页。★ 记忆的是 tab_id（见
         _remember_workbench_tab）：按 id 在当前页签集合中重新定位，找不到
         （页签已卸载）则保持现状，不越界跳页也不把全部按钮高亮熄灭。
+        ★ seq 过期作废：调度后用户又切了标签 → 本次是旧切换的遗留，
+        执行会用旧窗口的页签记忆覆盖新活跃窗口状态（per-tab 串态根因）。
         """
+        if seq and seq != getattr(self, "_wb_refresh_seq", 0):
+            return  # 已有更新的切换调度，本次作废
         panel = getattr(self, "workbench_panel", None)
         if panel is None or not self.is_workbench_visible():
             return
@@ -3172,10 +3176,13 @@ class TabManagerWindow(FramelessWindow):
                 if self.is_workbench_visible():
                     # 🚀 数据刷新延迟一帧：setCurrentWidget 先完成目标窗口渲染，
                     # 工作台全量刷新（产物/任务/工作树/历史换挂）在下一帧执行，
-                    # 切标签的感知延迟不再叠加工作台刷新成本
+                    # 切标签的感知延迟不再叠加工作台刷新成本。★ 序号守卫：
+                    # 快速连续切换时旧调度作废，防止旧窗口记忆覆盖新活跃窗口状态
+                    self._wb_refresh_seq = getattr(self, "_wb_refresh_seq", 0) + 1
+                    seq = self._wb_refresh_seq
                     QTimer.singleShot(
                         0,
-                        lambda w=win, sv=saved_tab: self._deferred_workbench_refresh(w, sv),
+                        lambda w=win, sv=saved_tab, s=seq: self._deferred_workbench_refresh(w, sv, s),
                     )
 
     def _on_tab_close_requested(self, index: int):
