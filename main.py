@@ -140,7 +140,7 @@ def main():
 
         # 原生崩溃捕获（faulthandler）：Qt/C++ 层段错误不经过 Python excepthook，
         # 打包版表现为「闪退且 all.log 无任何记录」。启用后崩溃栈 dump 到
-        # logs/crash/，下次启动由 crash_handler.check_last_crash 检测并弹窗。
+        # logs/crash/，下次启动由 crash_handler.check_pending_crashes 检测并弹窗。
         try:
             from app.core.crash_handler import install_crash_handler
             from app.utils.utils import get_app_data_dir
@@ -395,14 +395,15 @@ def main():
         _apply_window_topmost(tm)
         logger.info("DriFox 以 Tab 管理器模式启动")
 
-        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后弹窗，不抢首帧
+        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条弹窗，不抢首帧。
+        # 每条弹窗关闭即重命名 .reported（显示过就改状态），下次启动不再弹
         def _check_last_crash():
             try:
-                from app.core.crash_handler import check_last_crash, prompt_crash_report
+                from app.core.crash_handler import check_pending_crashes, prompt_crash_report
                 from app.utils.utils import get_app_data_dir
 
-                dump = check_last_crash(get_app_data_dir() / "logs")
-                if dump is not None:
+                dumps = check_pending_crashes(get_app_data_dir() / "logs")
+                for dump in dumps:
                     logger.warning(f"[CrashHandler] 检测到上次崩溃报告: {dump}")
                     prompt_crash_report(dump, parent=tm)
             except Exception:

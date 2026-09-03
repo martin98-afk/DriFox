@@ -15,7 +15,7 @@ from app.core.crash_handler import (
     _nearby_wer_dump,
     _nearby_wer_report,
     _setup_wer_localdumps,
-    check_last_crash,
+    check_pending_crashes,
     install_crash_handler,
 )
 
@@ -28,26 +28,33 @@ def _make_dump(crash_dir: Path, name: str, content: str) -> Path:
 
 
 def test_check_no_dir(tmp_path):
-    assert check_last_crash(tmp_path / "logs") is None
+    assert check_pending_crashes(tmp_path / "logs") == []
 
 
 def test_check_empty_dir(tmp_path):
     (tmp_path / "logs" / "crash").mkdir(parents=True)
-    assert check_last_crash(tmp_path / "logs") is None
+    assert check_pending_crashes(tmp_path / "logs") == []
 
 
 def test_crash_dump_reported(tmp_path):
     logs = tmp_path / "logs"
     dump = _make_dump(logs / "crash", "crash_1.log", "Fatal Python error: Segmentation fault\nstack...")
-    assert check_last_crash(logs) == dump
+    assert check_pending_crashes(logs) == [dump]
     # 崩溃 dump 不被清理（弹窗确认后才删）
     assert dump.exists()
+
+
+def test_reported_suffix_not_matched(tmp_path):
+    """已报告（.reported 后缀）的 dump 不再命中，每条只弹一次。"""
+    logs = tmp_path / "logs"
+    _make_dump(logs / "crash", "crash_1.log.reported", "crash already shown")
+    assert check_pending_crashes(logs) == []
 
 
 def test_clean_exit_dump_cleared(tmp_path):
     logs = tmp_path / "logs"
     f = _make_dump(logs / "crash", "crash_1.log", f"stack...\n{_CLEAN_EXIT_MARK}\n")
-    assert check_last_crash(logs) is None
+    assert check_pending_crashes(logs) == []
     assert not f.exists()
 
 
@@ -55,16 +62,17 @@ def test_empty_dump_cleared_not_reported(tmp_path):
     """空文件 = taskkill 强杀/断电（faulthandler 未触发），静默清理不误报。"""
     logs = tmp_path / "logs"
     f = _make_dump(logs / "crash", "crash_1.log", "")
-    assert check_last_crash(logs) is None
+    assert check_pending_crashes(logs) == []
     assert not f.exists()
 
 
-def test_latest_crash_wins(tmp_path):
+def test_all_pending_returned_oldest_first(tmp_path):
+    """积压多份未报告 dump 全部返回，按崩溃时间从旧到新逐条弹。"""
     logs = tmp_path / "logs"
     old = _make_dump(logs / "crash", "crash_100.log", "crash old")
     new = _make_dump(logs / "crash", "crash_200.log", "crash new")
     os.utime(old, (time.time() - 10, time.time() - 10))
-    assert check_last_crash(logs) == new
+    assert check_pending_crashes(logs) == [old, new]
 
 
 def test_install_and_clean_exit(tmp_path):
@@ -75,7 +83,7 @@ def test_install_and_clean_exit(tmp_path):
     _mark_clean_exit()
     assert _CLEAN_EXIT_MARK in dump.read_text(encoding="utf-8")
     # 正常退出后不应报告
-    assert check_last_crash(logs) is None
+    assert check_pending_crashes(logs) == []
 
 
 # ========== WER LocalDumps ==========
