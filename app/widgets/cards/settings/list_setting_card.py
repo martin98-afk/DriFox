@@ -526,7 +526,7 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         parts = [
             "\n\n## 偏好技能\n"
             "凡用户请求命中以下技能 description 描述的场景，必须先调用 `skill` 工具加载对应技能再回答，"
-            "禁止跳过直接作答；以下技能无法满足时用 `list_skills` 查看完整列表：\n"
+            "禁止跳过直接作答；以下技能无法满足时用 `manage_skill(action=\"list\")` 查看完整列表：\n"
         ]
         for skill in all_skills:
             if skill["name"] in enabled:

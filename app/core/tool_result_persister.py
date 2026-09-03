@@ -43,7 +43,7 @@ SKIP_TOOLS = frozenset(
         "question",  # 用户问答结果
         "todowrite",  # todo 写入
         "todoread",  # todo 读取
-        "list_skills",  # 技能列表
+        "manage_skill",  # 技能管理
         "mcp_list_servers",  # MCP 服务器列表
         "skill",  # 技能加载结果
     }

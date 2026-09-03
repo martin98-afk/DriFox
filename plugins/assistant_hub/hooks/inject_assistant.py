@@ -141,7 +141,7 @@ def _assistant_prompt_block(aid: str) -> str:
             parts.append("\n\n".join(mem_parts))
 
     # 3. 技能段（渐进披露）：只注入 name + 简介 + 绝对路径，正文由模型用 read 工具按需读盘
-    #    （对齐 openhanako：无专用技能读取工具，避免与宿主 skill/list_skills 工具入口混淆）
+    #    （对齐 openhanako：无专用技能读取工具，避免与宿主 skill/manage_skill 工具入口混淆）
     try:
         skills = mgr.enabled_skills(aid)
     except Exception as e:
