@@ -80,10 +80,12 @@ class Assistant:
     avatar_path: str = ""  # 相对 avatars/ 的文件路径，空表示内置色块
     primary: bool = False  # 是否主助手
     order: int = 0
-    # assistant 派生 subagent 的 tool 白名单；空 list 表示继承 yuan
+    # 专属技能白名单：非空 = 仅启用名单内技能；空 = 全部启用（再减黑名单）
     skills_whitelist: List[str] = field(default_factory=list)
-    # assistant 派生 subagent 的 tool 黑名单
+    # 专属技能黑名单：whitelist 为空时生效，名单内技能不注入
     skills_blacklist: List[str] = field(default_factory=list)
+    # 专属技能（skills/*.md）总开关：关闭后不注入提示词，read_skill 工具暂停
+    skills_enabled: bool = True
     # 是否启用 memory 体系（关闭后 today/longterm 都不注入）
     memory_enabled: bool = True
     # dream 自动整理：默认关闭（手动触发）
@@ -119,6 +121,7 @@ class Assistant:
             "order": self.order,
             "skills_whitelist": list(self.skills_whitelist),
             "skills_blacklist": list(self.skills_blacklist),
+            "skills_enabled": self.skills_enabled,
             "memory_enabled": self.memory_enabled,
             "dream_auto_enabled": self.dream_auto_enabled,
             "model": self.model,
@@ -150,6 +153,7 @@ class Assistant:
             order=int(data.get("order", 0) or 0),
             skills_whitelist=list(data.get("skills_whitelist") or []),
             skills_blacklist=list(data.get("skills_blacklist") or []),
+            skills_enabled=bool(data.get("skills_enabled", True)),
             memory_enabled=bool(data.get("memory_enabled", True)),
             dream_auto_enabled=bool(data.get("dream_auto_enabled", False)),
             model=str(data.get("model") or ""),
@@ -183,6 +187,7 @@ class Assistant:
             order=0,
             skills_whitelist=[],
             skills_blacklist=[],
+            skills_enabled=True,
             memory_enabled=True,
             dream_auto_enabled=False,
             model="",
@@ -1126,6 +1131,18 @@ class AssistantManager:
 
     # ── 专属技能 ──
 
+    def enabled_skills(self, aid: str) -> List[Dict[str, Any]]:
+        """过滤后的启用技能：总开关关→空；whitelist 非空→仅白名单；空→全部减 blacklist。"""
+        a = self.get(aid)
+        if a is None or not a.skills_enabled:
+            return []
+        skills = self.list_skills(aid)
+        if a.skills_whitelist:
+            wl = set(a.skills_whitelist)
+            return [s for s in skills if s["name"] in wl]
+        bl = set(a.skills_blacklist)
+        return [s for s in skills if s["name"] not in bl]
+
     def list_skills(self, aid: str) -> List[Dict[str, Any]]:
         """列出助手专属技能（每条 {name, path, description, content_chars}）"""
         d = self._skills_dir(aid)
@@ -1163,15 +1180,15 @@ class AssistantManager:
         except Exception:
             return ""
 
-    def write_skill(self, aid: str, name: str, content: str) -> bool:
-        # 文件名规范化（保留英文/数字/下划线/连字符）
+    def write_skill(self, aid: str, name: str, content: str) -> str:
+        """写入技能，返回规范化文件名（不含 .md）；失败返回空串。"""
         safe = re.sub(r"[^a-zA-Z0-9_\-]+", "-", name).strip("-").lower()
         if not safe:
-            return False
+            return ""
         d = self._skills_dir(aid)
         self._ensure_dir(d)
         (d / f"{safe}.md").write_text(content, encoding="utf-8")
-        return True
+        return safe
 
     def delete_skill(self, aid: str, name: str) -> bool:
         safe = re.sub(r"[^a-zA-Z0-9_\-]+", "-", name).strip("-").lower()

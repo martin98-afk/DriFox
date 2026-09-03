@@ -104,7 +104,7 @@ def _user_name(mgr) -> str:
 
 
 def _assistant_prompt_block(aid: str) -> str:
-    """组装助手信息块：人格段 → 人工提示 → 记忆段（规则+memory.md，受开关控制）。"""
+    """组装助手信息块：人格段 → 人工提示 → 记忆段 → 技能段（渐进披露）。"""
     mgr = _get_manager()
     if mgr is None:
         return ""
@@ -139,6 +139,24 @@ def _assistant_prompt_block(aid: str) -> str:
             mem_parts.append("# 长期记忆\n\n" + memory_md)
         if len(mem_parts) > 1:  # 规则之外还有实际记忆内容才注入整段
             parts.append("\n\n".join(mem_parts))
+
+    # 3. 技能段（渐进披露）：只注入 name + 简介 + 绝对路径，正文由模型用 read 工具按需读盘
+    #    （对齐 openhanako：无专用技能读取工具，避免与宿主 skill/list_skills 工具入口混淆）
+    try:
+        skills = mgr.enabled_skills(aid)
+    except Exception as e:
+        logger.debug(f"[assistant_hub.hooks] 读取技能列表失败: {e}")
+        skills = []
+    if skills:
+        lines = [
+            f"- {s['name']}：{s.get('description') or '（无简介）'}（{s['path']}）"
+            for s in skills
+        ]
+        parts.append(
+            "# 助手技能\n\n"
+            "以下是你的专属技能（只列名称与简介）。处理相关任务前，"
+            "先用 read 工具按括号内路径读取技能全文再执行：\n" + "\n".join(lines)
+        )
 
     if not parts:
         return ""
