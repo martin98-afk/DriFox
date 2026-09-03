@@ -280,7 +280,7 @@ _READ_SCHEMA = {
     "type": "function",
     "function": {
         "name": "read",
-        "description": "读文件。返回原文，可选行号。支持文本/图片(.png/.jpg/.jpeg/.gif/.webp/.bmp)，图片返base64。记录mtime检测外部修改。",
+        "description": "读文件。返回原文，可选行号。默认从 startline 起读 500 行；大文件先给 endline 限定范围再按需续读。支持文本/图片(.png/.jpg/.jpeg/.gif/.webp/.bmp)，图片转 base64 供视觉模型查看，可直接读截图。只读文件不读目录，列目录用 list。改文件前必须先 read 获取精确文本（含空白）；多个独立文件应在同一轮并行读取。记录 mtime 检测外部修改。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -349,7 +349,7 @@ _WRITE_SCHEMA = {
     "type": "function",
     "function": {
         "name": "write",
-        "description": "创建/覆盖文件。自动建目录。超大文件用多次 edit 写入。",
+        "description": "创建/覆盖文件，自动建目录。整文件覆盖写：已有文件先 read 拿到现状再决定，盲目覆盖会丢用户内容；小改动优先 edit 而非全量重写。超大文件拆成 write 骨架加多次 edit 追加。必须给完整最终内容，不放占位符。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -428,7 +428,7 @@ _EDIT_SCHEMA = {
     "type": "function",
     "function": {
         "name": "edit",
-        "description": "精确文本替换。",
+        "description": "精确文本替换。oldString 必须与文件内容逐字符一致（含空白），不唯一时替换失败——扩大上下文使其唯一，或用 replaceAll 全部替换。oldString 与 newString 相同是无操作，禁止。改前先 read 拿精确文本，行号前缀勿带入 oldString。同一文件多处改动用 multi_edit。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -496,7 +496,7 @@ _MULTI_EDIT_SCHEMA = {
     "type": "function",
     "function": {
         "name": "multi_edit",
-        "description": "批量编辑同文件。多次替换后生成 unified diff 审查。",
+        "description": "同一文件多处编辑。edits 按序执行，每项替换 oldString 的首个匹配；oldString 不唯一或不存在会失败——每项扩大上下文保证唯一。全部成功后生成 unified diff 供审查。同文件多处改动用它，勿拆成多次 edit。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -591,7 +591,7 @@ _GREP_SCHEMA = {
     "type": "function",
     "function": {
         "name": "grep",
-        "description": "递归搜索正则匹配内容。",
+        "description": "递归正则搜索文件内容，返回命中行。找文件名用 glob，列目录用 list。pattern 用正则语法；include 过滤文件模式（如 '*.py'）缩小范围；path 默认当前目录。未知代码位置时先 grep 关键标识符再 read。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -715,7 +715,7 @@ _GLOB_SCHEMA = {
     "type": "function",
     "function": {
         "name": "glob",
-        "description": "通配符递归查找。支持 **, *, ? 等glob。",
+        "description": "通配符递归查找文件名，支持 **、*、?。如 '*.py'、'src/**/*.ts'。只匹配路径不搜内容，按内容找代码用 grep。",
         "parameters": {
             "type": "object",
             "properties": {

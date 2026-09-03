@@ -167,6 +167,7 @@ from app.widgets.render_helpers import (
     get_tool_qrc_prefix,
     render_tool_block,
 )
+from app.widgets.cards.settings.history_card import format_relative_time
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
 # ======== Markdown 实例 ========
@@ -4287,6 +4288,18 @@ class CodeWebViewer(QWebEngineView):
                     transform: translateX(-4px);
                     transition: opacity 0.18s ease, transform 0.18s ease;
                     line-height: 1;
+                }}
+                /* 最近会话右侧相对时间 tag（仅 count_mode=False 输出） */
+                .session-item-tag {{
+                    flex: 0 0 auto;
+                    font-size: {tiny_font_size}px;
+                    font-weight: 600;
+                    color: var(--accent-text);
+                    background: var(--accent-soft-strong);
+                    padding: 2px 8px;
+                    border-radius: 6px;
+                    line-height: 1.4;
+                    white-space: nowrap;
                 }}
                 .session-item.context-tag:hover .session-item-arrow {{
                     opacity: 1;
@@ -13185,6 +13198,11 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
             meta = escape(s.get("last_time") or "")
             icon = "💬"
         anim_style = "animation: none;" if suppress_anim else f"animation-delay:{idx * 55}ms"
+        # 最近会话右侧追加相对时间 tag（第二行 meta 保留绝对时间不变）
+        tag_html = ""
+        if not count_mode:
+            rel_label = format_relative_time(s.get("last_time") or "")
+            tag_html = f'<span class="session-item-tag">{escape(rel_label)}</span>'
         return (
             f'<div class="context-tag session-item" data-type="session" '
             f'data-session-id="{sid}" data-action="session" '
@@ -13194,6 +13212,7 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
             f'<span class="session-item-title">{t}</span>'
             f'<span class="session-item-meta">{meta}</span>'
             f"</span>"
+            f"{tag_html}"
             f'<span class="session-item-arrow">›</span>'
             f"</div>"
         )
