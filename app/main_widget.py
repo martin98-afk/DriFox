@@ -11786,6 +11786,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "last_time": session.get("last_time"),
                     "session_id": session.get("session_id"),
                     "message_count": session.get("message_count", 0),
+                    "created_at": session.get("created_at") or session.get("saved_at") or "",
                 }
             )
 
@@ -11799,6 +11800,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "last_time": session.get("last_time"),
                     "session_id": session.get("session_id"),
                     "message_count": session.get("message_count", 0),
+                    "created_at": session.get("created_at") or session.get("saved_at") or "",
                 }
             )
         return recent_sessions, top_by_count

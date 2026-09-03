@@ -4301,6 +4301,11 @@ class CodeWebViewer(QWebEngineView):
                     line-height: 1.4;
                     white-space: nowrap;
                 }}
+                /* 最活跃会话右侧热度 tag（count_mode=True 输出） */
+                .session-item-tag-warn {{
+                    color: #ea580c;
+                    background: rgba(234, 88, 12, 0.12);
+                }}
                 .session-item.context-tag:hover .session-item-arrow {{
                     opacity: 1;
                     transform: translateX(0);
@@ -13174,6 +13179,24 @@ _SESSION_ROWS = 3  # 双列网格行数（每分类显示 3×2 = 6 张）
 _SESSION_COLS = 2
 
 
+def _session_duration_days(created_at: str) -> int:
+    """计算会话持续天数（基于 created_at 与当前时间差）
+
+    用于欢迎卡片最活跃会话卡片第二行展示「持续 X 天」。
+    created_at 格式 "%Y-%m-%d %H:%M:%S"；空 / 解析失败返回 0。
+    """
+    if not created_at:
+        return 0
+    try:
+        start = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        try:
+            start = datetime.strptime(created_at[:10], "%Y-%m-%d")
+        except (ValueError, TypeError):
+            return 0
+    return max((datetime.now() - start).days, 0)
+
+
 def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_anim: bool = False) -> str:
     """渲染会话导览 body：最近 / 最活跃两个卡片双列网格（每分类 3 行）
 
@@ -13192,15 +13215,23 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
         sid = escape(s.get("session_id", ""))
         if count_mode:
             mc = s.get("message_count", 0)
-            meta = f"{mc} 条消息"
+            # 第二行 = 日期（天）+ 持续天数（消息数移到右侧 tag，不重复显示）
+            last_time = s.get("last_time") or ""
+            date_str = last_time[:10] if len(last_time) >= 10 else last_time
+            days = _session_duration_days(s.get("created_at") or "")
+            days_part = f" · 持续 {days} 天" if days > 0 else ""
+            meta = f"{date_str}{days_part}"
             icon = "⚡"
         else:
             meta = escape(s.get("last_time") or "")
             icon = "💬"
         anim_style = "animation: none;" if suppress_anim else f"animation-delay:{idx * 55}ms"
-        # 最近会话右侧追加相对时间 tag（第二行 meta 保留绝对时间不变）
+        # 右侧 tag：最近=相对时间（蓝），最活跃=消息数（橙）
         tag_html = ""
-        if not count_mode:
+        if count_mode:
+            mc = s.get("message_count", 0)
+            tag_html = f'<span class="session-item-tag session-item-tag-warn">{mc} 条</span>'
+        else:
             rel_label = format_relative_time(s.get("last_time") or "")
             tag_html = f'<span class="session-item-tag">{escape(rel_label)}</span>'
         return (
