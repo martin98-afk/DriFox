@@ -73,3 +73,33 @@ SVG 前放一段标准 style：
 ## 数据编码配色（9-ramp，数据专用，不做界面色）
 
 亮底速查：50 填充 + 600 描边 + 800 标题；暗底速查：800 填充 + 200 描边 + 100 标题。完整色板见 `html-widget.md`。
+
+## CSS 动画（动效场景必读，实战踩坑沉淀）
+
+`<script>` 死代码，SMIL 无法响应 reduced-motion，动效一律 CSS：动画写在图内 `<style>`，全部 keyframes 与 animation 包进 `@media (prefers-reduced-motion: no-preference)`。
+
+**origin 规则（最大坑）**：禁 `transform-box: fill-box`，Chromium 83 对 SVG 静默失效（元素不动或绕错心转）。origin 一律写 view-box 显式坐标，每个元素各自的 origin 用内联 style 覆盖：
+
+```html
+<path class="wing" style="transform-origin:264px 79px" d="..."/>
+```
+
+**感知阈值**：小于 15px 的元素做 scale/translate 动画肉眼不可见（6px 高的鸟 scaleY 0.8 全程只变 1.2px，用户会报「没动」）。小元素拆结构放大力臂：鸟 = 身体一点 + 左右翅两条 path，绕翅根 rotate ±30°。
+
+**角色骨骼动画**：`d: path()` 关键帧可做关节联动（腿蹬踏板），要求所有帧命令结构完全一致（如 `M x y C x y x y x y l x y`），8 帧近似圆周已平滑。踝点坐标 = 驱动点（踏板）逐帧位置，膝盖用 C 控制点前偏表达。
+
+**多部件同步**：联动件（轮/曲柄/踏板/腿/链条）共用同一 `animation-duration`；0% 关键帧几何对齐（曲柄臂端点 = 踏板静态位 = 踝始态）。相位差 180° 的配对件用**反相 keyframes**，禁用 animation-delay 表达相位（delay 是时间平移，位移场不同的部件会脱节——腿 delay 半周期而踏板位移场不同，脚会离开踏板）。链条等环带用 dashoffset 流动，速度 = 周长 ÷ 周期。
+
+**无缝循环背景**：图案复制 + 视宽平移，循环点无跳变：
+
+```html
+<g class="roadtex"><g id="rtex">…线条…</g><use href="#rtex" x="680"/></g>
+```
+```css
+.roadtex { animation: texmove 2.7s linear infinite; }
+@keyframes texmove { to { transform: translateX(-680px); } }
+```
+
+**速度一致性**：地面物移动速度必须 ≈ 轮缘线速度（2πr ÷ 转周期），否则打滑感；视差分层（远景云 20s+，中景 2~3s）。dashoffset 正值向路径起点方向移动，流向必须与画面运动方向一致（车向右，路面纹理向左流）。
+
+**层序**：远景 → 中景 → 影子 → 主体（远侧肢在车架下、近侧肢在躯干上）→ 前景动效（速度线）。

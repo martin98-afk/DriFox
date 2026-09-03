@@ -42,14 +42,14 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 
 | 场景 | 何时读 |
 |------|--------|
-| `references/svg-guide.md` | 画任何 SVG 前**必读**：CJK 字宽公式（不读中文必溢出）、间距公式、字体 style、arrow marker |
+| `references/svg-guide.md` | 画任何 SVG 前**必读**：CJK 字宽公式（不读中文必溢出）、间距公式、字体 style、arrow marker；带动画必读「CSS 动画」节 |
 | `references/echarts-mermaid.md` | 用 echarts/mermaid 前必读：纯 JSON 约束（禁 formatter/回调/注释）、容器 400px 写死、流式行为 |
 | `references/html-widget.md` | HTML 带交互或用主题色前必读：Host API 交互桥、CSS 变量、9-ramp 色板、Chromium 83 限制 |
 
 ## 硬约束（任何通道，常驻）
 
 1. **`<script>` 永不执行**（innerHTML 注入后是死代码）。交互走 Host API。
-2. **Chromium 83**：`context-stroke`、`:has()`、`subgrid`、`aspect-ratio` 不可用；flex/grid/CSS 变量/圆角可用。
+2. **Chromium 83**：`context-stroke`、`:has()`、`subgrid`、`aspect-ratio`、`transform-box: fill-box` 不可用（fill-box 使动画 origin 静默失效）；flex/grid/CSS 变量/圆角可用。
 3. 禁 `position: fixed`；外层容器透明，背景由宿主提供。
 4. SVG 里不引用外部资源。
 5. 宿主已深浅主题自适配（echarts init、CSS 变量注入），不写死背景色。
