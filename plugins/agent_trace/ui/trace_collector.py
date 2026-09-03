@@ -46,6 +46,15 @@ from .trace_models import (
 )
 
 
+# 秒级 timestamp 字符串 → epoch 的解析缓存（见 TraceCollector._parse_timestamp）
+_TS_CACHE: Dict[str, float] = {}
+
+# 增量投影时固定重投影的尾部消息条数：流式正文增长 / elapsed_ms 落盘 /
+# 工具结果写入都发生在最后几条消息上。一轮工具调用可长达 user +
+# assistant(tool_calls) + tool×N + assistant，取 8 覆盖绝大多数轮次。
+_KEEP_TAIL = 8
+
+
 class TraceCollector(QObject):
     """常驻 Qt 对象：订阅一个对话窗口的 backend 信号，维护该会话的轨迹快照。"""
 
@@ -73,6 +82,9 @@ class TraceCollector(QObject):
         self._bound_main_widget: Optional[Any] = None
         # (消息序号, 文本长度) → token 数
         self._token_cache: Dict[tuple, int] = {}
+        # ── 增量投影状态（见 _try_incremental）──
+        self._proj_msgs: List[Any] = []  # 上次投影用的**消息对象引用**（身份比对用）
+        self._proj_sys: str = ""  # 上次投影时的 system_prompt
 
     # ──────────────────── 公共 API ────────────────────
 
@@ -198,7 +210,7 @@ class TraceCollector(QObject):
             sys_prompt = (getattr(session, "system_prompt", "") or "").strip()
         except Exception:
             pass
-        new_records = self._project_messages(messages, system_prompt=sys_prompt)
+        new_records = self._project(messages, sys_prompt)
 
         if emit_reset or not self._records:
             self._records = new_records
@@ -246,9 +258,7 @@ class TraceCollector(QObject):
                     r
                     for r in self._tail
                     # 报错收尾态的 assistant 尾巴同样让位（正式记录已落盘）
-                    if not (
-                        r.kind == EntryKind.ASSISTANT and (r.is_pending or r.meta.get("terminal_error"))
-                    )
+                    if not (r.kind == EntryKind.ASSISTANT and (r.is_pending or r.meta.get("terminal_error")))
                 ]
             )
 
@@ -282,24 +292,113 @@ class TraceCollector(QObject):
         self._tail = list(new_tail)
         self.tailChanged.emit()
 
+    # ──────────────────── 增量投影 ────────────────────
+
+    def _project(self, messages: List[Dict[str, Any]], system_prompt: str) -> List[TraceRecord]:
+        """投影入口：能增量就增量，否则全量。
+
+        ⚠️ ``_sync`` 会被 hook 注入 / 工具结果高频触发，而全量投影是 O(全部历史
+        消息)。稳态下（一轮对话只在尾部追加几条）绝大多数工作是完全重复的。
+        """
+        records = self._try_incremental(messages, system_prompt)
+        if records is None:
+            records = self._project_messages(messages, system_prompt=system_prompt)
+        # 记下本次投影的输入，供下次做身份比对
+        self._proj_msgs = list(messages)
+        self._proj_sys = system_prompt
+        return records
+
+    def _try_incremental(self, messages: List[Dict[str, Any]], system_prompt: str) -> Optional[List[TraceRecord]]:
+        """前缀复用：只重投影尾部 K 条。返回 None = 不适用（调用方回退全量）。
+
+        走增量的前提（**全部**满足）：
+        - 上次投影过（``_proj_msgs`` 非空）且 ``_records`` 非空；
+        - 消息只增不减 —— 截断 / 压缩会让长度变小 → 回退全量；
+        - 前缀的**消息对象身份**逐个相同 —— 原地改写、列表重建、会话重载
+          都会导致身份不符 → 自动回退全量（正确性由「身份比对」兜底）；
+        - ``system_prompt`` 未变（变了要重新合成 SYSTEM 行）。
+
+        尾部固定重投影 ``_KEEP_TAIL`` 条：流式 assistant 正文增长、
+        ``elapsed_ms`` / ``token_usage`` 落盘、工具结果写入，全都发生在最后
+        几条消息上 —— 只复用前缀不会漏掉这些**原地修改**。
+
+        任何异常 / 形状不符都回退全量，绝不因优化破坏数据正确性。
+        """
+        prev = self._proj_msgs
+        if not prev or not self._records:
+            return None
+        n_prev = len(prev)
+        if len(messages) < n_prev or system_prompt != self._proj_sys:
+            return None
+        # SYSTEM 是合成行（不在 messages 里）→ records 比 messages 多 1
+        offset = 1 if self._records[0].source == "session.system_prompt" else 0
+        if len(self._records) != n_prev + offset:
+            return None
+        cut_msg = max(0, n_prev - _KEEP_TAIL)
+        for j in range(cut_msg):
+            if messages[j] is not prev[j]:
+                return None
+        try:
+            cut_rec = cut_msg + offset
+            prefix = self._records[:cut_rec]
+            # 轮次号必须接着前缀继续数，否则新消息全变成 Turn 0
+            turn = prefix[-1].turn_no if prefix else 0
+            tail = self._project_messages(
+                messages[cut_msg:],
+                system_prompt=system_prompt,
+                start_index=cut_msg,
+                turn_start=turn,
+                synthesize_system=False,
+            )
+            records = prefix + tail
+            if len(records) != len(messages) + offset:  # 形状校验（防御）
+                return None
+            # 只有**最后一条前缀记录**的占用区间会受新尾部影响
+            if prefix:
+                self._fill_span_ends(records, start_index=max(0, cut_rec - 1))
+            return records
+        except Exception as e:  # noqa: BLE001 — 优化路径绝不能抛穿到 UI
+            logger.debug(f"[agent_trace] 增量投影失败，回退全量: {e}")
+            return None
+
     # ──────────────────── messages → records 投影 ────────────────────
 
-    def _project_messages(self, messages: List[Dict[str, Any]], system_prompt: str = "") -> List[TraceRecord]:
+    def _project_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        system_prompt: str = "",
+        start_index: int = 0,
+        turn_start: int = 0,
+        synthesize_system: bool = True,
+    ) -> List[TraceRecord]:
+        """把 ``session.messages`` 投影成 ``TraceRecord`` 列表。
+
+        Args:
+            start_index: 本片首条消息在**完整 messages 中的绝对序号**（影响
+                ``source`` 文案与 token 缓存键；增量投影传切点，全量传 0）。
+            turn_start: 起始轮次号（增量投影接前缀的最后一轮）。
+            synthesize_system: 是否合成 SYSTEM 行（增量投影的尾部片必须关掉，
+                否则会在列表中间插一行）。
+        """
         records: List[TraceRecord] = []
-        turn = 0
+        turn = turn_start
         assistant_seq = 0
-        # 解析全部时间戳（秒级）作为条目起始时刻
-        ts_list = [self._parse_timestamp(m.get("timestamp")) or 0.0 for m in messages]
+        # ⚠️ 时间戳解析是投影头号热点（profile：strptime 占 _project_messages
+        # 的 61%）。两条优化：
+        #   ① ``ts_ms`` 存在时**不要**去解析秒级 ``timestamp`` 串 —— 解析结果
+        #      立刻被覆盖，纯浪费（现代消息全带 ts_ms）。
+        #   ② 只有 ts_ms 缺失（ts_ms 字段上线前落盘的历史会话）才回退解析，
+        #      且按字符串记忆化：秒级串在长会话里大量重复。
+        ts_list: List[float] = []
+        for m in messages:
+            ms = _epoch_from_ts_ms(m.get("ts_ms"))
+            ts_list.append(ms if ms is not None else (self._parse_timestamp(m.get("timestamp")) or 0.0))
 
         for i, msg in enumerate(messages):
             kind = infer_message_kind(msg)
             label = message_label(msg)
             raw_text = content_to_text(msg.get("content"))
             start = ts_list[i]
-            # 毫秒时间戳优先：``timestamp`` 只有秒级精度，同秒注入的多条消息
-            # 无法区分先后（hook 连发时尤其明显）→ ts_ms 由主程序写入（见
-            # chat_session / backend / chat_worker 三处写入点）。
-            start = _epoch_from_ts_ms(msg.get("ts_ms")) or start
             # 消息写入本身是瞬时事件：默认 end=0（时长 0）。
             # ⚠️ 不能用「下一条时刻 − 本条时刻」当存续间隔 —— 用户隔 1 小时
             # 再问下一条，上一条消息就会显示 1 小时时长（闲置时间被算成时长）。
@@ -422,8 +521,10 @@ class TraceCollector(QObject):
 
             # token 占用（列表 Tokens 列）：优先用 worker 落盘的真实 usage，
             # 没有才按字符估算并逐条缓存（key = 消息序号 + 文本长度）
+            # ⚠️ 缓存键与 source 文案都必须用**绝对序号**：增量投影传切片，
+            # 局部 i 从 0 重数会和前缀消息撞键（不同内容同长度同键）。
             if not meta.get("tokens"):
-                meta["tokens"] = self._tokens_for(i, raw_text)
+                meta["tokens"] = self._tokens_for(start_index + i, raw_text)
 
             records.append(
                 TraceRecord(
@@ -431,7 +532,7 @@ class TraceCollector(QObject):
                     label=label,
                     preview=preview,
                     raw=raw_text,
-                    source=message_source(i, label),
+                    source=message_source(start_index + i, label),
                     start_ts=start,
                     end_ts=end,
                     is_pending=False,
@@ -447,7 +548,9 @@ class TraceCollector(QObject):
         # ⚠️ 条件只看「有没有消息」而不是「有没有 system_prompt」：SYSTEM 行是
         # 详情面板 System Prompt / Tools Schema 的唯一入口，会话即使没设系统
         # 提示词也应能查看当前挂载的工具 schema。
-        if records and not any(r.kind == EntryKind.SYSTEM for r in records):
+        # ⚠️ 增量投影的尾部片必须关掉（synthesize_system=False），否则会把
+        # SYSTEM 行插到列表正中间。
+        if synthesize_system and records and not any(r.kind == EntryKind.SYSTEM for r in records):
             head_ts = records[0].start_ts if records else 0.0
             records.insert(
                 0,
@@ -468,8 +571,12 @@ class TraceCollector(QObject):
         return records
 
     @staticmethod
-    def _fill_span_ends(records: List[TraceRecord]) -> None:
+    def _fill_span_ends(records: List[TraceRecord], start_index: int = 0) -> None:
         """给**没有真实耗时**的条目补占用终点 → 时间线连贯。
+
+        Args:
+            start_index: 从该下标开始重算（增量投影只重算「最后一条前缀记录
+                + 新尾部」，更早的前缀记录已被算过且不受尾部影响，原地跳过）。
 
         规则（写 ``meta["span_end"]`` / ``meta["span_capped"]``）：
         - 有真实耗时（TOOL/ASSISTANT 由实时信号回填）→ 用 end_ts，不动；
@@ -478,7 +585,8 @@ class TraceCollector(QObject):
         - ⚠️ 间隔为 0（**同秒注入**，消息时间戳只有秒级精度）就是瞬时事件，
           span = 0。早期版本保底 80ms，结果时长列只剩「80ms / 3s」两个怪值。
         """
-        for i, rec in enumerate(records):
+        for i in range(start_index, len(records)):
+            rec = records[i]
             if rec.start_ts <= 0:
                 continue
             if rec.end_ts > rec.start_ts:
@@ -544,16 +652,28 @@ class TraceCollector(QObject):
 
     @staticmethod
     def _parse_timestamp(s: Any) -> Optional[float]:
-        """把 'YYYY-MM-DD HH:MM:SS[.f]' 解析为 epoch，失败返回 None。"""
+        """把 'YYYY-MM-DD HH:MM:SS[.f]' 解析为 epoch，失败返回 None。
+
+        ⚠️ 必须**记忆化**：``strptime`` 单次 ≈15µs 且内部走 locale 查询
+        （profile 实测占投影 61%），而秒级 ``timestamp`` 串在长会话里**高度
+        重复**（同秒注入的多条消息共用一个串）。缓存上限防极端场景膨胀。
+        """
         if not s or not isinstance(s, str):
             return None
+        hit = _TS_CACHE.get(s)
+        if hit is not None:
+            return hit
         import datetime as _dt
 
         for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
             try:
-                return _dt.datetime.strptime(s, fmt).timestamp()
+                value = _dt.datetime.strptime(s, fmt).timestamp()
             except ValueError:
                 continue
+            if len(_TS_CACHE) > 4096:  # 防止异常会话无限增长
+                _TS_CACHE.clear()
+            _TS_CACHE[s] = value
+            return value
         return None
 
     # ──────────────────── 实时信号 → timing 表 / tail ────────────────────
