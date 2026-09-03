@@ -7,6 +7,8 @@
 - 对齐 openhanako lib/memory/prompts/{compile,dream,fact-extraction}.ts 的语义。
 """
 
+from typing import List
+
 _SYSTEM = "你是记忆整理器。输出面向 LLM 回读而非人类阅读：记忆碎片式高密度条目，零冗余。只输出要求的内容，不解释，不加 markdown 代码围栏。"
 
 # 各模板共用的高密度输出风格：碎片化条目，形式像人类记忆，内容保真不能松
@@ -120,6 +122,23 @@ def build_dream_verify(current_sections: str, composed: str) -> list:
         '"sufficient_compression": true/false, "feedback": "失败原因一句话"}\n'
         "全部通过则 feedback 留空。\n\n"
         f"【整理前】\n{current_sections}\n\n【整理后】\n{composed}"
+    )
+
+
+# ── 经验库压缩 ──────────────────────────────────────────
+
+
+def build_consolidate(entries: List[Dict[str, str]]) -> list:
+    lines = "\n".join(f"- [{e.get('category', '')}] {e.get('content', '')}" for e in entries)
+    return _msg(
+        "你是经验库的压缩器。下面是一个 AI 助手全部工作经验条目（带当前分类）。\n"
+        "压缩合并：语义相近的多条合并成一条、重复的只留一条、过时或被新实践覆盖的删掉，"
+        "长条目改写成碎片表述。跨分类的重复也一并合并，相近分类可合并成一个新分类。\n"
+        "保留全部仍然有效的事实，禁止编造原文不存在的内容。\n"
+        "- 每条仍是一条碎片：对象+动作+关键细节，具体可执行\n"
+        "- 每条给出分类（≤8 字，可沿用或新起）\n"
+        '- 只输出 JSON 数组：[{"category": "...", "content": "..."}]，无可保留内容输出 []\n\n'
+        f"【全部条目（{len(entries)} 条）】\n{lines}"
     )
 
 

@@ -22,12 +22,15 @@ logger = logging.getLogger(__name__)
 
 _THIS = Path(__file__).resolve()
 _MAX_CATEGORY = 8
+# 全库经验条目总数超过该值时触发自动压缩（反思落库后检查）
+_CONSOLIDATE_THRESHOLD = 50
 
 
-def _prompts():
+def _prompts(*required: str):
+    """取 prompts 模块；缓存命中但缺 required 函数（热重载后旧版）→ 重新加载。"""
     key = "assistant_hub_core.memory.prompts"
     mod = sys.modules.get(key)
-    if mod is not None:
+    if mod is not None and all(hasattr(mod, r) for r in required):
         return mod
     spec = importlib.util.spec_from_file_location(key, str(_THIS.parent / "memory" / "prompts.py"))
     module = importlib.util.module_from_spec(spec)
@@ -150,6 +153,89 @@ def read_index(aid_dir: Path) -> str:
     return _read(p)
 
 
+# ── 压缩 ────────────────────────────────────────────────
+
+
+def read_all_entries(aid_dir: Path) -> List[Dict[str, str]]:
+    """读全库条目（跨分类）。"""
+    out: List[Dict[str, str]] = []
+    for doc in list_documents(aid_dir):
+        f = experience_dir(aid_dir) / doc["file"]
+        for ln in _read(f).splitlines():
+            if ln.strip().startswith("- "):
+                out.append({"category": doc["category"], "content": ln.strip()[2:]})
+    return out
+
+
+def total_entries(aid_dir: Path) -> int:
+    return sum(d["count"] for d in list_documents(aid_dir))
+
+
+def needs_consolidate(aid_dir: Path) -> bool:
+    """全库条目总数超过压缩水位。"""
+    return total_entries(aid_dir) > _CONSOLIDATE_THRESHOLD
+
+
+def write_all_entries(aid_dir: Path, items: List[Dict[str, str]]) -> Dict:
+    """全库重写：旧文件备份到 experience.bak/ 后按新分类重建；条目级去重。"""
+    d = experience_dir(aid_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    bak = d.parent / "experience.bak"
+    bak.mkdir(exist_ok=True)
+    old_files = list(d.glob("*.md"))
+    for f in old_files:
+        (bak / f.name).write_text(_read(f), encoding="utf-8")
+    by_cat: Dict[str, List[str]] = {}
+    for it in items:
+        cat = normalize_category(str(it.get("category") or ""))
+        content = str(it.get("content") or "").strip()
+        if not cat or not content:
+            continue
+        bucket = by_cat.setdefault(cat, [])
+        if content not in bucket:
+            bucket.append(content)
+    # 安全阀：原本有条目但结果全被过滤 → 拒绝清库（防 LLM 异常输出毁库）
+    if not by_cat and old_files:
+        return {"count": 0, "rejected": True}
+    for f in old_files:
+        f.unlink()
+    total = 0
+    for cat, contents in by_cat.items():
+        f = d / f"{_safe_name(cat)}.md"
+        f.write_text(f"# {cat}\n\n" + "\n".join(f"- {c}" for c in contents) + "\n", encoding="utf-8")
+        total += len(contents)
+    rebuild_index(aid_dir)
+    return {"count": total}
+
+
+def consolidate(aid_dir: Path, *, llm: Callable) -> Dict:
+    """LLM 全库压缩（跨分类语义合并去重 + 重新归类）；LLM 失败/输出异常时不动原文件。"""
+    entries = read_all_entries(aid_dir)
+    before = len(entries)
+    if before < 2:
+        return {"changed": False, "reason": "too_few", "before": before, "after": before}
+    try:
+        prompts = _prompts("build_consolidate")
+        raw = (llm(prompts.build_consolidate(entries)) or "").strip()
+    except Exception as e:
+        logger.warning(f"[assistant_hub.experience] 压缩 LLM 失败: {e}")
+        return {"changed": False, "reason": f"llm_error: {e}", "before": before, "after": before}
+    raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {"changed": False, "reason": "bad_json", "before": before, "after": before}
+    if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+        return {"changed": False, "reason": "bad_json", "before": before, "after": before}
+    # 安全阀：输出空数组或条目数不减 → 视为无价值/异常输出，不动原文件
+    if not data:
+        return {"changed": False, "reason": "empty_output", "before": before, "after": before}
+    r = write_all_entries(aid_dir, data)
+    if r.get("rejected"):
+        return {"changed": False, "reason": "rejected", "before": before, "after": before}
+    return {"changed": True, "before": before, "after": r["count"]}
+
+
 # ── 反思 ────────────────────────────────────────────────
 
 
@@ -157,7 +243,7 @@ def reflect(aid_dir: Path, *, identity_and_persona: str, memory_md: str, llm: Ca
     """从近期记忆提炼 0-3 条工作心得写入经验库；返回 {"added","items"}。"""
     existing = read_index(aid_dir)
     try:
-        prompts = _prompts()
+        prompts = _prompts("build_reflect")
         raw = (llm(prompts.build_reflect(identity_and_persona, memory_md, existing)) or "").strip()
     except Exception as e:
         logger.warning(f"[assistant_hub.experience] 反思 LLM 失败: {e}")

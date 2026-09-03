@@ -312,6 +312,7 @@ class AssistantCardWidget(QWidget):
         self._experience.toggleExperience.connect(self._on_experience_toggle)
         self._experience.viewCategory.connect(self._on_view_experience)
         self._experience.deleteCategoryRequested.connect(self._on_experience_delete)
+        self._experience.consolidateRequested.connect(self._on_experience_consolidate)
         self._experience.reflectRequested.connect(self._on_reflect)
         self._inner_v.addWidget(self._experience)
 
@@ -831,13 +832,53 @@ class AssistantCardWidget(QWidget):
 
         def _worker():
             r = self._mgr.experience_reflect(aid)
-            msg = (
-                f"反思完成：新增 {r.get('added', 0)} 条经验"
-                if r.get("added")
-                else f"反思完成：暂无新经验 {('(' + r.get('error', '') + ')') if r.get('error') else ''}"
+            parts = [f"反思完成：新增 {r.get('added', 0)} 条经验" if r.get("added") else "反思完成：暂无新经验"]
+            for c in r.get("consolidated") or []:
+                if c.get("changed"):
+                    parts.append(f"全库已压缩 {c.get('before')}→{c.get('after')} 条")
+            msg = "；".join(parts) + (
+                f" {('(' + r.get('error', '') + ')') if r.get('error') and not r.get('added') else ''}"
             )
+
+            def _done():
+                self._notify(msg)
+                if r.get("added") or r.get("consolidated"):
+                    self._experience.reload_categories(self._mgr.experience_list(aid))
+
             # daemon 线程 → 走信号投递（QTimer.singleShot 在这里永不触发）
-            self._main_thread_call.emit(lambda: self._notify(msg))
+            self._main_thread_call.emit(_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_experience_consolidate(self) -> None:
+        """手动全库压缩：确认 → 后台线程跑 LLM 合并 → 刷新列表。"""
+        if not self._active_aid or self._dream_running:
+            return
+        aid = self._active_aid
+        ret = _confirm_dialog(
+            _host_window() or self.window(),
+            "压缩经验库",
+            "压缩全部经验？\nLLM 将跨分类语义合并去重 + 重新归类，旧文件备份到 experience.bak。",
+        )
+        if not ret:
+            return
+        self._notify("压缩进行中…")
+
+        def _worker():
+            r = self._mgr.experience_consolidate(aid)
+            if r.get("changed"):
+                msg = f"已压缩 {r.get('before')}→{r.get('after')} 条"
+                msg += "（内容无变化）" if r.get("before") == r.get("after") else ""
+            elif r.get("reason") == "too_few":
+                msg = "经验条目过少，无需压缩"
+            else:
+                msg = f"压缩失败 {('(' + str(r.get('error') or r.get('reason', '')) + ')')}"
+
+            def _done():
+                self._notify(msg)
+                self._experience.reload_categories(self._mgr.experience_list(aid))
+
+            self._main_thread_call.emit(_done)
 
         threading.Thread(target=_worker, daemon=True).start()
 

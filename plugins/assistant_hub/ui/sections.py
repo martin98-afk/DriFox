@@ -861,6 +861,7 @@ class ExperienceSection(_Section):
     toggleExperience = pyqtSignal(bool)
     viewCategory = pyqtSignal(str)
     deleteCategoryRequested = pyqtSignal(str)
+    consolidateRequested = pyqtSignal()
     reflectRequested = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -878,6 +879,11 @@ class ExperienceSection(_Section):
         top_row = QHBoxLayout()
         self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验；每日 Dream 后会自动反思整理。")
         top_row.addWidget(self._hint, 1)
+        cons_btn = QPushButton("压缩整理")
+        cons_btn.setStyleSheet(_btn_style())
+        cons_btn.setToolTip("全库压缩：LLM 跨分类语义合并去重 + 重新归类，旧文件备份到 experience.bak")
+        cons_btn.clicked.connect(self.consolidateRequested.emit)
+        top_row.addWidget(cons_btn)
         reflect_btn = QPushButton("反思整理")
         reflect_btn.setStyleSheet(_btn_style())
         reflect_btn.clicked.connect(self.reflectRequested.emit)

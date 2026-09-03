@@ -1460,14 +1460,42 @@ class AssistantManager:
         return self._core_experience().delete_entry(self._assistant_dir(aid), category, index)
 
     def experience_reflect(self, aid: str) -> Dict[str, Any]:
-        """经验反思：从 memory.md 提炼工作心得（需 LLM；LLM 不可用静默返回）。"""
+        """经验反思：从 memory.md 提炼工作心得，随后自动压缩超限分类（需 LLM；LLM 不可用静默返回）。"""
         try:
             llm = self._utility_llm(aid)
         except Exception as e:
             return {"added": 0, "items": [], "error": f"llm_unavailable: {e}"}
-        return self._core_experience().reflect(
+        r = self._core_experience().reflect(
             self._assistant_dir(aid),
             identity_and_persona=self.identity_and_persona(aid),
             memory_md=self.compiled_memory(aid),
             llm=llm,
         )
+        r["consolidated"] = self._experience_auto_consolidate(aid, llm)
+        return r
+
+    def _experience_auto_consolidate(self, aid: str, llm) -> List[Dict[str, Any]]:
+        """水位检查：全库条目超阈值时自动压缩一次（无人管理，反思收尾时跑）。"""
+        try:
+            if not self._core_experience().needs_consolidate(self._assistant_dir(aid)):
+                return []
+        except Exception:
+            return []
+        try:
+            r = self._core_experience().consolidate(self._assistant_dir(aid), llm=llm)
+        except Exception as e:
+            return [{"error": str(e)}]
+        if r.get("changed"):
+            self.invalidate_context(aid)
+        return [r]
+
+    def experience_consolidate(self, aid: str) -> Dict[str, Any]:
+        """手动全库压缩（跨分类语义合并去重 + 重新归类）。"""
+        try:
+            llm = self._utility_llm(aid)
+        except Exception as e:
+            return {"changed": False, "error": f"llm_unavailable: {e}"}
+        r = self._core_experience().consolidate(self._assistant_dir(aid), llm=llm)
+        if r.get("changed"):
+            self.invalidate_context(aid)
+        return r
