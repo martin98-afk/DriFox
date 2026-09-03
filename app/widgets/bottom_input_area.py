@@ -1198,6 +1198,8 @@ class SendableTextEdit(TextEdit):
                 text = entry["text"]
                 self._suppress_slash_trigger = text.strip().startswith("/")
                 self.setPlainText(text)
+                # [[basename]] 字面占位符转回 inline 胶囊（依条目附件路径还原）
+                self.convert_placeholders_to_mentions(entry.get("attachments", []))
                 self.historyAttachmentsRestored.emit(entry.get("attachments", []))
                 # 选中全部文本，方便继续编辑
                 cursor = self.textCursor()
@@ -1410,6 +1412,115 @@ class SendableTextEdit(TextEdit):
         finally:
             self._syncing_attachments = False
         return True
+
+    def convert_placeholders_to_mentions(self, attachments: list):
+        """把正文中的 [[basename]] / @名字 字面文本转回 inline 胶囊
+
+        历史条目 / working line 恢复走 setPlainText（纯文本通道），胶囊信息
+        在保存时已被 toPlainText() 展开成 [[basename]] / @名字。这里还原：
+
+        - 文件占位符：依条目保存的附件路径，与「同名文件逐个消耗」的发送侧
+          替换（_build_user_text_with_attachments）互为逆操作。只还原能匹配
+          到路径的占位符；手动键入的无路径引用保持字面，发送时由占位符
+          替换逻辑兜底。
+        - 助手胶囊：名字精确匹配当前 @ 提供者条目才转（颜色取列表值），
+          匹配不到保持字面——发送链路 PreUserMessage hook 认 @名字 字面
+          文本，不转也不影响功能，纯视觉差异。
+
+        必须在 _setting_history_text / _syncing_attachments 守卫内调用：
+        替换触发的 textChanged 在守卫内只校准反向同步快照，不会误报；
+        且转换后 toPlainText() 重新展开为同样的 [[basename]] / @名字，
+        快照不变。
+        """
+        name_colors = self._collect_assistant_name_colors()
+        if not attachments and not name_colors:
+            return
+        # basename → 待消耗路径队列（同名文件按占位符出现顺序逐个消耗）
+        queues: dict[str, list[str]] = {}
+        for p in attachments:
+            queues.setdefault(os.path.basename(p), []).append(p)
+
+        # 此刻文档内无胶囊对象，super().toPlainText() 与重写版等价且更省事；
+        # 文件占位符与 @名字 两种模式不重叠，span 可在同一份文本上收集
+        raw = super().toPlainText()
+        spans: list[tuple[int, int, QTextCharFormat]] = []
+        for m in _PLACEHOLDER_RE.finditer(raw):
+            queue = queues.get(m.group(1))
+            if queue:
+                # 正序消耗：正文第 N 个同名占位符 ↔ 附件列表第 N 个同名路径
+                spans.append((m.start(), m.end(), self._make_mention_format(queue.pop(0))))
+        for start, end, fmt in self._find_assistant_mention_spans(raw, name_colors):
+            spans.append((start, end, fmt))
+        if not spans:
+            return
+
+        # 从后往前替换：前面的 span 位置不会因替换而偏移
+        spans.sort(key=lambda s: s[0], reverse=True)
+        doc = self.document()
+        self._syncing_attachments = True
+        try:
+            for start, end, fmt in spans:
+                cursor = QTextCursor(doc)
+                cursor.setPosition(start)
+                cursor.setPosition(end, QTextCursor.KeepAnchor)
+                # 占位符整体换成一枚 U+FFFC；原文本自带的尾随空格保持不动
+                cursor.insertText(_OBJECT_REPLACEMENT, fmt)
+        finally:
+            self._syncing_attachments = False
+
+    def _collect_assistant_name_colors(self) -> dict[str, str]:
+        """从 @ 提及提供者拉取 名字→颜色 映射（历史恢复胶囊还原用）
+
+        与 file_mention_card._collect_mention_items 同款取数模式：
+        provider list_func 均为内存回调，同步拉取无阻塞；异常静默返回空。
+        """
+        result: dict[str, str] = {}
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            providers = UIPluginRegistry.get_instance().get_mention_providers()
+        except Exception:
+            return result
+        for provider in providers:
+            try:
+                for entry in provider.list_func() or []:
+                    name = str(entry.get("name", "")).strip()
+                    if name and name not in result:
+                        result[name] = str(entry.get("color", "")) or "#7C3AED"
+            except Exception:
+                continue
+        return result
+
+    def _find_assistant_mention_spans(
+        self, raw: str, name_colors: dict[str, str]
+    ) -> list[tuple[int, int, QTextCharFormat]]:
+        """在纯文本 raw 中定位可还原的 @名字，返回 (start, end, 格式) 列表
+
+        - 长名优先 + 重叠丢弃："阿明2" 与 "阿明" 同时在列时前者整段成胶囊，
+          不给后者留前缀残段
+        - 后边界要求名字后是串尾/空白/常见标点；前边界只挡 ASCII 字母数字与
+          @ _（邮箱、路径里的 @），中文紧邻（"问下@阿明"）放行
+        """
+        spans: list[tuple[int, int, QTextCharFormat]] = []
+        taken: list[tuple[int, int]] = []
+        _AFTER = "，。！？；：、)）】」》\"'"
+        for name in sorted(name_colors, key=len, reverse=True):
+            for m in re.finditer("@" + re.escape(name) + r"(?=$|\s|[" + re.escape(_AFTER) + r"])", raw):
+                start, end = m.start(), m.end()
+                if start > 0:
+                    prev = raw[start - 1]
+                    if prev.isascii() and (prev.isalnum() or prev in "@_"):
+                        continue
+                if any(start < e and s < end for s, e in taken):
+                    continue
+                taken.append((start, end))
+                fmt = QTextCharFormat()
+                fmt.setObjectType(_ASSISTANT_MENTION_TYPE)
+                fmt.setProperty(_ASSISTANT_MENTION_NAME_PROP, name)
+                fmt.setProperty(_ASSISTANT_MENTION_COLOR_PROP, name_colors[name])
+                fmt.setToolTip(f"临时使用助手：{name}")
+                spans.append((start, end, fmt))
+        return spans
 
     def set_attachment_sync_enabled(self, enabled: bool):
         """暂停 / 恢复「文本 → 附件」反向同步

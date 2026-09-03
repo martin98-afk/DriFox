@@ -15558,6 +15558,9 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_history_mode_exited(self):
         """退出历史浏览模式 — 恢复进入时保存的附件"""
         self._on_history_attachments_restored(self._history_working_attachments)
+        # working line 经 toPlainText() 保存时胶囊已展开成 [[basename]]，
+        # setPlainText 回填后需依进入时保存的附件路径把占位符转回胶囊
+        self.input_area.convert_placeholders_to_mentions(self._history_working_attachments)
 
     # ==================== 附件管理 ====================
     #
