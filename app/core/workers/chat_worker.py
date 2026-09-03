@@ -2432,7 +2432,11 @@ class OpenAIChatWorker(QThread):
         for tc_id, tool_result in tool_result_map.items():
             if tc_id in added_tool_ids:
                 continue
-            tool_call = tool_result_map.get(tc_id)
+            # ⚠️ 必须从 tool_call_map 取声明结构（含 id/function.name/arguments）。
+            # 修复前误取 tool_result_map：tool 结果 dict 无 id/function 键，
+            # 塞进 tool_calls 后序列化出 {id:"", function:{name:null}} 的畸形声明，
+            # 后续 tool result 的真实 id 在服务端找不到声明 → MiniMax 2013 错误。
+            tool_call = tool_call_map.get(tc_id)
             asst_msg = {"role": "assistant", "timestamp": now_ts}
             if has_reasoning:
                 asst_msg["reasoning_content"] = reasoning_content
@@ -2819,7 +2823,34 @@ class OpenAIChatWorker(QThread):
 
             fixed_messages.append(fixed_msg)
 
-        return fixed_messages, modified
+        # 第三步：反向清理孤儿 tool 消息（tool 结果存在，但之前的 assistant 均未声明该 id）。
+        # 修复前只处理 assistant 方向的孤儿，方向反了就漏：MiniMax 2013
+        # （tool result's tool id not found）重试时 was_fixed=False，错误直达用户。
+        final_messages: List[Dict] = []
+        declared_ids: set = set()
+        removed_orphans = 0
+        for msg in fixed_messages:
+            role = msg.get("role")
+            if role == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    tc_id = tc.get("id", "")
+                    if tc_id:
+                        declared_ids.add(tc_id)
+                final_messages.append(msg)
+            elif role == "tool":
+                tc_id = msg.get("tool_call_id", "")
+                if tc_id and tc_id not in declared_ids:
+                    removed_orphans += 1
+                    modified = True
+                    continue
+                final_messages.append(msg)
+            else:
+                final_messages.append(msg)
+
+        if removed_orphans:
+            logger.warning(f"[ToolCall修复] 移除 {removed_orphans} 条无 assistant 声明的孤儿 tool 结果")
+
+        return final_messages, modified
 
     def _try_recover_tool_arguments(self, messages: List[Dict]) -> Optional[List[Dict]]:
         """
