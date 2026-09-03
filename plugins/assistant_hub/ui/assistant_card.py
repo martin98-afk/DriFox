@@ -319,7 +319,6 @@ class AssistantCardWidget(QWidget):
         self._skills = SkillsSection()
         self._skills.toggleSkills.connect(self._on_skills_toggle)
         self._skills.skillToggleRequested.connect(self._on_skill_toggle_row)
-        self._skills.skillCreateRequested.connect(self._on_skill_create)
         self._skills.skillDeleteRequested.connect(self._on_skill_delete)
         self._inner_v.addWidget(self._skills)
 
@@ -920,29 +919,6 @@ class AssistantCardWidget(QWidget):
         self._mgr.update(a)
         self._mgr.invalidate_context(a.id)
         self._reload_skills(a.id)
-
-    def _on_skill_create(self) -> None:
-        aid = self._active_aid
-        if not aid:
-            return
-        dlg = RenameDialog(
-            title="新建技能",
-            hint="输入技能名（自动规范化为英文/数字/连字符，例如：drifox-plugin-dev）：",
-            default="",
-            parent=_host_window() or self.window(),
-        )
-
-        def _do(name: str) -> None:
-            template = "# 在此填写技能简介（首行 # 标题会作为列表描述）\n\n正文：方法论、流程、注意事项。"
-            safe = self._mgr.write_skill(aid, name, template)
-            if not safe:
-                self._notify_error("技能名无效，未创建")
-                return
-            self._reload_skills(aid)
-            self._notify(f"技能「{safe}」已创建，点击列表编辑内容")
-
-        dlg.confirmed.connect(_do)
-        _open_dialog(dlg)
 
     def _on_skill_delete(self, name: str) -> None:
         aid = self._active_aid

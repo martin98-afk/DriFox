@@ -112,7 +112,7 @@ def rebuild_index(aid_dir: Path) -> str:
         lines.append(f"## {doc['category']}（{doc['count']} 条）")
         if doc["preview"]:
             lines.append(f"{doc['preview']}")
-        lines.append(f"→ experience/{doc['file']}")
+        lines.append(f"→ {experience_dir(aid_dir) / doc['file']}")
         lines.append("")
     text = "\n".join(lines).strip() + "\n"
     p = index_path(aid_dir)
