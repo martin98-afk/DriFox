@@ -41,7 +41,7 @@ os.environ.pop("MEM_TRACE", None)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench_common as bc  # noqa: E402
 
-from PyQt5.QtCore import Qt, QTimer  # noqa: E402
+from PyQt5.QtCore import QCoreApplication, QEvent, Qt, QTimer  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
 
 QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -61,6 +61,20 @@ def _counting_fetch(provider_name, config, callback):
 
 
 cpf.fetch_async = _counting_fetch  # 运行时替换
+
+
+def _flush_deferred_deletes(app):
+    """强制消费 DeferredDelete 队列（口径修正）。
+
+    deleteLater 只能被「与调用时同层」的事件循环消费；本脚本手动泵
+    （processEvents / spin_qt_events）不处理 DeferredDelete，若不冲刷，
+    关闭的窗口对象树（含其上 ~95 个 tooltip filter 与 WebEngine page）
+    会一直存活到进程结束 → RSS 殘留虚高（实测 4 tab 多算 ~6MB，且
+    tracemalloc 的 tooltip 增长全部是此假象）。
+    真实运行时 app.exec_() 每帧自动处理，此函数使 bench 口径对齐生产语义。"""
+    for _ in range(3):
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        app.processEvents()
 
 from app.main_widget import OpenAIChatToolWindow  # noqa: E402
 from app.widgets.tab_manager_window import TabManagerWindow  # noqa: E402
@@ -159,6 +173,7 @@ def run(rounds: int, tabs_per_round: int, keep: int, track_objects: bool, object
         tm._close_window_at(tm.window_count - 1)
         app.processEvents()
     bc.spin_qt_events(app, 400)
+    _flush_deferred_deletes(app)
     for _ in range(3):
         bc.full_gc()
         app.processEvents()
@@ -192,6 +207,12 @@ def run(rounds: int, tabs_per_round: int, keep: int, track_objects: bool, object
             tm._close_window_at(tm.window_count - 1)
             app.processEvents()
         bc.spin_qt_events(app, 400)
+        for _ in range(3):
+            bc.full_gc()
+            app.processEvents()
+            time.sleep(0.1)
+        # 口径修正：先冲刷 DeferredDelete 再采样（否则窗口树滞留虚高）
+        _flush_deferred_deletes(app)
         for _ in range(3):
             bc.full_gc()
             app.processEvents()
