@@ -206,6 +206,52 @@ def test_session_changed_signal_triggers_refresh(qapp):
         card.close()
 
 
+def test_error_stops_inflight_timer(qapp):
+    """模型报错后计时必须停下 —— 报错路径不发 stream_finished。
+
+    现象：出错那一轮的「正在生成…」尾巴永远 ``is_pending=True``，
+    ``duration_ms`` 走 ``time.time() - start`` 分支 → 每秒都在涨。
+    """
+    session = _FakeSession("sid-E", _messages("E", 1))
+    backend = _FakeBackend(session)
+    mw = _FakeMainWidget("win-4", backend)
+
+    card = _make_card(qapp, mw)
+    try:
+        c = card._collector
+        assert c is not None
+        # 流开始 → 产生一条 in-flight 尾巴
+        backend.stream_started.emit()
+        qapp.processEvents()
+        assert c.has_pending, "应有 in-flight 记录"
+        pending = [r for r in c.tail if r.is_pending]
+        assert pending, "尾巴里应有 pending 记录"
+        assert pending[0].status == "进行中"
+
+        # ⚠️ 只有 error_occurred，没有 stream_finished（真实 worker 行为）
+        backend.error_occurred.emit("[请求错误] 连接被重置")
+        qapp.processEvents()
+
+        assert not c.has_pending, "报错后仍有 in-flight 记录 → 计时不会停"
+        frozen = [r for r in c.tail if r.meta.get("terminal_error")]
+        assert frozen, "应保留一条可见的失败记录"
+        rec = frozen[0]
+        assert rec.is_error and not rec.is_pending
+        assert rec.status == "失败"
+        assert "请求错误" in rec.preview
+        # 关键：时长被钉死，不再随时间增长
+        d1 = rec.duration_ms
+        time.sleep(0.05)
+        assert rec.duration_ms == d1, "报错后时长仍在增长"
+
+        # 新一轮开始 → 上一轮的失败尾巴让位
+        backend.stream_started.emit()
+        qapp.processEvents()
+        assert not any(r.meta.get("terminal_error") for r in c.tail), "新一轮应清掉上一轮失败尾巴"
+    finally:
+        card.close()
+
+
 def test_kind_color_covers_hook_alias():
     """CONTEXT 的 value 是 "HOOK" —— 按 value 查表会退化成兜底灰。
 

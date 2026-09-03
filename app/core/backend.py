@@ -797,7 +797,9 @@ class ChatBackend(QObject):
         arity = self._TRACE_SIGNAL_ARITY.get(name)
         if arity is None:
             return callback
-        sig = getattr(self, self._TRACE_SIGNAL_ALIAS.get(name, name), None)
+        # ⚠️ 用 getattr 取别名表：单测探针只复制 _TRACE_SIGNAL_ARITY（向后兼容）
+        alias = getattr(self, "_TRACE_SIGNAL_ALIAS", None) or {}
+        sig = getattr(self, alias.get(name, name), None)
         if sig is None or not hasattr(sig, "emit"):
             return callback
 
