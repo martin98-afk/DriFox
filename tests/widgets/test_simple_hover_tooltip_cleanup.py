@@ -39,7 +39,7 @@ def _make_app_widget_tree():
     return root, children
 
 
-def test_scenario_a_simple_destroy(_qt_app):
+def test_scenario_a_simple_destroy(qapp):
     """Just destroy all children, no events."""
     root, children = _make_app_widget_tree()
     _flush_events(20)
@@ -49,7 +49,7 @@ def test_scenario_a_simple_destroy(_qt_app):
     _flush_events(500)
 
 
-def test_scenario_b_destroy_with_shown_tooltip(_qt_app):
+def test_scenario_b_destroy_with_shown_tooltip(qapp):
     """Show tooltips on some children, then destroy."""
     from PyQt5.QtWidgets import QWidget
 
@@ -71,7 +71,7 @@ def test_scenario_b_destroy_with_shown_tooltip(_qt_app):
     _flush_events(500)
 
 
-def test_scenario_c_hide_then_destroy(_qt_app):
+def test_scenario_c_hide_then_destroy(qapp):
     """Show tooltips, manually hide some, then destroy."""
     root, children = _make_app_widget_tree()
     _flush_events(20)
@@ -97,7 +97,7 @@ def test_scenario_c_hide_then_destroy(_qt_app):
     _flush_events(500)
 
 
-def test_scenario_d_deleteLater_then_immediate_access(_qt_app):
+def test_scenario_d_deleteLater_then_immediate_access(qapp):
     """deleteLater on parent, then try to access tooltip."""
     from PyQt5.QtWidgets import QWidget
 
@@ -124,7 +124,7 @@ def test_scenario_d_deleteLater_then_immediate_access(_qt_app):
     _flush_events(500)
 
 
-def test_scenario_e_close_main_window(_qt_app):
+def test_scenario_e_close_main_window(qapp):
     """Close the main widget tree like app shutdown would."""
     root, children = _make_app_widget_tree()
     _flush_events(20)
@@ -145,7 +145,7 @@ def test_scenario_e_close_main_window(_qt_app):
     _flush_events(500)
 
 
-def test_scenario_f_quit_app_subprocess(_qt_app):
+def test_scenario_f_quit_app_subprocess(qapp):
     """Destroy all top-level windows like QApplication.quit() would."""
     from PyQt5.QtWidgets import QWidget
 
@@ -166,7 +166,7 @@ def test_scenario_f_quit_app_subprocess(_qt_app):
     _flush_events(500)
 
 
-def test_scenario_g_timer_fires_during_destruction(_qt_app):
+def test_scenario_g_timer_fires_during_destruction(qapp):
     """Tooltip timer fires after parent starts destroying."""
     from PyQt5.QtCore import QTimer
     from PyQt5.QtWidgets import QWidget
@@ -179,10 +179,23 @@ def test_scenario_g_timer_fires_during_destruction(_qt_app):
 
     child = QWidget(parent)
     child.setToolTip("test")
-    f = install_hover_tooltip(child)
+    # setToolTip 已通过 monkey-patch 自动安装，install_hover_tooltip 此时返回
+    # None（防重路径），需从 _filters 注册表取 filter 实例
+    install_hover_tooltip(child)
+    f = sht_mod._filters.get(id(child))
 
     # Don't show tooltip yet — let timer fire AFTER deleteLater
     # First, queue deleteLater with 0 delay
     QTimer.singleShot(0, child.deleteLater)
-    QTimer.singleShot(50, lambda: f._timer.start())
+    # B2 修复后语义：child 销毁 → parent.destroyed → _cleanup 显式断连，
+    # filter/QTimer 的 C++ 对象随之析构。迟到 50ms 的 start() 预期抛
+    # RuntimeError（wrapped C/C++ object deleted），正确行为是不崩溃——
+    # 防御性吞掉，断言进程存活即可。
+    def _late_start():
+        try:
+            f._timer.start()
+        except RuntimeError:
+            pass
+
+    QTimer.singleShot(50, _late_start)
     _flush_events(500)
