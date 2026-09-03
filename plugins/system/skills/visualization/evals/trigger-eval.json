@@ -1,0 +1,72 @@
+{
+  "skill": "visualization",
+  "version": "2.0",
+  "note": "触发评测用例。expect_visualization=true 表示应产出可视化；channel_hint 为期望通道。",
+  "trigger_cases": [
+    {
+      "id": "explicit-chart",
+      "input": "画个最近 7 天的内存占用曲线",
+      "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "显式触发：用户点名「曲线」"
+    },
+    {
+      "id": "explicit-ui",
+      "input": "这个设置页的开关长什么样比较好看",
+      "expect_visualization": true,
+      "channel_hint": "html-widget",
+      "reason": "显式触发 + UI 设计专项：效果图即回答"
+    },
+    {
+      "id": "proactive-edu",
+      "input": "讲解一下 FOPDT 一阶惯性加纯滞后模型",
+      "expect_visualization": true,
+      "reason": "教学请求必出图（主动触发）"
+    },
+    {
+      "id": "proactive-compare",
+      "input": "微服务和单体架构怎么选",
+      "expect_visualization": true,
+      "channel_hint": "html-widget",
+      "reason": "方案选型对比（主动触发）"
+    },
+    {
+      "id": "spec-state-machine",
+      "input": "订单状态机：draft → submitted → approved → shipped",
+      "expect_visualization": true,
+      "channel_hint": "mermaid",
+      "reason": "规格即渲染：名词短语直接渲染，不用文字描述"
+    },
+    {
+      "id": "proactive-metrics",
+      "input": "总结一下刚才压测的各项指标结果",
+      "expect_visualization": true,
+      "channel_hint": "html-widget",
+      "reason": "指标展示场景命中指标卡模板（主动触发）"
+    },
+    {
+      "id": "negative-code",
+      "input": "git rebase 和 merge 的命令分别怎么写",
+      "expect_visualization": false,
+      "reason": "纯代码操作说明，命中降级条件"
+    },
+    {
+      "id": "negative-fact",
+      "input": "Python 的 list.append 返回什么",
+      "expect_visualization": false,
+      "reason": "单行事实问答，命中降级条件"
+    },
+    {
+      "id": "edge-css-task",
+      "input": "帮我写一个按钮 hover 效果的 CSS",
+      "expect_visualization": false,
+      "reason": "边界：代码交付请求，非 UI 设计建议，期望直接给代码"
+    },
+    {
+      "id": "edge-vague-edu",
+      "input": "随便讲讲 TCP 握手",
+      "expect_visualization": true,
+      "reason": "边界：泛泛讲解仍属教学场景，主动触发命中，应出时序示意"
+    }
+  ]
+}
