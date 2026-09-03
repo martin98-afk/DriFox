@@ -113,7 +113,6 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
                 f"#hubConfirm {{ background: {Colors.CARD_BG_SOLID}; border: 1px solid {Colors.BORDER};"
                 f"border-radius: 12px; }}"
             )
-            self.widget.setFixedSize(640, 420)
             v = QVBoxLayout(self.widget)
             v.setContentsMargins(24, 20, 24, 18)
             v.setSpacing(10)
@@ -140,7 +139,10 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
             row.addWidget(cancel)
             row.addWidget(ok)
             v.addLayout(row)
-            # 对齐 plugin-marketplace 模式：widget 留在 _hBox 布局自动居中，不手动干预
+            # 宽度固定 420；高度按内容自适应（调用点均为显式换行的 2-3 行短句，sizeHint 高度准确）
+            self.widget.setFixedWidth(420)
+            self.widget.setFixedHeight(self.widget.sizeHint().height() + 40)
+            # 对齐 plugin-marketplace 模式：widget 留在 _hBox 布局自动居中，不手动干预。
 
         def _yes_accept(self):
             self._yes = True
