@@ -704,6 +704,28 @@ class TabManagerWindow(FramelessWindow):
         # 初始宽度（隐藏态不占空间，展开时生效）
         self._workbench_frame_w = PANEL_WIDTH_DEFAULT + 14
 
+        # ── 右侧工作台 hover 悬浮预览（见 sidebar_hover_preview）──
+        # 标题栏 workbench 按钮 hover → 控制器 → 浮层 fade_in/out；
+        # 浮层自身不发信号，由 eventFilter 转发 HoverEnter/Leave 给控制器。
+        from app.widgets.sidebar_hover_preview import (
+            HoverPreviewOverlay,
+            HoverPreviewController,
+        )
+        from app.widgets.custom_title_bar import CustomTitleBar
+
+        _tb_h = CustomTitleBar.MAC_HEIGHT if self.titleBar._is_mac else CustomTitleBar.HEIGHT
+        self._wb_overlay = HoverPreviewOverlay(self, side="right", titlebar_h=_tb_h)
+        self._wb_overlay.installEventFilter(self)
+        self._wb_suppress_memory = False
+        self._wb_in_preview = False
+        self._wb_preview_ctrl = HoverPreviewController(
+            self._wb_overlay,
+            can_preview=lambda: not self.is_workbench_visible(),
+            on_enter=self._wb_preview_enter,
+            on_leave=self._wb_preview_leave,
+        )
+        self.titleBar.workbench_hover_changed.connect(self._wb_preview_ctrl.on_button_hover)
+
         # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
         QTimer.singleShot(0, self._apply_bg_from_theme)
 
@@ -858,7 +880,14 @@ class TabManagerWindow(FramelessWindow):
 
         工作台是 splitter 第三窗格，hide/show 后 QSplitter 自动把空间
         归还/分配给对话区，无需手动 setSizes。
+
+        ★ 若当前正处 hover 预览态：先同步退出预览（reparent 回 splitter），
+        预览退出回调里已经 set_workbench_visible(False)，无需再翻一次。
         """
+        ctrl = getattr(self, "_wb_preview_ctrl", None)
+        if ctrl is not None and ctrl.is_previewing():
+            ctrl.on_clicked()  # 退预览（reparent 回 splitter 并收起）
+            return
         self.set_workbench_visible(not self.is_workbench_visible())
 
     def is_workbench_visible(self) -> bool:
@@ -987,6 +1016,47 @@ class TabManagerWindow(FramelessWindow):
             frame.set_min_hint_disabled(False)
         self._set_windows_resize_preview_suppressed(False)
 
+    # ── 右侧工作台 hover 悬浮预览：进入/退出回调 ──
+
+    def _wb_preview_enter(self) -> None:
+        """控制器 on_enter：把工作台从 splitter 摘到浮层，复用 set_workbench_visible 落位/数据"""
+        frame = self._workbench_frame
+        self._wb_in_preview = True
+        w = int(getattr(self, "_workbench_frame_w", frame.minimumWidth() or 340))
+        self._wb_overlay.place(max(w, frame.minimumWidth()))
+        # 先把 frame reparent 到 overlay（手动）；set_content 内部会重复一次，幂等无害
+        frame.setParent(self._wb_overlay)
+        # 复用现有可见性落位/数据填充：动画关掉、走瞬切路径，避免与浮层进出打架
+        self._wb_suppress_memory = True
+        try:
+            self.set_workbench_visible(True, animate=False)
+        finally:
+            self._wb_suppress_memory = False
+        self._wb_overlay.set_content(frame)
+        self._wb_overlay.fade_in()
+
+    def _wb_preview_leave(self) -> None:
+        """控制器 on_leave：fade_out 同步回调里 reparent 回 splitter 第三窗格"""
+        if not self._wb_in_preview:
+            return
+        self._wb_in_preview = False
+
+        def _done() -> None:
+            frame = self._workbench_frame
+            self._wb_overlay.clear_content()
+            self._wb_overlay.hide()
+            frame.setParent(self._splitter)
+            self._splitter.insertWidget(2, frame)
+            frame.hide()
+            # 预览退出后回到收起态；记忆抑制守门，per-tab 记忆不被污染
+            self._wb_suppress_memory = True
+            try:
+                self.set_workbench_visible(False, animate=False)
+            finally:
+                self._wb_suppress_memory = False
+
+        self._wb_overlay.fade_out(on_done=_done)
+
     def _stop_wb_anim(self) -> None:
         anim = getattr(self, "_wb_anim", None)
         if anim is not None:
@@ -1026,8 +1096,9 @@ class TabManagerWindow(FramelessWindow):
         visible = bool(visible)
         # per-tab 显隐记忆：无论走哪条路径（含状态一致的 early-return）都以
         # 当前活跃窗口为准落账，切换标签页时按目标窗口记忆恢复
+        # ★ 预览路径（_wb_suppress_memory=True）只复用落位/数据，不写记忆
         cur = self.get_current_window()
-        if cur is not None:
+        if cur is not None and not getattr(self, "_wb_suppress_memory", False):
             cur._workbench_visible_memory = visible
         if visible == getattr(self, "_wb_visible_target", frame.isVisible()):
             # 状态一致时仍要确保 panel 同步（panel 曾被显式 hide，
@@ -4146,6 +4217,18 @@ class TabManagerWindow(FramelessWindow):
         (wrapper_w - _MAX_CHAT_WIDTH)/2 的空白，chat_frame 精确居中；
         窗口不足该宽度时 margins 归零，chat_frame 占满 wrapper。
         """
+        # ── 右侧工作台浮层 hover 转发 ──
+        # 浮层自身 WA_Hover 触发 HoverEnter/Leave，但不开信号；
+        # 这里透传给控制器，让它在「光标停在浮层」时取消缓收计时。
+        ov = getattr(self, "_wb_overlay", None)
+        ctrl = getattr(self, "_wb_preview_ctrl", None)
+        if ov is not None and ctrl is not None and obj is ov:
+            t = event.type()
+            if t == QEvent.HoverEnter:
+                ctrl.on_overlay_hover(True)
+            elif t == QEvent.HoverLeave:
+                ctrl.on_overlay_hover(False)
+            # 不 return：让既有 super().eventFilter 继续处理（不影响）
         if obj is self._chat_wrapper and event.type() == QEvent.Resize:
             try:
                 self._sync_chat_wrapper_width()
