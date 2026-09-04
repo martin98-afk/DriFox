@@ -945,12 +945,10 @@ class ExperienceSection(_Section):
 
     def set_enabled(self, on: bool) -> None:
         self._exp_switch.setChecked(on)
-        self._body_wrap.setVisible(True)
-        self._hint.setText(
-            "已启用：助手可在对话中自主回忆/记录经验（recall/record_experience 工具）。"
-            if on
-            else "已暂停。已有内容会保留，但助手不能读取或记录经验。"
-        )
+        # 与记忆一致：关闭后内容全部隐藏（含提示/按钮/分类列表），只留开关
+        self._body_wrap.setVisible(bool(on))
+        if on:
+            self._hint.setText("已启用：助手可在对话中自主回忆/记录经验（recall/record_experience 工具）。")
 
     def reload_categories(self, docs: List[Dict[str, Any]]) -> None:
         while self._list_area.count():
@@ -1142,6 +1140,11 @@ class SkillsSection(_Section):
         self._switch.blockSignals(True)
         self._switch.setChecked(bool(on))
         self._switch.blockSignals(False)
+        # 与记忆一致：关闭后内容全部隐藏（提示 + 技能列表），只留开关
+        for i in range(self.body().count()):
+            w = self.body().itemAt(i).widget()
+            if w is not None:
+                w.setVisible(bool(on))
 
     def reload_skills(
         self,

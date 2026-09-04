@@ -11,9 +11,10 @@
     │ Tools           ░░▓▓░░░▓▓░░░▓▓░                               │
     └──────────────────────────────────────────────────────────────┘
 
-顶栏 Duration 开关：开=条带按真实时间比例，关=每条等宽。
-滚轮缩放（仅 Duration 模式）：以鼠标所在时刻为锚点放大/缩小时间窗，
-一路缩小到覆盖全量时自动复位。
+顶栏 Duration 开关：开=条带宽度按真实时间比例，关=等宽块铺满整轴。
+滚轮缩放（两种模式都可用）：以鼠标所在时刻为锚点放大/缩小时间窗。
+duration 下窗内条带按时间比例；等宽下只铺视口内的记录、仍均分铺满。
+一路缩小到覆盖全量时自动复位；放大后底部出现平移滚动条。
 
 交互：hover 高亮 + tooltip（类型 · 名称 · 时长 · 绝对时间），点击条带选中记录。
 
@@ -28,7 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QRect, QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPen
-from PyQt5.QtWidgets import QWidget
+from PyQt5.QtWidgets import QScrollBar, QWidget
 
 from .trace_models import (
     LANE_ORDER,
@@ -46,6 +47,8 @@ LANE_ROW_H = 26
 LANE_LABEL_W = 58
 PANEL_H = TICK_H + len(LANE_ORDER) * LANE_ROW_H + 8
 PAD_R = 12
+# 底部视口平移滚动条高度（仅 Duration 开且已放大时出现）
+SCROLL_H = 12
 # duration 模式下条带的最小可见宽度（像素）。真实耗时可能只占总轴的十万分之
 # 几（快工具 13ms / 会话 3min），纯比例下限 0.004 只有 ≈3px，看起来一排
 # 刻度线（「断断续续」）。改成像素级下限，保证每个条带至少肉眼可点中。
@@ -85,12 +88,28 @@ class TimelinePanel(QWidget):
         self._range: Optional[Tuple[float, float]] = None  # 已确认选区（时间戳）
         self._drag_from: Optional[int] = None  # 拖拽起点 x
         self._drag_to: Optional[int] = None  # 当前 x
-        # ── 时间视口（滚轮缩放，仅 Duration 模式）──
+        # ── 时间视口（滚轮缩放，两种模式共用同一时间轴）──
         # None = 显示全量时间轴；(v0, v1) = 当前可见时间窗
         self._view: Optional[Tuple[float, float]] = None
+        # 等宽铺满布局：视口内记录按序分槽（paintEvent 每帧重建）
+        self._eq_slots: Optional[Dict[int, int]] = None  # idx → 槽序
+        self._eq_order: List[int] = []  # 槽序 → idx
         self.setMouseTracking(True)
-        self.setFixedHeight(PANEL_H)
+        # 泳道绘制区仍是 PANEL_H，底部 SCROLL_H 留给视口平移滚动条
+        self.setFixedHeight(PANEL_H + SCROLL_H)
         self.setCursor(Qt.ArrowCursor)
+        # ── 视口平移滚动条 ──
+        self._scrollbar = QScrollBar(Qt.Horizontal, self)
+        self._scrollbar.hide()
+        self._scrollbar.setCursor(Qt.PointingHandCursor)
+        self._scrollbar.setStyleSheet(
+            f"QScrollBar:horizontal{{background:transparent;height:{SCROLL_H}px;margin:0;}}"
+            "QScrollBar::handle:horizontal{background:rgba(102,198,255,90);border-radius:3px;min-width:24px;}"
+            "QScrollBar::handle:horizontal:hover{background:rgba(102,198,255,140);}"
+            "QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{width:0;height:0;}"
+            "QScrollBar::add-page:horizontal,QScrollBar::sub-page:horizontal{background:transparent;}"
+        )
+        self._scrollbar.valueChanged.connect(self._on_scroll_moved)
 
     def _font(self, delta_px: int = 0, bold: bool = False) -> QFont:
         """泳道标签 / 条带文字 / 空态 → **系统 UI 字体**。"""
@@ -111,6 +130,7 @@ class TimelinePanel(QWidget):
     def set_records(self, records: List[TraceRecord]) -> None:
         self._records = list(records)
         self._clamp_view()
+        self._sync_scrollbar()
         self.update()
 
     def set_selected(self, idx: Optional[int]) -> None:
@@ -118,13 +138,15 @@ class TimelinePanel(QWidget):
         self.update()
 
     def set_duration(self, enabled: bool) -> None:
-        """Duration 开关（顶栏按钮驱动）。关闭时复位缩放视口。"""
+        """Duration 开关（顶栏按钮驱动）：条带宽度按真实时间比例。
+
+        只改宽度语义，时间轴/视口/拖选在两种模式下共用，切换不复位。
+        """
         enabled = bool(enabled)
         if enabled == self._flag_duration:
             return
         self._flag_duration = enabled
-        if not enabled:
-            self._view = None  # 等宽模式无时间轴语义，视口作废
+        self._sync_scrollbar()
         self.update()
 
     def set_palette(self, pal: ThemePalette) -> None:
@@ -156,21 +178,34 @@ class TimelinePanel(QWidget):
         return time_bounds(self._records)
 
     def _x_ratio(
-        self, rec: TraceRecord, idx: int, total: int, t0: float, t1: float, lane_x0: float, lane_w: float
+        self,
+        rec: TraceRecord,
+        idx: int,
+        total: int,
+        t0: float,
+        t1: float,
+        lane_x0: float,
+        lane_w: float,
+        slot_k: int = -1,
+        slot_n: int = 0,
     ) -> Tuple[float, float]:
         """计算一条记录在泳道内的 (x0, x1) 像素坐标。
 
         宽度语义由 ``duration`` 开关决定：
         - 开：按真实时间比例（span 区间）
-        - 关：等宽块（第 idx 条占第 idx 格，块间留 8% 缝隙）
+        - 关：等宽块铺满（第 slot_k 槽占第 slot_k 格，块间留 8% 缝隙；
+          缩放时只铺视口内记录，仍是均分铺满而非按时间留空）
         """
         if self._flag_duration:
             a, b = self._ratio_global(rec, t0, t1)
             x0 = lane_x0 + a * lane_w
             # 像素级最小宽度：真实耗时极短的条带也保持可见/可点
             return x0, max(lane_x0 + b * lane_w, x0 + _MIN_BAR_PX)
-        n = max(1, total)
-        a, b = idx / n, (idx + 0.92) / n
+        if slot_k >= 0 and slot_n > 0:
+            a, b = slot_k / slot_n, (slot_k + 0.92) / slot_n
+        else:
+            n = max(1, total)
+            a, b = idx / n, (idx + 0.92) / n
         return lane_x0 + a * lane_w, lane_x0 + b * lane_w
 
     @staticmethod
@@ -205,8 +240,20 @@ class TimelinePanel(QWidget):
             # 记录几何/时间映射，供拖选/缩放换算（x ↔ 时间戳，线性）
             self._full_t0, self._full_t1 = time_bounds(recs)
             self._track_x, self._track_w, self._t0, self._t1 = track_x, track_w, t0, t1
+            # 等宽铺满布局：与视口相交的记录按序分槽（缩放时只铺窗内记录）
+            self._eq_slots = None
+            self._eq_order = []
+            if not self._flag_duration:
+                order = []
+                for i, r in enumerate(recs):
+                    s_v = r.start_ts if r.start_ts > 0 else t0
+                    e_v = max(r.span_end_ts, s_v)
+                    if e_v >= t0 and s_v <= t1:
+                        order.append(i)
+                self._eq_order = order
+                self._eq_slots = {i: k for k, i in enumerate(order)}
 
-            h = (self.height() - TICK_H - 6) / len(LANE_ORDER)
+            h = (PANEL_H - TICK_H - 6) / len(LANE_ORDER)
 
             self._paint_grid(painter, track_x, track_w, t0, t1)
             for lane_i, lane in enumerate(LANE_ORDER):
@@ -221,18 +268,45 @@ class TimelinePanel(QWidget):
     # ──────────────────── 时间选区（DevTools Overview 拖选）────────────────────
 
     def _x_to_time(self, x: int) -> float:
-        """x → 时间戳。与条带绘制同一套线性几何（当前视口 _t0/_t1）。
+        """x → 时间戳。与条带绘制同一套几何（按当前模式同源换算）。
 
-        ⚠️ 必须线性：拖选区间传给列表过滤、选区高亮回画，三方共用同一
-        映射才能对齐。旧的「条带内插值」方案在条带缝隙/空白处外推，
-        时间戳与视觉位置对不上（框选和显示不一致的根因）。
+        - duration：线性时间映射（视口 _t0/_t1）
+        - 等宽铺满：槽位域换算，第 k 槽占轴 [k/n, (k+1)/n)，格内位置映射
+          到该条带自己的 [start, span_end] 区间。框选命中哪几格 = 筛出
+          哪几条，视觉一致。
         """
-        span = max(1e-6, self._t1 - self._t0)
         frac = max(0.0, min(1.0, (x - self._track_x) / max(1, self._track_w)))
+        if not self._flag_duration:
+            order = self._eq_order
+            if not order:
+                return self._t0
+            n = len(order)
+            k = min(n - 1, int(frac * n))
+            rec = self._records[order[k]]
+            s = rec.start_ts if rec.start_ts > 0 else self._t0
+            e = max(rec.span_end_ts, s)
+            return s + (frac * n - k) * (e - s)
+        span = max(1e-6, self._t1 - self._t0)
         return self._t0 + frac * span
 
     def _time_to_x(self, t: float) -> int:
         """时间戳 → x。与 ``_x_to_time`` 对称，保证选区高亮画到正确位置。"""
+        if not self._flag_duration:
+            order = self._eq_order
+            if not order:
+                return self._track_x
+            n = len(order)
+            for k, idx in enumerate(order):
+                rec = self._records[idx]
+                s = rec.start_ts if rec.start_ts > 0 else self._t0
+                e = max(rec.span_end_ts, s)
+                if s <= t <= e:
+                    cell = (t - s) / max(1e-6, e - s)
+                    return int(self._track_x + (k + cell) / n * self._track_w)
+                if t < s:
+                    # 时间上落在当前条之前（空档/开头）→ 当前槽左端
+                    return int(self._track_x + k / n * self._track_w)
+            return int(self._track_x + self._track_w)  # 超过末条 → 轴右端
         span = max(1e-6, self._t1 - self._t0)
         frac = max(0.0, min(1.0, (t - self._t0) / span))
         return int(self._track_x + frac * self._track_w)
@@ -247,7 +321,7 @@ class TimelinePanel(QWidget):
                 rects.append((self._drag_from, self._drag_to))
         for x0, x1 in rects:
             left, right = min(x0, x1), max(x0, x1)
-            box = QRect(left, TICK_H - 6, max(2, right - left), self.height() - TICK_H + 2)
+            box = QRect(left, TICK_H - 6, max(2, right - left), PANEL_H - TICK_H + 2)
             painter.setPen(Qt.NoPen)
             painter.setBrush(with_alpha(QColor(self._pal.accent), 34))
             painter.drawRect(box)
@@ -274,7 +348,7 @@ class TimelinePanel(QWidget):
         painter.setPen(pen)
         for k in range(1, 4):
             gx = track_x + int(track_w * k / 4)
-            painter.drawLine(gx, TICK_H - 4, gx, self.height() - 4)
+            painter.drawLine(gx, TICK_H - 4, gx, PANEL_H - 4)
 
     def _paint_lane(
         self,
@@ -305,7 +379,22 @@ class TimelinePanel(QWidget):
         for idx, rec in enumerate(recs):
             if rec.lane != lane:
                 continue
-            bx0, bx1 = self._x_ratio(rec, idx, len(recs), t0, t1, track_x, track_w)
+            s_v = rec.start_ts if rec.start_ts > 0 else t0
+            e_v = max(rec.span_end_ts, s_v)
+            if self._eq_slots is not None:
+                # 等宽：只画视口内分到槽的记录（铺满布局，见 paintEvent）
+                slot_k = self._eq_slots.get(idx, -1)
+                if slot_k < 0:
+                    continue
+                slot_n = len(self._eq_order)
+            else:
+                # 视口剪裁：与当前时间窗无重叠的条带不画，否则被 clamp 到
+                # 边界后又被 _MIN_BAR_PX 撑成 5px 块，堆积在两头。
+                # 用严格不等：端点相接（e==t0 / s==t1）仍画，避免误杀瞬时条带。
+                if e_v < t0 or s_v > t1:
+                    continue
+                slot_k, slot_n = -1, 0
+            bx0, bx1 = self._x_ratio(rec, idx, len(recs), t0, t1, track_x, track_w, slot_k, slot_n)
             raw_w = int(bx1 - bx0)
             # 瞬时事件（span=0，同秒注入）画成 3px 竖线标记，圆角也收敛
             instant = raw_w <= 4
@@ -392,6 +481,49 @@ class TimelinePanel(QWidget):
 
     # ──────────────────── 交互 ────────────────────
 
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._scrollbar.setGeometry(
+            LANE_LABEL_W,
+            self.height() - SCROLL_H,
+            max(40, self.width() - LANE_LABEL_W - PAD_R),
+            SCROLL_H,
+        )
+
+    def _sync_scrollbar(self) -> None:
+        """滚动条 ↔ 视口同步：未放大时隐藏，放大后出现且可拖。"""
+        sb = self._scrollbar
+        if self._view is None or not self._records:
+            sb.hide()
+            return
+        full_t0, full_t1 = time_bounds(self._records)
+        full_ms = max(1, int((full_t1 - full_t0) * 1000))
+        span_ms = max(1, int((self._view[1] - self._view[0]) * 1000))
+        sb.blockSignals(True)
+        sb.setRange(0, max(0, full_ms - span_ms))
+        sb.setPageStep(span_ms)
+        sb.setSingleStep(max(1, span_ms // 20))
+        sb.setValue(int((self._view[0] - full_t0) * 1000))
+        sb.blockSignals(False)
+        self._scrollbar.setGeometry(
+            LANE_LABEL_W,
+            self.height() - SCROLL_H,
+            max(40, self.width() - LANE_LABEL_W - PAD_R),
+            SCROLL_H,
+        )
+        sb.show()
+
+    def _on_scroll_moved(self, value: int) -> None:
+        """拖滚动条 → 视口平移（缩放状态不变）。"""
+        if self._view is None or not self._records:
+            return
+        full_t0, full_t1 = time_bounds(self._records)
+        span = self._view[1] - self._view[0]
+        v0 = full_t0 + value / 1000.0
+        v0 = max(full_t0, min(full_t1 - span, v0))
+        self._view = (v0, v0 + span)
+        self.update()
+
     def _clamp_view(self) -> None:
         """数据变化后把视口夹回全量时间轴内（流式追加不打断缩放状态）。"""
         if self._view is None:
@@ -405,12 +537,12 @@ class TimelinePanel(QWidget):
         self._view = (v0, v0 + span)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
-        """滚轮缩放时间窗（以鼠标所在时刻为锚点），仅 Duration 模式。
+        """滚轮缩放时间窗（以鼠标所在时刻为锚点），两种模式共用。
 
         ⚠️ 锚点必须用全局光标映射：QWheelEvent.pos() 在部分 Windows 环境
         返回错误坐标，导致锚点恒在左端 → 放大永远从时间轴起点开始。
         """
-        if not self._flag_duration or not self._records:
+        if not self._records:
             return
         full_t0, full_t1 = time_bounds(self._records)
         t0, t1 = self._view if self._view else (full_t0, full_t1)
@@ -427,6 +559,7 @@ class TimelinePanel(QWidget):
             v0 = anchor - frac * new_span
             v0 = max(full_t0, min(full_t1 - new_span, v0))
             self._view = (v0, v0 + new_span)
+        self._sync_scrollbar()
         self.update()
 
     def _hit_test(self, pos) -> Optional[int]:
