@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt5.QtCore import QEasingCurve, QPoint, QVariantAnimation, Qt, QTimer
-from PyQt5.QtWidgets import QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QWidget
 
 
 class HoverPreviewOverlay(QWidget):
@@ -19,9 +19,13 @@ class HoverPreviewOverlay(QWidget):
     - WA_ShowWithoutActivating：hover 弹出不抢焦点。
 
     跟随策略：place() 用 mapToGlobal 换算屏幕坐标定位；主窗口 moveEvent /
-    resizeEvent 时宿主调 sync_to_window() 重定位。滑入/滑出动画每帧重读
-    主窗口几何，动画期间天然跟随。已知代价：预览期拖动主窗口存在一帧滞后
-    （hover 预览是临时态，用户此时通常不拖窗口，可接受）。
+    resizeEvent 时宿主调 sync_to_window() 重定位。已知代价：预览期拖动主窗口
+    存在一帧滞后（hover 预览是临时态，用户此时通常不拖窗口，可接受）。
+
+    展开语义是 reveal（揭示）而非 slide（滑动）：动画期内容 frame 固定在最终
+    屏幕位置不动，浮层自身从窗口右缘向左扩展，像幕布从右缘向左拉开逐渐
+    "揭示"内容。若让内容跟随浮层左缘一起移动/重排，观感是整块面板从屏幕
+    右缘外飞进来（用户实测否决），故内容定位采用右对齐负偏移方案。
     """
 
     EDGE_INSET = 6  # 贴窗口外缘内缩，避让主窗口边缘 resize 命中区
@@ -35,9 +39,8 @@ class HoverPreviewOverlay(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setAttribute(Qt.WA_Hover, True)  # 浮层自身接收 HoverEnter/Leave
         self.setObjectName("hoverPreviewOverlay")
-        self._slot_layout = QVBoxLayout(self)
-        self._slot_layout.setContentsMargins(0, 0, 0, 0)  # 几何全部交给 place()
-        self._slot_layout.setSpacing(0)
+        # 不用 layout：动画期内容 frame 由 _place_at_width 手动右对齐定位
+        # （reveal 语义，见类 docstring），layout 会强制 frame 等于浮层宽导致内容跟滑
         self._content: QWidget | None = None
         self._slide: QVariantAnimation | None = None
         self._target_w = 0
@@ -47,7 +50,11 @@ class HoverPreviewOverlay(QWidget):
     # ── 定位：主窗口局部坐标 → 全局屏幕坐标 ──
 
     def _place_at_width(self, w: int) -> None:
-        """把浮层摆到主窗口边缘：顶接标题栏、底接窗口底、外缘对齐（全局坐标）。"""
+        """把浮层摆到主窗口边缘：顶接标题栏、底接窗口底、外缘对齐（全局坐标）。
+
+        reveal 语义：内容 frame 固定在最终屏幕位置（右缘贴浮层右缘、宽度等于
+        目标宽，左缘伸出浮层左侧被裁剪），浮层宽度从 0 → 目标宽只改变可见范围，
+        内容在屏幕上的坐标全程静止。"""
         win = self.parentWidget()
         if win is None:
             return
@@ -59,6 +66,22 @@ class HoverPreviewOverlay(QWidget):
         g = win.mapToGlobal(QPoint(local_x, top))
         self._current_w = w
         self.setGeometry(g.x(), g.y(), w, h)
+        self._layout_content(h)
+
+    def _layout_content(self, h: int) -> None:
+        """reveal 定位：内容固定宽 _target_w、右缘贴浮层右缘（左缘负偏移被裁剪）。
+
+        内容屏幕坐标 = 浮层全局x + (_current_w - _target_w) = 窗口右缘-EDGE_INSET
+        -_target_w，与浮层当前宽无关 → 全程静止。稳定态 _current_w == _target_w
+        时偏移归 0。左侧面板展开方向相反时改此处符号即可。"""
+        c = self._content
+        if c is None:
+            return
+        target = max(1, self._target_w)
+        if self._side == "right":
+            c.setGeometry(self._current_w - target, 0, target, h)
+        else:
+            c.setGeometry(0, 0, target, h)
 
     def place(self, width: int) -> None:
         """按窗口当前尺寸与目标宽度定位浮层。"""
@@ -71,20 +94,22 @@ class HoverPreviewOverlay(QWidget):
             self._place_at_width(self._current_w)
 
     def set_content(self, widget: QWidget) -> None:
-        """把侧栏外层 frame 挂入浮层。"""
+        """把侧栏外层 frame 挂入浮层（reveal 手动定位，见 _layout_content）。"""
         if self._content is widget:
             return
         self.clear_content()
         widget.setParent(self)
-        self._slot_layout.addWidget(widget)
         widget.show()
         self._content = widget
+        self._layout_content(self.height())
 
     def clear_content(self) -> None:
-        """从浮层摘出内容 widget（不销毁、不 setParent(None)；reparent 交调用方）。"""
-        if self._content is not None:
-            self._slot_layout.removeWidget(self._content)
-            self._content = None
+        """从浮层摘出内容 widget。
+
+        ★ 只清引用、不动 parent：宿主滑出回调里是「clear_content → frame.hide()
+        → reparent 回 splitter」的顺序，若此处 setParent(None)，可见的 frame 会
+        闪现成独立顶层窗口一帧。parent 交调用方 reparent。"""
+        self._content = None
 
     # ── 显隐（fade 语义保留为直切，动画走 slide_in/slide_out 几何滑入滑出） ──
 

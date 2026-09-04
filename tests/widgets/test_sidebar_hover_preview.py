@@ -41,6 +41,26 @@ def test_place_right_insets_edge(window, qtbot):
     assert ov.height() == 800 - 38
 
 
+def test_reveal_keeps_content_screen_position(window, qtbot):
+    """reveal 语义：滑入动画期内容屏幕坐标静止（右对齐负偏移，非内容跟滑）。"""
+    ov = HoverPreviewOverlay(window, side="right", titlebar_h=38)
+    qtbot.addWidget(ov)
+    window.resize(1200, 800)
+    frame = QWidget()
+    qtbot.addWidget(frame)
+    ov.set_content(frame)
+    ov.slide_in(400)
+    qtbot.wait(50)  # 动画中途
+    assert 0 < ov.width() < 400
+    mid_x = frame.mapToGlobal(QPoint(0, 0)).x()
+    qtbot.wait(220)  # 等动画结束
+    assert ov.width() == 400
+    # 内容全程钉在最终位置：中途与结束时屏幕 x 一致（reveal 而非滑动）
+    assert frame.mapToGlobal(QPoint(0, 0)).x() == mid_x
+    assert frame.geometry().x() == 0  # 稳定态右对齐偏移归 0
+    ov._slide.stop()
+
+
 def test_set_and_clear_content(window, qtbot):
     ov = HoverPreviewOverlay(window, side="right", titlebar_h=38)
     qtbot.addWidget(ov)
