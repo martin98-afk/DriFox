@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.5.8-gamma] - 2026-09-04
+## [v0.5.8b2] - 2026-09-04
 
 自上一版本以来的变更 | 提交数：71 · 文件变更：239 · +11258/-6616 | 贡献者：mading, dingma
 
