@@ -30,8 +30,8 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 |------|------|------|
 | 自定义示意图/结构图/流程图 | 内联 `<svg>` | → `references/svg-guide.md` |
 | 数据趋势/曲线/分布/占比 | ` ```echarts ` 代码块 | → `references/echarts-mermaid.md` |
-| 层级占比/多维评分/仪表盘/热力/桑基/K线 | ` ```echarts ` 代码块 | → `references/echarts-mermaid.md`（图型路由总表） |
-| 流程/时序/状态机/ER/甘特/象限选型/分支流/里程碑 | ` ```mermaid ` 代码块 | → `references/echarts-mermaid.md`（图型路由总表） |
+| 层级占比/多维评分/仪表盘/热力/桑基/K线/象限定位（中文标签） | ` ```echarts ` 代码块 | → `references/echarts-mermaid.md`（图型路由总表） |
+| 流程/时序/状态机/ER/甘特/象限选型（英文）/分支流/里程碑 | ` ```mermaid ` 代码块 | → `references/echarts-mermaid.md`（图型路由总表） |
 | UI 效果稿/指标卡/对比卡/交互组件 | 内联 HTML | → `references/html-widget.md` |
 | 数学/物理公式、方程、推导 | 正文 LaTeX 定界符 | 宿主 KaTeX 自动渲染，规则见下节 |
 | 监控总览/选型报告/性能排查/数据周报（复合场景） | 配方组合 | → `references/playbooks.md` |

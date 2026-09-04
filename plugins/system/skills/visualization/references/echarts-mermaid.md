@@ -7,6 +7,8 @@
 - 宿主免费提供：hover 工具栏、放大查看、PNG 导出、resize 自适应、深浅主题（`echarts.init(el, isDark ? 'dark' : undefined)`）。option 里不写死背景色、不写工具栏配置。
 - 文字标签用 rich text 控制字号字重，只用 400/500 两档。
 
+| 选型象限定位 | quadrantChart（英文）/ echarts 散点（中文） | 见 echarts-mermaid.md |
+
 ### 图型路由总表（按数据形态选图型，不只折线柱状饼图）
 
 | 数据形态 | 图型 | 要点 |
@@ -18,6 +20,7 @@
 | 层级占比 | treemap / sunburst | 层级 ≤3，treemap 优先横向 |
 | 流量/资金/依赖分配 | sankey | 左进右出，层级 ≤4 |
 | 依赖/关系网络 | graph（力导向） | 节点 ≤50，`layout:'force'` 纯 JSON，categories 分组着色 |
+| 选型象限定位（中文标签） | scatter + markLine | 0-1 坐标，x/y=0.5 十字分割，markArea 四象限着色，点 label 显名称 |
 | 单指标阈值状态 | gauge | ≤2 个并排（容器 400px 高限制），阈值分段色 |
 | 二维密度 | heatmap | 类目规模 ≤20×7，visualMap 标明范围 |
 | 金融 OHLC | candlestick | 涨红跌绿（见细则） |
@@ -45,12 +48,14 @@
 | 数据库 schema | `erDiagram` |
 | 状态机 | `stateDiagram-v2` |
 | 甘特/计划 | `gantt` |
-| 选型象限定位 | `quadrantChart` |
+| 选型象限定位（**仅英文标签**） | `quadrantChart` |
 | 分支策略/发布流 | `gitGraph` |
 | 里程碑叙事 | `timeline` |
 | 知识结构发散 | `mindmap` |
 
-后四种图型依赖宿主 vendor 完整性：渲染失败时降级——quadrantChart → SVG 决策矩阵（templates.md），gitGraph → 文字步骤列表，timeline → HTML 垂直时间线（templates.md），mindmap → `flowchart` 层级布局。
+**quadrantChart 中文硬限制（runtime 实测）**：`x-axis`/`y-axis` 文本与点名在词法层拒绝中文（title 可中文），含中文必报 Lexical error。中文标签场景直接改走 echarts：scatter + 0-1 坐标 + `markLine` x/y=0.5 十字分割 + `markArea` 四象限着色（≤2 色系）+ 点 `label` 显名称，纯 JSON 且无词法限制。
+
+gitGraph/timeline/mindmap 中文兼容已实测通过；渲染失败时降级——gitGraph → 文字步骤列表，timeline → HTML 垂直时间线（templates.md），mindmap → `flowchart` 层级布局。
 
 - 数据库 schema / ERD 一律走 mermaid `erDiagram`，不手画 SVG。
 - 环形循环不画成 ring：线性步骤 + 文字标注回边，或编号步骤列表。

@@ -75,12 +75,20 @@
       "reason": "金融 OHLC → candlestick，涨红跌绿（v3 图型路由）"
     },
     {
-      "id": "new-quadrant",
+      "id": "new-quadrant-cjk",
       "type": "positive",
       "input": "把这几个需求按价值和成本放到四象限里排个优先级",
       "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "中文标签象限 → echarts scatter+markLine（quadrantChart 词法拒中文，runtime 实测）"
+    },
+    {
+      "id": "new-quadrant-en",
+      "type": "positive",
+      "input": "Plot these frameworks on a quadrant chart by cost and value",
+      "expect_visualization": true,
       "channel_hint": "mermaid",
-      "reason": "象限定位 → quadrantChart 或 SVG 决策矩阵（v3 图型路由）"
+      "reason": "纯英文标签 → quadrantChart 可用"
     },
     {
       "id": "new-treemap",
