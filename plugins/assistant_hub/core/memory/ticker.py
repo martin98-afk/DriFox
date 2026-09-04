@@ -151,20 +151,24 @@ class MemoryTicker:
             pass  # LLM 不可用等：静默（compile_chain 内部已降级）
 
     def _run_daily(self, aid: str, logical_date: str) -> None:
-        today_changed = True  # LLM 不可用等异常时保持原行为：后续步骤照常尝试
+        material_changed = True  # LLM 不可用等异常时保持原行为：后续步骤照常尝试
         try:
             # 顺序铁律：compile_chain(False) 内部先 daily 后 today；
             # require_new=True：今日无新增时短路 facts（省 LLM 成本）
             chain = self._mgr.compile_chain(aid, light=False, require_new=True)
-            if (chain or {}).get("ok") and chain.get("steps", {}).get("compile_today") is not None:
-                today_changed = bool(chain["steps"]["compile_today"].get("changed"))
+            if (chain or {}).get("ok"):
+                steps = chain.get("steps", {})
+                # daily 蒸馏出新日记同样算素材变化（凌晨启动场景：
+                # 昨日草稿已进 daily 但今天还没新对话，dream/reflect 不应被跳过）
+                daily_changed = bool((steps.get("compile_daily") or {}).get("changed"))
+                material_changed = daily_changed or bool((steps.get("compile_today") or {}).get("changed"))
         except Exception:
             chain = {}
         a = self._mgr.get(aid)
         if a is None:
             return
-        # 今日确无新增：素材无变化，dream/经验反思无需跑
-        if not today_changed:
+        # 素材无变化：dream/经验反思无需跑
+        if not material_changed:
             return
         if getattr(a, "dream_auto_enabled", False):
             try:

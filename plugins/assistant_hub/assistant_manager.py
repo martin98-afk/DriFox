@@ -1397,7 +1397,7 @@ class AssistantManager:
                     if (aid_dir / "memory" / "today.md").exists()
                     else ""
                 )
-                yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+                yesterday = cm.logical_yesterday()
                 result["steps"]["compile_daily"] = cm.compile_daily(aid_dir, prev_today, yesterday, llm=llm)
             result["steps"]["compile_today"] = cm.compile_today(aid_dir, llm=llm, _session_filter=_filter)
             if not light:

@@ -95,6 +95,15 @@ def logical_today() -> str:
     return _core("session_store").logical_day()
 
 
+def logical_yesterday() -> str:
+    """上一逻辑日（对 04:00 边界安全，供日批蒸馏定日期）。
+
+    例：09-06 凌晨 02:00（逻辑日 09-05）→ now-1day=09-05 02:00 → hour<4 → 09-04。
+    直接用 now-1day 的日期会在深夜触发日批时错把当天草稿提前蒸馏。
+    """
+    return _core("session_store").logical_day(datetime.now() - timedelta(days=1))
+
+
 def _day_start(logical_date: str) -> str:
     """逻辑日 04:00 起点的时间戳字符串（sessions.updated_at 比较）。"""
     d = datetime.strptime(logical_date, "%Y-%m-%d") + timedelta(hours=4)
