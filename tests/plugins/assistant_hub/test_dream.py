@@ -231,3 +231,21 @@ def test_build_dream_forget_prompt():
     assert "不增" in text
     assert "- 事实A" in text and "- 长期沉淀" in text and "- 今日草稿" in text
     assert "2026-08-30" in text and "30日的事" in text
+
+
+def test_apply_sections_syncs_daily(tmp_path):
+    aid = tmp_path / "a_apply"
+    _seed_memory(aid)  # daily/2026-08-30.md
+    (aid / "memory" / "daily" / "2026-08-31.md").write_text("# 2026-08-31\n\n- 31日的事", encoding="utf-8")
+    ddir = aid / "memory" / "daily"
+    assert (ddir / "2026-08-30.md").exists() and (ddir / "2026-08-31.md").exists()
+    # 只保留 08-31：08-30 应被删除
+    m.apply_sections(
+        aid,
+        m.DreamSections(facts="- F", today="- T", daily=[{"date": "2026-08-31", "body": "# 2026-08-31\n\n- 31日的事"}], longterm=""),
+    )
+    assert not (ddir / "2026-08-30.md").exists()
+    assert (ddir / "2026-08-31.md").exists()
+    # daily 为空列表：清空全部 daily
+    m.apply_sections(aid, m.DreamSections(facts="- F", today="- T", daily=[], longterm=""))
+    assert not any(ddir.glob("*.md"))

@@ -141,6 +141,16 @@ def apply_sections(aid_dir: Path, s: DreamSections) -> None:
     _write(mem / "facts.md", s.facts)
     _write(mem / "longterm.md", s.longterm)
     # today/daily 属"过程段"：Dream 只重写 facts/longterm 可编辑段（对齐原版 editable sections）
+    # 遗忘步扩展：daily 与 s.daily 对齐（不在集合内的文件删除）；restore 传全量即全量恢复
+    ddir = mem / "daily"
+    if ddir.exists():
+        keep = {str(d.get("date") or "") for d in s.daily}
+        for f in ddir.glob("*.md"):
+            if f.stem not in keep:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
 
 
 # ── state（每日水位 + lastRun 报告）─────────────────────
