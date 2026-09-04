@@ -1069,16 +1069,18 @@ class TabManagerWindow(FramelessWindow):
             panel = self.workbench_panel
             panel.set_panel_visible(False)
             self._wb_overlay.clear_content()
+            # ★ 回挂前先隐藏：QSplitter 不给隐藏窗格分宽度，chatFrame 全程不被挤
+            #   → 消除关闭瞬间的消息卡闪烁（原 bug：frame 仍 visible 时被塞回 splitter）
+            frame.hide()
             self._wb_overlay.hide()
             frame.setParent(self._splitter)
             self._splitter.insertWidget(2, frame)
             if self._wb_promote_on_leave:
-                # 点击转常驻：走真正的嵌入展开（动画 + chatFrame margin 切换 + 记忆落账 True）
+                # 点击转常驻：显式走嵌入展开（动画 + chatFrame margin 切换 + 记忆落账 True）
                 self._wb_promote_on_leave = False
                 self.set_workbench_visible(True)
             else:
-                frame.hide()
-                self._wb_visible_target = None  # 回挂收起后回到“看 isVisible”，关闭态 False
+                self._wb_visible_target = None  # 回挂收起后回到"看 isVisible"，关闭态 False
 
         self._wb_overlay.slide_out(on_done=_done)
 
