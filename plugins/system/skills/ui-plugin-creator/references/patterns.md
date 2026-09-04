@@ -47,6 +47,11 @@
   - 8.1 日志 — L522–L530
   - 8.2 异常处理 — L531–L536
   - 8.3 命名 — L537–L542
+- **10. 全屏覆盖窗（选区截图 / 全屏遮罩类动作）** — L551–L630
+  - 10.1 冻结底图方案（核心决策） — L556
+  - 10.2 窗口属性与生命周期 — L572
+  - 10.3 高 DPI 坐标换算 — L600
+  - 10.4 测试要点（pytest-qt） — L619
 ## 1. 上下文注入（拉模型）
 
 **核心原则**：**不要直接推数据**。卡片通过 `set_context_provider(provider)` 注入一个**无参函数**，在需要时自行调用获取最新上下文（主题色、字体、项目信息等）。
@@ -540,3 +545,86 @@ logger.error(f"[<plugin>] 数据读取失败: {e}\n{traceback.format_exc()}")
 - 类：`PascalCase`（如 `MyCardWidget`）
 - 私有方法：`_underscore_prefix`（如 `_async_load_data`）
 - 模块前缀：`ui_plugin_<name>.`（用于热重载清理）
+
+---
+
+## 10. 全屏覆盖窗（选区截图 / 全屏遮罩类动作）
+
+> 参考实现：`plugins/quick-screenshot/ui/overlay.py`（2026-09-04 实战沉淀）。
+> 适配场景：点击按钮后接管全屏做选区/遮罩交互（截图、屏幕取色、录屏选区等）。
+
+### 10.1 冻结底图方案（核心决策）
+
+进覆盖窗**之前**先 `QScreen.grabWindow(0)` 抓全屏作底图，覆盖窗铺底图：
+
+```python
+screen = QApplication.primaryScreen()
+base = screen.grabWindow(0)              # 物理像素尺寸，devicePixelRatio 已标记
+overlay = _ScreenshotOverlay(base, screen.geometry())
+overlay.show()                            # FramelessWindowHint | WindowStaysOnTopHint | Tool
+```
+
+- **为什么不用半透明透窗**：透窗有闪烁；松手到抓屏有时间差，截到的与看到的不一致；
+  且做不了「选区外变暗、选区内原图」。冻结底图 = 所见即所截（Snipaste/QQ 截图同原理）。
+- paintEvent：先 `drawPixmap(self.rect(), base)` 铺底图（物理尺寸拉伸到逻辑窗口，等效缩小
+  DPR，画面正确），再四段 `fillRect` 拼选区外暗遮罩 + 选区边框 + 尺寸角标。
+
+### 10.2 窗口属性与生命周期
+
+```python
+super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+self.setAttribute(Qt.WA_DeleteOnClose)   # 用完即毁，防置顶窗残留卡死桌面
+self.setCursor(Qt.CrossCursor)
+self.setGeometry(screen_rect)            # 不用 showFullScreen()，多屏下几何更可控
+```
+
+- 信号出口：`captured(QPixmap)` / `cancelled()`，窗口自身不做剪贴板/提示（保持可测）。
+- 交互约定：左键拖框、松手即完成；**Esc / 右键 / 误触（选区 < 4×4 逻辑像素）一律取消**。
+- **单实例防护**（放 on_click 侧，模块级引用）：
+
+```python
+_active_overlay = None  # 模块级
+
+def _close_stale():
+    global _active_overlay
+    if _active_overlay is not None:
+        try:
+            _active_overlay.close()
+        except RuntimeError:
+            pass  # WA_DeleteOnClose 后 C++ 对象已销毁
+        _active_overlay = None
+```
+
+- `destroyed.connect(_clear_ref)` 清引用；on_click 全流程 try/except，异常路径必须关窗。
+
+### 10.3 高 DPI 坐标换算（主程序三件套全开：EnableHighDpiScaling + UseHighDpiPixmaps + PassThrough）
+
+- 覆盖窗鼠标 `event.pos()` 是**逻辑像素**；`grabWindow` 底图是**物理像素**（DPR 已标记）。
+- 裁剪用物理矩形，结果回写 DPR 保证粘贴出去物理尺寸正确：
+
+```python
+def _physical_rect(logical: QRect, dpr: float) -> QRect:
+    if dpr <= 1.0:
+        return QRect(logical)
+    return QRect(round(logical.x() * dpr), round(logical.y() * dpr),
+                 round(logical.width() * dpr), round(logical.height() * dpr))
+
+dpr = float(base.devicePixelRatio() or 1.0)
+shot = base.copy(_physical_rect(sel, dpr))
+shot.setDevicePixelRatio(dpr)
+```
+
+- QRect 两点构造**含端点**：拖 (10,10)→(110,60) 得 101×51，与截图工具坐标语义一致，别"修正"它。
+
+### 10.4 测试要点（pytest-qt）
+
+- 插件目录非 Python 包，测试用 `importlib.util.spec_from_file_location` 加载
+  （先例：`tests/plugins/test_quick_screenshot.py`、`tests/test_rewrite_inline_script.py`）。
+- **`qtbot.mouseMove` 在未 show 的 widget 上不派发事件**：拖拽模拟用手动
+  `QMouseEvent + QApplication.sendEvent`（press/move/release 三连）。
+- 窗口用 `WA_DeleteOnClose` 时**别交给 `qtbot.addWidget`** 收尾（teardown 二次 close 会
+  RuntimeError），fixture 里 yield 后 `try: ov.close() except RuntimeError: pass` + `deleteLater()`。
+- 信号验证用 `qtbot.waitSignal(overlay.captured)`；剪贴板断言注意剪贴板是全局资源，
+  断言尺寸即可，别依赖具体内容。
+- lint 关卡是 **ruff**；`npx pyright` 默认配置在本项目是满屏基线噪音
+  （无 pyrightconfig、PyQt5 stub 缺枚举），别当硬关卡，也别为它改代码。
