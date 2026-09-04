@@ -3,6 +3,66 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.8-gamma] - 2026-09-04
+
+自上一版本以来的变更 | 提交数：71 · 文件变更：239 · +11258/-6616 | 贡献者：mading, dingma
+
+> ⚠️ Pre-release 版本：quick-screenshot 插件迁移至 drifox-plugins2 市场发布；KaTeX 公式渲染全套接入；assistant_hub Dream 遗忘步上线；skills 管理系统与 agent trace 推理支持。稳定性尚未充分验证。
+
+### ✨ 新功能 (New Features)
+
+- **quick-screenshot 截图插件** (`plugins/system/quick-screenshot/`): 输入框按钮注册、剪贴板写入、单实例防护、选区遮罩窗（冻结底图+高DPI换算+误触取消）、按钮锚定新建会话左侧、InfoBar 成功提示；后续移除系统副本迁至 drifox-plugins2 市场发布。
+- **KaTeX 公式渲染全套** (`app/widgets/message_card.py` 等): 0.16.22 vendor 落库；公式提取纯函数（GitHub 规则 + CJK 收紧，14 条测试矩阵）；接入 markdown 管线（cached_impl + worker + 差量/增量/类内流式共 6 处）；JS 渲染层（懒加载 + 流式防重 + 失败回退）；`build.py` 收集 `vendor/katex`。
+- **SVG 渲染增强** (`app/widgets/cards/`): 内联 SVG 多行块保护；SVG widget 源码保存与图表展开功能；code block 内 SVG 处理；SVG 规范补 CSS 动画规则与最佳实践。
+- **visualization 技能 v3.0 → v3.1** (`plugins/system/skills/visualization/`): quadrantChart 中文象限改路由 echarts scatter+markLine；同步 KaTeX 公式通道（正文 LaTeX 定界符 + GitHub 规则说明）；eval 包增至 25 用例；技能触发评测脚本与参考文档。
+- **assistant_hub Dream 遗忘步** (`plugins/system/assistant_hub/`): 第六步遗忘（火灾取物·物竞天择，记忆限额压缩）；`apply_sections` 支持 daily 状态同步；遗忘步 prompt；新增遗忘步确定性硬截兜底。
+- **skills 管理系统** (`plugins/system/` 等): enable/disable 功能、白名单/黑名单、UI 集成；技能描述优化与用法引导。
+- **Agent Trace 推理支持** (`app/widgets/cards/trace_card_widget.py` 等): reasoning 透传与 UI 改进；TraceCollector 增量投影 + 性能基准；session 处理稳定性增强；tab 切换与主题应用性能优化。
+- **session 模型扩展** (`app/core/`): `created_at` 字段 + session duration（active session 实时计算）；session ownership mapping for memory filtering。
+- **Vision 内容注入 + `<think>` 剥离** (`app/core/engines/`): 视觉内容注入逻辑增强，含 vision notice 抑制测试。
+- **placeholder → mention 转换** (`app/widgets/cards/message_card.py`): SendableTextEdit 附件占位符转 mention。
+- **插件页面管理** (`app/widgets/`): 强制重建与同步逻辑更新。
+- **SessionStart hook** (`plugins/system/`): 团队成员 agent identity 提示注入。
+- **经验自动/手动合并** (`plugins/system/assistant_hub/`): LLM 集成 consolidation。
+- **UI 改进** (`app/widgets/`): 对话框尺寸自适应与内容对齐（plugin-marketplace 模式）；custom title bar macOS/Windows padding 调整；session item badge 激活样式；reduced motion 支持与动画增强。
+- **hook 策略 ID 映射** (`app/core/engines/`): EngineSession 增加 hook 策略 ID 映射与陈旧 worker 处理。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **message_card 渲染链路修复** (`app/widgets/message_card.py`): vault 回插一次性消费（同内容多图防挪位空白）；覆盖前 dispose 旧实例；接 `renderProcessTerminated` 自愈（renderer 崩溃重载骨架补渲，连续崩溃重建兜底）；SVG toolbar 渲染逻辑；行尾统一 CRLF + join 单行化（ruff format）。
+- **多行 fence markdown 块提取** (`app/widgets/message_card.py`): 修复完整块提取（多行代码 fence 边界识别）。
+- **bottom_input_area 附件芯片** (`app/widgets/bottom_input_area.py`): 粘贴图片兼容剪贴板 QPixmap 类型（同进程 `setPixmap` 回读不过 CF_DIB 转换）；异步落盘完成信号刷新附件芯片（修 0KB/不存在误报）。
+- **插件输入按钮锚点清理** (`app/main_widget.py`, `app/widgets/bottom_toolbar_module.py`): memory/history 零尺寸锚点移除（`f58cfe46`）。
+- **visualization quadrantChart 中文** (`plugins/system/skills/visualization/`): axis/点名拒中文词法限制实测同步。
+- **assistant_hub** (`plugins/system/assistant_hub/`): core 加载器 mtime 自检 + 插件声明式 `module_prefixes` 热重载清理；遗忘步 LLM 无视名额时按行截断保重要度序。
+- **孤儿工具消息双向清理** (`app/core/engines/`): tool results 无 declarations 时双向清理。
+- **hover tooltip 清理测试** (`tests/`): qapp fixture + filter lookup + post-destroy timer 语义修复。
+
+### ⚡ 性能优化 (Performance)
+
+- **message_card 图表 vault** (`app/widgets/message_card.py`): echarts init rAF 排队每帧 1 个 + mermaid 渲染并发限 2（多图不再单帧长任务卡死）；图表节点 vault 全量渲染零重建零闪烁；dispose 堵 echarts 孤儿实例泄漏；主题切换重渲染；差量路径 echarts init 硬编码 dark 主题修复。
+- **gateway 启动优化** (`app/gateway/`): engine construction 推迟到首帧后，砍 8.5s 启动关键路径。
+- **bench DeferredDelete** (`tests/perf/`): 采样前 flush，对齐生产事件循环语义。
+
+### ♻️ 代码重构 (Refactoring)
+
+- 经验文件路径处理 (`app/core/`): `rebuild_index` 函数路径处理更新。
+- 崩溃检查函数重命名 (`app/core/`): `check_last_crash` → `check_pending_crashes`，更新相关调用。
+- 代码结构重构：改善可读性与可维护性。
+
+### 📚 文档 (Documentation)
+
+- **ui-plugin-creator 技能补全** (`plugins/system/skills/ui-plugin-creator/`): 输入框按钮 / 标题栏 tab / 工作台页模板 + 剪贴板与提示通道坑 + 覆盖窗模式（quick-screenshot 实战沉淀）。
+
+### 🔧 其他 (Chores & Build)
+
+- **quick-screenshot 插件迁移** (`plugins/system/`): 系统副本移除，迁移至 drifox-plugins2 市场发布。
+- **dead code 清理**: 移除死模块、过期测试与孤儿图片。
+- **ruff format 收尾**: quick-screenshot + assistant_hub prompts 格式化。
+- **scripts 重命名** (`scripts/`): `tmp_check_skeleton_js` → `check_skeleton_js`（去 tmp_ 前缀，长期保留的骨架 JS 语法检查工具）。
+- **visualization skill eval cases unignore**: `.gitignore` 中 skill 包评测 JSON 解除忽略。
+- **回归测试补全**: 流式图表渲染与资源管理回归测试（test 分类混入）。
+
 ## [v0.5.8-beta] - 2026-09-03
 
 自上一版本以来的变更 | 提交数：100 · 文件变更：654 · +61169/-44175 | 贡献者：mading, dingma
