@@ -2213,6 +2213,55 @@ def _extract_formulas(md_text: str) -> str:
     return "\n".join(seg if is_fence else _extract_formulas_in_plain(seg) for is_fence, seg in segments)
 
 
+def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
+    """提取完整 fenced code 块为 \x00F<i>\x00 哨兵（inject 免疫保护）。
+
+    背景：_inject_think_cards/_inject_tool_blocks/_inject_tag_cards 全文扫描
+    <think>/<tool>/<tag> 协议标签，不感知 fence——代码示例内容里含协议标签
+    （讨论插件协议、展示调用格式时极常见）会被抽出渲染成假思考卡/工具框，
+    经差量 append 滞留正文底部。fence 跨空行整块产出修复后暴露（旧版尾段
+    产出丢内容反而掩盖了它）；全量渲染管线同样受影响。
+
+    提取后 inject 只作用于 fence 外文本；_restore_fenced_code 在 md.convert
+    前放回原文，fenced_code 正常渲染代码内容（协议标签转义为字面文本）。
+    fence 状态机与 _extract_formulas 同款语义；未闭合 fence（流式中间态，
+    _sanitize_incomplete_markdown 已补闭合，此处兜底）原样放回不提取。
+    """
+    if "```" not in md_text and "~~~" not in md_text:
+        return [], md_text
+
+    fences: list[str] = []
+    out_lines: list[str] = []
+    buf: list[str] | None = None
+    fence_marker = ""
+    for line in md_text.split("\n"):
+        stripped = line.lstrip()
+        if buf is None:
+            m = _RE_KATEX_FENCE_OPEN.match(stripped)
+            if m:
+                fence_marker = m.group(1)
+                buf = [line]
+            else:
+                out_lines.append(line)
+        else:
+            buf.append(line)
+            if stripped.startswith(fence_marker):
+                fences.append("\n".join(buf))
+                out_lines.append(f"\x00F{len(fences) - 1}\x00")
+                buf = None
+    if buf is not None:
+        # 未闭合 fence：原样放回（流式中间态兜底，语义与 _extract_formulas 一致）
+        out_lines.extend(buf)
+    return fences, "\n".join(out_lines)
+
+
+def _restore_fenced_code(md_text: str, fences: list[str]) -> str:
+    """_extract_fenced_code 提取的 fence 原文放回（md.convert 前）。"""
+    for i, src in enumerate(fences):
+        md_text = md_text.replace(f"\x00F{i}\x00", src)
+    return md_text
+
+
 # 缓存大小阈值（KB）：超过此大小的文本不缓存，防止内存膨胀
 _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 
@@ -2229,10 +2278,13 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取（设计文档 2026-09-04）
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
+    # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+    _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
+    processed_md = _restore_fenced_code(processed_md, _fences)
 
     try:
         md = get_markdown_instance()
@@ -2332,10 +2384,13 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
         safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
+        # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+        _fences, safe_md = _extract_fenced_code(safe_md)
         processed_md = _inject_think_cards(safe_md, True, compact=compact)
         processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
         processed_md = _inject_hook_blocks(processed_md, True)
         processed_md = _inject_tag_cards(processed_md, True, compact=compact)
+        processed_md = _restore_fenced_code(processed_md, _fences)
         md.reset()
         html_content = md.convert(processed_md)
         html_content = _wrap_code_blocks_with_copy_button_web(
@@ -2357,10 +2412,13 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
+    # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+    _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, False, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, False, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, False)
     processed_md = _inject_tag_cards(processed_md, False, compact=compact)
+    processed_md = _restore_fenced_code(processed_md, _fences)
 
     md.reset()
     html_content = md.convert(processed_md)
@@ -2599,10 +2657,13 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
+    # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+    _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
+    processed_md = _restore_fenced_code(processed_md, _fences)
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
@@ -2650,10 +2711,13 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
+    # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+    _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
+    processed_md = _restore_fenced_code(processed_md, _fences)
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)

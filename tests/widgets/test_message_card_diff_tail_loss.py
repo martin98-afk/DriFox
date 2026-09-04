@@ -399,3 +399,59 @@ def test_render_stable_segment_multiline_fence_no_empty_code_block():
     assert "Plain Text" not in html, f"不得出现空代码块兜底: {html!r}"
     assert ">python<" in html, f"代码块语言标签应为 python: {html!r}"
     assert "```" not in html, f"渲染产物不得残留字面 fence: {html!r}"
+
+
+# ── 回归：代码块内协议标签不得被 inject 抽出渲染成假卡片 ──
+def test_render_stable_segment_code_block_with_protocol_tags_renders_as_code():
+    """🐛 回归（假工具框残留）：fence 整块产出后，代码内容里的 <tool>/<think>
+    协议标签不得被 _inject_tool_blocks/_inject_think_cards 抽出渲染成真实
+    思考卡/工具框（滞留正文底部）——必须作为代码字面文本保留在代码块内。
+    fence 哨兵保护（_extract_fenced_code/_restore_fenced_code）负责此语义。
+    """
+    code_block = (
+        "```html\n"
+        "<tool>\n"
+        '{"name": "demo"}\n'
+        "</tool>\n"
+        "\n"
+        "<think>示例</think>\n"
+        "```"
+    )
+    md = "参考协议：\n\n" + code_block + "\n\n完成。"
+    stable_len, segs = _extract_closed_segments(md)
+    assert len(segs) == 2, f"应产出文字段+完整代码块: {segs!r}"
+    html = _render_stable_segment(segs[1])
+    assert "tool-block" not in html, f"代码内 <tool> 被渲染成工具框: {html!r}"
+    assert "think-block" not in html and "think-compact" not in html, f"代码内 <think> 被渲染成思考卡: {html!r}"
+    # 协议标签以 HTML 转义字面保留在代码内容中（pygments 内联高亮形态为
+    # <span>...&lt;</span>tool...，故只断言转义实体存在而非连续串）
+    assert "&lt;" in html and "&gt;" in html, f"<tool>/<think> 未以转义字面保留: {html!r}"
+    # 代码内容完整（未丢段）
+    assert "demo" in html, f"代码内容丢失: {html!r}"
+
+
+def test_render_full_pipeline_code_block_with_tool_tag_no_card():
+    """全量渲染管线同样受保护：正文含 <tool> 正常渲染卡片，代码内 <tool> 不渲染。"""
+    md = (
+        "<tool>\n"
+        '{"name": "real_tool"}\n'
+        "</tool>\n"
+        "\n"
+        "真实工具调用。\n"
+        "\n"
+        "```text\n"
+        "<tool>\n"
+        '{"name": "in_code"}\n'
+        "</tool>\n"
+        "```\n"
+    )
+    html = _render_markdown_to_html_cached_impl(md)
+    # 正文的真实 <tool> 渲染成工具框；代码内的同名标签只出现转义字面
+    assert "real_tool" in html, f"真实工具框丢失: {html!r}"
+    assert "&lt;tool&gt;" in html, f"代码内 <tool> 未转义保留: {html!r}"
+    # 代码内的 in_code 不得出现在任何工具框结构里（data-tool-name 属性等）
+    import re as _re
+
+    tool_block_htmls = _re.findall(r'<div class="tool-block[^"]*"[^>]*>.*?</div>\s*</div>', html, _re.S)
+    for block in tool_block_htmls:
+        assert "in_code" not in block, f"代码内 <tool> 混入真实工具框: {block!r}"
