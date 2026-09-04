@@ -4,6 +4,7 @@
 交互流：点按钮 → grabWindow 抓主屏底图 → 全屏遮罩窗拖框 → 松手复制剪贴板
 → QToolTip 提示。Esc/右键取消。单实例防护：重复点击先关旧遮罩窗。
 """
+
 from __future__ import annotations
 
 import sys

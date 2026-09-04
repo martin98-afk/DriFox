@@ -26,6 +26,7 @@ def _load_module(name: str, path: Path):
 # 坐标换算（高 DPI）
 # ========================================================================
 
+
 def test_physical_rect_identity_at_dpr1():
     mod = _load_module("qs_overlay_test", _PLUGIN_UI / "overlay.py")
     r = mod._physical_rect(QRect(10, 20, 100, 50), 1.0)
@@ -41,6 +42,7 @@ def test_physical_rect_scales_at_dpr15():
 # ========================================================================
 # 遮罩窗交互
 # ========================================================================
+
 
 @pytest.fixture()
 def overlay(qtbot):
@@ -101,6 +103,7 @@ def test_reverse_drag_normalizes(overlay, qtbot):
 # ========================================================================
 # 注册行为
 # ========================================================================
+
 
 @pytest.fixture()
 def fresh_registry(monkeypatch):

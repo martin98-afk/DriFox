@@ -4,6 +4,7 @@
 进入选区时抓主屏全屏作底图：遮罩窗铺底图（所见即所截），选区外叠半透明
 暗遮罩，松手从底图按高 DPI 换算裁剪物理像素区域，粘贴出去尺寸与屏幕一致。
 """
+
 from PyQt5.QtCore import Qt, QRect, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QWidget
