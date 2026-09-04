@@ -9,6 +9,17 @@ import sys
 import time
 import warnings
 
+# ========== 开机自启提权 helper（最早处理，不加载 Qt）==========
+# 拨动自启开关时主进程通过 runas 以管理员身份把本进程再次拉起，
+# 命令行携带 --configure-auto-start=on|off。helper 写完 HKLM 注册表
+# 立即退出，成败通过 --startup-error-file 回传（见 app/utils/startup_manager.py）。
+# 必须放在 qfluentwidgets/Qt 导入之前：helper 进程无需也不应加载 GUI 栈。
+if os.name == "nt" and any(arg.startswith("--configure-auto-start=") for arg in sys.argv[1:]):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from app.utils.startup_manager import maybe_handle_startup_helper
+
+    sys.exit(maybe_handle_startup_helper(sys.argv[1:]) or 0)
+
 from qfluentwidgets import setFontFamilies
 
 warnings.filterwarnings("ignore")

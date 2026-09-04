@@ -2939,6 +2939,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception as e2:
                     logger.error(f"[MainWidget] system_cards 兜底 build 也失败，契约属性将缺失: {e2}")
 
+        # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
+        # [PERF] 延迟 100ms 到首帧之后注册，节省 ~200ms 关键路径时间。
+        # 为什么是 100ms 而非 singleShot(0)：Qt QTimer 按到期时间排序，
+        # singleShot(0) 到期时间 ≈ 创建时间，早于 main.py 中 _show_popup 的
+        # singleShot(0)（创建更晚），导致 BuiltinCommands 仍在窗口显示前执行。
+        # 100ms 延迟确保到期时间晚于所有 singleShot(0)，在窗口第一次绘制后注册。
+        # ⚠️ 2026-09-04 修复：f3da81c0 抽 SystemCardsModule 时误删本调用且未迁移，
+        # 此后 register_all_commands / _register_command_shortcuts 启动期零调用——
+        # 命令表仅剩 UI 卡片命令（无 shortcut），全部命令快捷键失效且不自愈，
+        # 只能靠插件热重载事件偶然补救（症状：干净启动后快捷键全灭）。
+        QTimer.singleShot(100, self._init_builtin_commands)
+
         # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，
         # 让窗口外壳尽快出现，压缩首次启动感知耗时
