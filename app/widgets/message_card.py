@@ -2519,6 +2519,7 @@ def _extract_closed_segments(md: str):
     i = 0
     n = len(md)
     fence_open = False  # 是否在 ``` 代码块内（跨段累计）
+    fence_start = 0  # fence 开启段起点偏移（fence 跨 \n\n 时闭合段需回溯到此）
     while i < n:
         # 硬边界：空行 \n\n（markdown 段落分隔）——闭合段**唯一**切段边界。
         # 句号类标点不是 markdown 段落边界，禁止在此切段（会拆裂同段文字，
@@ -2541,10 +2542,18 @@ def _extract_closed_segments(md: str):
                 i = seg_end + boundary_len
                 continue
             fence_open = False
+            # 🐛 修复（流式闪现孤立空代码块）：fence 跨 \n\n 时闭合段只是代码块
+            # 尾部，若单独产出：①开启段/中间段落在 stable 内却从未追加
+            # （updateContentAppend 删增量节点时连带删掉 tail 行内渲染的完整
+            # 代码块）；②尾段经 _sanitize_incomplete_markdown 补闭合渲染成
+            # 「半截正文 + 空 Plain Text 代码块」，全量渲染才恢复。
+            # 回溯到 fence 开启段起点，把整个 fence 区间作为完整闭合段产出。
+            seg = md[fence_start:seg_end]
         else:
             if fence_count % 2 == 1:
                 # 段内 fence 打开（未闭合）→ 不产出，fence 状态延续到下一段
                 fence_open = True
+                fence_start = i
                 i = seg_end + boundary_len
                 continue
 

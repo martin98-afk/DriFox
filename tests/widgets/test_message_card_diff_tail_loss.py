@@ -361,3 +361,41 @@ def test_extract_closed_segments_keeps_paragraph_intact_without_blank_line():
     stable_len2, segs2 = _extract_closed_segments(md_hard)
     assert len(segs2) == 1 and segs2[0] == md, f"硬边界切段应产出第一段: {segs2!r}"
     assert stable_len2 == len(md) + 2, f"稳定区应推进到空行之后: {stable_len2}"
+
+
+# ── 回归：fence 跨空行时闭合段必须回溯整块产出 ──
+def test_extract_closed_segments_multiline_fence_produces_whole_block():
+    """🐛 回归（流式闪现孤立空代码块）：fence 内容含空行时，闭合瞬间只产出
+    尾段会造成双重破坏：
+    1. fence 开启段/中间段落在 stable 区内却从未追加（updateContentAppend
+       删增量节点时连带删掉 tail 行内渲染的完整代码块）；
+    2. 尾段经 _sanitize_incomplete_markdown 补闭合后渲染成
+       「半截代码文本 + 空 Plain Text 代码块」——用户看到完整代码块突然
+       缩水成残段+空框，全量渲染才恢复。
+    闭合段必须回溯到 fence 开启段起点，把整个 fence 区间作为一段产出。
+    """
+    code_block = "```python\ndef foo():\n    return 1\n\ndef bar():\n    return 2\n```"
+    md = code_block + "\n\n完成。"
+    stable_len, segs = _extract_closed_segments(md)
+    assert segs == [code_block], f"闭合段应为完整 fence 区间: {segs!r}"
+    assert stable_len == len(code_block) + 2, f"稳定区应推进到 fence 末尾空行之后: {stable_len}"
+    tail = md[stable_len:]
+    assert tail == "完成。", f"尾部应只剩闭合段之后的文本: {tail!r}"
+
+
+def test_extract_closed_segments_multiline_fence_after_paragraph():
+    """前置文字段 + 跨空行 fence：文字段照常产出，fence 整块产出，顺序不乱。"""
+    code_block = "```python\na = 1\n\nb = 2\n```"
+    md = "看这个：\n\n" + code_block + "\n\n结束"
+    stable_len, segs = _extract_closed_segments(md)
+    assert segs == ["看这个：", code_block], f"段落产出应完整有序: {segs!r}"
+    assert md[stable_len:] == "结束", f"尾部应只剩收尾文本: {md[stable_len:]!r}"
+
+
+def test_render_stable_segment_multiline_fence_no_empty_code_block():
+    """整块产出的跨空行 fence 渲染为单个 python 代码块，无空 Plain Text 框。"""
+    code_block = "```python\ndef foo():\n    return 1\n\ndef bar():\n    return 2\n```"
+    html = _render_stable_segment(code_block)
+    assert "Plain Text" not in html, f"不得出现空代码块兜底: {html!r}"
+    assert ">python<" in html, f"代码块语言标签应为 python: {html!r}"
+    assert "```" not in html, f"渲染产物不得残留字面 fence: {html!r}"
