@@ -88,3 +88,5 @@ $RECYCLE.BIN/
 *~
 .project
 .pycpath
+# git worktree 隔离工作区（不提交）
+.worktrees/
