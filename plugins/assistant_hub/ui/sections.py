@@ -983,76 +983,121 @@ class ExperienceSection(_Section):
             self._list_area.addWidget(row_wrap)
 
 
-# ── 工具权限分区 ────────────────────────────────────────
+# ── 预置工具分区 ────────────────────────────────────────
 
-# 档位定义（key 与 Assistant.tool_access / schema_filter 对齐）
+# 档位定义（key 与 Assistant.tool_access / schema_filter 对齐）：控制初始注入的
+# 工具 schema，不影响可用性（未注入的可经 tool_search 搜索后照常调用）
 _TOOL_MODES = (
-    ("full", "完全权限", "全部工具可用，不做限制"),
-    ("readonly", "只读", "仅安全类工具（查看/搜索/问答），不能改文件、不能执行命令"),
-    ("minimal", "极简", "只保留 bash，一个工具做所有事"),
+    ("full", "全量", "初始注入全部工具", "[FULL]"),
+    ("readonly", "只读", "初始只注入安全类工具", "[READ-ONLY]"),
+    ("minimal", "极简", "初始只注入 bash，其余搜索后使用", "[MINIMAL]"),
 )
 
 
+class _ToolModeChip(QFrame):
+    """单档卡片：视觉对齐人格 chips（名 + 两行描述 + tag 方角牌，选中 accent 边框）。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, mode: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("toolModeChip")  # ⚠ 样式选择器依赖
+        self.mode = mode
+        self._selected = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(150, 112)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 10)
+        v.setSpacing(5)
+        name, desc, tag = next((n, d, t) for k, n, d, t in _TOOL_MODES if k == mode)
+        self._name = QLabel(name)
+        self._name.setAlignment(Qt.AlignCenter)
+        v.addWidget(self._name)
+        self._desc = QLabel()
+        self._desc.setAlignment(Qt.AlignCenter)
+        # 描述限制 2 行：按像素宽度手动截断（超出加 …）并钉死高度，防遮挡 tag
+        # （手法与 _PersonaChip 一致；字号须与 QSS 实际渲染一致，含全局字体缩放 delta）
+        fm = QFont(self._desc.font())
+        fm.setPixelSize(scale_font_size(10))
+        metrics = QFontMetrics(fm)
+        self._desc.setText(_elide_lines(desc, metrics, 124, 2))
+        self._desc.setFixedHeight(metrics.lineSpacing() * 2)
+        self._desc.setWordWrap(False)
+        v.addWidget(self._desc)
+        v.addStretch()
+        self._tag = QLabel(tag)
+        self._tag.setAlignment(Qt.AlignCenter)
+        v.addWidget(self._tag)
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        border = Colors.TEXT_ACCENT if self._selected else Colors.BORDER
+        bg = "rgba(245, 158, 11, 0.07)" if self._selected else "transparent"
+        self.setStyleSheet(
+            f"""
+            QFrame#toolModeChip {{
+                background: {bg};
+                border: {"2px solid " + Colors.TEXT_ACCENT if self._selected else "1.5px solid " + border};
+                border-radius: 12px;
+            }}
+            QFrame#toolModeChip:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
+            QFrame#toolModeChip QLabel {{ background: transparent; border: none; }}
+        """
+        )
+        self._name.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
+        )
+        self._desc.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        self._tag.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT if self._selected else Colors.TEXT_MUTED};"
+            f"background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(9)}; letter-spacing: 1px;"
+        )
+
+    def set_selected(self, on: bool) -> None:
+        if self._selected != on:
+            self._selected = on
+            self._apply_style()
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        self.clicked.emit()
+
+
 class ToolAccessSection(_Section):
-    """工具权限：三档快捷切换（对话前过滤发给 LLM 的工具 schema）。"""
+    """预置工具：三档 chips 卡快捷切换（控制初始注入的工具 schema，不影响可用性）。"""
 
     modeChangeRequested = pyqtSignal(str)
 
     def __init__(self, parent=None):
-        super().__init__("工具权限", parent)
+        super().__init__("预置工具", parent)
+        self.body().addWidget(
+            _hint(
+                "点卡片切换初始注入的工具范围；未注入的工具仍可用，模型可经 tool_search 搜索、tool_execute 中转调用，下一条消息生效。",
+                10,
+            )
+        )
         self._mode = "full"
-        self._mode_buttons: Dict[str, QPushButton] = {}
-        row = QHBoxLayout()
-        row.setSpacing(8)
-        for key, name, desc in _TOOL_MODES:
-            btn = QPushButton()
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setCheckable(True)
-            btn.setMinimumHeight(52)
-            btn.clicked.connect(lambda _c=False, k=key: self.modeChangeRequested.emit(k))
-            layout = QVBoxLayout(btn)
-            layout.setContentsMargins(10, 7, 10, 7)
-            layout.setSpacing(3)
-            title = QLabel(name)
-            title.setStyleSheet(
-                f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
-                f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
-            )
-            layout.addWidget(title)
-            sub = QLabel(desc)
-            sub.setWordWrap(True)
-            sub.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
-                f"{get_font_family_css()} {font_size_css(10)};"
-            )
-            layout.addWidget(sub)
-            self._mode_buttons[key] = btn
-            row.addWidget(btn, 1)
-        self.body().addLayout(row)
-        hint = _hint("切换后下一条消息生效：对话前按档位过滤发给模型的工具列表（模型看不到被关掉的工具）。")
-        self.body().addWidget(hint)
-        self._set_mode_style()
-
-    def _set_mode_style(self) -> None:
-        for key, btn in self._mode_buttons.items():
-            selected = key == self._mode
-            border = Colors.TEXT_ACCENT if selected else Colors.BORDER
-            bg = "rgba(245, 158, 11, 0.10)" if selected else "transparent"
-            btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    border: 1px solid {border};
-                    border-radius: 8px;
-                    background: {bg};
-                    text-align: left;
-                }}
-                QPushButton:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
-                """
-            )
+        self._chips: Dict[str, _ToolModeChip] = {}
+        chips_host = QWidget()
+        chips_host.setStyleSheet("background: transparent;")
+        row = _CenterFlowLayout(chips_host)
+        row.setSpacing(12)
+        for key, _n, _d, _t in _TOOL_MODES:
+            chip = _ToolModeChip(key)
+            chip.clicked.connect(lambda k=key: self.modeChangeRequested.emit(k))
+            row.addWidget(chip)
+            self._chips[key] = chip
+        self.body().addWidget(chips_host)
+        self.set_mode("full")
 
     def set_mode(self, mode: str) -> None:
-        self._mode = mode if mode in {k for k, _n, _d in _TOOL_MODES} else "full"
-        self._set_mode_style()
+        self._mode = mode if mode in self._chips else "full"
+        for key, chip in self._chips.items():
+            chip.set_selected(key == self._mode)
 
 
 # ── 技能分区 ────────────────────────────────────────────

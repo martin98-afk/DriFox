@@ -288,6 +288,10 @@ class AssistantCardWidget(QWidget):
         self._about.createPersonaRequested.connect(self._on_create_persona)
         self._inner_v.addWidget(self._about)
 
+        self._tool_access = ToolAccessSection()
+        self._tool_access.modeChangeRequested.connect(self._on_tool_access_change)
+        self._inner_v.addWidget(self._tool_access)
+
         self._project = ProjectSection()
         self._project.toggleNotes.connect(self._on_project_notes_toggle)
         self._project.toggleContext.connect(self._on_project_context_toggle)
@@ -316,10 +320,6 @@ class AssistantCardWidget(QWidget):
         self._experience.consolidateRequested.connect(self._on_experience_consolidate)
         self._experience.reflectRequested.connect(self._on_reflect)
         self._inner_v.addWidget(self._experience)
-
-        self._tool_access = ToolAccessSection()
-        self._tool_access.modeChangeRequested.connect(self._on_tool_access_change)
-        self._inner_v.addWidget(self._tool_access)
 
         self._skills = SkillsSection()
         self._skills.toggleSkills.connect(self._on_skills_toggle)
@@ -790,7 +790,7 @@ class AssistantCardWidget(QWidget):
         a.tool_access = str(mode or "full")
         self._mgr.update(a)
         self._tool_access.set_mode(a.tool_access)
-        self._notify(f"工具权限已切换为「{mode}」，下一条消息生效")
+        self._notify(f"预置工具已切换为「{mode}」，下一条消息生效")
 
     def _on_view_experience(self, category: str) -> None:
         if not self._active_aid:

@@ -102,7 +102,7 @@ class Assistant:
     project_notes_enabled: bool = True
     # 项目上下文（项目根目录 + git 状态）注入开关：主智能体按此开关控制；子智能体始终注入
     project_context_enabled: bool = True
-    # 工具权限档位（对话前 schema 过滤）：full=不过滤 / readonly=仅安全类工具 / minimal=仅 bash
+    # 预置工具档位（控制初始注入的 schema，不影响可用性）：full=全量 / readonly=仅安全类 / minimal=仅 bash+tool_search
     tool_access: str = "full"
     # 记忆整理模型（llm_saved_providers 的 config_id）：空 = 跟随全局当前模型
     utility_model: str = ""
@@ -740,13 +740,13 @@ class AssistantManager:
             return ""
         return aid
 
-    # ── 工具权限档位（对话前 schema 过滤）──
+    # ── 预置工具档位（初始注入 schema，hooks 与 UI 统计共用归属逻辑）──
 
     _TOOL_ACCESS_MODES = ("full", "readonly", "minimal")
 
     @classmethod
     def tool_access_for(cls, session_id: str) -> str:
-        """会话生效的工具权限档位：会话 override 助手优先，否则主助手；异常兜底 full。"""
+        """会话生效的预置工具档位：会话 override 助手优先，否则主助手；异常兜底 full。"""
         try:
             aid = cls.get_session_override(session_id) if session_id else ""
             if not aid:
@@ -1390,6 +1390,77 @@ class AssistantManager:
         if persona is None or not persona.prompt.strip():
             return ""
         return reg.render(a.yuan, persona.prompt.strip(), agent_name=agent_name, user_name=user)
+
+    # ── 完整注入块（BuildSystemPrompt hook 与 UI 统计共用，单一数据源）──
+
+    _MEMORY_RULES = """## 记忆使用规则
+
+记忆和用户档案是你内化的背景知识。你和{user}是认识很久的人，这些事你本来就知道。
+
+- **只有当{user}提到相关内容，记忆才参与**，而且方式是无声的：影响你的角度、语气、判断，不出现在文字里。{user}没提起的话题，不要主动从记忆里翻出来讲。
+- **永远不要让{user}感觉到"记忆"这个东西的存在。** 禁止"我记得""你之前说过""根据记忆"这类表述，除非{user}主动问"你还记得 xxx 吗"。
+- **记忆可能过时，当前对话永远优先。** 信息冲突时以对话为准，不要用旧记忆纠正{user}。"""
+
+    def prompt_block(self, aid: str) -> str:
+        """组装助手信息块：人格段 → 人工提示 → 记忆段 → 技能段（渐进披露）。"""
+        a = self.get(aid)
+        if a is None:
+            return ""
+
+        parts: list[str] = []
+
+        # 1. 人格段（personas/<yuan>/persona.md 基底，fill 模板变量；none=纯净）
+        persona_block = self.identity_and_persona(aid)
+        if persona_block.strip():
+            parts.append(persona_block.strip())
+
+        # 2a. 人工提示（pinned）：人工添加，无自动记忆风险，不受 memory_enabled 控制，始终注入
+        pinned = self.read_pinned(aid)
+        pin_lines = [f"- {(c or '').strip()}" for _pid, c in pinned if (c or "").strip()]
+        if pin_lines:
+            parts.append("# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines))
+
+        # 2b. 记忆段（memory_enabled 才注入）：无声规则 + 编译记忆（自动整理产物，有风险）
+        if a.memory_enabled:
+            rule = self._MEMORY_RULES.replace("{user}", self.user_name())
+            mem_parts = [rule]
+            try:
+                memory_md = (self.compiled_memory(aid) or "").strip()
+            except Exception:
+                memory_md = ""
+            if memory_md:
+                mem_parts.append("# 长期记忆\n\n" + memory_md)
+            if len(mem_parts) > 1:  # 规则之外还有实际记忆内容才注入整段
+                parts.append("\n\n".join(mem_parts))
+
+        # 3. 技能段（渐进披露）：只注入 name + 简介 + 绝对路径，正文由模型用 read 工具按需读盘
+        try:
+            skills = self.enabled_skills(aid)
+        except Exception:
+            skills = []
+        if skills:
+            lines = [f"- {s['name']}：{s.get('description') or '（无简介）'}（{s['path']}）" for s in skills]
+            parts.append(
+                "# 助手技能\n\n"
+                "以下是你的专属技能（只列名称与简介）。处理相关任务前，"
+                "先用 read 工具按括号内路径读取技能全文再执行：\n" + "\n".join(lines)
+            )
+
+        if not parts:
+            return ""
+
+        header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}——一个由用户创建的专属 AI 助手。"
+        return header + "\n\n" + "\n\n".join(parts)
+
+    def prompt_stats(self, aid: str) -> Dict[str, int]:
+        """注入块统计：chars=完整块字符数；tokens_est≈中文场景 1.6 字符/token 粗估。"""
+        block = ""
+        try:
+            block = self.prompt_block(aid)
+        except Exception:
+            pass
+        chars = len(block)
+        return {"chars": chars, "tokens_est": int(chars / 1.6)}
 
     # ── 记忆传送带 ──
 

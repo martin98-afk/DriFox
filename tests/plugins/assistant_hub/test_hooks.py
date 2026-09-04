@@ -54,6 +54,7 @@ class _Mgr:
 
     def compiled_memory(self, aid):
         return "## 今日\n\n- 在开发助手中心"
+
     def enabled_skills(self, aid):
         return [
             {"name": "drifox-dev", "description": "DriFox 开发规范", "path": "/tmp/skills/drifox-dev.md"}
@@ -61,6 +62,25 @@ class _Mgr:
 
     def experience_read_index(self, aid):
         return "# 经验索引"
+
+    def prompt_block(self, aid):
+        """模拟 manager.prompt_block 组装语义（真组装在 test_manager_ext 用真 manager 测）。"""
+        a = self.get(aid)
+        parts = []
+        persona = self.identity_and_persona(aid)
+        if persona.strip():
+            parts.append(persona.strip())
+        pin_lines = [f"- {(c or '').strip()}" for _pid, c in self.read_pinned(aid) if (c or "").strip()]
+        if pin_lines:
+            parts.append("# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines))
+        if a.memory_enabled:
+            parts += ["## 记忆使用规则", "# 长期记忆\n\n" + self.compiled_memory(aid)]
+        skills = self.enabled_skills(aid)
+        if skills:
+            lines = [f"- {s['name']}：{s.get('description') or ''}（{s['path']}）" for s in skills]
+            parts.append("# 助手技能\n\n先用 read 工具读取技能全文再执行：\n" + "\n".join(lines))
+        header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}"
+        return header + "\n\n" + "\n\n".join(parts)
 
 
 def _patch_mgr(monkeypatch):

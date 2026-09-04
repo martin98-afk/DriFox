@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""schema_filter.py — 助手工具权限档位（对话前 schema 过滤）
+"""schema_filter.py — 助手预置工具档位（控制初始注入的 schema）
 
-按当前会话归属助手的 tool_access 档位，裁剪发给 LLM 的工具 schema：
+按当前会话归属助手的 tool_access 档位，控制初始注入的工具 schema（不影响可用性，未注入的可经 tool_search 找回）：
 - full    不过滤（默认）
 - readonly 仅保留安全类工具（registry danger 分类驱动，动态，MCP 工具走启发式兜底）
 - minimal 仅保留 bash
@@ -42,7 +42,12 @@ def filter_tools_schema(schemas: List[Dict[str, Any]], ctx: Dict[str, Any]) -> L
     if mode == "full":
         return schemas
     if mode == "minimal":
-        return [s for s in schemas if s.get("function", {}).get("name", "") == "bash"]
+        # bash 万能执行 + 两个元工具（搜索找回 schema / 中转执行），懒加载闭环必须常驻
+        return [
+            s
+            for s in schemas
+            if s.get("function", {}).get("name", "") in ("bash", "tool_search", "tool_execute")
+        ]
     # readonly：仅安全类工具（registry danger 驱动；mcp__ 工具按启发式兜底）
     from app.tools.tool_classifier import DANGER_SAFE, classify_tool_danger
 
