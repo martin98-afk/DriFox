@@ -56,6 +56,7 @@ from .sections import (
     ProfileSection,
     ProjectSection,
     SkillsSection,
+    ToolAccessSection,
     _btn_style,
 )
 
@@ -316,6 +317,10 @@ class AssistantCardWidget(QWidget):
         self._experience.reflectRequested.connect(self._on_reflect)
         self._inner_v.addWidget(self._experience)
 
+        self._tool_access = ToolAccessSection()
+        self._tool_access.modeChangeRequested.connect(self._on_tool_access_change)
+        self._inner_v.addWidget(self._tool_access)
+
         self._skills = SkillsSection()
         self._skills.toggleSkills.connect(self._on_skills_toggle)
         self._skills.skillToggleRequested.connect(self._on_skill_toggle_row)
@@ -473,6 +478,7 @@ class AssistantCardWidget(QWidget):
             self._memory.set_dream_hint("")
             self._experience.set_enabled(a.experience_enabled)
             self._experience.reload_categories(mgr.experience_list(aid_capture))
+            self._tool_access.set_mode(a.tool_access)
             self._reload_skills(aid_capture)
 
         QTimer.singleShot(0, _do_bind)
@@ -776,6 +782,15 @@ class AssistantCardWidget(QWidget):
         a.experience_enabled = bool(on)
         self._mgr.update(a)
         self._experience.set_enabled(bool(on))
+
+    def _on_tool_access_change(self, mode: str) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        a.tool_access = str(mode or "full")
+        self._mgr.update(a)
+        self._tool_access.set_mode(a.tool_access)
+        self._notify(f"工具权限已切换为「{mode}」，下一条消息生效")
 
     def _on_view_experience(self, category: str) -> None:
         if not self._active_aid:

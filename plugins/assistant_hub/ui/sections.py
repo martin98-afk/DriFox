@@ -983,6 +983,78 @@ class ExperienceSection(_Section):
             self._list_area.addWidget(row_wrap)
 
 
+# ── 工具权限分区 ────────────────────────────────────────
+
+# 档位定义（key 与 Assistant.tool_access / schema_filter 对齐）
+_TOOL_MODES = (
+    ("full", "完全权限", "全部工具可用，不做限制"),
+    ("readonly", "只读", "仅安全类工具（查看/搜索/问答），不能改文件、不能执行命令"),
+    ("minimal", "极简", "只保留 bash，一个工具做所有事"),
+)
+
+
+class ToolAccessSection(_Section):
+    """工具权限：三档快捷切换（对话前过滤发给 LLM 的工具 schema）。"""
+
+    modeChangeRequested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__("工具权限", parent)
+        self._mode = "full"
+        self._mode_buttons: Dict[str, QPushButton] = {}
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        for key, name, desc in _TOOL_MODES:
+            btn = QPushButton()
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setCheckable(True)
+            btn.setMinimumHeight(52)
+            btn.clicked.connect(lambda _c=False, k=key: self.modeChangeRequested.emit(k))
+            layout = QVBoxLayout(btn)
+            layout.setContentsMargins(10, 7, 10, 7)
+            layout.setSpacing(3)
+            title = QLabel(name)
+            title.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
+                f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
+            )
+            layout.addWidget(title)
+            sub = QLabel(desc)
+            sub.setWordWrap(True)
+            sub.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+                f"{get_font_family_css()} {font_size_css(10)};"
+            )
+            layout.addWidget(sub)
+            self._mode_buttons[key] = btn
+            row.addWidget(btn, 1)
+        self.body().addLayout(row)
+        hint = _hint("切换后下一条消息生效：对话前按档位过滤发给模型的工具列表（模型看不到被关掉的工具）。")
+        self.body().addWidget(hint)
+        self._set_mode_style()
+
+    def _set_mode_style(self) -> None:
+        for key, btn in self._mode_buttons.items():
+            selected = key == self._mode
+            border = Colors.TEXT_ACCENT if selected else Colors.BORDER
+            bg = "rgba(245, 158, 11, 0.10)" if selected else "transparent"
+            btn.setStyleSheet(
+                f"""
+                QPushButton {{
+                    border: 1px solid {border};
+                    border-radius: 8px;
+                    background: {bg};
+                    text-align: left;
+                }}
+                QPushButton:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
+                """
+            )
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode if mode in {k for k, _n, _d in _TOOL_MODES} else "full"
+        self._set_mode_style()
+
+
 # ── 技能分区 ────────────────────────────────────────────
 
 

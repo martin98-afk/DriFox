@@ -1000,6 +1000,7 @@ class _PreSendWorker(QThread):
         )
 
         # ---- 6. 获取 tool schema ----
+        session_id = str(getattr(self._session, "id", "") or "")
         if self._current_agent:
             self._available_tools = self._agent_manager.get_agent_tools_schema(
                 self._current_agent,
@@ -1009,4 +1010,5 @@ class _PreSendWorker(QThread):
             self._available_tools = get_builtin_tools_schema(
                 self._agent_manager,
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                session_id=session_id,
             )

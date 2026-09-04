@@ -771,6 +771,7 @@ class GatewayEngine(QObject, BaseEngine):
             tools = get_builtin_tools_schema(
                 agent_manager=self._agent_manager,
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                session_id=str(getattr(session, "id", "") or "") if session else "",
             )
 
         from app.core.conversation.config import PermissionStrategy, filter_interactive_tools

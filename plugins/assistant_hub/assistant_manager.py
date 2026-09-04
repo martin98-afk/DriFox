@@ -102,6 +102,8 @@ class Assistant:
     project_notes_enabled: bool = True
     # 项目上下文（项目根目录 + git 状态）注入开关：主智能体按此开关控制；子智能体始终注入
     project_context_enabled: bool = True
+    # 工具权限档位（对话前 schema 过滤）：full=不过滤 / readonly=仅安全类工具 / minimal=仅 bash
+    tool_access: str = "full"
     # 记忆整理模型（llm_saved_providers 的 config_id）：空 = 跟随全局当前模型
     utility_model: str = ""
     # 对用户的称呼（{{userName}} 模板变量覆盖）：空 = 跟随系统用户名
@@ -131,6 +133,7 @@ class Assistant:
             "experience_enabled": self.experience_enabled,
             "project_notes_enabled": self.project_notes_enabled,
             "project_context_enabled": self.project_context_enabled,
+            "tool_access": self.tool_access,
             "utility_model": self.utility_model,
             "user_addressing": self.user_addressing,
             "created_at": self.created_at,
@@ -163,6 +166,7 @@ class Assistant:
             experience_enabled=bool(data.get("experience_enabled", False)),
             project_notes_enabled=bool(data.get("project_notes_enabled", True)),
             project_context_enabled=bool(data.get("project_context_enabled", True)),
+            tool_access=str(data.get("tool_access") or "full"),
             utility_model=str(data.get("utility_model") or ""),
             user_addressing=str(data.get("user_addressing") or ""),
             created_at=str(data.get("created_at") or ""),
@@ -735,6 +739,23 @@ class AssistantManager:
             cls.get_instance()._session_overrides.pop(session_id, None)
             return ""
         return aid
+
+    # ── 工具权限档位（对话前 schema 过滤）──
+
+    _TOOL_ACCESS_MODES = ("full", "readonly", "minimal")
+
+    @classmethod
+    def tool_access_for(cls, session_id: str) -> str:
+        """会话生效的工具权限档位：会话 override 助手优先，否则主助手；异常兜底 full。"""
+        try:
+            aid = cls.get_session_override(session_id) if session_id else ""
+            if not aid:
+                aid = cls.active_id()
+            a = cls.get_instance().get(aid)
+            mode = str(getattr(a, "tool_access", "") or "full")
+            return mode if mode in cls._TOOL_ACCESS_MODES else "full"
+        except Exception:
+            return "full"
 
     @staticmethod
     def _invalidate_session_prompt_caches() -> None:

@@ -58,6 +58,23 @@ def test_normalize_category():
     assert len(m.normalize_category("x" * 100)) <= 8
 
 
+def test_category_limit(tmp_path):
+    """新分类超过上限被拒绝并附现有分类；已有分类仍可写入。"""
+    aid = tmp_path / "a5"
+    for i in range(m._MAX_CATEGORIES):
+        r = m.record_entry(aid, f"分类{i}", f"内容{i}")
+        assert r["added"] is True
+    # 新分类：拒绝 + 现有分类列表
+    r = m.record_entry(aid, "全新分类", "这条装不下")
+    assert r["added"] is False and r["reason"] == "category_limit"
+    assert len(r.get("categories") or []) == m._MAX_CATEGORIES
+    # 已有分类：不受限
+    r2 = m.record_entry(aid, "分类0", "追加到已有分类")
+    assert r2["added"] is True
+    assert m.total_entries(aid) == m._MAX_CATEGORIES + 1
+    assert "全新分类" not in [d["category"] for d in m.list_documents(aid)]
+
+
 def test_reflect_with_fake_llm(tmp_path):
     aid = tmp_path / "a4"
     llm_text = json.dumps(
