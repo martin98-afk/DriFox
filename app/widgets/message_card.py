@@ -2181,9 +2181,7 @@ def _extract_formulas(md_text: str) -> str:
     # 流式半截 fence 到结尾：整段视为 fence，不提取
     segments.append((in_fence, "\n".join(buf)))
 
-    return "\n".join(
-        seg if is_fence else _extract_formulas_in_plain(seg) for is_fence, seg in segments
-    )
+    return "\n".join(seg if is_fence else _extract_formulas_in_plain(seg) for is_fence, seg in segments)
 
 
 # 缓存大小阈值（KB）：超过此大小的文本不缓存，防止内存膨胀
@@ -13594,3 +13592,4 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block
+
