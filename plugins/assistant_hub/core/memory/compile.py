@@ -34,18 +34,27 @@ MEMORY_TARGET_CHARS = 4000
 
 
 def _core(name: str):
-    """加载同包模块（session_store / prompts），兼容 importlib 独立加载。"""
+    """加载同包模块（session_store / prompts），兼容 importlib 独立加载。
+
+    mtime 自检：插件热重载不清理 assistant_hub_core.* 的 sys.modules 缓存，
+    命中即返回会卡旧代码 → 比对源文件 mtime，更新则重新加载替换。
+    """
     key = f"assistant_hub_core.{name}"
-    mod = sys_modules().get(key)
-    if mod is not None:
-        return mod
     path = _THIS.parent.parent / f"{name}.py"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    mod = sys_modules().get(key)
+    if mod is not None and getattr(mod, "_source_mtime", -1.0) >= mtime:
+        return mod
     spec = importlib.util.spec_from_file_location(key, str(path))
     if spec is None or spec.loader is None:
         raise ImportError(f"无法加载 {path}")
     module = importlib.util.module_from_spec(spec)
     sys_modules()[key] = module
     spec.loader.exec_module(module)
+    module._source_mtime = mtime
     return module
 
 

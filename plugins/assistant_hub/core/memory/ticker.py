@@ -25,6 +25,32 @@ _TURNS_PER_CHAIN = 10
 _DAILY_CHECK_INTERVAL = 300
 
 
+def _load_session_store():
+    """加载 session_store（importlib 手动注册）。
+
+    mtime 自检：插件热重载不清理 assistant_hub_core.* 的 sys.modules 缓存，
+    命中即返回会卡旧代码 → 比对源文件 mtime，更新则重新加载替换。
+    """
+    import importlib.util
+    import sys
+
+    key = "assistant_hub_core.session_store"
+    path = Path(__file__).resolve().parent.parent / "session_store.py"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    mod = sys.modules.get(key)
+    if mod is not None and getattr(mod, "_source_mtime", -1.0) >= mtime:
+        return mod
+    spec = importlib.util.spec_from_file_location(key, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[key] = mod
+    spec.loader.exec_module(mod)
+    mod._source_mtime = mtime
+    return mod
+
+
 class MemoryTicker:
     """记忆调度器（进程级单例，由 AssistantManager 持有）。"""
 
@@ -192,17 +218,7 @@ class MemoryTicker:
     def _logical_today(self) -> str:
         """当前逻辑日（04:00 边界）；session_store 不可用返回空串。"""
         try:
-            import importlib.util
-            import sys
-
-            key = "assistant_hub_core.session_store"
-            mod = sys.modules.get(key)
-            if mod is None:
-                path = Path(__file__).resolve().parent.parent / "session_store.py"
-                spec = importlib.util.spec_from_file_location(key, str(path))
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[key] = mod
-                spec.loader.exec_module(mod)
+            mod = _load_session_store()
             from datetime import datetime
 
             return mod.logical_day(datetime.now())

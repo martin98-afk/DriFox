@@ -27,15 +27,21 @@ _CONSOLIDATE_THRESHOLD = 50
 
 
 def _prompts(*required: str):
-    """取 prompts 模块；缓存命中但缺 required 函数（热重载后旧版）→ 重新加载。"""
+    """取 prompts 模块；mtime 自检防热重载旧缓存，required 兜底校验函数存在。"""
     key = "assistant_hub_core.memory.prompts"
+    path = _THIS.parent / "memory" / "prompts.py"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
     mod = sys.modules.get(key)
-    if mod is not None and all(hasattr(mod, r) for r in required):
+    if mod is not None and getattr(mod, "_source_mtime", -1.0) >= mtime and all(hasattr(mod, r) for r in required):
         return mod
-    spec = importlib.util.spec_from_file_location(key, str(_THIS.parent / "memory" / "prompts.py"))
+    spec = importlib.util.spec_from_file_location(key, str(path))
     module = importlib.util.module_from_spec(spec)
     sys.modules[key] = module
     spec.loader.exec_module(module)
+    module._source_mtime = mtime
     return module
 
 

@@ -12,6 +12,7 @@
     "homepage": "https://github.com/martin98-afk/DriFox",
     "license": "MIT",
     "type": "user",
+    "module_prefixes": ["assistant_hub_core."],
     "components": {
         "ui": true,
         "hooks": true,
