@@ -1,0 +1,17 @@
+{
+    "name": "quick-screenshot",
+    "version": "0.1.0",
+    "description": "选区截图：点击输入框按钮，拖框选取屏幕区域，自动复制到系统剪贴板，Ctrl+V 即可作为附件发送",
+    "author": {
+        "name": "DriFox Contributors"
+    },
+    "license": "MIT",
+    "type": "user",
+    "icon": {
+        "light": "icon.svg",
+        "dark": "icon_dark.svg"
+    },
+    "components": {
+        "ui": true
+    }
+}

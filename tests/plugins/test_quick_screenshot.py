@@ -96,3 +96,31 @@ def test_reverse_drag_normalizes(overlay, qtbot):
     with qtbot.waitSignal(overlay.captured, timeout=2000) as blocker:
         _drag(overlay, QPoint(110, 60), QPoint(10, 10), QPoint(10, 10))
     assert (blocker.args[0].width(), blocker.args[0].height()) == (101, 51)
+
+
+# ========================================================================
+# 注册行为
+# ========================================================================
+
+@pytest.fixture()
+def fresh_registry(monkeypatch):
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+    reg = UIPluginRegistry()
+    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
+    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
+    return reg
+
+
+def test_register_ui_registers_input_button(fresh_registry):
+    ui = _load_module("qs_ui_test", _PLUGIN_UI / "__init__.py")
+    ui.register_ui(fresh_registry)
+    buttons = fresh_registry.get_input_buttons()
+    assert len(buttons) == 1
+    info = buttons[0]
+    assert info.plugin_name == "quick-screenshot"
+    assert info.button_id == "quick-screenshot"
+    assert info.tooltip == "选区截图（复制到剪贴板）"
+    assert info.icon_path.endswith("screenshot.svg")
+    assert info.icon_light_path.endswith("screenshot_light.svg")
+    assert callable(info.on_click)
