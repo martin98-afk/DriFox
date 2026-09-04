@@ -415,6 +415,20 @@ def _strip_code_blocks(text: str) -> str:
     return text.strip()
 
 
+# ======== 流式图表骨架 ========
+# 半截 ```echarts / ```mermaid fence 期间的占位。原先残缺内容会被包成真正的
+# .echarts-container，JS 侧 JSON.parse / mermaid.parse 必然失败，只剩一个 400px
+# 空洞（用户视角"图表区空一块"，且上一版视觉残留会闪）。骨架与真图等高
+# （CSS min-height 300px），fence 闭合切真图时零布局跳动。
+# class `chart-streaming` 供 JS `_chartReady` 识别：永不入 vault、永不 init。
+_CHART_SKELETON_HTML = (
+    '<div class="chart-skeleton chart-streaming">'
+    '<div class="chart-skeleton__bars"><i></i><i></i><i></i><i></i><i></i></div>'
+    '<div class="chart-skeleton__label">图表生成中…</div>'
+    "</div>"
+)
+
+
 # ======== 核心逻辑：保留你的原始代码块样式 ========
 def _wrap_code_blocks_with_copy_button_web(
     html: str,
@@ -438,12 +452,20 @@ def _wrap_code_blocks_with_copy_button_web(
         lang = (match.group(1) or "").replace("language-", "").strip()
         code_content_raw = match.group(2) or ""
 
+        # ===== 流式中的半截图表：骨架占位 =====
+        # _sanitize_incomplete_markdown 把末尾未闭合的图表 fence 改标为
+        # <lang>-streaming。这里必须在此之前拦截：残缺 JSON 若照常包成
+        # .echarts-container，其 b64 每轮随内容增长而变化 → vault key 每轮都不同，
+        # 节点被反复塞进 vault 迅速膨胀（多图白屏的次因）。骨架不入 vault、不 init。
+        if lang in ("echarts-streaming", "mermaid-streaming"):
+            return _CHART_SKELETON_HTML
+
         # ===== ECharts 代码块：渲染为交互式图表 =====
         if lang == "echarts":
             try:
                 # 解码 HTML 实体（&quot; → " 等），确保 JSON 可解析
                 json_text = _unescape_html(code_content_raw)
-                # 验证 JSON 合法性（json.loads 内部会解析，无需提前 decode）
+                json.loads(json_text)  # 校验：非法 JSON 降级为普通代码块，不留空洞容器
                 # base64 编码防止 HTML 属性转义问题
                 b64_json = base64.b64encode(json_text.encode("utf-8")).decode("ascii")
                 chart_id = "echart-" + hashlib.sha1(json_text.encode("utf-8")).hexdigest()[:12]
@@ -567,16 +589,23 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
     # 只处理 markdown 代码块的不完整情况
     # 不再删除尾随的 <，因为它可能是 HTML/工具标签的一部分
     if md_text.count("```") % 2 == 1:
-        # 流式中间态：末尾未闭合 fence 若是 mermaid，改语言标记跳过图表渲染。
-        # 半截 mermaid 源码必然 parse 失败，mermaid 10 失败时会向 body 追加
-        # error bomb SVG（innerHTML 全量重建清不掉，且占位 id 随内容 hash
-        # 变化无法去重，逐轮累积成消息结尾一串「Syntax error in text」）。
+        # 流式中间态：末尾未闭合 fence 若是图表语言，改语言标记降级为骨架占位。
+        #
+        # mermaid：半截源码必然 parse 失败，mermaid 10 失败时会向 body 追加 error
+        #   bomb SVG（innerHTML 全量重建清不掉，且占位 id 随内容 hash 变化无法去重，
+        #   逐轮累积成消息结尾一串「Syntax error in text」）。
+        # echarts：原先只处理 mermaid，半截 JSON 会被照常包成 .echarts-container。
+        #   ① JSON.parse 必然失败 → 400px 空洞；② b64 随内容逐字增长 → vault key
+        #   每轮都变，未渲染节点被反复塞进 vault 快速膨胀（多图白屏次因）。
+        # 两者统一改标为 <lang>-streaming，由 _wrap_code_blocks_with_copy_button_web
+        # 产出等高骨架；fence 闭合后语言标记复原，自动切换为真实图表。
         lines = md_text.split("\n")
         for i in range(len(lines) - 1, -1, -1):
             stripped = lines[i].strip()
             if stripped.startswith("```"):
-                if stripped[3:].strip().lower() == "mermaid":
-                    lines[i] = lines[i].replace("mermaid", "mermaid-streaming", 1)
+                lang_token = stripped[3:].strip()
+                if lang_token.lower() in ("mermaid", "echarts"):
+                    lines[i] = lines[i].replace(lang_token, f"{lang_token}-streaming", 1)
                     md_text = "\n".join(lines)
                 break
         md_text += "\n```"
@@ -5265,6 +5294,81 @@ class CodeWebViewer(QWebEngineView):
                     font-size: 12px;
                     color: var(--text-secondary, #c9d1d9);
                 }}
+
+                /* ===== 流式图表骨架 ===== */
+                /* 半截 ```echarts / ```mermaid fence 期间占位。原实现把残缺 JSON 也包成
+                   .echarts-container，JS 侧 JSON.parse 失败后只 console.error，容器留
+                   400px 空洞 → 用户看到"图表区空一块"或上一版内容闪现。骨架用柱状图
+                   拟态 + 扫光明确传达"图表正在生成"，且高度与真图一致（min-height 300px），
+                   fence 闭合切换成真图时零布局跳动。 */
+                .chart-skeleton {{
+                    position: relative;
+                    width: 100%;
+                    min-height: 300px;
+                    margin: 12px 0;
+                    border-radius: 10px;
+                    background: {"rgba(255, 255, 255, 0.75)" if _is_light_diff else "rgba(22, 27, 34, 0.6)"};
+                    border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 16px;
+                    overflow: hidden;
+                }}
+                .chart-skeleton__bars {{
+                    display: flex;
+                    align-items: flex-end;
+                    gap: 9px;
+                    height: 104px;
+                }}
+                .chart-skeleton__bars i {{
+                    display: block;
+                    width: 15px;
+                    border-radius: 3px;
+                    background: var(--accent, #4C8DFF);
+                    transform-origin: bottom;
+                    animation: chartSkPulse 1.15s ease-in-out infinite;
+                }}
+                .chart-skeleton__bars i:nth-child(1) {{ height: 38%; animation-delay: 0ms; }}
+                .chart-skeleton__bars i:nth-child(2) {{ height: 64%; animation-delay: 110ms; }}
+                .chart-skeleton__bars i:nth-child(3) {{ height: 96%; animation-delay: 220ms; }}
+                .chart-skeleton__bars i:nth-child(4) {{ height: 54%; animation-delay: 330ms; }}
+                .chart-skeleton__bars i:nth-child(5) {{ height: 78%; animation-delay: 440ms; }}
+                @keyframes chartSkPulse {{
+                    0%, 100% {{ transform: scaleY(0.42); opacity: 0.32; }}
+                    50%      {{ transform: scaleY(1);    opacity: 0.72; }}
+                }}
+                .chart-skeleton__label {{
+                    font-size: 12px;
+                    color: var(--text-muted, #8b949e);
+                    letter-spacing: 0.3px;
+                }}
+                /* 顶部扫光：强化"持续生成中"的连续感，避免静态骨架看着像卡死 */
+                .chart-skeleton::after {{
+                    content: "";
+                    position: absolute;
+                    inset: 0;
+                    background: linear-gradient(100deg, transparent 18%, rgba(128,128,128,0.10) 50%, transparent 82%);
+                    animation: chartSkSweep 1.7s linear infinite;
+                }}
+                @keyframes chartSkSweep {{
+                    from {{ transform: translateX(-100%); }}
+                    to   {{ transform: translateX(100%); }}
+                }}
+                /* option 解析失败兜底（fence 已闭合但 JSON 畸形）：收起空洞，给出提示。
+                   成功渲染时 JS 移除该 class，容器恢复 300px。 */
+                .echarts-container.echarts-failed {{
+                    min-height: 120px;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                }}
+                .echarts-container.echarts-failed::before {{
+                    content: "图表数据暂不完整，等待生成…";
+                    font-size: 12px;
+                    color: var(--text-muted, #8b949e);
+                }}
                 '''
 
                 /* 内容区图片可点击打开 */
@@ -5676,8 +5780,54 @@ class CodeWebViewer(QWebEngineView):
                     }}, 260);
                 }}
 
-                function restoreCollapsibleStates(root) {{
-                    root.querySelectorAll('.cm-collapsible').forEach(block => {{
+                // ===== 差量渲染的作用域查询 =====
+                // 差量路径（updateContentAppend / updateTailHtml）原来每轮都对
+                // 整个 #content-placeholder（甚至 document）做 querySelectorAll，
+                // 随着正文增长是 O(n)；流式 N 轮累积成 O(n²) —— 长回复越到后面
+                // 越卡、"图表更新慢"的机械性根源。差量语义下新内容只可能出现在
+                // 新增的那几个顶层节点里，因此把扫描范围限定到新增区间即可：
+                // 每轮代价从 O(全文) 降为 O(新增段)，与已渲染长度无关。
+                // roots 为 null/undefined 时退化为全文档查询（全量渲染路径）。
+                window._scopeQuery = function (roots, sel) {{
+                    var out = [];
+                    if (!roots) return document.querySelectorAll(sel);
+                    if (!roots.length) roots = [roots];
+                    for (var i = 0; i < roots.length; i++) {{
+                        var r = roots[i];
+                        if (!r) continue;
+                        if (r.matches && r.matches(sel)) out.push(r);
+                        if (r.querySelectorAll) {{
+                            var sub = r.querySelectorAll(sel);
+                            for (var j = 0; j < sub.length; j++) out.push(sub[j]);
+                        }}
+                    }}
+                    return out;
+                }};
+                // 取容器中 [fromIdx, end) 区间的顶层节点——差量追加新增的部分。
+                // reorganizeContent 可能搬走部分节点导致长度收缩，故取 min 保护。
+                window._nodesSince = function (container, fromIdx) {{
+                    var out = [];
+                    var start = Math.min(fromIdx, container.children.length);
+                    for (var i = start; i < container.children.length; i++) out.push(container.children[i]);
+                    return out;
+                }};
+                // 表格包裹（差量路径只处理新增区间）
+                window._wrapTablesIn = function (roots) {{
+                    var tables = window._scopeQuery(roots, 'table:not(.code-table):not(.layout-table)');
+                    for (var i = 0; i < tables.length; i++) {{
+                        var table = tables[i];
+                        if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) continue;
+                        var wrapper = document.createElement('div');
+                        wrapper.className = 'table-scroll-wrapper';
+                        table.parentNode.insertBefore(wrapper, table);
+                        wrapper.appendChild(table);
+                    }}
+                }};
+
+                function restoreCollapsibleStates(roots) {{
+                    var blocks = window._scopeQuery(roots, '.cm-collapsible');
+                    for (var _bi = 0; _bi < blocks.length; _bi++) {{
+                        var block = blocks[_bi];
                         const key = block.dataset.blockKey;
                         const expanded = key && collapsibleState.has(key)
                             ? collapsibleState.get(key)
@@ -5696,7 +5846,7 @@ class CodeWebViewer(QWebEngineView):
                             body.offsetHeight;
                             body.style.transition = '';
                         }}
-                    }});
+                    }};
                 }}
 
                 // ===== Mermaid 渲染（Chromium 83 兼容：polyfill + mermaid 10.9.1 懒加载） =====
@@ -5768,8 +5918,10 @@ class CodeWebViewer(QWebEngineView):
                     }}
                 }}
 
-                function renderMermaidBlocks() {{
-                    var blocks = document.querySelectorAll('.mermaid-block[data-mermaid-src]');
+                // roots：差量路径传入新增节点区间，只渲染新增的图（见 _scopeQuery 说明）。
+                // 省略时退化为全文档扫描，供全量 updateContent 路径使用。
+                function renderMermaidBlocks(roots) {{
+                    var blocks = window._scopeQuery(roots, '.mermaid-block[data-mermaid-src]');
                     if (!blocks.length) return;
                     _mmdEnsure(function () {{
                         if (!window.mermaid || !window.mermaid.render) return;
@@ -5843,8 +5995,39 @@ class CodeWebViewer(QWebEngineView):
                     el._chartKey = pfx + b64;
                     return el._chartKey;
                 }};
+                // ⚠️ 必须按节点类型分别判定。原实现
+                //   `el._echartInited || el._mmdDone || !el.classList.contains('katex-pending')`
+                // 对 echarts / mermaid 节点**恒为 true**：这两个 class 都不带
+                // `katex-pending`，第三项 `!false` 直接短路为真。
+                // 后果（两个 P0）：
+                //   ① _restoreCharts 守卫把 innerHTML 重建后的**新**节点也当成
+                //      "已回插"跳过 → vault 回插从未发生 → 每轮全量渲染后所有图表
+                //      重新 init/render → 流式期间旧图表持续闪烁（用户可见现象）。
+                //   ② _stashCharts 把未渲染节点也搬进 vault 并标 _chartStashed，
+                //      从而跳过下方 dispose 兜底；节点随即被 innerHTML 销毁 →
+                //      echarts 实例 + ResizeObserver 成孤儿。流式 N 轮 × M 图滚雪球
+                //      → renderer 进程内存/GPU 资源耗尽 → 图表一多整卡白屏。
+                // 仅 katex 路径（带 katex-pending）能走通，形成对照。
                 window._chartReady = function (el) {{
-                    return el._echartInited || el._mmdDone || !el.classList.contains('katex-pending');
+                    var cl = el.classList;
+                    if (cl.contains('echarts-container')) return !!el._echartInited;
+                    if (cl.contains('mermaid-block')) return !!el._mmdDone;
+                    // 流式骨架（chart-skeleton）：无内容可渲染，不入 vault
+                    if (cl.contains('chart-streaming')) return false;
+                    return !cl.contains('katex-pending');
+                }};
+                window._disposeChartNode = function (el) {{
+                    if (!el) return;
+                    try {{
+                        if (el._chartRO) {{ el._chartRO.disconnect(); el._chartRO = null; }}
+                    }} catch (e) {{ }}
+                    try {{
+                        if (el._chartInstance && typeof el._chartInstance.dispose === 'function') {{
+                            el._chartInstance.dispose();
+                        }}
+                    }} catch (e) {{ }}
+                    el._chartInstance = null;
+                    el._echartInited = false;
                 }};
                 window._stashCharts = function (container) {{
                     if (!window.__chartVault) window.__chartVault = new Map();
@@ -5855,26 +6038,30 @@ class CodeWebViewer(QWebEngineView):
                         if (!key) continue;
                         if (window._chartReady(el)) {{
                             var _prev = window.__chartVault.get(key);
-                            if (_prev && _prev !== el && _prev._chartInstance) {{
-                                try {{ _prev._chartInstance.dispose(); }} catch (e) {{ }}  // 同内容覆盖前先释放旧实例
+                            if (_prev && _prev !== el) {{
+                                window._disposeChartNode(_prev);   // 同内容覆盖前先释放旧实例
                             }}
                             el._chartStashed = true;
                             window.__chartVault.set(key, el);
                         }}
                     }}
                     // 未暂存的已 init echarts 节点将被 innerHTML 销毁：主动 dispose 堵孤儿实例泄漏
-                    container.querySelectorAll('.echarts-container').forEach(function (el) {{
-                        if (el._echartInited && el._chartInstance && !el._chartStashed) {{
-                            try {{ el._chartInstance.dispose(); }} catch (e) {{ }}
+                    var _echs = container.querySelectorAll('.echarts-container');
+                    for (var j = 0; j < _echs.length; j++) {{
+                        var _e = _echs[j];
+                        if (_e._echartInited && !_e._chartStashed) {{
+                            window._disposeChartNode(_e);
                         }}
-                    }});
+                    }}
                 }};
                 window._restoreCharts = function (container) {{
                     if (!window.__chartVault || !window.__chartVault.size) return;
                     var nodes = container.querySelectorAll('.echarts-container, .mermaid-block, .katex-block, .katex-inline');
                     for (var i = 0; i < nodes.length; i++) {{
                         var el = nodes[i];
-                        if (el._echartInited || el._mmdDone || !el.classList.contains('katex-pending')) continue;  // 已是回插节点
+                        // 已渲染（含本轮刚回插的 saved）→ 跳过；innerHTML 重建出的新节点
+                        // 未渲染 → 走下方回插。原守卫对 echarts/mermaid 恒真，导致回插全失效。
+                        if (window._chartReady(el)) continue;
                         var key = window._chartKeyOf(el);
                         if (!key || !window.__chartVault.has(key)) continue;
                         var saved = window.__chartVault.get(key);
@@ -5883,21 +6070,29 @@ class CodeWebViewer(QWebEngineView):
                         // 一次性回插：同内容多图（b64 相同）时后续节点走正常 init，
                         // 防同一 saved 节点被 replaceChild 挪位导致前一个位置留空白
                         window.__chartVault.delete(key);
-                        // 回插的 echarts 实例适配新容器尺寸
+                        // 回插的 echarts 实例适配新容器尺寸（detached 期间 RO 不触发，
+                        // 重新入 DOM 后虽会恢复，但首帧尺寸可能仍是旧值，这里显式同步一次）
                         if (saved._chartInstance && typeof saved._chartInstance.resize === 'function') {{
                             try {{ saved._chartInstance.resize(); }} catch (e) {{ }}
                         }}
                     }}
-                    // vault 上限控制：会话内图表反复改稿场景防 Map 无限涨
+                    // vault 上限控制：会话内图表反复改稿场景防 Map 无限涨。
+                    // 裁剪必须连带 dispose——原实现只 delete 条目，被淘汰节点上的
+                    // echarts 实例与 ResizeObserver 永久驻留（vault 是本进程主要泄漏点）。
                     if (window.__chartVault.size > 48) {{
                         var _vk = window.__chartVault.keys();
-                        while (window.__chartVault.size > 24) {{ window.__chartVault.delete(_vk.next().value); }}
+                        while (window.__chartVault.size > 24) {{
+                            var _k = _vk.next().value;
+                            var _drop = window.__chartVault.get(_k);
+                            window.__chartVault.delete(_k);
+                            window._disposeChartNode(_drop);
+                        }}
                     }}
                 }};
 
-                // ===== echarts init 排队：每帧最多初始化 1 个，多图不同帧 init 不卡 JS 主线程 =====
+                // ===== echarts init 排队：rAF + 每帧时间预算，多图不同帧 init 不卡 JS 主线程 =====
                 // 多图表回复（如可视化验证场景 10+ 图）同帧批量 init 会形成长任务阻塞渲染
-                // 主线程，用户感知"图表一多整卡卡死"。rAF 队列把 init 摊到多帧，每帧 1 个。
+                // 主线程，用户感知"图表一多整卡卡死"。rAF 队列把 init 摊到多帧。
                 window._initOneEcharts = function (el) {{
                     try {{
                         var jsonB64 = el.getAttribute('data-echarts-json');
@@ -5906,15 +6101,35 @@ class CodeWebViewer(QWebEngineView):
                         // 用 TextDecoder('utf-8') 还原为正确字符串后再 JSON.parse，避免 mojibake。
                         var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
                         var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
-                        var chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
-                        chart.setOption(option);
+                        // 复用同节点上的旧实例（vault 回插 / 重复扫描）：只 setOption，
+                        // 不重复 init。echarts.init 对已初始化容器会抛 "There is a chart
+                        // instance already initialized on the dom"，旧实现靠 try/catch 吞掉，
+                        // 但那样每次都白跑一遍完整 init 开销。
+                        var chart = el._chartInstance;
+                        if (!chart || chart.isDisposed()) {{
+                            chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
+                            // RO 必须持引用：节点被 innerHTML 销毁时若不 disconnect，
+                            // RO 连同 target 常驻（本卡历史上最大的泄漏源之一，见
+                            // _disposeChartNode）。
+                            var _ro = new ResizeObserver(function() {{
+                                try {{ chart.resize(); }} catch (e) {{ }}
+                            }});
+                            _ro.observe(el);
+                            el._chartRO = _ro;
+                        }}
+                        chart.setOption(option, true);   // notMerge：避免残留上一轮 series
                         el._echartInited = true;
                         el._chartInstance = chart;
-                        if (window._attachChartToolbar) window._attachChartToolbar(el, 'echarts');
-                        // 卡片 resize 时自适应
-                        var _ro = new ResizeObserver(function() {{ chart.resize(); }});
-                        _ro.observe(el);
+                        el.classList.remove('chart-streaming', 'echarts-failed');
+                        if (window._attachChartToolbar && !el._toolbarAttached) {{
+                            window._attachChartToolbar(el, 'echarts');
+                            el._toolbarAttached = true;
+                        }}
                     }} catch(e) {{
+                        // JSON 不完整（流式半截）或 option 非法：保留占位骨架，内容补齐后
+                        // 下一轮自然重试（b64 变 → key 变 → 新节点重新入队）。
+                        // 原实现只 console.error，容器留 400px 空白 → 用户看到"图表区空一块"。
+                        el.classList.add('echarts-failed');
                         console.error('ECharts init error:', e);
                     }}
                 }};
@@ -5926,14 +6141,22 @@ class CodeWebViewer(QWebEngineView):
                     window.__echQueue.push(el);
                     if (!window.__echPumpBusy) window._pumpEcharts();
                 }};
+                // 每帧固定 1 个 → 每帧 8ms 时间预算：单图延迟不变，但模型连吐数个
+                // ```echarts 时可在一帧内 init 完 2~4 个，消掉"图表逐个蹦出"的拖沓感。
+                window._ECH_FRAME_BUDGET_MS = 8;
                 window._pumpEcharts = function () {{
+                    if (window.__echPumpBusy) return;   // 防多个入口并发触发重复 rAF
                     window.__echPumpBusy = true;
                     requestAnimationFrame(function () {{
                         window.__echPumpBusy = false;
-                        var el = window.__echQueue.shift();
-                        if (!el) return;
-                        el._echQueued = false;
-                        if (el.isConnected) window._initOneEcharts(el);  // 节点已被后续全量替换销毁则静默跳过
+                        var _t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+                        while (window.__echQueue.length) {{
+                            var el = window.__echQueue.shift();
+                            el._echQueued = false;
+                            if (el.isConnected) window._initOneEcharts(el);  // 节点已被后续全量替换销毁则静默跳过
+                            var _now = (window.performance && performance.now) ? performance.now() : Date.now();
+                            if (_now - _t0 >= window._ECH_FRAME_BUDGET_MS) break;
+                        }}
                         if (window.__echQueue.length) window._pumpEcharts();
                     }});
                 }};
@@ -5975,8 +6198,8 @@ class CodeWebViewer(QWebEngineView):
                     document.head.appendChild(s);
                 }}
 
-                function renderKatexBlocks() {{
-                    var nodes = document.querySelectorAll('.katex-pending[data-katex-src]');
+                function renderKatexBlocks(roots) {{
+                    var nodes = window._scopeQuery(roots, '.katex-pending[data-katex-src]');
                     if (!nodes.length) return;
                     _katexEnsure(function () {{
                         if (!window.katex || !window.katex.render) return;
@@ -6255,9 +6478,35 @@ class CodeWebViewer(QWebEngineView):
                 // 因此 Python 端把未闭合尾部的**行内渲染 HTML**传进来，
                 // 移除后重建增量节点保尾（innerHTML 注入，流式期间 markdown
                 // 语法即时格式化，不再字面显示源码）。
+                // ===== 流式图表骨架复用：保持 CSS 动画连续 =====
+                // 未闭合的图表 fence 每轮都随 tail 重建，骨架节点被销毁又新建 →
+                // CSS 动画每 150~500ms 重启一次，用户看到"骨架抖动"而非平滑的生成反馈。
+                // 对策：移除增量节点前先把已有骨架摘出，重建后再挂回末尾——流式期间
+                // 始终是同一个 DOM 节点，动画相位连续。
+                window._takeSkeleton = function (container) {{
+                    var sk = container.querySelector('.chart-skeleton');
+                    if (!sk) return null;
+                    if (sk.parentNode) sk.parentNode.removeChild(sk);
+                    return sk;
+                }};
+                // 本轮 HTML 是否已产出真图（fence 闭合）→ 骨架该退场了
+                window._hasRealChartIn = function (html) {{
+                    return !!html && (html.indexOf('echarts-container') >= 0 || html.indexOf('mermaid-block') >= 0);
+                }};
+                // 复用骨架：清掉新渲染出的同款骨架（避免双骨架），把旧节点挂到末尾
+                window._reattachSkeleton = function (container, sk, newHtml, tailHtml, tailDiv) {{
+                    if (!sk) return;
+                    if (window._hasRealChartIn(newHtml) || window._hasRealChartIn(tailHtml)) return;  // 图表已闭合，骨架自然丢弃
+                    var _inner = (tailDiv || container).querySelector('.chart-skeleton');
+                    if (_inner && _inner.parentNode) _inner.parentNode.removeChild(_inner);
+                    container.appendChild(sk);
+                }};
+
                 function updateContentAppend(newHtml, tailHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container) return;
+                    // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
+                    var _skel = window._takeSkeleton(container);
                     // 移除增量纯文本节点（差量渲染会以格式化 HTML 替代它们）
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
                         el.remove();
@@ -6280,6 +6529,8 @@ class CodeWebViewer(QWebEngineView):
                         tailDiv.innerHTML = tailHtml;
                         container.appendChild(tailDiv);
                     }}
+                    // 骨架挂回末尾（图表仍在生成中）→ CSS 动画相位连续，不抖动
+                    window._reattachSkeleton(container, _skel, newHtml, tailHtml, typeof tailDiv !== 'undefined' ? tailDiv : null);
                     // 🐛 修复（思考块滞留正文）：与全量 updateContent 对齐——简洁模式下
                     // 差量追加的思考/工具块立即搬移到"工具与思考"区，否则滞留
                     // #content-placeholder，视觉上"思考内容在正文闪现，随后消失回折叠区"。
@@ -6328,6 +6579,8 @@ class CodeWebViewer(QWebEngineView):
                 function updateTailHtml(html) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container || !html) return;
+                    // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
+                    var _skel = window._takeSkeleton(container);
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
                         el.remove();
                     }});
@@ -6340,6 +6593,8 @@ class CodeWebViewer(QWebEngineView):
                     tailDiv.setAttribute('data-rendered', 'true');
                     tailDiv.innerHTML = html;
                     container.appendChild(tailDiv);
+                    // 骨架挂回末尾（图表仍在生成中）；闭合时 _reattachSkeleton 自动丢弃
+                    window._reattachSkeleton(container, _skel, html, '', tailDiv);
                     // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
                     container.querySelectorAll('table:not(.code-table):not(.layout-table)').forEach(function(table) {{
                         if (table.parentNode && table.parentNode.classList.contains('table-scroll-wrapper')) return;
@@ -7599,12 +7854,20 @@ class CodeWebViewer(QWebEngineView):
                 # 轻量纯 JS 不做可见性门控（隐藏 tab 下执行无害；且必须执行——否则
                 # 恢复可见后 vault 回插的仍是旧主题实例）。图标重置与 CSS 变量注入
                 # 解耦，_theme_css_pending 补注入逻辑不受影响。
+                # [PERF] 主题切换会丢弃全部已渲染图表，必须**逐个 dispose** 而非
+                # 只 clear() Map：vault 里每个节点都持有 echarts 实例 + ResizeObserver
+                # （RO 对 target 是强引用，不 disconnect 则整棵子树常驻）。原实现
+                # clear() 丢弃引用但不释放资源，每次主题切换泄漏一批，与流式期间
+                # 的孤儿实例叠加 → 多图卡片 renderer 进程 OOM 白屏。
                 _chart_reset_js = (
-                    "if (window.__chartVault) { window.__chartVault.clear(); }"
+                    "if (window.__chartVault && window.__chartVault.size) {"
+                    "  window.__chartVault.forEach(function (el) { window._disposeChartNode(el); });"
+                    "  window.__chartVault.clear();"
+                    "}"
                     "if (window.echarts) {"
                     "  document.querySelectorAll('.echarts-container').forEach(function (el) {"
-                    "    if (el._chartInstance) { try { el._chartInstance.dispose(); } catch (e) {} }"
-                    "    el._echartInited = false; el._chartStashed = false;"
+                    "    window._disposeChartNode(el);"
+                    "    el._chartStashed = false;"
                     "  });"
                     "}"
                 )

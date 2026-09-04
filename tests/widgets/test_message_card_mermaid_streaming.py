@@ -63,10 +63,20 @@ def test_empty_untouched():
 
 
 def test_pipeline_streaming_has_no_render_block():
-    """管线级：半截时无渲染块（降级代码块），闭合后有且内容完整。"""
+    """管线级：半截时无渲染块（降级为图表骨架），闭合后有且内容完整。
+
+    行为变更：早期版本把半截 mermaid 降级为**普通代码块**（源码可见），
+    后续统一为**等高图表骨架**（chart-skeleton）——用户看到的是"图表生成中"
+    的占位动画而非源码，fence 闭合后原地切换成真图，零布局跳动。
+    共性收益：半截内容不再进入渲染分支，也不再往 chart vault 塞 key 每轮
+    变化的垃圾节点（vault 膨胀是多图白屏的次因）。
+    """
     html_half = _render_markdown_to_html_cached_impl(HALF_MERMAID)
     assert 'data-mermaid-src="' not in html_half, "半截不应下发渲染属性"
-    assert "mermaid-streaming" in html_half, "半截应降级为普通代码块"
+    assert 'class="chart-skeleton chart-streaming"' in html_half, (
+        "半截应降级为图表骨架占位，实际: " + html_half[:200]
+    )
+    assert "flowchart TD" not in html_half, "半截源码不再以代码块形式暴露给用户"
 
     complete = HALF_MERMAID + "?}\n    B -- 否 --> A\n```\n\n后文。"
     html_full = _render_markdown_to_html_cached_impl(complete)
