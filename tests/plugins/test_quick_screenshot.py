@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""quick-screenshot 插件测试：坐标换算 / 误触取消 / 选区捕获 / 注册行为。"""
+"""quick-screenshot 插件测试：坐标换算 / 误触取消 / 选区捕获 / 注册行为。
+
+quick-screenshot 已从本仓库系统插件目录迁移到插件市场仓库发布
+（drifox-plugins2，见 https://github.com/martin98-afk/drifox-plugins），
+本地未挂载时整套测试自动 skip，不污染测试报告。
+"""
 
 import importlib.util
 import sys
@@ -12,6 +17,12 @@ from PyQt5.QtWidgets import QApplication
 
 # plugins/ 非 Python 包，用 _load_module 模式加载（复用 test_rewrite_inline_script.py 做法）
 _PLUGIN_UI = Path(__file__).resolve().parents[2] / "plugins" / "quick-screenshot" / "ui"
+
+# 本地未挂载插件时跳过整套测试（已迁移到市场版）
+pytestmark = pytest.mark.skipif(
+    not _PLUGIN_UI.exists(),
+    reason="quick-screenshot 已迁移到 drifox-plugins2 市场发布，本地 plugins/quick-screenshot/ 不存在时跳过",
+)
 
 
 def _load_module(name: str, path: Path):
