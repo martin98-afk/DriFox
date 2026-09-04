@@ -438,14 +438,12 @@ def main() -> int:
         card._turn_list.set_filter_kind(None)
         app.processEvents()
 
-        # 时间线三个开关的全组合（duration / turns / calls 可任意叠加）
+        # 时间线 Duration 开关两态（开=真实时间比例+滚轮缩放，关=等宽块）
         for dur in (True, False):
-            for turns in (False, True):
-                for calls in (False, True):
-                    card._timeline.set_flags(dur, turns, calls)
-                    app.processEvents()
-        # 回到默认（三个开关全关 = 等宽块视图）
-        card._timeline.set_flags(False, False, False)
+            card._timeline.set_duration(dur)
+            app.processEvents()
+        # 回到默认（关 = 等宽块视图）
+        card._timeline.set_duration(False)
         app.processEvents()
 
         # 时间线拖选 → 列表过滤（重叠区间才保留）

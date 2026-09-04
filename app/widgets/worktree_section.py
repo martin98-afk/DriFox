@@ -721,9 +721,8 @@ class WorktreeSectionWidget(QWidget):
             return
         self._create_busy = True
         repo_root = self._repo_info.root
-        worktree_dir = os.path.join(
-            os.path.dirname(repo_root), f"{os.path.basename(repo_root)}-{branch_name.replace('/', '-')}"
-        )
+        # 统一建到仓库内 .worktrees/（已 gitignore），分支名中的 / 转为 -
+        worktree_dir = os.path.join(repo_root, ".worktrees", branch_name.replace("/", "-"))
 
         worker = _WorktreeTaskWorker(_create_worktree_job, repo_root, branch_name, worktree_dir, base_branch or "HEAD")
         worker.signals.finished.connect(lambda _r: self._on_create_finished(branch_name, worktree_dir, pet))
