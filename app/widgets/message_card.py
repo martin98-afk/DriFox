@@ -5727,6 +5727,21 @@ class CodeWebViewer(QWebEngineView):
                     }});
                 }}
 
+                // ===== mermaid 渲染并发限制：同时最多 2 个 render =====
+                // mermaid render 含 layout 计算，多图（10+）同时全并发会形成长任务阻塞
+                // 渲染主线程（"图表一多整卡卡死"）。信号量泵：_mmdActive < 2 时逐个取
+                // job 执行，done() 回调释放名额并驱动下一轮。
+                var _mmdWait = [];
+                var _mmdActive = 0;
+                function _pumpMmd() {{
+                    while (_mmdActive < 2 && _mmdWait.length) {{
+                        (function (job) {{
+                            _mmdActive++;
+                            job(function () {{ _mmdActive--; _pumpMmd(); }});
+                        }})(_mmdWait.shift());
+                    }}
+                }}
+
                 function renderMermaidBlocks() {{
                     var blocks = document.querySelectorAll('.mermaid-block[data-mermaid-src]');
                     if (!blocks.length) return;
@@ -5734,8 +5749,10 @@ class CodeWebViewer(QWebEngineView):
                         if (!window.mermaid || !window.mermaid.render) return;
                         for (var i = 0; i < blocks.length; i++) {{
                             (function (el) {{
-                                if (el._mmdDone) return;
+                                if (el._mmdDone || el._mmdQueued) return;
+                                el._mmdQueued = true;           // 入队防重（job 执行前的窗口期）
                                 el._mmdDone = true;             // 流式追加不重复渲染
+                                _mmdWait.push(function (done) {{
                                 var decoded;
                                 try {{
                                     // atob 按 ISO-8859-1 解码，直接用于 UTF-8 中文会 mojibake
@@ -5745,7 +5762,7 @@ class CodeWebViewer(QWebEngineView):
                                 }} catch (e) {{
                                     decoded = '';
                                 }}
-                                if (!decoded) return;
+                                if (!decoded) {{ done(); return; }}
                                 var rid = (el.id || 'mmd') + '-svg';
                                 window.mermaid.render(rid, decoded).then(function (r) {{
                                     var svg = r && r.svg ? r.svg : String(r);
@@ -5755,6 +5772,7 @@ class CodeWebViewer(QWebEngineView):
                                     el.setAttribute('data-mermaid-src', '');   // 渲染完释放 b64
                                     if (window._attachChartToolbar) window._attachChartToolbar(el, 'mermaid');
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                                    done();
                                 }})['catch'](function (e) {{
                                     // 失败不吞内容：退回原始源码，用户仍可复制
                                     el.classList.remove('mermaid-pending');
@@ -5773,9 +5791,12 @@ class CodeWebViewer(QWebEngineView):
                                         }}
                                     }} catch (ignored) {{ }}
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                                    done();
+                                }});
                                 }});
                             }})(blocks[i]);
                         }}
+                        _pumpMmd();
                     }});
                 }}
 
@@ -5839,6 +5860,57 @@ class CodeWebViewer(QWebEngineView):
                         var _vk = window.__chartVault.keys();
                         while (window.__chartVault.size > 24) {{ window.__chartVault.delete(_vk.next().value); }}
                     }}
+                }};
+
+                // ===== echarts init 排队：每帧最多初始化 1 个，多图不同帧 init 不卡 JS 主线程 =====
+                // 多图表回复（如可视化验证场景 10+ 图）同帧批量 init 会形成长任务阻塞渲染
+                // 主线程，用户感知"图表一多整卡卡死"。rAF 队列把 init 摊到多帧，每帧 1 个。
+                window._initOneEcharts = function (el) {{
+                    try {{
+                        var jsonB64 = el.getAttribute('data-echarts-json');
+                        if (!jsonB64 || el._echartInited) return;
+                        // atob() 默认按 ISO-8859-1 解码字节串，会破坏 UTF-8 中文。
+                        // 用 TextDecoder('utf-8') 还原为正确字符串后再 JSON.parse，避免 mojibake。
+                        var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
+                        var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
+                        var chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
+                        chart.setOption(option);
+                        el._echartInited = true;
+                        el._chartInstance = chart;
+                        if (window._attachChartToolbar) window._attachChartToolbar(el, 'echarts');
+                        // 卡片 resize 时自适应
+                        var _ro = new ResizeObserver(function() {{ chart.resize(); }});
+                        _ro.observe(el);
+                    }} catch(e) {{
+                        console.error('ECharts init error:', e);
+                    }}
+                }};
+                window.__echQueue = [];
+                window.__echPumpBusy = false;
+                window._queueEcharts = function (el) {{
+                    if (el._echQueued) return;
+                    el._echQueued = true;
+                    window.__echQueue.push(el);
+                    if (!window.__echPumpBusy) window._pumpEcharts();
+                }};
+                window._pumpEcharts = function () {{
+                    window.__echPumpBusy = true;
+                    requestAnimationFrame(function () {{
+                        window.__echPumpBusy = false;
+                        var el = window.__echQueue.shift();
+                        if (!el) return;
+                        el._echQueued = false;
+                        if (el.isConnected) window._initOneEcharts(el);  // 节点已被后续全量替换销毁则静默跳过
+                        if (window.__echQueue.length) window._pumpEcharts();
+                    }});
+                }};
+                window._initEchartsIn = function (container) {{
+                    if (!window.echarts) return;
+                    container.querySelectorAll('.echarts-container').forEach(function(el) {{
+                        var jsonB64 = el.getAttribute('data-echarts-json');
+                        if (!jsonB64 || el._echartInited || el._echQueued) return;
+                        window._queueEcharts(el);
+                    }});
                 }};
 
                 function _katexEnsure(cb) {{
@@ -6047,29 +6119,8 @@ class CodeWebViewer(QWebEngineView):
                             if (_fe) _fe.remove();
                         }});
 
-                        // 初始化 ECharts 图表
-                        if (window.echarts) {{
-                            document.querySelectorAll('.echarts-container').forEach(function(el) {{
-                                try {{
-                                    var jsonB64 = el.getAttribute('data-echarts-json');
-                                    if (!jsonB64 || el._echartInited) return;
-                                    // atob() 默认按 ISO-8859-1 解码字节串，会破坏 UTF-8 中文。
-                                    // 用 TextDecoder('utf-8') 还原为正确字符串后再 JSON.parse，避免 mojibake。
-                                    var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
-                                    var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
-                                    var chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
-                                    chart.setOption(option);
-                                    el._echartInited = true;
-                                    el._chartInstance = chart;
-                                    if (window._attachChartToolbar) window._attachChartToolbar(el, 'echarts');
-                                    // 卡片 resize 时自适应
-                                    var _ro = new ResizeObserver(function() {{ chart.resize(); }});
-                                    _ro.observe(el);
-                                }} catch(e) {{
-                                    console.error('ECharts init error:', e);
-                                }}
-                            }});
-                        }}
+                        // 初始化 ECharts 图表（rAF 排队：每帧 1 个 init，多图不同帧不卡主线程）
+                        window._initEchartsIn(container);
 
                         // 渲染 Mermaid 图表（内部按需懒加载 polyfill + mermaid）
                         if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
@@ -6224,26 +6275,8 @@ class CodeWebViewer(QWebEngineView):
                     window._prevScrollTop = document.body.scrollTop;
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
-                    // 初始化 ECharts 图表（追加的闭合段可能含 echarts 代码块）
-                    if (window.echarts) {{
-                        container.querySelectorAll('.echarts-container').forEach(function(el) {{
-                            try {{
-                                var jsonB64 = el.getAttribute('data-echarts-json');
-                                if (!jsonB64 || el._echartInited) return;
-                                var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
-                                var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
-                                var chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
-                                chart.setOption(option);
-                                el._echartInited = true;
-                                el._chartInstance = chart;
-                                if (window._attachChartToolbar) window._attachChartToolbar(el, 'echarts');
-                                var _ro = new ResizeObserver(function() {{ chart.resize(); }});
-                                _ro.observe(el);
-                            }} catch(e) {{
-                                console.error('ECharts init error:', e);
-                            }}
-                        }});
-                    }}
+                    // 初始化 ECharts 图表（追加的闭合段可能含 echarts 代码块；rAF 排队）
+                    window._initEchartsIn(container);
                     // 渲染 Mermaid 图表（追加的闭合段可能含 ```mermaid 代码块）
                     if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
                     // 渲染 KaTeX 公式（追加的闭合段可能含公式）
