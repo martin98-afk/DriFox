@@ -2090,6 +2090,102 @@ def _inject_hook_blocks(md_text: str, completed: bool = True) -> str:
     return md_text
 
 
+# ======== KaTeX 公式提取（GitHub 规则 + CJK 收紧）========
+# 设计文档：docs/superpowers/specs/2026-09-04-katex-formula-rendering-design.md
+# 在 markdown 渲染前把公式源码提取为 b64 占位标签：
+# - 公式不进 markdown 管线，天然免疫 _ ^ \ 的转义
+# - fence / inline code 内永不提取
+# - 未闭合定界符（流式半截）不命中，保持原文
+_RE_KATEX_FENCE_OPEN = re.compile(r"(```|~~~)")
+_RE_KATEX_INLINE_CODE = re.compile(r"`[^`\n]+`")
+_RE_KATEX_SENTINEL = re.compile("\x00(\\d+)\x00")
+_RE_KATEX_DISPLAY_DOLLAR = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
+_RE_KATEX_DISPLAY_BRACKET = re.compile(r"\\\[(.+?)\\\]", re.DOTALL)
+_RE_KATEX_INLINE_PAREN = re.compile(r"\\\((.+?)\\\)")
+# GitHub 规则：开 $ 右侧非空白/数字/$；闭 $ 左侧非空白、右侧非数字/字母
+# （闭侧允许数字结尾：$E=mc^2$ 是合法公式；开侧禁数字已挡住 $100 类价格）
+_RE_KATEX_INLINE_DOLLAR = re.compile(
+    r"(?<![\\$])\$(?=[^\s\d$])"
+    r"([^$\n]+?)"
+    r"(?<=[^\s])\$(?![\d\w])"
+)
+_RE_KATEX_CJK = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _katex_placeholder(src: str, display: bool) -> str:
+    """公式源码 b64 编码为占位标签；JS 侧 renderKatexBlocks 消费。"""
+    b64 = base64.b64encode(src.encode("utf-8")).decode("ascii")
+    if display:
+        return f'<div class="katex-block katex-pending" data-katex-src="{b64}" style="margin:12px 0;"></div>'
+    return f'<span class="katex-inline katex-pending" data-katex-src="{b64}"></span>'
+
+
+def _katex_sub(pattern: re.Pattern, text: str, display: bool) -> str:
+    """按一条定界符规则替换；内容含 CJK 时放弃该对保持原文。"""
+
+    def _repl(m: re.Match) -> str:
+        src = m.group(1)
+        if not src.strip() or _RE_KATEX_CJK.search(src):
+            return m.group(0)
+        return _katex_placeholder(src, display)
+
+    return pattern.sub(_repl, text)
+
+
+def _extract_formulas_in_plain(seg: str) -> str:
+    """非 fence 段：inline code 哨兵保护 → 四类定界符按优先级提取 → 还原。"""
+    stash: list[str] = []
+
+    def _save(m: re.Match) -> str:
+        stash.append(m.group(0))
+        return f"\x00{len(stash) - 1}\x00"
+
+    seg = _RE_KATEX_INLINE_CODE.sub(_save, seg)
+    # 长定界优先，防止 $$ 被两个 $ 拆食
+    seg = _katex_sub(_RE_KATEX_DISPLAY_DOLLAR, seg, display=True)
+    seg = _katex_sub(_RE_KATEX_DISPLAY_BRACKET, seg, display=True)
+    seg = _katex_sub(_RE_KATEX_INLINE_PAREN, seg, display=False)
+    seg = _katex_sub(_RE_KATEX_INLINE_DOLLAR, seg, display=False)
+    return _RE_KATEX_SENTINEL.sub(lambda m: stash[int(m.group(1))], seg)
+
+
+def _extract_formulas(md_text: str) -> str:
+    """markdown 渲染前提取 LaTeX 公式为占位标签（GitHub 规则 + CJK 收紧）。
+
+    - fence 状态机切段，fence 内（含流式未闭合 fence）原样保留
+    - 四类定界符优先级：$$ → \\[ → \\( → $
+    - 未闭合定界符不命中，原文保留（流式安全）
+    """
+    if "$" not in md_text and "\\(" not in md_text and "\\[" not in md_text:
+        return md_text
+
+    segments: list[tuple[bool, str]] = []  # (is_fence, text)
+    buf: list[str] = []
+    in_fence = False
+    fence_marker = ""
+    for line in md_text.split("\n"):
+        stripped = line.lstrip()
+        if in_fence:
+            buf.append(line)
+            if stripped.startswith(fence_marker):
+                segments.append((True, "\n".join(buf)))
+                buf, in_fence, fence_marker = [], False, ""
+        else:
+            m = _RE_KATEX_FENCE_OPEN.match(stripped)
+            if m:
+                if buf:
+                    segments.append((False, "\n".join(buf)))
+                buf, in_fence, fence_marker = [line], True, m.group(1)
+            else:
+                buf.append(line)
+    # 流式半截 fence 到结尾：整段视为 fence，不提取
+    segments.append((in_fence, "\n".join(buf)))
+
+    return "\n".join(
+        seg if is_fence else _extract_formulas_in_plain(seg) for is_fence, seg in segments
+    )
+
+
 # 缓存大小阈值（KB）：超过此大小的文本不缓存，防止内存膨胀
 _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 
