@@ -3924,6 +3924,8 @@ class CodeWebViewer(QWebEngineView):
         theme_fp = json.dumps({k: theme[k] for k in sorted(theme)}, option=json.OPT_SORT_KEYS).decode("utf-8")
         # mermaid vendor URL 进 key：热替换 vendor 文件后能让旧骨架缓存失效
         _mmd_polyfill_url, _mmd_lib_url = _get_mermaid_vendor_urls()
+        # KaTeX vendor URL 进 key：与 mermaid 同策略，热替换后骨架缓存失效
+        _katex_css_url, _katex_js_url = _get_katex_urls()
         # mermaid 主题联动：取 Colors 而非硬编码，避免浅色主题下白叠白
         # （MEMORY.md 记录的反复出现的缺陷模式）。Colors 大写属性由主题 YAML 自动填充。
         mmd_text_color = Colors.TEXT_PRIMARY
@@ -3945,6 +3947,8 @@ class CodeWebViewer(QWebEngineView):
             tiny_font_size,
             _mmd_polyfill_url,
             _mmd_lib_url,
+            _katex_css_url,
+            _katex_js_url,
             mmd_text_color,
             mmd_line_color,
             mmd_node_bg,
@@ -5678,6 +5682,10 @@ class CodeWebViewer(QWebEngineView):
                 var _MMD_POLYFILL = '{_mmd_polyfill_url}';
                 var _MMD_LIB = '{_mmd_lib_url}';
 
+                // ===== KaTeX 公式渲染（懒加载，与 mermaid 同策略；css/js 同源见 _get_katex_urls）=====
+                var _KATEX_CSS = '{_katex_css_url}';
+                var _KATEX_LIB = '{_katex_js_url}';
+
                 function _mmdLoadScript(src, onOk) {{
                     if (!src) {{ onOk(); return; }}
                     var s = document.createElement('script');
@@ -5769,6 +5777,64 @@ class CodeWebViewer(QWebEngineView):
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                 }});
                             }})(blocks[i]);
+                        }}
+                    }});
+                }}
+
+                function _katexEnsure(cb) {{
+                    if (window.katex && window.katex.render) {{ cb(); return; }}
+                    if (!window._katexQueue) window._katexQueue = [];
+                    window._katexQueue.push(cb);
+                    if (window._katexLoading) return;   // 已在加载中，排队即可
+                    window._katexLoading = true;
+                    if (!document.getElementById('katex-css') && _KATEX_CSS) {{
+                        var link = document.createElement('link');
+                        link.id = 'katex-css';
+                        link.rel = 'stylesheet';
+                        link.href = _KATEX_CSS;
+                        document.head.appendChild(link);
+                    }}
+                    var s = document.createElement('script');
+                    s.src = _KATEX_LIB;
+                    s.onload = function () {{
+                        window._katexLoading = false;
+                        var q = window._katexQueue || [];
+                        window._katexQueue = [];
+                        for (var qi = 0; qi < q.length; qi++) {{ q[qi](); }}
+                    }};
+                    s.onerror = function () {{
+                        // 加载失败：清队列，占位保持 pending 原样（流式下一轮可重试）
+                        window._katexLoading = false;
+                        window._katexQueue = [];
+                    }};
+                    document.head.appendChild(s);
+                }}
+
+                function renderKatexBlocks() {{
+                    var nodes = document.querySelectorAll('.katex-pending[data-katex-src]');
+                    if (!nodes.length) return;
+                    _katexEnsure(function () {{
+                        if (!window.katex || !window.katex.render) return;
+                        for (var i = 0; i < nodes.length; i++) {{
+                            (function (el) {{
+                                if (el._katexDone) return;
+                                el._katexDone = true;             // 流式重建防重
+                                var bytes = Uint8Array.from(atob(el.getAttribute('data-katex-src')),
+                                    function (c) {{ return c.charCodeAt(0); }});
+                                var decoded = new TextDecoder('utf-8').decode(bytes);
+                                var display = el.classList.contains('katex-block');
+                                try {{
+                                    // throwOnError:false → 非法 LaTeX 输出红色错误样式源码（GitHub 风格）
+                                    katex.render(decoded, el, {{ throwOnError: false, displayMode: display }});
+                                    el.setAttribute('data-katex-src', '');   // 渲染完释放 b64
+                                    el.classList.remove('katex-pending');
+                                }} catch (e) {{
+                                    // 环境级异常（katex 未定义等）：退纯文本源码
+                                    el.textContent = decoded;
+                                    el.classList.remove('katex-pending');
+                                }}
+                                if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                            }})(nodes[i]);
                         }}
                     }});
                 }}
@@ -5943,6 +6009,8 @@ class CodeWebViewer(QWebEngineView):
 
                         // 渲染 Mermaid 图表（内部按需懒加载 polyfill + mermaid）
                         if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
+                        // 渲染 KaTeX 公式（内部按需懒加载 katex，css 一次性注入）
+                        if (typeof renderKatexBlocks === 'function') renderKatexBlocks();
 
                         // SVG / HTML widget 工具栏挂载（与 mermaid 同时机：全量重建后）
                         if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
@@ -6114,6 +6182,8 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     // 渲染 Mermaid 图表（追加的闭合段可能含 ```mermaid 代码块）
                     if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
+                    // 渲染 KaTeX 公式（追加的闭合段可能含公式）
+                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks();
                     // SVG / HTML widget 工具栏挂载（同上时机）
                     if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
                     // 使用延迟报告，确保浏览器布局完成
