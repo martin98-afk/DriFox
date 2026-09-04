@@ -233,6 +233,7 @@ class SendableTextEdit(TextEdit):
     atTriggered = pyqtSignal(str)  # 检测到 @ 触发，携带查询文本
     atDismissed = pyqtSignal()  # @ 触发结束
     files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
+    paste_image_saved = pyqtSignal(str)  # 粘贴图片后台落盘完成（跨线程刷新附件芯片用）
     enteringHistoryMode = pyqtSignal()  # 即将进入历史浏览模式（main_widget 需保存当前附件）
     historyAttachmentsRestored = pyqtSignal(list)  # 恢复附件路径列表
     historyModeExited = pyqtSignal()  # 退出历史浏览模式（main_widget 从备份恢复附件）
@@ -1913,6 +1914,12 @@ class SendableTextEdit(TextEdit):
                         self._pending_image_saves.remove(ev)
                     except ValueError:
                         pass
+                # 通知主线程落盘完成：芯片创建早于文件写入，需刷新解除"不存在"误报
+                # （跨线程 emit → queued 到主线程；窗口销毁竞态时静默）
+                try:
+                    self.paste_image_saved.emit(path)
+                except RuntimeError:
+                    pass
 
         threading.Thread(target=_do_save, daemon=True, name="drifox-paste-image-save").start()
 
