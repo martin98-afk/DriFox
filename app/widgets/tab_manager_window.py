@@ -890,11 +890,10 @@ class TabManagerWindow(FramelessWindow):
         """
         ctrl = getattr(self, "_wb_preview_ctrl", None)
         if ctrl is not None and ctrl.is_previewing():
+            # 标志交由 _wb_preview_leave 的 _done（slide_out 异步回调）读取并复位，
+            # 此处不能提前复位：否则异步 _done 跑时读到 False → 误走收起而非转常驻。
             self._wb_promote_on_leave = True
-            try:
-                ctrl.on_clicked()  # 同步走 _done，reparent 回 splitter
-            finally:
-                self._wb_promote_on_leave = False
+            ctrl.on_clicked()  # 触发 _wb_preview_leave → slide_out → _done 里 promote
             return
         self.set_workbench_visible(not self.is_workbench_visible())
 
@@ -1027,48 +1026,61 @@ class TabManagerWindow(FramelessWindow):
     # ── 右侧工作台 hover 悬浮预览：进入/退出回调 ──
 
     def _wb_preview_enter(self) -> None:
-        """控制器 on_enter：把工作台从 splitter 摘到浮层，复用 set_workbench_visible 落位/数据"""
+        """控制器 on_enter：把工作台 frame 摘到浮层做纯几何滑入。
+
+        ★ 全程不调 set_workbench_visible：预览是浮层盖在**已稳定**的对话区上，
+        frame 关闭态在 splitter 里本就 0 宽、摘出后 chatFrame 仍占满不 resize，
+        也就不切 chatFrame margin、不写 _workbench_frame_w → 消除消息卡闪 + 宽度重置。
+        """
+        from app.widgets.workbench_panel import PANEL_WIDTH_MIN
+
         frame = self._workbench_frame
+        panel = self.workbench_panel
         self._wb_in_preview = True
-        w = int(getattr(self, "_workbench_frame_w", frame.minimumWidth() or 340))
-        self._wb_overlay.place(max(w, frame.minimumWidth()))
-        # 先把 frame reparent 到 overlay（手动）；set_content 内部会重复一次，幂等无害
+        self._wb_visible_target = False  # 预览≠打开：is_workbench_visible() 保持 False，不污染
+        w = int(getattr(self, "_workbench_frame_w", PANEL_WIDTH_MIN + 14))
         frame.setParent(self._wb_overlay)
-        # 复用现有可见性落位/数据填充：动画关掉、走瞬切路径，避免与浮层进出打架
-        self._wb_suppress_memory = True
-        try:
-            self.set_workbench_visible(True, animate=False)
-        finally:
-            self._wb_suppress_memory = False
         self._wb_overlay.set_content(frame)
-        self._wb_overlay.fade_in()
+        panel.set_panel_visible(True)
+        panel.setMinimumWidth(0)  # 滑入期放开下限，避免 panel 最小宽顶住浮层展开
+        panel.setUpdatesEnabled(False)  # 滑入期冻结内容重绘（对齐嵌入展开"先滑后显"观感）
+        target = max(w, PANEL_WIDTH_MIN + 14)
+
+        def _shown() -> None:
+            panel.setUpdatesEnabled(True)
+            panel.setMinimumWidth(PANEL_WIDTH_MIN)
+            self.refresh_workbench()
+
+        self._wb_overlay.slide_in(target, on_done=_shown)
 
     def _wb_preview_leave(self) -> None:
-        """控制器 on_leave：fade_out 同步回调里 reparent 回 splitter 第三窗格"""
+        """控制器 on_leave：浮层滑出后把 frame 以 0 宽 hide 回挂 splitter 第三窗格。
+
+        非点击路径不复用 set_workbench_visible(False)——那会把 reparent 残值写进
+        _workbench_frame_w（宽度重置）并切 chatFrame margin（消息闪）。回挂后 frame
+        保持隐藏 0 宽，chatFrame 宽度自始至终不变。仅点击转常驻才走嵌入展开动画。
+        """
         if not self._wb_in_preview:
             return
         self._wb_in_preview = False
 
         def _done() -> None:
             frame = self._workbench_frame
+            panel = self.workbench_panel
+            panel.set_panel_visible(False)
             self._wb_overlay.clear_content()
             self._wb_overlay.hide()
             frame.setParent(self._splitter)
             self._splitter.insertWidget(2, frame)
             if self._wb_promote_on_leave:
-                # 点击转常驻：frame 留在 splitter 第三窗格并显示，记忆正常落账为 True
-                frame.show()
-                self.set_workbench_visible(True, animate=False)
+                # 点击转常驻：走真正的嵌入展开（动画 + chatFrame margin 切换 + 记忆落账 True）
+                self._wb_promote_on_leave = False
+                self.set_workbench_visible(True)
             else:
-                # hover 超时离开：收起工作台，记忆抑制避免污染 per-tab 记忆
                 frame.hide()
-                self._wb_suppress_memory = True
-                try:
-                    self.set_workbench_visible(False, animate=False)
-                finally:
-                    self._wb_suppress_memory = False
+                self._wb_visible_target = None  # 回挂收起后回到“看 isVisible”，关闭态 False
 
-        self._wb_overlay.fade_out(on_done=_done)
+        self._wb_overlay.slide_out(on_done=_done)
 
     def _stop_wb_anim(self) -> None:
         anim = getattr(self, "_wb_anim", None)

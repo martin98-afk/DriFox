@@ -1,28 +1,38 @@
 # -*- coding: utf-8 -*-
 """右侧工作台 hover 悬浮预览的接线与状态机测试
 
-宿主在 ``offscreen`` 下真实构造 ``TabManagerWindow``，验证：
+宿主在 offscreen 下真实构造 TabManagerWindow，验证重构后的语义：
 
-- 装配段创建了 ``_wb_overlay`` / ``_wb_preview_ctrl``，并把标题栏 hover
-  信号接到控制器上；
-- 收起态 hover 进入预览后，``_workbench_frame`` 被 reparent 到浮层、
-  控制器进入 ``previewing`` 状态；
-- 预览全程**不污染**当前窗口的 ``_workbench_visible_memory``（记忆抑制）；
-- 点击（``on_clicked``）把 frame 回挂 splitter、浮层隐藏、工作台回到收起；
-- 直接点标题栏按钮：在预览中也走相同的「先退预览」互斥逻辑。
+- 装配段创建 _wb_overlay / _wb_preview_ctrl，标题栏 hover 信号接到控制器；
+- 收起态 hover 进入预览：_workbench_frame 被 reparent 到浮层、控制器进入
+  previewing；但**预览≠打开**——is_workbench_visible() 保持 False、不写
+  per-tab 显隐记忆（预览是浮层盖在已稳定的对话区上，不动 splitter 布局）；
+- 浮层滑入/滑出是异步动画（QVariantAnimation），故 leave/click 后要等动画
+  完成（_SLIDE_MS）再看 reparent 回挂结果；
+- hover 超时离开 → 浮层滑出 → frame 以 0 宽 hide 回挂 splitter index2、
+  回到收起、记忆保持 False；
+- 预览态点击 → 浮层滑出 → frame 回挂后走 set_workbench_visible(True) 转
+  常驻展开、is_workbench_visible True、记忆 True；
+- eventFilter 把浮层自身 HoverEnter/Leave 转给控制器，驱动缓收计时取消。
+
+浮层 isVisible 在 offscreen + native-child 下不可靠，不断言，交由人工实测。
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
-from app.widgets.tab_manager_window import TabManagerWindow
 from app.widgets.sidebar_hover_preview import HoverPreviewOverlay
+from app.widgets.tab_manager_window import TabManagerWindow
+
+# slide_out 动画 150ms，测试等待留余量
+_SLIDE_MS = 280
 
 
 @pytest.fixture(autouse=True)
 def _reset_tab_manager_singleton():
-    """TabManagerWindow 是单例，每个用例前后清空，避免相互污染"""
     from app.tray_manager import TrayManager
 
     TabManagerWindow._instance = None
@@ -34,237 +44,127 @@ def _reset_tab_manager_singleton():
 
 @pytest.fixture
 def tm(qtbot):
-    """offscreen 真实构造宿主（与 test_tab_manager_window.py 同样的入口）"""
     w = TabManagerWindow.create_instance()
     qtbot.addWidget(w)
-    # 默认工作台收起，避免用例间的状态泄漏
     w.set_workbench_visible(False, animate=False)
     return w
 
 
-def _has_attr_chain(tm, *names):
-    cur = tm
-    for n in names:
-        if not hasattr(cur, n):
-            return False
-        cur = getattr(cur, n)
-    return True
+def _fake_cur(tm):
+    cur = SimpleNamespace(_workbench_visible_memory=False)
+    tm.get_current_window = lambda: cur
+    return cur
 
 
 class TestAssembly:
-    """__init__ 内装配的接线存在性"""
-
     def test_overlay_and_controller_attached(self, tm):
+        from PyQt5.QtCore import Qt
+
         assert isinstance(tm._wb_overlay, HoverPreviewOverlay)
         assert tm._wb_overlay.parentWidget() is tm
-        # 浮层自身不开信号，靠宿主 eventFilter 转发 hover
-        assert tm._wb_overlay.testAttribute(0x0001) is False  # WA_Hover 不强制，brief 没要求断言
-
+        assert tm._wb_overlay.testAttribute(Qt.WA_Hover)
         assert tm._wb_preview_ctrl is not None
-        # 标题栏 hover 信号必须连到控制器
-        assert _has_attr_chain(tm, "titleBar", "_workbench_btn")
+        assert hasattr(tm.titleBar, "_workbench_btn")
 
-    def test_suppression_flags_initialized(self, tm):
-        assert tm._wb_suppress_memory is False
+    def test_flags_initialized(self, tm):
         assert tm._wb_in_preview is False
+        assert tm._wb_promote_on_leave is False
 
 
 class TestHoverEntersPreview:
-    """收起态 hover 进入预览：frame 被 reparent 到浮层、状态机进入 previewing"""
-
-    def test_frame_reparented_to_overlay(self, tm):
+    def test_frame_to_overlay_preview_not_open(self, tm):
         frame = tm._workbench_frame
-        assert frame.parent() is tm._splitter  # 初始回 splitter
+        assert frame.parent() is tm._splitter
 
         tm.titleBar.workbench_hover_changed.emit(True)
 
-        # set_content 会把 frame setParent 到 overlay
+        # frame 同步挂入 overlay（set_content），随后 slide_in 异步展开
         assert frame.parent() is tm._wb_overlay
         assert tm._wb_in_preview is True
         assert tm._wb_preview_ctrl.is_previewing() is True
-        # 复用 set_workbench_visible 落位/数据 → 工作台展开
-        assert tm.is_workbench_visible() is True
-        # fade_in 在 offscreen + native-child 下 isVisible 不可靠（见 brief 末段
-        # 「Task 6 人工实测」），不强行断言；手动验证时可观察弹出。
-
-
-class TestMemorySuppression:
-    """预览全程不污染当前窗口的 _workbench_visible_memory（per-tab 记忆）"""
-
-    def test_memory_stays_collapsed_during_preview(self, tm):
-        # 初始无当前窗口：手动构造一个 SimpleNamespace 充当 cur
-        from types import SimpleNamespace
-
-        cur = SimpleNamespace()
-        tm._content_stack.setCurrentIndex(0)  # 触发 currentWindow 路径不影响，本用例直接绕过
-
-        # 关键：当前窗口记忆在预览期间不能被改成 True
-        cur._workbench_visible_memory = False
-
-        # 直接走 preview 路径（不依赖 get_current_window，因为测试环境可能为空）
-        # 这里覆盖更宽：通过 controller 触发 enter
-        tm.titleBar.workbench_hover_changed.emit(True)
-        # 由于实际 _workbench_visible_memory 是 set_workbench_visible 写入 cur 的
-        # 而我们的宿主此时 get_current_window() 通常为 None（无窗口），
-        # 这条路径天然不会写入；为了真正测抑制逻辑，我们模拟有 cur：
-        # 直接看 _wb_suppress_memory 守卫生效即可。
-        assert tm._wb_in_preview is True
-        # 即使有 cur，记忆也未被改写为 True
-        if cur._workbench_visible_memory is True:
-            pytest.fail("preview 不应把 _workbench_visible_memory 写为 True")
-
-    def test_suppress_memory_flag_during_preview(self, tm):
-        """直接验证抑制守门：模拟有 cur 时 set_workbench_visible 跳过写入
-
-        通过 monkey-patch get_current_window 返回带 memory 字段的对象，
-        在预览 enter 时 memory 不被覆盖。
-        """
-        from types import SimpleNamespace
-
-        cur = SimpleNamespace(_workbench_visible_memory=False)
-        tm.get_current_window = lambda: cur
-
-        tm.titleBar.workbench_hover_changed.emit(True)
-        # 预览期间 set_workbench_visible 被守门，未写入 True
-        assert cur._workbench_visible_memory is False
-        # 但工作台实际已展开（视觉/数据落位）
-        assert tm.is_workbench_visible() is True
-
-
-class TestClickedExitsPreview:
-    """直接 ``ctrl.on_clicked()`` 走纯 leave 路径：超时语义——回挂并收起"""
-
-    def test_on_clicked_reparents_back_and_collapses(self, tm):
-        from types import SimpleNamespace
-
-        cur = SimpleNamespace(_workbench_visible_memory=False)
-        tm.get_current_window = lambda: cur
-
-        # 进入预览
-        tm.titleBar.workbench_hover_changed.emit(True)
-        assert tm._workbench_frame.parent() is tm._wb_overlay
-        assert tm._wb_in_preview is True
-
-        # 直接调 on_clicked（不带 promote 标志）→ 等同超时 leave 路径
-        tm._wb_preview_ctrl.on_clicked()
-
-        # 回挂 splitter 第三窗格
-        assert tm._workbench_frame.parent() is tm._splitter
-        # splitter 索引 2 还是 workbench_frame
-        assert tm._splitter.widget(2) is tm._workbench_frame
-        # 状态机退出
-        assert tm._wb_in_preview is False
-        assert tm._wb_preview_ctrl.is_previewing() is False
-        # 浮层隐藏
-        assert tm._wb_overlay.isVisible() is False
-        # 工作台收起（is_visible_target 路径）
+        # 预览≠打开：is_workbench_visible 保持 False（_wb_visible_target=False）
         assert tm.is_workbench_visible() is False
-        # 记忆抑制依然守门：preview→collapsed 整段都未污染
-        assert cur._workbench_visible_memory is False
 
 
-class TestTitlebarButtonMutualExclusion:
-    """直接点标题栏按钮：
-
-    spec 要求预览态下点击 = 「收起浮层并转为常驻嵌入展开」，即点完应
-    is_workbench_visible() 为 True、frame 已 reparent 回 splitter。
-    与 hover 超时离开（应回到 False）形成互斥。
-    """
-
-    def test_click_while_previewing_promotes_to_embedded_open(self, tm):
-        """预览态下点按钮：转为常驻展开（spec 行为）"""
-        from types import SimpleNamespace
-
-        cur = SimpleNamespace(_workbench_visible_memory=False)
-        tm.get_current_window = lambda: cur
-
-        # 进入预览
+class TestPreviewDoesNotPolluteMemory:
+    def test_memory_untouched_during_preview(self, tm):
+        cur = _fake_cur(tm)
         tm.titleBar.workbench_hover_changed.emit(True)
-        assert tm._wb_in_preview is True
-        # 预览期 set_workbench_visible(True) 已发生（复用落位）
-        assert tm.is_workbench_visible() is True
-
-        # 直接点标题栏按钮：preview → 常驻 True（不再额外翻）
-        tm.toggle_workbench()
-
-        # 状态机退出预览
-        assert tm._wb_in_preview is False
-        # spec：转常驻展开
-        assert tm.is_workbench_visible() is True
-        # frame 已 reparent 回 splitter 第三窗格（不再是 overlay）
-        assert tm._workbench_frame.parent() is tm._splitter
-        assert tm._splitter.widget(2) is tm._workbench_frame
-        # 浮层已隐藏
-        assert tm._wb_overlay.isVisible() is False
-        # 当前窗口记忆正常落账为 True（promote 分支不抑制）
-        assert cur._workbench_visible_memory is True
-
-    def test_hover_timeout_leave_collapses(self, tm):
-        """hover 超时离开（非点击）：回到收起（spec 行为）"""
-        from types import SimpleNamespace
-
-        cur = SimpleNamespace(_workbench_visible_memory=False)
-        tm.get_current_window = lambda: cur
-
-        # 进入预览
-        tm.titleBar.workbench_hover_changed.emit(True)
-        assert tm._wb_in_preview is True
-
-        # 模拟 hover 离开（控制器走 on_button_hover(False) 路径）
-        tm.titleBar.workbench_hover_changed.emit(False)
-        # 走 hide_timer：直接 fire 即可
-        if tm._wb_preview_ctrl._hide_timer.isActive():
-            tm._wb_preview_ctrl._hide_timer.timeout.emit()
-
-        # 状态机退出预览、回到收起
-        assert tm._wb_in_preview is False
-        assert tm.is_workbench_visible() is False
-        # frame 已 reparent 回 splitter
-        assert tm._workbench_frame.parent() is tm._splitter
-        assert tm._wb_overlay.isVisible() is False
-        # 记忆抑制：hover-leave 分支不写记忆
+        # 预览不调 set_workbench_visible，记忆保持 False
         assert cur._workbench_visible_memory is False
-
-    def test_toggle_outside_preview_keeps_toggle_behavior(self, tm):
-        """非预览态点按钮仍走翻转（首次 = 展开，第二次 = 收起）"""
-        from types import SimpleNamespace
-
-        cur = SimpleNamespace(_workbench_visible_memory=False)
-        tm.get_current_window = lambda: cur
-
-        assert tm._wb_in_preview is False
-
-        # 首次点击（收起态）→ 展开
-        tm.toggle_workbench()
-        assert tm.is_workbench_visible() is True
-        assert cur._workbench_visible_memory is True
-
-        # 再次点击 → 收起
-        tm.toggle_workbench()
         assert tm.is_workbench_visible() is False
-        assert cur._workbench_visible_memory is False
+        # 清理进行中的 slide_in 动画
+        tm._wb_overlay._slide.stop()
 
 
 class TestEventFilterOverlayHover:
-    """eventFilter 转发浮层 HoverEnter/Leave → 控制器"""
-
-    def test_overlay_hover_enter_calls_controller(self, tm, qtbot):
+    def test_overlay_leave_starts_timer_enter_cancels(self, tm):
         from PyQt5.QtCore import QEvent, QPoint, Qt
         from PyQt5.QtGui import QHoverEvent
 
-        # 进入预览以便观察 leave 取消
         tm.titleBar.workbench_hover_changed.emit(True)
         assert tm._wb_in_preview is True
 
         p = QPoint(0, 0)
-        # 模拟浮层 HoverLeave：必须把 leave 转发到 controller
-        ev_leave = QHoverEvent(QEvent.HoverLeave, p, p, Qt.NoModifier)
-        # 直接调 eventFilter 即可（不依赖 QApplication 实际派发）
-        tm.eventFilter(tm._wb_overlay, ev_leave)
-        # leave 会启动 hide_timer（默认 300ms），previewing 仍为 True
-        assert tm._wb_in_preview is True
+        tm.eventFilter(tm._wb_overlay, QHoverEvent(QEvent.HoverLeave, p, p, Qt.NoModifier))
         assert tm._wb_preview_ctrl._hide_timer.isActive() is True
-        # enter 取消该 timer
-        ev_enter = QHoverEvent(QEvent.HoverEnter, p, p, Qt.NoModifier)
-        tm.eventFilter(tm._wb_overlay, ev_enter)
+        tm.eventFilter(tm._wb_overlay, QHoverEvent(QEvent.HoverEnter, p, p, Qt.NoModifier))
         assert tm._wb_preview_ctrl._hide_timer.isActive() is False
+
+        tm._wb_overlay._slide.stop()
+
+
+class TestHoverTimeoutLeaveCollapses:
+    def test_timeout_leave_reparents_back_and_collapses(self, tm, qtbot):
+        cur = _fake_cur(tm)
+        frame = tm._workbench_frame
+        tm.titleBar.workbench_hover_changed.emit(True)
+        assert frame.parent() is tm._wb_overlay
+        tm._wb_overlay._slide.stop()  # 结束 slide_in，进入稳定预览
+
+        # hover 离开 → 控制器缓收计时 → 触发 leave
+        tm.titleBar.workbench_hover_changed.emit(False)
+        tm._wb_preview_ctrl._hide_timer.timeout.emit()
+        # slide_out 异步，等 _done 回挂
+        qtbot.wait(_SLIDE_MS)
+
+        assert tm._wb_in_preview is False
+        assert tm._wb_preview_ctrl.is_previewing() is False
+        assert frame.parent() is tm._splitter
+        assert tm._splitter.widget(2) is frame
+        assert tm.is_workbench_visible() is False
+        assert cur._workbench_visible_memory is False
+
+
+class TestClickPromotesToEmbeddedOpen:
+    def test_click_while_previewing_promotes(self, tm, qtbot):
+        cur = _fake_cur(tm)
+        frame = tm._workbench_frame
+        tm.titleBar.workbench_hover_changed.emit(True)
+        assert tm._wb_in_preview is True
+        tm._wb_overlay._slide.stop()  # 结束 slide_in
+
+        # 预览态点标题栏按钮 → 转常驻嵌入展开
+        tm.toggle_workbench()
+        qtbot.wait(_SLIDE_MS)  # 等 slide_out 的 _done（promote 回挂 + 展开）
+
+        assert tm._wb_in_preview is False
+        assert tm.is_workbench_visible() is True  # spec：转常驻打开
+        assert frame.parent() is tm._splitter
+        assert tm._splitter.widget(2) is frame
+        assert cur._workbench_visible_memory is True  # promote 分支正常落账
+        tm._wb_anim.stop() if tm._wb_anim else None  # 清理展开动画
+
+
+class TestNonPreviewToggleUnchanged:
+    def test_toggle_outside_preview_flips(self, tm):
+        cur = _fake_cur(tm)
+        assert tm._wb_in_preview is False
+        tm.toggle_workbench()
+        assert tm.is_workbench_visible() is True
+        assert cur._workbench_visible_memory is True
+        tm._wb_anim.stop() if tm._wb_anim else None
+        tm.toggle_workbench()
+        assert tm.is_workbench_visible() is False
+        assert cur._workbench_visible_memory is False
+        tm._wb_anim.stop() if tm._wb_anim else None

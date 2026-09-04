@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import QEasingCurve, QVariantAnimation, Qt, QTimer
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
 
@@ -30,6 +30,8 @@ class HoverPreviewOverlay(QWidget):
         self._slot_layout.setContentsMargins(0, 0, 0, 0)  # 几何全部交给 place()
         self._slot_layout.setSpacing(0)
         self._content: QWidget | None = None
+        self._slide: QVariantAnimation | None = None
+        self._target_w = 0
         self.hide()
 
     def place(self, width: int) -> None:
@@ -73,6 +75,52 @@ class HoverPreviewOverlay(QWidget):
         self.hide()
         if on_done is not None:
             on_done()
+
+    # ── 几何滑入/滑出（native child 不支持 opacity 动画，用逐帧 setGeometry） ──
+
+    def _apply_width(self, w: int) -> None:
+        """设浮层宽度：贴窗口外缘一侧固定，另一侧向内伸缩，顶/底不变。"""
+        win = self.parentWidget()
+        if win is None:
+            return
+        ww, wh = win.width(), win.height()
+        top = self._titlebar_h
+        h = max(0, wh - top)
+        w = max(0, min(int(w), ww - self.EDGE_INSET))
+        if self._side == "right":
+            self.setGeometry(ww - self.EDGE_INSET - w, top, w, h)
+        else:
+            self.setGeometry(self.EDGE_INSET, top, w, h)
+
+    def slide_in(self, target_w: int, on_done=None) -> None:
+        """从贴边外缘向内滑到 target_w（180ms OutCubic）。滑入期覆盖的对话区不 resize。"""
+        self._target_w = int(target_w)
+        self._apply_width(0)
+        self.show()
+        self.raise_()
+        anim = QVariantAnimation(self)
+        anim.setDuration(180)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setStartValue(0.0)
+        anim.setEndValue(float(self._target_w))
+        anim.valueChanged.connect(lambda v: self._apply_width(int(v)))
+        if on_done is not None:
+            anim.finished.connect(on_done)
+        self._slide = anim  # 持引用防 GC
+        anim.start()
+
+    def slide_out(self, on_done=None) -> None:
+        """从当前宽滑回贴边外缘（150ms OutQuad），动画结束调 on_done（交宿主 reparent 回挂）。"""
+        anim = QVariantAnimation(self)
+        anim.setDuration(150)
+        anim.setEasingCurve(QEasingCurve.OutQuad)
+        anim.setStartValue(float(self.width()))
+        anim.setEndValue(0.0)
+        anim.valueChanged.connect(lambda v: self._apply_width(int(v)))
+        if on_done is not None:
+            anim.finished.connect(on_done)
+        self._slide = anim
+        anim.start()
 
 
 class HoverPreviewController:
