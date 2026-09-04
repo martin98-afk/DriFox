@@ -11,13 +11,12 @@
 6. 当下记忆（memory/today.md，对应当下/今日记忆）
 7. 长期记忆（memory/longterm.md，Dream 整理结果）
 8. Dream 自动整理（原子化 → 去重 → 优化 → 合成 → 验证；持久化修订）
-9. 专属技能（skills/<name>.md 描述 + assistant.yaml 的 skills 白名单）
 
 AssistantManager 与 AgentManager 解耦：
 - 不修改 /plugins/system/agents/*.md
 - 不修改 AgentManager 既有行为
 - 通过 register_assistant_agent() 派生一个动态 agent（name = "assistant_<id>"，
-  mode=subagent，仅含 assistant yaml 中的 skills 白名单）注入 AgentManager。
+  mode=subagent）注入 AgentManager。
   调用 subagent_para(name="assistant_<id>") 即"调用助手"，被调用的助手看到
   的是 persona.md + pinned.md + today.md + longterm.md 拼出的 system prompt。
 
@@ -80,12 +79,6 @@ class Assistant:
     avatar_path: str = ""  # 相对 avatars/ 的文件路径，空表示内置色块
     primary: bool = False  # 是否主助手
     order: int = 0
-    # 专属技能白名单：非空 = 仅启用名单内技能；空 = 全部启用（再减黑名单）
-    skills_whitelist: List[str] = field(default_factory=list)
-    # 专属技能黑名单：whitelist 为空时生效，名单内技能不注入
-    skills_blacklist: List[str] = field(default_factory=list)
-    # 专属技能（skills/*.md）总开关：关闭后不注入提示词，read_skill 工具暂停
-    skills_enabled: bool = True
     # 是否启用 memory 体系（关闭后 today/longterm 都不注入）
     memory_enabled: bool = True
     # dream 自动整理：默认关闭（手动触发）
@@ -121,9 +114,6 @@ class Assistant:
             "avatar_path": self.avatar_path,
             "primary": self.primary,
             "order": self.order,
-            "skills_whitelist": list(self.skills_whitelist),
-            "skills_blacklist": list(self.skills_blacklist),
-            "skills_enabled": self.skills_enabled,
             "memory_enabled": self.memory_enabled,
             "dream_auto_enabled": self.dream_auto_enabled,
             "model": self.model,
@@ -154,9 +144,6 @@ class Assistant:
             avatar_path=str(data.get("avatar_path") or ""),
             primary=bool(data.get("primary", False)),
             order=int(data.get("order", 0) or 0),
-            skills_whitelist=list(data.get("skills_whitelist") or []),
-            skills_blacklist=list(data.get("skills_blacklist") or []),
-            skills_enabled=bool(data.get("skills_enabled", True)),
             memory_enabled=bool(data.get("memory_enabled", True)),
             dream_auto_enabled=bool(data.get("dream_auto_enabled", False)),
             model=str(data.get("model") or ""),
@@ -189,9 +176,6 @@ class Assistant:
             avatar_path="",
             primary=False,
             order=0,
-            skills_whitelist=[],
-            skills_blacklist=[],
-            skills_enabled=True,
             memory_enabled=True,
             dream_auto_enabled=False,
             model="",
@@ -431,9 +415,6 @@ class AssistantManager:
     def _dream_history_path(self, aid: str) -> Path:
         return self._assistant_dir(aid) / "memory" / "dream_history.json"
 
-    def _skills_dir(self, aid: str) -> Path:
-        return self._assistant_dir(aid) / "skills"
-
     def _avatar_dir(self, aid: str) -> Path:
         return self._assistant_dir(aid) / "avatars"
 
@@ -556,7 +537,6 @@ class AssistantManager:
                 encoding="utf-8",
             )
         self._ensure_dir(self._avatar_dir(a.id))
-        self._ensure_dir(self._skills_dir(a.id))
         logger.info(f"[assistant_hub] 创建助手: {a.id} ({a.name})")
         return a
 
@@ -1150,79 +1130,6 @@ class AssistantManager:
         _notify("done", run_id=run_id, units=len(optimized))
         return {"ok": ok, "run_id": run_id, "units": len(optimized)}
 
-    # ── 专属技能 ──
-
-    def enabled_skills(self, aid: str) -> List[Dict[str, Any]]:
-        """过滤后的启用技能：总开关关→空；whitelist 非空→仅白名单；空→全部减 blacklist。"""
-        a = self.get(aid)
-        if a is None or not a.skills_enabled:
-            return []
-        skills = self.list_skills(aid)
-        if a.skills_whitelist:
-            wl = set(a.skills_whitelist)
-            return [s for s in skills if s["name"] in wl]
-        bl = set(a.skills_blacklist)
-        return [s for s in skills if s["name"] not in bl]
-
-    def list_skills(self, aid: str) -> List[Dict[str, Any]]:
-        """列出助手专属技能（每条 {name, path, description, content_chars}）"""
-        d = self._skills_dir(aid)
-        if not d.exists():
-            return []
-        out: List[Dict[str, Any]] = []
-        for p in sorted(d.glob("*.md")):
-            try:
-                text = p.read_text(encoding="utf-8")
-            except Exception:
-                text = ""
-            # 取第一段 # xxx 作为 description
-            desc = ""
-            for line in text.splitlines():
-                line = line.strip()
-                if line.startswith("#"):
-                    desc = line.lstrip("#").strip()
-                    break
-            out.append(
-                {
-                    "name": p.stem,
-                    "path": str(p),
-                    "description": desc,
-                    "content_chars": len(text),
-                }
-            )
-        return out
-
-    def read_skill(self, aid: str, name: str) -> str:
-        p = self._skills_dir(aid) / f"{name}.md"
-        if not p.exists():
-            return ""
-        try:
-            return p.read_text(encoding="utf-8")
-        except Exception:
-            return ""
-
-    def write_skill(self, aid: str, name: str, content: str) -> str:
-        """写入技能，返回规范化文件名（不含 .md）；失败返回空串。"""
-        safe = re.sub(r"[^a-zA-Z0-9_\-]+", "-", name).strip("-").lower()
-        if not safe:
-            return ""
-        d = self._skills_dir(aid)
-        self._ensure_dir(d)
-        (d / f"{safe}.md").write_text(content, encoding="utf-8")
-        return safe
-
-    def delete_skill(self, aid: str, name: str) -> bool:
-        safe = re.sub(r"[^a-zA-Z0-9_\-]+", "-", name).strip("-").lower()
-        if not safe:
-            return False
-        p = self._skills_dir(aid) / f"{safe}.md"
-        try:
-            if p.exists():
-                p.unlink()
-            return True
-        except OSError:
-            return False
-
     # ── 上下文快照 ──
 
     def get_context(self, aid: str) -> AssistantContext:
@@ -1402,7 +1309,7 @@ class AssistantManager:
 - **记忆可能过时，当前对话永远优先。** 信息冲突时以对话为准，不要用旧记忆纠正{user}。"""
 
     def prompt_block(self, aid: str) -> str:
-        """组装助手信息块：人格段 → 人工提示 → 记忆段 → 技能段（渐进披露）。"""
+        """组装助手信息块：人格段 → 人工提示 → 记忆段。"""
         a = self.get(aid)
         if a is None:
             return ""
@@ -1432,19 +1339,6 @@ class AssistantManager:
                 mem_parts.append("# 长期记忆\n\n" + memory_md)
             if len(mem_parts) > 1:  # 规则之外还有实际记忆内容才注入整段
                 parts.append("\n\n".join(mem_parts))
-
-        # 3. 技能段（渐进披露）：只注入 name + 简介 + 绝对路径，正文由模型用 read 工具按需读盘
-        try:
-            skills = self.enabled_skills(aid)
-        except Exception:
-            skills = []
-        if skills:
-            lines = [f"- {s['name']}：{s.get('description') or '（无简介）'}（{s['path']}）" for s in skills]
-            parts.append(
-                "# 助手技能\n\n"
-                "以下是你的专属技能（只列名称与简介）。处理相关任务前，"
-                "先用 read 工具按括号内路径读取技能全文再执行：\n" + "\n".join(lines)
-            )
 
         if not parts:
             return ""

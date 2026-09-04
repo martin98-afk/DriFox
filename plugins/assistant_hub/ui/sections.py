@@ -2,7 +2,7 @@
 """sections.py — 助手中心单列分区组件（对齐 openhanako AgentTab 分区结构）
 
 分区：ProfileSection（名称/模型）→ AboutSection（人格切换，只读）→
-MemorySection（记忆传送带）→ ExperienceSection（经验）→ SkillsSection（技能）。
+MemorySection（记忆传送带）→ ExperienceSection（经验）。
 
 视觉基调（对齐原版纸张风）：细边框卡 + 12px 圆角 + 小字 hint + 大量留白；
 去 emoji，统一 FluentIcon / 文字标签。
@@ -10,7 +10,7 @@ MemorySection（记忆传送带）→ ExperienceSection（经验）→ SkillsSec
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from PyQt5.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
@@ -22,7 +22,6 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QLayout,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -1097,92 +1096,3 @@ class ToolAccessSection(_Section):
         for key, chip in self._chips.items():
             chip.set_selected(key == self._mode)
 
-
-# ── 技能分区 ────────────────────────────────────────────
-
-
-class SkillsSection(_Section):
-    """专属技能：总开关 + 列表（行内开关/查看/删除）。
-
-    技能只能由助手自主创建（skill 工具落盘），不提供手动新建。
-    行内开关消费 whitelist/blacklist：whitelist 非空 = 仅白名单启用；
-    空 = 全部启用减黑名单（默认全开，对齐 openhanako enabled 语义）。
-    """
-
-    skillsChanged = pyqtSignal()
-    toggleSkills = pyqtSignal(bool)
-    skillToggleRequested = pyqtSignal(str, bool)  # name, enable
-    skillDeleteRequested = pyqtSignal(str)
-
-    def __init__(self, parent=None):
-        super().__init__("专属技能", parent)
-        self._switch = SwitchButton()
-        self._switch.setOnText("开")
-        self._switch.setOffText("关")
-        self._switch.checkedChanged.connect(self.toggleSkills.emit)
-        self.set_context(self._switch)
-
-        self.body().addWidget(
-            _hint("助手的专属技能（skills/*.md）。启用的技能注入对话提示（名称+简介+路径），正文由模型用 read 工具按需读取。")
-        )
-
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        container = QWidget()
-        self._list_v = QVBoxLayout(container)
-        self._list_v.setContentsMargins(0, 0, 0, 0)
-        self._list_v.setSpacing(3)
-        self._scroll.setWidget(container)
-        self.body().addWidget(self._scroll)
-
-    def set_skills_enabled(self, on: bool) -> None:
-        self._switch.blockSignals(True)
-        self._switch.setChecked(bool(on))
-        self._switch.blockSignals(False)
-        # 与记忆一致：关闭后内容全部隐藏（提示 + 技能列表），只留开关
-        for i in range(self.body().count()):
-            w = self.body().itemAt(i).widget()
-            if w is not None:
-                w.setVisible(bool(on))
-
-    def reload_skills(
-        self,
-        skills: List[Dict[str, Any]],
-        enabled_names: "set | List[str]",
-        on_open: Callable[[str], None],
-    ) -> None:
-        enabled = set(enabled_names)
-        while self._list_v.count():
-            item = self._list_v.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-        if not skills:
-            self._list_v.addWidget(_hint("（暂无技能）"))
-            return
-        for sk in skills:
-            row_wrap = QWidget()
-            row_wrap.setStyleSheet("background: transparent;")
-            row = QHBoxLayout(row_wrap)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
-            btn = QPushButton(f"{sk['name']} · {sk.get('description', '')[:30]}（{sk.get('content_chars', 0)} 字）")
-            btn.setStyleSheet(_btn_style(align_left=True))
-            btn.clicked.connect(lambda _c=False, n=sk["name"]: on_open(n))
-            row.addWidget(btn, 1)
-            sw = SwitchButton()
-            sw.setOnText("开")
-            sw.setOffText("关")
-            sw.setChecked(sk["name"] in enabled)
-            sw.checkedChanged.connect(
-                lambda on, n=sk["name"]: self.skillToggleRequested.emit(n, on)
-            )
-            row.addWidget(sw)
-            del_btn = _del_btn(14)
-            del_btn.setFixedSize(30, 28)
-            del_btn.setToolTip("删除技能")
-            del_btn.setStyleSheet(_btn_style(danger=True, icon_only=True))
-            del_btn.clicked.connect(lambda _c=False, n=sk["name"]: self.skillDeleteRequested.emit(n))
-            row.addWidget(del_btn)
-            self._list_v.addWidget(row_wrap)

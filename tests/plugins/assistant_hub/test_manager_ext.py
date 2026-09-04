@@ -123,11 +123,10 @@ def test_identity_persona_none(tmp_path):
 
 
 def test_prompt_block_assembles_sections(tmp_path):
-    """prompt_block：header + 人格 + 人工提示 + 记忆段 + 技能段 全部组装。"""
+    """prompt_block：header + 人格 + 人工提示 + 记忆段 全部组装。"""
     mgr = _fresh_manager(tmp_path)
     a = mgr.create("小狐")
     mgr.write_pinned(a.id, [("pin-1", "回复保持简短")])
-    mgr.write_skill(a.id, "demo-skill", "# 演示技能\n\n正文")
     # 记忆段需要实际记忆内容（无内容时整段不注入，与 hook 行为一致）
     mem_dir = mgr.assistant_dir(a.id) / "memory"
     mem_dir.mkdir(parents=True)
@@ -137,20 +136,16 @@ def test_prompt_block_assembles_sections(tmp_path):
     assert "小狐" in block  # persona 段
     assert "人工提示" in block and "回复保持简短" in block
     assert "记忆使用规则" in block and "用户偏好简洁" in block  # 规则+编译记忆都注入
-    assert "# 助手技能" in block and "demo-skill" in block and "演示技能" in block
 
 
-def test_prompt_block_memory_off_and_skills_off(tmp_path):
+def test_prompt_block_memory_off(tmp_path):
     mgr = _fresh_manager(tmp_path)
     a = mgr.create("纯净狐")
     a.memory_enabled = False
-    a.skills_enabled = False
     mgr.update(a)
     mgr.write_pinned(a.id, [("pin-1", "硬性要求")])
-    mgr.write_skill(a.id, "demo", "# x")
     block = mgr.prompt_block(a.id)
     assert "记忆使用规则" not in block
-    assert "# 助手技能" not in block
     assert "硬性要求" in block  # 人工提示不受开关控制
 
 

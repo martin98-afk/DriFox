@@ -55,7 +55,6 @@ from .sections import (
     PinnedSection,
     ProfileSection,
     ProjectSection,
-    SkillsSection,
     ToolAccessSection,
     _btn_style,
 )
@@ -321,12 +320,6 @@ class AssistantCardWidget(QWidget):
         self._experience.reflectRequested.connect(self._on_reflect)
         self._inner_v.addWidget(self._experience)
 
-        self._skills = SkillsSection()
-        self._skills.toggleSkills.connect(self._on_skills_toggle)
-        self._skills.skillToggleRequested.connect(self._on_skill_toggle_row)
-        self._skills.skillDeleteRequested.connect(self._on_skill_delete)
-        self._inner_v.addWidget(self._skills)
-
         self._inner_v.addStretch(1)
 
         center = QHBoxLayout()
@@ -479,7 +472,6 @@ class AssistantCardWidget(QWidget):
             self._experience.set_enabled(a.experience_enabled)
             self._experience.reload_categories(mgr.experience_list(aid_capture))
             self._tool_access.set_mode(a.tool_access)
-            self._reload_skills(aid_capture)
 
         QTimer.singleShot(0, _do_bind)
 
@@ -899,70 +891,6 @@ class AssistantCardWidget(QWidget):
             self._main_thread_call.emit(_done)
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    def _reload_skills(self, aid: str) -> None:
-        """技能区回刷：开关状态 + 列表 + 行内启用态（UI 永远以盘上数据为准）。"""
-        a = self._mgr.get(aid)
-        enabled = {s["name"] for s in self._mgr.enabled_skills(aid)}
-        self._skills.set_skills_enabled(bool(a and a.skills_enabled))
-        self._skills.reload_skills(self._mgr.list_skills(aid), enabled, self._on_view_skill)
-
-    def _on_skills_toggle(self, on: bool) -> None:
-        a = self._mgr.get(self._active_aid)
-        if not a:
-            return
-        a.skills_enabled = bool(on)
-        self._mgr.update(a)
-        self._mgr.invalidate_context(a.id)
-
-    def _on_skill_toggle_row(self, name: str, enable: bool) -> None:
-        """行内开关：whitelist 非空改 whitelist；否则改 blacklist（空=全启用减黑名单）。"""
-        a = self._mgr.get(self._active_aid)
-        if not a:
-            return
-        if a.skills_whitelist:
-            if enable:
-                if name not in a.skills_whitelist:
-                    a.skills_whitelist.append(name)
-            else:
-                a.skills_whitelist = [n for n in a.skills_whitelist if n != name]
-        elif enable:
-            if name in a.skills_blacklist:
-                a.skills_blacklist = [n for n in a.skills_blacklist if n != name]
-        elif name not in a.skills_blacklist:
-            a.skills_blacklist.append(name)
-        self._mgr.update(a)
-        self._mgr.invalidate_context(a.id)
-        self._reload_skills(a.id)
-
-    def _on_skill_delete(self, name: str) -> None:
-        aid = self._active_aid
-        if not aid:
-            return
-        ret = _confirm_dialog(
-            _host_window() or self.window(),
-            "删除技能",
-            f"确定删除技能「{name}」？\n（该操作不可撤销）",
-        )
-        if not ret:
-            return
-        if self._mgr.delete_skill(aid, name):
-            self._reload_skills(aid)
-            self._notify(f"技能「{name}」已删除")
-
-    def _on_view_skill(self, name: str) -> None:
-        if not self._active_aid:
-            return
-        text = self._mgr.read_skill(self._active_aid, name)
-        _open_dialog(
-            TextViewOverlay(
-                f"技能 · {name}",
-                text,
-                editable=True,
-                on_save=lambda c: self._mgr.write_skill(self._active_aid, name, c),
-                parent=_host_window() or self.window(),
-            )
-        )
 
     # ══════════════════════════════════════════════════
     #  通知 / 宿主契约
