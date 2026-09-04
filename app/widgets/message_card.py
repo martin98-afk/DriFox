@@ -5854,6 +5854,10 @@ class CodeWebViewer(QWebEngineView):
                         var key = window._chartKeyOf(el);
                         if (!key) continue;
                         if (window._chartReady(el)) {{
+                            var _prev = window.__chartVault.get(key);
+                            if (_prev && _prev !== el && _prev._chartInstance) {{
+                                try {{ _prev._chartInstance.dispose(); }} catch (e) {{ }}  // 同内容覆盖前先释放旧实例
+                            }}
                             el._chartStashed = true;
                             window.__chartVault.set(key, el);
                         }}
@@ -5876,6 +5880,9 @@ class CodeWebViewer(QWebEngineView):
                         var saved = window.__chartVault.get(key);
                         if (!saved || !window._chartReady(saved)) continue;
                         el.parentNode.replaceChild(saved, el);
+                        // 一次性回插：同内容多图（b64 相同）时后续节点走正常 init，
+                        // 防同一 saved 节点被 replaceChild 挪位导致前一个位置留空白
+                        window.__chartVault.delete(key);
                         // 回插的 echarts 实例适配新容器尺寸
                         if (saved._chartInstance && typeof saved._chartInstance.resize === 'function') {{
                             try {{ saved._chartInstance.resize(); }} catch (e) {{ }}
