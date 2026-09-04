@@ -38,8 +38,8 @@ def build_compile_today(turns: str, prev_today: str) -> list:
     prev = prev_today.strip() or "（今日暂无记忆草稿）"
     return _msg(
         "把新对话中有价值的信息合并进已有草稿，输出**更新后的完整今日记忆**。\n"
-        + _STYLE +
-        "- 相似碎片合并，过时碎片修正或删除，寒暄丢弃\n"
+        + _STYLE
+        + "- 相似碎片合并，过时碎片修正或删除，寒暄丢弃\n"
         "- 按重要度排序；总量 ≤20 行，接近上限时合并保主干\n"
         "- 不编造新对话里没有的信息\n\n"
         f"【已有草稿】\n{prev}\n\n【今日新对话】\n{turns.strip() or '（无）'}"
@@ -49,8 +49,8 @@ def build_compile_today(turns: str, prev_today: str) -> list:
 def build_compile_daily(prev_today: str) -> list:
     return _msg(
         "把昨日全天「今日记忆」草稿蒸馏成 ≤3 行日记碎片，只留那天的重要进展、决定、未完成事项。\n"
-        + _STYLE +
-        f"\n【昨日记忆草稿】\n{prev_today.strip() or '（空）'}"
+        + _STYLE
+        + f"\n【昨日记忆草稿】\n{prev_today.strip() or '（空）'}"
     )
 
 
@@ -59,8 +59,8 @@ def build_compile_facts(existing_facts: str, turns: str) -> list:
     return _msg(
         "从新对话提取值得长期记住的事实（身份、关系、偏好、约束、长期项目、硬性要求），"
         "与已有事实合并去重，输出**完整的重要事实清单**。\n"
-        + _STYLE +
-        "- 只收「过时会让助手犯错」级别的事实，一次性话题不收\n"
+        + _STYLE
+        + "- 只收「过时会让助手犯错」级别的事实，一次性话题不收\n"
         "- 与已有事实冲突时以新对话为准\n"
         "- 总量 ≤30 行；接近上限时合并同类、淘汰最陈旧最不关键的\n\n"
         f"【已有重要事实】\n{existing}\n\n【新对话】\n{turns.strip() or '（无）'}"
@@ -91,8 +91,8 @@ def build_dream_optimize(units: str) -> list:
     return _msg(
         "优化下面记忆单元的表述：指代不明的词（如「那个」「上次」）改成具体对象/绝对日期，"
         "其余按碎片风格压缩，信息不丢。输出优化后的完整列表，`- ` 开头，一行一条，不增不删。\n"
-        + _STYLE +
-        f"\n【记忆单元】\n{units}"
+        + _STYLE
+        + f"\n【记忆单元】\n{units}"
     )
 
 
@@ -102,9 +102,7 @@ def build_dream_compose(optimized: str) -> list:
         "- 按主题聚合成 3-6 个小节，每节一个 `## 标题`\n"
         "- 节内条目 `- ` 开头，碎片式高密度，语义等价的碎片合并\n"
         "- 总长压到原文 60% 左右且不超过 1500 字；超限继续合并次要细节\n"
-        "- 不丢任何一条独立事实；已过时或被新信息覆盖的旧条目可删\n\n"
-        + _STYLE +
-        f"【记忆单元】\n{optimized}"
+        "- 不丢任何一条独立事实；已过时或被新信息覆盖的旧条目可删\n\n" + _STYLE + f"【记忆单元】\n{optimized}"
     )
 
 
@@ -133,8 +131,8 @@ def build_dream_forget(facts_draft: str, longterm: str, today: str, daily: List[
         "淘汰优先：已完成闭环的待办、一次性信息、可从外部重新获得的内容（公开文档/代码可查）、"
         "被新版本覆盖的旧表述、模糊薄弱脱离上下文不可解码的条目、长期沉寂无引用的条目。\n"
         "存活优先：仍活跃的项目/约束/偏好、具体可执行的坑与决策、身份关系类硬事实。\n"
-        + _STYLE +
-        "- 硬性名额：facts ≤15 条；longterm ≤20 条；daily 保留 ≤3 天\n"
+        + _STYLE
+        + "- 硬性名额：facts ≤15 条；longterm ≤20 条；daily 保留 ≤3 天\n"
         "- 只删/合并，不增不改写：输出中出现的事实必须来自输入；语义等价碎片可合并挤一个名额\n"
         "- today 仅供参考视野，不在输出范围\n\n"
         '只输出一个 JSON 对象：{"facts": "保留后的重要事实全文", "keep_daily": ["日期"], '
