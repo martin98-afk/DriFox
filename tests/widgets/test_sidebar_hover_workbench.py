@@ -188,6 +188,75 @@ class TestClickPromotesToEmbeddedOpen:
         tm._wb_anim.stop() if tm._wb_anim else None  # 清理展开动画
 
 
+class TestPluginPageContextDuringPreview:
+    """★ 回归：预览态下插件页仍必须拿到完整 UI context
+
+    hover 预览会把工作台 frame setParent 到 HoverPreviewOverlay（Qt.Tool 顶层
+    owned 窗口），此时 ``panel.window()`` 返回的是**浮层**而非 TabManagerWindow。
+    若宿主页按裸 window() 取 context，浮层没有 _build_ui_context → context 只剩
+    diff_requested_callback（backend 缺失）→ 工作树页空列表且添加/删除/切换
+    全部静默失效。宿主必须按"能构建 UI context 的顶层窗口"解析。
+    """
+
+    @staticmethod
+    def _page_cls(store):
+        from PyQt5.QtWidgets import QWidget
+
+        class _CtxPage(QWidget):
+            def __init__(self, parent=None, context=None):
+                super().__init__(parent)
+                self._context = dict(context or {})
+                store.append(self)
+
+        return _CtxPage
+
+    @staticmethod
+    def _worktree_info(store):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            page_id="worktree",
+            label="工作树",
+            widget_class=TestPluginPageContextDuringPreview._page_cls(store),
+            priority=0,
+            metadata={},
+        )
+
+    def test_context_survives_overlay_reparent(self, tm):
+        store = []
+        tm._build_ui_context = lambda: {"backend": object(), "project_name": "X"}
+        panel = tm.workbench_panel
+        info = self._worktree_info(store)
+
+        # 1) frame 正常嵌在 splitter → 完整 context（基准）
+        panel.sync_plugin_pages([info], force=True)
+        assert "backend" in store[-1]._context
+
+        # 2) frame 被摘到 hover 浮层（预览态）→ 依然必须拿到完整 context
+        frame = tm._workbench_frame
+        frame.setParent(tm._wb_overlay)
+        tm._wb_overlay.set_content(frame)
+        assert panel.window() is tm._wb_overlay  # 复现前提：window() 已是浮层
+        panel.sync_plugin_pages([info], force=True)
+        assert "backend" in store[-1]._context, "预览期间构建的插件页不得丢失 backend"
+
+    def test_incomplete_context_page_is_rebuilt(self, tm):
+        store = []
+        tm._build_ui_context = lambda: {"backend": object()}
+        panel = tm.workbench_panel
+        info = self._worktree_info(store)
+
+        panel.sync_plugin_pages([info], force=True)
+        first = panel.worktree_page
+        assert "backend" in first._context
+
+        # 人为降级为"残缺 context"（等价修复前在浮层里构建出来的坏页面）
+        first._context = {}
+        panel.sync_plugin_pages([info])  # 签名未变，但必须自愈重建
+        assert panel.worktree_page is not first
+        assert "backend" in panel.worktree_page._context
+
+
 class TestNonPreviewToggleUnchanged:
     def test_toggle_outside_preview_flips(self, tm):
         cur = _fake_cur(tm)

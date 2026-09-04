@@ -595,6 +595,8 @@ class WorkbenchPanel(QWidget):
         self._worktree_plugin_info: Optional[Any] = None
         # 构建前收到的项目信息（槽位页挂载后补投递）
         self._pending_project: Optional[tuple] = None
+        # 宿主窗口缓存（见 _host_window：hover 预览期间 window() 会取到浮层）
+        self._host_window_ref: Optional[QWidget] = None
         # 页签记忆：None = 面板尚未打开过（首次打开默认第一个页签，之后恢复上次关闭时页签）
         self._last_tab_index: Optional[int] = None
         # 历史会话页内容（宿主当前活跃窗口的历史卡片框架）；None = 未挂载（页签不出现）
@@ -1110,7 +1112,13 @@ class WorkbenchPanel(QWidget):
     def _use_plugin_worktree(self, info: Any) -> None:
         """用插件版工作树页替换 index 0 的当前内容（占位页或旧插件页）"""
         sig = (info.page_id, info.label)
-        if sig == self._worktree_plugin_sig and self._plugin_worktree_widget is not None:
+        # ★ 签名相同但页面是"残缺 context"版本（见 _host_window 注释：hover 预览
+        # 期间构建）时必须重建，否则会一直沿用无 backend 的坏页面。
+        if (
+            sig == self._worktree_plugin_sig
+            and self._plugin_worktree_widget is not None
+            and not self._page_context_incomplete(self._plugin_worktree_widget)
+        ):
             return
         widget = self._make_page_widget(info)
         if widget is None:
@@ -1188,7 +1196,11 @@ class WorkbenchPanel(QWidget):
         0=工作树 / 1=记忆 / 2=产物 / 3+=其它插件页。
         """
         sig = (info.page_id, info.label)
-        if sig == self._artifacts_plugin_sig and self._plugin_artifacts_widget is not None:
+        if (
+            sig == self._artifacts_plugin_sig
+            and self._plugin_artifacts_widget is not None
+            and not self._page_context_incomplete(self._plugin_artifacts_widget)
+        ):
             return
         widget = self._make_page_widget(info)
         if widget is None:
@@ -1262,12 +1274,52 @@ class WorkbenchPanel(QWidget):
         """返回宿主主窗口（TabManagerWindow）
 
         嵌入式下 parentWidget() 可能只是中间容器（如 #workbenchFrame），
-        因此统一用 window() 上溯到顶层窗口取 UI context。
+        因此统一上溯到顶层窗口取 UI context。
+
+        ★ 不能用裸 window()：hover 悬浮预览期间工作台 frame 会被 setParent
+        到 HoverPreviewOverlay（Qt.Tool 顶层 owned 窗口），此时 panel.window()
+        返回的是**浮层**而不是主窗口。浮层没有 _build_ui_context → 插件页拿到
+        的 context 只剩 diff_requested_callback（backend 缺失 → 工作树页空列表、
+        添加/删除/切换全部静默失效）。因此这里按"能构建 UI context 的顶层窗口"
+        解析：先看缓存宿主，再按 window() → 全部顶层窗口的顺序找第一个具备
+        _build_ui_context 的窗口。
         """
+        cached = getattr(self, "_host_window_ref", None)
+        if cached is not None:
+            try:
+                if hasattr(cached, "_build_ui_context"):
+                    return cached
+            except RuntimeError:
+                pass  # C++ 对象已销毁
+            self._host_window_ref = None
+
+        candidates = []
         try:
-            return self.window()
+            candidates.append(self.window())
         except Exception:
-            return self.parentWidget()
+            pass
+        try:
+            from PyQt5.QtWidgets import QApplication
+
+            candidates.extend(QApplication.topLevelWidgets())
+        except Exception:
+            pass
+        for w in candidates:
+            try:
+                if w is not None and hasattr(w, "_build_ui_context"):
+                    self._host_window_ref = w
+                    return w
+            except RuntimeError:
+                continue  # C++ 对象已销毁
+        return candidates[0] if candidates else self.parentWidget()
+
+    def _page_context_incomplete(self, widget: Optional[QWidget]) -> bool:
+        """插件页构建时是否只拿到了残缺 UI context（缺 backend → 页面无数据源）"""
+        ctx = getattr(widget, "_context", None)
+        # 老签名插件页没有 _context，不做干预
+        if not isinstance(ctx, dict):
+            return False
+        return "backend" not in ctx
 
     def _make_page_widget(self, info: Any) -> Optional[QWidget]:
         """构建插件页 widget（构造 parent + context，兼容无 context 的老签名）"""
