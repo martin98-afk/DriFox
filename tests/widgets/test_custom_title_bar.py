@@ -262,3 +262,25 @@ def test_mac_branch_hides_system_buttons(qtbot, container, monkeypatch):
     assert tb.minBtn.isHidden() and tb.maxBtn.isHidden() and tb.closeBtn.isHidden()
     m = tb.layout().contentsMargins()
     assert m.left() >= 70
+
+
+def test_title_bar_hover_signals_defined(qtbot, container):
+    """标题栏声明侧栏/工作台 hover 信号"""
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    # 信号存在且可连接
+    got = []
+    tb.sidebar_hover_changed.connect(got.append)
+    tb.workbench_hover_changed.connect(got.append)
+    tb._emit_sidebar_hover(True)
+    tb._emit_workbench_hover(True)
+    assert got == [True, True]
+
+
+def test_sidebar_btn_hover_attribute(qtbot, container):
+    """按钮开启 WA_Hover 以便接收 hover 事件"""
+    from PyQt5.QtCore import Qt
+    tb = CustomTitleBar(container)
+    qtbot.addWidget(tb)
+    assert tb._sidebar_btn.testAttribute(Qt.WA_Hover) is True
+    assert tb._workbench_btn.testAttribute(Qt.WA_Hover) is True
