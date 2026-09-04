@@ -567,6 +567,18 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
     # 只处理 markdown 代码块的不完整情况
     # 不再删除尾随的 <，因为它可能是 HTML/工具标签的一部分
     if md_text.count("```") % 2 == 1:
+        # 流式中间态：末尾未闭合 fence 若是 mermaid，改语言标记跳过图表渲染。
+        # 半截 mermaid 源码必然 parse 失败，mermaid 10 失败时会向 body 追加
+        # error bomb SVG（innerHTML 全量重建清不掉，且占位 id 随内容 hash
+        # 变化无法去重，逐轮累积成消息结尾一串「Syntax error in text」）。
+        lines = md_text.split("\n")
+        for i in range(len(lines) - 1, -1, -1):
+            stripped = lines[i].strip()
+            if stripped.startswith("```"):
+                if stripped[3:].strip().lower() == "mermaid":
+                    lines[i] = lines[i].replace("mermaid", "mermaid-streaming", 1)
+                    md_text = "\n".join(lines)
+                break
         md_text += "\n```"
     return md_text
 
@@ -5593,6 +5605,18 @@ class CodeWebViewer(QWebEngineView):
                                     el.classList.remove('mermaid-pending');
                                     el.innerHTML = '<pre class="mermaid-error"></pre>';
                                     el.firstChild.textContent = decoded;
+                                    // mermaid render 失败时会向 body 追加 error bomb SVG
+                                    // （含「Syntax error in text」文案）。它不在卡片容器内，
+                                    // innerHTML 全量重建清不掉，会逐轮流式累积，这里顺手移除。
+                                    try {{
+                                        var bombs = document.querySelectorAll('svg');
+                                        for (var bi = 0; bi < bombs.length; bi++) {{
+                                            if ((bombs[bi].textContent || '').indexOf('Syntax error in text') >= 0 &&
+                                                !bombs[bi].closest('.mermaid-block')) {{
+                                                bombs[bi].parentNode.removeChild(bombs[bi]);
+                                            }}
+                                        }}
+                                    }} catch (ignored) {{ }}
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                 }});
                             }})(blocks[i]);

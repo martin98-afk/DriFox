@@ -353,11 +353,10 @@ class _HistoryItemCard(SimpleCardWidget):
     def _ensure_preview_label(self, text: str):
         """确保存在预览标签（独立一行，不挤占右侧按钮空间）"""
         if self._preview_label is None:
-            self._preview_label = CaptionLabel("", self)
+            self._preview_label = _ElidedLabel("", self)
             self._preview_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {self._caption_size}px; {self._font_family}"
             )
-            self._preview_label.setWordWrap(True)
             # 添加到主布局底部（bottom_row 下方），占满整行宽度
             self.layout().addWidget(self._preview_label)
         self._preview_label.setText(text)
@@ -600,11 +599,10 @@ class _ArchivedItemCard(CardWidget):
     def _init_preview_label(self, text: str):
         """初始化预览标签（独立一行，不挤占右侧按钮空间）"""
         caption_size = scale_font_size(12)
-        self._preview_label = CaptionLabel(text, self)
+        self._preview_label = _ElidedLabel(text, self)
         self._preview_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {caption_size}px; {get_font_family_css()}"
         )
-        self._preview_label.setWordWrap(True)
         # 添加到主布局底部（bottom_row 下方），占满整行宽度
         self.layout().addWidget(self._preview_label)
 
@@ -819,7 +817,7 @@ class _TeamGroupCard(CardWidget):
         self._layout.addWidget(self.meta_label)
 
         # 预览行（首问预览，复用 _HistoryItemCard 的预览样式）
-        self._preview_label: Optional[CaptionLabel] = None
+        self._preview_label: Optional[_ElidedLabel] = None
         self._ensure_preview_label(group.get("preview", "") or "")
 
         # 展开区容器：成员行列表（懒创建）
@@ -831,12 +829,11 @@ class _TeamGroupCard(CardWidget):
     def _ensure_preview_label(self, text: str):
         """确保存在预览标签（独立一行，样式与 _HistoryItemCard 一致）"""
         if self._preview_label is None:
-            self._preview_label = CaptionLabel("", self)
+            self._preview_label = _ElidedLabel("", self)
             self._preview_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {scale_font_size(11)}px; "
                 f"{get_font_family_css()}"
             )
-            self._preview_label.setWordWrap(True)
             self._layout.addWidget(self._preview_label)
         self._preview_label.setText(text)
         self._preview_label.setVisible(bool(text))
