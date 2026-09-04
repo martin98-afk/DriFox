@@ -1,7 +1,7 @@
 {
   "skill": "visualization",
-  "version": "3.0",
-  "note": "触发评测用例。expect_visualization=true 表示应产出可视化；channel_hint 为期望通道；type ∈ positive/negative/near-miss/edge。v3 新增：图型路由（radar/sankey/candlestick/quadrant/treemap）、场景配方、代码交付 near-miss、无上下文边界。",
+  "version": "3.1",
+  "note": "触发评测用例。expect_visualization=true 表示应产出可视化；channel_hint 为期望通道；type ∈ positive/negative/near-miss/edge/katex。v3.1 新增：正文 LaTeX 公式（宿主 KaTeX）通道用例。",
   "trigger_cases": [
     {
       "id": "explicit-chart",
@@ -97,6 +97,22 @@
       "expect_visualization": true,
       "channel_hint": "html-widget",
       "reason": "复合场景命中性能排查配方：指标卡 → 瀑布分解 → 因果流程图 → checklist"
+    },
+    {
+      "id": "katex-formula",
+      "type": "katex",
+      "input": "写一下正态分布的概率密度公式",
+      "expect_visualization": true,
+      "channel_hint": "katex",
+      "reason": "公式表达式走正文 LaTeX 定界符（宿主 KaTeX 渲染），非图表通道"
+    },
+    {
+      "id": "katex-vs-chart-boundary",
+      "type": "katex",
+      "input": "画一下正态分布的钟形曲线",
+      "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "函数形状/曲线走 echarts；公式 ≠ 图像，不能只给 LaTeX"
     },
     {
       "id": "negative-code",
