@@ -7139,25 +7139,37 @@ class CodeWebViewer(QWebEngineView):
                 }};
 
                 // ===== SVG widget 工具栏挂载 =====
-                // 渲染后扫描正文顶层的自由 svg（排除 mermaid/echarts 内部）包 wrapper 挂工具栏。
-                // 尺寸阈值滤掉装饰小图标（欢迎卡图标、行内 icon），只对内容级示意图挂载。
-                // el._widgetToolbar 防重挂（innerHTML 全量重建后 DOM 全新，标记自然失效，重扫重挂）。
+                // 渲染后扫描正文的自由 svg（排除 mermaid/echarts 内部）包 wrapper 挂工具栏。
+                // 目标形态两种：① 顶层裸 svg（```svg 围栏透传）；② svg-only 容器（内联 svg
+                // 经 _protect_inline_svg_blocks 包 <div> / markdown 段落包 <p>，svg 沉一层，
+                // 只扫顶层会漏挂）。尺寸阈值滤掉装饰小图标（欢迎卡图标、行内 icon）。
+                // svg._widgetToolbar 防重挂（innerHTML 全量重建后 DOM 全新，标记自然失效，重扫重挂）。
                 window.renderWidgetToolbars = function() {{
                     var root = document.getElementById('content-placeholder');
                     if (!root) return;
                     var children = root.children;
                     for (var i = 0; i < children.length; i++) {{
                         var el = children[i];
-                        if (el.tagName !== 'svg' && el.tagName !== 'SVG') continue;
-                        if (el.closest('.mermaid-block') || el.closest('.echarts-container')) continue;
-                        if (el._widgetToolbar) continue;
-                        if (el.clientWidth < 200 || el.clientHeight < 100) continue;  // 装饰小图标
-                        el._widgetToolbar = true;
+                        var svg = null;
+                        if (el.tagName === 'svg' || el.tagName === 'SVG') {{
+                            svg = el;
+                        }} else if (el.tagName === 'DIV' || el.tagName === 'P') {{
+                            // svg-only 容器：唯一子节点是 svg 且内部无图表/代码结构
+                            if (!el.querySelector('.mermaid-block, .echarts-container, .katex-block, .code-container') && el.children.length === 1) {{
+                                var only = el.children[0];
+                                if (only.tagName === 'svg' || only.tagName === 'SVG') svg = only;
+                            }}
+                        }}
+                        if (!svg) continue;
+                        if (svg.closest('.mermaid-block') || svg.closest('.echarts-container')) continue;
+                        if (svg._widgetToolbar) continue;
+                        if (svg.clientWidth < 200 || svg.clientHeight < 100) continue;  // 装饰小图标
+                        svg._widgetToolbar = true;
                         var wrap = document.createElement('div');
                         wrap.className = 'svg-widget-host widget-toolbar-host';
                         wrap.style.cssText = 'position:relative;margin:12px 0;';
-                        el.parentNode.insertBefore(wrap, el);
-                        wrap.appendChild(el);
+                        el.parentNode.replaceChild(wrap, el);  // svg-only 容器整个替换，避免 div>wrap 双层嵌套
+                        wrap.appendChild(svg);
                         window._attachChartToolbar(wrap, 'svg');
                     }}
                 }};
