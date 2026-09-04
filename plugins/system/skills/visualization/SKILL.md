@@ -1,11 +1,10 @@
 ---
 name: visualization
-description: 可视化优先输出技能。凡回答涉及以下场景必须先加载本技能，跳过本技能直接用纯文字回答是错误行为：讲解/教学/原理（为什么、怎么运作、是什么）、数据与对比（怎么选、区别、优缺点、趋势、曲线、占比）、架构/流程/时序、UI 设计与界面效果（长什么样、给个样式、怎么改好看）、指标与状态展示。产出通道：echarts 图表/mermaid 图/SVG 示意图/HTML widget（效果稿/指标卡/对比卡）。加载后先读决策层与模板库，各通道技术细节按需读 references/。
+description: 可视化优先输出技能。凡回答涉及以下场景必须先加载本技能，跳过本技能直接用纯文字回答是错误行为：讲解/教学/原理（为什么、怎么运作、是什么）、数据与对比（怎么选、区别、优缺点、趋势、曲线、占比、层级、分布）、架构/流程/时序/状态机、UI 设计与界面效果（长什么样、给个样式、怎么改好看）、指标与状态展示/监控总览、金融行情与 K 线、多维评分对比、流量/资金桑基流向、选型象限定位、里程碑时间线、数据周报。产出通道：echarts 图表/mermaid 图/SVG 示意图/HTML widget（效果稿/指标卡/对比卡）；复杂场景走场景配方。加载后先读通道选择表，各通道技术细节与模板按需读 references/。
 ---
 
 # DriFox 可视化输出规范
 
-> 移植自 workbuddy Visualizer Core Design System，按 DriFox 渲染架构重写。
 > 架构事实：消息卡片是 **innerHTML 注入 + Chromium 83**，不是完整 web 沙箱。
 
 ## 第一动作：先想视觉，再想文字
@@ -25,26 +24,26 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 - **讲解/教学必出图**：「讲解 X」「教我 X」「X 是什么原理」必配概念图、流程图或响应曲线，唯一例外是词典式单词查询。
 - **markdown 表格不是等价物**：用户点名「对比表/时间线/状态机/仪表盘」时，要的是渲染出的视觉组件，不是一张 markdown 表。
 
-### UI 设计专项
-
-用户问「这个界面怎么设计」「样式怎么改」「给个布局方案」时，**效果图即回答**：内联 HTML widget 直接产出可见效果稿，文字只解释设计决策。多方案并排渲染，用 `context-tag[data-type="ask"]` 让用户点选继续。
-
 ## 通道选择（选定后按渐进加载表读对应 reference）
 
 | 场景 | 通道 | 细节 |
 |------|------|------|
 | 自定义示意图/结构图/流程图 | 内联 `<svg>` | → `references/svg-guide.md` |
-| 数据趋势、曲线、分布、占比 | ` ```echarts ` 代码块 | → `references/echarts-mermaid.md` |
-| 顺序流程/时序/状态机/ER/甘特 | ` ```mermaid ` 代码块 | → `references/echarts-mermaid.md` |
-| UI 效果稿、指标卡、对比卡、交互组件 | 内联 HTML | → `references/html-widget.md` |
+| 数据趋势/曲线/分布/占比 | ` ```echarts ` 代码块 | → `references/echarts-mermaid.md` |
+| 层级占比/多维评分/仪表盘/热力/桑基/K线 | ` ```echarts ` 代码块 | → `references/echarts-mermaid.md`（图型路由总表） |
+| 流程/时序/状态机/ER/甘特/象限选型/分支流/里程碑 | ` ```mermaid ` 代码块 | → `references/echarts-mermaid.md`（图型路由总表） |
+| UI 效果稿/指标卡/对比卡/交互组件 | 内联 HTML | → `references/html-widget.md` |
+| 监控总览/选型报告/性能排查/数据周报（复合场景） | 配方组合 | → `references/playbooks.md` |
 
 ## 渐进加载
 
 | 场景 | 何时读 |
 |------|--------|
-| `references/svg-guide.md` | 画任何 SVG 前**必读**：CJK 字宽公式（不读中文必溢出）、间距公式、字体 style、arrow marker；带动画必读「CSS 动画」节 |
-| `references/echarts-mermaid.md` | 用 echarts/mermaid 前必读：纯 JSON 约束（禁 formatter/回调/注释）、容器 400px 写死、流式行为 |
-| `references/html-widget.md` | HTML 带交互或用主题色前必读：Host API 交互桥、CSS 变量、9-ramp 色板、Chromium 83 限制 |
+| `references/svg-guide.md` | 画任何 SVG 前**必读**：示意图三分法、CJK 字宽公式（不读中文必溢出）、间距公式、字体 style、arrow marker；带动画必读「CSS 动画」节 |
+| `references/echarts-mermaid.md` | 用 echarts/mermaid 前必读：图型路由总表、纯 JSON 约束（禁 formatter/回调/注释）、容器 400px 写死、流式行为 |
+| `references/html-widget.md` | HTML 带交互、UI 效果稿或用主题色前必读：UI 设计专项、Host API 交互桥、CSS 变量、9-ramp 色板、Chromium 83 限制 |
+| `references/templates.md` | 套指标卡/对比卡/数据记录卡/交互解释器/决策矩阵/时间线/进度清单/sparkline/状态徽章模板时 |
+| `references/playbooks.md` | 命中监控总览/选型报告/性能排查/数据周报等复合场景，或多图叙事排版时 |
 
 ## 硬约束（任何通道，常驻）
 
@@ -54,45 +53,6 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 4. SVG 里不引用外部资源。
 5. 宿主已深浅主题自适配（echarts init、CSS 变量注入），不写死背景色。
 
-## 示意图三分法（决定画什么）
-
-| 类型 | 适用 | 画法要点 |
-|------|------|---------|
-| 流程图 | 顺序过程、因果链、决策 | 单向流为主，≤5 节点；环形循环用编号步进器+文字回边，不画 ring |
-| 结构图 | 包含关系、层级组成 | 外层容器 rx=20-24 最浅填充，内层 rx=8-12 次浅；内边距 ≥20px，≤3 层 |
-| 示意图 | 建立直觉 | 物理对象画简化剖面（热水器=水箱+底部烧器）；抽象对象造空间隐喻（transformer=水平层叠板，哈希=漏斗撒进桶）；颜色编码强度而非类别 |
-
-## 默认模板库（直接套用，变量已适配 DriFox）
-
-**指标卡**（指标展示/状态总览首选项）：
-
-```html
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px">
-  <div style="background:var(--panel-soft);border-radius:8px;padding:1rem">
-    <div style="font:400 13px sans-serif;color:var(--text-muted)">CPU 占用</div>
-    <div style="font:500 24px sans-serif;color:var(--text);margin-top:4px">37%</div>
-  </div>
-</div>
-```
-
-**方案对比卡**（选型/方案对比首选项，特色方案加 2px 边框 + 徽章）：
-
-```html
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px">
-  <div style="background:var(--panel);border:2px solid var(--accent);border-radius:12px;padding:1rem 1.25rem">
-    <span style="background:var(--accent-soft);color:var(--accent-text);font-size:12px;padding:2px 8px;border-radius:4px">推荐</span>
-    <p style="font:500 15px sans-serif;color:var(--text);margin:8px 0 4px">方案 A</p>
-    <p style="font:400 13px sans-serif;color:var(--text-secondary);margin:0">要点一句话</p>
-  </div>
-</div>
-```
-
-**数据记录卡**（实体/配置/联系人展示）：44px 头像圆（`var(--accent-soft)` 底 + `var(--accent-text)` 字）+ 15px/500 姓名 + 13px 副题，外层 `var(--panel)` 卡、0.5px `var(--border)`、圆角 12px、padding 1rem 1.25rem。
-
-**交互解释器**（参数调节/行为演示）：HTML 控件（slider/toggle）+ 实时数值显示；追问入口用 `context-tag[data-type="ask"]`。逻辑用纯 CSS（checkbox hack）或静态展示，无 script。
-
-通用规则：卡片 `background:var(--panel)`、`border:0.5px solid var(--border)`、圆角 12px；界面间距用 rem（1/1.5/2），组件内部用 px（8/12/16）；表格数据仍用 markdown 表写在正文，不塞进 widget。
-
 ## 复杂度预算（硬限制）
 
 - 框副题 ≤ 12 个中文字
@@ -101,16 +61,11 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 - 流程图 ≤ 5 节点
 - 结构嵌套 ≤ 3 层，容器内边距 ≥ 20px
 
-## 多图叙事
-
-- 复杂主题拆多张小图，不塞一张密图；每张图前一两句话说明它展示什么、与上一张的关系。
-- 可视化块放回答**后半段**（流式渲染：闭合块才被扫描），文字解读写在图前。
-- 图与图之间必须有文字衔接，不连续堆叠。
-
 ## 硬停止（不产可视化的条件）
 
 - 单行事实问答、词典式查询
 - 纯代码修改的 diff 说明
+- 用户要的是可直接复制的代码/配置文本（交付代码块，不渲染组件）
 - 用户明确只要文字
 - 闲聊与情感对话
 - 纯 Qt 灰度渲染通道（`MarkdownBlockViewer`）：echarts/mermaid/CSS 变量全不可用，只输出 markdown + 代码块
@@ -125,11 +80,3 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 - [ ] 界面色用 CSS 变量，无硬编码 hex 界面色
 - [ ] 可视化块在回答后半段，图前有引入文字
 - [ ] 复杂度未超预算（节点数/嵌套层数/色系数）
-
-## 示例
-
-- 「讲解 FOPDT 模型」→ SVG 结构图（输入→一阶环节→滞后→输出）+ echarts 阶跃响应曲线，文字在图间串讲
-- 「信号槽和回调有什么区别」→ 一张 SVG 双列对比图
-- 「这个开关组件太丑了」→ 两个 HTML 效果稿并排（现状 vs 建议）+ 设计决策说明 + 点选追问
-- 「最近 7 天内存占用变化」→ echarts 折线图，不用文字罗列数字
-- 「微服务和单体怎么选」→ HTML 对比卡并排 + 一张选型决策 flowchart

@@ -2,6 +2,10 @@
 
 带样式的信息组件、UI 效果稿、交互解释器画之前必读。外层容器透明，背景由宿主提供；禁 `position: fixed`。
 
+## UI 设计专项（效果图即回答）
+
+用户问「这个界面怎么设计」「样式怎么改」「给个布局方案」时，**效果图即回答**：内联 HTML widget 直接产出可见效果稿，文字只解释设计决策。多方案并排渲染（现状 vs 建议两稿并排），用 `context-tag[data-type="ask"]` 让用户点选继续。组件模板见 templates.md。
+
 ## Host API（交互桥）
 
 JS→Python 唯一通道是 `console.log('pywebview_action:...')` + `javaScriptConsoleMessage` 拦截。可用的是 document 级**事件委托**（innerHTML 替换后依然有效）：
