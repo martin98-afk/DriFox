@@ -132,7 +132,7 @@ class TestMemorySuppression:
 
 
 class TestClickedExitsPreview:
-    """点击（on_clicked）回挂 splitter、浮层隐藏、工作台收起"""
+    """直接 ``ctrl.on_clicked()`` 走纯 leave 路径：超时语义——回挂并收起"""
 
     def test_on_clicked_reparents_back_and_collapses(self, tm):
         from types import SimpleNamespace
@@ -145,7 +145,7 @@ class TestClickedExitsPreview:
         assert tm._workbench_frame.parent() is tm._wb_overlay
         assert tm._wb_in_preview is True
 
-        # 点击 = 先退预览。fade_out 在实现里同步直接 on_done()
+        # 直接调 on_clicked（不带 promote 标志）→ 等同超时 leave 路径
         tm._wb_preview_ctrl.on_clicked()
 
         # 回挂 splitter 第三窗格
@@ -164,9 +164,15 @@ class TestClickedExitsPreview:
 
 
 class TestTitlebarButtonMutualExclusion:
-    """直接点标题栏按钮：在预览中也走相同的「先退预览」互斥逻辑"""
+    """直接点标题栏按钮：
 
-    def test_click_while_previewing_exits_first(self, tm):
+    spec 要求预览态下点击 = 「收起浮层并转为常驻嵌入展开」，即点完应
+    is_workbench_visible() 为 True、frame 已 reparent 回 splitter。
+    与 hover 超时离开（应回到 False）形成互斥。
+    """
+
+    def test_click_while_previewing_promotes_to_embedded_open(self, tm):
+        """预览态下点按钮：转为常驻展开（spec 行为）"""
         from types import SimpleNamespace
 
         cur = SimpleNamespace(_workbench_visible_memory=False)
@@ -175,19 +181,68 @@ class TestTitlebarButtonMutualExclusion:
         # 进入预览
         tm.titleBar.workbench_hover_changed.emit(True)
         assert tm._wb_in_preview is True
-        # 此时 set_workbench_visible(True) 已发生（reuse 落位）
+        # 预览期 set_workbench_visible(True) 已发生（复用落位）
         assert tm.is_workbench_visible() is True
 
-        # 直接点标题栏按钮：先退预览（同步），再切显隐
-        # toggle_workbench 在新实现里会先调用 ctrl.on_clicked()
+        # 直接点标题栏按钮：preview → 常驻 True（不再额外翻）
         tm.toggle_workbench()
 
-        # 退出预览后，toggle 再把 visible 翻成 False
+        # 状态机退出预览
+        assert tm._wb_in_preview is False
+        # spec：转常驻展开
+        assert tm.is_workbench_visible() is True
+        # frame 已 reparent 回 splitter 第三窗格（不再是 overlay）
+        assert tm._workbench_frame.parent() is tm._splitter
+        assert tm._splitter.widget(2) is tm._workbench_frame
+        # 浮层已隐藏
+        assert tm._wb_overlay.isVisible() is False
+        # 当前窗口记忆正常落账为 True（promote 分支不抑制）
+        assert cur._workbench_visible_memory is True
+
+    def test_hover_timeout_leave_collapses(self, tm):
+        """hover 超时离开（非点击）：回到收起（spec 行为）"""
+        from types import SimpleNamespace
+
+        cur = SimpleNamespace(_workbench_visible_memory=False)
+        tm.get_current_window = lambda: cur
+
+        # 进入预览
+        tm.titleBar.workbench_hover_changed.emit(True)
+        assert tm._wb_in_preview is True
+
+        # 模拟 hover 离开（控制器走 on_button_hover(False) 路径）
+        tm.titleBar.workbench_hover_changed.emit(False)
+        # 走 hide_timer：直接 fire 即可
+        if tm._wb_preview_ctrl._hide_timer.isActive():
+            tm._wb_preview_ctrl._hide_timer.timeout.emit()
+
+        # 状态机退出预览、回到收起
         assert tm._wb_in_preview is False
         assert tm.is_workbench_visible() is False
-        # 回挂正确
+        # frame 已 reparent 回 splitter
         assert tm._workbench_frame.parent() is tm._splitter
         assert tm._wb_overlay.isVisible() is False
+        # 记忆抑制：hover-leave 分支不写记忆
+        assert cur._workbench_visible_memory is False
+
+    def test_toggle_outside_preview_keeps_toggle_behavior(self, tm):
+        """非预览态点按钮仍走翻转（首次 = 展开，第二次 = 收起）"""
+        from types import SimpleNamespace
+
+        cur = SimpleNamespace(_workbench_visible_memory=False)
+        tm.get_current_window = lambda: cur
+
+        assert tm._wb_in_preview is False
+
+        # 首次点击（收起态）→ 展开
+        tm.toggle_workbench()
+        assert tm.is_workbench_visible() is True
+        assert cur._workbench_visible_memory is True
+
+        # 再次点击 → 收起
+        tm.toggle_workbench()
+        assert tm.is_workbench_visible() is False
+        assert cur._workbench_visible_memory is False
 
 
 class TestEventFilterOverlayHover:

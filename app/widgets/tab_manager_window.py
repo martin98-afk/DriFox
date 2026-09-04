@@ -718,6 +718,9 @@ class TabManagerWindow(FramelessWindow):
         self._wb_overlay.installEventFilter(self)
         self._wb_suppress_memory = False
         self._wb_in_preview = False
+        # 预览态下点击按钮：leave 完成后转为常驻展开（区别于超时收起）。
+        # 由 toggle_workbench 在调 on_clicked 前后置位/复位。
+        self._wb_promote_on_leave = False
         self._wb_preview_ctrl = HoverPreviewController(
             self._wb_overlay,
             can_preview=lambda: not self.is_workbench_visible(),
@@ -881,12 +884,17 @@ class TabManagerWindow(FramelessWindow):
         工作台是 splitter 第三窗格，hide/show 后 QSplitter 自动把空间
         归还/分配给对话区，无需手动 setSizes。
 
-        ★ 若当前正处 hover 预览态：先同步退出预览（reparent 回 splitter），
-        预览退出回调里已经 set_workbench_visible(False)，无需再翻一次。
+        ★ 若当前正处 hover 预览态：点击应转为常驻展开（spec）——
+        置 _wb_promote_on_leave 后再 on_clicked()，回调里走「常驻 True」分支；
+        非预览态才走翻转。
         """
         ctrl = getattr(self, "_wb_preview_ctrl", None)
         if ctrl is not None and ctrl.is_previewing():
-            ctrl.on_clicked()  # 退预览（reparent 回 splitter 并收起）
+            self._wb_promote_on_leave = True
+            try:
+                ctrl.on_clicked()  # 同步走 _done，reparent 回 splitter
+            finally:
+                self._wb_promote_on_leave = False
             return
         self.set_workbench_visible(not self.is_workbench_visible())
 
@@ -1047,13 +1055,18 @@ class TabManagerWindow(FramelessWindow):
             self._wb_overlay.hide()
             frame.setParent(self._splitter)
             self._splitter.insertWidget(2, frame)
-            frame.hide()
-            # 预览退出后回到收起态；记忆抑制守门，per-tab 记忆不被污染
-            self._wb_suppress_memory = True
-            try:
-                self.set_workbench_visible(False, animate=False)
-            finally:
-                self._wb_suppress_memory = False
+            if self._wb_promote_on_leave:
+                # 点击转常驻：frame 留在 splitter 第三窗格并显示，记忆正常落账为 True
+                frame.show()
+                self.set_workbench_visible(True, animate=False)
+            else:
+                # hover 超时离开：收起工作台，记忆抑制避免污染 per-tab 记忆
+                frame.hide()
+                self._wb_suppress_memory = True
+                try:
+                    self.set_workbench_visible(False, animate=False)
+                finally:
+                    self._wb_suppress_memory = False
 
         self._wb_overlay.fade_out(on_done=_done)
 
