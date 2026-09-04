@@ -3370,16 +3370,17 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_plugin_input_buttons(self):
         """重建输入区插件按钮（Phase D + E 扩展点，幂等）
 
-        先清空本方法构建的按钮 + 分隔线，再按 UIPluginRegistry.get_input_buttons()
+        先清空本方法构建的按钮，再按 UIPluginRegistry.get_input_buttons()
         重新构建；未注册任何按钮时不渲染任何东西（行为零变化）。
         热重载/卸载经 _on_plugin_hot_reload 触发重建。
 
         Phase E：按 info.position 决定插入位置：
         - "start"        插入 capsule_layout 首位
-        - "end"          默认：末尾追加（与分隔线一起）
+        - "end"          默认：末尾追加
         - "before:<id>"  锚定到 objectName=<id> 的 widget 左侧
         - "after:<id>"   锚定到 objectName=<id> 的 widget 右侧
-        锚点缺失降级末尾追加。
+        锚点缺失（典型场景：老插件使用 memory/history 锚点，系统按钮已迁出）→ 降级到
+        新建会话按钮左侧插入；新建会话按钮也不存在时兜底末尾追加。
         """
         if not hasattr(self, "_toolbar_capsule"):
             return
@@ -3450,7 +3451,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 rel, _, anchor_id = info.position.partition(":")
                 idx = _find_anchor_index(anchor_id)
                 if idx < 0:
-                    capsule_layout.addWidget(btn)  # 锚点缺失降级末尾
+                    # 锚点缺失（老插件用 memory/history 等已迁出按钮的 objectName）：
+                    # 降级到新建会话按钮左侧插入，保留视觉上的"系统按钮区"语义。
+                    ns_idx = _find_anchor_index("new_session")
+                    if ns_idx < 0:
+                        capsule_layout.addWidget(btn)  # 兜底：末尾追加
+                    else:
+                        capsule_layout.insertWidget(ns_idx, btn)
                 elif rel == "before":
                     capsule_layout.insertWidget(idx, btn)
                 else:  # after
@@ -3458,15 +3465,7 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 构建失败：{e}")
 
-        # 3) end：末尾追加（与分隔线一起）
-        if end_buttons or anchored:
-            # 分隔线：系统按钮与插件按钮区分
-            separator = QFrame(self._toolbar_capsule)
-            separator.setFrameShape(QFrame.VLine)
-            separator.setStyleSheet(f"color: {Colors.DIVIDER_COLOR};")
-            separator.setFixedHeight(16)
-            capsule_layout.addWidget(separator)
-            self._plugin_input_buttons.append(separator)
+        # 3) end：末尾追加
         for info in sorted(end_buttons, key=lambda b: -b.priority):
             try:
                 btn = _make_btn(info)
