@@ -3073,6 +3073,7 @@ class ConsoleMonitorPage(QWebEnginePage):
     chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — echarts/mermaid/svg/html 放大查看
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
     saveWidgetFileRequested = pyqtSignal(str, str)  # (wtype, content_b64) — svg widget 源码保存回传
+    renderCrashed = pyqtSignal()  # renderer 进程崩溃（GPU OOM/崩溃），宿主卡片自愈
 
     def __init__(self, profile=None, parent=None):
         """创建一个 ConsoleMonitorPage。
@@ -3085,6 +3086,15 @@ class ConsoleMonitorPage(QWebEnginePage):
             super().__init__(profile, parent)
         else:
             super().__init__(parent)
+        # renderer 进程崩溃（多图 GPU 内存压力下 Chromium 渲染进程 OOM/崩溃）。
+        # 此前只有 JS 侧 webglcontextlost 上报路径（console "context_lost"），
+        # renderer 真崩溃时 JS 已死、信号永不来 → 卡片永久白屏无人管。
+        self.renderProcessTerminated.connect(self._on_render_process_terminated)
+
+    def _on_render_process_terminated(self, status, exit_code):
+        """QWebEnginePage 内建信号转发：renderer 进程终止 → 通知宿主卡片自愈"""
+        logger.warning(f"WebEngine renderer 崩溃: status={status} exit_code={exit_code}")
+        self.renderCrashed.emit()
 
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):
         """拦截 file:// 链接点击：用系统默认程序打开（不导航）。
@@ -3577,6 +3587,7 @@ class CodeWebViewer(QWebEngineView):
         self._page.chartExpandRequested.connect(self.chartExpandRequested.emit)
         self._page.saveChartPngRequested.connect(self.saveChartPngRequested.emit)
         self._page.saveWidgetFileRequested.connect(self.saveWidgetFileRequested.emit)
+        self._page.renderCrashed.connect(self._on_render_crashed)
 
         self._load_skeleton()
 
@@ -3672,6 +3683,21 @@ class CodeWebViewer(QWebEngineView):
             logger.warning(f"Context restore failed: {e}")
             # 恢复失败，请求重建
             self.needRecreate.emit()
+
+    def _on_render_crashed(self):
+        """renderer 进程崩溃自愈：重载骨架补渲；连续崩溃（≥3 次）交重建。
+
+        复用 _context_lost_count 计数（与 webglcontextlost 共享阈值）：
+        单次崩溃重载骨架成本远低于整卡重建；反复崩溃说明环境级问题（如
+        显存枯竭），重建兜底。重载骨架后 vault/队列等 JS 状态随页面重置，
+        _schedule_render 补渲时图表按当前内容重新 init 一次。
+        """
+        logger.warning("WebEngine renderer 崩溃，触发卡片自愈")
+        self._context_lost_count += 1
+        if self._context_lost_count > 2:
+            self.needRecreate.emit()
+            return
+        self._try_restore_context()
 
     def event(self, event):
         """拦截 WebEngine 事件"""
