@@ -324,20 +324,43 @@ def test_dream_forget_hallucination_guard(tmp_path):
 
 
 def test_dream_forget_daily_quota_and_budget(tmp_path):
-    """keep 超名额 → 确定性删最旧；总量超 3000 → 继续删最旧 daily。"""
+    """keep 超名额 → 确定性删最旧；longterm 超预算硬截 → total ≤ 3000。"""
     aid = tmp_path / "a_quota"
     _seed_memory_multi(aid)
     composed = "- 合成事实0"
-    big_longterm = "- 长" * 1034  # 3102 字符：≤ seed longterm（守门过），facts+lt 已超 3000 → daily 必被预算删光
+    big_longterm = "- 长" * 1034  # 3102 字符：≤ seed longterm（守门过），硬截后 ≤1400
     keep_all = [f"2026-08-2{5 + i}" for i in range(5)]  # 超名额 3 天
     llm = FakeLLM(list(_DREAM_REPLIES[:5]) + [_forget_reply(composed, keep_all, big_longterm)])
     r = m.DreamRunner(aid, llm=llm).start("manual")
     assert r["ok"] is True
     ddir = aid / "memory" / "daily"
     kept = sorted(f.stem for f in ddir.glob("*.md"))
-    # 留的是最新几天（名额 3 + 预算兜底继续删最旧）
+    # 留的是最新几天（名额 3 天，硬截后预算内不再删）
     all_days = sorted(f"2026-08-2{5 + i}" for i in range(5))
     assert len(kept) <= 3
     assert kept == all_days[len(all_days) - len(kept) :]
-    total = len(composed) + len(big_longterm) + sum(len(f.read_text(encoding="utf-8")) for f in ddir.glob("*.md"))
+    # 用落盘值算总量：longterm 已被硬截
+    lt_final = (aid / "memory" / "longterm.md").read_text(encoding="utf-8").strip()
+    assert len(lt_final) <= 1400
+    total = len(composed) + len(lt_final) + sum(len(f.read_text(encoding="utf-8")) for f in ddir.glob("*.md"))
     assert total <= 3000 or not kept
+
+
+def test_dream_forget_enforces_budget_when_llm_disobeys(tmp_path):
+    """LLM 无视名额返回超长 facts → 确定性硬截到预算内（保重要度序前部）。"""
+    aid = tmp_path / "a_trim"
+    _seed_memory_multi(aid)
+    composed = "\n".join(f"- 合成事实{i}：{'内容' * 20}" for i in range(60))  # ~2500 字符
+    llm = FakeLLM(
+        list(_DREAM_REPLIES[:3])
+        + [composed]  # compose：合成稿本身长，遗忘 reply 与其等长 → 幻觉守门过
+        + ['{"semantic_ok": true, "provenance_ok": true, "sufficient_compression": true, "feedback": ""}']
+        + [_forget_reply(composed, ["2026-08-29"], "- 长期0")]
+    )
+    r = m.DreamRunner(aid, llm=llm).start("manual")
+    assert r["ok"] is True
+    facts_text = (aid / "memory" / "facts.md").read_text(encoding="utf-8").strip()
+    # 硬截生效：不超预算、头部重要条目保留、尾部条目被丢
+    assert len(facts_text) <= 1500
+    assert "合成事实0" in facts_text
+    assert "合成事实59" not in facts_text

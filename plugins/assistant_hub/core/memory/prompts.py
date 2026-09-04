@@ -133,6 +133,7 @@ def build_dream_forget(facts_draft: str, longterm: str, today: str, daily: List[
         "存活优先：仍活跃的项目/约束/偏好、具体可执行的坑与决策、身份关系类硬事实。\n"
         + _STYLE
         + "- 硬性名额：facts ≤15 条；longterm ≤20 条；daily 保留 ≤3 天\n"
+        "- **输出必须按重要度从高到低排序**（超名额时末尾条目会被截断，最重要的必须在最前）\n"
         "- 只删/合并，不增不改写：输出中出现的事实必须来自输入；语义等价碎片可合并挤一个名额\n"
         "- today 仅供参考视野，不在输出范围\n\n"
         '只输出一个 JSON 对象：{"facts": "保留后的重要事实全文", "keep_daily": ["日期"], '

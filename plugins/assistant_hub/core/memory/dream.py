@@ -33,6 +33,9 @@ FORGET_FACTS_LIMIT = 15
 FORGET_DAILY_LIMIT = 3
 FORGET_LONGTERM_LIMIT = 20
 FORGET_BUDGET_CHARS = 3000
+# 确定性硬截预算：LLM 无视名额时按行截断（输出已要求重要度降序）
+FORGET_FACTS_BUDGET_CHARS = 1500
+FORGET_LONGTERM_BUDGET_CHARS = 1400
 _locks: Dict[str, threading.Lock] = {}
 
 
@@ -41,16 +44,28 @@ class DreamAlreadyRunningError(RuntimeError):
 
 
 def _load(name: str, rel: str):
+    """加载同包模块（importlib 手动注册 sys.modules）。
+
+    mtime 自检：sys.modules 里的旧对象在插件热重载时无人清理（app 侧 purge
+    只覆盖 gateway/ui 等前缀），命中即返回会卡住旧代码（如 prompts 新增函数
+    不可见）→ 命中后比对源文件 mtime，更新则重新加载替换。
+    """
     key = f"assistant_hub_core.{name}"
     import sys
 
+    path = _THIS.parent.parent / rel
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
     mod = sys.modules.get(key)
-    if mod is not None:
+    if mod is not None and getattr(mod, "_source_mtime", -1.0) >= mtime:
         return mod
-    spec = importlib.util.spec_from_file_location(key, str(_THIS.parent.parent / rel))
+    spec = importlib.util.spec_from_file_location(key, str(path))
     module = importlib.util.module_from_spec(spec)
     sys.modules[key] = module
     spec.loader.exec_module(module)
+    module._source_mtime = mtime
     return module
 
 
@@ -113,6 +128,25 @@ def _read(p: Path) -> str:
 def _write(p: Path, text: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
+
+
+def _trim_to_budget(text: str, limit: int) -> str:
+    """按行累积截断到字符预算内（保序保头部；遗忘输出已要求重要度降序，截尾保重要）。
+
+    首行即超限时行内硬截（预算硬保证优先于行完整性）。
+    """
+    if len(text) <= limit:
+        return text
+    out: List[str] = []
+    used = 0
+    for line in text.splitlines():
+        if used + len(line) + 1 > limit:
+            break
+        out.append(line)
+        used += len(line) + 1
+    if not out:
+        return text[:limit]
+    return "\n".join(out)
 
 
 def _sections_text(s: DreamSections) -> str:
@@ -434,6 +468,9 @@ class DreamRunner:
         if len(facts) > len(composed) or len(lt) > len(longterm.strip()):
             return None
         keep_set = {str(x) for x in keep}
+        # 确定性名额执行：LLM 无视名额时按行截断（重要度降序，截尾保重要）
+        facts = _trim_to_budget(facts, FORGET_FACTS_BUDGET_CHARS)
+        lt = _trim_to_budget(lt, FORGET_LONGTERM_BUDGET_CHARS)
         daily_keep = sorted((x for x in before.daily if x.get("date") in keep_set), key=lambda x: x["date"])
         # 名额兜底：超名额删最旧
         daily_keep = daily_keep[-FORGET_DAILY_LIMIT:]
