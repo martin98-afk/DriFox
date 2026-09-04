@@ -1047,16 +1047,27 @@ class WorkbenchPanel(QWidget):
 
     # ── 插件页签 reconcile（宿主在 refresh_workbench 时调用） ──
 
-    def sync_plugin_pages(self, tabs: List[Any]) -> None:
+    def sync_plugin_pages(self, tabs: List[Any], force: bool = False) -> None:
         """按 UIPluginRegistry 的 workbench_tabs 增删插件页（签名不变则跳过重建）
 
         产物页特例：``page_id="artifacts"`` 是**保留 id**，插件注册它即填充
         index 2 的产物页槽位（面板本身不提供产物实现）。未注册时显示占位页。
         其余 page_id 按注册序追加在「工作树 / 记忆 / 产物」之后。
+
+        force=True（热重载）：(page_id, label) 签名不变但实现已变，置空全部
+        签名并销毁现有插件页，强制按最新注册重建（worktree/artifacts 槽位
+        由 _use_plugin_* 感知 None 签名自动走替换；重建后数据由宿主
+        refresh_workbench 的推送链补投递）。
         """
         all_infos = {t.page_id: t for t in (tabs or [])}
         # ── 保留页签槽位：worktree（index 0）/ artifacts（index 1），不进普通插件页列表 ──
         wt_info = all_infos.get("worktree")
+        if force:
+            self._plugin_sig = None
+            self._worktree_plugin_sig = None
+            self._artifacts_plugin_sig = None
+            for page_id in list(self._plugin_widgets.keys()):
+                self._destroy_plugin_page(page_id)
         if wt_info is not None:
             self._use_plugin_worktree(wt_info)
         else:

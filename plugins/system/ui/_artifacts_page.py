@@ -255,7 +255,8 @@ class _QuestionGroupCard(QFrame):
     def _apply_expand(self) -> None:
         self._body.setVisible(self._expanded)
         # 收起态显示「展开」箭头，展开态显示「折叠」箭头
-        self._arrow_label.setPixmap(get_icon("展开" if not self._expanded else "折叠").pixmap(14, 14))
+        # 状态语义：折叠态显示向右箭头（▶，点击展开），展开态显示向下箭头（▼）
+        self._arrow_label.setPixmap(get_icon("折叠" if not self._expanded else "展开").pixmap(14, 14))
 
     def _emit_diff(self) -> None:
         paths: List[str] = []

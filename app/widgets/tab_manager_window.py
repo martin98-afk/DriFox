@@ -1144,13 +1144,15 @@ class TabManagerWindow(FramelessWindow):
         except Exception:
             pass
 
-    def refresh_workbench(self) -> None:
+    def refresh_workbench(self, force: bool = False) -> None:
         """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
 
         数据源均为既有单一数据源：
         - 产物：backend.file_recorder 会话级文件写入记录
         - 任务：窗口 _latest_todos（todowrite 结果联动缓存），缺失回退 tool_executor
         - 项目：win._current_project + _current_workdir → MemoryCardContent
+
+        force=True：插件页强制重建（ui 热重载后签名未变但实现已变）。
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None or not panel.isVisible():
@@ -1159,7 +1161,7 @@ class TabManagerWindow(FramelessWindow):
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            panel.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs())
+            panel.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs(), force=force)
         except Exception:
             pass
         win = self.get_current_window()

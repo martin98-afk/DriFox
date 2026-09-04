@@ -9419,6 +9419,18 @@ class OpenAIChatToolWindow(ToolWindow):
                             pass
                 except RuntimeError, AttributeError:
                     pass
+            # ★ 右侧工作台插件页强制重建：ui 热重载后 registry 已更新，但面板
+            # widget 是构建时快照，(page_id, label) 签名不变会被 sync_plugin_pages
+            # 短路跳过——force=True 忽略签名销毁重建，常驻插件页（工作树/产物/
+            # 自注册 tab）才真正换用新代码。下一帧执行，避开广播栈内重建。
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                _tmw = TabManagerWindow.get_instance()
+                if _tmw is not None:
+                    QTimer.singleShot(0, lambda: _tmw.refresh_workbench(force=True))
+            except Exception:
+                pass
             # 欢迎卡片插件 tab 刷新：ui 组件重载（安装/更新/卸载）后，已打开的
             # 欢迎卡片需重建以显示新增/移除的插件 tab。原刷新完全依赖
             # register_welcome_tab → registry 链，实测安装新插件后已打开标签页
