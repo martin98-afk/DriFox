@@ -5779,6 +5779,68 @@ class CodeWebViewer(QWebEngineView):
                     }});
                 }}
 
+                // ===== 图表节点暂存区（vault）：全量渲染时保全已渲染图表 =====
+                // updateContent 用 innerHTML 整体重建正文，已渲染的 echarts/mermaid/katex
+                // 节点被销毁，防重标记（_echartInited/_mmdDone）随节点丢失 → 所有图表重新
+                // init/render（流式期间反复闪烁）+ 旧 echarts 实例不 dispose（孤儿实例泄漏，
+                // 多图卡片 GPU 内存滚雪球 → 单卡白屏候选根因）。vault 机制：替换前按内容
+                // key 把已渲染节点搬进 detached Map，替换后按 key 原节点回插——实例与渲染
+                // 产物完整保留，零重建零闪烁。
+                // key：ech 用 data-echarts-json（属性永久保留）；mmd/ktx 渲染成功后属性被
+                // 清空，故首次 stash 时把 key 缓存在 el._chartKey 上，后续 stash 直接复用。
+                window._chartKeyOf = function (el) {{
+                    if (el._chartKey) return el._chartKey;
+                    var b64 = el.getAttribute('data-echarts-json') || el.getAttribute('data-mermaid-src') || el.getAttribute('data-katex-src') || '';
+                    if (!b64) return null;
+                    var pfx = el.classList.contains('echarts-container') ? 'ech:' : (el.classList.contains('mermaid-block') ? 'mmd:' : 'ktx:');
+                    el._chartKey = pfx + b64;
+                    return el._chartKey;
+                }};
+                window._chartReady = function (el) {{
+                    return el._echartInited || el._mmdDone || !el.classList.contains('katex-pending');
+                }};
+                window._stashCharts = function (container) {{
+                    if (!window.__chartVault) window.__chartVault = new Map();
+                    var nodes = container.querySelectorAll('.echarts-container, .mermaid-block, .katex-block, .katex-inline');
+                    for (var i = 0; i < nodes.length; i++) {{
+                        var el = nodes[i];
+                        var key = window._chartKeyOf(el);
+                        if (!key) continue;
+                        if (window._chartReady(el)) {{
+                            el._chartStashed = true;
+                            window.__chartVault.set(key, el);
+                        }}
+                    }}
+                    // 未暂存的已 init echarts 节点将被 innerHTML 销毁：主动 dispose 堵孤儿实例泄漏
+                    container.querySelectorAll('.echarts-container').forEach(function (el) {{
+                        if (el._echartInited && el._chartInstance && !el._chartStashed) {{
+                            try {{ el._chartInstance.dispose(); }} catch (e) {{ }}
+                        }}
+                    }});
+                }};
+                window._restoreCharts = function (container) {{
+                    if (!window.__chartVault || !window.__chartVault.size) return;
+                    var nodes = container.querySelectorAll('.echarts-container, .mermaid-block, .katex-block, .katex-inline');
+                    for (var i = 0; i < nodes.length; i++) {{
+                        var el = nodes[i];
+                        if (el._echartInited || el._mmdDone || !el.classList.contains('katex-pending')) continue;  // 已是回插节点
+                        var key = window._chartKeyOf(el);
+                        if (!key || !window.__chartVault.has(key)) continue;
+                        var saved = window.__chartVault.get(key);
+                        if (!saved || !window._chartReady(saved)) continue;
+                        el.parentNode.replaceChild(saved, el);
+                        // 回插的 echarts 实例适配新容器尺寸
+                        if (saved._chartInstance && typeof saved._chartInstance.resize === 'function') {{
+                            try {{ saved._chartInstance.resize(); }} catch (e) {{ }}
+                        }}
+                    }}
+                    // vault 上限控制：会话内图表反复改稿场景防 Map 无限涨
+                    if (window.__chartVault.size > 48) {{
+                        var _vk = window.__chartVault.keys();
+                        while (window.__chartVault.size > 24) {{ window.__chartVault.delete(_vk.next().value); }}
+                    }}
+                }};
+
                 function _katexEnsure(cb) {{
                     if (window.katex && window.katex.render) {{ cb(); return; }}
                     if (!window._katexQueue) window._katexQueue = [];
@@ -5840,6 +5902,8 @@ class CodeWebViewer(QWebEngineView):
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
+                        // 图表保全：替换前暂存已渲染图表节点（防闪烁 + 堵 echarts 孤儿实例泄漏）
+                        window._stashCharts(container);
                         // 记录当前展开状态的思考块
                         // [PERF] 简洁模式：completed 思考块是 think-compact（无折叠），跳过 save
                         //       节省 querySelectorAll + Map 构造；非简洁模式行为不变
@@ -5937,6 +6001,8 @@ class CodeWebViewer(QWebEngineView):
                                 console.error('updateContent textContent fallback also failed:', e2);
                             }}
                         }}
+                        // 图表保全：按 key 回插暂存节点（带 _echartInited/_mmdDone，后续 init 扫描天然跳过）
+                        window._restoreCharts(container);
                         // 立即恢复滚动位置，防止浏览器在下一次 paint 时呈现 scrollTop=0
                         var _maxScroll = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
                         document.body.scrollTop = Math.min(_prevScrollTop, _maxScroll);
@@ -6166,7 +6232,7 @@ class CodeWebViewer(QWebEngineView):
                                 if (!jsonB64 || el._echartInited) return;
                                 var _bytes = Uint8Array.from(atob(jsonB64), function(c) {{ return c.charCodeAt(0); }});
                                 var option = JSON.parse(new TextDecoder('utf-8').decode(_bytes));
-                                var chart = echarts.init(el, 'dark');
+                                var chart = echarts.init(el, _CHART_IS_DARK ? 'dark' : undefined);
                                 chart.setOption(option);
                                 el._echartInited = true;
                                 el._chartInstance = chart;
@@ -7461,6 +7527,22 @@ class CodeWebViewer(QWebEngineView):
         # 避免 updateContent 复用旧骨架 CSS 变量导致主题色残留。
         try:
             if self.page():
+                # [vault] 主题切换：清空图表暂存区 + dispose 旧主题 echarts 实例。
+                # echarts 主题在 init 时确定、实例不可变色，复用旧实例会残留旧配色；
+                # 清空 vault + 置 _echartInited=false 后，下次全量渲染按新主题重 init。
+                # 轻量纯 JS 不做可见性门控（隐藏 tab 下执行无害；且必须执行——否则
+                # 恢复可见后 vault 回插的仍是旧主题实例）。图标重置与 CSS 变量注入
+                # 解耦，_theme_css_pending 补注入逻辑不受影响。
+                _chart_reset_js = (
+                    "if (window.__chartVault) { window.__chartVault.clear(); }"
+                    "if (window.echarts) {"
+                    "  document.querySelectorAll('.echarts-container').forEach(function (el) {"
+                    "    if (el._chartInstance) { try { el._chartInstance.dispose(); } catch (e) {} }"
+                    "    el._echartInited = false; el._chartStashed = false;"
+                    "  });"
+                    "}"
+                )
+                self.page().runJavaScript(_chart_reset_js)
                 if self.isVisible():
                     self.page().runJavaScript(js_code)
                     self._theme_css_pending = False
