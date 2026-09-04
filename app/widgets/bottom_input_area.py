@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt5.QtCore import (
+    QEasingCurve,
     QMimeData,
     QObject,
     QRectF,
@@ -19,6 +20,7 @@ from PyQt5.QtCore import (
     QSizeF,
     Qt,
     QTimer,
+    QVariantAnimation,
     pyqtSignal,
 )
 from PyQt5.QtGui import (
@@ -32,6 +34,7 @@ from PyQt5.QtGui import (
     QKeySequence,
     QPainter,
     QPainterPath,
+    QPixmap,
     QPen,
     QSyntaxHighlighter,
     QTextCharFormat,
@@ -53,7 +56,7 @@ from qfluentwidgets import ComboBox, FluentIcon, IconWidget, TextEdit, Transpare
 
 from app.widgets.stop_button import SendStopButton
 
-from app.utils.design_tokens import Colors, font_size_css, qcolor_from_token
+from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token
 from app.utils.utils import get_font_family_css
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
@@ -230,6 +233,7 @@ class SendableTextEdit(TextEdit):
     atTriggered = pyqtSignal(str)  # 检测到 @ 触发，携带查询文本
     atDismissed = pyqtSignal()  # @ 触发结束
     files_dropped = pyqtSignal(list)  # list[str] 拖入/粘贴的文件路径
+    paste_image_saved = pyqtSignal(str)  # 粘贴图片后台落盘完成（跨线程刷新附件芯片用）
     enteringHistoryMode = pyqtSignal()  # 即将进入历史浏览模式（main_widget 需保存当前附件）
     historyAttachmentsRestored = pyqtSignal(list)  # 恢复附件路径列表
     historyModeExited = pyqtSignal()  # 退出历史浏览模式（main_widget 从备份恢复附件）
@@ -1198,6 +1202,8 @@ class SendableTextEdit(TextEdit):
                 text = entry["text"]
                 self._suppress_slash_trigger = text.strip().startswith("/")
                 self.setPlainText(text)
+                # [[basename]] 字面占位符转回 inline 胶囊（依条目附件路径还原）
+                self.convert_placeholders_to_mentions(entry.get("attachments", []))
                 self.historyAttachmentsRestored.emit(entry.get("attachments", []))
                 # 选中全部文本，方便继续编辑
                 cursor = self.textCursor()
@@ -1410,6 +1416,115 @@ class SendableTextEdit(TextEdit):
         finally:
             self._syncing_attachments = False
         return True
+
+    def convert_placeholders_to_mentions(self, attachments: list):
+        """把正文中的 [[basename]] / @名字 字面文本转回 inline 胶囊
+
+        历史条目 / working line 恢复走 setPlainText（纯文本通道），胶囊信息
+        在保存时已被 toPlainText() 展开成 [[basename]] / @名字。这里还原：
+
+        - 文件占位符：依条目保存的附件路径，与「同名文件逐个消耗」的发送侧
+          替换（_build_user_text_with_attachments）互为逆操作。只还原能匹配
+          到路径的占位符；手动键入的无路径引用保持字面，发送时由占位符
+          替换逻辑兜底。
+        - 助手胶囊：名字精确匹配当前 @ 提供者条目才转（颜色取列表值），
+          匹配不到保持字面——发送链路 PreUserMessage hook 认 @名字 字面
+          文本，不转也不影响功能，纯视觉差异。
+
+        必须在 _setting_history_text / _syncing_attachments 守卫内调用：
+        替换触发的 textChanged 在守卫内只校准反向同步快照，不会误报；
+        且转换后 toPlainText() 重新展开为同样的 [[basename]] / @名字，
+        快照不变。
+        """
+        name_colors = self._collect_assistant_name_colors()
+        if not attachments and not name_colors:
+            return
+        # basename → 待消耗路径队列（同名文件按占位符出现顺序逐个消耗）
+        queues: dict[str, list[str]] = {}
+        for p in attachments:
+            queues.setdefault(os.path.basename(p), []).append(p)
+
+        # 此刻文档内无胶囊对象，super().toPlainText() 与重写版等价且更省事；
+        # 文件占位符与 @名字 两种模式不重叠，span 可在同一份文本上收集
+        raw = super().toPlainText()
+        spans: list[tuple[int, int, QTextCharFormat]] = []
+        for m in _PLACEHOLDER_RE.finditer(raw):
+            queue = queues.get(m.group(1))
+            if queue:
+                # 正序消耗：正文第 N 个同名占位符 ↔ 附件列表第 N 个同名路径
+                spans.append((m.start(), m.end(), self._make_mention_format(queue.pop(0))))
+        for start, end, fmt in self._find_assistant_mention_spans(raw, name_colors):
+            spans.append((start, end, fmt))
+        if not spans:
+            return
+
+        # 从后往前替换：前面的 span 位置不会因替换而偏移
+        spans.sort(key=lambda s: s[0], reverse=True)
+        doc = self.document()
+        self._syncing_attachments = True
+        try:
+            for start, end, fmt in spans:
+                cursor = QTextCursor(doc)
+                cursor.setPosition(start)
+                cursor.setPosition(end, QTextCursor.KeepAnchor)
+                # 占位符整体换成一枚 U+FFFC；原文本自带的尾随空格保持不动
+                cursor.insertText(_OBJECT_REPLACEMENT, fmt)
+        finally:
+            self._syncing_attachments = False
+
+    def _collect_assistant_name_colors(self) -> dict[str, str]:
+        """从 @ 提及提供者拉取 名字→颜色 映射（历史恢复胶囊还原用）
+
+        与 file_mention_card._collect_mention_items 同款取数模式：
+        provider list_func 均为内存回调，同步拉取无阻塞；异常静默返回空。
+        """
+        result: dict[str, str] = {}
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            providers = UIPluginRegistry.get_instance().get_mention_providers()
+        except Exception:
+            return result
+        for provider in providers:
+            try:
+                for entry in provider.list_func() or []:
+                    name = str(entry.get("name", "")).strip()
+                    if name and name not in result:
+                        result[name] = str(entry.get("color", "")) or "#7C3AED"
+            except Exception:
+                continue
+        return result
+
+    def _find_assistant_mention_spans(
+        self, raw: str, name_colors: dict[str, str]
+    ) -> list[tuple[int, int, QTextCharFormat]]:
+        """在纯文本 raw 中定位可还原的 @名字，返回 (start, end, 格式) 列表
+
+        - 长名优先 + 重叠丢弃："阿明2" 与 "阿明" 同时在列时前者整段成胶囊，
+          不给后者留前缀残段
+        - 后边界要求名字后是串尾/空白/常见标点；前边界只挡 ASCII 字母数字与
+          @ _（邮箱、路径里的 @），中文紧邻（"问下@阿明"）放行
+        """
+        spans: list[tuple[int, int, QTextCharFormat]] = []
+        taken: list[tuple[int, int]] = []
+        _AFTER = "，。！？；：、)）】」》\"'"
+        for name in sorted(name_colors, key=len, reverse=True):
+            for m in re.finditer("@" + re.escape(name) + r"(?=$|\s|[" + re.escape(_AFTER) + r"])", raw):
+                start, end = m.start(), m.end()
+                if start > 0:
+                    prev = raw[start - 1]
+                    if prev.isascii() and (prev.isalnum() or prev in "@_"):
+                        continue
+                if any(start < e and s < end for s, e in taken):
+                    continue
+                taken.append((start, end))
+                fmt = QTextCharFormat()
+                fmt.setObjectType(_ASSISTANT_MENTION_TYPE)
+                fmt.setProperty(_ASSISTANT_MENTION_NAME_PROP, name)
+                fmt.setProperty(_ASSISTANT_MENTION_COLOR_PROP, name_colors[name])
+                fmt.setToolTip(f"临时使用助手：{name}")
+                spans.append((start, end, fmt))
+        return spans
 
     def set_attachment_sync_enabled(self, enabled: bool):
         """暂停 / 恢复「文本 → 附件」反向同步
@@ -1723,6 +1838,10 @@ class SendableTextEdit(TextEdit):
             # 粘贴剪贴板图片 → 保存到临时文件
             if source.hasImage() and not file_paths:
                 img = source.imageData()
+                if isinstance(img, QPixmap):
+                    # 同进程 clipboard().setPixmap() 写入的剪贴板，同进程回读为
+                    # QPixmap（未走系统 CF_DIB 转换）；外部进程截图则为 QImage。
+                    img = img.toImage()
                 if isinstance(img, QImage) and not img.isNull():
                     tmp_dir = Path(tempfile.gettempdir()) / "drifox_paste"
                     tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -1795,6 +1914,12 @@ class SendableTextEdit(TextEdit):
                         self._pending_image_saves.remove(ev)
                     except ValueError:
                         pass
+                # 通知主线程落盘完成：芯片创建早于文件写入，需刷新解除"不存在"误报
+                # （跨线程 emit → queued 到主线程；窗口销毁竞态时静默）
+                try:
+                    self.paste_image_saved.emit(path)
+                except RuntimeError:
+                    pass
 
         threading.Thread(target=_do_save, daemon=True, name="drifox-paste-image-save").start()
 
@@ -2135,6 +2260,10 @@ class InputGlowUnderlay(QWidget):
         self._pill_w = 0
         self._pill_h = 0
         self._radius = self.DEFAULT_RADIUS
+        # 辉光过渡动画：0..1 归一化插值 + from/target 快照，retarget 时从当前值续接
+        self._glow_anim: Optional[QVariantAnimation] = None
+        self._glow_from: tuple = (0, 0, 0, 0)
+        self._glow_target: tuple = (0, 0, 0, 0)
 
     def set_color(self, color: QColor):
         c = QColor(color)
@@ -2162,6 +2291,61 @@ class InputGlowUnderlay(QWidget):
         self._ambient_alpha = max(0, int(ambient_alpha))
         self._ambient_blur = max(0, int(ambient_blur))
         self.update()
+
+    def animate_glow_to(
+        self,
+        primary_alpha: int,
+        primary_blur: int,
+        ambient_alpha: int,
+        ambient_blur: int,
+        duration: int = 200,
+    ):
+        """辉光参数平滑过渡到目标值（聚焦/失焦切换用）
+
+        中途反向切换时从当前实际值续接（retarget），不会跳回起点。
+        reduced-motion 开启时直接落终值。
+        """
+        target = (
+            max(0, int(primary_alpha)),
+            max(0, int(primary_blur)),
+            max(0, int(ambient_alpha)),
+            max(0, int(ambient_blur)),
+        )
+        current = (
+            self._primary_alpha,
+            self._primary_blur,
+            self._ambient_alpha,
+            self._ambient_blur,
+        )
+        if target == current:
+            return
+        if not Animations.motion_enabled() or duration <= 0:
+            self.set_glow(*target)
+            return
+        if self._glow_anim is None:
+            anim = QVariantAnimation(self)
+            anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+            anim.valueChanged.connect(self._on_glow_anim_tick)
+            self._glow_anim = anim
+        anim = self._glow_anim
+        anim.stop()
+        self._glow_from = current
+        self._glow_target = target
+        anim.setDuration(int(duration))
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.start()
+
+    def _on_glow_anim_tick(self, t: float):
+        t = max(0.0, min(1.0, float(t)))
+        f = self._glow_from
+        d = self._glow_target
+        self.set_glow(
+            f[0] + (d[0] - f[0]) * t,
+            f[1] + (d[1] - f[1]) * t,
+            f[2] + (d[2] - f[2]) * t,
+            f[3] + (d[3] - f[3]) * t,
+        )
 
     def set_pill_geometry(
         self,

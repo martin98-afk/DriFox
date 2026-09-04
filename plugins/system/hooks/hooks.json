@@ -88,6 +88,13 @@
             "add_output_to_context": true,
             "statusMessage": "团队上下文:",
             "id": "builtin_inject_team_context"
+          },
+          {
+            "type": "python",
+            "function": ".inject_agent_identity:hook",
+            "add_output_to_context": true,
+            "statusMessage": "智能体身份:",
+            "id": "builtin_inject_agent_identity"
           }
         ]
       }

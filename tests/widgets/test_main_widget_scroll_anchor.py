@@ -20,6 +20,7 @@ import sys
 from unittest.mock import MagicMock
 
 import pytest
+from PyQt5.QtCore import QObject
 
 sys.path.insert(0, "app")
 
@@ -379,3 +380,191 @@ def test_apply_style_skips_when_signature_unchanged(qapp):
     assert btn._style_sig == sig  # 没变 → 没重刷
     btn._apply_style(force=True)
     assert btn._style_sig == sig  # 强制重刷后签名依然一致
+
+
+# ─── 卡片高度锚定补偿（v2）─────────────────────────────────────────
+# 背景：锚定补偿初版用 `card_top < value` 作为「增量发生在视口上方」的代理
+# 判据。工具折叠框展开后卡片常高于视口 → 该条件恒成立；而流式正文是在卡片
+# **底部**增长的 → 每个流式高度回调（~80ms 一次）都 += delta，视口被持续
+# 下拽，内容从用户眼下漂走 —— 即「滚轮位置反复被重置到奇怪位置」。
+#
+# ⚠️ v2 按「卡片是否在流式」一刀切关补偿，结果把跟底通道也堵死了 → 流式
+# 中途「置顶」（补偿是流式期间唯一的跟底手段，见源码注释）。
+#
+# v3 判据（补偿成立只需其一）：
+#   A. 整张卡片在视口上方（card_bottom <= value）→ 增量必然在视口之上 → 补偿；
+#   B. 视口处于跟随态（_should_follow_bottom）→ 补偿 == 保持贴底。
+# 用户已上滚阅读且卡片跨视口顶部 → 不补偿。
+
+
+class _AnchorHarness(QObject):
+    """承载 `_on_message_card_height_changed` 的真实 QObject 载体
+
+    该处理器依赖 `self.sender()` 取信号发送者，必须是已完成 C++ 初始化的
+    QObject；直接复写类属性即可把它挂到轻量载体上，避免实例化整个主窗口。
+    """
+
+    _on_message_card_height_changed = OpenAIChatToolWindow._on_message_card_height_changed
+    _should_follow_bottom = OpenAIChatToolWindow._should_follow_bottom
+    _is_view_at_bottom = OpenAIChatToolWindow._is_view_at_bottom
+
+
+def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=False, away=False):
+    """构造带真实容器/卡片 + 可控滚动条的窗口，用于验证锚定补偿判据
+
+    ⚠️ 不能用 `_make_window()`（`OpenAIChatToolWindow.__new__`）—— 未经
+    `QObject.__init__` 的实例调 `self.sender()` 拿不到信号发送者，处理器会在
+    `isinstance(sender, MessageCard)` 处直接 return，测不到补偿逻辑。
+    故用一个真实 QObject 载体承载该处理器（它只依赖 self.sender/聊天滚动区）。
+
+    Args:
+        card_top: 卡片顶部在容器中的 y（用等高占位撑出）
+        card_height: 卡片高度（决定 card_bottom = card_top + card_height）
+        value: 滚动条当前值（视口顶部在内容坐标系的位置）
+        maximum: 滚动条最大值
+        streaming: 卡片是否处于流式输出中
+        away: 用户是否已主动滚离底部（_user_intentionally_away_from_bottom）
+    """
+    from PyQt5.QtCore import QObject, QRect
+    from PyQt5.QtWidgets import QVBoxLayout, QWidget
+
+    from app.widgets.message_card import MessageCard
+
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+
+    if card_top:
+        filler = QWidget(container)
+        filler.setFixedHeight(card_top)
+        layout.addWidget(filler)
+
+    card = MessageCard(role="assistant", parent=container)
+    card.setFixedHeight(card_height)
+    layout.addWidget(card)
+    # 末尾 stretch：否则 QVBoxLayout 会把唯一子项垂直居中，card_top 不可控
+    layout.addStretch(1)
+    # 显式布排：未 show 的顶层 widget 不会自动激活布局，card_top 会恒为 0
+    total_h = max(2000, card_top + card_height + 500)
+    container.resize(400, total_h)
+    layout.setGeometry(QRect(0, 0, 400, total_h))
+
+    card._streaming = streaming
+    card._content_just_loaded = False
+
+    bar = MagicMock()
+    bar.value.return_value = value
+    bar.maximum.return_value = maximum
+    area = MagicMock()
+    area.widget.return_value = container
+    area.verticalScrollBar.return_value = bar
+
+    win = _AnchorHarness()
+    win.chat_scroll_area = area
+    win._is_streaming = streaming
+    win._user_intentionally_away_from_bottom = away
+
+    card.heightChanged.connect(win._on_message_card_height_changed)
+    return win, card, bar
+
+
+def test_streaming_card_not_compensated_when_user_scrolled_away(qapp):
+    """回归核心：用户上滚阅读 + 卡片跨视口顶部（折叠框展开的典型形态）→ 不补偿
+
+    折叠框展开后卡片 1200px 高于视口，card_top(0) < value(300) 恒成立；
+    但正文在卡片**底部**增长（增量在视口之下），补偿会把视口每 ~80ms
+    下拽 Δ → 内容持续从用户眼下漂走。
+    """
+    win, card, bar = _make_anchor_window(
+        card_top=0, card_height=1200, value=300, streaming=True, away=True
+    )
+    card._last_height_delta = 20
+    card.heightChanged.emit(1220)
+
+    bar.setValue.assert_not_called()  # 视口不得被下拽
+
+
+def test_streaming_card_keeps_bottom_follow_when_user_at_bottom(qapp):
+    """回归 v2 引入的「流式中途置顶」：跟随态必须继续补偿（补偿 == 跟底）
+
+    ⚠️ 补偿是流式期间唯一的跟底通道 —— 下方滚底逻辑被 `_content_just_loaded`
+    挡着，而流式 chunk / 工具·思考更新故意不置该标记。v2 按「卡片是否在流式」
+    一刀切关补偿，视口就停在原地、内容在下方越长越多 → 用户看到「置顶」。
+    """
+    win, card, bar = _make_anchor_window(
+        card_top=0, card_height=1200, value=300, streaming=True, away=False
+    )
+    card._last_height_delta = 20
+    card.heightChanged.emit(1220)
+
+    bar.setValue.assert_called_once_with(320)  # 300 + 20 == 新的 maximum
+
+
+def test_short_streaming_card_keeps_bottom_follow(qapp):
+    """卡片矮于视口（card_top >= value）且跟随态 → 仍要补偿，否则丢失跟底
+
+    流式刚开始、卡片还没长过视口时正是这个形态：card_top(1000) > value(300)，
+    若因「顶部已在视口内」而跳过补偿，视口会随内容增长被落在后面。
+    """
+    win, card, bar = _make_anchor_window(
+        card_top=1000, card_height=200, value=300, streaming=True, away=False
+    )
+    card._last_height_delta = 30
+    card.heightChanged.emit(230)
+
+    bar.setValue.assert_called_once_with(330)  # 300 + 30
+
+
+def test_card_entirely_above_viewport_compensated_even_when_user_away(qapp):
+    """整张卡片都在视口上方 → 增量必然在视口之上 → 补偿（与跟随态无关）"""
+    win, card, bar = _make_anchor_window(
+        card_top=0, card_height=200, value=500, streaming=True, away=True
+    )
+    card._last_height_delta = 40
+    card.heightChanged.emit(240)
+
+    bar.setValue.assert_called_once_with(540)  # 500 + 40
+
+
+def test_card_below_viewport_top_not_compensated_when_user_away(qapp):
+    """用户已上滚阅读 + 卡片整体位于视口下方 → 增量不可能影响视口 → 不补偿"""
+    win, card, bar = _make_anchor_window(
+        card_top=1000, card_height=200, value=300, streaming=False, away=True
+    )
+    card._last_height_delta = 100
+    card.heightChanged.emit(300)
+
+    bar.setValue.assert_not_called()
+
+
+def test_height_delta_is_one_shot(qapp):
+    """增量是一次性令牌：同一 delta 不得被后续 heightChanged 重复补偿
+
+    heightChanged 可能由多条路径发射（含"重发已应用高度"的动画结束回调），
+    若 delta 不清零，同一增量会被反复累加 → 视口持续漂移。
+    """
+    win, card, bar = _make_anchor_window(
+        card_top=0, card_height=200, value=500, streaming=False, away=True
+    )
+    card._last_height_delta = 40
+    card.heightChanged.emit(240)
+    bar.setValue.assert_called_once_with(540)
+
+    bar.setValue.reset_mock()
+    card.heightChanged.emit(240)  # 无新增量 → 不得再补
+    bar.setValue.assert_not_called()
+
+
+def test_negative_delta_clamped_at_zero(qapp):
+    """卡片收拢（负增量）时补偿不得让 value 变负
+
+    跟随态 + 卡片大幅收拢（如坞态归位、内容重渲染变短）时最容易撞到负值。
+    """
+    win, card, bar = _make_anchor_window(
+        card_top=0, card_height=1200, value=30, streaming=False, away=False
+    )
+    card._last_height_delta = -80
+    card.heightChanged.emit(1120)
+
+    bar.setValue.assert_called_once_with(0)  # max(0, 30 - 80)

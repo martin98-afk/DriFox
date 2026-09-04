@@ -155,7 +155,8 @@ class PersonaRegistry:
         except Exception:
             return
         # id：frontmatter 优先；子文件夹布局回落文件夹名，平铺布局回落文件名
-        pid = meta.get("id") or (md.parent.name if md.parent == self._builtin_dir else md.stem) or md.stem
+        in_subdir = md.parent != self._builtin_dir
+        pid = meta.get("id") or (md.parent.name if in_subdir else md.stem) or md.stem
         self._builtin[pid] = Persona(
             id=pid,
             name=meta.get("name") or pid,

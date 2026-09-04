@@ -163,8 +163,17 @@ class GatewayService(QObject):
             self._initialized = True
             logger.info("[GatewayService] PlatformManager 就绪")
 
-            # 引擎同步就绪（轻量构造；避免首批消息撞上不可用引擎）
-            self._ensure_engine()
+            # [PERF] 引擎构造不再阻塞启动关键路径：_ensure_engine 触发的懒加载
+            # import 链（GatewayEngine → adapters → mcp SDK 3s + tool_executor
+            # 1.4s + SessionStore DB 迁移）实测 ~8.5s，是 create_instance 的最大
+            # 单项。延迟到首帧后（事件循环首拍）执行，tm.show() 大幅提前。
+            # 时序安全：
+            # - 首批外部平台消息早于引擎就绪 → _on_gateway_input 的
+            #   _ensure_engine 自愈守卫兜底（幂等 + 5s 冷却）
+            # - 应用退出早于引擎就绪 → stop() 只动 _manager，_engine=None 无害
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(0, self._ensure_engine)
 
             self._manager.start_all_async()
         except Exception as e:

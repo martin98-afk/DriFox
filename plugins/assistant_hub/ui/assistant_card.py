@@ -113,7 +113,6 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
                 f"#hubConfirm {{ background: {Colors.CARD_BG_SOLID}; border: 1px solid {Colors.BORDER};"
                 f"border-radius: 12px; }}"
             )
-            self.widget.setFixedSize(640, 420)
             v = QVBoxLayout(self.widget)
             v.setContentsMargins(24, 20, 24, 18)
             v.setSpacing(10)
@@ -140,7 +139,13 @@ def _confirm_dialog(parent, title: str, text: str) -> bool:
             row.addWidget(cancel)
             row.addWidget(ok)
             v.addLayout(row)
-            # 对齐 plugin-marketplace 模式：widget 留在 _hBox 布局自动居中，不手动干预
+            # ⚠ MaskDialogBase 默认 _hBoxLayout.addWidget 无对齐参数 → widget
+            # 被拉伸至 dialog 全屏（此前 setFixedSize 只是硬钳制侥幸正常）。
+            # 显式 AlignCenter 让卡片按内容自适应并居中；勿 removeWidget（钉左上角）。
+            self._hBoxLayout.addWidget(self.widget, 0, Qt.AlignCenter)
+            # 宽度固定 420；高度按内容自适应（调用点均为显式换行的 2-3 行短句，sizeHint 高度准确）
+            self.widget.setFixedWidth(420)
+            self.widget.setFixedHeight(self.widget.sizeHint().height() + 40)
 
         def _yes_accept(self):
             self._yes = True
@@ -307,10 +312,14 @@ class AssistantCardWidget(QWidget):
         self._experience.toggleExperience.connect(self._on_experience_toggle)
         self._experience.viewCategory.connect(self._on_view_experience)
         self._experience.deleteCategoryRequested.connect(self._on_experience_delete)
+        self._experience.consolidateRequested.connect(self._on_experience_consolidate)
         self._experience.reflectRequested.connect(self._on_reflect)
         self._inner_v.addWidget(self._experience)
 
         self._skills = SkillsSection()
+        self._skills.toggleSkills.connect(self._on_skills_toggle)
+        self._skills.skillToggleRequested.connect(self._on_skill_toggle_row)
+        self._skills.skillDeleteRequested.connect(self._on_skill_delete)
         self._inner_v.addWidget(self._skills)
 
         self._inner_v.addStretch(1)
@@ -464,7 +473,7 @@ class AssistantCardWidget(QWidget):
             self._memory.set_dream_hint("")
             self._experience.set_enabled(a.experience_enabled)
             self._experience.reload_categories(mgr.experience_list(aid_capture))
-            self._skills.reload_skills(mgr.list_skills(aid_capture), self._on_view_skill)
+            self._reload_skills(aid_capture)
 
         QTimer.singleShot(0, _do_bind)
 
@@ -636,8 +645,16 @@ class AssistantCardWidget(QWidget):
         aid = self._active_aid
         if not aid:
             return
-        items = [(p, c) for p, c in self._mgr.read_pinned(aid) if p != pid]
-        self._mgr.write_pinned(aid, items)
+        items = list(self._mgr.read_pinned(aid))
+        content = next((c for p, c in items if p == pid), "")
+        preview = content if len(content) <= 30 else content[:30] + "…"
+        if not _confirm_dialog(
+            _host_window() or self.window(),
+            "删除人工提示",
+            f"确定删除「{preview}」？\n该操作不可撤销。",
+        ):
+            return
+        self._mgr.write_pinned(aid, [(p, c) for p, c in items if p != pid])
         self._mgr.invalidate_context(aid)
         self._reload_pinned(aid)
 
@@ -818,15 +835,105 @@ class AssistantCardWidget(QWidget):
 
         def _worker():
             r = self._mgr.experience_reflect(aid)
-            msg = (
-                f"反思完成：新增 {r.get('added', 0)} 条经验"
-                if r.get("added")
-                else f"反思完成：暂无新经验 {('(' + r.get('error', '') + ')') if r.get('error') else ''}"
+            parts = [f"反思完成：新增 {r.get('added', 0)} 条经验" if r.get("added") else "反思完成：暂无新经验"]
+            for c in r.get("consolidated") or []:
+                if c.get("changed"):
+                    parts.append(f"全库已压缩 {c.get('before')}→{c.get('after')} 条")
+            msg = "；".join(parts) + (
+                f" {('(' + r.get('error', '') + ')') if r.get('error') and not r.get('added') else ''}"
             )
+
+            def _done():
+                self._notify(msg)
+                if r.get("added") or r.get("consolidated"):
+                    self._experience.reload_categories(self._mgr.experience_list(aid))
+
             # daemon 线程 → 走信号投递（QTimer.singleShot 在这里永不触发）
-            self._main_thread_call.emit(lambda: self._notify(msg))
+            self._main_thread_call.emit(_done)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_experience_consolidate(self) -> None:
+        """手动全库压缩：确认 → 后台线程跑 LLM 合并 → 刷新列表。"""
+        if not self._active_aid or self._dream_running:
+            return
+        aid = self._active_aid
+        ret = _confirm_dialog(
+            _host_window() or self.window(),
+            "压缩经验库",
+            "压缩全部经验？\nLLM 将跨分类语义合并去重 + 重新归类，旧文件备份到 experience.bak。",
+        )
+        if not ret:
+            return
+        self._notify("压缩进行中…")
+
+        def _worker():
+            r = self._mgr.experience_consolidate(aid)
+            if r.get("changed"):
+                msg = f"已压缩 {r.get('before')}→{r.get('after')} 条"
+                msg += "（内容无变化）" if r.get("before") == r.get("after") else ""
+            elif r.get("reason") == "too_few":
+                msg = "经验条目过少，无需压缩"
+            else:
+                msg = f"压缩失败 {('(' + str(r.get('error') or r.get('reason', '')) + ')')}"
+
+            def _done():
+                self._notify(msg)
+                self._experience.reload_categories(self._mgr.experience_list(aid))
+
+            self._main_thread_call.emit(_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _reload_skills(self, aid: str) -> None:
+        """技能区回刷：开关状态 + 列表 + 行内启用态（UI 永远以盘上数据为准）。"""
+        a = self._mgr.get(aid)
+        enabled = {s["name"] for s in self._mgr.enabled_skills(aid)}
+        self._skills.set_skills_enabled(bool(a and a.skills_enabled))
+        self._skills.reload_skills(self._mgr.list_skills(aid), enabled, self._on_view_skill)
+
+    def _on_skills_toggle(self, on: bool) -> None:
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        a.skills_enabled = bool(on)
+        self._mgr.update(a)
+        self._mgr.invalidate_context(a.id)
+
+    def _on_skill_toggle_row(self, name: str, enable: bool) -> None:
+        """行内开关：whitelist 非空改 whitelist；否则改 blacklist（空=全启用减黑名单）。"""
+        a = self._mgr.get(self._active_aid)
+        if not a:
+            return
+        if a.skills_whitelist:
+            if enable:
+                if name not in a.skills_whitelist:
+                    a.skills_whitelist.append(name)
+            else:
+                a.skills_whitelist = [n for n in a.skills_whitelist if n != name]
+        elif enable:
+            if name in a.skills_blacklist:
+                a.skills_blacklist = [n for n in a.skills_blacklist if n != name]
+        elif name not in a.skills_blacklist:
+            a.skills_blacklist.append(name)
+        self._mgr.update(a)
+        self._mgr.invalidate_context(a.id)
+        self._reload_skills(a.id)
+
+    def _on_skill_delete(self, name: str) -> None:
+        aid = self._active_aid
+        if not aid:
+            return
+        ret = _confirm_dialog(
+            _host_window() or self.window(),
+            "删除技能",
+            f"确定删除技能「{name}」？\n（该操作不可撤销）",
+        )
+        if not ret:
+            return
+        if self._mgr.delete_skill(aid, name):
+            self._reload_skills(aid)
+            self._notify(f"技能「{name}」已删除")
 
     def _on_view_skill(self, name: str) -> None:
         if not self._active_aid:

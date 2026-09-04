@@ -19,6 +19,7 @@ class _A:
     id = "xiaohu-x1"
     memory_enabled = True
     experience_enabled = False
+    skills_enabled = True
 
 
 class _Mgr:
@@ -26,11 +27,21 @@ class _Mgr:
 
     last_on_stop = 0
 
+    def __init__(self):
+        self.session_overrides = {}
+        self.session_map = {}
+
     def active_id(self):
         return "xiaohu-x1"
 
     def has(self, aid):
         return bool(aid)
+
+    def get_session_override(self, sid):
+        return self.session_overrides.get(sid, "")
+
+    def record_session_aid(self, sid, aid):
+        self.session_map[sid] = aid
 
     def get(self, aid):
         return _A()
@@ -43,6 +54,10 @@ class _Mgr:
 
     def compiled_memory(self, aid):
         return "## 今日\n\n- 在开发助手中心"
+    def enabled_skills(self, aid):
+        return [
+            {"name": "drifox-dev", "description": "DriFox 开发规范", "path": "/tmp/skills/drifox-dev.md"}
+        ]
 
     def experience_read_index(self, aid):
         return "# 经验索引"
@@ -79,6 +94,22 @@ def test_block_memory_disabled(monkeypatch):
     assert "今日" not in block  # memory.md 不注入
 
 
+def test_block_contains_skill_section(monkeypatch):
+    """技能段（渐进披露）：name+简介+路径入 prompt，正文不入（模型用 read 读盘）。"""
+    _patch_mgr(monkeypatch)
+    block = m._assistant_prompt_block("xiaohu-x1")
+    assert "# 助手技能" in block
+    assert "drifox-dev" in block and "DriFox 开发规范" in block
+    assert "read" in block  # 引导模型用 read 工具读全文
+
+
+def test_block_skills_disabled(monkeypatch):
+    mgr = _patch_mgr(monkeypatch)
+    mgr.enabled_skills = lambda aid: []  # 总开关关/全部过滤
+    block = m._assistant_prompt_block("xiaohu-x1")
+    assert "# 助手技能" not in block
+
+
 def test_hook_replaces_identity_context(monkeypatch):
     _patch_mgr(monkeypatch)
     context = {"current_role": "primary", "agent_identity_content": "原build提示词"}
@@ -99,12 +130,45 @@ def test_on_stop_counts_turn(monkeypatch):
 
     class _Ticker:
         @staticmethod
-        def on_turn_finished():
-            calls.append(1)
+        def on_turn_finished(aid):
+            calls.append(aid)
 
     monkeypatch.setattr(m, "_get_ticker", lambda mgr_: _Ticker())
     out = m.on_stop("Stop", {"current_role": "primary", "session_id": "s1"})
-    assert out == "" and len(calls) == 1
+    assert out == "" and calls == ["xiaohu-x1"]  # 无 override → 主助手
+    assert mgr.session_map == {"s1": "xiaohu-x1"}  # 归属已记录
     # 无活跃助手：不异常
     mgr.active_id = lambda: ""
     assert m.on_stop("Stop", {"current_role": "primary"}) == ""
+
+
+def test_on_stop_uses_session_override(monkeypatch):
+    """临时助手会话：轮次计入临时助手并记录归属，不落主助手。"""
+    mgr = _patch_mgr(monkeypatch)
+    mgr.session_overrides["s2"] = "b-1"
+    calls = []
+
+    class _Ticker:
+        @staticmethod
+        def on_turn_finished(aid):
+            calls.append(aid)
+
+    monkeypatch.setattr(m, "_get_ticker", lambda mgr_: _Ticker())
+    out = m.on_stop("Stop", {"current_role": "primary", "session_id": "s2"})
+    assert out == "" and calls == ["b-1"]
+    assert mgr.session_map == {"s2": "b-1"}
+
+
+def test_on_stop_non_primary_noop(monkeypatch):
+    mgr = _patch_mgr(monkeypatch)
+    calls = []
+
+    class _Ticker:
+        @staticmethod
+        def on_turn_finished(aid):
+            calls.append(aid)
+
+    monkeypatch.setattr(m, "_get_ticker", lambda mgr_: _Ticker())
+    out = m.on_stop("Stop", {"current_role": "subagent", "session_id": "s1"})
+    assert out == "" and calls == []
+    assert mgr.session_map == {}

@@ -378,3 +378,74 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 ```
 
 > 完整模板与踩坑见 `templates.md §八`。
+
+---
+
+## 13. 输入框按钮 / 剪贴板 / 覆盖窗验证（如果用了 `register_input_button`）
+
+### 13.1 按钮与提示
+
+- [ ] 按钮出现在锚定位置（`before:new_session` 等）；锚点缺失降级末尾不报错
+- [ ] 深浅主题切换图标都可见（`icon_path` + `icon_light_path` 两套 SVG）
+- [ ] 成功/失败提示用 **InfoBar**（`parent=main_widget`）；**禁用 QToolTip**（DriFox 内不显示）
+- [ ] 重复点击不叠加（单实例防护）；热重载后按钮仍在
+
+### 13.2 剪贴板类（核心 ⚠️）
+
+- [ ] 写图用 `clipboard().setImage(img.toImage())`，**禁用 `setPixmap`**
+- [ ] 复制后在 DriFox 输入框 Ctrl+V **有反应**（变附件芯片）——"提示有了但粘不出来"
+  就是 setPixmap 的同进程 QPixmap 回读坑（详见 `templates.md` §9.3）
+- [ ] 跨应用粘贴（画图/微信）内容与尺寸正确
+
+### 13.3 全屏覆盖窗类（详见 `patterns.md` §10）
+
+- [ ] Esc / 右键 / 误触（<4×4px）三种取消路径均**无残留置顶窗**
+- [ ] 遮罩存活时再次点按钮不叠加（先关旧窗）
+- [ ] 高 DPI 屏（150%）截图/选区像素尺寸与屏幕实际区域一致
+- [ ] `WA_DeleteOnClose` + 模块级引用 `destroyed` 清理；on_click 异常路径必关窗
+
+### 13.4 测试要点
+
+- [ ] 插件单测用 `importlib.util.spec_from_file_location` 加载（plugins/ 非 Python 包）
+- [ ] 拖拽模拟用 `QMouseEvent + sendEvent`（`qtbot.mouseMove` 在未 show 的 widget 上不派发）
+- [ ] lint 关卡是 **ruff**；`npx pyright` 默认配置是基线噪音，不当硬关卡
+
+---
+
+## 14. 标题栏常驻 tab / 右侧工作台页验证（如果用了 `register_titlebar_tab` / `register_workbench_tab`）
+
+### 14.1 标题栏常驻 tab（参考：agent_trace / assistant_hub）
+
+- [ ] tab 出现在标题栏，label 正确，点击触发 on_click
+- [ ] **tab 点击必须走 `UIPluginRegistry.toggle_floating_card(CARD_ID)`**，
+      不能用 `card_manager.show_card`（懒创建实例，show_card 首次点击静默失败）
+- [ ] tab 图标注意：`CustomTabButton` 无 icon_light 主题感知 → 深色主题下深色描边图标
+      不可见，**纯文字更安全**
+- [ ] full 卡 metadata：`full_card=True` + `hide_sidebar=True`（入口只有标题栏 tab，
+      侧边栏不重复列出）
+- [ ] 已可见时点 tab 不闪（先查 `is_card_visible` 再 toggle，语义"切到该 tab"）
+- [ ] Tab 模式宿主是 TabManagerWindow：直接用 `UIPluginRegistry.toggle_floating_card`
+      （内部已处理宿主解析），别自己遍历 main_widget
+
+### 14.2 右侧工作台页（参考：system/ui/_worktree_page.py、_artifacts_page.py）
+
+- [ ] `register_workbench_tab(plugin_name, page_id, label, widget_class, priority, metadata)`
+      同 page_id 高优先级覆盖；`worktree` / `artifacts` 是保留槽位 id
+- [ ] widget_class 是 QWidget 子类，懒实例化；构造期别做重 IO（数据读取放 show 后/异步）
+- [ ] 宿主上下文经 `context["backend"]`、`context["working_dir_changed_callback"]` 注入
+- [ ] 注册失败降级：try/except + 占位页提示（system/ui 同款模式），不拖垮其他组件
+- [ ] 卸载后槽位显示占位页，无崩溃
+- [ ] 区分 `register_workspace_page`（Phase G 工作区面板页面槽，order_hint 升序，
+      icon 深浅两套）——两者是不同扩展点，按目标面板选对
+
+### 14.3 其他扩展点速查（用到再读 registry 源码）
+
+| 扩展点 | 一句话 | 参考实现 |
+|--------|--------|----------|
+| `register_sidebar_item` | 侧边栏插件项（与 floating card 解耦） | UIPluginRegistry:724 |
+| `register_context_menu_action` | 消息卡/tab 右键菜单项 | UIPluginRegistry:933 |
+| `register_settings_card` | 设置面板插件卡片（priority 覆盖 E1 自动卡） | prompt-enhancer |
+| `register_tag_renderer` | 消息内标签卡渲染（persona tag 等） | assistant_hub |
+| `register_welcome_action` / `register_mention_provider` | 欢迎页动作 / @提及提供者 | UIPluginRegistry:557/603 |
+
+> 标题栏 tab 模板见 `templates.md §十`；工作台页模板见 `templates.md §十一`。

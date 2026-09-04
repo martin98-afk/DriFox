@@ -48,6 +48,10 @@ LANE_ROW_H = 26
 LANE_LABEL_W = 58
 PANEL_H = TICK_H + len(LANE_ORDER) * LANE_ROW_H + 8
 PAD_R = 12
+# duration 模式下条带的最小可见宽度（像素）。真实耗时可能只占总轴的十万分之
+# 几（快工具 13ms / 会话 3min），纯比例下限 0.004 只有 ≈3px，看起来一排
+# 刻度线（「断断续续」）。改成像素级下限，保证每个条带至少肉眼可点中。
+_MIN_BAR_PX = 5.0
 # 顶栏三个开关（非互斥）：比例 / 按轮分段 / 只看工具
 FLAGS = ("duration", "turns", "calls")
 
@@ -190,11 +194,16 @@ class TimelinePanel(QWidget):
                 n = max(1, len(same))
                 pos = same.index(idx) if idx in same else 0
                 a, b = pos / n, (pos + 0.92) / n
-            return seg_x0 + a * seg_w, seg_x0 + b * seg_w
+            x0, x1 = seg_x0 + a * seg_w, seg_x0 + b * seg_w
+            if self._flag_duration:
+                x1 = max(x1, x0 + _MIN_BAR_PX)
+            return x0, x1
 
         if self._flag_duration:
             a, b = self._ratio_global(rec, t0, t1)
-            return lane_x0 + a * lane_w, lane_x0 + b * lane_w
+            x0 = lane_x0 + a * lane_w
+            # 像素级最小宽度：真实耗时极短的条带也保持可见/可点
+            return x0, max(lane_x0 + b * lane_w, x0 + _MIN_BAR_PX)
         n = max(1, total)
         a, b = idx / n, (idx + 0.92) / n
         return lane_x0 + a * lane_w, lane_x0 + b * lane_w

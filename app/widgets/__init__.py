@@ -28,7 +28,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "CodingPlanRing":     ("app.widgets.coding_plan_ring", "CodingPlanRing"),
     "ContextUsageRing":   ("app.widgets.context_usage_ring", "ContextUsageRing"),
     "ConversationNodePreview": ("app.widgets.conversation_node_preview", "ConversationNodePreview"),
-    "FileUndoPreviewDialog": ("app.widgets.file_undo_dialog", "FileUndoPreviewDialog"),
     "MessageCard":        ("app.widgets.message_card", "MessageCard"),
     "create_welcome_card": ("app.widgets.message_card", "create_welcome_card"),
 }
@@ -68,5 +67,4 @@ __all__ = [
     "CodingPlanRing",
     "ContextUsageRing",
     "ConversationNodePreview",
-    "FileUndoPreviewDialog",
 ]

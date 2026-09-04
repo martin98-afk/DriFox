@@ -86,7 +86,6 @@ class PluginHostService(QObject):
         except Exception as e:
             logger.warning(f"[PluginHost] stop failed: {e}")
 
-
     def _init_plugin_system(self):
         """初始化 PluginManager，加载所有插件
 
@@ -1309,6 +1308,7 @@ class PluginHostService(QObject):
             # 5. 技能 / MCP：懒加载，只需标记
             if comps.get("skills"):
                 from app.utils.utils import invalidate_skills_cache
+
                 invalidate_skills_cache()
             result["skills"] = bool(comps.get("skills"))
             result["mcp"] = bool(comps.get("mcp"))
@@ -1379,6 +1379,32 @@ class PluginHostService(QObject):
             logger.error(f"[PluginHost] Failed to reload new plugin '{plugin_name}': {e}")
 
         return result
+
+    @staticmethod
+    def _purge_module_prefixes(prefixes: list) -> list:
+        """按声明前缀清理 sys.modules 中的手动加载模块（返回被清理的模块名）。
+
+        通用化 purge：插件 plugin.json 声明 "module_prefixes" 后，热重载时
+        其 importlib 手动注册的模块（如 assistant_hub_core.*）统一摘除，
+        后续加载自然回到磁盘最新代码。前缀按 startswith 匹配（带点声明精确到包）。
+        """
+        import gc
+        import importlib
+        import sys as _sys
+
+        removed: list = []
+        for pref in prefixes:
+            pref = str(pref)
+            if not pref:
+                continue
+            hit = [m for m in list(_sys.modules.keys()) if m == pref or m.startswith(pref)]
+            for m in hit:
+                _sys.modules.pop(m, None)
+            removed.extend(hit)
+        if removed:
+            importlib.invalidate_caches()
+            gc.collect()
+        return removed
 
     def _cleanup_removed_plugin_components(
         self,
@@ -1543,6 +1569,20 @@ class PluginHostService(QObject):
             removed_components = dict(plugin_before.components) if plugin_before else {}
 
             pm.rescan_plugin(plugin_name)
+
+            # 1.5 通用模块缓存清理（热重载机制通用化）：插件可在 plugin.json 声明
+            # "module_prefixes"（如 assistant_hub 手动 importlib 注册的 assistant_hub_core.*），
+            # app 侧 sys.modules purge 只覆盖内置前缀（gateway/ui/tool 等），声明式前缀
+            # 在 rescan（拿到最新 manifest）之后、组件分派之前统一清除，
+            # 防旧模块对象滞留导致热更新代码不生效。
+            plugin_rescanned = pm.get_plugin(plugin_name)
+            declared_prefixes = (getattr(plugin_rescanned, "manifest", None) or {}).get("module_prefixes") or []
+            if declared_prefixes:
+                purged = self._purge_module_prefixes(declared_prefixes)
+                if purged:
+                    logger.info(
+                        f"[PluginHost] 已清理插件 '{plugin_name}' 声明的模块缓存 {len(purged)} 个: {purged[:5]}"
+                    )
 
             plugin = pm.get_plugin(plugin_name)
             if not plugin:

@@ -9,6 +9,17 @@ import sys
 import time
 import warnings
 
+# ========== 开机自启提权 helper（最早处理，不加载 Qt）==========
+# 拨动自启开关时主进程通过 runas 以管理员身份把本进程再次拉起，
+# 命令行携带 --configure-auto-start=on|off。helper 写完 HKLM 注册表
+# 立即退出，成败通过 --startup-error-file 回传（见 app/utils/startup_manager.py）。
+# 必须放在 qfluentwidgets/Qt 导入之前：helper 进程无需也不应加载 GUI 栈。
+if os.name == "nt" and any(arg.startswith("--configure-auto-start=") for arg in sys.argv[1:]):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from app.utils.startup_manager import maybe_handle_startup_helper
+
+    sys.exit(maybe_handle_startup_helper(sys.argv[1:]) or 0)
+
 from qfluentwidgets import setFontFamilies
 
 warnings.filterwarnings("ignore")
@@ -140,7 +151,7 @@ def main():
 
         # 原生崩溃捕获（faulthandler）：Qt/C++ 层段错误不经过 Python excepthook，
         # 打包版表现为「闪退且 all.log 无任何记录」。启用后崩溃栈 dump 到
-        # logs/crash/，下次启动由 crash_handler.check_last_crash 检测并弹窗。
+        # logs/crash/，下次启动由 crash_handler.check_pending_crashes 检测并弹窗。
         try:
             from app.core.crash_handler import install_crash_handler
             from app.utils.utils import get_app_data_dir
@@ -395,14 +406,15 @@ def main():
         _apply_window_topmost(tm)
         logger.info("DriFox 以 Tab 管理器模式启动")
 
-        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后弹窗，不抢首帧
+        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条弹窗，不抢首帧。
+        # 每条弹窗关闭即重命名 .reported（显示过就改状态），下次启动不再弹
         def _check_last_crash():
             try:
-                from app.core.crash_handler import check_last_crash, prompt_crash_report
+                from app.core.crash_handler import check_pending_crashes, prompt_crash_report
                 from app.utils.utils import get_app_data_dir
 
-                dump = check_last_crash(get_app_data_dir() / "logs")
-                if dump is not None:
+                dumps = check_pending_crashes(get_app_data_dir() / "logs")
+                for dump in dumps:
                     logger.warning(f"[CrashHandler] 检测到上次崩溃报告: {dump}")
                     prompt_crash_report(dump, parent=tm)
             except Exception:

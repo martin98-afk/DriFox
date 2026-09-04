@@ -209,6 +209,11 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self._batch_timer.setSingleShot(True)
         self._batch_timer.setInterval(0)
         self._batch_timer.timeout.connect(self._build_next_batch)
+        # 开关写盘防抖：连续切换只落盘一次（见 _on_skill_enabled_changed）
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(500)
+        self._save_timer.timeout.connect(self._save_config)
         self.__initWidget()
 
     def _discover_skills(self):
@@ -452,9 +457,14 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         from qfluentwidgets import qconfig
 
         self.enabled_skills = qconfig.get(self.configItem).copy() if qconfig.get(self.configItem) else []
+        # blockSignals：同步外部变更时 setChecked 会同步触发 checkedChanged →
+        # enabled_changed → 又一轮 Settings.set + token 计算，多窗口下 N 倍放大
         for section in self._sections:
             for item in section.items():
-                item.switch.setChecked(item.name in self.enabled_skills)
+                sw = item.switch
+                sw.blockSignals(True)
+                sw.setChecked(item.name in self.enabled_skills)
+                sw.blockSignals(False)
         # 行还没建时 all_skills 是空的，此时更新计数会把 subtitle 写成 0/0
         if self._items_built:
             self._update_skill_token_count()
@@ -515,8 +525,8 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         all_skills = get_local_skills()
         parts = [
             "\n\n## 偏好技能\n"
-            "以下是部分用户偏好的智能体技能，如果以下技能不能满足用户需求，"
-            "可以使用 `list_skills` 技能加载完整技能列表：\n"
+            "凡用户请求命中以下技能 description 描述的场景，必须先调用 `skill` 工具加载对应技能再回答，"
+            "禁止跳过直接作答；以下技能无法满足时用 `manage_skill(action=\"list\")` 查看完整列表：\n"
         ]
         for skill in all_skills:
             if skill["name"] in enabled:
@@ -527,16 +537,24 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         count = estimate_tokens(content)
         self.setContent(f"{len(enabled)}/{total} · ~{count:,} tokens")
 
+    def _save_config(self):
+        """防抖落盘（只写文件，配置值已在 Settings.set 时更新）"""
+        from app.utils.config import Settings
+
+        Settings.get_instance().save()
+
     def _on_skill_enabled_changed(self, name: str, enabled: bool):
         if enabled and name not in self.enabled_skills:
             self.enabled_skills.append(name)
         elif not enabled and name in self.enabled_skills:
             self.enabled_skills.remove(name)
 
-        # 使用 Settings.set() 而非 qconfig.set()，确保持久化到正确的配置文件
+        # 值立即更新（valueChanged 同步广播驱动多窗口 UI 同步），落盘防抖：
+        # 每次 save 都全量序列化写 config 文件，连续切换开关时只落最后一次
         from app.utils.config import Settings
 
-        Settings.get_instance().set(self.configItem, self.enabled_skills, save=True)
+        Settings.get_instance().set(self.configItem, self.enabled_skills, save=False)
+        self._save_timer.start()
         self._update_skill_token_count()
         self.skillsChanged.emit(self.enabled_skills)
 

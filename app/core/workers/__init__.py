@@ -2,8 +2,7 @@
 """
 Workers 模块 - 包含各种执行器和任务类
 
-[PERF] PEP 562 懒加载：chat_worker 顶层拉 openai 全家（~500ms）、shell_task 拉
-app.tools（~700ms），若在包 __init__ 顶层 from-import，则导入 workers 下任何
+[PERF] PEP 562 懒加载：chat_worker 顶层拉 openai 全家（~500ms），若在包 __init__ 顶层 from-import，则导入 workers 下任何
 子模块都会连带加载全部兄弟模块。改为 __getattr__ 按需导入后：
 - `from app.core.workers.chat_worker import X` 只加载 chat_worker 本身
 - `from app.core.workers import X` 首次访问时才加载对应子模块
@@ -20,7 +19,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, tuple[str, ...]]] = {
         ("AggregatedCacheStats", "CacheHitRateTracker", "CacheStats"),
     ),
     "chat_worker": ("app.core.workers.chat_worker", ("OpenAIChatWorker",)),
-    "shell_task": ("app.core.workers.shell_task", ("ShellExecutionTask",)),
     "subagent_worker": ("app.core.workers.subagent_worker", ("SubAgentExecutor", "SubAgentManager")),
     "topic_summary": ("app.core.workers.topic_summary", ("TopicSummaryTask",)),
 }
@@ -62,7 +60,6 @@ __all__ = [
     "SubAgentManager",
     # Tasks
     "TopicSummaryTask",
-    "ShellExecutionTask",
     # Cache Tracker
     "CacheHitRateTracker",
     "CacheStats",

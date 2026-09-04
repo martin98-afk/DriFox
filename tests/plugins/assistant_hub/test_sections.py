@@ -108,6 +108,31 @@ def test_experience_section_reload(qtbot=None):
     assert opened == ["工作流"]
 
 
+def test_skills_section_reload(qtbot=None):
+    s = sections.SkillsSection()
+    opened = []
+    toggled = []
+    s.skillToggleRequested.connect(lambda n, on: toggled.append((n, on)))
+    s.reload_skills(
+        [{"name": "alpha", "description": "技能A", "content_chars": 10}],
+        set(),
+        on_open=opened.append,
+    )
+    # 无启技能 → 行内开关关；切换上报 (name, enable)
+    sw = s._list_v.itemAt(0).widget().layout().itemAt(1).widget()
+    assert not sw.isChecked()
+    sw.setChecked(True)
+    assert toggled == [("alpha", True)]
+    # 总开关信号
+    got = []
+    s.toggleSkills.connect(lambda on: got.append(on))
+    s._switch.setChecked(False)
+    assert got == [False]
+    # set_skills_enabled 不触发信号（blockSignals）
+    s.set_skills_enabled(True)
+    assert got == [False]
+
+
 def test_text_view_overlay_readonly(qtbot=None):
     host = QWidget()
     host.resize(800, 600)

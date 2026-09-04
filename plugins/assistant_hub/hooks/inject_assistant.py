@@ -104,7 +104,7 @@ def _user_name(mgr) -> str:
 
 
 def _assistant_prompt_block(aid: str) -> str:
-    """组装助手信息块：人格段 → 人工提示 → 记忆段（规则+memory.md，受开关控制）。"""
+    """组装助手信息块：人格段 → 人工提示 → 记忆段 → 技能段（渐进披露）。"""
     mgr = _get_manager()
     if mgr is None:
         return ""
@@ -139,6 +139,24 @@ def _assistant_prompt_block(aid: str) -> str:
             mem_parts.append("# 长期记忆\n\n" + memory_md)
         if len(mem_parts) > 1:  # 规则之外还有实际记忆内容才注入整段
             parts.append("\n\n".join(mem_parts))
+
+    # 3. 技能段（渐进披露）：只注入 name + 简介 + 绝对路径，正文由模型用 read 工具按需读盘
+    #    （对齐 openhanako：无专用技能读取工具，避免与宿主 skill/manage_skill 工具入口混淆）
+    try:
+        skills = mgr.enabled_skills(aid)
+    except Exception as e:
+        logger.debug(f"[assistant_hub.hooks] 读取技能列表失败: {e}")
+        skills = []
+    if skills:
+        lines = [
+            f"- {s['name']}：{s.get('description') or '（无简介）'}（{s['path']}）"
+            for s in skills
+        ]
+        parts.append(
+            "# 助手技能\n\n"
+            "以下是你的专属技能（只列名称与简介）。处理相关任务前，"
+            "先用 read 工具按括号内路径读取技能全文再执行：\n" + "\n".join(lines)
+        )
 
     if not parts:
         return ""
@@ -226,6 +244,10 @@ def on_pre_user(event: str, context: Dict[str, Any]) -> str:
 def on_stop(event: str, context: Dict[str, Any]) -> str:
     """Stop hook：主对话每轮结束 → MemoryTicker 计数（驱动记忆传送带）。
 
+    归属：会话级临时助手优先（override），否则主助手；每轮把
+    sid→aid 写入归属映射，供记忆传送带过滤素材，保证各助手
+    记忆互相独立。
+
     恒返回空串（不向对话注入任何内容）。
     """
     try:
@@ -234,12 +256,17 @@ def on_stop(event: str, context: Dict[str, Any]) -> str:
         mgr = _get_manager()
         if mgr is None:
             return ""
-        aid = mgr.active_id()
+        sid = str((context or {}).get("session_id") or "")
+        aid = mgr.get_session_override(sid) if sid else ""
+        if not aid:
+            aid = mgr.active_id()
         if not aid or not mgr.has(aid):
             return ""
+        if sid:
+            mgr.record_session_aid(sid, aid)
         ticker = _get_ticker(mgr)
         if ticker is not None:
-            ticker.on_turn_finished()
+            ticker.on_turn_finished(aid)
     except Exception as e:
         logger.debug(f"[assistant_hub.hooks] Stop 计数失败: {e}")
     return ""

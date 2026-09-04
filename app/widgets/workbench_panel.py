@@ -24,6 +24,7 @@
 面板自身不持有 backend 引用，便于测试与解耦。
 """
 
+import json
 from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
@@ -159,6 +160,8 @@ class TasksPage(QWidget):
         self._collapse_btn.hide()
         self.hide()
         self.refresh_style()
+        # 任务列表内容签名（数据未变时 update_todos 跳过全量重建）
+        self._last_todos_sig: Optional[str] = None
 
     # ── 折叠 ──
 
@@ -214,9 +217,18 @@ class TasksPage(QWidget):
             w.deleteLater()
 
     def update_todos(self, todos: List[Dict[str, Any]]) -> None:
-        """刷新任务列表（无任务时整区 hide，由宿主 splitter 收敛；非空时显示并默认展开）"""
-        self._clear_items()
+        """刷新任务列表（无任务时整区 hide，由宿主 splitter 收敛；非空时显示并默认展开）
+
+        ★ 数据未变时跳过重建（内容签名比对）：切对话标签等高频路径每次都会
+        全量推送，任务多时逐条重建 widget 成本可观；签名相同 → 渲染结果
+        相同，直接跳过。
+        """
         todos = list(todos or [])
+        sig = json.dumps(todos, ensure_ascii=False, sort_keys=True, default=str)
+        if sig == self._last_todos_sig:
+            return
+        self._last_todos_sig = sig
+        self._clear_items()
         done = sum(1 for t in todos if (t.get("status") or "pending") == "completed")
         total = len(todos)
         pct = int(round(done * 100 / total)) if total else 0
@@ -591,6 +603,8 @@ class WorkbenchPanel(QWidget):
         self._artifacts_plugin_sig: Optional[tuple] = None
         self._plugin_artifacts_widget: Optional[QWidget] = None
         self._artifacts_plugin_info: Optional[Any] = None
+        # 产物数据签名（数据未变时 update_artifacts 跳过全量重建）
+        self._last_artifacts_sig: Optional[tuple] = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(10, 8, 8, 8)
@@ -1033,16 +1047,27 @@ class WorkbenchPanel(QWidget):
 
     # ── 插件页签 reconcile（宿主在 refresh_workbench 时调用） ──
 
-    def sync_plugin_pages(self, tabs: List[Any]) -> None:
+    def sync_plugin_pages(self, tabs: List[Any], force: bool = False) -> None:
         """按 UIPluginRegistry 的 workbench_tabs 增删插件页（签名不变则跳过重建）
 
         产物页特例：``page_id="artifacts"`` 是**保留 id**，插件注册它即填充
         index 2 的产物页槽位（面板本身不提供产物实现）。未注册时显示占位页。
         其余 page_id 按注册序追加在「工作树 / 记忆 / 产物」之后。
+
+        force=True（热重载）：(page_id, label) 签名不变但实现已变，置空全部
+        签名并销毁现有插件页，强制按最新注册重建（worktree/artifacts 槽位
+        由 _use_plugin_* 感知 None 签名自动走替换；重建后数据由宿主
+        refresh_workbench 的推送链补投递）。
         """
         all_infos = {t.page_id: t for t in (tabs or [])}
         # ── 保留页签槽位：worktree（index 0）/ artifacts（index 1），不进普通插件页列表 ──
         wt_info = all_infos.get("worktree")
+        if force:
+            self._plugin_sig = None
+            self._worktree_plugin_sig = None
+            self._artifacts_plugin_sig = None
+            for page_id in list(self._plugin_widgets.keys()):
+                self._destroy_plugin_page(page_id)
         if wt_info is not None:
             self._use_plugin_worktree(wt_info)
         else:
@@ -1175,6 +1200,8 @@ class WorkbenchPanel(QWidget):
         self.artifacts_page = widget
         self._artifacts_plugin_sig = sig
         self._artifacts_plugin_info = info
+        # 新页实例无数据：重置产物脏标记，下一次推送必刷（否则新页空白）
+        self._last_artifacts_sig = None
         # 差异入口接到 panel 的 diff_requested（插件版若有 set_diff_all_callback）
         self._wire_artifacts_diff(widget)
         if self._stack.currentIndex() == self.TAB_ARTIFACTS:
@@ -1190,6 +1217,8 @@ class WorkbenchPanel(QWidget):
         self.artifacts_page = self._artifacts_placeholder
         self._artifacts_plugin_sig = None
         self._artifacts_plugin_info = None
+        # 回落占位页：重置产物脏标记，下一次推送必刷
+        self._last_artifacts_sig = None
         if self._stack.currentIndex() == self.TAB_ARTIFACTS:
             self._stack.setCurrentIndex(self.TAB_ARTIFACTS)
 
@@ -1303,8 +1332,25 @@ class WorkbenchPanel(QWidget):
 
     # ── 数据入口（宿主驱动） ──
 
-    def update_artifacts(self, operations: List[Dict[str, Any]]) -> None:
-        self.artifacts_page.set_operations(operations)
+    def update_artifacts(self, operations: List[Dict[str, Any]], session_key: Optional[str] = None) -> None:
+        """刷新产物列表（数据未变时跳过重建）
+
+        ★ 签名 = (session_key, 条数, 首条/末条 file_path)：file_recorder 记录
+        为 append-only，同会话条数不变即内容不变；跨窗口由 session_key
+        （会话 id）区分。切对话标签的高频全量重建（含遍历全部消息分组）
+        是工作台开着时切换卡顿的主源之一。
+        """
+        ops = list(operations or [])
+        sig = (
+            session_key,
+            len(ops),
+            ops[0].get("file_path") if ops else None,
+            ops[-1].get("file_path") if ops else None,
+        )
+        if sig == self._last_artifacts_sig:
+            return
+        self._last_artifacts_sig = sig
+        self.artifacts_page.set_operations(ops)
 
     def update_todos(self, todos: List[Dict[str, Any]]) -> None:
         """刷新任务列表
@@ -1315,8 +1361,17 @@ class WorkbenchPanel(QWidget):
         self.tasks_page.update_todos(todos)
 
     def update_project(self, project: str, workdir: Optional[str] = None) -> None:
-        """同步当前项目到工作树页（槽位未挂载时缓存，挂载后补投递）"""
-        self._pending_project = (project or "", workdir)
+        """同步当前项目到工作树页（槽位未挂载时缓存，挂载后补投递）
+
+        ★ (project, workdir) 未变化时跳过：工作树页刷新含 DB 查询 + git 检测
+        + 列表重建，切标签高频路径重复推送是卡顿源之一。_pending_project
+        兼作脏标记（插件页挂载消费置 None 后首次推送必刷）；页面自身的
+        增删文档操作走独立刷新入口，不受此脏检查影响。
+        """
+        project = project or ""
+        if self._pending_project is not None and (project, workdir) == self._pending_project:
+            return
+        self._pending_project = (project, workdir)
         self._push_worktree_project(project, workdir)
 
     # ── 主题 ──

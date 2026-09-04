@@ -41,6 +41,8 @@ _DREAM_REPLIES = [
     "- 单元A（优化）\n- 单元B（优化）",  # optimize
     "## 主题\n\n- 单元A（优化）\n- 单元B（优化）",  # compose
     '{"semantic_ok": true, "provenance_ok": true, "sufficient_compression": true, "feedback": ""}',  # verify
+    # forget：facts 原样保留合成稿、daily 全保留、longterm 清空（≤输入即可过守门）
+    '{"facts": "## 主题\\n\\n- 单元A（优化）\\n- 单元B（优化）", "keep_daily": ["2026-08-30"], "longterm": ""}',
 ]
 
 
@@ -213,3 +215,152 @@ def test_dream_automatic_double_watermark(tmp_path):
     assert runner2.start_automatic_if_eligible("2026-09-01") is None
     # 次日：放行
     assert runner2.start_automatic_if_eligible("2026-09-02") is not None
+
+
+def test_build_dream_forget_prompt():
+    p = m._prompts()
+    msgs = p.build_dream_forget(
+        "- 事实A",
+        "- 长期沉淀",
+        "- 今日草稿",
+        [{"date": "2026-08-30", "body": "# 2026-08-30\n\n- 30日的事"}],
+    )
+    text = msgs[-1]["content"]
+    # 火灾/物竞天择场景 + 名额数字 + 只删不增约束 + JSON 输出契约 + 四段输入
+    assert "火灾" in text and "名额" in text
+    assert "15" in text and "20" in text and "3" in text
+    assert "keep_daily" in text
+    assert "不增" in text
+    assert "- 事实A" in text and "- 长期沉淀" in text and "- 今日草稿" in text
+    assert "2026-08-30" in text and "30日的事" in text
+
+
+def test_apply_sections_syncs_daily(tmp_path):
+    aid = tmp_path / "a_apply"
+    _seed_memory(aid)  # daily/2026-08-30.md
+    (aid / "memory" / "daily" / "2026-08-31.md").write_text("# 2026-08-31\n\n- 31日的事", encoding="utf-8")
+    ddir = aid / "memory" / "daily"
+    assert (ddir / "2026-08-30.md").exists() and (ddir / "2026-08-31.md").exists()
+    # 只保留 08-31：08-30 应被删除
+    m.apply_sections(
+        aid,
+        m.DreamSections(
+            facts="- F", today="- T", daily=[{"date": "2026-08-31", "body": "# 2026-08-31\n\n- 31日的事"}], longterm=""
+        ),
+    )
+    assert not (ddir / "2026-08-30.md").exists()
+    assert (ddir / "2026-08-31.md").exists()
+    # daily 为空列表：清空全部 daily
+    m.apply_sections(aid, m.DreamSections(facts="- F", today="- T", daily=[], longterm=""))
+    assert not any(ddir.glob("*.md"))
+
+
+def _seed_memory_multi(aid: Path):
+    """5 天 daily + 长 facts/longterm，供遗忘/兜底用例。"""
+    mem = aid / "memory"
+    (mem / "daily").mkdir(parents=True, exist_ok=True)
+    (mem / "facts.md").write_text("\n".join(f"- 事实{i}" for i in range(20)), encoding="utf-8")
+    (mem / "today.md").write_text("- 今天聊了部署", encoding="utf-8")
+    for i in range(5):
+        d = f"2026-08-2{5 + i}"
+        (mem / "daily" / f"{d}.md").write_text(f"# {d}\n\n- {d}的事", encoding="utf-8")
+    (mem / "longterm.md").write_text("\n".join(f"- 长期{i}：{'细节' * 60}" for i in range(25)), encoding="utf-8")
+
+
+def _forget_reply(facts: str, keep: list, longterm: str) -> str:
+    return json.dumps({"facts": facts, "keep_daily": keep, "longterm": longterm}, ensure_ascii=False)
+
+
+def test_dream_forget_step_prunes(tmp_path):
+    aid = tmp_path / "a_forget"
+    _seed_memory_multi(aid)
+    composed = "\n".join(f"- 合成事实{i}" for i in range(10))
+    llm = FakeLLM(
+        list(_DREAM_REPLIES[:4])
+        + ['{"semantic_ok": true, "provenance_ok": true, "sufficient_compression": true, "feedback": ""}']
+        + [_forget_reply("- 合成事实0\n- 合成事实1", ["2026-08-29", "2026-08-27"], "- 长期0")]
+    )
+    r = m.DreamRunner(aid, llm=llm).start("manual")
+    assert r["ok"] is True and r["changed"] is True
+    mem = aid / "memory"
+    # facts 落遗忘后内容；daily 只留 keep 的两天；longterm 落遗忘后内容
+    assert (mem / "facts.md").read_text(encoding="utf-8").strip() == "- 合成事实0\n- 合成事实1"
+    ddir = mem / "daily"
+    kept = sorted(f.stem for f in ddir.glob("*.md"))
+    assert kept == ["2026-08-27", "2026-08-29"]
+    assert (mem / "longterm.md").read_text(encoding="utf-8").strip() == "- 长期0"
+    # revision before 含全量 5 天 daily → 可完整恢复
+    revs = m.DreamRunner(aid, llm=FakeLLM([])).list_revisions()
+    assert revs and revs[0]["dailyCount"] == 5
+
+
+def test_dream_forget_invalid_json_degrades(tmp_path):
+    aid = tmp_path / "a_degrade"
+    _seed_memory_multi(aid)
+    llm = FakeLLM(list(_DREAM_REPLIES[:5]) + ["（无法解析）"])
+    r = m.DreamRunner(aid, llm=llm).start("manual")
+    assert r["ok"] is True  # Dream 整体不失败
+    mem = aid / "memory"
+    # 降级：五步合成稿落 facts，daily 不删
+    facts_text = (mem / "facts.md").read_text(encoding="utf-8")
+    assert "合成事实" in facts_text or "单元A" in facts_text
+    assert len(list((mem / "daily").glob("*.md"))) == 5
+    state = m.DreamRunner(aid, llm=FakeLLM([])).status()
+    assert "遗忘" in str(state.get("lastRun", {}).get("warning", ""))
+
+
+def test_dream_forget_hallucination_guard(tmp_path):
+    """遗忘输出比输入长（凭空增写）→ 视为幻觉，降级。"""
+    aid = tmp_path / "a_halluc"
+    _seed_memory_multi(aid)
+    composed = "- 合成事实0"
+    bloated = "\n".join(f"- 凭空新事实{i}" for i in range(50))
+    llm = FakeLLM(list(_DREAM_REPLIES[:5]) + [_forget_reply(bloated, [], bloated)])
+    r = m.DreamRunner(aid, llm=llm).start("manual")
+    assert r["ok"] is True
+    # facts 落的是五步合成稿（composed），不是 bloated
+    facts_text = (aid / "memory" / "facts.md").read_text(encoding="utf-8")
+    assert "凭空新事实" not in facts_text
+
+
+def test_dream_forget_daily_quota_and_budget(tmp_path):
+    """keep 超名额 → 确定性删最旧；longterm 超预算硬截 → total ≤ 3000。"""
+    aid = tmp_path / "a_quota"
+    _seed_memory_multi(aid)
+    composed = "- 合成事实0"
+    big_longterm = "- 长" * 1034  # 3102 字符：≤ seed longterm（守门过），硬截后 ≤1400
+    keep_all = [f"2026-08-2{5 + i}" for i in range(5)]  # 超名额 3 天
+    llm = FakeLLM(list(_DREAM_REPLIES[:5]) + [_forget_reply(composed, keep_all, big_longterm)])
+    r = m.DreamRunner(aid, llm=llm).start("manual")
+    assert r["ok"] is True
+    ddir = aid / "memory" / "daily"
+    kept = sorted(f.stem for f in ddir.glob("*.md"))
+    # 留的是最新几天（名额 3 天，硬截后预算内不再删）
+    all_days = sorted(f"2026-08-2{5 + i}" for i in range(5))
+    assert len(kept) <= 3
+    assert kept == all_days[len(all_days) - len(kept) :]
+    # 用落盘值算总量：longterm 已被硬截
+    lt_final = (aid / "memory" / "longterm.md").read_text(encoding="utf-8").strip()
+    assert len(lt_final) <= 1400
+    total = len(composed) + len(lt_final) + sum(len(f.read_text(encoding="utf-8")) for f in ddir.glob("*.md"))
+    assert total <= 3000 or not kept
+
+
+def test_dream_forget_enforces_budget_when_llm_disobeys(tmp_path):
+    """LLM 无视名额返回超长 facts → 确定性硬截到预算内（保重要度序前部）。"""
+    aid = tmp_path / "a_trim"
+    _seed_memory_multi(aid)
+    composed = "\n".join(f"- 合成事实{i}：{'内容' * 20}" for i in range(60))  # ~2500 字符
+    llm = FakeLLM(
+        list(_DREAM_REPLIES[:3])
+        + [composed]  # compose：合成稿本身长，遗忘 reply 与其等长 → 幻觉守门过
+        + ['{"semantic_ok": true, "provenance_ok": true, "sufficient_compression": true, "feedback": ""}']
+        + [_forget_reply(composed, ["2026-08-29"], "- 长期0")]
+    )
+    r = m.DreamRunner(aid, llm=llm).start("manual")
+    assert r["ok"] is True
+    facts_text = (aid / "memory" / "facts.md").read_text(encoding="utf-8").strip()
+    # 硬截生效：不超预算、头部重要条目保留、尾部条目被丢
+    assert len(facts_text) <= 1500
+    assert "合成事实0" in facts_text
+    assert "合成事实59" not in facts_text

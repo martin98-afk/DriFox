@@ -1144,13 +1144,15 @@ class TabManagerWindow(FramelessWindow):
         except Exception:
             pass
 
-    def refresh_workbench(self) -> None:
+    def refresh_workbench(self, force: bool = False) -> None:
         """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
 
         数据源均为既有单一数据源：
         - 产物：backend.file_recorder 会话级文件写入记录
         - 任务：窗口 _latest_todos（todowrite 结果联动缓存），缺失回退 tool_executor
         - 项目：win._current_project + _current_workdir → MemoryCardContent
+
+        force=True：插件页强制重建（ui 热重载后签名未变但实现已变）。
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None or not panel.isVisible():
@@ -1159,7 +1161,7 @@ class TabManagerWindow(FramelessWindow):
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            panel.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs())
+            panel.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs(), force=force)
         except Exception:
             pass
         win = self.get_current_window()
@@ -1190,7 +1192,7 @@ class TabManagerWindow(FramelessWindow):
                     ops = backend.file_recorder.get_all_operations_for_session(session_id)
             except Exception:
                 ops = []
-            panel.update_artifacts(ops)
+            panel.update_artifacts(ops, session_key=session_id)
         # 任务：优先窗口缓存（todowrite 结果联动），缺失回退 tool_executor 实时读
         todos = getattr(win, "_latest_todos", None)
         if not todos and backend is not None and getattr(backend, "_tool_executor", None) is not None:
@@ -1199,6 +1201,41 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 todos = []
         panel.update_todos(todos or [])
+
+    def _deferred_workbench_refresh(self, win, saved_tab, seq: int = 0) -> None:
+        """切标签后的工作台数据刷新（延迟一帧执行，见 _on_tab_selected）
+
+        含刷新后的页签恢复（refresh_workbench 可能因历史页保持/插件页
+        reconcile 改变当前页，故恢复放在其之后）。仅处理窗口显式记忆过的
+        页签；未记忆过的窗口保持现状不跳页。★ 记忆的是 tab_id（见
+        _remember_workbench_tab）：按 id 在当前页签集合中重新定位，找不到
+        （页签已卸载）则保持现状，不越界跳页也不把全部按钮高亮熄灭。
+        ★ seq 过期作废：调度后用户又切了标签 → 本次是旧切换的遗留，
+        执行会用旧窗口的页签记忆覆盖新活跃窗口状态（per-tab 串态根因）。
+        """
+        if seq and seq != getattr(self, "_wb_refresh_seq", 0):
+            return  # 已有更新的切换调度，本次作废
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None or not self.is_workbench_visible():
+            return
+        try:
+            if win is None or win not in self._windows:
+                return  # 延迟期间目标标签已被关闭
+        except RuntimeError:
+            return
+        self.refresh_workbench()
+        if saved_tab is None:
+            return
+        try:
+            if isinstance(saved_tab, int):
+                # 旧版按 index 记忆的兼容（本次修复前写入的存量值）
+                saved_tab = panel._tab_ids[saved_tab] if 0 <= saved_tab < len(panel._tab_ids) else None
+            if saved_tab is not None:
+                idx = panel._tab_id_index(saved_tab)
+                if idx is not None and panel.current_tab() != idx:
+                    panel.set_current_tab(idx)
+        except RuntimeError:
+            pass
 
     def _on_workbench_working_dir_changed(self, file_path: str) -> None:
         """工作树页内工作目录变更 → 转发给当前活跃窗口
@@ -3139,25 +3176,16 @@ class TabManagerWindow(FramelessWindow):
                 if saved_visible is not None and self.is_workbench_visible() != bool(saved_visible):
                     self.set_workbench_visible(bool(saved_visible), animate=False)
                 if self.is_workbench_visible():
-                    self.refresh_workbench()
-                    # 恢复该窗口上次停留的工作台页签（refresh_workbench 可能因
-                    # 历史页保持/插件页 reconcile 改变当前页，故恢复放在其之后）。
-                    # 仅处理窗口显式记忆过的页签；未记忆过的窗口保持现状不跳页。
-                    # ★ 记忆的是 tab_id（见 _remember_workbench_tab）：按 id 在
-                    # 当前页签集合中重新定位，找不到（页签已卸载）则保持现状，
-                    # 不越界跳页也不把全部按钮高亮熄灭。
-                    if saved_tab is not None:
-                        try:
-                            panel = self.workbench_panel
-                            if isinstance(saved_tab, int):
-                                # 旧版按 index 记忆的兼容（本次修复前写入的存量值）
-                                saved_tab = panel._tab_ids[saved_tab] if 0 <= saved_tab < len(panel._tab_ids) else None
-                            if saved_tab is not None:
-                                idx = panel._tab_id_index(saved_tab)
-                                if idx is not None and panel.current_tab() != idx:
-                                    panel.set_current_tab(idx)
-                        except RuntimeError:
-                            pass
+                    # 🚀 数据刷新延迟一帧：setCurrentWidget 先完成目标窗口渲染，
+                    # 工作台全量刷新（产物/任务/工作树/历史换挂）在下一帧执行，
+                    # 切标签的感知延迟不再叠加工作台刷新成本。★ 序号守卫：
+                    # 快速连续切换时旧调度作废，防止旧窗口记忆覆盖新活跃窗口状态
+                    self._wb_refresh_seq = getattr(self, "_wb_refresh_seq", 0) + 1
+                    seq = self._wb_refresh_seq
+                    QTimer.singleShot(
+                        0,
+                        lambda w=win, sv=saved_tab, s=seq: self._deferred_workbench_refresh(w, sv, s),
+                    )
 
     def _on_tab_close_requested(self, index: int):
         """标签关闭按钮回调：按索引关闭单个窗口"""
@@ -3760,18 +3788,20 @@ class TabManagerWindow(FramelessWindow):
         """macOS：强制重算 NSWindow 的 fullSizeContentView 布局
 
         现象：窗口关闭（红绿灯，closeEvent accept → NSWindow orderOut，对象保留）
-        后从 dock 唤起（show → orderFront），自定义标题栏整体下移一个标题栏
-        高度，顶部露出一条原生标题栏空白带。
+        后从 dock 唤起（show → orderFront），窗口整体退回原生样式：顶部出现
+        原生标题栏行，自定义标题栏被压到第二行。
 
-        根因：qframelesswindow 的 MacFramelessWindow 依赖 AppKit 侧
-        NSFullSizeContentViewWindowMask + titlebarAppearsTransparent 让 Qt
-        内容覆盖整个窗口；close→show 循环中 AppKit 会把 contentView 布局
-        重算回「标题栏之下」，而库只在 paintEvent/changeEvent 里重复设置
-        相同的 styleMask 值——AppKit 对相同值是 no-op，不会触发 contentView
-        重新布局，错位因此固化。
+        根因：close→show 循环中 AppKit 会把 NSFullSizeContentViewWindowMask
+        位清掉（或 Qt 重建 NSWindow），contentView 布局退回「标题栏之下」。
+        库（MacFramelessWindow）只在 paintEvent/changeEvent 里用 ``styleMask |
+        full`` 幂等置位——即使位从无到有加上，AppKit 也可能不再重算 contentView
+        frame；且 qframelesswindow 缓存的 ``__nsWindow`` 若指向已重建前的旧
+        窗口，库后续所有设置都会落空。
 
-        修法：先摘掉再戴回 fullSizeContentView 位，强制 AppKit 重算
-        contentView frame。摘/戴在同一事件栈内完成，不经过绘制循环，无闪烁。
+        修法：① ``updateFrameless()`` 让库重新绑定当前 NSWindow 并重置
+        titlebar（幂等）；② 无条件确保 full 位戴上，并用「先摘后戴」制造一次
+        真实变化，强制 AppKit 重算 contentView frame（对相同值 AppKit 是
+        no-op，必须先摘后戴）。摘/戴在同一事件栈内完成，不经过绘制循环，无闪烁。
         """
         try:
             import Cocoa
@@ -3783,13 +3813,20 @@ class TabManagerWindow(FramelessWindow):
             try:
                 if not self.isVisible():
                     return
+                # NSWindow 可能已被 Qt 重建：让库重新绑定当前窗口并重设
+                # titlebar（含交通灯可见性，幂等，失败不阻断摘戴）
+                try:
+                    self.updateFrameless()
+                except Exception:
+                    pass
                 ns_window = getNSWindow(int(self.winId()))
                 mask = int(ns_window.styleMask())
                 full = int(Cocoa.NSFullSizeContentViewWindowMask)
+                # close→show 后 full 位可能已被 AppKit 清掉：无条件确保戴上；
+                # 先摘后戴制造一次真实变化才能触发布局重算（相同值是 no-op）
                 if mask & full:
-                    # 相同值是 no-op，必须先摘后戴才能触发布局重算
                     ns_window.setStyleMask_(mask & ~full)
-                    ns_window.setStyleMask_(mask | full)
+                ns_window.setStyleMask_(mask | full)
                 # 与 MacFramelessWindow._hideSystemTitleBar 保持一致的重申（幂等）
                 ns_window.setTitlebarAppearsTransparent_(True)
                 ns_window.setTitleVisibility_(Cocoa.NSWindowTitleHidden)

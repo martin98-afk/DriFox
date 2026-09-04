@@ -319,7 +319,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.5.8-beta"
+    current_version = "v0.5.8b2"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -356,7 +356,7 @@ class Settings(QConfig):
     llm_enabled_skills = ConfigItem(
         "LLM",
         "EnabledSkills",
-        ["brainstorming", "writing-plans", "find-skills", "skill-creator", "git-commit", "minimax-image-understanding"],
+        ["brainstorming", "visualization", "writing-plans", "find-skills", "skill-creator", "git-commit"],
     )
     # 主智能体选择（单选，通过 inject_agent_identity hook 注入系统提示词）
     llm_primary_agent = ConfigItem("LLM", "PrimaryAgent", "")

@@ -75,6 +75,9 @@ Step 6  按 checklist.md 验证
 | "欢迎卡片加个 tab""会话初始卡片""HTML 注入初始卡片" | **欢迎卡片插件 tab**（WelcomeTab） | `templates.md` §八 |
 | "欢迎卡片加 echarts 图表/统计趋势 tab" | **欢迎卡片插件 tab + echarts**（WelcomeTab） | `templates.md` §八 §8.5 |
 | "替换消息气泡""自定义消息控件""做个消息widget" | **消息元素工厂**（MessageFactory） | `templates.md` §三 |
+| "输入框加个按钮""工具栏快捷动作""截图/快捷发图按钮" | **输入框按钮**（InputButton） | `templates.md` §九（全屏窗口模式见 `patterns.md` §10） |
+| "标题栏加个常驻 tab""顶部 tab 入口" | **标题栏常驻 tab**（TitlebarTab） | `templates.md` §十 |
+| "右侧加个页""工作台加个 tab""常驻内容页" | **右侧工作台页**（WorkbenchTab） | `templates.md` §十一 |
 | "做个插件市场""安装插件""插件管理" | **完整插件**（全组件） | `templates.md` §四 + `architecture.md` |
 | "插件需要 requests/PIL/... 等第三方包""打包后再加依赖" | **外部依赖（_vendor/）** | `templates.md` §五 |
 | "改现有插件""加个按钮""调样式" | **修改现有插件** | `modifying.md` |
@@ -93,8 +96,8 @@ plugins/system/skills/ui-plugin-creator/
 ├─ SKILL.md                ← 本文件（TOC，~6KB）
 └─ references/
    ├─ workflow.md          开发工作流（澄清需求 → 创建结构 → 验证 → 发布）
-   ├─ patterns.md          核心模式（上下文注入/比例高度/异步/热重载/信号链/_vendor/）
-   ├─ templates.md         代码模板（浮动卡片/内容渲染器/消息工厂/welcome tab/register_ui）
+   ├─ patterns.md          核心模式（上下文注入/比例高度/异步/热重载/信号链/_vendor/全屏覆盖窗）
+   ├─ templates.md         代码模板（浮动卡片/内容渲染器/消息工厂/welcome tab/输入框按钮/标题栏 tab/工作台页/register_ui）
    ├─ widgets.md           可复用控件库索引（设计原则 + 整合示例 + 陷阱速查）
    ├─ widgets-statcard.md  _StatCard（多层级统计卡片）
    ├─ widgets-charts.md    _BarChartWidget / _LineChartWidget / _ProjectBarWidget（QPainter 自绘，浮动卡片用）
@@ -102,7 +105,7 @@ plugins/system/skills/ui-plugin-creator/
    ├─ widgets-sqlite.md    SQLite 读取模式（路径兜底 / N 天窗口 / fallback）
    ├─ widgets-theme.md     主题色映射（ctx → QColor 字典）
    ├─ modifying.md         修改现有插件的步骤与调试
-   ├─ checklist.md         UI 插件验证清单（11 大类）
+   ├─ checklist.md         UI 插件验证清单（14 大类）
    ├─ architecture.md      UI 插件架构总览
    └─ testing-vendor.md    _vendor/ 打包测试脚本
 ```
@@ -269,4 +272,33 @@ def deleteLater(self):
 3. 主题色跟随主程序变吗？      → 不跟  → 检查 set_context_provider + _apply_latest_theme
 4. 刷新/操作不卡 UI 吗？       → 卡UI  → 检查是否用了 QThread
 5. 连续快速点击会崩吗？        → 崩溃  → 检查 _is_busy 防重入 + worker cleanup
+6. 写剪贴板的图粘贴有反应吗？   → 无反应 → 检查是否用了 setImage（§5.7）
+7. 提示条看得见吗？            → 看不见 → 检查是否用了 InfoBar 而非 QToolTip（§5.8）
 ```
+
+### 5.7 剪贴板写图必须用 setImage，禁用 setPixmap
+
+`clipboard().setPixmap()` 后剪贴板所有权在本进程，**同进程粘贴时
+`mimeData().imageData()` 返回 QPixmap**，主程序输入框的
+`isinstance(img, QImage)` 检查静默跳过 → 表现为「提示已复制，粘贴却无反应」。
+外部工具截图不受影响（跨进程读 CF_DIB 自动转 QImage）。
+
+```python
+QApplication.clipboard().setImage(pixmap.toImage())   # ✅
+QApplication.clipboard().setPixmap(pixmap)            # ❌ DriFox 内粘贴无反应
+```
+
+详见 `templates.md` §9.3（主程序 2026-09 已双类型兼容，插件侧仍以 QImage 为准）。
+
+### 5.8 用户提示统一 InfoBar，QToolTip 在 DriFox 内不可靠
+
+主程序源码明确注释「绕开 QToolTip 样式问题」，`QToolTip.showText` 可能不显示。
+提示走 `qfluentwidgets.InfoBar`（`parent=context["main_widget"]`）：
+
+```python
+from qfluentwidgets import InfoBar, InfoBarPosition
+InfoBar.success("标题", "内容", parent=main_widget,
+                position=InfoBarPosition.BOTTOM, duration=2500)
+```
+
+模板与兜底写法见 `templates.md` §9.4。

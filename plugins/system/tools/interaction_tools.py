@@ -2,7 +2,7 @@
 """
 系统工具插件 — 交互、技能与系统（平台服务）
 
-question / skill / list_skills / mcp_list_servers / upload_file：
+question / skill / manage_skill / mcp_list_servers / upload_file：
 用户提问 UI、技能库、MCP 客户端、Gitee 上传是平台能力，
 impl 通过 tool_ctx["services"] 调用，工具层逻辑（参数/结果）在插件内。
 
@@ -11,6 +11,7 @@ impl 通过 tool_ctx["services"] 调用，工具层逻辑（参数/结果）在�
 """
 import json
 import re
+from pathlib import Path
 
 from app.tools.result import ToolResult
 from app.tools.registry import make_summarize_from_preview
@@ -75,7 +76,7 @@ _SKILL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "skill",
-        "description": "加载智能体技能",
+        "description": "加载智能体技能到当前会话。阻断要求：用户请求命中任何可用技能描述的场景（含 /斜杠命令引用，如 /visualization）时，必须在生成其他回答前先调用本工具加载对应技能；提到某技能就必须真实调用本工具，禁止只提及不加载；同一技能已加载则勿重复调用，直接遵循其内容执行。可用技能清单见系统提示「偏好技能」段，未列出时用 manage_skill 的 list 动作查看。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -100,20 +101,173 @@ def _skill_impl(tool_ctx, **kwargs):
     return ToolResult(False, error=content)
 
 
-_LIST_SKILLS_SCHEMA = {
+_MANAGE_SKILL_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "list_skills",
-        "description": "列出所有可用技能(内置+用户安装)。",
-        "parameters": {"type": "object", "properties": {}},
+        "name": "manage_skill",
+        "description": "技能生命周期管理（只读指导式）。list=返回技能清单（含来源/位置/agent_created 标记；支持 query/source 过滤，全量超 30 个自动降为精简视图）；create/modify/delete 本工具不直接改文件，返回目标路径、SKILL.md 模板与分步工作流，由你用 write/edit/bash 执行。仅 frontmatter 含 agent_created: true 且位于用户技能目录的自建技能可修改或删除，系统/用户安装技能受保护；删除前必须先征得用户确认。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "create", "modify", "delete"], "description": "list=清单；create=新建指引；modify=编辑指引；delete=删除指引"},
+                "name": {"type": "string", "description": "create/modify/delete 必填：技能名（小写字母/数字/中划线）"},
+                "query": {"type": "string", "description": "list 可选：按技能名/描述子串过滤（不分大小写），如「visualization」"},
+                "source": {"type": "string", "description": "list 可选：按来源过滤（system/user/插件名子串）"},
+            },
+            "required": ["action"],
+        },
     },
 }
 
 
-def _list_skills_impl(tool_ctx, **kwargs):
-    from app.utils.utils import list_skills_with_intro
+def _agent_created_check(skill: dict) -> tuple[bool, str]:
+    """双校验：技能位于用户数据技能目录 + frontmatter 标记 agent_created: true"""
+    from app.utils.utils import get_app_data_dir
 
-    return ToolResult(True, content=list_skills_with_intro())
+    p = Path(skill.get("path", "")).resolve()
+    user_base = (get_app_data_dir() / "skills").resolve()
+    if user_base not in p.parents:
+        return False, f"技能不在用户技能目录（{user_base}）内，系统/用户安装的插件技能受保护"
+    md = p / "SKILL.md"
+    if not md.exists():
+        md = p / "skill.md"
+    if not md.exists():
+        return False, "SKILL.md 不存在"
+    if "agent_created: true" not in md.read_text(encoding="utf-8")[:600]:
+        return False, "frontmatter 缺 agent_created: true，受保护不可修改/删除"
+    return True, ""
+
+
+def _skill_inventory(query: str = "", source: str = "") -> str:
+    from app.utils.utils import get_local_skills, get_app_data_dir
+
+    skills = get_local_skills()
+    if not skills:
+        return "当前没有任何技能。用 create 动作可创建新技能。"
+    user_base = (get_app_data_dir() / "skills").resolve()
+    q = (query or "").lower()
+    src = (source or "").lower()
+
+    rows = []
+    for s in skills:
+        p = Path(s.get("path", "")).resolve()
+        tag = ""
+        if user_base in p.parents:
+            md = p / "SKILL.md"
+            if md.exists() and "agent_created: true" in md.read_text(encoding="utf-8")[:600]:
+                tag = " [agent_created]"
+        src_name = s.get("plugin_name") or ("system" if s.get("is_system") else "user")
+        if src and src not in src_name.lower():
+            continue
+        desc = (s.get("description") or "").strip().replace("\n", " ")
+        if q and q not in s["qualified_name"].lower() and q not in desc.lower():
+            continue
+        rows.append((s, tag, src_name, desc))
+
+    if not rows:
+        return f"无匹配技能（query={query!r}, source={source!r}）。清空过滤条件查看全部 {len(skills)} 个。"
+
+    # 无过滤且量大时降为单行精简视图，避免全量输出被截断
+    brief = not q and not src and len(rows) > 30
+    lines = [f"共 {len(skills)} 个技能，匹配 {len(rows)} 个："]
+    for s, tag, src_name, desc in rows:
+        if brief:
+            lines.append(f"- {s['qualified_name']}{tag}（{src_name}）")
+        else:
+            lines.append(f"- {s['qualified_name']}{tag}（来源: {src_name}）\n  {desc[:100]}\n  位置: {s['path']}")
+    if brief:
+        lines.append(f"\n超过 30 个，已显示精简视图；用 query（名称/描述子串）或 source（system/user/插件名）过滤查看详情。")
+    lines.append(f"\n仅 [agent_created] 技能可用 modify/delete；create 的新技能放用户技能目录：{user_base}")
+    return "\n".join(lines)
+
+
+def _guide_create(name: str) -> str:
+    from app.utils.utils import get_app_data_dir
+
+    if not name or not re.match(r"^[a-z0-9][a-z0-9-]*$", name):
+        return "错误：name 必填，技能名须为小写字母/数字/中划线（如 pdf-summary）。"
+    base = get_app_data_dir() / "skills"
+    target = base / name
+    if target.exists():
+        return f"错误：{target} 已存在。同名技能请用 modify。"
+    return f"""技能创建指引（本工具不写文件，按以下步骤用 write 工具执行）：
+
+目标目录：{target}
+
+第 1 步：创建 {target}\\SKILL.md，内容模板：
+---
+name: {name}
+description: （必填。一句话说明该技能解决什么问题、何时触发；这是模型路由的依据，务必覆盖用户会说的触发词）
+agent_created: true
+---
+
+# {name}
+
+（技能正文：工作流步骤、规则约束、示例。详细资料可拆到 references/ 子文件按需加载）
+
+第 2 步：如需校验脚本/评测用例，放同目录 scripts/、evals/ 子目录（可选）
+第 3 步：完成后用 manage_skill(action="list") 核验技能已被发现
+
+约束：description 决定技能是否被主动加载，写清触发场景；agent_created: true 是后续 modify/delete 的凭证，勿删。"""
+
+
+def _guide_modify(name: str) -> str:
+    from app.utils.utils import get_skill_by_name
+
+    skill = get_skill_by_name(name or "")
+    if not skill:
+        return f"错误：技能「{name}」不存在。用 list 动作查看全部技能。"
+    ok, reason = _agent_created_check(skill)
+    if not ok:
+        return f"拒绝：{reason}"
+    p = Path(skill["path"])
+    return f"""技能编辑指引：
+
+技能目录：{p}
+标准结构：SKILL.md（frontmatter: name/description/agent_created）+ 可选 references/、scripts/、evals/
+
+步骤：
+1. read {p}\\SKILL.md 查看现状
+2. 按需 edit 正文；改动 description 会影响触发倾向，谨慎
+3. 保持 frontmatter 的 agent_created: true（删掉将失去后续修改权限）
+4. 保存即热生效（技能列表按 mtime 缓存，自动失效）"""
+
+
+def _guide_delete(name: str) -> str:
+    from app.utils.utils import get_skill_by_name
+
+    skill = get_skill_by_name(name or "")
+    if not skill:
+        return f"错误：技能「{name}」不存在。"
+    ok, reason = _agent_created_check(skill)
+    if not ok:
+        return f"拒绝：{reason}"
+    p = Path(skill["path"])
+    return f"""技能删除指引：
+
+⚠️ 执行前必须先向用户确认（question 工具或正文询问），获得明确同意后才能继续。
+
+技能目录：{p}
+步骤：
+1. 获得用户明确确认
+2. 用 bash 删除整个目录（含子文件，删除不可逆）
+3. 用 manage_skill(action="list") 核验已消失
+
+注意：若技能含用户数据（evals 运行记录等），先提示用户。"""
+
+
+def _manage_skill_impl(tool_ctx, **kwargs):
+    action = (kwargs.get("action") or "list").lower()
+    name = kwargs.get("name", "")
+    if action == "list":
+        return ToolResult(True, content=_skill_inventory(kwargs.get("query", ""), kwargs.get("source", "")))
+    if action == "create":
+        return ToolResult(True, content=_guide_create(name))
+    if action == "modify":
+        return ToolResult(True, content=_guide_modify(name))
+    if action == "delete":
+        return ToolResult(True, content=_guide_delete(name))
+    return ToolResult(False, error=f"未知 action: {action}（支持 list/create/modify/delete）")
 
 
 _MCP_LIST_SCHEMA = {
@@ -369,8 +523,11 @@ def _preview_skill(tool_args: dict) -> str:
     return f'加载技能 "{name}"' if name else "加载技能"
 
 
-def _preview_list_skills(tool_args: dict) -> str:
-    return "列出可用技能"
+def _preview_manage_skill(tool_args: dict) -> str:
+    action = (tool_args or {}).get("action") or "list"
+    name = (tool_args or {}).get("name", "")
+    cn = {"list": "列出技能", "create": "新建技能", "modify": "编辑技能", "delete": "删除技能"}.get(action, action)
+    return f"{cn}: {name}" if name else cn
 
 
 def _preview_mcp_list_servers(tool_args: dict) -> str:
@@ -411,12 +568,12 @@ def register(registry):
         metadata={"protect": True, "permission_arg": "name"},  # 技能内容完整保留；权限按技能名
     )
     registry.register(
-        "list_skills", _LIST_SKILLS_SCHEMA, impl=_list_skills_impl,
-        danger="safe", icon="技能", cn_name="列出技能",
-        group=GROUP_INTERACTION, description="列出可用技能",
-        aliases=["ListSkills", "listSkills"],
-        preview=_preview_list_skills,
-        summarize=make_summarize_from_preview(_preview_list_skills),
+        "manage_skill", _MANAGE_SKILL_SCHEMA, impl=_manage_skill_impl,
+        danger="safe", icon="技能", cn_name="管理技能",
+        group=GROUP_INTERACTION, description="技能生命周期管理",
+        aliases=["ListSkills", "listSkills", "ManageSkill", "skillmanage"],
+        preview=_preview_manage_skill,
+        summarize=make_summarize_from_preview(_preview_manage_skill),
     )
     registry.register(
         "mcp_list_servers", _MCP_LIST_SCHEMA, impl=_mcp_list_impl,

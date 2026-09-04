@@ -13,7 +13,7 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.5.8-beta-brightgreen)
+![Version](https://img.shields.io/badge/version-0.5.8b2-brightgreen)
 
 </div>
 
@@ -154,7 +154,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.5.8-beta 架构                  │
+│                    DriFox v0.5.8b2 架构                  │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      悬浮窗口 / 消息卡片 / 差异视图 / 输入区         │
 │             浮动卡片 / 桌宠 / 系统托盘 / 设置面板            │

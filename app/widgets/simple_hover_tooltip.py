@@ -24,7 +24,7 @@
 
 from typing import Optional
 
-from PyQt5.QtCore import QObject, QPoint, QRectF, Qt, QTimer
+from PyQt5.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer
 from PyQt5.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPainterPath
 from PyQt5.QtWidgets import QApplication, QWidget
 
@@ -120,6 +120,17 @@ def _get_tooltip_theme() -> dict:
     }
 
 
+def _max_tip_text_width() -> int:
+    """tooltip 单行文本最大宽度：取当前主窗口宽度，拿不到则兜底屏幕宽 1/3。"""
+    w = QApplication.activeWindow()
+    if w is not None and w.width() >= 200:
+        return w.width() - 24  # 留少量余量，避免 tooltip 贴满窗口宽
+    screen = QApplication.primaryScreen()
+    if screen is not None:
+        return max(240, screen.availableGeometry().width() // 3)
+    return 360
+
+
 def _get_tooltip_font() -> QFont:
     """获取 tooltip 字体（跟随用户设置）。"""
     try:
@@ -195,6 +206,7 @@ class SimpleHoverTooltip(QWidget):
         self._padding_h: int = 8
         self._padding_v: int = 4
         self._border_radius: int = 6
+        self._wrap_w: Optional[int] = None  # 非空表示文本已超限折行，值为折行宽度
 
         self._refresh_theme()
         if not transient:
@@ -242,8 +254,17 @@ class SimpleHoverTooltip(QWidget):
         lines = self._text.split("\n") if self._text else [""]
         max_w = max((fm.width(line) for line in lines), default=0)
         line_h = fm.lineSpacing()  # 含行间距，多行不挤
-        w = max_w + self._padding_h * 2
-        h = line_h * len(lines) + self._padding_v * 2
+        limit = _max_tip_text_width()
+        if max_w > limit:
+            # 超限：按限宽折行重算尺寸（绘制端用同一折行规则）
+            self._wrap_w = limit
+            rect = fm.boundingRect(QRect(0, 0, limit, 0), Qt.TextWordWrap, self._text)
+            w = limit + self._padding_h * 2
+            h = rect.height() + self._padding_v * 2
+        else:
+            self._wrap_w = None
+            w = max_w + self._padding_h * 2
+            h = line_h * len(lines) + self._padding_v * 2
         self.setFixedSize(max(w, 20), max(h, 20))
 
     def show_above(self, target: QWidget):
@@ -300,10 +321,18 @@ class SimpleHoverTooltip(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(rect, r, r)
 
-        # 文字（逐行绘制，行间距与 _recalc_size 一致）
+        # 文字（逐行绘制，行间距与 _recalc_size 一致；超限折行走整体 drawText）
         if self._text:
             painter.setPen(self._tc)
             painter.setFont(self._font)
+            if self._wrap_w is not None:
+                # 折行分支：与 _recalc_size 同宽度同规则，交由 Qt 折行
+                text_rect = QRect(self._padding_h, self._padding_v,
+                                  self._wrap_w, self.height() - self._padding_v * 2)
+                painter.drawText(text_rect,
+                                 Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap,
+                                 self._text)
+                return
             lines = self._text.split("\n")
             fm = QFontMetrics(self._font)
             line_h = fm.lineSpacing()
@@ -340,10 +369,12 @@ class _HoverTooltipFilter(QObject):
         self._guard.timeout.connect(self._guard_check)
         parent.installEventFilter(self)
         # 目标销毁时自动清理 tooltip
-        # 改用 self.destroyed（filter 自身析构时发出，连接仍有效）而非 parent.destroyed
-        # （#29 根因：filter 是 parent 子对象，parent 销毁时先删子对象再 emit destroyed，
-        # 连接已断开 → _cleanup 永不触发 → per-tab 泄漏）。self.destroyed 确保 _cleanup 可靠触发。
-        self.destroyed.connect(self._cleanup)
+        # ⚠️ 实测（PyQt5）：self.destroyed 自连接 bound method 在 parent 析构
+        # 链上不回调（PyQt 短路半析构对象的自身 bound method 连接），原 #29
+        # 修复从未真正生效 → per-tab ~95 filter + 2 QTimer wrapper 残留。
+        # 改挂 parent.destroyed：跨对象连接实测可靠触发，且 destroyed 在
+        # children 销毁前 emit，此刻 filter 仍存活，清理安全。
+        parent.destroyed.connect(self._cleanup)
 
     def _get_tooltip(self) -> SimpleHoverTooltip:
         if self._tooltip is None:
@@ -428,20 +459,26 @@ class _HoverTooltipFilter(QObject):
                 pass
 
     def _cleanup(self):
-        # 泄漏修复（6a）：目标 widget 销毁（parent.destroyed）时立即移除
-        # _filters 缓存条目，不等弱值兜底回收。WeakValueDictionary 弱值
-        # 语义保证 _filters 不强引用 filter；此处显式 pop 让条目即时消失，
-        # 避免 filter wrapper 被 PyQt 信号连接/event filter 框架层短暂持有时
-        # 条目仍残留（id 复用会误判"已安装"）。
+        # 幂等防重入：触发路径唯一（parent.destroyed），重入安全保底
+        if getattr(self, "_cleaned", False):
+            return
+        self._cleaned = True
+        p = self._parent() if self._parent is not None else None
+        if p is not None:
+            _filters.pop(id(p), None)
+        # 残留治理（R2）：显式停表并断开定时器连接。PyQt 连接表持有
+        # bound method → 滞留 self（filter wrapper）→ 连带 _timer/_guard
+        # wrapper 驻留（每 tab ~95 filter + 2 QTimer）。
+        for _t, _h in ((self._timer, self._on_timeout), (self._guard, self._guard_check)):
+            try:
+                _t.stop()
+                _t.timeout.disconnect(_h)
+            except (RuntimeError, TypeError, AttributeError):
+                pass
         try:
-            _filters.pop(id(self._parent()), None)
-        except Exception:
-            pass
-        try:
-            self._timer.stop()
+            self._hide()
         except (RuntimeError, AttributeError):
             pass
-        self._hide()
         # 🛡️ 泄漏根因修复（B7）：目标 widget 销毁时 tooltip 同步销毁。
         # 此前只 _hide() 不 deleteLater() → tooltip 永不销毁 → 全局注册表
         # _tooltip_instances 只增不减（QWidget 引用驻留）。

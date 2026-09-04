@@ -34,15 +34,6 @@ from typing import Any, Dict, Optional, Tuple
 
 from PyQt5.QtGui import QColor
 
-# ── 类型主色（hex，深浅主题通吃；对齐 DeepSeek Harness 的彩色标签）──
-ENTRY_KIND_COLORS: Dict["EntryKind", str] = {
-    "SYSTEM": "#7AA2F7",  # 蓝
-    "USER": "#E0AF68",  # 金橙
-    "CONTEXT": "#9ECE6A",  # 绿
-    "ASSISTANT": "#BB9AF7",  # 紫
-    "TOOL": "#7DCFFF",  # 青
-}
-
 _RGBA_RE = re.compile(r"rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)\s*(?:,\s*([0-9.]+)\s*)?\)", re.I)
 
 # ── 「占用区间」参数（让时间线连贯，而不是一堆 0ms 碎片）──
@@ -92,10 +83,35 @@ class Lane(Enum):
 
 LANE_ORDER: tuple = (Lane.INPUT, Lane.MODEL, Lane.TOOLS)
 
+# ── 类型主色（hex，深浅主题通吃；对齐 DeepSeek Harness 的彩色标签）──
+# ⚠️ 键必须是 **EntryKind 成员**（定义顺序：本表须在 EntryKind 之后）：
+# CONTEXT 的 value 是 "HOOK"（徽章文案），若按 value 查表会 miss →
+# 全部 HOOK 条目退化成兜底灰 #888888。
+ENTRY_KIND_COLORS: Dict[EntryKind, str] = {
+    EntryKind.SYSTEM: "#7AA2F7",  # 蓝
+    EntryKind.USER: "#E0AF68",  # 金橙
+    EntryKind.CONTEXT: "#9ECE6A",  # 绿（徽章显示 HOOK）
+    EntryKind.ASSISTANT: "#BB9AF7",  # 紫
+    EntryKind.TOOL: "#7DCFFF",  # 青
+}
 
-def kind_color(kind: EntryKind) -> QColor:
-    """类型主色（不透明 QColor）。"""
-    return QColor(ENTRY_KIND_COLORS.get(getattr(kind, "value", kind), "#888888"))
+# 按「枚举名 / 枚举值」反查成员 —— 兼容历史调用方传字符串的情况
+_KIND_BY_NAME: Dict[str, EntryKind] = {k.name: k for k in EntryKind}
+_KIND_BY_VALUE: Dict[str, EntryKind] = {k.value: k for k in EntryKind}
+
+
+def kind_color(kind: Any) -> QColor:
+    """类型主色（不透明 QColor）。
+
+    ⚠️ 必须按**枚举成员**取色，不能用 ``kind.value``：CONTEXT 的 value 是
+    "HOOK"（徽章显示文案，见 :class:`EntryKind`），按 value 查表必然 miss，
+    结果是所有 HOOK 条目的徽章/时间线条带/详情标题全退化成兜底灰 #888888。
+    """
+    k = kind
+    if not isinstance(k, EntryKind):
+        key = str(getattr(kind, "name", "") or kind)
+        k = _KIND_BY_NAME.get(key) or _KIND_BY_VALUE.get(str(kind)) or kind
+    return QColor(ENTRY_KIND_COLORS.get(k, "#888888"))
 
 
 def with_alpha(color: QColor, alpha: int) -> QColor:
@@ -186,9 +202,7 @@ class ThemePalette:
         pal = cls(
             is_dark=bool(is_dark),
             text=to_qcolor(c.get("text_primary"), "#E6E9F0" if is_dark else "#1A1F2B"),
-            text_secondary=to_qcolor(
-                c.get("text_secondary"), "#B9C3D4" if is_dark else "rgba(60,70,90,0.75)"
-            ),
+            text_secondary=to_qcolor(c.get("text_secondary"), "#B9C3D4" if is_dark else "rgba(60,70,90,0.75)"),
             text_muted=to_qcolor(c.get("text_muted"), "#8B98AD" if is_dark else "#6B7688"),
             border=to_qcolor(c.get("border"), "#3D4A60" if is_dark else "#D6DCE6"),
             accent=to_qcolor(c.get("accent"), "#66C6FF"),
@@ -564,3 +578,56 @@ def time_bounds(records: list) -> Tuple[float, float]:
     if t1 <= t0:
         t1 = t0 + 1.0
     return t0, t1
+
+
+def merge_overlapping(records: list) -> Tuple[int, int]:
+    """重叠时间区间的并集统计 → ``(总毫秒, 连通段数)``。
+
+    为什么不用「Σ duration_ms」求和（2026-09-03）：
+
+    宿主 chat_worker 落盘时把一次 API 响应里的**每个并行 tool_call 拆成
+    一条独立 assistant 消息**（``_build_response_message_sequence`` 对
+    ``tool_call_marker`` 逐个建条），这些消息共享**同一次 API 调用的
+    elapsed_ms**、同一时刻写入 → 投影出的 N 条 ASSISTANT 区间完全重叠。
+    求和会把同一次调用计时 N 遍（实测 LLM 总时长放大 2-4 倍）；并行执行
+    的工具同理。并集（墙钟口径）才是真实耗时。
+
+    段数 = 合并后的独立区间块数，可当「LLM 调用次数」用：同批拆条的
+    N 条 assistant 完全重叠 → 1 段 = 1 次真实调用。
+
+    口径细节：
+    - ``start_ts <= 0``（无时间）→ 跳过；瞬时条目（end <= start 且非
+      pending，如无 elapsed_ms 的历史消息）不贡献时长，与旧求和口径一致；
+    - in-flight（``is_pending``）按 ``now - start`` 计（与
+      :attr:`TraceRecord.duration_ms` 一致）；
+    - 相接区间（下一段 start == 当前段 end）视为连续 —— 毫秒打点上相接
+      基本只出现在同一次调用链内。
+    """
+    spans: list = []
+    now = time.time()
+    for r in records:
+        s = getattr(r, "start_ts", 0)
+        if s <= 0:
+            continue
+        e = getattr(r, "end_ts", 0)
+        if e <= s:
+            if getattr(r, "is_pending", False):
+                spans.append((s, now))
+            continue
+        spans.append((s, e))
+    if not spans:
+        return 0, 0
+    spans.sort()
+    total = 0.0
+    segments = 0
+    cs, ce = spans[0]
+    for s, e in spans[1:]:
+        if s > ce:
+            total += ce - cs
+            segments += 1
+            cs, ce = s, e
+        elif e > ce:
+            ce = e
+    total += ce - cs
+    segments += 1
+    return int(total * 1000), segments

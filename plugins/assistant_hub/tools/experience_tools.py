@@ -60,11 +60,24 @@ def _enabled_or_reload(mgr, aid: str, a) -> bool:
     return a2 is not None and getattr(a2, "experience_enabled", False)
 
 
+def _resolve_aid(mgr, tool_ctx) -> str:
+    """经验归属助手：按工具执行会话解析（override 优先，否则主助手）。"""
+    sid = ""
+    try:
+        sid = str((tool_ctx or {}).get("session_id") or "")
+    except Exception:
+        sid = ""
+    try:
+        return mgr.resolve_session_aid(sid)
+    except Exception:
+        return mgr.active_id()
+
+
 def _recall_impl(tool_ctx, **kw):
     mgr = _get_manager()
     if mgr is None:
         return ToolResult(False, error="assistant_manager 不可用")
-    aid = mgr.active_id()
+    aid = _resolve_aid(mgr, tool_ctx)
     if not aid or not mgr.has(aid):
         return ToolResult(True, content="当前没有激活的助手。")
     a = mgr.get(aid)
@@ -83,7 +96,7 @@ def _record_impl(tool_ctx, **kw):
     mgr = _get_manager()
     if mgr is None:
         return ToolResult(False, error="assistant_manager 不可用")
-    aid = mgr.active_id()
+    aid = _resolve_aid(mgr, tool_ctx)
     if not aid or not mgr.has(aid):
         return ToolResult(True, content="当前没有激活的助手。")
     a = mgr.get(aid)
@@ -103,7 +116,11 @@ _RECALL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "recall_experience",
-        "description": ("回忆你的工作经验。无参调用返回经验索引（分类列表）；带 category 返回该分类下的全部经验条目。"),
+        "description": (
+            "回忆你的工作经验。无参调用返回经验索引（分类列表）；带 category 返回该分类下的全部经验条目。"
+            "当用户交办具体任务（写代码、调研、写文档、分析问题等）时，开工前先查这里有没有相关经验；"
+            "闲聊、问答、日常对话无需调用。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {"category": {"type": "string", "description": "经验分类名（不传返回索引）"}},
@@ -115,7 +132,12 @@ _RECORD_SCHEMA = {
     "type": "function",
     "function": {
         "name": "record_experience",
-        "description": ("记录一条工作经验（用户偏好、有效工作流、踩坑教训等），供未来的自己做类似事情时回忆。"),
+        "description": (
+            "记录一条工作经验，供未来的自己做类似事情时回忆。"
+            "以下时机应记录：用户指出错误并讲解正确做法；用户明显不耐烦或反复强调某事；"
+            "多次尝试后找到有效方法；用户明确说「以后要/不要这样做」；自主工作中踩到坑。"
+            "每条简洁直接，一句话。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {

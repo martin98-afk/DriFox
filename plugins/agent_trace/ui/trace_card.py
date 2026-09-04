@@ -63,6 +63,7 @@ from .trace_models import (
     ThemePalette,
     TraceRecord,
     format_duration,
+    merge_overlapping,
     time_bounds,
     with_alpha,
 )
@@ -128,6 +129,8 @@ class TraceCardWidget(QWidget):
         self._hub = TraceCollectorHub(self)
         self._collector: Optional[TraceCollector] = None
         self._active_wid: str = ""
+        # 当前展示的 session_id（同窗口幂等判据 —— 见 _switch_collector）
+        self._active_sid: str = ""
         self._context_tokens: int = 0
         self._context_limit: int = 0
         self._pal = ThemePalette()
@@ -293,8 +296,14 @@ class TraceCardWidget(QWidget):
         except Exception as e:
             logger.warning(f"[agent_trace] 订阅 EV_TAB_SWITCHED 失败: {e}")
 
-    def _on_tab_switched(self, _payload: Dict[str, Any]) -> None:
+    def _on_tab_switched(self, payload: Dict[str, Any]) -> None:
         if not self.isVisible():
+            return
+        # 🚀 同窗口切换零动作：collector 常驻且由 backend 信号驱动同步（切走
+        # 也在记 timing），数据不会过期；主题/字体未变，重刷样式与全量投影
+        # 纯冗余（长会话 _project_messages 全量遍历是切标签卡顿主源之一）。
+        wid = str(payload.get("window_id") or "")
+        if wid and wid == self._active_wid:
             return
         self._refresh_context()
 
@@ -314,7 +323,18 @@ class TraceCardWidget(QWidget):
         if not ctx:
             return
         self._ctx = dict(ctx)
-        self._apply_latest_theme()
+        # 🚀 主题/字体指纹未变时跳过全量样式重刷：QSS 重设会触发全面板重绘，
+        # 切标签/重复 showEvent 的高频路径纯冗余；主题切换时指纹变化才真刷。
+        fp = (
+            tuple(sorted((k, str(v)) for k, v in (ctx.get("colors") or {}).items())),
+            bool(ctx.get("is_dark", True)),
+            int(ctx.get("font_size") or 13),
+            str(ctx.get("font_family") or ""),
+        )
+        theme_changed = fp != getattr(self, "_theme_fp", None)
+        self._theme_fp = fp
+        if theme_changed:
+            self._apply_latest_theme()
         main_widget = self._ctx.get("main_widget")
         if main_widget is not None:
             self._switch_collector(main_widget)
@@ -385,9 +405,27 @@ class TraceCardWidget(QWidget):
     # ──────────────────── collector 切换 ────────────────────
 
     def _switch_collector(self, main_widget: Any) -> None:
-        """切换到目标窗口的常驻 collector（同窗口幂等）。"""
+        """切换到目标窗口的常驻 collector（同窗口 + 同会话幂等）。
+
+        ⚠️ 「同窗口直接 return」是有前提的：collector 的数据新鲜度依赖 backend
+        信号（``_hook_messages_updated`` / ``tool_*`` / ``stream_*``）。但
+        **加载历史会话不走任何 backend 信号** —— 主程序走的是
+        ``main_widget.session_manager.set_current_session(session)``，既不发
+        ``session_changed``（只有 ``backend.set_current_session`` 才发），也不发
+        ``_hook_messages_updated``。结果是：加载完历史会话后没有任何东西驱动
+        重新投影，卡片一直停在旧会话上（表现为「轨迹不显示 / 显示的还是上一个
+        会话」）。故同窗口分支也必须比对 session_id，变了就重投影。
+        """
         wid = getattr(main_widget, "_window_id", "") or ""
+        sid = self._session_id_of(main_widget)
         if wid and wid == self._active_wid and self._collector is not None:
+            # 同窗口：collector 常驻且由 backend 信号驱动同步（切走也在记
+            # timing），常规链路数据不过期，无需全量重投影（长会话投影是切
+            # 标签卡顿主源之一）。仅当 session_id 变化（加载历史会话等静默
+            # 切换）才补一次投影 —— 比对是 O(1)，不是性能热点。
+            if sid and sid == self._active_sid:
+                return
+            self._active_sid = sid
             self._collector.refresh()
             return
 
@@ -395,21 +433,29 @@ class TraceCardWidget(QWidget):
         self._unbind_backend_stats_signals()
         self._collector = self._hub.collector_for(main_widget)
         self._active_wid = wid if self._collector is not None else ""
+        self._active_sid = sid if self._collector is not None else ""
 
         if self._collector is not None:
             self._collector.refresh()
             self._bind_collector_signals(self._collector)
-            try:
-                backend = getattr(main_widget, "backend", None)
-                if backend is not None and hasattr(backend, "context_updated"):
-                    backend.context_updated.connect(self._on_context_updated)
-            except Exception:
-                pass
+            self._bind_backend_stats_signals(main_widget)
             self._pull_records()
             self._hub.cleanup_closed(self._active_window_ids())
         else:
             # backend 未就绪：清空展示，等下次 show/tab 切换重试
             self._pull_records()
+
+    @staticmethod
+    def _session_id_of(main_widget: Any) -> str:
+        """当前窗口 backend 的 session_id；解析不到返回空串（= 不做幂等短路）。"""
+        backend = getattr(main_widget, "backend", None)
+        if backend is None:
+            return ""
+        try:
+            session = backend.get_current_session()
+        except Exception:
+            return ""
+        return str(getattr(session, "session_id", "") or "")
 
     @staticmethod
     def _active_window_ids() -> Optional[set]:
@@ -444,14 +490,38 @@ class TraceCardWidget(QWidget):
             except TypeError, RuntimeError:
                 pass
 
+    def _bind_backend_stats_signals(self, main_widget: Any) -> None:
+        """订阅 backend 的上下文/会话信号（切窗口时与 collector 同步换绑）。"""
+        backend = getattr(main_widget, "backend", None)
+        if backend is None:
+            return
+        try:
+            if hasattr(backend, "context_updated"):
+                backend.context_updated.connect(self._on_context_updated)
+        except Exception:
+            pass
+        try:
+            if hasattr(backend, "session_changed"):
+                backend.session_changed.connect(self._on_session_changed)
+        except Exception:
+            pass
+
     def _unbind_backend_stats_signals(self) -> None:
         c = self._collector
         if c is None:
             return
         be = getattr(c, "_bound_backend", None)
-        if be is not None and hasattr(be, "context_updated"):
+        if be is None:
+            return
+        for name, slot in (
+            ("context_updated", self._on_context_updated),
+            ("session_changed", self._on_session_changed),
+        ):
+            sig = getattr(be, name, None)
+            if sig is None:
+                continue
             try:
-                be.context_updated.disconnect(self._on_context_updated)
+                sig.disconnect(slot)
             except TypeError, RuntimeError:
                 pass
 
@@ -462,14 +532,32 @@ class TraceCardWidget(QWidget):
             return []
         return self._collector.visible_records
 
+    def _stable(self) -> List[TraceRecord]:
+        """纯落盘投影（不含 tail）—— turn_list 的索引空间基准。
+
+        ⚠️ collector 的增量信号（appended/updated）都发这个空间的索引；
+        turn_list._records 若混入 tail（visible_records），tail 每增减一次
+        索引就整体漂移，点列表行传给详情的 idx 从此对不上（「左侧选中 A
+        右侧显示 B」的根因）。
+
+        ⚠️ 用 ``records`` 而不是自建属性：插件热重载时 hub 常驻的 collector
+        可能还是旧类实例（没有新增的 property），访问新属性直接 AttributeError。
+        ``records`` 从旧版起就存在且语义相同（纯落盘投影）。
+        """
+        if self._collector is None:
+            return []
+        return self._collector.records
+
     def _pull_records(self) -> None:
         """全量推送（首次显示 / reset / 切换标签页）。"""
         vis = self._visible()
+        stable = self._stable()
         self._timeline.set_records(vis)
-        self._turn_list.set_records(vis)
+        self._turn_list.set_records(stable)
         self._sync_bounds(vis)
         # ⚠️ 先 clear 再 set_records：clear() 会把 _records 清空并回到 idle 态，
         # 反过来写等于把刚推入的数据抹掉（详情面板恒显示"未选中条目"）。
+        # 详情用 vis（含 tail）：列表 idx 是 stable = vis 的前缀，直接对齐。
         self._detail.clear()
         self._detail.set_records(vis)
         self._hide_detail()  # 全量重置后回到无选中态 → 详情收起
@@ -485,8 +573,10 @@ class TraceCardWidget(QWidget):
         self._pull_records()
 
     def _on_records_appended(self, start: int, count: int) -> None:
+        # ⚠️ start/count 是 stable（纯落盘）空间 → 切片也必须用 stable：
+        # vis[start:start+count] 会把 tail 头几条错当增量行插进主列表。
+        self._turn_list.append_records(self._stable()[start : start + count])
         vis = self._visible()
-        self._turn_list.append_records(vis[start : start + count])
         self._timeline.set_records(vis)
         self._sync_bounds(vis)
         self._detail.set_records(vis)
@@ -514,8 +604,35 @@ class TraceCardWidget(QWidget):
         self._context_tokens, self._context_limit = tokens, limit
         self._refresh_stats(self._visible())
 
+    def _on_session_changed(self, _sid: str = "") -> None:
+        """backend 信号驱动的会话切换 → 重新投影。
+
+        只覆盖「新建会话 / ``backend.set_current_session``」路径；**历史会话
+        加载**不发此信号（走 ``session_manager.set_current_session``），由
+        :meth:`_switch_collector` 的 session_id 比对 + :meth:`_on_tick` 心跳
+        探测兜底。
+        """
+        c = self._collector
+        if c is None:
+            return
+        try:
+            c.refresh()
+        except Exception as e:
+            logger.warning(f"[agent_trace] 会话切换后重投影失败: {e}")
+
     def _on_tick(self) -> None:
-        """心跳：仅当有 in-flight 记录时重绘（时长走动）。"""
+        """心跳：in-flight 时长走动（只重绘，不重建）+ 会话变更兜底探测。"""
+        if not self.isVisible():
+            return
+        # ⚠️ 历史会话加载是「静默切换」：不发 session_changed、不发
+        # _hook_messages_updated。卡片已打开时既没有 showEvent 也没有 tab
+        # 切换事件 → 只剩心跳能发现 session_id 变了。仅做 id 字符串比较，
+        # 不变就零开销；变了才走 _switch_collector 重投影。
+        mw = self._ctx.get("main_widget")
+        if mw is not None and self._collector is not None:
+            sid = self._session_id_of(mw)
+            if sid and sid != self._active_sid:
+                self._switch_collector(mw)
         c = self._collector
         if c is not None and c.has_pending:
             self._timeline.update()
@@ -626,17 +743,24 @@ class TraceCardWidget(QWidget):
         if not isinstance(records, list):
             records = []
         turns = sum(1 for r in records if r.kind == EntryKind.USER and r.turn_no > 0)
-        llm_ms = sum(max(0, r.duration_ms) for r in records if r.kind == EntryKind.ASSISTANT)
-        tool_ms = sum(max(0, r.duration_ms) for r in records if r.kind == EntryKind.TOOL)
+        # ⚠️ 时长必须用**区间并集**（墙钟），不能 Σ duration_ms：
+        # 宿主把一次 API 响应的 N 个并行 tool_calls 拆成 N 条 assistant 消息
+        # 落盘（同 elapsed_ms、同刻写入），求和会把同一次调用计时 N 遍。
+        llm_ms, llm_calls = merge_overlapping([r for r in records if r.kind == EntryKind.ASSISTANT])
+        tool_ms, _ = merge_overlapping([r for r in records if r.kind == EntryKind.TOOL])
         total = self._turn_list.total_count
         shown = self._turn_list.shown_count
         if shown == total:
             self._stats_turns.setText(f"{total} 条 · {turns} 轮")
         else:
             self._stats_turns.setText(f"{shown} / {total} 条 · {turns} 轮")
-        self._stats_time.setText(
-            f"LLM {format_duration(llm_ms)} · 工具 {format_duration(tool_ms)}" if records else "LLM - · 工具 -"
-        )
+        if records:
+            llm_text = f"LLM {format_duration(llm_ms)}"
+            if llm_calls > 1:
+                llm_text += f" · {llm_calls} 次调用"
+            self._stats_time.setText(f"{llm_text} · 工具 {format_duration(tool_ms)}")
+        else:
+            self._stats_time.setText("LLM - · 工具 -")
         if self._context_tokens > 0:
             ctx_text = f"上下文 {self._context_tokens / 1000:.1f}K tok"
             if self._context_limit > 0:

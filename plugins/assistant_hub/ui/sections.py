@@ -13,7 +13,8 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Tuple
 
 from PyQt5.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont, QFontMetrics
+from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
+from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -111,15 +112,16 @@ def _input_style() -> str:
     """
 
 
-def _btn_style(danger: bool = False, align_left: bool = False) -> str:
+def _btn_style(danger: bool = False, align_left: bool = False, icon_only: bool = False) -> str:
     color = Colors.ERROR if danger else Colors.TEXT_PRIMARY
     align = "text-align: left; padding-left: 12px;" if align_left else ""
+    pad = "padding: 0;" if icon_only else "padding: 4px 16px;"
     return f"""
         QPushButton {{
             color: {color};
             border: 1px solid {Colors.ERROR if danger else Colors.BORDER};
             border-radius: 6px;
-            padding: 4px 16px;
+            {pad}
             {align}
             background: transparent;
             {get_font_family_css()} {font_size_css(11)}
@@ -129,6 +131,54 @@ def _btn_style(danger: bool = False, align_left: bool = False) -> str:
         }}
         QPushButton:disabled {{ opacity: 0.4; }}
     """
+
+
+def _svg_icon(svg: str, size: int) -> QIcon:
+    """SVG 字符串 → QIcon（QSvgRenderer 直渲，颜色烧进 SVG）。"""
+    renderer = QSvgRenderer(svg.encode("utf-8"))
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    renderer.render(p)
+    p.end()
+    return QIcon(pm)
+
+
+def _icon_btn(svg: str, size: int) -> "QPushButton":
+    """纯图标按钮（列表行增删，替代字符 +/×）。"""
+    btn = QPushButton()
+    icon = _svg_icon(svg, size)
+    btn.setIcon(icon)
+    btn.setIconSize(icon.actualSize(QSize(size, size)))
+    return btn
+
+
+def _del_btn(size: int) -> "QPushButton":
+    """列表行删除按钮：垃圾桶图标。"""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+        f'fill="none" stroke="{Colors.ERROR}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<polyline points="3 6 5 6 21 6"/>'
+        '<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>'
+        '<line x1="10" y1="11" x2="10" y2="17"/>'
+        '<line x1="14" y1="11" x2="14" y2="17"/>'
+        "</svg>"
+    )
+    return _icon_btn(svg, size)
+
+
+def _add_btn(size: int) -> "QPushButton":
+    """列表行添加按钮：加号图标。"""
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" '
+        f'fill="none" stroke="{Colors.TEXT_PRIMARY}" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round">'
+        '<line x1="12" y1="5" x2="12" y2="19"/>'
+        '<line x1="5" y1="12" x2="19" y2="12"/>'
+        "</svg>"
+    )
+    return _icon_btn(svg, size)
 
 
 def _sep() -> QFrame:
@@ -691,9 +741,9 @@ class PinnedSection(_Section):
         self._pin_input.setStyleSheet(_input_style())
         self._pin_input.returnPressed.connect(self._emit_add_pin)
         add_row.addWidget(self._pin_input, 1)
-        add_btn = QPushButton("+")
+        add_btn = _add_btn(14)
         add_btn.setFixedSize(30, 28)
-        add_btn.setStyleSheet(_btn_style())
+        add_btn.setStyleSheet(_btn_style(icon_only=True))
         add_btn.clicked.connect(self._emit_add_pin)
         add_row.addWidget(add_btn)
         self.body().addLayout(add_row)
@@ -723,10 +773,10 @@ class PinnedSection(_Section):
             edit.setStyleSheet(_input_style())
             edit.editingFinished.connect(lambda pid=pid, e=edit: self.pinEdited.emit(pid, e.text().strip()))
             h.addWidget(edit, 1)
-            del_btn = QPushButton("×")
+            del_btn = _del_btn(14)
             del_btn.setFixedSize(26, 26)
             del_btn.setToolTip("删除这条提示")
-            del_btn.setStyleSheet(_btn_style(danger=True))
+            del_btn.setStyleSheet(_btn_style(danger=True, icon_only=True))
             del_btn.clicked.connect(lambda _checked=False, pid=pid: self.pinDeleteRequested.emit(pid))
             h.addWidget(del_btn)
             self._pin_list.addWidget(row)
@@ -861,6 +911,7 @@ class ExperienceSection(_Section):
     toggleExperience = pyqtSignal(bool)
     viewCategory = pyqtSignal(str)
     deleteCategoryRequested = pyqtSignal(str)
+    consolidateRequested = pyqtSignal()
     reflectRequested = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -878,6 +929,11 @@ class ExperienceSection(_Section):
         top_row = QHBoxLayout()
         self._hint = _hint("默认关闭。开启后助手可自主回忆/记录工作经验；每日 Dream 后会自动反思整理。")
         top_row.addWidget(self._hint, 1)
+        cons_btn = QPushButton("压缩整理")
+        cons_btn.setStyleSheet(_btn_style())
+        cons_btn.setToolTip("全库压缩：LLM 跨分类语义合并去重 + 重新归类，旧文件备份到 experience.bak")
+        cons_btn.clicked.connect(self.consolidateRequested.emit)
+        top_row.addWidget(cons_btn)
         reflect_btn = QPushButton("反思整理")
         reflect_btn.setStyleSheet(_btn_style())
         reflect_btn.clicked.connect(self.reflectRequested.emit)
@@ -918,10 +974,10 @@ class ExperienceSection(_Section):
             btn.setStyleSheet(_btn_style(align_left=True))
             btn.clicked.connect(lambda _c=False, cat=doc["category"]: self.viewCategory.emit(cat))
             row.addWidget(btn, 1)
-            del_btn = QPushButton("×")
+            del_btn = _del_btn(14)
             del_btn.setFixedSize(30, 28)
             del_btn.setToolTip("删除该分类及其全部经验条目")
-            del_btn.setStyleSheet(_btn_style(danger=True))
+            del_btn.setStyleSheet(_btn_style(danger=True, icon_only=True))
             del_btn.clicked.connect(lambda _c=False, cat=doc["category"]: self.deleteCategoryRequested.emit(cat))
             row.addWidget(del_btn)
             self._list_area.addWidget(row_wrap)
@@ -931,13 +987,30 @@ class ExperienceSection(_Section):
 
 
 class SkillsSection(_Section):
-    """专属技能：列表 + 编辑（复用原 SkillsTab 逻辑的最小化版本）。"""
+    """专属技能：总开关 + 列表（行内开关/查看/删除）。
+
+    技能只能由助手自主创建（skill 工具落盘），不提供手动新建。
+    行内开关消费 whitelist/blacklist：whitelist 非空 = 仅白名单启用；
+    空 = 全部启用减黑名单（默认全开，对齐 openhanako enabled 语义）。
+    """
 
     skillsChanged = pyqtSignal()
+    toggleSkills = pyqtSignal(bool)
+    skillToggleRequested = pyqtSignal(str, bool)  # name, enable
+    skillDeleteRequested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__("专属技能", parent)
-        self.body().addWidget(_hint("助手的专属知识文件（skills/*.md），对话中可引用。"))
+        self._switch = SwitchButton()
+        self._switch.setOnText("开")
+        self._switch.setOffText("关")
+        self._switch.checkedChanged.connect(self.toggleSkills.emit)
+        self.set_context(self._switch)
+
+        self.body().addWidget(
+            _hint("助手的专属技能（skills/*.md）。启用的技能注入对话提示（名称+简介+路径），正文由模型用 read 工具按需读取。")
+        )
+
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
@@ -948,7 +1021,18 @@ class SkillsSection(_Section):
         self._scroll.setWidget(container)
         self.body().addWidget(self._scroll)
 
-    def reload_skills(self, skills: List[Dict[str, Any]], on_open: Callable[[str], None]) -> None:
+    def set_skills_enabled(self, on: bool) -> None:
+        self._switch.blockSignals(True)
+        self._switch.setChecked(bool(on))
+        self._switch.blockSignals(False)
+
+    def reload_skills(
+        self,
+        skills: List[Dict[str, Any]],
+        enabled_names: "set | List[str]",
+        on_open: Callable[[str], None],
+    ) -> None:
+        enabled = set(enabled_names)
         while self._list_v.count():
             item = self._list_v.takeAt(0)
             w = item.widget()
@@ -958,7 +1042,27 @@ class SkillsSection(_Section):
             self._list_v.addWidget(_hint("（暂无技能）"))
             return
         for sk in skills:
+            row_wrap = QWidget()
+            row_wrap.setStyleSheet("background: transparent;")
+            row = QHBoxLayout(row_wrap)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
             btn = QPushButton(f"{sk['name']} · {sk.get('description', '')[:30]}（{sk.get('content_chars', 0)} 字）")
             btn.setStyleSheet(_btn_style(align_left=True))
             btn.clicked.connect(lambda _c=False, n=sk["name"]: on_open(n))
-            self._list_v.addWidget(btn)
+            row.addWidget(btn, 1)
+            sw = SwitchButton()
+            sw.setOnText("开")
+            sw.setOffText("关")
+            sw.setChecked(sk["name"] in enabled)
+            sw.checkedChanged.connect(
+                lambda on, n=sk["name"]: self.skillToggleRequested.emit(n, on)
+            )
+            row.addWidget(sw)
+            del_btn = _del_btn(14)
+            del_btn.setFixedSize(30, 28)
+            del_btn.setToolTip("删除技能")
+            del_btn.setStyleSheet(_btn_style(danger=True, icon_only=True))
+            del_btn.clicked.connect(lambda _c=False, n=sk["name"]: self.skillDeleteRequested.emit(n))
+            row.addWidget(del_btn)
+            self._list_v.addWidget(row_wrap)

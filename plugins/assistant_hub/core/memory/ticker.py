@@ -25,6 +25,32 @@ _TURNS_PER_CHAIN = 10
 _DAILY_CHECK_INTERVAL = 300
 
 
+def _load_session_store():
+    """加载 session_store（importlib 手动注册）。
+
+    mtime 自检：插件热重载不清理 assistant_hub_core.* 的 sys.modules 缓存，
+    命中即返回会卡旧代码 → 比对源文件 mtime，更新则重新加载替换。
+    """
+    import importlib.util
+    import sys
+
+    key = "assistant_hub_core.session_store"
+    path = Path(__file__).resolve().parent.parent / "session_store.py"
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    mod = sys.modules.get(key)
+    if mod is not None and getattr(mod, "_source_mtime", -1.0) >= mtime:
+        return mod
+    spec = importlib.util.spec_from_file_location(key, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[key] = mod
+    spec.loader.exec_module(mod)
+    mod._source_mtime = mtime
+    return mod
+
+
 class MemoryTicker:
     """记忆调度器（进程级单例，由 AssistantManager 持有）。"""
 
@@ -77,9 +103,15 @@ class MemoryTicker:
             pass
 
     # ── 对外入口（hook 调用）──
-    def on_turn_finished(self) -> None:
-        """Stop hook：活跃助手轮次 +1；每 10 轮触发轻量编译链。"""
-        aid = self._mgr.active_id()
+    def on_turn_finished(self, aid: Optional[str] = None) -> None:
+        """Stop hook：当前会话助手轮次 +1；每 10 轮触发轻量编译链。
+
+        aid 由调用方按会话归属解析（override 优先，否则主助手）；
+        缺省回落 active_id（兼容旧调用）。计数全局共享（只控制触发
+        频率，不影响归属）。
+        """
+        if not aid:
+            aid = self._mgr.active_id()
         if not aid or not self._mgr.has(aid):
             return
         count = int(self._turn_state.get("count", 0)) + 1
@@ -93,16 +125,23 @@ class MemoryTicker:
             self._save_turn_state()
 
     def daily_maintenance(self, logical_date: str) -> None:
-        """逻辑日批（daemon 线程检测日期变化后调用；每逻辑日一次）。"""
+        """逻辑日批（daemon 线程检测日期变化后调用；每逻辑日一次）。
+
+        遍历全部开启记忆的助手各跑一遍：各助手素材经归属过滤后
+        互不重叠，无新增的助手由 compile_chain(require_new) 短路。
+        """
         if self._last_daily_date == logical_date:
             return
         self._last_daily_date = logical_date
         self._turn_state["last_daily_date"] = logical_date
         self._save_turn_state()
-        aid = self._mgr.active_id()
-        if not aid or not self._mgr.has(aid):
-            return
-        self._enqueue(f"daily:{aid}", self._run_daily, aid, logical_date)
+        for a in self._mgr.list_assistants_sorted_by_stable():
+            aid = getattr(a, "id", "")
+            if not aid or not self._mgr.has(aid):
+                continue
+            if not getattr(a, "memory_enabled", False):
+                continue
+            self._enqueue(f"daily:{aid}", self._run_daily, aid, logical_date)
 
     # ── 工作项 ──
     def _run_light(self, aid: str) -> None:
@@ -112,13 +151,20 @@ class MemoryTicker:
             pass  # LLM 不可用等：静默（compile_chain 内部已降级）
 
     def _run_daily(self, aid: str, logical_date: str) -> None:
+        today_changed = True  # LLM 不可用等异常时保持原行为：后续步骤照常尝试
         try:
-            # 顺序铁律：compile_chain(False) 内部先 daily 后 today
-            self._mgr.compile_chain(aid, light=False)
+            # 顺序铁律：compile_chain(False) 内部先 daily 后 today；
+            # require_new=True：今日无新增时短路 facts（省 LLM 成本）
+            chain = self._mgr.compile_chain(aid, light=False, require_new=True)
+            if (chain or {}).get("ok") and chain.get("steps", {}).get("compile_today") is not None:
+                today_changed = bool(chain["steps"]["compile_today"].get("changed"))
         except Exception:
-            pass
+            chain = {}
         a = self._mgr.get(aid)
         if a is None:
+            return
+        # 今日确无新增：素材无变化，dream/经验反思无需跑
+        if not today_changed:
             return
         if getattr(a, "dream_auto_enabled", False):
             try:
@@ -163,8 +209,8 @@ class MemoryTicker:
             try:
                 today = self._logical_today()
                 if today and today != self._last_daily_date:
-                    # 只有存在活跃助手时才触发（内部再校验）
-                    if self._mgr.active_id():
+                    # 存在助手才触发（内部再按 memory_enabled 过滤）
+                    if self._mgr.list_assistants_sorted_by_stable():
                         self.daily_maintenance(today)
             except Exception:
                 pass
@@ -172,17 +218,7 @@ class MemoryTicker:
     def _logical_today(self) -> str:
         """当前逻辑日（04:00 边界）；session_store 不可用返回空串。"""
         try:
-            import importlib.util
-            import sys
-
-            key = "assistant_hub_core.session_store"
-            mod = sys.modules.get(key)
-            if mod is None:
-                path = Path(__file__).resolve().parent.parent / "session_store.py"
-                spec = importlib.util.spec_from_file_location(key, str(path))
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[key] = mod
-                spec.loader.exec_module(mod)
+            mod = _load_session_store()
             from datetime import datetime
 
             return mod.logical_day(datetime.now())

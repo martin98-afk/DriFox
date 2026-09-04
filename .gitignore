@@ -49,6 +49,8 @@ _extract*
 !plugins/**/hooks/hooks.json
 !plugins/**/personas/build/
 !plugins/**/personas/build/**
+# 技能包评测用例（meta-skill-creator 包结构标准件，勿被 *.json 误伤）
+!plugins/**/skills/**/evals/*.json
 fixed_extractor.py
 various_test.py
 app.config

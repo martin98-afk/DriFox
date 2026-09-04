@@ -2359,6 +2359,17 @@ class OpenAIChatWorker(QThread):
                     "echarts": item.get("echarts"),
                     "lsp_diagnostic": item.get("lsp_diagnostic"),
                 }
+                # ⚠️ 轨迹计时字段必须透传：ts_ms / trace_phases 由执行层
+                # _build_result_dict 写入，是 agent_trace 在**重载会话后**恢复
+                # 真实耗时的唯一数据源（运行时 timing 表只存在于内存）。
+                # 这里重建 dict 时漏掉 → 重载后所有工具条目耗时退化成
+                # 「下一条起点 − 本条起点」并封顶显示 ≥3.00 s。
+                _ts_ms = item.get("ts_ms")
+                if isinstance(_ts_ms, (int, float)) and not isinstance(_ts_ms, bool) and _ts_ms > 0:
+                    tool_result_map[tc_id]["ts_ms"] = int(_ts_ms)
+                _phases = item.get("trace_phases")
+                if isinstance(_phases, dict) and _phases:
+                    tool_result_map[tc_id]["trace_phases"] = dict(_phases)
 
         # ---- Phase 3: 过滤无结果的 tool_call（原地 del，避免重建 dict） ----
         if tool_result_map:
@@ -2401,7 +2412,12 @@ class OpenAIChatWorker(QThread):
                     asst_msg["reasoning_content"] = reasoning_content
                 if has_model_name:
                     asst_msg["model_name"] = model_name
-
+                # ⚠️ tool_calls assistant 也要落盘本次 API 调用耗时（含 thinking）：
+                # 纯文本回复走 _make_assistant_msg 已带 elapsed_ms，这里漏了
+                # 会导致「思考+决定调工具」的条目在轨迹里耗时为 0 / 拿整轮顶替。
+                _llm_ms = getattr(self, "_last_llm_elapsed_ms", 0.0) or 0.0
+                if _llm_ms > 0:
+                    asst_msg["elapsed_ms"] = round(float(_llm_ms), 1)
                 if asst_msg.get("content") or asst_msg.get("tool_calls"):
                     sequence.append(asst_msg)
 
@@ -2416,6 +2432,10 @@ class OpenAIChatWorker(QThread):
         for tc_id, tool_result in tool_result_map.items():
             if tc_id in added_tool_ids:
                 continue
+            # ⚠️ 必须从 tool_call_map 取声明结构（含 id/function.name/arguments）。
+            # 修复前误取 tool_result_map：tool 结果 dict 无 id/function 键，
+            # 塞进 tool_calls 后序列化出 {id:"", function:{name:null}} 的畸形声明，
+            # 后续 tool result 的真实 id 在服务端找不到声明 → MiniMax 2013 错误。
             tool_call = tool_call_map.get(tc_id)
             asst_msg = {"role": "assistant", "timestamp": now_ts}
             if has_reasoning:
@@ -2424,6 +2444,9 @@ class OpenAIChatWorker(QThread):
                 asst_msg["model_name"] = model_name
             if tool_call:
                 asst_msg["tool_calls"] = [tool_call]
+            _llm_ms = getattr(self, "_last_llm_elapsed_ms", 0.0) or 0.0
+            if _llm_ms > 0:
+                asst_msg["elapsed_ms"] = round(float(_llm_ms), 1)
             if asst_msg.get("tool_calls"):
                 sequence.append(asst_msg)
             sequence.append(tool_result)
@@ -2537,9 +2560,9 @@ class OpenAIChatWorker(QThread):
                 if not isinstance(r, dict) or not r.get("success"):
                     continue
                 tn = r.get("name", "")
-                if tn in _provides_image:
-                    # T4d：放宽回基线语义——工具在视觉集合即提示（协议 A 工具天然产出路径，
-                    # 无需内容结构判定；read 有 image_data 亦命中）
+                if tn in _provides_image and self._result_has_image(
+                    r.get("content"), r.get("raw_content"), r.get("image_data")
+                ):
                     _non_vision_tools.add(tn)
             if _non_vision_tools:
                 _nv_hint = (
@@ -2800,7 +2823,34 @@ class OpenAIChatWorker(QThread):
 
             fixed_messages.append(fixed_msg)
 
-        return fixed_messages, modified
+        # 第三步：反向清理孤儿 tool 消息（tool 结果存在，但之前的 assistant 均未声明该 id）。
+        # 修复前只处理 assistant 方向的孤儿，方向反了就漏：MiniMax 2013
+        # （tool result's tool id not found）重试时 was_fixed=False，错误直达用户。
+        final_messages: List[Dict] = []
+        declared_ids: set = set()
+        removed_orphans = 0
+        for msg in fixed_messages:
+            role = msg.get("role")
+            if role == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    tc_id = tc.get("id", "")
+                    if tc_id:
+                        declared_ids.add(tc_id)
+                final_messages.append(msg)
+            elif role == "tool":
+                tc_id = msg.get("tool_call_id", "")
+                if tc_id and tc_id not in declared_ids:
+                    removed_orphans += 1
+                    modified = True
+                    continue
+                final_messages.append(msg)
+            else:
+                final_messages.append(msg)
+
+        if removed_orphans:
+            logger.warning(f"[ToolCall修复] 移除 {removed_orphans} 条无 assistant 声明的孤儿 tool 结果")
+
+        return final_messages, modified
 
     def _try_recover_tool_arguments(self, messages: List[Dict]) -> Optional[List[Dict]]:
         """
@@ -4582,6 +4632,20 @@ class OpenAIChatWorker(QThread):
         success = bool(getattr(result, "success", True)) if result else False
         return result, result_content, success
 
+    @staticmethod
+    def _result_has_image(content, raw_content=None, image_data=None) -> bool:
+        """工具结果本次是否实际产出图像（协议 B image_data / 协议 A 图片路径 dict）。
+
+        read 声明 provides_image 但读普通文件时无图像载荷，不能只按工具名判定，
+        否则 read 文本结果也会被追加视觉提示。
+        """
+        if isinstance(image_data, dict) and image_data.get("data"):
+            return True
+        for c in (content, raw_content):
+            if isinstance(c, dict) and (c.get("absolute_path") or c.get("path")):
+                return True
+        return False
+
     def _build_result_dict(self, tool_call_id, tool_name, arguments, result_content, success, round_id, result_obj):
         """构建标准的结果字典
 
@@ -4603,7 +4667,10 @@ class OpenAIChatWorker(QThread):
         except Exception:
             # T4d：registry 异常时保守回退，保持旧工具名兜底
             _provides_image = frozenset({"screenshot", "read"})
-        if tool_name in _provides_image and success:
+        if tool_name in _provides_image and success and self._result_has_image(
+            getattr(result_obj, "content", None) if result_obj else None,
+            image_data=getattr(result_obj, "image_data", None) if result_obj else None,
+        ):
             try:
                 from app.core.model_capabilities import get_model_capabilities
 

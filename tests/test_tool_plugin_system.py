@@ -177,7 +177,7 @@ class TestSystemPluginTools:
             "team_list_members",
             "question",
             "skill",
-            "list_skills",
+            "manage_skill",
             "mcp_list_servers",
             "upload_file",
         }

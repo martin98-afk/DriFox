@@ -40,7 +40,7 @@ from app.utils.design_tokens import (
     invalidate_font_cache,
     scale_icon_size,
 )
-from app.utils.startup_manager import set_auto_start
+from app.utils.startup_manager import AutoStartCancelled, request_auto_start_update
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
 from app.widgets.cards.settings.gitee_card import GiteeCard
@@ -1221,9 +1221,14 @@ class LLMSettingsCard(SystemCardFrame):
                     ).show()
                     return
 
-            # 1. 先写入注册表（独立 try，不相互污染异常处理）
+            # 1. 先弹 UAC 由提权 helper 写 HKLM 注册表（独立 try，不相互污染异常处理）
             try:
-                set_auto_start(enabled)
+                request_auto_start_update(enabled)
+            except AutoStartCancelled:
+                # 用户在 UAC 弹窗点"否"：静默回退开关，不打扰
+                self.autoStartCard.switchButton.setChecked(not enabled)
+                self.cfg.set(self.cfg.auto_start, not enabled, save=True)
+                return
             except Exception as exc:
                 # 注册表写入失败 → 回退 UI 和配置
                 self.autoStartCard.switchButton.setChecked(not enabled)

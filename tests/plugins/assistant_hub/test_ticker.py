@@ -19,14 +19,24 @@ spec.loader.exec_module(m)
 class FakeManager:
     """记录 compile_chain/dream/reflect 调用序列的假 manager。"""
 
-    def __init__(self, active_id="a1", llm_error=False):
+    def __init__(self, active_id="a1", llm_error=False, assistants=None):
         self._active_id = active_id
         self.calls = []
         self._llm_error = llm_error
         self.lock = threading.Lock()
+        # 助手列表（id, memory_enabled）：日批遍历用
+        self._assistants = assistants if assistants is not None else [("a1", True)]
 
     def active_id(self):
         return self._active_id
+
+    def list_assistants_sorted_by_stable(self):
+        class _A:
+            def __init__(self, aid, mem):
+                self.id = aid
+                self.memory_enabled = mem
+
+        return [_A(aid, mem) for aid, mem in self._assistants]
 
     def has(self, aid):
         return bool(aid)
@@ -40,12 +50,13 @@ class FakeManager:
 
         return _A() if aid else None
 
-    def compile_chain(self, aid, *, light=False):
+    def compile_chain(self, aid, *, light=False, require_new=False):
         with self.lock:
             self.calls.append(("compile", aid, light))
         if self._llm_error:
             return {"ok": False, "error": "llm_unavailable"}
-        return {"ok": True}
+        # 默认模拟今日有新增；测试用 _no_new_today 控制短路分支
+        return {"ok": True, "steps": {"compile_today": {"changed": not getattr(self, "_no_new_today", False)}}}
 
     def dream_start_auto_if_eligible(self, aid, logical_date):
         with self.lock:
@@ -122,6 +133,34 @@ def test_daily_maintenance_sequence(tmp_path):
         t.stop()
 
 
+def test_daily_iterates_all_memory_enabled_assistants(tmp_path):
+    """日批遍历全部记忆助手：a1/a2 跑，a3 关记忆被跳过。"""
+    mgr = FakeManager(assistants=[("a2", True), ("a1", True), ("a3", False)])
+    t = m.MemoryTicker(mgr, state_dir=tmp_path)
+    try:
+        t.daily_maintenance(logical_date="2026-09-01")
+        assert _drain(t)
+        compiled_aids = [c[1] for c in mgr.calls if c[0] == "compile"]
+        assert set(compiled_aids) == {"a1", "a2"}
+        assert "a3" not in compiled_aids
+    finally:
+        t.stop()
+
+
+def test_daily_skips_when_no_new_today(tmp_path):
+    """今日无新增：dream/reflect 短路（素材无变化）。"""
+    mgr = FakeManager()
+    mgr._no_new_today = True
+    t = m.MemoryTicker(mgr, state_dir=tmp_path)
+    try:
+        t.daily_maintenance(logical_date="2026-09-01")
+        assert _drain(t)
+        kinds = [c[0] for c in mgr.calls]
+        assert kinds == ["compile"]  # 只有编译链，无 dream/reflect
+    finally:
+        t.stop()
+
+
 def test_daily_respects_dream_auto_disabled(tmp_path):
     class M2(FakeManager):
         def get(self, aid):
@@ -144,7 +183,7 @@ def test_daily_respects_dream_auto_disabled(tmp_path):
 
 
 def test_no_active_assistant_noop(tmp_path):
-    mgr = FakeManager(active_id="")
+    mgr = FakeManager(active_id="", assistants=[])
     t = m.MemoryTicker(mgr, state_dir=tmp_path)
     try:
         t.on_turn_finished()

@@ -94,29 +94,31 @@ def _mark_clean_exit() -> None:
         pass
 
 
-def check_last_crash(logs_dir: Path) -> Optional[Path]:
-    """扫描 crash 目录，返回待报告的最新崩溃 dump 路径（无则 None）。
+def check_pending_crashes(logs_dir: Path) -> list:
+    """扫描 crash 目录，返回全部待报告的崩溃 dump（按崩溃时间从旧到新）。
 
-    已确认非崩溃的文件（空文件/含 clean-exit 标记）就地清理。
+    每份 dump 由 prompt_crash_report 弹窗一次后重命名 .reported（改状态），
+    因此这里只收集尚未报告的；已确认非崩溃的文件（空文件/含 clean-exit
+    标记）就地清理。
     """
     try:
         crash_dir = Path(logs_dir) / "crash"
         if not crash_dir.is_dir():
-            return None
-        latest: Optional[Path] = None
+            return []
+        pending: list = []
         for f in crash_dir.glob("crash_*.log"):
             try:
                 content = f.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
             if content.strip() and _CLEAN_EXIT_MARK not in content:
-                if latest is None or f.stat().st_mtime > latest.stat().st_mtime:
-                    latest = f
+                pending.append(f)
             else:
                 _silent_remove(f)
-        return latest
+        pending.sort(key=lambda p: p.stat().st_mtime)
+        return pending
     except Exception:
-        return None
+        return []
 
 
 def _nearby_wer_dump(crash_log: Path, window_s: float = 600.0) -> Optional[str]:
@@ -210,7 +212,7 @@ def prompt_crash_report(dump_path: Path, parent=None) -> None:
         if box.clickedButton() is open_btn:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(dump_path.parent)))
         # 报告已告知 → 重命名标记已读：文件保留供排查（崩溃证据不可再生），
-        # 后缀变化使 check_last_crash 不再命中，避免下次启动重复弹窗
+        # 后缀变化使 check_pending_crashes 不再命中，避免重复弹窗
         try:
             dump_path.rename(dump_path.with_name(dump_path.name + ".reported"))
         except Exception:

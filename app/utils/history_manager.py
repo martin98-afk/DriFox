@@ -119,7 +119,28 @@ def _clean_orphan_tool_calls(messages: List[Dict]) -> List[Dict]:
 
         cleaned.append(msg)
 
-    return cleaned
+    # 反向清理孤儿 tool 消息（结果存在，但之前的 assistant 均未声明该 id）。
+    # 逻辑同 chat_worker._fix_tool_result_order 第三步，保证持久化后的历史
+    # 不会触发 MiniMax 2013（tool result's tool id not found）。
+    final_messages = []
+    declared_ids: set = set()
+    for msg in cleaned:
+        role = msg.get("role")
+        if role == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                tc_id = tc.get("id", "")
+                if tc_id:
+                    declared_ids.add(tc_id)
+            final_messages.append(msg)
+        elif role == "tool":
+            tc_id = msg.get("tool_call_id", "")
+            if tc_id and tc_id not in declared_ids:
+                continue
+            final_messages.append(msg)
+        else:
+            final_messages.append(msg)
+
+    return final_messages
 
 
 # 预编译文件名清理正则

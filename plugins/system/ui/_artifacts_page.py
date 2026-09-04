@@ -115,7 +115,7 @@ class _SystemArtifactItem(QFrame):
         text_col = QVBoxLayout()
         text_col.setSpacing(1)
         name = Path(self._file_path).name or self._file_path
-        self._name_label = QLabel(name, self)
+        self._name_label = _ElidedLabel(name, self)
         self._meta_label = QLabel(f"{op.get('tool_name', '')} · {_relative_time(op.get('created_at', ''))}", self)
         text_col.addWidget(self._name_label)
         text_col.addWidget(self._meta_label)
@@ -255,7 +255,8 @@ class _QuestionGroupCard(QFrame):
     def _apply_expand(self) -> None:
         self._body.setVisible(self._expanded)
         # 收起态显示「展开」箭头，展开态显示「折叠」箭头
-        self._arrow_label.setPixmap(get_icon("展开" if not self._expanded else "折叠").pixmap(14, 14))
+        # 状态语义：折叠态显示向右箭头（▶，点击展开），展开态显示向下箭头（▼）
+        self._arrow_label.setPixmap(get_icon("折叠" if not self._expanded else "展开").pixmap(14, 14))
 
     def _emit_diff(self) -> None:
         paths: List[str] = []

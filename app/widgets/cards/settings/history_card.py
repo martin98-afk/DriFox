@@ -353,11 +353,10 @@ class _HistoryItemCard(SimpleCardWidget):
     def _ensure_preview_label(self, text: str):
         """确保存在预览标签（独立一行，不挤占右侧按钮空间）"""
         if self._preview_label is None:
-            self._preview_label = CaptionLabel("", self)
+            self._preview_label = _ElidedLabel("", self)
             self._preview_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {self._caption_size}px; {self._font_family}"
             )
-            self._preview_label.setWordWrap(True)
             # 添加到主布局底部（bottom_row 下方），占满整行宽度
             self.layout().addWidget(self._preview_label)
         self._preview_label.setText(text)
@@ -600,11 +599,10 @@ class _ArchivedItemCard(CardWidget):
     def _init_preview_label(self, text: str):
         """初始化预览标签（独立一行，不挤占右侧按钮空间）"""
         caption_size = scale_font_size(12)
-        self._preview_label = CaptionLabel(text, self)
+        self._preview_label = _ElidedLabel(text, self)
         self._preview_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {caption_size}px; {get_font_family_css()}"
         )
-        self._preview_label.setWordWrap(True)
         # 添加到主布局底部（bottom_row 下方），占满整行宽度
         self.layout().addWidget(self._preview_label)
 
@@ -719,8 +717,8 @@ class _TeamGroupCard(CardWidget):
 
     方案 A（M4）：取消顶部团队分组区，团队会话在普通列表内按 run_id 合并为
     单一条目（数据层 merge_team=True 提供），此处渲染该条目：
-    - 顶行：👥 团队名 + 相对时间 + 恢复团队 + 归档按钮
-    - 元信息行：N 位成员 · M 轮
+    - 顶行：👥 团队名 + 恢复团队 + 归档按钮
+    - 元信息行：N 位成员 · M 轮 · 相对时间
     - 预览行：团队首问（数据层 get_team_first_question 提供）
     - 展开区：点击卡片仅切换展开/收起（不再触发恢复）；展开后渲染成员行
       （角色胶囊 + 标题 + 相对时间），点击成员行 → memberSelected(session_record)
@@ -765,7 +763,7 @@ class _TeamGroupCard(CardWidget):
         self._layout.setContentsMargins(12, 8, 8, 8)
         self._layout.setSpacing(6)
 
-        # 顶行：团队名 + 相对时间 + 恢复 + 归档按钮
+        # 顶行：团队名 + 恢复 + 归档按钮
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
 
@@ -775,13 +773,7 @@ class _TeamGroupCard(CardWidget):
         )
         top_row.addWidget(self.title_label, 1)
 
-        last_time = group.get("last_time", "")
-        self._last_time = last_time
-        self.time_label = CaptionLabel("", self)
-        self.time_label.setStyleSheet(
-            f"color: {_text_secondary}; font-size: {_caption}px; background: transparent; {_ff}"
-        )
-        top_row.addWidget(self.time_label, 0, Qt.AlignVCenter)
+        self._last_time = group.get("last_time", "")
 
         archive_btn = TransparentToolButton(get_icon("归档"), self)
         archive_btn.setToolTip("归档该团队")
@@ -819,7 +811,7 @@ class _TeamGroupCard(CardWidget):
         self._layout.addWidget(self.meta_label)
 
         # 预览行（首问预览，复用 _HistoryItemCard 的预览样式）
-        self._preview_label: Optional[CaptionLabel] = None
+        self._preview_label: Optional[_ElidedLabel] = None
         self._ensure_preview_label(group.get("preview", "") or "")
 
         # 展开区容器：成员行列表（懒创建）
@@ -831,12 +823,11 @@ class _TeamGroupCard(CardWidget):
     def _ensure_preview_label(self, text: str):
         """确保存在预览标签（独立一行，样式与 _HistoryItemCard 一致）"""
         if self._preview_label is None:
-            self._preview_label = CaptionLabel("", self)
+            self._preview_label = _ElidedLabel("", self)
             self._preview_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {scale_font_size(11)}px; "
                 f"{get_font_family_css()}"
             )
-            self._preview_label.setWordWrap(True)
             self._layout.addWidget(self._preview_label)
         self._preview_label.setText(text)
         self._preview_label.setVisible(bool(text))
@@ -947,15 +938,13 @@ class _TeamGroupCard(CardWidget):
         self.title_label.setText(f"👥 {team_name}")
 
         self._last_time = group.get("last_time", "") or ""
-        if self._last_time:
-            self.time_label.setText(f"最近活跃 {format_relative_time(self._last_time)}")
-            self.time_label.show()
-        else:
-            self.time_label.hide()
 
         member_count = group.get("member_count", len(group.get("agent_names") or []))
         message_count = group.get("message_count", 0)
-        self.meta_label.setText(f"{member_count} 位成员 · {message_count} 轮")
+        meta_text = f"{member_count} 位成员 · {message_count} 轮"
+        if self._last_time:
+            meta_text += f" · {format_relative_time(self._last_time)}"
+        self.meta_label.setText(meta_text)
 
         preview = group.get("preview", "") or ""
         self._ensure_preview_label(preview)

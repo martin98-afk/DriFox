@@ -80,10 +80,12 @@ class Assistant:
     avatar_path: str = ""  # 相对 avatars/ 的文件路径，空表示内置色块
     primary: bool = False  # 是否主助手
     order: int = 0
-    # assistant 派生 subagent 的 tool 白名单；空 list 表示继承 yuan
+    # 专属技能白名单：非空 = 仅启用名单内技能；空 = 全部启用（再减黑名单）
     skills_whitelist: List[str] = field(default_factory=list)
-    # assistant 派生 subagent 的 tool 黑名单
+    # 专属技能黑名单：whitelist 为空时生效，名单内技能不注入
     skills_blacklist: List[str] = field(default_factory=list)
+    # 专属技能（skills/*.md）总开关：关闭后不注入提示词，read_skill 工具暂停
+    skills_enabled: bool = True
     # 是否启用 memory 体系（关闭后 today/longterm 都不注入）
     memory_enabled: bool = True
     # dream 自动整理：默认关闭（手动触发）
@@ -119,6 +121,7 @@ class Assistant:
             "order": self.order,
             "skills_whitelist": list(self.skills_whitelist),
             "skills_blacklist": list(self.skills_blacklist),
+            "skills_enabled": self.skills_enabled,
             "memory_enabled": self.memory_enabled,
             "dream_auto_enabled": self.dream_auto_enabled,
             "model": self.model,
@@ -150,6 +153,7 @@ class Assistant:
             order=int(data.get("order", 0) or 0),
             skills_whitelist=list(data.get("skills_whitelist") or []),
             skills_blacklist=list(data.get("skills_blacklist") or []),
+            skills_enabled=bool(data.get("skills_enabled", True)),
             memory_enabled=bool(data.get("memory_enabled", True)),
             dream_auto_enabled=bool(data.get("dream_auto_enabled", False)),
             model=str(data.get("model") or ""),
@@ -183,6 +187,7 @@ class Assistant:
             order=0,
             skills_whitelist=[],
             skills_blacklist=[],
+            skills_enabled=True,
             memory_enabled=True,
             dream_auto_enabled=False,
             model="",
@@ -349,6 +354,10 @@ class AssistantManager:
     # 由 @提及触发，仅影响对应会话的 system prompt）
     _session_overrides: Dict[str, str] = {}
 
+    # 会话归属映射：{session_id: assistant_id}（持久化 _session_map.json）；
+    # 记忆传送带按它过滤素材，保证各助手记忆互相独立
+    _session_map: Dict[str, str] = {}
+
     def __init__(self, root_dir: Optional[str] = None):
         self._root: Path = Path(root_dir) if root_dir else self._default_root()
         self._assistants: Dict[str, Assistant] = {}
@@ -374,6 +383,7 @@ class AssistantManager:
         """测试/重载用：清空单例"""
         cls._instance = None
         cls._session_overrides = {}
+        cls._session_map = {}
 
     # ── 根目录 ──
 
@@ -431,6 +441,7 @@ class AssistantManager:
     def _load_all(self) -> None:
         """启动时从磁盘扫描全部助手"""
         self._ensure_dir(self._root)
+        self._load_session_map()
         try:
             for entry in sorted(self._root.iterdir(), key=lambda p: p.name):
                 if not entry.is_dir():
@@ -665,7 +676,54 @@ class AssistantManager:
             overrides[session_id] = aid
         else:
             overrides.pop(session_id, None)
+        # 同步归属映射（提前落盘，不等轮次结束）
+        if aid:
+            cls.record_session_aid(session_id, aid)
         return True
+
+    @classmethod
+    def record_session_aid(cls, session_id: str, aid: str) -> None:
+        """记录会话归属（sid 当前使用的助手）：记忆素材过滤的数据源。"""
+        if not session_id or not aid:
+            return
+        inst = cls.get_instance()
+        if cls._session_map.get(session_id) == aid:
+            return
+        cls._session_map[session_id] = aid
+        # 防膨胀：超上限裁掉最旧的一半（dict 保插入序）
+        if len(cls._session_map) > 1000:
+            for k in list(cls._session_map.keys())[:500]:
+                cls._session_map.pop(k, None)
+        inst._save_session_map()
+
+    @classmethod
+    def resolve_session_aid(cls, session_id: str) -> str:
+        """会话当前归属助手；映射无记录/助手已删回落主助手（兼容旧数据）。"""
+        fallback = cls.active_id()
+        if not session_id:
+            return fallback
+        aid = cls._session_map.get(session_id, "")
+        if aid and cls.get_instance().has(aid):
+            return aid
+        return fallback
+
+    def _session_map_path(self) -> Path:
+        return self._root / "_session_map.json"
+
+    def _save_session_map(self) -> None:
+        try:
+            self._ensure_dir(self._root)
+            self._session_map_path().write_text(json.dumps(self._session_map, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 保存 session map 失败: {e}")
+
+    def _load_session_map(self) -> None:
+        try:
+            data = json.loads(self._session_map_path().read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                type(self)._session_map = {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            pass
 
     @classmethod
     def get_session_override(cls, session_id: str) -> str:
@@ -1073,6 +1131,18 @@ class AssistantManager:
 
     # ── 专属技能 ──
 
+    def enabled_skills(self, aid: str) -> List[Dict[str, Any]]:
+        """过滤后的启用技能：总开关关→空；whitelist 非空→仅白名单；空→全部减 blacklist。"""
+        a = self.get(aid)
+        if a is None or not a.skills_enabled:
+            return []
+        skills = self.list_skills(aid)
+        if a.skills_whitelist:
+            wl = set(a.skills_whitelist)
+            return [s for s in skills if s["name"] in wl]
+        bl = set(a.skills_blacklist)
+        return [s for s in skills if s["name"] not in bl]
+
     def list_skills(self, aid: str) -> List[Dict[str, Any]]:
         """列出助手专属技能（每条 {name, path, description, content_chars}）"""
         d = self._skills_dir(aid)
@@ -1110,15 +1180,15 @@ class AssistantManager:
         except Exception:
             return ""
 
-    def write_skill(self, aid: str, name: str, content: str) -> bool:
-        # 文件名规范化（保留英文/数字/下划线/连字符）
+    def write_skill(self, aid: str, name: str, content: str) -> str:
+        """写入技能，返回规范化文件名（不含 .md）；失败返回空串。"""
         safe = re.sub(r"[^a-zA-Z0-9_\-]+", "-", name).strip("-").lower()
         if not safe:
-            return False
+            return ""
         d = self._skills_dir(aid)
         self._ensure_dir(d)
         (d / f"{safe}.md").write_text(content, encoding="utf-8")
-        return True
+        return safe
 
     def delete_skill(self, aid: str, name: str) -> bool:
         safe = re.sub(r"[^a-zA-Z0-9_\-]+", "-", name).strip("-").lower()
@@ -1306,11 +1376,18 @@ class AssistantManager:
         """assemble 产物 memory.md（缺失/空返回 ""）。"""
         return self._core_compile().assemble(self._assistant_dir(aid))
 
-    def compile_chain(self, aid: str, *, light: bool = False) -> Dict[str, Any]:
+    def compile_chain(self, aid: str, *, light: bool = False, require_new: bool = False) -> Dict[str, Any]:
         """跑编译链（ticker/手动入口）。
 
         light=True：只 compile_today + assemble（每 10 轮轻量链）
         light=False：完整日批（daily→today→roll→facts→assemble）
+        require_new=True：今日无新增轮次时跳过 facts 等后续 LLM 步骤
+        （日批遍历多助手时避免对无活动助手白烧调用）。
+
+        素材过滤：compile_today 按会话归属映射（_session_map）只取
+        本助手名下会话，保证各助手记忆互相独立；映射无记录的旧会话
+        归主助手（与升级前行为一致）。
+
         LLM 不可用时各步静默降级（返回各步状态）。
         """
         aid_dir = self._assistant_dir(aid)
@@ -1321,6 +1398,12 @@ class AssistantManager:
         except Exception as e:
             return {"ok": False, "error": f"llm_unavailable: {e}"}
         try:
+            active = self.active_id()
+            session_map = dict(type(self)._session_map)
+
+            def _filter(s: dict) -> bool:
+                return session_map.get(s.get("session_id", ""), active) == aid
+
             if not light:
                 # 日批顺序铁律：先蒸馏昨日草稿，再增量编译今日
                 prev_today = (
@@ -1330,9 +1413,17 @@ class AssistantManager:
                 )
                 yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
                 result["steps"]["compile_daily"] = cm.compile_daily(aid_dir, prev_today, yesterday, llm=llm)
-            result["steps"]["compile_today"] = cm.compile_today(aid_dir, llm=llm)
+            result["steps"]["compile_today"] = cm.compile_today(aid_dir, llm=llm, _session_filter=_filter)
             if not light:
                 result["steps"]["roll_daily_window"] = {"folded": cm.roll_daily_window(aid_dir)}
+                if require_new and not result["steps"]["compile_today"].get("changed"):
+                    # 今日无新增：跳过 facts（LLM 成本），assemble 收尾
+                    text = cm.assemble(aid_dir)
+                    result["steps"]["assemble"] = {"chars": len(text)}
+                    if not text:
+                        result["memory_empty"] = True
+                    self.invalidate_context(aid)
+                    return result
                 result["steps"]["compile_facts"] = cm.compile_facts(aid_dir, llm=llm)
             text = cm.assemble(aid_dir)
             result["steps"]["assemble"] = {"chars": len(text)}
@@ -1386,14 +1477,42 @@ class AssistantManager:
         return self._core_experience().delete_entry(self._assistant_dir(aid), category, index)
 
     def experience_reflect(self, aid: str) -> Dict[str, Any]:
-        """经验反思：从 memory.md 提炼工作心得（需 LLM；LLM 不可用静默返回）。"""
+        """经验反思：从 memory.md 提炼工作心得，随后自动压缩超限分类（需 LLM；LLM 不可用静默返回）。"""
         try:
             llm = self._utility_llm(aid)
         except Exception as e:
             return {"added": 0, "items": [], "error": f"llm_unavailable: {e}"}
-        return self._core_experience().reflect(
+        r = self._core_experience().reflect(
             self._assistant_dir(aid),
             identity_and_persona=self.identity_and_persona(aid),
             memory_md=self.compiled_memory(aid),
             llm=llm,
         )
+        r["consolidated"] = self._experience_auto_consolidate(aid, llm)
+        return r
+
+    def _experience_auto_consolidate(self, aid: str, llm) -> List[Dict[str, Any]]:
+        """水位检查：全库条目超阈值时自动压缩一次（无人管理，反思收尾时跑）。"""
+        try:
+            if not self._core_experience().needs_consolidate(self._assistant_dir(aid)):
+                return []
+        except Exception:
+            return []
+        try:
+            r = self._core_experience().consolidate(self._assistant_dir(aid), llm=llm)
+        except Exception as e:
+            return [{"error": str(e)}]
+        if r.get("changed"):
+            self.invalidate_context(aid)
+        return [r]
+
+    def experience_consolidate(self, aid: str) -> Dict[str, Any]:
+        """手动全库压缩（跨分类语义合并去重 + 重新归类）。"""
+        try:
+            llm = self._utility_llm(aid)
+        except Exception as e:
+            return {"changed": False, "error": f"llm_unavailable: {e}"}
+        r = self._core_experience().consolidate(self._assistant_dir(aid), llm=llm)
+        if r.get("changed"):
+            self.invalidate_context(aid)
+        return r

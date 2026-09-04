@@ -780,6 +780,16 @@ class ChatBackend(QObject):
         "tool_call_started": 3,  # (tool_call_id, tool_name, arguments)；引擎第 4 参 round_id 不透传
         "tool_result_received": 4,  # (tool_call_id, name, arguments, result)
         "context_updated": 2,  # (token_count, limit)；引擎第 3 参 from_api 不透传
+        "error": 1,  # (error,) → 信号名见 _TRACE_SIGNAL_ALIAS
+    }
+
+    # 「回调键名 ≠ 信号名」的映射（main_widget._setup_engine_callbacks 用的是
+    # 回调语义名）。error → error_occurred 必须转发：引擎报错路径**不发射
+    # stream_finished**（chat_worker 只 emit error_occurred，main_widget 的
+    # _on_engine_error 也不走 _on_messages_updated），插件若订阅不到 error，
+    # 就永远收不到"这一轮结束了"的兜底通知 —— 表现为 in-flight 计时永不停。
+    _TRACE_SIGNAL_ALIAS: Dict[str, str] = {
+        "error": "error_occurred",
     }
 
     def _wrap_trace_callback(self, name: str, callback: Callable) -> Callable:
@@ -787,7 +797,9 @@ class ChatBackend(QObject):
         arity = self._TRACE_SIGNAL_ARITY.get(name)
         if arity is None:
             return callback
-        sig = getattr(self, name, None)
+        # ⚠️ 用 getattr 取别名表：单测探针只复制 _TRACE_SIGNAL_ARITY（向后兼容）
+        alias = getattr(self, "_TRACE_SIGNAL_ALIAS", None) or {}
+        sig = getattr(self, alias.get(name, name), None)
         if sig is None or not hasattr(sig, "emit"):
             return callback
 

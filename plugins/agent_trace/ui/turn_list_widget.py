@@ -306,6 +306,18 @@ class _RowDelegate(QStyledItemDelegate):
                 painter.drawText(QRect(x, rect.y(), tw, rect.height()), Qt.AlignCenter, tag)
                 x += tw + 6
 
+            # 思维链标记：有 reasoning → 详情面板有 Thinking tab，列表给个入口暗示
+            if rec.meta.get("reasoning"):
+                tfm = QFontMetrics(small_font)
+                tag = "思考"
+                tw = tfm.horizontalAdvance(tag) + 10
+                painter.setBrush(with_alpha(QColor(pal.warning), 36))
+                painter.drawRoundedRect(QRectF(x, dot_y - 2, tw, dot_d + 4), 3, 3)
+                painter.setPen(QColor(pal.warning))
+                painter.setFont(small_font)
+                painter.drawText(QRect(x, rect.y(), tw, rect.height()), Qt.AlignCenter, tag)
+                x += tw + 6
+
             # 主文本：label（亮） + preview（暗）
             avail = max(30, name_rect.right() - x)
             painter.setFont(main_font)

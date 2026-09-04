@@ -54,7 +54,6 @@ LOG_ROUTES: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = [
             "app.widgets",
             "app.main_widget",
             "app.tray_manager",
-            "app.tool_popup",
             "app.update_checker",
             "app.core.ui_event_bus",
             "app.core.webengine_profile",

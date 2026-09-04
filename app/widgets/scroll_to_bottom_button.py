@@ -18,15 +18,17 @@
 - 事件过滤父级与锚点的 Resize/Move/Show 来重定位，不引入额外定时器。
 """
 
+from typing import Optional
+
 import weakref
 from pathlib import Path
 
-from PyQt5.QtCore import QByteArray, QEvent, QFile, QSize, Qt
+from PyQt5.QtCore import QByteArray, QEasingCurve, QEvent, QFile, QPropertyAnimation, QSize, Qt
 from PyQt5.QtGui import QIcon, QPainter, QPixmap
 from PyQt5.QtSvg import QSvgRenderer
-from PyQt5.QtWidgets import QPushButton
+from PyQt5.QtWidgets import QGraphicsOpacityEffect, QPushButton
 
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Animations, Colors
 from app.utils.theme_manager import theme_manager
 
 # qrc 编译产物：**导入即注册资源**。主程序链路只 import 了深色 icons_rc，
@@ -43,6 +45,10 @@ _BUTTON_SIZE = 32
 _MARGIN_RIGHT = 20  # 距 chat_scroll_area 右边缘
 _MARGIN_BOTTOM = 14  # 距 chat_scroll_area 下边缘
 _ICON_SIZE = 18
+
+# 浮出/隐藏淡入淡出时长：浮层标准区间 125-200ms，隐藏稍短更利落
+_FADE_IN_MS = 160
+_FADE_OUT_MS = 120
 
 # 图标资源名（qrc 前缀 / 源码树相对路径共用同一个文件名）
 _ICON_DARK_REL = "icons/scroll_to_bottom.svg"
@@ -177,6 +183,10 @@ class ScrollToBottomButton(QPushButton):
         self._on_click_cb = on_click
         self._visible_pref = False  # 宿主要求的显示状态（实际显示还要看有无可滚内容）
         self._style_sig = None  # 已应用样式的主题签名（用于跳过重复刷新）
+        # 淡入淡出状态：_opacity_value 跟随动画实时值，retarget 时从它续接
+        self._fade_anim: Optional[QPropertyAnimation] = None
+        self._fade_target = 1.0
+        self._opacity_value = 1.0
 
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
@@ -297,15 +307,51 @@ class ScrollToBottomButton(QPushButton):
 
     def _sync_visibility(self):
         should_show = self._visible_pref and self._has_scrollable_content()
-        if should_show == self.isVisible():
+        target = 1.0 if should_show else 0.0
+        settled = should_show == self.isVisible() and self._fade_target == target
+        if settled:
             if should_show:
                 self._reposition()
             return
         if should_show:
             self._reposition()
             self.raise_()
-            self.show()
+            if not self.isVisible():
+                self.show()
+            self._fade_to(1.0, _FADE_IN_MS)
         else:
+            self._fade_to(0.0, _FADE_OUT_MS)
+
+    def _fade_to(self, target: float, duration: int):
+        """淡入/淡出到目标透明度（复用动画对象；中途反向时从当前值续接）"""
+        self._fade_target = target
+        if not Animations.motion_enabled():
+            self._set_opacity(target)
+            if target <= 0.0:
+                self.hide()
+            return
+        if self._fade_anim is None:
+            effect = QGraphicsOpacityEffect(self)
+            effect.setOpacity(self._opacity_value)
+            self.setGraphicsEffect(effect)
+            anim = QPropertyAnimation(effect, b"opacity", self)
+            anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+            anim.valueChanged.connect(self._set_opacity)
+            anim.finished.connect(self._on_fade_done)
+            self._fade_anim = anim
+        anim = self._fade_anim
+        anim.stop()
+        anim.setDuration(int(duration))
+        anim.setStartValue(self._opacity_value)
+        anim.setEndValue(target)
+        anim.start()
+
+    def _set_opacity(self, value: float):
+        self._opacity_value = float(value)
+
+    def _on_fade_done(self):
+        # 淡出完成才真正隐藏；若动画期间宿主又请求显示（_fade_target 反向），跳过
+        if self._fade_target <= 0.0 and self.isVisible() and not self._visible_pref:
             self.hide()
 
     def _has_scrollable_content(self) -> bool:

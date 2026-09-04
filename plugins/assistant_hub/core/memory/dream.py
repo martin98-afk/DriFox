@@ -28,6 +28,14 @@ logger = logging.getLogger(__name__)
 
 _THIS = Path(__file__).resolve()
 _MAX_REVISIONS = 10
+# ── 遗忘步名额（火灾取物 · 物竞天择）─────────────────────
+FORGET_FACTS_LIMIT = 15
+FORGET_DAILY_LIMIT = 3
+FORGET_LONGTERM_LIMIT = 20
+FORGET_BUDGET_CHARS = 3000
+# 确定性硬截预算：LLM 无视名额时按行截断（输出已要求重要度降序）
+FORGET_FACTS_BUDGET_CHARS = 1500
+FORGET_LONGTERM_BUDGET_CHARS = 1400
 _locks: Dict[str, threading.Lock] = {}
 
 
@@ -36,16 +44,28 @@ class DreamAlreadyRunningError(RuntimeError):
 
 
 def _load(name: str, rel: str):
+    """加载同包模块（importlib 手动注册 sys.modules）。
+
+    mtime 自检：sys.modules 里的旧对象在插件热重载时无人清理（app 侧 purge
+    只覆盖 gateway/ui 等前缀），命中即返回会卡住旧代码（如 prompts 新增函数
+    不可见）→ 命中后比对源文件 mtime，更新则重新加载替换。
+    """
     key = f"assistant_hub_core.{name}"
     import sys
 
+    path = _THIS.parent.parent / rel
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
     mod = sys.modules.get(key)
-    if mod is not None:
+    if mod is not None and getattr(mod, "_source_mtime", -1.0) >= mtime:
         return mod
-    spec = importlib.util.spec_from_file_location(key, str(_THIS.parent.parent / rel))
+    spec = importlib.util.spec_from_file_location(key, str(path))
     module = importlib.util.module_from_spec(spec)
     sys.modules[key] = module
     spec.loader.exec_module(module)
+    module._source_mtime = mtime
     return module
 
 
@@ -110,6 +130,25 @@ def _write(p: Path, text: str) -> None:
     p.write_text(text, encoding="utf-8")
 
 
+def _trim_to_budget(text: str, limit: int) -> str:
+    """按行累积截断到字符预算内（保序保头部；遗忘输出已要求重要度降序，截尾保重要）。
+
+    首行即超限时行内硬截（预算硬保证优先于行完整性）。
+    """
+    if len(text) <= limit:
+        return text
+    out: List[str] = []
+    used = 0
+    for line in text.splitlines():
+        if used + len(line) + 1 > limit:
+            break
+        out.append(line)
+        used += len(line) + 1
+    if not out:
+        return text[:limit]
+    return "\n".join(out)
+
+
 def _sections_text(s: DreamSections) -> str:
     parts = [s.facts, s.today]
     parts.extend(d["body"] for d in s.daily)
@@ -141,6 +180,16 @@ def apply_sections(aid_dir: Path, s: DreamSections) -> None:
     _write(mem / "facts.md", s.facts)
     _write(mem / "longterm.md", s.longterm)
     # today/daily 属"过程段"：Dream 只重写 facts/longterm 可编辑段（对齐原版 editable sections）
+    # 遗忘步扩展：daily 与 s.daily 对齐（不在集合内的文件删除）；restore 传全量即全量恢复
+    ddir = mem / "daily"
+    if ddir.exists():
+        keep = {str(d.get("date") or "") for d in s.daily}
+        for f in ddir.glob("*.md"):
+            if f.stem not in keep:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
 
 
 # ── state（每日水位 + lastRun 报告）─────────────────────
@@ -289,7 +338,7 @@ class DreamRunner:
         before_hash = _hash_sections(before)
 
         prompts = _prompts()
-        total = 5
+        total = 6
         try:
             llm = self._llm
             self._report(1, total, "原子化")
@@ -338,15 +387,32 @@ class DreamRunner:
         longterm_after = before.longterm
         if before.facts.strip() and before.longterm.strip() == before.facts.strip():
             longterm_after = ""
-        after = DreamSections(facts=composed, today=before.today, daily=before.daily, longterm=longterm_after)
+
+        # 第 6 步 遗忘：火灾取物 · 物竞天择，名额内抢救记忆；失败降级五步结果
+        forget_warning = ""
+        forgotten = None
+        try:
+            forgotten = self._try_forget(prompts, before, composed, longterm_after)
+        except Exception as e:
+            forget_warning = f"遗忘步异常已跳过: {e}"
+        if forgotten is None and not forget_warning:
+            forget_warning = "遗忘步失败已跳过（解析/守门未过），保留五步结果"
+
+        if forgotten is not None:
+            after = DreamSections(
+                facts=forgotten.facts, today=before.today, daily=forgotten.daily, longterm=forgotten.longterm
+            )
+        else:
+            after = DreamSections(facts=composed, today=before.today, daily=before.daily, longterm=longterm_after)
+        warning_text = "；".join(w for w in (verify_warning, forget_warning) if w)
         if _hash_sections(after) == before_hash:
             state.update(self._finalize(state, run_id, trigger, "succeeded", "", before_hash, before_hash))
-            if verify_warning:
-                state["lastRun"]["warning"] = verify_warning
+            if warning_text:
+                state["lastRun"]["warning"] = warning_text
             if trigger == "manual":
                 state["lastSuccessfulManualDate"] = self._logical_date
             _write_state(self._aid, state)
-            return {"ok": True, "run_id": run_id, "changed": False, "revision_id": "", "warning": verify_warning}
+            return {"ok": True, "run_id": run_id, "changed": False, "revision_id": "", "warning": warning_text}
 
         revision_id = create_revision(self._aid, run_id=run_id, trigger=trigger, before=before)
         # pending-apply：崩溃恢复标记
@@ -361,14 +427,14 @@ class DreamRunner:
             pass
 
         state = self._finalize(state, run_id, trigger, "succeeded", revision_id, before_hash, _hash_sections(after))
-        if verify_warning:
-            state["lastRun"]["warning"] = verify_warning
+        if warning_text:
+            state["lastRun"]["warning"] = warning_text
         if trigger == "manual":
             state["lastSuccessfulManualDate"] = self._logical_date
         else:
             state["lastAutomaticAttemptDate"] = self._logical_date
         _write_state(self._aid, state)
-        return {"ok": True, "run_id": run_id, "changed": True, "revision_id": revision_id, "warning": verify_warning}
+        return {"ok": True, "run_id": run_id, "changed": True, "revision_id": revision_id, "warning": warning_text}
 
     def _verify(self, prompts, before: DreamSections, composed: str) -> Dict:
         raw = (self._llm(prompts.build_dream_verify(_sections_text(before), composed)) or "").strip()
@@ -378,6 +444,43 @@ class DreamRunner:
             return d if isinstance(d, dict) else {}
         except Exception:
             return {}
+
+    def _try_forget(self, prompts, before: DreamSections, composed: str, longterm: str) -> Optional[DreamSections]:
+        """第 6 步遗忘：LLM 按火灾/物竞天择在名额内抢救记忆。
+
+        返回 None 表示遗忘失败（调用方降级五步结果）。守门：
+        - JSON 解析失败 / facts 为空 / keep_daily 非列表 → None
+        - 幻觉守门：输出长度超过对应输入（只删不增被违反）→ None
+        - daily 超名额确定性删最旧；总量超预算继续删最旧 daily
+        """
+        raw = (self._llm(prompts.build_dream_forget(composed, longterm, before.today, before.daily)) or "").strip()
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        d = json.loads(raw)
+        if not isinstance(d, dict):
+            return None
+        facts = str(d.get("facts") or "").strip()
+        lt = str(d.get("longterm") or "").strip()
+        keep = d.get("keep_daily")
+        if not facts or not isinstance(keep, list):
+            return None
+        # 幻觉守门：遗忘只能删减（合并等价碎片不会增字符）；
+        # longterm 输入为空串（迁移清空）时输出非空同样视为增写
+        if len(facts) > len(composed) or len(lt) > len(longterm.strip()):
+            return None
+        keep_set = {str(x) for x in keep}
+        # 确定性名额执行：LLM 无视名额时按行截断（重要度降序，截尾保重要）
+        facts = _trim_to_budget(facts, FORGET_FACTS_BUDGET_CHARS)
+        lt = _trim_to_budget(lt, FORGET_LONGTERM_BUDGET_CHARS)
+        daily_keep = sorted((x for x in before.daily if x.get("date") in keep_set), key=lambda x: x["date"])
+        # 名额兜底：超名额删最旧
+        daily_keep = daily_keep[-FORGET_DAILY_LIMIT:]
+        # 字符预算兜底：继续删最旧 daily（longterm/facts 超限不硬截，语义优先）
+        while (
+            daily_keep
+            and len(facts) + len(lt) + sum(len(x.get("body") or "") for x in daily_keep) > FORGET_BUDGET_CHARS
+        ):
+            daily_keep.pop(0)
+        return DreamSections(facts=facts, today=before.today, daily=daily_keep, longterm=lt)
 
     @staticmethod
     def _finalize(
