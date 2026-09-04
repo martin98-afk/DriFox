@@ -5,6 +5,7 @@
 暗遮罩，松手从底图按高 DPI 换算裁剪物理像素区域，粘贴出去尺寸与屏幕一致。
 """
 
+from loguru import logger
 from PyQt5.QtCore import Qt, QRect, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QWidget
@@ -68,16 +69,19 @@ class _ScreenshotOverlay(QWidget):
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:
+        logger.debug(f"[qs-overlay] release: button={event.button()} origin={self._origin} sel={self._selection}")
         if event.button() != Qt.LeftButton or self._origin is None:
             return
         self._origin = None
         sel = self._selection
         if sel.width() < MIN_SELECTION or sel.height() < MIN_SELECTION:
+            logger.debug("[qs-overlay] 选区过小，视为误触取消")
             self._cancel()  # 误触（点击），静默取消
             return
         dpr = float(self._base.devicePixelRatio() or 1.0)
         shot = self._base.copy(_physical_rect(sel, dpr))
         shot.setDevicePixelRatio(dpr)
+        logger.info(f"[qs-overlay] 选区捕获: {shot.width()}x{shot.height()} dpr={dpr}")
         self.captured.emit(shot)
         self.close()
         event.accept()
@@ -90,6 +94,7 @@ class _ScreenshotOverlay(QWidget):
         super().keyPressEvent(event)
 
     def _cancel(self) -> None:
+        logger.debug("[qs-overlay] 遮罩窗取消（Esc/右键/误触）")
         self.cancelled.emit()
         self.close()
 
