@@ -26,6 +26,7 @@ _IS_MAC = sys.platform == "darwin"
 from PyQt5.QtCore import (
     QAbstractAnimation,
     QEasingCurve,
+    QEvent,
     QRect,
     QRectF,
     QSize,
@@ -554,6 +555,8 @@ class CustomTitleBar(TitleBarBase):
     tab_close_clicked = pyqtSignal(str)
     sidebar_toggle_requested = pyqtSignal()
     workbench_toggle_requested = pyqtSignal()  # 右侧工作台浮层开关（按钮在最小化左侧）
+    sidebar_hover_changed = pyqtSignal(bool)  # 左按钮：True=进入 False=离开
+    workbench_hover_changed = pyqtSignal(bool)  # 右按钮：True=进入 False=离开
 
     def __init__(self, parent):
         self._is_mac: bool = sys.platform == "darwin"
@@ -577,6 +580,8 @@ class CustomTitleBar(TitleBarBase):
         self._sidebar_btn.setCursor(Qt.PointingHandCursor)
         self._sidebar_btn.setToolTip("收起/展开侧边栏")
         self._sidebar_btn.clicked.connect(self.sidebar_toggle_requested.emit)
+        self._sidebar_btn.setAttribute(Qt.WA_Hover, True)
+        self._sidebar_btn.installEventFilter(self)
 
         # ── 右区：工作台浮层开关（右侧边栏图标，位于最小化按钮左侧）──
         # mac 上系统交通灯由 NSWindow 提供且系统按钮隐藏，此按钮仍保留（浮层开关独立于系统按钮）
@@ -587,6 +592,9 @@ class CustomTitleBar(TitleBarBase):
         self._workbench_btn.setCursor(Qt.PointingHandCursor)
         self._workbench_btn.setToolTip("打开/关闭工作台")
         self._workbench_btn.clicked.connect(self.workbench_toggle_requested.emit)
+        self._workbench_btn.setAttribute(Qt.WA_Hover, True)
+        self._workbench_btn.installEventFilter(self)
+
 
         # ── 中央区：tab 容器 ──
         self._tab_container = QWidget(self)
@@ -645,6 +653,33 @@ class CustomTitleBar(TitleBarBase):
 
         self.refresh_style()
         self._sync_tab_centering()
+
+    def _emit_sidebar_hover(self, on: bool) -> None:
+        """侧栏开关按钮 hover 状态变化：True=进入 False=离开"""
+        self.sidebar_hover_changed.emit(bool(on))
+
+    def _emit_workbench_hover(self, on: bool) -> None:
+        """工作台开关按钮 hover 状态变化：True=进入 False=离开"""
+        self.workbench_hover_changed.emit(bool(on))
+
+    def eventFilter(self, obj, event) -> bool:
+        """拦截侧栏/工作台按钮的 HoverEnter/Leave，转为信号发出
+
+        通过 ``super().eventFilter(obj, event)`` 链保留 ``TitleBarBase`` 原有
+        的事件过滤逻辑（拖拽/系统按钮命中），避免破坏基类行为。
+        """
+        t = event.type()
+        if obj is getattr(self, "_sidebar_btn", None):
+            if t == QEvent.HoverEnter:
+                self._emit_sidebar_hover(True)
+            elif t == QEvent.HoverLeave:
+                self._emit_sidebar_hover(False)
+        elif obj is getattr(self, "_workbench_btn", None):
+            if t == QEvent.HoverEnter:
+                self._emit_workbench_hover(True)
+            elif t == QEvent.HoverLeave:
+                self._emit_workbench_hover(False)
+        return super().eventFilter(obj, event)
 
     # ── 布局 ──
 
