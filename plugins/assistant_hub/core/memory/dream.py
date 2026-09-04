@@ -366,7 +366,7 @@ class DreamRunner:
 
         if forgotten is not None:
             after = DreamSections(
-                facts=forgotten.facts, today=before.today, daily=forgotten.daily, longterm=longterm_after
+                facts=forgotten.facts, today=before.today, daily=forgotten.daily, longterm=forgotten.longterm
             )
         else:
             after = DreamSections(facts=composed, today=before.today, daily=before.daily, longterm=longterm_after)
@@ -430,8 +430,8 @@ class DreamRunner:
         if not facts or not isinstance(keep, list):
             return None
         # 幻觉守门：遗忘只能删减（合并等价碎片不会增字符）；
-        # longterm 输入为空串（迁移清空）时输出也应为空，不触发误杀
-        if len(facts) > len(composed) or (longterm.strip() and len(lt) > len(longterm.strip())):
+        # longterm 输入为空串（迁移清空）时输出非空同样视为增写
+        if len(facts) > len(composed) or len(lt) > len(longterm.strip()):
             return None
         keep_set = {str(x) for x in keep}
         daily_keep = sorted((x for x in before.daily if x.get("date") in keep_set), key=lambda x: x["date"])

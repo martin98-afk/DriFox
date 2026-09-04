@@ -244,7 +244,9 @@ def test_apply_sections_syncs_daily(tmp_path):
     # 只保留 08-31：08-30 应被删除
     m.apply_sections(
         aid,
-        m.DreamSections(facts="- F", today="- T", daily=[{"date": "2026-08-31", "body": "# 2026-08-31\n\n- 31日的事"}], longterm=""),
+        m.DreamSections(
+            facts="- F", today="- T", daily=[{"date": "2026-08-31", "body": "# 2026-08-31\n\n- 31日的事"}], longterm=""
+        ),
     )
     assert not (ddir / "2026-08-30.md").exists()
     assert (ddir / "2026-08-31.md").exists()
@@ -262,7 +264,7 @@ def _seed_memory_multi(aid: Path):
     for i in range(5):
         d = f"2026-08-2{5 + i}"
         (mem / "daily" / f"{d}.md").write_text(f"# {d}\n\n- {d}的事", encoding="utf-8")
-    (mem / "longterm.md").write_text("\n".join(f"- 长期{i}" for i in range(25)), encoding="utf-8")
+    (mem / "longterm.md").write_text("\n".join(f"- 长期{i}：{'细节' * 60}" for i in range(25)), encoding="utf-8")
 
 
 def _forget_reply(facts: str, keep: list, longterm: str) -> str:
@@ -326,7 +328,7 @@ def test_dream_forget_daily_quota_and_budget(tmp_path):
     aid = tmp_path / "a_quota"
     _seed_memory_multi(aid)
     composed = "- 合成事实0"
-    big_longterm = "- 长" * 2000  # longterm 2000 字符，挤占预算
+    big_longterm = "- 长" * 1034  # 3102 字符：≤ seed longterm（守门过），facts+lt 已超 3000 → daily 必被预算删光
     keep_all = [f"2026-08-2{5 + i}" for i in range(5)]  # 超名额 3 天
     llm = FakeLLM(list(_DREAM_REPLIES[:5]) + [_forget_reply(composed, keep_all, big_longterm)])
     r = m.DreamRunner(aid, llm=llm).start("manual")
@@ -336,6 +338,6 @@ def test_dream_forget_daily_quota_and_budget(tmp_path):
     # 留的是最新几天（名额 3 + 预算兜底继续删最旧）
     all_days = sorted(f"2026-08-2{5 + i}" for i in range(5))
     assert len(kept) <= 3
-    assert kept == all_days[-len(kept) :]
+    assert kept == all_days[len(all_days) - len(kept) :]
     total = len(composed) + len(big_longterm) + sum(len(f.read_text(encoding="utf-8")) for f in ddir.glob("*.md"))
     assert total <= 3000 or not kept
