@@ -2936,8 +2936,9 @@ class ConsoleMonitorPage(QWebEnginePage):
     toolDiffRequested = pyqtSignal(str)  # tool_call_id
     subAgentLogRequested = pyqtSignal(str)  # task_ids (comma-separated)
     saveFileRequested = pyqtSignal(str, str)  # code, lang
-    chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — echarts/mermaid 放大查看
+    chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — echarts/mermaid/svg/html 放大查看
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
+    saveWidgetFileRequested = pyqtSignal(str, str)  # (wtype, content_b64) — svg widget 源码保存回传
 
     def __init__(self, profile=None, parent=None):
         """创建一个 ConsoleMonitorPage。
@@ -3052,12 +3053,21 @@ class ConsoleMonitorPage(QWebEnginePage):
                 except Exception:
                     pass
             elif msg.startswith("pywebview_action:chart_expand:"):
-                # 图表放大查看请求：console.log('pywebview_action:chart_expand:<type>:<b64>')
+                # 图表/Widget 放大查看请求：console.log('pywebview_action:chart_expand:<type>:<b64>')
                 try:
                     rest = msg.split("pywebview_action:chart_expand:", 1)[1]
                     chart_type, payload = rest.split(":", 1)
-                    if chart_type in ("echarts", "mermaid") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
+                    if chart_type in ("echarts", "mermaid", "svg", "html") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
                         self.chartExpandRequested.emit(chart_type, payload)
+                except Exception:
+                    pass
+            elif msg.startswith("pywebview_action:save_widget_file:"):
+                # Widget 源码保存请求：console.log('pywebview_action:save_widget_file:<type>:<b64>')
+                try:
+                    rest = msg.split("pywebview_action:save_widget_file:", 1)[1]
+                    wtype, payload = rest.split(":", 1)
+                    if wtype == "svg" and len(payload) <= _MAX_CHART_PAYLOAD_B64:
+                        self.saveWidgetFileRequested.emit(wtype, payload)
                 except Exception:
                     pass
             elif msg.startswith("pywebview_action:save_chart_png:"):
@@ -3255,6 +3265,7 @@ class CodeWebViewer(QWebEngineView):
     saveFileRequested = pyqtSignal(str, str)  # code, lang
     chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — 图表放大查看
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
+    saveWidgetFileRequested = pyqtSignal(str, str)  # (wtype, content_b64) — svg widget 源码保存回传
     # WebEngine 上下文丢失信号
     contextLost = pyqtSignal()
     contextRestored = pyqtSignal()
@@ -3431,6 +3442,7 @@ class CodeWebViewer(QWebEngineView):
         self._page.saveFileRequested.connect(self.saveFileRequested.emit)
         self._page.chartExpandRequested.connect(self.chartExpandRequested.emit)
         self._page.saveChartPngRequested.connect(self.saveChartPngRequested.emit)
+        self._page.saveWidgetFileRequested.connect(self.saveWidgetFileRequested.emit)
 
         self._load_skeleton()
 
@@ -5007,7 +5019,8 @@ class CodeWebViewer(QWebEngineView):
                     z-index: 10;
                 }}
                 .echarts-container:hover .chart-toolbar,
-                .mermaid-block:hover .chart-toolbar {{
+                .mermaid-block:hover .chart-toolbar,
+                .widget-toolbar-host:hover .chart-toolbar {{
                     opacity: 1;
                 }}
                 .chart-toolbar button {{
@@ -5795,6 +5808,9 @@ class CodeWebViewer(QWebEngineView):
                         // 渲染 Mermaid 图表（内部按需懒加载 polyfill + mermaid）
                         if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
 
+                        // SVG / HTML widget 工具栏挂载（与 mermaid 同时机：全量重建后）
+                        if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
+
                         // 将工具/思考块分流到独立滚动容器（仅简洁模式）
                         // 必须在 _suppressScrollEvent=false 之前执行，
                         // 否则移动 DOM 触发的 scroll 事件会错误标记 _userScrolledWithin=true
@@ -5962,6 +5978,8 @@ class CodeWebViewer(QWebEngineView):
                     }}
                     // 渲染 Mermaid 图表（追加的闭合段可能含 ```mermaid 代码块）
                     if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
+                    // SVG / HTML widget 工具栏挂载（同上时机）
+                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
                     // 使用延迟报告，确保浏览器布局完成
                     setTimeout(() => reportHeight(), 30);
                 }}
@@ -6485,7 +6503,7 @@ class CodeWebViewer(QWebEngineView):
                     btnExpand.setAttribute('data-tooltip', '放大查看');
                     btnExpand.innerHTML = '<img src="' + _ICON_BASE + '/最大化.svg" />';
                     var btnExport = document.createElement('button');
-                    btnExport.setAttribute('data-tooltip', '导出 PNG（3x）');
+                    btnExport.setAttribute('data-tooltip', type === 'svg' ? '保存源文件' : '导出 PNG（3x）');
                     btnExport.innerHTML = '<img src="' + _ICON_BASE + '/导入.svg" />';
                     bar.appendChild(btnExpand);
                     bar.appendChild(btnExport);
@@ -6500,6 +6518,10 @@ class CodeWebViewer(QWebEngineView):
                                 var svg = el.querySelector('svg');
                                 if (!svg) return;
                                 console.log('pywebview_action:chart_expand:mermaid:' + _b64EncodeUtf8(svg.outerHTML));
+                            }} else if (type === 'svg') {{
+                                var node = (el.tagName === 'svg' || el.tagName === 'SVG') ? el : el.querySelector('svg');
+                                if (!node) return;
+                                console.log('pywebview_action:chart_expand:svg:' + _b64EncodeUtf8(node.outerHTML));
                             }}
                         }} catch (e) {{ console.error('[chart] expand failed:', e); }}
                     }});
@@ -6511,6 +6533,10 @@ class CodeWebViewer(QWebEngineView):
                                 _emitChartPng(el._chartInstance.getDataURL({{ type: 'png', pixelRatio: 3, backgroundColor: _CHART_BG }}));
                             }} else if (type === 'mermaid') {{
                                 _exportMermaidSvgPng(el.querySelector('svg'), 3);
+                            }} else if (type === 'svg') {{
+                                var node = (el.tagName === 'svg' || el.tagName === 'SVG') ? el : el.querySelector('svg');
+                                if (!node) return;
+                                console.log('pywebview_action:save_widget_file:svg:' + _b64EncodeUtf8(node.outerHTML));
                             }}
                         }} catch (e) {{ console.error('[chart] export failed:', e); }}
                     }});
@@ -6519,6 +6545,30 @@ class CodeWebViewer(QWebEngineView):
                 // 工具差异对比请求函数
                 window._requestToolDiff = function(toolCallId) {{
                     console.log('pywebview_action:tool_diff:' + toolCallId);
+                }};
+
+                // ===== SVG widget 工具栏挂载 =====
+                // 渲染后扫描正文顶层的自由 svg（排除 mermaid/echarts 内部）包 wrapper 挂工具栏。
+                // 尺寸阈值滤掉装饰小图标（欢迎卡图标、行内 icon），只对内容级示意图挂载。
+                // el._widgetToolbar 防重挂（innerHTML 全量重建后 DOM 全新，标记自然失效，重扫重挂）。
+                window.renderWidgetToolbars = function() {{
+                    var root = document.getElementById('content-placeholder');
+                    if (!root) return;
+                    var children = root.children;
+                    for (var i = 0; i < children.length; i++) {{
+                        var el = children[i];
+                        if (el.tagName !== 'svg' && el.tagName !== 'SVG') continue;
+                        if (el.closest('.mermaid-block') || el.closest('.echarts-container')) continue;
+                        if (el._widgetToolbar) continue;
+                        if (el.clientWidth < 200 || el.clientHeight < 100) continue;  // 装饰小图标
+                        el._widgetToolbar = true;
+                        var wrap = document.createElement('div');
+                        wrap.className = 'svg-widget-host widget-toolbar-host';
+                        wrap.style.cssText = 'position:relative;margin:12px 0;';
+                        el.parentNode.insertBefore(wrap, el);
+                        wrap.appendChild(el);
+                        window._attachChartToolbar(wrap, 'svg');
+                    }}
                 }};
 
                 // 子智能体日志查看请求函数
@@ -10880,6 +10930,17 @@ class MessageCard(SimpleCardWidget):
         if path:
             logger.info(f"[MessageCard] 图表 PNG 已导出: {path}")
 
+    def _on_save_widget_file(self, wtype: str, content_b64: str):
+        """SVG widget 源码保存（存矢量源码，缺 xmlns 自动补齐）"""
+        try:
+            from app.widgets.ui_helpers import save_svg_source
+
+            path = save_svg_source(self, content_b64)
+            if path:
+                logger.info(f"[MessageCard] SVG 源文件已导出: {path}")
+        except Exception as e:
+            logger.error(f"[MessageCard] Widget 保存失败: {e}")
+
     def _on_webengine_context_lost(self):
         """WebEngine 上下文丢失时显示恢复提示"""
         # 设置卡片为错误状态样式（根据深浅模式选择边框色）
@@ -10931,6 +10992,7 @@ class MessageCard(SimpleCardWidget):
         self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
         self.viewer.chartExpandRequested.connect(self._on_chart_expand)
         self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
+        self.viewer.saveWidgetFileRequested.connect(self._on_save_widget_file)
         self.viewer.contextLost.connect(self._on_webengine_context_lost)
         self.viewer.contextRestored.connect(self._on_webengine_context_restored)
         self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
@@ -11634,6 +11696,7 @@ class MessageCard(SimpleCardWidget):
             self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
             self.viewer.chartExpandRequested.connect(self._on_chart_expand)
             self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
+            self.viewer.saveWidgetFileRequested.connect(self._on_save_widget_file)
             # WebEngine 上下文丢失处理
             self.viewer.contextLost.connect(self._on_webengine_context_lost)
             self.viewer.contextRestored.connect(self._on_webengine_context_restored)

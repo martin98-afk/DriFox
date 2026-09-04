@@ -17,6 +17,7 @@
 | 多维评分对比 | radar | 3-8 维，系列 ≤3，各维满刻度统一 |
 | 层级占比 | treemap / sunburst | 层级 ≤3，treemap 优先横向 |
 | 流量/资金/依赖分配 | sankey | 左进右出，层级 ≤4 |
+| 依赖/关系网络 | graph（力导向） | 节点 ≤50，`layout:'force'` 纯 JSON，categories 分组着色 |
 | 单指标阈值状态 | gauge | ≤2 个并排（容器 400px 高限制），阈值分段色 |
 | 二维密度 | heatmap | 类目规模 ≤20×7，visualMap 标明范围 |
 | 金融 OHLC | candlestick | 涨红跌绿（见细则） |

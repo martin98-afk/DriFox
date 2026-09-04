@@ -1321,12 +1321,56 @@ def save_png_from_b64(parent, png_b64: str, default_name: str = "图表") -> Opt
         return None
 
 
+def save_svg_source(parent, content_b64: str, default_name: str = "SVG") -> Optional[str]:
+    """把 SVG widget 源码保存为本地 .svg 文件（弹保存对话框）
+
+    缺 xmlns 时补默认命名空间，保证浏览器可直接打开。
+
+    Args:
+        parent: 父控件
+        content_b64: SVG 源码的 base64 字符串
+        default_name: 默认文件名主体
+
+    Returns:
+        保存路径；用户取消返回 None
+    """
+    import base64 as _b64mod
+
+    from PyQt5.QtWidgets import QFileDialog
+
+    try:
+        content = _b64mod.b64decode(content_b64).decode("utf-8") if content_b64 else ""
+    except Exception as e:
+        logger.error(f"[Widget] 源码解码失败: {e}")
+        return None
+    if not content.strip():
+        return None
+
+    # 缺 xmlns 的 svg 存盘后浏览器拒渲染，兜底注入默认命名空间
+    if "xmlns=" not in content[:1000]:
+        content = content.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"', 1)
+    default_file = f"{default_name}_{time.strftime('%Y%m%d_%H%M%S')}.svg"
+    file_path, _ = QFileDialog.getSaveFileName(parent, "保存 SVG 源文件", default_file, "SVG 文件 (*.svg)")
+    if not file_path:
+        return None
+    if not file_path.lower().endswith(".svg"):
+        file_path += ".svg"
+
+    try:
+        with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        return file_path
+    except Exception as e:
+        logger.error(f"[Widget] 源文件保存失败: {e}")
+        return None
+
+
 def show_chart_viewer(parent, chart_type: str, payload_b64: str) -> Any:
     """显示图表放大查看器（内嵌卡覆盖对话区域；无全局卡片容器时回退弹窗）
 
     Args:
         parent: 父控件（仅弹窗回退时使用）
-        chart_type: "echarts" | "mermaid"
+        chart_type: "echarts" | "mermaid" | "svg"
         payload_b64: 图表数据 b64
     """
     logger.debug(f"[ChartViewer] show_chart_viewer type={chart_type}, payload_len={len(payload_b64 or '')}")

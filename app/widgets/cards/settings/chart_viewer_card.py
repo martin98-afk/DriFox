@@ -9,6 +9,7 @@ ChartViewerCard — 内嵌图表查看卡片，覆盖右侧对话区域（card_i
   getOption 序列化产物，ResizeObserver 自适应。
 - mermaid 模式：直接注入已渲染 SVG outerHTML（矢量无损、自带主题配色，零 JS 依赖），
   CSS max-width:100% 自适应。
+- svg 模式：与 mermaid 同路径（payload=svg outerHTML b64 直注入 + panZoom + PNG 导出）。
 
 导出：头部「导出 PNG」按钮 → runJavaScript 触发 window._exportChartPng(3) →
 JS 生成 dataURL 后经 console.log('pywebview_action:save_chart_png:...') 回传 →
@@ -124,7 +125,7 @@ function _exportMermaidPng(scale) {
 }
 window._exportChartPng = function (scale) {
     if (window._chartType === 'echarts') _exportEchartsPng(scale);
-    else _exportMermaidPng(scale);
+    else _exportMermaidPng(scale);  // mermaid/svg
 };
 // 容器级平移缩放（mermaid SVG / 饼图等 dataZoom 不适用的图表）：
 // Ctrl+滚轮以鼠标为中心缩放 · 拖拽平移 · 双击复位
@@ -175,14 +176,14 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
     """构建图表大图查看 HTML
 
     Args:
-        chart_type: "echarts" | "mermaid"
-        payload_b64: echarts option JSON / mermaid SVG outerHTML 的 UTF-8 b64
+        chart_type: "echarts" | "mermaid" | "svg"
+        payload_b64: echarts option JSON / mermaid|svg 的 SVG outerHTML 的 UTF-8 b64
         is_dark: 深色主题（背景与 echarts init 主题跟随）
 
     Raises:
         ValueError: payload 超上限或类型未知
     """
-    if chart_type not in ("echarts", "mermaid"):
+    if chart_type not in ("echarts", "mermaid", "svg"):
         raise ValueError("未知图表类型: " + chart_type)
     if len(payload_b64) > _MAX_PAYLOAD_B64:
         raise ValueError("图表数据超过 8MB 上限")
@@ -247,7 +248,8 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
             "html, body { margin: 0; padding: 0; width: 100%%; height: 100%%; background: %(bg)s; overflow: hidden; } "
             "#chart { width: 100%%; height: 100%%; }"
         )
-    else:
+    elif chart_type in ("mermaid", "svg"):
+        # svg 与 mermaid 同路径：payload 均为 svg outerHTML b64，直注入 + panZoom + PNG 导出
         pre_end = _close("pre")
         body_script = (
             '<div class="chart-body">'
@@ -269,7 +271,9 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
             + "        wrap.innerHTML = '<pre style=\"color:#e06c75;padding:16px;\">图表渲染失败: ' + e + '" + pre_end + "';\n"
             + "    }\n"
             + "})();\n"
-            + "window._chartType = 'mermaid';\n"
+            + "window._chartType = '"
+            + chart_type
+            + "';\n"
             + _END_SCRIPT
             + "\n"
         )
@@ -346,9 +350,9 @@ class ChartViewerCard(BaseSettingsCard):
 
         self.add_header_button(FluentIcon.SAVE, "导出 PNG（3x 高清）", self._on_export_clicked)
 
-    def load_chart(self, chart_type: str, payload_b64: str, title: str = "图表查看"):
-        """加载图表（echarts option b64 / mermaid svg b64）并更新标题（背景跟随主题）"""
-        self.set_title_text(title)
+    def load_chart(self, chart_type: str, payload_b64: str, title: str = ""):
+        """加载图表（echarts option b64 / mermaid、svg 的 outerHTML b64）"""
+        self.set_title_text(title or ("SVG 查看" if chart_type == "svg" else "图表查看"))
         _cleanup_temp_files(self._tmp_files)
         try:
             from app.utils.theme_manager import theme_manager
