@@ -90,3 +90,6 @@ $RECYCLE.BIN/
 .pycpath
 # git worktree 隔离工作区（不提交）
 .worktrees/
+
+# sdd 编排台账（brief/report/ledger，不提交）
+.superpowers/
