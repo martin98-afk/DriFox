@@ -1,27 +1,36 @@
 from __future__ import annotations
 
-from PyQt5.QtCore import QEasingCurve, QVariantAnimation, Qt, QTimer
+from PyQt5.QtCore import QEasingCurve, QPoint, QVariantAnimation, Qt, QTimer
 from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
 
 class HoverPreviewOverlay(QWidget):
-    """侧栏 hover 悬浮预览的原生浮层容器。
+    """侧栏 hover 悬浮预览浮层：Qt.Tool 顶层 owned 窗口（路线 C）。
 
-    WA_NativeWindow → 覆盖在对话区 QWebEngineView（原生 HWND）之上不穿透；
-    WA_ShowWithoutActivating → 弹出时不抢窗口焦点。贴窗口外缘一侧内缩
-    EDGE_INSET 让出 frameless 主窗口的边缘 resize 热区。
+    为什么是独立顶层窗口（决策 D025）：路线 A 的 WA_NativeWindow 原生**子**
+    HWND 常驻在 frameless 主窗口客户区内，会整体击穿 qframelesswindow 的边缘
+    WM_NCHITTEST（四边 resize 全废）。路线 C 改为独立顶层 HWND：
+
+    - 构造传 parent + Qt.Tool → owned 顶层窗口：z-order 恒在 owner 之上，
+      能压住对话区 QWebEngineView（原生 HWND）不穿透；
+    - 不占主窗口客户区 → 不干扰边缘命中测试，frameless resize 完好；
+    - 按需 show/hide 不常驻（hover 期间才存在），进一步远离 A 路线死结；
+    - Qt.Tool 不进任务栏；owner 最小化时系统自动连带隐藏本浮层；
+    - WA_ShowWithoutActivating：hover 弹出不抢焦点。
+
+    跟随策略：place() 用 mapToGlobal 换算屏幕坐标定位；主窗口 moveEvent /
+    resizeEvent 时宿主调 sync_to_window() 重定位。滑入/滑出动画每帧重读
+    主窗口几何，动画期间天然跟随。已知代价：预览期拖动主窗口存在一帧滞后
+    （hover 预览是临时态，用户此时通常不拖窗口，可接受）。
     """
 
-    EDGE_INSET = 6  # 贴外缘内缩，避让主窗口 resize 命中区
+    EDGE_INSET = 6  # 贴窗口外缘内缩，避让主窗口边缘 resize 命中区
 
     def __init__(self, window: QWidget, side: str, titlebar_h: int):
-        super().__init__(window)
+        super().__init__(window, Qt.Tool | Qt.FramelessWindowHint)
         assert side in ("left", "right")
         self._side = side
         self._titlebar_h = titlebar_h
-        # 作为父窗口的 native child：靠 WA_NativeWindow 成为原生 HWND 压住
-        # 对话区 WebEngine；不设 WindowFlags（child 上无效）。
-        self.setAttribute(Qt.WA_NativeWindow, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setAttribute(Qt.WA_Hover, True)  # 浮层自身接收 HoverEnter/Leave
@@ -32,23 +41,34 @@ class HoverPreviewOverlay(QWidget):
         self._content: QWidget | None = None
         self._slide: QVariantAnimation | None = None
         self._target_w = 0
+        self._current_w = 0  # 当前呈现宽度（动画逐帧更新，sync_to_window 用）
         self.hide()
 
-    def place(self, width: int) -> None:
-        """按窗口当前尺寸与目标宽度定位浮层（顶接标题栏、底接窗口底）。"""
+    # ── 定位：主窗口局部坐标 → 全局屏幕坐标 ──
+
+    def _place_at_width(self, w: int) -> None:
+        """把浮层摆到主窗口边缘：顶接标题栏、底接窗口底、外缘对齐（全局坐标）。"""
         win = self.parentWidget()
         if win is None:
             return
         ww, wh = win.width(), win.height()
         top = self._titlebar_h
         h = max(0, wh - top)
-        if self._side == "right":
-            x = ww - self.EDGE_INSET - max(0, min(width, ww - self.EDGE_INSET))
-            self.setGeometry(x, top, ww - self.EDGE_INSET - x, h)
-        else:
-            x = self.EDGE_INSET  # 左缘内缩让位 resize 热区
-            w = max(0, min(width, ww - self.EDGE_INSET))
-            self.setGeometry(x, top, w, h)
+        w = max(0, min(int(w), ww - self.EDGE_INSET))
+        local_x = (ww - self.EDGE_INSET - w) if self._side == "right" else self.EDGE_INSET
+        g = win.mapToGlobal(QPoint(local_x, top))
+        self._current_w = w
+        self.setGeometry(g.x(), g.y(), w, h)
+
+    def place(self, width: int) -> None:
+        """按窗口当前尺寸与目标宽度定位浮层。"""
+        self._target_w = int(width)
+        self._place_at_width(width)
+
+    def sync_to_window(self) -> None:
+        """主窗口 move/resize 后重定位（保持当前宽度；动画期每帧自跟随，无需调用）。"""
+        if self.isVisible():
+            self._place_at_width(self._current_w)
 
     def set_content(self, widget: QWidget) -> None:
         """把侧栏外层 frame 挂入浮层。"""
@@ -66,8 +86,10 @@ class HoverPreviewOverlay(QWidget):
             self._slot_layout.removeWidget(self._content)
             self._content = None
 
+    # ── 显隐（fade 语义保留为直切，动画走 slide_in/slide_out 几何滑入滑出） ──
+
     def fade_in(self) -> None:
-        """直接显出并提到最顶（native child 不支持 opacity 淡入淡出，见类注释）。"""
+        """直接显出并提到最顶（owned 顶层窗口天然盖住主窗口与 WebEngine）。"""
         self.show()
         self.raise_()
 
@@ -76,26 +98,12 @@ class HoverPreviewOverlay(QWidget):
         if on_done is not None:
             on_done()
 
-    # ── 几何滑入/滑出（native child 不支持 opacity 动画，用逐帧 setGeometry） ──
-
-    def _apply_width(self, w: int) -> None:
-        """设浮层宽度：贴窗口外缘一侧固定，另一侧向内伸缩，顶/底不变。"""
-        win = self.parentWidget()
-        if win is None:
-            return
-        ww, wh = win.width(), win.height()
-        top = self._titlebar_h
-        h = max(0, wh - top)
-        w = max(0, min(int(w), ww - self.EDGE_INSET))
-        if self._side == "right":
-            self.setGeometry(ww - self.EDGE_INSET - w, top, w, h)
-        else:
-            self.setGeometry(self.EDGE_INSET, top, w, h)
+    # ── 几何滑入/滑出（逐帧全局坐标 setGeometry） ──
 
     def slide_in(self, target_w: int, on_done=None) -> None:
         """从贴边外缘向内滑到 target_w（180ms OutCubic）。滑入期覆盖的对话区不 resize。"""
         self._target_w = int(target_w)
-        self._apply_width(0)
+        self._place_at_width(0)
         self.show()
         self.raise_()
         anim = QVariantAnimation(self)
@@ -103,7 +111,7 @@ class HoverPreviewOverlay(QWidget):
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.setStartValue(0.0)
         anim.setEndValue(float(self._target_w))
-        anim.valueChanged.connect(lambda v: self._apply_width(int(v)))
+        anim.valueChanged.connect(lambda v: self._place_at_width(int(v)))
         if on_done is not None:
             anim.finished.connect(on_done)
         self._slide = anim  # 持引用防 GC
@@ -114,9 +122,9 @@ class HoverPreviewOverlay(QWidget):
         anim = QVariantAnimation(self)
         anim.setDuration(150)
         anim.setEasingCurve(QEasingCurve.OutQuad)
-        anim.setStartValue(float(self.width()))
+        anim.setStartValue(float(self._current_w))
         anim.setEndValue(0.0)
-        anim.valueChanged.connect(lambda v: self._apply_width(int(v)))
+        anim.valueChanged.connect(lambda v: self._place_at_width(int(v)))
         if on_done is not None:
             anim.finished.connect(on_done)
         self._slide = anim

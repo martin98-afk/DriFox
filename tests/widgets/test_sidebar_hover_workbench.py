@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""右侧工作台 hover 悬浮预览的接线与状态机测试
+"""右侧工作台 hover 悬浮预览的接线与状态机测试（路线 C：Qt.Tool 顶层 owned 窗口）
 
 宿主在 offscreen 下真实构造 TabManagerWindow，验证重构后的语义：
 
-- 装配段创建 _wb_overlay / _wb_preview_ctrl，标题栏 hover 信号接到控制器；
+- 装配段创建 _wb_overlay / _wb_preview_ctrl：浮层是 Qt.Tool 顶层 owned 窗口
+  （parent 仍是主窗口、flags 含 Tool+FramelessWindowHint、无 WA_NativeWindow），
+  标题栏 hover 信号接到控制器；
+- 全局坐标跟随：place() 用 mapToGlobal 换算屏幕坐标；主窗口移动后
+  _sync_wb_overlay_geometry 重定位浮层；
 - 收起态 hover 进入预览：_workbench_frame 被 reparent 到浮层、控制器进入
   previewing；但**预览≠打开**——is_workbench_visible() 保持 False、不写
   per-tab 显隐记忆（预览是浮层盖在已稳定的对话区上，不动 splitter 布局）；
@@ -15,7 +19,7 @@
   常驻展开、is_workbench_visible True、记忆 True；
 - eventFilter 把浮层自身 HoverEnter/Leave 转给控制器，驱动缓收计时取消。
 
-浮层 isVisible 在 offscreen + native-child 下不可靠，不断言，交由人工实测。
+浮层为独立顶层窗口，isVisible 在 offscreen 下不作为核心断言，交由人工实测。
 """
 
 from __future__ import annotations
@@ -23,13 +27,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
-# ★ 临时禁用：WA_NativeWindow 原生浮层与 frameless 主窗口的边缘 resize 冲突
-# （常驻原生子窗口 → 四边命中测试全废）。装配已从 __init__ 摘除，本组依赖浮层
-# 装配的测试整体 skip，待悬浮预览重构方向确定后重写。
-pytest.skip(
-    "hover 原生浮层因 frameless resize 死结临时禁用，待重构方向", allow_module_level=True
-)
+from PyQt5.QtCore import QPoint, Qt
 
 from app.widgets.sidebar_hover_preview import HoverPreviewOverlay
 from app.widgets.tab_manager_window import TabManagerWindow
@@ -65,10 +63,15 @@ def _fake_cur(tm):
 
 class TestAssembly:
     def test_overlay_and_controller_attached(self, tm):
-        from PyQt5.QtCore import Qt
-
         assert isinstance(tm._wb_overlay, HoverPreviewOverlay)
+        # owned 顶层窗口：parent 仍是主窗口，但自己是独立 HWND 的 Tool 窗口
         assert tm._wb_overlay.parentWidget() is tm
+        assert tm._wb_overlay.isWindow()
+        flags = tm._wb_overlay.windowFlags()
+        assert bool(flags & Qt.Tool)
+        assert bool(flags & Qt.FramelessWindowHint)
+        # 防回退标记：路线 A 的 WA_NativeWindow（破坏 frameless resize）不得启用
+        assert not tm._wb_overlay.testAttribute(Qt.WA_NativeWindow)
         assert tm._wb_overlay.testAttribute(Qt.WA_Hover)
         assert tm._wb_preview_ctrl is not None
         assert hasattr(tm.titleBar, "_workbench_btn")
@@ -76,6 +79,28 @@ class TestAssembly:
     def test_flags_initialized(self, tm):
         assert tm._wb_in_preview is False
         assert tm._wb_promote_on_leave is False
+
+
+class TestGeometryFollowsWindow:
+    def test_place_uses_global_coords(self, tm):
+        tm.resize(1000, 800)
+        overlay = tm._wb_overlay
+        overlay.place(400)
+        # 右缘内缩 EDGE_INSET、顶接标题栏：局部 (ww-inset-w, titlebar_h) 换全局
+        expected = tm.mapToGlobal(QPoint(1000 - overlay.EDGE_INSET - 400, overlay._titlebar_h))
+        assert (overlay.x(), overlay.y()) == (expected.x(), expected.y())
+        assert overlay.width() == 400
+        assert overlay.height() == 800 - overlay._titlebar_h
+
+    def test_sync_refollows_window_move(self, tm):
+        overlay = tm._wb_overlay
+        tm.resize(1000, 800)
+        overlay.place(400)
+        overlay.show()
+        tm.move(120, 90)  # moveEvent 内部已触发 _sync_wb_overlay_geometry
+        tm._sync_wb_overlay_geometry()
+        expected = tm.mapToGlobal(QPoint(1000 - overlay.EDGE_INSET - 400, overlay._titlebar_h))
+        assert (overlay.x(), overlay.y()) == (expected.x(), expected.y())
 
 
 class TestHoverEntersPreview:
@@ -106,7 +131,7 @@ class TestPreviewDoesNotPolluteMemory:
 
 class TestEventFilterOverlayHover:
     def test_overlay_leave_starts_timer_enter_cancels(self, tm):
-        from PyQt5.QtCore import QEvent, QPoint, Qt
+        from PyQt5.QtCore import QEvent
         from PyQt5.QtGui import QHoverEvent
 
         tm.titleBar.workbench_hover_changed.emit(True)

@@ -714,25 +714,22 @@ class TabManagerWindow(FramelessWindow):
         from app.widgets.custom_title_bar import CustomTitleBar
 
         _tb_h = CustomTitleBar.MAC_HEIGHT if self.titleBar._is_mac else CustomTitleBar.HEIGHT
-        # ★ 临时止血：WA_NativeWindow 原生浮层会整体破坏 frameless 主窗口的边缘
-        # resize（实测四边全废；代码库 workbench_panel 注释早记录「原生 HWND 吞
-        # WM_NCHITTEST」这条死路）。默认不装配 → 无常驻原生子窗口 → resize 正常。
-        # 悬浮预览重构方向确定后再接回（见 sdd 台账）。属性名保留供 getattr 守护。
-        self._wb_overlay = None
-        self._wb_preview_ctrl = None
+        # 路线 C（决策 D025）：浮层是 Qt.Tool 顶层 owned 窗口（独立 HWND，按需
+        # show/hide），不占主窗口客户区 → 不破坏 frameless 边缘 resize；owned
+        # z-order 恒在主窗口之上 → 盖得住 WebEngine。路线 A 的 WA_NativeWindow
+        # 常驻子 HWND 已实测证伪（四边 resize 全废），勿回退。
+        self._wb_overlay = HoverPreviewOverlay(self, side="right", titlebar_h=_tb_h)
+        self._wb_overlay.installEventFilter(self)
+        self._wb_preview_ctrl = HoverPreviewController(
+            self._wb_overlay,
+            can_preview=lambda: not self.is_workbench_visible(),
+            on_enter=self._wb_preview_enter,
+            on_leave=self._wb_preview_leave,
+        )
+        self.titleBar.workbench_hover_changed.connect(self._wb_preview_ctrl.on_button_hover)
         self._wb_suppress_memory = False
         self._wb_in_preview = False
         self._wb_promote_on_leave = False
-        if getattr(self, "_hover_preview_enabled", False):
-            self._wb_overlay = HoverPreviewOverlay(self, side="right", titlebar_h=_tb_h)
-            self._wb_overlay.installEventFilter(self)
-            self._wb_preview_ctrl = HoverPreviewController(
-                self._wb_overlay,
-                can_preview=lambda: not self.is_workbench_visible(),
-                on_enter=self._wb_preview_enter,
-                on_leave=self._wb_preview_leave,
-            )
-            self.titleBar.workbench_hover_changed.connect(self._wb_preview_ctrl.on_button_hover)
 
         # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
         QTimer.singleShot(0, self._apply_bg_from_theme)
@@ -3962,6 +3959,17 @@ class TabManagerWindow(FramelessWindow):
                 self._window_dragging_timer.start()  # 持续重置防抖
         # 几何保存防抖（拖拽期间由 _save_geometry 内部守卫跳过）
         self._save_geometry()
+        # hover 浮层跟随（独立 Tool 顶层窗口，全局坐标手动同步）
+        self._sync_wb_overlay_geometry()
+
+    def _sync_wb_overlay_geometry(self) -> None:
+        """主窗口 move/resize 后同步 hover 浮层全局坐标（未装配/隐藏时跳过）
+
+        浮层是独立 Tool 顶层窗口，不会随主窗口布局自动移动，须在宿主
+        moveEvent/resizeEvent 里手动重定位（见 sidebar_hover_preview 跟随策略）。"""
+        ov = getattr(self, "_wb_overlay", None)
+        if ov is not None:
+            ov.sync_to_window()
 
     # ── 原生窗口能力：边缘/角落 resize + Aero Snap 分屏 ──
 
@@ -4202,6 +4210,12 @@ class TabManagerWindow(FramelessWindow):
             # 最大化/还原误判为"用户拖窄"。resize 周期结束会提前解除，
             # 这里的定时器只是兜底。
             self._begin_window_state_guard()
+            # 最小化时 owned 浮层被系统连带隐藏：预览态需同步收场
+            # （on_clicked 取消缓收并走非 promote 的 leave 路径）
+            if self.isMinimized():
+                ctrl = getattr(self, "_wb_preview_ctrl", None)
+                if ctrl is not None and ctrl.is_previewing():
+                    ctrl.on_clicked()
 
     def _begin_window_state_guard(self):
         """窗口状态切换（最大化/还原/全屏）期间抑制侧边栏自动折叠"""
@@ -4470,6 +4484,7 @@ class TabManagerWindow(FramelessWindow):
             # FramelessWindow.__init__ 内部 resize(500,500) 同步触发的首个 Resize：
             # 本类节流状态尚未初始化，直接走基类布局（含顶栏宽度同步）并返回
             super().resizeEvent(event)
+            self._sync_wb_overlay_geometry()
             return
 
         if self._resize_blocking:
@@ -4481,6 +4496,7 @@ class TabManagerWindow(FramelessWindow):
             self._sync_title_bar_width()
             # 背景图尺寸跟随（轻量操作，不触发布局）
             self._resize_bg_labels()
+            self._sync_wb_overlay_geometry()
             return
 
         # ── 阶段一：首个 resize 事件，正常布局 + 初始化 blocking ──
@@ -4505,6 +4521,7 @@ class TabManagerWindow(FramelessWindow):
         self._resize_blocking = True
         self._resize_timer.start()
         self._save_geometry()
+        self._sync_wb_overlay_geometry()
 
     def closeEvent(self, event: QCloseEvent):
         """关闭 TabManagerWindow 时不销毁，仅隐藏到系统托盘

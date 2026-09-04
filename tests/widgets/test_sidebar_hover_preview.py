@@ -1,7 +1,7 @@
-"""HoverPreviewOverlay / HoverPreviewController 单测（offscreen 状态机 + 几何）"""
+"""HoverPreviewOverlay / HoverPreviewController 单测（offscreen 状态机 + 几何，路线 C）"""
 
 import pytest
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import QPoint, Qt
 from PyQt5.QtWidgets import QWidget
 
 from app.widgets.sidebar_hover_preview import HoverPreviewOverlay, HoverPreviewController
@@ -15,23 +15,30 @@ def window(qtbot):
     return w
 
 
-def test_overlay_is_native_and_no_activate(window, qtbot):
+def test_overlay_is_tool_toplevel_no_activate(window, qtbot):
+    """路线 C：Qt.Tool 顶层 owned 窗口，不得启用 WA_NativeWindow（破坏 frameless resize）"""
     ov = HoverPreviewOverlay(window, side="right", titlebar_h=38)
     qtbot.addWidget(ov)
-    assert ov.testAttribute(Qt.WA_NativeWindow) is True
+    assert ov.isWindow()  # 独立顶层窗口，不占主窗口客户区
+    assert ov.parentWidget() is window  # owned：z-order 跟随主窗口
+    flags = ov.windowFlags()
+    assert bool(flags & Qt.Tool)
+    assert bool(flags & Qt.FramelessWindowHint)
+    assert ov.testAttribute(Qt.WA_NativeWindow) is False
     assert ov.testAttribute(Qt.WA_ShowWithoutActivating) is True
     assert ov.testAttribute(Qt.WA_Hover) is True
 
 
 def test_place_right_insets_edge(window, qtbot):
+    """place 落在全局坐标：右缘内缩 EDGE_INSET、顶接标题栏、底接窗口底"""
     ov = HoverPreviewOverlay(window, side="right", titlebar_h=38)
     qtbot.addWidget(ov)
     window.resize(1200, 800)
     ov.place(300)
-    g = ov.geometry()
-    assert abs(g.right() - (1200 - HoverPreviewOverlay.EDGE_INSET)) <= 1
-    assert g.top() == 38
-    assert g.height() == 800 - 38
+    expected = window.mapToGlobal(QPoint(1200 - HoverPreviewOverlay.EDGE_INSET - 300, 38))
+    assert (ov.x(), ov.y()) == (expected.x(), expected.y())
+    assert ov.width() == 300
+    assert ov.height() == 800 - 38
 
 
 def test_set_and_clear_content(window, qtbot):
