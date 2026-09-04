@@ -90,3 +90,22 @@ def test_pipeline_cached_impl():
     html = _render_markdown_to_html_cached_impl("质能 $E=mc^2$ 方程", False)
     assert "data-katex-src" in html
     _render_markdown_to_html_cached_impl.cache_clear()
+
+
+def test_katex_vendor_files_exist():
+    from pathlib import Path
+
+    root = Path(__file__).parents[2]
+    vdir = root / "app/resources/web/vendor/katex"
+    assert (vdir / "katex.min.js").is_file()
+    assert (vdir / "katex.min.css").is_file()
+    assert (vdir / "fonts" / "KaTeX_Main-Regular.woff2").is_file()
+
+
+def test_get_katex_urls_local_first():
+    from app.widgets import message_card
+
+    message_card._katex_vendor_urls_cache = None
+    css_url, js_url = message_card._get_katex_urls()
+    assert css_url.startswith("file://") and js_url.startswith("file://")
+    assert message_card._katex_vendor_urls_cache is not None

@@ -3021,6 +3021,41 @@ def _get_mermaid_vendor_urls() -> tuple:
     return _mermaid_vendor_urls_cache
 
 
+_katex_vendor_urls_cache: tuple[str, str] | None = None
+
+
+def _get_katex_urls() -> tuple:
+    """返回 (css_url, js_url)。本地优先成对返回；任一缺失时整体降级 CDN。
+
+    css 与 js 必须同源：katex.min.css 用相对路径 url(fonts/...) 引字体，
+    混用本地 css + CDN js（或反之）会导致字体路径错位。
+    不并入 `_get_vendor_script_tags()`（骨架缓存会让每条消息都背上 vendor），
+    由 JS 侧 `_katexEnsure` 首次遇到公式时动态加载，与 mermaid 同策略。
+    """
+    global _katex_vendor_urls_cache
+    if _katex_vendor_urls_cache is not None:
+        return _katex_vendor_urls_cache
+
+    base_dirs = [_PROJECT_ROOT]
+    if hasattr(sys, "_MEIPASS"):
+        base_dirs.append(sys._MEIPASS)
+
+    css_url = js_url = ""
+    for base in base_dirs:
+        css_c = os.path.join(base, "app/resources/web/vendor/katex/katex.min.css")
+        js_c = os.path.join(base, "app/resources/web/vendor/katex/katex.min.js")
+        if os.path.isfile(css_c) and os.path.isfile(js_c):
+            css_url = QUrl.fromLocalFile(css_c).toString()
+            js_url = QUrl.fromLocalFile(js_c).toString()
+            break
+    if not css_url:
+        css_url = "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css"
+        js_url = "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"
+
+    _katex_vendor_urls_cache = (css_url, js_url)
+    return _katex_vendor_urls_cache
+
+
 # ======== WebViewer ========
 class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
