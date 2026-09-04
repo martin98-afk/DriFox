@@ -82,3 +82,11 @@ def test_markdown_escape_immune():
 def test_adjacent_dollars():
     md = "$ $$ $$$"
     assert _extract_formulas(md) == md
+
+
+def test_pipeline_cached_impl():
+    from app.widgets.message_card import _render_markdown_to_html_cached_impl
+
+    html = _render_markdown_to_html_cached_impl("质能 $E=mc^2$ 方程", False)
+    assert "data-katex-src" in html
+    _render_markdown_to_html_cached_impl.cache_clear()

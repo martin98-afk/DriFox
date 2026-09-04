@@ -2199,6 +2199,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
     """
     safe_md = _sanitize_incomplete_markdown(raw_md)
     safe_md = _protect_inline_svg_blocks(safe_md)
+    safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取（设计文档 2026-09-04）
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
@@ -2301,6 +2302,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     if not streaming:
         # 非流式分支（历史加载 / 流式结束调用方已切非流式）
         safe_md = _sanitize_incomplete_markdown(raw_md)
+        safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
         processed_md = _inject_think_cards(safe_md, True, compact=compact)
@@ -2325,6 +2327,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
         streaming_md = streaming_md[: -len("</think>")].rstrip()
 
     safe_md = _sanitize_incomplete_markdown(streaming_md)
+    safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
     processed_md = _inject_think_cards(safe_md, False, compact=compact)
@@ -2557,6 +2560,7 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     """
     safe_md = _sanitize_incomplete_markdown(md_seg)
     safe_md = _protect_inline_svg_blocks(safe_md)
+    safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
@@ -2607,6 +2611,7 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     if "<think>" in md_text or "</think>" in md_text or "<tool>" in md_text or "</tool>" in md_text:
         return ""
     safe_md = _sanitize_incomplete_markdown(md_text)
+    safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
@@ -7209,6 +7214,7 @@ class CodeWebViewer(QWebEngineView):
             streaming_md = streaming_md[: -len("</think>")].rstrip()
 
         safe_md = _sanitize_incomplete_markdown(streaming_md)
+        safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
         processed_md = _inject_think_cards(safe_md, self._streaming is False, compact=self._tool_compact_mode)
