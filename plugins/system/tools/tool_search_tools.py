@@ -234,8 +234,6 @@ def _execute_impl(tool_ctx=None, **kw):
     """中转执行：调用 tool_search 搜到但未注入 schema 的工具。"""
     import inspect
 
-    from app.tools.registry import ToolRegistry as _TR
-
     name = str(kw.get("tool_name") or "").strip()
     args = kw.get("arguments")
     if args is None or args == "":
@@ -254,20 +252,22 @@ def _execute_impl(tool_ctx=None, **kw):
 
     services = (tool_ctx or {}).get("services") or {}
 
-    # 全局硬关闭检查：用户在权限卡片显式关掉的工具，中转也拒绝（安全网保留）
+    # 安全网：用户在权限卡片显式关掉的工具（toggles=False 且 deny 策略），中转也拒绝
     try:
         from app.core.tool_permission_controller import resolve_tool_off_policy
         from app.utils.config import Settings
 
         settings = Settings.get_instance()
-        policies = dict(settings.tool_permission_policy.value or {})
-        behavior = settings.tool_off_behavior.value or "deny"
-        if resolve_tool_off_policy(name, None, policies, behavior) == "deny":
-            return ToolResult(True, content=f"工具 {name} 已被用户禁用（deny 策略），不能中转执行。")
+        toggles = dict(settings.tool_toggles.value or {})
+        if toggles.get(name, True) is False:
+            policies = dict(settings.tool_permission_policy.value or {})
+            behavior = settings.tool_off_behavior.value or "deny"
+            if resolve_tool_off_policy(name, None, policies, behavior) == "deny":
+                return ToolResult(True, content=f"工具 {name} 已被用户禁用（deny 策略），不能中转执行。")
     except Exception:
         pass  # 检查失败不阻塞执行（与执行层兜底口径一致）
 
-    reg = _TR.get_instance()
+    reg = ToolRegistry.get_instance()
     if reg.has(name):
         entry = reg.get(name)
         impl = entry.impl

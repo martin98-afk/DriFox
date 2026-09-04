@@ -154,6 +154,20 @@ def test_prompt_block_memory_off_and_skills_off(tmp_path):
     assert "硬性要求" in block  # 人工提示不受开关控制
 
 
+def test_tool_access_for_session_override(tmp_path):
+    """预置档位：会话 override 助手优先，否则主助手。"""
+    mgr = _fresh_manager(tmp_path)
+    mgr.create("主狐")
+    a2 = mgr.create("只读狐")
+    a2.tool_access = "readonly"
+    mgr.update(a2)
+    assert mgr.tool_access_for("") == "full"  # 无 override → 主助手档
+    assert mgr.tool_access_for("s-none") == "full"
+    mgr.set_session_override("s1", a2.id)
+    assert mgr.tool_access_for("s1") == "readonly"  # override 助手档生效
+    assert mgr.tool_access_for("s2") == "full"  # 其他会话不受影响
+
+
 def test_prompt_stats_counts_chars(tmp_path):
     mgr = _fresh_manager(tmp_path)
     a = mgr.create("小狐")

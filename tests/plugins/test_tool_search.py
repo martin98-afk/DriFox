@@ -230,16 +230,54 @@ def test_execute_mcp_via_services(monkeypatch):
 
 
 def test_execute_deny_policy_blocked(monkeypatch):
-    """全局 deny 策略的工具中转也拒绝（安全网）。"""
+    """toggles 显式关 + deny 策略的工具，中转也拒绝（安全网）。"""
 
     def _bash(tool_ctx=None, **kw):
         return m.ToolResult(True, content="should not run")
 
     _setup_registry_with_impl(monkeypatch, {"bash": _bash, "tool_search": None, "tool_execute": None})
 
+    class _V:
+        def __init__(self, v):
+            self.value = v
+
     class _FakeSettings:
-        tool_permission_policy = type("V", (), {"value": {"bash": "deny"}})()
-        tool_off_behavior = type("V", (), {"value": "deny"})()
+        tool_toggles = _V({"bash": False})
+        tool_permission_policy = _V({"bash": "deny"})
+        tool_off_behavior = _V("deny")
+
+        @staticmethod
+        def get_instance():
+            return _FakeSettings()
+
+    _FakeSettingsModule = _FakeSettings
+
+    import sys
+    import types
+
+    fake = types.ModuleType("app.utils.config")
+    fake.Settings = _FakeSettings
+    monkeypatch.setitem(sys.modules, "app.utils.config", fake)
+    out = m._execute_impl(tool_ctx={"services": {}}, tool_name="bash", arguments={"command": "dir"})
+    assert out.success and "禁用" in out.content
+
+
+def test_execute_toggles_off_ask_still_runs(monkeypatch):
+    """toggles 关但策略 ask：无弹窗通道，中转放行（与执行层兜底口径一致）。"""
+
+    def _bash(tool_ctx=None, **kw):
+        return m.ToolResult(True, content="ran")
+
+    _setup_registry_with_impl(monkeypatch, {"bash": _bash, "tool_search": None, "tool_execute": None})
+
+    class _V:
+        def __init__(self, v):
+            self.value = v
+
+    class _FakeSettings:
+        tool_toggles = _V({"bash": False})
+        tool_permission_policy = _V({})
+        tool_off_behavior = _V("ask")
 
     class _FakeSettingsModule:
         @staticmethod
@@ -253,7 +291,7 @@ def test_execute_deny_policy_blocked(monkeypatch):
     fake.Settings = _FakeSettings
     monkeypatch.setitem(sys.modules, "app.utils.config", fake)
     out = m._execute_impl(tool_ctx={"services": {}}, tool_name="bash", arguments={"command": "dir"})
-    assert out.success and "禁用" in out.content
+    assert out.success and "ran" in out.content
 
 
 def test_execute_no_name_prompts(monkeypatch):
