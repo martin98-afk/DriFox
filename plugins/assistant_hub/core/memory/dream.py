@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 _THIS = Path(__file__).resolve()
 _MAX_REVISIONS = 10
+# ── 遗忘步名额（火灾取物 · 物竞天择）─────────────────────
+FORGET_FACTS_LIMIT = 15
+FORGET_DAILY_LIMIT = 3
+FORGET_LONGTERM_LIMIT = 20
+FORGET_BUDGET_CHARS = 3000
 _locks: Dict[str, threading.Lock] = {}
 
 
@@ -299,7 +304,7 @@ class DreamRunner:
         before_hash = _hash_sections(before)
 
         prompts = _prompts()
-        total = 5
+        total = 6
         try:
             llm = self._llm
             self._report(1, total, "原子化")
@@ -348,15 +353,32 @@ class DreamRunner:
         longterm_after = before.longterm
         if before.facts.strip() and before.longterm.strip() == before.facts.strip():
             longterm_after = ""
-        after = DreamSections(facts=composed, today=before.today, daily=before.daily, longterm=longterm_after)
+
+        # 第 6 步 遗忘：火灾取物 · 物竞天择，名额内抢救记忆；失败降级五步结果
+        forget_warning = ""
+        forgotten = None
+        try:
+            forgotten = self._try_forget(prompts, before, composed, longterm_after)
+        except Exception as e:
+            forget_warning = f"遗忘步异常已跳过: {e}"
+        if forgotten is None and not forget_warning:
+            forget_warning = "遗忘步失败已跳过（解析/守门未过），保留五步结果"
+
+        if forgotten is not None:
+            after = DreamSections(
+                facts=forgotten.facts, today=before.today, daily=forgotten.daily, longterm=longterm_after
+            )
+        else:
+            after = DreamSections(facts=composed, today=before.today, daily=before.daily, longterm=longterm_after)
+        warning_text = "；".join(w for w in (verify_warning, forget_warning) if w)
         if _hash_sections(after) == before_hash:
             state.update(self._finalize(state, run_id, trigger, "succeeded", "", before_hash, before_hash))
-            if verify_warning:
-                state["lastRun"]["warning"] = verify_warning
+            if warning_text:
+                state["lastRun"]["warning"] = warning_text
             if trigger == "manual":
                 state["lastSuccessfulManualDate"] = self._logical_date
             _write_state(self._aid, state)
-            return {"ok": True, "run_id": run_id, "changed": False, "revision_id": "", "warning": verify_warning}
+            return {"ok": True, "run_id": run_id, "changed": False, "revision_id": "", "warning": warning_text}
 
         revision_id = create_revision(self._aid, run_id=run_id, trigger=trigger, before=before)
         # pending-apply：崩溃恢复标记
@@ -371,14 +393,14 @@ class DreamRunner:
             pass
 
         state = self._finalize(state, run_id, trigger, "succeeded", revision_id, before_hash, _hash_sections(after))
-        if verify_warning:
-            state["lastRun"]["warning"] = verify_warning
+        if warning_text:
+            state["lastRun"]["warning"] = warning_text
         if trigger == "manual":
             state["lastSuccessfulManualDate"] = self._logical_date
         else:
             state["lastAutomaticAttemptDate"] = self._logical_date
         _write_state(self._aid, state)
-        return {"ok": True, "run_id": run_id, "changed": True, "revision_id": revision_id, "warning": verify_warning}
+        return {"ok": True, "run_id": run_id, "changed": True, "revision_id": revision_id, "warning": warning_text}
 
     def _verify(self, prompts, before: DreamSections, composed: str) -> Dict:
         raw = (self._llm(prompts.build_dream_verify(_sections_text(before), composed)) or "").strip()
@@ -388,6 +410,40 @@ class DreamRunner:
             return d if isinstance(d, dict) else {}
         except Exception:
             return {}
+
+    def _try_forget(self, prompts, before: DreamSections, composed: str, longterm: str) -> Optional[DreamSections]:
+        """第 6 步遗忘：LLM 按火灾/物竞天择在名额内抢救记忆。
+
+        返回 None 表示遗忘失败（调用方降级五步结果）。守门：
+        - JSON 解析失败 / facts 为空 / keep_daily 非列表 → None
+        - 幻觉守门：输出长度超过对应输入（只删不增被违反）→ None
+        - daily 超名额确定性删最旧；总量超预算继续删最旧 daily
+        """
+        raw = (self._llm(prompts.build_dream_forget(composed, longterm, before.today, before.daily)) or "").strip()
+        raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        d = json.loads(raw)
+        if not isinstance(d, dict):
+            return None
+        facts = str(d.get("facts") or "").strip()
+        lt = str(d.get("longterm") or "").strip()
+        keep = d.get("keep_daily")
+        if not facts or not isinstance(keep, list):
+            return None
+        # 幻觉守门：遗忘只能删减（合并等价碎片不会增字符）；
+        # longterm 输入为空串（迁移清空）时输出也应为空，不触发误杀
+        if len(facts) > len(composed) or (longterm.strip() and len(lt) > len(longterm.strip())):
+            return None
+        keep_set = {str(x) for x in keep}
+        daily_keep = sorted((x for x in before.daily if x.get("date") in keep_set), key=lambda x: x["date"])
+        # 名额兜底：超名额删最旧
+        daily_keep = daily_keep[-FORGET_DAILY_LIMIT:]
+        # 字符预算兜底：继续删最旧 daily（longterm/facts 超限不硬截，语义优先）
+        while (
+            daily_keep
+            and len(facts) + len(lt) + sum(len(x.get("body") or "") for x in daily_keep) > FORGET_BUDGET_CHARS
+        ):
+            daily_keep.pop(0)
+        return DreamSections(facts=facts, today=before.today, daily=daily_keep, longterm=lt)
 
     @staticmethod
     def _finalize(

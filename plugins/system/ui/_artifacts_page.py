@@ -115,7 +115,7 @@ class _SystemArtifactItem(QFrame):
         text_col = QVBoxLayout()
         text_col.setSpacing(1)
         name = Path(self._file_path).name or self._file_path
-        self._name_label = QLabel(name, self)
+        self._name_label = _ElidedLabel(name, self)
         self._meta_label = QLabel(f"{op.get('tool_name', '')} · {_relative_time(op.get('created_at', ''))}", self)
         text_col.addWidget(self._name_label)
         text_col.addWidget(self._meta_label)

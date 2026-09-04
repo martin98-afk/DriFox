@@ -203,10 +203,10 @@ def _record_mtime(tool_ctx, full_path: Path) -> None:
 # ========== 内部 helper（自包含） ==========
 
 def _resolve(workdir: Optional[Path], path: str) -> Path:
-    """解析路径：绝对路径直接用；~ 展开；相对路径基于 workdir"""
+    """解析路径：绝对路径直接用；环境变量展开（Win %VAR% / POSIX $VAR）；~ 展开；相对路径基于 workdir"""
     if not path:
         return Path(workdir or Path.cwd())
-    p = Path(path).expanduser()
+    p = Path(os.path.expandvars(path)).expanduser()
     if p.is_absolute():
         return p
     base = workdir or Path.cwd()
