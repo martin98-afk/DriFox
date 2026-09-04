@@ -213,3 +213,21 @@ def test_dream_automatic_double_watermark(tmp_path):
     assert runner2.start_automatic_if_eligible("2026-09-01") is None
     # 次日：放行
     assert runner2.start_automatic_if_eligible("2026-09-02") is not None
+
+
+def test_build_dream_forget_prompt():
+    p = m._prompts()
+    msgs = p.build_dream_forget(
+        "- 事实A",
+        "- 长期沉淀",
+        "- 今日草稿",
+        [{"date": "2026-08-30", "body": "# 2026-08-30\n\n- 30日的事"}],
+    )
+    text = msgs[-1]["content"]
+    # 火灾/物竞天择场景 + 名额数字 + 只删不增约束 + JSON 输出契约 + 四段输入
+    assert "火灾" in text and "名额" in text
+    assert "15" in text and "20" in text and "3" in text
+    assert "keep_daily" in text
+    assert "不增" in text
+    assert "- 事实A" in text and "- 长期沉淀" in text and "- 今日草稿" in text
+    assert "2026-08-30" in text and "30日的事" in text

@@ -125,6 +125,27 @@ def build_dream_verify(current_sections: str, composed: str) -> list:
     )
 
 
+def build_dream_forget(facts_draft: str, longterm: str, today: str, daily: List[Dict[str, str]]) -> list:
+    daily_text = "\n\n".join(f"【{d['date']}】\n{d['body']}" for d in daily) or "（无）"
+    return _msg(
+        "【火灾取物 · 物竞天择】记忆库发生火灾，只能抢救有限名额，"
+        "每条记忆必须证明自己值得占一个名额，平庸即淘汰。\n"
+        "淘汰优先：已完成闭环的待办、一次性信息、可从外部重新获得的内容（公开文档/代码可查）、"
+        "被新版本覆盖的旧表述、模糊薄弱脱离上下文不可解码的条目、长期沉寂无引用的条目。\n"
+        "存活优先：仍活跃的项目/约束/偏好、具体可执行的坑与决策、身份关系类硬事实。\n"
+        + _STYLE +
+        "- 硬性名额：facts ≤15 条；longterm ≤20 条；daily 保留 ≤3 天\n"
+        "- 只删/合并，不增不改写：输出中出现的事实必须来自输入；语义等价碎片可合并挤一个名额\n"
+        "- today 仅供参考视野，不在输出范围\n\n"
+        '只输出一个 JSON 对象：{"facts": "保留后的重要事实全文", "keep_daily": ["日期"], '
+        '"longterm": "保留后的长期记忆全文"}；某段全无可保留则输出空字符串/空数组。\n\n'
+        f"【facts 候选（合成稿）】\n{facts_draft.strip() or '（空）'}\n\n"
+        f"【longterm】\n{longterm.strip() or '（空）'}\n\n"
+        f"【today（只读视野）】\n{today.strip() or '（空）'}\n\n"
+        f"【daily 候选】\n{daily_text}"
+    )
+
+
 # ── 经验库压缩 ──────────────────────────────────────────
 
 
