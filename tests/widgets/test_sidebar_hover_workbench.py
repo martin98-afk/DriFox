@@ -24,6 +24,13 @@ from types import SimpleNamespace
 
 import pytest
 
+# ★ 临时禁用：WA_NativeWindow 原生浮层与 frameless 主窗口的边缘 resize 冲突
+# （常驻原生子窗口 → 四边命中测试全废）。装配已从 __init__ 摘除，本组依赖浮层
+# 装配的测试整体 skip，待悬浮预览重构方向确定后重写。
+pytest.skip(
+    "hover 原生浮层因 frameless resize 死结临时禁用，待重构方向", allow_module_level=True
+)
+
 from app.widgets.sidebar_hover_preview import HoverPreviewOverlay
 from app.widgets.tab_manager_window import TabManagerWindow
 

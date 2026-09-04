@@ -714,20 +714,25 @@ class TabManagerWindow(FramelessWindow):
         from app.widgets.custom_title_bar import CustomTitleBar
 
         _tb_h = CustomTitleBar.MAC_HEIGHT if self.titleBar._is_mac else CustomTitleBar.HEIGHT
-        self._wb_overlay = HoverPreviewOverlay(self, side="right", titlebar_h=_tb_h)
-        self._wb_overlay.installEventFilter(self)
+        # ★ 临时止血：WA_NativeWindow 原生浮层会整体破坏 frameless 主窗口的边缘
+        # resize（实测四边全废；代码库 workbench_panel 注释早记录「原生 HWND 吞
+        # WM_NCHITTEST」这条死路）。默认不装配 → 无常驻原生子窗口 → resize 正常。
+        # 悬浮预览重构方向确定后再接回（见 sdd 台账）。属性名保留供 getattr 守护。
+        self._wb_overlay = None
+        self._wb_preview_ctrl = None
         self._wb_suppress_memory = False
         self._wb_in_preview = False
-        # 预览态下点击按钮：leave 完成后转为常驻展开（区别于超时收起）。
-        # 由 toggle_workbench 在调 on_clicked 前后置位/复位。
         self._wb_promote_on_leave = False
-        self._wb_preview_ctrl = HoverPreviewController(
-            self._wb_overlay,
-            can_preview=lambda: not self.is_workbench_visible(),
-            on_enter=self._wb_preview_enter,
-            on_leave=self._wb_preview_leave,
-        )
-        self.titleBar.workbench_hover_changed.connect(self._wb_preview_ctrl.on_button_hover)
+        if getattr(self, "_hover_preview_enabled", False):
+            self._wb_overlay = HoverPreviewOverlay(self, side="right", titlebar_h=_tb_h)
+            self._wb_overlay.installEventFilter(self)
+            self._wb_preview_ctrl = HoverPreviewController(
+                self._wb_overlay,
+                can_preview=lambda: not self.is_workbench_visible(),
+                on_enter=self._wb_preview_enter,
+                on_leave=self._wb_preview_leave,
+            )
+            self.titleBar.workbench_hover_changed.connect(self._wb_preview_ctrl.on_button_hover)
 
         # 初始加载全局背景图（延迟到首帧后，背景为纯装饰，不阻塞出现）
         QTimer.singleShot(0, self._apply_bg_from_theme)
