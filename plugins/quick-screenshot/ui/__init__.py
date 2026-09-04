@@ -90,9 +90,11 @@ def _on_screenshot_clicked(context: Dict[str, Any]) -> None:
         _active_overlay = overlay
 
         def _on_captured(pixmap) -> None:
-            QApplication.clipboard().setPixmap(pixmap)
+            # 存 QImage 而非 setPixmap：同进程剪贴板回读时 QPixmap 不走系统
+            # CF_DIB 转换，paste 端拿到的类型是 QPixmap；转 QImage 保持通用语义
+            QApplication.clipboard().setImage(pixmap.toImage())
             # 读回验证：确认 Qt 层剪贴板确有图像（定位"复制了但粘贴板空"类问题）
-            back = QApplication.clipboard().pixmap()
+            back = QApplication.clipboard().image()
             logger.info(
                 f"[quick-screenshot] 剪贴板写入: {pixmap.width()}x{pixmap.height()} "
                 f"读回 isNull={back.isNull()} size={back.width()}x{back.height()}"

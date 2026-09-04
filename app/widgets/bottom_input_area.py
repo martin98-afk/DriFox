@@ -34,6 +34,7 @@ from PyQt5.QtGui import (
     QKeySequence,
     QPainter,
     QPainterPath,
+    QPixmap,
     QPen,
     QSyntaxHighlighter,
     QTextCharFormat,
@@ -1836,6 +1837,10 @@ class SendableTextEdit(TextEdit):
             # 粘贴剪贴板图片 → 保存到临时文件
             if source.hasImage() and not file_paths:
                 img = source.imageData()
+                if isinstance(img, QPixmap):
+                    # 同进程 clipboard().setPixmap() 写入的剪贴板，同进程回读为
+                    # QPixmap（未走系统 CF_DIB 转换）；外部进程截图则为 QImage。
+                    img = img.toImage()
                 if isinstance(img, QImage) and not img.isNull():
                     tmp_dir = Path(tempfile.gettempdir()) / "drifox_paste"
                     tmp_dir.mkdir(parents=True, exist_ok=True)
