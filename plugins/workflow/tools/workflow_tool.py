@@ -14,6 +14,7 @@ import inspect
 import json
 import math
 import re
+import shutil
 import statistics
 import threading
 import time
@@ -703,6 +704,8 @@ def _workflow_description(subagent_names: list) -> str:
         "复用与后台：action=save/list/load 管理可复用 workflow（from_saved 直接跑已存档）；"
         "默认后台运行立即返回 run_id，用 action=status 查进度；foreground=true 同步等结果；"
         "action=resume + run_id 从中断处续跑（prompt 拼时间戳/随机数会指纹漂移导致全量重跑，保持 prompt 确定性）。\n\n"
+        "沙箱定位：containment（防误用围栏），非安全边界——不要把不可信内容交给脚本处理；"
+        "历史 run 目录按 max_runs_kept 滚动清理。\n\n"
         "沙箱边界：禁止 import（预置 json/math/re/statistics/datetime）；无文件/网络能力；"
         "宿主内部变量（_ 开头）不在脚本命名空间。\n"
         "误用钩子或超上限会中止整个脚本；子任务失败只降 None。"
@@ -825,12 +828,44 @@ def _saved_path(root: Path, name: str) -> Path:
 
 
 def save_workflow(root: Path, name: str, meta: dict, script: str, args: dict | None) -> Path:
-    """保存可复用 workflow：头注释行存 meta+args JSON，正文是脚本原文。同名覆盖。"""
+    """保存可复用 workflow：头注释行存 meta+args JSON，正文是脚本原文。同名覆盖。
+
+    存一个跑不了的脚本没有意义：meta.name 必须非空，script 必须过语法检查。
+    """
+    if not isinstance(meta, dict) or not str(meta.get("name") or "").strip():
+        raise ValueError("保存 workflow 需要 meta.name 非空")
+    try:
+        ast.parse(script)
+    except SyntaxError as e:
+        raise ValueError(f"脚本语法错误，不予保存: {e}") from e
     path = _saved_path(root, name)
     path.parent.mkdir(parents=True, exist_ok=True)
     header = orjson.dumps({"meta": meta, "args": args}).decode()
     path.write_text(f"# workflow-meta: {header}\n{script}", encoding="utf-8")
     return path
+
+
+def prune_runs(root: Path, keep: int, exclude: Path | None = None) -> int:
+    """滚动清理 runs/ 目录：按 mtime 降序只保留最新 keep 个（saved/ 资产不碰）。
+
+    keep<=0 表示全清（测试用）；exclude 用于保护正在写入的 run。
+    """
+    runs_dir = root / "runs"
+    if not runs_dir.is_dir():
+        return 0
+    dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
+    dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    removed = 0
+    for d in dirs[max(0, keep):]:
+        # 活跃 run 保护：占保留名额但跳过删除（总数仍 ≤ keep）
+        if exclude is not None and d.resolve() == exclude.resolve():
+            continue
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+        except Exception as e:  # 单个删除失败不影响其余
+            logger.debug(f"[workflow] 清理 run 目录失败 {d.name}: {e}")
+    return removed
 
 
 def load_workflow(root: Path, name: str) -> dict:
@@ -998,6 +1033,15 @@ def _execute_run(cfg: dict) -> ToolResult:
         # 否则异常路径下这些线程会一直挂到各自的截止时间才退出。
         state.abort()
         pool.shutdown(wait=False, cancel_futures=True)
+        # 滚动清理旧 runs（异步）：journal 结果全文较大，不滚动会无限增长
+        keep = int(cfg.get("max_runs_kept") or 0)
+        if keep > 0 and cfg.get("prune_root"):
+            threading.Thread(
+                target=prune_runs,
+                args=(Path(cfg["prune_root"]), keep, Path(cfg["run_dir"])),
+                daemon=True,
+                name=f"wf-prune-{cfg.get('run_id')}",
+            ).start()
 
 
 _RUN_STATE_LABEL = {
@@ -1240,6 +1284,7 @@ def _workflow_impl(tool_ctx, **kwargs):
     model_aliases = _parse_aliases(store.get(PLUGIN_NAME, "model_aliases"))
     default_foreground = str(store.get(PLUGIN_NAME, "default_foreground") or "").lower() == "true"
     card_refresh_ms = int(float(store.get(PLUGIN_NAME, "card_refresh_ms") or 1000))
+    max_runs_kept = int(float(store.get(PLUGIN_NAME, "max_runs_kept") or 30))
 
     # ---- 前台/后台分流：默认后台投递 daemon 线程立即返回，foreground=true 同步等结果 ----
     foreground = kwargs.get("foreground")
@@ -1274,6 +1319,8 @@ def _workflow_impl(tool_ctx, **kwargs):
         "journal": journal,
         "run_id": run_id,
         "resume_map": resume_map,
+        "max_runs_kept": max_runs_kept,
+        "prune_root": root,
     }
     if foreground:
         return _execute_run(cfg)

@@ -81,6 +81,13 @@
         "type": "number",
         "default": 1000,
         "description": "实时状态卡片的轮询间隔"
+      },
+      {
+        "key": "max_runs_kept",
+        "label": "历史 run 保留数",
+        "type": "number",
+        "default": 30,
+        "description": "runs/ 目录滚动清理：每次 run 结束后只保留最近 N 个（0=不清理）；saved/ 存档不受影响"
       }
     ]
   }

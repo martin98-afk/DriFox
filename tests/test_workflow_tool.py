@@ -1044,6 +1044,98 @@ class TestPostMortemFixes:
         assert any("未返回文本" in m for m in logs)
 
 
+class TestLifecycleAndStorage:
+    """存储复用完善 + runs 残留生命周期（滚动清理）+ 沙箱声明。"""
+
+    def test_save_rejects_empty_meta_name(self, tmp_path):
+        from plugins.workflow.tools.workflow_tool import save_workflow
+
+        with pytest.raises(ValueError):
+            save_workflow(tmp_path, "x", {"description": "无名字"}, "result = 1", None)
+
+    def test_save_rejects_syntax_error_script(self, tmp_path):
+        from plugins.workflow.tools.workflow_tool import save_workflow
+
+        with pytest.raises(ValueError):
+            save_workflow(tmp_path, "x", {"name": "x", "description": "d"}, "def broken(:", None)
+
+    def test_prune_runs_keeps_newest(self, tmp_path):
+        from plugins.workflow.tools.workflow_tool import prune_runs
+
+        root = tmp_path / "workflows"
+        root.mkdir()
+        for i in range(5):
+            rd = root / "runs" / f"r{i}"
+            rd.mkdir(parents=True)
+            (rd / "marker.txt").write_text(str(i), encoding="utf-8")
+            import os as _os
+
+            stamp = 1000000000 + i * 1000
+            _os.utime(rd, (stamp, stamp))
+        removed = prune_runs(root, keep=3)
+        assert removed == 2
+        left = sorted(p.name for p in (root / "runs").iterdir())
+        assert left == ["r2", "r3", "r4"]  # 最旧的 r0/r1 被清
+
+    def test_prune_runs_never_touches_saved(self, tmp_path):
+        from plugins.workflow.tools.workflow_tool import prune_runs, save_workflow
+
+        save_workflow(tmp_path, "keep-me", {"name": "keep-me"}, "result = 1", None)
+        rd = tmp_path / "runs" / "old"
+        rd.mkdir(parents=True)
+        assert prune_runs(tmp_path, keep=0) == 1
+        assert (tmp_path / "saved" / "keep-me.py").exists()  # saved 资产不动
+        assert prune_runs(tmp_path, keep=0) == 0
+
+    def test_prune_excludes_active_run(self, tmp_path):
+        from plugins.workflow.tools.workflow_tool import prune_runs
+
+        rd = tmp_path / "runs" / "active"
+        rd.mkdir(parents=True)
+        import os as _os
+
+        _os.utime(rd, (1, 1))  # 最旧，但在排除名单
+        assert prune_runs(tmp_path, keep=0, exclude=rd) == 0
+        assert rd.exists()
+
+    def test_description_declares_containment(self):
+        # 沙箱定位声明：containment 非安全边界，必须显式告知调用方
+        from plugins.workflow.tools.workflow_tool import _workflow_description
+
+        d = _workflow_description(["build"])
+        assert "containment" in d and "非安全边界" in d
+
+    def test_run_prunes_old_runs_after_finish(self, monkeypatch, tmp_path):
+        # 集成：run 完成后滚动清理，只留 max_runs_kept 个（含本次）
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {
+                "max_result_chars": "50000",
+                "default_foreground": "true",
+                "max_runs_kept": "2",
+            }.get(key),
+        )
+        import os as _os
+
+        for i in range(3):
+            old = tmp_path / "runs" / f"old{i}"
+            old.mkdir(parents=True)
+            _os.utime(old, (1000000000 + i, 1000000000 + i))
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(ctx, meta={"name": "p", "description": "d"}, script="result = 1")
+        assert r.success
+        import time as _t
+
+        _t.sleep(0.5)  # prune 是异步线程
+        runs = sorted(p.name for p in (tmp_path / "runs").iterdir())
+        assert len(runs) == 2 and all(n.startswith("old") is False or n == runs[-1] for n in runs)
+        assert any(not n.startswith("old") for n in runs)  # 本次 run 保留
+
+
 class TestRunCard:
     """Task 10: 运行卡片——从 status 数据渲染 phase 分组 + agent 状态 + 汇总。"""
 
