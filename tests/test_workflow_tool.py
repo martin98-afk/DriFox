@@ -25,10 +25,10 @@ class _FakeManager:
         self.calls.append((agent_name, task_description, kw))
         if agent_name in self.fail_agents:
             if on_error:
-                on_error(f"Agent not found: {agent_name}")
+                on_error(task_id, f"Agent not found: {agent_name}")
             return False
         if on_finished:
-            on_finished(self.routes.get(agent_name, f"done:{agent_name}"))
+            on_finished(task_id, self.routes.get(agent_name, f"done:{agent_name}"))
         return True
 
 

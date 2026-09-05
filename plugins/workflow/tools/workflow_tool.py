@@ -124,11 +124,12 @@ def _make_agent_hook(manager, session_id: str, state: _RunState, default_agent: 
         done = threading.Event()
         box = {"result": None}
 
-        def _on_finished(text):
+        def _on_finished(tid, text):
+            # 信号签名 (task_id, result)：PyQt 双参 emit，回调签名必须双参否则静默 TypeError
             box["result"] = text
             done.set()
 
-        def _on_error(err):
+        def _on_error(tid, err):
             logger.warning(f"[workflow] 子任务失败 ({label or name}): {err}")
             done.set()
 
