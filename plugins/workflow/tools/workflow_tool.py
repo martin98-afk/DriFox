@@ -304,6 +304,44 @@ class RunJournal:
             self._agent_seq += 1
             return f"a{self._agent_seq}"
 
+    def agent_snapshots(self) -> list:
+        """从 journal 聚合每 agent 最新状态：[{key, role, status, elapsed_sec, result}]。
+
+        start 无 end → running；卡片数据源与 resume 诊断共用。
+        """
+        jf = self.dir / "journal.jsonl"
+        if not jf.exists():
+            return []
+        order: list = []
+        by_key: dict = {}
+        with open(jf, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    continue
+                key = rec.get("agent_key")
+                if not key:
+                    continue
+                if rec.get("type") == "agent_start":
+                    if key not in by_key:
+                        order.append(key)
+                        by_key[key] = {
+                            "key": key,
+                            "role": rec.get("role"),
+                            "status": "running",
+                            "elapsed_sec": None,
+                            "result": None,
+                        }
+                elif rec.get("type") == "agent_end" and key in by_key:
+                    by_key[key]["status"] = rec.get("status")
+                    by_key[key]["elapsed_sec"] = rec.get("elapsed_sec")
+                    by_key[key]["result"] = rec.get("result")
+        return [by_key[k] for k in order]
+
     def write_status(self, payload: dict) -> None:
         """原子写 status.json：tmp+replace，卡片侧永远读到完整 JSON。"""
         with self._lock:
@@ -823,6 +861,10 @@ def _execute_run(cfg: dict) -> ToolResult:
     logs: list = []
 
     def _finish_status(ok: bool, result, note: str) -> None:
+        with _RUNS_LOCK:
+            rec = _ACTIVE_RUNS.get(cfg.get("run_id") or "")
+            if rec is not None:
+                rec["state"] = "done" if ok else "error"
         if not journal:
             return
         journal.write_status({
@@ -832,6 +874,7 @@ def _execute_run(cfg: dict) -> ToolResult:
             "agents_started": state.started,
             "phases": phases,
             "logs": logs,
+            "agents": journal.agent_snapshots(),
             "result": result,
             "note": note,
         })
@@ -928,6 +971,103 @@ def _execute_run(cfg: dict) -> ToolResult:
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+_RUN_STATE_LABEL = {
+    "done": "完成",
+    "replayed": "回放",
+    "failed": "失败",
+    "running": "运行中",
+    "schema_failed": "校验失败",
+    "none": "降级",
+    "error": "异常",
+}
+_RUN_STATE_COLOR = {
+    "done": "#2ea44f",
+    "replayed": "#8250df",
+    "failed": "#cf222e",
+    "running": "#0969da",
+    "schema_failed": "#bf8700",
+    "none": "var(--text-secondary)",
+    "error": "#cf222e",
+}
+
+
+def _render_run_card(status: dict) -> str:
+    """运行状态卡：phase 分组时间线 + agent 状态行 + 汇总（action=status, html=true 用）。"""
+    from app.widgets.render_helpers import escape, scale_font_size
+
+    fs = scale_font_size(12)
+    fs_small = scale_font_size(11)
+    name = str(status.get("name") or "workflow")
+    state = str(status.get("state") or "running")
+    phases = _norm_phases(status.get("phases"))
+    agents = status.get("agents") or []
+
+    parts = [
+        f'<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px;">'
+        f'<b style="font-size:{scale_font_size(13)}px;color:var(--text);">{escape(name)}</b>'
+        f'<span style="font-size:{fs_small}px;color:{_RUN_STATE_COLOR.get(state, "var(--text-secondary)")};">'
+        f'{_RUN_STATE_LABEL.get(state, state)}</span></div>'
+    ]
+
+    def _pill(label: str, color: str) -> str:
+        return (
+            f'<span style="display:inline-flex;align-items:center;padding:1px 8px;margin:0 6px 4px 0;'
+            f'border:1px solid var(--border);border-radius:999px;font-size:{fs_small}px;color:{color};">'
+            f'{escape(label)}</span>'
+        )
+    if phases:
+        rows = ""
+        for title, detail in phases:
+            d_html = (
+                f'<span style="color:var(--text-secondary);font-size:{fs_small}px;"> — {escape(detail)}</span>'
+                if detail
+                else ""
+            )
+            rows += (
+                f'<div style="display:flex;align-items:baseline;gap:6px;padding:2px 0;">'
+                f'<span style="flex:0 0 auto;width:6px;height:6px;border-radius:50%;'
+                f'background:var(--accent);margin-top:6px;"></span>'
+                f'<span style="color:var(--text);font-size:{fs}px;">{escape(title)}{d_html}</span></div>'
+            )
+        parts.append(
+            f'<div style="border-left:1px solid var(--border);padding-left:8px;margin:6px 0 8px 2px;">{rows}</div>'
+        )
+    if agents:
+        rows = ""
+        for a in agents:
+            st = str(a.get("status") or "running")
+            label = _RUN_STATE_LABEL.get(st, st)
+            color = _RUN_STATE_COLOR.get(st, "var(--text-secondary)")
+            elapsed = a.get("elapsed_sec")
+            t_html = f" · {elapsed:.1f}s" if isinstance(elapsed, (int, float)) else ""
+            rows += (
+                f'<div style="display:flex;align-items:baseline;gap:6px;padding:1px 0;font-size:{fs_small}px;">'
+                f'<span style="width:8px;height:8px;border-radius:50%;flex:0 0 auto;'
+                f'background:{color};margin-top:4px;"></span>'
+                f'<span style="color:var(--text);">{escape(str(a.get("role") or ""))}</span>'
+                f'<span style="color:{color};">{escape(label)}{t_html}</span></div>'
+            )
+        parts.append(f'<div style="margin:4px 0 8px 2px;">{rows}</div>')
+    counters: dict = {}
+    for a in agents:
+        st = str(a.get("status") or "running")
+        counters[st] = counters.get(st, 0) + 1
+    if counters:
+        pills = "".join(
+            _pill(f"{_RUN_STATE_LABEL.get(k, k)} × {v}", _RUN_STATE_COLOR.get(k, "var(--text-secondary)"))
+            for k, v in counters.items()
+        )
+        parts.append(f'<div style="margin-top:2px;">{pills}</div>')
+    note = str(status.get("note") or "")
+    if note:
+        parts.append(
+            f'<div style="color:var(--text-secondary);font-size:{fs_small}px;margin-top:4px;">{escape(note)}</div>'
+        )
+    return (
+        f'<div class="wf-run-card" style="padding:2px 0;">{"".join(parts)}</div>'
+    )
+
+
 def _workflow_impl(tool_ctx, **kwargs):
     # ---- action 分发：存档管理类动作不需要 manager ----
     action = str(kwargs.get("action") or "run")
@@ -973,8 +1113,12 @@ def _workflow_impl(tool_ctx, **kwargs):
                 ),
             )
         if sf.exists():
-            return ToolResult(True, content=_dump_content(orjson.loads(sf.read_bytes())))
-        return ToolResult(True, content=_dump_content({"run_id": run_id, "state": live.get("state")}))
+            payload_status = orjson.loads(sf.read_bytes())
+        else:
+            payload_status = {"run_id": run_id, "name": live.get("name"), "state": live.get("state")}
+        if str(kwargs.get("html") or "").lower() in ("1", "true", "yes"):
+            return ToolResult(True, content=_dump_content(payload_status))
+        return ToolResult(True, content=_dump_content(payload_status))
     if action != "run":
         return ToolResult(False, error=f"未知 action: {action}（run/save/list/load/status）")
 
@@ -1055,9 +1199,7 @@ def _workflow_impl(tool_ctx, **kwargs):
         return _execute_run(cfg)
 
     def _bg():
-        result = _execute_run(cfg)
-        with _RUNS_LOCK:
-            _ACTIVE_RUNS[run_id]["state"] = "done" if result.success else "error"
+        _execute_run(cfg)
 
     threading.Thread(target=_bg, daemon=True, name=f"workflow-{run_id}").start()
     return ToolResult(
@@ -1225,6 +1367,9 @@ def _render_workflow_body(result, tool_name, tool_args, success) -> str:
     if not data:
         # 解析不出来（旧消息 / 异常）也别丢内容，退化成纯文本块
         return _wf_pre(str(raw))
+    # 运行状态卡（action=status 的产出）：识别后走专用渲染，不走工作流结果卡
+    if "state" in data and "agents" in data:
+        return _render_run_card(data)
 
     fs = scale_font_size(12)
     fs_small = scale_font_size(11)

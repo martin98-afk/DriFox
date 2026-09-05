@@ -930,6 +930,85 @@ class TestBackgroundRun:
         assert json.loads(r.content)["result"]["r"] == "slow-ok"
 
 
+class TestRunCard:
+    """Task 10: 运行卡片——从 status 数据渲染 phase 分组 + agent 状态 + 汇总。"""
+
+    def _status(self):
+        return {
+            "name": "audit",
+            "description": "审计工作流",
+            "state": "done",
+            "agents_started": 3,
+            "phases": [
+                {"title": "1/2 扫描", "detail": "全仓扫描"},
+                {"title": "2/2 复核", "detail": None},
+            ],
+            "agents": [
+                {"key": "a1", "role": "explore", "status": "done", "elapsed_sec": 1.2, "result": "扫完了"[:200]},
+                {"key": "a2", "role": "build", "status": "failed", "elapsed_sec": 0.5, "result": None},
+                {"key": "a3", "role": "review", "status": "replayed", "elapsed_sec": 0.0, "result": "旧结果"},
+            ],
+            "logs": [" started"],
+            "result": {"ok": 1},
+            "note": "",
+        }
+
+    def test_render_card_groups_and_colors(self):
+        from plugins.workflow.tools.workflow_tool import _render_run_card
+
+        html = _render_run_card(self._status())
+        assert "audit" in html and "扫描" in html and "全仓扫描" in html
+        assert "explore" in html and "failed" in html or "失败" in html  # 角色与失败态可见
+        assert "replayed" in html or "回放" in html
+        assert "2" in html  # 阶段数
+
+    def test_render_card_escapes(self):
+        from plugins.workflow.tools.workflow_tool import _render_run_card
+
+        st = self._status()
+        st["name"] = "<script>alert(1)</script>"
+        html = _render_run_card(st)
+        assert "<script>" not in html and "&lt;script&gt;" in html
+
+    def test_journal_agent_snapshots(self, tmp_path):
+        from plugins.workflow.tools.workflow_tool import RunJournal
+
+        j = RunJournal(tmp_path)
+        j.record_agent_start("a1", "fp1", "explore", None)
+        j.record_agent_end("a1", "done", 1.2, "扫完了")
+        j.record_agent_start("a2", "fp2", "build", None)
+        snaps = RunJournal(tmp_path).agent_snapshots()
+        by_key = {s["key"]: s for s in snaps}
+        assert by_key["a1"]["status"] == "done" and by_key["a1"]["role"] == "explore"
+        assert by_key["a2"]["status"] == "running"  # start 无 end → running
+
+    def test_status_action_renders_html(self, monkeypatch, tmp_path):
+        import json
+        import time
+
+        from plugins.workflow.tools import workflow_tool as wt
+        from tests.test_workflow_tool import TestBackgroundRun
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "true"}.get(key),
+        )
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(ctx, meta={"name": "hc", "description": "d"}, script="result = agent('x')")
+        assert r.success
+        run_id = wt.list_workflows(tmp_path)["runs"][0]
+        r2 = wt._workflow_impl(ctx, action="status", run_id=run_id, html=True, meta={"name": "s", "description": "d"})
+        assert r2.success
+        assert "hc" in r2.content and "done" in r2.content
+    """Task 2: 新配置项解析——model_aliases 别名映射 + 前台开关 + 卡片刷新间隔。"""
+
+    def test_parse_aliases_basic(self):
+        from plugins.workflow.tools.workflow_tool import _parse_aliases
+
+        assert _parse_aliases("sonnet=m1, haiku=m2") == {"sonnet": "m1", "haiku": "m2"}
+
 class TestConfigParsing:
     """Task 2: 新配置项解析——model_aliases 别名映射 + 前台开关 + 卡片刷新间隔。"""
 
