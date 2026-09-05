@@ -1,0 +1,59 @@
+{
+  "name": "workflow",
+  "description": "workflow 工具：受限 Python 脚本编排子智能体，支持条件/循环/并行扇出，前台阻塞返回原子结果",
+  "version": "0.1.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "license": "MIT",
+  "components": {
+    "tools": true
+  },
+  "config_schema": {
+    "title": "工作流编排",
+    "fields": [
+      {
+        "key": "max_concurrent_agents",
+        "label": "并发子智能体上限",
+        "type": "number",
+        "default": 4,
+        "description": "parallel/pipeline 内部线程池大小"
+      },
+      {
+        "key": "max_total_agents",
+        "label": "单次 run 子智能体总数上限",
+        "type": "number",
+        "default": 50,
+        "description": "跑飞兜底"
+      },
+      {
+        "key": "max_items_per_call",
+        "label": "单次并行项数上限",
+        "type": "number",
+        "default": 100,
+        "description": "parallel/pipeline 一次接受的项数"
+      },
+      {
+        "key": "max_duration_sec",
+        "label": "run 总时长上限（秒）",
+        "type": "number",
+        "default": 1800,
+        "description": "钩子间检查点检查，超时中止脚本"
+      },
+      {
+        "key": "default_agent",
+        "label": "默认子智能体角色",
+        "type": "text",
+        "default": "build",
+        "description": "agent() 未指定角色时使用"
+      },
+      {
+        "key": "max_result_chars",
+        "label": "结果渲染上限（字符）",
+        "type": "number",
+        "default": 50000,
+        "description": "超长截断并附说明"
+      }
+    ]
+  }
+}
