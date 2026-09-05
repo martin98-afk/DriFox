@@ -518,6 +518,57 @@ class TestCombinators:
             pipeline([1, 2])
 
 
+class TestTranslateTypeError:
+    """TypeError 人话翻译层：钩子签名报错（<lambda> 或含钩子名）翻译成自愈提示。"""
+
+    _HOOKS = ("agent", "parallel", "pipeline", "phase", "log")
+
+    def _catch(self, boom) -> TypeError:
+        try:
+            boom()
+        except TypeError as e:
+            return e
+        raise AssertionError("未触发 TypeError")
+
+    def test_lambda_positional_error_translated(self):
+        from plugins.workflow.tools.workflow_tool import translate_type_error
+
+        def boom():
+            phase = lambda title: None  # noqa: E731
+            phase("a", "b")
+
+        msg = translate_type_error(self._catch(boom), self._HOOKS)
+        assert msg is not None
+        assert "签名" in msg and "phase(title" in msg  # 带正确签名提示
+
+    def test_def_named_hook_extracted(self):
+        from plugins.workflow.tools.workflow_tool import translate_type_error
+
+        def phase(title, detail=None):
+            return None
+
+        def boom():
+            phase("a", "b", "c")  # 多于新签名
+
+        msg = translate_type_error(self._catch(boom), self._HOOKS)
+        assert msg is not None and "phase" in msg
+
+    def test_kwarg_error_translated(self):
+        from plugins.workflow.tools.workflow_tool import translate_type_error
+
+        def boom():
+            agent = lambda prompt: None  # noqa: E731
+            agent("x", model="sonnet")
+
+        msg = translate_type_error(self._catch(boom), self._HOOKS)
+        assert msg is not None and "model" in msg  # 提示里点出肇事参数
+
+    def test_unrelated_error_passthrough(self):
+        from plugins.workflow.tools.workflow_tool import translate_type_error
+
+        assert translate_type_error(TypeError("int object is not callable"), self._HOOKS) is None
+
+
 class TestWorkflowImpl:
     def _impl(self, monkeypatch, manager, **overrides):
         from plugins.workflow.tools import workflow_tool as wt

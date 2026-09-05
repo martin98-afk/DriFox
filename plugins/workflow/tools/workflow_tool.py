@@ -43,6 +43,32 @@ class WorkflowTimeoutError(WorkflowError):
     """run 总时长超限"""
 
 
+# 钩子签名提示：TypeError 翻译层与工具 description 共用的契约文本
+_HOOK_SIGNATURE_HINT = (
+    "agent(prompt, agent=角色, phase=分组, label=标签, model=别名, schema=JSONSchema) / "
+    "parallel([零参函数]) / pipeline(items, *stages) / phase(title, detail=None) / log(msg)"
+)
+
+
+def translate_type_error(e: TypeError, hook_names: tuple) -> str | None:
+    """TypeError 含钩子痕迹（<lambda> 或钩子名）时翻译成人话；否则 None 交回原路径。
+
+    钩子 def 化后报错自带函数名（phase() takes ...）；lambda 时期报错是
+    _workflow_impl.<locals>.<lambda>——两种形态都要接住。返回文本必须让模型
+    无需读源码即可自愈：点出肇事参数 + 正确签名 + 预置名单。
+    """
+    msg = str(e)
+    named = [h for h in hook_names if h in msg]
+    if "<lambda>" not in msg and not named:
+        return None
+    who = "/".join(named) if named else "某个钩子"
+    return (
+        f"钩子调用签名错误（{who}）: {msg}。正确签名: {_HOOK_SIGNATURE_HINT}。"
+        "沙箱仅预置钩子与 json/math/re/statistics/datetime、args，"
+        "钩子不接受 model 之外未知的关键字参数。"
+    )
+
+
 # 白名单式内置函数（containment：白名单外的名字一律 NameError）
 _ALLOWED_BUILTINS: dict = {
     "None": None,
