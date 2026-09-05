@@ -382,6 +382,7 @@ def _manager_supports_kwarg(manager, name: str) -> bool:
 def _make_agent_hook(
     manager, session_id: str, state: _RunState, default_agent: str, max_agent_wait: float = 900.0,
     model_aliases: dict | None = None, log_fn=None, journal: "RunJournal | None" = None,
+    resume_map: dict | None = None,
 ):
     """agent(prompt, agent=None, label=None, phase=None, share_context=False) -> str | None
 
@@ -443,6 +444,12 @@ def _make_agent_hook(
             status, out = "failed", None
             if journal:
                 journal.record_agent_start(agent_key, fp, name, resolved_model)
+                # resume 回放：同序号 + 指纹一致（prompt/角色/model/schema 未变）→ 直接回放不真跑
+                hit = (resume_map or {}).get(agent_key)
+                if hit and hit.get("fingerprint") == fp:
+                    journal.record_agent_end(agent_key, "replayed", 0.0, hit.get("result"))
+                    logger.info(f"[workflow] resume 回放 {agent_key}（指纹命中，跳过真跑）")
+                    return hit.get("result")
             task_id = str(uuid.uuid4())
             done = threading.Event()
             box: dict = {"result": None, "settled": False}
@@ -675,7 +682,8 @@ def _workflow_description(subagent_names: list) -> str:
         "- phase(title, detail=None): 进度分组，detail 上卡片副标题\n"
         "- log(msg): 进度消息\n\n"
         "复用与后台：action=save/list/load 管理可复用 workflow（from_saved 直接跑已存档）；"
-        "默认后台运行立即返回 run_id，用 action=status 查进度；foreground=true 同步等结果。\n\n"
+        "默认后台运行立即返回 run_id，用 action=status 查进度；foreground=true 同步等结果；"
+        "action=resume + run_id 从中断处续跑（prompt 拼时间戳/随机数会指纹漂移导致全量重跑，保持 prompt 确定性）。\n\n"
         "沙箱边界：禁止 import（预置 json/math/re/statistics/datetime）；无文件/网络能力；"
         "宿主内部变量（_ 开头）不在脚本命名空间。\n"
         "误用钩子或超上限会中止整个脚本；子任务失败只降 None。"
@@ -717,8 +725,8 @@ _WORKFLOW_SCHEMA = {
                 },
                 "action": {
                     "type": "string",
-                    "enum": ["run", "save", "list", "load", "status"],
-                    "description": "默认 run 执行脚本；save 存为可复用 workflow（需 save_as）；list 列已存与最近 runs；load 读存档（需 name）；status 查运行中任务（需 run_id）",
+                    "enum": ["run", "save", "list", "load", "status", "resume"],
+                    "description": "默认 run 执行脚本；save 存为可复用 workflow（需 save_as）；list 列已存与最近 runs；load 读存档（需 name）；status 查任务（需 run_id）；resume 从原 run 回放续跑（已完成且指纹一致的 agent 不重跑，编辑脚本后只重跑变化部分）",
                 },
                 "foreground": {
                     "type": "boolean",
@@ -905,6 +913,7 @@ def _execute_run(cfg: dict) -> ToolResult:
                     model_aliases=cfg["model_aliases"],
                     log_fn=log_hook,
                     journal=journal,
+                    resume_map=cfg.get("resume_map"),
                 ),
                 "parallel": parallel_hook,
                 "pipeline": pipeline_hook,
@@ -1119,8 +1128,8 @@ def _workflow_impl(tool_ctx, **kwargs):
         if str(kwargs.get("html") or "").lower() in ("1", "true", "yes"):
             return ToolResult(True, content=_dump_content(payload_status))
         return ToolResult(True, content=_dump_content(payload_status))
-    if action != "run":
-        return ToolResult(False, error=f"未知 action: {action}（run/save/list/load/status）")
+    if action not in ("run", "resume"):
+        return ToolResult(False, error=f"未知 action: {action}（run/resume/save/list/load/status）")
 
     manager = tool_ctx.get("sub_agent_manager")
     if not manager:
@@ -1139,6 +1148,24 @@ def _workflow_impl(tool_ctx, **kwargs):
             kwargs["args"] = wf_saved["args"]
         if not str(kwargs.get("script") or "").strip():
             kwargs["script"] = wf_saved["script"]
+
+    # ---- resume：从原 run 目录复用 journal，已完成且指纹一致的 agent 直接回放 ----
+    resume_map = None
+    resume_dir = None
+    if action == "resume":
+        resume_run_id = str(kwargs.get("run_id") or "")
+        resume_dir = wf_root() / "runs" / resume_run_id
+        if not resume_run_id or not resume_dir.exists():
+            return ToolResult(False, error=f"未找到 run: {resume_run_id}")
+        resume_map = RunJournal(resume_dir).completed_map()
+        meta_file = resume_dir / "meta.json"
+        env = orjson.loads(meta_file.read_bytes()) if meta_file.exists() else {}
+        if not (isinstance(meta, dict) and meta):
+            meta = env.get("meta") or {"name": resume_run_id, "description": f"resume: {resume_run_id}"}
+        if kwargs.get("args") is None:
+            kwargs["args"] = env.get("args")
+        if not str(kwargs.get("script") or "").strip():
+            kwargs["script"] = (resume_dir / "script.py").read_text(encoding="utf-8")
 
     if (
         not isinstance(meta, dict)
@@ -1172,9 +1199,13 @@ def _workflow_impl(tool_ctx, **kwargs):
         foreground = default_foreground
     root = wf_root()
     session_id = tool_ctx.get("session_id", "")
-    run_dir = new_run_dir(root, meta, script, kwargs.get("args"))
+    if resume_dir is not None:
+        run_dir = resume_dir
+        run_id = resume_dir.name
+    else:
+        run_dir = new_run_dir(root, meta, script, kwargs.get("args"))
+        run_id = run_dir.name
     journal = RunJournal(run_dir)
-    run_id = run_dir.name
     with _RUNS_LOCK:
         _ACTIVE_RUNS[run_id] = {"state": "running", "run_dir": str(run_dir), "name": meta.get("name")}
     cfg = {
@@ -1194,6 +1225,7 @@ def _workflow_impl(tool_ctx, **kwargs):
         "run_dir": run_dir,
         "journal": journal,
         "run_id": run_id,
+        "resume_map": resume_map,
     }
     if foreground:
         return _execute_run(cfg)

@@ -1009,6 +1009,60 @@ class TestRunCard:
 
         assert _parse_aliases("sonnet=m1, haiku=m2") == {"sonnet": "m1", "haiku": "m2"}
 
+class TestResume:
+    """Task 11: resume 指纹回放——命中的 agent 回放结果不真跑，编辑过的重跑。"""
+
+    class _Counting:
+        def __init__(self):
+            self.calls = 0
+
+        def execute_task(self, task_id, agent_name, task_description, on_finished=None, on_error=None, **kw):
+            self.calls += 1
+            on_finished(task_id, f"新结果{self.calls}")
+            return True
+
+        def cancel_task(self, task_id):
+            return True
+
+    def _patch(self, monkeypatch, tmp_path):
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "true"}.get(key),
+        )
+        return wt
+
+    def test_resume_replays_completed(self, monkeypatch, tmp_path):
+        wt = self._patch(monkeypatch, tmp_path)
+        mgr = self._Counting()
+        ctx = {"sub_agent_manager": mgr, "session_id": "s1"}
+        r1 = wt._workflow_impl(ctx, meta={"name": "res", "description": "d"}, script="result = agent('p1')")
+        assert r1.success and mgr.calls == 1
+        run_id = wt.list_workflows(tmp_path)["runs"][0]
+        # resume：a1 指纹命中 → 回放，不真跑
+        r2 = wt._workflow_impl(ctx, action="resume", run_id=run_id)
+        assert r2.success, r2.error
+        assert mgr.calls == 1  # manager 零新调用
+        assert json.loads(r2.content)["result"] == "新结果1"
+
+    def test_resume_reruns_edited_fingerprint(self, monkeypatch, tmp_path):
+        wt = self._patch(monkeypatch, tmp_path)
+        ctx = {"sub_agent_manager": self._Counting(), "session_id": "s1"}
+        r1 = wt._workflow_impl(ctx, meta={"name": "res2", "description": "d"}, script="result = agent('p1')")
+        assert r1.success
+        run_id = wt.list_workflows(tmp_path)["runs"][0]
+        # 编辑脚本（prompt 变 → 指纹变）→ 重跑
+        mgr2 = self._Counting()
+        ctx2 = {"sub_agent_manager": mgr2, "session_id": "s1"}
+        r2 = wt._workflow_impl(ctx2, action="resume", run_id=run_id, script="result = agent('p1-edited')")
+        assert r2.success
+        assert mgr2.calls == 1
+        assert json.loads(r2.content)["result"] == "新结果1"
+
+
 class TestConfigParsing:
     """Task 2: 新配置项解析——model_aliases 别名映射 + 前台开关 + 卡片刷新间隔。"""
 
