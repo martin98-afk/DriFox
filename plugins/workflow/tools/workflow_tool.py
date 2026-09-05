@@ -272,7 +272,7 @@ def _make_agent_hook(
             "改用 executor_ref 事后补挂直连回调兜底（建议重启宿主以加载最新核心）"
         )
 
-    def agent(prompt, agent=None, label=None, phase=None, share_context=False, model=None):
+    def agent(prompt, agent=None, label=None, phase=None, share_context=False, model=None, schema=None):
         # 参数名 agent 遮蔽外层函数名：本函数体内不再引用自身，合法且对模型最自然
         if not isinstance(prompt, str) or not prompt.strip():
             raise WorkflowError("agent() 的 prompt 必须是非空字符串")
@@ -292,89 +292,129 @@ def _make_agent_hook(
                 return None
         if state.aborted():
             return None
-        state.reserve()
         name = agent or default_agent
-        task_id = str(uuid.uuid4())
-        done = threading.Event()
-        box: dict = {"result": None, "settled": False}
 
-        def _on_finished(tid, text):
-            # 信号签名 (task_id, result)：PyQt 双参 emit，回调签名必须双参否则静默 TypeError
-            box["result"] = text
-            box["settled"] = True
-            done.set()
+        def _dispatch(effective_prompt: str) -> str | None:
+            """派发一个子任务并同步等待：额度→派发→等待→超时/中止降级。schema 重试复用。"""
+            state.reserve()
+            task_id = str(uuid.uuid4())
+            done = threading.Event()
+            box: dict = {"result": None, "settled": False}
 
-        def _on_error(tid, err):
-            # 回调可能被挂两次（核心 connection_type + executor_ref 兜底），只记第一次
+            def _on_finished(tid, text):
+                # 信号签名 (task_id, result)：PyQt 双参 emit，回调签名必须双参否则静默 TypeError
+                box["result"] = text
+                box["settled"] = True
+                done.set()
+
+            def _on_error(tid, err):
+                # 回调可能被挂两次（核心 connection_type + executor_ref 兜底），只记第一次
+                if not box["settled"]:
+                    logger.warning(f"[workflow] 子任务失败 ({label or name}): {err}")
+                box["settled"] = True
+                done.set()
+
+            def _attach_direct(executor):
+                """再补挂一组 DirectConnection 回调（对旧核心是唯一救命手段）。
+
+                真实核心的 execute_task 在 start() 之前就把 executor 写进 executor_ref，
+                子智能体跑完通常要数秒，而 start() 到本行只有毫秒级，竞态窗口可忽略；
+                真撞上了还有下面的等待上界兜底。
+                """
+                if executor is None:
+                    return
+                for sig_name, cb in (("finished_with_result", _on_finished), ("error_occurred", _on_error)):
+                    sig = getattr(executor, sig_name, None)
+                    if sig is None:
+                        continue
+                    try:
+                        sig.connect(cb, direct)
+                    except Exception as e:  # 补挂失败不影响降级路径
+                        logger.debug(f"[workflow] 补挂 {sig_name} 直连回调失败: {e}")
+
+            ref: dict = {}
+            call: dict = {
+                "task_id": task_id,
+                "agent_name": name,
+                "task_description": effective_prompt,
+                "on_finished": _on_finished,
+                "on_error": _on_error,
+                "share_context": bool(share_context),
+                "session_id": session_id,
+            }
+            if supports_conn_type:
+                call["connection_type"] = direct
+            if supports_executor_ref:
+                call["executor_ref"] = ref
+            # 旧宿主无 model 形参时静默跳过（与 connection_type 同款自适应），不白跑也不炸
+            if resolved_model is not None and supports_model:
+                call["model"] = resolved_model
+
+            ok = manager.execute_task(**call)
+            if not ok:
+                return None
+            _attach_direct(ref.get("executor"))
+
+            # 截止时间 = min(run 总 deadline, 单 agent 等待上限)，杜绝无限期阻塞
+            deadline = min(state.deadline, time.monotonic() + max_agent_wait)
+            state.track_waiter(done)
+            try:
+                while not state.aborted() and not done.is_set():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    done.wait(min(remaining, _WAIT_SLICE))
+            finally:
+                state.untrack_waiter(done)
+
             if not box["settled"]:
-                logger.warning(f"[workflow] 子任务失败 ({label or name}): {err}")
-            box["settled"] = True
-            done.set()
-
-        def _attach_direct(executor):
-            """再补挂一组 DirectConnection 回调（对旧核心是唯一救命手段）。
-
-            真实核心的 execute_task 在 start() 之前就把 executor 写进 executor_ref，
-            子智能体跑完通常要数秒，而 start() 到本行只有毫秒级，竞态窗口可忽略；
-            真撞上了还有下面的等待上界兜底。
-            """
-            if executor is None:
-                return
-            for sig_name, cb in (("finished_with_result", _on_finished), ("error_occurred", _on_error)):
-                sig = getattr(executor, sig_name, None)
-                if sig is None:
-                    continue
-                try:
-                    sig.connect(cb, direct)
-                except Exception as e:  # 补挂失败不影响降级路径
-                    logger.debug(f"[workflow] 补挂 {sig_name} 直连回调失败: {e}")
-
-        ref: dict = {}
-        call: dict = {
-            "task_id": task_id,
-            "agent_name": name,
-            "task_description": prompt,
-            "on_finished": _on_finished,
-            "on_error": _on_error,
-            "share_context": bool(share_context),
-            "session_id": session_id,
-        }
-        if supports_conn_type:
-            call["connection_type"] = direct
-        if supports_executor_ref:
-            call["executor_ref"] = ref
-        # 旧宿主无 model 形参时静默跳过（与 connection_type 同款自适应），不白跑也不炸
-        if resolved_model is not None and supports_model:
-            call["model"] = resolved_model
-
-        ok = manager.execute_task(**call)
-        if not ok:
-            return None
-        _attach_direct(ref.get("executor"))
-
-        # 截止时间 = min(run 总 deadline, 单 agent 等待上限)，杜绝无限期阻塞
-        deadline = min(state.deadline, time.monotonic() + max_agent_wait)
-        state.track_waiter(done)
-        try:
-            while not state.aborted() and not done.is_set():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                done.wait(min(remaining, _WAIT_SLICE))
-        finally:
-            state.untrack_waiter(done)
-
-        if not box["settled"]:
-            if not state.aborted() and time.monotonic() > state.deadline:
+                if not state.aborted() and time.monotonic() > state.deadline:
+                    _cancel(manager, task_id)
+                    raise WorkflowTimeoutError("workflow 超过总时长上限（等待子任务时 deadline 已过）")
+                logger.warning(
+                    f"[workflow] 子任务未返回结果 ({label or name})："
+                    f"{'run 已中止' if state.aborted() else f'等待超过 {max_agent_wait:.0f}s'}，取消并降级 None"
+                )
                 _cancel(manager, task_id)
-                raise WorkflowTimeoutError("workflow 超过总时长上限（等待子任务时 deadline 已过）")
-            logger.warning(
-                f"[workflow] 子任务未返回结果 ({label or name})："
-                f"{'run 已中止' if state.aborted() else f'等待超过 {max_agent_wait:.0f}s'}，取消并降级 None"
+                return None
+            return box["result"]
+
+        # ---- schema 结构化输出：注入指令 → 校验 → 失败带错重试 1 次 → 仍失败降 None ----
+
+        def _validate_schema(s: dict, text: str):
+            import jsonschema  # 延迟导入：插件加载期不付成本（dingtalk_stream 教训）
+
+            data = json.loads(text)
+            jsonschema.validate(data, s)
+            return data
+
+        def _dispatch_with_schema(p: str, s: dict):
+            base = p + (
+                "\n\n[输出格式硬约束] 只输出一个符合以下 JSON Schema 的 JSON 对象，"
+                "禁止任何多余文本、代码围栏或解释：\n" + json.dumps(s, ensure_ascii=False)
             )
-            _cancel(manager, task_id)
-            return None
-        return box["result"]
+            text = _dispatch(base)
+            if text is None:
+                return None
+            try:
+                return _validate_schema(s, text)
+            except Exception as first_err:
+                retry = base + f"\n\n[重试] 上次输出未通过校验: {first_err}。严格遵守 JSON Schema 重新输出。"
+                text2 = _dispatch(retry)
+                err = first_err
+                if text2 is not None:
+                    try:
+                        return _validate_schema(s, text2)
+                    except Exception as second_err:
+                        err = second_err
+                logger.warning(f"[workflow] schema 校验失败降级 None: {err}")
+                if log_fn:
+                    log_fn(f"[workflow] schema_failed: {err}")
+                return None
+
+        if schema is None:
+            return _dispatch(prompt)
+        return _dispatch_with_schema(prompt, schema)
 
     return agent
 

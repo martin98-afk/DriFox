@@ -778,6 +778,60 @@ class TestAgentHookModel:
         assert hook("x", model="sonnet") == "ok"  # 不炸，model 被静默跳过（宿主旧签名自适应）
 
 
+class TestAgentHookSchema:
+    """Task 5: agent 钩子 schema 结构化输出——注入指令/校验/失败带错重试 1 次。"""
+
+    SCHEMA = {"type": "object", "properties": {"verdict": {"type": "string"}}, "required": ["verdict"]}
+
+    def _make(self, responses):
+        from plugins.workflow.tools.workflow_tool import _make_agent_hook
+
+        class _Seq:
+            def __init__(self):
+                self.responses = list(responses)
+                self.calls = 0
+                self.descs = []
+
+            def execute_task(self, task_id, agent_name, task_description, on_finished=None, on_error=None, **kw):
+                self.calls += 1
+                self.descs.append(task_description)
+                r = self.responses.pop(0)
+                on_finished(task_id, r)
+                return True
+
+        mgr = _Seq()
+        st = _RunState(50, time.monotonic() + 60)
+        logs: list = []
+        hook = _make_agent_hook(mgr, "s1", st, "build", 900.0, log_fn=lambda m: logs.append(str(m)))
+        return hook, mgr, st, logs
+
+    def test_valid_json_returns_dict(self):
+        hook, mgr, _, _ = self._make(['{"verdict": "通过"}'])
+        assert hook("x", schema=self.SCHEMA) == {"verdict": "通过"}
+        assert "JSON Schema" in mgr.descs[0]  # prompt 注入了输出格式指令
+
+    def test_retry_once_then_success(self):
+        hook, mgr, _, _ = self._make(["不是json", '{"verdict": "通过"}'])
+        assert hook("x", schema=self.SCHEMA) == {"verdict": "通过"}
+        assert mgr.calls == 2
+
+    def test_both_bad_returns_none_and_logs(self):
+        hook, mgr, _, logs = self._make(["bad1", "bad2"])
+        assert hook("x", schema=self.SCHEMA) is None
+        assert mgr.calls == 2
+        assert any("schema_failed" in m for m in logs)
+
+    def test_retries_count_toward_quota(self):
+        hook, _, st, _ = self._make(["bad1", '{"verdict": "v"}'])
+        hook("x", schema=self.SCHEMA)
+        assert st.started == 2
+
+    def test_schema_error_in_retry_prompt(self):
+        hook, mgr, _, _ = self._make(["bad1", '{"verdict": "v"}'])
+        hook("x", schema=self.SCHEMA)
+        assert "重试" in mgr.descs[1] and "上次" in mgr.descs[1]  # 重试 prompt 带具体校验错误
+
+
 class TestConfigParsing:
     """Task 2: 新配置项解析——model_aliases 别名映射 + 前台开关 + 卡片刷新间隔。"""
 
