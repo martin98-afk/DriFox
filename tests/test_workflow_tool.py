@@ -398,6 +398,19 @@ class TestWorkflowResultRendering:
         assert "<img src=x" not in html and "<script>" not in html
         assert "&lt;" in html
 
+    def test_render_shows_dict_phases_with_detail(self):
+        # Task 3: phases 条目 dict 化（title+detail），渲染层兼容并与旧字符串条目共存
+        html = self._body(
+            workflow="audit",
+            agents_started=1,
+            phases=[{"title": "plan", "detail": "读文档"}, {"title": "build", "detail": None}, "旧字符串阶段"],
+            logs=[],
+            result={"ok": 1},
+        )
+        assert "plan" in html and "build" in html and "旧字符串阶段" in html
+        assert "读文档" in html
+        assert "detail" not in html  # dict 不得以 repr 形态漏出（escape 后仍含 detail 字样）
+
     def test_render_falls_back_for_unparseable(self):
         from plugins.workflow.tools.workflow_tool import _render_workflow_body
 
@@ -670,6 +683,38 @@ class TestDynamicDescription:
 
         d = _workflow_description([])
         assert "agent(" in d  # 钩子用法仍在
+
+
+class TestPhaseLogHooks:
+    """Task 3: phase/log 钩子 def 化——phase 带 detail、log 容忍多余参数。"""
+
+    def test_phase_accepts_detail(self):
+        from plugins.workflow.tools.workflow_tool import _make_phase_log_hooks
+
+        phases, logs = [], []
+        phase, log = _make_phase_log_hooks(phases, logs)
+        phase("1/4 plan", "读取计划与设计")
+        phase("2/4 build")
+        log("done")
+        log("另一条", "多余参数容忍")
+        assert phases[0] == {"title": "1/4 plan", "detail": "读取计划与设计"}
+        assert phases[1] == {"title": "2/4 build", "detail": None}
+        assert logs == ["done", "另一条"]
+
+    def test_phase_beyond_detail_still_typeerror_but_translatable(self):
+        # 超过 (title, detail) 的调用仍 TypeError，但 def 化后报错含函数名，翻译层能点名
+        from plugins.workflow.tools.workflow_tool import (
+            _make_phase_log_hooks,
+            translate_type_error,
+        )
+
+        phase, _ = _make_phase_log_hooks([], [])
+        try:
+            phase("a", "b", "c")
+            raise AssertionError("未触发 TypeError")
+        except TypeError as e:
+            msg = translate_type_error(e, ("agent", "parallel", "pipeline", "phase", "log"))
+        assert msg is not None and "phase" in msg
 
 
 class TestConfigParsing:

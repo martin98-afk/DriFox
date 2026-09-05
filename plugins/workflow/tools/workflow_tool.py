@@ -499,6 +499,33 @@ _WORKFLOW_SCHEMA = {
 }
 
 
+def _make_phase_log_hooks(phases: list, logs: list):
+    """phase/log 钩子工厂：def 化（报错自带函数名，翻译层可点名）。
+
+    phase(title, detail=None)：detail 上卡片副标题，兼容旧单参调用；
+    条目统一为 {title, detail} dict（detail 可为 None）。log(msg, *_) 容忍多余参数。
+    """
+
+    def phase(title, detail=None):
+        phases.append({"title": str(title), "detail": None if detail is None else str(detail)})
+
+    def log(msg, *_):
+        logs.append(str(msg))
+
+    return phase, log
+
+
+def _norm_phases(raw) -> list[tuple[str, str | None]]:
+    """渲染层 phases 归一化：兼容 dict 条目（title+detail）与旧字符串条目。"""
+    out: list[tuple[str, str | None]] = []
+    for p in raw or []:
+        if isinstance(p, dict):
+            out.append((str(p.get("title") or ""), None if p.get("detail") is None else str(p.get("detail"))))
+        else:
+            out.append((str(p), None))
+    return out
+
+
 def _workflow_impl(tool_ctx, **kwargs):
     manager = tool_ctx.get("sub_agent_manager")
     if not manager:
@@ -545,6 +572,7 @@ def _workflow_impl(tool_ctx, **kwargs):
     session_id = tool_ctx.get("session_id", "")
     phases: list = []
     logs: list = []
+    phase_hook, log_hook = _make_phase_log_hooks(phases, logs)
 
     try:
         parallel_hook, pipeline_hook = _make_combinators(state, pool, max_items)
@@ -554,8 +582,8 @@ def _workflow_impl(tool_ctx, **kwargs):
                 "agent": _make_agent_hook(manager, session_id, state, default_agent, max_agent_wait),
                 "parallel": parallel_hook,
                 "pipeline": pipeline_hook,
-                "phase": lambda title: phases.append(str(title)),
-                "log": lambda msg: logs.append(str(msg)),
+                "phase": phase_hook,
+                "log": log_hook,
             },
         )
         # 预检：宿主内部名引用在 exec 前拦截，避免 agent 扇出后才 NameError 白跑
@@ -772,7 +800,7 @@ def _render_workflow_body(result, tool_name, tool_args, success) -> str:
 
     name = str(data.get("workflow") or "workflow")
     agents = data.get("agents_started")
-    phases = [str(p) for p in (data.get("phases") or [])]
+    phases = _norm_phases(data.get("phases"))
     logs = [str(x) for x in (data.get("logs") or [])]
     note = str(data.get("_note") or "")
     if data.get("_truncated"):
@@ -802,14 +830,21 @@ def _render_workflow_body(result, tool_name, tool_args, success) -> str:
     # ── 阶段时间线 ──
     phases_html = ""
     if phases:
-        nodes = "".join(
-            f'<div style="display:flex;align-items:flex-start;gap:8px;padding:3px 0;">'
-            f'<span style="flex:0 0 auto;width:6px;height:6px;margin-top:6px;border-radius:50%;'
-            f'background:var(--accent);"></span>'
-            f'<span style="flex:1 1 auto;min-width:0;color:var(--text);font-size:{fs}px;'
-            f'word-break:break-word;">{escape(p)}</span></div>'
-            for p in phases
-        )
+        nodes = ""
+        for title, detail in phases:
+            detail_html = (
+                f'<div style="color:var(--text-secondary);font-size:{fs_small}px;margin-top:1px;">'
+                f'{escape(detail)}</div>'
+                if detail
+                else ""
+            )
+            nodes += (
+                f'<div style="display:flex;align-items:flex-start;gap:8px;padding:3px 0;">'
+                f'<span style="flex:0 0 auto;width:6px;height:6px;margin-top:6px;border-radius:50%;'
+                f'background:var(--accent);"></span>'
+                f'<span style="flex:1 1 auto;min-width:0;color:var(--text);font-size:{fs}px;'
+                f'word-break:break-word;">{escape(title)}{detail_html}</span></div>'
+            )
         phases_html = (
             f'<div style="margin-top:10px;">'
             f'<div style="color:var(--text-secondary);font-size:{fs_small}px;margin-bottom:2px;">阶段</div>'
