@@ -126,7 +126,10 @@ def _build_sandbox(args, hooks: dict | None = None) -> dict:
 
 
 def _check_imports(script: str, preset_modules: dict) -> str | None:
-    """exec 前拦截脚本 import：沙箱无 __import__，第一时间报人话并列出预置模块。"""
+    """exec 前拦截脚本 import：沙箱无 __import__，第一时间报人话并列出预置模块。
+
+    import 预置模块（如 import json）单独点名：直接删掉 import 行即可用。
+    """
     banned: set = set()
     for node in ast.walk(ast.parse(script)):
         if isinstance(node, ast.Import):
@@ -135,9 +138,18 @@ def _check_imports(script: str, preset_modules: dict) -> str | None:
             banned.add(node.module.split(".")[0])
     if not banned:
         return None
+    preset_hits = sorted(banned & set(preset_modules))
+    real_banned = sorted(banned - set(preset_modules))
+    parts = []
+    if preset_hits:
+        parts.append(
+            f"{', '.join(preset_hits)} 已预置（直接用，删掉 import 行即可）"
+        )
+    if real_banned:
+        parts.append(f"{', '.join(real_banned)} 禁止 import（沙箱无 __import__）")
     return (
-        f"脚本禁止 import（沙箱无 __import__）: {', '.join(sorted(banned))}。"
-        f"已预置可用模块: {', '.join(sorted(preset_modules))}；"
+        f"脚本 import 问题: {'；'.join(parts)}。"
+        f"全部可用预置模块: {', '.join(sorted(preset_modules))}；"
         "路径拼接用 f-string 或 '/'.join，脚本无文件/网络能力。"
     )
 
@@ -434,11 +446,13 @@ def _make_agent_hook(
         if state.aborted():
             return None
         name = agent or default_agent
+        # agent_key 按 agent() 调用序号分配（入口处一次）：schema 重试共用同 key，
+        # 否则 resume 按序号回放时会错位
+        agent_key = journal.next_agent_key() if journal else ""
 
         def _dispatch(effective_prompt: str) -> str | None:
             """派发一个子任务并同步等待：额度→派发→等待→超时/中止降级。schema 重试复用。"""
             state.reserve()
-            agent_key = journal.next_agent_key() if journal else ""
             fp = journal.fingerprint(effective_prompt, name, resolved_model, schema) if journal else ""
             t0 = time.monotonic()
             status, out = "failed", None
@@ -555,6 +569,9 @@ def _make_agent_hook(
             )
             text = _dispatch(base)
             if text is None:
+                # 子任务本身失败/返回空：重试注定同样结果，注明原因直接降级
+                if log_fn:
+                    log_fn("[workflow] schema_failed: 子任务未返回文本，无法校验")
                 return None
             try:
                 return _validate_schema(s, text)
@@ -962,6 +979,7 @@ def _execute_run(cfg: dict) -> ToolResult:
         return ToolResult(False, error=f"workflow 执行中止: {e}")
     except NameError as e:
         # 预检只拦 _ 开头的名字；其他未定义名（钩子拼错等）走到这里，附预置名清单让模型自愈
+        _finish_status(False, None, f"NameError: {e}")
         return ToolResult(
             False,
             error=(

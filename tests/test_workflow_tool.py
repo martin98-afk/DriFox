@@ -930,6 +930,106 @@ class TestBackgroundRun:
         assert json.loads(r.content)["result"]["r"] == "slow-ok"
 
 
+class TestPostMortemFixes:
+    """复盘修复：来自 4 个真实 run 的 2 个 bug + 2 个体验点。"""
+
+    def test_nameerror_writes_error_status(self, monkeypatch, tmp_path):
+        # Bug1: NameError 路径曾漏写 status.json 且注册表卡 running
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "true"}.get(key),
+        )
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(
+            ctx, meta={"name": "boom", "description": "d"}, script="result = undefined_name_x"
+        )
+        assert not r.success and "NameError" in r.error
+        run_id = wt.list_workflows(tmp_path)["runs"][0]
+        rd = tmp_path / "runs" / run_id
+        import orjson as _o
+
+        st = _o.loads((rd / "status.json").read_bytes())
+        assert st["state"] == "error" and "NameError" in st["note"]
+        r2 = wt._workflow_impl(ctx, action="status", run_id=run_id, meta={"name": "s", "description": "d"})
+        assert json.loads(r2.content)["state"] == "error"
+
+    def test_schema_retry_reuses_agent_key(self, monkeypatch, tmp_path):
+        # Bug2: schema 重试曾各领一个 agent_key，resume 序号错位
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "true"}.get(key),
+        )
+
+        class _Bad:
+            calls = 0
+
+            def execute_task(self, task_id, agent_name, task_description, on_finished=None, on_error=None, **kw):
+                self.calls += 1
+                on_finished(task_id, "坏输出" if self.calls == 1 else '{"v": "好"}')
+                return True
+
+            def cancel_task(self, task_id):
+                return True
+
+        mgr = _Bad()
+        ctx = {"sub_agent_manager": mgr, "session_id": "s1"}
+        schema = {"type": "object", "properties": {"v": {"type": "string"}}, "required": ["v"]}
+        r = wt._workflow_impl(
+            ctx,
+            meta={"name": "retry", "description": "d"},
+            script="result = agent('x', schema=" + json.dumps(schema) + ")",
+        )
+        assert r.success
+        run_id = wt.list_workflows(tmp_path)["runs"][0]
+        lines = (tmp_path / "runs" / run_id / "journal.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        starts = [json.loads(x) for x in lines if '"agent_start"' in x]
+        assert len(starts) == 2  # 首派 + 重试
+        assert starts[0]["agent_key"] == starts[1]["agent_key"] == "a1"  # 同 key
+
+    def test_precheck_import_preset_hint(self):
+        # 体验: import 预置模块时报「已预置，删掉 import 行」
+        from plugins.workflow.tools.workflow_tool import _check_imports, _PRESET_MODULES
+
+        err = _check_imports("import json, os\nresult = 1", _PRESET_MODULES)
+        assert err is not None
+        assert "json" in err and "已预置" in err and "删掉 import" in err  # json 指明已预置可删
+        assert "os" in err and "禁止" in err  # os 指明禁止
+
+    def test_schema_none_text_notes_reason(self, monkeypatch, tmp_path):
+        # 体验: 子任务成功但返回空文本时，日志说明原因而非裸 json 错误
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "true"}.get(key),
+        )
+
+        class _Empty:
+            def execute_task(self, task_id, agent_name, task_description, on_finished=None, on_error=None, **kw):
+                on_finished(task_id, None)
+                return True
+
+            def cancel_task(self, task_id):
+                return True
+
+        logs: list = []
+        st = wt._RunState(50, time.monotonic() + 60)
+        hook = wt._make_agent_hook(_Empty(), "s1", st, "build", 60.0, log_fn=lambda m: logs.append(str(m)))
+        schema = {"type": "object", "properties": {"v": {}}}
+        assert hook("x", schema=schema) is None
+        assert any("未返回文本" in m for m in logs)
+
+
 class TestRunCard:
     """Task 10: 运行卡片——从 status 数据渲染 phase 分组 + agent 状态 + 汇总。"""
 
