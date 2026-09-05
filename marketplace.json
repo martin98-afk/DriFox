@@ -259,6 +259,25 @@
                 "ui": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox"
+        },
+        {
+            "name": "workflow",
+            "description": "workflow 工具：受限 Python 脚本编排子智能体，支持条件/循环/并行扇出，前台阻塞返回原子结果",
+            "version": "0.1.0",
+            "author": "DriFoxx Team",
+            "license": "MIT",
+            "categories": [
+                "tool"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/workflow",
+                "ref": "master"
+            },
+            "components": {
+                "tools": true
+            }
         }
     ]
 }
