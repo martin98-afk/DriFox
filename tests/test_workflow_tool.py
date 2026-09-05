@@ -931,6 +931,33 @@ class TestBackgroundRun:
         assert st["state"] in ("running", "done")  # 不炸即可
         time.sleep(2.0)
 
+    def test_status_running_reports_progress(self, monkeypatch, tmp_path):
+        """running 态 status 必须带 progress 摘要（phases/logs/agent 计数），不许盲等。"""
+        wt = self._patch(monkeypatch, tmp_path)
+        ctx = {"sub_agent_manager": self._Slow(), "session_id": "s1"}
+        script = "phase('P1')\nlog('m1')\nresult = agent('x')"
+        r = wt._workflow_impl(ctx, meta={"name": "prog", "description": "d"}, script=script)
+        body = json.loads(r.content)
+        time.sleep(0.3)  # 等 exec 线程把 phase/log/agent_start 落盘
+        r2 = wt._workflow_impl(ctx, action="status", run_id=body["run_id"])
+        st = json.loads(r2.content)
+        assert st["state"] == "running"
+        prog = st["progress"]
+        assert prog["phases"] == ["P1"]
+        assert prog["recent_logs"] == ["m1"]
+        assert prog["agent_total"] == 1
+        assert prog["agents"][0]["key"] == "a1"
+        assert prog["agents"][0]["status"] in ("running", "done")
+        time.sleep(2.0)
+
+    def test_run_without_script_friendly_error(self, monkeypatch, tmp_path):
+        """schema 放开 required 后，run 缺 script 必须给内部人话报错而非静默空跑。"""
+        wt = self._patch(monkeypatch, tmp_path)
+        ctx = {"sub_agent_manager": object(), "session_id": "s1"}
+        r = wt._workflow_impl(ctx, meta={"name": "x", "description": "d"})
+        assert not r.success
+        assert "script" in (r.error or "")
+
     def test_foreground_keeps_sync_contract(self, monkeypatch, tmp_path):
         wt = self._patch(monkeypatch, tmp_path)
         ctx = {"sub_agent_manager": self._Slow(), "session_id": "s1"}
@@ -1261,6 +1288,77 @@ class TestEdgeMatrix:
             script="result = agent('x')",
         )
         assert r.success and json.loads(r.content)["result"] == "slow-ok"
+
+
+class TestActionPreviewAndRender:
+    """各 action 的折叠框预览与展开内容：拒绝「workflow: workflow」和裸 JSON。"""
+
+    class _R:
+        def __init__(self, content):
+            self.content = content
+
+    def _body(self, content, success=True, tool_args=None):
+        from plugins.workflow.tools.workflow_tool import _dump_content, _render_workflow_body
+
+        return _render_workflow_body(
+            self._R(_dump_content(content) if not isinstance(content, str) else content),
+            "workflow",
+            tool_args or {},
+            success,
+        )
+
+    def test_preview_by_action(self):
+        from plugins.workflow.tools.workflow_tool import _preview_workflow
+
+        assert "已存工作流" in _preview_workflow({"action": "list"})
+        assert "run-123" in _preview_workflow({"action": "status", "run_id": "run-123"})
+        assert "mywf" in _preview_workflow({"action": "load", "name": "mywf"})
+        assert "mywf" in _preview_workflow({"action": "save", "save_as": "mywf"})
+        assert "r-9" in _preview_workflow({"action": "resume", "run_id": "r-9"})
+        # run 分支维持原名展示
+        assert "workflow: my-name" in _preview_workflow({"meta": {"name": "my-name"}})
+        # from_saved 显示存档名而非 workflow
+        assert "saved-wf" in _preview_workflow({"from_saved": "saved-wf", "meta": {"name": "saved-wf"}})
+
+    def test_render_bg_started(self):
+        html = self._body(
+            {
+                "run_id": "20260906-120000-abc",
+                "status": "running",
+                "name": "apache",
+                "hint": "后台运行中：完成后用 action=status, run_id=... 查询进度与结果",
+            }
+        )
+        assert "apache" in html and "后台" in html and "20260906-120000-abc" in html
+        assert "action=status" in html  # 提示查询方式（随 hint 原文展示）
+
+    def test_render_saved_result(self):
+        html = self._body({"saved": "my-wf"})
+        assert "my-wf" in html and "已保存" in html
+
+    def test_render_list_result(self):
+        html = self._body({"saved": ["a", "b"], "runs": ["20260906-1", "20260905-2"]})
+        assert "a" in html and "b" in html and "20260906-1" in html
+
+    def test_render_load_result(self):
+        html = self._body(
+            {
+                "name": "mywf",
+                "meta": {"name": "mywf", "description": "审计工作流"},
+                "args": {"k": 1},
+                "script": "result = 1\nresult = 2",
+            }
+        )
+        assert "mywf" in html and "审计工作流" in html
+        assert "2 行" in html  # 脚本行数而非全文
+
+    def test_render_error_red_card(self):
+        html = self._body("workflow 脚本异常: NameError: name 'x' is not defined。沙箱仅预置...", success=False)
+        assert "NameError" in html
+
+    def test_status_still_uses_run_card(self):
+        html = self._body({"name": "s", "state": "done", "agents": [], "phases": [], "result": None})
+        assert "wf-run-card" in html
 
 
 class TestRunCard:

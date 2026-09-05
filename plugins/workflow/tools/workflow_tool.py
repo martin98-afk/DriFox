@@ -750,7 +750,7 @@ _WORKFLOW_SCHEMA = {
             "properties": {
                 "meta": {
                     "type": "object",
-                    "description": "工作流身份块（纯 JSON）：name(kebab-case 必填) + description(必填)",
+                    "description": "工作流身份块（纯 JSON）：name(kebab-case) + description；action=run/save 必填",
                     "properties": {
                         "name": {"type": "string", "description": "短名，kebab-case"},
                         "description": {"type": "string", "description": "一句话说明这个工作流做什么"},
@@ -795,7 +795,6 @@ _WORKFLOW_SCHEMA = {
                     "description": "action=status 时的运行 ID",
                 },
             },
-            "required": ["script", "meta"],
         },
     },
 }
@@ -878,7 +877,14 @@ def prune_runs(root: Path, keep: int, exclude: Path | None = None) -> int:
     if not runs_dir.is_dir():
         return 0
     dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
-    dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return 0.0  # 列表与排序之间被并发删除：当最旧处理，排进待删区由 rmtree 容错
+
+    dirs.sort(key=_mtime, reverse=True)
     removed = 0
     for d in dirs[max(0, keep):]:
         # 活跃 run 保护：占保留名额但跳过删除（总数仍 ≤ keep）
@@ -1193,6 +1199,43 @@ def _extract_json(text: str):
     return None
 
 
+def _running_progress(run_dir) -> dict:
+    """running 态轻量进度摘要：agent 快照 + phase 标题 + 最近日志。
+
+    status.json 只在终态落盘，running 期间模型轮询除 state 外无可判断，
+    从 journal 现读，免得调用方盲等或绕道文件系统。
+    """
+    d = Path(run_dir)
+    agents = RunJournal(d).agent_snapshots()
+    counts: dict = {}
+    for s in agents:
+        counts[s["status"]] = counts.get(s["status"], 0) + 1
+    phases: list = []
+    logs: list = []
+    jf = d / "journal.jsonl"
+    if jf.exists():
+        with open(jf, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    continue
+                if rec.get("type") == "phase":
+                    phases.append(rec.get("title"))
+                elif rec.get("type") == "log":
+                    logs.append(str(rec.get("msg") or ""))
+    return {
+        "agent_total": len(agents),
+        "agent_counts": counts,
+        "agents": [{"key": s["key"], "role": s["role"], "status": s["status"]} for s in agents],
+        "phases": phases,
+        "recent_logs": logs[-5:],
+    }
+
+
 def _workflow_impl(tool_ctx, **kwargs):
     # ---- action 分发：存档管理类动作不需要 manager ----
     action = str(kwargs.get("action") or "run")
@@ -1234,7 +1277,13 @@ def _workflow_impl(tool_ctx, **kwargs):
             return ToolResult(
                 True,
                 content=_dump_content(
-                    {"run_id": run_id, "name": live.get("name"), "state": "running", "run_dir": live.get("run_dir")}
+                    {
+                        "run_id": run_id,
+                        "name": live.get("name"),
+                        "state": "running",
+                        "run_dir": live.get("run_dir"),
+                        "progress": _running_progress(Path(live["run_dir"])),
+                    }
                 ),
             )
         if sf.exists():
@@ -1291,6 +1340,11 @@ def _workflow_impl(tool_ctx, **kwargs):
         return ToolResult(False, error="meta 必须包含非空 name 与 description")
 
     script = kwargs.get("script", "")
+    if not str(script or "").strip():
+        return ToolResult(
+            False,
+            error="action=run 需要 script 参数（受限 Python 脚本体）；已有存档改用 from_saved，中断续跑用 action=resume",
+        )
     try:
         ast.parse(script)
     except SyntaxError as e:
@@ -1519,6 +1573,92 @@ def _wf_render_value(value, depth: int = 0) -> str:
     return f'<span style="font-size:{fs}px;">{escape(str(value))}</span>'
 
 
+def _render_action_payload(data: dict) -> str | None:
+    """按 action 返回体的键组合分发渲染；非 action 形态返回 None 走工作流结果卡。"""
+    from app.widgets.render_helpers import escape, scale_font_size
+
+    fs = scale_font_size(12)
+    fs_small = scale_font_size(11)
+
+    # 后台发起：{run_id, status:"running", name?, hint?}
+    if "run_id" in data and data.get("status") == "running":
+        rows = ""
+        for label, val in (("run_id", data.get("run_id")), ("名称", data.get("name") or "—")):
+            rows += (
+                f'<div style="display:flex;gap:8px;padding:2px 0;font-size:{fs}px;">'
+                f'<span style="color:var(--text-secondary);flex:0 0 auto;">{escape(label)}</span>'
+                f'<span style="color:var(--text);word-break:break-all;">{escape(str(val))}</span></div>'
+            )
+        hint = str(data.get("hint") or "")
+        hint_html = (
+            f'<div style="margin-top:6px;color:var(--text-secondary);font-size:{fs_small}px;">{escape(hint)}</div>'
+            if hint
+            else ""
+        )
+        return (
+            f'<div class="wf-block" style="padding:2px 0;">'
+            f'<div style="font-size:{fs}px;font-weight:600;color:var(--text);">已发起工作流（后台运行）</div>'
+            f'<div style="margin-top:4px;">{rows}</div>{hint_html}</div>'
+        )
+
+    # 保存确认：{saved: name}
+    if isinstance(data.get("saved"), str):
+        return (
+            f'<div class="wf-block" style="padding:2px 0;font-size:{fs}px;color:var(--text);">'
+            f'✓ 已保存工作流：<b>{escape(str(data["saved"]))}</b>（可用 from_saved 复跑）</div>'
+        )
+
+    # 列表：{saved: [...], runs: [...]}
+    if isinstance(data.get("saved"), list):
+        saved = data.get("saved") or []
+        runs = data.get("runs") or []
+        saved_html = (
+            "".join(f'<div style="padding:1px 0;">· {escape(str(x))}</div>' for x in saved)
+            or '<div style="color:var(--text-secondary);">（空）</div>'
+        )
+        runs_html = (
+            "".join(f'<div style="padding:1px 0;">· {escape(str(x))}</div>' for x in runs)
+            or '<div style="color:var(--text-secondary);">（空）</div>'
+        )
+        return (
+            f'<div class="wf-block" style="padding:2px 0;">'
+            f'<div style="font-size:{fs}px;font-weight:600;color:var(--text);">已存工作流（{len(saved)}）</div>'
+            f'<div style="margin:2px 0 8px;">{saved_html}</div>'
+            f'<div style="font-size:{fs}px;font-weight:600;color:var(--text);">最近 runs（{len(runs)}）</div>'
+            f'<div style="margin-top:2px;color:var(--text-secondary);font-size:{fs_small}px;">{runs_html}</div></div>'
+        )
+
+    # 存档详情：{name, meta, args, script}
+    if "script" in data and "meta" in data:
+        meta = data.get("meta") or {}
+        desc = str(meta.get("description") or "")
+        args_v = data.get("args")
+        script = str(data.get("script") or "")
+        n_lines = len(script.splitlines())
+        desc_html = (
+            f'<div style="color:var(--text-secondary);font-size:{fs_small}px;margin-top:2px;">{escape(desc)}</div>'
+            if desc
+            else ""
+        )
+        args_txt = (
+            json.dumps(args_v, ensure_ascii=False)
+            if args_v is not None
+            else "（无）"
+        )
+        return (
+            f'<div class="wf-block" style="padding:2px 0;">'
+            f'<div style="font-size:{fs}px;font-weight:600;color:var(--text);">存档：{escape(str(data.get("name") or ""))}</div>'
+            f"{desc_html}"
+            f'<div style="margin-top:4px;color:var(--text-secondary);font-size:{fs_small}px;">'
+            f'脚本 {n_lines} 行；默认 args：{escape(args_txt)}</div>'
+            f'<details class="wf-details" style="margin-top:4px;">'
+            f'<summary style="cursor:pointer;color:var(--accent);font-size:{fs_small}px;">查看脚本</summary>'
+            f'<div style="margin-top:4px;">{_wf_pre(script)}</div></details></div>'
+        )
+
+    return None
+
+
 def _render_workflow_body(result, tool_name, tool_args, success) -> str:
     """workflow 完成框渲染闭包：概览 + 阶段时间线 + 日志 + 结构化结果。
 
@@ -1530,11 +1670,27 @@ def _render_workflow_body(result, tool_name, tool_args, success) -> str:
     raw = getattr(result, "content", "") or ""
     data = _parse_workflow_payload(raw)
     if not data:
+        # 失败结果（error 纯文本）：红字人话卡，不落裸 <pre>
+        if not success:
+            fs_e = scale_font_size(12)
+            fs_es = scale_font_size(11)
+            return (
+                f'<div class="wf-block" style="padding:2px 0;">'
+                f'<div style="display:flex;align-items:center;gap:6px;">'
+                f'<span style="width:8px;height:8px;border-radius:50%;background:#cf222e;flex:0 0 auto;"></span>'
+                f'<span style="font-size:{fs_e}px;font-weight:600;color:#cf222e;">执行失败</span></div>'
+                f'<div style="margin-top:4px;color:var(--text);font-size:{fs_es}px;white-space:pre-wrap;'
+                f'word-break:break-word;">{escape(str(raw))}</div></div>'
+            )
         # 解析不出来（旧消息 / 异常）也别丢内容，退化成纯文本块
         return _wf_pre(str(raw))
     # 运行状态卡（action=status 的产出）：识别后走专用渲染，不走工作流结果卡
     if "state" in data and "agents" in data:
         return _render_run_card(data)
+    # action 返回体（后台发起/保存/列表/存档详情）：各目式专属卡
+    action_html = _render_action_payload(data)
+    if action_html is not None:
+        return action_html
 
     fs = scale_font_size(12)
     fs_small = scale_font_size(11)
@@ -1635,6 +1791,21 @@ def _render_workflow_body(result, tool_name, tool_args, success) -> str:
 
 
 def _preview_workflow(tool_args: dict) -> str:
+    """折叠框摘要：按 action 分支给人话，run 分支维持「workflow: 名称」。"""
+    action = str(tool_args.get("action") or "run")
+    if action == "list":
+        return "列出已存工作流与最近 runs"
+    if action == "status":
+        return f"查询运行状态: {tool_args.get('run_id') or '？'}"
+    if action == "load":
+        return f"读取存档: {tool_args.get('name') or '？'}"
+    if action == "save":
+        return f"保存工作流: {tool_args.get('save_as') or '？'}"
+    if action == "resume":
+        return f"续跑 run: {tool_args.get('run_id') or '？'}"
+    saved = str(tool_args.get("from_saved") or "").strip()
+    if saved:
+        return f"workflow: {saved}（存档复跑）"
     meta = tool_args.get("meta") or {}
     if isinstance(meta, str):
         try:
