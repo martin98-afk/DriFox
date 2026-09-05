@@ -84,9 +84,15 @@ class _AutoHeightScrollArea(QScrollArea):
             content_h = w.heightForWidth(vw2) if w.hasHeightForWidth() else w.sizeHint().height()
         return max(self.minimumHeight(), min(content_h + frame, self.maximumHeight()))
 
-    def _outer_width(self, base: QSize) -> int:
-        """测量用的控件外宽（唯一输入，不读 viewport 的瞬时宽度）"""
-        return self.width() if self.width() > 0 else base.width()
+    def _outer_width(self) -> int:
+        """测量用的控件外宽（唯一输入，不读 viewport 的瞬时宽度）
+
+        首帧布局前 self.width() 为 0，此时不能用 super().sizeHint().width()
+        兜底——它含内容全文单行宽度（wordWrap QLabel sizeHint 宽 = 全文不折行
+        宽度），会污染首轮高度测量。用一个有界常量兜底即可（仅影响首轮估算，
+        布局落地后 self.width() 生效）。
+        """
+        return self.width() if self.width() > 0 else 320
 
     def minimumSizeHint(self):
         # QAbstractScrollArea 默认 minimumSizeHint 含滚动条尺寸（~42px），
@@ -94,18 +100,22 @@ class _AutoHeightScrollArea(QScrollArea):
         # 容器高度动画滞后 / 布局空间不足时，问题标题区是布局中唯一可被
         # 压到 0 的成员，minimumSizeHint=(0,0) 会被优先压没（标题完全不可见）。
         # 下限 = 内容高度（封顶 maximumHeight），保证问题标题区始终可见。
-        base = super().sizeHint()
+        # ⚠ 宽度必须返回 0：super().sizeHint().width() 会传播内容（wordWrap
+        # 长文本）的全文单行宽度作为最小宽度诉求，顶层布局 SetDefaultConstraint
+        # 会把主窗口强行撑宽 → 容器宽度突变 → hfw 重算 → 锁高跳变（文字抖动）。
         w = self.widget()
         if w is None:
             return QSize(0, 0)
-        return QSize(base.width(), self._height_for_width(self._outer_width(base)))
+        return QSize(0, self._height_for_width(self._outer_width()))
 
     def sizeHint(self):
         base = super().sizeHint()
         w = self.widget()
         if w is None:
             return base
-        return QSize(base.width(), self._height_for_width(self._outer_width(base)))
+        # 宽度同样返回 0（不参与宽度诉求，见 minimumSizeHint 注释）；
+        # 本区水平策略是 Expanding，宽度由布局分配，不需要 sizeHint 表达。
+        return QSize(0, self._height_for_width(self._outer_width()))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -163,6 +173,7 @@ class _OptionRadioCard(QWidget):
 
         self._title_label = QLabel(self._label_text)
         self._title_label.setFont(get_unified_font(11, True))
+        self._title_label.setWordWrap(True)  # 长标题折行而不是撑宽/裁切
         self._title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self._desc_label = QLabel(self._desc_text)
@@ -170,6 +181,15 @@ class _OptionRadioCard(QWidget):
         self._desc_label.setWordWrap(True)
         self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._desc_label.setVisible(bool(self._desc_text))
+
+        # 文本 label 水平一律 Ignored：不参与卡片的宽度诉求。
+        # wordWrap 的 QLabel sizeHint 宽度 = 全文单行宽度（可达数千 px），
+        # 且会经 qSmartMinSize 变成卡片 minimumSize 宽度 → 顶层布局
+        # SetDefaultConstraint 把主窗口强行撑宽 → 容器宽度突变 →
+        # heightForWidth 重算 → CardContainer 锁高跳变（卡片内文字抖动）。
+        # Ignored 后文本按实际分得宽度折行，卡片永远不要求额外宽度。
+        self._title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         text_layout.addWidget(self._title_label)
         text_layout.addWidget(self._desc_label)
@@ -280,6 +300,7 @@ class _OptionCheckCard(QWidget):
 
         self._title_label = QLabel(self._label_text)
         self._title_label.setFont(get_unified_font(11, True))
+        self._title_label.setWordWrap(True)  # 长标题折行而不是撑宽/裁切
         self._title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self._desc_label = QLabel(self._desc_text)
@@ -287,6 +308,15 @@ class _OptionCheckCard(QWidget):
         self._desc_label.setWordWrap(True)
         self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._desc_label.setVisible(bool(self._desc_text))
+
+        # 文本 label 水平一律 Ignored：不参与卡片的宽度诉求。
+        # wordWrap 的 QLabel sizeHint 宽度 = 全文单行宽度（可达数千 px），
+        # 且会经 qSmartMinSize 变成卡片 minimumSize 宽度 → 顶层布局
+        # SetDefaultConstraint 把主窗口强行撑宽 → 容器宽度突变 →
+        # heightForWidth 重算 → CardContainer 锁高跳变（卡片内文字抖动）。
+        # Ignored 后文本按实际分得宽度折行，卡片永远不要求额外宽度。
+        self._title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         text_layout.addWidget(self._title_label)
         text_layout.addWidget(self._desc_label)
@@ -433,6 +463,11 @@ class _CustomInputCard(QWidget):
         self._desc_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
         self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._right_layout.addWidget(self._desc_label)
+
+        # 同选项卡片：文本 label 水平 Ignored，不参与卡片宽度诉求
+        # （防止长文本经 sizeHint/minimumSize 把主窗口撑宽引发锁高跳变）。
+        self._title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         self._text_edit = QTextEdit()
         self._text_edit.setPlaceholderText(self.PLACEHOLDER)
