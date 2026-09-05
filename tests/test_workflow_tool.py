@@ -214,3 +214,87 @@ class TestCombinators:
         _, pipeline, _ = self._make()
         with pytest.raises(WorkflowError):
             pipeline([1, 2])
+
+
+class TestWorkflowImpl:
+    def _impl(self, monkeypatch, manager, **overrides):
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {
+                "max_concurrent_agents": 2,
+                "max_total_agents": 10,
+                "max_items_per_call": 10,
+                "max_duration_sec": 60,
+                "default_agent": "build",
+                "max_result_chars": 1000,
+            }.get(key),
+        )
+        ctx = {"sub_agent_manager": manager, "session_id": "s1"}
+        kwargs = {
+            "meta": {"name": "audit", "description": "审计"},
+            "script": "result = {'n': agent('x')}",
+        }
+        kwargs.update(overrides)
+        return wt._workflow_impl(ctx, **kwargs)
+
+    def test_happy_path(self, monkeypatch):
+        r = self._impl(monkeypatch, _FakeManager(routes={"build": "ok"}))
+        assert r.success is True
+        assert r.content["result"] == {"n": "ok"}
+        assert r.content["agents_started"] == 1
+        assert r.content["workflow"] == "audit"
+
+    def test_meta_validation_fails_fast(self, monkeypatch):
+        r = self._impl(monkeypatch, _FakeManager(), meta={"name": "x"})
+        assert r.success is False
+        assert "description" in r.error
+
+    def test_syntax_error_fails_fast(self, monkeypatch):
+        r = self._impl(monkeypatch, _FakeManager(), script="def oops(:")
+        assert r.success is False
+        assert "语法" in r.error
+
+    def test_missing_result_is_null(self, monkeypatch):
+        r = self._impl(monkeypatch, _FakeManager(), script="agent('x')")
+        assert r.success is True
+        assert r.content["result"] is None
+
+    def test_unserializable_result_degrades(self, monkeypatch):
+        r = self._impl(monkeypatch, _FakeManager(), script="result = {'f': len}")
+        assert r.success is True
+        assert isinstance(r.content["result"], dict)
+        assert "_repr" in r.content["result"]
+
+    def test_script_exception_reported(self, monkeypatch):
+        r = self._impl(monkeypatch, _FakeManager(), script="result = 1 / 0")
+        assert r.success is False
+        assert "脚本异常" in r.error
+
+    def test_manager_missing(self, monkeypatch):
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt.PluginConfigStore, "get", lambda self, p, k: None)
+        r = wt._workflow_impl(
+            {"session_id": "s1"}, meta={"name": "a", "description": "b"}, script="result = 1"
+        )
+        assert r.success is False
+
+    def test_preview_shows_name(self):
+        from plugins.workflow.tools.workflow_tool import _preview_workflow
+
+        assert "audit" in _preview_workflow({"meta": {"name": "audit", "description": "d"}, "script": ""})
+
+    def test_register(self):
+        from plugins.workflow.tools.workflow_tool import register
+
+        class _R:
+            def register(self, name, schema, **kw):
+                assert name == "workflow"
+                assert kw["danger"] == "dangerous"
+                assert kw["group"] == "子智能体"
+                assert kw["keep_in_content"] is True
+
+        register(_R())

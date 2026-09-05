@@ -6,6 +6,7 @@ agent() 走 SubAgentManager.execute_task + Event 同步等待，子任务自动�
 """
 from __future__ import annotations
 
+import ast
 import builtins
 import datetime
 import json
@@ -215,3 +216,158 @@ def _make_combinators(state: _RunState, pool: ThreadPoolExecutor, max_items: int
         return out
 
     return parallel, pipeline
+
+
+# ============================================================
+# schema / impl / register
+# ============================================================
+
+_WORKFLOW_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "workflow",
+        # description 运行时由 get_builtin_tools_schema 用 _workflow_description 动态覆盖
+        "description": "运行受限 Python 编排脚本，扇出子智能体。适合大规模多智能体编排"
+        "（审计/迁移/多角度研究）；一两个委派用 subagent_para，固定依赖图用 subagent_dag。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "meta": {
+                    "type": "object",
+                    "description": "工作流身份块（纯 JSON）：name(kebab-case 必填) + description(必填)",
+                    "properties": {
+                        "name": {"type": "string", "description": "短名，kebab-case"},
+                        "description": {"type": "string", "description": "一句话说明这个工作流做什么"},
+                    },
+                    "required": ["name", "description"],
+                },
+                "script": {
+                    "type": "string",
+                    "description": "受限 Python 脚本体：顶层直接执行，最终结果赋给 result 变量。"
+                    "钩子：agent(prompt, agent=角色, phase=分组) 跑子智能体返最终文本（失败 None）；"
+                    "parallel([零参函数]) 并发等全部；pipeline(items, *stages) 无屏障流水线；"
+                    "phase(title)/log(msg) 记进度。预置 json/math/re/statistics/datetime，"
+                    "无文件/网络能力。脚本必须通过钩子干活。",
+                },
+                "args": {
+                    "type": "object",
+                    "description": "可选 JSON 输入，暴露为脚本全局 args",
+                },
+            },
+            "required": ["script", "meta"],
+        },
+    },
+}
+
+
+def _workflow_impl(tool_ctx, **kwargs):
+    manager = tool_ctx.get("sub_agent_manager")
+    if not manager:
+        return ToolResult(False, error="子智能体管理器未初始化")
+
+    meta = kwargs.get("meta") or {}
+    if isinstance(meta, str):
+        try:
+            meta = orjson.loads(meta)
+        except orjson.JSONDecodeError:
+            return ToolResult(False, error="meta 不是合法 JSON")
+    if (
+        not isinstance(meta, dict)
+        or not str(meta.get("name") or "").strip()
+        or not str(meta.get("description") or "").strip()
+    ):
+        return ToolResult(False, error="meta 必须包含非空 name 与 description")
+
+    script = kwargs.get("script", "")
+    try:
+        ast.parse(script)
+    except SyntaxError as e:
+        return ToolResult(False, error=f"脚本语法错误: {e}")
+
+    # 配置三级链（env → 存储 → 默认）；number 字段读回为 str，须显式转换
+    store = PluginConfigStore()
+    max_concurrent = int(store.get(PLUGIN_NAME, "max_concurrent_agents") or 4)
+    max_total = int(store.get(PLUGIN_NAME, "max_total_agents") or 50)
+    max_items = int(store.get(PLUGIN_NAME, "max_items_per_call") or 100)
+    max_duration = float(store.get(PLUGIN_NAME, "max_duration_sec") or 1800)
+    default_agent = str(store.get(PLUGIN_NAME, "default_agent") or "build")
+    max_chars = int(store.get(PLUGIN_NAME, "max_result_chars") or 50000)
+
+    state = _RunState(max_total, time.monotonic() + max_duration)
+    pool = ThreadPoolExecutor(
+        max_workers=max(1, max_concurrent),
+        initializer=_pool_initializer,
+        thread_name_prefix="wf-agent",
+    )
+    session_id = tool_ctx.get("session_id", "")
+    phases: list = []
+    logs: list = []
+
+    try:
+        parallel_hook, pipeline_hook = _make_combinators(state, pool, max_items)
+        ns = _build_sandbox(
+            args=kwargs.get("args"),
+            hooks={
+                "agent": _make_agent_hook(manager, session_id, state, default_agent),
+                "parallel": parallel_hook,
+                "pipeline": pipeline_hook,
+                "phase": lambda title: phases.append(str(title)),
+                "log": lambda msg: logs.append(str(msg)),
+            },
+        )
+        exec(compile(script, "<workflow>", "exec"), ns)  # noqa: S102 - 受限命名空间，containment 定位
+        result = ns.get("result")
+        result_note = ""
+        try:
+            orjson.dumps(result)
+        except (TypeError, ValueError):
+            result = {"_repr": str(result)}
+            result_note = "result 不可 JSON 序列化，已转为字符串"
+
+        content = {
+            "workflow": meta.get("name"),
+            "agents_started": state.started,
+            "phases": phases,
+            "logs": logs,
+            "result": result,
+        }
+        if len(orjson.dumps(content).decode("utf-8")) > max_chars:
+            content["logs"] = content["logs"][:10]
+            result_note = (result_note + " 结果超长，logs 截断").strip()
+        if result_note:
+            content["_note"] = result_note
+        return ToolResult(True, content=content)
+    except WorkflowError as e:
+        return ToolResult(False, error=f"workflow 执行中止: {e}")
+    except Exception as e:
+        return ToolResult(False, error=f"workflow 脚本异常: {type(e).__name__}: {e}")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _preview_workflow(tool_args: dict) -> str:
+    meta = tool_args.get("meta") or {}
+    if isinstance(meta, str):
+        try:
+            meta = orjson.loads(meta)
+        except Exception:
+            meta = {}
+    name = str(meta.get("name") or "").strip() or "workflow"
+    return f"workflow: {name}"
+
+
+def register(registry):
+    registry.register(
+        "workflow",
+        _WORKFLOW_SCHEMA,
+        impl=_workflow_impl,
+        danger="dangerous",
+        icon="workflow",
+        cn_name="工作流编排",
+        group=GROUP_SUBAGENT,
+        description="受限 Python 脚本编排子智能体",
+        aliases=["workflow-orchestrate", "Wf"],
+        preview=_preview_workflow,
+        summarize=make_summarize_from_preview(_preview_workflow),
+        keep_in_content=True,
+    )
