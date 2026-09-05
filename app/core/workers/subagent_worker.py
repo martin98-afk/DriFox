@@ -1790,6 +1790,18 @@ class SubAgentManager(QObject):
             if task_id in self._running_tasks:
                 del self._running_tasks[task_id]
 
+    @staticmethod
+    def _connect_cb(signal, callback, connection_type: int = None):
+        """连接回调；connection_type 为 None 时沿用 Qt 默认（AutoConnection）。
+
+        抽成方法是为了让「同步等待型」调用方能显式指定 DirectConnection——
+        详见 execute_task 的 connection_type 文档。
+        """
+        if connection_type is None:
+            signal.connect(callback)
+        else:
+            signal.connect(callback, connection_type)
+
     def execute_task(
         self,
         task_id: str,
@@ -1803,6 +1815,7 @@ class SubAgentManager(QObject):
         share_context: bool = False,  # 是否共享主智能体上下文
         session_id: str = "",  # 所属会话 ID（任务创建时锁定，避免跨会话覆盖）
         llm_config: Dict = None,  # 可选：预解析的 LLM 配置（支持覆盖模型）
+        connection_type: int = None,  # 回调连接方式；None=沿用默认 AutoConnection
     ) -> bool:
         """执行子智能体任务
 
@@ -1812,6 +1825,15 @@ class SubAgentManager(QObject):
                         避免同一窗口内切换会话后异步回调用错 session_id。
             llm_config: 预解析的 LLM 配置（可选）。传入时跳过内部 _get_llm_config() 调用，
                         用于 --model=xxx 覆盖模型/服务商的场景。
+            connection_type: on_finished/on_error/on_progress 的连接方式（Qt.ConnectionType）。
+                默认 None 表示沿用 Qt 默认（AutoConnection）。
+
+                ★ 调用方若要在回调里做「同步等待」（典型：workflow 插件 agent() 派发后
+                用 threading.Event.wait() 阻塞等结果），必须显式传 Qt.DirectConnection(1)：
+                AutoConnection 会把回调排进**发起连接那个线程**的事件循环，而该线程此刻正
+                阻塞在 wait() 上——若它是普通 Python 线程（无 Qt 事件循环）更永不会投递，
+                结果是子任务早已跑完、回调永不触发的**永久死锁**（无超时则永远不返回）。
+                DirectConnection 让回调直接在 executor 线程里执行，等待方即可被唤醒。
         """
         # 在任务创建时即锁定 session_id，不依赖后续的全局状态
         task_session_id = session_id or self._current_session_id
@@ -1918,11 +1940,11 @@ class SubAgentManager(QObject):
                 executor_ref["executor"] = executor
 
             if on_finished:
-                executor.finished_with_result.connect(on_finished)
+                self._connect_cb(executor.finished_with_result, on_finished, connection_type)
             if on_error:
-                executor.error_occurred.connect(on_error)
+                self._connect_cb(executor.error_occurred, on_error, connection_type)
             if on_progress:
-                executor.progress_updated.connect(on_progress)
+                self._connect_cb(executor.progress_updated, on_progress, connection_type)
 
             # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
             executor.permission_requested.connect(self._forward_permission_request)

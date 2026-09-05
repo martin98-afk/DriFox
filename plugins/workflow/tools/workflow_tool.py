@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import builtins
 import datetime
+import inspect
 import json
 import math
 import re
@@ -82,13 +83,20 @@ def _build_sandbox(args, hooks: dict | None = None) -> dict:
 
 
 class _RunState:
-    """单次 run 的额度与时长状态（线程安全）。"""
+    """单次 run 的额度、时长与中止状态（线程安全）。"""
 
     def __init__(self, max_total_agents: int, deadline: float):
         self._lock = threading.Lock()
         self._max_total = max_total_agents
         self._deadline = deadline
+        self._abort = threading.Event()
+        self._waiters: set = set()
         self.started = 0
+
+    @property
+    def deadline(self) -> float:
+        """run 总截止时间（time.monotonic 基准）。"""
+        return self._deadline
 
     def _check_deadline(self) -> None:
         if time.monotonic() > self._deadline:
@@ -106,48 +114,185 @@ class _RunState:
                 raise WorkflowError(f"子智能体总数超上限（{self._max_total}）")
             self.started += 1
 
+    # ---- 中止：run 被杀时立刻唤醒所有阻塞中的 agent()，避免线程悬挂到 deadline ----
 
-def _make_agent_hook(manager, session_id: str, state: _RunState, default_agent: str):
+    def aborted(self) -> bool:
+        return self._abort.is_set()
+
+    def abort(self) -> None:
+        self._abort.set()
+        with self._lock:
+            waiters = list(self._waiters)
+        for ev in waiters:
+            ev.set()
+
+    def track_waiter(self, ev: threading.Event) -> None:
+        with self._lock:
+            self._waiters.add(ev)
+
+    def untrack_waiter(self, ev: threading.Event) -> None:
+        with self._lock:
+            self._waiters.discard(ev)
+
+
+def _direct_connection() -> int:
+    """Qt.DirectConnection 的值（1）。延迟导入，保持本模块导入期不依赖 Qt。"""
+    try:
+        from PyQt5.QtCore import Qt
+
+        return int(Qt.DirectConnection)
+    except Exception:  # pragma: no cover - Qt 不可用时退回字面量
+        return 1
+
+
+# 等待切片：即使没有中止事件也按此间隔醒一次，兼顾 deadline 检查与响应速度
+_WAIT_SLICE = 0.5
+
+
+def _manager_supports_kwarg(manager, name: str) -> bool:
+    """宿主 execute_task 是否接受某个关键字参数。
+
+    核心代码（app/）不走插件热重载：宿主任进程若在我方改核心之前启动，内存里仍是旧签名，
+    直接传新参数会抛 TypeError 而不是降级。插件必须自适应宿主版本。
+    """
+    try:
+        params = inspect.signature(manager.execute_task).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _make_agent_hook(
+    manager, session_id: str, state: _RunState, default_agent: str, max_agent_wait: float = 900.0
+):
     """agent(prompt, agent=None, label=None, phase=None, share_context=False) -> str | None
 
     execute_task 异步派发 SubAgentExecutor；Event 在 executor 线程被回调置位。
-    子任务失败（on_error / execute_task 返回 False）降级为 None，由脚本兜底。
+    子任务失败（on_error / execute_task 返回 False / 等待超时）降级为 None，由脚本兜底。
+
+    ★ 两个必须同时成立的防挂条件（缺一必现「子任务跑完了但脚本永远不动」）：
+      1) connection_type=DirectConnection。默认 AutoConnection 会把回调排进「发起连接那个
+         线程」的事件循环，而该线程此刻正阻塞在 wait() 上；parallel/pipeline 的 worker 还
+         是普通 Python 线程、根本没有 Qt 事件循环 → 回调永不投递 → 永久死锁。
+      2) 等待必须有截止时间。子任务被 stall 检测器取消、或 executor 异常退出时，不会发射
+         finished_with_result，无超时就永远等不到。超时按「子任务失败」处理，降 None。
     """
+    direct = _direct_connection()
+    # 宿主核心版本自适应：app/ 核心不走插件热重载，宿主任进程可能还跑在旧签名上，
+    # 直接传新参数会抛 TypeError（而不是降级），所以先探再传。
+    supports_conn_type = _manager_supports_kwarg(manager, "connection_type")
+    supports_executor_ref = _manager_supports_kwarg(manager, "executor_ref")
+    if not supports_conn_type and not supports_executor_ref:
+        logger.warning(
+            "[workflow] 宿主 SubAgentManager.execute_task 既不支持 connection_type 也不支持 "
+            "executor_ref：子任务回调大概率无法投递，将依赖等待上界降级（建议重启宿主）"
+        )
+    elif not supports_conn_type:
+        logger.warning(
+            "[workflow] 宿主 SubAgentManager.execute_task 不支持 connection_type，"
+            "改用 executor_ref 事后补挂直连回调兜底（建议重启宿主以加载最新核心）"
+        )
 
     def agent(prompt, agent=None, label=None, phase=None, share_context=False):
         # 参数名 agent 遮蔽外层函数名：本函数体内不再引用自身，合法且对模型最自然
         if not isinstance(prompt, str) or not prompt.strip():
             raise WorkflowError("agent() 的 prompt 必须是非空字符串")
+        if agent is not None and (not isinstance(agent, str) or not agent.strip()):
+            raise WorkflowError("agent() 的 agent 必须是非空字符串")
+        if state.aborted():
+            return None
         state.reserve()
         name = agent or default_agent
         task_id = str(uuid.uuid4())
         done = threading.Event()
-        box = {"result": None}
+        box: dict = {"result": None, "settled": False}
 
         def _on_finished(tid, text):
             # 信号签名 (task_id, result)：PyQt 双参 emit，回调签名必须双参否则静默 TypeError
             box["result"] = text
+            box["settled"] = True
             done.set()
 
         def _on_error(tid, err):
-            logger.warning(f"[workflow] 子任务失败 ({label or name}): {err}")
+            # 回调可能被挂两次（核心 connection_type + executor_ref 兜底），只记第一次
+            if not box["settled"]:
+                logger.warning(f"[workflow] 子任务失败 ({label or name}): {err}")
+            box["settled"] = True
             done.set()
 
-        ok = manager.execute_task(
-            task_id=task_id,
-            agent_name=name,
-            task_description=prompt,
-            on_finished=_on_finished,
-            on_error=_on_error,
-            share_context=bool(share_context),
-            session_id=session_id,
-        )
+        def _attach_direct(executor):
+            """再补挂一组 DirectConnection 回调（对旧核心是唯一救命手段）。
+
+            真实核心的 execute_task 在 start() 之前就把 executor 写进 executor_ref，
+            子智能体跑完通常要数秒，而 start() 到本行只有毫秒级，竞态窗口可忽略；
+            真撞上了还有下面的等待上界兜底。
+            """
+            if executor is None:
+                return
+            for sig_name, cb in (("finished_with_result", _on_finished), ("error_occurred", _on_error)):
+                sig = getattr(executor, sig_name, None)
+                if sig is None:
+                    continue
+                try:
+                    sig.connect(cb, direct)
+                except Exception as e:  # 补挂失败不影响降级路径
+                    logger.debug(f"[workflow] 补挂 {sig_name} 直连回调失败: {e}")
+
+        ref: dict = {}
+        call: dict = {
+            "task_id": task_id,
+            "agent_name": name,
+            "task_description": prompt,
+            "on_finished": _on_finished,
+            "on_error": _on_error,
+            "share_context": bool(share_context),
+            "session_id": session_id,
+        }
+        if supports_conn_type:
+            call["connection_type"] = direct
+        if supports_executor_ref:
+            call["executor_ref"] = ref
+
+        ok = manager.execute_task(**call)
         if not ok:
             return None
-        done.wait()
+        _attach_direct(ref.get("executor"))
+
+        # 截止时间 = min(run 总 deadline, 单 agent 等待上限)，杜绝无限期阻塞
+        deadline = min(state.deadline, time.monotonic() + max_agent_wait)
+        state.track_waiter(done)
+        try:
+            while not state.aborted() and not done.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                done.wait(min(remaining, _WAIT_SLICE))
+        finally:
+            state.untrack_waiter(done)
+
+        if not box["settled"]:
+            if not state.aborted() and time.monotonic() > state.deadline:
+                _cancel(manager, task_id)
+                raise WorkflowTimeoutError("workflow 超过总时长上限（等待子任务时 deadline 已过）")
+            logger.warning(
+                f"[workflow] 子任务未返回结果 ({label or name})："
+                f"{'run 已中止' if state.aborted() else f'等待超过 {max_agent_wait:.0f}s'}，取消并降级 None"
+            )
+            _cancel(manager, task_id)
+            return None
         return box["result"]
 
     return agent
+
+
+def _cancel(manager, task_id: str) -> None:
+    """尽力取消子任务；取消失败不影响降级路径。"""
+    try:
+        manager.cancel_task(task_id)
+    except Exception as e:
+        logger.debug(f"[workflow] cancel_task({str(task_id)[:8]}) 失败: {e}")
 
 
 _COMBINATOR_LOCAL = threading.local()
@@ -195,6 +340,8 @@ def _make_combinators(state: _RunState, pool: ThreadPoolExecutor, max_items: int
         def _run_item(item):
             prev = item
             for idx, stage in enumerate(stages):
+                if state.aborted():
+                    return None
                 try:
                     prev = stage(prev, item, idx)
                 except WorkflowError:
@@ -229,7 +376,7 @@ def _workflow_description(subagent_names: list) -> str:
         "运行受限 Python 编排脚本，扇出子智能体。适合大规模多智能体编排（审计/迁移/多角度研究/对抗验证）；"
         "一两个委派用 subagent_para，固定依赖图用 subagent_dag。\n\n"
         "脚本是同步 Python，顶层直接执行，最终结果赋给 result 变量（未赋则为 null）。钩子：\n"
-        "- agent(prompt, agent=角色, phase=分组): 跑一个子智能体到完成，返回最终文本，失败返回 None\n"
+        "- agent(prompt, agent=角色, phase=分组): 跑一个子智能体到完成，返回最终文本，失败/超时返回 None\n"
         "- parallel([零参函数]): 并发执行并等全部（屏障）；异常项降 None；不支持嵌套\n"
         "- pipeline(items, *stages): 每项独立流过 stage(prev, item, index)，无屏障；阶段异常该项降 None 跳后续\n"
         "- phase(title)/log(msg): 进度记录；预置 json/math/re/statistics/datetime；无文件/网络能力\n"
@@ -307,6 +454,7 @@ def _workflow_impl(tool_ctx, **kwargs):
     max_total = int(store.get(PLUGIN_NAME, "max_total_agents") or 50)
     max_items = int(store.get(PLUGIN_NAME, "max_items_per_call") or 100)
     max_duration = float(store.get(PLUGIN_NAME, "max_duration_sec") or 1800)
+    max_agent_wait = float(store.get(PLUGIN_NAME, "max_agent_wait_sec") or 900)
     default_agent = str(store.get(PLUGIN_NAME, "default_agent") or "build")
     max_chars = int(store.get(PLUGIN_NAME, "max_result_chars") or 50000)
 
@@ -325,7 +473,7 @@ def _workflow_impl(tool_ctx, **kwargs):
         ns = _build_sandbox(
             args=kwargs.get("args"),
             hooks={
-                "agent": _make_agent_hook(manager, session_id, state, default_agent),
+                "agent": _make_agent_hook(manager, session_id, state, default_agent, max_agent_wait),
                 "parallel": parallel_hook,
                 "pipeline": pipeline_hook,
                 "phase": lambda title: phases.append(str(title)),
@@ -359,6 +507,9 @@ def _workflow_impl(tool_ctx, **kwargs):
     except Exception as e:
         return ToolResult(False, error=f"workflow 脚本异常: {type(e).__name__}: {e}")
     finally:
+        # 收尾：先置中止标志唤醒所有仍在等子任务的 worker（含线程池里的），再关池。
+        # 否则异常路径下这些线程会一直挂到各自的截止时间才退出。
+        state.abort()
         pool.shutdown(wait=False, cancel_futures=True)
 
 

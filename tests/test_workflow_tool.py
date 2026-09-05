@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """workflow 工具单测：受限命名空间 / 钩子语义 / 上限 / impl 组装。"""
+import threading
 import time
 
+from PyQt5.QtCore import QThread, pyqtSignal
 import pytest
 
 from plugins.workflow.tools.workflow_tool import (
@@ -19,6 +21,7 @@ class _FakeManager:
         self.routes = routes or {}
         self.fail_agents = set(fail_agents)
         self.calls = []
+        self.cancelled = []
 
     def execute_task(self, task_id, agent_name, task_description,
                      on_finished=None, on_error=None, **kw):
@@ -29,6 +32,19 @@ class _FakeManager:
             return False
         if on_finished:
             on_finished(task_id, self.routes.get(agent_name, f"done:{agent_name}"))
+        return True
+
+    def cancel_task(self, task_id):
+        self.cancelled.append(task_id)
+        return True
+
+
+class _SilentManager(_FakeManager):
+    """子任务既不 on_finished 也不 on_error（模拟 executor 静默死亡 / 被 stall 检测器摘除）。"""
+
+    def execute_task(self, task_id, agent_name, task_description,
+                     on_finished=None, on_error=None, **kw):
+        self.calls.append((agent_name, task_description, kw))
         return True
 
 
@@ -125,6 +141,215 @@ class TestAgentHook:
         hook, _ = self._make(mgr)
         hook("x", share_context=True)
         assert mgr.calls[0][2].get("share_context") is True
+
+
+class TestAgentHookWaitContract:
+    """★ 回归：agent() 的「回调能收到 + 等待有上界」双保险。
+
+    缺 connection_type=DirectConnection 时，回调会被排进发起连接那个线程的事件循环，
+    而该线程正阻塞在 wait() 上（线程池 worker 还是无 Qt 事件循环的普通线程）
+    → 子任务跑完了、回调永不投递 → 脚本永久挂起。
+    """
+
+    def _make(self, manager, max_total=50, deadline=None, max_agent_wait=900.0):
+        from plugins.workflow.tools.workflow_tool import _make_agent_hook
+
+        st = _RunState(max_total, deadline or time.monotonic() + 60)
+        return _make_agent_hook(manager, "sess-1", st, "build", max_agent_wait), st
+
+    def test_forwards_direct_connection(self):
+        mgr = _FakeManager()
+        hook, _ = self._make(mgr)
+        hook("x")
+        # 1 == Qt.DirectConnection：回调在 executor 线程里直接执行，等待方才能被唤醒
+        assert mgr.calls[0][2].get("connection_type") == 1
+
+    def test_silent_child_degrades_to_none_within_cap(self):
+        mgr = _SilentManager()
+        hook, _ = self._make(mgr, max_agent_wait=0.3)
+        t0 = time.monotonic()
+        assert hook("x") is None
+        assert time.monotonic() - t0 < 3.0  # 有上界，不可能是无限等待
+        assert len(mgr.cancelled) == 1  # 挂起的子任务被尽力取消
+
+    def test_abort_unblocks_waiting_agent(self):
+        mgr = _SilentManager()
+        hook, st = self._make(mgr, max_agent_wait=60.0)
+        box = {}
+
+        def runner():
+            box["v"] = hook("x")
+
+        t = threading.Thread(target=runner, daemon=True)
+        t.start()
+        time.sleep(0.2)
+        st.abort()
+        t.join(timeout=3)
+        assert not t.is_alive(), "abort 后 agent() 仍被阻塞"
+        assert box.get("v") is None
+        assert len(mgr.cancelled) == 1
+
+    def test_deadline_passed_raises_timeout(self):
+        hook, _ = self._make(_SilentManager(), deadline=time.monotonic() + 0.3, max_agent_wait=60.0)
+        with pytest.raises(WorkflowTimeoutError):
+            hook("x")
+
+    def test_blank_agent_name_raises(self):
+        hook, _ = self._make(_FakeManager())
+        with pytest.raises(WorkflowError):
+            hook("x", agent="   ")
+
+    def test_legacy_signature_does_not_raise_type_error(self):
+        """宿主核心是旧签名时不能抛 TypeError（抛了就整段脚本挂掉，而不是降级）。"""
+
+        class _Legacy:
+            def execute_task(self, task_id=None, agent_name=None, task_description=None,
+                             parent_context="", on_finished=None, on_error=None,
+                             on_progress=None, executor_ref=None, share_context=False,
+                             session_id="", llm_config=None):
+                if on_finished:
+                    on_finished(task_id, "ok")
+                if executor_ref is not None:
+                    executor_ref["executor"] = None  # 同步回调场景没有 executor
+                return True
+
+            def cancel_task(self, task_id):
+                return True
+
+        hook, _ = self._make(_Legacy())
+        assert hook("x") == "ok"
+
+    def test_abort_skips_new_dispatch(self):
+        mgr = _FakeManager()
+        hook, st = self._make(mgr)
+        st.abort()
+        assert hook("x") is None
+        assert mgr.calls == []  # 已中止：不再派发新的子智能体
+
+
+class TestRunStateAbort:
+    def test_abort_wakes_tracked_waiters(self):
+        st = _RunState(10, time.monotonic() + 60)
+        ev = threading.Event()
+        st.track_waiter(ev)
+        st.abort()
+        assert st.aborted() is True
+        assert ev.is_set() is True
+
+    def test_untracked_waiter_not_touched(self):
+        st = _RunState(10, time.monotonic() + 60)
+        ev = threading.Event()
+        st.track_waiter(ev)
+        st.untrack_waiter(ev)
+        st.abort()
+        assert ev.is_set() is False
+
+
+class TestQtCallbackDelivery:
+    """★ 真实 QThread + 真实 pyqtSignal 下的回调投递验证（根因层面回归）。
+
+    卡死根因：不指定 connection_type 时是 AutoConnection，回调被排进「发起连接那个线程」
+    的事件循环，而该线程正阻塞在 wait() 上（线程池 worker 还是无 Qt 事件循环的普通线程）
+    → 子任务早已跑完，回调却永不投递。
+    """
+
+    class _MgrBase:
+        """共享：真实 QThread 发射 + 连接语义；子类决定 execute_task 的签名。"""
+
+        class _Exec(QThread):
+            finished_with_result = pyqtSignal(str, str)
+            error_occurred = pyqtSignal(str, str)
+
+            def run(self):
+                time.sleep(0.05)
+                self.finished_with_result.emit(self._tid, "payload")
+
+        def __init__(self, honor=True):
+            self.honor = honor
+            self.cancelled = []
+            self._execs = []  # 持有引用，避免 QThread 运行中被 GC
+
+        def _dispatch(self, task_id, on_finished, on_error, connection_type, executor_ref):
+            ex = self._Exec()
+            ex._tid = task_id
+            if connection_type is not None:
+                if on_finished:
+                    ex.finished_with_result.connect(on_finished, connection_type)
+                if on_error:
+                    ex.error_occurred.connect(on_error, connection_type)
+            else:  # AutoConnection：回调排进发起连接那个线程的事件循环
+                if on_finished:
+                    ex.finished_with_result.connect(on_finished)
+                if on_error:
+                    ex.error_occurred.connect(on_error)
+            self._execs.append(ex)
+            if executor_ref is not None:
+                executor_ref["executor"] = ex  # 与真实核心一致：start() 之前写入
+            ex.start()
+            return True
+
+        def cancel_task(self, task_id):
+            self.cancelled.append(task_id)
+            return True
+
+    class _NewCoreMgr(_MgrBase):
+        """新核心：execute_task 支持 connection_type。honor=False 模拟「收了但没照做」。"""
+
+        def execute_task(self, task_id=None, agent_name=None, task_description=None,
+                         on_finished=None, on_error=None, connection_type=None,
+                         executor_ref=None, **kw):
+            return self._dispatch(task_id, on_finished, on_error,
+                                  connection_type if self.honor else None, executor_ref)
+
+    class _LegacyMgr(_MgrBase):
+        """旧核心（宿主未重启时就是这样）：无 connection_type，但有 executor_ref。"""
+
+        def execute_task(self, task_id=None, agent_name=None, task_description=None,
+                         parent_context="", on_finished=None, on_error=None,
+                         on_progress=None, executor_ref=None, share_context=False,
+                         session_id="", llm_config=None):
+            return self._dispatch(task_id, on_finished, on_error, None, executor_ref)
+
+    class _BareMgr(_MgrBase):
+        """最旧核心：connection_type / executor_ref 都没有，无任何直连手段。"""
+
+        def execute_task(self, task_id=None, agent_name=None, task_description=None,
+                         parent_context="", on_finished=None, on_error=None,
+                         on_progress=None, share_context=False, session_id="", llm_config=None):
+            return self._dispatch(task_id, on_finished, on_error, None, None)
+
+    def _run(self, manager, agent_wait):
+        """在普通 Python 线程里调 agent()（模拟 chat worker / 线程池 worker）。"""
+        from plugins.workflow.tools.workflow_tool import _make_agent_hook
+
+        st = _RunState(10, time.monotonic() + 60)
+        hook = _make_agent_hook(manager, "sess", st, "build", agent_wait)
+        box = {}
+        t = threading.Thread(target=lambda: box.update(v=hook("x")), daemon=True)
+        t.start()
+        t.join(timeout=10)
+        return t.is_alive(), box.get("v")
+
+    def test_direct_connection_delivers_without_event_loop(self, qapp):
+        alive, val = self._run(self._NewCoreMgr(honor=True), 5.0)
+        assert not alive, "DirectConnection 下 agent() 仍被阻塞"
+        assert val == "payload"
+
+    def test_legacy_core_falls_back_to_executor_ref(self, qapp):
+        """宿主核心没有 connection_type（未重启的老进程就是这种）时，靠 executor_ref 补挂直连。"""
+        alive, val = self._run(self._LegacyMgr(), 5.0)
+        assert not alive, "旧核心兜底路径仍被阻塞"
+        assert val == "payload"
+
+    def test_no_fallback_path_still_capped(self, qapp):
+        """反例：既无 connection_type 又无 executor_ref 时回调永不投递。
+
+        只剩等待上界兜底（返回 None）——修复前连上界都没有，
+        正是「子任务跑完了但脚本永远不动」的现象。
+        """
+        alive, val = self._run(self._BareMgr(), 1.0)
+        assert not alive, "退化路径应被等待上界兜住，不应挂死"
+        assert val is None
 
 
 class TestCombinators:

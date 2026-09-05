@@ -41,6 +41,13 @@
         "description": "钩子间检查点检查，超时中止脚本"
       },
       {
+        "key": "max_agent_wait_sec",
+        "label": "单个子智能体等待上限（秒）",
+        "type": "number",
+        "default": 900,
+        "description": "单个 agent() 的等待上限；超时按子任务失败处理并降为 None，避免脚本永久挂起"
+      },
+      {
         "key": "default_agent",
         "label": "默认子智能体角色",
         "type": "text",

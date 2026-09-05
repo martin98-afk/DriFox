@@ -785,16 +785,17 @@ class TestPermissionLinkage:
 
         pc = ToolPermissionController()
         toggles = pc.get_toggles()
-        # 系统插件工具基线 30；workbuddy 插件新增 wb_plan/present_files/wb_read_me/wb_tool_search
-        # 共 4 个工具 → 基线 34。codegraph_explore 来自社区插件 codegraph-tools，
-        # 未安装时不注册。用动态下界兼容未来新增：>= 30；精确 34 仅在无 codegraph 时成立。
-        assert len(toggles) >= 30
-        assert (
-            len(toggles) == 34
-            or (len(toggles) == 35 and "codegraph_explore" in toggles)
-            or (len(toggles) == 31 and "codegraph_explore" in toggles)  # 仅 codegraph，无 workbuddy
-            or len(toggles) == 30  # 极简环境（workbuddy/codegraph 均未加载）
-        ), f"工具数异常: {len(toggles)} ({sorted(toggles.keys())})"
+        # 语义：控制器应为「当前注册的全部工具」各产出一个开关，并清理已删除工具的残留。
+        # 工具总数随装了哪些插件而变（workbuddy / codegraph-tools / workflow / win-powershell
+        # 等都会各自贡献工具），硬编码数字必然过期——直接对齐注册表判定。
+        from app.tools.tool_classifier import get_all_tools
+
+        registered = set(get_all_tools())
+        assert len(toggles) >= 30  # 下界：系统插件工具基线
+        assert set(toggles) == registered, (
+            f"开关与注册表不一致：仅开关 {sorted(set(toggles) - registered)} / "
+            f"仅注册表 {sorted(registered - set(toggles))}"
+        )
         assert toggles["read"] is True
         pc.deleteLater()
         qt_app.processEvents()
