@@ -863,6 +863,20 @@ class TestAgentHookSchema:
         hook("x", schema=self.SCHEMA)
         assert "重试" in mgr.descs[1] and "上次" in mgr.descs[1]  # 重试 prompt 带具体校验错误
 
+    def test_extract_json_from_fenced_reply(self):
+        # 冒烟实测：子 agent 输出「说明 + ```json 围栏```」，裸 loads 失败但应能提取
+        hook, mgr, _, _ = self._make([
+            '分析如下：\n```json\n{"verdict": "通过"}\n```',
+        ])
+        out = hook("x", schema=self.SCHEMA)
+        assert out == {"verdict": "通过"}
+        assert mgr.calls == 1  # 提取成功无需重试
+
+    def test_extract_json_from_prefixed_reply(self):
+        hook, mgr, _, _ = self._make(['我有足够信息。结论：{"verdict": "OK"} 以上。'])
+        assert hook("x", schema=self.SCHEMA) == {"verdict": "OK"}
+        assert mgr.calls == 1
+
 
 class TestBackgroundRun:
     """Task 9: 后台执行——立即返回 run_id，后台跑完 status 可查；foreground 保留同步。"""

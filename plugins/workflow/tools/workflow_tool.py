@@ -558,7 +558,9 @@ def _make_agent_hook(
         def _validate_schema(s: dict, text: str):
             import jsonschema  # 延迟导入：插件加载期不付成本（dingtalk_stream 教训）
 
-            data = json.loads(text)
+            data = _extract_json(text)
+            if data is None:
+                raise ValueError("回复中未找到可解析的 JSON（已尝试整体/围栏/首尾大括号提取）")
             jsonschema.validate(data, s)
             return data
 
@@ -1093,6 +1095,34 @@ def _render_run_card(status: dict) -> str:
     return (
         f'<div class="wf-run-card" style="padding:2px 0;">{"".join(parts)}</div>'
     )
+
+
+def _extract_json(text: str):
+    """从模型回复提取 JSON：整体解析 → 剥 markdown 围栏 → 首个{到最后一个}块。
+
+    子 agent 输出「说明文字 + ```json 围栏```」时裸 json.loads 必失败，
+    重试也难改输出习惯——提取容错比重试省钱。
+    """
+    s = (text or "").strip()
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    m = re.search(r"```(?:json)?\s*(.+?)\s*```", s, re.S)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    i, j = s.find("{"), s.rfind("}")
+    if 0 <= i < j:
+        try:
+            return json.loads(s[i : j + 1])
+        except Exception:
+            return None
+    return None
 
 
 def _workflow_impl(tool_ctx, **kwargs):
