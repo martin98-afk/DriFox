@@ -717,6 +717,67 @@ class TestPhaseLogHooks:
         assert msg is not None and "phase" in msg
 
 
+class TestAgentHookModel:
+    """Task 4: agent 钩子 model 别名——解析映射传宿主，未知别名降级并写人话日志。"""
+
+    def _make(self, manager, aliases=None):
+        from plugins.workflow.tools.workflow_tool import _make_agent_hook
+
+        st = _RunState(50, time.monotonic() + 60)
+        logs: list = []
+        hook = _make_agent_hook(
+            manager, "s1", st, "build", 900.0, model_aliases=aliases, log_fn=lambda m: logs.append(str(m))
+        )
+        return hook, st, logs
+
+    def test_alias_resolved_into_dispatch(self):
+        mgr = _FakeManager(routes={"build": "ok"})
+        hook, _, _ = self._make(mgr, aliases={"sonnet": "m-sonnet"})
+        assert hook("x", model="sonnet") == "ok"
+        assert mgr.calls[0][2].get("model") == "m-sonnet"
+
+    def test_unknown_alias_drops_none_and_logs_hint(self):
+        mgr = _FakeManager()
+        hook, _, logs = self._make(mgr, aliases={"sonnet": "m-sonnet"})
+        assert hook("x", model="opus") is None
+        assert mgr.calls == []  # 未派发，不消耗额度
+        assert any("opus" in m and "sonnet" in m for m in logs)  # 人话提示列出可用别名
+
+    def test_no_model_arg_keeps_call_unchanged(self):
+        mgr = _FakeManager()
+        hook, _, _ = self._make(mgr)
+        assert hook("x") == "done:build"
+        assert "model" not in mgr.calls[0][2]
+
+    def test_host_without_model_kwarg_skips_it(self):
+        from plugins.workflow.tools.workflow_tool import _make_agent_hook
+
+        class _Strict:
+            """旧宿主：基础键都收（比 model 更早存在），唯独无 **kw、无 model 形参。"""
+
+            def __init__(self):
+                self.passed = {}
+
+            def execute_task(
+                self,
+                task_id,
+                agent_name,
+                task_description,
+                on_finished=None,
+                on_error=None,
+                share_context=False,
+                session_id="",
+            ):
+                self.passed = dict(task_id=task_id)
+                on_finished(task_id, "ok")
+                return True
+
+        st = _RunState(50, time.monotonic() + 60)
+        strict = _Strict()
+        hook = _make_agent_hook(strict, "s1", st, "build", 900.0, model_aliases={"sonnet": "m1"})
+        assert hook("x", model="sonnet") == "ok"  # 不炸，model 被静默跳过（宿主旧签名自适应）
+
+
 class TestConfigParsing:
     """Task 2: 新配置项解析——model_aliases 别名映射 + 前台开关 + 卡片刷新间隔。"""
 

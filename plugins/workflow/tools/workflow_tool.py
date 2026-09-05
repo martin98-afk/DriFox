@@ -240,7 +240,8 @@ def _manager_supports_kwarg(manager, name: str) -> bool:
 
 
 def _make_agent_hook(
-    manager, session_id: str, state: _RunState, default_agent: str, max_agent_wait: float = 900.0
+    manager, session_id: str, state: _RunState, default_agent: str, max_agent_wait: float = 900.0,
+    model_aliases: dict | None = None, log_fn=None,
 ):
     """agent(prompt, agent=None, label=None, phase=None, share_context=False) -> str | None
 
@@ -259,6 +260,7 @@ def _make_agent_hook(
     # 直接传新参数会抛 TypeError（而不是降级），所以先探再传。
     supports_conn_type = _manager_supports_kwarg(manager, "connection_type")
     supports_executor_ref = _manager_supports_kwarg(manager, "executor_ref")
+    supports_model = _manager_supports_kwarg(manager, "model")
     if not supports_conn_type and not supports_executor_ref:
         logger.warning(
             "[workflow] 宿主 SubAgentManager.execute_task 既不支持 connection_type 也不支持 "
@@ -270,12 +272,24 @@ def _make_agent_hook(
             "改用 executor_ref 事后补挂直连回调兜底（建议重启宿主以加载最新核心）"
         )
 
-    def agent(prompt, agent=None, label=None, phase=None, share_context=False):
+    def agent(prompt, agent=None, label=None, phase=None, share_context=False, model=None):
         # 参数名 agent 遮蔽外层函数名：本函数体内不再引用自身，合法且对模型最自然
         if not isinstance(prompt, str) or not prompt.strip():
             raise WorkflowError("agent() 的 prompt 必须是非空字符串")
         if agent is not None and (not isinstance(agent, str) or not agent.strip()):
             raise WorkflowError("agent() 的 agent 必须是非空字符串")
+        # model 别名 → 实际模型 ID；未注册别名写人话日志并降级 None（模型可读 logs 自愈），
+        # 不消耗 run 额度
+        resolved_model = None
+        if model is not None:
+            resolved_model = (model_aliases or {}).get(str(model))
+            if resolved_model is None:
+                available = ", ".join(sorted(model_aliases)) if model_aliases else "（未配置 model_aliases）"
+                hint = f"[workflow] 未知模型别名: {model}。可用别名: {available}"
+                logger.warning(hint)
+                if log_fn:
+                    log_fn(hint)
+                return None
         if state.aborted():
             return None
         state.reserve()
@@ -329,6 +343,9 @@ def _make_agent_hook(
             call["connection_type"] = direct
         if supports_executor_ref:
             call["executor_ref"] = ref
+        # 旧宿主无 model 形参时静默跳过（与 connection_type 同款自适应），不白跑也不炸
+        if resolved_model is not None and supports_model:
+            call["model"] = resolved_model
 
         ok = manager.execute_task(**call)
         if not ok:
@@ -579,7 +596,15 @@ def _workflow_impl(tool_ctx, **kwargs):
         ns = _build_sandbox(
             args=kwargs.get("args"),
             hooks={
-                "agent": _make_agent_hook(manager, session_id, state, default_agent, max_agent_wait),
+                "agent": _make_agent_hook(
+                    manager,
+                    session_id,
+                    state,
+                    default_agent,
+                    max_agent_wait,
+                    model_aliases=model_aliases,
+                    log_fn=log_hook,
+                ),
                 "parallel": parallel_hook,
                 "pipeline": pipeline_hook,
                 "phase": phase_hook,
