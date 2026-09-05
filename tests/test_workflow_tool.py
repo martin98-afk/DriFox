@@ -596,6 +596,7 @@ class TestWorkflowImpl:
                 "max_duration_sec": 60,
                 "default_agent": "build",
                 "max_result_chars": 1000,
+                "default_foreground": "true",
             }.get(key),
         )
         ctx = {"sub_agent_manager": manager, "session_id": "s1"}
@@ -861,6 +862,72 @@ class TestAgentHookSchema:
         hook, mgr, _, _ = self._make(["bad1", '{"verdict": "v"}'])
         hook("x", schema=self.SCHEMA)
         assert "重试" in mgr.descs[1] and "上次" in mgr.descs[1]  # 重试 prompt 带具体校验错误
+
+
+class TestBackgroundRun:
+    """Task 9: 后台执行——立即返回 run_id，后台跑完 status 可查；foreground 保留同步。"""
+
+    class _Slow:
+        def execute_task(self, task_id, agent_name, task_description, on_finished=None, on_error=None, **kw):
+            threading.Timer(1.2, lambda: on_finished(task_id, "slow-ok")).start()
+            return True
+
+        def cancel_task(self, task_id):
+            return True
+
+    def _patch(self, monkeypatch, tmp_path):
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000"}.get(key),
+        )
+        return wt
+
+    def test_background_returns_immediately_and_completes(self, monkeypatch, tmp_path):
+        wt = self._patch(monkeypatch, tmp_path)
+        ctx = {"sub_agent_manager": self._Slow(), "session_id": "s1"}
+        t0 = time.monotonic()
+        r = wt._workflow_impl(
+            ctx,
+            meta={"name": "slow", "description": "慢任务"},
+            script="result = {'r': agent('x')}",
+        )
+        elapsed = time.monotonic() - t0
+        assert r.success, r.error
+        assert elapsed < 0.8, f"后台模式应立即返回，实际 {elapsed:.2f}s"
+        body = json.loads(r.content)
+        assert body["status"] == "running" and body["run_id"]
+        time.sleep(2.0)
+        r2 = wt._workflow_impl(ctx, action="status", run_id=body["run_id"], meta={"name": "s", "description": "d"})
+        assert r2.success
+        st = json.loads(r2.content)
+        assert st["state"] == "done"
+        assert json.loads(st["result"])["r"] == "slow-ok" if isinstance(st.get("result"), str) else st["result"]["r"] == "slow-ok"
+
+    def test_status_running_before_finish(self, monkeypatch, tmp_path):
+        wt = self._patch(monkeypatch, tmp_path)
+        ctx = {"sub_agent_manager": self._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(ctx, meta={"name": "s2", "description": "d"}, script="result = agent('x')")
+        body = json.loads(r.content)
+        r2 = wt._workflow_impl(ctx, action="status", run_id=body["run_id"], meta={"name": "s", "description": "d"})
+        st = json.loads(r2.content)
+        assert st["state"] in ("running", "done")  # 不炸即可
+        time.sleep(2.0)
+
+    def test_foreground_keeps_sync_contract(self, monkeypatch, tmp_path):
+        wt = self._patch(monkeypatch, tmp_path)
+        ctx = {"sub_agent_manager": self._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(
+            ctx,
+            foreground=True,
+            meta={"name": "sync", "description": "d"},
+            script="result = {'r': agent('x')}",
+        )
+        assert r.success
+        assert json.loads(r.content)["result"]["r"] == "slow-ok"
 
 
 class TestConfigParsing:

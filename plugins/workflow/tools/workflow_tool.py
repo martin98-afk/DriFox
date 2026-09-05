@@ -241,6 +241,7 @@ class RunJournal:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._seq = 0
+        self._agent_seq = 0
 
     # ---- 事件流 ----
 
@@ -297,6 +298,12 @@ class RunJournal:
 
     # ---- 卡片数据源 ----
 
+    def next_agent_key(self) -> str:
+        """脚本内 agent() 调用序号（1 起）：resume 回放的回放定位锚。"""
+        with self._lock:
+            self._agent_seq += 1
+            return f"a{self._agent_seq}"
+
     def write_status(self, payload: dict) -> None:
         """原子写 status.json：tmp+replace，卡片侧永远读到完整 JSON。"""
         with self._lock:
@@ -336,7 +343,7 @@ def _manager_supports_kwarg(manager, name: str) -> bool:
 
 def _make_agent_hook(
     manager, session_id: str, state: _RunState, default_agent: str, max_agent_wait: float = 900.0,
-    model_aliases: dict | None = None, log_fn=None,
+    model_aliases: dict | None = None, log_fn=None, journal: "RunJournal | None" = None,
 ):
     """agent(prompt, agent=None, label=None, phase=None, share_context=False) -> str | None
 
@@ -392,6 +399,12 @@ def _make_agent_hook(
         def _dispatch(effective_prompt: str) -> str | None:
             """派发一个子任务并同步等待：额度→派发→等待→超时/中止降级。schema 重试复用。"""
             state.reserve()
+            agent_key = journal.next_agent_key() if journal else ""
+            fp = journal.fingerprint(effective_prompt, name, resolved_model, schema) if journal else ""
+            t0 = time.monotonic()
+            status, out = "failed", None
+            if journal:
+                journal.record_agent_start(agent_key, fp, name, resolved_model)
             task_id = str(uuid.uuid4())
             done = threading.Event()
             box: dict = {"result": None, "settled": False}
@@ -447,6 +460,8 @@ def _make_agent_hook(
 
             ok = manager.execute_task(**call)
             if not ok:
+                if journal:
+                    journal.record_agent_end(agent_key, "failed", time.monotonic() - t0, None)
                 return None
             _attach_direct(ref.get("executor"))
 
@@ -471,7 +486,12 @@ def _make_agent_hook(
                     f"{'run 已中止' if state.aborted() else f'等待超过 {max_agent_wait:.0f}s'}，取消并降级 None"
                 )
                 _cancel(manager, task_id)
+                if journal:
+                    journal.record_agent_end(agent_key, "failed", time.monotonic() - t0, None)
                 return None
+            status, out = "done", box["result"]
+            if journal:
+                journal.record_agent_end(agent_key, status, time.monotonic() - t0, out)
             return box["result"]
 
         # ---- schema 结构化输出：注入指令 → 校验 → 失败带错重试 1 次 → 仍失败降 None ----
@@ -689,18 +709,24 @@ _WORKFLOW_SCHEMA = {
 }
 
 
-def _make_phase_log_hooks(phases: list, logs: list):
+def _make_phase_log_hooks(phases: list, logs: list, journal: "RunJournal | None" = None):
     """phase/log 钩子工厂：def 化（报错自带函数名，翻译层可点名）。
 
     phase(title, detail=None)：detail 上卡片副标题，兼容旧单参调用；
     条目统一为 {title, detail} dict（detail 可为 None）。log(msg, *_) 容忍多余参数。
+    传入 journal 时同步落盘。
     """
 
     def phase(title, detail=None):
-        phases.append({"title": str(title), "detail": None if detail is None else str(detail)})
+        entry = {"title": str(title), "detail": None if detail is None else str(detail)}
+        phases.append(entry)
+        if journal:
+            journal.record_phase(entry["title"], entry["detail"])
 
     def log(msg, *_):
         logs.append(str(msg))
+        if journal:
+            journal.append("log", msg=str(msg))
 
     return phase, log
 
@@ -779,6 +805,129 @@ def new_run_dir(root: Path, meta: dict, script: str, args) -> Path:
     return rd
 
 
+
+_ACTIVE_RUNS: dict = {}
+_RUNS_LOCK = threading.Lock()
+
+
+def _execute_run(cfg: dict) -> ToolResult:
+    """执行一次 workflow 脚本（前台/后台共用）：沙箱→预检→exec→payload。
+
+    journal 存在时同步落盘：phases/logs/agent start/end → journal.jsonl；
+    终态写 status.json（卡片数据源）与 result.json。
+    """
+    meta: dict = cfg["meta"]
+    script: str = cfg["script"]
+    journal: RunJournal | None = cfg.get("journal")
+    phases: list = []
+    logs: list = []
+
+    def _finish_status(ok: bool, result, note: str) -> None:
+        if not journal:
+            return
+        journal.write_status({
+            "name": meta.get("name"),
+            "description": meta.get("description"),
+            "state": "done" if ok else "error",
+            "agents_started": state.started,
+            "phases": phases,
+            "logs": logs,
+            "result": result,
+            "note": note,
+        })
+        if ok:
+            (cfg["run_dir"] / "result.json").write_bytes(orjson.dumps(result))
+
+    state = _RunState(cfg["max_total"], time.monotonic() + cfg["max_duration"])
+    pool = ThreadPoolExecutor(
+        max_workers=max(1, cfg["max_concurrent"]),
+        initializer=_pool_initializer,
+        thread_name_prefix="wf-agent",
+    )
+    phases: list = []
+    logs: list = []
+    phase_hook, log_hook = _make_phase_log_hooks(phases, logs, journal)
+
+    try:
+        parallel_hook, pipeline_hook = _make_combinators(state, pool, cfg["max_items"])
+        ns = _build_sandbox(
+            args=cfg["args"],
+            hooks={
+                "agent": _make_agent_hook(
+                    cfg["manager"],
+                    cfg["session_id"],
+                    state,
+                    cfg["default_agent"],
+                    cfg["max_agent_wait"],
+                    model_aliases=cfg["model_aliases"],
+                    log_fn=log_hook,
+                    journal=journal,
+                ),
+                "parallel": parallel_hook,
+                "pipeline": pipeline_hook,
+                "phase": phase_hook,
+                "log": log_hook,
+            },
+        )
+        # 预检：import 与宿主内部名引用在 exec 前拦截，避免 agent 扇出后才炸白跑
+        precheck_err = _check_imports(script, _PRESET_MODULES) or _check_underscore_names(script, ns)
+        if precheck_err:
+            _finish_status(False, None, f"预检失败: {precheck_err}")
+            return ToolResult(False, error=f"脚本预检失败: {precheck_err}")
+        exec(compile(script, "<workflow>", "exec"), ns)  # noqa: S102 - 受限命名空间，containment 定位
+        result = ns.get("result")
+        result_note = ""
+        try:
+            orjson.dumps(result)
+        except (TypeError, ValueError):
+            result = {"_repr": str(result)}
+            result_note = "result 不可 JSON 序列化，已转为字符串"
+
+        content = {
+            "workflow": meta.get("name"),
+            "agents_started": state.started,
+            "phases": phases,
+            "logs": logs,
+            "result": result,
+        }
+        if result_note:
+            content["_note"] = result_note
+        payload = _dump_content(content)
+        # max_chars：给模型的预算，超了先砍日志
+        if len(payload) > cfg["max_chars"] and content["logs"]:
+            content["logs"] = content["logs"][:10]
+            content["_note"] = (result_note + " 结果超长，logs 截断").strip()
+            payload = _dump_content(content)
+        # _HOST_RENDER_CAP：宿主渲染层对结果文本的硬上限（render_helpers._MAX_OUTPUT_CHARS）。
+        # 超了会被截断、渲染闭包就解析不出 JSON；日志在 UI 里本来是收起的，再让一步。
+        if len(payload) > _HOST_RENDER_CAP and content["logs"]:
+            content["logs"] = content["logs"][:5]
+            payload = _dump_content(content)
+        _finish_status(True, result, result_note)
+        return ToolResult(True, content=payload)
+    except WorkflowError as e:
+        _finish_status(False, None, f"执行中止: {e}")
+        return ToolResult(False, error=f"workflow 执行中止: {e}")
+    except NameError as e:
+        # 预检只拦 _ 开头的名字；其他未定义名（钩子拼错等）走到这里，附预置名清单让模型自愈
+        return ToolResult(
+            False,
+            error=(
+                f"workflow 脚本异常: NameError: {e}。"
+                "沙箱仅预置 agent/parallel/pipeline/phase/log、json/math/re/statistics/datetime、args；"
+                "宿主内部名不在脚本命名空间"
+            ),
+        )
+    except Exception as e:
+        _finish_status(False, None, f"{type(e).__name__}: {e}")
+        return ToolResult(False, error=f"workflow 脚本异常: {type(e).__name__}: {e}")
+    finally:
+        # 收尾：先置中止标志唤醒所有仍在等子任务的 worker（含线程池里的），再关池。
+        # 否则异常路径下这些线程会一直挂到各自的截止时间才退出。
+        state.abort()
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
 def _workflow_impl(tool_ctx, **kwargs):
     # ---- action 分发：存档管理类动作不需要 manager ----
     action = str(kwargs.get("action") or "run")
@@ -809,10 +958,23 @@ def _workflow_impl(tool_ctx, **kwargs):
             save_workflow(root, save_as, meta if isinstance(meta, dict) else {}, script_str, kwargs.get("args"))
             return ToolResult(True, content={"saved": save_as})
         run_id = str(kwargs.get("run_id") or "")
+        if not run_id:
+            return ToolResult(False, error="action=status 需要 run_id 参数")
+        with _RUNS_LOCK:
+            live = _ACTIVE_RUNS.get(run_id)
         sf = root / "runs" / run_id / "status.json"
-        if not run_id or not sf.exists():
+        if live is None and not sf.exists():
             return ToolResult(False, error=f"未找到 run: {run_id}")
-        return ToolResult(True, content=_dump_content(orjson.loads(sf.read_bytes())))
+        if live is not None and live.get("state") == "running":
+            return ToolResult(
+                True,
+                content=_dump_content(
+                    {"run_id": run_id, "name": live.get("name"), "state": "running", "run_dir": live.get("run_dir")}
+                ),
+            )
+        if sf.exists():
+            return ToolResult(True, content=_dump_content(orjson.loads(sf.read_bytes())))
+        return ToolResult(True, content=_dump_content({"run_id": run_id, "state": live.get("state")}))
     if action != "run":
         return ToolResult(False, error=f"未知 action: {action}（run/save/list/load/status）")
 
@@ -860,90 +1022,54 @@ def _workflow_impl(tool_ctx, **kwargs):
     default_foreground = str(store.get(PLUGIN_NAME, "default_foreground") or "").lower() == "true"
     card_refresh_ms = int(float(store.get(PLUGIN_NAME, "card_refresh_ms") or 1000))
 
-    state = _RunState(max_total, time.monotonic() + max_duration)
-    pool = ThreadPoolExecutor(
-        max_workers=max(1, max_concurrent),
-        initializer=_pool_initializer,
-        thread_name_prefix="wf-agent",
-    )
+    # ---- 前台/后台分流：默认后台投递 daemon 线程立即返回，foreground=true 同步等结果 ----
+    foreground = kwargs.get("foreground")
+    if foreground is None:
+        foreground = default_foreground
+    root = wf_root()
     session_id = tool_ctx.get("session_id", "")
-    phases: list = []
-    logs: list = []
-    phase_hook, log_hook = _make_phase_log_hooks(phases, logs)
+    run_dir = new_run_dir(root, meta, script, kwargs.get("args"))
+    journal = RunJournal(run_dir)
+    run_id = run_dir.name
+    with _RUNS_LOCK:
+        _ACTIVE_RUNS[run_id] = {"state": "running", "run_dir": str(run_dir), "name": meta.get("name")}
+    cfg = {
+        "manager": manager,
+        "session_id": session_id,
+        "meta": meta,
+        "script": script,
+        "args": kwargs.get("args"),
+        "max_concurrent": max_concurrent,
+        "max_total": max_total,
+        "max_items": max_items,
+        "max_duration": max_duration,
+        "max_agent_wait": max_agent_wait,
+        "default_agent": default_agent,
+        "max_chars": max_chars,
+        "model_aliases": model_aliases,
+        "run_dir": run_dir,
+        "journal": journal,
+        "run_id": run_id,
+    }
+    if foreground:
+        return _execute_run(cfg)
 
-    try:
-        parallel_hook, pipeline_hook = _make_combinators(state, pool, max_items)
-        ns = _build_sandbox(
-            args=kwargs.get("args"),
-            hooks={
-                "agent": _make_agent_hook(
-                    manager,
-                    session_id,
-                    state,
-                    default_agent,
-                    max_agent_wait,
-                    model_aliases=model_aliases,
-                    log_fn=log_hook,
-                ),
-                "parallel": parallel_hook,
-                "pipeline": pipeline_hook,
-                "phase": phase_hook,
-                "log": log_hook,
-            },
-        )
-        # 预检：import 与宿主内部名引用在 exec 前拦截，避免 agent 扇出后才炸白跑
-        precheck_err = _check_imports(script, _PRESET_MODULES) or _check_underscore_names(script, ns)
-        if precheck_err:
-            return ToolResult(False, error=f"脚本预检失败: {precheck_err}")
-        exec(compile(script, "<workflow>", "exec"), ns)  # noqa: S102 - 受限命名空间，containment 定位
-        result = ns.get("result")
-        result_note = ""
-        try:
-            orjson.dumps(result)
-        except (TypeError, ValueError):
-            result = {"_repr": str(result)}
-            result_note = "result 不可 JSON 序列化，已转为字符串"
+    def _bg():
+        result = _execute_run(cfg)
+        with _RUNS_LOCK:
+            _ACTIVE_RUNS[run_id]["state"] = "done" if result.success else "error"
 
-        content = {
-            "workflow": meta.get("name"),
-            "agents_started": state.started,
-            "phases": phases,
-            "logs": logs,
-            "result": result,
-        }
-        if result_note:
-            content["_note"] = result_note
-        payload = _dump_content(content)
-        # max_chars：给模型的预算，超了先砍日志
-        if len(payload) > max_chars and content["logs"]:
-            content["logs"] = content["logs"][:10]
-            content["_note"] = (result_note + " 结果超长，logs 截断").strip()
-            payload = _dump_content(content)
-        # _HOST_RENDER_CAP：宿主渲染层对结果文本的硬上限（render_helpers._MAX_OUTPUT_CHARS）。
-        # 超了会被截断、渲染闭包就解析不出 JSON；日志在 UI 里本来是收起的，再让一步。
-        if len(payload) > _HOST_RENDER_CAP and content["logs"]:
-            content["logs"] = content["logs"][:5]
-            payload = _dump_content(content)
-        return ToolResult(True, content=payload)
-    except WorkflowError as e:
-        return ToolResult(False, error=f"workflow 执行中止: {e}")
-    except NameError as e:
-        # 预检只拦 _ 开头的名字；其他未定义名（钩子拼错等）走到这里，附预置名清单让模型自愈
-        return ToolResult(
-            False,
-            error=(
-                f"workflow 脚本异常: NameError: {e}。"
-                "沙箱仅预置 agent/parallel/pipeline/phase/log、json/math/re/statistics/datetime、args；"
-                "宿主内部名不在脚本命名空间"
-            ),
-        )
-    except Exception as e:
-        return ToolResult(False, error=f"workflow 脚本异常: {type(e).__name__}: {e}")
-    finally:
-        # 收尾：先置中止标志唤醒所有仍在等子任务的 worker（含线程池里的），再关池。
-        # 否则异常路径下这些线程会一直挂到各自的截止时间才退出。
-        state.abort()
-        pool.shutdown(wait=False, cancel_futures=True)
+    threading.Thread(target=_bg, daemon=True, name=f"workflow-{run_id}").start()
+    return ToolResult(
+        True,
+        content=_dump_content({
+            "run_id": run_id,
+            "status": "running",
+            "run_dir": str(run_dir),
+            "name": meta.get("name"),
+            "hint": "后台运行中：完成后用 action=status, run_id=... 查询进度与结果",
+        }),
+    )
 
 
 def _dump_content(content: dict) -> str:

@@ -100,6 +100,6 @@ class TestImplActions:
         monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
         monkeypatch.setattr(wt.PluginConfigStore, "get", lambda self, plugin, key: None)
         ctx = {"sub_agent_manager": _SeqEcho(), "session_id": "s1"}
-        r = wt._workflow_impl(ctx, from_saved="echo", args={"msg": "覆盖"})
+        r = wt._workflow_impl(ctx, from_saved="echo", args={"msg": "覆盖"}, foreground=True)
         assert r.success
         assert json.loads(r.content)["result"]["msg"] == "覆盖"
