@@ -379,19 +379,24 @@ def _format_unified_table(
     """
     将参数字典和结果合并为一个表格。
     前几行是参数（key=value 形式），最后一行是结果。
+
+    状态色一律走主题变量（--success / --danger / --text-muted）：早先写死
+    #F44336 / #5FD18C / #666，跟主题脱节。结果超长时给「展开全部」而不是直接砍断
+    （用原生 <details>，展开时折叠体已 height:auto，不会被裁掉）。
     """
+    max_result_len = 500
     rows = []
 
     # 根据成功/失败状态确定颜色
     if success is False:
         row_class = "args-row result-row result-fail"
-        key_color = "#F44336"
+        key_color = "var(--danger)"
     elif success is True:
         row_class = "args-row result-row result-success"
-        key_color = "#5FD18C"
+        key_color = "var(--success)"
     else:
         row_class = "args-row result-row"
-        key_color = "#9C9C9C"
+        key_color = "var(--text-muted)"
 
     # 参数行
     if tool_args:
@@ -422,24 +427,32 @@ def _format_unified_table(
     else:
         rows.append('<div class="args-row empty">无参数</div>')
 
-    # 结果行（最后一行）
+    # 结果行（最后一行）：结果通常是一大段文本，超长时给「展开全部」
     result_label = "调用子智能体" if is_sub_agent_task else "结果"
     if result:
-        result_text = _escape_text_for_plain(str(result))
-        max_result_len = 500
-        if len(result_text) > max_result_len:
-            result_text = result_text[:max_result_len] + "..."
+        full_text = _escape_text_for_plain(str(result))
+        if len(full_text) > max_result_len:
+            result_inner = (
+                f"{escape(full_text[:max_result_len])}…"
+                f'<details style="display:block;margin-top:6px;">'
+                f'<summary style="cursor:pointer;color:var(--accent);'
+                f'font-size:{scale_font_size(11)}px;">展开全部（共 {len(full_text)} 字符）</summary>'
+                f'<div style="margin-top:6px;max-height:420px;overflow-y:auto;">{escape(full_text)}</div>'
+                f"</details>"
+            )
+        else:
+            result_inner = escape(full_text)
         rows.append(
             f'<div class="{row_class}">'
             f'<span class="args-key" style="color: {key_color};">{result_label}</span>'
-            f'<span class="args-value">{escape(result_text)}</span>'
+            f'<span class="args-value">{result_inner}</span>'
             f"</div>"
         )
     else:
         rows.append(
             f'<div class="{row_class}">'
             f'<span class="args-key" style="color: {key_color};">{result_label}</span>'
-            f'<span class="args-value" style="color: #666; font-style: italic;">无结果</span>'
+            f'<span class="args-value" style="color: var(--text-muted); font-style: italic;">无结果</span>'
             f"</div>"
         )
 
@@ -989,7 +1002,8 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
     """
     if not isinstance(result, str):
         result = str(result)
-    raw = _unescape_newlines(result)[:_MAX_OUTPUT_CHARS]
+    full = _unescape_newlines(result)
+    raw = full[:_MAX_OUTPUT_CHARS]
     if not raw.strip():
         return ""
     tool_args = tool_args or {}
@@ -1011,8 +1025,36 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
         logger.warning(f"[render] 工具 {tool_name} render 闭包异常，回退默认渲染: {e}")
 
     # ── 通用文本输出兜底 (webfetch, websearch, mouse, keyboard 等) ──
+    # 颜色一律走主题变量：早先写死深色底 + 浅色字（rgba(13,17,23,.40) / #c9d1d9），
+    # 浅色主题下就是一块突兀的深色盒子。
+    # word-break 用 break-word 而非 break-all：搜索摘要这类散文会被 break-all 切碎。
+    # max-height + 内部滚动：兜底块最长 5000 字符，不设限会把正文顶掉整屏。
+    note = ""
+    if len(full) > _MAX_OUTPUT_CHARS:
+        note = (
+            f'<div style="margin-top:6px;color:var(--text-muted);'
+            f'font-size:{scale_font_size(11)}px;font-style:italic;">'
+            f"共 {len(full)} 字符，已截断显示前 {_MAX_OUTPUT_CHARS} 字符</div>"
+        )
+    # 复制按钮：骨架里已有 document 级委托（button[data-action=copy] → clipboard），
+    # 复用即可，不用改骨架 JS。复制的是当前显示的内容（截断后的 raw）。
+    copy_btn = ""
+    if raw.strip():
+        try:
+            import base64 as _b64
+
+            copy_btn = (
+                f'<button type="button" data-action="copy" class="code-btn" data-tooltip="复制结果" '
+                f'data-copy="{_b64.b64encode(raw.encode("utf-8")).decode("ascii")}" '
+                f'style="position:absolute;top:6px;right:6px;height:22px;padding:0 8px;'
+                f'background:var(--panel-soft);border:1px solid var(--border);border-radius:6px;'
+                f'cursor:pointer;color:var(--text-secondary);font-size:{scale_font_size(11)}px;">复制</button>'
+            )
+        except Exception:  # base64 失败不影响展示
+            copy_btn = ""
     return f"""
-    <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{escape(raw)}</pre>"""
+    <div style="position:relative;">
+    <pre style="margin:0;padding:10px 12px;background:var(--panel-soft);color:var(--text);font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:520px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">{escape(raw)}</pre>{copy_btn}</div>{note}"""
 
 
 def _keep_in_content_tools() -> frozenset:

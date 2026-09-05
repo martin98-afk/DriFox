@@ -30,6 +30,10 @@ PLUGIN_NAME = "workflow"
 
 GROUP_SUBAGENT = "子智能体"
 
+# 宿主 render_helpers._MAX_OUTPUT_CHARS：工具结果文本超过这个长度会被截断，
+# 渲染闭包拿到的是截断后的字符串（JSON 不再合法）。这里留出余量做让位与抢救。
+_HOST_RENDER_CAP = 5000
+
 
 class WorkflowError(Exception):
     """钩子误用 / 上限触发（杀全脚本，模型可修正后重发）"""
@@ -496,12 +500,20 @@ def _workflow_impl(tool_ctx, **kwargs):
             "logs": logs,
             "result": result,
         }
-        if len(orjson.dumps(content).decode("utf-8")) > max_chars:
-            content["logs"] = content["logs"][:10]
-            result_note = (result_note + " 结果超长，logs 截断").strip()
         if result_note:
             content["_note"] = result_note
-        return ToolResult(True, content=content)
+        payload = _dump_content(content)
+        # max_chars：给模型的预算，超了先砍日志
+        if len(payload) > max_chars and content["logs"]:
+            content["logs"] = content["logs"][:10]
+            content["_note"] = (result_note + " 结果超长，logs 截断").strip()
+            payload = _dump_content(content)
+        # _HOST_RENDER_CAP：宿主渲染层对结果文本的硬上限（render_helpers._MAX_OUTPUT_CHARS）。
+        # 超了会被截断、渲染闭包就解析不出 JSON；日志在 UI 里本来是收起的，再让一步。
+        if len(payload) > _HOST_RENDER_CAP and content["logs"]:
+            content["logs"] = content["logs"][:5]
+            payload = _dump_content(content)
+        return ToolResult(True, content=payload)
     except WorkflowError as e:
         return ToolResult(False, error=f"workflow 执行中止: {e}")
     except Exception as e:
@@ -513,6 +525,251 @@ def _workflow_impl(tool_ctx, **kwargs):
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+def _dump_content(content: dict) -> str:
+    """结果序列化为 JSON 字符串，而不是回 dict。
+
+    ToolResult.__str__ 走的是 str(content)：content 是 dict 时会输出 Python repr
+    （单引号 / None / True 大小写），模型读着别扭，渲染闭包也没法可靠解析。
+    统一出口为 JSON，模型侧和 UI 侧两头都干净。
+    """
+    try:
+        return orjson.dumps(content, option=orjson.OPT_NON_STR_KEYS).decode("utf-8")
+    except (TypeError, ValueError):
+        return json.dumps(content, ensure_ascii=False, default=str)
+
+
+def _salvage_truncated_json(raw: str):
+    """宿主按 _MAX_OUTPUT_CHARS 截断后 JSON 不再合法：从尾部按逗号回退，救回可解析的前缀。
+
+    救回来时打上 _truncated 标记，渲染时如实提示「只显示可解析部分」，
+    总好过整块退化成原始 <pre>。
+    """
+    body = raw
+    for _ in range(200):
+        cut = body.rfind(",")
+        if cut <= 1:
+            return None
+        body = body[:cut]
+        try:
+            data = orjson.loads(body + "}")
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            data["_truncated"] = True
+            return data
+    return None
+
+
+def _parse_workflow_payload(raw) -> dict:
+    """把工具结果字符串还原成 dict（新格式 JSON；老消息的 Python repr 兜底）。"""
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        data = orjson.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        salvaged = _salvage_truncated_json(raw)
+        if salvaged is not None:
+            return salvaged
+    try:
+        data = ast.literal_eval(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+# 正文里单段文本超过这个长度就折叠，避免一张卡顶掉整屏
+_WF_TEXT_COLLAPSE_CHARS = 1200
+_WF_LOG_COLLAPSE_CHARS = 600
+
+
+def _wf_escape_pre(text: str) -> str:
+    from app.widgets.render_helpers import escape
+
+    return escape(text)
+
+
+def _wf_pre(text: str, extra_style: str = "") -> str:
+    from app.widgets.render_helpers import escape, scale_font_size
+
+    return (
+        f'<pre class="wf-pre" style="margin:0;padding:8px 10px;background:var(--panel-soft);'
+        f'border:1px solid var(--border);border-radius:6px;color:var(--text);'
+        f'font-size:{scale_font_size(12)}px;line-height:1.55;white-space:pre-wrap;'
+        f'word-break:break-word;max-height:320px;overflow:auto;{extra_style}">{escape(text)}</pre>'
+    )
+
+
+def _wf_collapsible_text(text: str) -> str:
+    """长文本：先给截断预览，再用原生 <details> 挂全文（不需要 JS）。"""
+    from app.widgets.render_helpers import escape, scale_font_size
+
+    if len(text) <= _WF_TEXT_COLLAPSE_CHARS:
+        return _wf_pre(text)
+    head = text[:_WF_TEXT_COLLAPSE_CHARS]
+    rest_n = len(text) - _WF_TEXT_COLLAPSE_CHARS
+    return (
+        f'{_wf_pre(head + " …")}'
+        f'<details class="wf-details" style="margin-top:6px;">'
+        f'<summary style="cursor:pointer;color:var(--accent);font-size:{scale_font_size(11)}px;">'
+        f'展开剩余 {rest_n} 字符</summary>'
+        f'<div style="margin-top:6px;">{_wf_pre(text)}</div></details>'
+    )
+
+
+def _wf_render_value(value, depth: int = 0) -> str:
+    """按类型渲染 result：str→等宽块 / list→条目列表 / dict→键值表 / None→提示。"""
+    from app.widgets.render_helpers import escape, scale_font_size
+
+    fs = scale_font_size(12)
+    if value is None:
+        return (
+            f'<span style="color:var(--text-muted);font-style:italic;font-size:{fs}px;">'
+            f'脚本没有给 result 赋值</span>'
+        )
+    if isinstance(value, str):
+        return _wf_collapsible_text(value) if value.strip() else (
+            f'<span style="color:var(--text-muted);font-style:italic;font-size:{fs}px;">空字符串</span>'
+        )
+    if isinstance(value, (int, float, bool)):
+        return f'<span style="font-size:{fs}px;">{escape(str(value))}</span>'
+    if isinstance(value, list):
+        if not value:
+            return f'<span style="color:var(--text-muted);font-style:italic;font-size:{fs}px;">空列表</span>'
+        items = "".join(
+            f'<li style="margin:0 0 8px 0;list-style:none;">'
+            f'<span style="display:inline-block;min-width:20px;color:var(--text-muted);'
+            f'font-size:{scale_font_size(11)}px;">{i + 1}.</span>'
+            f'<span style="display:inline-block;width:calc(100% - 24px);vertical-align:top;">'
+            f'{_wf_render_value(v, depth + 1)}</span></li>'
+            for i, v in enumerate(value)
+        )
+        return f'<ul style="margin:0;padding:0;">{items}</ul>'
+    if isinstance(value, dict):
+        if not value:
+            return f'<span style="color:var(--text-muted);font-style:italic;font-size:{fs}px;">空对象</span>'
+        rows = "".join(
+            f'<div style="display:flex;gap:10px;padding:4px 0;'
+            f'border-top:1px solid var(--border);">'
+            f'<span style="flex:0 0 auto;min-width:72px;max-width:140px;color:var(--text-secondary);'
+            f'font-size:{scale_font_size(11)}px;word-break:break-word;">{escape(str(k))}</span>'
+            f'<span style="flex:1 1 auto;min-width:0;">{_wf_render_value(v, depth + 1)}</span></div>'
+            for k, v in value.items()
+        )
+        return f'<div style="display:flex;flex-direction:column;">{rows}</div>'
+    return f'<span style="font-size:{fs}px;">{escape(str(value))}</span>'
+
+
+def _render_workflow_body(result, tool_name, tool_args, success) -> str:
+    """workflow 完成框渲染闭包：概览 + 阶段时间线 + 日志 + 结构化结果。
+
+    不注册闭包的话，结果会落到 render_helpers 的通用兜底 —— 一大坨 JSON/Python repr
+    原样塞进 <pre>，既看不出阶段进展，也读不出子智能体各自返回了什么。
+    """
+    from app.widgets.render_helpers import escape, scale_font_size
+
+    raw = getattr(result, "content", "") or ""
+    data = _parse_workflow_payload(raw)
+    if not data:
+        # 解析不出来（旧消息 / 异常）也别丢内容，退化成纯文本块
+        return _wf_pre(str(raw))
+
+    fs = scale_font_size(12)
+    fs_small = scale_font_size(11)
+
+    name = str(data.get("workflow") or "workflow")
+    agents = data.get("agents_started")
+    phases = [str(p) for p in (data.get("phases") or [])]
+    logs = [str(x) for x in (data.get("logs") or [])]
+    note = str(data.get("_note") or "")
+    if data.get("_truncated"):
+        note = (note + "；结果超出宿主渲染上限，仅显示可解析部分").strip("；")
+    payload = data.get("result")
+
+    # ── 概览指标 ──
+    metrics = []
+    if isinstance(agents, int):
+        metrics.append((str(agents), "子智能体"))
+    if phases:
+        metrics.append((str(len(phases)), "阶段"))
+    if logs:
+        metrics.append((str(len(logs)), "条日志"))
+    metrics_html = ""
+    if metrics:
+        chips = "".join(
+            f'<span style="display:inline-flex;align-items:baseline;gap:4px;padding:2px 9px;'
+            f'margin:0 6px 0 0;border:1px solid var(--border);border-radius:999px;'
+            f'background:var(--panel-soft);font-size:{fs_small}px;">'
+            f'<b style="font-size:{fs}px;font-weight:600;">{escape(v)}</b>'
+            f'<span style="color:var(--text-secondary);">{escape(k)}</span></span>'
+            for v, k in metrics
+        )
+        metrics_html = f'<div style="display:flex;flex-wrap:wrap;align-items:center;">{chips}</div>'
+
+    # ── 阶段时间线 ──
+    phases_html = ""
+    if phases:
+        nodes = "".join(
+            f'<div style="display:flex;align-items:flex-start;gap:8px;padding:3px 0;">'
+            f'<span style="flex:0 0 auto;width:6px;height:6px;margin-top:6px;border-radius:50%;'
+            f'background:var(--accent);"></span>'
+            f'<span style="flex:1 1 auto;min-width:0;color:var(--text);font-size:{fs}px;'
+            f'word-break:break-word;">{escape(p)}</span></div>'
+            for p in phases
+        )
+        phases_html = (
+            f'<div style="margin-top:10px;">'
+            f'<div style="color:var(--text-secondary);font-size:{fs_small}px;margin-bottom:2px;">阶段</div>'
+            f'<div style="padding-left:2px;border-left:1px solid var(--border);margin-left:2px;">'
+            f'<div style="padding-left:8px;">{nodes}</div></div></div>'
+        )
+
+    # ── 日志（默认收起）──
+    logs_html = ""
+    if logs:
+        log_text = "\n".join(f"· {x}" for x in logs)
+        inner = _wf_pre(log_text) if len(log_text) <= _WF_LOG_COLLAPSE_CHARS else (
+            _wf_pre(log_text[:_WF_LOG_COLLAPSE_CHARS] + " …")
+            + f'<details class="wf-details" style="margin-top:6px;">'
+            f'<summary style="cursor:pointer;color:var(--accent);font-size:{fs_small}px;">展开全部 {len(logs)} 条</summary>'
+            f'<div style="margin-top:6px;">{_wf_pre(log_text)}</div></details>'
+        )
+        logs_html = (
+            f'<details class="wf-details" style="margin-top:10px;">'
+            f'<summary style="cursor:pointer;color:var(--text-secondary);font-size:{fs_small}px;">'
+            f'执行日志（{len(logs)} 条）</summary>'
+            f'<div style="margin-top:6px;">{inner}</div></details>'
+        )
+
+    # ── 结果区 ──
+    result_html = (
+        f'<div style="margin-top:10px;">'
+        f'<div style="color:var(--text-secondary);font-size:{fs_small}px;margin-bottom:4px;">result</div>'
+        f'<div>{_wf_render_value(payload)}</div></div>'
+    )
+
+    note_html = ""
+    if note:
+        note_html = (
+            f'<div style="margin-top:8px;color:var(--text-muted);font-size:{fs_small}px;'
+            f'font-style:italic;">{escape(note)}</div>'
+        )
+
+    return (
+        f'<div class="wf-block" style="padding:2px 0;">'
+        f'<div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">'
+        f'<span style="font-size:{fs}px;font-weight:600;color:var(--text);">{escape(name)}</span>'
+        f'<span style="font-size:{fs_small}px;color:var(--text-muted);">工作流</span>'
+        f"</div>"
+        f"{metrics_html}{phases_html}{result_html}{logs_html}{note_html}</div>"
+    )
+
+
 def _preview_workflow(tool_args: dict) -> str:
     meta = tool_args.get("meta") or {}
     if isinstance(meta, str):
@@ -521,6 +778,10 @@ def _preview_workflow(tool_args: dict) -> str:
         except Exception:
             meta = {}
     name = str(meta.get("name") or "").strip() or "workflow"
+    # 阶段数直接显示在折叠头上：不用展开就知道这个工作流跑了几步
+    declared = meta.get("phases")
+    if isinstance(declared, list) and declared:
+        return f"workflow: {name} · {len(declared)} 个阶段"
     return f"workflow: {name}"
 
 
@@ -536,6 +797,7 @@ def register(registry):
         description="受限 Python 脚本编排子智能体",
         aliases=["workflow-orchestrate", "Wf"],
         preview=_preview_workflow,
+        render=_render_workflow_body,
         summarize=make_summarize_from_preview(_preview_workflow),
         keep_in_content=True,
     )

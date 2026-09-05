@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """workflow 工具单测：受限命名空间 / 钩子语义 / 上限 / impl 组装。"""
+import json
 import threading
 import time
 
@@ -352,6 +353,82 @@ class TestQtCallbackDelivery:
         assert val is None
 
 
+class TestWorkflowResultRendering:
+    """结果出口与完成框渲染闭包。
+
+    宿主 render_helpers 没有插件 render 闭包时会把结果文本原样塞进 <pre>，
+    workflow 的结果是一整个 JSON —— 不注册闭包就是一大坨 Python repr。
+    """
+
+    class _R:
+        def __init__(self, content):
+            self.content = content
+
+    def _body(self, **content):
+        from plugins.workflow.tools.workflow_tool import _dump_content, _render_workflow_body
+
+        return _render_workflow_body(self._R(_dump_content(content)), "workflow", {}, True)
+
+    def test_dump_content_is_json_not_python_repr(self):
+        import orjson
+
+        from plugins.workflow.tools.workflow_tool import _dump_content
+
+        s = _dump_content({"a": 1, "b": None, "c": True, "d": [1, 2]})
+        assert orjson.loads(s) == {"a": 1, "b": None, "c": True, "d": [1, 2]}
+        assert "'" not in s and "None" not in s  # 不是 str(dict) 的 Python repr
+
+    def test_render_shows_metrics_phases_and_logs(self):
+        html = self._body(
+            workflow="audit", agents_started=3, phases=["扫描", "复核"], logs=["扫到 12 个文件"], result={"ok": 1}
+        )
+        assert "audit" in html
+        assert "3" in html and "子智能体" in html
+        assert "扫描" in html and "复核" in html
+        assert "执行日志" in html
+
+    def test_render_hints_when_result_unset(self):
+        html = self._body(workflow="w", agents_started=0, phases=[], logs=[], result=None)
+        assert "result 赋值" in html
+
+    def test_render_escapes_html(self):
+        html = self._body(
+            workflow="<img src=x onerror=alert(1)>", agents_started=0, phases=[], logs=[], result="<script>"
+        )
+        assert "<img src=x" not in html and "<script>" not in html
+        assert "&lt;" in html
+
+    def test_render_falls_back_for_unparseable(self):
+        from plugins.workflow.tools.workflow_tool import _render_workflow_body
+
+        html = _render_workflow_body(self._R("not json at all"), "workflow", {}, True)
+        assert "not json at all" in html
+
+    def test_salvage_truncated_json(self):
+        """宿主按 _MAX_OUTPUT_CHARS 截断后仍要救回可解析的前缀。"""
+        from plugins.workflow.tools.workflow_tool import _parse_workflow_payload
+
+        full = '{"workflow":"a","agents_started":2,"phases":[],"logs":[],"result":"' + "x" * 9000 + '"}'
+        data = _parse_workflow_payload(full[:5000])
+        assert data.get("workflow") == "a"
+        assert data.get("_truncated") is True
+
+    def test_preview_shows_phase_count(self):
+        from plugins.workflow.tools.workflow_tool import _preview_workflow
+
+        assert "2 个阶段" in _preview_workflow({"meta": {"name": "a", "phases": [{"title": "x"}, {"title": "y"}]}})
+        assert _preview_workflow({"meta": {"name": "a"}}) == "workflow: a"
+
+    def test_register_passes_render(self):
+        from plugins.workflow.tools.workflow_tool import _render_workflow_body, register
+
+        class _Reg:
+            def register(self, name, schema, **kw):
+                assert kw["render"] is _render_workflow_body
+
+        register(_Reg())
+
+
 class TestCombinators:
     def _make(self, max_items=100, max_total=50):
         from concurrent.futures import ThreadPoolExecutor
@@ -468,9 +545,11 @@ class TestWorkflowImpl:
     def test_happy_path(self, monkeypatch):
         r = self._impl(monkeypatch, _FakeManager(routes={"build": "ok"}))
         assert r.success is True
-        assert r.content["result"] == {"n": "ok"}
-        assert r.content["agents_started"] == 1
-        assert r.content["workflow"] == "audit"
+        # 出口是 JSON 字符串（不是 Python repr）：模型侧和渲染闭包侧都要能直接 parse
+        payload = json.loads(r.content)
+        assert payload["result"] == {"n": "ok"}
+        assert payload["agents_started"] == 1
+        assert payload["workflow"] == "audit"
 
     def test_meta_validation_fails_fast(self, monkeypatch):
         r = self._impl(monkeypatch, _FakeManager(), meta={"name": "x"})
@@ -485,13 +564,14 @@ class TestWorkflowImpl:
     def test_missing_result_is_null(self, monkeypatch):
         r = self._impl(monkeypatch, _FakeManager(), script="agent('x')")
         assert r.success is True
-        assert r.content["result"] is None
+        assert json.loads(r.content)["result"] is None
 
     def test_unserializable_result_degrades(self, monkeypatch):
         r = self._impl(monkeypatch, _FakeManager(), script="result = {'f': len}")
         assert r.success is True
-        assert isinstance(r.content["result"], dict)
-        assert "_repr" in r.content["result"]
+        payload = json.loads(r.content)
+        assert isinstance(payload["result"], dict)
+        assert "_repr" in payload["result"]
 
     def test_script_exception_reported(self, monkeypatch):
         r = self._impl(monkeypatch, _FakeManager(), script="result = 1 / 0")

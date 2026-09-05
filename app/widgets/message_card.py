@@ -2707,7 +2707,7 @@ _SKELETON_CACHE_MAX = 48
 # **之前**先执行一次（原先只在 onload 回调之后）。插件脚本末尾的首帧兜底初始化
 # 若先跑，会看到空桥并把未授权状态锁死在节点上（幂等标记已打，后续救不回来）。
 # 旧骨架仍是旧时序 → 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 24
+_SKELETON_CACHE_VERSION = 25
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -5305,7 +5305,8 @@ class CodeWebViewer(QWebEngineView):
                     flex: 0 0 auto;
                     padding: 2px 7px;
                     border-radius: 999px;
-                    background: rgba(13,17,23,0.42);
+                    /* 早先写死 rgba(13,17,23,.42)，浅色主题下是一枚深色药丸；与相邻规则一样按主题取色 */
+                    background: {"rgba(0,0,0,0.04)" if _is_light_diff else "rgba(13,17,23,0.42)"};
                     border: 1px solid rgba(139, 148, 158, 0.18);
                     font-weight: 800;
                 }}
@@ -5522,8 +5523,9 @@ class CodeWebViewer(QWebEngineView):
                     background: {"rgba(34, 197, 94, 0.05)" if _is_light_diff else "rgba(95, 209, 140, 0.05)"};
                 }}
                 .args-row.result-fail {{
-                    border-top: 1px solid rgba(244, 67, 54, 0.3);
-                    background: rgba(244, 67, 54, 0.05);
+                    /* 早先写死 rgba(244,67,54,.3)，浅色主题下过艳；与 result-success 一样按主题取色 */
+                    border-top: 1px solid {"rgba(220, 38, 38, 0.3)" if _is_light_diff else "rgba(248, 81, 73, 0.3)"};
+                    background: {"rgba(220, 38, 38, 0.05)" if _is_light_diff else "rgba(248, 81, 73, 0.05)"};
                 }}
                 .args-value {{
                     flex: 1 1 auto;
