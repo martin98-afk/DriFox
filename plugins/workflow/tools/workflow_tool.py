@@ -104,3 +104,45 @@ class _RunState:
             if self.started >= self._max_total:
                 raise WorkflowError(f"子智能体总数超上限（{self._max_total}）")
             self.started += 1
+
+
+def _make_agent_hook(manager, session_id: str, state: _RunState, default_agent: str):
+    """agent(prompt, agent=None, label=None, phase=None, share_context=False) -> str | None
+
+    execute_task 异步派发 SubAgentExecutor；Event 在 executor 线程被回调置位。
+    子任务失败（on_error / execute_task 返回 False）降级为 None，由脚本兜底。
+    """
+
+    def agent(prompt, agent=None, label=None, phase=None, share_context=False):
+        # 参数名 agent 遮蔽外层函数名：本函数体内不再引用自身，合法且对模型最自然
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise WorkflowError("agent() 的 prompt 必须是非空字符串")
+        state.reserve()
+        name = agent or default_agent
+        task_id = str(uuid.uuid4())
+        done = threading.Event()
+        box = {"result": None}
+
+        def _on_finished(text):
+            box["result"] = text
+            done.set()
+
+        def _on_error(err):
+            logger.warning(f"[workflow] 子任务失败 ({label or name}): {err}")
+            done.set()
+
+        ok = manager.execute_task(
+            task_id=task_id,
+            agent_name=name,
+            task_description=prompt,
+            on_finished=_on_finished,
+            on_error=_on_error,
+            share_context=bool(share_context),
+            session_id=session_id,
+        )
+        if not ok:
+            return None
+        done.wait()
+        return box["result"]
+
+    return agent
