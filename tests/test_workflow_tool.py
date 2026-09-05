@@ -1166,6 +1166,45 @@ class TestLifecycleAndStorage:
 class TestEdgeMatrix:
     """彻底性补测：对照 CC 语义与真实执行暴露的边界。"""
 
+    def test_status_large_result_truncated_in_status_json(self, monkeypatch, tmp_path):
+        # 超长 result 不得撑爆 status.json（渲染上限截断会破坏结构、丢 agents 键）
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "true"}.get(key),
+        )
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(ctx, meta={"name": "big", "description": "d"}, script="result = 'x' * 80000")
+        assert r.success
+        run_id = wt.list_workflows(tmp_path)["runs"][0]
+        sf = tmp_path / "runs" / run_id / "status.json"
+        assert sf.stat().st_size < 8000, "status.json 必须瘦身"
+        st = wt.orjson.loads(sf.read_bytes())
+        assert "agents" in st  # 结构完整：agents 键不被截断丢失
+        # result.json 仍存全文
+        assert len((tmp_path / "runs" / run_id / "result.json").read_bytes()) >= 80000
+
+    def test_running_status_has_agents_for_run_card(self, monkeypatch, tmp_path):
+        # running 态返回体必须带顶层 agents/phases，否则渲染分发掉进结果卡出误导文案
+        wt = TestBackgroundRun()._patch(monkeypatch, tmp_path)
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(ctx, meta={"name": "rc", "description": "d"}, script="phase('P1')\nresult = agent('x')")
+        body = json.loads(r.content)
+        r2 = wt._workflow_impl(ctx, action="status", run_id=body["run_id"], meta={"name": "s", "description": "d"})
+        st = json.loads(r2.content)
+        assert "agents" in st and "phases" in st  # 渲染分发键齐全
+        from plugins.workflow.tools.workflow_tool import _dump_content, _render_workflow_body
+
+        class _R:
+            def __init__(self, content):
+                self.content = content
+
+        html = _render_workflow_body(_R(_dump_content(st)), "workflow", {}, True)
+        assert "wf-run-card" in html  # 走运行卡而非「result 未赋值」结果卡
+
     def test_datetime_now_banned_but_construct_ok(self):
         # CC 同款：时间源抛错保 resume 指纹确定性；构造/运算不受影响
         ns = _build_sandbox(args={})

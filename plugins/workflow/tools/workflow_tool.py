@@ -341,10 +341,11 @@ class RunJournal:
             self._agent_seq += 1
             return f"a{self._agent_seq}"
 
-    def agent_snapshots(self) -> list:
+    def agent_snapshots(self, max_result_len: int | None = None) -> list:
         """从 journal 聚合每 agent 最新状态：[{key, role, status, elapsed_sec, result}]。
 
         start 无 end → running；卡片数据源与 resume 诊断共用。
+        max_result_len：结果截断长度（渲染路径用，全文只在 journal / completed_map）。
         """
         jf = self.dir / "journal.jsonl"
         if not jf.exists():
@@ -376,7 +377,10 @@ class RunJournal:
                 elif rec.get("type") == "agent_end" and key in by_key:
                     by_key[key]["status"] = rec.get("status")
                     by_key[key]["elapsed_sec"] = rec.get("elapsed_sec")
-                    by_key[key]["result"] = rec.get("result")
+                    result = rec.get("result")
+                    if max_result_len is not None and isinstance(result, str) and len(result) > max_result_len:
+                        result = result[:max_result_len] + f"…（全文 {len(rec.get('result'))} 字见 journal）"
+                    by_key[key]["result"] = result
         return [by_key[k] for k in order]
 
     def write_status(self, payload: dict) -> None:
@@ -959,6 +963,13 @@ def _execute_run(cfg: dict) -> ToolResult:
                 rec["state"] = "done" if ok else "error"
         if not journal:
             return
+        # status.json 是卡片数据源（会被宿主渲染上限截断）：结果只存预览，全文在 result.json
+        result_preview = result
+        try:
+            if len(orjson.dumps(result)) > 2000:
+                result_preview = orjson.dumps(result)[:1000].decode("utf-8", "ignore") + "…（全文见 result.json）"
+        except (TypeError, ValueError):
+            result_preview = str(result)
         journal.write_status({
             "name": meta.get("name"),
             "description": meta.get("description"),
@@ -966,8 +977,8 @@ def _execute_run(cfg: dict) -> ToolResult:
             "agents_started": state.started,
             "phases": phases,
             "logs": logs,
-            "agents": journal.agent_snapshots(),
-            "result": result,
+            "agents": journal.agent_snapshots(max_result_len=200),
+            "result": result_preview,
             "note": note,
         })
         if ok:
@@ -1274,6 +1285,7 @@ def _workflow_impl(tool_ctx, **kwargs):
         if live is None and not sf.exists():
             return ToolResult(False, error=f"未找到 run: {run_id}")
         if live is not None and live.get("state") == "running":
+            progress = _running_progress(Path(live["run_dir"]))
             return ToolResult(
                 True,
                 content=_dump_content(
@@ -1282,7 +1294,10 @@ def _workflow_impl(tool_ctx, **kwargs):
                         "name": live.get("name"),
                         "state": "running",
                         "run_dir": live.get("run_dir"),
-                        "progress": _running_progress(Path(live["run_dir"])),
+                        "progress": progress,
+                        # run card 渲染需要顶层 agents/phases 键：从 progress 提升一份
+                        "agents": progress["agents"],
+                        "phases": [{"title": t, "detail": None} for t in progress["phases"]],
                     }
                 ),
             )
