@@ -131,10 +131,13 @@ class TestCombinators:
     def _make(self, max_items=100, max_total=50):
         from concurrent.futures import ThreadPoolExecutor
 
-        from plugins.workflow.tools.workflow_tool import _make_combinators
+        from plugins.workflow.tools.workflow_tool import (
+            _make_combinators,
+            _pool_initializer,
+        )
 
         st = _RunState(max_total, time.monotonic() + 60)
-        pool = ThreadPoolExecutor(max_workers=4)
+        pool = ThreadPoolExecutor(max_workers=4, initializer=_pool_initializer)
         return (*_make_combinators(st, pool, max_items), st)
 
     def test_parallel_returns_all(self):

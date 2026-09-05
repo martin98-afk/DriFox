@@ -151,72 +151,67 @@ def _make_agent_hook(manager, session_id: str, state: _RunState, default_agent: 
 _COMBINATOR_LOCAL = threading.local()
 
 
+def _pool_initializer():
+    """线程池 worker 打标：池内任务禁止再调 parallel/pipeline（防池耗尽死锁）。"""
+    _COMBINATOR_LOCAL.in_pool_worker = True
+
+
 def _make_combinators(state: _RunState, pool: ThreadPoolExecutor, max_items: int):
     """parallel / pipeline 钩子工厂。共享线程池；并发上限 = 池大小。"""
 
-    def _guard_enter():
-        if getattr(_COMBINATOR_LOCAL, "inside", False):
-            raise WorkflowError("parallel/pipeline 不支持嵌套（thunk 内只调 agent()）")
-        _COMBINATOR_LOCAL.inside = True
-
-    def _guard_exit():
-        _COMBINATOR_LOCAL.inside = False
+    def _pool_guard():
+        if getattr(_COMBINATOR_LOCAL, "in_pool_worker", False):
+            raise WorkflowError("池内任务禁止调用 parallel/pipeline（防死锁），thunk 内只调 agent()")
 
     def parallel(callables):
-        _guard_enter()
-        try:
-            items = list(callables)
-            if len(items) > max_items:
-                raise WorkflowError(f"parallel 单次项数超上限（{max_items}）")
-            state.check()  # 只查时长；agent 额度在各 thunk 内的 agent() 里计
-            futs = [pool.submit(c) for c in items]
-            out = []
-            for f in futs:
-                try:
-                    out.append(f.result())
-                except WorkflowError:
-                    raise
-                except Exception as e:
-                    logger.warning(f"[workflow] parallel 项异常降级 None: {e}")
-                    out.append(None)
-            return out
-        finally:
-            _guard_exit()
+        _pool_guard()
+        items = list(callables)
+        if len(items) > max_items:
+            raise WorkflowError(f"parallel 单次项数超上限（{max_items}）")
+        state.check()  # 只查时长；agent 额度在各 thunk 内的 agent() 里计
+        futs = [pool.submit(c) for c in items]
+        out = []
+        for f in futs:
+            try:
+                out.append(f.result())
+            except WorkflowError:
+                raise
+            except Exception as e:
+                logger.warning(f"[workflow] parallel 项异常降级 None: {e}")
+                out.append(None)
+        return out
 
     def pipeline(items, *stages):
-        _guard_enter()
-        try:
-            if not stages:
-                raise WorkflowError("pipeline 至少需要一个 stage")
-            item_list = list(items)
-            if len(item_list) > max_items:
-                raise WorkflowError(f"pipeline 单次项数超上限（{max_items}）")
-            state.check()
+        _pool_guard()
+        if not stages:
+            raise WorkflowError("pipeline 至少需要一个 stage")
+        item_list = list(items)
+        if len(item_list) > max_items:
+            raise WorkflowError(f"pipeline 单次项数超上限（{max_items}）")
+        state.check()
 
-            def _run_item(item):
-                prev = item
-                for idx, stage in enumerate(stages):
-                    try:
-                        prev = stage(prev, item, idx)
-                    except WorkflowError:
-                        raise
-                    except Exception as e:
-                        logger.warning(f"[workflow] pipeline 阶段 {idx} 异常，该项降级 None: {e}")
-                        return None
-                return prev
-
-            futs = [pool.submit(_run_item, it) for it in item_list]
-            out = []
-            for f in futs:
+        def _run_item(item):
+            prev = item
+            for idx, stage in enumerate(stages):
                 try:
-                    out.append(f.result())
+                    prev = stage(prev, item, idx)
                 except WorkflowError:
                     raise
                 except Exception as e:
-                    logger.warning(f"[workflow] pipeline 项异常降级 None: {e}")
-                    out.append(None)
-            return out
-        finally:
-            _guard_exit()
+                    logger.warning(f"[workflow] pipeline 阶段 {idx} 异常，该项降级 None: {e}")
+                    return None
+            return prev
+
+        futs = [pool.submit(_run_item, it) for it in item_list]
+        out = []
+        for f in futs:
+            try:
+                out.append(f.result())
+            except WorkflowError:
+                raise
+            except Exception as e:
+                logger.warning(f"[workflow] pipeline 项异常降级 None: {e}")
+                out.append(None)
+        return out
 
     return parallel, pipeline
