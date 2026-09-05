@@ -95,7 +95,7 @@ class Assistant:
     project_notes_enabled: bool = True
     # 项目上下文（项目根目录 + git 状态）注入开关：主智能体按此开关控制；子智能体始终注入
     project_context_enabled: bool = True
-    # 预置工具档位（控制初始注入的 schema，不影响可用性）：full=全量 / readonly=仅安全类 / minimal=仅 bash+tool_search
+    # 预置工具档位（控制初始注入的 schema，不影响可用性）：full=全量 / readonly=仅安全类 / minimal=bash+write+edit / search=仅搜索+中转 / none=无工具
     tool_access: str = "full"
     # 记忆整理模型（llm_saved_providers 的 config_id）：空 = 跟随全局当前模型
     utility_model: str = ""
@@ -722,7 +722,7 @@ class AssistantManager:
 
     # ── 预置工具档位（初始注入 schema，hooks 与 UI 统计共用归属逻辑）──
 
-    _TOOL_ACCESS_MODES = ("full", "readonly", "minimal")
+    _TOOL_ACCESS_MODES = ("full", "readonly", "minimal", "search", "none")
 
     @classmethod
     def tool_access_for(cls, session_id: str) -> str:

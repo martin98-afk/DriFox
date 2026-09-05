@@ -254,7 +254,7 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
     if not assistants:
         return '<div class="welcome-empty">暂无助手，可在标题栏「助手」中创建。</div>'
 
-    _ACCESS_LABELS = {"full": "全量", "readonly": "只读", "minimal": "极简"}
+    _ACCESS_LABELS = {"full": "全量", "readonly": "只读", "minimal": "极简", "search": "仅搜索", "none": "无工具"}
 
     def _fmt_tokens(n: int) -> str:
         return f"{n / 1000:.1f}k" if n >= 1000 else str(n)

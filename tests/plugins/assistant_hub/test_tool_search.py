@@ -5,12 +5,12 @@ import importlib.util
 import sys
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[2]
-_MODULE = _ROOT / "plugins" / "system" / "tools" / "tool_search_tools.py"
+_ROOT = Path(__file__).resolve().parents[3]
+_MODULE = _ROOT / "plugins" / "assistant_hub" / "tools" / "tool_search_tools.py"
 
-spec = importlib.util.spec_from_file_location("test_tool_search_mod", str(_MODULE))
+spec = importlib.util.spec_from_file_location("test_assistant_tool_search_mod", str(_MODULE))
 m = importlib.util.module_from_spec(spec)
-sys.modules.setdefault("test_tool_search_mod", m)
+sys.modules.setdefault("test_assistant_tool_search_mod", m)
 spec.loader.exec_module(m)
 
 
@@ -114,6 +114,40 @@ def test_no_args_prompts_usage(monkeypatch):
     _setup_registry(monkeypatch, _TOOLS)
     out = m._search_impl(tool_ctx={"services": {}})
     assert "queries" in out.content
+
+
+def test_list_mode_catalog(monkeypatch):
+    """mode=list：全量名录（分组+名称+一句话），不含 Parameters。"""
+    _setup_registry(monkeypatch, _TOOLS)
+    out = m._search_impl(tool_ctx={"services": {}}, mode="list")
+    assert out.success
+    assert "- write（写入文件）：写文件或覆盖内容" in out.content
+    assert "## 文件写入" in out.content
+    assert "Parameters" not in out.content
+    assert "- tool_search" not in out.content and "- tool_execute" not in out.content  # 元工具自身排除
+
+
+def test_list_mode_includes_mcp_grouped_by_server(monkeypatch):
+    _setup_registry(monkeypatch, _TOOLS)
+    mcp = _FakeMcp([_schema("mcp__time__current_time", "获取当前时间")])
+    out = m._search_impl(tool_ctx={"services": {"mcp": mcp}}, mode="list")
+    assert "## MCP·time" in out.content
+    assert "- mcp__time__current_time：获取当前时间" in out.content
+
+
+def test_list_mode_degrades_to_group_overview_when_huge(monkeypatch):
+    """超阈值降级为分组概览，不列成员。"""
+    many = [(f"t{i}", f"工具{i}", f"分组{i % 3}", f"描述{i}", []) for i in range(120)]
+    _setup_registry(monkeypatch, many)
+    out = m._search_impl(tool_ctx={"services": {}}, mode="list")
+    assert "分组概览" in out.content and "（40 个）" in out.content
+    assert "- t0" not in out.content
+
+
+def test_default_mode_search_unchanged(monkeypatch):
+    _setup_registry(monkeypatch, _TOOLS)
+    out = m._search_impl(tool_ctx={"services": {}}, queries=["文件"])
+    assert "Parameters:" in out.content
 
 
 def test_string_args_coerced(monkeypatch):

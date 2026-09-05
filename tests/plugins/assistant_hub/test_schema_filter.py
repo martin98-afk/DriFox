@@ -59,10 +59,24 @@ def test_full_no_filter(monkeypatch):
     assert out is schemas and len(out) == 6
 
 
-def test_minimal_only_bash(monkeypatch):
+def test_minimal_bash_write_edit(monkeypatch):
     _patch_manager(monkeypatch, "minimal")
     out = m.filter_tools_schema(_schemas(), {"session_id": "s1"})
-    assert [s["function"]["name"] for s in out] == ["bash"]
+    assert [s["function"]["name"] for s in out] == ["bash", "write", "edit"]
+
+
+def test_search_meta_only(monkeypatch):
+    _patch_manager(monkeypatch, "search")
+    schemas = _schemas() + [
+        {"type": "function", "function": {"name": n, "description": n}} for n in ("tool_search", "tool_execute")
+    ]
+    out = m.filter_tools_schema(schemas, {"session_id": "s1"})
+    assert [s["function"]["name"] for s in out] == ["tool_search", "tool_execute"]
+
+
+def test_none_empty(monkeypatch):
+    _patch_manager(monkeypatch, "none")
+    assert m.filter_tools_schema(_schemas(), {"session_id": "s1"}) == []
 
 
 def test_readonly_only_safe(monkeypatch):

@@ -3,7 +3,8 @@
 系统工具插件 — 工具搜索与中转执行（schema 懒加载）
 
 tool_search：按关键词/精确名搜索全部已注册工具（含被 schema 档位裁剪的与
-MCP 工具），返回完整定义（name + description + parameters）。
+MCP 工具），返回完整定义（name + description + parameters）；mode=list
+可列出全部工具名录（分组+名称+一句话，超阈值降级为分组概览）。
 
 tool_execute：中转执行搜到的工具。为什么需要：API 层只允许模型调用本次
 请求 tools 列表里的工具，未注入 schema 的工具模型发不出调用（实测确认），
@@ -13,6 +14,7 @@ tool_execute：中转执行搜到的工具。为什么需要：API 层只允许�
 对齐 CodeBuddy ToolSearchTool（queries 全文搜索 + tool_names 精确查找 +
 top_k 截断）；其中转执行即 CodeBuddy 的 DeferExecuteTool。
 """
+
 import json
 
 from app.tools.result import ToolResult
@@ -23,6 +25,10 @@ GROUP_TOOL_SEARCH = "工具搜索"
 # 输出字符上限（对齐 CodeBuddy 默认 30k，DriFox schema 体量取 20k 足够）
 _MAX_OUTPUT_CHARS = 20000
 _SELF_NAME = "tool_search"
+
+# mode=list 名录：单条描述截断长度 / 总数超阈值降级为分组概览
+_LIST_DESC_MAX = 80
+_LIST_GROUP_THRESHOLD = 100
 
 
 def _as_str_list(v) -> list:
@@ -45,7 +51,7 @@ def _as_str_list(v) -> list:
 def _clamp_top_k(v) -> int:
     try:
         k = int(v)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 5
     return max(1, min(20, k))
 
@@ -143,7 +149,63 @@ def _format_entry(schema: dict) -> list:
     return lines
 
 
+def _brief_desc(desc: str) -> str:
+    """名录用一句话描述：取首行并截断。"""
+    lines = (desc or "").strip().splitlines()
+    d = lines[0].strip() if lines else ""
+    return d if len(d) <= _LIST_DESC_MAX else d[:_LIST_DESC_MAX] + "…"
+
+
+def _mcp_server_of(name: str) -> str:
+    """从 mcp__服务__工具 全名提取服务名，非 mcp 前缀归 mcp。"""
+    return name.split("__", 2)[1] if name.startswith("mcp__") else "mcp"
+
+
+def _list_impl(services: dict) -> str:
+    """mode=list：列出全部可用工具名录（分组 + 名称 + 一句话描述，不含参数）。"""
+    entries = [r for r in ToolRegistry.get_instance().list() if r.name not in (_SELF_NAME, "tool_execute")]
+    mcp_schemas: list = []
+    mcp = services.get("mcp") if isinstance(services, dict) else None
+    if mcp is not None:
+        try:
+            mcp_schemas = [s for s in (mcp.get_tool_schemas() or []) if _fname(s)]
+        except Exception:
+            mcp_schemas = []
+    total = len(entries) + len(mcp_schemas)
+    header = f"共 {total} 个可用工具（名录；完整定义用 tool_search 的 tool_names 获取）："
+
+    # 超量降级：只列分组名 + 计数，成员靠按分组名搜索找回
+    if total > _LIST_GROUP_THRESHOLD:
+        counts: dict = {}
+        for r in entries:
+            counts[r.group or "未分组"] = counts.get(r.group or "未分组", 0) + 1
+        for s in mcp_schemas:
+            key = f"MCP·{_mcp_server_of(_fname(s))}"
+            counts[key] = counts.get(key, 0) + 1
+        lines = [header, "工具较多，仅列分组概览（把分组名作为 queries 关键词搜索可查看成员）："]
+        lines += [f"- {g}（{n} 个）" for g, n in sorted(counts.items())]
+        return "\n".join(lines)
+
+    by_group: dict = {}
+    for r in entries:
+        by_group.setdefault(r.group or "未分组", []).append(
+            f"- {r.name}（{r.cn_name or r.name}）：{_brief_desc(r.description)}"
+        )
+    for s in mcp_schemas:
+        fn = s.get("function", {}) or {}
+        by_group.setdefault(f"MCP·{_mcp_server_of(_fname(s))}", []).append(
+            f"- {_fname(s)}：{_brief_desc(fn.get('description', ''))}"
+        )
+    lines = [header]
+    for g, items in sorted(by_group.items()):
+        lines += ["", f"## {g}", *items]
+    return "\n".join(lines)
+
+
 def _search_impl(tool_ctx=None, **kw):
+    mode = str(kw.get("mode") or "search").strip().lower()
+    if mode == "list":
+        return ToolResult(True, content=_list_impl((tool_ctx or {}).get("services") or {}))
     queries = _as_str_list(kw.get("queries"))
     tool_names = _as_str_list(kw.get("tool_names"))
     top_k = _clamp_top_k(kw.get("top_k"))
@@ -152,7 +214,7 @@ def _search_impl(tool_ctx=None, **kw):
             True,
             content=(
                 '请提供搜索条件：queries（关键词数组，中英文均可，如 ["文件搜索", "file search"]）'
-                '或 tool_names（精确工具名数组）。'
+                '或 tool_names（精确工具名数组）；也可用 mode="list" 列出全部工具名录。'
             ),
         )
     services = (tool_ctx or {}).get("services") or {}
@@ -208,7 +270,9 @@ def _search_impl(tool_ctx=None, **kw):
             content="没有找到匹配的工具。换关键词试试（中英文各写一份效果更好），或改用 tool_names 精确查找。",
         )
 
-    lines: list = [f"找到 {len(results)} 个工具（完整定义如下；当前工具列表里没有它们，请用 tool_execute(tool_name=工具名, arguments=参数对象) 中转调用）："]
+    lines: list = [
+        f"找到 {len(results)} 个工具（完整定义如下；当前工具列表里没有它们，请用 tool_execute(tool_name=工具名, arguments=参数对象) 中转调用）："
+    ]
     for schema in results:
         lines += ["", *_format_entry(schema)]
     shown = [c for c in candidates if c][:10]
@@ -313,7 +377,10 @@ _EXECUTE_SCHEMA = {
             "type": "object",
             "properties": {
                 "tool_name": {"type": "string", "description": "要执行的工具名（精确名，含别名；MCP 用全名）"},
-                "arguments": {"type": "object", "description": "工具参数对象（按其 schema 的 Parameters 传，无参传 {}）"},
+                "arguments": {
+                    "type": "object",
+                    "description": "工具参数对象（按其 schema 的 Parameters 传，无参传 {}）",
+                },
             },
             "required": ["tool_name"],
         },
@@ -330,14 +397,20 @@ _SCHEMA = {
             "搜到后用 tool_execute(tool_name, arguments) 调用。"
             "当需要的能力不在你当前的工具列表里（被权限档位裁剪、或 MCP 工具未列出）时，"
             "先用本工具搜索：queries 给中英文关键词，tool_names 给精确工具名。"
+            "不确定存在哪些工具时用 mode=list 先列名录。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["search", "list"],
+                    "description": "search=按条件搜索并返回完整定义（默认）；list=列出全部工具名录（分组+名称+一句话描述，不含参数定义）",
+                },
                 "queries": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "关键词数组（建议中英文各写一份，如 [\"文件搜索\", \"file search\"]）；多词任一命中即返回",
+                    "description": '关键词数组（建议中英文各写一份，如 ["文件搜索", "file search"]）；多词任一命中即返回',
                 },
                 "tool_names": {
                     "type": "array",

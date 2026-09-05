@@ -987,7 +987,9 @@ class ExperienceSection(_Section):
 _TOOL_MODES = (
     ("full", "全量", "初始注入全部工具", "[FULL]"),
     ("readonly", "只读", "初始只注入安全类工具", "[READ-ONLY]"),
-    ("minimal", "极简", "初始只注入 bash，其余搜索后使用", "[MINIMAL]"),
+    ("minimal", "极简", "bash+write+edit，其余不可用", "[MINIMAL]"),
+    ("search", "仅搜索", "仅搜索+中转执行，其余搜索后调用", "[SEARCH]"),
+    ("none", "无工具", "不注入任何工具", "[NONE]"),
 )
 
 
@@ -1073,7 +1075,7 @@ class ToolAccessSection(_Section):
         super().__init__("预置工具", parent)
         self.body().addWidget(
             _hint(
-                "点卡片切换初始注入的工具范围；未注入的工具仍可用，模型可经 tool_search 搜索、tool_execute 中转调用，下一条消息生效。",
+                "点卡片切换初始注入的工具范围，下一条消息生效；未注入的工具并非都能找回：含工具搜索的档位可经 tool_search 搜索、tool_execute 中转调用，极简/无工具档则不可。",
                 10,
             )
         )
@@ -1095,4 +1097,3 @@ class ToolAccessSection(_Section):
         self._mode = mode if mode in self._chips else "full"
         for key, chip in self._chips.items():
             chip.set_selected(key == self._mode)
-
