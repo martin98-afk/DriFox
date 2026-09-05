@@ -616,6 +616,8 @@ def _workflow_description(subagent_names: list) -> str:
         "- pipeline(items, *stages): 每项独立流过 stage(prev, item, index)，无屏障；阶段异常该项降 None 跳后续\n"
         "- phase(title, detail=None): 进度分组，detail 上卡片副标题\n"
         "- log(msg): 进度消息\n\n"
+        "复用与后台：action=save/list/load 管理可复用 workflow（from_saved 直接跑已存档）；"
+        "默认后台运行立即返回 run_id，用 action=status 查进度；foreground=true 同步等结果。\n\n"
         "沙箱边界：禁止 import（预置 json/math/re/statistics/datetime）；无文件/网络能力；"
         "宿主内部变量（_ 开头）不在脚本命名空间。\n"
         "误用钩子或超上限会中止整个脚本；子任务失败只降 None。"
@@ -655,6 +657,31 @@ _WORKFLOW_SCHEMA = {
                     "type": "object",
                     "description": "可选 JSON 输入，暴露为脚本全局 args",
                 },
+                "action": {
+                    "type": "string",
+                    "enum": ["run", "save", "list", "load", "status"],
+                    "description": "默认 run 执行脚本；save 存为可复用 workflow（需 save_as）；list 列已存与最近 runs；load 读存档（需 name）；status 查运行中任务（需 run_id）",
+                },
+                "foreground": {
+                    "type": "boolean",
+                    "description": "true 时同步执行到完成（旧行为）；默认后台运行立即返回 run_id",
+                },
+                "from_saved": {
+                    "type": "string",
+                    "description": "运行已存 workflow 的名字（代替 script），args 可覆盖存档默认值",
+                },
+                "save_as": {
+                    "type": "string",
+                    "description": "action=save 时的存档名",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "action=load 时的存档名",
+                },
+                "run_id": {
+                    "type": "string",
+                    "description": "action=status 时的运行 ID",
+                },
             },
             "required": ["script", "meta"],
         },
@@ -689,17 +716,124 @@ def _norm_phases(raw) -> list[tuple[str, str | None]]:
     return out
 
 
-def _workflow_impl(tool_ctx, **kwargs):
-    manager = tool_ctx.get("sub_agent_manager")
-    if not manager:
-        return ToolResult(False, error="子智能体管理器未初始化")
+# ============================================================
+# 存档层：saved / runs 目录管理
+# ============================================================
 
+
+def wf_root() -> Path:
+    """workflow 存档根：<app_data_dir>/workflows/（saved/ + runs/）。"""
+    from app.utils.utils import get_app_data_dir  # 延迟导入：与插件加载器同款
+
+    return get_app_data_dir() / "workflows"
+
+
+def _saved_path(root: Path, name: str) -> Path:
+    safe = "".join(c for c in name if c.isalnum() or c in "-_")
+    return root / "saved" / f"{safe or 'unnamed'}.py"
+
+
+def save_workflow(root: Path, name: str, meta: dict, script: str, args: dict | None) -> Path:
+    """保存可复用 workflow：头注释行存 meta+args JSON，正文是脚本原文。同名覆盖。"""
+    path = _saved_path(root, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    header = orjson.dumps({"meta": meta, "args": args}).decode()
+    path.write_text(f"# workflow-meta: {header}\n{script}", encoding="utf-8")
+    return path
+
+
+def load_workflow(root: Path, name: str) -> dict:
+    path = _saved_path(root, name)
+    if not path.exists():
+        raise KeyError(f"workflow 不存在: {name}")
+    text = path.read_text(encoding="utf-8")
+    first, _, body = text.partition("\n")
+    envelope: dict = {}
+    if first.startswith("# workflow-meta:"):
+        try:
+            envelope = orjson.loads(first[len("# workflow-meta:") :].strip())
+        except orjson.JSONDecodeError:
+            envelope = {}
+    return {"name": name, "meta": envelope.get("meta") or {}, "args": envelope.get("args"), "script": body}
+
+
+def list_workflows(root: Path) -> dict:
+    saved_dir = root / "saved"
+    runs_dir = root / "runs"
+    saved = sorted(p.stem for p in saved_dir.glob("*.py")) if saved_dir.is_dir() else []
+    runs = []
+    if runs_dir.is_dir():
+        for d in sorted(runs_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
+            if d.is_dir():
+                runs.append(d.name)
+    return {"saved": saved, "runs": runs}
+
+
+def new_run_dir(root: Path, meta: dict, script: str, args) -> Path:
+    """创建 runs/<run_id>/ 并写入脚本与 meta 快照；返回 run 目录。"""
+    run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    rd = root / "runs" / run_id
+    rd.mkdir(parents=True, exist_ok=True)
+    (rd / "script.py").write_text(script, encoding="utf-8")
+    (rd / "meta.json").write_bytes(orjson.dumps({"meta": meta, "args": args}))
+    return rd
+
+
+def _workflow_impl(tool_ctx, **kwargs):
+    # ---- action 分发：存档管理类动作不需要 manager ----
+    action = str(kwargs.get("action") or "run")
     meta = kwargs.get("meta") or {}
     if isinstance(meta, str):
         try:
             meta = orjson.loads(meta)
         except orjson.JSONDecodeError:
             return ToolResult(False, error="meta 不是合法 JSON")
+    if action in ("list", "load", "save", "status"):
+        root = wf_root()
+        if action == "list":
+            return ToolResult(True, content=_dump_content(list_workflows(root)))
+        if action == "load":
+            name = str(kwargs.get("name") or "")
+            if not name:
+                return ToolResult(False, error="action=load 需要 name 参数")
+            try:
+                wf = load_workflow(root, name)
+            except KeyError as e:
+                return ToolResult(False, error=str(e).strip("'\""))
+            return ToolResult(True, content=_dump_content(wf))
+        if action == "save":
+            save_as = str(kwargs.get("save_as") or "")
+            script_str = str(kwargs.get("script") or "")
+            if not save_as or not script_str:
+                return ToolResult(False, error="action=save 需要 save_as 与 script 参数")
+            save_workflow(root, save_as, meta if isinstance(meta, dict) else {}, script_str, kwargs.get("args"))
+            return ToolResult(True, content={"saved": save_as})
+        run_id = str(kwargs.get("run_id") or "")
+        sf = root / "runs" / run_id / "status.json"
+        if not run_id or not sf.exists():
+            return ToolResult(False, error=f"未找到 run: {run_id}")
+        return ToolResult(True, content=_dump_content(orjson.loads(sf.read_bytes())))
+    if action != "run":
+        return ToolResult(False, error=f"未知 action: {action}（run/save/list/load/status）")
+
+    manager = tool_ctx.get("sub_agent_manager")
+    if not manager:
+        return ToolResult(False, error="子智能体管理器未初始化")
+
+    # ---- from_saved：读存档补齐 script/meta/args（显式传入的 args/script 优先）----
+    from_saved = str(kwargs.get("from_saved") or "")
+    if from_saved:
+        try:
+            wf_saved = load_workflow(wf_root(), from_saved)
+        except KeyError as e:
+            return ToolResult(False, error=str(e).strip("'\""))
+        if not (isinstance(meta, dict) and meta):
+            meta = wf_saved["meta"] or {"name": from_saved, "description": f"已存 workflow: {from_saved}"}
+        if kwargs.get("args") is None:
+            kwargs["args"] = wf_saved["args"]
+        if not str(kwargs.get("script") or "").strip():
+            kwargs["script"] = wf_saved["script"]
+
     if (
         not isinstance(meta, dict)
         or not str(meta.get("name") or "").strip()
