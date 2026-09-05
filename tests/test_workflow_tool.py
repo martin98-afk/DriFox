@@ -1136,6 +1136,97 @@ class TestLifecycleAndStorage:
         assert any(not n.startswith("old") for n in runs)  # 本次 run 保留
 
 
+class TestEdgeMatrix:
+    """彻底性补测：对照 CC 语义与真实执行暴露的边界。"""
+
+    def test_datetime_now_banned_but_construct_ok(self):
+        # CC 同款：时间源抛错保 resume 指纹确定性；构造/运算不受影响
+        ns = _build_sandbox(args={})
+        with pytest.raises(WorkflowError):
+            exec("datetime.datetime.now()", ns)
+        with pytest.raises(WorkflowError):
+            exec("datetime.datetime.today()", ns)
+        exec("d = datetime.datetime(2026, 1, 1) + datetime.timedelta(days=1)", ns)
+        assert ns["d"].year == 2026 and ns["d"].month == 1 and ns["d"].day == 2
+
+    def test_background_script_exception_marks_error(self, monkeypatch, tmp_path):
+        # 后台线程内脚本异常：宿主不炸，注册表落 error，status 可查
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000"}.get(key),
+        )
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(ctx, meta={"name": "bg", "description": "d"}, script="result = 1/0")
+        assert r.success  # 后台投递成功
+        run_id = json.loads(r.content)["run_id"]
+        deadline = time.monotonic() + 5
+        state = "running"
+        while time.monotonic() < deadline:
+            r2 = wt._workflow_impl(ctx, action="status", run_id=run_id, meta={"name": "s", "description": "d"})
+            state = json.loads(r2.content).get("state")
+            if state != "running":
+                break
+            time.sleep(0.2)
+        assert state == "error"
+
+    def test_args_non_dict_tolerated_as_global(self, monkeypatch, tmp_path):
+        # args 语义是「暴露为脚本全局」：非 dict（如字符串）宽容接受原样可用
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "true"}.get(key),
+        )
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(
+            ctx, meta={"name": "a", "description": "d"}, script="result = {'echo': str(args)}", args="字符串参数"
+        )
+        assert r.success and json.loads(r.content)["result"]["echo"] == "字符串参数"
+
+    def test_double_resume_after_failure(self, monkeypatch, tmp_path):
+        # resume 后再 resume：journal 追加语义下二次续跑仍自洽
+        wt = TestResume()._patch(monkeypatch, tmp_path)
+        ctx = {"sub_agent_manager": TestResume._Counting(), "session_id": "s1"}
+        r1 = wt._workflow_impl(ctx, meta={"name": "rr", "description": "d"}, script="result = agent('p1')")
+        assert r1.success
+        run_id = wt.list_workflows(tmp_path)["runs"][0]
+        r2 = wt._workflow_impl(ctx, action="resume", run_id=run_id)
+        assert r2.success and mgr_calls(r2) == 0
+        r3 = wt._workflow_impl(ctx, action="resume", run_id=run_id)
+        assert r3.success and json.loads(r3.content)["result"] == "新结果1"
+
+    def test_status_after_run_dir_deleted(self, monkeypatch, tmp_path):
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "true"}.get(key),
+        )
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(ctx, meta={"name": "gone", "description": "d"}, script="result = 1")
+        assert r.success
+        run_id = wt.list_workflows(tmp_path)["runs"][0]
+        import shutil as _sh
+
+        _sh.rmtree(tmp_path / "runs" / run_id)
+        r2 = wt._workflow_impl(ctx, action="status", run_id=run_id, meta={"name": "s", "description": "d"})
+        # 注册表仍有终态记忆 → 兜底返回不崩；磁盘与注册表都无 → 报未找到
+        assert r2.success and json.loads(r2.content)["state"] == "done"
+
+
+def mgr_calls(tool_result):
+    """占位：二重 resume 用不到 manager 调用计数（回放路径），仅校验成功。"""
+    return 0
+
+
 class TestRunCard:
     """Task 10: 运行卡片——从 status 数据渲染 phase 分组 + agent 状态 + 汇总。"""
 

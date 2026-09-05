@@ -107,12 +107,36 @@ _ALLOWED_BUILTINS.update(
 )
 
 # 预置只读常用模块（脚本只做协调与数据变换，不开放 __import__）
+def _restricted_datetime():
+    """datetime 模块的受限副本：now/today/utcnow 抛 WorkflowError。
+
+    CC 同款语义（Date.now()/Math.random() 直接 throw）：时间源不确定会让
+    resume 重放时 agent 调用序列漂移。需要时间戳请通过 args 传入。
+    """
+    import types
+
+    mod = types.ModuleType("datetime")
+    mod.__dict__.update(datetime.__dict__)
+
+    def _banned(*a, **kw):
+        raise WorkflowError(
+            "datetime.now/today/utcnow 已禁用（保证 resume 指纹确定性）；需要时间戳请通过 args 传入"
+        )
+
+    mod.datetime = type(
+        "datetime",
+        (datetime.datetime,),
+        {"now": staticmethod(_banned), "today": staticmethod(_banned), "utcnow": staticmethod(_banned)},
+    )
+    return mod
+
+
 _PRESET_MODULES: dict = {
     "json": json,
     "math": math,
     "re": re,
     "statistics": statistics,
-    "datetime": datetime,
+    "datetime": _restricted_datetime(),
 }
 
 
@@ -1215,11 +1239,11 @@ def _workflow_impl(tool_ctx, **kwargs):
             )
         if sf.exists():
             payload_status = orjson.loads(sf.read_bytes())
-        else:
-            payload_status = {"run_id": run_id, "name": live.get("name"), "state": live.get("state")}
-        if str(kwargs.get("html") or "").lower() in ("1", "true", "yes"):
+            # 磁盘是事实源：终态已落盘则注册表不再需要驻留，防 _ACTIVE_RUNS 无限增长
+            with _RUNS_LOCK:
+                _ACTIVE_RUNS.pop(run_id, None)
             return ToolResult(True, content=_dump_content(payload_status))
-        return ToolResult(True, content=_dump_content(payload_status))
+        return ToolResult(True, content=_dump_content({"run_id": run_id, "state": live.get("state")}))
     if action not in ("run", "resume"):
         return ToolResult(False, error=f"未知 action: {action}（run/resume/save/list/load/status）")
 
