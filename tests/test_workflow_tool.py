@@ -1063,6 +1063,81 @@ class TestResume:
         assert json.loads(r2.content)["result"] == "新结果1"
 
 
+class TestIntegrationFormerErrorShapes:
+    """Task 12: 集成验收——重放 apache-3d-build 脚本（曾踩满三个炸点）的形态，应一次跑通。"""
+
+    def _patch(self, monkeypatch, tmp_path):
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {
+                "max_result_chars": "50000",
+                "default_foreground": "true",
+                "model_aliases": "sonnet=m-sonnet, haiku=m-haiku",
+            }.get(key),
+        )
+        return wt
+
+    class _Rec:
+        """记录派发详情的 manager。"""
+
+        def __init__(self):
+            self.dispatched = []
+
+        def execute_task(self, task_id, agent_name, task_description, on_finished=None, on_error=None, **kw):
+            self.dispatched.append({"agent": agent_name, "model": kw.get("model")})
+            on_finished(task_id, json.dumps({"verdict": "通过", "by": agent_name}))
+            return True
+
+        def cancel_task(self, task_id):
+            return True
+
+    APACHE_SHAPE = """
+phase("1/4 plan", "读取计划与设计并给出实施约束")
+plan = agent("给出硬约束清单", agent="plan", phase="plan")
+phase("2/4 build", "实现单 HTML 离线模型")
+build = agent("构建目标", agent="build", phase="build", model="sonnet")
+phase("3/4 review", "并行审查")
+SCHEMA = {"type": "object", "properties": {"verdict": {"type": "string"}}, "required": ["verdict"]}
+r1, r2 = parallel([
+    lambda: agent("功能审查", agent="code-reviewer", phase="review", model="haiku"),
+    lambda: agent("界面审查", agent="frontend-architect", phase="review", schema=SCHEMA),
+])
+phase("4/4 test", "运行静态与浏览器自检")
+test = agent("自检", agent="task-executor", phase="test", model="sonnet")
+log("全部阶段完成")
+result = {"plan": plan, "build": build, "reviews": [r1, r2], "test": test}
+"""
+
+    def test_apache_shape_runs_end_to_end(self, monkeypatch, tmp_path):
+        wt = self._patch(monkeypatch, tmp_path)
+        mgr = self._Rec()
+        ctx = {"sub_agent_manager": mgr, "session_id": "s1"}
+        r = wt._workflow_impl(ctx, meta={"name": "apache-3d", "description": "三维模型"}, script=self.APACHE_SHAPE)
+        assert r.success, r.error
+        body = json.loads(r.content)
+        assert body["agents_started"] == 5
+        assert [p["title"] for p in body["phases"]] == ["1/4 plan", "2/4 build", "3/4 review", "4/4 test"]
+        assert body["phases"][0]["detail"] == "读取计划与设计并给出实施约束"
+        assert json.loads(body["result"]["build"])["verdict"] == "通过"
+        assert body["result"]["reviews"][1] == {"verdict": "通过", "by": "frontend-architect"}  # schema 校验后的 dict
+        by_agent = {d["agent"]: d["model"] for d in mgr.dispatched}
+        assert by_agent["build"] == "m-sonnet" and by_agent["task-executor"] == "m-sonnet"
+        assert by_agent["code-reviewer"] == "m-haiku"
+
+    def test_import_os_rejected_with_presets(self, monkeypatch, tmp_path):
+        wt = self._patch(monkeypatch, tmp_path)
+        ctx = {"sub_agent_manager": self._Rec(), "session_id": "s1"}
+        r = wt._workflow_impl(
+            ctx, meta={"name": "bad", "description": "d"}, script="import os\nresult = 1"
+        )
+        assert not r.success
+        assert "禁止 import" in r.error and "os" in r.error
+
+
 class TestConfigParsing:
     """Task 2: 新配置项解析——model_aliases 别名映射 + 前台开关 + 卡片刷新间隔。"""
 
