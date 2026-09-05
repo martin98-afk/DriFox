@@ -28,7 +28,7 @@ class TestSandbox:
     def test_preset_modules_and_args(self):
         ns = _build_sandbox(args={"files": ["a"]})
         assert ns["args"] == {"files": ["a"]}
-        assert ns["json"]["dumps"] and ns["math"]["sqrt"] and ns["re"]["match"]
+        assert ns["json"].dumps and ns["math"].sqrt and ns["re"].match
 
 
 class TestRunState:
