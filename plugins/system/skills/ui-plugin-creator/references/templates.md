@@ -1807,6 +1807,7 @@ registry.register_input_button(
     icon_light_path=...,  # 浅色主题图标（深色线条 SVG），主题切换主程序自动刷新
     tooltip="...",
     on_click=_on_clicked, # callback(context)
+    on_right_click=None,  # 可选；注册后按钮右键派发 callback(context)，不弹系统菜单
     position="before:new_session",  # 可选；缺省 "end"
 )
 ```
@@ -1817,6 +1818,8 @@ registry.register_input_button(
   `memory` / `history` 已迁工作台，仅剩零尺寸锚点（兼容旧插件，勿依赖视觉位置）。
 - 图标为 **24×24 线性 SVG**，线条 `stroke`：深色主题用 `#d0d0d0`，浅色主题用 `#3a3a3a`。
 - `on_click(context)` 的 context 含：`main_widget` / `window_id` / `item_id` / `tab_index`。
+- `on_right_click` 仅新版主程序支持：旧主程序上多传该 kwarg 会 TypeError，
+  插件侧用 `inspect.signature` 检测降级（参考 quick-screenshot `register_ui`）。
 
 ### 9.2 ui/__init__.py 完整骨架
 

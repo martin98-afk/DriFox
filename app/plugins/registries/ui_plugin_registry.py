@@ -307,6 +307,7 @@ class InputButtonInfo:
         group: 分组（默认 "plugin"，用于与系统按钮分隔线区分）
         priority: 优先级（同 button_id 时高者覆盖低者）
         on_click: 点击回调，签名 (context: dict) -> None（context 含 window_id 等）
+        on_right_click: 右键回调，签名同 on_click（可选；缺省时按钮右键无行为）
         metadata: 附加元数据
     """
 
@@ -318,6 +319,7 @@ class InputButtonInfo:
     group: str = "plugin"
     priority: int = 0
     on_click: Optional[Callable[[Dict[str, Any]], None]] = None
+    on_right_click: Optional[Callable[[Dict[str, Any]], None]] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     position: str = "end"  # "start" | "before:<id>" | "after:<id>" | "end"（默认追加末尾）
 
@@ -1059,6 +1061,7 @@ class UIPluginRegistry:
         group: str = "plugin",
         priority: int = 0,
         on_click: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_right_click: Optional[Callable[[Dict[str, Any]], None]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         position: str = "end",
     ) -> None:
@@ -1066,6 +1069,9 @@ class UIPluginRegistry:
 
         icon_path 为深色主题默认图标；icon_light_path 为浅色主题图标
         （可选，缺省时浅色主题回退 icon_path）。主题切换时主程序自动刷新。
+
+        on_right_click: 右键点击回调（可选，签名同 on_click）；注册后按钮右键
+        不再弹系统菜单，改为派发本回调。
 
         position: "start" | "before:<button_id>" | "after:<button_id>" | "end"
         （Phase E：允许插件声明按钮位置——锚定系统按钮 memory/history/new_session
@@ -1086,6 +1092,7 @@ class UIPluginRegistry:
             group=group,
             priority=priority,
             on_click=on_click,
+            on_right_click=on_right_click,
             metadata=metadata,
             position=position,
         )
