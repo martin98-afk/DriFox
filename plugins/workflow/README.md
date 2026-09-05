@@ -29,7 +29,8 @@
 | `status` | run_id | 查任务状态；`html=true` 返回渲染卡片 |
 | `resume` | run_id | 从原 run 续跑：指纹命中的 agent 回放结果不真跑 |
 
-- `foreground=true`：同步执行到完成（旧行为）
+- `foreground=true`：同步执行到完成。**用户在配置里关闭同步执行后此参数被禁用**：
+  传 `foreground=true` 会被拒绝并提示改用后台模式；省略参数即后台 + `action=status` 查询
 - `from_saved="名字"`：跑已存 workflow，`args` 覆盖存档默认值
 
 ### 存档目录

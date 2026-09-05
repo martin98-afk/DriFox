@@ -776,7 +776,7 @@ _WORKFLOW_SCHEMA = {
                 },
                 "foreground": {
                     "type": "boolean",
-                    "description": "true 时同步执行到完成（旧行为）；默认后台运行立即返回 run_id",
+                    "description": "同步等待到完成。仅当用户配置允许时生效；用户关闭同步执行（default_foreground=false）后传 true 会被拒绝——此时省略本参数用后台模式 + action=status 查询即可",
                 },
                 "from_saved": {
                     "type": "string",
@@ -1311,9 +1311,23 @@ def _workflow_impl(tool_ctx, **kwargs):
     max_runs_kept = int(float(store.get(PLUGIN_NAME, "max_runs_kept") or 30))
 
     # ---- 前台/后台分流：默认后台投递 daemon 线程立即返回，foreground=true 同步等结果 ----
+    # 用户显式关闭同步执行（default_foreground=false）= 禁用前台：模型的显式 foreground=true
+    # 视为违背用户配置，拒绝并引导走后台 + status 查询。未配置（None/空）仅是默认后台，不禁。
+    raw_fg = store.get(PLUGIN_NAME, "default_foreground")
+    explicitly_disabled = raw_fg is not None and str(raw_fg).strip() != "" and str(raw_fg).lower() != "true"
+    default_foreground = str(raw_fg or "").lower() == "true"
     foreground = kwargs.get("foreground")
     if foreground is None:
         foreground = default_foreground
+    elif foreground and explicitly_disabled:
+        return ToolResult(
+            False,
+            error=(
+                "前台同步已被用户配置禁用（default_foreground=false）。"
+                "请省略 foreground 以后台模式发起任务，随后用 action=status, run_id=... 查询进度与结果；"
+                "中断的任务用 action=resume 续跑。"
+            ),
+        )
     root = wf_root()
     session_id = tool_ctx.get("session_id", "")
     if resume_dir is not None:

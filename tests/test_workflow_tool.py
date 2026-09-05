@@ -1197,7 +1197,7 @@ class TestEdgeMatrix:
         assert r1.success
         run_id = wt.list_workflows(tmp_path)["runs"][0]
         r2 = wt._workflow_impl(ctx, action="resume", run_id=run_id)
-        assert r2.success and mgr_calls(r2) == 0
+        assert r2.success
         r3 = wt._workflow_impl(ctx, action="resume", run_id=run_id)
         assert r3.success and json.loads(r3.content)["result"] == "新结果1"
 
@@ -1221,10 +1221,46 @@ class TestEdgeMatrix:
         # 注册表仍有终态记忆 → 兜底返回不崩；磁盘与注册表都无 → 报未找到
         assert r2.success and json.loads(r2.content)["state"] == "done"
 
+    def test_foreground_denied_when_user_disabled(self, monkeypatch, tmp_path):
+        # 用户关闭同步执行（default_foreground=false）后，模型的显式 foreground=true 被拒
+        from plugins.workflow.tools import workflow_tool as wt
 
-def mgr_calls(tool_result):
-    """占位：二重 resume 用不到 manager 调用计数（回放路径），仅校验成功。"""
-    return 0
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "false"}.get(key),
+        )
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(
+            ctx,
+            foreground=True,
+            meta={"name": "denied", "description": "d"},
+            script="result = agent('x')",
+        )
+        assert not r.success and "禁用" in r.error
+        # 省略参数时走后台默认
+        r2 = wt._workflow_impl(ctx, meta={"name": "denied2", "description": "d"}, script="result = agent('x')")
+        assert r2.success and json.loads(r2.content)["status"] == "running"
+
+    def test_foreground_allowed_when_user_enabled(self, monkeypatch, tmp_path):
+        # 配置为前台（未关闭同步）时，显式 foreground=true 正常生效
+        from plugins.workflow.tools import workflow_tool as wt
+
+        monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
+        monkeypatch.setattr(
+            wt.PluginConfigStore,
+            "get",
+            lambda self, plugin, key: {"max_result_chars": "50000", "default_foreground": "true"}.get(key),
+        )
+        ctx = {"sub_agent_manager": TestBackgroundRun._Slow(), "session_id": "s1"}
+        r = wt._workflow_impl(
+            ctx,
+            foreground=True,
+            meta={"name": "ok", "description": "d"},
+            script="result = agent('x')",
+        )
+        assert r.success and json.loads(r.content)["result"] == "slow-ok"
 
 
 class TestRunCard:
