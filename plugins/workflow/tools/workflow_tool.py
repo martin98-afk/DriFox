@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import builtins
 import datetime
+import hashlib
 import inspect
 import json
 import math
@@ -18,6 +19,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import orjson
 from loguru import logger
@@ -225,6 +227,82 @@ class _RunState:
     def untrack_waiter(self, ev: threading.Event) -> None:
         with self._lock:
             self._waiters.discard(ev)
+
+
+class RunJournal:
+    """单次 run 的运行日志：journal.jsonl（事件流）+ status.json（卡片数据源，原子写）。
+
+    resume 靠 journal 回放：agent 指纹 = sha256(prompt+role+model+schema)，
+    指纹命中且状态 done 的子任务直接回放结果不再真跑。
+    """
+
+    def __init__(self, run_dir):
+        self.dir = Path(run_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._seq = 0
+
+    # ---- 事件流 ----
+
+    def append(self, type: str, **fields) -> dict:
+        """追加一行事件（线程安全）；返回写入的完整记录。"""
+        with self._lock:
+            self._seq += 1
+            rec = {"ts": round(time.time(), 3), "seq": self._seq, "type": type, **fields}
+            with open(self.dir / "journal.jsonl", "a", encoding="utf-8") as f:
+                f.write(orjson.dumps(rec).decode() + "\n")
+            return rec
+
+    def record_phase(self, title: str, detail: str | None = None) -> None:
+        self.append("phase", title=str(title), detail=None if detail is None else str(detail))
+
+    def record_agent_start(self, agent_key: str, fingerprint: str, role: str, model: str | None) -> None:
+        self.append("agent_start", agent_key=agent_key, fingerprint=fingerprint, role=role, model=model)
+
+    def record_agent_end(self, agent_key: str, status: str, elapsed_sec: float, result) -> None:
+        self.append("agent_end", agent_key=agent_key, status=status, elapsed_sec=round(elapsed_sec, 3), result=result)
+
+    # ---- 指纹与回放 ----
+
+    @staticmethod
+    def fingerprint(prompt: str, role: str, model: str | None, schema) -> str:
+        payload = orjson.dumps(
+            {"p": prompt, "r": role, "m": model, "s": schema},
+            option=orjson.OPT_SORT_KEYS,
+        )
+        return hashlib.sha256(payload).hexdigest()[:16]
+
+    def completed_map(self) -> dict:
+        """{agent_key: {fingerprint, status, result}}：仅含已终结（done/replayed）的 agent。"""
+        jf = self.dir / "journal.jsonl"
+        if not jf.exists():
+            return {}
+        out: dict = {}
+        with open(jf, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = orjson.loads(line)
+                except orjson.JSONDecodeError:
+                    continue
+                if rec.get("type") == "agent_start":
+                    out.setdefault(rec["agent_key"], {})['fingerprint'] = rec.get("fingerprint")
+                elif rec.get("type") == "agent_end" and rec.get("status") in ("done", "replayed"):
+                    out.setdefault(rec["agent_key"], {}).update(
+                        {"status": rec["status"], "result": rec.get("result")}
+                    )
+        return {k: v for k, v in out.items() if "result" in v and "fingerprint" in v}
+
+    # ---- 卡片数据源 ----
+
+    def write_status(self, payload: dict) -> None:
+        """原子写 status.json：tmp+replace，卡片侧永远读到完整 JSON。"""
+        with self._lock:
+            tmp = self.dir / f"status.json.tmp.{threading.get_ident()}"
+            tmp.write_bytes(orjson.dumps(payload))
+            tmp.replace(self.dir / "status.json")
 
 
 def _direct_connection() -> int:
