@@ -60,6 +60,27 @@
         "type": "number",
         "default": 50000,
         "description": "超长截断并附说明"
+      },
+      {
+        "key": "model_aliases",
+        "label": "模型别名映射",
+        "type": "text",
+        "default": "",
+        "description": "agent(model=别名) 的解析表，格式: 别名=模型ID，逗号分隔，如 sonnet=xxx,haiku=yyy"
+      },
+      {
+        "key": "default_foreground",
+        "label": "默认前台阻塞",
+        "type": "bool",
+        "default": false,
+        "description": "开启后 workflow 默认同步执行到完成；关闭（默认）为后台运行立即返回"
+      },
+      {
+        "key": "card_refresh_ms",
+        "label": "卡片刷新间隔（毫秒）",
+        "type": "number",
+        "default": 1000,
+        "description": "实时状态卡片的轮询间隔"
       }
     ]
   }

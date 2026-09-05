@@ -35,6 +35,17 @@ GROUP_SUBAGENT = "子智能体"
 _HOST_RENDER_CAP = 5000
 
 
+def _parse_aliases(raw: str | None) -> dict[str, str]:
+    """解析 model_aliases 配置："别名=模型ID" 逗号分隔；残缺段跳过不报错。"""
+    out: dict[str, str] = {}
+    for part in str(raw or "").split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            if k.strip() and v.strip():
+                out[k.strip()] = v.strip()
+    return out
+
+
 class WorkflowError(Exception):
     """钩子误用 / 上限触发（杀全脚本，模型可修正后重发）"""
 
@@ -521,6 +532,9 @@ def _workflow_impl(tool_ctx, **kwargs):
     max_agent_wait = float(store.get(PLUGIN_NAME, "max_agent_wait_sec") or 900)
     default_agent = str(store.get(PLUGIN_NAME, "default_agent") or "build")
     max_chars = int(store.get(PLUGIN_NAME, "max_result_chars") or 50000)
+    model_aliases = _parse_aliases(store.get(PLUGIN_NAME, "model_aliases"))
+    default_foreground = str(store.get(PLUGIN_NAME, "default_foreground") or "").lower() == "true"
+    card_refresh_ms = int(float(store.get(PLUGIN_NAME, "card_refresh_ms") or 1000))
 
     state = _RunState(max_total, time.monotonic() + max_duration)
     pool = ThreadPoolExecutor(

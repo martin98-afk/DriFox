@@ -670,3 +670,46 @@ class TestDynamicDescription:
 
         d = _workflow_description([])
         assert "agent(" in d  # 钩子用法仍在
+
+
+class TestConfigParsing:
+    """Task 2: 新配置项解析——model_aliases 别名映射 + 前台开关 + 卡片刷新间隔。"""
+
+    def test_parse_aliases_basic(self):
+        from plugins.workflow.tools.workflow_tool import _parse_aliases
+
+        assert _parse_aliases("sonnet=m1, haiku=m2") == {"sonnet": "m1", "haiku": "m2"}
+
+    def test_parse_aliases_edge_cases(self):
+        from plugins.workflow.tools.workflow_tool import _parse_aliases
+
+        assert _parse_aliases("") == {}
+        assert _parse_aliases(None) == {}
+        # 残缺段（无=、空 key、空 value）跳过，合法段保留
+        assert _parse_aliases("bad, a=, =b, ok=v1") == {"ok": "v1"}
+
+    def test_impl_tolerates_new_config_keys(self, monkeypatch):
+        from plugins.workflow.tools import workflow_tool as wt
+
+        def fake_get(self, plugin, key):
+            return {
+                "max_concurrent_agents": 2,
+                "max_total_agents": 10,
+                "max_items_per_call": 10,
+                "max_duration_sec": 60,
+                "max_agent_wait_sec": 60,
+                "default_agent": "build",
+                "max_result_chars": 1000,
+                "model_aliases": "sonnet=m1",
+                "default_foreground": "true",
+                "card_refresh_ms": 2000,
+            }.get(key)
+
+        monkeypatch.setattr(wt.PluginConfigStore, "get", fake_get)
+        ctx = {"sub_agent_manager": _FakeManager(routes={"build": "ok"}), "session_id": "s1"}
+        r = wt._workflow_impl(
+            ctx,
+            meta={"name": "audit", "description": "审计"},
+            script="result = {'n': agent('x')}",
+        )
+        assert r.success is True
