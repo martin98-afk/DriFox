@@ -300,6 +300,10 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id:
         elif name == "subagent_dag":
             if subagent_names:
                 schema["function"]["description"] += "\n\n可用子智能体见系统提示 ## Available Subagents。"
+        elif name == "workflow":
+            from plugins.workflow.tools.workflow_tool import _workflow_description
+
+            schema["function"]["description"] = _workflow_description(subagent_names)
         elif name == "bash":
             schema["function"]["description"] += f"\n\n当前平台: {platform.system()}。"
 

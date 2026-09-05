@@ -298,3 +298,19 @@ class TestWorkflowImpl:
                 assert kw["keep_in_content"] is True
 
         register(_R())
+
+
+class TestDynamicDescription:
+    def test_workflow_description_lists_agents(self):
+        from plugins.workflow.tools.workflow_tool import _workflow_description
+
+        d = _workflow_description(["build", "explore"])
+        assert "build" in d and "explore" in d
+        assert "subagent_dag" in d  # 分工指引在描述里
+        assert "result" in d  # 结果约定在描述里
+
+    def test_workflow_description_empty_agents(self):
+        from plugins.workflow.tools.workflow_tool import _workflow_description
+
+        d = _workflow_description([])
+        assert "agent(" in d  # 钩子用法仍在

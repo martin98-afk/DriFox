@@ -222,13 +222,29 @@ def _make_combinators(state: _RunState, pool: ThreadPoolExecutor, max_items: int
 # schema / impl / register
 # ============================================================
 
+def _workflow_description(subagent_names: list) -> str:
+    """workflow 工具的动态描述：用法契约 + 可用角色列表（get_builtin_tools_schema 调用）。"""
+    base = (
+        "运行受限 Python 编排脚本，扇出子智能体。适合大规模多智能体编排（审计/迁移/多角度研究/对抗验证）；"
+        "一两个委派用 subagent_para，固定依赖图用 subagent_dag。\n\n"
+        "脚本是同步 Python，顶层直接执行，最终结果赋给 result 变量（未赋则为 null）。钩子：\n"
+        "- agent(prompt, agent=角色, phase=分组): 跑一个子智能体到完成，返回最终文本，失败返回 None\n"
+        "- parallel([零参函数]): 并发执行并等全部（屏障）；异常项降 None；不支持嵌套\n"
+        "- pipeline(items, *stages): 每项独立流过 stage(prev, item, index)，无屏障；阶段异常该项降 None 跳后续\n"
+        "- phase(title)/log(msg): 进度记录；预置 json/math/re/statistics/datetime；无文件/网络能力\n"
+        "误用钩子或超上限会中止整个脚本；子任务失败只降 None。"
+    )
+    if subagent_names:
+        base += "\n\n可用角色: " + ", ".join(subagent_names)
+    return base
+
+
 _WORKFLOW_SCHEMA = {
     "type": "function",
     "function": {
         "name": "workflow",
-        # description 运行时由 get_builtin_tools_schema 用 _workflow_description 动态覆盖
-        "description": "运行受限 Python 编排脚本，扇出子智能体。适合大规模多智能体编排"
-        "（审计/迁移/多角度研究）；一两个委派用 subagent_para，固定依赖图用 subagent_dag。",
+        # description 运行时由 get_builtin_tools_schema 用 _workflow_description 动态覆盖（含角色列表）
+        "description": _workflow_description([]),
         "parameters": {
             "type": "object",
             "properties": {
