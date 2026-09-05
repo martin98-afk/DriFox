@@ -2703,10 +2703,11 @@ _SKELETON_CACHE_MAX = 48
 # _ensureFenceAssets / _runFenceAssets）+ __drifoxBridge 权限桥
 # （_syncFenceBridge：theme / sendPrompt / storage）。旧骨架无这些函数与映射表
 # → 插件 fence 只剩静态 HTML，必须靠版本号让旧缓存失效。
-# v23（2026-09-05）：插件 fence JS 初始化入口约定 —— 宿主在 assets 就绪后调用
-# window.__drifoxFenceInit[lang]。旧骨架不调，插件只能靠自己 MutationObserver，
-# 行为不一致 → 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 23
+# v24（2026-09-05）：桥装配时序修复 —— _syncFenceBridge 改为在发起 assets 加载
+# **之前**先执行一次（原先只在 onload 回调之后）。插件脚本末尾的首帧兜底初始化
+# 若先跑，会看到空桥并把未授权状态锁死在节点上（幂等标记已打，后续救不回来）。
+# 旧骨架仍是旧时序 → 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 24
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -7784,12 +7785,20 @@ class CodeWebViewer(QWebEngineView):
                         }}
                     }} : undefined;
                 }};
+                function _syncFenceBridgeSafe() {{
+                    try {{ window._syncFenceBridge(); }} catch (e) {{
+                        console.error('[fence] bridge sync:', e);
+                    }}
+                }}
                 window._runFenceAssets = function () {{
                     var _flangs = _scanFenceLangs();
+                    // 桥必须先于 assets 装配：插件脚本末尾常有"首帧兜底"的主动初始化
+                    // （一执行就跑），那时若桥还是空的，插件会把"未授权"状态写死在
+                    // 节点上，之后再装配也救不回来（幂等标记已打）。
+                    _syncFenceBridgeSafe();
                     _ensureFenceAssets(_flangs, function () {{
-                        try {{ window._syncFenceBridge(); }} catch (e) {{
-                            console.error('[fence] bridge sync:', e);
-                        }}
+                        // 加载完成后再装配一次，覆盖注入期间新增的 fence lang
+                        _syncFenceBridgeSafe();
                         // 插件初始化入口约定：插件脚本挂 window.__drifoxFenceInit[lang]，
                         // 宿主在 assets 就绪后调用。会被反复调用（每次渲染），
                         // 插件必须保证幂等 —— 通常用 data-* 标记已处理的节点。
