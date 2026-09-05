@@ -2703,7 +2703,10 @@ _SKELETON_CACHE_MAX = 48
 # _ensureFenceAssets / _runFenceAssets）+ __drifoxBridge 权限桥
 # （_syncFenceBridge：theme / sendPrompt / storage）。旧骨架无这些函数与映射表
 # → 插件 fence 只剩静态 HTML，必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 22
+# v23（2026-09-05）：插件 fence JS 初始化入口约定 —— 宿主在 assets 就绪后调用
+# window.__drifoxFenceInit[lang]。旧骨架不调，插件只能靠自己 MutationObserver，
+# 行为不一致 → 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 23
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -7617,8 +7620,13 @@ class CodeWebViewer(QWebEngineView):
                                 console.log('pywebview_action:chart_expand:svg:' + _b64EncodeUtf8(node.outerHTML));
                             }} else if (type === 'html') {{
                                 // html widget（```html fence 净化产物）：放大查看走
-                                // chart_viewer_card 的独立渲染页
+                                // chart_viewer_card 的独立渲染页。
+                                // 取 innerHTML 前先摘除浮动工具栏：查看页无
+                                // .chart-toolbar 尺寸约束，按钮 qrc svg 会被渲染成巨大图标
+                                var _bar = el.querySelector(':scope > .chart-toolbar');
+                                if (_bar) el.removeChild(_bar);
                                 console.log('pywebview_action:chart_expand:html:' + _b64EncodeUtf8(el.innerHTML));
+                                if (_bar) el.appendChild(_bar);
                             }}
                         }} catch (e) {{ console.error('[chart] expand failed:', e); }}
                     }});
@@ -7635,7 +7643,11 @@ class CodeWebViewer(QWebEngineView):
                                 if (!node) return;
                                 console.log('pywebview_action:save_widget_file:svg:' + _b64EncodeUtf8(node.outerHTML));
                             }} else if (type === 'html') {{
+                                // 导出源文件同样摘除工具栏，还原纯净净化产物
+                                var _bar = el.querySelector(':scope > .chart-toolbar');
+                                if (_bar) el.removeChild(_bar);
                                 console.log('pywebview_action:save_widget_file:html:' + _b64EncodeUtf8(el.innerHTML));
+                                if (_bar) el.appendChild(_bar);
                             }}
                         }} catch (e) {{ console.error('[chart] export failed:', e); }}
                     }});
@@ -7773,10 +7785,23 @@ class CodeWebViewer(QWebEngineView):
                     }} : undefined;
                 }};
                 window._runFenceAssets = function () {{
-                    _ensureFenceAssets(_scanFenceLangs(), function () {{
+                    var _flangs = _scanFenceLangs();
+                    _ensureFenceAssets(_flangs, function () {{
                         try {{ window._syncFenceBridge(); }} catch (e) {{
                             console.error('[fence] bridge sync:', e);
                         }}
+                        // 插件初始化入口约定：插件脚本挂 window.__drifoxFenceInit[lang]，
+                        // 宿主在 assets 就绪后调用。会被反复调用（每次渲染），
+                        // 插件必须保证幂等 —— 通常用 data-* 标记已处理的节点。
+                        try {{
+                            var _inits = window.__drifoxFenceInit;
+                            if (_inits) {{
+                                for (var _fi = 0; _fi < _flangs.length; _fi++) {{
+                                    var _fn = _inits[_flangs[_fi]];
+                                    if (typeof _fn === 'function') _fn();
+                                }}
+                            }}
+                        }} catch (e) {{ console.error('[fence] init:', e); }}
                         if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                     }});
                 }};

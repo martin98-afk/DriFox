@@ -99,6 +99,19 @@ class TestBuildHtml:
         html_dark = build_chart_viewer_html("svg", _b64("<svg/>"), is_dark=True)
         assert "background: #1B1E24" in html_dark
 
+    def test_svg_mode_injects_viewbox_size_fallback(self):
+        """无 width/height 属性、只有 viewBox 的内联 SVG 必须注入按 viewBox 补尺寸的兜底 JS。
+
+        回归：旧 Chromium（Qt5 WebEngine）对无 width/height 属性的 svg intrinsic
+        size 按 0 算，flex 容器下 0x0 整图不可见（visualization 内联 SVG 常只给
+        viewBox；mermaid 产物自带尺寸不受影响）。"""
+        svg = '<svg viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg"></svg>'
+        for ctype in ("svg", "mermaid"):
+            html = build_chart_viewer_html(ctype, _b64(svg))
+            assert "setAttribute('width'" in html, f"{ctype} 缺 viewBox 补宽兜底"
+            assert "setAttribute('height'" in html, f"{ctype} 缺 viewBox 补高兜底"
+            assert "getAttribute('width')" in html, f"{ctype} 缺已有尺寸判断（勿覆盖显式尺寸）"
+
 
 class TestSavePngFromB64:
     def test_user_cancel_returns_none(self, qapp, monkeypatch):
