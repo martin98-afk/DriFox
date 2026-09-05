@@ -125,3 +125,89 @@ class TestAgentHook:
         hook, _ = self._make(mgr)
         hook("x", share_context=True)
         assert mgr.calls[0][2].get("share_context") is True
+
+
+class TestCombinators:
+    def _make(self, max_items=100, max_total=50):
+        from concurrent.futures import ThreadPoolExecutor
+
+        from plugins.workflow.tools.workflow_tool import _make_combinators
+
+        st = _RunState(max_total, time.monotonic() + 60)
+        pool = ThreadPoolExecutor(max_workers=4)
+        return (*_make_combinators(st, pool, max_items), st)
+
+    def test_parallel_returns_all(self):
+        parallel, _, _ = self._make()
+        out = parallel([lambda: 1, lambda: 2, lambda: 3])
+        assert out == [1, 2, 3]
+
+    def test_parallel_thunk_exception_drops_to_none(self):
+        parallel, _, _ = self._make()
+
+        def boom():
+            raise ValueError("x")
+
+        out = parallel([lambda: "ok", boom, lambda: "ok2"])
+        assert out == ["ok", None, "ok2"]
+
+    def test_parallel_nested_call_raises(self):
+        parallel, _, _ = self._make()
+
+        def nested():
+            parallel([lambda: 1])
+
+        with pytest.raises(WorkflowError):
+            parallel([nested])
+
+    def test_parallel_items_cap(self):
+        parallel, _, _ = self._make(max_items=2)
+        with pytest.raises(WorkflowError):
+            parallel([lambda: 1, lambda: 2, lambda: 3])
+
+    def test_pipeline_no_barrier_stage_signature(self):
+        _, pipeline, _ = self._make()
+        order = []
+
+        def s1(prev, item, idx):
+            time.sleep(0.05 if item == 0 else 0)
+            order.append(("s1", item))
+            return f"{item}-a"
+
+        def s2(prev, item, idx):
+            order.append(("s2", item))
+            return f"{prev}-b"
+
+        out = pipeline([0, 1], s1, s2)
+        assert out == ["0-a-b", "1-a-b"]
+        # 无屏障断言：item=1 的 s2 早于 item=0 的 s1（慢项不阻塞快项）
+        assert order.index(("s2", 1)) < order.index(("s1", 0))
+
+    def test_pipeline_stage_failure_skips_rest(self):
+        _, pipeline, _ = self._make()
+        reached = []
+
+        def bad(prev, item, idx):
+            raise ValueError("stage boom")
+
+        def after(prev, item, idx):
+            reached.append(item)
+            return prev
+
+        out = pipeline([1, 2], bad, after)
+        assert out == [None, None]
+        assert reached == []
+
+    def test_pipeline_workflow_error_propagates(self):
+        _, pipeline, _ = self._make()
+
+        def over_limit(prev, item, idx):
+            raise WorkflowError("额度尽")
+
+        with pytest.raises(WorkflowError):
+            pipeline([1], over_limit)
+
+    def test_pipeline_empty_stages_raises(self):
+        _, pipeline, _ = self._make()
+        with pytest.raises(WorkflowError):
+            pipeline([1, 2])
