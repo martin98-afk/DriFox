@@ -123,6 +123,23 @@ def _build_sandbox(args, hooks: dict | None = None) -> dict:
     return ns
 
 
+def _check_imports(script: str, preset_modules: dict) -> str | None:
+    """exec 前拦截脚本 import：沙箱无 __import__，第一时间报人话并列出预置模块。"""
+    banned: set = set()
+    for node in ast.walk(ast.parse(script)):
+        if isinstance(node, ast.Import):
+            banned.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            banned.add(node.module.split(".")[0])
+    if not banned:
+        return None
+    return (
+        f"脚本禁止 import（沙箱无 __import__）: {', '.join(sorted(banned))}。"
+        f"已预置可用模块: {', '.join(sorted(preset_modules))}；"
+        "路径拼接用 f-string 或 '/'.join，脚本无文件/网络能力。"
+    )
+
+
 def _check_underscore_names(script: str, ns: dict) -> str | None:
     """exec 前拦截脚本对宿主内部名（_ 开头）的引用，返回错误描述或 None。
 
@@ -503,15 +520,26 @@ def _make_combinators(state: _RunState, pool: ThreadPoolExecutor, max_items: int
 # ============================================================
 
 def _workflow_description(subagent_names: list) -> str:
-    """workflow 工具的动态描述：用法契约 + 可用角色列表（get_builtin_tools_schema 调用）。"""
+    """workflow 工具的动态描述：完整用法契约 + 可用角色列表（get_builtin_tools_schema 调用）。
+
+    description 是模型写脚本的第一信息源：钩子签名、沙箱边界、result 约定必须全部显式，
+    否则模型按直觉猜 API（phase 双参/model 参数/import）→ 每次报错。
+    """
     base = (
         "运行受限 Python 编排脚本，扇出子智能体。适合大规模多智能体编排（审计/迁移/多角度研究/对抗验证）；"
         "一两个委派用 subagent_para，固定依赖图用 subagent_dag。\n\n"
-        "脚本是同步 Python，顶层直接执行，最终结果赋给 result 变量（未赋则为 null）。钩子：\n"
-        "- agent(prompt, agent=角色, phase=分组): 跑一个子智能体到完成，返回最终文本，失败/超时返回 None\n"
+        "脚本是同步 Python，顶层直接执行，最终结果赋给 result 变量（未赋则为 null）。\n\n"
+        "钩子（def 定义，签名严格）：\n"
+        "- agent(prompt, agent=角色, phase=分组, label=标签, model=别名, schema=JSONSchema) -> str|None："
+        "跑一个子智能体到完成，返回最终文本，失败/超时返回 None；"
+        "model 需在插件配置 model_aliases 里注册别名（如 sonnet=模型ID），未注册别名降 None 并在日志提示；"
+        "schema 传 JSON Schema dict 时返回校验通过的 dict（失败自动带错重试 1 次，仍失败降 None）\n"
         "- parallel([零参函数]): 并发执行并等全部（屏障）；异常项降 None；不支持嵌套\n"
         "- pipeline(items, *stages): 每项独立流过 stage(prev, item, index)，无屏障；阶段异常该项降 None 跳后续\n"
-        "- phase(title)/log(msg): 进度记录；预置 json/math/re/statistics/datetime；无文件/网络能力\n"
+        "- phase(title, detail=None): 进度分组，detail 上卡片副标题\n"
+        "- log(msg): 进度消息\n\n"
+        "沙箱边界：禁止 import（预置 json/math/re/statistics/datetime）；无文件/网络能力；"
+        "宿主内部变量（_ 开头）不在脚本命名空间。\n"
         "误用钩子或超上限会中止整个脚本；子任务失败只降 None。"
     )
     if subagent_names:
@@ -651,8 +679,8 @@ def _workflow_impl(tool_ctx, **kwargs):
                 "log": log_hook,
             },
         )
-        # 预检：宿主内部名引用在 exec 前拦截，避免 agent 扇出后才 NameError 白跑
-        precheck_err = _check_underscore_names(script, ns)
+        # 预检：import 与宿主内部名引用在 exec 前拦截，避免 agent 扇出后才炸白跑
+        precheck_err = _check_imports(script, _PRESET_MODULES) or _check_underscore_names(script, ns)
         if precheck_err:
             return ToolResult(False, error=f"脚本预检失败: {precheck_err}")
         exec(compile(script, "<workflow>", "exec"), ns)  # noqa: S102 - 受限命名空间，containment 定位

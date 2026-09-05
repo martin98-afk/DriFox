@@ -669,6 +669,27 @@ class TestWorkflowImpl:
         register(_R())
 
 
+class TestImportPrecheck:
+    """Task 6: import 预检——拦截脚本 import，报错列出预置模块清单。"""
+
+    def test_blocks_import_and_lists_presets(self):
+        from plugins.workflow.tools.workflow_tool import _check_imports, _PRESET_MODULES
+
+        err = _check_imports("import os, json\nresult = 1", _PRESET_MODULES)
+        assert err is not None
+        assert "os" in err and "json" in err  # 被禁名与预置清单都在报错里
+
+    def test_from_import_blocked(self):
+        from plugins.workflow.tools.workflow_tool import _check_imports, _PRESET_MODULES
+
+        assert _check_imports("from pathlib import Path\nresult = 1", _PRESET_MODULES) is not None
+
+    def test_plain_script_passes(self):
+        from plugins.workflow.tools.workflow_tool import _check_imports, _PRESET_MODULES
+
+        assert _check_imports("x = json.loads('{}')\nresult = x", _PRESET_MODULES) is None
+
+
 class TestDynamicDescription:
     def test_workflow_description_lists_agents(self):
         from plugins.workflow.tools.workflow_tool import _workflow_description
@@ -683,6 +704,16 @@ class TestDynamicDescription:
 
         d = _workflow_description([])
         assert "agent(" in d  # 钩子用法仍在
+
+    def test_workflow_description_documents_full_contract(self):
+        # Task 6: description 是模型的第一信息源，契约必须完整显式
+        from plugins.workflow.tools.workflow_tool import _workflow_description
+
+        d = _workflow_description(["build"])
+        assert "model=" in d and "schema=" in d  # agent 钩子完整签名
+        assert "phase(title, detail=None)" in d  # phase 双参
+        assert "禁止 import" in d  # import 契约显式化
+        assert "model_aliases" in d  # 别名需配置的提示
 
 
 class TestPhaseLogHooks:
