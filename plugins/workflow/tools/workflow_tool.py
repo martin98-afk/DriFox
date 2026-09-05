@@ -86,6 +86,40 @@ def _build_sandbox(args, hooks: dict | None = None) -> dict:
     return ns
 
 
+def _check_underscore_names(script: str, ns: dict) -> str | None:
+    """exec 前拦截脚本对宿主内部名（_ 开头）的引用，返回错误描述或 None。
+
+    模型上下文里见过宿主变量（如 _HOST_RENDER_CAP）就可能写进脚本；沙箱没有这个名字，
+    NameError 要等脚本跑到引用点才炸——此前扇出的 agent 全部白跑。预检把失败提前到零成本。
+    保守策略：只拦 _ 开头的 Load 名；绑定收集从宽（赋值/参数/导入/except as 全算已定义），
+    宁可漏报不误报。reserved 集合直接从沙箱 ns 推导，钩子增减无漂移。
+    """
+    bound: set = set()
+    loads: set = set()
+    for node in ast.walk(ast.parse(script)):
+        if isinstance(node, ast.Name):
+            (loads if isinstance(node.ctx, ast.Load) else bound).add(node.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+    reserved = set(ns) - {"__builtins__"}
+    unknown = sorted(n for n in loads if n.startswith("_") and n not in bound and n not in reserved)
+    if not unknown:
+        return None
+    return (
+        f"脚本引用了沙箱不存在的名字: {', '.join(unknown)}。"
+        f"沙箱预置: {', '.join(sorted(reserved))}；"
+        "宿主内部变量（_ 开头）不在脚本命名空间，result 超长由宿主自行截断，脚本无需处理。"
+    )
+
+
 class _RunState:
     """单次 run 的额度、时长与中止状态（线程安全）。"""
 
@@ -484,6 +518,10 @@ def _workflow_impl(tool_ctx, **kwargs):
                 "log": lambda msg: logs.append(str(msg)),
             },
         )
+        # 预检：宿主内部名引用在 exec 前拦截，避免 agent 扇出后才 NameError 白跑
+        precheck_err = _check_underscore_names(script, ns)
+        if precheck_err:
+            return ToolResult(False, error=f"脚本预检失败: {precheck_err}")
         exec(compile(script, "<workflow>", "exec"), ns)  # noqa: S102 - 受限命名空间，containment 定位
         result = ns.get("result")
         result_note = ""
@@ -516,6 +554,16 @@ def _workflow_impl(tool_ctx, **kwargs):
         return ToolResult(True, content=payload)
     except WorkflowError as e:
         return ToolResult(False, error=f"workflow 执行中止: {e}")
+    except NameError as e:
+        # 预检只拦 _ 开头的名字；其他未定义名（钩子拼错等）走到这里，附预置名清单让模型自愈
+        return ToolResult(
+            False,
+            error=(
+                f"workflow 脚本异常: NameError: {e}。"
+                "沙箱仅预置 agent/parallel/pipeline/phase/log、json/math/re/statistics/datetime、args；"
+                "宿主内部名不在脚本命名空间"
+            ),
+        )
     except Exception as e:
         return ToolResult(False, error=f"workflow 脚本异常: {type(e).__name__}: {e}")
     finally:
