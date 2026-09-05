@@ -57,5 +57,11 @@ agent 指纹 = sha256(prompt+角色+model+schema)。prompt 内拼时间戳/随�
 
 设置卡可调：并发上限 / 总数上限 / 单次项数 / 总时长 / 单 agent 等待上限 / 默认角色 /
 结果字符上限 / `model_aliases`（别名=模型ID，逗号分隔）/ `default_foreground`（默认前台）/
-`card_refresh_ms`（卡片轮询间隔）。
+`card_refresh_ms`（卡片轮询间隔）/ `max_runs_kept`（历史 run 保留数，滚动清理，saved/ 不受影响）。
 环境变量 → 设置值 → 内置默认，三级链。
+
+## 沙箱定位
+
+受限命名空间是 **containment（防误用围栏），非安全边界**：白名单 builtins + 预置
+只读模块能挡住意外破坏与越权 import，但无法对抗蓄意逃逸（属性链反射等）。
+不要把不可信内容交给脚本处理；跨信任边界须换进程级隔离。
