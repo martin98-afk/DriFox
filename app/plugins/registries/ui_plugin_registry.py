@@ -5,10 +5,11 @@
 插件通过 register_ui(registry) 在加载时注册组件。
 """
 
+import os
 import re
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from app.core.command_manager import CommandType  # noqa: F401
@@ -60,6 +61,42 @@ class TagRendererInfo:
     tag_name: str
     render_func: Callable[[str, Dict[str, Any]], str]
     priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FenceRendererInfo:
+    """消息正文 fence 代码块渲染器
+
+    让插件注册一种 ```<lang> fence 的渲染方式。宿主内置的 echarts / mermaid /
+    svg / html **不迁移**（它们是协议的参考实现），且同名时内置优先——插件
+    无法劫持内置类型。
+
+    Attributes:
+        plugin_name: 所属插件名
+        lang: fence 语言标记（小写规范化）
+        render_func: 渲染函数，签名 (code: str, ctx: dict) -> str(HTML 片段)。
+                     ctx 含 theme_is_dark / card_id / window_id / message_id /
+                     fence_index。须为纯函数（在后台渲染线程调用，禁止触碰
+                     Qt widget）。
+        streaming_placeholder: 流式半截 fence 的占位；str 或
+                     callable(半截源码) -> str。缺省用宿主的通用图表骨架。
+        priority: 优先级（同 lang 时高者覆盖低者）
+        assets: 相对插件根路径的资源声明，形如
+                {"js": "ui/assets/fence/renderer.js", "css": "..."}。
+                宿主按卡片实际用到的 fence 按需注入。
+        bridge_permissions: 桥权限声明，取值见 FENCE_BRIDGE_PERMISSIONS。
+                未声明的方法在页面中为 undefined。
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    lang: str
+    render_func: Callable[[str, Dict[str, Any]], str]
+    streaming_placeholder: Optional[Any] = None
+    priority: int = 0
+    assets: Dict[str, str] = field(default_factory=dict)
+    bridge_permissions: Tuple[str, ...] = ()
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -345,6 +382,11 @@ class UIPluginRegistry:
         self._content_renderers: Dict[str, ContentRendererInfo] = {}
         # 消息文本内联标签渲染器：{tag_name(小写): TagRendererInfo}
         self._tag_renderers: Dict[str, TagRendererInfo] = {}
+        # 正文 fence 代码块渲染器：{lang(小写): FenceRendererInfo}
+        self._fence_renderers: Dict[str, FenceRendererInfo] = {}
+        # 已加载插件的根目录：{plugin_name: 目录绝对路径}
+        # fence 渲染器的 assets 是相对插件根声明的，宿主注入时需按此解析。
+        self._plugin_paths: Dict[str, str] = {}
         self._message_factories: List[MessageFactoryInfo] = []
         self._floating_cards: Dict[str, FloatingCardInfo] = {}
         self._welcome_tabs: Dict[str, WelcomeTabInfo] = {}
@@ -504,6 +546,137 @@ class UIPluginRegistry:
             # 低优先级注册被忽略
             return
         self._tag_renderers[key] = info
+
+    # fence 渲染器：允许的资源键与桥权限白名单
+    FENCE_ASSET_KEYS = ("js", "css")
+    FENCE_BRIDGE_PERMISSIONS = ("theme", "sendPrompt", "storage")
+    # 单个 asset 文件上限（设计稿 §3 防呆）。插件合计上限由宿主注入时控。
+    FENCE_ASSET_MAX_BYTES = 2 * 1024 * 1024
+
+    def register_fence_renderer(
+        self,
+        plugin_name: str,
+        lang: str,
+        render_func: Callable[[str, Dict[str, Any]], str],
+        streaming_placeholder: Optional[Any] = None,
+        priority: int = 0,
+        assets: Optional[Dict[str, str]] = None,
+        bridge_permissions: Optional[Iterable[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册消息正文 fence 代码块渲染器。
+
+        Args:
+            plugin_name: 所属插件名
+            lang: fence 语言标记（自动转小写）。与宿主内置 echarts / mermaid /
+                  svg / html 同名时内置优先，插件不会覆盖内置行为。
+            render_func: (code, ctx) -> HTML 片段，须为纯函数（后台渲染线程调用）
+            streaming_placeholder: 流式半截 fence 的占位（str 或 callable），
+                           缺省用宿主的通用图表骨架
+            priority: 同 lang 时高者覆盖低者
+            assets: {"js": 相对插件根路径, "css": ...}。宿主按卡片实际用到的
+                    fence 按需注入，未用到的插件不注入。
+            bridge_permissions: 桥权限声明，取值 "theme" / "sendPrompt" /
+                    "storage"。未声明的桥方法在页面中为 undefined。
+            metadata: 附加元数据
+
+        Raises:
+            ValueError: lang 非法、assets 键非法或路径不安全、权限名未知
+        """
+        if metadata is None:
+            metadata = {}
+        key = lang.strip().lower()
+        if not key or not re.fullmatch(r"[a-z0-9_+.-]+", key):
+            raise ValueError(f"invalid fence lang {lang!r}: must match [a-z0-9_+.-]+")
+
+        safe_assets: Dict[str, str] = {}
+        for akey, apath in (assets or {}).items():
+            if akey not in self.FENCE_ASSET_KEYS:
+                raise ValueError(f"invalid asset key {akey!r}: expected one of {self.FENCE_ASSET_KEYS}")
+            if not isinstance(apath, str) or not apath:
+                continue
+            # 防呆：只接受插件根内的相对路径（体积校验由宿主注入时做，
+            # registry 侧拿不到插件根目录）
+            norm = apath.replace("\\", "/").lstrip("/")
+            if not norm or norm.startswith("../") or "/../" in norm or os.path.isabs(apath):
+                raise ValueError(f"unsafe asset path {apath!r}: must be relative to plugin root")
+            safe_assets[akey] = norm
+
+        perms: Tuple[str, ...] = tuple(bridge_permissions or ())
+        unknown = [p for p in perms if p not in self.FENCE_BRIDGE_PERMISSIONS]
+        if unknown:
+            raise ValueError(
+                f"unknown bridge_permissions {unknown}: expected subset of {list(self.FENCE_BRIDGE_PERMISSIONS)}"
+            )
+
+        info = FenceRendererInfo(
+            plugin_name=plugin_name,
+            lang=key,
+            render_func=render_func,
+            streaming_placeholder=streaming_placeholder,
+            priority=priority,
+            assets=safe_assets,
+            bridge_permissions=perms,
+            metadata=metadata,
+        )
+        existing = self._fence_renderers.get(key)
+        if existing is not None and existing.priority > priority:
+            # 低优先级注册被忽略（与 register_content_renderer / register_tag_renderer 同范式）
+            return
+        self._fence_renderers[key] = info
+
+    def get_fence_renderer(self, lang: str) -> Optional[FenceRendererInfo]:
+        """按 fence 语言标记取渲染器；未注册返回 None。
+
+        宿主分发时先查表，命中走插件路径，未命中走内置硬编码链。
+        """
+        return self._fence_renderers.get((lang or "").strip().lower())
+
+    def get_all_fence_renderers(self) -> Dict[str, FenceRendererInfo]:
+        """返回全部已注册 fence 渲染器（副本）。
+
+        宿主用它做按需注入扫描：只有卡片里真的出现了该 lang 的 fence，
+        才把对应插件的 assets 注入这张卡片的骨架。
+        """
+        return dict(self._fence_renderers)
+
+    def get_plugin_path(self, plugin_name: str) -> Optional[str]:
+        """已加载插件的根目录绝对路径；未加载 / 未知插件返回 None。"""
+        return self._plugin_paths.get(str(plugin_name))
+
+    def resolve_fence_assets(self, plugin_name: str, assets: Dict[str, str]) -> Dict[str, str]:
+        """把插件声明的 assets 相对路径解析为绝对路径（含三重校验）。
+
+        校验项：① 键必须在 FENCE_ASSET_KEYS 内；② 解析后必须仍在插件根内
+        （防路径穿越，注册时已挡一道，这里再挡一道——插件目录可能被外部改动）；
+        ③ 文件存在且不超过 FENCE_ASSET_MAX_BYTES。
+
+        任一条不满足就静默丢弃该条目（插件的一部分能力失效，但不影响卡片其余渲染）。
+        """
+        out: Dict[str, str] = {}
+        root = self._plugin_paths.get(str(plugin_name))
+        if not root or not assets:
+            return out
+        root_norm = os.path.normpath(root)
+        prefix = root_norm + os.sep
+        for key, rel in assets.items():
+            if key not in self.FENCE_ASSET_KEYS or not isinstance(rel, str) or not rel:
+                continue
+            try:
+                path = os.path.normpath(os.path.join(root_norm, rel.replace("\\", "/")))
+            except Exception:
+                continue
+            if not path.startswith(prefix):
+                continue
+            if not os.path.isfile(path):
+                continue
+            try:
+                if os.path.getsize(path) > self.FENCE_ASSET_MAX_BYTES:
+                    continue
+            except OSError:
+                continue
+            out[key] = path
+        return out
 
     def get_tag_renderer(self, tag_name: str) -> Optional[TagRendererInfo]:
         """按标签名查询渲染器（未注册返回 None，调用方回退默认渲染）"""
@@ -1697,6 +1870,13 @@ class UIPluginRegistry:
 
         if plugin_path is None:
             return False
+        # 记录插件根路径：fence 渲染器的 assets 以插件根为基准声明，
+        # 宿主注入时要按此拼成 file:// URL（见 resolve_fence_assets）。
+        # 即便 ui/__init__.py 不存在也记 —— 插件根路径本身对宿主有用。
+        try:
+            self._plugin_paths[str(plugin_name)] = str(plugin_path)
+        except Exception:
+            pass
         ui_init = plugin_path / "ui" / "__init__.py"
         if not ui_init.exists():
             return False
@@ -1819,6 +1999,7 @@ class UIPluginRegistry:
             any(v.plugin_name == plugin_name for v in self._content_renderers.values())
             or any(f.plugin_name == plugin_name for f in self._message_factories)
             or any(v.plugin_name == plugin_name for v in self._tag_renderers.values())
+            or any(v.plugin_name == plugin_name for v in self._fence_renderers.values())
             or any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
             or any(v.plugin_name == plugin_name for v in self._welcome_actions.values())
             or any(v.plugin_name == plugin_name for v in self._mention_providers.values())
@@ -1909,6 +2090,9 @@ class UIPluginRegistry:
                         pass
                     if was_visible:
                         self._pending_card_restore.append((plugin_name, win_id, cid))
+        # 清理 fence 渲染器注册
+        self._fence_renderers = {k: v for k, v in self._fence_renderers.items() if v.plugin_name != plugin_name}
+        self._plugin_paths.pop(plugin_name, None)
         # 清理 Phase D 四类扩展点注册
         self._sidebar_items = {k: v for k, v in self._sidebar_items.items() if v.plugin_name != plugin_name}
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
@@ -2347,6 +2531,8 @@ class UIPluginRegistry:
     def reset(self) -> None:
         """清空所有状态（仅供测试使用）"""
         self._content_renderers.clear()
+        self._fence_renderers.clear()
+        self._plugin_paths.clear()
         self._message_factories.clear()
         self._floating_cards.clear()
         self._welcome_tabs.clear()

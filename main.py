@@ -45,11 +45,32 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 #
 # 覆盖方式：用 setdefault，外部若已设置 QTWEBENGINE_CHROMIUM_FLAGS 则以其为准
 # （便于调试或快速回退，例如 QTWEBENGINE_CHROMIUM_FLAGS="" 即完全禁用本组开关）。
+# ========== WebGL 按需解禁（3D 图形需要）==========
+# 默认关闭 GPU：正文是纯 2D 渲染，GPU 进程常驻是纯开销（见下方 _GPU_FLAGS）。
+# 需要 3D 图形（three.js / echarts-gl 之类）时启用，任一命中即可，重启生效：
+#   ① 环境变量 DRIFOX_ENABLE_WEBGL=1
+#   ② 标记文件 ~/.drifox/webgl_enabled（内容不限，存在即启用）
+# 不用设置项的原因：QtWebEngine 只在首次初始化时读取 QTWEBENGINE_CHROMIUM_FLAGS，
+# 必须早于 QApplication，此处加载 Settings 过重（且 main.py 顶部刻意少依赖）。
+_WEBGL_ENABLED = os.environ.get("DRIFOX_ENABLE_WEBGL", "").strip().lower() in ("1", "true", "on", "yes")
+if not _WEBGL_ENABLED:
+    try:
+        _WEBGL_ENABLED = os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox", "webgl_enabled"))
+    except Exception:
+        _WEBGL_ENABLED = False
+
+if _WEBGL_ENABLED:
+    # 无硬件 GPU 时用 SwiftShader 软件光栅兜底（老版本 Chromium 忽略此开关）
+    _GPU_FLAGS = " --enable-unsafe-swiftshader"
+else:
+    _GPU_FLAGS = (
+        " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
+        " --disable-software-rasterizer"
+    )
 _CHROMIUM_FLAGS = (
     "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
-    " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
-    " --disable-software-rasterizer"
-    " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
+    + _GPU_FLAGS
+    + " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
     " --disable-extensions"
     " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
     " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染

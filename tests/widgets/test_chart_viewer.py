@@ -68,6 +68,37 @@ class TestBuildHtml:
         with pytest.raises(ValueError):
             build_chart_viewer_html("echarts", big)
 
+    def test_svg_mode_injects_theme_css_vars(self):
+        """内联 SVG 依赖聊天骨架 :root 变量（var(--text)/var(--accent-soft) 等），
+        预览页必须注入同名变量块：缺变量时 fill 解析无效回退 SVG 默认黑 → 整块黑
+        （回归：曾导致 svg 全屏预览黑块 + 文字隐形）"""
+        svg = '<svg width="10" height="10"><rect fill="var(--accent-soft)"/></svg>'
+        for ctype in ("svg", "mermaid", "html"):
+            html = build_chart_viewer_html(ctype, _b64(svg))
+            assert ":root {" in html, f"{ctype} 缺 :root 变量块"
+            for var in (
+                "--text",
+                "--text-secondary",
+                "--text-muted",
+                "--accent",
+                "--accent-soft",
+                "--accent-soft-strong",
+                "--accent-text",
+                "--accent-border-weak",
+                "--panel",
+                "--border",
+                "--r-md",
+            ):
+                assert var + ":" in html, f"{ctype} 缺变量 {var}"
+
+    def test_svg_mode_vars_survive_bg_formatting(self):
+        """变量块拼在 %(bg)s 格式化之后：模板替换不得被变量值中的裸 % 破坏
+        （% 格式化遇裸 % 会抛 ValueError/输出错乱），背景字面值必须原样落盘"""
+        html = build_chart_viewer_html("svg", _b64("<svg/>"), is_dark=False)
+        assert "background: #FFFFFF" in html
+        html_dark = build_chart_viewer_html("svg", _b64("<svg/>"), is_dark=True)
+        assert "background: #1B1E24" in html_dark
+
 
 class TestSavePngFromB64:
     def test_user_cancel_returns_none(self, qapp, monkeypatch):
