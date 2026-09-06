@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -305,16 +306,13 @@ def _load_core_module(key: str, rel: str):
         raise ImportError(f"无法加载 {path}")
     module = importlib.util.module_from_spec(spec)
     _CORE_MODULES[key] = module
-    sys_modules()[f"assistant_hub_core.{key}"] = module
+    # 直接写 sys.modules：模块名前缀 assistant_hub_core. 已在 plugin.json 的
+    # module_prefixes 声明（AST 安全网按声明放行 + 热重载按声明 purge）。
+    # 早先这里用 sys_modules() 包一层以绕开静态扫描 —— 属规避手法，已纠正。
+    sys.modules[f"assistant_hub_core.{key}"] = module
     spec.loader.exec_module(module)
     module._source_mtime = mtime
     return module
-
-
-def sys_modules():
-    import sys
-
-    return sys.modules
 
 
 # ────────────────────────────────────────────────────────────────────

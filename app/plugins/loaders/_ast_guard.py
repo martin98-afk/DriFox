@@ -18,26 +18,35 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
+import os
+import sys
 from pathlib import Path
-from typing import Iterable, List, Set, Tuple
+from typing import Iterable, List, NamedTuple, Optional, Set, Tuple
 
 from loguru import logger
 
 
-def contains_sys_modules_mutation(source: str) -> bool:
-    """检测源码任意位置是否包含直接操作 sys.modules 的危险语句。
+def contains_sys_modules_mutation(
+    source: str,
+    allowed_names: Iterable[str] = (),
+    plugin_dir: Optional[Path] = None,
+) -> bool:
+    """检测源码是否包含**未被声明许可**的 sys.modules 写入。
 
-    覆盖两种常见形式：sys.modules.update({...}) 与 sys.modules['x'] = <obj>。
-    返回 True 即拒载。
+    Args:
+        source: 源码文本
+        allowed_names: 插件在 plugin.json 的 ``module_prefixes`` 里声明的模块名/前缀
+            （与热重载 purge 同源契约，见 PluginHostService._purge_module_prefixes）。
+            落在声明内、且不会遮蔽真实模块的注册放行；未声明或键无法静态解析则拒载。
+        plugin_dir: 插件根目录；用于判定"已加载模块是否本插件自己注册的"
+            （热重载覆盖自己允许，覆盖他人拒绝）。
+
+    Returns:
+        True 即拒载。
     """
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        # 语法错误由调用方按"拒载"处理（tool loader 行为：直接 return False，
-        # runtime/provider loader 走 exec 的 try/except 捕获后 return False）
-        return False
-    for node in ast.walk(tree):
-        if _is_sys_modules_mutation(node):
+    for write in find_sys_modules_writes(source):
+        if _write_rejection_reason(write.keys, allowed_names, plugin_dir) is not None:
             return True
     return False
 
@@ -63,6 +72,158 @@ def _is_sys_modules_mutation(node: "ast.AST") -> bool:
                 if val.attr == "modules" and isinstance(val.value, ast.Name) and val.value.id == "sys":
                     return True
     return False
+
+
+# ── 写入落点解析（声明式放行的基础） ──────────────────────────────
+# 背景：2026-09-06 ui loader 接上本安全网后，assistant_hub 这类"插件按文件路径
+# 注册自有共享模块（sys.modules['assistant_hub_manager'] = module）"的存量写法
+# 被一刀切拒载（UI 整体加载失败）。一刀切的本意是防"用假模块覆盖真模块"
+# （2026-08-22 事故：sys.modules.update({"app.tools": ...})），并非禁止插件注册
+# 自己的模块。故改为声明式：plugin.json 的 module_prefixes 声明命名空间，
+# 落点可静态解析 + 落在声明内 + 不遮蔽真实模块 → 放行并留日志。
+
+
+class SysModulesWrite(NamedTuple):
+    """一次 sys.modules 写入。
+
+    keys 为 None 表示键是动态表达式（变量拼接 / 函数返回值等），
+    静态无法确定落点 —— 调用方必须按最严口径拒载。
+    """
+
+    lineno: int
+    kind: str  # "update" | "subscript"
+    keys: Optional[Tuple[str, ...]]
+
+
+def _is_sys_modules_attr(node: "ast.AST") -> bool:
+    """节点是否为 sys.modules 表达式。"""
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "modules"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sys"
+    )
+
+
+def _module_level_str_constants(tree: "ast.Module") -> dict:
+    """收集模块顶层 `NAME = "字面量"` 常量，用于解析 sys.modules[NAME] 的键。"""
+    consts: dict = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            val = node.value
+            if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                consts[node.targets[0].id] = val.value
+    return consts
+
+
+def _resolve_str_key(node: "ast.AST", consts: dict) -> Optional[str]:
+    """把 sys.modules 的键表达式解析成字符串；无法静态确定返回 None。"""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name) and node.id in consts:
+        return consts[node.id]
+    return None
+
+
+def _dict_literal_keys(call: "ast.Call", consts: dict) -> Optional[Tuple[str, ...]]:
+    """解析 sys.modules.update({...}) 的键；非字面量 dict（含 **展开）返回 None。"""
+    if len(call.args) != 1 or call.keywords:
+        return None
+    arg = call.args[0]
+    if not isinstance(arg, ast.Dict):
+        return None
+    keys: List[str] = []
+    for k in arg.keys:
+        if k is None:  # {**other} 展开
+            return None
+        resolved = _resolve_str_key(k, consts)
+        if resolved is None:
+            return None
+        keys.append(resolved)
+    return tuple(keys)
+
+
+def find_sys_modules_writes(source: str) -> List[SysModulesWrite]:
+    """列出源码中所有 sys.modules 写入（update / 下标赋值）及其可解析的键名。"""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    consts = _module_level_str_constants(tree)
+    writes: List[SysModulesWrite] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "update" and _is_sys_modules_attr(node.func.value):
+                writes.append(
+                    SysModulesWrite(getattr(node, "lineno", 0), "update", _dict_literal_keys(node, consts))
+                )
+                continue
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Subscript) and _is_sys_modules_attr(target.value):
+                    key = _resolve_str_key(target.slice, consts)
+                    writes.append(
+                        SysModulesWrite(getattr(node, "lineno", 0), "subscript", None if key is None else (key,))
+                    )
+    return writes
+
+
+def _is_dotted_identifier(name: str) -> bool:
+    return bool(name) and all(part.isidentifier() for part in name.split("."))
+
+
+def _origin_under_plugin(mod, plugin_dir: Optional[Path]) -> bool:
+    """已加载模块的来源文件是否位于插件目录内（即"插件自己注册的"）。"""
+    if plugin_dir is None:
+        return False
+    origin = getattr(mod, "__file__", None) or getattr(getattr(mod, "__spec__", None), "origin", None)
+    if not origin:
+        return False
+    try:
+        base = Path(os.path.normcase(str(Path(plugin_dir).resolve())))
+        target = Path(os.path.normcase(str(Path(origin).resolve())))
+        return target.is_relative_to(base)
+    except Exception:
+        return False
+
+
+def _shadows_real_module(root: str, plugin_dir: Optional[Path]) -> bool:
+    """根名是否指向真实模块（宿主/三方/其它插件已加载或可导入）。
+
+    True → 注册即遮蔽，必须拒载。插件自己此前注册的模块（origin 在其目录内）
+    视为热重载自覆盖，不算遮蔽。
+    """
+    existing = sys.modules.get(root)
+    if existing is not None:
+        return not _origin_under_plugin(existing, plugin_dir)
+    try:
+        return importlib.util.find_spec(root) is not None
+    except (ModuleNotFoundError, ValueError):
+        return False  # 父包不存在 / 名称非法 → 环境里没有这个真模块
+    except Exception:
+        return True  # 未知状态：保守按"可能遮蔽"处理
+
+
+def _write_rejection_reason(
+    keys: Optional[Tuple[str, ...]],
+    allowed_names: Iterable[str],
+    plugin_dir: Optional[Path],
+) -> Optional[str]:
+    """返回拒载原因；None 表示放行。"""
+    if keys is None:
+        return "键为动态表达式，无法静态确认落点"
+    declared = tuple(allowed_names or ())
+    if not declared:
+        return "插件未在 plugin.json 声明 module_prefixes"
+    for key in keys:
+        if not _is_dotted_identifier(key):
+            return f"模块名非法: {key!r}"
+        if not any(key == p or key.startswith(p) for p in declared):
+            return f"模块名 {key!r} 不在声明前缀 {list(declared)} 内"
+        root = key.split(".")[0]
+        if _shadows_real_module(root, plugin_dir):
+            return f"模块名 {key!r} 会遮蔽真实模块（根 {root!r} 已存在或可导入）"
+    return None
 
 
 def has_register_function(source: str, names: Iterable[str] = ("register",)) -> bool:
@@ -206,6 +367,8 @@ def guard_plugin_module(
     require_register: bool = True,
     component: str = "",
     entry_names: Iterable[str] = ("register",),
+    allowed_sys_modules: Iterable[str] = (),
+    plugin_dir: Optional[Path] = None,
 ) -> bool:
     """P5：插件模块加载前的统一 AST 网关。
 
@@ -217,15 +380,32 @@ def guard_plugin_module(
         component: 组件名（仅用于日志：runtime_component_loader 透传"model_adapters"等）
         entry_names: 入口函数名集合（A1：透传给 has_register_function；
             tools/runtime/providers 用默认 ("register",)，ui 组件传 ("register_ui",)）
+        allowed_sys_modules: 声明式放行名单（plugin.json 的 module_prefixes）。
+            不传 = 一刀切拒载任何 sys.modules 写入（tool/runtime/provider 保持原语义）
+        plugin_dir: 插件根目录（判定"覆盖的是不是自己的模块"）；缺省按
+            path.parent.parent 推断（ui/tools/runtime/providers 均适用）
 
     Returns:
         True → 允许加载；False → 拒绝并已 logger.warning
     """
     tag = f"[{component}] " if component else ""
-    # 1) 拒绝 sys.modules 污染——任何位置命中即拒载
-    if contains_sys_modules_mutation(source):
+    if plugin_dir is None:
+        try:
+            plugin_dir = Path(path).parent.parent
+        except Exception:
+            plugin_dir = None
+    # 1) sys.modules 写入：声明内且非遮蔽 → 放行（留 info 便于事后审计）；否则拒载
+    for write in find_sys_modules_writes(source):
+        reason = _write_rejection_reason(write.keys, allowed_sys_modules, plugin_dir)
+        if reason is None:
+            logger.info(
+                f"{tag}[ASTGuard] 按 plugin.json module_prefixes 放行模块注册 "
+                f"{list(write.keys or ())}（line {write.lineno}）: {path}"
+            )
+            continue
         logger.warning(
             f"{tag}[ASTGuard] 拒绝加载疑似污染 sys.modules 的文件: {path}"
+            f"（line {write.lineno}，{reason}）"
         )
         return False
     # 2) 入口函数检查（按需）
@@ -240,6 +420,8 @@ def guard_plugin_module(
 # 为减少 churn，保留同名薄壳指向本模块实现（tool loader 内部会重写以调用本模块）。
 __all__ = [
     "contains_sys_modules_mutation",
+    "find_sys_modules_writes",
+    "SysModulesWrite",
     "has_register_function",
     "guard_plugin_module",
     "is_sys_modules_mutation_node",

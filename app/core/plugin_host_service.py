@@ -1624,11 +1624,16 @@ class PluginHostService(QObject):
             # 防旧模块对象滞留导致热更新代码不生效。
             plugin_rescanned = pm.get_plugin(plugin_name)
             declared_prefixes = (getattr(plugin_rescanned, "manifest", None) or {}).get("module_prefixes") or []
-            if declared_prefixes:
-                purged = self._purge_module_prefixes(declared_prefixes)
+            # P2-3：purge 自动化——目录名为合法 Python 标识符时，等价隐式声明
+            # module_prefixes=[目录名]（importlib 手动注册的同名前缀模块统一摘除）；
+            # 非法标识符目录名（如 voice-input 含连字符，不可能被 import）不触发
+            auto_prefix = [plugin_name] if plugin_name.isidentifier() else []
+            purge_prefixes = list(dict.fromkeys(list(declared_prefixes) + auto_prefix))
+            if purge_prefixes:
+                purged = self._purge_module_prefixes(purge_prefixes)
                 if purged:
                     logger.info(
-                        f"[PluginHost] 已清理插件 '{plugin_name}' 声明的模块缓存 {len(purged)} 个: {purged[:5]}"
+                        f"[PluginHost] 已清理插件 '{plugin_name}' 模块缓存 {len(purged)} 个: {purged[:5]}"
                     )
 
             plugin = pm.get_plugin(plugin_name)

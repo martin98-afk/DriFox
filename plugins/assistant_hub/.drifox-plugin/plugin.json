@@ -13,7 +13,8 @@
     "license": "MIT",
     "type": "user",
     "module_prefixes": [
-        "assistant_hub_core."
+        "assistant_hub_core.",
+        "assistant_hub_manager"
     ],
     "components": {
         "ui": true,

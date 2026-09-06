@@ -607,8 +607,28 @@ class PluginToolWatcher:
         跨根覆盖恢复：与 unload_plugin 相同，注销后对更低等级根重扫一次，
         被覆盖工具按 root_kind 优先级自然恢复；随后重注册本插件（高等级根）
         再次按优先级覆盖 → 最终状态与全量重扫一致。
+
+        P2-2 last-known-good：先试加载新模块（exec 层面），任一失败即放弃本次
+        重载并保留旧注册（坏版本重载失败旧版仍可用；新版成功前旧 registry 项
+        不清空）；同名注册冲突以新加载结果为准（旧项已随成功路径注销）。
         """
         with self._scan_lock:
+            pending: list = []
+            for root in self._roots:
+                root_path = Path(root)
+                for pname, py in _iter_tool_modules(root_path):
+                    if pname != plugin_name:
+                        continue
+                    try:
+                        _load_module(plugin_name, py, root_kind=_root_kind(root_path))
+                    except Exception as e:
+                        logger.warning(
+                            f"[PluginToolLoader] 插件 {plugin_name} 新模块加载失败，"
+                            f"保留旧注册（last-known-good）: {e}"
+                        )
+                        return
+                    pending.append((root_path, py))
+
             with self._registry.notify_batch():
                 tool_names = set(self._loaded.get(plugin_name, set()))
                 # 兜底：_loaded 未跟踪但 registry 残留的同源工具（防御状态漂移）
@@ -636,17 +656,15 @@ class PluginToolWatcher:
                     logger.warning(f"[PluginToolLoader] 跳过被门禁拦截插件的工具: {plugin_name}")
                     return
                 new_names: Set[str] = set()
-                for root in self._roots:
-                    root_path = Path(root)
-                    for pname, py in _iter_tool_modules(root_path):
-                        if pname != plugin_name:
-                            continue
-                        try:
-                            new_names.update(
-                                _run_register(self._registry, plugin_name, py, root_path, self._root_tracker)
-                            )
-                        except Exception as e:
-                            logger.warning(f"[PluginToolLoader] 插件 {plugin_name} register 失败: {e}")
+                for root_path, py in pending:
+                    try:
+                        new_names.update(
+                            _run_register(self._registry, plugin_name, py, root_path, self._root_tracker)
+                        )
+                    except Exception as e:
+                        # exec 已在试加载阶段验证通过；此处失败属 register 期错误，
+                        # 旧项已注销无法原地恢复——warning 上报（与既有语义一致）
+                        logger.warning(f"[PluginToolLoader] 插件 {plugin_name} register 失败: {e}")
                 if new_names:
                     self._loaded[plugin_name] = new_names
 

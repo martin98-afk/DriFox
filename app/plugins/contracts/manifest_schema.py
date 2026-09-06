@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
@@ -82,3 +83,35 @@ def _apply_default(out: dict, key: str, default) -> None:
         out[key] = default
     else:
         out.pop(key, None)
+
+
+# 清单目录查找顺序：与 PluginManager._scan_one_plugin_dir 保持一致
+_MANIFEST_DIRS = (".drifox-plugin", ".claude-plugin")
+
+
+def read_manifest_module_prefixes(plugin_dir) -> List[str]:
+    """读取插件声明的模块命名空间前缀（plugin.json → ``module_prefixes``）。
+
+    用途：插件按文件路径 importlib 注册自有共享模块时（如 assistant_hub 的
+    ``assistant_hub_manager`` / ``assistant_hub_core.*``），需在清单里声明命名空间，
+    AST 安全网据此放行，热重载（``PluginHostService._purge_module_prefixes``）
+    据此清理。两处共用同一份声明，避免"加载允许注册、重载却不清理"的漂移。
+
+    读取失败 / 缺字段 / 类型不符 → 返回空表（未声明即不可写，最严口径）。
+    """
+    import json
+
+    base = Path(plugin_dir)
+    for sub in _MANIFEST_DIRS:
+        path = base / sub / "plugin.json"
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        raw = (data or {}).get("module_prefixes")
+        if not isinstance(raw, list):
+            return []
+        return [str(x) for x in raw if isinstance(x, str) and x.strip()]
+    return []

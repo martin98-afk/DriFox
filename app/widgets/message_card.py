@@ -524,8 +524,17 @@ def _render_plugin_fence(info, code_content_raw: str) -> str:
         code = _unescape_html(code_content_raw)
     except Exception:
         code = code_content_raw
+    # P2-1：fence render 入口同口径 watchdog（超时 degrade → 连续熔断停用）
     try:
-        html = info.render_func(code, {"lang": info.lang, "plugin_name": info.plugin_name})
+        from app.core.ui_callback_watchdog import timed_ui_callback
+
+        html = timed_ui_callback(
+            info.plugin_name,
+            f"fence:{info.lang}",
+            info.render_func,
+            code,
+            {"lang": info.lang, "plugin_name": info.plugin_name},
+        )
     except Exception:
         return ""
     if not isinstance(html, str) or not html.strip():
