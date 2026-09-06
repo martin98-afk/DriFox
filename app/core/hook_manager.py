@@ -278,6 +278,109 @@ class HookCondition:
         return cls(type=d.get("type", "env"), pattern=d.get("pattern", ""))
 
 
+# ============================================================
+# A2：hook 执行安全基座（python 标准路径白名单 / http 私网拦截 / 审计）
+# ============================================================
+
+
+def _hook_safe_python_modules() -> set:
+    """python hook「标准路径」白名单：HookManager.SAFE_PYTHON_MODULES 内置基座
+    + Settings.safe_python_modules 用户扩展（读取失败仅用内置集）。"""
+    mods = set(HookManager.SAFE_PYTHON_MODULES)
+    try:
+        from app.utils.config import Settings
+
+        extra = Settings.get_instance().safe_python_modules.value or []
+        mods |= {str(m) for m in extra if str(m)}
+    except Exception:
+        pass
+    return mods
+
+
+def _is_safe_python_module(module_path: str) -> bool:
+    """标准路径白名单判定：精确或子模块前缀（app.utils → app.utils.utils 放行）。
+
+    相对路径（hooks.json 同目录，_import_relative_function）与
+    registered_functions 注册表不受此限（白名单只管 importlib.import_module）。
+    """
+    if not module_path:
+        return False
+    for base in _hook_safe_python_modules():
+        if module_path == base or module_path.startswith(base + "."):
+            return True
+    return False
+
+
+def _reject_unsafe_python_module(module_path: str) -> str:
+    """白名单拒执行时的统一报错文本（两条路径共用，方便测试断言）。"""
+    return f"Rejected: module '{module_path}' is not in the safe python modules whitelist"
+
+
+def _validate_http_hook_url(url: Optional[str]) -> tuple:
+    """http hook URL 校验：强制 https；私网段默认拦截（Settings 可关）。
+
+    私网口径：IP 字面量按 ipaddress is_private/is_loopback/is_link_local
+    （覆盖 127/8、10/8、172.16/12、192.168/16、169.254/16、::1）；
+    localhost 主机名按 loopback 处理；纯域名不做 DNS 解析（anti-rebinding
+    超出本层职责）。
+
+    Returns:
+        (ok, reason) — ok=False 时 reason 为拒执行原因。
+    """
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url or "")
+        if parsed.scheme != "https":
+            return False, f"仅允许 https（当前 scheme: {parsed.scheme or '缺失'}）"
+        allow_private = False
+        try:
+            from app.utils.config import Settings
+
+            allow_private = bool(Settings.get_instance().hook_allow_private_network.value)
+        except Exception:
+            pass
+        if allow_private:
+            return True, ""
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            return False, "URL 缺少主机名"
+        if host == "localhost" or host.endswith(".localhost"):
+            return False, "私网地址被拦截: localhost"
+        try:
+            import ipaddress
+
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return True, ""  # 域名：非 IP 字面量，放行
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return False, f"私网地址被拦截: {host}"
+        return True, ""
+    except Exception as e:
+        return False, f"URL 校验失败: {e}"
+
+
+def _hook_owner_name(hook) -> str:
+    """审计日志用插件名推导：skill_root 目录名 > config_file 一级父目录 > unknown。"""
+    try:
+        from pathlib import Path as _P
+
+        if hook.skill_root:
+            return _P(hook.skill_root).name
+        if hook.config_file:
+            return _P(hook.config_file).parent.name
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _audit_command(hook, event_name: str, command: str) -> None:
+    """command hook 执行审计（一行：插件名+事件+命令前 80 字符摘要）。"""
+    logger.warning(
+        f"[HookCommandAudit] plugin={_hook_owner_name(hook)} event={event_name} cmd={command[:80]!r}"
+    )
+
+
 @dataclass
 class Hook:
     """
@@ -618,10 +721,17 @@ class HookWorker(QRunnable):
         # 修复路径分隔符问题：Unix / 转 Windows \
         if os.name == "nt":
             command = command.replace("/", "\\")
-            # Windows cmd.exe 对 `subprocess.run(..., shell=True)` 传入的多行命令里 `\n`
-            # 处理不可靠（实际只跑第一行）。统一转换为 `&` 分隔符确保 exit 2 等能真正执行。
-            if "\n" in command:
-                command = command.replace("\n", " & ")
+        # A2：多行 command 拒收（历史行为是 \n→& 拼接后全部执行，任意代码面过大）。
+        # 多行命令必须拆成多条单行 hook 或使用脚本文件 + 单行调用。
+        if "\n" in command or "\r" in command:
+            logger.warning(
+                f"[HookCommandAudit] 多行 command 已拒收（请拆分为多条单行 hook）: {command[:80]!r}"
+            )
+            return (
+                "Rejected: multi-line command is not allowed (split into single-line hooks)",
+                False,
+                1,
+            )
 
         # 构造 subprocess 参数
         subprocess_kwargs = {
@@ -725,6 +835,8 @@ class HookWorker(QRunnable):
             effective_cmd = self.hook.commandWindows
         # 变量插值（含 ${CLAUDE_PLUGIN_ROOT} 等插件路径变量）
         effective_cmd = HookManager._interpolate_variables(effective_cmd, self.context)
+        # A2：command 执行审计（异步路径；同步路径在 HookManager._execute_hook）
+        _audit_command(self.hook, self.event_name, effective_cmd)
         stdin_data = _json.dumps(self.context) if self.context else None
         # 注入 Claude Code 兼容环境变量（第三方插件依赖）
         extra_env = HookManager._build_claude_env(self.context)
@@ -743,7 +855,19 @@ class HookWorker(QRunnable):
             import urllib.error
             import urllib.request
 
-            url = self.hook.url
+            url = self.hook.url or ""
+            # A2：http hook 校验（https 强制 + 私网拦截）+ 审计
+            _ok, _reason = _validate_http_hook_url(url)
+            if not _ok:
+                logger.warning(
+                    f"[HookHTTPAudit] plugin={_hook_owner_name(self.hook)} event={self.event_name} "
+                    f"URL 拒执行: {_reason} ({url})"
+                )
+                return f"HTTP hook rejected: {_reason}", False
+            logger.warning(
+                f"[HookHTTPAudit] plugin={_hook_owner_name(self.hook)} event={self.event_name} "
+                f"url={url[:120]}"
+            )
             headers = self.hook.headers or {}
             headers["Content-Type"] = "application/json"
 
@@ -851,8 +975,15 @@ class HookWorker(QRunnable):
             if module_path.startswith(".") and self.hook.config_file:
                 func = HookWorker._import_relative_function(clean_function, self.hook.config_file)
 
-            # 标准路径：importlib.import_module
+            # 标准路径：importlib.import_module（A2：白名单校验，拒绝任意模块导入）
             if func is None:
+                if not _is_safe_python_module(module_path):
+                    logger.warning(
+                        f"[HookPythonAudit] 标准路径模块不在白名单，已拒执行: {module_path} "
+                        f"(内置白名单: {sorted(HookManager.SAFE_PYTHON_MODULES)}，"
+                        f"可用 Settings.safe_python_modules 扩展)"
+                    )
+                    return _reject_unsafe_python_module(module_path), False
                 import importlib
 
                 module = importlib.import_module(module_path)
@@ -1998,6 +2129,8 @@ class HookManager:
 
                 if hook.type == HookType.COMMAND.value:
                     extra_env = HookManager._build_claude_env(context)
+                    # A2：command 执行审计（同步路径；异步路径在 HookWorker._execute_command）
+                    _audit_command(hook, context.get("event_name", ""), command)
                     output, success, exit_code = HookWorker._run_command_sync(
                         command,
                         cwd,
@@ -2011,15 +2144,29 @@ class HookManager:
                     import urllib.error
                     import urllib.request
 
-                    data = json.dumps({"event": context.get("event_name"), "context": context}).encode("utf-8")
-                    headers = hook.headers or {}
-                    headers["Content-Type"] = "application/json"
+                    # A2：http hook 校验（https 强制 + 私网拦截）+ 审计
+                    _ok, _reason = _validate_http_hook_url(url)
+                    if not _ok:
+                        logger.warning(
+                            f"[HookHTTPAudit] plugin={_hook_owner_name(hook)} "
+                            f"event={context.get('event_name')} URL 拒执行: {_reason} ({url})"
+                        )
+                        output = f"HTTP hook rejected: {_reason}"
+                        success = False
+                    else:
+                        logger.warning(
+                            f"[HookHTTPAudit] plugin={_hook_owner_name(hook)} "
+                            f"event={context.get('event_name')} url={url[:120]}"
+                        )
+                        data = json.dumps({"event": context.get("event_name"), "context": context}).encode("utf-8")
+                        headers = hook.headers or {}
+                        headers["Content-Type"] = "application/json"
 
-                    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+                        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
-                    with urllib.request.urlopen(req, timeout=hook.timeout) as response:
-                        output = response.read().decode("utf-8")
-                        success = True
+                        with urllib.request.urlopen(req, timeout=hook.timeout) as response:
+                            output = response.read().decode("utf-8")
+                            success = True
 
                 elif hook.type == HookType.PROMPT.value:
                     output = hook.prompt or hook.command or ""
@@ -2052,19 +2199,32 @@ class HookManager:
                                 else:
                                     module_path, func_name = parts
                                     func = None
+                                    whitelisted_reject = False
 
                                     # 相对路径：基于 hooks.json 目录解析
                                     if module_path.startswith(".") and hook.config_file:
                                         func = HookWorker._import_relative_function(clean_function, hook.config_file)
 
-                                    # 标准路径：importlib.import_module
+                                    # 标准路径：importlib.import_module（A2：白名单校验）
                                     if func is None:
-                                        import importlib
+                                        if not _is_safe_python_module(module_path):
+                                            logger.warning(
+                                                f"[HookPythonAudit] 标准路径模块不在白名单，已拒执行: {module_path} "
+                                                f"(内置白名单: {sorted(HookManager.SAFE_PYTHON_MODULES)}，"
+                                                f"可用 Settings.safe_python_modules 扩展)"
+                                            )
+                                            output = _reject_unsafe_python_module(module_path)
+                                            success = False
+                                            whitelisted_reject = True
+                                        else:
+                                            import importlib
 
-                                        module = importlib.import_module(module_path)
-                                        func = getattr(module, func_name, None)
+                                            module = importlib.import_module(module_path)
+                                            func = getattr(module, func_name, None)
 
-                                    if not callable(func):
+                                    if whitelisted_reject:
+                                        pass  # output/success 已在白名单拒分支设置，不执行
+                                    elif not callable(func):
                                         output = f"Function not found: {hook.function}"
                                         success = False
                                     else:

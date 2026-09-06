@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List, Set, Tuple
 
 from loguru import logger
 
@@ -65,16 +65,138 @@ def _is_sys_modules_mutation(node: "ast.AST") -> bool:
     return False
 
 
-def has_register_function(source: str) -> bool:
-    """检测源码是否定义了 register(registry) 顶层函数（工具/运行时/服务商的统一入口约定）。"""
+def has_register_function(source: str, names: Iterable[str] = ("register",)) -> bool:
+    """检测源码是否定义了指定名称的函数（组件入口约定）。
+
+    A1：names 参数化——tools/runtime/providers 入口为 register，ui 组件为
+    register_ui；默认值保持旧语义，不影响现有调用点。
+    """
+    wanted: Set[str] = set(names)
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return False
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "register":
+        if isinstance(node, ast.FunctionDef) and node.name in wanted:
             return True
     return False
+
+
+# A4：危险 import 审计面——模块级命中即记入审计清单（仅日志告警，不拒载）。
+# 覆盖网络/socket（socket）、子进程（subprocess）、HTTP 客户端（requests/urllib）、
+# 原生调用（ctypes）五类高危能力。
+_DANGEROUS_IMPORT_ROOTS = frozenset({"socket", "subprocess", "requests", "urllib", "ctypes"})
+
+
+def audit_dangerous_imports(source: str) -> List[Tuple[int, str]]:
+    """审计模块级危险 import，返回 [(行号, 符号名), ...]。
+
+    只扫模块顶层语句（tree.body）；函数/方法/类内的延迟 import 不算
+    （按模块级副作用口径）。语法错误返回空表（拒载判断是调用方职责，
+    本函数只做审计，不做行为决定）。
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    hits: List[Tuple[int, str]] = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] in _DANGEROUS_IMPORT_ROOTS:
+                    hits.append((node.lineno, alias.name))
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            if node.module.split(".")[0] in _DANGEROUS_IMPORT_ROOTS:
+                hits.append((node.lineno, node.module))
+    return hits
+
+
+# 模块级阻塞/破坏性调用审计面。
+# 说明：插件模块由宿主线程同步 exec_module，顶层 `while True` / `input()` 会直接
+# 冻结 Qt 事件循环且无法中断（无子进程隔离、无超时）。此处仅做静态审计告警，
+# 不拒载 —— 避免误伤存量插件；日志即为事后追责与用户自查依据。
+_BLOCKING_CALLS = {
+    "input": "阻塞式读取 stdin（无终端时永久挂起）",
+    "system": "执行系统命令",
+    "popen": "执行系统命令",
+    "rmtree": "递归删除目录",
+    "remove": "删除文件",
+    "unlink": "删除文件",
+    "rmdir": "删除目录",
+    "chmod": "修改文件权限",
+    "kill": "终止进程",
+    "setrecursionlimit": "修改解释器递归上限",
+}
+
+
+def audit_blocking_calls(source: str) -> List[Tuple[int, str, str]]:
+    """审计模块级（tree.body 递归）阻塞/破坏性调用。
+
+    Returns:
+        [(行号, 调用表达式, 风险说明), ...]；语法错误返回空表。
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    hits: List[Tuple[int, str, str]] = []
+    seen: Set[int] = set()
+
+    def _expr(node: ast.AST) -> str:
+        try:
+            return ast.unparse(node)  # type: ignore[attr-defined]
+        except Exception:
+            return "<unparse-failed>"
+
+    def _record(node: ast.AST, reason: str) -> None:
+        line = getattr(node, "lineno", 0)
+        if line in seen:
+            return
+        seen.add(line)
+        hits.append((line, _expr(node), reason))
+
+    for node in ast.walk(tree):
+        # 顶层 while True —— 无 break 的常量真值循环
+        if isinstance(node, ast.While) and _is_constant_true(node.test):
+            if not _has_break(node):
+                _record(node, "模块级 while True 无 break（将永久冻结宿主主线程）")
+            continue
+        if isinstance(node, ast.Call):
+            name = _call_name(node)
+            if not name:
+                continue
+            leaf = name.rsplit(".", 1)[-1]
+            if leaf in _BLOCKING_CALLS:
+                _record(node, f"{leaf}(): {_BLOCKING_CALLS[leaf]}")
+    return sorted(hits)
+
+
+def _is_constant_true(node: ast.AST) -> bool:
+    return isinstance(node, ast.Constant) and node.value is True
+
+
+def _has_break(loop: ast.AST) -> bool:
+    """循环体内（不含嵌套函数）是否存在 break/return/raise —— 有则可退出。"""
+    for child in ast.walk(loop):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if isinstance(child, (ast.Break, ast.Return, ast.Raise)):
+            return True
+    return False
+
+
+def _call_name(node: ast.Call) -> str:
+    """取调用的完整点分名（os.system -> 'os.system'；rmtree(...) -> 'rmtree'）。"""
+    parts: List[str] = []
+    cur: ast.AST = node.func
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    if isinstance(cur, ast.Name):
+        parts.append(cur.id)
+    if not parts:
+        return ""
+    return ".".join(reversed(parts))
 
 
 def guard_plugin_module(
@@ -83,15 +205,18 @@ def guard_plugin_module(
     *,
     require_register: bool = True,
     component: str = "",
+    entry_names: Iterable[str] = ("register",),
 ) -> bool:
     """P5：插件模块加载前的统一 AST 网关。
 
     Args:
         source: 文件源码（path.read_text() 结果）
         path: 文件路径（用于日志/拒绝提示）
-        require_register: 是否要求 register(registry) 顶层函数；False 时不强制
+        require_register: 是否要求入口函数；False 时不强制
             （如运行时组件 loader 内部另有 callable 检查；provider/工具 loader 开启）
         component: 组件名（仅用于日志：runtime_component_loader 透传"model_adapters"等）
+        entry_names: 入口函数名集合（A1：透传给 has_register_function；
+            tools/runtime/providers 用默认 ("register",)，ui 组件传 ("register_ui",)）
 
     Returns:
         True → 允许加载；False → 拒绝并已 logger.warning
@@ -104,7 +229,7 @@ def guard_plugin_module(
         )
         return False
     # 2) 入口函数检查（按需）
-    if require_register and not has_register_function(source):
+    if require_register and not has_register_function(source, names=entry_names):
         # 与原 tool loader 行为一致：缺 register 直接 return False（不警告，
         # 调试日志，让 plugin_tool_loader 自己的 logger.debug 提示）
         return False
@@ -118,6 +243,8 @@ __all__ = [
     "has_register_function",
     "guard_plugin_module",
     "is_sys_modules_mutation_node",
+    "audit_dangerous_imports",
+    "audit_blocking_calls",
 ]
 
 

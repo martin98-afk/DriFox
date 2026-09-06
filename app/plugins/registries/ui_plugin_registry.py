@@ -496,6 +496,8 @@ class UIPluginRegistry:
             priority: 优先级（同 type_name 时高者覆盖低者）
             metadata: 附加元数据
         """
+        from loguru import logger
+
         if metadata is None:
             metadata = {}
         info = ContentRendererInfo(
@@ -509,6 +511,12 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             # 低优先级注册被忽略
             return
+        if existing is not None and existing.plugin_name != plugin_name:
+            logger.warning(
+                f"[UIPluginRegistry] content renderer '{type_name}' 被插件 {plugin_name!r} 覆盖"
+                f"（原注册方: {existing.plugin_name!r}, "
+                f"priority {existing.priority} -> {priority}）"
+            )
         self._content_renderers[type_name] = info
 
     def register_tag_renderer(
@@ -531,6 +539,8 @@ class UIPluginRegistry:
             priority: 优先级（同 tag_name 时高者覆盖低者）
             metadata: 附加元数据
         """
+        from loguru import logger
+
         if metadata is None:
             metadata = {}
         key = tag_name.strip().lower()
@@ -547,11 +557,22 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             # 低优先级注册被忽略
             return
+        if existing is not None and existing.plugin_name != plugin_name:
+            logger.warning(
+                f"[UIPluginRegistry] tag '{key}' 被插件 {plugin_name!r} 覆盖"
+                f"（原注册方: {existing.plugin_name!r}, "
+                f"priority {existing.priority} -> {priority}）"
+            )
         self._tag_renderers[key] = info
 
     # fence 渲染器：允许的资源键与桥权限白名单
     FENCE_ASSET_KEYS = ("js", "css")
     FENCE_BRIDGE_PERMISSIONS = ("theme", "sendPrompt", "storage")
+    # 内置 fence 保留名：这些 lang 在宿主渲染链中位于插件查询之后
+    # （见 widgets/message_card.py 的 _render_code_block），一旦被插件注册，
+    # 内置实现将永久失效 —— 插件可据此劫持全应用图表/HTML/SVG 渲染。
+    # 注册表侧此前只校验 lang 字符正则，未落实该约束，此处补齐。
+    RESERVED_FENCE_LANGS = frozenset({"echarts", "mermaid", "svg", "html"})
     # 单个 asset 文件上限（设计稿 §3 防呆）。插件合计上限由宿主注入时控。
     FENCE_ASSET_MAX_BYTES = 2 * 1024 * 1024
 
@@ -590,6 +611,11 @@ class UIPluginRegistry:
         key = lang.strip().lower()
         if not key or not re.fullmatch(r"[a-z0-9_+.-]+", key):
             raise ValueError(f"invalid fence lang {lang!r}: must match [a-z0-9_+.-]+")
+        if key in self.RESERVED_FENCE_LANGS:
+            raise ValueError(
+                f"fence lang {key!r} 为宿主内置保留名，插件不可注册"
+                f"（保留名: {sorted(self.RESERVED_FENCE_LANGS)}）"
+            )
 
         safe_assets: Dict[str, str] = {}
         for akey, apath in (assets or {}).items():
@@ -1941,6 +1967,27 @@ class UIPluginRegistry:
             spec = importlib.util.spec_from_file_location(module_name, ui_init)
             if spec is None or spec.loader is None:
                 logger.error(f"[UIPluginRegistry] Failed to load spec for {plugin_name}")
+                return False
+            # A1：exec 前 AST 安全网——ui loader 原先全裸奔（恶意模块级代码在
+            # exec 时已执行，事后 getattr 检查为时已晚）。此处拒绝 sys.modules
+            # 污染 + 强制 register_ui 入口，拒载语义与 tool/runtime loader 对齐。
+            try:
+                ui_source = ui_init.read_text(encoding="utf-8")
+            except OSError as e:
+                logger.error(f"[UIPluginRegistry] 读取 {ui_init} 失败: {e}")
+                return False
+            from app.plugins.loaders._ast_guard import guard_plugin_module
+
+            if not guard_plugin_module(
+                ui_source,
+                ui_init,
+                require_register=True,
+                component="UIPluginRegistry",
+                entry_names=("register_ui",),
+            ):
+                logger.error(
+                    f"[UIPluginRegistry] 插件 {plugin_name} ui/__init__.py 未通过 AST 安全网，拒载: {ui_init}"
+                )
                 return False
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module

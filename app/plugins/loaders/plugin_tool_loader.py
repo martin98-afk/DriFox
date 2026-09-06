@@ -252,6 +252,17 @@ def _load_module(plugin_name: str, path: Path):
         sys.modules.pop(mod_name, None)
         logger.warning(f"[PluginToolLoader] 读取/编译失败 {path}: {e}")
         return None
+    # A4：危险 import 审计（仅日志告警，不拒载）——模块级 socket/subprocess/
+    # requests/urllib/ctypes 记入结构化清单（插件名+行号+符号名），供安全巡检。
+    from app.plugins.loaders._ast_guard import audit_dangerous_imports
+
+    _audit_hits = audit_dangerous_imports(source)
+    if _audit_hits:
+        _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in _audit_hits)
+        logger.warning(
+            f"[PluginToolLoader] [AST审计] 插件 {plugin_name} 工具模块含模块级危险 import"
+            f"（已放行，仅告警）: {_audit_detail} ({path})"
+        )
     # [SAFETY] 加载安全网：仅加载暴露 register(registry) 入口的工具文件。
     # 跳过无 register 入口的文件（测试脚本/临时文件/误放入 tools/ 目录的模块），
     # 避免其模块级代码（如 sys.modules.update 覆盖核心模块 app.tools）在 exec

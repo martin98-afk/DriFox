@@ -38,6 +38,7 @@
 """
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -49,6 +50,29 @@ from app.plugins.kernel import KNOWN_COMPONENTS
 
 # 插件平台声明与 deps 统一加载（设计：docs/superpowers/specs/2026-08-27-plugin-platform-deps-design.md）
 from app.plugins.deps_loader import check_platform, ensure_deps_on_path
+
+# 插件名合法字符：首字符必须为字母或数字，后续允许字母数字与 _ . -
+# 严禁路径分隔符与 `..`（plugin_name 会参与配置存储路径拼接，见 plugin_config_store）
+_PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _normalize_plugin_name(raw: object, fallback: str) -> Optional[str]:
+    """把清单里的 name 归一为安全插件名；非法返回 None（调用方跳过该插件）。
+
+    防护点：
+    ① 类型污染 —— `{"name": 123}` 会让 int 成为 _plugins 的 key，后续
+       ui_plugin_registry 的 str 方法（.lower()/.replace()）抛 AttributeError；
+    ② 路径穿越 —— name 参与 `<app_data>/plugin_data/<name>/config.json` 拼接，
+       `../../` 可写到宿主任意位置。
+    """
+    if isinstance(raw, str) and _PLUGIN_NAME_RE.match(raw):
+        return raw
+    if _PLUGIN_NAME_RE.match(fallback):
+        if raw is not None:
+            # 清单 name 非法但目录名合法 —— 回退到目录名，保证存量插件不被误杀
+            logger.warning(f"[PluginManager] 插件清单 name 非法 {raw!r}，回退为目录名 {fallback!r}")
+        return fallback
+    return None
 
 # 组件物理探测谓词：按 kernel.KNOWN_COMPONENTS 顺序遍历，物理目录/根文件命中即标记
 # 探测规则差异：hooks 需 hooks.json、ui 需 __init__.py、tools/providers 需 *.py、
@@ -748,7 +772,16 @@ class PluginManager:
 
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                plugin_name = manifest.get("name", item.name)
+                if not isinstance(manifest, dict):
+                    logger.error(f"[PluginManager] 清单根节点不是对象，跳过: {manifest_path}")
+                    continue
+                plugin_name = _normalize_plugin_name(manifest.get("name"), item.name)
+                if plugin_name is None:
+                    logger.error(
+                        f"[PluginManager] 插件名非法（须匹配 [A-Za-z0-9][A-Za-z0-9_.-]* 且"
+                        f"不含路径分隔符），跳过: {manifest_path} -> {manifest.get('name')!r}"
+                    )
+                    continue
 
                 # .claude-plugin 格式：自动补全缺少的字段
                 if manifest_format == "claude":
@@ -766,12 +799,18 @@ class PluginManager:
                 compatible, reason = check_platform(manifest)
                 if not compatible:
                     logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
-                ensure_deps_on_path(item)
 
                 # —— P1 版本契约：min_host_version 与宿主版本比对 ——
                 from app.plugins.version_gate import check_host_version
 
                 ver_ok, ver_reason = check_host_version(manifest, plugin_name)
+
+                # —— 安全：deps 注入延后到门禁之后 ——
+                # deps 目录被 insert 到 sys.path[0]（优先于 stdlib），注入即等于
+                # 赋予该插件劫持全进程导入的能力。故平台不兼容 / 版本契约未通过的
+                # 插件一律不注入，避免"未启用的插件仍能污染宿主"。
+                if compatible and ver_ok:
+                    ensure_deps_on_path(item)
 
                 # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
                 self._register_config_schema(plugin_name, manifest)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -29,8 +30,25 @@ class PluginConfigStore:
     def _schema(self, plugin_name: str) -> Optional[PluginConfigSchema]:
         return PluginConfigRegistry.get_instance().get(plugin_name)
 
+    # 插件名合法字符（与 plugin_manager._PLUGIN_NAME_RE 保持同一口径）
+    _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+    @classmethod
+    def _safe_name(cls, plugin_name: str) -> str:
+        """防路径穿越：plugin_name 参与 plugin_data/<name>/config.json 拼接。
+
+        非法名（含分隔符 / `..` / 非字符串）一律降级为脱敏占位名，
+        保证读写不会逃逸到 plugin_data/ 之外。
+        """
+        if isinstance(plugin_name, str) and cls._NAME_RE.match(plugin_name):
+            return plugin_name
+        logger.warning(f"[PluginConfigStore] 非法插件名 {plugin_name!r}，按 '__invalid__' 处理")
+        return "__invalid__"
+
     def _path(self, plugin_name: str) -> Path:
         from app.utils.utils import get_app_data_dir
+
+        plugin_name = self._safe_name(plugin_name)
 
         new_path = Path(get_app_data_dir()) / "plugin_data" / plugin_name / "config.json"
         legacy_path = Path(get_app_data_dir()) / "plugins" / plugin_name / "config.json"

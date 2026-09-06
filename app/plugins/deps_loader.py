@@ -138,7 +138,59 @@ def deps_paths(plugin_dir: Path) -> List[Path]:
     if common.is_dir() and any(common.iterdir()):
         # 平台目录是 deps/ 的子目录，已单独注入；公共注入仍保留（纯 Python 包在顶层）
         paths.append(common)
-    return paths
+
+    # —— 安全：剔除会劫持 stdlib / 宿主包的 deps 目录 ——
+    # deps 位于 sys.path[0]（优先于 stdlib），deps/json.py 即可替换全进程
+    # 的 json 模块。此处按目录粒度拒注入并告警，不影响其余 deps 生效。
+    safe: List[Path] = []
+    for d in paths:
+        shadowed = _shadowing_entries(d)
+        if shadowed:
+            logger.warning(
+                f"[deps_loader] {plugin_dir.name} 的 {d.name} 含与 stdlib/宿主同名的顶层模块 "
+                f"{shadowed}，已拒绝注入 sys.path（疑似依赖劫持）"
+            )
+            continue
+        safe.append(d)
+    return safe
+
+
+def _stdlib_toplevel_names() -> frozenset:
+    """stdlib 顶层模块名集合（sys.stdlib_module_names，3.10+）。
+
+    用于识别 deps/ 里的"同名劫持"：deps 被 insert 到 sys.path[0]，
+    若其中存在 json.py / os.py / typing.py 等，会整体替换全进程对 stdlib 的导入。
+    """
+    names = getattr(sys, "stdlib_module_names", None)
+    if names:
+        return frozenset(names)
+    return frozenset()
+
+
+def _host_toplevel_names() -> frozenset:
+    """宿主自身顶层包名（app / plugins）— 同样禁止被 deps 覆盖。"""
+    return frozenset({"app", "plugins"})
+
+
+def _shadowing_entries(dep_dir: Path) -> List[str]:
+    """返回 dep_dir 下会劫持 stdlib / 宿主包的顶层模块名列表。"""
+    banned = _stdlib_toplevel_names() | _host_toplevel_names()
+    if not banned:
+        return []
+    hits: List[str] = []
+    try:
+        for entry in dep_dir.iterdir():
+            stem = entry.name
+            is_pkg = entry.is_dir() and (entry / "__init__.py").exists()
+            if entry.is_file() and entry.suffix == ".py":
+                stem = entry.stem
+            elif not is_pkg:
+                continue
+            if stem in banned:
+                hits.append(stem)
+    except OSError as e:
+        logger.debug(f"[deps_loader] 扫描 deps 目录失败 {dep_dir}: {e}")
+    return sorted(set(hits))
 
 
 def ensure_deps_on_path(plugin_dir: Path) -> List[str]:

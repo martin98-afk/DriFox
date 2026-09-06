@@ -399,6 +399,16 @@ class RuntimeComponentLoader:
         if not guard_plugin_module(source, py, require_register=True, component=f"RuntimeLoader:{self._comp_dir}"):
             sys.modules.pop(mod_name, None)
             return False
+        # A4：危险 import 审计（仅日志告警，不拒载）——对齐 tool loader 审计口径。
+        from app.plugins.loaders._ast_guard import audit_dangerous_imports
+
+        _audit_hits = audit_dangerous_imports(source)
+        if _audit_hits:
+            _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in _audit_hits)
+            logger.warning(
+                f"[RuntimeLoader] [AST审计] 插件 {plugin_name} {self._comp_dir} 组件含模块级危险 import"
+                f"（已放行，仅告警）: {_audit_detail} ({py})"
+            )
         try:
             spec = importlib.util.spec_from_file_location(mod_name, py)
             if spec is None or spec.loader is None:
