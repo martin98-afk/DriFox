@@ -3,6 +3,57 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.8] - 2026-09-06
+
+自上一版本以来的变更 | 提交数：70 · 文件变更：87 · +9063/-5329 | 贡献者：mading, dingma
+
+### ✨ 新功能 (New Features)
+
+- **workflow 插件完整落地** (`plugins/system/workflow/`): 从骨架 (manifest/icons/readme)、受限沙箱与运行状态、`tool`/`agent` 钩子（同步事件等待、dual-arg 信号签名、TypeError 翻译层、模型别名解析+降级日志、schema-validated 结构化输出与单次重试、动态工具描述与 agent roster），到 `parallel`/`pipeline` 组合器（pool-worker 死锁守护 + 嵌套守护）、后台执行（run registry / journal wiring / status action）、saved store 与 from_saved 重载、resume 通过 fingerprint 重放已完成 agent 仅重跑变更段、RunJournal 指纹 + completed_map + 原子状态快照、run status card renderer（agent snapshot + status html）、`phase` 钩子接受 detail 与 log 容忍多余参数、配置项（model_aliases / default_foreground / card_refresh_ms / max_agent_wait_sec）、save 校验与 runs lifecycle（含 max_runs_kept 滚动裁剪）、import 预检 + preset listing + 工具描述全契约改写、status.json 仅保留 result 预览 / running status 携带 render keys、`workflow_tool` 增强结果渲染与 JSON 处理、长输出截断拯救、下划线前缀名预检、终端状态清理注册表。
+- **workflow 使用文档** (`plugins/system/workflow/`): 包含声明与 max_runs_kept、claudecode-parity 使用指南含集成测试。
+- **ChartViewerCard HTML 导出与源码保存** (`app/widgets/cards/`): PNG 导出 + HTML 源码保存。
+- **WorkbenchPanel 主题刷新** (`app/widgets/`): refresh_theme 接入 + KeyDocumentItemWidget 样式更新。
+- **输入框插件按钮右键回调** (`plugins/system/ui_registry`): `on_right_click` 支持。
+- **Tool Registry 能力扩展** (`app/core/`): tool_search / tool_execute、schema filter 注册与应用、tool access levels、session ID 检索与 tool access 策略更新。
+- **原生 hover preview 体系** (`app/widgets/sidebar_hover_preview/`): 标题栏按钮发出 hover 信号、可取消控制器、原生 overlay、点击行为匹配 spec、workbench 切到嵌入打开。
+- **SystemWorktreePage offscreen 渲染** (`app/widgets/`): 时间线面板滚动条增强。
+- **SVG / Mermaid / WebGL 增强** (`app/widgets/cards/`): chart_viewer 内联 SVG 无 width/height 时 viewBox 兜底；mermaid 严格语法规则防解析错误；WebGL 支持增强与 tool block 处理改进。
+- **逻辑日期处理** (`plugins/system/`): experience icons 更新。
+- **plugin pages UI 上下文** (`app/widgets/`): hover preview 时确保完整 UI 上下文。
+- **fenced code 保护** (`app/core/`): 抽取与还原协议标签。
+- **apply_webview_render_p4f_patch** (`app/`): 修复插件 fence 初始化时桥接装配的时序问题。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **workflow 修复** (`plugins/system/workflow/`): NameError 状态持久化、schema 重试 key 复用、preset-import 提示、空文本原因；schema 校验提取 fenced/前缀 JSON 避免失败；用户禁用同步时 config 覆盖 model 显式拒绝前台；dual-arg 信号签名匹配修复事件死锁；status.json 仅保留 result 预览、running status 携带 render keys；调整自动高度滚动区与选项卡宽度处理避免布局问题。
+- **worktree QSize NameError** (`app/widgets/_worktree_page.py`): 补顶部 QSize 导入修复尺寸回调。
+- **sidebar hover preview 修复** (`app/widgets/`): 禁用原生 hover overlay 默认（WA_NativeWindow 破坏无边框边缘 resize）；slide-in 动画改为 reveal 语义（内容钉住，不从屏幕边缘飞入）；workbench 帧重新附着到 splitter 前隐藏消除聊天闪烁。
+- **timeline 显示逻辑** (`app/widgets/`): 精简展示 + duration 切换增强。
+
+### ⚡ 性能优化 (Performance)
+
+- **hover preview 几何动画** (`app/widgets/sidebar_hover_preview/`): 原生 geometry anim 滑动，splitter 稳定、宽度跨 hover 一致、无聊天回流闪烁。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **subagent_dag 移除** (`app/core/`, `app/tools/`): 移除 subagent_dag 工具及 DAG 编排引擎。
+- **AssistantManager skills 移除** (`app/widgets/`): skills 功能及关联 UI 组件下架。
+- **sidebar hover overlay 改写** (`app/widgets/sidebar_hover_preview/`): 重写为 Qt.Tool toplevel owned window（route C）。
+
+### 📚 文档 (Documentation)
+
+- **workflow README** (`plugins/system/workflow/`): 包含声明与 max_runs_kept。
+- **workflow claudecode-parity 使用指南** (`plugins/system/workflow/`): 含集成测试。
+
+### 🔧 其他 (Chores & Build)
+
+- **版本升级至 v0.5.8** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): 四文件版本号统一更新（v0.5.8b2 → v0.5.8 正式版）。
+- **marketplace 自动重新生成** (`plugins/system/`): 3 次 `[skip ci]` 自动提交。
+- **.gitignore 更新**: 添加 `.superpowers/`（sdd 工作区）、`.worktrees/`（隔离 worktree 开发）。
+- **workflow 临时 cc 文档引用移除** (`plugins/system/workflow/`): 清理临时文档。
+- **CodeWebViewer.refresh_theme 回归测试** (`tests/`): 防止 NameError 复发。
+- **workflow 沙箱测试修正** (`tests/`): 模块属性访问 fix。
+
 ## [v0.5.8b2] - 2026-09-04
 
 自上一版本以来的变更 | 提交数：71 · 文件变更：239 · +11258/-6616 | 贡献者：mading, dingma
