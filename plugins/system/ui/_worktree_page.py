@@ -441,7 +441,11 @@ class KeyDocumentItemWidget(QWidget):
         name_label.setWordWrap(False)
         name_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         name_label.setMinimumWidth(0)
-        name_label.setStyleSheet(f"{get_font_family_css()} {font_size_css(12)} padding: 0 4px;")
+        name_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
+            f" {get_font_family_css()} {font_size_css(12)} padding: 0 4px;"
+        )
+        self._name_label = name_label  # 成员化：refresh_style 重设主题色（BodyLabel 默认色不随应用主题）
 
         main_layout.addWidget(icon_label)
         main_layout.addWidget(name_label)
@@ -501,6 +505,25 @@ class KeyDocumentItemWidget(QWidget):
 
         main_layout.addWidget(self.open_btn)
         main_layout.addWidget(self.remove_btn)
+
+    def refresh_style(self):
+        """主题切换：重设条目文字颜色（setItemWidget 子件不吃 QListWidget 的 QSS）"""
+        Colors.refresh()
+        if hasattr(self, "_name_label"):
+            self._name_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
+                f" {get_font_family_css()} {font_size_css(12)} padding: 0 4px;"
+            )
+        Colors.refresh()
+        if hasattr(self, "_path_label"):
+            if self._is_url:
+                self._path_label.setStyleSheet(
+                    f"color: {Colors.INFO}; {get_font_family_css()} {font_size_css(10)} text-decoration: underline;"
+                )
+            else:
+                self._path_label.setStyleSheet(
+                    f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)}"
+                )
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -887,7 +910,15 @@ class SystemWorktreePage(QWidget):
 
     def refresh_style(self):
         """响应主题切换：刷新所有样式"""
+        from loguru import logger
+
+        from app.utils.theme_manager import theme_manager
+
         Colors.refresh()
+        logger.debug(
+            f"[WorktreePage] refresh_style: theme_id={theme_manager.get_current_theme_id()} "
+            f"card_bg={str(Colors.CARD_BG)[:48]}"
+        )
         self.setStyleSheet(f"""
             QWidget {{
                 background: transparent;
@@ -920,6 +951,11 @@ class SystemWorktreePage(QWidget):
         """)
         # 刷新子组件的独立样式
         self._refresh_child_styles()
+        container = self.findChild(QWidget, "docsContainer")
+        if container is not None:
+            logger.debug(
+                f"[WorktreePage] docsContainer qss head={' '.join(container.styleSheet().split())[:80]}"
+            )
 
     def _refresh_child_styles(self):
         """刷新各个子组件独立样式（不继承自父级的）"""
@@ -957,6 +993,17 @@ class SystemWorktreePage(QWidget):
             self._docs_count_label.setStyleSheet(
                 f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(11)}"
             )
+        # 空态提示（构造期固化 TEXT_MUTED，此处重设）
+        if hasattr(self, "_docs_empty_hint"):
+            self._docs_empty_hint.setStyleSheet(
+                f"background: transparent; color: {Colors.TEXT_MUTED};"
+                f" {get_font_family_css()} {font_size_css(15)} padding: 20px;"
+            )
+        # 列表条目（setItemWidget 子件不吃 QListWidget QSS，需逐条重设）
+        for i in range(self.docs_list.count()):
+            item_w = self.docs_list.itemWidget(self.docs_list.item(i))
+            if item_w is not None and hasattr(item_w, "refresh_style"):
+                item_w.refresh_style()
 
     # ==================== 项目笔记操作 ====================
 

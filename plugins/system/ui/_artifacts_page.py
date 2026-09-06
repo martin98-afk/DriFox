@@ -279,6 +279,9 @@ class _QuestionGroupCard(QFrame):
             " }"
             f" QLabel {{ background: transparent; {get_font_family_css()} }}"
         )
+        # 箭头/操作按钮图标按当前主题着色重建（构造期 pixmap 已固化）
+        self._apply_expand()
+        self._diff_btn.setIcon(get_icon("差异对比"))
         self._question_label.setStyleSheet(
             f"color: {Colors.TEXT_PRIMARY}; background: transparent; font-weight: 600;"
             f" {get_font_family_css()} {font_size_css(12)};"

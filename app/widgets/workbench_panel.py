@@ -46,6 +46,7 @@ from qfluentwidgets import TransparentToolButton
 
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
+from loguru import logger
 from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
 from app.widgets.custom_title_bar import CustomTabButton
 from app.widgets.flow_layout import FlowLayout
@@ -1129,6 +1130,11 @@ class WorkbenchPanel(QWidget):
         self.worktree_page = widget
         self._worktree_plugin_sig = sig
         self._worktree_plugin_info = info
+        # ★ 挂载点补刷：页面构造可能早于主题应用（启动期插件加载先于
+        #   Colors 就绪），构造期固化的 QSS 是旧主题色；此后无人再通知它。
+        #   有 refresh_style 的页面就地按当前主题重设一次。
+        if hasattr(widget, "refresh_style"):
+            widget.refresh_style()
         # 工作目录变更 → panel 信号（宿主转发给活跃窗口）
         self._wire_worktree_dir_change(widget)
         # 挂载前缓存的项目信息补投递
@@ -1212,6 +1218,9 @@ class WorkbenchPanel(QWidget):
         self.artifacts_page = widget
         self._artifacts_plugin_sig = sig
         self._artifacts_plugin_info = info
+        # 挂载点补刷（同 _use_plugin_worktree：构造早于主题应用的固化旧色）
+        if hasattr(widget, "refresh_style"):
+            widget.refresh_style()
         # 新页实例无数据：重置产物脏标记，下一次推送必刷（否则新页空白）
         self._last_artifacts_sig = None
         # 差异入口接到 panel 的 diff_requested（插件版若有 set_diff_all_callback）
@@ -1345,6 +1354,9 @@ class WorkbenchPanel(QWidget):
             return
         self._stack.addWidget(widget)
         self._plugin_widgets[info.page_id] = widget
+        # 挂载点补刷（同 _use_plugin_worktree：构造早于主题应用的固化旧色）
+        if hasattr(widget, "refresh_style"):
+            widget.refresh_style()
 
     def _destroy_plugin_page(self, page_id: str) -> None:
         """销毁插件页 widget（显式隐藏 + 移除布局，避免残影）"""
@@ -1446,18 +1458,43 @@ class WorkbenchPanel(QWidget):
         )
         for btn in self._tab_buttons:
             btn.refresh_style()
-        self.artifacts_page.refresh_style()
-        self.tasks_page.refresh_style()
-        if hasattr(self.worktree_page, "refresh_style"):
-            self.worktree_page.refresh_style()
-        if self._history_page is not None and hasattr(self._history_page, "refresh_style"):
-            self._history_page.refresh_style()
+        # ★ 逐页隔离分发：任何一页 refresh_style 抛异常都会中断后续分发
+        #   （历史实锤：真机上 worktree 页残留 azure 旧色而 artifacts 正常，
+        #   dispatch 外层 except 吞掉异常只留一行 warning）。每页独立捕获，
+        #   异常带页类名落日志，保证一页炸不掉整面板。
+        for _label, _page in (
+            ("artifacts", self.artifacts_page),
+            ("tasks", self.tasks_page),
+            ("worktree", self.worktree_page),
+            ("history", self._history_page),
+        ):
+            if _page is None or not hasattr(_page, "refresh_style"):
+                continue
+            try:
+                _page.refresh_style()
+            except Exception:  # noqa: BLE001 — 诊断日志见 except 内
+                logger.exception(f"[WorkbenchPanel] 页面主题刷新失败: {_label} ({type(_page).__name__})")
         # 插件页签 / 卡片 tab（right 容器 UI 插件卡片）：外部不广播主题事件，
         # 面板统一分发；无 refresh_style 的插件页跳过
         for widget in self._plugin_widgets.values():
             if hasattr(widget, "refresh_style"):
-                widget.refresh_style()
+                try:
+                    widget.refresh_style()
+                except Exception:  # noqa: BLE001
+                    logger.exception(f"[WorkbenchPanel] 插件页主题刷新失败: {type(widget).__name__}")
         for entry in self._card_tabs.values():
             widget = entry.get("widget")
             if widget is not None and hasattr(widget, "refresh_style"):
-                widget.refresh_style()
+                try:
+                    widget.refresh_style()
+                except Exception:  # noqa: BLE001
+                    logger.exception(f"[WorkbenchPanel] 卡片页主题刷新失败: {type(widget).__name__}")
+
+    def refresh_theme(self) -> None:
+        """ThemeManager 协议入口（dispatch_refresh 只认 refresh_theme）
+
+        ★ 此前只实现 refresh_style：register_refresh_target 注册了本面板，
+        但 dispatch 的 hasattr(widget, "refresh_theme") 探测落空 → 静默跳过，
+        主题切换时整面板（含工作树/产物插件页）都不刷新。
+        """
+        self.refresh_style()

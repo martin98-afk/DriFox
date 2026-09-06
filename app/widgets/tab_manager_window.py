@@ -784,6 +784,23 @@ class TabManagerWindow(FramelessWindow):
         # 重建样式表
         self._apply_theme_stylesheet()
 
+        # 刷新右侧工作台面板（页签条 / 任务区 / 内置页 / 插件页签 / 卡片 tab
+        # 全在 workbench_panel.refresh_style 内逐页分发，独立于本窗口 QSS）
+        # ★ GUI 手动切主题走 main_widget._execute_batched_theme_refresh（不走
+        #   theme_manager.dispatch_refresh），注册在 _refresh_targets 里的
+        #   workbench_panel 回调永远不会被触发，本方法才是 batched 路径触达
+        #   TabManager 区域的唯一入口。此前漏刷 → 右栏插件页内容停留旧主题。
+        #   置于方法前部 + 独立 try：后方 refresh 调用抛异常时不再腰斩本刷新
+        #   （_empty_state/titleBar 等未受保护，任一异常都会中断整段方法）。
+        #   dispatch 路径下 panel 另有独立注册，此处会重复刷新——低频云同步/
+        #   主题热重载路径，refresh_style 幂等，双刷可接受。
+        try:
+            panel = getattr(self, "workbench_panel", None)
+            if panel is not None:
+                panel.refresh_style()
+        except Exception:
+            logger.exception("[TabManagerWindow] workbench panel theme refresh failed")
+
         # hover 预览浮层是独立顶层窗口，不继承本窗口 QSS，需单独刷新；
         # 预览中的 frame 带内联样式（脱离 QSS 作用域），同步刷新
         overlay = getattr(self, "_wb_overlay", None)
