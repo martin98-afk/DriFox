@@ -45,14 +45,6 @@ def _get_parallel_executor() -> ThreadPoolExecutor:
     return _PARALLEL_EXECUTOR
 
 
-def shutdown_parallel_executor():
-    """由应用退出路径调用，释放并行执行器资源"""
-    global _PARALLEL_EXECUTOR
-    if _PARALLEL_EXECUTOR is not None:
-        _PARALLEL_EXECUTOR.shutdown(wait=False)
-        _PARALLEL_EXECUTOR = None
-
-
 # PluginChanged 快照基线（模块级共享：多窗口 / 多触发点一份 diff 基线）
 # None = 未初始化（首次触发只建基线不 diff，避免启动风暴误报）
 # tools 快照存 {name: signature_hash}：检测增删 + 同名工具 schema 变化（updated）
@@ -2465,47 +2457,7 @@ class HookManager:
 
         return env
 
-    def get_registered_events(self) -> List[str]:
-        """获取所有已注册事件"""
-        return list(self._hooks.keys())
-
-    def get_hook_info(self, event_name: str) -> List[dict]:
-        """获取指定事件的 Hook 信息"""
-        if event_name not in self._hooks:
-            return []
-
-        info = []
-        for rule in self._hooks[event_name]:
-            for hook in rule.hooks:
-                info.append(hook.to_dict())
-        return info
-
-    def export_config(self) -> dict:
-        """导出当前配置（用于保存）"""
-        hooks = {}
-        for event_name, rules in self._hooks.items():
-            rules_data = []
-            for rule in rules:
-                hooks_data = [h.to_dict() for h in rule.hooks]
-                if hooks_data:
-                    rules_data.append({"matcher": rule.matcher, "hooks": hooks_data})
-            if rules_data:
-                hooks[event_name] = rules_data
-        return {"hooks": hooks}
-
     # ==================== UI 集成方法 ====================
-
-    def get_all_hooks(self) -> Dict[str, List[dict]]:
-        """获取所有已注册的 hooks，用于 UI 显示（覆写层的 enabled 优先）"""
-        result = {}
-        for event_name, rules in self._hooks.items():
-            result[event_name] = []
-            for rule in rules:
-                for hook in rule.hooks:
-                    hook_dict = self._get_effective_hook_dict(hook)
-                    hook_dict["matcher"] = rule.matcher
-                    result[event_name].append(hook_dict)
-        return result
 
     def get_all_hooks_grouped(self) -> Dict[str, Dict[str, List[dict]]]:
         """
@@ -2935,51 +2887,6 @@ class HookManager:
 
         logger.info(f"[HookManager] Deleted hook {hook_id}")
         return True
-
-    def set_hook_enabled(self, event_name: str, hook_index: int, enabled: bool):
-        """设置 hook 启用状态（内部委托给 toggle_hook_by_id）"""
-        if event_name not in self._hooks:
-            return
-
-        rules = self._hooks[event_name]
-        hook_count = 0
-        for rule in rules:
-            for h in rule.hooks:
-                if hook_count == hook_index:
-                    self.toggle_hook_by_id(h.id, enabled)
-                    return
-                hook_count += 1
-
-    def _save_hook_to_file(self, hook: Hook, event_name: str):
-        """保存单个 hook 的状态到配置文件"""
-        try:
-            with open(hook.config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
-
-            # 递归查找并更新 hook
-            self._update_hook_in_config(config, event_name, hook)
-
-            with open(hook.config_file, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-
-            logger.debug(f"[HookManager] Saved hook enabled={hook.enabled} to {hook.config_file}")
-        except Exception as e:
-            logger.error(f"[HookManager] Failed to save hook to {hook.config_file}: {e}")
-
-    def _update_hook_in_config(self, config: dict, event_name: str, target_hook: Hook):
-        """递归更新配置中的 hook enabled 状态"""
-        raw_hooks = config.get("hooks", config)
-        if event_name not in raw_hooks:
-            return
-
-        rules = raw_hooks[event_name]
-        for rule in rules:
-            hooks = rule.get("hooks", [])
-            for h in hooks:
-                # 通过 command 匹配（假设 command 是唯一的）
-                if h.get("command") == target_hook.command:
-                    h["enabled"] = target_hook.enabled
-                    return
 
     def reload_global_hooks(self, config_file: str = None):
         """仅重新加载全局 hooks 配置，不影响 skill/agent hooks"""

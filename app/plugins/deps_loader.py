@@ -170,16 +170,22 @@ def deps_paths(plugin_dir: Path) -> List[Path]:
     return safe
 
 
+_STDLIB_TOPLEVEL: Optional[frozenset] = None
+
+
 def _stdlib_toplevel_names() -> frozenset:
     """stdlib 顶层模块名集合（sys.stdlib_module_names，3.10+）。
 
     用于识别 deps/ 里的"同名劫持"：deps 被 insert 到 sys.path[0]，
     若其中存在 json.py / os.py / typing.py 等，会整体替换全进程对 stdlib 的导入。
+
+    P4：结果模块级缓存（stdlib 集合进程内不变，免每次调用重建 frozenset）。
     """
-    names = getattr(sys, "stdlib_module_names", None)
-    if names:
-        return frozenset(names)
-    return frozenset()
+    global _STDLIB_TOPLEVEL
+    if _STDLIB_TOPLEVEL is None:
+        names = getattr(sys, "stdlib_module_names", None)
+        _STDLIB_TOPLEVEL = frozenset(names) if names else frozenset()
+    return _STDLIB_TOPLEVEL
 
 
 def _host_toplevel_names() -> frozenset:
@@ -243,14 +249,26 @@ def missing_pip_deps(plugin_dir: Path, manifest: dict) -> List[str]:
 
     missing: List[str] = []
     have_dirs = deps_paths(plugin_dir)
+    # P4：一次性收集 deps 目录顶层可用包名（目录含 __init__.py 或 .py 文件 stem），
+    # 消除逐 spec glob 的重复目录扫描；`-` 归一为 `_` 后集合查询，
+    # 替代原 `pkg.replace("_", "?")` 单字符通配（通配会误匹配任意字符）。
+    have_names: set = set()
+    for d in have_dirs:
+        try:
+            for entry in d.iterdir():
+                if entry.is_dir() and (entry / "__init__.py").exists():
+                    have_names.add(entry.name.replace("-", "_"))
+                elif entry.is_file() and entry.suffix == ".py":
+                    have_names.add(entry.stem.replace("-", "_"))
+        except OSError:
+            continue
     for spec in resolve_pip_deps(manifest):
         pkg = spec.split("==")[0].split(">=")[0].split("<=")[0].split("~=")[0].split("!=")[0]
         pkg = pkg.split("[")[0].strip().replace("-", "_")
         if not pkg:
             continue
-        # deps 目录里已有同名顶层包（或包名带下划线/连字符变体）
-        top = pkg.replace("_", "?")
-        if any(hit for d in have_dirs for hit in d.glob(top)):
+        # deps 目录里已有同名顶层包 → 就绪
+        if pkg in have_names:
             continue
         if importlib.util.find_spec(pkg) is not None:
             continue

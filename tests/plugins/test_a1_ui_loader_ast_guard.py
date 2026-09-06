@@ -85,3 +85,82 @@ def test_ui_loader_allows_clean_register_ui(tmp_path, log_capture):
     assert reg.is_loaded("ui-guard-ok") is True
     # 正常插件不得触发安全网拒载日志
     assert not any("[ASTGuard]" in r for r in log_capture)
+
+
+def _make_manifest(root, prefixes):
+    """在插件根写 .drifox-plugin/plugin.json 声明模块命名空间。"""
+    import json
+
+    mdir = root / ".drifox-plugin"
+    mdir.mkdir(parents=True, exist_ok=True)
+    (mdir / "plugin.json").write_text(
+        json.dumps({"name": root.name, "module_prefixes": prefixes}), encoding="utf-8"
+    )
+    return root
+
+
+def test_ui_loader_allows_declared_module_prefixes(tmp_path, log_capture):
+    """声明式放行：plugin.json 声明的命名空间内注册自有模块 → 放行且副作用发生。
+
+    覆盖存量写法（assistant_hub 的 assistant_hub_manager：ui 与 hooks 共享同一
+    模块对象），声明同时供 PluginHostService._purge_module_prefixes 热重载清理。
+    """
+    reg = UIPluginRegistry()
+    p = _make_manifest(tmp_path / "ui-declared", ["ui_declared_owned.", "ui_declared_mgr"])
+    _make_ui_plugin(p, (
+        "import sys\n"
+        "import types\n"
+        "sys.modules['ui_declared_mgr'] = types.ModuleType('ui_declared_mgr')\n"
+        "sys.modules.update({'ui_declared_owned.sub': types.ModuleType('ui_declared_owned.sub')})\n"
+        "def register_ui(registry):\n"
+        "    pass\n"
+    ))
+    try:
+        assert reg.load_plugin("ui-declared", p) is True
+        assert "ui_declared_mgr" in sys.modules
+        assert "ui_declared_owned.sub" in sys.modules
+        assert not any("[ASTGuard] 拒绝" in r for r in log_capture)
+    finally:
+        sys.modules.pop("ui_declared_mgr", None)
+        sys.modules.pop("ui_declared_owned.sub", None)
+
+
+def test_ui_loader_rejects_declared_prefix_shadowing_host(tmp_path, log_capture):
+    """声明也不能用来遮蔽真实模块：声明 app. 前缀并覆盖 app.* → 仍拒载。"""
+    reg = UIPluginRegistry()
+    p = _make_manifest(tmp_path / "ui-shadow", ["app."])
+    _make_ui_plugin(p, (
+        "import sys\n"
+        "import types\n"
+        "sys.modules['app.canary_shadow'] = types.ModuleType('app.canary_shadow')\n"
+        "def register_ui(registry):\n"
+        "    pass\n"
+    ))
+    assert reg.load_plugin("ui-shadow", p) is False
+    assert "app.canary_shadow" not in sys.modules
+    assert any("[ASTGuard]" in r and "遮蔽" in r for r in log_capture)
+
+
+def test_ui_loader_rejects_dynamic_sys_modules_key(tmp_path, log_capture):
+    """键为动态表达式（无法静态确认落点）→ 即便有声明也拒载。"""
+    reg = UIPluginRegistry()
+    p = _make_manifest(tmp_path / "ui-dyn", ["ui_dyn_owned."])
+    _make_ui_plugin(p, (
+        "import sys\n"
+        "def _name():\n"
+        "    return 'ui_dyn_owned.x'\n"
+        "sys.modules[_name()] = object\n"
+        "def register_ui(registry):\n"
+        "    pass\n"
+    ))
+    assert reg.load_plugin("ui-dyn", p) is False
+    assert any("[ASTGuard]" in r and "动态" in r for r in log_capture)
+
+
+def test_read_manifest_module_prefixes_missing_manifest(tmp_path):
+    """无清单 / 缺字段 → 空表（未声明即不可写，最严口径）。"""
+    from app.plugins.contracts.manifest_schema import read_manifest_module_prefixes
+
+    assert read_manifest_module_prefixes(tmp_path / "nope") == []
+    _make_ui_plugin(tmp_path / "ui-nodecl", "def register_ui(registry):\n    pass\n")
+    assert read_manifest_module_prefixes(tmp_path / "ui-nodecl") == []

@@ -149,6 +149,11 @@ def find_sys_modules_writes(source: str) -> List[SysModulesWrite]:
         tree = ast.parse(source)
     except SyntaxError:
         return []
+    return _find_sys_modules_writes_in_tree(tree)
+
+
+def _find_sys_modules_writes_in_tree(tree: "ast.Module") -> List[SysModulesWrite]:
+    """find_sys_modules_writes 的 tree 内核（parse-once 聚合门复用）。"""
     consts = _module_level_str_constants(tree)
     writes: List[SysModulesWrite] = []
     for node in ast.walk(tree):
@@ -237,6 +242,11 @@ def has_register_function(source: str, names: Iterable[str] = ("register",)) -> 
         tree = ast.parse(source)
     except SyntaxError:
         return False
+    return _has_register_in_tree(tree, wanted)
+
+
+def _has_register_in_tree(tree: "ast.Module", wanted: Set[str]) -> bool:
+    """has_register_function 的 tree 内核（parse-once 聚合门复用）。"""
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in wanted:
             return True
@@ -260,6 +270,11 @@ def audit_dangerous_imports(source: str) -> List[Tuple[int, str]]:
         tree = ast.parse(source)
     except SyntaxError:
         return []
+    return _audit_dangerous_imports_in_tree(tree)
+
+
+def _audit_dangerous_imports_in_tree(tree: "ast.Module") -> List[Tuple[int, str]]:
+    """audit_dangerous_imports 的 tree 内核（parse-once 聚合门复用）。"""
     hits: List[Tuple[int, str]] = []
     for node in tree.body:
         if isinstance(node, ast.Import):
@@ -416,6 +431,80 @@ def guard_plugin_module(
     return True
 
 
+class GuardResult(NamedTuple):
+    """guard_plugin_module_once 的聚合判定结果。
+
+    rejected_writes: 被 _write_rejection_reason 判拒的 sys.modules 写入
+    （调用方按各自日志口径输出拒载原因）。
+    """
+
+    ok: bool
+    has_register: bool
+    rejected_writes: List[SysModulesWrite]
+    dangerous_imports: List[Tuple[int, str]]
+    syntax_error: bool
+
+
+def guard_plugin_module_once(
+    source: str,
+    path: Path,
+    *,
+    require_register: bool = True,
+    component: str = "",
+    entry_names: Iterable[str] = ("register",),
+    allowed_sys_modules: Iterable[str] = (),
+    plugin_dir: Optional[Path] = None,
+) -> GuardResult:
+    """P1b：插件模块加载前的 parse-once 聚合门。
+
+    与 guard_plugin_module 同判定语义（sys.modules 声明式放行 + 入口检查），
+    额外聚合模块级危险 import 审计；全部判定共享单次 ast.parse
+    （热重载全量重扫时原三独立调用为 3 次 parse，此处收敛为 1 次）。
+
+    Returns:
+        GuardResult — ok=False 时调用方拒载；dangerous_imports 仅告警不拒载。
+    """
+    tag = f"[{component}] " if component else ""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return GuardResult(
+            ok=False, has_register=False, rejected_writes=[], dangerous_imports=[], syntax_error=True
+        )
+
+    writes = _find_sys_modules_writes_in_tree(tree)
+    has_register = _has_register_in_tree(tree, set(entry_names))
+    dangerous = _audit_dangerous_imports_in_tree(tree)
+
+    if plugin_dir is None:
+        try:
+            plugin_dir = Path(path).parent.parent
+        except Exception:
+            plugin_dir = None
+
+    rejected: List[SysModulesWrite] = []
+    for write in writes:
+        reason = _write_rejection_reason(write.keys, allowed_sys_modules, plugin_dir)
+        if reason is None:
+            logger.info(
+                f"{tag}[ASTGuard] 按 plugin.json module_prefixes 放行模块注册 "
+                f"{list(write.keys or ())}（line {write.lineno}）: {path}"
+            )
+        else:
+            logger.warning(
+                f"{tag}[ASTGuard] 拒绝加载疑似污染 sys.modules 的文件: {path}"
+                f"（line {write.lineno}，{reason}）"
+            )
+            rejected.append(write)
+
+    if require_register and not has_register:
+        logger.debug(f"{tag}[ASTGuard] 缺少入口函数 {list(entry_names)}: {path}")
+
+    ok = not rejected and (has_register or not require_register)
+    return GuardResult(ok=ok, has_register=has_register, rejected_writes=rejected,
+                       dangerous_imports=dangerous, syntax_error=False)
+
+
 # 兼容旧调用点：tool loader 原命名空间使用 _is_tool_entry_module / _is_sys_modules_mutation
 # 为减少 churn，保留同名薄壳指向本模块实现（tool loader 内部会重写以调用本模块）。
 __all__ = [
@@ -424,12 +513,9 @@ __all__ = [
     "SysModulesWrite",
     "has_register_function",
     "guard_plugin_module",
-    "is_sys_modules_mutation_node",
+    "guard_plugin_module_once",
+    "GuardResult",
     "audit_dangerous_imports",
     "audit_blocking_calls",
 ]
 
-
-def is_sys_modules_mutation_node(node: "ast.AST") -> bool:
-    """兼容原 tool loader 内部按 node 逐个检查的调用语义。"""
-    return _is_sys_modules_mutation(node)

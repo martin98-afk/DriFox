@@ -8,6 +8,8 @@
 html / 普通代码块的渲染结果与接入前完全一致。
 """
 
+import json
+
 import pytest
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -265,7 +267,10 @@ class TestFenceAssets:
     def test_assets_for_skeleton_empty_when_no_renderer(self):
         assets_js, perms_js, sig = _fence_assets_for_skeleton()
         assert assets_js == "{}"
-        assert perms_js == "{}"
+        # 内置 fence（```widget）无插件替它声明权限，由宿主兜底合入 ——
+        # 即便一个插件渲染器都没注册，perms 也必须含 widget 条目，
+        # 否则 widget 的桥会全空。
+        assert json.loads(perms_js) == {"widget": ["theme", "sendPrompt", "storage"]}
         assert sig == ()
 
     def test_assets_for_skeleton_collects_registered(self, tmp_path):
@@ -286,3 +291,42 @@ class TestFenceAssets:
         assert "file:///" in assets_js
         assert '"theme"' in perms_js
         assert len(sig) == 1
+
+
+# ============================================================
+# 内置 ```widget 围栏（沙箱 iframe 通道）
+# ============================================================
+class TestBuiltinWidgetFence:
+    """` ```widget ` 保留脚本并装进沙箱；` ```html ` 仍然剥离脚本。"""
+
+    @staticmethod
+    def _code(lang, code):
+        import html as _h
+
+        return '<pre><code class="language-%s">%s</code></pre>' % (lang, _h.escape(code))
+
+    def test_widget_fence_emits_sandboxed_container(self):
+        import base64
+        import re
+
+        src = '<div id="a">hi</div><script>document.getElementById("a").textContent="ran"</script>'
+        out = _wrap_code_blocks_with_copy_button_web(self._code("widget", src))
+        m = re.search(r'<div id="([^"]+)" class="drifox-widget"[^>]*data-widget-src="([^"]+)"', out)
+        assert m is not None
+        assert m.group(1).startswith("wgt-")
+        # 脚本必须原样保留（交给沙箱 iframe 执行），不得被净化吃掉
+        assert base64.b64decode(m.group(2)).decode("utf-8") == src
+
+    def test_widget_fence_falls_back_to_code_block_when_not_markup(self):
+        out = _wrap_code_blocks_with_copy_button_web(self._code("widget", "print(1)"))
+        assert "drifox-widget" not in out
+
+    def test_html_fence_still_strips_script(self):
+        out = _wrap_code_blocks_with_copy_button_web(self._code("html", "<div>hi</div><script>x()</script>"))
+        assert "html-widget" in out
+        assert "<script>" not in out
+
+    def test_widget_is_reserved_for_plugins(self):
+        reg = UIPluginRegistry.get_instance()
+        with pytest.raises(ValueError, match="内置保留名"):
+            reg.register_fence_renderer("plug-x", "widget", lambda c, ctx: c)

@@ -190,42 +190,6 @@ class _PluginRegistryProxy:
         return ok
 
 
-def _is_tool_entry_module(source: str, path: Path) -> bool:
-    """判断文件是否为工具入口模块（须定义 register(registry) 且不得污染 sys.modules）。
-
-    加载安全网：仅当文件确实暴露 register 入口、且不在模块级直接操作
-    sys.modules（如 sys.modules.update 覆盖核心模块 app.tools）时才 exec。
-    跳过测试脚本/临时文件/误放入 tools/ 目录的其他模块，防止其模块级代码
-    在 exec 时污染全局 sys.modules。
-
-    文件名快速过滤（test_*/conftest）+ AST 精确判定（register 函数 +
-    拒绝 sys.modules 变异），防止误判 'tool_register=' 等相似标识符。
-
-    P5 加固：原实现为内联 AST 扫描；现委托 app.plugins.loaders._ast_guard
-    公共网关，逻辑保持一致（保留薄壳以减少外部调用点 churn）。
-    """
-    name = path.name
-    if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
-        return False
-    from app.plugins.loaders._ast_guard import contains_sys_modules_mutation, has_register_function
-
-    if contains_sys_modules_mutation(source):
-        logger.warning(f"[PluginToolLoader] 拒绝加载疑似污染 sys.modules 的文件: {path}")
-        return False
-    return has_register_function(source)
-
-
-def _is_sys_modules_mutation(node: "ast.AST") -> bool:
-    """兼容旧调用点（按 node 判定）— 委托公共网关。
-
-    P5 加固：原实现为内联扫描；现委托 app.plugins.loaders._ast_guard。
-    保留薄壳以减少外部调用点 churn。
-    """
-    from app.plugins.loaders._ast_guard import is_sys_modules_mutation_node
-
-    return is_sys_modules_mutation_node(node)
-
-
 def _load_module(plugin_name: str, path: Path, root_kind: str = ""):
     """加载插件工具模块（唯一模块名，避免命名冲突）。
 
@@ -252,28 +216,39 @@ def _load_module(plugin_name: str, path: Path, root_kind: str = ""):
         sys.modules.pop(mod_name, None)
         logger.warning(f"[PluginToolLoader] 读取/编译失败 {path}: {e}")
         return None
-    # A4：危险 import 审计（仅日志告警，不拒载）——模块级 socket/subprocess/
-    # requests/urllib/ctypes 记入结构化清单（插件名+行号+符号名），供安全巡检。
-    from app.plugins.loaders._ast_guard import audit_dangerous_imports
+    # P1b：parse-once 聚合门——sys.modules 声明式放行判定 + register 入口检查
+    # + 危险 import 审计，共享单次 ast.parse（原为 3 次独立解析）。
+    # [SAFETY] 事故复盘 2026-08-22：自测脚本落入 tools/ 其模块级
+    # sys.modules.update 覆盖真模块导致全局导入崩溃——聚合门沿用同一拒载面。
+    # 文件名快速过滤（test_*/conftest）保留在调用侧（与原 _is_tool_entry_module 一致）。
+    name = path.name
+    if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
+        sys.modules.pop(mod_name, None)
+        return None
+    from app.plugins.loaders._ast_guard import guard_plugin_module_once
 
-    _audit_hits = audit_dangerous_imports(source)
-    if _audit_hits:
-        _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in _audit_hits)
+    guard = guard_plugin_module_once(
+        source,
+        path,
+        require_register=True,
+        component="PluginToolLoader",
+        plugin_dir=path.parent.parent,
+    )
+    if guard.syntax_error or guard.rejected_writes:
+        sys.modules.pop(mod_name, None)
+        # 拒载原因已由聚合门按行号输出 warning
+        return None
+    if not guard.has_register:
+        sys.modules.pop(mod_name, None)
+        logger.debug(f"[PluginToolLoader] 跳过非工具入口文件（无 register 函数）: {path}")
+        return None
+    if guard.dangerous_imports:
+        # A4：危险 import 审计（仅日志告警，不拒载）
+        _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in guard.dangerous_imports)
         logger.warning(
             f"[PluginToolLoader] [AST审计] 插件 {plugin_name} 工具模块含模块级危险 import"
             f"（已放行，仅告警）: {_audit_detail} ({path}) kind={root_kind or 'unknown'}"
         )
-    # [SAFETY] 加载安全网：仅加载暴露 register(registry) 入口的工具文件。
-    # 跳过无 register 入口的文件（测试脚本/临时文件/误放入 tools/ 目录的模块），
-    # 避免其模块级代码（如 sys.modules.update 覆盖核心模块 app.tools）在 exec
-    # 时污染全局 sys.modules。
-    # 事故复盘 2026-08-22：自测脚本 test_scaffold_storage.py 落入 self-evolver/tools/，
-    # 其模块级 sys.modules.update({"app.tools": ModuleType(...)}) 覆盖真模块，
-    # 导致后续 `from app.tools import X` 全部 (unknown location) 崩溃。
-    if not _is_tool_entry_module(source, path):
-        sys.modules.pop(mod_name, None)
-        logger.debug(f"[PluginToolLoader] 跳过非工具入口文件（无 register 函数）: {path}")
-        return None
     code = compile(source, str(path), "exec")
     try:
         exec(code, module.__dict__)
@@ -505,8 +480,6 @@ class PluginToolWatcher:
         self._loaded: Dict[str, Set[str]] = {}  # plugin_name -> tool_names（当前生效）
         self._root_tracker: Dict[str, Path] = {}  # tool_name -> 来源根（跨根优先级）
         self._scan_lock = threading.Lock()  # 重扫互斥（UI 触发 + 轮询线程并发安全）
-        self._thread = None
-        self._stop = False
         # 热重载完成监听（轮询检测到变更并完成重扫后触发，后台线程回调）
         # 用途：UI 弹风险通知等。仅 watcher 轮询路径触发，
         # 显式 scan_now()（启动对齐 / 插件启停）不触发——那些场景用户已知情。
@@ -680,19 +653,6 @@ class PluginToolWatcher:
             except Exception as e:
                 logger.warning(f"[PluginToolWatcher] 热重载监听回调失败: {e}")
 
-    def start(self, poll_interval: float = 2.0) -> None:
-        """[已退役] 轮询线程不再启动。
-
-        tools 组件变更改由 backend watchfiles 主链驱动：kernel
-        KNOWN_COMPONENTS 已含 tools → _identify_all_components_from_changes
-        识别 → builtin_reloaders._reload_tools 调 scan_now。本方法保留
-        是为向后兼容旧调用点，空转即可。scan_now() 语义不变。
-        """
-        return
-
-    def stop(self) -> None:
-        self._stop = True
-
     def _signature(self) -> Tuple:
         """目录变更指纹：(path, mtime, size) 列表（多根聚合）"""
         sig = []
@@ -706,14 +666,18 @@ class PluginToolWatcher:
         return tuple(sig)
 
 
-# ========== 进程级惰性启动 ==========
+# ========== 进程级惰性单例 ==========
 
 _plugin_watcher: Optional[PluginToolWatcher] = None
 _plugin_watcher_lock = threading.Lock()
 
 
 def ensure_plugin_tool_watcher() -> Optional[PluginToolWatcher]:
-    """确保插件工具热重载 watcher 已启动（进程级一次，幂等）"""
+    """获取进程级 watcher 单例（惰性构造，幂等）。
+
+    watcher 自身无线程/轮询语义（scan_now 由 watchfiles 主链驱动：
+    builtin_reloaders._reload_tools），本函数仅负责单例构造。
+    """
     global _plugin_watcher
     if _plugin_watcher is not None:
         return _plugin_watcher
@@ -722,8 +686,7 @@ def ensure_plugin_tool_watcher() -> Optional[PluginToolWatcher]:
             return _plugin_watcher
         try:
             _plugin_watcher = PluginToolWatcher()
-            _plugin_watcher.start()
-            logger.info("[PluginToolWatcher] 插件工具热重载 watcher 已启动")
+            logger.debug("[PluginToolWatcher] watcher 单例已创建（事件驱动，无线程）")
         except Exception as e:
-            logger.warning(f"[PluginToolWatcher] watcher 启动失败: {e}")
+            logger.warning(f"[PluginToolWatcher] watcher 创建失败: {e}")
     return _plugin_watcher

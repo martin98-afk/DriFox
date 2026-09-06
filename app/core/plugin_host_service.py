@@ -23,6 +23,8 @@ from typing import Any, Dict, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
+from app.plugins.kernel import COMPONENT_ORDER
+
 # 读取期过滤型组件：细项开关在**读取/执行链路上**判定，改配置即生效，
 # 不需要重载 registry（见 PluginHostService.on_plugin_item_toggled）。
 # 其余组件属于注册期过滤型（条目是否进 registry 由 loader 在注册阶段决定），
@@ -936,16 +938,9 @@ class PluginHostService(QObject):
 
     # 组件优先级（用于在多组件批处理中决定先后顺序）
     # agents 最先：它会影响 commands 和 hooks 同步
-    _COMPONENT_ORDER = {
-        "agents": 0,
-        "hooks": 1,
-        "commands": 2,
-        "themes": 3,
-        "skills": 4,
-        "mcp": 5,
-        "lsp": 6,
-        "ui": 7,
-    }
+    # G2：单一事实源在 kernel.COMPONENT_ORDER，此处仅转成 rank dict
+    # （kernel 未登记的组件 get(c, 99) 兜底，行为与原 8 项本地表一致）
+    _COMPONENT_ORDER = {name: rank for rank, name in enumerate(COMPONENT_ORDER)}
 
     def _identify_all_components_from_changes(
         self, changes: list, plugin_prefixes: Dict[str, str], plugin_name: str

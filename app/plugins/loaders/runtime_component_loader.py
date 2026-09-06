@@ -387,24 +387,30 @@ class RuntimeComponentLoader:
         mod_name = f"drifox_rt_{self._comp_dir}_{plugin_name}_{py.stem}"
         # 防模块 GC 回收导致插件类定义丢失（对齐 provider_loader._load_module）
         sys.modules.pop(mod_name, None)
-        # P5：exec 前 AST 安全网——拒绝污染 sys.modules 的模块（与 tool loader 对齐）
-        # 复用 _ast_guard.guard_plugin_module；require_register=True 强制 register 入口。
+        # P5/P1b：exec 前 AST 聚合门（parse-once）——sys.modules 声明式放行判定
+        # + register 入口检查 + 危险 import 审计，共享单次 ast.parse（原为 3 次）。
+        # require_register=True 强制 register 入口。
         try:
             source = py.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             logger.warning(f"[RuntimeLoader] 读取 {py} 失败: {e}")
             return False
-        from app.plugins.loaders._ast_guard import guard_plugin_module
+        from app.plugins.loaders._ast_guard import guard_plugin_module_once
 
-        if not guard_plugin_module(source, py, require_register=True, component=f"RuntimeLoader:{self._comp_dir}"):
+        guard = guard_plugin_module_once(
+            source,
+            py,
+            require_register=True,
+            component=f"RuntimeLoader:{self._comp_dir}",
+            plugin_dir=py.parent.parent,
+        )
+        if guard.syntax_error or guard.rejected_writes or not guard.has_register:
             sys.modules.pop(mod_name, None)
+            # 拒载原因已由聚合门输出 warning
             return False
-        # A4：危险 import 审计（仅日志告警，不拒载）——对齐 tool loader 审计口径。
-        from app.plugins.loaders._ast_guard import audit_dangerous_imports
-
-        _audit_hits = audit_dangerous_imports(source)
-        if _audit_hits:
-            _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in _audit_hits)
+        if guard.dangerous_imports:
+            # A4：危险 import 审计（仅日志告警，不拒载）——对齐 tool loader 审计口径。
+            _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in guard.dangerous_imports)
             logger.warning(
                 f"[RuntimeLoader] [AST审计] 插件 {plugin_name} {self._comp_dir} 组件含模块级危险 import"
                 f"（已放行，仅告警）: {_audit_detail} ({py}) kind={kind}"

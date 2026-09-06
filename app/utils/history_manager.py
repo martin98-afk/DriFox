@@ -1600,6 +1600,38 @@ class HistoryManager:
         sessions = self.get_history_list(with_messages=False)
         return [s for s in sessions if (s.get("team_run_id") or "").strip() == run_id]
 
+    def _lookup_team_first_question(self, run_id: str, max_len: int = 50) -> Optional[str]:
+        """从落库列 first_user_msg / first_user_ts 直接求团队首问（零反序列化）。
+
+        候选按 updated_at DESC 返回，与 get_by_team_run_id 的遍历顺序一致，从而
+        复现旧实现「时间戳并列时保留首个」的语义：首个候选无条件成为 best（即使
+        ts 为空），后续候选仅在 ts 非空且严格小于 best.ts 时覆盖。
+
+        Args:
+            run_id: 团队运行标识
+            max_len: 预览截断长度
+
+        Returns:
+            首问预览文本；落库列缺失（未迁移 / 老数据 / 存储未就绪）时返回 None，
+            调用方据此退回全量扫描路径，功能零退化。
+        """
+        if not (self._use_sqlite and self._session_store):
+            return None
+        getter = getattr(self._session_store, "get_team_first_question_candidates", None)
+        if getter is None:
+            return None
+        candidates = getter(run_id) or []
+        best: Optional[Dict] = None
+        for ts, content in candidates:
+            if not content:
+                continue
+            if best is None or (ts and (not best["ts"] or ts < best["ts"])):
+                best = {"ts": ts, "content": content}
+        if best is None:
+            return None
+        content = best["content"]
+        return content[:max_len].strip() + ("..." if len(content) > max_len else "")
+
     def get_team_first_question(self, run_id: str, max_len: int = 50) -> str:
         """获取团队首问：该 run_id 下所有会话中时间戳最早的真实 user 消息文本。
 
@@ -1624,6 +1656,12 @@ class HistoryManager:
         """
         if not run_id:
             return ""
+        # 🚀 T4 快路径（内存治理）：首问已随会话落库时直接读字符串列，零反序列化。
+        # 旧路径为此反序列化该 run 下全部成员会话的完整 messages —— 实测 246 条
+        # 约 285MB 常驻、放大 9.9 倍、耗时 1.0s；落库后退化为一列字符串读取。
+        _quick = self._lookup_team_first_question(run_id, max_len)
+        if _quick is not None:
+            return _quick
         sessions = self.get_team_sessions_by_run_id(run_id)
         if not sessions:
             return ""

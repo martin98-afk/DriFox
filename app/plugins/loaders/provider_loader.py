@@ -24,7 +24,7 @@ import importlib.util
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 from loguru import logger
 
@@ -232,18 +232,30 @@ def _load_module(plugin_name: str, path: Path):
     """加载服务商插件模块（唯一模块名，避免命名冲突；显式 compile 绕过 pyc 缓存）"""
     mod_name = f"_plugin_provider_{plugin_name}_{path.stem}"
     sys.modules.pop(mod_name, None)
-    # P5：exec 前 AST 安全网——拒绝污染 sys.modules 的模块（与 tool/runtime loader 对齐）
-    # 复用 _ast_guard.guard_plugin_module。服务商约定与 tool 一致：必须 register(registry)。
+    # P5/P1b：exec 前 AST 聚合门（parse-once）——sys.modules 声明式放行判定
+    # + register 入口检查 + 危险 import 审计，共享单次 ast.parse（原为 2 次）。
+    # 服务商约定与 tool 一致：必须 register(registry)。
     try:
         source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         logger.warning(f"[ProviderLoader] 读取 {path} 失败: {e}")
         return None
-    from app.plugins.loaders._ast_guard import guard_plugin_module
+    from app.plugins.loaders._ast_guard import guard_plugin_module_once
 
-    if not guard_plugin_module(source, path, require_register=True, component="ProviderLoader"):
+    guard = guard_plugin_module_once(
+        source, path, require_register=True, component="ProviderLoader", plugin_dir=path.parent.parent
+    )
+    if guard.syntax_error or guard.rejected_writes or not guard.has_register:
         sys.modules.pop(mod_name, None)
+        # 拒载原因已由聚合门输出 warning
         return None
+    if guard.dangerous_imports:
+        # A4：危险 import 审计（仅日志告警，不拒载）——对齐 tool/runtime loader 审计口径。
+        _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in guard.dangerous_imports)
+        logger.warning(
+            f"[ProviderLoader] [AST审计] 插件 {plugin_name} 服务商模块含模块级危险 import"
+            f"（已放行，仅告警）: {_audit_detail} ({path})"
+        )
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
         logger.warning(f"[ProviderLoader] 无法加载 {path}")
@@ -339,8 +351,6 @@ class ProviderWatcher:
         self._roots = roots if roots is not None else _PLUGIN_ROOTS
         self._root_tracker: Dict[str, Path] = {}
         self._scan_lock = threading.Lock()
-        self._thread = None
-        self._stop = False
 
     def scan_now(self) -> None:
         """全量重扫：先注销注册表中全部插件来源服务商，再全量重新注册（幂等）。
@@ -452,21 +462,6 @@ class ProviderWatcher:
         保留是为向后兼容旧调用点，空转即可。scan_now() 语义不变。
         """
         return
-
-    def stop(self) -> None:
-        self._stop = True
-
-    def _signature(self) -> Tuple:
-        """目录变更指纹：(path, mtime, size) 列表（多根聚合）"""
-        sig = []
-        for root in self._roots:
-            for plugin_name, py in _iter_provider_modules(Path(root)):
-                try:
-                    st = py.stat()
-                    sig.append((str(py), st.st_mtime_ns, st.st_size))
-                except OSError:
-                    pass
-        return tuple(sig)
 
 
 # ========== 进程级惰性启动 ==========
