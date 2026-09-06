@@ -2155,7 +2155,7 @@ class UIPluginRegistry:
                     if not was_visible and cm is not None:
                         try:
                             was_visible = cm.is_card_visible(cid, win_id)
-                        except RuntimeError, AttributeError:
+                        except (RuntimeError, AttributeError):
                             was_visible = False
                     self._remove_widget_from_container(win_id, cid, widget)
                     # 显式销毁旧实例：_remove_widget_from_container 仅 UI 清理不触发删除，

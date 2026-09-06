@@ -323,7 +323,10 @@ class SessionRepository:
             # 🚀 只选轻量列表展示所需的字段，跳过 compaction_state/cache
             # 等重量级 BLOB 列，减少 SQLite I/O 和传输开销。
             success, rows = self._execute(
-                f"SELECT session_id, title, project, system_prompt, "
+                # 内存优化：不再 SELECT system_prompt。该列均值约 10KB/条，
+                # 5000 条常驻内存约 50MB，而会话列表渲染完全用不到它。
+                # 需要时通过 get_system_prompt(session_id) 单列回查。
+                f"SELECT session_id, title, project, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
                 f"team_run_id, team_name, agent_name, team_members "
@@ -336,6 +339,27 @@ class SessionRepository:
         except Exception as e:
             logger.error(f"[SessionRepository] get_all_lightweight 异常: {e}")
             return []
+
+    def get_system_prompt(self, session_id: str) -> str:
+        """单列取 system_prompt（轻量列表不再 SELECT 该列后的按需回查入口）。
+
+        Returns:
+            该会话的 system_prompt；会话不存在或查询失败返回空串。
+        """
+        if not self.is_initialized or not session_id:
+            return ""
+        try:
+            success, rows = self._execute(
+                f"SELECT system_prompt FROM {self.TABLE_NAME} WHERE session_id = ?",
+                (session_id,),
+            )
+            if success and rows:
+                row = rows[0]
+                val = row["system_prompt"] if hasattr(row, "keys") else row[0]
+                return val or ""
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_system_prompt 异常: {e}")
+        return ""
 
     def _row_to_session_lightweight(self, row) -> Dict:
         """将数据库行转换为不含 messages 的轻量会话字典"""
@@ -360,7 +384,9 @@ class SessionRepository:
             "topic_summary": raw_title,
             "project": d.get("project", "默认项目"),
             "messages": [],  # 懒加载：不在启动时加载
-            "system_prompt": d.get("system_prompt", ""),
+            # 未 SELECT 该列时为 None —— 哨兵表示"未加载"，区别于真实空串。
+            # 消费方（HistoryManager）据此决定是否需要回查，不可当成空值写回。
+            "system_prompt": d.get("system_prompt"),
             "compaction_state": {},
             "compaction_cache": {},
             "message_count": d.get("message_count", 0),

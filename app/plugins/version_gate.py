@@ -7,8 +7,10 @@ plugin.json 可选声明 ``min_host_version``（如 "0.5.8"），宿主加载前
 
 规则（宽容优先，避免误伤）：
 - 未声明 min_host_version → 视为兼容（老插件零改动）
-- 声明了但解析失败（作者写错格式）→ 视为兼容 + warning（不因拼写错误拒载）
+- 声明了但解析失败（作者写错格式）→ 拒载（契约3：声明即契约，格式非法
+  = 契约不可信，防脏数据/注入串混入加载链）
 - 解析成功则按 semver 数值比较：host >= min 才放行
+- 宿主自身版本读不到 → 放行（宿主异常不迁怒插件）
 """
 from __future__ import annotations
 
@@ -61,10 +63,10 @@ def check_host_version(manifest: dict, plugin_name: str = "") -> Tuple[bool, str
     cur = parse_semver(host_version())
     need = parse_semver(str(required))
     if need is None:
-        logger.warning(
-            f"[VersionGate] 插件 '{plugin_name}' 的 min_host_version 格式非法: {required!r}，忽略校验"
-        )
-        return True, ""
+        # 契约3：声明即契约，格式非法=契约不可信，拒载（原为放行+warning）
+        reason = f"min_host_version 格式非法: {required!r}"
+        logger.warning(f"[VersionGate] 插件 '{plugin_name}' {reason}，拒载")
+        return False, reason
     if cur is None:
         # 宿主版本未知（异常兜底），放行并记录
         logger.warning("[VersionGate] 宿主版本未知，跳过插件版本校验")

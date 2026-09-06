@@ -375,7 +375,9 @@ class HistoryManager:
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
         # 与 SQLite 轻量懒加载上限保持一致，避免首次加载后保存任意会话又截断。
-        self._history_limit = 500
+        # 5000：旧值 500 会让更旧的会话彻底不出现在列表里（UI 只读内存、不分页）。
+        # 轻量投影已剔除 system_prompt，单条约 0.16KB，5000 条常驻约 0.8MB，可接受。
+        self._history_limit = 5000
         self._save_timer: Optional[QTimer] = None
         self._save_delay_ms = 1000
 
@@ -1564,6 +1566,10 @@ class HistoryManager:
                     if full:
                         session["messages"] = full.get("messages", [])
                         session["message_count"] = full.get("message_count", len(session["messages"]))
+                        # system_prompt 轻量列表不再加载，借这次全量查询回填
+                        # （full 已含该字段，零额外 I/O）
+                        if session.get("system_prompt") is None:
+                            session["system_prompt"] = full.get("system_prompt", "")
                 return session
         # 2. 内存没有则直接查 SQLite（跨窗口同步最新数据）
         if self._session_store and self._session_store.is_initialized:
@@ -1655,6 +1661,27 @@ class HistoryManager:
         content = best["content"]
         return content[:max_len].strip() + ("..." if len(content) > max_len else "")
 
+    def _resolve_existing_system_prompt(self, existing: Dict) -> str:
+        """取会话既有 system_prompt；未加载（哨兵 None）时回查 SQLite。
+
+        背景：轻量列表不再 SELECT system_prompt，内存里的值为 None。
+        若 update_session 直接拿 None 当空串写回，会把 DB 中真实的
+        system_prompt 清空 —— 故此处必须回查兜底。
+        """
+        val = existing.get("system_prompt")
+        if val is not None:
+            return val
+        sid = existing.get("session_id") or ""
+        if not sid or not self._session_store or not self._session_store.is_initialized:
+            return ""
+        try:
+            repo = getattr(self._session_store, "_session_repo", None)
+            if repo is not None and hasattr(repo, "get_system_prompt"):
+                return repo.get_system_prompt(sid)
+        except Exception as e:
+            logger.warning(f"[HistoryManager] system_prompt 回查失败 {sid}: {e}")
+        return ""
+
     def update_session(
         self,
         index: int,
@@ -1690,7 +1717,11 @@ class HistoryManager:
                 compaction_cache=(
                     compaction_cache if compaction_cache is not None else existing.get("compaction_cache", {})
                 ),
-                system_prompt=(system_prompt if system_prompt is not None else existing.get("system_prompt", "")),
+                system_prompt=(
+                    system_prompt
+                    if system_prompt is not None
+                    else self._resolve_existing_system_prompt(existing)
+                ),
                 project=project if project is not None else existing.get("project", "默认项目"),
                 worktree_path=worktree_path if worktree_path is not None else existing.get("worktree_path", ""),
                 team_run_id=team_run_id if team_run_id is not None else existing.get("team_run_id", ""),
