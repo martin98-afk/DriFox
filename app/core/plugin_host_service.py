@@ -220,6 +220,8 @@ class PluginHostService(QObject):
 
                 lsp_mgr = get_lsp_manager()
                 lsp_configs = pm.get_lsp_configs()
+                # P2：消费端过滤 load_blocked 插件的 LSP 配置（被门禁拦截的插件不注册 LSP）
+                lsp_configs = self._filter_blocked_lsp_configs(pm, lsp_configs)
                 workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 lsp_mgr.initialize(workdir, lsp_configs)
                 logger.info(f"[PluginHost] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
@@ -1264,6 +1266,10 @@ class PluginHostService(QObject):
                 logger.warning(f"[PluginHost] New plugin '{plugin_name}' not found after scan")
                 return result
 
+            # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派
+            if not self._load_gate(plugin):
+                return result
+
             comps = plugin.components
             logger.info(f"[PluginHost] 检测到新插件「{plugin_name}」，执行增量加载")
 
@@ -1379,6 +1385,45 @@ class PluginHostService(QObject):
             logger.error(f"[PluginHost] Failed to reload new plugin '{plugin_name}': {e}")
 
         return result
+
+    @staticmethod
+    def _load_gate(plugin) -> bool:
+        """版本/平台门禁闸口：拦截 load_blocked 插件的任何加载/重载动作。
+
+        行为：
+        - plugin 为 None → False（无对象可供门禁，不放行）
+        - plugin.load_blocked 为真 → logger.warning（带 reason）+ False
+        - 其余 → True
+
+        注：插件被删除的清理路径（_cleanup_removed_plugin_components）不调
+        本门禁——清理时 plugin 已被 PluginManager 摘索引，必须允许走完。
+        """
+        if plugin is None:
+            return False
+        if getattr(plugin, "load_blocked", False):
+            reason = getattr(plugin, "version_reason", "") or "平台/版本不兼容"
+            logger.warning(
+                f"[PluginHost] 插件 '{plugin.name}' 被门禁拦截（{reason}），跳过加载/重载"
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _filter_blocked_lsp_configs(pm, lsp_configs: list) -> list:
+        """过滤掉被门禁拦截的插件的 LSP 配置（P2 消费端防御）。
+
+        即使 PluginManager._iter_enabled_plugins 未来变化，调用方仍能在此
+        兜底一遍：load_blocked 插件的 LSP 不进入 LspManager.initialize。
+        """
+        out = []
+        for c in lsp_configs:
+            plugin_name = c.get("plugin", "")
+            plugin = pm.get_plugin(plugin_name) if plugin_name else None
+            if plugin is not None and getattr(plugin, "load_blocked", False):
+                logger.debug(f"[PluginHost] LSP 配置跳过被门禁插件: {plugin_name}")
+                continue
+            out.append(c)
+        return out
 
     @staticmethod
     def _purge_module_prefixes(prefixes: list) -> list:
@@ -1594,6 +1639,11 @@ class PluginHostService(QObject):
                     f"cleaning up artifacts..."
                 )
                 return self._cleanup_removed_plugin_components(plugin_name, removed_components, result, result_keys)
+
+            # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派；
+            # 清理路径已在上方处理完毕，本处只挡「插件对象存在但不该加载」情形。
+            if not self._load_gate(plugin):
+                return result
 
             # 2-N. 组件分派：查 kernel reloader 注册表（原 8 分支 if 已迁 builtin_reloaders）
             # 注册 / 注入 runtime 句柄由 _do_deferred + reload_plugin_subsystems 集中完成
@@ -1942,6 +1992,8 @@ class PluginHostService(QObject):
 
             lsp_mgr = get_lsp_manager()
             lsp_configs = pm.get_lsp_configs()
+            # P2：消费端过滤 load_blocked 插件的 LSP 配置（被门禁拦截的插件不注册 LSP）
+            lsp_configs = self._filter_blocked_lsp_configs(pm, lsp_configs)
             workdir = os.getcwd()
             from app.tools.mcp_tools import MCPClientManager
 

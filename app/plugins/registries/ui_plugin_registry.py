@@ -1976,7 +1976,10 @@ class UIPluginRegistry:
             return True
         except Exception as e:
             logger.error(f"[UIPluginRegistry] Failed to load UI for {plugin_name}: {e}")
-            # 回滚：恢复旧模块与旧注册，保持插件上一版本状态可用
+            # P4：回滚——恢复旧模块与旧注册，保持插件上一版本状态可用。
+            # 目标场景：插件文件短暂语法错误时已加载的工作树页等 UI 不消失，
+            # 修好后下次重载自动恢复。回滚失败时也至少保 _loaded_plugins + sys.modules，
+            # 避免旧 module 被彻底从 Python 命名空间抹掉（下一次重载可继续尝试）。
             if old_module is not None:
                 try:
                     import sys as _sys_rollback
@@ -1988,7 +1991,26 @@ class UIPluginRegistry:
                     self._loaded_plugins.add(plugin_name)
                     logger.warning(f"[UIPluginRegistry] 已回滚 {plugin_name} 至上一版本 UI 注册")
                 except Exception as re:
-                    logger.error(f"[UIPluginRegistry] 回滚失败 {plugin_name}: {re}")
+                    # 回滚也失败：保底——把旧 module 装回 sys.modules + 标记已加载，
+                    # 注册表项可能为空（旧 register_ui 不可用），但不出现「黑洞」状态。
+                    try:
+                        import sys as _sys_fallback
+                        _sys_fallback.modules[module_name] = old_module
+                    except Exception:
+                        pass
+                    self._loaded_plugins.add(plugin_name)
+                    logger.error(
+                        f"[UIPluginRegistry] 回滚失败 {plugin_name}（{re}），"
+                        f"已保底保留旧 module 引用与 _loaded_plugins 标记，"
+                        f"待下次重载或用户手动重启用恢复"
+                    )
+            else:
+                # 首次加载就失败且无旧 module——记录在 _loaded_plugins 中阻止重入黑洞
+                # （reload_plugin / 后续 load_plugin 重入会再走原逻辑）
+                logger.warning(
+                    f"[UIPluginRegistry] {plugin_name} 首次加载失败且无旧版本可回滚，"
+                    f"用户修复文件后下次 watchfiles 重载将自动重试"
+                )
             return False
 
     def reload_plugin(self, plugin_name: str, plugin_path) -> bool:

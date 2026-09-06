@@ -42,10 +42,17 @@ class SerializerRegistry:
         with self._lock:
             item = self._serializers.get(requested) or self._serializers.get(_DEFAULT_ID)
         if item is None:
-            raise RuntimeError(
-                "未注册任何 MessageSerializer 插件（含系统插件 openai），"
-                "请确认 plugins/system/serializers/ 已启用"
+            # P3 兜底：无任何 MessageSerializer 插件 → 返回内置 passthrough + warning
+            # 行为：serialize 直接透传 messages（不做协议特判）；多模态等高级特性会丢失，
+            # 但主链路不抛错，发送链不至于炸。
+            from loguru import logger
+            from app.plugins.registries._builtin_fallback import BuiltInPassthroughSerializer
+
+            logger.warning(
+                "[SerializerRegistry] 未注册任何 MessageSerializer 插件（含系统插件 openai），"
+                "降级使用内置 passthrough（不做协议特判，特性可能丢失）"
             )
+            return BuiltInPassthroughSerializer()
         return item[0]
 
     def serializers(self) -> Dict[str, MessageSerializer]:

@@ -49,6 +49,27 @@ def _root_kind(root: Optional[Path]) -> str:
     return _ROOT_KIND_SYSTEM
 
 
+def _is_plugin_load_blocked(plugin_name: str) -> bool:
+    """P1/P2：检查插件是否被版本/平台门禁拦截（load_blocked）。
+
+    仅在 PluginManager 已初始化且能查到插件时检查；否则视为不拦截（放行）。
+    拦截的插件其运行时组件不进 registry——已注册过的会在后续重扫中被清理。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if not pm.is_initialized():
+            return False
+        plugin = pm.get_plugin(plugin_name)
+        if plugin is None:
+            return False
+        return bool(getattr(plugin, "load_blocked", False))
+    except Exception as e:
+        logger.warning(f"[RuntimeLoader] 门禁检查失败，默认放行 {plugin_name}: {e}")
+        return False
+
+
 def _is_plugin_enabled(plugin_name: str) -> bool:
     """按插件启用状态过滤运行时组件加载（对齐 provider_loader._is_plugin_enabled）。
 
@@ -248,6 +269,12 @@ class RuntimeComponentLoader:
                     # D9：组件整类停用时跳过该插件的这一类组件
                     if not _is_component_enabled(plugin_dir.name, self._comp_dir):
                         continue
+                    # P1/P2：版本/平台门禁——load_blocked 插件不加载其运行时组件
+                    if _is_plugin_load_blocked(plugin_dir.name):
+                        logger.warning(
+                            f"[RuntimeLoader] 跳过被门禁拦截插件的组件: {plugin_dir.name}:{self._comp_dir}"
+                        )
+                        continue
                     for py in sorted(comp.glob("*.py")):
                         if py.name.startswith("_"):
                             continue
@@ -276,6 +303,12 @@ class RuntimeComponentLoader:
                     continue
                 # D9：组件整类停用时跳过（与 scan_roots 保持一致）
                 if not _is_component_enabled(plugin_dir.name, self._comp_dir):
+                    continue
+                # P1/P2：版本/平台门禁——load_blocked 插件不重注册其运行时组件
+                if _is_plugin_load_blocked(plugin_dir.name):
+                    logger.warning(
+                        f"[RuntimeLoader] 跳过被门禁拦截插件的组件: {plugin_dir.name}:{self._comp_dir}"
+                    )
                     continue
                 for py in sorted(comp.glob("*.py")):
                     if py.name.startswith("_"):
@@ -332,6 +365,12 @@ class RuntimeComponentLoader:
             if not _is_component_enabled(plugin_name, self._comp_dir):
                 logger.info(f"[RuntimeLoader] 跳过已停用组件的重载: {plugin_name}:{self._comp_dir}")
                 return
+            # P1/P2：版本/平台门禁——load_blocked 插件不重注册其运行时组件
+            if _is_plugin_load_blocked(plugin_name):
+                logger.warning(
+                    f"[RuntimeLoader] 跳过被门禁拦截插件的组件重载: {plugin_name}:{self._comp_dir}"
+                )
+                return
             roots = self._scan_roots_cache or _plugin_roots()
             for root in roots:
                 if not (root / plugin_name).is_dir():
@@ -348,6 +387,18 @@ class RuntimeComponentLoader:
         mod_name = f"drifox_rt_{self._comp_dir}_{plugin_name}_{py.stem}"
         # 防模块 GC 回收导致插件类定义丢失（对齐 provider_loader._load_module）
         sys.modules.pop(mod_name, None)
+        # P5：exec 前 AST 安全网——拒绝污染 sys.modules 的模块（与 tool loader 对齐）
+        # 复用 _ast_guard.guard_plugin_module；require_register=True 强制 register 入口。
+        try:
+            source = py.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            logger.warning(f"[RuntimeLoader] 读取 {py} 失败: {e}")
+            return False
+        from app.plugins.loaders._ast_guard import guard_plugin_module
+
+        if not guard_plugin_module(source, py, require_register=True, component=f"RuntimeLoader:{self._comp_dir}"):
+            sys.modules.pop(mod_name, None)
+            return False
         try:
             spec = importlib.util.spec_from_file_location(mod_name, py)
             if spec is None or spec.loader is None:

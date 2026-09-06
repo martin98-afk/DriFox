@@ -26,7 +26,6 @@
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import sys
 import threading
@@ -201,48 +200,30 @@ def _is_tool_entry_module(source: str, path: Path) -> bool:
 
     文件名快速过滤（test_*/conftest）+ AST 精确判定（register 函数 +
     拒绝 sys.modules 变异），防止误判 'tool_register=' 等相似标识符。
+
+    P5 加固：原实现为内联 AST 扫描；现委托 app.plugins.loaders._ast_guard
+    公共网关，逻辑保持一致（保留薄壳以减少外部调用点 churn）。
     """
     name = path.name
     if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
         return False
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
+    from app.plugins.loaders._ast_guard import contains_sys_modules_mutation, has_register_function
+
+    if contains_sys_modules_mutation(source):
+        logger.warning(f"[PluginToolLoader] 拒绝加载疑似污染 sys.modules 的文件: {path}")
         return False
-    has_register = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "register":
-            has_register = True
-        if _is_sys_modules_mutation(node):
-            logger.warning(f"[PluginToolLoader] 拒绝加载疑似污染 sys.modules 的文件: {path}")
-            return False
-    return has_register
+    return has_register_function(source)
 
 
 def _is_sys_modules_mutation(node: "ast.AST") -> bool:
-    """检测节点是否为直接操作 sys.modules 的危险语句（污染核心模块的元凶）。
+    """兼容旧调用点（按 node 判定）— 委托公共网关。
 
-    覆盖两种常见形式：sys.modules.update({...}) 与 sys.modules['x'] = <obj>。
+    P5 加固：原实现为内联扫描；现委托 app.plugins.loaders._ast_guard。
+    保留薄壳以减少外部调用点 churn。
     """
-    # sys.modules.update(...)
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-        val = node.func.value
-        if (
-            isinstance(val, ast.Attribute)
-            and val.attr == "modules"
-            and isinstance(val.value, ast.Name)
-            and val.value.id == "sys"
-            and node.func.attr == "update"
-        ):
-            return True
-    # sys.modules[...] = ...
-    if isinstance(node, ast.Assign):
-        for target in node.targets:
-            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Attribute):
-                val = target.value
-                if val.attr == "modules" and isinstance(val.value, ast.Name) and val.value.id == "sys":
-                    return True
-    return False
+    from app.plugins.loaders._ast_guard import is_sys_modules_mutation_node
+
+    return is_sys_modules_mutation_node(node)
 
 
 def _load_module(plugin_name: str, path: Path):
@@ -328,6 +309,27 @@ def _is_plugin_enabled(plugin_name: str) -> bool:
     except Exception as e:
         logger.warning(f"[PluginToolLoader] 插件启用状态检查失败，默认加载 {plugin_name}: {e}")
         return True
+
+
+def _is_plugin_load_blocked(plugin_name: str) -> bool:
+    """P1/P2：检查插件是否被版本/平台门禁拦截（load_blocked）。
+
+    仅在 PluginManager 已初始化且能查到插件时检查；否则视为不拦截（放行）。
+    拦截的插件其工具不进 registry——已注册过的会在后续重扫中被清理。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if not pm.is_initialized():
+            return False
+        plugin = pm.get_plugin(plugin_name)
+        if plugin is None:
+            return False
+        return bool(getattr(plugin, "load_blocked", False))
+    except Exception as e:
+        logger.warning(f"[PluginToolLoader] 门禁检查失败，默认放行 {plugin_name}: {e}")
+        return False
 
 
 def _is_component_enabled(plugin_name: str, component: str = "tools") -> bool:
@@ -432,6 +434,10 @@ def load_plugin_tools(
             # D9：组件级禁用——tools 子项被关后不再注册
             if not _is_component_enabled(plugin_name):
                 logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {plugin_name}")
+                continue
+            # P1/P2：版本/平台门禁——load_blocked 插件不加载其工具
+            if _is_plugin_load_blocked(plugin_name):
+                logger.warning(f"[PluginToolLoader] 跳过被门禁拦截插件的工具: {plugin_name}")
                 continue
             try:
                 new_tools = _run_register(registry, plugin_name, py_path, Path(root), root_tracker)
@@ -613,6 +619,10 @@ class PluginToolWatcher:
                 # D9：组件级禁用——tools 子项被关后不再重注册
                 if not _is_component_enabled(plugin_name):
                     logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {plugin_name}")
+                    return
+                # P1/P2：版本/平台门禁——load_blocked 插件不重注册其工具
+                if _is_plugin_load_blocked(plugin_name):
+                    logger.warning(f"[PluginToolLoader] 跳过被门禁拦截插件的工具: {plugin_name}")
                     return
                 new_names: Set[str] = set()
                 for root in self._roots:
