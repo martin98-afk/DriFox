@@ -800,6 +800,7 @@ class CommandCard(QWidget):
         self._selected_param_index: int = -1  # 参数列表选中索引
         self._value_selection_mode: bool = False  # 是否处于值选择模式
         self._value_selection_param: str = ""  # 值选择对应的参数名（如 "--model="）
+        self._value_just_selected_param: str = ""  # 刚通过枚举选中退出的参数名（防抖回声抑制标记）
         self._value_widgets: List[QWidget] = []  # 值选择列表项
         self._selected_value_index: int = -1  # 值列表选中索引
         self._last_selected_value_index: int = -1  # 上次值列表选中索引，用于增量更新
@@ -1885,12 +1886,14 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(False)
         self._detail_value_scroll.setVisible(True)
 
+        # 先重算高度再更新选中：_update_value_selection → _update_desc_tooltip
+        # 会按当前卡片几何定位悬浮描述气泡，若高度未更新，气泡锚定在旧顶边，
+        # 卡片随后变矮时气泡悬在旧位置（枚举描述悬浮窗位置不更新 bug）
+        self._adjust_detail_height()
+
         # 选中第一项
         self._selected_value_index = 0 if self._value_widgets else -1
         self._update_value_selection()
-
-        # 重算高度
-        self._adjust_detail_height()
 
     # ---- 自动检测 --model 触发值选择 / 实时搜索 ----
 
@@ -1947,6 +1950,16 @@ class CommandCard(QWidget):
         if self._value_selection_mode and self._value_selection_param == target_widget.param_name:
             self._refresh_value_list(query)
             return
+
+        # 3.5 选择完成回声抑制：程序化选择退出值选择模式后的首次防抖同步
+        # 会带完整值再次命中同一参数；用户 100ms 内不可能有物理编辑，
+        # 视为回声直接跳过，不再弹回枚举列表。参数不同（用户已切到别的参数）
+        # 则清除标记正常放行。
+        echo_param = self._value_just_selected_param
+        if echo_param:
+            self._value_just_selected_param = ""
+            if target_widget.param_name == echo_param:
+                return
 
         # 4. 切到值选择模式
         self._switch_to_value_selection(target_widget, query=query)
@@ -2047,6 +2060,13 @@ class CommandCard(QWidget):
 
     def _exit_value_selection(self):
         """退出值选择模式，回到参数列表"""
+        # 记录刚选中退出的参数名：选择（Tab/Enter/点击）会同步插入完整值+空格并触发
+        # textChanged → 100ms 防抖 → _sync_detail_params → _auto_switch_to_value_selection。
+        # 此时行尾空格不算"已离开"，--load= 仍会命中并重新弹回值选择模式，
+        # 枚举描述气泡随之重新显示在旧几何位置（悬在聊天区中间）。
+        # 用户 100ms 内不可能有物理编辑，该次重入纯属程序回声，见
+        # _auto_switch_to_value_selection 的回声抑制分支。
+        self._value_just_selected_param = self._value_selection_param
         self._value_selection_mode = False
         self._value_selection_param = ""
         self._detail_value_scroll.setVisible(False)
@@ -2304,6 +2324,7 @@ class CommandCard(QWidget):
         self._detail_has_params = False
         self._value_selection_mode = False
         self._value_selection_param = ""
+        self._value_just_selected_param = ""
         self._selected_param_index = -1
         self._selected_value_index = -1
         self._last_selected_value_index = -1
