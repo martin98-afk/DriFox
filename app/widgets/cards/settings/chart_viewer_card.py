@@ -26,7 +26,7 @@ import sys
 from typing import List
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QUrl, pyqtSignal
+from PyQt5.QtCore import QBuffer, QIODevice, Qt, QUrl, pyqtSignal
 from PyQt5.QtWebEngineWidgets import QWebEnginePage
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import QDialog, QVBoxLayout
@@ -172,6 +172,62 @@ window._enablePanZoom = _enablePanZoom;
 """
 
 
+def _svg_theme_css_vars(is_dark: bool) -> str:
+    """按当前主题生成 :root CSS 变量块（与 message_card 骨架 :root 同源）。
+
+    visualization 技能产出的内联 SVG / html widget 样式大量引用
+    var(--text) / var(--accent-soft) 等变量，变量定义在聊天页骨架的 :root；
+    预览页若不注入同名变量，var() 解析失败 → fill 回退 SVG 默认黑色（整块变黑）。
+    mermaid 渲染产物与 echarts option 自带实色，注入变量对它们无影响（纯增益兜底）。
+    """
+    from app.utils.design_tokens import BorderRadius, current_theme
+
+    theme = current_theme()
+    is_light = not is_dark
+    accent = theme["accent"]
+
+    def _accent_rgba(v: str, alpha: float) -> str:
+        h = (v or "").strip().lstrip("#")
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        if len(h) == 6:
+            try:
+                return "rgba(%d, %d, %d, %s)" % (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16), alpha)
+            except ValueError:
+                pass
+        return "rgba(100, 198, 255, %s)" % alpha  # 解析失败兜底：原 midnight 色
+
+    pairs = [
+        ("--bg", "transparent"),
+        ("--panel", theme["card_bg_solid"]),
+        ("--panel-elevated", theme["card_bg_solid"]),
+        ("--panel-soft", theme["content_bg"]),
+        ("--border", theme["border"]),
+        ("--border-strong", theme["border_accent"]),
+        ("--text", theme["text_primary"]),
+        ("--text-secondary", theme["text_secondary"]),
+        ("--text-muted", theme["text_muted"]),
+        ("--accent", accent),
+        ("--accent-warm", theme["accent_warm"]),
+        ("--code-bg", "var(--panel-soft)" if is_light else "transparent"),
+        ("--code-toolbar", "rgba(0,0,0,0.03)" if is_light else "rgba(255, 255, 255, 0.03)"),
+        ("--code-border", "var(--border)" if is_light else "#2a3447"),
+        ("--success", "#5fd18c"),
+        ("--danger", "#ff7b7b"),
+        # 语义派生层：与 message_card 骨架同源（浅/深主题通吃）
+        ("--accent-text", accent),
+        ("--accent-soft", theme["hover_bg"]),
+        ("--accent-soft-strong", theme["selected_bg"]),
+        ("--accent-border-weak", _accent_rgba(accent, 0.22)),
+        ("--accent-glow", _accent_rgba(accent, 0.10)),
+        ("--row-alt", "rgba(15, 23, 42, 0.03)" if is_light else "rgba(255, 255, 255, 0.02)"),
+        ("--row-hover", "rgba(15, 23, 42, 0.05)" if is_light else "rgba(255, 255, 255, 0.05)"),
+        ("--row-header", "rgba(15, 23, 42, 0.06)" if is_light else "rgba(255, 255, 255, 0.04)"),
+    ]
+    body = "; ".join(f"{k}: {v}" for k, v in pairs)
+    return ":root { " + body + "; " + BorderRadius.CSS_VARS + " }"
+
+
 def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = True) -> str:
     """构建图表大图查看 HTML
 
@@ -183,7 +239,7 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
     Raises:
         ValueError: payload 超上限或类型未知
     """
-    if chart_type not in ("echarts", "mermaid", "svg"):
+    if chart_type not in ("echarts", "mermaid", "svg", "html"):
         raise ValueError("未知图表类型: " + chart_type)
     if len(payload_b64) > _MAX_PAYLOAD_B64:
         raise ValueError("图表数据超过 8MB 上限")
@@ -248,8 +304,48 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
             "html, body { margin: 0; padding: 0; width: 100%%; height: 100%%; background: %(bg)s; overflow: hidden; } "
             "#chart { width: 100%%; height: 100%%; }"
         )
+    elif chart_type == "html":
+        # html 不与 svg/mermaid 同路径：svg/mermaid 走 _enablePanZoom（矢量图
+        # 平移缩放 transform），而 html widget 本身就是成型布局（指标卡/效果稿，
+        # 自带 flex/grid/margin），套 transform 会把布局搅乱——表现为内容错位、
+        # 不居中、大片空白。这里只做居中展示 + 可滚动。
+        # payload 是消息侧已净化过的 .html-widget innerHTML（script/事件属性
+        # 在 fence 阶段就摘掉了），这里再兜一道 script 检测防 payload 被伪造。
+        pre_end = _close("pre")
+        body_script = (
+            '<div class="chart-body">'
+            + "\n"
+            + _SCRIPT_OPEN
+            + "\n"
+            + "var _PAYLOAD = '"
+            + payload_b64
+            + "';\n"
+            + "(function () {\n"
+            + "    var wrap = document.querySelector('.chart-body');\n"
+            + "    try {\n"
+            + "        var bytes = Uint8Array.from(atob(_PAYLOAD), function (c) { return c.charCodeAt(0); });\n"
+            + "        var widgetHtml = new TextDecoder('utf-8').decode(bytes);\n"
+            + "        if (/<script/i.test(widgetHtml)) throw new Error('html contains script');\n"
+            + "        wrap.innerHTML = widgetHtml;\n"
+            + "    } catch (e) {\n"
+            + "        wrap.innerHTML = '<pre style=\"color:#e06c75;padding:16px;\">内容渲染失败: ' + e + '" + pre_end + "';\n"
+            + "    }\n"
+            + "})();\n"
+            + "window._chartType = '"
+            + chart_type
+            + "';\n"
+            + _END_SCRIPT
+            + "\n"
+        )
+        # margin:auto 而非 align-items:center：flex 居中在内容高于视口时会把
+        # 溢出端裁掉且滚不到；margin:auto 溢出后仍可滚动到全部内容
+        style = (
+            "html, body { margin: 0; padding: 0; width: 100%%; height: 100%%; background: %(bg)s; overflow: auto; }"
+            " .chart-body { display: flex; min-height: 100%%; padding: 24px; box-sizing: border-box; }"
+            " .chart-body > * { margin: auto; max-width: 100%%; }"
+        )
     elif chart_type in ("mermaid", "svg"):
-        # svg 与 mermaid 同路径：payload 均为 svg outerHTML b64，直注入 + panZoom + PNG 导出
+        # svg 与 mermaid 同路径：payload 均为 svg outerHTML b64，直注入 + panZoom。
         pre_end = _close("pre")
         body_script = (
             '<div class="chart-body">'
@@ -266,6 +362,17 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
             + "        var svgHtml = new TextDecoder('utf-8').decode(bytes);\n"
             + "        if (/<script/i.test(svgHtml)) throw new Error('svg contains script');\n"
             + "        wrap.innerHTML = svgHtml;\n"
+            + "        // 兜底：无 width/height 属性、只有 viewBox 的内联 SVG，在旧 Chromium\n"
+            + "        // （Qt5 WebEngine）里 intrinsic size 按 0 算 → flex 下 0x0 整图不可见；\n"
+            + "        // 按 viewBox 补显式像素属性，CSS max-width:100% + height:auto 继续管自适应\n"
+            + "        var _el = wrap.firstElementChild;\n"
+            + "        if (_el && _el.tagName && _el.tagName.toLowerCase() === 'svg') {\n"
+            + "            var _vb = _el.viewBox && _el.viewBox.baseVal;\n"
+            + "            if (_vb && _vb.width > 0 && _vb.height > 0 && !_el.getAttribute('width') && !_el.getAttribute('height')) {\n"
+            + "                _el.setAttribute('width', _vb.width);\n"
+            + "                _el.setAttribute('height', _vb.height);\n"
+            + "            }\n"
+            + "        }\n"
             + "        window._enablePanZoom(wrap, wrap.firstElementChild || wrap);\n"
             + "    } catch (e) {\n"
             + "        wrap.innerHTML = '<pre style=\"color:#e06c75;padding:16px;\">图表渲染失败: ' + e + '" + pre_end + "';\n"
@@ -283,7 +390,10 @@ def build_chart_viewer_html(chart_type: str, payload_b64: str, is_dark: bool = T
             " .chart-body svg { max-width: 100%%; height: auto; }"
         )
 
-    style_full = (style % {"bg": bg}).replace("100%%", "100%")
+    # 内联 SVG / html widget 样式依赖骨架 :root 变量（var(--text) 等），
+    # 缺变量时 fill 无效回退默认黑 → 黑块（曾踩坑，见 _svg_theme_css_vars）。
+    # 拼在格式化之后：变量值不受 %%(bg)s 模板影响。
+    style_full = (style % {"bg": bg}).replace("100%%", "100%") + " " + _svg_theme_css_vars(is_dark)
     head_open = "<" + "head" + ">"
     body_open = "<" + "body" + ">"
     style_open = "<" + "style" + ">"
@@ -348,11 +458,16 @@ class ChartViewerCard(BaseSettingsCard):
 
         from qfluentwidgets import FluentIcon
 
-        self.add_header_button(FluentIcon.SAVE, "导出 PNG（3x 高清）", self._on_export_clicked)
+        self._export_btn = self.add_header_button(FluentIcon.SAVE, "导出 PNG（3x 高清）", self._on_export_clicked)
+        self._chart_type = ""
 
     def load_chart(self, chart_type: str, payload_b64: str, title: str = ""):
         """加载图表（echarts option b64 / mermaid、svg 的 outerHTML b64）"""
-        self.set_title_text(title or ("SVG 查看" if chart_type == "svg" else "图表查看"))
+        self.set_title_text(title or {"svg": "SVG 查看", "html": "HTML 查看"}.get(chart_type, "图表查看"))
+        self._chart_type = chart_type
+        # html 走 Qt 抓图（视口物理像素），无 3x 矢量重画，tooltip 如实标注
+        if chart_type == "html" and getattr(self, "_export_btn", None) is not None:
+            self._export_btn.setToolTip("导出 PNG（当前视图）")
         _cleanup_temp_files(self._tmp_files)
         try:
             from app.utils.theme_manager import theme_manager
@@ -389,8 +504,27 @@ class ChartViewerCard(BaseSettingsCard):
         self._export_ready = bool(ok)
 
     def _on_export_clicked(self):
-        if getattr(self, "_export_ready", False):
-            self._webview.page().runJavaScript("window._exportChartPng && window._exportChartPng(3);")
+        if not getattr(self, "_export_ready", False):
+            return
+        if getattr(self, "_chart_type", "") == "html":
+            self._export_widget_png()
+            return
+        self._webview.page().runJavaScript("window._exportChartPng && window._exportChartPng(3);")
+
+    def _export_widget_png(self):
+        """html widget 导出 PNG：成型布局非 echarts 实例、无 html2canvas，
+        JS 矢量通道（getDataURL / svg→canvas）均不适用 → Qt 侧抓整视图
+        （含页面主题底色，物理像素保真）"""
+        pixmap = self._webview.grab()
+        if pixmap.isNull():
+            logger.warning("[ChartViewer] html widget 截图失败")
+            return
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        if not pixmap.save(buf, "PNG"):
+            logger.warning("[ChartViewer] html widget 截图编码失败")
+            return
+        self._save_png("HTML widget", base64.b64encode(bytes(buf.data())).decode("ascii"))
 
     def _save_png(self, name: str, png_b64: str):
         # 延迟导入：ui_helpers 顶部反向 import MessageCard，顶层导入会成环

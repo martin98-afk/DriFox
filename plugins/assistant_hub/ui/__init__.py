@@ -254,6 +254,11 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
     if not assistants:
         return '<div class="welcome-empty">暂无助手，可在标题栏「助手」中创建。</div>'
 
+    _ACCESS_LABELS = {"full": "全量", "readonly": "只读", "minimal": "极简", "search": "仅搜索", "none": "无工具"}
+
+    def _fmt_tokens(n: int) -> str:
+        return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
     try:
         from app.utils.design_tokens import scale_font_size, scale_icon_size
 
@@ -284,13 +289,19 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
         badge = '<span class="ah-badge">主助手</span>' if a.primary else ""
         desc = (a.public_description or "").strip()
         desc_html = f'<span class="ah-desc">{escape(desc)}</span>' if desc else ""
+        access = _ACCESS_LABELS.get(getattr(a, "tool_access", "") or "full", "完全权限")
+        try:
+            tokens_est = mgr.prompt_stats(a.id).get("tokens_est", 0)
+        except Exception:
+            tokens_est = 0
+        meta_html = f'<span class="ah-meta">{access} · 约 {_fmt_tokens(tokens_est)} tokens 上下文</span>'
         anim = f"animation-delay:{idx * 55}ms"
         cards.append(
             f'<div class="ah-card context-tag" style="--ah-c:{color};--ah-glow:{color}59;{anim}" '
             f'data-type="{_WELCOME_ACTION_INSERT}" data-content="{escape(name)}" '
             f'data-action="{_WELCOME_ACTION_INSERT}">'
             f"{avatar_html}"
-            f'<span class="ah-info"><span class="ah-name">{escape(name)}{badge}</span>{desc_html}</span>'
+            f'<span class="ah-info"><span class="ah-name">{escape(name)}{badge}</span>{desc_html}{meta_html}</span>'
             f'<span class="ah-arrow">›</span>'
             f"</div>"
         )
@@ -339,6 +350,10 @@ def _render_assistants_welcome(ctx: Optional[dict] = None) -> str:
 .ah-desc {{
   display: block; font-size: {desc_fs}px; color: var(--text-muted); margin-top: 2px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}}
+.ah-meta {{
+  display: block; font-size: {badge_fs}px; color: var(--text-muted); opacity: .8; margin-top: 3px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }}
 .ah-arrow {{
   flex: 0 0 auto; font-size: {name_fs}px; color: var(--text-muted);

@@ -6,7 +6,7 @@
 
     ┌──────────────────────────────────────────────────────────────┐
     │ ● 记录中 23 条  [全部][系统][用户][钩子][助手][工具]   🔍 搜索 │ 工具条 44px
-    │                                      [Duration|Turns|Calls] ⌫ │
+    │                                      [Duration] ⌫ │
     ├──────────────────────────────────────────────────────────────┤
     │  0s      2.5s      5.0s      7.5s     10.2s                   │ 时间线（全宽）
     │  Input ▓▓▓▓░░░░▓▓▓▓▓▓▓▓░░░░░░░░                              │
@@ -200,26 +200,17 @@ class TraceCardWidget(QWidget):
 
         layout.addStretch(1)
 
-        # 三个**独立开关**（不是互斥 tab）：
-        #   Duration 开=按真实时间比例画条带，关=每条固定宽度
-        #   Turns    开=先按轮次等分整条轴
-        #   Calls    开=只画 Tools 泳道
-        self._flag_btns: Dict[str, QPushButton] = {}
-        for key, label, tip in (
-            ("duration", "Duration", "开：条带宽度按真实时间比例；关：每条等宽"),
-            ("turns", "Turns", "开：按对话轮次等分时间轴"),
-            ("calls", "Calls", "开：只显示 Tools 泳道"),
-        ):
-            btn = QPushButton(label, bar)
-            btn.setCheckable(True)
-            # 默认全关：Duration 关 = 每条等宽（固定长度），开启才按真实时间比例
-            btn.setChecked(False)
-            btn.setFixedHeight(26)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setToolTip(tip)
-            btn.toggled.connect(lambda _c=False, k=key: self._on_flag_toggled(k))
-            self._flag_btns[key] = btn
-            layout.addWidget(btn)
+        # Duration 开关：开=按真实时间比例画条带，关=每条等宽；
+        # 开启后时间线支持滚轮缩放（以鼠标所在时刻为锚点）
+        self._duration_btn = QPushButton("Duration", bar)
+        self._duration_btn.setCheckable(True)
+        # 默认关：Duration 关 = 每条等宽（固定长度），开启才按真实时间比例
+        self._duration_btn.setChecked(False)
+        self._duration_btn.setFixedHeight(26)
+        self._duration_btn.setCursor(Qt.PointingHandCursor)
+        self._duration_btn.setToolTip("开：条带宽度按真实时间比例（开启后滚轮可缩放时间窗）；关：每条等宽")
+        self._duration_btn.toggled.connect(self._on_flag_toggled)
+        layout.addWidget(self._duration_btn)
 
         self._search_box = SearchLineEdit(bar)
         self._search_box.setPlaceholderText("搜索内容 / 工具名…")
@@ -729,13 +720,9 @@ class TraceCardWidget(QWidget):
         # × = 整块隐藏详情面板；点选新条目时再恢复（_on_record_selected）
         self._hide_detail()
 
-    def _on_flag_toggled(self, key: str) -> None:
-        """顶栏三个开关 → 时间线 flags（可任意组合）。"""
-        self._timeline.set_flags(
-            self._flag_btns["duration"].isChecked(),
-            self._flag_btns["turns"].isChecked(),
-            self._flag_btns["calls"].isChecked(),
-        )
+    def _on_flag_toggled(self, checked: bool) -> None:
+        """顶栏 Duration 开关 → 时间线显示模式。"""
+        self._timeline.set_duration(checked)
 
     # ──────────────────── 底部汇总 ────────────────────
 

@@ -15,7 +15,7 @@ def register_ui(registry):
     registry.register_welcome_tab(plugin_name, mode_key, label, render_func)
 
     registry.register_sidebar_item(plugin_name, item_id, label, group="custom", priority=0, on_click=..., metadata=...)
-    registry.register_input_button(plugin_name, button_id, icon_path, tooltip, group="plugin", priority=0, on_click=..., position="end", metadata=...)
+    registry.register_input_button(plugin_name, button_id, icon_path, tooltip, group="plugin", priority=0, on_click=..., on_right_click=..., position="end", metadata=...)
     registry.register_context_menu_action(plugin_name, action_id, label, on_click, target="message_card", group="plugin", priority=0)
     registry.register_settings_card(plugin_name, card_id, title, widget_class, section="plugins", icon="", priority=0)
 

@@ -18,6 +18,7 @@
 - ToolNameMapper 别名          → registry aliases           （hook 上下文/命令解析）
 - ToolExecutor 执行            → registry.impl               （工具分发）
 """
+
 from __future__ import annotations
 
 import copy
@@ -41,6 +42,7 @@ GROUP_DEFAULT_DANGEROUS = "其他"
 # 单一来源：修改此处即同步影响 dataclass 默认值 / register() 默认 / get_icon() 兜底 / render_helpers._get_tool_icon_name()
 DEFAULT_FALLBACK_ICON = "工具"
 
+
 @dataclass
 class ToolRegistration:
     """单个工具的完整注册信息"""
@@ -57,10 +59,14 @@ class ToolRegistration:
     description: str = ""  # 权限卡片行内描述
     source: str = "builtin"  # builtin | plugin:<name>
     team_only: bool = False  # 团队专用：仅团队成员可见（非成员从 schema 定义中过滤）
-    render: Optional[Callable] = None  # 工具完成框 body 渲染闭包：render(result, tool_name, tool_args, success) -> str|None
+    render: Optional[Callable] = (
+        None  # 工具完成框 body 渲染闭包：render(result, tool_name, tool_args, success) -> str|None
+    )
     render_mode: str = ""  # 完成框渲染模式：""=默认折叠卡 / "inline"=紧凑单行(无body) / "expand"=完整卡无折叠(body始终展开) / "none"=不渲染完成框
     preview: Optional[Callable] = None  # 自然语言预览闭包：preview(tool_args) -> str（用于 inline 卡/折叠头参数预览）
-    summarize: Optional[Callable] = None  # 结果压缩摘要闭包：summarize(tool_name, tool_args: dict, tool_content: str) -> str（历史压缩用）
+    summarize: Optional[Callable] = (
+        None  # 结果压缩摘要闭包：summarize(tool_name, tool_args: dict, tool_content: str) -> str（历史压缩用）
+    )
     aliases: List[str] = field(default_factory=list)  # Claude Code 风格别名
     keep_in_content: bool = False  # 工具完成卡常驻消息正文（不迁入「工具与思考」折叠区）
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -138,6 +144,9 @@ class ToolRegistry:
         self._listeners: List = []  # 变更监听（bound method 以 (weakref, func) 弱持有，见 _to_listener_ref）
         self._notify_suspend = 0  # 批量通知挂起计数（嵌套安全）
         self._notify_pending = False  # 挂起期间是否发生变更（恢复计数归零时补发一次）
+        # schema 过滤器（owner → fn）：对话前按 owner 裁剪发给 LLM 的工具 schema。
+        # fn(schemas, ctx) -> list；ctx 含 session_id。插件禁用/卸载时按 owner 清理。
+        self._schema_filters: Dict[str, Callable] = {}
 
     # ========== 单例 ==========
 
@@ -403,10 +412,7 @@ class ToolRegistry:
         工具结果可携带 image_data（协议 B）或可解析出本地图片路径（协议 A）时声明。
         """
         with self._lock:
-            return frozenset(
-                r.name for r in self._tools.values()
-                if (r.metadata or {}).get("provides_image")
-            )
+            return frozenset(r.name for r in self._tools.values() if (r.metadata or {}).get("provides_image"))
 
     def group_map(self) -> Dict[str, List[ToolRegistration]]:
         """按展示分组聚合（权限卡片用）。保持注册顺序，组内危险工具在前。"""
@@ -431,7 +437,7 @@ class ToolRegistry:
         """始终展示在正文的工具名集合（消息卡片正文/工具区分区用）。
 
         纯参数派生：注册时显式声明 keep_in_content=True（如 write/edit/multi_edit、
-        subagent_para/subagent_dag、question）。不做 group/语义标记隐式推断——
+        subagent_para、question）。不做 group/语义标记隐式推断——
         语义键（interactive/subagent_task）另有消费点，借用会误触发其他流程。
         """
         with self._lock:
@@ -454,6 +460,38 @@ class ToolRegistry:
                 return list(self._tools.values())
             wanted = set(agent_tools)
             return [r for name, r in self._tools.items() if name in wanted]
+
+    # ========== Schema 过滤器（对话前裁剪发给 LLM 的工具列表）==========
+
+    def register_schema_filter(self, owner: str, fn: Callable) -> None:
+        """注册 schema 过滤器（同 owner 覆盖）。
+
+        fn(schemas: List[Dict], ctx: Dict) -> List[Dict]：返回裁剪后的 schema 列表
+        （可原地过滤返回子序列，也可返回原列表表示不干预）。
+        """
+        if not callable(fn):
+            raise TypeError("schema filter 必须可调用")
+        with self._lock:
+            self._schema_filters[owner] = fn
+
+    def unregister_schema_filter(self, owner: str) -> None:
+        """注销指定 owner 的过滤器（幂等；插件禁用/卸载时调用）。"""
+        with self._lock:
+            self._schema_filters.pop(owner, None)
+
+    def apply_schema_filters(self, schemas: List[Dict[str, Any]], ctx: Optional[Dict[str, Any]] = None) -> List[Dict]:
+        """依次应用全部过滤器；单个过滤器异常时跳过（不拖垮工具下发）。"""
+        if not self._schema_filters:
+            return schemas
+        current = schemas
+        for owner, fn in list(self._schema_filters.items()):
+            try:
+                result = fn(current, dict(ctx or {}))
+                if isinstance(result, list):
+                    current = result
+            except Exception as e:
+                logger.warning(f"[ToolRegistry] schema 过滤器 {owner} 执行失败，已跳过: {e}")
+        return current
 
     # ========== 缓存失效钩子 ==========
 
@@ -554,9 +592,22 @@ def _classify_fallback(tool_name: str) -> str:
     仅保留供 builtin 种子路径/安全护栏使用。
     """
     dangerous_hint = (
-        "write", "edit", "multi_edit", "bash", "exec", "kill", "remove", "delete",
-        "upload", "mouse", "keyboard", "subagent_para", "subagent_dag",
-        "todowrite", "stage_files", "bg_start", "bg_stop",
+        "write",
+        "edit",
+        "multi_edit",
+        "bash",
+        "exec",
+        "kill",
+        "remove",
+        "delete",
+        "upload",
+        "mouse",
+        "keyboard",
+        "subagent_para",
+        "todowrite",
+        "stage_files",
+        "bg_start",
+        "bg_stop",
     )
     base = tool_name
     if tool_name.startswith("mcp__"):

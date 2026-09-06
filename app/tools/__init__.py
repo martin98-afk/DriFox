@@ -234,15 +234,19 @@ except Exception:
 # 语义等价：任何 ToolRegistry 消费者首次读取前插件必已加载（幂等）。
 
 
-def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dict]:
+def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id: str = "") -> List[Dict]:
     """获取工具的 schema 定义（用于给 LLM 调用，registry 驱动）
 
     系统插件工具（plugins/system/tools/*.py）与第三方插件工具经
     ToolRegistry 注册后自动进入 schema 流；MCP 工具在此动态注入。
 
+    出口统一应用 registry 注册的 schema 过滤器（如 assistant_hub 按
+    助手权限档位裁剪）：过滤发生在缓存之后，不污染缓存。
+
     Args:
         agent_manager: AgentManager 实例，用于动态注入可用子智能体列表
         builtin_tools: BuiltinTools 实例，用于动态注入 MCP 工具 schema
+        session_id: 当前会话 id（供过滤器按会话归属解析，空走全局默认）
     """
     global _CACHE_RESULT, _CACHE_TIMESTAMP, _CACHE_VERSION, _CACHE_AGENT_REF
 
@@ -261,7 +265,13 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         and _CACHE_VERSION == current_version
         and _CACHE_AGENT_REF is agent_manager  # 引用比对：agent 实例更换即失效（多窗口隔离）
     ):
-        return copy.deepcopy(_CACHE_RESULT)
+        result = copy.deepcopy(_CACHE_RESULT)
+        # 对话前 schema 过滤（缓存之后应用，助手权限档位等按 owner 裁剪）
+        try:
+            result = ToolRegistry.get_instance().apply_schema_filters(result, {"session_id": session_id})
+        except Exception as e:
+            logger.warning(f"[BuiltinTools] schema 过滤失败，返回全量: {e}")
+        return result
 
     # 动态获取子智能体名称列表
     subagent_names = []
@@ -287,9 +297,10 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         name = schema.get("function", {}).get("name", "")
         if name == "subagent_para":
             schema["function"]["description"] = subagent_para_desc
-        elif name == "subagent_dag":
-            if subagent_names:
-                schema["function"]["description"] += "\n\n可用子智能体见系统提示 ## Available Subagents。"
+        elif name == "workflow":
+            from plugins.workflow.tools.workflow_tool import _workflow_description
+
+            schema["function"]["description"] = _workflow_description(subagent_names)
         elif name == "bash":
             schema["function"]["description"] += f"\n\n当前平台: {platform.system()}。"
 
@@ -325,4 +336,10 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     _CACHE_VERSION = current_version
     _CACHE_AGENT_REF = agent_manager
 
-    return copy.deepcopy(schemas)
+    result = copy.deepcopy(schemas)
+    # 对话前 schema 过滤（缓存之后应用，助手权限档位等按 owner 裁剪）
+    try:
+        result = ToolRegistry.get_instance().apply_schema_filters(result, {"session_id": session_id})
+    except Exception as e:
+        logger.warning(f"[BuiltinTools] schema 过滤失败，返回全量: {e}")
+    return result

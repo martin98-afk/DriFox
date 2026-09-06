@@ -109,6 +109,12 @@ def _record_impl(tool_ctx, **kw):
     r: Dict[str, Any] = mgr.experience_record(aid, category, content)
     if r.get("added"):
         return ToolResult(True, content=f"已记录到经验库「{category}」。")
+    if r.get("reason") == "category_limit":
+        cats = "、".join(r.get("categories") or [])
+        return ToolResult(
+            True,
+            content=(f"未记录：分类数已达上限，禁止新建分类。请改用已有分类重新调用 record_experience。现有分类：{cats}"),
+        )
     return ToolResult(True, content=f"未记录：{r.get('reason', 'unknown')}")
 
 
@@ -137,11 +143,13 @@ _RECORD_SCHEMA = {
             "以下时机应记录：用户指出错误并讲解正确做法；用户明显不耐烦或反复强调某事；"
             "多次尝试后找到有效方法；用户明确说「以后要/不要这样做」；自主工作中踩到坑。"
             "每条简洁直接，一句话。"
+            "分类纪律：分类要少而稳定。先用无参 recall_experience 查看现有分类，"
+            "必须选一个最接近的已有分类；只有现有分类确实装不下时才允许新建。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "category": {"type": "string", "description": "经验分类（≤8 字，如：代码风格/工作流）"},
+                "category": {"type": "string", "description": "经验分类（≤8 字。优先沿用已有分类，不确定先无参调用 recall_experience 查索引）"},
                 "content": {"type": "string", "description": "经验内容（一句话，具体可执行）"},
             },
             "required": ["category", "content"],
@@ -157,7 +165,7 @@ def register(registry):
         _RECALL_SCHEMA,
         impl=_recall_impl,
         danger="safe",
-        icon="memory",
+        icon="experience",
         cn_name="回忆经验",
         group=_GROUP,
         description="回忆助手的工作经验（索引/分类）",
@@ -168,7 +176,7 @@ def register(registry):
         _RECORD_SCHEMA,
         impl=_record_impl,
         danger="safe",
-        icon="memory",
+        icon="experience",
         cn_name="记录经验",
         group=_GROUP,
         description="记录一条工作经验到经验库",

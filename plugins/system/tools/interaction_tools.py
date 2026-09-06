@@ -176,7 +176,7 @@ def _skill_inventory(query: str = "", source: str = "") -> str:
         else:
             lines.append(f"- {s['qualified_name']}{tag}（来源: {src_name}）\n  {desc[:100]}\n  位置: {s['path']}")
     if brief:
-        lines.append(f"\n超过 30 个，已显示精简视图；用 query（名称/描述子串）或 source（system/user/插件名）过滤查看详情。")
+        lines.append("\n超过 30 个，已显示精简视图；用 query（名称/描述子串）或 source（system/user/插件名）过滤查看详情。")
     lines.append(f"\n仅 [agent_created] 技能可用 modify/delete；create 的新技能放用户技能目录：{user_base}")
     return "\n".join(lines)
 
@@ -390,12 +390,14 @@ def _render_question_body(result, tool_name, tool_args, success):
     first_q = normalized[0].get("question", "")
     q_preview = first_q[:80] + ("…" if len(first_q) > 80 else "")
 
+    # 配色一律走主程序暴露的主题令牌（--panel-soft / --text / --border ...），
+    # 不写死颜色、也不往主程序塞工具专属 CSS —— 换主题自动跟随。
     return f"""
-    <div class="terminal-block" style="background:rgba(13,17,23,0.40);border:1px solid rgba(48,54,61,0.25);border-radius:8px;overflow:hidden;margin:0;">
-        <div style="padding:6px 12px;background:rgba(22,27,34,0.40);border-bottom:1px solid rgba(48,54,61,0.25);color:#8b949e;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(12)}px;">
-            <span style="color:#FFA500;">❓</span> <span style="color:#c9d1d9;">question: {escape(q_preview)}</span>
+    <div style="background:var(--panel-soft);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin:0;">
+        <div style="padding:6px 12px;border-bottom:1px solid var(--border);color:var(--text-secondary);word-break:break-word;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;">
+            <span style="color:var(--accent);">?</span> <span style="color:var(--text);">question: {escape(q_preview)}</span>
         </div>
-        <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;">{escape(body_text)}</pre>
+        <pre style="margin:0;padding:10px 12px;background:transparent;color:var(--text);font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:520px;overflow-y:auto;">{escape(body_text)}</pre>
     </div>"""
 
 

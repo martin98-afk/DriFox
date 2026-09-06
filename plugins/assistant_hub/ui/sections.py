@@ -2,7 +2,7 @@
 """sections.py — 助手中心单列分区组件（对齐 openhanako AgentTab 分区结构）
 
 分区：ProfileSection（名称/模型）→ AboutSection（人格切换，只读）→
-MemorySection（记忆传送带）→ ExperienceSection（经验）→ SkillsSection（技能）。
+MemorySection（记忆传送带）→ ExperienceSection（经验）。
 
 视觉基调（对齐原版纸张风）：细边框卡 + 12px 圆角 + 小字 hint + 大量留白；
 去 emoji，统一 FluentIcon / 文字标签。
@@ -10,7 +10,7 @@ MemorySection（记忆传送带）→ ExperienceSection（经验）→ SkillsSec
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from PyQt5.QtCore import QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QFontMetrics, QIcon, QPainter, QPixmap
@@ -22,7 +22,6 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QLayout,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
@@ -945,12 +944,10 @@ class ExperienceSection(_Section):
 
     def set_enabled(self, on: bool) -> None:
         self._exp_switch.setChecked(on)
-        self._body_wrap.setVisible(True)
-        self._hint.setText(
-            "已启用：助手可在对话中自主回忆/记录经验（recall/record_experience 工具）。"
-            if on
-            else "已暂停。已有内容会保留，但助手不能读取或记录经验。"
-        )
+        # 与记忆一致：关闭后内容全部隐藏（含提示/按钮/分类列表），只留开关
+        self._body_wrap.setVisible(bool(on))
+        if on:
+            self._hint.setText("已启用：助手可在对话中自主回忆/记录经验（recall/record_experience 工具）。")
 
     def reload_categories(self, docs: List[Dict[str, Any]]) -> None:
         while self._list_area.count():
@@ -983,86 +980,120 @@ class ExperienceSection(_Section):
             self._list_area.addWidget(row_wrap)
 
 
-# ── 技能分区 ────────────────────────────────────────────
+# ── 预置工具分区 ────────────────────────────────────────
+
+# 档位定义（key 与 Assistant.tool_access / schema_filter 对齐）：控制初始注入的
+# 工具 schema，不影响可用性（未注入的可经 tool_search 搜索后照常调用）
+_TOOL_MODES = (
+    ("full", "全量", "初始注入全部工具", "[FULL]"),
+    ("readonly", "只读", "初始只注入安全类工具", "[READ-ONLY]"),
+    ("minimal", "极简", "bash+write+edit，其余不可用", "[MINIMAL]"),
+    ("search", "仅搜索", "仅搜索+中转执行，其余搜索后调用", "[SEARCH]"),
+    ("none", "无工具", "不注入任何工具", "[NONE]"),
+)
 
 
-class SkillsSection(_Section):
-    """专属技能：总开关 + 列表（行内开关/查看/删除）。
+class _ToolModeChip(QFrame):
+    """单档卡片：视觉对齐人格 chips（名 + 两行描述 + tag 方角牌，选中 accent 边框）。"""
 
-    技能只能由助手自主创建（skill 工具落盘），不提供手动新建。
-    行内开关消费 whitelist/blacklist：whitelist 非空 = 仅白名单启用；
-    空 = 全部启用减黑名单（默认全开，对齐 openhanako enabled 语义）。
-    """
+    clicked = pyqtSignal()
 
-    skillsChanged = pyqtSignal()
-    toggleSkills = pyqtSignal(bool)
-    skillToggleRequested = pyqtSignal(str, bool)  # name, enable
-    skillDeleteRequested = pyqtSignal(str)
+    def __init__(self, mode: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("toolModeChip")  # ⚠ 样式选择器依赖
+        self.mode = mode
+        self._selected = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(150, 112)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 12, 12, 10)
+        v.setSpacing(5)
+        name, desc, tag = next((n, d, t) for k, n, d, t in _TOOL_MODES if k == mode)
+        self._name = QLabel(name)
+        self._name.setAlignment(Qt.AlignCenter)
+        v.addWidget(self._name)
+        self._desc = QLabel()
+        self._desc.setAlignment(Qt.AlignCenter)
+        # 描述限制 2 行：按像素宽度手动截断（超出加 …）并钉死高度，防遮挡 tag
+        # （手法与 _PersonaChip 一致；字号须与 QSS 实际渲染一致，含全局字体缩放 delta）
+        fm = QFont(self._desc.font())
+        fm.setPixelSize(scale_font_size(10))
+        metrics = QFontMetrics(fm)
+        self._desc.setText(_elide_lines(desc, metrics, 124, 2))
+        self._desc.setFixedHeight(metrics.lineSpacing() * 2)
+        self._desc.setWordWrap(False)
+        v.addWidget(self._desc)
+        v.addStretch()
+        self._tag = QLabel(tag)
+        self._tag.setAlignment(Qt.AlignCenter)
+        v.addWidget(self._tag)
+        self._apply_style()
 
-    def __init__(self, parent=None):
-        super().__init__("专属技能", parent)
-        self._switch = SwitchButton()
-        self._switch.setOnText("开")
-        self._switch.setOffText("关")
-        self._switch.checkedChanged.connect(self.toggleSkills.emit)
-        self.set_context(self._switch)
-
-        self.body().addWidget(
-            _hint("助手的专属技能（skills/*.md）。启用的技能注入对话提示（名称+简介+路径），正文由模型用 read 工具按需读取。")
+    def _apply_style(self) -> None:
+        border = Colors.TEXT_ACCENT if self._selected else Colors.BORDER
+        bg = "rgba(245, 158, 11, 0.07)" if self._selected else "transparent"
+        self.setStyleSheet(
+            f"""
+            QFrame#toolModeChip {{
+                background: {bg};
+                border: {"2px solid " + Colors.TEXT_ACCENT if self._selected else "1.5px solid " + border};
+                border-radius: 12px;
+            }}
+            QFrame#toolModeChip:hover {{ border-color: {Colors.TEXT_ACCENT}; }}
+            QFrame#toolModeChip QLabel {{ background: transparent; border: none; }}
+        """
+        )
+        self._name.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(12)}; font-weight: 600;"
+        )
+        self._desc.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(10)};"
+        )
+        self._tag.setStyleSheet(
+            f"color: {Colors.TEXT_ACCENT if self._selected else Colors.TEXT_MUTED};"
+            f"background: transparent; border: none;"
+            f"{get_font_family_css()} {font_size_css(9)}; letter-spacing: 1px;"
         )
 
-        self._scroll = QScrollArea()
-        self._scroll.setWidgetResizable(True)
-        self._scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        container = QWidget()
-        self._list_v = QVBoxLayout(container)
-        self._list_v.setContentsMargins(0, 0, 0, 0)
-        self._list_v.setSpacing(3)
-        self._scroll.setWidget(container)
-        self.body().addWidget(self._scroll)
+    def set_selected(self, on: bool) -> None:
+        if self._selected != on:
+            self._selected = on
+            self._apply_style()
 
-    def set_skills_enabled(self, on: bool) -> None:
-        self._switch.blockSignals(True)
-        self._switch.setChecked(bool(on))
-        self._switch.blockSignals(False)
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        self.clicked.emit()
 
-    def reload_skills(
-        self,
-        skills: List[Dict[str, Any]],
-        enabled_names: "set | List[str]",
-        on_open: Callable[[str], None],
-    ) -> None:
-        enabled = set(enabled_names)
-        while self._list_v.count():
-            item = self._list_v.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-        if not skills:
-            self._list_v.addWidget(_hint("（暂无技能）"))
-            return
-        for sk in skills:
-            row_wrap = QWidget()
-            row_wrap.setStyleSheet("background: transparent;")
-            row = QHBoxLayout(row_wrap)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
-            btn = QPushButton(f"{sk['name']} · {sk.get('description', '')[:30]}（{sk.get('content_chars', 0)} 字）")
-            btn.setStyleSheet(_btn_style(align_left=True))
-            btn.clicked.connect(lambda _c=False, n=sk["name"]: on_open(n))
-            row.addWidget(btn, 1)
-            sw = SwitchButton()
-            sw.setOnText("开")
-            sw.setOffText("关")
-            sw.setChecked(sk["name"] in enabled)
-            sw.checkedChanged.connect(
-                lambda on, n=sk["name"]: self.skillToggleRequested.emit(n, on)
+
+class ToolAccessSection(_Section):
+    """预置工具：三档 chips 卡快捷切换（控制初始注入的工具 schema，不影响可用性）。"""
+
+    modeChangeRequested = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__("预置工具", parent)
+        self.body().addWidget(
+            _hint(
+                "点卡片切换初始注入的工具范围，下一条消息生效；未注入的工具并非都能找回：含工具搜索的档位可经 tool_search 搜索、tool_execute 中转调用，极简/无工具档则不可。",
+                10,
             )
-            row.addWidget(sw)
-            del_btn = _del_btn(14)
-            del_btn.setFixedSize(30, 28)
-            del_btn.setToolTip("删除技能")
-            del_btn.setStyleSheet(_btn_style(danger=True, icon_only=True))
-            del_btn.clicked.connect(lambda _c=False, n=sk["name"]: self.skillDeleteRequested.emit(n))
-            row.addWidget(del_btn)
-            self._list_v.addWidget(row_wrap)
+        )
+        self._mode = "full"
+        self._chips: Dict[str, _ToolModeChip] = {}
+        chips_host = QWidget()
+        chips_host.setStyleSheet("background: transparent;")
+        row = _CenterFlowLayout(chips_host)
+        row.setSpacing(12)
+        for key, _n, _d, _t in _TOOL_MODES:
+            chip = _ToolModeChip(key)
+            chip.clicked.connect(lambda k=key: self.modeChangeRequested.emit(k))
+            row.addWidget(chip)
+            self._chips[key] = chip
+        self.body().addWidget(chips_host)
+        self.set_mode("full")
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode if mode in self._chips else "full"
+        for key, chip in self._chips.items():
+            chip.set_selected(key == self._mode)

@@ -46,6 +46,7 @@ class _SectionHeader(QFrame):
         self._icon_label.setFixedSize(16, 16)
         self._icon_label.setScaledContents(True)
         self._icon_label.setVisible(bool(icon_name))
+        self._icon_name = icon_name  # 存名供 refresh_style 重取 pixmap（SVG 着色随主题）
         if icon_name:
             self.set_icon_name(icon_name)
         self._title_label = QLabel(title, self)
@@ -75,6 +76,7 @@ class _SectionHeader(QFrame):
         btn.clicked.connect(callback)
         self.layout().insertWidget(self.layout().count() - 1, btn)
         self._action_btn = btn
+        self._action_icon_name = icon_name
         return btn
 
     def hide_action(self) -> None:
@@ -86,6 +88,12 @@ class _SectionHeader(QFrame):
             self._action_btn.show()
 
     def refresh_style(self) -> None:
+        # 重取图标 pixmap：get_icon 按当前主题着色 SVG，构造期 pixmap 已固化
+        if self._icon_name:
+            self._icon_label.setPixmap(get_icon(self._icon_name).pixmap(16, 16))
+        # 操作按钮图标同理重建（TransparentToolButton setIcon 固化）
+        if self._action_btn is not None:
+            self._action_btn.setIcon(get_icon(self._action_icon_name))
         self.setStyleSheet(
             "QFrame#workbenchSectionHeader { background: transparent; border: none; }"
             f" QLabel {{ color: {Colors.TEXT_SECONDARY}; background: transparent;"

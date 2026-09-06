@@ -455,6 +455,11 @@ def unload_plugin_tools(
             （如用户插件删除后，残留的 read→user_root 会挡住 system 恢复）。
     """
     registry = registry or ToolRegistry.get_instance()
+    # 同步清理该插件的 schema 过滤器（禁用/卸载/热重载路径统一走这里，防残留）
+    try:
+        registry.unregister_schema_filter(plugin_name)
+    except Exception as e:
+        logger.warning(f"[PluginToolLoader] 清理插件 schema 过滤器失败: {plugin_name} {e}")
     for name in tool_names:
         reg = registry.get(name)
         if reg is not None and reg.source == f"plugin:{plugin_name}":

@@ -170,7 +170,7 @@ def _estimate_agents_tokens(plugin_name: str) -> tuple:
     if not parts:
         return 0, 0
     text = "\n".join(
-        ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para和subagent_dag使用)："] + parts
+        ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para使用)："] + parts
     )
     return _estimate_tokens(text), count
 

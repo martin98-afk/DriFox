@@ -328,16 +328,27 @@ class DreamRunner:
     def _run(self, trigger: str) -> Dict:
         run_id = f"dream-{int(time.time() * 1000)}"
         state = _read_state(self._aid)
+        # 崩溃可察：开跑先落盘 running 审计态，任何终态（成功/失败）都会覆盖它。
+        # 进程在此后被杀的尝试不再"无痕"：lastRun.status=running + 无新 revision = 被打断。
+        state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "running", "at": _now()}
+        _write_state(self._aid, state)
 
-        before = snapshot_sections(self._aid)
-        if not _has_any_memory(before):
-            err = "dream_no_memory"
-            state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed", "error": err, "at": _now()}
+        try:
+            before = snapshot_sections(self._aid)
+            if not _has_any_memory(before):
+                err = "dream_no_memory"
+                state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed", "error": err, "at": _now()}
+                _write_state(self._aid, state)
+                return {"ok": False, "error": err}
+            before_hash = _hash_sections(before)
+            prompts = _prompts()
+        except Exception as e:
+            # 前置段（快照/模板加载）异常不再静默丢弃：记 failed 供调度补跑决策
+            logger.warning("[assistant_hub.dream] %s %s 前置准备失败: %s", self._aid, trigger, e)
+            state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed", "error": str(e), "at": _now()}
             _write_state(self._aid, state)
-            return {"ok": False, "error": err}
-        before_hash = _hash_sections(before)
+            return {"ok": False, "error": str(e)}
 
-        prompts = _prompts()
         total = 6
         try:
             llm = self._llm
@@ -363,6 +374,7 @@ class DreamRunner:
             if not (verdict.get("semantic_ok", True) and verdict.get("provenance_ok", True)):
                 verify_warning = str(verdict.get("feedback") or "语义/溯源校验未通过（仅警告）")
         except Exception as e:
+            logger.warning("[assistant_hub.dream] %s %s 整理管线失败: %s", self._aid, trigger, e)
             state["lastRun"] = {"runId": run_id, "trigger": trigger, "status": "failed", "error": str(e), "at": _now()}
             _write_state(self._aid, state)
             return {"ok": False, "error": str(e)}
@@ -370,6 +382,7 @@ class DreamRunner:
         # 快照对比：Dream 期间记忆被改 → 放弃
         current = snapshot_sections(self._aid)
         if _hash_sections(current) != before_hash:
+            logger.warning("[assistant_hub.dream] %s %s 记忆中途变更，放弃本次整理", self._aid, trigger)
             state["lastRun"] = {
                 "runId": run_id,
                 "trigger": trigger,

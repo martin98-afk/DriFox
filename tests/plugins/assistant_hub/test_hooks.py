@@ -19,7 +19,6 @@ class _A:
     id = "xiaohu-x1"
     memory_enabled = True
     experience_enabled = False
-    skills_enabled = True
 
 
 class _Mgr:
@@ -54,13 +53,24 @@ class _Mgr:
 
     def compiled_memory(self, aid):
         return "## 今日\n\n- 在开发助手中心"
-    def enabled_skills(self, aid):
-        return [
-            {"name": "drifox-dev", "description": "DriFox 开发规范", "path": "/tmp/skills/drifox-dev.md"}
-        ]
 
     def experience_read_index(self, aid):
         return "# 经验索引"
+
+    def prompt_block(self, aid):
+        """模拟 manager.prompt_block 组装语义（真组装在 test_manager_ext 用真 manager 测）。"""
+        a = self.get(aid)
+        parts = []
+        persona = self.identity_and_persona(aid)
+        if persona.strip():
+            parts.append(persona.strip())
+        pin_lines = [f"- {(c or '').strip()}" for _pid, c in self.read_pinned(aid) if (c or "").strip()]
+        if pin_lines:
+            parts.append("# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines))
+        if a.memory_enabled:
+            parts += ["## 记忆使用规则", "# 长期记忆\n\n" + self.compiled_memory(aid)]
+        header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}"
+        return header + "\n\n" + "\n\n".join(parts)
 
 
 def _patch_mgr(monkeypatch):
@@ -92,22 +102,6 @@ def test_block_memory_disabled(monkeypatch):
     assert "人工提示" in block and "用户喜欢简洁回复" in block  # 人工提示不受记忆开关控制
     assert "小狐" in block  # persona 段仍在
     assert "今日" not in block  # memory.md 不注入
-
-
-def test_block_contains_skill_section(monkeypatch):
-    """技能段（渐进披露）：name+简介+路径入 prompt，正文不入（模型用 read 读盘）。"""
-    _patch_mgr(monkeypatch)
-    block = m._assistant_prompt_block("xiaohu-x1")
-    assert "# 助手技能" in block
-    assert "drifox-dev" in block and "DriFox 开发规范" in block
-    assert "read" in block  # 引导模型用 read 工具读全文
-
-
-def test_block_skills_disabled(monkeypatch):
-    mgr = _patch_mgr(monkeypatch)
-    mgr.enabled_skills = lambda aid: []  # 总开关关/全部过滤
-    block = m._assistant_prompt_block("xiaohu-x1")
-    assert "# 助手技能" not in block
 
 
 def test_hook_replaces_identity_context(monkeypatch):

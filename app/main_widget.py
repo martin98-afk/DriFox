@@ -3341,6 +3341,21 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[MainWidget] 输入区插件按钮 {info.button_id} 回调失败：{e}")
 
+    def _on_plugin_input_button_right_clicked(self, info):
+        """输入区插件按钮右键：组同款上下文派发 info.on_right_click（未注册则忽略）"""
+        try:
+            if getattr(info, "on_right_click", None) is None:
+                return
+            context = {
+                "button_id": info.button_id,
+                "plugin_name": info.plugin_name,
+                "window_id": getattr(self, "_window_id", None),
+                "main_widget": self,
+            }
+            info.on_right_click(context)
+        except Exception as e:
+            logger.error(f"[MainWidget] 输入区插件按钮 {info.button_id} 右键回调失败：{e}")
+
     def _build_plugin_input_menu(self, menu) -> None:
         """向输入框右键菜单追加插件项（Phase E：target=input_area）
 
@@ -3431,6 +3446,13 @@ class OpenAIChatToolWindow(ToolWindow):
             btn.setObjectName(info.button_id)  # 供其他插件锚点匹配
             btn._plugin_input_info = info  # 供主题切换时刷新图标
             btn.clicked.connect(lambda checked=False, i=info: self._on_plugin_input_button_clicked(i))
+            if getattr(info, "on_right_click", None) is not None:
+                from PyQt5.QtCore import Qt
+
+                btn.setContextMenuPolicy(Qt.CustomContextMenu)
+                btn.customContextMenuRequested.connect(
+                    lambda pos, i=info: self._on_plugin_input_button_right_clicked(i)
+                )
             return btn
 
         def _find_anchor_index(anchor_id: str) -> int:
@@ -9747,11 +9769,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 if ring and hasattr(ring, "refresh_theme"):
                     ring.refresh_theme()
 
-            # 消息卡片主题
+            # 消息卡片主题（per-card 隔离：单卡 refresh_theme 异常不得中断
+            # 后续刷新项——2026-09-06 NameError 曾致同窗口输入框/设置弹窗卡片
+            # 全部停留在旧主题）
             ThemeRefreshCoordinator.timer_start("msg_cards")
             for card in _message_cards:
                 if hasattr(card, "refresh_theme"):
-                    card.refresh_theme()
+                    try:
+                        card.refresh_theme()
+                    except Exception as e:
+                        logger.warning(f"[theme refresh] message card {id(card):#x}: {e}")
             ThemeRefreshCoordinator.timer_end("msg_cards")
 
             # 自绘 hover tooltip 主题刷新

@@ -1365,6 +1365,45 @@ def save_svg_source(parent, content_b64: str, default_name: str = "SVG") -> Opti
         return None
 
 
+def save_html_source(parent, content_b64: str, default_name: str = "HTML") -> Optional[str]:
+    """把 HTML widget（```html fence 净化产物）源码保存为本地 .html 文件（弹保存对话框）
+
+    Args:
+        parent: 父控件
+        content_b64: HTML 源码的 base64 字符串
+        default_name: 默认文件名主体
+
+    Returns:
+        保存路径；用户取消返回 None
+    """
+    import base64 as _b64mod
+
+    from PyQt5.QtWidgets import QFileDialog
+
+    try:
+        content = _b64mod.b64decode(content_b64).decode("utf-8") if content_b64 else ""
+    except Exception as e:
+        logger.error(f"[Widget] 源码解码失败: {e}")
+        return None
+    if not content.strip():
+        return None
+
+    default_file = f"{default_name}_{time.strftime('%Y%m%d_%H%M%S')}.html"
+    file_path, _ = QFileDialog.getSaveFileName(parent, "保存 HTML 源文件", default_file, "HTML 文件 (*.html)")
+    if not file_path:
+        return None
+    if not file_path.lower().endswith(".html"):
+        file_path += ".html"
+
+    try:
+        with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        return file_path
+    except Exception as e:
+        logger.error(f"[Widget] 源文件保存失败: {e}")
+        return None
+
+
 def show_chart_viewer(parent, chart_type: str, payload_b64: str) -> Any:
     """显示图表放大查看器（内嵌卡覆盖对话区域；无全局卡片容器时回退弹窗）
 

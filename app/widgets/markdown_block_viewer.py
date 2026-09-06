@@ -1705,6 +1705,42 @@ class _NullPage:
         return ""
 
 
+# ===== 图表 fence 在灰度渲染器下的降级说明 =====
+# 纯 Qt 组件没有 JS 引擎，渲染不了 echarts / mermaid / 插件 fence。设计稿
+# （docs/superpowers/specs/2026-09-04-plugin-fence-renderer-design.md:102）
+# 明确"灰度渲染器不接插件 fence，降级代码块，留 TODO"。这里只把静默降级
+# 变成体面降级：补一张说明卡片，源码照常保留。
+_CHART_FENCE_LANGS = ("echarts", "mermaid", "html", "svg")
+
+
+def _chart_fence_notice(lang: str):
+    """图表类 fence 的说明卡片；非图表 fence 返回 None。
+
+    覆盖宿主内置的 echarts / mermaid / svg / html，以及插件注册的任意
+    fence lang（查 UIPluginRegistry，与 WebEngine 侧同一张表）。
+    """
+    key = (lang or "").strip().lower()
+    if key.endswith("-streaming"):
+        key = key[: -len("-streaming")]
+    if not key:
+        return None
+    if key not in _CHART_FENCE_LANGS:
+        try:
+            from app.widgets.message_card import _get_plugin_fence_renderer
+
+            if _get_plugin_fence_renderer(key) is None:
+                return None
+        except Exception:
+            return None
+    # lang 来自 LLM 输出，拼进富文本前必须转义
+    safe = _html_mod.escape(key)
+    return RichTextLabel(
+        "<table cellspacing='0' cellpadding='6' width='100%'>"
+        f"<tr><td><b>{safe}</b> 需要 WebEngine 渲染，当前 Qt 灰度渲染器不渲染图表。"
+        "在设置中关闭「Qt 灰度渲染器」后重开会话即可查看；下方为原始源码。</td></tr></table>"
+    )
+
+
 class MarkdownBlockViewer(QWidget):
     """纯 Qt 块级消息正文渲染器（CodeWebViewer 替换原型）。
 
@@ -1911,6 +1947,17 @@ class MarkdownBlockViewer(QWidget):
     @staticmethod
     def _build_block_widget(b: Dict[str, Any]) -> QWidget:
         if b["type"] == "code":
+            notice = _chart_fence_notice(b["lang"])
+            if notice is not None:
+                # 图表类 fence：上方说明卡片 + 下方源码，而不是把图表源码
+                # 默默当成普通代码高亮（用户会以为"图表渲染成这样了"）
+                holder = QWidget()
+                lay = QVBoxLayout(holder)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.setSpacing(6)
+                lay.addWidget(notice)
+                lay.addWidget(CodeBlockWidget(b["code"], b["lang"]))
+                return holder
             return CodeBlockWidget(b["code"], b["lang"])
         if b["type"] == "tool":
             return ToolCardWidget(b)  # 编辑类工具：结果展示在正文之中

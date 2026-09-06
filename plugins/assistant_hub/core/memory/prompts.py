@@ -7,7 +7,7 @@
 - 对齐 openhanako lib/memory/prompts/{compile,dream,fact-extraction}.ts 的语义。
 """
 
-from typing import List
+from typing import Dict, List
 
 _SYSTEM = "你是记忆整理器。输出面向 LLM 回读而非人类阅读：记忆碎片式高密度条目，零冗余。只输出要求的内容，不解释，不加 markdown 代码围栏。"
 
@@ -62,6 +62,7 @@ def build_compile_facts(existing_facts: str, turns: str) -> list:
         + _STYLE
         + "- 只收「过时会让助手犯错」级别的事实，一次性话题不收\n"
         "- 与已有事实冲突时以新对话为准\n"
+        "- 旧有事实在新对话中未再提及：默认原样保留，只有确证已过时/被覆盖才删，存疑即留\n"
         "- 总量 ≤30 行；接近上限时合并同类、淘汰最陈旧最不关键的\n\n"
         f"【已有重要事实】\n{existing}\n\n【新对话】\n{turns.strip() or '（无）'}"
     )
@@ -156,7 +157,8 @@ def build_consolidate(entries: List[Dict[str, str]]) -> list:
         "长条目改写成碎片表述。跨分类的重复也一并合并，相近分类可合并成一个新分类。\n"
         "保留全部仍然有效的事实，禁止编造原文不存在的内容。\n"
         "- 每条仍是一条碎片：对象+动作+关键细节，具体可执行\n"
-        "- 每条给出分类（≤8 字，可沿用或新起）\n"
+        "- 分类纪律：分类总数必须 ≤6 个。优先沿用输入中已有的分类，"
+        "只有某条经验确实装不进任何现有分类时才新建；能合并的分类一律合并，不新建\n"
         '- 只输出 JSON 数组：[{"category": "...", "content": "..."}]，无可保留内容输出 []\n\n'
         f"【全部条目（{len(entries)} 条）】\n{lines}"
     )
@@ -173,7 +175,8 @@ def build_reflect(identity_and_persona: str, memory_md: str, existing_experience
         "要求：\n"
         "- 只提炼记忆中有依据的心得，不要泛泛的空话（如「要认真负责」）\n"
         "- content 一条碎片：对象+动作+关键细节，具体可执行\n"
-        "- 每条给出分类（≤8 字，如「代码风格」「工作流」「工具使用」）\n"
+        "- 分类纪律：分类要少而稳定（全库 ≤6 个）。必须优先从「已有经验库」里选一个最接近的分类，"
+        "只有现有分类确实装不下时才允许新建；给出分类（≤8 字）\n"
         '- 只输出 JSON 数组：[{"category": "...", "content": "..."}]，没有心得输出 []\n\n'
         f"【助手人格】\n{identity_and_persona.strip()[:1500]}\n\n"
         f"【最近记忆】\n{memory_md.strip()[:4000] or '（空）'}\n\n"

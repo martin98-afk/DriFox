@@ -345,10 +345,10 @@ def wheel_delta_to_px(delta: int) -> int:
 
 
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
-# 子智能体和提问工具（subagent_para/subagent_dag/question）涉及 AI 与用户的直接交互，
+# 子智能体和提问工具（subagent_para/question）涉及 AI 与用户的直接交互，
 # 留在正文中比收到工具区更符合直觉，体验更连贯。
 # 集合由 registry 派生（注册时显式声明 keep_in_content=True，不硬编码工具名）：
-#   write/edit/multi_edit + subagent_para/subagent_dag + question 等
+#   write/edit/multi_edit + subagent_para + question 等
 def _edit_tools() -> frozenset:
     """编辑/子智能体/提问类工具集合（registry 派生，数据源统一）"""
     try:
@@ -428,6 +428,130 @@ _CHART_SKELETON_HTML = (
     "</div>"
 )
 
+# ===== ```html fence 净化 =====
+# 可视化协议（plugins/system/skills/visualization）会产出 ```html 围栏的
+# UI 效果稿 / 指标卡。此前分发器没有 html 分支 → 落到兜底被当源码高亮，
+# 用户看到的是一堆 HTML 文本而不是渲染结果。
+#
+# 但直接内联 HTML = 任意 HTML 注入：卡片页面是 file:// 源且开了本地文件
+# 访问，未净化的 <script> 能读本地磁盘。净化策略：
+#   保留：普通标签、class/id/data-*、内联 style、<style> 样式表
+#   移除：script / iframe / object / embed / applet / form / base / link / meta、
+#         所有 on* 事件属性、javascript: 等危险协议、<style> 里的 @import
+# 需要交互能力的场景走插件 fence 渲染器 + __drifoxBridge（受权限声明约束），
+# 不走裸 html fence。
+_HTML_STRIP_PAIR_PATTERN = re.compile(
+    r"<\s*(script|iframe|object|embed|applet|form)\b[^>]*>.*?<\s*/\s*\1\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_STRIP_VOID_PATTERN = re.compile(
+    r"<\s*(script|iframe|object|embed|applet|form|base|link|meta|portal)\b[^>]*>",
+    re.IGNORECASE,
+)
+_HTML_EVENT_ATTR_PATTERN = re.compile(
+    r"\son[a-z][a-z0-9_-]*\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)",
+    re.IGNORECASE,
+)
+_HTML_JS_PROTO_PATTERN = re.compile(r"(javascript|vbscript|livescript|mocha)\s*:", re.IGNORECASE)
+_HTML_DATA_HTML_PATTERN = re.compile(r"data\s*:\s*text/html", re.IGNORECASE)
+_HTML_CSS_IMPORT_PATTERN = re.compile(r"@import\b[^;]*;?", re.IGNORECASE)
+# 只有"真正的 HTML"才渲染：以标准 HTML 元素 / DOCTYPE / 注释开头。
+# 反例：模型在 ```html 围栏里写 DriFox 协议片段（<tool>...</tool>、<think>...</think>），
+# 这是协议文本而不是 UI 稿 —— 若当真实 DOM 内联，标签会被浏览器当未知元素吞掉，
+# 内部字段（工具参数 JSON 等）裸露成结构化正文。回归用例见
+# tests/widgets/test_message_card_diff_tail_loss.py。此类内容降级普通代码块。
+_HTML_WIDGET_HEAD_PATTERN = re.compile(
+    r"^\s*(?:<!doctype\b|<!--"
+    r"|<(?:html|head|body|div|span|section|article|aside|header|footer|nav|main"
+    r"|p|h[1-6]|ul|ol|li|table|thead|tbody|tr|td|th|figure|figcaption|dl|dt|dd"
+    r"|svg|style|pre|blockquote|strong|em|a|img|button|label|details|summary|canvas)\b)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_widget_html(raw_html: str, max_len: int = 200_000) -> str:
+    """净化 ```html fence 内容，产出可直接内联的静态 HTML 片段。
+
+    Args:
+        raw_html: fence 原始内容（已解 HTML 实体）
+        max_len: 长度上限，超限直接判空（调用方降级为普通代码块）
+
+    Returns:
+        净化后的 HTML 片段；空串表示超限或净化后无实质内容。
+    """
+    if not raw_html or len(raw_html) > max_len:
+        return ""
+    html = raw_html
+    html = _HTML_STRIP_PAIR_PATTERN.sub("", html)
+    html = _HTML_STRIP_VOID_PATTERN.sub("", html)
+    html = _HTML_EVENT_ATTR_PATTERN.sub("", html)
+    html = _HTML_JS_PROTO_PATTERN.sub("#", html)
+    html = _HTML_DATA_HTML_PATTERN.sub("#", html)
+    html = _HTML_CSS_IMPORT_PATTERN.sub("", html)
+    html = html.strip()
+    # 净化后只剩空标签骨架（内容全是可执行物）→ 判空，由调用方降级
+    text_only = re.sub(r"<[^>]+>", "", html).strip()
+    if not text_only and not re.search(r"<(img|svg|canvas|hr|br)\b", html, re.IGNORECASE):
+        return ""
+    return html
+
+
+def _get_plugin_fence_renderer(lang: str):
+    """查插件 fence 渲染器注册表；未注册 / 插件系统未就绪返回 None。
+
+    在 B3 渲染线程池里调用：`UIPluginRegistry` 是进程级单例，只读的 dict.get
+    在 GIL 下是原子操作，无需额外加锁。任何异常都吞掉并返回 None —— 消息渲染
+    永远不能被插件拖垮（插件出错降级为普通代码块）。
+    """
+    if not lang:
+        return None
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        return UIPluginRegistry.get_instance().get_fence_renderer(lang)
+    except Exception:
+        return None
+
+
+def _render_plugin_fence(info, code_content_raw: str) -> str:
+    """调用插件 render_func 渲染 fence。
+
+    Returns:
+        渲染后的 HTML 片段（带 data-fence-renderer / data-plugin-name 标记）；
+        插件抛错或返回空时返回空串 → 调用方继续走内置链/降级代码块。
+    """
+    try:
+        code = _unescape_html(code_content_raw)
+    except Exception:
+        code = code_content_raw
+    try:
+        html = info.render_func(code, {"lang": info.lang, "plugin_name": info.plugin_name})
+    except Exception:
+        return ""
+    if not isinstance(html, str) or not html.strip():
+        return ""
+    return (
+        f'<div class="plugin-fence" data-fence-renderer="{info.lang}" '
+        f'data-plugin-name="{info.plugin_name}">{html}</div>'
+    )
+
+
+def _plugin_fence_placeholder(info, code_content_raw: str) -> str:
+    """流式半截 fence 的占位：插件自定义优先，否则用宿主通用图表骨架。
+
+    插件的 streaming_placeholder 可以是 str，也可以是 callable(半截源码) -> str。
+    """
+    ph = getattr(info, "streaming_placeholder", None)
+    try:
+        if callable(ph):
+            out = ph(code_content_raw)
+            return out if isinstance(out, str) and out.strip() else _CHART_SKELETON_HTML
+        if isinstance(ph, str) and ph.strip():
+            return ph
+    except Exception:
+        pass
+    return _CHART_SKELETON_HTML
+
 
 # ======== 核心逻辑：保留你的原始代码块样式 ========
 def _wrap_code_blocks_with_copy_button_web(
@@ -457,8 +581,24 @@ def _wrap_code_blocks_with_copy_button_web(
         # <lang>-streaming。这里必须在此之前拦截：残缺 JSON 若照常包成
         # .echarts-container，其 b64 每轮随内容增长而变化 → vault key 每轮都不同，
         # 节点被反复塞进 vault 迅速膨胀（多图白屏的次因）。骨架不入 vault、不 init。
-        if lang in ("echarts-streaming", "mermaid-streaming"):
+        if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming"):
             return _CHART_SKELETON_HTML
+        # 插件注册的 fence 在流式期同样降级为占位：半截源码交给 render_func
+        # 必然产出残缺节点，且内容每轮变化会让产物反复变更、高度抖动。
+        if lang.endswith("-streaming"):
+            _streaming_info = _get_plugin_fence_renderer(lang[: -len("-streaming")])
+            if _streaming_info is not None:
+                return _plugin_fence_placeholder(_streaming_info, code_content_raw)
+
+        # ===== 插件 fence 渲染器（架构档）：先查注册表 =====
+        # 命中 → 插件路径（产物带 data-fence-renderer 标记，供后续按需注入
+        #        插件 assets）；未命中 → 走下方内置硬编码链。
+        # 注册表禁止注册与内置同名的 lang，故不会影响 echarts/mermaid 行为。
+        _fence_info = _get_plugin_fence_renderer(lang)
+        if _fence_info is not None:
+            _plugin_html = _render_plugin_fence(_fence_info, code_content_raw)
+            if _plugin_html:
+                return _plugin_html
 
         # ===== ECharts 代码块：渲染为交互式图表 =====
         if lang == "echarts":
@@ -503,6 +643,24 @@ def _wrap_code_blocks_with_copy_button_web(
             svg_html = _unescape_html(code_content_raw)
             if svg_html.lstrip().lower().startswith("<svg"):
                 return svg_html
+
+        # ===== HTML 代码块：净化后内联（UI 效果稿 / 指标卡）=====
+        # 与 svg 同层：内容不以 "<" 开头（教学代码、配置片段等）保持普通代码块，
+        # 避免把讲 HTML 语法的示例代码误吞成真实 DOM。
+        if lang == "html":
+            try:
+                raw_widget = _unescape_html(code_content_raw)
+            except Exception:
+                raw_widget = code_content_raw
+            if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget):
+                widget_html = _sanitize_widget_html(raw_widget)
+                # 净化后为空（内容全是脚本 / 超长 / 无实质内容）→ 降级普通代码块，
+                # 不留空洞容器
+                if widget_html:
+                    return (
+                        f'<div class="html-widget" data-fence-renderer="html" '
+                        f'style="margin: 12px 0;">{widget_html}</div>'
+                    )
 
         # --- 普通代码块处理 ---
         try:
@@ -604,7 +762,11 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
             stripped = lines[i].strip()
             if stripped.startswith("```"):
                 lang_token = stripped[3:].strip()
-                if lang_token.lower() in ("mermaid", "echarts"):
+                # html 同样需要骨架：半截 HTML 透传会因标签未闭合破坏页面结构。
+                # 插件注册的 fence 也要改标（否则半截源码会被当成品渲染）。
+                if lang_token.lower() in ("mermaid", "echarts", "html") or _get_plugin_fence_renderer(
+                    lang_token.lower()
+                ) is not None:
                     lines[i] = lines[i].replace(lang_token, f"{lang_token}-streaming", 1)
                     md_text = "\n".join(lines)
                 break
@@ -1299,7 +1461,7 @@ def _render_tool_streaming_block(
     # MCP 工具名清理
     is_mcp = tool_name.startswith("mcp__")
     # 子智能体任务：与 render_tool_block 统一走 registry metadata 声明
-    # （插件注册 metadata["subagent_task"]=True；工具已由 task 更名为 subagent_para/subagent_dag，
+    # （插件注册 metadata["subagent_task"]=True；工具已由 task 更名为 subagent_para，
     #   历史消息中的旧名 task 经 ToolNameMapper.to_native 归一化后命中）
     try:
         from app.tools.registry import ToolRegistry
@@ -1736,7 +1898,7 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
         else:
             diff_content = diff_after.strip()
 
-    # ========== 解析 echarts（可选字段，仅 subagent_dag 有；行锚定取最后一个） ==========
+    # ========== 解析 echarts（可选字段；行锚定取最后一个） ==========
     echarts_content = ""
     _echarts_pos = _field_positions.get("echarts", -1)
     if _echarts_pos != -1:
@@ -2052,7 +2214,10 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
     while i < len(md_text):
         start_idx = md_text.find("<tool>", i)
         if start_idx == -1:
-            parts.append(md_text[i:])
+            # 🐛 防御（工具源码泄漏）：无 <tool> 开头的剩余段清理孤立 </tool>，
+            # 对齐 _inject_think_cards 的孤立闭合标签清理——HTML 解析器虽会
+            # 忽略孤立闭合标签，但 <p>正文</tool></p> 在嵌套解析下产生怪异结构。
+            parts.append(md_text[i:].replace("</tool>", ""))
             break
         parts.append(md_text[i:start_idx])
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
@@ -2061,7 +2226,39 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
             parts.append(_render_tool_block_content(content, compact=compact))
             i = end_idx + len("</tool>")
         else:
-            parts.append(md_text[start_idx:])
+            # 🐛 修复（工具源码泄漏）：未闭合块此前原样保留 → md.convert 把
+            # <tool> 当未知 HTML 元素（标签本身不可见），内部 name:/args:/result:
+            # 字段文本裸露为正文（截图级症状：name: bash args: {...} result: ...）。
+            # 未闭合来源：模型在正文中输出协议格式文本（讨论工具调用机制时
+            # 模仿上下文格式，流式中 </tool> 未到达）、max_tokens 截断、停止生成。
+            # 按到达程度渲染：流式中间态 → 运行中占位框（与 JS 注入运行框视觉
+            # 一致，闭合后自然过渡为工具卡）；非流式终态（截断/停止）→ 容错
+            # 解析已有字段渲染完成态卡。fence 内示例由 _extract_fenced_code
+            # 保护，不进入本分支。
+            # 🐛 防御（审查 I-1，吞正文）：容错解析范围截断到下一个 <tool>
+            # 开标签（嵌套/后续块的字段不得混入本块）；剩余段递归走同一
+            # 渲染逻辑（每轮至少消费一个开标签，无死循环风险）。
+            content = md_text[start_idx + len("<tool>") :]
+            _next_open = content.find("<tool>")
+            _rest = ""
+            if _next_open != -1:
+                _rest = content[_next_open:]
+                content = content[:_next_open]
+            if completed:
+                if content.strip():
+                    parts.append(_render_tool_block_content(content, compact=compact))
+            elif content.strip():
+                _name_m = _TOOL_NAME_PATTERN.search(content)
+                parts.append(
+                    _render_tool_streaming_block(
+                        tool_call_id="",
+                        tool_name=_name_m.group(1).strip() if _name_m else "",
+                        preview="接收中...",
+                        completed=False,
+                    )
+                )
+            if _rest:
+                parts.append(_inject_tool_blocks(_rest, completed, compact))
             break
     return "".join(parts)
 
@@ -2213,6 +2410,55 @@ def _extract_formulas(md_text: str) -> str:
     return "\n".join(seg if is_fence else _extract_formulas_in_plain(seg) for is_fence, seg in segments)
 
 
+def _extract_fenced_code(md_text: str) -> tuple[list[str], str]:
+    """提取完整 fenced code 块为 \x00F<i>\x00 哨兵（inject 免疫保护）。
+
+    背景：_inject_think_cards/_inject_tool_blocks/_inject_tag_cards 全文扫描
+    <think>/<tool>/<tag> 协议标签，不感知 fence——代码示例内容里含协议标签
+    （讨论插件协议、展示调用格式时极常见）会被抽出渲染成假思考卡/工具框，
+    经差量 append 滞留正文底部。fence 跨空行整块产出修复后暴露（旧版尾段
+    产出丢内容反而掩盖了它）；全量渲染管线同样受影响。
+
+    提取后 inject 只作用于 fence 外文本；_restore_fenced_code 在 md.convert
+    前放回原文，fenced_code 正常渲染代码内容（协议标签转义为字面文本）。
+    fence 状态机与 _extract_formulas 同款语义；未闭合 fence（流式中间态，
+    _sanitize_incomplete_markdown 已补闭合，此处兜底）原样放回不提取。
+    """
+    if "```" not in md_text and "~~~" not in md_text:
+        return [], md_text
+
+    fences: list[str] = []
+    out_lines: list[str] = []
+    buf: list[str] | None = None
+    fence_marker = ""
+    for line in md_text.split("\n"):
+        stripped = line.lstrip()
+        if buf is None:
+            m = _RE_KATEX_FENCE_OPEN.match(stripped)
+            if m:
+                fence_marker = m.group(1)
+                buf = [line]
+            else:
+                out_lines.append(line)
+        else:
+            buf.append(line)
+            if stripped.startswith(fence_marker):
+                fences.append("\n".join(buf))
+                out_lines.append(f"\x00F{len(fences) - 1}\x00")
+                buf = None
+    if buf is not None:
+        # 未闭合 fence：原样放回（流式中间态兜底，语义与 _extract_formulas 一致）
+        out_lines.extend(buf)
+    return fences, "\n".join(out_lines)
+
+
+def _restore_fenced_code(md_text: str, fences: list[str]) -> str:
+    """_extract_fenced_code 提取的 fence 原文放回（md.convert 前）。"""
+    for i, src in enumerate(fences):
+        md_text = md_text.replace(f"\x00F{i}\x00", src)
+    return md_text
+
+
 # 缓存大小阈值（KB）：超过此大小的文本不缓存，防止内存膨胀
 _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 
@@ -2229,10 +2475,13 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取（设计文档 2026-09-04）
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
+    # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+    _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
+    processed_md = _restore_fenced_code(processed_md, _fences)
 
     try:
         md = get_markdown_instance()
@@ -2332,10 +2581,13 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
         safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
+        # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+        _fences, safe_md = _extract_fenced_code(safe_md)
         processed_md = _inject_think_cards(safe_md, True, compact=compact)
         processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
         processed_md = _inject_hook_blocks(processed_md, True)
         processed_md = _inject_tag_cards(processed_md, True, compact=compact)
+        processed_md = _restore_fenced_code(processed_md, _fences)
         md.reset()
         html_content = md.convert(processed_md)
         html_content = _wrap_code_blocks_with_copy_button_web(
@@ -2357,10 +2609,13 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
+    # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+    _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, False, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, False, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, False)
     processed_md = _inject_tag_cards(processed_md, False, compact=compact)
+    processed_md = _restore_fenced_code(processed_md, _fences)
 
     md.reset()
     html_content = md.convert(processed_md)
@@ -2430,7 +2685,29 @@ _SKELETON_CACHE_MAX = 48
 # 正文，观感是"文字先在最后几行冒出来再跳回正文"）；新增 data-pending-break
 # 挂起分段标记（纯 \\n\\n chunk 不再堆空段落），旧骨架无 removeAttribute 清理
 # 逻辑会导致标记残留 → 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 18
+# v19（2026-09-05）：① echarts 单图渲染完成 + _pumpEcharts 队列排空时补
+# reportHeightDebounced（原只在 updateContent 末尾 30~50ms 定时上报，rAF 分帧
+# 下多图卡片常被提前触发 → 高度偏小、底部图表被裁）；② updateTailHtml 补齐
+# 图表四连；③ 新增 ```html fence（.html-widget + 工具栏 html 分支）；
+# ④ 正文 <img> 补 loading=lazy / decoding=async。
+# 旧骨架无上述分支 → 必须靠版本号让旧缓存失效。
+# v20（2026-09-05）：① 图表主题三件套（_CHART_IS_DARK/_CHART_BG/_ICON_BASE）
+# 与 mermaid themeVariables 由骨架构建期常量改为运行时可更新（window._applyChartTheme
+# / window._mmdApplyTheme），refresh_theme 同步刷新；② echarts 改懒加载
+# （_echartsEnsure），骨架不再常驻 1MB vendor。
+# 旧骨架无上述函数 → 必须靠版本号让旧缓存失效。
+# v21（2026-09-05）：正文 <img> 点击的 action 从 open_url 改为 preview_image
+# （内置预览弹窗 + 滚轮缩放）。旧骨架仍发 open_url → 不会崩但走不到预览，
+# 必须靠版本号让旧缓存失效。
+# v22（2026-09-05）：插件 fence assets 按需注入（window.__fenceAssets /
+# _ensureFenceAssets / _runFenceAssets）+ __drifoxBridge 权限桥
+# （_syncFenceBridge：theme / sendPrompt / storage）。旧骨架无这些函数与映射表
+# → 插件 fence 只剩静态 HTML，必须靠版本号让旧缓存失效。
+# v24（2026-09-05）：桥装配时序修复 —— _syncFenceBridge 改为在发起 assets 加载
+# **之前**先执行一次（原先只在 onload 回调之后）。插件脚本末尾的首帧兜底初始化
+# 若先跑，会看到空桥并把未授权状态锁死在节点上（幂等标记已打，后续救不回来）。
+# 旧骨架仍是旧时序 → 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 25
 
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
@@ -2599,10 +2876,13 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
+    # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+    _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
+    processed_md = _restore_fenced_code(processed_md, _fences)
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
@@ -2650,10 +2930,13 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
     safe_md = _inject_context_links(safe_md)
+    # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+    _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
     processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
+    processed_md = _restore_fenced_code(processed_md, _fences)
     md = get_markdown_instance()
     md.reset()
     html = md.convert(processed_md)
@@ -2909,25 +3192,54 @@ def _inject_context_links(md_text: str) -> str:
 # ===== _resolve_image_src 模块级常量（避免每次渲染重编译正则+重算路径） =====
 _IMG_SRC_PATTERN = re.compile(r'(<img\s[^>]*?src\s*=\s*["\'])([^"\']+)(["\'][^>]*?>)', re.IGNORECASE)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 正文图片懒加载属性：http(s) 远程图在长会话里会随滚动/重渲染反复请求，
+# 一次性打开几十张卡会瞬间打出 N 个并发连接。loading=lazy 让浏览器只在图
+# 片接近视口时才发起请求（已在视口内的立即加载，不影响首屏观感）；
+# decoding=async 把解码挪出主线程，滚动不卡。
+_IMG_LAZY_ATTRS = ' loading="lazy" decoding="async"'
+
+
+def _append_img_load_attrs(suffix: str, src: str) -> str:
+    """给 <img> 尾部属性串补懒加载属性（幂等）。
+
+    Args:
+        suffix: 正则 group(3)，形如 引号 + 其余属性 + '>'
+        src: 图片地址
+
+    Returns:
+        补好属性的 suffix；跳过场景原样返回。
+
+    跳过 qrc:/（UI 图标内联资源，lazy 无意义且可能闪一帧）与 data:/blob:
+    （已在内存里，无需网络加载）。
+    """
+    if src.startswith(("qrc:/", "data:", "blob:")):
+        return suffix
+    if "loading=" in suffix or "decoding=" in suffix:
+        return suffix
+    if suffix.endswith(">"):
+        return suffix[:-1] + _IMG_LAZY_ATTRS + ">"
+    return suffix + _IMG_LAZY_ATTRS
 
 
 def _resolve_image_src(html_content: str) -> str:
     """
-    将 HTML 中的图片 src 相对路径转为绝对 file:/// 路径。
+    将 HTML 中的图片 src 相对路径转为绝对 file:/// 路径，并补懒加载属性。
 
     检测 <img src="相对路径"> 中的 src，如果路径是相对路径且本地文件存在，
     则转换为 file:/// 绝对路径，确保 QWebEngineView 能正常加载。
-    已存在的绝对路径（http/https/file/data/qrc）跳过处理。
+    已存在的绝对路径（http/https/file/data/qrc）跳过路径解析，但仍会补
+    loading/decoding 属性。
     """
 
     def _replacer(match):
         prefix = match.group(1)
         src = match.group(2)
         suffix = match.group(3)
+        new_suffix = _append_img_load_attrs(suffix, src)
 
-        # 跳过已经是绝对 URL 或 data URI 的 src
+        # 跳过已经是绝对 URL 或 data URI 的 src（不改写路径，只补属性）
         if src.startswith(("http://", "https://", "file://", "data:", "qrc:/", "#", "blob:")):
-            return match.group(0)
+            return f"{prefix}{src}{new_suffix}"
 
         # 尝试解析为绝对路径
         if os.path.isabs(src):
@@ -2940,9 +3252,9 @@ def _resolve_image_src(html_content: str) -> str:
         if os.path.isfile(candidate):
             # 本地文件存在，转为 file:/// 路径
             file_url = QUrl.fromLocalFile(candidate).toString()
-            return f"{prefix}{file_url}{suffix}"
+            return f"{prefix}{file_url}{new_suffix}"
 
-        return match.group(0)
+        return f"{prefix}{src}{new_suffix}"
 
     return _IMG_SRC_PATTERN.sub(_replacer, html_content)
 
@@ -3092,6 +3404,68 @@ def _get_katex_urls() -> tuple:
     return _katex_vendor_urls_cache
 
 
+_echarts_vendor_urls_cache: tuple[str, str] | None = None
+
+
+def _get_echarts_vendor_urls() -> tuple:
+    """返回 (echarts_url, wordcloud_url)，本地优先、缺失时降级 CDN。
+
+    与 mermaid / KaTeX 同策略：**不并入骨架**。原实现由 `_get_vendor_script_tags()`
+    把 echarts.min.js(1MB) + wordcloud 写进骨架 HTML，而骨架被 `_skeleton_cache`
+    缓存并在卡片间共享 → 每条消息都背上 1MB 的解析与内存开销，哪怕整篇没有一个
+    图表。改为 JS 侧首次遇到 `.echarts-container` 时动态加载，见 `_echartsEnsure`。
+
+    wordcloud 是 echarts 插件，必须在 echarts 本体之后加载（顺序强依赖）。
+    """
+    global _echarts_vendor_urls_cache
+    if _echarts_vendor_urls_cache is not None:
+        return _echarts_vendor_urls_cache
+
+    base_dirs = [_PROJECT_ROOT]
+    if hasattr(sys, "_MEIPASS"):
+        base_dirs.append(sys._MEIPASS)
+
+    echarts_url = "https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"
+    wordcloud_url = "https://cdn.jsdelivr.net/npm/echarts-wordcloud@2/dist/echarts-wordcloud.min.js"
+
+    for base in base_dirs:
+        candidate = os.path.join(base, "app/resources/web/vendor/echarts.min.js")
+        if os.path.isfile(candidate):
+            echarts_url = QUrl.fromLocalFile(candidate).toString()
+            break
+
+    for base in base_dirs:
+        candidate = os.path.join(base, "app/resources/web/vendor/echarts-wordcloud.min.js")
+        if os.path.isfile(candidate):
+            wordcloud_url = QUrl.fromLocalFile(candidate).toString()
+            break
+
+    _echarts_vendor_urls_cache = (echarts_url, wordcloud_url)
+    return _echarts_vendor_urls_cache
+
+
+def _mmd_theme_vars_js(body_font_size: int) -> str:
+    """mermaid themeVariables 的 JS 对象字面量（按当前主题取色）。
+
+    骨架构建与 `refresh_theme` 共用：mermaid 的 `initialize()` 原先只在首次懒加载
+    时跑一次，主题切换后新渲染的图沿用建卡时的旧配色（浅色主题下白叠白）。
+    现在主题变量挂 `window._MMD_THEME_VARS`，切主题时重新注入并调
+    `window._mmdApplyTheme()` 重设。
+    """
+    from app.utils.design_tokens import Colors
+
+    return (
+        "{"
+        f"primaryTextColor: '{Colors.TEXT_PRIMARY}', "
+        f"lineColor: '{Colors.TEXT_SECONDARY}', "
+        f"mainBkg: '{Colors.CONTENT_BG}', "
+        f"nodeBorder: '{Colors.BORDER}', "
+        "background: 'transparent', "
+        f"fontSize: '{body_font_size}px'"
+        "}"
+    )
+
+
 # ======== WebViewer ========
 class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
@@ -3111,6 +3485,7 @@ class ConsoleMonitorPage(QWebEnginePage):
     chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — echarts/mermaid/svg/html 放大查看
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
     saveWidgetFileRequested = pyqtSignal(str, str)  # (wtype, content_b64) — svg widget 源码保存回传
+    previewImageRequested = pyqtSignal(str)  # (image_url) — 正文图片点击 → 内置预览
     renderCrashed = pyqtSignal()  # renderer 进程崩溃（GPU OOM/崩溃），宿主卡片自愈
 
     def __init__(self, profile=None, parent=None):
@@ -3178,6 +3553,26 @@ class ConsoleMonitorPage(QWebEnginePage):
                     pass
             elif "context_lost" in msg:
                 self._handle_context_lost()
+            elif "fence_prompt:" in msg:
+                # 插件 fence 的 sendPrompt 桥 → 复用 <ask> 追问管线
+                # （contextActionRequested + "ask"，与 <ask> 标签同一条链路）
+                try:
+                    import base64 as _b64mod
+
+                    _text = _b64mod.b64decode(msg.split("fence_prompt:", 1)[1]).decode("utf-8")
+                    if _text.strip():
+                        self.contextActionRequested.emit(_text, "ask")
+                except Exception:
+                    pass
+            elif "preview_image:" in msg:
+                # 正文图片点击 → 内置预览（可滚轮缩放）。原先走 open_url 直接交给
+                # 系统默认程序：跳出应用、体验割裂，且 data:/qrc: 的 src 交给
+                # openUrl 后实际无响应。预处理失败时由宿主回退 openUrl。
+                try:
+                    url_str = msg.split("preview_image:", 1)[1]
+                    self.previewImageRequested.emit(url_str)
+                except Exception:
+                    pass
             elif "open_url:" in msg:
                 try:
                     url_str = msg.split("open_url:", 1)[1]
@@ -3248,7 +3643,7 @@ class ConsoleMonitorPage(QWebEnginePage):
                 try:
                     rest = msg.split("pywebview_action:save_widget_file:", 1)[1]
                     wtype, payload = rest.split(":", 1)
-                    if wtype == "svg" and len(payload) <= _MAX_CHART_PAYLOAD_B64:
+                    if wtype in ("svg", "html") and len(payload) <= _MAX_CHART_PAYLOAD_B64:
                         self.saveWidgetFileRequested.emit(wtype, payload)
                 except Exception:
                     pass
@@ -3448,6 +3843,7 @@ class CodeWebViewer(QWebEngineView):
     chartExpandRequested = pyqtSignal(str, str)  # (chart_type, payload_b64) — 图表放大查看
     saveChartPngRequested = pyqtSignal(str, str)  # (name_b64, png_b64) — 图表 PNG 导出回传
     saveWidgetFileRequested = pyqtSignal(str, str)  # (wtype, content_b64) — svg widget 源码保存回传
+    previewImageRequested = pyqtSignal(str)  # (image_url) — 正文图片点击 → 内置预览
     # WebEngine 上下文丢失信号
     contextLost = pyqtSignal()
     contextRestored = pyqtSignal()
@@ -3625,6 +4021,7 @@ class CodeWebViewer(QWebEngineView):
         self._page.chartExpandRequested.connect(self.chartExpandRequested.emit)
         self._page.saveChartPngRequested.connect(self.saveChartPngRequested.emit)
         self._page.saveWidgetFileRequested.connect(self.saveWidgetFileRequested.emit)
+        self._page.previewImageRequested.connect(self.previewImageRequested.emit)
         self._page.renderCrashed.connect(self._on_render_crashed)
 
         self._load_skeleton()
@@ -3988,6 +4385,12 @@ class CodeWebViewer(QWebEngineView):
         _mmd_polyfill_url, _mmd_lib_url = _get_mermaid_vendor_urls()
         # KaTeX vendor URL 进 key：与 mermaid 同策略，热替换后骨架缓存失效
         _katex_css_url, _katex_js_url = _get_katex_urls()
+        # ECharts vendor URL 进 key：同策略。echarts 改懒加载后只在真正有图表时才
+        # 加载，但 URL 变化仍需让旧骨架失效（否则旧骨架里的旧 URL 被复用）。
+        _echarts_lib_url, _echarts_wordcloud_url = _get_echarts_vendor_urls()
+        # 插件 fence 渲染器的 assets 表（file:// URL + 权限）内联进骨架；
+        # 签名（路径 + mtime）进 key，插件 assets 热替换后旧骨架自动失效。
+        _fence_assets_js, _fence_perms_js, _fence_assets_sig = _fence_assets_for_skeleton()
         # mermaid 主题联动：取 Colors 而非硬编码，避免浅色主题下白叠白
         # （MEMORY.md 记录的反复出现的缺陷模式）。Colors 大写属性由主题 YAML 自动填充。
         mmd_text_color = Colors.TEXT_PRIMARY
@@ -4011,6 +4414,9 @@ class CodeWebViewer(QWebEngineView):
             _mmd_lib_url,
             _katex_css_url,
             _katex_js_url,
+            _echarts_lib_url,
+            _echarts_wordcloud_url,
+            _fence_assets_sig,
             mmd_text_color,
             mmd_line_color,
             mmd_node_bg,
@@ -4029,10 +4435,13 @@ class CodeWebViewer(QWebEngineView):
             )
             tag_css.append(f'.context-tag[data-type="{act}"]:hover {{ background: {col}30; border-color: {col}; }}')
 
-        # 离线优先：本地 vendor JS（app/resources/web/vendor/），缺失时降级 CDN。
-        # light 骨架（欢迎卡片）也加载 echarts：欢迎 tab 插件（如 context-stats）
-        # 通过 ```echarts 代码块渲染图表，依赖 window.echarts 存在。
-        cdn_libs = _get_vendor_script_tags()
+        # vendor JS 全部改为懒加载（mermaid / KaTeX / ECharts 同策略）：骨架不再
+        # 常驻任何 vendor script 标签。原先 echarts.min.js(1MB) + wordcloud 被写进
+        # 骨架并被 _skeleton_cache 缓存 → 每条消息都背上 1MB，哪怕整篇没有图表。
+        # 现由 JS 侧首次遇到对应 fence 时动态加载（_echartsEnsure / _mmdEnsure /
+        # _katexEnsure），欢迎卡片等 light 骨架场景同样走这条路径（_initEchartsIn
+        # 内部会先 ensure 再扫描，不依赖 window.echarts 预先存在）。
+        cdn_libs = "" 
 
         # 检测浅色/深色模式，用于滚动条和行内差异框主题适配
         try:
@@ -4896,7 +5305,8 @@ class CodeWebViewer(QWebEngineView):
                     flex: 0 0 auto;
                     padding: 2px 7px;
                     border-radius: 999px;
-                    background: rgba(13,17,23,0.42);
+                    /* 早先写死 rgba(13,17,23,.42)，浅色主题下是一枚深色药丸；与相邻规则一样按主题取色 */
+                    background: {"rgba(0,0,0,0.04)" if _is_light_diff else "rgba(13,17,23,0.42)"};
                     border: 1px solid rgba(139, 148, 158, 0.18);
                     font-weight: 800;
                 }}
@@ -5113,8 +5523,9 @@ class CodeWebViewer(QWebEngineView):
                     background: {"rgba(34, 197, 94, 0.05)" if _is_light_diff else "rgba(95, 209, 140, 0.05)"};
                 }}
                 .args-row.result-fail {{
-                    border-top: 1px solid rgba(244, 67, 54, 0.3);
-                    background: rgba(244, 67, 54, 0.05);
+                    /* 早先写死 rgba(244,67,54,.3)，浅色主题下过艳；与 result-success 一样按主题取色 */
+                    border-top: 1px solid {"rgba(220, 38, 38, 0.3)" if _is_light_diff else "rgba(248, 81, 73, 0.3)"};
+                    background: {"rgba(220, 38, 38, 0.05)" if _is_light_diff else "rgba(248, 81, 73, 0.05)"};
                 }}
                 .args-value {{
                     flex: 1 1 auto;
@@ -5865,6 +6276,18 @@ class CodeWebViewer(QWebEngineView):
                 var _MMD_POLYFILL = '{_mmd_polyfill_url}';
                 var _MMD_LIB = '{_mmd_lib_url}';
 
+                // ===== ECharts 懒加载（与 mermaid / KaTeX 同策略）=====
+                // 原先 echarts.min.js(1MB) + wordcloud 常驻骨架 → 每张卡片都背上。
+                // 改为首次遇到 .echarts-container 时才加载，见 _echartsEnsure。
+                var _ECH_LIB = '{_echarts_lib_url}';
+                var _ECH_WORDCLOUD = '{_echarts_wordcloud_url}';
+
+                // ===== 插件 fence 渲染器：assets 与权限映射表 =====
+                // 只是"有哪些可用"的清单，真正的加载按卡片实际出现的 fence lang
+                // 按需触发（见 _runFenceAssets），未用到的插件零开销。
+                window.__fenceAssets = {_fence_assets_js};
+                window.__fenceBridgePerms = {_fence_perms_js};
+
                 // ===== KaTeX 公式渲染（懒加载，与 mermaid 同策略；css/js 同源见 _get_katex_urls）=====
                 var _KATEX_CSS = '{_katex_css_url}';
                 var _KATEX_LIB = '{_katex_js_url}';
@@ -5878,6 +6301,34 @@ class CodeWebViewer(QWebEngineView):
                     document.head.appendChild(s);
                 }}
 
+                // mermaid 主题变量随主题取色，抽成可更新变量：原先 initialize 只在
+                // 首次懒加载时跑一次且颜色是建卡时插值的常量，主题切换后新渲染的图
+                // 沿用旧配色（浅色主题下白叠白）。refresh_theme 会注入新值并调
+                // window._mmdApplyTheme() 重设。
+                window._MMD_THEME_VARS = {{
+                    primaryTextColor: '{mmd_text_color}',
+                    lineColor: '{mmd_line_color}',
+                    mainBkg: '{mmd_node_bg}',
+                    nodeBorder: '{mmd_border}',
+                    background: 'transparent',
+                    fontSize: '{body_font_size}px'
+                }};
+                window._mmdApplyTheme = function () {{
+                    try {{
+                        if (window.mermaid && window.mermaid.initialize) {{
+                            window.mermaid.initialize({{
+                                startOnLoad: false,
+                                // 内容来自 LLM，不可信：strict 会 sanitize 标签、禁用交互
+                                securityLevel: 'strict',
+                                theme: 'base',
+                                themeVariables: window._MMD_THEME_VARS
+                            }});
+                        }}
+                    }} catch (e) {{
+                        console.error('[mermaid] initialize failed:', e);
+                    }}
+                }};
+
                 function _mmdEnsure(cb) {{
                     if (window.mermaid && window.mermaid.render) {{ cb(); return; }}
                     if (!window._mmdQueue) window._mmdQueue = [];
@@ -5886,24 +6337,7 @@ class CodeWebViewer(QWebEngineView):
                     window._mmdLoading = true;
                     _mmdLoadScript(_MMD_POLYFILL, function () {{
                         _mmdLoadScript(_MMD_LIB, function () {{
-                            try {{
-                                window.mermaid.initialize({{
-                                    startOnLoad: false,
-                                    // 内容来自 LLM，不可信：strict 会 sanitize 标签、禁用交互
-                                    securityLevel: 'strict',
-                                    theme: 'base',
-                                    themeVariables: {{
-                                        primaryTextColor: '{mmd_text_color}',
-                                        lineColor: '{mmd_line_color}',
-                                        mainBkg: '{mmd_node_bg}',
-                                        nodeBorder: '{mmd_border}',
-                                        background: 'transparent',
-                                        fontSize: '{body_font_size}px'
-                                    }}
-                                }});
-                            }} catch (e) {{
-                                console.error('[mermaid] initialize failed:', e);
-                            }}
+                            window._mmdApplyTheme();
                             window._mmdLoading = false;
                             var q = window._mmdQueue || [];
                             window._mmdQueue = [];
@@ -6134,12 +6568,21 @@ class CodeWebViewer(QWebEngineView):
                             window._attachChartToolbar(el, 'echarts');
                             el._toolbarAttached = true;
                         }}
+                        // 高度回传：echarts 自带的 ResizeObserver 只监听容器自身尺寸，
+                        // 不会带动 document.body 高度上报。多图卡片原先只靠
+                        // updateContent 末尾 30~50ms 定时上报，而 _pumpEcharts 是 rAF
+                        // 分帧的 —— 定时常在队列未排空时就触发，卡片高度偏小、底部
+                        // 图表被裁。此处与 mermaid 对齐：单图完成即上报一次，
+                        // _pumpEcharts 队列排空时再兜一次。
+                        if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                     }} catch(e) {{
                         // JSON 不完整（流式半截）或 option 非法：保留占位骨架，内容补齐后
                         // 下一轮自然重试（b64 变 → key 变 → 新节点重新入队）。
                         // 原实现只 console.error，容器留 400px 空白 → 用户看到"图表区空一块"。
                         el.classList.add('echarts-failed');
                         console.error('ECharts init error:', e);
+                        // 与 mermaid 失败路径对齐：降级态也要上报，避免高度停在旧值
+                        if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                     }}
                 }};
                 window.__echQueue = [];
@@ -6167,10 +6610,40 @@ class CodeWebViewer(QWebEngineView):
                             if (_now - _t0 >= window._ECH_FRAME_BUDGET_MS) break;
                         }}
                         if (window.__echQueue.length) window._pumpEcharts();
+                        else if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                     }});
                 }};
+                // ECharts 懒加载：骨架不再常驻 vendor，首次遇到图表块才加载，
+                // 加载完成后回调重跑 _initEchartsIn（此时 window.echarts 已就绪）。
+                function _echLoadScript(src, onOk) {{
+                    if (!src) {{ onOk(); return; }}
+                    var s = document.createElement('script');
+                    s.src = src;
+                    s.onload = onOk;
+                    s.onerror = function () {{ console.error('[echarts] load failed: ' + src); }};
+                    document.head.appendChild(s);
+                }}
+                function _echartsEnsure(cb) {{
+                    if (window.echarts) {{ cb(); return; }}
+                    if (!window._echLibQueue) window._echLibQueue = [];
+                    window._echLibQueue.push(cb);
+                    if (window._echLibLoading) return;   // 已在加载中，排队即可
+                    window._echLibLoading = true;
+                    // wordcloud 是 echarts 插件，必须在 echarts 本体之后加载
+                    _echLoadScript(_ECH_LIB, function () {{
+                        _echLoadScript(_ECH_WORDCLOUD, function () {{
+                            window._echLibLoading = false;
+                            var q = window._echLibQueue || [];
+                            window._echLibQueue = [];
+                            for (var qi = 0; qi < q.length; qi++) {{ q[qi](); }}
+                        }});
+                    }});
+                }}
                 window._initEchartsIn = function (container) {{
-                    if (!window.echarts) return;
+                    if (!window.echarts) {{
+                        window._echartsEnsure(function () {{ window._initEchartsIn(container); }});
+                        return;
+                    }}
                     container.querySelectorAll('.echarts-container').forEach(function(el) {{
                         var jsonB64 = el.getAttribute('data-echarts-json');
                         if (!jsonB64 || el._echartInited || el._echQueued) return;
@@ -6394,6 +6867,8 @@ class CodeWebViewer(QWebEngineView):
 
                         // SVG / HTML widget 工具栏挂载（与 mermaid 同时机：全量重建后）
                         if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
+                        // 插件 fence：按需注入 assets + 按权限装配桥
+                        if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
 
                         // 将工具/思考块分流到独立滚动容器（仅简洁模式）
                         // 必须在 _suppressScrollEvent=false 之前执行，
@@ -6576,6 +7051,8 @@ class CodeWebViewer(QWebEngineView):
                     if (typeof renderKatexBlocks === 'function') renderKatexBlocks();
                     // SVG / HTML widget 工具栏挂载（同上时机）
                     if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
+                    // 插件 fence：追加的闭合段可能带入新的插件 fence
+                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
                     // 使用延迟报告，确保浏览器布局完成
                     setTimeout(() => reportHeight(), 30);
                 }}
@@ -6626,6 +7103,16 @@ class CodeWebViewer(QWebEngineView):
                     window._prevScrollTop = document.body.scrollTop;
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
+                    // 与 updateContentAppend 对齐：尾部整段替换同样可能带入刚闭合的
+                    // 图表/公式 fence。原先缺这四连 → 走 updateTailHtml 路径（无空行
+                    // 分隔的长段落）时 echarts / mermaid / katex / widget 工具栏
+                    // 全部静默不初始化。
+                    window._initEchartsIn(container);
+                    if (typeof renderMermaidBlocks === 'function') renderMermaidBlocks();
+                    if (typeof renderKatexBlocks === 'function') renderKatexBlocks();
+                    if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
+                    // 插件 fence：尾部整段替换同样可能带入新的插件 fence
+                    if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
                     setTimeout(() => reportHeight(), 30);
                 }}
                 {_CONTENT_AUTOSCROLL_JS}
@@ -6666,7 +7153,7 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== 正文/非正文分区：将工具块/思考块从内容区移到独立可滚动容器 =====
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
-                // 子智能体/提问类工具（subagent_para/subagent_dag/question）与编辑工具类似，
+                // 子智能体/提问类工具（subagent_para/question）与编辑工具类似，
                 // 属于 AI 与用户之间的直接交互结果，保留在正文中体验更连贯。
                 // 工具名集合由 Python 渲染端派生（registry 声明），经 data-keep-in-content 属性传入，
                 // JS 不再硬编码工具名。
@@ -6983,12 +7470,15 @@ class CodeWebViewer(QWebEngineView):
                         console.log('pywebview_action:context|||' + tagContent + '|||' + tagType);
                         return;
                     }}
-                    // 图片点击 → 系统默认程序打开
+                    // 图片点击 → 内置预览（可滚轮缩放）
+                    // 原为 'pywebview_action:open_url:' 直接交给系统默认程序打开：
+                    // 跳出应用、体验割裂；且 data:/qrc: 的 src 交给 openUrl 后
+                    // 实际无响应。改为内置预览，无法预览时由宿主回退 openUrl。
                     const img = e.target.closest('#content-placeholder img');
                     if (img) {{
                         e.stopPropagation();
                         e.preventDefault();
-                        console.log('pywebview_action:open_url:' + img.src);
+                        console.log('pywebview_action:preview_image:' + img.src);
                         return;
                     }}
                     const link = e.target.closest('a');
@@ -7054,10 +7544,19 @@ class CodeWebViewer(QWebEngineView):
                 window.pywebview = {{ reportHeight: reportHeight }};
 
                 // ===== 图表工具栏：echarts / mermaid 放大查看 + 3x PNG 导出 =====
-                var _CHART_IS_DARK = {str(not _is_light).lower()};
-                var _CHART_BG = _CHART_IS_DARK ? '#1B1E24' : '#FFFFFF';
-                // icon 目录与按钮底色同源（_CHART_IS_DARK），避免主题切换时 prefix 缓存滞后致白底白 icon
-                var _ICON_BASE = _CHART_IS_DARK ? 'qrc:/icons' : 'qrc:/icons_light';
+                // 图表主题三件套（明暗判定 / 导出底色 / 图标目录）。
+                // 原先是骨架构建期常量：refresh_theme 只注入 CSS 变量、不重 setHtml，
+                // 导致切主题后已存在卡片的 echarts 明暗、PNG 导出底色、工具栏图标
+                // 永久停留在建卡时的值。改为挂 window 的运行时可变量，
+                // refresh_theme 调 window._applyChartTheme() 同步。
+                window._applyChartTheme = function (isDark) {{
+                    window._CHART_IS_DARK = !!isDark;
+                    window._CHART_BG = isDark ? '#1B1E24' : '#FFFFFF';
+                    // icon 目录与按钮底色同源（_CHART_IS_DARK），避免主题切换时
+                    // prefix 缓存滞后致白底白 icon
+                    window._ICON_BASE = isDark ? 'qrc:/icons' : 'qrc:/icons_light';
+                }};
+                window._applyChartTheme({str(not _is_light).lower()});
                 function _b64EncodeUtf8(str) {{
                     return btoa(unescape(encodeURIComponent(str)));
                 }}
@@ -7103,7 +7602,7 @@ class CodeWebViewer(QWebEngineView):
                     btnExpand.setAttribute('data-tooltip', '放大查看');
                     btnExpand.innerHTML = '<img src="' + _ICON_BASE + '/最大化.svg" />';
                     var btnExport = document.createElement('button');
-                    btnExport.setAttribute('data-tooltip', type === 'svg' ? '保存源文件' : '导出 PNG（3x）');
+                    btnExport.setAttribute('data-tooltip', (type === 'svg' || type === 'html') ? '保存源文件' : '导出 PNG（3x）');
                     btnExport.innerHTML = '<img src="' + _ICON_BASE + '/导入.svg" />';
                     bar.appendChild(btnExpand);
                     bar.appendChild(btnExport);
@@ -7122,6 +7621,15 @@ class CodeWebViewer(QWebEngineView):
                                 var node = (el.tagName === 'svg' || el.tagName === 'SVG') ? el : el.querySelector('svg');
                                 if (!node) return;
                                 console.log('pywebview_action:chart_expand:svg:' + _b64EncodeUtf8(node.outerHTML));
+                            }} else if (type === 'html') {{
+                                // html widget（```html fence 净化产物）：放大查看走
+                                // chart_viewer_card 的独立渲染页。
+                                // 取 innerHTML 前先摘除浮动工具栏：查看页无
+                                // .chart-toolbar 尺寸约束，按钮 qrc svg 会被渲染成巨大图标
+                                var _bar = el.querySelector(':scope > .chart-toolbar');
+                                if (_bar) el.removeChild(_bar);
+                                console.log('pywebview_action:chart_expand:html:' + _b64EncodeUtf8(el.innerHTML));
+                                if (_bar) el.appendChild(_bar);
                             }}
                         }} catch (e) {{ console.error('[chart] expand failed:', e); }}
                     }});
@@ -7137,6 +7645,12 @@ class CodeWebViewer(QWebEngineView):
                                 var node = (el.tagName === 'svg' || el.tagName === 'SVG') ? el : el.querySelector('svg');
                                 if (!node) return;
                                 console.log('pywebview_action:save_widget_file:svg:' + _b64EncodeUtf8(node.outerHTML));
+                            }} else if (type === 'html') {{
+                                // 导出源文件同样摘除工具栏，还原纯净净化产物
+                                var _bar = el.querySelector(':scope > .chart-toolbar');
+                                if (_bar) el.removeChild(_bar);
+                                console.log('pywebview_action:save_widget_file:html:' + _b64EncodeUtf8(el.innerHTML));
+                                if (_bar) el.appendChild(_bar);
                             }}
                         }} catch (e) {{ console.error('[chart] export failed:', e); }}
                     }});
@@ -7169,7 +7683,18 @@ class CodeWebViewer(QWebEngineView):
                                 if (only.tagName === 'svg' || only.tagName === 'SVG') svg = only;
                             }}
                         }}
-                        if (!svg) continue;
+                        if (!svg) {{
+                            // HTML widget（```html fence 净化产物）：与自由 svg 同等待遇，
+                            // 挂同一套工具栏（放大查看 + 保存源文件）。
+                            // 尺寸阈值滤掉小装饰块，_widgetToolbar 防重挂。
+                            if (el.classList && el.classList.contains('html-widget') && !el._widgetToolbar) {{
+                                if (el.clientWidth < 200 || el.clientHeight < 100) continue;
+                                el._widgetToolbar = true;
+                                el.classList.add('widget-toolbar-host');
+                                window._attachChartToolbar(el, 'html');
+                            }}
+                            continue;
+                        }}
                         if (svg.closest('.mermaid-block') || svg.closest('.echarts-container')) continue;
                         if (svg._widgetToolbar) continue;
                         if (svg.clientWidth < 200 || svg.clientHeight < 100) continue;  // 装饰小图标
@@ -7181,6 +7706,115 @@ class CodeWebViewer(QWebEngineView):
                         wrap.appendChild(svg);
                         window._attachChartToolbar(wrap, 'svg');
                     }}
+                }};
+
+                // ===== 插件 fence：assets 按需注入 + 权限桥 =====
+                window.__fenceLoaded = {{}};
+                function _scanFenceLangs() {{
+                    var out = [], nodes = document.querySelectorAll('[data-fence-renderer]');
+                    for (var i = 0; i < nodes.length; i++) {{
+                        var l = nodes[i].getAttribute('data-fence-renderer');
+                        if (l && out.indexOf(l) < 0) out.push(l);
+                    }}
+                    return out;
+                }}
+                function _ensureFenceAssets(langs, cb) {{
+                    var list = [], i;
+                    for (i = 0; i < langs.length; i++) {{
+                        var spec = window.__fenceAssets[langs[i]];
+                        if (spec && !window.__fenceLoaded[langs[i]]) list.push([langs[i], spec]);
+                    }}
+                    if (!list.length) {{ cb(); return; }}
+                    var pending = 0, fired = false;
+                    function _tick() {{
+                        pending--;
+                        if (pending <= 0 && !fired) {{ fired = true; cb(); }}
+                    }}
+                    for (i = 0; i < list.length; i++) {{
+                        (function (lang, spec) {{
+                            window.__fenceLoaded[lang] = true;
+                            if (spec.css) {{
+                                var link = document.createElement('link');
+                                link.rel = 'stylesheet';
+                                link.href = spec.css;
+                                document.head.appendChild(link);
+                            }}
+                            if (spec.js) {{
+                                pending++;
+                                var s = document.createElement('script');
+                                s.src = spec.js;
+                                s.onload = _tick;
+                                s.onerror = function () {{
+                                    console.error('[fence] load failed: ' + spec.js);
+                                    _tick();
+                                }};
+                                document.head.appendChild(s);
+                            }}
+                        }})(list[i][0], list[i][1]);
+                    }}
+                    if (pending === 0) cb();
+                }}
+                // 桥：权限声明制，未声明的方法恒为 undefined。插件 JS 只存活于本
+                // 卡片的 QWebEngineView，跨卡 / 跨窗 / 进主进程均不可达。
+                window.__drifoxBridge = {{}};
+                window._syncFenceBridge = function () {{
+                    var langs = _scanFenceLangs(), granted = {{}}, i, j;
+                    for (i = 0; i < langs.length; i++) {{
+                        var ps = window.__fenceBridgePerms[langs[i]] || [];
+                        for (j = 0; j < ps.length; j++) granted[ps[j]] = true;
+                    }}
+                    var B = window.__drifoxBridge;
+                    B.getTheme = granted.theme ? function () {{
+                        return {{
+                            isDark: !!window._CHART_IS_DARK,
+                            chartBg: window._CHART_BG,
+                            textColor: getComputedStyle(document.body).color
+                        }};
+                    }} : undefined;
+                    B.sendPrompt = granted.sendPrompt ? function (text) {{
+                        console.log('pywebview_action:fence_prompt:' + _b64EncodeUtf8(String(text)));
+                    }} : undefined;
+                    B.storage = granted.storage ? {{
+                        get: function (k) {{
+                            try {{
+                                return JSON.parse(sessionStorage.getItem('__fence_' + k) || 'null');
+                            }} catch (e) {{ return null; }}
+                        }},
+                        set: function (k, v) {{
+                            try {{
+                                sessionStorage.setItem('__fence_' + k, JSON.stringify(v));
+                            }} catch (e) {{}}
+                        }}
+                    }} : undefined;
+                }};
+                function _syncFenceBridgeSafe() {{
+                    try {{ window._syncFenceBridge(); }} catch (e) {{
+                        console.error('[fence] bridge sync:', e);
+                    }}
+                }}
+                window._runFenceAssets = function () {{
+                    var _flangs = _scanFenceLangs();
+                    // 桥必须先于 assets 装配：插件脚本末尾常有"首帧兜底"的主动初始化
+                    // （一执行就跑），那时若桥还是空的，插件会把"未授权"状态写死在
+                    // 节点上，之后再装配也救不回来（幂等标记已打）。
+                    _syncFenceBridgeSafe();
+                    _ensureFenceAssets(_flangs, function () {{
+                        // 加载完成后再装配一次，覆盖注入期间新增的 fence lang
+                        _syncFenceBridgeSafe();
+                        // 插件初始化入口约定：插件脚本挂 window.__drifoxFenceInit[lang]，
+                        // 宿主在 assets 就绪后调用。会被反复调用（每次渲染），
+                        // 插件必须保证幂等 —— 通常用 data-* 标记已处理的节点。
+                        try {{
+                            var _inits = window.__drifoxFenceInit;
+                            if (_inits) {{
+                                for (var _fi = 0; _fi < _flangs.length; _fi++) {{
+                                    var _fn = _inits[_flangs[_fi]];
+                                    if (typeof _fn === 'function') _fn();
+                                }}
+                            }}
+                        }} catch (e) {{ console.error('[fence] init:', e); }}
+                        if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                    }});
                 }};
 
                 // 子智能体日志查看请求函数
@@ -7728,10 +8362,16 @@ class CodeWebViewer(QWebEngineView):
         safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
         safe_md = _unwrap_code_blocks_with_context_links(safe_md)
         safe_md = _inject_context_links(safe_md)
+        # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
+        # （与 _render_markdown_to_html_worker 流式分支对齐；缺此保护时模型在
+        # 代码示例中写的 <tool>/<think> 协议标签会在流式期间被抽成假卡片，
+        # 流式结束非流式渲染有保护又变回代码块，形态跳变）
+        _fences, safe_md = _extract_fenced_code(safe_md)
         processed_md = _inject_think_cards(safe_md, self._streaming is False, compact=self._tool_compact_mode)
         processed_md = _inject_tool_blocks(processed_md, self._streaming is False, compact=self._tool_compact_mode)
         processed_md = _inject_hook_blocks(processed_md, self._streaming is False)
         processed_md = _inject_tag_cards(processed_md, self._streaming is False, compact=self._tool_compact_mode)
+        processed_md = _restore_fenced_code(processed_md, _fences)
 
         # [PERF] 实例级哈希缓存：processed_md 未变时直接返回缓存的 HTML，
         # 跳过 md.convert() + _wrap_code_blocks（最昂贵的步骤）。
@@ -7862,6 +8502,11 @@ class CodeWebViewer(QWebEngineView):
 
         theme = current_theme()
         js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
+        # body_font_size 供图表主题 JS 使用（与 _load_skeleton 构建期同语义：
+        # scale_font_size(14)）。此前引用的是 _refresh_viewer_font_css 的局部
+        # 变量，作用域外抛 NameError，致批处理主题刷新在该卡中断，后续输入框/
+        # 设置弹窗卡片刷新全部跳过（2026-09-06 日志实证）。
+        body_font_size = scale_font_size(14)
 
         # [PERF] 仅对可见 viewer 注入 CSS 变量：隐藏卡（不可见 tab / 未渲染）
         # 跳过 runJavaScript（WebEngine IPC 开销大，200 卡 ≈ 100ms）。
@@ -7881,6 +8526,12 @@ class CodeWebViewer(QWebEngineView):
                 # clear() 丢弃引用但不释放资源，每次主题切换泄漏一批，与流式期间
                 # 的孤儿实例叠加 → 多图卡片 renderer 进程 OOM 白屏。
                 _chart_reset_js = (
+                    # 图表主题运行时同步：这三值原先是骨架构建期常量，refresh_theme
+                    # 只注入 CSS 变量、不重 setHtml → 切主题后已存在卡片的 echarts
+                    # 明暗 / PNG 导出底色 / 工具栏图标永久停在旧值。
+                    f"window._applyChartTheme({str(not _is_light).lower()});"
+                    f"window._MMD_THEME_VARS = {_mmd_theme_vars_js(body_font_size)};"
+                    "window._mmdApplyTheme();"
                     "if (window.__chartVault && window.__chartVault.size) {"
                     "  window.__chartVault.forEach(function (el) { window._disposeChartNode(el); });"
                     "  window.__chartVault.clear();"
@@ -10087,10 +10738,44 @@ class _ImagePreviewDialog(MaskDialogBase):
         img_label.setScaledContents(False)
         lay.addWidget(img_label)
 
+        # 滚轮缩放：以"适配屏幕 60%"为 1.0 基准，范围 0.2x ~ 5x
+        self._pixmap = pixmap
+        self._base_size = (scaled.width(), scaled.height())
+        self._scale = 1.0
+        self._img_label = img_label
+
         # MaskDialogBase 的 QHBoxLayout 会把 widget 拉伸到全屏：
         # 取出后自管几何并居中（与 ConfirmDialog._fit_widget_to_content 同法）
         self.layout().removeWidget(self.widget)
         self.widget.setParent(self)
+        self.widget.adjustSize()
+        self._center_widget()
+
+    def wheelEvent(self, e):
+        delta = e.angleDelta().y() if hasattr(e, "angleDelta") else 0
+        if not delta:
+            return
+        factor = 1.15 if delta > 0 else 1 / 1.15
+        new_scale = max(0.2, min(5.0, self._scale * factor))
+        if abs(new_scale - self._scale) < 1e-6:
+            return
+        self._scale = new_scale
+        self._apply_scale()
+        e.accept()
+
+    def _apply_scale(self):
+        bw, bh = self._base_size
+        screen = QApplication.primaryScreen().availableGeometry()
+        w = max(16, int(bw * self._scale))
+        h = max(16, int(bh * self._scale))
+        # 上限保护：不超过屏幕可用区 92%，避免缩放到超出可见范围
+        max_w = int(screen.width() * 0.92)
+        max_h = int(screen.height() * 0.92)
+        if w > max_w or h > max_h:
+            w, h = max_w, max_h
+        self._img_label.setPixmap(
+            self._pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
         self.widget.adjustSize()
         self._center_widget()
 
@@ -10102,6 +10787,150 @@ class _ImagePreviewDialog(MaskDialogBase):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._center_widget()
+
+
+def _decode_image_url_to_pixmap(url_str: str):
+    """file:// / 绝对本地路径 / data:image → QPixmap（同步，失败返回 None）。
+
+    只处理能同步拿到字节的来源；http(s) 走 _download_and_preview 异步路径。
+    """
+    from PyQt5.QtCore import QByteArray, QUrl
+    from PyQt5.QtGui import QPixmap
+
+    try:
+        if url_str.startswith("data:"):
+            b64 = url_str.split(",", 1)[1] if "," in url_str else ""
+            if not b64:
+                return None
+            pix = QPixmap()
+            return pix if pix.loadFromData(QByteArray.fromBase64(b64.encode("ascii"))) else None
+        if url_str.startswith("file://"):
+            path = QUrl(url_str).toLocalFile()
+        elif os.path.isabs(url_str):
+            path = url_str
+        else:
+            return None
+        if not path or not os.path.isfile(path):
+            return None
+        pix = QPixmap(path)
+        return pix if not pix.isNull() else None
+    except Exception:
+        return None
+
+
+_image_nam = None
+
+
+def _get_image_nam():
+    """正文图片异步下载用的共享 QNetworkAccessManager（进程级单例）。
+
+    单例而非每卡一个：卡片数量可达数十，各自持有 NAM 会平白多出一批
+    网络连接池。延迟导入避免模块加载期拉起 QtNetwork。
+    """
+    global _image_nam
+    if _image_nam is None:
+        from PyQt5.QtNetwork import QNetworkAccessManager
+
+        _image_nam = QNetworkAccessManager()
+    return _image_nam
+
+
+def _download_and_preview(url_str: str, parent=None) -> None:
+    """远程图片异步下载 → 预览；失败回退系统默认程序打开。"""
+    from PyQt5.QtCore import QUrl
+    from PyQt5.QtGui import QDesktopServices, QPixmap
+    from PyQt5.QtNetwork import QNetworkRequest
+
+    def _on_finished(reply):
+        try:
+            pix = QPixmap()
+            if pix.loadFromData(reply.readAll()):
+                _show_image_preview(pix, parent=parent)
+                return
+        except Exception:
+            pass
+        try:
+            QDesktopServices.openUrl(QUrl(url_str))
+        except Exception:
+            pass
+        finally:
+            reply.deleteLater()
+
+    try:
+        reply = _get_image_nam().get(QNetworkRequest(QUrl(url_str)))
+        reply.finished.connect(lambda _r=reply: _on_finished(_r))
+    except Exception:
+        try:
+            QDesktopServices.openUrl(QUrl(url_str))
+        except Exception:
+            pass
+
+
+def _fence_assets_for_skeleton() -> tuple:
+    """收集当前已注册 fence 渲染器的 assets（file:// URL）与权限声明。
+
+    Returns:
+        (assets_json, perms_json, cache_sig)
+        assets_json: {lang: {"js": file_url, "css": file_url}} 的 JSON
+        perms_json:  {lang: ["theme", ...]} 的 JSON
+        cache_sig:   骨架缓存 key 用的签名（路径 + mtime），vendor 热替换即失效
+
+    插件系统未就绪或任何异常都返回空表 —— 骨架构建不能被插件拖垮。
+    """
+    empty = ("{}", "{}", ())
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
+        renderers = reg.get_all_fence_renderers()
+    except Exception:
+        return empty
+    if not renderers:
+        return empty
+
+    assets: dict = {}
+    perms: dict = {}
+    sig: list = []
+    for lang in sorted(renderers):
+        info = renderers[lang]
+        try:
+            resolved = reg.resolve_fence_assets(info.plugin_name, info.assets)
+        except Exception:
+            resolved = {}
+        entry: dict = {}
+        for key in sorted(resolved):
+            path = resolved[key]
+            try:
+                url = QUrl.fromLocalFile(path).toString()
+            except Exception:
+                continue
+            entry[key] = url
+            try:
+                sig.append((lang, key, path, int(os.path.getmtime(path))))
+            except OSError:
+                sig.append((lang, key, path, 0))
+        if entry:
+            assets[lang] = entry
+        if info.bridge_permissions:
+            perms[lang] = list(info.bridge_permissions)
+
+    # 本模块的 json 是 orjson（`import orjson as json`）：dumps 返回 bytes，
+    # 且不接受 ensure_ascii 关键字 —— 这里统一归一化成 str。
+    def _dump_js(obj) -> str:
+        raw = json.dumps(obj)
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        # </ 会提前闭合骨架的 <script> 块，必须转义
+        return str(raw).replace("</", "<\\/")
+
+    assets_js = _dump_js(assets)
+    perms_js = _dump_js(perms)
+    return (assets_js, perms_js, tuple(sig))
+
+
+def _show_image_preview(pixmap, parent=None) -> None:
+    """打开图片预览弹窗（_ImagePreviewDialog 同模块，无需导入）。"""
+    _ImagePreviewDialog(pixmap, parent=parent).exec_()
 
 
 class MessageCard(SimpleCardWidget):
@@ -11542,6 +12371,41 @@ class MessageCard(SimpleCardWidget):
         )
         self._retry_wait_label.setText(f"等待 {self._retry_wait_time:.0f}s")
 
+    def _on_preview_image(self, image_url: str):
+        """正文图片点击 → 内置预览（可滚轮缩放）。
+
+        原先直接 QDesktopServices.openUrl 交给系统默认程序：跳出应用、体验割裂，
+        且 data:/qrc: 的 src 交给 openUrl 后实际无响应。改为：
+          file:// / 绝对本地路径 / data:image → 同步解码后立即预览
+          http(s)://                          → 异步下载后预览（P1 已启用磁盘
+                                                HTTP 缓存，命中即几乎无等待）
+          qrc:/ 等                            → 回退原行为
+        任一步失败都回退 openUrl，保证不比改动前差。
+        """
+        if not image_url or image_url.startswith("qrc:/"):
+            self._open_url_external(image_url)
+            return
+        pixmap = _decode_image_url_to_pixmap(image_url)
+        if pixmap is not None and not pixmap.isNull():
+            _show_image_preview(pixmap, parent=self.window())
+            return
+        if image_url.startswith(("http://", "https://")):
+            _download_and_preview(image_url, self.window())
+            return
+        self._open_url_external(image_url)
+
+    def _open_url_external(self, url_str: str) -> None:
+        """回退路径：交给系统默认程序打开（与改动前行为一致）。"""
+        if not url_str:
+            return
+        try:
+            from PyQt5.QtCore import QUrl
+            from PyQt5.QtGui import QDesktopServices
+
+            QDesktopServices.openUrl(QUrl(url_str))
+        except Exception:
+            pass
+
     def _on_chart_expand(self, chart_type: str, payload_b64: str):
         """图表放大查看 → 打开覆盖右侧对话区域的 chart_viewer 全局卡
 
@@ -11568,13 +12432,20 @@ class MessageCard(SimpleCardWidget):
             logger.info(f"[MessageCard] 图表 PNG 已导出: {path}")
 
     def _on_save_widget_file(self, wtype: str, content_b64: str):
-        """SVG widget 源码保存（存矢量源码，缺 xmlns 自动补齐）"""
+        """Widget 源码保存（svg 存矢量源码补 xmlns；html 存净化产物 .html）"""
         try:
-            from app.widgets.ui_helpers import save_svg_source
+            if wtype == "html":
+                from app.widgets.ui_helpers import save_html_source
 
-            path = save_svg_source(self, content_b64)
-            if path:
-                logger.info(f"[MessageCard] SVG 源文件已导出: {path}")
+                path = save_html_source(self, content_b64)
+                if path:
+                    logger.info(f"[MessageCard] HTML 源文件已导出: {path}")
+            else:
+                from app.widgets.ui_helpers import save_svg_source
+
+                path = save_svg_source(self, content_b64)
+                if path:
+                    logger.info(f"[MessageCard] SVG 源文件已导出: {path}")
         except Exception as e:
             logger.error(f"[MessageCard] Widget 保存失败: {e}")
 
@@ -11630,6 +12501,7 @@ class MessageCard(SimpleCardWidget):
         self.viewer.chartExpandRequested.connect(self._on_chart_expand)
         self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
         self.viewer.saveWidgetFileRequested.connect(self._on_save_widget_file)
+        self.viewer.previewImageRequested.connect(self._on_preview_image)
         self.viewer.contextLost.connect(self._on_webengine_context_lost)
         self.viewer.contextRestored.connect(self._on_webengine_context_restored)
         self.viewer.needRecreate.connect(self._on_webengine_need_recreate)

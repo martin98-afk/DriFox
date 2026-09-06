@@ -122,6 +122,62 @@ def test_identity_persona_none(tmp_path):
     assert "<plan>" not in text and "<mood>" not in text
 
 
+def test_prompt_block_assembles_sections(tmp_path):
+    """prompt_block：header + 人格 + 人工提示 + 记忆段 全部组装。"""
+    mgr = _fresh_manager(tmp_path)
+    a = mgr.create("小狐")
+    mgr.write_pinned(a.id, [("pin-1", "回复保持简短")])
+    # 记忆段需要实际记忆内容（无内容时整段不注入，与 hook 行为一致）
+    mem_dir = mgr.assistant_dir(a.id) / "memory"
+    mem_dir.mkdir(parents=True)
+    (mem_dir / "longterm.md").write_text("## 长期记忆\n\n- 用户偏好简洁", encoding="utf-8")
+    block = mgr.prompt_block(a.id)
+    assert block.startswith("# 助手：小狐")
+    assert "小狐" in block  # persona 段
+    assert "人工提示" in block and "回复保持简短" in block
+    assert "记忆使用规则" in block and "用户偏好简洁" in block  # 规则+编译记忆都注入
+
+
+def test_prompt_block_memory_off(tmp_path):
+    mgr = _fresh_manager(tmp_path)
+    a = mgr.create("纯净狐")
+    a.memory_enabled = False
+    mgr.update(a)
+    mgr.write_pinned(a.id, [("pin-1", "硬性要求")])
+    block = mgr.prompt_block(a.id)
+    assert "记忆使用规则" not in block
+    assert "硬性要求" in block  # 人工提示不受开关控制
+
+
+def test_tool_access_for_session_override(tmp_path):
+    """预置档位：会话 override 助手优先，否则主助手。"""
+    mgr = _fresh_manager(tmp_path)
+    mgr.create("主狐")
+    a2 = mgr.create("只读狐")
+    a2.tool_access = "readonly"
+    mgr.update(a2)
+    assert mgr.tool_access_for("") == "full"  # 无 override → 主助手档
+    assert mgr.tool_access_for("s-none") == "full"
+    mgr.set_session_override("s1", a2.id)
+    assert mgr.tool_access_for("s1") == "readonly"  # override 助手档生效
+    assert mgr.tool_access_for("s2") == "full"  # 其他会话不受影响
+
+
+def test_prompt_stats_counts_chars(tmp_path):
+    mgr = _fresh_manager(tmp_path)
+    a = mgr.create("小狐")
+    stats = mgr.prompt_stats(a.id)
+    assert stats["chars"] > 0
+    assert stats["tokens_est"] == int(stats["chars"] / 1.6)
+    # 无 persona 段且无其他内容：纯净助手块为空 → 统计为 0
+    a2 = mgr.create("空狐")
+    a2.yuan = "none"
+    a2.memory_enabled = False
+    mgr.update(a2)
+    empty = mgr.prompt_stats(a2.id)
+    assert empty == {"chars": 0, "tokens_est": 0}
+
+
 def test_persona_registry_via_facade(tmp_path, monkeypatch):
     mgr = _fresh_manager(tmp_path)
     reg = mgr.persona_registry()

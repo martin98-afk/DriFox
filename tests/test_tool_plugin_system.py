@@ -172,7 +172,6 @@ class TestSystemPluginTools:
             "lsp",
             "subagent_para",
             "subagent_status",
-            "subagent_dag",
             "team_send_message",
             "team_list_members",
             "question",
@@ -785,16 +784,17 @@ class TestPermissionLinkage:
 
         pc = ToolPermissionController()
         toggles = pc.get_toggles()
-        # 系统插件工具基线 30；workbuddy 插件新增 wb_plan/present_files/wb_read_me/wb_tool_search
-        # 共 4 个工具 → 基线 34。codegraph_explore 来自社区插件 codegraph-tools，
-        # 未安装时不注册。用动态下界兼容未来新增：>= 30；精确 34 仅在无 codegraph 时成立。
-        assert len(toggles) >= 30
-        assert (
-            len(toggles) == 34
-            or (len(toggles) == 35 and "codegraph_explore" in toggles)
-            or (len(toggles) == 31 and "codegraph_explore" in toggles)  # 仅 codegraph，无 workbuddy
-            or len(toggles) == 30  # 极简环境（workbuddy/codegraph 均未加载）
-        ), f"工具数异常: {len(toggles)} ({sorted(toggles.keys())})"
+        # 语义：控制器应为「当前注册的全部工具」各产出一个开关，并清理已删除工具的残留。
+        # 工具总数随装了哪些插件而变（workbuddy / codegraph-tools / workflow / win-powershell
+        # 等都会各自贡献工具），硬编码数字必然过期——直接对齐注册表判定。
+        from app.tools.tool_classifier import get_all_tools
+
+        registered = set(get_all_tools())
+        assert len(toggles) >= 30  # 下界：系统插件工具基线
+        assert set(toggles) == registered, (
+            f"开关与注册表不一致：仅开关 {sorted(set(toggles) - registered)} / "
+            f"仅注册表 {sorted(registered - set(toggles))}"
+        )
         assert toggles["read"] is True
         pc.deleteLater()
         qt_app.processEvents()
@@ -1558,24 +1558,6 @@ class TestSelfContained:
         html2 = _render_text_output("普通输出", "read", {"path": "x"})
         assert html2
 
-    def test_dag_echarts_render_closure(self):
-        """subagent_dag 的 echarts 渲染走插件 render 闭包"""
-        import json
-
-        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
-        from app.tools.registry import ToolRegistry
-        from app.widgets.render_helpers import render_tool_block
-
-        ToolRegistry.reset_instance()
-        load_plugin_tools()
-        reg = ToolRegistry.get_instance()
-        assert reg.get_render("subagent_dag") is not None
-        echarts_json = json.dumps({"type": "graph", "data": [], "links": []})
-        html = render_tool_block(
-            "subagent_dag", {"nodes": [{"id": "a"}]}, result="DAG 完成", success=True, echarts=echarts_json
-        )
-        assert "echarts-container" in html
-
     def test_render_mode_and_closures(self):
         """render_mode（inline/none）+ 渲染闭包（edit diff/bash/question）"""
         from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
@@ -1815,7 +1797,6 @@ class TestRegistryMetadata:
         reg = ToolRegistry.get_instance()
         kept = reg.keep_in_content_tools()
         assert "subagent_para" in kept
-        assert "subagent_dag" in kept
         assert "write" in kept, "文件写入工具应常驻正文"
         assert "question" in kept, "提问工具应常驻正文"
         # 纯 metadata 语义键（interactive/subagent_task）不再隐式驱动留正文
