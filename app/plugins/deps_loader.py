@@ -256,7 +256,9 @@ def missing_pip_deps(plugin_dir: Path, manifest: dict) -> List[str]:
     for d in have_dirs:
         try:
             for entry in d.iterdir():
-                if entry.is_dir() and (entry / "__init__.py").exists():
+                # 原语义（glob 通配）：同名目录/模块文件存在即算"已就绪"，
+                # 不校验 __init__.py；`-` 归一为 `_` 后集合查询
+                if entry.is_dir():
                     have_names.add(entry.name.replace("-", "_"))
                 elif entry.is_file() and entry.suffix == ".py":
                     have_names.add(entry.stem.replace("-", "_"))

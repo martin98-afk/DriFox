@@ -1967,21 +1967,11 @@ class HistoryManager:
             logger.warning(f"[HistoryManager] 项目「{project_name}」无会话，无法导出")
             return None
 
-        # 🐛 修复：轻量加载的消息为空，必须逐条从 SQLite 补全完整消息数据
-        sessions = []
-        for s in sessions_light:
-            sid = s.get("session_id", "")
-            if sid:
-                full = self.get_session_by_session_id(sid)
-                if full and full.get("messages"):
-                    sessions.append(full)
-                    continue
-            # 兜底：没有完整数据也用轻量数据
-            sessions.append(s)
-
-        if not sessions:
-            logger.warning(f"[HistoryManager] 项目「{project_name}」无有效会话，无法导出")
-            return None
+        # 🚀 T4：不再先把整个项目的完整会话攒进内存。
+        # 旧实现此处对每条会话调 get_session_by_session_id()，会把完整 messages
+        # 回填进 _history_sessions（无淘汰常驻），且 sessions 列表本身也持有全部
+        # 完整消息 —— 导出 1283 条会话的项目实测 1035 MB。改为在写 ZIP 的循环里
+        # 逐条直查 SQLite、写完即弃（见下方流式写入），峰值降到单条会话。
 
         # 构建 ZIP 文件名
         safe_name = sanitize_filename(project_name[:50])
@@ -2000,13 +1990,32 @@ class HistoryManager:
                 meta = {
                     "project_name": project_name,
                     "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "session_count": len(sessions),
+                    "session_count": len(sessions_light),
                     "version": 1,
                 }
                 zf.writestr("project.json", json.dumps(serialize_for_json(meta), option=json.OPT_INDENT_2))
 
-                # ── 写入所有会话 JSON ──
-                for session in sessions:
+                # ── 流式写入会话 JSON（🚀 T4 内存治理）──
+                # 逐条「直查 SQLite（不经过 _history_sessions，因此不产生回填常驻）
+                # → 立即写 ZIP → 下一条覆盖引用后即可回收」。峰值 = 单条会话，
+                # 而非旧实现的整个项目（1283 条 ≈ 1035 MB → 约 17 MB）。
+                # 基底仍是轻量条目，只补 messages / system_prompt，保持产物字段不变。
+                exported = 0
+                for s in sessions_light:
+                    session = s
+                    sid = s.get("session_id", "")
+                    if sid and self._use_sqlite and self._session_store:
+                        try:
+                            # 直查 SQLite 取完整行：不经过 _history_sessions，因此不
+                            # 产生回填常驻；写入 ZIP 后引用即被下一条覆盖回收。
+                            # 用完整行而非轻量条目，保证导出产物字段与旧实现一致
+                            # （含 created_at / updated_at / name / topic_summary /
+                            # compaction_state 等），导入侧无差异。
+                            full = self._session_store.get_session(sid)
+                            if full:
+                                session = full
+                        except Exception as e:
+                            logger.debug(f"[HistoryManager] 导出读取完整会话失败 {sid[:8]}: {e}")
                     session_id = session.get("session_id", uuid.uuid4().hex[:8])
                     title = session.get("title", "未命名")
                     safe_title = sanitize_filename(title[:50])
@@ -2017,6 +2026,9 @@ class HistoryManager:
                         session_filename,
                         json.dumps(serialize_for_json(session), option=json.OPT_INDENT_2),
                     )
+                    exported += 1
+                if exported == 0:
+                    raise RuntimeError("无有效会话可写入")
 
                 # ── 写入 Git 仓库信息（如果支持） ──
                 git_info = self._collect_git_info(root_dir)

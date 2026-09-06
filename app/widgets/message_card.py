@@ -330,20 +330,6 @@ WHEEL_STUCK_LIMIT = 4
 WHEEL_STUCK_MIN_INTERVAL = 0.1
 
 
-def wheel_delta_to_px(delta: int) -> int:
-    """滚轮角位移 → 滚动条位移（px），三处 wheelEvent 共用。
-
-    🐛 原实现 `-delta // 2` 有两个缺陷：
-    1) 归零：delta = -1（触控板精细滚动）→ -(-1)//2 = 0 → 向下滚完全无反应；
-    2) 不对称：Python 整除向下取整，±3 分别得到 -2 / +1，上下滚速度不一致。
-    改为四舍五入并保底 ±1，保证任何幅度都至少有 1px 响应。
-    """
-    step = int(round(delta / 2.0))
-    if step == 0 and delta != 0:
-        step = 1 if delta > 0 else -1
-    return step
-
-
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
 # 子智能体和提问工具（subagent_para/question）涉及 AI 与用户的直接交互，
 # 留在正文中比收到工具区更符合直觉，体验更连贯。
@@ -10364,14 +10350,14 @@ class CodeWebViewer(QWebEngineView):
             self._resize_unlock_timer.start()
 
     def wheelEvent(self, event: QWheelEvent):
-        # 内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部
+        # 内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部。
+        # 转发外层滚动区走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
         try:
             scroll_area = self.parent().parent()._parent.chat_scroll_area
             if scroll_area:
                 vbar = scroll_area.verticalScrollBar()
-                if vbar and vbar.minimum() != vbar.maximum():
-                    delta = event.angleDelta().y()
-                    vbar.setValue(vbar.value() - wheel_delta_to_px(delta))
+                if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
+                    scroll_area.wheelEvent(event)
                     event.accept()
                     return
         except Exception:
@@ -13338,13 +13324,14 @@ class MessageCard(SimpleCardWidget):
 
     def wheelEvent(self, event: QWheelEvent):
         # MessageCard 的 wheelEvent 仅在子 widget（viewer）未消费事件时被调用。
-        # 此时说明内部没有可滚动内容，或内部已达边界 → 直接转发到外部。
+        # 此时说明内部没有可滚动内容，或内部已达边界 → 转发外层滚动区，
+        # 走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
         try:
             scroll_area = self._parent.chat_scroll_area
             if scroll_area:
                 vbar = scroll_area.verticalScrollBar()
                 if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
-                    vbar.setValue(vbar.value() - wheel_delta_to_px(event.angleDelta().y()))
+                    scroll_area.wheelEvent(event)
                     event.accept()
                     return
         except Exception:
