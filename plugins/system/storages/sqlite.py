@@ -79,6 +79,14 @@ class SqliteStorageEngine:
     def get_sessions_by_team_run_id(self, run_id: str):
         return self._store.get_sessions_by_team_run_id(run_id)
 
+    def get_team_first_question_candidates(self, run_id: str):
+        """★★ 团队首问候选（T4 落库列查询）—— 委托底层 SessionStore。
+
+        此前漏加此委托导致 HistoryManager._lookup_team_first_question 探测
+        getter=None，70 个 run 全部走全量 fallback，启动 +325MB。
+        """
+        return self._store.get_team_first_question_candidates(run_id)
+
     def delete_session(self, session_id: str) -> bool:
         return self._store.delete_session(session_id)
 

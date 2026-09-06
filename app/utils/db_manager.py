@@ -81,7 +81,12 @@ class DatabaseManager:
             # 临时存储放到内存（加速 ORDER BY/GROUP BY）
             cursor.execute("PRAGMA temp_store=MEMORY")
             # 启用 mmap 读取（减少系统调用）
-            cursor.execute("PRAGMA mmap_size=268435456")
+            # 🔧 T5 内存治理：256MB(268435456) → 64MB(67108864)。
+            # sessions.db 实测 236MB 时，256MB 上限会让整个数据文件映射进 RSS
+            # （实测独占 235.8MB，是当时进程 USS 788MB 的最大单项）。超出 64MB
+            # 的部分改走 read() + page cache（62.5MB，见 session_store 的
+            # cache_size=-64000），热数据仍有缓存，仅全表扫描类查询略增 I/O。
+            cursor.execute("PRAGMA mmap_size=67108864")
             # 外键约束
             cursor.execute("PRAGMA foreign_keys=ON")
             self._wal_mode_enabled = True
