@@ -17,30 +17,13 @@ from typing import Any
 from loguru import logger
 
 from app.core.builtin_commands import reload_agent_commands, reload_all_commands
-from app.plugins.kernel import ComponentReloaderRegistry, ReloadContext
+from app.plugins.kernel import KNOWN_COMPONENTS, ComponentReloaderRegistry, ReloadContext
 from app.utils.utils import invalidate_skills_cache
 
-# 本模块注册的组件全集（= kernel.KNOWN_COMPONENTS）
-RELOADED_COMPONENTS = {
-    "agents",
-    "hooks",
-    "commands",
-    "themes",
-    "skills",
-    "mcp",
-    "lsp",
-    "ui",
-    "tools",
-    "providers",
-    "team_templates",
-    "model_adapters",
-    "loop_policies",
-    "hook_policies",
-    "storages",
-    "serializers",
-    "gateways",
-    "engines",
-}
+# 本模块注册的组件全集 —— 单一事实源为 kernel.KNOWN_COMPONENTS（继承全集：
+# 新增组件类型只需在 kernel 登记即自动出现在此处，避免双份漂移）。
+# 历史：本集合曾手抄自 kernel 且缺 hook_policies，导致 G1 归因链断裂。
+RELOADED_COMPONENTS = set(KNOWN_COMPONENTS)
 
 _BUILTIN_REGISTERED: list = []  # 强引用已注册的 registry 对象（防 GC 后 id 复用误判）
 

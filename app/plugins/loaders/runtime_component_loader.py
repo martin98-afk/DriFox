@@ -407,7 +407,7 @@ class RuntimeComponentLoader:
             _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in _audit_hits)
             logger.warning(
                 f"[RuntimeLoader] [AST审计] 插件 {plugin_name} {self._comp_dir} 组件含模块级危险 import"
-                f"（已放行，仅告警）: {_audit_detail} ({py})"
+                f"（已放行，仅告警）: {_audit_detail} ({py}) kind={kind}"
             )
         try:
             spec = importlib.util.spec_from_file_location(mod_name, py)

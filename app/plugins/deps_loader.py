@@ -32,8 +32,10 @@ from typing import List, Optional, Tuple
 
 from loguru import logger
 
-# P1-4：pip spec 白名单——包名 + extras 可选 + 版本约束必需（拒 git+/file:///-r/--flag/无版本）
-_PIP_SPEC_RE = re.compile(r"^[\w.\[\]-]+(\[\w[.\w-]*\])?(==|>=|<=|~=|!=)\d[\d.*]*$")
+# P1-4：pip spec 白名单——首字符字母数字（拒 -flag 与 . 开头）、包名 + extras 可选 +
+# 版本约束可选（裸包名合法）；另拒常见文件扩展名（requirements.txt 等间接注入链）
+_PIP_SPEC_RE = re.compile(r"^(?!-)[A-Za-z0-9_][\w.\[\]-]*(\[\w[.\w-]*\])?((==|>=|<=|~=|!=|>|<)\d[\d.*]*)?$")
+_PIP_FILE_EXT_RE = re.compile(r"\.(txt|whl|tar|gz|zip|git|json|cfg|ini|yml|yaml)$", re.IGNORECASE)
 
 # 友好名 → sys.platform 值（目录名 / pip key 用）
 PLATFORM_DIR_MAP = {
@@ -122,8 +124,8 @@ def resolve_pip_deps(manifest: dict, platform_key: Optional[str] = None) -> List
             return
         for s in specs:
             if isinstance(s, str) and s and s not in merged:
-                # P1-4：spec 白名单（包名+extras 可选+版本约束必需）
-                if not _PIP_SPEC_RE.match(s):
+                # P1-4：spec 白名单 + 文件扩展名拒绝（-r 间接注入链）
+                if not _PIP_SPEC_RE.match(s) or _PIP_FILE_EXT_RE.search(s):
                     logger.warning(
                         f"[deps_loader] 拒收非法 pip spec（白名单外，疑似注入/非固定版本）: {s!r}"
                     )

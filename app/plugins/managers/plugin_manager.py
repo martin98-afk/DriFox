@@ -39,6 +39,7 @@
 
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -74,6 +75,32 @@ def _normalize_plugin_name(raw: object, fallback: str) -> Optional[str]:
         return fallback
     return None
 
+def _resolve_system_plugin_dir() -> Path:
+    """系统插件根：单一事实源。
+
+    打包形态为 onedir（Drifox.spec COLLECT，datas 把 plugins/ 放进 _internal），
+    与项目 resource_path() 惯例一致：hasattr(sys, "_MEIPASS") 即分发目录
+    （onedir 下 _MEIPASS == <安装目录>/_internal，非临时解压），系统插件根为
+    _MEIPASS/plugins；开发环境为项目根 plugins/。
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "plugins"
+    return Path(__file__).resolve().parent.parent.parent.parent / "plugins"
+
+
+def _assert_writable_plugin_target(path: Path) -> None:
+    """P1-6：分发目录只读守卫——onedir 下 _internal（含系统插件根）不应被插件写入，
+    打包形态（存在 _MEIPASS）下命中即拒；开发环境恒过。"""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+    target = Path(path).resolve()
+    if target.is_relative_to(Path(meipass).resolve()):
+        logger.warning(f"[PluginManager] 打包版分发目录只读，拒绝写入: {target}")
+        raise PermissionError(f"打包版分发目录只读: {target}")
+
+
 # 组件物理探测谓词：按 kernel.KNOWN_COMPONENTS 顺序遍历，物理目录/根文件命中即标记
 # 探测规则差异：hooks 需 hooks.json、ui 需 __init__.py、tools/providers 需 *.py、
 # team_templates 需 *.yaml、其余只看子目录是否存在
@@ -91,6 +118,7 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
     "team_templates": lambda d: (d / "team_templates").exists() and any((d / "team_templates").glob("*.yaml")),
     "model_adapters": lambda d: (d / "model_adapters").exists() and any((d / "model_adapters").glob("*.py")),
     "loop_policies": lambda d: (d / "loop_policies").exists() and any((d / "loop_policies").glob("*.py")),
+    "hook_policies": lambda d: (d / "hook_policies").exists() and any((d / "hook_policies").glob("*.py")),
     "storages": lambda d: (d / "storages").exists() and any((d / "storages").glob("*.py")),
     "serializers": lambda d: (d / "serializers").exists() and any((d / "serializers").glob("*.py")),
     "gateways": lambda d: (d / "gateways").exists() and any((d / "gateways").glob("*.py")),
@@ -282,8 +310,8 @@ class PluginManager:
     _instance: Optional["PluginManager"] = None
 
     # 插件搜索路径（按优先级）
-    # 系统插件：项目根目录 plugins/（打包在 exe 中）
-    _SYSTEM_PLUGIN_DIR = Path(__file__).parent.parent.parent.parent / "plugins"
+    # 系统插件：项目根目录 plugins/（打包在 exe 中；P1-6：onedir 下解析 _MEIPASS/plugins）
+    _SYSTEM_PLUGIN_DIR = _resolve_system_plugin_dir()
     # 不可禁用核心插件名单（黑名单制）：禁用会断核心链路（组件宿主/插件市场自身）。
     # 其余插件（含 manifest type=system 的内置插件）均可禁用；
     # plugin-marketplace/ui/installer.py 状态分类与本名单保持单一数据源。
@@ -1608,6 +1636,8 @@ class PluginManager:
                     )
                 else:
                     content[name] = {k: v for k, v in server_data.items() if k not in ("name", "_source", "_builtin")}
+            # P1-6：分发目录只读守卫（来源插件在 _internal 下时拒写）
+            _assert_writable_plugin_target(source_path)
             source_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
             self.invalidate_mcp_cache()
             logger.info(f"[PluginManager] Updated MCP server '{name}' in {source_path}")
@@ -1736,6 +1766,9 @@ class PluginManager:
         if not source.exists():
             logger.warning(f"[PluginManager] MCP source file not found: {source}")
             return
+
+        # P1-6：分发目录只读守卫（来源插件在 _internal 下时拒写；用户插件不受影响）
+        _assert_writable_plugin_target(source)
 
         try:
             content = json.loads(source.read_text(encoding="utf-8"))

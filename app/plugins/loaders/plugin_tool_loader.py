@@ -226,7 +226,7 @@ def _is_sys_modules_mutation(node: "ast.AST") -> bool:
     return is_sys_modules_mutation_node(node)
 
 
-def _load_module(plugin_name: str, path: Path):
+def _load_module(plugin_name: str, path: Path, root_kind: str = ""):
     """加载插件工具模块（唯一模块名，避免命名冲突）。
 
     显式 compile 绕过 SourceFileLoader 的 __pycache__ 缓存：
@@ -261,7 +261,7 @@ def _load_module(plugin_name: str, path: Path):
         _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in _audit_hits)
         logger.warning(
             f"[PluginToolLoader] [AST审计] 插件 {plugin_name} 工具模块含模块级危险 import"
-            f"（已放行，仅告警）: {_audit_detail} ({path})"
+            f"（已放行，仅告警）: {_audit_detail} ({path}) kind={root_kind or 'unknown'}"
         )
     # [SAFETY] 加载安全网：仅加载暴露 register(registry) 入口的工具文件。
     # 跳过无 register 入口的文件（测试脚本/临时文件/误放入 tools/ 目录的模块），
@@ -394,7 +394,7 @@ def _run_register(
     覆盖场景（工具已存在、仅替换 source/impl）下 diff 为空集，会导致 watcher
     的 _loaded 漏记被覆盖工具，用户插件删除后系统插件无法恢复。
     """
-    module = _load_module(plugin_name, py_path)
+    module = _load_module(plugin_name, py_path, root_kind=_root_kind(root))
     register_fn = getattr(module, "register", None) if module else None
     if not callable(register_fn):
         return set()
