@@ -19428,7 +19428,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_import_project_from_url(self):
         """从URL导入项目压缩包"""
-        from plugins.system.ui._worktree_page import SingleInputDialog
+        from app.widgets.common_dialogs import SingleInputDialog
 
         dialog = SingleInputDialog(
             title="🔗 从URL导入项目",
@@ -19672,7 +19672,7 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 将拖入文件夹加入关键文档并设为工作目录（根目录）
         4. 刷新项目列表
         """
-        from plugins.system.ui._worktree_page import SingleInputDialog
+        from app.widgets.common_dialogs import SingleInputDialog
 
         # ── 提取文件夹名作为默认项目名 ──
         folder_name = os.path.basename(folder_path.rstrip("/\\"))

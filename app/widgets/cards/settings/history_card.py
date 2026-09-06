@@ -1922,7 +1922,7 @@ class HistoryCard(QWidget):
 
     def _on_import_from_url(self):
         """从URL导入会话JSON"""
-        from app.widgets.cards.settings.memory_card import SingleInputDialog
+        from app.widgets.common_dialogs import SingleInputDialog
 
         dialog = SingleInputDialog(
             title="🔗 从URL导入会话",

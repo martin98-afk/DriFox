@@ -283,10 +283,25 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id:
 
     # 从 registry 读取全部 schema（深拷贝，避免 description 改写污染注册数据）
     try:
-        schemas = ToolRegistry.get_instance().schemas()
+        _tool_registry = ToolRegistry.get_instance()
+        schemas = _tool_registry.schemas()
     except Exception as e:
         logger.warning(f"[BuiltinTools] 读取 registry schema 失败: {e}")
         schemas = []
+        _tool_registry = None
+
+    # 通用动态描述：工具注册时带 metadata.description_builder(subagent_names)->str
+    # 即可运行时重写 description（如注入可用角色列表）。主程序不感知具体工具，
+    # 也不 import 插件模块（打包环境 plugins/ 是数据目录，包导入不可用）。
+    description_builders = {}
+    if _tool_registry is not None:
+        try:
+            for reg in _tool_registry.list():
+                builder = (reg.metadata or {}).get("description_builder")
+                if callable(builder):
+                    description_builders[reg.name] = builder
+        except Exception as e:
+            logger.warning(f"[BuiltinTools] 读取动态描述构造器失败: {e}")
 
     # 动态生成 subagent_para 工具描述
     subagent_para_desc = "批量分发子智能体任务(并行执行)。调完后不可等——继续调其他工具或结束本轮。完成后系统发[后台任务状态]，届时用subagent_status查。"
@@ -297,12 +312,12 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id:
         name = schema.get("function", {}).get("name", "")
         if name == "subagent_para":
             schema["function"]["description"] = subagent_para_desc
-        elif name == "workflow":
-            from plugins.workflow.tools.workflow_tool import _workflow_description
-
-            schema["function"]["description"] = _workflow_description(subagent_names)
         elif name == "bash":
             schema["function"]["description"] += f"\n\n当前平台: {platform.system()}。"
+        else:
+            builder = description_builders.get(name)
+            if callable(builder):
+                schema["function"]["description"] = builder(subagent_names)
 
     # 动态注入 MCP 工具 schema
     if builtin_tools and hasattr(builtin_tools, "_mcp_manager"):

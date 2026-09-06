@@ -97,6 +97,8 @@ class PluginInfo:
     path: Path  # 插件根目录
     plugin_type: str = "user"  # "system" | "user"
     platform_compatible: bool = True  # platforms 声明与当前系统是否兼容（缺省声明=兼容）
+    version_compatible: bool = True  # min_host_version 与宿主版本比对（缺省声明=兼容）
+    version_reason: str = ""  # 版本不兼容原因（供 UI 展示）
 
     @property
     def description(self) -> str:
@@ -105,6 +107,11 @@ class PluginInfo:
     @property
     def version(self) -> str:
         return self.manifest.get("version", "0.0.0")
+
+    @property
+    def load_blocked(self) -> bool:
+        """是否被门禁拦截（平台不兼容或版本不满足），拦截时宿主不得加载其任何组件"""
+        return not (self.platform_compatible and self.version_compatible)
 
     @property
     def is_system(self) -> bool:
