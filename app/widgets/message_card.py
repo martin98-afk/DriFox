@@ -87,6 +87,7 @@ from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
     SimpleCardWidget,
 )
+from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
 from app.core import (
     append_text_block,
@@ -10511,6 +10512,12 @@ class PlainTextViewer(QWidget):
         self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
         self._apply_text_style()
+        # 把 QTextEdit 内部滚轮劫持到 qfluentwidgets SmoothScroll 引擎——
+        # 与外层 chat_scroll_area（SingleDirectionScrollArea）走同款 400ms
+        # 插值、stepRatio 1.5、连滚加速。手感统一，消除"卡内跳、卡间滑"的异样。
+        # CodeWebViewer 的 Chromium 内部滚动是引擎边界（事件被子进程拦截），
+        # 维持原状，边界放行靠外层 MessageCard.wheelEvent 接管。
+        SmoothScrollDelegate(self.text_edit)
         layout.addWidget(self.text_edit)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
