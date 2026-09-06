@@ -12,7 +12,6 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -22,6 +21,7 @@ from qfluentwidgets import (
     FluentIcon,
     OptionsSettingCard,
     PrimaryPushButton,
+    ScrollArea,
     SettingCard,
     SwitchSettingCard,
 )
@@ -839,7 +839,7 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _make_page(self) -> tuple:
         """创建单个分页：独立 QScrollArea + 垂直内容布局"""
-        page = QScrollArea(self)
+        page = ScrollArea(self)
         page.setWidgetResizable(True)
         page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         page.setStyleSheet(SystemCardFrame._scroll_style())
@@ -908,7 +908,7 @@ class LLMSettingsCard(SystemCardFrame):
         """向上查找最近的祖先 QScrollArea（分页改造后卡片在页内滚动区中）"""
         p = widget.parentWidget()
         while p is not None:
-            if isinstance(p, QScrollArea):
+            if isinstance(p, ScrollArea):
                 return p
             p = p.parentWidget()
         return None

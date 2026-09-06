@@ -35,14 +35,13 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QProgressBar,
-    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import TransparentToolButton
+from qfluentwidgets import ScrollArea, TransparentToolButton
 
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
@@ -138,7 +137,7 @@ class TasksPage(QWidget):
         layout.addWidget(self._progress)
 
         # ── 任务列表 ──
-        self._scroll = QScrollArea(self)
+        self._scroll = ScrollArea(self)
         self._scroll.setWidgetResizable(True)
         self._scroll.setFocusPolicy(Qt.NoFocus)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -437,7 +436,7 @@ class HistoryPage(QWidget):
         #    > content_layout 结构。★ HistoryCard 自己无布局，条目经
         #    get_content_layout() 沿父链上溯找 content_layout 属性后直接插入，
         #    去掉滚动容器会被压缩成一条条（2026-09-01 用户实测回归）。
-        self._scroll_area = QScrollArea(self)
+        self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         Colors.refresh()

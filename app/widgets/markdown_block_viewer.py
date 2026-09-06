@@ -29,7 +29,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
@@ -46,6 +45,7 @@ except Exception:  # pragma: no cover
 
 import html as _html_mod
 
+from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import Animations, Colors, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon
 
@@ -1480,7 +1480,7 @@ class ToolSectionWidget(QWidget):
         cv.setContentsMargins(0, 0, 0, 0)
         cv.setSpacing(2)
         # ── 卡片内滚容器：坞态限高的载体 ──
-        self._cards_scroll = QScrollArea(self)
+        self._cards_scroll = ScrollArea(self)
         self._cards_scroll.setWidgetResizable(True)
         self._cards_scroll.setFocusPolicy(Qt.NoFocus)
         self._cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1620,7 +1620,7 @@ class TodoPanel(QWidget):
         self._separator = _SeparatorRow("任务列表", self, icon_name="todo")
         self._separator.clicked.connect(self._toggle)
         root.addWidget(self._separator)
-        self._list_scroll = QScrollArea(self)
+        self._list_scroll = ScrollArea(self)
         self._list_scroll.setWidgetResizable(True)
         self._list_scroll.setFocusPolicy(Qt.NoFocus)
         self._list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

@@ -19,12 +19,12 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from qfluentwidgets import ScrollArea
 from app.core.command_manager import CommandManager, CommandParameter, CommandType
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
@@ -842,9 +842,9 @@ class CommandCard(QWidget):
         self._resize_recompute_timer: Optional[QTimer] = None  # 窗口 resize 防抖重算
 
         # 滚动区域
-        self._scroll_area = QScrollArea(self)
+        self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
-        self._scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self._scroll_area.setFrameShape(ScrollArea.NoFrame)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         Colors.refresh()
@@ -907,7 +907,7 @@ class CommandCard(QWidget):
             }}
         """)
 
-    def _apply_scroll_area_styles(self, scroll_area: "QScrollArea"):
+    def _apply_scroll_area_styles(self, scroll_area: "ScrollArea"):
         """应用列表/参数/值三个滚动区的统一样式（滚动条 + viewport）
 
         Args:
@@ -1008,7 +1008,7 @@ class CommandCard(QWidget):
         self._apply_detail_positional_hint_style()
 
         # 参数列表滚动区（有 parameters 时显示）
-        self._detail_params_scroll = QScrollArea()
+        self._detail_params_scroll = ScrollArea()
         self._detail_params_scroll.setWidgetResizable(True)
         self._detail_params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._detail_params_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1024,7 +1024,7 @@ class CommandCard(QWidget):
         detail_layout.addWidget(self._detail_params_scroll)
 
         # 值选择列表滚动区（--model= 展开时显示）
-        self._detail_value_scroll = QScrollArea()
+        self._detail_value_scroll = ScrollArea()
         self._detail_value_scroll.setWidgetResizable(True)
         self._detail_value_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._detail_value_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)

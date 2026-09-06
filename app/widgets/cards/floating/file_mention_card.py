@@ -21,7 +21,6 @@ from PyQt5.QtGui import QMouseEvent, QPixmap
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -30,6 +29,7 @@ from PyQt5.QtWidgets import (
 if TYPE_CHECKING:
     pass
 
+from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
@@ -743,9 +743,9 @@ class FileMentionCard(QWidget):
         layout.setSpacing(0)
 
         # 滚动区域
-        self._scroll_area = QScrollArea(self)
+        self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
-        self._scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self._scroll_area.setFrameShape(ScrollArea.NoFrame)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._scroll_area.setStyleSheet(f"""

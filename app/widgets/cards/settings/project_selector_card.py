@@ -15,12 +15,11 @@ from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, TransparentToolButton
+from qfluentwidgets import FluentIcon, ScrollArea, TransparentToolButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -444,7 +443,7 @@ class ProjectSelectorCardContent(QWidget):
         layout.setSpacing(2)
 
         # ── 项目列表滚动区域 ──
-        self._scroll_area = QScrollArea(self)
+        self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)

@@ -33,13 +33,13 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 from qfluentwidgets import (
     FluentIcon as FIF,
+    ScrollArea,
 )
 from qfluentwidgets import (
     TransparentToolButton,
@@ -1153,7 +1153,7 @@ class TabPanel(QWidget):
         # ── 对话页显示模式（列表 / 工作区树）──
         self._mode: str = PANEL_MODE_LIST
         self._mode_popup = None  # 模式选择悬浮框（Qt.Popup，二次点击收起）
-        self._tree_scroll: Optional[QScrollArea] = None
+        self._tree_scroll: Optional[ScrollArea] = None
         self._tree_widget: Optional[WorkspaceTree] = None
         self._tree_snapshot = None  # 树节点签名，用于跳过无变化的重建
         self._setup_ui()
@@ -1217,7 +1217,7 @@ class TabPanel(QWidget):
         card_layout.addWidget(self._custom_plugin_header)
 
         # 滚动列表（卡片内，默认折叠）
-        self._custom_plugin_scroll = QScrollArea(self._custom_plugin_card)
+        self._custom_plugin_scroll = ScrollArea(self._custom_plugin_card)
         self._custom_plugin_scroll.setWidgetResizable(True)
         self._custom_plugin_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._custom_plugin_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1309,7 +1309,7 @@ class TabPanel(QWidget):
         layout.addWidget(self._top_bar)
 
         # ── 中间：Tab 列表 ──
-        self._scroll_area = QScrollArea(self)
+        self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1342,7 +1342,7 @@ class TabPanel(QWidget):
         # ── 中间（树模式）：工作区树 项目 → 工作树 → 会话 ──
         # 与列表区并列，靠 setVisible 切换。TabItem / 团队框不需要手动搬运：
         # QLayout.addWidget 会自动 reparent，两个重建函数各摆各的容器。
-        self._tree_scroll = QScrollArea(self)
+        self._tree_scroll = ScrollArea(self)
         self._tree_scroll.setWidgetResizable(True)
         self._tree_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._tree_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)

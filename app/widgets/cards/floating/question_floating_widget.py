@@ -15,7 +15,6 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QShortcut,
     QSizePolicy,
     QTextEdit,
@@ -23,6 +22,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
@@ -32,7 +32,7 @@ from app.widgets.cards.card_container import CardContainer
 # ═══════════════════════════════════════════════════════════
 
 
-class _AutoHeightScrollArea(QScrollArea):
+class _AutoHeightScrollArea(ScrollArea):
     """高度跟随内容的自适应滚动区
 
     短内容 → 高度 = 内容高度（不产生空白）；

@@ -18,12 +18,12 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import Colors
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon, get_unified_font
 
@@ -592,7 +592,7 @@ class SubAgentCompactFloatingWidget(QWidget):
         main_layout.addLayout(header)
 
         # ── 任务列表滚动容器 ──
-        self._scroll_area = QScrollArea(self)
+        self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
