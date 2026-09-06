@@ -80,6 +80,53 @@ def test_file_and_ssh_urls_rejected(log_capture):
         assert ok is False, bad
 
 
+def test_git_subdir_marketplace_format_allowed(log_capture):
+    """git-subdir（DriFox 旧格式，drifox-plugins 市场全量在用）放行。
+
+    https 直链 + 相对子目录过；owner/repo 简写与 _resolve_git_subdir_url
+    补全行为对齐同样过。回归背景：C1 加固漏实现该类型导致整市场误拦。
+    """
+    ok, reason = validate_marketplace_source(
+        {
+            "type": "git-subdir",
+            "url": "https://github.com/martin98-afk/drifox-plugins",
+            "path": "plugins/voice-input",
+            "ref": "main",
+        }
+    )
+    assert ok is True, reason
+    ok, reason = validate_marketplace_source(
+        {"type": "git-subdir", "url": "martin98-afk/drifox-plugins", "path": "plugins/voice-input", "ref": "main"}
+    )
+    assert ok is True, reason
+
+
+def test_git_subdir_path_traversal_rejected(log_capture):
+    """git-subdir path 禁绝对路径、盘符与 .. 穿越。"""
+    for bad in [
+        {"type": "git-subdir", "url": "https://github.com/a/b", "path": "../etc"},
+        {"type": "git-subdir", "url": "https://github.com/a/b", "path": "a/../../etc"},
+        {"type": "git-subdir", "url": "https://github.com/a/b", "path": "/abs/path"},
+        {"type": "git-subdir", "url": "https://github.com/a/b", "path": "C:/Windows"},
+        {"type": "git-subdir", "url": "https://github.com/a/b", "path": ""},
+    ]:
+        ok, reason = validate_marketplace_source(bad)
+        assert ok is False, bad
+        assert "path 不合法" in reason
+
+
+def test_git_subdir_url_rules_rejected(log_capture):
+    """git-subdir url 同受 https + host 白名单约束；git@ 形态拒。"""
+    for bad in [
+        {"type": "git-subdir", "url": "http://github.com/a/b", "path": "p"},
+        {"type": "git-subdir", "url": "https://evil.example.com/a/b", "path": "p"},
+        {"type": "git-subdir", "url": "git@github.com:owner/repo.git", "path": "p"},
+        {"type": "git-subdir", "url": "", "path": "p"},
+    ]:
+        ok, _reason = validate_marketplace_source(bad)
+        assert ok is False, bad
+
+
 def test_settings_extension_host_allowed(tmp_path, log_capture):
     """Settings.marketplace_allowed_git_hosts 扩展的内网 git 源放行。"""
     from app.utils.config import Settings

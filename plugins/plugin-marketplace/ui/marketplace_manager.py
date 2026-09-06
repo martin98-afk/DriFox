@@ -107,11 +107,39 @@ def _marketplace_allowed_hosts() -> set:
     return hosts
 
 
+def _validate_git_url_field(raw: Any, *, allow_shorthand: bool) -> Tuple[bool, str]:
+    """校验 git url 字段：https 直链走 host 白名单；简写仅按需放行。
+
+    allow_shorthand=True 时兼容 owner/repo 简写（隐含 github.com，与
+    installer._resolve_git_subdir_url 的补全行为对齐，仅 git-subdir 使用）。
+    """
+    from urllib.parse import urlparse
+
+    raw = str(raw or "").strip()
+    if not raw:
+        return False, "url 缺失"
+    if allow_shorthand and "/" in raw and not raw.startswith(("http://", "https://", "git@")):
+        if _GITHUB_REPO_RE.fullmatch(raw):
+            return True, ""
+        return False, f"url 简写不合法: {raw!r}（须为 owner/repo 形态或 https 直链）"
+    parsed = urlparse(raw)
+    if parsed.scheme != "https":
+        return False, f"url scheme 须为 https（当前: {parsed.scheme or '缺失'}）"
+    host = (parsed.hostname or "").lower()
+    if host not in _marketplace_allowed_hosts():
+        return False, f"非白名单 git host: {host or '缺失'}"
+    return True, ""
+
+
 def validate_marketplace_source(source: Any) -> Tuple[bool, str]:
     """C1：市场源白名单校验（新增/修改与下载前二次校验共用）。
 
     - github → repo 必须匹配 ^[\w.-]+/[\w.-]+$
     - url → scheme 必须 https 且 hostname 在允许表（内置五家 + Settings 扩展）
+    - git-subdir → url 同 url 规则（另兼容 owner/repo 简写）；path 必须为
+      仓库内相对子目录（禁绝对路径与 .. 穿越）。注意：安装器本就支持
+      git-subdir（DriFox 旧格式，drifox-plugins 市场全量在用），
+      校验器必须与其能力面对齐，否则合法安装被误拦。
     - 其余类型与 file:///ssh:// 等一律拒绝
 
     Returns:
@@ -133,16 +161,21 @@ def validate_marketplace_source(source: Any) -> Tuple[bool, str]:
             ):
                 return True, ""
             return False, f"github repo 不合法: {repo!r}（须为 owner/name 形态，禁路径穿越）"
-        if src_type == "url":
-            from urllib.parse import urlparse
-
-            raw = str(source.get("url") or "")
-            parsed = urlparse(raw)
-            if parsed.scheme != "https":
-                return False, f"url scheme 须为 https（当前: {parsed.scheme or '缺失'}）"
-            host = (parsed.hostname or "").lower()
-            if host not in _marketplace_allowed_hosts():
-                return False, f"非白名单 git host: {host or '缺失'}"
+        if src_type in ("url", "git-subdir"):
+            ok, reason = _validate_git_url_field(source.get("url"), allow_shorthand=(src_type == "git-subdir"))
+            if not ok:
+                return False, reason
+            if src_type == "git-subdir":
+                subpath = str(source.get("path") or "").strip()
+                norm = subpath.replace("\\", "/")
+                parts = [seg for seg in norm.split("/") if seg]
+                if (
+                    not subpath
+                    or norm.startswith("/")
+                    or (len(norm) >= 2 and norm[1] == ":")
+                    or any(seg in (".", "..") for seg in parts)
+                ):
+                    return False, f"git-subdir path 不合法: {subpath!r}（须为仓库内相对子目录，禁路径穿越）"
             return True, ""
         return False, f"不支持的市场源类型: {src_type or '缺失'}"
     except Exception as e:
