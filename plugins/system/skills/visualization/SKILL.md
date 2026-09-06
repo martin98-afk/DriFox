@@ -6,6 +6,7 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 # DriFox 可视化输出规范
 
 > 架构事实：消息卡片是 **innerHTML 注入 + Chromium 83**，不是完整 web 沙箱。
+> 需要执行脚本时唯一通道是 ` ```widget ` 围栏（沙箱 iframe + `__drifoxBridge` 白名单）；` ```html ` 与内联 SVG 里的 `<script>` 一律不执行。
 
 ## 第一动作：先想视觉，再想文字
 
@@ -33,6 +34,7 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 | 层级占比/多维评分/仪表盘/热力/桑基/K线/象限定位（中文标签） | ` ```echarts ` 代码块 | → `references/echarts-mermaid.md`（图型路由总表） |
 | 流程/时序/状态机/ER/甘特/象限选型（英文）/分支流/里程碑 | ` ```mermaid ` 代码块 | → `references/echarts-mermaid.md`（图型路由总表） |
 | UI 效果稿/指标卡/对比卡/交互组件 | 内联 HTML | → `references/html-widget.md` |
+| 要执行脚本的交互组件（滑块/输入联动/实时计算/stepper/点节点改状态） | ` ```widget ` 代码块 | → `references/html-widget.md`（「交互通道」节） |
 | 数学/物理公式、方程、推导 | 正文 LaTeX 定界符 | 宿主 KaTeX 自动渲染，规则见下节 |
 | 监控总览/选型报告/性能排查/数据周报（复合场景） | 配方组合 | → `references/playbooks.md` |
 
@@ -55,11 +57,51 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 
 ## 硬约束（任何通道，常驻）
 
-1. **`<script>` 永不执行**（innerHTML 注入后是死代码）。交互走 Host API。
+1. **`` ```html `` 与内联 SVG 里的 `<script>` 永不执行**（innerHTML 注入后是死代码），交互走 Host API。要真执行脚本必须换 ` ```widget ` 围栏（沙箱 iframe，见「交互通道」节）。
 2. **Chromium 83**：`context-stroke`、`:has()`、`subgrid`、`aspect-ratio`、`transform-box: fill-box` 不可用（fill-box 使动画 origin 静默失效）；flex/grid/CSS 变量/圆角可用。
 3. 禁 `position: fixed`；外层容器透明，背景由宿主提供。
 4. SVG 里不引用外部资源。
 5. 宿主已深浅主题自适配（echarts init、CSS 变量注入），不写死背景色。
+
+## 交互通道（要执行 JS 时用 ```widget）
+
+` ```html ` 里的 `<script>` 会被剥离（永久死代码），**只有** ` ```widget ` 能执行脚本。判定：
+
+| 场景 | 通道 |
+|------|------|
+| 只要展示（指标卡、效果稿、静态 SVG、对比卡） | ` ```html ` / ` ```svg ` |
+| 要滑块、输入联动、实时计算、点节点改状态 | ` ```widget ` |
+| 数据是表格/序列/层级 | ` ```echarts ` |
+
+` ```widget ` 内容跑在沙箱 iframe 里（源为 opaque，拿不到宿主 DOM / 本地文件 / 网络）。可用能力只有：
+
+- `window.__drifoxBridge.getTheme()` → Promise，返回 `{isDark, chartBg, textColor, vars}`
+- `window.__drifoxBridge.sendPrompt(text)` → 把文本当追问发出
+- `window.__drifoxBridge.storage.get(k)` / `.set(k, v)` → 会话级，get 返回 Promise
+- 宿主主题变量（`--panel` `--text` `--accent` `--border` `--r-md` …）由宿主自动注入沙箱 `:root`，照常 `var(--panel)` 使用，深浅主题自动跟随
+- **不用自己上报高度**：宿主已用 ResizeObserver + 轮询自动撑高 iframe
+
+硬约束：
+
+- `<script>` 必须**内联**（外链 script 被 CSP 拦）；`<style>` 同样内联。
+- `fetch` / `XHR` / `WebSocket` 全禁（`connect-src 'none'`）。需要数据就把数据写死在内容里。
+- 别在 ` ```html ` 里写脚本凑 —— 会被静默剥离，产物是个不动的壳。
+
+## SVG 图节点可点
+
+`<g>` / `<rect>` / `<circle>` 上挂 `.context-tag` 即走同一条点击链（不必是 `<span>`）：
+
+```html
+<g class="context-tag" data-type="ask" data-content="展开讲讲这一层">
+  <rect x="100" y="20" width="180" height="44" rx="8" stroke-width="0.5" />
+  <text x="190" y="42" text-anchor="middle" dominant-baseline="central">编码层</text>
+</g>
+```
+
+- 只对**整组**挂，不要给组里每个图元各挂一次（会重复触发）。
+- `data-content` 写完整追问句 —— 它是点击后真正发出的文本。
+- 悬停反馈由宿主 `svg .context-tag:hover { opacity: .78 }` 提供，不要自己写 hover 样式。
+- 别用 `onclick="sendPrompt(...)"` —— 那是别家 API，DriFox 里没有，且事件属性会被净化掉。
 
 ## 复杂度预算（硬限制）
 
@@ -84,7 +126,8 @@ description: 可视化优先输出技能。凡回答涉及以下场景必须先�
 
 - [ ] echarts option 是纯 JSON：无函数、无注释、无尾逗号
 - [ ] SVG viewBox 680，H 按最底元素算出；中文框宽用 CJK 公式算过
-- [ ] 全文无 `<script>`、无 `onclick=`、无 `sendPrompt`；追问用 `context-tag[data-type="ask"]`
+- [ ] ` ```html ` / SVG 里无 `<script>`、无 `onclick=`、无 `sendPrompt`；追问用 `context-tag[data-type="ask"]`（SVG 图形节点也可挂）
+- [ ] 用 ` ```widget ` 时：脚本内联（禁外链 script）、无 `fetch`/`XHR`、数据写死在内容里
 - [ ] 界面色用 CSS 变量，无硬编码 hex 界面色
 - [ ] 可视化块在回答后半段，图前有引入文字
 - [ ] 复杂度未超预算（节点数/嵌套层数/色系数）

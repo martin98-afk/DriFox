@@ -425,6 +425,8 @@ class PluginManager:
                 )
                 p.overridden_by = overridden.plugin_type
                 result["changed"].append(p)
+                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
+                self._plugins[name] = p
             new_plugins[name] = p
         # 用户插件同名覆盖前两者（最高优先级）
         for name, p in current_user.items():
@@ -442,6 +444,8 @@ class PluginManager:
                 )
                 p.overridden_by = overridden.plugin_type
                 result["changed"].append(p)
+                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
+                self._plugins[name] = p
             new_plugins[name] = p
 
         new_names = set(new_plugins.keys())

@@ -111,3 +111,18 @@ SVG 前放一段标准 style：
 **速度一致性**：地面物移动速度必须 ≈ 轮缘线速度（2πr ÷ 转周期），否则打滑感；视差分层（远景云 20s+，中景 2~3s）。dashoffset 正值向路径起点方向移动，流向必须与画面运动方向一致（车向右，路面纹理向左流）。
 
 **层序**：远景 → 中景 → 影子 → 主体（远侧肢在车架下、近侧肢在躯干上）→ 前景动效（速度线）。
+
+## 图节点可点
+
+节点组挂 `.context-tag` 即可点击追问 —— 宿主的点击委托已扩展到 SVG 元素：
+
+```html
+<g class="context-tag" data-type="ask" data-content="展开讲讲这一层">
+  <rect x="100" y="20" width="180" height="44" rx="8" stroke-width="0.5" />
+  <text class="th" x="190" y="42" text-anchor="middle" dominant-baseline="central">编码层</text>
+</g>
+```
+
+- 挂**整组**不挂单个图元；`data-content` 写完整追问句。
+- 悬停反馈由宿主 `svg .context-tag:hover { opacity: .78 }` 提供，不要再自己写 hover 样式。
+- 不要用 `onclick`、也不要用 `<a>` 包 SVG 节点：事件属性会被净化，且页面里没有 `sendPrompt` 全局函数。

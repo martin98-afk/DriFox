@@ -572,7 +572,7 @@ class UIPluginRegistry:
     # （见 widgets/message_card.py 的 _render_code_block），一旦被插件注册，
     # 内置实现将永久失效 —— 插件可据此劫持全应用图表/HTML/SVG 渲染。
     # 注册表侧此前只校验 lang 字符正则，未落实该约束，此处补齐。
-    RESERVED_FENCE_LANGS = frozenset({"echarts", "mermaid", "svg", "html"})
+    RESERVED_FENCE_LANGS = frozenset({"echarts", "mermaid", "svg", "html", "widget"})
     # 单个 asset 文件上限（设计稿 §3 防呆）。插件合计上限由宿主注入时控。
     FENCE_ASSET_MAX_BYTES = 2 * 1024 * 1024
 
@@ -592,7 +592,7 @@ class UIPluginRegistry:
         Args:
             plugin_name: 所属插件名
             lang: fence 语言标记（自动转小写）。与宿主内置 echarts / mermaid /
-                  svg / html 同名时内置优先，插件不会覆盖内置行为。
+                  svg / html / widget 同名时内置优先，插件不会覆盖内置行为。
             render_func: (code, ctx) -> HTML 片段，须为纯函数（后台渲染线程调用）
             streaming_placeholder: 流式半截 fence 的占位（str 或 callable），
                            缺省用宿主的通用图表骨架

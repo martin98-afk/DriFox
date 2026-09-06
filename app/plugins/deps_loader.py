@@ -25,11 +25,15 @@ deps 目录规范：
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from loguru import logger
+
+# P1-4：pip spec 白名单——包名 + extras 可选 + 版本约束必需（拒 git+/file:///-r/--flag/无版本）
+_PIP_SPEC_RE = re.compile(r"^[\w.\[\]-]+(\[\w[.\w-]*\])?(==|>=|<=|~=|!=)\d[\d.*]*$")
 
 # 友好名 → sys.platform 值（目录名 / pip key 用）
 PLATFORM_DIR_MAP = {
@@ -93,6 +97,9 @@ def check_platform(manifest: dict) -> Tuple[bool, str]:
 def resolve_pip_deps(manifest: dict, platform_key: Optional[str] = None) -> List[str]:
     """合并 dependencies.pip 的 default 与指定平台列表（去重、保序）。
 
+    P1-4：PEP 508 白名单校验——包名+extras 可选+版本约束必需；
+    git+/file:///-r/--flag 等 注入形态拒收（移除 + warning）。
+
     Args:
         manifest: 插件清单
         platform_key: 平台 key，缺省用当前平台
@@ -115,6 +122,12 @@ def resolve_pip_deps(manifest: dict, platform_key: Optional[str] = None) -> List
             return
         for s in specs:
             if isinstance(s, str) and s and s not in merged:
+                # P1-4：spec 白名单（包名+extras 可选+版本约束必需）
+                if not _PIP_SPEC_RE.match(s):
+                    logger.warning(
+                        f"[deps_loader] 拒收非法 pip spec（白名单外，疑似注入/非固定版本）: {s!r}"
+                    )
+                    continue
                 merged.append(s)
 
     _add(pip.get("default"))

@@ -544,6 +544,25 @@ class MCPClientManager:
         args = conn.config.get("args", [])
         env = conn.config.get("env")
 
+        # P1-3：启动门禁（审计 + shell 元字符拒启 + 非内置源确认流）
+        from app.core.mcp_lsp_safety import gate_server_launch
+
+        source = conn.config.get("_source")
+        plugin_name = Path(source).parent.name if source and Path(source).suffix == ".json" else ""
+        verdict = gate_server_launch(
+            "mcp",
+            plugin_name,
+            conn.name,
+            [command] + list(args or []),
+            source=source,
+        )
+        if verdict != "proceed":
+            conn._connect_error = RuntimeError(
+                f"MCP 服务器启动被安全门禁拦截（{verdict}）：需用户确认或 args 含非法字符"
+            )
+            conn._ready_event.set()
+            return
+
         # 显式继承完整父进程环境（代理/证书/镜像源），否则 npx、uvx 常拉包失败
         params = StdioServerParameters(command=command, args=args, env=_build_stdio_env(env))
 
@@ -612,6 +631,25 @@ class MCPClientManager:
         args = conn.config.get("args", [])
         env = conn.config.get("env")
         merged_env = _build_stdio_env(env)
+
+        # P1-3：启动门禁（两阶段 stdio→http 同样过门禁）
+        from app.core.mcp_lsp_safety import gate_server_launch
+
+        source = conn.config.get("_source")
+        plugin_name = Path(source).parent.name if source and Path(source).suffix == ".json" else ""
+        verdict = gate_server_launch(
+            "mcp",
+            plugin_name,
+            conn.name,
+            [command] + list(args or []),
+            source=source,
+        )
+        if verdict != "proceed":
+            conn._connect_error = RuntimeError(
+                f"MCP 服务器启动被安全门禁拦截（{verdict}）：需用户确认或 args 含非法字符"
+            )
+            conn._ready_event.set()
+            return
 
         logger.info(f"[MCP] '{conn.name}' 启动进程中获取 URL...")
 

@@ -454,6 +454,11 @@ class Settings(QConfig):
     # false 时用户目录同名插件跳过、系统版生效；默认 true 保 junction 部署工作流
     allow_user_override = ConfigItem("Plugin", "AllowUserOverride", True, BoolValidator())
 
+    # ========== MCP/LSP 启动确认白名单（P1-3） ==========
+    # 键格式 "<kind>:<plugin>:<server>"（如 "mcp:user-custom:fetch"），
+    # 用户对非内置源 server 首次启动点「允许」后写入；拒绝仅本会话生效不落盘
+    confirmed_plugin_servers = ConfigItem("Plugin", "ConfirmedPluginServers", [])
+
     # ========== Gateway 通讯平台配置 ==========
     # 企业微信
     gateway_wecom_enabled = ConfigItem("Gateway", "WeCom/Enabled", False, BoolValidator())
