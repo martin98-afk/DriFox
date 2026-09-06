@@ -26,7 +26,7 @@ import sys
 from typing import List
 
 from loguru import logger
-from PyQt5.QtCore import Qt, QUrl, pyqtSignal
+from PyQt5.QtCore import QBuffer, QIODevice, Qt, QUrl, pyqtSignal
 from PyQt5.QtWebEngineWidgets import QWebEnginePage
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import QDialog, QVBoxLayout
@@ -458,11 +458,16 @@ class ChartViewerCard(BaseSettingsCard):
 
         from qfluentwidgets import FluentIcon
 
-        self.add_header_button(FluentIcon.SAVE, "导出 PNG（3x 高清）", self._on_export_clicked)
+        self._export_btn = self.add_header_button(FluentIcon.SAVE, "导出 PNG（3x 高清）", self._on_export_clicked)
+        self._chart_type = ""
 
     def load_chart(self, chart_type: str, payload_b64: str, title: str = ""):
         """加载图表（echarts option b64 / mermaid、svg 的 outerHTML b64）"""
         self.set_title_text(title or {"svg": "SVG 查看", "html": "HTML 查看"}.get(chart_type, "图表查看"))
+        self._chart_type = chart_type
+        # html 走 Qt 抓图（视口物理像素），无 3x 矢量重画，tooltip 如实标注
+        if chart_type == "html" and getattr(self, "_export_btn", None) is not None:
+            self._export_btn.setToolTip("导出 PNG（当前视图）")
         _cleanup_temp_files(self._tmp_files)
         try:
             from app.utils.theme_manager import theme_manager
@@ -499,8 +504,27 @@ class ChartViewerCard(BaseSettingsCard):
         self._export_ready = bool(ok)
 
     def _on_export_clicked(self):
-        if getattr(self, "_export_ready", False):
-            self._webview.page().runJavaScript("window._exportChartPng && window._exportChartPng(3);")
+        if not getattr(self, "_export_ready", False):
+            return
+        if getattr(self, "_chart_type", "") == "html":
+            self._export_widget_png()
+            return
+        self._webview.page().runJavaScript("window._exportChartPng && window._exportChartPng(3);")
+
+    def _export_widget_png(self):
+        """html widget 导出 PNG：成型布局非 echarts 实例、无 html2canvas，
+        JS 矢量通道（getDataURL / svg→canvas）均不适用 → Qt 侧抓整视图
+        （含页面主题底色，物理像素保真）"""
+        pixmap = self._webview.grab()
+        if pixmap.isNull():
+            logger.warning("[ChartViewer] html widget 截图失败")
+            return
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        if not pixmap.save(buf, "PNG"):
+            logger.warning("[ChartViewer] html widget 截图编码失败")
+            return
+        self._save_png("HTML widget", base64.b64encode(bytes(buf.data())).decode("ascii"))
 
     def _save_png(self, name: str, png_b64: str):
         # 延迟导入：ui_helpers 顶部反向 import MessageCard，顶层导入会成环

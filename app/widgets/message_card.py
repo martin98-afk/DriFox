@@ -12432,13 +12432,20 @@ class MessageCard(SimpleCardWidget):
             logger.info(f"[MessageCard] 图表 PNG 已导出: {path}")
 
     def _on_save_widget_file(self, wtype: str, content_b64: str):
-        """SVG widget 源码保存（存矢量源码，缺 xmlns 自动补齐）"""
+        """Widget 源码保存（svg 存矢量源码补 xmlns；html 存净化产物 .html）"""
         try:
-            from app.widgets.ui_helpers import save_svg_source
+            if wtype == "html":
+                from app.widgets.ui_helpers import save_html_source
 
-            path = save_svg_source(self, content_b64)
-            if path:
-                logger.info(f"[MessageCard] SVG 源文件已导出: {path}")
+                path = save_html_source(self, content_b64)
+                if path:
+                    logger.info(f"[MessageCard] HTML 源文件已导出: {path}")
+            else:
+                from app.widgets.ui_helpers import save_svg_source
+
+                path = save_svg_source(self, content_b64)
+                if path:
+                    logger.info(f"[MessageCard] SVG 源文件已导出: {path}")
         except Exception as e:
             logger.error(f"[MessageCard] Widget 保存失败: {e}")
 

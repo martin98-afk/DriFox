@@ -7,7 +7,7 @@
 - 对齐 openhanako lib/memory/prompts/{compile,dream,fact-extraction}.ts 的语义。
 """
 
-from typing import List
+from typing import Dict, List
 
 _SYSTEM = "你是记忆整理器。输出面向 LLM 回读而非人类阅读：记忆碎片式高密度条目，零冗余。只输出要求的内容，不解释，不加 markdown 代码围栏。"
 
@@ -62,6 +62,7 @@ def build_compile_facts(existing_facts: str, turns: str) -> list:
         + _STYLE
         + "- 只收「过时会让助手犯错」级别的事实，一次性话题不收\n"
         "- 与已有事实冲突时以新对话为准\n"
+        "- 旧有事实在新对话中未再提及：默认原样保留，只有确证已过时/被覆盖才删，存疑即留\n"
         "- 总量 ≤30 行；接近上限时合并同类、淘汰最陈旧最不关键的\n\n"
         f"【已有重要事实】\n{existing}\n\n【新对话】\n{turns.strip() or '（无）'}"
     )
