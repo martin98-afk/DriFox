@@ -57,30 +57,6 @@
             }
         },
         {
-            "name": "context-usage-stats",
-            "description": "对话上下文用量统计 — 展示最近对话的 token 用量、消息数量趋势、会话活跃度图表",
-            "version": "0.1.0",
-            "author": "DriFox Contributors",
-            "license": "MIT",
-            "categories": [
-                "ui"
-            ],
-            "source": {
-                "type": "git-subdir",
-                "url": "https://github.com/martin98-afk/DriFox",
-                "path": "plugins/context-usage-stats",
-                "ref": "master"
-            },
-            "components": {
-                "ui": true
-            },
-            "homepage": "https://github.com/martin98-afk/DriFox",
-            "icon": {
-                "light": "icon.svg",
-                "dark": "icon_dark.svg"
-            }
-        },
-        {
             "name": "file-tree",
             "description": "当前项目文件树浏览 — 直观展示项目目录结构，支持右键菜单与实时文件监听",
             "version": "0.1.0",
@@ -259,25 +235,6 @@
                 "ui": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox"
-        },
-        {
-            "name": "workflow",
-            "description": "workflow 工具：受限 Python 脚本编排子智能体，支持条件/循环/并行扇出，前台阻塞返回原子结果",
-            "version": "0.1.0",
-            "author": "DriFoxx Team",
-            "license": "MIT",
-            "categories": [
-                "tool"
-            ],
-            "source": {
-                "type": "git-subdir",
-                "url": "https://github.com/martin98-afk/DriFox",
-                "path": "plugins/workflow",
-                "ref": "master"
-            },
-            "components": {
-                "tools": true
-            }
         }
     ]
 }
