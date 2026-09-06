@@ -227,6 +227,10 @@ class ContextBreakdownTooltip(QWidget):
         self._data = data or {}
         self._refresh()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refresh()  # show 后 isVisible=True，完整跑一次真实刷新（覆盖前置 rebuild 被短路）
+
     def _refresh(self):
         # 隐藏时短路：流式期间 set_usage 2Hz 调 set_data → _refresh，tooltip 隐藏时
         # 13 处 setStyleSheet + legend rebuild 全是无效工作。显示前 _show_tooltip()

@@ -19,7 +19,7 @@ from loguru import logger
 
 SINGLE_SLOW_SECONDS = 5.0
 WINDOW_SECONDS = 30.0
-WINDOW_SIZE = 6
+WINDOW_SIZE = 8
 DEGRADE_LIMIT = 3
 
 # {(plugin, component): {"consecutive": int, "window": deque[float]}}

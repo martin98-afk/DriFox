@@ -2253,6 +2253,8 @@ class UIPluginRegistry:
         重载复用 load_plugin（失败走既有回滚恢复旧注册，即 last-known-good）。
         Returns: 本轮触发重载的插件名列表。
         """
+        from loguru import logger
+
         reloaded: list = []
         for name, sig in list(self._ui_signatures.items()):
             plugin = self._plugin_paths.get(name)

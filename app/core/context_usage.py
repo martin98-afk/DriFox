@@ -15,6 +15,26 @@ from typing import Dict, Optional, Tuple
 
 from loguru import logger
 
+# 快照签名缓存：键 session_id（无则 id(session)），值 (sig, result)。
+# 签名 = (消息数, 末条消息对象 id, API prompt_tokens)：任一变化即失效，
+# 保证 auto-compact 判定新鲜度（不设 TTL）。仅包主路径快照，legacy 回退不缓存。
+_snap_cache: dict = {}
+
+
+def _snapshot_sig(session) -> tuple:
+    """快照失效签名：消息数 + 末条消息对象身份 + API 口径修正值。"""
+    msgs = getattr(session, "messages", None) or []
+    return (
+        len(msgs),
+        id(msgs[-1]) if msgs else 0,
+        int(getattr(session, "last_api_prompt_tokens", 0) or 0),
+    )
+
+
+def _cache_key(session) -> object:
+    sid = getattr(session, "session_id", None)
+    return sid if sid else id(session)
+
 
 def snapshot_usage_for_hooks(
     backend,
@@ -48,6 +68,14 @@ def snapshot_usage_for_hooks(
                 llm_config = getter() or {}  # type: ignore[assignment]
         llm_config = llm_config or {}
 
+        # 签名缓存：同会话同状态下重复调用（每 tool call / 每 assistant 消息
+        # 各一次）直接复用上一次快照，免 O(N) 全量重算；任一变化源变动即重算。
+        sig = _snapshot_sig(session)
+        key = _cache_key(session)
+        cached = _snap_cache.get(key)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+
         snap = {}
         if hasattr(backend, "get_context_usage_snapshot"):
             snap = (
@@ -63,7 +91,9 @@ def snapshot_usage_for_hooks(
         used = int(snap.get("used_tokens", 0) or 0)
         budget = int(snap.get("budget_tokens", 0) or 0)
         if used > 0 and budget > 0:
-            return used, budget
+            result = (used, budget)
+            _snap_cache[key] = (sig, result)
+            return result
     except Exception as e:
         logger.warning(f"[ContextUsage] hook 快照口径失败，回退本地估算: {e}")
 
