@@ -14,12 +14,11 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, PrimaryToolButton, StrongBodyLabel, TransparentToolButton
+from qfluentwidgets import FluentIcon, PrimaryToolButton, ScrollArea, StrongBodyLabel, TransparentToolButton
 
 from app.utils.design_tokens import Colors, TabStyles, font_size_css, get_unified_scrollbar_style, scale_icon_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -124,7 +123,7 @@ class SystemCardFrame(QFrame):
         main_layout.addLayout(self._header_layout)
 
         # ── 内容区 ──
-        self.scroll_area = QScrollArea(self)
+        self.scroll_area = ScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet(self._scroll_style())
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)

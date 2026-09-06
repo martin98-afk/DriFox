@@ -87,6 +87,7 @@ from qfluentwidgets.components.widgets.card_widget import (
     CardSeparator,
     SimpleCardWidget,
 )
+from qfluentwidgets.components.widgets.scroll_bar import SmoothScrollDelegate
 
 from app.core import (
     append_text_block,
@@ -330,20 +331,6 @@ WHEEL_STUCK_LIMIT = 4
 WHEEL_STUCK_MIN_INTERVAL = 0.1
 
 
-def wheel_delta_to_px(delta: int) -> int:
-    """滚轮角位移 → 滚动条位移（px），三处 wheelEvent 共用。
-
-    🐛 原实现 `-delta // 2` 有两个缺陷：
-    1) 归零：delta = -1（触控板精细滚动）→ -(-1)//2 = 0 → 向下滚完全无反应；
-    2) 不对称：Python 整除向下取整，±3 分别得到 -2 / +1，上下滚速度不一致。
-    改为四舍五入并保底 ±1，保证任何幅度都至少有 1px 响应。
-    """
-    step = int(round(delta / 2.0))
-    if step == 0 and delta != 0:
-        step = 1 if delta > 0 else -1
-    return step
-
-
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
 # 子智能体和提问工具（subagent_para/question）涉及 AI 与用户的直接交互，
 # 留在正文中比收到工具区更符合直觉，体验更连贯。
@@ -524,8 +511,17 @@ def _render_plugin_fence(info, code_content_raw: str) -> str:
         code = _unescape_html(code_content_raw)
     except Exception:
         code = code_content_raw
+    # P2-1：fence render 入口同口径 watchdog（超时 degrade → 连续熔断停用）
     try:
-        html = info.render_func(code, {"lang": info.lang, "plugin_name": info.plugin_name})
+        from app.core.ui_callback_watchdog import timed_ui_callback
+
+        html = timed_ui_callback(
+            info.plugin_name,
+            f"fence:{info.lang}",
+            info.render_func,
+            code,
+            {"lang": info.lang, "plugin_name": info.plugin_name},
+        )
     except Exception:
         return ""
     if not isinstance(html, str) or not html.strip():
@@ -581,7 +577,7 @@ def _wrap_code_blocks_with_copy_button_web(
         # <lang>-streaming。这里必须在此之前拦截：残缺 JSON 若照常包成
         # .echarts-container，其 b64 每轮随内容增长而变化 → vault key 每轮都不同，
         # 节点被反复塞进 vault 迅速膨胀（多图白屏的次因）。骨架不入 vault、不 init。
-        if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming"):
+        if lang in ("echarts-streaming", "mermaid-streaming", "html-streaming", "widget-streaming"):
             return _CHART_SKELETON_HTML
         # 插件注册的 fence 在流式期同样降级为占位：半截源码交给 render_func
         # 必然产出残缺节点，且内容每轮变化会让产物反复变更、高度抖动。
@@ -661,6 +657,24 @@ def _wrap_code_blocks_with_copy_button_web(
                         f'<div class="html-widget" data-fence-renderer="html" '
                         f'style="margin: 12px 0;">{widget_html}</div>'
                     )
+
+        # ===== 可交互 widget 围栏：沙箱 iframe + 白名单桥 =====
+        # 与 ```html 的分工：html 走 _sanitize_widget_html（脚本被剥离、纯静态），
+        # widget 保留脚本并放进沙箱 iframe。内容**不**内联进主文档，只以 base64
+        # 存在 data 属性里，由 JS 侧装配 —— 主文档开了 file:// 互访，脚本内联
+        # 等于任意本地文件读取 + 外传，必须隔离。桥权限与插件 fence 同款。
+        if lang == "widget":
+            try:
+                raw_widget = _unescape_html(code_content_raw)
+            except Exception:
+                raw_widget = code_content_raw
+            if _HTML_WIDGET_HEAD_PATTERN.match(raw_widget) and len(raw_widget) <= 200_000:
+                b64_widget = base64.b64encode(raw_widget.encode("utf-8")).decode("ascii")
+                widget_id = "wgt-" + hashlib.sha1(raw_widget.encode("utf-8")).hexdigest()[:12]
+                return (
+                    f'<div id="{widget_id}" class="drifox-widget" data-fence-renderer="widget" '
+                    f'data-widget-src="{b64_widget}" style="margin: 12px 0;"></div>'
+                )
 
         # --- 普通代码块处理 ---
         try:
@@ -764,7 +778,7 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
                 lang_token = stripped[3:].strip()
                 # html 同样需要骨架：半截 HTML 透传会因标签未闭合破坏页面结构。
                 # 插件注册的 fence 也要改标（否则半截源码会被当成品渲染）。
-                if lang_token.lower() in ("mermaid", "echarts", "html") or _get_plugin_fence_renderer(
+                if lang_token.lower() in ("mermaid", "echarts", "html", "widget") or _get_plugin_fence_renderer(
                     lang_token.lower()
                 ) is not None:
                     lines[i] = lines[i].replace(lang_token, f"{lang_token}-streaming", 1)
@@ -2707,8 +2721,104 @@ _SKELETON_CACHE_MAX = 48
 # **之前**先执行一次（原先只在 onload 回调之后）。插件脚本末尾的首帧兜底初始化
 # 若先跑，会看到空桥并把未授权状态锁死在节点上（幂等标记已打，后续救不回来）。
 # 旧骨架仍是旧时序 → 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 25
+# v26（2026-09-06）：① 新增内置 ```widget 围栏（沙箱 iframe + 白名单桥：
+# _initWidgets / _WIDGET_PRELUDE_JS / window.__WIDGET_GRANTS / window 级 message
+# 监听）；② SVG 图形节点可挂 .context-tag 走同一条点击链（_closestTag）。
+# 旧骨架两样都没有 —— widget 围栏退化成普通代码块、图节点点不动 ——
+# 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 26
 
+
+def _js_literal(value) -> str:
+    """把 Python 对象序列化成可直接内联进骨架 <script> 的 JS 字面量。
+
+    本模块顶部是 `import orjson as json`：dumps 返回 **bytes** 且不接受
+    ensure_ascii 关键字（与 _fence_assets_for_skeleton 的 _dump_js 同因），
+    这里统一归一化成 str。
+    """
+    raw = json.dumps(value)
+    return raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+
+
+# ===== 内置可交互 widget 围栏（```widget）=====
+# 与 ```html 的分工：html = 静态（脚本被 _sanitize_widget_html 剥离），
+# widget = 可执行脚本（沙箱 iframe + 白名单桥）。
+#
+# 为什么必须隔离（安全红线）：宿主 WebEngine 开了 LocalContentCanAccessFileUrls
+# + LocalContentCanAccessRemoteUrls，模型脚本若直接内联进主文档，等价于给出
+# 「任意本地文件读取 + 外传」能力。故 widget 内容只以 base64 存在 data 属性里，
+# 由 JS 侧装进 sandbox="allow-scripts" 的 iframe —— **不**授予
+# allow-same-origin → 内部源为 opaque，拿不到宿主 DOM / sessionStorage /
+# file:// 读取能力；iframe 内再叠一层 CSP 禁 connect-src / form-action /
+# base-uri。宿主能力经 postMessage 白名单暴露，与插件 fence 的 __drifoxBridge
+# 权限模型同款（theme / sendPrompt / storage）。
+_BUILTIN_FENCE_PERMS: dict = {"widget": ["theme", "sendPrompt", "storage"]}
+
+_WIDGET_CSP = (
+    "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; "
+    "style-src 'unsafe-inline'; img-src data: blob: https: http:; "
+    "media-src data: blob:; font-src data: https:; connect-src 'none'; "
+    "form-action 'none'; base-uri 'none'"
+)
+_WIDGET_CSP_JS = '"' + _WIDGET_CSP + '"'
+_WIDGET_BASE_CSS = (
+    "html,body{margin:0;padding:0;background:transparent;color:var(--text);font-size:13px;}"
+    "*{box-sizing:border-box;}"
+)
+_WIDGET_BASE_CSS_JS = '"' + _WIDGET_BASE_CSS + '"'
+
+# iframe 内部前置脚本：必须先于模型内容执行（模型脚本首帧就要用桥）。
+# 只做三件事：① 接收宿主下发的主题变量并写进 :root，让 var(--panel) 等宿主
+# 令牌在沙箱里继续可用；② 暴露 __drifoxBridge（postMessage 代理）；③ 上报高度。
+_WIDGET_PRELUDE = """(function () {
+  function post(m) { try { parent.postMessage({ __drifoxWidget: 1, p: m }, '*'); } catch (e) {} }
+  var _pending = {}, _seq = 0;
+  window.addEventListener('message', function (e) {
+    var d = e && e.data;
+    if (!d || !d.__drifoxWidgetHost) return;
+    if (d.t === 'vars') {
+      var s = document.getElementById('__drifoxVars');
+      if (!s) { s = document.createElement('style'); s.id = '__drifoxVars'; document.head.appendChild(s); }
+      var css = ':root{', k;
+      for (k in d.v) { if (Object.prototype.hasOwnProperty.call(d.v, k)) css += k + ':' + d.v[k] + ';'; }
+      css += '}';
+      if (d.v && d.v['--font-family']) css += 'body{font-family:' + d.v['--font-family'] + ';}';
+      s.textContent = css;
+      return;
+    }
+    if (d.t === 'reply') {
+      var r = _pending[d.id];
+      if (r) { delete _pending[d.id]; r(d.v); }
+    }
+  });
+  function _call(method, arg) {
+    return new Promise(function (res) {
+      var id = ++_seq;
+      _pending[id] = res;
+      post({ t: 'call', id: id, m: method, a: arg });
+      setTimeout(function () { if (_pending[id]) { delete _pending[id]; res(null); } }, 4000);
+    });
+  }
+  window.__drifoxBridge = {
+    getTheme: function () { return _call('getTheme'); },
+    sendPrompt: function (t) { post({ t: 'call', m: 'sendPrompt', a: String(t) }); },
+    storage: {
+      get: function (k) { return _call('storage.get', k); },
+      set: function (k, v) { post({ t: 'call', m: 'storage.set', a: [k, v] }); }
+    }
+  };
+  var _lastH = 0;
+  function _report() {
+    var h = 0;
+    try { h = Math.ceil(document.documentElement.getBoundingClientRect().height); } catch (e) { h = 0; }
+    if (h > 0 && Math.abs(h - _lastH) > 1) { _lastH = h; post({ t: 'h', v: h }); }
+  }
+  window.addEventListener('load', _report);
+  if (window.ResizeObserver) { try { new ResizeObserver(_report).observe(document.documentElement); } catch (e) {} }
+  setInterval(_report, 400);
+  _report();
+})();"""
+_WIDGET_PRELUDE_JS = _js_literal(_WIDGET_PRELUDE)
 
 # 流式模式追加的字符统计 HTML 标记，用于 finish_streaming 时移除
 _CHAR_COUNT_HTML = '<div id="char-count" style="color: var(--text-muted); font-size: 11px; margin-top: 12px; text-align: right; opacity: 0.7;"></div>'
@@ -4391,6 +4501,7 @@ class CodeWebViewer(QWebEngineView):
         # 插件 fence 渲染器的 assets 表（file:// URL + 权限）内联进骨架；
         # 签名（路径 + mtime）进 key，插件 assets 热替换后旧骨架自动失效。
         _fence_assets_js, _fence_perms_js, _fence_assets_sig = _fence_assets_for_skeleton()
+        _widget_grants_js = _js_literal({_p: True for _p in _BUILTIN_FENCE_PERMS.get("widget", [])})
         # mermaid 主题联动：取 Colors 而非硬编码，避免浅色主题下白叠白
         # （MEMORY.md 记录的反复出现的缺陷模式）。Colors 大写属性由主题 YAML 自动填充。
         mmd_text_color = Colors.TEXT_PRIMARY
@@ -4782,6 +4893,15 @@ class CodeWebViewer(QWebEngineView):
                     vertical-align: middle;
                 }}
                 {"".join(tag_css)}
+                /* SVG 图形节点（<g> / <rect> / <circle> …）复用 .context-tag
+                   点击链。SVG 不支持 background / border，悬停反馈只能用
+                   opacity —— 没有它用户看不出图节点可点。 */
+                svg .context-tag {{
+                    cursor: pointer;
+                }}
+                svg .context-tag:hover {{
+                    opacity: 0.78;
+                }}
 
                 /* session 历史会话标签样式（胶囊按内容宽度自然展开） */
                 .session-tag {{
@@ -6869,6 +6989,7 @@ class CodeWebViewer(QWebEngineView):
                         if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
                         // 插件 fence：按需注入 assets + 按权限装配桥
                         if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
+                    if (typeof window._initWidgets === 'function') window._initWidgets();
 
                         // 将工具/思考块分流到独立滚动容器（仅简洁模式）
                         // 必须在 _suppressScrollEvent=false 之前执行，
@@ -7053,6 +7174,7 @@ class CodeWebViewer(QWebEngineView):
                     if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
                     // 插件 fence：追加的闭合段可能带入新的插件 fence
                     if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
+                    if (typeof window._initWidgets === 'function') window._initWidgets();
                     // 使用延迟报告，确保浏览器布局完成
                     setTimeout(() => reportHeight(), 30);
                 }}
@@ -7113,6 +7235,7 @@ class CodeWebViewer(QWebEngineView):
                     if (typeof renderWidgetToolbars === 'function') renderWidgetToolbars();
                     // 插件 fence：尾部整段替换同样可能带入新的插件 fence
                     if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
+                    if (typeof window._initWidgets === 'function') window._initWidgets();
                     setTimeout(() => reportHeight(), 30);
                 }}
                 {_CONTENT_AUTOSCROLL_JS}
@@ -7435,6 +7558,33 @@ class CodeWebViewer(QWebEngineView):
                     sep.setAttribute('aria-expanded', collapsed ? 'true' : 'false');
                     try {{ sessionStorage.setItem('_toolSectionCollapsed', collapsed ? '0' : '1'); }} catch(_err) {{}}
                 }}
+                // SVG 图形节点也要能挂 .context-tag：<g class="context-tag"
+                // data-type="ask" data-content="..."> 与 <span> 走同一条点击链。
+                // Element.closest 在 SVG 子树上并非处处可靠（Chromium 83 的
+                // SVGElement 原型链），故先试 closest，失败或未命中再退化成
+                // 手动向上遍历 + class 属性比对。
+                function _closestTag(el, cls) {{
+                    if (el && typeof el.closest === 'function') {{
+                        try {{
+                            var hit = el.closest('.' + cls);
+                            if (hit) return hit;
+                        }} catch (e) {{}}
+                    }}
+                    var node = el, guard = 0;
+                    while (node && guard++ < 64) {{
+                        if (node.nodeType === 1) {{
+                            var c = node.getAttribute ? node.getAttribute('class') : null;
+                            if (c) {{
+                                var parts = String(c).split(' ');
+                                for (var i = 0; i < parts.length; i++) {{
+                                    if (parts[i] === cls) return node;
+                                }}
+                            }}
+                        }}
+                        node = node.parentNode;
+                    }}
+                    return null;
+                }}
                 document.addEventListener('click', e => {{
                     const sep = e.target.closest('#tool-separator');
                     if (sep) {{
@@ -7460,7 +7610,7 @@ class CodeWebViewer(QWebEngineView):
                         }}
                         return;
                     }}
-                    const tag = e.target.closest('.context-tag');
+                    const tag = _closestTag(e.target, 'context-tag');
                     if (tag) {{
                         var tagType = tag.getAttribute('data-type') || tag.getAttribute('data-action') || '';
                         var sessionId = tag.getAttribute('data-session-id') || '';
@@ -7552,6 +7702,8 @@ class CodeWebViewer(QWebEngineView):
                 window._applyChartTheme = function (isDark) {{
                     window._CHART_IS_DARK = !!isDark;
                     window._CHART_BG = isDark ? '#1B1E24' : '#FFFFFF';
+                    // 沙箱 widget 拿不到宿主 CSS 变量，主题切换后必须重推一次
+                    if (typeof window._refreshWidgetVars === 'function') window._refreshWidgetVars();
                     // icon 目录与按钮底色同源（_CHART_IS_DARK），避免主题切换时
                     // prefix 缓存滞后致白底白 icon
                     window._ICON_BASE = isDark ? 'qrc:/icons' : 'qrc:/icons_light';
@@ -7559,6 +7711,9 @@ class CodeWebViewer(QWebEngineView):
                 window._applyChartTheme({str(not _is_light).lower()});
                 function _b64EncodeUtf8(str) {{
                     return btoa(unescape(encodeURIComponent(str)));
+                }}
+                function _b64DecodeUtf8(b64) {{
+                    return decodeURIComponent(escape(atob(b64)));
                 }}
                 function _emitChartPng(dataUrl) {{
                     var b64 = (dataUrl || '').split(',', 2)[1] || '';
@@ -7816,6 +7971,109 @@ class CodeWebViewer(QWebEngineView):
                         if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                     }});
                 }};
+
+                // ===== 内置可交互 widget 围栏（```widget）=====
+                // 内容不内联进主文档，而是装进 sandbox="allow-scripts" 的 iframe
+                // （不授予 allow-same-origin → 源为 opaque），内部再叠 CSP。
+                // 宿主开了 file:// 互访 + 远程访问，脚本内联即任意本地文件读取 +
+                // 外传；沙箱把这条链切断。宿主能力经 postMessage 白名单暴露。
+                var _WIDGET_HOST_VARS = ['--bg', '--panel', '--panel-elevated', '--panel-soft', '--border', '--border-strong', '--text', '--text-secondary', '--text-muted', '--accent', '--accent-warm', '--code-bg', '--code-toolbar', '--code-border', '--success', '--danger', '--accent-text', '--accent-soft', '--accent-soft-strong', '--accent-border-weak', '--accent-glow', '--row-alt', '--row-hover', '--row-header', '--r-xs', '--r-sm', '--r-md', '--r-lg', '--r-xl', '--r-pill'];
+                window.__WIDGET_GRANTS = {_widget_grants_js};
+                function _widgetHostVars() {{
+                    var cs = getComputedStyle(document.documentElement), out = {{}}, i;
+                    for (i = 0; i < _WIDGET_HOST_VARS.length; i++) {{
+                        var v = cs.getPropertyValue(_WIDGET_HOST_VARS[i]);
+                        if (v) out[_WIDGET_HOST_VARS[i]] = String(v).trim();
+                    }}
+                    out['--font-family'] = getComputedStyle(document.body).fontFamily;
+                    return out;
+                }}
+                function _widgetPushVars(win) {{
+                    if (!win) return;
+                    try {{ win.postMessage({{ __drifoxWidgetHost: 1, t: 'vars', v: _widgetHostVars() }}, '*'); }} catch (e) {{}}
+                }}
+                // 主题切换时重推变量：沙箱拿不到宿主 CSS 变量，只能靠这里同步
+                window._refreshWidgetVars = function () {{
+                    var fs = document.querySelectorAll('.drifox-widget iframe');
+                    for (var i = 0; i < fs.length; i++) _widgetPushVars(fs[i].contentWindow);
+                }};
+                function _widgetStripShell(h) {{
+                    return String(h)
+                        .replace(/<!doctype[^>]*>/gi, '')
+                        .replace(/<[/]?html[^>]*>/gi, '')
+                        .replace(/<[/]?head[^>]*>/gi, '')
+                        .replace(/<[/]?body[^>]*>/gi, '');
+                }}
+                function _widgetBuildDoc(srcHtml) {{
+                    return '<!DOCTYPE html><html><head><meta charset="utf-8">'
+                        + '<meta http-equiv="Content-Security-Policy" content=' + _WIDGET_CSP_JS + '>'
+                        + '<style>' + _WIDGET_BASE_CSS_JS + '</style></head><body>'
+                        + '<script>' + _WIDGET_PRELUDE_JS + '</scr' + 'ipt>'
+                        + _widgetStripShell(srcHtml)
+                        + '</body></html>';
+                }}
+                function _initOneWidget(node) {{
+                    if (!node || node.getAttribute('data-widget-ready') === '1') return;
+                    var b64 = node.getAttribute('data-widget-src');
+                    if (!b64) return;
+                    var src;
+                    try {{ src = _b64DecodeUtf8(b64); }} catch (e) {{ return; }}
+                    if (!src) return;
+                    node.setAttribute('data-widget-ready', '1');
+                    node.innerHTML = '';
+                    var f = document.createElement('iframe');
+                    f.setAttribute('sandbox', 'allow-scripts');
+                    f.setAttribute('scrolling', 'no');
+                    f.setAttribute('frameborder', '0');
+                    f.style.cssText = 'width:100%;height:120px;border:0;display:block;overflow:hidden;background:transparent;';
+                    f.onload = function () {{ _widgetPushVars(f.contentWindow); }};
+                    node.appendChild(f);
+                    try {{ f.setAttribute('srcdoc', _widgetBuildDoc(src)); }} catch (e) {{}}
+                }}
+                window._initWidgets = function () {{
+                    var nodes = document.querySelectorAll('.drifox-widget[data-widget-src]');
+                    for (var i = 0; i < nodes.length; i++) _initOneWidget(nodes[i]);
+                }};
+                window.addEventListener('message', function (e) {{
+                    var d = e && e.data;
+                    if (!d || !d.__drifoxWidget) return;
+                    var msg = d.p || {{}};
+                    var fs = document.querySelectorAll('.drifox-widget iframe'), i, f = null;
+                    for (i = 0; i < fs.length; i++) {{
+                        if (fs[i].contentWindow === e.source) {{ f = fs[i]; break; }}
+                    }}
+                    if (!f) return;
+                    if (msg.t === 'h') {{
+                        var h = parseInt(msg.v, 10) || 0;
+                        if (h > 0) f.style.height = Math.max(48, Math.min(1600, h)) + 'px';
+                        if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        return;
+                    }}
+                    if (msg.t !== 'call') return;
+                    var G = window.__WIDGET_GRANTS || {{}};
+                    function _reply(v) {{
+                        try {{ f.contentWindow.postMessage({{ __drifoxWidgetHost: 1, t: 'reply', id: msg.id, v: v }}, '*'); }} catch (err) {{}}
+                    }}
+                    if (msg.m === 'sendPrompt' && G.sendPrompt) {{
+                        console.log('pywebview_action:fence_prompt:' + _b64EncodeUtf8(String(msg.a || '')));
+                        _reply(true);
+                        return;
+                    }}
+                    if (msg.m === 'getTheme' && G.theme) {{
+                        _reply({{ isDark: !!window._CHART_IS_DARK, chartBg: window._CHART_BG, textColor: getComputedStyle(document.body).color, vars: _widgetHostVars() }});
+                        return;
+                    }}
+                    if (msg.m === 'storage.get' && G.storage) {{
+                        try {{ _reply(JSON.parse(sessionStorage.getItem('__fence_' + msg.a) || 'null')); }} catch (err) {{ _reply(null); }}
+                        return;
+                    }}
+                    if (msg.m === 'storage.set' && G.storage) {{
+                        try {{ sessionStorage.setItem('__fence_' + msg.a[0], JSON.stringify(msg.a[1])); }} catch (err) {{}}
+                        _reply(true);
+                        return;
+                    }}
+                    _reply(null);
+                }});
 
                 // 子智能体日志查看请求函数
                 window._requestSubAgentLog = function(taskIds) {{
@@ -10093,14 +10351,14 @@ class CodeWebViewer(QWebEngineView):
             self._resize_unlock_timer.start()
 
     def wheelEvent(self, event: QWheelEvent):
-        # 内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部
+        # 内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部。
+        # 转发外层滚动区走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
         try:
             scroll_area = self.parent().parent()._parent.chat_scroll_area
             if scroll_area:
                 vbar = scroll_area.verticalScrollBar()
-                if vbar and vbar.minimum() != vbar.maximum():
-                    delta = event.angleDelta().y()
-                    vbar.setValue(vbar.value() - wheel_delta_to_px(delta))
+                if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
+                    scroll_area.wheelEvent(event)
                     event.accept()
                     return
         except Exception:
@@ -10254,6 +10512,12 @@ class PlainTextViewer(QWidget):
         self.text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.text_edit.setLineWrapMode(QTextEdit.WidgetWidth)
         self._apply_text_style()
+        # 把 QTextEdit 内部滚轮劫持到 qfluentwidgets SmoothScroll 引擎——
+        # 与外层 chat_scroll_area（SingleDirectionScrollArea）走同款 400ms
+        # 插值、stepRatio 1.5、连滚加速。手感统一，消除"卡内跳、卡间滑"的异样。
+        # CodeWebViewer 的 Chromium 内部滚动是引擎边界（事件被子进程拦截），
+        # 维持原状，边界放行靠外层 MessageCard.wheelEvent 接管。
+        SmoothScrollDelegate(self.text_edit)
         layout.addWidget(self.text_edit)
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -10877,7 +11141,12 @@ def _fence_assets_for_skeleton() -> tuple:
 
     插件系统未就绪或任何异常都返回空表 —— 骨架构建不能被插件拖垮。
     """
-    empty = ("{}", "{}", ())
+    # 内置 fence（当前只有 ```widget）没有插件替它声明权限，在此兜底合入；
+    # 插件系统未就绪时也必须带上，否则 widget 桥会全空。
+    def _builtin_only() -> tuple:
+        return ("{}", _js_literal(_BUILTIN_FENCE_PERMS), ())
+
+    empty = _builtin_only()
     try:
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
@@ -10889,7 +11158,7 @@ def _fence_assets_for_skeleton() -> tuple:
         return empty
 
     assets: dict = {}
-    perms: dict = {}
+    perms: dict = {_lang: list(_ps) for _lang, _ps in _BUILTIN_FENCE_PERMS.items()}
     sig: list = []
     for lang in sorted(renderers):
         info = renderers[lang]
@@ -13062,13 +13331,14 @@ class MessageCard(SimpleCardWidget):
 
     def wheelEvent(self, event: QWheelEvent):
         # MessageCard 的 wheelEvent 仅在子 widget（viewer）未消费事件时被调用。
-        # 此时说明内部没有可滚动内容，或内部已达边界 → 直接转发到外部。
+        # 此时说明内部没有可滚动内容，或内部已达边界 → 转发外层滚动区，
+        # 走 qfluentwidgets SmoothScroll，与卡片间隙滚动同款平滑手感。
         try:
             scroll_area = self._parent.chat_scroll_area
             if scroll_area:
                 vbar = scroll_area.verticalScrollBar()
                 if vbar and vbar.minimum() != vbar.maximum() and event.angleDelta().y() != 0:
-                    vbar.setValue(vbar.value() - wheel_delta_to_px(event.angleDelta().y()))
+                    scroll_area.wheelEvent(event)
                     event.accept()
                     return
         except Exception:

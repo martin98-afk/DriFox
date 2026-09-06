@@ -9,6 +9,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -456,6 +457,9 @@ class UIPluginRegistry:
         # 条目按 plugin_name 作用域：仅被同插件的 load_plugin 消费——插件删除路径
         # （standalone unload，无后续 load）的过期条目不会泄漏给其他插件的加载。
         self._pending_card_restore: list[tuple[str, str, str]] = []
+        # P2-2：UI 目录 mtime 签名（静默写入兑底轮询用）
+        self._ui_signatures: dict = {}
+        self._signature_watch_started = False
         # ── Tab 模式浮动卡片按标签页隔离（per-tab 可见集合）──
         # 卡片 widget 单实例挂 TabManagerWindow 全局容器；CardManager 的
         # GLOBAL 可见记录是「当前活跃标签页可见集合」的投影。切换标签时按
@@ -496,8 +500,18 @@ class UIPluginRegistry:
             priority: 优先级（同 type_name 时高者覆盖低者）
             metadata: 附加元数据
         """
+        from loguru import logger
+
         if metadata is None:
             metadata = {}
+        # P2-1：UI 回调 watchdog 包装（单次/滑窗超时 degrade → 连续熔断停用；
+        # 重新注册即重置计数=修复恢复语义）
+        try:
+            from app.core.ui_callback_watchdog import wrap_ui_callback
+
+            render_func = wrap_ui_callback(plugin_name, f"content:{type_name}", render_func)
+        except Exception:
+            pass
         info = ContentRendererInfo(
             plugin_name=plugin_name,
             type_name=type_name,
@@ -509,6 +523,12 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             # 低优先级注册被忽略
             return
+        if existing is not None and existing.plugin_name != plugin_name:
+            logger.warning(
+                f"[UIPluginRegistry] content renderer '{type_name}' 被插件 {plugin_name!r} 覆盖"
+                f"（原注册方: {existing.plugin_name!r}, "
+                f"priority {existing.priority} -> {priority}）"
+            )
         self._content_renderers[type_name] = info
 
     def register_tag_renderer(
@@ -531,11 +551,20 @@ class UIPluginRegistry:
             priority: 优先级（同 tag_name 时高者覆盖低者）
             metadata: 附加元数据
         """
+        from loguru import logger
+
         if metadata is None:
             metadata = {}
         key = tag_name.strip().lower()
         if not key or not re.fullmatch(r"[a-z0-9_-]+", key):
             raise ValueError(f"invalid tag_name {tag_name!r}: must match [a-z0-9_-]+")
+        # P2-1：UI 回调 watchdog 包装（同 content renderer 口径）
+        try:
+            from app.core.ui_callback_watchdog import wrap_ui_callback
+
+            render_func = wrap_ui_callback(plugin_name, f"tag:{key}", render_func)
+        except Exception:
+            pass
         info = TagRendererInfo(
             plugin_name=plugin_name,
             tag_name=key,
@@ -547,11 +576,22 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             # 低优先级注册被忽略
             return
+        if existing is not None and existing.plugin_name != plugin_name:
+            logger.warning(
+                f"[UIPluginRegistry] tag '{key}' 被插件 {plugin_name!r} 覆盖"
+                f"（原注册方: {existing.plugin_name!r}, "
+                f"priority {existing.priority} -> {priority}）"
+            )
         self._tag_renderers[key] = info
 
     # fence 渲染器：允许的资源键与桥权限白名单
     FENCE_ASSET_KEYS = ("js", "css")
     FENCE_BRIDGE_PERMISSIONS = ("theme", "sendPrompt", "storage")
+    # 内置 fence 保留名：这些 lang 在宿主渲染链中位于插件查询之后
+    # （见 widgets/message_card.py 的 _render_code_block），一旦被插件注册，
+    # 内置实现将永久失效 —— 插件可据此劫持全应用图表/HTML/SVG 渲染。
+    # 注册表侧此前只校验 lang 字符正则，未落实该约束，此处补齐。
+    RESERVED_FENCE_LANGS = frozenset({"echarts", "mermaid", "svg", "html", "widget"})
     # 单个 asset 文件上限（设计稿 §3 防呆）。插件合计上限由宿主注入时控。
     FENCE_ASSET_MAX_BYTES = 2 * 1024 * 1024
 
@@ -571,7 +611,7 @@ class UIPluginRegistry:
         Args:
             plugin_name: 所属插件名
             lang: fence 语言标记（自动转小写）。与宿主内置 echarts / mermaid /
-                  svg / html 同名时内置优先，插件不会覆盖内置行为。
+                  svg / html / widget 同名时内置优先，插件不会覆盖内置行为。
             render_func: (code, ctx) -> HTML 片段，须为纯函数（后台渲染线程调用）
             streaming_placeholder: 流式半截 fence 的占位（str 或 callable），
                            缺省用宿主的通用图表骨架
@@ -590,6 +630,11 @@ class UIPluginRegistry:
         key = lang.strip().lower()
         if not key or not re.fullmatch(r"[a-z0-9_+.-]+", key):
             raise ValueError(f"invalid fence lang {lang!r}: must match [a-z0-9_+.-]+")
+        if key in self.RESERVED_FENCE_LANGS:
+            raise ValueError(
+                f"fence lang {key!r} 为宿主内置保留名，插件不可注册"
+                f"（保留名: {sorted(self.RESERVED_FENCE_LANGS)}）"
+            )
 
         safe_assets: Dict[str, str] = {}
         for akey, apath in (assets or {}).items():
@@ -1942,6 +1987,33 @@ class UIPluginRegistry:
             if spec is None or spec.loader is None:
                 logger.error(f"[UIPluginRegistry] Failed to load spec for {plugin_name}")
                 return False
+            # A1：exec 前 AST 安全网——ui loader 原先全裸奔（恶意模块级代码在
+            # exec 时已执行，事后 getattr 检查为时已晚）。此处拒绝 sys.modules
+            # 污染 + 强制 register_ui 入口，拒载语义与 tool/runtime loader 对齐。
+            try:
+                ui_source = ui_init.read_text(encoding="utf-8")
+            except OSError as e:
+                logger.error(f"[UIPluginRegistry] 读取 {ui_init} 失败: {e}")
+                return False
+            from app.plugins.contracts.manifest_schema import read_manifest_module_prefixes
+            from app.plugins.loaders._ast_guard import guard_plugin_module
+
+            # 声明式放行：插件在 plugin.json 的 module_prefixes 里声明自有模块命名空间后，
+            # 允许其按文件路径 importlib 注册共享模块（assistant_hub 的 assistant_hub_manager
+            # 属此类）。未声明 → 任何 sys.modules 写入仍拒载（默认最严）。
+            if not guard_plugin_module(
+                ui_source,
+                ui_init,
+                require_register=True,
+                component="UIPluginRegistry",
+                entry_names=("register_ui",),
+                allowed_sys_modules=read_manifest_module_prefixes(plugin_path),
+                plugin_dir=plugin_path,
+            ):
+                logger.error(
+                    f"[UIPluginRegistry] 插件 {plugin_name} ui/__init__.py 未通过 AST 安全网，拒载: {ui_init}"
+                )
+                return False
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
@@ -1958,6 +2030,11 @@ class UIPluginRegistry:
             register_func(self)
             self._loaded_plugins.add(plugin_name)
             logger.info(f"[UIPluginRegistry] Loaded UI components for plugin: {plugin_name}")
+            # P2-2：记录 ui/ 目录 mtime 签名（静默写入兑底轮询基准）
+            try:
+                self._ui_signatures[plugin_name] = self._compute_ui_signature(plugin_path)
+            except Exception:
+                pass
             after_tabs = {k for k, v in self._welcome_tabs.items() if v.plugin_name == plugin_name}
             if before_tabs or after_tabs:
                 self._schedule_welcome_refresh()
@@ -1976,7 +2053,10 @@ class UIPluginRegistry:
             return True
         except Exception as e:
             logger.error(f"[UIPluginRegistry] Failed to load UI for {plugin_name}: {e}")
-            # 回滚：恢复旧模块与旧注册，保持插件上一版本状态可用
+            # P4：回滚——恢复旧模块与旧注册，保持插件上一版本状态可用。
+            # 目标场景：插件文件短暂语法错误时已加载的工作树页等 UI 不消失，
+            # 修好后下次重载自动恢复。回滚失败时也至少保 _loaded_plugins + sys.modules，
+            # 避免旧 module 被彻底从 Python 命名空间抹掉（下一次重载可继续尝试）。
             if old_module is not None:
                 try:
                     import sys as _sys_rollback
@@ -1988,7 +2068,26 @@ class UIPluginRegistry:
                     self._loaded_plugins.add(plugin_name)
                     logger.warning(f"[UIPluginRegistry] 已回滚 {plugin_name} 至上一版本 UI 注册")
                 except Exception as re:
-                    logger.error(f"[UIPluginRegistry] 回滚失败 {plugin_name}: {re}")
+                    # 回滚也失败：保底——把旧 module 装回 sys.modules + 标记已加载，
+                    # 注册表项可能为空（旧 register_ui 不可用），但不出现「黑洞」状态。
+                    try:
+                        import sys as _sys_fallback
+                        _sys_fallback.modules[module_name] = old_module
+                    except Exception:
+                        pass
+                    self._loaded_plugins.add(plugin_name)
+                    logger.error(
+                        f"[UIPluginRegistry] 回滚失败 {plugin_name}（{re}），"
+                        f"已保底保留旧 module 引用与 _loaded_plugins 标记，"
+                        f"待下次重载或用户手动重启用恢复"
+                    )
+            else:
+                # 首次加载就失败且无旧 module——记录在 _loaded_plugins 中阻止重入黑洞
+                # （reload_plugin / 后续 load_plugin 重入会再走原逻辑）
+                logger.warning(
+                    f"[UIPluginRegistry] {plugin_name} 首次加载失败且无旧版本可回滚，"
+                    f"用户修复文件后下次 watchfiles 重载将自动重试"
+                )
             return False
 
     def reload_plugin(self, plugin_name: str, plugin_path) -> bool:
@@ -2086,7 +2185,7 @@ class UIPluginRegistry:
                     if not was_visible and cm is not None:
                         try:
                             was_visible = cm.is_card_visible(cid, win_id)
-                        except RuntimeError, AttributeError:
+                        except (RuntimeError, AttributeError):
                             was_visible = False
                     self._remove_widget_from_container(win_id, cid, widget)
                     # 显式销毁旧实例：_remove_widget_from_container 仅 UI 清理不触发删除，
@@ -2130,6 +2229,65 @@ class UIPluginRegistry:
         if had_welcome_tabs:
             self._schedule_welcome_refresh()
         return True
+
+    # ── P2-2：热重载 last-known-good——静默写入兜底轮询 ──────────────
+
+    @staticmethod
+    def _compute_ui_signature(plugin_path) -> float:
+        """ui/ 目录 mtime 签名（全部文件 mtime 最大值；目录不存在返回 -1）。"""
+        ui_dir = Path(plugin_path) / "ui"
+        if not ui_dir.is_dir():
+            return -1.0
+        latest = -1.0
+        for f in ui_dir.rglob("*"):
+            if f.is_file():
+                try:
+                    latest = max(latest, f.stat().st_mtime)
+                except OSError:
+                    continue
+        return latest
+
+    def poll_silent_ui_changes(self) -> list:
+        """比对 ui/ 目录 mtime 签名，静默写入（错过 watchfiles 事件）触发重载。
+
+        重载复用 load_plugin（失败走既有回滚恢复旧注册，即 last-known-good）。
+        Returns: 本轮触发重载的插件名列表。
+        """
+        from loguru import logger
+
+        reloaded: list = []
+        for name, sig in list(self._ui_signatures.items()):
+            plugin = self._plugin_paths.get(name)
+            if not plugin:
+                continue
+            current = self._compute_ui_signature(Path(plugin))
+            if current == sig:
+                continue
+            logger.warning(
+                f"[UIPluginRegistry] 插件 '{name}' ui 目录签名变化（静默写入兜底触发重载）"
+            )
+            ok = self.reload_plugin(name, Path(plugin))
+            if ok:
+                reloaded.append(name)
+            self._ui_signatures[name] = self._compute_ui_signature(Path(plugin))
+        return reloaded
+
+    def start_signature_watch(self, interval: float = 30.0) -> None:
+        """启动 30s 空闲周期签名轮询（QTimer，须在主线程调用；幂等）。"""
+        if self._signature_watch_started:
+            return
+        try:
+            from PyQt5.QtCore import QTimer
+
+            self._signature_watch_started = True
+            timer = QTimer()
+            timer.timeout.connect(self.poll_silent_ui_changes)
+            timer.start(int(interval * 1000))
+            self._signature_timer = timer
+            logger.info(f"[UIPluginRegistry] UI 签名轮询已启动（{interval:.0f}s）")
+        except Exception as e:
+            self._signature_watch_started = False
+            logger.debug(f"[UIPluginRegistry] UI 签名轮询启动失败（无 Qt 环境？）: {e}")
 
     def _schedule_welcome_refresh(self) -> None:
         """延迟合并欢迎卡片刷新（debounce）

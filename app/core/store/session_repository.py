@@ -13,6 +13,50 @@ from loguru import logger
 
 from app.core.store.serde import deserialize, serialize
 
+# 落库时 first_user_msg 的存储上限。团队首问预览只取前 50 字符，留 500 是为了
+# 将来 UI 需要更长预览时不必重新回扫 messages BLOB。
+FIRST_USER_MSG_STORE_LIMIT = 500
+
+
+def extract_first_user_question(messages: Optional[List]) -> Tuple[str, str]:
+    """从消息列表中提取首条「真实用户提问」（团队首问语义）。
+
+    筛选规则与 HistoryManager.get_team_first_question 严格一致：
+    - 跳过带 _hook_event 的系统消息
+    - 跳过 role != user
+    - content 为 list 时用 content_to_text 转换
+    - 跳过空 content
+    - 跳过 "📨 **来自" 开头的任务邮件注入（兼容无 _hook_event 标记的旧数据）
+
+    Args:
+        messages: 会话消息列表
+
+    Returns:
+        (timestamp, content)；无有效提问时返回 ("", "")。
+        content 已按 FIRST_USER_MSG_STORE_LIMIT 截断。
+    """
+    if not messages:
+        return "", ""
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("_hook_event"):
+            continue
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            from app.core.message_content import content_to_text
+
+            content = content_to_text(content)
+        if not content:
+            continue
+        content = str(content)
+        if content.startswith("📨 **来自"):
+            continue
+        return str(msg.get("timestamp") or ""), content[:FIRST_USER_MSG_STORE_LIMIT]
+    return "", ""
+
 
 class SessionRepository:
     """会话数据仓储，处理会话的 CRUD 操作"""
@@ -190,6 +234,9 @@ class SessionRepository:
                 # 团队成员快照透传（F3）：JSON 字符串，非团队会话保持空串
                 "team_members": session.get("team_members", "") or "",
             }
+            # 首问落库（T4 内存治理）：随保存增量写入，使团队合并条目的预览
+            # 查询无需反序列化完整 messages（旧路径 246 条约 285MB 常驻）。
+            session_data["first_user_ts"], session_data["first_user_msg"] = extract_first_user_question(messages)
 
             success, result = self._execute(
                 f"""
@@ -199,10 +246,12 @@ class SessionRepository:
                  worktree_path, preview, context_usage,
                  last_api_prompt_tokens, last_api_message_count,
                  team_run_id, team_name, agent_name, team_members,
+                 first_user_msg, first_user_ts,
                  created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
+                    ?, ?,
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
             """,
@@ -225,6 +274,8 @@ class SessionRepository:
                     session_data["team_name"],
                     session_data["agent_name"],
                     session_data["team_members"],
+                    session_data["first_user_msg"],
+                    session_data["first_user_ts"],
                     session_id,  # for coalesce
                     now,  # created_at default
                     now,  # updated_at
@@ -323,7 +374,10 @@ class SessionRepository:
             # 🚀 只选轻量列表展示所需的字段，跳过 compaction_state/cache
             # 等重量级 BLOB 列，减少 SQLite I/O 和传输开销。
             success, rows = self._execute(
-                f"SELECT session_id, title, project, system_prompt, "
+                # 内存优化：不再 SELECT system_prompt。该列均值约 10KB/条，
+                # 5000 条常驻内存约 50MB，而会话列表渲染完全用不到它。
+                # 需要时通过 get_system_prompt(session_id) 单列回查。
+                f"SELECT session_id, title, project, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
                 f"team_run_id, team_name, agent_name, team_members "
@@ -336,6 +390,27 @@ class SessionRepository:
         except Exception as e:
             logger.error(f"[SessionRepository] get_all_lightweight 异常: {e}")
             return []
+
+    def get_system_prompt(self, session_id: str) -> str:
+        """单列取 system_prompt（轻量列表不再 SELECT 该列后的按需回查入口）。
+
+        Returns:
+            该会话的 system_prompt；会话不存在或查询失败返回空串。
+        """
+        if not self.is_initialized or not session_id:
+            return ""
+        try:
+            success, rows = self._execute(
+                f"SELECT system_prompt FROM {self.TABLE_NAME} WHERE session_id = ?",
+                (session_id,),
+            )
+            if success and rows:
+                row = rows[0]
+                val = row["system_prompt"] if hasattr(row, "keys") else row[0]
+                return val or ""
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_system_prompt 异常: {e}")
+        return ""
 
     def _row_to_session_lightweight(self, row) -> Dict:
         """将数据库行转换为不含 messages 的轻量会话字典"""
@@ -360,7 +435,9 @@ class SessionRepository:
             "topic_summary": raw_title,
             "project": d.get("project", "默认项目"),
             "messages": [],  # 懒加载：不在启动时加载
-            "system_prompt": d.get("system_prompt", ""),
+            # 未 SELECT 该列时为 None —— 哨兵表示"未加载"，区别于真实空串。
+            # 消费方（HistoryManager）据此决定是否需要回查，不可当成空值写回。
+            "system_prompt": d.get("system_prompt"),
             "compaction_state": {},
             "compaction_cache": {},
             "message_count": d.get("message_count", 0),
@@ -425,6 +502,42 @@ class SessionRepository:
             return []
         except Exception as e:
             logger.error(f"[SessionRepository] get_by_team_run_id 异常: {e}")
+            return []
+
+    def get_team_first_question_candidates(self, run_id: str) -> List[Tuple[str, str]]:
+        """取该 run 下所有会话已落库的首问候选（纯字符串，零反序列化）。
+
+        团队合并条目的预览只需要「时间戳最早的那条 user 消息」，完全不必翻开
+        messages BLOB。候选按 updated_at DESC 返回，与 get_by_team_run_id 的
+        遍历顺序一致，保证旧实现「时间戳并列时保留首个」的语义可复现。
+
+        Returns:
+            [(timestamp, content), ...]；无候选时为空列表
+        """
+        if not self.is_initialized or not run_id:
+            return []
+        try:
+            success, rows = self._execute(
+                f"SELECT first_user_ts, first_user_msg FROM {self.TABLE_NAME} "
+                f"WHERE team_run_id = ? AND first_user_msg IS NOT NULL AND first_user_msg != '' "
+                f"ORDER BY updated_at DESC",
+                (run_id,),
+            )
+            if not success:
+                return []
+            out: List[Tuple[str, str]] = []
+            for row in rows or []:
+                try:
+                    if hasattr(row, "keys"):
+                        ts, msg = row["first_user_ts"], row["first_user_msg"]
+                    else:
+                        ts, msg = row[0], row[1]
+                except Exception:
+                    continue
+                out.append((str(ts or ""), str(msg or "")))
+            return out
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_team_first_question_candidates 异常: {e}")
             return []
 
     def get_projects(self) -> List[str]:

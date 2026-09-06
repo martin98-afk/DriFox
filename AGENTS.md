@@ -21,6 +21,14 @@ pytest tests/ -m perf                  # 仅性能基准
 - **打包**：`python build.py`（Win+Linux）；mac 额外需 `dmgbuild`+`Pillow`
 - **pytest markers**：`perf`（基准）、`stress`（稳定性）；`asyncio_mode=auto`
 
+### 行尾（EOL）纪律 —— 提交前必查
+- Windows 上 `open(p, "w")` 会把 `\n` 静默转成 `\r\n`。patch 脚本一次误写 = 整文件行尾翻转 = 声明改动上千行、实质改动几十行，真实 diff 被淹没且 blame 全毁（2026-09-06 一次评审连中 3 个文件）。
+- **写文件一律用** `tools/eol_guard.py` 的 `write_text_keep_eol(path, text)`（内部 `newline=""`，保持原行尾）。禁止裸 `open(p, "w")` 写源码。
+- **提交前**：`python tools/eol_guard.py check`（或 `--cached`）。`scripts/hooks/pre-commit` 已自动拦截（阈值：噪声占比 ≥80% 且改动 ≥20 行）；确属整文件重写时用 `git commit --no-verify`。
+- 钩子安装：`git config core.hooksPath scripts/hooks`（每个克隆执行一次）。
+- 误翻转修复：`python tools/eol_guard.py fix <file>`（按 HEAD 版本风格还原，保留内容改动）。
+- **全仓归一化**：`python tools/eol_guard.py normalize --eol lf`（默认 dry-run，`--apply` 落地）。当前 1324 个文本文件中 717 个待转 —— 属破坏性大动作，须在无并行改动的窗口期单独提交。
+
 ## 3. 目录结构
 | 目录 | 职责 |
 |---|---|

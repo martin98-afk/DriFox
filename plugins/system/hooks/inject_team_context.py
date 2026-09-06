@@ -64,11 +64,25 @@ def hook(event: str, context: dict) -> str:
     if not context.get("is_team_member"):
         return ""
 
+    window_id = context.get("window_id", "") or ""
+
     try:
         from app.core.team_manager import TeamManager
 
         tm = TeamManager.get_instance()
-        template = tm.get_template()
+        # 🛡️ M1'：按成员所属 run_id 读专属模板槽（templates_by_run_id），
+        # 避免多团队并存时顶层 template 单槽被后加载团队互相覆盖
+        # （症状：default-team 成员被注入别的团队描述）。
+        # getattr 回退：老测试 mock 未实现新方法时走旧 get_template。
+        run_id = ""
+        _run_getter = getattr(tm, "get_member_run_id", None)
+        if callable(_run_getter) and window_id:
+            run_id = _run_getter(window_id) or ""
+        _tpl_getter = getattr(tm, "get_template_for_run_id", None)
+        if callable(_tpl_getter) and run_id:
+            template = _tpl_getter(run_id)
+        else:
+            template = tm.get_template()
     except Exception:
         return ""
 
@@ -87,7 +101,6 @@ def hook(event: str, context: dict) -> str:
     parts.append(description)
 
     # 按成员各自注入：定位当前窗口的角色，附加其角色描述
-    window_id = context.get("window_id", "") or ""
     agent_name = _find_member_agent_name(tm, window_id)
     if agent_name:
         role_desc = _find_agent_description(template.get("agents"), agent_name)

@@ -102,6 +102,21 @@ class LspClient:
             )
             return False
 
+        # P1-3：启动门禁（审计 + shell 元字符拒启 + 非内置源确认流）
+        from app.core.mcp_lsp_safety import gate_server_launch
+
+        verdict = gate_server_launch(
+            "lsp",
+            self.config.plugin_name,
+            self.config.name,
+            [self.config.command] + list(self.config.args or []),
+        )
+        if verdict != "proceed":
+            logger.warning(
+                f"[LspClient:{self.config.name}] 启动被安全门禁拦截（{verdict}）"
+            )
+            return False
+
         try:
             self._client = JsonRPCClient()
 

@@ -1128,25 +1128,23 @@ def _prune_tool_content_for_api(content: str) -> str:
 def _resolve_serializer():
     """经 SerializerRegistry 解析默认序列化器（id="openai"）。
 
-    冷启动防御（同 chat_worker._adapter_flags）：注册表为空时幂等触发
-    系统插件扫描再重试；仍为空才抛错（真实配置错误）。函数体内 import
+    冷启动防御（P3 修正）：resolve 已改为永不抛错（空时降级内置 passthrough），
+    无法再靠 except RuntimeError 驱动冷启动重载。故这里前置探测：registry 空
+    则幂等触发系统插件扫描再取，确保真实环境拿到 openai serializer 而非
+    passthrough（passthrough 不做协议特判，特性会丢）。函数体内 import
     注册表，避免与 app/core/__init__.py LazyLoader 循环导入。
     """
     from app.plugins.registries.serializer_registry import SerializerRegistry
 
     registry = SerializerRegistry.get_instance()
-    try:
-        return registry.resolve()
-    except RuntimeError:
-        if registry.serializers():
-            raise
+    if not registry.serializers():
         try:
             from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
             warmup_runtime_components()
         except Exception:
             pass
-        return registry.resolve()
+    return registry.resolve()
 
 
 def _default_ctx(supports_vision: bool = True, is_gemini: bool = False, requires_reasoning_content: bool = False):

@@ -468,7 +468,7 @@ class _AddWorktreeRow(QWidget):
         layout.addStretch()
 
     def _on_add(self):
-        from app.widgets.cards.settings.memory_card import SingleInputDialog
+        from app.widgets.common_dialogs import SingleInputDialog
 
         # 注意：parent 必须传顶层窗口（self.window()）。
         # 如果传 self（_AddWorktreeRow，24px 高），MaskDialogBase 会把

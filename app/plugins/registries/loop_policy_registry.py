@@ -66,7 +66,17 @@ class LoopPolicyRegistry:
                     _SCOPE_DEFAULTS[SCOPE_MAIN]
                 )
         if item is None:
-            raise RuntimeError(f"未加载任何 LoopPolicy 插件（scope={scope}），请确认 system 插件已启用")
+            # P3 兜底：无任何 LoopPolicy 插件（system 整体被禁/加载失败）→ 返回内置最简策略 + warning
+            # 行为对齐 DefaultLoopPolicy 子集：tool_calls_found → CONTINUE；其余 STOP。
+            # 无限 max_rounds（与现状 while 无上限一致）。
+            from loguru import logger
+            from app.plugins.registries._builtin_fallback import BuiltInDefaultLoopPolicy
+
+            logger.warning(
+                f"[LoopPolicyRegistry] 未加载任何 LoopPolicy 插件（scope={scope}），"
+                f"降级使用内置兜底策略"
+            )
+            return BuiltInDefaultLoopPolicy()
         return item[0]
 
     def policies(self, scope: Optional[str] = None) -> Dict[str, LoopPolicy]:

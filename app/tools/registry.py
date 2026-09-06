@@ -214,9 +214,34 @@ class ToolRegistry:
         if danger not in (DANGER_SAFE, DANGER_DANGEROUS):
             logger.warning(f"[ToolRegistry] 工具 {name} danger 非法值 {danger!r}，拒绝注册")
             return False
+        # A3：schema 规范化（warning 不拒载）——在副本上改，不污染调用方数据；
+        # function.name 必须等于注册名、parameters 必须为 object、description 上限 2KB。
+        safe_schema = copy.deepcopy(schema) if isinstance(schema, dict) else schema
+        if isinstance(safe_schema, dict):
+            fn = safe_schema.get("function")
+            if isinstance(fn, dict):
+                if fn.get("name") is not None and fn.get("name") != name:
+                    logger.warning(
+                        f"[ToolRegistry] [SchemaGuard] 工具 {name} function.name={fn.get('name')!r} "
+                        f"与注册名不一致，已剔除修正为注册名"
+                    )
+                    fn["name"] = name
+                params = fn.get("parameters")
+                if not isinstance(params, dict) or params.get("type") != "object":
+                    logger.warning(
+                        f"[ToolRegistry] [SchemaGuard] 工具 {name} parameters 缺失或非 object，"
+                        f"已剔除并置为空 object schema"
+                    )
+                    fn["parameters"] = {"type": "object", "properties": {}}
+                desc = fn.get("description")
+                if isinstance(desc, str) and len(desc) > 2048:
+                    logger.warning(
+                        f"[ToolRegistry] [SchemaGuard] 工具 {name} description 长度 {len(desc)} 超 2KB，已截断"
+                    )
+                    fn["description"] = desc[:2048]
         reg = ToolRegistration(
             name=name,
-            schema=copy.deepcopy(schema),
+            schema=safe_schema,
             impl=impl,
             danger=danger,
             icon=icon or DEFAULT_FALLBACK_ICON,

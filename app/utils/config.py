@@ -439,6 +439,26 @@ class Settings(QConfig):
     # 组件级禁用（D9）：["plugin:component", ...]，如 "calendar:hooks"
     disabled_plugin_components = ConfigItem("Plugin", "DisabledComponents", [])
 
+    # ========== Hook 安全配置（A2） ==========
+    # python hook「标准路径」白名单扩展（叠加在内置基座 app.hooks/app.utils 之上）
+    safe_python_modules = ConfigItem("Hooks", "SafePythonModules", [])
+    # http hook 是否放行私网地址（默认拦截 127/8、10/8、172.16/12、192.168/16、169.254/16、::1）
+    hook_allow_private_network = ConfigItem("Hooks", "AllowPrivateNetwork", False, BoolValidator())
+
+    # ========== 插件市场安全配置（C1） ==========
+    # 市场源 url 类型允许的 git host 扩展（叠加在内置 github/gitlab/gitee/bitbucket/gitcode 之上，
+    # 内网 git 源显式加白用）
+    marketplace_allowed_git_hosts = ConfigItem("Marketplace", "AllowedGitHosts", [])
+
+    # ========== 插件覆盖策略（同名覆盖显性化） ==========
+    # false 时用户目录同名插件跳过、系统版生效；默认 true 保 junction 部署工作流
+    allow_user_override = ConfigItem("Plugin", "AllowUserOverride", True, BoolValidator())
+
+    # ========== MCP/LSP 启动确认白名单（P1-3） ==========
+    # 键格式 "<kind>:<plugin>:<server>"（如 "mcp:user-custom:fetch"），
+    # 用户对非内置源 server 首次启动点「允许」后写入；拒绝仅本会话生效不落盘
+    confirmed_plugin_servers = ConfigItem("Plugin", "ConfirmedPluginServers", [])
+
     # ========== Gateway 通讯平台配置 ==========
     # 企业微信
     gateway_wecom_enabled = ConfigItem("Gateway", "WeCom/Enabled", False, BoolValidator())

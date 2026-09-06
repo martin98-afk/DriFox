@@ -19,12 +19,12 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
+from qfluentwidgets import ScrollArea
 from app.core.command_manager import CommandManager, CommandParameter, CommandType
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
@@ -800,6 +800,7 @@ class CommandCard(QWidget):
         self._selected_param_index: int = -1  # 参数列表选中索引
         self._value_selection_mode: bool = False  # 是否处于值选择模式
         self._value_selection_param: str = ""  # 值选择对应的参数名（如 "--model="）
+        self._value_just_selected_param: str = ""  # 刚通过枚举选中退出的参数名（防抖回声抑制标记）
         self._value_widgets: List[QWidget] = []  # 值选择列表项
         self._selected_value_index: int = -1  # 值列表选中索引
         self._last_selected_value_index: int = -1  # 上次值列表选中索引，用于增量更新
@@ -841,9 +842,9 @@ class CommandCard(QWidget):
         self._resize_recompute_timer: Optional[QTimer] = None  # 窗口 resize 防抖重算
 
         # 滚动区域
-        self._scroll_area = QScrollArea(self)
+        self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
-        self._scroll_area.setFrameShape(QScrollArea.NoFrame)
+        self._scroll_area.setFrameShape(ScrollArea.NoFrame)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         Colors.refresh()
@@ -906,7 +907,7 @@ class CommandCard(QWidget):
             }}
         """)
 
-    def _apply_scroll_area_styles(self, scroll_area: "QScrollArea"):
+    def _apply_scroll_area_styles(self, scroll_area: "ScrollArea"):
         """应用列表/参数/值三个滚动区的统一样式（滚动条 + viewport）
 
         Args:
@@ -1007,7 +1008,7 @@ class CommandCard(QWidget):
         self._apply_detail_positional_hint_style()
 
         # 参数列表滚动区（有 parameters 时显示）
-        self._detail_params_scroll = QScrollArea()
+        self._detail_params_scroll = ScrollArea()
         self._detail_params_scroll.setWidgetResizable(True)
         self._detail_params_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._detail_params_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1023,7 +1024,7 @@ class CommandCard(QWidget):
         detail_layout.addWidget(self._detail_params_scroll)
 
         # 值选择列表滚动区（--model= 展开时显示）
-        self._detail_value_scroll = QScrollArea()
+        self._detail_value_scroll = ScrollArea()
         self._detail_value_scroll.setWidgetResizable(True)
         self._detail_value_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._detail_value_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1885,12 +1886,14 @@ class CommandCard(QWidget):
         self._detail_params_scroll.setVisible(False)
         self._detail_value_scroll.setVisible(True)
 
+        # 先重算高度再更新选中：_update_value_selection → _update_desc_tooltip
+        # 会按当前卡片几何定位悬浮描述气泡，若高度未更新，气泡锚定在旧顶边，
+        # 卡片随后变矮时气泡悬在旧位置（枚举描述悬浮窗位置不更新 bug）
+        self._adjust_detail_height()
+
         # 选中第一项
         self._selected_value_index = 0 if self._value_widgets else -1
         self._update_value_selection()
-
-        # 重算高度
-        self._adjust_detail_height()
 
     # ---- 自动检测 --model 触发值选择 / 实时搜索 ----
 
@@ -1947,6 +1950,16 @@ class CommandCard(QWidget):
         if self._value_selection_mode and self._value_selection_param == target_widget.param_name:
             self._refresh_value_list(query)
             return
+
+        # 3.5 选择完成回声抑制：程序化选择退出值选择模式后的首次防抖同步
+        # 会带完整值再次命中同一参数；用户 100ms 内不可能有物理编辑，
+        # 视为回声直接跳过，不再弹回枚举列表。参数不同（用户已切到别的参数）
+        # 则清除标记正常放行。
+        echo_param = self._value_just_selected_param
+        if echo_param:
+            self._value_just_selected_param = ""
+            if target_widget.param_name == echo_param:
+                return
 
         # 4. 切到值选择模式
         self._switch_to_value_selection(target_widget, query=query)
@@ -2042,11 +2055,25 @@ class CommandCard(QWidget):
         if sender is None:
             return
         self.parameterValueSelected.emit(sender.value)
-        # 回退到参数列表模式
-        self._exit_value_selection()
+        # 回退到参数列表模式（标记为选择完成，抑制防抖回声重入）
+        self._exit_value_selection(mark_selected=True)
 
-    def _exit_value_selection(self):
-        """退出值选择模式，回到参数列表"""
+    def _exit_value_selection(self, mark_selected: bool = False):
+        """退出值选择模式，回到参数列表
+
+        Args:
+            mark_selected: True 表示本次退出源于用户完成枚举选择（Tab/Enter/点击），
+                记录参数名用于抑制防抖回声重入；False 表示参数被删/光标离开等
+                情境退出，不得打标（否则用户删值重新输入时列表会被误抑制）。
+        """
+        if mark_selected:
+            # 选择（Tab/Enter/点击）会同步插入完整值+空格并触发 textChanged →
+            # 100ms 防抖 → _sync_detail_params → _auto_switch_to_value_selection。
+            # 此时行尾空格不算"已离开"，--load= 仍会命中并重新弹回值选择模式，
+            # 枚举描述气泡随之重新显示在旧几何位置（悬在聊天区中间）。
+            # 用户 100ms 内不可能有物理编辑，该次重入纯属程序回声，见
+            # _auto_switch_to_value_selection 的回声抑制分支。
+            self._value_just_selected_param = self._value_selection_param
         self._value_selection_mode = False
         self._value_selection_param = ""
         self._detail_value_scroll.setVisible(False)
@@ -2304,6 +2331,7 @@ class CommandCard(QWidget):
         self._detail_has_params = False
         self._value_selection_mode = False
         self._value_selection_param = ""
+        self._value_just_selected_param = ""
         self._selected_param_index = -1
         self._selected_value_index = -1
         self._last_selected_value_index = -1
@@ -2936,7 +2964,7 @@ class CommandCard(QWidget):
                 widget = self._value_widgets[self._selected_value_index]
                 if widget.value:
                     self.parameterValueSelected.emit(widget.value)
-                    self._exit_value_selection()
+                    self._exit_value_selection(mark_selected=True)
             return
         if self._detail_mode and self._detail_has_params:
             # 参数列表模式：选中当前高亮的参数（仅当可见时）

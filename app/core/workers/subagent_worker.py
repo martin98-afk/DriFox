@@ -2143,6 +2143,72 @@ class SubAgentManager(QObject):
         """获取指定任务的执行结果"""
         return self._finished_tasks.get(task_id, {"result": "", "error": ""})
 
+    def mark_task_finished(self, task_id: str, result: str, error: str = "") -> Dict:
+        """任务完成归档：写入内存 _finished_tasks，并把数据库状态推进到 finished。
+
+        数据库在运行期间由 executor 实时日志回调持续写 running 状态；本方法是
+        正常完成路径上唯一把 DB 推进到 finished 的入口。若缺失，get_task_logs
+        查库命中 running 即返回，会话卡片（SubAgentSessionCard）会永远显示
+        「执行中」，工具数/耗时冻结在最后一条日志时刻。
+
+        Returns:
+            Dict: {agent_name, task_description, session_id} 供批次汇总/流式注入使用
+        """
+        executor = self._running_tasks.pop(task_id, None)
+        if executor is not None:
+            agent_name = executor.agent_name
+            task_description = executor.task_description
+            task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
+            logs = executor.get_logs()
+            summary = executor.get_summary()
+            final_error = error or ""
+        else:
+            # executor 已被其他路径归档（get_finished_tasks / DAG 提前删除），
+            # 从已有条目恢复字段；条目可能已带更准的 error（如 DAG 跳过信息），不覆盖
+            existing = self._finished_tasks.get(task_id, {})
+            agent_name = existing.get("agent_name", "")
+            task_description = existing.get("task_description", "")
+            task_session_id = existing.get("session_id", "")
+            logs = existing.get("logs")
+            summary = None
+            final_error = existing.get("error") or (error or "")
+
+        if task_id in self._finished_tasks:
+            entry = self._finished_tasks[task_id]
+            entry["result"] = result
+            if not entry.get("error"):
+                entry["error"] = final_error
+            entry.setdefault("agent_name", agent_name)
+            entry.setdefault("task_description", task_description)
+            entry.setdefault("session_id", task_session_id)
+            if logs:
+                entry.setdefault("logs", logs)
+        else:
+            self._finished_tasks[task_id] = {
+                "result": result,
+                "error": final_error,
+                "agent_name": agent_name,
+                "task_description": task_description,
+                "session_id": task_session_id,
+                "logs": logs or [],
+                "tool_call_count": (summary or {}).get("tool_call_count", 0),
+                "elapsed_seconds": (summary or {}).get("elapsed_seconds", 0),
+            }
+
+        # 落库用部分更新语义（None 字段不覆盖）：executor 缺席时 summary 传 None，
+        # 保留运行期最后写入的 tool_call_count/elapsed_seconds，避免被清空
+        if self._session_store:
+            try:
+                self._session_store.update_subagent_task_status(task_id, "finished", result, final_error, logs, summary)
+            except Exception as e:
+                logger.warning(f"[SubAgentManager] mark_task_finished 落库失败: {e}")
+
+        return {
+            "agent_name": agent_name,
+            "task_description": task_description,
+            "session_id": task_session_id,
+        }
+
     def get_task_logs(self, task_id: str) -> Dict:
         """
         获取指定任务的完整日志和摘要。
@@ -2154,7 +2220,13 @@ class SubAgentManager(QObject):
                 "found": bool       # 是否找到任务
             }
         """
-        # 先从数据库获取
+        # 先归档已完成的任务（会同步把 DB 状态推进到 finished），再查库。
+        # 顺序很关键：executor 运行期间实时日志回调持续写 DB running 状态，
+        # 若先查库命中即返回，get_finished_tasks 永不执行，DB 状态永挂 running，
+        # 会话卡片（SubAgentSessionCard）会永远显示「执行中」且工具数/时间冻结。
+        self.get_finished_tasks()
+
+        # 从数据库获取
         if self._session_store:
             db_task = self._session_store.get_subagent_task(task_id)
             if db_task:
@@ -2177,9 +2249,6 @@ class SubAgentManager(QObject):
                     "result": db_task.get("result", ""),
                     "error": db_task.get("error", ""),
                 }
-
-        # 清理并检查内存中的任务
-        self.get_finished_tasks()
 
         # 检查运行中的任务
         if task_id in self._running_tasks:

@@ -38,7 +38,9 @@
 """
 
 import json
-from dataclasses import dataclass
+import re
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -49,6 +51,55 @@ from app.plugins.kernel import KNOWN_COMPONENTS
 
 # 插件平台声明与 deps 统一加载（设计：docs/superpowers/specs/2026-08-27-plugin-platform-deps-design.md）
 from app.plugins.deps_loader import check_platform, ensure_deps_on_path
+
+# 插件名合法字符：首字符必须为字母或数字，后续允许字母数字与 _ . -
+# 严禁路径分隔符与 `..`（plugin_name 会参与配置存储路径拼接，见 plugin_config_store）
+_PLUGIN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _normalize_plugin_name(raw: object, fallback: str) -> Optional[str]:
+    """把清单里的 name 归一为安全插件名；非法返回 None（调用方跳过该插件）。
+
+    防护点：
+    ① 类型污染 —— `{"name": 123}` 会让 int 成为 _plugins 的 key，后续
+       ui_plugin_registry 的 str 方法（.lower()/.replace()）抛 AttributeError；
+    ② 路径穿越 —— name 参与 `<app_data>/plugin_data/<name>/config.json` 拼接，
+       `../../` 可写到宿主任意位置。
+    """
+    if isinstance(raw, str) and _PLUGIN_NAME_RE.match(raw):
+        return raw
+    if _PLUGIN_NAME_RE.match(fallback):
+        if raw is not None:
+            # 清单 name 非法但目录名合法 —— 回退到目录名，保证存量插件不被误杀
+            logger.warning(f"[PluginManager] 插件清单 name 非法 {raw!r}，回退为目录名 {fallback!r}")
+        return fallback
+    return None
+
+def _resolve_system_plugin_dir() -> Path:
+    """系统插件根：单一事实源。
+
+    打包形态为 onedir（Drifox.spec COLLECT，datas 把 plugins/ 放进 _internal），
+    与项目 resource_path() 惯例一致：hasattr(sys, "_MEIPASS") 即分发目录
+    （onedir 下 _MEIPASS == <安装目录>/_internal，非临时解压），系统插件根为
+    _MEIPASS/plugins；开发环境为项目根 plugins/。
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "plugins"
+    return Path(__file__).resolve().parent.parent.parent.parent / "plugins"
+
+
+def _assert_writable_plugin_target(path: Path) -> None:
+    """P1-6：分发目录只读守卫——onedir 下 _internal（含系统插件根）不应被插件写入，
+    打包形态（存在 _MEIPASS）下命中即拒；开发环境恒过。"""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+    target = Path(path).resolve()
+    if target.is_relative_to(Path(meipass).resolve()):
+        logger.warning(f"[PluginManager] 打包版分发目录只读，拒绝写入: {target}")
+        raise PermissionError(f"打包版分发目录只读: {target}")
+
 
 # 组件物理探测谓词：按 kernel.KNOWN_COMPONENTS 顺序遍历，物理目录/根文件命中即标记
 # 探测规则差异：hooks 需 hooks.json、ui 需 __init__.py、tools/providers 需 *.py、
@@ -67,11 +118,75 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
     "team_templates": lambda d: (d / "team_templates").exists() and any((d / "team_templates").glob("*.yaml")),
     "model_adapters": lambda d: (d / "model_adapters").exists() and any((d / "model_adapters").glob("*.py")),
     "loop_policies": lambda d: (d / "loop_policies").exists() and any((d / "loop_policies").glob("*.py")),
+    "hook_policies": lambda d: (d / "hook_policies").exists() and any((d / "hook_policies").glob("*.py")),
     "storages": lambda d: (d / "storages").exists() and any((d / "storages").glob("*.py")),
     "serializers": lambda d: (d / "serializers").exists() and any((d / "serializers").glob("*.py")),
     "gateways": lambda d: (d / "gateways").exists() and any((d / "gateways").glob("*.py")),
     "engines": lambda d: (d / "engines").exists() and any((d / "engines").glob("*.py")),
 }
+
+
+# P1-2：插件清单文件大小上限（防超大 manifest 拖垮加载/解析）
+_MANIFEST_MAX_BYTES = 256 * 1024
+
+
+def _load_manifest_file(manifest_path: Path):
+    """读取插件清单 JSON（P1-2：文件 ≤256KB，超限拒载 + 明确报错）。
+
+    Returns:
+        (manifest, schema_warnings)；文件不可读 / 超限 / 解析失败 / 根节点非对象
+        → (None, [])。
+    """
+    try:
+        size = manifest_path.stat().st_size
+    except OSError as e:
+        logger.error(f"[PluginManager] 清单不可读: {manifest_path} {e}")
+        return None
+    if size > _MANIFEST_MAX_BYTES:
+        logger.error(
+            f"[PluginManager] 清单文件 {size} 字节超过上限 {_MANIFEST_MAX_BYTES}（256KB），拒载: {manifest_path}"
+        )
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"[PluginManager] 清单解析失败: {manifest_path} {e}")
+        return None
+    if not isinstance(manifest, dict):
+        logger.error(f"[PluginManager] 清单根节点不是对象，跳过: {manifest_path}")
+        return None
+    manifest = _enforce_manifest_limits(manifest, manifest_path)
+    # 契约1：manifest schema 宽容校验（类型不符 → warning + 缺省处理；未知字段忽略）
+    from app.plugins.contracts.manifest_schema import validate_manifest
+
+    manifest, schema_warnings = validate_manifest(
+        manifest, source=manifest_path.parent.parent.name, fallback_name=manifest_path.parent.parent.name
+    )
+    return manifest, schema_warnings
+
+
+def _enforce_manifest_limits(manifest: dict, manifest_path: Path) -> dict:
+    """P1-2：manifest 资源上限（超限截断/丢弃 + warning，不拒载）。"""
+    icon = manifest.get("icon")
+    if isinstance(icon, str) and len(icon) > 512:
+        logger.warning(
+            f"[PluginManager] manifest icon 字段 {len(icon)} 字符超过上限 512，已丢弃: {manifest_path}"
+        )
+        manifest.pop("icon", None)
+    elif isinstance(icon, dict):
+        cleaned = {k: v for k, v in icon.items() if isinstance(v, str) and len(v) <= 512}
+        if len(cleaned) != len(icon):
+            logger.warning(
+                f"[PluginManager] manifest icon 子项超长(>512 字符)，已丢弃超限项: {manifest_path}"
+            )
+            manifest["icon"] = cleaned
+    pip = manifest.get("pip")
+    if isinstance(pip, list) and len(pip) > 20:
+        logger.warning(
+            f"[PluginManager] manifest pip 声明 {len(pip)} 条超过上限 20，已截断: {manifest_path}"
+        )
+        manifest["pip"] = pip[:20]
+    return manifest
 
 
 def _detect_components(plugin_dir: Path) -> Dict[str, bool]:
@@ -97,6 +212,12 @@ class PluginInfo:
     path: Path  # 插件根目录
     plugin_type: str = "user"  # "system" | "user"
     platform_compatible: bool = True  # platforms 声明与当前系统是否兼容（缺省声明=兼容）
+    version_compatible: bool = True  # min_host_version 与宿主版本比对（缺省声明=兼容）
+    version_reason: str = ""  # 版本不兼容原因（供 UI 展示）
+    api_compatible: bool = True  # 契约2：api_version 与宿主插件 API 版本比对（缺省=兼容）
+    api_reason: str = ""  # api_version 不兼容原因（供 UI 展示）
+    manifest_warnings: List[str] = field(default_factory=list)  # 契约1：schema 校验 warning 清单（UI 角标后续）
+    overridden_by: str = ""  # 同名覆盖标记：被覆盖方 plugin_type（"system"/"claude"），空=未被覆盖
 
     @property
     def description(self) -> str:
@@ -105,6 +226,11 @@ class PluginInfo:
     @property
     def version(self) -> str:
         return self.manifest.get("version", "0.0.0")
+
+    @property
+    def load_blocked(self) -> bool:
+        """是否被门禁拦截（平台/版本/api_version 任一不满足），拦截时宿主不得加载其任何组件"""
+        return not (self.platform_compatible and self.version_compatible and self.api_compatible)
 
     @property
     def is_system(self) -> bool:
@@ -136,16 +262,29 @@ class PluginInfo:
                 return {"light": default, "dark": default}
             return None
         if isinstance(raw, str):
-            p = self.path / raw
+            p = (self.path / raw).resolve()
+            # P1-1：icon 路径逃逸校验——解析后必须仍在插件根内（str/dict 两形态同规则）
+            if not p.is_relative_to(self.path.resolve()):
+                logger.warning(
+                    f"[PluginManager] 插件 '{self.name}' icon 路径越界，已丢弃: {raw!r}"
+                )
+                return None
             if p.exists():
                 return {"light": p, "dark": p}
             return None
         if isinstance(raw, dict):
             result: dict = {}
+            root_resolved = self.path.resolve()
             for theme in ("light", "dark"):
                 path_str = raw.get(theme)
                 if path_str:
                     p = (self.path / path_str).resolve()
+                    # P1-1：icon 路径逃逸校验（越界条目丢弃 + warning）
+                    if not p.is_relative_to(root_resolved):
+                        logger.warning(
+                            f"[PluginManager] 插件 '{self.name}' icon 路径越界，已丢弃: {path_str!r}"
+                        )
+                        continue
                     if p.exists():
                         result[theme] = p
             # 单主题补齐：只有一个主题时补齐另一个
@@ -171,8 +310,8 @@ class PluginManager:
     _instance: Optional["PluginManager"] = None
 
     # 插件搜索路径（按优先级）
-    # 系统插件：项目根目录 plugins/（打包在 exe 中）
-    _SYSTEM_PLUGIN_DIR = Path(__file__).parent.parent.parent.parent / "plugins"
+    # 系统插件：项目根目录 plugins/（打包在 exe 中；P1-6：onedir 下解析 _MEIPASS/plugins）
+    _SYSTEM_PLUGIN_DIR = _resolve_system_plugin_dir()
     # 不可禁用核心插件名单（黑名单制）：禁用会断核心链路（组件宿主/插件市场自身）。
     # 其余插件（含 manifest type=system 的内置插件）均可禁用；
     # plugin-marketplace/ui/installer.py 状态分类与本名单保持单一数据源。
@@ -241,8 +380,8 @@ class PluginManager:
                 if name not in saved_set and name not in disabled_set:
                     saved.append(name)
             cfg.set(cfg.enabled_plugins, saved, save=True)
-        except (ImportError, Exception):
-            pass
+        except Exception as e:
+            logger.warning(f"[PluginManager] 从 Settings 恢复启用状态失败（吞异常保留语义）: {e}")
 
     def reset(self):
         """重置（主要用于测试）"""
@@ -293,22 +432,48 @@ class PluginManager:
 
         # 3. 构建新插件映射（优先级: 系统 → Claude → 用户）
         new_plugins: Dict[str, PluginInfo] = {}
+        # allow_user_override=false 时用户目录同名插件跳过，系统版生效
+        allow_user_override = True
+        try:
+            from app.utils.config import Settings
+
+            allow_user_override = bool(Settings.get_instance().allow_user_override.value)
+        except Exception:
+            pass
         # 先加系统插件
         for name, p in current_system.items():
             new_plugins[name] = p
-        # Claude 插件同名覆盖系统
+        # Claude 插件同名覆盖系统（同名覆盖显性化：warning + overridden_by 标记）
         for name, p in current_claude.items():
             if name in new_plugins:
-                if new_plugins[name].is_system:
-                    logger.info(f"[PluginManager] Rescan: Claude plugin '{name}' overrides system plugin")
-                    result["changed"].append(p)
+                overridden = new_plugins[name]
+                logger.warning(
+                    f"[PluginManager] Rescan: '{name}' 被 Claude 插件覆盖 "
+                    f"({overridden.plugin_type}: {overridden.path} → claude: {p.path})"
+                )
+                p.overridden_by = overridden.plugin_type
+                result["changed"].append(p)
+                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
+                self._plugins[name] = p
             new_plugins[name] = p
         # 用户插件同名覆盖前两者（最高优先级）
         for name, p in current_user.items():
             if name in new_plugins:
-                if new_plugins[name].is_system:
-                    logger.info(f"[PluginManager] Rescan: user plugin '{name}' overrides system plugin")
-                    result["changed"].append(p)
+                if not allow_user_override:
+                    logger.warning(
+                        f"[PluginManager] Rescan: 用户插件 '{name}' 因 allow_user_override=false 跳过，"
+                        f"保留现有版本: {new_plugins[name].path}"
+                    )
+                    continue
+                overridden = new_plugins[name]
+                logger.warning(
+                    f"[PluginManager] Rescan: '{name}' 被用户插件覆盖 "
+                    f"({overridden.plugin_type}: {overridden.path} → user: {p.path})"
+                )
+                p.overridden_by = overridden.plugin_type
+                result["changed"].append(p)
+                # 顺手修正：写回 _plugins，覆盖后的新实例立即生效于运行时查询
+                self._plugins[name] = p
             new_plugins[name] = p
 
         new_names = set(new_plugins.keys())
@@ -740,13 +905,22 @@ class PluginManager:
                 continue
 
             try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                plugin_name = manifest.get("name", item.name)
+                manifest, schema_warnings = _load_manifest_file(manifest_path)
+                if manifest is None:
+                    continue
+                for _w in schema_warnings:
+                    logger.warning(f"[PluginManager] {_w}")
+                plugin_name = _normalize_plugin_name(manifest.get("name"), item.name)
+                if plugin_name is None:
+                    logger.error(
+                        f"[PluginManager] 插件名非法（须匹配 [A-Za-z0-9][A-Za-z0-9_.-]* 且"
+                        f"不含路径分隔符），跳过: {manifest_path} -> {manifest.get('name')!r}"
+                    )
+                    continue
 
-                # .claude-plugin 格式：自动补全缺少的字段
+                # .claude-plugin 格式：补全 type（version 缺省已由 manifest_schema 契约层提供）
                 if manifest_format == "claude":
                     manifest.setdefault("type", plugin_type)
-                    manifest.setdefault("version", manifest.get("version", "0.0.0"))
 
                 # 自动检测组件：扫描目录结构（两种格式都做，保证新增目录能被识别）
                 # 探测规则见 _COMPONENT_PROBES，按 kernel.KNOWN_COMPONENTS 顺序遍历
@@ -759,7 +933,19 @@ class PluginManager:
                 compatible, reason = check_platform(manifest)
                 if not compatible:
                     logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
-                ensure_deps_on_path(item)
+
+                # —— P1 版本契约：min_host_version 与宿主版本比对 ——
+                from app.plugins.version_gate import check_api_version, check_host_version
+
+                ver_ok, ver_reason = check_host_version(manifest, plugin_name)
+                api_ok, api_reason = check_api_version(manifest, plugin_name)
+
+                # —— G3 安全对齐：deps 注入延后到门禁之后 ——
+                # deps 目录被 insert 到 sys.path[0]（优先于 stdlib），注入即等于
+                # 赋予该插件劫持全进程导入的能力。故平台不兼容 / 版本契约未通过的
+                # 插件一律不注入，避免"未启用的插件仍能污染宿主"。
+                if compatible and ver_ok and api_ok:
+                    ensure_deps_on_path(item)
 
                 # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
                 self._register_config_schema(plugin_name, manifest)
@@ -771,6 +957,11 @@ class PluginManager:
                         path=item,
                         plugin_type=plugin_type,
                         platform_compatible=compatible,
+                        version_compatible=ver_ok,
+                        version_reason=ver_reason,
+                        api_compatible=api_ok,
+                        api_reason=api_reason,
+                        manifest_warnings=schema_warnings,
                     )
                 )
                 logger.debug(
@@ -800,7 +991,11 @@ class PluginManager:
             return None
 
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest, schema_warnings = _load_manifest_file(manifest_path)
+            if manifest is None:
+                return None
+            for _w in schema_warnings:
+                logger.warning(f"[PluginManager] {_w}")
             plugin_name = manifest.get("name", plugin_dir.name)
 
             if manifest_format == "claude":
@@ -815,11 +1010,22 @@ class PluginManager:
             # 但无 commands/ 目录）导致热更新触发全量命令重载
             manifest["components"] = _detect_components(plugin_dir)
 
-            # —— 平台兼容检查 + deps 统一注入（幂等，热重载 rescan 同样覆盖）——
+            # —— 平台兼容检查（G3：门禁全部通过前不注入 deps）——
             compatible, reason = check_platform(manifest)
             if not compatible:
                 logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
-            ensure_deps_on_path(plugin_dir)
+
+            # —— P1 版本契约：min_host_version 与宿主版本比对 ——
+            from app.plugins.version_gate import check_api_version, check_host_version
+
+            ver_ok, ver_reason = check_host_version(manifest, plugin_name)
+            api_ok, api_reason = check_api_version(manifest, plugin_name)
+
+            # —— G3 安全对齐：deps 注入延后到门禁之后（与 _scan_plugins 同版式）——
+            # 本函数在热路径（热重载/安装/更新）：先注入会让平台/版本不符的插件
+            # 依然拿到 sys.path 劫持能力，绕过门禁
+            if compatible and ver_ok and api_ok:
+                ensure_deps_on_path(plugin_dir)
 
             # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
             self._register_config_schema(plugin_name, manifest)
@@ -830,6 +1036,11 @@ class PluginManager:
                 path=plugin_dir,
                 plugin_type=plugin_type,
                 platform_compatible=compatible,
+                version_compatible=ver_ok,
+                version_reason=ver_reason,
+                api_compatible=api_ok,
+                api_reason=api_reason,
+                manifest_warnings=schema_warnings,
             )
             logger.debug(
                 f"[PluginManager] Rescanned plugin: {plugin_name} (type={plugin_type}, format={manifest_format})"
@@ -1425,6 +1636,8 @@ class PluginManager:
                     )
                 else:
                     content[name] = {k: v for k, v in server_data.items() if k not in ("name", "_source", "_builtin")}
+            # P1-6：分发目录只读守卫（来源插件在 _internal 下时拒写）
+            _assert_writable_plugin_target(source_path)
             source_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
             self.invalidate_mcp_cache()
             logger.info(f"[PluginManager] Updated MCP server '{name}' in {source_path}")
@@ -1553,6 +1766,9 @@ class PluginManager:
         if not source.exists():
             logger.warning(f"[PluginManager] MCP source file not found: {source}")
             return
+
+        # P1-6：分发目录只读守卫（来源插件在 _internal 下时拒写；用户插件不受影响）
+        _assert_writable_plugin_target(source)
 
         try:
             content = json.loads(source.read_text(encoding="utf-8"))

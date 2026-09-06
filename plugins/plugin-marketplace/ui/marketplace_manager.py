@@ -7,11 +7,12 @@
 """
 
 import json
+import re
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from loguru import logger
@@ -80,6 +81,105 @@ _DEFAULT_SOURCES = [
         "builtin": True,
     },
 ]
+
+
+# ── C1：市场源白名单 ──────────────────────────────
+
+# 允许的 git 托管 host（url 类型源）；Settings.marketplace_allowed_git_hosts 可追加
+_MARKETPLACE_ALLOWED_GIT_HOSTS = {"github.com", "gitlab.com", "gitee.com", "bitbucket.org", "gitcode.com"}
+# github 类型源的 repo 形态：owner/name
+_GITHUB_REPO_RE = re.compile(r"^[\w.-]+/[\w.-]+$")
+
+
+def _marketplace_allowed_hosts() -> set:
+    """内置白名单 + Settings.marketplace_allowed_git_hosts 扩展（内网 git 源显式加白）。
+
+    本模块设计上不依赖 app 核心 Settings，故此处容错读取：不可用时仅用内置表。
+    """
+    hosts = set(_MARKETPLACE_ALLOWED_GIT_HOSTS)
+    try:
+        from app.utils.config import Settings
+
+        extra = Settings.get_instance().marketplace_allowed_git_hosts.value or []
+        hosts |= {str(h).strip().lower() for h in extra if str(h).strip()}
+    except Exception:
+        pass
+    return hosts
+
+
+def _validate_git_url_field(raw: Any, *, allow_shorthand: bool) -> Tuple[bool, str]:
+    """校验 git url 字段：https 直链走 host 白名单；简写仅按需放行。
+
+    allow_shorthand=True 时兼容 owner/repo 简写（隐含 github.com，与
+    installer._resolve_git_subdir_url 的补全行为对齐，仅 git-subdir 使用）。
+    """
+    from urllib.parse import urlparse
+
+    raw = str(raw or "").strip()
+    if not raw:
+        return False, "url 缺失"
+    if allow_shorthand and "/" in raw and not raw.startswith(("http://", "https://", "git@")):
+        if _GITHUB_REPO_RE.fullmatch(raw):
+            return True, ""
+        return False, f"url 简写不合法: {raw!r}（须为 owner/repo 形态或 https 直链）"
+    parsed = urlparse(raw)
+    if parsed.scheme != "https":
+        return False, f"url scheme 须为 https（当前: {parsed.scheme or '缺失'}）"
+    host = (parsed.hostname or "").lower()
+    if host not in _marketplace_allowed_hosts():
+        return False, f"非白名单 git host: {host or '缺失'}"
+    return True, ""
+
+
+def validate_marketplace_source(source: Any) -> Tuple[bool, str]:
+    """C1：市场源白名单校验（新增/修改与下载前二次校验共用）。
+
+    - github → repo 必须匹配 ^[\w.-]+/[\w.-]+$
+    - url → scheme 必须 https 且 hostname 在允许表（内置五家 + Settings 扩展）
+    - git-subdir → url 同 url 规则（另兼容 owner/repo 简写）；path 必须为
+      仓库内相对子目录（禁绝对路径与 .. 穿越）。注意：安装器本就支持
+      git-subdir（DriFox 旧格式，drifox-plugins 市场全量在用），
+      校验器必须与其能力面对齐，否则合法安装被误拦。
+    - 其余类型与 file:///ssh:// 等一律拒绝
+
+    Returns:
+        (ok, reason) — ok=False 时 reason 为拒收原因。
+    """
+    try:
+        if not isinstance(source, dict):
+            return False, f"不支持的 source 类型: {type(source).__name__}"
+        src_type = str(source.get("source") or source.get("type") or "").strip().lower()
+        if src_type == "github":
+            repo = str(source.get("repo") or "").strip()
+            segments = repo.split("/")
+            dot_segment = any(seg in (".", "..") for seg in segments)
+            if (
+                len(segments) == 2
+                and not dot_segment
+                and all(segments)
+                and _GITHUB_REPO_RE.fullmatch(repo)
+            ):
+                return True, ""
+            return False, f"github repo 不合法: {repo!r}（须为 owner/name 形态，禁路径穿越）"
+        if src_type in ("url", "git-subdir"):
+            ok, reason = _validate_git_url_field(source.get("url"), allow_shorthand=(src_type == "git-subdir"))
+            if not ok:
+                return False, reason
+            if src_type == "git-subdir":
+                subpath = str(source.get("path") or "").strip()
+                norm = subpath.replace("\\", "/")
+                parts = [seg for seg in norm.split("/") if seg]
+                if (
+                    not subpath
+                    or norm.startswith("/")
+                    or (len(norm) >= 2 and norm[1] == ":")
+                    or any(seg in (".", "..") for seg in parts)
+                ):
+                    return False, f"git-subdir path 不合法: {subpath!r}（须为仓库内相对子目录，禁路径穿越）"
+            return True, ""
+        return False, f"不支持的市场源类型: {src_type or '缺失'}"
+    except Exception as e:
+        return False, f"校验异常: {e}"
 
 
 class MarketplaceSourceManager:
@@ -233,9 +333,19 @@ class MarketplaceSourceManager:
         if not self._sources_file.exists():
             self._ensure_defaults()
         try:
-            return json.loads(self._sources_file.read_text(encoding="utf-8-sig"))
+            sources = json.loads(self._sources_file.read_text(encoding="utf-8-sig"))
         except Exception:
             return list(_DEFAULT_SOURCES)
+        # C1 存量容忍：既有非法条目仅告警不阻断/不删除（强校验只管新增/修改）
+        for entry in sources or []:
+            if isinstance(entry, dict) and entry.get("source") is not None:
+                ok, reason = validate_marketplace_source(entry.get("source"))
+                if not ok:
+                    logger.warning(
+                        f"[MarketplaceGuard] 存量市场源未过白名单（容忍放行，仅告警）: "
+                        f"{entry.get('name')} {reason}"
+                    )
+        return sources or []
 
     def _save_sources(self, sources: List[Dict[str, Any]]):
         """保存市场源列表到文件"""
@@ -255,6 +365,11 @@ class MarketplaceSourceManager:
         Returns:
             True 添加成功
         """
+        # C1：新增/修改走强校验（存量条目不受影响，见 get_sources 容忍逻辑）
+        ok, reason = validate_marketplace_source(source)
+        if not ok:
+            logger.warning(f"[MarketplaceGuard] 拒绝添加市场源: {name} {reason}")
+            return False
         sources = self.get_sources()
         # 同名覆盖
         for s in sources:

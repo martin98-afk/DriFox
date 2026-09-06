@@ -32,6 +32,74 @@ from app.utils.file_operation_recorder import (
 )
 
 
+# ============================================================
+# A3：工具面 capability 声明制 + 高权限服务审计
+# ============================================================
+
+
+def _plugin_label_from_source(source: str) -> str:
+    """从注册 source（plugin:<名>）提取插件名，非插件源返回原值。"""
+    try:
+        if source and source.startswith("plugin:"):
+            return source.split(":", 1)[1] or "unknown"
+    except Exception:
+        pass
+    return source or "builtin"
+
+
+def _get_declared_capabilities(reg) -> Optional[set]:
+    """读插件 manifest 的可选 "capabilities" 声明。
+
+    返回 None = 未声明 / 查询失败 / 非插件源 → services 全量注入（现状不变）；
+    返回集合 = 按清单裁剪（空数组即全裁高权限服务）。
+    """
+    try:
+        source = reg.source or ""
+        if not source.startswith("plugin:"):
+            return None
+        plugin_name = source.split(":", 1)[1].strip()
+        if not plugin_name:
+            return None
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        plugin = PluginManager.get_instance().get_plugin(plugin_name)
+        caps = (getattr(plugin, "manifest", None) or {}).get("capabilities")
+        if isinstance(caps, list):
+            return {str(c) for c in caps}
+    except Exception:
+        pass
+    return None
+
+
+class _AuditedService:
+    """高权限服务审计代理：属性/调用透传，首次触达记一行 [ServiceAudit]。
+
+    只包访问层不复制行为；服务对象为 None 时不包装（直接注入 None）。
+    """
+
+    def __init__(self, plugin_name: str, service_name: str, inner):
+        object.__setattr__(self, "_plugin", plugin_name)
+        object.__setattr__(self, "_service", service_name)
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_logged", False)
+
+    def _audit_once(self):
+        if not object.__getattribute__(self, "_logged"):
+            object.__setattr__(self, "_logged", True)
+            logger.warning(
+                f"[ServiceAudit] plugin={object.__getattribute__(self, '_plugin')} "
+                f"service={object.__getattribute__(self, '_service')}"
+            )
+
+    def __getattr__(self, item):
+        self._audit_once()
+        return getattr(object.__getattribute__(self, "_inner"), item)
+
+    def __call__(self, *args, **kwargs):
+        self._audit_once()
+        return object.__getattribute__(self, "_inner")(*args, **kwargs)
+
+
 class ToolExecutor:
     """工具执行器 - 统一调度各种工具"""
 
@@ -1013,6 +1081,26 @@ class ToolExecutor:
             "env": env,
             "services": services,
         }
+
+        # A3：capability 声明制——manifest 声明 "capabilities" 后按清单裁剪
+        # services 与 ctx.sub_agent_manager；未声明保持现状全量注入。
+        # window_state（窗口级 KV，无系统权限）不受管控恒保留；
+        # ctx["env"]["app_data_dir"] 恒保留。
+        declared_caps = _get_declared_capabilities(reg)
+        if declared_caps is not None:
+            services = {
+                k: v for k, v in ctx["services"].items() if k in declared_caps or k == "window_state"
+            }
+            if "subagent" not in declared_caps:
+                ctx["sub_agent_manager"] = None
+        ctx["services"] = services
+        # A3：高权限服务审计——插件实际触达（属性访问/调用）时记 [ServiceAudit]
+        _plugin_label = _plugin_label_from_source(reg.source)
+        for _svc_key in ("lsp", "mcp", "gitee"):
+            if ctx["services"].get(_svc_key) is not None:
+                ctx["services"][_svc_key] = _AuditedService(_plugin_label, _svc_key, ctx["services"][_svc_key])
+        if ctx["sub_agent_manager"] is not None:
+            ctx["sub_agent_manager"] = _AuditedService(_plugin_label, "subagent", ctx["sub_agent_manager"])
 
         # 签名检测：是否接受 tool_ctx（无法检测时尝试注入）
         try:

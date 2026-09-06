@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -45,23 +46,19 @@ def _core(name: str):
         mtime = path.stat().st_mtime
     except OSError:
         mtime = 0.0
-    mod = sys_modules().get(key)
+    mod = sys.modules.get(key)
     if mod is not None and getattr(mod, "_source_mtime", -1.0) >= mtime:
         return mod
     spec = importlib.util.spec_from_file_location(key, str(path))
     if spec is None or spec.loader is None:
         raise ImportError(f"无法加载 {path}")
     module = importlib.util.module_from_spec(spec)
-    sys_modules()[key] = module
+    # 直接写 sys.modules：assistant_hub_core. 前缀已在 plugin.json module_prefixes 声明
+    # （早先用 sys_modules() 包一层绕开静态扫描，属规避手法，已纠正）。
+    sys.modules[key] = module
     spec.loader.exec_module(module)
     module._source_mtime = mtime
     return module
-
-
-def sys_modules():
-    import sys
-
-    return sys.modules
 
 
 # ── 路径辅助 ────────────────────────────────────────────
@@ -196,12 +193,12 @@ def compile_today(
 
 def _load_prompts():
     key = "assistant_hub_core.memory.prompts"
-    mod = sys_modules().get(key)
+    mod = sys.modules.get(key)
     if mod is not None:
         return mod
     spec = importlib.util.spec_from_file_location(key, str(_THIS.parent / "prompts.py"))
     module = importlib.util.module_from_spec(spec)
-    sys_modules()[key] = module
+    sys.modules[key] = module
     spec.loader.exec_module(module)
     return module
 

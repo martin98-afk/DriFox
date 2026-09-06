@@ -26,7 +26,7 @@ from app.core.store.input_history_repo import InputHistoryRepository
 from app.core.store.memory_repository import MemoryRepository
 
 # 导入子模块
-from app.core.store.session_repository import SessionRepository
+from app.core.store.session_repository import SessionRepository, extract_first_user_question
 from app.core.store.subagent_log_repository import SubAgentLogRepository
 from app.utils.db_manager import DatabaseManager
 from app.utils.utils import get_app_data_dir
@@ -397,6 +397,8 @@ class SessionStore:
                         {"name": "team_name", "type": "TEXT", "default": ""},
                         {"name": "agent_name", "type": "TEXT", "default": ""},
                         {"name": "team_members", "type": "TEXT", "default": ""},
+                        {"name": "first_user_msg", "type": "TEXT", "default": ""},
+                        {"name": "first_user_ts", "type": "TEXT", "default": ""},
                     ],
                 )
 
@@ -476,6 +478,7 @@ class SessionStore:
                 self._migrate_add_api_context_columns()
                 self._migrate_add_team_columns()
                 self._migrate_add_team_members_column()
+                self._migrate_add_first_user_columns()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -676,6 +679,84 @@ class SessionStore:
         except Exception as e:
             logger.warning(f"[SessionStore] team_members 列迁移失败(可能已存在): {e}")
 
+    def _migrate_add_first_user_columns(self):
+        """迁移：添加首问落库列 first_user_msg / first_user_ts（如果不存在）
+
+        🛡️ T4 内存治理：历史列表的团队合并条目需要「首问预览」，旧实现为此反
+        序列化该 run 下全部成员会话的完整 messages（实测 246 条约 285MB 常驻、
+        放大 9.9 倍）。落库列让预览查询退化为纯字符串读取。
+
+        新增列后对**团队会话**做一次性回填（逐条读、逐条写，任意时刻只有一条
+        会话的 messages 在内存，峰值约等于最大单条会话）。普通会话不回填——
+        目前无消费方，其首问会在下次 save 时随增量写入自然补齐。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            missing = [c for c in ("first_user_msg", "first_user_ts") if c not in col_names]
+            if not missing:
+                return
+            for col in missing:
+                logger.info(f"[SessionStore] 迁移：添加 {col} 列")
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {col} TEXT DEFAULT ''")
+            logger.info("[SessionStore] first_user_* 列迁移完成，开始回填团队会话首问")
+            self._backfill_first_user_columns()
+        except Exception as e:
+            logger.warning(f"[SessionStore] first_user_* 列迁移失败: {e}")
+
+    def _backfill_first_user_columns(self):
+        """一次性回填团队会话的首问列（逐条读写，内存友好）
+
+        只处理团队会话（team_run_id 非空）：它们是首问列的唯一消费方。逐条
+        SELECT messages → 提取 → UPDATE，避免一次性加载全部 messages 造成的
+        数百 MB 峰值。失败仅跳过单条，不阻塞启动。
+        """
+        from app.core.store.serde import deserialize
+
+        try:
+            ok, rows = self._db.execute_sql(
+                f"SELECT session_id FROM {self.TABLE_NAME} "
+                f"WHERE team_run_id IS NOT NULL AND team_run_id != '' "
+                f"AND (first_user_msg IS NULL OR first_user_msg = '')"
+            )
+            if not ok or not rows:
+                return
+            ids = []
+            for r in rows:
+                try:
+                    sid = r["session_id"] if hasattr(r, "keys") else r[0]
+                except Exception:
+                    continue
+                if sid:
+                    ids.append(sid)
+            if not ids:
+                return
+            done = 0
+            for sid in ids:
+                try:
+                    ok2, r2 = self._db.execute_sql(
+                        f"SELECT messages FROM {self.TABLE_NAME} WHERE session_id = ?", (sid,)
+                    )
+                    if not ok2 or not r2:
+                        continue
+                    row0 = r2[0]
+                    raw = row0["messages"] if hasattr(row0, "keys") else row0[0]
+                    ts, msg = extract_first_user_question(deserialize(raw))
+                    if not msg:
+                        continue
+                    self._db.execute_sql(
+                        f"UPDATE {self.TABLE_NAME} SET first_user_msg = ?, first_user_ts = ? WHERE session_id = ?",
+                        (msg, ts, sid),
+                    )
+                    done += 1
+                except Exception as e:
+                    logger.debug(f"[SessionStore] 回填首问失败 {str(sid)[:8]}: {e}")
+            logger.info(f"[SessionStore] 团队会话首问回填完成: {done}/{len(ids)}")
+        except Exception as e:
+            logger.warning(f"[SessionStore] 团队会话首问回填异常: {e}")
+
     @property
     def is_initialized(self) -> bool:
         return self._initialized and self._db is not None and self._db.is_connected
@@ -719,6 +800,12 @@ class SessionStore:
         """
         if self._session_repo:
             return self._session_repo.get_by_team_run_id(run_id)
+        return []
+
+    def get_team_first_question_candidates(self, run_id: str) -> List[Tuple[str, str]]:
+        """取团队首问候选（纯字符串列，零反序列化）"""
+        if self._session_repo:
+            return self._session_repo.get_team_first_question_candidates(run_id)
         return []
 
     def delete_session(self, session_id: str) -> bool:

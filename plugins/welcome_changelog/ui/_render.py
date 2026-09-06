@@ -56,35 +56,59 @@ def _render_error(msg: str) -> str:
 
 
 def _render_body(releases: list) -> str:
-    """左列版本列表 + 右列描述（SPA，JS 切换不调 Python）"""
+    """左列版本列表 + 右列描述（CSS-only 切换）
+
+    为什么不用 <script>：主程序 viewer 经 updateContent() 以 innerHTML 注入本插件
+    返回的 HTML 片段，HTML5 标准下 innerHTML 注入的 <script> 不会执行（2026-09-06
+    版本点击无反应的根因）。改用 radio + :checked 兄弟选择器纯 CSS 切换：
+
+    - radio 作为 .changelog-shell 的前置兄弟节点，供 ``#cl-rN:checked ~`` 联动
+    - <label for=cl-rN> 点击切换 checked（浏览器原生行为，无需 JS）
+    - 高亮 / 详情显示规则按版本数动态生成（≤20 条 × 2）
+    """
     items = []
     bodies = []
-    for i, r in enumerate(releases[:20]):
+    radios = []
+    css_rules = []
+    shown = releases[:20]
+    for i, r in enumerate(shown):
         tag = escape(r.get("tag_name") or r.get("name") or f"v{i + 1}")
         date = escape((r.get("published_at") or "")[:10])
         body_html = r.get("body_html") or "<em>无更新说明</em>"
-        active = "active" if i == 0 else ""
+        checked = " checked" if i == 0 else ""
+        radios.append(
+            f'<input type="radio" name="cl-radio" id="cl-r{i}" '
+            f'class="cl-radio"{checked}>'
+        )
         items.append(
-            f'<li class="changelog-version {active}" data-idx="{i}">'
+            f'<li class="changelog-version">'
+            f'<label for="cl-r{i}">'
             f'<div class="ver-tag">{tag}</div>'
-            f'<div class="ver-date">{date}</div></li>'
+            f'<div class="ver-date">{date}</div></label></li>'
         )
         bodies.append(
-            f'<div class="changelog-body" data-idx="{i}" '
-            f'style="{"display:block" if i == 0 else "display:none"}">{body_html}</div>'
+            f'<div class="changelog-body cl-b{i}">{body_html}</div>'
+        )
+        css_rules.append(
+            f'#cl-r{i}:checked ~ .changelog-versions label[for="cl-r{i}"] '
+            f'{{ background: var(--accent-soft-strong); }}'
+        )
+        css_rules.append(
+            f'#cl-r{i}:checked ~ .changelog-detail .cl-b{i} {{ display: block; }}'
         )
 
     return (
-        f"<style>{_CHANGELOG_CSS}</style>"
+        f"<style>{_CHANGELOG_CSS}" + "\n" + "\n".join(css_rules) + "</style>"
         '<div class="changelog-shell">'
+        f'{"".join(radios)}'
         f'<ul class="changelog-versions">{"".join(items)}</ul>'
         f'<div class="changelog-detail">{"".join(bodies)}</div>'
         "</div>"
-        f"<script>{_CHANGELOG_JS}</script>"
     )
 
 
 # ── 内嵌 CSS：复用主程序 viewer 的 :root CSS 变量（--accent-*）────────────
+# 版本切换纯 CSS：.cl-bN 默认隐藏，由动态生成的 :checked 规则控制显示（见 _render_body）
 _CHANGELOG_CSS = f"""
 .changelog-shell {{
     display: flex;
@@ -103,17 +127,17 @@ _CHANGELOG_CSS = f"""
     max-height: 360px;
 }}
 .changelog-version {{
+    margin-bottom: 2px;
+}}
+.changelog-version label {{
+    display: block;
     padding: 6px 10px;
     cursor: pointer;
     border-radius: 6px;
-    margin-bottom: 2px;
     transition: 0.15s ease;
 }}
-.changelog-version:hover {{
+.changelog-version label:hover {{
     background: var(--accent-soft);
-}}
-.changelog-version.active {{
-    background: var(--accent-soft-strong);
 }}
 .changelog-version .ver-tag {{
     font-weight: 600;
@@ -137,25 +161,7 @@ _CHANGELOG_CSS = f"""
     margin-top: 0;
 }}
 .changelog-body img {{ max-width: 100%; }}
-"""
-
-
-# ── 内嵌 JS：版本点击 → SPA 切换 body（DOM 内部操作，不调 Python）──────────
-_CHANGELOG_JS = """
-(function(){
-    document.addEventListener('click', function(e){
-        var verItem = e.target && e.target.closest && e.target.closest('.changelog-version');
-        if (!verItem) return;
-        e.stopPropagation();
-        e.preventDefault();
-        var vIdx = verItem.getAttribute('data-idx');
-        var vShell = verItem.closest('.changelog-shell');
-        if (!vShell) return;
-        vShell.querySelectorAll('.changelog-version').forEach(function(el){ el.classList.remove('active'); });
-        vShell.querySelectorAll('.changelog-body').forEach(function(el){ el.style.display = 'none'; });
-        verItem.classList.add('active');
-        var vBody = vShell.querySelector('.changelog-body[data-idx="' + vIdx + '"]');
-        if (vBody) vBody.style.display = 'block';
-    });
-})();
+/* 默认全隐藏，由 _render_body 动态生成的 :checked 规则显示选中项 */
+.changelog-body {{ display: none; }}
+.cl-radio {{ display: none; }}
 """

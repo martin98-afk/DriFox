@@ -19,8 +19,10 @@ JS→Python 唯一通道是 `console.log('pywebview_action:...')` + `javaScriptC
 
 - `data-copy` 必须 Base64（JS 侧 `atob` 解码）。
 - 没有 `sendPrompt` 函数调用；SVG 里的 `onclick="sendPrompt(...)"` 在 DriFox 不可用，追问入口一律 `context-tag[data-type="ask"]`。
+- `context-tag` 不只作用于文字：**SVG 图形节点（`<g>` / `<rect>` / `<circle>`）同样可挂**，见 SKILL.md「SVG 图节点可点」。
 - 纯 CSS 交互可用：`<input type="checkbox"> + <label>` 可做无 JS 的步进器/折叠。
 - `<script>` 永不执行（innerHTML 注入后是死代码），任何逻辑走上述通道。
+- **要执行脚本就换 ` ```widget ` 围栏**（沙箱 iframe + `__drifoxBridge` 白名单），别在 ` ```html ` 里写脚本凑 —— 会被静默剥离。
 
 ## 宿主 CSS 变量（明暗自适应）
 

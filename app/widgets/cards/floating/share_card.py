@@ -20,12 +20,11 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import InfoBar, InfoBarPosition
+from qfluentwidgets import InfoBar, InfoBarPosition, ScrollArea
 
 from app.utils.design_tokens import Colors, current_theme, get_unified_scrollbar_style
 from app.utils.theme_manager import theme_manager
@@ -628,11 +627,11 @@ class ShareCardContent(QWidget):
         main_layout.addLayout(fmt_layout)
 
         # ── 预览区 ──
-        self._preview_area = QScrollArea(self)
+        self._preview_area = ScrollArea(self)
         self._preview_area.setWidgetResizable(True)
         self._preview_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._preview_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._preview_area.setFrameShape(QScrollArea.NoFrame)
+        self._preview_area.setFrameShape(ScrollArea.NoFrame)
         self._preview_area.setFixedHeight(160)
         self._preview_area.setStyleSheet(
             f"QScrollArea {{ background: {Colors.CONTENT_BG}; border: 1px solid {Colors.BORDER}; "

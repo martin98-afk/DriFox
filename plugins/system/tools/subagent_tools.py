@@ -92,7 +92,18 @@ def _team_list_members(tool_ctx) -> ToolResult:
 
     role_descs = {}
     try:
-        template = tm.get_template()
+        # 🛡️ M1'：按本窗口所属 run_id 读专属模板槽（templates_by_run_id），
+        # 防多团队并存时顶层 template 单槽互相覆盖；getattr 回退保证
+        # 老测试 mock 未实现新方法时零改动仍工作（与 _safe_team_label 同模式）。
+        run_id = ""
+        _run_getter = getattr(tm, "get_member_run_id", None)
+        if callable(_run_getter) and window_id:
+            run_id = _run_getter(window_id) or ""
+        _tpl_getter = getattr(tm, "get_template_for_run_id", None)
+        if callable(_tpl_getter) and run_id:
+            template = _tpl_getter(run_id)
+        else:
+            template = tm.get_template()
         for item in (template or {}).get("agents") or []:
             if isinstance(item, dict) and item.get("agent_name"):
                 desc = str(item.get("description") or "").strip()

@@ -23,6 +23,8 @@ from typing import Any, Dict, Optional
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
+from app.plugins.kernel import COMPONENT_ORDER
+
 # 读取期过滤型组件：细项开关在**读取/执行链路上**判定，改配置即生效，
 # 不需要重载 registry（见 PluginHostService.on_plugin_item_toggled）。
 # 其余组件属于注册期过滤型（条目是否进 registry 由 loader 在注册阶段决定），
@@ -220,6 +222,8 @@ class PluginHostService(QObject):
 
                 lsp_mgr = get_lsp_manager()
                 lsp_configs = pm.get_lsp_configs()
+                # P2：消费端过滤 load_blocked 插件的 LSP 配置（被门禁拦截的插件不注册 LSP）
+                lsp_configs = self._filter_blocked_lsp_configs(pm, lsp_configs)
                 workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 lsp_mgr.initialize(workdir, lsp_configs)
                 logger.info(f"[PluginHost] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
@@ -934,16 +938,9 @@ class PluginHostService(QObject):
 
     # 组件优先级（用于在多组件批处理中决定先后顺序）
     # agents 最先：它会影响 commands 和 hooks 同步
-    _COMPONENT_ORDER = {
-        "agents": 0,
-        "hooks": 1,
-        "commands": 2,
-        "themes": 3,
-        "skills": 4,
-        "mcp": 5,
-        "lsp": 6,
-        "ui": 7,
-    }
+    # G2：单一事实源在 kernel.COMPONENT_ORDER，此处仅转成 rank dict
+    # （kernel 未登记的组件 get(c, 99) 兜底，行为与原 8 项本地表一致）
+    _COMPONENT_ORDER = {name: rank for rank, name in enumerate(COMPONENT_ORDER)}
 
     def _identify_all_components_from_changes(
         self, changes: list, plugin_prefixes: Dict[str, str], plugin_name: str
@@ -1264,6 +1261,10 @@ class PluginHostService(QObject):
                 logger.warning(f"[PluginHost] New plugin '{plugin_name}' not found after scan")
                 return result
 
+            # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派
+            if not self._load_gate(plugin):
+                return result
+
             comps = plugin.components
             logger.info(f"[PluginHost] 检测到新插件「{plugin_name}」，执行增量加载")
 
@@ -1381,6 +1382,47 @@ class PluginHostService(QObject):
         return result
 
     @staticmethod
+    def _load_gate(plugin) -> bool:
+        """版本/平台门禁闸口：拦截 load_blocked 插件的任何加载/重载动作。
+
+        行为：
+        - plugin 为 None → False（无对象可供门禁，不放行）
+        - plugin.load_blocked 为真 → logger.warning（带 reason）+ False
+        - 其余 → True
+
+        注：插件被删除的清理路径（_cleanup_removed_plugin_components）不调
+        本门禁——清理时 plugin 已被 PluginManager 摘索引，必须允许走完。
+        """
+        if plugin is None:
+            return False
+        # 只认显式 True（真实 PluginInfo 计算出的判定）。测试 mock/鸭子类型对象
+        # 的动态属性是 MagicMock（truthy 但不是 True），不得误拦。
+        if getattr(plugin, "load_blocked", False) is True:
+            reason = getattr(plugin, "version_reason", "") or "平台/版本不兼容"
+            logger.warning(
+                f"[PluginHost] 插件 '{plugin.name}' 被门禁拦截（{reason}），跳过加载/重载"
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _filter_blocked_lsp_configs(pm, lsp_configs: list) -> list:
+        """过滤掉被门禁拦截的插件的 LSP 配置（P2 消费端防御）。
+
+        即使 PluginManager._iter_enabled_plugins 未来变化，调用方仍能在此
+        兜底一遍：load_blocked 插件的 LSP 不进入 LspManager.initialize。
+        """
+        out = []
+        for c in lsp_configs:
+            plugin_name = c.get("plugin", "")
+            plugin = pm.get_plugin(plugin_name) if plugin_name else None
+            if plugin is not None and getattr(plugin, "load_blocked", False):
+                logger.debug(f"[PluginHost] LSP 配置跳过被门禁插件: {plugin_name}")
+                continue
+            out.append(c)
+        return out
+
+    @staticmethod
     def _purge_module_prefixes(prefixes: list) -> list:
         """按声明前缀清理 sys.modules 中的手动加载模块（返回被清理的模块名）。
 
@@ -1405,6 +1447,15 @@ class PluginHostService(QObject):
             importlib.invalidate_caches()
             gc.collect()
         return removed
+
+    @staticmethod
+    def _resolve_purge_prefixes(plugin_name: str, declared_prefixes: list) -> list:
+        """P2-3：purge 自动化——目录名为合法 Python 标识符时，等价隐式声明
+        module_prefixes=[目录名]（importlib 手动注册的同名前缀模块统一摘除）；
+        非法标识符目录名（如 voice-input 含连字符，不可能被 import）不触发。
+        声明前缀照常合并（声明优先，去重保序）。"""
+        auto = [plugin_name] if plugin_name.isidentifier() else []
+        return list(dict.fromkeys(list(declared_prefixes or []) + auto))
 
     def _cleanup_removed_plugin_components(
         self,
@@ -1577,11 +1628,12 @@ class PluginHostService(QObject):
             # 防旧模块对象滞留导致热更新代码不生效。
             plugin_rescanned = pm.get_plugin(plugin_name)
             declared_prefixes = (getattr(plugin_rescanned, "manifest", None) or {}).get("module_prefixes") or []
-            if declared_prefixes:
-                purged = self._purge_module_prefixes(declared_prefixes)
+            purge_prefixes = self._resolve_purge_prefixes(plugin_name, declared_prefixes)
+            if purge_prefixes:
+                purged = self._purge_module_prefixes(purge_prefixes)
                 if purged:
                     logger.info(
-                        f"[PluginHost] 已清理插件 '{plugin_name}' 声明的模块缓存 {len(purged)} 个: {purged[:5]}"
+                        f"[PluginHost] 已清理插件 '{plugin_name}' 模块缓存 {len(purged)} 个: {purged[:5]}"
                     )
 
             plugin = pm.get_plugin(plugin_name)
@@ -1594,6 +1646,11 @@ class PluginHostService(QObject):
                     f"cleaning up artifacts..."
                 )
                 return self._cleanup_removed_plugin_components(plugin_name, removed_components, result, result_keys)
+
+            # P1/P2：版本/平台门禁闸口——被拦截的插件不进任何组件分派；
+            # 清理路径已在上方处理完毕，本处只挡「插件对象存在但不该加载」情形。
+            if not self._load_gate(plugin):
+                return result
 
             # 2-N. 组件分派：查 kernel reloader 注册表（原 8 分支 if 已迁 builtin_reloaders）
             # 注册 / 注入 runtime 句柄由 _do_deferred + reload_plugin_subsystems 集中完成
@@ -1942,6 +1999,8 @@ class PluginHostService(QObject):
 
             lsp_mgr = get_lsp_manager()
             lsp_configs = pm.get_lsp_configs()
+            # P2：消费端过滤 load_blocked 插件的 LSP 配置（被门禁拦截的插件不注册 LSP）
+            lsp_configs = self._filter_blocked_lsp_configs(pm, lsp_configs)
             workdir = os.getcwd()
             from app.tools.mcp_tools import MCPClientManager
 

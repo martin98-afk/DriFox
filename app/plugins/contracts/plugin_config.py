@@ -49,10 +49,16 @@ select 的 options 声明（value 为存储值，label 为显示名）：
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
+
+# P1-2：config_schema 资源上限
+_CONFIG_MAX_FIELDS = 50
+_CONFIG_MAX_DESC = 2048  # 字段 description ≤ 2KB
+_CONFIG_MAX_DEFAULT_BYTES = 8192  # 字段 default 序列化后 ≤ 8KB
 
 # 支持的字段类型（渲染映射见 plugin_config_card.py）
 FIELD_TYPES = ("text", "password", "bool", "select", "number", "textarea", "link", "action")
@@ -210,11 +216,17 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
     """
     if not isinstance(raw, dict):
         return None
+    # P1-2：资源上限（超限截断/丢弃 + warning，不崩不炸不拒载）
     title = str(raw.get("title") or plugin_name)
     raw_fields = raw.get("fields")
     if not isinstance(raw_fields, list) or not raw_fields:
         logger.warning(f"[PluginConfig] {plugin_name} config_schema.fields 为空或缺失，忽略")
         return None
+    if len(raw_fields) > _CONFIG_MAX_FIELDS:
+        logger.warning(
+            f"[PluginConfig] {plugin_name} fields {len(raw_fields)} 条超过上限 {_CONFIG_MAX_FIELDS}，已截断"
+        )
+        raw_fields = raw_fields[:_CONFIG_MAX_FIELDS]
     fields: List[PluginConfigField] = []
     for item in raw_fields:
         if not isinstance(item, dict):
@@ -232,6 +244,16 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
         default = item.get("default", "" if ftype != "bool" else False)
         if ftype == "bool" and not isinstance(default, bool):
             default = bool(default)
+        # P1-2：default 序列化后 ≤8KB，超限丢弃回退类型默认（防巨量默认值拖垮设置卡/配置写盘）
+        try:
+            _default_size = len(json.dumps(default, ensure_ascii=False, default=str))
+        except Exception:
+            _default_size = 0
+        if _default_size > _CONFIG_MAX_DEFAULT_BYTES:
+            logger.warning(
+                f"[PluginConfig] {plugin_name} 字段 {key} default 约 {_default_size} 字节超过 8KB，已丢弃回退默认"
+            )
+            default = "" if ftype != "bool" else False
         options: Tuple[Tuple[str, str], ...] = ()
         if ftype == "select":
             options = _parse_select_options(item.get("options"))
@@ -249,6 +271,11 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
             action_spec = _parse_tool_action(plugin_name, key, item.get("action"))
             if action_spec is None:
                 return None
+        # P1-2：description ≤ 2KB，超限截断 + warning
+        desc = str(item.get("description") or "")
+        if len(desc) > _CONFIG_MAX_DESC:
+            logger.warning(f"[PluginConfig] {plugin_name} 字段 {key} description 长度 {len(desc)} 超过 2KB，已截断")
+            desc = desc[:_CONFIG_MAX_DESC]
         fields.append(
             PluginConfigField(
                 key=key,
@@ -257,7 +284,7 @@ def parse_config_schema(plugin_name: str, raw: Optional[dict]) -> Optional[Plugi
                 default=default,
                 env=str(item.get("env") or ""),
                 placeholder=str(item.get("placeholder") or ""),
-                description=str(item.get("description") or ""),
+                description=desc,
                 options=options,
                 min=_parse_optional_int(item.get("min"), None) if ftype == "number" else None,
                 max=_parse_optional_int(item.get("max"), None) if ftype == "number" else None,

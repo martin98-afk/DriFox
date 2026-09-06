@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -460,6 +461,11 @@ class LspManager:
         """通用 CLI 调用 + JSON 解析（pyright 风格）。由 cli_fallback 调度。"""
         import asyncio.subprocess
 
+        from app.core.mcp_lsp_safety import gate_server_launch
+
+        if gate_server_launch("lsp", "", Path(args[0]).stem if args else "cli", args) != "proceed":
+            return None, "", False, "CLI 启动被安全门禁拦截"
+
         subprocess_kwargs = {}
         if sys.platform == "win32":
             subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -491,6 +497,11 @@ class LspManager:
         """通用 CLI 调用 + 原始 stdout 返回（不解析）。"""
         import asyncio.subprocess
 
+        from app.core.mcp_lsp_safety import gate_server_launch
+
+        if gate_server_launch("lsp", "", Path(args[0]).stem if args else "cli", args) != "proceed":
+            return "[CLI] 启动被安全门禁拦截"
+
         subprocess_kwargs = {}
         if sys.platform == "win32":
             subprocess_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -520,6 +531,11 @@ class LspManager:
         """
         import asyncio.subprocess
         import re
+
+        from app.core.mcp_lsp_safety import gate_server_launch
+
+        if gate_server_launch("lsp", "", Path(args[0]).stem if args else "cli", args) != "proceed":
+            return "[CLI] 启动被安全门禁拦截"
 
         subprocess_kwargs = {}
         if sys.platform == "win32":

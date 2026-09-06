@@ -9657,6 +9657,36 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.exception("[HotReload] 刷新共享 Launcher 异常")
             logger.debug("[HotReload] UI 插件列表已刷新")
 
+    def _safe_refresh(self, widget, method_name: str = "refresh_style") -> None:
+        """周期内刷新去重：同一 widget 的同名刷新方法每周期只调一次。
+
+        5a（颜色）与 5b（字体）块对同一批浮动卡片的 refresh_style 重复调用
+        是已知冗余（setStyleSheet 解析 + 向下传播非免费）。周期集合在
+        _apply_runtime_ui_settings 入口重置。
+        """
+        if widget is None or not hasattr(widget, method_name):
+            return
+        key = (id(widget), method_name)
+        if key in self._refreshed_in_cycle:
+            return
+        self._refreshed_in_cycle.add(key)
+        try:
+            getattr(widget, method_name)()
+        except Exception as e:
+            logger.warning(f"[theme refresh] {type(widget).__name__}.{method_name}: {e}")
+
+    def _safe_refresh_tooltips(self) -> None:
+        """refresh_all_tooltips 的周期内去重（主题块与字体块各有一处调用）。"""
+        if getattr(self, "_tooltips_refreshed_in_cycle", False):
+            return
+        self._tooltips_refreshed_in_cycle = True
+        try:
+            from app.widgets.simple_hover_tooltip import refresh_all_tooltips
+
+            refresh_all_tooltips()
+        except Exception as e:
+            logger.warning(f"[theme refresh] refresh_all_tooltips: {e}")
+
     def _apply_runtime_ui_settings(self, scope=None, _skip_global=False):
         """
         统一刷新 UI 外观，按变更类型分流。
@@ -9699,6 +9729,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 批处理模式下跳过（已由协调器执行）。
         if not _skip_global:
             Colors.refresh()
+
+        # ── 周期内刷新去重（5a + 5b 块对同一 widget 的 refresh_style 重复调用
+        # 是已知冗余；set/flag 在每次进入本方法时重置，即一个刷新周期） ──
+        self._refreshed_in_cycle: set = set()
+        self._tooltips_refreshed_in_cycle = False
 
         # ── 0. 按需扫描 widget 树，按类型缓存 ──
         # [PERF] 单次 findChildren(QWidget) 全树遍历 + isinstance 分类，
@@ -9781,10 +9816,8 @@ class OpenAIChatToolWindow(ToolWindow):
                         logger.warning(f"[theme refresh] message card {id(card):#x}: {e}")
             ThemeRefreshCoordinator.timer_end("msg_cards")
 
-            # 自绘 hover tooltip 主题刷新
-            from app.widgets.simple_hover_tooltip import refresh_all_tooltips
-
-            refresh_all_tooltips()
+            # 自绘 hover tooltip 主题刷新（周期内去重，见 _safe_refresh_tooltips）
+            self._safe_refresh_tooltips()
 
             # 输入区插件按钮图标随主题切换（浅色/深色图标）
             self._refresh_plugin_input_button_icons()
@@ -9827,10 +9860,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 if ring and hasattr(ring, "refresh_font_size"):
                     ring.refresh_font_size()
 
-            # 自绘 hover tooltip 字号刷新
-            from app.widgets.simple_hover_tooltip import refresh_all_tooltips
-
-            refresh_all_tooltips()
+            # 自绘 hover tooltip 字号刷新（周期内去重，见 _safe_refresh_tooltips）
+            self._safe_refresh_tooltips()
 
             # 分支标签（包含字号 + 颜色的样式，字体变化时需同步刷新）
             if hasattr(self, "_project_label"):
@@ -9935,8 +9966,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 设置弹窗 — 子卡片主题样式
             if self._settings_popup:
                 for frame in _popup_frames:
-                    if hasattr(frame, "refresh_style"):
-                        frame.refresh_style()
+                    self._safe_refresh(frame)
                 # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
                 for card_name in (
                     "uiFontSizeCard",
@@ -9952,18 +9982,14 @@ class OpenAIChatToolWindow(ToolWindow):
                     "pluginToolCard",
                     "pluginAgentCard",
                 ):
-                    card = getattr(self._settings_popup, card_name, None)
-                    if card is not None and hasattr(card, "refresh_style"):
-                        card.refresh_style()
+                    self._safe_refresh(getattr(self._settings_popup, card_name, None))
                 # 刷新设置弹窗分隔标签
                 if hasattr(self._settings_popup, "_refresh_sep_labels"):
                     self._settings_popup._refresh_sep_labels()
             # 设置卡片（全窗口递归）
             for card in _base_settings:
-                if hasattr(card, "refresh_style"):
-                    card.refresh_style()
-            if self._settings_popup and hasattr(self._settings_popup, "refresh_style"):
-                self._settings_popup.refresh_style()
+                self._safe_refresh(card)
+            self._safe_refresh(self._settings_popup)
             # 浮动卡片
             for card in (
                 self._question_floating_widget,
@@ -9972,51 +9998,30 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._history_questions_card_content,
                 self._undo_delete_card,
             ):
-                if card and hasattr(card, "refresh_style"):
-                    card.refresh_style()
+                self._safe_refresh(card)
             # 卡片容器
-            if (
-                hasattr(self, "_top_card_container")
-                and self._top_card_container
-                and hasattr(self._top_card_container, "refresh_style")
-            ):
-                self._top_card_container.refresh_style()
-            if (
-                hasattr(self, "_bottom_card_container")
-                and self._bottom_card_container
-                and hasattr(self._bottom_card_container, "refresh_style")
-            ):
-                self._bottom_card_container.refresh_style()
+            self._safe_refresh(getattr(self, "_top_card_container", None))
+            self._safe_refresh(getattr(self, "_bottom_card_container", None))
             # 命令卡片
-            if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
-                self._command_card.refresh_style()
+            self._safe_refresh(getattr(self, "_command_card", None))
             # 文件提及卡片（滚动条颜色随主题）
-            if (
-                hasattr(self, "_file_mention_card")
-                and self._file_mention_card
-                and hasattr(self._file_mention_card, "refresh_style")
-            ):
-                self._file_mention_card.refresh_style()
+            self._safe_refresh(getattr(self, "_file_mention_card", None))
             # 模型选择卡片
-            if hasattr(self, "_model_selector_card_content") and self._model_selector_card_content:
-                self._model_selector_card_content.refresh_style()
+            self._safe_refresh(getattr(self, "_model_selector_card_content", None))
             # 🛡️ 懒创建框架下 _model_selector_card 可能仍为 None（deferred 链未执行），
             # 必须判 None 而非 hasattr（属性恒存在，值为 None 时 hasattr 返回 True）
+            self._safe_refresh(getattr(self, "_model_selector_card", None))
             if getattr(self, "_model_selector_card", None) is not None:
-                self._model_selector_card.refresh_style()
                 self._update_model_selector_header()
             # 项目选择卡片
-            if hasattr(self, "_project_selector_card_content"):
-                self._project_selector_card_content.refresh_style()
-            if hasattr(self, "_project_selector_card"):
-                self._project_selector_card.refresh_style()
+            self._safe_refresh(getattr(self, "_project_selector_card_content", None))
+            self._safe_refresh(getattr(self, "_project_selector_card", None))
             # 工具控制卡片
-            if hasattr(self, "_tool_control_card") and hasattr(self._tool_control_card, "refresh_style"):
-                self._tool_control_card.refresh_style()
+            self._safe_refresh(getattr(self, "_tool_control_card", None))
 
         # ── 5b. 字体相关公共块（颜色或字体变化时都执行） ──
         # 内嵌 font_size_css / get_font_family_css 的浮动卡片：
-        #   - 颜色变化：上面 5a 已调过 refresh_style（重复但无害，setStyleSheet 幂等）
+        #   - 5a/5b 通过 _safe_refresh 周期内自动去重，5b 跳过 5a 已刷卡片
         #   - 字体变化：5a 不走 → 这里补一次刷新，否则字号/字族切换时
         #     内嵌硬编码 font-size 的 QSS 不重建，setFont 被 QSS 盖住，视觉不响应
         self._refresh_floating_cards_font_style()
@@ -10078,7 +10083,7 @@ class OpenAIChatToolWindow(ToolWindow):
         ctx 拉取 font_size/font_family，show_card 之后需要主动调
         _apply_latest_theme 重新拉 ctx 应用新字号/字族。
         """
-        # ── 主窗口内嵌浮动卡片 ──
+        # ── 主窗口内嵌浮动卡片（周期内去重：5b 跳过 5a 已刷卡片） ──
         for card in (
             self._question_floating_widget,
             self._sub_agent_compact_widget,
@@ -10089,11 +10094,7 @@ class OpenAIChatToolWindow(ToolWindow):
             getattr(self, "_file_mention_card", None),
             getattr(self, "_tool_control_card", None),
         ):
-            if card and hasattr(card, "refresh_style"):
-                try:
-                    card.refresh_style()
-                except Exception:
-                    pass
+            self._safe_refresh(card)
 
         # ── UI 插件浮动卡片：拉模型，卡片自带 _apply_latest_theme / _apply_theme / _retheme ──
         # （detect-by-hasattr 防止强制依赖某个具体方法名，向后兼容多版本插件）
@@ -16907,38 +16908,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget.finish_task(task_id, success)
 
-        # 从管理器移除并记录结果
-        if executor:
-            agent_name = getattr(executor, "agent_name", "")
-            task_description = getattr(executor, "task_description", "")
-            task_session_id = getattr(executor, "_task_session_id", "")
-            del sub_agent_mgr._running_tasks[task_id]
-        else:
-            # executor 可能已被 get_finished_tasks() 移除（DAG 节点由 _on_dag_node_finished 提前删除 running_tasks）
-            # 此时从 _finished_tasks 恢复字段（此时 DAG 已写入 error 信息，不要覆盖）
-            existing = sub_agent_mgr._finished_tasks.get(task_id, {})
-            agent_name = existing.get("agent_name", "")
-            task_description = existing.get("task_description", "")
-            task_session_id = existing.get("session_id", "")
-
-        # 如果 get_finished_tasks() 已经写入过完整数据，只更新 result/error 避免丢失 session_id/日志
-        if task_id in sub_agent_mgr._finished_tasks:
-            existing = sub_agent_mgr._finished_tasks[task_id]
-            existing["result"] = result
-            # 已有 error（如 DAG 写入的跳过信息）不要覆盖
-            if "error" not in existing or not existing["error"]:
-                existing["error"] = execution_error or ""
-            existing.setdefault("agent_name", agent_name)
-            existing.setdefault("task_description", task_description)
-            existing.setdefault("session_id", task_session_id)
-        else:
-            sub_agent_mgr._finished_tasks[task_id] = {
-                "result": result,
-                "error": execution_error or "",
-                "agent_name": agent_name,
-                "task_description": task_description,
-                "session_id": task_session_id,
-            }
+        # 归档到管理器：内存 _finished_tasks + 数据库 finished 状态（含最终 logs/summary）。
+        # 之前只写内存不落库，DB 永挂 running → 会话卡片永远显示执行中、工具数/时间冻结
+        info = sub_agent_mgr.mark_task_finished(task_id, result, execution_error or "")
+        agent_name = info["agent_name"]
+        task_description = info["task_description"]
 
         # 批次完成检查：先检查当前计数，用于精确诊断
         _batch_before = sub_agent_mgr._batch_completed
@@ -19428,7 +19402,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_import_project_from_url(self):
         """从URL导入项目压缩包"""
-        from plugins.system.ui._worktree_page import SingleInputDialog
+        from app.widgets.common_dialogs import SingleInputDialog
 
         dialog = SingleInputDialog(
             title="🔗 从URL导入项目",
@@ -19672,7 +19646,7 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 将拖入文件夹加入关键文档并设为工作目录（根目录）
         4. 刷新项目列表
         """
-        from plugins.system.ui._worktree_page import SingleInputDialog
+        from app.widgets.common_dialogs import SingleInputDialog
 
         # ── 提取文件夹名作为默认项目名 ──
         folder_name = os.path.basename(folder_path.rstrip("/\\"))

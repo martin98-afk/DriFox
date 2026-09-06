@@ -642,6 +642,14 @@ class PluginInstaller:
             logger.error(f"[Installer] 不支持的 source 类型: {type(source)}")
             return False
 
+        # C1：下载执行前二次校验同一白名单（防 sources 文件被手改绕过 UI）
+        from .marketplace_manager import validate_marketplace_source
+
+        ok, reason = validate_marketplace_source(source)
+        if not ok:
+            logger.warning(f"[MarketplaceGuard] install 前二次校验拒绝: {name} {reason}")
+            return False
+
         # 识别 source 类型：优先 Claude Code 的 "source" 字段，其次 DriFox 的 "type" 字段
         src_type = source.get("source") or source.get("type", "")
 
@@ -694,6 +702,14 @@ class PluginInstaller:
         """
         if not marketplace_source:
             logger.warning(f"[Installer] 无法安装相对路径插件 {name}：缺少市场源信息")
+            return False
+
+        # C1：相对路径安装依赖市场源，同样过白名单
+        from .marketplace_manager import validate_marketplace_source
+
+        ok, reason = validate_marketplace_source(marketplace_source)
+        if not ok:
+            logger.warning(f"[MarketplaceGuard] 相对路径安装前校验拒绝: {name} {reason}")
             return False
 
         # 去掉 "./" 前缀得到子目录路径
