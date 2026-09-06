@@ -1,6 +1,6 @@
 [project]
 name = "drifox"
-version = "0.5.8b2"
+version = "0.5.8"
 description = "DriFox - AI Chat Desktop Application"
 readme = "README.md"
 requires-python = ">=3.14"
