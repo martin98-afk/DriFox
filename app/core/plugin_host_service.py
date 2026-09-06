@@ -1400,7 +1400,9 @@ class PluginHostService(QObject):
         """
         if plugin is None:
             return False
-        if getattr(plugin, "load_blocked", False):
+        # 只认显式 True（真实 PluginInfo 计算出的判定）。测试 mock/鸭子类型对象
+        # 的动态属性是 MagicMock（truthy 但不是 True），不得误拦。
+        if getattr(plugin, "load_blocked", False) is True:
             reason = getattr(plugin, "version_reason", "") or "平台/版本不兼容"
             logger.warning(
                 f"[PluginHost] 插件 '{plugin.name}' 被门禁拦截（{reason}），跳过加载/重载"

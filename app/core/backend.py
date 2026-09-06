@@ -26,23 +26,22 @@ _AUTO_COMPACT_COOLDOWN = 30.0
 def get_session_storage():
     """全局存储门面：返回 StorageRegistry 活跃引擎（非 UI 消费方统一入口）。
 
-    冷启动防御（同 chat_worker._adapter_flags）：注册表为空（backend warmup
-    尚未执行/测试环境）时幂等触发系统插件扫描再重试；仍失败（真实配置错误）
-    让 RuntimeError 显式传播。registry 零硬编码兜底原则不变——兜底在门面侧。
+    冷启动防御（P3 修正）：get_active 已改为永不抛错（空时降级内置 noop 引擎，
+    会话不持久化），无法再靠 except RuntimeError 驱动冷启动重载。故这里前置
+    探测：registry 空则幂等触发系统插件扫描再取，确保真实环境拿到 sqlite
+    引擎而非 noop（noop 不持久化，会伤用户数据）。
     """
     from app.plugins.registries.storage_registry import StorageRegistry
 
     registry = StorageRegistry.get_instance()
-    try:
-        return registry.get_active()
-    except RuntimeError:
+    if not registry.engines:
         try:
             from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
             warmup_runtime_components()
         except Exception:
             pass
-        return registry.get_active()
+    return registry.get_active()
 
 
 

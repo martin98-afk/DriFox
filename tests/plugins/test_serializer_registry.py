@@ -63,10 +63,16 @@ def test_resolve_fallback_to_openai(fresh_registry):
     assert fresh_registry.resolve("nonexistent") is a
 
 
-def test_resolve_empty_raises(fresh_registry):
-    """注册表空且无 openai → 抛错（零硬编码兜底）"""
-    with pytest.raises(RuntimeError):
-        fresh_registry.resolve()
+def test_resolve_empty_falls_back_to_passthrough(fresh_registry):
+    """注册表空且无 openai → 降级内置 passthrough（P3：主链路不抛错）。
+
+    旧契约是抛 RuntimeError（零硬编码兜底）；P3 加固改为降级 passthrough，
+    冷启动重载职责已前置到 caller（_resolve_serializer / get_session_storage）。
+    """
+    from app.plugins.registries._builtin_fallback import BuiltInPassthroughSerializer
+
+    serializer = fresh_registry.resolve()
+    assert isinstance(serializer, BuiltInPassthroughSerializer)
 
 
 def test_register_overrides_same_id(fresh_registry):
@@ -79,11 +85,12 @@ def test_register_overrides_same_id(fresh_registry):
 
 
 def test_unregister_source(fresh_registry):
-    """unregister_source 清理后回退/抛错"""
+    """unregister_source 清理后降级内置 passthrough（P3 契约）"""
     fresh_registry.register(_FakeSerializer("openai"), source="plugin:demo")
     fresh_registry.unregister_source("plugin:demo")
-    with pytest.raises(RuntimeError):
-        fresh_registry.resolve()
+    from app.plugins.registries._builtin_fallback import BuiltInPassthroughSerializer
+
+    assert isinstance(fresh_registry.resolve(), BuiltInPassthroughSerializer)
 
 
 def test_protocol_runtime_checkable():

@@ -24,6 +24,12 @@ class StorageRegistry:
         with self._lock:
             self._engines[engine.id] = (engine, source)
 
+    @property
+    def engines(self) -> Dict[str, SessionStorageEngine]:
+        """已注册引擎只读视图（冷启动探测用：空=尚未加载任何插件引擎）"""
+        with self._lock:
+            return {k: v[0] for k, v in self._engines.items()}
+
     def unregister_source(self, source: str) -> None:
         with self._lock:
             dead = [k for k, (_, s) in self._engines.items() if s == source]

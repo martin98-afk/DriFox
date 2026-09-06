@@ -768,6 +768,11 @@ class PluginManager:
                     logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
                 ensure_deps_on_path(item)
 
+                # —— P1 版本契约：min_host_version 与宿主版本比对 ——
+                from app.plugins.version_gate import check_host_version
+
+                ver_ok, ver_reason = check_host_version(manifest, plugin_name)
+
                 # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
                 self._register_config_schema(plugin_name, manifest)
 
@@ -778,6 +783,8 @@ class PluginManager:
                         path=item,
                         plugin_type=plugin_type,
                         platform_compatible=compatible,
+                        version_compatible=ver_ok,
+                        version_reason=ver_reason,
                     )
                 )
                 logger.debug(
@@ -828,6 +835,11 @@ class PluginManager:
                 logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
             ensure_deps_on_path(plugin_dir)
 
+            # —— P1 版本契约：min_host_version 与宿主版本比对 ——
+            from app.plugins.version_gate import check_host_version
+
+            ver_ok, ver_reason = check_host_version(manifest, plugin_name)
+
             # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
             self._register_config_schema(plugin_name, manifest)
 
@@ -837,6 +849,8 @@ class PluginManager:
                 path=plugin_dir,
                 plugin_type=plugin_type,
                 platform_compatible=compatible,
+                version_compatible=ver_ok,
+                version_reason=ver_reason,
             )
             logger.debug(
                 f"[PluginManager] Rescanned plugin: {plugin_name} (type={plugin_type}, format={manifest_format})"

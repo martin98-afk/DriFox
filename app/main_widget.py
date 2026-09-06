@@ -16907,38 +16907,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget.finish_task(task_id, success)
 
-        # 从管理器移除并记录结果
-        if executor:
-            agent_name = getattr(executor, "agent_name", "")
-            task_description = getattr(executor, "task_description", "")
-            task_session_id = getattr(executor, "_task_session_id", "")
-            del sub_agent_mgr._running_tasks[task_id]
-        else:
-            # executor 可能已被 get_finished_tasks() 移除（DAG 节点由 _on_dag_node_finished 提前删除 running_tasks）
-            # 此时从 _finished_tasks 恢复字段（此时 DAG 已写入 error 信息，不要覆盖）
-            existing = sub_agent_mgr._finished_tasks.get(task_id, {})
-            agent_name = existing.get("agent_name", "")
-            task_description = existing.get("task_description", "")
-            task_session_id = existing.get("session_id", "")
-
-        # 如果 get_finished_tasks() 已经写入过完整数据，只更新 result/error 避免丢失 session_id/日志
-        if task_id in sub_agent_mgr._finished_tasks:
-            existing = sub_agent_mgr._finished_tasks[task_id]
-            existing["result"] = result
-            # 已有 error（如 DAG 写入的跳过信息）不要覆盖
-            if "error" not in existing or not existing["error"]:
-                existing["error"] = execution_error or ""
-            existing.setdefault("agent_name", agent_name)
-            existing.setdefault("task_description", task_description)
-            existing.setdefault("session_id", task_session_id)
-        else:
-            sub_agent_mgr._finished_tasks[task_id] = {
-                "result": result,
-                "error": execution_error or "",
-                "agent_name": agent_name,
-                "task_description": task_description,
-                "session_id": task_session_id,
-            }
+        # 归档到管理器：内存 _finished_tasks + 数据库 finished 状态（含最终 logs/summary）。
+        # 之前只写内存不落库，DB 永挂 running → 会话卡片永远显示执行中、工具数/时间冻结
+        info = sub_agent_mgr.mark_task_finished(task_id, result, execution_error or "")
+        agent_name = info["agent_name"]
+        task_description = info["task_description"]
 
         # 批次完成检查：先检查当前计数，用于精确诊断
         _batch_before = sub_agent_mgr._batch_completed

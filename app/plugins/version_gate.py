@@ -39,9 +39,10 @@ def parse_semver(text: str) -> Tuple[int, int, int] | None:
 def host_version() -> str:
     """宿主当前版本（去 v 前缀）。读不到时返回 "0.0.0"（放行一切，宽容）。"""
     try:
-        from app.utils.config import Config
+        from app.utils.config import Settings
 
-        v = str(getattr(Config, "current_version", "") or "")
+        cfg = Settings.get_instance()
+        v = str(getattr(cfg, "current_version", "") or "")
         return v.lstrip("vV") or "0.0.0"
     except Exception:
         return "0.0.0"
