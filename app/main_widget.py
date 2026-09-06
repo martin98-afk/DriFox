@@ -12071,6 +12071,52 @@ class OpenAIChatToolWindow(ToolWindow):
         elif new_len < len(self._batch_cards):
             self._batch_cards = self._batch_cards[:new_len]
 
+    def _register_new_cards_into_batches(self) -> None:
+        """把 chat_layout 中尚未登记进 _batch_cards 的卡片补齐登记。
+
+        🔧 内存修复（T5）：_sync_batch_structures() 只把 _batch_cards 扩展到新长度
+        （填 None），新建的 MessageCard 不会自动登记；而回收函数
+        _recycle_out_of_view_batches 只遍历 _batch_cards 且跳过 None 项，导致聊天
+        新建的卡片永远进不了回收视野 —— 每张卡正文是一个 CodeWebViewer
+        （QWebEngineView），长时间对话会无限累积，聊几十轮即达 1GB。
+
+        幂等：已登记的批次只做去重追加，不重复、不覆盖、不重排、不动占位。
+        """
+        n = len(self._batch_cards)
+        if n == 0:
+            return
+        try:
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                widget = item.widget() if item else None
+                if not isinstance(widget, MessageCard):
+                    continue
+                if getattr(widget, "_is_welcome", False):
+                    continue
+                if not self._is_widget_alive(widget):
+                    continue
+                mi = getattr(widget, "_message_index", None)
+                if mi is None or not (0 <= mi < n):
+                    continue
+                if self._batch_cards[mi] is None:
+                    self._batch_cards[mi] = [widget]
+                elif widget not in self._batch_cards[mi]:
+                    self._batch_cards[mi].append(widget)
+        except Exception as e:
+            logger.debug(f"[Memory] 登记新卡片到批次失败: {e}")
+
+    def _advance_visible_batch_window(self) -> None:
+        """发新消息/流式完成后推进可见批次窗口（视口在底部语义）。
+
+        🔧 内存修复（T5）：原代码只推进 _visible_batch_end 而不推进
+        _visible_batch_start，于是 active_start 恒为 0、active_end 恒为
+        「批次总数 + buffer」——回收范围为空，_recycle_out_of_view_batches
+        永远不回收任何卡片。补推进 start 后，上方超出缓冲区的历史卡片才会被回收，
+        底部新卡片仍在窗口内，不会被误删。
+        """
+        self._visible_batch_end = len(self._message_batch)
+        self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
+
     def _rebuild_batch_cards_from_layout(self) -> None:
         """
         从 chat_layout 中存活卡片按顺序重建 _batch_cards。
@@ -16197,8 +16243,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_batch_structures()
             # 给新创建的用户卡片设置正确的 _message_index（_append_user_message 中未设置）
             self._fix_new_card_message_index(user_text=user_text)
-            # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片
-            self._visible_batch_end = len(self._message_batch)
+            # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
+            self._advance_visible_batch_window()
+            self._register_new_cards_into_batches()
 
             # 🆕 发送纪元 +1：新一轮 worker 已启动。压缩守卫（_post_compact_guard）
             # 依赖 epoch 判定"清空后新 worker"，其结果不得被当作旧快照丢弃
@@ -17094,8 +17141,9 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             # send_message 成功后同步 batch 结构（send 会往 session 写入消息，因此同步必须在 send 之后）
             self._sync_batch_structures()
-            self._fix_new_card_message_index(user_text=callback_content)
-            self._visible_batch_end = len(self._message_batch)
+            self._fix_new_card_message_index(user_text=callback_content)            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
+            self._advance_visible_batch_window()
+            self._register_new_cards_into_batches()
             # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
             self._sync_node_preview_to_last()
             # 🆕 发送纪元 +1 并解除压缩守卫：本回调路径不走 _on_send_clicked
@@ -17446,8 +17494,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self.history_manager.flush()
             # 流式完成后同步 batch 结构，确保 _message_batch 包含完整的 assistant batch
             self._sync_batch_structures()
-            # 修复：同步可见范围，避免回收机制误删当前轮次的卡片
-            self._visible_batch_end = len(self._message_batch)
+            # 修复：同步可见范围，避免回收机制误删当前轮次的卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
+            self._advance_visible_batch_window()
+            self._register_new_cards_into_batches()
 
         session = self.session_manager.get_current_session()
         if session and session.messages:
