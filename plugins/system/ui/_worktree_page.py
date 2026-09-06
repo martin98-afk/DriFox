@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from typing import Dict, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PyQt5.QtWidgets import (
     QFileDialog,
