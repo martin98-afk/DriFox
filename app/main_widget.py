@@ -9769,11 +9769,16 @@ class OpenAIChatToolWindow(ToolWindow):
                 if ring and hasattr(ring, "refresh_theme"):
                     ring.refresh_theme()
 
-            # 消息卡片主题
+            # 消息卡片主题（per-card 隔离：单卡 refresh_theme 异常不得中断
+            # 后续刷新项——2026-09-06 NameError 曾致同窗口输入框/设置弹窗卡片
+            # 全部停留在旧主题）
             ThemeRefreshCoordinator.timer_start("msg_cards")
             for card in _message_cards:
                 if hasattr(card, "refresh_theme"):
-                    card.refresh_theme()
+                    try:
+                        card.refresh_theme()
+                    except Exception as e:
+                        logger.warning(f"[theme refresh] message card {id(card):#x}: {e}")
             ThemeRefreshCoordinator.timer_end("msg_cards")
 
             # 自绘 hover tooltip 主题刷新

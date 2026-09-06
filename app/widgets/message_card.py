@@ -8502,6 +8502,11 @@ class CodeWebViewer(QWebEngineView):
 
         theme = current_theme()
         js_code = ThemeRefreshCoordinator.get_or_build_js(theme, _is_light)
+        # body_font_size 供图表主题 JS 使用（与 _load_skeleton 构建期同语义：
+        # scale_font_size(14)）。此前引用的是 _refresh_viewer_font_css 的局部
+        # 变量，作用域外抛 NameError，致批处理主题刷新在该卡中断，后续输入框/
+        # 设置弹窗卡片刷新全部跳过（2026-09-06 日志实证）。
+        body_font_size = scale_font_size(14)
 
         # [PERF] 仅对可见 viewer 注入 CSS 变量：隐藏卡（不可见 tab / 未渲染）
         # 跳过 runJavaScript（WebEngine IPC 开销大，200 卡 ≈ 100ms）。

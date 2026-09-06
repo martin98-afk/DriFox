@@ -3,6 +3,8 @@ from __future__ import annotations
 from PyQt5.QtCore import QEasingCurve, QPoint, QVariantAnimation, Qt, QTimer
 from PyQt5.QtWidgets import QWidget
 
+from app.utils.design_tokens import Colors
+
 
 class HoverPreviewOverlay(QWidget):
     """侧栏 hover 悬浮预览浮层：Qt.Tool 顶层 owned 窗口（路线 C）。
@@ -39,6 +41,9 @@ class HoverPreviewOverlay(QWidget):
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setAttribute(Qt.WA_Hover, True)  # 浮层自身接收 HoverEnter/Leave
         self.setObjectName("hoverPreviewOverlay")
+        # 主题联动背景（task2 遗留项落地）：独立顶层窗口不继承宿主 QSS，
+        # 不设背景时画 palette 默认色（浅色），深色主题下呈白块。
+        self.refresh_style()
         # 不用 layout：动画期内容 frame 由 _place_at_width 手动右对齐定位
         # （reveal 语义，见类 docstring），layout 会强制 frame 等于浮层宽导致内容跟滑
         self._content: QWidget | None = None
@@ -46,6 +51,14 @@ class HoverPreviewOverlay(QWidget):
         self._target_w = 0
         self._current_w = 0  # 当前呈现宽度（动画逐帧更新，sync_to_window 用）
         self.hide()
+
+    def refresh_style(self) -> None:
+        """主题切换 / 构造时刷新浮层背景（宿主 _on_theme_changed 调用）
+
+        ★ 用 CONTENT_BG 实色而非 CARD_BG(alpha)：独立顶层窗口未开
+        WA_TranslucentBackground，QSS rgba 会落成不透明底，半透明无意义。
+        """
+        self.setStyleSheet(f"#hoverPreviewOverlay {{ background: {Colors.CONTENT_BG}; }}")
 
     # ── 定位：主窗口局部坐标 → 全局屏幕坐标 ──
 

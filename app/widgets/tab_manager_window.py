@@ -784,6 +784,14 @@ class TabManagerWindow(FramelessWindow):
         # 重建样式表
         self._apply_theme_stylesheet()
 
+        # hover 预览浮层是独立顶层窗口，不继承本窗口 QSS，需单独刷新；
+        # 预览中的 frame 带内联样式（脱离 QSS 作用域），同步刷新
+        overlay = getattr(self, "_wb_overlay", None)
+        if overlay is not None:
+            overlay.refresh_style()
+        if getattr(self, "_wb_in_preview", False):
+            self._workbench_frame.setStyleSheet(self._wb_frame_inline_qss())
+
         # 刷新自绘顶栏（tab 胶囊/按钮样式随主题；Colors 已由调用方 refresh）
         if hasattr(self.titleBar, "refresh_style"):
             self.titleBar.refresh_style()
@@ -1027,6 +1035,20 @@ class TabManagerWindow(FramelessWindow):
 
     # ── 右侧工作台 hover 悬浮预览：进入/退出回调 ──
 
+    def _wb_frame_inline_qss(self) -> str:
+        """预览期 #workbenchFrame 内联样式（与 _apply_theme_stylesheet 同款）
+
+        frame 被摘到 hover 预览浮层后脱离本窗口 QSS 作用域，需内联补同款；
+        主题切换时若预览中，也走本方法刷新。
+        """
+        return (
+            "#workbenchFrame {"
+            f" background: {Colors.CARD_BG.format(alpha=150)};"
+            f" border: 1px solid {Colors.BORDER};"
+            " border-radius: 8px;"
+            " }"
+        )
+
     def _wb_preview_enter(self) -> None:
         """控制器 on_enter：把工作台 frame 摘到浮层做纯几何滑入。
 
@@ -1043,6 +1065,10 @@ class TabManagerWindow(FramelessWindow):
         w = int(getattr(self, "_workbench_frame_w", PANEL_WIDTH_MIN + 14))
         frame.setParent(self._wb_overlay)
         self._wb_overlay.set_content(frame)
+        # ★ reparent 后 frame 脱离本窗口 QSS 作用域，#workbenchFrame 规则失效
+        #   （QSS 继承基于父链）→ 补同款内联样式，否则预览态丢面板底/边框；
+        #   回挂 splitter 时清掉（_wb_preview_leave），避免内联样式残留压住后续主题刷新
+        frame.setStyleSheet(self._wb_frame_inline_qss())
         panel.set_panel_visible(True)
         panel.setMinimumWidth(0)  # 滑入期放开下限，避免 panel 最小宽顶住浮层展开
         panel.setUpdatesEnabled(False)  # 滑入期冻结内容重绘（对齐嵌入展开"先滑后显"观感）
@@ -1077,6 +1103,8 @@ class TabManagerWindow(FramelessWindow):
             self._wb_overlay.hide()
             frame.setParent(self._splitter)
             self._splitter.insertWidget(2, frame)
+            # 回挂后重新继承本窗口 QSS：清内联样式，防残留压住 _apply_theme_stylesheet
+            frame.setStyleSheet("")
             if self._wb_promote_on_leave:
                 # 点击转常驻：显式走嵌入展开（动画 + chatFrame margin 切换 + 记忆落账 True）
                 self._wb_promote_on_leave = False
