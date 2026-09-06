@@ -2055,18 +2055,25 @@ class CommandCard(QWidget):
         if sender is None:
             return
         self.parameterValueSelected.emit(sender.value)
-        # 回退到参数列表模式
-        self._exit_value_selection()
+        # 回退到参数列表模式（标记为选择完成，抑制防抖回声重入）
+        self._exit_value_selection(mark_selected=True)
 
-    def _exit_value_selection(self):
-        """退出值选择模式，回到参数列表"""
-        # 记录刚选中退出的参数名：选择（Tab/Enter/点击）会同步插入完整值+空格并触发
-        # textChanged → 100ms 防抖 → _sync_detail_params → _auto_switch_to_value_selection。
-        # 此时行尾空格不算"已离开"，--load= 仍会命中并重新弹回值选择模式，
-        # 枚举描述气泡随之重新显示在旧几何位置（悬在聊天区中间）。
-        # 用户 100ms 内不可能有物理编辑，该次重入纯属程序回声，见
-        # _auto_switch_to_value_selection 的回声抑制分支。
-        self._value_just_selected_param = self._value_selection_param
+    def _exit_value_selection(self, mark_selected: bool = False):
+        """退出值选择模式，回到参数列表
+
+        Args:
+            mark_selected: True 表示本次退出源于用户完成枚举选择（Tab/Enter/点击），
+                记录参数名用于抑制防抖回声重入；False 表示参数被删/光标离开等
+                情境退出，不得打标（否则用户删值重新输入时列表会被误抑制）。
+        """
+        if mark_selected:
+            # 选择（Tab/Enter/点击）会同步插入完整值+空格并触发 textChanged →
+            # 100ms 防抖 → _sync_detail_params → _auto_switch_to_value_selection。
+            # 此时行尾空格不算"已离开"，--load= 仍会命中并重新弹回值选择模式，
+            # 枚举描述气泡随之重新显示在旧几何位置（悬在聊天区中间）。
+            # 用户 100ms 内不可能有物理编辑，该次重入纯属程序回声，见
+            # _auto_switch_to_value_selection 的回声抑制分支。
+            self._value_just_selected_param = self._value_selection_param
         self._value_selection_mode = False
         self._value_selection_param = ""
         self._detail_value_scroll.setVisible(False)
@@ -2957,7 +2964,7 @@ class CommandCard(QWidget):
                 widget = self._value_widgets[self._selected_value_index]
                 if widget.value:
                     self.parameterValueSelected.emit(widget.value)
-                    self._exit_value_selection()
+                    self._exit_value_selection(mark_selected=True)
             return
         if self._detail_mode and self._detail_has_params:
             # 参数列表模式：选中当前高亮的参数（仅当可见时）
