@@ -397,10 +397,6 @@ class SingleInputDialog(MaskDialogBase):
         self.input.selectAll()
 
 
-# 向后兼容别名（旧的 URL 引用代码）
-UrlInputDialog = SingleInputDialog
-
-
 class InfoDialog(MaskDialogBase):
     """通用信息提示弹框 — 单按钮确认，替代 qfluentwidgets MessageBox（仅确认按钮场景）
 

@@ -228,6 +228,11 @@ class ContextBreakdownTooltip(QWidget):
         self._refresh()
 
     def _refresh(self):
+        # 隐藏时短路：流式期间 set_usage 2Hz 调 set_data → _refresh，tooltip 隐藏时
+        # 13 处 setStyleSheet + legend rebuild 全是无效工作。显示前 _show_tooltip()
+        # 会主动调 _rebuild_tooltip() 补齐数据，短路不丢数据、不丢主题同步。
+        if not self.isVisible():
+            return
         data = self._data
         # 跟随主题：每次显示前重新读取主题色并回填静态控件样式
         self._load_theme_colors()

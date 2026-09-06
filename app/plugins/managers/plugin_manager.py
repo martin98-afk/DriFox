@@ -98,6 +98,61 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
 }
 
 
+# P1-2：插件清单文件大小上限（防超大 manifest 拖垮加载/解析）
+_MANIFEST_MAX_BYTES = 256 * 1024
+
+
+def _load_manifest_file(manifest_path: Path) -> Optional[dict]:
+    """读取插件清单 JSON（P1-2：文件 ≤256KB，超限拒载 + 明确报错）。
+
+    Returns:
+        manifest dict；文件不可读 / 超限 / 解析失败 / 根节点非对象 → None。
+    """
+    try:
+        size = manifest_path.stat().st_size
+    except OSError as e:
+        logger.error(f"[PluginManager] 清单不可读: {manifest_path} {e}")
+        return None
+    if size > _MANIFEST_MAX_BYTES:
+        logger.error(
+            f"[PluginManager] 清单文件 {size} 字节超过上限 {_MANIFEST_MAX_BYTES}（256KB），拒载: {manifest_path}"
+        )
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"[PluginManager] 清单解析失败: {manifest_path} {e}")
+        return None
+    if not isinstance(manifest, dict):
+        logger.error(f"[PluginManager] 清单根节点不是对象，跳过: {manifest_path}")
+        return None
+    return _enforce_manifest_limits(manifest, manifest_path)
+
+
+def _enforce_manifest_limits(manifest: dict, manifest_path: Path) -> dict:
+    """P1-2：manifest 资源上限（超限截断/丢弃 + warning，不拒载）。"""
+    icon = manifest.get("icon")
+    if isinstance(icon, str) and len(icon) > 512:
+        logger.warning(
+            f"[PluginManager] manifest icon 字段 {len(icon)} 字符超过上限 512，已丢弃: {manifest_path}"
+        )
+        manifest.pop("icon", None)
+    elif isinstance(icon, dict):
+        cleaned = {k: v for k, v in icon.items() if isinstance(v, str) and len(v) <= 512}
+        if len(cleaned) != len(icon):
+            logger.warning(
+                f"[PluginManager] manifest icon 子项超长(>512 字符)，已丢弃超限项: {manifest_path}"
+            )
+            manifest["icon"] = cleaned
+    pip = manifest.get("pip")
+    if isinstance(pip, list) and len(pip) > 20:
+        logger.warning(
+            f"[PluginManager] manifest pip 声明 {len(pip)} 条超过上限 20，已截断: {manifest_path}"
+        )
+        manifest["pip"] = pip[:20]
+    return manifest
+
+
 def _detect_components(plugin_dir: Path) -> Dict[str, bool]:
     """按 kernel.KNOWN_COMPONENTS 优先级探测插件目录实际组件（物理目录为准）
 
@@ -167,16 +222,29 @@ class PluginInfo:
                 return {"light": default, "dark": default}
             return None
         if isinstance(raw, str):
-            p = self.path / raw
+            p = (self.path / raw).resolve()
+            # P1-1：icon 路径逃逸校验——解析后必须仍在插件根内（str/dict 两形态同规则）
+            if not p.is_relative_to(self.path.resolve()):
+                logger.warning(
+                    f"[PluginManager] 插件 '{self.name}' icon 路径越界，已丢弃: {raw!r}"
+                )
+                return None
             if p.exists():
                 return {"light": p, "dark": p}
             return None
         if isinstance(raw, dict):
             result: dict = {}
+            root_resolved = self.path.resolve()
             for theme in ("light", "dark"):
                 path_str = raw.get(theme)
                 if path_str:
                     p = (self.path / path_str).resolve()
+                    # P1-1：icon 路径逃逸校验（越界条目丢弃 + warning）
+                    if not p.is_relative_to(root_resolved):
+                        logger.warning(
+                            f"[PluginManager] 插件 '{self.name}' icon 路径越界，已丢弃: {path_str!r}"
+                        )
+                        continue
                     if p.exists():
                         result[theme] = p
             # 单主题补齐：只有一个主题时补齐另一个
@@ -272,8 +340,8 @@ class PluginManager:
                 if name not in saved_set and name not in disabled_set:
                     saved.append(name)
             cfg.set(cfg.enabled_plugins, saved, save=True)
-        except (ImportError, Exception):
-            pass
+        except Exception as e:
+            logger.warning(f"[PluginManager] 从 Settings 恢复启用状态失败（吞异常保留语义）: {e}")
 
     def reset(self):
         """重置（主要用于测试）"""
@@ -771,9 +839,8 @@ class PluginManager:
                 continue
 
             try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if not isinstance(manifest, dict):
-                    logger.error(f"[PluginManager] 清单根节点不是对象，跳过: {manifest_path}")
+                manifest = _load_manifest_file(manifest_path)
+                if manifest is None:
                     continue
                 plugin_name = _normalize_plugin_name(manifest.get("name"), item.name)
                 if plugin_name is None:
@@ -853,7 +920,9 @@ class PluginManager:
             return None
 
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = _load_manifest_file(manifest_path)
+            if manifest is None:
+                return None
             plugin_name = manifest.get("name", plugin_dir.name)
 
             if manifest_format == "claude":
@@ -868,16 +937,21 @@ class PluginManager:
             # 但无 commands/ 目录）导致热更新触发全量命令重载
             manifest["components"] = _detect_components(plugin_dir)
 
-            # —— 平台兼容检查 + deps 统一注入（幂等，热重载 rescan 同样覆盖）——
+            # —— 平台兼容检查（G3：门禁全部通过前不注入 deps）——
             compatible, reason = check_platform(manifest)
             if not compatible:
                 logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
-            ensure_deps_on_path(plugin_dir)
 
             # —— P1 版本契约：min_host_version 与宿主版本比对 ——
             from app.plugins.version_gate import check_host_version
 
             ver_ok, ver_reason = check_host_version(manifest, plugin_name)
+
+            # —— G3 安全对齐：deps 注入延后到门禁之后（与 _scan_plugins 同版式）——
+            # 本函数在热路径（热重载/安装/更新）：先注入会让平台/版本不符的插件
+            # 依然拿到 sys.path 劫持能力，绕过门禁
+            if compatible and ver_ok:
+                ensure_deps_on_path(plugin_dir)
 
             # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
             self._register_config_schema(plugin_name, manifest)

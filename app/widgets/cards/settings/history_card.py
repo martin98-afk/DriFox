@@ -691,7 +691,7 @@ class _ArchivedItemCard(CardWidget):
         super().mousePressEvent(event)
 
 
-class _SectionHeader(QLabel):
+class _HistorySectionHeader(QLabel):
     def __init__(self, text: str, count: int = 0, parent=None):
         super().__init__(parent)
         display_text = text if count == 0 else f"{text} ({count})"
@@ -1041,7 +1041,7 @@ class HistoryCard(QWidget):
         self._batch_size = 30  # 每批渲染 30 个 widget（增大批次减少事件循环次数）
 
         # 分组标题 + 间隔线缓存（避免重复创建/销毁）
-        self._cached_headers: Dict[str, _SectionHeader] = {}
+        self._cached_headers: Dict[str, _HistorySectionHeader] = {}
         self._cached_spacers: List[QWidget] = []
 
         self._setup_ui()
@@ -1059,7 +1059,7 @@ class HistoryCard(QWidget):
     def refresh_style(self):
         """刷新主题样式：更新所有分组标题的颜色"""
         Colors.refresh()
-        for header in self.findChildren(_SectionHeader):
+        for header in self.findChildren(_HistorySectionHeader):
             header._apply_style()
 
     def _setup_ui(self):
@@ -1381,7 +1381,7 @@ class HistoryCard(QWidget):
                 # 复用或创建分组标题
                 header = self._cached_headers.get(section_name)
                 if header is None:
-                    header = _SectionHeader(section_name, count, self)
+                    header = _HistorySectionHeader(section_name, count, self)
                     self._cached_headers[section_name] = header
                 else:
                     header.setText(f"{section_name} ({count})" if count else section_name)
