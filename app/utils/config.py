@@ -450,6 +450,10 @@ class Settings(QConfig):
     # 内网 git 源显式加白用）
     marketplace_allowed_git_hosts = ConfigItem("Marketplace", "AllowedGitHosts", [])
 
+    # ========== 插件覆盖策略（同名覆盖显性化） ==========
+    # false 时用户目录同名插件跳过、系统版生效；默认 true 保 junction 部署工作流
+    allow_user_override = ConfigItem("Plugin", "AllowUserOverride", True, BoolValidator())
+
     # ========== Gateway 通讯平台配置 ==========
     # 企业微信
     gateway_wecom_enabled = ConfigItem("Gateway", "WeCom/Enabled", False, BoolValidator())

@@ -39,7 +39,7 @@
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -102,11 +102,12 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
 _MANIFEST_MAX_BYTES = 256 * 1024
 
 
-def _load_manifest_file(manifest_path: Path) -> Optional[dict]:
+def _load_manifest_file(manifest_path: Path):
     """读取插件清单 JSON（P1-2：文件 ≤256KB，超限拒载 + 明确报错）。
 
     Returns:
-        manifest dict；文件不可读 / 超限 / 解析失败 / 根节点非对象 → None。
+        (manifest, schema_warnings)；文件不可读 / 超限 / 解析失败 / 根节点非对象
+        → (None, [])。
     """
     try:
         size = manifest_path.stat().st_size
@@ -126,7 +127,14 @@ def _load_manifest_file(manifest_path: Path) -> Optional[dict]:
     if not isinstance(manifest, dict):
         logger.error(f"[PluginManager] 清单根节点不是对象，跳过: {manifest_path}")
         return None
-    return _enforce_manifest_limits(manifest, manifest_path)
+    manifest = _enforce_manifest_limits(manifest, manifest_path)
+    # 契约1：manifest schema 宽容校验（类型不符 → warning + 缺省处理；未知字段忽略）
+    from app.plugins.contracts.manifest_schema import validate_manifest
+
+    manifest, schema_warnings = validate_manifest(
+        manifest, source=manifest_path.parent.parent.name, fallback_name=manifest_path.parent.parent.name
+    )
+    return manifest, schema_warnings
 
 
 def _enforce_manifest_limits(manifest: dict, manifest_path: Path) -> dict:
@@ -178,6 +186,10 @@ class PluginInfo:
     platform_compatible: bool = True  # platforms 声明与当前系统是否兼容（缺省声明=兼容）
     version_compatible: bool = True  # min_host_version 与宿主版本比对（缺省声明=兼容）
     version_reason: str = ""  # 版本不兼容原因（供 UI 展示）
+    api_compatible: bool = True  # 契约2：api_version 与宿主插件 API 版本比对（缺省=兼容）
+    api_reason: str = ""  # api_version 不兼容原因（供 UI 展示）
+    manifest_warnings: List[str] = field(default_factory=list)  # 契约1：schema 校验 warning 清单（UI 角标后续）
+    overridden_by: str = ""  # 同名覆盖标记：被覆盖方 plugin_type（"system"/"claude"），空=未被覆盖
 
     @property
     def description(self) -> str:
@@ -189,8 +201,8 @@ class PluginInfo:
 
     @property
     def load_blocked(self) -> bool:
-        """是否被门禁拦截（平台不兼容或版本不满足），拦截时宿主不得加载其任何组件"""
-        return not (self.platform_compatible and self.version_compatible)
+        """是否被门禁拦截（平台/版本/api_version 任一不满足），拦截时宿主不得加载其任何组件"""
+        return not (self.platform_compatible and self.version_compatible and self.api_compatible)
 
     @property
     def is_system(self) -> bool:
@@ -392,22 +404,44 @@ class PluginManager:
 
         # 3. 构建新插件映射（优先级: 系统 → Claude → 用户）
         new_plugins: Dict[str, PluginInfo] = {}
+        # allow_user_override=false 时用户目录同名插件跳过，系统版生效
+        allow_user_override = True
+        try:
+            from app.utils.config import Settings
+
+            allow_user_override = bool(Settings.get_instance().allow_user_override.value)
+        except Exception:
+            pass
         # 先加系统插件
         for name, p in current_system.items():
             new_plugins[name] = p
-        # Claude 插件同名覆盖系统
+        # Claude 插件同名覆盖系统（同名覆盖显性化：warning + overridden_by 标记）
         for name, p in current_claude.items():
             if name in new_plugins:
-                if new_plugins[name].is_system:
-                    logger.info(f"[PluginManager] Rescan: Claude plugin '{name}' overrides system plugin")
-                    result["changed"].append(p)
+                overridden = new_plugins[name]
+                logger.warning(
+                    f"[PluginManager] Rescan: '{name}' 被 Claude 插件覆盖 "
+                    f"({overridden.plugin_type}: {overridden.path} → claude: {p.path})"
+                )
+                p.overridden_by = overridden.plugin_type
+                result["changed"].append(p)
             new_plugins[name] = p
         # 用户插件同名覆盖前两者（最高优先级）
         for name, p in current_user.items():
             if name in new_plugins:
-                if new_plugins[name].is_system:
-                    logger.info(f"[PluginManager] Rescan: user plugin '{name}' overrides system plugin")
-                    result["changed"].append(p)
+                if not allow_user_override:
+                    logger.warning(
+                        f"[PluginManager] Rescan: 用户插件 '{name}' 因 allow_user_override=false 跳过，"
+                        f"保留现有版本: {new_plugins[name].path}"
+                    )
+                    continue
+                overridden = new_plugins[name]
+                logger.warning(
+                    f"[PluginManager] Rescan: '{name}' 被用户插件覆盖 "
+                    f"({overridden.plugin_type}: {overridden.path} → user: {p.path})"
+                )
+                p.overridden_by = overridden.plugin_type
+                result["changed"].append(p)
             new_plugins[name] = p
 
         new_names = set(new_plugins.keys())
@@ -839,9 +873,11 @@ class PluginManager:
                 continue
 
             try:
-                manifest = _load_manifest_file(manifest_path)
+                manifest, schema_warnings = _load_manifest_file(manifest_path)
                 if manifest is None:
                     continue
+                for _w in schema_warnings:
+                    logger.warning(f"[PluginManager] {_w}")
                 plugin_name = _normalize_plugin_name(manifest.get("name"), item.name)
                 if plugin_name is None:
                     logger.error(
@@ -850,10 +886,9 @@ class PluginManager:
                     )
                     continue
 
-                # .claude-plugin 格式：自动补全缺少的字段
+                # .claude-plugin 格式：补全 type（version 缺省已由 manifest_schema 契约层提供）
                 if manifest_format == "claude":
                     manifest.setdefault("type", plugin_type)
-                    manifest.setdefault("version", manifest.get("version", "0.0.0"))
 
                 # 自动检测组件：扫描目录结构（两种格式都做，保证新增目录能被识别）
                 # 探测规则见 _COMPONENT_PROBES，按 kernel.KNOWN_COMPONENTS 顺序遍历
@@ -868,15 +903,16 @@ class PluginManager:
                     logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
 
                 # —— P1 版本契约：min_host_version 与宿主版本比对 ——
-                from app.plugins.version_gate import check_host_version
+                from app.plugins.version_gate import check_api_version, check_host_version
 
                 ver_ok, ver_reason = check_host_version(manifest, plugin_name)
+                api_ok, api_reason = check_api_version(manifest, plugin_name)
 
-                # —— 安全：deps 注入延后到门禁之后 ——
+                # —— G3 安全对齐：deps 注入延后到门禁之后 ——
                 # deps 目录被 insert 到 sys.path[0]（优先于 stdlib），注入即等于
                 # 赋予该插件劫持全进程导入的能力。故平台不兼容 / 版本契约未通过的
                 # 插件一律不注入，避免"未启用的插件仍能污染宿主"。
-                if compatible and ver_ok:
+                if compatible and ver_ok and api_ok:
                     ensure_deps_on_path(item)
 
                 # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
@@ -891,6 +927,9 @@ class PluginManager:
                         platform_compatible=compatible,
                         version_compatible=ver_ok,
                         version_reason=ver_reason,
+                        api_compatible=api_ok,
+                        api_reason=api_reason,
+                        manifest_warnings=schema_warnings,
                     )
                 )
                 logger.debug(
@@ -920,9 +959,11 @@ class PluginManager:
             return None
 
         try:
-            manifest = _load_manifest_file(manifest_path)
+            manifest, schema_warnings = _load_manifest_file(manifest_path)
             if manifest is None:
                 return None
+            for _w in schema_warnings:
+                logger.warning(f"[PluginManager] {_w}")
             plugin_name = manifest.get("name", plugin_dir.name)
 
             if manifest_format == "claude":
@@ -943,14 +984,15 @@ class PluginManager:
                 logger.warning(f"[PluginManager] {plugin_name} 平台不兼容: {reason}")
 
             # —— P1 版本契约：min_host_version 与宿主版本比对 ——
-            from app.plugins.version_gate import check_host_version
+            from app.plugins.version_gate import check_api_version, check_host_version
 
             ver_ok, ver_reason = check_host_version(manifest, plugin_name)
+            api_ok, api_reason = check_api_version(manifest, plugin_name)
 
             # —— G3 安全对齐：deps 注入延后到门禁之后（与 _scan_plugins 同版式）——
             # 本函数在热路径（热重载/安装/更新）：先注入会让平台/版本不符的插件
             # 依然拿到 sys.path 劫持能力，绕过门禁
-            if compatible and ver_ok:
+            if compatible and ver_ok and api_ok:
                 ensure_deps_on_path(plugin_dir)
 
             # —— E1 声明式插件配置：解析 config_schema 并注册（含自动设置卡）——
@@ -964,6 +1006,9 @@ class PluginManager:
                 platform_compatible=compatible,
                 version_compatible=ver_ok,
                 version_reason=ver_reason,
+                api_compatible=api_ok,
+                api_reason=api_reason,
+                manifest_warnings=schema_warnings,
             )
             logger.debug(
                 f"[PluginManager] Rescanned plugin: {plugin_name} (type={plugin_type}, format={manifest_format})"

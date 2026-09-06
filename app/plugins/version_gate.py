@@ -50,6 +50,38 @@ def host_version() -> str:
         return "0.0.0"
 
 
+# 宿主插件 API 契约版本：manifest 可选声明 api_version，高于此值拒载
+HOST_PLUGIN_API_VERSION = 1
+
+
+def check_api_version(manifest: dict, plugin_name: str = "") -> Tuple[bool, str]:
+    """契约2：manifest 可选 api_version 与宿主插件 API 版本比对。
+
+    - 缺省/None → 兼容（老插件零改动，存量插件均未声明）
+    - > HOST_PLUGIN_API_VERSION → 不兼容（load_blocked，reason 可见）
+    - < 1（含 0/负数）→ warning 向下兼容放行
+
+    Returns:
+        (是否兼容, 不兼容原因)。兼容时 reason 为空串。
+    """
+    api = (manifest or {}).get("api_version")
+    if api is None:
+        return True, ""
+    if not isinstance(api, int) or isinstance(api, bool):
+        # 契约1 schema 层已把非 int 规范化为缺省 1；此处兜底
+        api = 1
+    if api < 1:
+        logger.warning(
+            f"[VersionGate] 插件 '{plugin_name}' api_version={api} < 1，按向下兼容放行"
+        )
+        return True, ""
+    if api > HOST_PLUGIN_API_VERSION:
+        reason = f"插件 api_version={api} 高于宿主支持的 {HOST_PLUGIN_API_VERSION}"
+        logger.warning(f"[VersionGate] 插件 '{plugin_name}' {reason}，拒载")
+        return False, reason
+    return True, ""
+
+
 def check_host_version(manifest: dict, plugin_name: str = "") -> Tuple[bool, str]:
     """按 manifest 的 min_host_version 校验当前宿主。
 
