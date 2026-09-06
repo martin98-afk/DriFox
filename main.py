@@ -75,6 +75,7 @@ _CHROMIUM_FLAGS = (
     " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
     " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染
     " --js-flags=--max-old-space-size=128"  # 限制单 renderer JS 堆，防单页膨胀
+    + " --enable-low-end-device-mode"  # 🔧 Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
 )
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _CHROMIUM_FLAGS)
 
