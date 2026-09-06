@@ -342,46 +342,6 @@ _SUBAGENT_STATUS_SCHEMA = {
     },
 }
 
-_SUBAGENT_DAG_SCHEMA = {
-    "type": "function",
-    "function": {
-        "name": "subagent_dag",
-        "description": "子智能体DAG工作流。按拓扑排序分批并行执行，下游自动取上游结果。【同步执行】等全部完成再返回。【失败处理】失败节点→下游自动skipped。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "nodes": {
-                    "type": "array",
-                    "description": "工作流节点列表",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string", "description": "节点ID(如step1/analyze/build)，供edges引用"},
-                            "agent": {"type": "string", "description": "子智能体名称"},
-                            "description": {"type": "string", "description": "该节点的任务描述"},
-                            "context": {"type": "string", "description": "额外上下文(可选)，追加到上游结果之后"},
-                        },
-                        "required": ["id", "agent", "description"],
-                    },
-                },
-                "edges": {
-                    "type": "array",
-                    "description": "依赖关系。如[{from:step1,to:step2}]表示step2依赖step1",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "from": {"type": "string", "description": "上游节点 ID"},
-                            "to": {"type": "string", "description": "下游节点 ID"},
-                        },
-                        "required": ["from", "to"],
-                    },
-                },
-            },
-            "required": ["nodes", "edges"],
-        },
-    },
-}
-
 _TEAM_SEND_SCHEMA = {
     "type": "function",
     "function": {
@@ -474,39 +434,12 @@ def _subagent_status_impl(tool_ctx, **kwargs):
     return manager.get_all_active_tasks_with_details(with_log, with_result, session_id=session_id)
 
 
-def _subagent_dag_impl(tool_ctx, **kwargs):
-    manager = tool_ctx.get("sub_agent_manager")
-    if not manager:
-        return ToolResult(False, error="子智能体管理器未初始化")
-    nodes = kwargs.get("nodes", [])
-    edges = kwargs.get("edges", [])
-    if not nodes:
-        return ToolResult(False, error="节点列表为空")
-    session_id = tool_ctx.get("session_id", "")
-    return manager.execute_dag(nodes=nodes, edges=edges, session_id=session_id)
-
-
 def _team_send_impl(tool_ctx, **kwargs):
     return _team_send_message(tool_ctx, kwargs.get("to_agent", ""), kwargs.get("message", ""))
 
 
 def _team_list_impl(tool_ctx, **kwargs):
     return _team_list_members(tool_ctx)
-
-
-def _render_dag_body(result, tool_name, tool_args, success):
-    """subagent_dag 完成框渲染闭包：ECharts DAG 节点图（从主程序 render_helpers 迁出）"""
-    import base64
-    import hashlib
-
-    echarts = getattr(result, "echarts", None) or ""
-    if not echarts:
-        return None  # 无图表 → 回退默认渲染
-    b64_json = base64.b64encode(echarts.encode("utf-8")).decode("ascii")
-    chart_id = "echart-tool-" + hashlib.sha1(echarts.encode("utf-8")).hexdigest()[:12]
-    return f"""
-    <div id="{chart_id}" class="echarts-container" data-echarts-json="{b64_json}"
-        style="width: 100%; height: 400px; margin: 12px 0; border-radius: 10px; overflow: hidden;"></div>"""
 
 
 def _preview_subagent_para(tool_args: dict) -> str:
@@ -537,20 +470,6 @@ def _preview_subagent_status(tool_args: dict) -> str:
     return "查询子智能体状态"
 
 
-def _preview_subagent_dag(tool_args: dict) -> str:
-    """DAG 预览：展示首个节点的 description + 节点数（比纯"DAG 工作流"更有信息量）"""
-    nodes = tool_args.get("nodes", [])
-    count = len(nodes) if isinstance(nodes, list) else 0
-    if not count:
-        return "DAG 工作流"
-    head = ""
-    if isinstance(nodes[0], dict):
-        head = str(nodes[0].get("description") or "").strip()
-    if not head:
-        return f"DAG 工作流 ({count} 节点)"
-    return f"{head[:40]} 等 {count} 步工作流" if count > 1 else head
-
-
 def register(registry):
     registry.register(
         "subagent_para", _SUBAGENT_PARA_SCHEMA, impl=_subagent_para_impl,
@@ -569,17 +488,6 @@ def register(registry):
         aliases=["subagent-status", "TaskStatus", "Status"],
         preview=_preview_subagent_status,
         summarize=make_summarize_from_preview(_preview_subagent_status),
-    )
-    registry.register(
-        "subagent_dag", _SUBAGENT_DAG_SCHEMA, impl=_subagent_dag_impl,
-        danger="dangerous", icon="设置-subagent", cn_name="分发工作流",
-        group=GROUP_SUBAGENT, description="DAG工作流子智能体",
-        aliases=["subagent-dag", "subagent-teams", "SubagentDag", "Dag"],
-        render=_render_dag_body,
-        preview=_preview_subagent_dag,
-        summarize=make_summarize_from_preview(_preview_subagent_dag),
-        keep_in_content=True,
-        metadata={"subagent_task": True},
     )
     # 团队专用工具：team_only=True → 非团队成员从 schema 定义中过滤（LLM 不可见）
     registry.register(

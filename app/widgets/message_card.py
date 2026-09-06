@@ -345,10 +345,10 @@ def wheel_delta_to_px(delta: int) -> int:
 
 
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
-# 子智能体和提问工具（subagent_para/subagent_dag/question）涉及 AI 与用户的直接交互，
+# 子智能体和提问工具（subagent_para/question）涉及 AI 与用户的直接交互，
 # 留在正文中比收到工具区更符合直觉，体验更连贯。
 # 集合由 registry 派生（注册时显式声明 keep_in_content=True，不硬编码工具名）：
-#   write/edit/multi_edit + subagent_para/subagent_dag + question 等
+#   write/edit/multi_edit + subagent_para + question 等
 def _edit_tools() -> frozenset:
     """编辑/子智能体/提问类工具集合（registry 派生，数据源统一）"""
     try:
@@ -1461,7 +1461,7 @@ def _render_tool_streaming_block(
     # MCP 工具名清理
     is_mcp = tool_name.startswith("mcp__")
     # 子智能体任务：与 render_tool_block 统一走 registry metadata 声明
-    # （插件注册 metadata["subagent_task"]=True；工具已由 task 更名为 subagent_para/subagent_dag，
+    # （插件注册 metadata["subagent_task"]=True；工具已由 task 更名为 subagent_para，
     #   历史消息中的旧名 task 经 ToolNameMapper.to_native 归一化后命中）
     try:
         from app.tools.registry import ToolRegistry
@@ -1898,7 +1898,7 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
         else:
             diff_content = diff_after.strip()
 
-    # ========== 解析 echarts（可选字段，仅 subagent_dag 有；行锚定取最后一个） ==========
+    # ========== 解析 echarts（可选字段；行锚定取最后一个） ==========
     echarts_content = ""
     _echarts_pos = _field_positions.get("echarts", -1)
     if _echarts_pos != -1:
@@ -7153,7 +7153,7 @@ class CodeWebViewer(QWebEngineView):
 
                 // ===== 正文/非正文分区：将工具块/思考块从内容区移到独立可滚动容器 =====
                 // 编辑类工具（write/edit/multi_edit）保留在正文中，不迁移到"工具与思考"区域
-                // 子智能体/提问类工具（subagent_para/subagent_dag/question）与编辑工具类似，
+                // 子智能体/提问类工具（subagent_para/question）与编辑工具类似，
                 // 属于 AI 与用户之间的直接交互结果，保留在正文中体验更连贯。
                 // 工具名集合由 Python 渲染端派生（registry 声明），经 data-keep-in-content 属性传入，
                 // JS 不再硬编码工具名。

@@ -27,9 +27,9 @@ _agent_file_cache: Dict[str, Dict[str, tuple]] = {}
 def _subagent_forbidden_tools() -> set:
     """子智能体调用时禁止使用的工具集合（registry 派生，不硬编码工具名）。
 
-    规则（与旧硬编码 {question, subagent_para, subagent_status, subagent_dag} 等价）：
+    规则（与旧硬编码集合语义等价）：
     - metadata["interactive"]：交互式提问（question）
-    - group=="子智能体"：嵌套子智能体工具（subagent_para/subagent_status/subagent_dag）
+    - group=="子智能体"：嵌套子智能体工具（subagent_para/subagent_status）
     """
     try:
         from app.tools.registry import ToolRegistry
@@ -41,7 +41,7 @@ def _subagent_forbidden_tools() -> set:
         }
     except Exception:
         # registry 不可用：回退旧集合（保持过滤语义不失效）
-        return {"question", "subagent_para", "subagent_status", "subagent_dag"}
+        return {"question", "subagent_para", "subagent_status"}
 
 
 @dataclass
@@ -714,7 +714,7 @@ class AgentManager:
         if not agents:
             return ""
 
-        lines = ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para和subagent_dag使用)："]
+        lines = ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para使用)："]
         for a in agents:
             lines.append(f"- **{a.name}**: {a.description[:300]}")
 
@@ -757,7 +757,7 @@ class AgentManager:
         all_tools = get_builtin_tools_schema(self, builtin_tools=_bt)
 
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
-        # registry 派生：interactive（question）+ 子智能体组（subagent_para/subagent_status/subagent_dag）
+        # registry 派生：interactive（question）+ 子智能体组（subagent_para/subagent_status）
         forbidden_tools = _subagent_forbidden_tools()
         if is_subagent_call:
             # 被主智能体调用时，强制过滤

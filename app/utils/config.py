@@ -348,7 +348,7 @@ class Settings(QConfig):
     llm_model_overrides = ConfigItem("LLM", "ModelOverrides", {})
     # 最近选择的模型
     llm_selected_model = ConfigItem("LLM", "SelectedModel", "")
-    # 子智能体默认模型（用于 subagent_para / subagent_dag，空字符串表示使用主模型）
+    # 子智能体默认模型（用于 subagent_para，空字符串表示使用主模型）
     llm_subagent_default_model = ConfigItem("LLM", "SubagentDefaultModel", "")
     # 标题生成默认模型（用于 topic_summary，空字符串表示使用主模型）
     llm_title_gen_default_model = ConfigItem("LLM", "TitleGenDefaultModel", "")

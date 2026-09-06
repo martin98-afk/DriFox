@@ -437,7 +437,7 @@ class ToolRegistry:
         """始终展示在正文的工具名集合（消息卡片正文/工具区分区用）。
 
         纯参数派生：注册时显式声明 keep_in_content=True（如 write/edit/multi_edit、
-        subagent_para/subagent_dag、question）。不做 group/语义标记隐式推断——
+        subagent_para、question）。不做 group/语义标记隐式推断——
         语义键（interactive/subagent_task）另有消费点，借用会误触发其他流程。
         """
         with self._lock:
@@ -604,7 +604,6 @@ def _classify_fallback(tool_name: str) -> str:
         "mouse",
         "keyboard",
         "subagent_para",
-        "subagent_dag",
         "todowrite",
         "stage_files",
         "bg_start",

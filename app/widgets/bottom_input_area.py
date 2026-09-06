@@ -201,7 +201,6 @@ PLACEHOLDER_TIPS = [
     "/new 新建会话 /branch 创建分支",
     "/init 笔记 /theme 主题色 /compact 压缩",
     "/subagents 启动子智能体任务",
-    "/subagent_dag 编排多步骤 DAG 工作流",
     "/team 团队协作模式启动",
     "/title-gen 自动生成会话标题",
     "/receive-review 接收外部审查意见",

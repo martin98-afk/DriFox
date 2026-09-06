@@ -172,7 +172,6 @@ class TestSystemPluginTools:
             "lsp",
             "subagent_para",
             "subagent_status",
-            "subagent_dag",
             "team_send_message",
             "team_list_members",
             "question",
@@ -1559,24 +1558,6 @@ class TestSelfContained:
         html2 = _render_text_output("普通输出", "read", {"path": "x"})
         assert html2
 
-    def test_dag_echarts_render_closure(self):
-        """subagent_dag 的 echarts 渲染走插件 render 闭包"""
-        import json
-
-        from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
-        from app.tools.registry import ToolRegistry
-        from app.widgets.render_helpers import render_tool_block
-
-        ToolRegistry.reset_instance()
-        load_plugin_tools()
-        reg = ToolRegistry.get_instance()
-        assert reg.get_render("subagent_dag") is not None
-        echarts_json = json.dumps({"type": "graph", "data": [], "links": []})
-        html = render_tool_block(
-            "subagent_dag", {"nodes": [{"id": "a"}]}, result="DAG 完成", success=True, echarts=echarts_json
-        )
-        assert "echarts-container" in html
-
     def test_render_mode_and_closures(self):
         """render_mode（inline/none）+ 渲染闭包（edit diff/bash/question）"""
         from app.plugins.loaders.plugin_tool_loader import load_plugin_tools
@@ -1816,7 +1797,6 @@ class TestRegistryMetadata:
         reg = ToolRegistry.get_instance()
         kept = reg.keep_in_content_tools()
         assert "subagent_para" in kept
-        assert "subagent_dag" in kept
         assert "write" in kept, "文件写入工具应常驻正文"
         assert "question" in kept, "提问工具应常驻正文"
         # 纯 metadata 语义键（interactive/subagent_task）不再隐式驱动留正文

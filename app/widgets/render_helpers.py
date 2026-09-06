@@ -1061,7 +1061,7 @@ def _keep_in_content_tools() -> frozenset:
     """始终展示在正文的工具集合（registry 派生，与 message_card._edit_tools 同源）。
 
     规则：注册时显式声明 keep_in_content=True（write/edit/multi_edit、
-    subagent_para/subagent_dag、question 等）。用于工具块渲染 data-keep-in-content 属性。
+    subagent_para、question 等）。用于工具块渲染 data-keep-in-content 属性。
     """
     try:
         from app.tools.registry import ToolRegistry
@@ -1218,7 +1218,7 @@ def render_tool_block(
     echarts_html = ""
     if echarts:
         try:
-            # 工具自定义渲染闭包优先（如 subagent_dag 注册的 DAG 图渲染）
+            # 工具自定义渲染闭包优先（注册时声明 render 的工具）
             from app.tools.registry import ToolRegistry
             from app.tools.result import ToolResult as _TR
 
