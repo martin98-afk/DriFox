@@ -636,7 +636,12 @@ class _CustomInputCard(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            # 点击卡片任意位置 → 聚焦输入框（FocusIn 负责激活与互斥）
+            # 点击卡片任意位置 → 激活自定义输入。
+            # 不能只靠 FocusIn：焦点可能已在本输入框（如选选项后焦点未离开），
+            # setFocus 是 no-op 不产生 FocusIn，会导致图标点了没反应。
+            if not self._active:
+                self.set_active(True)
+                self.activated.emit()
             self._text_edit.setFocus()
         super().mousePressEvent(e)
 
