@@ -203,7 +203,6 @@ class TraceCardWidget(QWidget):
         self._dot = _StatusDot(bar)
         layout.addWidget(self._dot, 0, Qt.AlignVCenter)
         self._status_label = QLabel("记录中", bar)
-        self._status_label.setMinimumWidth(0)  # 窄窗口允许压缩裁剪
         layout.addWidget(self._status_label)
 
         layout.addStretch(1)
@@ -215,7 +214,6 @@ class TraceCardWidget(QWidget):
         # 默认关：Duration 关 = 每条等宽（固定长度），开启才按真实时间比例
         self._duration_btn.setChecked(False)
         self._duration_btn.setFixedHeight(26)
-        self._duration_btn.setMinimumWidth(0)  # 窄窗口允许压缩裁剪
         self._duration_btn.setCursor(Qt.PointingHandCursor)
         self._duration_btn.setToolTip("开：条带宽度按真实时间比例（开启后滚轮可缩放时间窗）；关：每条等宽")
         self._duration_btn.toggled.connect(self._on_flag_toggled)
@@ -223,8 +221,7 @@ class TraceCardWidget(QWidget):
 
         self._search_box = SearchLineEdit(bar)
         self._search_box.setPlaceholderText("搜索内容 / 工具名…")
-        # 正常宽度封顶 220；下限 0，窄窗口随布局压缩
-        self._search_box.setMinimumWidth(0)
+        # 宽度封顶 220，不设下限（QLayout 链上 min 0 压不住 hint，交给外层裁剪）
         self._search_box.setMaximumWidth(220)
         self._search_box.setFixedHeight(28)
         self._search_box.setClearButtonEnabled(True)
@@ -242,10 +239,6 @@ class TraceCardWidget(QWidget):
         self._stats_time = QLabel("LLM - · 工具 -", bar)
         self._stats_ctx = QLabel("上下文 -", bar)
         self._stats_total = QLabel("", bar)
-        # 页脚统计是此前窗口最小宽度的主因：QLabel 文本撑出的 minimumSizeHint
-        # 叠加近 300px。显式置 0 允许压缩裁剪，窗口才能拖到任意窄。
-        for _lbl in (self._stats_turns, self._stats_time, self._stats_ctx, self._stats_total):
-            _lbl.setMinimumWidth(0)
         widgets = (self._stats_turns, self._stats_time, self._stats_ctx)
         for i, lbl in enumerate(widgets):
             layout.addWidget(lbl)

@@ -482,7 +482,7 @@ class AssistantManager:
             ("build", "DriFox", "build", True, None, None),
             ("hanako", "花子", "hanako", False, None, None),
             ("pure", "空", "none", False, None, None),
-            ("viper-mei", "毒蛇妹", "viper-mei", False, False, True),
+            ("viper", "毒蛇妹", "viper", False, False, True),
         ]
         try:
             for name, display, yuan, primary, memory, experience in seeds:
@@ -502,7 +502,7 @@ class AssistantManager:
                 if primary:
                     a.primary = True
                 self.update(a)
-            logger.info("[assistant_hub] 已预置默认助手: build / hanako / pure / viper-mei")
+            logger.info("[assistant_hub] 已预置默认助手: build / hanako / pure / viper")
         except Exception as e:
             logger.warning(f"[assistant_hub] 预置助手失败: {e}")
 

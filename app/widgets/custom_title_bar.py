@@ -651,11 +651,15 @@ class CustomTitleBar(TitleBarBase):
             except Exception:
                 pass
 
-        # 窄窗口下标题栏按钮允许被裁剪：不放行的话标题栏按钮堆的 minimumSizeHint
-        # （~340px）会顶住整窗 resize 下限，主窗口无法缩到很小
+        # 标题栏按钮堆的 minimumSizeHint（~340px）会顶住整窗 resize 下限；
+        # setMinimumWidth(0) 压不住 hint，必须覆写：宽度全放开，窄窗口下按钮被裁剪
         self.setMinimumWidth(0)
         self.refresh_style()
         self._sync_tab_centering()
+
+    def minimumSizeHint(self):  # noqa: N802
+        # 宽度 0：允许主窗口缩到任意窄（窄时 tab/按钮被布局裁剪）
+        return QSize(0, self.MAC_HEIGHT if self._is_mac else self.HEIGHT)
 
     def _emit_sidebar_hover(self, on: bool) -> None:
         """侧栏开关按钮 hover 状态变化：True=进入 False=离开"""

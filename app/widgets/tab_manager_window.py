@@ -205,13 +205,11 @@ class EmptyStateWidget(QWidget):
 
         icon_label = QLabel("📑", self)
         icon_label.setAlignment(Qt.AlignCenter)
-        icon_label.setMinimumWidth(0)  # 窄窗口允许压缩，避免撑住整窗 resize 下限
         icon_label.setStyleSheet("font-size: 48px; background: transparent;")
         layout.addWidget(icon_label)
 
         self._text_label = QLabel("没有打开的窗口", self)
         self._text_label.setAlignment(Qt.AlignCenter)
-        self._text_label.setMinimumWidth(0)  # 文本宽 ~150px 是空态页撑宽的元凶
         self._text_label.setFont(get_unified_font(14))
         self._text_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)}"
@@ -224,6 +222,11 @@ class EmptyStateWidget(QWidget):
         self._text_label.setStyleSheet(
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)}"
         )
+
+    def minimumSizeHint(self):  # noqa: N802
+        # setMinimumWidth(0) 压不住 hint（QWidgetItem::minimumSize = hint.expandedTo(min)），
+        # 文本宽 ~150px 会顶住整窗 resize 下限，必须从源头摘掉
+        return QSize(0, 0)
 
 
 def _apply_window_topmost(window):
