@@ -42,10 +42,14 @@ DUR = 60.0
 
 @pytest.fixture(autouse=True)
 def _reset_suppression_state():
-    """测试后复位类级抑制状态，避免跨用例污染"""
+    """测试后复位类级抑制/watcher 状态，避免跨用例污染"""
     yield
     PluginHostService._watcher_suppress_refs = 0
     PluginHostService._suppress_watcher_until = 0.0
+    PluginHostService._plugin_watcher_started = False
+    PluginHostService._plugin_watcher_refcount = 0
+    PluginHostService._plugin_watcher_thread = None
+    PluginHostService._plugin_watcher_stop = None
 
 
 class TestSuppressRefcount:
@@ -212,3 +216,74 @@ class TestInstallerRemoveSuppression:
         assert ok is True
         assert targeted == [], "目录不存在时不应触发重载"
         assert PluginHostService._watcher_suppress_refs == 0
+
+
+class TestCrossPluginBatchEmit:
+    def test_cross_plugin_changes_emit_single_full_reload(self, tmp_path, monkeypatch, qtbot):
+        """跨插件批量变更 → 整批只 emit 一次 ("","")（合并为全量重载请求）
+
+        回归锁定（卡死根因之三）：旧实现逐 (插件,组件) emit——39 插件批次产生
+        90+ 个排队信号（实测 22 秒 148 次 emit），主线程「首个同步重载 + 300ms
+        去抖合并重载」背靠背执行。现整批合并为一次空名请求，由
+        reload_plugin_subsystems 的 rescan diff 精准路径覆盖全部增删改。
+        """
+        import threading
+
+        import watchfiles as _wf
+        from PyQt5.QtCore import QObject
+        from watchfiles import Change
+
+        # ── 夹具：两个假插件目录（跨插件批次） ──
+        sys_plugins = tmp_path / "sys-plugins"
+        plug_a = sys_plugins / "plug-a"
+        plug_b = sys_plugins / "plug-b"
+        plug_a.mkdir(parents=True)
+        plug_b.mkdir(parents=True)
+
+        class _FakePlugin:
+            def __init__(self, name, path):
+                self.name = name
+                self.path = path
+
+        class _FakePM:
+            _SYSTEM_PLUGIN_DIR = sys_plugins
+            _app_data_dir = None  # 用户插件目录不进 watch_paths
+            _USER_PLUGIN_DIR_NAME = "plugins"
+
+            def list_plugins(self):
+                return [_FakePlugin("plug-a", plug_a), _FakePlugin("plug-b", plug_b)]
+
+        monkeypatch.setattr(
+            "app.plugins.managers.plugin_manager.PluginManager.get_instance",
+            staticmethod(lambda: _FakePM()),
+        )
+
+        # ── 假 watch：yield 一批跨插件变更后挂起，等测试侧放行 ──
+        batch = {
+            (Change.added, str(plug_a / "ui" / "card.py")),
+            (Change.modified, str(plug_a / "commands" / "c.json")),
+            (Change.deleted, str(plug_b / "skills" / "s.md")),
+            (Change.added, str(plug_b / "ui" / "x.py")),
+        }
+        entered = threading.Event()
+
+        def _fake_watch(*paths, **kwargs):
+            yield batch
+            entered.set()
+            kwargs["stop_event"].wait(5.0)  # 挂住 watcher 线程，避免多轮 yield
+
+        monkeypatch.setattr(_wf, "watch", _fake_watch)
+
+        svc = PluginHostService.__new__(PluginHostService)
+        QObject.__init__(svc)
+        # 拦截真实重载槽：只收集 emit，不触发 rescan/子系统重载
+        received: list = []
+        monkeypatch.setattr(svc, "_on_hot_reload_requested", lambda p, c: received.append((p, c)))
+
+        svc._start_plugin_watcher()
+        try:
+            assert entered.wait(5.0), "watcher 线程未在超时内消费测试批次"
+            qtbot.wait_until(lambda: len(received) >= 1, timeout=5000)
+            assert received == [("", "")], f"跨插件批次应合并为一次全量重载请求，实际: {received}"
+        finally:
+            svc._stop_plugin_watcher()

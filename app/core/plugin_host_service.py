@@ -661,51 +661,21 @@ class PluginHostService(QObject):
                     plugin_name = self._identify_plugin_from_changes(relevant_changes, current_prefixes)
 
                     if plugin_name == "__ALL__":
-                        # 跨插件变更：逐一识别受影响的插件，各自走增量重载路径
+                        # 跨插件批量变更：整批合并为一次全量重载请求（emit 空名）。
+                        # 历史问题：原实现逐 (插件,组件) emit——39 插件批次实测产生 90+ 个
+                        # 排队信号（22 秒 148 次 emit），主线程「首个同步全量重载 + 300ms
+                        # 去抖合并全量重载」背靠背执行，中间还夹着几十个信号事件排队处理，
+                        # UI 长冻结。逐个 emit 的精准性被下游去抖合并完全抵消，纯增开销。
+                        # 现改为一次 emit("", "") → reload_plugin_subsystems 精准路径：
+                        # rescan diff 对 added/removed/changed 逐插件精准处理（根目录删除
+                        # 必然进 removed 清理），语义覆盖原逐组件 emit + _root_deleted 兜底。
                         affected_plugins = self._identify_all_affected_plugins(relevant_changes, current_prefixes)
                         logger.info(
                             f"[PluginHost] 跨插件文件变更 ({len(relevant_changes)} 处，"
                             f"涉及 {len(affected_plugins)} 个插件: {', '.join(sorted(affected_plugins))})，"
-                            f"逐一增量重载..."
+                            f"合并为一次全量重载请求"
                         )
-                        for pname in affected_plugins:
-                            all_components = self._identify_all_components_from_changes(
-                                relevant_changes, current_prefixes, pname
-                            )
-                            if all_components:
-                                ordered = sorted(
-                                    all_components,
-                                    key=lambda c: self._COMPONENT_ORDER.get(c, 99),
-                                )
-                                for component in ordered:
-                                    if _is_duplicate(pname, component):
-                                        continue
-                                    logger.info(
-                                        f"[PluginHost] 插件 [{pname}] ({component}) "
-                                        f"跨插件文件变更，请求主线程增量重载..."
-                                    )
-                                    self._hot_reload_requested.emit(pname, component)
-                            else:
-                                # 变更不在已知组件目录中（如 data/ 等非相关目录），跳过不触发重载
-                                # 特殊 case：插件根目录被删除（整个插件被移出），此时 path 精确等于
-                                # plugin_path，被 _identify_all_components_from_changes 跳过（continue），
-                                # 导致 all_components 为空。需要在此处兜底检测并触发全组件卸载。
-                                _root_deleted = any(
-                                    ct == 3 and cp.lower() == path
-                                    for path, name in current_prefixes.items()
-                                    if name == pname
-                                    for ct, cp in relevant_changes
-                                )
-                                if _root_deleted:
-                                    logger.info(
-                                        f"[PluginHost] 插件 [{pname}] 目录已被删除，跨插件变更中触发全组件卸载..."
-                                    )
-                                    self._hot_reload_requested.emit(pname, "")
-                                else:
-                                    logger.debug(
-                                        f"[PluginHost] 插件 [{pname}] 跨插件文件变更不涉及已知组件，"
-                                        f"跳过重载: {relevant_changes[0][1]}"
-                                    )
+                        self._hot_reload_requested.emit("", "")
                     elif plugin_name:
                         # 识别变更所属组件（agents/hooks/commands/themes/skills/mcp/lsp/ui）
                         # 多组件批处理：一次 watchfiles batch 中可能同时修改多个组件目录
