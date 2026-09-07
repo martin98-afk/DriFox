@@ -17,6 +17,7 @@ PluginHostService — 应用级插件宿主服务（一个应用一个实例）
 """
 
 import os
+import threading
 import time
 from typing import Any, Dict, Optional
 
@@ -30,6 +31,49 @@ from app.plugins.kernel import COMPONENT_ORDER
 # 其余组件属于注册期过滤型（条目是否进 registry 由 loader 在注册阶段决定），
 # 细项开关必须重载该组件的注册才能落地。
 _READ_THROUGH_COMPONENTS = frozenset({"hooks", "team_templates"})
+
+# ── watcher 抑制引用计数（并发批量装卸安全）────────────────────────
+# 历史问题：_suppress_watcher_until 是单一截止时间戳，enable/disable/install/
+# uninstall/config_sync 各自写 it = now + duration，前一个操作结束立即清零 →
+# 当多个插件**同时**安装/卸载（市场并发上限 3）时，先结束的 worker 会把
+# 抑制窗口提前关掉，后结束的 worker 仍在大规模写/删 plugins 目录（整树
+# rename/rmtree 产生成百上千 watchfiles 事件）→ watcher 风暴 + 半成品插件
+# 被 import + 主线程重载风暴 → UI 卡死。
+# 修复：引用计数式抑制。suppress 持有期在最后一个 release 前不会解除，
+# 截止时间戳仅作旧调用方（config_sync 直接写）的兼容叠加。操作方应使用
+# 下方模块级函数（线程安全），不要直接写类属性。
+_watcher_suppress_lock = threading.Lock()
+
+
+def suppress_plugin_watcher(duration: float = 180.0) -> None:
+    """引用计数式抑制插件热重载 watcher（并发安装/卸载安全，幂等叠加）
+
+    Args:
+        duration: 截止时间戳叠加窗口（秒）。调用方忘记 release 时兜底自动过期。
+    """
+    try:
+        with _watcher_suppress_lock:
+            PluginHostService._watcher_suppress_refs += 1
+            PluginHostService._suppress_watcher_until = max(
+                PluginHostService._suppress_watcher_until, time.time() + duration
+            )
+    except Exception as e:  # pragma: no cover - 防御极端 import 时序
+        logger.debug(f"[PluginHost] suppress_plugin_watcher 失败（不影响调用方）: {e}")
+
+
+def resume_plugin_watcher() -> None:
+    """释放一次 watcher 抑制引用。归零时解除抑制（截止时间戳清零）。
+
+    注意：仅解抑制，**不**触发重载——调用方需自行按操作结果安排
+    reload_plugin_targeted / reload_plugin_subsystems。
+    """
+    try:
+        with _watcher_suppress_lock:
+            PluginHostService._watcher_suppress_refs = max(0, PluginHostService._watcher_suppress_refs - 1)
+            if PluginHostService._watcher_suppress_refs == 0:
+                PluginHostService._suppress_watcher_until = 0.0
+    except Exception as e:  # pragma: no cover - 防御极端 import 时序
+        logger.debug(f"[PluginHost] resume_plugin_watcher 失败（不影响调用方）: {e}")
 
 
 class PluginHostService(QObject):
@@ -311,6 +355,9 @@ class PluginHostService(QObject):
     # 由 config_sync 下载完成后兜底合并触发一次 reload_plugin_subsystems。
     _suppress_watcher_until = 0.0
     _watcher_pending_reload = False
+    # 引用计数式抑制（suppress_plugin_watcher/resume_plugin_watcher 维护，
+    # 并发安装/卸载互不清除的语义基础——见模块头注释）
+    _watcher_suppress_refs = 0
     # ★ 泄漏修复（P1）：watcher 闭包持有首个 backend 实例引用（self._hot_reload_requested /
     # self.plugin_changed / self._identify_* 全部走实例成员），窗口关闭不停止则实例永不可回收。
     # 用引用计数 + stop_event 实现"最后一个窗口关闭时停止 watcher"：
@@ -591,7 +638,7 @@ class PluginHostService(QObject):
                     # 也避免半安装插件被提前 import 报错。窗口结束后由调用方
                     # （config_sync 下载完成 / installer 安装完成）主动触发一次
                     # reload_plugin_subsystems 兜底加载，pending 事件不丢失。
-                    if time.time() < self._suppress_watcher_until:
+                    if self._watcher_suppressed():
                         self._watcher_pending_reload = True
                         logger.info(
                             f"[PluginHost] 抑制窗口内收到 {len(relevant_changes)} 处变更，标记 pending 待合并重载"
@@ -760,13 +807,20 @@ class PluginHostService(QObject):
                                         for ct, cp in relevant_changes
                                     )
                                     if _is_fresh_install:
+                                        # 10s 去重：抑制窗口后残留的同一批 added 事件会反复
+                                        # 走到本分支（路径索引尚未重建），同一插件只应触发一次
+                                        # __NEW__ 全量加载——首拍预填充 dedup，后续批直接跳过，
+                                        # 避免并发安装多个插件时每个插件被重复全量加载（主线程
+                                        # 重载风暴）。
+                                        if _is_duplicate(new_name, ""):
+                                            logger.debug(
+                                                f"[PluginHost] 插件 [{new_name}] __NEW__ 请求 10s 内重复，去重跳过"
+                                            )
+                                            continue
                                         logger.info(
                                             f"[PluginHost] 插件 [{new_name}] 检测到新增事件，"
                                             f"判定为全新安装，请求 __NEW__ 全组件加载..."
                                         )
-                                        # 预填充 dedup cache，防止路径索引重建后同一批
-                                        # watch 事件的剩余部分以已知插件路径再次触发
-                                        _dedup_cache[(new_name, "")] = time.time() + _DEDUP_INTERVAL
                                         self._hot_reload_requested.emit(self._NEW_PLUGIN_SENTINEL, new_name)
                                         continue
                                     # 非全新安装：使用插件实际路径识别变更组件
@@ -793,11 +847,15 @@ class PluginHostService(QObject):
                                     )
                                     self._hot_reload_requested.emit(new_name, "")
                                     continue
-                                # 预填充 dedup cache，防止路径索引重建后同一批 watch 事件
-                                # 的剩余部分以已知插件路径再次触发（ghost trigger）
-                                _dedup_cache[(new_name, "")] = time.time() + _DEDUP_INTERVAL
                                 # 发射新插件标记，走 _reload_new_plugin 增量路径
-                                # 只扫描这一个插件目录，不触发全量 rescan
+                                # 只扫描这一个插件目录，不触发全量 rescan。
+                                # 10s 去重：未注册插件在批量落盘期间会跨多批 watch 事件反复
+                                # 走到本分支，同一插件只触发一次 __NEW__ 全量加载。
+                                if _is_duplicate(new_name, ""):
+                                    logger.debug(
+                                        f"[PluginHost] 插件 [{new_name}] __NEW__ 请求 10s 内重复，去重跳过"
+                                    )
+                                    continue
                                 self._hot_reload_requested.emit(self._NEW_PLUGIN_SENTINEL, new_name)
                         else:
                             # 无法识别的新增文件变更（如编辑器临时文件、git 残留等）
@@ -811,6 +869,10 @@ class PluginHostService(QObject):
         t = _threading.Thread(target=_watch_loop, daemon=True, name="plugin-watcher")
         self._plugin_watcher_thread = t
         t.start()
+
+    def _watcher_suppressed(self) -> bool:
+        """watcher 当前是否处于抑制窗口（引用计数 + 截止时间戳任一命中）"""
+        return self._watcher_suppress_refs > 0 or time.time() < self._suppress_watcher_until
 
     def _stop_plugin_watcher(self):
         """backend 关闭时递减 watcher 引用计数；归零时停止 watchfiles 线程。
@@ -1798,7 +1860,35 @@ class PluginHostService(QObject):
             self.emit_plugin_changed(result, plugin_name, action=action)
         except Exception as e:
             logger.warning(f"[PluginHost] reload_plugin_targeted 广播失败: {e}")
+        finally:
+            # 重载后重建 watcher 路径索引：安装/卸载（rescan_plugin 已更新 PluginManager）
+            # 会让 watchfiles 线程的插件前缀表过期，重建后残留事件按已知插件走增量/去重，
+            # 避免被反复识别为 __NEW__ 全量加载（对齐 _on_hot_reload_requested 语义）。
+            self._rebuild_watcher_prefixes()
+            self._stamp_watcher_dedup_for(plugin_name, result)
         return result
+
+    def _stamp_watcher_dedup_for(self, plugin_name: str, result: dict) -> None:
+        """把本次已成功重载的组件写入 watcher 10s 去重缓存。
+
+        安装/更新完成后的 targeted 重载会重建前缀索引，但本批文件事件中属于该
+        插件组件目录的残留事件仍会在随后 ~2s（watchfiles debounce）到达 watcher
+        并触发一次重复组件重载。预写去重键使残留事件被 _is_duplicate 跳过，
+        避免「市场装一个插件 → 组件被全量重载两次」的主线程重复开销。
+        """
+        dedup = getattr(self, "_watcher_dedup_cache", None)
+        if (
+            dedup is None
+            or not plugin_name
+            or plugin_name == self._NEW_PLUGIN_SENTINEL
+            or not isinstance(result, dict)
+        ):
+            return
+        window_end = time.time() + 10.0
+        for comp, ok in result.items():
+            if comp.startswith("_") or not ok:
+                continue
+            dedup[(plugin_name, comp)] = window_end
 
     def reload_plugin_subsystems(self, force_full: bool = False) -> dict:
         """重载插件子系统（默认 diff 精准；force_full=True 走全量）
