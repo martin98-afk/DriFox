@@ -136,6 +136,7 @@ class TraceCardWidget(QWidget):
         self._pal = ThemePalette()
         self._fs = 13
         self._schema_ts = 0.0
+        self._aux_dirty = False  # 有 O(N) 辅助刷新待补（见 _flush_aux_refresh）
         self._build_ui()
         self._build_timer()
 
@@ -249,6 +250,14 @@ class TraceCardWidget(QWidget):
         self._tick_timer.setInterval(1000)
         self._tick_timer.timeout.connect(self._on_tick)
         self._tick_timer.start()
+        # 统计/时间线数据刷新防抖（100ms 合并窗口）：流式期间 recordsUpdated /
+        # tailChanged / context_updated 高频到达，而 timeline.set_records /
+        # _sync_bounds / _refresh_stats 都是 O(全部记录) 遍历 —— 长会话下逐次
+        # 执行就是持续卡顿。列表行本身走增量（append/update），只合并这三样。
+        self._aux_timer = QTimer(self)
+        self._aux_timer.setSingleShot(True)
+        self._aux_timer.setInterval(100)
+        self._aux_timer.timeout.connect(self._flush_aux_refresh)
 
     # ──────────────────── 上下文注入 ────────────────────
 
@@ -302,6 +311,9 @@ class TraceCardWidget(QWidget):
         super().showEvent(event)
         if self._ctx_provider is not None:
             self._refresh_context()
+        # 隐藏期间积压的统计/时间线刷新（_flush_aux_refresh 不可见时会跳过）
+        if self._aux_dirty:
+            self._flush_aux_refresh()
 
     def _refresh_context(self) -> None:
         if self._ctx_provider is None:
@@ -541,6 +553,13 @@ class TraceCardWidget(QWidget):
 
     def _pull_records(self) -> None:
         """全量推送（首次显示 / reset / 切换标签页）。"""
+        # 全量重置（切会话 / 切标签页 / 清除）时丢掉时间选区：旧区间在新会话里没意义。
+        # 两处都直接设空值、不 emit，避免互相回环。
+        # ⚠️ 必须在 set_records **之前**清：否则列表先按旧选区过滤建一遍、
+        # clear_time_range 再全量重建一遍（长会话下白干 200ms+）。
+        self._timeline.clear_range()
+        self._turn_list.clear_time_range()
+
         vis = self._visible()
         stable = self._stable()
         self._timeline.set_records(vis)
@@ -552,10 +571,6 @@ class TraceCardWidget(QWidget):
         self._detail.clear()
         self._detail.set_records(vis)
         self._hide_detail()  # 全量重置后回到无选中态 → 详情收起
-        # 全量重置（切会话 / 切标签页 / 清除）时丢掉时间选区：旧区间在新会话里没意义。
-        # 两处都直接设空值、不 emit，避免互相回环。
-        self._timeline.clear_range()
-        self._turn_list.clear_time_range()
         self._refresh_stats(vis)
         self._maybe_refresh_schema(force=self._schema_ts <= 0)
         self._refresh_system_sections()
@@ -567,33 +582,45 @@ class TraceCardWidget(QWidget):
         # ⚠️ start/count 是 stable（纯落盘）空间 → 切片也必须用 stable：
         # vis[start:start+count] 会把 tail 头几条错当增量行插进主列表。
         self._turn_list.append_records(self._stable()[start : start + count])
-        vis = self._visible()
-        self._timeline.set_records(vis)
-        self._sync_bounds(vis)
-        self._detail.set_records(vis)
-        self._refresh_stats(vis)
+        self._schedule_aux_refresh()
 
     def _on_records_updated(self, start: int, count: int) -> None:
         self._turn_list.update_records(start, count)
-        vis = self._visible()
-        self._timeline.set_records(vis)
-        self._sync_bounds(vis)
-        self._detail.set_records(vis)
-        # 选中行被回填 → 同步详情
+        # 选中行被回填 → 同步详情（单条 O(1)，留同步；O(N) 部分走防抖）
         sel = self._turn_list.selected_record_idx
         if sel is not None and start <= sel < start + count:
             self._detail.select(sel)
-        self._refresh_stats(vis)
+        self._schedule_aux_refresh()
 
     def _on_tail_changed(self) -> None:
         tail = self._collector.tail if self._collector else []
         self._turn_list.set_tail(tail)
-        self._timeline.set_records(self._visible())
-        self._refresh_stats(self._visible())
+        self._schedule_aux_refresh()
 
     def _on_context_updated(self, tokens: int, limit: int) -> None:
         self._context_tokens, self._context_limit = tokens, limit
-        self._refresh_stats(self._visible())
+        self._schedule_aux_refresh()
+
+    def _schedule_aux_refresh(self) -> None:
+        """统计/时间线/详情数据合并刷新：100ms 窗口内多次信号只做一次 O(N) 遍历。
+
+        流式期间 recordsUpdated / tailChanged / context_updated 高频到达，原版
+        每次都全量推送 timeline + stats（O(全部记录)），长会话下是持续卡顿源。
+        """
+        self._aux_dirty = True
+        if not self._aux_timer.isActive():
+            self._aux_timer.start()
+
+    def _flush_aux_refresh(self) -> None:
+        """防抖窗口到期：把 timeline/stats/详情数据源一次性刷到最新。"""
+        self._aux_dirty = False
+        if not self.isVisible():
+            return  # 不可见：留 dirty 标志，showEvent 时补刷
+        vis = self._visible()
+        self._timeline.set_records(vis)
+        self._sync_bounds(vis)
+        self._detail.set_records(vis)
+        self._refresh_stats(vis)
 
     def _on_session_changed(self, _sid: str = "") -> None:
         """backend 信号驱动的会话切换 → 重新投影。
@@ -763,6 +790,8 @@ class TraceCardWidget(QWidget):
 
     def deleteLater(self) -> None:  # noqa: N802
         try:
+            self._tick_timer.stop()
+            self._aux_timer.stop()
             self._unbind_collector_signals()
             self._unbind_backend_stats_signals()
             self._hub.dispose()

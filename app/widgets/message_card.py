@@ -722,7 +722,6 @@ def _wrap_code_blocks_with_copy_button_web(
             border: 1px solid var(--code-border, rgba(58, 63, 71, 0.6));
             border-radius: 10px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.18), 0 1px 3px rgba(0,0,0,0.2);
-            backdrop-filter: blur(8px);
             font-family: Consolas, monospace;
             font-size: {_font_size}px;
         ">
