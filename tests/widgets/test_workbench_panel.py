@@ -6,7 +6,7 @@
 模态避让、产物页插件槽位替换。纯离屏（offscreen）运行，不依赖真实显示环境。
 
 ★ 产物页已完全插件化：面板不内置产物实现，测试统一加载系统插件的
-``SystemArtifactsPage``（plugins/system/ui/_artifacts_page.py）作为产物页注入。
+``SystemArtifactsPage``（plugins/system-ui/ui/_artifacts_page.py）作为产物页注入。
 """
 
 import importlib.util
@@ -30,7 +30,7 @@ from app.widgets.workbench_panel import (  # noqa: E402
 )
 
 # 系统插件 ui 目录（产物页实现所在）
-_SYSTEM_UI_DIR = Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "ui"
+_SYSTEM_UI_DIR = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-ui" / "ui"
 
 
 def _load_system_artifacts_cls():
@@ -547,11 +547,11 @@ def test_other_plugin_page_id_still_appended(panel):
 
 
 def test_system_plugin_ui_module_importable():
-    """plugins/system/ui/__init__.py 应可被 import 且暴露 register_ui 函数"""
+    """plugins/system-ui/ui/__init__.py 应可被 import 且暴露 register_ui 函数"""
     import importlib.util
     from pathlib import Path
 
-    ui_init = Path("plugins/system/ui/__init__.py").resolve()
+    ui_init = Path("plugins/system-ui/ui/__init__.py").resolve()
     assert ui_init.exists(), f"system plugin ui module missing: {ui_init}"
     spec = importlib.util.spec_from_file_location("system_ui_test", ui_init)
     assert spec is not None and spec.loader is not None

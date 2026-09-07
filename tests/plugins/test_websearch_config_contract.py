@@ -96,7 +96,7 @@ class TestLegacyMigration:
 class TestSelfContained:
     def test_no_manual_storage_boilerplate_left(self):
         """手写存储样板已删（get_api_key_config/set_api_key_config/_config_path 不复存在）"""
-        src = open("plugins/system/tools/web_tools.py", encoding="utf-8").read()
+        src = open("plugins/system-tools/tools/web_tools.py", encoding="utf-8").read()
         assert "def get_api_key_config" not in src
         assert "def set_api_key_config" not in src
         assert "_config_path" not in src
@@ -105,10 +105,10 @@ class TestSelfContained:
         """手写 UI 卡已删（自动卡接管）"""
         import os
 
-        ui_init = "plugins/system/ui/__init__.py"
+        ui_init = "plugins/system-ui/ui/__init__.py"
         assert not os.path.exists(ui_init) or ("WebSearchKeySettingsCard" not in open(ui_init, encoding="utf-8").read())
 
     def test_no_settings_dependency(self):
         """插件配置不依赖主程序 Settings（沿用自包含决策）"""
-        src = open("plugins/system/tools/web_tools.py", encoding="utf-8").read()
+        src = open("plugins/system-tools/tools/web_tools.py", encoding="utf-8").read()
         assert "from app.utils.config import Settings" not in src

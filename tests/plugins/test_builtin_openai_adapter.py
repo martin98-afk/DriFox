@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """协议家族适配器与 chat_worker 旧协议检测方法行为逐点等价。
 
-实现已从旧单适配器迁入系统插件三家族 plugins/system/model_adapters/：
+实现已从旧单适配器迁入系统插件三家族 plugins/system-model-adapters/model_adapters/：
 openai-family（兜底）/ gemini-family / deepseek-family。
 """
 

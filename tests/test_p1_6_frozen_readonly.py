@@ -34,7 +34,7 @@ def test_frozen_plugin_root_resolves_to_meipass(fake_meipass):
 def test_readonly_guard_blocks_internal_writes(fake_meipass):
     """只读守卫：分发目录（_internal）下任何写入目标 → PermissionError。"""
     with pytest.raises(PermissionError):
-        _assert_writable_plugin_target(fake_meipass / "plugins" / "system" / ".mcp.json")
+        _assert_writable_plugin_target(fake_meipass / "plugins" / "system-mcp" / ".mcp.json")
     with pytest.raises(PermissionError):
         _assert_writable_plugin_target(fake_meipass / "app" / "resources" / "x.svg")
 

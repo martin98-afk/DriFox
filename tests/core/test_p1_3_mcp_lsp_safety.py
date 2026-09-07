@@ -31,7 +31,7 @@ def log_capture():
 @pytest.fixture()
 def builtin_source():
     """系统插件根下的 .mcp.json 路径（内置源判定）。"""
-    return str(_SYSTEM_PLUGIN_ROOT / "system" / ".mcp.json")
+    return str(_SYSTEM_PLUGIN_ROOT / "system-mcp" / ".mcp.json")
 
 
 def test_mcp_builtin_audit_logged(builtin_source, log_capture):

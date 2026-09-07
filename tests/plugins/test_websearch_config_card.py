@@ -34,7 +34,7 @@ def isolated_config(monkeypatch, tmp_path):
 
 
 def _load_system_manifest():
-    with open("plugins/system/.drifox-plugin/plugin.json", encoding="utf-8") as fp:
+    with open("plugins/system-tools/.drifox-plugin/plugin.json", encoding="utf-8") as fp:
         return json.load(fp)
 
 

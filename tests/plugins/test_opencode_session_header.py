@@ -47,7 +47,7 @@ def test_provider_profile_exposes_session_header(fresh_registry):
 
 # ── worker 注入侧 ───────────────────────────────────────
 
-from app.core.workers.chat_worker import ChatWorker  # noqa: E402
+from app.core.workers.chat_worker import OpenAIChatWorker as ChatWorker  # noqa: E402
 
 
 class _StubWorker:

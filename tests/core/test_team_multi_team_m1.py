@@ -25,7 +25,7 @@ def _load_subagent_tools():
     """加载团队工具插件模块（幂等），返回模块。"""
     import importlib.util
 
-    module_path = Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "tools" / "subagent_tools.py"
+    module_path = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-tools" / "tools" / "subagent_tools.py"
     spec = importlib.util.spec_from_file_location("subagent_tools_m1", module_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -241,7 +241,7 @@ class TestInjectTeamContextMultiTeam:
         import importlib.util
 
         module_path = (
-            Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "hooks" / "inject_team_context.py"
+            Path(__file__).resolve().parent.parent.parent / "plugins" / "system-hooks" / "hooks" / "inject_team_context.py"
         )
         spec = importlib.util.spec_from_file_location("inject_team_context_m1", module_path)
         mod = importlib.util.module_from_spec(spec)

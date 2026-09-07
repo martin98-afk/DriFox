@@ -458,13 +458,22 @@ class PluginManager:
                 cfg.set(cfg.disabled_plugin_components, mapped, save=True)
                 logger.info(f"[PluginManager] 迁移 system 拆分禁用键 {len(mapped)} 条")
 
-            # 2. 启用/禁用插件列表清理旧单体名
+            # 2. 启用/禁用插件列表：清理旧单体名 + 补录拆分插件名
+            #    补录必须发生在迁移期（早于 Settings 期 provider warmup 的白名单检查），
+            #    否则启动早期 load_providers 会把 system-providers 等整体跳过，
+            #    导致 x-opencode-session 等插件声明能力丢失（400 MissingSessionID）。
             for setting in (cfg.enabled_plugins, cfg.disabled_plugins):
                 names = list(setting.value or [])
                 if "system" in names:
                     names.remove("system")
                     cfg.set(setting, names, save=True)
                     changed = True
+            enabled = list(cfg.enabled_plugins.value or [])
+            missing = [n for n in self._SPLIT_COMPONENT_TO_PLUGIN.values() if n not in enabled]
+            if missing:
+                cfg.set(cfg.enabled_plugins, enabled + missing, save=True)
+                changed = True
+                logger.info(f"[PluginManager] 补录拆分插件到启用白名单: {missing}")
 
             if changed:
                 logger.info("[PluginManager] system 拆分状态迁移完成")

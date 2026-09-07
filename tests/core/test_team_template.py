@@ -37,9 +37,9 @@ from app.core.team.template_schema import (
 )
 
 # 工具插件化：TeamTools 类已删除，team_list_members 迁移为
-# plugins/system/tools/subagent_tools.py 模块级函数（tool_ctx 签名）。
+# plugins/system-tools/tools/subagent_tools.py 模块级函数（tool_ctx 签名）。
 # 复用 _load_module 模式加载插件模块（plugins/ 非 Python 包）。
-_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "tools"
+_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-tools" / "tools"
 
 
 def _load_subagent_tools():
@@ -555,7 +555,7 @@ class TestInvalidName:
 
 
 # ══════════════════════════════════════════════════════════
-# 8. 示例默认模板（plugins/system/team_templates/default-team.yaml）
+# 8. 示例默认模板（plugins/system-team-templates/team_templates/default-team.yaml）
 # ══════════════════════════════════════════════════════════
 
 
@@ -880,7 +880,7 @@ class TestInjectTeamContext:
 
         spec = importlib.util.spec_from_file_location(
             "inject_team_context_test",
-            Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "hooks" / "inject_team_context.py",
+            Path(__file__).resolve().parent.parent.parent / "plugins" / "system-hooks" / "hooks" / "inject_team_context.py",
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -1144,7 +1144,7 @@ class TestLoadMissingDegradation:
     3. `_on_send_clicked` FUNCTION 分支统一走 handler（`_execute_command`），
        之后检查 `_team_load_degraded` 决定是否继续 send_message
     4. 已删除 `_prompt_matched` 整段计算（不再硬编码 --load=/--create=）
-    5. `plugins/system/commands/team.md` frontmatter 保持 `prompt_sections` 单字段
+    5. `plugins/system-commands/commands/team.md` frontmatter 保持 `prompt_sections` 单字段
     """
 
     @staticmethod
@@ -1154,7 +1154,7 @@ class TestLoadMissingDegradation:
 
     @staticmethod
     def _team_md_path() -> Path:
-        return Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "commands" / "team.md"
+        return Path(__file__).resolve().parent.parent.parent / "plugins" / "system-commands" / "commands" / "team.md"
 
     @staticmethod
     def _find_function(tree: ast.Module, name: str):
@@ -1387,7 +1387,7 @@ class TestLoadMissingDegradation:
         assert "_prompt_matched" not in func_src, "_execute_command 不应依赖 _prompt_matched"
 
     def test_team_md_load_missing_section_and_frontmatter(self):
-        """`plugins/system/commands/team.md` 必须含 load_missing section + prompt_sections 映射 + 提示流程。
+        """`plugins/system-commands/commands/team.md` 必须含 load_missing section + prompt_sections 映射 + 提示流程。
 
         极简方案：frontmatter 保持 `prompt_sections` 单字段（含 --create= 与 --load=），
         不拆分 prompt_degrade_sections。

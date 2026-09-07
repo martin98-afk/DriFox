@@ -141,7 +141,7 @@ class TestRegistry:
 
 
 class TestSystemPluginTools:
-    """系统插件工具（plugins/system/tools/）"""
+    """系统插件工具（plugins/system-tools/tools/）"""
 
     def test_all_30_tools_registered(self):
         reg = ToolRegistry.get_instance()
@@ -1380,7 +1380,7 @@ class TestWebToolsEnvKey:
         """按插件加载器同款方式动态加载 web_tools 模块"""
         import importlib.util
 
-        path = Path(__file__).parent.parent / "plugins" / "system" / "tools" / "web_tools.py"
+        path = Path(__file__).parent.parent / "plugins" / "system-tools" / "tools" / "web_tools.py"
         spec = importlib.util.spec_from_file_location("_test_web_tools", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -1392,7 +1392,7 @@ class TestWebToolsEnvKey:
         import json
 
         manifest = json.loads(
-            (Path(__file__).parent.parent / "plugins" / "system" / ".drifox-plugin" / "plugin.json").read_text(
+            (Path(__file__).parent.parent / "plugins" / "system-tools" / ".drifox-plugin" / "plugin.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -1466,7 +1466,7 @@ class TestSelfContained:
             'tool_ctx.get("builtin_tools")',
         ]
         # 只检查 import 行 + builtin_tools 访问（docstring 说明文字不受限）
-        for py in glob.glob("plugins/system/tools/*.py"):
+        for py in glob.glob("plugins/system-tools/tools/*.py"):
             src = open(py, encoding="utf-8").read()
             import_lines = [l for l in src.splitlines() if l.strip().startswith(("import ", "from "))]
             for kw in forbidden:

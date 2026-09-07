@@ -33,7 +33,7 @@ def _register_system_policies():
     from app.plugins.registries.hook_policy_registry import HookPolicyRegistry
 
     reg = HookPolicyRegistry.get_instance()
-    base = Path(__file__).resolve().parents[2] / "plugins" / "system" / "hook_policies"
+    base = Path(__file__).resolve().parents[2] / "plugins" / "system-hook-policies" / "hook_policies"
     for name in ("all", "tool_only", "none", "subagent_default", "team_member"):
         spec = importlib.util.spec_from_file_location(f"_hp_{name}", base / f"{name}.py")
         mod = importlib.util.module_from_spec(spec)

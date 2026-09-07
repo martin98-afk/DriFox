@@ -224,6 +224,9 @@ class ProviderRegistry:
         启动早期（Settings.get_instance → _ensure_default_opencode_provider）
         先于 backend 的 warmup_providers 调用，故任何读取入口都需先走本方法
         触发一次插件扫描；backend 的显式 warmup 也会被本标志去重。
+        早期扫描可能整体空转（Settings 启停白名单尚未由 PluginManager
+        补录新插件 → load_providers 全部跳过），此时不算完成，
+        复位标志允许后续调用（如 backend warmup）重试。
         """
         if self._warmup_done:
             return
@@ -234,7 +237,12 @@ class ProviderRegistry:
         try:
             from app.plugins.loaders.provider_loader import warmup_providers
 
-            warmup_providers()
+            loaded = warmup_providers()
+            if not any(loaded.values()):
+                # 零注册 ≠ 正常完成：多为白名单未就绪的早期空转，允许重试
+                # （load_providers 同名保护幂等，重复扫描无副作用）
+                with self._lock:
+                    self._warmup_done = False
         except Exception as e:
             logger.warning(f"[ProviderRegistry] 服务商插件懒加载失败: {e}")
             with self._lock:
@@ -330,7 +338,10 @@ class ProviderRegistry:
 
         聚合所有声明该 family 的服务商能力的并集（后注册覆盖同名字段）；
         无任何插件声明时回退内置 custom 兜底。
+        读路径兜底 ensure_loaded：历史调用方（provider_profile 等）可能早于
+        backend warmup 触发，不预热会拿到空聚合（如 session_header 丢失）。
         """
+        self.ensure_loaded()
         merged: Dict[str, Any] = {}
         with self._lock:
             for p in self._providers.values():
