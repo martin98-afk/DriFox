@@ -8,6 +8,7 @@ import gc
 import os
 import queue
 import re
+import socket
 import threading
 import time
 
@@ -40,7 +41,7 @@ from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
 
 from app.core.conversation.config import HookPolicy, PermissionCache
-from app.core.message_content import append_text_block, consolidate_messages
+from app.core.message_content import append_text_block, consolidate_messages, extract_reasoning_delta
 
 from app.core.model_capabilities import get_model_capabilities, normalize_reasoning_effort
 from app.core.provider_profile import get_provider_profile
@@ -291,6 +292,13 @@ class OpenAIChatWorker(QThread):
 
         # ========== HTTP 流式响应引用（供 cancel() 关闭连接）==========
         self._current_response: Any = None
+        # 🛡️ 流式响应跨线程安全三件套（修复取消时的 Windows access violation）：
+        # _stream_lock          —— 保护 _current_response 的读/写/关闭
+        # _stream_in_read       —— worker 线程是否正阻塞在底层 socket 读（C 层）
+        # _stream_abort_pending —— 取消发生在读期间，关闭动作需由 worker 线程补做
+        self._stream_lock = threading.RLock()
+        self._stream_in_read = False
+        self._stream_abort_pending = False
 
         # ========== 内存诊断 ==========
         self._mem_diag_logged = False  # 防止重复日志刷屏
@@ -1148,13 +1156,127 @@ class OpenAIChatWorker(QThread):
         # 线程在安全的检查点自行退出，避免 OS 级强杀。
         self.requestInterruption()
 
-        # 🛡️ 关闭流式响应连接，立即中断 worker 线程的 for chunk in response: 等待
-        if self._current_response is not None:
+        # 🛡️ 中断流式响应：绝不在 worker 正阻塞于底层 read 时释放响应对象
+        self._abort_current_stream()
+
+    # ========== 流式响应安全中断（跨线程 close 修复）==========
+
+    @staticmethod
+    def _find_stream_socket(obj: Any, depth: int = 0) -> Any:
+        """从 openai/httpx/httpcore 响应对象里尽力挖出底层 socket。
+
+        用途仅限于「唤醒正阻塞在 read 的读线程」，不持有也不释放任何对象。
+        挖不到就返回 None，调用方降级为等待 worker 线程自行退出。
+        """
+        if obj is None or depth > 5:
+            return None
+        if isinstance(obj, socket.socket):
+            return obj
+        getter = getattr(obj, "get_extra_info", None)
+        if callable(getter):
             try:
-                self._current_response.close()
+                found = getter("socket")
             except Exception:
-                pass
+                found = None
+            if isinstance(found, socket.socket):
+                return found
+        for attr in ("_sock", "_socket", "_connection", "_stream", "stream", "_raw_stream"):
+            nxt = getattr(obj, attr, None)
+            if nxt is None or nxt is obj:
+                continue
+            found = OpenAIChatWorker._find_stream_socket(nxt, depth + 1)
+            if found is not None:
+                return found
+        return None
+
+    @staticmethod
+    def _shutdown_stream_socket(response: Any) -> bool:
+        """半关闭底层 socket 唤醒阻塞的读线程，但不释放 httpx/httpcore 对象。
+
+        与 response.close() 的区别：close() 会释放 httpcore 连接与 SSL 对象，
+        若读线程正处在 ssl.read() 内部即构成 use-after-free（Windows 上表现为
+        openai/_streaming.py 的 access violation）；shutdown 只让阻塞的 recv
+        立刻返回错误，对象释放仍交给读线程自己完成。
+        """
+        try:
+            sock = OpenAIChatWorker._find_stream_socket(getattr(response, "response", response))
+            if sock is None:
+                return False
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                try:
+                    sock.close()
+                except Exception:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _abort_current_stream(self) -> None:
+        """取消路径：中断当前流式响应（跨线程安全）。
+
+        - worker 不在底层 read → 调用线程直接 close（安全点，无竞争）
+        - worker 正在底层 read → 只 shutdown socket 唤醒它，并把关闭动作留给
+          worker 线程在 _guarded_stream_iter / _finish_stream_response 里完成
+        """
+        with self._stream_lock:
+            resp = self._current_response
             self._current_response = None
+            in_read = self._stream_in_read
+        if resp is None:
+            return
+        if in_read:
+            self._stream_abort_pending = True
+            if not self._shutdown_stream_socket(resp):
+                logger.debug("[Stream] 未定位到底层 socket，取消将等待下一个 chunk 或读超时")
+            return
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+    def _finish_stream_response(self, response: Any) -> None:
+        """在 worker 线程内收尾流式响应（同线程关闭，杜绝跨线程释放）。
+
+        覆盖正常结束 / 取消 / 异常 / 重试前丢弃四条路径，同时消除旧代码
+        「流式响应从不 close」导致的 httpx 连接池泄漏。
+        """
+        with self._stream_lock:
+            if self._current_response is response:
+                self._current_response = None
+            self._stream_abort_pending = False
+        try:
+            response.close()
+        except Exception:
+            pass
+
+    def _guarded_stream_iter(self, response: Any):
+        """包裹流式迭代：暴露「是否处在底层 read」状态，并吸收取消引发的读异常。"""
+        # 取证用：崩溃 dump 里的线程名常与代码直觉不符（见 crash_handler），
+        # 记录真实执行线程便于核对「哪个线程在做流式读取」。
+        logger.debug(
+            f"[Stream] 开始流式读取 thread={threading.current_thread().name} cancelled={self._is_cancelled}"
+        )
+        it = iter(response)
+        while True:
+            if self._stream_abort_pending:
+                return
+            self._stream_in_read = True
+            try:
+                item = next(it)
+            except StopIteration:
+                return
+            except Exception:
+                # 取消时 shutdown 了底层 socket，读会抛各类底层异常
+                # （httpx.ReadError / ssl.SSLEOFError / OSError ...）。
+                # 这里当作流结束处理，避免用户主动停止被误判成网络故障弹窗。
+                if self._stream_abort_pending or self._is_cancelled:
+                    return
+                raise
+            finally:
+                self._stream_in_read = False
+            yield item
 
     def get_interrupted_messages(self) -> List[Dict]:
         """
@@ -1397,9 +1519,10 @@ class OpenAIChatWorker(QThread):
         self._current_session_messages = []
 
         # 清理 HTTP 客户端和流式响应引用
-        self._http_client = None
-        self._cached_api_config = None
-        self._current_response = None
+        with self._stream_lock:
+            self._http_client = None
+            self._cached_api_config = None
+            self._current_response = None
 
         # 🔧 修复：清空 EventBus 订阅者，防止 handler 闭包引用残留
         # 如果不清理，EventBus 的 _handlers 字典中保留所有订阅的 lambda 闭包，
@@ -3069,7 +3192,8 @@ class OpenAIChatWorker(QThread):
         3. 预构建 API 参数，避免每次都重复处理
         """
         # 🛡️ 清除旧响应引用，确保 cancel() 不关闭过期连接
-        self._current_response = None
+        with self._stream_lock:
+            self._current_response = None
 
         # 在重试前保存部分接收到的内容备份，用于协议错误重试失败后恢复
         # 协议错误（如 RemoteProtocolError）重试前会清空 _response_chunks 等中间状态，
@@ -3165,6 +3289,9 @@ class OpenAIChatWorker(QThread):
                     }
                     self._clear_pending_response_state()
                     raise
+                finally:
+                    # 🛡️ 同线程收尾：任何路径（正常/取消/异常/重试前丢弃）都关闭响应
+                    self._finish_stream_response(response)
             except BadRequestError as e:
                 error_str = str(e)
                 # 检测 tool call result 错误码 2013
@@ -3421,7 +3548,7 @@ class OpenAIChatWorker(QThread):
                 self._streaming_rss_base = _psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
             except Exception:
                 pass
-        for chunk in response:
+        for chunk in self._guarded_stream_iter(response):
             saw_any_chunk = True
             if self._is_cancelled:
                 # 🛡️ 取消前刷新待处理的 content/reasoning 批次，避免丢失最后一批内容
@@ -3663,8 +3790,8 @@ class OpenAIChatWorker(QThread):
                                 }
                             self._waiting_tool_params[tc_id]["attempt_count"] += 1
 
-            # 提取 reasoning_content (DeepSeek V4 thinking mode)
-            reasoning_delta = getattr(delta, "reasoning_content", None)
+            # 提取思考增量（兼容 reasoning_content / reasoning / reasoning_details）
+            reasoning_delta = extract_reasoning_delta(delta)
             if reasoning_delta:
                 if not reasoning_started_this_call:
                     reasoning_started_this_call = True
@@ -4000,7 +4127,7 @@ class OpenAIChatWorker(QThread):
         saw_any_chunk = False
         failed_error: Optional[str] = None
 
-        for event in response:
+        for event in self._guarded_stream_iter(response):
             if self._is_cancelled:
                 # 取消前刷新待处理批次
                 if _reasoning_batch:

@@ -21,6 +21,7 @@ from app.core.model_capabilities import (
     resolve_context_limit,
     resolve_max_output_tokens,
 )
+from app.core.message_content import extract_reasoning_delta
 from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
@@ -1123,7 +1124,7 @@ class SubAgentExecutor(QThread):
         # 非流式：直接读取响应
         message = response.choices[0].message
         response_content = self._filter_thinking_content(message.content or "")
-        reasoning_content = getattr(message, "reasoning_content", "") or ""
+        reasoning_content = extract_reasoning_delta(message)
 
         # 提取工具调用
         tool_calls_found = []

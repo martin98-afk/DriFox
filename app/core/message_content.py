@@ -1333,3 +1333,50 @@ def messages_to_responses_input(
     ctx.flags.use_responses_api = True
     result = serializer.serialize(messages, ctx)
     return result.input_items, result.instructions
+
+
+def extract_reasoning_delta(obj: Any) -> str:
+    """从流式 delta / message 对象里提取思考增量，兼容各厂商字段名。
+
+    厂商差异（实测）：
+        - ``reasoning_content`` : DeepSeek / GLM / 混元官方 / vLLM reasoning-parser
+        - ``reasoning``         : OpenRouter 及兼容网关（OpenCode Go）的归一化字段
+        - ``reasoning_details`` : OpenRouter 结构化数组
+          ``[{"type": "reasoning.text", "text": "...", "index": 0}]``
+
+    只取第一个命中的字段，避免同一段思考被重复计入（网关通常同时下发
+    ``reasoning`` 与 ``reasoning_details``，两者内容一致）。
+
+    Args:
+        obj: openai SDK 的 ``ChoiceDelta`` / ``ChatCompletionMessage``，或等价 dict。
+
+    Returns:
+        思考文本增量；无思考内容时返回空字符串。
+    """
+
+    def _pick(container, key):
+        if isinstance(container, dict):
+            return container.get(key)
+        return getattr(container, key, None)
+
+    for key in ("reasoning_content", "reasoning"):
+        value = _pick(obj, key)
+        # 只接受标量文本：dict/list（某些网关的 reasoning 是对象）不塞进思考框
+        if isinstance(value, str) and value:
+            return value
+        if value and not isinstance(value, (dict, list, tuple)):
+            return str(value)
+
+    details = _pick(obj, "reasoning_details")
+    if isinstance(details, list) and details:
+        parts = []
+        for item in details:
+            if isinstance(item, dict):
+                piece = item.get("text") or item.get("summary") or ""
+            else:
+                piece = getattr(item, "text", None) or getattr(item, "summary", None) or ""
+            if piece:
+                parts.append(str(piece))
+        if parts:
+            return "".join(parts)
+    return ""
