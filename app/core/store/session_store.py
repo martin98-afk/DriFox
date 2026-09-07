@@ -459,6 +459,21 @@ class SessionStore:
                     ],
                 )
 
+                # UI 态字段剥离表（message_extras 方案）：reasoning_content /
+                # arguments / diff 按行存储，value 为 zstd 压缩字节。复合主键
+                # 需原生 DDL（DatabaseManager.create_table 不支持多列 PRIMARY KEY）。
+                self._db.execute_sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS session_msg_extras (
+                        session_id TEXT NOT NULL,
+                        msg_idx    INTEGER NOT NULL,
+                        field      TEXT NOT NULL,
+                        value      BLOB NOT NULL,
+                        PRIMARY KEY (session_id, msg_idx, field)
+                    )
+                    """
+                )
+
                 # 创建索引
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
@@ -466,6 +481,10 @@ class SessionStore:
                 self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)")
                 self._db.execute_sql(
                     "CREATE INDEX IF NOT EXISTS idx_file_ops_call ON file_operations(session_id, call_id)"
+                )
+                # session_msg_extras 表索引：剥离读回按 session_id + msg_idx 定位
+                self._db.execute_sql(
+                    "CREATE INDEX IF NOT EXISTS idx_msg_extras_session ON session_msg_extras(session_id, msg_idx)"
                 )
 
                 # 迁移逻辑
