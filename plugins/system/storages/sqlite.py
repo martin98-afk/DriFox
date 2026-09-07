@@ -61,6 +61,14 @@ class SqliteStorageEngine:
     def delete(self, session_id: str) -> bool:
         return self._repo.delete(session_id)
 
+    def load_msg_extras(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict]:
+        """message_extras 懒读（UI 渲染 / agent_trace Thinking 回看）。"""
+        return self._store.load_msg_extras(session_id, idxs)
+
+    def get_full_messages(self, session_id: str) -> List[Dict]:
+        """主 blob + extras 合并的全量消息（导出用）。"""
+        return self._store.get_full_messages(session_id)
+
     # ---------- 消费方方法（history_manager / memory_manager / session_handler 调用集，
     # 委托 SessionStore 同名方法，行为零变化） ----------
 

@@ -127,7 +127,6 @@ def test_keep_window_fields_retained(store):
     assert "reasoning_content" not in msgs[0]
 
 
-@pytest.mark.skip(reason="Task 4 提供 load_msg_extras 后解除")
 def test_compaction_rewrite_realigned(store):
     """消息变短（压缩重写）→ 全删全插让 extras 对齐新消息。"""
     messages = [_msg("assistant", f"a{i}", reasoning_content=f"t{i}") for i in range(10)]
@@ -137,7 +136,6 @@ def test_compaction_rewrite_realigned(store):
     assert store.load_msg_extras("s6") == {}, "截断后旧 extras 应被清空"
 
 
-@pytest.mark.skip(reason="Task 4 提供 get_full_messages 后解除")
 def test_repeated_save_idempotent(store):
     """重复保存内容不变时（增量指纹跳过），合并读回不重复累积。"""
     messages = [_msg("assistant", f"a{i}", reasoning_content=f"t{i}") for i in range(8)]
@@ -147,3 +145,58 @@ def test_repeated_save_idempotent(store):
     full = store.get_full_messages("s8")
     assert len(full) == 8
     assert full[0]["reasoning_content"] == "t0"
+
+
+def test_get_full_messages_merges(store):
+    """get_full_messages：主 blob + extras 按哨兵索引合并。"""
+    messages = [_msg("tool", f"r{i}", arguments={"i": i}, name="edit", tool_call_id=f"c{i}") for i in range(6)]
+    store.save_session(_session("s3", messages))
+    full = store.get_full_messages("s3")
+    assert len(full) == 6
+    assert full[0]["arguments"] == {"i": 0}
+    assert full[5]["arguments"] == {"i": 5}
+
+
+def test_load_msg_extras_roundtrip_and_subset(store):
+    messages = [_msg("assistant", f"a{i}", reasoning_content=f"think-{i}") for i in range(8)]
+    store.save_session(_session("s2", messages))
+    patch = store.load_msg_extras("s2", [0, 1])
+    assert patch[0]["reasoning_content"] == "think-0"
+    assert patch[1]["reasoning_content"] == "think-1"
+    assert 2 not in patch
+    allp = store.load_msg_extras("s2")
+    assert len(allp) == 5  # 8 条 - 保活窗 3
+
+
+def test_legacy_blob_fields_tolerated(store):
+    """老数据：字段在主 blob → 原样读出；首次保存后窗外条目收敛进 extras。
+
+    保活窗内尾部 3 条按设计保留字段（DeepSeek thinking 连续推理依赖），仅验证窗外条目收敛。
+    """
+    # 6 条消息，窗外 3 条 + 保活窗 3 条
+    messages = [_msg("assistant", f"a{i}", reasoning_content=f"legacy-{i}") for i in range(6)]
+    store.save_session(_session("s4", messages))
+    # 手动还原旧形态：清 extras、主 blob 塞回带字段版本
+    from app.core.store.serde import serialize
+
+    store._db.execute_sql("DELETE FROM session_msg_extras WHERE session_id='s4'")
+    store._db.execute_sql("UPDATE sessions SET messages=? WHERE session_id='s4'", (serialize(messages),))
+    loaded = store.get_session("s4")
+    # 窗外条目原样读出（兼容老数据）
+    assert loaded["messages"][0].get("reasoning_content") == "legacy-0"
+    assert loaded["messages"][1].get("reasoning_content") == "legacy-1"
+    # 首次保存收敛：窗外条目剥离到 extras，主 blob 不再带字段
+    store.save_session(_session("s4", loaded["messages"]))
+    msgs_after = store.get_session("s4")["messages"]
+    assert "reasoning_content" not in msgs_after[0]
+    assert "reasoning_content" not in msgs_after[1]
+    assert "reasoning_content" not in msgs_after[2]
+    # 保活窗内尾部 3 条按设计保留
+    assert msgs_after[3].get("reasoning_content") == "legacy-3"
+    assert msgs_after[4].get("reasoning_content") == "legacy-4"
+    assert msgs_after[5].get("reasoning_content") == "legacy-5"
+    # 全量读回能拿回全部 6 条 reasoning_content
+    full = store.get_full_messages("s4")
+    assert len(full) == 6
+    assert full[0]["reasoning_content"] == "legacy-0"
+    assert full[5]["reasoning_content"] == "legacy-5"

@@ -827,6 +827,18 @@ class SessionStore:
             return self._session_repo.get_team_first_question_candidates(run_id)
         return []
 
+    def load_msg_extras(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict]:
+        """读取剥离的 UI 态字段（message_extras）。idxs=None 读全部。"""
+        if self._session_repo:
+            return self._session_repo.load_extras_for_session(session_id, idxs)
+        return {}
+
+    def get_full_messages(self, session_id: str) -> List[Dict]:
+        """主 blob + extras 合并的全量消息（导出 / 深读用）。"""
+        if self._session_repo:
+            return self._session_repo.get_full_messages(session_id)
+        return []
+
     def delete_session(self, session_id: str) -> bool:
         """删除会话"""
         if self._session_repo:

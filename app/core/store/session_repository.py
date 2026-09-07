@@ -402,6 +402,60 @@ class SessionRepository:
         except Exception as e:
             logger.error(f"[SessionRepository] write_extras 异常: {e}")
 
+    def load_extras_for_session(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict[str, Any]]:
+        """读取剥离的 UI 态字段（message_extras）。
+
+        Args:
+            session_id: 会话 ID
+            idxs: 消息绝对索引列表；None 读全部
+
+        Returns:
+            {msg_idx: {field: 反序列化后的值}}；异常/未初始化返回 {}
+        """
+        if not self.is_initialized or not session_id:
+            return {}
+        try:
+            if idxs:
+                placeholders = ",".join("?" * len(idxs))
+                sql = (
+                    "SELECT msg_idx, field, value FROM session_msg_extras "
+                    f"WHERE session_id = ? AND msg_idx IN ({placeholders})"
+                )
+                ok, rows = self._execute(sql, (session_id, *idxs))
+            else:
+                ok, rows = self._execute(
+                    "SELECT msg_idx, field, value FROM session_msg_extras WHERE session_id = ?",
+                    (session_id,),
+                )
+            result: Dict[int, Dict[str, Any]] = {}
+            if ok:
+                for row in rows or []:
+                    mi = row["msg_idx"] if hasattr(row, "keys") else row[0]
+                    f = row["field"] if hasattr(row, "keys") else row[1]
+                    v = row["value"] if hasattr(row, "keys") else row[2]
+                    result.setdefault(int(mi), {})[str(f)] = deserialize(v)
+            return result
+        except Exception as e:
+            logger.error(f"[SessionRepository] load_extras 异常: {e}")
+            return {}
+
+    def get_full_messages(self, session_id: str) -> List[Dict[str, Any]]:
+        """主 blob + extras 合并的全量消息（导出 / agent_trace 深读用）。
+
+        get() 每次返回新反序列化的消息列表，就地合并无副作用。
+        """
+        sess = self.get(session_id)
+        if not sess:
+            return []
+        msgs = sess.get("messages", [])
+        extras = self.load_extras_for_session(session_id)
+        if not extras:
+            return msgs
+        for i, patch in extras.items():
+            if i < len(msgs) and isinstance(msgs[i], dict):
+                msgs[i].update(patch)
+        return msgs
+
     def get(self, session_id: str) -> Optional[Dict]:
         """根据 ID 获取单个会话（同时失效内容 hash 缓存）"""
         if not self.is_initialized:
