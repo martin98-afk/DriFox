@@ -520,6 +520,13 @@ class _TabFakeHost:
         self._bottom_card_container = _FakeContainer()
         self._left_card_container = _FakeContainer()
         self._right_card_container = _FakeContainer()
+        self._wb_visible = False
+
+    def is_workbench_visible(self):
+        return self._wb_visible
+
+    def set_workbench_visible(self, visible):
+        self._wb_visible = bool(visible)
 
 
 def _setup_tab_registry(monkeypatch, host=None):
@@ -1315,5 +1322,59 @@ def test_workbench_card_projection_preserves_current_tab(monkeypatch):
     reg.sync_floating_cards_to_tab("tab-1")
     assert panel.has_card_tab("plug-right:card")
     assert panel.current_tab() == 1, f"投影前后应保持「记忆」页: current={panel.current_tab()}"
+
+    reg.reset()
+
+
+def test_workbench_card_reclick_closes_tab_and_workbench(monkeypatch):
+    """★ 再次点击侧边栏按钮 = 关闭已激活的卡片页签 + 收起工作台（toggle 直觉）
+
+    用户打开卡片后（工作台可见 + 卡片页为当前激活页），再次点击同一插件
+    按钮应视为"关闭"：摘卡片页签并收起右侧工作台。其余场景（卡片页非
+    激活页 / 工作台隐藏）保持打开语义。
+    """
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    panel = _FakeWorkbenchPanel()
+    host = _TabFakeHost()
+    host.workbench_panel = panel
+    monkeypatch.setattr(UIPluginRegistry, "_resolve_global_host", lambda self: host)
+    reg.register_floating_card(
+        plugin_name="plug-right",
+        card_id="plug-right:card",
+        widget_class=_TabStatefulCard,
+        container="right",
+        title="右侧卡片",
+    )
+    reg.sync_floating_cards_to_tab("tab-1")
+    # 用户打开：工作台自动展开 + 卡片页激活
+    reg._show_floating_card("plug-right:card")
+    host.set_workbench_visible(True)
+    assert panel.current_tab() == panel._tab_ids.index("plug-right:card")
+
+    # 场景 1：再次点击（卡片页激活 + 工作台可见）→ 关闭页签 + 收起工作台
+    reg._show_floating_card("plug-right:card")
+    assert not panel.has_card_tab("plug-right:card"), "再次点击应关闭卡片页签"
+    assert not host.is_workbench_visible(), "再次点击应收起工作台"
+    assert panel.closed[-1] == "plug-right:card"
+
+    # 场景 2：重新打开后切到其他页签再点击 → 只激活不关闭
+    reg._show_floating_card("plug-right:card")
+    host.set_workbench_visible(True)
+    panel.set_current_tab(0)
+    reg._show_floating_card("plug-right:card")
+    assert panel.has_card_tab("plug-right:card"), "非激活页点击应保持打开"
+    assert panel.current_tab() == panel._tab_ids.index("plug-right:card"), "应激活卡片页"
+
+    # 场景 3：工作台隐藏时点击 → 打开语义（激活页签，不关闭）
+    host.set_workbench_visible(False)
+    reg._show_floating_card("plug-right:card")
+    assert panel.has_card_tab("plug-right:card"), "工作台隐藏时点击不应关闭页签"
+
+    # 场景 4：投影恢复（activate=False）永不触发关闭
+    reg._show_floating_card_in_workbench(
+        reg.get_floating_cards()["plug-right:card"], panel, host, auto_expand=False, activate=False
+    )
+    assert panel.has_card_tab("plug-right:card")
 
     reg.reset()
