@@ -444,8 +444,8 @@ def main():
         _apply_window_topmost(tm)
         logger.info("DriFox 以 Tab 管理器模式启动")
 
-        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条弹窗，不抢首帧。
-        # 每条弹窗关闭即重命名 .reported（显示过就改状态），下次启动不再弹
+        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条以 InfoBar 提示，不抢首帧。
+        # 每条 InfoBar 创建成功即重命名 .reported（显示过就改状态），下次启动不再提示
         def _check_last_crash():
             try:
                 from app.core.crash_handler import check_pending_crashes, prompt_crash_report

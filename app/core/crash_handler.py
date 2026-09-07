@@ -5,14 +5,14 @@ Python 层异常有 sys.excepthook / sys.unraisablehook 兜底（main.py），
 但 Qt/C++ 层的段错误不经过 Python——打包版表现为「闪退且 all.log 无任何
 记录」。本模块用 faulthandler 在致命信号（SIGSEGV/SIGILL/SIGFPE/SIGABRT...）
 触发时把原生 + Python 混合调用栈 dump 到 logs/crash/，下次启动检测残留
-dump 并弹窗告知报告位置，解决「闪退后无从排查」的问题。
+dump 并以 InfoBar 横幅告知报告位置，解决「闪退后无从排查」的问题。
 
 判定规则：
-- dump 文件非空且无 clean-exit 标记 → 发生过原生崩溃，弹窗报告
+- dump 文件非空且无 clean-exit 标记 → 发生过原生崩溃，InfoBar 报告
 - 含 clean-exit 标记 → 正常退出，静默清理
 - 空文件（taskkill 强杀/断电，faulthandler 未触发）→ 静默清理，不误报
 
-已弹窗确认的报告重命名为 *.log.reported（保留取证，不再弹窗）。
+已提示确认的报告重命名为 *.log.reported（保留取证，不再提示）。
 """
 import atexit
 import os
@@ -97,7 +97,7 @@ def _mark_clean_exit() -> None:
 def check_pending_crashes(logs_dir: Path) -> list:
     """扫描 crash 目录，返回全部待报告的崩溃 dump（按崩溃时间从旧到新）。
 
-    每份 dump 由 prompt_crash_report 弹窗一次后重命名 .reported（改状态），
+    每份 dump 由 prompt_crash_report InfoBar 提示一次后重命名 .reported（改状态），
     因此这里只收集尚未报告的；已确认非崩溃的文件（空文件/含 clean-exit
     标记）就地清理。
     """
@@ -174,45 +174,50 @@ def _nearby_wer_report(crash_log: Path, window_s: float = 600.0) -> Optional[str
 
 
 def prompt_crash_report(dump_path: Path, parent=None) -> None:
-    """弹窗展示上次崩溃摘要，并提供打开报告目录的入口。
+    """以 InfoBar 横幅展示上次崩溃摘要，并提供打开报告目录的入口。
 
-    弹窗关闭后删除 dump，避免下次启动重复报告。
+    InfoBar 持久显示（duration=-1，不自动消失，不打断当前操作）；
+    创建成功后即重命名 .reported 标记已读，避免下次启动重复提示。
     """
     try:
-        from PyQt5.QtCore import QUrl
+        from PyQt5.QtCore import Qt, QUrl
         from PyQt5.QtGui import QDesktopServices
-        from PyQt5.QtWidgets import QMessageBox
+        from qfluentwidgets import InfoBar, InfoBarIcon, InfoBarPosition, PushButton
 
         dump_path = Path(dump_path)
         try:
             crash_ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(dump_path.stat().st_mtime))
         except Exception:
             crash_ts = "未知时间"
-        try:
-            lines = dump_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except Exception:
-            lines = []
-        excerpt = "\n".join(lines[:12])
-        if len(lines) > 12:
-            excerpt += "\n..."
 
         # 关联同一次崩溃的系统级取证（±10 分钟窗口）
         wer_note = _nearby_wer_dump(dump_path) or _nearby_wer_report(dump_path)
-        if wer_note:
-            excerpt += f"\n\n{wer_note}"
 
-        box = QMessageBox(parent)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("检测到上次异常退出")
-        box.setText(f"上次运行发生了原生崩溃（闪退），崩溃时间：{crash_ts}")
-        box.setInformativeText(f"崩溃报告：{dump_path}\n\n{excerpt or '（报告内容为空）'}")
-        open_btn = box.addButton("打开报告目录", QMessageBox.ActionRole)
-        box.addButton("关闭", QMessageBox.RejectRole)
-        box.exec_()
-        if box.clickedButton() is open_btn:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(dump_path.parent)))
+        content = f"上次运行发生了原生崩溃（闪退），崩溃时间：{crash_ts}\n崩溃报告：{dump_path.name}"
+        if wer_note:
+            content += f"\n{wer_note}"
+
+        bar = InfoBar(
+            icon=InfoBarIcon.WARNING,
+            title="检测到上次异常退出",
+            content=content,
+            orient=Qt.Vertical,
+            isClosable=True,
+            position=InfoBarPosition.BOTTOM,
+            duration=-1,
+            parent=parent,
+        )
+        open_btn = PushButton("打开报告目录")
+        open_btn.clicked.connect(
+            lambda: (
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(dump_path.parent))),
+                bar.close(),
+            )
+        )
+        bar.addWidget(open_btn)
+        bar.show()
         # 报告已告知 → 重命名标记已读：文件保留供排查（崩溃证据不可再生），
-        # 后缀变化使 check_pending_crashes 不再命中，避免重复弹窗
+        # 后缀变化使 check_pending_crashes 不再命中，避免重复提示
         try:
             dump_path.rename(dump_path.with_name(dump_path.name + ".reported"))
         except Exception:
