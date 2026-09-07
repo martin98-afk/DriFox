@@ -190,6 +190,14 @@ class OpenAIChatWorker(QThread):
     # __init__ 赋值）可让 __new__ 构造的测试桩安全读取（QObject 未初始化时
     # 访问不存在的实例属性会抛 RuntimeError 而非 AttributeError）。
     _loop_policy_id = None
+    # 流式响应跨线程安全状态（同样必须是类级默认值，理由同上：__new__ 构造的
+    # 测试桩不走 __init__，访问缺失的实例属性会抛 RuntimeError）。
+    # _stream_lock 是类级共享 RLock：正常实例会在 __init__ 里换成自己的锁，
+    # 桩对象直接共用这一把；只在取消/赋值瞬间持有，争用可忽略。
+    _stream_lock = threading.RLock()
+    _stream_in_read = False
+    _stream_abort_pending = False
+    _current_response = None
 
     def __init__(
         self,
@@ -3520,8 +3528,11 @@ class OpenAIChatWorker(QThread):
         return sig if sig else None
 
     def _process_response(self, response):
-        # 🛡️ 保存响应引用，供 cancel() 关闭底层 HTTP 连接以中断流式等待
-        self._current_response = response
+        # 🛡️ 保存响应引用，供 cancel() 安全中断流式等待。
+        # 锁内写入：与 _abort_current_stream 的锁内读取配对，避免 cancel 抢在
+        # 赋值前进锁读到 None 而跳过 shutdown（取消即时性降级为等下一个 chunk）。
+        with self._stream_lock:
+            self._current_response = response
         self._response_content_blocks = []
         self._current_tool_calls = {}  # 改成字典，key 是 tool_call_id
         self._tool_calls_buffer = {}
@@ -4112,7 +4123,9 @@ class OpenAIChatWorker(QThread):
         - response.output_item.done(function_call) → tool_call_started + tool_args_updated
         - response.failed / error → 抛错
         """
-        self._current_response = response
+        # 🛡️ 锁内写入，理由同 _process_response（与 _abort_current_stream 配对）
+        with self._stream_lock:
+            self._current_response = response
         self._response_content_blocks = []
         self._current_tool_calls = {}
         self._tool_calls_buffer = {}
