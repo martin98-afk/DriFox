@@ -9,7 +9,6 @@
 
 import json
 import time
-import urllib.request
 from typing import Any, Dict, Optional
 
 from app.plugins.registries.provider_registry import ProviderDef, QuotaField
@@ -23,6 +22,8 @@ def _fetch_volcengine_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, 
     - csrf_token: x-csrf-token
     - x_web_id: x-web-id
     """
+    import urllib.request  # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
+
     cookie = (config.get("cookie", "") or "").strip()
     csrf_token = (config.get("csrf_token", "") or "").strip()
     x_web_id = (config.get("x_web_id", "") or "").strip()

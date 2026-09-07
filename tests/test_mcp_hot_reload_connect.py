@@ -15,6 +15,7 @@ _on_plugin_hot_reload）只刷新服务器列表 + 断开孤儿连接（disconne
 - 服务器自身禁用 → 跳过
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
@@ -99,3 +100,18 @@ class TestRefreshConnections:
         )
         card.refresh_connections()
         assert sorted(name for name, _ in mgr._connect_calls) == ["b", "c"]
+
+    def test_skips_pending_gate_confirm(self):
+        """门禁待确认的服务器 → 自动补连跳过（防插件批量安装时重复发起被拦连接）"""
+        from app.core import mcp_lsp_safety
+
+        srv = _server("browser")
+        srv["_source"] = str(Path.home() / ".drifox" / "plugins" / "browser" / ".mcp.json")
+        key = mcp_lsp_safety.server_key("mcp", "browser", "browser")
+        mcp_lsp_safety._PENDING_CONFIRM.add(key)
+        try:
+            card, mgr = _make_card(enabled=True, servers=[srv, _server("on")], status_list=[])
+            card.refresh_connections()
+            assert [name for name, _ in mgr._connect_calls] == ["on"]
+        finally:
+            mcp_lsp_safety._PENDING_CONFIRM.discard(key)

@@ -459,6 +459,21 @@ class SessionStore:
                     ],
                 )
 
+                # UI 态字段剥离表（message_extras 方案）：reasoning_content /
+                # arguments / diff 按行存储，value 为 zstd 压缩字节。复合主键
+                # 需原生 DDL（DatabaseManager.create_table 不支持多列 PRIMARY KEY）。
+                self._db.execute_sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS session_msg_extras (
+                        session_id TEXT NOT NULL,
+                        msg_idx    INTEGER NOT NULL,
+                        field      TEXT NOT NULL,
+                        value      BLOB NOT NULL,
+                        PRIMARY KEY (session_id, msg_idx, field)
+                    )
+                    """
+                )
+
                 # 创建索引
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
@@ -466,6 +481,10 @@ class SessionStore:
                 self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)")
                 self._db.execute_sql(
                     "CREATE INDEX IF NOT EXISTS idx_file_ops_call ON file_operations(session_id, call_id)"
+                )
+                # session_msg_extras 表索引：剥离读回按 session_id + msg_idx 定位
+                self._db.execute_sql(
+                    "CREATE INDEX IF NOT EXISTS idx_msg_extras_session ON session_msg_extras(session_id, msg_idx)"
                 )
 
                 # 迁移逻辑
@@ -808,6 +827,18 @@ class SessionStore:
             return self._session_repo.get_team_first_question_candidates(run_id)
         return []
 
+    def load_msg_extras(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict]:
+        """读取剥离的 UI 态字段（message_extras）。idxs=None 读全部。"""
+        if self._session_repo:
+            return self._session_repo.load_extras_for_session(session_id, idxs)
+        return {}
+
+    def get_full_messages(self, session_id: str) -> List[Dict]:
+        """主 blob + extras 合并的全量消息（导出 / 深读用）。"""
+        if self._session_repo:
+            return self._session_repo.get_full_messages(session_id)
+        return []
+
     def delete_session(self, session_id: str) -> bool:
         """删除会话"""
         if self._session_repo:
@@ -842,10 +873,18 @@ class SessionStore:
             logger.error(f"[SessionStore] 数据库未连接，无法清理项目 {project_name}")
             return False
         try:
+            # 先快照待删会话 id（顺序倒置后 extras 删除必须基于此快照，
+            # 否则前置 sessions DELETE 会让基于 sessions 的子查询返空、留下孤儿行）。
+            ids_ok, id_rows = self._execute("SELECT session_id FROM sessions WHERE project = ?", (project_name,))
+            target_ids = [r["session_id"] for r in id_rows] if ids_ok and id_rows else []
             # 删除会话（直接 SQL，不经过 repo 层）
             self._execute("DELETE FROM sessions WHERE project = ?", (project_name,))
             # 删除关键文档
             self._execute("DELETE FROM key_documents WHERE project = ?", (project_name,))
+            # message_extras 级联清理（最后删）：前两步失败则 extras 与会话保持一致保留；
+            # 前两步成功而 extras 失败只剩无害孤儿行（会话已不存在，无人查询）。
+            for sid in target_ids:
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (sid,))
             logger.info(f"[SessionStore] 已强制清理项目 {project_name} 的所有关联数据")
             return True
         except Exception as e:

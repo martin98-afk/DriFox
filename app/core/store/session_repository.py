@@ -17,6 +17,49 @@ from app.core.store.serde import deserialize, serialize
 # 将来 UI 需要更长预览时不必重新回扫 messages BLOB。
 FIRST_USER_MSG_STORE_LIMIT = 500
 
+# ============================================================
+# message_extras：UI 态字段剥离（specs/2026-09-07-message-extras-offload-design.md）
+# ============================================================
+# 三字段不进 API 请求（openai serializer 只取 role/content/tool_calls/
+# tool_call_id/name），历史轮次剥离进 session_msg_extras 表，回看时按需读回。
+OFFLOAD_FIELDS = ("reasoning_content", "arguments", "diff")
+# 保活窗：尾部 N 条消息不剥离（活跃轮次参与 API 请求，DeepSeek thinking
+# 连续推理依赖最近上下文的 reasoning_content）。
+KEEP_RECENT_ROUNDS = 3
+# 剥离哨兵：轻量消息携带的绝对索引（int）。渲染/轨迹懒读据此定位 extras 行；
+# 老消息与保活窗内消息无哨兵 → 字段本就在消息里，无需查表。
+OFFLOAD_IDX_FIELD = "_x_idx"
+
+
+def extract_offload_fields(messages: List[Any]) -> Tuple[Dict[int, Dict[str, bytes]], List[Any]]:
+    """提取保活窗外的 UI 态字段，返回 (extras, 轻量消息副本)。
+
+    - 不修改入参消息：session.messages 是内存唯一事实源（UI/agent_trace
+      正在读全量），剥离只作用于写库的轻量副本，且仅待剥离项为浅拷贝
+    - 待剥离消息打上 _x_idx 绝对索引哨兵；已带哨兵的消息重复保存时索引不变
+      （messages 追加式增长，历史索引稳定）
+    """
+    n = len(messages)
+    keep_from = max(0, n - KEEP_RECENT_ROUNDS)
+    extras: Dict[int, Dict[str, bytes]] = {}
+    light: List[Any] = []
+    for i, msg in enumerate(messages):
+        # 保活窗（i >= keep_from）内字段原样保留；窗外（i < keep_from）剥离
+        if i >= keep_from or not isinstance(msg, dict):
+            light.append(msg)
+            continue
+        patch = {f: msg[f] for f in OFFLOAD_FIELDS if msg.get(f)}
+        if not patch:
+            light.append(msg)
+            continue
+        m2 = dict(msg)
+        for f in patch:
+            m2.pop(f, None)
+        m2[OFFLOAD_IDX_FIELD] = i
+        extras[i] = {f: serialize(v) for f, v in patch.items()}
+        light.append(m2)
+    return extras, light
+
 
 def extract_first_user_question(messages: Optional[List]) -> Tuple[str, str]:
     """从消息列表中提取首条「真实用户提问」（团队首问语义）。
@@ -207,6 +250,13 @@ class SessionRepository:
             if cached is not None and cached == content_key:
                 return True  # 消息未变，跳过昂贵的序列化+压缩+写盘
 
+        # message_extras：提取剥离字段（不就地修改 session.messages）
+        try:
+            extras, light_messages = extract_offload_fields(messages)
+        except Exception as e:
+            logger.warning(f"[SessionRepository] extract_offload_fields 失败，按全量保存: {e}")
+            extras, light_messages = {}, messages
+
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             user_edited = 1 if session.get("user_edited_title", False) else 0
@@ -216,7 +266,7 @@ class SessionRepository:
                 "title": session.get("topic_summary") or session.get("name") or session.get("title", ""),
                 "project": session.get("project", "默认项目"),
                 # 使用 serde 透明压缩（zstd + 格式魔数），DB 体积减少 50-80%
-                "messages": serialize(messages),
+                "messages": serialize(light_messages),
                 "system_prompt": session.get("system_prompt", ""),
                 "compaction_state": serialize(session.get("compaction_state", {})),
                 "compaction_cache": serialize(session.get("compaction_cache", {})),
@@ -292,6 +342,14 @@ class SessionRepository:
                 # 此处检测 freelist 是否超过安全阈值（5000 页 ≈ 20MB），超过则
                 # 增量回收 500 页（≈2MB），防止 freelist 滚雪球到 GB 级。
                 self._reclaim_freelist_if_needed()
+                # message_extras：全删全插。compaction 重写/截断导致的索引漂移
+                # 由此天然覆盖（每次 save 后 extras 与主 blob 严格一致）。
+                # 🛡️ 独立隔离：extras 写入失败只记日志，不得让异常冒泡到外层
+                # try（主 blob 已落库，误报 False 会误导调用方重试/报错）。
+                try:
+                    self._write_extras(session_id, extras)
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"[SessionRepository] write_extras 调用异常（不影响主保存）: {e}")
 
             return success
 
@@ -327,6 +385,81 @@ class SessionRepository:
             self._execute(f"PRAGMA incremental_vacuum({reclaim_pages})")
         except Exception:
             pass  # auto_vacuum 未启用时静默跳过，不阻塞保存流程
+
+    def _write_extras(self, session_id: str, extras: Dict[int, Dict[str, bytes]]) -> None:
+        """全删全插该会话的剥离字段（失败不阻塞主保存，仅记日志）。"""
+        try:
+            self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
+            if not extras:
+                return
+            for i, fields in extras.items():
+                for f, v in fields.items():
+                    self._execute(
+                        "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) "
+                        "VALUES (?, ?, ?, ?)",
+                        (session_id, i, f, v),
+                    )
+        except Exception as e:
+            logger.error(f"[SessionRepository] write_extras 异常: {e}")
+
+    def load_extras_for_session(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict[str, Any]]:
+        """读取剥离的 UI 态字段（message_extras）。
+
+        Args:
+            session_id: 会话 ID
+            idxs: 消息绝对索引列表；None 读全部
+
+        Returns:
+            {msg_idx: {field: 反序列化后的值}}；异常/未初始化返回 {}
+
+        契约：
+        - idxs 规模由调用方保证（批次级，≤数百）；不做截断，静默截断反而丢数据
+        - 异常时返回 {}，与「无 extras」不可区分；消费方（渲染/轨迹/导出）
+          均有降级回退，不得依赖本方法区分「读失败」与「真没有」
+        """
+        if not self.is_initialized or not session_id:
+            return {}
+        try:
+            if idxs:
+                placeholders = ",".join("?" * len(idxs))
+                sql = (
+                    "SELECT msg_idx, field, value FROM session_msg_extras "
+                    f"WHERE session_id = ? AND msg_idx IN ({placeholders})"
+                )
+                ok, rows = self._execute(sql, (session_id, *idxs))
+            else:
+                ok, rows = self._execute(
+                    "SELECT msg_idx, field, value FROM session_msg_extras WHERE session_id = ?",
+                    (session_id,),
+                )
+            result: Dict[int, Dict[str, Any]] = {}
+            if ok:
+                for row in rows or []:
+                    mi = row["msg_idx"] if hasattr(row, "keys") else row[0]
+                    f = row["field"] if hasattr(row, "keys") else row[1]
+                    v = row["value"] if hasattr(row, "keys") else row[2]
+                    result.setdefault(int(mi), {})[str(f)] = deserialize(v)
+            return result
+        except Exception as e:
+            logger.error(f"[SessionRepository] load_extras 异常: {e}")
+            return {}
+
+    def get_full_messages(self, session_id: str) -> List[Dict[str, Any]]:
+        """主 blob + extras 合并的全量消息（导出 / agent_trace 深读用）。
+
+        get() 每次返回新反序列化的消息列表，就地合并无副作用。
+        """
+        sess = self.get(session_id)
+        if not sess:
+            return []
+        msgs = sess.get("messages", [])
+        extras = self.load_extras_for_session(session_id)
+        if not extras:
+            return msgs
+        for i, patch in extras.items():
+            if i < len(msgs) and isinstance(msgs[i], dict):
+                msgs[i].update(patch)
+        return msgs
 
     def get(self, session_id: str) -> Optional[Dict]:
         """根据 ID 获取单个会话（同时失效内容 hash 缓存）"""
@@ -580,6 +713,10 @@ class SessionRepository:
         try:
             self._content_hash_cache.pop(session_id, None)
             success, _ = self._execute(f"DELETE FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
+            if success:
+                # message_extras 级联清理（后删子表）：主表失败则整体未删保持一致；
+                # 主表成功而子表失败只剩无害孤儿行（会话已不存在，无人查询）。
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
             return success
         except Exception as e:
             logger.error(f"[SessionRepository] delete_session 异常: {e}")

@@ -697,6 +697,12 @@ class ConfigSyncService(QObject):
                                 if getattr(cfg, _matched).serialize() != _value:
                                     _cloud_theme_mode_differs = True
                                 continue
+                            # 开机自启是设备本地属性：HKLM Run 项指向本机 exe 路径，
+                            # 云端值不参与覆盖。若强行写回，值变化会联动
+                            # SwitchSettingCard → LLMSettingsCard._on_toggled →
+                            # request_auto_start_update，运行中突然弹 UAC 提权框
+                            if _section_name == "General" and _key == "AutoStart":
+                                continue
                             # 🚀 P5d：diff 短路——内存值已等于云端值时跳过赋值，
                             # 省掉 setter + valueChanged 信号发射完整监听链路径
                             # （隔天同步时多数配置未变，仅此项即可消除主线程 200-500ms 占用）

@@ -26,7 +26,15 @@ _SHELL_METACHAR_RE = re.compile(r"[;&|`]|\$\(")
 # 会话级拒绝（用户点拒绝后本会话内不再提示/启动，不落盘）
 _SESSION_DENIED: set = set()
 
-_SYSTEM_PLUGIN_ROOT = Path(__file__).resolve().parents[3] / "plugins"
+# 会话级待确认（need_confirm 后置位：自动补连路径跳过该服务器，
+# 避免插件批量安装时每次热重载广播都重复发起注定被拦的连接；
+# 用户手动开关（force=True）不受限。确认/拒绝后清除）
+_PENDING_CONFIRM: set = set()
+
+# 源码运行：仓库根/app/core/mcp_lsp_safety.py → parents[2] = 仓库根；
+# 打包（onefile）：<_MEIPASS>/app/core/... → parents[2] = <_MEIPASS>，plugins 随包同级。
+# 注意必须是 parents[2]：曾误写 parents[3] 指到仓库外层目录，系统插件源全部误判非内置。
+_SYSTEM_PLUGIN_ROOT = Path(__file__).resolve().parents[2] / "plugins"
 
 
 def check_args_safety(args) -> Tuple[bool, str]:
@@ -86,7 +94,7 @@ def gate_server_launch(
     # 2) 审计日志（启动放行路径统一记录：插件名+server+args 摘要）
     summary = " ".join(args)[:120]
     builtin = is_builtin_source(source)
-    key = f"{kind}:{plugin or '-'}:{server}"
+    key = server_key(kind, plugin, server)
 
     # 3) 非内置源确认流
     if not builtin:
@@ -111,15 +119,38 @@ def gate_server_launch(
             f"[{tag}] plugin={plugin or '?'} server={server} 非内置源首次启动，需用户确认 "
             f"(source={source}; args=[{summary}]；确认后调 confirm_plugin_server 白名单化)"
         )
+        _PENDING_CONFIRM.add(key)
         return "need_confirm"
 
     logger.warning(f"[{tag}] plugin={plugin or '?'} server={server} args=[{summary}]")
     return "proceed"
 
 
-def confirm_plugin_server(kind: str, plugin: str, server: str, allow: bool = True) -> None:
-    """用户确认结果：allow=True 写入永久白名单；False 加入本次会话禁用集（不落盘）。"""
-    key = f"{kind}:{plugin or '-'}:{server}"
+def plugin_from_source(source) -> str:
+    """从配置来源路径推导插件名（与门禁 key 拼接口径一致）；无法推导返回空串。"""
+    if not source:
+        return ""
+    p = Path(source)
+    return p.parent.name if p.suffix == ".json" else ""
+
+
+def server_key(kind: str, plugin: str, server: str) -> str:
+    """门禁三集合（白名单/会话拒绝/待确认）统一的 key 拼接。"""
+    return f"{kind}:{plugin or '-'}:{server}"
+
+
+def is_pending_confirm_by_key(key: str) -> bool:
+    """该服务器是否处于「待用户确认」状态（自动补连路径应跳过）。"""
+    return key in _PENDING_CONFIRM
+
+
+def is_session_denied(key: str) -> bool:
+    """该服务器是否已被用户本次会话拒绝（UI 据此静默处理 denied 失败回调）。"""
+    return key in _SESSION_DENIED
+
+
+def confirm_by_key(key: str, allow: bool = True) -> None:
+    """按 key 提交确认结果：allow=True 写永久白名单；False 会话禁用（不落盘）。均清除待确认标记。"""
     if allow:
         try:
             from app.utils.config import Settings
@@ -133,3 +164,9 @@ def confirm_plugin_server(kind: str, plugin: str, server: str, allow: bool = Tru
             logger.warning(f"[mcp_lsp_safety] 写入确认记录失败: {e}")
     else:
         _SESSION_DENIED.add(key)
+    _PENDING_CONFIRM.discard(key)
+
+
+def confirm_plugin_server(kind: str, plugin: str, server: str, allow: bool = True) -> None:
+    """用户确认结果入口（按 kind/plugin/server 定位，内部转 confirm_by_key）。"""
+    confirm_by_key(server_key(kind, plugin, server), allow)

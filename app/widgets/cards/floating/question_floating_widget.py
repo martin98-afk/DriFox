@@ -392,7 +392,7 @@ class _OptionCheckCard(QWidget):
 
 
 class _CustomInputCard(QWidget):
-    """输入自己的答案选项 — 默认显示描述，选中后变成文本输入框"""
+    """输入自己的答案选项 — 输入框常驻显示，点击/聚焦即视为选中"""
 
     PLACEHOLDER = "输入你的答案..."
     activated = pyqtSignal()  # 用户主动点击选中时触发
@@ -458,16 +458,9 @@ class _CustomInputCard(QWidget):
         self._title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._right_layout.addWidget(self._title_label)
 
-        self._desc_label = QLabel(self.PLACEHOLDER)
-        self._desc_label.setFont(get_unified_font(9))
-        self._desc_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
-        self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._right_layout.addWidget(self._desc_label)
-
         # 同选项卡片：文本 label 水平 Ignored，不参与卡片宽度诉求
         # （防止长文本经 sizeHint/minimumSize 把主窗口撑宽引发锁高跳变）。
         self._title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self._desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         self._text_edit = QTextEdit()
         self._text_edit.setPlaceholderText(self.PLACEHOLDER)
@@ -479,7 +472,6 @@ class _CustomInputCard(QWidget):
         # 兜底：即使 auto-grow 临时失效，垂直滚动条也能让用户看到溢出内容
         self._text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._text_edit.setVisible(False)
         self._text_edit.textChanged.connect(self._on_text_changed)
         self._text_edit.installEventFilter(self)  # 监听 Resize/Show，等布局完成后再算高度
         # 强制白色文字：Qt 样式表 color 对 QTextEdit 经常不生效，需用 QPalette
@@ -497,8 +489,13 @@ class _CustomInputCard(QWidget):
         必须延迟到下一轮事件循环（QTimer.singleShot(0, ...)），
         因为 Resize 事件触发时 viewport().width() 还没更新好。
         """
-        if obj is self._text_edit and self._active:
-            if event.type() in (QEvent.Resize, QEvent.Show):
+        if obj is self._text_edit:
+            if event.type() == QEvent.FocusIn:
+                # 输入框常驻后，聚焦即视为选中自定义输入（单选下取消其他选项）
+                if not self._active:
+                    self.set_active(True)
+                    self.activated.emit()
+            elif event.type() in (QEvent.Resize, QEvent.Show):
                 QTimer.singleShot(0, self._adjust_height_to_content)
         return super().eventFilter(obj, event)
 
@@ -566,23 +563,11 @@ class _CustomInputCard(QWidget):
                 self._adjusting_height = False
 
     def set_active(self, active: bool):
+        """切换选中态：输入框常驻，此处仅更新图标与样式"""
         self._active = active
         a_icon = "☑" if self._multiple else "●"
         i_icon = "□" if self._multiple else "○"
         self._icon.setText(a_icon if active else i_icon)
-        self._desc_label.setVisible(not active)
-        self._text_edit.setVisible(active)
-        if active:
-            self._text_edit.setFixedHeight(self.MIN_INPUT_HEIGHT)
-            # ★ 仅在可见时聚焦——防止 QStackedWidget 隐藏页窃取焦点
-            if self.isVisible():
-                self._text_edit.setFocus()
-            if self._text_value:
-                self._text_edit.setPlainText(self._text_value)
-            # 延迟到下一轮事件循环，等布局完成（viewport().width() > 0）后再算高度
-            # _adjust_height_to_content 内部已在高度变化时调用 _emit_height_update
-            # 不需要额外的 10ms 兜底 timer（避免与导航路径的 heightChanged 重复触发）
-            QTimer.singleShot(0, self._adjust_height_to_content)
         self._apply_style()
 
     def _emit_height_update(self):
@@ -590,22 +575,13 @@ class _CustomInputCard(QWidget):
         self.updateGeometry()
         self.heightNeedsUpdate.emit()
 
-    def toggle(self):
-        new_state = not self._active
-        self.set_active(new_state)
-        if new_state:
-            self.activated.emit()
-
     def get_text(self) -> str:
-        if self._active:
-            return self._text_edit.toPlainText().strip()
-        return self._text_value.strip()
+        return self._text_edit.toPlainText().strip()
 
     def set_content(self, text: str):
         """恢复已保存的文本内容"""
         self._text_value = text
-        if self._active:
-            self._text_edit.setPlainText(text)
+        self._text_edit.setPlainText(text)
 
     def _apply_style(self):
         Colors.refresh()
@@ -656,7 +632,13 @@ class _CustomInputCard(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            self.toggle()
+            # 点击卡片任意位置 → 激活自定义输入。
+            # 不能只靠 FocusIn：焦点可能已在本输入框（如选选项后焦点未离开），
+            # setFocus 是 no-op 不产生 FocusIn，会导致图标点了没反应。
+            if not self._active:
+                self.set_active(True)
+                self.activated.emit()
+            self._text_edit.setFocus()
         super().mousePressEvent(e)
 
 
@@ -1292,6 +1274,7 @@ class QuestionFloatingWidget(QWidget):
         return results
 
     def _get_custom_input_text(self) -> str:
+        """计入答案的自定义文本：仅激活态（草稿不丢但也不盲提交）"""
         if self._custom_input_widget and self._custom_input_widget._active:
             return self._custom_input_widget.get_text()
         return ""
@@ -1299,17 +1282,18 @@ class QuestionFloatingWidget(QWidget):
     def _save_current_answer(self):
         selected = self._get_selected_options()
         custom = self._get_custom_input_text()
-        has_custom = bool(custom)
+        # 草稿：无论激活与否都保留（切选项/翻页不丢字），但只有激活态才计入提交
+        draft = self._custom_input_widget.get_text() if self._custom_input_widget else ""
         parts = []
         if selected:
             parts.extend(f"【{s['label']}】" for s in selected)
         if custom:
             parts.append(custom)
-        if parts:
+        if parts or draft:
             self._answers[self._current_index] = {
                 "text": "；".join(parts),
-                "custom": has_custom,
-                "custom_text": custom,  # 保存原始自定义输入文本，用于恢复
+                "custom": bool(custom),
+                "custom_text": draft,  # 全量草稿，用于翻页恢复
             }
         else:
             self._answers.pop(self._current_index, None)
@@ -1337,7 +1321,7 @@ class QuestionFloatingWidget(QWidget):
                     w.set_checked(text and w._label_text in text)
         if self._custom_input_widget:
             self._custom_input_widget.set_active(custom_used)
-            if custom_used and isinstance(answer, dict):
+            if isinstance(answer, dict):
                 custom_text = answer.get("custom_text", "") or answer.get("text", "")
                 # 如果是混合答案（选项+自定义），提取纯自定义部分
                 import re

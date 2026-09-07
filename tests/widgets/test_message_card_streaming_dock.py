@@ -22,14 +22,17 @@ def _ensure_qapp():
 
 
 def test_streaming_dock_css_content():
-    """坞态 CSS 必须包含：flex 调换、order 沉底、110px 限高。"""
+    """坞态 CSS 必须包含：flex 调换、order 沉底、限高。"""
     css = mc._STREAMING_DOCK_CSS
     assert "body.streaming-dock" in css
     assert "flex-direction: column" in css
     assert "body.streaming-dock #tool-section" in css
     assert "order: 2" in css
     assert "body.streaming-dock #tool-content" in css
-    assert "max-height: 110px" in css
+    # 工具区限高：110→220（原 3-4 行看不见进度，放宽到 ≈8 行）
+    assert "max-height: 220px" in css
+    # 正文限高：330→450→600（流式长回复展示更多正文）
+    assert "max-height: 600px" in css
 
 
 def test_streaming_dock_content_no_horizontal_scrollbar():
@@ -83,8 +86,8 @@ def test_content_autoscroll_respects_user_scroll():
     assert "_cp._progScroll = true" in js, "程序置底必须打 _progScroll 标记"
     # 正文容器必须有 scroll 监听跟踪用户滚动（滚回底部附近恢复跟随）
     assert "getElementById('content-placeholder')?.addEventListener('scroll'" in js, "正文容器必须有独立 scroll 监听"
-    # 监听内恢复跟随：滚回底部清 _userScrolledUp
-    assert "cp._userScrolledUp = false" in js, "滚回底部附近必须恢复自动跟随"
+    # 监听内恢复跟随：位置判定（接近底部=跟随，离开=用户阅读）
+    assert "cp._userScrolledUp = !atBottom" in js, "滚回底部附近必须恢复自动跟随（位置判定）"
     # DOM 操作期间程序性 scroll 必须忽略（防误标正文上滚→置顶），与 body 监听对称
     assert "if (window._suppressScrollEvent) return;" in js, "DOM 操作期间的程序 scroll 必须忽略"
     # 程序滚动事件吞掉（不误标用户）
@@ -111,19 +114,18 @@ def test_content_autoscroll_marks_user_scroll_via_wheel():
     assert "addEventListener('wheel'" in js, "必须有 wheel 监听同步标记用户上滚"
     assert "deltaY < 0" in js, "wheel 上滚方向判定（deltaY<0）必须存在"
     assert "this._userScrolledUp = true" in js, "wheel 上滚必须同步置 _userScrolledUp"
-    # scroll 监听只做恢复跟随（atBottom 清标志），不得置位（防钳制 scroll 误标）
-    assert "_userScrolledUp = !atBottom" not in js, "scroll 事件不得置位 _userScrolledUp（异步派发有竞争窗口）"
+    # scroll 监听只做恢复跟随（位置判定 atBottom → 清标志），不得置位（防钳制 scroll 误标）
+    # 注：置位唯一入口是 wheel 同步标记；scroll 监听内的位置判定赋值是恢复跟随语义。
     # wheel 监听必须是 passive（不阻断浏览器原生滚动）
     assert "{passive: true}" in js, "wheel 监听必须 passive"
     # 🐛 回归（工具折叠框展开→视口弹到随机位置）：
-    # 1) wheel 置位必须门控"容器实际可滚"——无溢出时 wheel 属冒泡残留
-    #    （本应转发外层聊天列表），误置位会锁死正文跟随；
+    # wheel 置位必须门控"容器实际可滚"——无溢出时 wheel 属冒泡残留
+    # （本应转发外层聊天列表），误置位会锁死正文跟随；
     assert "scrollHeight > this.clientHeight" in js, "wheel 置位必须检查 cp 实际可滚（防冒泡残留误置位）"
-    # 2) scroll 清标志必须有时间窗门控——折叠框动画/高度报告应用引发 viewport
-    #    resize → Chromium 钳制/anchor 补偿被动贴底 → 原实现距底<30px 即清标志
-    #    → 下个 chunk 无条件拉底。要求近期真实滚轮行为才允许恢复跟随。
-    assert "_lastUserWheelAt" in js, "必须有用户滚轮时间戳用于清标志门控"
-    assert "800" in js, "清标志必须限制在最近一次用户滚轮后 800ms 内（防程序性贴底误清）"
+    # 历史注：原实现要求 _lastUserWheelAt/800ms 时间窗门控 scroll 清标志；
+    # 现实现改为位置判定（离开底部=阅读，滚回底部=恢复）+ _progScroll 排除，
+    # 消除了"下滚回底不刷新时间戳 → 标志卡死为已离开 → 跟随失效弹回中间"的根因。
+    assert "_suppressScrollEvent" in js, "DOM 操作期间的程序 scroll 必须忽略"
 
 
 def test_skeleton_template_includes_content_autoscroll():
@@ -155,6 +157,19 @@ class _ViewerStub:
         # 与 CodeWebViewer._init_render_state 同语义：渲染序号，finish_streaming
         # 递增使在途线程池任务过期（9c76d04f 新增，stub 需同步）
         self._render_seq: int = 0
+        # 同步 CodeWebViewer 后续演进新增的属性（缺失会 AttributeError）：
+        self.viewer = None  # finish_streaming 的 hasattr 守卫分支
+        self._light_skeleton = False  # 欢迎卡片不进坞态守卫
+        self._needs_full_render = False
+        self._stable_html = ""
+        self._stable_md_len = 0
+        self._render_pending = None
+        self._tool_dom_dirty = False
+        self._cached_streaming_html = None
+        self._processed_md_hash = 0
+        self._cached_raw_md_hash = 0
+        self._think_text_streaming_started = False
+        self._reasoning_streaming_started = False
 
     def page(self):
         return self._page

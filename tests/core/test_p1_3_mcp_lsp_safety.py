@@ -12,8 +12,11 @@ from loguru import logger
 from app.core import mcp_lsp_safety
 from app.core.mcp_lsp_safety import (
     _SYSTEM_PLUGIN_ROOT,
+    confirm_by_key,
     confirm_plugin_server,
     gate_server_launch,
+    is_pending_confirm_by_key,
+    server_key,
 )
 
 
@@ -116,3 +119,55 @@ def test_builtin_source_skips_confirmation(builtin_source, log_capture):
         assert not any("需用户确认" in r for r in log_capture)
     finally:
         cfg.confirmed_plugin_servers.value = saved
+
+
+def test_system_plugin_root_points_at_repo():
+    """门禁内置源根必须指向仓库真实 plugins/ 目录（防 parents 索引漂移回归）。
+
+    曾误写 parents[3] 指到仓库外层目录（D:/work/plugins），系统插件源全部被
+    误判非内置；因系统 .mcp.json 内服务器均 enabled=false 未暴露。本用例
+    用仓库事实（plugins/system/ 存在）锁死索引。
+    """
+    assert (_SYSTEM_PLUGIN_ROOT / "system").is_dir(), (
+        f"_SYSTEM_PLUGIN_ROOT 指向不存在目录: {_SYSTEM_PLUGIN_ROOT}"
+    )
+
+
+def test_need_confirm_sets_pending_and_deny_clears(tmp_path):
+    """need_confirm 置位待确认集合；拒绝后清除并会话禁用（自动补连据此跳过）。"""
+    src = str(tmp_path / "my-plug" / ".mcp.json")
+    key = server_key("mcp", "my-plug", "fetch")
+    try:
+        assert gate_server_launch("mcp", "my-plug", "fetch", ["npx", "fetch"], source=src) == "need_confirm"
+        assert is_pending_confirm_by_key(key)
+        confirm_by_key(key, allow=False)
+        assert not is_pending_confirm_by_key(key)
+        # 拒绝后同会话内直接 denied，不再 need_confirm
+        assert gate_server_launch("mcp", "my-plug", "fetch", ["npx", "fetch"], source=src) == "denied"
+    finally:
+        mcp_lsp_safety._SESSION_DENIED.discard(key)
+        mcp_lsp_safety._PENDING_CONFIRM.discard(key)
+
+
+def test_confirm_allow_whitelists_and_clears_pending(tmp_path, monkeypatch):
+    """允许后：写白名单（内存）+ 清待确认，二次启动直接放行。monkeypatch 阻止真实写盘。"""
+    from app.utils.config import Settings
+
+    monkeypatch.setattr(
+        Settings,
+        "set",
+        lambda self, attr, value, save=False: setattr(attr, "value", value),
+    )
+    src = str(tmp_path / "my-plug" / ".mcp.json")
+    key = server_key("mcp", "my-plug", "fetch")
+    cfg = Settings.get_instance()
+    saved = list(cfg.confirmed_plugin_servers.value or [])
+    try:
+        assert gate_server_launch("mcp", "my-plug", "fetch", ["npx", "fetch"], source=src) == "need_confirm"
+        confirm_by_key(key, allow=True)
+        assert not is_pending_confirm_by_key(key)
+        assert key in (cfg.confirmed_plugin_servers.value or [])
+        assert gate_server_launch("mcp", "my-plug", "fetch", ["npx", "fetch"], source=src) == "proceed"
+    finally:
+        cfg.confirmed_plugin_servers.value = saved
+        mcp_lsp_safety._PENDING_CONFIRM.discard(key)

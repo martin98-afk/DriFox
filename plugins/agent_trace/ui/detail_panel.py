@@ -661,8 +661,14 @@ class DetailPanel(QWidget):
             self._set_content(self._page_text, rec.raw or "（空）")
         elif key == "thinking":
             # DeepSeek V4 / GLM-5 等思维链：worker 落盘在 msg["reasoning_content"]，
-            # collector 投影时搬进 meta["reasoning"]。
-            self._set_content(self._page_text, str(rec.meta.get("reasoning") or "").strip() or "（空）")
+            # collector 投影时搬进 meta["reasoning"]；轻量消息（已剥离）走 loader 懒读。
+            reasoning = str(rec.meta.get("reasoning") or "").strip()
+            if not reasoning and rec.reasoning_loader is not None:
+                try:
+                    reasoning = str(rec.reasoning_loader() or "").strip()
+                except Exception:
+                    reasoning = ""
+            self._set_content(self._page_text, reasoning or "（空）")
         elif key == "request":
             self._set_content(self._page_request, self._tool_request(rec))
         elif key == "response":
@@ -684,7 +690,13 @@ class DetailPanel(QWidget):
 
         # ASSISTANT 带思维链 → 在 Preview 后插入 Thinking tab（没 reasoning 不占位）
         tabs = list(_TABS_BY_KIND.get(rec.kind, _TABS_BY_KIND[EntryKind.USER]))
-        if rec.kind == EntryKind.ASSISTANT and str(rec.meta.get("reasoning") or "").strip():
+        has_reasoning = bool(str(rec.meta.get("reasoning") or "").strip())
+        if not has_reasoning and rec.reasoning_loader is not None:
+            try:
+                has_reasoning = bool(str(rec.reasoning_loader() or "").strip())
+            except Exception:
+                has_reasoning = False
+        if rec.kind == EntryKind.ASSISTANT and has_reasoning:
             tabs.insert(1, ("thinking", "Thinking"))
         self._rebuild_tabs(tuple(tabs))
         # 切换条目类型后原 tab 可能不存在 → 回落到第一个 tab。

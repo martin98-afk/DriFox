@@ -446,27 +446,39 @@ def _register_sync_provider() -> None:
         logger.warning(f"[assistant_hub] 注册 Gitee 同步内容失败: {e}")
 
 
-def _promote_build_system_prompt_hook() -> None:
+def _promote_build_system_prompt_hook(_attempt: int = 0) -> None:
     """确保 assistant_hub 的 BuildSystemPrompt hook 先于系统 inject_agent_identity 执行。
 
     系统插件（plugins/system/hooks/hooks.json）里的 builtin_inject_agent_identity
     会读取 context["agent_identity_content"]。assistant_hub 的 hook 需要**先**改
     context 才能实现"替换注入"（否则系统 hook 先输出原智能体提示词，我们的
     修改只变成追加）。注册顺序 = 执行顺序，把我们的 rule 提前到列表头部。
+
+    HookManager 无单例入口（实例状态全部指向类属性 _shared_hooks，实例 _hooks
+    即同一对象）。插件扫描时系统插件先注册 → 本插件 rule 天然在列表尾部，
+    提升必要。时机：UI 注册早于 backend 初始化的 AgentManager hooks 加载
+    （首窗口必然扑空），热重载时 hooks 也可能尚未重注册 → 找不到 rule 时延迟重试。
     """
+    from PyQt5.QtCore import QTimer
+
     try:
         from app.core.hook_manager import HookManager
 
-        hm = HookManager.get_instance()
-        rules = getattr(hm, "_hooks", {}).get("BuildSystemPrompt", [])
-        # 找 assistant_hub 的 rule
-        for i, rule in enumerate(rules):
-            if getattr(rule, "skill_name", "") == "assistant_hub":
-                if i > 0:
-                    rule_obj = rules.pop(i)
-                    rules.insert(0, rule_obj)
-                break
-        logger.debug("[assistant_hub] BuildSystemPrompt hook 已提升到最前（先于系统身份注入）")
+        rules = HookManager._shared_hooks.get("BuildSystemPrompt") or []
+        target = next((r for r in rules if getattr(r, "skill_name", "") == "assistant_hub"), None)
+        if target is None:
+            # hooks 尚未注册（首窗口：UI 注册先于 backend 初始化），延迟重试
+            if _attempt < 20:
+                QTimer.singleShot(500, lambda: _promote_build_system_prompt_hook(_attempt + 1))
+            else:
+                logger.warning(f"[assistant_hub] BuildSystemPrompt hook 未注册，放弃顺序提升（已重试 {_attempt} 次）")
+            return
+        i = rules.index(target)
+        if i > 0:
+            rules.insert(0, rules.pop(i))
+            logger.info("[assistant_hub] BuildSystemPrompt hook 已提升到最前（先于系统身份注入）")
+        else:
+            logger.debug("[assistant_hub] BuildSystemPrompt hook 已在最前，无需提升")
     except Exception as e:
         logger.warning(f"[assistant_hub] 提升 hook 顺序失败: {e}")
 

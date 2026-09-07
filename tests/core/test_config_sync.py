@@ -18,7 +18,13 @@ import httpx
 import pytest
 from PyQt5.QtCore import QTimer
 from qfluentwidgets import Theme
-from qfluentwidgets.common.config import EnumSerializer, OptionsConfigItem, OptionsValidator
+from qfluentwidgets.common.config import (
+    BoolValidator,
+    ConfigItem,
+    EnumSerializer,
+    OptionsConfigItem,
+    OptionsValidator,
+)
 
 
 # =============================================================================
@@ -1336,3 +1342,47 @@ class TestSetThemeAfterSkip:
         finally:
             cfg.themeMode.value = original
             setTheme(original)
+
+
+class TestAutoStartExcludedFromSync:
+    """开机自启是设备本地属性，云端值不参与写回覆盖。
+
+    背景：AutoStart 曾随云端同步写回内存，值变化联动
+    SwitchSettingCard → LLMSettingsCard._on_toggled → request_auto_start_update，
+    运行中突然弹 UAC 提权框（用户感知：同步后莫名其妙要确认开机自启）。
+    修复要求：写回循环跳过 General.AutoStart。
+    """
+
+    class _FakeSettings:
+        """替身：类属性含 auto_start（真实 ConfigItem + BoolValidator 语义）"""
+
+        auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
+
+        def __init__(self):
+            self.file = Path("")
+            type(self).auto_start.value = True  # 本机已开启自启
+
+        def get_instance(self):
+            return self
+
+    def test_auto_start_not_overwritten_by_cloud(self, reset_sync_service, tmp_path, monkeypatch):
+        """云端 AutoStart=False 覆盖本机 True → 写回循环跳过，内存保持 True"""
+        from app.core import config_sync as cs
+
+        cfg_path = tmp_path / "app.config"
+        cfg_path.write_text(
+            json.dumps({"General": {"AutoStart": False}}),
+            encoding="utf-8",
+        )
+
+        fake = self._FakeSettings()
+        fake.file = cfg_path
+
+        monkeypatch.setattr("app.utils.config.update_theme_options", lambda: None)
+        monkeypatch.setattr("app.utils.theme_manager.ThemeManager.reload", lambda self: None)
+        monkeypatch.setattr(cs, "Settings", fake)
+        monkeypatch.setattr(cs.QTimer, "singleShot", staticmethod(lambda ms, cb: None))
+
+        reset_sync_service._reload_settings_on_main_thread()
+
+        assert fake.auto_start.value is True, "开机自启为设备本地属性，云端 False 不得覆盖本机 True"

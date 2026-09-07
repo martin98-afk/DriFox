@@ -163,6 +163,7 @@ from app.widgets.ui_helpers import (
     log_deletion_stats,
     post_append_user_message,
     refresh_history_card_if_visible,
+    materialize_batch_with_extras,
     render_batch_to_assistant_card,
     restore_input_from_card,
     save_or_archive_session,
@@ -7002,7 +7003,15 @@ class OpenAIChatToolWindow(ToolWindow):
         """滚动时吸顶服务商变化，更新标题栏显示当前服务商名和图标
 
         provider_name 是从 model_selector 传来的 display_name（不是 config_id）。
+
+        去重：滚动过程中 valueChanged 每像素都会触发本回调，而吸顶服务商名
+        往往长时间不变；同名时直接返回，避免每个滚轮 tick 都 delete 旧
+        ProviderIconWidget + new 新 widget（replaceWidget 触发重排重绘）导致
+        标题栏图标闪烁。
         """
+        if getattr(self, "_last_sticky_provider", None) == provider_name:
+            return
+        self._last_sticky_provider = provider_name
         if provider_name:
             from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 
@@ -12274,6 +12283,25 @@ class OpenAIChatToolWindow(ToolWindow):
 
         QTimer.singleShot(0, card._refresh_footer_separators)
 
+    def _get_load_msg_extras_fn(self):
+        """message_extras 懒读函数（探测式：引擎不支持时返回 None）。"""
+        try:
+            from app.core.backend import get_session_storage
+
+            storage = get_session_storage()
+        except Exception:
+            return None
+        fn = getattr(storage, "load_msg_extras", None)
+        return fn if callable(fn) else None
+
+    def _current_session_id_for_extras(self) -> str:
+        """当前会话 ID（message_extras 查询键；异常/无会话返回空串）。"""
+        try:
+            session = self.session_manager.get_current_session()
+            return getattr(session, "session_id", "") or ""
+        except Exception:
+            return ""
+
     def _render_message_to_card(
         self,
         batches: List[List[Dict[str, Any]]],
@@ -12282,6 +12310,13 @@ class OpenAIChatToolWindow(ToolWindow):
     ):
         insert_index = 0 if insert_at_top else None
         for local_index, batch in enumerate(batches):
+            # message_extras：session.messages 为轻量形态，渲染前补回剥离字段。
+            # 副本注入不写回 session.messages，批次卸载（B4 回收）随卡片销毁。
+            load_fn = self._get_load_msg_extras_fn()
+            if load_fn is not None:
+                batch = materialize_batch_with_extras(batch, self._current_session_id_for_extras(), load_fn)
+            if not batch:
+                continue
             role = batch[0].get("role")
             timestamp = batch[0].get("timestamp") or get_default_timestamp()
             model_name = batch[0].get("model_name")
@@ -13809,7 +13844,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         from app.core import consolidate_messages
 
-        messages = consolidate_messages(session.messages)
+        messages = self._load_full_messages_for_export(session) or consolidate_messages(session.messages)
         if not messages:
             from qfluentwidgets import InfoBar, InfoBarPosition
 
@@ -13827,6 +13862,31 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._share_card_content:
             self._share_card_content.set_messages(record, session.name or "")
         self._card_manager.toggle_card("share", self._window_id)
+
+    def _load_full_messages_for_export(self, session) -> list:
+        """导出用全量消息：从存储合并 extras；不可用/落后于内存时返回 []（回退内存）。
+
+        DB 全量条数 >= 内存条数才采用（流式中最新一轮尚未落盘的场景回退内存）。
+        """
+        try:
+            sid = getattr(session, "session_id", "")
+            if not sid:
+                return []
+            from app.core.backend import get_session_storage
+
+            storage = get_session_storage()
+            fn = getattr(storage, "get_full_messages", None)
+            if not callable(fn):
+                return []
+            msgs = fn(sid) or []
+            mem = getattr(session, "messages", None) or []
+            if len(msgs) >= len(mem):
+                from app.core import consolidate_messages
+
+                return consolidate_messages(msgs)
+        except Exception:
+            logger.warning("[Share] 全量消息读取失败，回退内存消息", exc_info=True)
+        return []
 
     def _build_share_record(self, session, merged_messages: list) -> dict:
         """构建与归档（archive）一致的完整 session 记录字典，供分享导出（JSON/HTML）使用。
@@ -17141,7 +17201,9 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             # send_message 成功后同步 batch 结构（send 会往 session 写入消息，因此同步必须在 send 之后）
             self._sync_batch_structures()
-            self._fix_new_card_message_index(user_text=callback_content)            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
+            self._fix_new_card_message_index(
+                user_text=callback_content
+            )  # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
             self._advance_visible_batch_window()
             self._register_new_cards_into_batches()
             # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
@@ -20032,6 +20094,15 @@ class OpenAIChatToolWindow(ToolWindow):
         加载会话时自动调用：会话关联了哪个 worktree，就切到哪个 worktree。
         """
         if not worktree_path or not os.path.isdir(worktree_path):
+            return
+        # zombie 过滤：.git 指向的 gitdir 已消失（主仓库 .git 被删/重建）的
+        # worktree 不切换，避免把工作目录切进 git 已不认的目录
+        from app.utils.git_worktree import GitWorktreeDetector
+
+        if not GitWorktreeDetector.is_valid_worktree_link(worktree_path):
+            logger.warning(
+                f"[MainWidget] 跳过切换到已失效的 worktree: {worktree_path}（项目: {self._current_project}）"
+            )
             return
         project = self._current_project
 

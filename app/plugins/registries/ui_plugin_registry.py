@@ -1675,6 +1675,30 @@ class UIPluginRegistry:
                 停留的工作台页签带走）
         """
         card_id = card_info.card_id
+        # toggle 关闭路径（仅用户主动打开 activate=True 生效；投影恢复
+        # activate=False 不受影响）：页签已打开且正是当前激活页、工作台可见
+        # → 再次点击侧边栏按钮 = 关闭该页签并收起工作台，对齐标题栏
+        # 「右侧边栏」按钮的 toggle 直觉。工作台隐藏时保持打开语义
+        #（重新展开并激活该页），不做 toggle。
+        if activate:
+            cur_id = None
+            try:
+                cur_id = panel._tab_id_at(panel.current_tab())
+            except Exception:
+                cur_id = None
+            if cur_id == card_id and panel.has_card_tab(card_id):
+                wb_visible = False
+                try:
+                    wb_visible = host.is_workbench_visible()
+                except Exception:
+                    wb_visible = False
+                if wb_visible:
+                    self._close_workbench_card_tab(card_id)
+                    try:
+                        host.set_workbench_visible(False)
+                    except Exception:
+                        pass
+                    return
         window_id = getattr(host, "_window_id", None)
         if not window_id:
             from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID

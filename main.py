@@ -76,6 +76,9 @@ _CHROMIUM_FLAGS = (
     " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染
     " --js-flags=--max-old-space-size=128"  # 限制单 renderer JS 堆，防单页膨胀
     + " --enable-low-end-device-mode"  # 🔧 Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
+    " --disable-smooth-scrolling"  # 合成器平滑滚动动画：卡内滚动只是安全网场景，外层滚动由 Qt 承载
+    " --disable-features=Translate,MediaRouter,optimizeHints"  # 翻译/媒体路由常驻线程/谷歌优化提示，纯开销
+    " --disable-canvas-aa --disable-2d-canvas-clip-aa"  # 2D canvas 抗锯齿关闭：echarts 软件光栅下省内存提速（锯齿微增）
 )
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _CHROMIUM_FLAGS)
 
@@ -245,7 +248,20 @@ def main():
             _preheat_view.hide()
             # 保持引用，防止 GC 回收导致进程退出
             app._preheat_webengine = _preheat_view
-            logger.debug("[DeferredStartup] WebEngine 预热视图已创建")
+
+            # [MEM] 预热完成后销毁视图本身：Chromium 基础设施（browser process /
+            # profile）此时已初始化完毕且随 app 级 profile 常驻，空白 renderer
+            # 约占 15-30MB 无保留价值。延时 5s：覆盖启动窗口，之后首张真实卡片
+            # 的 renderer 已就位，销毁无副作用。
+            def _release_preheat():
+                try:
+                    _preheat_view.deleteLater()
+                    app._preheat_webengine = None
+                except Exception:
+                    pass
+
+            QTimer.singleShot(5000, _release_preheat)
+            logger.debug("[DeferredStartup] WebEngine 预热视图已创建（5s 后释放）")
         except Exception:
             logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
 
@@ -428,8 +444,8 @@ def main():
         _apply_window_topmost(tm)
         logger.info("DriFox 以 Tab 管理器模式启动")
 
-        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条弹窗，不抢首帧。
-        # 每条弹窗关闭即重命名 .reported（显示过就改状态），下次启动不再弹
+        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条以 InfoBar 提示，不抢首帧。
+        # 每条 InfoBar 创建成功即重命名 .reported（显示过就改状态），下次启动不再提示
         def _check_last_crash():
             try:
                 from app.core.crash_handler import check_pending_crashes, prompt_crash_report

@@ -32,6 +32,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QStyle,
     QStyledItemDelegate,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -247,6 +248,24 @@ class _RowDelegate(QStyledItemDelegate):
         # 形成正反馈自锁——窗口变窄后行宽冻结在旧值，横向滚动条出现且拖动时
         # 内容不随 option.rect.x() 平移（表现为「滚动无作用」）。
         return QSize(0, self.row_h)
+
+    def helpEvent(self, event, view, option, index) -> bool:  # noqa: N802
+        """tooltip 懒生成：item 不再预存 tooltip 字符串，悬停时现拼一次。
+
+        ``_make_item`` 逐条 ``setToolTip`` 会在长会话全量重建时构造上万次
+        多行字符串（实测约占 item 构造成本四成），改到悬停时才生成。
+        """
+        rec: Optional[TraceRecord] = index.data(Qt.UserRole)
+        if rec is None:
+            return super().helpEvent(event, view, option, index)
+        QToolTip.showText(
+            event.globalPos(),
+            f"{rec.kind.label} · {rec.label}\n"
+            f"{rec.absolute_time} · {format_duration(rec.duration_ms)} · {rec.tokens} tok\n"
+            f"{rec.source}",
+            view,
+        )
+        return True
 
     def paint(self, painter: QPainter, option, index) -> None:  # noqa: N802
         rec: Optional[TraceRecord] = index.data(Qt.UserRole)
@@ -569,7 +588,14 @@ class TurnListWidget(QWidget):
         self._refilter()
 
     def clear_time_range(self) -> None:
-        """外部（时间线空白单击）清除过滤 —— 不回发 timeRangeCleared，避免回环。"""
+        """外部（时间线空白单击）清除过滤 —— 不回发 timeRangeCleared，避免回环。
+
+        ⚠️ 幂等短路：本就无选区时直接返回。``_pull_records`` 每次全量推送都
+        会调到这里，而不短路会在长会话下白白多跑一次全量 ``_refilter``
+        （实测 1.8 万条 ≈ 220ms，占切换路径一半耗时）。
+        """
+        if self._time_range is None:
+            return
         self._time_range = None
         self._update_range_chip()
         self._refilter()
@@ -778,11 +804,7 @@ class TurnListWidget(QWidget):
         item.setData(Qt.UserRole, rec)
         item.setData(Qt.UserRole + 1, idx)
         item.setSizeHint(QSize(0, self._delegate.row_h))
-        item.setToolTip(
-            f"{rec.kind.label} · {rec.label}\n"
-            f"{rec.absolute_time} · {format_duration(rec.duration_ms)} · {rec.tokens} tok\n"
-            f"{rec.source}"
-        )
+        # tooltip 懒生成（_RowDelegate.helpEvent）：全量重建路径上不再逐条拼字符串
         return item
 
     def _row_of_record(self, idx: int) -> Optional[int]:

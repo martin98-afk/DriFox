@@ -1452,6 +1452,37 @@ def _is_hook_message_ui(msg: dict) -> bool:
     return False
 
 
+def materialize_batch_with_extras(batch: list, session_id: str, load_extras) -> list:
+    """渲染副本注入（message_extras 方案）：为带 _x_idx 哨兵的批次消息补回剥离字段。
+
+    - 批次内无哨兵消息（活跃会话 / 老数据）→ 原样返回，零开销
+    - 仅被补回的消息做浅拷贝；session.messages 始终保持轻量，批次卸载随卡片销毁
+    - load_extras 异常安全：读库失败按「无 extras」处理，渲染不阻塞
+    """
+    if not batch or not session_id or not callable(load_extras):
+        return batch
+    idxs = [m.get("_x_idx") for m in batch if isinstance(m, dict) and isinstance(m.get("_x_idx"), int)]
+    if not idxs:
+        return batch
+    try:
+        patch_by_idx = load_extras(session_id, idxs) or {}
+    except Exception:
+        return batch
+    if not patch_by_idx:
+        return batch
+    out = []
+    for m in batch:
+        idx = m.get("_x_idx") if isinstance(m, dict) else None
+        patch = patch_by_idx.get(idx) if idx is not None else None
+        if patch:
+            m2 = dict(m)
+            m2.update(patch)
+            out.append(m2)
+        else:
+            out.append(m)
+    return out
+
+
 def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
     """
     将消息批次渲染到 assistant 卡片

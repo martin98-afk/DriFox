@@ -3,6 +3,62 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.9] - 2026-09-07
+
+自上一版本以来的变更 | 提交数：18 · 文件变更：22 · +1037/-21 | 贡献者：mading
+
+### ✨ 新功能 (New Features)
+
+- **会话 UI 态字段离屏化** (`app/core/store/session_repository.py`, `app/core/store/session_store.py`): 新增 `session_msg_extras` 表，将 reasoning_content / tool_calls / arguments 等 UI 态字段在保存时离屏写入，降低会话内存占用；暴露 `load_msg_extras` / `get_full_messages` 门面供回看完整消息。
+- **渲染批次物化** (`app/widgets/ui_helpers.py`, `app/main_widget.py`): 离屏 UI 态字段的渲染批次按需物化，sentinel 命中/未命中场景均有测试覆盖。
+- **思考标签页惰性加载** (`plugins/agent_trace/ui/`): 离屏 reasoning content 在思考标签页按需懒加载。
+- **opencode 网关会话头** (`app/core/workers/chat_worker.py`, `plugins/system/providers/opencode.py`): LLM 请求自动注入 `x-opencode-session` 会话头，满足网关会话绑定要求。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **滚动时服务商 icon 闪烁** (`app/widgets/ui_helpers.py`): 修复 sticky header 滚动时服务商 icon 闪烁。
+- **分享导出合并 extras** (`app/core/store/session_repository.py`): 离屏会话导出时合并 extras，保证导出消息完整。
+- **级联删除顺序** (`app/core/store/session_repository.py`): 倒置删除顺序，先删主表再删 extras，避免部分失败导致 extras 丢失。
+- **extras 写入失败隔离** (`app/core/store/session_repository.py`): extras 写入失败不影响主保存结果。
+
+### 🎨 样式改进 (Style)
+
+- **会话内存诊断脚本格式化** (`tools/diag_session_fields.py`, `tools/diag_session_memory.py`): ruff format 统一风格。
+
+### 🔧 其他 (Chores & Build)
+
+- **测试** (`tests/`): 修复插件命名空间劫持导致的混合目录收集失败；覆盖 batch materialize sentinel 命中/未命中场景；加固 load_msg_extras 边界用例与契约文档。
+- **依赖锁定** (`uv.lock`): 同步 jsonschema 依赖与 drifox 版本号。
+
+## [v0.5.8] - 2026-09-07 (重新发布)
+
+自上一版本以来的变更 | 提交数：18 · 文件变更：36 · +1384/-250 | 贡献者：mading
+
+> 🔄 重新发布：在 v0.5.8 首次发布基础上，合并 18 个关键修复，覆盖 plugin-host reload 链路、InfoBar 崩溃提示、跨插件可见性切换、窗口窄宽度自适应、AST 审计豁免与 TraceCard 布局稳定性。
+
+### ✨ 新功能 (New Features)
+
+- **崩溃提示改用 InfoBar** (`app/core/crash_handler.py`): 替换原有弹窗，使用 InfoBar 持久显示崩溃报告，并提供"打开报告目录"按钮。
+- **git worktree 僵尸检测** (`app/core/`, `tests/`): 检测失效 worktree 软链、增强校验逻辑；配套单测覆盖。
+- **窗口窄宽度自适应** (`app/widgets/cards/floating/`, `app/widgets/cards/trace_card_widget.py`): 浮动卡片/TraceCardWidget 重写最小尺寸提示，支持窄窗口下压缩；标题栏与图标标签同步放行宽度。
+- **config_sync 防止云同步覆盖本地 AutoStart** (`app/core/config_sync.py`, `app/widgets/cards/settings/llm_settings_card.py`): 云同步不再覆盖本地 AutoStart 设置，LLM 设置卡配合更新。
+- **自定义输入草稿保留 + 答案提交改进** (`app/widgets/cards/floating/question_floating_widget.py`): 自定义输入处理优化，保留草稿文本，改进答案提交逻辑。
+- **鼠标按下激活自定义输入** (`app/widgets/cards/floating/question_floating_widget.py`): 鼠标按下事件激活自定义输入并发出信号。
+- **TraceCardWidget 辅助数据刷新加防抖** (`app/widgets/cards/floating/question_floating_widget.py`, `app/widgets/message_card.py`, `main.py`, `plugins/agent_trace/`): 实现防抖机制，避免高频刷新。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **plugin-host 单次 full reload** (`app/core/plugin_host_service.py`): 跨插件变更合并为单次 full reload 请求，避免重载风暴。
+- **ui_plugin_registry 工作台卡片 toggle** (`app/plugins/registries/ui_plugin_registry.py`): 工作台卡片可见性切换行为对齐标题栏「右侧边栏」按钮；backend_dispatch mock 同步更新；新增 toggle 测试。
+- **streaming dock 最大高度** (`app/widgets/message_card.py`): 增加流式 dock 最大高度，调整相关测试断言。
+- **InfoBarIcon.WARNING 替换** (`plugins/system/mcp`): qfluentwidgets 不存在 ATTENTION 图标，改用 WARNING；同步修复 plugin root path 与 need_confirm 门控 UI、抑制 retry storm。
+- **urllib.request 延迟导入** (`plugins/system/`, `app/gateway/providers/`): 5 个 provider 的 urllib.request 延迟导入至用量查询函数，消音 AST 审计告警。
+- **urllib.parse/error 审计豁免** (`app/plugins/loaders/_ast_guard.py`): 新增 _URBLIB_EXEMPT_SUBMODULES，urllib.parse/error 豁免危险导入审计。
+
+### ⚡ 性能优化 (Performance)
+
+- **plugin-host 重载去重** (`app/core/plugin_host_service.py`): 引用计数观察者抑制，批量安装/卸载 reload 去重。
+
 ## [v0.5.8] - 2026-09-06
 
 自上一版本以来的变更 | 提交数：70 · 文件变更：87 · +9063/-5329 | 贡献者：mading, dingma
@@ -125,7 +181,7 @@ All notable changes to this project will be documented in this file.
 - **原生崩溃处理与上报机制** (`app/core/`): 实现 native crash handling；集成 Windows WER；persona 创建流程新增头像处理；崩溃报告注册表与上报链路打通。
 - **插件安装器 git 命令防护** (`plugins/system/`): git 命令增加超时与停滞检测，避免长时间挂起阻塞插件安装。
 - **assistant_hub 全套能力** (`plugins/system/assistant_hub/`): 落地完整 assistant_hub 子系统——
-  - persona 注册表与内置构建模板（build / hanako / none / viper-mei / butter / ming）
+  - persona 注册表与内置构建模板（build / hanako / none / viper / butter / ming）
   - 默认助手种子化、活跃助手高亮、自适应全宽卡片行、屏蔽对话框、ComboBox 替代
   - 弧形卡片堆叠（扇形折叠 / hover 展开）、分区控件（persona chips / memory / experience）
   - 提示注入重写（persona + 静默记忆规则 + Stop turn counter）、`recall` / `record_experience` 工具
@@ -145,7 +201,7 @@ All notable changes to this project will be documented in this file.
 - **标签页删除保护** (`app/widgets/`): 标题栏永久标签禁止关闭；卡片定位增强新增卡片对齐方式。
 - **插件组件主题刷新** (`app/widgets/`): Workbench 面板与插件组件主题变化时样式自动刷新，保证 UI 一致性。
 - **动态头像尺寸** (`app/widgets/`): `set_avatar_size` 动态调整头像尺寸支持缩放动画。
-- **persona 头像与人格定义** (`plugins/system/assistant_hub/personas/`): 新增 butter / ming / viper-mei 人格定义与头像图；persona 创建指南补充访谈阶段与行为洞察描述。
+- **persona 头像与人格定义** (`plugins/system/assistant_hub/personas/`): 新增 butter / ming / viper 人格定义与头像图；persona 创建指南补充访谈阶段与行为洞察描述。
 - **assistant 编辑标签页** (`plugins/system/assistant_hub/`): 编辑器标签页覆盖 identity / prompts / public persona / avatar / memory / skills；utility model 与 session prompt cache 失效；移除未使用的 identity injection hook。
 
 ### 🐛 问题修复 (Bug Fixes)

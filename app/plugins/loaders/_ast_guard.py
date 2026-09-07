@@ -258,6 +258,16 @@ def _has_register_in_tree(tree: "ast.Module", wanted: Set[str]) -> bool:
 # 原生调用（ctypes）五类高危能力。
 _DANGEROUS_IMPORT_ROOTS = frozenset({"socket", "subprocess", "requests", "urllib", "ctypes"})
 
+# urllib 子模块豁免：parse / error 仅 URL 解析与异常定义，无网络能力，不触发告警
+_URLLIB_EXEMPT_SUBMODULES = frozenset({"urllib.parse", "urllib.error"})
+
+
+def _is_dangerous_import(fullname: str) -> bool:
+    """按完整模块名判定是否命中危险审计面（根命中且不在豁免清单）。"""
+    if fullname in _URLLIB_EXEMPT_SUBMODULES:
+        return False
+    return fullname.split(".")[0] in _DANGEROUS_IMPORT_ROOTS
+
 
 def audit_dangerous_imports(source: str) -> List[Tuple[int, str]]:
     """审计模块级危险 import，返回 [(行号, 符号名), ...]。
@@ -279,10 +289,10 @@ def _audit_dangerous_imports_in_tree(tree: "ast.Module") -> List[Tuple[int, str]
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name.split(".")[0] in _DANGEROUS_IMPORT_ROOTS:
+                if _is_dangerous_import(alias.name):
                     hits.append((node.lineno, alias.name))
         elif isinstance(node, ast.ImportFrom) and node.module:
-            if node.module.split(".")[0] in _DANGEROUS_IMPORT_ROOTS:
+            if _is_dangerous_import(node.module):
                 hits.append((node.lineno, node.module))
     return hits
 

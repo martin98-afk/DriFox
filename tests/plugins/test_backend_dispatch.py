@@ -81,8 +81,10 @@ def test_dispatch_deleted_plugin_triggers_cleanup_path(kernel_env, monkeypatch):
     fake_plugin.components = {"themes": True, "commands": True, "skills": True}
     fake_plugin.has_component = lambda c: fake_plugin.components.get(c, False)
 
-    # 第一次 get_plugin（拿 plugin_before）→ fake_plugin；第二次（rescan 后）→ None
-    fake_pm.get_plugin.side_effect = [fake_plugin, None]
+    # get_plugin 三连：plugin_before → plugin_rescanned（module_prefixes 清理段）→
+    # None（rescan 后删除段检查）。旧 mock 只给两值，第三次调用抛 StopIteration
+    # 被外层 except 吞掉，删除清理段永远走不到（54e8a4cf 引入的测试回归）。
+    fake_pm.get_plugin.side_effect = [fake_plugin, None, None]
 
     from app.core.backend import ChatBackend
 
@@ -181,8 +183,8 @@ def test_delete_path_iterates_by_component_order(kernel_env, monkeypatch):
     fake_plugin.components = {c: True for c in kernel_mod.COMPONENT_ORDER}
     fake_plugin.has_component = lambda c: fake_plugin.components.get(c, False)
     fake_plugin.path = MagicMock()
-    # 第一次 get_plugin（取 plugin_before）→ fake_plugin；第二次（rescan 后）→ None
-    fake_pm.get_plugin.side_effect = [fake_plugin, None]
+    # 同上三连：plugin_before → plugin_rescanned → None（删除段）
+    fake_pm.get_plugin.side_effect = [fake_plugin, None, None]
 
     # 用本地 seen 收集所有 reloader 实际触发顺序
     seen: list[str] = []

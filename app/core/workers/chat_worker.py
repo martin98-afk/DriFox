@@ -1587,7 +1587,7 @@ class OpenAIChatWorker(QThread):
                 f"extra_body_keys={[k for k in extra_body if k in ('thinking', 'thinking_budget', 'reasoning_effort')]}"
             )
 
-        # 处理认证
+        # 处理认证 + 网关会话头（服务商插件声明，如 opencode 的 x-opencode-session）
         auth_headers = None
         auth_type = self.llm_config.get("认证方式", "bearer")
         if auth_type == "bce":
@@ -1596,6 +1596,9 @@ class OpenAIChatWorker(QThread):
             auth_str = f"{api_key}:{api_key}"
             b64_auth = base64.b64encode(auth_str.encode()).decode()
             auth_headers = {"Authorization": f"Basic {b64_auth}"}
+        gateway_headers = self._gateway_session_headers()
+        if gateway_headers:
+            auth_headers = {**(auth_headers or {}), **gateway_headers}
 
         is_o1 = model.startswith("o1") or model.startswith("o3")
 
@@ -1678,7 +1681,7 @@ class OpenAIChatWorker(QThread):
         if self.session_id:
             kwargs["user"] = self.session_id
 
-        # 认证头（bce 认证方式）
+        # 认证头（bce 认证方式）+ 网关会话头（服务商插件声明）
         auth_headers = None
         if str(self.llm_config.get("认证方式", "bearer")) == "bce":
             import base64
@@ -1687,6 +1690,9 @@ class OpenAIChatWorker(QThread):
             auth_str = f"{api_key}:{api_key}"
             b64_auth = base64.b64encode(auth_str.encode()).decode()
             auth_headers = {"Authorization": f"Basic {b64_auth}"}
+        gateway_headers = self._gateway_session_headers()
+        if gateway_headers:
+            auth_headers = {**(auth_headers or {}), **gateway_headers}
         if auth_headers:
             kwargs["extra_headers"] = auth_headers
         return kwargs
@@ -2890,6 +2896,24 @@ class OpenAIChatWorker(QThread):
         except Exception as e:
             logger.warning(f"[ToolCall恢复] 尝试恢复工具参数时出错: {e}")
             return None
+
+    def _gateway_session_headers(self) -> Optional[Dict[str, str]]:
+        """服务商插件声明的网关会话头（capabilities["session_header"]），值=当前会话 ID。
+
+        OpenCode Zen/Go 等网关要求每个 LLM 请求携带稳定会话标识
+        （2026-09 起缺失报 400 MissingSessionID）；头名由 providers 插件
+        按 family 声明，主程序只做通用注入，不感知具体服务商。
+        """
+        if not self.session_id:
+            return None
+        try:
+            header = get_provider_profile(self.llm_config or {}).get("session_header")
+        except Exception as e:
+            logger.debug(f"[ChatWorker] session_header 解析失败: {e}")
+            return None
+        if not header:
+            return None
+        return {str(header): self.session_id}
 
     def _adapter_flags(self):
         """经 ModelAdapterRegistry 解析协议开关（系统插件 openai 兜底，可覆盖）

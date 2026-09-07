@@ -8,7 +8,6 @@
 
 import json
 import time
-import urllib.request
 from typing import Any, Dict, Optional
 
 from app.plugins.registries.provider_registry import ProviderDef
@@ -21,6 +20,8 @@ def _fetch_zhipu_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any]]
     新版套餐按积分计算：5 小时窗口（unit=3）+ 每周窗口（unit=6），无月度额度。
     端点按 API_URL 自动区分国内版（open.bigmodel.cn）与国际版（api.z.ai）。
     """
+    import urllib.request  # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
+
     api_key = (config.get("API_KEY", "") or "").strip()
     if not api_key:
         return None

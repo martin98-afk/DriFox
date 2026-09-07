@@ -986,14 +986,22 @@ class PluginInstaller:
     def _suppress_backend_watcher(self, duration: float = 180.0) -> None:
         """安装期间抑制 backend 插件热重载 watcher，避免半安装插件被提前 import 报错。
 
-        抑制目标：PluginHostService._suppress_watcher_until（应用级单例）。
-        旧实现写 ChatBackend._suppress_watcher_until，但 watcher 实际读 PluginHostService
-        的同名属性，写入即失效（PluginHostService 迁移遗留）。
+        委托模块级引用计数 API（app.core.plugin_host_service.suppress_plugin_watcher）：
+        - 多个 worker（安装/卸载/启停并发，市场并发上限 >1）各自 suppress 时，
+          引用计数叠加，**先结束的 worker 不会解除后结束 worker 的抑制**；
+          最后一个 resume 才真正放开 watcher（并发批量装卸时杜绝事件风暴 + 半成品
+          import + 主线程重载风暴 = 卡死）。
+        - 截止时间戳兼容旧调用方直接写 PluginHostService._suppress_watcher_until
+          （如 config_sync），两路叠加任一命中即抑制。
+
+        旧实现直接写 PluginHostService._suppress_watcher_until（非引用计数），
+        并发场景先完成方把抑制清零 → watcher 在其余 worker 大规模写/删插件目录时
+        复活 → 事件风暴。此为迁移遗留缺陷。
         """
         try:
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.plugin_host_service import suppress_plugin_watcher
 
-            PluginHostService._suppress_watcher_until = time.time() + duration
+            suppress_plugin_watcher(duration)
         except Exception as e:
             logger.debug(f"[Installer] 无法抑制 backend watcher（不影响安装）: {e}")
 
@@ -1001,6 +1009,9 @@ class PluginInstaller:
         self, reload: bool = False, plugin_name: Optional[str] = None, action: Optional[str] = None
     ) -> None:
         """恢复 backend watcher；安装/启停成功时精准重载目标插件（不触发全量）
+
+        委托模块级引用计数 API（resume_plugin_watcher）释放一次抑制。只有引用
+        计数归零时 watcher 才真正解除抑制（多 worker 并发时最后一个结束者生效）。
 
         旧实现 reload=True 时调 reload_plugin_subsystems() 全量重载——卸载/安装
         一个插件会把全部插件的 hooks 注销重注册、全部 agents 重载（数十个插件
@@ -1011,13 +1022,13 @@ class PluginInstaller:
         但该方法已上移 PluginHostService，ChatBackend 上无此属性（PluginHostService 迁移遗留）。
 
         Args:
-            action: PluginChanged hook 动作语义（installed/updated/disabled/enabled），
+            action: PluginChanged hook 动作语义（installed/updated/disabled/enabled/uninstalled），
                 None 时由 backend 按插件注册表状态自动推断
         """
         try:
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.plugin_host_service import resume_plugin_watcher
 
-            PluginHostService._suppress_watcher_until = 0.0
+            resume_plugin_watcher()
         except Exception:
             return
         if not reload:
@@ -1248,42 +1259,54 @@ class PluginInstaller:
     def remove(self, name: str) -> bool:
         """删除插件目录（更新/卸载共用）
 
-        Args:
-            name: 插件名
+        卸载整树会产生成百上千 delete 事件；若 watcher 不抑制，会风暴触发
+        卸载重载链（registry 摘除 + commands 全量重建 + plugin_changed 广播到
+        全部窗口），并与市场并发 worker（并发上限 3）交错时互相污染——旧实现
+        仅 enable/disable/install/update 抑制 watcher，**卸载不抑制**，多个插件
+        同时卸载时主线程被重复清理链反复阻塞（卡死）。
 
-        Returns:
-            True 删除成功或目录不存在
+        现整个删除动作持引用计数式抑制（多 worker 并发时最后一个结束者才真正
+        放开 watcher），结束后精准重载目标插件一次（仅清理该插件，不触发全量）。
         """
-        # 0. 停止并摘除该插件注册的 gateway 平台 adapter：adapter 依赖的 SDK
-        #    （如 lark_oapi → Crypto）被进程加载后 .pyd/.dll 句柄占用，不摘除
-        #    会导致 rmtree 删不干净（残留 deps 目录）。stop_plugin_platforms
-        #    内部先调度 stop（释放 WS 连接线程）再 pop 摘除实例引用；
-        #    wait=True 确保 stop 完成后再删，最大限度避免 .pyd 占用。
-        self._stop_gateway_platforms(name, wait=True)
-        # 清理模块缓存（UI 注册表卸载由 GUI 线程在主线程先行完成）
-        self._purge_plugin_module_cache(name)
+        self._suppress_backend_watcher()
         removed = False
-        leftover: list = []
-        for base in (self._plugins_dir, self._disabled_dir):
-            target = base / name
-            if target.exists():
-                # _rmtree_relocate：先正常删，删不掉的被锁 .pyd/.dll 同卷改名移出
-                # 插件目录（让空），再二次 rmtree 清空；仅当文件被其它进程永久独占、
-                # 连 rename 都不行时才残留到 leftover（记录待重启清理）。
-                if _rmtree_relocate(self, target, leftover):
-                    removed = True
-                    logger.info(f"[Installer] Removed plugin {name}")
-        if leftover:
-            # 部分文件被其它进程永久独占、连 rename 都失败 → 记录待下次启动/重启清理。
-            # 占用文件已被尽可能移出，目录通常已让空，市场侧不再显示为插件，
-            # 用户视角卸载已完成；残留仅占磁盘，重启后自动清掉。
-            self._record_pending_delete(leftover)
-            logger.warning(
-                f"[Installer] 插件 {name} 部分文件残留（可能被其它进程占用），已记录待下次启动清理: {leftover[:5]}"
+        try:
+            # 0. 停止并摘除该插件注册的 gateway 平台 adapter：adapter 依赖的 SDK
+            #    （如 lark_oapi → Crypto）被进程加载后 .pyd/.dll 句柄占用，不摘除
+            #    会导致 rmtree 删不干净（残留 deps 目录）。stop_plugin_platforms
+            #    内部先调度 stop（释放 WS 连接线程）再 pop 摘除实例引用；
+            #    wait=True 确保 stop 完成后再删，最大限度避免 .pyd 占用。
+            self._stop_gateway_platforms(name, wait=True)
+            # 清理模块缓存（UI 注册表卸载由 GUI 线程在主线程先行完成）
+            self._purge_plugin_module_cache(name)
+            leftover: list = []
+            for base in (self._plugins_dir, self._disabled_dir):
+                target = base / name
+                if target.exists():
+                    # _rmtree_relocate：先正常删，删不掉的被锁 .pyd/.dll 同卷改名移出
+                    # 插件目录（让空），再二次 rmtree 清空；仅当文件被其它进程永久独占、
+                    # 连 rename 都不行时才残留到 leftover（记录待重启清理）。
+                    if _rmtree_relocate(self, target, leftover):
+                        removed = True
+                        logger.info(f"[Installer] Removed plugin {name}")
+            if leftover:
+                # 部分文件被其它进程永久独占、连 rename 都失败 → 记录待下次启动/重启清理。
+                # 占用文件已被尽可能移出，目录通常已让空，市场侧不再显示为插件，
+                # 用户视角卸载已完成；残留仅占磁盘，重启后自动清掉。
+                self._record_pending_delete(leftover)
+                logger.warning(
+                    f"[Installer] 插件 {name} 部分文件残留（可能被其它进程占用），已记录待下次启动清理: {leftover[:5]}"
+                )
+            if removed:
+                self.invalidate_installed_cache()
+            return True
+        finally:
+            # 卸载成功后精准重载目标插件（走 __manifest__ 删除路径，仅清理该插件
+            # 组件并广播 plugin_changed action=uninstalled）；未真正删除（残留/目录
+            # 不存在）时不重载。
+            self._resume_backend_watcher(
+                reload=removed, plugin_name=name, action="uninstalled" if removed else None
             )
-        if removed:
-            self.invalidate_installed_cache()
-        return True
 
     @staticmethod
     def _stop_gateway_platforms(name: str, wait: bool = False) -> None:

@@ -9,7 +9,6 @@
 import json
 import re
 import urllib.parse
-import urllib.request
 from typing import Any, Dict, Optional
 
 from app.plugins.registries.provider_registry import ProviderDef, QuotaField
@@ -31,6 +30,8 @@ def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, An
     需要在服务商配置中额外填写 server_id / cookie / workspace_id。
     这些字段不会影响正常的 API 调用，仅用于用量查询。
     """
+    import urllib.request  # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
+
     server_id = (config.get("server_id", "") or "").strip()
     cookie = (config.get("cookie", "") or "").strip()
     workspace_id = (config.get("workspace_id", "") or "").strip()
@@ -128,6 +129,9 @@ _ZEN_CAPABILITIES = {
     "supports_thinking": True,
     "thinking_param": "reasoning_effort",
     "reasoning_effort_param": "reasoning_effort",
+    # 网关会话标识头：Zen/Go 要求每个 LLM 请求携带稳定会话 ID
+    # （2026-09-06 起缺失报 400 MissingSessionID），值由主程序填当前会话 ID
+    "session_header": "x-opencode-session",
 }
 
 

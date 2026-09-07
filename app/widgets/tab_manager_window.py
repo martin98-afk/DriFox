@@ -223,6 +223,11 @@ class EmptyStateWidget(QWidget):
             f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(14)}"
         )
 
+    def minimumSizeHint(self):  # noqa: N802
+        # setMinimumWidth(0) 压不住 hint（QWidgetItem::minimumSize = hint.expandedTo(min)），
+        # 文本宽 ~150px 会顶住整窗 resize 下限，必须从源头摘掉
+        return QSize(0, 0)
+
 
 def _apply_window_topmost(window):
     """应用窗口置顶配置（Settings.window_always_on_top）到指定窗口
@@ -450,6 +455,36 @@ class _WorkbenchFrame(QFrame):
 
     def set_min_hint_disabled(self, disabled: bool) -> None:
         """切换「最小尺寸提示归零」；幂等，切换后主动 updateGeometry 让 splitter 重算"""
+        disabled = bool(disabled)
+        if self._min_hint_disabled == disabled:
+            return
+        self._min_hint_disabled = disabled
+        self.updateGeometry()
+
+    def minimumSizeHint(self):
+        if self._min_hint_disabled:
+            return QSize(0, 0)
+        return super().minimumSizeHint()
+
+
+class _ContentStack(QStackedWidget):
+    """对话区覆盖层堆栈：覆盖层可见时可归零 minimumSizeHint（同 _WorkbenchFrame 思路）
+
+    QStackedLayout::minimumSize 取**所有页**的最大值：page0 聊天页（输入区、
+    欢迎页等）的最小宽会透过整条 splitter 链顶住把手，导致覆盖层卡片
+    （agent_trace 等 full 卡）无法被左右侧边栏拖拽挤压——窗口 resize 在到达
+    同一下限前的区间内仍有效，感知上就成了「缩窗口能压窄、拖把手压不了」。
+
+    覆盖层可见期间聊天页本就隐藏，其下限不应参与布局：归零后实际下限只剩
+    覆盖层卡片自身（内部控件均已放开）；卡片关闭恢复聊天页正常下限。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._min_hint_disabled = False
+
+    def set_min_hint_disabled(self, disabled: bool) -> None:
+        """切换「最小尺寸提示归零」；幂等，切换后主动 updateGeometry 让布局重算"""
         disabled = bool(disabled)
         if self._min_hint_disabled == disabled:
             return
@@ -1920,12 +1955,12 @@ class TabManagerWindow(FramelessWindow):
         #   展开动画结束 → 释放轴向 max、锁定最小尺寸，占比交给 splitter 拖拽；
         #   折叠 → 记忆占比、动画收 0 后 hide() 并显式归还空间给内容区；
         #   重开 → 恢复上次拖出的占比。
-        from PyQt5.QtWidgets import QSplitter as _DockSplitter, QStackedWidget as _QStackedWidget
+        from PyQt5.QtWidgets import QSplitter as _DockSplitter
 
         # ── 覆盖层堆栈（QStackedWidget）：仅替换对话区，不覆盖 LEFT/RIGHT/BOTTOM ──
         # Page 0: 正常对话视图
         # Page 1: 系统卡片覆盖层（_global_top_container 内的全局卡片）
-        self._content_stack = _QStackedWidget(self._chat_frame)
+        self._content_stack = _ContentStack(self._chat_frame)
         self._content_stack.setObjectName("contentStack")
         self._content_stack.addWidget(self._content_area)  # index 0: 对话区
 
@@ -2363,6 +2398,9 @@ class TabManagerWindow(FramelessWindow):
         卡片关闭后空间恢复：若折叠确为挤压所致（非用户手动），且可用宽度足够，
         则自动展开回常规宽度，避免折叠态残留。
         """
+        # 覆盖层可见期间聊天页隐藏，其最小宽不应参与布局（否则顶住 splitter
+        # 把手，覆盖层卡片无法被左右侧边栏挤压）。卡片自身下限已各自放开。
+        self._content_stack.set_min_hint_disabled(has_visible)
         if has_visible:
             self._content_stack.setCurrentIndex(1)
         else:

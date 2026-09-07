@@ -22,7 +22,9 @@ from unittest.mock import MagicMock
 import pytest
 from PyQt5.QtCore import QObject
 
-sys.path.insert(0, "app")
+# 注意：不得在此插入 "app" 到 sys.path——app/plugins（regular package）会
+# 劫持顶层 `plugins.*` 命名空间解析，令 tests/plugins 下 import plugins.* 的
+# 测试在混合收集时全部 ModuleNotFoundError。仓库根已由 pytest rootdir 提供。
 
 from app.main_widget import AT_BOTTOM_TOLERANCE, OpenAIChatToolWindow  # noqa: E402
 
