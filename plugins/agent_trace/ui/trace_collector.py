@@ -210,7 +210,7 @@ class TraceCollector(QObject):
             sys_prompt = (getattr(session, "system_prompt", "") or "").strip()
         except Exception:
             pass
-        new_records = self._project(messages, sys_prompt)
+        new_records = self._project(messages, sys_prompt, session_id=sid)
 
         if emit_reset or not self._records:
             self._records = new_records
@@ -284,6 +284,24 @@ class TraceCollector(QObject):
     def _tail_signature(tail: List[TraceRecord]) -> tuple:
         return tuple((r.kind, r.label[:32], round(r.start_ts, 3), r.is_pending, r.raw[:48]) for r in tail)
 
+    def _make_reasoning_loader(self, session_id: str, msg_idx: int):
+        """轻量消息 reasoning 懒读闭包（message_extras 探测式，失败返回空串）。"""
+
+        def _load() -> str:
+            try:
+                from app.core.backend import get_session_storage
+
+                storage = get_session_storage()
+                fn = getattr(storage, "load_msg_extras", None)
+                if not callable(fn):
+                    return ""
+                patch = fn(session_id, [msg_idx]) or {}
+                return str((patch.get(msg_idx) or {}).get("reasoning_content") or "")
+            except Exception:
+                return ""
+
+        return _load
+
     def _set_tail(self, new_tail: List[TraceRecord]) -> None:
         """tail 稳定化赋值：内容没变不发信号（修「历史记录一直在刷新」）。"""
         new_sig = self._tail_signature(new_tail)
@@ -294,21 +312,23 @@ class TraceCollector(QObject):
 
     # ──────────────────── 增量投影 ────────────────────
 
-    def _project(self, messages: List[Dict[str, Any]], system_prompt: str) -> List[TraceRecord]:
+    def _project(self, messages: List[Dict[str, Any]], system_prompt: str, session_id: str = "") -> List[TraceRecord]:
         """投影入口：能增量就增量，否则全量。
 
         ⚠️ ``_sync`` 会被 hook 注入 / 工具结果高频触发，而全量投影是 O(全部历史
         消息)。稳态下（一轮对话只在尾部追加几条）绝大多数工作是完全重复的。
         """
-        records = self._try_incremental(messages, system_prompt)
+        records = self._try_incremental(messages, system_prompt, session_id=session_id)
         if records is None:
-            records = self._project_messages(messages, system_prompt=system_prompt)
+            records = self._project_messages(messages, system_prompt=system_prompt, session_id=session_id)
         # 记下本次投影的输入，供下次做身份比对
         self._proj_msgs = list(messages)
         self._proj_sys = system_prompt
         return records
 
-    def _try_incremental(self, messages: List[Dict[str, Any]], system_prompt: str) -> Optional[List[TraceRecord]]:
+    def _try_incremental(
+        self, messages: List[Dict[str, Any]], system_prompt: str, session_id: str = ""
+    ) -> Optional[List[TraceRecord]]:
         """前缀复用：只重投影尾部 K 条。返回 None = 不适用（调用方回退全量）。
 
         走增量的前提（**全部**满足）：
@@ -349,6 +369,7 @@ class TraceCollector(QObject):
                 start_index=cut_msg,
                 turn_start=turn,
                 synthesize_system=False,
+                session_id=session_id,
             )
             records = prefix + tail
             if len(records) != len(messages) + offset:  # 形状校验（防御）
@@ -370,6 +391,7 @@ class TraceCollector(QObject):
         start_index: int = 0,
         turn_start: int = 0,
         synthesize_system: bool = True,
+        session_id: str = "",
     ) -> List[TraceRecord]:
         """把 ``session.messages`` 投影成 ``TraceRecord`` 列表。
 
@@ -407,6 +429,8 @@ class TraceCollector(QObject):
 
             meta: Dict[str, Any] = {}
             is_error = False
+            # message_extras 懒读钩子：仅 ASSISTANT 分支按需挂上。
+            rec_loader = None
 
             if kind == EntryKind.ASSISTANT:
                 # 真实 token 用量优先：worker 会把 API 响应的 usage 落成
@@ -429,6 +453,9 @@ class TraceCollector(QObject):
                 reasoning = msg.get("reasoning_content")
                 if isinstance(reasoning, str) and reasoning.strip():
                     meta["reasoning"] = reasoning
+                elif isinstance(msg.get("_x_idx"), int) and session_id:
+                    # 轻量消息：reasoning 已剥离进 extras → 挂懒读钩子
+                    rec_loader = self._make_reasoning_loader(session_id, msg["_x_idx"])
 
             if kind == EntryKind.TOOL:
                 tool_call_id = msg.get("tool_call_id") or ""
@@ -539,6 +566,7 @@ class TraceCollector(QObject):
                     is_error=is_error,
                     turn_no=turn,
                     meta=meta,
+                    reasoning_loader=rec_loader,
                 )
             )
 

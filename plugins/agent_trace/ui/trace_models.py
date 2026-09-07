@@ -30,7 +30,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from PyQt5.QtGui import QColor
 
@@ -262,6 +262,9 @@ class TraceRecord:
     is_error: bool = False
     turn_no: int = 0
     meta: Dict[str, Any] = field(default_factory=dict)
+    # message_extras：轻量消息的 reasoning 懒读钩子（collector 注入，
+    # detail_panel Thinking tab 展开时调用）。无剥离时为 None。
+    reasoning_loader: Optional[Callable[[], str]] = None
 
     @property
     def lane(self) -> Lane:
