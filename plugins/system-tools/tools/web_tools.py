@@ -54,7 +54,7 @@ def _ensure_migrated() -> None:
     if not legacy.exists():
         return
     PluginConfigStore().migrate(
-        "system",
+        "system-tools",
         legacy,
         key_map={"tavily_api_key": "tavily_api_key", "tinyfish_api_key": "tinyfish_api_key"},
     )
@@ -71,7 +71,7 @@ def _api_key(tool_ctx, name: str) -> str:
     from app.plugins.managers.plugin_config_store import PluginConfigStore
 
     key = "tavily_api_key" if name == "TAVILY_API_KEY" else "tinyfish_api_key"
-    val = PluginConfigStore().get("system", key)
+    val = PluginConfigStore().get("system-tools", key)
     return str(val or "")
 
 
