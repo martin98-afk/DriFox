@@ -890,7 +890,7 @@ class MCPListSettingCard(ExpandSettingCard):
 
         _parent = TabManagerWindow.get_instance() or self.window()
         infobar = InfoBar(
-            icon=InfoBarIcon.ATTENTION,
+            icon=InfoBarIcon.WARNING,
             title=f"MCP 安全确认: {name}",
             content="该服务器来自非内置源（用户级插件），首次启动需确认是否放行",
             orient=Qt.Vertical,
