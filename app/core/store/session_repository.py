@@ -712,9 +712,11 @@ class SessionRepository:
 
         try:
             self._content_hash_cache.pop(session_id, None)
-            # message_extras 级联清理（先删子表）
-            self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
             success, _ = self._execute(f"DELETE FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
+            if success:
+                # message_extras 级联清理（后删子表）：主表失败则整体未删保持一致；
+                # 主表成功而子表失败只剩无害孤儿行（会话已不存在，无人查询）。
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
             return success
         except Exception as e:
             logger.error(f"[SessionRepository] delete_session 异常: {e}")

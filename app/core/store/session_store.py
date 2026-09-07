@@ -873,16 +873,18 @@ class SessionStore:
             logger.error(f"[SessionStore] 数据库未连接，无法清理项目 {project_name}")
             return False
         try:
-            # message_extras 级联清理（须在删 sessions 之前用子查询定位）
-            self._execute(
-                "DELETE FROM session_msg_extras WHERE session_id IN "
-                "(SELECT session_id FROM sessions WHERE project = ?)",
-                (project_name,),
-            )
+            # 先快照待删会话 id（顺序倒置后 extras 删除必须基于此快照，
+            # 否则前置 sessions DELETE 会让基于 sessions 的子查询返空、留下孤儿行）。
+            ids_ok, id_rows = self._execute("SELECT session_id FROM sessions WHERE project = ?", (project_name,))
+            target_ids = [r["session_id"] for r in id_rows] if ids_ok and id_rows else []
             # 删除会话（直接 SQL，不经过 repo 层）
             self._execute("DELETE FROM sessions WHERE project = ?", (project_name,))
             # 删除关键文档
             self._execute("DELETE FROM key_documents WHERE project = ?", (project_name,))
+            # message_extras 级联清理（最后删）：前两步失败则 extras 与会话保持一致保留；
+            # 前两步成功而 extras 失败只剩无害孤儿行（会话已不存在，无人查询）。
+            for sid in target_ids:
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (sid,))
             logger.info(f"[SessionStore] 已强制清理项目 {project_name} 的所有关联数据")
             return True
         except Exception as e:

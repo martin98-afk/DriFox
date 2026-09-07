@@ -240,3 +240,31 @@ def test_force_cleanup_project_cascades_extras(store):
     assert store.load_msg_extras("s9"), "前置：extras 应有数据"
     store.force_cleanup_project("测试项目")
     assert store.load_msg_extras("s9") == {}, "强制清理项目应级联清理 extras"
+
+
+def test_delete_session_without_extras_ok(store):
+    """删除无 extras 的会话：子表 0 行受影响不影响主表删除成功。"""
+    messages = [_msg("user", "hi")]
+    store.save_session(_session("s12", messages))
+    assert store.delete_session("s12")
+    assert store.get_session("s12") is None
+
+
+def test_delete_does_not_touch_other_sessions_extras(store):
+    """删除 s5 不影响同库其它会话的 extras。"""
+    m5 = [_msg("assistant", f"a{i}", reasoning_content=f"t{i}") for i in range(6)]
+    m6 = [_msg("assistant", f"b{i}", reasoning_content=f"u{i}") for i in range(6)]
+    store.save_session(_session("s5", m5))
+    store.save_session(_session("s6", m6))
+    store.delete_session("s5")
+    assert store.load_msg_extras("s6"), "其它会话 extras 不应被误删"
+
+
+def test_archive_by_project_preserves_extras(store):
+    """归档（改名非删除）不清理 extras，防止后续误加级联。"""
+    messages = [_msg("assistant", f"a{i}", reasoning_content=f"t{i}") for i in range(6)]
+    s = _session("s13", messages)
+    s["project"] = "归档项目"
+    store.save_session(s)
+    store.archive_sessions_by_project("归档项目")
+    assert store.load_msg_extras("s13"), "归档不应清理 extras"
