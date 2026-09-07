@@ -3,6 +3,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.9] - 2026-09-07
+
+自上一版本以来的变更 | 提交数：18 · 文件变更：22 · +1037/-21 | 贡献者：mading
+
+### ✨ 新功能 (New Features)
+
+- **会话 UI 态字段离屏化** (`app/core/store/session_repository.py`, `app/core/store/session_store.py`): 新增 `session_msg_extras` 表，将 reasoning_content / tool_calls / arguments 等 UI 态字段在保存时离屏写入，降低会话内存占用；暴露 `load_msg_extras` / `get_full_messages` 门面供回看完整消息。
+- **渲染批次物化** (`app/widgets/ui_helpers.py`, `app/main_widget.py`): 离屏 UI 态字段的渲染批次按需物化，sentinel 命中/未命中场景均有测试覆盖。
+- **思考标签页惰性加载** (`plugins/agent_trace/ui/`): 离屏 reasoning content 在思考标签页按需懒加载。
+- **opencode 网关会话头** (`app/core/workers/chat_worker.py`, `plugins/system/providers/opencode.py`): LLM 请求自动注入 `x-opencode-session` 会话头，满足网关会话绑定要求。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **滚动时服务商 icon 闪烁** (`app/widgets/ui_helpers.py`): 修复 sticky header 滚动时服务商 icon 闪烁。
+- **分享导出合并 extras** (`app/core/store/session_repository.py`): 离屏会话导出时合并 extras，保证导出消息完整。
+- **级联删除顺序** (`app/core/store/session_repository.py`): 倒置删除顺序，先删主表再删 extras，避免部分失败导致 extras 丢失。
+- **extras 写入失败隔离** (`app/core/store/session_repository.py`): extras 写入失败不影响主保存结果。
+
+### 🎨 样式改进 (Style)
+
+- **会话内存诊断脚本格式化** (`tools/diag_session_fields.py`, `tools/diag_session_memory.py`): ruff format 统一风格。
+
+### 🔧 其他 (Chores & Build)
+
+- **测试** (`tests/`): 修复插件命名空间劫持导致的混合目录收集失败；覆盖 batch materialize sentinel 命中/未命中场景；加固 load_msg_extras 边界用例与契约文档。
+- **依赖锁定** (`uv.lock`): 同步 jsonschema 依赖与 drifox 版本号。
+
 ## [v0.5.8] - 2026-09-07 (重新发布)
 
 自上一版本以来的变更 | 提交数：18 · 文件变更：36 · +1384/-250 | 贡献者：mading
