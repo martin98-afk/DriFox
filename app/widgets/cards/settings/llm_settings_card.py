@@ -40,7 +40,12 @@ from app.utils.design_tokens import (
     invalidate_font_cache,
     scale_icon_size,
 )
-from app.utils.startup_manager import AutoStartCancelled, request_auto_start_update
+from app.utils.startup_manager import (
+    AutoStartCancelled,
+    build_startup_command,
+    get_registered_command,
+    request_auto_start_update,
+)
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, invalidate_font_family_css_cache
 from app.widgets.cards.settings.gitee_card import GiteeCard
@@ -1220,6 +1225,16 @@ class LLMSettingsCard(SystemCardFrame):
                         parent=bar_parent,
                     ).show()
                     return
+
+            # 注册表现状短路：目标状态与本机注册表一致时无需提权重写，
+            # 兼防同步/配置回写等程序化联动误触发 UAC 弹窗
+            reg_cmd = get_registered_command()
+            if enabled and reg_cmd == build_startup_command():
+                logger.info("[AutoStart] 注册表已开启且命令有效，跳过重复写入")
+                return
+            if not enabled and reg_cmd is None:
+                logger.info("[AutoStart] 注册表本就无自启项，跳过删除")
+                return
 
             # 1. 先弹 UAC 由提权 helper 写 HKLM 注册表（独立 try，不相互污染异常处理）
             try:

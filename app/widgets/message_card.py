@@ -3575,6 +3575,26 @@ def _mmd_theme_vars_js(body_font_size: int) -> str:
     )
 
 
+def _format_elapsed(elapsed: float) -> str:
+    """自适应单位格式化耗时：<60s=秒；<1h=分秒；<1d=时分；>=1d=天时。
+
+    阈值固定（60/3600/86400），与设置/语言无关。返回值不含前缀，前缀由调用方拼接。
+    """
+    total = int(elapsed)
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        m, s = divmod(total, 60)
+        return f"{m}m {s}s"
+    if total < 86400:
+        h, rem = divmod(total, 3600)
+        m = rem // 60
+        return f"{h}h {m}m"
+    d, rem = divmod(total, 86400)
+    h = rem // 3600
+    return f"{d}d {h}h"
+
+
 # ======== WebViewer ========
 class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
@@ -11707,7 +11727,7 @@ class MessageCard(SimpleCardWidget):
             self._elapsed_timer.stop()
             self._elapsed_start_time = None
             try:
-                self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
+                self._footer_elapsed_label.setText(f"⏱ {_format_elapsed(elapsed)}")
                 self._footer_elapsed_label.setVisible(True)
             except RuntimeError:
                 # 🛡️ 防御：footer label 可能已被 C++ 侧销毁（deleteLater 排队中），
@@ -11838,7 +11858,7 @@ class MessageCard(SimpleCardWidget):
         if not self._footer_elapsed_label:
             return
         self._elapsed_start_time = time.time()
-        self._footer_elapsed_label.setText("⏱ 0s")
+        self._footer_elapsed_label.setText(f"⏱ {_format_elapsed(0)}")
         self._footer_elapsed_label.setVisible(True)
         self._refresh_footer_separators()
         self._elapsed_timer.start(1000)  # 每秒更新
@@ -11853,7 +11873,7 @@ class MessageCard(SimpleCardWidget):
         if not self.isVisible():
             return
         elapsed = time.time() - self._elapsed_start_time
-        self._footer_elapsed_label.setText(f"⏱ {elapsed:.0f}s")
+        self._footer_elapsed_label.setText(f"⏱ {_format_elapsed(elapsed)}")
 
     def _build_avatar_style(self):
         font_css = get_font_family_css()
