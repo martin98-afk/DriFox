@@ -281,7 +281,7 @@ class HookItem(QWidget):
         self.delBtn.setStyleSheet(ButtonStyles.tool_button())
         self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
 
-        # 系统级 hook（来自 plugins/system/ 内置插件）禁止删除
+        # 系统级 hook（来自 plugins/ 内置 system 族插件）禁止删除
         is_system_plugin = self._hook_data.get("_is_system_plugin", False)
         if is_system_plugin:
             self.delBtn.setEnabled(False)

@@ -3308,7 +3308,7 @@ class OpenAIChatToolWindow(ToolWindow):
             for card_id, card_info in ui_registry.get_floating_cards().items():
                 if ":" in card_id:
                     cmd_name = card_id
-                elif card_info.plugin_name == "system" or card_id == card_info.plugin_name:
+                elif card_info.plugin_name in ("system", "system-ui") or card_id == card_info.plugin_name:
                     cmd_name = card_id
                 else:
                     cmd_name = f"{card_info.plugin_name}:{card_id}"
@@ -4404,7 +4404,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🆕 缺失角色不再弹 InfoBar 报错 → 抛 CommandNeedDegrade 降级到
             # prompt 注入补全流程：由 _execute_command 捕获后 select_prompt 按
             # --load= 参数匹配 `<!-- section:load_missing -->` 段（详见
-            # `plugins/system/commands/team.md`），AI 走补全流程。
+            # `plugins/system-commands/commands/team.md`），AI 走补全流程。
             from app.core.command_manager import CommandNeedDegrade
 
             raise CommandNeedDegrade("team", f"--load={name} 缺失角色: {', '.join(missing)}")

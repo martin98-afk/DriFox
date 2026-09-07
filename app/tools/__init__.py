@@ -184,7 +184,7 @@ def create_builtin_tools(homepage=None, workdir: str = None) -> BuiltinTools:
 # ============================================================
 # 工具插件化：系统插件工具加载 + schema 聚合（registry 驱动）
 # ============================================================
-# 系统工具插件位于 plugins/system/tools/*.py，通过 register(registry) 注册
+# 系统工具插件位于 plugins/system-tools/tools/*.py，通过 register(registry) 注册
 # schema / impl / icon / cn_name / danger / group / description / aliases。
 # 模块导入时加载一次（幂等），热重载由 PluginToolWatcher 后台轮询驱动。
 
@@ -237,7 +237,7 @@ except Exception:
 def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id: str = "") -> List[Dict]:
     """获取工具的 schema 定义（用于给 LLM 调用，registry 驱动）
 
-    系统插件工具（plugins/system/tools/*.py）与第三方插件工具经
+    系统插件工具（plugins/system-tools/tools/*.py）与第三方插件工具经
     ToolRegistry 注册后自动进入 schema 流；MCP 工具在此动态注入。
 
     出口统一应用 registry 注册的 schema 过滤器（如 assistant_hub 按

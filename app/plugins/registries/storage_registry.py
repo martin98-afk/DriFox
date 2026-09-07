@@ -2,7 +2,7 @@
 """存储引擎注册表 — set_active 激活插件引擎。
 
 零硬编码兜底：active id 不在 _engines 时不再 new SqliteStorageEngine()。
-- 先尝试 _engines["sqlite"]（由系统插件 plugins/system/storages/sqlite.py 注册）
+- 先尝试 _engines["sqlite"]（由系统插件 plugins/system-storages/storages/sqlite.py 注册）
 - 仍不在则抛 RuntimeError，让调用方/启动器明确报错（引导启用 system 插件）
 """
 

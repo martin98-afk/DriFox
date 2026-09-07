@@ -1,0 +1,18 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-mcp",
+  "description": "DriFox 内置 MCP 服务器配置：MiniMax / GitHub / Playwright（默认关闭）",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "MIT",
+  "type": "system",
+  "components": {
+    "mcp": true
+  }
+}

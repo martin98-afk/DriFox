@@ -122,7 +122,7 @@ class SubAgentExecutor(QThread):
         max_iterations: Optional[
             int
         ] = None,  # 轮数上限（per-agent steps 优先）；None=走激活策略（默认 subagent 策略 30）
-        hook_policy_id: Optional[str] = None,  # 子智能体域 hook 策略插件 id（plugins/system/hook_policies/）
+        hook_policy_id: Optional[str] = None,  # 子智能体域 hook 策略插件 id（plugins/system-hook-policies/hook_policies/）
     ):
         super().__init__()
         self.task_id = task_id
@@ -134,7 +134,7 @@ class SubAgentExecutor(QThread):
         self.parent_context = parent_context
         self.is_subagent_call = is_subagent_call  # 传递给提示词构建
         self.max_iterations = max_iterations  # 轮数上限（None=走激活策略）
-        # 子智能体域 hook 策略：默认 None → 走 plugins/system/hook_policies/ 的
+        # 子智能体域 hook 策略：默认 None → 走 plugins/system-hook-policies/hook_policies/ 的
         # "subagent_default"（仅工具级 + Stop + PluginChanged）。可显式传 id 覆盖。
         self._hook_policy_id = hook_policy_id
         self._hook_policy_obj = None  # 懒解析缓存
@@ -634,7 +634,7 @@ class SubAgentExecutor(QThread):
         """当前激活的子智能体 hook 触发策略对象
 
         优先级：_hook_policy_id 显式 id > 默认 scope=subagent 的激活策略
-        （默认 plugins/system/hook_policies/subagent_default.py，仅工具级 + Stop +
+        （默认 plugins/system-hook-policies/hook_policies/subagent_default.py，仅工具级 + Stop +
         PluginChanged）。Registry 未加载时回退到内置 SubagentDefaultHookPolicy（保持
         现状行为：仅工具级 + Stop + PluginChanged）。
         """
@@ -732,7 +732,7 @@ class SubAgentExecutor(QThread):
             adapter = self._resolve_adapter_with_warmup(registry, config or {})
         if adapter is None:
             raise RuntimeError(
-                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system/model_adapters/ 已启用"
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system-model-adapters/ 已启用"
             )
         return adapter.protocol_flags(config or {})
 
@@ -751,7 +751,7 @@ class SubAgentExecutor(QThread):
             adapter = self._resolve_adapter_with_warmup(registry, llm_config)
         if adapter is None:
             raise RuntimeError(
-                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system/model_adapters/ 已启用"
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system-model-adapters/ 已启用"
             )
         return adapter.protocol_flags(llm_config or {}).requires_reasoning_content
 

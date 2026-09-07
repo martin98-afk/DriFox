@@ -9,7 +9,7 @@
 - 服务商定义（icon/url/模型/能力/余额/用量 fetcher）完全由插件内联声明
 
 扫描范围（含系统插件）：
-- 工作树 `plugins/`（含 `plugins/system/providers/` 系统内置服务商插件）
+- 工作树 `plugins/`（含 `plugins/system-providers/providers/` 系统内置服务商插件）
 - 用户插件目录 `<app_data>/plugins/`
 
 热重载：

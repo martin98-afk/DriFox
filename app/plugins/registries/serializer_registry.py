@@ -2,7 +2,7 @@
 """消息序列化器注册表 — 单例，按 serializer_id 解析，无该 id 回退 "openai"，仍无抛错。
 
 零硬编码兜底：registry 不自带 fallback serializer（系统插件
-plugins/system/serializers/openai.py 提供默认实现）。resolve 回退逻辑仅做
+plugins/system-serializers/serializers/openai.py 提供默认实现）。resolve 回退逻辑仅做
 id 回退（"openai" 是约定默认 id），不 new 任何实例。
 """
 

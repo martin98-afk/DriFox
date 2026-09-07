@@ -678,7 +678,7 @@ def warmup_runtime_components() -> Dict[str, Set[str]]:
     """启动期一次性加载五类运行时组件（系统插件 plugins/system 提供默认实现）。
 
     五类运行时组件（model_adapters / loop_policies / storages / serializers / gateways / engines）
-    的默认实现现已迁入系统插件（plugins/system/{model_adapters,loop_policies,storages,
+    的默认实现现已迁入系统插件（plugins/system-model-adapters/model_adapters/ 等（拆分前为 plugins/system/），
     serializers,gateways}/），不再需要 builtin 层兜底。registry 完全由插件目录扫描结果填充。
     """
     result: Dict[str, Set[str]] = {}

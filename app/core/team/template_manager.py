@@ -10,7 +10,7 @@
 模板来源（优先级从高到低）：
   1. user-custom  — .drifox/plugins/user-custom/team_templates/（可写、可删）
   2. plugin       — 各插件声明的 team_templates/ 目录（只读）
-  3. system       — plugins/system/team_templates/（只读）
+  3. system       — plugins/system-team-templates/team_templates/（只读）
 
 设计要点：
 - 单例模式：与 TeamManager 风格保持一致
@@ -76,9 +76,12 @@ class TemplateManager:
 
     @classmethod
     def _resolve_system_templates_dir(cls) -> Path:
-        """解析系统模板根目录（<repo>/plugins/system/team_templates/）。"""
+        """解析系统模板根目录（<repo>/plugins/system-team-templates/team_templates/）。
+
+        system 插件按类型拆分后，内置团队模板由 system-team-templates 插件承载。
+        """
         project_root = Path(__file__).resolve().parent.parent.parent.parent
-        return project_root / "plugins" / "system" / cls._TEMPLATES_SUBDIR
+        return project_root / "plugins" / "system-team-templates" / cls._TEMPLATES_SUBDIR
 
     def _get_user_dir(self) -> Optional[Path]:
         """获取 user-custom 插件下的 team_templates/ 目录（不存在则创建）。
@@ -115,8 +118,8 @@ class TemplateManager:
     def _get_plugin_template_dirs_named(cls) -> List[tuple]:
         """获取插件模板目录并保留插件名：[(plugin_name, dir), ...]
 
-        system 插件（plugins/system/）同样作为「插件源」出现，其细项开关
-        归属插件名 "system"。
+        system-team-templates 插件同样作为「插件源」出现，其细项开关归属插件名
+        "system-team-templates"。
         """
         try:
             from app.plugins.managers.plugin_manager import PluginManager
@@ -132,9 +135,9 @@ class TemplateManager:
     def _source_enabled(plugin_name: str) -> bool:
         """检查某来源所属插件的 team_templates 组件是否被整类停用
 
-        system 源固定归属 "system" 插件、user 源固定归属 "user-custom" 插件。
-        这两路来源按硬编码路径读取、不经过 PluginManager 的目录枚举，
-        若不在此显式判断就会出现「关了团队模板，系统模板仍在列表里」。
+        system 源固定归属 "system-team-templates" 插件、user 源固定归属
+        "user-custom" 插件。这两路来源按硬编码路径读取、不经过 PluginManager
+        的目录枚举，若不在此显式判断就会出现「关了团队模板，系统模板仍在列表里」。
 
         插件未注册时（如 user-custom 清单尚未创建）保持原语义——始终可用，
         避免开关把用户自建模板一起屏蔽。
@@ -178,8 +181,8 @@ class TemplateManager:
             if plugin_dir.exists():
                 sources.append((plugin_dir, self.SOURCE_PLUGIN, plugin_name))
 
-        if self._system_dir.exists() and self._source_enabled("system"):
-            sources.append((self._system_dir, self.SOURCE_SYSTEM, "system"))
+        if self._system_dir.exists() and self._source_enabled("system-team-templates"):
+            sources.append((self._system_dir, self.SOURCE_SYSTEM, "system-team-templates"))
 
         return sources
 

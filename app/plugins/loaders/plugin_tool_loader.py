@@ -10,7 +10,7 @@
 - 危险级别强制校验：register 必须显式声明 danger（registry 层拒绝未声明插件工具）
 
 扫描范围（含系统插件）：
-- 工作树 `plugins/`（含 `plugins/system/tools/` 系统内置工具插件）
+- 工作树 `plugins/`（含 `plugins/system-tools/tools/` 系统内置工具插件）
 - 用户插件目录 `<app_data>/plugins/`
 
 热重载：

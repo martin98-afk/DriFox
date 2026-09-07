@@ -25,7 +25,7 @@ from app.plugins.contracts.hook_policy import (
     HookPolicy,
 )
 
-# 各 scope 的默认策略 id（由系统插件 plugins/system/hook_policies/*.py 注册）
+# 各 scope 的默认策略 id（由系统插件 plugins/system-hook-policies/hook_policies/*.py 注册）
 _SCOPE_DEFAULTS: Dict[str, str] = {
     SCOPE_MAIN: "all",
     SCOPE_SUBAGENT: "subagent_default",

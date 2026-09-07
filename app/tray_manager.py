@@ -794,7 +794,7 @@ class TrayManager(QObject):
 
         # 兜底：直接从系统文件读取
         try:
-            cmd_path = Path(__file__).parents[1] / "plugins" / "system" / "commands" / "toggle-window.md"
+            cmd_path = Path(__file__).parents[1] / "plugins" / "system-commands" / "commands" / "toggle-window.md"
             if not cmd_path.exists():
                 return ""
             content = cmd_path.read_text(encoding="utf-8")

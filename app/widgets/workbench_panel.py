@@ -15,7 +15,7 @@
 
 ★ 产物页已完全插件化：面板**不再内置**产物实现，改由插件通过
 ``UIPluginRegistry.register_workbench_tab(plugin_name, page_id="artifacts", ...)``
-注册（系统插件见 ``plugins/system/ui/_artifacts_page.py``）。
+注册（系统插件见 ``plugins/system-ui/ui/_artifacts_page.py``）。
 插件未注册时 index 2 显示 ``_PagePlaceholder`` 占位。
 
 其它 page_id 的插件页追加在「工作树 / 记忆 / 产物」之后（见 sync_plugin_pages）。
@@ -61,14 +61,14 @@ TASKS_DEFAULT_HEIGHT = 180  # 任务区默认高度
 
 
 # 注：_EmptyHint / _SectionHeader 已迁移到 app.widgets._workbench_helpers 共享模块，
-# 被 TasksPage 和 plugins/system/ui/_artifacts_page.py 共用。
+# 被 TasksPage 和 plugins/system-ui/ui/_artifacts_page.py 共用。
 
 
 class _PagePlaceholder(QWidget):
     """页签占位页：插件页未注册 / 已卸载时的兜底内容
 
     产物页（page_id="artifacts"）已完全插件化——面板不再内置实现，
-    由 plugins/system/ui/_artifacts_page.py 的 SystemArtifactsPage 提供。
+    由 plugins/system-ui/ui/_artifacts_page.py 的 SystemArtifactsPage 提供。
     插件未加载时显示本占位，避免出现空白页。
     """
 
