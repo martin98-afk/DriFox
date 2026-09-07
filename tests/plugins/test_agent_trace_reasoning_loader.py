@@ -2,7 +2,11 @@
 """agent_trace：轻量消息 reasoning 懒读链测试。"""
 from types import SimpleNamespace
 
-from plugins.agent_trace.ui.trace_collector import TraceCollector
+import pytest
+
+pytest.importorskip("PyQt5.QtGui")
+
+from plugins.agent_trace.ui.trace_collector import TraceCollector  # noqa: E402
 
 
 def _bare_collector():
