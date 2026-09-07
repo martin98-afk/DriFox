@@ -651,6 +651,9 @@ class CustomTitleBar(TitleBarBase):
             except Exception:
                 pass
 
+        # 窄窗口下标题栏按钮允许被裁剪：不放行的话标题栏按钮堆的 minimumSizeHint
+        # （~340px）会顶住整窗 resize 下限，主窗口无法缩到很小
+        self.setMinimumWidth(0)
         self.refresh_style()
         self._sync_tab_centering()
 
