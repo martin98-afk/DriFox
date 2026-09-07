@@ -70,7 +70,7 @@ def test_key_modules_routed():
         "app.tools.mcp_tools": "mcp.log",
         "app.core.lsp.lsp_client": "lsp.log",
         "app.core.tool_executor": "tools.log",
-        "plugins.system.tools.terminal_tools": "plugins.log",
+        "plugins.system-tools.tools.terminal_tools": "plugins.log",
         "app.main_widget": "ui.log",
         "app.core.team_manager": "team.log",
         "app.core.store.session_store": "store.log",

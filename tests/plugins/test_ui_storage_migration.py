@@ -78,7 +78,8 @@ def fresh_serializer_registry(monkeypatch):
 
 def test_engine_covers_ui_call_sites(tmp_path, monkeypatch):
     """引擎方法集 == UI 层（main_widget + FileOperationRecorder）实际调用点"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.core.store.session_store import SessionStore
 
     monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
@@ -102,7 +103,8 @@ def test_engine_covers_ui_call_sites(tmp_path, monkeypatch):
 
 def test_engine_methods_delegate_to_session_store(tmp_path, monkeypatch):
     """引擎方法委托 SessionStore（标题/计数/输入历史/子任务清理/文件操作等价）"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.core.store.session_store import SessionStore
 
     monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
@@ -125,7 +127,8 @@ def test_engine_methods_delegate_to_session_store(tmp_path, monkeypatch):
 
 def test_file_operation_recorder_accepts_engine(tmp_path, monkeypatch):
     """FileOperationRecorder(self.session_store) 构造兼容引擎（隐式依赖）"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.core.store.session_store import SessionStore
     from app.utils.file_operation_recorder import FileOperationRecorder
 
@@ -141,7 +144,8 @@ def test_file_operation_recorder_accepts_engine(tmp_path, monkeypatch):
 def test_backend_session_store_returns_active_engine(fresh_storage_registry, fresh_serializer_registry):
     """backend.session_store 返回 StorageRegistry 活跃引擎（自定义引擎生效）"""
     from app.core.backend import ChatBackend
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
 
     backend = ChatBackend.__new__(ChatBackend)
     fresh_storage_registry.register(SqliteStorageEngine(db_dir=":memory:"), source="plugin:system")

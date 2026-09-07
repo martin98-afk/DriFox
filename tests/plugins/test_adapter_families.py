@@ -8,7 +8,8 @@
 import pytest
 
 from app.plugins.contracts.model_adapter import ProtocolFlags
-from plugins.system.model_adapters import _detectors as det
+from importlib import import_module
+det = import_module("plugins.system-model-adapters.model_adapters._detectors")
 
 _CASES = [
     # (llm_config, 预期选中家族, 预期 flags 三判定)
@@ -58,9 +59,12 @@ def test_family_equivalence_matrix(fresh_registry, cfg, family_id, expected):
 
 def test_family_priorities(fresh_registry):
     """matches 优先级：deepseek 3 > gemini 2 > openai 1（兜底）"""
-    from plugins.system.model_adapters.deepseek_family import DeepSeekFamilyAdapter
-    from plugins.system.model_adapters.gemini_family import GeminiFamilyAdapter
-    from plugins.system.model_adapters.openai_family import OpenAIFamilyAdapter
+    from importlib import import_module
+    DeepSeekFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.deepseek_family").DeepSeekFamilyAdapter
+    from importlib import import_module
+    GeminiFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.gemini_family").GeminiFamilyAdapter
+    from importlib import import_module
+    OpenAIFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.openai_family").OpenAIFamilyAdapter
 
     deepseek_cfg = {"API_URL": "https://api.deepseek.com/v1", "模型名称": "deepseek-chat", "思考模式": True}
     gemini_cfg = {"API_URL": "https://generativelanguage.googleapis.com/v1", "模型名称": "gemini-2.5-pro"}
@@ -91,14 +95,15 @@ def test_no_legacy_openai_module():
     """旧单适配器 openai.py 已删除（无残留 import）"""
     import importlib.util
 
-    spec = importlib.util.find_spec("plugins.system.model_adapters.openai")
+    spec = importlib.util.find_spec("plugins.system-model-adapters.model_adapters.openai")
     assert spec is None
 
 
 def test_serializer_id_default_openai():
     """家族 adapter 的 serializer_id 保持默认 openai（暂无专属序列化器）"""
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
-    from plugins.system.model_adapters.openai_family import OpenAIFamilyAdapter
+    from importlib import import_module
+    OpenAIFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.openai_family").OpenAIFamilyAdapter
 
     flags = OpenAIFamilyAdapter().protocol_flags({"API_URL": "https://api.openai.com/v1", "模型名称": "gpt-4o"})
     assert flags.serializer_id == "openai"

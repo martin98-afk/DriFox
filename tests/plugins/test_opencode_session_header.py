@@ -25,7 +25,8 @@ def fresh_registry(monkeypatch):
 
 
 def _load_opencode_plugin(registry):
-    from plugins.system.providers import opencode as opencode_plugin
+    from importlib import import_module
+    opencode_plugin = import_module("plugins.system-providers.providers").opencode
 
     opencode_plugin.register(registry)
 

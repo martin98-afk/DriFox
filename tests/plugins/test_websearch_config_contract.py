@@ -52,7 +52,8 @@ def env(tmp_path, monkeypatch):
 def _websearch_module():
     import importlib
 
-    import plugins.system.tools.web_tools as m
+    from importlib import import_module
+    m = import_module("plugins.system-tools.tools.web_tools")
 
     return importlib.reload(m)
 

@@ -27,7 +27,8 @@ def fresh_registry(monkeypatch):
 
 def test_policy_semantics(fresh_registry):
     """scope 声明 + 继续/停止判定（与原硬编码行为等价）"""
-    from plugins.system.loop_policies.subagent import SubagentLoopPolicy
+    from importlib import import_module
+    SubagentLoopPolicy = import_module("plugins.system-loop-policies.loop_policies.subagent").SubagentLoopPolicy
 
     p = SubagentLoopPolicy()
     assert p.id == "subagent"
@@ -40,7 +41,8 @@ def test_policy_semantics(fresh_registry):
 
 def test_max_rounds_default_and_config(fresh_registry):
     """默认 30（与原 max_iterations=30 等价）；配置键可调"""
-    from plugins.system.loop_policies.subagent import SubagentLoopPolicy
+    from importlib import import_module
+    SubagentLoopPolicy = import_module("plugins.system-loop-policies.loop_policies.subagent").SubagentLoopPolicy
 
     p = SubagentLoopPolicy()
     assert p.max_rounds({}) == 30
@@ -51,7 +53,8 @@ def test_max_rounds_default_and_config(fresh_registry):
 
 def test_final_summary_prompt_content(fresh_registry):
     """总结提示词与原 _build_final_summary_prompt 内容等价"""
-    from plugins.system.loop_policies.subagent import SubagentLoopPolicy
+    from importlib import import_module
+    SubagentLoopPolicy = import_module("plugins.system-loop-policies.loop_policies.subagent").SubagentLoopPolicy
 
     prompt = SubagentLoopPolicy().final_summary_prompt()
     assert "总结当前执行结果" in prompt

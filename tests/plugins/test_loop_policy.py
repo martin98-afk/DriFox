@@ -9,7 +9,8 @@ from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 @pytest.fixture()
 def fresh_registry(monkeypatch):
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
-    from plugins.system.loop_policies.default import DefaultLoopPolicy
+    from importlib import import_module
+    DefaultLoopPolicy = import_module("plugins.system-loop-policies.loop_policies.default").DefaultLoopPolicy
 
     reg = LoopPolicyRegistry()
     reg.register(DefaultLoopPolicy(), source="plugin:system")
@@ -71,7 +72,8 @@ def test_set_active_and_fallback(fresh_registry):
 
 def test_scope_grouped_defaults(fresh_registry):
     """subagent 域默认激活 subagent 策略；main 域默认 default；两槽互不影响"""
-    from plugins.system.loop_policies.subagent import SubagentLoopPolicy
+    from importlib import import_module
+    SubagentLoopPolicy = import_module("plugins.system-loop-policies.loop_policies.subagent").SubagentLoopPolicy
 
     fresh_registry.register(SubagentLoopPolicy(), source="plugin:system")
     assert fresh_registry.get_active("main").id == "default"
@@ -81,7 +83,8 @@ def test_scope_grouped_defaults(fresh_registry):
 
 def test_set_active_auto_routes_to_policy_scope(fresh_registry):
     """set_active 不带 scope 时按策略注册的 scope 归位：子域策略激活不影响主域槽"""
-    from plugins.system.loop_policies.subagent import SubagentLoopPolicy
+    from importlib import import_module
+    SubagentLoopPolicy = import_module("plugins.system-loop-policies.loop_policies.subagent").SubagentLoopPolicy
 
     class _CustomSub:
         id = "custom-sub"

@@ -99,7 +99,7 @@ def test_scanner_catches_injected_violation(tmp_path):
     bad = tmp_path / "fake_app" / "sub"
     bad.mkdir(parents=True)
     (bad / "violator.py").write_text(
-        "import json\nfrom plugins.system.tools import file_tools\n", encoding="utf-8"
+        "import json\nfrom plugins.system-tools.tools import file_tools\n", encoding="utf-8"
     )
     clean = tmp_path / "fake_app" / "clean.py"
     clean.write_text("from app.utils import utils\n", encoding="utf-8")

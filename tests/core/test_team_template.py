@@ -1844,4 +1844,3 @@ class TestTeamMailSenderRoleGuard:
         src = ast.unparse(target)
         assert "chat_engine" in src
         assert "switch_agent" in src
-

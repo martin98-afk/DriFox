@@ -12,7 +12,8 @@ import pytest
 from app.core import message_content as mc
 from app.plugins.contracts.message_serializer import SerializeContext, SerializeResult
 from app.plugins.contracts.model_adapter import ProtocolFlags
-from plugins.system.serializers.openai import OpenAIChatSerializer
+from importlib import import_module
+OpenAIChatSerializer = import_module("plugins.system-serializers.serializers.openai").OpenAIChatSerializer
 
 SER = OpenAIChatSerializer()
 
