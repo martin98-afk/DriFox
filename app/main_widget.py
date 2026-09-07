@@ -7003,7 +7003,15 @@ class OpenAIChatToolWindow(ToolWindow):
         """滚动时吸顶服务商变化，更新标题栏显示当前服务商名和图标
 
         provider_name 是从 model_selector 传来的 display_name（不是 config_id）。
+
+        去重：滚动过程中 valueChanged 每像素都会触发本回调，而吸顶服务商名
+        往往长时间不变；同名时直接返回，避免每个滚轮 tick 都 delete 旧
+        ProviderIconWidget + new 新 widget（replaceWidget 触发重排重绘）导致
+        标题栏图标闪烁。
         """
+        if getattr(self, "_last_sticky_provider", None) == provider_name:
+            return
+        self._last_sticky_provider = provider_name
         if provider_name:
             from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 
