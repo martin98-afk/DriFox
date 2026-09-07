@@ -3,6 +3,27 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.10b1] - 2026-09-07
+
+自上一版本以来的变更 | 提交数：7 · 文件变更：17 · +429/-59 | 贡献者：dingma, drifox-bot, mading
+
+> 🧪 Beta 预发布：在 v0.5.9 基础上合并 7 个关键修复与功能，重点修复流式响应线程安全崩溃、补齐 reasoning_content 流式提取工具函数。
+
+### ✨ 新功能 (New Features)
+
+- **extract_reasoning_delta 推理内容提取** (`app/core/message_content.py`, `app/core/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`): 新增推理内容增量提取工具函数 `extract_reasoning_delta`，供 reasoning_content 流式渲染与子智能体工作线程复用，模型能力表同步更新。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **流式响应线程安全** (`app/core/workers/chat_worker.py`): 为流式响应增加线程安全处理，防止跨线程访问冲突触发 Access Violation 崩溃；附 `reports/crash_stream_access_violation_analysis.md` 根因分析报告。
+- **websearch 搜索失效** (`plugins/system-tools/.drifox-plugin/plugin.json`, `plugins/system-tools/tools/web_tools.py`, `tests/plugins/`): 修复 plugin_name 拆分后 plugin.json 配置项未同步导致的 websearch 工具搜索失效，同步新增/更新测试契约。
+
+### 🔧 其他 (Chores & Build)
+
+- **版本升级至 v0.5.10b1** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): 四文件版本号统一更新，标记为 beta 预发布。
+- **marketplace 自动重新生成** (`marketplace.json`): 2 次 `[skip ci]` 自动同步提交。
+- **plugin.json 版本号同步** (`plugins/system-providers/.drifox-plugin/plugin.json`): provider 插件内部版本号更新至 1.1.0。
+
 ## [v0.5.9] - 2026-09-07 (重新发布)
 
 自上一版本以来的变更 | 提交数：24 · 文件变更：372 · +17440/-16074 | 贡献者：mading, drifox-bot
