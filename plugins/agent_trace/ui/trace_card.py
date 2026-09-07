@@ -72,6 +72,9 @@ from .turn_list_widget import TurnListWidget
 TOP_BAR_H = 46
 BOTTOM_BAR_H = 30
 
+# 卡片窄于此值时隐藏底部汇总栏：统计文本自然宽 ~300px，再窄只会挤压列表/详情
+_FOOTER_HIDE_BELOW = 420
+
 _PLUGIN_NAME = "agent_trace"
 
 # 类型过滤 chips 已下放到 TurnListWidget（时间线下方、列表上方），顶栏不再承载
@@ -137,6 +140,8 @@ class TraceCardWidget(QWidget):
         self._fs = 13
         self._schema_ts = 0.0
         self._aux_dirty = False  # 有 O(N) 辅助刷新待补（见 _flush_aux_refresh）
+        # (widget, 原最小宽)：卡片可见期间临时放开的宿主对话区下限（_relax_chat_min_width）
+        self._chat_min_saved: Optional[Tuple[QWidget, int]] = None
         self._build_ui()
         self._build_timer()
 
@@ -157,11 +162,12 @@ class TraceCardWidget(QWidget):
         # ③ 列表 + 详情（同一行）
         splitter = QSplitter(Qt.Horizontal, self)
         splitter.setHandleWidth(6)
-        splitter.setChildrenCollapsible(False)
+        splitter.setChildrenCollapsible(True)
         self._turn_list = TurnListWidget(splitter)
-        self._turn_list.setMinimumWidth(420)
+        # 无宽度下限：显式置 0 压过内部布局的 minimumSizeHint，允许拖到任意窄
+        self._turn_list.setMinimumWidth(0)
         self._detail = DetailPanel(splitter)
-        self._detail.setMinimumWidth(320)
+        self._detail.setMinimumWidth(0)
         splitter.addWidget(self._turn_list)
         splitter.addWidget(self._detail)
         splitter.setStretchFactor(0, 3)
@@ -197,6 +203,7 @@ class TraceCardWidget(QWidget):
         self._dot = _StatusDot(bar)
         layout.addWidget(self._dot, 0, Qt.AlignVCenter)
         self._status_label = QLabel("记录中", bar)
+        self._status_label.setMinimumWidth(0)  # 窄窗口允许压缩裁剪
         layout.addWidget(self._status_label)
 
         layout.addStretch(1)
@@ -208,6 +215,7 @@ class TraceCardWidget(QWidget):
         # 默认关：Duration 关 = 每条等宽（固定长度），开启才按真实时间比例
         self._duration_btn.setChecked(False)
         self._duration_btn.setFixedHeight(26)
+        self._duration_btn.setMinimumWidth(0)  # 窄窗口允许压缩裁剪
         self._duration_btn.setCursor(Qt.PointingHandCursor)
         self._duration_btn.setToolTip("开：条带宽度按真实时间比例（开启后滚轮可缩放时间窗）；关：每条等宽")
         self._duration_btn.toggled.connect(self._on_flag_toggled)
@@ -215,7 +223,9 @@ class TraceCardWidget(QWidget):
 
         self._search_box = SearchLineEdit(bar)
         self._search_box.setPlaceholderText("搜索内容 / 工具名…")
-        self._search_box.setFixedWidth(220)
+        # 正常宽度封顶 220；下限 0，窄窗口随布局压缩
+        self._search_box.setMinimumWidth(0)
+        self._search_box.setMaximumWidth(220)
         self._search_box.setFixedHeight(28)
         self._search_box.setClearButtonEnabled(True)
         layout.addWidget(self._search_box)
@@ -232,12 +242,17 @@ class TraceCardWidget(QWidget):
         self._stats_time = QLabel("LLM - · 工具 -", bar)
         self._stats_ctx = QLabel("上下文 -", bar)
         self._stats_total = QLabel("", bar)
+        # 页脚统计是此前窗口最小宽度的主因：QLabel 文本撑出的 minimumSizeHint
+        # 叠加近 300px。显式置 0 允许压缩裁剪，窗口才能拖到任意窄。
+        for _lbl in (self._stats_turns, self._stats_time, self._stats_ctx, self._stats_total):
+            _lbl.setMinimumWidth(0)
         widgets = (self._stats_turns, self._stats_time, self._stats_ctx)
         for i, lbl in enumerate(widgets):
             layout.addWidget(lbl)
             if i < len(widgets) - 1:
                 sep = QLabel("   |   ", bar)
                 sep.setObjectName("agentTraceStatSep")
+                sep.setMinimumWidth(0)
                 layout.addWidget(sep)
         layout.addStretch(1)
         layout.addWidget(self._stats_total)
@@ -314,6 +329,54 @@ class TraceCardWidget(QWidget):
         # 隐藏期间积压的统计/时间线刷新（_flush_aux_refresh 不可见时会跳过）
         if self._aux_dirty:
             self._flush_aux_refresh()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        # 卡片不可见（用户关闭 / 切回聊天页 / 宿主窗口隐藏）→ 归还对话区宽度下限
+        self._restore_chat_min_width()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        # 响应式汇总栏：卡片足够窄时让位给列表/详情，拉宽自动恢复
+        bar = getattr(self, "_bottom_bar", None)
+        if bar is not None:
+            bar.setVisible(self.width() >= _FOOTER_HIDE_BELOW)
+
+    # ──────────────── 宿主对话区宽度联动 ────────────────
+
+    def _relax_chat_min_width(self, main_widget: Any) -> None:
+        """卡片可见期间放开宿主对话区 320px 最小宽，隐藏/切走时恢复。
+
+        agent_trace 覆盖整个对话区，聊天流的 setMinimumWidth(320) 只会
+        白白卡住 splitter（用户拉宽侧边栏受限）。记录原值并置 0，实际
+        下限由卡片自身决定（内部控件均已放开）。恢复走 _restore_chat_min_width。
+        """
+        if not self.isVisible():
+            self._restore_chat_min_width()
+            return
+        scroll = getattr(main_widget, "chat_scroll_area", None)
+        if scroll is None:
+            return
+        saved = self._chat_min_saved
+        if saved is not None and saved[0] is scroll:
+            return  # 同一宿主已放开
+        self._restore_chat_min_width()  # 切窗口场景：先归还原宿主
+        try:
+            self._chat_min_saved = (scroll, scroll.minimumWidth())
+            scroll.setMinimumWidth(0)
+        except RuntimeError:
+            self._chat_min_saved = None  # C++ 对象已销毁
+
+    def _restore_chat_min_width(self) -> None:
+        """归还临时放开的对话区最小宽；宿主已销毁则静默跳过。"""
+        saved = self._chat_min_saved
+        if saved is None:
+            return
+        self._chat_min_saved = None
+        try:
+            saved[0].setMinimumWidth(saved[1])
+        except RuntimeError:
+            pass
 
     def _refresh_context(self) -> None:
         if self._ctx_provider is None:
@@ -421,6 +484,7 @@ class TraceCardWidget(QWidget):
         """
         wid = getattr(main_widget, "_window_id", "") or ""
         sid = self._session_id_of(main_widget)
+        self._relax_chat_min_width(main_widget)
         if wid and wid == self._active_wid and self._collector is not None:
             # 同窗口：collector 常驻且由 backend 信号驱动同步（切走也在记
             # timing），常规链路数据不过期，无需全量重投影（长会话投影是切
