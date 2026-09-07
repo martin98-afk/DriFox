@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # 内置主题目录（打包在 exe 中，只读）
 # 指向系统插件 themes 目录，不再依赖 app/themes/
-_BUILTIN_THEMES_DIR = Path(__file__).parent.parent.parent / "plugins" / "system" / "themes"
+_BUILTIN_THEMES_DIR = Path(__file__).parent.parent.parent / "plugins" / "system-themes" / "themes"
 
 
 class ThemeManager:
@@ -58,7 +58,7 @@ class ThemeManager:
         系统主题 < 插件主题(直接扫描) < 插件主题(PluginManager) < 用户主题
         """
 
-        # 1. 内置主题（打包在 exe 的 plugins/system/themes/，优先级最低）
+        # 1. 内置主题（打包在 exe 的 plugins/system-themes/themes/，优先级最低）
         self._load_from_dir(_BUILTIN_THEMES_DIR, is_builtin=True)
 
         # 2. 插件主题 — 直接扫描插件目录（不依赖 PluginManager）

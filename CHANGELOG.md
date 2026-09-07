@@ -3,9 +3,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.5.9] - 2026-09-07
+## [v0.5.9] - 2026-09-07 (重新发布)
 
-自上一版本以来的变更 | 提交数：18 · 文件变更：22 · +1037/-21 | 贡献者：mading
+自上一版本以来的变更 | 提交数：24 · 文件变更：372 · +17440/-16074 | 贡献者：mading, drifox-bot
+
+> 🔄 重新发布：在初版 v0.5.9 基础上，合并 5 个关键重构（v0.5.9..HEAD），覆盖 plugins/system 拆分、importlib 动态加载、marketplace 自动同步与冗余插件文件清理。
 
 ### ✨ 新功能 (New Features)
 
@@ -21,6 +23,13 @@ All notable changes to this project will be documented in this file.
 - **级联删除顺序** (`app/core/store/session_repository.py`): 倒置删除顺序，先删主表再删 extras，避免部分失败导致 extras 丢失。
 - **extras 写入失败隔离** (`app/core/store/session_repository.py`): extras 写入失败不影响主保存结果。
 
+### ♻️ 代码重构 (Refactoring)
+
+- **插件路径与目录结构调整** (`plugins/`, `app/`): 反映新目录结构与文档清晰度改进。
+- **importlib 动态加载** (`plugins/`, `app/`): 改用 importlib 动态加载插件，精简代码结构。
+- **插件路径与组件清理** (`plugins/`, `app/`): 更新插件路径，清理冗余组件。
+- **删除过时 DriFox 插件文件** (`plugins/`): 移除 command format 文档、LSP 配置与 system README，剔除未使用组件。
+
 ### 🎨 样式改进 (Style)
 
 - **会话内存诊断脚本格式化** (`tools/diag_session_fields.py`, `tools/diag_session_memory.py`): ruff format 统一风格。
@@ -29,6 +38,7 @@ All notable changes to this project will be documented in this file.
 
 - **测试** (`tests/`): 修复插件命名空间劫持导致的混合目录收集失败；覆盖 batch materialize sentinel 命中/未命中场景；加固 load_msg_extras 边界用例与契约文档。
 - **依赖锁定** (`uv.lock`): 同步 jsonschema 依赖与 drifox 版本号。
+- **marketplace 同步** (`marketplace.json`): 由 plugin.json 自动重新生成（`[skip ci]`）。
 
 ## [v0.5.8] - 2026-09-07 (重新发布)
 

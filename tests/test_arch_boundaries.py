@@ -26,6 +26,7 @@ LEGACY_TESTS_ALLOWLIST = {
     "debug/agent_trace_token_repro.py",
     "debug/verify_incremental_projection.py",
     "file_tools_resolve_test.py",
+    "plugins/test_agent_trace_reasoning_loader.py",
     "plugins/test_adapter_families.py",
     "plugins/test_builtin_openai_adapter.py",
     "plugins/test_e2e_phase_c.py",
@@ -99,7 +100,7 @@ def test_scanner_catches_injected_violation(tmp_path):
     bad = tmp_path / "fake_app" / "sub"
     bad.mkdir(parents=True)
     (bad / "violator.py").write_text(
-        "import json\nfrom plugins.system.tools import file_tools\n", encoding="utf-8"
+        "import json\nfrom plugins.system-tools.tools import file_tools\n", encoding="utf-8"
     )
     clean = tmp_path / "fake_app" / "clean.py"
     clean.write_text("from app.utils import utils\n", encoding="utf-8")

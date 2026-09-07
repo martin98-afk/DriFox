@@ -16,7 +16,7 @@ if str(_REPO_ROOT) not in sys.path:
 # shell_compressor 随工具插件存放（工具插件化），从插件路径加载
 import importlib.util  # noqa: E402
 
-_plugin_path = _REPO_ROOT / "plugins" / "system" / "tools" / "_shell_compressor.py"
+_plugin_path = _REPO_ROOT / "plugins" / "system-tools" / "tools" / "_shell_compressor.py"
 _spec = importlib.util.spec_from_file_location("_shell_compressor", _plugin_path)
 _shell_compressor = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_shell_compressor)

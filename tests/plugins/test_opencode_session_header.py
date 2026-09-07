@@ -25,7 +25,8 @@ def fresh_registry(monkeypatch):
 
 
 def _load_opencode_plugin(registry):
-    from plugins.system.providers import opencode as opencode_plugin
+    from importlib import import_module
+    opencode_plugin = import_module("plugins.system-providers.providers.opencode")
 
     opencode_plugin.register(registry)
 
@@ -47,7 +48,7 @@ def test_provider_profile_exposes_session_header(fresh_registry):
 
 # ── worker 注入侧 ───────────────────────────────────────
 
-from app.core.workers.chat_worker import ChatWorker  # noqa: E402
+from app.core.workers.chat_worker import OpenAIChatWorker as ChatWorker  # noqa: E402
 
 
 class _StubWorker:

@@ -11,7 +11,8 @@ import pytest
 from app.core import message_content as mc
 from app.plugins.contracts.message_serializer import SerializeContext
 from app.plugins.contracts.model_adapter import ProtocolFlags
-from plugins.system.serializers.openai import OpenAIChatSerializer
+from importlib import import_module
+OpenAIChatSerializer = import_module("plugins.system-serializers.serializers.openai").OpenAIChatSerializer
 
 SER = OpenAIChatSerializer()
 
@@ -126,7 +127,8 @@ def test_register_convention():
             self.items.append(item)
 
     reg = _FakeReg()
-    from plugins.system.serializers import openai as ser_mod
+    from importlib import import_module
+    ser_mod = import_module("plugins.system-serializers.serializers.openai")
 
     ser_mod.register(reg)
     assert len(reg.items) == 1

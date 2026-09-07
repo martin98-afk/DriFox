@@ -313,9 +313,25 @@ class PluginManager:
     # 系统插件：项目根目录 plugins/（打包在 exe 中；P1-6：onedir 下解析 _MEIPASS/plugins）
     _SYSTEM_PLUGIN_DIR = _resolve_system_plugin_dir()
     # 不可禁用核心插件名单（黑名单制）：禁用会断核心链路（组件宿主/插件市场自身）。
-    # 其余插件（含 manifest type=system 的内置插件）均可禁用；
+    # system 插件已按组件类型拆分为 system-* 系列内置插件，其中承载核心链路的
+    # 子集（工具/序列化/存储/模型适配/服务商/Hooks/两类策略/命令/智能体）不可禁用；
+    # 外围插件（主题/技能/MCP/团队模板/UI 页）可整插件禁用。
     # plugin-marketplace/ui/installer.py 状态分类与本名单保持单一数据源。
-    _NON_DISABLEABLE = frozenset({"system", "plugin-marketplace"})
+    _NON_DISABLEABLE = frozenset(
+        {
+            "system-tools",
+            "system-serializers",
+            "system-storages",
+            "system-model-adapters",
+            "system-providers",
+            "system-hooks",
+            "system-loop-policies",
+            "system-hook-policies",
+            "system-commands",
+            "system-agents",
+            "plugin-marketplace",
+        }
+    )
     # 用户插件：~/.drifox/plugins/（相对于 app_data_dir）
     _USER_PLUGIN_DIR_NAME = "plugins"
     # Claude Code 插件目录（同时支持两种生态）
@@ -351,6 +367,9 @@ class PluginManager:
 
         self._app_data_dir = app_data_dir
 
+        # 0. 一次性迁移：system 单体插件拆分为 system-* 系列后的旧状态键改写
+        self._migrate_split_system_states()
+
         # 1. 扫描系统插件
         self._discover_system_plugins()
 
@@ -382,6 +401,102 @@ class PluginManager:
             cfg.set(cfg.enabled_plugins, saved, save=True)
         except Exception as e:
             logger.warning(f"[PluginManager] 从 Settings 恢复启用状态失败（吞异常保留语义）: {e}")
+
+    # ============================================================
+    # system 单体插件拆分迁移（v0.5.9 → 拆分版，一次性 + 幂等）
+    # ============================================================
+
+    # 组件目录 → 拆分后承载该组件的系统插件名（与 plugins/ 目录一一对应）
+    _SPLIT_COMPONENT_TO_PLUGIN = {
+        "commands": "system-commands",
+        "agents": "system-agents",
+        "skills": "system-skills",
+        "themes": "system-themes",
+        "hooks": "system-hooks",
+        "loop_policies": "system-loop-policies",
+        "hook_policies": "system-hook-policies",
+        "model_adapters": "system-model-adapters",
+        "providers": "system-providers",
+        "storages": "system-storages",
+        "serializers": "system-serializers",
+        "tools": "system-tools",
+        "ui": "system-ui",
+        "team_templates": "system-team-templates",
+        "mcp": "system-mcp",
+    }
+    # 旧单体插件 config_schema（网页搜索 API Key）的承继插件
+    _SPLIT_CONFIG_HEIR = "system-tools"
+
+    def _migrate_split_system_states(self) -> None:
+        """system 插件按类型拆分后的一次性状态迁移（幂等，无旧键时零写入）。
+
+        1. disabled_plugin_components：`system:<comp>[:<item>]` → `<split>:<comp>[:<item>]`
+        2. enabled_plugins / disabled_plugins：移除已不存在的 "system" 条目
+        3. plugin_data/system/config.json → plugin_data/system-tools/config.json
+           （旧 monolith 的网页搜索 API Key 由 system-tools 承继）
+        """
+        try:
+            from app.utils.config import Settings
+
+            cfg = Settings.get_instance()
+            changed = False
+
+            # 1. 组件/细项禁用键改写
+            disabled = list(cfg.disabled_plugin_components.value or [])
+            mapped: List[str] = []
+            for key in disabled:
+                if isinstance(key, str) and key.startswith("system:"):
+                    rest = key[len("system:") :]
+                    comp = rest.split(":", 1)[0]
+                    new_name = self._SPLIT_COMPONENT_TO_PLUGIN.get(comp)
+                    if new_name:
+                        mapped.append(f"{new_name}:{rest}")
+                        changed = True
+                        continue
+                mapped.append(key)
+            if changed:
+                cfg.set(cfg.disabled_plugin_components, mapped, save=True)
+                logger.info(f"[PluginManager] 迁移 system 拆分禁用键 {len(mapped)} 条")
+
+            # 2. 启用/禁用插件列表：清理旧单体名 + 补录拆分插件名
+            #    补录必须发生在迁移期（早于 Settings 期 provider warmup 的白名单检查），
+            #    否则启动早期 load_providers 会把 system-providers 等整体跳过，
+            #    导致 x-opencode-session 等插件声明能力丢失（400 MissingSessionID）。
+            for setting in (cfg.enabled_plugins, cfg.disabled_plugins):
+                names = list(setting.value or [])
+                if "system" in names:
+                    names.remove("system")
+                    cfg.set(setting, names, save=True)
+                    changed = True
+            enabled = list(cfg.enabled_plugins.value or [])
+            missing = [n for n in self._SPLIT_COMPONENT_TO_PLUGIN.values() if n not in enabled]
+            if missing:
+                cfg.set(cfg.enabled_plugins, enabled + missing, save=True)
+                changed = True
+                logger.info(f"[PluginManager] 补录拆分插件到启用白名单: {missing}")
+
+            if changed:
+                logger.info("[PluginManager] system 拆分状态迁移完成")
+        except Exception as e:
+            logger.warning(f"[PluginManager] system 拆分状态迁移失败（吞异常不影响启动）: {e}")
+
+        # 3. 插件配置文件承继（独立于 Settings，失败静默）
+        self._migrate_split_system_config_file()
+
+    def _migrate_split_system_config_file(self) -> None:
+        """plugin_data/system/config.json → plugin_data/system-tools/config.json（幂等）"""
+        try:
+            from app.utils.utils import get_app_data_dir
+
+            old_path = Path(get_app_data_dir()) / "plugin_data" / "system" / "config.json"
+            new_path = Path(get_app_data_dir()) / "plugin_data" / self._SPLIT_CONFIG_HEIR / "config.json"
+            if old_path.exists() and not new_path.exists():
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                new_path.write_bytes(old_path.read_bytes())
+                logger.info(f"[PluginManager] 已承继旧 system 插件配置 → {new_path}")
+        except Exception as e:
+            logger.warning(f"[PluginManager] system 插件配置承继失败（吞异常）: {e}")
+
 
     def reset(self):
         """重置（主要用于测试）"""

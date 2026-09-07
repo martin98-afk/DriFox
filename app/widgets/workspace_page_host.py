@@ -146,7 +146,7 @@ class WorkspacePageHost:
         for info in reg.get_workspace_pages():
             cmd_name = (
                 info.page_id
-                if ":" in info.page_id or info.plugin_name == "system"
+                if ":" in info.page_id or info.plugin_name in ("system", "system-ui")
                 else f"{info.plugin_name}:{info.page_id}"
             )
             mgr = CommandManager.get_instance()

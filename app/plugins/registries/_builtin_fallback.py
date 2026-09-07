@@ -20,7 +20,7 @@ from app.plugins.contracts.message_serializer import (
 
 
 class BuiltInDefaultLoopPolicy:
-    """内置兜底循环策略 — 行为与 plugins/system/loop_policies/default.py 子集等价。
+    """内置兜底循环策略 — 行为与 plugins/system-loop-policies/loop_policies/default.py 子集等价。
 
     差异：不实现 final_summary_prompt（子智能体用，主链路不调）。
     子智能体域缺插件时仍由本兜底顶替，子智能体的 max_rounds 上限由调用方配置补。

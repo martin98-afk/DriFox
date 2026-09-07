@@ -224,7 +224,7 @@ class OpenAIChatWorker(QThread):
         self.session_id = session_id
         # Hook 参与级别（None = 未声明，按 ALL 兼容旧调用方）
         self._hook_policy = hook_policy if isinstance(hook_policy, HookPolicy) else HookPolicy.ALL
-        # 可选：HookPolicy 插件 id（plugins/system/hook_policies/ 注册）。
+        # 可选：HookPolicy 插件 id（plugins/system-hook-policies/hook_policies/ 注册）。
         # 优先级高于 _hook_policy 枚举：设置后从 HookPolicyRegistry 取对应策略对象，
         # 未设置时按枚举回落（ALL→"all" / TOOL_EVENTS_ONLY→"tool_only" / NONE→"none"）。
         self._hook_policy_id = hook_policy_id
@@ -761,7 +761,7 @@ class OpenAIChatWorker(QThread):
         from app.core.backend import _make_hook_message
 
         # Hook 参与级别拦截：消息级事件（PreAssistantMessage/PostAssistantMessage/Stop）
-        # 由 hook policy 插件决定（plugins/system/hook_policies/）。
+        # 由 hook policy 插件决定（plugins/system-hook-policies/hook_policies/）。
         # 默认 AllHookPolicy 触发所有事件（兼容原 HookPolicy.ALL）；
         # 插件自建引擎可传 hook_policy=NONE 或 hook_policy_id="none"。
         from app.plugins.contracts.hook_policy import (
@@ -2930,7 +2930,7 @@ class OpenAIChatWorker(QThread):
                 adapter = self._resolve_with_cold_start_warmup(registry)
             if adapter is None:
                 raise RuntimeError(
-                    "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system/model_adapters/ 已启用"
+                    "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system-model-adapters/ 已启用"
                 )
             self._model_adapter = adapter
         return self._model_adapter.protocol_flags(self.llm_config or {})
@@ -3041,21 +3041,21 @@ class OpenAIChatWorker(QThread):
     def _requires_reasoning_content(self) -> bool:
         """thinking 模式下，兼容要求 tool-call assistant 保留 reasoning_content 字段的 provider。
 
-        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
+        实现已迁入系统插件 plugins/system-model-adapters/model_adapters/openai.py（可被插件覆盖）。
         """
         return self._adapter_flags().requires_reasoning_content
 
     def _is_gemini_model(self) -> bool:
         """当前 worker 是否为 Gemini 模型（需特殊处理 thought_signature）。
 
-        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
+        实现已迁入系统插件 plugins/system-model-adapters/model_adapters/openai.py（可被插件覆盖）。
         """
         return self._adapter_flags().is_gemini
 
     def _use_responses_api(self) -> bool:
         """当前模型是否走 Responses API（/v1/responses）。
 
-        实现已迁入系统插件 plugins/system/model_adapters/openai.py（可被插件覆盖）。
+        实现已迁入系统插件 plugins/system-model-adapters/model_adapters/openai.py（可被插件覆盖）。
         """
         return self._adapter_flags().use_responses_api
 

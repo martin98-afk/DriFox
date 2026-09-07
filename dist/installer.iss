@@ -62,6 +62,11 @@ Name: "chinesesimplified"; MessagesFile: "./ChineseSimplified.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; 
 
+[InstallDelete]
+; 升级前清空安装目录：旧版本删除/改名的文件（插件、依赖等）不会残留
+; 注意：用户数据在用户目录（~/.drifox），安装目录为纯产物，可安全清空
+Type: filesandordirs; Name: "{app}"
+
 [Files]
 Source: "Drifox\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

@@ -16,7 +16,7 @@ from typing import Dict, Optional, Tuple
 
 from app.plugins.contracts.loop_policy import SCOPE_MAIN, SCOPE_SUBAGENT, LoopPolicy
 
-# 各 scope 的默认策略 id（由系统插件 plugins/system/loop_policies/*.py 注册）
+# 各 scope 的默认策略 id（由系统插件 plugins/system-loop-policies/loop_policies/*.py 注册）
 _SCOPE_DEFAULTS: Dict[str, str] = {
     SCOPE_MAIN: "default",
     SCOPE_SUBAGENT: "subagent",

@@ -427,7 +427,7 @@ class Hook:
     # config_file: 所属的 hooks.json 配置文件路径（用于 UI 保存）
     config_file: Optional[str] = None
 
-    # 是否来自系统内置插件（plugins/system/）。系统级 hook 在 UI 上禁止删除。
+    # 是否来自系统内置插件（plugins/ 内置 system 族插件）。系统级 hook 在 UI 上禁止删除。
     # 该字段由 HookManager.register_hooks_from_json() 注入，不会写回源文件。
     is_system_plugin: bool = False
 
@@ -2808,7 +2808,7 @@ class HookManager:
         hook.enabled = enabled
 
         # 双轨制持久化：
-        # - 系统 hook（plugins/system/）：保留覆盖层（hook_states.json）
+        # - 系统 hook（plugins/ 内置 system 族插件）：保留覆盖层（hook_states.json）
         # - 非系统 hook（插件/user-custom）：写回源文件 enabled 字段（覆盖式）
         #   并清理覆盖层残留（迁移兜底）
         if hook.is_system_plugin:
@@ -2831,7 +2831,7 @@ class HookManager:
         """
         通过 id 删除 hook
 
-        系统内置插件（plugins/system/）的 hook 不可删除。
+        系统内置插件（plugins/ 内置 system 族插件）的 hook 不可删除。
 
         Args:
             hook_id: hook 唯一标识
@@ -2953,7 +2953,7 @@ class HookManager:
 
         Args:
             agents_dir: agents 目录路径
-            is_system_plugin: 是否来自系统内置插件（plugins/system/），标记的 hook 在 UI 上禁止删除
+            is_system_plugin: 是否来自系统内置插件（plugins/ 内置 system 族插件），标记的 hook 在 UI 上禁止删除
         """
         count = 0
         if not agents_dir.exists():
@@ -2991,7 +2991,7 @@ class HookManager:
         Args:
             dir_path: hooks 目录路径
             skill_name: 注册用的 skill 名称。为 None 时使用 dir_path.name（兼容旧调用）
-            is_system_plugin: 是否来自系统内置插件（plugins/system/），标记的 hook 在 UI 上禁止删除
+            is_system_plugin: 是否来自系统内置插件（plugins/ 内置 system 族插件），标记的 hook 在 UI 上禁止删除
         """
         count = 0
         if not dir_path.exists() or not dir_path.is_dir():

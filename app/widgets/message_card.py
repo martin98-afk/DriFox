@@ -416,7 +416,7 @@ _CHART_SKELETON_HTML = (
 )
 
 # ===== ```html fence 净化 =====
-# 可视化协议（plugins/system/skills/visualization）会产出 ```html 围栏的
+# 可视化协议（plugins/system-skills/skills/visualization）会产出 ```html 围栏的
 # UI 效果稿 / 指标卡。此前分发器没有 html 分支 → 落到兜底被当源码高亮，
 # 用户看到的是一堆 HTML 文本而不是渲染结果。
 #
@@ -15205,4 +15205,4 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block
-
+

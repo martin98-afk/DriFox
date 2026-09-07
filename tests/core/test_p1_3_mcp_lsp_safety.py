@@ -31,7 +31,7 @@ def log_capture():
 @pytest.fixture()
 def builtin_source():
     """系统插件根下的 .mcp.json 路径（内置源判定）。"""
-    return str(_SYSTEM_PLUGIN_ROOT / "system" / ".mcp.json")
+    return str(_SYSTEM_PLUGIN_ROOT / "system-mcp" / ".mcp.json")
 
 
 def test_mcp_builtin_audit_logged(builtin_source, log_capture):
@@ -126,9 +126,9 @@ def test_system_plugin_root_points_at_repo():
 
     曾误写 parents[3] 指到仓库外层目录（D:/work/plugins），系统插件源全部被
     误判非内置；因系统 .mcp.json 内服务器均 enabled=false 未暴露。本用例
-    用仓库事实（plugins/system/ 存在）锁死索引。
+    用仓库事实（plugins/system-mcp/ 存在，system 单体已按类型拆分）锁死索引。
     """
-    assert (_SYSTEM_PLUGIN_ROOT / "system").is_dir(), (
+    assert (_SYSTEM_PLUGIN_ROOT / "system-mcp").is_dir(), (
         f"_SYSTEM_PLUGIN_ROOT 指向不存在目录: {_SYSTEM_PLUGIN_ROOT}"
     )
 

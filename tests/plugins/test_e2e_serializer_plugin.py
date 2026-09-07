@@ -71,7 +71,7 @@ def test_plugin_overrides_default_serializer(fresh_registry, fresh_storage_regis
 
 
 def test_serializer_watcher_scans_system_plugin(fresh_registry, fresh_storage_registry):
-    """ensure_serializer_watcher → 扫描 plugins/system/serializers/ → 注册默认 openai"""
+    """ensure_serializer_watcher → 扫描 plugins/system-serializers/serializers/ → 注册默认 openai"""
     from app.plugins.loaders.runtime_component_loader import ensure_serializer_watcher
 
     watcher = ensure_serializer_watcher()
