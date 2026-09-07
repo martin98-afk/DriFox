@@ -2830,12 +2830,17 @@ class TabPanel(QWidget):
             registered: List[str] = []
             try:
                 if memory is not None:
+                    from app.utils.git_worktree import GitWorktreeDetector
+
                     for doc in memory.get_key_documents(project) or []:
                         if str(doc.get("added_by") or "") != "git_worktree":
                             continue
                         path = (doc.get("file_path") or "").strip()
                         if path and os.path.isdir(path) and path not in registered:
-                            registered.append(path)
+                            # zombie 过滤：.git 指向的 gitdir 已消失（主仓库 .git
+                            # 被删/重建）的 worktree 不进树，与 worktree list 口径对齐
+                            if GitWorktreeDetector.is_valid_worktree_link(path):
+                                registered.append(path)
             except Exception:
                 pass
             # ⚠️ 归一：目录已不存在 / 主仓库根目录 / 临时工作目录 一律回落到主仓库("")。
@@ -2977,8 +2982,8 @@ class TabPanel(QWidget):
         1. 空 / 目录已不存在 → 主仓库
         2. 命中已登记的真实 worktree（关键文档 added_by=git_worktree）→ 原样
         3. 位于某个已登记 worktree 之下 → 归到该 worktree
-        4. .git 是**文件**（git worktree 的特征）→ 原样
-        5. 其余（主仓库根目录 / 临时工作目录 / 非 git 目录）→ 主仓库
+        4. .git 是**文件**且指向的 gitdir 存在（git worktree 特征）→ 原样
+        5. 其余（主仓库根目录 / 临时工作目录 / 非 git 目录 / zombie worktree）→ 主仓库
         """
         if not wt or not os.path.isdir(wt):
             return ""
@@ -2986,7 +2991,9 @@ class TabPanel(QWidget):
         for known, kn, kn_slash in registered_norm:
             if norm == kn or norm.startswith(kn_slash):
                 return known
-        return wt if os.path.isfile(os.path.join(wt, ".git")) else ""
+        from app.utils.git_worktree import GitWorktreeDetector
+
+        return wt if GitWorktreeDetector.is_valid_worktree_link(wt) else ""
 
     def _open_project_memory(self, project: str):
         """项目根「管理工作树」快捷入口

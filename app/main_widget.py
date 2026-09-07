@@ -20033,6 +20033,15 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if not worktree_path or not os.path.isdir(worktree_path):
             return
+        # zombie 过滤：.git 指向的 gitdir 已消失（主仓库 .git 被删/重建）的
+        # worktree 不切换，避免把工作目录切进 git 已不认的目录
+        from app.utils.git_worktree import GitWorktreeDetector
+
+        if not GitWorktreeDetector.is_valid_worktree_link(worktree_path):
+            logger.warning(
+                f"[MainWidget] 跳过切换到已失效的 worktree: {worktree_path}（项目: {self._current_project}）"
+            )
+            return
         project = self._current_project
 
         # 幂等：已在目标 worktree 中则跳过

@@ -169,17 +169,43 @@ class GitWorktreeDetector:
         return None
 
     @staticmethod
+    def is_valid_worktree_link(path: str) -> bool:
+        """纯文件系统校验 .git 文件指向的 gitdir 是否真实存在（zombie 检测）
+
+        worktree 的 .git 是文件，内容形如 "gitdir: <主仓库>/.git/worktrees/<名>"。
+        主仓库 .git 被删除/重建后，遗留的 worktree 目录（git 已 prune）仍带着
+        这个 .git 文件，但 git 层面已不认（worktree list 不再列出）。
+        不起 git 子进程，可在侧栏重建等高频路径安全调用。
+        """
+        git_path = os.path.join(path, ".git")
+        if not os.path.isfile(git_path):
+            return False
+        try:
+            with open(git_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+        except Exception:
+            # 读取失败：.git 文件存在本身是强信号，维持旧判据按 worktree 处理
+            return True
+        if content.startswith("gitdir:"):
+            gitdir_path = content[7:].strip()
+            if gitdir_path and not os.path.isabs(gitdir_path):
+                gitdir_path = os.path.join(path, gitdir_path)
+            return os.path.isdir(gitdir_path)
+        return True
+
+    @staticmethod
     def is_worktree(path: str) -> bool:
         """
         判断路径是否在一个 worktree 中（而非主仓库）
 
-        原理：主仓库的 .git 是文件夹，worktree 的 .git 是文件
+        原理：主仓库的 .git 是文件夹，worktree 的 .git 是文件；
+        且 .git 文件指向的 gitdir 必须存在（zombie worktree 不算）
         """
         if not path:
             return False
         git_path = os.path.join(path, ".git")
         if os.path.isfile(git_path):
-            return True
+            return GitWorktreeDetector.is_valid_worktree_link(path)
         elif os.path.isdir(git_path):
             try:
                 result = _run_git(["rev-parse", "--git-common-dir"], cwd=path)

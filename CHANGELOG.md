@@ -125,7 +125,7 @@ All notable changes to this project will be documented in this file.
 - **原生崩溃处理与上报机制** (`app/core/`): 实现 native crash handling；集成 Windows WER；persona 创建流程新增头像处理；崩溃报告注册表与上报链路打通。
 - **插件安装器 git 命令防护** (`plugins/system/`): git 命令增加超时与停滞检测，避免长时间挂起阻塞插件安装。
 - **assistant_hub 全套能力** (`plugins/system/assistant_hub/`): 落地完整 assistant_hub 子系统——
-  - persona 注册表与内置构建模板（build / hanako / none / viper-mei / butter / ming）
+  - persona 注册表与内置构建模板（build / hanako / none / viper / butter / ming）
   - 默认助手种子化、活跃助手高亮、自适应全宽卡片行、屏蔽对话框、ComboBox 替代
   - 弧形卡片堆叠（扇形折叠 / hover 展开）、分区控件（persona chips / memory / experience）
   - 提示注入重写（persona + 静默记忆规则 + Stop turn counter）、`recall` / `record_experience` 工具
@@ -145,7 +145,7 @@ All notable changes to this project will be documented in this file.
 - **标签页删除保护** (`app/widgets/`): 标题栏永久标签禁止关闭；卡片定位增强新增卡片对齐方式。
 - **插件组件主题刷新** (`app/widgets/`): Workbench 面板与插件组件主题变化时样式自动刷新，保证 UI 一致性。
 - **动态头像尺寸** (`app/widgets/`): `set_avatar_size` 动态调整头像尺寸支持缩放动画。
-- **persona 头像与人格定义** (`plugins/system/assistant_hub/personas/`): 新增 butter / ming / viper-mei 人格定义与头像图；persona 创建指南补充访谈阶段与行为洞察描述。
+- **persona 头像与人格定义** (`plugins/system/assistant_hub/personas/`): 新增 butter / ming / viper 人格定义与头像图；persona 创建指南补充访谈阶段与行为洞察描述。
 - **assistant 编辑标签页** (`plugins/system/assistant_hub/`): 编辑器标签页覆盖 identity / prompts / public persona / avatar / memory / skills；utility model 与 session prompt cache 失效；移除未使用的 identity injection hook。
 
 ### 🐛 问题修复 (Bug Fixes)
