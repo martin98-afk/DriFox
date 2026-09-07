@@ -1213,10 +1213,11 @@ class OpenAIChatWorker(QThread):
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except Exception:
-                try:
-                    sock.close()
-                except Exception:
-                    return False
+                # 禁止 sock.close() 兜底：closesocket 与读线程的 recv 并发在
+                # Windows 上是未定义行为（fd 复用后可能操作无关 socket），
+                # 与本函数要消除的 use-after-free 同族。失败就降级：
+                # worker 等下一个 chunk 或读超时自行退出。
+                return False
             return True
         except Exception:
             return False
@@ -3884,18 +3885,17 @@ class OpenAIChatWorker(QThread):
                     if _gc_rss > 0 and self._streaming_rss_base > 0 and (_gc_rss - self._streaming_rss_base) > 200:
                         _delta = _gc_rss - self._streaming_rss_base
                         try:
-                            import ctypes
-
-                            gc.collect()  # 双重 gc.collect 触发 pymalloc arena 合并
-                            msvcrt = ctypes.CDLL("msvcrt.dll")
-                            msvcrt._heapmin()
-                            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-                            heap = kernel32.GetProcessHeap()
-                            if heap:
-                                kernel32.HeapCompact(heap, 0)
-                            logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已强制堆压缩")
+                            # ⚠️ 这里原本还有 msvcrt._heapmin() 与 kernel32.HeapCompact(heap, 0)。
+                            # 项目内 T10 实测结论：Python 3.14 下 HeapCompact **100% 抛 access
+                            # violation**。该 AV 虽会落到下面的 except 被吞掉，但 Windows 进程堆
+                            # 已被触碰过，进程之后处于不可信状态——后续任意分配/释放都可能随机
+                            # 崩溃，而崩溃点会落在完全无关的代码上（例如 openai/_streaming.py），
+                            # 极难归因。更何况这段代码跑在 worker 线程，与主线程/Qt 的并发堆
+                            # 操作叠加，风险更高。堆压缩的收益远不抵风险，只保留纯 Python 侧 GC。
+                            gc.collect()  # 触发 pymalloc arena 合并
+                            logger.info(f"[MEM] 流式 RSS 增量 {_delta:.0f}MB>200MB，已触发自适应 GC")
                         except Exception as e:
-                            logger.debug(f"[MEM] 堆压缩失败: {e}")
+                            logger.debug(f"[MEM] 自适应 GC 失败: {e}")
             # processEvents() 从 worker 线程调用仅处理 worker 线程自身事件，
             # 不会处理主线程事件队列中的跨线程 Qt 信号，因此对内容渲染无帮助。
             # 核心修复见上方「检测到 tool_calls 时强制冲刷 _content_batch」。
