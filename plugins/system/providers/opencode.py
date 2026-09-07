@@ -129,6 +129,9 @@ _ZEN_CAPABILITIES = {
     "supports_thinking": True,
     "thinking_param": "reasoning_effort",
     "reasoning_effort_param": "reasoning_effort",
+    # 网关会话标识头：Zen/Go 要求每个 LLM 请求携带稳定会话 ID
+    # （2026-09-06 起缺失报 400 MissingSessionID），值由主程序填当前会话 ID
+    "session_header": "x-opencode-session",
 }
 
 
