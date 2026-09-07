@@ -344,7 +344,12 @@ class SessionRepository:
                 self._reclaim_freelist_if_needed()
                 # message_extras：全删全插。compaction 重写/截断导致的索引漂移
                 # 由此天然覆盖（每次 save 后 extras 与主 blob 严格一致）。
-                self._write_extras(session_id, extras)
+                # 🛡️ 独立隔离：extras 写入失败只记日志，不得让异常冒泡到外层
+                # try（主 blob 已落库，误报 False 会误导调用方重试/报错）。
+                try:
+                    self._write_extras(session_id, extras)
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"[SessionRepository] write_extras 调用异常（不影响主保存）: {e}")
 
             return success
 
