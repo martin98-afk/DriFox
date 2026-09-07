@@ -49,3 +49,41 @@ def test_not_callable_or_empty_session_id_noop():
     batch = [{"role": "assistant", "_x_idx": 1}]
     assert materialize_batch_with_extras(batch, "", lambda *a: {}) is batch
     assert materialize_batch_with_extras(batch, "s1", None) is batch
+
+
+def test_mixed_sentinels_hit_and_miss_and_absent():
+    batch = [
+        {"role": "assistant", "_x_idx": 10, "content": "a"},
+        {"role": "tool", "_x_idx": 11, "content": "t"},
+        {"role": "user", "content": "u"},
+    ]
+
+    def loader(sid, idxs):
+        return {10: {"reasoning_content": "think"}}
+
+    out = materialize_batch_with_extras(batch, "s1", loader)
+    assert len(out) == 3
+    assert out[0] is not batch[0] and out[0]["reasoning_content"] == "think"
+    assert out[1] is batch[1], "未命中哨兵应原样返回"
+    assert out[2] is batch[2], "无哨兵消息应原样返回"
+
+
+def test_multiple_sentinels_single_call_with_dedup():
+    batch = [
+        {"role": "a", "_x_idx": 0},
+        {"role": "a", "_x_idx": 0},
+        {"role": "a", "_x_idx": 5},
+    ]
+    calls = []
+
+    def loader(sid, idxs):
+        calls.append(list(idxs))
+        return {0: {"reasoning_content": "0"}, 5: {"arguments": "{}"}}
+
+    out = materialize_batch_with_extras(batch, "s1", loader)
+    # 契约：不去重，idxs 原样透传（docstring「规模由调用方保证」）；
+    # 批次内重复索引本不该发生，SQL IN 对重复值无害。
+    assert calls == [[0, 0, 5]]
+    assert out[0]["reasoning_content"] == "0"
+    assert out[1]["reasoning_content"] == "0"
+    assert out[2]["arguments"] == "{}"
