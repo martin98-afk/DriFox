@@ -475,7 +475,7 @@
         {
             "name": "system-tools",
             "description": "DriFox 内置工具集：文件读写、终端执行、网页搜索、诊断、任务管理、子智能体调度、用户交互，含 Tavily/TinyFish 搜索 API Key 配置",
-            "version": "1.0.0",
+            "version": "1.0.1",
             "author": "DriFoxx Team",
             "license": "MIT",
             "categories": [
