@@ -4,6 +4,17 @@
 > 依据：T1（DeepSeek Harness 理念调研）+ T2（DriFox 现有架构与 UI 插件机制摸底）+ T3（整体插件化方案设计）+ T5（审查意见 7 条）
 > 状态：审查通过（有条件）后修订终稿
 
+> ⚠️ **现状提示（2026-09）：本文件是插件化拆解的方案终稿，正文中的「计划/迁移路径」
+> 多数已落地，且落地演进后部分路径与本文不一致：**
+> - 插件管理器已从 `app/core/plugin_manager.py` 迁至 `app/plugins/managers/plugin_manager.py`
+> - UI 注册表已从 `app/core/ui_plugin_registry.py` 迁至 `app/plugins/registries/ui_plugin_registry.py`
+> - 系统内置插件已从单体 `plugins/system/<comp>/` 拆分为独立插件 `plugins/system-<comp>/`
+> - 引擎目录化：`app/core/engines/ui/engine.py` / `app/core/engines/gateway/engine.py`
+> - Hook 策略已从硬编码枚举升级为可插拔 `HookPolicy` 注册表（scope 分域）
+>
+> **开发插件请以 [`docs/plugins/README.md`](./plugins/README.md) 为入口**，按组件查对应
+> 指南；本文件保留作为架构沿革与设计动机参考。
+
 ## 目录
 
 - [1. 目标与原则](#1-目标与原则)

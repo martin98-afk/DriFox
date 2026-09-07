@@ -48,9 +48,9 @@ gateway-teams/
 }
 ```
 
-主程序（`PluginManager`）看到 `components.gateways: true` 即交给
-`runtime_component_loader` 扫描 `gateways/*.py`；看到 `config_schema` 即自动
-注册 `PluginConfigRegistry` + 渲染 `PluginConfigCard` 设置面板。
+主程序（`PluginManager`）扫描 `gateways/` 目录（`runtime_component_loader` 硬编码
+组件名，**`components.gateways` 字段非必需**——目录存在即探到，声明仅为自描述）；
+看到 `config_schema` 即自动注册 `PluginConfigRegistry` + 渲染 `PluginConfigCard` 设置面板。
 
 ### config_schema 字段类型（通用契约，所有插件共用）
 
@@ -62,6 +62,8 @@ gateway-teams/
 | `select` | 下拉选择 | **必填** `options`（见下） |
 | `number` | 整数输入 | `min` / `max` / `step`（默认 0 / 2^31-1 / 1） |
 | `textarea` | 多行文本 | `rows`（显示行数，默认 3）、`placeholder` |
+| `link` | 外链按钮 | **必填** `url`（强制 http/https，纯展示不存储） |
+| `action` | 声明式工具调用按钮 | **必填** `action`（ToolActionSpec：tool + args + 可选 poll，见 README §4.1） |
 
 `select` 的 `options` 三种声明形态（value 为存储值，label 为显示名）：
 
@@ -80,15 +82,15 @@ gateway-teams/
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `platform_id` | `str` | ✅ | 平台唯一 ID（任意字符串，建议 `kebab-case`，与内置平台不冲突） |
-| `display_name` | `str` | ✅ | 设置卡显示名（中文友好） |
-| `adapter_factory` | `(PlatformConfig) -> BasePlatformAdapter` | ✅ | 适配器工厂：构造实例时调用一次 |
+| `display_name` | `str` | ✅ | **仅作日志 tag**（`[PlatformManager] xxx adapter loaded`）；设置卡标题走 `config_schema.title` |
+| `adapter_factory` | `(PlatformConfig) -> BasePlatformAdapter` | ✅ | 适配器工厂：构造实例时调用一次（`config_builder` 为 None 时以 `None` 入参调用） |
 | `check_requirements` | `() -> bool` | ⬜ | 缺省 `lambda: True`；SDK 缺失时返回 False 让 manager 跳过 |
-| `config_builder` | `() -> PlatformConfig` | ⬜ | 构造 PlatformConfig；建议从 `PluginConfigStore` 读 |
-| `config_writer` | `(PlatformConfig) -> None` | ⬜ | 持久化配置（建议写 `PluginConfigStore`） |
-| `build_config_values` | `(dict, PlatformConfig?) -> Any` | ⬜ | 设置面板回显字段（dict → PlatformConfig） |
-| `validate_config` | `(PlatformConfig) -> (bool, str)` | ⬜ | 保存前校验，返回 `(ok, msg)` |
-| `ui_order` | `int` | ⬜ | 设置卡展示顺序（缺省 100） |
-| `icon_hint` | `str` | ⬜ | 图标提示（深色/浅色优先 `icon_dark.svg`/`icon.svg`） |
+| `config_builder` | `() -> PlatformConfig` | ⬜ | 构造 PlatformConfig；建议从 `PluginConfigStore` 读。缺省 None → `adapter_factory(None)` |
+| `config_writer` | `(PlatformConfig) -> None` | ⬜ | 持久化配置（建议写 `PluginConfigStore`）。缺省 None 时调用方只 warning 不抛错 |
+| `build_config_values` | `(dict, PlatformConfig?) -> Any` | ⬜ | **保留字段，当前全工程无读取方**（设置面板回显走 PluginConfigCard + PluginConfigStore，勿依赖） |
+| `validate_config` | `(PlatformConfig) -> (bool, str)` | ⬜ | **adapter 加载/重建前**校验（manager 启动装配与配置更新重建分支），非保存前校验 |
+| `ui_order` | `int` | ⬜ | 仅影响 `GatewayPlatformRegistry.list_platforms()` 排序（缺省 100）；**不影响设置卡顺序** |
+| `icon_hint` | `str` | ⬜ | **保留字段，当前无消费方**。图标按插件根 `icon.svg`/`icon_dark.svg` 文件约定自动选，无字段参与 |
 | `source` | `str` | ⬜ | 注册来源（loader 自动填 `plugin:<name>`，手写注册可省略） |
 
 `source` 与 `id` 是注册表与 runtime loader 内部用，**插件开发者不需要手动设**。
