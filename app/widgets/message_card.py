@@ -3069,8 +3069,8 @@ _STREAMING_DOCK_CSS = """
                     order: 1;
                     /* 坞态正文限高：容器自身滚动，卡片总高稳定不随流式增长，
                        工具区+todo 保持可见；流式结束归位后恢复自然高度。
-                       330→450 略微放宽，让流式长回复展示更多正文。 */
-                    max-height: 450px;
+                       330→450→600：流式长回复展示更多正文。 */
+                    max-height: 600px;
                     overflow-y: auto;
                     /* 🐛 修复（禁横向滚动）：单轴 auto 时另一轴 visible 会被计算为
                        auto → 长行（URL/无空格长 token）超宽出现容器级横向滚动条。
@@ -3233,6 +3233,19 @@ _CONTENT_AUTOSCROLL_JS = """
                     var atBottom = Math.abs(cp.scrollHeight - cp.scrollTop - cp.clientHeight) < 30;
                     cp._userScrolledUp = !atBottom;
                 });
+                // 异步渲染（mermaid/katex/echarts/widget iframe）完成后补滚底。
+                // 这些渲染在 updateContent 置底**之后**才完成并增高内容 →
+                // _cp（坞态正文容器）停在旧位置，下一个 chunk 的 updateContent
+                // 又拉回底部 → 视口在「固定位置 ↔ 底部」往返抖动（图表卡片
+                // 滚轮来回跳的根因）。增高完成后立即补滚。
+                // 守卫：仅坞态流式生效；用户上滚阅读（_userScrolledUp）不拉底，
+                // 由 _autoScrollStreamingBody 内部判定；非流式（历史卡片懒渲染
+                // 图表）绝不滚动。
+                function _autoScrollAfterAsyncRender() {
+                    if (window._streamingActive && typeof _autoScrollStreamingBody === 'function') {
+                        _autoScrollStreamingBody();
+                    }
+                }
 """
 
 
@@ -6531,6 +6544,7 @@ class CodeWebViewer(QWebEngineView):
                                     el.innerHTML = svg;
                                     el.setAttribute('data-mermaid-src', '');   // 渲染完释放 b64
                                     if (window._attachChartToolbar) window._attachChartToolbar(el, 'mermaid');
+                                    if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                     done();
                                 }})['catch'](function (e) {{
@@ -6550,6 +6564,7 @@ class CodeWebViewer(QWebEngineView):
                                             }}
                                         }}
                                     }} catch (ignored) {{ }}
+                                    if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
                                     if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                                     done();
                                 }});
@@ -6749,7 +6764,10 @@ class CodeWebViewer(QWebEngineView):
                             if (_now - _t0 >= window._ECH_FRAME_BUDGET_MS) break;
                         }}
                         if (window.__echQueue.length) window._pumpEcharts();
-                        else if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        else {{
+                            if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
+                            if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
+                        }}
                     }});
                 }};
                 // ECharts 懒加载：骨架不再常驻 vendor，首次遇到图表块才加载，
@@ -6842,6 +6860,7 @@ class CodeWebViewer(QWebEngineView):
                                     el.textContent = decoded;
                                     el.classList.remove('katex-pending');
                                 }}
+                                if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
                                 if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                             }})(nodes[i]);
                         }}
@@ -8065,6 +8084,7 @@ class CodeWebViewer(QWebEngineView):
                     if (msg.t === 'h') {{
                         var h = parseInt(msg.v, 10) || 0;
                         if (h > 0) f.style.height = Math.max(48, Math.min(1600, h)) + 'px';
+                        if (typeof _autoScrollAfterAsyncRender === 'function') _autoScrollAfterAsyncRender();
                         if (typeof reportHeightDebounced === 'function') reportHeightDebounced();
                         return;
                     }}
