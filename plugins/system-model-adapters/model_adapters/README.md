@@ -11,7 +11,7 @@
 - `_` 前缀文件（如 `_detectors.py`）是共享工具模块，**不被 loader 当作插件**。
 - user 根可覆盖 system 根同名实现（`user > system`），热重载自动生效。
 
-## 系统默认三家族（plugins/system/model_adapters/）
+## 系统默认三家族（plugins/system-model-adapters/model_adapters/）
 
 | 家族 | id | matches | 归属 |
 |---|---|---|---|

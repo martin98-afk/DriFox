@@ -65,16 +65,16 @@ drifox-dev/
 cd D:/work/DriFox
 
 # 1. 初始化（首次）
-python plugins/system/skills/drifox-dev/scripts/state_manager.py init
+python plugins/system-skills/skills/drifox-dev/scripts/state_manager.py init
 
 # 2. 采集项目快照（含 GitHub open issues — 公开仓库免 token）
-python plugins/system/skills/drifox-dev/scripts/snapshot_project.py
+python plugins/system-skills/skills/drifox-dev/scripts/snapshot_project.py
 
 # 离线 / CI 环境跳过 GitHub 拉取：
-python plugins/system/skills/drifox-dev/scripts/snapshot_project.py --no-network
+python plugins/system-skills/skills/drifox-dev/scripts/snapshot_project.py --no-network
 
 # 3. 查看当前状态摘要
-python plugins/system/skills/drifox-dev/scripts/state_manager.py show --summary
+python plugins/system-skills/skills/drifox-dev/scripts/state_manager.py show --summary
 
 # 4. 记录工作进展
 python scripts/state_manager.py focus --task "重构 drifox-dev 技能"
@@ -149,7 +149,7 @@ python scripts/state_manager.py preference --key <name> --value <value>
 
 ```python
 import sys
-sys.path.insert(0, "plugins/system/skills/drifox-dev/scripts")
+sys.path.insert(0, "plugins/system-skills/skills/drifox-dev/scripts")
 from state_manager import (
     load_state, save_state, set_focus, add_decision,
     add_pitfall, add_question, set_preference,

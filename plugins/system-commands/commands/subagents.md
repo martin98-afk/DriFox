@@ -158,9 +158,9 @@ tools:
 
 | 角色模板 | 参考现有智能体 |
 |---------|---------------|
-| A: 只读探索 | `plugins/system/agents/explore.md` — 只读代码探索 |
-| B: 读写实现 | `plugins/system/agents/build.md` — 编码实现 |
-| C: 规划分析 | `plugins/system/agents/plan.md` — 规划分析（含 Question 权限） |
+| A: 只读探索 | `plugins/system-agents/agents/explore.md` — 只读代码探索 |
+| B: 读写实现 | `plugins/system-agents/agents/build.md` — 编码实现 |
+| C: 规划分析 | `plugins/system-agents/agents/plan.md` — 规划分析（含 Question 权限） |
 
 ### 注意事项
 1. 文件创建到 `.drifox/plugins/user-custom/agents/` 后，watchfiles 会在 1-3 秒内自动热加载，无需手动重载

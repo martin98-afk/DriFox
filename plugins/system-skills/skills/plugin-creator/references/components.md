@@ -111,7 +111,7 @@ parameters:
 ### 參考
 
 - 完整規範：[docs/commands.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/commands.md)
-- 系統命令案例：`plugins/system/commands/`
+- 系統命令案例：`plugins/system-commands/commands/`
 
 ---
 
@@ -132,7 +132,7 @@ parameters:
 ### 參考
 
 - 完整規範：[docs/agents.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/agents.md)
-- 系統 agent 案例：`plugins/system/agents/`
+- 系統 agent 案例：`plugins/system-agents/agents/`
 
 ---
 
@@ -173,7 +173,7 @@ description: 一句話描述技能用途，AI 會匹配此字段
 
 - 完整規範：[docs/skills.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/skills.md)
 - 最小示例：[plugins/example-plugin/skills/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/skills)
-- 系統案例：`plugins/system/skills/`（25+ 技能）
+- 系統案例：`plugins/system-skills/skills/`（25+ 技能）
 
 ---
 
@@ -237,7 +237,7 @@ def on_tool_use(ctx):
 
 - 完整規範：[docs/hooks.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/hooks.md)
 - 最小示例：[plugins/example-plugin/hooks/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/hooks)
-- 系統案例：`plugins/system/hooks/hooks.json`
+- 系統案例：`plugins/system-hooks/hooks/hooks.json`
 
 ---
 
@@ -271,7 +271,7 @@ def on_tool_use(ctx):
 
 - 完整規範：[docs/mcp.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/mcp.md)
 - example-plugin：[plugins/example-plugin/.mcp.json](https://github.com/martin98-afk/drifox-plugins/blob/main/plugins/example-plugin/.mcp.json)
-- 系統案例：`plugins/system/.mcp.json`
+- 系統案例：`plugins/system-mcp/.mcp.json`
 
 ---
 
@@ -302,7 +302,7 @@ def on_tool_use(ctx):
 
 - 完整規範：[docs/lsp.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/lsp.md)
 - example-plugin：[plugins/example-plugin/.lsp.json](https://github.com/martin98-afk/drifox-plugins/blob/main/plugins/example-plugin/.lsp.json)
-- 系統案例：`plugins/system/.lsp.json`
+- 系統案例：`plugins/system-mcp/.lsp.json`
 
 ---
 
@@ -344,7 +344,7 @@ Token 定義取決於 DriFox 主題系統支持的字段。參考現有主題了
 
 - 完整規範：[docs/themes.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/themes.md)
 - 最小示例：[plugins/example-plugin/themes/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/themes)
-- 系統案例：`plugins/system/themes/`（11 個主題）
+- 系統案例：`plugins/system-themes/themes/`（11 個主題）
 
 ---
 
@@ -466,7 +466,7 @@ def register(registry):
 ### 渲染三閉包（主程序零工具名硬編碼）
 
 > 工具的**渲染完全由插件聲明**：主程序 `render_helpers` 只做閉包路由 + 通用兜底。
-> 參考 `plugins/system/tools/`（bash 終端塊、question 彈窗、screenshot 圖片、
+> 參考 `plugins/system-tools/tools/`（bash 終端塊、question 彈窗、screenshot 圖片、
 > codegraph 結構化、edit diff 均為插件閉包實現）。
 
 ```python
@@ -537,7 +537,7 @@ ws["delete"]("my_state")         # 刪除
 
 - 存儲由 tool_executor 按窗口持有（多窗口互不影響），線程安全
 - 任意 key 自定義（todo 工具用 key="todo"）；無注入（測試/無窗口）場景需插件自備兜底
-- 參考：`plugins/system/tools/task_tools.py`（_todo_state 讀寫模式）
+- 參考：`plugins/system-tools/tools/task_tools.py`（_todo_state 讀寫模式）
 
 ### 圖標自包含
 
@@ -559,7 +559,7 @@ ws["delete"]("my_state")         # 刪除
 
 ### 參考
 
-- 系統工具真實案例：\`plugins/system/tools/\`（file_tools 自包含、subagent_tools 平台服務）
+- 系統工具真實案例：\`plugins/system-tools/tools/\`（file_tools 自包含、subagent_tools 平台服務）
 - 註冊表實現：\`app/tools/registry.py\`
 - 掃描/熱重載：\`app/tools/plugin_tool_loader.py\`
 
@@ -581,7 +581,7 @@ plugins/<name>/
     └── plugin.json          # components 聲明 "providers": true（自動檢測，可選）
 ```
 
-- 系統內置服務商：`plugins/system/providers/*.py`
+- 系統內置服務商：`plugins/system-providers/providers/*.py`
 - 用戶插件：`<app_data>/plugins/<name>/providers/*.py`
 - 熱重載：ProviderWatcher 後台輪詢（path, mtime, size），變更全量重掃；user 插件可覆蓋 system 同名服務商
 
@@ -690,8 +690,8 @@ None                                    # 無 API key 等（不請求）
 
 ### 參考
 
-- 完整開發指南：\`plugins/system/providers/README.md\`
-- 系統服務商真實案例：\`plugins/system/providers/*.py\`
+- 完整開發指南：\`plugins/system-providers/providers/README.md\`
+- 系統服務商真實案例：\`plugins/system-providers/providers/*.py\`
 - 註冊表實現：\`app/plugins/registries/provider_registry.py\`
 - 測試：\`python -m pytest tests/core/test_provider_registry.py -v\`
 
@@ -736,7 +736,7 @@ agents:
 | `template_name` | ✅ | 模板名（建議與文件名 stem 一致） |
 | `description` | 選填 | 一句話描述（列出時展示） |
 | `agents` | ✅ | 非空列表，按順序對應窗口 1..N |
-| `agents[].agent_name` | ✅ | 引用 `plugins/system/agents/` 下的角色名（如 build、review） |
+| `agents[].agent_name` | ✅ | 引用 `plugins/system-agents/agents/` 下的角色名（如 build、review） |
 | `agents[].description` | 選填 | 角色描述，注入團隊上下文時附加；為空則跳過 |
 
 ### 關鍵約束
@@ -756,7 +756,7 @@ agents:
 
 1. **user-custom** — `.drifox/plugins/user-custom/team_templates/`（可寫、可刪）
 2. **plugin** — 各啟用插件聲明的 `team_templates/`（唯讀，按插件優先級排序）
-3. **system** — `plugins/system/team_templates/`（唯讀，內置 `default-team`）
+3. **system** — `plugins/system-team-templates/team_templates/`（唯讀，內置 `default-team`）
 
 > 覆蓋語義與 tools/providers 同構：user 插件同名模板優先於 system 內置。
 
@@ -779,5 +779,5 @@ agents:
 
 - 模板結構與校驗：`app/core/team/template_schema.py`
 - 文件存儲層（來源解析/優先級）：`app/core/team/template_manager.py`
-- 系統模板案例：`plugins/system/team_templates/default-team.yaml`
+- 系統模板案例：`plugins/system-team-templates/team_templates/default-team.yaml`
 - 測試：`python -m pytest tests/core/test_team_template.py -v`

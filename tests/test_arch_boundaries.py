@@ -26,6 +26,7 @@ LEGACY_TESTS_ALLOWLIST = {
     "debug/agent_trace_token_repro.py",
     "debug/verify_incremental_projection.py",
     "file_tools_resolve_test.py",
+    "plugins/test_agent_trace_reasoning_loader.py",
     "plugins/test_adapter_families.py",
     "plugins/test_builtin_openai_adapter.py",
     "plugins/test_e2e_phase_c.py",

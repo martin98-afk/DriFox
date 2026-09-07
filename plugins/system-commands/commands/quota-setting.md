@@ -45,7 +45,7 @@ prompt_sections:
 1. 检查 mcp__playwright__browser_navigate 是否可用
    → 可用：进入第 3 步
    → 不可用：直接停下，提示用户「需要启用 Playwright MCP server 才能使用本命令。
-              请在 DriFox 的 MCP 配置中添加 Playwright server（参考 plugins/system/.mcp.json），
+              请在 DriFox 的 MCP 配置中添加 Playwright server（参考 plugins/system-mcp/.mcp.json），
               或暂时使用手动方式：打开浏览器 DevTools → Network 面板 → 复制请求头」
 2. 不要尝试用 web 工具（fetch_web / search_web）替代——本命令的核心动作是「让用户在真实浏览器里手动登录」
 3. 工具集确认（只读探测）：

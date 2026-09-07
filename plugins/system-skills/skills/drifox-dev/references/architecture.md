@@ -53,12 +53,12 @@
 
 | 路径 | 说明 |
 |------|------|
-| `plugins/system/` | 系统内置插件（打包在 exe 中） |
-| `plugins/system/agents/` | 内置 Agent 定义 |
-| `plugins/system/commands/` | 系统命令（/new, /compact, /debug 等） |
-| `plugins/system/skills/` | 内置技能 |
-| `plugins/system/themes/` | 主题 |
-| `plugins/system/hooks/` | Hook 配置 |
+| `plugins/` | 系统内置插件族（打包在 exe 中，system-* 按组件类型拆分） |
+| `plugins/system-agents/agents/` | 内置 Agent 定义 |
+| `plugins/system-commands/commands/` | 系统命令（/new, /compact, /debug 等） |
+| `plugins/system-skills/skills/` | 内置技能 |
+| `plugins/system-themes/themes/` | 主题 |
+| `plugins/system-hooks/hooks/` | Hook 配置 |
 | `.drifox/plugins/` | 用户安装的第三方插件 |
 
 ## 三、关键文件行数（动态）

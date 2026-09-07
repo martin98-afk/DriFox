@@ -18,7 +18,7 @@ plugins/<name>/
 │   └── plugin.json          # components 声明 "providers": true（自动检测，可选）
 ```
 
-- 系统内置服务商：`plugins/system/providers/*.py`
+- 系统内置服务商：`plugins/system-providers/providers/*.py`
 - 用户插件：`<app_data>/plugins/<name>/providers/*.py`
 - 热重载：ProviderWatcher 后台轮询（path, mtime, size），变更全量重扫；
   user 插件可覆盖 system 同名服务商
@@ -29,7 +29,7 @@ plugins/<name>/
 `registry.register(ProviderDef(...))`：
 
 ```python
-# plugins/system/providers/deepseek.py
+# plugins/system-providers/providers/deepseek.py
 from app.plugins.registries.provider_registry import (
     ProviderDef,
     make_bearer_balance_fetcher,

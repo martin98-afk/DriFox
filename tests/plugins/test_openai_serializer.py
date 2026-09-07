@@ -128,7 +128,7 @@ def test_register_convention():
 
     reg = _FakeReg()
     from importlib import import_module
-    ser_mod = import_module("plugins.system-serializers.serializers").openai
+    ser_mod = import_module("plugins.system-serializers.serializers.openai")
 
     ser_mod.register(reg)
     assert len(reg.items) == 1

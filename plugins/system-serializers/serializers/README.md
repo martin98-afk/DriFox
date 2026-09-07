@@ -22,7 +22,7 @@
 
 ## 默认实现
 
-`plugins/system/serializers/openai.py`（id=`"openai"`）：逻辑与旧实现逐点等价，
+`plugins/system-serializers/serializers/openai.py`（id=`"openai"`）：逻辑与旧实现逐点等价，
 辅助函数复用 `app.core.message_content`（`normalize_message` /
 `_extract_content_for_api` / `_build_api_tool_call` / `_prune_tool_content_for_api` /
 `_extract_responses_content`）。

@@ -130,7 +130,7 @@ python scripts/snapshot_project.py --project-root D:/work/DriFox
 
 ```python
 import sys
-sys.path.insert(0, "plugins/system/skills/drifox-dev/scripts")
+sys.path.insert(0, "plugins/system-skills/skills/drifox-dev/scripts")
 from state_manager import (
     load_state, save_state, set_focus, add_decision,
     add_pitfall, add_question, set_preference,

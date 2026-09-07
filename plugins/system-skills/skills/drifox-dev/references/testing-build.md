@@ -45,7 +45,7 @@ python build.py
 
 | 范围 | 文档 |
 |------|------|
-| Skill | `plugins/system/skills/<name>/README.md` 或 SKILL.md description |
+| Skill | `plugins/system-skills/skills/<name>/README.md` 或 SKILL.md description |
 | Plugin | `plugins/<plugin>/README.md` |
 | UI 改动 | `README.md` 截图 / 章节 |
 | 命令 | `commands/<cmd>.md` 自带说明 |

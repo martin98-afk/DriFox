@@ -8,8 +8,8 @@ Phase C 迁入 plugins/system-model-adapters/model_adapters/_detectors.py 供协
 import pytest
 
 from importlib import import_module
-det = import_module("plugins.system-model-adapters.model_adapters")._detectors
-from importlib import import_module
+
+det = import_module("plugins.system-model-adapters.model_adapters._detectors")
 OpenAIFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.openai_family").OpenAIFamilyAdapter
 
 

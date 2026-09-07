@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 工具插件化系统测试 — registry / loader / 渲染联动 / 权限联动 / 热插拔
 
@@ -507,7 +507,7 @@ def register(registry):
         watcher.scan_now()
         r = reg.get("read")
         assert r is not None, "read 不应丢失"
-        assert r.source == "plugin:system", f"system 应恢复，实际: {r.source}"
+        assert r.source == "plugin:system-tools", f"system 应恢复，实际: {r.source}"
         assert r.cn_name != "读取（用户覆盖）", "cn_name 应为 system 原始值"
 
     def test_unload_plugin_precise_no_other_plugin_touched(self, tmp_path, monkeypatch):
@@ -553,7 +553,7 @@ def register(registry):
         assert "write" not in unregistered, "system 工具 write 不应被 unregister"
         # 3) 跨根覆盖恢复：read 恢复为 system
         r = reg.get("read")
-        assert r is not None and r.source == "plugin:system", f"system 应恢复，实际: {r.source if r else None}"
+        assert r is not None and r.source == "plugin:system-tools", f"system 应恢复，实际: {r.source if r else None}"
         # 4) watcher._loaded 已移除该插件记录
         assert "user-override-plug" not in watcher._loaded
 
@@ -654,7 +654,7 @@ def register(registry):
         cfg.enabled_plugins.value = [p for p in old if p != "user-override-plug"]
         watcher.scan_now()
         r = reg.get("read")
-        assert r is not None and r.source == "plugin:system", f"禁用后 system 应恢复，实际: {r.source if r else None}"
+        assert r is not None and r.source == "plugin:system-tools", f"禁用后 system 应恢复，实际: {r.source if r else None}"
         cfg.enabled_plugins.value = old
 
 
@@ -713,8 +713,10 @@ class TestSourceLabelRender:
         # 收集来源标签文本（内置 / 纯插件名）
         all_labels = card.findChildren(QLabel)
         source_texts = {lbl.text() for lbl in all_labels}
-        # 至少存在系统插件来源标签（插件名 system）或内置标签
-        assert "system" in source_texts or "内置" in source_texts, f"缺来源标签: {source_texts}"
+        # 至少存在系统插件来源标签（拆分后 system-tools 显示截断为 system-t…）或内置标签
+        assert (
+            "system" in source_texts or "system-t…" in source_texts or "内置" in source_texts
+        ), f"缺来源标签: {source_texts}"
 
         card.deleteLater()
         pc.deleteLater()

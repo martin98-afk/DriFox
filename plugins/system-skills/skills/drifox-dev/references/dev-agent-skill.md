@@ -6,7 +6,7 @@
 
 ## 一、Agent 定义
 
-**位置**：`plugins/system/agents/<name>.md`
+**位置**：`plugins/system-agents/agents/<name>.md`
 
 **最小骨架**：
 
@@ -38,7 +38,7 @@ permission: default|strict
 
 ## 二、Skill 定义
 
-**位置**：`plugins/system/skills/<name>/SKILL.md`
+**位置**：`plugins/system-skills/skills/<name>/SKILL.md`
 
 **最小骨架**：
 

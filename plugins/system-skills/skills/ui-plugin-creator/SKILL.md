@@ -92,7 +92,7 @@ Step 6  按 checklist.md 验证
 ## 2. references/ 文件结构
 
 ```
-plugins/system/skills/ui-plugin-creator/
+plugins/system-skills/skills/ui-plugin-creator/
 ├─ SKILL.md                ← 本文件（TOC，~6KB）
 └─ references/
    ├─ workflow.md          开发工作流（澄清需求 → 创建结构 → 验证 → 发布）

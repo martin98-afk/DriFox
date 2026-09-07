@@ -138,9 +138,9 @@ your-plugin/
 | **生產 UI 參考** | [plugins/context-usage-stats/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/context-usage-stats)（浮動卡片實際案例） |
 | **驗證工具** | [tools/validate_plugins.py](https://github.com/martin98-afk/drifox-plugins/blob/main/tools/validate_plugins.py) |
 | **marketplace 生成** | [tools/generate_marketplace.py](https://github.com/martin98-afk/drifox-plugins/blob/main/tools/generate_marketplace.py) |
-| **DriFox 系統插件** | `plugins/system/`（system type 參考，**不要手動修改**） |
+| **DriFox 系統插件** | `plugins/`（system-* 系列内置插件，system type 參考，**不要手動修改**） |
 
-> 插件運行的權威實現在 DriFox 內置的 `plugins/system/`（system 插件），本技能文檔僅為開發指引。
+> 插件運行的權威實現在 DriFox 內置的 `plugins/`（system-* 系列内置插件），本技能文檔僅為開發指引。
 
 ---
 
@@ -253,7 +253,7 @@ commands/<name>.md → 註冊為 /<name> 斜杠命令
 **參考**：
 - [docs/commands.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/commands.md) — 完整規範
 - [plugins/example-plugin/commands/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/commands) — 最小示例
-- `plugins/system/commands/` — 系統命令真實案例
+- `plugins/system-commands/commands/` — 系統命令真實案例
 
 ### 5.2 Agents
 
@@ -268,7 +268,7 @@ agents/<name>.md → 註冊為 @<name> 智能體
 **參考**：
 - [docs/agents.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/agents.md)
 - [plugins/example-plugin/agents/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/agents)
-- `plugins/system/agents/`
+- `plugins/system-agents/agents/`
 
 ### 5.3 Skills
 
@@ -284,7 +284,7 @@ skills/<name>/SKILL.md → AI 可檢索的技能
 **參考**：
 - [docs/skills.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/skills.md)
 - [plugins/example-plugin/skills/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/skills)
-- `plugins/system/skills/`（25+ 技能真實案例）
+- `plugins/system-skills/skills/`（25+ 技能真實案例）
 
 ### 5.4 Hooks
 
@@ -302,7 +302,7 @@ hooks/
 **參考**：
 - [docs/hooks.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/hooks.md)
 - [plugins/example-plugin/hooks/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/hooks)
-- `plugins/system/hooks/hooks.json`
+- `plugins/system-hooks/hooks/hooks.json`
 
 ### 5.5 MCP（Model Context Protocol）
 
@@ -317,7 +317,7 @@ hooks/
 **參考**：
 - [docs/mcp.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/mcp.md)
 - [plugins/example-plugin/.mcp.json](https://github.com/martin98-afk/drifox-plugins/blob/main/plugins/example-plugin/.mcp.json)
-- `plugins/system/.mcp.json`
+- `plugins/system-mcp/.mcp.json`
 
 ### 5.6 LSP（Language Server Protocol）
 
@@ -332,7 +332,7 @@ hooks/
 **參考**：
 - [docs/lsp.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/lsp.md)
 - [plugins/example-plugin/.lsp.json](https://github.com/martin98-afk/drifox-plugins/blob/main/plugins/example-plugin/.lsp.json)
-- `plugins/system/.lsp.json`
+- `plugins/system-mcp/.lsp.json`
 
 ### 5.7 Themes
 
@@ -347,7 +347,7 @@ themes/<name>/*.yaml → 配色方案
 **參考**：
 - [docs/themes.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/themes.md)
 - [plugins/example-plugin/themes/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/themes)
-- `plugins/system/themes/`（11 個主題真實案例）
+- `plugins/system-themes/themes/`（11 個主題真實案例）
 
 ### 5.8 UI
 
@@ -486,7 +486,7 @@ def register(registry):
 無需重啟；同名工具先註冊者優先（工作樹 plugins/ 優先於用戶插件目錄）。
 
 **參考**：
-- `plugins/system/tools/`（33 個系統工具真實案例：file_tools/web_tools/
+- `plugins/system-tools/tools/`（33 個系統工具真實案例：file_tools/web_tools/
   automation_tools 為自包含實現，subagent_tools/terminal_tools 等為平台服務）
 - `app/tools/registry.py`（ToolRegistration 字段定義）
 - `app/tools/plugin_tool_loader.py`（掃描/熱重載實現）
@@ -580,8 +580,8 @@ def register(registry):
   `{"rolling": {...}, "weekly": ..., "monthly": ...}`；返回 None 表示暫不支持
 
 **參考**：
-- `plugins/system/providers/README.md`（服務商插件完整開發指南）
-- `plugins/system/providers/*.py`（15+ 系統服務商真實案例）
+- `plugins/system-providers/providers/README.md`（服務商插件完整開發指南）
+- `plugins/system-providers/providers/*.py`（15+ 系統服務商真實案例）
 - `app/plugins/registries/provider_registry.py`（ProviderDef / ProviderRegistry 字段定義）
 - 測試：`python -m pytest tests/core/test_provider_registry.py -v`
 
@@ -626,7 +626,7 @@ agents:
 | `template_name` | ✅ | 模板名（建議與文件名 stem 一致） |
 | `description` | 選填 | 一句話描述（列出時展示） |
 | `agents` | ✅ | 非空列表，按順序對應窗口 1..N |
-| `agents[].agent_name` | ✅ | 引用 `plugins/system/agents/` 下的角色名（如 build、review） |
+| `agents[].agent_name` | ✅ | 引用 `plugins/system-agents/agents/` 下的角色名（如 build、review） |
 | `agents[].description` | 選填 | 角色描述，注入團隊上下文時附加；為空則跳過 |
 
 #### 關鍵約束
@@ -645,7 +645,7 @@ agents:
 
 1. **user-custom** — `.drifox/plugins/user-custom/team_templates/`（可寫、可刪）
 2. **plugin** — 各啟用插件聲明的 `team_templates/`（唯讀，按插件優先級排序）
-3. **system** — `plugins/system/team_templates/`（唯讀，內置 default-team）
+3. **system** — `plugins/system-team-templates/team_templates/`（唯讀，內置 default-team）
 
 #### 使用方式
 
@@ -666,7 +666,7 @@ agents:
 
 - 模板結構與校驗：`app/core/team/template_schema.py`
 - 文件存儲層：`app/core/team/template_manager.py`
-- 系統模板案例：`plugins/system/team_templates/default-team.yaml`
+- 系統模板案例：`plugins/system-team-templates/team_templates/default-team.yaml`
 - 測試：`python -m pytest tests/core/test_team_template.py -v`
 
 ---
@@ -818,7 +818,7 @@ marketplace.json 中每條記錄的結構由 `tools/generate_marketplace.py` 自
 UI 插件開發請調用 `ui-plugin-creator` 技能。
 
 ### 🚫 修改了 system 插件
-`plugins/system/` 下的內容不要手動修改——它們是 DriFox 內置的。
+`plugins/` 下 system-* 系列內置插件的內容不要手動修改——它們是 DriFox 內置的。
 
 ### 🚫 跳過驗證直接提 PR
 提 PR 前一定要跑 `validate_plugins.py`，否則 CI 會失敗。
