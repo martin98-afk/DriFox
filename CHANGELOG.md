@@ -3,6 +3,35 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.8] - 2026-09-07 (重新发布)
+
+自上一版本以来的变更 | 提交数：18 · 文件变更：36 · +1384/-250 | 贡献者：mading
+
+> 🔄 重新发布：在 v0.5.8 首次发布基础上，合并 18 个关键修复，覆盖 plugin-host reload 链路、InfoBar 崩溃提示、跨插件可见性切换、窗口窄宽度自适应、AST 审计豁免与 TraceCard 布局稳定性。
+
+### ✨ 新功能 (New Features)
+
+- **崩溃提示改用 InfoBar** (`app/core/crash_handler.py`): 替换原有弹窗，使用 InfoBar 持久显示崩溃报告，并提供"打开报告目录"按钮。
+- **git worktree 僵尸检测** (`app/core/`, `tests/`): 检测失效 worktree 软链、增强校验逻辑；配套单测覆盖。
+- **窗口窄宽度自适应** (`app/widgets/cards/floating/`, `app/widgets/cards/trace_card_widget.py`): 浮动卡片/TraceCardWidget 重写最小尺寸提示，支持窄窗口下压缩；标题栏与图标标签同步放行宽度。
+- **config_sync 防止云同步覆盖本地 AutoStart** (`app/core/config_sync.py`, `app/widgets/cards/settings/llm_settings_card.py`): 云同步不再覆盖本地 AutoStart 设置，LLM 设置卡配合更新。
+- **自定义输入草稿保留 + 答案提交改进** (`app/widgets/cards/floating/question_floating_widget.py`): 自定义输入处理优化，保留草稿文本，改进答案提交逻辑。
+- **鼠标按下激活自定义输入** (`app/widgets/cards/floating/question_floating_widget.py`): 鼠标按下事件激活自定义输入并发出信号。
+- **TraceCardWidget 辅助数据刷新加防抖** (`app/widgets/cards/floating/question_floating_widget.py`, `app/widgets/message_card.py`, `main.py`, `plugins/agent_trace/`): 实现防抖机制，避免高频刷新。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **plugin-host 单次 full reload** (`app/core/plugin_host_service.py`): 跨插件变更合并为单次 full reload 请求，避免重载风暴。
+- **ui_plugin_registry 工作台卡片 toggle** (`app/plugins/registries/ui_plugin_registry.py`): 工作台卡片可见性切换行为对齐标题栏「右侧边栏」按钮；backend_dispatch mock 同步更新；新增 toggle 测试。
+- **streaming dock 最大高度** (`app/widgets/message_card.py`): 增加流式 dock 最大高度，调整相关测试断言。
+- **InfoBarIcon.WARNING 替换** (`plugins/system/mcp`): qfluentwidgets 不存在 ATTENTION 图标，改用 WARNING；同步修复 plugin root path 与 need_confirm 门控 UI、抑制 retry storm。
+- **urllib.request 延迟导入** (`plugins/system/`, `app/gateway/providers/`): 5 个 provider 的 urllib.request 延迟导入至用量查询函数，消音 AST 审计告警。
+- **urllib.parse/error 审计豁免** (`app/plugins/loaders/_ast_guard.py`): 新增 _URBLIB_EXEMPT_SUBMODULES，urllib.parse/error 豁免危险导入审计。
+
+### ⚡ 性能优化 (Performance)
+
+- **plugin-host 重载去重** (`app/core/plugin_host_service.py`): 引用计数观察者抑制，批量安装/卸载 reload 去重。
+
 ## [v0.5.8] - 2026-09-06
 
 自上一版本以来的变更 | 提交数：70 · 文件变更：87 · +9063/-5329 | 贡献者：mading, dingma
