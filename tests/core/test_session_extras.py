@@ -220,3 +220,23 @@ def test_load_msg_extras_out_of_range_idx(store):
 def test_load_msg_extras_unknown_session(store):
     """未保存过的 session_id：返回空 dict 而非抛错。"""
     assert store.load_msg_extras("no-such-session") == {}
+
+
+def test_delete_cascades_extras(store):
+    """删除会话应级联清理 session_msg_extras 子表。"""
+    messages = [_msg("assistant", f"a{i}", reasoning_content=f"t{i}") for i in range(6)]
+    store.save_session(_session("s5", messages))
+    assert store.load_msg_extras("s5"), "前置：extras 应有数据"
+    store.delete_session("s5")
+    assert store.load_msg_extras("s5") == {}, "删除会话应级联清理 extras"
+
+
+def test_force_cleanup_project_cascades_extras(store):
+    """强制清理项目应级联清理 session_msg_extras 子表。"""
+    messages = [_msg("assistant", f"a{i}", reasoning_content=f"t{i}") for i in range(6)]
+    s = _session("s9", messages)
+    s["project"] = "测试项目"
+    store.save_session(s)
+    assert store.load_msg_extras("s9"), "前置：extras 应有数据"
+    store.force_cleanup_project("测试项目")
+    assert store.load_msg_extras("s9") == {}, "强制清理项目应级联清理 extras"

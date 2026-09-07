@@ -712,6 +712,8 @@ class SessionRepository:
 
         try:
             self._content_hash_cache.pop(session_id, None)
+            # message_extras 级联清理（先删子表）
+            self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
             success, _ = self._execute(f"DELETE FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
             return success
         except Exception as e:

@@ -873,6 +873,12 @@ class SessionStore:
             logger.error(f"[SessionStore] 数据库未连接，无法清理项目 {project_name}")
             return False
         try:
+            # message_extras 级联清理（须在删 sessions 之前用子查询定位）
+            self._execute(
+                "DELETE FROM session_msg_extras WHERE session_id IN "
+                "(SELECT session_id FROM sessions WHERE project = ?)",
+                (project_name,),
+            )
             # 删除会话（直接 SQL，不经过 repo 层）
             self._execute("DELETE FROM sessions WHERE project = ?", (project_name,))
             # 删除关键文档
