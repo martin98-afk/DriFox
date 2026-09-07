@@ -411,6 +411,11 @@ class SessionRepository:
 
         Returns:
             {msg_idx: {field: 反序列化后的值}}；异常/未初始化返回 {}
+
+        契约：
+        - idxs 规模由调用方保证（批次级，≤数百）；不做截断，静默截断反而丢数据
+        - 异常时返回 {}，与「无 extras」不可区分；消费方（渲染/轨迹/导出）
+          均有降级回退，不得依赖本方法区分「读失败」与「真没有」
         """
         if not self.is_initialized or not session_id:
             return {}

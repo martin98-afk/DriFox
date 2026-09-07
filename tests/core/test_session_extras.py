@@ -200,3 +200,23 @@ def test_legacy_blob_fields_tolerated(store):
     assert len(full) == 6
     assert full[0]["reasoning_content"] == "legacy-0"
     assert full[5]["reasoning_content"] == "legacy-5"
+
+
+def test_load_msg_extras_empty_idxs_loads_all(store):
+    """固化行为：idxs=[] 走全量分支（与 None 同义）。"""
+    messages = [_msg("assistant", f"a{i}", reasoning_content=f"t{i}") for i in range(8)]
+    store.save_session(_session("s10", messages))
+    patch = store.load_msg_extras("s10", [])
+    assert len(patch) == 5  # 8 条 - 保活窗 3
+
+
+def test_load_msg_extras_out_of_range_idx(store):
+    """越界 idx：无匹配行 → 空 patch，消费方按无 extras 降级。"""
+    messages = [_msg("assistant", f"a{i}", reasoning_content=f"t{i}") for i in range(8)]
+    store.save_session(_session("s11", messages))
+    assert store.load_msg_extras("s11", [99999]) == {}
+
+
+def test_load_msg_extras_unknown_session(store):
+    """未保存过的 session_id：返回空 dict 而非抛错。"""
+    assert store.load_msg_extras("no-such-session") == {}
