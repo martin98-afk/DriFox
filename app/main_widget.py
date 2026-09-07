@@ -13836,7 +13836,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         from app.core import consolidate_messages
 
-        messages = consolidate_messages(session.messages)
+        messages = self._load_full_messages_for_export(session) or consolidate_messages(session.messages)
         if not messages:
             from qfluentwidgets import InfoBar, InfoBarPosition
 
@@ -13854,6 +13854,31 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._share_card_content:
             self._share_card_content.set_messages(record, session.name or "")
         self._card_manager.toggle_card("share", self._window_id)
+
+    def _load_full_messages_for_export(self, session) -> list:
+        """导出用全量消息：从存储合并 extras；不可用/落后于内存时返回 []（回退内存）。
+
+        DB 全量条数 >= 内存条数才采用（流式中最新一轮尚未落盘的场景回退内存）。
+        """
+        try:
+            sid = getattr(session, "session_id", "")
+            if not sid:
+                return []
+            from app.core.backend import get_session_storage
+
+            storage = get_session_storage()
+            fn = getattr(storage, "get_full_messages", None)
+            if not callable(fn):
+                return []
+            msgs = fn(sid) or []
+            mem = getattr(session, "messages", None) or []
+            if len(msgs) >= len(mem):
+                from app.core import consolidate_messages
+
+                return consolidate_messages(msgs)
+        except Exception:
+            logger.warning("[Share] 全量消息读取失败，回退内存消息", exc_info=True)
+        return []
 
     def _build_share_record(self, session, merged_messages: list) -> dict:
         """构建与归档（archive）一致的完整 session 记录字典，供分享导出（JSON/HTML）使用。
