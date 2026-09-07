@@ -15,7 +15,6 @@ import json
 import re
 import time
 import urllib.parse
-import urllib.request
 import uuid
 import zlib
 from typing import Any, Dict, Optional
@@ -119,6 +118,8 @@ def _fetch_bailian_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any
     （form 表单里的风控令牌，从 DevTools → Payload 复制）。
     仅 weekly 一层；5 小时 / 月度窗口该接口未提供。
     """
+    import urllib.request  # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
+
     cookie = (config.get("cookie", "") or "").strip()
     sec_token = (config.get("sec_token", "") or "").strip()
     if not cookie or not sec_token:

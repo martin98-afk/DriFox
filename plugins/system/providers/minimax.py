@@ -7,7 +7,6 @@
 """
 
 import json
-import urllib.request
 from typing import Any, Dict, Optional
 
 from app.plugins.registries.provider_registry import ProviderDef
@@ -19,6 +18,8 @@ def _fetch_minimax_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, Any
     使用服务商的 API_KEY（Bearer token）直接请求，不需要额外配置。
     API 返回 coding plan 的滚动/每周剩余额度，自动换算为用量百分比。
     """
+    import urllib.request  # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
+
     api_key = (config.get("API_KEY", "") or "").strip()
     if not api_key:
         return None

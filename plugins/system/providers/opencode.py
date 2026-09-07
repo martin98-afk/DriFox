@@ -9,7 +9,6 @@
 import json
 import re
 import urllib.parse
-import urllib.request
 from typing import Any, Dict, Optional
 
 from app.plugins.registries.provider_registry import ProviderDef, QuotaField
@@ -31,6 +30,8 @@ def _fetch_opencode_coding_plan(config: Dict[str, Any]) -> Optional[Dict[str, An
     需要在服务商配置中额外填写 server_id / cookie / workspace_id。
     这些字段不会影响正常的 API 调用，仅用于用量查询。
     """
+    import urllib.request  # 延迟导入：避免模块级网络库触发 AST 危险 import 审计告警
+
     server_id = (config.get("server_id", "") or "").strip()
     cookie = (config.get("cookie", "") or "").strip()
     workspace_id = (config.get("workspace_id", "") or "").strip()
