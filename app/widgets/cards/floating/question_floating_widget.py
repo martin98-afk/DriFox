@@ -583,10 +583,6 @@ class _CustomInputCard(QWidget):
         self._text_value = text
         self._text_edit.setPlainText(text)
 
-    def clear_text(self):
-        """清空输入（单选下改选选项时调用，保证互斥语义）"""
-        self._text_edit.clear()
-
     def _apply_style(self):
         Colors.refresh()
         if self._active:
@@ -1230,7 +1226,6 @@ class QuestionFloatingWidget(QWidget):
                 w.set_selected(w is card)
         if self._custom_input_widget:
             self._custom_input_widget.set_active(False)
-            self._custom_input_widget.clear_text()
 
     def _on_custom_input_activated(self):
         """单选模式下自定义输入被选中，取消其他选项"""
@@ -1279,24 +1274,26 @@ class QuestionFloatingWidget(QWidget):
         return results
 
     def _get_custom_input_text(self) -> str:
-        if self._custom_input_widget:
+        """计入答案的自定义文本：仅激活态（草稿不丢但也不盲提交）"""
+        if self._custom_input_widget and self._custom_input_widget._active:
             return self._custom_input_widget.get_text()
         return ""
 
     def _save_current_answer(self):
         selected = self._get_selected_options()
         custom = self._get_custom_input_text()
-        has_custom = bool(custom)
+        # 草稿：无论激活与否都保留（切选项/翻页不丢字），但只有激活态才计入提交
+        draft = self._custom_input_widget.get_text() if self._custom_input_widget else ""
         parts = []
         if selected:
             parts.extend(f"【{s['label']}】" for s in selected)
         if custom:
             parts.append(custom)
-        if parts:
+        if parts or draft:
             self._answers[self._current_index] = {
                 "text": "；".join(parts),
-                "custom": has_custom,
-                "custom_text": custom,  # 保存原始自定义输入文本，用于恢复
+                "custom": bool(custom),
+                "custom_text": draft,  # 全量草稿，用于翻页恢复
             }
         else:
             self._answers.pop(self._current_index, None)
@@ -1324,7 +1321,7 @@ class QuestionFloatingWidget(QWidget):
                     w.set_checked(text and w._label_text in text)
         if self._custom_input_widget:
             self._custom_input_widget.set_active(custom_used)
-            if custom_used and isinstance(answer, dict):
+            if isinstance(answer, dict):
                 custom_text = answer.get("custom_text", "") or answer.get("text", "")
                 # 如果是混合答案（选项+自定义），提取纯自定义部分
                 import re
