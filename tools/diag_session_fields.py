@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """content 外字段构成诊断：统计消息 dict 中除 content 外各字段的体积分布。"""
+
 import json
 import sqlite3
 import sys
@@ -33,4 +34,4 @@ for (blob,) in conn.execute("SELECT messages FROM sessions WHERE messages IS NOT
 rank = sorted(field_bytes.items(), key=lambda x: -x[1])
 print("字段体积排行（content 之外，全库累计）:")
 for (k, role), v in rank[:20]:
-    print(f"  {k:24} role={role:10} {v/1e6:10.2f} MB")
+    print(f"  {k:24} role={role:10} {v / 1e6:10.2f} MB")

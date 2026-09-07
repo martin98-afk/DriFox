@@ -5,6 +5,7 @@
 - 单会话解压后体积排行（≈ 加载进内存的体积）
 - 内容分类：图片 base64 / 工具结果 / 其他文本 / content 外字段
 """
+
 import json
 import sqlite3
 import sys
@@ -18,9 +19,7 @@ DB = sys.argv[1] if len(sys.argv) > 1 else r"D:\work\DriFox\.drifox\sessions.db"
 conn = sqlite3.connect(f"file:{Path(DB).as_posix()}?mode=ro", uri=True)
 conn.row_factory = sqlite3.Row
 
-rows = conn.execute(
-    "SELECT rowid, session_id, title, updated_at, messages, message_count FROM sessions"
-).fetchall()
+rows = conn.execute("SELECT rowid, session_id, title, updated_at, messages, message_count FROM sessions").fetchall()
 print(f"total sessions: {len(rows)}")
 
 
@@ -76,12 +75,12 @@ for r in rows:
     stats.append((len(ser), img, tool, text, other, r["title"] or "?", r["updated_at"], r["rowid"], len(msgs)))
 
 stats.sort(reverse=True)
-print(f"\nDB blob 总计: {total_blob/1e6:.1f} MB → 解压后 JSON 总计: {total_raw/1e6:.1f} MB（内存视角）")
+print(f"\nDB blob 总计: {total_blob / 1e6:.1f} MB → 解压后 JSON 总计: {total_raw / 1e6:.1f} MB（内存视角）")
 print("\nTop 15 最大会话（解压后 | 图片 | 工具 | 文本 | other | 条数 | 标题 | 更新时间）:")
 for full, img, tool, text, other, title, ts, rid, n in stats[:15]:
     print(
-        f"  {full/1e6:7.2f} MB | img {img/1e6:6.2f} | tool {tool/1e6:6.2f}"
-        f" | txt {text/1e6:6.2f} | other {other/1e6:6.2f} | {n:4d} 条 | {title[:24]:24} | {ts} | rowid={rid}"
+        f"  {full / 1e6:7.2f} MB | img {img / 1e6:6.2f} | tool {tool / 1e6:6.2f}"
+        f" | txt {text / 1e6:6.2f} | other {other / 1e6:6.2f} | {n:4d} 条 | {title[:24]:24} | {ts} | rowid={rid}"
     )
 
 agg_img = sum(s[1] for s in stats)
@@ -89,8 +88,8 @@ agg_tool = sum(s[2] for s in stats)
 agg_text = sum(s[3] for s in stats)
 agg_other = sum(s[4] for s in stats)
 print(
-    f"\n全库解压后合计: 图片 {agg_img/1e6:.1f} MB | 工具结果 {agg_tool/1e6:.1f} MB"
-    f" | 其他文本 {agg_text/1e6:.1f} MB | content外字段 {agg_other/1e6:.1f} MB"
+    f"\n全库解压后合计: 图片 {agg_img / 1e6:.1f} MB | 工具结果 {agg_tool / 1e6:.1f} MB"
+    f" | 其他文本 {agg_text / 1e6:.1f} MB | content外字段 {agg_other / 1e6:.1f} MB"
 )
 
 # Top1 会话 role 分布（tuple: full,img,tool,text,other,title,ts,rid,n）
@@ -104,4 +103,4 @@ if stats:
         roles[k] = roles.get(k, 0) + len(json.dumps(m, ensure_ascii=False))
     print(f"\nTop1 会话 rowid={rid} role 分布:")
     for k, v in sorted(roles.items(), key=lambda x: -x[1]):
-        print(f"    role={k:10} {v/1e6:8.2f} MB")
+        print(f"    role={k:10} {v / 1e6:8.2f} MB")
