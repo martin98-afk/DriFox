@@ -271,7 +271,13 @@ class PluginHostService(QObject):
                 workdir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
                 lsp_mgr.initialize(workdir, lsp_configs)
                 logger.info(f"[PluginHost] LspManager 延迟初始化完成，已注册 {len(lsp_mgr._clients)} 个 LSP 服务器")
-                lsp_mgr.start_all_background()
+                # 按需启动：不再批量预热。所有 LSP 消费接口（lsp_tools 的
+                # diagnostics/symbols/definition/references/hover 等操作，
+                # 经 LspManager 的 sync_get_diagnostics/sync_hover/
+                # sync_go_to_definition 等方法提交）调用前均会经
+                # _ensure_started 自动拉起对应 server，
+                # 避免启动窗口 6+ 个 LSP 子进程集中 spawn（性能优化 T5-1）。
+                # 插件热重载场景（_reload_all_plugin_subsystems）仍主动 start_all_background。
             except Exception as e:
                 logger.error(f"[PluginHost] LSP 延迟初始化失败: {e}")
 

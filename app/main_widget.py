@@ -1237,6 +1237,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 值越大回收越保守（减少 WebEngine 重建），值越小内存越低
         self._virtual_scroll_buffer = 1
         self._message_batch: List[List[Dict[str, Any]]] = []
+        # [T5-5] 节点→batch 映射缓存：(指纹, mapping)。指纹变化自动失效，
+        # 无需在各 _message_batch 变更点手动清理
+        self._node_batch_map_cache = None
         # 存储每个batch对应的UI卡片：None表示已回收（只存数据不存UI）
         self._batch_cards: List[Optional[List[MessageCard]]] = []
         # 卸载批次后留在原位的等高空白占位：batch_idx → spacer。
@@ -2649,6 +2652,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 清空批量渲染索引，防止虚拟滚动定时器触发的回收访问已移出布局的旧卡片
         self._batch_cards = []
         self._message_batch = []
+        self._node_batch_map_cache = None  # [T5-5] 指纹自动失效，此处显式重置双保险
         self._visible_batch_start = 0
         self._visible_batch_end = 0
         self._virtual_scroll_timer.stop()
@@ -2781,12 +2785,14 @@ class OpenAIChatToolWindow(ToolWindow):
         theme_manager.register_refresh_target(self)
         # 动态更新主题选项
         update_theme_options()
-        # 模块级 override 前置：必须在 compose 前注册 UI 插件，否则 register_ui_module
-        # (priority=100) 晚于 compose 生效，override 被系统版（priority=0）覆盖。
-        # 首帧后 _init_ui_plugins_deferred 仍会调用本方法，但 registry 单例已加载会跳过，
-        # 仅执行其后的命令重注册等窗口级初始化。
-        self._load_all_ui_plugins()
-        # Phase F：注册 5 个系统 UI 模块（瘦版占位；插件可 register_ui_module override）
+        # T5-2R：插件全量加载已移出首帧（首帧后 _init_ui_plugins_deferred 统一执行：
+        # 加载 + 命令重注册 + 浮动卡 handler + 输入区按钮 + 共享 Launcher 刷新补挂）。
+        # setup_ui 期间 compose 仅消费系统模块（_register_system_ui_modules 注册），
+        # 侧边栏/顶部 tab 的插件项由补挂的 _update_shared_launcher 延迟刷新。
+        # 已知边界：①插件欢迎卡首启不生效（构建期读取+按窗口缓存，切会话/软刷新恢复）；
+        # ②用户自定义插件若走 register_ui_module override 协议，延迟后 override 失效
+        # （compose 一次性），项目自带插件不受影响。
+        # Phase F：注册 5 个系统 UI 模块（瘦版占位）
         _register_system_ui_modules()
 
         layout = QVBoxLayout(self)
@@ -3327,6 +3333,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._build_plugin_input_buttons()
             except Exception as e:
                 logger.error(f"[MainWidget] 输入区插件按钮初始化失败: {e}")
+
+            # T5-2R: UI plugins load deferred; sidebar/titlebar built with empty
+            # registry during setup_ui, refresh here (idempotent chain)
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                _tm = TabManagerWindow.get_instance()
+                if _tm is not None:
+                    _tm._update_shared_launcher()
+            except Exception:
+                logger.exception("[UIPluginDeferred] Failed to refresh shared launcher")
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
 
@@ -11949,6 +11966,7 @@ class OpenAIChatToolWindow(ToolWindow):
         return is_widget_alive(widget)
 
     def _restore_cached_session_cards(self, session: ChatSession) -> bool:
+        """缓存仅存元信息，恒走全量重建（本方法恒返回 False）。"""
         if not session.messages:
             return False
 
@@ -11980,43 +11998,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 轻量快照只保留元信息，实际恢复仍由 session.messages 重建
         return False
-
-        alive_cards, removed = filter_alive_cards(cached_cards)
-        if removed:
-            self._session_card_cache.pop(session.session_id, None)
-        if not alive_cards:
-            return False
-
-        self._clear_chat_area(delete_widgets=False)
-        for card in alive_cards:
-            self._add_chat_widget(card)
-        self._displayed_session_id = session.session_id
-        # 关键修复：同步 _current_session_id 与实际显示的会话
-        self._current_session_id = session.session_id
-        self._current_assistant_card = alive_cards[-1] if alive_cards and alive_cards[-1].role == "assistant" else None
-        self._message_batch = group_messages_for_display(session.messages)
-        # 重建 user 前缀和缓存（用于 O(1) 的 round_index 计算）
-        self._build_user_prefix_cache()
-        # 同步 _batch_cards 长度
-        self._sync_batch_structures()
-        # 从缓存卡片的 _message_index 重建 _batch_cards 引用（缓存卡片已有正确的索引）
-        for card in alive_cards:
-            mi = getattr(card, "_message_index", None)
-            if mi is not None and 0 <= mi < len(self._batch_cards):
-                if self._batch_cards[mi] is None:
-                    self._batch_cards[mi] = []
-                if card not in self._batch_cards[mi]:
-                    self._batch_cards[mi].append(card)
-        self._visible_batch_start = max(0, int(cache_entry.get("visible_batch_start", 0)))
-        self._visible_batch_end = min(
-            len(self._message_batch),
-            int(cache_entry.get("visible_batch_end", len(self._message_batch))),
-        )
-        # 延迟恢复所有助手卡片的差异统计（避免文件 I/O 阻塞首屏）
-        for card in alive_cards:
-            if card.role == "assistant":
-                QTimer.singleShot(0, lambda c=card: self._update_card_diff_stats(c))
-        return True
 
     def _collect_welcome_sessions(self):
         """收集欢迎卡片会话列表数据（按当前项目过滤，剔除团队会话）
@@ -13975,38 +13956,43 @@ class OpenAIChatToolWindow(ToolWindow):
         - _message_batch 中最后一个 user batch 也生成节点（trailing check）
 
         返回: mapping[node_index] = batch_index
+
+        [T5-5] 滚动 tick 内高频调用。原实现对每个 user batch 向后线性扫描
+        配对（O(B²)）；现改为指纹缓存 + 倒序单 pass：命中走 O(B) 指纹校验
+        （小常数，消除重建 O(B²) 尖峰），失效重建 O(B)。
+        指纹 = 各 batch 首消息 role 序列（映射输出仅依赖它）。
         """
+        batches = self._message_batch
+        fingerprint = tuple(b[0].get("role") if b else None for b in batches)
+        cache = self._node_batch_map_cache
+        if cache is not None and cache[0] == fingerprint:
+            return cache[1]
+
         mapping = []
         last_user_batch_idx = -1
-
-        for idx, batch in enumerate(self._message_batch):
-            if not batch:
-                continue
-            if batch[0].get("role") != "user":
-                continue
-
-            last_user_batch_idx = idx
-
-            # 检查当前 user batch 之后是否有配对的 assistant/tool batch
-            has_paired = False
-            for next_idx in range(idx + 1, len(self._message_batch)):
-                next_batch = self._message_batch[next_idx]
-                if not next_batch:
-                    continue
-                next_role = next_batch[0].get("role")
-                if next_role in ("assistant", "tool"):
-                    has_paired = True
-                    break
-                if next_role == "user":
-                    break  # 在 assistant 前遇到另一个 user → 无配对
-
-            if has_paired:
-                mapping.append(idx)
+        # 倒序单 pass：decisive_after = i 之后首个 role ∈ {assistant, tool, user}
+        # 的 batch 的 role。与旧扫描语义一致：空 batch 与 role 为 None/其他值的
+        # batch 不参与配对判定也不终止扫描（继续向后找）。
+        decisive_after = None
+        for i in range(len(batches) - 1, -1, -1):
+            batch = batches[i]
+            role = batch[0].get("role") if batch else None
+            if role == "user":
+                # 倒序遍历：首个遇到的 user 即最大 index（last_user），
+                # 后续（更小 index）的 user 不得覆盖
+                if last_user_batch_idx < 0:
+                    last_user_batch_idx = i
+                if decisive_after in ("assistant", "tool"):
+                    mapping.append(i)
+            if role in ("assistant", "tool", "user"):
+                decisive_after = role
+        mapping.reverse()
 
         # 最后一个 user（即使是无配对的）也生成节点
         if last_user_batch_idx >= 0 and (not mapping or mapping[-1] != last_user_batch_idx):
             mapping.append(last_user_batch_idx)
 
+        self._node_batch_map_cache = (fingerprint, mapping)
         return mapping
 
     def _get_batch_index_from_node_index(self, node_index: int) -> int:

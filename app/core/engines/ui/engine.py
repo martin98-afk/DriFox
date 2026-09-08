@@ -656,7 +656,7 @@ class UIEngine(BaseEngine):
                 if isinstance(msg.get("content"), str) and len(msg["content"]) > TOOL_RESULT_MAX_LEN:
                     _m = dict(msg)
                     _m["content"] = prune_tool_result(_m["content"])
-                tool_tokens += per_message_tokens(_m, model)
+                tool_tokens += per_message_tokens(_m, model, ratio)
             else:
                 # 其它角色（如内联 system 消息）兜底归入用户侧
                 user_tokens += t
@@ -685,7 +685,7 @@ class UIEngine(BaseEngine):
                 # 上次 API 调用后新增了消息：API 精确值 + 新增消息估算
                 # 性能优化（O-01）：per_message_tokens 累加，避免临时列表+缓存 MISS
                 new_msgs = session.messages[api_message_count:]
-                delta = sum(per_message_tokens(m, model) for m in new_msgs)
+                delta = sum(per_message_tokens(m, model, ratio) for m in new_msgs)
                 used_tokens = api_prompt_tokens + delta
             else:
                 used_tokens = api_prompt_tokens

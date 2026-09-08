@@ -19,14 +19,21 @@ B4 批次回收把 ``CodeWebViewer`` 归还复用池（``webview_pool.WebViewPoo
 因此现象与"对话轮次多了以后"强相关；且池是进程级全局的，
 新开标签页的第一条回复也会取到被污染的 viewer。
 
+3. ``setFixedHeight`` 钉死的高度（由 `_commit_viewer_height` 设置，长消息可达
+   数千 px）在归还时未清 → 复用方在骨架就绪前顶着上一张消息的高度，
+   表现为"巨高空白卡片"（而不是塌成最小高度）。
+
 修复：
 1. 取用侧：重置 ``_is_js_ready`` 并调用 ``_load_skeleton()``（与新建等价）；
    ``set_content`` 因 JS 未就绪 defer，由 ``_on_js_ready`` 统一补渲。
 2. ``reset_for_reuse()``：归还时同步 ``_is_js_ready = False``（防御）。
+3. 高度复位：归还侧与取用侧都把 viewer 高度复位到最小高度 40，
+   由新内容首次 ``reportHeight`` 重新收敛。
 
 本测试验证（mock viewer，不依赖真实 Chromium）：
 1. 从池中取出的 viewer 必须经历一次骨架重载，且 JS 就绪态被复位；
-2. 归还侧 ``reset_for_reuse`` 会把残留的 ``_is_js_ready`` 清掉。
+2. 归还侧 ``reset_for_reuse`` 会把残留的 ``_is_js_ready`` 清掉；
+3. 复用的 viewer 不得残留上一张卡片钉死的固定高度。
 
 运行：
     python -m pytest tests/widgets/test_webview_pool_skeleton_reload.py -v
@@ -83,6 +90,9 @@ def test_pooled_viewer_must_reload_skeleton_on_acquire():
 
     fake = _FakePooledViewer()
     assert fake._is_js_ready is True
+    # 模拟上一张卡片（长消息）钉死的高度：复用必须丢弃，否则显示为"巨高空白卡片"
+    fake.setMinimumHeight(40)
+    fake.setFixedHeight(1600)
     # 归还进池（真实 release 链：_is_usable → reset_for_reuse → 入桶）
     assert pool.release(fake, light=False) is True
 
@@ -105,6 +115,10 @@ def test_pooled_viewer_must_reload_skeleton_on_acquire():
             "复用时 JS 就绪态必须复位，否则 set_content 会把 runJavaScript "
             "打在空页上静默失败 → 卡片永久空白"
         )
+        # 高度：上一张卡片钉死的 1600px 不得残留（用户现象：巨高空白卡片）
+        assert fake.maximumHeight() == 40, (
+            f"复用时必须复位高度，陈旧固定高度会撑出巨大空白卡片（当前 {fake.maximumHeight()}）"
+        )
     finally:
         pool.clear()
 
@@ -114,13 +128,15 @@ def test_reset_for_reuse_clears_stale_js_ready():
     _ensure_qapp()
 
     fake = _FakePooledViewer()
-    # 模拟一张正常工作过的 viewer：JS 就绪 + 有稳定渲染状态
+    # 模拟一张正常工作过的 viewer：JS 就绪 + 有稳定渲染状态 + 已钉死高度
     fake._is_js_ready = True
     fake._stable_html = "<p>x</p>"
     fake._needs_full_render = False
+    fake.setFixedHeight(1600)
 
     fake.reset_for_reuse()
 
     assert fake._is_js_ready is False, "页面已被 setHtml('') 清空，就绪态不得残留 True"
     assert fake._needs_full_render is True
     assert fake._stable_html == ""
+    assert fake.maximumHeight() == 40, "归还时必须复位高度，否则复用时残留上一张卡片的巨高"

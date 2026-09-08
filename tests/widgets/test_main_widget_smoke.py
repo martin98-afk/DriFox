@@ -769,3 +769,36 @@ class TestMockedInit:
                 pass
             except Exception:
                 raise
+
+
+# ─── T5-2R: UI 插件延迟加载 → 共享 Launcher 补挂防回归 ────────────────────────
+def test_deferred_ui_plugins_refresh_shared_launcher(monkeypatch):
+    """_init_ui_plugins_deferred 末尾必须刷新共享 Launcher
+
+    T5-2R 把 _load_all_ui_plugins 移出 setup_ui 后，侧边栏/顶部 tab 在
+    compose 期间基于空 registry 构建；若 deferred 链末尾缺失
+    TabManagerWindow._update_shared_launcher() 补挂，插件项将永久消失
+    （T5-2 翻车点）。
+    """
+    from app.main_widget import OpenAIChatToolWindow
+
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._is_destroyed = False
+    win._function_command_handlers = {}
+    win._load_all_ui_plugins = MagicMock()
+    win._build_plugin_input_buttons = MagicMock()
+
+    reg = MagicMock()
+    reg.get_floating_cards.return_value = {}
+    import app.plugins.registries.ui_plugin_registry as uir
+
+    monkeypatch.setattr(uir.UIPluginRegistry, "get_instance", lambda *a, **k: reg)
+
+    tm = MagicMock()
+    import app.widgets.tab_manager_window as tmw
+
+    monkeypatch.setattr(tmw.TabManagerWindow, "get_instance", lambda *a, **k: tm)
+
+    win._init_ui_plugins_deferred()
+
+    tm._update_shared_launcher.assert_called_once()

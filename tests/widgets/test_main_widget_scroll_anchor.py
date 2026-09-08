@@ -570,3 +570,113 @@ def test_negative_delta_clamped_at_zero(qapp):
     card.heightChanged.emit(1120)
 
     bar.setValue.assert_called_once_with(0)  # max(0, 30 - 80)
+
+
+# ─── T5-5: _build_node_to_batch_mapping 等价性（指纹缓存 + 单 pass） ───────────
+def _map_window(batches):
+    """最小实例：_build_node_to_batch_mapping 仅依赖 _message_batch 与缓存属性"""
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._message_batch = batches
+    win._node_batch_map_cache = None
+    return win
+
+
+def _u():
+    return [{"role": "user", "content": "hi"}]
+
+
+def _a():
+    return [{"role": "assistant", "content": "ok"}]
+
+
+def _t():
+    return [{"role": "tool", "content": "result"}]
+
+
+def test_mapping_interleave_user_assistant_tool():
+    """形态1：user/assistant/tool 交错 → 每个 user 都有配对"""
+    win = _map_window([_u(), _a(), _t(), _u(), _a()])
+    assert win._build_node_to_batch_mapping() == [0, 3]
+
+
+def test_mapping_trailing_user():
+    """形态2：trailing user（无配对）→ trailing check 补节点"""
+    win = _map_window([_u(), _a(), _u()])
+    assert win._build_node_to_batch_mapping() == [0, 2]
+
+
+def test_mapping_consecutive_users_only_last_paired():
+    """形态3：连续 user → 只有配对 assistant 的最后一个生成节点"""
+    win = _map_window([_u(), _u(), _a()])
+    assert win._build_node_to_batch_mapping() == [1]
+
+
+def test_mapping_empty_batches_skipped():
+    """形态4：空 batch 跳过，不影响配对判定"""
+    win = _map_window([_u(), [], _a()])
+    assert win._build_node_to_batch_mapping() == [0]
+
+
+def test_mapping_cache_hit_and_invalidate():
+    """指纹命中返回缓存；批次变化后自动失效重建"""
+    win = _map_window([_u(), _a()])
+    first = win._build_node_to_batch_mapping()
+    assert win._node_batch_map_cache is not None
+    assert win._build_node_to_batch_mapping() is first  # 缓存命中（同一对象）
+    win._message_batch.append(_u())  # 追加 trailing user → 指纹变化
+    second = win._build_node_to_batch_mapping()
+    assert second == [0, 2]
+    assert second is not first
+
+
+def test_mapping_equivalence_with_reference_fuzz():
+    """fuzz 对照：固定 seed 伪随机批次序列，新算法与参考实现逐例同输出
+
+    参考实现 = 旧 O(B²) 扫描（规格的直译，保留在测试内作为行为锚）。
+    覆盖 spec 四形态之外的分支配对：空 batch / role=None / 未知 role 的
+    非空 batch（旧语义：不参与配对也不终止扫描）。
+    """
+    import random
+
+    def _reference_mapping(batches):
+        mapping = []
+        last_user_batch_idx = -1
+        for idx, batch in enumerate(batches):
+            if not batch or batch[0].get("role") != "user":
+                continue
+            last_user_batch_idx = idx
+            has_paired = False
+            for next_idx in range(idx + 1, len(batches)):
+                next_batch = batches[next_idx]
+                if not next_batch:
+                    continue
+                next_role = next_batch[0].get("role")
+                if next_role in ("assistant", "tool"):
+                    has_paired = True
+                    break
+                if next_role == "user":
+                    break
+            if has_paired:
+                mapping.append(idx)
+        if last_user_batch_idx >= 0 and (not mapping or mapping[-1] != last_user_batch_idx):
+            mapping.append(last_user_batch_idx)
+        return mapping
+
+    rng = random.Random(0xB2C0)
+    for case in range(300):
+        n = rng.randint(0, 25)
+        batches = []
+        for _ in range(n):
+            kind = rng.random()
+            if kind < 0.12:
+                batches.append([])  # 空 batch
+            elif kind < 0.18:
+                batches.append([{"content": "no-role"}])  # role 缺失
+            elif kind < 0.22:
+                batches.append([{"role": "system", "content": "x"}])  # 其他 role
+            else:
+                batches.append(rng.choice([_u(), _a(), _t()]))
+        win = _map_window(batches)
+        assert win._build_node_to_batch_mapping() == _reference_mapping(batches), (
+            f"fuzz case {case} 不等价: batches={batches!r}"
+        )

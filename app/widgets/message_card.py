@@ -330,6 +330,24 @@ WHEEL_STUCK_LIMIT = 4
 # 帧级延迟，密集滚动期间 scrollTop 未刷新属正常，不得误判为卡死）。
 WHEEL_STUCK_MIN_INTERVAL = 0.1
 
+# ======== 结束态卡片高度过渡（默认开，出问题可一键关）========
+# 背景：流式结束时卡片高度会从"坞态限高"收敛到自然高度（常是数百 px 的突变），
+# 原来 _update_height 对大 delta 直接 snap（noContainerAnimation），外层滚动区
+# 跟着瞬移 —— 页面内的位移已被 FLIP 补间，唯独 Qt 侧这一跳没动画。
+# 这里在"结束态窗口"内改用既有的 _height_anim 做 200ms 缓动。
+# 关闭方式：环境变量 DRIFOX_FINISH_HEIGHT_ANIM=0，或运行时
+# set_finish_height_anim_enabled(False)。
+FINISH_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_FINISH_HEIGHT_ANIM", "1") != "0"
+FINISH_HEIGHT_ANIM_MS = 200  # 与 JS 侧 FLIP 时长（220ms）接近，观感一致
+FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪声抖动）
+FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖"结束后的第一次高度收敛"
+
+
+def set_finish_height_anim_enabled(enabled: bool) -> None:
+    """运行时开关结束态高度动画（灰度/回滚用）。"""
+    global FINISH_HEIGHT_ANIM_ENABLED
+    FINISH_HEIGHT_ANIM_ENABLED = bool(enabled)
+
 
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
 # 子智能体和提问工具（subagent_para/question）涉及 AI 与用户的直接交互，
@@ -8693,6 +8711,9 @@ class CodeWebViewer(QWebEngineView):
     _ADAPTIVE_THRESHOLD_SLOW = 500  # ms
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
+    # 长内容最终渲染走线程池的字符阈值：低于阈值保持同步（历史短消息/测试路径
+    # 行为不变），超过则异步，避免 md.convert + Pygments + json.dumps 阻塞结束这一拍。
+    _ASYNC_FINAL_RENDER_MIN_CHARS = 6000
 
     @staticmethod
     def _has_reached_clean_boundary(md_text: str) -> bool:
@@ -9204,6 +9225,18 @@ class CodeWebViewer(QWebEngineView):
                         ]
                     else:
                         html_content = self._cached_streaming_html
+                elif len(self._markdown_text) > self._ASYNC_FINAL_RENDER_MIN_CHARS:
+                    # [PERF] 长内容的最终渲染（流式结束 / 大段历史消息）走线程池。
+                    # 同步路径要在主线程跑完 md.convert + Pygments 高亮 + 表格/代码块
+                    # 包装 + json.dumps，长消息实测几十~上百 ms —— 而流式结束这一拍
+                    # 还要承载坞态归位、FLIP、高度变化与折叠，全部叠在一起就是
+                    # 用户感知的"结束卡顿"。交给 _sequence_render 后主线程只负责
+                    # 把结果 runJavaScript 推给 WebEngine（_apply_render_result 已
+                    # 覆盖 save/restore、auto-scroll 与 seq 过期丢弃）。
+                    self._last_rendered_markdown = self._markdown_text
+                    self._height_report_pending = True
+                    self._sequence_render(self._markdown_text, self._tool_compact_mode)
+                    return
                 else:
                     html_content = self._render_markdown_to_html(self._markdown_text)
                 self._last_rendered_markdown = self._markdown_text
@@ -11677,6 +11710,9 @@ class MessageCard(SimpleCardWidget):
         self._height_anim.setDuration(0)  # 设置为0相当于禁用插值
         self._target_viewer_height = 40
         self._last_applied_viewer_height = 40
+        # 结束态高度缓动窗口（monotonic 截止时刻；0 = 无窗口）。由
+        # MessageCard.finish_streaming 打开，_update_height 消费一次即失效。
+        self._finish_height_anim_until = 0.0
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
@@ -12876,6 +12912,13 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _apply_card_style(self, border: str = None, bg: str = None):
+        # [PERF] 幂等短路：setStyleSheet 会触发 Qt 样式重新 polish + 子控件 relayout，
+        # 而流式结束时 stop_streaming_anim() 会再调一次 —— 与最终全量渲染撞在
+        # 同一拍，是结束态卡顿的一分子。参数未变时直接跳过。
+        _style_key = (self.role, self.error, border, bg, self._base_bg, self._base_border)
+        if getattr(self, "_applied_card_style_key", None) == _style_key:
+            return
+        self._applied_card_style_key = _style_key
         # user 简洁气泡：12px 圆角 + 无边框（仅轻量背景色）；错误态仍显示红色边框
         if self.role == "user" and not self.error:
             self.setStyleSheet(
@@ -12923,8 +12966,10 @@ class MessageCard(SimpleCardWidget):
             return
         self._apply_card_style()
         self._retry_status_widget.setVisible(False)
+        # [PERF] 去掉 repaint()：同步强制重绘会把整卡 paint 塞进当前这一拍，
+        # 而结束态这一拍还要承载最终全量渲染与高度变化；异步 update() 足够，
+        # 由 Qt 在下一个合成周期统一绘制。
         self.update()
-        self.repaint()
 
     def start_retry_anim(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
         """切换到重试边框模式（红色流动+白光点）"""
@@ -13464,6 +13509,19 @@ class MessageCard(SimpleCardWidget):
         if not self._streaming and not self._resize_preview_mode:
             self._remember_height_for_width(target_height)
 
+        # 🆕 结束态高度动画进行中：reportHeight 回环（setFixedHeight → 视口变化 →
+        # ResizeObserver → reportHeight）会不断送来"当前中间高度"，若照单全收会
+        # 把补间打断成锯齿。判定为同一收敛值（差异 <24px）时忽略。
+        if self._is_height_animating:
+            try:
+                _end = int(self._height_anim.endValue())
+            except Exception:
+                _end = target_height
+            if abs(target_height - _end) < 24:
+                return
+            # 明显不同的新目标（内容又变了）：停机，交回常规路径
+            self._height_anim.stop()
+
         # 🆕 流式中防抖：累积高度变化，定时器到期才应用 viewer 高度。
         # 流式期间每个 text chunk 都会触发 height report（~60fps），
         # 若每次立即 resize viewer 会导致卡片高度持续跳动、主滚动区不稳定。
@@ -13483,6 +13541,13 @@ class MessageCard(SimpleCardWidget):
             self._apply_viewer_height(target_height)
             return
 
+        # 🆕 结束态高度过渡：坞态归位 + 最终重排会让卡片高度一次跳几百 px，
+        # snap 会让外层滚动区瞬移（页面内已由 FLIP 补间，唯独 Qt 侧没有）。
+        # 仅在"流式结束后第一次收敛"的窗口内启用，且变化足够大才值得动画。
+        if self._in_finish_height_window() and abs(target_height - current_height) >= FINISH_HEIGHT_ANIM_MIN_DELTA:
+            self._start_finish_height_anim(current_height, target_height)
+            return
+
         # 非流式大高度变化（折叠/展开）：一次性设 viewer 最终高度，
         # 但跳过容器的 200ms maximumHeight 动画，避免 AlignBottom 布局中
         # 卡片位置因容器动画与 viewer 高度变化不同步而"闪现"。
@@ -13491,6 +13556,48 @@ class MessageCard(SimpleCardWidget):
         self._apply_viewer_height(target_height)
         # 延迟清除标志，等容器 snap 完成
         QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
+
+    # ── 结束态高度过渡（可关：FINISH_HEIGHT_ANIM_ENABLED）──
+
+    def _in_finish_height_window(self) -> bool:
+        """是否处于"流式结束后的高度收敛窗口"内。
+
+        只在 ``MessageCard.finish_streaming`` 打开的一个短窗口内为真，
+        保证动画只服务结束态这一次收敛，不污染折叠/展开/主题刷新等日常路径。
+        """
+        global FINISH_HEIGHT_ANIM_ENABLED
+        if not FINISH_HEIGHT_ANIM_ENABLED:
+            return False
+        if getattr(self, "_finish_height_anim_until", 0.0) <= 0.0:
+            return False
+        if time.monotonic() > self._finish_height_anim_until:
+            self._finish_height_anim_until = 0.0
+            self._finish_height_anim_left = 0
+            return False
+        # 次数预算：结束态通常有两次收敛（坞态归位+重排、随后自动折叠），
+        # 用完即回到 snap，避免把后续日常高度变化也动画化。
+        return int(getattr(self, "_finish_height_anim_left", 0)) > 0
+
+    def _start_finish_height_anim(self, start_h: int, end_h: int) -> None:
+        """用既有的 ``_height_anim`` 把 viewer 高度从 start 缓动到 end。
+
+        容器侧仍走 ``noContainerAnimation`` snap（原逻辑保留），因为容器
+        maximumHeight 只是一个**上限**，放宽到终值不会造成可见跳变；真正的
+        可见高度由 viewer 的固定高度驱动，故缓动 viewer 即可平滑整体。
+        """
+        # 窗口只服务一次收敛：进入即消费
+        self._finish_height_anim_until = 0.0
+        try:
+            self._height_anim.stop()
+            self._height_anim.setDuration(FINISH_HEIGHT_ANIM_MS)
+            self._height_anim.setStartValue(int(start_h))
+            self._height_anim.setEndValue(int(end_h))
+            self._height_anim.start()
+        except Exception:
+            # 动画不可用（对象已销毁等）：退回原有 snap 行为
+            self.setProperty("noContainerAnimation", True)
+            self._apply_viewer_height(end_h)
+            QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
 
     def _on_height_anim_state_changed(self, state):
         self._is_height_animating = state == QVariantAnimation.Running
@@ -15382,6 +15489,18 @@ class MessageCard(SimpleCardWidget):
                 流式动画，跳过 stop_streaming_anim 无副作用。
         """
         try:
+            # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
+            # 渐变边框/流动光点），与紧随其后的最终全量渲染抢主线程。
+            # 这里只停定时器，不改任何状态标记（仍由下方 stop_streaming_anim 收尾）。
+            try:
+                self._anim_timer.stop()
+            except RuntimeError:
+                pass
+            # 🆕 打开结束态高度缓动窗口：坞态归位 + 最终重排后卡片高度会一次收敛
+            # 数百 px，交由 _update_height 缓动（只服务一次，消费或超时即失效）。
+            # 历史会话加载（history=True）不打开——那是首帧建卡，无需过渡。
+            if not history:
+                self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
                 self.viewer.finish_streaming(keep_dock=False if history else self._has_active_tools())
                 if hasattr(self.viewer, "_cleanup_render_cache"):

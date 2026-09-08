@@ -169,7 +169,10 @@ class TrayManager(QObject):
         # Windows: 安装 WM_HOTKEY 原生事件过滤器（需在 QApplication 存在后）
         if platform.system() == "Windows":
             self._install_hotkey_filter()
-        self._setup_global_hotkey()
+        # T5-4：热键注册延后一个事件循环轮次，移出主窗口构造关键路径
+        # （keyboard 兜底场景同步探测耗时 ~0.35s）。幂等机制不变：
+        # _setup_global_hotkey 内 _registered_hotkey 短路 + 5min 健康检查重试。
+        QTimer.singleShot(0, self._setup_global_hotkey)
 
         # 定时重建全局热键（应对 sleep/resume 等导致的钩子丢失）
         self._hotkey_health_timer = QTimer(self)
