@@ -103,19 +103,24 @@ class TestTypewriterQueue:
 class TestFinishTickCost:
     """结束这一拍的主线程开销（卡顿的隐藏来源）"""
 
-    def test_final_render_must_not_be_async(self, src_text: str):
-        """最终渲染**不能**丢给线程池：finish_streaming 之后紧随的
-        _cleanup_render_cache() 会 `self._render_seq += 1`，异步结果回来时已被判
-        过期丢弃 → 最终渲染永不落地（卡片停在流式形态、高度不收敛）。
+    def test_only_history_render_may_be_async(self, src_text: str):
+        """长内容异步只允许给**历史渲染**；流式结束的终渲染必须同步。
 
-        曾按"长内容走 _sequence_render"优化并踩了这个坑，此处锁定回退。
+        原因：finish_streaming 之后紧随的 _cleanup_render_cache() 会
+        `self._render_seq += 1`，异步结果回来即被 _apply_render_result 判为过期
+        丢弃 → 终渲染永不落地（卡片停在流式形态、高度不收敛）。曾踩过。
         """
         body = _func_body(src_text, "def _perform_update(self):")
         non_streaming = body.split("if not self._streaming:", 1)[1].split("以下为流式模式", 1)[0]
-        assert "self._sequence_render(" not in non_streaming, (
-            "最终渲染不能异步（会被 _cleanup_render_cache 的 seq 递增判为过期）"
+        assert "self._sequence_render(" in non_streaming, "长历史卡应走线程池（真机 40~120ms/张）"
+        # 异步分支必须带着"非结束态"守卫
+        assert "not self._final_render_pending" in non_streaming, (
+            "异步分支必须排除流式结束的终渲染（_final_render_pending）"
         )
-        assert "_cleanup_render_cache" in non_streaming or "_cleanup_render_cache" in body, "需保留为何不能异步的说明"
+        assert "_cleanup_render_cache" in body, "需保留为何结束态不能异步的说明"
+        # finish_streaming 必须打开该守卫
+        fin = _func_body(src_text, "def finish_streaming(self, keep_dock: bool = False):")
+        assert "_final_render_pending = True" in fin, "finish_streaming 必须标记终渲染为同步"
 
     def test_finish_timing_probe_available(self, src_text: str):
         """结束态耗时打点：render/dumps 慢时默认就打，js_land+layout 也要能测"""

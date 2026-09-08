@@ -3632,6 +3632,17 @@ class OpenAIChatToolWindow(ToolWindow):
             workdir = self._current_workdir.get(project, "")
             if workdir:
                 logger.debug(f"[_build_ui_context] workdir from _current_workdir cache: {workdir}")
+            elif project and self.backend and self.backend.memory_manager:
+                # 启动早期（首帧渲染早于 singleShot(0) 的 _sync_working_directory）
+                # 实例缓存与 tool_executor 尚未同步，从项目 DB 兜底恢复，
+                # 与 _resolve_project_workdir 的三级取值链一致。
+                try:
+                    workdir = self.backend.memory_manager.get_working_directory(project) or ""
+                except Exception:
+                    workdir = ""
+                if workdir:
+                    self._current_workdir[project] = workdir
+                    logger.debug(f"[_build_ui_context] workdir from project DB: {workdir}")
 
         if not workdir:
             logger.warning(
@@ -9153,6 +9164,8 @@ class OpenAIChatToolWindow(ToolWindow):
         scroll_area = getattr(self, "chat_scroll_area", None)
         if not scroll_area:
             return
+        # 观测：稳态下的并发渲染页 / 复用池占用（内部自带 2s 节流）
+        self._log_render_quota("scroll")
 
         viewport_rect = scroll_area.viewport().rect()
         viewport_top = scroll_area.verticalScrollBar().value()
@@ -11285,8 +11298,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if fn is None:
             return False
         try:
-            return bool(fn())
-        except Exception:
+            ok = bool(fn())
+            if not ok:
+                # 观测：池化为什么没发生（release=0 时靠这行定位）
+                logger.debug(
+                    f"[pool-detach] 未池化 role={getattr(card, 'role', None)} "
+                    f"streaming={getattr(card, '_streaming', None)} "
+                    f"lazy_rendered={getattr(card, '_lazy_rendered', None)} "
+                    f"viewer={type(getattr(card, 'viewer', None)).__name__}"
+                )
+            return ok
+        except Exception as _e:
+            logger.debug(f"[pool-detach] 异常：{_e!r}")
             return False
 
     def _unload_batch(self, batch_idx: int) -> int:
@@ -11465,6 +11488,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     f"_rendered_card_count={self._rendered_card_count}/{quota}"
                     f" (global={_global_rendered_pages}/{_MAX_GLOBAL_RENDERED_PAGES})"
                 )
+                # 观测：回收后并发页数与复用池占用（判断是否真的回收下来了）
+                self._log_render_quota("recycle")
         finally:
             self._is_virtual_recycling = False
 
@@ -12606,6 +12631,43 @@ class OpenAIChatToolWindow(ToolWindow):
             self._lazy_batch_timer_active = True
             QTimer.singleShot(0, self._process_next_lazy_batch)
 
+    # 渲染配额打点的最小间隔（秒）：事件密集（滚动/懒渲染/回收）时避免刷屏
+    RENDER_QUOTA_LOG_MIN_INTERVAL = 2.0
+
+    def _log_render_quota(self, reason: str) -> None:
+        """渲染配额 / 池化占用打点（自带 2s 节流）。
+
+        用于回答"加载大会话内存为什么涨"：并发渲染页数是否超配额、批次是否
+        没被回收、复用池里囤了多少常驻 Chromium 实例。
+        日志形如：
+        ``[render-quota] <reason> rendered=… quota=… global=…/… batches=总/非空
+        pool(full/light)=…/… stats={…}``
+        """
+        now = time.time()
+        if now - getattr(self, "_last_quota_log_at", 0.0) < self.RENDER_QUOTA_LOG_MIN_INTERVAL:
+            return
+        self._last_quota_log_at = now
+        try:
+            from app.widgets.webview_pool import WebViewPool
+
+            pool = WebViewPool.get_instance()
+            stats = pool.stats
+            pool_full, pool_light = pool.size(light=False), pool.size(light=True)
+        except Exception:
+            stats, pool_full, pool_light = {}, -1, -1
+        try:
+            batches = getattr(self, "_batch_cards", None) or []
+            non_empty = sum(1 for b in batches if b)
+            logger.info(
+                f"[render-quota] {reason} rendered={self._rendered_card_count} "
+                f"quota={self._effective_max_rendered_cards()} "
+                f"global={_global_rendered_pages}/{_MAX_GLOBAL_RENDERED_PAGES} "
+                f"batches={len(batches)}/{non_empty} "
+                f"pool(full/light)={pool_full}/{pool_light} stats={stats}"
+            )
+        except Exception:
+            pass
+
     def _process_next_lazy_batch(self):
         """批量懒渲染：16ms 时间片内处理尽量多卡片，减少 WebEngine 创建开销
 
@@ -12676,6 +12738,8 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(80, self._process_next_lazy_batch)
         else:
             self._loading_session = False
+            # 懒渲染队列排空：打一次配额/池化占用（加载大会话的观测点）
+            self._log_render_quota("lazy-drained")
             self._lazy_batch_timer_active = False
             # 🐛 修复：所有懒渲染批次完成后，卡片仍在异步报告高度，
             # layout 持续扩展但不再触发滚底。用 sticky 模式在接下来

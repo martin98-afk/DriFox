@@ -8779,8 +8779,13 @@ class CodeWebViewer(QWebEngineView):
     _ADAPTIVE_THRESHOLD_SLOW = 500  # ms
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
-    # 注：曾尝试"长内容最终渲染走线程池"，因 _cleanup_render_cache 的 _render_seq
-    # 递增会让异步结果被判过期丢弃（详见 _perform_update 内注释），已回退为同步。
+    # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
+    # ⚠️ 结束路径后面紧跟 _cleanup_render_cache()，它 `self._render_seq += 1`
+    # 会把异步结果判为过期丢弃（详见 _perform_update 内注释）——所以结束态必须
+    # 保持同步，历史加载没有这个紧随的 cleanup，异步是安全的。
+    # 真机实测（2026-09-09）：历史卡 md 24k~37k 时主线程 render 占 40~120ms/张，
+    # 一张张串行就是"加载大会话时一顿一顿"的来源。
+    _ASYNC_HISTORY_RENDER_MIN_CHARS = 6000
 
     @staticmethod
     def _has_reached_clean_boundary(md_text: str) -> bool:
@@ -9252,7 +9257,9 @@ class CodeWebViewer(QWebEngineView):
             pass
 
     def _perform_update(self):
-        _t_enter = time.perf_counter() if FINISH_TIMING_ENABLED else 0.0
+        # ⚠️ 必须无条件取时间：此前写成 `perf_counter() if FINISH_TIMING_ENABLED else 0.0`，
+        # 未开打点时 _t_enter=0，render 会被算成 perf_counter()*1000（千万毫秒级假数据）。
+        _t_enter = time.perf_counter()
         try:
             if not self.page():
                 return
@@ -9293,15 +9300,28 @@ class CodeWebViewer(QWebEngineView):
                         ]
                     else:
                         html_content = self._cached_streaming_html
+                elif (
+                    len(self._markdown_text) > self._ASYNC_HISTORY_RENDER_MIN_CHARS
+                    and not self._final_render_pending
+                ):
+                    # [PERF] 长内容的**历史/非结束态**渲染走线程池：md.convert +
+                    # Pygments 在长消息上是 40~120ms 的主线程阻塞（真机实测），
+                    # 加载大会话时每张卡都堵一拍。_apply_render_result 已覆盖
+                    # save/restore、auto-scroll 与 seq 过期丢弃，语义等价。
+                    self._last_rendered_markdown = self._markdown_text
+                    self._height_report_pending = True
+                    self._sequence_render(self._markdown_text, self._tool_compact_mode)
+                    return
                 else:
-                    # ⚠️ 这里**不能**改成走 _sequence_render 线程池：
+                    # ⚠️ 结束态（_final_render_pending）必须保持同步：
                     # MessageCard.finish_streaming 在 viewer.finish_streaming() 之后
                     # 立即调用 _cleanup_render_cache()，而它会 `self._render_seq += 1`
                     # （本意是让在途流式渲染过期）。异步提交的结果回来时 seq 已变，
                     # 被 _apply_render_result 判定过期直接丢弃 → 最终渲染永远不落地
-                    # （卡片停在流式形态、高度不收敛）。要保持异步就必须把 cleanup
-                    # 推迟到渲染落地之后，属另一处改造，暂不同步进行。
+                    # （卡片停在流式形态、高度不收敛）。要保持结束态异步就必须把
+                    # cleanup 推迟到渲染落地之后，属另一处改造。
                     html_content = self._render_markdown_to_html(self._markdown_text)
+                self._final_render_pending = False
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
                 # 🐛 修复：非流式路径也会在"流式结束但工具仍在并行执行"时触发
@@ -9323,6 +9343,7 @@ class CodeWebViewer(QWebEngineView):
                 # 已完成工具块待 restore（_restore_finished_ids）时才需要 save/restore 保护；
                 # 否则裸 updateContent（省整页 JS 包装，MB 级 IPC 载荷下降）。
                 _needs_save_restore = self._tool_dom_dirty or bool(getattr(self, "_restore_finished_ids", set()))
+                _kind = "finish" if getattr(self, "_finish_t0", 0.0) > 0.0 else "history"
                 _t_ser = time.perf_counter()
                 if _needs_save_restore:
                     _gen = self._tool_dom_dirty_gen
@@ -9335,7 +9356,8 @@ class CodeWebViewer(QWebEngineView):
                     # 结束态卡顿必须靠数据定位，不能靠猜。DRIFOX_FINISH_TIMING=1 强制全量。
                     if FINISH_TIMING_ENABLED or _render_ms >= 20 or _ser_ms >= 8:
                         logger.info(
-                            f"[finish-render] path=save_restore md={len(self._markdown_text)} "
+                            f"[finish-render] kind={_kind} path=save_restore "
+                            f"md={len(self._markdown_text)} "
                             f"html={len(html_content)} render={_render_ms:.1f}ms dumps={_ser_ms:.1f}ms"
                         )
                     self.page().runJavaScript(_js_code, lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g))
@@ -9345,7 +9367,8 @@ class CodeWebViewer(QWebEngineView):
                     _render_ms = (_t_ser - _t_enter) * 1000
                     if FINISH_TIMING_ENABLED or _render_ms >= 20 or _ser_ms >= 8:
                         logger.info(
-                            f"[finish-render] path=bare md={len(self._markdown_text)} "
+                            f"[finish-render] kind={_kind} path=bare "
+                            f"md={len(self._markdown_text)} "
                             f"html={len(html_content)} render={_render_ms:.1f}ms dumps={_ser_ms:.1f}ms"
                         )
                     self.page().runJavaScript(
@@ -9935,6 +9958,9 @@ class CodeWebViewer(QWebEngineView):
                 f"finished_tools={len(getattr(self, '_restore_finished_ids', set()) or set())}"
             )
         self._finish_t0 = time.perf_counter()
+        # 标记"接下来这次非流式渲染是流式结束的终渲染"：它必须同步完成
+        # （紧随其后的 _cleanup_render_cache 会让异步结果过期），见 _perform_update。
+        self._final_render_pending = True
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间
         # think-streaming（展开）应保持，只有历史会话加载走非流式分支
@@ -11807,6 +11833,8 @@ class MessageCard(SimpleCardWidget):
         self._finish_height_anim_active = False
         # 结束态打点起点（0 = 无待结算的结束拍）
         self._finish_t0 = 0.0
+        # 下一次非流式渲染是否为"流式结束的终渲染"（决定能否走线程池）
+        self._final_render_pending = False
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
