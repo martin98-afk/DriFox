@@ -70,9 +70,10 @@ to_remove_linux = [
 # Windows 专用（.dll 文件）
 to_remove_windows = [
     "numpy",
-    "PyQt5/Qt5/bin/libGLESv2.dll",
-    "PyQt5/Qt5/bin/opengl32sw.dll",
-    "PyQt5/Qt5/bin/d3dcompiler_47.dll",
+    # 注意：libEGL.dll/libGLESv2.dll/d3dcompiler_47.dll 是 ANGLE 三件套，必须保留。
+    # main.py 强制 AA_UseOpenGLES（ANGLE→D3D11），缺 libGLESv2 会导致启动即
+    # "Failed to create OpenGL context" 崩溃（2026-09-08 v0.5.10b2 实测踩坑）。
+    "PyQt5/Qt5/bin/opengl32sw.dll",  # 软件 OpenGL 兜底：强制 ANGLE 后不参与加载，删（省 20MB）
     "PyQt5/Qt5/bin/Qt5Quick3D.dll",
     "PyQt5/Qt5/bin/Qt5Quick3DAssetImport.dll",
     "PyQt5/Qt5/bin/Qt5Quick3DRuntimeRender.dll",

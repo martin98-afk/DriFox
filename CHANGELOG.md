@@ -3,6 +3,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.10b3] - 2026-09-08
+
+自上一版本以来的变更 | 提交数：1 · 文件变更：6 · +17/-8 | 贡献者：mading
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **打包版启动崩溃 "Failed to create OpenGL context"** (`build.py`, `tests/debug/gl_context_repro.py`): v0.5.10b2 起 `main.py` 强制 ANGLE（`AA_UseOpenGLES`→D3D11），但打包精简列表仍在删除 ANGLE 必需的 `libGLESv2.dll`（GLES2 实现）与 `d3dcompiler_47.dll`（shader 编译器），desktop OpenGL 不可用的机器（远程虚拟屏、老显卡驱动）启动即崩；将两者从 Windows 删除列表移除，`opengl32sw.dll` 继续精简（强制 ANGLE 后不参与加载）。附 GL 后端最小复现脚本。
+
 ## [v0.5.10b2] - 2026-09-08
 
 自上一版本以来的变更 | 提交数：10 · 文件变更：45 · +3273/-302 | 贡献者：mading
