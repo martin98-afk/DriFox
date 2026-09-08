@@ -4078,10 +4078,9 @@ class CodeWebViewer(QWebEngineView):
         self._height_report_pending = False
         self._context_lost = False  # 上下文丢失标志
         self._context_lost_count = 0  # 上下文丢失次数统计
-        self._resize_debounce_timer = QTimer(self)
-        self._resize_debounce_timer.setSingleShot(True)
-        self._resize_debounce_timer.setInterval(100)
-        self._resize_debounce_timer.timeout.connect(self._do_resize_check)
+        # 注：原 CodeWebViewer 的 _resize_debounce_timer(100ms) 与 _resize_timer(100ms)
+        # 只被定义/连接、从未 start()，属死代码且误导排查，已移除。
+        # resize 期间真正生效的防抖只剩下面的 _resize_unlock_timer(150ms)。
         # 性能优化：resize 锁，防止 resize 期间频繁报告高度
         self._resize_locked = False
         self._resize_unlock_timer = QTimer(self)
@@ -4123,13 +4122,9 @@ class CodeWebViewer(QWebEngineView):
         self._render_timer.setSingleShot(True)
         self._render_timer.timeout.connect(self._perform_update)
 
-        # 2. Resize 定时器 (修复 Crash 的关键：作为成员变量，随 self 销毁)
-        # [PERF] 100ms 比 50ms 减少 50% 的 height report 触发，
-        # 降低父容器和 scrollarea 的 layout 重算频率
-        self._resize_timer = QTimer(self)
-        self._resize_timer.setSingleShot(True)
-        self._resize_timer.setInterval(100)
-        self._resize_timer.timeout.connect(self._safe_report_height)
+        # 2. Resize 定时器
+        # （原 _resize_timer(100ms → _safe_report_height) 从未 start()，死代码已移除；
+        #   resize 期高度上报统一由 _resize_unlock_timer(150ms) 兜底。）
 
         # 共享全局 profile：所有消息卡片复用同一 Chromium 进程池，
         # 避免每个卡片独立匿名 profile 触发独立进程组初始化（加载慢的根因）。
@@ -4348,9 +4343,15 @@ class CodeWebViewer(QWebEngineView):
             pass
 
     def _do_resize_check(self):
-        # 如果处于 resize 锁定状态，跳过 height 报告
+        # 如果处于 resize 锁定状态，登记一次补报后返回。
+        # ⚠️ 不能直接 return：外层 resize 恢复路径（set_resize_preview_mode(False)
+        # → viewer.update_height()）会调到这里，静默丢弃意味着这次高度上报永久
+        # 丢失且无任何重试 → 卡片高度停在旧值，表现为「有的卡片跟上、有的没跟上」。
+        # 标记由 _on_resize_unlock 消费补发。
         if self._resize_locked:
+            self._height_report_pending = True
             return
+        self._height_report_pending = False
         try:
             if self.page():
                 self.page().runJavaScript("reportHeight();")
@@ -4358,8 +4359,10 @@ class CodeWebViewer(QWebEngineView):
             pass
 
     def _on_resize_unlock(self):
-        """resize 结束后触发高度报告"""
+        """resize 结束后触发高度报告（含锁定期内被推迟的补报）"""
         self._resize_locked = False
+        if self._height_report_pending:
+            self._height_report_pending = False
         self._do_resize_check()
 
     def _on_height_reported(self, h):
@@ -10383,11 +10386,14 @@ class CodeWebViewer(QWebEngineView):
         if self._streaming:
             return
 
-        # 性能优化：使用 resize 锁，阻止 resize 期间频繁报告高度
-        if not self._resize_locked:
-            self._resize_locked = True
-            self._resize_unlock_timer.stop()
-            self._resize_unlock_timer.start()
+        # 性能优化：resize 锁（trailing debounce）——每次 resize 都续期，
+        # 保证「最后一次 resize 之后 150ms」才上报高度。
+        # 🐛 旧实现只在 `not _resize_locked` 时上锁（即只有第一次 resize 生效），
+        # 锁的到期时刻由**第一次** resize 决定：其后发生的高度变化全被吞掉，
+        # 且多张卡的解锁时刻彼此错开 → 高度分批到达 → 容器总高被逐张修改。
+        self._resize_locked = True
+        self._resize_unlock_timer.stop()
+        self._resize_unlock_timer.start()
 
     def wheelEvent(self, event: QWheelEvent):
         # 内部 PlainTextViewer(QWidget) 本身不可滚动，始终转发到外部。
@@ -10422,8 +10428,6 @@ class CodeWebViewer(QWebEngineView):
         # 停止所有定时器
         timers_to_stop = [
             self._render_timer,
-            self._resize_timer,
-            self._resize_debounce_timer,
             self._resize_unlock_timer,
         ]
         for timer in timers_to_stop:
@@ -11241,6 +11245,11 @@ def _show_image_preview(pixmap, parent=None) -> None:
     _ImagePreviewDialog(pixmap, parent=parent).exec_()
 
 
+# [L3] 单张卡片保留的「宽度 → 高度」缓存条数上限。
+# 窗口拖拽时宽度连续变化，缓存过久的宽度组合价值低，8 条足够覆盖往返拖拽。
+_HEIGHT_CACHE_MAX = 8
+
+
 class MessageCard(SimpleCardWidget):
     heightChanged = pyqtSignal(int)
     deleteRequested = pyqtSignal()
@@ -11358,6 +11367,10 @@ class MessageCard(SimpleCardWidget):
         self._base_border = self._theme["border"]
         # 性能优化：缓存上次宽度值，避免不必要的更新
         self._last_synced_width = 0
+        # [L3] 宽度 → 内容高度缓存：resize 命中历史宽度时同步套用已知高度，
+        # 省掉一次 JS 异步往返（窗口拖拽时宽度来回往返，命中率很高）。
+        # 它只是**预测**：命中后仍会发起一次异步上报校正，不会锁死错误高度。
+        self._height_cache: Dict[int, int] = {}
         self._resize_preview_mode = False
         self._resize_preview_height = 0
         self._options_were_visible_before_resize = False
@@ -13104,10 +13117,29 @@ class MessageCard(SimpleCardWidget):
         msg_idx = self._message_index if self._message_index is not None else -1
         self.reviewRequested.emit(round_idx, msg_idx)
 
+    def _remember_height_for_width(self, height: int) -> None:
+        """[L3] 记录「最近一次同步宽度 → 内容高度」，供后续 resize 预测命中。
+
+        只在**非流式、非占位**状态记录：流式中间态和占位高度都不是稳定高度，
+        写进缓存会让后续预测把卡片撑错（虽然有异步校正兜底，但会多抖一帧）。
+        """
+        width = self._last_synced_width
+        if width <= 0:
+            return
+        cache = self._height_cache
+        cache[width] = height
+        if len(cache) > _HEIGHT_CACHE_MAX:
+            # dict 保持插入序：丢弃最早写入的键
+            for key in list(cache)[: len(cache) - _HEIGHT_CACHE_MAX]:
+                cache.pop(key, None)
+
     def _update_height(self, h):
         target_height = max(40, h)
         current_height = self.viewer.height() or self.viewer.minimumHeight() or 40
         self._target_viewer_height = target_height
+        # [L3] 稳定状态下的高度才写入宽度→高度缓存
+        if not self._streaming and not self._resize_preview_mode:
+            self._remember_height_for_width(target_height)
 
         # 🆕 流式中防抖：累积高度变化，定时器到期才应用 viewer 高度。
         # 流式期间每个 text chunk 都会触发 height report（~60fps），
@@ -13175,6 +13207,38 @@ class MessageCard(SimpleCardWidget):
         self._last_height_delta = 0
         self.heightChanged.emit(max(40, int(h)))
 
+    def _resolve_height_batch(self):
+        """沿 Qt 父链上溯，找到本卡所属聊天页的高度批量提交器。
+
+        不用 ``self._parent``（其语义随调用点变化），直接走 Qt 父链更稳：
+        ``MessageCard → chat_container → scroll_area(viewport) → … → MainWidget``。
+        """
+        widget = self.parentWidget()
+        for _ in range(6):
+            if widget is None:
+                return None
+            batch = getattr(widget, "_height_batch", None)
+            if batch is not None:
+                return batch
+            widget = widget.parentWidget()
+        return None
+
+    def _commit_viewer_height(self, height: int) -> None:
+        """高度应用的统一出口。
+
+        批量提交器激活时（resize 恢复期）交由它统一 flush —— 由它做
+        「一次布局 + 一次锚点修正」，与高度到达顺序无关；否则按原行为直接
+        应用。流式卡片始终走直接路径，保证跟底不受批处理延迟影响。
+        """
+        batch = getattr(self, "_height_batch", None)
+        if batch is None:
+            batch = self._resolve_height_batch()
+        if batch is not None and batch.active and not self._streaming:
+            batch.submit(self, height)
+            return
+        self.viewer.setFixedHeight(height)
+        self.heightChanged.emit(height)
+
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
         if height == self._last_applied_viewer_height:
@@ -13192,8 +13256,7 @@ class MessageCard(SimpleCardWidget):
         if self._resize_preview_mode:
             self._pending_viewer_height = height
             return
-        self.viewer.setFixedHeight(height)
-        self.heightChanged.emit(height)
+        self._commit_viewer_height(height)
         # viewer 高度变化后 body 视口可能改变，仅在用户已处于底部时重新滚动到底部
         # 🐛 修复：当 MAX_HEIGHT 限制导致 body 首次出现溢出时，scrollTop=0，
         # wasAtBottom 永远为 false，auto-scroll 不触发。跟踪用户主动滚动行为，
@@ -13325,6 +13388,14 @@ class MessageCard(SimpleCardWidget):
         self._resize_preview_height = 0
         self._options_were_visible_before_resize = False
 
+        # [L3] 宽度→高度缓存命中：把已知高度作为本次恢复的目标，省掉等待
+        # JS 异步回传的那一帧（窗口拖拽宽度往返时命中率很高）。
+        # 只是预测：下方仍会发起异步上报，若真实高度不同会自动校正。
+        if not self._streaming and self.role != "user":
+            cached = self._height_cache.get(self._last_synced_width)
+            if cached is not None:
+                self._pending_viewer_height = cached
+
         if hasattr(self.viewer, "update_height"):
             self.viewer.update_height()
 
@@ -13337,10 +13408,14 @@ class MessageCard(SimpleCardWidget):
         pending_h = getattr(self, "_pending_viewer_height", None)
         if pending_h is not None and self.role != "user" and self.viewer is not None:
             try:
-                # resize 占位恢复无增量语义：清零防止外层误锚定补偿
-                self._last_height_delta = 0
-                self.viewer.setFixedHeight(pending_h)
-                self.heightChanged.emit(pending_h)
+                # 🐛 从占位高度恢复到真实内容高度**存在真实增量**，不能清零：
+                # 占位高度 = resize 前的旧 viewer 高度（+options），真实高度是新宽度
+                # 下的重排高度，两者差值必须由外层做锚定补偿。旧实现写死 `= 0`
+                # → 外层 `if delta and ...` 直接跳过 → 整个 resize 恢复期零补偿
+                # → 视口被 N 张卡逐张推走（「一 resize 画面就很乱」的直接来源）。
+                # 批量提交（HeightCommitBatch）激活时由 batch 统一接管并改用锚点修正。
+                self._last_height_delta = pending_h - self.viewer.height()
+                self._commit_viewer_height(pending_h)
             except RuntimeError:
                 pass
             self._pending_viewer_height = None
@@ -13551,6 +13626,8 @@ class MessageCard(SimpleCardWidget):
             _do_ensure_rendered()
 
     def set_content(self, content: Any):
+        # [L3] 内容整体替换：此前的「宽度→高度」预测全部失效
+        self._height_cache.clear()
         if self.role == "assistant":
             self._content_data = ensure_content_blocks(content)
             rendered = content_to_markdown(self._content_data)
@@ -13700,6 +13777,9 @@ class MessageCard(SimpleCardWidget):
         return "\n\n".join(part for part in parts if part).strip()
 
     def append_text(self, text: str):
+        # [L3] 内容增长：此前的「宽度→高度」预测失效（流式期间本就不写缓存，
+        # 这里兜底处理流式中途插入内容等路径）
+        self._height_cache.clear()
         if self.role == "user" and self.viewer is None:
             self._ensure_user_viewer()
         if self.role == "assistant":

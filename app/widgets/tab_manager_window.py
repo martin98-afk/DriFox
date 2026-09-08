@@ -1946,6 +1946,13 @@ class TabManagerWindow(FramelessWindow):
         self._empty_state = EmptyStateWidget(content_widget)
         self._content_area.addWidget(self._empty_state)  # index 0
 
+        # [L2] 多页 resize 编排：注册内容区 stack，使其接管 currentChanged ——
+        # 页被激活时补跑该页此前被挂起的 resize 同步，消除切页空窗；
+        # 后台页的恢复链则会被挂起，避免与前台页争抢主线程。
+        from app.widgets.resize_orchestrator import ResizeOrchestrator
+
+        ResizeOrchestrator.get_instance().register_stack(self._content_area)
+
         # ── 右侧对话区域圆角矩形包裹框架 ──
         self._chat_frame = QFrame(content_widget)
         self._chat_frame.setObjectName("chatFrame")
