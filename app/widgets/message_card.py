@@ -2725,7 +2725,11 @@ _SKELETON_CACHE_MAX = 48
 # 监听）；② SVG 图形节点可挂 .context-tag 走同一条点击链（_closestTag）。
 # 旧骨架两样都没有 —— widget 围栏退化成普通代码块、图节点点不动 ——
 # 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 26
+# v27（2026-09-08）：① 打字机揭示队列（_TYPEWRITER_JS：window._twPush/_twReset/
+# _twFlush + rAF 帧级揭示）；② FLIP 位移动画与动画串行队列（_FLIP_JS：
+# _flipCapture/_flipPlay/_animEnqueue）。旧骨架两者都没有 —— 流式仍是整块蹦字、
+# 结束态三动画叠加跳变 —— 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 27
 
 
 def _js_literal(value) -> str:
@@ -3116,6 +3120,9 @@ _STREAMING_DOCK_JS = """
                     // 切换前记录工具区高度与用户是否在底部，用于阅读位置补偿
                     var _dockH = ts ? ts.offsetHeight : 0;
                     var _atBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 40;
+                    // FLIP：工具区在「沉底 ↔ 顶部」之间换位（CSS order 调换）是瞬移，
+                    // 记录切换前位置，切换后补间成平滑位移。
+                    var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                     document.body.classList.toggle('streaming-dock', on);
                     if (!on && wasOn) {
                         // 坞态 → 归位顶部：正文整体下移 ≈ 工具区高度，
@@ -3151,7 +3158,186 @@ _STREAMING_DOCK_JS = """
                     } else if (typeof reportHeightDebounced === 'function') {
                         reportHeightDebounced();
                     }
+                    // FLIP Play（入队串行：不会与后续重排/折叠动画同时开跑）
+                    if (_flipPrev && typeof window._flipPlay === 'function') window._flipPlay(_flipPrev, 220);
                 }
+"""
+
+# ── 打字机揭示队列（Typewriter Reveal Queue）骨架资产 ──
+# 为什么需要它：
+# 流式正文的到达节奏由**网络 chunk**决定（上游 80ms 批处理 + 令牌生成抖动，
+# 中文长段落常无 \n\n 闭合段 → 安全定时器兜底 150~500ms 才渲染一次），
+# 每次到达就把整块文本一次性塞进 DOM → 观感是"一块一块蹦出来"，没有打字机感。
+# 队列把"到达节奏"与"显示节奏"解耦：Python 只管把文本 push 进来，
+# JS 用 requestAnimationFrame 按帧揭示（~60fps），积压时用指数追赶收敛
+# （CATCHUP_MS 内排空），既不拖慢最终显示，也不因突发 chunk 越拉越长。
+#
+# 与既有渲染路径的关系：
+# - 揭示内容同样走 window._dfxAppendStreamText（与旧逻辑同一套段落/host 判定）；
+# - updateContent / updateTailHtml / updateContentAppend 会**整体替换**增量节点，
+#   且 Python 侧 markdown 已包含全部文本（含未揭示部分），故入口调用 _twReset()
+#   丢弃缓冲即可，不会丢字。
+_TYPEWRITER_JS = """
+                // ===== 打字机揭示队列 =====
+                window._tw = {
+                    buf: "",          // 待揭示文本
+                    raf: 0,           // rAF 句柄（0 = 未运行）
+                    last: 0,          // 上一帧时间戳
+                    enabled: true,    // 总开关（灰度/降级用）
+                    CATCHUP_MS: 110,  // 目标追赶窗口：积压在此时间内排空
+                    BURST_LEN: 400    // 超过该积压视为突发，加速揭示
+                };
+                window._twPush = function (text) {
+                    var st = window._tw;
+                    if (!st || !st.enabled || !text) return;
+                    // 骨架尚未注册追加函数（理论上不会发生）：退化为直接调用
+                    if (typeof window._dfxAppendStreamText !== 'function') return;
+                    st.buf += text;
+                    if (!st.raf) {
+                        st.last = performance.now();
+                        st.raf = requestAnimationFrame(window._twStep);
+                    }
+                };
+                window._twStep = function (ts) {
+                    var st = window._tw;
+                    if (!st) return;
+                    st.raf = 0;
+                    if (!st.buf) return;
+                    var now = (typeof ts === 'number' && ts > 0) ? ts : performance.now();
+                    var dt = Math.max(1, Math.min(200, now - st.last));
+                    st.last = now;
+                    // 每帧揭示量：按"剩余缓冲在 CATCHUP_MS 内排空"做指数追赶（最少 1 字）
+                    var n = Math.max(1, Math.ceil(st.buf.length * (dt / st.CATCHUP_MS)));
+                    // 突发积压（网络一次送来一大段）：提高下限，避免越拖越长
+                    if (st.buf.length > st.BURST_LEN) {
+                        n = Math.max(n, Math.ceil(st.buf.length / 8));
+                    }
+                    var slice = st.buf.slice(0, n);
+                    st.buf = st.buf.slice(n);
+                    try {
+                        window._dfxAppendStreamText(slice);
+                    } catch (e) {}
+                    if (st.buf) {
+                        st.raf = requestAnimationFrame(window._twStep);
+                    }
+                };
+                window._twFlush = function () {
+                    // 立即揭示全部（需要"当前文本必须已在 DOM"的场景）
+                    var st = window._tw;
+                    if (!st) return;
+                    if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
+                    if (st.buf) {
+                        var all = st.buf;
+                        st.buf = "";
+                        try { window._dfxAppendStreamText(all); } catch (e) {}
+                    }
+                };
+                window._twReset = function () {
+                    // DOM 已被整体替换：丢弃缓冲（Python 侧 markdown 已含全部文本，
+                    // 新渲染结果自带这些文字，保留反而会重复）
+                    var st = window._tw;
+                    if (!st) return;
+                    if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
+                    st.buf = "";
+                };
+"""
+
+# ── FLIP 位移动画 + 动画串行队列骨架资产 ──
+# 解决"流式结束时工具与思考弹到最顶上"：
+# 简洁模式下流式期间工具区沉底（body.streaming-dock 纯 CSS order 调换），
+# 结束时归位顶部 + 最终全量重排（innerHTML 整体替换）+ 自动折叠三个动作叠加，
+# 每个都带 200ms 过渡 → 视觉上是一次生硬跳变 + 三动画互相抢帧的卡顿。
+#
+# 对策：
+# 1) FLIP（First-Last-Invert-Play）：动作前记录关键容器/块的视口位置，
+#    动作后把它们 transform 反向补偿回旧位置，再动画归零 → 位置变化被
+#    "补间"成平滑位移，而不是瞬移。
+# 2) 动画串行队列 _animEnqueue：归位 / 重排 / 折叠不再同时开跑，
+#    按入队顺序一条一条放，避免三段 200ms 过渡叠加造成的掉帧与位置抖动。
+_FLIP_JS = """
+                // ===== 动画串行队列（结束态三段动画不叠加）=====
+                window._animQ = { items: [], running: false };
+                window._animEnqueue = function (fn, dur) {
+                    var q = window._animQ;
+                    if (!q) return;
+                    q.items.push({ fn: fn, dur: dur || 0 });
+                    if (!q.running) window._animNext();
+                };
+                window._animNext = function () {
+                    var q = window._animQ;
+                    if (!q) return;
+                    var it = q.items.shift();
+                    if (!it) { q.running = false; return; }
+                    q.running = true;
+                    try { it.fn(); } catch (e) {}
+                    if (it.dur > 0) {
+                        setTimeout(window._animNext, it.dur);
+                    } else {
+                        window._animNext();
+                    }
+                };
+
+                // ===== FLIP：位置突变 → 平滑位移 =====
+                window._flipFind = function (key) {
+                    if (!key) return null;
+                    if (key.charAt(0) === '#') return document.getElementById(key.slice(1));
+                    var kind = key.slice(0, 3);
+                    var val = key.slice(3);
+                    if (kind === 'tc:') return document.querySelector('[data-tool-call-id="' + val + '"]');
+                    if (kind === 'bk:') return document.querySelector('[data-block-key="' + val + '"]');
+                    return null;
+                };
+                window._flipCapture = function () {
+                    var map = new Map();
+                    ['tool-section', 'content-placeholder', 'todo-section'].forEach(function (id) {
+                        var el = document.getElementById(id);
+                        if (el) map.set('#' + id, el.getBoundingClientRect());
+                    });
+                    document.querySelectorAll('[data-tool-call-id]').forEach(function (el) {
+                        var id = el.getAttribute('data-tool-call-id');
+                        if (id) map.set('tc:' + id, el.getBoundingClientRect());
+                    });
+                    document.querySelectorAll('[data-block-key]').forEach(function (el) {
+                        var k = el.getAttribute('data-block-key');
+                        if (k) map.set('bk:' + k, el.getBoundingClientRect());
+                    });
+                    return map;
+                };
+                window._flipPlay = function (prev, dur) {
+                    if (!prev || !prev.size || typeof window._animEnqueue !== 'function') return;
+                    dur = dur || 200;
+                    var moves = [];
+                    prev.forEach(function (rect, key) {
+                        var el = window._flipFind(key);
+                        if (!el || !el.isConnected) return;
+                        var r2 = el.getBoundingClientRect();
+                        var dx = rect.left - r2.left;
+                        var dy = rect.top - r2.top;
+                        // 位移过小（亚像素/重排噪声）不做动画，避免无谓的 transform 抖动
+                        if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+                        moves.push({ el: el, dx: dx, dy: dy });
+                    });
+                    if (!moves.length) return;
+                    window._animEnqueue(function () {
+                        // Invert：先无过渡地搬回旧位置
+                        moves.forEach(function (m) {
+                            m.el.style.transition = 'none';
+                            m.el.style.transform = 'translate(' + m.dx + 'px,' + m.dy + 'px)';
+                        });
+                        void document.body.offsetHeight;  // 强制同步样式，让跳变立即生效
+                        // Play：过渡到 0（回到真实新位置）
+                        moves.forEach(function (m) {
+                            m.el.style.transition = 'transform ' + dur + 'ms cubic-bezier(0.22, 0.61, 0.36, 1)';
+                            m.el.style.transform = '';
+                        });
+                        setTimeout(function () {
+                            moves.forEach(function (m) {
+                                m.el.style.transition = '';
+                                m.el.style.transform = '';
+                            });
+                        }, dur + 40);
+                    }, dur + 30);
+                };
 """
 
 # 正文容器（#content-placeholder）自动滚底 + 用户滚动跟踪。
@@ -4337,6 +4523,15 @@ class CodeWebViewer(QWebEngineView):
         # runJavaScript 打在空页上静默失败 → 复用卡片永久空白。
         # （真正重载骨架在取用侧 ensure_rendered 里做。）
         self._is_js_ready = False
+        # 🐛 高度残留：卡片通过 _commit_viewer_height 用 setFixedHeight 钉死高度
+        # （长消息可达数千 px）。归还时不清，复用方在骨架/JS 就绪前（或任何
+        # 未上报高度的异常路径）会顶着上一张消息的陈旧高度 → 空白巨高卡片。
+        # 复位到最小高度，由新内容首次 reportHeight 重新收敛。
+        try:
+            self.setMinimumHeight(40)
+            self.setFixedHeight(40)
+        except RuntimeError:
+            pass
         self._streaming = False
         self._is_history = False
         self._stable_html = ""
@@ -6909,6 +7104,12 @@ class CodeWebViewer(QWebEngineView):
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
+                        // 打字机：本次将整体替换增量节点，Python 侧 markdown 已含全部
+                        // 文本（含尚未揭示部分），故丢弃揭示缓冲，避免重复追加。
+                        if (typeof window._twReset === 'function') window._twReset();
+                        // FLIP：替换前记录工具/思考区与正文容器的视口位置，
+                        // 重排后用位移动画补间（消除"结束态弹到最顶上"的瞬移感）。
+                        var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                         // 图表保全：替换前暂存已渲染图表节点（防闪烁 + 堵 echarts 孤儿实例泄漏）
                         window._stashCharts(container);
                         // 记录当前展开状态的思考块
@@ -7126,6 +7327,10 @@ class CodeWebViewer(QWebEngineView):
                         window._autoScrollTime = performance.now();
                         window._suppressScrollEvent = false;
 
+                        // FLIP Play：重排（reorganizeContent 搬移工具/思考块）完成后，
+                        // 把位置突变补间成平滑位移；入队串行，避免与归位/折叠动画叠加。
+                        if (_flipPrev && typeof window._flipPlay === 'function') window._flipPlay(_flipPrev, 220);
+
                         // ── 恢复全透明度：在下一帧前 fade in，CSS transition 驱动平滑淡入 ──
                         // 🛡️ 竞态防护：递增 token + 定时器引用，防止连续 updateContent 时
                         // 上轮清理误清本轮 transition，或清理定时器残留导致 transition 提前消失。
@@ -7187,6 +7392,9 @@ class CodeWebViewer(QWebEngineView):
                 function updateContentAppend(newHtml, tailHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container) return;
+                    // 打字机：增量节点即将被移除并以格式化 HTML 重建（含未揭示文本），
+                    // 丢弃揭示缓冲防重复追加。
+                    if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
                     // 移除增量纯文本节点（差量渲染会以格式化 HTML 替代它们）
@@ -7264,6 +7472,8 @@ class CodeWebViewer(QWebEngineView):
                 function updateTailHtml(html) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container || !html) return;
+                    // 打字机：尾部将被整体行内重渲染（含未揭示文本），丢弃揭示缓冲。
+                    if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
@@ -8345,6 +8555,8 @@ class CodeWebViewer(QWebEngineView):
                     }}
                 }}, {{passive: true}});
                 {_STREAMING_DOCK_JS}
+                {_TYPEWRITER_JS}
+                {_FLIP_JS}
 
                 // ===== 流式工具块：移除超时自动标记 ====
                 // 原 _cleanupStuckTools 会在 30 秒后标记工具为"超时未返回结果"，
@@ -8543,7 +8755,12 @@ class CodeWebViewer(QWebEngineView):
                 text_clean = text_clean[:2000] + "\n\n..."
             js = f"""
             (function() {{
-                var text = {json.dumps(text_clean).decode("utf-8")};
+                // ── 追加逻辑注册为全局函数（只注册一次）──
+                // 打字机揭示队列（window._twPush）需要按帧调用同一套"把一段文本
+                // 接到正文尾部"的逻辑；注册成函数后队列与直接调用共用一份实现，
+                // 避免两处逻辑漂移（段落/host 判定一旦分叉就会出现跳位）。
+                if (typeof window._dfxAppendStreamText !== 'function') {{
+                window._dfxAppendStreamText = function(text) {{
                 var c = document.getElementById('content-placeholder');
                 if (!c || !text) return;
                 // ── 尾部文本宿主定位 ──
@@ -8648,6 +8865,16 @@ class CodeWebViewer(QWebEngineView):
                 window._autoScrollTime = performance.now();
                 window._suppressScrollEvent = false;
                 reportHeightDebounced();
+                }};  // ── _dfxAppendStreamText 定义结束 ──
+                }}
+                // ── 交给打字机揭示队列（帧级揭示）──
+                // 队列不可用时（旧骨架 / 降级）退化为立即追加，行为与改造前一致。
+                var text = {json.dumps(text_clean).decode("utf-8")};
+                if (typeof window._twPush === 'function') {{
+                    window._twPush(text);
+                }} else {{
+                    window._dfxAppendStreamText(text);
+                }}
             }})();
             """
             self.page().runJavaScript(js)
@@ -9556,13 +9783,17 @@ class CodeWebViewer(QWebEngineView):
             if self._is_js_ready and self.page():
                 self.page().runJavaScript(
                     "(function(){"
+                    "var _run=function(){"
                     "var _ts=document.getElementById('tool-section');"
                     "var _sep=document.getElementById('tool-separator');"
                     "if(_ts){"
                     "  if(typeof _beginToolSectionTransition==='function')_beginToolSectionTransition();"
                     "  _ts.setAttribute('data-collapsed','true');"
                     "  if(_sep)_sep.setAttribute('aria-expanded','false');"
-                    "}"
+                    "}};"
+                    # 动画串行：折叠排在归位/重排的 FLIP 之后再跑，
+                    # 避免「归位→重排→折叠」三段 200ms 过渡同时开跑造成掉帧与抖动。
+                    "if(typeof window._animEnqueue==='function'){window._animEnqueue(_run,220);}else{_run();}"
                     "})();"
                 )
         except RuntimeError:
@@ -13704,6 +13935,10 @@ class MessageCard(SimpleCardWidget):
                 try:
                     pooled.setParent(self)
                     pooled.setUpdatesEnabled(True)
+                    # 高度兜底复位：丢弃上一张卡片钉死的高度（长消息可达数千 px），
+                    # 避免骨架就绪前的窗口期显示成"巨高空白卡片"。
+                    pooled.setMinimumHeight(40)
+                    pooled.setFixedHeight(40)
                     # 🐛 复用卡片空白根因修复：release 时 reset_for_reuse 的
                     # setHtml("", about:blank) 已把骨架与 JS 全部清空，但
                     # _is_js_ready 残留 True → set_content 直接 runJavaScript
