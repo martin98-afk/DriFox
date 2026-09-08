@@ -4301,6 +4301,9 @@ class CodeWebViewer(QWebEngineView):
         self._streaming = True
         self._is_history = False  # 历史会话标志（非流式加载的历史消息）
         self._is_js_ready = False
+        # 下一次非流式渲染是否为"流式结束的终渲染"（决定能否走线程池，见
+        # _perform_update）：仅在 CodeWebViewer.__init__ 初始化一次。
+        self._final_render_pending = False
         self._last_rendered_html = ""
         self._last_rendered_markdown = ""
         # 流式渲染哈希缓存：避免对相同 processed_md 重复跑 6 轮正则 + md.convert()
@@ -9302,7 +9305,7 @@ class CodeWebViewer(QWebEngineView):
                         html_content = self._cached_streaming_html
                 elif (
                     len(self._markdown_text) > self._ASYNC_HISTORY_RENDER_MIN_CHARS
-                    and not self._final_render_pending
+                    and not getattr(self, "_final_render_pending", False)
                 ):
                     # [PERF] 长内容的**历史/非结束态**渲染走线程池：md.convert +
                     # Pygments 在长消息上是 40~120ms 的主线程阻塞（真机实测），
@@ -11833,8 +11836,6 @@ class MessageCard(SimpleCardWidget):
         self._finish_height_anim_active = False
         # 结束态打点起点（0 = 无待结算的结束拍）
         self._finish_t0 = 0.0
-        # 下一次非流式渲染是否为"流式结束的终渲染"（决定能否走线程池）
-        self._final_render_pending = False
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动

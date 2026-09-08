@@ -21518,7 +21518,11 @@ _gc_hook_pending = False
 # 每渲染卡 ~64MB renderer 进程，长对话必须锁峰值：
 # 温和层：并发页 ≤ _MAX_RENDERED_CARDS（18 = 可视 12 批 + 上下 6 批缓冲）。
 # 强回收层（kill 离屏 renderer）依赖 message_card 的 renderer_pid 记录，暂缓。
-_MAX_RENDERED_CARDS = 18
+# 2026-09-09 内存治理：18 → 12（可视 ~8 批 + 上下 4 批缓冲）。真机日志显示
+# 大会话（60+ 批次）内存主体是**并发 WebEngine 页数**而非单卡 HTML 体积
+# （单卡 DOM 数百 KB vs 每页数十 MB 常驻），砍 6 页 ≈ 直接省下数百 MB，
+# 且历史渲染已异步化，回滚重建不再阻塞主线程。
+_MAX_RENDERED_CARDS = 12
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
 
 # ── B4 温和层：跨窗口全局渲染页闸门 ──
