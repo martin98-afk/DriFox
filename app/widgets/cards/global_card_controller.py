@@ -77,6 +77,29 @@ class GlobalCardController:
     # 窗口辅助
     # ───────────────────────────────────────────────────────────
 
+    def refresh_theme_styles(self):
+        """主题/字号变更时刷新本层持有的全局卡片
+
+        这些卡片 parent 挂在 TabManagerWindow 层，不在 main_widget widget
+        树内，main_widget._apply_runtime_ui_settings 的 findChildren 扫不到，
+        需由 TabManagerWindow._on_theme_changed 显式调用。
+        """
+        for card in (
+            self._settings_popup,
+            self._provider_edit_card,
+            self._hook_edit_card,
+            self._mcp_edit_card,
+            self._diff_viewer_card,
+            self._chart_viewer_card,
+            self._file_undo_card,
+            self._sub_agent_session_card,
+        ):
+            if card is not None and hasattr(card, "refresh_style"):
+                try:
+                    card.refresh_style()
+                except Exception as e:
+                    logger.warning(f"[GlobalCard] 卡片主题刷新失败: {e}")
+
     def _active_window(self):
         """当前激活的对话窗口（per-window 状态的读写目标）"""
         from app.widgets.tab_manager_window import TabManagerWindow
@@ -275,6 +298,9 @@ class GlobalCardController:
                 item.widget().deleteLater()
         self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
         self._provider_edit_card.set_save_button_handler(lambda: self._provider_edit_popup._on_save())
+        from app.utils.design_tokens import apply_font_size_to_widget
+
+        apply_font_size_to_widget(self._provider_edit_popup, 14)
         self._card_manager.show_card("provider_edit", GLOBAL_WINDOW_ID)
 
     def _show_provider_edit_card(self, config_id: str, provider_info: dict):
@@ -303,6 +329,9 @@ class GlobalCardController:
                 item.widget().deleteLater()
         self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
         self._provider_edit_card.set_save_button_handler(lambda: self._provider_edit_popup._on_save())
+        from app.utils.design_tokens import apply_font_size_to_widget
+
+        apply_font_size_to_widget(self._provider_edit_popup, 14)
         self._card_manager.show_card("provider_edit", GLOBAL_WINDOW_ID)
 
     def _on_provider_edit_saved(self, provider_name: str, provider_info: dict, is_new: bool = False):

@@ -867,6 +867,16 @@ class TabManagerWindow(FramelessWindow):
                     _c.refresh_style()
                 except Exception:
                     pass
+        # 刷新全局卡片本体（系统设置/服务商/Hook/MCP 编辑等挂在本窗口层，
+        # 不在 main_widget widget 树内，主题/字号刷新链扫不到，需显式触发）
+        try:
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            _controller = get_global_card_controller()
+            if _controller is not None:
+                _controller.refresh_theme_styles()
+        except Exception:
+            logger.exception("[TabManagerWindow] global cards theme refresh failed")
         # 重画所有 tab 的项目图标：仅在 scale_icon_size 变化时才需重建
         # （纯主题色切换不影响图标，跳过可避免 QPainter 开销）
         from app.utils.design_tokens import scale_icon_size as _scale_size
