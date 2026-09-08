@@ -28,22 +28,23 @@ def _drifox_dir() -> Path:
     PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox
     """
-    if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
-        return Path('.drifox')
-    if sys.platform == 'darwin':
+    if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
+        return Path(".drifox")
+    if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
+
             paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
                 NSApplicationSupportDirectory, NSUserDomainMask
             )
             if paths:
-                app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
-                app_support = Path(app_support_path) / 'Drifox'
+                app_support_path = paths[0].fileSystemRepresentation().decode("utf-8")
+                app_support = Path(app_support_path) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / '.drifox'
+                return app_support / ".drifox"
         except Exception:
             pass
-    return Path.home() / '.drifox'
+    return Path.home() / ".drifox"
 
 
 # ── 缓存类型定义 ──────────────────────────────────────────
@@ -89,17 +90,27 @@ def _calc_dir_size(path: Path, dir_mode: bool) -> int:
 
 
 def _walk_dir_size(path: Path) -> int:
-    """递归计算目录总大小"""
+    """递归计算目录总大小（迭代式 scandir，栈替代递归）
+
+    Windows 上 entry.stat() 的 size 信息由目录枚举直接携带，
+    相比 os.walk + os.path.getsize（每文件额外一次系统调用）快数倍。
+    """
     total = 0
-    try:
-        for root, _dirs, files in os.walk(str(path)):
-            for f in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, f))
-                except (OSError, PermissionError):
-                    pass
-    except (OSError, PermissionError):
-        pass
+    stack = [str(path)]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
     return total
 
 
@@ -156,9 +167,9 @@ def _delete_cache(path: Path, dir_mode: bool):
                     _rmtree_force(entry)
                 else:
                     entry.unlink()
-            except (OSError, PermissionError):
+            except OSError, PermissionError:
                 pass
-    except (OSError, PermissionError):
+    except OSError, PermissionError:
         pass
 
 
@@ -345,13 +356,22 @@ class _ScanWorker(QObject):
     def __init__(self, drifox_dir: Path):
         super().__init__()
         self._drifox_dir = drifox_dir
+        self._cancelled = False
+
+    def cancel(self):
+        """协作式取消：置位后 run() 在下一个目录边界快速退出，不发 finished"""
+        self._cancelled = True
 
     def run(self):
         try:
             sizes: Dict[str, int] = {}
             for cid, _icon, _label, rel_path, dir_mode in CACHE_DEFS:
+                if self._cancelled:
+                    return
                 full = self._drifox_dir / rel_path
                 sizes[cid] = _calc_dir_size(full, dir_mode)
+            if self._cancelled:
+                return
             self.finished.emit(sizes)
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")

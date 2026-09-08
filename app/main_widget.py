@@ -141,6 +141,8 @@ from app.widgets.cards.settings.project_selector_card import (
 from app.widgets.conversation_node_preview import (
     ConversationNodePreview,
 )
+from app.widgets.height_commit_batch import HeightCommitBatch
+from app.widgets.resize_orchestrator import ResizeOrchestrator
 from app.widgets.cards.settings.file_undo_card import FileUndoCard
 from app.widgets.message_card import (
     MessageCard,
@@ -1356,8 +1358,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.setSingleShot(True)
         self._resize_complete_timer.setInterval(100)  # resize 结束后尽快恢复真实内容
         self._resize_complete_timer.timeout.connect(self._sync_all_cards_width)
-        self._pending_resize_sync = False
         self._resize_preview_active = False
+        # [L1] 高度批量提交器：惰性创建（依赖 chat_scroll_area 就绪）
+        self._height_batch: HeightCommitBatch | None = None
         # #31 侧栏/工作台宽度动画期间由宿主置 True：动画每帧 resize 对话区，
         # 但不应把卡片 WebView 藏进静态预览（用户要求中间区域原样实时显示）。
         # 宽度同步仍由上方防抖定时器在动画结束后一次完成。
@@ -8790,7 +8793,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if not getattr(self, "_suppress_resize_preview", False):
             self._set_cards_resize_preview_mode(True)
         # resize 期间持续重置防抖，避免在拖拽过程中提前批量重排
-        self._pending_resize_sync = True
         self._resize_debounce_timer.stop()
         self._resize_debounce_timer.start()
         self._resize_complete_timer.stop()
@@ -8816,7 +8818,12 @@ class OpenAIChatToolWindow(ToolWindow):
         卡片 minimumWidth 阻止 chat_container 缩小 → parent.width() 卡在旧值
         → sync_width 算出旧宽度 → 死锁。绕过方式：从视口直接推算。
         """
-        self._pending_resize_sync = False
+        # [L2] 后台页挂起：本页已被切到后台时不再推进恢复链。
+        # QTimer 不受可见性约束，不挂起的话后台页的定时器会与前台页争抢主线程。
+        orchestrator = ResizeOrchestrator.get_instance()
+        if not orchestrator.is_current(self):
+            orchestrator.mark_dirty(self)
+            return
 
         scroll_area = getattr(self, "chat_scroll_area", None)
         if not scroll_area:
@@ -8859,6 +8866,12 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _sync_all_cards_width(self):
         """resize 完成后分批恢复卡片，避免所有 WebEngineView 同时分配 GPU 缓冲区"""
+        # [L2] 后台页：整条恢复链挂起，等该页重新激活时（on_activated）同步补跑。
+        orchestrator = ResizeOrchestrator.get_instance()
+        if not orchestrator.is_current(self):
+            orchestrator.mark_paused(self)
+            return
+
         scroll_area = getattr(self, "chat_scroll_area", None)
         viewport_width = 0
         if scroll_area:
@@ -8883,6 +8896,13 @@ class OpenAIChatToolWindow(ToolWindow):
                     card.sync_width(force=True)
             except RuntimeError:
                 pass
+
+        # [L1] 开启高度批量提交：本轮恢复产生的所有高度变化收敛为
+        # 「一次布局 + 一次锚点修正」（与到达顺序无关），取代逐张
+        # setFixedHeight + 逐张 delta 补偿的旧链路。
+        batch = self._ensure_height_batch()
+        if batch is not None:
+            batch.begin()
 
         # 第二步：分区恢复 —— 视口内立即全量恢复，离屏大批量快恢复。
         #
@@ -8936,8 +8956,49 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._restore_queue:
             self._process_restore_batch(epoch)
         else:
-            self._restore_queue = []
-            self._resize_preview_active = False
+            self._end_resize_cycle()
+
+    def _ensure_height_batch(self) -> "HeightCommitBatch | None":
+        """惰性创建高度批量提交器（需要 chat_scroll_area 已构建）。"""
+        batch = getattr(self, "_height_batch", None)
+        if batch is not None:
+            return batch
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        container = scroll_area.widget() if scroll_area is not None else None
+        if scroll_area is None or container is None:
+            return None
+        batch = HeightCommitBatch(scroll_area, container, self._should_follow_bottom)
+        self._height_batch = batch
+        return batch
+
+    def _is_resize_cycle_active(self) -> bool:
+        """判断 resize 周期是否真的在飞行中（而不是只残留一个标志位）。
+
+        用于「新卡片入列时是否立刻进入占位模式」的判定。旧实现只看
+        `_resize_preview_active`：该标志一旦因异常路径泄漏（卡片被删除、
+        恢复链被 epoch 作废等），之后**所有**新建卡片都会一诞生就被 hide
+        成占位 → 永久空白。这里改为「定时器在跑 或 恢复队列非空」，
+        即使标志泄漏也不再有破坏性后果。
+        """
+        return (
+            self._resize_debounce_timer.isActive()
+            or self._resize_complete_timer.isActive()
+            or bool(self._restore_queue)
+        )
+
+    def _end_resize_cycle(self):
+        """resize 周期的唯一收口。
+
+        旧实现把 `_resize_preview_active = False` 散落在多个出口，任一出口被
+        异常 / 已删除卡片打断都会让标志泄漏。这里统一收口：任何退出路径
+        （含被 epoch 作废的旧恢复链提前收尾）都保证队列与标志复位。
+        """
+        self._restore_queue = []
+        self._restore_batch_idx = 0
+        self._resize_preview_active = False
+        batch = getattr(self, "_height_batch", None)
+        if batch is not None:
+            batch.end()
 
     def _process_restore_batch(self, epoch: int | None = None):
         """分批恢复离屏卡片 viewer（触发 GPU 分配，故分批以避免峰值）
@@ -8947,6 +9008,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 resize 作废，立即退出，避免多链并存互相清空队列。
         """
         if epoch is not None and epoch != self._restore_epoch:
+            return
+        # [L2] 链式恢复途中被切到后台：挂起剩余批次，激活时补跑。
+        # 不挂起的话，后台页会继续以 20 张/30ms 的节奏分配 GPU 缓冲，
+        # 与前台页的恢复链争抢主线程。
+        orchestrator = ResizeOrchestrator.get_instance()
+        if not orchestrator.is_current(self):
+            orchestrator.mark_paused(self)
             return
         BATCH_SIZE = 20
         INTERVAL_MS = 30
@@ -8961,8 +9029,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if end < len(self._restore_queue):
             QTimer.singleShot(INTERVAL_MS, lambda: self._process_restore_batch(epoch))
         else:
-            self._restore_queue = []
-            self._resize_preview_active = False
+            self._end_resize_cycle()
 
     def _sync_single_card_width(self, card, force: bool = True):
         """按当前滚动区 viewport 宽度同步单张卡片宽度（统一宽度来源）。"""
@@ -10987,6 +11054,9 @@ class OpenAIChatToolWindow(ToolWindow):
                             if not self._install_batch_placeholder(batch_idx, batch_height, first_index):
                                 above_removed_height += batch_height
                             above_widgets.extend(batch_cards)
+                            # [池化] 高度已记录、占位已装好，此时摘 WebView 不影响几何
+                            for card in batch_cards:
+                                self._try_detach_card_viewer(card)
                         recycled_count += 1
                     # 🛡️ B9 修复：只卸载 UI（_batch_cards=None），
                     # 保留 _message_batch 数据（上滚回可重建，数据不丢失）
@@ -11014,6 +11084,9 @@ class OpenAIChatToolWindow(ToolWindow):
                             # 同上方批次：优先留等高占位，保持容器总高度不变
                             self._install_batch_placeholder(batch_idx, batch_height, first_index)
                             below_widgets.extend(batch_cards)
+                            # [池化] 同上：几何已固定后再摘 WebView
+                            for card in batch_cards:
+                                self._try_detach_card_viewer(card)
                         recycled_count += 1
                     # 🛡️ B9 修复：只卸载 UI，保留数据
                     self._batch_cards[batch_idx] = None
@@ -11099,6 +11172,20 @@ class OpenAIChatToolWindow(ToolWindow):
             ordered = sorted(self._unloaded_pids, key=lambda x: x[1])
             self._unloaded_pids = ordered[-_UNLOADED_PIDS_MAX:]
 
+    @staticmethod
+    def _try_detach_card_viewer(card) -> bool:
+        """尝试把卡片的 CodeWebViewer 摘下归还复用池（任何异常静默忽略）。
+
+        池化失败不影响既有流程：返回 False 时调用方照旧走销毁路径。
+        """
+        fn = getattr(card, "detach_viewer", None)
+        if fn is None:
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
     def _unload_batch(self, batch_idx: int) -> int:
         """卸载一个批次的 UI（释放 WebEngine renderer），保留 _message_batch 数据。
 
@@ -11117,12 +11204,9 @@ class OpenAIChatToolWindow(ToolWindow):
         cards = self._batch_cards[batch_idx]
         if not cards:
             return 0
-        # 强回收：卸载前收集存活卡片的 renderer PID（PID>0 才登记）
-        now = time.time()
-        for card in cards:
-            pid = getattr(card, "_renderer_pid", 0) or 0
-            if pid > 0 and self._is_widget_alive(card):
-                self._register_unloaded_pid(pid, now, batch_idx)
+        # ── 第一步：先按「viewer 仍在」的状态量出真实高度 ──
+        # ⚠️ 顺序关键：摘掉 viewer 会让卡片高度立刻塌陷，必须在摘之前量完，
+        # 否则占位高度与滚动补偿都会算错（表现为回收后视口跳动）。
         removed_h = 0
         alive_cards = []
         first_index = -1
@@ -11135,6 +11219,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 except RuntimeError:
                     pass
                 alive_cards.append(card)
+
+        # ── 第二步：高度已记录，安全摘下 WebView 归还复用池 ──
+        detached_ids = {id(c) for c in alive_cards if self._try_detach_card_viewer(c)}
+
+        # ── 第三步：只对**未能池化**的卡片登记 renderer PID ──
+        # 池中 viewer 的 renderer 仍存活且随时会被取出复用，登记进
+        # _unloaded_pids 会被强回收 kill → 复用时卡片直接白屏。
+        now = time.time()
+        for card in alive_cards:
+            if id(card) in detached_ids:
+                continue
+            pid = getattr(card, "_renderer_pid", 0) or 0
+            if pid > 0:
+                self._register_unloaded_pid(pid, now, batch_idx)
+
         placeholder_ok = False
         if alive_cards:
             delete_widgets_from_layout(alive_cards, self.chat_layout, call_cleanup=True)
@@ -11301,6 +11400,15 @@ class OpenAIChatToolWindow(ToolWindow):
                     return True
             except RuntimeError:
                 pass
+        # [池化] 复用池中 viewer 的 renderer 进程仍存活且随时会被取出复用，
+        # 必须视为「在用」——否则强回收 kill 掉它，复用时卡片直接白屏。
+        try:
+            from app.widgets.webview_pool import WebViewPool
+
+            if pid in WebViewPool.get_instance().pids():
+                return True
+        except Exception:
+            pass
         return False
 
     @staticmethod
@@ -12705,7 +12813,9 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
             widget.heightChanged.connect(self._on_message_card_height_changed)
-            if self._resize_preview_active:
+            # 🐛 修复：只在 resize 周期**真的在飞行**时才把新卡片置为占位。
+            # 仅凭 _resize_preview_active（可能泄漏）会让新卡片永久空白。
+            if self._resize_preview_active and self._is_resize_cycle_active():
                 widget.set_resize_preview_mode(True)
             # 🐛 修复：新增卡片宽度同样用 viewport 直接推算，避免 parent.width()
             # 被 chat_container 撑大后返回旧大值（与 _sync_visible_cards_on_scroll 一致）。

@@ -102,6 +102,7 @@ class SystemCleanerCard(QWidget):
         self._scan_worker: Optional[_ScanWorker] = None
         self._clean_thread: Optional[QThread] = None
         self._clean_worker: Optional[_CleanWorker] = None
+        self._is_scanning = False
         self._last_clean_time: Optional[str] = None
         self._last_mem_release_time: Optional[str] = None
         self._cache_rows: Dict[str, _CacheItemRow] = {}
@@ -573,7 +574,7 @@ class SystemCleanerCard(QWidget):
         self.closed.emit()
 
     def _on_refresh(self):
-        self._async_scan()
+        self._async_scan(force=True)
         self._refresh_memory()
 
     def _on_row_toggled(self):
@@ -635,10 +636,16 @@ class SystemCleanerCard(QWidget):
 
     # ── 扫描 ──
 
-    def _async_scan(self):
+    def _async_scan(self, force: bool = False):
         drifox = _drifox_dir()
         if drifox is None:
             self._set_status("未找到数据目录")
+            return
+
+        # 去抖：扫描未完成时不重复启动（show_card 每次都调）；
+        # force=True（手动刷新/清理后重扫）则取消旧扫描立即重扫。
+        # 旧扫描取消等待实测 <50ms（目录边界生效），不卡 UI。
+        if self._is_scanning and not force:
             return
 
         self._set_status("扫描中…")
@@ -646,20 +653,23 @@ class SystemCleanerCard(QWidget):
 
         self._cleanup_scan()
         w = _ScanWorker(drifox)
-        t = QThread(self)
+        t = QThread()  # 无 parent：卡片销毁不析构运行中线程，生命周期由 finished→deleteLater 链接管
         w.moveToThread(t)
         t.started.connect(w.run)
         w.finished.connect(self._on_scan_done)
         w.error.connect(self._on_scan_error)
         w.finished.connect(t.quit)
         w.error.connect(t.quit)
-        w.finished.connect(w.deleteLater)
-        w.error.connect(w.deleteLater)
+        # worker 销毁挂线程退出信号：正常完成与取消返回两条路径都会走 t.finished，
+        # 避免被取消的 worker 无人 deleteLater → 跨线程析构崩溃
+        t.finished.connect(w.deleteLater)
         t.finished.connect(t.deleteLater)
         self._scan_worker, self._scan_thread = w, t
+        self._is_scanning = True
         t.start()
 
     def _on_scan_done(self, sizes: Dict[str, int]):
+        self._is_scanning = False
         self._refresh_btn.setEnabled(True)
 
         total = 0
@@ -676,6 +686,7 @@ class SystemCleanerCard(QWidget):
         self._set_status("")
 
     def _on_scan_error(self, err: str):
+        self._is_scanning = False
         self._refresh_btn.setEnabled(True)
         self._set_status("扫描失败")
         logger.error(f"[SystemCleaner] 扫描失败: {err}")
@@ -729,7 +740,7 @@ class SystemCleanerCard(QWidget):
 
         self._cleanup_clean()
         w = _CleanWorker(drifox, selected)
-        t = QThread(self)
+        t = QThread()  # 无 parent：同 _async_scan
         w.moveToThread(t)
         t.started.connect(w.run)
         w.progress.connect(self._on_clean_progress)
@@ -737,8 +748,7 @@ class SystemCleanerCard(QWidget):
         w.error.connect(self._on_clean_error)
         w.finished.connect(t.quit)
         w.error.connect(t.quit)
-        w.finished.connect(w.deleteLater)
-        w.error.connect(w.deleteLater)
+        t.finished.connect(w.deleteLater)
         t.finished.connect(t.deleteLater)
         self._clean_worker, self._clean_thread = w, t
         t.start()
@@ -762,7 +772,7 @@ class SystemCleanerCard(QWidget):
         self._last_clean_time = now
         self._last_clean_lb.setText(f"📝 上次清理: {now}")
 
-        self._async_scan()
+        self._async_scan(force=True)
         self._refresh_memory()
 
         QTimer.singleShot(3000, self._reset_cache_clean_btn)
@@ -803,24 +813,39 @@ class SystemCleanerCard(QWidget):
     # ── 清理 ──
 
     def _cleanup_scan(self):
+        # 协作式取消后旧 worker 在下一个目录边界快速退出；
+        # 必须等线程真正结束才能丢引用——提前丢会让 GC 从主线程
+        # 析构仍属于工作线程的 worker（跨线程析构 → 0xC0000005 崩溃）。
+        if self._scan_worker is not None:
+            try:
+                self._scan_worker.cancel()
+            except RuntimeError:
+                pass
         if self._scan_thread is not None:
             try:
                 self._scan_thread.quit()
-                self._scan_thread.wait(500)
+                self._scan_thread.wait(1000)
             except RuntimeError:
                 pass
-            self._scan_thread = None
+        self._scan_thread = None
         self._scan_worker = None
 
     def _cleanup_clean(self):
+        # 清理 worker 不可中断（删一半会留垃圾）。同 _cleanup_scan：
+        # 等线程真正结束再丢引用，避免跨线程析构；清理通常秒级完成，
+        # wait 超时只发生在超大缓存清理中关卡片时，此时放弃等待但引用
+        # 语义仍不安全——因此仅在 wait 成功后才清 worker 引用。
         if self._clean_thread is not None:
             try:
                 self._clean_thread.quit()
-                self._clean_thread.wait(500)
+                finished = self._clean_thread.wait(3000)
             except RuntimeError:
-                pass
-            self._clean_thread = None
-        self._clean_worker = None
+                finished = True
+            if finished:
+                self._clean_thread = None
+                self._clean_worker = None
+        else:
+            self._clean_worker = None
 
     def deleteLater(self):
         self._cleanup_scan()
