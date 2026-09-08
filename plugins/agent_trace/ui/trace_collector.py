@@ -518,6 +518,10 @@ class TraceCollector(QObject):
                     if start > 0:
                         end = start
                         start = start - llm_ms / 1000.0
+                # 首 token 延迟（毫秒，chat_worker 落盘）：统计页算生成时长/吞吐量
+                ttft_ms = msg.get("ttft_ms")
+                if isinstance(ttft_ms, (int, float)) and ttft_ms > 0:
+                    meta["ttft_ms"] = float(ttft_ms)
                 # ⚠️ 不再用实时流配对兜底：stream_started/stream_finished 是
                 # **整个 worker 线程**级别的（executor.py 在 worker.start() 后
                 # 只发一次），一轮含多次工具迭代时只有一对 start/end。按序号

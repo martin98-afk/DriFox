@@ -522,8 +522,10 @@ class OpenAIChatWorker(QThread):
         # 那一对回调是**整个 worker 线程**级别的（executor.py:134 在 worker.start()
         # 之后只发一次），一轮含多次工具迭代时只能测到「整轮总时长」。
         self._last_llm_elapsed_ms = 0.0
-
-    # ── 工具执行分阶段计时 ──
+        # 首 token 延迟（毫秒）：请求发出 → 首个有实际内容的 chunk（思考/正文/工具调用）。
+        # 起点 _llm_req_t0 在 _make_api_call 每次重试前重置，随消息落盘（ttft_ms）供轨迹统计。
+        self._last_ttft_ms = 0.0
+        self._llm_req_t0 = 0.0
 
     def _mark_tool_start(self, tool_call_id: str) -> None:
         """工具进入执行流程（emit tool_call_started 时打点）。"""
@@ -1981,6 +1983,7 @@ class OpenAIChatWorker(QThread):
                 # 单次 LLM 调用计时（含重试与流式处理）。先清零：若本次未走
                 # API 调用就构建消息，不会误用上一轮的耗时。
                 self._last_llm_elapsed_ms = 0.0
+                self._last_ttft_ms = 0.0
                 _llm_t0 = time.monotonic()
                 tool_calls_found, tool_args_pending = self._make_api_call(current_messages, use_cache=True)
                 self._last_llm_elapsed_ms = round((time.monotonic() - _llm_t0) * 1000, 1)
@@ -2405,6 +2408,10 @@ class OpenAIChatWorker(QThread):
         elapsed_ms = getattr(self, "_last_llm_elapsed_ms", 0.0) or 0.0
         if elapsed_ms > 0:
             msg["elapsed_ms"] = round(float(elapsed_ms), 1)
+        # 首 token 延迟（毫秒）随消息落盘，历史会话轨迹统计用
+        ttft_ms = getattr(self, "_last_ttft_ms", 0.0) or 0.0
+        if ttft_ms > 0:
+            msg["ttft_ms"] = round(float(ttft_ms), 1)
         if content:
             msg["content"] = content
         if reasoning_content:
@@ -2556,6 +2563,9 @@ class OpenAIChatWorker(QThread):
                 _llm_ms = getattr(self, "_last_llm_elapsed_ms", 0.0) or 0.0
                 if _llm_ms > 0:
                     asst_msg["elapsed_ms"] = round(float(_llm_ms), 1)
+                _ttft = getattr(self, "_last_ttft_ms", 0.0) or 0.0
+                if _ttft > 0:
+                    asst_msg["ttft_ms"] = round(float(_ttft), 1)
                 if asst_msg.get("content") or asst_msg.get("tool_calls"):
                     sequence.append(asst_msg)
 
@@ -2585,6 +2595,9 @@ class OpenAIChatWorker(QThread):
             _llm_ms = getattr(self, "_last_llm_elapsed_ms", 0.0) or 0.0
             if _llm_ms > 0:
                 asst_msg["elapsed_ms"] = round(float(_llm_ms), 1)
+            _ttft = getattr(self, "_last_ttft_ms", 0.0) or 0.0
+            if _ttft > 0:
+                asst_msg["ttft_ms"] = round(float(_ttft), 1)
             if asst_msg.get("tool_calls"):
                 sequence.append(asst_msg)
             sequence.append(tool_result)
@@ -3270,8 +3283,10 @@ class OpenAIChatWorker(QThread):
                 if use_responses:
                     # Responses API 解析器仅支持事件流（非流式返回 Response 对象不可迭代）
                     self.stream = True
+                    self._llm_req_t0 = time.monotonic()
                     response = client.responses.create(**self._build_responses_kwargs(messages))
                 else:
+                    self._llm_req_t0 = time.monotonic()
                     response = client.chat.completions.create(**req_kwargs)
                 if attempt > 0:
                     self.retry_resolved.emit()
@@ -3804,6 +3819,10 @@ class OpenAIChatWorker(QThread):
 
             # 提取思考增量（兼容 reasoning_content / reasoning / reasoning_details）
             reasoning_delta = extract_reasoning_delta(delta)
+            # 📊 TTFT：首个有实际内容的 chunk（思考/正文/工具调用）距请求发出的延迟。
+            # 空 choices 的 usage/ping chunk 不算（上面已 continue）。
+            if self._last_ttft_ms <= 0.0 and (content or reasoning_delta or tool_calls):
+                self._last_ttft_ms = round((time.monotonic() - self._llm_req_t0) * 1000, 1)
             if reasoning_delta:
                 if not reasoning_started_this_call:
                     reasoning_started_this_call = True
@@ -4156,6 +4175,9 @@ class OpenAIChatWorker(QThread):
 
             saw_any_chunk = True
             etype = getattr(event, "type", "") or ""
+            # 📊 TTFT：首个内容事件（思考/正文/工具参数 delta）距请求发出的延迟
+            if self._last_ttft_ms <= 0.0 and etype.endswith(".delta"):
+                self._last_ttft_ms = round((time.monotonic() - self._llm_req_t0) * 1000, 1)
 
             # ----- 思考内容（摘要/完整思考文本，兼容多种网关事件名）-----
             # OpenAI 官方：reasoning_summary_text.delta（摘要，默认）

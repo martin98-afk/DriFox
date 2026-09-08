@@ -69,7 +69,7 @@ _TABS_BY_KIND: Dict[EntryKind, Tuple[Tuple[str, str], ...]] = {
     EntryKind.SYSTEM: (
         ("system", "System Prompt"),
         ("tools", "Tools Schema"),
-        ("headers", "Headers"),
+        ("headers", "Info"),
     ),
     EntryKind.TOOL: (
         ("request", "Request"),
@@ -80,17 +80,17 @@ _TABS_BY_KIND: Dict[EntryKind, Tuple[Tuple[str, str], ...]] = {
     EntryKind.ASSISTANT: (
         ("preview", "Preview"),
         ("raw", "Raw"),
-        ("timing", "Timing"),
+        ("timing", "统计"),
     ),
     EntryKind.USER: (
         ("content", "Content"),
         ("raw", "Raw"),
-        ("headers", "Headers"),
+        ("headers", "Info"),
     ),
     EntryKind.CONTEXT: (
         ("content", "Content"),
         ("raw", "Raw"),
-        ("headers", "Headers"),
+        ("headers", "Info"),
     ),
 }
 
@@ -790,21 +790,49 @@ class DetailPanel(QWidget):
         return raw or "（无结果）"
 
     def _headers_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
-        rows: List[Tuple[str, str]] = [
-            ("Kind", rec.kind.label),
-            ("Label", rec.label),
-            ("Status", rec.status),
-            ("Source", rec.source or "-"),
+        """Info 页（原 Headers）：只留有用的三行，元杂项（Kind/Status/Source 等）全部砍掉。"""
+        return [
+            ("开始时间", self._full_ts(rec.start_ts)),
             ("Turn", str(rec.turn_no) if rec.turn_no > 0 else "-"),
-            ("Size", f"{len(rec.raw or ''):,} 字符"),
+            ("大小", f"{len(rec.raw or ''):,} 字符"),
         ]
-        for k, v in (rec.meta or {}).items():
-            if k in ("arguments", "result", "turn_start"):
-                continue
-            rows.append((k, str(v)))
+
+    def _llm_stat_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
+        """ASSISTANT 统计页：开始时间 / 总时长 / 首 token 延迟 / 生成 / 吞吐量。
+
+        口径：总时长 = elapsed_ms（请求发出 → 响应完成）；
+        首 token 延迟 = ttft_ms（chat_worker 流式首个内容 chunk 打点，落盘字段）；
+        生成 = 总时长 − 首 token；吞吐量 = 输出 token ÷ 生成秒。
+        估算 token（无 tokens_exact）时吞吐量加 ≈ 前缀。
+        """
+        rows: List[Tuple[str, str]] = [("开始时间", self._full_ts(rec.start_ts))]
+        total_ms = rec.duration_ms if rec.duration_ms > 0 else int(rec.meta.get("elapsed_ms") or 0)
+        rows.append(("总时长", format_duration(total_ms) if total_ms > 0 else "—"))
+        ttft = rec.meta.get("ttft_ms")
+        if isinstance(ttft, (int, float)) and ttft > 0:
+            rows.append(("首 token 延迟", format_duration(int(ttft))))
+            gen_ms = total_ms - int(ttft)
+            rows.append(("生成", format_duration(gen_ms) if gen_ms > 0 else "—"))
+            if gen_ms > 0 and rec.tokens > 0:
+                tps = rec.tokens / (gen_ms / 1000.0)
+                prefix = "" if rec.meta.get("tokens_exact") else "≈"
+                rows.append(("吞吐量", f"{prefix}{tps:.1f} tok/s"))
         return rows
 
+    @staticmethod
+    def _full_ts(epoch: float) -> str:
+        """完整时间戳（毫秒精度）：``2026-09-08 14:53:48.706``。"""
+        if not epoch or epoch <= 0:
+            return "-"
+        import datetime as _dt
+
+        dt = _dt.datetime.fromtimestamp(epoch)
+        return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+
     def _timing_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
+        # ASSISTANT：LLM 调用统计（开始时间/总时长/首 token/生成/吞吐量）
+        if rec.kind == EntryKind.ASSISTANT:
+            return self._llm_stat_rows(rec)
         t0, _t1 = self._bounds
         offset_ms = max(0.0, (rec.start_ts - t0) * 1000) if rec.start_ts > 0 and t0 > 0 else 0.0
         rows = [
