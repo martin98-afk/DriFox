@@ -5,6 +5,7 @@
 （实测 270-335ms）。叠放化后覆盖层页首次 show 永不 hide，切换只 raise/lower
 + hide/show 对话页（双向 <12ms）。
 """
+
 import pytest
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QLabel
@@ -48,7 +49,7 @@ class TestContentStackOverlay:
         assert not p1.testAttribute(Qt.WA_WState_Hidden)  # 初始即 visible 在下（启动期子树为空，零成本）
         s.setCurrentIndex(1)
         assert not p1.testAttribute(Qt.WA_WState_Hidden)
-        s.setCurrentIndex(0)                           # 切回：不得 hide 覆盖层页
+        s.setCurrentIndex(0)  # 切回：不得 hide 覆盖层页
         assert not p1.testAttribute(Qt.WA_WState_Hidden)
         s.setCurrentIndex(1)
         s.setCurrentIndex(0)
