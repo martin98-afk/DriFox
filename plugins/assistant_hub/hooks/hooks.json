@@ -1,5 +1,19 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "python",
+            "function": ".inject_assistant:on_session_start",
+            "add_output_to_context": true,
+            "statusMessage": "助手记忆:",
+            "id": "assistant_hub_inject_memory"
+          }
+        ]
+      }
+    ],
     "BuildSystemPrompt": [
       {
         "matcher": "primary",

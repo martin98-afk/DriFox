@@ -57,20 +57,25 @@ class _Mgr:
     def experience_read_index(self, aid):
         return "# 经验索引"
 
-    def prompt_block(self, aid):
-        """模拟 manager.prompt_block 组装语义（真组装在 test_manager_ext 用真 manager 测）。"""
+    def identity_block(self, aid):
+        """模拟 manager.identity_block（BuildSystemPrompt hook 注入系统提示词）。"""
+        a = self.get(aid)
+        persona = self.identity_and_persona(aid)
+        if not persona.strip():
+            return ""
+        header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}"
+        return header + "\n\n" + persona.strip()
+
+    def memory_block(self, aid):
+        """模拟 manager.memory_block（SessionStart hook 注入会话消息）。"""
         a = self.get(aid)
         parts = []
-        persona = self.identity_and_persona(aid)
-        if persona.strip():
-            parts.append(persona.strip())
         pin_lines = [f"- {(c or '').strip()}" for _pid, c in self.read_pinned(aid) if (c or "").strip()]
         if pin_lines:
             parts.append("# 人工提示\n\n以下是用户人工添加的明确要求，直接遵守即可。\n\n" + "\n".join(pin_lines))
         if a.memory_enabled:
             parts += ["## 记忆使用规则", "# 长期记忆\n\n" + self.compiled_memory(aid)]
-        header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}"
-        return header + "\n\n" + "\n\n".join(parts)
+        return "\n\n".join(parts)
 
 
 def _patch_mgr(monkeypatch):
@@ -79,36 +84,54 @@ def _patch_mgr(monkeypatch):
     return mgr
 
 
-def test_block_contains_persona_memory_rules_pinned(monkeypatch):
+def test_identity_block_persona_only(monkeypatch):
+    """BuildSystemPrompt hook 用的 identity_block：人格段 + header，不含记忆。"""
     _patch_mgr(monkeypatch)
-    block = m._assistant_prompt_block("xiaohu-x1")
-    assert "# 小狐" in block
-    assert "记忆使用规则" in block  # 无声记忆规则
+    block = m._identity_block("xiaohu-x1")
+    assert block.startswith("# 助手：小狐")
+    assert "小狐" in block  # persona 段
+    # 关键：记忆已迁出系统提示词
+    assert "记忆使用规则" not in block
+    assert "人工提示" not in block
+    assert "今日" not in block
+    assert "经验索引" not in block  # 经验不注入 prompt（渐进式披露走工具）
+
+
+def test_memory_block_pinned_rules_memory(monkeypatch):
+    """SessionStart hook 用的 memory_block：人工提示 + 记忆规则 + 长期记忆。"""
+    _patch_mgr(monkeypatch)
+    block = m._memory_block("xiaohu-x1")
+    assert block  # 非空
     assert "人工提示" in block and "用户喜欢简洁回复" in block
+    assert "记忆使用规则" in block
     assert "今日" in block
-    # 经验不注入 prompt（渐进式披露走工具）
-    assert "经验索引" not in block
+    # 不含人格 header（人格在 BuildSystemPrompt 注入）
+    assert "# 助手：" not in block
 
 
-def test_block_memory_disabled(monkeypatch):
+def test_memory_block_disabled_no_rules(monkeypatch):
+    """memory_enabled=False：memory_block 不输出记忆规则 + 长期记忆，但人工提示仍保留。"""
     mgr = _patch_mgr(monkeypatch)
 
     class _A2(_A):
         memory_enabled = False
 
     mgr.get = lambda aid: _A2()
-    block = m._assistant_prompt_block("xiaohu-x1")
+    block = m._memory_block("xiaohu-x1")
     assert "记忆使用规则" not in block
-    assert "人工提示" in block and "用户喜欢简洁回复" in block  # 人工提示不受记忆开关控制
-    assert "小狐" in block  # persona 段仍在
-    assert "今日" not in block  # memory.md 不注入
+    assert "今日" not in block
+    assert "人工提示" in block and "用户喜欢简洁回复" in block  # 不受开关控制
 
 
 def test_hook_replaces_identity_context(monkeypatch):
+    """BuildSystemPrompt hook：注入人格块到 system prompt，置空预取防重复。"""
     _patch_mgr(monkeypatch)
     context = {"current_role": "primary", "agent_identity_content": "原build提示词"}
     out = m.hook("BuildSystemPrompt", context)
     assert out and "小狐" in out
+    # 关键：BuildSystemPrompt hook 输出不再含记忆
+    assert "记忆使用规则" not in out
+    assert "人工提示" not in out
     assert context["agent_identity_content"] == ""  # 置空防重复注入
 
 
@@ -116,6 +139,31 @@ def test_hook_non_primary_noop(monkeypatch):
     _patch_mgr(monkeypatch)
     context = {"current_role": "subagent"}
     assert m.hook("BuildSystemPrompt", context) == ""
+
+
+def test_on_session_start_returns_memory(monkeypatch):
+    """SessionStart hook：注入人工提示 + 记忆块到 session.messages（不进系统提示词）。"""
+    _patch_mgr(monkeypatch)
+    out = m.on_session_start("SessionStart", {"state": "startup"})
+    assert out
+    assert "人工提示" in out and "用户喜欢简洁回复" in out
+    assert "记忆使用规则" in out
+    assert "今日" in out
+    # 不含人格 header（人格由 BuildSystemPrompt 提供）
+    assert "# 助手：" not in out
+
+
+def test_on_session_start_no_active_assistant(monkeypatch):
+    """无激活助手：SessionStart hook 返回空串，不报错。"""
+    mgr = _patch_mgr(monkeypatch)
+    mgr.active_id = lambda: ""
+    assert m.on_session_start("SessionStart", {}) == ""
+
+
+def test_on_session_start_mgr_unavailable(monkeypatch):
+    """manager 不可用：返回空串，不抛异常。"""
+    monkeypatch.setattr(m, "_get_manager", lambda: None)
+    assert m.on_session_start("SessionStart", {}) == ""
 
 
 def test_on_stop_counts_turn(monkeypatch):
