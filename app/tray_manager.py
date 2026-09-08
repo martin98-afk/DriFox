@@ -836,6 +836,18 @@ class TrayManager(QObject):
 
         hotkey_str = hotkey_str.lower()
 
+        # ── 幂等短路 ──
+        # 命令热重载 / UI 插件热重载 / 快捷键改绑都会调 _setup_global_hotkey()，
+        # 其中绝大多数目标热键并未变化。原先无条件解注册+重注册，等于每次 UI
+        # 插件热重载都把全局热键卸一遍再装一遍（日志刷「已注册」、中间存在
+        # 短暂空窗）。目标键与当前已注册一致且句柄有效时直接返回。
+        if self._registered_hotkey == hotkey_str:
+            # 仅在当前已「原生注册成功」时短路：kbd 是降级态，保持原有语义——
+            # 让每次调用都重试 RegisterHotKey，占用方关闭后能自动升回原生热键
+            # （另有 5 分钟一次的 _health_check_hotkey 兜底重试）。
+            if self._hotkey_mode == "win" and getattr(self, "_hotkey_id", None) is not None:
+                return
+
         if platform.system() == "Windows":
             self._win_register_hotkey(hotkey_str)
         else:

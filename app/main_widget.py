@@ -3703,8 +3703,84 @@ class OpenAIChatToolWindow(ToolWindow):
     # 创建/销毁都不再影响快捷键可用性。
     _window_shortcut_cache: Dict[int, list] = {}
 
-    def _register_command_shortcuts(self):
+    # 命令快捷键标记（用于按标记扫描残留，兜住缓存之外的孤儿）
+    _COMMAND_SHORTCUT_MARKER = "drifox_command_shortcut"
+
+    @classmethod
+    def _prune_marked_shortcuts(cls, parent) -> None:
+        """按标记摘除窗口上残留的命令 QShortcut（自愈缓存之外的孤儿）
+
+        _window_shortcut_cache 只能管住「它自己登记过」的对象。历史代码路径、
+        未来新增路径、以及本修复落地前已经产生的孤儿都不在缓存里，但同样会
+        与新建快捷键撞键序列触发 ambiguous。统一打标记后，任何一次 force
+        重建都会把窗口上所有带标记的旧快捷键清干净。
+        """
+        try:
+            from PyQt5.QtWidgets import QShortcut
+        except ImportError:
+            return
+        try:
+            candidates = parent.findChildren(QShortcut)
+        except RuntimeError:
+            return
+        for qs in candidates:
+            try:
+                if _is_sip_deleted(qs):
+                    continue
+                if not qs.property(cls._COMMAND_SHORTCUT_MARKER):
+                    continue
+                qs.setProperty(cls._COMMAND_SHORTCUT_MARKER, False)
+                qs.setEnabled(False)
+                try:
+                    qs.activated.disconnect()
+                    qs.activatedAmbiguously.disconnect()
+                except RuntimeError, TypeError:
+                    pass
+                qs.deleteLater()
+            except RuntimeError, AttributeError:
+                continue
+
+    @classmethod
+    def _destroy_window_command_shortcuts(cls, win_id: int) -> None:
+        """彻底销毁某窗口已注册的命令快捷键（含 C++ 对象）
+
+        ⚠️ 只做 `cls._window_shortcut_cache.clear()`（旧实现）是不够的：QShortcut 的
+        Qt 父对象是顶层窗口，Python wrapper 被回收并不会带走 C++ 对象，旧 QShortcut
+        仍注册在 Qt 的 QShortcutMap 中。此时重新注册会产生「同窗口 + 同键序列」的
+        多套 QShortcut → Qt 判定 ambiguous，只发 activatedAmbiguously()，
+        而处理器只连了 activated() → 全部命令快捷键静默失效（2026-09-08 故障：
+        任何一次命令热重载 / 快捷键管理器改绑之后，程序内快捷键全灭，只能重启恢复）。
+        """
+        cached = cls._window_shortcut_cache.pop(win_id, None)
+        if not cached:
+            return
+        for qs in cached:
+            try:
+                if _is_sip_deleted(qs):
+                    continue
+                # setEnabled(False) 同步把条目从 QShortcutMap 摘除；
+                # 只调 deleteLater() 不行（延迟删除，同一轮事件内新快捷键仍会撞上旧条目）
+                qs.setEnabled(False)
+                try:
+                    qs.activated.disconnect()
+                    qs.activatedAmbiguously.disconnect()
+                except RuntimeError, TypeError:
+                    pass
+                qs.deleteLater()
+            except RuntimeError, AttributeError:
+                continue
+
+    @classmethod
+    def _destroy_all_command_shortcuts(cls) -> None:
+        """销毁全部窗口的命令快捷键（命令表整体重建前调用）"""
+        for win_id in list(cls._window_shortcut_cache):
+            cls._destroy_window_command_shortcuts(win_id)
+
+    def _register_command_shortcuts(self, force: bool = False):
         """为所有有 shortcut 配置的命令注册 QShortcut
+
+        force=True 时先销毁该窗口已缓存的 QShortcut 再重建（命令表或快捷键
+        绑定变更后的正确姿势）；force=False 为幂等 ensure，缓存内对象存活即跳过。
 
         父对象取顶层窗口（self.window()）而非 self(MainWidget)：
         "替换(full)" 类卡片打开时 TabManagerWindow 会切换 QStackedWidget 隐藏对话区
@@ -3739,6 +3815,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 顶层窗口在覆盖层打开时仍可见，确保快捷键持续可触发
         shortcut_parent = self.window() or self
         win_id = id(shortcut_parent)
+
+        # ── 强制重建：命令/快捷键绑定变更后必须先销毁旧 QShortcut ──
+        if force:
+            OpenAIChatToolWindow._destroy_window_command_shortcuts(win_id)
+            # 二次兜底：按标记清理缓存之外的残留孤儿
+            OpenAIChatToolWindow._prune_marked_shortcuts(shortcut_parent)
 
         # ── 幂等 ensure：窗口已有存活的命令快捷键集合则直接复用 ──
         cached = OpenAIChatToolWindow._window_shortcut_cache.get(win_id)
@@ -3782,6 +3864,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 key_seq = cmd_def.shortcut
 
                 qs = QShortcut(QKeySequence(key_seq), shortcut_parent)
+                qs.setProperty(OpenAIChatToolWindow._COMMAND_SHORTCUT_MARKER, True)
 
                 name = cmd_def.name
 
@@ -9494,16 +9577,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 命令变更：同步刷新快捷键绑定
         if result.get("commands"):
-            # 清除窗口级快捷键缓存，允许重新注册
-            OpenAIChatToolWindow._window_shortcut_cache.clear()
+            # ⚠️ 不能用 _window_shortcut_cache.clear() 代替：那只丢 Python 引用，
+            # C++ QShortcut 仍留在 QShortcutMap，重建后同键序列多套 → Qt 判
+            # ambiguous → activated() 永不触发（快捷键全灭，仅重启可恢复）。
+            OpenAIChatToolWindow._destroy_all_command_shortcuts()
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
-                    win._register_command_shortcuts()
+                    win._register_command_shortcuts(force=True)
                 except RuntimeError, AttributeError:
                     pass
+            logger.debug("[HotReload] 命令快捷键已重建（先销毁旧 QShortcut 再注册）")
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
+        # ⚠️ 本分支不重建命令快捷键（命令表没变）；只有上面的 commands 分支才重建。
         if result.get("ui"):
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
@@ -9558,7 +9645,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 tray._setup_global_hotkey()
             except Exception:
                 pass
-            logger.debug("[HotReload] command shortcuts re-registered")
 
         # 技能变更：刷新技能列表（settings popup + 卡片 token 估算）
         # 注意：settings popup 是全局共享单例（所有窗口通过 property 访问同一实例），

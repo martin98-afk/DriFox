@@ -676,14 +676,16 @@ def _rebind_command_shortcuts():
     try:
         from app.main_widget import OpenAIChatToolWindow
 
-        # 清除窗口级快捷键去重缓存，允许命令变更后重新注册
-        OpenAIChatToolWindow._window_shortcut_cache.clear()
+        # ⚠️ 不能只 clear() 去重缓存：那只丢 Python 引用，QShortcut 的 Qt 父对象是
+        # 顶层窗口，C++ 对象仍留在 QShortcutMap 中；重新注册即产生同键序列多套
+        # QShortcut → Qt 判 ambiguous → activated() 永不触发 → 命令快捷键全灭。
+        OpenAIChatToolWindow._destroy_all_command_shortcuts()
 
         for win in window_registry.alive_window_instances():
             if win._is_destroyed:
                 continue
             try:
-                win._register_command_shortcuts()
+                win._register_command_shortcuts(force=True)
             except (RuntimeError, AttributeError):
                 pass
     except Exception:
