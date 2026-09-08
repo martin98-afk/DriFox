@@ -4332,6 +4332,11 @@ class CodeWebViewer(QWebEngineView):
                 self.setHtml("", QUrl("about:blank"))
         except RuntimeError:
             pass
+        # 🐛 setHtml("") 已清掉骨架与 JS，就绪态必须同步失效；
+        # 残留 True 会让复用方（ensure_rendered）误判 JS 可用，
+        # runJavaScript 打在空页上静默失败 → 复用卡片永久空白。
+        # （真正重载骨架在取用侧 ensure_rendered 里做。）
+        self._is_js_ready = False
         self._streaming = False
         self._is_history = False
         self._stable_html = ""
@@ -13699,8 +13704,22 @@ class MessageCard(SimpleCardWidget):
                 try:
                     pooled.setParent(self)
                     pooled.setUpdatesEnabled(True)
+                    # 🐛 复用卡片空白根因修复：release 时 reset_for_reuse 的
+                    # setHtml("", about:blank) 已把骨架与 JS 全部清空，但
+                    # _is_js_ready 残留 True → set_content 直接 runJavaScript
+                    # 打在空页上（updateContent 不存在，静默失败），且
+                    # contentReady 永不再次触发 → 卡片永久空白。
+                    # 因此复用必须重置 JS 就绪态并重新加载骨架，与新建等价；
+                    # 后续 set_content 会因 JS 未就绪 defer，由 _on_js_ready 补渲。
+                    pooled._is_js_ready = False
+                    pooled._load_skeleton()
                     self.viewer = pooled
-                except RuntimeError:
+                except Exception:
+                    # 骨架重载失败（C++ 对象已删除等）：弃用该实例，回退新建
+                    try:
+                        pooled.deleteLater()
+                    except Exception:
+                        pass
                     self.viewer = None
             if self.viewer is None:
                 self.viewer = CodeWebViewer(self, light=is_welcome)
