@@ -810,7 +810,7 @@ class DetailPanel(QWidget):
         rows.append(("总时长", format_duration(total_ms) if total_ms > 0 else "—"))
         ttft = rec.meta.get("ttft_ms")
         if isinstance(ttft, (int, float)) and ttft > 0:
-            rows.append(("首 token 延迟", format_duration(int(ttft))))
+            rows.append(("首字延迟", format_duration(int(ttft))))
             gen_ms = total_ms - int(ttft)
             rows.append(("生成", format_duration(gen_ms) if gen_ms > 0 else "—"))
             if gen_ms > 0 and rec.tokens > 0:

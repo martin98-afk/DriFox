@@ -775,6 +775,14 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if isinstance(phases, dict) and phases:
         normalized["trace_phases"] = {str(k): float(v) for k, v in phases.items() if isinstance(v, (int, float))}
 
+    # message_extras 剥离哨兵（session_repository 写库时打上的绝对索引）。
+    # 历史会话加载后渲染前会经本函数重建消息，若在此剥掉哨兵，
+    # materialize_batch_with_extras 找不到索引 → 剥离的 arguments/diff/
+    # reasoning_content 永远补不回 → 工具折叠框预览参数全空（2026-09-08 回归）。
+    x_idx = message.get("_x_idx")
+    if isinstance(x_idx, int) and not isinstance(x_idx, bool):
+        normalized["_x_idx"] = x_idx
+
     if role == "assistant":
         content = content_to_text(message.get("content", ""))
         if content:

@@ -268,3 +268,50 @@ def test_archive_by_project_preserves_extras(store):
     store.save_session(s)
     store.archive_sessions_by_project("归档项目")
     assert store.load_msg_extras("s13"), "归档不应清理 extras"
+
+
+def test_reload_then_group_preserves_tool_args_for_render(store):
+    """回归（2026-09-08 工具折叠框预览全空）：
+
+    保存剥离 arguments 进 extras → 重进软件加载轻量 blob（带 _x_idx）→
+    渲染前 group_messages_for_display → normalize_message 白名单剥掉
+    _x_idx → materialize_batch_with_extras 找不到哨兵跳过补回 → 折叠框
+    预览参数全空。修复后 normalize_message 必须透传 _x_idx，渲染端才能
+    按 extras 补回 arguments。
+    """
+    from app.core.message_content import group_messages_for_display
+    from app.widgets.ui_helpers import materialize_batch_with_extras
+
+    messages = []
+    for i in range(4):
+        messages.append(_msg("user", f"q{i}"))
+        messages.append(
+            _msg(
+                "tool",
+                f"result-{i}",
+                name="read",
+                tool_call_id=f"c{i}",
+                arguments={"path": f"a{i}.py", "startline": i},
+                success=True,
+            )
+        )
+    store.save_session(_session("sx", messages))
+
+    # 模拟重进软件后的渲染数据链
+    loaded = store.get_session("sx")["messages"]
+    batches = group_messages_for_display(loaded)
+
+    # 还原消息绝对索引（哨兵在 group 前的位置即 session.messages 下标）
+    idx_of = {id(m): i for i, m in enumerate(loaded)}
+    seen_args = []
+    for b in batches:
+        patched = materialize_batch_with_extras(b, "sx", store.load_msg_extras)
+        for m in patched:
+            if isinstance(m, dict) and m.get("role") == "tool":
+                seen_args.append(m.get("arguments"))
+
+    assert len(seen_args) == 4, f"应渲染 4 条工具消息，实际 {len(seen_args)}"
+    for i, args in enumerate(seen_args):
+        assert args == {"path": f"a{i}.py", "startline": i}, (
+            f"第 {i} 条工具消息 arguments 补回失败（渲染后预览将为空）: {args}"
+        )
