@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import (
     FluentIcon,
     IconWidget,
+    SmoothScrollDelegate,
     StrongBodyLabel,
     TransparentPushButton,
     TransparentToolButton,
@@ -397,6 +398,7 @@ class SystemCleanerCard(QWidget):
         self._content_layout.setSpacing(0)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
+        SmoothScrollDelegate(self._scroll)  # 平滑滚动（与主程序同款引擎）
         root.addWidget(self._scroll, 1)
 
         self._build_memory_row()

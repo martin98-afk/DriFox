@@ -51,6 +51,7 @@ from qfluentwidgets import (
     PushButton,
     ScrollArea,
     SingleDirectionScrollArea,
+    SmoothScrollDelegate,
     StrongBodyLabel,
     SwitchButton,
     TransparentPushButton,
@@ -2731,6 +2732,9 @@ class MarketplaceCard(QWidget):
         self._content_layout.setSpacing(6)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
+        # 平滑滚动：qfluentwidgets SmoothScrollDelegate（与主程序对话区同款引擎）
+        # 400ms 插值 60fps + 连滚加速；自绘悬浮滚动条接管原生条（同主程序视觉）
+        SmoothScrollDelegate(self._scroll)
         self._content_stack.addWidget(self._scroll)
 
         self._empty_label = StrongBodyLabel("暂无可用插件", self._browse_page)
@@ -2781,6 +2785,7 @@ class MarketplaceCard(QWidget):
         # 避免被工具行/分组抢占拉伸）
         self._explore_root_layout.addStretch(1)
         self._explore_scroll.setWidget(self._explore_content)
+        SmoothScrollDelegate(self._explore_scroll)  # 平滑滚动（同主程序）
         self._content_stack.addWidget(self._explore_scroll)
         self._explore_sections: list = []  # [_ExploreGridSection]
 
@@ -4718,6 +4723,7 @@ class MarketplaceCard(QWidget):
         self._records_layout.setContentsMargins(0, 0, 4, 0)
         self._records_layout.setSpacing(2)
         rec_scroll.setWidget(self._records_container)
+        SmoothScrollDelegate(rec_scroll)  # 平滑滚动（同主程序）
         records_layout.addWidget(rec_scroll, 1)
 
         root.addWidget(records_outer, 1)

@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QTimer, QRect, QRectF, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QPainter, QPen
+from qfluentwidgets import SmoothScrollDelegate
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -285,12 +286,14 @@ class _ToolsPage(QWidget):
         self._list.setFrameShape(QFrame.NoFrame)
         self._list.setUniformItemSizes(True)
         self._list.currentRowChanged.connect(self._on_row)
+        SmoothScrollDelegate(self._list)  # 平滑滚动（与主程序同款引擎）
         self._json = QPlainTextEdit(split)
         self._json.setReadOnly(True)
         self._json.setFrameShape(QFrame.NoFrame)
         self._json.setLineWrapMode(QPlainTextEdit.NoWrap)
         self._json.setUndoRedoEnabled(False)
         self._json.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        SmoothScrollDelegate(self._json)  # 平滑滚动（含横向，NoWrap JSON）
         split.addWidget(self._list)
         split.addWidget(self._json)
         split.setSizes([220, 380])
@@ -490,6 +493,7 @@ class DetailPanel(QWidget):
         edit.setLineWrapMode(QPlainTextEdit.WidgetWidth if wrap else QPlainTextEdit.NoWrap)
         edit.setUndoRedoEnabled(False)
         edit.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        SmoothScrollDelegate(edit)  # 平滑滚动（与主程序同款引擎）
         return edit
 
     # ──────────────────── 公开 API ────────────────────

@@ -103,10 +103,30 @@ class TestTypewriterQueue:
 class TestFinishTickCost:
     """结束这一拍的主线程开销（卡顿的隐藏来源）"""
 
-    def test_long_final_render_goes_off_main_thread(self, src_text: str):
-        """长消息最终渲染必须走线程池，不能在 finish 这一拍同步跑 md.convert+pygments"""
+    def test_final_render_must_not_be_async(self, src_text: str):
+        """最终渲染**不能**丢给线程池：finish_streaming 之后紧随的
+        _cleanup_render_cache() 会 `self._render_seq += 1`，异步结果回来时已被判
+        过期丢弃 → 最终渲染永不落地（卡片停在流式形态、高度不收敛）。
+
+        曾按"长内容走 _sequence_render"优化并踩了这个坑，此处锁定回退。
+        """
         body = _func_body(src_text, "def _perform_update(self):")
-        assert "_ASYNC_FINAL_RENDER_MIN_CHARS" in body, "非流式分支需按阈值把长内容交给 _sequence_render"
+        non_streaming = body.split("if not self._streaming:", 1)[1].split("以下为流式模式", 1)[0]
+        assert "self._sequence_render(" not in non_streaming, (
+            "最终渲染不能异步（会被 _cleanup_render_cache 的 seq 递增判为过期）"
+        )
+        assert "_cleanup_render_cache" in non_streaming or "_cleanup_render_cache" in body, "需保留为何不能异步的说明"
+
+    def test_finish_timing_probe_available(self, src_text: str):
+        """结束态耗时打点：render/dumps 慢时默认就打，js_land+layout 也要能测"""
+        assert 'os.environ.get("DRIFOX_FINISH_TIMING", "0")' in src_text, "需要全量打点开关"
+        assert "[finish-render]" in src_text
+        # 主线程两段
+        assert "render={_render_ms" in src_text and "dumps={_ser_ms" in src_text
+        # WebEngine 侧（innerHTML 解析 + 重排）靠"派发 → 首个 reportHeight"度量
+        assert "js_land+layout=" in src_text
+        # 两条渲染路径（裸 updateContent / save+restore）都要覆盖
+        assert "path=bare" in src_text and "path=save_restore" in src_text
 
     def test_stop_anim_no_forced_repaint(self, src_text: str):
         """stop_streaming_anim 不应 repaint()（同步强制重绘会把整卡 paint 挤进结束这一拍）"""
@@ -127,6 +147,7 @@ class TestFinishHeightTransition:
         """只有流式结束打开窗口；history 加载是首帧建卡，不需要过渡"""
         body = _func_body(src_text, "def finish_streaming(self, history: bool = False):")
         assert "_finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S" in body
+        assert "_finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES" in body
         assert "if not history:" in body
 
     def test_update_height_uses_anim_in_window(self, src_text: str):

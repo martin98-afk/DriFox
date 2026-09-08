@@ -43,6 +43,7 @@ from qfluentwidgets import (
     IconWidget,
     MaskDialogBase,
     ScrollArea,
+    SmoothScrollDelegate,
     StrongBodyLabel,
     TransparentPushButton,
     TransparentToolButton,
@@ -328,6 +329,8 @@ class FileTreeCard(QWidget):
         self._tree_view = FileTreeView(self._scroll_area)
         self._tree_view.setObjectName("file-tree-widget")
         self._tree_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # 滚轮实际落点是内层 QTreeView（外层 ScrollArea 不滚），平滑引擎必须挂在它身上
+        SmoothScrollDelegate(self._tree_view)
 
         # 占位页面（QStackedWidget 切换，避免子控件无布局时左上角残留）
         self._stack = QStackedWidget(self._scroll_area)

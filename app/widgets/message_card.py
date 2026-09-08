@@ -18,6 +18,7 @@ MessageCard - 消息卡片组件
 
 import base64
 import concurrent.futures
+import contextlib
 import hashlib
 import math
 import os
@@ -340,7 +341,13 @@ WHEEL_STUCK_MIN_INTERVAL = 0.1
 FINISH_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_FINISH_HEIGHT_ANIM", "1") != "0"
 FINISH_HEIGHT_ANIM_MS = 200  # 与 JS 侧 FLIP 时长（220ms）接近，观感一致
 FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪声抖动）
-FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖"结束后的第一次高度收敛"
+FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
+FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
+
+
+# 结束态耗时打点（默认关）：环境变量 DRIFOX_FINISH_TIMING=1 打开，
+# 用于在真机定位"结束这一拍"到底卡在 render / json.dumps / 哪一段。
+FINISH_TIMING_ENABLED = os.environ.get("DRIFOX_FINISH_TIMING", "0") == "1"
 
 
 def set_finish_height_anim_enabled(enabled: bool) -> None:
@@ -3193,6 +3200,40 @@ _STREAMING_DOCK_JS = """
                 }
 """
 
+# ── 复用前的内容清理（保留骨架）──
+# 归还 WebViewPool 时执行：只清空内容容器与易失状态，**不重建文档**。
+# 与 setHtml("") 相比省掉一次文档重建 + 骨架 JS 重新执行（setInterval /
+# ResizeObserver / 事件监听全套重注册），加载大会话时批次反复卸载重建的
+# 内存与 CPU 成本显著下降。
+_RESET_CONTENT_FOR_REUSE_JS = """
+                (function () {
+                    var c = document.getElementById('content-placeholder');
+                    if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0; }
+                    var t = document.getElementById('tool-content');
+                    if (t) { t.innerHTML = ''; t.scrollTop = 0; }
+                    var td = document.getElementById('todo-content');
+                    if (td) { td.innerHTML = ''; td.scrollTop = 0; }
+                    var ts = document.getElementById('tool-section');
+                    if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
+                    // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）
+                    document.body.classList.remove('streaming-dock');
+                    document.body.scrollTop = 0;
+                    window._userScrolledWithin = false;
+                    window._userScrolledUp = false;
+                    window._suppressScrollEvent = false;
+                    window._streamingActive = false;
+                    // 图表：vault 里的节点已随 innerHTML 清空，逐个 dispose 防孤儿实例
+                    if (window.__chartVault && window.__chartVault.size) {
+                        window.__chartVault.forEach(function (el) {
+                            if (typeof window._disposeChartNode === 'function') window._disposeChartNode(el);
+                        });
+                        window.__chartVault.clear();
+                    }
+                    // 打字机缓冲（页面仍存活，若上一张卡有未揭示文本必须丢弃）
+                    if (typeof window._twReset === 'function') window._twReset();
+                })();
+"""
+
 # ── 打字机揭示队列（Typewriter Reveal Queue）骨架资产 ──
 # 为什么需要它：
 # 流式正文的到达节奏由**网络 chunk**决定（上游 80ms 批处理 + 令牌生成抖动，
@@ -4555,7 +4596,15 @@ class CodeWebViewer(QWebEngineView):
         _dialog_event_filter.register(self)
 
     def reset_for_reuse(self):
-        """归还 ``WebViewPool`` 前的重置：清空文档 + 复位卡片相关状态。
+        """归还 ``WebViewPool`` 前的重置：**保留骨架**，只清空内容与卡片状态。
+
+        ⚠️ 这里刻意**不用** ``setHtml("")`` 清页。原因（2026-09-09 内存回归）：
+        清空文档后复用方必须重新 ``_load_skeleton()``，等于每次复用都新建一份
+        ~54KB 文档 + 重新执行骨架 JS（setInterval/ResizeObserver/事件监听全套
+        重新注册）。加载"消息数很多"的会话时批次反复卸载/重建，文档频繁新建，
+        Chromium 侧内存与 CPU 占用明显上升。
+        改成"原地清空内容容器"后：骨架与 JS 上下文存活，复用成本只剩一次
+        轻量 DOM 清理，既无文档重建，也不会出现白屏。
 
         只清理 viewer 自身。**与卡片的信号连接不在这里断开** —— 那部分由
         ``MessageCard.detach_viewer()`` 成对维护（连接/断开写在一起，新增信号
@@ -4566,15 +4615,14 @@ class CodeWebViewer(QWebEngineView):
         清零会让该进程被误杀。
         """
         try:
-            if self.page():
-                self.setHtml("", QUrl("about:blank"))
+            if self.page() and self._is_js_ready:
+                self.page().runJavaScript(_RESET_CONTENT_FOR_REUSE_JS)
         except RuntimeError:
             pass
-        # 🐛 setHtml("") 已清掉骨架与 JS，就绪态必须同步失效；
-        # 残留 True 会让复用方（ensure_rendered）误判 JS 可用，
-        # runJavaScript 打在空页上静默失败 → 复用卡片永久空白。
-        # （真正重载骨架在取用侧 ensure_rendered 里做。）
-        self._is_js_ready = False
+        # 骨架仍在 → JS 就绪态保持 True（复用方无需重载骨架）。
+        # 仅当骨架根本没加载成功时把它置 False，由取用侧补一次 _load_skeleton。
+        if not self._is_js_ready:
+            self._is_js_ready = False
         # 🐛 高度残留：卡片通过 _commit_viewer_height 用 setFixedHeight 钉死高度
         # （长消息可达数千 px）。归还时不清，复用方在骨架/JS 就绪前（或任何
         # 未上报高度的异常路径）会顶着上一张消息的陈旧高度 → 空白巨高卡片。
@@ -4598,6 +4646,20 @@ class CodeWebViewer(QWebEngineView):
         self._body_client_height = 0
         self._body_scroll_top = 0
         self._body_geom_valid = False
+        # 🐛 内容态必须一并清：_markdown_text / _cached_streaming_html 若残留，
+        # 复用后 _on_js_ready 会拿旧文本立即渲染一次（与新卡片内容无关），
+        # 多一次全量渲染 = 多一份内存与主线程开销（大会话加载时逐卡叠加）。
+        self._markdown_text = ""
+        self._last_rendered_markdown = ""
+        self._cached_streaming_html = None
+        self._processed_md_hash = 0
+        self._cached_raw_md_hash = 0
+        self._last_rendered_html = None
+        self._render_deferred = False
+        self._pending_todos = None
+        if hasattr(self, "_tool_md_cache"):
+            with contextlib.suppress(Exception):
+                self._tool_md_cache.clear()
 
     def _is_mask_dialog(self, obj) -> bool:
         """判断是否为透明遮罩对话框（WA_TranslucentBackground，需防穿透）"""
@@ -4649,6 +4711,12 @@ class CodeWebViewer(QWebEngineView):
         self._do_resize_check()
 
     def _on_height_reported(self, h):
+        # 🐛 打点：结束这一拍的"JS 落地 + 布局"耗时 = 渲染派发 → 首个 reportHeight。
+        if getattr(self, "_finish_t0", 0.0) > 0.0:
+            _el = (time.perf_counter() - self._finish_t0) * 1000
+            self._finish_t0 = 0.0
+            if FINISH_TIMING_ENABLED or _el >= 120:
+                logger.info(f"[finish-render] js_land+layout={_el:.1f}ms height={h}")
         self._height_report_pending = False
         self._document_height = h  # 跟踪文档高度用于 wheelEvent 边界判断
         final_h = h + 2
@@ -8711,9 +8779,8 @@ class CodeWebViewer(QWebEngineView):
     _ADAPTIVE_THRESHOLD_SLOW = 500  # ms
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
-    # 长内容最终渲染走线程池的字符阈值：低于阈值保持同步（历史短消息/测试路径
-    # 行为不变），超过则异步，避免 md.convert + Pygments + json.dumps 阻塞结束这一拍。
-    _ASYNC_FINAL_RENDER_MIN_CHARS = 6000
+    # 注：曾尝试"长内容最终渲染走线程池"，因 _cleanup_render_cache 的 _render_seq
+    # 递增会让异步结果被判过期丢弃（详见 _perform_update 内注释），已回退为同步。
 
     @staticmethod
     def _has_reached_clean_boundary(md_text: str) -> bool:
@@ -9185,6 +9252,7 @@ class CodeWebViewer(QWebEngineView):
             pass
 
     def _perform_update(self):
+        _t_enter = time.perf_counter() if FINISH_TIMING_ENABLED else 0.0
         try:
             if not self.page():
                 return
@@ -9225,19 +9293,14 @@ class CodeWebViewer(QWebEngineView):
                         ]
                     else:
                         html_content = self._cached_streaming_html
-                elif len(self._markdown_text) > self._ASYNC_FINAL_RENDER_MIN_CHARS:
-                    # [PERF] 长内容的最终渲染（流式结束 / 大段历史消息）走线程池。
-                    # 同步路径要在主线程跑完 md.convert + Pygments 高亮 + 表格/代码块
-                    # 包装 + json.dumps，长消息实测几十~上百 ms —— 而流式结束这一拍
-                    # 还要承载坞态归位、FLIP、高度变化与折叠，全部叠在一起就是
-                    # 用户感知的"结束卡顿"。交给 _sequence_render 后主线程只负责
-                    # 把结果 runJavaScript 推给 WebEngine（_apply_render_result 已
-                    # 覆盖 save/restore、auto-scroll 与 seq 过期丢弃）。
-                    self._last_rendered_markdown = self._markdown_text
-                    self._height_report_pending = True
-                    self._sequence_render(self._markdown_text, self._tool_compact_mode)
-                    return
                 else:
+                    # ⚠️ 这里**不能**改成走 _sequence_render 线程池：
+                    # MessageCard.finish_streaming 在 viewer.finish_streaming() 之后
+                    # 立即调用 _cleanup_render_cache()，而它会 `self._render_seq += 1`
+                    # （本意是让在途流式渲染过期）。异步提交的结果回来时 seq 已变，
+                    # 被 _apply_render_result 判定过期直接丢弃 → 最终渲染永远不落地
+                    # （卡片停在流式形态、高度不收敛）。要保持异步就必须把 cleanup
+                    # 推迟到渲染落地之后，属另一处改造，暂不同步进行。
                     html_content = self._render_markdown_to_html(self._markdown_text)
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
@@ -9260,15 +9323,33 @@ class CodeWebViewer(QWebEngineView):
                 # 已完成工具块待 restore（_restore_finished_ids）时才需要 save/restore 保护；
                 # 否则裸 updateContent（省整页 JS 包装，MB 级 IPC 载荷下降）。
                 _needs_save_restore = self._tool_dom_dirty or bool(getattr(self, "_restore_finished_ids", set()))
+                _t_ser = time.perf_counter()
                 if _needs_save_restore:
                     _gen = self._tool_dom_dirty_gen
-                    self.page().runJavaScript(
-                        self._build_save_and_restore_js(html_content, getattr(self, "_restore_finished_ids", set())),
-                        lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g),
+                    _js_code = self._build_save_and_restore_js(
+                        html_content, getattr(self, "_restore_finished_ids", set())
                     )
+                    _ser_ms = (time.perf_counter() - _t_ser) * 1000
+                    _render_ms = (_t_ser - _t_enter) * 1000
+                    # 🐛 打点默认也打（只在"慢"时打，常规一两行/条消息，噪声可忽略）：
+                    # 结束态卡顿必须靠数据定位，不能靠猜。DRIFOX_FINISH_TIMING=1 强制全量。
+                    if FINISH_TIMING_ENABLED or _render_ms >= 20 or _ser_ms >= 8:
+                        logger.info(
+                            f"[finish-render] path=save_restore md={len(self._markdown_text)} "
+                            f"html={len(html_content)} render={_render_ms:.1f}ms dumps={_ser_ms:.1f}ms"
+                        )
+                    self.page().runJavaScript(_js_code, lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g))
                 else:
+                    _payload = json.dumps(html_content).decode("utf-8")
+                    _ser_ms = (time.perf_counter() - _t_ser) * 1000
+                    _render_ms = (_t_ser - _t_enter) * 1000
+                    if FINISH_TIMING_ENABLED or _render_ms >= 20 or _ser_ms >= 8:
+                        logger.info(
+                            f"[finish-render] path=bare md={len(self._markdown_text)} "
+                            f"html={len(html_content)} render={_render_ms:.1f}ms dumps={_ser_ms:.1f}ms"
+                        )
                     self.page().runJavaScript(
-                        f"updateContent({json.dumps(html_content).decode('utf-8')});",
+                        f"updateContent({_payload});",
                         lambda _result: None,
                     )
                 # 🐛 修复（编辑工具框运行中消失）：不再同步清除 _tool_dom_dirty——
@@ -9845,6 +9926,15 @@ class CodeWebViewer(QWebEngineView):
                 self.page().runJavaScript("if(typeof window._flipArm==='function')window._flipArm(2000);")
         except RuntimeError:
             pass
+        # ── 打点：记录"结束这一拍"的起点，首次高度上报时结算 JS 落地+布局耗时 ──
+        # （render/dumps 只覆盖主线程，真正的 innerHTML 解析与重排在 WebEngine 侧，
+        #  这一段只能靠"渲染派发 → 首个 reportHeight"的时间差来度量）
+        if FINISH_TIMING_ENABLED:
+            logger.info(
+                f"[finish-render] begin md={len(self._markdown_text or '')} "
+                f"finished_tools={len(getattr(self, '_restore_finished_ids', set()) or set())}"
+            )
+        self._finish_t0 = time.perf_counter()
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间
         # think-streaming（展开）应保持，只有历史会话加载走非流式分支
@@ -11710,9 +11800,13 @@ class MessageCard(SimpleCardWidget):
         self._height_anim.setDuration(0)  # 设置为0相当于禁用插值
         self._target_viewer_height = 40
         self._last_applied_viewer_height = 40
-        # 结束态高度缓动窗口（monotonic 截止时刻；0 = 无窗口）。由
-        # MessageCard.finish_streaming 打开，_update_height 消费一次即失效。
+        # 结束态高度缓动窗口（monotonic 截止时刻；0 = 无窗口）+ 剩余可用次数。
+        # 由 MessageCard.finish_streaming 打开，_update_height 用尽预算即失效。
         self._finish_height_anim_until = 0.0
+        self._finish_height_anim_left = 0
+        self._finish_height_anim_active = False
+        # 结束态打点起点（0 = 无待结算的结束拍）
+        self._finish_t0 = 0.0
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
@@ -13585,8 +13679,11 @@ class MessageCard(SimpleCardWidget):
         maximumHeight 只是一个**上限**，放宽到终值不会造成可见跳变；真正的
         可见高度由 viewer 的固定高度驱动，故缓动 viewer 即可平滑整体。
         """
-        # 窗口只服务一次收敛：进入即消费
-        self._finish_height_anim_until = 0.0
+        # 消费一次预算；预算用尽则关闭窗口
+        self._finish_height_anim_left = max(0, int(getattr(self, "_finish_height_anim_left", 0)) - 1)
+        if self._finish_height_anim_left <= 0:
+            self._finish_height_anim_until = 0.0
+        self._finish_height_anim_active = True
         try:
             self._height_anim.stop()
             self._height_anim.setDuration(FINISH_HEIGHT_ANIM_MS)
@@ -13606,6 +13703,12 @@ class MessageCard(SimpleCardWidget):
             # 重发的是**已应用过**的高度，没有新的高度增量。必须清零，否则
             # 外层列表会拿上一次的残值再补偿一次 → 视口被重复拖拽。
             self._last_height_delta = 0
+            # 🆕 结束态高度缓动收尾：缓动过程中只做增量补偿（不触发整段滚底），
+            # 收尾时补一次 _content_just_loaded，让 main_widget 把视口真正钉到底
+            # （否则结束态会停在"补偿后的位置"而不是底部）。
+            if self._finish_height_anim_active:
+                self._finish_height_anim_active = False
+                self._content_just_loaded = True
             self.heightChanged.emit(self._last_applied_viewer_height)
             layout = self.layout()
             if layout:
@@ -14102,15 +14205,14 @@ class MessageCard(SimpleCardWidget):
                     # 避免骨架就绪前的窗口期显示成"巨高空白卡片"。
                     pooled.setMinimumHeight(40)
                     pooled.setFixedHeight(40)
-                    # 🐛 复用卡片空白根因修复：release 时 reset_for_reuse 的
-                    # setHtml("", about:blank) 已把骨架与 JS 全部清空，但
-                    # _is_js_ready 残留 True → set_content 直接 runJavaScript
-                    # 打在空页上（updateContent 不存在，静默失败），且
-                    # contentReady 永不再次触发 → 卡片永久空白。
-                    # 因此复用必须重置 JS 就绪态并重新加载骨架，与新建等价；
-                    # 后续 set_content 会因 JS 未就绪 defer，由 _on_js_ready 补渲。
-                    pooled._is_js_ready = False
-                    pooled._load_skeleton()
+                    # 🐛 复用卡片空白防护：正常路径下 reset_for_reuse 会**保留骨架**
+                    # （只清空内容），JS 仍是就绪的，这里无需任何重载 —— 复用成本
+                    # 因此只剩一次轻量 DOM 清理（大会话加载时的内存/CPU 关键）。
+                    # 仅当骨架根本没加载成功（_is_js_ready=False，如首次加载被打断）
+                    # 才补一次 _load_skeleton，避免把 runJavaScript 打在空页上
+                    # （updateContent 不存在 → 静默失败 → 卡片永久空白）。
+                    if not getattr(pooled, "_is_js_ready", False):
+                        pooled._load_skeleton()
                     self.viewer = pooled
                 except Exception:
                     # 骨架重载失败（C++ 对象已删除等）：弃用该实例，回退新建
@@ -15501,6 +15603,7 @@ class MessageCard(SimpleCardWidget):
             # 历史会话加载（history=True）不打开——那是首帧建卡，无需过渡。
             if not history:
                 self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
+                self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
                 self.viewer.finish_streaming(keep_dock=False if history else self._has_active_tools())
                 if hasattr(self.viewer, "_cleanup_render_cache"):

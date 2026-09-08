@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import MaskDialogBase
+from qfluentwidgets import MaskDialogBase, SmoothScrollDelegate
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
@@ -115,6 +115,7 @@ class TextViewOverlay(OverlayBase):
         self._on_save = on_save
         self._edit = QPlainTextEdit(text)
         self._edit.setReadOnly(not editable)
+        SmoothScrollDelegate(self._edit)  # 平滑滚动（与主程序同款引擎）
         self._edit.setStyleSheet(
             f"""
             QPlainTextEdit {{
@@ -177,6 +178,7 @@ class DreamRevisionOverlay(OverlayBase):
         self._list = QListWidget()
         self._list.setStyleSheet(self._list_style())
         self._list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        SmoothScrollDelegate(self._list)  # 平滑滚动（与主程序同款引擎）
         self._list.setFixedWidth(250)
         for rev in revisions:
             item = QListWidgetItem()
@@ -190,6 +192,7 @@ class DreamRevisionOverlay(OverlayBase):
 
         self._preview = QPlainTextEdit()
         self._preview.setReadOnly(True)
+        SmoothScrollDelegate(self._preview)  # 平滑滚动（与主程序同款引擎）
         self._preview.setPlaceholderText("选择左侧版本，查看它保存的记忆快照")
         self._preview.setStyleSheet(self._edit_style())
         columns.addWidget(self._preview, 1)
