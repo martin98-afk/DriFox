@@ -1810,8 +1810,13 @@ def _inject_tag_cards(md_text: str, completed: bool = True, compact: bool = Fals
     return result
 
 
+# 历史渲染"重负载字段"每块上限 (result, diff, echarts)。
+# 2026-09-09 内存治理：大会话卡 HTML 达 120~473KB，大头是工具块 diff/echarts。
+_HISTORY_TOOL_CAPS = (800, 3000, 8000)
+
+
 @lru_cache(maxsize=128)
-def _render_tool_block_content(content: str, compact: bool = False) -> str:
+def _render_tool_block_content(content: str, compact: bool = False, heavy_caps=None) -> str:
     """
     渲染工具块内容为HTML。
 
@@ -2016,6 +2021,15 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
     for key in args_dict:
         if isinstance(args_dict[key], str):
             args_dict[key] = args_dict[key].replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+    # ── 历史渲染重负载治理（heavy_caps 仅历史卡传入）──
+    if heavy_caps:
+        _r_cap, _d_cap, _e_cap = heavy_caps
+        if _r_cap and len(tool_result) > _r_cap:
+            tool_result = tool_result[:_r_cap] + " …[结果过长，已省略 " + str(len(tool_result) - _r_cap) + " 字符]"
+        if _d_cap and len(diff_content) > _d_cap:
+            diff_content = diff_content[:_d_cap] + " …[diff 过长，已省略 " + str(len(diff_content) - _d_cap) + " 字符]"
+        if _e_cap and len(echarts_content) > _e_cap:
+            echarts_content = ""
     return render_tool_block(
         tool_name,
         args_dict,
@@ -2253,7 +2267,9 @@ def _extract_by_regex_fallback(content: str) -> dict:
     return args
 
 
-def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = False) -> str:
+def _inject_tool_blocks(
+    md_text: str, completed: bool = True, compact: bool = False, heavy_caps=None
+) -> str:
     """注入工具块HTML，类似think块"""
     if not md_text:
         return md_text
@@ -2272,7 +2288,7 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
         if end_idx != -1:
             content = md_text[start_idx + len("<tool>") : end_idx]
-            parts.append(_render_tool_block_content(content, compact=compact))
+            parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
             i = end_idx + len("</tool>")
         else:
             # 🐛 修复（工具源码泄漏）：未闭合块此前原样保留 → md.convert 把
@@ -2295,7 +2311,7 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
                 content = content[:_next_open]
             if completed:
                 if content.strip():
-                    parts.append(_render_tool_block_content(content, compact=compact))
+                    parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
             elif content.strip():
                 _name_m = _TOOL_NAME_PATTERN.search(content)
                 parts.append(
@@ -2307,7 +2323,7 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
                     )
                 )
             if _rest:
-                parts.append(_inject_tool_blocks(_rest, completed, compact))
+                parts.append(_inject_tool_blocks(_rest, completed, compact, heavy_caps))
             break
     return "".join(parts)
 
@@ -2515,7 +2531,7 @@ _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 @lru_cache(
     maxsize=16
 )  # 256→64→16：>200KB 大文本已走 __wrapped__ 绕过缓存；实际唯一渲染内容通常 < 16 条，16 与 64 命中率差异 <5%，内存占用 -75%
-def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> str:
+def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False, heavy_caps=None) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
     """
@@ -2527,7 +2543,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
     # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
-    processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
+    processed_md = _inject_tool_blocks(processed_md, True, compact=compact, heavy_caps=heavy_caps)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     processed_md = _restore_fenced_code(processed_md, _fences)
@@ -2542,7 +2558,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
         return f"<pre>{escape(raw_md)}</pre>"
 
 
-def _render_markdown_to_html_cached(raw_md: str, compact: bool = False) -> str:
+def _render_markdown_to_html_cached(raw_md: str, compact: bool = False, heavy_caps=None) -> str:
     """
     带内存保护的 Markdown 渲染函数。
     - 对于超过阈值的文本，跳过缓存直接渲染
@@ -2555,9 +2571,9 @@ def _render_markdown_to_html_cached(raw_md: str, compact: bool = False) -> str:
     # 大文本跳过缓存，防止内存膨胀 — 用 __wrapped__ 绕过 LRU，不清空缓存
     text_size = len(raw_md.encode("utf-8"))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
-        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, compact=compact)
+        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, compact=compact, heavy_caps=heavy_caps)
 
-    return _render_markdown_to_html_cached_impl(raw_md, compact=compact)
+    return _render_markdown_to_html_cached_impl(raw_md, compact=compact, heavy_caps=heavy_caps)
 
 
 # ============================================================
@@ -2623,6 +2639,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     streaming = snapshot["streaming"]
     compact = snapshot["compact"]
     icon_prefix = snapshot["icon_prefix"]
+    heavy_caps = snapshot.get("heavy_caps")  # 历史卡重负载上限（None=不限）
 
     if not streaming:
         # 非流式分支（历史加载 / 流式结束调用方已切非流式）
@@ -2633,7 +2650,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
         # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
         _fences, safe_md = _extract_fenced_code(safe_md)
         processed_md = _inject_think_cards(safe_md, True, compact=compact)
-        processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
+        processed_md = _inject_tool_blocks(processed_md, True, compact=compact, heavy_caps=heavy_caps)
         processed_md = _inject_hook_blocks(processed_md, True)
         processed_md = _inject_tag_cards(processed_md, True, compact=compact)
         processed_md = _restore_fenced_code(processed_md, _fences)
@@ -9585,6 +9602,7 @@ class CodeWebViewer(QWebEngineView):
             "compact": compact,
             "pygments_style": _style,
             "icon_prefix": _ICON_PREFIX_CACHE,
+            "heavy_caps": _HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
             "code_font_size": _CODE_FONT_SIZE,
         }
 

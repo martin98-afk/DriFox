@@ -113,8 +113,8 @@ class TestFinishTickCost:
         body = _func_body(src_text, "def _perform_update(self):")
         non_streaming = body.split("if not self._streaming:", 1)[1].split("以下为流式模式", 1)[0]
         assert "self._sequence_render(" in non_streaming, "长历史卡应走线程池（真机 40~120ms/张）"
-        # 异步分支必须带着"非结束态"守卫
-        assert "not self._final_render_pending" in non_streaming, (
+        # 异步分支必须带着"非结束态"守卫（getattr 形式防御历史实例缺属性）
+        assert 'not getattr(self, "_final_render_pending", False)' in non_streaming, (
             "异步分支必须排除流式结束的终渲染（_final_render_pending）"
         )
         assert "_cleanup_render_cache" in body, "需保留为何结束态不能异步的说明"
