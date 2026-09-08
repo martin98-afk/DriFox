@@ -3,6 +3,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.10b2] - 2026-09-08
+
+自上一版本以来的变更 | 提交数：10 · 文件变更：45 · +3273/-302 | 贡献者：mading
+
+### ✨ 新功能 (New Features)
+
+- **WebView 池化复用** (`app/widgets/webview_pool.py`, `app/widgets/message_card.py`, `app/main_widget.py`): 引入 `WebViewPool` 统一管理 `CodeWebViewer` 实例，新增 `reset_for_reuse` 在归还前清理状态；`MessageCard` 切到池化获取释放路径，避免每次新建 Chromium 初始化开销；同步重构 viewer 切换时的信号重连。
+- **Height Commit Batch 协同提交** (`app/widgets/height_commit_batch.py`, `app/widgets/resize_orchestrator.py`, `app/widgets/tab_manager_window.py`): 新增 `HeightCommitBatch` 合并多张卡片在 resize 期间的 height 提交，提升窗口缩放视觉稳定性；`ResizeOrchestrator` 统一协调多标签页的同步，阻止非活跃页面干扰当前页；`CodeWebViewer` 在 resize 锁期间延后 height 上报，结束后统一补偿。
+- **_x_idx 透传保护 tool 参数预览** (`app/core/message_content.py`, `plugins/agent_trace/ui/detail_panel.py`): 消息归一化阶段保留 `_x_idx`，避免预览页因序号丢失导致 tool arguments 显示为空。
+- **provider 卡内嵌模型列表编辑器** (`app/widgets/cards/settings/provider_edit_card.py`, `app/widgets/cards/global_card_controller.py`, `app/widgets/model_list_edit_dialog.py`): provider 编辑卡下方嵌入模型列表编辑器（编辑按钮切换），配置名行下沉到 provider 行下方；`ModelListEditorWidget` 最大高度 200 + 统一滚动条样式 + `refresh_style` 实时响应主题/字号；新增 `GlobalCardController.refresh_theme_styles()` 让挂在 TabManager 层的全局卡片（主窗 `findChildren` 不可见）也能即时响应主题变更。
+- **首 token 时延统计 (ttft_ms)** (`app/core/message_content.py`, `app/core/workers/chat_worker.py`, `plugins/agent_trace/ui/detail_panel.py`, `plugins/agent_trace/ui/trace_collector.py`): 消息归一化阶段记录首 token 延迟 `ttft_ms`，UI 统计与 trace 详情同步展示。
+- **OpenGL ANGLE 支持 + Intel 集显崩溃捕获** (`main.py`, `app/utils/veh_minidump.py`): 启用 ANGLE 后端兜底 Intel 集显渲染异常；新增 `veh_minidump` 模块对崩溃做进程内 minidump 捕获，配套自检单测。
+- **新建项目流式护栏** (`app/main_widget.py`): 新建项目动作期间阻断流式响应进入会话上下文，避免上下文污染。
+- **临时助手 session override 持久化 + 注入加固** (`plugins/assistant_hub/assistant_manager.py`, `plugins/assistant_hub/hooks/inject_assistant.py`, `plugins/assistant_hub/hooks/project_notes.py`): 临时助手的 session override 持久化落地，注入路径同步加固，新增相关 hook 与 manager 单测。
+
+### ⚡ 性能优化 (Performance)
+
+- **agent_trace 详情文本页懒构建** (`plugins/agent_trace/ui/detail_panel.py`): 详情页首开由 0.9s 降至 ~0.3s，避免切换 tab 时全量构建未激活页。
+- **content stack overlay keep-alive** (`app/widgets/tab_manager_window.py`): 全卡片 tab 切换场景下取消 overlay 的 `show` 传递，省去 300ms 传播耗时。
+
 ## [v0.5.9] - 2026-09-08 (重新发布 v2)
 
 自上一版本以来的变更 | 提交数：35 · 文件变更：389 · +18620/-16233 | 贡献者：dingma, drifox-bot, mading
