@@ -28,6 +28,16 @@ warnings.filterwarnings("ignore")
 os.environ.setdefault("PYPINYIN_NO_DICT_COPY", "1")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
+# ========== Qt 侧 OpenGL 走 ANGLE(D3D11)（Intel 核显 OpenGL 崩溃修复）==========
+# 根因：QtWebEngine 网页帧合成走 Qt Quick 场景图，默认 OpenGL 后端命中本机
+# Intel Xe-LP 驱动（igxelpicd64.dll）的 OpenGL 实现，流式渲染高频合成期崩溃。
+# 方案：强制 Qt 的 GL 经 ANGLE 翻译为 D3D11 实现，绕开 Intel OpenGL ICD 的
+# 代码路径，同时保留 GL 语义（WebEngine 纹理共享在 ANGLE 上是官方支持路径）。
+# 注意：不能用 QSG_RHI_BACKEND=d3d11 —— Qt 5.15 中 WebEngine 的 GL 纹理无法
+# 与 RHI D3D11 合成器互操作，会导致消息卡片黑屏（已实测踩坑）。
+# 回退：外部设 QT_OPENGL=desktop 恢复桌面 GL。
+os.environ.setdefault("QT_OPENGL", "angle")
+
 # ========== Chromium 进程治理（WebEngine 内存占用的根因）==========
 # 必须在 QApplication 创建之前设置：QtWebEngine 在首次初始化时读取该环境变量，
 # 之后修改无效（这也是它必须放在 main.py 最顶部的原因）。
@@ -75,9 +85,9 @@ _CHROMIUM_FLAGS = (
     " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
     " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染
     " --js-flags=--max-old-space-size=128"  # 限制单 renderer JS 堆，防单页膨胀
-    + " --enable-low-end-device-mode"  # 🔧 Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
+     + " --enable-low-end-device-mode"  # 🔧 Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
     " --disable-smooth-scrolling"  # 合成器平滑滚动动画：卡内滚动只是安全网场景，外层滚动由 Qt 承载
-    " --disable-features=Translate,MediaRouter,optimizeHints"  # 翻译/媒体路由常驻线程/谷歌优化提示，纯开销
+    " --disable-features=Translate,MediaRouter,optimizeHints,CalculateNativeWinOcclusion"  # 翻译/媒体路由常驻线程/谷歌优化提示，纯开销；窗口遮挡计算在多 WebEngine 卡片下有已知崩溃关联，防御性禁用
     " --disable-canvas-aa --disable-2d-canvas-clip-aa"  # 2D canvas 抗锯齿关闭：echarts 软件光栅下省内存提速（锯齿微增）
 )
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _CHROMIUM_FLAGS)
@@ -107,6 +117,18 @@ else:
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
+# ========== 崩溃捕获（VEH → minidump + C 栈，仅 Windows）==========
+# Intel 核显驱动崩溃发生在 native 层，Python traceback 看不到调用链；
+# 此捕获器在致命异常时自动落 logs/crash/*.dmp + 模块!RVA 级 C 栈日志。
+# 回退：DRIFOX_NO_VEH=1 跳过安装。确认驱动修复稳定后可移除本段。
+if os.name == "nt":
+    try:
+        from tools.veh_minidump import install as _install_veh
+
+        _install_veh()
+    except Exception:
+        pass  # 捕获器失败绝不阻塞启动
+
 
 def main():
     """启动 LLM Chatter"""
@@ -134,6 +156,9 @@ def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+    # OpenGL 走 ANGLE(D3D11)：绕开 Intel OpenGL ICD 缺陷路径（见文件顶部说明）。
+    # 必须在 QApplication 与 WebEngine 导入之前设置。
+    QApplication.setAttribute(Qt.AA_UseOpenGLES)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，

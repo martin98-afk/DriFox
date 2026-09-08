@@ -22,9 +22,7 @@ logger = logging.getLogger(__name__)
 
 _THIS = Path(__file__).resolve()
 _MAX_CATEGORY = 8
-# 分类总数上限：宁可挤进现有分类也不滥建新类；实在装不下才允许新建
-_MAX_CATEGORIES = 6
-# 全库经验条目总数超过该值时触发自动压缩（反思落库后检查）
+# 全库经验条目总数超过该值时触发自动压缩（反思落库后检查）；软限制：只整理不拒绝记录
 _CONSOLIDATE_THRESHOLD = 50
 
 
@@ -89,8 +87,8 @@ def _read(p: Path) -> str:
 def record_entry(aid_dir: Path, category: str, content: str) -> Dict:
     """记录一条经验到分类文件并重建索引；同分类同文本去重。
 
-    分类上限防御：新分类且现有分类数已达 _MAX_CATEGORIES → 拒绝，
-    返回现有分类列表（调用方转述给 LLM 自行归入）。
+    分类数为软限制：不做硬性拒绝，靠提示词引导 LLM 优先复用已有分类；
+    条目总量超水位时由自动压缩（consolidate）整理。
     """
     cat = normalize_category(category)
     content = (content or "").strip()
@@ -99,8 +97,6 @@ def record_entry(aid_dir: Path, category: str, content: str) -> Dict:
     d = experience_dir(aid_dir)
     d.mkdir(parents=True, exist_ok=True)
     f = d / f"{_safe_name(cat)}.md"
-    if not f.exists() and len(existing_categories(aid_dir)) >= _MAX_CATEGORIES:
-        return {"added": False, "reason": "category_limit", "categories": existing_categories(aid_dir)}
     existing = _read(f)
     if content in existing:
         return {"added": False, "reason": "duplicate"}
