@@ -4069,7 +4069,40 @@ class MarketplaceCard(QWidget):
             InfoBar.success(f"{name} 安装成功", "", duration=2000, parent=bar_parent)
         else:
             self._update_row_state(name, installed=False, error=True)
-            InfoBar.error(f"{name} 安装失败", "请检查网络或插件源", duration=3000, parent=bar_parent)
+            if self._is_git_missing(get_installer().last_error):
+                # 环境缺 git：提示准确原因 + 自动回对话引导安装 git
+                InfoBar.error(f"{name} 安装失败", "未检测到 git，已为你引导安装", duration=4000, parent=bar_parent)
+                self._guide_install_git()
+            else:
+                InfoBar.error(f"{name} 安装失败", "请检查网络或插件源", duration=3000, parent=bar_parent)
+
+    def _is_git_missing(self, err: str) -> bool:
+        """判断安装错误是否源于 git 可执行文件缺失（installer 已转成 GitNotFoundError 文案）"""
+        return "未检测到 git" in (err or "")
+
+    def _guide_install_git(self):
+        """git 缺失引导：隐藏市场卡、切回对话、把「本地安装git」填入输入框
+
+        installer.last_error 为 GitNotFoundError 文案时由 _on_install_done 触发。
+        全程 try/except 兜底：引导失败（如窗口未就绪）不影响安装失败的正常提示。
+        """
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            UIPluginRegistry.get_instance().hide_floating_card_globally("plugin-marketplace")
+            win = TabManagerWindow.get_instance()
+            mw = win.get_current_window() if win is not None else None
+            if mw is None or not hasattr(mw, "input_area"):
+                return
+            area = mw.input_area
+            area.setPlainText("本地安装git")
+            cursor = area.textCursor()
+            cursor.movePosition(cursor.End)
+            area.setTextCursor(cursor)
+            area.setFocus()
+        except Exception as e:
+            logger.warning(f"[Marketplace] git 缺失引导失败（忽略）: {e}")
 
     def _on_install_error(self, name: str, err: str):
         """安装出错"""

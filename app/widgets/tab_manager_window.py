@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
     QGraphicsOpacityEffect,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QStackedWidget,
@@ -467,21 +468,85 @@ class _WorkbenchFrame(QFrame):
         return super().minimumSizeHint()
 
 
-class _ContentStack(QStackedWidget):
-    """对话区覆盖层堆栈：覆盖层可见时可归零 minimumSizeHint（同 _WorkbenchFrame 思路）
+class _ContentStack(QWidget):
+    """对话区覆盖层堆栈（叠放实现）：覆盖层页首次 show 后永不 hide。
 
-    QStackedLayout::minimumSize 取**所有页**的最大值：page0 聊天页（输入区、
-    欢迎页等）的最小宽会透过整条 splitter 链顶住把手，导致覆盖层卡片
-    （agent_trace 等 full 卡）无法被左右侧边栏拖拽挤压——窗口 resize 在到达
-    同一下限前的区间内仍有效，感知上就成了「缩窗口能压窄、拖把手压不了」。
+    为什么不用 QStackedWidget（2026-09-08 排查，见
+    docs/superpowers/specs/2026-09-08-content-stack-overlay-switch-design.md）：
+    QStackedWidget 切到覆盖层页 = 整棵覆盖层子树 hidden→visible 的 show 传播
+    （polish + 逐控件 Show 事件），实测 270-335ms，每次从对话切走都重付。
+    叠放实现下覆盖层页首次 show 后常驻 visible（被对话页遮住），切换只
+    raise_/lower + hide/show 对话页（双向 <12ms）。
 
-    覆盖层可见期间聊天页本就隐藏，其下限不应参与布局：归零后实际下限只剩
-    覆盖层卡片自身（内部控件均已放开）；卡片关闭恢复聊天页正常下限。
+    QStackedLayout::minimumSize 取**所有页**的最大值：page0 聊天页的最小宽会
+    透过 splitter 链顶住把手。本实现 minimumSizeHint 只取**当前顶层可见页**，
+    语义更准；`set_min_hint_disabled` 归零逻辑保留。
     """
+
+    currentChanged = pyqtSignal(int)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._min_hint_disabled = False
+        self._pages: List[QWidget] = []
+        self._current = -1
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(0)
+        self._grid = grid
+
+    # ── QStackedWidget 兼容 API ──
+
+    def addWidget(self, w: QWidget) -> int:
+        """加入堆栈。首页可见并置顶；后续页可见但在下层（被首页遮住）。"""
+        idx = len(self._pages)
+        self._pages.append(w)
+        self._grid.addWidget(w, 0, 0)
+        if idx == 0:
+            w.setVisible(True)
+            self._current = 0
+        else:
+            w.setVisible(True)
+            w.lower()  # 压到首页之下，不遮对话区
+        return idx
+
+    def widget(self, i: int) -> Optional[QWidget]:
+        if 0 <= i < len(self._pages):
+            return self._pages[i]
+        return None
+
+    def currentIndex(self) -> int:
+        return self._current
+
+    def currentWidget(self) -> Optional[QWidget]:
+        return self.widget(self._current)
+
+    def setCurrentIndex(self, i: int) -> None:
+        if i == self._current or not (0 <= i < len(self._pages)):
+            return
+        new = self._pages[i]
+        old = self._pages[self._current] if self._current >= 0 else None
+        self._current = i
+        if i == 0:
+            # 回对话：show 对话页（实测 ~10ms）+ raise 盖住覆盖层。
+            # ⚠️ 覆盖层页**不 hide**——保活不变式，消灭下次切换的 show 传播。
+            if old is not None:
+                old.lower()
+            new.show()
+            new.raise_()
+        else:
+            # 去覆盖层：覆盖层 raise 到顶；对话页 hide（实测 ~11ms，
+            # 省布局 + 杜绝焦点穿透到被遮的对话区）
+            new.show()
+            new.raise_()
+            if old is not None:
+                old.hide()
+        self.currentChanged.emit(i)
+
+    def setCurrentWidget(self, w: QWidget) -> None:
+        i = self._pages.index(w) if w in self._pages else -1
+        if i >= 0:
+            self.setCurrentIndex(i)
 
     def set_min_hint_disabled(self, disabled: bool) -> None:
         """切换「最小尺寸提示归零」；幂等，切换后主动 updateGeometry 让布局重算"""
@@ -494,7 +559,8 @@ class _ContentStack(QStackedWidget):
     def minimumSizeHint(self):
         if self._min_hint_disabled:
             return QSize(0, 0)
-        return super().minimumSizeHint()
+        w = self.currentWidget()
+        return w.minimumSizeHint() if w is not None else QSize(0, 0)
 
 
 class TabManagerWindow(FramelessWindow):
@@ -867,6 +933,16 @@ class TabManagerWindow(FramelessWindow):
                     _c.refresh_style()
                 except Exception:
                     pass
+        # 刷新全局卡片本体（系统设置/服务商/Hook/MCP 编辑等挂在本窗口层，
+        # 不在 main_widget widget 树内，主题/字号刷新链扫不到，需显式触发）
+        try:
+            from app.widgets.cards.global_card_controller import get_global_card_controller
+
+            _controller = get_global_card_controller()
+            if _controller is not None:
+                _controller.refresh_theme_styles()
+        except Exception:
+            logger.exception("[TabManagerWindow] global cards theme refresh failed")
         # 重画所有 tab 的项目图标：仅在 scale_icon_size 变化时才需重建
         # （纯主题色切换不影响图标，跳过可避免 QPainter 开销）
         from app.utils.design_tokens import scale_icon_size as _scale_size

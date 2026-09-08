@@ -1,124 +1,92 @@
 # -*- coding: utf-8 -*-
 """
-极简模型列表编辑器
+极简模型列表编辑器（嵌入式 Widget）
 Enter 新增，Delete 删除，双击编辑，拖拽排序
 """
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (
-    QDialog,
-    QHBoxLayout,
-    QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QPushButton,
-    QVBoxLayout,
-)
 
-from app.utils.design_tokens import scale_font_size
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QLabel, QListWidget, QListWidgetItem, QVBoxLayout, QWidget
+
+from app.utils.design_tokens import Colors, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css
 
 
-class ModelListEditDialog(QDialog):
-    """极简模型列表编辑器"""
+class ModelListEditorWidget(QWidget):
+    """极简模型列表编辑器 — 可内嵌到表单卡片中，点击按钮切换显隐"""
 
-    def __init__(self, models: list, parent=None):
+    def __init__(self, models: list | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("编辑模型列表")
-        self.setMinimumWidth(380)
-        self.setMinimumHeight(320)
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: #1e1e1e;
+        self._init_ui(models or [])
+        self.refresh_style()
+
+    def _build_qss(self) -> str:
+        """构建主题 QSS（refresh_style 时重建，保证颜色/字号随系统）"""
+        Colors.refresh()
+        return f"""
+            QWidget {{
+                background: transparent;
             }}
             QListWidget {{
-                background-color: #252526;
-                color: #cccccc;
-                border: 1px solid #3c3c3c;
+                background-color: {Colors.CONTENT_BG};
+                color: {Colors.TEXT_PRIMARY};
+                border: 1px solid {Colors.BORDER};
                 border-radius: 6px;
                 {get_font_family_css()}
                 font-size: {scale_font_size(13)}px;
                 outline: none;
             }}
             QListWidget::item {{
-                background-color: #252526;
+                background-color: transparent;
                 padding: 4px 8px;
                 border-radius: 3px;
             }}
             QListWidget::item:hover {{
-                background-color: #2a2d2e;
+                background-color: {Colors.HOVER_BG};
             }}
             QListWidget::item:selected {{
-                background-color: #094771;
-                color: #ffffff;
+                background-color: {Colors.INPUT_FOCUS_BORDER};
+                color: {Colors.TEXT_PRIMARY};
             }}
             QListWidget::item:selected:hover {{
-                background-color: #1177bb;
+                background-color: {Colors.HOVER_BG_STRONG};
             }}
-            QPushButton {{
-                background: transparent;
-                border: 1px solid #3c3c3c;
-                border-radius: 4px;
-                color: #cccccc;
-                {get_font_family_css()}
-                font-size: {scale_font_size(12)}px;
-                padding: 4px 12px;
-            }}
-            QPushButton:hover {{
-                border-color: #007acc;
-                color: #ffffff;
-            }}
-        """)
-        self._init_ui(models)
+        """ + get_unified_scrollbar_style(6)
 
-    def _init_ui(self, models):
+    def refresh_style(self):
+        """主题/字号变更时刷新样式（由宿主卡片 refresh_style 链调用）"""
+        self.setStyleSheet(self._build_qss())
+        self.hint_label.setStyleSheet(
+            f"background: transparent; border: none; {get_font_family_css()}"
+            f" font-size: {scale_font_size(11)}px; padding: 0;"
+        )
+
+    def _init_ui(self, models: list):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
         # 提示行
-        hint_label = QLabel("<span style='color:#808080;'>双击编辑</span> · <span style='color:#606060;'>Enter 新增</span> · <span style='color:#606060;'>Delete 删除</span> · <span style='color:#606060;'>拖拽排序</span>")
-        hint_label.setStyleSheet(f"background: transparent; border: none; {get_font_family_css()} font-size: {scale_font_size(11)}px; padding: 0;")
-        layout.addWidget(hint_label)
+        self.hint_label = QLabel(
+            "<span style='color:#808080;'>双击编辑</span> · <span style='color:#606060;'>Enter 新增</span>"
+            " · <span style='color:#606060;'>Delete 删除</span> · <span style='color:#606060;'>拖拽排序</span>"
+        )
+        self.hint_label.setStyleSheet(
+            f"background: transparent; border: none; {get_font_family_css()}"
+            f" font-size: {scale_font_size(11)}px; padding: 0;"
+        )
+        layout.addWidget(self.hint_label)
 
         # 列表
         self.listWidget = QListWidget()
+        # 最大高度：内容少时自适应矮，超出封顶后内部滚动
+        self.listWidget.setMaximumHeight(200)
         self.listWidget.setDragDropMode(QListWidget.InternalMove)
         self.listWidget.setDefaultDropAction(Qt.MoveAction)
         self.listWidget.setSelectionBehavior(QListWidget.SelectRows)
-        self.listWidget.setEditTriggers(
-            QListWidget.DoubleClicked | QListWidget.EditKeyPressed
-        )
+        self.listWidget.setEditTriggers(QListWidget.DoubleClicked | QListWidget.EditKeyPressed)
         self.listWidget.itemDoubleClicked.connect(self._start_edit)
         self.listWidget.addItems(models)
         layout.addWidget(self.listWidget)
-
-        # 底部按钮
-        bottom = QHBoxLayout()
-        bottom.addStretch()
-
-        cancelBtn = QPushButton("取消")
-        cancelBtn.setFixedSize(60, 28)
-        cancelBtn.clicked.connect(self.reject)
-        bottom.addWidget(cancelBtn)
-
-        okBtn = QPushButton("确定")
-        okBtn.setFixedSize(60, 28)
-        okBtn.setStyleSheet(f"""
-            QPushButton {{
-                background: #0078d4;
-                border: none;
-                border-radius: 4px;
-                color: #fff;
-                {get_font_family_css()}
-                font-size: {scale_font_size(12)}px;
-            }}
-            QPushButton:hover {{
-                background: #1a8ae5;
-            }}
-        """)
-        okBtn.clicked.connect(self.accept)
-        bottom.addWidget(okBtn)
-
-        layout.addLayout(bottom)
 
         self.listWidget.setFocus()
 
@@ -138,10 +106,6 @@ class ModelListEditDialog(QDialog):
             self._delete_selected()
             return
 
-        if key == Qt.Key_Escape:
-            self.reject()
-            return
-
         super().keyPressEvent(event)
 
     def _add_new(self):
@@ -158,5 +122,10 @@ class ModelListEditDialog(QDialog):
         if row >= 0:
             self.listWidget.takeItem(row)
 
-    def get_models(self):
+    def set_models(self, models: list):
+        """装载模型列表（清空后填入）"""
+        self.listWidget.clear()
+        self.listWidget.addItems(models)
+
+    def get_models(self) -> list:
         return [self.listWidget.item(i).text() for i in range(self.listWidget.count())]

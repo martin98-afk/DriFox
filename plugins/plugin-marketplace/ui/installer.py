@@ -39,6 +39,15 @@ _COUNT_API_BASE = "https://countapi.mileshilliard.com/api/v1"
 _COUNT_KEY_PREFIX = "drifox-plugins-"
 _COUNT_UA = "DriFox/0.5 (+https://github.com/martin98-afk/drifox-plugins)"
 
+
+class GitNotFoundError(RuntimeError):
+    """git 可执行文件缺失（未安装或不在 PATH）
+
+    由 ``_sparse_clone._run`` 的 ``Popen(["git", ...])`` 抛 ``FileNotFoundError``
+    时转抛，供 UI 层识别「环境缺 git」并给出针对性引导（而非网络/源错误）。
+    消息即最终展示文案。
+    """
+
 # git 传输停滞自断：连续 30s 平均速度 < 1KB/s 视为连接已死（代理失效/半开），
 # git 自行断开报错。覆盖绝大多数网络挂死场景，避免走到总超时强杀。
 _GIT_STALL_ARGS = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30")
@@ -882,9 +891,16 @@ class PluginInstaller:
         cmd_timeout = _GIT_CMD_TIMEOUT if timeout is None else float(timeout)
 
         def _run(cmd):
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs
-            )
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs
+                )
+            except FileNotFoundError:
+                # git 可执行文件不存在（未安装或不在 PATH）：转抛专门异常，
+                # 让 UI 层能识别并引导用户安装，而非显示误导性的网络/源错误。
+                raise GitNotFoundError(
+                    "未检测到 git 可执行文件（git 未安装或不在 PATH），请先安装 git 后再安装插件"
+                ) from None
             try:
                 out, err = proc.communicate(timeout=cmd_timeout)
             except subprocess.TimeoutExpired:
@@ -929,6 +945,8 @@ class PluginInstaller:
     @staticmethod
     def _format_git_err(e: Exception) -> str:
         """从 git 异常里抽出 stderr/returncode 拼成一行可读消息"""
+        if isinstance(e, GitNotFoundError):
+            return str(e)
         if isinstance(e, subprocess.CalledProcessError):
             stderr = (e.stderr or "").strip()
             if stderr:

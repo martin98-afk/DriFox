@@ -69,7 +69,7 @@ _TABS_BY_KIND: Dict[EntryKind, Tuple[Tuple[str, str], ...]] = {
     EntryKind.SYSTEM: (
         ("system", "System Prompt"),
         ("tools", "Tools Schema"),
-        ("headers", "Headers"),
+        ("headers", "Info"),
     ),
     EntryKind.TOOL: (
         ("request", "Request"),
@@ -80,17 +80,17 @@ _TABS_BY_KIND: Dict[EntryKind, Tuple[Tuple[str, str], ...]] = {
     EntryKind.ASSISTANT: (
         ("preview", "Preview"),
         ("raw", "Raw"),
-        ("timing", "Timing"),
+        ("timing", "统计"),
     ),
     EntryKind.USER: (
         ("content", "Content"),
         ("raw", "Raw"),
-        ("headers", "Headers"),
+        ("headers", "Info"),
     ),
     EntryKind.CONTEXT: (
         ("content", "Content"),
         ("raw", "Raw"),
-        ("headers", "Headers"),
+        ("headers", "Info"),
     ),
 }
 
@@ -195,8 +195,7 @@ class _KVPage(QScrollArea):
         ui = pal.font_family
         self.setStyleSheet(
             "QScrollArea { background: transparent; border: none; }"
-            "QWidget { background: transparent; }"
-            + (unified_scrollbar(8) or "")
+            "QWidget { background: transparent; }" + (unified_scrollbar(8) or "")
         )
         for _row, k, v in self._rows:
             k.setStyleSheet(f"color: {pal.q('text_muted')}; font-family: '{ui}'; font-size: {fs}px; padding: 2px 0;")
@@ -247,10 +246,10 @@ class _TimingBar(QWidget):
             f.setPixelSize(max(9, self._base_px - 2))
             p.setFont(f)
             p.setPen(QColor(pal.text_muted))
-            p.drawText(QRect(0, 0, self.width(), 12), Qt.AlignLeft | Qt.AlignVCenter, format_duration(int(self._offset)))
             p.drawText(
-                QRect(0, 0, self.width(), 12), Qt.AlignRight | Qt.AlignVCenter, format_duration(int(self._dur))
+                QRect(0, 0, self.width(), 12), Qt.AlignLeft | Qt.AlignVCenter, format_duration(int(self._offset))
             )
+            p.drawText(QRect(0, 0, self.width(), 12), Qt.AlignRight | Qt.AlignVCenter, format_duration(int(self._dur)))
         finally:
             p.end()
 
@@ -376,8 +375,7 @@ class _ToolsPage(QWidget):
         self._json.setStyleSheet(
             f"QPlainTextEdit {{ background: transparent; color: {pal.q('text')}; border: none;"
             f" font-family: '{pal.mono_family if _MONO_FOR_JSON else pal.font_family}';"
-            f" font-size: {fs - 1}px; padding: 8px 16px; }}"
-            + (unified_scrollbar(8) or "")
+            f" font-size: {fs - 1}px; padding: 8px 16px; }}" + (unified_scrollbar(8) or "")
         )
 
 
@@ -448,24 +446,42 @@ class DetailPanel(QWidget):
         self._stack = QStackedWidget(self)
         outer.addWidget(self._stack, 1)
 
+        # 懒构造：request/response/raw 三个 QPlainTextEdit 首次切到对应 tab 才建。
+        # QText 控件群首次实例化成本高（实测 list+detail 段 ~0.9s 的大头），
+        # 详情默认不展开，四页大多用不上。_page_text 是默认页（首帧渲染依赖）保持同步。
         self._page_text = self._build_text_page(wrap=True)
-        self._page_request = self._build_text_page(wrap=True)
-        self._page_response = self._build_text_page(wrap=True)
-        self._page_raw = self._build_text_page(wrap=False)
+        self._page_request: Optional[QPlainTextEdit] = None
+        self._page_response: Optional[QPlainTextEdit] = None
+        self._page_raw: Optional[QPlainTextEdit] = None
         self._page_tools = _ToolsPage(self)
         self._page_kv = _KVPage(self)
-        self._slots = {
+        self._slots: Dict[str, Optional[QWidget]] = {
             "text": self._page_text,
-            "request": self._page_request,
-            "response": self._page_response,
-            "raw": self._page_raw,
+            "request": None,
+            "response": None,
+            "raw": None,
             "tools": self._page_tools,
             "kv": self._page_kv,
         }
         for w in self._slots.values():
-            self._stack.addWidget(w)
+            if w is not None:
+                self._stack.addWidget(w)
 
         self._apply_idle()
+
+    def _ensure_slot_page(self, slot: str):
+        """懒取 tab 页：request/response/raw 首次访问才构造并入栈。"""
+        page = self._slots.get(slot)
+        if page is not None:
+            return page
+        if slot not in ("request", "response", "raw"):
+            return None
+        page = self._build_text_page(wrap=(slot != "raw"))
+        self._slots[slot] = page
+        setattr(self, f"_page_{slot}", page)
+        self._stack.addWidget(page)
+        page.setStyleSheet(self._edit_qss(page))  # 补应用当前主题（构造晚于 set_palette）
+        return page
 
     def _build_text_page(self, wrap: bool) -> QPlainTextEdit:
         edit = QPlainTextEdit()
@@ -565,19 +581,27 @@ class DetailPanel(QWidget):
         ui = pal.font_family  # 一律系统 UI 字体（_MONO_FOR_JSON 时才对 JSON 用等宽）
         self.setStyleSheet("QWidget { background: transparent; }")
         self._title_bar.setStyleSheet(
-            f"QFrame#agentTraceDetailTitle {{ background: transparent;"
-            f" border-bottom: 1px solid {pal.q('border')}; }}"
+            f"QFrame#agentTraceDetailTitle {{ background: transparent; border-bottom: 1px solid {pal.q('border')}; }}"
         )
         self._close_btn.set_palette(pal)
         self._title_label.setStyleSheet(f"color: {pal.q('text')}; font-family: '{ui}'; font-size: {self._base_px}px;")
         self._meta_label.setStyleSheet(f"color: {pal.q('text_muted')}; font-family: '{ui}'; font-size: {fs}px;")
-        for edit in (self._page_text, self._page_request, self._page_response, self._page_raw):
+        for edit in self._existing_text_pages():
             # 正文一律**系统 UI 字体**；padding-top 8 → 与标题栏、键值面板「向上贴齐」
             edit.setStyleSheet(self._edit_qss(edit))
         self._page_tools.set_palette(pal, self._base_px)
         self._page_kv.set_palette(pal, self._base_px)
         self._badge.setStyleSheet(self._badge_qss(QColor("#888888")))
         self._refresh_badge()
+
+    def _existing_text_pages(self):
+        """已建的全部文本页（懒页未建的不在列，主题刷新只刷现存控件）。"""
+        pages = [self._page_text]
+        for slot in ("request", "response", "raw"):
+            page = self._slots.get(slot)
+            if page is not None:
+                pages.append(page)
+        return pages
 
     def _edit_qss(self, edit: QPlainTextEdit) -> str:
         """正文编辑框 QSS：系统 UI 字体（JSON 可选等宽，见 ``_MONO_FOR_JSON``）。"""
@@ -590,8 +614,7 @@ class DetailPanel(QWidget):
             fam = pal.font_family
         return (
             f"QPlainTextEdit {{ background: transparent; color: {pal.q('text')}; border: none;"
-            f" font-family: '{fam}'; font-size: {fs + 1}px; padding: 8px 16px; }}"
-            + (unified_scrollbar(8) or "")
+            f" font-family: '{fam}'; font-size: {fs + 1}px; padding: 8px 16px; }}" + (unified_scrollbar(8) or "")
         )
 
     def _set_content(self, edit: QPlainTextEdit, text: str) -> None:
@@ -632,7 +655,7 @@ class DetailPanel(QWidget):
         self._active_tab = key
         slot = _SLOT_OF_TAB.get(key)
         if slot is not None:
-            self._stack.setCurrentWidget(self._slots[slot])
+            self._stack.setCurrentWidget(self._ensure_slot_page(slot))
         self._fill_active_tab()
 
     def _rebuild_tabs(self, tabs: Tuple[Tuple[str, str], ...]) -> None:
@@ -670,11 +693,11 @@ class DetailPanel(QWidget):
                     reasoning = ""
             self._set_content(self._page_text, reasoning or "（空）")
         elif key == "request":
-            self._set_content(self._page_request, self._tool_request(rec))
+            self._set_content(self._ensure_slot_page("request"), self._tool_request(rec))
         elif key == "response":
-            self._set_content(self._page_response, self._tool_response(rec))
+            self._set_content(self._ensure_slot_page("response"), self._tool_response(rec))
         elif key == "raw":
-            self._set_content(self._page_raw, pretty_json(rec.raw or "（空）"))
+            self._set_content(self._ensure_slot_page("raw"), pretty_json(rec.raw or "（空）"))
         elif key == "tools":
             self._page_tools.set_schemas(self._tools_schemas)
         elif key == "headers":
@@ -711,7 +734,7 @@ class DetailPanel(QWidget):
             self._rebuilding = False
         slot = _SLOT_OF_TAB.get(self._active_tab)
         if slot is not None:
-            self._stack.setCurrentWidget(self._slots[slot])
+            self._stack.setCurrentWidget(self._ensure_slot_page(slot))
 
         self._refresh_badge()
         turn_part = f"Turn {rec.turn_no} · " if rec.turn_no > 0 else ""
@@ -748,7 +771,7 @@ class DetailPanel(QWidget):
         self._badge.setStyleSheet(self._badge_qss(QColor("#888888")))
         self._title_label.setText("未选中条目")
         self._meta_label.setText("点击左侧任意条目查看完整内容")
-        for edit in (self._page_text, self._page_request, self._page_response, self._page_raw):
+        for edit in self._existing_text_pages():
             self._set_content(edit, "")
         self._page_kv.set_rows([])
 
@@ -790,21 +813,49 @@ class DetailPanel(QWidget):
         return raw or "（无结果）"
 
     def _headers_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
-        rows: List[Tuple[str, str]] = [
-            ("Kind", rec.kind.label),
-            ("Label", rec.label),
-            ("Status", rec.status),
-            ("Source", rec.source or "-"),
+        """Info 页（原 Headers）：只留有用的三行，元杂项（Kind/Status/Source 等）全部砍掉。"""
+        return [
+            ("开始时间", self._full_ts(rec.start_ts)),
             ("Turn", str(rec.turn_no) if rec.turn_no > 0 else "-"),
-            ("Size", f"{len(rec.raw or ''):,} 字符"),
+            ("大小", f"{len(rec.raw or ''):,} 字符"),
         ]
-        for k, v in (rec.meta or {}).items():
-            if k in ("arguments", "result", "turn_start"):
-                continue
-            rows.append((k, str(v)))
+
+    def _llm_stat_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
+        """ASSISTANT 统计页：开始时间 / 总时长 / 首 token 延迟 / 生成 / 吞吐量。
+
+        口径：总时长 = elapsed_ms（请求发出 → 响应完成）；
+        首 token 延迟 = ttft_ms（chat_worker 流式首个内容 chunk 打点，落盘字段）；
+        生成 = 总时长 − 首 token；吞吐量 = 输出 token ÷ 生成秒。
+        估算 token（无 tokens_exact）时吞吐量加 ≈ 前缀。
+        """
+        rows: List[Tuple[str, str]] = [("开始时间", self._full_ts(rec.start_ts))]
+        total_ms = rec.duration_ms if rec.duration_ms > 0 else int(rec.meta.get("elapsed_ms") or 0)
+        rows.append(("总时长", format_duration(total_ms) if total_ms > 0 else "—"))
+        ttft = rec.meta.get("ttft_ms")
+        if isinstance(ttft, (int, float)) and ttft > 0:
+            rows.append(("首字延迟", format_duration(int(ttft))))
+            gen_ms = total_ms - int(ttft)
+            rows.append(("生成", format_duration(gen_ms) if gen_ms > 0 else "—"))
+            if gen_ms > 0 and rec.tokens > 0:
+                tps = rec.tokens / (gen_ms / 1000.0)
+                prefix = "" if rec.meta.get("tokens_exact") else "≈"
+                rows.append(("吞吐量", f"{prefix}{tps:.1f} tok/s"))
         return rows
 
+    @staticmethod
+    def _full_ts(epoch: float) -> str:
+        """完整时间戳（毫秒精度）：``2026-09-08 14:53:48.706``。"""
+        if not epoch or epoch <= 0:
+            return "-"
+        import datetime as _dt
+
+        dt = _dt.datetime.fromtimestamp(epoch)
+        return dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}"
+
     def _timing_rows(self, rec: TraceRecord) -> List[Tuple[str, str]]:
+        # ASSISTANT：LLM 调用统计（开始时间/总时长/首 token/生成/吞吐量）
+        if rec.kind == EntryKind.ASSISTANT:
+            return self._llm_stat_rows(rec)
         t0, _t1 = self._bounds
         offset_ms = max(0.0, (rec.start_ts - t0) * 1000) if rec.start_ts > 0 and t0 > 0 else 0.0
         rows = [

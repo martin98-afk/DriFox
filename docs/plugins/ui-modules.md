@@ -44,15 +44,20 @@ class UIModule:
 
 ## 3. 五个系统模块
 
-| module_id | 职责 | 产物属性（节选） |
-|---|---|---|
-| `title_bar` | 标题栏 + session_bar_layout | `_session_bar` `session_bar_layout` `project_btn` `branch_btn` `title_edit` `_session_right_buttons` `_model_btn_container` 等 9 属性 |
-| `chat_area` | 对话滚动区 + 上下卡容器 | `_top_card_container` `_bottom_card_container` `chat_scroll_area` `chat_container` `chat_layout` |
-| `system_cards` | 六张系统卡懒创建 + 项目选择卡 | `_tool_control_card` `_project_selector_card` `_project_selector_card_content` + 各卡引用 |
-| `input_card` | 输入卡/附件区/命令三卡 | `_bottom_input_container` `_input_card` `_input_card_wrapper` `_attach_container` `_attach_layout` `input_area` `_command_card` `_file_mention_card` `_undo_delete_card` `_attachments` `_history_working_attachments` 等 15 属性 |
-| `bottom_toolbar` | 底部工具栏（模型/记忆/历史/新会话/工具切换等） | `_bottom_toolbar_strip` `_model_btn_container` `current_model_btn` `settings_btn` `effort_btn` `_tool_toggle_btn` `_toolbar_capsule` `memory_btn` `history_btn` `new_session_btn` `_input_glow_underlay` 等 20 属性 |
+系统模块源码在**主程序** `app/widgets/modules/`（不是插件目录），由
+`app/main_widget.py:_register_system_ui_modules()` 注册、`app/widgets/ui_composition.py`
+装配。产物属性清单（setattr 挂回 host 的真实集合）：
 
-属性契约表来源：各模块 Task 步骤中 `grep self.<attr>` 提取。
+| module_id | 源码文件 | 职责 | 产物属性（完整 setattr 清单） |
+|---|---|---|---|
+| `title_bar` | `app/widgets/modules/title_bar_module.py` | 标题栏（项目/分支/标题/余额/编码计划环/上下文用量/问答/分享） | `diff_btn`(兼容占位 None) `_project_branch_container` `_project_avatar` `_project_label` `_branch_widget` `title_edit` `balance_display` `coding_plan_ring` `_coding_plan_hidden` `context_usage_ring` `_history_questions_btn` `_history_questions_badge` `_share_btn` |
+| `chat_area` | `app/widgets/modules/chat_area_module.py` | 对话滚动区 + 消息容器 + 装饰层 | `chat_scroll_area` `chat_container` `chat_layout` `_decoration_layer` `_apply_decorations` `_scroll_to_bottom_button`（`_top_card_container`/`_bottom_card_container` 由 setup_ui 头部预创建，**非**本模块产物） |
+| `system_cards` | `app/widgets/modules/system_cards_module.py` | 六张系统卡懒创建 + 项目选择卡 | `_history_card` `_history_popup_card` `_share_card` `_share_card_content` `_history_questions_card` `_history_questions_card_content` `_memory_card` `_memory_card_popup` `_model_config_card` `_model_config_popup` `_model_selector_card` `_model_selector_card_content` `_tool_control_card` `_project_selector_card` `_project_selector_card_content` `_project_new_edit` `_project_new_btn` `_project_open_folder_btn` `_project_import_btn` `_question_floating_widget` |
+| `input_card` | `app/widgets/modules/input_card_module.py` | 输入卡/附件区/命令三卡 | `_bottom_input_container` `_bottom_input_layout` `_input_card` `_input_card_wrapper` `_attach_container` `_attach_layout` `input_area` `_command_card` `_file_mention_card` `_undo_delete_card` `_undo_delete_cache` `_truncation_sentinel` `_pending_send_after_truncation` `_pending_send_user_text`（无 `_attachments`/`_history_working_attachments`——原文档有误） |
+| `bottom_toolbar` | `app/widgets/modules/bottom_toolbar_module.py` | 底部工具栏（模型选择/工具切换/记忆/历史/新会话等） | `_bottom_toolbar_strip` `_model_btn_container` `_model_sep_name` `_model_sep_usage` `current_model_btn` `_model_btn_icon` `_model_btn_text` `settings_btn` `_settings_btn_icon` `effort_btn` `_settings_effort_label` `_current_provider_name` `_current_model_name` `_user_manually_selected_model` `_tool_toggle_btn` `_tool_danger_label` `_tool_safe_label` `_tool_restore_btn` `_toolbar_capsule` `memory_btn`(None) `history_btn`(None) `new_session_btn` `_plugin_input_buttons` `_input_glow_underlay` `_input_card_primary_shadow` `_input_card_ambient_shadow` `_bottom_toolbar_shadow` `_input_card_focused` `_input_area_collapsed` |
+
+> ⚠️ 覆盖 `input_card` 插件时 `input_area` 必须保持 `SendableTextEdit` 兼容接口
+> （`sendMessageRequested`/`stopMessageRequested` 信号等），宿主其余代码依赖它。
 
 ---
 
@@ -94,7 +99,8 @@ _SYSTEM_MODULE_ORDER = ["title_bar", "chat_area", "system_cards", "input_card", 
 
 ```python
 def register_ui(registry):
-    # priority >= 100 覆盖系统 priority=0
+    # 真实签名: register_ui_module(module_id, factory, plugin_name="system", priority=0)
+    # priority >= 100 覆盖系统 priority=0；同 priority 后注册胜
     registry.register_ui_module(
         "input_card",
         MyCustomInputCardModule,  # 类引用（factory 在 get_ui_module 时实例化）
@@ -178,13 +184,13 @@ registry.unload_plugin("my-plugin")
 ```
 setup_ui 入口
   ├─ 根 QVBoxLayout（主程序）
-  ├─ _register_system_ui_modules()   # 注册 5 个系统模块
+  ├─ _register_system_ui_modules()   # 注册 5 个系统模块（app/main_widget.py）
   └─ compose(host=self, module_ids=_SYSTEM_MODULE_ORDER)
-       ├─ title_bar      → TitleBarModule.build
-       ├─ chat_area      → ChatAreaModule.build
-       ├─ system_cards   → SystemCardsModule.build
-       ├─ input_card     → InputCardModule.build  ← 插件可 override
-       └─ bottom_toolbar → BottomToolbarModule.build
+       ├─ title_bar      → TitleBarModule.build（app/widgets/modules/title_bar_module.py）
+       ├─ chat_area      → ChatAreaModule.build（app/widgets/modules/chat_area_module.py）
+       ├─ system_cards   → SystemCardsModule.build（app/widgets/modules/system_cards_module.py）
+       ├─ input_card     → InputCardModule.build（app/widgets/modules/input_card_module.py）← 插件可 override
+       └─ bottom_toolbar → BottomToolbarModule.build（app/widgets/modules/bottom_toolbar_module.py）
 ```
 
 页面级（Phase G）独立于本路径：`WorkspacePageHost.attach_to(tab_window)` 在 `TabManagerWindow._setup_ui` 末尾挂载，挂到 `_content_area`（QStackedWidget）。

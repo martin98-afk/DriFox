@@ -30,7 +30,7 @@ from app.utils.design_tokens import Colors, font_size_css
 from app.utils.provider_icons import get_provider_icon
 from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
-from app.widgets.model_list_edit_dialog import ModelListEditDialog
+from app.widgets.model_list_edit_dialog import ModelListEditorWidget
 from app.widgets.searchable_editable_combobox import SearchableEditableComboBox
 
 
@@ -215,6 +215,25 @@ class ProviderEditCard(QWidget):
             name_row.addWidget(getKeyBtn)
             main_layout.addLayout(name_row)
 
+        # 配置名称行（紧跟服务商名称行）
+        config_name_row = QHBoxLayout()
+        config_name_label = BodyLabel("配置名称:")
+        config_name_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        config_name_row.addWidget(config_name_label)
+        self.configNameEdit = LineEdit()
+        # 如果是编辑模式，且 provider_info 中有 name 字段，则填充
+        if not self.is_new and "name" in self.provider_info:
+            self.configNameEdit.setText(self.provider_info["name"])
+        else:
+            # 新建时，默认使用服务商名称
+            if self.is_new:
+                self._auto_config_name = self.nameCombo.currentText()
+                self.configNameEdit.setText(self._auto_config_name)
+            else:
+                self.configNameEdit.setText(self.provider_name)
+        config_name_row.addWidget(self.configNameEdit, 1)
+        main_layout.addLayout(config_name_row)
+
         # API URL 行
         url_row = QHBoxLayout()
         url_label = BodyLabel("API URL:")
@@ -303,24 +322,10 @@ class ProviderEditCard(QWidget):
 
         main_layout.addLayout(model_row)
 
-        # 配置名称行
-        config_name_row = QHBoxLayout()
-        config_name_label = BodyLabel("配置名称:")
-        config_name_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        config_name_row.addWidget(config_name_label)
-        self.configNameEdit = LineEdit()
-        # 如果是编辑模式，且 provider_info 中有 name 字段，则填充
-        if not self.is_new and "name" in self.provider_info:
-            self.configNameEdit.setText(self.provider_info["name"])
-        else:
-            # 新建时，默认使用服务商名称
-            if self.is_new:
-                self._auto_config_name = self.nameCombo.currentText()
-                self.configNameEdit.setText(self._auto_config_name)
-            else:
-                self.configNameEdit.setText(self.provider_name)
-        config_name_row.addWidget(self.configNameEdit, 1)
-        main_layout.addLayout(config_name_row)
+        # 模型列表内嵌编辑器（点击「编辑列表」展开/收起）
+        self.modelListEditor = ModelListEditorWidget(parent=self)
+        self.modelListEditor.setVisible(False)
+        main_layout.addWidget(self.modelListEditor)
 
         # 套餐用量查询额外配置（可选）— 由 providers 插件声明（ProviderDef.extra_quota_fields）
         self._extra_config_section = QWidget()
@@ -397,6 +402,12 @@ class ProviderEditCard(QWidget):
         for combo in self._searchable_combos:
             try:
                 combo.refresh_style()
+            except RuntimeError:
+                pass
+        editor = getattr(self, "modelListEditor", None)
+        if editor is not None:
+            try:
+                editor.refresh_style()
             except RuntimeError:
                 pass
 
@@ -603,19 +614,27 @@ class ProviderEditCard(QWidget):
         )
 
     def _on_manage_models(self):
-        """打开模型列表管理对话框"""
-        current_models = self.modelCombo.get_all_models()
-        dialog = ModelListEditDialog(current_models, self.window())
-        if dialog.exec_() == dialog.Accepted:
-            new_models = dialog.get_models()
-            self.modelCombo.blockSignals(True)
-            self.modelCombo.clear()
-            self.modelCombo.addItems(new_models)
-            current = self.modelCombo.currentText()
-            if not current or self.modelCombo.findText(current) < 0:
-                if new_models:
-                    self.modelCombo.setCurrentIndex(0)
-            self.modelCombo.blockSignals(False)
+        """展开/收起内嵌模型列表编辑器；收起时把编辑结果写回模型下拉"""
+        if self.modelListEditor.isVisible():
+            self._sync_editor_to_combo()
+            self.modelListEditor.setVisible(False)
+            self.manageModelsBtn.setText("编辑列表")
+        else:
+            self.modelListEditor.set_models(self.modelCombo.get_all_models())
+            self.modelListEditor.setVisible(True)
+            self.manageModelsBtn.setText("收起列表")
+
+    def _sync_editor_to_combo(self):
+        """把内嵌编辑器中的列表写回模型下拉"""
+        new_models = self.modelListEditor.get_models()
+        self.modelCombo.blockSignals(True)
+        self.modelCombo.clear()
+        self.modelCombo.addItems(new_models)
+        current = self.modelCombo.currentText()
+        if not current or self.modelCombo.findText(current) < 0:
+            if new_models:
+                self.modelCombo.setCurrentIndex(0)
+        self.modelCombo.blockSignals(False)
 
     def _on_save(self):
         """保存。
@@ -624,6 +643,8 @@ class ProviderEditCard(QWidget):
         的稳定 hash 计算（见 app.core.provider_profile.apply_provider_save），
         编辑同 apikey 始终命中同一条目，不会再产生重复。
         """
+        if self.modelListEditor.isVisible():
+            self._sync_editor_to_combo()
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
         current_models = self.modelCombo.get_all_models()
         existing_models = self.provider_info.get("模型列表", [])

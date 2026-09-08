@@ -85,22 +85,27 @@ def _ticker_instance(mgr):
     return mod._load_core_module("memory.ticker", "memory/ticker.py").MemoryTicker.get(mgr)
 
 
-def _assistant_prompt_block(aid: str) -> str:
-    """组装助手信息块（人格段→人工提示→记忆段→技能段）。
-
-    实现内聚在 manager.prompt_block（hooks 与 UI 欢迎卡统计共用，单一数据源）。
-    """
+def _identity_block(aid: str) -> str:
+    """取人格块（BuildSystemPrompt 注入系统提示词用）。"""
     mgr = _get_manager()
     if mgr is None:
         return ""
-    return mgr.prompt_block(aid)
+    return mgr.identity_block(aid)
+
+
+def _memory_block(aid: str) -> str:
+    """取记忆块（SessionStart 注入会话消息用，不进系统提示词）。"""
+    mgr = _get_manager()
+    if mgr is None:
+        return ""
+    return mgr.memory_block(aid)
 
 
 def hook(event: str, context: Dict[str, Any]) -> str:
-    """BuildSystemPrompt hook：激活助手时直接输出助手信息块。
+    """BuildSystemPrompt hook：激活助手时输出人格块（不含记忆）。
 
-    会话级临时助手（@提及）优先于全局 active_id：同一进程多会话
-    各自看到各自的助手身份，互不影响。
+    记忆（人工提示 + 长期记忆）已迁移到 SessionStart hook 注入会话消息，
+    不再占据系统提示词空间。会话级临时助手（@提及）优先于全局 active_id。
     """
     if (context or {}).get("current_role") != "primary":
         return ""
@@ -114,13 +119,38 @@ def hook(event: str, context: Dict[str, Any]) -> str:
             aid = mgr.active_id()
         if not aid or not mgr.has(aid):
             return ""
-        block = _assistant_prompt_block(aid)
+        block = _identity_block(aid)
         if not block:
             return ""
         context["agent_identity_content"] = ""
         return block
     except Exception as e:
         logger.warning(f"[assistant_hub.hooks] BuildSystemPrompt 处理失败: {e}")
+        return ""
+
+
+def on_session_start(event: str, context: Dict[str, Any]) -> str:
+    """SessionStart hook：注入人工提示 + 记忆块到 session.messages。
+
+    由主程序 _inject_hook_to_session 包装为 role=user 的 hook 消息注入会话
+    消息列表（带 <session-start-hook> / <system-reminder> 标记），不进系统
+    提示词。会话级临时助手（@提及）override 优先（重启/清空/压缩后
+    override 仍在，按其记忆开关与记忆内容注入）；新会话首条消息 @ 场景
+    override 尚未生效（@ 在 PreUserMessage 才检测），回落主助手。
+    """
+    try:
+        mgr = _get_manager()
+        if mgr is None:
+            return ""
+        sid = str((context or {}).get("session_id") or "")
+        aid = mgr.get_session_override(sid) if sid else ""
+        if not aid:
+            aid = mgr.active_id()
+        if not aid or not mgr.has(aid):
+            return ""
+        return _memory_block(aid) or ""
+    except Exception as e:
+        logger.warning(f"[assistant_hub.hooks] SessionStart 处理失败: {e}")
         return ""
 
 

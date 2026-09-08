@@ -19138,6 +19138,36 @@ class OpenAIChatToolWindow(ToolWindow):
                       （~/.drifox/workspaces/<project>/），AGENTS.md 等文件
                       写入指定路径而非默认路径。
         """
+        # 🆕 流式保护：当前标签页流式输出时，新建项目改开新标签页
+        # （新项目·新会话），不污染当前流式对话的项目归属、不强行停流。
+        # 项目上下文（_current_project / backend / tool_executor / 工作目录）
+        # 只落到新窗口，当前流式窗口保持旧项目（对齐 _on_project_selected 的
+        # 流式保护写法；修复前此处直接改 self 项目，新建项目会把原 tab 的
+        # 项目偷偷切走，流式输出的项目归属与工具写入全部错位）。
+        if self._is_streaming:
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                new = tm.spawn_tab(self, new_session=True, project=project)
+                if new is not None:
+                    # 在新窗口上补齐「新建项目」的上下文注册（不碰当前流式窗口）：
+                    # 根目录预置 → 工作目录同步（含临时目录创建 + DB 注册）→
+                    # 团队广播（发送方保持旧项目，同团队同旧项目的成员窗口跟随。
+                    # _broadcast_team_project 跳过发送方，接收方须在旧项目才应用）
+                    try:
+                        if root_dir:
+                            new._current_workdir[project] = root_dir
+                            if new.backend and new.backend.memory_manager:
+                                new.backend.memory_manager.add_key_document(project, root_dir, added_by="manual")
+                                new.backend.memory_manager.set_working_directory(project, root_dir)
+                        new._sync_working_directory()
+                        self._broadcast_team_project(project, self._current_project)
+                        if not suppress_memory_card:
+                            tm.open_workbench_memory("docs")
+                    except Exception as e:
+                        logger.warning(f"[NewProject] 流式下新标签页项目上下文注册失败: {e}")
+                    self._card_manager.hide_card("project_selector", self._window_id)
+                    return
+            # TabManagerWindow 未就绪则降级原行为（原地切项目）
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
         prev_project = self._current_project
         self._current_project = project

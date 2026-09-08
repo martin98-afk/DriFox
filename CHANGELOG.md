@@ -3,32 +3,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.5.10b1] - 2026-09-07
+## [v0.5.9] - 2026-09-08 (重新发布 v2)
 
-自上一版本以来的变更 | 提交数：7 · 文件变更：17 · +429/-59 | 贡献者：dingma, drifox-bot, mading
+自上一版本以来的变更 | 提交数：35 · 文件变更：389 · +18620/-16233 | 贡献者：dingma, drifox-bot, mading
 
-> 🧪 Beta 预发布：在 v0.5.9 基础上合并 7 个关键修复与功能，重点修复流式响应线程安全崩溃、补齐 reasoning_content 流式提取工具函数。
-
-### ✨ 新功能 (New Features)
-
-- **extract_reasoning_delta 推理内容提取** (`app/core/message_content.py`, `app/core/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`): 新增推理内容增量提取工具函数 `extract_reasoning_delta`，供 reasoning_content 流式渲染与子智能体工作线程复用，模型能力表同步更新。
-
-### 🐛 问题修复 (Bug Fixes)
-
-- **流式响应线程安全** (`app/core/workers/chat_worker.py`): 为流式响应增加线程安全处理，防止跨线程访问冲突触发 Access Violation 崩溃；附 `reports/crash_stream_access_violation_analysis.md` 根因分析报告。
-- **websearch 搜索失效** (`plugins/system-tools/.drifox-plugin/plugin.json`, `plugins/system-tools/tools/web_tools.py`, `tests/plugins/`): 修复 plugin_name 拆分后 plugin.json 配置项未同步导致的 websearch 工具搜索失效，同步新增/更新测试契约。
-
-### 🔧 其他 (Chores & Build)
-
-- **版本升级至 v0.5.10b1** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): 四文件版本号统一更新，标记为 beta 预发布。
-- **marketplace 自动重新生成** (`marketplace.json`): 2 次 `[skip ci]` 自动同步提交。
-- **plugin.json 版本号同步** (`plugins/system-providers/.drifox-plugin/plugin.json`): provider 插件内部版本号更新至 1.1.0。
-
-## [v0.5.9] - 2026-09-07 (重新发布)
-
-自上一版本以来的变更 | 提交数：24 · 文件变更：372 · +17440/-16074 | 贡献者：mading, drifox-bot
-
-> 🔄 重新发布：在初版 v0.5.9 基础上，合并 5 个关键重构（v0.5.9..HEAD），覆盖 plugins/system 拆分、importlib 动态加载、marketplace 自动同步与冗余插件文件清理。
+> 🔄 重新发布 v2：在初版 v0.5.9 (重新发布) 基础上，合并 11 个关键修复/功能（v0.5.9..HEAD），重点修复流式响应线程安全崩溃、websearch 工具搜索失效，补齐 reasoning_content 流式提取工具函数、assistant prompt 重构与插件缺失 git 错误处理。
 
 ### ✨ 新功能 (New Features)
 
@@ -60,6 +39,28 @@ All notable changes to this project will be documented in this file.
 - **测试** (`tests/`): 修复插件命名空间劫持导致的混合目录收集失败；覆盖 batch materialize sentinel 命中/未命中场景；加固 load_msg_extras 边界用例与契约文档。
 - **依赖锁定** (`uv.lock`): 同步 jsonschema 依赖与 drifox 版本号。
 - **marketplace 同步** (`marketplace.json`): 由 plugin.json 自动重新生成（`[skip ci]`）。
+
+### 🧪 新增补强 (v0.5.9..HEAD 增量)
+
+#### ✨ 新功能 (New Features)
+
+- **extract_reasoning_delta 推理内容提取** (`app/core/message_content.py`, `app/core/model_capabilities.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`): 新增推理内容增量提取工具函数 `extract_reasoning_delta`，供 reasoning_content 流式渲染与子智能体工作线程复用，模型能力表同步更新。
+- **assistant prompt 重构与会话启动 memory 注入** (`app/core/`, `app/workers/`): 重构 assistant prompt 处理流程；会话启动时自动注入关键 memory，提升首轮回复上下文一致性。
+- **插件安装 git 缺失错误处理** (`app/core/plugin_installer.py`, `app/gateway/`): 增强插件安装过程对 git 缺失场景的错误处理与用户提示。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **流式响应线程安全** (`app/core/workers/chat_worker.py`): 为流式响应增加线程安全处理，防止跨线程访问冲突触发 Access Violation 崩溃；附 `reports/crash_stream_access_violation_analysis.md` 根因分析报告。
+- **websearch 搜索失效** (`plugins/system-tools/.drifox-plugin/plugin.json`, `plugins/system-tools/tools/web_tools.py`, `tests/plugins/`): 修复 plugin_name 拆分后 plugin.json 配置项未同步导致的 websearch 工具搜索失效，同步新增/更新测试契约。
+
+#### 📚 文档 (Documentation)
+
+- **plugin 契约文档与 marketplace 测试** (`docs/plugins/`, `tests/plugins/`): 同步 plugin 契约文档与真实实现，新增 marketplace git-missing 缺失 git 场景的契约测试。
+
+#### 🔧 其他 (Chores & Build)
+
+- **provider 插件版本同步** (`plugins/system-providers/.drifox-plugin/plugin.json`): provider 插件内部版本号更新至 1.1.0。
+- **marketplace 自动重新生成** (`marketplace.json`): 多次 `[skip ci]` 自动同步提交。
 
 ## [v0.5.8] - 2026-09-07 (重新发布)
 

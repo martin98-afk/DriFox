@@ -775,6 +775,14 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if isinstance(phases, dict) and phases:
         normalized["trace_phases"] = {str(k): float(v) for k, v in phases.items() if isinstance(v, (int, float))}
 
+    # message_extras 剥离哨兵（session_repository 写库时打上的绝对索引）。
+    # 历史会话加载后渲染前会经本函数重建消息，若在此剥掉哨兵，
+    # materialize_batch_with_extras 找不到索引 → 剥离的 arguments/diff/
+    # reasoning_content 永远补不回 → 工具折叠框预览参数全空（2026-09-08 回归）。
+    x_idx = message.get("_x_idx")
+    if isinstance(x_idx, int) and not isinstance(x_idx, bool):
+        normalized["_x_idx"] = x_idx
+
     if role == "assistant":
         content = content_to_text(message.get("content", ""))
         if content:
@@ -809,6 +817,10 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
         llm_ms = message.get("elapsed_ms")
         if isinstance(llm_ms, (int, float)) and not isinstance(llm_ms, bool) and llm_ms > 0:
             normalized["elapsed_ms"] = float(llm_ms)
+        # 首 token 延迟（毫秒，chat_worker 写入）—— 轨迹统计（吞吐量/生成时长）用
+        ttft_ms = message.get("ttft_ms")
+        if isinstance(ttft_ms, (int, float)) and not isinstance(ttft_ms, bool) and ttft_ms > 0:
+            normalized["ttft_ms"] = float(ttft_ms)
         if isinstance(message.get("token_usage"), dict):
             normalized["token_usage"] = dict(message["token_usage"])
         # 保留 _hook_event 标记，确保能通过 save/load 持久化

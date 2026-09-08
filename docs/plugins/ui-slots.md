@@ -4,26 +4,115 @@
 
 ---
 
-## 1. 8 类既有扩展点 API
+## 1. UI 注册 API 总览（全部真实签名）
+
+`ui/__init__.py` 暴露 `def register_ui(registry)`，在加载时注册组件；
+**签名以本节为准**（`app/plugins/registries/ui_plugin_registry.py`），按文档写错会直接 `TypeError`。
+
+### 1.1 渲染器 / 工厂（内容层）
 
 ```python
 def register_ui(registry):
-    # Phase D 原始 4 类 + Phase E 增强
-    registry.register_floating_card(plugin_name, card_id, widget_class, container, title, ...)
-    registry.register_content_renderer(plugin_name, type_name, render_func)
-    registry.register_message_factory(plugin_name, name, condition_func, factory_func)
-    registry.register_welcome_tab(plugin_name, mode_key, label, render_func)
+    # 自定义内容块渲染器（content 中 custom_type 字段的分发目标）
+    registry.register_content_renderer(
+        plugin_name, type_name, render_func,
+        priority=0, metadata=None,
+    )  # render_func: (data: dict, context) -> str(HTML)
 
-    registry.register_sidebar_item(plugin_name, item_id, label, group="custom", priority=0, on_click=..., metadata=...)
-    registry.register_input_button(plugin_name, button_id, icon_path, tooltip, group="plugin", priority=0, on_click=..., on_right_click=..., position="end", metadata=...)
-    registry.register_context_menu_action(plugin_name, action_id, label, on_click, target="message_card", group="plugin", priority=0)
-    registry.register_settings_card(plugin_name, card_id, title, widget_class, section="plugins", icon="", priority=0)
+    # 消息文本内联标签渲染器（LLM 输出中的 <tag>...</tag> 块 → 卡片 HTML）
+    registry.register_tag_renderer(
+        plugin_name, tag_name, render_func,
+        priority=0, metadata=None,
+    )  # render_func: (content: str, ctx: dict) -> str(HTML)；ctx 含 tag/completed/compact
+
+    # 消息正文 fence 代码块渲染器（``<lang>`` 的渲染方式，内置 echarts/mermaid/svg/html 不可劫持）
+    registry.register_fence_renderer(
+        plugin_name, lang, render_func,
+        streaming_placeholder=None, priority=0,
+        assets=None, bridge_permissions=None, metadata=None,
+    )  # render_func: (code: str, ctx: dict) -> str(HTML 片段)，纯函数（后台线程调用）
+       # assets: {"js": "ui/assets/fence/x.js", "css": ...}（相对插件根，宿主按需注入）
+       # bridge_permissions: 桥权限声明，取值见 FENCE_BRIDGE_PERMISSIONS（如 "theme"/"sendPrompt"/"storage"）
+
+    # 消息元素工厂（condition 命中才接管该消息的 widget 构建）
+    registry.register_message_factory(
+        plugin_name, name, condition_func, factory_func,
+        priority=0,
+    )  # condition_func: (message) -> bool；factory_func: (message, parent) -> QWidget
+
+    # 欢迎卡片插件 tab
+    registry.register_welcome_tab(
+        plugin_name, mode_key, label, render_func,
+        priority=0, metadata=None,
+    )  # mode_key 同时是 welcome mode 值，避开系统内置 sessions/projects
+
+    # 欢迎卡片点击动作（.context-tag 的 data-type 派发）
+    registry.register_welcome_action(
+        plugin_name, action, handler,
+        metadata=None,
+    )  # handler: (content: str, ctx: dict) -> None；建议动作名带插件前缀
+
+    # @ 提及条目提供者（@ 卡片顶部渲染的条目源）
+    registry.register_mention_provider(
+        plugin_name, provider_id, list_func,
+        on_selected=None, metadata=None,
+    )  # list_func: () -> List[dict]，同步主线程调用；on_selected: (entry, ctx) -> None
+```
+
+### 1.2 浮动卡 / 常驻元素（控件层）
+
+```python
+def register_ui(registry):
+    # 浮动卡片（container: "top"|"bottom"|"left"|"right"|"full"；Tab 窗口级容器对应方位）
+    registry.register_floating_card(
+        plugin_name, card_id, widget_class, container,
+        title="", default_visible=False,
+        metadata=None, context_provider=None,
+    )  # 自动注册命令 /{card_id}；context_provider 可选覆盖全局上下文
+
+    # 侧边栏插件项（独立扩展点，与浮动卡解耦）
+    registry.register_sidebar_item(
+        plugin_name, item_id, label, icon_path="",
+        group="custom", default_visible=True, priority=0,
+        on_click=None, metadata=None,
+    )
+
+    # 输入区工具栏按钮（position: "start"|"before:<id>"|"after:<id>"|"end"）
+    registry.register_input_button(
+        plugin_name, button_id, icon_path="", icon_light_path="", tooltip="",
+        group="plugin", priority=0,
+        on_click=None, on_right_click=None, metadata=None, position="end",
+    )  # icon_path 深色 / icon_light_path 浅色（缺省回退深色），主题切换自动刷新
+
+    # 右键菜单项（target: "message_card"|"tab"|"input_area"；target 是第 3 个位置参数！）
+    registry.register_context_menu_action(
+        plugin_name, action_id, target, label, action_func,
+        enabled_func=None, separator_before=False, priority=0, metadata=None,
+    )  # action_func: (ctx) -> bool（返回 True 表示已处理）；enabled_func: (ctx) -> bool 控制灰显
+
+    # 设置面板卡片（section: "plugins"|"llm"|"common"|"appearance"|"update"）
+    registry.register_settings_card(
+        plugin_name, card_id, title, widget_class,
+        group="plugin", priority=0, metadata=None, section="plugins",
+    )
 
     # 标题栏常驻 tab（无 × 关闭钮；点击走 on_click 回调自展示，主程序不接管内容区）
-    registry.register_titlebar_tab(plugin_name, tab_id, label, icon_path="", on_click=..., priority=0, metadata=...)
+    registry.register_titlebar_tab(
+        plugin_name, tab_id, label, icon_path="",
+        on_click=None, priority=0, metadata=None,
+    )
 
     # 右侧工作台 tab（WorkbenchPanel 页签条：产物 / 记忆 之后追加）
-    registry.register_workbench_tab(plugin_name, page_id, label, widget_class, priority=0, metadata=...)
+    registry.register_workbench_tab(
+        plugin_name, page_id, label, widget_class,
+        priority=0, metadata=None,
+    )
+
+    # 工作区页面（Phase G，见 ui-workspace.md）
+    registry.register_workspace_page(
+        plugin_name, page_id, title, widget_class,
+        icon_path="", icon_light_path="", order_hint=500, metadata=None,
+    )
 ```
 
 详见 [`docs/plugin-architecture.md`](../plugin-architecture.md) 466-477 行。
@@ -32,7 +121,7 @@ def register_ui(registry):
 > - **常驻**（`register_titlebar_tab`）：始终显示在标题栏 tab 区（「聊天」右侧），不可关闭，点击触发插件回调。
 > - **非常驻**（`register_floating_card(container="full")`）：卡片打开时动态出现在标题栏（带 × 关闭钮），关闭即从标题栏移除；点击 tab 切换覆盖层显示。
 
-> **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台浮层（WorkbenchPanel）的页签条，自动出现在「产物」「记忆」之后；宿主在 `refresh_workbench` 时调用 `panel.sync_plugin_pages(tabs)` reconcile（签名不变则跳过重建）。同 page_id 高优先级覆盖低优先级，插件卸载时自动注销。系统插件 `plugins/system/ui/_artifacts_page.py` 提供 `SystemArtifactsPage` 作为参考实现，演示如何通过 `context["backend"]` / `context["session_id"]` / `context["diff_requested_callback"]` 从宿主拉取数据与触发回调。
+> **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台浮层（WorkbenchPanel）的页签条，自动出现在「产物」「记忆」之后；宿主在 `refresh_workbench` 时调用 `panel.sync_plugin_pages(tabs)` reconcile（签名不变则跳过重建）。同 page_id 高优先级覆盖低优先级，插件卸载时自动注销。系统插件 `plugins/system-ui/ui/_artifacts_page.py` 提供 `SystemArtifactsPage` 作为参考实现，演示如何通过 `context["backend"]` / `context["session_id"]` / `context["diff_requested_callback"]` 从宿主拉取数据与触发回调。
 
 ---
 
@@ -59,6 +148,10 @@ class RegionKind:
     TOOLBAR_BUTTON = "toolbar_button"
     PANEL = "panel"         # 设置面板
     CONTENT = "content"
+
+# 实际实现是模块级字符串常量（非 class），允许宿主自定义扩展值：
+#   MENU / LIST_ITEM / TOOLBAR_BUTTON / PANEL / CONTENT
+# VALID_REGION_KINDS = frozenset({...}) 只作合法性校验。
 ```
 
 ### API
@@ -136,6 +229,9 @@ EV_CARD_VISIBILITY_CHANGED = "card_visibility_changed"
     # payload: card_id (str), window_id (str), visible (bool)
 EV_WINDOW_ACTIVATED = "window_activated"
     # payload: window_id (str)
+EV_WELCOME_TAB_REFRESHED = "welcome_tab_refreshed"
+    # payload: mode_key (str), plugin_name (str), window_id (str,可选)
+    # 欢迎卡片 tab 数据已更新（异步 fetcher 完成/数据源刷新），主程序对指定 mode_key 重渲染
 ```
 
 ### 订阅示例
@@ -244,10 +340,9 @@ registry.register_settings_card(
 
 ```python
 registry.register_context_menu_action(
-    "my-plugin", "act-1", "增强粘贴",
-    on_click=lambda ctx: ...,
-    target="input_area",  # "message_card" | "tab" | "input_area"
-)
+    "my-plugin", "act-1", "input_area", "增强粘贴",
+    lambda ctx: True,  # action_func，(ctx) -> bool；target 是第 3 个位置参数
+)  # target: "message_card" | "tab" | "input_area"
 ```
 
 新增 `input_area` target：输入框右键菜单。

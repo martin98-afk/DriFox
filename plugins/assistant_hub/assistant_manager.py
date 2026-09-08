@@ -336,8 +336,8 @@ class AssistantManager:
 
     _instance: Optional["AssistantManager"] = None
 
-    # 会话级临时助手：{session_id: assistant_id}（运行时态，重启清零；
-    # 由 @提及触发，仅影响对应会话的 system prompt）
+    # 会话级临时助手：{session_id: assistant_id}（持久化 _session_overrides.json，
+    # 重启后恢复；由 @提及触发，仅影响对应会话的注入身份与开关判断）
     _session_overrides: Dict[str, str] = {}
 
     # 会话归属映射：{session_id: assistant_id}（持久化 _session_map.json）；
@@ -425,6 +425,7 @@ class AssistantManager:
         """启动时从磁盘扫描全部助手"""
         self._ensure_dir(self._root)
         self._load_session_map()
+        self._load_session_overrides()
         try:
             for entry in sorted(self._root.iterdir(), key=lambda p: p.name):
                 if not entry.is_dir():
@@ -658,6 +659,12 @@ class AssistantManager:
             overrides[session_id] = aid
         else:
             overrides.pop(session_id, None)
+        # 防膨胀：超上限裁掉最旧的一半（dict 保插入序，对齐 _session_map）
+        if len(overrides) > 1000:
+            for k in list(overrides.keys())[:500]:
+                overrides.pop(k, None)
+        # 持久化：重启后恢复，SessionStart 记忆注入也能按临时助手开关判断
+        cls.get_instance()._save_session_overrides()
         # 同步归属映射（提前落盘，不等轮次结束）
         if aid:
             cls.record_session_aid(session_id, aid)
@@ -712,11 +719,33 @@ class AssistantManager:
         """读会话级临时助手；无 override 或助手已删除返回空串（跟随全局）。"""
         if not session_id:
             return ""
-        aid = cls.get_instance()._session_overrides.get(session_id, "")
-        if aid and not cls.get_instance().has(aid):
-            cls.get_instance()._session_overrides.pop(session_id, None)
+        inst = cls.get_instance()
+        aid = inst._session_overrides.get(session_id, "")
+        if aid and not inst.has(aid):
+            inst._session_overrides.pop(session_id, None)
+            inst._save_session_overrides()
             return ""
         return aid
+
+    def _session_overrides_path(self) -> Path:
+        return self._root / "_session_overrides.json"
+
+    def _save_session_overrides(self) -> None:
+        try:
+            self._ensure_dir(self._root)
+            self._session_overrides_path().write_text(
+                json.dumps(self._session_overrides, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 保存 session overrides 失败: {e}")
+
+    def _load_session_overrides(self) -> None:
+        try:
+            data = json.loads(self._session_overrides_path().read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                type(self)._session_overrides = {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            pass
 
     # ── 预置工具档位（初始注入 schema，hooks 与 UI 统计共用归属逻辑）──
 
@@ -1306,18 +1335,34 @@ class AssistantManager:
 - **永远不要让{user}感觉到"记忆"这个东西的存在。** 禁止"我记得""你之前说过""根据记忆"这类表述，除非{user}主动问"你还记得 xxx 吗"。
 - **记忆可能过时，当前对话永远优先。** 信息冲突时以对话为准，不要用旧记忆纠正{user}。"""
 
-    def prompt_block(self, aid: str) -> str:
-        """组装助手信息块：人格段 → 人工提示 → 记忆段。"""
+    def identity_block(self, aid: str) -> str:
+        """人格块（BuildSystemPrompt hook 注入系统提示词）。
+
+        仅含助手身份与人格段；不包含人工提示 / 记忆段（这两段由
+        SessionStart hook 以会话消息形式注入，不进系统提示词）。
+        无人格段时返回空串，与原 prompt_block 行为对齐。
+        """
+        a = self.get(aid)
+        if a is None:
+            return ""
+        persona_block = self.identity_and_persona(aid)
+        if not persona_block.strip():
+            return ""
+        header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}——一个由用户创建的专属 AI 助手。"
+        return header + "\n\n" + persona_block.strip()
+
+    def memory_block(self, aid: str) -> str:
+        """记忆块（SessionStart hook 注入会话消息，role=user 的 hook 消息）。
+
+        含人工提示（pinned）+ 记忆使用规则 + 编译的长期记忆；不进系统提示词，
+        避免长记忆挤占每次请求都带的 system prompt 空间。会话启动/清空/压缩
+        时注入一次，后续模型从历史中取到。
+        """
         a = self.get(aid)
         if a is None:
             return ""
 
         parts: list[str] = []
-
-        # 1. 人格段（personas/<yuan>/persona.md 基底，fill 模板变量；none=纯净）
-        persona_block = self.identity_and_persona(aid)
-        if persona_block.strip():
-            parts.append(persona_block.strip())
 
         # 2a. 人工提示（pinned）：人工添加，无自动记忆风险，不受 memory_enabled 控制，始终注入
         pinned = self.read_pinned(aid)
@@ -1338,11 +1383,19 @@ class AssistantManager:
             if len(mem_parts) > 1:  # 规则之外还有实际记忆内容才注入整段
                 parts.append("\n\n".join(mem_parts))
 
-        if not parts:
-            return ""
+        return "\n\n".join(parts)
 
-        header = f"# 助手：{a.name or a.id}\n\n你是 {a.name or a.id}——一个由用户创建的专属 AI 助手。"
-        return header + "\n\n" + "\n\n".join(parts)
+    def prompt_block(self, aid: str) -> str:
+        """完整注入块（UI 统计 / 欢迎卡 token 估计，单一数据源 = identity + memory 拼接）。
+
+        与拆前的输出格式等价：header + persona + pinned + memory。无人格段时返回
+        空串（保持原行为；此时 SessionStart 仍会按 memory_block 注入记忆上下文）。
+        """
+        identity = self.identity_block(aid)
+        if not identity:
+            return ""
+        memory = self.memory_block(aid)
+        return identity + ("\n\n" + memory if memory else "")
 
     def prompt_stats(self, aid: str) -> Dict[str, int]:
         """注入块统计：chars=完整块字符数；tokens_est≈中文场景 1.6 字符/token 粗估。"""

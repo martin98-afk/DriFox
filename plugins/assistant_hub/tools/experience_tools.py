@@ -109,12 +109,6 @@ def _record_impl(tool_ctx, **kw):
     r: Dict[str, Any] = mgr.experience_record(aid, category, content)
     if r.get("added"):
         return ToolResult(True, content=f"已记录到经验库「{category}」。")
-    if r.get("reason") == "category_limit":
-        cats = "、".join(r.get("categories") or [])
-        return ToolResult(
-            True,
-            content=(f"未记录：分类数已达上限，禁止新建分类。请改用已有分类重新调用 record_experience。现有分类：{cats}"),
-        )
     return ToolResult(True, content=f"未记录：{r.get('reason', 'unknown')}")
 
 
