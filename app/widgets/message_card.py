@@ -1531,7 +1531,13 @@ def _render_tool_streaming_block(
     </div>"""
 
 
-def _render_think_block(content: str, completed: bool = True, compact: bool = False) -> str:
+def _render_think_block(content: str, completed: bool = True, compact: bool = False, flip_idx: int = -1) -> str:
+    # 🆕 FLIP 稳定键：流式态（.think-streaming）与完成态（.think-compact/.think-block）
+    # 用的是不同 DOM 结构与不同 block-key（后者按内容哈希），导致结束态重排时
+    # FLIP 无法配对 → 思考块"瞬移到顶部"没有动画。
+    # 这里额外打一个**按消息内出现顺序**的位置键 data-flip-key，两种形态共用，
+    # FLIP 即可把"第 N 个思考块"的位移补间成平滑动画。
+    _flip_attr = f' data-flip-key="think-{flip_idx}"' if flip_idx >= 0 else ""
     if completed:
         # ── 完成态 ──
         tag = _classify_think_tag(content)
@@ -1546,7 +1552,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
             block_seed = f"{content}|1"
             block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
             preview_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
-            return f"""<div class="think-compact" data-block-key="{block_key}" style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
+            return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
     <span style="white-space: nowrap; flex-shrink: 0;">{status_text}</span>
     {preview_right}
 </div>"""
@@ -1557,7 +1563,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
         summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
-        return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="false" style="margin: 4px 0;">
+        return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}"{_flip_attr} data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
         <span style="white-space: nowrap;">{status_text}</span>
         {summary_right}
@@ -1573,7 +1579,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     # 在消息正文中显得过粗过大。
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
-    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
+    return f"""<div class="think-streaming"{_flip_attr} data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
         {spinner_html}
         <span>深度思考中...</span>
@@ -1670,6 +1676,9 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
     """
     parts = []
     i = 0
+    # 消息内思考块序号：作为 FLIP 位置键（data-flip-key），流式态与完成态共用，
+    # 结束态重排时 FLIP 才能把"第 N 个思考块"的位移补间成动画。
+    think_ordinal = 0
     while i < len(md_text):
         start_idx = md_text.find("<think>", i)
         if start_idx == -1:
@@ -1691,14 +1700,16 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
         if end_idx != -1:
             content = md_text[think_start:end_idx]
             if content.strip():
-                parts.append(_render_think_block(content, completed=True, compact=compact))
+                parts.append(_render_think_block(content, completed=True, compact=compact, flip_idx=think_ordinal))
+                think_ordinal += 1
             # 空思考块跳过渲染，避免页面末尾遗留空折叠框
             i = end_idx + len("</think>")
         else:
             # 未闭合：内容截取到边界处，避免吞掉后续 <think>
             content = md_text[think_start:search_end]
             if content.strip():
-                parts.append(_render_think_block(content, completed=False))
+                parts.append(_render_think_block(content, completed=False, flip_idx=think_ordinal))
+                think_ordinal += 1
             # 空且未闭合也跳过
             i = search_end
     return "".join(parts)
@@ -3122,6 +3133,7 @@ _STREAMING_DOCK_JS = """
                     var _atBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 40;
                     // FLIP：工具区在「沉底 ↔ 顶部」之间换位（CSS order 调换）是瞬移，
                     // 记录切换前位置，切换后补间成平滑位移。
+                    if (typeof window._flipArm === 'function') window._flipArm(1200);
                     var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                     document.body.classList.toggle('streaming-dock', on);
                     if (!on && wasOn) {
@@ -3214,8 +3226,14 @@ _TYPEWRITER_JS = """
                     }
                     var slice = st.buf.slice(0, n);
                     st.buf = st.buf.slice(n);
+                    // [PERF] 高度上报节流：揭示是每帧进行，但高度上报会触发
+                    // reportHeight → Python setFixedHeight → Chromium 视口变化 →
+                    // 重排的回环。按帧上报会让回环频率翻数倍（流式卡顿来源），
+                    // 这里限制到 ≥80ms 一次——与旧"按 chunk 上报"的节奏一致。
+                    var _skipReport = (now - (st.reportedAt || 0)) < 80;
+                    if (!_skipReport) st.reportedAt = now;
                     try {
-                        window._dfxAppendStreamText(slice);
+                        window._dfxAppendStreamText(slice, _skipReport);
                     } catch (e) {}
                     if (st.buf) {
                         st.raf = requestAnimationFrame(window._twStep);
@@ -3285,9 +3303,18 @@ _FLIP_JS = """
                     var val = key.slice(3);
                     if (kind === 'tc:') return document.querySelector('[data-tool-call-id="' + val + '"]');
                     if (kind === 'bk:') return document.querySelector('[data-block-key="' + val + '"]');
+                    if (kind === 'fk:') return document.querySelector('[data-flip-key="' + val + '"]');
                     return null;
                 };
+                // ⚡ 性能：capture 会强制同步布局（getBoundingClientRect），
+                // 流式期间每次全量渲染都做一遍代价过高。只有在"即将发生位置突变"
+                // 时（坞态归位 / 流式结束的最终重排）由调用方 arm 一个短窗口，
+                // 窗口内才真正采集；其余渲染 capture 直接返回 null（零开销）。
+                window._flipArm = function (ms) {
+                    window._flipArmedUntil = performance.now() + (ms || 1200);
+                };
                 window._flipCapture = function () {
+                    if (!(window._flipArmedUntil > performance.now())) return null;
                     var map = new Map();
                     ['tool-section', 'content-placeholder', 'todo-section'].forEach(function (id) {
                         var el = document.getElementById(id);
@@ -3300,6 +3327,13 @@ _FLIP_JS = """
                     document.querySelectorAll('[data-block-key]').forEach(function (el) {
                         var k = el.getAttribute('data-block-key');
                         if (k) map.set('bk:' + k, el.getBoundingClientRect());
+                    });
+                    // 思考块：流式态（.think-streaming）与完成态（.think-compact/
+                    // .think-block）DOM 结构不同、block-key 也不同（内容哈希），
+                    // 只有位置键 data-flip-key 能跨形态配对。
+                    document.querySelectorAll('[data-flip-key]').forEach(function (el) {
+                        var k = el.getAttribute('data-flip-key');
+                        if (k) map.set('fk:' + k, el.getBoundingClientRect());
                     });
                     return map;
                 };
@@ -8760,7 +8794,7 @@ class CodeWebViewer(QWebEngineView):
                 // 接到正文尾部"的逻辑；注册成函数后队列与直接调用共用一份实现，
                 // 避免两处逻辑漂移（段落/host 判定一旦分叉就会出现跳位）。
                 if (typeof window._dfxAppendStreamText !== 'function') {{
-                window._dfxAppendStreamText = function(text) {{
+                window._dfxAppendStreamText = function(text, skipReport) {{
                 var c = document.getElementById('content-placeholder');
                 if (!c || !text) return;
                 // ── 尾部文本宿主定位 ──
@@ -8784,6 +8818,19 @@ class CodeWebViewer(QWebEngineView):
                         host = lc;
                     }}
                     return host;
+                }}
+                // [PERF] 文本合并追加：帧级揭示（~60fps）下若每次都 appendChild 新建
+                // 文本节点，一条 2000 字回复会产出 600+ 个 Text 节点 —— DOM 节点数
+                // 膨胀，内存与后续 querySelectorAll / innerHTML 成本同步上升
+                // （用户反馈"内存占用高了很多"的主因之一）。
+                // 末尾已是文本节点时直接 appendData 合并 → 每段稳定 1 个文本节点。
+                function _appendTextMerged(host, txt) {{
+                    var lc = host.lastChild;
+                    if (lc && lc.nodeType === 3) {{
+                        lc.appendData(txt);
+                    }} else {{
+                        host.appendChild(document.createTextNode(txt));
+                    }}
                 }}
                 function _newIncrementalP(txt) {{
                     var _p = document.createElement('p');
@@ -8831,7 +8878,7 @@ class CodeWebViewer(QWebEngineView):
                     // 随后 updateTailHtml 又把碎片合并回正文"（文字不断跳位重排）。
                     // appendChild(textNode) 既不覆盖已渲染的行内 HTML（textContent += 会把
                     // <strong>/<code> 抹回 markdown 源码形态），又让文字连续增长。
-                    _tailTextHost(last).appendChild(document.createTextNode(text));
+                    _appendTextMerged(_tailTextHost(last), text);
                 }} else if (last && last.tagName === 'P') {{
                     // 🐛 修复（正文段落丢失）：最后是已格式化渲染的稳定段落（非增量节点）。
                     // 不能打 data-incremental 标记/原地追加——否则下次差量渲染
@@ -8864,7 +8911,8 @@ class CodeWebViewer(QWebEngineView):
                 window._prevScrollTop = document.body.scrollTop;
                 window._autoScrollTime = performance.now();
                 window._suppressScrollEvent = false;
-                reportHeightDebounced();
+                // skipReport：打字机揭示按帧调用，由队列侧节流（见 _twStep）
+                if (!skipReport) reportHeightDebounced();
                 }};  // ── _dfxAppendStreamText 定义结束 ──
                 }}
                 // ── 交给打字机揭示队列（帧级揭示）──
@@ -9756,6 +9804,14 @@ class CodeWebViewer(QWebEngineView):
         # 重置思考文本流式标志，防止下一轮对话误判
         self._think_text_streaming_started = False
         self._reasoning_streaming_started = False
+        # 🆕 FLIP：最终全量重排会把工具/思考块从"流式态沉底"换成"完成态归位"，
+        # arm 一个短窗口，让紧随其后的 updateContent 采集旧位置并补间成位移动画。
+        # （未 arm 时 _flipCapture 直接返回 null，流式期间零额外布局开销。）
+        try:
+            if self._is_js_ready and self.page():
+                self.page().runJavaScript("if(typeof window._flipArm==='function')window._flipArm(2000);")
+        except RuntimeError:
+            pass
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间
         # think-streaming（展开）应保持，只有历史会话加载走非流式分支
