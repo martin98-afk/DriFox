@@ -43,6 +43,9 @@ def _make_window(**overrides):
     win._rendered_card_count = 0
     win._max_rendered_cards = 100
     win._recycle_lru_batches = MagicMock()
+    # 🛡️ _process_next_lazy_batch 排空分支调 _log_render_quota（近期新增打点），
+    # 裸 __new__ 实例 getattr 未定义属性会抛 RuntimeError —— 必须预置
+    win._last_quota_log_at = 0.0
     win._initial_scroll_to_bottom = False
     win._user_intentionally_away_from_bottom = False
     win._scroll_to_bottom = MagicMock()
@@ -478,9 +481,7 @@ def test_streaming_card_not_compensated_when_user_scrolled_away(qapp):
     但正文在卡片**底部**增长（增量在视口之下），补偿会把视口每 ~80ms
     下拽 Δ → 内容持续从用户眼下漂走。
     """
-    win, card, bar = _make_anchor_window(
-        card_top=0, card_height=1200, value=300, streaming=True, away=True
-    )
+    win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=300, streaming=True, away=True)
     card._last_height_delta = 20
     card.heightChanged.emit(1220)
 
@@ -494,9 +495,7 @@ def test_streaming_card_keeps_bottom_follow_when_user_at_bottom(qapp):
     挡着，而流式 chunk / 工具·思考更新故意不置该标记。v2 按「卡片是否在流式」
     一刀切关补偿，视口就停在原地、内容在下方越长越多 → 用户看到「置顶」。
     """
-    win, card, bar = _make_anchor_window(
-        card_top=0, card_height=1200, value=300, streaming=True, away=False
-    )
+    win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=300, streaming=True, away=False)
     card._last_height_delta = 20
     card.heightChanged.emit(1220)
 
@@ -509,9 +508,7 @@ def test_short_streaming_card_keeps_bottom_follow(qapp):
     流式刚开始、卡片还没长过视口时正是这个形态：card_top(1000) > value(300)，
     若因「顶部已在视口内」而跳过补偿，视口会随内容增长被落在后面。
     """
-    win, card, bar = _make_anchor_window(
-        card_top=1000, card_height=200, value=300, streaming=True, away=False
-    )
+    win, card, bar = _make_anchor_window(card_top=1000, card_height=200, value=300, streaming=True, away=False)
     card._last_height_delta = 30
     card.heightChanged.emit(230)
 
@@ -520,9 +517,7 @@ def test_short_streaming_card_keeps_bottom_follow(qapp):
 
 def test_card_entirely_above_viewport_compensated_even_when_user_away(qapp):
     """整张卡片都在视口上方 → 增量必然在视口之上 → 补偿（与跟随态无关）"""
-    win, card, bar = _make_anchor_window(
-        card_top=0, card_height=200, value=500, streaming=True, away=True
-    )
+    win, card, bar = _make_anchor_window(card_top=0, card_height=200, value=500, streaming=True, away=True)
     card._last_height_delta = 40
     card.heightChanged.emit(240)
 
@@ -531,13 +526,203 @@ def test_card_entirely_above_viewport_compensated_even_when_user_away(qapp):
 
 def test_card_below_viewport_top_not_compensated_when_user_away(qapp):
     """用户已上滚阅读 + 卡片整体位于视口下方 → 增量不可能影响视口 → 不补偿"""
-    win, card, bar = _make_anchor_window(
-        card_top=1000, card_height=200, value=300, streaming=False, away=True
-    )
+    win, card, bar = _make_anchor_window(card_top=1000, card_height=200, value=300, streaming=False, away=True)
     card._last_height_delta = 100
     card.heightChanged.emit(300)
 
     bar.setValue.assert_not_called()
+
+
+# ─── sticky anchor 到期后的兜底接力 ───────────────────────────────────
+# 背景：会话加载排空走 _scroll_to_bottom(sticky_ms=900)，anchor 定时器每
+# 100ms setValue(max) 维持贴底；到期分支直接清零 return，不接力任何兜底。
+# WebEngine 卡片高度异步上报晚于 900ms 窗口（大会话/慢机器常态）→ 内容撑高
+# 后视口永久停在消息列表中部，即「加载历史会话偶尔不置底」的根因。
+# 非 sticky 路径（_do_scroll_to_bottom 的 else 分支）有 _ensure_at_bottom
+# (retries=8) 兜底窗口 —— sticky 路径恰恰缺失。修复：到期接力同款兜底。
+
+
+class _FakeClock:
+    """可控单调时钟，patch 进 app.main_widget.time"""
+
+    def __init__(self):
+        self.t = 1000.0
+
+    def monotonic(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+class _FakeScrollBar:
+    """带真实 value/max 状态的滚动条替身（MagicMock 的 setValue 无侧效）"""
+
+    def __init__(self, maximum=1000, value=0):
+        self._max = maximum
+        self._val = value
+
+    def maximum(self):
+        return self._max
+
+    def value(self):
+        return self._val
+
+    def setValue(self, v):
+        self._val = max(0, min(v, self._max))
+
+
+def _make_sticky_window(away=False):
+    """构造 _scroll_to_bottom / _maintain_bottom_anchor 可运行的最小实例"""
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._is_destroyed = False
+    win._pending_scroll_to_bottom = False
+    win._bottom_anchor_deadline = 0.0
+    win._bottom_anchor_timer = MagicMock()
+    win._scroll_bottom_timer = MagicMock()
+    win._suppress_scroll_sync_count = 0
+    win._user_intentionally_away_from_bottom = away
+    bar = _FakeScrollBar(maximum=1000, value=1000)  # 贴底起点
+    area = MagicMock()
+    area.verticalScrollBar.return_value = bar
+    win.chat_scroll_area = area
+    return win
+
+
+def _drive_sticky_lifecycle(win, clock):
+    """驱动 sticky(900ms) 完整生命周期：置底 → anchor 100ms tick → 到期清零"""
+    win._scroll_to_bottom(sticky_ms=900)
+    clock.advance(0.05)
+    win._do_scroll_to_bottom()  # 50ms 后置底并启动 anchor
+    for _ in range(8):
+        clock.advance(0.1)
+        win._maintain_bottom_anchor()  # 100~800ms tick，维持贴底
+    clock.advance(0.1)
+    win._maintain_bottom_anchor()  # ~900ms 到期 → 清零 return
+    assert win._bottom_anchor_deadline == 0.0
+
+
+def test_sticky_anchor_expiry_relays_bottom_guard(qapp):
+    """sticky 900ms 到期后晚到的高度上报必须仍被追平（加载不置底根因）
+
+    修复前：到期分支清零 return，链路终止 —— 之后的高度上报把视口顶离底部
+    后无人再管，永久停在中间。修复后：到期接力 _ensure_at_bottom 兜底窗口。
+    """
+    import types
+    from unittest import mock
+
+    import app.main_widget as mw
+
+    clock = _FakeClock()
+    singles = []
+    win = _make_sticky_window()
+    bar = win.chat_scroll_area.verticalScrollBar()
+    with (
+        mock.patch.object(mw, "time", types.SimpleNamespace(monotonic=clock.monotonic)),
+        mock.patch.object(mw.QTimer, "singleShot", staticmethod(lambda ms, cb: singles.append((ms, cb)))),
+    ):
+        _drive_sticky_lifecycle(win, clock)
+        # 晚到高度上报：内容撑高 400px，视口距底 400（远超 AT_BOTTOM_TOLERANCE）
+        bar._max = 1400
+        clock.advance(0.15)  # 接力 singleShot(150) 到期
+        for _ms, cb in list(singles):
+            cb()
+    assert bar.value() == 1400  # 修复前停 1000（红），修复后追平（绿）
+
+
+def test_sticky_anchor_expiry_relay_respects_away(qapp):
+    """到期接力不得覆盖用户阅读位置：away=True 时守卫拦截，不强制置底"""
+    import types
+    from unittest import mock
+
+    import app.main_widget as mw
+
+    clock = _FakeClock()
+    singles = []
+    win = _make_sticky_window(away=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar._val = 400  # 用户停在消息列表中部阅读
+    win._bottom_anchor_deadline = clock.t + 0.9
+    with (
+        mock.patch.object(mw, "time", types.SimpleNamespace(monotonic=clock.monotonic)),
+        mock.patch.object(mw.QTimer, "singleShot", staticmethod(lambda ms, cb: singles.append((ms, cb)))),
+    ):
+        clock.advance(1.0)
+        win._maintain_bottom_anchor()  # 到期 → 清零 + 接力
+        assert win._bottom_anchor_deadline == 0.0
+        bar._max = 1400  # 内容撑高
+        clock.advance(0.15)
+        for _ms, cb in list(singles):
+            cb()
+    assert bar.value() == 400  # away 守卫拦截，阅读位置不被打扰
+
+
+# ─── 加载期 away 污染（加载不置底的真正主因）──────────────────────────
+# 背景：首屏 12 批渲染必超单窗配额 12 张 → B4 回收触发补偿
+# setValue(value-removed_total)。此刻加载中 maximum 因卡片高度异步上报
+# 持续增长，value 停在最后程序置底处（差值 >24px），valueChanged →
+# _on_scroll_changed 把「不在底部」误归因为用户滚离 → away=True。
+# 之后批次置底、最后卡救场、排空 sticky 全被守卫拦下且无复位事件
+# → 视口永久停在消息列表中间。短会话（<12 卡）不触发回收 → 「偶尔」。
+
+
+def test_loading_scroll_change_does_not_pollute_away():
+    """加载期程序性 value 移动（B4 补偿触发 valueChanged）不得置 away"""
+    win = _make_window(_loading_session=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1400
+    bar.value.return_value = 1000  # 差值 400 > 24（加载中 max 涨、value 未跟）
+
+    win._on_scroll_changed(1000)
+
+    assert win._user_intentionally_away_from_bottom is False
+
+
+def test_loading_scroll_change_still_resets_away():
+    """加载期贴底时仍复位 away（保留原语义）"""
+    win = _make_window(_loading_session=True, _user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+    bar.value.return_value = 1000  # 贴底
+
+    win._on_scroll_changed(1000)
+
+    assert win._user_intentionally_away_from_bottom is False
+
+
+def test_non_loading_scroll_still_marks_away():
+    """非加载期行为不变：不贴底的 valueChanged 仍置 away（用户滚离阅读）"""
+    win = _make_window(_loading_session=False)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1400
+    bar.value.return_value = 400
+
+    win._on_scroll_changed(400)
+
+    assert win._user_intentionally_away_from_bottom is True
+
+
+def test_away_pollution_blocks_sticky_end_to_end():
+    """端到端复现：加载期 away 被污染 → 排空 sticky 不启动 → 停在中间
+
+    模拟真实信号序列：首批置底后 max 因高度上报涨到 1400，B4 回收补偿
+    触发 valueChanged(1000)，随后懒渲染排空。修复前 away=True 拦下
+    sticky，修复后 sticky 启动把视口追平到底。
+    """
+    win = _make_window(_loading_session=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1400
+    bar.value.return_value = 1000
+
+    # B4 回收补偿 setValue(1000-removed) 触发 valueChanged → _on_scroll_changed
+    win._on_scroll_changed(1000)
+    # 懒渲染排空分支的 sticky 条件：initial_scroll 已 True + not away
+    win._initial_scroll_to_bottom = True
+    win._loading_session = False
+    if not win._user_intentionally_away_from_bottom:
+        win._scroll_to_bottom(sticky_ms=900)
+
+    win._scroll_to_bottom.assert_called_once()  # 修复前不调用（红）
 
 
 def test_height_delta_is_one_shot(qapp):
@@ -546,9 +731,7 @@ def test_height_delta_is_one_shot(qapp):
     heightChanged 可能由多条路径发射（含"重发已应用高度"的动画结束回调），
     若 delta 不清零，同一增量会被反复累加 → 视口持续漂移。
     """
-    win, card, bar = _make_anchor_window(
-        card_top=0, card_height=200, value=500, streaming=False, away=True
-    )
+    win, card, bar = _make_anchor_window(card_top=0, card_height=200, value=500, streaming=False, away=True)
     card._last_height_delta = 40
     card.heightChanged.emit(240)
     bar.setValue.assert_called_once_with(540)
@@ -563,9 +746,7 @@ def test_negative_delta_clamped_at_zero(qapp):
 
     跟随态 + 卡片大幅收拢（如坞态归位、内容重渲染变短）时最容易撞到负值。
     """
-    win, card, bar = _make_anchor_window(
-        card_top=0, card_height=1200, value=30, streaming=False, away=False
-    )
+    win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=30, streaming=False, away=False)
     card._last_height_delta = -80
     card.heightChanged.emit(1120)
 

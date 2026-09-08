@@ -14287,9 +14287,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 所以 `_do_scroll_to_bottom` 里不需要（也绝不能再）手动复位。
         # 旧实现 `elif scroll_bar.maximum() > 0` 在「内容不足一屏」(maximum==0)
         # 时不复位，会把 away 永久卡在 True —— 这里用 _is_view_at_bottom 覆盖。
-        if self._is_view_at_bottom():
+        # 🐛 加载期（_loading_session）滚动条 value 会被 B4 回收补偿等程序路径
+        # 移动，且 maximum 因卡片高度异步上报持续增长 ——「此刻不在底部」不代表
+        # 用户意图。此窗口置位 away 会让批次置底/最后卡救场/排空 sticky 全链
+        # 静默失效（加载停在消息列表中间的根因），故只允许复位不允许置位。
+        if self._is_view_at_bottom() or self._loading_session:
             self._user_intentionally_away_from_bottom = False
-        else:
+        elif not self._loading_session:
             self._user_intentionally_away_from_bottom = True
         if value <= self._history_load_threshold:
             self._load_more_history_batches()
@@ -15765,6 +15769,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._bottom_anchor_deadline <= time.monotonic():
             self._bottom_anchor_deadline = 0.0
             self._suppress_scroll_sync_count = 0
+            # 🐛 anchor 到期 ≠ 卡片高度稳定：WebEngine 高度异步上报可能晚于
+            # sticky 窗口（大会话/慢机器常态），视口随后被顶离底部且无人再
+            # 追平 → 「加载历史会话偶尔停在消息列表中间」。到期接力与非
+            # sticky 路径（_do_scroll_to_bottom else 分支）同款的
+            # _ensure_at_bottom 兜底窗口；away 守卫保证不打扰用户主动阅读。
+            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         scroll_bar.setValue(scroll_bar.maximum())
