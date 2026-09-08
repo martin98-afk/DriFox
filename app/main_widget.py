@@ -11054,6 +11054,9 @@ class OpenAIChatToolWindow(ToolWindow):
                             if not self._install_batch_placeholder(batch_idx, batch_height, first_index):
                                 above_removed_height += batch_height
                             above_widgets.extend(batch_cards)
+                            # [池化] 高度已记录、占位已装好，此时摘 WebView 不影响几何
+                            for card in batch_cards:
+                                self._try_detach_card_viewer(card)
                         recycled_count += 1
                     # 🛡️ B9 修复：只卸载 UI（_batch_cards=None），
                     # 保留 _message_batch 数据（上滚回可重建，数据不丢失）
@@ -11081,6 +11084,9 @@ class OpenAIChatToolWindow(ToolWindow):
                             # 同上方批次：优先留等高占位，保持容器总高度不变
                             self._install_batch_placeholder(batch_idx, batch_height, first_index)
                             below_widgets.extend(batch_cards)
+                            # [池化] 同上：几何已固定后再摘 WebView
+                            for card in batch_cards:
+                                self._try_detach_card_viewer(card)
                         recycled_count += 1
                     # 🛡️ B9 修复：只卸载 UI，保留数据
                     self._batch_cards[batch_idx] = None
@@ -11166,6 +11172,20 @@ class OpenAIChatToolWindow(ToolWindow):
             ordered = sorted(self._unloaded_pids, key=lambda x: x[1])
             self._unloaded_pids = ordered[-_UNLOADED_PIDS_MAX:]
 
+    @staticmethod
+    def _try_detach_card_viewer(card) -> bool:
+        """尝试把卡片的 CodeWebViewer 摘下归还复用池（任何异常静默忽略）。
+
+        池化失败不影响既有流程：返回 False 时调用方照旧走销毁路径。
+        """
+        fn = getattr(card, "detach_viewer", None)
+        if fn is None:
+            return False
+        try:
+            return bool(fn())
+        except Exception:
+            return False
+
     def _unload_batch(self, batch_idx: int) -> int:
         """卸载一个批次的 UI（释放 WebEngine renderer），保留 _message_batch 数据。
 
@@ -11184,12 +11204,9 @@ class OpenAIChatToolWindow(ToolWindow):
         cards = self._batch_cards[batch_idx]
         if not cards:
             return 0
-        # 强回收：卸载前收集存活卡片的 renderer PID（PID>0 才登记）
-        now = time.time()
-        for card in cards:
-            pid = getattr(card, "_renderer_pid", 0) or 0
-            if pid > 0 and self._is_widget_alive(card):
-                self._register_unloaded_pid(pid, now, batch_idx)
+        # ── 第一步：先按「viewer 仍在」的状态量出真实高度 ──
+        # ⚠️ 顺序关键：摘掉 viewer 会让卡片高度立刻塌陷，必须在摘之前量完，
+        # 否则占位高度与滚动补偿都会算错（表现为回收后视口跳动）。
         removed_h = 0
         alive_cards = []
         first_index = -1
@@ -11202,6 +11219,21 @@ class OpenAIChatToolWindow(ToolWindow):
                 except RuntimeError:
                     pass
                 alive_cards.append(card)
+
+        # ── 第二步：高度已记录，安全摘下 WebView 归还复用池 ──
+        detached_ids = {id(c) for c in alive_cards if self._try_detach_card_viewer(c)}
+
+        # ── 第三步：只对**未能池化**的卡片登记 renderer PID ──
+        # 池中 viewer 的 renderer 仍存活且随时会被取出复用，登记进
+        # _unloaded_pids 会被强回收 kill → 复用时卡片直接白屏。
+        now = time.time()
+        for card in alive_cards:
+            if id(card) in detached_ids:
+                continue
+            pid = getattr(card, "_renderer_pid", 0) or 0
+            if pid > 0:
+                self._register_unloaded_pid(pid, now, batch_idx)
+
         placeholder_ok = False
         if alive_cards:
             delete_widgets_from_layout(alive_cards, self.chat_layout, call_cleanup=True)
@@ -11368,6 +11400,15 @@ class OpenAIChatToolWindow(ToolWindow):
                     return True
             except RuntimeError:
                 pass
+        # [池化] 复用池中 viewer 的 renderer 进程仍存活且随时会被取出复用，
+        # 必须视为「在用」——否则强回收 kill 掉它，复用时卡片直接白屏。
+        try:
+            from app.widgets.webview_pool import WebViewPool
+
+            if pid in WebViewPool.get_instance().pids():
+                return True
+        except Exception:
+            pass
         return False
 
     @staticmethod

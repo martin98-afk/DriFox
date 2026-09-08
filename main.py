@@ -123,7 +123,7 @@ sys.path.insert(0, project_root)
 # 回退：DRIFOX_NO_VEH=1 跳过安装。确认驱动修复稳定后可移除本段。
 if os.name == "nt":
     try:
-        from tools.veh_minidump import install as _install_veh
+        from app.utils.veh_minidump import install as _install_veh
 
         _install_veh()
     except Exception:

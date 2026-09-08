@@ -4316,6 +4316,37 @@ class CodeWebViewer(QWebEngineView):
         """注册到全局单例事件过滤器（注册表方式，不再每 viewer 安装一个过滤器）"""
         _dialog_event_filter.register(self)
 
+    def reset_for_reuse(self):
+        """归还 ``WebViewPool`` 前的重置：清空文档 + 复位卡片相关状态。
+
+        只清理 viewer 自身。**与卡片的信号连接不在这里断开** —— 那部分由
+        ``MessageCard.detach_viewer()`` 成对维护（连接/断开写在一起，新增信号
+        时不易漏）。
+
+        注意 ``_renderer_pid`` **不清零**：复用时 renderer 进程通常被 Chromium
+        保留，池中 viewer 的 PID 要交给 B4 强回收护栏做「在用」判定，
+        清零会让该进程被误杀。
+        """
+        try:
+            if self.page():
+                self.setHtml("", QUrl("about:blank"))
+        except RuntimeError:
+            pass
+        self._streaming = False
+        self._is_history = False
+        self._stable_html = ""
+        self._stable_md_len = 0
+        self._needs_full_render = True
+        self._tail_html_hash = 0
+        self._lazy_markdown_cb = None
+        self._restore_finished_ids = None
+        self._resize_locked = False
+        self._height_report_pending = False
+        self._document_height = 0
+        self._body_client_height = 0
+        self._body_scroll_top = 0
+        self._body_geom_valid = False
+
     def _is_mask_dialog(self, obj) -> bool:
         """判断是否为透明遮罩对话框（WA_TranslucentBackground，需防穿透）"""
         try:
@@ -13511,6 +13542,98 @@ class MessageCard(SimpleCardWidget):
             p = p.parentWidget()
         return True
 
+    def _connect_viewer_signals(self):
+        """连接 viewer → 卡片的全部信号。
+
+        与 :meth:`_disconnect_viewer_signals` **成对维护**，两处写在一起是为了
+        支持 WebView 池化：viewer 换卡片时必须先断开旧连接再连到新卡片，
+        否则旧卡片被销毁后残留连接会在信号触发时抛 RuntimeError。
+        """
+        v = self.viewer
+        if v is None:
+            return
+        v.codeActionRequested.connect(self.actionRequested.emit)
+        v.contextActionRequested.connect(self.contextActionRequested.emit)
+        v.contentHeightChanged.connect(self._update_height)
+        v.toolDiffRequested.connect(self.toolDiffRequested.emit)
+        v.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
+        v.saveFileRequested.connect(self.saveFileRequested.emit)
+        v.chartExpandRequested.connect(self._on_chart_expand)
+        v.saveChartPngRequested.connect(self._on_save_chart_png)
+        v.saveWidgetFileRequested.connect(self._on_save_widget_file)
+        # WebEngine 上下文丢失处理
+        v.contextLost.connect(self._on_webengine_context_lost)
+        v.contextRestored.connect(self._on_webengine_context_restored)
+        v.needRecreate.connect(self._on_webengine_need_recreate)
+        # 安装对话框过滤
+        v._install_dialog_filter()
+
+    def _disconnect_viewer_signals(self):
+        """断开 viewer → 卡片的全部信号（池化复用 / 摘除 viewer 前调用）。"""
+        v = self.viewer
+        if v is None:
+            return
+        pairs = (
+            (v.codeActionRequested, self.actionRequested.emit),
+            (v.contextActionRequested, self.contextActionRequested.emit),
+            (v.contentHeightChanged, self._update_height),
+            (v.toolDiffRequested, self.toolDiffRequested.emit),
+            (v.subAgentLogRequested, self.subAgentLogRequested.emit),
+            (v.saveFileRequested, self.saveFileRequested.emit),
+            (v.chartExpandRequested, self._on_chart_expand),
+            (v.saveChartPngRequested, self._on_save_chart_png),
+            (v.saveWidgetFileRequested, self._on_save_widget_file),
+            (v.contextLost, self._on_webengine_context_lost),
+            (v.contextRestored, self._on_webengine_context_restored),
+            (v.needRecreate, self._on_webengine_need_recreate),
+        )
+        for signal, slot in pairs:
+            try:
+                signal.disconnect(slot)
+            except RuntimeError, TypeError:
+                pass
+
+    def detach_viewer(self) -> bool:
+        """把 ``CodeWebViewer`` 摘下并归还复用池（卡片随后被卸载/销毁）。
+
+        与「直接销毁」的区别：renderer 进程与已初始化的 WebContents 保留下来，
+        下次有卡片需要 viewer 时直接复用实例，省掉一次 Chromium 初始化。
+
+        Returns:
+            是否成功归还到池。``False`` 表示未池化，调用方照旧销毁整张卡片。
+        """
+        viewer = self.viewer
+        if viewer is None:
+            return False
+        # user 卡片走 PlainTextViewer；灰度中的纯 Qt 渲染器不参与池化
+        if self.role == "user" or not isinstance(viewer, CodeWebViewer):
+            return False
+        # 流式输出中的卡片不可摘：摘掉会中断正在进行的渲染与高度回传
+        if self._streaming:
+            return False
+
+        from app.widgets.webview_pool import WebViewPool
+
+        light = bool(getattr(viewer, "_light_skeleton", False))
+        try:
+            self._disconnect_viewer_signals()
+            self._viewer_layout.removeWidget(viewer)
+            viewer.setParent(None)
+        except RuntimeError:
+            return False
+        self.viewer = None
+        # 回到「未渲染」态。消息数据仍留在 _message_batch / _content_data，
+        # 批次重建时由上层重新灌入，这里不需要暂存。
+        self._lazy_rendered = False
+        if WebViewPool.get_instance().release(viewer, light=light):
+            return True
+        # 入池失败：照旧销毁，绝不让 viewer 实例泄漏
+        try:
+            viewer.deleteLater()
+        except RuntimeError:
+            pass
+        return False
+
     def ensure_rendered(self, delay_ms: int = 0):
         """如果还没渲染，懒加载创建QWebViewer并渲染内容
 
@@ -13566,7 +13689,21 @@ class MessageCard(SimpleCardWidget):
                     self._pending_welcome_md = None
                 self.lazyRenderCompleted.emit()
                 return
-            self.viewer = CodeWebViewer(self, light=is_welcome)
+            # [池化] 优先复用池中实例：省掉一次 Chromium renderer/上下文初始化
+            # （既有注释记录的量级是 100–500ms 主线程占用 + 视觉闪烁）。
+            # 取不到（池空 / 池已停用）时回退到新建，行为与改造前一致。
+            from app.widgets.webview_pool import WebViewPool
+
+            pooled = WebViewPool.get_instance().acquire(light=is_welcome)
+            if pooled is not None:
+                try:
+                    pooled.setParent(self)
+                    pooled.setUpdatesEnabled(True)
+                    self.viewer = pooled
+                except RuntimeError:
+                    self.viewer = None
+            if self.viewer is None:
+                self.viewer = CodeWebViewer(self, light=is_welcome)
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             if not is_welcome:
                 # 标记是否为历史会话：非流式加载的历史消息自动折叠工具区
@@ -13581,21 +13718,7 @@ class MessageCard(SimpleCardWidget):
                 # 让 viewer 的 restore 逻辑知道哪些工具结果已到达，
                 # 避免全量重渲染时把已完成的运行框以“运行中”状态复活。
                 self.viewer._restore_finished_ids = self._finished_streaming_ids
-            self.viewer.codeActionRequested.connect(self.actionRequested.emit)
-            self.viewer.contextActionRequested.connect(self.contextActionRequested.emit)
-            self.viewer.contentHeightChanged.connect(self._update_height)
-            self.viewer.toolDiffRequested.connect(self.toolDiffRequested.emit)
-            self.viewer.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
-            self.viewer.saveFileRequested.connect(self.saveFileRequested.emit)
-            self.viewer.chartExpandRequested.connect(self._on_chart_expand)
-            self.viewer.saveChartPngRequested.connect(self._on_save_chart_png)
-            self.viewer.saveWidgetFileRequested.connect(self._on_save_widget_file)
-            # WebEngine 上下文丢失处理
-            self.viewer.contextLost.connect(self._on_webengine_context_lost)
-            self.viewer.contextRestored.connect(self._on_webengine_context_restored)
-            self.viewer.needRecreate.connect(self._on_webengine_need_recreate)
-            # 安装对话框过滤
-            self.viewer._install_dialog_filter()
+            self._connect_viewer_signals()
 
             self._viewer_layout.addWidget(self.viewer)
             self._lazy_rendered = True
