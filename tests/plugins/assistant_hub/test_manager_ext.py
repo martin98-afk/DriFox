@@ -73,6 +73,43 @@ def test_set_session_override_records_map(tmp_path):
     # override 清除不影响归属映射（归属以最后使用为准）
 
 
+def test_session_override_persist_and_reload(tmp_path):
+    """override 持久化：重启后恢复，SessionStart 记忆注入仍按临时助手开关判断。"""
+    mgr = _fresh_manager(tmp_path)
+    mgr.create("主助手")
+    a2 = mgr.create("临时助手")
+    assert mgr.set_session_override("s1", a2.id)
+    assert (tmp_path / "hub" / "_session_overrides.json").exists()
+    # 重启（新实例）后 override 保留
+    mgr2 = _fresh_manager(tmp_path)
+    assert mgr2.get_session_override("s1") == a2.id
+    # 清除 override 也落盘：重启后不回来
+    mgr2.set_session_override("s1", "")
+    mgr3 = _fresh_manager(tmp_path)
+    assert mgr3.get_session_override("s1") == ""
+
+
+def test_session_override_deleted_assistant_cleaned(tmp_path):
+    """override 指向的助手已删：读取时惰性清理并落盘。"""
+    mgr = _fresh_manager(tmp_path)
+    mgr.create("主助手")
+    a2 = mgr.create("将删助手")
+    mgr.set_session_override("s1", a2.id)
+    mgr.delete(a2.id)
+    assert mgr.get_session_override("s1") == ""
+    mgr2 = _fresh_manager(tmp_path)
+    assert mgr2.get_session_override("s1") == ""
+
+
+def test_session_override_trimmed_when_overflow(tmp_path):
+    mgr = _fresh_manager(tmp_path)
+    mgr.create("主助手")
+    for i in range(1100):
+        mgr.set_session_override(f"s{i}", mgr.active_id())
+    assert len(m.AssistantManager._session_overrides) <= 1000
+    assert "s0" not in m.AssistantManager._session_overrides
+
+
 def test_session_map_trimmed_when_overflow(tmp_path):
     mgr = _fresh_manager(tmp_path)
     mgr.create("主助手")

@@ -71,7 +71,8 @@ def _enabled_for_primary(context: Dict[str, Any], attr: str) -> bool:
     """判断当前会话是否允许注入。
 
     - 子智能体（current_role != "primary"）→ 始终允许
-    - 主智能体 → 读当前激活助手的开关字段；无激活助手 → 不允许
+    - 主智能体 → 读当前生效助手的开关字段（会话级临时助手 override 优先，
+      回落主助手）；无生效助手 → 不允许
     """
     ctx = context or {}
     if ctx.get("current_role") != "primary":
@@ -80,7 +81,10 @@ def _enabled_for_primary(context: Dict[str, Any], attr: str) -> bool:
         mgr = _get_manager()
         if mgr is None:
             return False
-        aid = mgr.active_id()
+        sid = str(ctx.get("session_id") or "")
+        aid = mgr.get_session_override(sid) if sid else ""
+        if not aid:
+            aid = mgr.active_id()
         if not aid or not mgr.has(aid):
             return False
         a = mgr.get(aid)

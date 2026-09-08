@@ -160,6 +160,29 @@ def test_on_session_start_no_active_assistant(monkeypatch):
     assert m.on_session_start("SessionStart", {}) == ""
 
 
+def test_on_session_start_uses_session_override(monkeypatch):
+    """会话 override 优先：重启/压缩后按临时助手的记忆开关注入，不用主助手。"""
+    mgr = _patch_mgr(monkeypatch)
+    mgr.session_overrides["s2"] = "temp-1"
+
+    class _ATemp(_A):
+        memory_enabled = False  # 临时助手关了记忆开关
+
+    mgr.get = lambda aid: _ATemp()
+    out = m.on_session_start("SessionStart", {"state": "compact", "session_id": "s2"})
+    assert out
+    assert "人工提示" in out  # pinned 始终注入
+    assert "记忆使用规则" not in out  # 临时助手的记忆开关生效
+    assert "今日" not in out
+
+
+def test_on_session_start_no_override_falls_back_to_active(monkeypatch):
+    """有 session_id 但无 override：回落主助手。"""
+    _patch_mgr(monkeypatch)
+    out = m.on_session_start("SessionStart", {"state": "startup", "session_id": "s3"})
+    assert out and "记忆使用规则" in out
+
+
 def test_on_session_start_mgr_unavailable(monkeypatch):
     """manager 不可用：返回空串，不抛异常。"""
     monkeypatch.setattr(m, "_get_manager", lambda: None)

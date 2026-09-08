@@ -336,8 +336,8 @@ class AssistantManager:
 
     _instance: Optional["AssistantManager"] = None
 
-    # 会话级临时助手：{session_id: assistant_id}（运行时态，重启清零；
-    # 由 @提及触发，仅影响对应会话的 system prompt）
+    # 会话级临时助手：{session_id: assistant_id}（持久化 _session_overrides.json，
+    # 重启后恢复；由 @提及触发，仅影响对应会话的注入身份与开关判断）
     _session_overrides: Dict[str, str] = {}
 
     # 会话归属映射：{session_id: assistant_id}（持久化 _session_map.json）；
@@ -425,6 +425,7 @@ class AssistantManager:
         """启动时从磁盘扫描全部助手"""
         self._ensure_dir(self._root)
         self._load_session_map()
+        self._load_session_overrides()
         try:
             for entry in sorted(self._root.iterdir(), key=lambda p: p.name):
                 if not entry.is_dir():
@@ -658,6 +659,12 @@ class AssistantManager:
             overrides[session_id] = aid
         else:
             overrides.pop(session_id, None)
+        # 防膨胀：超上限裁掉最旧的一半（dict 保插入序，对齐 _session_map）
+        if len(overrides) > 1000:
+            for k in list(overrides.keys())[:500]:
+                overrides.pop(k, None)
+        # 持久化：重启后恢复，SessionStart 记忆注入也能按临时助手开关判断
+        cls.get_instance()._save_session_overrides()
         # 同步归属映射（提前落盘，不等轮次结束）
         if aid:
             cls.record_session_aid(session_id, aid)
@@ -712,11 +719,33 @@ class AssistantManager:
         """读会话级临时助手；无 override 或助手已删除返回空串（跟随全局）。"""
         if not session_id:
             return ""
-        aid = cls.get_instance()._session_overrides.get(session_id, "")
-        if aid and not cls.get_instance().has(aid):
-            cls.get_instance()._session_overrides.pop(session_id, None)
+        inst = cls.get_instance()
+        aid = inst._session_overrides.get(session_id, "")
+        if aid and not inst.has(aid):
+            inst._session_overrides.pop(session_id, None)
+            inst._save_session_overrides()
             return ""
         return aid
+
+    def _session_overrides_path(self) -> Path:
+        return self._root / "_session_overrides.json"
+
+    def _save_session_overrides(self) -> None:
+        try:
+            self._ensure_dir(self._root)
+            self._session_overrides_path().write_text(
+                json.dumps(self._session_overrides, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.debug(f"[assistant_hub] 保存 session overrides 失败: {e}")
+
+    def _load_session_overrides(self) -> None:
+        try:
+            data = json.loads(self._session_overrides_path().read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                type(self)._session_overrides = {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            pass
 
     # ── 预置工具档位（初始注入 schema，hooks 与 UI 统计共用归属逻辑）──
 

@@ -134,15 +134,18 @@ def on_session_start(event: str, context: Dict[str, Any]) -> str:
 
     由主程序 _inject_hook_to_session 包装为 role=user 的 hook 消息注入会话
     消息列表（带 <session-start-hook> / <system-reminder> 标记），不进系统
-    提示词。会话级临时助手（@提及）尚未生效（@ 在 PreUserMessage 才检测），
-    此处用主助手身份注入；后续切助手时 BuildSystemPrompt 通过 identity_block
-    覆盖人格段，记忆段保持主助手视角。
+    提示词。会话级临时助手（@提及）override 优先（重启/清空/压缩后
+    override 仍在，按其记忆开关与记忆内容注入）；新会话首条消息 @ 场景
+    override 尚未生效（@ 在 PreUserMessage 才检测），回落主助手。
     """
     try:
         mgr = _get_manager()
         if mgr is None:
             return ""
-        aid = mgr.active_id()
+        sid = str((context or {}).get("session_id") or "")
+        aid = mgr.get_session_override(sid) if sid else ""
+        if not aid:
+            aid = mgr.active_id()
         if not aid or not mgr.has(aid):
             return ""
         return _memory_block(aid) or ""
