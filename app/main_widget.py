@@ -15638,7 +15638,30 @@ class OpenAIChatToolWindow(ToolWindow):
             True = 视口在底部附近（或内容不足一屏，无处可滚）。
         """
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        self._sync_scroll_maximum()
         return scroll_bar.maximum() - scroll_bar.value() <= tolerance
+
+    def _sync_scroll_maximum(self) -> int:
+        """把滚动条上界校正到**真实**内容高度，返回校正后的 maximum。
+
+        🐛 卡片 `setFixedHeight` 之后，Qt 布局要到下一次事件循环才传播：这段窗口里
+        `container.height()` 与 `scrollBar.maximum()` 都还是旧值（实测滞后可达数千
+        px —— 流式结束那一次高度收敛会让视口停在消息列表中间）。而
+        `layout.sizeHint()` 是即时计算的，可以拿来当真实内容高度。
+
+        只**抬高**不压低：Qt 随后自己算出的上界会覆盖它，不会互相打架。
+        """
+        scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        try:
+            container = self.chat_scroll_area.widget()
+            if container is None:
+                return scroll_bar.maximum()
+            real = container.sizeHint().height() - self.chat_scroll_area.viewport().height()
+            if real > scroll_bar.maximum():
+                scroll_bar.setMaximum(max(0, real))
+        except RuntimeError:
+            pass
+        return scroll_bar.maximum()
 
     def _should_follow_bottom(self) -> bool:
         """程序是否应该把视口拽回底部。
@@ -15715,7 +15738,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._pending_scroll_to_bottom:
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        max_val = scroll_bar.maximum()
+        max_val = self._sync_scroll_maximum()
+        logger.info(f"[DBG-SCF] do_bottom value={scroll_bar.value()} max={max_val}")
         scroll_bar.setValue(max_val)
         # 再次设置确保卡片高度变化后仍在底部
         scroll_bar.setValue(max_val)
@@ -15754,6 +15778,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._should_follow_bottom():
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        self._sync_scroll_maximum()
+        logger.info(
+            f"[DBG-SCF] ensure value={scroll_bar.value()} max={scroll_bar.maximum()} "
+            f"atbottom={self._is_view_at_bottom()} retries={retries} follow={self._should_follow_bottom()}"
+        )
         if not self._is_view_at_bottom():
             scroll_bar.setValue(scroll_bar.maximum())
             # 懒渲染可能需要更长时间，延迟再次检查
@@ -15823,11 +15852,16 @@ class OpenAIChatToolWindow(ToolWindow):
             container = self.chat_scroll_area.widget()
             if delta and container is not None and sender.parentWidget() is container:
                 sb = self.chat_scroll_area.verticalScrollBar()
+                self._sync_scroll_maximum()
                 value = sb.value()
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()
                 card_bottom = card_top + sender.height()
                 if card_bottom <= value or self._should_follow_bottom():
                     sb.setValue(max(0, value + delta))
+                    logger.info(
+                        f"[DBG-SCF] comp card={id(sender) % 100000} delta={delta} "
+                        f"value={value} max={sb.maximum()} newvalue={sb.value()}"
+                    )
         except RuntimeError:
             pass
         if not sender._content_just_loaded:

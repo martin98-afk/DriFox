@@ -15963,6 +15963,7 @@ class MessageCard(SimpleCardWidget):
                 与"历史会话默认折叠"的产品预期冲突。历史卡片从未启动过
                 流式动画，跳过 stop_streaming_anim 无副作用。
         """
+        logger.info(f"[DBG-SCF] finish_streaming card={id(self) % 100000} history={history}")
         try:
             # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
             # 渐变边框/流动光点），与紧随其后的最终全量渲染抢主线程。
