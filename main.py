@@ -28,6 +28,19 @@ warnings.filterwarnings("ignore")
 os.environ.setdefault("PYPINYIN_NO_DICT_COPY", "1")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
+# ========== 渲染后端：硬件优先，软件仅作回退 ==========
+# 默认走硬件：Qt 侧 ANGLE→D3D11，Chromium 侧启用 GPU 进程与硬件光栅。
+# 回退到软件路径（显卡驱动异常 / 无可用 GPU），任一命中即可，重启生效：
+#   ① 环境变量 DRIFOX_SOFTWARE_RENDER=1
+#   ② 标记文件 ~/.drifox/software_render（内容不限，存在即启用）
+# 软件路径 = QT_ANGLE_PLATFORM=warp（纯 CPU 光栅） + --disable-gpu。
+_SOFTWARE_RENDER = os.environ.get("DRIFOX_SOFTWARE_RENDER", "").strip().lower() in ("1", "true", "on", "yes")
+if not _SOFTWARE_RENDER:
+    try:
+        _SOFTWARE_RENDER = os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox", "software_render"))
+    except Exception:
+        _SOFTWARE_RENDER = False
+
 # ========== Qt 侧 OpenGL 走 ANGLE(D3D11)（Intel 核显 OpenGL 崩溃修复）==========
 # 根因：QtWebEngine 网页帧合成走 Qt Quick 场景图，默认 OpenGL 后端命中本机
 # Intel Xe-LP 驱动（igxelpicd64.dll）的 OpenGL 实现，流式渲染高频合成期崩溃。
@@ -39,15 +52,15 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 # RHI D3D11 合成，消息卡片整体变黑 —— 启动时强制清除，杜绝复发。
 # 回退：外部设 QT_OPENGL=desktop 恢复桌面 GL。
 os.environ.setdefault("QT_OPENGL", "angle")
-# ANGLE 后端默认走 WARP（Windows 软件光栅，纯 CPU）。原因：Qt 场景图合成是远端
-# Intel 集显崩溃的落点（OpenGL ICD），WARP 完全不碰显卡驱动，同时保留 GL 语义，
-# WebEngine 的纹理共享照常 —— 这是「既不崩也不黑」的唯一组合（QSG_RHI 路线会黑屏）。
-# 代价：场景图合成走 CPU，长对话多卡片滚动时占用高于硬件 D3D11。
-# 回退：显卡正常、想回硬件加速设 QT_ANGLE_PLATFORM=d3d11；
-#       仍崩则 QT_OPENGL=software 退到 Mesa llvmpipe（最慢最稳）。
+# ANGLE 后端平台（二选一，由上面的 _SOFTWARE_RENDER 决定）：
+# - 硬件路径（默认）d3d11：ANGLE 把 GL 语义翻译成 D3D11，既绕开 Intel OpenGL ICD
+#   的崩溃路径，又把场景图合成交还 GPU —— 长对话多卡片滚动不再吃 CPU。
+# - 软件回退 warp：Windows 软件光栅，纯 CPU，完全不碰显卡驱动 —— 驱动异常或
+#   无可用 GPU（虚拟机 / 远程桌面）时的兜底。仍崩则 QT_OPENGL=software 退到
+#   Mesa llvmpipe（最慢最稳）。
 # 实测四种后端均不黑屏，见 tests/debug/angle_backend_check.py。
 # 注：仅 Windows 生效，其他平台 Qt 直接忽略本变量。
-os.environ.setdefault("QT_ANGLE_PLATFORM", "warp")
+os.environ.setdefault("QT_ANGLE_PLATFORM", "warp" if _SOFTWARE_RENDER else "d3d11")
 # 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
 for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
     os.environ.pop(_env_key, None)
@@ -69,28 +82,18 @@ for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
 #
 # 覆盖方式：用 setdefault，外部若已设置 QTWEBENGINE_CHROMIUM_FLAGS 则以其为准
 # （便于调试或快速回退，例如 QTWEBENGINE_CHROMIUM_FLAGS="" 即完全禁用本组开关）。
-# ========== WebGL 按需解禁（3D 图形需要）==========
-# 默认关闭 GPU：正文是纯 2D 渲染，GPU 进程常驻是纯开销（见下方 _GPU_FLAGS）。
-# 需要 3D 图形（three.js / echarts-gl 之类）时启用，任一命中即可，重启生效：
-#   ① 环境变量 DRIFOX_ENABLE_WEBGL=1
-#   ② 标记文件 ~/.drifox/webgl_enabled（内容不限，存在即启用）
-# 不用设置项的原因：QtWebEngine 只在首次初始化时读取 QTWEBENGINE_CHROMIUM_FLAGS，
-# 必须早于 QApplication，此处加载 Settings 过重（且 main.py 顶部刻意少依赖）。
-_WEBGL_ENABLED = os.environ.get("DRIFOX_ENABLE_WEBGL", "").strip().lower() in ("1", "true", "on", "yes")
-if not _WEBGL_ENABLED:
-    try:
-        _WEBGL_ENABLED = os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox", "webgl_enabled"))
-    except Exception:
-        _WEBGL_ENABLED = False
-
-if _WEBGL_ENABLED:
-    # 无硬件 GPU 时用 SwiftShader 软件光栅兜底（老版本 Chromium 忽略此开关）
-    _GPU_FLAGS = " --enable-unsafe-swiftshader"
+# ========== Chromium GPU 开关 ==========
+# 硬件路径（默认）：不禁用 GPU 进程，Chromium 走硬件光栅与合成，WebGL / 3D 图形
+#   天然可用 —— 不再需要 --enable-unsafe-swiftshader（那是软件光栅，与新策略冲突）。
+#   保留 --disable-software-rasterizer：禁掉 SwiftShader 软件兜底，避免驱动异常时
+#   静默退化回软件光栅（既慢又掩盖问题），失败就显式失败。
+#   代价：无可用 GPU 的环境（部分虚拟机 / 远程桌面）会渲染异常，
+#         此时用 DRIFOX_SOFTWARE_RENDER=1 回退。
+# 软件路径（_SOFTWARE_RENDER）：完全关掉 GPU 进程，纯 CPU 光栅。
+if _SOFTWARE_RENDER:
+    _GPU_FLAGS = " --disable-gpu --disable-software-rasterizer"
 else:
-    _GPU_FLAGS = (
-        " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
-        " --disable-software-rasterizer"
-    )
+    _GPU_FLAGS = " --disable-software-rasterizer"
 _CHROMIUM_FLAGS = (
     "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
     + _GPU_FLAGS
@@ -102,7 +105,7 @@ _CHROMIUM_FLAGS = (
      + " --enable-low-end-device-mode"  # 🔧 Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
     " --disable-smooth-scrolling"  # 合成器平滑滚动动画：卡内滚动只是安全网场景，外层滚动由 Qt 承载
     " --disable-features=Translate,MediaRouter,optimizeHints,CalculateNativeWinOcclusion"  # 翻译/媒体路由常驻线程/谷歌优化提示，纯开销；窗口遮挡计算在多 WebEngine 卡片下有已知崩溃关联，防御性禁用
-    " --disable-canvas-aa --disable-2d-canvas-clip-aa"  # 2D canvas 抗锯齿关闭：echarts 软件光栅下省内存提速（锯齿微增）
+    " --disable-canvas-aa --disable-2d-canvas-clip-aa"  # 2D canvas 抗锯齿关闭：echarts 渲染省内存提速（锯齿微增）
 )
 os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _CHROMIUM_FLAGS)
 
@@ -173,6 +176,11 @@ def main():
     # OpenGL 走 ANGLE(D3D11)：绕开 Intel OpenGL ICD 缺陷路径（见文件顶部说明）。
     # 必须在 QApplication 与 WebEngine 导入之前设置。
     QApplication.setAttribute(Qt.AA_UseOpenGLES)
+    # [MEM] 共享 GL 上下文：默认每个 QWebEngineView 会创建自己的 OpenGL 上下文，
+    # 并发对话下 40+ 张消息卡 = 40+ 个独立上下文，每个都要独立的命令缓冲与
+    # 合成表面后备存储。开启后所有 view 复用同一上下文，per-view 常驻开销显著下降。
+    # 必须在 QApplication 创建之前设置（benchmarks/README.md 同样要求此项）。
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，
