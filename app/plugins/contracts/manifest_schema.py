@@ -12,8 +12,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from loguru import logger
-
 # 字段规范表：字段名 → (期望类型元组, 缺省值或 None)
 # 缺省 None 表示：类型不符时直接丢弃该字段（视为未声明，下游按缺省语义处理）
 SPEC: Dict[str, tuple] = {
