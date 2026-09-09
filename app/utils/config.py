@@ -459,44 +459,6 @@ class Settings(QConfig):
     # 用户对非内置源 server 首次启动点「允许」后写入；拒绝仅本会话生效不落盘
     confirmed_plugin_servers = ConfigItem("Plugin", "ConfirmedPluginServers", [])
 
-    # ========== Gateway 通讯平台配置 ==========
-    # 企业微信
-    gateway_wecom_enabled = ConfigItem("Gateway", "WeCom/Enabled", False, BoolValidator())
-    gateway_wecom_bot_id = ConfigItem("Gateway", "WeCom/BotID", "")
-    gateway_wecom_secret = ConfigItem("Gateway", "WeCom/Secret", "")
-    gateway_wecom_websocket_url = ConfigItem("Gateway", "WeCom/WebSocketURL", "wss://openws.work.weixin.qq.com")
-
-    # 钉钉
-    gateway_dingtalk_enabled = ConfigItem("Gateway", "DingTalk/Enabled", False, BoolValidator())
-    gateway_dingtalk_client_id = ConfigItem("Gateway", "DingTalk/ClientID", "")
-    gateway_dingtalk_client_secret = ConfigItem("Gateway", "DingTalk/ClientSecret", "")
-
-    # Telegram
-    gateway_telegram_enabled = ConfigItem("Gateway", "Telegram/Enabled", False, BoolValidator())
-    gateway_telegram_token = ConfigItem("Gateway", "Telegram/Token", "")
-    gateway_telegram_require_mention = ConfigItem("Gateway", "Telegram/RequireMention", True, BoolValidator())
-
-    # Discord
-    gateway_discord_enabled = ConfigItem("Gateway", "Discord/Enabled", False, BoolValidator())
-    gateway_discord_token = ConfigItem("Gateway", "Discord/Token", "")
-    gateway_discord_require_mention = ConfigItem("Gateway", "Discord/RequireMention", True, BoolValidator())
-
-    # WhatsApp (Twilio)
-    gateway_whatsapp_enabled = ConfigItem("Gateway", "WhatsApp/Enabled", False, BoolValidator())
-    gateway_whatsapp_account_sid = ConfigItem("Gateway", "WhatsApp/AccountSID", "")
-    gateway_whatsapp_auth_token = ConfigItem("Gateway", "WhatsApp/AuthToken", "")
-    gateway_whatsapp_from_number = ConfigItem("Gateway", "WhatsApp/FromNumber", "")
-
-    # 飞书
-    gateway_feishu_enabled = ConfigItem("Gateway", "Feishu/Enabled", False, BoolValidator())
-    gateway_feishu_app_id = ConfigItem("Gateway", "Feishu/AppID", "")
-    gateway_feishu_app_secret = ConfigItem("Gateway", "Feishu/AppSecret", "")
-
-    # Slack
-    gateway_slack_enabled = ConfigItem("Gateway", "Slack/Enabled", False, BoolValidator())
-    gateway_slack_bot_token = ConfigItem("Gateway", "Slack/BotToken", "")
-    gateway_slack_app_token = ConfigItem("Gateway", "Slack/AppToken", "")
-
     # ========== Gitee 图床配置 ==========
     gitee_enabled = ConfigItem("Gitee", "Enabled", True, BoolValidator())
     gitee_token = ConfigItem("Gitee", "Token", "a5dcb6e2e7776143b7a7e7685a1f33a3")
