@@ -6405,7 +6405,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._toggle_send_stop(False)
             if self._current_assistant_card:
                 self._current_assistant_card.stop_streaming_anim()
-                self._current_assistant_card.finish_streaming()
+                # 🐛 打断路径强制归位（同 _on_stop_clicked）：压缩触发后 worker
+                # 已停止，活跃工具结果不再到达，keep_dock 会永久保留坞态。
+                self._current_assistant_card.finish_streaming(force_dock_off=True)
             try:
                 interrupted = self.backend.stop_streaming()
                 if interrupted:
@@ -6516,7 +6518,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._toggle_send_stop(False)
             if self._current_assistant_card:
                 self._current_assistant_card.stop_streaming_anim()
-                self._current_assistant_card.finish_streaming()
+                # 🐛 打断路径强制归位（同 _on_stop_clicked）。
+                self._current_assistant_card.finish_streaming(force_dock_off=True)
             try:
                 # 清空语义下中断消息无需回写 session（即将整体清空），
                 # 旧 worker 延迟快照由下方 _post_compact_guard 拦截
@@ -18413,7 +18416,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_assistant_card:
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.set_error_state(True, error_message=error)
+            # 🐛 注意顺序：update_content 在 _streaming=False 时会经 start_streaming_anim
+            # 重开流式态与坞态，必须在其后强制收尾，否则错误卡片永久停留在
+            # 流式结构（坞态沉底 + 正文限矮）。
             self._current_assistant_card.update_content(error)
+            self._current_assistant_card.finish_streaming(force_dock_off=True)
 
         self._is_streaming = False
         self._set_ai_state("error")  # 桌宠：发生错误
@@ -21043,7 +21050,9 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 self._stop_elapsed = None
             self._current_assistant_card.stop_streaming_anim()
-            self._current_assistant_card.finish_streaming()
+            # 🐛 打断路径必须强制归位：worker 已取消，活跃工具结果永不到达，
+            # keep_dock 的兑底归位永不触发 → 坞态永久沉底。
+            self._current_assistant_card.finish_streaming(force_dock_off=True)
 
         # 优先显示中止提示，让用户立即感知到操作已生效
         InfoBar.warning(
