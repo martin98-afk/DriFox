@@ -76,20 +76,6 @@ def _msg_feature(msg: Any):
     return None
 
 
-def _msg_role_fingerprint(messages: list) -> int:
-    """消息列表缓存指纹：覆盖原地可变元数据字段（Bug9 防脏命中）。
-
-    流式收尾/更新会在**原消息对象上原地补写**
-    model_name/provider_name/config_id/elapsed（_on_stream_finished /
-    _on_messages_updated）而不改变长度与首尾 role → 若指纹不含这些字段，
-    缓存命中会返回缺这些字段的旧列表（脏数据，Bug9）。
-
-    ⚡ [PERF] 本函数 O(n)，**已不在 consolidate_messages 的命中路径上**
-    （改为 O(W) 的尾部窗口校验），仅保留给需要全列表指纹的调用方。
-    """
-    if not messages:
-        return 0
-    return hash(tuple(_msg_feature(m) for m in messages))
 
 
 def _msg_head_key(messages: list) -> tuple:
@@ -676,43 +662,8 @@ def content_to_markdown(content: Any) -> str:
     return "\n\n".join(part for part in parts if part).strip()
 
 
-def extract_tool_result_blocks(content: Any) -> List[Dict[str, Any]]:
-    return [
-        dict(block)
-        for block in ensure_content_blocks(content)
-        if block.get("type") == "tool_result"
-    ]
 
 
-def dedupe_tool_result_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    deduped: List[Dict[str, Any]] = []
-    seen = set()
-    for block in blocks or []:
-        if not isinstance(block, dict) or block.get("type") != "tool_result":
-            continue
-        key = (
-            block.get("tool_call_id"),
-            block.get("name"),
-            json.dumps(
-                block.get("arguments", {}) or {}, option=json.OPT_SORT_KEYS
-            ).decode("utf-8"),
-            block.get("result", ""),
-            bool(block.get("success", True)),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(
-            make_tool_result_block(
-                tool_name=block.get("name", "tool"),
-                arguments=block.get("arguments", {}),
-                result=block.get("result", ""),
-                success=block.get("success", True),
-                tool_call_id=block.get("tool_call_id"),
-                diff=block.get("diff"),
-            )
-        )
-    return deduped
 
 
 def normalize_tool_call(tool_call: Any) -> Optional[Dict[str, Any]]:

@@ -50,13 +50,6 @@ def fake_clock(monkeypatch):
     return clock
 
 
-@pytest.fixture()
-def log_capture():
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 @pytest.fixture(autouse=True)
 def _clean_states():

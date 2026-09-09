@@ -180,31 +180,8 @@ def migrate_app_data_if_needed():
         logger.warning("[迁移] sessions.db 未找到，数据可能是空的")
 
 
-def get_pinyin_search_keys(text):
-    """生成拼音全拼和首字母缩写"""
-    if not text:
-        return ""
-    try:
-        from pypinyin import Style, pinyin as _pinyin
-    except ImportError:
-        return text.lower()
-    # 提取首字母 (Style.FIRST_LETTER)
-    first_letters = "".join([i[0][0] for i in _pinyin(text, style=Style.FIRST_LETTER)])
-    # 提取全拼 (Style.NORMAL)
-    full_pinyin = "".join([i[0] for i in _pinyin(text, style=Style.NORMAL)])
-    return f"{first_letters} {full_pinyin} {text}".lower()
 
 
-def kill_proc_tree(pid):
-    try:
-        parent = psutil.Process(pid)
-        children = parent.children(recursive=True)
-        for child in children:
-            child.kill()
-        parent.kill()
-        psutil.wait_procs(children + [parent], timeout=5)
-    except psutil.NoSuchProcess:
-        pass
 
 
 # 预编译 ANSI 处理正则表达式
@@ -261,11 +238,6 @@ def ansi_to_html(text):
     return text
 
 
-def ansi_to_rich_text(text):
-    """
-    将 ANSI 转换为 Qt Rich Text（备用方案）
-    """
-    return f"<pre style='font-family: Consolas, monospace;'>{ansi_to_html(text)}</pre>"
 
 
 def resource_path(relative_path) -> str:
@@ -280,10 +252,6 @@ def resource_path(relative_path) -> str:
     return os.path.join(base_path, relative_path)
 
 
-def get_port_node(port):
-    """安全获取端口所属节点，兼容 property 和 method"""
-    node = port.node
-    return node() if callable(node) else node
 
 
 # 图标缓存（仅按 icon_name 缓存 QIcon，theme 感知由 QIconEngine 处理）
@@ -371,9 +339,6 @@ class _ThemeIconEngine(QIconEngine):
         # 主题切换后 key 变化 → Qt pixmap 缓存自动失效
         is_light = _is_current_theme_light()
         return f"_ThemeIconEngine:{self._icon_name}:{'light' if is_light else 'dark'}"
-
-    def iconName(self):
-        return self._icon_name
 
 
 def get_icon(icon_name: str) -> QIcon:
@@ -725,56 +690,8 @@ def load_skill(name: str) -> tuple[bool, str, str]:
     return (True, content, workspace)
 
 
-def list_skills_with_intro() -> str:
-    """获取技能列表，包含 SKILLS.md 介绍"""
-    skills = get_local_skills()
-
-    # 从插件路径查找 SKILLS.md（优先使用优先级最高的）
-    skills_intro = ""
-    try:
-        from app.plugins.managers.plugin_manager import PluginManager
-        pm = PluginManager.get_instance()
-        if pm.is_initialized():
-            for item in pm.get_skills_with_plugin():
-                readme = item["path"] / "SKILLS.md"
-                if readme.exists():
-                    skills_intro = readme.read_text(encoding="utf-8") + "\n\n"
-                    break
-    except (ImportError, Exception):
-        pass
-
-    # 回退：旧路径
-    if not skills_intro:
-        main_skills_dir = Path(__file__).parent.parent / "skills"
-        skills_readme = main_skills_dir / "SKILLS.md"
-        if skills_readme.exists():
-            skills_intro = skills_readme.read_text(encoding="utf-8") + "\n\n"
-
-    # 生成 XML 格式（使用 qualified_name 以示含前缀）
-    skills_xml = "<available_skills>\n"
-    for skill in skills:
-        desc = skill.get("description", "").replace("<", "&lt;").replace(">", "&gt;")
-        name = skill.get("qualified_name", skill["name"])
-        skills_xml += f"  <skill>\n    <name>{name}</name>\n    <description>{desc}</description>\n  </skill>\n"
-    skills_xml += "</available_skills>"
-
-    return skills_intro + skills_xml
 
 
-def get_canvas_font(size=10, bold=False):
-    from app.utils.design_tokens import scale_font_size
-    try:
-        font_family = Settings.get_instance().llm_font_family.value
-    except Exception:
-        try:
-            font_family = Settings.get_instance().canvas_font_selected.value
-        except Exception:
-            font_family = "Segoe UI"
-
-    font = QFont(font_family, scale_font_size(size))
-    if bold:
-        font.setBold(True)
-    return font
 
 
 def get_unified_font(size=10, bold=False):
@@ -821,17 +738,8 @@ def invalidate_font_family_css_cache() -> None:
     _cached_font_family_css = None
 
 
-def str_to_bool(value):
-    """可靠的布尔值转换"""
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() in ("true", "1", "yes", "on")
 
 
-def get_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
 
 
 def serialize_for_json(obj, large_list_threshold=1000):

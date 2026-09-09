@@ -36,12 +36,6 @@ except ImportError:
 # 错误类型定义（向后兼容）
 # ============================================================================
 
-_RETRIABLE_ERROR_TYPES = (
-    "RateLimitError",  # 请求频率限制
-    "InternalServerError",  # 服务器错误 (5xx)
-    "APIConnectionError",  # 连接错误
-    "APITimeoutError",  # 超时错误
-)
 
 
 def is_retriable_error(e: Exception) -> bool:

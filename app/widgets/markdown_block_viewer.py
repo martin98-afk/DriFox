@@ -555,9 +555,6 @@ def _render_plugin_tag_html(tag: str, content: str, completed: bool) -> str:
         return ""
 
 
-SIDE_TYPES = ("think", "tool")
-
-
 def _block_key(b: Dict[str, Any]) -> str:
     """块内容指纹：reconcile 时跳过未变化的块。"""
     if b["type"] == "tool":

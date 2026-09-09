@@ -13,7 +13,7 @@ from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 
 
 @pytest.fixture()
-def fresh_registry(monkeypatch):
+def fresh_loop_policy(monkeypatch):
     from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
 
@@ -25,7 +25,7 @@ def fresh_registry(monkeypatch):
 # ===== SubagentLoopPolicy 策略语义 =====
 
 
-def test_policy_semantics(fresh_registry):
+def test_policy_semantics(fresh_loop_policy):
     """scope 声明 + 继续/停止判定（与原硬编码行为等价）"""
     from importlib import import_module
     SubagentLoopPolicy = import_module("plugins.system-loop-policies.loop_policies.subagent").SubagentLoopPolicy
@@ -39,7 +39,7 @@ def test_policy_semantics(fresh_registry):
     assert p.should_continue(LoopState(repetitive_loop_detected=True)) is LoopDecision.CONTINUE
 
 
-def test_max_rounds_default_and_config(fresh_registry):
+def test_max_rounds_default_and_config(fresh_loop_policy):
     """默认 30（与原 max_iterations=30 等价）；配置键可调"""
     from importlib import import_module
     SubagentLoopPolicy = import_module("plugins.system-loop-policies.loop_policies.subagent").SubagentLoopPolicy
@@ -51,7 +51,7 @@ def test_max_rounds_default_and_config(fresh_registry):
     assert p.max_rounds({"子智能体最大轮数": "bad"}) == 30  # 非法值回退
 
 
-def test_final_summary_prompt_content(fresh_registry):
+def test_final_summary_prompt_content(fresh_loop_policy):
     """总结提示词与原 _build_final_summary_prompt 内容等价"""
     from importlib import import_module
     SubagentLoopPolicy = import_module("plugins.system-loop-policies.loop_policies.subagent").SubagentLoopPolicy
@@ -62,11 +62,11 @@ def test_final_summary_prompt_content(fresh_registry):
     assert "直接输出总结内容" in prompt
 
 
-def test_registry_subagent_slot_default(fresh_registry):
+def test_registry_subagent_slot_default(fresh_loop_policy):
     """warmup 后 subagent 域默认激活 subagent 策略，main 域不受影响"""
-    assert fresh_registry.get_active("subagent").id == "subagent"
-    assert fresh_registry.get_active("main").id == "default"
-    assert fresh_registry.get_active().id == "default"  # 缺省 scope=main
+    assert fresh_loop_policy.get_active("subagent").id == "subagent"
+    assert fresh_loop_policy.get_active("main").id == "default"
+    assert fresh_loop_policy.get_active().id == "default"  # 缺省 scope=main
 
 
 # ===== subagent_worker 接入 =====
@@ -83,17 +83,17 @@ def _make_worker(**attrs):
     return w
 
 
-def test_worker_resolve_round_limit_steps_priority(fresh_registry):
+def test_worker_resolve_round_limit_steps_priority(fresh_loop_policy):
     """agent.steps（max_iterations）显式声明优先于策略"""
     assert _make_worker(max_iterations=7)._resolve_round_limit() == 7
 
 
-def test_worker_resolve_round_limit_policy_fallback(fresh_registry):
+def test_worker_resolve_round_limit_policy_fallback(fresh_loop_policy):
     """未声明 steps 时走激活 subagent 策略（默认 30）"""
     assert _make_worker()._resolve_round_limit() == 30
 
 
-def test_worker_resolve_round_limit_policy_exception(fresh_registry):
+def test_worker_resolve_round_limit_policy_exception(fresh_loop_policy):
     """策略 max_rounds 异常时回退 30，不炸"""
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
 
@@ -115,13 +115,13 @@ def test_worker_resolve_round_limit_policy_exception(fresh_registry):
         LoopPolicyRegistry.get_instance().unregister_source("plugin:test-boom-sub")
 
 
-def test_worker_final_summary_from_policy(fresh_registry):
+def test_worker_final_summary_from_policy(fresh_loop_policy):
     """激活策略提供总结提示词"""
     prompt = _make_worker()._final_summary_prompt()
     assert "总结当前执行结果" in prompt
 
 
-def test_worker_final_summary_fallback_constant(fresh_registry):
+def test_worker_final_summary_fallback_constant(fresh_loop_policy):
     """策略无 final_summary_prompt 时回退模块级内置文案（与原文案等价）"""
     import app.core.workers.subagent_worker as sw
     from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry

@@ -3,6 +3,8 @@
 
 import pytest
 
+from loguru import logger
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_split_system_plugins_enabled():
@@ -40,3 +42,12 @@ def qapp(_setup_qt_attributes):
 
     app = QApplication.instance() or QApplication([])
     yield app
+
+
+@pytest.fixture()
+def log_capture():
+    """捕获 loguru WARNING+ 日志记录（自 12 个安全审计/守卫类测试上收）。"""
+    records = []
+    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
+    yield records
+    logger.remove(sink_id)

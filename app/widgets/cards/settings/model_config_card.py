@@ -382,5 +382,3 @@ class ModelConfigCard(QWidget):
                 result[actual_key] = ""
         return result
 
-    def _on_get_api_key(self, url: str):
-        webbrowser.open(url)

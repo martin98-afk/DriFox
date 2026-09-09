@@ -735,9 +735,6 @@ class MCPClientManager:
 
     # ── 连接操作 ──────────────────────────────────────
 
-    def connect_all_sync(self, servers_config: List[dict]) -> None:
-        """同步连接所有 MCP 服务器（阻塞调用线程，慎用）"""
-        self._run_async(self._connect_all(servers_config))
 
     def connect_all_background(self, servers_config: List[dict], on_done=None) -> None:
         """后台连接所有 MCP 服务器（不阻塞 UI 线程）
@@ -857,16 +854,6 @@ class MCPClientManager:
         with self._lock:
             self._connected = any(c.state == MCPState.CONNECTED for c in self._connections.values())
 
-    def connect_server_sync(self, name: str, config: dict) -> bool:
-        """同步连接单个 MCP 服务器（热添加）"""
-        try:
-            success, err = self._run_async(self._connect_single(name, config))
-            if not success and err:
-                logger.error(f"[MCP] 热添加服务器 '{name}' 失败: {err}")
-            return success
-        except Exception as e:
-            logger.error(f"[MCP] 热添加服务器 '{name}' 失败: {e}")
-            return False
 
     def connect_server_background(self, name: str, config: dict, on_done=None) -> None:
         """后台连接单个 MCP 服务器（不阻塞 UI）
@@ -1009,13 +996,6 @@ class MCPClientManager:
 
     # ── 断开连接 ──────────────────────────────────────
 
-    def disconnect_server_sync(self, name: str) -> bool:
-        """同步断开单个 MCP 服务器"""
-        try:
-            return self._run_async(self._disconnect_single(name, keep_record=True))
-        except Exception as e:
-            logger.error(f"[MCP] 热断开服务器 '{name}' 失败: {e}")
-            return False
 
     def disconnect_server_background(self, name: str, on_done=None) -> None:
         """后台断开单个 MCP 服务器（不阻塞 UI）

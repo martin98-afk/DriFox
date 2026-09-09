@@ -1362,9 +1362,6 @@ class PluginManager:
         """获取所有插件的智能体文件"""
         return self._get_md_files("agents")
 
-    def get_skill_paths(self) -> List[Path]:
-        """获取所有插件的技能目录路径"""
-        return self.get_plugin_dirs("skills")
 
     def get_skills_with_plugin(self) -> List[dict]:
         """获取所有已启用插件的技能信息，包含所属插件名称和类型
@@ -1394,9 +1391,6 @@ class PluginManager:
         """获取所有插件的主题目录路径"""
         return self.get_plugin_dirs("themes")
 
-    def get_hooks_dirs(self) -> List[Path]:
-        """获取所有已启用插件的 hooks 目录路径"""
-        return self.get_plugin_dirs("hooks")
 
     def get_global_hooks_file(self) -> Path:
         """获取全局 hooks 文件路径（user-custom 插件的 hooks/hooks.json）

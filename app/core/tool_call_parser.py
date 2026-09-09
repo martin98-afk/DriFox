@@ -19,10 +19,6 @@ import re
 from typing import Dict, Optional, Tuple
 
 # ========== 预编译正则（用于快速初筛，不再用于精确提取） ==========
-RE_HAS_PATH = re.compile(r'"path"\s*:')
-RE_HAS_CONTENT = re.compile(r'"content"\s*:')
-RE_HAS_OLDSTRING = re.compile(r'"oldString"\s*:')
-RE_HAS_NEWSTRING = re.compile(r'"newString"\s*:')
 
 
 def _find_quoted_string(text: str, start_pos: int) -> Tuple[Optional[str], int]:
@@ -198,27 +194,6 @@ def _complete_truncated_json(raw: str) -> Optional[str]:
     return result
 
 
-def _escape_json_string(s: str) -> str:
-    """
-    对字符串进行 JSON 转义，确保可以作为 JSON 中的字符串值。
-    """
-    result = []
-    for ch in s:
-        if ch == '"':
-            result.append('\\"')
-        elif ch == '\\':
-            result.append('\\\\')
-        elif ch == '\n':
-            result.append('\\n')
-        elif ch == '\t':
-            result.append('\\t')
-        elif ch == '\r':
-            result.append('\\r')
-        elif ord(ch) < 0x20:
-            result.append(f'\\u{ord(ch):04x}')
-        else:
-            result.append(ch)
-    return ''.join(result)
 
 
 def _try_standard_parse(raw: str) -> Optional[Dict]:

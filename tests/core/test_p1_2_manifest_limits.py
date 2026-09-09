@@ -19,13 +19,6 @@ from app.plugins.managers.plugin_manager import (
 )
 
 
-@pytest.fixture()
-def log_capture():
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 def _make_plugin(root: Path, name: str, manifest: dict):
     d = root / name / ".drifox-plugin"

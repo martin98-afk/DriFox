@@ -690,12 +690,3 @@ class ProviderEditCard(QWidget):
         """取消"""
         self.closed.emit()
 
-    def get_result(self):
-        """获取结果"""
-        if self.is_new:
-            return self.nameCombo.currentText(), self.provider_info
-        return self.provider_name, self.provider_info
-
-    def get_save_button(self):
-        """获取保存按钮，供父组件移到关闭按钮旁边"""
-        return self.save_btn

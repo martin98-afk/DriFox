@@ -333,22 +333,6 @@ class ProviderItem(QWidget):
         if hasattr(self.iconWidget, "refresh_style"):
             self.iconWidget.refresh_style()
 
-    def update_info(self, name: str, info: dict):
-        self.provider_name = name
-        self.provider_info = info
-        # 同步后缀索引（同名数量变化时可能需要重新计算）
-        self.suffix_index = info.get("_suffix_index", self.suffix_index)
-        # 更新显示名称
-        display_name = info.get("name", "") or name
-        if self.suffix_index >= 1:
-            display_name = f"{display_name} #{self.suffix_index + 1}"
-        self.nameLabel.setText(display_name)
-        self.modelLabel.setText(info.get("模型名称", ""))
-        self.iconWidget.provider_name = name
-        self.iconWidget._init_icon()
-        self.iconWidget.update()
-
-
 class ProviderListSettingCard(ExpandSettingCard):
     providerChanged = pyqtSignal(dict)
     defaultProviderChanged = pyqtSignal(str)

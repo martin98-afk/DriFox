@@ -71,8 +71,6 @@ TYPE_ALIASES = {
 }
 
 # number 默认范围（SpinBox 默认 0~2^31-1，与 qfluentwidgets SpinBox 一致）
-_NUMBER_DEFAULT_MIN = 0
-_NUMBER_DEFAULT_MAX = 2147483647
 
 
 @dataclass(frozen=True)

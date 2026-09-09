@@ -13,13 +13,6 @@ from app.plugins.managers.plugin_manager import PluginInfo
 from app.tools.registry import ToolRegistry
 
 
-@pytest.fixture()
-def log_capture():
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 def _make_tool_plugin(root, name, body):
     tools = root / name / "tools"

@@ -44,14 +44,6 @@ class ListDictValidator(ConfigValidator):
         return []
 
 
-class QuickComponentsSerializer(ConfigSerializer):
-    def serialize(self, value):
-        return value  # list[dict] 是 JSON-safe
-
-    def deserialize(self, value):
-        if isinstance(value, list):
-            return value
-        return []
 
 
 class Settings(QConfig):
@@ -249,11 +241,6 @@ class Settings(QConfig):
 
             logging.warning(f"[_extend_theme_validator_before_load] failed: {e}")
 
-    @classmethod
-    def save_config(cls):
-        """保存配置"""
-        instance = cls.get_instance()
-        instance.save()
 
     def set(self, item, value, save=False, copy=True):
         """set the value of config item

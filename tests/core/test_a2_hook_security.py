@@ -17,14 +17,6 @@ from app.core.hook_manager import (
 )
 
 
-@pytest.fixture()
-def log_capture():
-    """loguru WARNING+ 捕获为文本列表。"""
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 def _make_worker(hook: Hook, event_name: str = "test-event") -> HookWorker:
     """跳过 Qt signals 构造（_execute_python 只用 hook/event_name/context）。"""

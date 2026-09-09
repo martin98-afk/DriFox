@@ -41,7 +41,7 @@ def qcolor_from(spec: str, fallback: QColor = QColor(33, 33, 38, 250)) -> QColor
             r, g, b = (int(float(parts[i])) for i in range(3))
             a = int(float(parts[3])) if len(parts) > 3 else 255
             return QColor(r, g, b, a)
-        except ValueError, IndexError:
+        except (ValueError, IndexError):
             pass
     return fallback
 

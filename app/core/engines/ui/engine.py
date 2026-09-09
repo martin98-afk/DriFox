@@ -287,13 +287,6 @@ class UIEngine(BaseEngine):
         if worker:
             worker.deny_permission(tool_call_id)
 
-    def clear_session_permission_cache(self, tool_name: str = None):
-        """清除会话级权限缓存"""
-        cache = self._conversation_core.permission_cache
-        if tool_name:
-            cache.deny(tool_name)
-        else:
-            cache.clear_session()
 
     # ========== 回调管理 ==========
 

@@ -37,18 +37,18 @@ def _get_card_widget(reg, card_id):
 
 
 @pytest.fixture()
-def tm(qtbot):
-    tm = TabManagerWindow.create_instance()
-    tm.show()
+def tm_window(qtbot):
+    tm_window = TabManagerWindow.create_instance()
+    tm_window.show()
     qtbot.wait(50)
-    yield tm
+    yield tm_window
     QApplication.processEvents()
 
 
-def test_projection_restore_keeps_card_hidden(qtbot, tm):
+def test_projection_restore_keeps_card_hidden(qtbot, tm_window):
     """投影恢复（activate=False）路径不得把非当前页卡片强行 show 出来"""
     reg = UIPluginRegistry.get_instance()
-    panel = tm.workbench_panel
+    panel = tm_window.workbench_panel
     card_id = "wb-ghost-card"
 
     reg.register_floating_card("tp", card_id, _TemplateCard, "right", title="幽灵卡")

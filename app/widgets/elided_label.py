@@ -38,18 +38,6 @@ class _ElidedLabel(QLabel):
         self.setToolTip(self._full_text)
         self._update_elided()
 
-    def setHighlight(self, query: str, color: str):
-        """设置搜索高亮：匹配部分用 <span> 高亮
-
-        Args:
-            query: 搜索关键词（不区分大小写匹配）
-            color: 高亮颜色（CSS 格式，如 "#FF6600"）
-        """
-        self._hl_query = query
-        self._hl_queries = [query]  # 单关键字时列表只有一项
-        self._hl_color = color
-        self._update_elided()
-
     def setHighlights(self, queries: List[str], color: str):
         """设置多关键字搜索高亮：每个匹配部分都用 <span> 高亮
 

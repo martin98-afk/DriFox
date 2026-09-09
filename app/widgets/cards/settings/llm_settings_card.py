@@ -1207,39 +1207,6 @@ class LLMSettingsCard(SystemCardFrame):
             self,
         )
 
-    def _setup_port_card(self):
-        """创建端口设置卡片"""
-        from qfluentwidgets import FluentIcon, SettingCard, SpinBox
-
-        class PortSettingCard(SettingCard):
-            def __init__(self, title, content, cfg, parent=None):
-                super().__init__(FluentIcon.INFO, title, content, parent)
-                self.cfg = cfg
-
-                self.spinBox = SpinBox()
-                self.spinBox.setFixedWidth(100)
-                self.spinBox.setRange(1024, 65535)
-                self.spinBox.setValue(cfg.llm_api_port.value)
-                self.spinBox.valueChanged.connect(self._on_value_changed)
-
-                self.hBoxLayout.addWidget(self.spinBox)
-                self.hBoxLayout.addSpacing(16)
-
-            def _on_value_changed(self, value):
-                self.cfg.set(self.cfg.llm_api_port, value, save=True)
-                parent = self.parent()
-                while parent and not hasattr(parent, "llmApiEnabledCard"):
-                    parent = parent.parent()
-                if parent and hasattr(parent, "llmApiEnabledCard"):
-                    parent.llmApiEnabledCard.setContent(f"http://localhost:{value}/docs")
-
-        self.llmApiPortCard = PortSettingCard(
-            "API 端口",
-            "设置 API 服务端口（1024-65535）",
-            self.cfg,
-            self,
-        )
-
     def _on_close(self):
         self.setVisible(False)
         self.closed.emit()

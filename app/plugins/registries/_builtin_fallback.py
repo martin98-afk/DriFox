@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 from app.plugins.contracts.message_serializer import (
-    MessageSerializer,
     SerializeContext,
     SerializeResult,
 )

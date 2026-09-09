@@ -8,13 +8,6 @@ from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 ORDER = ["title_bar", "chat_area", "system_cards", "input_card", "bottom_toolbar"]
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 def test_system_modules_registered(fresh_registry):
     """5 系统模块均注册到 UIPluginRegistry"""

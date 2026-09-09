@@ -131,11 +131,6 @@ class HoverPreviewOverlay(QWidget):
         self.show()
         self.raise_()
 
-    def fade_out(self, on_done=None) -> None:
-        self.hide()
-        if on_done is not None:
-            on_done()
-
     # ── 几何滑入/滑出（逐帧全局坐标 setGeometry） ──
 
     def slide_in(self, target_w: int, on_done=None) -> None:

@@ -8,6 +8,7 @@
 
 import ctypes
 import sys
+from typing import Optional
 
 from PyQt5.QtCore import QEasingCurve, QSize
 
@@ -253,28 +254,8 @@ def current_theme() -> dict:
     return theme_manager.get_current_colors()
 
 
-def get_window_style() -> str:
-    """获取窗口渐变背景样式"""
-    from app.utils.theme_manager import theme_manager
-
-    window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
-    return f"""
-    #OpenAIChatToolWindow {{
-        background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-            stop:0 {window.get("gradient_start", "rgba(10, 14, 22, 255)")},
-            stop:1 {window.get("gradient_end", "rgba(15, 20, 30, 255)")});
-    }}
-    """
 
 
-def get_capsule_style() -> str:
-    """获取胶囊样式"""
-    theme = current_theme()
-    return f"""
-        background: {theme["capsule_bg"]};
-        border: 1px solid {theme["capsule_border"]};
-        border-radius: {BorderRadius.LG};
-    """
 
 
 # ============ 发光预设（glow presets）============
@@ -760,32 +741,11 @@ class BorderRadius:
 
 
 # ============ 间距系统 ============
-class Spacing:
-    """间距 Token（单位：px）"""
-
-    XS = 4
-    SM = 8
-    MD = 12
-    LG = 16
-    XL = 20
-    XXL = 24
 
 
 # ============ 字体系统 ============
-class FontSizes:
-    """字体大小 Token"""
-
-    XS = "10px"
-    SM = "11px"  # 正文、标签
-    MD = "12px"  # 标题
-    LG = "14px"  # 大标题
 
 
-class FontWeights:
-    """字重 Token"""
-
-    NORMAL = ""
-    BOLD = "bold"
 
 
 # ============ 组件尺寸 ============
@@ -825,14 +785,6 @@ class CardStyles:
             }}
         """
 
-    @staticmethod
-    def card_content() -> str:
-        """卡片内容区样式"""
-        Colors.refresh()
-        return f"""
-            background-color: {Colors.CONTENT_BG};
-            border-radius: {BorderRadius.SM};
-        """
 
     @staticmethod
     def scroll_area() -> str:
@@ -910,10 +862,6 @@ class CardStyles:
         }}
         """
 
-    @staticmethod
-    def title_icon(emoji: str = "⚙️") -> str:
-        """标题图标样式（返回 emoji）"""
-        return emoji
 
     @staticmethod
     def title_label() -> str:
@@ -921,10 +869,6 @@ class CardStyles:
         Colors.refresh()
         return f"color: {Colors.TEXT_ACCENT};"
 
-    @staticmethod
-    def close_button() -> str:
-        """关闭按钮样式"""
-        return "color: #888888; cursor: pointer; padding: 4px;"
 
 
 class TabStyles:
@@ -964,38 +908,6 @@ class TabStyles:
         """
 
 
-class ItemStyles:
-    """列表项样式模板"""
-
-    @staticmethod
-    def radio_button() -> str:
-        """单选按钮样式"""
-        return """
-            QRadioButton::indicator {
-                width: 16px;
-                height: 16px;
-                /* 刻意保持 8px 字面量：等于尺寸的一半 = 正圆指示器。
-                   此处语义是"半径"而非"圆角档位"，套用 token 会丢失该语义。 */
-                border-radius: 8px;
-                border: 2px solid #8e8e8e;
-                background-color: transparent;
-            }
-            QRadioButton::indicator:checked {
-                border: 2px solid #0078d4;
-                background-color: #0078d4;
-            }
-        """
-
-    @staticmethod
-    def tag() -> str:
-        """标签样式"""
-        return f"""
-            color: #fff; 
-            font-weight: bold; 
-            background-color: rgba(102, 198, 255, 0.35); 
-            border-radius: {BorderRadius.XS}; 
-            padding: 2px 8px;
-        """
 
 
 class ButtonStyles:
@@ -1141,14 +1053,8 @@ class ComboBoxStyles:
 
 
 # ============ 便捷函数 ============
-def get_card_style(alpha: int = 250) -> str:
-    """获取卡片样式字符串"""
-    return CardStyles.card(alpha)
 
 
-def get_scroll_style() -> str:
-    """获取滚动区域样式字符串"""
-    return CardStyles.scroll_area()
 
 
 def get_unified_scrollbar_style(width: int = 6) -> str:
@@ -1208,12 +1114,6 @@ def get_unified_scrollbar_style(width: int = 6) -> str:
     """
 
 
-def get_content_bg_style() -> str:
-    """获取内容区背景样式"""
-    return f"""
-        background-color: {Colors.CONTENT_BG};
-        border-radius: {BorderRadius.SM};
-    """
 
 
 def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
@@ -1234,34 +1134,6 @@ def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
     widget._fade_anim = anim
 
 
-def apply_card_shadow(widget, shadow_type: str = "card"):
-    """为 widget 添加预设阴影效果
-
-    Args:
-        widget: 目标控件
-        shadow_type: "card" | "floating" | "glow" | "glow_primary" | "glow_ambient"
-            - "card"/"floating": 静态 drop shadow（深色 + offset）
-            - "glow*": 聚焦发光 halo，颜色取自 Colors.INPUT_FOCUS_BORDER（主题感知），
-              alpha / blur_radius 来自对应 token
-    """
-    from PyQt5.QtGui import QColor
-    from PyQt5.QtWidgets import QGraphicsDropShadowEffect
-
-    config = getattr(Shadows, shadow_type.upper(), Shadows.CARD)
-    effect = QGraphicsDropShadowEffect(widget)
-    effect.setBlurRadius(config["blur_radius"])
-    effect.setOffset(config["offset_x"], config["offset_y"])
-
-    if shadow_type.lower().startswith("glow"):
-        # GLOW_* 系列：颜色跟随主题，alpha 来自 token
-        Colors.refresh()
-        glow = QColor(Colors.INPUT_FOCUS_BORDER)
-        glow.setAlpha(config.get("alpha", 170))
-        effect.setColor(glow)
-    else:
-        # CARD / FLOATING：颜色直接来自 token 的 color 字段
-        effect.setColor(QColor(config["color"]))
-    widget.setGraphicsEffect(effect)
 
 
 # ── 全局 tooltip 样式（跟随主题） ──────────────────────

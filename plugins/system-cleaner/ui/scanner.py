@@ -167,9 +167,9 @@ def _delete_cache(path: Path, dir_mode: bool):
                     _rmtree_force(entry)
                 else:
                     entry.unlink()
-            except OSError, PermissionError:
+            except (OSError, PermissionError):
                 pass
-    except OSError, PermissionError:
+    except (OSError, PermissionError):
         pass
 
 

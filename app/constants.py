@@ -1,4 +1,6 @@
-﻿MAX_SESSION_CARD_CACHE_SIZE = 10
+﻿from typing import Any, Dict, List, Optional
+
+MAX_SESSION_CARD_CACHE_SIZE = 10
 
 # ============================================================
 # 可识别的图片扩展名（统一常量，多处复用）

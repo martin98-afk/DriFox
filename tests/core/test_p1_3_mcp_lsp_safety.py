@@ -20,13 +20,6 @@ from app.core.mcp_lsp_safety import (
 )
 
 
-@pytest.fixture()
-def log_capture():
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 @pytest.fixture()
 def builtin_source():

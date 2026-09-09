@@ -95,8 +95,6 @@ _SOURCE_TAG_STYLE = (
 )
 
 _TEXT_LABEL_STYLE = "color: {color}; background: transparent; border: none; {weight}{font_size} {font_family}"
-_MUTED_LABEL_STYLE = "color: {color}; background: transparent; border: none; {font_size} {font_family}"
-
 # 未搜索时挂载的小节数（首个插件清单可能上百个，全挂载会拖垮设置页）
 _PAGE_SIZE = 40
 # 搜索后结果通常很少，放宽上限但仍保留天花板
@@ -647,16 +645,6 @@ class PluginSectionWidget(QWidget):
 
     def component_row(self, component: str) -> Optional[ComponentRow]:
         return self._rows.get(component)
-
-    def set_component_checked(self, component: str, checked: bool):
-        row = self.component_row(component)
-        if row is not None:
-            row.set_checked_silent(checked)
-
-    def set_component_tokens(self, component: str, tokens: int, count: int):
-        row = self.component_row(component)
-        if row is not None:
-            row.set_tokens(tokens, count)
 
     def load_component_items(self, component: str, items: List[ComponentItem], enabled_fn):
         row = self.component_row(component)
