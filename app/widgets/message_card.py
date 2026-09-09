@@ -200,6 +200,12 @@ _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")
 _CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((jump|create|generate|view|session)(?:\|([^)]*))?\)")
 # 追问新格式：<ask>内容</ask>，直接生成胶囊（空内容丢弃整段标签，避免 [](ask) 残留）
 _ASK_TAG_PATTERN = re.compile(r"<ask>(.*?)</ask>", re.DOTALL)
+# 追问收拢：摘除正文里的 ask 标签（连带行内多余空白），改由末尾区块统一渲染
+_ASK_STRIP_PATTERN = re.compile(r"[ \t]*<ask>.*?</ask>[ \t]*", re.DOTALL)
+# 摘除后可能残留的空列表项（"-" 后无内容）
+_ASK_EMPTY_BULLET_PATTERN = re.compile(r"^[ \t]*[-*+][ \t]*$", re.MULTILINE)
+# 追问区块最多展示条数（模型通常给 1~3 条，超量截断避免卡片尾部过长）
+_ASK_MAX_ITEMS = 4
 _CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
@@ -2789,7 +2795,7 @@ _SKELETON_CACHE_MAX = 48
 # _twFlush + rAF 帧级揭示）；② FLIP 位移动画与动画串行队列（_FLIP_JS：
 # _flipCapture/_flipPlay/_animEnqueue）。旧骨架两者都没有 —— 流式仍是整块蹦字、
 # 结束态三动画叠加跳变 —— 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 27
+_SKELETON_CACHE_VERSION = 28
 
 
 def _js_literal(value) -> str:
@@ -3688,26 +3694,78 @@ def get_random_greeting() -> str:
     return random.choice(WELCOME_GREETINGS)
 
 
+def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
+    """摘出正文里所有 <ask> 内容并移除标签，返回（去 ask 后的文本, 去重后的追问列表）。
+
+    追问由模型分散输出（多数在末尾，也可能夹在段落中）。渲染时全部摘除、按内容
+    去重（保序、忽略空白差异），交给 _build_ask_suggest_block 在文末集中渲染。
+    strip 后空内容（如 <ask></ask>、<ask>   </ask>）直接丢弃。
+    """
+    # 代码块内的 <ask> 不算追问（fence 内容要原样展示），先圈出 fence 区间跳过
+    fences = [(m.start(), m.end()) for m in _CODE_BLOCK_PATTERN.finditer(md_text)]
+
+    def _in_fence(pos: int) -> bool:
+        return any(s <= pos < e for s, e in fences)
+
+    items: list[str] = []
+    seen: set[str] = set()
+    found = False
+    for m in _ASK_TAG_PATTERN.finditer(md_text):
+        if _in_fence(m.start()):
+            continue
+        found = True
+        content = m.group(1).strip()
+        if not content:
+            continue
+        key = _MULTIPLE_SPACES_PATTERN.sub(" ", content)
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(content)
+    # 一个 ask 标签都没有 → 原文返回；有标签但内容全空 → 仍要摘除，避免字面残留
+    if not found:
+        return md_text, []
+
+    source = md_text
+
+    def _strip(m: re.Match) -> str:
+        if _in_fence(m.start()):
+            return m.group(0)
+        before = source[m.start() - 1] if m.start() > 0 else ""
+        after = source[m.end()] if m.end() < len(source) else ""
+        # 标签夹在文字中间时留一个空格，避免两个词被直接粘连
+        return " " if before.strip() and after.strip() else ""
+
+    md_text = _ASK_STRIP_PATTERN.sub(_strip, md_text)
+    md_text = _ASK_EMPTY_BULLET_PATTERN.sub("", md_text)
+    md_text = re.sub(r"\n{3,}", "\n\n", md_text)
+    return md_text, items[:_ASK_MAX_ITEMS]
+
+
+def _build_ask_suggest_block(items: list[str]) -> str:
+    """把去重后的追问渲染成文末「你可以继续问」区块（点击仍走 context-tag 链路）。"""
+    chips = "".join(
+        f'<span class="context-tag" data-type="ask" data-content="{escape(it)}" data-action="ask">{escape(it)}</span>'
+        for it in items
+    )
+    return (
+        '<div class="ask-suggest">'
+        '<div class="ask-suggest-title"><span class="ask-suggest-dot"></span>你可以继续问</div>'
+        f'<div class="ask-suggest-list">{chips}</div>'
+        "</div>"
+    )
+
+
 def _inject_context_links(md_text: str) -> str:
     """将 <ask>文本</ask> 或 [文本](jump/create/generate/view/session) 转换为胶囊样式的追问标签
 
     注：[文本](ask) 旧格式已废弃，不再识别（残留会渲染成空 markdown 链接）。
 
+    <ask> 不就地渲染：先全文摘除去重，再统一拼到文末的追问区块（只影响卡片渲染）。
+
     session 类型格式：[文本](session|session_id|last_time)
     last_time 如果为空则不显示
     """
-
-    # 新格式 <ask>内容</ask> → 直接生成胶囊
-    # strip 后空内容（如 <ask></ask>、<ask>   </ask>、<ask>\n</ask>）丢弃整段标签，
-    # 避免旧逻辑归一化为 [](ask) 后残留为字面 markdown 链接导致渲染崩（<a href="ask"></a>）。
-    def _ask_replacer(m: re.Match) -> str:
-        content = m.group(1).strip()
-        if not content:
-            return ""
-        attrs = f'data-type="ask" data-content="{escape(content)}" data-action="ask"'
-        return f'<span class="context-tag" {attrs}>{content}</span>'
-
-    md_text = _ASK_TAG_PATTERN.sub(_ask_replacer, md_text)
 
     def replacer(match):
         content = match.group(1)
@@ -3733,7 +3791,13 @@ def _inject_context_links(md_text: str) -> str:
 
         return f'<span class="context-tag" data-type="{action}" data-content="{escape(content)}" data-action="{action}">{content}</span>'
 
-    return _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
+    md_text = _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
+
+    # 追问统一收拢到文末：正文里的 <ask> 全部摘除（去重）后集中渲染成一个区块。
+    md_text, ask_items = _collect_and_strip_asks(md_text)
+    if ask_items:
+        md_text = md_text.rstrip() + "\n\n" + _build_ask_suggest_block(ask_items)
+    return md_text
 
 
 # ===== _resolve_image_src 模块级常量（避免每次渲染重编译正则+重算路径） =====
@@ -5435,6 +5499,68 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 svg .context-tag:hover {{
                     opacity: 0.78;
+                }}
+
+                /* 追问区块：正文里的 <ask> 由 _inject_context_links 摘除去重后，
+                   统一渲染在文末。整行 hover 点亮 + 右侧「发送」提示，弱化原来
+                   高饱和红胶囊的存在感。 */
+                .ask-suggest {{
+                    margin: 16px 0 2px;
+                    padding-top: 12px;
+                    border-top: 1px solid var(--border);
+                }}
+                .ask-suggest-title {{
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    margin-bottom: 8px;
+                    font-size: {small_font_size}px;
+                    font-weight: 600;
+                    color: var(--text-muted);
+                }}
+                .ask-suggest-dot {{
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 50%;
+                    background: var(--accent);
+                    flex: none;
+                }}
+                .ask-suggest-list {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 2px;
+                }}
+                .ask-suggest .context-tag {{
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 10px;
+                    padding: 6px 10px;
+                    margin: 0;
+                    border: 1px solid transparent;
+                    border-radius: 8px;
+                    background: transparent;
+                    color: var(--text-secondary);
+                    font-weight: 400;
+                    transition: 0.18s ease;
+                }}
+                .ask-suggest .context-tag::after {{
+                    content: "发送 ›";
+                    flex: none;
+                    font-size: {tiny_font_size}px;
+                    color: var(--accent-text);
+                    opacity: 0;
+                    transform: translateX(-4px);
+                    transition: 0.18s ease;
+                }}
+                .ask-suggest .context-tag:hover {{
+                    background: var(--accent-soft);
+                    border-color: var(--accent-border-weak);
+                    color: var(--accent-text);
+                }}
+                .ask-suggest .context-tag:hover::after {{
+                    opacity: 1;
+                    transform: translateX(0);
                 }}
 
                 /* session 历史会话标签样式（胶囊按内容宽度自然展开） */

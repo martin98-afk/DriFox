@@ -5,14 +5,16 @@
 """
 
 from loguru import logger
-from PyQt5.QtCore import QPointF, QRectF, QPoint, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QPainter, QPen
+from PyQt5.QtCore import QPointF, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen
 from PyQt5.QtWidgets import (
     QFontComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -344,6 +346,40 @@ class ManualUpdateCard(SettingCard):
 class LLMSettingsCard(SystemCardFrame):
     """大模型设置卡片 - 固定边框 + 垂直列表布局"""
 
+    # 左侧导航分组：(分组标题, ((tab_id, 显示名, 图标源), ...))
+    # 图标源：字符串 → 主题感知资源图标 get_icon(name)；FluentIcon 枚举 → 内置图标
+    # 分组标题为空串表示不渲染标题（插件组按注册卡片动态显隐）
+    NAV_GROUPS = (
+        (
+            "模型与扩展",
+            (
+                ("provider", "服务商", "大模型"),
+                ("hooks", "Hooks", "hooks"),
+                ("mcp", "MCP", "MCP"),
+                ("lsp", "LSP", "lsp"),
+                ("tools", "工具", "工具"),
+                ("agents", "智能体", "智能体"),
+                ("skills", "技能", "技能"),
+            ),
+        ),
+        (
+            "界面",
+            (
+                ("appearance", "外观", "主题风格"),
+                ("pet", "桌宠", "pet"),
+            ),
+        ),
+        (
+            "系统",
+            (
+                ("common", "通用", FluentIcon.SETTING),
+                ("notify", "通知", "提示"),
+                ("update", "更新", FluentIcon.UPDATE),
+            ),
+        ),
+        ("", (("plugins", "插件", FluentIcon.APPLICATION),)),
+    )
+
     _autostart_toggling = False  # 类级防重入标志
     _last_change_type: str | None = None  # "theme" | "font_family" | "font_size" | None(=全部)
     closed = pyqtSignal()
@@ -358,13 +394,15 @@ class LLMSettingsCard(SystemCardFrame):
         self.cfg = Settings.get_instance()
 
         # 左侧导航 + 右侧分页：分区归属见 _setup_content
-        self._current_tab = "llm"
+        self._current_tab = "provider"
         self._nav_frame = None  # _build_side_nav 中创建
 
         self._setup_content()
 
         # 初始化时应用配置中的字体大小和主题样式
         QTimer.singleShot(0, self._refresh_appearance_from_config)
+        # 首屏（服务商页）默认展开已配置的服务商列表
+        QTimer.singleShot(0, lambda: self._expand_page_cards("provider"))
 
     def _setup_content(self):
         content_layout = self.content_layout
@@ -372,18 +410,12 @@ class LLMSettingsCard(SystemCardFrame):
         content_layout.setSpacing(0)
 
         # ── 主体：左侧导航 + 右侧分页 ──
-        tabs = [
-            ("llm", "大模型"),
-            ("common", "通用设置"),
-            ("appearance", "外观样式"),
-            ("update", "版本更新"),
-            ("plugins", "插件设置"),
-        ]
+        tabs = [(tab_id, name) for _group, items in self.NAV_GROUPS for tab_id, name, _icon in items]
         body = QWidget(self)
         body_layout = QHBoxLayout(body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(8)
-        body_layout.addWidget(self._build_side_nav(tabs))
+        body_layout.addWidget(self._build_side_nav())
 
         self._pages_stack = QStackedWidget(self)
         self._page_scrolls = {}
@@ -397,15 +429,12 @@ class LLMSettingsCard(SystemCardFrame):
         content_layout.addWidget(body)
         self._update_nav_styles()
 
-        # ════ 大模型页 ════
-        llm_layout = self._page_layouts["llm"]
-
-        # ── 本页卡片顺序（用户指定）：服务商 → hooks → mcp → 工具 → 智能体 → 技能 → lsp ──
-        # Gitee 账号绑定保持在顶部（原有设计，不参与上面的排序）
+        # ════ 服务商页 ════
+        provider_layout = self._page_layouts["provider"]
 
         # Gitee 账号绑定（保持原默认页顶部位置）
         self.giteeCard = GiteeCard(self)
-        llm_layout.addWidget(self.giteeCard)
+        provider_layout.addWidget(self.giteeCard)
 
         self.llmProviderCard = ProviderListSettingCard(
             icon=get_icon("大模型"),
@@ -416,9 +445,12 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
             home=self,
         )
-        llm_layout.addWidget(self.llmProviderCard)
+        provider_layout.addWidget(self.llmProviderCard)
+        provider_layout.addStretch(1)
 
-        # Hooks 管理
+        # ════ Hooks 页 ════
+        hooks_layout = self._page_layouts["hooks"]
+
         from app.widgets.cards.settings.hook_setting_card import HookListSettingCard
 
         hook_manager = getattr(self.parent(), "backend", None)
@@ -433,49 +465,23 @@ class LLMSettingsCard(SystemCardFrame):
             home=self,
             hook_manager=hook_manager,
         )
-        llm_layout.addWidget(self.hookListCard)
+        hooks_layout.addWidget(self.hookListCard)
+        hooks_layout.addStretch(1)
 
-        # MCP 服务器管理
+        # ════ MCP 页 ════
+        mcp_layout = self._page_layouts["mcp"]
         self.mcpListCard = MCPListSettingCard(
             icon=get_icon("MCP"),
             title="MCP 服务器",
             content="管理 MCP Server 连接",
             parent=self,
         )
-        llm_layout.addWidget(self.mcpListCard)
+        mcp_layout.addWidget(self.mcpListCard)
+        mcp_layout.addStretch(1)
 
-        # ════ 工具 / 智能体 启停（按插件维度，D9/D10）════
-        # 原先是独立的「插件启用」页签，实际要管的只有这两类，收进大模型页
-        self.pluginToolCard = PluginComponentsCard(
-            components=("tools",),
-            title="工具启用",
-            content="按插件控制其工具的启停",
-            icon=FluentIcon.DEVELOPER_TOOLS,
-            parent=self,
-        )
-        llm_layout.addWidget(self.pluginToolCard)
+        # ════ LSP 页 ════
+        lsp_layout = self._page_layouts["lsp"]
 
-        self.pluginAgentCard = PluginComponentsCard(
-            components=("agents",),
-            title="智能体启用",
-            content="按插件控制其智能体的启停",
-            icon=get_icon("智能体"),
-            parent=self,
-        )
-        llm_layout.addWidget(self.pluginAgentCard)
-
-        # 技能启用（按插件/内置/用户分组，行在展开后分批构建）
-        self.llmSkillsCard = SkillListSettingCard(
-            icon=get_icon("智能体"),
-            configItem=self.cfg.llm_enabled_skills,
-            title="技能启用",
-            content="选择要注入的技能",
-            parent=self,
-            home=self,
-        )
-        llm_layout.addWidget(self.llmSkillsCard)
-
-        # LSP 语言服务器状态
         from app.widgets.cards.settings.lsp_setting_card import LspListSettingCard
 
         self.lspListCard = LspListSettingCard(
@@ -484,8 +490,44 @@ class LLMSettingsCard(SystemCardFrame):
             content="代码智能与诊断",
             parent=self,
         )
-        llm_layout.addWidget(self.lspListCard)
-        llm_layout.addStretch(1)
+        lsp_layout.addWidget(self.lspListCard)
+        lsp_layout.addStretch(1)
+
+        # ════ 工具 / 智能体 / 技能 启停（按插件维度 D9/D10，各自独立分页）════
+        tools_layout = self._page_layouts["tools"]
+        self.pluginToolCard = PluginComponentsCard(
+            components=("tools",),
+            title="工具启用",
+            content="按插件控制其工具的启停",
+            icon=FluentIcon.DEVELOPER_TOOLS,
+            parent=self,
+        )
+        tools_layout.addWidget(self.pluginToolCard)
+        tools_layout.addStretch(1)
+
+        agents_layout = self._page_layouts["agents"]
+        self.pluginAgentCard = PluginComponentsCard(
+            components=("agents",),
+            title="智能体启用",
+            content="按插件控制其智能体的启停",
+            icon=get_icon("智能体"),
+            parent=self,
+        )
+        agents_layout.addWidget(self.pluginAgentCard)
+        agents_layout.addStretch(1)
+
+        # 技能启用（按插件/内置/用户分组，行在展开后分批构建）
+        skills_layout = self._page_layouts["skills"]
+        self.llmSkillsCard = SkillListSettingCard(
+            icon=get_icon("智能体"),
+            configItem=self.cfg.llm_enabled_skills,
+            title="技能启用",
+            content="选择要注入的技能",
+            parent=self,
+            home=self,
+        )
+        skills_layout.addWidget(self.llmSkillsCard)
+        skills_layout.addStretch(1)
 
         # ════ 通用设置页 ════
         common_layout = self._page_layouts["common"]
@@ -531,6 +573,10 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         common_layout.addWidget(self.qtRendererCard)
+        common_layout.addStretch(1)
+
+        # ════ 通知页 ════
+        notify_layout = self._page_layouts["notify"]
 
         # 智能体完成通知
         self.llmNotifyCard = SwitchSettingCard(
@@ -540,7 +586,7 @@ class LLMSettingsCard(SystemCardFrame):
             configItem=self.cfg.llm_notify_enabled,
             parent=self,
         )
-        common_layout.addWidget(self.llmNotifyCard)
+        notify_layout.addWidget(self.llmNotifyCard)
 
         # 通知提示音
         self.llmSoundCard = OptionsSettingCard(
@@ -551,8 +597,8 @@ class LLMSettingsCard(SystemCardFrame):
             texts=["默认", "短提示音", "无"],
             parent=self,
         )
-        common_layout.addWidget(self.llmSoundCard)
-        common_layout.addStretch(1)
+        notify_layout.addWidget(self.llmSoundCard)
+        notify_layout.addStretch(1)
 
         # ════ 外观样式页 ════
         appearance_layout = self._page_layouts["appearance"]
@@ -566,6 +612,10 @@ class LLMSettingsCard(SystemCardFrame):
         # 全局字体设置
         self._setup_font_card()
         appearance_layout.addWidget(self.llmFontCard)
+        appearance_layout.addStretch(1)
+
+        # ════ 桌宠页 ════
+        pet_layout = self._page_layouts["pet"]
 
         # 桌宠显示开关
         self.petCard = SwitchSettingCard(
@@ -575,7 +625,7 @@ class LLMSettingsCard(SystemCardFrame):
             configItem=self.cfg.pet_enabled,
             parent=self,
         )
-        appearance_layout.addWidget(self.petCard)
+        pet_layout.addWidget(self.petCard)
 
         # 桌宠大小
         self.petSizeCard = OptionsSettingCard(
@@ -586,8 +636,8 @@ class LLMSettingsCard(SystemCardFrame):
             texts=["小 (32px)", "中 (48px)", "大 (64px)"],
             parent=self,
         )
-        appearance_layout.addWidget(self.petSizeCard)
-        appearance_layout.addStretch(1)
+        pet_layout.addWidget(self.petSizeCard)
+        pet_layout.addStretch(1)
 
         # ════ 版本更新页 ════
         update_layout = self._page_layouts["update"]
@@ -821,26 +871,68 @@ class LLMSettingsCard(SystemCardFrame):
 
     # ── 左侧导航 + 分页 ──────────────────────────────
 
-    def _build_side_nav(self, tabs: list) -> QFrame:
-        """构建左侧导航面板（垂直 tab 按钮列表）"""
+    def _build_side_nav(self) -> QFrame:
+        """构建左侧导航面板：分组标题 + 图标导航项，顶部对齐，超高可滚动"""
         self._nav_buttons = {}
+        self._nav_group_labels = []
         nav = QFrame(self)
         nav.setObjectName("settingsSideNav")
-        nav.setFixedWidth(148)
         nav.setStyleSheet(self._nav_frame_style())
 
-        nav_layout = QVBoxLayout(nav)
-        nav_layout.setContentsMargins(4, 8, 6, 8)
-        nav_layout.setSpacing(2)
-        for tab_id, tab_name in tabs:
-            btn = QLabel(tab_name, nav)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.mousePressEvent = lambda e, tid=tab_id: self._set_active_page(tid)
-            nav_layout.addWidget(btn)
-            self._nav_buttons[tab_id] = btn
-        nav_layout.addStretch(1)
+        outer = QVBoxLayout(nav)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # 分组数变多后高度可能超过卡片可视区，导航自身可滚动（内容与分页共用滚动条样式）
+        scroll = ScrollArea(nav)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(SystemCardFrame._scroll_style())
+
+        body = QWidget()
+        body.setStyleSheet("background: transparent;")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(4, 8, 8, 8)
+        body_layout.setSpacing(4)
+
+        for group_idx, (group_title, items) in enumerate(self.NAV_GROUPS):
+            if group_title:
+                if group_idx > 0:
+                    body_layout.addSpacing(14)
+                label = QLabel(group_title, body)
+                label.setStyleSheet(self._nav_group_style())
+                self._nav_group_labels.append(label)
+                body_layout.addWidget(label)
+            for tab_id, tab_name, icon_src in items:
+                btn = QToolButton(body)
+                btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+                btn.setIcon(self._resolve_nav_icon(icon_src))
+                btn.setIconSize(QSize(18, 18))
+                btn.setText(tab_name)
+                btn.setFixedHeight(36)
+                # 高度固定、宽度铺满导航整行：选中态色块长度不再随文字长短变化
+                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                btn.setCursor(Qt.PointingHandCursor)
+                btn.setStyleSheet(self._nav_btn_style(False))
+                btn.clicked.connect(lambda _checked=False, tid=tab_id: self._set_active_page(tid))
+                body_layout.addWidget(btn)
+                self._nav_buttons[tab_id] = btn
+        body_layout.addStretch(1)
+
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
+        # 宽度按最长项自适应（sizeHint 已含图标/文字/内边距，只补左侧指示条与外边距）
+        widest = max((btn.sizeHint().width() for btn in self._nav_buttons.values()), default=150)
+        nav.setFixedWidth(max(150, min(196, widest + 12)))
         self._nav_frame = nav
         return nav
+
+    @staticmethod
+    def _resolve_nav_icon(icon_src) -> QIcon:
+        """导航图标源 → QIcon：字符串走主题感知资源图标，FluentIcon 枚举走内置图标"""
+        if isinstance(icon_src, str):
+            return get_icon(icon_src)
+        return icon_src.icon() if hasattr(icon_src, "icon") else icon_src
 
     def _make_page(self) -> tuple:
         """创建单个分页：独立 QScrollArea + 垂直内容布局"""
@@ -852,7 +944,7 @@ class LLMSettingsCard(SystemCardFrame):
         inner = QWidget()
         inner.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(inner)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(0, 4, 6, 4)
         layout.setSpacing(6)
         page.setWidget(inner)
         return page, layout
@@ -864,7 +956,28 @@ class LLMSettingsCard(SystemCardFrame):
         self._current_tab = tab_id
         self._pages_stack.setCurrentWidget(self._page_scrolls[tab_id])
         self._update_nav_styles()
+        self._expand_page_cards(tab_id)
         self.tabChanged.emit(tab_id)
+
+    def _expand_page_cards(self, tab_id: str):
+        """进入分页时展开页内可展开卡片：进页即见列表，无需再点一次标题栏"""
+        layout = self._page_layouts.get(tab_id)
+        if layout is None:
+            return
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            card = item.widget() if item is not None else None
+            if card is None or not hasattr(card, "toggleExpand"):
+                continue
+            try:
+                # qfluentwidgets ExpandSettingCard 的展开状态属性是 isExpand
+                if not getattr(card, "isExpand", False):
+                    card.toggleExpand()
+            except Exception as e:
+                logger.warning(f"[LLMSettingsCard] {tab_id} 页卡片展开失败: {e}")
+        page = self._page_scrolls.get(tab_id)
+        if page is not None:
+            page.verticalScrollBar().setValue(0)
 
     def _update_nav_styles(self):
         for tab_id, btn in self._nav_buttons.items():
@@ -879,32 +992,65 @@ class LLMSettingsCard(SystemCardFrame):
         """
 
     @staticmethod
-    def _nav_btn_style(active: bool) -> str:
-        if active:
-            return f"""
-                QLabel {{
-                    color: {Colors.TEXT_PRIMARY};
-                    {font_size_css(12)}
-                    font-weight: bold;
-                    padding: 8px 10px;
-                    border-radius: 6px;
-                    border-left: 3px solid {Colors.TEXT_ACCENT};
-                    background-color: {Colors.TAB_ACTIVE_BG};
-                    {get_font_family_css()}
-                }}
-            """
+    def _nav_group_style() -> str:
         return f"""
             QLabel {{
                 color: {Colors.TEXT_SECONDARY};
-                {font_size_css(12)}
-                padding: 8px 10px;
-                border-radius: 6px;
-                border-left: 3px solid transparent;
+                {font_size_css(10)}
+                font-weight: bold;
+                letter-spacing: 1px;
+                padding: 2px 10px;
+                background: transparent;
                 {get_font_family_css()}
             }}
-            QLabel:hover {{
+        """
+
+    @staticmethod
+    def _nav_btn_style(active: bool) -> str:
+        if active:
+            return f"""
+                QToolButton {{
+                    color: {Colors.TEXT_ACCENT};
+                    {font_size_css(13)}
+                    font-weight: bold;
+                    padding: 0 10px;
+                    border: none;
+                    border-left: 3px solid {Colors.TEXT_ACCENT};
+                    border-radius: 6px;
+                    text-align: left;
+                    background-color: {Colors.TAB_ACTIVE_BG};
+                    {get_font_family_css()}
+                }}
+                QToolButton:hover, QToolButton:pressed {{
+                    color: {Colors.TEXT_ACCENT};
+                    background-color: {Colors.TAB_ACTIVE_BG};
+                }}
+                QToolButton:focus {{
+                    outline: none;
+                }}
+            """
+        return f"""
+            QToolButton {{
+                color: {Colors.TEXT_SECONDARY};
+                {font_size_css(13)}
+                padding: 0 10px;
+                border: none;
+                border-left: 3px solid transparent;
+                border-radius: 6px;
+                text-align: left;
+                background-color: transparent;
+                {get_font_family_css()}
+            }}
+            QToolButton:hover {{
                 color: {Colors.TEXT_PRIMARY};
                 background-color: {Colors.TAB_HOVER_BG};
+            }}
+            QToolButton:pressed {{
+                color: {Colors.TEXT_PRIMARY};
+                background-color: {Colors.TAB_ACTIVE_BG};
+            }}
+            QToolButton:focus {{
+                outline: none;
             }}
         """
 
@@ -925,6 +1071,8 @@ class LLMSettingsCard(SystemCardFrame):
             self._nav_frame.setStyleSheet(self._nav_frame_style())
         if hasattr(self, "_nav_buttons"):
             self._update_nav_styles()
+        for label in getattr(self, "_nav_group_labels", []):
+            label.setStyleSheet(self._nav_group_style())
         for page in getattr(self, "_page_scrolls", {}).values():
             page.setStyleSheet(SystemCardFrame._scroll_style())
             for sb in (page.verticalScrollBar(), page.horizontalScrollBar()):

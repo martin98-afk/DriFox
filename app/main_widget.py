@@ -7189,8 +7189,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _expand_provider_list_card(self):
         """展开服务商列表卡片"""
         try:
-            if hasattr(self._settings_popup, "llmProviderCard"):
-                self._settings_popup.llmProviderCard.toggleExpand()
+            # 设置卡片首屏已默认展开服务商列表，此处只在未展开时补展开（避免又被收起）
+            card = getattr(self._settings_popup, "llmProviderCard", None)
+            if card is not None and not getattr(card, "isExpand", False):
+                card.toggleExpand()
         except Exception:
             pass
 

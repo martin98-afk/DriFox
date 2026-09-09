@@ -177,8 +177,45 @@ def _items_json_keys(json_path: Optional[Path], wrapper: str = "") -> List[Compo
     return [ComponentItem(id=name) for name in sorted(node.keys())]
 
 
+def _parse_md_frontmatter(path: Path) -> dict:
+    """解析 md 文件头部 YAML frontmatter（失败返回空字典）"""
+    try:
+        import yaml
+
+        content = path.read_text(encoding="utf-8")
+        if not content.startswith("---"):
+            return {}
+        meta = yaml.safe_load(content.split("---", 2)[1])
+        return meta if isinstance(meta, dict) else {}
+    except Exception:
+        return {}
+
+
+def _items_md(directory: Optional[Path], pattern: str = "*.md") -> List[ComponentItem]:
+    """按文件名 stem 枚举 md 目录，并从 frontmatter 取 name / description
+
+    智能体 / 命令等 md 组件的说明写在 frontmatter 的 description 里，
+    只取文件名的话设置页细项行就没有任何可辨认信息。
+    """
+    if directory is None or not directory.exists():
+        return []
+    items: List[ComponentItem] = []
+    for p in sorted(directory.glob(pattern)):
+        if p.name.startswith("_"):
+            continue
+        meta = _parse_md_frontmatter(p)
+        items.append(
+            ComponentItem(
+                id=p.stem,
+                label=str(meta.get("name") or ""),
+                description=_shorten(str(meta.get("description") or "")),
+            )
+        )
+    return sorted(items, key=lambda it: it.id)
+
+
 def _items_stem(directory: Optional[Path], pattern: str) -> List[ComponentItem]:
-    """按文件名 stem 枚举（md / yaml / py 目录通用）"""
+    """按文件名 stem 枚举（yaml / py 目录通用；md 目录走 _items_md）"""
     if directory is None or not directory.exists():
         return []
     items = [ComponentItem(id=p.stem) for p in sorted(directory.glob(pattern)) if not p.name.startswith("_")]
@@ -217,7 +254,7 @@ def list_component_items(
         if component == "lsp":
             return _items_lsp(path)
         if component in _MD_SUBDIRS:
-            return _items_stem(path / component if path else None, "*.md")
+            return _items_md(path / component if path else None, "*.md")
         if component in _YAML_SUBDIRS:
             return _items_stem(path / component if path else None, "*.yaml")
         if component in _PY_SUBDIRS:
