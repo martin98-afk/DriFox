@@ -96,25 +96,13 @@ class ClassifiedError:
     should_fallback: bool = False
     should_retry: bool = True
 
-    @property
-    def is_auth(self) -> bool:
-        """是否认证相关错误"""
-        return self.reason in {FailoverReason.auth, FailoverReason.auth_permanent}
 
-    @property
-    def is_billing(self) -> bool:
-        """是否计费相关错误"""
-        return self.reason == FailoverReason.billing
 
     @property
     def is_rate_limit(self) -> bool:
         """是否频率限制"""
         return self.reason == FailoverReason.rate_limit
 
-    @property
-    def is_context_overflow(self) -> bool:
-        """是否上下文溢出"""
-        return self.reason == FailoverReason.context_overflow
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""

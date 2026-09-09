@@ -125,14 +125,6 @@ class DatabaseManager:
     def db_path(self) -> Optional[str]:
         return self._db_path
 
-    def get_tables(self) -> List[str]:
-        if not self._conn:
-            return []
-        cursor = self._conn.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
-        )
-        return [row[0] for row in cursor.fetchall()]
 
     def get_table_info(self, table_name: str) -> List[Dict[str, Any]]:
         if not self._conn:
@@ -153,25 +145,7 @@ class DatabaseManager:
             )
         return columns
 
-    def get_table_data(
-        self, table_name: str, limit: int = 100, offset: int = 0
-    ) -> Tuple[List[str], List[List[Any]]]:
-        if not self._conn:
-            return [], []
-        cursor = self._conn.cursor()
-        cursor.execute(
-            f'SELECT * FROM "{table_name}" LIMIT ? OFFSET ?', (limit, offset)
-        )
-        columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
-        return columns, [list(row) for row in rows]
 
-    def get_table_count(self, table_name: str) -> int:
-        if not self._conn:
-            return 0
-        cursor = self._conn.cursor()
-        cursor.execute(f'SELECT COUNT(*) FROM "{table_name}"')
-        return cursor.fetchone()[0]
 
     def execute_sql(self, sql: str, params: tuple = ()) -> Tuple[bool, Any]:
         """
@@ -183,7 +157,6 @@ class DatabaseManager:
         🛡️ P4（T4-TOP6）：写路径批量事务——DML（INSERT/UPDATE/DELETE/REPLACE）
         执行后不再立即 commit，而是挂起（_pending_commit=True）并启动攒批
         timer（≤1s），攒批窗口内多次写合并为一次 commit，减少 SQLite 提交
-        次数（主线程写耗时降低）。安全性：
         - 每条 DML 用 SAVEPOINT 包裹：单条失败只回滚该条，不丢攒批内已成功写
         - flush() / close() / backup_to() 同步落盘（硬约束：退出不丢数据）
         - 非 DML 写（CREATE/DROP/ALTER/VACUUM 等）保持立即 commit
@@ -352,11 +325,6 @@ class DatabaseManager:
         sql = f'CREATE TABLE IF NOT EXISTS "{table_name}" ({", ".join(col_defs)})'
         return self.execute_sql(sql)
 
-    def drop_table(self, table_name: str) -> Tuple[bool, str]:
-        if not table_name or not table_name.isidentifier():
-            return False, "无效的表名"
-        sql = f"DROP TABLE IF EXISTS {table_name}"
-        return self.execute_sql(sql)
 
     def insert_data(self, table_name: str, data: Dict[str, Any]) -> Tuple[bool, str]:
         if not data:
@@ -379,11 +347,6 @@ class DatabaseManager:
         sql = f'UPDATE "{table_name}" SET {set_clause} WHERE {where}'
         return self.execute_sql(sql, tuple(data.values()) + where_params)
 
-    def delete_data(
-        self, table_name: str, where: str, where_params: tuple = ()
-    ) -> Tuple[bool, str]:
-        sql = f'DELETE FROM "{table_name}" WHERE {where}'
-        return self.execute_sql(sql, where_params)
 
     def backup_to(self, target_path: str) -> Tuple[bool, str]:
         if not self._conn:

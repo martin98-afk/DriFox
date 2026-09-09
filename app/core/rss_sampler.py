@@ -109,9 +109,6 @@ class RssSampler:
         s = self._current_sample()
         return s.web_rss_mb if s else 0.0
 
-    def is_available(self) -> bool:
-        """psutil 是否可用（首帧采样成功后为 True）。"""
-        return self._current_sample() is not None
 
     # ── 内部实现 ──────────────────────────────────────────────
     def _current_sample(self) -> Optional[_RssSample]:

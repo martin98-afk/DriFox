@@ -269,17 +269,9 @@ def supports_items(component: str) -> bool:
     return component not in _ATOMIC_COMPONENTS
 
 
-def count_component_items(plugin_name: str, component: str, plugin_path: Optional[Path] = None) -> int:
-    """条目数量（UI 未展开时只需数字，避免构造完整对象）"""
-    return len(list_component_items(plugin_name, component, plugin_path))
 
 
-def describe_items(plugin_name: str, component: str, plugin_path: Optional[Path] = None) -> Dict[str, str]:
-    """返回 {item_id: label}，供过滤链路快速取展示名"""
-    return {it.id: it.display_label for it in list_component_items(plugin_name, component, plugin_path)}
 
-
-# ── 全量索引（搜索用） ─────────────────────────────
 #
 # 搜索关键词可能命中的是细项 id（用户想关掉某个具体工具时会直接搜工具名），
 # 这意味着要遍历全部插件 × 全部组件。逐个现读会放大成上百次目录扫描，

@@ -966,23 +966,6 @@ class SubAgentExecutor(QThread):
             logger.debug(f"[SubAgent] drain hook queues failed: {e}")
         return msgs
 
-    def _parse_tool_arguments_json(self, raw_arguments: Any):
-        if isinstance(raw_arguments, dict):
-            return raw_arguments, ""
-
-        text = str(raw_arguments or "")
-        if not text.strip():
-            return {}, ""
-
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError as exc:
-            return None, str(exc)
-
-        if not isinstance(parsed, dict):
-            return None, f"expected JSON object, got {type(parsed).__name__}"
-
-        return parsed, ""
 
     def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
         """调用 LLM API（非流式，子智能体后台执行无需流式输出）"""
@@ -1708,10 +1691,6 @@ class SubAgentManager(QObject):
             self._stall_timer.stop()
             logger.info("[SubAgentManager] Stall 检测器已停止")
 
-    def set_stall_timeout(self, seconds: int):
-        """设置日志静默超时阈值（最少 30 秒）"""
-        self._stall_timeout = max(30, seconds)
-        logger.info(f"[SubAgentManager] Stall 超时已设置为 {self._stall_timeout}s")
 
     def _check_stalled_tasks(self):
         """
@@ -2049,45 +2028,6 @@ class SubAgentManager(QObject):
                 finished.append(task_id)
         return finished
 
-    def cleanup_dead_tasks(self, timeout_seconds: int = 300) -> List[str]:
-        """
-        清理卡死的任务（运行时间超过 timeout_seconds 的任务）
-
-        Returns: 已清理的任务ID列表
-        """
-        import time
-
-        cleaned = []
-        now = time.time()
-
-        for task_id in list(self._running_tasks.keys()):
-            executor = self._running_tasks[task_id]
-            start_time = executor.start_time
-
-            if start_time and (now - start_time) > timeout_seconds:
-                logger.warning(f"[SubAgentManager] Task {task_id} dead for {now - start_time}s, cancelling")
-                executor.cancel()
-                agent_name = executor.agent_name
-                task_description = executor.task_description
-                logs = executor.get_logs()
-                task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
-                error_msg = f"Task cancelled due to timeout ({timeout_seconds}s)"
-                self._finished_tasks[task_id] = {
-                    "result": "",
-                    "error": error_msg,
-                    "agent_name": agent_name,
-                    "task_description": task_description,
-                    "session_id": task_session_id,
-                    "logs": logs,
-                }
-                # 更新数据库（传入锁定的 session_id）
-                self._save_task_to_store(
-                    task_id, agent_name, task_description, "timeout", "", error_msg, session_id=task_session_id
-                )
-                del self._running_tasks[task_id]
-                cleaned.append(task_id)
-
-        return cleaned
 
     def cancel_all(self):
         """取消所有运行中的子智能体任务 + 停止 Stall 检测器
@@ -2140,9 +2080,6 @@ class SubAgentManager(QObject):
 
         self._running_tasks.clear()
 
-    def get_task_result(self, task_id: str) -> Dict:
-        """获取指定任务的执行结果"""
-        return self._finished_tasks.get(task_id, {"result": "", "error": ""})
 
     def mark_task_finished(self, task_id: str, result: str, error: str = "") -> Dict:
         """任务完成归档：写入内存 _finished_tasks，并把数据库状态推进到 finished。
@@ -2283,87 +2220,7 @@ class SubAgentManager(QObject):
 
         return {"summary": {}, "logs": [], "found": False, "status": "unknown"}
 
-    def get_all_task_logs(self) -> List[Dict]:
-        """
-        获取所有任务的日志（运行中和已完成的）。
 
-        Returns:
-            List[Dict]: 每个任务的日志信息列表
-        """
-        results = []
-        self.get_finished_tasks()  # 先清理
-
-        # 收集运行中的任务
-        for task_id, executor in self._running_tasks.items():
-            results.append(
-                {
-                    "task_id": task_id,
-                    "summary": executor.get_summary(),
-                    "logs": executor.get_logs(),
-                    "status": "running",
-                }
-            )
-
-        # 收集已完成的任务
-        for task_id, task_info in self._finished_tasks.items():
-            results.append(
-                {
-                    "task_id": task_id,
-                    "summary": {
-                        "task_id": task_id,
-                        "agent_name": task_info.get("agent_name", ""),
-                        "task_description": task_info.get("task_description", ""),
-                        "result": task_info.get("result", ""),
-                        "error": task_info.get("error", ""),
-                        "tool_call_count": task_info.get("tool_call_count", 0),
-                        "elapsed_seconds": task_info.get("elapsed_seconds", 0),
-                    },
-                    "logs": task_info.get("logs", []),
-                    "status": "finished",
-                }
-            )
-
-        return results
-
-    def get_tasks_status(self, task_ids: List[str], session_id: str = None) -> ToolResult:
-        """获取指定任务的状态（会话隔离）
-
-        Args:
-            session_id: 可选，传入时只返回属于该会话的任务
-        """
-        effective_session = session_id if session_id else self._current_session_id
-        tasks_info = []
-        for tid in task_ids:
-            if tid in self._running_tasks:
-                executor = self._running_tasks[tid]
-                # 会话隔离：检查 running 任务的 session
-                if effective_session:
-                    task_session = getattr(executor, "_task_session_id", "")
-                    if task_session != effective_session:
-                        continue
-                tasks_info.append(
-                    {
-                        "task_id": tid,
-                        "status": "running" if executor.isRunning() else "finishing",
-                        "agent": executor.agent_name,
-                    }
-                )
-            elif tid in self._finished_tasks:
-                task_info = self._finished_tasks[tid]
-                task_session = task_info.get("session_id", "")
-                # 会话隔离：只返回当前会话的任务
-                # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
-                if effective_session and task_session != effective_session:
-                    continue
-                tasks_info.append(
-                    {
-                        "task_id": tid,
-                        "status": "finished",
-                        "agent": task_info.get("agent_name", ""),
-                    }
-                )
-            # 其他情况（unknown）不返回，隐藏不存在或不属于当前会话的任务
-        return ToolResult(True, content={"tasks": tasks_info})
 
     def get_tasks_status_with_details(
         self, task_ids: List[str], with_log: bool = False, with_result: bool = True, session_id: str = None
@@ -2404,7 +2261,6 @@ class SubAgentManager(QObject):
                 summary = task_data.get("summary", {}) or {}
                 elapsed = summary.get("elapsed_seconds", 0) or 0
                 tool_calls = summary.get("tool_call_count", 0) or 0
-                task_info["elapsed_seconds"] = elapsed
                 task_info["tool_call_count"] = tool_calls
                 task_info["_hint"] = (
                     f"⏳ 该任务还在后台运行中（已用时 {elapsed}s，已调用 {tool_calls} 次工具）。"
@@ -2540,15 +2396,3 @@ class SubAgentManager(QObject):
 
         return ToolResult(True, content={"tasks": tasks_info})
 
-    def get_all_active_tasks(self) -> ToolResult:
-        """获取所有活跃任务"""
-        tasks_info = []
-        for task_id, executor in self._running_tasks.items():
-            tasks_info.append(
-                {
-                    "task_id": task_id,
-                    "status": "running" if executor.isRunning() else "finishing",
-                    "agent": executor.agent_name,
-                }
-            )
-        return ToolResult(True, content={"tasks": tasks_info})

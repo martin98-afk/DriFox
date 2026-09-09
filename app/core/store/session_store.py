@@ -930,87 +930,11 @@ class SessionStore:
             return self._memory_repo.save(memory)
         return False
 
-    def save_memories(self, memories: List[Dict]) -> bool:
-        """批量保存记忆"""
-        if self._memory_repo:
-            return self._memory_repo.save_all(memories)
-        return False
 
-    def load_memories(self, limit: int = 200, include_disabled: bool = False) -> List[Dict]:
-        """加载所有记忆"""
-        if self._memory_repo:
-            return self._memory_repo.load_all(limit, include_disabled)
-        return []
 
-    def delete_memory(self, memory_id: str) -> bool:
-        """删除指定记忆"""
-        if self._memory_repo:
-            return self._memory_repo.delete(memory_id)
-        return False
 
-    def delete_memories_by_category(self, category: str) -> int:
-        """删除指定分类的所有记忆"""
-        if self._memory_repo:
-            return self._memory_repo.delete_by_category(category)
-        return 0
 
-    def clear_memories(self) -> bool:
-        """清空所有记忆"""
-        if self._memory_repo:
-            return self._memory_repo.clear_all()
-        return False
 
-    def update_memory_enabled(self, memory_id: str, enabled: bool) -> bool:
-        """更新记忆的启用状态"""
-        if self._memory_repo:
-            return self._memory_repo.update_enabled(memory_id, enabled)
-        return False
-
-    def update_last_accessed(self, memory_id: str) -> bool:
-        """更新记忆的最后访问时间"""
-        if self._memory_repo:
-            return self._memory_repo.update_last_accessed(memory_id)
-        return False
-
-    def search_memories(self, query_terms: List[str], limit: int = 20) -> List[Dict]:
-        """搜索记忆"""
-        if self._memory_repo:
-            return self._memory_repo.search(query_terms, limit)
-        return []
-
-    def migrate_memories_from_json(self, json_path: str) -> int:
-        """从 JSON 文件迁移记忆到 SQLite"""
-        import json as json_module
-
-        from app.utils.utils import deserialize_from_json
-
-        if not self.is_initialized:
-            return 0
-
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = deserialize_from_json(json_module.load(f))
-
-            if not isinstance(data, list):
-                return 0
-
-            count = 0
-            for memory in data:
-                memory_id = memory.get("memory_id") or memory.get("id")
-                if memory_id:
-                    existing = self._memory_repo.get(memory_id) if self._memory_repo else None
-                    if not existing:
-                        if self.save_memory(memory):
-                            count += 1
-
-            logger.info(f"[SessionStore] 从 {json_path} 迁移了 {count} 条记忆")
-            return count
-
-        except Exception as e:
-            logger.error(f"[SessionStore] 记忆迁移失败: {e}")
-            return 0
-
-    # ==================== 子智能体日志操作（委托给 SubAgentLogRepository）====================
 
     def save_subagent_task(
         self,
@@ -1051,29 +975,11 @@ class SessionStore:
             return self._subagent_log_repo.get_task(task_id)
         return None
 
-    def get_subagent_tasks(self, task_ids: List[str]) -> List[Dict]:
-        """获取多个子智能体任务"""
-        if self._subagent_log_repo:
-            return self._subagent_log_repo.get_tasks(task_ids)
-        return []
 
-    def get_all_subagent_tasks(self, limit: int = 100) -> List[Dict]:
-        """获取所有子智能体任务"""
-        if self._subagent_log_repo:
-            return self._subagent_log_repo.get_all_tasks(limit)
-        return []
 
-    def delete_subagent_task(self, task_id: str) -> bool:
-        """删除子智能体任务"""
-        if self._subagent_log_repo:
-            return self._subagent_log_repo.delete_task(task_id)
-        return False
 
     def clear_old_subagent_tasks(self, days: int = 7) -> int:
         """清理旧子智能体任务"""
-        if self._subagent_log_repo:
-            return self._subagent_log_repo.clear_old_tasks(days)
-        return 0
 
     # ==================== 文件操作记录（委托给 FileOperationRepository）====================
 
@@ -1085,11 +991,6 @@ class SessionStore:
             return self._file_op_repo.record(session_id, call_id, tool_name, file_path, backup_path)
         return False
 
-    def get_file_operations_after_call(self, session_id: str, call_id: str) -> List[Dict]:
-        """获取某 call_id 之后的所有文件操作"""
-        if self._file_op_repo:
-            return self._file_op_repo.get_after_call(session_id, call_id)
-        return []
 
     def get_file_operations_by_call_id(self, session_id: str, call_id: str) -> List[Dict]:
         """根据 call_id 获取文件操作记录"""
@@ -1103,11 +1004,6 @@ class SessionStore:
             return self._file_op_repo.get_all(session_id)
         return []
 
-    def delete_file_operations_after_id(self, session_id: str, after_id: int) -> int:
-        """删除指定 session 中 id 大于 after_id 的所有操作记录"""
-        if self._file_op_repo:
-            return self._file_op_repo.delete_after_id(session_id, after_id)
-        return 0
 
     def clear_session_file_operations(self, session_id: str) -> Tuple[int, List[str]]:
         """清空会话的所有文件操作记录"""
@@ -1160,17 +1056,5 @@ class SessionStore:
         """获取会话仓储（用于高级操作）"""
         return self._session_repo
 
-    @property
-    def memory_repo(self) -> Optional[MemoryRepository]:
-        """获取记忆仓储（用于高级操作）"""
-        return self._memory_repo
 
-    @property
-    def file_op_repo(self) -> Optional[FileOperationRepository]:
-        """获取文件操作记录仓储（用于高级操作）"""
-        return self._file_op_repo
 
-    @property
-    def subagent_log_repo(self) -> Optional[SubAgentLogRepository]:
-        """获取子智能体日志仓储（用于高级操作）"""
-        return self._subagent_log_repo

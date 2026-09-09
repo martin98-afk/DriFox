@@ -426,6 +426,3 @@ class ToolResultPersister:
 
         return block
 
-    def cleanup_session(self) -> None:
-        """会话结束时清理 (暂不删除文件, 方便调试; 后续可加保留期策略)"""
-        self._frozen.clear()

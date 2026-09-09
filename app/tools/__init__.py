@@ -173,9 +173,6 @@ class BuiltinTools(QObject):
         logger.info(f"[BuiltinTools] Workdir updated to: {self.workdir}")
 
 
-def create_builtin_tools(homepage=None, workdir: str = None) -> BuiltinTools:
-    """创建内置工具实例"""
-    return BuiltinTools(homepage, workdir)
 
 
 # Tool schema definitions - keep separate from class

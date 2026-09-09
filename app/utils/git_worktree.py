@@ -380,19 +380,4 @@ class GitWorktreeDetector:
             pass
         return None
 
-    @staticmethod
-    def get_worktree_by_branch(worktrees: List[WorktreeInfo], branch: str) -> Optional[WorktreeInfo]:
-        """根据分支名查找 worktree"""
-        for wt in worktrees:
-            if wt.branch == branch:
-                return wt
-        return None
 
-    @staticmethod
-    def get_worktree_by_path(worktrees: List[WorktreeInfo], path: str) -> Optional[WorktreeInfo]:
-        """根据路径查找 worktree"""
-        normalized = os.path.normpath(path)
-        for wt in worktrees:
-            if os.path.normpath(wt.path) == normalized:
-                return wt
-        return None

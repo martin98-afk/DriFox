@@ -353,29 +353,6 @@ class TemplateManager:
 
         return results
 
-    def list_templates_by_source(self, source: str) -> List[Dict[str, Any]]:
-        """仅列出指定来源的模板。
-
-        Args:
-            source: SOURCE_USER / SOURCE_PLUGIN / SOURCE_SYSTEM
-
-        Returns:
-            同 list_templates 格式，但只包含指定来源的模板。
-        """
-        results: List[Dict[str, Any]] = []
-
-        if source == self.SOURCE_USER:
-            user_dir = self._get_user_dir()
-            if user_dir and user_dir.exists() and self._source_enabled("user-custom"):
-                results = self._list_from_dir(user_dir, source, "user-custom")
-        elif source == self.SOURCE_SYSTEM:
-            if self._system_dir.exists() and self._source_enabled("system"):
-                results = self._list_from_dir(self._system_dir, source, "system")
-        elif source == self.SOURCE_PLUGIN:
-            for plugin_name, plugin_dir in self._get_plugin_template_dirs_named():
-                if plugin_dir.exists():
-                    results.extend(self._list_from_dir(plugin_dir, source, plugin_name))
-        return results
 
     def delete(self, name: str) -> bool:
         """删除 user-custom 目录下的模板文件。

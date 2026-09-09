@@ -1671,9 +1671,6 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
             logger.error(f"[DiffHtml] 获取 diff 失败: {e}")
             return ""
 
-    @classmethod
-    def generate_report_for_files(cls, file_paths: List[str], session_id: str = "") -> str:
-        return cls.generate_html_report(cls.get_diff_for_files(file_paths, session_id) or "", session_id)
 
 
 # ==========================================================================
@@ -1869,14 +1866,6 @@ class _DiffWebPage(QWebEnginePage):
 class DiffViewerWindow:
     _instances = []
 
-    @classmethod
-    def close_all(cls):
-        for w in cls._instances[:]:
-            try:
-                w.close()
-            except Exception:
-                pass
-        cls._instances.clear()
 
     def __init__(self, parent=None, title: str = "文件差异对比"):
         self._disposed = False

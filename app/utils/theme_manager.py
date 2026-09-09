@@ -194,14 +194,6 @@ class ThemeManager:
         self._ensure_loaded()
         return self._themes.get(theme_id)
 
-    def get_theme_value(self, theme_id: str, key: str, default: str = None) -> str:
-        """从主题的 colors 中获取颜色值"""
-        self._ensure_loaded()
-        theme = self._themes.get(theme_id)
-        if not theme:
-            return default
-        colors = theme.get("colors", {})
-        return colors.get(key, default)
 
     def get_theme_window(self, theme_id: str) -> dict:
         """获取窗口背景配置"""
@@ -209,11 +201,6 @@ class ThemeManager:
         theme = self._themes.get(theme_id) or {}
         return theme.get("window", {})
 
-    def get_theme_background(self, theme_id: str) -> dict:
-        """获取背景图片配置（旧字段，对应 yaml 的 `background:` 块）"""
-        self._ensure_loaded()
-        theme = self._themes.get(theme_id) or {}
-        return theme.get("background", {})
 
     def get_theme_backgrounds(self, theme_id: str) -> dict:
         """获取主题的多区域背景配置（新字段，统一 5 个区域）
@@ -371,11 +358,6 @@ class ThemeManager:
         self._cached_light_check = (theme_id, result)
         return result
 
-    def is_user_theme(self, theme_id: str) -> bool:
-        """判断是否为用户自定义主题（非内置）"""
-        self._ensure_loaded()
-        theme = self._themes.get(theme_id)
-        return bool(theme and not theme.get("_is_builtin", True))
 
     # ── 当前主题 ──────────────────────────────────────────
 
@@ -407,10 +389,6 @@ class ThemeManager:
         if callback not in self._reload_callbacks:
             self._reload_callbacks.append(callback)
 
-    def remove_reload_callback(self, callback):
-        """移除已注册的回调"""
-        if callback in self._reload_callbacks:
-            self._reload_callbacks.remove(callback)
 
     # ── 统一刷新目标注册 ──────────────────────────────────
     # 使用弱引用防止阻止垃圾回收
@@ -639,11 +617,6 @@ class ThemeManager:
                     pass  # 文件被并发删除等竞态 → 跳过，指纹可能含噪，重扫兜底
         return h.hexdigest()
 
-    def get_user_themes_dir(self) -> Path:
-        """获取用户主题目录"""
-        from app.utils.utils import get_app_data_dir
-
-        return get_app_data_dir() / "themes"
 
 
 # 全局单例

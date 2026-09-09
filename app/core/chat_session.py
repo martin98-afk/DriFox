@@ -313,10 +313,6 @@ class SessionManager(QObject):
             # 后续索引前移，更新映射
             session_index = {s.session_id: i for i, s in enumerate(self.sessions)}
 
-    def set_max_cached_sessions(self, max_cached: int):
-        """设置最大缓存会话数"""
-        self.max_cached_sessions = max_cached
-        self._evict_if_needed()
 
     def switch_to_session(self, index: int):
         if 0 <= index < len(self.sessions):
@@ -330,13 +326,6 @@ class SessionManager(QObject):
     def get_session_names(self) -> List[str]:
         return [s.name for s in self.sessions]
 
-    def set_session_from_messages(self, messages: List[Dict]):
-        if self.current_index < 0:
-            self.current_index = 0
-        if self.current_index >= len(self.sessions):
-            self.sessions.append(ChatSession(messages=messages.copy()))
-        else:
-            self.sessions[self.current_index] = ChatSession(messages=messages.copy())
 
     def set_current_session(self, session: ChatSession):
         if self.current_index < 0:

@@ -19,13 +19,8 @@ from app.core.store import (
 
 # ========== 兼容旧接口（已废弃，保持向后兼容）==========
 # 旧版 5 大类记忆已废弃，但 topic_summary.py 还在用
-MEMORY_CATEGORIES = {
-    # 空字典，不再使用分类
-}
 
-MEMORY_CATEGORY_SUMMARIES = {}
 
-MEMORY_CATEGORY_LIMITS = {}
 
 
 class MemoryManagerCore:
