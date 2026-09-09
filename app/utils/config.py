@@ -405,7 +405,7 @@ class Settings(QConfig):
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
 
     # ========== 像素桌宠 ==========
-    pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())
+    pet_enabled = ConfigItem("UI", "PetEnabled", False, BoolValidator())
     # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树
     tab_panel_mode = OptionsConfigItem(
         "UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"])
