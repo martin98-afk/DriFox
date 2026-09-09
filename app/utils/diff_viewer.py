@@ -30,8 +30,8 @@ from PyQt5.QtWidgets import QDialog, QHBoxLayout
 
 from app.core.webengine_profile import create_transient_web_profile
 
-# Pygments 语法高亮（与 render_helpers 一致，确保 diff 弹窗预渲染文件不依赖 JS 即有着色）
-from app.widgets.render_helpers import (
+# Pygments 语法高亮（行内 diff 高亮子系统，确保 diff 弹窗预渲染文件不依赖 JS 即有着色）
+from app.utils.diff_highlight import (
     _highlight_code_line,
     _highlighted_word_diff_html,
     _get_diff_lexer,
