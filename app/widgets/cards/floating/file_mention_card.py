@@ -264,7 +264,7 @@ def _scan_tree(root_dir: str, rules: "IgnoreRules", max_items: int):
                     )
                     if is_dir:
                         walk(os.path.normpath(entry.path), rel, parts)
-        except PermissionError, FileNotFoundError, OSError:
+        except (PermissionError, FileNotFoundError, OSError):
             pass
         snapshots[dirpath] = names
 
@@ -916,7 +916,7 @@ class FileMentionCard(QWidget):
                         if is_dir:
                             # 新目录：递归扫描子文件 + 注册监视
                             self._incremental_scan_new_dir(os.path.normpath(entry.path), rel)
-        except PermissionError, FileNotFoundError, OSError:
+        except (PermissionError, FileNotFoundError, OSError):
             # 目录可能已被删除
             new_names = set()
 
@@ -982,7 +982,7 @@ class FileMentionCard(QWidget):
 
                     if is_dir:
                         self._incremental_scan_new_dir(os.path.normpath(entry.path), rel)
-        except PermissionError, FileNotFoundError, OSError:
+        except (PermissionError, FileNotFoundError, OSError):
             pass
 
         self._dir_snapshots[dirpath] = names

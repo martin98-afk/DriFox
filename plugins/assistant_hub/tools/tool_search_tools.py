@@ -51,7 +51,7 @@ def _as_str_list(v) -> list:
 def _clamp_top_k(v) -> int:
     try:
         k = int(v)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return 5
     return max(1, min(20, k))
 

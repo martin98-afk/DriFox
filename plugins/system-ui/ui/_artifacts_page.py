@@ -43,7 +43,7 @@ from app.utils.utils import get_font_family_css, get_icon
 def _relative_time(created_at: str) -> str:
     try:
         dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return created_at or ""
     delta = datetime.now() - dt
     seconds = delta.total_seconds()

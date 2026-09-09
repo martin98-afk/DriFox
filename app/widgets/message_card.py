@@ -4344,7 +4344,7 @@ class _DialogEventFilter(QObject):
             # 兜底：viewer 未走 cleanup（正常路径 deleteLater → cleanup）就销毁时，
             # 自动从注册表移除，避免单例过滤器滞留已销毁对象引用
             viewer.destroyed.connect(self._on_viewer_destroyed)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             pass
 
     def unregister(self, viewer):
@@ -4355,7 +4355,7 @@ class _DialogEventFilter(QObject):
         self._viewers.discard(viewer)
         try:
             viewer.destroyed.disconnect(self._on_viewer_destroyed)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             pass
         if not self._viewers:
             self._detach_from_application()
@@ -4692,7 +4692,7 @@ class CodeWebViewer(QWebEngineView):
                 sig = getattr(dialog, sig_name, None)
                 if sig is not None:
                     sig.connect(self._restore_from_dialog)
-            except TypeError, RuntimeError, AttributeError:
+            except (TypeError, RuntimeError, AttributeError):
                 pass
 
     def _restore_from_dialog(self, _result=None):
@@ -14465,7 +14465,7 @@ class MessageCard(SimpleCardWidget):
         for signal, slot in pairs:
             try:
                 signal.disconnect(slot)
-            except RuntimeError, TypeError:
+            except (RuntimeError, TypeError):
                 pass
 
     def detach_viewer(self) -> bool:
@@ -16038,7 +16038,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):
@@ -16208,10 +16208,10 @@ def _session_duration_days(created_at: str) -> int:
         return 0
     try:
         start = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         try:
             start = datetime.strptime(created_at[:10], "%Y-%m-%d")
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return 0
     return max((datetime.now() - start).days, 0)
 
