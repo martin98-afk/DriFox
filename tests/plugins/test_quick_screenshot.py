@@ -116,15 +116,6 @@ def test_reverse_drag_normalizes(overlay, qtbot):
 # ========================================================================
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 def test_register_ui_registers_input_button(fresh_registry):
     ui = _load_module("qs_ui_test", _PLUGIN_UI / "__init__.py")

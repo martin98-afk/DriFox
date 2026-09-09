@@ -19,14 +19,6 @@ from app.plugins.loaders.runtime_component_loader import RuntimeComponentLoader
 from app.tools.registry import ToolRegistry
 
 
-@pytest.fixture()
-def log_capture():
-    """loguru WARNING+ 捕获为文本列表。"""
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 def _make_tool_plugin(root, plugin_name: str, body: str, tool_name: str):
     tools_dir = root / plugin_name / "tools"

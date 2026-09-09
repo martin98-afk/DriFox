@@ -25,13 +25,6 @@ class _PluginChatArea(UIModule):
         host.built_by = "plugin"
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 class TestUIModuleRegistry:
     def test_factory_not_invoked_on_register(self, fresh_registry):

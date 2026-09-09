@@ -13,13 +13,6 @@ from app.plugins.registries.ui_plugin_registry import (
 )
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 class TestMigrationDualView:
     def test_sidebar_item_appears_in_region(self, fresh_registry):

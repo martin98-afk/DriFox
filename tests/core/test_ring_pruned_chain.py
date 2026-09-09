@@ -10,11 +10,6 @@ import pytest
 from PyQt5.QtWidgets import QApplication
 
 
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
 
 def _make_ring(qapp):
     from app.widgets.context_usage_ring import ContextUsageRing

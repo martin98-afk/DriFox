@@ -32,14 +32,6 @@ MarketplaceSourceManager = mm.MarketplaceSourceManager
 Installer = installer_mod.PluginInstaller
 
 
-@pytest.fixture()
-def log_capture():
-    """loguru WARNING+ 捕获为文本列表。"""
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 def test_github_repo_regex_rejects_traversal(log_capture):
     """github repo 必须是 owner/name 形态：路径穿越/缺名/嵌套路径全拒。"""
