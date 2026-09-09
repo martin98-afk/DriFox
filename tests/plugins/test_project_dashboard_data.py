@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 # project-dashboard 已迁至 .drifox/plugins（引擎插件化），用唯一模块名加载，避免 ui 包冲突（T8）
-_UI_DIR = Path(__file__).resolve().parent.parent / ".drifox" / "plugins" / "project-dashboard" / "ui"
+_UI_DIR = Path(__file__).resolve().parent.parent.parent / ".drifox" / "plugins" / "project-dashboard" / "ui"
 _spec = importlib.util.spec_from_file_location("pd_dashboard", _UI_DIR / "dashboard.py")
 _dashboard = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_dashboard)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -349,7 +349,7 @@ def register(registry):
         monkeypatch.setattr("app.utils.utils.get_app_data_dir", lambda: tmp_path)
         user_root = tmp_path / "plugins"
         self._make_user_override_plugin(user_root)
-        system_root = Path(__file__).parent.parent / "plugins"
+        system_root = Path(__file__).parent.parent.parent / "plugins"
         return system_root, user_root
 
     def test_root_kind_priority_constants(self):
@@ -463,7 +463,7 @@ def register(registry):
         """场景 5：所有插件工具的 metadata._plugin_root_kind 都被正确注入"""
         reg = ToolRegistry.get_instance()
         # 显式只加载 system_root，隔离用户插件（如 hashline-edit 覆盖 read）干扰
-        system_root = Path(__file__).parent.parent / "plugins"
+        system_root = Path(__file__).parent.parent.parent / "plugins"
         load_plugin_tools(registry=reg, plugin_roots=[system_root])
         # 系统插件工具：kind=system
         for name in ("read", "write", "bash"):
@@ -473,7 +473,7 @@ def register(registry):
     def test_get_meta_includes_source(self):
         """get_meta 暴露 source 字段，权限卡片已可用"""
         reg = ToolRegistry.get_instance()
-        system_root = Path(__file__).parent.parent / "plugins"
+        system_root = Path(__file__).parent.parent.parent / "plugins"
         load_plugin_tools(registry=reg, plugin_roots=[system_root])
         meta = reg.get_meta("read")
         assert "source" in meta
@@ -701,7 +701,7 @@ class TestSourceLabelRender:
         from app.widgets.cards.settings.tool_control_card import ToolControlCardContent
 
         # 显式只加载 system_root，隔离用户插件（hashline-edit 覆盖 read）干扰
-        system_root = Path(__file__).parent.parent / "plugins"
+        system_root = Path(__file__).parent.parent.parent / "plugins"
         ToolRegistry.reset_instance()
         reg = ToolRegistry.get_instance()
         load_plugin_tools(registry=reg, plugin_roots=[system_root])
@@ -1382,7 +1382,7 @@ class TestWebToolsEnvKey:
         """按插件加载器同款方式动态加载 web_tools 模块"""
         import importlib.util
 
-        path = Path(__file__).parent.parent / "plugins" / "system-tools" / "tools" / "web_tools.py"
+        path = Path(__file__).parent.parent.parent / "plugins" / "system-tools" / "tools" / "web_tools.py"
         spec = importlib.util.spec_from_file_location("_test_web_tools", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -1394,7 +1394,7 @@ class TestWebToolsEnvKey:
         import json
 
         manifest = json.loads(
-            (Path(__file__).parent.parent / "plugins" / "system-tools" / ".drifox-plugin" / "plugin.json").read_text(
+            (Path(__file__).parent.parent.parent / "plugins" / "system-tools" / ".drifox-plugin" / "plugin.json").read_text(
                 encoding="utf-8"
             )
         )
@@ -1507,7 +1507,7 @@ class TestSelfContained:
 
         ToolRegistry.reset_instance()
         # 显式只加载 system_root，隔离用户插件覆盖（hashline-edit 无 read.svg 图标）
-        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent / "plugins"])
+        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent.parent / "plugins"])
         reg = ToolRegistry.get_instance()
         assert reg.get_icon_dir("read")
         assert reg.get_icon_dir_light("read")
@@ -1528,7 +1528,7 @@ class TestSelfContained:
 
         ToolRegistry.reset_instance()
         # 显式只加载 system_root，隔离用户插件覆盖
-        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent / "plugins"])
+        load_plugin_tools(registry=ToolRegistry.get_instance(), plugin_roots=[Path(__file__).parent.parent.parent / "plugins"])
         icon_name = _get_tool_icon_name("read")
 
         def svg_of(html):

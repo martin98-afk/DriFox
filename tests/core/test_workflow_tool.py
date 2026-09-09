@@ -1457,7 +1457,7 @@ class TestRunCard:
         import time
 
         from plugins.workflow.tools import workflow_tool as wt
-        from tests.test_workflow_tool import TestBackgroundRun
+        from tests.core.test_workflow_tool import TestBackgroundRun
 
         monkeypatch.setattr(wt, "wf_root", lambda: tmp_path)
         monkeypatch.setattr(

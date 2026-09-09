@@ -42,7 +42,7 @@ def test_readonly_guard_blocks_internal_writes(fake_meipass):
 def test_dev_mode_resolves_project_plugins(monkeypatch):
     """dev 回归锚点：无 _MEIPASS → 解析回项目根 plugins/。"""
     monkeypatch.delattr(sys, "_MEIPASS", raising=False)
-    expected = Path(__file__).resolve().parent.parent / "plugins"
+    expected = Path(__file__).resolve().parent.parent.parent / "plugins"
     assert _resolve_system_plugin_dir() == expected
 
 

@@ -7,7 +7,7 @@ import tempfile
 tmpdir = tempfile.mkdtemp(prefix="drifox_veh_test_")
 os.environ["DRIFOX_CRASH_DIR"] = tmpdir
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from app.utils.veh_minidump import install
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-SRC_ROOT = Path(__file__).resolve().parent.parent / "app"
+SRC_ROOT = Path(__file__).resolve().parent.parent.parent / "app"
 
 
 def _read_src(rel: str) -> str:

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 APP_ROOT = PROJECT_ROOT / "app"
 TESTS_ROOT = PROJECT_ROOT / "tests"
 _PATTERN = re.compile(r"^(from|import)\s+plugins\.", re.MULTILINE)

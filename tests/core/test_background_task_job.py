@@ -17,7 +17,7 @@ import pytest
 import importlib.util
 from pathlib import Path
 
-_PLUGIN_PATH = Path(__file__).resolve().parent.parent / "plugins" / "system-tools" / "tools" / "terminal_tools.py"
+_PLUGIN_PATH = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-tools" / "tools" / "terminal_tools.py"
 _spec = importlib.util.spec_from_file_location("_terminal_plugin", _PLUGIN_PATH)
 _terminal_plugin = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_terminal_plugin)

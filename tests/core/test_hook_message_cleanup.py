@@ -5,7 +5,7 @@ import os
 from typing import List, Dict, Any
 
 # 确保能找到 app 包
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 from app.core.message_content import (
     consolidate_messages,

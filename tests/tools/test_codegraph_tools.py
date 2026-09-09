@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # ── 跳过条件（工具插件化：引擎迁社区插件 .drifox/plugins/codegraph-tools/） ──

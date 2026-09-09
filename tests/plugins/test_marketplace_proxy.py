@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 PLUGIN_MARKETPLACE = ROOT / "plugins" / "plugin-marketplace"
 if str(PLUGIN_MARKETPLACE) not in sys.path:
     sys.path.insert(0, str(PLUGIN_MARKETPLACE))

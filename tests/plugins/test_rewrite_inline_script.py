@@ -22,7 +22,7 @@ import pytest
 # 工具插件化：app/tools/terminal_tools.py 已迁移为 plugins/system-tools/tools/terminal_tools.py
 # （主程序 fallback 已移除）。plugins/ 非 Python 包，用 _load_module 模式加载插件模块
 # （复用 test_file_tree_root_watch.py 的做法）。
-_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent / "plugins" / "system-tools" / "tools"
+_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-tools" / "tools"
 
 
 def _load_module(name: str, path: Path):
