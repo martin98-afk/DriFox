@@ -168,9 +168,13 @@ def test_full_render_marks_unclosed_tail_paragraph_incremental():
     [inc] 节点时删掉的正是 tail 会重建的内容，不丢不重。
     """
     src = inspect.getsource(CodeWebViewer._apply_render_result)
-    # 打标 JS 必须存在：限定 tagName==='P'（复杂尾部结构不标，维持兜底行为）
-    assert "tagName!=='P'" in src, "打标 JS 必须限定只给末尾 <p> 打增量标记"
-    assert "data-incremental" in src, "全量渲染后应给未闭合段末尾 <p> 补打增量标记"
+    # 打标 JS 必须覆盖**可安全重建的块级元素**：只认 <p> 时末尾是代码块/列表/引用
+    # 会漏标，后续 updateTailHtml 删不掉它、tail 又重建一遍 → 同一段重复出现。
+    assert "tagName!=='P'" not in src, "打标不得只认 <p>（代码块/列表尾部漏标会导致内容重复）"
+    assert "PRE" in src, "代码块（PRE / 含 <pre> 的 DIV）尾部也必须打增量标记"
+    # 图表/公式容器必须排除：remove() 会销毁已渲染 canvas/SVG，chart vault 不覆盖 append 路径
+    assert "echarts-container" in src, "图表/公式容器不得打 data-incremental（会销毁已渲染 canvas）"
+    assert "data-incremental" in src, "全量渲染后应给未闭合段末尾节点补打增量标记"
     # stable 推进必须到最后段落边界，而非 md 末尾（否则打标删除会丢内容）
     assert 'rfind("\\n\\n")' in src, "全量渲染后 stable 必须推进到最后一个 \\n\n 之后"
 

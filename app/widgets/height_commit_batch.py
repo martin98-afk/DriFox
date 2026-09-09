@@ -131,6 +131,13 @@ class HeightCommitBatch:
                         card.heightChanged.emit(height)
             finally:
                 if follow:
+                    # 🐛 同 main_widget._sync_scroll_maximum：卡片 setFixedHeight 之后
+                    # 布局尚未传播，sb.maximum() 仍是旧值 → setValue(maximum) 只会停在
+                    # "上一拍的底"。用即时计算的 sizeHint 校正上界后再置底。
+                    with contextlib.suppress(RuntimeError):
+                        real = self._container.sizeHint().height() - self._sa.viewport().height()
+                        if real > sb.maximum():
+                            sb.setMaximum(max(0, real))
                     sb.setValue(sb.maximum())
                 elif self._anchor_card is not None:
                     top = self._anchor_card.mapTo(self._container, QPoint(0, 0)).y()

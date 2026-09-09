@@ -15,6 +15,7 @@ from qfluentwidgets import (
     ConfigItem,
     ConfigValidator,
     ExpandSettingCard,
+    SearchLineEdit,
     StrongBodyLabel,
     qconfig,
 )
@@ -214,6 +215,9 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(500)
         self._save_timer.timeout.connect(self._save_config)
+        # 搜索过滤（与「工具/智能体启用」卡同款：输入防抖 → 按关键词重建）
+        self._keyword = ""
+        self._empty_label = None
         self.__initWidget()
 
     def _discover_skills(self):
@@ -274,13 +278,15 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
                     self.all_skills.append(entry)
         self._discovered = True
 
-    def _build_groups(self) -> List[tuple]:
+    def _build_groups(self, keyword: str = "") -> List[tuple]:
         """按来源分组：[(group_name, is_system, [skill...]), ...]
 
         有 plugin_name 的按插件分组；否则归入「内置技能」/「用户技能」。
         排序：系统优先、同名按字母序（与工具/智能体卡的小节顺序一致）。
+        keyword 非空时只保留技能名 / 描述 / 来源命中的技能，空分组整体剔除。
         """
         groups: Dict[tuple, list] = {}
+        kw = (keyword or "").strip().lower()
         for skill in self.all_skills:
             plugin_name = skill.get("plugin_name")
             is_system = bool(skill.get("is_system", True))
@@ -288,6 +294,8 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
                 key = (plugin_name, is_system)
             else:
                 key = (_BUILTIN_GROUP if is_system else _USER_GROUP, is_system)
+            if kw and kw not in f"{skill.get('name', '')} {skill.get('description', '')} {key[0]}".lower():
+                continue
             groups.setdefault(key, []).append(skill)
 
         ordered = sorted(groups.items(), key=lambda kv: (not kv[0][1], kv[0][0].lower()))
@@ -333,6 +341,9 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self.viewLayout.setAlignment(Qt.AlignTop)
         self.viewLayout.setContentsMargins(8, 0, 8, 0)
 
+        self._build_search_bar()
+        self.viewLayout.addWidget(self._search_bar)
+
         header_widget = QWidget(self.view)
         header_widget.setStyleSheet("background-color: transparent;")
         header_layout = QHBoxLayout(header_widget)
@@ -375,6 +386,8 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self._sections.clear()
         self._pending_rows.clear()
         self._built = 0
+        if self._empty_label is not None:
+            self._empty_label.hide()
 
     def _ensure_items_built(self, skip_discover: bool = False):
         """首次需要时搭起分组骨架并排队填充技能行
@@ -392,7 +405,7 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         if not skip_discover and not self._discovered:
             self._discover_skills()
 
-        for group_name, is_system, skills in self._build_groups():
+        for group_name, is_system, skills in self._build_groups(self._keyword):
             section = SkillGroupSection(group_name, is_system, self.view)
             self.viewLayout.addWidget(section)
             section.show()
@@ -403,6 +416,53 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         self._update_skill_token_count()
         self._adjust_view_size()
         self._build_next_batch(first=True)
+
+    def _build_search_bar(self):
+        """搜索框：与「工具/智能体启用」卡同款，按技能名 / 描述 / 来源过滤"""
+        self._search_bar = SearchLineEdit(self)
+        self._search_bar.setPlaceholderText("搜索技能名 / 描述 / 来源")
+        self._search_bar.setClearButtonEnabled(True)
+        self._search_bar.setFixedHeight(32)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._rebuild_sections)
+        self._search_bar.textChanged.connect(self._on_search_text_changed)
+
+    def _on_search_text_changed(self, text: str):
+        self._keyword = (text or "").strip()
+        self._search_timer.start()
+
+    def _rebuild_sections(self):
+        """按当前关键词重建分组与技能行（搜索输入防抖后调用）"""
+        # 折叠态下还没构建过行 → 关键词留给首次展开时生效，不为此付扫盘开销
+        if not self._items_built:
+            return
+        self._token += 1
+        self._clear_sections()
+        for group_name, is_system, skills in self._build_groups(self._keyword):
+            section = SkillGroupSection(group_name, is_system, self.view)
+            self.viewLayout.addWidget(section)
+            section.show()
+            self._sections.append(section)
+            for skill in skills:
+                self._pending_rows.append((section, skill))
+        self._update_empty_state()
+        self._adjust_view_size()
+        self._build_next_batch(first=True)
+
+    def _update_empty_state(self):
+        """无匹配结果时给一条空态提示；清空关键词或有结果时隐藏"""
+        if not self._keyword or self._sections:
+            if self._empty_label is not None:
+                self._empty_label.hide()
+            return
+        if self._empty_label is None:
+            self._empty_label = QLabel("", self.view)
+            self._empty_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {font_size_css(12)} {get_font_family_css()}")
+        self._empty_label.setText(f"未找到匹配「{self._keyword}」的技能")
+        self.viewLayout.addWidget(self._empty_label)
+        self._empty_label.show()
 
     def _build_next_batch(self, first: bool = False):
         """构建下一批技能行"""
@@ -526,7 +586,7 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         parts = [
             "\n\n## 偏好技能\n"
             "凡用户请求命中以下技能 description 描述的场景，必须先调用 `skill` 工具加载对应技能再回答，"
-            "禁止跳过直接作答；以下技能无法满足时用 `manage_skill(action=\"list\")` 查看完整列表：\n"
+            '禁止跳过直接作答；以下技能无法满足时用 `manage_skill(action="list")` 查看完整列表：\n'
         ]
         for skill in all_skills:
             if skill["name"] in enabled:

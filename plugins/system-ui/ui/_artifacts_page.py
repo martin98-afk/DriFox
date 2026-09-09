@@ -30,7 +30,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import TransparentToolButton
+from qfluentwidgets import SmoothScrollDelegate, TransparentToolButton
 
 # 复用内置 _EmptyHint / _SectionHeader（共享模块，避免重复定义）
 from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
@@ -330,6 +330,7 @@ class SystemArtifactsPage(QWidget):
         self._empty_hint = _EmptyHint("本次会话暂无产物", self._list_wrap)
         self._list_layout.addWidget(self._empty_hint)
         self._list_layout.addStretch(1)
+        SmoothScrollDelegate(self._scroll)  # 平滑滚动（与主程序同款引擎）
         layout.addWidget(self._scroll, 1)
         self._header.hide_action()
         # 「查看所有产物差异」按钮

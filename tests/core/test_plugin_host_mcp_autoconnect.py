@@ -90,6 +90,31 @@ class TestDeferredChainInitializesMcp:
         assert hasattr(PluginHostService, "_init_mcp_connections")
 
 
+class TestLspOnDemandStart:
+    """LSP 按需启动（T5-1）：首次启动延迟链只注册不预热
+
+    LspManager._ensure_started 已覆盖全部消费场景（sync_* 系列调用前
+    自动拉起），启动窗口批量 start_all_background 仅造成 6+ 个 LSP
+    子进程集中 spawn。本测试防止预热被无意加回。
+    """
+
+    def test_do_deferred_registers_but_never_preheats_lsp(self, deferred_spied):
+        svc, fired = deferred_spied
+        svc._defer_non_critical_plugin_init(MagicMock())
+
+        assert fired, "非关键初始化延迟回调未注册"
+        _, callback = fired[0]
+        callback()
+
+        # fixture patch 的 get_lsp_manager 返回同一 MagicMock，直接取回校验：
+        # 注册仍发生，预热不发生
+        import app.core.lsp.lsp_manager as lm
+
+        lsp_mgr = lm.get_lsp_manager()
+        assert lsp_mgr.initialize.called, "启动延迟链应注册 LSP 服务器"
+        lsp_mgr.start_all_background.assert_not_called()
+
+
 class TestInitMcpConnectionsSemantics:
     """_init_mcp_connections 真实守卫语义（调用链 spy 之外的内在正确性）"""
 

@@ -18,6 +18,7 @@ MessageCard - 消息卡片组件
 
 import base64
 import concurrent.futures
+import contextlib
 import hashlib
 import math
 import os
@@ -199,6 +200,15 @@ _CODE_BLOCK_WITH_LANG_PATTERN = re.compile(r"<pre><code(?:\s+class=\"([^\"]*)\")
 _CONTEXT_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((jump|create|generate|view|session)(?:\|([^)]*))?\)")
 # 追问新格式：<ask>内容</ask>，直接生成胶囊（空内容丢弃整段标签，避免 [](ask) 残留）
 _ASK_TAG_PATTERN = re.compile(r"<ask>(.*?)</ask>", re.DOTALL)
+# 追问收拢：摘除正文里的 ask 标签（连带行内多余空白），改由末尾区块统一渲染
+_ASK_STRIP_PATTERN = re.compile(r"[ \t]*<ask>.*?</ask>[ \t]*", re.DOTALL)
+# 摘除后可能残留的空列表项（"-" 后无内容）
+_ASK_EMPTY_BULLET_PATTERN = re.compile(r"^[ \t]*[-*+][ \t]*$", re.MULTILINE)
+# 追问区块最多展示条数（模型通常给 1~3 条，超量截断避免卡片尾部过长）
+_ASK_MAX_ITEMS = 4
+# 追问模板占位词：stop 追问预测 hook 的提示词里出现过「<ask>原话</ask>」这类示例，
+# 模型偶尔照抄字面输出成一个假追问项。渲染阶段兜底丢弃，历史消息同样受益。
+_ASK_PLACEHOLDER_TEXTS = frozenset({"原话", "追问", "问题", "xxx", "某问题"})
 _CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
@@ -329,6 +339,30 @@ WHEEL_STUCK_LIMIT = 4
 # 两次滚轮间隔小于该值时不计入 stuck（Chromium 滚动与 reportHeight 上报均有
 # 帧级延迟，密集滚动期间 scrollTop 未刷新属正常，不得误判为卡死）。
 WHEEL_STUCK_MIN_INTERVAL = 0.1
+
+# ======== 结束态卡片高度过渡（默认开，出问题可一键关）========
+# 背景：流式结束时卡片高度会从"坞态限高"收敛到自然高度（常是数百 px 的突变），
+# 原来 _update_height 对大 delta 直接 snap（noContainerAnimation），外层滚动区
+# 跟着瞬移 —— 页面内的位移已被 FLIP 补间，唯独 Qt 侧这一跳没动画。
+# 这里在"结束态窗口"内改用既有的 _height_anim 做 200ms 缓动。
+# 关闭方式：环境变量 DRIFOX_FINISH_HEIGHT_ANIM=0，或运行时
+# set_finish_height_anim_enabled(False)。
+FINISH_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_FINISH_HEIGHT_ANIM", "1") != "0"
+FINISH_HEIGHT_ANIM_MS = 200  # 与 JS 侧 FLIP 时长（220ms）接近，观感一致
+FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪声抖动）
+FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
+FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
+
+
+# 结束态耗时打点（默认关）：环境变量 DRIFOX_FINISH_TIMING=1 打开，
+# 用于在真机定位"结束这一拍"到底卡在 render / json.dumps / 哪一段。
+FINISH_TIMING_ENABLED = os.environ.get("DRIFOX_FINISH_TIMING", "0") == "1"
+
+
+def set_finish_height_anim_enabled(enabled: bool) -> None:
+    """运行时开关结束态高度动画（灰度/回滚用）。"""
+    global FINISH_HEIGHT_ANIM_ENABLED
+    FINISH_HEIGHT_ANIM_ENABLED = bool(enabled)
 
 
 # 编辑类工具/子智能体/提问类工具：无论简洁模式与否，这些工具的结果始终展示在正文中
@@ -777,9 +811,10 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
                 lang_token = stripped[3:].strip()
                 # html 同样需要骨架：半截 HTML 透传会因标签未闭合破坏页面结构。
                 # 插件注册的 fence 也要改标（否则半截源码会被当成品渲染）。
-                if lang_token.lower() in ("mermaid", "echarts", "html", "widget") or _get_plugin_fence_renderer(
-                    lang_token.lower()
-                ) is not None:
+                if (
+                    lang_token.lower() in ("mermaid", "echarts", "html", "widget")
+                    or _get_plugin_fence_renderer(lang_token.lower()) is not None
+                ):
                     lines[i] = lines[i].replace(lang_token, f"{lang_token}-streaming", 1)
                     md_text = "\n".join(lines)
                 break
@@ -813,11 +848,7 @@ def _protect_inline_svg_blocks(md_text: str) -> str:
         if not in_svg:
             if stripped.startswith("```"):
                 in_fence = not in_fence
-            if (
-                not in_fence
-                and stripped[:4].lower() == "<svg"
-                and "</svg>" not in stripped.lower()
-            ):
+            if not in_fence and stripped[:4].lower() == "<svg" and "</svg>" not in stripped.lower():
                 in_svg = True
                 buf = [line]
                 continue
@@ -1525,13 +1556,19 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
-        <span class="tool-streaming-preview" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_display}
         </span>
     </div>"""
 
 
-def _render_think_block(content: str, completed: bool = True, compact: bool = False) -> str:
+def _render_think_block(content: str, completed: bool = True, compact: bool = False, flip_idx: int = -1) -> str:
+    # 🆕 FLIP 稳定键：流式态（.think-streaming）与完成态（.think-compact/.think-block）
+    # 用的是不同 DOM 结构与不同 block-key（后者按内容哈希），导致结束态重排时
+    # FLIP 无法配对 → 思考块"瞬移到顶部"没有动画。
+    # 这里额外打一个**按消息内出现顺序**的位置键 data-flip-key，两种形态共用，
+    # FLIP 即可把"第 N 个思考块"的位移补间成平滑动画。
+    _flip_attr = f' data-flip-key="think-{flip_idx}"' if flip_idx >= 0 else ""
     if completed:
         # ── 完成态 ──
         tag = _classify_think_tag(content)
@@ -1545,8 +1582,12 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         if compact:
             block_seed = f"{content}|1"
             block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
-            preview_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
-            return f"""<div class="think-compact" data-block-key="{block_key}" style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
+            preview_right = (
+                f'<span data-dfx-preview data-dfx-key="{block_key}" data-dfx-text="{escape(preview)}" '
+                f'style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
+                f"{escape(preview)}</span>"
+            )
+            return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
     <span style="white-space: nowrap; flex-shrink: 0;">{status_text}</span>
     {preview_right}
 </div>"""
@@ -1555,9 +1596,13 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         content_escaped = escape(_strip_code_blocks(content))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
-        summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        summary_right = (
+            f'<span data-dfx-preview data-dfx-key="{block_key}" data-dfx-text="{escape(preview)}" '
+            f'style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f"{escape(preview)}</span>"
+        )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
-        return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}" data-expanded="false" style="margin: 4px 0;">
+        return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}"{_flip_attr} data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
         <span style="white-space: nowrap;">{status_text}</span>
         {summary_right}
@@ -1573,7 +1618,7 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
     # 在消息正文中显得过粗过大。
     font_style_inline = f"{get_font_family_css()} font-size: {scale_font_size(13)}px;"
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
-    return f"""<div class="think-streaming" data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
+    return f"""<div class="think-streaming"{_flip_attr} data-streaming="true" style="margin: 4px 0; padding: 6px 10px; border: none; border-radius: 6px;">
     <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); {font_style_inline}">
         {spinner_html}
         <span>深度思考中...</span>
@@ -1597,7 +1642,11 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         content_escaped = escape(content)
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
-        summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        summary_right = (
+            f'<span data-dfx-preview data-dfx-key="think-light" data-dfx-text="{escape(preview)}" '
+            f'style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f"{escape(preview)}</span>"
+        )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
@@ -1670,6 +1719,9 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
     """
     parts = []
     i = 0
+    # 消息内思考块序号：作为 FLIP 位置键（data-flip-key），流式态与完成态共用，
+    # 结束态重排时 FLIP 才能把"第 N 个思考块"的位移补间成动画。
+    think_ordinal = 0
     while i < len(md_text):
         start_idx = md_text.find("<think>", i)
         if start_idx == -1:
@@ -1691,14 +1743,16 @@ def _inject_think_cards(md_text: str, completed: bool = True, compact: bool = Fa
         if end_idx != -1:
             content = md_text[think_start:end_idx]
             if content.strip():
-                parts.append(_render_think_block(content, completed=True, compact=compact))
+                parts.append(_render_think_block(content, completed=True, compact=compact, flip_idx=think_ordinal))
+                think_ordinal += 1
             # 空思考块跳过渲染，避免页面末尾遗留空折叠框
             i = end_idx + len("</think>")
         else:
             # 未闭合：内容截取到边界处，避免吞掉后续 <think>
             content = md_text[think_start:search_end]
             if content.strip():
-                parts.append(_render_think_block(content, completed=False))
+                parts.append(_render_think_block(content, completed=False, flip_idx=think_ordinal))
+                think_ordinal += 1
             # 空且未闭合也跳过
             i = search_end
     return "".join(parts)
@@ -1774,8 +1828,13 @@ def _inject_tag_cards(md_text: str, completed: bool = True, compact: bool = Fals
     return result
 
 
+# 历史渲染"重负载字段"每块上限 (result, diff, echarts)。
+# 2026-09-09 内存治理：大会话卡 HTML 达 120~473KB，大头是工具块 diff/echarts。
+_HISTORY_TOOL_CAPS = (800, 3000, 8000)
+
+
 @lru_cache(maxsize=128)
-def _render_tool_block_content(content: str, compact: bool = False) -> str:
+def _render_tool_block_content(content: str, compact: bool = False, heavy_caps=None) -> str:
     """
     渲染工具块内容为HTML。
 
@@ -1980,6 +2039,15 @@ def _render_tool_block_content(content: str, compact: bool = False) -> str:
     for key in args_dict:
         if isinstance(args_dict[key], str):
             args_dict[key] = args_dict[key].replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+    # ── 历史渲染重负载治理（heavy_caps 仅历史卡传入）──
+    if heavy_caps:
+        _r_cap, _d_cap, _e_cap = heavy_caps
+        if _r_cap and len(tool_result) > _r_cap:
+            tool_result = tool_result[:_r_cap] + " …[结果过长，已省略 " + str(len(tool_result) - _r_cap) + " 字符]"
+        if _d_cap and len(diff_content) > _d_cap:
+            diff_content = diff_content[:_d_cap] + " …[diff 过长，已省略 " + str(len(diff_content) - _d_cap) + " 字符]"
+        if _e_cap and len(echarts_content) > _e_cap:
+            echarts_content = ""
     return render_tool_block(
         tool_name,
         args_dict,
@@ -2217,7 +2285,7 @@ def _extract_by_regex_fallback(content: str) -> dict:
     return args
 
 
-def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = False) -> str:
+def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = False, heavy_caps=None) -> str:
     """注入工具块HTML，类似think块"""
     if not md_text:
         return md_text
@@ -2236,7 +2304,7 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
         end_idx = md_text.find("</tool>", start_idx + len("<tool>"))
         if end_idx != -1:
             content = md_text[start_idx + len("<tool>") : end_idx]
-            parts.append(_render_tool_block_content(content, compact=compact))
+            parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
             i = end_idx + len("</tool>")
         else:
             # 🐛 修复（工具源码泄漏）：未闭合块此前原样保留 → md.convert 把
@@ -2259,7 +2327,7 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
                 content = content[:_next_open]
             if completed:
                 if content.strip():
-                    parts.append(_render_tool_block_content(content, compact=compact))
+                    parts.append(_render_tool_block_content(content, compact=compact, heavy_caps=heavy_caps))
             elif content.strip():
                 _name_m = _TOOL_NAME_PATTERN.search(content)
                 parts.append(
@@ -2271,7 +2339,7 @@ def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = Fa
                     )
                 )
             if _rest:
-                parts.append(_inject_tool_blocks(_rest, completed, compact))
+                parts.append(_inject_tool_blocks(_rest, completed, compact, heavy_caps))
             break
     return "".join(parts)
 
@@ -2479,7 +2547,7 @@ _LRU_CACHE_SIZE_THRESHOLD = 200 * 1024  # 200KB
 @lru_cache(
     maxsize=16
 )  # 256→64→16：>200KB 大文本已走 __wrapped__ 绕过缓存；实际唯一渲染内容通常 < 16 条，16 与 64 命中率差异 <5%，内存占用 -75%
-def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> str:
+def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False, heavy_caps=None) -> str:
     """
     Markdown 转 HTML 的核心渲染函数（带 LRU 缓存）。
     """
@@ -2491,7 +2559,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
     # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
     _fences, safe_md = _extract_fenced_code(safe_md)
     processed_md = _inject_think_cards(safe_md, True, compact=compact)
-    processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
+    processed_md = _inject_tool_blocks(processed_md, True, compact=compact, heavy_caps=heavy_caps)
     processed_md = _inject_hook_blocks(processed_md, True)
     processed_md = _inject_tag_cards(processed_md, True, compact=compact)
     processed_md = _restore_fenced_code(processed_md, _fences)
@@ -2506,7 +2574,7 @@ def _render_markdown_to_html_cached_impl(raw_md: str, compact: bool = False) -> 
         return f"<pre>{escape(raw_md)}</pre>"
 
 
-def _render_markdown_to_html_cached(raw_md: str, compact: bool = False) -> str:
+def _render_markdown_to_html_cached(raw_md: str, compact: bool = False, heavy_caps=None) -> str:
     """
     带内存保护的 Markdown 渲染函数。
     - 对于超过阈值的文本，跳过缓存直接渲染
@@ -2519,9 +2587,9 @@ def _render_markdown_to_html_cached(raw_md: str, compact: bool = False) -> str:
     # 大文本跳过缓存，防止内存膨胀 — 用 __wrapped__ 绕过 LRU，不清空缓存
     text_size = len(raw_md.encode("utf-8"))
     if text_size > _LRU_CACHE_SIZE_THRESHOLD:
-        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, compact=compact)
+        return _render_markdown_to_html_cached_impl.__wrapped__(raw_md, compact=compact, heavy_caps=heavy_caps)
 
-    return _render_markdown_to_html_cached_impl(raw_md, compact=compact)
+    return _render_markdown_to_html_cached_impl(raw_md, compact=compact, heavy_caps=heavy_caps)
 
 
 # ============================================================
@@ -2587,6 +2655,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
     streaming = snapshot["streaming"]
     compact = snapshot["compact"]
     icon_prefix = snapshot["icon_prefix"]
+    heavy_caps = snapshot.get("heavy_caps")  # 历史卡重负载上限（None=不限）
 
     if not streaming:
         # 非流式分支（历史加载 / 流式结束调用方已切非流式）
@@ -2597,7 +2666,7 @@ def _render_markdown_to_html_worker(snapshot: dict) -> str:
         # fence 内容保护：代码块内协议标签不被 inject 抽出渲染成假卡片
         _fences, safe_md = _extract_fenced_code(safe_md)
         processed_md = _inject_think_cards(safe_md, True, compact=compact)
-        processed_md = _inject_tool_blocks(processed_md, True, compact=compact)
+        processed_md = _inject_tool_blocks(processed_md, True, compact=compact, heavy_caps=heavy_caps)
         processed_md = _inject_hook_blocks(processed_md, True)
         processed_md = _inject_tag_cards(processed_md, True, compact=compact)
         processed_md = _restore_fenced_code(processed_md, _fences)
@@ -2725,7 +2794,11 @@ _SKELETON_CACHE_MAX = 48
 # 监听）；② SVG 图形节点可挂 .context-tag 走同一条点击链（_closestTag）。
 # 旧骨架两样都没有 —— widget 围栏退化成普通代码块、图节点点不动 ——
 # 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 26
+# v27（2026-09-08）：① 打字机揭示队列（_TYPEWRITER_JS：window._twPush/_twReset/
+# _twFlush + rAF 帧级揭示）；② FLIP 位移动画与动画串行队列（_FLIP_JS：
+# _flipCapture/_flipPlay/_animEnqueue）。旧骨架两者都没有 —— 流式仍是整块蹦字、
+# 结束态三动画叠加跳变 —— 必须靠版本号让旧缓存失效。
+_SKELETON_CACHE_VERSION = 28
 
 
 def _js_literal(value) -> str:
@@ -2761,8 +2834,7 @@ _WIDGET_CSP = (
 )
 _WIDGET_CSP_JS = '"' + _WIDGET_CSP + '"'
 _WIDGET_BASE_CSS = (
-    "html,body{margin:0;padding:0;background:transparent;color:var(--text);font-size:13px;}"
-    "*{box-sizing:border-box;}"
+    "html,body{margin:0;padding:0;background:transparent;color:var(--text);font-size:13px;}*{box-sizing:border-box;}"
 )
 _WIDGET_BASE_CSS_JS = '"' + _WIDGET_BASE_CSS + '"'
 
@@ -2855,6 +2927,50 @@ def _has_unclosed_think_or_tool(md: str) -> bool:
     if not md:
         return False
     return md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>")
+
+
+def _last_unpaired_open_pos(md: str, open_tag: str, close_tag: str) -> int:
+    """返回最后一个**未闭合**开标签的起始偏移（无未闭合块 → -1）。"""
+    depth = 0
+    first_open = -1
+    i = 0
+    n = len(md)
+    o_len, c_len = len(open_tag), len(close_tag)
+    while i < n:
+        if md.startswith(open_tag, i):
+            if depth == 0:
+                first_open = i
+            depth += 1
+            i += o_len
+            continue
+        if md.startswith(close_tag, i):
+            if depth > 0:
+                depth -= 1
+            i += c_len
+            continue
+        i += 1
+    return first_open if depth > 0 else -1
+
+
+def _tail_before_unclosed_block(md: str) -> str:
+    """截取 md 中第一个**未闭合** `<think>` / `<tool>` 块之前的部分。
+
+    差量渲染的 tail（未闭合尾部）含未闭合协议块时会被静默丢弃（防思考内容泄漏
+    到正文、防半截 `<tool>` 被渲染成假卡片）。但 JS `updateContentAppend` 会
+    无条件 remove 全部 `[data-incremental]` 节点——若 tail 整段不重建，未闭合块
+    **之前**已经显示出来的正文会跟着一起消失，且此后无人补回（用户可见
+    “流式输出吞内容”）。
+
+    因此丢弃只应发生在未闭合块起点**之后**：之前的正文照常行内渲染。
+    """
+    if not md or not _has_unclosed_think_or_tool(md):
+        return md
+    cut = len(md)
+    for open_tag, close_tag in (("<think>", "</think>"), ("<tool>", "</tool>")):
+        pos = _last_unpaired_open_pos(md, open_tag, close_tag)
+        if pos != -1:
+            cut = min(cut, pos)
+    return md[:cut] if cut != len(md) else md
 
 
 # ===== 句号类标点（软边界触发器）=====
@@ -3116,6 +3232,10 @@ _STREAMING_DOCK_JS = """
                     // 切换前记录工具区高度与用户是否在底部，用于阅读位置补偿
                     var _dockH = ts ? ts.offsetHeight : 0;
                     var _atBottom = Math.abs(document.body.scrollHeight - document.body.scrollTop - document.body.clientHeight) < 40;
+                    // FLIP：工具区在「沉底 ↔ 顶部」之间换位（CSS order 调换）是瞬移，
+                    // 记录切换前位置，切换后补间成平滑位移。
+                    if (typeof window._flipArm === 'function') window._flipArm(1200);
+                    var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                     document.body.classList.toggle('streaming-dock', on);
                     if (!on && wasOn) {
                         // 坞态 → 归位顶部：正文整体下移 ≈ 工具区高度，
@@ -3151,7 +3271,321 @@ _STREAMING_DOCK_JS = """
                     } else if (typeof reportHeightDebounced === 'function') {
                         reportHeightDebounced();
                     }
+                    // FLIP Play（入队串行：不会与后续重排/折叠动画同时开跑）
+                    if (_flipPrev && typeof window._flipPlay === 'function') window._flipPlay(_flipPrev, 220);
                 }
+"""
+
+# ── 复用前的内容清理（保留骨架）──
+# 归还 WebViewPool 时执行：只清空内容容器与易失状态，**不重建文档**。
+# 与 setHtml("") 相比省掉一次文档重建 + 骨架 JS 重新执行（setInterval /
+# ResizeObserver / 事件监听全套重注册），加载大会话时批次反复卸载重建的
+# 内存与 CPU 成本显著下降。
+_RESET_CONTENT_FOR_REUSE_JS = """
+                (function () {
+                    var c = document.getElementById('content-placeholder');
+                    if (c) { c.innerHTML = ''; c.removeAttribute('data-pending-break'); c.scrollTop = 0; }
+                    var t = document.getElementById('tool-content');
+                    if (t) { t.innerHTML = ''; t.scrollTop = 0; }
+                    var td = document.getElementById('todo-content');
+                    if (td) { td.innerHTML = ''; td.scrollTop = 0; }
+                    var ts = document.getElementById('tool-section');
+                    if (ts) { ts.removeAttribute('data-collapsed'); ts.style.display = ''; }
+                    // 坞态/滚动跟随等易失标志复位（避免沿用上一张卡片的阅读状态）
+                    document.body.classList.remove('streaming-dock');
+                    document.body.scrollTop = 0;
+                    window._userScrolledWithin = false;
+                    window._userScrolledUp = false;
+                    window._suppressScrollEvent = false;
+                    window._streamingActive = false;
+                    // 图表：vault 里的节点已随 innerHTML 清空，逐个 dispose 防孤儿实例
+                    if (window.__chartVault && window.__chartVault.size) {
+                        window.__chartVault.forEach(function (el) {
+                            if (typeof window._disposeChartNode === 'function') window._disposeChartNode(el);
+                        });
+                        window.__chartVault.clear();
+                    }
+                    // 打字机缓冲（页面仍存活，若上一张卡有未揭示文本必须丢弃）
+                    if (typeof window._twReset === 'function') window._twReset();
+                })();
+"""
+
+# ── 打字机揭示队列（Typewriter Reveal Queue）骨架资产 ──
+# 为什么需要它：
+# 流式正文的到达节奏由**网络 chunk**决定（上游 80ms 批处理 + 令牌生成抖动，
+# 中文长段落常无 \n\n 闭合段 → 安全定时器兜底 150~500ms 才渲染一次），
+# 每次到达就把整块文本一次性塞进 DOM → 观感是"一块一块蹦出来"，没有打字机感。
+# 队列把"到达节奏"与"显示节奏"解耦：Python 只管把文本 push 进来，
+# JS 用 requestAnimationFrame 按帧揭示（~60fps），积压时用指数追赶收敛
+# （CATCHUP_MS 内排空），既不拖慢最终显示，也不因突发 chunk 越拉越长。
+#
+# 与既有渲染路径的关系：
+# - 揭示内容同样走 window._dfxAppendStreamText（与旧逻辑同一套段落/host 判定）；
+# - updateContent / updateTailHtml / updateContentAppend 会**整体替换**增量节点，
+#   且 Python 侧 markdown 已包含全部文本（含未揭示部分），故入口调用 _twReset()
+#   丢弃缓冲即可，不会丢字。
+_TYPEWRITER_JS = """
+                // ===== 打字机揭示队列 =====
+                window._tw = {
+                    buf: "",          // 待揭示文本
+                    raf: 0,           // rAF 句柄（0 = 未运行）
+                    last: 0,          // 上一帧时间戳
+                    enabled: true,    // 总开关（灰度/降级用）
+                    CATCHUP_MS: 110,  // 目标追赶窗口：积压在此时间内排空
+                    BURST_LEN: 400    // 超过该积压视为突发，加速揭示
+                };
+                window._twPush = function (text) {
+                    var st = window._tw;
+                    if (!st || !st.enabled || !text) return;
+                    // 骨架尚未注册追加函数（理论上不会发生）：退化为直接调用
+                    if (typeof window._dfxAppendStreamText !== 'function') return;
+                    st.buf += text;
+                    if (!st.raf) {
+                        st.last = performance.now();
+                        st.raf = requestAnimationFrame(window._twStep);
+                    }
+                };
+                window._twStep = function (ts) {
+                    var st = window._tw;
+                    if (!st) return;
+                    st.raf = 0;
+                    if (!st.buf) return;
+                    var now = (typeof ts === 'number' && ts > 0) ? ts : performance.now();
+                    var dt = Math.max(1, Math.min(200, now - st.last));
+                    st.last = now;
+                    // 每帧揭示量：按"剩余缓冲在 CATCHUP_MS 内排空"做指数追赶（最少 1 字）
+                    var n = Math.max(1, Math.ceil(st.buf.length * (dt / st.CATCHUP_MS)));
+                    // 突发积压（网络一次送来一大段）：提高下限，避免越拖越长
+                    if (st.buf.length > st.BURST_LEN) {
+                        n = Math.max(n, Math.ceil(st.buf.length / 8));
+                    }
+                    var slice = st.buf.slice(0, n);
+                    st.buf = st.buf.slice(n);
+                    // [PERF] 高度上报节流：揭示是每帧进行，但高度上报会触发
+                    // reportHeight → Python setFixedHeight → Chromium 视口变化 →
+                    // 重排的回环。按帧上报会让回环频率翻数倍（流式卡顿来源），
+                    // 这里限制到 ≥80ms 一次——与旧"按 chunk 上报"的节奏一致。
+                    var _skipReport = (now - (st.reportedAt || 0)) < 80;
+                    if (!_skipReport) st.reportedAt = now;
+                    try {
+                        window._dfxAppendStreamText(slice, _skipReport);
+                    } catch (e) {}
+                    if (st.buf) {
+                        st.raf = requestAnimationFrame(window._twStep);
+                    }
+                };
+                window._twFlush = function () {
+                    // 立即揭示全部（需要"当前文本必须已在 DOM"的场景）
+                    var st = window._tw;
+                    if (!st) return;
+                    if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
+                    if (st.buf) {
+                        var all = st.buf;
+                        st.buf = "";
+                        try { window._dfxAppendStreamText(all); } catch (e) {}
+                    }
+                };
+                window._twReset = function () {
+                    // DOM 已被整体替换：丢弃缓冲（Python 侧 markdown 已含全部文本，
+                    // 新渲染结果自带这些文字，保留反而会重复）
+                    var st = window._tw;
+                    if (!st) return;
+                    if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
+                    st.buf = "";
+                };
+"""
+
+# ── 预览文字打字机（Preview Typewriter）骨架资产 ──
+# 背景：思考/工具预览文字是「静默累积 → 一次性全量渲染」落地的（append_reasoning 的
+# 既定设计，避免每 chunk 全量重排导致 think-streaming DOM 反复销毁重建），因此它
+# 出现在 DOM 的那一刻是整段瞬间出现，观感生硬。这里让**预览行**逐字显现：
+#   - 首次落地：从空打到完整预览文本
+#   - 后续更新：从"已显示文本"续打到新文本，只补增量，不重放已显示部分
+# 只作用于带 [data-dfx-preview] 的短文本预览行（单行、nowrap、高度恒定），
+# 不动正文/思考正文——长文本逐字成本高且与 _tw 揭示队列职责重叠。
+# 全文存 data-dfx-text 属性（HTML 已转义），JS 只写首个文本节点，
+# 子元素（如工具的"(N字符)"计数 span）不受影响。
+_PREVIEW_TYPEWRITER_JS = """
+                // ===== 预览文字打字机 =====
+                window._pt = {
+                    shown: Object.create(null),  // key -> 已显现文本
+                    node: Object.create(null),   // key -> 当前正在写的文本节点
+                    raf: Object.create(null),    // key -> rAF 句柄（0 = 空闲）
+                    enabled: true,
+                    TOTAL_MS: 240,   // 单次要补的字符数在此时间内补齐
+                    MAX_CHARS: 120   // 超过该长度直接全显（长预览不逐字）
+                };
+                window._ptType = function (el, key, full) {
+                    var st = window._pt;
+                    if (!st || !st.enabled || !el) return;
+                    if (st.shown[key] === full) return;
+                    var node = el.firstChild;
+                    if (!node || node.nodeType !== 3) {
+                        // 没有可直接写的文本节点（理论上预览行必有）：
+                        // 退化直接显示，不影响可见性
+                        st.shown[key] = full;
+                        return;
+                    }
+                    // 打字中被全量重渲染打断（流式每 150~500ms 就会 innerHTML 重建一次，
+                    // 且 updateContent 内部 reorganizeContent 之后还会再播一次）：
+                    // 新节点携带完整文本，若从头重打会"全显→清空→再补"闪一下。
+                    // 这里只把写指针切到新节点的首个文本节点，动画按原进度续跑。
+                    if (st.raf[key]) {
+                        if (st.node[key] !== node) st.node[key] = node;
+                        return;
+                    }
+                    var shown = st.shown[key] || "";
+                    // 非前缀延续（预览被整体替换/回退）→ 从头重打
+                    if (full.indexOf(shown) !== 0) shown = "";
+                    var delta = full.length - shown.length;
+                    if (delta > st.MAX_CHARS) {
+                        node.nodeValue = full;
+                        st.shown[key] = full;
+                        return;
+                    }
+                    node.nodeValue = shown;
+                    var step = Math.max(1, Math.ceil(delta / (st.TOTAL_MS / 16)));
+                    var pos = shown.length;
+                    st.node[key] = node;
+                    var tick = function () {
+                        pos = Math.min(full.length, pos + step);
+                        var n = st.node[key];
+                        if (n && n.nodeType === 3) n.nodeValue = full.slice(0, pos);
+                        if (pos < full.length) {
+                            st.raf[key] = requestAnimationFrame(tick);
+                        } else {
+                            st.raf[key] = 0;
+                            st.node[key] = null;
+                            st.shown[key] = full;
+                        }
+                    };
+                    st.raf[key] = requestAnimationFrame(tick);
+                };
+                window._ptPlay = function (root) {
+                    var st = window._pt;
+                    if (!st || !st.enabled) return;
+                    var els = (root || document).querySelectorAll('[data-dfx-preview]');
+                    for (var i = 0; i < els.length; i++) {
+                        var el = els[i];
+                        var full = el.getAttribute('data-dfx-text');
+                        if (full === null) continue;
+                        window._ptType(el, el.getAttribute('data-dfx-key') || ('pt' + i), full);
+                    }
+                };
+"""
+
+# ── FLIP 位移动画 + 动画串行队列骨架资产 ──
+# 解决"流式结束时工具与思考弹到最顶上"：
+# 简洁模式下流式期间工具区沉底（body.streaming-dock 纯 CSS order 调换），
+# 结束时归位顶部 + 最终全量重排（innerHTML 整体替换）+ 自动折叠三个动作叠加，
+# 每个都带 200ms 过渡 → 视觉上是一次生硬跳变 + 三动画互相抢帧的卡顿。
+#
+# 对策：
+# 1) FLIP（First-Last-Invert-Play）：动作前记录关键容器/块的视口位置，
+#    动作后把它们 transform 反向补偿回旧位置，再动画归零 → 位置变化被
+#    "补间"成平滑位移，而不是瞬移。
+# 2) 动画串行队列 _animEnqueue：归位 / 重排 / 折叠不再同时开跑，
+#    按入队顺序一条一条放，避免三段 200ms 过渡叠加造成的掉帧与位置抖动。
+_FLIP_JS = """
+                // ===== 动画串行队列（结束态三段动画不叠加）=====
+                window._animQ = { items: [], running: false };
+                window._animEnqueue = function (fn, dur) {
+                    var q = window._animQ;
+                    if (!q) return;
+                    q.items.push({ fn: fn, dur: dur || 0 });
+                    if (!q.running) window._animNext();
+                };
+                window._animNext = function () {
+                    var q = window._animQ;
+                    if (!q) return;
+                    var it = q.items.shift();
+                    if (!it) { q.running = false; return; }
+                    q.running = true;
+                    try { it.fn(); } catch (e) {}
+                    if (it.dur > 0) {
+                        setTimeout(window._animNext, it.dur);
+                    } else {
+                        window._animNext();
+                    }
+                };
+
+                // ===== FLIP：位置突变 → 平滑位移 =====
+                window._flipFind = function (key) {
+                    if (!key) return null;
+                    if (key.charAt(0) === '#') return document.getElementById(key.slice(1));
+                    var kind = key.slice(0, 3);
+                    var val = key.slice(3);
+                    if (kind === 'tc:') return document.querySelector('[data-tool-call-id="' + val + '"]');
+                    if (kind === 'bk:') return document.querySelector('[data-block-key="' + val + '"]');
+                    if (kind === 'fk:') return document.querySelector('[data-flip-key="' + val + '"]');
+                    return null;
+                };
+                // ⚡ 性能：capture 会强制同步布局（getBoundingClientRect），
+                // 流式期间每次全量渲染都做一遍代价过高。只有在"即将发生位置突变"
+                // 时（坞态归位 / 流式结束的最终重排）由调用方 arm 一个短窗口，
+                // 窗口内才真正采集；其余渲染 capture 直接返回 null（零开销）。
+                window._flipArm = function (ms) {
+                    window._flipArmedUntil = performance.now() + (ms || 1200);
+                };
+                window._flipCapture = function () {
+                    if (!(window._flipArmedUntil > performance.now())) return null;
+                    var map = new Map();
+                    ['tool-section', 'content-placeholder', 'todo-section'].forEach(function (id) {
+                        var el = document.getElementById(id);
+                        if (el) map.set('#' + id, el.getBoundingClientRect());
+                    });
+                    document.querySelectorAll('[data-tool-call-id]').forEach(function (el) {
+                        var id = el.getAttribute('data-tool-call-id');
+                        if (id) map.set('tc:' + id, el.getBoundingClientRect());
+                    });
+                    document.querySelectorAll('[data-block-key]').forEach(function (el) {
+                        var k = el.getAttribute('data-block-key');
+                        if (k) map.set('bk:' + k, el.getBoundingClientRect());
+                    });
+                    // 思考块：流式态（.think-streaming）与完成态（.think-compact/
+                    // .think-block）DOM 结构不同、block-key 也不同（内容哈希），
+                    // 只有位置键 data-flip-key 能跨形态配对。
+                    document.querySelectorAll('[data-flip-key]').forEach(function (el) {
+                        var k = el.getAttribute('data-flip-key');
+                        if (k) map.set('fk:' + k, el.getBoundingClientRect());
+                    });
+                    return map;
+                };
+                window._flipPlay = function (prev, dur) {
+                    if (!prev || !prev.size || typeof window._animEnqueue !== 'function') return;
+                    dur = dur || 200;
+                    var moves = [];
+                    prev.forEach(function (rect, key) {
+                        var el = window._flipFind(key);
+                        if (!el || !el.isConnected) return;
+                        var r2 = el.getBoundingClientRect();
+                        var dx = rect.left - r2.left;
+                        var dy = rect.top - r2.top;
+                        // 位移过小（亚像素/重排噪声）不做动画，避免无谓的 transform 抖动
+                        if (Math.abs(dx) < 2 && Math.abs(dy) < 2) return;
+                        moves.push({ el: el, dx: dx, dy: dy });
+                    });
+                    if (!moves.length) return;
+                    window._animEnqueue(function () {
+                        // Invert：先无过渡地搬回旧位置
+                        moves.forEach(function (m) {
+                            m.el.style.transition = 'none';
+                            m.el.style.transform = 'translate(' + m.dx + 'px,' + m.dy + 'px)';
+                        });
+                        void document.body.offsetHeight;  // 强制同步样式，让跳变立即生效
+                        // Play：过渡到 0（回到真实新位置）
+                        moves.forEach(function (m) {
+                            m.el.style.transition = 'transform ' + dur + 'ms cubic-bezier(0.22, 0.61, 0.36, 1)';
+                            m.el.style.transform = '';
+                        });
+                        setTimeout(function () {
+                            moves.forEach(function (m) {
+                                m.el.style.transition = '';
+                                m.el.style.transform = '';
+                            });
+                        }, dur + 40);
+                    }, dur + 30);
+                };
 """
 
 # 正文容器（#content-placeholder）自动滚底 + 用户滚动跟踪。
@@ -3263,26 +3697,81 @@ def get_random_greeting() -> str:
     return random.choice(WELCOME_GREETINGS)
 
 
+def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
+    """摘出正文里所有 <ask> 内容并移除标签，返回（去 ask 后的文本, 去重后的追问列表）。
+
+    追问由模型分散输出（多数在末尾，也可能夹在段落中）。渲染时全部摘除、按内容
+    去重（保序、忽略空白差异），交给 _build_ask_suggest_block 在文末集中渲染。
+    strip 后空内容（如 <ask></ask>、<ask>   </ask>）直接丢弃。
+    """
+    # 代码块内的 <ask> 不算追问（fence 内容要原样展示），先圈出 fence 区间跳过
+    fences = [(m.start(), m.end()) for m in _CODE_BLOCK_PATTERN.finditer(md_text)]
+
+    def _in_fence(pos: int) -> bool:
+        return any(s <= pos < e for s, e in fences)
+
+    items: list[str] = []
+    seen: set[str] = set()
+    found = False
+    for m in _ASK_TAG_PATTERN.finditer(md_text):
+        if _in_fence(m.start()):
+            continue
+        found = True
+        content = m.group(1).strip()
+        if not content:
+            continue
+        key = _MULTIPLE_SPACES_PATTERN.sub(" ", content)
+        # 占位词（模型照抄提示词模板）不是真追问
+        if key.lower() in _ASK_PLACEHOLDER_TEXTS or key.strip("？?。. ") in _ASK_PLACEHOLDER_TEXTS:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(content)
+    # 一个 ask 标签都没有 → 原文返回；有标签但内容全空 → 仍要摘除，避免字面残留
+    if not found:
+        return md_text, []
+
+    source = md_text
+
+    def _strip(m: re.Match) -> str:
+        if _in_fence(m.start()):
+            return m.group(0)
+        before = source[m.start() - 1] if m.start() > 0 else ""
+        after = source[m.end()] if m.end() < len(source) else ""
+        # 标签夹在文字中间时留一个空格，避免两个词被直接粘连
+        return " " if before.strip() and after.strip() else ""
+
+    md_text = _ASK_STRIP_PATTERN.sub(_strip, md_text)
+    md_text = _ASK_EMPTY_BULLET_PATTERN.sub("", md_text)
+    md_text = re.sub(r"\n{3,}", "\n\n", md_text)
+    return md_text, items[:_ASK_MAX_ITEMS]
+
+
+def _build_ask_suggest_block(items: list[str]) -> str:
+    """把去重后的追问渲染成文末「你可以继续问」区块（点击仍走 context-tag 链路）。"""
+    chips = "".join(
+        f'<span class="context-tag" data-type="ask" data-content="{escape(it)}" data-action="ask">{escape(it)}</span>'
+        for it in items
+    )
+    return (
+        '<div class="ask-suggest">'
+        '<div class="ask-suggest-title"><span class="ask-suggest-dot"></span>你可以继续问</div>'
+        f'<div class="ask-suggest-list">{chips}</div>'
+        "</div>"
+    )
+
+
 def _inject_context_links(md_text: str) -> str:
     """将 <ask>文本</ask> 或 [文本](jump/create/generate/view/session) 转换为胶囊样式的追问标签
 
     注：[文本](ask) 旧格式已废弃，不再识别（残留会渲染成空 markdown 链接）。
 
+    <ask> 不就地渲染：先全文摘除去重，再统一拼到文末的追问区块（只影响卡片渲染）。
+
     session 类型格式：[文本](session|session_id|last_time)
     last_time 如果为空则不显示
     """
-
-    # 新格式 <ask>内容</ask> → 直接生成胶囊
-    # strip 后空内容（如 <ask></ask>、<ask>   </ask>、<ask>\n</ask>）丢弃整段标签，
-    # 避免旧逻辑归一化为 [](ask) 后残留为字面 markdown 链接导致渲染崩（<a href="ask"></a>）。
-    def _ask_replacer(m: re.Match) -> str:
-        content = m.group(1).strip()
-        if not content:
-            return ""
-        attrs = f'data-type="ask" data-content="{escape(content)}" data-action="ask"'
-        return f'<span class="context-tag" {attrs}>{content}</span>'
-
-    md_text = _ASK_TAG_PATTERN.sub(_ask_replacer, md_text)
 
     def replacer(match):
         content = match.group(1)
@@ -3308,7 +3797,13 @@ def _inject_context_links(md_text: str) -> str:
 
         return f'<span class="context-tag" data-type="{action}" data-content="{escape(content)}" data-action="{action}">{content}</span>'
 
-    return _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
+    md_text = _CONTEXT_LINK_PATTERN.sub(replacer, md_text)
+
+    # 追问统一收拢到文末：正文里的 <ask> 全部摘除（去重）后集中渲染成一个区块。
+    md_text, ask_items = _collect_and_strip_asks(md_text)
+    if ask_items:
+        md_text = md_text.rstrip() + "\n\n" + _build_ask_suggest_block(ask_items)
+    return md_text
 
 
 # ===== _resolve_image_src 模块级常量（避免每次渲染重编译正则+重算路径） =====
@@ -4022,6 +4517,9 @@ class CodeWebViewer(QWebEngineView):
         self._streaming = True
         self._is_history = False  # 历史会话标志（非流式加载的历史消息）
         self._is_js_ready = False
+        # 下一次非流式渲染是否为"流式结束的终渲染"（决定能否走线程池，见
+        # _perform_update）：仅在 CodeWebViewer.__init__ 初始化一次。
+        self._final_render_pending = False
         self._last_rendered_html = ""
         self._last_rendered_markdown = ""
         # 流式渲染哈希缓存：避免对相同 processed_md 重复跑 6 轮正则 + md.convert()
@@ -4278,7 +4776,6 @@ class CodeWebViewer(QWebEngineView):
             pass
         return super().event(event)
 
-
     def setFixedSize(self, *args, **kwargs):
         """限制最大尺寸，防止 GPU 内存溢出"""
         # 计算安全尺寸
@@ -4317,7 +4814,15 @@ class CodeWebViewer(QWebEngineView):
         _dialog_event_filter.register(self)
 
     def reset_for_reuse(self):
-        """归还 ``WebViewPool`` 前的重置：清空文档 + 复位卡片相关状态。
+        """归还 ``WebViewPool`` 前的重置：**保留骨架**，只清空内容与卡片状态。
+
+        ⚠️ 这里刻意**不用** ``setHtml("")`` 清页。原因（2026-09-09 内存回归）：
+        清空文档后复用方必须重新 ``_load_skeleton()``，等于每次复用都新建一份
+        ~54KB 文档 + 重新执行骨架 JS（setInterval/ResizeObserver/事件监听全套
+        重新注册）。加载"消息数很多"的会话时批次反复卸载/重建，文档频繁新建，
+        Chromium 侧内存与 CPU 占用明显上升。
+        改成"原地清空内容容器"后：骨架与 JS 上下文存活，复用成本只剩一次
+        轻量 DOM 清理，既无文档重建，也不会出现白屏。
 
         只清理 viewer 自身。**与卡片的信号连接不在这里断开** —— 那部分由
         ``MessageCard.detach_viewer()`` 成对维护（连接/断开写在一起，新增信号
@@ -4328,8 +4833,21 @@ class CodeWebViewer(QWebEngineView):
         清零会让该进程被误杀。
         """
         try:
-            if self.page():
-                self.setHtml("", QUrl("about:blank"))
+            if self.page() and self._is_js_ready:
+                self.page().runJavaScript(_RESET_CONTENT_FOR_REUSE_JS)
+        except RuntimeError:
+            pass
+        # 骨架仍在 → JS 就绪态保持 True（复用方无需重载骨架）。
+        # 仅当骨架根本没加载成功时把它置 False，由取用侧补一次 _load_skeleton。
+        if not self._is_js_ready:
+            self._is_js_ready = False
+        # 🐛 高度残留：卡片通过 _commit_viewer_height 用 setFixedHeight 钉死高度
+        # （长消息可达数千 px）。归还时不清，复用方在骨架/JS 就绪前（或任何
+        # 未上报高度的异常路径）会顶着上一张消息的陈旧高度 → 空白巨高卡片。
+        # 复位到最小高度，由新内容首次 reportHeight 重新收敛。
+        try:
+            self.setMinimumHeight(40)
+            self.setFixedHeight(40)
         except RuntimeError:
             pass
         self._streaming = False
@@ -4346,6 +4864,20 @@ class CodeWebViewer(QWebEngineView):
         self._body_client_height = 0
         self._body_scroll_top = 0
         self._body_geom_valid = False
+        # 🐛 内容态必须一并清：_markdown_text / _cached_streaming_html 若残留，
+        # 复用后 _on_js_ready 会拿旧文本立即渲染一次（与新卡片内容无关），
+        # 多一次全量渲染 = 多一份内存与主线程开销（大会话加载时逐卡叠加）。
+        self._markdown_text = ""
+        self._last_rendered_markdown = ""
+        self._cached_streaming_html = None
+        self._processed_md_hash = 0
+        self._cached_raw_md_hash = 0
+        self._last_rendered_html = None
+        self._render_deferred = False
+        self._pending_todos = None
+        if hasattr(self, "_tool_md_cache"):
+            with contextlib.suppress(Exception):
+                self._tool_md_cache.clear()
 
     def _is_mask_dialog(self, obj) -> bool:
         """判断是否为透明遮罩对话框（WA_TranslucentBackground，需防穿透）"""
@@ -4397,6 +4929,12 @@ class CodeWebViewer(QWebEngineView):
         self._do_resize_check()
 
     def _on_height_reported(self, h):
+        # 🐛 打点：结束这一拍的"JS 落地 + 布局"耗时 = 渲染派发 → 首个 reportHeight。
+        if getattr(self, "_finish_t0", 0.0) > 0.0:
+            _el = (time.perf_counter() - self._finish_t0) * 1000
+            self._finish_t0 = 0.0
+            if FINISH_TIMING_ENABLED or _el >= 120:
+                logger.info(f"[finish-render] js_land+layout={_el:.1f}ms height={h}")
         self._height_report_pending = False
         self._document_height = h  # 跟踪文档高度用于 wheelEvent 边界判断
         final_h = h + 2
@@ -4618,7 +5156,7 @@ class CodeWebViewer(QWebEngineView):
         # 现由 JS 侧首次遇到对应 fence 时动态加载（_echartsEnsure / _mmdEnsure /
         # _katexEnsure），欢迎卡片等 light 骨架场景同样走这条路径（_initEchartsIn
         # 内部会先 ensure 再扫描，不依赖 window.echarts 预先存在）。
-        cdn_libs = "" 
+        cdn_libs = ""
 
         # 检测浅色/深色模式，用于滚动条和行内差异框主题适配
         try:
@@ -4967,6 +5505,68 @@ class CodeWebViewer(QWebEngineView):
                 }}
                 svg .context-tag:hover {{
                     opacity: 0.78;
+                }}
+
+                /* 追问区块：正文里的 <ask> 由 _inject_context_links 摘除去重后，
+                   统一渲染在文末。整行 hover 点亮 + 右侧「发送」提示，弱化原来
+                   高饱和红胶囊的存在感。 */
+                .ask-suggest {{
+                    margin: 16px 0 2px;
+                    padding-top: 12px;
+                    border-top: 1px solid var(--border);
+                }}
+                .ask-suggest-title {{
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    margin-bottom: 8px;
+                    font-size: {small_font_size}px;
+                    font-weight: 600;
+                    color: var(--text-muted);
+                }}
+                .ask-suggest-dot {{
+                    width: 6px;
+                    height: 6px;
+                    border-radius: 50%;
+                    background: var(--accent);
+                    flex: none;
+                }}
+                .ask-suggest-list {{
+                    display: flex;
+                    flex-direction: column;
+                    gap: 2px;
+                }}
+                .ask-suggest .context-tag {{
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 10px;
+                    padding: 6px 10px;
+                    margin: 0;
+                    border: 1px solid transparent;
+                    border-radius: 8px;
+                    background: transparent;
+                    color: var(--text-secondary);
+                    font-weight: 400;
+                    transition: 0.18s ease;
+                }}
+                .ask-suggest .context-tag::after {{
+                    content: "发送 ›";
+                    flex: none;
+                    font-size: {tiny_font_size}px;
+                    color: var(--accent-text);
+                    opacity: 0;
+                    transform: translateX(-4px);
+                    transition: 0.18s ease;
+                }}
+                .ask-suggest .context-tag:hover {{
+                    background: var(--accent-soft);
+                    border-color: var(--accent-border-weak);
+                    color: var(--accent-text);
+                }}
+                .ask-suggest .context-tag:hover::after {{
+                    opacity: 1;
+                    transform: translateX(0);
                 }}
 
                 /* session 历史会话标签样式（胶囊按内容宽度自然展开） */
@@ -6904,6 +7504,12 @@ class CodeWebViewer(QWebEngineView):
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
+                        // 打字机：本次将整体替换增量节点，Python 侧 markdown 已含全部
+                        // 文本（含尚未揭示部分），故丢弃揭示缓冲，避免重复追加。
+                        if (typeof window._twReset === 'function') window._twReset();
+                        // FLIP：替换前记录工具/思考区与正文容器的视口位置，
+                        // 重排后用位移动画补间（消除"结束态弹到最顶上"的瞬移感）。
+                        var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                         // 图表保全：替换前暂存已渲染图表节点（防闪烁 + 堵 echarts 孤儿实例泄漏）
                         window._stashCharts(container);
                         // 记录当前展开状态的思考块
@@ -7121,6 +7727,13 @@ class CodeWebViewer(QWebEngineView):
                         window._autoScrollTime = performance.now();
                         window._suppressScrollEvent = false;
 
+                        // FLIP Play：重排（reorganizeContent 搬移工具/思考块）完成后，
+                        // 把位置突变补间成平滑位移；入队串行，避免与归位/折叠动画叠加。
+                        if (_flipPrev && typeof window._flipPlay === 'function') window._flipPlay(_flipPrev, 220);
+
+                        // 预览文字打字机：本次渲染新落地的思考/工具预览行逐字显现
+                        if (typeof window._ptPlay === 'function') window._ptPlay();
+
                         // ── 恢复全透明度：在下一帧前 fade in，CSS transition 驱动平滑淡入 ──
                         // 🛡️ 竞态防护：递增 token + 定时器引用，防止连续 updateContent 时
                         // 上轮清理误清本轮 transition，或清理定时器残留导致 transition 提前消失。
@@ -7182,6 +7795,9 @@ class CodeWebViewer(QWebEngineView):
                 function updateContentAppend(newHtml, tailHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container) return;
+                    // 打字机：增量节点即将被移除并以格式化 HTML 重建（含未揭示文本），
+                    // 丢弃揭示缓冲防重复追加。
+                    if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
                     // 移除增量纯文本节点（差量渲染会以格式化 HTML 替代它们）
@@ -7247,6 +7863,8 @@ class CodeWebViewer(QWebEngineView):
                     // 插件 fence：追加的闭合段可能带入新的插件 fence
                     if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
                     if (typeof window._initWidgets === 'function') window._initWidgets();
+                    // 预览文字打字机：差量段里新落地的思考/工具预览行逐字显现
+                    if (typeof window._ptPlay === 'function') window._ptPlay();
                     // 使用延迟报告，确保浏览器布局完成
                     setTimeout(() => reportHeight(), 30);
                 }}
@@ -7259,6 +7877,8 @@ class CodeWebViewer(QWebEngineView):
                 function updateTailHtml(html) {{
                     const container = document.getElementById('content-placeholder');
                     if (!container || !html) return;
+                    // 打字机：尾部将被整体行内重渲染（含未揭示文本），丢弃揭示缓冲。
+                    if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
                     container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
@@ -7616,6 +8236,8 @@ class CodeWebViewer(QWebEngineView):
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                     // 坞态（流式中）：新条目进入后自动滚底
                     if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
+                    // 预览文字打字机：搬移进工具区的思考/工具预览行逐字显现
+                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }}
                 // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
                 // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
@@ -8340,6 +8962,9 @@ class CodeWebViewer(QWebEngineView):
                     }}
                 }}, {{passive: true}});
                 {_STREAMING_DOCK_JS}
+                {_TYPEWRITER_JS}
+                {_PREVIEW_TYPEWRITER_JS}
+                {_FLIP_JS}
 
                 // ===== 流式工具块：移除超时自动标记 ====
                 // 原 _cleanupStuckTools 会在 30 秒后标记工具为"超时未返回结果"，
@@ -8442,6 +9067,13 @@ class CodeWebViewer(QWebEngineView):
     _ADAPTIVE_THRESHOLD_SLOW = 500  # ms
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
+    # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
+    # ⚠️ 结束路径后面紧跟 _cleanup_render_cache()，它 `self._render_seq += 1`
+    # 会把异步结果判为过期丢弃（详见 _perform_update 内注释）——所以结束态必须
+    # 保持同步，历史加载没有这个紧随的 cleanup，异步是安全的。
+    # 真机实测（2026-09-09）：历史卡 md 24k~37k 时主线程 render 占 40~120ms/张，
+    # 一张张串行就是"加载大会话时一顿一顿"的来源。
+    _ASYNC_HISTORY_RENDER_MIN_CHARS = 6000
 
     @staticmethod
     def _has_reached_clean_boundary(md_text: str) -> bool:
@@ -8538,7 +9170,12 @@ class CodeWebViewer(QWebEngineView):
                 text_clean = text_clean[:2000] + "\n\n..."
             js = f"""
             (function() {{
-                var text = {json.dumps(text_clean).decode("utf-8")};
+                // ── 追加逻辑注册为全局函数（只注册一次）──
+                // 打字机揭示队列（window._twPush）需要按帧调用同一套"把一段文本
+                // 接到正文尾部"的逻辑；注册成函数后队列与直接调用共用一份实现，
+                // 避免两处逻辑漂移（段落/host 判定一旦分叉就会出现跳位）。
+                if (typeof window._dfxAppendStreamText !== 'function') {{
+                window._dfxAppendStreamText = function(text, skipReport) {{
                 var c = document.getElementById('content-placeholder');
                 if (!c || !text) return;
                 // ── 尾部文本宿主定位 ──
@@ -8562,6 +9199,19 @@ class CodeWebViewer(QWebEngineView):
                         host = lc;
                     }}
                     return host;
+                }}
+                // [PERF] 文本合并追加：帧级揭示（~60fps）下若每次都 appendChild 新建
+                // 文本节点，一条 2000 字回复会产出 600+ 个 Text 节点 —— DOM 节点数
+                // 膨胀，内存与后续 querySelectorAll / innerHTML 成本同步上升
+                // （用户反馈"内存占用高了很多"的主因之一）。
+                // 末尾已是文本节点时直接 appendData 合并 → 每段稳定 1 个文本节点。
+                function _appendTextMerged(host, txt) {{
+                    var lc = host.lastChild;
+                    if (lc && lc.nodeType === 3) {{
+                        lc.appendData(txt);
+                    }} else {{
+                        host.appendChild(document.createTextNode(txt));
+                    }}
                 }}
                 function _newIncrementalP(txt) {{
                     var _p = document.createElement('p');
@@ -8609,7 +9259,7 @@ class CodeWebViewer(QWebEngineView):
                     // 随后 updateTailHtml 又把碎片合并回正文"（文字不断跳位重排）。
                     // appendChild(textNode) 既不覆盖已渲染的行内 HTML（textContent += 会把
                     // <strong>/<code> 抹回 markdown 源码形态），又让文字连续增长。
-                    _tailTextHost(last).appendChild(document.createTextNode(text));
+                    _appendTextMerged(_tailTextHost(last), text);
                 }} else if (last && last.tagName === 'P') {{
                     // 🐛 修复（正文段落丢失）：最后是已格式化渲染的稳定段落（非增量节点）。
                     // 不能打 data-incremental 标记/原地追加——否则下次差量渲染
@@ -8642,7 +9292,18 @@ class CodeWebViewer(QWebEngineView):
                 window._prevScrollTop = document.body.scrollTop;
                 window._autoScrollTime = performance.now();
                 window._suppressScrollEvent = false;
-                reportHeightDebounced();
+                // skipReport：打字机揭示按帧调用，由队列侧节流（见 _twStep）
+                if (!skipReport) reportHeightDebounced();
+                }};  // ── _dfxAppendStreamText 定义结束 ──
+                }}
+                // ── 交给打字机揭示队列（帧级揭示）──
+                // 队列不可用时（旧骨架 / 降级）退化为立即追加，行为与改造前一致。
+                var text = {json.dumps(text_clean).decode("utf-8")};
+                if (typeof window._twPush === 'function') {{
+                    window._twPush(text);
+                }} else {{
+                    window._dfxAppendStreamText(text);
+                }}
             }})();
             """
             self.page().runJavaScript(js)
@@ -8884,6 +9545,9 @@ class CodeWebViewer(QWebEngineView):
             pass
 
     def _perform_update(self):
+        # ⚠️ 必须无条件取时间：此前写成 `perf_counter() if FINISH_TIMING_ENABLED else 0.0`，
+        # 未开打点时 _t_enter=0，render 会被算成 perf_counter()*1000（千万毫秒级假数据）。
+        _t_enter = time.perf_counter()
         try:
             if not self.page():
                 return
@@ -8894,6 +9558,16 @@ class CodeWebViewer(QWebEngineView):
             if not self.isVisible():
                 self._render_deferred = True
                 return
+
+            # 预览文字打字机开关：只在本轮流式（含结束后的终渲染）播放。
+            # 历史会话加载时 _streaming / _streaming_finished 均为 False —— 一次
+            # 加载几十张卡片，若都逐字播放会同时起几十个 rAF 抢帧，且"打字机"
+            # 对已存在的历史内容没有意义，故关闭（文字按渲染结果直接全显）。
+            _pt_enabled = "true" if (self._streaming or getattr(self, "_streaming_finished", False)) else "false"
+            try:
+                self.page().runJavaScript(f"if (window._pt) window._pt.enabled = {_pt_enabled};")
+            except RuntimeError:
+                pass
 
             # 已完成（结果已到达）的工具 id 集合，供下方 restore 逻辑判断运行框是否可复活
             _finished_ids = list(getattr(self, "_restore_finished_ids", set()) or set())
@@ -8924,8 +9598,27 @@ class CodeWebViewer(QWebEngineView):
                         ]
                     else:
                         html_content = self._cached_streaming_html
+                elif len(self._markdown_text) > self._ASYNC_HISTORY_RENDER_MIN_CHARS and not getattr(
+                    self, "_final_render_pending", False
+                ):
+                    # [PERF] 长内容的**历史/非结束态**渲染走线程池：md.convert +
+                    # Pygments 在长消息上是 40~120ms 的主线程阻塞（真机实测），
+                    # 加载大会话时每张卡都堵一拍。_apply_render_result 已覆盖
+                    # save/restore、auto-scroll 与 seq 过期丢弃，语义等价。
+                    self._last_rendered_markdown = self._markdown_text
+                    self._height_report_pending = True
+                    self._sequence_render(self._markdown_text, self._tool_compact_mode)
+                    return
                 else:
+                    # ⚠️ 结束态（_final_render_pending）必须保持同步：
+                    # MessageCard.finish_streaming 在 viewer.finish_streaming() 之后
+                    # 立即调用 _cleanup_render_cache()，而它会 `self._render_seq += 1`
+                    # （本意是让在途流式渲染过期）。异步提交的结果回来时 seq 已变，
+                    # 被 _apply_render_result 判定过期直接丢弃 → 最终渲染永远不落地
+                    # （卡片停在流式形态、高度不收敛）。要保持结束态异步就必须把
+                    # cleanup 推迟到渲染落地之后，属另一处改造。
                     html_content = self._render_markdown_to_html(self._markdown_text)
+                self._final_render_pending = False
                 self._last_rendered_markdown = self._markdown_text
                 self._height_report_pending = True
                 # 🐛 修复：非流式路径也会在"流式结束但工具仍在并行执行"时触发
@@ -8947,15 +9640,36 @@ class CodeWebViewer(QWebEngineView):
                 # 已完成工具块待 restore（_restore_finished_ids）时才需要 save/restore 保护；
                 # 否则裸 updateContent（省整页 JS 包装，MB 级 IPC 载荷下降）。
                 _needs_save_restore = self._tool_dom_dirty or bool(getattr(self, "_restore_finished_ids", set()))
+                _kind = "finish" if getattr(self, "_finish_t0", 0.0) > 0.0 else "history"
+                _t_ser = time.perf_counter()
                 if _needs_save_restore:
                     _gen = self._tool_dom_dirty_gen
-                    self.page().runJavaScript(
-                        self._build_save_and_restore_js(html_content, getattr(self, "_restore_finished_ids", set())),
-                        lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g),
+                    _js_code = self._build_save_and_restore_js(
+                        html_content, getattr(self, "_restore_finished_ids", set())
                     )
+                    _ser_ms = (time.perf_counter() - _t_ser) * 1000
+                    _render_ms = (_t_ser - _t_enter) * 1000
+                    # 🐛 打点默认也打（只在"慢"时打，常规一两行/条消息，噪声可忽略）：
+                    # 结束态卡顿必须靠数据定位，不能靠猜。DRIFOX_FINISH_TIMING=1 强制全量。
+                    if FINISH_TIMING_ENABLED or _render_ms >= 20 or _ser_ms >= 8:
+                        logger.info(
+                            f"[finish-render] kind={_kind} path=save_restore "
+                            f"md={len(self._markdown_text)} "
+                            f"html={len(html_content)} render={_render_ms:.1f}ms dumps={_ser_ms:.1f}ms"
+                        )
+                    self.page().runJavaScript(_js_code, lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g))
                 else:
+                    _payload = json.dumps(html_content).decode("utf-8")
+                    _ser_ms = (time.perf_counter() - _t_ser) * 1000
+                    _render_ms = (_t_ser - _t_enter) * 1000
+                    if FINISH_TIMING_ENABLED or _render_ms >= 20 or _ser_ms >= 8:
+                        logger.info(
+                            f"[finish-render] kind={_kind} path=bare "
+                            f"md={len(self._markdown_text)} "
+                            f"html={len(html_content)} render={_render_ms:.1f}ms dumps={_ser_ms:.1f}ms"
+                        )
                     self.page().runJavaScript(
-                        f"updateContent({json.dumps(html_content).decode('utf-8')});",
+                        f"updateContent({_payload});",
                         lambda _result: None,
                     )
                 # 🐛 修复（编辑工具框运行中消失）：不再同步清除 _tool_dom_dirty——
@@ -9016,8 +9730,15 @@ class CodeWebViewer(QWebEngineView):
                     # 等闭合后由差量段/全量渲染处理，避免思考内容泄漏到正文）。
                     _tail = self._markdown_text[self._stable_md_len :]
                     _tail_html = ""
-                    if _tail and not _has_unclosed_think_or_tool(_tail):
-                        _tail_html = _render_inline_tail(_tail, compact=self._tool_compact_mode)
+                    if _tail:
+                        # 🐛 修复（流式吞内容）：tail 含未闭合 think/tool 时只截到未闭合
+                        # 块起点——未闭合块内容照旧静默累积（等闭合后由差量/全量渲染
+                        # 落地），但它**之前**的正文必须重建：updateContentAppend 会
+                        # 无条件 remove 全部 [data-incremental] 节点，整段 tail 不重建
+                        # 就等于把这部分已显示的文字抹掉且不恢复。
+                        _safe_tail = _tail_before_unclosed_block(_tail)
+                        if _safe_tail and not _has_unclosed_think_or_tool(_safe_tail):
+                            _tail_html = _render_inline_tail(_safe_tail, compact=self._tool_compact_mode)
                     js = (
                         "updateContentAppend("
                         f"{json.dumps(new_html).decode('utf-8')},"
@@ -9165,6 +9886,7 @@ class CodeWebViewer(QWebEngineView):
             "compact": compact,
             "pygments_style": _style,
             "icon_prefix": _ICON_PREFIX_CACHE,
+            "heavy_caps": _HISTORY_TOOL_CAPS if getattr(self, "_is_history", False) else None,
             "code_font_size": _CODE_FONT_SIZE,
         }
 
@@ -9239,7 +9961,11 @@ class CodeWebViewer(QWebEngineView):
                 _md_r = self._last_rendered_markdown
                 _last_break = _md_r.rfind("\n\n")
                 self._stable_md_len = _last_break + 2 if _last_break != -1 else 0
-            self._needs_full_render = False
+            # 🐛 修复（思考框/工具框重复）：md 含未闭合块时基线**不推进**（防残段
+            # 泄漏到正文），但 DOM 里已渲染出该块（think-streaming / 工具框）。
+            # 若让后续走差量追加，会把已渲染的段再渲染一遍 → 同一段重复出现。
+            # 故基线未推进时强制下一次走全量渲染（updateContent 整体替换，不重复）。
+            self._needs_full_render = self._streaming and _has_unclosed_think_or_tool(self._last_rendered_markdown)
             # 🐛 修复（流式文字跳位）：全量渲染的 DOM 末尾 <p> 可以是**未闭合段的
             # 中间形态**（首渲染 / 工具后重渲等，md 尾部无 \n\n）。此时末尾 <p>
             # 承载的是未写完的段落，后续同段 chunk 应继续接在它后面。若不补打
@@ -9262,7 +9988,17 @@ class CodeWebViewer(QWebEngineView):
                         "if(!_c)return;"
                         "var _l=_c.lastElementChild;"
                         "if(_l&&_l.id==='char-count')_l=_l.previousElementSibling;"
-                        "if(!_l||_l.tagName!=='P'||_l.hasAttribute('data-incremental'))return;"
+                        "if(!_l||_l.hasAttribute('data-incremental'))return;"
+                        # 🐛 修复（尾部重复）：原判据只认 <p>，末尾是代码块/列表/引用时
+                        # 打不上标记 → updateTailHtml / updateContentAppend 删不掉它，
+                        # tail 又被重建一遍 → 同一段内容重复出现。放宽到可安全重建的
+                        # 块级元素（含代码包装 DIV 里的 <pre>）。
+                        # 图表/公式容器不打标：remove() 会销毁已渲染 canvas/SVG，
+                        # 而 chart vault 只覆盖 updateContent 路径，不覆盖 append。
+                        "if(_l.querySelector&&_l.querySelector('.echarts-container,.mermaid-block,.katex-container'))return;"
+                        "var _tn=_l.tagName;"
+                        "var _isPre=(_tn==='PRE')||(_tn==='DIV'&&!!_l.querySelector('pre'));"
+                        "if(!(_tn==='P'||_tn==='PRE'||_tn==='UL'||_tn==='OL'||_tn==='BLOCKQUOTE'||/^H[1-6]$/.test(_tn)||_isPre))return;"
                         "_l.setAttribute('data-incremental','true');"
                         "})();"
                     )
@@ -9306,6 +10042,10 @@ class CodeWebViewer(QWebEngineView):
             # 误判"无工具 DOM"而裸 updateContent 抹掉 JS 注入的运行框。
             _gen = self._tool_dom_dirty_gen
             self.page().runJavaScript(js_code, lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g))
+            # 🐛 修复（刚打出的字被抹掉）：updateContent 用的是「渲染快照」的 HTML，
+            # 在途期间到达的 chunk 只存在于 DOM 增量节点，整体替换会连它们一起删掉。
+            # 落地后把快照之后的增量补回（排在 updateContent 之后执行）。
+            self._push_unrendered_tail_text()
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
         except RuntimeError:
@@ -9317,6 +10057,31 @@ class CodeWebViewer(QWebEngineView):
                 pseq, pmd, pcompact = self._render_pending
                 self._render_pending = None
                 self._sequence_render(pmd, pcompact)
+
+    def _push_unrendered_tail_text(self):
+        """把「渲染快照之后新增」的文本重新推回 DOM（防全量渲染落地时抹掉）。
+
+        [B3] 全量渲染提交的是 md 快照（`_last_rendered_markdown`）；线程池在途
+        期间到达的 chunk 只存在于 DOM 的增量纯文本节点（`_append_text_incremental`）。
+        渲染落地时 `updateContent` 整体替换 innerHTML 会连它们一起删掉 —— 视觉上
+        是"刚打出来的字消失一块"。落地后把快照之后的增量补回，内容不再回退。
+        """
+        try:
+            if not self._streaming or not self._is_js_ready:
+                return
+            snapshot = self._last_rendered_markdown or ""
+            latest = self._markdown_text or ""
+            if not snapshot or len(latest) <= len(snapshot):
+                return
+            if not latest.startswith(snapshot):
+                # 内容被整体替换/重排（非纯追加）：语义未知，交给下一次全量渲染
+                return
+            extra = latest[len(snapshot) :]
+            if not extra.strip():
+                return
+            self._append_text_incremental(extra)
+        except RuntimeError:
+            pass
 
     def _build_save_and_restore_js(self, html_content: str, finished_ids: set = None) -> str:
         """生成"保存工具块 → 重写内容 → 还原工具块"的 JS 模板（流式/非流式共享）
@@ -9524,6 +10289,26 @@ class CodeWebViewer(QWebEngineView):
         # 重置思考文本流式标志，防止下一轮对话误判
         self._think_text_streaming_started = False
         self._reasoning_streaming_started = False
+        # 🆕 FLIP：最终全量重排会把工具/思考块从"流式态沉底"换成"完成态归位"，
+        # arm 一个短窗口，让紧随其后的 updateContent 采集旧位置并补间成位移动画。
+        # （未 arm 时 _flipCapture 直接返回 null，流式期间零额外布局开销。）
+        try:
+            if self._is_js_ready and self.page():
+                self.page().runJavaScript("if(typeof window._flipArm==='function')window._flipArm(2000);")
+        except RuntimeError:
+            pass
+        # ── 打点：记录"结束这一拍"的起点，首次高度上报时结算 JS 落地+布局耗时 ──
+        # （render/dumps 只覆盖主线程，真正的 innerHTML 解析与重排在 WebEngine 侧，
+        #  这一段只能靠"渲染派发 → 首个 reportHeight"的时间差来度量）
+        if FINISH_TIMING_ENABLED:
+            logger.info(
+                f"[finish-render] begin md={len(self._markdown_text or '')} "
+                f"finished_tools={len(getattr(self, '_restore_finished_ids', set()) or set())}"
+            )
+        self._finish_t0 = time.perf_counter()
+        # 标记"接下来这次非流式渲染是流式结束的终渲染"：它必须同步完成
+        # （紧随其后的 _cleanup_render_cache 会让异步结果过期），见 _perform_update。
+        self._final_render_pending = True
         # 流式结束：触发一次最终全量渲染，完成所有未完成的内容
         # 注意：不强制清除 _last_rendered_markdown —— 流式对话期间
         # think-streaming（展开）应保持，只有历史会话加载走非流式分支
@@ -9551,13 +10336,17 @@ class CodeWebViewer(QWebEngineView):
             if self._is_js_ready and self.page():
                 self.page().runJavaScript(
                     "(function(){"
+                    "var _run=function(){"
                     "var _ts=document.getElementById('tool-section');"
                     "var _sep=document.getElementById('tool-separator');"
                     "if(_ts){"
                     "  if(typeof _beginToolSectionTransition==='function')_beginToolSectionTransition();"
                     "  _ts.setAttribute('data-collapsed','true');"
                     "  if(_sep)_sep.setAttribute('aria-expanded','false');"
-                    "}"
+                    "}};"
+                    # 动画串行：折叠排在归位/重排的 FLIP 之后再跑，
+                    # 避免「归位→重排→折叠」三段 200ms 过渡同时开跑造成掉帧与抖动。
+                    "if(typeof window._animEnqueue==='function'){window._animEnqueue(_run,220);}else{_run();}"
                     "})();"
                 )
         except RuntimeError:
@@ -11111,9 +11900,7 @@ class _ImagePreviewDialog(MaskDialogBase):
         max_h = int(screen.height() * 0.92)
         if w > max_w or h > max_h:
             w, h = max_w, max_h
-        self._img_label.setPixmap(
-            self._pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
+        self._img_label.setPixmap(self._pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         self.widget.adjustSize()
         self._center_widget()
 
@@ -11215,6 +12002,7 @@ def _fence_assets_for_skeleton() -> tuple:
 
     插件系统未就绪或任何异常都返回空表 —— 骨架构建不能被插件拖垮。
     """
+
     # 内置 fence（当前只有 ```widget）没有插件替它声明权限，在此兜底合入；
     # 插件系统未就绪时也必须带上，否则 widget 桥会全空。
     def _builtin_only() -> tuple:
@@ -11385,6 +12173,13 @@ class MessageCard(SimpleCardWidget):
         self._height_anim.setDuration(0)  # 设置为0相当于禁用插值
         self._target_viewer_height = 40
         self._last_applied_viewer_height = 40
+        # 结束态高度缓动窗口（monotonic 截止时刻；0 = 无窗口）+ 剩余可用次数。
+        # 由 MessageCard.finish_streaming 打开，_update_height 用尽预算即失效。
+        self._finish_height_anim_until = 0.0
+        self._finish_height_anim_left = 0
+        self._finish_height_anim_active = False
+        # 结束态打点起点（0 = 无待结算的结束拍）
+        self._finish_t0 = 0.0
         # 最近一次 viewer 高度增量（新值 - 旧值），供外层列表滚动锚定补偿读取
         self._last_height_delta = 0
         # 🆕 流式高度防抖：减少频繁 height report 导致的 viewer resize 抖动
@@ -12584,6 +13379,13 @@ class MessageCard(SimpleCardWidget):
         self.update()
 
     def _apply_card_style(self, border: str = None, bg: str = None):
+        # [PERF] 幂等短路：setStyleSheet 会触发 Qt 样式重新 polish + 子控件 relayout，
+        # 而流式结束时 stop_streaming_anim() 会再调一次 —— 与最终全量渲染撞在
+        # 同一拍，是结束态卡顿的一分子。参数未变时直接跳过。
+        _style_key = (self.role, self.error, border, bg, self._base_bg, self._base_border)
+        if getattr(self, "_applied_card_style_key", None) == _style_key:
+            return
+        self._applied_card_style_key = _style_key
         # user 简洁气泡：12px 圆角 + 无边框（仅轻量背景色）；错误态仍显示红色边框
         if self.role == "user" and not self.error:
             self.setStyleSheet(
@@ -12631,8 +13433,10 @@ class MessageCard(SimpleCardWidget):
             return
         self._apply_card_style()
         self._retry_status_widget.setVisible(False)
+        # [PERF] 去掉 repaint()：同步强制重绘会把整卡 paint 塞进当前这一拍，
+        # 而结束态这一拍还要承载最终全量渲染与高度变化；异步 update() 足够，
+        # 由 Qt 在下一个合成周期统一绘制。
         self.update()
-        self.repaint()
 
     def start_retry_anim(self, error_type: str, attempt: int, max_retries: int, wait_time: float):
         """切换到重试边框模式（红色流动+白光点）"""
@@ -13172,6 +13976,19 @@ class MessageCard(SimpleCardWidget):
         if not self._streaming and not self._resize_preview_mode:
             self._remember_height_for_width(target_height)
 
+        # 🆕 结束态高度动画进行中：reportHeight 回环（setFixedHeight → 视口变化 →
+        # ResizeObserver → reportHeight）会不断送来"当前中间高度"，若照单全收会
+        # 把补间打断成锯齿。判定为同一收敛值（差异 <24px）时忽略。
+        if self._is_height_animating:
+            try:
+                _end = int(self._height_anim.endValue())
+            except Exception:
+                _end = target_height
+            if abs(target_height - _end) < 24:
+                return
+            # 明显不同的新目标（内容又变了）：停机，交回常规路径
+            self._height_anim.stop()
+
         # 🆕 流式中防抖：累积高度变化，定时器到期才应用 viewer 高度。
         # 流式期间每个 text chunk 都会触发 height report（~60fps），
         # 若每次立即 resize viewer 会导致卡片高度持续跳动、主滚动区不稳定。
@@ -13191,6 +14008,13 @@ class MessageCard(SimpleCardWidget):
             self._apply_viewer_height(target_height)
             return
 
+        # 🆕 结束态高度过渡：坞态归位 + 最终重排会让卡片高度一次跳几百 px，
+        # snap 会让外层滚动区瞬移（页面内已由 FLIP 补间，唯独 Qt 侧没有）。
+        # 仅在"流式结束后第一次收敛"的窗口内启用，且变化足够大才值得动画。
+        if self._in_finish_height_window() and abs(target_height - current_height) >= FINISH_HEIGHT_ANIM_MIN_DELTA:
+            self._start_finish_height_anim(current_height, target_height)
+            return
+
         # 非流式大高度变化（折叠/展开）：一次性设 viewer 最终高度，
         # 但跳过容器的 200ms maximumHeight 动画，避免 AlignBottom 布局中
         # 卡片位置因容器动画与 viewer 高度变化不同步而"闪现"。
@@ -13200,6 +14024,51 @@ class MessageCard(SimpleCardWidget):
         # 延迟清除标志，等容器 snap 完成
         QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
 
+    # ── 结束态高度过渡（可关：FINISH_HEIGHT_ANIM_ENABLED）──
+
+    def _in_finish_height_window(self) -> bool:
+        """是否处于"流式结束后的高度收敛窗口"内。
+
+        只在 ``MessageCard.finish_streaming`` 打开的一个短窗口内为真，
+        保证动画只服务结束态这一次收敛，不污染折叠/展开/主题刷新等日常路径。
+        """
+        global FINISH_HEIGHT_ANIM_ENABLED
+        if not FINISH_HEIGHT_ANIM_ENABLED:
+            return False
+        if getattr(self, "_finish_height_anim_until", 0.0) <= 0.0:
+            return False
+        if time.monotonic() > self._finish_height_anim_until:
+            self._finish_height_anim_until = 0.0
+            self._finish_height_anim_left = 0
+            return False
+        # 次数预算：结束态通常有两次收敛（坞态归位+重排、随后自动折叠），
+        # 用完即回到 snap，避免把后续日常高度变化也动画化。
+        return int(getattr(self, "_finish_height_anim_left", 0)) > 0
+
+    def _start_finish_height_anim(self, start_h: int, end_h: int) -> None:
+        """用既有的 ``_height_anim`` 把 viewer 高度从 start 缓动到 end。
+
+        容器侧仍走 ``noContainerAnimation`` snap（原逻辑保留），因为容器
+        maximumHeight 只是一个**上限**，放宽到终值不会造成可见跳变；真正的
+        可见高度由 viewer 的固定高度驱动，故缓动 viewer 即可平滑整体。
+        """
+        # 消费一次预算；预算用尽则关闭窗口
+        self._finish_height_anim_left = max(0, int(getattr(self, "_finish_height_anim_left", 0)) - 1)
+        if self._finish_height_anim_left <= 0:
+            self._finish_height_anim_until = 0.0
+        self._finish_height_anim_active = True
+        try:
+            self._height_anim.stop()
+            self._height_anim.setDuration(FINISH_HEIGHT_ANIM_MS)
+            self._height_anim.setStartValue(int(start_h))
+            self._height_anim.setEndValue(int(end_h))
+            self._height_anim.start()
+        except Exception:
+            # 动画不可用（对象已销毁等）：退回原有 snap 行为
+            self.setProperty("noContainerAnimation", True)
+            self._apply_viewer_height(end_h)
+            QTimer.singleShot(50, lambda: self.setProperty("noContainerAnimation", False))
+
     def _on_height_anim_state_changed(self, state):
         self._is_height_animating = state == QVariantAnimation.Running
         # 动画结束时触发一次高度变化信号，让父容器更新
@@ -13207,6 +14076,12 @@ class MessageCard(SimpleCardWidget):
             # 重发的是**已应用过**的高度，没有新的高度增量。必须清零，否则
             # 外层列表会拿上一次的残值再补偿一次 → 视口被重复拖拽。
             self._last_height_delta = 0
+            # 🆕 结束态高度缓动收尾：缓动过程中只做增量补偿（不触发整段滚底），
+            # 收尾时补一次 _content_just_loaded，让 main_widget 把视口真正钉到底
+            # （否则结束态会停在"补偿后的位置"而不是底部）。
+            if self._finish_height_anim_active:
+                self._finish_height_anim_active = False
+                self._content_just_loaded = True
             self.heightChanged.emit(self._last_applied_viewer_height)
             layout = self.layout()
             if layout:
@@ -13699,8 +14574,25 @@ class MessageCard(SimpleCardWidget):
                 try:
                     pooled.setParent(self)
                     pooled.setUpdatesEnabled(True)
+                    # 高度兜底复位：丢弃上一张卡片钉死的高度（长消息可达数千 px），
+                    # 避免骨架就绪前的窗口期显示成"巨高空白卡片"。
+                    pooled.setMinimumHeight(40)
+                    pooled.setFixedHeight(40)
+                    # 🐛 复用卡片空白防护：正常路径下 reset_for_reuse 会**保留骨架**
+                    # （只清空内容），JS 仍是就绪的，这里无需任何重载 —— 复用成本
+                    # 因此只剩一次轻量 DOM 清理（大会话加载时的内存/CPU 关键）。
+                    # 仅当骨架根本没加载成功（_is_js_ready=False，如首次加载被打断）
+                    # 才补一次 _load_skeleton，避免把 runJavaScript 打在空页上
+                    # （updateContent 不存在 → 静默失败 → 卡片永久空白）。
+                    if not getattr(pooled, "_is_js_ready", False):
+                        pooled._load_skeleton()
                     self.viewer = pooled
-                except RuntimeError:
+                except Exception:
+                    # 骨架重载失败（C++ 对象已删除等）：弃用该实例，回退新建
+                    try:
+                        pooled.deleteLater()
+                    except Exception:
+                        pass
                     self.viewer = None
             if self.viewer is None:
                 self.viewer = CodeWebViewer(self, light=is_welcome)
@@ -14557,6 +15449,8 @@ class MessageCard(SimpleCardWidget):
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     hr();
+                    // 预览文字打字机：预览文本更新后逐字补齐增量
+                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }} else {{
                     // text-only 模式下不存在块：不创建
                     if ({_text_only_js}) return;
@@ -14594,6 +15488,8 @@ class MessageCard(SimpleCardWidget):
                         if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
                     hr();
+                    // 预览文字打字机：新工具块的预览行逐字显现
+                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }}
             }})();
             """
@@ -14747,6 +15643,8 @@ class MessageCard(SimpleCardWidget):
                 }} else if (typeof reportHeight === 'function') {{
                     reportHeight();
                 }}
+                // 预览文字打字机：思考块转完成态时预览行逐字显现
+                if (typeof window._ptPlay === 'function') window._ptPlay();
             }})();
             """
             self.viewer.page().runJavaScript(js_code)
@@ -15071,7 +15969,21 @@ class MessageCard(SimpleCardWidget):
                 与"历史会话默认折叠"的产品预期冲突。历史卡片从未启动过
                 流式动画，跳过 stop_streaming_anim 无副作用。
         """
+        logger.info(f"[DBG-SCF] finish_streaming card={id(self) % 100000} history={history}")
         try:
+            # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
+            # 渐变边框/流动光点），与紧随其后的最终全量渲染抢主线程。
+            # 这里只停定时器，不改任何状态标记（仍由下方 stop_streaming_anim 收尾）。
+            try:
+                self._anim_timer.stop()
+            except RuntimeError:
+                pass
+            # 🆕 打开结束态高度缓动窗口：坞态归位 + 最终重排后卡片高度会一次收敛
+            # 数百 px，交由 _update_height 缓动（只服务一次，消费或超时即失效）。
+            # 历史会话加载（history=True）不打开——那是首帧建卡，无需过渡。
+            if not history:
+                self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
+                self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
                 self.viewer.finish_streaming(keep_dock=False if history else self._has_active_tools())
                 if hasattr(self.viewer, "_cleanup_render_cache"):
@@ -15296,10 +16208,10 @@ def _session_duration_days(created_at: str) -> int:
         return 0
     try:
         start = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         try:
             start = datetime.strptime(created_at[:10], "%Y-%m-%d")
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return 0
     return max((datetime.now() - start).days, 0)
 
@@ -15408,4 +16320,3 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block
-

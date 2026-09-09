@@ -1237,6 +1237,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 值越大回收越保守（减少 WebEngine 重建），值越小内存越低
         self._virtual_scroll_buffer = 1
         self._message_batch: List[List[Dict[str, Any]]] = []
+        # [T5-5] 节点→batch 映射缓存：(指纹, mapping)。指纹变化自动失效，
+        # 无需在各 _message_batch 变更点手动清理
+        self._node_batch_map_cache = None
         # 存储每个batch对应的UI卡片：None表示已回收（只存数据不存UI）
         self._batch_cards: List[Optional[List[MessageCard]]] = []
         # 卸载批次后留在原位的等高空白占位：batch_idx → spacer。
@@ -2649,6 +2652,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 清空批量渲染索引，防止虚拟滚动定时器触发的回收访问已移出布局的旧卡片
         self._batch_cards = []
         self._message_batch = []
+        self._node_batch_map_cache = None  # [T5-5] 指纹自动失效，此处显式重置双保险
         self._visible_batch_start = 0
         self._visible_batch_end = 0
         self._virtual_scroll_timer.stop()
@@ -2781,12 +2785,14 @@ class OpenAIChatToolWindow(ToolWindow):
         theme_manager.register_refresh_target(self)
         # 动态更新主题选项
         update_theme_options()
-        # 模块级 override 前置：必须在 compose 前注册 UI 插件，否则 register_ui_module
-        # (priority=100) 晚于 compose 生效，override 被系统版（priority=0）覆盖。
-        # 首帧后 _init_ui_plugins_deferred 仍会调用本方法，但 registry 单例已加载会跳过，
-        # 仅执行其后的命令重注册等窗口级初始化。
-        self._load_all_ui_plugins()
-        # Phase F：注册 5 个系统 UI 模块（瘦版占位；插件可 register_ui_module override）
+        # T5-2R：插件全量加载已移出首帧（首帧后 _init_ui_plugins_deferred 统一执行：
+        # 加载 + 命令重注册 + 浮动卡 handler + 输入区按钮 + 共享 Launcher 刷新补挂）。
+        # setup_ui 期间 compose 仅消费系统模块（_register_system_ui_modules 注册），
+        # 侧边栏/顶部 tab 的插件项由补挂的 _update_shared_launcher 延迟刷新。
+        # 已知边界：①插件欢迎卡首启不生效（构建期读取+按窗口缓存，切会话/软刷新恢复）；
+        # ②用户自定义插件若走 register_ui_module override 协议，延迟后 override 失效
+        # （compose 一次性），项目自带插件不受影响。
+        # Phase F：注册 5 个系统 UI 模块（瘦版占位）
         _register_system_ui_modules()
 
         layout = QVBoxLayout(self)
@@ -3327,6 +3333,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._build_plugin_input_buttons()
             except Exception as e:
                 logger.error(f"[MainWidget] 输入区插件按钮初始化失败: {e}")
+
+            # T5-2R: UI plugins load deferred; sidebar/titlebar built with empty
+            # registry during setup_ui, refresh here (idempotent chain)
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                _tm = TabManagerWindow.get_instance()
+                if _tm is not None:
+                    _tm._update_shared_launcher()
+            except Exception:
+                logger.exception("[UIPluginDeferred] Failed to refresh shared launcher")
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
 
@@ -3615,6 +3632,17 @@ class OpenAIChatToolWindow(ToolWindow):
             workdir = self._current_workdir.get(project, "")
             if workdir:
                 logger.debug(f"[_build_ui_context] workdir from _current_workdir cache: {workdir}")
+            elif project and self.backend and self.backend.memory_manager:
+                # 启动早期（首帧渲染早于 singleShot(0) 的 _sync_working_directory）
+                # 实例缓存与 tool_executor 尚未同步，从项目 DB 兜底恢复，
+                # 与 _resolve_project_workdir 的三级取值链一致。
+                try:
+                    workdir = self.backend.memory_manager.get_working_directory(project) or ""
+                except Exception:
+                    workdir = ""
+                if workdir:
+                    self._current_workdir[project] = workdir
+                    logger.debug(f"[_build_ui_context] workdir from project DB: {workdir}")
 
         if not workdir:
             logger.warning(
@@ -3703,8 +3731,84 @@ class OpenAIChatToolWindow(ToolWindow):
     # 创建/销毁都不再影响快捷键可用性。
     _window_shortcut_cache: Dict[int, list] = {}
 
-    def _register_command_shortcuts(self):
+    # 命令快捷键标记（用于按标记扫描残留，兜住缓存之外的孤儿）
+    _COMMAND_SHORTCUT_MARKER = "drifox_command_shortcut"
+
+    @classmethod
+    def _prune_marked_shortcuts(cls, parent) -> None:
+        """按标记摘除窗口上残留的命令 QShortcut（自愈缓存之外的孤儿）
+
+        _window_shortcut_cache 只能管住「它自己登记过」的对象。历史代码路径、
+        未来新增路径、以及本修复落地前已经产生的孤儿都不在缓存里，但同样会
+        与新建快捷键撞键序列触发 ambiguous。统一打标记后，任何一次 force
+        重建都会把窗口上所有带标记的旧快捷键清干净。
+        """
+        try:
+            from PyQt5.QtWidgets import QShortcut
+        except ImportError:
+            return
+        try:
+            candidates = parent.findChildren(QShortcut)
+        except RuntimeError:
+            return
+        for qs in candidates:
+            try:
+                if _is_sip_deleted(qs):
+                    continue
+                if not qs.property(cls._COMMAND_SHORTCUT_MARKER):
+                    continue
+                qs.setProperty(cls._COMMAND_SHORTCUT_MARKER, False)
+                qs.setEnabled(False)
+                try:
+                    qs.activated.disconnect()
+                    qs.activatedAmbiguously.disconnect()
+                except RuntimeError, TypeError:
+                    pass
+                qs.deleteLater()
+            except RuntimeError, AttributeError:
+                continue
+
+    @classmethod
+    def _destroy_window_command_shortcuts(cls, win_id: int) -> None:
+        """彻底销毁某窗口已注册的命令快捷键（含 C++ 对象）
+
+        ⚠️ 只做 `cls._window_shortcut_cache.clear()`（旧实现）是不够的：QShortcut 的
+        Qt 父对象是顶层窗口，Python wrapper 被回收并不会带走 C++ 对象，旧 QShortcut
+        仍注册在 Qt 的 QShortcutMap 中。此时重新注册会产生「同窗口 + 同键序列」的
+        多套 QShortcut → Qt 判定 ambiguous，只发 activatedAmbiguously()，
+        而处理器只连了 activated() → 全部命令快捷键静默失效（2026-09-08 故障：
+        任何一次命令热重载 / 快捷键管理器改绑之后，程序内快捷键全灭，只能重启恢复）。
+        """
+        cached = cls._window_shortcut_cache.pop(win_id, None)
+        if not cached:
+            return
+        for qs in cached:
+            try:
+                if _is_sip_deleted(qs):
+                    continue
+                # setEnabled(False) 同步把条目从 QShortcutMap 摘除；
+                # 只调 deleteLater() 不行（延迟删除，同一轮事件内新快捷键仍会撞上旧条目）
+                qs.setEnabled(False)
+                try:
+                    qs.activated.disconnect()
+                    qs.activatedAmbiguously.disconnect()
+                except RuntimeError, TypeError:
+                    pass
+                qs.deleteLater()
+            except RuntimeError, AttributeError:
+                continue
+
+    @classmethod
+    def _destroy_all_command_shortcuts(cls) -> None:
+        """销毁全部窗口的命令快捷键（命令表整体重建前调用）"""
+        for win_id in list(cls._window_shortcut_cache):
+            cls._destroy_window_command_shortcuts(win_id)
+
+    def _register_command_shortcuts(self, force: bool = False):
         """为所有有 shortcut 配置的命令注册 QShortcut
+
+        force=True 时先销毁该窗口已缓存的 QShortcut 再重建（命令表或快捷键
+        绑定变更后的正确姿势）；force=False 为幂等 ensure，缓存内对象存活即跳过。
 
         父对象取顶层窗口（self.window()）而非 self(MainWidget)：
         "替换(full)" 类卡片打开时 TabManagerWindow 会切换 QStackedWidget 隐藏对话区
@@ -3739,6 +3843,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 顶层窗口在覆盖层打开时仍可见，确保快捷键持续可触发
         shortcut_parent = self.window() or self
         win_id = id(shortcut_parent)
+
+        # ── 强制重建：命令/快捷键绑定变更后必须先销毁旧 QShortcut ──
+        if force:
+            OpenAIChatToolWindow._destroy_window_command_shortcuts(win_id)
+            # 二次兜底：按标记清理缓存之外的残留孤儿
+            OpenAIChatToolWindow._prune_marked_shortcuts(shortcut_parent)
 
         # ── 幂等 ensure：窗口已有存活的命令快捷键集合则直接复用 ──
         cached = OpenAIChatToolWindow._window_shortcut_cache.get(win_id)
@@ -3782,6 +3892,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 key_seq = cmd_def.shortcut
 
                 qs = QShortcut(QKeySequence(key_seq), shortcut_parent)
+                qs.setProperty(OpenAIChatToolWindow._COMMAND_SHORTCUT_MARKER, True)
 
                 name = cmd_def.name
 
@@ -7078,8 +7189,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _expand_provider_list_card(self):
         """展开服务商列表卡片"""
         try:
-            if hasattr(self._settings_popup, "llmProviderCard"):
-                self._settings_popup.llmProviderCard.toggleExpand()
+            # 设置卡片首屏已默认展开服务商列表，此处只在未展开时补展开（避免又被收起）
+            card = getattr(self._settings_popup, "llmProviderCard", None)
+            if card is not None and not getattr(card, "isExpand", False):
+                card.toggleExpand()
         except Exception:
             pass
 
@@ -9053,6 +9166,8 @@ class OpenAIChatToolWindow(ToolWindow):
         scroll_area = getattr(self, "chat_scroll_area", None)
         if not scroll_area:
             return
+        # 观测：稳态下的并发渲染页 / 复用池占用（内部自带 2s 节流）
+        self._log_render_quota("scroll")
 
         viewport_rect = scroll_area.viewport().rect()
         viewport_top = scroll_area.verticalScrollBar().value()
@@ -9494,16 +9609,20 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 命令变更：同步刷新快捷键绑定
         if result.get("commands"):
-            # 清除窗口级快捷键缓存，允许重新注册
-            OpenAIChatToolWindow._window_shortcut_cache.clear()
+            # ⚠️ 不能用 _window_shortcut_cache.clear() 代替：那只丢 Python 引用，
+            # C++ QShortcut 仍留在 QShortcutMap，重建后同键序列多套 → Qt 判
+            # ambiguous → activated() 永不触发（快捷键全灭，仅重启可恢复）。
+            OpenAIChatToolWindow._destroy_all_command_shortcuts()
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
-                    win._register_command_shortcuts()
+                    win._register_command_shortcuts(force=True)
                 except RuntimeError, AttributeError:
                     pass
+            logger.debug("[HotReload] 命令快捷键已重建（先销毁旧 QShortcut 再注册）")
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
+        # ⚠️ 本分支不重建命令快捷键（命令表没变）；只有上面的 commands 分支才重建。
         if result.get("ui"):
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
@@ -9558,7 +9677,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 tray._setup_global_hotkey()
             except Exception:
                 pass
-            logger.debug("[HotReload] command shortcuts re-registered")
 
         # 技能变更：刷新技能列表（settings popup + 卡片 token 估算）
         # 注意：settings popup 是全局共享单例（所有窗口通过 property 访问同一实例），
@@ -11182,8 +11300,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if fn is None:
             return False
         try:
-            return bool(fn())
-        except Exception:
+            ok = bool(fn())
+            if not ok:
+                # 观测：池化为什么没发生（release=0 时靠这行定位）
+                logger.debug(
+                    f"[pool-detach] 未池化 role={getattr(card, 'role', None)} "
+                    f"streaming={getattr(card, '_streaming', None)} "
+                    f"lazy_rendered={getattr(card, '_lazy_rendered', None)} "
+                    f"viewer={type(getattr(card, 'viewer', None)).__name__}"
+                )
+            return ok
+        except Exception as _e:
+            logger.debug(f"[pool-detach] 异常：{_e!r}")
             return False
 
     def _unload_batch(self, batch_idx: int) -> int:
@@ -11362,6 +11490,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     f"_rendered_card_count={self._rendered_card_count}/{quota}"
                     f" (global={_global_rendered_pages}/{_MAX_GLOBAL_RENDERED_PAGES})"
                 )
+                # 观测：回收后并发页数与复用池占用（判断是否真的回收下来了）
+                self._log_render_quota("recycle")
         finally:
             self._is_virtual_recycling = False
 
@@ -11863,6 +11993,7 @@ class OpenAIChatToolWindow(ToolWindow):
         return is_widget_alive(widget)
 
     def _restore_cached_session_cards(self, session: ChatSession) -> bool:
+        """缓存仅存元信息，恒走全量重建（本方法恒返回 False）。"""
         if not session.messages:
             return False
 
@@ -11894,43 +12025,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 轻量快照只保留元信息，实际恢复仍由 session.messages 重建
         return False
-
-        alive_cards, removed = filter_alive_cards(cached_cards)
-        if removed:
-            self._session_card_cache.pop(session.session_id, None)
-        if not alive_cards:
-            return False
-
-        self._clear_chat_area(delete_widgets=False)
-        for card in alive_cards:
-            self._add_chat_widget(card)
-        self._displayed_session_id = session.session_id
-        # 关键修复：同步 _current_session_id 与实际显示的会话
-        self._current_session_id = session.session_id
-        self._current_assistant_card = alive_cards[-1] if alive_cards and alive_cards[-1].role == "assistant" else None
-        self._message_batch = group_messages_for_display(session.messages)
-        # 重建 user 前缀和缓存（用于 O(1) 的 round_index 计算）
-        self._build_user_prefix_cache()
-        # 同步 _batch_cards 长度
-        self._sync_batch_structures()
-        # 从缓存卡片的 _message_index 重建 _batch_cards 引用（缓存卡片已有正确的索引）
-        for card in alive_cards:
-            mi = getattr(card, "_message_index", None)
-            if mi is not None and 0 <= mi < len(self._batch_cards):
-                if self._batch_cards[mi] is None:
-                    self._batch_cards[mi] = []
-                if card not in self._batch_cards[mi]:
-                    self._batch_cards[mi].append(card)
-        self._visible_batch_start = max(0, int(cache_entry.get("visible_batch_start", 0)))
-        self._visible_batch_end = min(
-            len(self._message_batch),
-            int(cache_entry.get("visible_batch_end", len(self._message_batch))),
-        )
-        # 延迟恢复所有助手卡片的差异统计（避免文件 I/O 阻塞首屏）
-        for card in alive_cards:
-            if card.role == "assistant":
-                QTimer.singleShot(0, lambda c=card: self._update_card_diff_stats(c))
-        return True
 
     def _collect_welcome_sessions(self):
         """收集欢迎卡片会话列表数据（按当前项目过滤，剔除团队会话）
@@ -12539,6 +12633,43 @@ class OpenAIChatToolWindow(ToolWindow):
             self._lazy_batch_timer_active = True
             QTimer.singleShot(0, self._process_next_lazy_batch)
 
+    # 渲染配额打点的最小间隔（秒）：事件密集（滚动/懒渲染/回收）时避免刷屏
+    RENDER_QUOTA_LOG_MIN_INTERVAL = 2.0
+
+    def _log_render_quota(self, reason: str) -> None:
+        """渲染配额 / 池化占用打点（自带 2s 节流）。
+
+        用于回答"加载大会话内存为什么涨"：并发渲染页数是否超配额、批次是否
+        没被回收、复用池里囤了多少常驻 Chromium 实例。
+        日志形如：
+        ``[render-quota] <reason> rendered=… quota=… global=…/… batches=总/非空
+        pool(full/light)=…/… stats={…}``
+        """
+        now = time.time()
+        if now - getattr(self, "_last_quota_log_at", 0.0) < self.RENDER_QUOTA_LOG_MIN_INTERVAL:
+            return
+        self._last_quota_log_at = now
+        try:
+            from app.widgets.webview_pool import WebViewPool
+
+            pool = WebViewPool.get_instance()
+            stats = pool.stats
+            pool_full, pool_light = pool.size(light=False), pool.size(light=True)
+        except Exception:
+            stats, pool_full, pool_light = {}, -1, -1
+        try:
+            batches = getattr(self, "_batch_cards", None) or []
+            non_empty = sum(1 for b in batches if b)
+            logger.info(
+                f"[render-quota] {reason} rendered={self._rendered_card_count} "
+                f"quota={self._effective_max_rendered_cards()} "
+                f"global={_global_rendered_pages}/{_MAX_GLOBAL_RENDERED_PAGES} "
+                f"batches={len(batches)}/{non_empty} "
+                f"pool(full/light)={pool_full}/{pool_light} stats={stats}"
+            )
+        except Exception:
+            pass
+
     def _process_next_lazy_batch(self):
         """批量懒渲染：16ms 时间片内处理尽量多卡片，减少 WebEngine 创建开销
 
@@ -12609,6 +12740,8 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(80, self._process_next_lazy_batch)
         else:
             self._loading_session = False
+            # 懒渲染队列排空：打一次配额/池化占用（加载大会话的观测点）
+            self._log_render_quota("lazy-drained")
             self._lazy_batch_timer_active = False
             # 🐛 修复：所有懒渲染批次完成后，卡片仍在异步报告高度，
             # layout 持续扩展但不再触发滚底。用 sticky 模式在接下来
@@ -13889,38 +14022,43 @@ class OpenAIChatToolWindow(ToolWindow):
         - _message_batch 中最后一个 user batch 也生成节点（trailing check）
 
         返回: mapping[node_index] = batch_index
+
+        [T5-5] 滚动 tick 内高频调用。原实现对每个 user batch 向后线性扫描
+        配对（O(B²)）；现改为指纹缓存 + 倒序单 pass：命中走 O(B) 指纹校验
+        （小常数，消除重建 O(B²) 尖峰），失效重建 O(B)。
+        指纹 = 各 batch 首消息 role 序列（映射输出仅依赖它）。
         """
+        batches = self._message_batch
+        fingerprint = tuple(b[0].get("role") if b else None for b in batches)
+        cache = self._node_batch_map_cache
+        if cache is not None and cache[0] == fingerprint:
+            return cache[1]
+
         mapping = []
         last_user_batch_idx = -1
-
-        for idx, batch in enumerate(self._message_batch):
-            if not batch:
-                continue
-            if batch[0].get("role") != "user":
-                continue
-
-            last_user_batch_idx = idx
-
-            # 检查当前 user batch 之后是否有配对的 assistant/tool batch
-            has_paired = False
-            for next_idx in range(idx + 1, len(self._message_batch)):
-                next_batch = self._message_batch[next_idx]
-                if not next_batch:
-                    continue
-                next_role = next_batch[0].get("role")
-                if next_role in ("assistant", "tool"):
-                    has_paired = True
-                    break
-                if next_role == "user":
-                    break  # 在 assistant 前遇到另一个 user → 无配对
-
-            if has_paired:
-                mapping.append(idx)
+        # 倒序单 pass：decisive_after = i 之后首个 role ∈ {assistant, tool, user}
+        # 的 batch 的 role。与旧扫描语义一致：空 batch 与 role 为 None/其他值的
+        # batch 不参与配对判定也不终止扫描（继续向后找）。
+        decisive_after = None
+        for i in range(len(batches) - 1, -1, -1):
+            batch = batches[i]
+            role = batch[0].get("role") if batch else None
+            if role == "user":
+                # 倒序遍历：首个遇到的 user 即最大 index（last_user），
+                # 后续（更小 index）的 user 不得覆盖
+                if last_user_batch_idx < 0:
+                    last_user_batch_idx = i
+                if decisive_after in ("assistant", "tool"):
+                    mapping.append(i)
+            if role in ("assistant", "tool", "user"):
+                decisive_after = role
+        mapping.reverse()
 
         # 最后一个 user（即使是无配对的）也生成节点
         if last_user_batch_idx >= 0 and (not mapping or mapping[-1] != last_user_batch_idx):
             mapping.append(last_user_batch_idx)
 
+        self._node_batch_map_cache = (fingerprint, mapping)
         return mapping
 
     def _get_batch_index_from_node_index(self, node_index: int) -> int:
@@ -14151,9 +14289,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 所以 `_do_scroll_to_bottom` 里不需要（也绝不能再）手动复位。
         # 旧实现 `elif scroll_bar.maximum() > 0` 在「内容不足一屏」(maximum==0)
         # 时不复位，会把 away 永久卡在 True —— 这里用 _is_view_at_bottom 覆盖。
-        if self._is_view_at_bottom():
+        # 🐛 加载期（_loading_session）滚动条 value 会被 B4 回收补偿等程序路径
+        # 移动，且 maximum 因卡片高度异步上报持续增长 ——「此刻不在底部」不代表
+        # 用户意图。此窗口置位 away 会让批次置底/最后卡救场/排空 sticky 全链
+        # 静默失效（加载停在消息列表中间的根因），故只允许复位不允许置位。
+        if self._is_view_at_bottom() or self._loading_session:
             self._user_intentionally_away_from_bottom = False
-        else:
+        elif not self._loading_session:
             self._user_intentionally_away_from_bottom = True
         if value <= self._history_load_threshold:
             self._load_more_history_batches()
@@ -15496,7 +15638,30 @@ class OpenAIChatToolWindow(ToolWindow):
             True = 视口在底部附近（或内容不足一屏，无处可滚）。
         """
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        self._sync_scroll_maximum()
         return scroll_bar.maximum() - scroll_bar.value() <= tolerance
+
+    def _sync_scroll_maximum(self) -> int:
+        """把滚动条上界校正到**真实**内容高度，返回校正后的 maximum。
+
+        🐛 卡片 `setFixedHeight` 之后，Qt 布局要到下一次事件循环才传播：这段窗口里
+        `container.height()` 与 `scrollBar.maximum()` 都还是旧值（实测滞后可达数千
+        px —— 流式结束那一次高度收敛会让视口停在消息列表中间）。而
+        `layout.sizeHint()` 是即时计算的，可以拿来当真实内容高度。
+
+        只**抬高**不压低：Qt 随后自己算出的上界会覆盖它，不会互相打架。
+        """
+        scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        try:
+            container = self.chat_scroll_area.widget()
+            if container is None:
+                return scroll_bar.maximum()
+            real = container.sizeHint().height() - self.chat_scroll_area.viewport().height()
+            if real > scroll_bar.maximum():
+                scroll_bar.setMaximum(max(0, real))
+        except RuntimeError:
+            pass
+        return scroll_bar.maximum()
 
     def _should_follow_bottom(self) -> bool:
         """程序是否应该把视口拽回底部。
@@ -15573,7 +15738,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._pending_scroll_to_bottom:
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        max_val = scroll_bar.maximum()
+        max_val = self._sync_scroll_maximum()
+        logger.info(f"[DBG-SCF] do_bottom value={scroll_bar.value()} max={max_val}")
         scroll_bar.setValue(max_val)
         # 再次设置确保卡片高度变化后仍在底部
         scroll_bar.setValue(max_val)
@@ -15612,6 +15778,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._should_follow_bottom():
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        self._sync_scroll_maximum()
+        logger.info(
+            f"[DBG-SCF] ensure value={scroll_bar.value()} max={scroll_bar.maximum()} "
+            f"atbottom={self._is_view_at_bottom()} retries={retries} follow={self._should_follow_bottom()}"
+        )
         if not self._is_view_at_bottom():
             scroll_bar.setValue(scroll_bar.maximum())
             # 懒渲染可能需要更长时间，延迟再次检查
@@ -15629,6 +15800,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._bottom_anchor_deadline <= time.monotonic():
             self._bottom_anchor_deadline = 0.0
             self._suppress_scroll_sync_count = 0
+            # 🐛 anchor 到期 ≠ 卡片高度稳定：WebEngine 高度异步上报可能晚于
+            # sticky 窗口（大会话/慢机器常态），视口随后被顶离底部且无人再
+            # 追平 → 「加载历史会话偶尔停在消息列表中间」。到期接力与非
+            # sticky 路径（_do_scroll_to_bottom else 分支）同款的
+            # _ensure_at_bottom 兜底窗口；away 守卫保证不打扰用户主动阅读。
+            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         scroll_bar.setValue(scroll_bar.maximum())
@@ -15675,11 +15852,16 @@ class OpenAIChatToolWindow(ToolWindow):
             container = self.chat_scroll_area.widget()
             if delta and container is not None and sender.parentWidget() is container:
                 sb = self.chat_scroll_area.verticalScrollBar()
+                self._sync_scroll_maximum()
                 value = sb.value()
                 card_top = sender.mapTo(container, sender.rect().topLeft()).y()
                 card_bottom = card_top + sender.height()
                 if card_bottom <= value or self._should_follow_bottom():
                     sb.setValue(max(0, value + delta))
+                    logger.info(
+                        f"[DBG-SCF] comp card={id(sender) % 100000} delta={delta} "
+                        f"value={value} max={sb.maximum()} newvalue={sb.value()}"
+                    )
         except RuntimeError:
             pass
         if not sender._content_just_loaded:
@@ -21382,7 +21564,11 @@ _gc_hook_pending = False
 # 每渲染卡 ~64MB renderer 进程，长对话必须锁峰值：
 # 温和层：并发页 ≤ _MAX_RENDERED_CARDS（18 = 可视 12 批 + 上下 6 批缓冲）。
 # 强回收层（kill 离屏 renderer）依赖 message_card 的 renderer_pid 记录，暂缓。
-_MAX_RENDERED_CARDS = 18
+# 2026-09-09 内存治理：18 → 12（可视 ~8 批 + 上下 4 批缓冲）。真机日志显示
+# 大会话（60+ 批次）内存主体是**并发 WebEngine 页数**而非单卡 HTML 体积
+# （单卡 DOM 数百 KB vs 每页数十 MB 常驻），砍 6 页 ≈ 直接省下数百 MB，
+# 且历史渲染已异步化，回滚重建不再阻塞主线程。
+_MAX_RENDERED_CARDS = 12
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
 
 # ── B4 温和层：跨窗口全局渲染页闸门 ──

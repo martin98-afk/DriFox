@@ -22,6 +22,7 @@ from typing import List, Optional
 
 from PyQt5.QtCore import QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from qfluentwidgets import SmoothScrollDelegate
 from PyQt5.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -481,6 +482,7 @@ class TurnListWidget(QWidget):
         # 无横向滚动概念）——显式关掉横向滚动条，防 sizeHint 回归再引入横滚。
         self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._list.currentRowChanged.connect(self._on_current_row_changed)
+        SmoothScrollDelegate(self._list)  # 平滑滚动（与主程序同款引擎）
         outer.addWidget(self._list, 1)
 
         # 空态提示（无脚本运行时）

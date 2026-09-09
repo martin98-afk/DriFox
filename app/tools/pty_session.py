@@ -37,15 +37,18 @@ from app.tools.process_job import ProcessJob
 DEFAULT_TIMEOUT = 300.0  # 单条命令默认超时（秒）
 _IDLE_POLL = 0.05        # 读循环轮询间隔（秒）
 
+# ANSI 清洗与提示符匹配正则：模块级预编译（T4d M2，避免高频调用重复编译）
+_RE_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")          # CSI 序列: ESC [ ... letter
+_RE_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")  # OSC 序列: ESC ] ... (BEL | ESC \)
+_RE_ANSI_SINGLE = re.compile(r"\x1b[()][0-9A-Za-z]")          # 单字符引入序列（如 ESC ( B 字符集切换）
+_RE_PROMPT_LINE = re.compile(r"^[A-Za-z]:\\[^>]*>\S*")        # 提示符行/提示符+命令回显粘连（如 D:\path>echo x）
+
 
 def _strip_ansi(text: str) -> str:
     """去除终端 ANSI 转义序列（颜色/光标定位/窗口标题等），保留可读文本"""
-    # CSI 序列: ESC [ ... letter（颜色、光标定位、模式切换）
-    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
-    # OSC 序列: ESC ] ... (BEL | ESC \) — 如窗口标题 \x1b]0;...\x1b\\
-    text = re.sub(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)", "", text)
-    # 单字符引入序列（如 ESC ( B 字符集切换）
-    text = re.sub(r"\x1b[()][0-9A-Za-z]", "", text)
+    text = _RE_ANSI_CSI.sub("", text)
+    text = _RE_ANSI_OSC.sub("", text)
+    text = _RE_ANSI_SINGLE.sub("", text)
     return text
 
 
@@ -243,7 +246,7 @@ class PtyShellSession:
                 continue
             if s == command.strip() or s.startswith(command.strip()[:40]):
                 continue
-            if re.match(r"^[A-Za-z]:\\[^>]*>\S*", s):  # 提示符行/提示符+命令回显粘连（如 D:\path>echo x）
+            if _RE_PROMPT_LINE.match(s):  # 提示符行/提示符+命令回显粘连（如 D:\path>echo x）
                 continue
             if "echo " in s and token in s:
                 continue
