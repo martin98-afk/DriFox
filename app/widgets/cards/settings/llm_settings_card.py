@@ -929,9 +929,13 @@ class LLMSettingsCard(SystemCardFrame):
 
     @staticmethod
     def _resolve_nav_icon(icon_src) -> QIcon:
-        """导航图标源 → QIcon：字符串走主题感知资源图标，FluentIcon 枚举走内置图标"""
+        """导航图标源 → QIcon：字符串走主题感知资源图标，FluentIcon 枚举走动态主题图标"""
         if isinstance(icon_src, str):
             return get_icon(icon_src)
+        # FluentIconBase.icon() 在调用瞬间把当前主题烧进静态 QIcon（文件名含颜色），
+        # 主题切换后颜色不更新；qicon() 返回 FluentIconEngine 动态包装，绘制时按主题取色
+        if hasattr(icon_src, "qicon"):
+            return icon_src.qicon()
         return icon_src.icon() if hasattr(icon_src, "icon") else icon_src
 
     def _make_page(self) -> tuple:
