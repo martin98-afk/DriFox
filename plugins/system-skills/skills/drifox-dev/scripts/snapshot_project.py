@@ -32,13 +32,17 @@ from pathlib import Path
 # 路径相对于 DriFox 项目根目录
 KEY_FILES = [
     "app/main_widget.py",
+    "app/widgets/message_card.py",
+    "app/widgets/tab_manager_window.py",
+    "app/widgets/webview_pool.py",
     "app/core/backend.py",
     "app/core/workers/chat_worker.py",
     "app/core/hook_manager.py",
-    "app/core/plugin_manager.py",
-    "app/tools/__init__.py",
-    "app/core/lsp/lsp_manager.py",
-    "app/gateway/manager.py",
+    "app/core/conversation/executor.py",
+    "app/plugins/kernel.py",
+    "app/plugins/registries/ui_plugin_registry.py",
+    "app/tools/registry.py",
+    "plugins/assistant_hub/assistant_manager.py",
 ]
 
 # 最多保留的最近 commit 数

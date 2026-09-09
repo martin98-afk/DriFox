@@ -124,6 +124,7 @@ python scripts/snapshot_project.py --project-root D:/work/DriFox
 | **遇到不确定但暂不深究** | `question ...`（默认 non-blocking）|
 | **缺回答就推不动** | `question ... --blocking` |
 | **完成任务 / 切换任务** | `focus --clear` |
+| **坑点库满 50 条** | 先归档：把已沉淀进 `known-pitfalls.md` 的老条目删掉，再写新的 |
 | **上下文长任务** | 中途 `snapshot_project.py` 刷新 |
 
 ## 五、API 用法（Python 模块）
@@ -149,3 +150,17 @@ from snapshot_project import take_snapshot, update_snapshot
 4. **去重 / 限额**：坑点 50 / 决策 50 / 问题 20
 5. **动态事实由脚本采集**：AI 不手抄会过期的事实
 6. **优雅降级**：模板 / 锁 / 迁移 / 网络任何环节失败不阻塞主流程
+
+---
+
+## 七、保鲜与归档
+
+| 事项 | 做法 |
+|------|------|
+| 快照过期 | `auto_snapshot.last_updated` 为空或超过 1 天 → 跑 `snapshot_project.py` |
+| 快照字段失效 | `key_files_lines` 出现 `null` → 文件已移动/改名，改 `scripts/snapshot_project.py` 的 `KEY_FILES` |
+| 坑点满了 | 按 `module` 聚类和并：把同类坑提炼成一条模式写进 `known-pitfalls.md`，再从 state.json 删掉原条目 |
+| 决策过期 | 代码已重构 / 方案已替换 → 更新 `recent_decisions` 对应条目 |
+| 焦点残留 | 上次会话没 `focus --clear` → 新任务开始时直接 `focus` 覆盖 |
+
+**写坑点的标准**：`symptom` 带数字或可观测现象，`cause` 具体到函数/机制，`fix` 可复用。只写现象不写根因的条目等于噪音。
