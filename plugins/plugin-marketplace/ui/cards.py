@@ -336,7 +336,7 @@ def _ast_calls(py_file: Path) -> list:
     """
     try:
         tree = ast.parse(py_file.read_text(encoding="utf-8"))
-    except SyntaxError, ValueError, OSError:
+    except (SyntaxError, ValueError, OSError):
         return []
     return [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
 
@@ -5866,7 +5866,7 @@ class MarketplaceCard(QWidget):
         """卡片 C++ 对象是否存活（销毁后迟到回调防护）"""
         try:
             return not sip.isdeleted(self)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             return False
 
     def _orphan_worker_thread(self, thread):

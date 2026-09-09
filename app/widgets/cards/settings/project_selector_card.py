@@ -518,18 +518,6 @@ class ProjectSelectorCardContent(QWidget):
         event.ignore()
 
     # ── 拖拽视觉反馈 ──
-    def _show_drop_indicator(self, visible: bool):
-        """拖拽悬停时的视觉反馈（可在此添加背景色等效果）"""
-        if visible:
-            self._scroll_area.setStyleSheet(
-                self._scroll_area.styleSheet()
-                + """
-                QScrollArea { background: rgba(255, 255, 255, 30); border: 2px dashed #4a9eff; }
-            """
-            )
-        else:
-            self.refresh_style()
-
     def refresh_style(self):
         """刷新主题样式（含滚动条颜色）"""
         Colors.refresh()

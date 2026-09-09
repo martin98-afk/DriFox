@@ -70,7 +70,7 @@ def decode_chart_payload(payload_b64: str) -> str:
     """b64 → UTF-8 文本（与卡片内 TextDecoder('utf-8') 等价）；非法输入返回空串"""
     try:
         return base64.b64decode(payload_b64).decode("utf-8")
-    except binascii.Error, ValueError, UnicodeDecodeError:
+    except (binascii.Error, ValueError, UnicodeDecodeError):
         return ""
 
 
@@ -499,7 +499,7 @@ class ChartViewerCard(BaseSettingsCard):
     def _on_load_finished(self, ok: bool):
         try:
             self._webview.loadFinished.disconnect(self._on_load_finished)  # type: ignore[attr-defined]
-        except TypeError, RuntimeError:
+        except (TypeError, RuntimeError):
             pass
         self._export_ready = bool(ok)
 

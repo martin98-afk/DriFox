@@ -2913,73 +2913,7 @@ class HookManager:
         except Exception as e:
             logger.error(f"Failed to reload global hooks: {e}")
 
-    def reload_all_plugin_hooks(self):
-        """重新加载所有已启用插件的 hooks（不碰 user-custom 全局 hooks）
 
-        用于卡片 _save_hooks() 后同步插件 hooks 的最新文件内容。
-        """
-        try:
-            from app.plugins.managers.plugin_manager import PluginManager
-
-            pm = PluginManager.get_instance()
-            if not pm.is_initialized():
-                return
-            for plugin in pm.get_enabled_plugins():
-                if plugin.name == "user-custom":
-                    # user-custom 由 reload_global_hooks 单独管理，跳过
-                    continue
-                hooks_dir = plugin.path / "hooks"
-                hooks_file = hooks_dir / "hooks.json"
-                if not hooks_dir.exists() or not hooks_dir.is_dir():
-                    continue
-                # 先注销旧的，清除去重缓存
-                self.unregister_skill_hooks(plugin.name)
-                if hooks_file.exists():
-                    self._clear_config_watcher(str(hooks_file))
-                # D9：hooks 组件整类停用时只卸载、不重新注册
-                # （细项级停用走 trigger_event 的 hook id 过滤，无需重载）
-                if not pm.is_component_enabled(plugin.name, "hooks"):
-                    logger.debug(f"[HookManager] hooks 组件已停用，跳过重载: {plugin.name}")
-                    continue
-                # 重新注册
-                count = self.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
-                if count > 0:
-                    logger.debug(f"[HookManager] Reloaded {count} hooks for plugin {plugin.name}")
-        except Exception as e:
-            logger.error(f"[HookManager] Failed to reload all plugin hooks: {e}")
-
-    def load_hooks_from_directory(self, agents_dir: Path, is_system_plugin: bool = False) -> int:
-        """从 agents_dir 子目录加载 hooks.json (agents/{name}/hooks/hooks.json)
-
-        Args:
-            agents_dir: agents 目录路径
-            is_system_plugin: 是否来自系统内置插件（plugins/ 内置 system 族插件），标记的 hook 在 UI 上禁止删除
-        """
-        count = 0
-        if not agents_dir.exists():
-            return count
-
-        for agent_dir in agents_dir.iterdir():
-            if not agent_dir.is_dir():
-                continue
-            hooks_file = agent_dir / "hooks" / "hooks.json"
-            if hooks_file.exists():
-                try:
-                    with open(hooks_file, "r", encoding="utf-8") as f:
-                        config = json.load(f)
-                    n = self.register_hooks_from_json(
-                        agent_dir.name,
-                        str(agent_dir.absolute()),
-                        config,
-                        str(hooks_file),
-                        is_system_plugin=is_system_plugin,
-                    )
-                    count += n
-                    if n > 0:
-                        logger.info(f"[HookManager] Loaded {n} hooks from {agent_dir.name}")
-                except Exception as e:
-                    logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
-        return count
 
     def load_hooks_from_directory_flat(
         self, dir_path: Path, skill_name: str = None, is_system_plugin: bool = False

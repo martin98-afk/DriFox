@@ -80,17 +80,6 @@ class ToolNameMapper(metaclass=_ToolNameMapperMeta):
         cls._reverse_version = version
         return reverse
 
-    @classmethod
-    def known_names(cls) -> List[str]:
-        """获取全部已知工具名（registry 驱动，供 hook 设置卡片下拉等使用）"""
-        try:
-            from app.tools import _ensure_plugin_tools_loaded
-            from app.tools.registry import ToolRegistry
-
-            _ensure_plugin_tools_loaded()  # [PERF] 首读前确保插件工具已加载（幂等）
-            return ToolRegistry.get_instance().names()
-        except Exception:
-            return sorted(cls._build_alias_map().keys())
 
     @classmethod
     def to_native(cls, name: str) -> str:

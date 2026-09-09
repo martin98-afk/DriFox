@@ -16,11 +16,6 @@ from app.widgets.cards.settings.plugin_config_card import (
 )
 
 
-@pytest.fixture(scope="module")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
 
 @pytest.fixture()
 def schema_env(tmp_path, monkeypatch):

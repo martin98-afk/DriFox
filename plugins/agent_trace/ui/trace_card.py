@@ -547,7 +547,7 @@ class TraceCardWidget(QWidget):
         ):
             try:
                 getattr(self._collector, sig).disconnect(slot)
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def _bind_backend_stats_signals(self, main_widget: Any) -> None:
@@ -582,7 +582,7 @@ class TraceCardWidget(QWidget):
                 continue
             try:
                 sig.disconnect(slot)
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     # ──────────────────── collector 信号 → UI ────────────────────

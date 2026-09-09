@@ -50,15 +50,6 @@ class _RotatingIcon(QWidget):
         self.update()
         self._redraw()
 
-    def set_svg_path(self, svg_path: str):
-        """切换 SVG 资源（用于主题切换）"""
-        if svg_path == self._svg_path:
-            return
-        self._svg_path = svg_path
-        self._renderer = QSvgRenderer(svg_path)
-        self._redraw()
-        self.update()
-
     def set_tint(self, color: str = None):
         """设置主题叠加色（用于浅色主题下加深图标）"""
         self._tint = color
@@ -85,9 +76,6 @@ class _RotatingIcon(QWidget):
                 tp.fillRect(self._last_pixmap.rect(), QColor(self._tint))
             finally:
                 tp.end()
-
-    def current_pixmap(self) -> QPixmap:
-        return self._last_pixmap
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -421,14 +409,6 @@ class _AgentTaskRow(QFrame):
         self.time_label.setText(f"⏱{time_str}")
         if self._elapsed_label_detail:
             self._elapsed_label_detail.setText(time_str)
-
-    def clear_icon(self):
-        """清空图标"""
-        self._rotating_icon.setVisible(False)
-        if hasattr(self, "_success_label"):
-            self._success_label.setVisible(False)
-        if hasattr(self, "_error_label"):
-            self._error_label.setVisible(False)
 
     # ── 样式刷新 ──────────────────────────────────────
 
@@ -965,12 +945,6 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._body_layout.removeWidget(row)
         row.deleteLater()
         self._reflow()
-
-    def set_task_model(self, task_id: str, model_name: str):
-        """设置任务的模型名称（运行时更新）"""
-        row = self._task_rows.get(task_id)
-        if row:
-            row.set_model_name(model_name)
 
     def set_task_context(self, task_id: str, info: str):
         """设置任务的上下文用量信息"""

@@ -214,15 +214,6 @@ class AggregatedCacheStats:
             return 0.0
         return self.cache_hits / self.requests
 
-    @property
-    def cache_savings_rate(self) -> float:
-        """缓存节省率"""
-        if self.cache_read_tokens == 0:
-            return 0.0
-        total_writes = self.cache_creation_5m_tokens + self.cache_creation_1h_tokens
-        if total_writes == 0:
-            return 0.0
-        return self.cache_read_tokens / (self.cache_read_tokens + total_writes * 0.1) * 100
 
     def cost_usd(self, model: str = "") -> float:
         prices = _get_pricing(model)
@@ -349,10 +340,6 @@ class CacheHitRateTracker:
         self._last_model = ""
         logger.info("[CacheTracker] Session started")
 
-    def end_session(self) -> AggregatedCacheStats:
-        stats = self._session_stats
-        logger.info(f"[CacheTracker] Session ended - {stats.summary()}")
-        return stats
 
     def set_provider_hooks(self, semantics: str = "", normalizer=None) -> None:
         """注入服务商插件的缓存 usage 处理钩子（ProviderDef.usage_semantics/usage_normalizer）。
@@ -541,13 +528,8 @@ class CacheHitRateTracker:
     def get_current_hit_rate(self) -> float:
         return self._session_stats.hit_rate
 
-    def get_current_per_request_hit_rate(self) -> float:
-        return self._session_stats.per_request_hit_rate
 
-    def get_current_total_input_hit_rate(self) -> float:
-        return self._session_stats.total_input_hit_rate
 
-    def get_hit_rate_display(self) -> str:
         """多维度命中率显示"""
         parts = []
         tr = self._session_stats.hit_rate
@@ -565,16 +547,8 @@ class CacheHitRateTracker:
         """设置当前使用的模型"""
         self._last_model = model
 
-    def get_last_model(self) -> str:
-        return self._last_model
 
 
-# 全局单例（可选）
 _global_tracker: Optional[CacheHitRateTracker] = None
 
 
-def get_global_tracker() -> CacheHitRateTracker:
-    global _global_tracker
-    if _global_tracker is None:
-        _global_tracker = CacheHitRateTracker()
-    return _global_tracker

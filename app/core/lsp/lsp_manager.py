@@ -318,8 +318,6 @@ class LspManager:
             return None
         return self._clients.get(server_name)
 
-    def get_client_by_name(self, name: str) -> Optional[LspClient]:
-        return self._clients.get(name)
 
     # ── 同步接口（供 lsp_tools.py 调用）────────────────────────
 

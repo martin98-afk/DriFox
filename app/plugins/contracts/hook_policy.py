@@ -58,12 +58,6 @@ class HookEvent(ABC):
     """
 
 
-@dataclass
-class BuildSystemPromptEvent(HookEvent):
-    """系统 prompt 构建前触发"""
-
-    current_role: str = "primary"  # primary / subagent
-    agent_name: str = ""
 
 
 @dataclass
@@ -76,12 +70,6 @@ class SessionStartEvent(HookEvent):
     agent_name: str = ""
 
 
-@dataclass
-class UserPromptSubmitEvent(HookEvent):
-    """用户提问提交触发"""
-
-    message: str = ""
-    is_team_member: bool = False
 
 
 @dataclass

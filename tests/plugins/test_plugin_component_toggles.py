@@ -231,13 +231,3 @@ def test_section_forwards_plugin_name(qapp):
     section.component_row("tools").switch.setChecked(False)
     assert got == [("demo", "tools", False)]
 
-
-@pytest.fixture
-def qapp():
-    """最小 QApplication（细项行是 QWidget，实例化必须有 app）"""
-    from PyQt5.QtWidgets import QApplication
-
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication([])
-    yield app

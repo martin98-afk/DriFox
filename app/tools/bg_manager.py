@@ -375,12 +375,3 @@ PID: {task.pid}
 
         return "\n".join(lines)
 
-    def cleanup_completed(self):
-        """清理已结束且超过 1 小时的僵尸任务"""
-        with self._manager_lock:
-            to_remove = []
-            for task_id, task in self._tasks.items():
-                if task.status in ("stopped", "completed") and (time.time() - task.start_time) > 3600:
-                    to_remove.append(task_id)
-            for task_id in to_remove:
-                del self._tasks[task_id]

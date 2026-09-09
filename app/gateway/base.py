@@ -97,13 +97,6 @@ class MessageEvent:
             raw = raw.split("@", 1)[0]
         return raw
 
-    @property
-    def command_args(self) -> str:
-        """获取命令参数"""
-        if not self.is_command:
-            return ""
-        parts = self.text.split(maxsplit=1)
-        return parts[1] if len(parts) > 1 else ""
 
 
 @dataclass
@@ -189,6 +182,49 @@ class BasePlatformAdapter(ABC):
 
     # 最大消息长度（子平台可覆盖）
     MAX_MESSAGE_LENGTH: int = 4096
+
+    async def _try_gitee_upload(self, file_path: str) -> str:
+        """
+        尝试将文件上传到 Gitee，返回下载链接。
+
+        如果未配置或上传失败，返回原始路径。
+
+        适配器子类可在 send_image/send_file 中调用此方法，
+        将本地路径转换为公开 URL 后嵌入消息中。
+
+        Args:
+            file_path: 本地文件路径
+
+        Returns:
+            下载链接（成功时）或原始路径（失败/未配置时）
+        """
+        try:
+            from app.gateway.utils.gitee_uploader import GiteeUploader
+
+            uploader = GiteeUploader.get_instance()
+            if not uploader.is_configured():
+                return file_path
+
+            url, err = await uploader.upload_file_async(file_path)
+            if url:
+                logger.info(f"[{self.name}] Gitee 上传成功: {url}")
+                return url
+            logger.debug(f"[{self.name}] Gitee 上传跳过: {err}")
+        except Exception as e:
+            logger.debug(f"[{self.name}] Gitee 上传异常: {e}")
+
+        return file_path
+
+    async def send_voice(self, chat_id: str, audio_path: str, **kwargs) -> SendResult:
+        """
+        发送语音
+        
+        默认实现为发送音频路径作为文本。子平台可覆盖实现原生发送。
+        """
+        return SendResult(
+            success=False,
+            error="Platform does not support native voice sending"
+        )
 
     def __init__(self, config: PlatformConfig, message_handler: Optional[MessageHandler] = None):
         """
@@ -277,95 +313,8 @@ class BasePlatformAdapter(ABC):
             error="Platform does not support native file sending"
         )
 
-    async def send_voice(self, chat_id: str, audio_path: str, **kwargs) -> SendResult:
-        """
-        发送语音
-        
-        默认实现为发送音频路径作为文本。子平台可覆盖实现原生发送。
-        """
-        return SendResult(
-            success=False,
-            error="Platform does not support native voice sending"
-        )
 
-    async def send_file_via_gitee(self, chat_id: str, file_path: str,
-                                   content_hint: str = "",
-                                   **kwargs) -> SendResult:
-        """
-        将本地文件上传到 Gitee 图床后发送下载链接。
 
-        适用于不支持原生文件发送的平台（如 Telegram、Discord），
-        或需要在消息中附带可公开访问的链接。
-
-        Args:
-            chat_id: 聊天 ID
-            file_path: 本地文件路径
-            content_hint: 附加到消息中的文本说明
-
-        Returns:
-            SendResult
-        """
-        from app.gateway.utils.gitee_uploader import GiteeUploader
-
-        uploader = GiteeUploader.get_instance()
-        if not uploader.is_configured():
-            return SendResult(
-                success=False,
-                error="Gitee 未配置，无法上传文件。请先在设置中配置 Gitee Token/Owner/Repo。",
-            )
-
-        from pathlib import Path
-        fp = Path(file_path)
-        url, err = await uploader.upload_file_async(str(fp))
-        if err:
-            return SendResult(
-                success=False,
-                error=f"Gitee 上传失败: {err}",
-            )
-
-        # 构建消息内容
-        filename = fp.name
-        ext = fp.suffix.lower()
-        is_image = ext in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
-
-        if is_image:
-            content = f"{content_hint}\n![{filename}]({url})" if content_hint else f"![{filename}]({url})"
-        else:
-            content = f"{content_hint}\n📎 [{filename}]({url})" if content_hint else f"📎 [{filename}]({url})"
-
-        return await self.send(chat_id, content, **kwargs)
-
-    async def _try_gitee_upload(self, file_path: str) -> str:
-        """
-        尝试将文件上传到 Gitee，返回下载链接。
-
-        如果未配置或上传失败，返回原始路径。
-
-        适配器子类可在 send_image/send_file 中调用此方法，
-        将本地路径转换为公开 URL 后嵌入消息中。
-
-        Args:
-            file_path: 本地文件路径
-
-        Returns:
-            下载链接（成功时）或原始路径（失败/未配置时）
-        """
-        try:
-            from app.gateway.utils.gitee_uploader import GiteeUploader
-
-            uploader = GiteeUploader.get_instance()
-            if not uploader.is_configured():
-                return file_path
-
-            url, err = await uploader.upload_file_async(file_path)
-            if url:
-                logger.info(f"[{self.name}] Gitee 上传成功: {url}")
-                return url
-            logger.debug(f"[{self.name}] Gitee 上传跳过: {err}")
-        except Exception as e:
-            logger.debug(f"[{self.name}] Gitee 上传异常: {e}")
-
-        return file_path
 
     @abstractmethod
     async def get_chat_info(self, chat_id: str) -> ChatInfo:
@@ -374,8 +323,6 @@ class BasePlatformAdapter(ABC):
         
         Args:
             chat_id: 聊天ID
-            
-        Returns:
             ChatInfo
         """
         pass
@@ -411,7 +358,6 @@ class BasePlatformAdapter(ABC):
             return
 
         # 启动新会话处理
-        self._active_sessions[session_key] = asyncio.Event()
         if event.message_id:
             self._active_message_ids[session_key] = event.message_id
         try:
@@ -458,29 +404,6 @@ class BasePlatformAdapter(ABC):
         """结束流式回复，发送最终全量内容。"""
         return SendResult(success=False, error="streaming not supported", retryable=False)
 
-    def truncate_message(self, content: str, max_length: Optional[int] = None) -> List[str]:
-        """
-        截断长消息
-        
-        Args:
-            content: 消息内容
-            max_length: 最大长度
-            
-        Returns:
-            消息块列表
-        """
-        limit = max_length or self.MAX_MESSAGE_LENGTH
-        if len(content) <= limit:
-            return [content]
-
-        chunks = []
-        remaining = content
-        while remaining:
-            chunk = remaining[:limit]
-            remaining = remaining[limit:]
-            chunks.append(chunk)
-
-        return chunks
 
     async def start(self) -> bool:
         """
@@ -522,22 +445,5 @@ def get_cache_dir(name: str) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
-def cache_image_from_bytes(data: bytes, ext: str = ".jpg") -> str:
-    """缓存图片字节到本地文件"""
-    import uuid
-    cache_dir = get_cache_dir("images")
-    filename = f"img_{uuid.uuid4().hex[:12]}{ext}"
-    filepath = cache_dir / filename
-    filepath.write_bytes(data)
-    return str(filepath)
 
 
-def cache_file_from_bytes(data: bytes, filename: str) -> str:
-    """缓存文件字节到本地"""
-    import uuid
-    cache_dir = get_cache_dir("files")
-    safe_name = Path(filename).name
-    cached_name = f"doc_{uuid.uuid4().hex[:12]}_{safe_name}"
-    filepath = cache_dir / cached_name
-    filepath.write_bytes(data)
-    return str(filepath)

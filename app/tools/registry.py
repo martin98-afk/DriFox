@@ -478,13 +478,6 @@ class ToolRegistry:
 
     # ========== 作用域过滤（按 agent 可用工具） ==========
 
-    def filter_by_agent(self, agent_name: Optional[str], agent_tools: Optional[List[str]]) -> List[ToolRegistration]:
-        """按 agent 作用域过滤：agent_tools 为 None 表示全量；否则仅返回白名单内工具。"""
-        with self._lock:
-            if agent_tools is None or not agent_tools:
-                return list(self._tools.values())
-            wanted = set(agent_tools)
-            return [r for name, r in self._tools.items() if name in wanted]
 
     # ========== Schema 过滤器（对话前裁剪发给 LLM 的工具列表）==========
 

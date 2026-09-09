@@ -16,14 +16,6 @@ from loguru import logger
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
 
-@pytest.fixture()
-def log_capture():
-    """loguru WARNING+ 捕获为文本列表。"""
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 def _make_ui_plugin(root, body: str):
     ui_dir = root / "ui"

@@ -418,13 +418,3 @@ def create_smart_api_call_with_retry(
 
 
 # 保留旧的函数名作为别名
-def create_api_call_with_retry_enhanced(
-    client,
-    create_func,
-    max_retries=15,
-    retry_delay=5,
-):
-    """create_api_call_with_retry 的增强版本"""
-    return create_smart_api_call_with_retry(
-        client, create_func, max_retries, retry_delay
-    )

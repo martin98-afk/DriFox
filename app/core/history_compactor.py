@@ -1249,12 +1249,6 @@ class HistoryCompactor:
         kept_count = len([m for m in recent_messages if m in result_messages])
         return result_messages, kept_count, note + f"，保留 {kept_count}/{compacted_len} 条"
 
-    def _calculate_dynamic_summary_chars(self, compacted_count: int) -> int:
-        """根据压缩消息数动态计算摘要字符上限"""
-        return min(
-            MAX_HEURISTIC_SUMMARY_CHARS_ABS,
-            MAX_HEURISTIC_SUMMARY_CHARS + compacted_count * MAX_HEURISTIC_SUMMARY_CHARS_PER_MSG,
-        )
 
     def _summarize(
         self,

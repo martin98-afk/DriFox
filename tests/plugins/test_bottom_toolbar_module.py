@@ -10,13 +10,6 @@ import pytest
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 def test_bottom_toolbar_module_id():
     from app.widgets.modules.bottom_toolbar_module import BottomToolbarModule

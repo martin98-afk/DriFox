@@ -49,9 +49,6 @@ def get_all_tools() -> List[str]:
     return _registry().names()
 
 
-def get_dangerous_tools() -> List[str]:
-    """获取全部危险工具名"""
-    return _registry().dangerous_tools()
 
 
 def get_safe_tools() -> List[str]:
@@ -109,10 +106,3 @@ def get_default_toggles(tool_names: list) -> dict:
     return {name: True for name in tool_names}
 
 
-def get_tool_groups() -> Dict[str, List[str]]:
-    """按展示分组聚合工具名（权限卡片用，registry 驱动）
-
-    Returns:
-        {group_name: [tool_name, ...]}
-    """
-    return {g: [r.name for r in tools] for g, tools in _registry().group_map().items()}

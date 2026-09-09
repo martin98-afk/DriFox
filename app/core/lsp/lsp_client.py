@@ -480,9 +480,6 @@ class LspClient:
         except Exception:
             return list(self._diagnostics)
 
-    def set_diagnostics_callback(self, cb: Callable[[str, list], None]) -> None:
-        """设置诊断推送回调"""
-        self._diag_callback = cb
 
     def is_command_available(self) -> bool:
         """检查 LSP 服务器可执行文件是否在 PATH 中
@@ -503,9 +500,6 @@ class LspClient:
             return None
         return self._cmd_cache_result is not None
 
-    def invalidate_command_cache(self) -> None:
-        """手动失效命令解析缓存（安装新 LSP 服务器后调用）"""
-        self._cmd_cache_time = 0.0
 
     # ── 内部 ─────────────────────────────────────────────────────
 

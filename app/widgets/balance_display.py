@@ -163,28 +163,6 @@ class BalanceDisplay(QWidget):
         self.setToolTip(f"{result['provider']} 余额")
         self.balance_updated.emit(self._balance, self._currency)
 
-    def _extract_balance(self, data: dict, config: dict) -> Optional[float]:
-        """从响应数据中提取余额"""
-        try:
-            balance_key = config["balance_key"]
-
-            if balance_key == "total_balance":
-                # DeepSeek: {"balance_infos": [{"total_balance": "0.92", ...}]}
-                balance_infos = data.get("balance_infos", [])
-                if balance_infos and len(balance_infos) > 0:
-                    balance_str = balance_infos[0].get("total_balance", "")
-                    if balance_str:
-                        return float(balance_str)
-            else:
-                # SiliconFlow: {"data": {"totalBalance": "-0.0079", ...}}
-                data_obj = data.get("data", data)
-                balance_str = data_obj.get(balance_key, "")
-                if balance_str:
-                    return float(balance_str)
-            return None
-        except (ValueError, TypeError, KeyError):
-            return None
-
     def _update_display(self):
         """更新显示"""
         if self._balance is None:

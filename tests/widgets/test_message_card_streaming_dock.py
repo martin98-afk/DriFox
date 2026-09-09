@@ -445,3 +445,116 @@ def test_update_content_preserves_content_scroll():
     src = inspect.getsource(CodeWebViewer._load_skeleton)
     assert "_cpPrevTop" in src, "必须保存正文容器 scrollTop"
     assert "Math.min(_cpPrevTop" in src, "必须在 DOM 操作完成后恢复（钳制到新 max）"
+
+
+# ──────────────────────────────────────────────
+# force_dock_off：打断/错误收尾强制归位（流式结构残留 bug 回归）
+#
+# 根因：打断路径（手动停止/自动压缩/引擎错误）worker 已终止，活跃工具结果
+# 永不到达 → append_tool_result 的 F2 兜底归位永不触发；若仍按 S1 语义
+# keep_dock=True，坞态永久沉底、正文限矮（卡片保持流式结构）。
+# 引擎错误路径还有一层：update_content 在 _streaming=False 时经
+# start_streaming_anim 重开流式态与坞态，收尾必须在其后强制关坞。
+# ──────────────────────────────────────────────
+
+
+class _ForceDockViewer:
+    """模拟 CodeWebViewer.finish_streaming 坞态行为的 viewer 桩。
+
+    finish_streaming(keep_dock) 时记录 keep_dock 并在 keep_dock=False 时
+    关坞（与 CodeWebViewer.finish_streaming 内部 `_sync_streaming_dock(False)`
+    行为一致），供断言 MessageCard 层参数传递是否正确。
+    """
+
+    def __init__(self):
+        self._streaming = True
+        self.dock_calls = []
+        self.finish_keep_dock = None
+
+    def _sync_streaming_dock(self, active):
+        self.dock_calls.append(active)
+
+    def finish_streaming(self, keep_dock=False):
+        self.finish_keep_dock = keep_dock
+        if not keep_dock:
+            self._sync_streaming_dock(False)
+
+
+def test_finish_streaming_force_dock_off_overrides_active_tools():
+    """force_dock_off=True：即使有活跃工具也必须关坞态（打断/错误收尾语义）。"""
+    from app.widgets.message_card import MessageCard as _MC
+
+    _ensure_qapp()
+    card = _MC(role="assistant")
+    card._lazy_rendered = True
+    card.viewer = _ForceDockViewer()
+    # 打断时刻仍有活跃工具（登记未完成）
+    card._tool_call_order["t1"] = 0
+    card._streaming = True
+    card.finish_streaming(force_dock_off=True)
+    assert card._streaming is False
+    assert card.viewer.finish_keep_dock is False, "force_dock_off=True 必须覆盖活跃工具判据"
+    assert card.viewer.dock_calls == [False], (
+        f"force_dock_off=True 必须关坞态，实际 dock_calls={card.viewer.dock_calls}"
+    )
+
+
+def test_finish_streaming_without_force_keeps_s1_dock_semantics():
+    """无 force_dock_off 时保持 S1 语义：有活跃工具 → keep_dock=True（坞态保留）。"""
+    from app.widgets.message_card import MessageCard as _MC
+
+    _ensure_qapp()
+    card = _MC(role="assistant")
+    card._lazy_rendered = True
+    card.viewer = _ForceDockViewer()
+    card._tool_call_order["t1"] = 0
+    card._streaming = True
+    card.finish_streaming()
+    assert card.viewer.finish_keep_dock is True, "S1 语义：活跃工具时 keep_dock=True"
+    assert card.viewer.dock_calls == [], (
+        f"S1 语义：活跃工具时不得关坞（等工具完成兜底归位），实际 dock_calls={card.viewer.dock_calls}"
+    )
+
+
+def test_finish_streaming_force_dock_off_no_tools_still_docks_off():
+    """force_dock_off=True 且无活跃工具：正常关坞（与默认行为一致）。"""
+    from app.widgets.message_card import MessageCard as _MC
+
+    _ensure_qapp()
+    card = _MC(role="assistant")
+    card._lazy_rendered = True
+    card.viewer = _ForceDockViewer()
+    card._streaming = True
+    card.finish_streaming(force_dock_off=True)
+    assert card.viewer.finish_keep_dock is False
+    assert card.viewer.dock_calls == [False]
+
+
+# ──────────────────────────────────────────────
+# 重建流式态同步：后台标签页切回后卡片重现流式结构（多 tab 并行高发）
+#
+# 根因：已结束卡片（_streaming_finished=True）经虚拟滚动/配额回收重建时，
+# ensure_rendered 只在 _is_history=True（磁盘历史）分支同步 viewer 非流式态；
+# 本轮已结束对话 _is_history=False → 新建 viewer 的 _streaming=True 初始值
+# 残留（池化实例经 reset_for_reuse 已置 False，两路径行为不一致）→ 渲染走
+# 流式分支，且 _on_js_ready 旧兜底 `_setStreamingDock(!!_act||!_co)` 因新骨架
+# 无 data-collapsed 属性（_co=false）误开坞态 → 工具区沉底 + 正文限矮。
+# ──────────────────────────────────────────────
+
+
+def test_ensure_rendered_syncs_streaming_false_for_finished_cards():
+    """重建时卡片非流式中必须同步 viewer._streaming=False（Qt/池化两个分支都要）。"""
+    src = inspect.getsource(MessageCard.ensure_rendered)
+    assert src.count("if not self._streaming:") >= 2, (
+        "ensure_rendered 的 Qt 渲染器分支与池化/新建分支都必须同步 viewer._streaming，"
+        "否则新建重建的已结束卡片残留流式态"
+    )
+
+
+def test_on_js_ready_dock_sync_uses_python_streaming_flag():
+    """_on_js_ready 坞态兜底必须以 Python 端 _streaming 判定，禁止「未折叠 → 开坞」推导。"""
+    src = inspect.getsource(CodeWebViewer._on_js_ready)
+    # 剥离注释后断言（根因说明的注释里会引用旧表达式原文）
+    code = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+    assert "!!_act||!_co" not in code, "不得保留 !_co（未折叠）开坞推导：新骨架无 data-collapsed 会误开坞态"
+    assert "_dock_on" in code, "必须用 Python 端 _streaming 真值参与坞态判定"
