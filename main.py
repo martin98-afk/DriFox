@@ -35,8 +35,22 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 # 代码路径，同时保留 GL 语义（WebEngine 纹理共享在 ANGLE 上是官方支持路径）。
 # 注意：不能用 QSG_RHI_BACKEND=d3d11 —— Qt 5.15 中 WebEngine 的 GL 纹理无法
 # 与 RHI D3D11 合成器互操作，会导致消息卡片黑屏（已实测踩坑）。
+# 防御：外部环境若残留 QSG_RHI*（手动 setx 过），Quick 场景图会绕开 GL 直接用
+# RHI D3D11 合成，消息卡片整体变黑 —— 启动时强制清除，杜绝复发。
 # 回退：外部设 QT_OPENGL=desktop 恢复桌面 GL。
 os.environ.setdefault("QT_OPENGL", "angle")
+# ANGLE 后端默认走 WARP（Windows 软件光栅，纯 CPU）。原因：Qt 场景图合成是远端
+# Intel 集显崩溃的落点（OpenGL ICD），WARP 完全不碰显卡驱动，同时保留 GL 语义，
+# WebEngine 的纹理共享照常 —— 这是「既不崩也不黑」的唯一组合（QSG_RHI 路线会黑屏）。
+# 代价：场景图合成走 CPU，长对话多卡片滚动时占用高于硬件 D3D11。
+# 回退：显卡正常、想回硬件加速设 QT_ANGLE_PLATFORM=d3d11；
+#       仍崩则 QT_OPENGL=software 退到 Mesa llvmpipe（最慢最稳）。
+# 实测四种后端均不黑屏，见 tests/debug/angle_backend_check.py。
+# 注：仅 Windows 生效，其他平台 Qt 直接忽略本变量。
+os.environ.setdefault("QT_ANGLE_PLATFORM", "warp")
+# 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
+for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
+    os.environ.pop(_env_key, None)
 
 # ========== Chromium 进程治理（WebEngine 内存占用的根因）==========
 # 必须在 QApplication 创建之前设置：QtWebEngine 在首次初始化时读取该环境变量，
