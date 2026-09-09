@@ -11,7 +11,7 @@ import pytest
 
 
 @pytest.fixture()
-def fresh_registry(monkeypatch):
+def fresh_adapter_registry(monkeypatch):
     """每用例独立 registry（绕过单例状态污染，对齐 test_model_adapter_registry）"""
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
@@ -37,14 +37,14 @@ def _plain_config() -> dict:
 
 
 class TestChatWorkerColdStart:
-    def test_deepseek_resolves_after_cold_start(self, fresh_registry):
+    def test_deepseek_resolves_after_cold_start(self, fresh_adapter_registry):
         """冷启动（注册表空）→ deepseek 配置判定 requires_reasoning_content=True 且不抛错"""
         from app.core.workers.chat_worker import OpenAIChatWorker
 
         worker = OpenAIChatWorker(messages=[], session_messages=[], llm_config=_opencode_deepseek_config())
         assert worker._requires_reasoning_content() is True
 
-    def test_plain_model_defaults_false(self, fresh_registry):
+    def test_plain_model_defaults_false(self, fresh_adapter_registry):
         """冷启动 → 普通模型协议开关全 False（openai 默认语义）"""
         from app.core.workers.chat_worker import OpenAIChatWorker
 
@@ -54,7 +54,7 @@ class TestChatWorkerColdStart:
         assert flags.requires_reasoning_content is False
         assert flags.use_responses_api is False
 
-    def test_registered_adapter_wins_without_rescan(self, fresh_registry, monkeypatch):
+    def test_registered_adapter_wins_without_rescan(self, fresh_adapter_registry, monkeypatch):
         """注册表已有适配器时不触发 warmup 重扫（幂等防御：adapters() 非空即跳过）"""
         from app.plugins.contracts.model_adapter import ProtocolFlags
 
@@ -67,7 +67,7 @@ class TestChatWorkerColdStart:
             def protocol_flags(self, llm_config: dict) -> ProtocolFlags:
                 return ProtocolFlags(requires_reasoning_content=True)
 
-        fresh_registry.register(_FakeAdapter())
+        fresh_adapter_registry.register(_FakeAdapter())
         import app.plugins.loaders.runtime_component_loader as loader_mod
 
         called = []
@@ -85,21 +85,21 @@ class TestChatWorkerColdStart:
 
 
 class TestSubAgentWorkerColdStart:
-    def test_deepseek_resolves_after_cold_start(self, fresh_registry):
+    def test_deepseek_resolves_after_cold_start(self, fresh_adapter_registry):
         """冷启动 → subagent_worker 对 deepseek 配置判定 True 且不抛错"""
         from app.core.workers.subagent_worker import SubAgentExecutor
 
         executor = SubAgentExecutor.__new__(SubAgentExecutor)
         assert executor._requires_reasoning_content(_opencode_deepseek_config()) is True
 
-    def test_plain_model_defaults_false(self, fresh_registry):
+    def test_plain_model_defaults_false(self, fresh_adapter_registry):
         """冷启动 → subagent_worker 普通模型判定 False"""
         from app.core.workers.subagent_worker import SubAgentExecutor
 
         executor = SubAgentExecutor.__new__(SubAgentExecutor)
         assert executor._requires_reasoning_content(_plain_config()) is False
 
-    def test_llm_config_none_safe(self, fresh_registry):
+    def test_llm_config_none_safe(self, fresh_adapter_registry):
         """llm_config 为 None 时防御（不抛 TypeError）"""
         from app.core.workers.subagent_worker import SubAgentExecutor
 

@@ -17,7 +17,7 @@ from app.plugins.registries.provider_registry import ProviderRegistry
 
 
 @pytest.fixture()
-def fresh_registry(monkeypatch):
+def fresh_provider_registry(monkeypatch):
     """每用例独立 registry（绕过单例状态污染）"""
     reg = ProviderRegistry()
     monkeypatch.setattr(ProviderRegistry, "get_instance", staticmethod(lambda: reg))
@@ -31,16 +31,16 @@ def _load_opencode_plugin(registry):
     opencode_plugin.register(registry)
 
 
-def test_opencode_plugin_declares_session_header(fresh_registry):
+def test_opencode_plugin_declares_session_header(fresh_provider_registry):
     """opencode 插件按 family 声明 session_header 能力"""
-    _load_opencode_plugin(fresh_registry)
-    caps = fresh_registry.family_capabilities("opencode")
+    _load_opencode_plugin(fresh_provider_registry)
+    caps = fresh_provider_registry.family_capabilities("opencode")
     assert caps.get("session_header") == "x-opencode-session"
 
 
-def test_provider_profile_exposes_session_header(fresh_registry):
+def test_provider_profile_exposes_session_header(fresh_provider_registry):
     """get_provider_profile 经 family 聚合透出 session_header（端到端）"""
-    _load_opencode_plugin(fresh_registry)
+    _load_opencode_plugin(fresh_provider_registry)
     profile = get_provider_profile({"API_URL": "https://opencode.ai/zen/go/v1"})
     assert profile["family"] == "opencode"
     assert profile["session_header"] == "x-opencode-session"
