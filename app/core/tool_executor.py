@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import orjson
 from loguru import logger

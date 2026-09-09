@@ -8,6 +8,7 @@
 
 import ctypes
 import sys
+from typing import Optional
 
 from PyQt5.QtCore import QEasingCurve, QSize
 

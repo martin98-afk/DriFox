@@ -10,7 +10,7 @@ import math as _math
 import os
 
 # ── 模块级缓存：避免 paintEvent 中反复解析 rgba 字符串 ──
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from loguru import logger
 from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
