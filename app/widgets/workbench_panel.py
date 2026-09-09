@@ -1260,15 +1260,6 @@ class WorkbenchPanel(QWidget):
         else:
             current.hide()
 
-    def _dispose_plugin_artifacts(self) -> None:
-        """销毁当前插件版产物页 widget（保留占位页）"""
-        widget = self._plugin_artifacts_widget
-        if widget is not None:
-            widget.hide()
-            self._stack.removeWidget(widget)
-            widget.deleteLater()
-        self._plugin_artifacts_widget = None
-
     def _wire_artifacts_diff(self, widget: QWidget) -> None:
         """把产物页的差异入口接到 panel.diff_requested"""
         setter = getattr(widget, "set_diff_all_callback", None)

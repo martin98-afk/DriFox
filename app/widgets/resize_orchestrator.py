@@ -62,10 +62,6 @@ class ResizeOrchestrator:
         with contextlib.suppress(Exception):
             stack.currentChanged.connect(self._on_stack_changed)
 
-    def set_current_provider(self, provider: Callable[[], Any]) -> None:
-        """自定义「当前页」取值器（无 stack 时使用）。"""
-        self._custom_provider = provider
-
     # ── 查询 ────────────────────────────────────────────────────────
 
     def current_widget(self) -> Any:
@@ -110,10 +106,6 @@ class ResizeOrchestrator:
             return
         self._paused[id(widget)] = widget
         self.mark_dirty(widget)
-
-    def clear_dirty(self, widget: Any) -> None:
-        self._dirty.pop(id(widget), None)
-        self._paused.pop(id(widget), None)
 
     def on_activated(self, widget: Any) -> None:
         """页被激活：若此前被挂起/标记，同步补跑一次宽度+高度同步。"""

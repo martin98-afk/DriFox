@@ -336,15 +336,6 @@ class _AgentComboBox(NoWheelComboBox):
     - 描述存到 itemData(Qt.ToolTipRole)，鼠标悬停时显示
     """
 
-    def add_agent(self, name: str, description: str = ""):
-        """添加一个智能体选项（名称 + 描述 tooltip）"""
-        self.addItem(name)
-        idx = self.count() - 1
-        if description:
-            self.setItemData(idx, description, Qt.ToolTipRole)
-            self.setItemData(idx, description, Qt.WhatsThisRole)
-
-
 class HookEditCard(QWidget):
     """
     Hook 编辑卡片（卡片形态）
@@ -1077,12 +1068,6 @@ class HookEditCard(QWidget):
         if not values["event"] or not values["command"]:
             return
         self.saved.emit(values)
-
-    def get_title(self) -> str:
-        if self._is_new:
-            return "➕ 添加 Hook"
-        return "✏️ 编辑 Hook"
-
 
 class HookListSettingCard(ExpandSettingCard):
     """Hook 管理设置卡片"""

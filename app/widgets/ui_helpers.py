@@ -1599,33 +1599,6 @@ def restore_input_from_card(input_area, card) -> None:
     input_area.setFocus()
 
 
-def find_user_card_at_index(chat_layout, target_index: int) -> Any:
-    """
-    找到指定索引的 user 卡片
-
-    Args:
-        chat_layout: 聊天布局
-        target_index: 目标索引
-
-    Returns:
-        找到的卡片或 None
-    """
-    # 延迟导入避免循环依赖
-    pair_index = 0
-    for i in range(chat_layout.count()):
-        item = chat_layout.itemAt(i)
-        if not item or not item.widget():
-            continue
-        widget = item.widget()
-        if not isinstance(widget, MessageCard):
-            continue
-        if widget.role == "user":
-            if pair_index == target_index:
-                return widget
-            pair_index += 1
-    return None
-
-
 def find_user_round_index(session, user_text: str, timestamp: str) -> int:
     """
     从 session 中找到 user 消息对应的 round_index。
@@ -1811,27 +1784,6 @@ def invalidate_session_card_cache(session, session_card_cache) -> None:
         session_card_cache.pop(session.session_id, None)
 
 
-def refresh_session_view(
-    self_widget, invalidate_cache_func=None, display_session_func=None, refresh_context_func=None
-) -> None:
-    """
-    刷新会话视图
-
-    Args:
-        self_widget: 自身 widget
-        invalidate_cache_func: 使缓存失效的函数
-        display_session_func: 显示会话的函数
-        refresh_context_func: 刷新上下文的函数
-    """
-    if invalidate_cache_func:
-        invalidate_cache_func()
-    self_widget._history_preview_messages = None
-    if display_session_func:
-        display_session_func()
-    if refresh_context_func:
-        refresh_context_func()
-
-
 def refresh_history_card_if_visible(history_card, refresh_func=None) -> None:
     """
     如果历史卡片可见则刷新
@@ -1913,36 +1865,6 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
     return deleted
 
 
-def find_last_tool_call_id_after_round(messages: list, round_ranges: list, round_index: int) -> Optional[str]:
-    """
-    查找指定 round 之后最后一个 tool_call_id
-
-    Args:
-        messages: 消息列表
-        round_ranges: round 范围列表
-        round_index: 目标 round 索引
-
-    Returns:
-        最后一个 tool_call_id 或 None
-    """
-    if round_index < 0 or round_index >= len(round_ranges):
-        return None
-
-    # 获取该 round 之后的所有消息的 start index
-    _, end_idx = round_ranges[round_index]
-
-    # 查找 end_idx 之后的所有 tool_call_id
-    last_call_id = None
-    for i in range(end_idx, len(messages)):
-        msg = messages[i]
-        if msg.get("role") == "tool":
-            call_id = msg.get("tool_call_id")
-            if call_id:
-                last_call_id = call_id
-
-    return last_call_id
-
-
 def create_assistant_card_widget(
     parent,
     timestamp: str,
@@ -2016,40 +1938,6 @@ def create_assistant_card_widget(
 
 
 # ==================== 滚动位置辅助 ====================
-
-
-def calculate_scroll_progress(visible_top: float, viewport_height: float, widget_tops: list) -> tuple:
-    """
-    计算滚动进度和可见索引
-
-    Args:
-        visible_top: 滚动条当前值（可见区域顶部）
-        viewport_height: 视口高度
-        widget_tops: 用户消息卡片顶部位置列表
-
-    Returns:
-        (progress, visible_index)
-    """
-    anchor_y = visible_top + max(viewport_height / 2, 1)
-
-    if len(widget_tops) == 1:
-        return 0.0, 0
-    elif anchor_y <= widget_tops[0]:
-        return 0.0, 0
-    elif anchor_y >= widget_tops[-1]:
-        return float(len(widget_tops) - 1), len(widget_tops) - 1
-    else:
-        progress = 0.0
-        for idx in range(len(widget_tops) - 1):
-            start_top = widget_tops[idx]
-            end_top = widget_tops[idx + 1]
-            if start_top <= anchor_y <= end_top:
-                span = max(end_top - start_top, 1)
-                ratio = (anchor_y - start_top) / span
-                progress = idx + ratio
-                break
-        visible_index = min(max(int(round(progress)), 0), len(widget_tops) - 1)
-        return progress, visible_index
 
 
 def add_message_to_layout(widget, chat_layout, is_alive_func=None) -> None:
