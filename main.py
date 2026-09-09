@@ -28,7 +28,27 @@ warnings.filterwarnings("ignore")
 os.environ.setdefault("PYPINYIN_NO_DICT_COPY", "1")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-# ========== Qt 侧 OpenGL 走 ANGLE(D3D11)（Intel 核显 OpenGL 崩溃修复）==========
+# ========== 渲染后端：Windows 硬件优先，软件仅作回退 ==========
+# ⚠️ 平台限定：ANGLE / D3D11 / WARP 全是 Windows 概念。macOS / Linux 走 Qt 原生
+# 后端（Metal / GL），下面这组强制设置一律不施加 —— 实测在 macOS 上强设
+# QT_ANGLE_PLATFORM=d3d11 会导致消息卡片黑屏（2026-09-10 回归，勿再全局化）。
+_IS_WINDOWS = os.name == "nt"
+
+# 软件回退开关（仅 Windows 有意义），任一命中即可，重启生效：
+#   ① 环境变量 DRIFOX_SOFTWARE_RENDER=1
+#   ② 标记文件 ~/.drifox/software_render（内容不限，存在即启用）
+# 软件路径 = QT_ANGLE_PLATFORM=warp（纯 CPU 光栅） + --disable-gpu。
+# 非 Windows 恒为 True：始终走原来的保守路径，行为与历史版本一致。
+_SOFTWARE_RENDER = True
+if _IS_WINDOWS:
+    _SOFTWARE_RENDER = os.environ.get("DRIFOX_SOFTWARE_RENDER", "").strip().lower() in ("1", "true", "on", "yes")
+    if not _SOFTWARE_RENDER:
+        try:
+            _SOFTWARE_RENDER = os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox", "software_render"))
+        except Exception:
+            _SOFTWARE_RENDER = True
+
+# ========== Windows：Qt 侧 OpenGL 走 ANGLE(D3D11)（Intel 核显 OpenGL 崩溃修复）==========
 # 根因：QtWebEngine 网页帧合成走 Qt Quick 场景图，默认 OpenGL 后端命中本机
 # Intel Xe-LP 驱动（igxelpicd64.dll）的 OpenGL 实现，流式渲染高频合成期崩溃。
 # 方案：强制 Qt 的 GL 经 ANGLE 翻译为 D3D11 实现，绕开 Intel OpenGL ICD 的
@@ -38,16 +58,16 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 # 防御：外部环境若残留 QSG_RHI*（手动 setx 过），Quick 场景图会绕开 GL 直接用
 # RHI D3D11 合成，消息卡片整体变黑 —— 启动时强制清除，杜绝复发。
 # 回退：外部设 QT_OPENGL=desktop 恢复桌面 GL。
-os.environ.setdefault("QT_OPENGL", "angle")
-# ANGLE 后端默认走 WARP（Windows 软件光栅，纯 CPU）。原因：Qt 场景图合成是远端
-# Intel 集显崩溃的落点（OpenGL ICD），WARP 完全不碰显卡驱动，同时保留 GL 语义，
-# WebEngine 的纹理共享照常 —— 这是「既不崩也不黑」的唯一组合（QSG_RHI 路线会黑屏）。
-# 代价：场景图合成走 CPU，长对话多卡片滚动时占用高于硬件 D3D11。
-# 回退：显卡正常、想回硬件加速设 QT_ANGLE_PLATFORM=d3d11；
-#       仍崩则 QT_OPENGL=software 退到 Mesa llvmpipe（最慢最稳）。
-# 实测四种后端均不黑屏，见 tests/debug/angle_backend_check.py。
-# 注：仅 Windows 生效，其他平台 Qt 直接忽略本变量。
-os.environ.setdefault("QT_ANGLE_PLATFORM", "warp")
+if _IS_WINDOWS:
+    os.environ.setdefault("QT_OPENGL", "angle")
+    # ANGLE 后端平台（二选一，由 _SOFTWARE_RENDER 决定）：
+    # - 硬件路径（默认）d3d11：ANGLE 把 GL 语义翻译成 D3D11，既绕开 Intel OpenGL
+    #   ICD 的崩溃路径，又把场景图合成交还 GPU —— 长对话多卡片滚动不再吃 CPU。
+    # - 软件回退 warp：Windows 软件光栅，纯 CPU，完全不碰显卡驱动 —— 驱动异常或
+    #   无可用 GPU（虚拟机 / 远程桌面）时的兜底。仍崩则 QT_OPENGL=software
+    #   退到 Mesa llvmpipe（最慢最稳）。
+    # 实测四种后端均不黑屏，见 tests/debug/angle_backend_check.py。
+    os.environ.setdefault("QT_ANGLE_PLATFORM", "warp" if _SOFTWARE_RENDER else "d3d11")
 # 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
 for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
     os.environ.pop(_env_key, None)
@@ -83,8 +103,18 @@ if not _WEBGL_ENABLED:
     except Exception:
         _WEBGL_ENABLED = False
 
-if _WEBGL_ENABLED:
-    # 无硬件 GPU 时用 SwiftShader 软件光栅兜底（老版本 Chromium 忽略此开关）
+# ========== Chromium GPU 开关 ==========
+# ⚠️ 平台限定：硬件路径只在 Windows 放开。macOS / Linux 恒走 --disable-gpu
+# （历史行为）—— 实测 macOS 上放开 GPU 又禁用 SwiftShader 兜底会黑屏。
+if not _SOFTWARE_RENDER:
+    # Windows 硬件路径：不禁用 GPU 进程，Chromium 走硬件光栅与合成，WebGL / 3D
+    # 图形天然可用；保留 --disable-software-rasterizer 禁掉 SwiftShader 软件兜底，
+    # 避免驱动异常时静默退化回软件光栅（失败就显式失败）。
+    # 代价：无可用 GPU 的环境（虚拟机 / 远程桌面）会渲染异常 —— 用
+    # DRIFOX_SOFTWARE_RENDER=1 回退。
+    _GPU_FLAGS = " --disable-software-rasterizer"
+elif _WEBGL_ENABLED:
+    # 软件路径 + 需要 3D 图形：用 SwiftShader 软件光栅兜底
     _GPU_FLAGS = " --enable-unsafe-swiftshader"
 else:
     _GPU_FLAGS = (
@@ -173,6 +203,12 @@ def main():
     # OpenGL 走 ANGLE(D3D11)：绕开 Intel OpenGL ICD 缺陷路径（见文件顶部说明）。
     # 必须在 QApplication 与 WebEngine 导入之前设置。
     QApplication.setAttribute(Qt.AA_UseOpenGLES)
+    # [MEM] 共享 GL 上下文：默认每个 QWebEngineView 会创建自己的 OpenGL 上下文，
+    # 并发对话下 40+ 张消息卡 = 40+ 个独立上下文，每个都要独立的命令缓冲与合成
+    # 表面后备存储。开启后所有 view 复用同一上下文，per-view 常驻开销下降
+    # （实测 12 个 view 总增量 250MB → 218MB，约 -12.7%）。
+    # 必须在 QApplication 创建之前设置（benchmarks/README.md 同样要求此项）。
+    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，

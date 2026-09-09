@@ -11420,7 +11420,31 @@ class OpenAIChatToolWindow(ToolWindow):
             remaining = _MAX_GLOBAL_RENDERED_PAGES - others
         except Exception:
             return self._max_rendered_cards
-        return max(_MIN_RENDERED_CARDS_PER_WINDOW, min(self._max_rendered_cards, remaining))
+        return max(self._render_floor(), min(self._max_rendered_cards, remaining))
+
+    def _render_floor(self) -> int:
+        """每窗口保底页数（随存活窗口数与全局占用率动态收缩）。
+
+        [MEM] 修复「保底值架空全局闸门」：原先保底是常量
+        ``_MIN_RENDERED_CARDS_PER_WINDOW=6``，N 个窗口必然 N×6 页
+        （8 窗口 = 48 页，实测每页 27-39MB → 1.3GB+），
+        ``_MAX_GLOBAL_RENDERED_PAGES=32`` 形同虚设。
+
+        现在保底取「全局闸门 / 存活窗口数」的公平份额；且当全局占用已超过
+        闸门时压到 ``_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR`` —— 这一条同时
+        覆盖同窗口多对话页的场景（此时窗口数为 1，但累计页数同样会超标）。
+        """
+        try:
+            n = max(1, len(window_registry.alive_window_instances()))
+        except Exception:
+            n = 1
+        floor = min(_MIN_RENDERED_CARDS_PER_WINDOW, max(1, _MAX_GLOBAL_RENDERED_PAGES // n))
+        try:
+            if _global_rendered_pages >= _MAX_GLOBAL_RENDERED_PAGES:
+                floor = _MIN_RENDERED_CARDS_PER_WINDOW_FLOOR
+        except Exception:
+            pass
+        return max(_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR, floor)
 
     def _sync_global_rendered_pages(self, new_count: int) -> None:
         """把本窗口已渲染计数校准为 new_count，并同步增减全局闸门计数。
@@ -11599,13 +11623,21 @@ class OpenAIChatToolWindow(ToolWindow):
         return rss_sampler.web_rss_mb()
 
     def _over_memory_threshold(self, active: bool = False) -> bool:
-        """内存阈值判定（T30 双判据）：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB
-        且（WebEngine 子进程 RSS > _WEB_MEM_THRESHOLD_MB 或子进程统计不可用时
-        退化单判据）→ True。
+        """内存阈值判定：以 WebEngine 子进程 RSS 为**主判据**。
+
+        [MEM] 旧实现是「主进程 RSS > _MEM_THRESHOLD_TOTAL_MB 且 WebEngine 子进程
+        RSS > _WEB_MEM_THRESHOLD_MB」的双 AND 判据。实测
+        （tools/diag_webengine_mem_probe.py，dpr=2.25）显示：并发 8 个
+        QWebEngineView 时子进程涨 216MB、主进程只涨 4MB —— 并发对话的内存
+        几乎全落在 renderer 子进程上，主进程 RSS 根本涨不到 900/1400MB 门槛，
+        强回收因此永不触发，子进程一路涨到 4GB。
+
+        现改为子进程 RSS 单独作主判据；主进程 RSS 只在子进程采样不可用时兜底。
+        原设计意图（不因 Python 堆高就误杀 renderer）依然成立：子进程不高就不触发。
 
         Args:
             active: 本窗口是否处于激活状态。活跃窗口用户正在交互，采用更高的
-                触发阈值（_MEM_THRESHOLD_TOTAL_MB_ACTIVE）避免频繁 kill 造成
+                触发阈值（_WEB_MEM_THRESHOLD_MB_ACTIVE）避免频繁 kill 造成
                 滚动回看时的重建抖动；但绝不再完全跳过（旧实现跳过 = 内存泄漏）。
 
         ⚡ [PERF] 采样值来自后台线程（`app.core.rss_sampler`）。本方法每
@@ -11615,20 +11647,21 @@ class OpenAIChatToolWindow(ToolWindow):
         距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL 的已卸载批次（说明内存压力来自 WebEngine）。
         """
         try:
-            rss_mb = rss_sampler.rss_mb()
-            if rss_mb <= 0.0:
-                # 采样不可用（无 psutil / 首帧未完成）→ 退化判定
-                return self._over_memory_threshold_fallback()
-            threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
-            if rss_mb <= threshold:
-                return False
-            # 主进程已超总阈值：再核对 WebEngine 侧，避免误杀
             web_mb = rss_sampler.web_rss_mb()
-            if web_mb > 0 and web_mb < _WEB_MEM_THRESHOLD_MB:
-                return False
-            return True
+        except Exception:
+            web_mb = 0.0
+        if web_mb > 0.0:
+            web_threshold = _WEB_MEM_THRESHOLD_MB_ACTIVE if active else _WEB_MEM_THRESHOLD_MB
+            return web_mb >= web_threshold
+        # 子进程采样不可用（无 psutil / 尚未创建 view）→ 退回主进程 RSS 判据
+        try:
+            rss_mb = rss_sampler.rss_mb()
         except Exception:
             return self._over_memory_threshold_fallback()
+        if rss_mb <= 0.0:
+            return self._over_memory_threshold_fallback()
+        threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
+        return rss_mb > threshold
 
     def _over_memory_threshold_fallback(self) -> bool:
         """psutil 不可用时的退化判定：并发页超限 + 存在远距已卸载批次。
@@ -21580,13 +21613,23 @@ _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约
 # 也不能让某个窗口白屏（可用性优先于内存）。
 _MAX_GLOBAL_RENDERED_PAGES = 32  # 跨窗口并发渲染页硬闸门
 _MIN_RENDERED_CARDS_PER_WINDOW = 6  # 每窗口保底页数（闸门的下限保护）
+# [MEM] 保底页数的收缩下限。原实现保底是常量 6 —— N 个窗口必然 N×6 页
+# （8 窗口 = 48 页，实测每页 27-39MB → 1.3GB+），_MAX_GLOBAL_RENDERED_PAGES=32
+# 被完全架空。现在保底随存活窗口数收缩，但降到本值即停，避免窗口被饿死到白屏。
+_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR = 3
 _MAX_BRANCH_CACHE = 64  # workdir→branch 缓存上限（M5-B）：超出时淘汰最早插入项，防长期累积渗漏
 
 # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──
 # 双判据：主进程 RSS 超总阈值，且 WebEngine 子进程 RSS 超子阈值才触发强回收——
 # 避免仅主进程内存高（如 Python 堆）时误杀 renderer。
-_MEM_THRESHOLD_TOTAL_MB = 900  # 总 RSS 阈值触发强回收（1800→900：修复 renderer 永不回收）
-_WEB_MEM_THRESHOLD_MB = 300  # WebEngine 子进程 RSS 阈值（待窗口期回填校准）
+# [MEM] 强回收的主判据已改为 WebEngine 子进程 RSS（见 _over_memory_threshold）。
+# 实测（tools/diag_webengine_mem_probe.py，dpr=2.25）：并发 8 个 QWebEngineView
+# 让子进程涨 216MB、主进程只涨 4MB —— 并发对话的内存主体全在 renderer 子进程，
+# 拿主进程 RSS 当门槛等于永远够不着，强回收永不触发 → 子进程一路涨到 4GB。
+_WEB_MEM_THRESHOLD_MB = 600  # 非活跃窗口：WebEngine 子进程 RSS 触发阈值
+_WEB_MEM_THRESHOLD_MB_ACTIVE = 1000  # 活跃窗口：阈值更高，避免滚动回看时重建抖动
+# 兜底：子进程采样不可用时（无 psutil / 尚未创建 view）退回主进程 RSS 判据
+_MEM_THRESHOLD_TOTAL_MB = 900
 _LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数
 _KILL_COOLDOWN_S = 60  # kill 冷却（防抖动）
 _KILL_BATCH_MAX = 12  # 每轮最多 kill
