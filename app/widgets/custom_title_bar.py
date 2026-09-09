@@ -144,10 +144,6 @@ class _BaseWinButton(TitleBarButton):
     #: 36：三按钮 + 0 间距时整组 108px，图标 12px 居中，观感紧凑（对齐 Win11 密度）
     WIDTH = 36
 
-    @property
-    def ICON(self) -> int:  # noqa: N802 - 兼容旧命名
-        return self.ICON_SIZE
-
     def __init__(self, parent=None, *, danger: bool = False):
         super().__init__(parent)
         self.setFixedSize(self.WIDTH, self.HEIGHT)
@@ -232,16 +228,16 @@ class MaximizeButton(_BaseWinButton):
         self._isMax = False
         super().__init__(parent, danger=danger)
 
+    def _icon_name(self) -> str:
+        # 图标表达"点击后会发生什么"：未最大化 → 显示最大化；已最大化 → 显示还原
+        return "窗体-向下还原" if self._isMax else "窗体-最大化"
+
     def setMaxState(self, isMax: bool) -> None:
         """由 TitleBarBase.eventFilter 在 WindowStateChange 时调用"""
         if self._isMax == isMax:
             return
         self._isMax = isMax
         self.update()
-
-    def _icon_name(self) -> str:
-        # 图标表达"点击后会发生什么"：未最大化 → 显示最大化；已最大化 → 显示还原
-        return "窗体-向下还原" if self._isMax else "窗体-最大化"
 
 
 class CloseButton(_BaseWinButton):
