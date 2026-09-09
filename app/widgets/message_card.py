@@ -206,6 +206,9 @@ _ASK_STRIP_PATTERN = re.compile(r"[ \t]*<ask>.*?</ask>[ \t]*", re.DOTALL)
 _ASK_EMPTY_BULLET_PATTERN = re.compile(r"^[ \t]*[-*+][ \t]*$", re.MULTILINE)
 # 追问区块最多展示条数（模型通常给 1~3 条，超量截断避免卡片尾部过长）
 _ASK_MAX_ITEMS = 4
+# 追问模板占位词：stop 追问预测 hook 的提示词里出现过「<ask>原话</ask>」这类示例，
+# 模型偶尔照抄字面输出成一个假追问项。渲染阶段兜底丢弃，历史消息同样受益。
+_ASK_PLACEHOLDER_TEXTS = frozenset({"原话", "追问", "问题", "xxx", "某问题"})
 _CODE_BLOCK_CODE_PATTERN = re.compile(r"```[\w]*\n")
 _CODE_BLOCK_END_PATTERN = re.compile(r"```\n")
 _CODE_BLOCK_FINAL_PATTERN = re.compile(r"```")
@@ -3718,6 +3721,9 @@ def _collect_and_strip_asks(md_text: str) -> tuple[str, list[str]]:
         if not content:
             continue
         key = _MULTIPLE_SPACES_PATTERN.sub(" ", content)
+        # 占位词（模型照抄提示词模板）不是真追问
+        if key.lower() in _ASK_PLACEHOLDER_TEXTS or key.strip("？?。. ") in _ASK_PLACEHOLDER_TEXTS:
+            continue
         if key in seen:
             continue
         seen.add(key)

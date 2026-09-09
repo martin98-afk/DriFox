@@ -46,6 +46,16 @@ def test_ask_inside_code_block_untouched():
     assert "真追问" in out
 
 
+def test_placeholder_ask_dropped():
+    """模型照抄提示词模板输出的「原话」等占位词不是真追问。"""
+    src = "- <ask>原话</ask>\n- <ask>追问</ask>\n- <ask>真的会变吗</ask>\n"
+    out = _inject_context_links(src)
+    assert "原话" not in out
+    assert 'data-type="ask"' in out
+    assert out.count('data-type="ask"') == 1
+    assert "真的会变吗" in out
+
+
 def test_ask_count_capped():
     """超量追问截断，避免卡片尾部过长（上限 4）。"""
     src = "\n".join(f"- <ask>第{i}问</ask>" for i in range(1, 7))
