@@ -202,13 +202,6 @@ class GatewaySessionManager:
         """获取会话"""
         return self._sessions.get(session_id)
 
-    def get_session_by_platform_user(self, platform: Platform, user_id: str) -> Optional[GatewaySession]:
-        """通过平台和用户 ID 获取会话"""
-        user_sessions = self._user_sessions.get(platform, {})
-        session_id = user_sessions.get(user_id)
-        if session_id:
-            return self._sessions.get(session_id)
-        return None
 
     def delete_session(self, session_id: str) -> bool:
         """
@@ -241,24 +234,6 @@ class GatewaySessionManager:
         logger.info(f"[GatewaySession] Deleted session {session_id}")
         return True
 
-    def reset_session(self, session_id: str) -> bool:
-        """
-        重置会话（清除历史但不删除）
-        """
-        session = self._sessions.get(session_id)
-        if not session:
-            return False
-
-        # 删除会话文件
-        session_file = self._data_dir / f"{session_id}.json"
-        if session_file.exists():
-            session_file.unlink()
-
-        session.message_count = 0
-        session.last_active = datetime.now()
-
-        logger.info(f"[GatewaySession] Reset session {session_id}")
-        return True
 
     def list_sessions(self, platform: Optional[Platform] = None) -> List[GatewaySession]:
         """
@@ -280,26 +255,9 @@ class GatewaySessionManager:
 
         return sessions
 
-    def list_sessions_by_chat(self, platform: Platform, chat_id: str) -> List[GatewaySession]:
-        """列出指定聊天的所有会话"""
-        return [
-            s for s in self._sessions.values()
-            if s.platform == platform and s.chat_id == chat_id
-        ]
 
-    def set_create_callback(self, callback: Callable[[GatewaySession], None]) -> None:
-        """设置创建会话回调"""
-        self._on_create_session = callback
 
     @property
     def session_count(self) -> int:
         """会话数量"""
         return len(self._sessions)
-
-    @property
-    def session_count_by_platform(self) -> Dict[Platform, int]:
-        """各平台会话数量"""
-        return {
-            platform: len([s for s in self._sessions.values() if s.platform == platform])
-            for platform in [Platform.WECOM, Platform.DINGTALK]
-        }
