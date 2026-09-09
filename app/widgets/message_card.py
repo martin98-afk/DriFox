@@ -802,9 +802,10 @@ def _sanitize_incomplete_markdown(md_text: str) -> str:
                 lang_token = stripped[3:].strip()
                 # html 同样需要骨架：半截 HTML 透传会因标签未闭合破坏页面结构。
                 # 插件注册的 fence 也要改标（否则半截源码会被当成品渲染）。
-                if lang_token.lower() in ("mermaid", "echarts", "html", "widget") or _get_plugin_fence_renderer(
-                    lang_token.lower()
-                ) is not None:
+                if (
+                    lang_token.lower() in ("mermaid", "echarts", "html", "widget")
+                    or _get_plugin_fence_renderer(lang_token.lower()) is not None
+                ):
                     lines[i] = lines[i].replace(lang_token, f"{lang_token}-streaming", 1)
                     md_text = "\n".join(lines)
                 break
@@ -838,11 +839,7 @@ def _protect_inline_svg_blocks(md_text: str) -> str:
         if not in_svg:
             if stripped.startswith("```"):
                 in_fence = not in_fence
-            if (
-                not in_fence
-                and stripped[:4].lower() == "<svg"
-                and "</svg>" not in stripped.lower()
-            ):
+            if not in_fence and stripped[:4].lower() == "<svg" and "</svg>" not in stripped.lower():
                 in_svg = True
                 buf = [line]
                 continue
@@ -1550,7 +1547,7 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
-        <span class="tool-streaming-preview" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_display}
         </span>
     </div>"""
@@ -1576,7 +1573,11 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         if compact:
             block_seed = f"{content}|1"
             block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
-            preview_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+            preview_right = (
+                f'<span data-dfx-preview data-dfx-key="{block_key}" data-dfx-text="{escape(preview)}" '
+                f'style="color: var(--text-secondary); font-weight: normal; margin-left: 8px; font-size: {scale_font_size(11)}px;">'
+                f"{escape(preview)}</span>"
+            )
             return f"""<div class="think-compact" data-block-key="{block_key}"{_flip_attr} style="margin: 2px 0; padding: 4px 8px; {font_style} display: flex; align-items: baseline; gap: 6px; border-radius: 4px;">
     <span style="white-space: nowrap; flex-shrink: 0;">{status_text}</span>
     {preview_right}
@@ -1586,7 +1587,11 @@ def _render_think_block(content: str, completed: bool = True, compact: bool = Fa
         content_escaped = escape(_strip_code_blocks(content))
         block_seed = f"{content}|1"
         block_key = "think-" + hashlib.sha1(block_seed.encode("utf-8")).hexdigest()[:12]
-        summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        summary_right = (
+            f'<span data-dfx-preview data-dfx-key="{block_key}" data-dfx-text="{escape(preview)}" '
+            f'style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f"{escape(preview)}</span>"
+        )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="{block_key}"{_flip_attr} data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
@@ -1628,7 +1633,11 @@ def _render_think_block_lightweight(content: str, completed: bool = True) -> str
         content_escaped = escape(content)
         font_style = _get_think_block_styles()
         preview = _get_think_preview(content)
-        summary_right = f'<span style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">{escape(preview)}</span>'
+        summary_right = (
+            f'<span data-dfx-preview data-dfx-key="think-light" data-dfx-text="{escape(preview)}" '
+            f'style="color: var(--text-secondary); font-weight: normal; margin-left: 12px; font-size: {scale_font_size(11)}px;">'
+            f"{escape(preview)}</span>"
+        )
         body_html = f'<div class="think-content loading" style="white-space: normal; word-break: break-word; line-height: 1.6; {font_style}">{content_escaped}</div>'
         return f"""<div class="cm-collapsible think-block" data-block-key="think-light" data-expanded="false" style="margin: 4px 0;">
     <button type="button" class="cm-collapsible__summary think-block__summary" aria-expanded="false" style="{font_style}">
@@ -2267,9 +2276,7 @@ def _extract_by_regex_fallback(content: str) -> dict:
     return args
 
 
-def _inject_tool_blocks(
-    md_text: str, completed: bool = True, compact: bool = False, heavy_caps=None
-) -> str:
+def _inject_tool_blocks(md_text: str, completed: bool = True, compact: bool = False, heavy_caps=None) -> str:
     """注入工具块HTML，类似think块"""
     if not md_text:
         return md_text
@@ -2818,8 +2825,7 @@ _WIDGET_CSP = (
 )
 _WIDGET_CSP_JS = '"' + _WIDGET_CSP + '"'
 _WIDGET_BASE_CSS = (
-    "html,body{margin:0;padding:0;background:transparent;color:var(--text);font-size:13px;}"
-    "*{box-sizing:border-box;}"
+    "html,body{margin:0;padding:0;background:transparent;color:var(--text);font-size:13px;}*{box-sizing:border-box;}"
 )
 _WIDGET_BASE_CSS_JS = '"' + _WIDGET_BASE_CSS + '"'
 
@@ -2912,6 +2918,50 @@ def _has_unclosed_think_or_tool(md: str) -> bool:
     if not md:
         return False
     return md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>")
+
+
+def _last_unpaired_open_pos(md: str, open_tag: str, close_tag: str) -> int:
+    """返回最后一个**未闭合**开标签的起始偏移（无未闭合块 → -1）。"""
+    depth = 0
+    first_open = -1
+    i = 0
+    n = len(md)
+    o_len, c_len = len(open_tag), len(close_tag)
+    while i < n:
+        if md.startswith(open_tag, i):
+            if depth == 0:
+                first_open = i
+            depth += 1
+            i += o_len
+            continue
+        if md.startswith(close_tag, i):
+            if depth > 0:
+                depth -= 1
+            i += c_len
+            continue
+        i += 1
+    return first_open if depth > 0 else -1
+
+
+def _tail_before_unclosed_block(md: str) -> str:
+    """截取 md 中第一个**未闭合** `<think>` / `<tool>` 块之前的部分。
+
+    差量渲染的 tail（未闭合尾部）含未闭合协议块时会被静默丢弃（防思考内容泄漏
+    到正文、防半截 `<tool>` 被渲染成假卡片）。但 JS `updateContentAppend` 会
+    无条件 remove 全部 `[data-incremental]` 节点——若 tail 整段不重建，未闭合块
+    **之前**已经显示出来的正文会跟着一起消失，且此后无人补回（用户可见
+    “流式输出吞内容”）。
+
+    因此丢弃只应发生在未闭合块起点**之后**：之前的正文照常行内渲染。
+    """
+    if not md or not _has_unclosed_think_or_tool(md):
+        return md
+    cut = len(md)
+    for open_tag, close_tag in (("<think>", "</think>"), ("<tool>", "</tool>")):
+        pos = _last_unpaired_open_pos(md, open_tag, close_tag)
+        if pos != -1:
+            cut = min(cut, pos)
+    return md[:cut] if cut != len(md) else md
 
 
 # ===== 句号类标点（软边界触发器）=====
@@ -3333,6 +3383,85 @@ _TYPEWRITER_JS = """
                     if (!st) return;
                     if (st.raf) { cancelAnimationFrame(st.raf); st.raf = 0; }
                     st.buf = "";
+                };
+"""
+
+# ── 预览文字打字机（Preview Typewriter）骨架资产 ──
+# 背景：思考/工具预览文字是「静默累积 → 一次性全量渲染」落地的（append_reasoning 的
+# 既定设计，避免每 chunk 全量重排导致 think-streaming DOM 反复销毁重建），因此它
+# 出现在 DOM 的那一刻是整段瞬间出现，观感生硬。这里让**预览行**逐字显现：
+#   - 首次落地：从空打到完整预览文本
+#   - 后续更新：从"已显示文本"续打到新文本，只补增量，不重放已显示部分
+# 只作用于带 [data-dfx-preview] 的短文本预览行（单行、nowrap、高度恒定），
+# 不动正文/思考正文——长文本逐字成本高且与 _tw 揭示队列职责重叠。
+# 全文存 data-dfx-text 属性（HTML 已转义），JS 只写首个文本节点，
+# 子元素（如工具的"(N字符)"计数 span）不受影响。
+_PREVIEW_TYPEWRITER_JS = """
+                // ===== 预览文字打字机 =====
+                window._pt = {
+                    shown: Object.create(null),  // key -> 已显现文本
+                    node: Object.create(null),   // key -> 当前正在写的文本节点
+                    raf: Object.create(null),    // key -> rAF 句柄（0 = 空闲）
+                    enabled: true,
+                    TOTAL_MS: 240,   // 单次要补的字符数在此时间内补齐
+                    MAX_CHARS: 120   // 超过该长度直接全显（长预览不逐字）
+                };
+                window._ptType = function (el, key, full) {
+                    var st = window._pt;
+                    if (!st || !st.enabled || !el) return;
+                    if (st.shown[key] === full) return;
+                    var node = el.firstChild;
+                    if (!node || node.nodeType !== 3) {
+                        // 没有可直接写的文本节点（理论上预览行必有）：
+                        // 退化直接显示，不影响可见性
+                        st.shown[key] = full;
+                        return;
+                    }
+                    // 打字中被全量重渲染打断（流式每 150~500ms 就会 innerHTML 重建一次，
+                    // 且 updateContent 内部 reorganizeContent 之后还会再播一次）：
+                    // 新节点携带完整文本，若从头重打会"全显→清空→再补"闪一下。
+                    // 这里只把写指针切到新节点的首个文本节点，动画按原进度续跑。
+                    if (st.raf[key]) {
+                        if (st.node[key] !== node) st.node[key] = node;
+                        return;
+                    }
+                    var shown = st.shown[key] || "";
+                    // 非前缀延续（预览被整体替换/回退）→ 从头重打
+                    if (full.indexOf(shown) !== 0) shown = "";
+                    var delta = full.length - shown.length;
+                    if (delta > st.MAX_CHARS) {
+                        node.nodeValue = full;
+                        st.shown[key] = full;
+                        return;
+                    }
+                    node.nodeValue = shown;
+                    var step = Math.max(1, Math.ceil(delta / (st.TOTAL_MS / 16)));
+                    var pos = shown.length;
+                    st.node[key] = node;
+                    var tick = function () {
+                        pos = Math.min(full.length, pos + step);
+                        var n = st.node[key];
+                        if (n && n.nodeType === 3) n.nodeValue = full.slice(0, pos);
+                        if (pos < full.length) {
+                            st.raf[key] = requestAnimationFrame(tick);
+                        } else {
+                            st.raf[key] = 0;
+                            st.node[key] = null;
+                            st.shown[key] = full;
+                        }
+                    };
+                    st.raf[key] = requestAnimationFrame(tick);
+                };
+                window._ptPlay = function (root) {
+                    var st = window._pt;
+                    if (!st || !st.enabled) return;
+                    var els = (root || document).querySelectorAll('[data-dfx-preview]');
+                    for (var i = 0; i < els.length; i++) {
+                        var el = els[i];
+                        var full = el.getAttribute('data-dfx-text');
+                        if (full === null) continue;
+                        window._ptType(el, el.getAttribute('data-dfx-key') || ('pt' + i), full);
+                    }
                 };
 """
 
@@ -4577,7 +4706,6 @@ class CodeWebViewer(QWebEngineView):
             pass
         return super().event(event)
 
-
     def setFixedSize(self, *args, **kwargs):
         """限制最大尺寸，防止 GPU 内存溢出"""
         # 计算安全尺寸
@@ -4958,7 +5086,7 @@ class CodeWebViewer(QWebEngineView):
         # 现由 JS 侧首次遇到对应 fence 时动态加载（_echartsEnsure / _mmdEnsure /
         # _katexEnsure），欢迎卡片等 light 骨架场景同样走这条路径（_initEchartsIn
         # 内部会先 ensure 再扫描，不依赖 window.echarts 预先存在）。
-        cdn_libs = "" 
+        cdn_libs = ""
 
         # 检测浅色/深色模式，用于滚动条和行内差异框主题适配
         try:
@@ -7471,6 +7599,9 @@ class CodeWebViewer(QWebEngineView):
                         // 把位置突变补间成平滑位移；入队串行，避免与归位/折叠动画叠加。
                         if (_flipPrev && typeof window._flipPlay === 'function') window._flipPlay(_flipPrev, 220);
 
+                        // 预览文字打字机：本次渲染新落地的思考/工具预览行逐字显现
+                        if (typeof window._ptPlay === 'function') window._ptPlay();
+
                         // ── 恢复全透明度：在下一帧前 fade in，CSS transition 驱动平滑淡入 ──
                         // 🛡️ 竞态防护：递增 token + 定时器引用，防止连续 updateContent 时
                         // 上轮清理误清本轮 transition，或清理定时器残留导致 transition 提前消失。
@@ -7600,6 +7731,8 @@ class CodeWebViewer(QWebEngineView):
                     // 插件 fence：追加的闭合段可能带入新的插件 fence
                     if (typeof window._runFenceAssets === 'function') window._runFenceAssets();
                     if (typeof window._initWidgets === 'function') window._initWidgets();
+                    // 预览文字打字机：差量段里新落地的思考/工具预览行逐字显现
+                    if (typeof window._ptPlay === 'function') window._ptPlay();
                     // 使用延迟报告，确保浏览器布局完成
                     setTimeout(() => reportHeight(), 30);
                 }}
@@ -7971,6 +8104,8 @@ class CodeWebViewer(QWebEngineView):
                     if (moved || toolContent.children.length > 0) _updateToolSectionHeader();
                     // 坞态（流式中）：新条目进入后自动滚底
                     if (window._streamingActive && window._toolCompactMode) _scrollToolContentToBottom();
+                    // 预览文字打字机：搬移进工具区的思考/工具预览行逐字显现
+                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }}
                 // 工具与思考区头部折叠/展开：用 transitionend 精确监听动画结束，
                 // 替代不可靠的 setTimeout(220) —— 动画时长若被 CSS 改动会失准
@@ -8696,6 +8831,7 @@ class CodeWebViewer(QWebEngineView):
                 }}, {{passive: true}});
                 {_STREAMING_DOCK_JS}
                 {_TYPEWRITER_JS}
+                {_PREVIEW_TYPEWRITER_JS}
                 {_FLIP_JS}
 
                 // ===== 流式工具块：移除超时自动标记 ====
@@ -9291,6 +9427,16 @@ class CodeWebViewer(QWebEngineView):
                 self._render_deferred = True
                 return
 
+            # 预览文字打字机开关：只在本轮流式（含结束后的终渲染）播放。
+            # 历史会话加载时 _streaming / _streaming_finished 均为 False —— 一次
+            # 加载几十张卡片，若都逐字播放会同时起几十个 rAF 抢帧，且"打字机"
+            # 对已存在的历史内容没有意义，故关闭（文字按渲染结果直接全显）。
+            _pt_enabled = "true" if (self._streaming or getattr(self, "_streaming_finished", False)) else "false"
+            try:
+                self.page().runJavaScript(f"if (window._pt) window._pt.enabled = {_pt_enabled};")
+            except RuntimeError:
+                pass
+
             # 已完成（结果已到达）的工具 id 集合，供下方 restore 逻辑判断运行框是否可复活
             _finished_ids = list(getattr(self, "_restore_finished_ids", set()) or set())
             _safe_finished = json.dumps(_finished_ids).decode("utf-8")
@@ -9320,9 +9466,8 @@ class CodeWebViewer(QWebEngineView):
                         ]
                     else:
                         html_content = self._cached_streaming_html
-                elif (
-                    len(self._markdown_text) > self._ASYNC_HISTORY_RENDER_MIN_CHARS
-                    and not getattr(self, "_final_render_pending", False)
+                elif len(self._markdown_text) > self._ASYNC_HISTORY_RENDER_MIN_CHARS and not getattr(
+                    self, "_final_render_pending", False
                 ):
                     # [PERF] 长内容的**历史/非结束态**渲染走线程池：md.convert +
                     # Pygments 在长消息上是 40~120ms 的主线程阻塞（真机实测），
@@ -9453,8 +9598,15 @@ class CodeWebViewer(QWebEngineView):
                     # 等闭合后由差量段/全量渲染处理，避免思考内容泄漏到正文）。
                     _tail = self._markdown_text[self._stable_md_len :]
                     _tail_html = ""
-                    if _tail and not _has_unclosed_think_or_tool(_tail):
-                        _tail_html = _render_inline_tail(_tail, compact=self._tool_compact_mode)
+                    if _tail:
+                        # 🐛 修复（流式吞内容）：tail 含未闭合 think/tool 时只截到未闭合
+                        # 块起点——未闭合块内容照旧静默累积（等闭合后由差量/全量渲染
+                        # 落地），但它**之前**的正文必须重建：updateContentAppend 会
+                        # 无条件 remove 全部 [data-incremental] 节点，整段 tail 不重建
+                        # 就等于把这部分已显示的文字抹掉且不恢复。
+                        _safe_tail = _tail_before_unclosed_block(_tail)
+                        if _safe_tail and not _has_unclosed_think_or_tool(_safe_tail):
+                            _tail_html = _render_inline_tail(_safe_tail, compact=self._tool_compact_mode)
                     js = (
                         "updateContentAppend("
                         f"{json.dumps(new_html).decode('utf-8')},"
@@ -9677,7 +9829,11 @@ class CodeWebViewer(QWebEngineView):
                 _md_r = self._last_rendered_markdown
                 _last_break = _md_r.rfind("\n\n")
                 self._stable_md_len = _last_break + 2 if _last_break != -1 else 0
-            self._needs_full_render = False
+            # 🐛 修复（思考框/工具框重复）：md 含未闭合块时基线**不推进**（防残段
+            # 泄漏到正文），但 DOM 里已渲染出该块（think-streaming / 工具框）。
+            # 若让后续走差量追加，会把已渲染的段再渲染一遍 → 同一段重复出现。
+            # 故基线未推进时强制下一次走全量渲染（updateContent 整体替换，不重复）。
+            self._needs_full_render = self._streaming and _has_unclosed_think_or_tool(self._last_rendered_markdown)
             # 🐛 修复（流式文字跳位）：全量渲染的 DOM 末尾 <p> 可以是**未闭合段的
             # 中间形态**（首渲染 / 工具后重渲等，md 尾部无 \n\n）。此时末尾 <p>
             # 承载的是未写完的段落，后续同段 chunk 应继续接在它后面。若不补打
@@ -9700,7 +9856,17 @@ class CodeWebViewer(QWebEngineView):
                         "if(!_c)return;"
                         "var _l=_c.lastElementChild;"
                         "if(_l&&_l.id==='char-count')_l=_l.previousElementSibling;"
-                        "if(!_l||_l.tagName!=='P'||_l.hasAttribute('data-incremental'))return;"
+                        "if(!_l||_l.hasAttribute('data-incremental'))return;"
+                        # 🐛 修复（尾部重复）：原判据只认 <p>，末尾是代码块/列表/引用时
+                        # 打不上标记 → updateTailHtml / updateContentAppend 删不掉它，
+                        # tail 又被重建一遍 → 同一段内容重复出现。放宽到可安全重建的
+                        # 块级元素（含代码包装 DIV 里的 <pre>）。
+                        # 图表/公式容器不打标：remove() 会销毁已渲染 canvas/SVG，
+                        # 而 chart vault 只覆盖 updateContent 路径，不覆盖 append。
+                        "if(_l.querySelector&&_l.querySelector('.echarts-container,.mermaid-block,.katex-container'))return;"
+                        "var _tn=_l.tagName;"
+                        "var _isPre=(_tn==='PRE')||(_tn==='DIV'&&!!_l.querySelector('pre'));"
+                        "if(!(_tn==='P'||_tn==='PRE'||_tn==='UL'||_tn==='OL'||_tn==='BLOCKQUOTE'||/^H[1-6]$/.test(_tn)||_isPre))return;"
                         "_l.setAttribute('data-incremental','true');"
                         "})();"
                     )
@@ -9744,6 +9910,10 @@ class CodeWebViewer(QWebEngineView):
             # 误判"无工具 DOM"而裸 updateContent 抹掉 JS 注入的运行框。
             _gen = self._tool_dom_dirty_gen
             self.page().runJavaScript(js_code, lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g))
+            # 🐛 修复（刚打出的字被抹掉）：updateContent 用的是「渲染快照」的 HTML，
+            # 在途期间到达的 chunk 只存在于 DOM 增量节点，整体替换会连它们一起删掉。
+            # 落地后把快照之后的增量补回（排在 updateContent 之后执行）。
+            self._push_unrendered_tail_text()
             # 释放缓存：HTML 已推送到 WebEngine，Python 端不再保留减少内存占用
             self._last_rendered_html = None
         except RuntimeError:
@@ -9755,6 +9925,31 @@ class CodeWebViewer(QWebEngineView):
                 pseq, pmd, pcompact = self._render_pending
                 self._render_pending = None
                 self._sequence_render(pmd, pcompact)
+
+    def _push_unrendered_tail_text(self):
+        """把「渲染快照之后新增」的文本重新推回 DOM（防全量渲染落地时抹掉）。
+
+        [B3] 全量渲染提交的是 md 快照（`_last_rendered_markdown`）；线程池在途
+        期间到达的 chunk 只存在于 DOM 的增量纯文本节点（`_append_text_incremental`）。
+        渲染落地时 `updateContent` 整体替换 innerHTML 会连它们一起删掉 —— 视觉上
+        是"刚打出来的字消失一块"。落地后把快照之后的增量补回，内容不再回退。
+        """
+        try:
+            if not self._streaming or not self._is_js_ready:
+                return
+            snapshot = self._last_rendered_markdown or ""
+            latest = self._markdown_text or ""
+            if not snapshot or len(latest) <= len(snapshot):
+                return
+            if not latest.startswith(snapshot):
+                # 内容被整体替换/重排（非纯追加）：语义未知，交给下一次全量渲染
+                return
+            extra = latest[len(snapshot) :]
+            if not extra.strip():
+                return
+            self._append_text_incremental(extra)
+        except RuntimeError:
+            pass
 
     def _build_save_and_restore_js(self, html_content: str, finished_ids: set = None) -> str:
         """生成"保存工具块 → 重写内容 → 还原工具块"的 JS 模板（流式/非流式共享）
@@ -11573,9 +11768,7 @@ class _ImagePreviewDialog(MaskDialogBase):
         max_h = int(screen.height() * 0.92)
         if w > max_w or h > max_h:
             w, h = max_w, max_h
-        self._img_label.setPixmap(
-            self._pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        )
+        self._img_label.setPixmap(self._pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         self.widget.adjustSize()
         self._center_widget()
 
@@ -11677,6 +11870,7 @@ def _fence_assets_for_skeleton() -> tuple:
 
     插件系统未就绪或任何异常都返回空表 —— 骨架构建不能被插件拖垮。
     """
+
     # 内置 fence（当前只有 ```widget）没有插件替它声明权限，在此兜底合入；
     # 插件系统未就绪时也必须带上，否则 widget 桥会全空。
     def _builtin_only() -> tuple:
@@ -15123,6 +15317,8 @@ class MessageCard(SimpleCardWidget):
                     window._autoScrollTime = performance.now();
                     window._suppressScrollEvent = false;
                     hr();
+                    // 预览文字打字机：预览文本更新后逐字补齐增量
+                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }} else {{
                     // text-only 模式下不存在块：不创建
                     if ({_text_only_js}) return;
@@ -15160,6 +15356,8 @@ class MessageCard(SimpleCardWidget):
                         if (ts) {{ ts.style.display = ''; _updateToolSectionHeader(); }}
                     }}
                     hr();
+                    // 预览文字打字机：新工具块的预览行逐字显现
+                    if (typeof window._ptPlay === 'function') window._ptPlay();
                 }}
             }})();
             """
@@ -15313,6 +15511,8 @@ class MessageCard(SimpleCardWidget):
                 }} else if (typeof reportHeight === 'function') {{
                     reportHeight();
                 }}
+                // 预览文字打字机：思考块转完成态时预览行逐字显现
+                if (typeof window._ptPlay === 'function') window._ptPlay();
             }})();
             """
             self.viewer.page().runJavaScript(js_code)
@@ -15875,10 +16075,10 @@ def _session_duration_days(created_at: str) -> int:
         return 0
     try:
         start = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         try:
             start = datetime.strptime(created_at[:10], "%Y-%m-%d")
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return 0
     return max((datetime.now() - start).days, 0)
 
@@ -15987,4 +16187,3 @@ def _render_sessions_body(recent_sessions: list, top_by_count: list, suppress_an
     if not (recent_block or top_block):
         return '<div class="welcome-empty">还没有历史会话，开始第一次对话吧 ✨</div>'
     return recent_block + top_block
-
