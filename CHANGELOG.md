@@ -3,6 +3,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.10b4] - 2026-09-09
+
+自上一版本以来的变更 | 提交数：20 · 文件变更：57 · +4617/-895 | 贡献者：dingma, mading
+
+### ✨ 新功能 (New Features)
+
+- **占位符 ask 处理过滤非问题消息** (`app/widgets/message_card.py`, `plugins/system-hooks/hooks/hooks.json`, `tests/widgets/test_ask_suggest_block.py`): 消息渲染时识别并过滤非问题的占位符 ask 提示，配套单元测试。
+- **聊天滚动最大值与 height commit batch 同步** (`app/main_widget.py`, `app/widgets/height_commit_batch.py`, `app/widgets/message_card.py`): 聊天区滚动最大值与 height commit batch 同步，确保滚动行为准确。
+- **插件组件卡和消息卡增强 ask 处理** (`app/main_widget.py`, `app/plugins/component_items.py`, `app/widgets/cards/settings/llm_settings_card.py`, `app/widgets/cards/settings/plugin_components_card.py`, `app/widgets/cards/settings/list_setting_card.py`, `app/widgets/message_card.py`, `tests/widgets/test_ask_suggest_block.py`, `tests/widgets/test_font_size_stepper.py`): 重构 `plugin_components_card.py` 项目行布局与描述处理；为 `ComponentRow` 引入新 `CardWidget` 对齐设计规范；搜索清除后恢复项目可见性；`message_card.py` 将 `<ask>` 标签合并到消息末尾单个块；新增 ask 建议块样式；新增 ask 建议块测试与字号 stepper 测试更新。
+- **预览文本渲染与打字机集成回归测试** (`tests/debug/preview_typewriter_repro.py`, `tests/widgets/test_preview_typewriter.py`): 新增预览文本与打字机集成回归测试。
+- **长内容渲染逻辑增强 + 终态同步防缓存** (`app/main_widget.py`, `app/widgets/message_card.py`, `plugins/file-tree/ui/_smoke_ft.py`, `tests/widgets/test_streaming_smoothness_wiring.py`): 长内容渲染逻辑增强；终态渲染强制同步，防止缓存问题。
+- **全 UI 组件平滑滚动 + viewer 复用保留骨架** (`app/widgets/message_card.py`, `plugins/agent_trace/ui/detail_panel.py`, `plugins/agent_trace/ui/turn_list_widget.py`, `plugins/assistant_hub/ui/overlays.py`, `plugins/file-tree/ui/`, `plugins/plugin-marketplace/ui/cards.py`, `plugins/system-cleaner/ui/cards.py`, `plugins/system-ui/ui/_artifacts_page.py`, `tests/widgets/test_streaming_smoothness_wiring.py`, `tests/widgets/test_webview_pool_skeleton_reload.py`): 实现跨 UI 组件的平滑滚动；viewer 复用时保留骨架并清理内容。
+- **终端会话处理与 UI 响应性增强** (`app/core/engines/ui/engine.py`, `app/core/plugin_host_service.py`, `app/main_widget.py`, `app/tools/pty_session.py`, `app/tray_manager.py`, `app/widgets/message_card.py`, `benchmarks/bench_startup.py`, `tests/core/test_plugin_host_mcp_autoconnect.py`, `tests/widgets/test_main_widget_scroll_anchor.py`, `tests/widgets/test_main_widget_smoke.py`, `tests/widgets/test_streaming_smoothness_wiring.py`, `tests/widgets/test_webview_pool_skeleton_reload.py`): `pty_session.py` 预编译 ANSI 正则；`_strip_ansi` 改用预编译正则；`tray_manager.py` 全局热键延迟初始化；`message_card.py` 新增 finish height 动画及开关（支持环境变量/运行时设置）；新增延迟 LSP 初始化测试；消息卡高度处理优化避免突变；viewer 高度重置修复。
+- **设计模式/场景文档与性能排查手册** (`plugins/system-skills/skills/drifox-dev/`): 强化 `patterns.md` 注册表与多窗口隔离策略；新增 `perf-playbook.md` 性能排查指南；新增 `rendering-pipeline.md` 渲染管线文档；精简 `scenarios.md` 新功能/Bug/插件流程；`state-reference.md` 加入 known-pitfalls 决策指南；全面更新 `testing-build.md`；`snapshot_project.py` 包含更多关键文件。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **OpenGL 处理与环境变量清理增强稳定性** (`main.py`): 增强 OpenGL 处理与环境变量清理，提升 Windows 打包版稳定性。
+- **快捷键提示优化** (`app/widgets/bottom_input_area.py`): 简化快捷键提示文案，改善可用性与清晰度。
+- **message_card 流式差量渲染吞内容** (`app/widgets/message_card.py`, `tests/debug/_stream_swallow_harness.py`, `tests/widgets/test_message_card_diff_tail_loss.py`, `tests/widgets/test_streaming_diff_no_swallow.py`): 修复流式输出过程中正文/正文区工具结果框偶发吞内容。三处根因：(A) 差量 tail 含未闭合 <think>/`<tool>` 时被整段丢弃，JS updateContentAppend 仍无条件 remove 全部 `[data-incremental]` 节点，导致未闭合块**之前**已显示的正文被一并抹掉；新增 `_tail_before_unclosed_block` / `_last_unpaired_open_pos`，丢弃只发生在未闭合块起点之后；(B) 全量渲染落地后的末尾打标只认 `<p>`，末尾是代码块/列表/引用时漏标，导致同一段重复出现；放宽到可重建块级元素（P/PRE/UL/OL/BLOCKQUOTE/H1-6/含 `<pre>` 的 DIV），排除图表/公式容器；md 含未闭合块时基线不推进，置 `_needs_full_render` 强制下一次走全量；(C) 全量渲染提交的是 md 快照，线程池在途期间到达的 chunk 只存在于 DOM 增量节点，`updateContent` 整体替换 innerHTML 会连它们一起抹掉；新增 `_push_unrendered_tail_text()` 在渲染落地后把快照之后的增量补回 DOM。验证：`_stream_swallow_harness.py` 修复前 26/44 失败 → 修复后 0/44；`test_streaming_diff_no_swallow.py` 11 条回归测试先红后绿；`test_message_card_diff_tail_loss.py` 18 条按新行为通过。
+- **加载会话时滚动位置污染防护** (`app/main_widget.py`, `tests/widgets/test_main_widget_scroll_anchor.py`): 加载会话时阻止滚动位置污染，尊重用户意图。
+- **非流式分支守卫异步渲染历史实例修正** (`app/widgets/message_card.py`, `tests/widgets/test_streaming_smoothness_wiring.py`): 修正异步渲染历史实例的非流式分支守卫。
+- **渲染卡上限与流式终态处理** (`app/main_widget.py`, `app/widgets/message_card.py`): 流式渲染时调整最大渲染卡数做内存管理，改善终态渲染处理。
+- **think 块翻转动画增强** (`app/widgets/message_card.py`): think 块渲染支持翻转动画，过渡更平滑。
+- **骨架缓存版本与打字机揭示队列** (`app/widgets/message_card.py`): 提升骨架缓存版本；实现打字机揭示队列，文本渲染更平滑。
+- **池化 WebView 骨架重载与 JS 就绪重置防白卡** (`app/widgets/message_card.py`, `tests/widgets/test_webview_pool_skeleton_reload.py`): 池化 WebView 归还时重载骨架并重置 JS 就绪状态，避免复用出现空白卡。
+- **命令热重载 QShortcut 二义性销毁旧快捷键** (`app/core/builtin_commands.py`, `app/main_widget.py`, `app/tray_manager.py`, `tests/widgets/test_command_shortcut_hot_reload.py`): 命令热重载时彻底销毁旧 QShortcut，避免同名快捷键冲突。
+
+### 🔧 其他 (Chores & Build)
+
+- 升级版本号至 v0.5.10b4（`pyproject.toml`、`app/utils/config.py`、`dist/installer.iss`、`README.md`）
+- 同步 uv.lock 版本至 0.5.10b3（`uv.lock`）
 ## [v0.5.10b3] - 2026-09-08
 
 自上一版本以来的变更 | 提交数：1 · 文件变更：6 · +17/-8 | 贡献者：mading
