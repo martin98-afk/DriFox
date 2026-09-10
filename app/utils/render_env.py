@@ -14,7 +14,8 @@ qfluentwidgets 全量配置拖慢启动 / 提前加载 GUI 栈），换算成环
   - software / software_gl：纯 CPU 光栅，完全不碰显卡驱动
 - WebglEnabled: auto（旧检测链）/ on / off
 - RendererProcessLimit / JsHeapMb / LowEndDeviceMode / SmoothScrolling /
-  CanvasAA / DisabledFeatures / ExtraChromiumFlags：直通 Chromium 开关
+  CanvasAA / DisableBackgroundThrottling / DisabledFeatures / ExtraChromiumFlags：
+  直通 Chromium 开关（DisableBackgroundThrottling 默认关，保持 Chromium 原生节流）
 
 兼容性契约：
 - 默认行为与历史 main.py 硬编码逐字一致（无配置文件 / 缺 key / 非法值均回退）
@@ -39,6 +40,7 @@ qfluentwidgets 全量配置拖慢启动 / 提前加载 GUI 栈），换算成环
 
 import json
 import os
+import re
 import sys
 
 __all__ = [
@@ -46,6 +48,7 @@ __all__ = [
     "build_chromium_flags",
     "compute_settings",
     "default_config_path",
+    "describe_applied",
 ]
 
 # 与 app/utils/config.py Render 组默认值/范围保持一致
@@ -121,6 +124,9 @@ def compute_settings(render: dict) -> dict:
         "low_end_device_mode": _to_bool(render.get("LowEndDeviceMode"), True),
         "smooth_scrolling": _to_bool(render.get("SmoothScrolling"), False),
         "canvas_aa": _to_bool(render.get("CanvasAA"), False),
+        # 后台节流：默认 False（Chromium 原生行为）。长对话里离屏/后台卡片会被降
+        # 优先级，表现为流式渲染卡顿掉帧；开启后关掉两类节流。
+        "disable_background_throttling": _to_bool(render.get("DisableBackgroundThrottling"), False),
         "disabled_features": _to_str(render.get("DisabledFeatures"), _DEFAULT_DISABLED_FEATURES),
         "extra_flags": _to_str(render.get("ExtraChromiumFlags"), ""),
     }
@@ -154,6 +160,9 @@ def build_chromium_flags(s: dict) -> str:
         parts.append("--enable-low-end-device-mode")
     if not s.get("smooth_scrolling", False):
         parts.append("--disable-smooth-scrolling")
+    if s.get("disable_background_throttling", False):
+        # 离屏/隐藏窗口的 renderer 不再被降优先级（长会话流式卡顿的一味解药）
+        parts += ["--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows"]
     features = s.get("disabled_features") or ""
     if features:
         parts.append(f"--disable-features={features}")
@@ -182,6 +191,54 @@ def apply_render_env(config_path) -> dict:
             os.environ.setdefault("QT_ANGLE_PLATFORM", "warp" if s["software_render"] else "d3d11")
     os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", build_chromium_flags(s))
     return s
+
+
+def describe_applied(env=None) -> dict:
+    """从环境变量反查「本次进程实际生效」的渲染参数（设置页回显 / 排障用）。
+
+    刻意读环境变量而不是重算 app.config：配置改了但没重启时，回显要展示的正是
+    「当前真正在跑的那组值」，与配置不一致 = 变更尚未生效，用户一眼能看出来。
+
+    Args:
+        env: 默认读 os.environ；单测可传 dict。
+
+    Returns:
+        dict: backend（hardware/software/software_gl/custom/"" 非 Windows 未设）、
+        opengl、angle、flags、flag_count、renderer_process_limit、js_heap_mb。
+    """
+    env = os.environ if env is None else env
+    flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "") or ""
+    opengl = env.get("QT_OPENGL", "") or ""
+    angle = env.get("QT_ANGLE_PLATFORM", "") or ""
+    if opengl == "software":
+        backend = "software_gl"
+    elif angle == "warp":
+        backend = "software"
+    elif angle == "d3d11":
+        backend = "hardware"
+    elif opengl or angle:
+        backend = "custom"  # 外部环境变量改过（setdefault 逃生门）
+    else:
+        backend = ""  # 非 Windows：不设 ANGLE，沿用 Qt 默认
+    return {
+        "backend": backend,
+        "opengl": opengl,
+        "angle": angle,
+        "flags": flags,
+        "flag_count": len(flags.split()) if flags else 0,
+        "renderer_process_limit": _parse_int_flag(flags, "--renderer-process-limit"),
+        "js_heap_mb": _parse_int_flag(flags, "--max-old-space-size"),
+    }
+
+
+def _parse_int_flag(flags: str, name: str) -> int:
+    """从 flags 串解析 ``--name=123``；命中不到返回 0。
+
+    ``--max-old-space-size`` 嵌在 ``--js-flags=--max-old-space-size=128`` 里，
+    直接子串匹配即可，无需按 flag 边界切分。
+    """
+    m = re.search(re.escape(name) + r"=(\d+)", flags or "")
+    return int(m.group(1)) if m else 0
 
 
 def _read_render_group(config_path) -> dict:

@@ -57,6 +57,7 @@ from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.render_restart_card import RenderRestartCard
+from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
 
@@ -596,21 +597,32 @@ class LLMSettingsCard(SystemCardFrame):
         # 手动重启（首项）：本页全部配置项都是 QtWebEngine 启动时一次性读取的
         # 环境变量，运行中改无效。卡片同时承担「待生效变更」提示，监控对象为
         # 下面所有 Render 组 ConfigItem（含未进 UI 的两个高级项）。
+        # 当前生效参数：回显本次进程实际跑的那组值，用于核对「改了有没有生效」
+        # ── Render 组配置项清单（两张卡共用：重启卡的变更计数、回显卡的恢复默认）──
+        render_items = [
+            self.cfg.render_backend,
+            self.cfg.render_webgl,
+            self.cfg.render_renderer_process_limit,
+            self.cfg.render_js_heap_mb,
+            self.cfg.render_low_end_device_mode,
+            self.cfg.render_smooth_scrolling,
+            self.cfg.render_canvas_aa,
+            self.cfg.render_disable_background_throttling,
+            self.cfg.render_disabled_features,
+            self.cfg.render_extra_flags,
+        ]
+
         self.renderRestartCard = RenderRestartCard(
-            render_items=[
-                self.cfg.render_backend,
-                self.cfg.render_webgl,
-                self.cfg.render_renderer_process_limit,
-                self.cfg.render_js_heap_mb,
-                self.cfg.render_low_end_device_mode,
-                self.cfg.render_smooth_scrolling,
-                self.cfg.render_canvas_aa,
-                self.cfg.render_disabled_features,
-                self.cfg.render_extra_flags,
-            ],
+            render_items=render_items,
             parent=self,
         )
         render_layout.addWidget(self.renderRestartCard)
+
+        self.renderStatusCard = RenderStatusCard(
+            render_items=render_items,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderStatusCard)
 
         # 渲染后端：Qt/Chromium 图形栈档位
         self.renderBackendCard = OptionsSettingCard(
@@ -673,6 +685,16 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         render_layout.addWidget(self.renderSmoothCard)
+
+        # 后台渲染节流（长对话离屏卡片被降优先级 → 流式卡顿的解药）
+        self.renderThrottleCard = SwitchSettingCard(
+            FluentIcon.PAUSE,
+            "关闭后台渲染节流",
+            "离屏卡片不再被降优先级，抗流式卡顿",
+            configItem=self.cfg.render_disable_background_throttling,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderThrottleCard)
 
         # 2D canvas 抗锯齿
         self.renderCanvasAACard = SwitchSettingCard(
@@ -1398,6 +1420,7 @@ class LLMSettingsCard(SystemCardFrame):
             "uiThemeStyleCard",
             "llmFontCard",
             "renderRestartCard",
+            "renderStatusCard",
         ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):

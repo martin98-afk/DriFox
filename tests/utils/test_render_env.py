@@ -21,6 +21,7 @@ from app.utils.render_env import (
     apply_render_env,
     build_chromium_flags,
     compute_settings,
+    describe_applied,
 )
 
 
@@ -277,3 +278,60 @@ def test_build_chromium_flags_order():
         " --disable-canvas-aa --disable-2d-canvas-clip-aa"
         " --z"
     )
+
+
+# ══ 后台渲染节流（DisableBackgroundThrottling）══
+
+
+def test_background_throttling_off_by_default():
+    """默认关：不追加任何节流 flag（与历史硬编码行为一致）"""
+    flags = build_chromium_flags(compute_settings({}))
+    assert "--disable-renderer-backgrounding" not in flags
+    assert "--disable-backgrounding-occluded-windows" not in flags
+
+
+def test_background_throttling_on():
+    """开启：追加两个 flag（离屏卡片不再被降优先级）"""
+    flags = build_chromium_flags(compute_settings({"DisableBackgroundThrottling": True}))
+    assert "--disable-renderer-backgrounding" in flags
+    assert "--disable-backgrounding-occluded-windows" in flags
+
+
+def test_background_throttling_invalid_value_falls_back():
+    """非布尔值（"yes"）一律回退默认关闭"""
+    flags = build_chromium_flags(compute_settings({"DisableBackgroundThrottling": "yes"}))
+    assert "--disable-renderer-backgrounding" not in flags
+
+
+# ══ describe_applied（设置页「当前生效参数」回显）══
+
+
+def test_describe_applied_windows_hardware():
+    s = describe_applied(
+        {
+            "QT_OPENGL": "angle",
+            "QT_ANGLE_PLATFORM": "d3d11",
+            "QTWEBENGINE_CHROMIUM_FLAGS": (
+                "--renderer-process-limit=8 --js-flags=--max-old-space-size=256 --disable-gpu"
+            ),
+        }
+    )
+    assert s["backend"] == "hardware"
+    assert s["renderer_process_limit"] == 8
+    assert s["js_heap_mb"] == 256
+    assert s["flag_count"] == 3
+
+
+def test_describe_applied_software_variants():
+    assert describe_applied({"QT_OPENGL": "angle", "QT_ANGLE_PLATFORM": "warp"})["backend"] == "software"
+    assert describe_applied({"QT_OPENGL": "software"})["backend"] == "software_gl"
+    # 外部改过但不在四档内 → custom
+    assert describe_applied({"QT_OPENGL": "desktop"})["backend"] == "custom"
+
+
+def test_describe_applied_without_env():
+    """非 Windows（未设 ANGLE）：backend 空串，数值位 0"""
+    s = describe_applied({})
+    assert s["backend"] == ""
+    assert s["flags"] == ""
+    assert (s["renderer_process_limit"], s["js_heap_mb"], s["flag_count"]) == (0, 0, 0)

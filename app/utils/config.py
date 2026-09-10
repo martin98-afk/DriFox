@@ -531,6 +531,12 @@ class Settings(QConfig):
     render_smooth_scrolling = ConfigItem("Render", "SmoothScrolling", False, BoolValidator())
     # 2D canvas 抗锯齿（默认关闭：echarts 软件光栅下省内存提速，锯齿微增）
     render_canvas_aa = ConfigItem("Render", "CanvasAA", False, BoolValidator())
+    # 后台渲染节流：关（默认，Chromium 原生节流）/ 开 ——
+    # 追加 --disable-renderer-backgrounding + --disable-backgrounding-occluded-windows。
+    # 长对话里离屏卡片被降优先级导致的流式卡顿可开，代价是离屏卡片回收变慢。
+    render_disable_background_throttling = ConfigItem(
+        "Render", "DisableBackgroundThrottling", False, BoolValidator()
+    )
     # 禁用的 Chromium feature 列表（翻译/媒体路由/优化提示/窗口遮挡计算）
     render_disabled_features = ConfigItem(
         "Render",
