@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.5.10] - 2026-09-10 (重新发布)
+## [v0.5.10] - 2026-09-10 (重新发布 #2)
 
-自上一版本以来的变更 | 提交数：79 · 文件变更：405 · +26604/-26522 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：82 · 文件变更：414 · +27806/-27247 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -51,6 +51,18 @@ All notable changes to this project will be documented in this file.
 - **重组 docs/reports 目录、精简 8 篇过时文档、采用严格 gitignore 白名单（A2）** (`docs/`、`.gitignore`): 文档结构整理与仓库 ignore 规则强化。
 - **清理未用脚本/临时文件/未引用资产** (`scripts/`、`assets/`): 仓库批量瘦身。
 - **移除或跳过孤立测试（引用已删除插件）** (`tests/`): 配合插件清理同步移除/标记失效测试。
+
+### ✨ 新功能 (New Features)
+
+- **hover 热路径样式防抖 + `_parse_branch_header` 历史缺陷修复** (`app/widgets/hover_style_guard.py`、`app/widgets/cards/settings/model_selector_card.py`、`app/widgets/cards/settings/project_selector_card.py`、`app/widgets/cards/floating/question_floating_widget.py`、`plugins/assistant_hub/hooks/project_notes.py`、`tests/utils/test_worktree_create_switch.py`): ① 新增 `app/widgets/hover_style_guard.py` —— `style_if_changed(target, ss)` 仅在样式串与当前不同时才 `setStyleSheet`，并返回是否真正应用。背景：Qt 对 `setStyleSheet` 不论内容是否变化都会全量重解析 QSS + unpolish/polish + relayout，平滑滚动区（qfw SmoothScroll 引擎 60fps 合成 wheel 事件）里鼠标下的行持续变化，enter/leave 若无条件 `setStyleSheet` 会叠加成每帧两次的样式风暴，表现为滚动掉帧。统一约定三态样式收敛到一个纯函数（state → 样式串），enter/leave 各调一次，串未变则零开销跳过。已接入 ModelItem（model_selector_card.py，内联同款串比较）/ ProjectItem（project_selector_card.py） / `_CustomInputCard`（question_floating_widget.py）三处。同时顺手修了 assistant_hub `project_notes._parse_branch_header` 的三处历史缺陷：空仓库头行 `## No commits yet on main` 解析为 branch="No"、单独 `[behind N]` 形态丢失 behind、点号分支名 `release/1.2.3` 被截断为 `release/1`；ahead/behind 改用裸词独立匹配，兼容 `[ahead N]` / `[behind N]` / `[ahead N, behind N]` 三种形态。配套新增 `tests/utils/test_worktree_create_switch.py`（169 行，覆盖 worktree 复用/创建/重命名路径 + 全部 branch header 解析形态）。
+
+### 📚 文档 (Documentation)
+
+- **ui-plugin-creator 新增 5 条 UI 插件陷阱与 plugin-creator 热重载排查** (`plugins/system-skills/skills/plugin-creator/references/troubleshooting.md`、`plugins/system-skills/skills/ui-plugin-creator/references/pitfalls.md`): pitfalls 新增 `QPlainTextEdit 高度自适应：document().size() 返回行数非像素，需按 fontMetrics + viewport 宽估算`、`ExpandSettingCard 覆写 _adjustViewSize 后折叠失效（setExpand 调 _adjustViewSize 覆盖 setFixedHeight(0) hack）` 等 5 条踩坑；plugin-creator troubleshooting 补充 `SkillNotFoundException` 排查步骤。
+
+### 🔧 其他 (Chores & Build)
+
+- **uv.lock 依赖锁更新** (`uv.lock`): `uv lock` 同步三方依赖到当前 lock 状态，1410 行变更（705 +/-）。
 
 ## [v0.5.10b4] - 2026-09-09
 
