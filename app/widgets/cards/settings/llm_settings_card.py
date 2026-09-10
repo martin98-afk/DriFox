@@ -23,6 +23,7 @@ from qfluentwidgets import (
     FluentIcon,
     OptionsSettingCard,
     PrimaryPushButton,
+    RangeSettingCard,
     ScrollArea,
     SettingCard,
     SwitchSettingCard,
@@ -366,7 +367,8 @@ class LLMSettingsCard(SystemCardFrame):
             "界面",
             (
                 ("appearance", "外观", "主题风格"),
-                ("pet", "桌宠", "pet"),
+                ("render", "渲染", FluentIcon.SPEED_HIGH),
+                # ("pet", "桌宠", "pet"),
             ),
         ),
         (
@@ -554,6 +556,16 @@ class LLMSettingsCard(SystemCardFrame):
         self.autoStartCard.checkedChanged.connect(self._on_toggled)
         common_layout.addWidget(self.autoStartCard)
 
+        # 单实例限制：同时只允许运行一个实例
+        self.singleInstanceCard = SwitchSettingCard(
+            FluentIcon.LAYOUT,
+            "单实例限制",
+            "开启后同时只能运行一个 Drifox 实例，修改后重启生效",
+            configItem=self.cfg.enable_single_instance,
+            parent=self,
+        )
+        common_layout.addWidget(self.singleInstanceCard)
+
         # 简洁模式：工具调用/思考块折叠显示
         self.compactToolCard = SwitchSettingCard(
             FluentIcon.MENU,
@@ -574,6 +586,84 @@ class LLMSettingsCard(SystemCardFrame):
         )
         common_layout.addWidget(self.qtRendererCard)
         common_layout.addStretch(1)
+
+        # ════ 渲染与性能页（Webview 环境变量配置化，全部重启生效）════
+        # 换算逻辑见 app/utils/render_env.py；高级项（DisabledFeatures /
+        # ExtraChromiumFlags）不进 UI，走 app.config [Render] 组直达。
+        render_layout = self._page_layouts["render"]
+
+        # 渲染后端：Qt/Chromium 图形栈档位
+        self.renderBackendCard = OptionsSettingCard(
+            self.cfg.render_backend,
+            FluentIcon.SPEED_HIGH,
+            "渲染后端",
+            "硬件 D3D11 最流畅；非gpu选软件档",
+            texts=["自动", "硬件 (D3D11)", "软件 (WARP)", "软件 GL (最稳)"],
+            parent=self,
+        )
+        render_layout.addWidget(self.renderBackendCard)
+
+        # WebGL 按需解禁（3D 图形需要）
+        self.renderWebglCard = OptionsSettingCard(
+            self.cfg.render_webgl,
+            FluentIcon.GLOBE,
+            "WebGL / 3D 图形",
+            "关闭可省 GPU 进程内存",
+            texts=["自动", "开", "关"],
+            parent=self,
+        )
+        render_layout.addWidget(self.renderWebglCard)
+
+        # Chromium renderer 进程硬上限（内存治理核心项）
+        self.renderProcessLimitCard = RangeSettingCard(
+            self.cfg.render_renderer_process_limit,
+            FluentIcon.LAYOUT,
+            "Renderer 进程上限",
+            "消息卡片渲染进程数硬上限",
+            parent=self,
+        )
+        render_layout.addWidget(self.renderProcessLimitCard)
+
+        # 单 renderer JS 堆上限
+        self.renderJsHeapCard = RangeSettingCard(
+            self.cfg.render_js_heap_mb,
+            FluentIcon.CLOUD,
+            "单卡片 JS 堆上限 (MB)",
+            "限制单张消息卡片的内存",
+            parent=self,
+        )
+        render_layout.addWidget(self.renderJsHeapCard)
+
+        # Chromium 低内存模式
+        self.renderLowEndCard = SwitchSettingCard(
+            FluentIcon.REMOVE_FROM,
+            "低内存模式",
+            "压低渲染缓冲/缓存，抗锯齿略降",
+            configItem=self.cfg.render_low_end_device_mode,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderLowEndCard)
+
+        # 合成器平滑滚动
+        self.renderSmoothCard = SwitchSettingCard(
+            FluentIcon.TILES,
+            "平滑滚动",
+            "卡内滚动的合成器动画",
+            configItem=self.cfg.render_smooth_scrolling,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderSmoothCard)
+
+        # 2D canvas 抗锯齿
+        self.renderCanvasAACard = SwitchSettingCard(
+            FluentIcon.BRUSH,
+            "Canvas 抗锯齿",
+            "开启后 echarts 图表边缘更平滑",
+            configItem=self.cfg.render_canvas_aa,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderCanvasAACard)
+        render_layout.addStretch(1)
 
         # ════ 通知页 ════
         notify_layout = self._page_layouts["notify"]

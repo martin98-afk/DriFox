@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ✨ 新功能 (New Features)
+
+- **Webview 渲染环境变量配置化** (`main.py`, `app/utils/render_env.py`, `app/utils/config.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/utils/test_render_env.py`): main.py 硬编码的 `QT_OPENGL` / `QT_ANGLE_PLATFORM` / `QTWEBENGINE_CHROMIUM_FLAGS` 换算抽到新模块 `render_env.py`（Qt 加载前裸 JSON 读取 `app.config` [Render] 组，纯 stdlib 零依赖）；设置界面新增「渲染」页（渲染后端 auto/hardware/software/software_gl、WebGL 解禁、renderer 进程上限、单卡 JS 堆、低内存模式、平滑滚动、Canvas 抗锯齿，共 7 张卡片，全部重启生效）；默认值与历史硬编码逐字一致，升级零变化；旧检测链（`DRIFOX_SOFTWARE_RENDER` / `DRIFOX_ENABLE_WEBGL` 环境变量 → `~/.drifox` 标记文件）保留为 auto 档；外部已设相关环境变量时保持 setdefault 优先；DisabledFeatures / ExtraChromiumFlags 两项为高级项，走配置文件直达；25 条单元测试覆盖档位/钳制/非法值回退/外部优先级/非 Windows 平台限定。
+
 ## [v0.5.10b4] - 2026-09-09
 
 自上一版本以来的变更 | 提交数：20 · 文件变更：57 · +4617/-895 | 贡献者：dingma, mading

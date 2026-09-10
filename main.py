@@ -28,113 +28,20 @@ warnings.filterwarnings("ignore")
 os.environ.setdefault("PYPINYIN_NO_DICT_COPY", "1")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-# ========== 渲染后端：Windows 硬件优先，软件仅作回退 ==========
-# ⚠️ 平台限定：ANGLE / D3D11 / WARP 全是 Windows 概念。macOS / Linux 走 Qt 原生
-# 后端（Metal / GL），下面这组强制设置一律不施加 —— 实测在 macOS 上强设
-# QT_ANGLE_PLATFORM=d3d11 会导致消息卡片黑屏（2026-09-10 回归，勿再全局化）。
-_IS_WINDOWS = os.name == "nt"
+# ========== 渲染配置 → 环境变量（QtWebEngine 首次初始化前一次性生效）==========
+# 原 main.py 硬编码的 QT_OPENGL / QT_ANGLE_PLATFORM / QTWEBENGINE_CHROMIUM_FLAGS
+# 已配置化：设置界面「渲染与性能」→ app.config [Render] 组，重启生效。
+# app/utils/render_env.py 在 Qt 加载前裸 JSON 读取该组并换算环境变量，档位语义、
+# 旧检测链（DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL → ~/.drifox 标记文件）、
+# 外部环境变量优先（setdefault）与平台限定（macOS 强设 d3d11 黑屏）见其模块注释。
+from app.utils.render_env import apply_render_env, default_config_path
 
-# 软件回退开关（仅 Windows 有意义），任一命中即可，重启生效：
-#   ① 环境变量 DRIFOX_SOFTWARE_RENDER=1
-#   ② 标记文件 ~/.drifox/software_render（内容不限，存在即启用）
-# 软件路径 = QT_ANGLE_PLATFORM=warp（纯 CPU 光栅） + --disable-gpu。
-# 非 Windows 恒为 True：始终走原来的保守路径，行为与历史版本一致。
-_SOFTWARE_RENDER = True
-if _IS_WINDOWS:
-    _SOFTWARE_RENDER = os.environ.get("DRIFOX_SOFTWARE_RENDER", "").strip().lower() in ("1", "true", "on", "yes")
-    if not _SOFTWARE_RENDER:
-        try:
-            _SOFTWARE_RENDER = os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox", "software_render"))
-        except Exception:
-            _SOFTWARE_RENDER = True
+apply_render_env(default_config_path())
 
-# ========== Windows：Qt 侧 OpenGL 走 ANGLE(D3D11)（Intel 核显 OpenGL 崩溃修复）==========
-# 根因：QtWebEngine 网页帧合成走 Qt Quick 场景图，默认 OpenGL 后端命中本机
-# Intel Xe-LP 驱动（igxelpicd64.dll）的 OpenGL 实现，流式渲染高频合成期崩溃。
-# 方案：强制 Qt 的 GL 经 ANGLE 翻译为 D3D11 实现，绕开 Intel OpenGL ICD 的
-# 代码路径，同时保留 GL 语义（WebEngine 纹理共享在 ANGLE 上是官方支持路径）。
-# 注意：不能用 QSG_RHI_BACKEND=d3d11 —— Qt 5.15 中 WebEngine 的 GL 纹理无法
-# 与 RHI D3D11 合成器互操作，会导致消息卡片黑屏（已实测踩坑）。
-# 防御：外部环境若残留 QSG_RHI*（手动 setx 过），Quick 场景图会绕开 GL 直接用
-# RHI D3D11 合成，消息卡片整体变黑 —— 启动时强制清除，杜绝复发。
-# 回退：外部设 QT_OPENGL=desktop 恢复桌面 GL。
-if _IS_WINDOWS:
-    os.environ.setdefault("QT_OPENGL", "angle")
-    # ANGLE 后端平台（二选一，由 _SOFTWARE_RENDER 决定）：
-    # - 硬件路径（默认）d3d11：ANGLE 把 GL 语义翻译成 D3D11，既绕开 Intel OpenGL
-    #   ICD 的崩溃路径，又把场景图合成交还 GPU —— 长对话多卡片滚动不再吃 CPU。
-    # - 软件回退 warp：Windows 软件光栅，纯 CPU，完全不碰显卡驱动 —— 驱动异常或
-    #   无可用 GPU（虚拟机 / 远程桌面）时的兜底。仍崩则 QT_OPENGL=software
-    #   退到 Mesa llvmpipe（最慢最稳）。
-    # 实测四种后端均不黑屏，见 tests/debug/angle_backend_check.py。
-    os.environ.setdefault("QT_ANGLE_PLATFORM", "warp" if _SOFTWARE_RENDER else "d3d11")
 # 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
 for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
     os.environ.pop(_env_key, None)
 
-# ========== Chromium 进程治理（WebEngine 内存占用的根因）==========
-# 必须在 QApplication 创建之前设置：QtWebEngine 在首次初始化时读取该环境变量，
-# 之后修改无效（这也是它必须放在 main.py 最顶部的原因）。
-#
-# 背景：每张消息卡片正文是一个独立的 QWebEngineView，Chromium 默认进程模型下
-# 会为每张卡片派生独立 renderer 进程（各约数十 MB）。长对话滚动过程中进程数
-# 随卡片数单调增长 —— 这是"长时间运行内存溢出"的主要来源。
-#
-# --renderer-process-limit：硬性封顶 renderer 进程总数，达到上限后 Chromium
-#   自动复用已有进程而非继续派生，把内存曲线从"线性增长"压成"恒定上限"。
-#   注意：不使用 --process-per-site —— 它会使所有同源卡片共享同一进程，与
-#   现有的「按 PID kill 离屏 renderer」回收机制冲突（kill 一个会误伤全部卡片）。
-#
-# 其余开关均为本地 setHtml 渲染场景下的纯开销，关闭后无功能损失。
-#
-# 覆盖方式：用 setdefault，外部若已设置 QTWEBENGINE_CHROMIUM_FLAGS 则以其为准
-# （便于调试或快速回退，例如 QTWEBENGINE_CHROMIUM_FLAGS="" 即完全禁用本组开关）。
-# ========== WebGL 按需解禁（3D 图形需要）==========
-# 默认关闭 GPU：正文是纯 2D 渲染，GPU 进程常驻是纯开销（见下方 _GPU_FLAGS）。
-# 需要 3D 图形（three.js / echarts-gl 之类）时启用，任一命中即可，重启生效：
-#   ① 环境变量 DRIFOX_ENABLE_WEBGL=1
-#   ② 标记文件 ~/.drifox/webgl_enabled（内容不限，存在即启用）
-# 不用设置项的原因：QtWebEngine 只在首次初始化时读取 QTWEBENGINE_CHROMIUM_FLAGS，
-# 必须早于 QApplication，此处加载 Settings 过重（且 main.py 顶部刻意少依赖）。
-_WEBGL_ENABLED = os.environ.get("DRIFOX_ENABLE_WEBGL", "").strip().lower() in ("1", "true", "on", "yes")
-if not _WEBGL_ENABLED:
-    try:
-        _WEBGL_ENABLED = os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox", "webgl_enabled"))
-    except Exception:
-        _WEBGL_ENABLED = False
-
-# ========== Chromium GPU 开关 ==========
-# ⚠️ 平台限定：硬件路径只在 Windows 放开。macOS / Linux 恒走 --disable-gpu
-# （历史行为）—— 实测 macOS 上放开 GPU 又禁用 SwiftShader 兜底会黑屏。
-if not _SOFTWARE_RENDER:
-    # Windows 硬件路径：不禁用 GPU 进程，Chromium 走硬件光栅与合成，WebGL / 3D
-    # 图形天然可用；保留 --disable-software-rasterizer 禁掉 SwiftShader 软件兜底，
-    # 避免驱动异常时静默退化回软件光栅（失败就显式失败）。
-    # 代价：无可用 GPU 的环境（虚拟机 / 远程桌面）会渲染异常 —— 用
-    # DRIFOX_SOFTWARE_RENDER=1 回退。
-    _GPU_FLAGS = " --disable-software-rasterizer"
-elif _WEBGL_ENABLED:
-    # 软件路径 + 需要 3D 图形：用 SwiftShader 软件光栅兜底
-    _GPU_FLAGS = " --enable-unsafe-swiftshader"
-else:
-    _GPU_FLAGS = (
-        " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
-        " --disable-software-rasterizer"
-    )
-_CHROMIUM_FLAGS = (
-    "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
-    + _GPU_FLAGS
-    + " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
-    " --disable-extensions"
-    " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
-    " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染
-    " --js-flags=--max-old-space-size=128"  # 限制单 renderer JS 堆，防单页膨胀
-     + " --enable-low-end-device-mode"  # 🔧 Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
-    " --disable-smooth-scrolling"  # 合成器平滑滚动动画：卡内滚动只是安全网场景，外层滚动由 Qt 承载
-    " --disable-features=Translate,MediaRouter,optimizeHints,CalculateNativeWinOcclusion"  # 翻译/媒体路由常驻线程/谷歌优化提示，纯开销；窗口遮挡计算在多 WebEngine 卡片下有已知崩溃关联，防御性禁用
-    " --disable-canvas-aa --disable-2d-canvas-clip-aa"  # 2D canvas 抗锯齿关闭：echarts 软件光栅下省内存提速（锯齿微增）
-)
-os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _CHROMIUM_FLAGS)
 
 # ========== 内存诊断开关 ==========
 # 设为 False 可禁用所有 [MEM] 诊断日志和 mem_diag.log 文件
@@ -408,12 +315,14 @@ def main():
 
     # ========== 单实例检查 ==========
     from app.core.single_instance import SingleInstanceGuard
+    from app.utils.config import Settings
 
     _guard = SingleInstanceGuard("Drifox")
-    # if not _guard.try_lock():
-    #     _guard.request_show_window()
-    #     _guard.cleanup()
-    #     return
+    # 开关关闭时不取锁，允许多实例并行（改动重启生效）
+    if Settings.get_instance().enable_single_instance.value and not _guard.try_lock():
+        _guard.request_show_window()
+        _guard.cleanup()
+        return
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme

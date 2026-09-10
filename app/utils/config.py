@@ -310,6 +310,9 @@ class Settings(QConfig):
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
+    # 单实例限制：开启后同时只允许运行一个 Drifox 实例（重启生效）
+    enable_single_instance = ConfigItem("General", "EnableSingleInstance", False, BoolValidator())
+
     # 灰度开关：消息正文用纯 Qt 块级渲染器（MarkdownBlockViewer）替代 QWebEngineView。
     # 仅作用于 assistant 卡片（welcome 卡 JS 交互复杂暂不灰度）；默认关闭。
     qt_message_renderer = ConfigItem("General", "QtMessageRenderer", False, BoolValidator())
@@ -496,6 +499,46 @@ class Settings(QConfig):
     # 窗口几何/面板宽度不做记忆（打开时固定默认 960x640 居中 + panel 280），
     # 原 tab_panel_width / tab_panel_collapsed / tab_manager_geometry 配置项已移除
     window_always_on_top = ConfigItem("UI", "WindowAlwaysOnTop", False, BoolValidator())
+
+    # ========== 渲染与性能（Webview）==========
+    # 说明：本组配置在 main.py 启动最早期由 app/utils/render_env.py 裸 JSON
+    # 读取并换算为环境变量，QtWebEngine 初始化后修改无效 —— **所有项均重启生效**。
+    # 默认值 = 历史 main.py 硬编码行为；"auto" 档沿用旧检测链
+    # （DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL 环境变量 → ~/.drifox 标记文件）。
+    # 渲染后端：auto / hardware(ANGLE d3d11) / software(ANGLE warp) / software_gl(最慢最稳兜底)
+    render_backend = OptionsConfigItem(
+        "Render",
+        "RenderBackend",
+        "auto",
+        OptionsValidator(["auto", "hardware", "software", "software_gl"]),
+    )
+    # WebGL 解禁（3D 图形需要）：auto / on / off
+    render_webgl = OptionsConfigItem(
+        "Render",
+        "WebglEnabled",
+        "auto",
+        OptionsValidator(["auto", "on", "off"]),
+    )
+    # Chromium renderer 进程硬上限（内存治理核心项）
+    render_renderer_process_limit = RangeConfigItem(
+        "Render", "RendererProcessLimit", 6, RangeValidator(1, 32)
+    )
+    # 单 renderer JS 堆上限（MB），防单页膨胀
+    render_js_heap_mb = RangeConfigItem("Render", "JsHeapMb", 128, RangeValidator(64, 1024))
+    # Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
+    render_low_end_device_mode = ConfigItem("Render", "LowEndDeviceMode", True, BoolValidator())
+    # 合成器平滑滚动动画（默认关闭：外层滚动由 Qt 承载，卡内滚动只是安全网场景）
+    render_smooth_scrolling = ConfigItem("Render", "SmoothScrolling", False, BoolValidator())
+    # 2D canvas 抗锯齿（默认关闭：echarts 软件光栅下省内存提速，锯齿微增）
+    render_canvas_aa = ConfigItem("Render", "CanvasAA", False, BoolValidator())
+    # 禁用的 Chromium feature 列表（翻译/媒体路由/优化提示/窗口遮挡计算）
+    render_disabled_features = ConfigItem(
+        "Render",
+        "DisabledFeatures",
+        "Translate,MediaRouter,optimizeHints,CalculateNativeWinOcclusion",
+    )
+    # 高级：追加任意 Chromium 开关（置于内置 flags 末尾，同 flag 后者覆盖前者）
+    render_extra_flags = ConfigItem("Render", "ExtraChromiumFlags", "")
 
 
 def update_theme_options():
