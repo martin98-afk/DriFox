@@ -34,9 +34,11 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 # app/utils/render_env.py 在 Qt 加载前裸 JSON 读取该组并换算环境变量，档位语义、
 # 旧检测链（DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL → ~/.drifox 标记文件）、
 # 外部环境变量优先（setdefault）与平台限定（macOS 强设 d3d11 黑屏）见其模块注释。
+# 返回值里还有两个「Qt 属性类」设置（AA_UseOpenGLES / AA_ShareOpenGLContexts）：
+# 它们不是环境变量，只能在 QApplication 创建前 setAttribute，故由 main() 取用。
 from app.utils.render_env import apply_render_env, default_config_path
 
-apply_render_env(default_config_path())
+RENDER_SETTINGS = apply_render_env(default_config_path())
 
 # 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
 for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
@@ -109,13 +111,20 @@ def main():
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     # OpenGL 走 ANGLE(D3D11)：绕开 Intel OpenGL ICD 缺陷路径（见文件顶部说明）。
     # 必须在 QApplication 与 WebEngine 导入之前设置。
-    QApplication.setAttribute(Qt.AA_UseOpenGLES)
+    # 由 RenderBackend 推导（见 render_env.compute_settings）：hardware / software
+    # 走 ANGLE 才需要；software_gl 是 Mesa llvmpipe 桌面 GL 兜底档，强制 ES 反而
+    # 与「最慢最稳」的初衷冲突 —— 故该档位下不设这个属性。
+    if RENDER_SETTINGS.get("use_open_gles", True):
+        QApplication.setAttribute(Qt.AA_UseOpenGLES)
     # [MEM] 共享 GL 上下文：默认每个 QWebEngineView 会创建自己的 OpenGL 上下文，
     # 并发对话下 40+ 张消息卡 = 40+ 个独立上下文，每个都要独立的命令缓冲与合成
     # 表面后备存储。开启后所有 view 复用同一上下文，per-view 常驻开销下降
     # （实测 12 个 view 总增量 250MB → 218MB，约 -12.7%）。
     # 必须在 QApplication 创建之前设置（benchmarks/README.md 同样要求此项）。
-    QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
+    # [Render] ShareGLContexts 可关：多卡共用上下文被怀疑与卡片/图表闪烁相关，
+    # 出问题时关掉即可验证是否由它引起。
+    if RENDER_SETTINGS.get("share_gl_contexts", True):
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，

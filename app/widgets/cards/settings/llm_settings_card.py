@@ -609,6 +609,7 @@ class LLMSettingsCard(SystemCardFrame):
             self.cfg.render_smooth_scrolling,
             self.cfg.render_canvas_aa,
             self.cfg.render_disable_background_throttling,
+            self.cfg.render_share_gl_contexts,
             self.cfg.render_disabled_features,
             self.cfg.render_extra_flags,
         ]
@@ -706,6 +707,16 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         render_layout.addWidget(self.renderCanvasAACard)
+
+        # 共享 GL 上下文：省约 12.7% 内存；共用一个上下文被怀疑与多卡/图表闪烁相关
+        self.renderShareGLCard = SwitchSettingCard(
+            FluentIcon.LAYOUT,
+            "共享 GL 上下文",
+            "省约 12% 内存；渲染闪烁时可尝试关闭",
+            configItem=self.cfg.render_share_gl_contexts,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderShareGLCard)
 
         # ── 高级配置（折叠）：一条一项 + 右侧开关，扁平列表不分组；
         # 底层仍写回 DisabledFeatures / ExtraChromiumFlags（此前只能手改 app.config）──

@@ -45,6 +45,7 @@ import sys
 
 __all__ = [
     "apply_render_env",
+    "applied_settings",
     "build_chromium_flags",
     "compute_settings",
     "default_config_path",
@@ -57,6 +58,9 @@ _RENDERER_LIMIT_RANGE = (1, 32)
 _DEFAULT_JS_HEAP_MB = 128
 _JS_HEAP_RANGE = (64, 1024)
 _DEFAULT_DISABLED_FEATURES = "Translate,MediaRouter,optimizeHints,CalculateNativeWinOcclusion"
+
+# apply_render_env 的留档（AA_* 类设置无处反查，见 applied_settings）
+_APPLIED: dict = {}
 
 
 def _detect_software_render() -> bool:
@@ -123,10 +127,17 @@ def compute_settings(render: dict) -> dict:
         "js_heap_mb": _to_int(render.get("JsHeapMb"), _DEFAULT_JS_HEAP_MB, *_JS_HEAP_RANGE),
         "low_end_device_mode": _to_bool(render.get("LowEndDeviceMode"), True),
         "smooth_scrolling": _to_bool(render.get("SmoothScrolling"), False),
+        # 共享 GL 上下文（Qt.AA_ShareOpenGLContexts）：省约 12.7% per-view 常驻内存，
+        # 代价是所有卡片共用一个上下文（多卡/图表闪烁的排查开关）。默认开 = 历史行为。
+        "share_gl_contexts": _to_bool(render.get("ShareGLContexts"), True),
         "canvas_aa": _to_bool(render.get("CanvasAA"), False),
         # 后台节流：默认 False（Chromium 原生行为）。长对话里离屏/后台卡片会被降
         # 优先级，表现为流式渲染卡顿掉帧；开启后关掉两类节流。
         "disable_background_throttling": _to_bool(render.get("DisableBackgroundThrottling"), False),
+        # Qt.AA_UseOpenGLES：不单独暴露开关，由后端档位推导（两个旋钮管同一件事
+        # 容易配出矛盾）。ANGLE 档（hardware / software）本来就是 ES，需要开；
+        # software_gl 走 Mesa llvmpipe 桌面 GL，强制 ES 与「最慢最稳兜底」冲突。
+        "use_open_gles": backend != "software_gl",
         "disabled_features": _to_str(render.get("DisabledFeatures"), _DEFAULT_DISABLED_FEATURES),
         "extra_flags": _to_str(render.get("ExtraChromiumFlags"), ""),
     }
@@ -181,6 +192,10 @@ def apply_render_env(config_path) -> dict:
     完全尊重外部值。返回换算后的设置（供日志/诊断用）。
     """
     s = compute_settings(_read_render_group(config_path))
+    # 记录本次进程实际采用的设置：AA_UseOpenGLES / AA_ShareOpenGLContexts 是 Qt 属性
+    # 而非环境变量，回显时无法从 os.environ 反查，只能从这里取（见 applied_settings）
+    _APPLIED.clear()
+    _APPLIED.update(s)
     # 平台限定：ANGLE / D3D11 / WARP 是 Windows 概念，非 Windows 一律不设
     # （macOS 强设 QT_ANGLE_PLATFORM=d3d11 会黑屏，2026-09-10 回归教训）
     if os.name == "nt":
@@ -191,6 +206,16 @@ def apply_render_env(config_path) -> dict:
             os.environ.setdefault("QT_ANGLE_PLATFORM", "warp" if s["software_render"] else "d3d11")
     os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", build_chromium_flags(s))
     return s
+
+
+def applied_settings() -> dict:
+    """本次进程实际采用的渲染设置（含 Qt 属性类），供设置页回显。
+
+    与 describe_applied 的分工：后者反查环境变量（Chromium 侧），这里给出
+    apply_render_env 落地到 Qt 属性的部分 —— 它们无处反查，只能留档。
+    未调用过 apply_render_env 时（单测 / 非主进程）返回空 dict。
+    """
+    return dict(_APPLIED)
 
 
 def describe_applied(env=None) -> dict:
@@ -228,6 +253,10 @@ def describe_applied(env=None) -> dict:
         "flag_count": len(flags.split()) if flags else 0,
         "renderer_process_limit": _parse_int_flag(flags, "--renderer-process-limit"),
         "js_heap_mb": _parse_int_flag(flags, "--max-old-space-size"),
+        # Qt 属性类：环境变量里查不到，取 apply_render_env 的留档（默认均为开，
+        # 与 main.py 历史行为一致）
+        "share_gl_contexts": bool(_APPLIED.get("share_gl_contexts", True)),
+        "use_open_gles": bool(_APPLIED.get("use_open_gles", True)),
     }
 
 

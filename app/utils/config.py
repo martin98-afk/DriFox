@@ -537,6 +537,9 @@ class Settings(QConfig):
     render_disable_background_throttling = ConfigItem(
         "Render", "DisableBackgroundThrottling", False, BoolValidator()
     )
+    # 共享 GL 上下文（Qt.AA_ShareOpenGLContexts）：默认开，省约 12.7% per-view 常驻
+    # 内存；代价是全部消息卡共用一个 GL 上下文。多卡/图表闪烁排查时可关掉验证。
+    render_share_gl_contexts = ConfigItem("Render", "ShareGLContexts", True, BoolValidator())
     # 禁用的 Chromium feature 列表（翻译/媒体路由/优化提示/窗口遮挡计算）
     render_disabled_features = ConfigItem(
         "Render",

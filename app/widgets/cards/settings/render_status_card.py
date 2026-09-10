@@ -30,14 +30,16 @@ from qfluentwidgets import (
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.render_env import describe_applied
 from app.utils.utils import get_font_family_css
+from app.widgets.elided_label import _ElidedLabel
 
-# 环境变量 → 后端档位显示文本
+# 环境变量 → 后端档位显示文本（刻意简短：这行会进卡片 sizeHint，太长会把设置
+# 弹窗整体顶宽；完整参数只在 tooltip / 复制里给）
 _BACKEND_TEXT = {
-    "hardware": "硬件 (D3D11)",
-    "software": "软件 (WARP)",
+    "hardware": "硬件 D3D11",
+    "software": "软件 WARP",
     "software_gl": "软件 GL",
-    "custom": "外部环境变量覆盖",
-    "": "系统默认（未设 ANGLE）",
+    "custom": "外部覆盖",
+    "": "系统默认",
 }
 
 
@@ -53,6 +55,7 @@ class RenderStatusCard(SettingCard):
         super().__init__(FluentIcon.INFO, "当前生效参数", "", parent)
         self._items: list[ConfigItem] = list(render_items)
         self._applied: dict = {}
+        self._backend_text = _BACKEND_TEXT
 
         self.copyBtn = TransparentToolButton(FluentIcon.COPY, self)
         self.copyBtn.setToolTip("复制完整参数")
@@ -78,8 +81,10 @@ class RenderStatusCard(SettingCard):
         self._applied = describe_applied()
         s = self._applied
         backend = _BACKEND_TEXT.get(s["backend"], s["backend"] or "系统默认")
+        # 文案刻意短：contentLabel 的 sizeHint 会撑大卡片 → 顺着布局链把设置弹窗
+        # 顶宽。这里只留速览（后端 / 开关数 / GL 模式），细节全在 tooltip 与复制里。
         self.setContent(
-            f"{backend} · 进程上限 {s['renderer_process_limit']} · JS 堆 {s['js_heap_mb']}MB · {s['flag_count']} 项开关"
+            f"{backend} · {s['flag_count']} 开关 · GL{'共享' if s.get('share_gl_contexts', True) else '独占'}"
         )
         self.contentLabel.setToolTip(self.detail_text())
         self._apply_content_style()
@@ -93,6 +98,11 @@ class RenderStatusCard(SettingCard):
         if s["angle"]:
             lines.append(f"QT_ANGLE_PLATFORM={s['angle']}")
         lines.append(f"QTWEBENGINE_CHROMIUM_FLAGS={s['flags']}")
+        # 解析后的速览（上面那行原始 flags 太长，这里给人读）
+        lines.append(f"Renderer 进程上限={s['renderer_process_limit']} · JS 堆={s['js_heap_mb']}MB")
+        # Qt 属性类：不是环境变量，取自 apply_render_env 的留档
+        lines.append(f"Qt.AA_UseOpenGLES={'开' if s.get('use_open_gles', True) else '关'}")
+        lines.append(f"Qt.AA_ShareOpenGLContexts={'开' if s.get('share_gl_contexts', True) else '关'}")
         return "\n".join(lines)
 
     def _apply_content_style(self) -> None:

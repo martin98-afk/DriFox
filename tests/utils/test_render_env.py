@@ -335,3 +335,37 @@ def test_describe_applied_without_env():
     assert s["backend"] == ""
     assert s["flags"] == ""
     assert (s["renderer_process_limit"], s["js_heap_mb"], s["flag_count"]) == (0, 0, 0)
+
+
+# ══ Qt 属性类设置（AA_UseOpenGLES / AA_ShareOpenGLContexts）══
+
+
+def test_use_open_gles_follows_backend():
+    """不单独暴露开关：ANGLE 档开启，software_gl（Mesa 桌面 GL）关闭"""
+    assert compute_settings({"RenderBackend": "hardware"})["use_open_gles"] is True
+    assert compute_settings({"RenderBackend": "software"})["use_open_gles"] is True
+    assert compute_settings({"RenderBackend": "software_gl"})["use_open_gles"] is False
+
+
+def test_share_gl_contexts_default_on_and_invalid_fallback():
+    """共享 GL 上下文默认开（历史行为）；非法值回退默认"""
+    assert compute_settings({})["share_gl_contexts"] is True
+    assert compute_settings({"ShareGLContexts": False})["share_gl_contexts"] is False
+    assert compute_settings({"ShareGLContexts": "no"})["share_gl_contexts"] is True
+
+
+def test_apply_render_env_records_applied_settings(tmp_path, monkeypatch):
+    """apply 后留档可被回显读到（这两个是 Qt 属性，无法从环境变量反查）"""
+    import app.utils.render_env as render_env
+
+    monkeypatch.setattr(render_env, "_APPLIED", {}, raising=False)
+    apply_render_env(_write_config(tmp_path, {"RenderBackend": "software_gl", "ShareGLContexts": False}))
+
+    applied = render_env.applied_settings()
+    assert applied["backend"] == "software_gl"
+    assert applied["use_open_gles"] is False
+    assert applied["share_gl_contexts"] is False
+    # describe_applied 应带上留档值（默认位为 True，与 main.py 历史行为一致）
+    s = describe_applied({})
+    assert s["use_open_gles"] is False
+    assert s["share_gl_contexts"] is False
