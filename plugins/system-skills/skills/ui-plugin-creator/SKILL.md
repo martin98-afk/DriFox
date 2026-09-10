@@ -1,161 +1,117 @@
 ---
 name: ui-plugin-creator
-description: DriFox UI 插件开发技能。用于创建、修改、调试 UI 插件（浮动卡片 / 内容块渲染器 / 消息元素工厂 / 欢迎卡片插件 tab）。
+description: "DriFox UI 插件开发技能。用于创建、修改、调试 UI 插件（浮动卡片 / 内容块渲染器 / 消息元素工厂 / 欢迎卡片插件 tab）。非 UI 组件、主程序改动、插件发布不适用本技能。"
+license: MIT
+compatibility: Requires DriFox UI plugin extension points (register_ui 契约); Python 3.10+
+allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 ---
 
 # ui-plugin-creator —— DriFox UI 插件开发技能
 
-> 快速、规范地从用户意图转化为可工作的 UI 插件代码。
-> **本文件是 TOC（总目录）**，详细内容按主题拆分到 `references/` 子文件，按需加载。
+> 快速、规范地把用户意图转化为可工作的 UI 插件代码。本文件是路由面，细节按需加载 `references/`。
 
----
+## 0. 何时用我 / 何时交回对方
 
-## ⚠️ 重要：新建 UI 插件必走的两个前置技能
+| 需求 | 归属 |
+|------|------|
+| 插件内 UI 载体（浮动卡/渲染器/工厂/欢迎 tab/输入按钮/工作台页） | **本技能** |
+| 完整 UI 插件的骨架、manifest、发布 | plugin-creator（本包只管 UI 载体） |
+| 纯工具 / hook / provider / 命令等非 UI 组件 | plugin-creator |
+| 改 app/ 主程序内的 widget | drifox-dev |
+| 写 skill 本身 | skill-creator |
 
-**开发任何新的 UI 插件之前，必须先调用：**
+## 1. 前置链（新建必走，不可跳）
 
-| 技能 | 何时调用 | 产出 |
-|------|---------|------|
-| **`brainstorming`** | 收到"做个新插件"请求时**第一时间**调用 | 用户意图、需求边界、功能清单、设计方案 |
-| **`frontend-design`** | brainstorming 完成后、**动手写代码前**调用 | UI 视觉稿、组件布局、交互流程、配色方案 |
-
-> 🛑 **不要跳过这两个技能直接进入编码**。
-> 即使是"很简单的卡片"，也可能因为需求理解偏差导致反复返工。
->
-> ✅ **正确的顺序**：
-> 1. `brainstorming` → 搞清楚"做什么 / 不做什么"
-> 2. `frontend-design` → 设计出"长什么样 / 怎么交互"
-> 3. `ui-plugin-creator`（本技能）→ 落地代码实现
-
-### 例外：修改现有插件
-
-> 改现有插件的样式、加按钮、调参数等小修改**不需要** brainstorming / frontend-design。
-> 直接读 `references/modifying.md` 即可。
-
----
-
-## 0. 加载流程
+**新建 UI 插件的硬顺序**：
 
 ```
-Step 1  收到"做个新 UI 插件"请求
-        ├─ 🟡 立即调用 brainstorming → 产出需求文档
-        └─ 🟡 立即调用 frontend-design → 产出 UI 设计稿
-Step 2  理解意图 → 按 §1 决策树分派组件类型
-Step 3  读 references/ 对应文件（按需加载）
-        ├─ 开发流程 → references/workflow.md
-        ├─ 核心模式 → references/patterns.md
-        ├─ 代码模板 → references/templates.md
-        ├─ 可复用控件库 → references/widgets.md (索引)
-        │   ├─ 统计卡片 → widgets-statcard.md
-        │   ├─ 图表 → widgets-charts.md
-        │   ├─ 工具函数 → widgets-utils.md
-        │   ├─ SQLite 模式 → widgets-sqlite.md
-        │   ├─ 主题色 → widgets-theme.md
-        │   └─ 弹窗对话框 → templates.md §七（统一 MaskDialogBase 风格）
-        ├─ 修改现有插件 → references/modifying.md
-        ├─ 验证清单 → references/checklist.md
-        └─ _vendor/ 外部依赖 → references/templates.md §五
-Step 4  按 workflow.md 工作流推进
-Step 5  按 templates.md + widgets-*.md 生成代码
-Step 6  按 checklist.md 验证
+brainstorming（需求边界） → frontend-design（视觉稿） → 本技能（代码落地）
 ```
 
----
+> 🛑 即使"很简单的卡片"也不跳过——需求理解偏差是返工主因。
 
-## 1. 组件类型决策树
+**例外**：修改现有插件（调样式/加按钮/换文案）免前置，直接读 `references/modifying.md`。
+
+**frontend-design 未安装降级**：skill 加载失败时告知用户二选一：
+
+a) 安装：本机曾装于 `~/.drifox/plugins/frontend-design/`，若已被移入 `plugins-disabled` 可直接恢复；
+b) 跳过设计稿直接实现，但动手前必须用 question 确认三要素：**布局结构、配色方案、交互流程**。禁止无确认直接编码。
+
+## 2. 触发与第一动作（组件类型决策树）
 
 | 用户说 | 组件类型 | 必读 references |
 |--------|---------|-----------------|
-| "加个卡片""做个设置界面""显示统计面板""搞个管理界面" | **浮动卡片**（FloatingCard） | `templates.md` §一 |
-| "加个图表""画个柱状图""折线图""水平条形图" | **图表控件**（Chart Widget） | `widgets-charts.md` |
-| "加个统计卡片""显示数字指标""做个 KPI 卡" | **统计卡片**（StatCard） | `widgets-statcard.md` |
-| "读 SQLite""查 14 天数据""新字段 fallback" | **SQLite 读取** | `widgets-sqlite.md` |
-| "主题色跟着变""跟随系统颜色""深浅色适配" | **主题色映射** | `widgets-theme.md` |
-| "在聊天里显示HTML""渲染自定义内容""做个消息卡片样式" | **内容块渲染器**（ContentRenderer） | `templates.md` §二 |
-| "欢迎卡片加个 tab""会话初始卡片""HTML 注入初始卡片" | **欢迎卡片插件 tab**（WelcomeTab） | `templates.md` §八 |
-| "欢迎卡片加 echarts 图表/统计趋势 tab" | **欢迎卡片插件 tab + echarts**（WelcomeTab） | `templates.md` §八 §8.5 |
-| "替换消息气泡""自定义消息控件""做个消息widget" | **消息元素工厂**（MessageFactory） | `templates.md` §三 |
-| "输入框加个按钮""工具栏快捷动作""截图/快捷发图按钮" | **输入框按钮**（InputButton） | `templates.md` §九（全屏窗口模式见 `patterns.md` §10） |
-| "标题栏加个常驻 tab""顶部 tab 入口" | **标题栏常驻 tab**（TitlebarTab） | `templates.md` §十 |
-| "右侧加个页""工作台加个 tab""常驻内容页" | **右侧工作台页**（WorkbenchTab） | `templates.md` §十一 |
-| "做个插件市场""安装插件""插件管理" | **完整插件**（全组件） | `templates.md` §四 + `architecture.md` |
-| "插件需要 requests/PIL/... 等第三方包""打包后再加依赖" | **外部依赖（_vendor/）** | `templates.md` §五 |
+| "加个卡片""设置界面""统计面板""管理界面" | **浮动卡片** | `templates-cards.md` |
+| "加个图表""柱状图""折线图""水平条形图" | **图表控件** | `widgets-charts.md` |
+| "统计卡片""数字指标""KPI 卡" | **统计卡片** | `widgets-statcard.md` |
+| "读 SQLite""查 14 天数据""字段 fallback" | **SQLite 读取** | `widgets-sqlite.md` |
+| "主题色跟着变""深浅色适配" | **主题色映射** | `widgets-theme.md` |
+| "聊天里显示 HTML""渲染自定义内容""消息卡片样式" | **内容块渲染器** | `templates-renderers.md` |
+| "欢迎卡片加 tab""会话初始卡片" | **欢迎卡片 tab** | `templates-welcome-tab.md` |
+| "欢迎卡片加 echarts/统计趋势 tab" | **欢迎 tab + echarts** | `templates-welcome-tab.md`（§8.5） |
+| "替换消息气泡""自定义消息控件" | **消息元素工厂** | `templates-renderers.md` |
+| "输入框加按钮""截图/快捷发图按钮" | **输入框按钮** | `templates-entries.md`（全屏窗口见 `patterns.md` §10） |
+| "标题栏加常驻 tab""顶部 tab 入口" | **标题栏常驻 tab** | `templates-entries.md` |
+| "右侧加个页""工作台加 tab""常驻内容页" | **右侧工作台页** | `templates-workbench.md` |
+| "做个插件市场""安装/管理插件" | **完整插件** | `templates-plugins.md` + `architecture.md` |
+| "插件要 requests/PIL/... 第三方包" | **外部依赖（_vendor/）** | `templates-plugins.md`（§五） |
 | "改现有插件""加个按钮""调样式" | **修改现有插件** | `modifying.md` |
 
-> ⚠️ **新插件优先走浮动卡片**——这是最常见的 UI 插件形态。
-> ⚠️ **图表/统计控件是浮动卡片内的常用组件**，从 `widgets-*.md` 直接复用即可。
-> ⚠️ **内容渲染器只做"展示"，交互按钮用 data 属性桥接。**
-> ⚠️ **消息工厂是高级用法——99% 场景用浮动卡片就够。**
+> ⚠️ 新插件优先浮动卡片（最常见形态）；图表/统计是卡片内组件，从 `widgets-*.md` 复用。
+> ⚠️ 内容渲染器只做"展示"，交互按钮用 data 属性桥接。
+> ⚠️ 消息工厂是高级用法——99% 场景用浮动卡片就够（见 §4 硬停止 6）。
 
----
+## 3. 渐进加载表
 
-## 2. references/ 文件结构
+| 阶段 | 读取 | 何时使用 |
+|------|------|---------|
+| 0 需求澄清 | brainstorming | 新建插件前 |
+| 0 UI 设计 | frontend-design | 设计稿产出（未装见 §1 降级） |
+| 1 组件选型 | 本文件 §2 决策树 | 任务进入时 |
+| 1 架构认知 | architecture.md | 扩展点全景 |
+| 2 开发流程 | workflow.md | scaffold→迭代→验证 |
+| 3 卡片骨架 | templates-cards.md | 浮动卡片 |
+| 3 卡片快起 | assets/card_template.py | 单文件骨架直接复制 |
+| 3 核心模式 | patterns.md | 上下文/比例高度/异步/热重载/信号链/_vendor/全屏覆盖窗 |
+| 3 渲染器 | templates-renderers.md | 内容渲染器/消息工厂 |
+| 3 欢迎 tab | templates-welcome-tab.md | 欢迎 tab/echarts |
+| 3 入口动作 | templates-entries.md | 输入框按钮/标题栏 tab |
+| 3 工作台页 | templates-workbench.md | 右侧工作台页 |
+| 3 插件级骨架 | templates-plugins.md | register_ui/plugin.json/_vendor |
+| 4 控件选型 | widgets.md | 控件索引与设计原则 |
+| 4 控件细节 | widgets-statcard.md 等 5 件按需 | 统计卡/图表/工具函数/SQLite/主题 |
+| 4 主题适配 | widgets-theme.md | ctx→QColor |
+| 4 数据读取 | widgets-sqlite.md | 路径兜底/N 天窗口/fallback |
+| 5 改现有插件 | modifying.md | 小修改免前置 |
+| 6 排坑 | pitfalls.md | 编码级踩坑（症状→原因→修法） |
+| 7 验证 | checklist.md | 14 大类清单 |
+| 7 打包验证 | testing-vendor.md | _vendor PyInstaller |
 
+## 4. 硬停止（触达即停）
+
+1. 无 UI 载体（纯工具/hook/provider/命令）→ 停，转 plugin-creator
+2. 新建插件未过 brainstorming → 停，先补前置
+3. frontend-design 未安装且用户未选降级 → 停，先走 §1 降级确认
+4. 改主程序 app/ 内 widget → 停，转 drifox-dev
+5. "加个面板/卡片"载体不明 → 停，question 问清再动
+6. 消息工厂（99% 场景用浮动卡片）→ 提示确认后才能用
+
+## 5. 验证
+
+```bash
+# 技能包结构自检（本包校验，两包通用脚本）
+python ../plugin-creator/scripts/check_skill_package.py .
 ```
-plugins/system-skills/skills/ui-plugin-creator/
-├─ SKILL.md                ← 本文件（TOC，~6KB）
-└─ references/
-   ├─ workflow.md          开发工作流（澄清需求 → 创建结构 → 验证 → 发布）
-   ├─ patterns.md          核心模式（上下文注入/比例高度/异步/热重载/信号链/_vendor/全屏覆盖窗）
-   ├─ templates.md         代码模板（浮动卡片/内容渲染器/消息工厂/welcome tab/输入框按钮/标题栏 tab/工作台页/register_ui）
-   ├─ widgets.md           可复用控件库索引（设计原则 + 整合示例 + 陷阱速查）
-   ├─ widgets-statcard.md  _StatCard（多层级统计卡片）
-   ├─ widgets-charts.md    _BarChartWidget / _LineChartWidget / _ProjectBarWidget（QPainter 自绘，浮动卡片用）
-   ├─ widgets-utils.md     工具函数（format / token 估算 / 日期）
-   ├─ widgets-sqlite.md    SQLite 读取模式（路径兜底 / N 天窗口 / fallback）
-   ├─ widgets-theme.md     主题色映射（ctx → QColor 字典）
-   ├─ modifying.md         修改现有插件的步骤与调试
-   ├─ checklist.md         UI 插件验证清单（14 大类）
-   ├─ architecture.md      UI 插件架构总览
-   └─ testing-vendor.md    _vendor/ 打包测试脚本
-```
 
----
+运行时验证（主题色实测 / 性能 / 跨环境 / 打包）按 `references/checklist.md` 执行；静态可判项已由脚本覆盖，人工只做运行时部分。
 
-## 3. 推荐学习路径
+## 6. 闭环
 
-### 3.1 第一次做 UI 插件
+- 新踩的坑 → 写回 `references/pitfalls.md`（症状→原因→修法）；插件级流程坑 → `modifying.md`
+- 技能改进 → writeback / 明确 none-with-reason
+- 收尾前跑 §5 自检留证据
 
-> 🟡 **第一步：调用 `brainstorming` 技能**（不是本技能！）
-> 🟡 **第二步：调用 `frontend-design` 技能**
-> ✅ **第三步**：才进入本技能的工作流
-
-```
-brainstorming → frontend-design → ui-plugin-creator
-  需求边界        UI 设计稿         代码实现
-```
-
-详细步骤见 `references/workflow.md §1`。
-
-### 3.2 想加图表/统计卡片
-
-1. 读 `widgets.md` 索引
-2. 复制 `widgets-statcard.md` 或 `widgets-charts.md`
-3. 配合 `widgets-theme.md` 适配主题色
-
-> 💡 欢迎卡片 tab 里的图表**不要**用 `widgets-charts.md`（QPainter 自绘）——
-> 用 ` ```echarts ` 代码块走主程序骨架渲染（`templates.md §8.5`），
-> 交互/明暗/缩放全部由 echarts 承担，参考 `context-stats` 插件。
-
-### 3.3 想读 SQLite
-
-1. 读 `widgets-sqlite.md §一/§二`
-2. 用 `widgets-theme.md` 处理颜色
-
-### 3.4 想加外部依赖（如 `requests`）
-
-1. 读 `templates.md §五`（含完整 register_ui 模板）
-2. 读 `patterns.md §7`（_vendor/ 模式）
-3. 用 `testing-vendor.md` 验证打包
-
-### 3.5 改现有插件
-
-1. 读 `modifying.md`（步骤 + 调试技巧）
-2. 用 `checklist.md §3` 验证修改
-
----
-
-## 4. 与其他技能的衔接
+## 附：技能衔接
 
 ```
 ui-plugin-creator（本技能）
@@ -164,141 +120,3 @@ ui-plugin-creator（本技能）
 ├─ 复杂功能拆多步 → subagent-driven-development
 └─ 调试 bug → diagnose
 ```
-
-### 4.1 与 brainstorming 的边界
-
-| 阶段 | 技能 | 产出 |
-|------|------|------|
-| 用户说"我想要..." | **brainstorming** | 搞清楚意图、列出功能点、确定边界 |
-| brainstorming 结束 | → **frontend-design** | 视觉稿、组件清单、交互流程 |
-| frontend-design 结束 | → **ui-plugin-creator**（本技能） | 代码实现、模式选择、验证发布 |
-
-> 本技能**不**做需求探索和 UI 设计——这两步必须由前置技能完成。
-
-### 4.2 与 frontend-design 的边界
-
-| 阶段 | 技能 | 产出 |
-|------|------|------|
-| "这个卡片应该长什么样" | **frontend-design** | 视觉稿、配色、布局图、组件规格 |
-| "这个视觉稿怎么落地成代码" | **ui-plugin-creator** | 选控件、复制模板、实现交互逻辑 |
-
-> 本技能**不**做视觉设计——视觉稿由 frontend-design 完成，本技能负责把视觉稿翻译成 PyQt5 代码。
-
----
-
-## 5. 实战经验总结（踩坑记录）
-
-### 5.1 Python 3.14 异常语法
-
-Python 3.14 不再支持 Python 2 风格的 `except Exception, e:` 语法，必须用 `except Exception as e:`。在卡片代码中：
-
-```python
-# ❌ 不可用（Python 2 语法，3.14 报 SyntaxError）
-except OSError, PermissionError:
-    pass
-
-# ✅ 正确
-except (OSError, PermissionError):
-    pass
-
-# ✅ 正确（带异常变量）
-except (OSError, PermissionError) as e:
-    logger.error(f"操作失败: {e}")
-```
-
-### 5.2 按钮高度 vs padding 陷阱
-
-```python
-# ❌ 按钮文字不显示
-btn = QPushButton("文字")
-btn.setFixedHeight(32)
-btn.setStyleSheet("padding: 16px 0;")   # 32 - 16 - 16 = 0 → 内容区为 0
-
-# ✅ 正确
-btn.setStyleSheet("padding: 0 10px;")   # 左右 padding，不占用高度
-```
-
-**规则**：`fixedHeight` 小于 40px 的按钮，用 `padding: 0 Xpx`；大按钮用 `padding: Ypx 0`。
-
-### 5.3 QTimer.singleShot 按钮自动恢复模式
-
-当操作完成后需要临时显示成功文案，数秒后恢复默认文案：
-
-```python
-self._btn.setText("✅ 清理完成，释放 234 MB")
-QTimer.singleShot(3000, self._reset_btn)  # 3 秒后恢复
-
-def _reset_btn(self):
-    if not self._is_busy:  # 防止恢复时正在执行新操作
-        self._btn.setText("默认文案")
-```
-
-### 5.4 字体注入容易漏
-
-**最常犯的 bug**：卡片看起来功能正常，但字体和主程序不一致。
-
-```python
-# ❌ 在 _apply_latest_theme 里只更新颜色
-child.setStyleSheet("color: rgba(255,255,255,0.9);")
-
-# ✅ 用 _make_style 同时注入颜色 + 字体
-child.setStyleSheet(_make_style(tc, font_family, font_size))
-```
-
-### 5.5 异步 worker 生命周期
-
-```python
-def _cleanup_worker(self):
-    if self._worker_thread is not None:
-        try:
-            self._worker_thread.quit()
-            self._worker_thread.wait(500)  # 超时防止死锁
-        except RuntimeError:
-            pass
-        self._worker_thread = None
-    self._worker = None
-
-def deleteLater(self):
-    self._cleanup_worker()  # 必须清理！否则线程泄漏
-    super().deleteLater()
-```
-
-### 5.6 生成代码后的自检清单
-
-```
-拿到新卡片 → 开程序 → 输 /system-cleaner
-1. 字体和主界面一致吗？        → 不一致 → 检查 _apply_latest_theme 的字体处理
-2. 按钮文字显示完整吗？         → 不完整 → 检查 button padding 和 fixedSize
-3. 主题色跟随主程序变吗？      → 不跟  → 检查 set_context_provider + _apply_latest_theme
-4. 刷新/操作不卡 UI 吗？       → 卡UI  → 检查是否用了 QThread
-5. 连续快速点击会崩吗？        → 崩溃  → 检查 _is_busy 防重入 + worker cleanup
-6. 写剪贴板的图粘贴有反应吗？   → 无反应 → 检查是否用了 setImage（§5.7）
-7. 提示条看得见吗？            → 看不见 → 检查是否用了 InfoBar 而非 QToolTip（§5.8）
-```
-
-### 5.7 剪贴板写图必须用 setImage，禁用 setPixmap
-
-`clipboard().setPixmap()` 后剪贴板所有权在本进程，**同进程粘贴时
-`mimeData().imageData()` 返回 QPixmap**，主程序输入框的
-`isinstance(img, QImage)` 检查静默跳过 → 表现为「提示已复制，粘贴却无反应」。
-外部工具截图不受影响（跨进程读 CF_DIB 自动转 QImage）。
-
-```python
-QApplication.clipboard().setImage(pixmap.toImage())   # ✅
-QApplication.clipboard().setPixmap(pixmap)            # ❌ DriFox 内粘贴无反应
-```
-
-详见 `templates.md` §9.3（主程序 2026-09 已双类型兼容，插件侧仍以 QImage 为准）。
-
-### 5.8 用户提示统一 InfoBar，QToolTip 在 DriFox 内不可靠
-
-主程序源码明确注释「绕开 QToolTip 样式问题」，`QToolTip.showText` 可能不显示。
-提示走 `qfluentwidgets.InfoBar`（`parent=context["main_widget"]`）：
-
-```python
-from qfluentwidgets import InfoBar, InfoBarPosition
-InfoBar.success("标题", "内容", parent=main_widget,
-                position=InfoBarPosition.BOTTOM, duration=2500)
-```
-
-模板与兜底写法见 `templates.md` §9.4。

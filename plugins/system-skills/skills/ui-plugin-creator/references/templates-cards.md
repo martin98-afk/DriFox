@@ -1,4 +1,4 @@
-﻿# UI 插件代码模板 — 浮动卡片 / widgets 集成 / 通用弹窗
+# UI 插件代码模板 — 浮动卡片 / widgets 集成 / 通用弹窗
 
 > 何时读：做浮动卡片（最常见形态）、在卡片里嵌统计卡/图表、需要统一风格弹窗时。
 > 前置依赖：workflow.md（流程）、patterns.md（核心模式）、widgets.md（控件索引）。
@@ -800,7 +800,7 @@ plugins/<your-plugin>/
 | 浮动卡片背景偏暗导致黑色字 | `_make_chart_colors_from_context` 中 `text` 固定白色 | `widgets-theme.md §二.2` |
 | 标签被顶部裁剪 | 折线图 `top_margin = max_val * 0.3` 留出 30% 空间 | `widgets-charts.md §二.4` |
 | 旧数据无新字段 | 模式见 §6.5，截断 100k 防 OOM | `widgets-sqlite.md §三` |
-| SQLite 连接阻塞 UI | 用 `_DataWorker` 后台线程跑 `_fetch_data` | `templates.md §一` |
+| SQLite 连接阻塞 UI | 用 `_DataWorker` 后台线程跑 `_fetch_data` | `templates-cards.md §一` |
 | 主题色不生效 | 确认 `_apply_latest_theme` 在 `show_card` 中调用 | `widgets-theme.md §四` |
 | 图表刷新不及时 | `set_data(...)` 后 `self.update()` 触发 `paintEvent` | `widgets-charts.md §五` |
 | 数据库被锁 | `timeout=3` + 必要时重试 | `widgets-sqlite.md §四.4.2` |

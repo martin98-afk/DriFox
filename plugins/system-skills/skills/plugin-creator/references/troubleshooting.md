@@ -73,16 +73,17 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 # ✅ registry.register("my_tool", schema, impl=_impl, danger="safe")
 ```
 
-### ❌ Providers 没被识别 / 互相覆盖
+### ❌ Providers 没被识别 / 服务商列表少了一个
 
-**症状**：服务商列表少了一个；或两个同名服务商只剩一个。
+**症状**：服务商列表少了一个；或后注册的同名服务商没生效。
 
 **原因**：
 1. `providers/foo.py` 只定义了函数，没暴露 `register(registry)` → loader 不扫描
-2. 两个 provider 用了相同 `name`（如都叫 "DeepSeek"）→ 后加载者覆盖先加载者
-3. user 插件与 system 内置同名 → 覆盖是**预期行为**（user 优先），非 bug
+2. 同名冲突时**先注册者保留**（system 根先扫），后注册者被跳过并记 warning
+   （`ProviderRegistry.register` 同名不覆盖；跨根 user>system 覆盖是 tools 的规则，providers 没有）
+3. 与 user 插件同名导致自己的定义被跳过——日志有「已注册，跳过重复注册」warning
 
-**修法**：每个 `providers/*.py` 暴露 `register(registry)`；`ProviderDef.name` 保持唯一；刻意覆盖 system 内置时确认命名冲突是有意为之。
+**修法**：每个 `providers/*.py` 暴露 `register(registry)`；`ProviderDef.name` 保持唯一；需要替换内置服务商时换名或确认跳过 warning 是预期行为。
 
 ### ❌ 命令不显示 / 不触发
 

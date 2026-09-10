@@ -101,23 +101,7 @@ child.setStyleSheet(_make_style(tc, font_family, font_size))
 
 **原因**：销毁时未停 worker 线程；C++ 对象销毁后残留信号触发 RuntimeError。
 
-**修法**：线程清理模式详见 patterns.md §3.2；骨架级写法：
-
-```python
-def _cleanup_worker(self):
-    if self._worker_thread is not None:
-        try:
-            self._worker_thread.quit()
-            self._worker_thread.wait(500)  # 超时防止死锁
-        except RuntimeError:
-            pass
-        self._worker_thread = None
-    self._worker = None
-
-def deleteLater(self):
-    self._cleanup_worker()  # 必须清理！否则线程泄漏
-    super().deleteLater()
-```
+**修法**：完整线程清理模式见 patterns.md §3.2（quit→wait(500)→置 None，重写 deleteLater）。
 
 ## 6. 剪贴板写图必须用 setImage，禁用 setPixmap
 

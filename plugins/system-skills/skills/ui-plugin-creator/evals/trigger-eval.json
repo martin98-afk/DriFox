@@ -1,0 +1,95 @@
+{
+  "description": "ui-plugin-creator 触发评测：正例应进入本技能并路由到对应载体，反例应路由到其他技能，边界考察路由精确性",
+  "cases": [
+    {
+      "id": "T01",
+      "type": "positive",
+      "query": "做一个 token 用量统计浮动卡片，实时显示当前会话消耗",
+      "expected_route": "ui-plugin-creator:浮动卡片（templates-cards.md）"
+    },
+    {
+      "id": "T02",
+      "type": "positive",
+      "query": "聊天消息里的 mermaid 代码块想渲染成图",
+      "expected_route": "ui-plugin-creator:内容渲染器/围栏渲染器（templates-renderers.md）"
+    },
+    {
+      "id": "T03",
+      "type": "positive",
+      "query": "欢迎卡片加个 tab，展示近 14 天消息量趋势",
+      "expected_route": "ui-plugin-creator:欢迎 tab + echarts（templates-welcome-tab.md）"
+    },
+    {
+      "id": "T04",
+      "type": "positive",
+      "query": "输入框旁边加个截图按钮，点完自动贴到输入框",
+      "expected_route": "ui-plugin-creator:输入框按钮（templates-entries.md）"
+    },
+    {
+      "id": "T05",
+      "type": "positive",
+      "query": "标题栏加一个常驻的设置中心入口",
+      "expected_route": "ui-plugin-creator:标题栏常驻 tab（templates-entries.md）"
+    },
+    {
+      "id": "T06",
+      "type": "positive",
+      "query": "用 StatCard 显示近 14 天消息总数，数据从本地 SQLite 读",
+      "expected_route": "ui-plugin-creator:StatCard + widgets-sqlite"
+    },
+    {
+      "id": "T07",
+      "type": "positive",
+      "query": "给现有的系统清理卡片加个按钮，顺便调下样式",
+      "expected_route": "ui-plugin-creator:modifying（改现有插件，免前置）"
+    },
+    {
+      "id": "N01",
+      "type": "negative",
+      "query": "做一个调用本地 API 查天气的工具，不带界面",
+      "expected_route": "plugin-creator（tools 组件，无 UI 载体）"
+    },
+    {
+      "id": "N02",
+      "type": "negative",
+      "query": "主程序聊天窗口的布局我想改成三栏",
+      "expected_route": "drifox-dev（改 app/ 主程序）"
+    },
+    {
+      "id": "N03",
+      "type": "negative",
+      "query": "我的 UI 插件写好了，帮我发布到插件市场",
+      "expected_route": "plugin-creator（发布流程）"
+    },
+    {
+      "id": "N04",
+      "type": "negative",
+      "query": "加个钩子拦截所有用户消息做敏感词过滤",
+      "expected_route": "plugin-creator（hooks 组件）"
+    },
+    {
+      "id": "N05",
+      "type": "negative",
+      "query": "帮我写一个教学分析的新 skill",
+      "expected_route": "skill-creator（写 skill 本身）"
+    },
+    {
+      "id": "N06",
+      "type": "negative",
+      "query": "程序启动后一直黑屏，帮我排查",
+      "expected_route": "drifox-dev + diagnose（主程序 bug）"
+    },
+    {
+      "id": "M01",
+      "type": "near-miss",
+      "query": "做一个插件市场，能浏览、安装、卸载插件",
+      "expected_route": "near-miss:UI 骨架本包 templates-plugins.md，插件生命周期/发布归 plugin-creator"
+    },
+    {
+      "id": "A01",
+      "type": "ambiguous",
+      "query": "帮我加个面板",
+      "expected_route": "ambiguous:浮动卡片/工作台页/主程序改动三选，先 question 确认载体再路由"
+    }
+  ]
+}

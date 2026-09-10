@@ -25,10 +25,10 @@ tool-plugin/
 
 ## 对应 SKILL.md 章节
 
-- §2.1 一个插件长这样 / §2.2 11 类组件速查
-- §5.9 Tools（工具插件化）— register 参数逐项说明
-- §6 测试与验证 — 改完名后照此验证
-- §8 常见陷阱 — 「工具没声明 danger」「components flag 开了但没文件」
+- §3 插件解剖速览（组件表 Tools 行）
+- references/components.md §Tools — register 参数逐项说明
+- references/troubleshooting.md — 「工具没声明 danger」等陷阱
+- 验证：references/testing.md
 
 ## 如何使用
 

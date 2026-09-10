@@ -387,7 +387,7 @@ def register_ui(registry):
 | 扩展点 | 注册方法（关键参数） | 场景 |
 |--------|---------------------|------|
 | 浮动卡片 | `register_floating_card(plugin_name, card_id, widget_class, container, title, default_visible, context_provider)` | 独立面板/仪表板；自动注册 `/<card_id>` 命令；widget_class 需接受 parent |
-| 内容块渲染器 | `register_content_renderer(plugin_name, type_name, render_func, priority)` | 消息流中自定义类型内容的 HTML 渲染；render_func(meta, widget) -> str |
+| 内容块渲染器 | `register_content_renderer(plugin_name, type_name, render_func, priority)` | 消息流中自定义类型内容的 HTML 渲染；render_func(data, context) -> HTML |
 | 消息元素工厂 | `register_message_factory(plugin_name, name, condition_func, factory_func, priority)` | 高级：condition 命中时接管整条消息的构造 |
 | 欢迎 tab | `register_welcome_tab(plugin_name, mode_key, label, render_func, priority)` | 欢迎卡片新增 tab；render_func(ctx) -> 完整 HTML |
 | 侧边栏项 | `register_sidebar_item(plugin_name, item_id, label, icon_path, group, default_visible, priority, on_click)` | 左侧导航自定义入口；on_click(ctx) |
@@ -399,9 +399,9 @@ def register_ui(registry):
 
 | 扩展点 | 签名要点 |
 |--------|---------|
-| 内联标签渲染 | `register_tag_renderer(plugin_name, tag_name, render_func(tag_text, attrs)->str, priority)` |
+| 内联标签渲染 | `register_tag_renderer(plugin_name, tag_name, render_func(content, ctx)->HTML, priority)`；纯函数，禁止碰 Qt widget |
 | 围栏渲染 | `register_fence_renderer(plugin_name, lang, render_func, streaming_placeholder, priority, assets, bridge_permissions)`；**保留 lang 不可劫持：echarts, mermaid, svg, html, widget** |
-| 欢迎动作 | `register_welcome_action(plugin_name, action, handler(action, data))`；欢迎 tab HTML 内 `.context-tag` 点击派发，后注册覆盖先注册 |
+| 欢迎动作 | `register_welcome_action(plugin_name, action, handler(content, ctx))`；欢迎 tab HTML 内 `.context-tag` 点击派发，后注册覆盖先注册 |
 | @提及提供者 | `register_mention_provider(plugin_name, provider_id, list_func()->[{...}], on_selected)`；条目渲染在 @ 卡片顶部 |
 | 标题栏 tab | `register_titlebar_tab(plugin_name, tab_id, label, icon_path, on_click, priority)`；icon 无主题感知，建议纯文字 label |
 | 工作台页签 | `register_workbench_tab(plugin_name, page_id, label, widget_class, priority)`；同 page_id 高优先级覆盖 |

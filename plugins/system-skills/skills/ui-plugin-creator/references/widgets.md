@@ -186,3 +186,5 @@ references/
 | `messages` JSON 太大 OOM | `str(msg_data)[:100000]` 截断 | `widgets-sqlite.md §三.3` |
 | `_BarChartWidget` 柱顶标签溢出 | `if label_y < margin_top: label_y = y + 4` | `widgets-charts.md §一.5` |
 | 上下文颜色字符串无效 | try/except + fallback | `widgets-theme.md §六.1` |
+
+> 编码级踩坑（Python 3.14 语法 / 剪贴板 setImage / InfoBar / 字体注入等）另见 `pitfalls.md`。

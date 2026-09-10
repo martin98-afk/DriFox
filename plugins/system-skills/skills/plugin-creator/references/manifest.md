@@ -111,7 +111,7 @@ python tools/validate_plugins.py
 }
 ```
 
-### 字段属性（12 个）
+### 字段属性（14 个）
 
 | 属性 | 必填 | 说明 |
 |------|------|------|
@@ -173,17 +173,14 @@ python tools/validate_plugins.py
         "poll": {
             "interval_ms": 2000,
             "max_rounds": 30,
-            "stop_when": "status==done"
+            "stop_when": {"data.status": ["done"]}
         },
-        "image_width": 480,
-        "dialog_title": "连接测试",
-        "dialog_width": 420,
-        "dialog_height": 300
+        "image_width": 480
     }
 }
 ```
 
-`poll.interval_ms` 必须 ≥1000。
+约束：`poll.interval_ms` 必须 ≥1000；`stop_when` 是**对象**——键为结果寻址路径（如 `data.status`），值为命中集合（如 `["done"]`），写成字符串会被宽容解析丢弃，导致轮询永不提前终止；`ToolActionSpec` 无 `dialog_title/dialog_width/dialog_height` 字段，声明会被忽略。
 
 ### 取值三级链：env → 存储 → 默认
 

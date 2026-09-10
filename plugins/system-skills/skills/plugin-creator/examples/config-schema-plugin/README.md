@@ -24,9 +24,9 @@
 
 ## 对应 SKILL.md 章节
 
-- §2.2 11 类组件速查（gateways 组件）
-- §6 测试与验证
-- §8 常见陷阱 — Manifest 命名不一致
+- §3 插件解剖速览（组件表）
+- references/manifest.md E1 配置契约节（config_schema 全字段）
+- references/troubleshooting.md — Manifest 相关陷阱
 
 ## 如何使用
 
