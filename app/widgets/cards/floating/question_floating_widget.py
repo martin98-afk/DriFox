@@ -26,6 +26,7 @@ from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
+from app.widgets.hover_style_guard import style_if_changed
 
 # ═══════════════════════════════════════════════════════════
 # 自适应高度滚动区
@@ -620,7 +621,7 @@ class _CustomInputCard(QWidget):
 
     def enterEvent(self, e):
         if not self._active:
-            self.setStyleSheet(
+            style_if_changed(self,
                 f"_CustomInputCard{{background-color:{Colors.REALTIME_TAG_BG};border:1px solid {Colors.REALTIME_TAG_BORDER};border-radius:8px;}}"
             )
         super().enterEvent(e)
