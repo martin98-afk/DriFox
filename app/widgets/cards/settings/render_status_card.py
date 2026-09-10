@@ -55,7 +55,6 @@ class RenderStatusCard(SettingCard):
         super().__init__(FluentIcon.INFO, "当前生效参数", "", parent)
         self._items: list[ConfigItem] = list(render_items)
         self._applied: dict = {}
-        self._backend_text = _BACKEND_TEXT
 
         self.copyBtn = TransparentToolButton(FluentIcon.COPY, self)
         self.copyBtn.setToolTip("复制完整参数")
@@ -82,10 +81,9 @@ class RenderStatusCard(SettingCard):
         s = self._applied
         backend = _BACKEND_TEXT.get(s["backend"], s["backend"] or "系统默认")
         # 文案刻意短：contentLabel 的 sizeHint 会撑大卡片 → 顺着布局链把设置弹窗
-        # 顶宽。这里只留速览（后端 / 开关数 / GL 模式），细节全在 tooltip 与复制里。
-        self.setContent(
-            f"{backend} · {s['flag_count']} 开关 · GL{'共享' if s.get('share_gl_contexts', True) else '独占'}"
-        )
+        # 顶宽。这里只留后端 + 开关数，GL 模式在本页有独立开关卡、不必重复，
+        # 其余细节全在 tooltip 与「复制」里。
+        self.setContent(f"{backend} · {s['flag_count']} 开关")
         self.contentLabel.setToolTip(self.detail_text())
         self._apply_content_style()
 
