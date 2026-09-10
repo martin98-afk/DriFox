@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
-from zero.errors import CircularDependency, ZeroError
+from zero.errors import CircularDependency, MissingDependency, PluginError, ZeroError
 from zero.service import get_inject_spec
 
 if TYPE_CHECKING:
@@ -98,9 +98,20 @@ class Registry:
 
     # ── 加载 ──────────────────────────────────────────────────────────
     def load_all(self) -> List["Context"]:
-        """按依赖顺序加载全部已登记插件，返回本次新加载的 fork。"""
+        """按依赖顺序加载全部已登记插件，返回本次新加载的 fork。
+
+        单插件加载失败（如依赖未就绪）只停用该插件并记日志，不阻断其余插件。
+        """
         order = self._topo_order()
-        return [self.load(name) for name in order]
+        forks: List["Context"] = []
+        for name in order:
+            try:
+                forks.append(self.load(name))
+            except MissingDependency as e:
+                logger.warning(f"[zero] 插件 {name!r} 依赖未就绪，停用: {e}")
+            except PluginError as e:
+                logger.error(f"[zero] 插件 {name!r} 加载失败，已回滚: {e}")
+        return forks
 
     def load(self, name: str) -> "Context":
         """加载单个插件（不校验顺序，一般经 load_all 调用）。"""

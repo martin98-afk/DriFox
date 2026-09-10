@@ -1,13 +1,14 @@
 {
   "name": "zero-bridge",
-  "description": "zero 插件引擎桥接器：把 DriFox 的 UI 事件与窗口状态接入 zero 上下文树（zero 插件的运行入口）",
-  "version": "0.1.0",
+  "description": "zero 插件引擎桥接器：把 DriFox 事件与状态接入 zero 上下文树，并提供 zero 组件类型（插件 zero/ 目录，*.py 文件即插件，热重载自动回滚）",
+  "version": "0.2.0",
   "author": {
     "name": "DriFox Team"
   },
   "license": "MIT",
   "type": "user",
   "components": {
-    "ui": true
+    "ui": true,
+    "zero": true
   }
 }

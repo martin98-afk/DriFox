@@ -123,6 +123,7 @@ _COMPONENT_PROBES: Dict[str, Callable[[Path], bool]] = {
     "serializers": lambda d: (d / "serializers").exists() and any((d / "serializers").glob("*.py")),
     "gateways": lambda d: (d / "gateways").exists() and any((d / "gateways").glob("*.py")),
     "engines": lambda d: (d / "engines").exists() and any((d / "engines").glob("*.py")),
+    "zero": lambda d: (d / "zero").exists() and any((d / "zero").glob("*.py")),
 }
 
 

@@ -38,6 +38,9 @@ KNOWN_COMPONENTS: Set[str] = {
     "serializers",
     "gateways",
     "engines",
+    # zero：zero 插件引擎组件（zero/ 子目录，*.py 文件即插件）。
+    # reloader 由 zero-bridge 插件运行时注册（零主系统逻辑）。
+    "zero",
 }
 
 # 组件优先级元组（用于多组件批处理中决定先后顺序，与旧 backend._COMPONENT_ORDER dict 数值一致）
@@ -62,6 +65,7 @@ COMPONENT_ORDER: tuple = (
     "serializers",
     "gateways",
     "engines",
+    "zero",
 )
 
 # 插件根目录的关键文件 → 组件类型（.mcp.json/.lsp.json 位于插件根而非子目录）
