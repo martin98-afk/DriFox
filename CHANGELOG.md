@@ -1,7 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.5.10] - 2026-09-10
+
+自上一版本以来的变更 | 提交数：31 · 文件变更：302 · +14217/-21500 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -11,6 +13,39 @@ All notable changes to this project will be documented in this file.
 - **渲染页高级配置折叠卡（开关列表）** (`app/widgets/cards/settings/render_advanced_card.py`, `app/widgets/cards/settings/llm_settings_card.py`): `DisabledFeatures` / `ExtraChromiumFlags` 两项此前只能手改 `app.config` [Render] 组，现收进渲染页末尾的「高级配置」折叠卡 —— 折叠态显示「已调整 N 项 / 全部保持默认」，展开后**一条一项 + 右侧 SwitchButton 的扁平列表**（不分组、不用 chip）：每行「名称 | 描述 | 开关」，列布局与「工具配置」ItemRow 对齐（名称固定 150px、描述用省略号标签居中撑开、开关在最右），共 13 项（7 个 Chromium 开关：LCD 文字渲染 / 垂直同步 / 部分光栅 / 声音 / 本地文件访问 / 自动播放 / sRGB 色彩统一；6 个 feature：网页翻译 / 投屏 / 加载优化提示 / 窗口遮挡计算 / 前进后退缓存 / 音频独立进程）。开关一律读作「这个能力开不开」：`disable` 类（能力默认开）关掉才写入值、`allow` 类（能力默认关）打开才写入值，mode 写在清单里不会搞反；底层仍写回 `DisabledFeatures`（逗号分隔）/ `ExtraChromiumFlags`（空白分隔），预设之外的旧值原样保留。chip 文案直接显示当前状态（「垂直同步：开 / 关」，点一下翻转），消除「勾选是开还是关」的歧义；chip 容器高度主动管理（`FlowLayout` 容器在布局未激活时 `QWidget.sizeHint()` 会累加子项 sizeHint，撑出约 150px 空白）；
 - **单实例限制开关** (`main.py`, `app/utils/config.py`, `app/widgets/cards/settings/llm_settings_card.py`): 通用设置页新增「单实例限制」开关，开启后同时只允许运行一个 Drifox 实例（二次启动通过 IPC 激活已有窗口后退出），关闭可多实例并行；默认关闭，与历史行为一致，修改后重启生效。
 - **Webview 渲染环境变量配置化** (`main.py`, `app/utils/render_env.py`, `app/utils/config.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/utils/test_render_env.py`): main.py 硬编码的 `QT_OPENGL` / `QT_ANGLE_PLATFORM` / `QTWEBENGINE_CHROMIUM_FLAGS` 换算抽到新模块 `render_env.py`（Qt 加载前裸 JSON 读取 `app.config` [Render] 组，纯 stdlib 零依赖）；设置界面新增「渲染」页（渲染后端 auto/hardware/software/software_gl、WebGL 解禁、renderer 进程上限、单卡 JS 堆、低内存模式、平滑滚动、Canvas 抗锯齿，共 7 张卡片，全部重启生效）；默认值与历史硬编码逐字一致，升级零变化；旧检测链（`DRIFOX_SOFTWARE_RENDER` / `DRIFOX_ENABLE_WEBGL` 环境变量 → `~/.drifox` 标记文件）保留为 auto 档；外部已设相关环境变量时保持 setdefault 优先；DisabledFeatures / ExtraChromiumFlags 两项为高级项，走配置文件直达；25 条单元测试覆盖档位/钳制/非法值回退/外部优先级/非 Windows 平台限定。
+- **渲染状态卡简化后端显示** (`app/widgets/cards/settings/render_status_card.py`): 去除冗余的 GL 模式信息，文案只保留后端类型与运行时状态。
+- **移除未用 gateway 通信平台配置** (`app/gateway/`): 清理未启用的通讯平台注册项，缩减依赖面与维护成本。
+- **桌面宠物功能默认关闭** (`app/widgets/pixmap_pet.py`、`app/utils/config.py`): UI 设置中桌面宠物开关默认关闭，避免对部分用户造成视觉干扰。
+- **清理/更新/新增图片资源** (`assets/`、`app/widgets/`): 删除未引用图片优化体积，更新并补充部分图标/插画改善视觉效果。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **恢复 qframelesswindow TitleBarBase.eventFilter 的 setMaxState 鸭子类型** (`app/main_widget.py`): eventFilter 拦截路径补回 `setMaxState` 调用，修复最大化按钮在某些情况下失效的问题。
+- **修复仓库根路径解析与跨模块导入（archive 移动后断裂）** (`tests/`、`conftest.py`): 多文件依赖的 `REPO_ROOT` 相对路径改为 pytest 注入或环境变量派生。
+- **补齐 8 个文件缺失的 typing 导入** (`app/`、`tests/`): 修复 `NameError: name 'Optional' is not defined` 等未定义名称错误。
+- **修复 Python2 风格 except 与未闭合字符串（59+1 处，P0）** (`app/`、`tests/`): 残留的 `except A, B:` 与多行字符串未闭合语法统一改为 Python3 风格，解除 pytest collection 阻塞。
+- **导航图标主题感知动态切换** (`app/widgets/navigation/_resolve_nav_icon.py`): 根据当前主题返回对应图标，修复深色/浅色主题切换后图标不更新的问题。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **改进内存管理与渲染回退逻辑** (`app/utils/render_env.py`、`app/main_widget.py`): 优化渲染管线内存回收路径，回退档不再盲目重置 WebEngine profile。
+- **finish_streaming 强制 dock 状态管理** (`app/widgets/message_card.py`): 中断/异常路径下也保证 dock 状态一致，避免 UI 状态泄漏。
+- **抽出 diff_highlight 模块解除 utils→widgets 反向依赖** (`app/utils/diff_highlight.py`、`app/widgets/`): 高亮工具下沉到 utils，widgets 改为调用方。
+- **移除未引用死代码（T1 高置信集合）** (`app/`): 静态分析 + 引用检查确认无引用的函数/类/变量批量删除。
+- **清理死分支与未用导入** (`app/`): 去除明显的死代码与未使用 import。
+- **gateway 死代码裁剪（20 符号）与协议/休眠 API 恢复（6 符号）** (`app/gateway/`): 按裁定结果批量删除已确认无引用的符号，同时恢复被误删的协议接口。
+- **移除未引用的 widget 方法（Qt-callback 筛选后）** (`app/widgets/`): 通过回调信号链筛选出无上游调用的 slot 方法并删除。
+- **测试文件归档与诊断脚本清理** (`tests/`): 73 个平铺测试文件按模块归档到子目录，10 个过期诊断脚本删除。
+- **测试 fixture 重命名消歧义** (`tests/`): 把 `tm` / `fresh_tm` / `fresh_registry` 等易混淆 fixture 名统一为可区分的命名。
+- **测试 fixture 合并到 conftest** (`tests/conftest.py`): 跨多个测试文件重复定义的 fixture 集中到 conftest，净减少 297 行。
+
+### 🔧 其他 (Chores & Build)
+
+- 升级版本号至 v0.5.10（`pyproject.toml`、`app/utils/config.py`、`dist/installer.iss`、`README.md`）
+- **移除未用依赖 qtpy/jsonschema/aiohttp** (`pyproject.toml`): 三方依赖清单清理。
+- **重组 docs/reports 目录、精简 8 篇过时文档、采用严格 gitignore 白名单（A2）** (`docs/`、`.gitignore`): 文档结构整理与仓库 ignore 规则强化。
+- **清理未用脚本/临时文件/未引用资产** (`scripts/`、`assets/`): 仓库批量瘦身。
+- **移除或跳过孤立测试（引用已删除插件）** (`tests/`): 配合插件清理同步移除/标记失效测试。
 
 ## [v0.5.10b4] - 2026-09-09
 
