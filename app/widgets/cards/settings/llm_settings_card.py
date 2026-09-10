@@ -56,6 +56,7 @@ from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
+from app.widgets.cards.settings.render_restart_card import RenderRestartCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
 
@@ -560,7 +561,7 @@ class LLMSettingsCard(SystemCardFrame):
         self.singleInstanceCard = SwitchSettingCard(
             FluentIcon.LAYOUT,
             "单实例限制",
-            "开启后同时只能运行一个 Drifox 实例，修改后重启生效",
+            "开启后限制一个 Drifox 实例，重启生效",
             configItem=self.cfg.enable_single_instance,
             parent=self,
         )
@@ -592,12 +593,31 @@ class LLMSettingsCard(SystemCardFrame):
         # ExtraChromiumFlags）不进 UI，走 app.config [Render] 组直达。
         render_layout = self._page_layouts["render"]
 
+        # 手动重启（首项）：本页全部配置项都是 QtWebEngine 启动时一次性读取的
+        # 环境变量，运行中改无效。卡片同时承担「待生效变更」提示，监控对象为
+        # 下面所有 Render 组 ConfigItem（含未进 UI 的两个高级项）。
+        self.renderRestartCard = RenderRestartCard(
+            render_items=[
+                self.cfg.render_backend,
+                self.cfg.render_webgl,
+                self.cfg.render_renderer_process_limit,
+                self.cfg.render_js_heap_mb,
+                self.cfg.render_low_end_device_mode,
+                self.cfg.render_smooth_scrolling,
+                self.cfg.render_canvas_aa,
+                self.cfg.render_disabled_features,
+                self.cfg.render_extra_flags,
+            ],
+            parent=self,
+        )
+        render_layout.addWidget(self.renderRestartCard)
+
         # 渲染后端：Qt/Chromium 图形栈档位
         self.renderBackendCard = OptionsSettingCard(
             self.cfg.render_backend,
             FluentIcon.SPEED_HIGH,
             "渲染后端",
-            "硬件 D3D11 最流畅；非gpu选软件档",
+            "硬件 D3D11 最流畅；无独显选软件档",
             texts=["自动", "硬件 (D3D11)", "软件 (WARP)", "软件 GL (最稳)"],
             parent=self,
         )
@@ -704,30 +724,30 @@ class LLMSettingsCard(SystemCardFrame):
         appearance_layout.addWidget(self.llmFontCard)
         appearance_layout.addStretch(1)
 
-        # ════ 桌宠页 ════
-        pet_layout = self._page_layouts["pet"]
+        # # ════ 桌宠页 ════
+        # pet_layout = self._page_layouts["pet"]
 
-        # 桌宠显示开关
-        self.petCard = SwitchSettingCard(
-            FluentIcon.HEART,
-            "桌宠显示",
-            "在主窗口上显示像素小狐桌宠",
-            configItem=self.cfg.pet_enabled,
-            parent=self,
-        )
-        pet_layout.addWidget(self.petCard)
+        # # 桌宠显示开关
+        # self.petCard = SwitchSettingCard(
+        #     FluentIcon.HEART,
+        #     "桌宠显示",
+        #     "在主窗口上显示像素小狐桌宠",
+        #     configItem=self.cfg.pet_enabled,
+        #     parent=self,
+        # )
+        # pet_layout.addWidget(self.petCard)
 
-        # 桌宠大小
-        self.petSizeCard = OptionsSettingCard(
-            self.cfg.pet_size,
-            FluentIcon.ZOOM,
-            "桌宠大小",
-            "调整像素桌宠的显示尺寸",
-            texts=["小 (32px)", "中 (48px)", "大 (64px)"],
-            parent=self,
-        )
-        pet_layout.addWidget(self.petSizeCard)
-        pet_layout.addStretch(1)
+        # # 桌宠大小
+        # self.petSizeCard = OptionsSettingCard(
+        #     self.cfg.pet_size,
+        #     FluentIcon.ZOOM,
+        #     "桌宠大小",
+        #     "调整像素桌宠的显示尺寸",
+        #     texts=["小 (32px)", "中 (48px)", "大 (64px)"],
+        #     parent=self,
+        # )
+        # pet_layout.addWidget(self.petSizeCard)
+        # pet_layout.addStretch(1)
 
         # ════ 版本更新页 ════
         update_layout = self._page_layouts["update"]
@@ -1372,7 +1392,13 @@ class LLMSettingsCard(SystemCardFrame):
             if hasattr(frame, "refresh_style"):
                 frame.refresh_style()
         # AppearanceComboCard / FontSettingCard（SettingCard 子类，不在以上遍历范围）
-        for card_name in ("uiFontSizeCard", "uiLightModeCard", "uiThemeStyleCard", "llmFontCard"):
+        for card_name in (
+            "uiFontSizeCard",
+            "uiLightModeCard",
+            "uiThemeStyleCard",
+            "llmFontCard",
+            "renderRestartCard",
+        ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()

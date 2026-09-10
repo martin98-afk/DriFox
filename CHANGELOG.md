@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **渲染页手动重启项** (`app/utils/app_restart.py`, `app/widgets/cards/settings/render_restart_card.py`, `app/core/single_instance.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/utils/test_app_restart.py`): 「渲染」页首项新增「手动重启」卡 —— 右侧「立即重启」按钮拉起新进程并退出当前实例，左侧文案实时显示「有 N 项变更待重启生效」（挂载时记录 Render 组 9 个配置基线，任一变更即高亮计数）。两个关键点：① 子进程环境必须剥离 `QTWEBENGINE_CHROMIUM_FLAGS` / `QT_OPENGL` / `QT_ANGLE_PLATFORM`（否则 apply_render_env 的 setdefault 让新进程沿用旧值，重启等于白重启）；② 剥离一次性内部参数 `--configure-auto-start=*` / `--startup-error-file=*`（重放会让新进程走 helper 分支直接退出）。另给 `single_instance` 增加 `release_current_lock()`：开启「单实例限制」时先放锁再拉起，避免新进程 try_lock 失败后「通知旧窗口并退出」导致点了重启程序反而没了；4 条单元测试覆盖命令构造与环境变量剥离。
+- **单实例限制开关** (`main.py`, `app/utils/config.py`, `app/widgets/cards/settings/llm_settings_card.py`): 通用设置页新增「单实例限制」开关，开启后同时只允许运行一个 Drifox 实例（二次启动通过 IPC 激活已有窗口后退出），关闭可多实例并行；默认关闭，与历史行为一致，修改后重启生效。
 - **Webview 渲染环境变量配置化** (`main.py`, `app/utils/render_env.py`, `app/utils/config.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/utils/test_render_env.py`): main.py 硬编码的 `QT_OPENGL` / `QT_ANGLE_PLATFORM` / `QTWEBENGINE_CHROMIUM_FLAGS` 换算抽到新模块 `render_env.py`（Qt 加载前裸 JSON 读取 `app.config` [Render] 组，纯 stdlib 零依赖）；设置界面新增「渲染」页（渲染后端 auto/hardware/software/software_gl、WebGL 解禁、renderer 进程上限、单卡 JS 堆、低内存模式、平滑滚动、Canvas 抗锯齿，共 7 张卡片，全部重启生效）；默认值与历史硬编码逐字一致，升级零变化；旧检测链（`DRIFOX_SOFTWARE_RENDER` / `DRIFOX_ENABLE_WEBGL` 环境变量 → `~/.drifox` 标记文件）保留为 auto 档；外部已设相关环境变量时保持 setdefault 优先；DisabledFeatures / ExtraChromiumFlags 两项为高级项，走配置文件直达；25 条单元测试覆盖档位/钳制/非法值回退/外部优先级/非 Windows 平台限定。
 
 ## [v0.5.10b4] - 2026-09-09
