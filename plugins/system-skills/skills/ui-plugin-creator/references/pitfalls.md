@@ -141,6 +141,101 @@ InfoBar.success("标题", "内容", parent=main_widget,
 
 **修法**：路径兜底 + N 天窗口查询模板见 widgets-sqlite.md §一/§二。
 
+## 9. QPlainTextEdit 高度自适应：document().size() 是行数不是像素
+
+**症状**：多行输入框写了 textChanged → setFixedHeight 自适应，但输入多行后框高永远不变（或高得离谱）。
+
+**原因**：QPlainTextEdit 下 `document().size().height()` 和 `documentLayout().documentSize().height()` 返回的都是**行数**，不是像素。10 行文本 doc_h=10，按像素用永远算出小高度。
+
+**修法**：行数 × lineSpacing + 垂直 chrome（QSS padding×2 + border×2 + documentMargin×2 + 余量）；无换行的长段落按 viewport 宽度估算软折行：
+
+```python
+fm = edit.fontMetrics()
+avail = max(40, edit.viewport().width() - 16)
+lines = 0
+blk = edit.document().firstBlock()
+while blk.isValid():
+    w = fm.horizontalAdvance(blk.text())
+    lines += max(1, int(w / avail) + (1 if w % avail else 0))
+    blk = blk.next()
+target = max(36, min(max(1, lines) * fm.lineSpacing() + 24, 160))
+```
+
+验证：用 D:\work\DriFox\.venv 的 python（带完整 PyQt5）写 QTimer 序列脚本离线实测，见 plugin-creator troubleshooting.md「热重载」条。
+
+## 10. ExpandSettingCard 覆写 _adjustViewSize 后展开收不回
+
+**症状**：qfluentwidgets ExpandSettingCard 为消除展开大空白覆写 `_adjustViewSize` 把 `spaceWidget.setFixedHeight(0)`，结果展开后点折叠没反应。
+
+**原因**：原版折叠动画靠 spaceWidget 占位提供滚动余量（scrollbar value 从 0 动画到 maximum）。占位归零后 maximum=0，动画失效，`setFixedHeight` 停在展开高度。
+
+**修法**：连 `setExpand` 一起覆写，绕开滚动动画直接切高度：
+
+```python
+def setExpand(self, isExpand: bool):
+    if self.isExpand == isExpand:
+        return
+    self.isExpand = isExpand
+    self.setProperty("isExpand", isExpand)
+    self.setStyle(QApplication.style())
+    self.card.expandButton.setExpand(isExpand)
+    self._adjustViewSize()
+
+def _adjustViewSize(self):
+    h = self.viewLayout.sizeHint().height()
+    self.spaceWidget.setFixedHeight(0)
+    self.setFixedHeight(self.card.height() + h if self.isExpand else self.card.height())
+```
+
+## 11. retheme 重涂陷阱：选择器类型不匹配静默失效
+
+**症状**：改了控件类型（如 QLineEdit → QPlainTextEdit）后主题色/字体从不生效，报错也没有。
+
+**原因**：`_apply_latest_theme/_retheme` 的 QSS 写死了旧控件类型选择器（`QLineEdit { ... }`），选择器不匹配时整段样式静默忽略。
+
+**修法**：改控件类型时同步改 retheme 里的 QSS 选择器。另注意 retheme 循环规则：
+
+- QLabel 带 `keepColor` 属性 → 整个跳过（语义色/字号自管，适合分支名、图例）
+- QPushButton 只有带 styleSheet 才被更新（字号替换为 fs-3，下限 11）
+- 带 QSS 的控件写死 `font-size` 会覆盖继承的 widget 字体，需跟随系统字体的控件不要写死字号，显式传 `font-family`/`font-size`
+
+## 12. 需要原生 tooltip 时用事件过滤器
+
+**症状**：`setToolTip("...")` 悬停弹的是主程序自绘气泡，想要系统原生样式做不到。
+
+**原因**：主程序全局 patch 了 `QWidget.setToolTip`，任何 setToolTip 都会被装上自绘 hover filter（QAbstractScrollArea/QLineEdit/QTextEdit 有豁免，但依赖主程序版本）。
+
+**修法**：插件侧装事件过滤器抢占 ToolTip 事件，直接 `QToolTip.showText`（与 #7 不冲突：给用户的操作提示用 InfoBar，控件的悬停说明用本模式）：
+
+```python
+class _NativeTooltipFilter(QObject):
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.ToolTip:
+            tip = obj.toolTip()
+            if tip:
+                QToolTip.showText(event.globalPos(), tip, obj)
+            return True
+        return False
+
+widget.setToolTip("说明文字")
+widget.installEventFilter(_NativeTooltipFilter(widget))
+```
+
+## 13. QPlainTextEdit 没有 setText：回调链静默中断
+
+**症状**：提交成功后输入框没清空，且同函数里的后续逻辑（如自动刷新）也没执行，无任何报错。
+
+**原因**：QPlainTextEdit 清空用 `setPlainText("")`；`setText` 只属于 QLineEdit/QLabel。信号回调里抛出的 AttributeError 被吞时，同函数后续语句全部不执行。
+
+**修法**：
+
+```python
+edit.setPlainText("")   # ✅ QPlainTextEdit
+edit.setText("")        # ❌ QLineEdit/QLabel 的 API，这里 AttributeError
+```
+
+**规则**：从单行输入框迁移到多行时全文搜 `.setText(`；信号回调链里的异常要么显式记日志要么别吞。
+
 ---
 
 > 新坑写回格式：`## N. 标题` + **症状/原因/修法** 三段 + 可运行代码片段。
