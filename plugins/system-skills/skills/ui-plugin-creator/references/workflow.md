@@ -1,7 +1,7 @@
 # 开发工作流（新建插件）
 
 > 本文是 `SKILL.md §3.1` 的完整展开。
-> 决策树见 `SKILL.md §1`，核心模式见 `references/patterns.md`，模板见 `references/templates.md`。
+> 决策树见 `SKILL.md §1`，核心模式见 `references/patterns.md`，模板见 `references/templates-*.md` 系列（按组件选件）。
 
 ---
 
@@ -180,7 +180,7 @@
 | 需要**异步操作**吗？ | 是 → QThread + pyqtSignal | 列表加载、安装/卸载、网络请求都算 |
 | 需要**上下文注入**吗？ | 是 → `set_context_provider` + 拉模型 | 主题色/字体跟随系统变化 |
 | 需要复用现成 widgets 吗？ | 见 `widgets.md` 索引 | 节省开发时间 |
-| 需要外部依赖吗？ | 见 `templates.md §五`（`_vendor/` 模式） | 引入第三方包 |
+| 需要外部依赖吗？ | 见 `templates-plugins.md`（`_vendor/` 模式） | 引入第三方包 |
 | 有没有现成的相似插件可参考？ | 见 `plugins/` 目录 | 减少重复造轮子 |
 
 ### 1.1 容器选择详解
@@ -223,7 +223,7 @@ plugins/<plugin-name>/
     ├── cards.py              # 浮动卡片 widget（可选）
     ├── renderers.py          # 内容块渲染器（可选）
     ├── widgets.py            # 复用 widgets（可选，从 widgets-*.md 复制）
-    └── _vendor/              # 可选：第三方纯 Python 依赖（见 templates.md §五）
+    └── _vendor/              # 可选：第三方纯 Python 依赖（见 templates-plugins.md）
         └── <package>/
 ```
 
@@ -269,10 +269,10 @@ plugins/<your-plugin>/
 
 ### 3.1 推荐顺序
 
-1. **先骨架** → 复制 `templates.md §一` 浮动卡片骨架到 `cards.py`
+1. **先骨架** → 复制 `templates-cards.md` 浮动卡片骨架到 `cards.py`
 2. **再控件** → 按 frontend-design 的组件清单，从 `widgets-*.md` 复制 widgets 到 `cards.py` 或独立 `widgets.py`
 3. **再数据** → 用 `widgets-sqlite.md` 的查询模式写 `_fetch_data()`
-4. **再入口** → 复制 `templates.md §四` register_ui 入口到 `__init__.py`
+4. **再入口** → 复制 `templates-plugins.md` register_ui 入口到 `__init__.py`
 5. **再主题** → 用 `widgets-theme.md` 的 `_make_chart_colors_from_context`
 
 ### 3.2 设计约束（插件闭包）
@@ -286,15 +286,15 @@ plugins/<your-plugin>/
 
 | 你需要 | 复制自 |
 |--------|--------|
-| 完整浮动卡片骨架 | `templates.md §一.1` |
-| register_ui 入口（基础） | `templates.md §四.2` |
-| register_ui 入口（含 _vendor/） | `templates.md §五.5` |
+| 完整浮动卡片骨架 | `templates-cards.md.1` |
+| register_ui 入口（基础） | `templates-plugins.md.2` |
+| register_ui 入口（含 _vendor/） | `templates-plugins.md.5` |
 | 统计卡片 widget | `widgets-statcard.md` |
 | 柱状/折线/水平柱状图 | `widgets-charts.md` |
 | 数字格式化 / token 估算 / 日期工具 | `widgets-utils.md` |
 | SQLite 读取模式 | `widgets-sqlite.md` |
 | 主题色映射 | `widgets-theme.md` |
-| 异步 worker 模板 | `templates.md §一.1` |
+| 异步 worker 模板 | `templates-cards.md.1` |
 
 ---
 
@@ -369,7 +369,7 @@ cd plugins/<plugin-name>
 zip -r ../../dist/<plugin-name>.zip . -x "*.pyc" -x "__pycache__/*"
 ```
 
-> 用户插件的依赖必须用 `_vendor/` 模式（见 `templates.md §五`），否则打包后运行会 `ImportError`。
+> 用户插件的依赖必须用 `_vendor/` 模式（见 `templates-plugins.md`），否则打包后运行会 `ImportError`。
 
 ### 5.3 提交时附带的文档
 

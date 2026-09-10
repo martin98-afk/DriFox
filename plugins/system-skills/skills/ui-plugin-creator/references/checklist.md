@@ -53,6 +53,12 @@
   - 12.4 功能验证 — L356–L368
 ## 1. 基础验证（每个 UI 插件必查）
 
+> ⚡ 本节（代码质量 / 插件清单 / 注册入口存在性 / 浮动卡片骨架特征 / 闭包 import 扫描 /
+> worker 生命周期特征 / _vendor 结构）均为**静态可判项**，已由
+> `../plugin-creator/scripts/check_skill_package.py` 自动执行（在技能包目录跑
+> `python ../plugin-creator/scripts/check_skill_package.py .`），人工无需重复逐项勾选。
+> 以下保留原始条目供脚本未覆盖的定制场景参考。
+
 ### 1.1 代码质量
 
 - [ ] `ruff check plugins/<plugin-name>/ui/` 通过
@@ -167,6 +173,9 @@
 
 ## 3. 外部依赖验证（如果用了 `_vendor/`）
 
+> ⚡ 3.1 目录结构 / 3.2 register_ui 配置为静态可判项，已由
+> `../plugin-creator/scripts/check_skill_package.py` 覆盖；3.3/3.4 为运行时项，须人工实测。
+
 ### 3.1 目录与文件
 
 - [ ] `ui/_vendor/<package>/` 下每个包都有 `__init__.py`
@@ -189,7 +198,7 @@
 
 - [ ] 用 PyInstaller 打包后测试：把整个 `plugins/<plugin-name>/` 复制到 `dist/<exe>/`，运行后能 `import` 第三方包并调用 API
 
-完整模板与陷阱见 `templates.md §五`。
+完整模板与陷阱见 `templates-plugins.md`。
 
 ---
 
@@ -377,7 +386,7 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 7. 插件热重载无异常？               → sys.modules 前缀清理
 ```
 
-> 完整模板与踩坑见 `templates.md §八`。
+> 完整模板与踩坑见 `templates-welcome-tab.md`。
 
 ---
 
@@ -394,7 +403,7 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 
 - [ ] 写图用 `clipboard().setImage(img.toImage())`，**禁用 `setPixmap`**
 - [ ] 复制后在 DriFox 输入框 Ctrl+V **有反应**（变附件芯片）——"提示有了但粘不出来"
-  就是 setPixmap 的同进程 QPixmap 回读坑（详见 `templates.md` §9.3）
+  就是 setPixmap 的同进程 QPixmap 回读坑（详见 `templates-entries.md` §9.3）
 - [ ] 跨应用粘贴（画图/微信）内容与尺寸正确
 
 ### 13.3 全屏覆盖窗类（详见 `patterns.md` §10）
@@ -448,4 +457,4 @@ git commit -m "feat(<plugin-name>): <功能描述>"
 | `register_tag_renderer` | 消息内标签卡渲染（persona tag 等） | assistant_hub |
 | `register_welcome_action` / `register_mention_provider` | 欢迎页动作 / @提及提供者 | UIPluginRegistry:557/603 |
 
-> 标题栏 tab 模板见 `templates.md §十`；工作台页模板见 `templates.md §十一`。
+> 标题栏 tab 模板见 `templates-entries.md`；工作台页模板见 `templates-workbench.md`。

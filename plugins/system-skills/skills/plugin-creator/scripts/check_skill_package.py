@@ -101,9 +101,9 @@ def check_line_limit(n_lines: int, limit: int, rep: Report) -> None:
 
 def check_references(skill_dir: Path, body: str, rep: Report) -> None:
     """SKILL.md 引用的 references/、assets/ 文件存在 + references 无孤儿。"""
-    # 1) 引用完整性
+    # 1) 引用完整性（(?<![\w\-/]) 排除 drifox-dev/references 这类跨包路径）
     referenced: set[Path] = set()
-    for m in re.finditer(r"(?:references|assets)/[\w\-./]+", body):
+    for m in re.finditer(r"(?<![\w\-/])(?:references|assets)/[\w\-./]+", body):
         rel = Path(m.group(0).rstrip(".,:)】」"))
         path = skill_dir / rel
         referenced.add(rel)

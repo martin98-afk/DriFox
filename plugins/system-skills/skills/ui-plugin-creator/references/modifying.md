@@ -117,7 +117,7 @@ def _fetch_data(self) -> dict:
         "error": None,
     }
 
-# 3. 如果插件不在 _vendor/，需要把 requests 加进去（见 templates.md §五）
+# 3. 如果插件不在 _vendor/，需要把 requests 加进去（见 templates-plugins.md）
 ```
 
 ### 2.5 改容器（bottom → top / full）
@@ -167,7 +167,7 @@ ruff check plugins/<plugin-name>/ui/
 | 主题色不对 | `_apply_latest_theme` 没在 `show_card` 调用 | 见 `patterns.md §1` |
 | Worker 内存泄漏 | `deleteLater` 没连接 | 见 `patterns.md §3` |
 | 卡片不显示 | `container` 错或 `default_visible` 错 | 检查 `__init__.py` |
-| `_vendor/` 加载失败 | sys.path 顺序问题 + sys.modules 缓存 | 见 `templates.md §五.5.1` |
+| `_vendor/` 加载失败 | sys.path 顺序问题 + sys.modules 缓存 | 见 `templates-plugins.md.5.1` |
 
 完整验证清单见 `checklist.md`。
 
