@@ -236,7 +236,7 @@ def test_non_windows_skips_qt_backend_env(tmp_path, monkeypatch):
 
 def test_compute_settings_defaults(monkeypatch):
     s = compute_settings({})
-    assert s["backend"] == "hardware"
+    assert s["backend"] == "software"  # 出厂默认 = 软件 (WARP)
     assert s["renderer_process_limit"] == 6
     assert s["js_heap_mb"] == 128
     assert s["low_end_device_mode"] is True

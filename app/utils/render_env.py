@@ -116,11 +116,11 @@ def compute_settings(render: dict) -> dict:
         webgl = _detect_webgl_enabled()
 
     # GPU 开关三选一（对应 build_chromium_flags 的 GPU 段）：
-    # - 显式 hardware / vulkan / d3d9：用户声明走真实 GPU → 保留 GPU 进程
+    # - hardware / vulkan / d3d9：用户声明走真实 GPU → 保留 GPU 进程
     # - swiftshader：Qt 侧走 WARP、Chromium 侧走自带 CPU 光栅双保险 → GPU 进程要留着
     # - WebGL 开：--disable-gpu 会连 SwiftShader 一起禁掉 → 换 swiftshader 兜底
-    # - 其余（auto / software / software_gl 且 WebGL 关）：纯 2D 正文，禁 GPU 进程省常驻内存
-    if explicit and backend in ("hardware", "vulkan", "d3d9"):
+    # - 其余（software / software_gl 且 WebGL 关）：纯 2D 正文，禁 GPU 进程省常驻内存
+    if backend in ("hardware", "vulkan", "d3d9"):
         disable_gpu, enable_swiftshader, disable_sw_rasterizer = False, False, True
     elif backend == "swiftshader" or webgl:
         disable_gpu, enable_swiftshader, disable_sw_rasterizer = False, True, False
