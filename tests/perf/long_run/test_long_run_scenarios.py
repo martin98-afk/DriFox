@@ -23,7 +23,6 @@ from .runner import (
     DEMO_DURATION_SEC,
     FULL_DURATION_SEC,
     SCENARIO_REGISTRY,
-    _ensure_qapp,
     _register_scenarios,
     render_markdown_report,
     run_all_scenarios,
@@ -79,12 +78,6 @@ def _pick_duration() -> float:
         except ValueError:
             pass
     return FULL_DURATION_SEC if os.environ.get("LONGRUN_FULL") else DEMO_DURATION_SEC
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    """PyQt5 QApplication 单例。"""
-    return _ensure_qapp()
 
 
 @pytest.fixture(scope="module", autouse=True)

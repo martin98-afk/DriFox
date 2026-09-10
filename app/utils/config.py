@@ -44,14 +44,6 @@ class ListDictValidator(ConfigValidator):
         return []
 
 
-class QuickComponentsSerializer(ConfigSerializer):
-    def serialize(self, value):
-        return value  # list[dict] 是 JSON-safe
-
-    def deserialize(self, value):
-        if isinstance(value, list):
-            return value
-        return []
 
 
 class Settings(QConfig):
@@ -249,11 +241,6 @@ class Settings(QConfig):
 
             logging.warning(f"[_extend_theme_validator_before_load] failed: {e}")
 
-    @classmethod
-    def save_config(cls):
-        """保存配置"""
-        instance = cls.get_instance()
-        instance.save()
 
     def set(self, item, value, save=False, copy=True):
         """set the value of config item
@@ -319,9 +306,12 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.5.10b4"
+    current_version = "v0.5.10"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
+
+    # 单实例限制：开启后同时只允许运行一个 Drifox 实例（重启生效）
+    enable_single_instance = ConfigItem("General", "EnableSingleInstance", False, BoolValidator())
 
     # 灰度开关：消息正文用纯 Qt 块级渲染器（MarkdownBlockViewer）替代 QWebEngineView。
     # 仅作用于 assistant 卡片（welcome 卡 JS 交互复杂暂不灰度）；默认关闭。
@@ -405,7 +395,7 @@ class Settings(QConfig):
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
 
     # ========== 像素桌宠 ==========
-    pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())
+    pet_enabled = ConfigItem("UI", "PetEnabled", False, BoolValidator())
     # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树
     tab_panel_mode = OptionsConfigItem(
         "UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"])
@@ -459,44 +449,6 @@ class Settings(QConfig):
     # 用户对非内置源 server 首次启动点「允许」后写入；拒绝仅本会话生效不落盘
     confirmed_plugin_servers = ConfigItem("Plugin", "ConfirmedPluginServers", [])
 
-    # ========== Gateway 通讯平台配置 ==========
-    # 企业微信
-    gateway_wecom_enabled = ConfigItem("Gateway", "WeCom/Enabled", False, BoolValidator())
-    gateway_wecom_bot_id = ConfigItem("Gateway", "WeCom/BotID", "")
-    gateway_wecom_secret = ConfigItem("Gateway", "WeCom/Secret", "")
-    gateway_wecom_websocket_url = ConfigItem("Gateway", "WeCom/WebSocketURL", "wss://openws.work.weixin.qq.com")
-
-    # 钉钉
-    gateway_dingtalk_enabled = ConfigItem("Gateway", "DingTalk/Enabled", False, BoolValidator())
-    gateway_dingtalk_client_id = ConfigItem("Gateway", "DingTalk/ClientID", "")
-    gateway_dingtalk_client_secret = ConfigItem("Gateway", "DingTalk/ClientSecret", "")
-
-    # Telegram
-    gateway_telegram_enabled = ConfigItem("Gateway", "Telegram/Enabled", False, BoolValidator())
-    gateway_telegram_token = ConfigItem("Gateway", "Telegram/Token", "")
-    gateway_telegram_require_mention = ConfigItem("Gateway", "Telegram/RequireMention", True, BoolValidator())
-
-    # Discord
-    gateway_discord_enabled = ConfigItem("Gateway", "Discord/Enabled", False, BoolValidator())
-    gateway_discord_token = ConfigItem("Gateway", "Discord/Token", "")
-    gateway_discord_require_mention = ConfigItem("Gateway", "Discord/RequireMention", True, BoolValidator())
-
-    # WhatsApp (Twilio)
-    gateway_whatsapp_enabled = ConfigItem("Gateway", "WhatsApp/Enabled", False, BoolValidator())
-    gateway_whatsapp_account_sid = ConfigItem("Gateway", "WhatsApp/AccountSID", "")
-    gateway_whatsapp_auth_token = ConfigItem("Gateway", "WhatsApp/AuthToken", "")
-    gateway_whatsapp_from_number = ConfigItem("Gateway", "WhatsApp/FromNumber", "")
-
-    # 飞书
-    gateway_feishu_enabled = ConfigItem("Gateway", "Feishu/Enabled", False, BoolValidator())
-    gateway_feishu_app_id = ConfigItem("Gateway", "Feishu/AppID", "")
-    gateway_feishu_app_secret = ConfigItem("Gateway", "Feishu/AppSecret", "")
-
-    # Slack
-    gateway_slack_enabled = ConfigItem("Gateway", "Slack/Enabled", False, BoolValidator())
-    gateway_slack_bot_token = ConfigItem("Gateway", "Slack/BotToken", "")
-    gateway_slack_app_token = ConfigItem("Gateway", "Slack/AppToken", "")
-
     # ========== Gitee 图床配置 ==========
     gitee_enabled = ConfigItem("Gitee", "Enabled", True, BoolValidator())
     gitee_token = ConfigItem("Gitee", "Token", "a5dcb6e2e7776143b7a7e7685a1f33a3")
@@ -547,6 +499,55 @@ class Settings(QConfig):
     # 窗口几何/面板宽度不做记忆（打开时固定默认 960x640 居中 + panel 280），
     # 原 tab_panel_width / tab_panel_collapsed / tab_manager_geometry 配置项已移除
     window_always_on_top = ConfigItem("UI", "WindowAlwaysOnTop", False, BoolValidator())
+
+    # ========== 渲染与性能（Webview）==========
+    # 说明：本组配置在 main.py 启动最早期由 app/utils/render_env.py 裸 JSON
+    # 读取并换算为环境变量，QtWebEngine 初始化后修改无效 —— **所有项均重启生效**。
+    # 默认值 = 历史 main.py 硬编码行为；"auto" 档沿用旧检测链
+    # （DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL 环境变量 → ~/.drifox 标记文件）。
+    # 渲染后端：auto / hardware(ANGLE d3d11) / software(ANGLE warp) / software_gl(最慢最稳兜底)
+    render_backend = OptionsConfigItem(
+        "Render",
+        "RenderBackend",
+        "auto",
+        OptionsValidator(["auto", "hardware", "software", "software_gl"]),
+    )
+    # WebGL 解禁（3D 图形需要）：auto / on / off
+    render_webgl = OptionsConfigItem(
+        "Render",
+        "WebglEnabled",
+        "auto",
+        OptionsValidator(["auto", "on", "off"]),
+    )
+    # Chromium renderer 进程硬上限（内存治理核心项）
+    render_renderer_process_limit = RangeConfigItem(
+        "Render", "RendererProcessLimit", 6, RangeValidator(1, 32)
+    )
+    # 单 renderer JS 堆上限（MB），防单页膨胀
+    render_js_heap_mb = RangeConfigItem("Render", "JsHeapMb", 128, RangeValidator(64, 1024))
+    # Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
+    render_low_end_device_mode = ConfigItem("Render", "LowEndDeviceMode", True, BoolValidator())
+    # 合成器平滑滚动动画（默认关闭：外层滚动由 Qt 承载，卡内滚动只是安全网场景）
+    render_smooth_scrolling = ConfigItem("Render", "SmoothScrolling", False, BoolValidator())
+    # 2D canvas 抗锯齿（默认关闭：echarts 软件光栅下省内存提速，锯齿微增）
+    render_canvas_aa = ConfigItem("Render", "CanvasAA", False, BoolValidator())
+    # 后台渲染节流：关（默认，Chromium 原生节流）/ 开 ——
+    # 追加 --disable-renderer-backgrounding + --disable-backgrounding-occluded-windows。
+    # 长对话里离屏卡片被降优先级导致的流式卡顿可开，代价是离屏卡片回收变慢。
+    render_disable_background_throttling = ConfigItem(
+        "Render", "DisableBackgroundThrottling", False, BoolValidator()
+    )
+    # 共享 GL 上下文（Qt.AA_ShareOpenGLContexts）：默认开，省约 12.7% per-view 常驻
+    # 内存；代价是全部消息卡共用一个 GL 上下文。多卡/图表闪烁排查时可关掉验证。
+    render_share_gl_contexts = ConfigItem("Render", "ShareGLContexts", True, BoolValidator())
+    # 禁用的 Chromium feature 列表（翻译/媒体路由/优化提示/窗口遮挡计算）
+    render_disabled_features = ConfigItem(
+        "Render",
+        "DisabledFeatures",
+        "Translate,MediaRouter,optimizeHints,CalculateNativeWinOcclusion",
+    )
+    # 高级：追加任意 Chromium 开关（置于内置 flags 末尾，同 flag 后者覆盖前者）
+    render_extra_flags = ConfigItem("Render", "ExtraChromiumFlags", "")
 
 
 def update_theme_options():

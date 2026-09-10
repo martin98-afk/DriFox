@@ -54,51 +54,14 @@ class WorkerEvent(Enum):
     }
 
 
-@dataclass
-class ToolCallStartedPayload:
-    """工具调用开始负载"""
-    tool_call_id: str
-    tool_name: str
-    arguments: dict
-    round_id: str
 
 
-@dataclass
-class ToolResultPayload:
-    """工具结果负载"""
-    tool_call_id: str
-    tool_name: str
-    arguments: dict
-    result: Any  # 可能是 dict 或 ErrorResult
 
 
-@dataclass
-class QuestionPayload:
-    """问题负载"""
-    tool_call_id: str
-    questions: list
-    extra: dict = None
 
 
-@dataclass
-class PermissionPayload:
-    """权限请求负载"""
-    tool_call_id: str
-    tool_name: str
-    arguments: dict
 
 
-@dataclass
-class CompactionPayload:
-    """压缩状态负载"""
-    active: bool
-    source: str
-    kind: str
-    original_count: int
-    summarized_count: int
-    kept_count: int
-    summary_count: int
-    note: str
 
 
 class WorkerEventBus:
@@ -154,7 +117,3 @@ class WorkerEventBus:
         with self._lock:
             self._handlers.clear()
 
-    def has_subscribers(self, event: WorkerEvent) -> bool:
-        """检查是否有订阅者"""
-        with self._lock:
-            return event in self._handlers and len(self._handlers[event]) > 0

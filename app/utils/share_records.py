@@ -183,6 +183,3 @@ def clear_all_records() -> bool:
         return ok
 
 
-def get_records_path_for_sync() -> str:
-    """返回 records.json 的绝对路径（供 ConfigSyncService 同步用）"""
-    return str(get_records_path().resolve())

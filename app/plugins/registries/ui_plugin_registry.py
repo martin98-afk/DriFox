@@ -2296,22 +2296,6 @@ class UIPluginRegistry:
             self._ui_signatures[name] = self._compute_ui_signature(Path(plugin))
         return reloaded
 
-    def start_signature_watch(self, interval: float = 30.0) -> None:
-        """启动 30s 空闲周期签名轮询（QTimer，须在主线程调用；幂等）。"""
-        if self._signature_watch_started:
-            return
-        try:
-            from PyQt5.QtCore import QTimer
-
-            self._signature_watch_started = True
-            timer = QTimer()
-            timer.timeout.connect(self.poll_silent_ui_changes)
-            timer.start(int(interval * 1000))
-            self._signature_timer = timer
-            logger.info(f"[UIPluginRegistry] UI 签名轮询已启动（{interval:.0f}s）")
-        except Exception as e:
-            self._signature_watch_started = False
-            logger.debug(f"[UIPluginRegistry] UI 签名轮询启动失败（无 Qt 环境？）: {e}")
 
     def _schedule_welcome_refresh(self) -> None:
         """延迟合并欢迎卡片刷新（debounce）
@@ -2516,19 +2500,6 @@ class UIPluginRegistry:
     def get_floating_cards(self) -> Dict[str, FloatingCardInfo]:
         return dict(self._floating_cards)
 
-    def get_card_widget(self, card_id: str, window_id: str = "") -> Optional[Any]:
-        """获取浮动卡在某窗口的实例（懒创建：未显示过则 None）
-
-        供插件在 toggle 显示后取回实例（如 autoloop 运行卡绑定控制器）。
-        window_id 为空时回退全局兼容缓存（单窗口模式）。
-        """
-        if window_id and window_id in self._card_widget_instances:
-            return self._card_widget_instances[window_id].get(card_id)
-        for instances in self._card_widget_instances.values():
-            w = instances.get(card_id)
-            if w is not None:
-                return w
-        return None
 
     def is_loaded(self, plugin_name: str) -> bool:
         return plugin_name in self._loaded_plugins
@@ -2670,19 +2641,6 @@ class UIPluginRegistry:
         for card_info in self._floating_cards.values():
             self._register_command_for_card(card_info)
 
-    def clear_window_cards(self, window_id: str) -> None:
-        """清空指定窗口的缓存卡片实例，下次显示时重新创建
-
-        用于项目/会话切换等场景，确保卡片用最新的上下文重建。
-
-        Args:
-            window_id: 窗口 ID
-        """
-        win_instances = self._card_widget_instances.get(window_id, {})
-        for card_id in list(win_instances.keys()):
-            widget = win_instances.pop(card_id, None)
-            if widget is not None:
-                self._remove_widget_from_container(window_id, card_id, widget)
 
     def unregister_window(self, window_id: str) -> None:
         """窗口关闭时注销该窗口的全部 UI 插件状态，释放窗口引用（泄漏修复 P0）。

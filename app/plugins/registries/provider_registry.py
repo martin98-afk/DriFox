@@ -118,7 +118,6 @@ class ProviderDef:
 # ============================================================
 
 # 余额响应解析的常见路径模板："auto" 表示按层级自动尝试
-_AUTO_KEYS = ("balance", "total_balance", "totalBalance", "balance_amount", "usage")
 
 
 def make_bearer_balance_fetcher(

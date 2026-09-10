@@ -37,7 +37,7 @@ class SubagentLoopPolicy:
         try:
             v = llm_config.get("子智能体最大轮数") if llm_config else None
             return int(v) if v else DEFAULT_SUBAGENT_MAX_ROUNDS
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             return DEFAULT_SUBAGENT_MAX_ROUNDS
 
     def final_summary_prompt(self) -> str:

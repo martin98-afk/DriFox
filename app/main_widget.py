@@ -1480,7 +1480,7 @@ class OpenAIChatToolWindow(ToolWindow):
         for signal, slot in self._singleton_connections:
             try:
                 signal.disconnect(slot)
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
         self._singleton_connections.clear()
 
@@ -3296,7 +3296,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 else:
                     self.destroyed.disconnect()
                 self._cmd_shortcuts_destroy_connected = False
-        except TypeError, RuntimeError:
+        except (TypeError, RuntimeError):
             pass
         try:
             self._clear_command_shortcuts()
@@ -3762,10 +3762,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 try:
                     qs.activated.disconnect()
                     qs.activatedAmbiguously.disconnect()
-                except RuntimeError, TypeError:
+                except (RuntimeError, TypeError):
                     pass
                 qs.deleteLater()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 continue
 
     @classmethod
@@ -3792,10 +3792,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 try:
                     qs.activated.disconnect()
                     qs.activatedAmbiguously.disconnect()
-                except RuntimeError, TypeError:
+                except (RuntimeError, TypeError):
                     pass
                 qs.deleteLater()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 continue
 
     @classmethod
@@ -3879,7 +3879,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     OpenAIChatToolWindow._window_shortcut_cache.pop(id(_parent), None)
 
                 shortcut_parent.destroyed.connect(_pop_shortcut_cache)
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         cache: list = OpenAIChatToolWindow._window_shortcut_cache.setdefault(win_id, [])
@@ -6405,7 +6405,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._toggle_send_stop(False)
             if self._current_assistant_card:
                 self._current_assistant_card.stop_streaming_anim()
-                self._current_assistant_card.finish_streaming()
+                # 🐛 打断路径强制归位（同 _on_stop_clicked）：压缩触发后 worker
+                # 已停止，活跃工具结果不再到达，keep_dock 会永久保留坞态。
+                self._current_assistant_card.finish_streaming(force_dock_off=True)
             try:
                 interrupted = self.backend.stop_streaming()
                 if interrupted:
@@ -6516,7 +6518,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._toggle_send_stop(False)
             if self._current_assistant_card:
                 self._current_assistant_card.stop_streaming_anim()
-                self._current_assistant_card.finish_streaming()
+                # 🐛 打断路径强制归位（同 _on_stop_clicked）。
+                self._current_assistant_card.finish_streaming(force_dock_off=True)
             try:
                 # 清空语义下中断消息无需回写 session（即将整体清空），
                 # 旧 worker 延迟快照由下方 _post_compact_guard 拦截
@@ -9463,7 +9466,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -9553,7 +9556,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if win._is_destroyed:
                 return False
             return not attr or hasattr(win, attr)
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             return False
 
     def _on_plugin_hot_reload(self, result: dict):
@@ -9603,7 +9606,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
@@ -9618,7 +9621,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._register_command_shortcuts(force=True)
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] 命令快捷键已重建（先销毁旧 QShortcut 再注册）")
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
@@ -9629,7 +9632,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     continue
                 try:
                     win._build_plugin_input_buttons()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # ★ 已打开标签页视图重绘：消息内容块是渲染时刻的快照，热重载后
             # 不会自动更新（新建标签页才显示新版）——遍历所有窗口的已渲染
@@ -9643,9 +9646,9 @@ class OpenAIChatToolWindow(ToolWindow):
                     for _card in win.findChildren(MessageCard):
                         try:
                             _card.rerender_custom_blocks(_ui_plugin_name)
-                        except RuntimeError, AttributeError:
+                        except (RuntimeError, AttributeError):
                             pass
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # ★ 右侧工作台插件页强制重建：ui 热重载后 registry 已更新，但面板
             # widget 是构建时快照，(page_id, label) 签名不变会被 sync_plugin_pages
@@ -9692,7 +9695,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
                     break
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered")
@@ -9712,7 +9715,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         card._hook_manager.reload_global_hooks(str(card._hooks_config_file))
                     card._refresh(reload=True)
                     break
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] hooks card refreshed")
@@ -9727,7 +9730,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     win._settings_popup.refresh_theme_options()
                     break
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed")
 
@@ -9778,7 +9781,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         mcp_card.refresh_connections()
                         logger.debug("[HotReload] MCP server list refreshed")
                     break
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             # 插件删除 / 服务器移除 / 禁用后，断开已不在启用列表中的运行连接（避免子进程残留）。
@@ -9809,7 +9812,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
                     break
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed")
 
@@ -9836,7 +9839,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
@@ -10850,7 +10853,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     f"[OpenAIChatToolWindow] _schedule_initial_welcome: pending 超 "
                     f"{self._WELCOME_PENDING_TIMEOUT_S:.0f}s 未回调，视为泄漏强制重建（wid={self._window_id}）"
                 )
-        except AttributeError, RuntimeError:
+        except (AttributeError, RuntimeError):
             pass  # stub（__new__ 绕过 __init__）实例无此属性，视为未 pending
         self._welcome_render_pending = True
         self._welcome_render_pending_since = now
@@ -10867,7 +10870,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """交错调度槽位回调：清 pending 后实际渲染欢迎卡片"""
         try:
             self._welcome_render_pending = False
-        except AttributeError, RuntimeError:
+        except (AttributeError, RuntimeError):
             pass
         logger.debug(f"[OpenAIChatToolWindow] _on_welcome_render_slot fired: wid={self._window_id}")
         self._show_initial_welcome()
@@ -11420,7 +11423,31 @@ class OpenAIChatToolWindow(ToolWindow):
             remaining = _MAX_GLOBAL_RENDERED_PAGES - others
         except Exception:
             return self._max_rendered_cards
-        return max(_MIN_RENDERED_CARDS_PER_WINDOW, min(self._max_rendered_cards, remaining))
+        return max(self._render_floor(), min(self._max_rendered_cards, remaining))
+
+    def _render_floor(self) -> int:
+        """每窗口保底页数（随存活窗口数与全局占用率动态收缩）。
+
+        [MEM] 修复「保底值架空全局闸门」：原先保底是常量
+        ``_MIN_RENDERED_CARDS_PER_WINDOW=6``，N 个窗口必然 N×6 页
+        （8 窗口 = 48 页，实测每页 27-39MB → 1.3GB+），
+        ``_MAX_GLOBAL_RENDERED_PAGES=32`` 形同虚设。
+
+        现在保底取「全局闸门 / 存活窗口数」的公平份额；且当全局占用已超过
+        闸门时压到 ``_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR`` —— 这一条同时
+        覆盖同窗口多对话页的场景（此时窗口数为 1，但累计页数同样会超标）。
+        """
+        try:
+            n = max(1, len(window_registry.alive_window_instances()))
+        except Exception:
+            n = 1
+        floor = min(_MIN_RENDERED_CARDS_PER_WINDOW, max(1, _MAX_GLOBAL_RENDERED_PAGES // n))
+        try:
+            if _global_rendered_pages >= _MAX_GLOBAL_RENDERED_PAGES:
+                floor = _MIN_RENDERED_CARDS_PER_WINDOW_FLOOR
+        except Exception:
+            pass
+        return max(_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR, floor)
 
     def _sync_global_rendered_pages(self, new_count: int) -> None:
         """把本窗口已渲染计数校准为 new_count，并同步增减全局闸门计数。
@@ -11567,7 +11594,7 @@ class OpenAIChatToolWindow(ToolWindow):
             except psutil.TimeoutExpired:
                 p.kill()
             return True
-        except psutil.NoSuchProcess, psutil.AccessDenied:
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
         except Exception:
             return False
@@ -11599,36 +11626,45 @@ class OpenAIChatToolWindow(ToolWindow):
         return rss_sampler.web_rss_mb()
 
     def _over_memory_threshold(self, active: bool = False) -> bool:
-        """内存阈值判定（T30 双判据）：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB
-        且（WebEngine 子进程 RSS > _WEB_MEM_THRESHOLD_MB 或子进程统计不可用时
-        退化单判据）→ True。
+        """内存阈值判定：以 WebEngine 子进程 RSS 为**主判据**。
+
+        [MEM] 旧实现是「主进程 RSS > _MEM_THRESHOLD_TOTAL_MB 且 WebEngine 子进程
+        RSS > _WEB_MEM_THRESHOLD_MB」的双 AND 判据。实测
+        （tools/diag_webengine_mem_probe.py，dpr=2.25）显示：并发 8 个
+        QWebEngineView 时子进程涨 216MB、主进程只涨 4MB —— 并发对话的内存
+        几乎全落在 renderer 子进程上，主进程 RSS 根本涨不到 900/1400MB 门槛，
+        强回收因此永不触发，子进程一路涨到 4GB。
+
+        现改为子进程 RSS 单独作主判据；主进程 RSS 只在子进程采样不可用时兜底。
+        原设计意图（不因 Python 堆高就误杀 renderer）依然成立：子进程不高就不触发。
 
         Args:
             active: 本窗口是否处于激活状态。活跃窗口用户正在交互，采用更高的
-                触发阈值（_MEM_THRESHOLD_TOTAL_MB_ACTIVE）避免频繁 kill 造成
+                触发阈值（_WEB_MEM_THRESHOLD_MB_ACTIVE）避免频繁 kill 造成
                 滚动回看时的重建抖动；但绝不再完全跳过（旧实现跳过 = 内存泄漏）。
 
         ⚡ [PERF] 采样值来自后台线程（`app.core.rss_sampler`）。本方法每
         content chunk 调用一次，绝不能在这里执行 psutil 系统调用。
 
-        无 psutil 或采样不可用时退化：并发页 > _MAX_RENDERED_CARDS 且存在
+        子进程采样不可用时退化：并发页 > _MAX_RENDERED_CARDS 且存在
         距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL 的已卸载批次（说明内存压力来自 WebEngine）。
         """
         try:
-            rss_mb = rss_sampler.rss_mb()
-            if rss_mb <= 0.0:
-                # 采样不可用（无 psutil / 首帧未完成）→ 退化判定
-                return self._over_memory_threshold_fallback()
-            threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
-            if rss_mb <= threshold:
-                return False
-            # 主进程已超总阈值：再核对 WebEngine 侧，避免误杀
             web_mb = rss_sampler.web_rss_mb()
-            if web_mb > 0 and web_mb < _WEB_MEM_THRESHOLD_MB:
-                return False
-            return True
+        except Exception:
+            web_mb = 0.0
+        if web_mb > 0.0:
+            web_threshold = _WEB_MEM_THRESHOLD_MB_ACTIVE if active else _WEB_MEM_THRESHOLD_MB
+            return web_mb >= web_threshold
+        # 子进程采样不可用（无 psutil / 尚未创建 view）→ 退回主进程 RSS 判据
+        try:
+            rss_mb = rss_sampler.rss_mb()
         except Exception:
             return self._over_memory_threshold_fallback()
+        if rss_mb <= 0.0:
+            return self._over_memory_threshold_fallback()
+        threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
+        return rss_mb > threshold
 
     def _over_memory_threshold_fallback(self) -> bool:
         """psutil 不可用时的退化判定：并发页超限 + 存在远距已卸载批次。
@@ -15111,7 +15147,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         _candidate = str(_parsed.get("diff"))
                     elif isinstance(_parsed, list):
                         _candidate = "\n".join(str(x) for x in _parsed if x)
-                except ValueError, SyntaxError:
+                except (ValueError, SyntaxError):
                     pass  # 非字面量 repr，保持原样
             diff_parts.append(_candidate)
 
@@ -17597,7 +17633,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # dict/list 等非字符串 content → 序列化为 JSON，避免 Python repr 破坏渲染
             try:
                 content = json.dumps(raw_content).decode("utf-8", errors="replace")
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 content = str(raw_content)
 
         # 字段驱动：任何工具结果携带 todos 字段 → 更新任务列表缓存
@@ -18413,7 +18449,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_assistant_card:
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.set_error_state(True, error_message=error)
+            # 🐛 注意顺序：update_content 在 _streaming=False 时会经 start_streaming_anim
+            # 重开流式态与坞态，必须在其后强制收尾，否则错误卡片永久停留在
+            # 流式结构（坞态沉底 + 正文限矮）。
             self._current_assistant_card.update_content(error)
+            self._current_assistant_card.finish_streaming(force_dock_off=True)
 
         self._is_streaming = False
         self._set_ai_state("error")  # 桌宠：发生错误
@@ -20855,7 +20895,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🔧 断开应用级 PluginHostService 的 plugin_changed（窗口销毁后
@@ -20864,7 +20904,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 from app.core.plugin_host_service import PluginHostService
 
                 PluginHostService.get_instance().plugin_changed.disconnect(self._on_plugin_hot_reload)
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
             # 🔧 泄漏修复（M6）：断开全局单例 coding_plan_ready，关窗后不再幽灵回调
@@ -20872,7 +20912,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 from app.core.usage_service import UsageService
 
                 UsageService.get_instance().coding_plan_ready.disconnect(self._on_coding_plan_result)
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
             # 🛡️ B5 异步化：closeEvent 不再同步调用 backend.stop_streaming()
@@ -21043,7 +21083,9 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 self._stop_elapsed = None
             self._current_assistant_card.stop_streaming_anim()
-            self._current_assistant_card.finish_streaming()
+            # 🐛 打断路径必须强制归位：worker 已取消，活跃工具结果永不到达，
+            # keep_dock 的兑底归位永不触发 → 坞态永久沉底。
+            self._current_assistant_card.finish_streaming(force_dock_off=True)
 
         # 优先显示中止提示，让用户立即感知到操作已生效
         InfoBar.warning(
@@ -21580,13 +21622,23 @@ _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约
 # 也不能让某个窗口白屏（可用性优先于内存）。
 _MAX_GLOBAL_RENDERED_PAGES = 32  # 跨窗口并发渲染页硬闸门
 _MIN_RENDERED_CARDS_PER_WINDOW = 6  # 每窗口保底页数（闸门的下限保护）
+# [MEM] 保底页数的收缩下限。原实现保底是常量 6 —— N 个窗口必然 N×6 页
+# （8 窗口 = 48 页，实测每页 27-39MB → 1.3GB+），_MAX_GLOBAL_RENDERED_PAGES=32
+# 被完全架空。现在保底随存活窗口数收缩，但降到本值即停，避免窗口被饿死到白屏。
+_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR = 3
 _MAX_BRANCH_CACHE = 64  # workdir→branch 缓存上限（M5-B）：超出时淘汰最早插入项，防长期累积渗漏
 
 # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──
 # 双判据：主进程 RSS 超总阈值，且 WebEngine 子进程 RSS 超子阈值才触发强回收——
 # 避免仅主进程内存高（如 Python 堆）时误杀 renderer。
-_MEM_THRESHOLD_TOTAL_MB = 900  # 总 RSS 阈值触发强回收（1800→900：修复 renderer 永不回收）
-_WEB_MEM_THRESHOLD_MB = 300  # WebEngine 子进程 RSS 阈值（待窗口期回填校准）
+# [MEM] 强回收的主判据已改为 WebEngine 子进程 RSS（见 _over_memory_threshold）。
+# 实测（tools/diag_webengine_mem_probe.py，dpr=2.25）：并发 8 个 QWebEngineView
+# 让子进程涨 216MB、主进程只涨 4MB —— 并发对话的内存主体全在 renderer 子进程，
+# 拿主进程 RSS 当门槛等于永远够不着，强回收永不触发 → 子进程一路涨到 4GB。
+_WEB_MEM_THRESHOLD_MB = 600  # 非活跃窗口：WebEngine 子进程 RSS 触发阈值
+_WEB_MEM_THRESHOLD_MB_ACTIVE = 1000  # 活跃窗口：阈值更高，避免滚动回看时重建抖动
+# 兜底：子进程采样不可用时（无 psutil / 尚未创建 view）退回主进程 RSS 判据
+_MEM_THRESHOLD_TOTAL_MB = 900
 _LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数
 _KILL_COOLDOWN_S = 60  # kill 冷却（防抖动）
 _KILL_BATCH_MAX = 12  # 每轮最多 kill

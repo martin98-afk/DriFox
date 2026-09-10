@@ -4344,7 +4344,7 @@ class _DialogEventFilter(QObject):
             # 兜底：viewer 未走 cleanup（正常路径 deleteLater → cleanup）就销毁时，
             # 自动从注册表移除，避免单例过滤器滞留已销毁对象引用
             viewer.destroyed.connect(self._on_viewer_destroyed)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             pass
 
     def unregister(self, viewer):
@@ -4355,7 +4355,7 @@ class _DialogEventFilter(QObject):
         self._viewers.discard(viewer)
         try:
             viewer.destroyed.disconnect(self._on_viewer_destroyed)
-        except RuntimeError, TypeError:
+        except (RuntimeError, TypeError):
             pass
         if not self._viewers:
             self._detach_from_application()
@@ -4692,7 +4692,7 @@ class CodeWebViewer(QWebEngineView):
                 sig = getattr(dialog, sig_name, None)
                 if sig is not None:
                     sig.connect(self._restore_from_dialog)
-            except TypeError, RuntimeError, AttributeError:
+            except (TypeError, RuntimeError, AttributeError):
                 pass
 
     def _restore_from_dialog(self, _result=None):
@@ -5025,20 +5025,19 @@ class CodeWebViewer(QWebEngineView):
                     "_ts.setAttribute('data-collapsed','true');}"
                     "if(_sep)_sep.setAttribute('aria-expanded','false');"
                 )
-            # 坞态同步：由 JS 读取 tool-section 的 data-collapsed 属性判断
-            # collapsed="true"（历史会话/已完成）→ dock off
-            # collapsed="false"（流式会话默认）→ dock on（受 _toolCompactMode 守卫）
-            # 此 JS 在上方 collapse 之后执行，保证 data-collapsed 已更新到正确值
-            # 🆕 F2（S2 兜底）：DOM 中存在运行中工具块（data-streaming="true"）
-            # 时强制 dock on——覆盖"JS 就绪晚于工具流式注入"的竞态窗口（_on_js_ready
-            # 执行时 _streaming 可能已 False，但运行中块仍在 DOM 等待结果）。
+            # 坞态同步：判定用 Python 端真值 _streaming，弃用旧「未折叠 → 开坞」推导。
+            # 🐛 旧 `_setStreamingDock(!!_act||!_co)` 在已结束卡片重建（新骨架 DOM 无
+            # data-collapsed 属性 → _co=false）时误开坞态 → 正文限矮、工具区沉底，
+            # 是「后台标签页切回后卡片重现流式结构」的直接来源之一。
+            # 此 JS 在上方 collapse 之后执行，保证历史卡 data-collapsed 已更新。
+            # S2 语义保留：DOM 中存在运行中工具块（data-streaming="true"）时仍强制
+            # dock on，覆盖「JS 就绪晚于工具流式注入」的竞态窗口。
             # 🛡️ 欢迎卡片（light 骨架）跳过：坞态会限死正文高度，欢迎页长内容被截断。
             if not self._light_skeleton:
+                _dock_on = "true" if self._streaming else "false"
                 self.page().runJavaScript(
-                    "var _ts2=document.getElementById('tool-section');"
-                    "var _co=_ts2&&_ts2.getAttribute('data-collapsed')==='true';"
                     "var _act=document.querySelector('#tool-content [data-tool-call-id][data-streaming=\"true\"]');"
-                    "if(typeof _setStreamingDock==='function')_setStreamingDock(!!_act||!_co);"
+                    f"if(typeof _setStreamingDock==='function')_setStreamingDock({_dock_on}||!!_act);"
                 )
         except RuntimeError:
             pass
@@ -14465,7 +14464,7 @@ class MessageCard(SimpleCardWidget):
         for signal, slot in pairs:
             try:
                 signal.disconnect(slot)
-            except RuntimeError, TypeError:
+            except (RuntimeError, TypeError):
                 pass
 
     def detach_viewer(self) -> bool:
@@ -14546,10 +14545,9 @@ class MessageCard(SimpleCardWidget):
                 # 保持展开 —— 后者若按 _streaming=False 判为历史，会在虚拟滚动
                 # 回收重建后突然折叠，与首次渲染的展开态不一致。
                 self.viewer._is_history = not (self._streaming or self._streaming_finished)
-                # 历史会话：同步非流式态——viewer 初始 _streaming=True 是为流式
-                # 增量注入设计；历史渲染须走非流式分支（完成态渲染、不追加流式
-                # 字数统计、不残留流式坞态）。
-                if self.viewer._is_history:
+                # 🐛 流式态同步必须覆盖「已结束的本轮对话」：_is_history=False 只代表
+                # 保持展开，不代表还在流式。Qt 渲染器同规则保持一致。
+                if not self._streaming:
                     self.viewer._streaming = False
                 self._viewer_layout.addWidget(self.viewer)
                 self._lazy_rendered = True
@@ -14603,9 +14601,14 @@ class MessageCard(SimpleCardWidget):
                 # 保持展开 —— 后者若按 _streaming=False 判为历史，会在虚拟滚动
                 # 回收重建后突然折叠，与首次渲染的展开态不一致。
                 self.viewer._is_history = not (self._streaming or self._streaming_finished)
-                # 历史会话：同步非流式态（viewer 初始 _streaming=True 为流式设计，
-                # 历史渲染须走非流式分支：完成态渲染、无流式字数统计/坞态）。
-                if self.viewer._is_history:
+                # 🐛 流式态同步必须覆盖「已结束的本轮对话」：_is_history=False 只代表
+                # 保持展开，不代表还在流式。新建 viewer 的 _streaming 初始 True（流式
+                # 设计），池化实例经 reset_for_reuse 置 False——两条路径初始值不一致，
+                # 若只处理历史分支，新建重建的已结束卡片会残留 _streaming=True →
+                # 渲染走流式分支（流式形态/字数统计），叠加 _on_js_ready 坞态兑底
+                # 误开 → 卡片重现流式结构（多 tab 并行时配额收缩+池被争抢，回退
+                # 新建概率大增，后台标签页切回即触发）。
+                if not self._streaming:
                     self.viewer._streaming = False
                 # 让 viewer 的 restore 逻辑知道哪些工具结果已到达，
                 # 避免全量重渲染时把已完成的运行框以“运行中”状态复活。
@@ -15958,7 +15961,7 @@ class MessageCard(SimpleCardWidget):
         if enabled:
             self.interventionRequested.emit({"card_id": id(self), "message": "请求人工干预"})
 
-    def finish_streaming(self, history: bool = False):
+    def finish_streaming(self, history: bool = False, force_dock_off: bool = False):
         """流式结束收尾。
 
         Args:
@@ -15968,8 +15971,17 @@ class MessageCard(SimpleCardWidget):
                 （_is_history=False → 工具与思考不折叠、正文按流式坞态限高），
                 与"历史会话默认折叠"的产品预期冲突。历史卡片从未启动过
                 流式动画，跳过 stop_streaming_anim 无副作用。
+            force_dock_off: True 表示打断/错误收尾强制归位（忽略活跃工具）。
+                正常结束时文本先于工具完成（S1）会 keep_dock 保留坞态，
+                等最后一个工具结果经 append_tool_result 兑底归位；但打断/
+                错误路径 worker 已终止，工具结果永不到达，兑底永不触发
+                → 坞态永久沉底、正文限矮（流式结构残留 bug 根因），
+                故打断/错误调用方必须传 True。
         """
-        logger.info(f"[DBG-SCF] finish_streaming card={id(self) % 100000} history={history}")
+        logger.info(
+            f"[DBG-SCF] finish_streaming card={id(self) % 100000} "
+            f"history={history} force_dock_off={force_dock_off}"
+        )
         try:
             # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
             # 渐变边框/流动光点），与紧随其后的最终全量渲染抢主线程。
@@ -15985,7 +15997,8 @@ class MessageCard(SimpleCardWidget):
                 self._finish_height_anim_until = time.monotonic() + FINISH_HEIGHT_ANIM_WINDOW_S
                 self._finish_height_anim_left = FINISH_HEIGHT_ANIM_MAX_USES
             if self.viewer is not None and hasattr(self.viewer, "finish_streaming"):
-                self.viewer.finish_streaming(keep_dock=False if history else self._has_active_tools())
+                _keep_dock = self._has_active_tools() and not (history or force_dock_off)
+                self.viewer.finish_streaming(keep_dock=_keep_dock)
                 if hasattr(self.viewer, "_cleanup_render_cache"):
                     self.viewer._cleanup_render_cache()
                 # 简洁模式：坞态归位后自动折叠工具与思考区。keep_dock=True
@@ -16038,7 +16051,7 @@ class MessageCard(SimpleCardWidget):
         for sig in signals:
             try:
                 sig.disconnect()
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
     def cleanup(self):
@@ -16208,10 +16221,10 @@ def _session_duration_days(created_at: str) -> int:
         return 0
     try:
         start = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         try:
             start = datetime.strptime(created_at[:10], "%Y-%m-%d")
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             return 0
     return max((datetime.now() - start).days, 0)
 

@@ -28,83 +28,22 @@ warnings.filterwarnings("ignore")
 os.environ.setdefault("PYPINYIN_NO_DICT_COPY", "1")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-# ========== Qt 侧 OpenGL 走 ANGLE(D3D11)（Intel 核显 OpenGL 崩溃修复）==========
-# 根因：QtWebEngine 网页帧合成走 Qt Quick 场景图，默认 OpenGL 后端命中本机
-# Intel Xe-LP 驱动（igxelpicd64.dll）的 OpenGL 实现，流式渲染高频合成期崩溃。
-# 方案：强制 Qt 的 GL 经 ANGLE 翻译为 D3D11 实现，绕开 Intel OpenGL ICD 的
-# 代码路径，同时保留 GL 语义（WebEngine 纹理共享在 ANGLE 上是官方支持路径）。
-# 注意：不能用 QSG_RHI_BACKEND=d3d11 —— Qt 5.15 中 WebEngine 的 GL 纹理无法
-# 与 RHI D3D11 合成器互操作，会导致消息卡片黑屏（已实测踩坑）。
-# 防御：外部环境若残留 QSG_RHI*（手动 setx 过），Quick 场景图会绕开 GL 直接用
-# RHI D3D11 合成，消息卡片整体变黑 —— 启动时强制清除，杜绝复发。
-# 回退：外部设 QT_OPENGL=desktop 恢复桌面 GL。
-os.environ.setdefault("QT_OPENGL", "angle")
-# ANGLE 后端默认走 WARP（Windows 软件光栅，纯 CPU）。原因：Qt 场景图合成是远端
-# Intel 集显崩溃的落点（OpenGL ICD），WARP 完全不碰显卡驱动，同时保留 GL 语义，
-# WebEngine 的纹理共享照常 —— 这是「既不崩也不黑」的唯一组合（QSG_RHI 路线会黑屏）。
-# 代价：场景图合成走 CPU，长对话多卡片滚动时占用高于硬件 D3D11。
-# 回退：显卡正常、想回硬件加速设 QT_ANGLE_PLATFORM=d3d11；
-#       仍崩则 QT_OPENGL=software 退到 Mesa llvmpipe（最慢最稳）。
-# 实测四种后端均不黑屏，见 tests/debug/angle_backend_check.py。
-# 注：仅 Windows 生效，其他平台 Qt 直接忽略本变量。
-os.environ.setdefault("QT_ANGLE_PLATFORM", "warp")
+# ========== 渲染配置 → 环境变量（QtWebEngine 首次初始化前一次性生效）==========
+# 原 main.py 硬编码的 QT_OPENGL / QT_ANGLE_PLATFORM / QTWEBENGINE_CHROMIUM_FLAGS
+# 已配置化：设置界面「渲染与性能」→ app.config [Render] 组，重启生效。
+# app/utils/render_env.py 在 Qt 加载前裸 JSON 读取该组并换算环境变量，档位语义、
+# 旧检测链（DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL → ~/.drifox 标记文件）、
+# 外部环境变量优先（setdefault）与平台限定（macOS 强设 d3d11 黑屏）见其模块注释。
+# 返回值里还有两个「Qt 属性类」设置（AA_UseOpenGLES / AA_ShareOpenGLContexts）：
+# 它们不是环境变量，只能在 QApplication 创建前 setAttribute，故由 main() 取用。
+from app.utils.render_env import apply_render_env, default_config_path
+
+RENDER_SETTINGS = apply_render_env(default_config_path())
+
 # 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
 for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
     os.environ.pop(_env_key, None)
 
-# ========== Chromium 进程治理（WebEngine 内存占用的根因）==========
-# 必须在 QApplication 创建之前设置：QtWebEngine 在首次初始化时读取该环境变量，
-# 之后修改无效（这也是它必须放在 main.py 最顶部的原因）。
-#
-# 背景：每张消息卡片正文是一个独立的 QWebEngineView，Chromium 默认进程模型下
-# 会为每张卡片派生独立 renderer 进程（各约数十 MB）。长对话滚动过程中进程数
-# 随卡片数单调增长 —— 这是"长时间运行内存溢出"的主要来源。
-#
-# --renderer-process-limit：硬性封顶 renderer 进程总数，达到上限后 Chromium
-#   自动复用已有进程而非继续派生，把内存曲线从"线性增长"压成"恒定上限"。
-#   注意：不使用 --process-per-site —— 它会使所有同源卡片共享同一进程，与
-#   现有的「按 PID kill 离屏 renderer」回收机制冲突（kill 一个会误伤全部卡片）。
-#
-# 其余开关均为本地 setHtml 渲染场景下的纯开销，关闭后无功能损失。
-#
-# 覆盖方式：用 setdefault，外部若已设置 QTWEBENGINE_CHROMIUM_FLAGS 则以其为准
-# （便于调试或快速回退，例如 QTWEBENGINE_CHROMIUM_FLAGS="" 即完全禁用本组开关）。
-# ========== WebGL 按需解禁（3D 图形需要）==========
-# 默认关闭 GPU：正文是纯 2D 渲染，GPU 进程常驻是纯开销（见下方 _GPU_FLAGS）。
-# 需要 3D 图形（three.js / echarts-gl 之类）时启用，任一命中即可，重启生效：
-#   ① 环境变量 DRIFOX_ENABLE_WEBGL=1
-#   ② 标记文件 ~/.drifox/webgl_enabled（内容不限，存在即启用）
-# 不用设置项的原因：QtWebEngine 只在首次初始化时读取 QTWEBENGINE_CHROMIUM_FLAGS，
-# 必须早于 QApplication，此处加载 Settings 过重（且 main.py 顶部刻意少依赖）。
-_WEBGL_ENABLED = os.environ.get("DRIFOX_ENABLE_WEBGL", "").strip().lower() in ("1", "true", "on", "yes")
-if not _WEBGL_ENABLED:
-    try:
-        _WEBGL_ENABLED = os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox", "webgl_enabled"))
-    except Exception:
-        _WEBGL_ENABLED = False
-
-if _WEBGL_ENABLED:
-    # 无硬件 GPU 时用 SwiftShader 软件光栅兜底（老版本 Chromium 忽略此开关）
-    _GPU_FLAGS = " --enable-unsafe-swiftshader"
-else:
-    _GPU_FLAGS = (
-        " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
-        " --disable-software-rasterizer"
-    )
-_CHROMIUM_FLAGS = (
-    "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
-    + _GPU_FLAGS
-    + " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
-    " --disable-extensions"
-    " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
-    " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染
-    " --js-flags=--max-old-space-size=128"  # 限制单 renderer JS 堆，防单页膨胀
-     + " --enable-low-end-device-mode"  # 🔧 Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
-    " --disable-smooth-scrolling"  # 合成器平滑滚动动画：卡内滚动只是安全网场景，外层滚动由 Qt 承载
-    " --disable-features=Translate,MediaRouter,optimizeHints,CalculateNativeWinOcclusion"  # 翻译/媒体路由常驻线程/谷歌优化提示，纯开销；窗口遮挡计算在多 WebEngine 卡片下有已知崩溃关联，防御性禁用
-    " --disable-canvas-aa --disable-2d-canvas-clip-aa"  # 2D canvas 抗锯齿关闭：echarts 软件光栅下省内存提速（锯齿微增）
-)
-os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _CHROMIUM_FLAGS)
 
 # ========== 内存诊断开关 ==========
 # 设为 False 可禁用所有 [MEM] 诊断日志和 mem_diag.log 文件
@@ -172,7 +111,20 @@ def main():
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     # OpenGL 走 ANGLE(D3D11)：绕开 Intel OpenGL ICD 缺陷路径（见文件顶部说明）。
     # 必须在 QApplication 与 WebEngine 导入之前设置。
-    QApplication.setAttribute(Qt.AA_UseOpenGLES)
+    # 由 RenderBackend 推导（见 render_env.compute_settings）：hardware / software
+    # 走 ANGLE 才需要；software_gl 是 Mesa llvmpipe 桌面 GL 兜底档，强制 ES 反而
+    # 与「最慢最稳」的初衷冲突 —— 故该档位下不设这个属性。
+    if RENDER_SETTINGS.get("use_open_gles", True):
+        QApplication.setAttribute(Qt.AA_UseOpenGLES)
+    # [MEM] 共享 GL 上下文：默认每个 QWebEngineView 会创建自己的 OpenGL 上下文，
+    # 并发对话下 40+ 张消息卡 = 40+ 个独立上下文，每个都要独立的命令缓冲与合成
+    # 表面后备存储。开启后所有 view 复用同一上下文，per-view 常驻开销下降
+    # （实测 12 个 view 总增量 250MB → 218MB，约 -12.7%）。
+    # 必须在 QApplication 创建之前设置（benchmarks/README.md 同样要求此项）。
+    # [Render] ShareGLContexts 可关：多卡共用上下文被怀疑与卡片/图表闪烁相关，
+    # 出问题时关掉即可验证是否由它引起。
+    if RENDER_SETTINGS.get("share_gl_contexts", True):
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，
@@ -372,12 +324,14 @@ def main():
 
     # ========== 单实例检查 ==========
     from app.core.single_instance import SingleInstanceGuard
+    from app.utils.config import Settings
 
     _guard = SingleInstanceGuard("Drifox")
-    # if not _guard.try_lock():
-    #     _guard.request_show_window()
-    #     _guard.cleanup()
-    #     return
+    # 开关关闭时不取锁，允许多实例并行（改动重启生效）
+    if Settings.get_instance().enable_single_instance.value and not _guard.try_lock():
+        _guard.request_show_window()
+        _guard.cleanup()
+        return
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme

@@ -34,16 +34,6 @@ _BUILTIN_GROUP = "内置技能"
 _USER_GROUP = "用户技能"
 
 
-class ListValidator(ConfigValidator):
-    """Folder list validator"""
-
-    def validate(self, value):
-        return True
-
-    def correct(self, value: List[str]):
-        return value
-
-
 class SkillItem(CardWidget):
     """Skill item with enable switch — 紧凑卡片风格，参考 MCPServerRow"""
 
@@ -547,23 +537,6 @@ class SkillListSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
             self._ensure_items_built(skip_discover=True)
         else:
             self._adjust_view_size()
-
-    def _add_skill_item(self, name: str, description: str, adjust: bool = True) -> SkillItem:
-        """兼容入口：直接往第一个分组追加一行
-
-        正常路径走 `_build_next_batch`（按来源分组、分批构建），这里只给
-        外部/旧调用方保留一个能用的追加接口。
-        """
-        if not self._sections:
-            section = SkillGroupSection(_BUILTIN_GROUP, True, self.view)
-            self.viewLayout.addWidget(section)
-            section.show()
-            self._sections.append(section)
-        item = self._sections[0].add_item(name, description, name in self.enabled_skills)
-        item.enabled_changed.connect(self._on_skill_enabled_changed)
-        if adjust:
-            self._adjust_view_size()
-        return item
 
     def _update_skill_token_count(self):
         """更新头部 subtitle：已启用计数 + token 占用估算"""

@@ -141,15 +141,3 @@ class PermissionCache:
         self._round_cache.clear()
         self._session_cache.clear()
 
-    def get_session_cache(self) -> DictType[str, bool]:
-        return self._session_cache.copy()
-
-    def sync_session_cache(self, cache: DictType[str, bool]) -> None:
-        self._session_cache = cache.copy()
-        logger.info(f"[PermissionCache] 同步 session 缓存: {len(cache)} 项")
-
-    def get_cache_stats(self) -> DictType[str, int]:
-        return {
-            "round_count": len(self._round_cache),
-            "session_count": len(self._session_cache),
-        }

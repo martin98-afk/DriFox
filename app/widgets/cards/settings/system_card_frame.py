@@ -327,10 +327,6 @@ class SystemCardFrame(QFrame):
         self._search_input.textChanged.connect(callback)
         self._search_container.addWidget(self._search_input)
 
-    def set_count_label(self, text: str):
-        self._count_label.setText(f"({text})" if text else "")
-        self._count_label.setVisible(bool(text))
-
     def set_header_sticky(self, text: str):
         """在标题栏显示标签（如吸顶服务商名称），置于标题和搜索框之间
 
@@ -343,28 +339,6 @@ class SystemCardFrame(QFrame):
         else:
             self._header_sticky_label.setVisible(False)
             self._header_sticky_label.setText("")
-
-    def setup_tabs(self, tabs: list, default_tab: str = None):
-        while self._tab_buttons_container.count():
-            item = self._tab_buttons_container.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        self._tabs = tabs
-        self._default_tab = default_tab or (tabs[0][0] if tabs else None)
-        self._current_tab = self._default_tab
-        self._tab_buttons = {}
-
-        for tab_id, tab_name in tabs:
-            btn = QLabel(f"{tab_name}", self)
-            btn.setFont(get_unified_font(12))
-            btn.setStyleSheet(TabStyles.inactive())
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.mousePressEvent = lambda e, tid=tab_id: self._on_tab_clicked(tid)
-            self._tab_buttons_container.addWidget(btn)
-            self._tab_buttons[tab_id] = btn
-
-        self._update_tab_styles()
 
     def _on_tab_clicked(self, tab_id: str):
         if self._current_tab != tab_id:

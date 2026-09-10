@@ -10,13 +10,6 @@ from loguru import logger
 from app.plugins.managers.plugin_manager import PluginInfo
 
 
-@pytest.fixture()
-def log_capture():
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 def _info(tmp_path, icon_raw):
     return PluginInfo(name="icon-plug", manifest={"icon": icon_raw}, path=tmp_path)

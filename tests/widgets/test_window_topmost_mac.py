@@ -15,12 +15,6 @@ from PyQt5.QtWidgets import QApplication, QWidget
 pytest.importorskip("PyQt5")
 
 
-@pytest.fixture()
-def qapp():
-    """确保 QApplication 可用"""
-    app = QApplication.instance() or QApplication([])
-    return app
-
 
 class _FakeTopmostCfg:
     """最小 Settings 替身：仅 window_always_on_top 一个配置项"""

@@ -101,10 +101,6 @@ class UpdateChecker(QWidget):
         )
         self.async_checker.start()
 
-    def _forward_error(self, msg):
-        """转发错误给外部监听者"""
-        self.error.emit(msg)
-        self.create_errorbar("检查更新失败", msg)
 
     def _on_check_finished(self, latest_release):
         """异步请求完成回调"""
@@ -183,12 +179,6 @@ class UpdateChecker(QWidget):
         info_bar.close()
         self._start_download(latest_release)
 
-    def _find_asset(self, assets: list, name_contains: str) -> dict | None:
-        """在 Release assets 列表中按名称片段查找资产。"""
-        for asset in assets:
-            if name_contains in asset.get("name", ""):
-                return asset
-        return None
 
     def _start_download(self, latest_release):
         """下载并安装新版本。"""

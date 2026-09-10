@@ -489,37 +489,6 @@ class HistoryManager:
         if self._session_store.get_session_count() > 0:
             return
 
-    def _normalize_sessions(self, data: List) -> List[Dict]:
-        """规范化会话数据"""
-        normalized = []
-        seen_ids = set()
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            sid = item.get("session_id")
-            if sid and sid in seen_ids:
-                continue
-            if sid:
-                seen_ids.add(sid)
-            fallback_ts = item.get("last_time") or item.get("saved_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            item["messages"] = self._ensure_message_timestamps(
-                merge_session_messages(item.get("messages", [])),
-                fallback_ts,
-            )
-            if "title" not in item:
-                item["title"] = item.get("topic_summary", "新对话")
-            if "last_time" not in item:
-                item["last_time"] = self._extract_last_message_time(item.get("messages", []))
-            if "message_count" not in item:
-                item["message_count"] = len(item.get("messages", []))
-            if "session_id" not in item:
-                item["session_id"] = uuid.uuid4().hex[:8]
-            item["compaction_state"] = dict(item.get("compaction_state") or {})
-            item["compaction_cache"] = dict(item.get("compaction_cache") or {})
-            if "project" not in item:
-                item["project"] = "默认项目"
-            normalized.append(item)
-        return normalized
 
     def save_session(
         self,
@@ -704,11 +673,6 @@ class HistoryManager:
             self._history_sessions[index]["user_edited_title"] = edited
             self._cache_dirty = True
 
-    def get_user_edited_title(self, index: int) -> bool:
-        """获取会话标题是否被用户编辑"""
-        if 0 <= index < len(self._history_sessions):
-            return self._history_sessions[index].get("user_edited_title", False)
-        return False
 
     def update_topic_summary(self, index: int, summary: str):
         self.update_session_title(index, summary)
@@ -716,19 +680,6 @@ class HistoryManager:
     def get_topic_summary(self, index: int) -> str:
         return self.get_current_title(index)
 
-    def should_generate_summary(self, index: int) -> bool:
-        if 0 <= index < len(self._history_sessions):
-            session = self._history_sessions[index]
-            messages = session.get("messages", [])
-            # 口径与 _count_conversation_pairs（L640）一致：TeamMail 视为真实 user 轮次，
-            # 其他 hook 排除（R1 残余清理）。
-            user_count = sum(
-                1
-                for msg in messages
-                if msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
-            )
-            return user_count >= 1
-        return False
 
     def _count_conversation_pairs(self, messages: List[Dict]) -> int:
         count = 0
@@ -742,36 +693,13 @@ class HistoryManager:
                 count += 1
         return count
 
-    def load_latest_session(self) -> Optional[Dict]:
-        if not self._history_sessions:
-            return None
-        latest = self._history_sessions[0]
-        if not latest.get("messages"):
-            return None
-        return latest
 
-    def load_most_recently_updated_session(self) -> Optional[Dict]:
-        """加载最近更新的会话"""
-        if not self._history_sessions:
-            return None
-        most_recent = None
-        most_recent_time = None
-        for session in self._history_sessions:
-            messages = session.get("messages", [])
-            if not messages:
-                continue
-            last_updated = session.get("last_updated") or session.get("last_time") or ""
-            if not most_recent_time or last_updated > most_recent_time:
-                most_recent_time = last_updated
-                most_recent = session
-        return most_recent
 
     def _ensure_history_loaded(self):
         """懒加载历史会话数据（首次访问时从 SQLite 加载）
 
         🛡️ H1（T4-TOP8）：持 _history_load_lock 保护"检查-加载"原子性——
         后台预热线程（_prewarm_history）与主线程首次访问可能并发进入：
-        - 预热已完成：主线程检查 _history_loaded 直接返回（0 阻塞）
         - 预热进行中：主线程等待锁（至多=查询耗时，与原同步方案等价，
           不劣化；预热把耗时从"用户操作时"提前到"启动后台"）
         - 预热失败：_history_loaded 不置 True，主线程首次访问兜底重试
@@ -1469,17 +1397,6 @@ class HistoryManager:
         except Exception as e:
             logger.exception(f"[HistoryManager] 归档扫描回调异常: {e}")
 
-    def invalidate_archive_cache(self, file_path: Optional[str] = None) -> None:
-        """失效归档元数据缓存。
-
-        Args:
-            file_path: 仅失效该路径；传 None 清空全部。
-        """
-        with self._archive_cache_lock:
-            if file_path is None:
-                self._archive_meta_cache.clear()
-            else:
-                self._archive_meta_cache.pop(file_path, None)
 
     def get_archived_sessions(self) -> List[Dict]:
         """同步获取归档列表（兼容旧调用方，UI 层请优先使用 scan_archives_async）。
@@ -1535,10 +1452,6 @@ class HistoryManager:
             )
         return None
 
-    def get_session_id_by_index(self, index: int) -> Optional[str]:
-        if 0 <= index < len(self._history_sessions):
-            return self._history_sessions[index].get("session_id")
-        return None
 
     def find_index_by_session_id(self, session_id: str) -> Optional[int]:
         """根据 session_id 查找索引"""
@@ -1899,18 +1812,6 @@ class HistoryManager:
             normalized.append(copied)
         return normalized
 
-    def get_session_preview(self, index: int, max_len: int = 50) -> str:
-        if 0 <= index < len(self._history_sessions):
-            messages = self._history_sessions[index].get("messages", [])
-            for msg in reversed(messages):
-                if msg.get("_hook_event"):
-                    continue
-                if msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        content = content_to_text(content)
-                    return content[:max_len].strip() + ("..." if len(content) > max_len else "")
-        return ""
 
     def get_total_storage_size(self) -> int:
         """获取总存储大小"""
@@ -1922,22 +1823,6 @@ class HistoryManager:
             if db_path.exists():
                 return db_path.stat().st_size
 
-    def get_memory_stats(self) -> Dict:
-        total_messages = sum(s.get("message_count", 0) for s in self._history_sessions)
-        total_chars = 0
-        for session in self._history_sessions:
-            for msg in session.get("messages", []):
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = content_to_text(content)
-                total_chars += len(content)
-        return {
-            "session_count": len(self._history_sessions),
-            "total_messages": total_messages,
-            "total_chars": total_chars,
-            "storage_size": self.get_total_storage_size(),
-            "storage_mode": "sqlite" if self._use_sqlite else "json",
-        }
 
     # ============================================================
     # 项目归档导出/导入（ZIP 压缩包）

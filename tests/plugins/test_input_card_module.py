@@ -33,13 +33,6 @@ _CONTRACT_ATTRS = (
 )
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 def test_module_id():
     from app.widgets.modules.input_card_module import InputCardModule

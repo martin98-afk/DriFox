@@ -1170,13 +1170,6 @@ class MCPListSettingCard(ExpandSettingCard):
         if hasattr(card, "contentLabel"):
             card.contentLabel.setText(text)
 
-    def _save_servers(self, servers: list):
-        """保存服务器列表（底层写入 PluginManager）"""
-        # 不再直接写 Settings.mcp_servers，而是通过 PluginManager 管理
-        # 此方法保留为空，实际增删改走 PluginManager 的方法
-        self._refresh()
-        self.serversChanged.emit()
-
     def _on_remove_server(self, name: str):
         from app.widgets.common_dialogs import ConfirmDialog
 
@@ -1330,38 +1323,3 @@ class MCPListSettingCard(ExpandSettingCard):
 
     # ── 供外部调用的添加/更新方法 ──────────────────────
 
-    def add_server(self, server_data: dict):
-        """添加 MCP 服务器（保留兼容，实际由 PluginManager 管理）"""
-        from app.plugins.managers.plugin_manager import PluginManager
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        pm = PluginManager.get_instance()
-        name = server_data.get("name", "")
-        servers = self._get_servers()
-        if any(s.get("name") == name for s in servers):
-            InfoBar.warning(
-                title="名称重复",
-                content=f"MCP Server '{name}' 已存在",
-                position=InfoBarPosition.BOTTOM,
-                duration=3000,
-                parent=TabManagerWindow.get_instance() or self.window(),
-            )
-            return False
-        pm.add_mcp_server(name, server_data)
-        self._refresh()
-        # 热连接
-        if server_data.get("enabled", True) and self.cfg.mcp_enabled.value:
-            self._hot_connect(name, server_data)
-        return True
-
-    def update_server(self, name: str, server_data: dict):
-        """更新 MCP 服务器配置（实际由 PluginManager 管理）"""
-        from app.plugins.managers.plugin_manager import PluginManager
-
-        pm = PluginManager.get_instance()
-        pm.update_mcp_server(name, server_data)
-        self._refresh()
-        # 先断开旧连接，再重新连接
-        self._hot_disconnect(name)
-        if server_data.get("enabled", True) and self.cfg.mcp_enabled.value:
-            self._hot_connect(name, server_data)

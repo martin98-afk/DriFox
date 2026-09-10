@@ -33,7 +33,7 @@ class _UpperSerializer:
 
 
 @pytest.fixture()
-def fresh_registry(monkeypatch):
+def fresh_serializer_registry(monkeypatch):
     from app.plugins.registries.serializer_registry import SerializerRegistry
 
     reg = SerializerRegistry()
@@ -51,7 +51,7 @@ def fresh_storage_registry(monkeypatch):
     return reg
 
 
-def test_plugin_overrides_default_serializer(fresh_registry, fresh_storage_registry):
+def test_plugin_overrides_default_serializer(fresh_serializer_registry, fresh_storage_registry):
     """user 根自定义 serializer 覆盖 system 默认 → messages_to_api 走自定义实现"""
     from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
@@ -60,17 +60,17 @@ def test_plugin_overrides_default_serializer(fresh_registry, fresh_storage_regis
     assert mc.messages_to_api([{"role": "system", "content": "s"}]) == [{"role": "system", "content": "s"}]
 
     # 插件覆盖（同 id 注册 → 后者覆盖）
-    fresh_registry.register(_UpperSerializer(), source="plugin:demo")
+    fresh_serializer_registry.register(_UpperSerializer(), source="plugin:demo")
     assert mc.messages_to_api([{"role": "user", "content": "hi"}]) == [{"role": "user", "content": "CUSTOM-OVERRIDE"}]
     result = mc.messages_to_responses_input([{"role": "user", "content": "hi"}])
     assert result == ([{"type": "message", "role": "user", "content": []}], "CUSTOM-OVERRIDE")
 
     # 卸载 → 回退系统默认
-    fresh_registry.unregister_source("plugin:demo")
+    fresh_serializer_registry.unregister_source("plugin:demo")
     assert mc.messages_to_api([{"role": "system", "content": "s"}]) == [{"role": "system", "content": "s"}]
 
 
-def test_serializer_watcher_scans_system_plugin(fresh_registry, fresh_storage_registry):
+def test_serializer_watcher_scans_system_plugin(fresh_serializer_registry, fresh_storage_registry):
     """ensure_serializer_watcher → 扫描 plugins/system-serializers/serializers/ → 注册默认 openai"""
     from app.plugins.loaders.runtime_component_loader import ensure_serializer_watcher
 

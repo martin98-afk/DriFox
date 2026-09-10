@@ -19,7 +19,7 @@ PluginHostService — 应用级插件宿主服务（一个应用一个实例）
 import os
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from loguru import logger
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal

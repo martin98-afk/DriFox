@@ -31,7 +31,7 @@ _CASES = [
 
 
 @pytest.fixture()
-def fresh_registry(monkeypatch):
+def fresh_adapter_registry(monkeypatch):
     """每用例独立 registry + warmup 注册三家族（系统插件）"""
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
@@ -44,9 +44,9 @@ def fresh_registry(monkeypatch):
 
 
 @pytest.mark.parametrize("cfg,family_id,expected", _CASES)
-def test_family_equivalence_matrix(fresh_registry, cfg, family_id, expected):
+def test_family_equivalence_matrix(fresh_adapter_registry, cfg, family_id, expected):
     """等价矩阵：选中家族 id + flags 与拆分前逐点等价"""
-    adapter = fresh_registry.resolve(cfg)
+    adapter = fresh_adapter_registry.resolve(cfg)
     assert adapter is not None
     assert adapter.id == family_id, f"{cfg} 应命中 {family_id}"
     flags = adapter.protocol_flags(cfg)
@@ -57,7 +57,7 @@ def test_family_equivalence_matrix(fresh_registry, cfg, family_id, expected):
     ) == expected, f"flags 不等价: {cfg}"
 
 
-def test_family_priorities(fresh_registry):
+def test_family_priorities(fresh_adapter_registry):
     """matches 优先级：deepseek 3 > gemini 2 > openai 1（兜底）"""
     from importlib import import_module
     DeepSeekFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.deepseek_family").DeepSeekFamilyAdapter
@@ -77,9 +77,9 @@ def test_family_priorities(fresh_registry):
     assert DeepSeekFamilyAdapter().matches(plain_cfg) == 0
 
     # resolve 选最高分
-    assert fresh_registry.resolve(deepseek_cfg).id == "deepseek-family"
-    assert fresh_registry.resolve(gemini_cfg).id == "gemini-family"
-    assert fresh_registry.resolve(plain_cfg).id == "openai-family"
+    assert fresh_adapter_registry.resolve(deepseek_cfg).id == "deepseek-family"
+    assert fresh_adapter_registry.resolve(gemini_cfg).id == "gemini-family"
+    assert fresh_adapter_registry.resolve(plain_cfg).id == "openai-family"
 
 
 def test_shared_detectors_still_exposed():

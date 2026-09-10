@@ -59,7 +59,7 @@ def _load_subagent_tools():
 
 
 @pytest.fixture
-def fresh_tm(monkeypatch, tmp_path):
+def fresh_template_mgr(monkeypatch, tmp_path):
     """每次返回指向 tmp_path 的全新 TemplateManager 实例。"""
     TemplateManager._instance = None
     tm = TemplateManager.get_instance()
@@ -260,20 +260,20 @@ class TestValidateAgentNames:
 
 
 class TestSaveLoad:
-    def test_save_writes_yaml(self, fresh_tm, basic_template, tmp_path):
-        path = fresh_tm.save(basic_template)
+    def test_save_writes_yaml(self, fresh_template_mgr, basic_template, tmp_path):
+        path = fresh_template_mgr.save(basic_template)
         assert path.exists()
         assert path.parent == tmp_path
         assert path.name == "basic.yaml"
 
-    def test_load_returns_template(self, fresh_tm, basic_template):
-        fresh_tm.save(basic_template)
-        loaded = fresh_tm.load("basic")
+    def test_load_returns_template(self, fresh_template_mgr, basic_template):
+        fresh_template_mgr.save(basic_template)
+        loaded = fresh_template_mgr.load("basic")
         assert loaded.template_name == "basic"
         assert loaded.description == "basic team"
         assert [a.agent_name for a in loaded.agents] == ["build", "review"]
 
-    def test_save_load_with_agent_descriptions(self, fresh_tm):
+    def test_save_load_with_agent_descriptions(self, fresh_template_mgr):
         """带角色描述的模板保存/加载应完整保留 description。"""
         t = Template(
             template_name="desc-team",
@@ -283,14 +283,14 @@ class TestSaveLoad:
                 TemplateAgent("build", "负责编码实现与验证"),
             ],
         )
-        fresh_tm.save(t)
-        loaded = fresh_tm.load("desc-team")
+        fresh_template_mgr.save(t)
+        loaded = fresh_template_mgr.load("desc-team")
         assert [a.agent_name for a in loaded.agents] == ["leader", "build"]
         assert [a.description for a in loaded.agents] == ["统筹团队任务拆解/分发/汇总", "负责编码实现与验证"]
 
-    def test_save_with_description_omits_empty_in_yaml(self, fresh_tm, tmp_path):
+    def test_save_with_description_omits_empty_in_yaml(self, fresh_template_mgr, tmp_path):
         """agent 描述为空时 YAML 的 agents 条目不应包含 description 键（保持旧模板简洁）。"""
-        fresh_tm.save(
+        fresh_template_mgr.save(
             Template(
                 template_name="no-desc",
                 agents=[TemplateAgent("build")],
@@ -302,43 +302,43 @@ class TestSaveLoad:
         assert "- agent_name: build\n" in agents_block
         assert "description" not in agents_block
 
-    def test_load_missing_raises(self, fresh_tm):
+    def test_load_missing_raises(self, fresh_template_mgr):
         with pytest.raises(TemplateError, match="模板不存在"):
-            fresh_tm.load("does_not_exist")
+            fresh_template_mgr.load("does_not_exist")
 
-    def test_load_corrupt_yaml_raises(self, fresh_tm, tmp_path):
+    def test_load_corrupt_yaml_raises(self, fresh_template_mgr, tmp_path):
         """YAML 语法错误应友好报错（不抛 yaml.YAMLError 原始异常）。"""
         (tmp_path / "broken.yaml").write_text(
             "schema_version: 1\ntemplate_name: broken\nagents: [\n",
             encoding="utf-8",
         )
         with pytest.raises(TemplateError, match="YAML 解析失败"):
-            fresh_tm.load("broken")
+            fresh_template_mgr.load("broken")
 
-    def test_load_empty_file_raises(self, fresh_tm, tmp_path):
+    def test_load_empty_file_raises(self, fresh_template_mgr, tmp_path):
         (tmp_path / "empty.yaml").write_text("", encoding="utf-8")
         with pytest.raises(TemplateError, match="模板文件为空"):
-            fresh_tm.load("empty")
+            fresh_template_mgr.load("empty")
 
-    def test_load_non_dict_top_level_raises(self, fresh_tm, tmp_path):
+    def test_load_non_dict_top_level_raises(self, fresh_template_mgr, tmp_path):
         (tmp_path / "list_top.yaml").write_text("- 1\n- 2\n", encoding="utf-8")
         with pytest.raises(TemplateError, match="顶层必须是对象"):
-            fresh_tm.load("list_top")
+            fresh_template_mgr.load("list_top")
 
-    def test_save_overwrites_existing(self, fresh_tm):
+    def test_save_overwrites_existing(self, fresh_template_mgr):
         t1 = Template(
             template_name="t",
             description="v1",
             agents=[TemplateAgent("build")],
         )
-        fresh_tm.save(t1)
+        fresh_template_mgr.save(t1)
         t2 = Template(
             template_name="t",
             description="v2",
             agents=[TemplateAgent("review")],
         )
-        fresh_tm.save(t2)
-        loaded = fresh_tm.load("t")
+        fresh_template_mgr.save(t2)
+        loaded = fresh_template_mgr.load("t")
         assert loaded.description == "v2"
         assert [a.agent_name for a in loaded.agents] == ["review"]
 
@@ -349,24 +349,24 @@ class TestSaveLoad:
 
 
 class TestListTemplates:
-    def test_empty_directory(self, fresh_tm):
-        assert fresh_tm.list_templates() == []
+    def test_empty_directory(self, fresh_template_mgr):
+        assert fresh_template_mgr.list_templates() == []
 
-    def test_lists_multiple(self, fresh_tm):
-        fresh_tm.save(
+    def test_lists_multiple(self, fresh_template_mgr):
+        fresh_template_mgr.save(
             Template(
                 template_name="a",
                 agents=[TemplateAgent("build")],
             )
         )
-        fresh_tm.save(
+        fresh_template_mgr.save(
             Template(
                 template_name="b",
                 description="B team",
                 agents=[TemplateAgent("build"), TemplateAgent("review")],
             )
         )
-        results = fresh_tm.list_templates()
+        results = fresh_template_mgr.list_templates()
         names = [r["name"] for r in results]
         assert names == ["a", "b"]  # sorted
 
@@ -375,16 +375,16 @@ class TestListTemplates:
         assert b["agent_count"] == 2
         assert b["agent_names"] == ["build", "review"]
 
-    def test_skips_corrupt_files(self, fresh_tm, tmp_path):
+    def test_skips_corrupt_files(self, fresh_template_mgr, tmp_path):
         """损坏的 YAML 不应让整个列表失败，而是被跳过 + 警告。"""
-        fresh_tm.save(
+        fresh_template_mgr.save(
             Template(
                 template_name="good",
                 agents=[TemplateAgent("build")],
             )
         )
         (tmp_path / "bad.yaml").write_text("this is: : invalid", encoding="utf-8")
-        results = fresh_tm.list_templates()
+        results = fresh_template_mgr.list_templates()
         names = [r["name"] for r in results]
         assert "good" in names
         assert "bad" not in names
@@ -459,15 +459,15 @@ class TestUserTemplatesWithoutPluginRegistration:
 
 
 class TestDelete:
-    def test_delete_existing(self, fresh_tm, basic_template, tmp_path):
-        fresh_tm.save(basic_template)
-        assert fresh_tm.delete("basic") is True
+    def test_delete_existing(self, fresh_template_mgr, basic_template, tmp_path):
+        fresh_template_mgr.save(basic_template)
+        assert fresh_template_mgr.delete("basic") is True
         assert not (tmp_path / "basic.yaml").exists()
-        assert fresh_tm.exists("basic") is False
+        assert fresh_template_mgr.exists("basic") is False
 
-    def test_delete_missing_returns_false(self, fresh_tm):
+    def test_delete_missing_returns_false(self, fresh_template_mgr):
         """删除不存在的模板应返回 False 而非抛错。"""
-        assert fresh_tm.delete("never_existed") is False
+        assert fresh_template_mgr.delete("never_existed") is False
 
 
 # ══════════════════════════════════════════════════════════
@@ -476,17 +476,17 @@ class TestDelete:
 
 
 class TestExists:
-    def test_exists_true(self, fresh_tm, basic_template):
-        fresh_tm.save(basic_template)
-        assert fresh_tm.exists("basic") is True
+    def test_exists_true(self, fresh_template_mgr, basic_template):
+        fresh_template_mgr.save(basic_template)
+        assert fresh_template_mgr.exists("basic") is True
 
-    def test_exists_false(self, fresh_tm):
-        assert fresh_tm.exists("nope") is False
+    def test_exists_false(self, fresh_template_mgr):
+        assert fresh_template_mgr.exists("nope") is False
 
-    def test_exists_with_invalid_name_returns_false(self, fresh_tm):
+    def test_exists_with_invalid_name_returns_false(self, fresh_template_mgr):
         """非法名称（如包含路径分隔符）应返回 False 而非抛错。"""
-        assert fresh_tm.exists("../etc/passwd") is False
-        assert fresh_tm.exists("") is False
+        assert fresh_template_mgr.exists("../etc/passwd") is False
+        assert fresh_template_mgr.exists("") is False
 
 
 # ══════════════════════════════════════════════════════════
@@ -495,23 +495,23 @@ class TestExists:
 
 
 class TestInvalidName:
-    def test_empty_name_rejected(self, fresh_tm):
+    def test_empty_name_rejected(self, fresh_template_mgr):
         with pytest.raises(TemplateError, match="模板名不能为空"):
-            fresh_tm.save(Template(template_name="", agents=[TemplateAgent("build")]))
+            fresh_template_mgr.save(Template(template_name="", agents=[TemplateAgent("build")]))
 
-    def test_path_traversal_rejected(self, fresh_tm):
+    def test_path_traversal_rejected(self, fresh_template_mgr):
         """'../bad' 必须被拒绝，避免写入到项目外。"""
         with pytest.raises(TemplateError, match="模板名非法"):
-            fresh_tm.save(
+            fresh_template_mgr.save(
                 Template(
                     template_name="../bad",
                     agents=[TemplateAgent("build")],
                 )
             )
 
-    def test_non_ascii_name_allowed(self, fresh_tm):
+    def test_non_ascii_name_allowed(self, fresh_template_mgr):
         """中文名应被允许（放宽支持 Unicode 名称）。"""
-        path = fresh_tm.save(
+        path = fresh_template_mgr.save(
             Template(
                 template_name="中文模板",
                 agents=[TemplateAgent("build")],
@@ -520,32 +520,32 @@ class TestInvalidName:
         assert path.exists()
         assert path.stem == "中文模板"
         # 往返：保存后能从文件名正确加载回来（本次 bug 的核心场景）
-        reloaded = fresh_tm.load("中文模板")
+        reloaded = fresh_template_mgr.load("中文模板")
         assert reloaded.template_name == "中文模板"
         assert reloaded.agents[0].agent_name == "build"
 
-    def test_name_with_dot_rejected(self, fresh_tm):
+    def test_name_with_dot_rejected(self, fresh_template_mgr):
         """包含 . 的名称应被拒绝（避免和扩展名冲突）。"""
         with pytest.raises(TemplateError, match="模板名非法"):
-            fresh_tm.save(
+            fresh_template_mgr.save(
                 Template(
                     template_name="my.template",
                     agents=[TemplateAgent("build")],
                 )
             )
 
-    def test_name_too_long_rejected(self, fresh_tm):
+    def test_name_too_long_rejected(self, fresh_template_mgr):
         with pytest.raises(TemplateError, match="模板名非法"):
-            fresh_tm.save(
+            fresh_template_mgr.save(
                 Template(
                     template_name="a" * 65,
                     agents=[TemplateAgent("build")],
                 )
             )
 
-    def test_hyphen_and_underscore_allowed(self, fresh_tm):
+    def test_hyphen_and_underscore_allowed(self, fresh_template_mgr):
         """合法的 hyphen/underscore 应通过。"""
-        path = fresh_tm.save(
+        path = fresh_template_mgr.save(
             Template(
                 template_name="my-team_v2",
                 agents=[TemplateAgent("build")],

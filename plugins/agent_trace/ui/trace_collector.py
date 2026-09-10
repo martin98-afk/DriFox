@@ -127,7 +127,7 @@ class TraceCollector(QObject):
         ):
             try:
                 getattr(self._bound_backend, sig).disconnect(slot)
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass  # 未连接 / 已析构
         self._bound_backend = None
         self._bound_main_widget = None

@@ -136,10 +136,6 @@ class CardManager:
         self._ensure_window_initialized(window_id)
         self._coexist_containers[window_id] = containers
 
-    def _ensure_state_initialized(self):
-        """兼容旧代码"""
-        pass
-
     def register_window(self, window_id: str):
         """注册窗口到管理器（窗口创建时调用）"""
         self._ensure_window_initialized(window_id)
@@ -448,14 +444,6 @@ class CardManager:
         else:
             self.show_card(card_id, window_id)
 
-    def show_card_by_id(self, card_id: str, window_id: str):
-        """显示卡片（兼容旧 API）"""
-        self.show_card(card_id, window_id)
-
-    def hide_card_by_id(self, card_id: str, window_id: str):
-        """隐藏卡片（兼容旧 API）"""
-        self.hide_card(card_id, window_id)
-
     # ========== 回调管理 ==========
 
     def on_card_shown(self, window_id: str, card_id: str, callback: Callable):
@@ -550,11 +538,6 @@ class CardManager:
                     for cb in win_data["hidden_callbacks"][card_id]:
                         cb(card_id)
 
-    def get_visible_card(self, container_type: ContainerType, window_id: str) -> Optional[str]:
-        if window_id not in self._window_data:
-            return None
-        return self._window_data[window_id]["visible_cards"].get(container_type)
-
     def is_card_visible(self, card_id: str, window_id: str) -> bool:
         if window_id not in self._window_data:
             return False
@@ -607,10 +590,6 @@ class CardManager:
         win_data["dock_active_cards"][ct] = card_id
         win_data["visible_cards"][ct] = card_id
 
-    def get_all_windows(self) -> List[str]:
-        """获取所有已注册的窗口ID"""
-        return list(self._window_data.keys())
-
     # ============================================================
     # 外部卡片注册（由 UI 插件调用）
     # ============================================================
@@ -655,8 +634,3 @@ class CardManager:
             return None
         return self._external_cards.get(window_id, {}).get(card_id)
 
-    def list_external_cards(self, window_id: str) -> Dict[str, dict]:
-        """列出窗口的所有外部卡片"""
-        if not hasattr(self, "_external_cards"):
-            return {}
-        return dict(self._external_cards.get(window_id, {}))

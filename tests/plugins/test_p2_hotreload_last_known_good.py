@@ -25,13 +25,6 @@ GOOD_V2 = GOOD_V1.replace("'v1'", "'v2'")
 BAD = "raise RuntimeError('broken reload')\n" + GOOD_V1
 
 
-@pytest.fixture()
-def log_capture():
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):

@@ -30,7 +30,7 @@ class _FakeSerializer:
 
 
 @pytest.fixture()
-def fresh_registry(monkeypatch):
+def fresh_serializer_registry(monkeypatch):
     """每用例独立 registry（绕过单例状态污染，对齐 test_model_adapter_registry）"""
     from app.plugins.registries.serializer_registry import SerializerRegistry
 
@@ -39,31 +39,31 @@ def fresh_registry(monkeypatch):
     return reg
 
 
-def test_resolve_default_id(fresh_registry):
+def test_resolve_default_id(fresh_serializer_registry):
     """注册 openai → 不传 id resolve 返回 openai"""
     s = _FakeSerializer("openai")
-    fresh_registry.register(s)
-    assert fresh_registry.resolve() is s
+    fresh_serializer_registry.register(s)
+    assert fresh_serializer_registry.resolve() is s
 
 
-def test_resolve_by_id(fresh_registry):
+def test_resolve_by_id(fresh_serializer_registry):
     """注册多 id → 按 id 精确解析"""
     a = _FakeSerializer("openai")
     b = _FakeSerializer("gemini")
-    fresh_registry.register(a)
-    fresh_registry.register(b)
-    assert fresh_registry.resolve("gemini") is b
-    assert fresh_registry.resolve("openai") is a
+    fresh_serializer_registry.register(a)
+    fresh_serializer_registry.register(b)
+    assert fresh_serializer_registry.resolve("gemini") is b
+    assert fresh_serializer_registry.resolve("openai") is a
 
 
-def test_resolve_fallback_to_openai(fresh_registry):
+def test_resolve_fallback_to_openai(fresh_serializer_registry):
     """无该 id → 回退 openai"""
     a = _FakeSerializer("openai")
-    fresh_registry.register(a)
-    assert fresh_registry.resolve("nonexistent") is a
+    fresh_serializer_registry.register(a)
+    assert fresh_serializer_registry.resolve("nonexistent") is a
 
 
-def test_resolve_empty_falls_back_to_passthrough(fresh_registry):
+def test_resolve_empty_falls_back_to_passthrough(fresh_serializer_registry):
     """注册表空且无 openai → 降级内置 passthrough（P3：主链路不抛错）。
 
     旧契约是抛 RuntimeError（零硬编码兜底）；P3 加固改为降级 passthrough，
@@ -71,26 +71,26 @@ def test_resolve_empty_falls_back_to_passthrough(fresh_registry):
     """
     from app.plugins.registries._builtin_fallback import BuiltInPassthroughSerializer
 
-    serializer = fresh_registry.resolve()
+    serializer = fresh_serializer_registry.resolve()
     assert isinstance(serializer, BuiltInPassthroughSerializer)
 
 
-def test_register_overrides_same_id(fresh_registry):
+def test_register_overrides_same_id(fresh_serializer_registry):
     """同 id 重复注册 → 后者覆盖（插件替换语义）"""
     first = _FakeSerializer("openai")
     second = _FakeSerializer("openai")
-    fresh_registry.register(first)
-    fresh_registry.register(second)
-    assert fresh_registry.resolve() is second
+    fresh_serializer_registry.register(first)
+    fresh_serializer_registry.register(second)
+    assert fresh_serializer_registry.resolve() is second
 
 
-def test_unregister_source(fresh_registry):
+def test_unregister_source(fresh_serializer_registry):
     """unregister_source 清理后降级内置 passthrough（P3 契约）"""
-    fresh_registry.register(_FakeSerializer("openai"), source="plugin:demo")
-    fresh_registry.unregister_source("plugin:demo")
+    fresh_serializer_registry.register(_FakeSerializer("openai"), source="plugin:demo")
+    fresh_serializer_registry.unregister_source("plugin:demo")
     from app.plugins.registries._builtin_fallback import BuiltInPassthroughSerializer
 
-    assert isinstance(fresh_registry.resolve(), BuiltInPassthroughSerializer)
+    assert isinstance(fresh_serializer_registry.resolve(), BuiltInPassthroughSerializer)
 
 
 def test_protocol_runtime_checkable():

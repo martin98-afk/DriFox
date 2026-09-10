@@ -44,27 +44,6 @@ def _color_for_name(name: str) -> str:
     return _AVATAR_COLORS[idx]
 
 
-def _make_avatar_pixmap(text: str, size: int = 28) -> QPixmap:
-    """生成圆形头像 QPixmap，HiDPI 感知（物理像素 = size * DPR）"""
-    dpr = QApplication.instance().devicePixelRatio()
-    physical_size = max(1, int(round(size * dpr)))
-    pix = QPixmap(physical_size, physical_size)
-    pix.setDevicePixelRatio(dpr)
-    pix.fill(Qt.transparent)
-    painter = QPainter(pix)
-    painter.setRenderHint(QPainter.Antialiasing)
-    painter.scale(dpr, dpr)  # 坐标系缩放为逻辑像素
-    painter.setBrush(QColor(_color_for_name(text)))
-    painter.setPen(Qt.NoPen)
-    painter.drawEllipse(QRectF(1, 1, size - 2, size - 2))
-    painter.setPen(QColor("#ffffff"))
-    font = get_unified_font(int(size * 0.42), True)
-    painter.setFont(font)
-    painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, text[0].upper())
-    painter.end()
-    return pix
-
-
 class _AvatarCircleWidget(QWidget):
     """使用 QPainter 绘制的圆形头像 — DPI 感知
 
@@ -134,13 +113,6 @@ class _AvatarCircleWidget(QWidget):
             painter.setPen(QPen(QColor("#ffffff"), 1.0))
             painter.setBrush(QColor("#f85149"))
             painter.drawEllipse(QRectF(size - 2 * dot_r - 1, 0, 2 * dot_r, 2 * dot_r))
-
-    def mousePressEvent(self, event: QMouseEvent):
-        self.clicked.emit()
-
-
-class _ClickableAvatar(QLabel):
-    clicked = pyqtSignal()
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clicked.emit()
@@ -462,59 +434,6 @@ class GiteeAccountRow(QFrame):
         self._settings_btn.setEnabled(not self._binding)
         self._apply_style()
 
-    def set_compact_mode(self, compact: bool):
-        """切换紧凑模式：收起时头像和设置按钮垂直堆叠"""
-        if self._compact == compact:
-            return
-        self._compact = compact
-
-        # 保存要重用的子控件
-        avatar = self._avatar
-        name_label = self._name_label
-        repo_label = self._repo_label
-        settings_btn = self._settings_btn
-
-        # 卸载旧布局（用临时 widget 接管 old layout 使其析构）
-        old_layout = self.layout()
-        temp = QWidget()
-        temp.setLayout(old_layout)
-        temp.deleteLater()
-
-        if compact:
-            # 垂直堆叠：头像居中（缩小），设置按钮居中
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(4, 2, 4, 2)
-            layout.setSpacing(2)
-            avatar_size = scale_font_size(20)
-            self._avatar.set_size(avatar_size)
-            layout.addWidget(avatar, 0, Qt.AlignCenter)
-            btn_size = scale_font_size(20)
-            settings_btn.setFixedSize(btn_size, btn_size)
-            settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
-            layout.addWidget(settings_btn, 0, Qt.AlignCenter)
-            name_label.setVisible(False)
-            repo_label.setVisible(False)
-        else:
-            # 水平恢复：头像 + 文字 + 设置按钮
-            layout = QHBoxLayout(self)
-            layout.setContentsMargins(6, 6, 6, 6)
-            layout.setSpacing(8)
-            avatar_size = scale_font_size(28)
-            self._avatar.set_size(avatar_size)
-            layout.addWidget(avatar)
-            text_container = QVBoxLayout()
-            text_container.setContentsMargins(0, 0, 0, 0)
-            text_container.setSpacing(0)
-            text_container.addWidget(name_label)
-            text_container.addWidget(repo_label)
-            layout.addLayout(text_container, 1)
-            btn_size = scale_font_size(24)
-            settings_btn.setFixedSize(btn_size, btn_size)
-            settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
-            layout.addWidget(settings_btn)
-            name_label.setVisible(True)
-            repo_label.setVisible(True)
-
     def _apply_style(self):
         self.setStyleSheet("""
             QFrame#giteeAccountRow {
@@ -674,15 +593,6 @@ class GiteeAccountRow(QFrame):
         self._settings_btn.setFixedSize(btn_size, btn_size)
         self._settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
         self._refresh_ui()
-
-    def close_popup(self):
-        """关闭弹出的浮动卡片（供外部调用，如 TabPanel 切换时）"""
-        if self._popup is not None and sip.isdeleted(self._popup):
-            self._popup = None
-            return
-        if self._popup and self._popup.isVisible():
-            self._popup.close()
-            self._popup = None
 
     def _toggle_popup(self):
         """点击整块区域切换浮动卡片显示状态"""

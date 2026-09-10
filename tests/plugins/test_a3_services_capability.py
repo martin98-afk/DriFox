@@ -15,14 +15,6 @@ from app.core.tool_executor import ToolExecutor
 from app.tools.registry import ToolRegistry
 
 
-@pytest.fixture()
-def log_capture():
-    """loguru WARNING+ 捕获为文本列表。"""
-    records = []
-    sink_id = logger.add(lambda m: records.append(str(m)), level="WARNING")
-    yield records
-    logger.remove(sink_id)
-
 
 class _FakeBT:
     """BuiltinTools 最小桩（services 注入来源）。"""

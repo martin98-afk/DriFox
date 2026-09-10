@@ -31,13 +31,6 @@ class _M2:
         host.m2_built = True
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 class TestCompose:
     def test_compose_builds_in_order(self, fresh_registry):

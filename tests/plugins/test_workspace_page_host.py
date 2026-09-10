@@ -14,13 +14,6 @@ from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 pytest.importorskip("PyQt5.QtWidgets", reason="仅在 PyQt5 环境加载 mock 类")
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 @pytest.fixture()
 def host(fresh_registry):

@@ -175,17 +175,3 @@ class FlowLayout(QLayout):
         return content_h + m.top() + m.bottom()
 
 
-def make_flow_container(spacing: int = 6, margins=0, alignment=Qt.AlignLeft):
-    """快捷构造：返回一个已挂载 FlowLayout 的 QWidget
-
-    用于不关心容器本身、只想要一个「会换行的行容器」的场景。
-
-    Returns:
-        tuple[QWidget, FlowLayout]
-    """
-    from PyQt5.QtWidgets import QWidget
-
-    container = QWidget()
-    container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
-    layout = FlowLayout(container, spacing=spacing, alignment=alignment, margins=margins)
-    return container, layout

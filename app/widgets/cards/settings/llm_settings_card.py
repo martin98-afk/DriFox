@@ -23,6 +23,7 @@ from qfluentwidgets import (
     FluentIcon,
     OptionsSettingCard,
     PrimaryPushButton,
+    RangeSettingCard,
     ScrollArea,
     SettingCard,
     SwitchSettingCard,
@@ -55,6 +56,9 @@ from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
+from app.widgets.cards.settings.render_restart_card import RenderRestartCard
+from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
+from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
 
@@ -366,7 +370,8 @@ class LLMSettingsCard(SystemCardFrame):
             "界面",
             (
                 ("appearance", "外观", "主题风格"),
-                ("pet", "桌宠", "pet"),
+                ("render", "渲染", FluentIcon.SPEED_HIGH),
+                # ("pet", "桌宠", "pet"),
             ),
         ),
         (
@@ -554,6 +559,16 @@ class LLMSettingsCard(SystemCardFrame):
         self.autoStartCard.checkedChanged.connect(self._on_toggled)
         common_layout.addWidget(self.autoStartCard)
 
+        # 单实例限制：同时只允许运行一个实例
+        self.singleInstanceCard = SwitchSettingCard(
+            FluentIcon.LAYOUT,
+            "单实例限制",
+            "开启后限制一个 Drifox 实例，重启生效",
+            configItem=self.cfg.enable_single_instance,
+            parent=self,
+        )
+        common_layout.addWidget(self.singleInstanceCard)
+
         # 简洁模式：工具调用/思考块折叠显示
         self.compactToolCard = SwitchSettingCard(
             FluentIcon.MENU,
@@ -574,6 +589,144 @@ class LLMSettingsCard(SystemCardFrame):
         )
         common_layout.addWidget(self.qtRendererCard)
         common_layout.addStretch(1)
+
+        # ════ 渲染与性能页（Webview 环境变量配置化，全部重启生效）════
+        # 换算逻辑见 app/utils/render_env.py；高级项（DisabledFeatures /
+        # ExtraChromiumFlags）不进 UI，走 app.config [Render] 组直达。
+        render_layout = self._page_layouts["render"]
+
+        # 手动重启（首项）：本页全部配置项都是 QtWebEngine 启动时一次性读取的
+        # 环境变量，运行中改无效。卡片同时承担「待生效变更」提示，监控对象为
+        # 下面所有 Render 组 ConfigItem（含未进 UI 的两个高级项）。
+        # 当前生效参数：回显本次进程实际跑的那组值，用于核对「改了有没有生效」
+        # ── Render 组配置项清单（两张卡共用：重启卡的变更计数、回显卡的恢复默认）──
+        render_items = [
+            self.cfg.render_backend,
+            self.cfg.render_webgl,
+            self.cfg.render_renderer_process_limit,
+            self.cfg.render_js_heap_mb,
+            self.cfg.render_low_end_device_mode,
+            self.cfg.render_smooth_scrolling,
+            self.cfg.render_canvas_aa,
+            self.cfg.render_disable_background_throttling,
+            self.cfg.render_share_gl_contexts,
+            self.cfg.render_disabled_features,
+            self.cfg.render_extra_flags,
+        ]
+
+        self.renderRestartCard = RenderRestartCard(
+            render_items=render_items,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderRestartCard)
+
+        self.renderStatusCard = RenderStatusCard(
+            render_items=render_items,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderStatusCard)
+
+        # 渲染后端：Qt/Chromium 图形栈档位
+        self.renderBackendCard = OptionsSettingCard(
+            self.cfg.render_backend,
+            FluentIcon.SPEED_HIGH,
+            "渲染后端",
+            "硬件 D3D11 最流畅；无独显选软件档",
+            texts=["自动", "硬件 (D3D11)", "软件 (WARP)", "软件 GL (最稳)"],
+            parent=self,
+        )
+        render_layout.addWidget(self.renderBackendCard)
+
+        # WebGL 按需解禁（3D 图形需要）
+        self.renderWebglCard = OptionsSettingCard(
+            self.cfg.render_webgl,
+            FluentIcon.GLOBE,
+            "WebGL / 3D 图形",
+            "关闭可省 GPU 进程内存",
+            texts=["自动", "开", "关"],
+            parent=self,
+        )
+        render_layout.addWidget(self.renderWebglCard)
+
+        # Chromium renderer 进程硬上限（内存治理核心项）
+        self.renderProcessLimitCard = RangeSettingCard(
+            self.cfg.render_renderer_process_limit,
+            FluentIcon.LAYOUT,
+            "Renderer 进程上限",
+            "消息卡片渲染进程数硬上限",
+            parent=self,
+        )
+        render_layout.addWidget(self.renderProcessLimitCard)
+
+        # 单 renderer JS 堆上限
+        self.renderJsHeapCard = RangeSettingCard(
+            self.cfg.render_js_heap_mb,
+            FluentIcon.CLOUD,
+            "单卡片 JS 堆上限 (MB)",
+            "限制单张消息卡片的内存",
+            parent=self,
+        )
+        render_layout.addWidget(self.renderJsHeapCard)
+
+        # Chromium 低内存模式
+        self.renderLowEndCard = SwitchSettingCard(
+            FluentIcon.REMOVE_FROM,
+            "低内存模式",
+            "压低渲染缓冲/缓存，抗锯齿略降",
+            configItem=self.cfg.render_low_end_device_mode,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderLowEndCard)
+
+        # 合成器平滑滚动
+        self.renderSmoothCard = SwitchSettingCard(
+            FluentIcon.TILES,
+            "平滑滚动",
+            "卡内滚动的合成器动画",
+            configItem=self.cfg.render_smooth_scrolling,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderSmoothCard)
+
+        # 后台渲染节流（长对话离屏卡片被降优先级 → 流式卡顿的解药）
+        self.renderThrottleCard = SwitchSettingCard(
+            FluentIcon.PAUSE,
+            "关闭后台渲染节流",
+            "离屏卡片不再被降优先级，抗流式卡顿",
+            configItem=self.cfg.render_disable_background_throttling,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderThrottleCard)
+
+        # 2D canvas 抗锯齿
+        self.renderCanvasAACard = SwitchSettingCard(
+            FluentIcon.BRUSH,
+            "Canvas 抗锯齿",
+            "开启后 echarts 图表边缘更平滑",
+            configItem=self.cfg.render_canvas_aa,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderCanvasAACard)
+
+        # 共享 GL 上下文：省约 12.7% 内存；共用一个上下文被怀疑与多卡/图表闪烁相关
+        self.renderShareGLCard = SwitchSettingCard(
+            FluentIcon.LAYOUT,
+            "共享 GL 上下文",
+            "省约 12% 内存；渲染闪烁时可尝试关闭",
+            configItem=self.cfg.render_share_gl_contexts,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderShareGLCard)
+
+        # ── 高级配置（折叠）：一条一项 + 右侧开关，扁平列表不分组；
+        # 底层仍写回 DisabledFeatures / ExtraChromiumFlags（此前只能手改 app.config）──
+        self.renderAdvancedCard = RenderAdvancedCard(
+            feature_item=self.cfg.render_disabled_features,
+            flag_item=self.cfg.render_extra_flags,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderAdvancedCard)
+        render_layout.addStretch(1)
 
         # ════ 通知页 ════
         notify_layout = self._page_layouts["notify"]
@@ -614,30 +767,30 @@ class LLMSettingsCard(SystemCardFrame):
         appearance_layout.addWidget(self.llmFontCard)
         appearance_layout.addStretch(1)
 
-        # ════ 桌宠页 ════
-        pet_layout = self._page_layouts["pet"]
+        # # ════ 桌宠页 ════
+        # pet_layout = self._page_layouts["pet"]
 
-        # 桌宠显示开关
-        self.petCard = SwitchSettingCard(
-            FluentIcon.HEART,
-            "桌宠显示",
-            "在主窗口上显示像素小狐桌宠",
-            configItem=self.cfg.pet_enabled,
-            parent=self,
-        )
-        pet_layout.addWidget(self.petCard)
+        # # 桌宠显示开关
+        # self.petCard = SwitchSettingCard(
+        #     FluentIcon.HEART,
+        #     "桌宠显示",
+        #     "在主窗口上显示像素小狐桌宠",
+        #     configItem=self.cfg.pet_enabled,
+        #     parent=self,
+        # )
+        # pet_layout.addWidget(self.petCard)
 
-        # 桌宠大小
-        self.petSizeCard = OptionsSettingCard(
-            self.cfg.pet_size,
-            FluentIcon.ZOOM,
-            "桌宠大小",
-            "调整像素桌宠的显示尺寸",
-            texts=["小 (32px)", "中 (48px)", "大 (64px)"],
-            parent=self,
-        )
-        pet_layout.addWidget(self.petSizeCard)
-        pet_layout.addStretch(1)
+        # # 桌宠大小
+        # self.petSizeCard = OptionsSettingCard(
+        #     self.cfg.pet_size,
+        #     FluentIcon.ZOOM,
+        #     "桌宠大小",
+        #     "调整像素桌宠的显示尺寸",
+        #     texts=["小 (32px)", "中 (48px)", "大 (64px)"],
+        #     parent=self,
+        # )
+        # pet_layout.addWidget(self.petSizeCard)
+        # pet_layout.addStretch(1)
 
         # ════ 版本更新页 ════
         update_layout = self._page_layouts["update"]
@@ -929,9 +1082,13 @@ class LLMSettingsCard(SystemCardFrame):
 
     @staticmethod
     def _resolve_nav_icon(icon_src) -> QIcon:
-        """导航图标源 → QIcon：字符串走主题感知资源图标，FluentIcon 枚举走内置图标"""
+        """导航图标源 → QIcon：字符串走主题感知资源图标，FluentIcon 枚举走动态主题图标"""
         if isinstance(icon_src, str):
             return get_icon(icon_src)
+        # FluentIconBase.icon() 在调用瞬间把当前主题烧进静态 QIcon（文件名含颜色），
+        # 主题切换后颜色不更新；qicon() 返回 FluentIconEngine 动态包装，绘制时按主题取色
+        if hasattr(icon_src, "qicon"):
+            return icon_src.qicon()
         return icon_src.icon() if hasattr(icon_src, "icon") else icon_src
 
     def _make_page(self) -> tuple:
@@ -1203,39 +1360,6 @@ class LLMSettingsCard(SystemCardFrame):
             self,
         )
 
-    def _setup_port_card(self):
-        """创建端口设置卡片"""
-        from qfluentwidgets import FluentIcon, SettingCard, SpinBox
-
-        class PortSettingCard(SettingCard):
-            def __init__(self, title, content, cfg, parent=None):
-                super().__init__(FluentIcon.INFO, title, content, parent)
-                self.cfg = cfg
-
-                self.spinBox = SpinBox()
-                self.spinBox.setFixedWidth(100)
-                self.spinBox.setRange(1024, 65535)
-                self.spinBox.setValue(cfg.llm_api_port.value)
-                self.spinBox.valueChanged.connect(self._on_value_changed)
-
-                self.hBoxLayout.addWidget(self.spinBox)
-                self.hBoxLayout.addSpacing(16)
-
-            def _on_value_changed(self, value):
-                self.cfg.set(self.cfg.llm_api_port, value, save=True)
-                parent = self.parent()
-                while parent and not hasattr(parent, "llmApiEnabledCard"):
-                    parent = parent.parent()
-                if parent and hasattr(parent, "llmApiEnabledCard"):
-                    parent.llmApiEnabledCard.setContent(f"http://localhost:{value}/docs")
-
-        self.llmApiPortCard = PortSettingCard(
-            "API 端口",
-            "设置 API 服务端口（1024-65535）",
-            self.cfg,
-            self,
-        )
-
     def _on_close(self):
         self.setVisible(False)
         self.closed.emit()
@@ -1311,7 +1435,14 @@ class LLMSettingsCard(SystemCardFrame):
             if hasattr(frame, "refresh_style"):
                 frame.refresh_style()
         # AppearanceComboCard / FontSettingCard（SettingCard 子类，不在以上遍历范围）
-        for card_name in ("uiFontSizeCard", "uiLightModeCard", "uiThemeStyleCard", "llmFontCard"):
+        for card_name in (
+            "uiFontSizeCard",
+            "uiLightModeCard",
+            "uiThemeStyleCard",
+            "llmFontCard",
+            "renderRestartCard",
+            "renderStatusCard",
+        ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
                 card.refresh_style()
@@ -1323,6 +1454,7 @@ class LLMSettingsCard(SystemCardFrame):
             "lspListCard",
             "pluginToolCard",
             "pluginAgentCard",
+            "renderAdvancedCard",
         ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):

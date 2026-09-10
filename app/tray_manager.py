@@ -224,17 +224,6 @@ class TrayManager(QObject):
         # `_tab_manager_window is not None` 恒为真，else 分支永不执行 ──
         # （原逻辑：过滤有效窗口、显示/隐藏全部、新建窗口菜单项）
 
-    def _get_window_menu_title(self, window, index: int) -> str:
-        """获取窗口在托盘菜单中显示的标题"""
-        try:
-            # 优先用 windowTitle（已由 _sync_dialog_title 同步为会话标题）
-            title = window.windowTitle()
-            if title and title != "飘狐":
-                return f"  {title}"
-        except RuntimeError:
-            pass
-        # 兜底：用窗口注册序号
-        return f"  窗口 {index}"
 
     # ========== 多窗口选中管理 ==========
 
@@ -244,144 +233,20 @@ class TrayManager(QObject):
             self._selected_windows.append(window)
             self._update_selection_visuals()
 
-    def is_window_selected(self, window) -> bool:
-        """检查窗口是否被选中"""
-        return window in self._selected_windows
 
-    def deselect_all(self) -> None:
-        """清除所有窗口的选中状态"""
-        if not self._selected_windows:
-            return
-        self._selected_windows.clear()
-        self._update_selection_visuals()
 
-    def _on_window_shift_clicked(self, window) -> None:
-        """窗口 Shift+点击回调 - 切换选中状态"""
-        if window in self._selected_windows:
-            self._selected_windows.remove(window)
-        else:
-            self._selected_windows.append(window)
-        self._update_selection_visuals()
 
-    def _update_selection_visuals(self) -> None:
-        """刷新所有窗口的选中标记"""
         for w in self._windows:
             try:
-                selected = w in self._selected_windows
                 if hasattr(w, "set_selection_indicator"):
                     w.set_selection_indicator(selected)
             except RuntimeError:
                 pass
 
-    def _handle_batch_move(self, source_window, delta) -> None:
-        """批量移动：所有选中窗口同 delta 偏移
-
-        Args:
-            source_window: 发起移动的窗口（已移动完毕，跳过）
-            delta: QPoint 偏移量
-        """
-        for w in self._selected_windows:
-            if w is source_window:
-                continue
-            try:
-                w.move(w.x() + delta.x(), w.y() + delta.y())
-            except RuntimeError:
-                pass
 
     _SNAP_THRESHOLD = 15  # 吸附阈值（像素）
     _TITLE_BAR_HEIGHT = 28  # 窗口标题栏高度（与 ToolWindowTitleBar.setFixedHeight(28) 一致）
 
-    def _snap_position(self, moving_rect, exclude_window=None) -> tuple:
-        """计算最近的对齐吸附位置
-
-        Args:
-            moving_rect: QRect 当前移动窗口的几何区域
-            exclude_window: 排除的窗口（自身）
-
-        Returns:
-            (snapped_x, snapped_y, is_snapped_x, is_snapped_y)
-            如果某方向未吸附，返回原值
-        """
-        x0, y0 = moving_rect.x(), moving_rect.y()
-        w, h = moving_rect.width(), moving_rect.height()
-        best_x, best_y = x0, y0
-        snapped_x, snapped_y = False, False
-        # 找最近吸附距离
-        min_dist_x = self._SNAP_THRESHOLD + 1
-        min_dist_y = self._SNAP_THRESHOLD + 1
-
-        # 获取当前屏幕号（跳过不同屏幕的窗口）
-        try:
-            from PyQt5.QtWidgets import QDesktopWidget
-
-            desktop = QDesktopWidget()
-            current_screen_idx = desktop.screenNumber(exclude_window) if exclude_window else -1
-        except Exception:
-            current_screen_idx = -1
-
-        for win in self._windows:
-            if win is exclude_window:
-                continue
-            # 只有当选中的窗口在批量拖拽时，才跳过其他选中窗口
-            # 非选中窗口拖拽时，选中窗口是有效吸附目标
-            if exclude_window in self._selected_windows and win in self._selected_windows:
-                continue
-            try:
-                # 跳过不可见或最小化的窗口
-                if win.isHidden() or win.isMinimized():
-                    continue
-                # 跳过不同屏幕的窗口
-                if current_screen_idx >= 0:
-                    try:
-                        win_screen = desktop.screenNumber(win)
-                        # -1 表示窗口尚未映射到屏幕（新窗口初始化中），不跳过
-                        if win_screen >= 0 and win_screen != current_screen_idx:
-                            continue
-                    except Exception:
-                        pass
-
-                r = win.geometry()
-                candidates_x = []
-
-                # 水平候选：左边缘、右边缘对齐
-                candidates_x.append((r.x(), abs(x0 - r.x())))  # 移动左 → 目标左
-                candidates_x.append((r.x() - w, abs(x0 + w - r.x())))  # 移动右 → 目标左
-                candidates_x.append((r.x() + r.width(), abs(x0 - r.x() - r.width())))  # 移动左 → 目标右
-                candidates_x.append((r.x() + r.width() - w, abs(x0 + w - r.x() - r.width())))  # 移动右 → 目标右
-
-                # 垂直候选：上边缘、下边缘对齐
-                candidates_y = []
-                candidates_y.append((r.y(), abs(y0 - r.y())))
-                candidates_y.append((r.y() - h, abs(y0 + h - r.y())))
-                candidates_y.append((r.y() + r.height(), abs(y0 - r.y() - r.height())))
-                candidates_y.append((r.y() + r.height() - h, abs(y0 + h - r.y() - r.height())))
-
-                # 取最近的水平吸附
-                for cand_x, dist in candidates_x:
-                    if dist < min_dist_x:
-                        min_dist_x = dist
-                        best_x = cand_x
-                        snapped_x = True
-
-                # 取最近的垂直吸附
-                for cand_y, dist in candidates_y:
-                    if dist < min_dist_y:
-                        min_dist_y = dist
-                        best_y = cand_y
-                        snapped_y = True
-
-            except RuntimeError:
-                pass
-
-        # 阈值检查：如果最近距离超出阈值，不吸附
-        if min_dist_x > self._SNAP_THRESHOLD:
-            best_x = x0
-            snapped_x = False
-        if min_dist_y > self._SNAP_THRESHOLD:
-            best_y = y0
-            snapped_y = False
-
-        return best_x, best_y, snapped_x, snapped_y
 
     def arrange_selected_windows_grid(self) -> None:
         """智能网格模式：右下锚定，自适应列数
@@ -574,27 +439,6 @@ class TrayManager(QObject):
         except RuntimeError:
             return None
 
-    def cycle_arrange_mode(self) -> str:
-        """循环切换排布模式（Ctrl+Shift+G）
-
-        依次执行：网格 → 竖列 → 折叠 → 网格 …
-        返回本次切换到的模式名称，便于调用方做提示。
-        """
-        # 三个具体排布方法入口已自带 _prune_dead_windows,此处直接分发即可
-        if not self._selected_windows:
-            return ""
-
-        mode = self._arrange_mode
-        if mode == 0:
-            self.arrange_selected_windows_grid()
-        elif mode == 1:
-            self.arrange_selected_windows_horizontal()
-        else:
-            self.arrange_selected_windows_stack()
-
-        # 切换到下一个模式（循环）
-        self._arrange_mode = (self._arrange_mode + 1) % len(self._ARRANGE_MODES)
-        return self._ARRANGE_MODES[mode]
 
     def _prune_dead_windows(self) -> None:
         """清理已销毁的窗口引用(C++ 对象已被 deleteLater 销毁)

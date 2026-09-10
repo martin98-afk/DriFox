@@ -174,13 +174,6 @@ class ConversationNodePreview(QWidget):
         for preview, timestamp in node_data:
             self.add_node(0, preview, timestamp)
 
-    def select_node(self, index: int):
-        if 0 <= index < len(self._nodes):
-            self._selected_index = index
-        else:
-            self._selected_index = -1
-        self.update()
-
     def set_visible_node(self, index: int):
         if 0 <= index < len(self._nodes):
             self._visible_index = index

@@ -1,6 +1,6 @@
 [project]
 name = "drifox"
-version = "0.5.10b4"
+version = "0.5.10"
 description = "DriFox - AI Chat Desktop Application"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -25,7 +25,6 @@ dependencies = [
     "PyQt5>=5.15.0,<5.15.16",
     "PyQtWebEngine>=5.15.0,<5.15.7",
     "PyQt-Fluent-Widgets",
-    "qtpy>=2.0.0",
     "loguru>=0.7.0",
     "openai>=1.0.0",
     "httpx>=0.25.0",
@@ -39,7 +38,6 @@ dependencies = [
     "pygments",
     "requests",
     "orjson>=3.8.0",
-    "jsonschema>=4.18.0",
     "pypinyin",
     # 全局热键
     "keyboard>=0.13.5",
@@ -47,7 +45,6 @@ dependencies = [
     "mcp>=1.0.0",
     # 插件热更新
     "watchfiles>=1.0.0",
-    "aiohttp",
     # LSP 集成 (Language Server Protocol)
     "pygls>=2.0.0",
     "lsprotocol",
