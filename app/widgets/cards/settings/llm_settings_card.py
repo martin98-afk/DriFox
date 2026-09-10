@@ -57,6 +57,7 @@ from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.render_restart_card import RenderRestartCard
+from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
 from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
@@ -705,6 +706,15 @@ class LLMSettingsCard(SystemCardFrame):
             parent=self,
         )
         render_layout.addWidget(self.renderCanvasAACard)
+
+        # ── 高级配置（折叠）：一条一项 + 右侧开关，扁平列表不分组；
+        # 底层仍写回 DisabledFeatures / ExtraChromiumFlags（此前只能手改 app.config）──
+        self.renderAdvancedCard = RenderAdvancedCard(
+            feature_item=self.cfg.render_disabled_features,
+            flag_item=self.cfg.render_extra_flags,
+            parent=self,
+        )
+        render_layout.addWidget(self.renderAdvancedCard)
         render_layout.addStretch(1)
 
         # ════ 通知页 ════
@@ -1433,6 +1443,7 @@ class LLMSettingsCard(SystemCardFrame):
             "lspListCard",
             "pluginToolCard",
             "pluginAgentCard",
+            "renderAdvancedCard",
         ):
             card = getattr(self, card_name, None)
             if card is not None and hasattr(card, "refresh_style"):
