@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.5.10] - 2026-09-10
+## [v0.5.10] - 2026-09-10 (重新发布)
 
-自上一版本以来的变更 | 提交数：31 · 文件变更：302 · +14217/-21500 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：71 · 文件变更：404 · +26459/-26522 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -17,6 +17,8 @@ All notable changes to this project will be documented in this file.
 - **移除未用 gateway 通信平台配置** (`app/gateway/`): 清理未启用的通讯平台注册项，缩减依赖面与维护成本。
 - **桌面宠物功能默认关闭** (`app/widgets/pixmap_pet.py`、`app/utils/config.py`): UI 设置中桌面宠物开关默认关闭，避免对部分用户造成视觉干扰。
 - **清理/更新/新增图片资源** (`assets/`、`app/widgets/`): 删除未引用图片优化体积，更新并补充部分图标/插画改善视觉效果。
+- **应用内更新改为半静默安装** (`app/update_checker.py`, `dist/installer.iss`): 点「立即更新」后不再需要一步步点完 Inno 向导 —— 下载完成即以 `/SILENT` 拉起安装器（只留进度条窗口，进度可见、全程零点击），配 `/NORESTART` `/SP-` `/CLOSEAPPLICATIONS`，并写 `%TEMP%\Drifox-Setup.log` 便于失败回溯。安装器侧配套三项：`CloseApplications=yes` + `CloseApplicationsFilter=*.exe,*.dll,*.chm`，让没退干净的旧进程被直接结束（否则 `[InstallDelete]` 清 `{app}` 会因文件占用失败）；`RestartApplications=no` 避免与下面的自动启动双开；`[Run]` 新增一条 `skipifnotsilent` + `runasoriginaluser` 条目，静默装完自动以原用户身份拉起新版本（不继承安装时的管理员权限），而双击交互安装仍走完成页复选框。刻意**不加** `/SUPPRESSMSGBOXES`：安装出错时保留提示，否则静默失败用户无从得知。下载进度框收尾改为「正在安装更新，完成后将自动启动…」后随主程序退出，交接给安装器自己的进度条。
+- **plugin-creator / ui-plugin-creator 技能重建为轻量路由形态** (`plugins/system-skills/skills/plugin-creator/`, `plugins/system-skills/skills/ui-plugin-creator/`): 两份 SKILL.md 由长文压成纯路由表（plugin-creator 681→139 行、ui-plugin-creator 229→122 行），正文只留「做什么 → 读哪个 reference」的调度，细节下沉到 references/ 按需加载（plugin-creator 6 件：components/manifest/publishing/testing/troubleshooting/workflow；ui-plugin-creator 19 件：architecture/checklist/modifying/patterns/pitfalls/workflow + widgets 系列 6 件 + templates 系列 6 件 + testing-vendor）；新增 `evals/trigger-eval.json`（16 / 15 cases）做触发准确率回归；新增 `scripts/check_skill_package.py` 校验包结构、frontmatter 与引用完整性；examples/ 补齐 tool-plugin、config-schema-plugin、gateway、floating-card、welcome-tab 五类可跑样例。
 
 ### 🐛 问题修复 (Bug Fixes)
 
@@ -25,6 +27,7 @@ All notable changes to this project will be documented in this file.
 - **补齐 8 个文件缺失的 typing 导入** (`app/`、`tests/`): 修复 `NameError: name 'Optional' is not defined` 等未定义名称错误。
 - **修复 Python2 风格 except 与未闭合字符串（59+1 处，P0）** (`app/`、`tests/`): 残留的 `except A, B:` 与多行字符串未闭合语法统一改为 Python3 风格，解除 pytest collection 阻塞。
 - **导航图标主题感知动态切换** (`app/widgets/navigation/_resolve_nav_icon.py`): 根据当前主题返回对应图标，修复深色/浅色主题切换后图标不更新的问题。
+- **ui-plugin-creator 模板文档断链** (`plugins/system-skills/skills/ui-plugin-creator/`): 2076 行的 `references/templates.md` 按用途拆为 templates-cards / templates-entries / templates-plugins / templates-renderers / templates-welcome-tab / templates-workbench 六件，示例代码 `card_template.py` 从 `references/` 迁到 `assets/`，并同步修正各文档内链；`check_skill_package.py` 一并修掉跨包路径误判（`drifox-dev/references/...` 曾被当作本包断链）。
 
 ### ♻️ 代码重构 (Refactoring)
 

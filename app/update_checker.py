@@ -233,33 +233,57 @@ class UpdateChecker(QWidget):
     # ------------------------------------------------------------------
 
     def _handle_download_finished(self):
-        """下载完成：直接开始安装（不再弹窗确认）"""
+        """下载完成：直接进入安装（不再弹窗确认）"""
         if self.progress_dialog:
-            self.progress_dialog.close()
+            # 后续进度由安装器自己的进度条接管，这里只留一句状态提示后随主程序退出
+            self.progress_dialog.setLabelText("正在安装更新，完成后将自动启动…")
+            self.progress_dialog.setValue(100)
+            self.progress_dialog.repaint()
 
         self._run_installer()
 
     def _run_installer(self):
-        """启动安装向导（Windows 运行 exe，macOS 自动升级）"""
+        """启动安装（Windows 半静默、macOS 自动升级）"""
         system = platform.system().lower()
         try:
             if system == "darwin":
                 self._run_macos_upgrade()
             else:
-                # Windows 运行 EXE 安装向导
-                # args 已经是列表，shell=True 多余，去除消除 CWE-78 风险
-                subprocess.Popen(
-                    [self.installer_path],
-                    shell=False,
-                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
-                    | subprocess.DETACHED_PROCESS,
-                )
+                self._run_windows_installer()
 
             # 立即关闭主程序
             QApplication.quit()
             os._exit(0)
         except Exception as e:
             self.create_errorbar("启动失败", str(e))
+
+    def _run_windows_installer(self):
+        """Windows：一条进度条装完，装完由安装器自动拉起新版本
+
+        参数与 `dist/installer.iss` 配套：
+        - `/SILENT`：只显示进度条窗口，跳过向导页与「完成」页，全程零点击、进度可见
+          （`/VERYSILENT` 连窗口都没有，用户看不到安装进度，故不用）
+        - `/CLOSEAPPLICATIONS`：旧进程若未退干净，由安装器直接结束，避免 [InstallDelete]
+          清空 {app} 时因文件占用失败（需 iss 里 `CloseApplications=yes`，已配）
+        - 不加 `/SUPPRESSMSGBOXES`：安装出错时保留错误提示，否则静默失败用户无从得知
+        - 自动启动不在这里做：iss 的 [Run] 有一条 `skipifnotsilent` 条目，只在静默模式下
+          执行，且带 `runasoriginaluser`，不会让新进程继承安装时的管理员权限
+        """
+        args = [
+            self.installer_path,
+            "/SILENT",
+            "/NORESTART",
+            "/SP-",
+            "/CLOSEAPPLICATIONS",
+            "/LOG=" + os.path.join(tempfile.gettempdir(), "Drifox-Setup.log"),
+        ]
+        # args 已经是列表，shell=True 多余，去除消除 CWE-78 风险
+        subprocess.Popen(
+            args,
+            shell=False,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.DETACHED_PROCESS,
+        )
 
     def _run_macos_upgrade(self):
         """macOS 自动升级：挂载DMG → 拷贝 .app 到 /Applications → 启动新版本"""

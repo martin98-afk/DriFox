@@ -1,134 +1,128 @@
 ---
-description: 發布插件到 drifox-plugins 官方市場的完整流程
+description: 发布插件到 drifox-plugins 官方市场的完整流程
 ---
 
-# 發布到官方市場
+# 发布到官方市场
 
-> 任何人都可以發布自己的插件！先 Fork → 再 PR，開發完成後提交到 [github.com/martin98-afk/drifox-plugins](https://github.com/martin98-afk/drifox-plugins) 讓所有 DriFox 用戶可用。
+> 任何人都可以发布自己的插件！先 Fork → 再 PR，开发完成后提交到 [github.com/martin98-afk/drifox-plugins](https://github.com/martin98-afk/drifox-plugins) 让所有 DriFox 用户可用。
 
 ---
 
-## 完整工作流
+## 工作流总览
 
 ```
-① Fork 官方倉庫 → https://github.com/martin98-afk/drifox-plugins（點右上角 Fork）
-② Clone 你的 fork → git clone https://github.com/<你的帳號>/drifox-plugins.git
-③ 把你的插件複製到倉庫中 → cp -r ~/.drifox/plugins/<name> plugins/<name>
-④ 跑驗證 → python tools/validate_plugins.py + generate_marketplace.py
+① Fork 官方仓库 → https://github.com/martin98-afk/drifox-plugins（点右上角 Fork）
+② Clone 你的 fork → git clone https://github.com/<你的帐号>/drifox-plugins.git
+③ 把你的插件复制到仓库中 → cp -r ~/.drifox/plugins/<name> plugins/<name>
+④ 跑验证 → python tools/validate_plugins.py + generate_marketplace.py
 ⑤ Commit & Push 到你的 fork
 ⑥ 在 GitHub 提交 PR（你的 fork → martin98-afk/drifox-plugins main）
-⑦ CI 自動校驗，通過後 maintainer 合併 → 你的插件上架 🎉
+⑦ CI 自动校验，通过后 maintainer 合并 → 你的插件上架 🎉
 ```
 
 ---
 
-## 步驟詳解
-
-### ① 本地開發完成
-
-確認你的插件：
-- 在 DriFox 中能正常加載
-- 所有組件功能正確
-- 版本號已更新
-
-### ② Fork + Clone
+## 完整提交流程（八步）
 
 ```bash
-# 先到 https://github.com/martin98-afk/drifox-plugins 點右上角 Fork
-# 然後 clone 你的 fork
-git clone https://github.com/<你的GitHub帳號>/drifox-plugins.git /tmp/dfp
+# 1. 先在 GitHub 上 Fork 官方市场仓库
+#    网址：https://github.com/martin98-afk/drifox-plugins → 点右上角 Fork
+
+# 2. clone 你的 fork
+git clone https://github.com/<你的GitHub帐号>/drifox-plugins.git /tmp/dfp
 cd /tmp/dfp
 
-# 把官方倉庫設為 upstream（便於同步）
+# 3. 把官方仓库设为 upstream（便于同步）
 git remote add upstream https://github.com/martin98-afk/drifox-plugins.git
 
-# 從本地開發目錄複製你的插件
-cp -r ~/.drifox/plugins/<your-plugin> plugins/<your-plugin>
-```
+# 4. 建立特性分支
+git checkout -b feat/<plugin-name>
 
-### ③ 驗證
+# 5. 把你的插件从本地开发目录复制进来
+cp -r ~/.drifox/plugins/<plugin-name> plugins/<plugin-name>
 
-```bash
+# 6. 跑验证
 python tools/validate_plugins.py
 python tools/generate_marketplace.py
-```
+#    marketplace.json 由 generate 脚本自动生成，无需手动编辑
 
-兩條命令都應輸出 `OK`。
-
-### ④ 創建分支
-
-```bash
-git checkout -b feat/<plugin-name>
-```
-
-### ⑤ Commit
-
-```bash
+# 7. commit 并推送
 git add plugins/<plugin-name>/ marketplace.json
 git commit -m "feat(<plugin-name>): 添加 xx 插件"
-```
-
-使用 Conventional Commits 格式：
-```
-feat(<plugin-name>): 添加新插件
-fix(<plugin-name>): 修復 xx 問題
-docs(<plugin-name>): 補充說明
-refactor(<plugin-name>): 重構 xx 模塊
-```
-
-### ⑥ Push + PR
-
-```bash
-# 推送到你的 fork
 git push origin feat/<plugin-name>
+
+# 8. 到 GitHub 上创建 Pull Request
+#    你的 fork → martin98-afk/drifox-plugins main
+#    链接：https://github.com/martin98-afk/drifox-plugins/pulls
 ```
 
-然後到 [github.com/martin98-afk/drifox-plugins](https://github.com/martin98-afk/drifox-plugins) 上創建 Pull Request：
-- **base repository**: `martin98-afk/drifox-plugins` → `main`
-- **head repository**: `<你的帳號>/drifox-plugins` → `feat/<plugin-name>`
+> ⚠️ 第 6 步未通过 → 禁止进入第 7 步（SKILL.md 硬停止第 6 条）。
 
 ---
 
-## CI 說明
+## Commit 规范
 
-PR 提交後 GitHub Actions 自動執行：
+使用 Conventional Commits 格式：
 
-1. **validate** — 檢查所有插件 manifest + 組件完整性
-2. **auto-fix-marketplace** — 如果 `marketplace.json` 過期，bot 自動修復並 commit 到 PR 分支
-3. ✅ 全部通過 → 等待 maintainer 合併
+```
+feat(<plugin-name>): 添加新插件
+fix(<plugin-name>): 修复 xx 问题
+docs(<plugin-name>): 补充说明
+refactor(<plugin-name>): 重构 xx 模块
+```
 
-### Bot 自動修復
+---
 
-當你修改 `plugin.json` 後忘了跑 `generate_marketplace.py` 時：
-- CI 的 `auto-fix-marketplace` job 會自動生成並 commit 修復
-- commit 含 `[skip ci]` 防止無限循環
-- PR 場景 → commit 到 PR head 分支
-- push main 場景 → commit 到 main
+## CI 说明
+
+PR 提交后 GitHub Actions 自动执行：
+
+1. **validate** — 检查所有插件 manifest + 组件完整性；跑 validate + generate，失败排查见 references/troubleshooting.md「PR 的 CI 失败」
+2. **auto-fix-marketplace** — 如果 `marketplace.json` 过期，bot 自动修复并 commit 到 PR 分支
+3. ✅ 全部通过 → 等待 maintainer 合并
+
+### Bot 自动修复
+
+当你修改 `plugin.json` 后忘了跑 `generate_marketplace.py` 时：
+- CI 的 `auto-fix-marketplace` job 会自动生成并 commit 修复
+- commit 含 `[skip ci]` 防止无限循环
+- PR 场景 → commit 到 PR head 分支
+- push main 场景 → commit 到 main
+
+---
+
+## PR 合并后
+
+- marketplace.json 自动更新
+- 你的插件名称出现在官方市场中
+- 所有 DriFox 用户可通过 plugin-marketplace UI 浏览和安装你的插件 🎉
 
 ---
 
 ## 版本策略
 
-| 變更類型 | 版本升級 | 示例 |
+| 变更类型 | 版本升级 | 示例 |
 |---------|---------|------|
-| 首次發布 | `0.1.0` → `1.0.0` | 穩定版 |
-| Bug 修復 | 升 patch | `1.0.0` → `1.0.1` |
+| 首次发布 | `0.1.0` → `1.0.0` | 稳定版 |
+| Bug 修复 | 升 patch | `1.0.0` → `1.0.1` |
 | 新增功能 | 升 minor | `1.0.0` → `1.1.0` |
-| 破壞性變更 | 升 major | `1.0.0` → `2.0.0` |
+| 破坏性变更 | 升 major | `1.0.0` → `2.0.0` |
 
-破壞性變更必須在 PR 描述中寫明遷移指南。
+破坏性变更必须在 PR 描述中写明迁移指南。
 
 ---
 
-## 插件維護
+## 插件维护
 
-- 不再維護的插件：`components` 全部設為 `false`，**不要刪除插件目錄**
+- 不再维护的插件：`components` 全部设为 `false`，**不要删除插件目录**
 - 新增事件或字段：同步更新 `schemas/plugin.schema.json`、`tools/generate_marketplace.py`、`docs/`
-- 修改別人的插件：先開 Issue 討論
+- 修改别人的插件：先开 Issue 讨论
+
+marketplace.json 中每条记录的结构由 `tools/generate_marketplace.py` 自动从 `plugin.json` 生成，无需手动编辑。
 
 ---
 
-## 參考
+## 参考
 
-- [CONTRIBUTING.md](https://github.com/martin98-afk/drifox-plugins/blob/main/CONTRIBUTING.md) — 完整貢獻指南
-- [GitHub 倉庫](https://github.com/martin98-afk/drifox-plugins) — 官方插件市場
+- [CONTRIBUTING.md](https://github.com/martin98-afk/drifox-plugins/blob/main/CONTRIBUTING.md) — 完整贡献指南
+- [GitHub 仓库](https://github.com/martin98-afk/drifox-plugins) — 官方插件市场

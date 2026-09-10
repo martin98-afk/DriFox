@@ -1,7 +1,7 @@
 # 核心模式与约定
 
 > 本文是 `SKILL.md §4` 的完整展开。
-> 模板见 `references/templates.md`，可复用 widgets 见 `references/widgets.md`。
+> 模板见 `references/templates-*.md` 系列（按组件选件），可复用 widgets 见 `references/widgets.md`。
 
 ---
 
@@ -373,7 +373,7 @@ def register_ui(registry):
 
 ### 4.3 含 _vendor/ 的特殊情况
 
-如果插件用了 `_vendor/`，还需额外清理 vendored 包的 `sys.modules` 缓存。详见 `templates.md §五.5.1`。
+如果插件用了 `_vendor/`，还需额外清理 vendored 包的 `sys.modules` 缓存。详见 `templates-plugins.md.5.1`。
 
 ---
 
@@ -432,7 +432,7 @@ class MyCard(QWidget):
 
 ## 7. 弹窗/确认对话框 — 统一 MaskDialogBase 风格
 
-> 完整代码模板见 `templates.md §七`。
+> 完整代码模板见 `templates-cards.md`。
 
 ### 7.1 为什么不用 QMessageBox
 
@@ -489,13 +489,13 @@ def _on_uninstall(self):
         self._do_uninstall()
 ```
 
-完整实现见 `templates.md §七`。
+完整实现见 `templates-cards.md`。
 
 ---
 
 ## 8. 外部依赖管理（_vendor/ 模式）
 
-> 详细内容见 `references/templates.md §五`，这里只列核心要点。
+> 详细内容见 `references/templates-plugins.md`，这里只列核心要点。
 
 ### 8.1 适用场景
 
@@ -518,7 +518,7 @@ UI 插件从 PyInstaller exe 解包后下载到 `~/.drifox/plugins/` 使用，**
 | 含 C 扩展但 PyInstaller 未声明 | ⚠️ **不要用 _vendor/**，跨平台/版本会崩溃 |
 | 巨型包（`numpy`, `torch`, `pandas`） | ❌ 不适合 _vendor/（体积太大） |
 
-完整模板见 `templates.md §五.5`，含 sys.modules 缓存陷阱说明。
+完整模板见 `templates-plugins.md.5`，含 sys.modules 缓存陷阱说明。
 
 ---
 

@@ -21,7 +21,7 @@
 | 新字段缺失时回退到旧字段估算 | `widgets-sqlite.md §三` |
 | 把 ctx["colors"] 转成图表用的 QColor 字典 | `widgets-theme.md §二` |
 | 浮动卡片主题色适配（白字固定） | `widgets-theme.md §一/§三` |
-| **弹窗/确认对话框（统一 MaskDialogBase 风格）** | **`templates.md §七`** |
+| **弹窗/确认对话框（统一 MaskDialogBase 风格）** | **`templates-cards.md`** |
 
 ---
 
@@ -69,7 +69,7 @@ plugins/<your-plugin>/
 
 ## 3. 最小整合示例
 
-> 想看完整整合示例 → 见 `templates.md §六`。
+> 想看完整整合示例 → 见 `templates-cards.md`。
 > 下面只展示"如何在一个新卡片里快速用上这些 widgets"。
 
 ```python
@@ -130,7 +130,7 @@ class MyCard(QWidget):
             self._content_layout.addWidget(bar)
 ```
 
-`set_context_provider` / `show_card` / `_apply_latest_theme` / `_async_load_data` 等浮动卡片骨架见 `templates.md §一`。
+`set_context_provider` / `show_card` / `_apply_latest_theme` / `_async_load_data` 等浮动卡片骨架见 `templates-cards.md`。
 
 ---
 
@@ -144,14 +144,14 @@ references/
 ├─ widgets-utils.md         ← 工具函数（数字格式化 / token 估算 / 日期带星期）
 ├─ widgets-sqlite.md        ← SQLite 读取模式（路径兜底 / N 天窗口 / fallback）
 ├─ widgets-theme.md         ← 主题色映射（ctx → QColor 字典）
-└─ templates.md §六         ← 把 widgets 集成到浮动卡片骨架
+└─ templates-cards.md         ← 把 widgets 集成到浮动卡片骨架
 ```
 
 ---
 
 ## 5. 与其他章节的衔接
 
-- **templates.md §一**：浮动卡片骨架（头部 / 比例高度 / 异步 worker）
+- **templates-cards.md**：浮动卡片骨架（头部 / 比例高度 / 异步 worker）
 - **SKILL.md §4.1**：上下文注入（拉模型）
 - **SKILL.md §4.2**：比例高度
 - **SKILL.md §4.6**：卡片关闭信号
@@ -159,9 +159,9 @@ references/
 
 新建一个 UI 插件的推荐流程：
 
-1. 复制 `templates.md §一` 浮动卡片骨架到 `ui/cards.py`
+1. 复制 `templates-cards.md` 浮动卡片骨架到 `ui/cards.py`
 2. 复制 `widgets-statcard.md` / `widgets-charts.md` / `widgets-utils.md` 等需要的部分到 `ui/widgets.py`
-3. 复制 `templates.md §四` register_ui 入口到 `ui/__init__.py`
+3. 复制 `templates-plugins.md` register_ui 入口到 `ui/__init__.py`
 4. 写 `_fetch_data()` 用 `widgets-sqlite.md` 的查询模式
 5. 写 `_render_content()` 用 `widgets-statcard.md` / `widgets-charts.md` 的控件
 6. `ruff check` + 触发热重载验证
@@ -178,7 +178,7 @@ references/
 | 浮动卡片背景暗导致黑色字 | `text` / `text_secondary` 固定白色 | `widgets-theme.md §二.2` |
 | 标签被顶部裁剪 | 折线图 `top_margin = max_val * 0.3` | `widgets-charts.md §二.4` |
 | 旧数据无新字段 | 精确值 + 估算值 分开查再相加 | `widgets-sqlite.md §三` |
-| SQLite 连接阻塞 UI | 用 `_DataWorker` 后台线程跑 | `templates.md §一` |
+| SQLite 连接阻塞 UI | 用 `_DataWorker` 后台线程跑 | `templates-cards.md` |
 | 主题色不生效 | 确认 `_apply_latest_theme` 在 `show_card` 中调用 | `widgets-theme.md §四` |
 | 图表刷新不及时 | `set_data(...)` 后 `self.update()` | `widgets-charts.md §五` |
 | 数据库被锁 | `timeout=3` + 短事务 + 必要时重试 | `widgets-sqlite.md §四.4.2` |
@@ -186,3 +186,5 @@ references/
 | `messages` JSON 太大 OOM | `str(msg_data)[:100000]` 截断 | `widgets-sqlite.md §三.3` |
 | `_BarChartWidget` 柱顶标签溢出 | `if label_y < margin_top: label_y = y + 4` | `widgets-charts.md §一.5` |
 | 上下文颜色字符串无效 | try/except + fallback | `widgets-theme.md §六.1` |
+
+> 编码级踩坑（Python 3.14 语法 / 剪贴板 setImage / InfoBar / 字体注入等）另见 `pitfalls.md`。
