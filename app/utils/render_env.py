@@ -8,11 +8,17 @@ QT_ANGLE_PLATFORM，之后修改无效 —— 因此本模块由 main.py 在所�
 qfluentwidgets 全量配置拖慢启动 / 提前加载 GUI 栈），换算成环境变量交给 Qt。
 
 档位与默认值（与 app/utils/config.py 的 Render 配置组一一对应，均重启生效）：
-- RenderBackend: auto / hardware(ANGLE d3d11) / software(ANGLE warp) / software_gl
-  - auto：沿用旧检测链 _detect_software_render()
+- RenderBackend: **software(默认, ANGLE warp)** / hardware(ANGLE d3d11) / software_gl
+  / vulkan / d3d9 / swiftshader
+  - software：默认档，Qt 走 ANGLE → WARP（CPU 光栅），完全不碰显卡驱动
   - hardware：保留 GPU 进程，禁 SwiftShader 兜底（驱动异常时显式失败不静默退化）
-  - software / software_gl：纯 CPU 光栅，完全不碰显卡驱动
-- WebglEnabled: auto（旧检测链）/ on / off
+  - software_gl：Mesa llvmpipe 桌面 GL，最慢最稳
+  - vulkan / d3d9 / swiftshader：排障档，见 _ANGLE_PLATFORM 注释
+  - **无 auto 档**（2026-09-10 移除）：它其实不检测机器，只是读人工放的
+    ~/.drifox/software_render 标记文件 / DRIFOX_SOFTWARE_RENDER 环境变量，名不副实。
+    该检测链已删除；历史配置里残留的 "auto"（以及手改的非法值、缺 key）一律按
+    出厂默认 software 处理。
+- WebglEnabled: auto（旧检测链：DRIFOX_ENABLE_WEBGL → ~/.drifox/webgl_enabled）/ on / off
 - RendererProcessLimit / JsHeapMb / LowEndDeviceMode / SmoothScrolling /
   CanvasAA / DisableBackgroundThrottling / DisabledFeatures / ExtraChromiumFlags：
   直通 Chromium 开关（DisableBackgroundThrottling 默认关，保持 Chromium 原生节流）
@@ -67,6 +73,7 @@ _ANGLE_PLATFORM = {
 }
 
 # 与 app/utils/config.py Render 组默认值/范围保持一致
+_DEFAULT_BACKEND = "software"  # 出厂默认：软件 (WARP)，不碰显卡驱动
 _DEFAULT_RENDERER_LIMIT = 6
 _RENDERER_LIMIT_RANGE = (1, 32)
 _DEFAULT_JS_HEAP_MB = 128
@@ -75,16 +82,6 @@ _DEFAULT_DISABLED_FEATURES = "Translate,MediaRouter,optimizeHints,CalculateNativ
 
 # apply_render_env 的留档（AA_* 类设置无处反查，见 applied_settings）
 _APPLIED: dict = {}
-
-
-def _detect_software_render() -> bool:
-    """软件回退检测链：DRIFOX_SOFTWARE_RENDER 环境变量 → ~/.drifox/software_render 标记文件。"""
-    if os.environ.get("DRIFOX_SOFTWARE_RENDER", "").strip().lower() in ("1", "true", "on", "yes"):
-        return True
-    try:
-        return os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox", "software_render"))
-    except Exception:
-        return True
 
 
 def _detect_webgl_enabled() -> bool:
@@ -98,17 +95,17 @@ def _detect_webgl_enabled() -> bool:
 
 
 def compute_settings(render: dict) -> dict:
-    """[Render] 配置组 → 渲染设置（纯函数；检测链为模块级函数，便于测试打桩）。"""
-    backend_raw = render.get("RenderBackend", "auto")
-    explicit = backend_raw in _ANGLE_PLATFORM or backend_raw == "software_gl"
-    if explicit:
+    """[Render] 配置组 → 渲染设置（纯函数；WebGL 检测链为模块级函数，便于测试打桩）。"""
+    # 缺 key（从未设置过）/ 历史 "auto" / 手改非法值 → 出厂默认：软件 (WARP)。
+    # 原 auto 检测链（DRIFOX_SOFTWARE_RENDER → ~/.drifox/software_render 标记文件）
+    # 已删除：默认档本身就是最保守的软件档，那条链既没有升级空间，也不是真检测。
+    backend_raw = render.get("RenderBackend", "")
+    if backend_raw in _ANGLE_PLATFORM or backend_raw == "software_gl":
         backend = backend_raw
-        # software_render 只用于 auto 档回退与 UI 语义：凡是走 CPU 的档位都算
-        software_render = backend_raw != "hardware"
     else:
-        # auto / 缺失 / 手改非法值 → 旧检测链
-        software_render = _detect_software_render()
-        backend = "software" if software_render else "hardware"
+        backend = _DEFAULT_BACKEND
+    # software_render 只用于语义标记：凡是走 CPU 的档位都算
+    software_render = backend != "hardware"
 
     webgl_raw = render.get("WebglEnabled", "auto")
     if webgl_raw == "on":

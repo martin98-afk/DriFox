@@ -632,9 +632,8 @@ class LLMSettingsCard(SystemCardFrame):
             self.cfg.render_backend,
             # ⚠️ 顺序必须与 render_backend 的 OptionsValidator 逐一对应
             texts=[
-                "自动",
-                "硬件 (D3D11)",
                 "软件 (WARP)",
+                "硬件 (D3D11)",
                 "软件 GL (最稳)",
                 "Vulkan (排障)",
                 "D3D9 (老机器)",

@@ -13,9 +13,8 @@ from __future__ import annotations
 
 from qfluentwidgets import FluentIcon, OptionsSettingCard, qconfig
 
-# 档位 → 头部一行说明（短）
+# 档位 → 头部一行说明（短）。无 auto 档：它不检测机器、只是读人工放的标记文件。
 DESCRIPTIONS = {
-    "auto": "跟随环境变量 / 标记文件自动选择",
     "hardware": "真实显卡跑 D3D11，最快",
     "software": "CPU 模拟 D3D11，驱动崩时用",
     "software_gl": "Mesa 纯 CPU 光栅，最慢最稳",
@@ -26,8 +25,6 @@ DESCRIPTIONS = {
 
 # 档位 → 展开后 tooltip 详解（可以长）
 TIPS = {
-    "auto": "默认档：走旧检测链（DRIFOX_SOFTWARE_RENDER 环境变量 → ~/.drifox/software_render 标记文件），"
-    "没标记就用硬件 D3D11。日常保持这个即可。",
     "hardware": "Qt 走 ANGLE → D3D11，由真实显卡驱动执行。正常机器的首选，合成与滚动都交给 GPU。",
     "software": "Qt 仍走 ANGLE → D3D11，但 D3D11 设备换成 WARP（微软的 CPU 光栅器）。"
     "驱动崩溃但仍能用 D3D11 时的第一选择，比软件 GL 快。",
