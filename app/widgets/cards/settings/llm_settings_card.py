@@ -631,8 +631,17 @@ class LLMSettingsCard(SystemCardFrame):
             self.cfg.render_backend,
             FluentIcon.SPEED_HIGH,
             "渲染后端",
-            "硬件 D3D11 最流畅；无独显选软件档",
-            texts=["自动", "硬件 (D3D11)", "软件 (WARP)", "软件 GL (最稳)"],
+            "硬件 D3D11 最流畅；异常时按顺序往下试",
+            # ⚠️ 顺序必须与 render_backend 的 OptionsValidator 逐一对应
+            texts=[
+                "自动",
+                "硬件 (D3D11)",
+                "软件 (WARP)",
+                "软件 GL (最稳)",
+                "Vulkan (排障)",
+                "D3D9 (老机器)",
+                "SwiftShader (双保险)",
+            ],
             parent=self,
         )
         render_layout.addWidget(self.renderBackendCard)

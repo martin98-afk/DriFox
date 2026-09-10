@@ -329,6 +329,57 @@ def test_describe_applied_software_variants():
     assert describe_applied({"QT_OPENGL": "desktop"})["backend"] == "custom"
 
 
+# ══ 排障档位：Vulkan / D3D9 / SwiftShader ══
+
+
+def test_angle_platform_follows_backend(tmp_path):
+    """排障档 → QT_ANGLE_PLATFORM；software_gl 走 QT_OPENGL=software"""
+    cases = {
+        "hardware": ("angle", "d3d11"),
+        "software": ("angle", "warp"),
+        "vulkan": ("angle", "vulkan"),
+        "d3d9": ("angle", "d3d9"),
+        # Qt 侧没有 swiftshader 这个 ANGLE 平台，仍走 WARP（靠 flag 区分）
+        "swiftshader": ("angle", "warp"),
+        "software_gl": ("software", None),
+    }
+    for backend, (opengl, angle) in cases.items():
+        os.environ.pop("QT_OPENGL", None)
+        os.environ.pop("QT_ANGLE_PLATFORM", None)
+        apply_render_env(_write_config(tmp_path, {"RenderBackend": backend}))
+        assert os.environ.get("QT_OPENGL") == opengl, backend
+        assert os.environ.get("QT_ANGLE_PLATFORM") == angle, backend
+
+
+def test_swiftshader_keeps_gpu_and_adds_angle_flag():
+    """SwiftShader 档：保留 GPU 进程 + 追加 --use-angle=swiftshader"""
+    s = compute_settings({"RenderBackend": "swiftshader"})
+    assert s["disable_gpu"] is False
+    assert s["enable_swiftshader"] is True
+    assert "--use-angle=swiftshader" in build_chromium_flags(s)
+
+
+def test_vulkan_and_d3d9_keep_gpu_without_swiftshader():
+    """Vulkan / D3D9 走真实 GPU：保留 GPU 进程，不追加 swiftshader"""
+    for backend in ("vulkan", "d3d9"):
+        s = compute_settings({"RenderBackend": backend})
+        assert s["disable_gpu"] is False, backend
+        assert s["enable_swiftshader"] is False, backend
+        assert "--use-angle=swiftshader" not in build_chromium_flags(s)
+
+
+def test_describe_applied_recognises_new_backends():
+    """回显能认出排障档（SwiftShader 只能靠 Chromium flag 认）"""
+    assert describe_applied({"QT_OPENGL": "angle", "QT_ANGLE_PLATFORM": "vulkan"})["backend"] == "vulkan"
+    assert describe_applied({"QT_OPENGL": "angle", "QT_ANGLE_PLATFORM": "d3d9"})["backend"] == "d3d9"
+    env = {
+        "QT_OPENGL": "angle",
+        "QT_ANGLE_PLATFORM": "warp",
+        "QTWEBENGINE_CHROMIUM_FLAGS": "--use-angle=swiftshader",
+    }
+    assert describe_applied(env)["backend"] == "swiftshader"
+
+
 def test_describe_applied_without_env():
     """非 Windows（未设 ANGLE）：backend 空串，数值位 0"""
     s = describe_applied({})

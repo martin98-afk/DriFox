@@ -52,6 +52,20 @@ __all__ = [
     "describe_applied",
 ]
 
+# 后端档位 → ANGLE 平台（QT_ANGLE_PLATFORM）。不含 software_gl：它不走 ANGLE，
+# 而是 QT_OPENGL=software（Mesa llvmpipe）。
+# 注：vulkan / d3d9 是排障档 —— 驱动支持不全时会黑屏，Qt 也可能静默回退默认值，
+# 所以只给「显卡驱动有问题」的场景试，不要当常规选项。
+_ANGLE_PLATFORM = {
+    "hardware": "d3d11",
+    "software": "warp",
+    "vulkan": "vulkan",
+    "d3d9": "d3d9",
+    # Qt 侧没有 swiftshader 这个 ANGLE 平台，故 Qt 仍走 WARP；
+    # Chromium 侧由 build_chromium_flags 追加 --use-angle=swiftshader
+    "swiftshader": "warp",
+}
+
 # 与 app/utils/config.py Render 组默认值/范围保持一致
 _DEFAULT_RENDERER_LIMIT = 6
 _RENDERER_LIMIT_RANGE = (1, 32)
@@ -86,9 +100,10 @@ def _detect_webgl_enabled() -> bool:
 def compute_settings(render: dict) -> dict:
     """[Render] 配置组 → 渲染设置（纯函数；检测链为模块级函数，便于测试打桩）。"""
     backend_raw = render.get("RenderBackend", "auto")
-    explicit = backend_raw in ("hardware", "software", "software_gl")
+    explicit = backend_raw in _ANGLE_PLATFORM or backend_raw == "software_gl"
     if explicit:
         backend = backend_raw
+        # software_render 只用于 auto 档回退与 UI 语义：凡是走 CPU 的档位都算
         software_render = backend_raw != "hardware"
     else:
         # auto / 缺失 / 手改非法值 → 旧检测链
@@ -104,12 +119,13 @@ def compute_settings(render: dict) -> dict:
         webgl = _detect_webgl_enabled()
 
     # GPU 开关三选一（对应 build_chromium_flags 的 GPU 段）：
-    # - 显式 hardware：用户声明硬件可用 → 保留 GPU，只禁 SwiftShader 软件兜底
+    # - 显式 hardware / vulkan / d3d9：用户声明走真实 GPU → 保留 GPU 进程
+    # - swiftshader：Qt 侧走 WARP、Chromium 侧走自带 CPU 光栅双保险 → GPU 进程要留着
     # - WebGL 开：--disable-gpu 会连 SwiftShader 一起禁掉 → 换 swiftshader 兜底
     # - 其余（auto / software / software_gl 且 WebGL 关）：纯 2D 正文，禁 GPU 进程省常驻内存
-    if explicit and backend == "hardware":
+    if explicit and backend in ("hardware", "vulkan", "d3d9"):
         disable_gpu, enable_swiftshader, disable_sw_rasterizer = False, False, True
-    elif webgl:
+    elif backend == "swiftshader" or webgl:
         disable_gpu, enable_swiftshader, disable_sw_rasterizer = False, True, False
     else:
         disable_gpu, enable_swiftshader, disable_sw_rasterizer = True, False, True
@@ -154,6 +170,10 @@ def build_chromium_flags(s: dict) -> str:
         parts.append("--disable-gpu")
     if s.get("enable_swiftshader"):
         parts.append("--enable-unsafe-swiftshader")
+    # SwiftShader 档：让 Chromium 用自己的 CPU 光栅（不碰显卡驱动）。
+    # 只有这一档显式指定 --use-angle，其余档位交给 Qt 的 QT_ANGLE_PLATFORM。
+    if s.get("backend") == "swiftshader":
+        parts.append("--use-angle=swiftshader")
     # 兜底推导：直接调 build（未经 compute）时按「硬件路径且 WebGL 关」禁软件光栅
     sw_rasterizer = s.get("disable_software_rasterizer")
     if sw_rasterizer is None:
@@ -203,7 +223,7 @@ def apply_render_env(config_path) -> dict:
             os.environ.setdefault("QT_OPENGL", "software")
         else:
             os.environ.setdefault("QT_OPENGL", "angle")
-            os.environ.setdefault("QT_ANGLE_PLATFORM", "warp" if s["software_render"] else "d3d11")
+            os.environ.setdefault("QT_ANGLE_PLATFORM", _ANGLE_PLATFORM.get(s["backend"], "d3d11"))
     os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", build_chromium_flags(s))
     return s
 
@@ -235,12 +255,17 @@ def describe_applied(env=None) -> dict:
     flags = env.get("QTWEBENGINE_CHROMIUM_FLAGS", "") or ""
     opengl = env.get("QT_OPENGL", "") or ""
     angle = env.get("QT_ANGLE_PLATFORM", "") or ""
-    if opengl == "software":
+    # SwiftShader 档的 Qt 侧仍是 warp，只能靠 Chromium flag 认出来，故先判
+    if "--use-angle=swiftshader" in flags:
+        backend = "swiftshader"
+    elif opengl == "software":
         backend = "software_gl"
     elif angle == "warp":
         backend = "software"
     elif angle == "d3d11":
         backend = "hardware"
+    elif angle in ("vulkan", "d3d9"):
+        backend = angle
     elif opengl or angle:
         backend = "custom"  # 外部环境变量改过（setdefault 逃生门）
     else:

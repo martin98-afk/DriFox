@@ -506,11 +506,16 @@ class Settings(QConfig):
     # 默认值 = 历史 main.py 硬编码行为；"auto" 档沿用旧检测链
     # （DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL 环境变量 → ~/.drifox 标记文件）。
     # 渲染后端：auto / hardware(ANGLE d3d11) / software(ANGLE warp) / software_gl(最慢最稳兜底)
+    # vulkan / d3d9 / swiftshader 是三个排障档（见 render_env._ANGLE_PLATFORM 注释）：
+    # 仅「显卡驱动有问题」时试 —— 驱动支持不全可能黑屏（vulkan / d3d9）；
+    # swiftshader = Qt 走 WARP + Chromium 走自带 CPU 光栅的双保险。
     render_backend = OptionsConfigItem(
         "Render",
         "RenderBackend",
         "auto",
-        OptionsValidator(["auto", "hardware", "software", "software_gl"]),
+        OptionsValidator(
+            ["auto", "hardware", "software", "software_gl", "vulkan", "d3d9", "swiftshader"]
+        ),
     )
     # WebGL 解禁（3D 图形需要）：auto / on / off
     render_webgl = OptionsConfigItem(
