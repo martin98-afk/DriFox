@@ -1,860 +1,138 @@
 ---
 name: plugin-creator
-description: "DriFox 插件全生命周期开发技能。涵盖全部 11 类组件（commands/agents/skills/hooks/mcp/lsp/themes/ui/tools/providers/team_templates），从脚手架生成 → 本地开发/调试 → 验证 → 发布到 drifox-plugins 官方市场的完整流程。UI 组件开发桥接 ui-plugin-creator 技能。"
+description: "DriFox 插件全生命周期开发技能。涵盖全部 11 类组件（commands/agents/skills/hooks/mcp/lsp/themes/ui/tools/providers/team_templates），从脚手架生成 → 本地开发/调试 → 验证 → 发布到 drifox-plugins 官方市场的完整流程。UI 组件开发桥接 ui-plugin-creator 技能。主程序改动、一次性脚本、UI 卡片载体开发不适用本技能。"
+license: MIT
+compatibility: Requires DriFox plugin system (目录即插件, register(registry) 契约); Python 3.10+
+allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 ---
 
-# plugin-creator — DriFox 插件開發技能
+# plugin-creator — DriFox 插件开发技能
 
-> **從需求到發布，一鍵生成 DriFox 插件。**
->
-> 本技能取代舊的 `/plugin` 管理命令（已被 plugin-marketplace UI 取代），
-> 專注於**插件開發**——從零創建、修改、除錯、發布 DriFox 插件。
+> 从需求到发布，构建可安装的 DriFox 插件。本文件是路由面：按需加载 `references/`，不在本文件找实现细节。
 
----
+## 0. 何时用我 / 何时交回对方
 
-## 📋 目錄
-
-- [0. 前置準備](#0-前置準備)
-- [1. 加載流程](#1-加載流程)
-- [2. 插件架構速覽](#2-插件架構速覽)
-- [3. 決策樹](#3-決策樹)
-- [4. 開發工作流](#4-開發工作流)
-- [5. 組件開發指引](#5-組件開發指引)
-- [6. 測試與驗證](#6-測試與驗證)
-- [7. 發布到市場](#7-發布到市場)
-- [8. 常見陷阱](#8-常見陷阱)
-- [9. references/ 索引](#9-references-索引)
-
----
-
-## 0. 前置準備
-
-開發前確保掌握以下工具：
-
-| 項目 | 說明 |
+| 需求 | 归属 |
 |------|------|
-| **drifox-dev** 技能 | DriFox 項目開發基礎環境、編碼規範（**先加載它**） |
-| **ui-plugin-creator** 技能 | UI 插件開發（`components.ui=true` 時必用） |
-| **drifox-plugins** 倉庫 | `https://github.com/martin98-afk/drifox-plugins` — 官方市場原始碼、文檔、schema、驗證工具 |
+| 可安装插件（11 类组件 / manifest / 发布） | **本技能** |
+| 插件内 UI 载体（浮动卡/渲染器/欢迎 tab） | ui-plugin-creator |
+| 完整 UI 插件（如插件市场） | **本技能主导**骨架+manifest+发布，UI 载体桥接 ui-plugin-creator |
+| 改 app/ 主程序（含 plugins/system-* 内置） | drifox-dev |
+| 主程序 bug/崩溃/性能 | drifox-dev + diagnose |
+| 学习单组件概念，不产出安装物 | plugin-dev 分项技能 |
+| 写 skill 本身 | skill-creator |
 
-> ⚠️ 沒有加載 `drifox-dev` → 先加載它，否則可能違反項目約定。
-> ⚠️ UI 插件請使用 `ui-plugin-creator` 技能，本技能僅提供 UI 組件的架構參考。
+> plugin-dev 让位条款：用户在学习单个组件概念 → plugin-dev；一旦要产出可安装插件 → 本技能。
 
----
+## 1. 触发与第一动作
 
-## 1. 加載流程
+**触发词表**（详解决策见 references/components.md 对应组件章节）：
 
-```
-Step 1  讀 SKILL.md 本體 ← 你正在看的這個文件
-        ├─ 理解插件生態 → §2
-        ├─ 理解要做什麼 → §3 決策樹
-        └─ 跟著 §4 工作流走
+| 你说 | 任务类型 | 去向 |
+|------|---------|------|
+| "做个新插件""创建插件" | 新建 | 第一动作=新建 → references/workflow.md Scaffold |
+| "加个 /xx 命令" | Commands | references/components.md §Commands |
+| "做个 @xx 智能体" | Agents | references/components.md §Agents |
+| "做个技能""写 SKILL.md" | Skills | references/components.md §Skills |
+| "加个钩子""事件驱动" | Hooks | references/components.md §Hooks |
+| "配置 MCP 服务器" | MCP | references/components.md §MCP |
+| "配置 LSP 语言服务器" | LSP | references/components.md §LSP |
+| "做个主题""改配色" | Themes | references/components.md §Themes |
+| "做 UI 卡片""浮动卡" | UI | → 调用 ui-plugin-creator 技能 |
+| "加个工具""做个 AI 工具" | Tools | references/components.md §Tools |
+| "加个服务商""接新模型厂商" | Providers | references/components.md §Providers |
+| "做团队模板""预设 @角色组合" | Team Templates | references/components.md §Team Templates |
+| "改 plugin.json""设置页配置" | Manifest | references/manifest.md |
+| "验证""跑测试" | 验证 | references/testing.md |
+| "发布到市场""提 PR" | 发布 | references/publishing.md |
+| "不工作""报错""不加载" | 除错 | references/troubleshooting.md |
+| "改现有插件" | 修改 | 跳过 Scaffold，直改组件 + 更新 version |
 
-Step 2  按 §3 決策樹分派任務：
-        ├─ 新建插件、加組件 → 讀 references/components.md
-        ├─ 改 manifest      → 讀 references/manifest.md
-        ├─ 測試/驗證        → 讀 references/testing.md
-        ├─ 發布到市場       → 讀 references/publishing.md
-        ├─ 常見問題         → 讀 references/troubleshooting.md 或 §8
-        └─ UI 插件          → 調用 ui-plugin-creator 技能
+**第一动作三问分流**：新建？修改现有？发布？→ 新建走 workflow.md Scaffold；修改定位目标插件后直改；发布走 publishing.md。
 
-Step 3  推進中更新 manifest、跑驗證
-Step 4  完成 → 按 §6 跑完整驗證
-```
+## 2. 渐进加载表
 
----
+| 阶段 | 读取 | 何时使用 |
+|------|------|---------|
+| 路由决策 | 本 SKILL.md（只读这一个） | 任务进入时 |
+| 脚手架与流程 | references/workflow.md | 新建插件、迭代循环、版本策略（SemVer） |
+| 组件实现 | references/components.md | 开发任一组件（模板+约束+真实案例） |
+| manifest 与配置 | references/manifest.md | 新建/修改 plugin.json、config_schema/E1 契约 |
+| 测试验证 | references/testing.md | 热更新测试、validate_plugins.py、除错 |
+| 发布 | references/publishing.md | Fork→PR 上架官方市场 |
+| 排障 | references/troubleshooting.md | 报错、不加载、CI 失败 |
+| 参考成品 | examples/ 目录 | 工具插件、config_schema、浮动卡、欢迎 tab 最小骨架 |
 
-## 2. 插件架構速覽
+## 3. 插件解剖速览
 
-### 2.1 一個插件長這樣（位於 `~/.drifox/plugins/<name>/` 下）
+插件位于 `~/.drifox/plugins/<name>/`，manifest 固定在 `<name>/.drifox-plugin/plugin.json`：
 
 ```
 your-plugin/
-├── .drifox-plugin/
-│   └── plugin.json          ← 插件 manifest（必需！插件身份證）
-│
-├── commands/                ← 斜杠命令 /xxx（*.md）
-│   ├── hello.md
-│   └── scan.md
-│
-├── agents/                  ← @name 智能體（*.md）
-│   └── assistant.md
-│
-├── skills/<name>/           ← AI 技能（SKILL.md）
-│   └── SKILL.md
-│
-├── hooks/                   ← 事件鉤子
-│   ├── hooks.json           ← 事件聲明
-│   └── myplugin_hook.py     ← Python 實現
-│
-├── themes/<name>/           ← 主題配色（*.yaml）
-│   └── dracula.yaml
-│
-├── ui/                      ← UI 組件（浮動卡片/渲染器/工廠）
-│   ├── __init__.py          ← 必須：register_ui(registry)
-│   └── my_card.py
-│
-├── tools/                   ← 工具組件（AI 可調用的工具，工具插件化）
-│   ├── my_tool.py           ← 每個工具文件暴露 register(registry)
-│   └── icons/               ← 工具自帶圖標（深色）+ icons_light/（淺色）
-│
-├── providers/               ← 服務商組件（可選 AI 模型/API 服務商，providers 插件化）
-│   ├── deepseek.py          ← 每個文件暴露 register(registry)
-│   └── icons/               ← 服務商自帶圖標（深色）+ icons_light/（淺色）
-│
-├── team_templates/          ← 團隊模板組件（預設 @角色組合，/team 一鍵載入）
-│   └── my-team.yaml         ← 每個文件一個模板（schema_version/template_name/agents）
-│
-├── .mcp.json                ← MCP 伺服器配置（插件根目錄）
-├── .lsp.json                ← LSP 語言伺服器配置（插件根目錄）
-├── README.md                ← 插件說明
-└── __init__.py              ← Python 包標記（可選）
+├── .drifox-plugin/plugin.json   ← manifest（必需，插件身份证）
+├── commands/*.md                ← 斜杠命令
+├── agents/*.md                  ← @智能体
+├── skills/<name>/SKILL.md       ← AI 技能
+├── hooks/hooks.json + *.py      ← 事件钩子
+├── themes/<name>/*.yaml         ← 配色
+├── ui/__init__.py + *.py        ← UI 组件（register_ui）
+├── tools/*.py + icons/          ← 工具（register(registry)）
+├── providers/*.py + icons/      ← 服务商（register(registry)）
+├── team_templates/*.yaml        ← 团队模板
+├── .mcp.json / .lsp.json        ← MCP / LSP（插件根）
+└── README.md / __init__.py      ← 说明 / 包标记（可选）
 ```
 
-### 2.2 11 類組件速查
-
-| # | 組件 | manifest flag | 必備文件 | 觸發方式 | 適用場景 |
-|---|------|--------------|---------|---------|---------|
-| 1 | **Commands** | `commands: true` | `commands/*.md` | 用戶輸入 `/xxx` | 斜杠命令（prompt/function/agent） |
-| 2 | **Agents** | `agents: true` | `agents/*.md` | 用戶輸入 `@xxx` | 限定任務域的 AI 角色 |
-| 3 | **Skills** | `skills: true` | `skills/<name>/SKILL.md` | AI 自動匹配 | 注入領域知識與最佳實踐 |
-| 4 | **Hooks** | `hooks: true` | `hooks/hooks.json` + `*.py` | DriFox 事件觸發 | 自動攔截/記錄/增強 |
-| 5 | **MCP** | `mcp: true` | `.mcp.json`（插件根） | DriFox 啟動 | 註冊外部 MCP 伺服器 |
-| 6 | **LSP** | `lsp: true` | `.lsp.json`（插件根） | DriFox 啟動 | 註冊語言伺服器 |
-| 7 | **Themes** | `themes: true` | `themes/<name>/*.yaml` | 用戶 `/theme xx` | 配色方案 |
-| 8 | **UI** | `ui: true` | `ui/__init__.py` + widgets | DriFox 啟動 + 命令 | 浮動卡片/內容渲染器/消息工廠 |
-| 9 | **Tools** | `tools: true` | `tools/*.py`（register 入口） | AI 工具調用 | 擴展 AI 可用的工具（schema/impl/圖標/權限元數據） |
-| 10 | **Providers** | `providers: true` | `providers/*.py`（register 入口） | 選擇模型/API 服務商 | 擴展可選 AI 服務商（icon/url/模型/餘額/用量/額外配置由插件聲明） |
-| 11 | **Team Templates** | `team_templates: true`（物理自動檢測，可選） | `team_templates/*.yaml` | `/team --load=<name>` | 預設 @角色組合，一鍵拉起多智能體團隊 |
-
-### 2.3 官方資源
-
-| 資源 | 位置 |
-|------|------|
-| **官方市場倉庫** | [github.com/martin98-afk/drifox-plugins](https://github.com/martin98-afk/drifox-plugins) |
-| **插件 Schema** | [schemas/plugin.schema.json](https://github.com/martin98-afk/drifox-plugins/blob/main/schemas/plugin.schema.json) |
-| **完整文檔** | [docs/](https://github.com/martin98-afk/drifox-plugins/tree/main/docs)（plugin-manifest / commands / agents / skills / hooks / mcp / lsp / themes / architecture） |
-| **最小參考實現** | [plugins/example-plugin/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin)（**最佳起點**） |
-| **生產 UI 參考** | [plugins/context-usage-stats/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/context-usage-stats)（浮動卡片實際案例） |
-| **驗證工具** | [tools/validate_plugins.py](https://github.com/martin98-afk/drifox-plugins/blob/main/tools/validate_plugins.py) |
-| **marketplace 生成** | [tools/generate_marketplace.py](https://github.com/martin98-afk/drifox-plugins/blob/main/tools/generate_marketplace.py) |
-| **DriFox 系統插件** | `plugins/`（system-* 系列内置插件，system type 參考，**不要手動修改**） |
-
-> 插件運行的權威實現在 DriFox 內置的 `plugins/`（system-* 系列内置插件），本技能文檔僅為開發指引。
-
----
-
-## 3. 決策樹
-
-| 你說 | 任務類型 | 執行 |
-|------|---------|------|
-| "做個新插件""創建插件" | **新建** | §4.1 Scaffold → 按組件類型加載指引 |
-| "加個 /xx 命令" | **Commands** | §5.1 或 `references/components.md §Commands` |
-| "做個 @xx 智能體" | **Agents** | §5.2 或 `references/components.md §Agents` |
-| "做個技能""寫 SKILL.md" | **Skills** | §5.3 或 `references/components.md §Skills` |
-| "加個鉤子""事件驅動" | **Hooks** | §5.4 或 `references/components.md §Hooks` |
-| "配置 MCP 伺服器" | **MCP** | §5.5 或 `references/components.md §MCP` |
-| "配置 LSP 語言伺服器" | **LSP** | §5.6 或 `references/components.md §LSP` |
-| "做個主題""改配色" | **Themes** | §5.7 或 `references/components.md §Themes` |
-| "做個 UI 插件""浮動卡片" | **UI** | → **調用 `ui-plugin-creator` 技能** |
-| "加個工具""做個 AI 工具" | **Tools** | §5.9 或 `references/components.md §Tools` |
-| "加個服務商""接新模型廠商" | **Providers** | §5.10 或 `references/components.md §Providers` |
-| "做團隊模板""加預設@角色組合" | **TeamTemplates** | §5.11 或 `references/components.md §Team Templates` |
-| "改 plugin.json" | **Manifest** | `references/manifest.md` |
-| "驗證""跑測試" | **驗證** | §6 或 `references/testing.md` |
-| "發布到市場""提 PR" | **發布** | §7 或 `references/publishing.md` |
-| "不工作""報錯" | **除錯** | `references/troubleshooting.md` 或 §8 |
-| "改現有插件" | **修改** | 跳過 Scaffold，直接改對應組件 + 更新 version |
-
-> ⚠️ **UI 插件** → 不在此技能處理，調用 `ui-plugin-creator`。
-> ⚠️ **新建插件** → 先 Scaffold（§4.1），再按組件類型逐一實現。
-> ⚠️ **需求不明確時** → 先用 `brainstorming` 技能釐清。
-
----
-
-## 4. 開發工作流
-
-### 4.1 Scaffold — 新建插件骨架
-
-所有插件建立在 `~/.drifox/plugins/` 下，DriFox 的 watchfiles 會自動熱加載。
-
-最快的起點是下載 `example-plugin`，它展示了各類組件的標準寫法（team_templates 為新增組件，見 §5.11）：
-
-```
-① 從官方市場 GitHub 倉庫獲取 example-plugin：
-   git clone --depth=1 --filter=blob:none --no-checkout \
-     https://github.com/martin98-afk/drifox-plugins.git /tmp/dfp
-   cd /tmp/dfp
-   git sparse-checkout set plugins/example-plugin
-   git checkout main
-   cp -r plugins/example-plugin ~/.drifox/plugins/<your-plugin>
-   rm -rf /tmp/dfp
-
-② 修改 manifest：
-   編輯 ~/.drifox/plugins/<your-plugin>/.drifox-plugin/plugin.json →
-   - name:        "<your-plugin>"（小寫 kebab-case，與目錄名一致）
-   - description: "一句話描述"
-   - version:     "0.1.0"
-   - author:      你的名字
-   - components:  只保留你需要的 flag
-
-③ 清理不需要的組件目錄與文件：
-   用不到的組件直接刪除對應目錄，並在 plugin.json 中設為 false
-
-④ 按 §5 開發各組件
-```
-
-> 💡 也可以不複製，直接在 `~/.drifox/plugins/<your-plugin>/` 下手動建目錄 + 寫 plugin.json（參考 [manifest 完整字段](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/plugin-manifest.md)）。
-
-### 4.2 迭代開發循環
-
-```
-修改文件 → DriFox watchfiles 熱更新（1-3秒） → 測試效果 → 再改
-```
-
-- **commands** 和 **skills** 修改後立即生效
-- **hooks** / **mcp** / **lsp** 修改後可能需要重啟 DriFox
-- **themes** 修改後用 `/theme <name>` 切換查看
-- **ui** 修改後卡片自動重新載入
-- 用 `/plugin-marketplace` 查看已安裝插件狀態（啟/禁/卸）
-
-### 4.3 版本管理
-
-```json
-// 開發階段：0.1.x
-"version": "0.1.0"
-
-// 首次發布：1.0.0
-// 遵循 SemVer：major.minor.patch
-// 破壞性變更 → 升 major
-// 新增功能 → 升 minor
-// Bug 修復 → 升 patch
-```
-
----
-
-## 5. 組件開發指引
-
-每類組件的關鍵約束與快速參考。完整模板見 `references/components.md`。
-
-### 5.1 Commands
-
-```
-commands/<name>.md → 註冊為 /<name> 斜杠命令
-```
-
-**關鍵約束**：
-- 文件名 = 命令名，必須 `^[a-z][a-z0-9-]*\.md$`
-- frontmatter 必含 `description` + `type`（prompt/function/agent）
-- 參數用 `parameters` 或 `argument-hint` 定義
-- 分段提示詞用 `<!-- section:id -->` / `<!-- end -->` 包裹
-- 可用 `$ARGUMENTS`、`$PLUGIN_NAME`、`$PLUGIN_DIR`、`$PROJECT_ROOT` 模板變量
-
-**參考**：
-- [docs/commands.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/commands.md) — 完整規範
-- [plugins/example-plugin/commands/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/commands) — 最小示例
-- `plugins/system-commands/commands/` — 系統命令真實案例
-
-### 5.2 Agents
-
-```
-agents/<name>.md → 註冊為 @<name> 智能體
-```
-
-**關鍵約束**：
-- 定義 AI 角色、行為邊界、可用工具
-- 支持 `role`、`tools`、`permission` 等字段
-
-**參考**：
-- [docs/agents.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/agents.md)
-- [plugins/example-plugin/agents/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/agents)
-- `plugins/system-agents/agents/`
-
-### 5.3 Skills
-
-```
-skills/<name>/SKILL.md → AI 可檢索的技能
-```
-
-**關鍵約束**：
-- frontmatter 必含 `name` + `description`
-- 結構自由，但建議含 # 標題 + 章節
-- AI 自動匹配 `description` 關鍵詞
-
-**參考**：
-- [docs/skills.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/skills.md)
-- [plugins/example-plugin/skills/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/skills)
-- `plugins/system-skills/skills/`（25+ 技能真實案例）
-
-### 5.4 Hooks
-
-```
-hooks/
-├── hooks.json          ← 事件聲明（哪個事件觸發哪個函數）
-└── <plugin>_hook.py    ← Python 實現
-```
-
-**關鍵約束**：
-- `hooks.json` 格式：`{ "事件名": "函數引用路徑" }`
-- Python 文件必須能 `python -m py_compile` 通過
-- 支持事件：`SessionStart`、`Stop`、`UserPromptSubmit`、`PreUserMessage`、`PostUserMessage`、`PreAssistantMessage`、`PostAssistantMessage`、`PreToolUse`、`PostToolUse`
-
-**參考**：
-- [docs/hooks.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/hooks.md)
-- [plugins/example-plugin/hooks/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/hooks)
-- `plugins/system-hooks/hooks/hooks.json`
-
-### 5.5 MCP（Model Context Protocol）
-
-```
-.mcp.json（插件根目錄） → 注入 MCP 伺服器
-```
-
-**關鍵約束**：
-- JSON 格式：MCP 伺服器配置陣列
-- 每個伺服器含 `name`、`command`/`url`、`args`、`env` 等
-
-**參考**：
-- [docs/mcp.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/mcp.md)
-- [plugins/example-plugin/.mcp.json](https://github.com/martin98-afk/drifox-plugins/blob/main/plugins/example-plugin/.mcp.json)
-- `plugins/system-mcp/.mcp.json`
-
-### 5.6 LSP（Language Server Protocol）
-
-```
-.lsp.json（插件根目錄） → 注入 LSP 語言伺服器
-```
-
-**關鍵約束**：
-- JSON 格式：LSP 伺服器配置陣列
-- 每個伺服器含 `language`、`command`、`args` 等
-
-**參考**：
-- [docs/lsp.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/lsp.md)
-- [plugins/example-plugin/.lsp.json](https://github.com/martin98-afk/drifox-plugins/blob/main/plugins/example-plugin/.lsp.json)
-- `plugins/system-mcp/.lsp.json`
-
-### 5.7 Themes
-
-```
-themes/<name>/*.yaml → 配色方案
-```
-
-**關鍵約束**：
-- YAML 格式，定義顏色 token
-- token 涵蓋：窗口、背景、卡片、文本、按鈕、邊框等
-
-**參考**：
-- [docs/themes.md](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/themes.md)
-- [plugins/example-plugin/themes/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/example-plugin/themes)
-- `plugins/system-themes/themes/`（11 個主題真實案例）
-
-### 5.8 UI
-
-> 🟡 **UI 插件開發請調用 `ui-plugin-creator` 技能。**
-> 本技能僅提供架構上下文。
-
-```
-ui/
-├── __init__.py          ← 必須定義 register_ui(registry) 函數
-└── *.py                 ← widget 模組
-```
-
-**3 類 UI 擴展點**：
-
-| 擴展點 | 註冊方法 | 用途 |
-|--------|---------|------|
-| 浮動卡片 | `registry.register_floating_card(...)` | 獨立卡片 widget + 自動註冊 `/<card_id>` 命令 |
-| 內容塊渲染器 | `registry.register_content_renderer(...)` | 在消息流中渲染自定義 HTML 內容塊 |
-| 消息元素工廠 | `registry.register_message_factory(...)` | 接管特定消息結構，返回自定義 QWidget |
-
-**參考**：
-- [docs/architecture.md §ui 組件](https://github.com/martin98-afk/drifox-plugins/blob/main/docs/architecture.md)
-- [plugins/context-usage-stats/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/context-usage-stats)（浮動卡片真實案例）
-- [plugins/plugin-marketplace/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/plugin-marketplace)（完整 UI 生態入口）
-- [plugins/plugin-marketplace/](https://github.com/martin98-afk/drifox-plugins/tree/main/plugins/plugin-marketplace)（瀏覽/安裝/啟禁/卸載 UI）
-
-### 5.9 Tools（工具插件化）
-
-> DriFox 的工具已插件化：工具作為插件的一部分，通過 `register(registry)` 註冊
-> schema/impl/圖標/中文名/危險級別/分組等元數據，主程序不再硬編碼工具。
-
-```
-tools/
-├── my_tool.py           ← 每個工具文件暴露 register(registry)
-└── icons/               ← 工具自帶圖標（深色，白/亮色）
-    └── icons_light/     ← 淺色版圖標（深色描邊；可選，缺省回退深色版）
-```
-
-**關鍵約束**：
-- 每個 `tools/*.py` 必須暴露 `register(registry)` 函數（loader 掃描調用）
-- `danger`（safe/dangerous）**必須顯式聲明**，未聲明 registry 拒絕註冊
-- `source` 由 loader 強制注入為 `plugin:<name>`（插件無法偽裝 builtin）
-- manifest：`"components": { "tools": true }`
-
-**註冊模板**：
-
-```python
-# tools/my_tool.py
-from app.tools.result import ToolResult
-
-def _my_impl(tool_ctx, **kwargs):
-    """impl 簽名：impl(tool_ctx, **kwargs) → ToolResult 或 str
-    tool_ctx 提供：
-      - workdir: 當前工作目錄
-      - session_id / call_id: 會話上下文
-      - env: 環境配置（api_keys / app_data_dir / desktop_automation_enabled）
-      - services: 平台能力接口（todo/terminal/subagent/team/lsp/codegraph/
-        mcp/ask_user/skills/gitee/diagnostics）— 僅平台工具需要
-    """
-    name = kwargs.get("name", "朋友")
-    return ToolResult(True, content=f"你好，{name}！")
-
-def register(registry):
-    registry.register(
-        "my_tool",
-        {
-            "type": "function",
-            "function": {
-                "name": "my_tool",
-                "description": "工具描述（LLM 可見）",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "參數描述"},
-                    },
-                    "required": [],
-                },
-            },
-        },
-        impl=_my_impl,
-        danger="safe",              # 必填：safe | dangerous
-        icon="my_tool",             # SVG 文件名（<插件>/tools/icons/ 下）
-        cn_name="我的工具",          # 中文顯示名（消息卡片/權限卡片）
-        group="工具組",              # 權限卡片分組
-        description="權限卡片內描述",
-        aliases=["MyTool"],         # Claude Code 風格別名（可選）
-        # ── 以下均為可選：渲染與行為完全由插件聲明，主程序零工具名硬編碼 ──
-        render=_render_body,        # body 渲染閉包：render(result, tool_name, tool_args, success) -> str|None
-        render_mode="expand",       # ""=默認摺疊卡 / inline=單行緊湊(無body) / expand=無摺疊展開 / none=不渲染完成框
-        preview=_preview,           # 自然語言預覽閉包：preview(tool_args) -> str（inline 卡/摺疊頭）
-        summarize=_summarize,       # 壓縮摘要閉包：summarize(tool_name, tool_args, content) -> str（歷史壓縮）
-        metadata={                  # 附加行為標記（見下表）
-            "permission_arg": "path",   # 權限檢查用哪個參數（bash→command、read→filePath...）
-            "protect": True,            # 工具結果壓縮時完整保留
-            "interactive": True,        # 交互式工具（UI 彈窗，子智能體禁用）
-            "ui_managed": True,         # 專屬 UI 工具（不創建通用流式塊）
-            "operation_icons": {...},   # 按參數切換圖標（如 lsp 按 operation）
-        },
-    )
-```
-
-**渲染三閉包 + render_mode（主程序 render_helpers 只做閉包路由 + 通用兜底）**：
-
-| 字段 | 簽名 | 用途 |
-|------|------|------|
-| `render` | `render(result, tool_name, tool_args, success) -> str\|None` | 完成框 body 自定義渲染；返回 None 回退默認（文本/表格/diff/echarts） |
-| `preview` | `preview(tool_args) -> str` | 自然語言參數預覽（inline 卡/摺疊頭），回退 key=value |
-| `summarize` | `summarize(tool_name, tool_args, tool_content) -> str` | 歷史壓縮的 1 行摘要；未註冊回退通用 `[name] args (N chars)` |
-| `render_mode` | `""`/`"inline"`/`"expand"`/`"none"` | 完成框形態：默認摺疊卡 / 單行緊湊 / 無摺疊展開 / 不渲染 |
-
-**metadata 行為標記**：
-
-| 標記 | 值 | 效果 |
-|------|-----|------|
-| `permission_arg` | str | 權限檢查提取該參數（`PermissionResolver.resolve(name, arg)`） |
-| `permission_task` | true | 子智能體分發權限（`resolve_task(首個 agent)`） |
-| `protect` | true | 壓縮時結果完整保留（歷史壓縮跳過裁剪） |
-| `interactive` | true | 交互式工具：UI 彈窗處理、子智能體禁用執行 |
-| `ui_managed` | true | 專屬 UI 工具：不創建通用流式工具塊 |
-| `operation_icons` | dict | 按參數值切換圖標（如 lsp 的 operation→圖標） |
-| `subagent_task` | true | 子智能體任務卡：表格渲染 + 日誌按鈕 |
-
-**group 語義（能力判定）**：工具註冊的 `group` 同時是權限卡片分組與**能力分組**。
-主程序按 group 驅動能力判定（不寫死工具名）：
-- 「文件寫入」分組（write/edit/multi_edit）→ 團隊 `can_write`、文件備份跟踪、自動 LSP 診斷
-- 新寫工具註冊到該 group 即自動獲得備份/診斷能力
-
-**自包含原則**：
-- 純邏輯工具（文件/網絡/桌面）impl 用標準庫/第三方庫獨立實現，不依賴主程序
-- 平台工具（bash/子智能體/MCP/LSP/CodeGraph/團隊/todo 等）通過
-  `tool_ctx["services"]` 調用平台能力，不直接訪問主程序內部
-- 圖標自包含：`tools/icons/*.svg`（深色）+ `tools/icons_light/*.svg`（淺色），
-  渲染按主題加載（缺淺色版回退深色/qrc）
-
-**熱插拔**：`tools/*.py` 文件增/刪/改自動熱生效（後台 watcher 輪詢），
-無需重啟；同名工具先註冊者優先（工作樹 plugins/ 優先於用戶插件目錄）。
-
-**參考**：
-- `plugins/system-tools/tools/`（33 個系統工具真實案例：file_tools/web_tools/
-  automation_tools 為自包含實現，subagent_tools/terminal_tools 等為平台服務）
-- `app/tools/registry.py`（ToolRegistration 字段定義）
-- `app/tools/plugin_tool_loader.py`（掃描/熱重載實現）
-
-### 5.10 Providers（服務商插件化）
-
-> 服務商支持已全面插件化（萬物為插件）：服務商的一切——**圖標、API URL、默認參數、
-> 模型列表、models.dev 白名單、family 能力、用量查詢額外配置、餘額/套餐用量查詢**——
-> 全部由 providers 插件聲明，主程序不再硬編碼任何服務商數據。
-
-```
-providers/
-├── deepseek.py          ← 每個文件暴露 register(registry)
-└── icons/               ← 服務商自帶圖標（深色）+ icons_light/（淺色）
-```
-
-**關鍵約束**：
-- 每個 `providers/*.py` 必須暴露 `register(registry)` 函數（ProviderWatcher 掃描調用）
-- 內部調用 `registry.register(ProviderDef(...))` 註冊 `name` / `icon` / `api_url` /
-  `auth_type` / `default_model` / `models` / `family` / `capabilities` 等
-- `icon_dir` / `icon_dir_light` 由 loader **自動注入**，勿手寫
-- manifest：`"components": { "providers": true }`（聲明可選，loader 自動檢測目錄）
-- 熱重載：ProviderWatcher 後台輪詢（path, mtime, size），變更全量重掃；
-  user 插件可覆蓋 system 同名服務商
-
-**註冊模板**：
-
-```python
-# providers/deepseek.py
-from app.plugins.registries.provider_registry import (
-    ProviderDef,
-    make_bearer_balance_fetcher,
-)
-
-
-def register(registry):
-    registry.register(
-        ProviderDef(
-            name="DeepSeek",                    # 服務商唯一名
-            icon="deepseek",                    # 圖標 key（icons/ 目錄文件名或 qrc）
-            api_url="https://api.deepseek.com",
-            auth_type="bearer",                 # bearer / bce / none / anthropic
-            default_model="deepseek-chat",
-            default_params={"溫度": 0.7, "最大Token": 200000, "思考等級": "high"},
-            register_url="https://platform.deepseek.com/api_keys",
-            models=["deepseek-v4-flash", "deepseek-v4-pro"],
-            models_dev_id="deepseek",           # models.dev provider id（可選）
-            family="deepseek",                  # 能力族（detect 探測同 key）
-            capabilities={                      # family 能力（可覆蓋默認）
-                "context_limit": 320000,
-                "supports_thinking": True,
-                "thinking_param": "thinking",
-            },
-            extra_quota_fields=[                # 用量查詢額外配置（可選，不進 API 請求）
-                QuotaField(key="server_id", label="Server ID:", placeholder="..."),
-            ],
-            balance_fetcher=make_bearer_balance_fetcher(   # 餘額查詢（可選）
-                url="https://api.deepseek.com/user/balance",
-                balance_key="total_balance",
-                currency="¥",
-            ),
-            coding_plan_fetcher=_fetch_coding_plan,        # 套餐用量查詢（可選）
-        )
-    )
-```
-
-**ProviderDef 核心字段**：
-
-| 字段 | 說明 | 對應舊硬編碼 |
-|------|------|------------|
-| `name` | 服務商唯一名 | `FREE_PROVIDERS` key |
-| `icon` | 圖標 key（icons/ 文件名或 qrc） | `PROVIDER_ICONS` |
-| `api_url` | 默認 API URL | `FREE_PROVIDERS.API_URL` |
-| `auth_type` | 認證方式 bearer/bce/none/anthropic | `FREE_PROVIDERS` 認證方式 |
-| `default_model` | 默認模型名 | `FREE_PROVIDERS` 模型名稱 |
-| `default_params` | 溫度/最大Token/思考模式等 | `FREE_PROVIDERS` 其餘鍵 |
-| `register_url` | 獲取 API Key 地址 | `FREE_PROVIDERS` 獲取地址 |
-| `models` | 模型列表 | `PROVIDER_MODELS` |
-| `models_dev_id` | models.dev provider id | `MODELS_DEV_PROVIDER_MAP` |
-| `family` | 能力族 | `detect_provider_family` |
-| `capabilities` | family 能力 | `PROVIDER_CAPABILITIES` |
-| `extra_quota_fields` | 用量查詢額外字段（不進 API 請求） | `QUOTA_EXCLUDE_KEYS` + 編輯卡片硬編碼 |
-| `balance_fetcher` | 餘額查詢函數 | `BALANCE_APIS` |
-| `coding_plan_fetcher` | 套餐用量查詢函數 | coding_plan_fetcher 註冊表 |
-
-**查詢函數簽名**：
-- 餘額 fetcher：`(config: dict) -> dict | None`
-  `{"balance": 123.4, "currency": "¥"}`（成功）/ `{"hide": True, "tooltip": "原因"}`（失敗）/ `None`（無 key 不請求）
-  簡單 Bearer GET 直接用工廠 `make_bearer_balance_fetcher(url, balance_key, currency="¥")`
-- 套餐用量 fetcher：`(config: dict) -> dict | None`
-  `{"rolling": {...}, "weekly": ..., "monthly": ...}`；返回 None 表示暫不支持
-
-**參考**：
-- `plugins/system-providers/providers/README.md`（服務商插件完整開發指南）
-- `plugins/system-providers/providers/*.py`（15+ 系統服務商真實案例）
-- `app/plugins/registries/provider_registry.py`（ProviderDef / ProviderRegistry 字段定義）
-- 測試：`python -m pytest tests/core/test_provider_registry.py -v`
-
----
-
-### 5.11 Team Templates（團隊模板組件）
-
-> 團隊模板讓插件預置一組 @角色組合（如「統籌 + 構建 + 審查 + 計劃」），
-> 用戶透過 `/team --load=<name>` 一鍵拉起多智能體團隊。
-> 模板文件由插件聲明，主程序不再硬編碼預設團隊。
-
-#### 文件位置
-
-```
-<plugin>/
-├── team_templates/
-│   └── my-team.yaml        # 一個文件即一個模板（可多個）
-└── .drifox-plugin/
-    └── plugin.json         # components 可聲明 "team_templates": true（物理自動檢測，可選）
-```
-
-#### 最小模板
-
-```yaml
-# team_templates/my-team.yaml
-# 用法：/team --load=my-team
-schema_version: 1
-template_name: my-team
-description: 一句話描述這個團隊組合
-agents:
-  - agent_name: leader
-    description: 團隊統籌 Leader，負責組隊與任務分發
-  - agent_name: build
-    description: 構建智能體，負責讀寫代碼與驗證
-```
-
-#### 字段說明
-
-| 字段 | 必填 | 說明 |
-|------|------|------|
-| `schema_version` | ✅ | 當前固定為 `1`（非 1 會拋 TemplateError） |
-| `template_name` | ✅ | 模板名（建議與文件名 stem 一致） |
-| `description` | 選填 | 一句話描述（列出時展示） |
-| `agents` | ✅ | 非空列表，按順序對應窗口 1..N |
-| `agents[].agent_name` | ✅ | 引用 `plugins/system-agents/agents/` 下的角色名（如 build、review） |
-| `agents[].description` | 選填 | 角色描述，注入團隊上下文時附加；為空則跳過 |
-
-#### 關鍵約束
-
-- 文件名規範：首字符為字母/數字（含中文），後續允許 `\w` 與 `-`，長度 1-64；
-  禁止 `.`/`/`/反斜槓/`..`（防路徑穿越）
-- `agents` 至少 1 個；同一模板內 `agent_name` 必須唯一
-- `agent_name` 必須引用**已存在**的 @角色（加載時語義校驗，缺失報 TemplateError）
-- 探測謂詞：目錄 `team_templates/` 存在且含 `*.yaml` 即被識別為該插件的組件
-- 建議在 manifest `components` 顯式聲明 `"team_templates": true`（與 tools/providers 一致；
-  system 內置插件基於物理目錄自動識別，不強制）
-
-#### 來源優先級與覆蓋
-
-模板按以下優先級載入（同名時高優先級覆蓋低優先級）：
-
-1. **user-custom** — `.drifox/plugins/user-custom/team_templates/`（可寫、可刪）
-2. **plugin** — 各啟用插件聲明的 `team_templates/`（唯讀，按插件優先級排序）
-3. **system** — `plugins/system-team-templates/team_templates/`（唯讀，內置 default-team）
-
-#### 使用方式
-
-| 命令 | 說明 |
-|------|------|
-| `/team --load=<name>` | 載入指定模板，一鍵拉起多智能體團隊 |
-| `/team` | 列出所有可用模板（標示 用戶/插件/系統 來源） |
-| `/team --save=<name>` | 將當前團隊另存為用戶模板 |
-| `/team --delete=<name>` | 刪除用戶模板（僅 user-custom 可刪） |
-
-#### 熱插拔
-
-- `team_templates/*.yaml` 新增/修改 → 懶加載、無緩存，下次 `/team` 列出或
-  `--load` 即生效（builtin_reloaders 對 team_templates 為 lazy，記日誌即成功）
-- 與 tools/providers 同構：kernel 分派時 skip 刷新鏈，僅標記組件已變更
-
-#### 參考
-
-- 模板結構與校驗：`app/core/team/template_schema.py`
-- 文件存儲層：`app/core/team/template_manager.py`
-- 系統模板案例：`plugins/system-team-templates/team_templates/default-team.yaml`
-- 測試：`python -m pytest tests/core/test_team_template.py -v`
-
----
-
-## 6. 測試與驗證
-
-### 6.1 本地快速測試
+11 类组件速查（字段细节、代码模板 → references/components.md）：
+
+| 组件 | manifest flag | 触发方式 |
+|------|--------------|---------|
+| Commands | `commands: true` | 用户输入 `/xxx` |
+| Agents | `agents: true` | 用户输入 `@xxx` |
+| Skills | `skills: true` | AI 自动匹配 description |
+| Hooks | `hooks: true` | DriFox 事件触发 |
+| MCP | `mcp: true` | DriFox 启动注入 |
+| LSP | `lsp: true` | DriFox 启动注入 |
+| Themes | `themes: true` | 用户 `/theme xx` |
+| UI | `ui: true` | 启动加载 + `/<card_id>` 命令 |
+| Tools | `tools: true` | AI 工具调用 |
+| Providers | `providers: true` | 用户选择模型/服务商 |
+| Team Templates | `team_templates: true` | `/team --load=<name>` |
+
+## 4. 硬停止（触达即停，不得绕行）
+
+1. 要改 `app/` 主程序 → 停，转交 drifox-dev
+2. 一次性任务、无插件形态 → 停，not-a-skill，直接实现
+3. UI 载体开发（卡片/渲染器内部实现）→ 停，路由 ui-plugin-creator
+4. drifox-dev 未加载 → 停，先加载再继续
+5. 新建/修改对象不明 → 停，用 question 问清再动手
+6. `validate_plugins.py` 未通过 → 禁止提 PR
+
+## 5. 验证
 
 ```bash
-# DriFox watchfiles 熱更新
-# 修改插件文件後等待 1-3 秒自動生效
+# 本包自检（结构/引用/evals 完整性）
+python scripts/check_skill_package.py .
 
-# 用 /plugin-marketplace 查看插件加載狀態（含啟/禁/卸）
-# 用 /theme 測試主題切換
+# 插件完整验证（在 drifox-plugins clone 中，发布前必做）
+python tools/validate_plugins.py && python tools/generate_marketplace.py
 ```
 
-### 6.2 完整驗證（提 PR 前必做）
+细节（热更新延迟表、检查项清单、除错流程）→ references/testing.md。
 
-當你的插件在 `~/.drifox/plugins/<name>/` 下開發完成後，要發布到官方市場前需跑完整驗證：
+## 6. 闭环
 
-```bash
-# 第一步：clone 官方市場倉庫
-git clone https://github.com/martin98-afk/drifox-plugins.git /tmp/dfp
+- 新踩的坑 → 写回 `references/troubleshooting.md`（症状→原因→修法）
+- 技能改进 → writeback / 明确 none-with-reason
+- 收尾前跑 `python scripts/check_skill_package.py .` 留证据
 
-# 第二步：把你的插件複製到倉庫中
-cp -r ~/.drifox/plugins/<name> /tmp/dfp/plugins/<name>
-
-# 第三步：在倉庫中跑驗證
-cd /tmp/dfp
-python tools/validate_plugins.py
-python tools/generate_marketplace.py
-
-# 第四步：確認全部 OK 後，清掉暫存
-# （正式提交 PR 的流程見 §7）
-rm -rf /tmp/dfp
-```
-
-### 6.3 驗證清單
-
-- [ ] `plugin.json` 能通過 `schemas/plugin.schema.json` 校驗
-- [ ] `name` 與目錄名一致，小寫 kebab-case
-- [ ] `components` 中每個 `true` 的 flag 都有對應目錄與文件
-- [ ] 每個 `commands/*.md` 有完整 frontmatter（description + type）
-- [ ] 每個 `skills/*/SKILL.md` 有 frontmatter（name + description）
-- [ ] 每個 `providers/*.py` 暴露 `register(registry)` 且 `ProviderDef.name` 唯一
-- [ ] `team_templates/*.yaml` 含 schema_version/template_name/非空 agents，且 agent_name 引用已存在 @角色
-- [ ] hooks 的 Python 文件能 `python -m py_compile` 通過
-- [ ] 已跑過 `validate_plugins.py` 全部 OK
-- [ ] 已跑過 `generate_marketplace.py` 更新 marketplace.json
-
----
-
-## 7. 發布到市場 — 任何人都可以發布自己的插件！
-
-插件在 `~/.drifox/plugins/<name>/` 下開發完成後，可以提交到官方市場讓所有 DriFox 用戶安裝使用。
-
-### 7.1 工作流
-
-```
-① Fork 官方市場倉庫 → https://github.com/martin98-afk/drifox-plugins（點右上角 Fork）
-② Clone 你的 fork → git clone https://github.com/<你的帳號>/drifox-plugins.git
-③ 把你的插件複製到倉庫中 → cp -r ~/.drifox/plugins/<name> plugins/<name>
-④ 跑驗證 → python tools/validate_plugins.py + generate_marketplace.py
-⑤ Commit & Push 到你的 fork
-⑥ 在 GitHub 上提交 PR（你的 fork → martin98-afk/drifox-plugins main）
-⑦ CI 自動校驗，通過後 maintainer 合併 → 你的插件上架 🎉
-```
-
-### 7.2 完整提交流程
-
-```bash
-# 1. 先在 GitHub 上 Fork 官方市場倉庫
-#    網址：https://github.com/martin98-afk/drifox-plugins → 點右上角 Fork
-
-# 2. clone 你的 fork
-git clone https://github.com/<你的GitHub帳號>/drifox-plugins.git /tmp/dfp
-cd /tmp/dfp
-
-# 3. 把官方倉庫設為上游（便於同步）
-git remote add upstream https://github.com/martin98-afk/drifox-plugins.git
-
-# 4. 建立特性分支
-git checkout -b feat/<plugin-name>
-
-# 5. 把你的插件從本地開發目錄複製進來
-cp -r ~/.drifox/plugins/<plugin-name> plugins/<plugin-name>
-
-# 6. 跑驗證
-python tools/validate_plugins.py
-python tools/generate_marketplace.py
-
-# 7. commit 並推送
-git add plugins/<plugin-name>/ marketplace.json
-git commit -m "feat(<plugin-name>): 添加 xx 插件"
-git push origin feat/<plugin-name>
-
-# 8. 到 GitHub 上創建 Pull Request
-#    你的 fork → martin98-afk/drifox-plugins main
-#    連結：https://github.com/martin98-afk/drifox-plugins/pulls
-```
-
-### 7.3 PR 合併後
-
-- marketplace.json 自動更新
-- 你的插件名稱出現在官方市場中
-- 所有 DriFox 用戶可透過 plugin-marketplace UI 瀏覽和安裝你的插件 🎉
-
-### 7.4 市場清單
-
-marketplace.json 中每條記錄的結構由 `tools/generate_marketplace.py` 自動從 `plugin.json` 生成，無需手動編輯。
-
-**參考**：
-- `references/publishing.md` — 完整發布流程
-- [CONTRIBUTING.md](https://github.com/martin98-afk/drifox-plugins/blob/main/CONTRIBUTING.md) — 貢獻指南
-- [GitHub 倉庫](https://github.com/martin98-afk/drifox-plugins) — 官方插件市場
-
----
-
-## 8. 常見陷阱
-
-### 🚫 Manifest 命名不一致
-插件目錄名與 `plugin.json` 的 `name` 字段必須一致。
-```json
-// ❌ 目錄是 my-cool-plugin，name 是 my-cool-plugin-v2
-// ✅ 目錄是 my-cool-plugin，name 是 my-cool-plugin
-```
-
-### 🚫 Components flag 開了但沒文件
-```json
-// ❌ "components": { "commands": true } 但沒有 commands/ 目錄
-// ✅ 每個 true 的 flag 必須有對應目錄或文件
-```
-
-### 🚫 工具沒聲明 danger
-```python
-# ❌ registry.register("my_tool", schema, impl=...)  # 缺 danger
-# ✅ registry.register(..., danger="safe")  # 插件工具必須顯式聲明
-```
-
-### 🚫 Providers 沒暴露 register / name 重複
-```python
-# ❌ providers/foo.py 只定義了函數，沒暴露 register(registry) → loader 不掃描
-# ❌ 兩個 provider 用了相同 name="DeepSeek" → 後加載者覆蓋先加載者
-# ✅ 每個 providers/*.py 必須暴露 register(registry)，name 唯一
-#    user 插件同名服務商會覆蓋 system 內置（覆蓋是預期行為，非 bug）
-```
-
-### 🚫 UI 插件走了本技能
-UI 插件開發請調用 `ui-plugin-creator` 技能。
-
-### 🚫 修改了 system 插件
-`plugins/` 下 system-* 系列內置插件的內容不要手動修改——它們是 DriFox 內置的。
-
-### 🚫 跳過驗證直接提 PR
-提 PR 前一定要跑 `validate_plugins.py`，否則 CI 會失敗。
-
-### 🚫 version 忘記更新
-每次修改後記得更新 `plugin.json` 的 `version` 字段。
-
-### 🚫 團隊模板 YAML 不合法
-`team_templates/*.yaml` 必須含 `schema_version`(固定 1)、`template_name`、非空 `agents`；
-`agents[].agent_name` 必須引用已存在的 @角色，否則 `/team --load` 報 TemplateError。
-文件名禁止 `.`/`/`/反斜槓/`..`（防路徑穿越）。
-
----
-
-## 9. references/ 索引
-
-> 以下文件按需加載，不要一次性全讀。
-
-| 文件 | 何時讀 | 內容 |
-|------|-------|------|
-| `references/components.md` | 開發各類組件時 | 11 類組件的詳細開發指南 + 代碼模板 |
-| `references/manifest.md` | 新建/修改 plugin.json 時 | manifest 字段定義、校驗規則、完整示例 |
-| `references/workflow.md` | 需要完整開發流程時 | 從需求→scaffold→開發→測試→發布的完整指引 |
-| `references/testing.md` | 驗證/除錯時 | validate_plugins.py 用法、熱更新測試、除錯技巧 |
-| `references/publishing.md` | 準備發布到市場時 | PR 流程、CI 說明、版本策略 |
-| `references/troubleshooting.md` | 遇到報錯/不工作時 | 常見問題與解決方案 |
-
----
-
-## 附：與其他技能的銜接
+## 附：技能衔接
 
 ```
 plugin-creator（本技能）
-├─ 🟡 需求不明確 → brainstorming
+├─ 🟡 需求不明确 → brainstorming
 ├─ 🟡 UI 插件     → ui-plugin-creator
-├─ 🟡 編碼規範     → drifox-dev/references/conventions.md
+├─ 🟡 编码规范     → drifox-dev/references/conventions.md
 ├─ 🟡 修 Bug      → diagnose
-└─ 🟡 複雜任務     → subagent-driven-development
+└─ 🟡 复杂任务     → subagent-driven-development
 ```
