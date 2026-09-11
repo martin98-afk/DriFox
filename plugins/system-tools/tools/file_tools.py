@@ -78,12 +78,12 @@ def _tool_desc_loader():
     return _tool_desc_module
 
 
-def _desc_param(example: str) -> dict:
+def _desc_param(example: str, required: bool = False) -> dict:
     """生成 description 参数的 schema 片段（模块缺失时返回空 dict，schema 退化为原样）"""
     mod = _tool_desc_loader()
     if not mod:
         return {}
-    return mod.description_param(example)
+    return mod.description_param(example, required=required)
 
 
 def _desc_preview(preview_fn, tail_fn=None):
@@ -357,7 +357,7 @@ _WRITE_SCHEMA = {
                 "content": {"type": "string", "description": "完整的文件内容"},
                 **_desc_param("新增 token 估算缓存模块"),
             },
-            "required": ["path", "content", "description"],
+            "required": ["path", "content"],
         },
     },
 }
@@ -438,7 +438,7 @@ _EDIT_SCHEMA = {
                 "replaceAll": {"type": "boolean", "description": "替换全部匹配(默认False)。oldString重复时设True", "default": False},
                 **_desc_param("修掉空列表导致的崩溃"),
             },
-            "required": ["path", "oldString", "newString", "description"],
+            "required": ["path", "oldString", "newString"],
         },
     },
 }
@@ -515,7 +515,7 @@ _MULTI_EDIT_SCHEMA = {
                 },
                 **_desc_param("把 token 估算抽成独立函数并加缓存"),
             },
-            "required": ["path", "edits", "description"],
+            "required": ["path", "edits"],
         },
     },
 }
