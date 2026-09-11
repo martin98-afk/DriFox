@@ -21151,6 +21151,57 @@ class OpenAIChatToolWindow(ToolWindow):
                 **kwargs,
             )
 
+        def _send_to_platform(platform: Any, chat_id: str, content: str, **kwargs):
+            """向已连接通讯平台会话发送消息（cron-tasks 等插件的通知通道）。
+
+            走 GatewayService 应用级单例，不依赖插件侧 import app.gateway
+            （其 _manager_instance 由 GatewayService 持有，插件拿不到）。
+
+            Args:
+                platform: 平台标识（Platform 枚举或 "feishu"/"dingtalk" 等 str）
+                chat_id: gateway 会话 chat_id
+                content: 消息文本
+                kwargs: timeout（秒，默认 30）
+
+            Returns:
+                SendResult（success/error 可判定）。服务未就绪时返回
+                success=False 的 SendResult，不抛异常。
+            """
+            from app.core.gateway_service import GatewayService
+            from app.gateway.base import SendResult
+
+            try:
+                svc = GatewayService.get_instance()
+            except Exception as e:
+                return SendResult(success=False, error=f"GatewayService 不可用: {e}")
+            return svc.send_to_platform(platform, chat_id, content, **kwargs)
+
+        def _list_platform_sessions():
+            """已知 gateway 会话列表（供插件选择投递目标）。
+
+            返回 GatewaySession 列表（含 platform/chat_id/display_name）；
+            服务未就绪时返回空列表。
+            """
+            from app.core.gateway_service import GatewayService
+
+            try:
+                return GatewayService.get_instance().list_platform_sessions()
+            except Exception:
+                return []
+
+        def _list_platforms():
+            """已注册通讯平台及连接状态（供插件区分「没配平台」与「配了没会话」）。
+
+            返回 list[dict]：{id, enabled, connected, available, error}；
+            服务未就绪时返回空列表。
+            """
+            from app.core.gateway_service import GatewayService
+
+            try:
+                return GatewayService.get_instance().list_platforms()
+            except Exception:
+                return []
+
         return {
             "get_model_config": self._get_current_model_config,
             "get_tool_executor": lambda: backend.tool_executor if backend else None,
@@ -21174,6 +21225,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
             ),
+            "send_to_platform": _send_to_platform,
+            "list_platform_sessions": _list_platform_sessions,
+            "list_platforms": _list_platforms,
         }
 
     def _build_agent_tools_schema(self, agent_name: str) -> List[Dict]:

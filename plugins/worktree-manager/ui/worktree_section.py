@@ -113,6 +113,7 @@ def _delete_worktree_job(wt_path: str, branch: str) -> bool:
             timeout=10,
             encoding="utf-8",
             errors="replace",
+            creationflags=_CREATION_FLAGS,
         )
         if r.returncode != 0:
             subprocess.run(

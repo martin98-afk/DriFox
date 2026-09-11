@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.5.10] - 2026-09-11 (重新发布 #3)
+## [v0.5.10] - 2026-09-11 (重新发布 #4)
 
-自上一版本以来的变更 | 提交数：87 · 文件变更：442 · +29172/-27772 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：89 · 文件变更：449 · +29403/-27778 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -84,6 +84,25 @@ All notable changes to this project will be documented in this file.
 #### ♻️ 代码重构 (Refactoring)
 
 - **`OpenAIChatToolWindow._branch_widget` 改用 `__dict__` 直查** (`app/main_widget.py`, `plugins/worktree-manager/icon.svg`, `plugins/worktree-manager/icon_dark.svg`): Qt 桥在裸实例上对缺失属性的访问可能抛 RuntimeError（getattr 默认值只兜 AttributeError），且避免误读类属性；同步替换 worktree-manager 图标资源（去除多余 `</svg>` 行 + 新增 dark 版）。
+
+### 🆕 重新发布 #4 增量（自 v0.5.10 #3 起）
+
+基于 `v0.5.10` (重新发布 #3) 标签的增量变更 | 提交数：2 · 文件变更：7 · +231/-6 | 贡献者：dingma, mading
+
+#### ✨ 新功能 (New Features)
+
+- **feat(gateway): 新增插件主动投递服务面 send_to_platform / list_platforms** (`app/core/gateway_service.py`, `app/gateway/base.py`, `app/gateway/manager.py`, `app/main_widget.py`, `app/plugins/contracts/engine_host.py`, `tests/plugins/test_engine_host_contract.py`): 修复插件无法向通讯平台主动发消息的问题。根因是 adapter 的平台标识被静默丢弃：`BasePlatformAdapter.platform` 是类属性，子类按惯例调用 `super().__init__(config, Platform.FEISHU)`，而基类 `__init__` 的第二个位置参数是 `message_handler`，平台标识被当处理器存下又随后丢弃，导致 `adapter.platform` 恒为类属性默认值 `Platform.WECOM`。按平台查适配器（`gateway_service._send_message` 的 `get_adapter`）因此永远返回 `None`，发送静默失败于 `SendResult(success=False, error="No adapter")`。
+  - `app/gateway/base.py`：`__init__` 识别第二位置参数的三种语义（None / 平台标识 / 消息处理器），新增 `_platform_id` 与 `platform_id` 属性。判定用鸭子类型而非 `isinstance` —— `MessageHandler` 是泛型别名，`isinstance` 会抛 `TypeError`。
+  - `app/gateway/manager.py`：`get_adapter` 增加 adapter 实例直通兜底。
+  - `app/core/gateway_service.py`：新增公开服务面 `send_to_platform`（在 manager 持久事件循环上调度协程并等待，任意线程可调；服务未就绪返回 `SendResult` 而非抛异常）与 `list_platforms`（平台连接状态，与会话列表正交 —— 平台已连接但未收到消息时会话为空而平台列表非空）。
+  - `app/main_widget.py`：`_build_ui_services` 注册两个新服务。
+  - `app/plugins/contracts/engine_host.py`：契约同步（17 → 18 键）。
+  - tests：守卫测试 6 → 9。
+  消费侧见 `drifox-plugins2` 仓库 cron-tasks 插件。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **fix: add creation flags to subprocess call in _delete_worktree_job for Windows compatibility** (`plugins/worktree-manager/ui/worktree_section.py`): Windows 下 `_delete_worktree_job` 调用的 `subprocess.Popen` 补齐 `creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW`，避免 worktree 删除作业的子进程被父进程控制台绑定 / 信号传递阻塞，导致切换/清理路径在 Windows 上偶发挂起或僵尸进程残留。
 
 ## [v0.5.10b4] - 2026-09-09
 
