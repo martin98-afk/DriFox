@@ -1683,6 +1683,37 @@ def _has_unclosed_think(text: str) -> bool:
     return last_close == -1
 
 
+def _registered_tag_names_safe() -> List[str]:
+    """安全获取插件注册的块标签名列表（注册表不可用时返回空列表）。
+
+    mood/plan 等人格块标签与 <think>/<tool> 同属流式协议标签：未闭合期间
+    内容不得以正文/纯文本形态进 DOM。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        return list(UIPluginRegistry.get_instance().get_registered_tag_names())
+    except Exception:
+        return []
+
+
+def _has_unclosed_registered_tag(text: str) -> bool:
+    """检测文本中是否存在未闭合的插件注册标签（如 <mood>，判据同 _has_unclosed_think）。
+
+    未闭合注册 tag 的内容若以正文/纯文本形态进 DOM，全量渲染落地时会被
+    _inject_tag_cards 替换为插件卡片 → 视觉上"文字先流式出现又消失"。
+    """
+    if not text:
+        return False
+    for tag in _registered_tag_names_safe():
+        last_open = text.rfind(f"<{tag}>")
+        if last_open == -1:
+            continue
+        if text.rfind(f"</{tag}>", last_open) == -1:
+            return True
+    return False
+
+
 # ── 方案 D：data-order 统一排序 ──────────────────────────────────
 # 根因（Bug B 复发的第三条路径）：JS 直接注入 #tool-content 的工具块
 # （_inject_tool_streaming_html 流式块 / append_tool_result 完成块 /
@@ -2914,7 +2945,7 @@ _CHAR_COUNT_HTML = '<div id="char-count" style="color: var(--text-muted); font-s
 # - segments：闭合段列表（每段是一段完整 markdown 文本）
 # ============================================================
 def _has_unclosed_think_or_tool(md: str) -> bool:
-    """md 中是否存在未闭合的 `<think>` / `<tool>` 块（开标签数 > 闭合标签数）。
+    """md 中是否存在未闭合的 ``<think>`` / ``<tool>`` / 插件注册 tag 块（开标签数 > 闭合标签数）。
 
     用途：全量渲染应用后决定是否推进差量基线 `_stable_md_len`。
     首次流式迭代的 `append_reasoning` 首 chunk 会触发全量渲染（显示
@@ -2926,7 +2957,11 @@ def _has_unclosed_think_or_tool(md: str) -> bool:
     """
     if not md:
         return False
-    return md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>")
+    if md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>"):
+        return True
+    # 插件注册 tag（如 <mood>）未闭合同样视为未闭合协议块：tail 行内渲染、
+    # 差量基线推进等守卫点共用本函数，tag 泄漏与 think 泄漏同症（闪现后消失）
+    return _has_unclosed_registered_tag(md)
 
 
 def _last_unpaired_open_pos(md: str, open_tag: str, close_tag: str) -> int:
@@ -2966,7 +3001,9 @@ def _tail_before_unclosed_block(md: str) -> str:
     if not md or not _has_unclosed_think_or_tool(md):
         return md
     cut = len(md)
-    for open_tag, close_tag in (("<think>", "</think>"), ("<tool>", "</tool>")):
+    pairs = [("<think>", "</think>"), ("<tool>", "</tool>")]
+    pairs += [(f"<{t}>", f"</{t}>") for t in _registered_tag_names_safe()]
+    for open_tag, close_tag in pairs:
         pos = _last_unpaired_open_pos(md, open_tag, close_tag)
         if pos != -1:
             cut = min(cut, pos)
@@ -3015,6 +3052,13 @@ def _extract_closed_segments(md: str):
     _first_close_tool = md.find("</tool>")
     if _first_close_tool != -1 and (_first_open_tool == -1 or _first_close_tool < _first_open_tool):
         return 0, []
+    # 插件注册 tag 同防护：切片起点落在未闭合 tag 内部（历史遗留基线）时，
+    # 第一个 close 在 open 之前 → 整个切片不产出，交给全量渲染兜底
+    for _tag in _registered_tag_names_safe():
+        _fo = md.find(f"<{_tag}>")
+        _fc = md.find(f"</{_tag}>")
+        if _fc != -1 and (_fo == -1 or _fc < _fo):
+            return 0, []
 
     segments = []
     stable_len = 0
@@ -3069,6 +3113,11 @@ def _extract_closed_segments(md: str):
             break  # think 未闭合 → 停止（尾部留在稳定区之外）
         if seg.count("<tool>") > seg.count("</tool>"):
             break  # tool 未闭合 → 停止
+        # 插件注册 tag（如 <mood>，人格块常含 \n\n 多段落）未闭合 → 停止：
+        # 半截 tag 段若照常产出，基线推进到 tag 内部，闭合后的 tail 无 open 有
+        # close → 孤立 close 被清理、内容当正文渲染（泄漏后随全量渲染消失）
+        if _has_unclosed_registered_tag(seg):
+            break
 
         # 该段完整闭合：产出
         segments.append(seg)
@@ -10078,6 +10127,11 @@ class CodeWebViewer(QWebEngineView):
             extra = latest[len(snapshot) :]
             if not extra.strip():
                 return
+            # 🐛 未闭合 tag/think 的半截内容不能以纯文本回补 DOM（快照可能切在
+            # 块中间，extra 检不出 open 标签 → 检测用全量 latest）：回补后会在
+            # 下一次全量渲染被插件卡片/思考折叠框替换 → "文字闪现后消失"
+            if _has_unclosed_registered_tag(latest) or _has_unclosed_think(latest):
+                return
             self._append_text_incremental(extra)
         except RuntimeError:
             pass
@@ -14827,16 +14881,20 @@ class MessageCard(SimpleCardWidget):
             # 🆕 检测未闭合 <think> 标签：静默累积不触发渲染，与 append_reasoning 策略一致
             # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
             # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
+            # 🆕 检测未闭合 <think> / 插件注册 tag 标签：静默累积不触发渲染，与 append_reasoning 策略一致
             last_block = self._content_data[-1] if self._content_data else None
             last_text = last_block.get("text", "") if isinstance(last_block, dict) else ""
             _think_unclosed = _has_unclosed_think(last_text)
+            _tag_unclosed = _has_unclosed_registered_tag(last_text)
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字。
             # 🐛 修复（高块闪现）：think 未闭合期间**不**调用 _append_text_incremental ——
             # 否则思考内容会以普通正文逐行注入 #content-placeholder 堆叠成高块，
             # 待 </think> 闭合后才由 _inject_think_cards 折叠成 think-compact，高块
             # 闪现后消失。与 append_reasoning 一致：未闭合期间静默累积、仅靠全量
             # 渲染落地；think 已闭合 / 无 think 标签时保持原有增量注入行为不变。
-            if self._streaming and not _think_unclosed:
+            # 插件注册 tag（<mood> 等）未闭合同样跳过增量注入：生肉文本进 DOM 后
+            # 会被全量渲染的插件卡片替换 → "文字先流式出现又消失"
+            if self._streaming and not _think_unclosed and not _tag_unclosed:
                 self.viewer._append_text_incremental(text)
             if _think_unclosed:
                 if not self.viewer._think_text_streaming_started:
@@ -14847,6 +14905,15 @@ class MessageCard(SimpleCardWidget):
                 # 后续 chunk：静默累积，不触发渲染/高度更新
                 self._content_just_loaded = True
                 return
+            # 🐛 插件注册 tag（<mood> 等）未闭合：增量注入已跳过（与 think 同策略）。
+            # 状态翻转（tag 首现/闭合）时强制全量渲染一次——差量快路径的闭合段
+            # append 与 tail 行内均被 tag 守卫拦截，占位行（"解析中…"）与完整
+            # 卡片只能由全量管线的 _inject_tag_cards 产出；闭合翻转也走全量，
+            # 卡片即刻展开而无需等下一个边界。
+            if _tag_unclosed != getattr(self.viewer, "_tag_text_streaming", False):
+                self.viewer._needs_full_render = True
+                self.viewer._schedule_render(immediate=True)
+            self.viewer._tag_text_streaming = _tag_unclosed
             # <think> 已闭合或无 think 标签：恢复正常渲染
             self.viewer._think_text_streaming_started = False
             # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离
