@@ -52,6 +52,7 @@
   - 10.2 窗口属性与生命周期 — L572
   - 10.3 高 DPI 坐标换算 — L600
   - 10.4 测试要点（pytest-qt） — L619
+- **11. 项目 / 工作目录联动（可选协议 on_project_changed）** — L634–L669
 ## 1. 上下文注入（拉模型）
 
 **核心原则**：**不要直接推数据**。卡片通过 `set_context_provider(provider)` 注入一个**无参函数**，在需要时自行调用获取最新上下文（主题色、字体、项目信息等）。
@@ -628,3 +629,42 @@ shot.setDevicePixelRatio(dpr)
   断言尺寸即可，别依赖具体内容。
 - lint 关卡是 **ruff**；`npx pyright` 默认配置在本项目是满屏基线噪音
   （无 pyrightconfig、PyQt5 stub 缺枚举），别当硬关卡，也别为它改代码。
+
+---
+
+## 11. 项目 / 工作目录联动（可选协议 on_project_changed）
+
+主程序在项目 / 工作目录切换完成时经 `UIEventBus` 广播 `EV_PROJECT_CHANGED`。
+插件**实现一个方法**即可接收，不需要注册任何元数据键：
+
+```python
+    def on_project_changed(self, project: str = "", workdir: str = "", window_id: str = "") -> None:
+        """项目 / 工作目录已切换（宿主只对可见组件调用）"""
+        # 工作台页：重取 ctx + 重载数据
+        self.refresh_data()
+        # 浮动卡：重取 provider + 刷新列表
+```
+
+约定：
+
+| 事项 | 说明 |
+|------|------|
+| 声明方式 | **实现即声明**（宿主用 `hasattr` 探测）；没实现则零开销跳过，不要在 `register_*` 里加键 |
+| 调用时机 | 只对**可见**的组件：当前工作台页、可见浮动卡 |
+| 不可见的怎么办 | 不派发。工作台页切回时走 `refresh_data()`；浮动卡再次显示时走 `show_card()` |
+| 窗口过滤 | 非活跃窗口的变更被丢弃，切回该窗口时由显示路径补刷（框架已做，插件不用管） |
+| 回调开销 | 直接跑在项目切换路径上，只做「重取 ctx + 重载数据」，重活请异步 |
+| 异常隔离 | 单卡抛错只记一条 warning，不影响其他插件与主流程 |
+
+**工作台页要拿最新 ctx**：`context` 是构造时快照，切项目后 `project_root` 会过期。
+从宿主注入的 `context_provider` 拉最新（浮动卡走 `set_context_provider` 拉模型）：
+
+```python
+    def refresh_data(self) -> None:
+        self._refresh_host_context()   # 内部调 context["context_provider"]()
+        self._apply_latest_theme()
+        self._async_load_tree()
+```
+
+完整先例：`plugins/file-tree/ui/cards.py`（工作台页首个接入方）；
+派发实现与协议说明：`app/core/project_changed.py`。

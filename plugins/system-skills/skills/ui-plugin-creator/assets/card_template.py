@@ -171,6 +171,16 @@ class CardTemplate(QWidget):
         self._async_refresh()
         self.setVisible(True)
 
+    # ── 项目 / 工作目录联动（可选协议，实现即生效） ────────
+    # 宿主在切换项目 / 工作目录时，只对**可见**的卡片调用本方法；
+    # 不可见的卡片在下次 show_card 时自行刷新（上面那条路径已覆盖）。
+    # 需要跟随项目的数据（如项目内文件树、工作区列表）按需实现：
+    #
+    # def on_project_changed(self, project: str = "", workdir: str = "", window_id: str = "") -> None:
+    #     self.show_card()
+    #
+    # 详见 references/patterns.md §11 与 references/pitfalls.md §14。
+
     def _apply_plugin_icon(self):
         """从上下文获取插件图标更新头部图标（所有实际卡片均实现此模式）"""
         if self._context_provider is None or self._header_icon is None:

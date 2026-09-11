@@ -238,4 +238,31 @@ edit.setText("")        # ❌ QLineEdit/QLabel 的 API，这里 AttributeError
 
 ---
 
+## 14. 工作台插件页拿到的 context 是构造时快照
+
+**症状**：切换项目后插件页仍显示上一个项目的数据（文件树显示旧目录、工作树提示未设置工作目录）；页面显示的路径与 `ctx["project_root"]` 对得上，但就是不变。
+
+**原因**：`WorkbenchPanel._make_page_widget` 只在页面**构造时**推一次 `_build_ui_context()` 的结果。页面把它存成 provider 闭包后一直返回同一份 dict，切项目不会自动更新。
+
+**修法**：
+
+```python
+    def __init__(self, parent=None, context=None):
+        ...
+        # 宿主注入的拉取入口（没有它就拿不到最新 ctx）
+        self._host_context_provider = (context or {}).get("context_provider")
+
+    def refresh_data(self) -> None:
+        provider = self._host_context_provider
+        if callable(provider):
+            ctx = provider()          # ✅ 每次拿最新
+            self._context = ctx
+```
+
+**规则**：插件页的 `context` 只当**初值**用；需要跟随项目 / 工作目录变化时，实现可选协议
+`on_project_changed`（宿主切项目时派发），内部走 `refresh_data()` 重取 ctx 并重载数据。
+详见 `references/patterns.md §11`。
+
+---
+
 > 新坑写回格式：`## N. 标题` + **症状/原因/修法** 三段 + 可运行代码片段。
