@@ -1714,6 +1714,96 @@ def _has_unclosed_registered_tag(text: str) -> bool:
     return False
 
 
+# ===== 渲染型 fence 流式静默 =====
+# ```echarts / ```mermaid / ```html / ```widget（及插件注册 fence lang）闭合后
+# 由全量渲染分发为图表/卡片。半截 fence 的代码若以生肉形式增量注入 DOM，
+# 观感是"代码流式打出来、fence 闭合后被替换消失"（与 think/mood 泄漏同族）。
+# 未闭合期间静默累积，闭合后由全量渲染落地（chart-streaming 骨架/真图）。
+_CHART_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*(\w+)")
+_CHART_FENCE_LANGS = frozenset({"echarts", "mermaid", "html", "widget", "svg"})
+
+
+def _is_render_fence_lang(lang: str) -> bool:
+    """lang 是否会渲染成卡片/图表（内置集合 + 插件 fence 渲染器注册表）。"""
+    if not lang:
+        return False
+    lang = lang.strip().lower()
+    if lang in _CHART_FENCE_LANGS:
+        return True
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        return lang in UIPluginRegistry.get_instance().get_all_fence_renderers()
+    except Exception:
+        return False
+
+
+def _has_unclosed_chart_fence(text: str) -> bool:
+    """检测文本是否停在未闭合的渲染型 fence（图表/卡片类）内部。
+
+    fence 开闭按行首 ``` / ~~~ 判定（与 _extract_fenced_code 同语义）。
+    普通代码块（python/js 等）流式生肉显示是预期行为，不在本检测范围。
+    """
+    if "```" not in text and "~~~" not in text:
+        return False
+    inside = False
+    chart = False
+    marker = ""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not inside:
+            m = _CHART_FENCE_OPEN_RE.match(stripped)
+            if m:
+                inside = True
+                marker = m.group(1)
+                chart = _is_render_fence_lang(m.group(2))
+            elif stripped.startswith("```") or stripped.startswith("~~~"):
+                inside = True
+                marker = stripped[:3]
+                chart = False
+        elif marker and stripped.startswith(marker):
+            inside = False
+            chart = False
+    return inside and chart
+
+
+def _last_para_break_outside_fence(md: str) -> int:
+    """最后一个不在 fence 内部的 ``\n\n`` 偏移（无 → -1）。
+
+    差量基线推进点若落进未闭合 fence 内部，后续差量切片起点就在 fence 内，
+    切片内的 fence 状态机（从外判起）会把内部代码行当普通段落产出 → 图表
+    源码以生肉段流入正文。stable 永不越过未闭合 fence 起点。
+    """
+    if "```" not in md and "~~~" not in md:
+        return md.rfind("\n\n")
+    inside = False
+    marker = ""
+    last = -1
+    i = 0
+    n = len(md)
+    while i < n:
+        if i == 0 or md[i - 1] == "\n":
+            # 行首：判定 fence 开闭
+            j = i
+            while j < n and md[j] in " \t":
+                j += 1
+            tok = md[j : j + 3]
+            if tok in ("```", "~~~"):
+                if not inside:
+                    inside = True
+                    marker = tok
+                elif tok == marker:
+                    inside = False
+                i = j + 3
+                continue
+        if not inside and md.startswith("\n\n", i):
+            last = i
+            i += 2
+            continue
+        i += 1
+    return last
+
+
 # ── 方案 D：data-order 统一排序 ──────────────────────────────────
 # 根因（Bug B 复发的第三条路径）：JS 直接注入 #tool-content 的工具块
 # （_inject_tool_streaming_html 流式块 / append_tool_result 完成块 /
@@ -9935,6 +10025,10 @@ class CodeWebViewer(QWebEngineView):
         # 当正文泄漏显示），等闭合后由差量段/全量渲染处理。
         if _has_unclosed_think_or_tool(_tail):
             return
+        # 渲染型 fence 未闭合：静默累积（半截图表代码不能行内渲染成普通代码块，
+        # 闭合后由全量渲染分发 chart-streaming 骨架/真图）
+        if _has_unclosed_chart_fence(_tail):
+            return
         _h = hash(_tail)
         if _h == self._tail_html_hash:
             return
@@ -10081,7 +10175,9 @@ class CodeWebViewer(QWebEngineView):
                 # 推进到最后段落边界后，末段整体划入 tail 区：打标删除与 tail 重建
                 # 语义闭环（删掉的正是 tail 会重建的），不丢不重。
                 _md_r = self._last_rendered_markdown
-                _last_break = _md_r.rfind("\n\n")
+                # fence 感知：推进点不落在未闭合 fence 内部（否则后续差量切片
+                # 起点在 fence 内，内部代码行被当普通段产出 → 图表源码生肉流入）
+                _last_break = _last_para_break_outside_fence(_md_r)
                 self._stable_md_len = _last_break + 2 if _last_break != -1 else 0
             # 🐛 修复（思考框/工具框重复）：md 含未闭合块时基线**不推进**（防残段
             # 泄漏到正文），但 DOM 里已渲染出该块（think-streaming / 工具框）。
@@ -10201,10 +10297,14 @@ class CodeWebViewer(QWebEngineView):
             extra = latest[len(snapshot) :]
             if not extra.strip():
                 return
-            # 🐛 未闭合 tag/think 的半截内容不能以纯文本回补 DOM（快照可能切在
-            # 块中间，extra 检不出 open 标签 → 检测用全量 latest）：回补后会在
-            # 下一次全量渲染被插件卡片/思考折叠框替换 → "文字闪现后消失"
-            if _has_unclosed_registered_tag(latest) or _has_unclosed_think(latest):
+            # 🐛 未闭合 tag/think/渲染型 fence 的半截内容不能以纯文本回补 DOM
+            # （快照可能切在块中间，extra 检不出 open 标签 → 检测用全量 latest）：
+            # 回补后会在下一次全量渲染被卡片/图表替换 → "文字闪现后消失"
+            if (
+                _has_unclosed_registered_tag(latest)
+                or _has_unclosed_think(latest)
+                or _has_unclosed_chart_fence(latest)
+            ):
                 return
             self._append_text_incremental(extra)
         except RuntimeError:
@@ -14955,20 +15055,22 @@ class MessageCard(SimpleCardWidget):
             # 🆕 检测未闭合 <think> 标签：静默累积不触发渲染，与 append_reasoning 策略一致
             # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
             # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
-            # 🆕 检测未闭合 <think> / 插件注册 tag 标签：静默累积不触发渲染，与 append_reasoning 策略一致
+            # 🆕 检测未闭合 <think> / 插件注册 tag / 渲染型 fence：静默累积不触发渲染，与 append_reasoning 策略一致
             last_block = self._content_data[-1] if self._content_data else None
             last_text = last_block.get("text", "") if isinstance(last_block, dict) else ""
             _think_unclosed = _has_unclosed_think(last_text)
             _tag_unclosed = _has_unclosed_registered_tag(last_text)
+            _fence_unclosed = _has_unclosed_chart_fence(last_text)
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字。
             # 🐛 修复（高块闪现）：think 未闭合期间**不**调用 _append_text_incremental ——
             # 否则思考内容会以普通正文逐行注入 #content-placeholder 堆叠成高块，
             # 待 </think> 闭合后才由 _inject_think_cards 折叠成 think-compact，高块
             # 闪现后消失。与 append_reasoning 一致：未闭合期间静默累积、仅靠全量
             # 渲染落地；think 已闭合 / 无 think 标签时保持原有增量注入行为不变。
-            # 插件注册 tag（<mood> 等）未闭合同样跳过增量注入：生肉文本进 DOM 后
-            # 会被全量渲染的插件卡片替换 → "文字先流式出现又消失"
-            if self._streaming and not _think_unclosed and not _tag_unclosed:
+            # 插件注册 tag（<mood> 等）与渲染型 fence（```echarts 等）未闭合同样
+            # 跳过增量注入：生肉进 DOM 后会被全量渲染的卡片/图表替换 →
+            # "文字/代码先流式出现又消失"
+            if self._streaming and not _think_unclosed and not _tag_unclosed and not _fence_unclosed:
                 self.viewer._append_text_incremental(text)
             if _think_unclosed:
                 if not self.viewer._think_text_streaming_started:
