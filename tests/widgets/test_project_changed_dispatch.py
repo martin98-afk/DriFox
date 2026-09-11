@@ -87,3 +87,51 @@ def test_publish_project_changed_dedupes(monkeypatch):
     assert published[0][0] == bus_mod.EV_PROJECT_CHANGED
     assert published[0][1]["workdir"] == "D:/a"
     assert published[0][1]["window_id"] == "win_1"
+
+
+def test_workbench_panel_dispatches_current_page(monkeypatch):
+    """面板只对当前页派发；非当前页由切页 refresh_data 补刷"""
+    import app.widgets.workbench_panel as wbp
+
+    panel = wbp.WorkbenchPanel.__new__(wbp.WorkbenchPanel)  # 不跑 __init__，避免真实控件
+    calls = []
+
+    class _Page:
+        def on_project_changed(self, project="", workdir="", window_id=""):
+            calls.append(("page", project))
+
+    class _Stack:
+        @staticmethod
+        def currentWidget():
+            return _Page()
+
+    panel._stack = _Stack()
+    monkeypatch.setattr(wbp, "is_active_window", lambda _wid: True)
+
+    wbp.WorkbenchPanel._on_project_changed_event(
+        panel, {"project": "项目B", "workdir": "D:/b", "window_id": "w1"}
+    )
+    assert calls == [("page", "项目B")]
+
+
+def test_workbench_panel_skips_background_window(monkeypatch):
+    """非活跃窗口的变更不派发（切回该窗口时由显示路径补刷）"""
+    import app.widgets.workbench_panel as wbp
+
+    panel = wbp.WorkbenchPanel.__new__(wbp.WorkbenchPanel)
+    calls = []
+
+    class _Page:
+        def on_project_changed(self, project="", workdir="", window_id=""):
+            calls.append(project)
+
+    class _Stack:
+        @staticmethod
+        def currentWidget():
+            return _Page()
+
+    panel._stack = _Stack()
+    monkeypatch.setattr(wbp, "is_active_window", lambda _wid: False)
+
+    wbp.WorkbenchPanel._on_project_changed_event(panel, {"project": "项目B", "window_id": "w2"})
+    assert calls == []

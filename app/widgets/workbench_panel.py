@@ -44,6 +44,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import ScrollArea, TransparentToolButton
 
+from app.core.project_changed import dispatch_project_changed, is_active_window
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
 from loguru import logger
@@ -522,6 +523,7 @@ class WorkbenchPanel(QWidget):
         # 初始默认选中第一个页签（非「默认工作树」特判；当前首个页签恰为工作树）
         self.set_current_tab(0)
         self.refresh_style()
+        self._subscribe_project_changed()
 
     # ── 显隐（直接 show/hide，无折叠动画） ──
 
@@ -1058,9 +1060,44 @@ class WorkbenchPanel(QWidget):
             return False
         return not ctx.get("backend")
 
+    # ── 项目 / 工作目录联动（UI 插件可选协议 on_project_changed） ──
+
+    def _subscribe_project_changed(self) -> None:
+        """订阅项目 / 工作目录变更：向当前插件页派发
+
+        退订要点：UIEventBus 用 ``is`` 比较回调对象，bound method 每次取值都是
+        新对象 —— 必须先把 ``self._on_project_changed_event`` 存进局部变量再
+        同时用于 subscribe 与 unsubscribe，否则退订静默失效、留下悬挂回调。
+        """
+        try:
+            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+
+            bus = UIEventBus.get_instance()
+            handler = self._on_project_changed_event
+            bus.subscribe(EV_PROJECT_CHANGED, handler)
+            self.destroyed.connect(lambda: bus.unsubscribe(EV_PROJECT_CHANGED, handler))
+        except Exception as e:
+            logger.warning(f"[WorkbenchPanel] 项目变更订阅失败: {e}")
+
+    def _on_project_changed_event(self, payload: dict) -> None:
+        """项目 / 工作目录变更：只对当前页派发
+
+        非当前页不派发：用户切到该页时 ``set_current_tab`` →
+        ``refresh_current_page_data()`` 会调页面 ``refresh_data()`` 补刷。
+        """
+        if not is_active_window(payload.get("window_id", "")):
+            return
+        dispatch_project_changed(
+            self._stack.currentWidget(),
+            project=payload.get("project", ""),
+            workdir=payload.get("workdir", ""),
+            window_id=payload.get("window_id", ""),
+        )
+
     def _make_page_widget(self, info: Any) -> Optional[QWidget]:
         """构建插件页 widget（构造 parent + context，兼容无 context 的老签名）"""
         context: Dict[str, Any] = {}
+        parent_win = None
         try:
             parent_win = self._host_window()
             if parent_win is not None and hasattr(parent_win, "_build_ui_context"):
@@ -1069,6 +1106,11 @@ class WorkbenchPanel(QWidget):
             context = {}
         # 差异回调注入 context，供插件版产物页触发
         context.setdefault("diff_requested_callback", self._emit_diff)
+        # 插件页拉取最新宿主上下文的入口：工作台页的 context 是构造时快照，
+        # 项目切换后 project_root 会过期（文件树页曾因此显示旧项目目录）。
+        # 老页面不读该键，行为完全不变。
+        if parent_win is not None and hasattr(parent_win, "_build_ui_context"):
+            context["context_provider"] = lambda _w=parent_win: _w._build_ui_context()
         try:
             widget = info.widget_class(parent=self._stack, context=context)
         except TypeError:
