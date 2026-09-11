@@ -55,6 +55,7 @@ ICON_NAME_TO_FILE_LIGHT = {
     "窗体-最大化": "窗体-最大化.svg",
     "窗体-最小化": "窗体-最小化.svg",
     "编辑": "编辑.svg",
+    "置顶": "置顶.svg",
     "裁剪": "裁剪.svg",
     "解锁": "解锁.svg",
     "设置-subagent": "设置-subagent.svg",

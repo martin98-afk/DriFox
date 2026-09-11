@@ -269,7 +269,7 @@ class _HistoryItemCard(QFrame):
         btns_layout = QHBoxLayout(self._btns)
         btns_layout.setContentsMargins(0, 0, 0, 0)
         btns_layout.setSpacing(0)
-        self.pin_btn = TransparentToolButton(FluentIcon.PIN, self._btns)
+        self.pin_btn = TransparentToolButton(get_icon("置顶"), self._btns)
         self.pin_btn.setToolTip("取消置顶" if pinned else "置顶")
         self.pin_btn.setFixedSize(22, 22)
         self.pin_btn.clicked.connect(lambda: self.pinToggleRequested.emit(self._index, not self._pinned))
@@ -391,8 +391,7 @@ class _HistoryItemCard(QFrame):
         self._project = project
         self._update_project_label(show_project)
 
-        # 置顶按钮图标/提示跟随状态
-        self.pin_btn.setIcon(FluentIcon.UNPIN if pinned else FluentIcon.PIN)
+        # 置顶按钮提示跟随状态
         self.pin_btn.setToolTip("取消置顶" if pinned else "置顶")
 
         # 预览变化
@@ -405,7 +404,7 @@ class _HistoryItemCard(QFrame):
 
 
 class _ArchivedItemCard(QFrame):
-    """归档会话条目（行式，与 _HistoryItemCard 同构）：恢复 / 彻底删除 / 重命名"""
+    """归档会话条目（行式，与 _HistoryItemCard 同构）：恢复 / 彻底删除"""
 
     restored = pyqtSignal(str)  # 文件路径
     permanentlyDeleted = pyqtSignal(str)  # 文件路径
@@ -857,7 +856,6 @@ class HistoryCard(QWidget):
     sessionImported = pyqtSignal(dict)  # 导入会话时发出
     sessionRestored = pyqtSignal(str)  # 恢复归档会话
     sessionPermanentlyDeleted = pyqtSignal(str)  # 彻底删除归档会话
-    archivedSessionRenamed = pyqtSignal(str, str)  # 归档会话重命名
     teamRestoreRequested = pyqtSignal(str)  # 恢复团队会话（参数 = run_id）
     teamArchiveRequested = pyqtSignal(str)  # 归档团队会话（参数 = run_id）
     memberSelected = pyqtSignal(dict)  # 团队成员 session_record 被选中进入会话
