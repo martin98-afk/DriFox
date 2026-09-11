@@ -1121,6 +1121,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self.cfg = Settings.get_instance()
         # 初始化当前项目（在 backend.initialize 之前）
         self._current_project = self.cfg.current_project.value or "默认项目"  # 当前项目
+        # 上次广播的项目上下文 (project, workdir)：EV_PROJECT_CHANGED 去重用
+        self._last_project_ctx: Optional[tuple] = None
         # 多窗口隔离：实例级工作目录缓存（{project: workdir_path}）
         # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
         self._current_workdir: Dict[str, str] = {}
@@ -20518,10 +20520,35 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_branch()
         # 工作台浮层记忆页跟随当前项目
         self._push_workbench_project(project, workdir)
+        # UI 插件项目联动：项目 / 工作目录定稿后广播（可选协议 on_project_changed）
+        self._publish_project_changed(project, workdir)
 
         from loguru import logger
 
         logger.info(f"[MainWidget] Synced working directory for project '{project}': {workdir or 'default'}")
+
+    def _publish_project_changed(self, project: str, workdir: str) -> None:
+        """广播项目 / 工作目录变更（UI 插件可选协议 on_project_changed 的触发源）
+
+        去重：同 (project, workdir) 重复同步不重复发布 —— showEvent 首帧、
+        切会话、分支恢复、切项目共 6 条路径都会走 _sync_working_directory。
+        首次同步也发一次（_last_project_ctx 初值 None），供插件做首次初始化。
+        """
+        signature = (project, workdir or "")
+        if signature == getattr(self, "_last_project_ctx", None):
+            return
+        self._last_project_ctx = signature
+        try:
+            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(
+                EV_PROJECT_CHANGED,
+                project=project,
+                workdir=workdir or "",
+                window_id=getattr(self, "_window_id", "") or "",
+            )
+        except Exception as e:
+            logger.warning(f"[MainWidget] 项目变更广播失败: {e}")
 
     def _ensure_temp_workdir(self, project: str) -> str:
         """确保项目有临时工作目录

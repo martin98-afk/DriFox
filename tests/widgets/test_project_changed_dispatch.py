@@ -60,3 +60,30 @@ def test_is_active_window_filters_background_window(monkeypatch):
     assert is_active_window("win_active") is True
     assert is_active_window("win_other") is False
     assert is_active_window("") is True  # 空 window_id 放行
+
+
+def test_publish_project_changed_dedupes(monkeypatch):
+    """同 (project, workdir) 重复同步只发一次；变化即发"""
+    from app.core import ui_event_bus as bus_mod
+    from app.main_widget import OpenAIChatToolWindow
+
+    published = []
+
+    class _Bus:
+        def publish(self, event, **payload):
+            published.append((event, payload))
+
+    monkeypatch.setattr(bus_mod.UIEventBus, "get_instance", staticmethod(lambda: _Bus()))
+
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)  # 不跑 __init__，避免真实控件
+    win._window_id = "win_1"
+    win._last_project_ctx = None
+
+    OpenAIChatToolWindow._publish_project_changed(win, "项目A", "D:/a")
+    OpenAIChatToolWindow._publish_project_changed(win, "项目A", "D:/a")  # 去重
+    OpenAIChatToolWindow._publish_project_changed(win, "项目B", "D:/b")  # 变化
+
+    assert [p[1]["project"] for p in published] == ["项目A", "项目B"]
+    assert published[0][0] == bus_mod.EV_PROJECT_CHANGED
+    assert published[0][1]["workdir"] == "D:/a"
+    assert published[0][1]["window_id"] == "win_1"
