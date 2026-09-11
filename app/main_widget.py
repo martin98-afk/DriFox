@@ -204,6 +204,14 @@ SCROLL_MAX_CACHE_TTL = 0.03
 # 共用阈值会让胶囊在跟随边界上反复闪现/消失。
 SCROLL_JUMP_SHOW_THRESHOLD = 120
 
+# 宽度同步分帧批大小：实测 sync_width 约 1.4ms/张（setMin/MaxWidth 布局失效
+# + update_height 的 runJavaScript IPC），8 张 ≈ 11ms，低于单帧预算（16ms），
+# 保证批间让出主线程后 UI 无冻结感。
+# ⚠️ 故意放模块级而非类属性：热重载会把新方法应用到旧实例上，
+# 新增的类常量不在旧类里（self._SYNC_WIDTH_BATCH 会 AttributeError），
+# 模块级常量经函数 __globals__ 查找，新旧实例都安全。
+_SYNC_WIDTH_BATCH = 8
+
 
 class _ProjectUrlImportThread(QThread):
     """后台线程：从 URL 下载 .drifox_project 项目压缩包，避免 UI 冻结。
@@ -1322,6 +1330,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._restore_epoch = 0
         self._restore_queue = []
         self._restore_batch_idx = 0
+        # ⚡ 宽度同步分帧链状态（见 _sync_all_cards_width 注释）
+        self._sync_width_queue: list = []
+        self._sync_width_idx = 0
         self._last_chat_viewport_width = 0
         # [PERF] 滚动同步定时器：100ms 已足够跟踪滚动停止
         self._scroll_sync_timer = QTimer(self)
@@ -8939,7 +8950,14 @@ class OpenAIChatToolWindow(ToolWindow):
             card.sync_width(target_width=max(320, viewport_width - margin))
 
     def _sync_all_cards_width(self):
-        """resize 完成后分批恢复卡片，避免所有 WebEngineView 同时分配 GPU 缓冲区"""
+        """resize 完成后恢复卡片：宽度同步分帧摊平 + 分批 GPU 恢复。
+
+        ⚡ #侧栏动画卡顿：实测 30 张卡一次性全量宽度同步会冻结主线程
+        44~132ms（约 1.4ms/张：setMin/MaxWidth 布局失效 + update_height 的
+        runJavaScript IPC），表现为「侧边栏动画放完后界面顿一下」。现改为
+        分帧批处理：每批 _SYNC_WIDTH_BATCH 张、批间让出主线程，单帧阻塞
+        <15ms（无感），总完成时间增加 <50ms。
+        """
         # [L2] 后台页：整条恢复链挂起，等该页重新激活时（on_activated）同步补跑。
         orchestrator = ResizeOrchestrator.get_instance()
         if not orchestrator.is_current(self):
@@ -8953,15 +8971,56 @@ class OpenAIChatToolWindow(ToolWindow):
             if viewport_width > 0:
                 self._last_chat_viewport_width = viewport_width
 
-        # 第一步：全量同步所有卡片宽度（轻量，仅 setMinimumWidth/setMaximumWidth，无 GPU 分配）
+        # epoch 令牌提前到链头：宽度同步分帧链与后续恢复链共用同一代次，
+        # 新一轮 resize 周期（complete timer 重新到期）会使旧链全部作废。
+        self._restore_epoch += 1
+        epoch = self._restore_epoch
+
+        # [L1] 高度批量提交提前到宽度同步前开启：分帧期间 sync_width 驱动的
+        # update_height → JS 高度回传同样要被收敛为「一次布局 + 一次锚点修正」。
+        batch = self._ensure_height_batch()
+        if batch is not None:
+            batch.begin()
+
+        # 第一阶段：全量同步所有卡片宽度（分帧批处理）。
         # 🐛 修复：不能只同步视口 ±buffer 内卡片——离屏卡片残留旧宽度(尤其窗口被拉宽又缩小后)
         # 会锁死 chat_container 无法缩小（parent.width()→旧宽度→死锁），滚动补同步也用错 parent 宽。
-        # 宽度同步本身轻量，全量遍历开销可接受；真正昂贵的是第二步 GPU preview 恢复(已分批)。
+        cards = []
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
             if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
                 continue
-            card = item.widget()
+            cards.append(item.widget())
+        self._sync_width_queue = cards
+        self._sync_width_idx = 0
+        self._process_sync_width_batch(epoch)
+
+    def _process_sync_width_batch(self, epoch: int | None = None):
+        """第一阶段：分帧推进全量宽度同步；完成后进入第二阶段恢复链。
+
+        Args:
+            epoch: 链代次。与 self._restore_epoch 不符说明本轮 resize 已作废本链。
+        """
+        if epoch is not None and epoch != self._restore_epoch:
+            return
+        # [L2] 后台页挂起：切回激活时 on_activated 重跑 _sync_all_cards_width（新 epoch）。
+        orchestrator = ResizeOrchestrator.get_instance()
+        if not orchestrator.is_current(self):
+            orchestrator.mark_paused(self)
+            return
+
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        viewport_width = 0
+        if scroll_area:
+            viewport_width = scroll_area.viewport().width()
+            if viewport_width > 0:
+                self._last_chat_viewport_width = viewport_width
+
+        queue = self._sync_width_queue
+        idx = self._sync_width_idx
+        end = min(idx + _SYNC_WIDTH_BATCH, len(queue))
+        for i in range(idx, end):
+            card = queue[i]
             try:
                 if viewport_width > 0:
                     margin = 20 if card.role != "user" else max(24, int(viewport_width * 0.06))
@@ -8970,32 +9029,34 @@ class OpenAIChatToolWindow(ToolWindow):
                     card.sync_width(force=True)
             except RuntimeError:
                 pass
+        self._sync_width_idx = end
+        if end < len(queue):
+            QTimer.singleShot(0, lambda: self._process_sync_width_batch(epoch))
+            return
+        self._sync_width_queue = []
+        self._sync_width_idx = 0
+        # 宽度全部就位 → 第二阶段恢复链
+        self._begin_restore_chain(epoch)
 
-        # [L1] 开启高度批量提交：本轮恢复产生的所有高度变化收敛为
-        # 「一次布局 + 一次锚点修正」（与到达顺序无关），取代逐张
-        # setFixedHeight + 逐张 delta 补偿的旧链路。
-        batch = self._ensure_height_batch()
-        if batch is not None:
-            batch.begin()
+    def _begin_restore_chain(self, epoch: int):
+        """第二阶段：分区恢复 —— 视口内立即全量恢复，离屏大批量快恢复。
 
-        # 第二步：分区恢复 —— 视口内立即全量恢复，离屏大批量快恢复。
-        #
-        # 🐛 竞态修复（窗口拖拽时部分卡片永久空白的根因）：
-        # 旧实现把全部卡片塞进同一个 _restore_queue，用 QTimer.singleShot 链式
-        # 分批推进，但**没有任何机制取消上一条链**。连续 resize（拖拽必然产生）
-        # 会启动多条链，它们共享 _restore_queue / _restore_batch_idx：
-        # 先结束的那条把 _restore_queue 清空并置 _resize_preview_active=False，
-        # 另一条链随后读到空队列直接收尾 → 大量卡片从未被 set_resize_preview_mode(False)
-        # → 永远停留在 placeholder 空白态，表现为"窗口变大后内容迟迟不刷新"。
-        # 引入 epoch 令牌作废旧链，保证同一时刻只有一条恢复链存活。
-        #
-        # 🐛 性能修复：固定 5 张/80ms 的节奏下，100 张卡片需 20 批 × 80ms ≈ 1.6s。
-        # 视口内卡片是用户正在看的，数量有限（通常 <20）且本来就要渲染，一次性
-        # 恢复没有额外 GPU 风险，却能让内容"立刻"适配；离屏卡片不参与渲染，
-        # 放宽到 20 张/30ms 快速收尾。
-        self._restore_epoch += 1
-        epoch = self._restore_epoch
+        🐛 竞态修复（窗口拖拽时部分卡片永久空白的根因）：
+        旧实现把全部卡片塞进同一个 _restore_queue，用 QTimer.singleShot 链式
+        分批推进，但**没有任何机制取消上一条链**。连续 resize（拖拽必然产生）
+        会启动多条链，它们共享 _restore_queue / _restore_batch_idx：
+        先结束的那条把 _restore_queue 清空并置 _resize_preview_active=False，
+        另一条链随后读到空队列直接收尾 → 大量卡片从未被 set_resize_preview_mode(False)
+        → 永远停留在 placeholder 空白态，表现为"窗口变大后内容迟迟不刷新"。
+        引入 epoch 令牌作废旧链，保证同一时刻只有一条恢复链存活
+        （宽度同步分帧链同样受 epoch 约束，见 _sync_all_cards_width）。
 
+        🐛 性能修复：固定 5 张/80ms 的节奏下，100 张卡片需 20 批 × 80ms ≈ 1.6s。
+        视口内卡片是用户正在看的，数量有限（通常 <20）且本来就要渲染，一次性
+        恢复没有额外 GPU 风险，却能让内容"立刻"适配；离屏卡片不参与渲染，
+        放宽到 20 张/30ms 快速收尾。
+        """
+        scroll_area = getattr(self, "chat_scroll_area", None)
         visible_cards = []
         offscreen_cards = []
         viewport_rect = scroll_area.viewport().rect() if scroll_area else None
@@ -9517,6 +9578,40 @@ class OpenAIChatToolWindow(ToolWindow):
         except (RuntimeError, AttributeError):
             return False
 
+    @staticmethod
+    def _resolve_hot_reload_scopes(result: dict):
+        """把热重载结果**溯源**成需要刷新的视图域集合（精准刷新判定）
+
+        单插件热重载时只刷新该插件真正占用的界面位置，避免「重载 A 把 B/C/D
+        的 UI 全部重建」。溯源链路：
+
+            result["_plugin_name"]
+              → UIPluginRegistry 的槽位轨迹（卸前 ∪ 装后）
+              → 槽位声明表 UI_SLOT_DECLS 翻译为视图域 SCOPE_*
+
+        ★ 本方法**不认识任何具体槽位名**，只认识 7 个稳定的视图域，因此新增
+        UI 扩展点无需改动热重载逻辑（只需在声明表补一行 declare_slot）。
+
+        Returns:
+            frozenset[SCOPE_*]：可精准刷新（空集 = 确定无需刷新任何 UI）
+            None：无法判定 → 调用方回退全量刷新（安全侧）
+        """
+        plugin_name = (result.get("_plugin_name") or "").strip()
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            reg = UIPluginRegistry.get_instance()
+            if not plugin_name:
+                # 兜底：部分启用/安装链路（组件开关、市场安装）未透传插件名。
+                # 广播总是紧随 load/unload 发出，用「刚刚被 touch 的插件」归属。
+                plugin_name = reg.get_recently_touched_plugin()
+                if not plugin_name:
+                    return None  # 全量/合并重载：无单一归属，走旧路径
+            return reg.get_reload_scopes(plugin_name)
+        except Exception as e:
+            logger.debug(f"[HotReload] 槽位溯源失败，回退全量刷新: {e}")
+            return None
+
     def _on_plugin_hot_reload(self, result: dict):
         """插件热更新完成时的回调（watchfiles 自动触发）
 
@@ -9584,14 +9679,36 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.debug("[HotReload] 命令快捷键已重建（先销毁旧 QShortcut 再注册）")
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
         # ⚠️ 本分支不重建命令快捷键（命令表没变）；只有上面的 commands 分支才重建。
+        #
+        # ★ 精准刷新（2026-09）：ui=True 曾经无条件重建**全部**插件的输入区按钮、
+        # 欢迎卡片、工作台页——热重载插件 A 会连带销毁重建 B/C/D 的 UI，造成无关
+        # 插件界面闪烁、页内状态丢失与明显卡顿。现按「该插件占用了哪些 UI 槽位」
+        # 溯源，只刷新命中的**视图域**（SCOPE_*）。
+        # 溯源失败（scopes is None，如全量重载/未知槽位）→ 回退旧的全量刷新。
+        # UI 插件增删：按溯源视图域精准重建（_precise=False 时回退旧全量路径）
+        # ⚠️ 本分支不重建命令快捷键（命令表没变）；只有上面的 commands 分支才重建。
+        _ui_scopes = OpenAIChatToolWindow._resolve_hot_reload_scopes(result)
+        _precise = _ui_scopes is not None
+        # 视图域常量（界面渲染位置，稳定集合）— 局部导入避免启动时加载插件层。
+        # 无条件导入：下方多处门控在 _precise=False 时靠短路跳过，但保证名字始终存在。
         if result.get("ui"):
-            for win in list(window_registry.alive_window_instances()):
-                if not OpenAIChatToolWindow._win_alive(win):
-                    continue
-                try:
-                    win._build_plugin_input_buttons()
-                except (RuntimeError, AttributeError):
-                    pass
+            from app.plugins.registries.ui_plugin_registry import (
+                SCOPE_HOTKEY,
+                SCOPE_INPUT_AREA,
+                SCOPE_SYSTEM_CARDS,
+                SCOPE_WELCOME,
+            )
+
+            if _precise:
+                logger.debug(f"[HotReload] UI 精准刷新: plugin={result.get('_plugin_name')} scopes={sorted(_ui_scopes or ())}")
+            if not _precise or SCOPE_INPUT_AREA in _ui_scopes:
+                for win in list(window_registry.alive_window_instances()):
+                    if not OpenAIChatToolWindow._win_alive(win):
+                        continue
+                    try:
+                        win._build_plugin_input_buttons()
+                    except (RuntimeError, AttributeError):
+                        pass
             # ★ 已打开标签页视图重绘：消息内容块是渲染时刻的快照，热重载后
             # 不会自动更新（新建标签页才显示新版）——遍历所有窗口的已渲染
             # 消息卡片，命中该插件的 custom 块时用最新 render_func 重新生成。
@@ -9612,12 +9729,22 @@ class OpenAIChatToolWindow(ToolWindow):
             # widget 是构建时快照，(page_id, label) 签名不变会被 sync_plugin_pages
             # 短路跳过——force=True 忽略签名销毁重建，常驻插件页（工作树/产物/
             # 自注册 tab）才真正换用新代码。下一帧执行，避开广播栈内重建。
+            # 精准化：只定向重建本次重载插件拥有的 page_id，其余插件页原样保留。
             try:
                 from app.widgets.tab_manager_window import TabManagerWindow
 
                 _tmw = TabManagerWindow.get_instance()
                 if _tmw is not None:
-                    QTimer.singleShot(0, lambda: _tmw.refresh_workbench(force=True))
+                    if _precise:
+                        from app.plugins.registries.ui_plugin_registry import (
+                            UIPluginRegistry as _UIReg,
+                        )
+
+                        _pids = _UIReg.get_instance().get_reload_workbench_page_ids(result.get("_plugin_name") or "")
+                        _kw = {"force_page_ids": _pids}
+                    else:
+                        _kw = {"force": True}
+                    QTimer.singleShot(0, lambda _kw=_kw: _tmw.refresh_workbench(**_kw))
             except Exception:
                 pass
             # 欢迎卡片插件 tab 刷新：ui 组件重载（安装/更新/卸载）后，已打开的
@@ -9625,17 +9752,19 @@ class OpenAIChatToolWindow(ToolWindow):
             # register_welcome_tab → registry 链，实测安装新插件后已打开标签页
             # 不刷新（须新建会话才出现），此处显式兜底刷新（见 2026-08-23 故障）。
             try:
-                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+                if not _precise or SCOPE_WELCOME in _ui_scopes:
+                    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-                UIPluginRegistry.get_instance()._refresh_welcome_cards()
+                    UIPluginRegistry.get_instance()._refresh_welcome_cards()
             except Exception:
                 logger.debug("[HotReload] 欢迎卡片刷新失败", exc_info=True)
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
-                from app.tray_manager import TrayManager
+                if not _precise or SCOPE_HOTKEY in _ui_scopes:
+                    from app.tray_manager import TrayManager
 
-                tray = TrayManager.get_instance()
-                tray._setup_global_hotkey()
+                    tray = TrayManager.get_instance()
+                    tray._setup_global_hotkey()
             except Exception:
                 pass
 
@@ -9776,7 +9905,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # UI 组件变更：热重载可能已强制删除 UI 插件卡片，
         # 检查并恢复输入区（兜底：防止 _on_system_card_closed 回调链断裂）
-        if result.get("ui"):
+        if result.get("ui") and (not _precise or SCOPE_SYSTEM_CARDS in _ui_scopes):
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue

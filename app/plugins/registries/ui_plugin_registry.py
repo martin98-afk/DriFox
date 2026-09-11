@@ -9,6 +9,7 @@ import functools
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,6 +22,116 @@ if TYPE_CHECKING:
 
 # re-export：让 `from app.plugins.registries.ui_plugin_registry import WorkspacePageInfo` 直接可用
 from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo  # noqa: E402,F401
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 热重载精准刷新：槽位（可扩展）→ 视图域（稳定）的两层映射
+# ═══════════════════════════════════════════════════════════════════════════
+# 问题：热重载一个 UI 插件时，若不去溯源它到底占了哪些位置，就只能「全量刷新」
+# （重建全部插件的输入区按钮 / 欢迎卡片 / 工作台页 …），既卡顿又会造成无关
+# 插件的界面闪烁与状态丢失。
+#
+# 分层设计（关键：只有**视图域**是硬概念，**槽位**是数据）：
+#   ┌ 槽位 slot_id ────────┐        ┌ 视图域 scope ──────────┐
+#   │ content_renderer     │──┐     │ input_area  输入区按钮  │
+#   │ input_button         │──┼────▶│ welcome     欢迎卡片    │
+#   │ welcome_tab          │──┤     │ workbench   工作台页    │
+#   │ workbench_tab        │──┤     │ messages    消息区重绘  │
+#   │ … 新增扩展点在此追加  │──┘     │ command     命令面板    │
+#   └──────────────────────┘        │ hotkey      全局热键    │
+#                                   │ system_cards 系统卡片   │
+#                                   └────────────────────────┘
+# 视图域 = 界面上真实存在的渲染位置，数量少且长期稳定；
+# 槽位 = 插件能挂载的扩展点，会随功能演进而增加。
+#
+# ★ 新增一个 UI 扩展点只需做一件事：在文件末尾的 ``_declare_builtin_slots()``
+#   里追加一条 ``declare_slot(...)``（槽位名 + 从注册表取条目的取值器 + 归属
+#   的视图域）。溯源、卸载判据、热重载门控全部由声明表自动驱动，无需改动。
+#   若忘记声明，``_has_any_registration`` 的兜底探测会把该插件判为「未知槽位」
+#   → 调用方回退全量刷新（漏声明只损失精度，不会漏刷新）。
+
+# ── 视图域：界面渲染位置（稳定，新增扩展点一般不需要动这里）──
+SCOPE_INPUT_AREA = "input_area"  # 输入区胶囊上的插件按钮
+SCOPE_WELCOME = "welcome"  # 欢迎卡片（QWebEngineView，重建代价最高）
+SCOPE_WORKBENCH = "workbench"  # 右侧工作台插件页
+SCOPE_MESSAGES = "messages"  # 已渲染消息的 custom / fence / tag 块
+SCOPE_COMMAND = "command"  # 命令面板 + 快捷键
+SCOPE_HOTKEY = "hotkey"  # 全局热键（托盘 toggle-window 等）
+SCOPE_SYSTEM_CARDS = "system_cards"  # 系统卡片容器（浮动卡所在的输入区恢复）
+
+
+def _owner_of(entry: Any) -> str:
+    """默认归属解析：条目自身带 plugin_name（绝大多数 info dataclass）
+
+    例外容器（元素为 tuple，如 _services / _ui_modules）在声明时单独传 owner。
+    """
+    return getattr(entry, "plugin_name", "") or ""
+
+
+@dataclass(frozen=True)
+class SlotDecl:
+    """一个 UI 扩展点槽位的声明（数据驱动，取代散落的硬编码分支）
+
+    Attributes:
+        slot_id: 槽位标识，通常与 register_* 方法名对应（register_input_button
+            → ``input_button``）。仅用于日志与调试，不参与任何 if 分支。
+        entries: ``(registry) -> Iterable[(key, entry)]``，枚举该槽位当前全部
+            条目。dict 容器用 ``.items()``，list 容器用 ``enumerate``。延迟求值
+            （lambda 内访问 registry 私有属性），故声明可写在类定义之前。
+        owner: ``(entry) -> plugin_name``，从条目解析所属插件名。
+        scopes: 该槽位命中时需要刷新的视图域集合。**空集表示未归类** →
+            溯源结果判为「未知」，调用方回退全量刷新（安全侧）。
+    """
+
+    slot_id: str
+    entries: Callable[[Any], Iterable[Tuple[Any, Any]]]
+    owner: Callable[[Any], str] = _owner_of
+    scopes: frozenset = frozenset()
+
+    def plugin_keys(self, registry: Any, plugin_name: str) -> List[Any]:
+        """该插件在此槽位占用的条目 key 列表（如工作台 page_id 列表）"""
+        if not plugin_name:
+            return []
+        try:
+            return [k for k, e in self.entries(registry) if self.owner(e) == plugin_name]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def has_plugin(self, registry: Any, plugin_name: str) -> bool:
+        """该插件是否占用了此槽位"""
+        if not plugin_name:
+            return False
+        try:
+            return any(self.owner(e) == plugin_name for _k, e in self.entries(registry))
+        except Exception:  # noqa: BLE001
+            return False
+
+
+# 槽位声明总表：{slot_id: SlotDecl}。新增扩展点 → 往里加一条即可。
+UI_SLOT_DECLS: Dict[str, SlotDecl] = {}
+
+
+def declare_slot(
+    slot_id: str,
+    entries: Callable[[Any], Iterable[Tuple[Any, Any]]],
+    *,
+    owner: Optional[Callable[[Any], str]] = None,
+    scopes: Iterable[str] = (),
+) -> None:
+    """声明一个 UI 扩展点槽位（幂等；重复声明以最后一条为准）
+
+    Args:
+        slot_id: 槽位标识
+        entries: 取值器，返回 ``(key, entry)`` 迭代
+        owner: 归属解析器，缺省取 entry.plugin_name
+        scopes: 命中该槽位时要刷新的视图域；留空表示暂未归类（回退全量刷新）
+    """
+    UI_SLOT_DECLS[slot_id] = SlotDecl(
+        slot_id=slot_id,
+        entries=entries,
+        owner=owner or _owner_of,
+        scopes=frozenset(scopes),
+    )
 
 
 @dataclass(frozen=True)
@@ -529,6 +640,16 @@ class UIPluginRegistry:
         # P2-2：UI 目录 mtime 签名（静默写入兑底轮询用）
         self._ui_signatures: dict = {}
         self._signature_watch_started = False
+        # ── 热重载槽位轨迹（精准刷新溯源）──
+        # {plugin_name: 本次 unload/load 周期「卸前 ∪ 装后」占用的 UI 槽位集合}
+        # 消费方（窗口热重载槽）据此只刷新该插件真正挂载的位置，避免「重载一个
+        # UI 插件 → 全部插件的输入区按钮/欢迎卡片/工作台页被无差别重建」。
+        # 取并集的理由：新版本可能**移除**了某槽位（如不再注册工作台页），此时
+        # 「装后」快照查不到它，但旧实例仍挂在界面上，必须靠「卸前」快照触发清理。
+        self._reload_slot_trace: Dict[str, frozenset] = {}
+        # 最近一次 load/unload 涉及的插件名与时刻（兜底溯源用，见上）
+        self._last_touched_plugin: str = ""
+        self._last_touched_at: float = 0.0
         # ── Tab 模式浮动卡片按标签页隔离（per-tab 可见集合）──
         # 卡片 widget 单实例挂 TabManagerWindow 全局容器；CardManager 的
         # GLOBAL 可见记录是「当前活跃标签页可见集合」的投影。切换标签时按
@@ -2516,27 +2637,30 @@ class UIPluginRegistry:
         用于 unload_plugin 的幂等判定：无 ui/ 组件但注册过 config_schema
         自动设置卡的插件（如 gateway 平台插件）不在 _loaded_plugins，
         但其 settings card 须能被卸载清理，故不能仅凭 _loaded_plugins 拦截。
+
+        ★ 遍历 UI_SLOT_DECLS 声明表，新增扩展点无需改动此处。
         """
-        return (
-            any(v.plugin_name == plugin_name for v in self._content_renderers.values())
-            or any(f.plugin_name == plugin_name for f in self._message_factories)
-            or any(v.plugin_name == plugin_name for v in self._tag_renderers.values())
-            or any(v.plugin_name == plugin_name for v in self._fence_renderers.values())
-            or any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
-            or any(v.plugin_name == plugin_name for v in self._welcome_actions.values())
-            or any(v.plugin_name == plugin_name for v in self._mention_providers.values())
-            or any(v.plugin_name == plugin_name for v in self._floating_cards.values())
-            or any(v.plugin_name == plugin_name for v in self._sidebar_items.values())
-            or any(v.plugin_name == plugin_name for v in self._input_buttons.values())
-            or any(v.plugin_name == plugin_name for v in self._context_actions.values())
-            or any(v.plugin_name == plugin_name for v in self._settings_cards.values())
-            or any(v.plugin_name == plugin_name for v in self._workspace_pages.values())
-            or any(v.plugin_name == plugin_name for v in self._workbench_tabs.values())
-            or any(
-                e.plugin_name == plugin_name for region in self._regions.values() for e in region["entries"].values()
-            )
-            or any(name == plugin_name for impls in self._ui_modules.values() for name, _p, _f in impls)
-        )
+        return any(decl.has_plugin(self, plugin_name) for decl in UI_SLOT_DECLS.values())
+
+    def get_plugin_ui_slots(self, plugin_name: str) -> frozenset:
+        """该插件**当前**占用的 UI 扩展点槽位集合（热重载精准刷新溯源用）
+
+        返回的是注册表此刻的快照：
+        - 热重载 unload **之前**调用 → 旧版本占用面（需清理的位置）
+        - 热重载 load **之后**调用 → 新版本占用面（需重建的位置）
+
+        消费方应取两者并集（见 ``get_reload_slot_trace``）：新版本可能移除某
+        槽位（如不再注册工作台页），此时「装后」快照查不到它，但旧实例仍挂在
+        界面上，必须靠「卸前」快照触发清理。
+
+        ★ 遍历 UI_SLOT_DECLS 声明表，新增扩展点无需改动此处。
+
+        Returns:
+            frozenset[slot_id]；插件无任何注册时为空集。
+        """
+        if not plugin_name:
+            return frozenset()
+        return frozenset(decl.slot_id for decl in UI_SLOT_DECLS.values() if decl.has_plugin(self, plugin_name))
 
     @_serialized
     def unload_plugin(self, plugin_name: str) -> bool:
@@ -2564,7 +2688,12 @@ class UIPluginRegistry:
             and not self._has_any_registration(plugin_name)
             and _mod_name not in _sys_probe.modules
         ):
+            # 确无任何注册：留一条空轨迹，让热重载消费方区分「确定没占槽位」
+            # 与「轨迹缺失」，从而安全跳过全部 UI 刷新而非回退全量。
+            self._reload_slot_trace.setdefault(plugin_name, frozenset())
             return False
+        # 溯源：记录卸载前的槽位占用面（新版本可能移除某些槽位，靠这份快照清理旧实例）
+        self._record_slot_trace(plugin_name, self.get_plugin_ui_slots(plugin_name))
         # 0) 调用插件可选 unload_ui 回调（先于注册表清理，便于释放外部资源）
         try:
             import sys as _sys
@@ -3108,3 +3237,128 @@ class UIPluginRegistry:
         # 重置单例本身（建议）——让下一次 get_instance() 重新创建，
         # 避免测试间残留 _instance 上的实例属性
         UIPluginRegistry._instance = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UI 扩展点槽位声明表
+# ═══════════════════════════════════════════════════════════════════════════
+# ★★ 新增一个 UI 扩展点时，**只需要在这里加一条 declare_slot** ★★
+#
+#   declare_slot(
+#       "<槽位名>",                       # 一般与 register_* 方法名对应
+#       lambda r: r._容器.items(),        # 枚举 (key, entry)
+#       scopes=(SCOPE_XXX, ...),          # 命中时该刷哪些界面位置
+#   )
+#
+# 之后下面这些能力全部自动获得，无需任何额外改动：
+#   - _has_any_registration()  卸载幂等判据
+#   - get_plugin_ui_slots()    槽位溯源
+#   - get_reload_scopes()      槽位 → 视图域翻译（供热重载精准刷新）
+#
+# scopes 留空的槽位被视为「未归类」：命中它时 get_reload_scopes 返回 None，
+# 调用方回退全量刷新。即漏配 scopes 只损失精度、不会漏刷新。
+#
+# 取值器写成 lambda 延迟求值（模块导入时 UIPluginRegistry 尚未实例化），
+# 因此本表必须位于类定义之后调用、但可安全引用其私有属性名。
+
+
+def _declare_builtin_slots() -> None:
+    """声明全部内置 UI 扩展点槽位（模块导入时执行一次，幂等）"""
+
+    # ── 消息区：已渲染消息的 custom / fence / tag 内容块 ──
+    declare_slot(
+        "content_renderer",
+        lambda r: r._content_renderers.items(),
+        scopes=(SCOPE_MESSAGES,),
+    )
+    declare_slot(
+        "fence_renderer",
+        lambda r: r._fence_renderers.items(),
+        scopes=(SCOPE_MESSAGES,),
+    )
+    declare_slot(
+        "tag_renderer",
+        lambda r: r._tag_renderers.items(),
+        scopes=(SCOPE_MESSAGES,),
+    )
+    declare_slot(
+        "message_factory",
+        lambda r: enumerate(r._message_factories),
+        scopes=(SCOPE_MESSAGES,),
+    )
+
+    # ── 输入区胶囊上的插件按钮 ──
+    declare_slot(
+        "input_button",
+        lambda r: r._input_buttons.items(),
+        scopes=(SCOPE_INPUT_AREA, SCOPE_COMMAND),
+    )
+
+    # ── 欢迎卡片（QWebEngineView，重建代价最高，务必精准）──
+    declare_slot(
+        "welcome_tab",
+        lambda r: r._welcome_tabs.items(),
+        scopes=(SCOPE_WELCOME,),
+    )
+    declare_slot(
+        "welcome_action",
+        lambda r: r._welcome_actions.items(),
+        scopes=(SCOPE_WELCOME,),
+    )
+
+    # ── 右侧工作台：注册页 + right 容器卡片（动态 tab）──
+    declare_slot(
+        "workbench_tab",
+        lambda r: r._workbench_tabs.items(),
+        scopes=(SCOPE_WORKBENCH, SCOPE_COMMAND),
+    )
+    declare_slot(
+        "workbench_card",
+        # right 容器的浮动卡片会被挂到工作台动态 tab 上，故归同一视图域
+        lambda r: ((k, v) for k, v in r._floating_cards.items() if getattr(v, "container", "") == "right"),
+        scopes=(SCOPE_WORKBENCH, SCOPE_COMMAND),
+    )
+
+    # ── 其余方位的浮动卡片（top/bottom/left/full）──
+    declare_slot(
+        "floating_card",
+        lambda r: ((k, v) for k, v in r._floating_cards.items() if getattr(v, "container", "") != "right"),
+        scopes=(SCOPE_SYSTEM_CARDS, SCOPE_COMMAND),
+    )
+
+    # ── 命令可触达的其它槽位 ──
+    declare_slot(
+        "workspace_page",
+        lambda r: r._workspace_pages.items(),
+        scopes=(SCOPE_COMMAND,),
+    )
+    declare_slot(
+        "titlebar_tab",
+        lambda r: r._titlebar_tabs.items(),
+        scopes=(SCOPE_COMMAND, SCOPE_HOTKEY),
+    )
+    declare_slot(
+        "sidebar_item",
+        lambda r: r._sidebar_items.items(),
+        scopes=(SCOPE_COMMAND,),
+    )
+
+    # ── 其余扩展点：改动后不牵动上述视图，仅登记占位（未归类 → 回退全量）──
+    # 这些槽位目前没有对应的「热重载后必须重建」视图；若将来出现，补上 scopes 即可。
+    declare_slot("titlebar_widget", lambda r: r._titlebar_widgets.items())
+    declare_slot("context_menu", lambda r: r._context_actions.items())
+    declare_slot("settings_card", lambda r: r._settings_cards.items())
+    declare_slot("mention_provider", lambda r: r._mention_providers.items())
+    declare_slot("service", lambda r: r._services.items(), owner=lambda e: e[0])
+    declare_slot(
+        "ui_module",
+        lambda r: ((f"{mid}:{i}", impl) for mid, impls in r._ui_modules.items() for i, impl in enumerate(impls)),
+        owner=lambda e: e[0],
+    )
+    declare_slot(
+        "region",
+        lambda r: ((f"{rid}:{eid}", e) for rid, reg in r._regions.items() for eid, e in reg.get("entries", {}).items()),
+    )
+
+
+_declare_builtin_slots()

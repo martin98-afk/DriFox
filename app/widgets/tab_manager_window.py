@@ -10,7 +10,7 @@ Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 import platform
 import sys
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from PyQt5 import sip as _sip
 
@@ -1398,7 +1398,11 @@ class TabManagerWindow(FramelessWindow):
         except Exception:
             pass
 
-    def refresh_workbench(self, force: bool = False) -> None:
+    def refresh_workbench(
+        self,
+        force: bool = False,
+        force_page_ids: Optional[Iterable[str]] = None,
+    ) -> None:
         """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
 
         数据源均为既有单一数据源：
@@ -1407,6 +1411,9 @@ class TabManagerWindow(FramelessWindow):
         - 项目：win._current_project + _current_workdir → MemoryCardContent
 
         force=True：插件页强制重建（ui 热重载后签名未变但实现已变）。
+
+        ★ force_page_ids：只定向重建这些 page_id 对应的插件页（热重载单个插件
+        时避免连带销毁其余插件的页）。为 None 时沿用 force 的全量语义。
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None or not panel.isVisible():
@@ -1415,7 +1422,11 @@ class TabManagerWindow(FramelessWindow):
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            panel.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs(), force=force)
+            panel.sync_plugin_pages(
+                UIPluginRegistry.get_instance().get_workbench_tabs(),
+                force=force,
+                force_page_ids=force_page_ids,
+            )
         except Exception:
             pass
         win = self.get_current_window()

@@ -26,7 +26,7 @@ refresh_workbench 时调用），页面自行实现可选协议 ``refresh_data()
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCursor
@@ -823,7 +823,12 @@ class WorkbenchPanel(QWidget):
 
     # ── 插件页签 reconcile（宿主在 refresh_workbench 时调用） ──
 
-    def sync_plugin_pages(self, tabs: List[Any], force: bool = False) -> None:
+    def sync_plugin_pages(
+        self,
+        tabs: List[Any],
+        force: bool = False,
+        force_page_ids: Optional[Iterable[str]] = None,
+    ) -> None:
         """按插件注册表 reconcile 工作台页（签名不变则跳过重建）
 
         ★ 面板对页面**零语义**：不识 page_id、不保留槽位、不内置任何页实现。
@@ -833,6 +838,16 @@ class WorkbenchPanel(QWidget):
 
         force=True（热重载）：签名不变但实现已变 → 销毁全部插件页强制重建
         （数据由页面自身 ``refresh_data()`` / ``showEvent`` 重新拉取）。
+
+        ★ 精准重建（新增）：``force_page_ids`` 显式给出要销毁重建的 page_id
+        集合时，**只**重建这些页，其余插件页保持原样。用于「热重载插件 A 时不
+        连带销毁重建 B/C/D 的页」——旧行为 force=True 会无差别销毁全部插件页，
+        导致无关插件的页状态（滚动位置/展开项/输入草稿）丢失、并造成明显卡顿。
+
+        Args:
+            force_page_ids: 需定向重建的 page_id 集合。传空集合 = 不做定向重建
+                （但仍会走下面的常规 reconcile，可摘除已注销的页）。
+                为 None 时按 force 参数决定（兼容旧行为）。
         """
         raw = list(tabs or [])
         ordered = sorted(
@@ -862,7 +877,15 @@ class WorkbenchPanel(QWidget):
                     probe_ctx = {}
                 context_broken = "backend" in (probe_ctx or {})
 
-        if force or context_broken:
+        if force_page_ids is not None:
+            # 定向重建：只销毁目标页。置空签名使其落到下方常规 reconcile，
+            # 由 _mount_plugin_page 按新 widget_class 重建。
+            targets = {pid for pid in force_page_ids if pid in self._plugin_widgets}
+            if targets:
+                self._plugin_sig = None
+                for page_id in targets:
+                    self._destroy_plugin_page(page_id)
+        elif force or context_broken:
             self._plugin_sig = None
             for page_id in list(self._plugin_widgets.keys()):
                 self._destroy_plugin_page(page_id)
