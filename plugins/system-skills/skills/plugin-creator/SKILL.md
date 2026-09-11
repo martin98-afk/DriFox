@@ -43,6 +43,13 @@ allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 | "加个工具""做个 AI 工具" | Tools | references/components.md §Tools |
 | "加个服务商""接新模型厂商" | Providers | references/components.md §Providers |
 | "做团队模板""预设 @角色组合" | Team Templates | references/components.md §Team Templates |
+| "hook 策略""控制 hook 触发" | Hook Policies | references/components.md §Hook Policies |
+| "循环策略""控制工具循环轮数" | Loop Policies | references/components.md §Loop Policies |
+| "对话引擎""插件里跑一轮对话" | Engines | references/components.md §Engines |
+| "换会话存储""自定义存储引擎" | Storages | references/components.md §Storages |
+| "消息序列化""新协议序列化" | Serializers | references/components.md §Serializers |
+| "接新消息平台""通讯网关" | Gateways | references/components.md §Gateways |
+| "模型协议适配" | Model Adapters | references/components.md §Model Adapters |
 | "改 plugin.json""设置页配置" | Manifest | references/manifest.md |
 | "验证""跑测试" | 验证 | references/testing.md |
 | "发布到市场""提 PR" | 发布 | references/publishing.md |
@@ -80,11 +87,18 @@ your-plugin/
 ├── tools/*.py + icons/          ← 工具（register(registry)）
 ├── providers/*.py + icons/      ← 服务商（register(registry)）
 ├── team_templates/*.yaml        ← 团队模板
+├── hook_policies/*.py           ← hook 触发策略（register(registry)）
+├── loop_policies/*.py           ← 循环策略（register(registry)）
+├── storages/*.py                ← 会话存储引擎（register(registry)）
+├── serializers/*.py             ← 消息序列化器（register(registry)）
+├── engines/*.py                 ← 对话引擎替换（进阶）
+├── gateways/*.py + deps/        ← 消息网关平台适配器
+├── model_adapters/*.py          ← 模型协议适配器
 ├── .mcp.json / .lsp.json        ← MCP / LSP（插件根）
 └── README.md / __init__.py      ← 说明 / 包标记（可选）
 ```
 
-11 类组件速查（字段细节、代码模板 → references/components.md）：
+18 类组件速查（字段细节、代码模板 → references/components.md）：
 
 | 组件 | manifest flag | 触发方式 |
 |------|--------------|---------|
@@ -99,6 +113,13 @@ your-plugin/
 | Tools | `tools: true` | AI 工具调用 |
 | Providers | `providers: true` | 用户选择模型/服务商 |
 | Team Templates | `team_templates: true` | `/team --load=<name>` |
+| Hook Policies | `hook_policies: true` | 引擎声明 hook_policy_id 生效 |
+| Loop Policies | `loop_policies: true` | 引擎声明 loop_policy_id / 全局 set_active |
+| Engines | `engines: true` | 替换主窗口对话引擎（进阶） |
+| Storages | `storages: true` | 设置卡选择存储后端 |
+| Serializers | `serializers: true` | ModelAdapter 的 serializer_id 命中 |
+| Gateways | `gateways: true` | 平台连接后收发消息 |
+| Model Adapters | `model_adapters: true` | worker 按 llm_config 打分 resolve |
 
 ## 4. 硬停止（触达即停，不得绕行）
 

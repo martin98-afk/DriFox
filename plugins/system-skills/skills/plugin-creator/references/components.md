@@ -1,5 +1,5 @@
 ---
-description: 11 类组件的详细开发指南与代码模板
+description: 18 类组件的详细开发指南与代码模板
 ---
 
 # 组件开发详细指南
@@ -723,3 +723,346 @@ agents:
 - 模板结构与校验：`app/core/team/template_schema.py`
 - 系统模板案例：`plugins/system-team-templates/team_templates/default-team.yaml`
 - 测试：`python -m pytest tests/core/test_team_template.py -v`
+
+## Hook Policies（hook 触发策略）
+
+控制一个对话引擎"参与哪些 hook 节点"。主对话策略粒度太粗（all/tool_only/none）时，插件可自带精细策略，让引擎按配置文件逐节点开关 hook。
+
+### 文件位置
+
+```
+your-plugin/
+├── .drifox-plugin/plugin.json   ← components.hook_policies: true
+└── hook_policies/*.py           ← 每个文件暴露 register(registry)
+```
+
+### 最小模板
+
+```python
+# hook_policies/my_selective.py
+# -*- coding: utf-8 -*-
+"""可配置事件白名单 hook 策略（id="my_selective"，scope="main"）"""
+from app.plugins.contracts.hook_policy import HookDecision, HookEvent, SessionStartEvent, StopEvent
+
+
+class MySelectiveHookPolicy:
+    id = "my_selective"      # 全局唯一；create_engine_session 时引用
+    scope = "main"           # main / subagent / team_member
+
+    def should_trigger(self, event: HookEvent) -> HookDecision:
+        if isinstance(event, SessionStartEvent):
+            return HookDecision.TRIGGER
+        return HookDecision.SKIP
+
+
+def register(registry):
+    registry.register(MySelectiveHookPolicy())
+```
+
+### 事件类型（contracts/hook_policy.py，isinstance 判定）
+
+`SessionStartEvent` / `BuildSystemPromptEvent` / `PreUserMessageEvent` / `PostUserMessageEvent` / `PreAssistantMessageEvent` / `PostAssistantMessageEvent` / `PreToolUseEvent` / `PostToolUseEvent` / `StopEvent` / `PluginChangedEvent` / `TeamMailEvent`
+
+### 触发点分工（谁消费你的策略）
+
+| 事件 | 判定位置 |
+|------|---------|
+| SessionStart / BuildSystemPrompt / PreUserMessage / PostUserMessage | EngineSession（插件引擎链路；主对话走 backend/agent.py） |
+| PreToolUse / PostToolUse / Stop / Pre(Actively)AssistantMessage | ChatWorker（`_should_run_hook`）+ tool_executor |
+| PluginChanged / TeamMail | 进程级/团队级事件，不受会话策略控制 |
+
+### 激活方式
+
+```python
+session = services["create_engine_session"]("my-engine", hook_policy_id="my_selective")
+```
+
+`hook_policy_id` 优先于 `hook_policy` 枚举（ALL/TOOL_EVENTS_ONLY/NONE 回落为 all/tool_only/none）。注册表见 `app/plugins/registries/hook_policy_registry.py`（按 scope 分域激活槽 + 回落链）。
+
+### 关键约束
+
+- 引擎会话不读 `session.messages`——hook 输出须进 prompt 才对 LLM 生效（EngineSession 已统一把 SessionStart/BuildSystemPrompt/PreUserMessage 贡献拼进 system）
+- 配置驱动型策略：配置文件放 `<app_data>/plugin_data/<plugin>/`，mtime 缓存实现"改文件即生效"
+
+### 参考
+
+- 契约：`app/plugins/contracts/hook_policy.py`；注册表：`app/plugins/registries/hook_policy_registry.py`
+- 系统案例：`plugins/system-hook-policies/hook_policies/`（all/none/tool_only/subagent_default/team_member）
+- 配置驱动案例：`drifox-plugins2` 仓库 `plugins/cron-tasks/hook_policies/cron_selective.py`
+- 引擎侧触发实现：`app/core/conversation/engine_session.py` 的 `_trigger_engine_hook`
+
+## Loop Policies（循环策略）
+
+控制一个对话引擎"工具循环怎么终止"：每轮结束判定续不继续、轮数上限、子智能体达到上限后的总结提示词。与 hook_policies 同构（scope 分域注册表 + 激活槽 + 按 id 直取）。
+
+### 文件位置
+
+```
+your-plugin/
+├── .drifox-plugin/plugin.json   ← components.loop_policies: true
+└── loop_policies/*.py           ← 每个文件暴露 register(registry)
+```
+
+### 契约接口（app/plugins/contracts/loop_policy.py）
+
+```python
+class LoopDecision(Enum): CONTINUE = "continue"; STOP = "stop"
+
+@dataclass
+class LoopState:                      # 每轮构造一次
+    round_count: int = 0
+    tool_calls_found: bool = False          # 本轮有工具调用 → 通常 CONTINUE
+    stop_hook_injected: bool = False        # Stop hook 续命一轮的机会
+    repetitive_loop_detected: bool = False  # 连续相同工具调用
+
+class LoopPolicy(Protocol):
+    id: str
+    scope: str  # main / subagent
+    def should_continue(self, state: LoopState) -> LoopDecision: ...
+    def max_rounds(self, llm_config) -> Optional[int]: ...  # None=不限；读 llm_config["最大循环轮数"] 对齐 default
+    def final_summary_prompt(self) -> str: ...  # 仅 subagent 域需要（超限总结提示词）
+```
+
+### 最小模板
+
+```python
+# loop_policies/two_step.py
+# -*- coding: utf-8 -*-
+"""放行工具迭代 1 次，第 2 次后强制 STOP"""
+from app.plugins.contracts.loop_policy import LoopDecision, LoopState
+
+class TwoStepLoopPolicy:
+    id = "two_step"
+    scope = "main"
+
+    def should_continue(self, state: LoopState) -> LoopDecision:
+        return LoopDecision.CONTINUE if state.tool_calls_found else LoopDecision.STOP
+
+    def max_rounds(self, llm_config) -> Optional[int]:
+        return 2
+
+def register(registry):
+    registry.register(TwoStepLoopPolicy())
+```
+
+### 激活方式（两种，语义不同）
+
+- **引擎级（推荐，不动全局）**：`create_engine_session("my-engine", loop_policy_id="two_step")` —— worker 按 id 直取，主对话不受影响
+- **全局切换**：`LoopPolicyRegistry.get_instance().set_active("two_step")` —— 影响整个 main 域（DSH 极简模式做法），慎用
+
+### 关键约束
+
+- 子智能体域（subagent_worker）**只读全局激活槽**，不支持 per-agent loop_policy_id；`final_summary_prompt` 仅该域消费
+- 策略调用异常安全：should_continue 抛异常回退 CONTINUE，max_rounds 回退不限——策略内部别依赖异常做控制流
+- 系统默认：default（对齐原行为）/ minimal（单轮即停）/ subagent（默认 30 轮）
+
+### 参考
+
+- 契约：`app/plugins/contracts/loop_policy.py`；注册表：`app/plugins/registries/loop_policy_registry.py`
+- 系统案例：`plugins/system-loop-policies/loop_policies/`
+- 引擎级案例：`plugins/assistant_hub/loop_policies/single_turn.py`（单回合钳制，记忆整理场景）
+
+## Engines（对话引擎）
+
+两类含义：① `engines/*.py` 组件替换主窗口对话引擎实现（进阶，少用）；② **插件驱动对话的标准姿势** —— 经 `services["create_engine_session"]` 拿 `EngineSession` 同步驱动一轮对话。后者是 90% 场景要看的。
+
+### EngineSession 服务链
+
+```
+ctx["services"]["create_engine_session"](engine_name, **kwargs)
+  → EngineSessionImpl（隔离 ConversationCore/SessionManager，不污染主窗口会话）
+  → session.turn(...) -> ChatResult(text, error, cancelled, timed_out, messages)
+```
+
+**kwargs**：`hook_policy`（默认 NONE）/ `hook_policy_id`（显式策略，优先）/ `loop_policy_id`（引擎级循环策略）/ `permission_strategy`（"auto_allow"/"auto_deny"…）/ `model_config_override`（dict，顶层 merge，不锁模型切换）。
+
+**turn 签名**：`turn(system=None, user=None, messages=None, tools=[], callbacks=None, timeout=300.0, auto_history=False)`。`ChatResult.ok` 为真时取 `.text`；`timed_out/cancelled/error` 分别处理。
+
+### 最小 turn 模板（后台线程）
+
+```python
+create = services["create_engine_session"]
+session = create("my-engine",
+    hook_policy="none",                    # 防被动触发全局 hooks
+    # hook_policy_id="my_id",              # 想精细接管才给
+    # loop_policy_id="my_loop_id",         # 引擎级循环策略，不动全局槽
+    permission_strategy="auto_allow",
+)
+try:
+    r = session.turn(system="你是助手。", user="你好",
+                     tools=[], timeout=300.0)
+    if r.ok: use(r.text)
+    elif r.timed_out: ...
+finally:
+    session.cleanup()                      # 插件停用时释放
+```
+
+### 关键约束
+
+- **必须在非 UI 线程调用 turn**（阻塞式）；QThread/daemon 线程 + 轮询/看门狗是标准姿态（参考 cron-tasks executor：daemon 线程跑 turn + QThread 主体 200ms 轮询 + 硬看门狗，防流式挂死卡死收尾）
+- `auto_history=True` 才由引擎存 history；默认插件自管上下文
+- 真实消费者：`assistant_hub/core/llm_client.py`（会话池化）、`drifox-plugins2` 的 `cron-tasks/crontasks_core/executor.py`
+- `autoloop` 走的是 `services["conversation_stack"]`（EP2 体系），不经 create_engine_session
+
+### 参考
+
+- 契约：`app/plugins/contracts/engine_session.py` / `engine_host.py`
+- 实现：`app/core/conversation/engine_session.py`（含引擎级 hook 触发 `_trigger_engine_hook`）
+- 引擎替换组件（进阶）：`engines/*.py` + `app/plugins/contracts/dialogue_engine.py` 的 `ClassEngineFactory(ENGINE_SLOT_UI, MyEngine)`，必须继承内置 UIEngine
+
+## Storages（会话存储引擎）
+
+替换主程序的会话持久化后端（默认 sqlite）。消费方：HistoryManager（UI 历史）、API 网关历史、MemoryManager（长期记忆，探底 `engine.store._db`）。
+
+### 文件位置
+
+```
+your-plugin/
+├── .drifox-plugin/plugin.json   ← components.storages: true
+└── storages/*.py                ← 每个文件暴露 register(registry)
+```
+
+### 关键约束（成败在此）
+
+- **方法面必须完整对齐默认 sqlite 引擎**：6 个主接口（save/get/get_all/get_by_project/get_projects/delete）+ 消费方探测属性（`is_initialized`/`store`/`_db_path`）+ `save_session/get_session/get_sessions/get_sessions_lightweight/delete_session/get_session_count/update_session_project/archive_sessions_by_project/record_file_operation/clear_old_subagent_tasks` 等 ~20 个方法。缺一个，某条历史路径就崩
+- 激活经设置卡"会话存储"选择，或 `config_schema` + `PluginConfigStore` 自激活（参照 jsonl-storage）
+- 第三方对齐成本高——jsonl-storage 实现约 588 行是正常体量，动手前先读它
+
+### 参考
+
+- 完整案例：`drifox-plugins2` 仓库 `plugins/jsonl-storage/`（逐方法对齐 sqlite 的活例）
+- 消费方接线：`app/utils/history_manager.py` / `app/core/memory_manager.py` / `app/gateway/local_service/session_handler.py`
+- 注册表：`app/plugins/registries/storage_registry.py`
+
+## Serializers（消息序列化器）
+
+把消息流序列化成不同 LLM 协议的请求格式（openai chat / responses / 自定义）。worker 统一走 `serializer.serialize()` 单入口，按 `ModelAdapter.ProtocolFlags.serializer_id` 命中。
+
+### 文件位置
+
+```
+your-plugin/
+├── .drifox-plugin/plugin.json   ← components.serializers: true
+└── serializers/*.py
+```
+
+### 最小模板
+
+```python
+# serializers/passthrough.py
+from app.plugins.contracts.serializer import SerializeContext
+
+class PassthroughSerializer:
+    id = "passthrough"
+
+    def serialize(self, messages, ctx: SerializeContext):
+        items, instructions = [], []
+        # ... 把 messages 转成目标协议格式
+        return items, "\n\n".join(instructions)
+
+def register(registry):
+    registry.register(PassthroughSerializer())
+```
+
+### 关键约束
+
+- 生效需配套 `ModelAdapter` 的 `ProtocolFlags.serializer_id="passthrough"`（默认 "openai"），单独注册不会被选中
+- 旧入口 `messages_to_api` 等仍保留，内部已委托 SerializerRegistry——别绕过单入口
+
+### 参考
+
+- 契约：`app/plugins/contracts/serializer.py`；注册表：`app/plugins/registries/serializer_registry.py`
+- 消费：`app/core/workers/chat_worker.py` `_serialize_for_api()`
+
+## Gateways（消息网关平台适配器）
+
+接入新通讯平台（钉钉/QQ/Telegram…）。三段式：依赖检测 + Adapter 实现 + GatewayPlatformDef 注册。
+
+### 文件位置
+
+```
+your-plugin/
+├── .drifox-plugin/plugin.json   ← components.gateways: true + config_schema
+├── deps/                        # 平台 SDK（loader 自动注入 sys.path）
+└── gateways/*.py
+```
+
+### 最小模板
+
+```python
+# gateways/mygw.py
+from app.gateway.base import (
+    BasePlatformAdapter, MessageEvent, Platform, PlatformConfig, SendResult, ChatInfo,
+)
+
+def check_requirements() -> bool:
+    try:
+        import some_sdk  # noqa
+        return True
+    except ImportError:
+        return False
+
+class MyAdapter(BasePlatformAdapter):
+    MAX_MESSAGE_LENGTH = 4096
+
+    def __init__(self, config: PlatformConfig):
+        super().__init__(config)              # 平台标识经 platform_id= 或类属性
+        self._token = (config.extra or {}).get("token") or ""
+
+    async def connect(self) -> bool: ...
+    async def disconnect(self) -> None: ...
+    async def send(self, chat_id, content, **kw) -> SendResult:
+        return SendResult(success=True)
+    async def get_chat_info(self, chat_id) -> ChatInfo:
+        return ChatInfo(chat_id=chat_id)
+
+def register(registry):
+    from app.plugins.contracts.gateway_platform import GatewayPlatformDef
+    registry.register(GatewayPlatformDef(
+        platform_id="mygw", display_name="MyGW",
+        adapter_factory=lambda cfg: MyAdapter(cfg),
+        check_requirements=check_requirements,
+        ui_order=80,
+    ))
+```
+
+### 关键约束
+
+- `BasePlatformAdapter.__init__` 第二参数已修：None / 有 `.handle()` 的 handler / 平台标识三种语义鸭子类型分流（旧写法 `super().__init__(config, Platform.XXX)` 会把平台标识当 handler 丢弃 → `adapter.platform` 恒为 WECOM）
+- 收发闭环：入站消息经 `MessageHandler.handle`（session 定位 → process_message_callback → 回发）；出站主动投递走 `GatewayService.send_to_platform`（插件从 services 拿，别 import 模块级单例）
+- 配置走 `config_schema` + `PluginConfigStore`（E1 契约，设置卡自动渲染）；变更经 `build_config_values` 热重建 adapter
+
+### 参考
+
+- 契约：`app/gateway/base.py` / `app/plugins/contracts/gateway_platform.py`
+- 完整案例：`drifox-plugins2` 仓库 `plugins/gateway-feishu/gateways/feishu.py`
+
+## Model Adapters（模型协议适配器）
+
+告诉 worker "当前模型配置该用什么协议行为"（chat vs responses、reasoning_content 回传、serializer_id 等）。**不读不写 `_valid_configs`**——Provider（providers 组件）管配置录入，ModelAdapter 只在运行时按 `llm_config` 打分解析协议。
+
+### 文件位置
+
+```
+your-plugin/
+├── .drifox-plugin/plugin.json   ← components.model_adapters: true
+└── model_adapters/*.py
+```
+
+### 契约与机制
+
+```python
+class ModelAdapter(Protocol):
+    id: str
+    def matches(self, llm_config: Dict[str, Any]) -> int: ...   # 评分制，高分者胜
+```
+
+- `ModelAdapterRegistry.resolve(llm_config)`：遍历全部 adapter 取 `matches()` 最高分
+- worker 每次请求前 resolve，按 adapter 的 `ProtocolFlags`（含 `serializer_id`，默认 "openai"）决定协议行为
+- 无 UI、无 config_schema——纯代码注册；与 ProviderDef 完全解耦
+
+### 参考
+
+- 契约：`app/plugins/contracts/model_adapter.py`；注册表：`app/plugins/registries/model_adapter_registry.py`
+- 系统案例：`plugins/system-model-adapters/model_adapters/`
+- resolve 入口：`app/core/workers/chat_worker.py`（L3055 附近）
