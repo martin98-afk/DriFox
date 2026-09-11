@@ -15998,7 +15998,6 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         max_val = self._sync_scroll_maximum()
-        logger.info(f"[DBG-SCF] do_bottom value={scroll_bar.value()} max={max_val}")
         scroll_bar.setValue(max_val)
         # 再次设置确保卡片高度变化后仍在底部
         scroll_bar.setValue(max_val)
@@ -16038,10 +16037,6 @@ class OpenAIChatToolWindow(ToolWindow):
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         self._sync_scroll_maximum()
-        logger.info(
-            f"[DBG-SCF] ensure value={scroll_bar.value()} max={scroll_bar.maximum()} "
-            f"atbottom={self._is_view_at_bottom()} retries={retries} follow={self._should_follow_bottom()}"
-        )
         if not self._is_view_at_bottom():
             scroll_bar.setValue(scroll_bar.maximum())
             # 懒渲染可能需要更长时间，延迟再次检查
@@ -16117,10 +16112,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 card_bottom = card_top + sender.height()
                 if card_bottom <= value or self._should_follow_bottom():
                     sb.setValue(max(0, value + delta))
-                    logger.info(
-                        f"[DBG-SCF] comp card={id(sender) % 100000} delta={delta} "
-                        f"value={value} max={sb.maximum()} newvalue={sb.value()}"
-                    )
         except RuntimeError:
             pass
         if not sender._content_just_loaded:

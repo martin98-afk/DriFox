@@ -15978,10 +15978,6 @@ class MessageCard(SimpleCardWidget):
                 → 坞态永久沉底、正文限矮（流式结构残留 bug 根因），
                 故打断/错误调用方必须传 True。
         """
-        logger.info(
-            f"[DBG-SCF] finish_streaming card={id(self) % 100000} "
-            f"history={history} force_dock_off={force_dock_off}"
-        )
         try:
             # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
             # 渐变边框/流动光点），与紧随其后的最终全量渲染抢主线程。
