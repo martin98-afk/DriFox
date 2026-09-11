@@ -29,7 +29,7 @@
         },
         {
             "name": "artifacts-manager",
-            "description": "DriFox 内置 UI 组件：工作台产物页（按用户问题分组展示会话文件产物，支持单文件 / 整组差异对比）",
+            "description": "DriFox 内置 UI 组件：工作台产物页（按用户问题分组展示会话文件产物）",
             "version": "1.0.0",
             "author": "DriFox Team",
             "license": "MIT",
@@ -93,6 +93,30 @@
                 "type": "git-subdir",
                 "url": "https://github.com/martin98-afk/DriFox",
                 "path": "plugins/file-tree",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon_dark.svg"
+            }
+        },
+        {
+            "name": "history-manager",
+            "description": "DriFox 内置 UI 组件：工作台历史会话页（历史 / 归档列表、搜索、归档 · 重命名 · 恢复 · 导入）",
+            "version": "1.0.0",
+            "author": "DriFox Team",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/history-manager",
                 "ref": "master"
             },
             "components": {
