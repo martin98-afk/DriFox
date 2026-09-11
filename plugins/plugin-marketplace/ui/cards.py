@@ -6106,14 +6106,22 @@ class MarketplaceCard(QWidget):
         webbrowser.open(url)
 
     def _on_open_plugin_dir(self, path: str):
-        """在系统文件管理器中打开插件所在目录（并选中该目录）"""
+        """在系统文件管理器中打开插件所在目录（并选中该目录）
+
+        路径可能是相对路径（开发模式下 ``_drifox_dir()`` 返回 ``.drifox``）：
+        子进程虽然继承当前工作目录，但显式转绝对路径更稳（应用从别处启动 /
+        后续有人改了 CWD 都不会失效）。
+        """
         try:
+            target = Path(path)
+            if not target.is_absolute():
+                target = (Path.cwd() / target).resolve()
             if os.name == "nt":
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(str(target))])
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", path])
+                subprocess.Popen(["open", "-R", str(target)])
             else:
-                subprocess.Popen(["xdg-open", path])
+                subprocess.Popen(["xdg-open", str(target)])
         except Exception as e:
             logger.warning(f"[Marketplace] 打开插件目录失败: {e}")
 
