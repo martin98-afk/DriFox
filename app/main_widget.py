@@ -144,6 +144,12 @@ from app.widgets.conversation_node_preview import (
 from app.widgets.height_commit_batch import HeightCommitBatch
 from app.widgets.resize_orchestrator import ResizeOrchestrator
 from app.widgets.cards.settings.file_undo_card import FileUndoCard
+from app.widgets.cards.floating.undo_delete_store import (
+    KIND_DELETE_ROUND,
+    KIND_UNDO_TO_ROUND,
+    UndoDeleteStore,
+    UndoEntry,
+)
 from app.widgets.message_card import (
     MessageCard,
     clear_global_render_cache,
@@ -1339,8 +1345,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
         self._pending_scroll_to_batch: Optional[int] = None  # 时间线节点滚动目标 batch 索引
         self._pending_scroll_to_update: Optional[int] = None  # 待更新的节点索引（用于同步高亮和进度）
-        # 撤销删除功能：删除消息的缓存栈
-        self._undo_delete_stack: List[Dict[str, Any]] = []  # 每个元素包含 deleted_messages, round_index, widgets
+        # 撤销删除功能：回退条目栈由 input_card_module 创建（_undo_delete_store），
+        # 这里不再声明 —— 旧字段 _undo_delete_stack 是「声明为缓存栈但全仓零引用」
+        # 的死代码，单步缓存 _undo_delete_cache 也已被类型化栈取代。
 
         self._current_session_id = self.session_manager.get_current_session().session_id
 
@@ -10685,6 +10692,10 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
     def _display_current_session(self):
+        # 会话切换：撤销条目绑定在具体 session 上，跨会话一律失效
+        # （本方法是所有会话加载路径的汇聚点，在此兜底即可覆盖全部调用方）
+        self._clear_undo_store_for_session_switch()
+
         session = self.session_manager.get_current_session()
         if not session:
             self._clear_chat_area()
@@ -12502,8 +12513,16 @@ class OpenAIChatToolWindow(ToolWindow):
         batches: List[List[Dict[str, Any]]],
         insert_at_top: bool = False,
         batch_offset: int = 0,
+        anchor_layout_index: Optional[int] = None,
     ):
-        insert_index = 0 if insert_at_top else None
+        if insert_at_top:
+            insert_index = 0
+        elif anchor_layout_index is not None:
+            # 原位插回（增量恢复路径）：把恢复的批次插到指定布局位置，
+            # 而不是追加到末尾导致消息顺序错乱。
+            insert_index = max(0, min(anchor_layout_index, self.chat_layout.count()))
+        else:
+            insert_index = None
         for local_index, batch in enumerate(batches):
             # message_extras：session.messages 为轻量形态，渲染前补回剥离字段。
             # 副本注入不写回 session.messages，批次卸载（B4 回收）随卡片销毁。
@@ -14394,198 +14413,474 @@ class OpenAIChatToolWindow(ToolWindow):
             }
             self._on_stop_clicked()
 
-        # 🛡️ 先清理 CardManager 中残留的可见状态（上次恢复时 _on_restore_clicked
-        # 直接调 setVisible(False) 绕过了 CardManager），再设新缓存，防止后续
-        # hide_card → dismissed → _on_undo_delete_dismissed 清空刚设好的缓存。
-        if self._card_manager.is_card_visible("undo_delete", self._window_id):
-            self._card_manager.hide_card("undo_delete", self._window_id)
+        # === 抓取回退锚点（必须在删除前，删除后 widget 已从布局摘除）===
+        # layout_index 记录被删区域在 chat_layout 中的起始位置，恢复时原位插回；
+        # 旧实现恢复一律走全量重建，滚动位置和阅读锚点全部丢失。
+        entry = self._build_undo_entry(
+            session=session,
+            round_index=card._round_index,
+            kind=KIND_DELETE_ROUND,
+            layout_index=self._layout_index_of_card(card),
+        )
 
-        # === 缓存删除数据，用于撤销恢复（只缓存一步）===
-        if session and card._round_index is not None:
-            try:
-                canonical_messages = consolidate_messages(session.messages)
-                round_ranges = get_user_round_ranges(canonical_messages)
-                if 0 <= card._round_index < len(round_ranges):
-                    start_idx, end_idx = round_ranges[card._round_index]
-                    msg_count = end_idx - start_idx
-                    self._undo_delete_cache = {
-                        "session_id": session.session_id,
-                        "messages": list(canonical_messages[start_idx:end_idx]),
-                        "insert_index": start_idx,
-                        "count": msg_count,
-                    }
-                    logger.debug(
-                        "[DELETE] Cache set: "
-                        f"session_id={session.session_id!r}, "
-                        f"start_idx={start_idx}, end_idx={end_idx}, "
-                        f"msg_count={msg_count}, "
-                        f"session_messages_len={len(session.messages)}, "
-                        f"canonical_len={len(canonical_messages)}"
-                    )
-            except Exception:
-                self._undo_delete_cache = {}
+        before_len = len(session.messages) if session else 0
 
-        # 执行删除（清理状态后才设缓存，此时 hide_card 的清空效果对本次缓存无害）
+        # 执行删除（卡片自身的可见性全部由 CardManager 驱动，无需再预清理状态）
         self._delete_user_round(card)
 
         # 非流式场景：_on_finalize_complete 不会运行，手动清除哨兵
         if not was_streaming:
             self._truncation_sentinel = None
 
-        # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
-        if self._undo_delete_cache:
-            self._undo_delete_card.set_count(self._undo_delete_cache.get("count", 0))
-            if self._card_manager.is_card_visible("undo_delete", self._window_id):
-                self._card_manager.hide_card("undo_delete", self._window_id)
-            self._card_manager.show_card("undo_delete", self._window_id)
-
-    def _restore_deleted_message(self):
-        """恢复被撤销删除的消息"""
-        from loguru import logger
-
-        if not self._undo_delete_cache:
+        # 删除未生效（round_index 失效 / 卡片不在布局中）时不入栈，避免"幽灵条目"
+        if entry is None or not session or len(session.messages) >= before_len:
+            if entry is not None:
+                logger.warning("[DELETE] 删除未改变会话内容，跳过撤销条目入栈")
             return
 
-        cache = self._undo_delete_cache
-        self._undo_delete_cache = {}  # 立即清空，防止重复恢复
+        self._undo_store().push(entry)
+        logger.debug(
+            f"[DELETE] Undo entry pushed: kind={entry.kind}, count={entry.count}, "
+            f"insert_index={entry.insert_index}, layout_index={entry.layout_index}, depth={self._undo_store().depth}"
+        )
+        self._show_undo_delete_card()
+
+    # ───────────────────────────────────────────────────────────
+    # 撤销删除：条目仓库 / 卡片显隐 / 恢复
+    # ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _safe_instance_attr(obj, name, default=None):
+        """安全读取实例属性（**不要**用 getattr(obj, name, default)）
+
+        ⚠️ PyQt 对象在 ``__init__`` 未执行时（测试用 ``__new__`` 构造的桩实例、
+        构造中途的实例）执行 ``getattr(obj, name, default)`` 会抛
+        ``RuntimeError: super-class __init__() ... was never called`` 而不是返回
+        default —— 直接把调用方打断（2026-09-11 实测：_display_current_session 的
+        会话切换钩子让一批 __new__ 桩测试集体报错）。直接读实例 ``__dict__``
+        可绕开 sip 的属性转发。
+        """
+        try:
+            return obj.__dict__.get(name, default)
+        except Exception:
+            return default
+
+    def _undo_store(self) -> UndoDeleteStore:
+        """获取撤销条目仓库（惰性创建，兼容 __new__ 构造的测试桩实例）"""
+        store = self._safe_instance_attr(self, "_undo_delete_store")
+        if store is None:
+            store = UndoDeleteStore()
+            self._undo_delete_store = store
+        return store
+
+    def _build_undo_entry(
+        self,
+        session,
+        round_index: Optional[int],
+        kind: str,
+        layout_index: Optional[int] = None,
+    ) -> Optional[UndoEntry]:
+        """构造一条可回退条目（必须在删除动作之前调用，删除后 session 已变）
+
+        Args:
+            session: 当前会话
+            round_index: 目标轮次（卡片上的 _round_index）
+            kind: KIND_DELETE_ROUND（删单轮，移除中间一段）
+                / KIND_UNDO_TO_ROUND（撤销到该轮，移除该轮及其之后全部）
+            layout_index: 被移除区域在 chat_layout 中的起始下标（仅删单轮需要）
+
+        Returns:
+            UndoEntry；round_index 失效 / 无可移除消息时返回 None
+        """
+        if session is None or round_index is None:
+            return None
+        try:
+            canonical = consolidate_messages(session.messages)
+            round_ranges = get_user_round_ranges(canonical)
+            if not (0 <= round_index < len(round_ranges)):
+                return None
+            start_idx, end_idx = round_ranges[round_index]
+            if kind == KIND_UNDO_TO_ROUND:
+                end_idx = len(canonical)
+            removed = list(canonical[start_idx:end_idx])
+            if not removed:
+                return None
+            return UndoEntry(
+                session_id=session.session_id,
+                messages=removed,
+                insert_index=start_idx,
+                count=len(removed),
+                kind=kind,
+                layout_index=layout_index if kind == KIND_DELETE_ROUND else None,
+                note=self._summarize_removed_messages(removed),
+            )
+        except Exception as e:
+            logger.warning(f"[UNDO] 构造回退条目失败: {e}")
+            return None
+
+    @staticmethod
+    def _summarize_removed_messages(messages: List[Dict[str, Any]]) -> str:
+        """被删内容摘要（卡片 tooltip）：取首条 user 消息前 80 字"""
+        for msg in messages:
+            if msg.get("role") != "user":
+                continue
+            text = " ".join((msg.get("content") or "").split())
+            if text:
+                return text[:80] + ("…" if len(text) > 80 else "")
+        return ""
+
+    def _layout_index_of_card(self, card) -> Optional[int]:
+        """card 在 chat_layout 中的下标（不在布局中返回 None）"""
+        try:
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if item and item.widget() is card:
+                    return i
+        except RuntimeError, AttributeError:
+            pass
+        return None
+
+    def _show_undo_delete_card(self):
+        """按栈顶条目刷新并显示撤销卡片（CardManager 为唯一显隐真源）"""
+        card = self._safe_instance_attr(self, "_undo_delete_card")
+        card_manager = self._safe_instance_attr(self, "_card_manager")
+        if card is None or card_manager is None:
+            return
+        store = self._undo_store()
+        entry = store.peek()
+        if entry is None:
+            self._hide_undo_delete_card()
+            return
+        card.set_entry(entry.label, store.depth, entry.note)
+        card_manager.show_card("undo_delete", self._window_id)
+        # CardManager 认为已可见时会早退，但文案与 TTL 仍需刷新
+        card.restart_ttl()
+
+    def _hide_undo_delete_card(self):
+        """隐藏撤销卡片（回退条目保留 —— 遮挡 ≠ 放弃撤销）"""
+        card_manager = self._safe_instance_attr(self, "_card_manager")
+        if card_manager is not None and card_manager.is_card_visible("undo_delete", self._window_id):
+            card_manager.hide_card("undo_delete", self._window_id)
+            return
+        card = self._safe_instance_attr(self, "_undo_delete_card")
+        if card is not None and card.isVisible():
+            card.setVisible(False)
+
+    def _on_undo_dismiss_requested(self):
+        """撤销窗口关闭（用户点 ✕ / TTL 到期）→ 回退条目整体失效"""
+        dropped = self._undo_store().clear("dismiss")
+        logger.debug(f"[UNDO-DISMISS] 窗口关闭，丢弃 {dropped} 条回退条目")
+        self._hide_undo_delete_card()
+
+    def _on_undo_delete_dismissed(self):
+        """卡片被 CardManager 隐藏 —— 仅记录，**不清空**回退条目
+
+        旧实现把「被别的卡片遮挡」当作「用户放弃撤销」，于是每次删除前都得先
+        hide_card 清残留状态，否则会误清新写的缓存 —— 这是双状态源问题的放大器。
+        现在卡片显隐完全由 CardManager 驱动，条目失效只由 ✕ / TTL / 会话切换触发。
+        """
+        logger.debug("[UNDO-DISMISS] 卡片隐藏，回退条目保留")
+
+    def _clear_undo_store_for_session_switch(self):
+        """会话切换：回退条目绑定具体 session，跨会话一律失效"""
+        store = self._safe_instance_attr(self, "_undo_delete_store")
+        if not store:
+            return
+        top = store.peek()
+        if top is None:
+            return
+        session = self.session_manager.get_current_session()
+        if session is None or top.session_id != session.session_id:
+            store.clear("session-switch")
+            self._hide_undo_delete_card()
+
+    # ── 恢复 ──────────────────────────────────────────────
+
+    def _restore_deleted_message(self):
+        """恢复最近一次被删除 / 撤销的消息（弹出栈顶条目）"""
+        store = self._undo_store()
+        entry = store.peek()
+        if entry is None:
+            return
 
         session = self.session_manager.get_current_session()
-        if not session or session.session_id != cache["session_id"]:
+        if session is None or session.session_id != entry.session_id:
             logger.warning(
-                "[RESTORE] Session changed, cannot restore: "
-                f"cache_session_id={cache['session_id']!r}, "
+                "[RESTORE] 会话已切换，回退条目失效: "
+                f"entry_session_id={entry.session_id!r}, "
                 f"current_session_id={session.session_id if session else None!r}, "
-                f"session_exists={session is not None}, "
-                f"cache_insert_index={cache.get('insert_index')}, "
-                f"cache_msg_count={cache.get('count')}, "
-                f"session_messages_len={len(session.messages) if session else 0}"
+                f"kind={entry.kind}, count={entry.count}"
+            )
+            store.clear("session-mismatch")
+            self._hide_undo_delete_card()
+            InfoBar.warning(
+                "无法恢复",
+                "当前会话已切换，被删除的消息无法恢复",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
             )
             return
 
-        # 恢复消息到 session
+        entry = store.pop()
+        if not self._restore_undo_entry(session, entry):
+            return
+
+        # 栈里还有更早的条目 → 卡片继续驻留，支持逐步回退
+        if store:
+            self._show_undo_delete_card()
+        else:
+            self._hide_undo_delete_card()
+
+    def _restore_undo_entry(self, session, entry: UndoEntry) -> bool:
+        """把一条回退条目写回：会话 → 视图 → 磁盘"""
+        # 中部恢复要保留阅读位置：插入点上方的卡片高度不受影响，记下当前滚动值
+        # 回填后复用即可；尾部恢复（用户本来就在末尾）才回到底部。
+        anchor_scroll = None
+        if not entry.appends_at_tail:
+            try:
+                anchor_scroll = self.chat_scroll_area.verticalScrollBar().value()
+            except (RuntimeError, AttributeError):
+                anchor_scroll = None
+
+        # ── 1. 消息回填 ──
         messages = list(session.messages)
-        insert_at = min(cache["insert_index"], len(messages))
-        messages[insert_at:insert_at] = cache["messages"]
+        insert_at = max(0, min(entry.insert_index, len(messages)))
+        messages[insert_at:insert_at] = entry.messages
         session.set_messages(messages, preserve_compaction=False)
         self._session_dirty = True  # 🛡️ 消息被恢复，脏标记兜底
 
-        # 保存并刷新视图
         if self._current_session_id != session.session_id:
             self._current_session_id = session.session_id
 
-        # 直接保存到 history_manager，确保数据不丢失
+        # ── 2. 视图：优先原位增量插回，异常时回退全量重建 ──
+        rendered = False
         try:
-            if self.history_manager:
-                from app.widgets.ui_helpers import get_session_compaction_info
+            rendered = self._render_restored_undo_region(insert_at, entry.layout_index)
+        except Exception as e:
+            logger.error(f"[RESTORE] 增量恢复失败，回退全量重建: {e}")
+        if not rendered:
+            self._full_rebuild_after_restore()
 
-                compaction_info = get_session_compaction_info(session)
-                idx = self.history_manager.find_index_by_session_id(self._current_session_id)
-                worktree_path = self._get_current_worktree_path()
-                worktree_kwargs = {"worktree_path": worktree_path or ""}
-                if idx is not None:
-                    # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
-                    self.history_manager.update_session(
-                        idx,
-                        session.messages,
-                        **compaction_info,
-                        **worktree_kwargs,
-                    )
-                else:
-                    # 🛡️ 罕见路径（恢复时历史被截断）：用 originating_project 优先的
-                    # fallback 链，避免被当前 _current_project 错误覆盖
-                    resolved_project = self._resolve_session_project_fallback(
-                        session.session_id, self._current_project, session=session
-                    )
-                    self.history_manager.save_session(
-                        session.messages,
-                        session_id=session.session_id,
-                        project=resolved_project,
-                        **compaction_info,
-                        **worktree_kwargs,
-                    )
+        # ── 3. 落盘 ──
+        self._persist_restored_session(session)
+
+        # ── 4. 文件内容回写（撤销时缓存下来的「AI 编辑后」快照）──
+        self._apply_file_restore_ops(entry)
+
+        # ── 5. 收尾：节点预览 / 上下文占用 / 历史徽章 / 滚动 ──
+        # 会话此时必然非空（刚回填了消息），_finalize_local_session_mutation
+        # 走非空分支：只做引用与预览同步，不会清空对话区。
+        try:
+            self._finalize_local_session_mutation()
+        except Exception as e:
+            logger.error(f"[RESTORE] 收尾刷新失败: {e}")
+        self._update_history_questions_badge()
+
+        if anchor_scroll is None:
+            QTimer.singleShot(200, self._scroll_to_bottom)
+        else:
+            # 两次设值：抵消 WebEngine 异步上报卡片高度引起的一次视口漂移
+            self._restore_scroll_value(anchor_scroll)
+            QTimer.singleShot(120, lambda value=anchor_scroll: self._restore_scroll_value(value))
+        return True
+
+    def _restore_scroll_value(self, value: int):
+        """把对话滚动条还原到指定位置（越界自动夹紧）"""
+        try:
+            bar = self.chat_scroll_area.verticalScrollBar()
+            bar.setValue(max(0, min(value, bar.maximum())))
+        except (RuntimeError, AttributeError):
+            pass
+
+    def _render_restored_undo_region(self, insert_at: int, layout_anchor: Optional[int]) -> bool:
+        """增量恢复：只重建被恢复的批次，卡片原位插回（保留滚动锚点）
+
+        与删除路径镜像：删除是「摘掉若干批次 + 重建 _message_batch/_batch_cards」，
+        恢复就是「插回若干批次 + 原位补上卡片」。只有增量路径失败时才回退全量重建。
+
+        Returns:
+            True 表示增量渲染完成；False 表示调用方应回退到全量重建。
+        """
+        session = self.session_manager.get_current_session()
+        if session is None:
+            return False
+
+        old_batch_count = len(self._message_batch)
+        all_batches = group_messages_for_display(session.messages)
+        batch_index = len(group_messages_for_display(list(session.messages[:insert_at])))
+        restored_count = len(all_batches) - old_batch_count
+        if restored_count <= 0:
+            # 回填的消息不产生新的展示批次（如全是 hook 消息）：只同步结构
+            self._message_batch = all_batches
+            self._sync_batch_structures()
+            self._build_user_prefix_cache()
+            self._refresh_all_cards_round_index()
+            return True
+
+        batch_index = max(0, min(batch_index, len(self._batch_cards)))
+        restored_batches = all_batches[batch_index : batch_index + restored_count]
+
+        # _batch_cards 原位插入占位，其后存活卡片整体后移并同步 _message_index
+        old_cards = list(self._batch_cards)
+        new_cards: List[Optional[List[MessageCard]]] = (
+            old_cards[:batch_index] + [None] * restored_count + old_cards[batch_index:]
+        )
+        self._message_batch = all_batches
+        self._batch_cards = new_cards
+        self._build_user_prefix_cache()
+        for idx in range(batch_index + restored_count, len(new_cards)):
+            for card in new_cards[idx] or []:
+                if self._is_widget_alive(card):
+                    card._message_index = idx
+
+        # 占位控件必须随批次下标整体后移：否则后续回收/重建会按错位的
+        # batch_idx 取到别人的占位，把消息插到错误位置。
+        if self._batch_placeholders:
+            self._batch_placeholders = {
+                (k + restored_count if k >= batch_index else k): v for k, v in self._batch_placeholders.items()
+            }
+
+        # 可见窗口同步：
+        # - 视口本来就在底部（end == 原总数）→ 跟随到新底部，否则刚渲染的
+        #   恢复批次会被当作"离屏"立即回收掉；
+        # - 恢复点在窗口之前 → 窗口整体后移；
+        # - 恢复点落在窗口中间 → 只扩窗口末尾。
+        if self._visible_batch_end >= old_batch_count:
+            self._advance_visible_batch_window()
+        elif self._visible_batch_start >= batch_index:
+            self._visible_batch_start += restored_count
+            self._visible_batch_end += restored_count
+        elif self._visible_batch_end > batch_index:
+            self._visible_batch_end += restored_count
+
+        # 删除至空会话时展示过欢迎卡片，恢复到非空需要让它让位
+        self._hide_welcome_cards()
+
+        self._render_message_to_card(
+            restored_batches,
+            batch_offset=batch_index,
+            anchor_layout_index=layout_anchor,
+        )
+        self._refresh_all_cards_round_index()
+        logger.debug(
+            f"[RESTORE] 增量恢复完成: batch_index={batch_index}, batches={restored_count}, anchor={layout_anchor}"
+        )
+        return True
+
+    def _full_rebuild_after_restore(self):
+        """全量重建兜底（增量渲染抛异常时使用）"""
+        session = self.session_manager.get_current_session()
+        if session is None or getattr(self, "_is_destroyed", False):
+            return
+        try:
+            self._invalidate_current_session_card_cache()
+            self._clear_chat_area()
+            self._message_batch = group_messages_for_display(session.messages)
+            self._batch_cards = [None for _ in self._message_batch]
+            self._build_user_prefix_cache()
+            if self._message_batch:
+                self._visible_batch_end = len(self._message_batch)
+                self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
+                self._load_message_batch(initial=True)
+                self._sync_batch_structures()
+        except Exception as e:
+            logger.error(f"[RESTORE] 全量重建失败: {e}")
+
+    def _persist_restored_session(self, session):
+        """恢复后落盘（更新 / 重建 / 兜底三分支）"""
+        try:
+            if not self.history_manager:
+                return
+            from app.widgets.ui_helpers import get_session_compaction_info
+
+            compaction_info = get_session_compaction_info(session)
+            idx = self.history_manager.find_index_by_session_id(self._current_session_id)
+            worktree_path = self._get_current_worktree_path()
+            worktree_kwargs = {"worktree_path": worktree_path or ""}
+            if idx is not None:
+                # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
+                self.history_manager.update_session(
+                    idx,
+                    session.messages,
+                    **compaction_info,
+                    **worktree_kwargs,
+                )
+            else:
+                # 🛡️ 罕见路径（恢复时历史被截断 / 已归档）：用 originating_project
+                # 优先的 fallback 链，避免被当前 _current_project 错误覆盖
+                resolved_project = self._resolve_session_project_fallback(
+                    session.session_id, self._current_project, session=session
+                )
+                self.history_manager.save_session(
+                    session.messages,
+                    session_id=session.session_id,
+                    project=resolved_project,
+                    **compaction_info,
+                    **worktree_kwargs,
+                )
         except Exception as e:
             logger.error(f"[RESTORE] Failed to persist session: {e}")
 
-        # 恢复文件操作（重写 AI 编辑后的文件内容）
-        # （write_file 兼容分支已删：DB 实证 0 记录；fr_op 通用结构保留，
-        #   含 content 的条目即按内容重写）
-        file_restore_ops = cache.get("file_restore_ops", [])
-        for fr_op in file_restore_ops:
+    def _apply_file_restore_ops(self, entry: UndoEntry):
+        """把撤销时缓存的「AI 编辑后文件内容」写回磁盘
+
+        用二进制写（write_bytes）而非文本模式：Windows 上 open(p, "w") 会把 \\n
+        静默转成 \\r\\n，导致整文件行尾翻转（见 AGENTS.md 行尾纪律）。
+        """
+        ops = entry.file_restore_ops or []
+        if not ops:
+            return
+        restored = 0
+        for op in ops:
+            file_path = op.get("file_path")
+            content = op.get("content")
+            if not file_path or content is None:
+                continue
             try:
-                fp = fr_op.get("file_path")
-                content = fr_op.get("content", "")
-                if fp and content:
-                    Path(fp).parent.mkdir(parents=True, exist_ok=True)
-                    with open(fp, "w", encoding="utf-8") as f:
-                        f.write(content)
-                    logger.info(f"[RESTORE] 已恢复文件编辑: {fp}")
+                target = Path(file_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                restored += 1
+                logger.info(f"[RESTORE] 已恢复文件编辑: {file_path}")
             except Exception as e:
-                logger.error(f"[RESTORE] 文件恢复失败: {fr_op.get('file_path')} - {e}")
-
-        # 刷新视图
-        self._invalidate_current_session_card_cache()
-        try:
-            self._display_current_session()
-        except Exception as e:
-            logger.error(f"[RESTORE] _display_current_session failed: {e}")
-            # fallback: 强制重建
-            try:
-                self._clear_chat_area()
-                self._message_batch = group_messages_for_display(session.messages)
-                self._batch_cards = [None for _ in self._message_batch]
-                self._build_user_prefix_cache()
-                if self._message_batch:
-                    self._visible_batch_end = len(self._message_batch)
-                    self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
-                    self._load_message_batch(initial=True)
-                    self._sync_batch_structures()
-            except Exception as e2:
-                logger.error(f"[RESTORE] Fallback render also failed: {e2}")
-
-        # 🛡️ 验证恢复是否成功：检查 _display_current_session 后布局中是否有消息卡片
-        # 若 chat_layout 中没有消息卡片（可能被某些边缘情况重置），强制重建
-        if self.chat_layout.count() == 0 or not any(
-            isinstance(self.chat_layout.itemAt(i).widget(), MessageCard)
-            for i in range(self.chat_layout.count())
-            if self.chat_layout.itemAt(i) and self.chat_layout.itemAt(i).widget()
-        ):
-            if session.messages and not getattr(self, "_is_destroyed", False):
-                logger.warning("[RESTORE] Display session produced no cards, forcing rebuild")
-                try:
-                    self._clear_chat_area()
-                    self._message_batch = group_messages_for_display(session.messages)
-                    self._batch_cards = [None for _ in self._message_batch]
-                    self._build_user_prefix_cache()
-                    if self._message_batch:
-                        self._visible_batch_end = len(self._message_batch)
-                        self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
-                        self._load_message_batch(initial=True)
-                        self._sync_batch_structures()
-                except Exception as e:
-                    logger.error(f"[RESTORE] Force rebuild failed: {e}")
-
-        # 恢复后消息数变化，显式刷新历史问题徽章（不依赖 _display_current_session
-        # 的内部分支路由，保证 badge 计数与恢复后的会话一致）
-        self._update_history_questions_badge()
-
-        # 确保用户看到恢复后的最后一条消息
-        QTimer.singleShot(200, self._scroll_to_bottom)
-
-        # 🛡️ 恢复成功后同步 CardManager 状态：_on_restore_clicked 直接调了
-        # setVisible(False) 绕过 CardManager，这里通知 CardManager 更新状态，
-        # 防止下次删除时 hide_card → dismissed 清空新缓存。
-        if self._card_manager.is_card_visible("undo_delete", self._window_id):
-            self._card_manager.hide_card("undo_delete", self._window_id)
-
-    def _on_undo_delete_dismissed(self):
-        """撤销删除卡片自动消失或被关闭时，清空缓存"""
-        if self._undo_delete_cache:
-            logger.debug(
-                "[UNDO-DISMISS] Cache cleared without restore: "
-                f"session_id={self._undo_delete_cache.get('session_id')!r}, "
-                f"count={self._undo_delete_cache.get('count')}"
+                logger.error(f"[RESTORE] 文件恢复失败: {file_path} - {e}")
+        if restored:
+            InfoBar.success(
+                "文件已恢复",
+                f"已还原 {restored} 个文件",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
             )
-        self._undo_delete_cache = {}
+
+    # 单文件快照上限：超过此大小的文件不缓存内容（恢复消息时不写回，仅记日志）
+    FILE_SNAPSHOT_MAX_BYTES = 5 * 1024 * 1024
+
+    def _snapshot_files_for_restore(self, operations) -> List[Dict[str, Any]]:
+        """回滚前快照「AI 编辑后」的文件内容，供恢复消息时写回
+
+        读原始字节而非文本：写回走 ``write_bytes``，避免 Windows 文本模式
+        ``open(p, "w")`` 把 \\n 静默转成 \\r\\n、翻转整文件行尾（AGENTS.md 行尾纪律）。
+        """
+        snapshots: List[Dict[str, Any]] = []
+        seen = set()
+        for op in operations or []:
+            file_path = op.get("file_path")
+            if not file_path or file_path in seen:
+                continue
+            seen.add(file_path)
+            try:
+                target = Path(file_path)
+                if not target.is_file():
+                    continue
+                if target.stat().st_size > self.FILE_SNAPSHOT_MAX_BYTES:
+                    logger.warning(f"[UNDO] 文件超过快照上限，恢复消息时不会写回: {file_path}")
+                    continue
+                snapshots.append({"file_path": file_path, "content": target.read_bytes()})
+            except Exception as e:
+                logger.warning(f"[UNDO] 文件快照失败: {file_path} - {e}")
+        return snapshots
 
     def _delete_user_round(self, card: MessageCard):
         """
@@ -14660,9 +14955,8 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info(
                 "[DEBUG-diagnose-welcome] _delete_user_round: INVALID round_index, will return without showing welcome"
             )
-            # 仍显示撤销卡片（缓存已设置）
-            if self._undo_delete_cache:
-                self._card_manager.show_card("undo_delete", self._window_id)
+            # 校验失败 = 什么都没删，撤销条目不入栈、卡片不显示
+            # （调用方 _delete_message 会检测会话未变化而跳过 push）
             return
 
         success, old_count, new_count = truncate_and_remove_round(session, round_index, round_ranges)
@@ -14717,12 +15011,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_session_id != session.session_id:
             self._current_session_id = session.session_id
 
-        # 🛡️ 先清理 CardManager 中残留的可见状态（与 _delete_message 同理，
-        # _on_restore_clicked 直接调 setVisible(False) 绕过了 CardManager），
-        # 防止后续显示撤销卡片时 hide_card → dismissed 清空缓存。
-        if self._card_manager.is_card_visible("undo_delete", self._window_id):
-            self._card_manager.hide_card("undo_delete", self._window_id)
-
         # 获取当前 session 的 round_ranges，用于验证 round_index
         canonical_now = consolidate_messages(session.messages)
         round_ranges_now = get_user_round_ranges(canonical_now)
@@ -14764,30 +15052,26 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning("[UNDO] Cannot determine valid round_index for card")
             return
 
-        # === 缓存撤销数据，用于恢复（只缓存一步）===
-        try:
-            # 撤销：删除从该 round 到末尾的所有消息
-            # 🛡️ 使用 canonical_now 而非 session.messages，确保索引一致。
-            # consolidate_messages 可能过滤掉非标准消息，导致 session.messages
-            # 与 canonical_now 长度不一致，直接使用 session.messages 切片会取错位置。
-            start_idx = round_ranges_now[round_index][0]
-            msg_count = len(canonical_now) - start_idx
-            self._undo_delete_cache = {
-                "session_id": session.session_id,
-                "messages": list(canonical_now[start_idx:]),  # 使用 canonical 消息
-                "insert_index": start_idx,
-                "count": msg_count,
-            }
-            logger.debug(
-                "[UNDO] Cache set: "
-                f"session_id={session.session_id!r}, "
-                f"start_idx={start_idx}, "
-                f"msg_count={msg_count}, "
-                f"session_messages_len={len(session.messages)}, "
-                f"canonical_len={len(canonical_now)}"
-            )
-        except Exception:
-            self._undo_delete_cache = {}
+        # === 构造回退条目（本地持有，截断成功后才入栈）===
+        # 🛡️ 索引口径基于 canonical_now 而非 session.messages：consolidate_messages
+        # 可能过滤掉非标准消息，长度不一致时直接切片会取错位置（见 _build_undo_entry）。
+        # 撤销移除的是尾部（该轮及其之后全部），恢复时直接追加 → layout_index=None。
+        undo_entry = self._build_undo_entry(
+            session=session,
+            round_index=round_index,
+            kind=KIND_UNDO_TO_ROUND,
+        )
+        if undo_entry is None:
+            logger.warning(f"[UNDO] 无法构造回退条目: round_index={round_index}")
+            return
+        logger.debug(
+            "[UNDO] Entry prepared: "
+            f"session_id={session.session_id!r}, "
+            f"start_idx={undo_entry.insert_index}, "
+            f"msg_count={undo_entry.count}, "
+            f"session_messages_len={len(session.messages)}, "
+            f"canonical_len={len(canonical_now)}"
+        )
 
         # 🛡️ 设置截断哨兵，必须领先于 _on_stop_clicked（与 _delete_message 同理）：
         # stop 触发的 deferred finalize（_on_finalize_complete / finished_with_messages）
@@ -14813,6 +15097,10 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
             if operations:
+                # 🛡️ 快照必须在弹窗打开**之前**完成：弹窗内既能整体回滚，也能逐行
+                # 撤销（FileUndoCard._undo_one），事后再读磁盘拿到的已是回滚后的旧内容。
+                file_snapshots = self._snapshot_files_for_restore(operations)
+
                 dialog = FileUndoCard(operations, self.backend.file_recorder, self)
                 result = dialog.exec_()
 
@@ -14826,15 +15114,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 执行回滚 - 只还原选中的操作
                 selected_ops = dialog.get_selected_operations()
                 if selected_ops:
-                    # 在回滚前，缓存文件当前内容（AI 编辑后的版本），用于后续恢复
-                    # （write_file 兼容分支已删：DB 实证 0 记录，工具名已为
-                    #   write/edit/multi_edit；file_restore_ops 通用结构保留，
-                    #   供后续按 registry 文件写入组分组的恢复实现复用）
-                    file_restore_ops = []
-                    self._undo_delete_cache["file_restore_ops"] = file_restore_ops
+                    # 已回滚的文件 = 本次选中的 + 弹窗内逐行撤销掉的（后者已从
+                    # dialog.operations 移除）。这些文件恢复消息时要一起写回。
+                    rolled_back = {op.get("file_path") for op in selected_ops}
+                    rolled_back |= {op.get("file_path") for op in operations} - {
+                        op.get("file_path") for op in dialog.operations
+                    }
+                    undo_entry.file_restore_ops = [
+                        snap for snap in file_snapshots if snap.get("file_path") in rolled_back
+                    ]
 
-                    result = self.backend.file_recorder.rollback_operations(selected_ops)
-                    self._show_undo_result(result)
+                    rollback_result = self.backend.file_recorder.rollback_operations(selected_ops)
+                    self._show_undo_result(rollback_result)
 
         # 再次验证 round_index 是否仍有效（dialog.exec_() 期间 session 可能变化）
         session_final = self.session_manager.get_current_session()
@@ -14855,12 +15146,14 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._truncate_session_from_user_round(round_index=round_index, card=card):
             return
 
-        # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
-        if self._undo_delete_cache:
-            self._undo_delete_card.set_count(self._undo_delete_cache.get("count", 0))
-            if self._card_manager.is_card_visible("undo_delete", self._window_id):
-                self._card_manager.hide_card("undo_delete", self._window_id)
-            self._card_manager.show_card("undo_delete", self._window_id)
+        # 入栈并显示撤销卡片（显隐统一由 CardManager 驱动）
+        self._undo_store().push(undo_entry)
+        logger.debug(
+            f"[UNDO] Entry pushed: kind={undo_entry.kind}, count={undo_entry.count}, "
+            f"insert_index={undo_entry.insert_index}, file_ops={len(undo_entry.file_restore_ops)}, "
+            f"depth={self._undo_store().depth}"
+        )
+        self._show_undo_delete_card()
 
         # 恢复输入框内容
         restore_input_from_card(self.input_area, card)

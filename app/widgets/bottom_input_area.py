@@ -58,7 +58,11 @@ from app.widgets.stop_button import SendStopButton
 
 from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token
 from app.utils.utils import get_font_family_css
-from app.widgets.simple_hover_tooltip import install_hover_tooltip
+from app.widgets.simple_hover_tooltip import (
+    get_hover_filter,
+    install_hover_tooltip,
+    load_preview_pixmap,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2481,6 +2485,9 @@ class AttachmentChip(QFrame):
     _MAX_CHIP_WIDTH = 210
     #: chip 固定高度
     _CHIP_HEIGHT = 26
+    #: hover 可预览缩略图的图像扩展名（与 _FILE_ICON_MAP 图片行一致；
+    #  svg/ico 依赖 Qt 图像插件能力，读取失败自动回退纯文本 tooltip）
+    _IMAGE_PREVIEW_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico")
 
     # 文件扩展名 → FluentIcon 映射
     # 注意：单元素元组必须写尾随逗号，否则 (".cs") 是 str，
@@ -2591,6 +2598,11 @@ class AttachmentChip(QFrame):
         if self._missing:
             tip += "\n⚠ 文件已不存在，发送时将被忽略"
         self.setToolTip(tip)
+        # 图像附件：hover 时在气泡内预览缩略图（loader 失败/非图像自动回退纯文本）
+        if not self._missing and os.path.splitext(self.filepath)[1].lower() in self._IMAGE_PREVIEW_EXTS:
+            _f = get_hover_filter(self)
+            if _f is not None:
+                _f.set_image_loader(lambda: load_preview_pixmap(self.filepath))
 
     def _apply_style(self):
         """按当前主题与文件状态生成样式表

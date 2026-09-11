@@ -30,9 +30,8 @@ _icon_patch._apply_icon_cache_patch()
 from PyQt5 import sip
 
 from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
-    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -108,6 +107,56 @@ def _text_color(secondary: bool = False) -> str:
     if isDarkTheme():
         return "rgba(255,255,255,0.55)" if secondary else "rgba(255,255,255,0.9)"
     return "rgba(0,0,0,0.45)" if secondary else "rgba(0,0,0,0.85)"
+
+
+# 筛选 chip（来源 / 类型）统一视觉规格
+# 原先「来源」「类型」「更多…」三处各自手写 QSS：圆角 6px vs 6px vs 6px、内边距
+# 一致但「更多…」是虚线边框、选中态是整块实心色 —— 一行里同时出现实心块和虚框，
+# 是整屏最重的色块来源。统一为：未选中浅灰底，选中只加描边 + 强调色（不用实心块）。
+_CHIP_ACCENT = "#62a0ea"
+_CHIP_ACCENT_BORDER = "rgba(98,160,234,0.55)"
+_CHIP_ACCENT_BG = "rgba(98,160,234,0.12)"
+
+
+def _filter_chip_qss(text_color: str) -> str:
+    """筛选 chip（来源 / 类型）统一样式"""
+    return (
+        f"QPushButton {{ background: rgba(128,128,128,0.10); color: {text_color};"
+        " border: 1px solid transparent; border-radius: 6px; padding: 3px 10px; font-size: 12px; }"
+        "QPushButton:hover { background: rgba(128,128,128,0.18); }"
+        f"QPushButton:checked {{ background: {_CHIP_ACCENT_BG}; color: {_CHIP_ACCENT};"
+        f" border: 1px solid {_CHIP_ACCENT_BORDER}; }}"
+    )
+
+
+def _shift_color(color: str, factor: float) -> str:
+    """按亮度缩放颜色（只处理 #rrggbb，其它格式原样返回）
+
+    用于给主按钮派生 hover / pressed 态：主题色来自上下文（可能是任意 hex），
+    写死一个蓝色会在换主题后与主色不搭。
+    """
+    c = (color or "").strip()
+    if len(c) != 7 or not c.startswith("#"):
+        return color
+    try:
+        r, g, b = (int(c[i : i + 2], 16) for i in (1, 3, 5))
+    except ValueError:
+        return color
+    if factor <= 1:
+        r, g, b = (int(v * factor) for v in (r, g, b))
+    else:
+        r, g, b = (min(255, int(v + (255 - v) * (factor - 1))) for v in (r, g, b))
+    return f"rgb({r},{g},{b})"
+
+
+def _more_chip_qss(text_color: str) -> str:
+    """「更多…」按钮样式：与筛选 chip 同规格，仅用描边区分「动作」语义（原为虚线边框）"""
+    return (
+        f"QPushButton {{ background: transparent; color: {text_color};"
+        " border: 1px solid rgba(128,128,128,0.25); border-radius: 6px;"
+        " padding: 3px 10px; font-size: 12px; }"
+        "QPushButton:hover { background: rgba(128,128,128,0.15); }"
+    )
 
 
 def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
@@ -365,6 +414,9 @@ def _collect_plugin_contents(plugin_dir: Path) -> dict:
         UI 注册点类型+标题），不导入模块、不执行代码。
     """
     contents: dict = {"skills": [], "mcp": [], "commands": [], "agents": [], "hooks": [], "themes": []}
+    if not plugin_dir or not isinstance(plugin_dir, Path):
+        # 插件已被卸载 / 本地目录解析失败：返回空清单，不让详情弹窗炸掉
+        return {}
 
     # 技能：skills/<name>/SKILL.md
     skills_dir = plugin_dir / "skills"
@@ -450,11 +502,20 @@ class _PluginDetailDialog(MaskDialogBase):
 
     所有插件（含未安装）可查看：完整描述、作者、license、分类、
     来源市场、官网；已安装额外展示组件内容清单（技能/智能体/命令等，
-    滚动查看）。底部主操作按状态给出：安装 / 更新 / 已安装（禁用）。
+    滚动查看）。
+
+    底部操作分两组：
+    - 左（次要，仅已安装）：打开目录 / 禁用·启用 / 卸载，规则与行内
+      ``_PluginRow._update_manage_buttons`` 完全一致
+    - 右（主操作）：安装 / 更新 / 已安装（禁用态）+ 关闭
     """
 
     installRequested = pyqtSignal(dict)
     updateRequested = pyqtSignal(dict)
+    enableRequested = pyqtSignal(dict)
+    disableRequested = pyqtSignal(dict)
+    uninstallRequested = pyqtSignal(dict)
+    openDirRequested = pyqtSignal(str)
     # 依赖安装完成（worker 线程 emit，queued 到 GUI 线程刷新按钮）
     _depsDone = pyqtSignal(object, object)
 
@@ -466,6 +527,7 @@ class _PluginDetailDialog(MaskDialogBase):
         has_update: bool,
         local_version: Optional[str],
         *,
+        status: str = "",
         tc: str,
         tcs: str,
         ff: str,
@@ -479,6 +541,8 @@ class _PluginDetailDialog(MaskDialogBase):
         self._installed = installed
         self._has_update = has_update
         self._local_version = local_version
+        # "enabled"/"disabled"/"system"/"builtin_enabled"/"builtin_disabled"/""
+        self._status = status
         # 平台兼容检查（platforms 缺省 = 兼容，存量插件零影响）
         from app.plugins.deps_loader import check_platform
 
@@ -504,139 +568,214 @@ class _PluginDetailDialog(MaskDialogBase):
 
         ff_qss = f'font-family: "{ff}";' if ff else ""
         layout = QVBoxLayout(self.widget)
-        layout.setContentsMargins(28, 24, 28, 20)
+        layout.setContentsMargins(26, 22, 26, 18)
         layout.setSpacing(0)
 
-        # 标题：名称 + 版本徽标
+        # ── 标题行：名称 + 版本徽标（徽标独立成 chip，不再用内联 HTML 拼字符串） ──
         name = self._meta.get("name", "未知")
         remote_ver = self._meta.get("version", "")
-        if self._has_update and self._local_version and remote_ver:
-            ver_html = f'<span style="color:#FFA726;">v{self._local_version} → v{remote_ver}</span>'
-        elif self._installed and self._local_version:
-            ver_html = f'<span style="color:#4CAF50;">v{self._local_version}</span>'
-        elif remote_ver:
-            ver_html = f'<span style="color:{tcs};">v{remote_ver}</span>'
-        else:
-            ver_html = ""
-        title_lb = QLabel(
-            f'<span style="font-size:{max(8, fs + 2)}px; font-weight:bold; color:{tc};">{name}</span>'
-            f' <span style="font-size:{max(8, fs)}px;">{ver_html}</span>',
-            self.widget,
-        )
-        title_lb.setWordWrap(True)
-        title_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        title_lb.setStyleSheet(f"background: transparent; {ff_qss}")
-        layout.addWidget(title_lb)
+        head = QWidget(self.widget)
+        head.setStyleSheet("background: transparent;")
+        head_lay = QHBoxLayout(head)
+        head_lay.setContentsMargins(0, 0, 0, 0)
+        head_lay.setSpacing(8)
 
-        # 完整描述
+        title_lb = QLabel(name, head)
+        title_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        title_lb.setStyleSheet(
+            f"color: {tc}; background: transparent; {ff_qss} font-size: {max(10, fs + 4)}px; font-weight: bold;"
+        )
+        head_lay.addWidget(title_lb, 0)
+        ver_chip = self._badge_chip(self._version_badge(), fs, ff_qss, head)
+        if ver_chip is not None:
+            head_lay.addWidget(ver_chip, 0)
+        head_lay.addStretch(1)
+        layout.addWidget(head)
+        layout.addSpacing(10)
+
+        # ── 完整描述 ──
         desc = self._meta.get("description", "") or "（暂无描述）"
         desc_lb = QLabel(desc, self.widget)
         desc_lb.setWordWrap(True)
         desc_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
         desc_lb.setStyleSheet(
-            f"color: {tcs}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; line-height: 1.5;"
+            f"color: {tcs}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
         )
         layout.addWidget(desc_lb)
-        layout.addSpacing(14)
+        layout.addSpacing(16)
 
-        # 信息区（滚动，字段多时不撑爆）
+        # ── 信息区（滚动，字段多时不撑爆）──
+        # 三列网格：图标 | 字段名 | 值。原先每行都是「<b>标签</b>：值」的整行富文本，
+        # 标签与值同字号同颜色、靠一个「：」分隔，字段一多就读成一团；图标也还是
+        # emoji（👤📜🏷📦…），与全 UI 的 FluentIcon 体系脱节、各平台字形不一致。
         scroll = ScrollArea(self.widget)
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet("background: transparent; border: none;")
         info_widget = QWidget(scroll)
         info_widget.setStyleSheet("background: transparent;")
         info_layout = QVBoxLayout(info_widget)
-        info_layout.setContentsMargins(2, 2, 8, 2)
-        info_layout.setSpacing(8)
+        info_layout.setContentsMargins(2, 2, 10, 2)
+        info_layout.setSpacing(0)
 
-        rows = []
+        def _section(title: str, *, first: bool = False) -> QWidget:
+            """段标题：非首段带上方 1px 分隔线 + accent 小标题"""
+            host = QWidget(info_widget)
+            host.setStyleSheet("background: transparent;")
+            v = QVBoxLayout(host)
+            v.setContentsMargins(0, 0 if first else 16, 0, 0)
+            v.setSpacing(10)
+            if not first:
+                line = QFrame(host)
+                line.setFrameShape(QFrame.HLine)
+                line.setStyleSheet(f"background: {border_c}; border: none; max-height: 1px;")
+                v.addWidget(line)
+            lb = QLabel(title, host)
+            lb.setStyleSheet(
+                f"color: {accent_bg}; background: transparent; {ff_qss}"
+                f" font-size: {max(8, fs - 1)}px; font-weight: bold;"
+            )
+            v.addWidget(lb)
+            return host
+
+        def _new_grid() -> QGridLayout:
+            g = QGridLayout()
+            g.setContentsMargins(0, 8, 0, 0)
+            g.setHorizontalSpacing(10)
+            g.setVerticalSpacing(7)
+            g.setColumnMinimumWidth(0, 16)
+            g.setColumnMinimumWidth(1, 60)
+            g.setColumnStretch(2, 1)
+            return g
+
+        def _field_name(text: str) -> QLabel:
+            lb = QLabel(text, info_widget)
+            lb.setStyleSheet(
+                f"color: {tcs}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
+            )
+            return lb
+
+        def _field_value(text: str, *, accent: bool = False) -> QLabel:
+            lb = QLabel(text, info_widget)
+            lb.setWordWrap(True)
+            # 必须显式带上 LinksAccessibleByMouse：QLabel 默认的交互标志里本来有这一位，
+            # 但 setTextInteractionFlags(TextSelectableByMouse) 会把链接可点那一位置掉 ——
+            # 官网这类 <a href> 就变成了「看着像链接、点了没反应」（已安装插件的官网
+            # 入口只剩详情弹窗这一处，行内官网按钮对已安装插件是隐藏的）。
+            lb.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+            lb.setOpenExternalLinks(True)
+            lb.setStyleSheet(
+                f"color: {accent_bg if accent else tc}; background: transparent;"
+                f" {ff_qss} font-size: {max(8, fs - 1)}px;"
+            )
+            return lb
+
+        def _chips(items: list) -> QWidget:
+            """值侧用 chip 呈现（标签 / 平台）：比「，」拼接的一整行文本好扫"""
+            host = QWidget(info_widget)
+            host.setStyleSheet("background: transparent;")
+            flow = _FlowLayout(host, spacing=4)
+            flow.setContentsMargins(0, 0, 0, 0)
+            for text in items:
+                chip = QLabel(text, host)
+                chip.setStyleSheet(
+                    f"background: rgba(128,128,128,0.10); color: {tcs}; border-radius: 4px;"
+                    f" padding: 1px 6px; {ff_qss} font-size: {max(8, fs - 2)}px;"
+                )
+                flow.addWidget(chip)
+            return host
+
+        def _grid_row(g: QGridLayout, idx: int, icon, label: str, value_widget) -> None:
+            ic = IconWidget(icon, info_widget)
+            ic.setFixedSize(16, 16)
+            g.addWidget(ic, idx, 0, Qt.AlignLeft | Qt.AlignTop)
+            g.addWidget(_field_name(label), idx, 1, Qt.AlignLeft | Qt.AlignTop)
+            g.addWidget(value_widget, idx, 2)
+
+        # ── 基本信息 ──
+        base_rows = []
+        # author 可能是 {"name":..., "url":...}（manifest 两种写法都允许）。
+        # 旧实现把它塞进 f-string，dict 被 str() 成 "{'name': ...}" 直接显示在详情里。
         author = self._meta.get("author", "")
-        if author:
-            rows.append(("👤 作者", author))
-        # 平台兼容徽标（platforms 缺省不显示，全平台插件零噪音）
+        if isinstance(author, dict):
+            a_name = str(author.get("name") or author.get("title") or "")
+            a_url = str(author.get("url") or "")
+            if a_url:
+                author_val = _field_value(f'<a href="{a_url}" style="color:{accent_bg};">{a_name or a_url}</a>')
+            else:
+                author_val = _field_value(a_name or "—")
+            base_rows.append((FluentIcon.PEOPLE, "作者", author_val))
+        elif author:
+            base_rows.append((FluentIcon.PEOPLE, "作者", _field_value(str(author))))
+        # 平台兼容（platforms 缺省不显示，全平台插件零噪音）
         platforms = self._meta.get("platforms")
         if isinstance(platforms, list) and platforms:
-            plat_icons = {"windows": "🪟 Windows", "linux": "🐧 Linux", "darwin": "🍎 macOS"}
-            plat_text = "，".join(plat_icons.get(p, p) for p in platforms)
+            plat_names = {"windows": "Windows", "linux": "Linux", "darwin": "macOS"}
             if self._plat_ok:
-                rows.append(("💻 支持平台", plat_text))
-            else:
-                rows.append(("💻 支持平台", f'<span style="color:#EF5350;">{plat_text}（{self._plat_reason}）</span>'))
-        license_ = self._meta.get("license", "")
-        if license_:
-            rows.append(("📜 License", license_))
-        tags = self._meta.get("_cached_tags", []) or []
-        if tags:
-            rows.append(("🏷 标签", "，".join(tags)))
-        marketplace = self._meta.get("_marketplace", "")
-        if marketplace:
-            rows.append(("📦 来源市场", marketplace))
-        # 下载量：紧跟来源市场之后展示，突出数字（0 或缺失不显示）
-        downloads = self._meta.get("downloads", 0)
-        if downloads:
-            rows.append(("下载量", f"{downloads:,}"))
-        homepage = _PluginRow._compute_homepage(self._meta)
-        if homepage:
-            rows.append(("🔗 官网", f'<a href="{homepage}" style="color:{accent_bg};">{homepage}</a>'))
-        if not rows:
-            rows.append(("ℹ️ 信息", "该插件未提供更多信息"))
-
-        for label, value in rows:
-            if label == "下载量":
-                # 下载量行特殊样式：加粗强调数字
-                html = (
-                    f'<b style="color:{accent_bg};">下载量</b>：'
-                    f'<span style="color:{accent_bg}; font-weight:bold; '
-                    f'font-size:{max(10, fs + 1)}px;">{value}</span> 次安装'
+                base_rows.append(
+                    (FluentIcon.IOT, "支持平台", _chips([plat_names.get(p, p) for p in platforms]))
                 )
             else:
-                html = f"<b>{label}</b>：{value}"
-            row_lb = QLabel(html, info_widget)
-            row_lb.setWordWrap(True)
-            row_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            row_lb.setOpenExternalLinks(True)
-            row_lb.setStyleSheet(
-                f"color: {tc}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; line-height: 1.6;"
+                plat_text = " / ".join(plat_names.get(p, p) for p in platforms)
+                bad = _field_value(f"{plat_text}（{self._plat_reason}）")
+                bad.setStyleSheet(
+                    f"color: #EF5350; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
+                )
+                base_rows.append((FluentIcon.IOT, "支持平台", bad))
+        license_ = self._meta.get("license", "")
+        if license_:
+            base_rows.append((FluentIcon.CERTIFICATE, "License", _field_value(str(license_))))
+        tags = self._meta.get("_cached_tags", []) or []
+        if tags:
+            base_rows.append((FluentIcon.TAG, "标签", _chips([str(t) for t in tags])))
+        marketplace = self._meta.get("_marketplace", "")
+        if marketplace:
+            base_rows.append((FluentIcon.SHOPPING_CART, "来源市场", _field_value(str(marketplace))))
+        downloads = self._meta.get("downloads", 0)
+        if downloads:
+            base_rows.append(
+                (FluentIcon.DOWNLOAD, "下载量", _field_value(f"{downloads:,} 次安装", accent=True))
             )
-            info_layout.addWidget(row_lb)
+        homepage = _PluginRow._compute_homepage(self._meta)
+        if homepage:
+            link = _field_value(f'<a href="{homepage}" style="color:{accent_bg};">{homepage}</a>')
+            base_rows.append((FluentIcon.LINK, "官网", link))
+        if not base_rows:
+            base_rows.append((FluentIcon.INFO, "信息", _field_value("该插件未提供更多信息")))
 
-        # 已安装：展示组件内容清单（技能/智能体/命令等，滚动查看）
+        info_layout.addWidget(_section("基本信息", first=True))
+        base_grid = _new_grid()
+        for i, (icon, label, widget) in enumerate(base_rows):
+            _grid_row(base_grid, i, icon, label, widget)
+        info_layout.addLayout(base_grid)
+
+        # ── 组件内容（仅已安装）──
         if self._installed:
-            info_layout.addSpacing(4)
             contents = _collect_plugin_contents(_PluginRow._find_local_plugin_path(name))
             content_rows = []
             if contents.get("skills"):
-                content_rows.append(("🧩 技能", "，".join(contents["skills"])))
+                content_rows.append((FluentIcon.LIBRARY, "技能", "，".join(contents["skills"])))
             if contents.get("mcp"):
-                content_rows.append(("🔌 MCP", "，".join(contents["mcp"])))
+                content_rows.append((FluentIcon.CONNECT, "MCP", "，".join(contents["mcp"])))
             if contents.get("commands"):
-                content_rows.append(("📁 命令", "，".join(contents["commands"])))
+                content_rows.append((FluentIcon.COMMAND_PROMPT, "命令", "，".join(contents["commands"])))
             if contents.get("agents"):
-                content_rows.append(("🤖 Agents", "，".join(contents["agents"])))
+                content_rows.append((FluentIcon.ROBOT, "Agents", "，".join(contents["agents"])))
             if contents.get("hooks"):
-                content_rows.append(("🔗 Hooks", "，".join(contents["hooks"])))
+                content_rows.append((FluentIcon.CODE, "Hooks", "，".join(contents["hooks"])))
             if contents.get("themes"):
-                content_rows.append(("🎨 主题", "，".join(contents["themes"])))
+                content_rows.append((FluentIcon.PALETTE, "主题", "，".join(contents["themes"])))
             if contents.get("tools"):
-                content_rows.append(("🛠️ 工具", "，".join(contents["tools"])))
+                content_rows.append((FluentIcon.DEVELOPER_TOOLS, "工具", "，".join(contents["tools"])))
             if contents.get("ui"):
-                content_rows.append(("🖥️ UI", "，".join(contents["ui"])))
+                content_rows.append((FluentIcon.LAYOUT, "UI", "，".join(contents["ui"])))
             if not content_rows:
-                content_rows.append(("ℹ️ 内容", "该插件未声明可展示的组件"))
+                content_rows.append((FluentIcon.INFO, "内容", "该插件未声明可展示的组件"))
 
-            sec_lb = QLabel("<b>📦 组件内容</b>", info_widget)
-            sec_lb.setStyleSheet(
-                f"color: {accent_bg}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px;"
-            )
-            info_layout.addWidget(sec_lb)
-            for label, value in content_rows:
-                row_lb = QLabel(f"<b>{label}</b>：{value}", info_widget)
-                row_lb.setWordWrap(True)
-                row_lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                row_lb.setStyleSheet(
-                    f"color: {tc}; background: transparent; {ff_qss} font-size: {max(8, fs - 1)}px; line-height: 1.6;"
-                )
-                info_layout.addWidget(row_lb)
+            info_layout.addWidget(_section("组件内容"))
+            content_grid = _new_grid()
+            for i, (icon, label, value) in enumerate(content_rows):
+                _grid_row(content_grid, i, icon, label, _field_value(value))
+            info_layout.addLayout(content_grid)
 
         info_layout.addStretch()
         scroll.setWidget(info_widget)
@@ -662,77 +801,162 @@ class _PluginDetailDialog(MaskDialogBase):
         main_btn = TransparentPushButton(main_text, self.widget)
         main_btn.setCursor(Qt.PointingHandCursor)
         main_btn.setFixedHeight(36)
+        main_btn.setMinimumWidth(112)
+        btn_font = f"{ff_qss} font-size: {max(8, fs - 1)}px;"
         if main_fn is None:
             main_btn.setEnabled(False)
             style_color = "#4CAF50" if self._plat_ok else "#EF5350"
+            border_color = "rgba(76,175,80,0.30)" if self._plat_ok else "rgba(239,83,80,0.30)"
+            fill = "rgba(76,175,80,0.12)" if self._plat_ok else "rgba(239,83,80,0.12)"
             if not self._plat_ok:
                 main_btn.setToolTip(self._plat_reason)
             main_btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    background: rgba(76, 175, 80, 0.12);
-                    color: {style_color};
-                    border: 1px solid rgba(76, 175, 80, 0.3);
-                    border-radius: 8px;
-                    padding: 4px 24px;
-                    {ff_qss}
-                    font-size: {max(8, fs - 1)}px;
-                    font-weight: bold;
-                }}
-                """
+                f"QPushButton {{ background: {fill}; color: {style_color};"
+                f" border: 1px solid {border_color}; border-radius: 8px; padding: 4px 22px;"
+                f" {btn_font} font-weight: bold; }}"
             )
         else:
+            # hover/pressed 必须给出可见反馈（原实现两个状态的 background 值相同 → hover 无变化）
             main_btn.setStyleSheet(
-                f"""
-                QPushButton {{
-                    background-color: {accent_bg};
-                    color: #ffffff;
-                    border: none;
-                    border-radius: 8px;
-                    padding: 4px 24px;
-                    {ff_qss}
-                    font-size: {max(8, fs - 1)}px;
-                    font-weight: bold;
-                }}
-                QPushButton:hover {{
-                    background-color: {accent_bg};
-                }}
-                """
+                f"QPushButton {{ background-color: {accent_bg}; color: #ffffff;"
+                f" border: none; border-radius: 8px; padding: 4px 22px;"
+                f" {btn_font} font-weight: bold; }}"
+                f"QPushButton:hover {{ background-color: {_shift_color(accent_bg, 1.18)}; }}"
+                f"QPushButton:pressed {{ background-color: {_shift_color(accent_bg, 0.82)}; }}"
             )
             main_btn.clicked.connect(main_fn)
 
-        # 依赖兑底：已安装且兼容但 pip 依赖缺失 → 「安装依赖」次按钮（手动重试）
-        if self._installed and self._plat_ok:
-            self._make_deps_button(tc, fs, ff_qss, btn_layout, main_btn)
+        # 已安装且无更新：主按钮隐藏（与行内一致 —— 此时底部已有「禁用 / 卸载 / 打开目录」，
+        # 再摆一个禁用的「已安装」只是占位；平台不兼容时保留禁用态以说明原因）
+        if main_fn is None and self._installed and self._plat_ok:
+            main_btn.setVisible(False)
 
         close_btn = TransparentPushButton("关闭", self.widget)
         close_btn.setCursor(Qt.PointingHandCursor)
         close_btn.setFixedHeight(36)
+        close_btn.setMinimumWidth(88)
         close_btn.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: rgba(128,128,128,0.15);
-                color: {tc};
-                border: none;
-                border-radius: 8px;
-                padding: 4px 24px;
-                {ff_qss}
-                font-size: {max(8, fs - 1)}px;
-            }}
-            QPushButton:hover {{
-                background: rgba(128,128,128,0.25);
-            }}
-            """
+            f"QPushButton {{ background: rgba(128,128,128,0.12); color: {tc};"
+            f" border: 1px solid rgba(128,128,128,0.18); border-radius: 8px; padding: 4px 22px;"
+            f" {btn_font} }}"
+            "QPushButton:hover { background: rgba(128,128,128,0.22); }"
+            "QPushButton:pressed { background: rgba(128,128,128,0.3); }"
         )
         close_btn.clicked.connect(self.close)
 
+        # 左：管理操作（打开目录 / 禁用·启用 / 卸载）；右：主操作 + 依赖兜底 + 关闭。
+        # 行内这些管理按钮是右侧竖排的窄按钮，详情弹窗信息更全，横排在底部更顺手。
+        for w in self._build_manage_buttons(tc, fs, ff_qss):
+            btn_layout.addWidget(w)
         btn_layout.addStretch(1)
         btn_layout.addWidget(main_btn)
+        # 依赖兑底：已安装且兼容但 pip 依赖缺失 → 「安装依赖」次按钮（手动重试）
+        if self._installed and self._plat_ok:
+            self._make_deps_button(tc, fs, ff_qss, btn_layout, main_btn)
         btn_layout.addWidget(close_btn)
-        btn_layout.addStretch(1)
         layout.addLayout(btn_layout)
 
-        self.widget.setFixedSize(600, 540)
+        self.widget.setFixedSize(620, 560)
+
+    # ── 底部管理操作（与行内 _PluginRow._update_manage_buttons 同规则） ──
+
+    def _footer_btn(self, text: str, tc: str, fs: int, ff_qss: str, slot, color: Optional[str] = None):
+        """底部次要按钮：给了 color 用同色描边（危险/警示语义），否则中性描边"""
+        btn = TransparentPushButton(text, self.widget)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFixedHeight(36)
+        btn.setMinimumWidth(80)
+        font = f" {ff_qss} font-size: {max(8, fs - 1)}px;"
+        if color:
+            r, g, b = (int(color[i : i + 2], 16) for i in (1, 3, 5))
+            btn.setStyleSheet(
+                f"QPushButton {{ color: {color}; background: transparent;"
+                f" border: 1px solid {color}; border-radius: 8px; padding: 4px 14px;{font} }}"
+                f"QPushButton:hover {{ background: rgba({r},{g},{b},0.12); }}"
+                f"QPushButton:pressed {{ background: rgba({r},{g},{b},0.22); }}"
+            )
+        else:
+            btn.setStyleSheet(
+                f"QPushButton {{ color: {tc}; background: rgba(128,128,128,0.10);"
+                f" border: 1px solid rgba(128,128,128,0.18); border-radius: 8px; padding: 4px 14px;{font} }}"
+                "QPushButton:hover { background: rgba(128,128,128,0.20); }"
+                "QPushButton:pressed { background: rgba(128,128,128,0.28); }"
+            )
+        btn.clicked.connect(slot)
+        return btn
+
+    def _build_manage_buttons(self, tc: str, fs: int, ff_qss: str) -> list:
+        """按安装状态生成管理按钮（规则与行内完全一致）
+
+        - 未安装 / 真系统插件（status=system）：无管理操作
+        - builtin_enabled/builtin_disabled：禁用·启用，无卸载（目录随主程序分发，删了不可恢复）
+        - enabled/disabled（用户插件）：禁用·启用 + 卸载
+
+        原先详情弹窗只有「安装 / 更新 / 关闭」，已安装插件在行内能做的操作
+        （禁用、卸载、打开目录）在详情页全都没有，只能退出去点行上的按钮。
+        """
+        if not self._installed or self._status == "system":
+            return []
+
+        buttons = []
+        path = _PluginRow._find_local_plugin_path(self._meta.get("name", ""))
+        if path:
+            buttons.append(
+                self._footer_btn("打开目录", tc, fs, ff_qss, lambda: self.openDirRequested.emit(str(path)))
+            )
+        if self._status in ("disabled", "builtin_disabled"):
+            buttons.append(self._footer_btn("启用", tc, fs, ff_qss, self._emit_enable, "#4CAF50"))
+        else:
+            buttons.append(self._footer_btn("禁用", tc, fs, ff_qss, self._emit_disable, "#FF9800"))
+        if self._status not in ("builtin_enabled", "builtin_disabled"):
+            buttons.append(self._footer_btn("卸载", tc, fs, ff_qss, self._emit_uninstall, "#F44336"))
+        return buttons
+
+    def _emit_enable(self):
+        self.enableRequested.emit(self._meta)
+        self.close()
+
+    def _emit_disable(self):
+        self.disableRequested.emit(self._meta)
+        self.close()
+
+    def _emit_uninstall(self):
+        # _async_uninstall 内部自带二次确认弹窗，这里直接转发
+        self.uninstallRequested.emit(self._meta)
+        self.close()
+
+    # ── 徽标 ──────────────────────────────────────────────
+
+    def _version_badge(self) -> Optional[tuple]:
+        """版本徽标内容：(文本, 前景色, 底色, 描边色)；无版本信息返回 None
+
+        已安装且最新 = 绿、有更新 = 琥珀（含 → 目标版本）、未安装 = 中性。
+        """
+        remote_ver = self._meta.get("version", "")
+        if self._has_update and self._local_version and remote_ver:
+            return (
+                f"v{self._local_version} → v{remote_ver}",
+                "#FFA726",
+                "rgba(255,167,38,0.14)",
+                "rgba(255,167,38,0.35)",
+            )
+        if self._installed and self._local_version:
+            return (f"v{self._local_version}", "#4CAF50", "rgba(76,175,80,0.14)", "rgba(76,175,80,0.35)")
+        if remote_ver:
+            return (f"v{remote_ver}", "#8A8A8E", "rgba(128,128,128,0.12)", "rgba(128,128,128,0.22)")
+        return None
+
+    def _badge_chip(self, badge: Optional[tuple], fs: int, ff_qss: str, parent) -> Optional[QLabel]:
+        """圆角小徽标（版本号等）：替代原先用内联 HTML span 拼在标题里的做法"""
+        if not badge:
+            return None
+        text, fg, bg, bd = badge
+        lb = QLabel(text, parent)
+        lb.setStyleSheet(
+            f"color: {fg}; background: {bg}; border: 1px solid {bd}; border-radius: 4px;"
+            f" padding: 1px 7px; {ff_qss} font-size: {max(8, fs - 2)}px;"
+        )
+        return lb
 
     def _make_deps_button(self, tc, fs, ff_qss, btn_layout, main_btn):
         """已安装插件的 pip 依赖缺失兜底按钮（后台线程跑 DepsInstaller）"""
@@ -1154,6 +1378,32 @@ class _PluginRow(QFrame):
                 return QSize(base.width(), h)
         return base
 
+    def minimumSizeHint(self):
+        """行最小高度对齐 sizeHint —— 修复「描述文字被挤掉半行」
+
+        根因：Qt 的 ``QWidgetItem::sizeHint()`` 取
+        ``max(widget.sizeHint(), widget.minimumSizeHint())``，而 QLayout 就是按
+        这个值分配垂直空间的。本类覆写了 ``sizeHint()``（按当前宽度算
+        heightForWidth，避免 wordWrap QLabel 按理想宽度放大），但
+        ``minimumSizeHint()`` 仍是 QWidget 默认（``layout().totalMinimumSize()``，
+        wordWrap QLabel 按「不换行的单行宽度」推导）——实测 18/30 行出现
+        ``minimumSizeHint > sizeHint``（+1~7px，如 87 vs 80）。
+
+        于是列表容器按 ``sizeHint`` 之和预留高度（_content_height），比 Qt 实际
+        需要的少 ~70px/30 行 → QVBoxLayout 压缩行；而 wordWrap 的 QLabel 是唯一
+        可压缩项（minimumSizeHint 只按一行算）→ 描述被挤掉半行（截图里
+        anything2explainer / archify 那种「字形被横向切一半」）。
+
+        两者对齐后 ``QWidgetItem::sizeHint() == sizeHint()``，缺口归零，
+        既不会被压缩，也不会多出 stretch 空白。
+        """
+        from PyQt5.QtCore import QSize
+
+        hint = self.sizeHint()
+        if self.width() > 0 and hint.height() > 0:
+            return QSize(hint.width(), hint.height())
+        return super().minimumSizeHint()
+
     def _font_qss(self, size_px: int) -> str:
         """生成 font-size + font-family 的 QSS 片段"""
         qss = f"font-size: {size_px}px;"
@@ -1216,8 +1466,13 @@ class _PluginRow(QFrame):
 
     def _setup_ui(self):
         self.setObjectName("pluginRow")
+        # 扁平列表：去掉四周描边（密集列表下每行一个圆角框会显得「漂浮」、也把行间空隙
+        # 撑成视觉噪声），改为底部 1px 分隔线 + 整行 hover 高亮。分隔线用中性灰、
+        # 深/浅主题都不突兀。
         self.setStyleSheet(
-            "#pluginRow { background: transparent; border: 1px solid rgba(128,128,128,0.12); border-radius: 8px; }"
+            "#pluginRow { background: transparent; border: none;"
+            " border-bottom: 1px solid rgba(128,128,128,0.14); }"
+            "#pluginRow:hover { background: rgba(128,128,128,0.07); }"
         )
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -1238,7 +1493,7 @@ class _PluginRow(QFrame):
 
         name = self._meta.get("name", "未知")
         self._name_raw = name
-        # 标题行：插件名靠左，下载量靠右（卡片右上角，醒目）
+        # 标题行：只有插件名（下载量已移到下方元信息行，见 meta_row）
         title_row = QWidget(self)
         title_row.setStyleSheet("background: transparent;")
         title_layout = QHBoxLayout(title_row)
@@ -1250,7 +1505,8 @@ class _PluginRow(QFrame):
         self._title_label.setStyleSheet(f"color: {self._tc}; font-weight: bold;{ff_qss} background: transparent;")
         self._refresh_title()
         title_layout.addWidget(self._title_label)
-        # 下载量：右上角醒目展示，下载 icon + 橙色加粗数字（0 或缺失不显示）
+        # 下载量：靠标题行右侧（与插件名同一视觉带，扫列表时一眼可见）。
+        # 曾下移到元信息行与「来源市场」并排，实测不好扫读，回归标题行。
         downloads = self._meta.get("downloads", 0)
         self._dl_label = None
         if downloads:
@@ -1303,7 +1559,7 @@ class _PluginRow(QFrame):
                 self._tag_labels.append(lbl)
             info_layout.addWidget(tags_widget)
 
-        # 元信息行：市场来源（状态标签已并入标题版本号后，下载量已移至右上角）
+        # 元信息行：市场来源（下载量在标题行右侧）
         meta_row = QWidget(self)
         meta_row.setStyleSheet("background: transparent;")
         meta_layout = QHBoxLayout(meta_row)
@@ -1318,6 +1574,9 @@ class _PluginRow(QFrame):
                 f"color: {self._tcs}; {self._font_qss(self._derive_size(10, 0))} background: transparent;"
             )
             meta_layout.addWidget(self._mp_label)
+        # 末尾 stretch：两项各保持自然宽度、左对齐相邻，否则 QLabel 会平分行宽
+        # 把市场来源挤到行中间（实测下载量 x=20、来源 x=331）
+        meta_layout.addStretch(1)
         info_layout.addWidget(meta_row)
 
         layout.addLayout(info_layout, 1)
@@ -1733,7 +1992,7 @@ class _PluginRow(QFrame):
     def _tag_stylesheet(self) -> str:
         """tag 标签 QSS 样式（字号跟随上下文派生）"""
         return (
-            f"background: rgba(128,128,128,0.12); color: {self._tcs}; border-radius: 4px; padding: 1px 6px; "
+            f"background: rgba(128,128,128,0.10); color: {self._tcs}; border-radius: 4px; padding: 1px 6px; "
             f"{self._font_qss(self._derive_size(10, -5))}"
         )
 
@@ -2399,7 +2658,7 @@ class MarketplaceCard(QWidget):
                 )
             except RuntimeError:
                 pass
-            self._style_sort_combo()
+            self._sync_sort_combo_metrics()
             for sep in self.findChildren(QFrame):
                 try:
                     if sep.frameShape() == QFrame.HLine:
@@ -2476,6 +2735,10 @@ class MarketplaceCard(QWidget):
 
         # QPushButton 字体（"加载更多"按钮等）
         for child in self.findChildren(QPushButton):
+            # ComboBox 也是 QPushButton：它的主题 QSS 由 styleSheetManager 托管，
+            # 追加自定义 QSS 会顶掉 Fluent 样式 → 字体改走 setFont（见 _sync_sort_combo_metrics）
+            if isinstance(child, ComboBox):
+                continue
             try:
                 cur = child.styleSheet()
                 btn_fs = max(fs - 2, 11)
@@ -2632,17 +2895,16 @@ class MarketplaceCard(QWidget):
         self._search_edit.textChanged.connect(self._on_search_text_changed)
         filter_layout.addWidget(self._search_edit)
 
-        # 排序下拉
-        self._sort_combo = QComboBox(filter_row)
-        self._sort_combo.addItem("默认排序", "default")
-        self._sort_combo.addItem("下载量最多优先", "downloads")
-        self._sort_combo.addItem("名称 A-Z", "name_asc")
-        self._sort_combo.addItem("名称 Z-A", "name_desc")
-        self._sort_combo.addItem("版本最新优先", "version")
-        self._sort_combo.setFixedWidth(120)
+        # 排序下拉：qfluentwidgets ComboBox（与左侧搜索框、代理页同源控件，
+        # 自带 Fluent 主题 QSS / 下拉动画 / 箭头，不再自绘 QSS）
+        self._sort_combo = ComboBox(filter_row)
+        self._sort_combo.addItem("默认排序", userData="default")
+        self._sort_combo.addItem("下载量", userData="downloads")
+        self._sort_combo.addItem("名称 A-Z", userData="name_asc")
+        self._sort_combo.addItem("名称 Z-A", userData="name_desc")
         # 与搜索框同高（LineEdit 视觉高度 33px）
         self._sort_combo.setFixedHeight(33)
-        self._style_sort_combo()
+        self._sync_sort_combo_metrics()
         self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         filter_layout.addWidget(self._sort_combo)
 
@@ -2734,7 +2996,9 @@ class MarketplaceCard(QWidget):
         self._content.setStyleSheet("background: transparent;")
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(12, 8, 12, 8)
-        self._content_layout.setSpacing(6)
+        # 间距 0：行与行之间靠行自身的 1px 分隔线分隔（行上下各有 8px 内边距，
+        # 分隔线恰好居中），相邻行的 hover 高亮也连成整块而不是各留一条缝
+        self._content_layout.setSpacing(0)
         self._content_layout.setAlignment(Qt.AlignTop)
         self._scroll.setWidget(self._content)
         # 平滑滚动：qfluentwidgets SmoothScrollDelegate（与主程序对话区同款引擎）
@@ -3424,15 +3688,6 @@ class MarketplaceCard(QWidget):
             matched.sort(key=lambda p: (p.get("name", "") or "").lower(), reverse=True)
         elif mode == "downloads":
             matched.sort(key=lambda p: p.get("downloads", 0), reverse=True)
-        elif mode == "version":
-            from functools import cmp_to_key
-
-            from .data import compare_versions
-
-            matched.sort(
-                key=cmp_to_key(lambda a, b: compare_versions(a.get("version", "0"), b.get("version", "0"))),
-                reverse=True,
-            )
 
     def _render_next_batch(self):
         """渲染下一批缺失的匹配行（同步，每批 _RENDER_BATCH 个足够快，停住等手动加载）
@@ -3646,13 +3901,37 @@ class MarketplaceCard(QWidget):
         except RuntimeError:
             pass  # 卡片已销毁
 
+    def _layout_need_height(self, width: int) -> int:
+        """列表容器「需要多高」——以 QVBoxLayout 自己的 heightForWidth 为准
+
+        为什么不用「逐行 sizeHint 累加」（旧实现）：
+
+        实测 30 行、视口宽 869 时，``Σ 行.sizeHint() + 间距 + 边距 = 2733``，
+        而 ``layout.heightForWidth(869) = 2823`` —— 手动累加少算 90px。原因是
+        QVBoxLayout 的垂直分配走的是 ``QBoxLayoutPrivate::heightForWidth()``
+        这条链路，逐行读取的行高需求比 ``widget.sizeHint()`` 更大（尤其是描述
+        折行 + 标签 FlowLayout 的行：``sum_row_h`` 撑开后要到 2601，而
+        ``Σ sizeHint`` 只有 2543，差 58px）。
+
+        少算的后果不是「空白」而是「压行」：QVBoxLayout 拿到 2765 可用高度却
+        需要 2823，只能压缩行；而行内唯一可压缩项是 wordWrap 的 QLabel →
+        描述被挤掉一整行（截图里 anything2explainer / archify 那种「字形被横向
+        切一半」）。
+
+        回退：布局未布局过 / 返回 -1 时用逐行 sizeHint 累加兜底。
+        """
+        h = self._content_layout.heightForWidth(width)
+        if h > 0:
+            return h
+        return self._content_height()
+
     def _content_height(self) -> int:
-        """按布局内可见行理想高度累加内容高度（不依赖 C++ sizeHint 缓存）
+        """按布局内可见行理想高度累加内容高度（兜底，不依赖 C++ sizeHint 缓存）
 
         用 Python 侧 w.sizeHint()（_PluginRow override：已布局时返回
-        heightForWidth(当前宽度) = 与实际布局一致的理想高度），避免：
-        1. C++ QWidgetItem::sizeHint（QLabel wordWrap 放大值）
-        2. 行在受限 content 高度下被压缩后的实际几何高度
+        heightForWidth(当前宽度) = 与实际布局一致的理想高度），避免 C++
+        QWidgetItem::sizeHint（QLabel wordWrap 放大值）。行在受限 content 高度
+        下被压缩后的实际几何高度同样不能用，那会把「压行」状态固化下来。
         """
         lay = self._content_layout
         spacing = lay.spacing()
@@ -3663,45 +3942,34 @@ class MarketplaceCard(QWidget):
             it = lay.itemAt(i)
             w = it.widget()
             if w is not None and w.isVisible():
-                total += w.sizeHint().height()
+                total += max(w.sizeHint().height(), w.minimumSizeHint().height())
                 vis += 1
         return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
 
     def _sync_content_size(self):
         """手动同步列表内容 widget 尺寸（widgetResizable=False 路径）
 
-        两阶段：先用行 sizeHint（heightForWidth）初算撑开 content 高度
-        （行此时可能未按新宽度重排，sizeHint 与实际布局有偏差），resize
-        触发行重排后，再按行实际几何高度累加校正——保证 content 高度与
-        布局实际一致（底部无 stretch 空白区）。宽度 = 视口宽；行少时
-        高度保持视口高，stretch 填满底部不出现空白。
+        两阶段都以「布局需求高度」为准（_layout_need_height）：第一阶段先用
+        当前宽度撑开 content，resize 触发行按新宽度重排（wordWrap 换行数、
+        标签 FlowLayout 行数都可能变化）后再取一次，变化超过 4px 才二次 resize。
+
+        **注意**：绝不能用「行实际几何高度累加」回调 content 高度 —— 行被压缩
+        后实际高度会小于需求，回调等于把压行状态写死，且此后每轮都自洽，
+        再也弹不回来（这正是描述被裁掉半行后不恢复的机制）。宽度 = 视口宽；
+        行少时高度保持视口高，stretch 填满底部不出现空白。
         """
         try:
             vp = self._scroll.viewport()
-            h1 = self._content_height()
-            self._content.resize(vp.width(), max(h1, vp.height()))
-            # resize 后行按新宽度重排 → 用实际几何高度校正
+            w = vp.width()
+            h1 = self._layout_need_height(w)
+            self._content.resize(w, max(h1, vp.height()))
+            # resize 后行按新宽度重排 → 再取一次需求高度
             self._content_layout.activate()
-            h2 = self._content_height_real()
+            h2 = self._layout_need_height(w)
             if abs(h2 - h1) > 4:
-                self._content.resize(vp.width(), max(h2, vp.height()))
+                self._content.resize(w, max(h2, vp.height()))
         except RuntimeError:
             pass  # 卡片已销毁
-
-    def _content_height_real(self) -> int:
-        """按布局内可见行实际几何高度累加内容高度（布局稳定后调用）"""
-        lay = self._content_layout
-        spacing = lay.spacing()
-        mg = lay.contentsMargins()
-        total = 0
-        vis = 0
-        for i in range(lay.count()):
-            it = lay.itemAt(i)
-            w = it.widget()
-            if w is not None and w.isVisible():
-                total += w.height()
-                vis += 1
-        return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
 
     def _update_empty_state(self):
         """匹配为空时显示空态提示（精选模式不参与，探索视图独立占位）"""
@@ -5232,35 +5500,39 @@ class MarketplaceCard(QWidget):
 
     # ── 排序 / 角标 ──
 
-    def _style_sort_combo(self):
-        """按上下文主题刷新排序下拉样式（与搜索框一致的圆角/内边距/无边框 + 全局字体）"""
-        tc = getattr(self, "_cached_tc", "") or _text_color()
+    def _sync_sort_combo_metrics(self):
+        """同步排序下拉的字体与宽度（主题/字号变化时调用）
+
+        两点与普通 QComboBox 不同，必须显式处理：
+
+        1. **字体**：qfluentwidgets ComboBox 的 QSS 里 font-family 是注释掉的，
+           字体完全由 QFont 决定（构造时 ``setFont(self)`` 用的是 qconfig 默认
+           families）→ 必须用 ``setFont`` 注入上下文的系统字体，QSS 改不动它。
+        2. **宽度**：ComboBox 继承 QPushButton，文本区左右内边距为 11px / 31px，
+           固定 120px 会把「下载量最多优先」截成省略号 → 按最长条目实测宽度自适应。
+
+        另：不能给它 ``setStyleSheet``——会把 Fluent 主题 QSS 顶掉（箭头/悬停态
+        全部失效），这正是改造前那个「下拉框上多一道下划线」的根因。
+        """
+        combo = getattr(self, "_sort_combo", None)
+        if combo is None:
+            return
         ff = getattr(self, "_cached_font_family", "") or ""
         fs = getattr(self, "_cached_font_size", 14) or 14
-        theme = getattr(self, "_cached_theme_colors", {}) or {}
-        card_bg = theme.get("content_bg", "#ffffff" if not isDarkTheme() else "#2a2a2e")
-        border_c = theme.get("border", "rgba(128,128,128,0.15)")
-        # 全局字体：font-family + font-size（下拉主体与弹出列表都应用）
-        combo_font = f" font-family: '{ff}';" if ff else ""
-        combo_font += f" font-size: {max(11, fs)}px;"
         try:
-            self._sort_combo.setStyleSheet(
-                f"QComboBox {{ background: rgba(128,128,128,0.1); color: {tc};"
-                f" border: none; border-radius: 8px; padding: 4px 8px;{combo_font} }}"
-                "QComboBox::drop-down { border: none; width: 18px; }"
-                f"QComboBox QAbstractItemView {{ background: {card_bg}; color: {tc};"
-                f" border: 1px solid {border_c}; border-radius: 6px;{combo_font}"
-                " selection-background-color: rgba(40,120,220,0.3); outline: none; }"
-                "QComboBox QAbstractItemView::item { padding: 4px 8px; }"
-                "QComboBox QAbstractItemView::item:hover { background: rgba(128,128,128,0.15); }"
-                # 下拉列表滚动条：对齐主程序 ComboBoxStyles.dark_combo_dropdown 规范
-                f"QComboBox QAbstractItemView QScrollBar:vertical {{ background: {card_bg};"
-                " border: none; width: 14px; margin: 4px 2px 4px 2px; }"
-                "QComboBox QAbstractItemView QScrollBar::add-line:vertical,"
-                " QComboBox QAbstractItemView QScrollBar::sub-line:vertical { height: 0px; }"
-                "QComboBox QAbstractItemView QScrollBar::add-page:vertical,"
-                " QComboBox QAbstractItemView QScrollBar::sub-page:vertical { background: none; }"
+            font = combo.font()
+            if ff:
+                font.setFamily(ff)
+            font.setPixelSize(max(11, fs))
+            combo.setFont(font)
+
+            fm = QFontMetrics(combo.font())
+            text_w = max(
+                (fm.horizontalAdvance(combo.itemText(i)) for i in range(combo.count())),
+                default=0,
             )
+            # 11px 左内边距 + 31px 箭头区 + 少量余量
+            combo.setFixedWidth(max(96, text_w + 46))
         except RuntimeError:
             pass
 
@@ -5315,11 +5587,7 @@ class MarketplaceCard(QWidget):
         # 「更多」放最前：展开全部标签的多选面板，方便快速访问
         more_btn = TransparentPushButton("更多…", self._tag_content)
         more_btn.setCursor(Qt.PointingHandCursor)
-        more_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {tc}; border: 1px dashed rgba(128,128,128,0.4);"
-            " border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: bold; }"
-            "QPushButton:hover { background: rgba(128,128,128,0.15); }"
-        )
+        more_btn.setStyleSheet(_more_chip_qss(tc))
         more_btn.clicked.connect(self._on_tag_more)
         self._tag_layout.addWidget(more_btn)
 
@@ -5328,13 +5596,7 @@ class MarketplaceCard(QWidget):
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setChecked(tag in self._active_tags)
-            btn.setStyleSheet(
-                f"QPushButton {{ background: rgba(128,128,128,0.1); color: {tc};"
-                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: bold; }"
-                "QPushButton:hover { background: rgba(128,128,128,0.2); }"
-                "QPushButton:checked { background: rgba(40,120,220,0.25); color: #62a0ea;"
-                " border: 1px solid rgba(98,160,234,0.5); font-weight: bold; }"
-            )
+            btn.setStyleSheet(_filter_chip_qss(tc))
             btn.clicked.connect(lambda checked, t=tag, b=btn: self._on_tag_toggled(t, b))
             self._tag_layout.addWidget(btn)
 
@@ -5372,13 +5634,7 @@ class MarketplaceCard(QWidget):
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
             btn.setChecked(value == getattr(self, "_source_filter", ""))
-            btn.setStyleSheet(
-                f"QPushButton {{ background: rgba(128,128,128,0.1); color: {tc};"
-                " border: none; border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: bold; }"
-                "QPushButton:hover { background: rgba(128,128,128,0.2); }"
-                "QPushButton:checked { background: rgba(40,120,220,0.25); color: #62a0ea;"
-                " border: 1px solid rgba(98,160,234,0.5); font-weight: bold; }"
-            )
+            btn.setStyleSheet(_filter_chip_qss(tc))
             btn.clicked.connect(lambda checked, v=value, b=btn: self._on_source_toggled(v, b))
             return btn
 
@@ -5520,7 +5776,7 @@ class MarketplaceCard(QWidget):
         parent 用 tab 管理器顶层窗口（遮罩覆盖整个 tab 而非卡片区域），
         与 InfoBar 挂载策略一致。
         """
-        installed, has_update, local_ver, _status = self._row_state(plugin_meta)
+        installed, has_update, local_ver, status = self._row_state(plugin_meta)
         theme_colors = getattr(self, "_cached_theme_colors", {}) or {}
         from app.widgets.tab_manager_window import TabManagerWindow
 
@@ -5531,6 +5787,7 @@ class MarketplaceCard(QWidget):
             installed,
             has_update,
             local_ver,
+            status=status,
             tc=getattr(self, "_cached_tc", "") or _text_color(),
             tcs=getattr(self, "_cached_tcs", "") or _text_color(secondary=True),
             ff=getattr(self, "_cached_font_family", ""),
@@ -5539,8 +5796,13 @@ class MarketplaceCard(QWidget):
             card_bg=theme_colors.get("content_bg", "#2a2a2e"),
             border_c=theme_colors.get("border", "rgba(128,128,128,0.15)"),
         )
+        # 管理与主操作全部复用行内同一批处理器（_async_* 自带状态刷新 / 二次确认）
         dialog.installRequested.connect(self._async_install)
         dialog.updateRequested.connect(self._async_update)
+        dialog.enableRequested.connect(self._async_enable)
+        dialog.disableRequested.connect(self._async_disable)
+        dialog.uninstallRequested.connect(self._async_uninstall)
+        dialog.openDirRequested.connect(self._on_open_plugin_dir)
         dialog.exec_()
 
     # ── 市场管理 ──
@@ -5844,14 +6106,22 @@ class MarketplaceCard(QWidget):
         webbrowser.open(url)
 
     def _on_open_plugin_dir(self, path: str):
-        """在系统文件管理器中打开插件所在目录（并选中该目录）"""
+        """在系统文件管理器中打开插件所在目录（并选中该目录）
+
+        路径可能是相对路径（开发模式下 ``_drifox_dir()`` 返回 ``.drifox``）：
+        子进程虽然继承当前工作目录，但显式转绝对路径更稳（应用从别处启动 /
+        后续有人改了 CWD 都不会失效）。
+        """
         try:
+            target = Path(path)
+            if not target.is_absolute():
+                target = (Path.cwd() / target).resolve()
             if os.name == "nt":
-                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(str(target))])
             elif sys.platform == "darwin":
-                subprocess.Popen(["open", "-R", path])
+                subprocess.Popen(["open", "-R", str(target)])
             else:
-                subprocess.Popen(["xdg-open", path])
+                subprocess.Popen(["xdg-open", str(target)])
         except Exception as e:
             logger.warning(f"[Marketplace] 打开插件目录失败: {e}")
 

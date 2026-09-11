@@ -1,11 +1,13 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.5.10] - 2026-09-11 (重新发布 #4)
+## [v0.5.10] - 2026-09-11 (重新发布 #5)
 
-自上一版本以来的变更 | 提交数：89 · 文件变更：449 · +29403/-27778 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：97 · 文件变更：477 · +31646/-28793 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
+
+- **附件胶囊悬浮图像预览** (`app/widgets/simple_hover_tooltip.py`, `app/widgets/bottom_input_area.py`): 输入框附件栏的图像附件胶囊，hover 400ms 后自绘气泡内直接预览缩略图（最大边 220px，`QImageReader` 先读尺寸再降采样解码，避免大图全量载入内存；EXIF 自动转正、gif 取首帧），图下方保留原有路径/大小文本；读取失败或非图像（含 svg/ico 插件缺失场景）自动回退纯文本 tooltip，文件失效（`_missing`）不预览。实现上给 `SimpleHoverTooltip` 增加图像绘制分支与 `set_pixmap()`，`_HoverTooltipFilter` 新增 `set_image_loader()` 回调（每次显示重读文件，所见即所得），新增公开入口 `get_hover_filter()` / `load_preview_pixmap()` 供其他控件复用。
 
 - **渲染页手动重启项** (`app/utils/app_restart.py`, `app/widgets/cards/settings/render_restart_card.py`, `app/core/single_instance.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/utils/test_app_restart.py`): 「渲染」页首项新增「手动重启」卡 —— 右侧「立即重启」按钮拉起新进程并退出当前实例，左侧文案实时显示「有 N 项变更待重启生效」（挂载时记录 Render 组 10 个配置基线，任一变更即高亮计数）。两个关键点：① 子进程环境必须剥离 `QTWEBENGINE_CHROMIUM_FLAGS` / `QT_OPENGL` / `QT_ANGLE_PLATFORM`（否则 apply_render_env 的 setdefault 让新进程沿用旧值，重启等于白重启）；② 剥离一次性内部参数 `--configure-auto-start=*` / `--startup-error-file=*`（重放会让新进程走 helper 分支直接退出）。另给 `single_instance` 增加 `release_current_lock()`：开启「单实例限制」时先放锁再拉起，避免新进程 try_lock 失败后「通知旧窗口并退出」导致点了重启程序反而没了；4 条单元测试覆盖命令构造与环境变量剥离。
 - **移除「自动」渲染后端 + 说明随档位变化** (`app/utils/render_env.py`, `app/utils/config.py`, `app/widgets/cards/settings/render_backend_card.py`, `app/widgets/cards/settings/llm_settings_card.py`): 原 `auto` 档名不副实 —— 它不检测机器，只是读人工放置的 `~/.drifox/software_render` 标记文件 / `DRIFOX_SOFTWARE_RENDER` 环境变量，故从 UI 与校验器中移除，**默认值改为 `software`（WARP，CPU 光栅，不碰显卡驱动）** —— 出厂即最稳路径，硬件档由用户显式选择；旧检测链（`DRIFOX_SOFTWARE_RENDER` / `~/.drifox/software_render` 标记文件）一并删除，配置里残留的 `auto` / 手改非法值 / 缺 key 一律按出厂默认 software 处理。同时新增 `RenderBackendCard`：头部说明**跟着所选档位变**（如「真实显卡跑 D3D11，最快」/「Qt + Chromium 双侧 CPU 兜底」），展开后每个单选项挂 tooltip 写清实现路径与适用场景 —— 基类只有一个共用 content，6 个档位挤一行说不清差别。
@@ -103,6 +105,49 @@ All notable changes to this project will be documented in this file.
 #### 🐛 问题修复 (Bug Fixes)
 
 - **fix: add creation flags to subprocess call in _delete_worktree_job for Windows compatibility** (`plugins/worktree-manager/ui/worktree_section.py`): Windows 下 `_delete_worktree_job` 调用的 `subprocess.Popen` 补齐 `creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW`，避免 worktree 删除作业的子进程被父进程控制台绑定 / 信号传递阻塞，导致切换/清理路径在 Windows 上偶发挂起或僵尸进程残留。
+
+### 🆕 重新发布 #5 增量（自 v0.5.10 #4 起）
+
+基于 `v0.5.10` (重新发布 #4) 标签的增量变更 | 提交数：8 · 文件变更：28 · +2243/-1015 | 贡献者：mading
+
+#### ✨ 新功能 (New Features)
+
+- **feat: add image preview for attachments in tooltip and enhance tooltip functionality** (`app/widgets/simple_hover_tooltip.py`, `app/widgets/bottom_input_area.py`): 输入框附件栏的图像附件胶囊在 hover 时支持内嵌缩略图预览（继承自前一轮独立提交，落到 #5 增量内一并整理）。
+- **feat: enhance EngineSession with hook events and improve ComboBox integration in MarketplaceCard** (`app/core/conversation/engine_session.py`, `app/plugins/contracts/hook_policy.py`, `plugins/plugin-marketplace/ui/cards.py`): `EngineSession` 接入完整 hook 事件流（新增 `BuildSystemPromptEvent` 与统一 `_trigger_engine` 通道，`turn()` 补齐 `PreUserMessage`/`PostUserMessage` 触发点），8 个 hook 引擎事件点全链路打通；`MarketplaceCard` 的 ComboBox 集成同步增强。
+- **feat: improve layout handling in MarketplaceCard to prevent text clipping and enhance size calculations** (`plugins/plugin-marketplace/ui/cards.py`): 卡片布局防文本截断，尺寸计算增强；回归后单元测试覆盖。
+- **feat: add detail dialog tests for homepage link and button management** (`tests/plugins/test_plugin_marketplace_render.py`): 详情对话框首页链接与按钮管理相关测试补齐。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **fix: 插件市场 - 打开插件目录前将相对路径转为绝对路径** (`plugins/plugin-marketplace/ui/cards.py`): `_on_open_plugin_dir` 中对非绝对路径先以 `Path.cwd()` 解析为绝对路径，再调用 `explorer` / `open` / `xdg-open`。提升健壮性：应用从其他目录启动或后续 CWD 变化时仍可正确打开插件目录。
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **refactor(plugin-creator): components 按组件拆分至独立文件（渐进加载）** (`plugins/system-skills/skills/plugin-creator/references/components.md` → `components/`): 原 752 行单文件 `components.md` 拆分为 13 个独立子文件（agents/commands/engines/gateways/hook-policies/hooks/loop-policies/lsp/mcp/model-adapters/providers/serializers/skills/storages/team-templates/themes/tools/ui 共 18 类组件，对应 14 个 md 文件 + 旧的根文件清理），加载按需；`troubleshooting.md` 同步补 3 条实战坑（`qfluentwidgets userData` / 热重载信号脱钩 / daemon 线程看门狗）。`SKILL.md` 触发词表 +10。
+
+#### 📚 文档 (Documentation)
+
+- **docs(plugin-creator): 组件文档补全至 18 类 + 实战排障条目** (`plugins/system-skills/skills/plugin-creator/SKILL.md`, `plugins/system-skills/skills/plugin-creator/references/troubleshooting.md`): components 章节从 11 类扩展到 18 类（新增 HookPolicies/LoopPolicies/Engines/Storages/Serializers/Gateways/ModelAdapters 7 章），由 4 个 explore 子智能体分别调研 loop_policies / storages_serializers / engines / gateways_model_adapters 契约与案例得出素材；troubleshooting 章节补 3 条实战坑。
+
+#### 🧪 测试 (Tests)
+
+- **Add tests to ensure description labels are not squeezed in card rows** (`plugins/plugin-marketplace/ui/cards.py`, `tests/plugins/test_plugin_marketplace_render.py`): 实现 `_desc_squeezed` 识别描述被压缩的行；新增 `test_rows_not_squeezed_desc_visible` 验证行高能容纳描述标签不被压缩、`test_rows_not_squeezed_after_resize` 验证窗口缩放后描述不被压缩；调整布局高度算法防止底部出现过多留白。
+
+### 🆕 重新发布 #6 增量（自 v0.5.10 #5 起）
+
+基于 `v0.5.10` (重新发布 #5) 标签的增量变更 | 提交数：4 · 文件变更：10 · +1134/-290 | 贡献者：mading
+
+#### ✨ 新功能 (New Features)
+
+- **feat: add safe attribute access method to prevent RuntimeError in PyQt instances** (`app/main_widget.py`): 新增 `_safe_instance_attr(obj, name, default)` 静态方法（直接读 `__dict__`，绕开 sip 属性转发），替换 `getattr(obj, name, default)` —— PyQt 对象在 `__init__` 未执行时（测试用 `__new__` 构造的桩实例、构造中途实例）执行 getattr 会抛 `RuntimeError: super-class __init__() ... was never called` 直接打断调用方（2026-09-11 实测：`_display_current_session` 的会话切换钩子让一批 `__new__` 桩测试集体报错）。`_undo_store` / `_show_undo_delete_card` / `_hide_undo_delete_card` / `_clear_undo_store_for_session_switch` 等 5 处全部改用安全读取；顺手给中部恢复（`appends_at_tail=False`）加上滚动锚点保留：恢复前记滚动值，恢复后立即 `_restore_scroll_value` 还原，120ms 后二次设值抵消 WebEngine 异步上报的视口漂移，尾部恢复仍按原行为 `QTimer.singleShot(200, _scroll_to_bottom)`。
+
+- **feat: implement UndoDeleteStore for managing undo entries and enhance UndoDeleteCard functionality** (`app/main_widget.py`, `app/widgets/cards/floating/undo_delete_card.py`, `app/widgets/cards/floating/undo_delete_store.py`, `app/widgets/modules/input_card_module.py`, `docs/plugins/ui-modules.md`, `tests/plugins/test_input_card_module.py`, `tests/widgets/test_undo_delete_store.py`): 引入 `UndoDeleteStore` 替换原单步缓存，允许多条撤销条目 + 最大条数上限；`UndoDeleteCard` 加 TTL —— 被其他卡片遮挡时不清条目（遮挡 ≠ 放弃撤销）；UI 元素升级（按钮样式、tooltip）；新增 `tests/widgets/test_undo_delete_store.py`（264 行）覆盖 `UndoDeleteStore` / `UndoDeleteCard` 行为。
+
+- **feat: add 'plugin-creator' and 'ui-plugin-creator' to enabled LLM skills** (`app/utils/config.py`): `llm_enabled_skills` 列表追加 `plugin-creator` 与 `ui-plugin-creator`，主程序默认加载这两个技能。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **fix(plugins): UIPluginRegistry 加载/卸载加锁并修正卸载判据，修复插件实例泄漏** (`app/plugins/registries/ui_plugin_registry.py`): `load_plugin` / `unload_plugin` 套 `_serialized`（`threading.RLock`，可重入 —— `load_plugin` 内部会调 `unload_plugin`）—— 安装路径与 watchfiles 热重载路径并发到达时，交错执行会让旧模块 `unload_ui` 永不执行、插件单例的 QTimer / 线程 / 子进程永久泄漏（2026-09-11 实测：进程内并存 3 套调度器，任务卡死后只能重启软件）。同时修正卸载判据：除 `_loaded_plugins` 集合外还要看 `sys.modules` 是否真存在模块（异常路径下集合与真实加载状态失配，导致「连续两次 Load 零 Unload」）；幂等退出条件同步把 `sys.modules` 算进来。
 
 ## [v0.5.10b4] - 2026-09-09
 

@@ -24,8 +24,17 @@
 
 from typing import Optional
 
-from PyQt5.QtCore import QObject, QPoint, QRect, QRectF, Qt, QTimer
-from PyQt5.QtGui import QColor, QCursor, QFont, QFontMetrics, QPainter, QPainterPath
+from PyQt5.QtCore import QObject, QPoint, QRect, QRectF, QSize, Qt, QTimer
+from PyQt5.QtGui import (
+    QColor,
+    QCursor,
+    QFont,
+    QFontMetrics,
+    QImageReader,
+    QPainter,
+    QPainterPath,
+    QPixmap,
+)
 from PyQt5.QtWidgets import QApplication, QWidget
 
 # ── 泄漏修复（6a）：_filters 缓存改弱值字典 ──
@@ -192,6 +201,7 @@ class SimpleHoverTooltip(QWidget):
     """
 
     _gap: int = 4  # 与目标控件的间距
+    _TEXT_GAP: int = 4  # 图像预览模式下图与文本的间距
 
     def __init__(self, parent=None, transient=False):
         super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
@@ -199,6 +209,7 @@ class SimpleHoverTooltip(QWidget):
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
 
         self._text: str = ""
+        self._pixmap: Optional[QPixmap] = None  # 非空：图像预览模式（图上文本下）
         self._bg: QColor = QColor(33, 33, 38, 250)
         self._tc: QColor = QColor("#ffffff")
         self._border: QColor = QColor("#3d3d3d")
@@ -243,18 +254,42 @@ class SimpleHoverTooltip(QWidget):
             self._recalc_size()
 
     def set_text(self, text: str):
-        """设置显示文本并重算尺寸。"""
+        """设置显示文本并重算尺寸（清除可能残留的图像预览）。"""
+        self._pixmap = None
+        self._text = text
+        self._recalc_size()
+        self.update()
+
+    def set_pixmap(self, pixmap: Optional[QPixmap], text: str):
+        """设置图像预览 + 文本并重算尺寸（pixmap 无效时回退纯文本）。"""
+        if pixmap is not None and not pixmap.isNull():
+            self._pixmap = pixmap
+        else:
+            self._pixmap = None
         self._text = text
         self._recalc_size()
         self.update()
 
     def _recalc_size(self):
-        """根据文本（支持多行 \\n） + padding 计算 widget 尺寸。"""
+        """根据文本（支持多行 \\n）/ 图像预览 + padding 计算 widget 尺寸。"""
         fm = QFontMetrics(self._font)
         lines = self._text.split("\n") if self._text else [""]
         max_w = max((fm.width(line) for line in lines), default=0)
         line_h = fm.lineSpacing()  # 含行间距，多行不挤
         limit = _max_tip_text_width()
+        if self._pixmap is not None:
+            # 图像预览模式：图在上居中，文本在下；宽度取图与文本较大者
+            if max_w > limit:
+                self._wrap_w = limit
+                text_rect = fm.boundingRect(QRect(0, 0, limit, 0), Qt.TextWordWrap, self._text)
+                text_h = text_rect.height()
+            else:
+                self._wrap_w = None
+                text_h = line_h * len(lines)
+            w = max(self._pixmap.width(), min(max_w, limit)) + self._padding_h * 2
+            h = self._padding_v + self._pixmap.height() + self._TEXT_GAP + text_h + self._padding_v
+            self.setFixedSize(max(w, 20), max(h, 20))
+            return
         if max_w > limit:
             # 超限：按限宽折行重算尺寸（绘制端用同一折行规则）
             self._wrap_w = limit
@@ -321,22 +356,28 @@ class SimpleHoverTooltip(QWidget):
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(rect, r, r)
 
-        # 文字（逐行绘制，行间距与 _recalc_size 一致；超限折行走整体 drawText）
+        # 图像预览（图上文本下）→ 纯文本（逐行绘制，行间距与 _recalc_size 一致；
+        # 超限折行走整体 drawText）
+        pm = self._pixmap
+        if pm is not None:
+            painter.drawPixmap((self.width() - pm.width()) // 2, self._padding_v, pm)
         if self._text:
             painter.setPen(self._tc)
             painter.setFont(self._font)
+            fm = QFontMetrics(self._font)
+            text_top = self._padding_v + (pm.height() + self._TEXT_GAP if pm else 0)
             if self._wrap_w is not None:
                 # 折行分支：与 _recalc_size 同宽度同规则，交由 Qt 折行
-                text_rect = QRect(self._padding_h, self._padding_v,
-                                  self._wrap_w, self.height() - self._padding_v * 2)
-                painter.drawText(text_rect,
-                                 Qt.AlignLeft | Qt.AlignVCenter | Qt.TextWordWrap,
-                                 self._text)
+                text_rect = QRect(self._padding_h, text_top, self._wrap_w, self.height() - text_top - self._padding_v)
+                painter.drawText(
+                    text_rect,
+                    Qt.AlignLeft | (Qt.AlignTop if self._pixmap else Qt.AlignVCenter) | Qt.TextWordWrap,
+                    self._text,
+                )
                 return
             lines = self._text.split("\n")
-            fm = QFontMetrics(self._font)
             line_h = fm.lineSpacing()
-            y = self._padding_v + fm.ascent()
+            y = text_top + self._padding_v + fm.ascent() if not self._pixmap else text_top + fm.ascent()
             for line in lines:
                 painter.drawText(self._padding_h, y, line)
                 y += line_h
@@ -354,6 +395,9 @@ class _HoverTooltipFilter(QObject):
         # 强持有 parent 会阻止父随标签关闭被回收 → per-tab 泄漏）。所有使用点需 deref + 判空。
         self._parent = weakref.ref(parent)
         self._text = text
+        # 图像预览加载回调：返回 QPixmap 或 None（None/异常 → 回退纯文本 tooltip）。
+        # 每次显示时调用，不缓存 —— 文件可能被外部修改，重读保证所见即所得。
+        self._image_loader = None
         self._tooltip: Optional[SimpleHoverTooltip] = None
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -380,6 +424,10 @@ class _HoverTooltipFilter(QObject):
         if self._tooltip is None:
             self._tooltip = SimpleHoverTooltip()
         return self._tooltip
+
+    def set_image_loader(self, loader):
+        """设置图像预览加载回调（返回 QPixmap；None/异常自动回退纯文本）。"""
+        self._image_loader = loader
 
     def eventFilter(self, obj, event):
         if obj is not self._parent():
@@ -425,7 +473,16 @@ class _HoverTooltipFilter(QObject):
             self._timer.stop()
             return
         tt = self._get_tooltip()
-        tt.set_text(self._text)
+        pm = None
+        if self._image_loader is not None:
+            try:
+                pm = self._image_loader()
+            except Exception:
+                pm = None
+        if pm is not None and not pm.isNull():
+            tt.set_pixmap(pm, self._text)
+        else:
+            tt.set_text(self._text)
         tt.show_above(p)
         # 启动看护轮询（显示期间持续校验是否仍需显示）
         self._guard.start()
@@ -501,6 +558,37 @@ class _HoverTooltipFilter(QObject):
 # installEventFilter 以 parent 链持有；widget 销毁后 filter 被释放、条目
 # 自动消失，避免模块级强引用造成窗口对象树残留。
 _filters: "weakref.WeakValueDictionary[int, QObject]" = weakref.WeakValueDictionary()
+
+
+def get_hover_filter(widget: QWidget) -> Optional["_HoverTooltipFilter"]:
+    """获取 widget 上已安装的 hover filter（供调用方后补图像预览等定制）。"""
+    return _filters.get(id(widget))
+
+
+#: 图像预览缩略图最大边长（px）。胶囊 tooltip 不宜过大，220 足够辨认内容。
+_PREVIEW_MAX_SIDE = 220
+
+
+def load_preview_pixmap(path: str, max_side: int = _PREVIEW_MAX_SIDE) -> Optional[QPixmap]:
+    """读图像文件并降采样为预览 pixmap；失败返回 None（调用方回退纯文本）。
+
+    - QImageReader 先只读尺寸，超过 max_side 时先设目标尺寸再解码，避免大图全量解码占内存
+    - autoTransform 处理 JPEG EXIF 旋转（手机拍摄的竖图不歪）
+    - gif 取首帧静态图（tooltip 内不做动画）
+    """
+    try:
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        sz = reader.size()
+        if sz.isValid() and max(sz.width(), sz.height()) > max_side:
+            scale = max_side / max(sz.width(), sz.height())
+            reader.setScaledSize(QSize(round(sz.width() * scale), round(sz.height() * scale)))
+        img = reader.read()
+        if img is None or img.isNull():
+            return None
+        return QPixmap.fromImage(img)
+    except Exception:
+        return None
 
 
 def install_hover_tooltip(widget: QWidget, text: str = "", delay_ms: int = 400):

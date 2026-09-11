@@ -73,17 +73,6 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 # ✅ registry.register("my_tool", schema, impl=_impl, danger="safe")
 ```
 
-### ❌ Providers 没被识别 / 服务商列表少了一个
-
-**症状**：服务商列表少了一个；或后注册的同名服务商没生效。
-
-**原因**：
-1. `providers/foo.py` 只定义了函数，没暴露 `register(registry)` → loader 不扫描
-2. 同名冲突时**先注册者保留**（system 根先扫），后注册者被跳过并记 warning
-   （`ProviderRegistry.register` 同名不覆盖；跨根 user>system 覆盖是 tools 的规则，providers 没有）
-3. 与 user 插件同名导致自己的定义被跳过——日志有「已注册，跳过重复注册」warning
-
-**修法**：每个 `providers/*.py` 暴露 `register(registry)`；`ProviderDef.name` 保持唯一；需要替换内置服务商时换名或确认跳过 warning 是预期行为。
 
 ### ❌ 命令不显示 / 不触发
 
@@ -93,16 +82,6 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 
 **修法**：对照 `components.md §Commands` 检查。
 
-### ❌ Hook 不触发
-
-**症状**：事件发生但钩子函数没执行。
-
-**原因**：`hooks.json` 格式错误；事件名拼写错误（大小写敏感）；函数名与 `hooks.json` 引用不匹配；Python 文件语法错误。
-
-**修法**：
-```bash
-python -m py_compile hooks/<name>_hook.py
-```
 
 ### ❌ UI 卡片空白 / 不显示
 
@@ -173,19 +152,6 @@ git commit -m "chore: update marketplace.json"
 
 ## 其他
 
-### ❌ team_templates YAML 校验失败（TemplateError）
-
-**症状**：`/team --load` 报 `TemplateError`，或模板不出现在 `/team` 列表。
-
-**原因**：YAML 不合法——缺 `schema_version`（固定为 1）/`template_name`/非空 `agents`；`agents[].agent_name` 引用了不存在的 @角色；文件名含 `.`/`/`/反斜杠/`..`。
-
-**修法**：
-```yaml
-schema_version: 1            # 固定为 1
-template_name: my-team       # 建议与文件名一致
-agents:                      # 非空；agent_name 必须引用已存在的 @角色
-  - agent_name: build
-```
 
 ### ❌ 不知道从何开始
 
@@ -198,3 +164,35 @@ agents:                      # 非空；agent_name 必须引用已存在的 @角
 ### ❌ 需要 UI 插件
 
 **修法**：调用 `ui-plugin-creator` 技能，本技能不处理 UI 开发细节。
+
+### ❌ 组件专属问题
+
+**修法**：各组件文档自带「排障」小节——见 [components/](components/) 目录对应文件。
+
+### ❌ qfluentwidgets ComboBox 存了数据但 currentData() 恒为 None
+
+**症状**：`combo.addItem(text, key)` 显示正常，保存时 `currentData()` 取到 None（如 cron-tasks 选了 gateway 会话仍报"无可用会话"）。
+
+**原因**：qfluentwidgets `ComboBox.addItem` 签名是 `(text, icon=None, userData=None)`——第二位置参数是 icon，不是 userData。
+
+**修法**：
+```python
+# ❌ combo.addItem("显示文本", "feishu:ou_xxx")        # key 被当 icon
+# ✅ combo.addItem("显示文本", userData="feishu:ou_xxx")
+```
+
+### ❌ 任务执行成功/失败但 UI 状态卡死（重开卡片才刷新）
+
+**症状**：浮动卡列表里任务行停在"运行中"，完成后不更新；关开卡片恢复。
+
+**原因**：插件热重载清 sys.modules 后，旧卡片实例持有旧 controller 单例，`jobs_changed` 等推送信号断在新旧实例之间。
+
+**修法**：卡片自驱动兜底——可见期间低频轮询运行态（翻转才全量刷新，避免闪烁），不依赖任何信号链；showEvent 时重新 `bind_card(get_instance())`。参考 `drifox-plugins2` 仓库 cron-tasks 的 `_poll_tick`。
+
+### ❌ 后台线程跑 EngineSession.turn 挂死后永远"运行中"
+
+**症状**：定时任务/无人值守调用偶发卡死，turn 内部 timeout 参数到点也不收尾（无落盘/无通知/串行锁不放）。
+
+**原因**：底层流式读取可能无限期阻塞（无读超时），且 daemon 线程场景 turn 内部超时自救链路可能失效。
+
+**修法**：插件执行器自建硬看门狗——QThread 主体轮询时自查运行时长，超时+缓冲仍无结果则强制 `session.cancel()` 并按 timeout 收尾。参考 cron-tasks `executor.py` 的 `hard_deadline`。根因（流式无读超时）需主程序侧修。

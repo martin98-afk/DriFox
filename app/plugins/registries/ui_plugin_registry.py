@@ -5,8 +5,10 @@
 插件通过 register_ui(registry) 在加载时注册组件。
 """
 
+import functools
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
@@ -399,12 +401,33 @@ class SettingsCardInfo:
     section: str = "plugins"  # 挂载分区：plugins/llm/common/appearance/update（对应设置面板 tab）
 
 
+def _serialized(method):
+    """同一注册表实例内的加载/卸载串行化
+
+    load_plugin 与 unload_plugin 会改动注册表状态 + 清写 sys.modules，且卸载
+    过程会调插件 unload_ui 回调（可能阻塞数秒）。安装路径与 watchfiles 热重载
+    路径并发到达时，交错执行会出现「同一插件连续两次 Load 零 Unload」：旧模块
+    的 unload_ui 从未执行，插件单例的 QTimer/线程/子进程永久泄漏（实测
+    2026-09-11：进程内并存 3 套调度器，任务卡死后只能重启软件）。
+    RLock 可重入：load_plugin 内部会调 unload_plugin。
+    """
+
+    @functools.wraps(method)
+    def _wrapper(self, *args, **kwargs):
+        with self._load_lock:
+            return method(self, *args, **kwargs)
+
+    return _wrapper
+
+
 class UIPluginRegistry:
     """UI 插件注册表（单例）"""
 
     _instance: Optional["UIPluginRegistry"] = None
 
     def __init__(self):
+        # 加载/卸载互斥锁（见模块级 _serialized）：防安装路径与热重载路径并发
+        self._load_lock = threading.RLock()
         self._content_renderers: Dict[str, ContentRendererInfo] = {}
         # 消息文本内联标签渲染器：{tag_name(小写): TagRendererInfo}
         self._tag_renderers: Dict[str, TagRendererInfo] = {}
@@ -2000,6 +2023,7 @@ class UIPluginRegistry:
                 except Exception:
                     continue
 
+    @_serialized
     def load_plugin(self, plugin_name: str, plugin_path) -> bool:
         """加载插件的 ui 组件
 
@@ -2031,8 +2055,11 @@ class UIPluginRegistry:
 
         safe_name = plugin_name.replace("-", "_").replace(":", "_")
         module_name = f"ui_plugin_{safe_name}"
-        old_module = _sys_backup.modules.get(module_name) if self.is_loaded(plugin_name) else None
-        if self.is_loaded(plugin_name):
+        # 卸载判据以 sys.modules 实际状态为准（旧逻辑只看 _loaded_plugins 集合）：
+        # 集合在异常路径下可能与真实加载状态失配（实测「连续两次 Load 零 Unload」），
+        # 漏卸载会让旧模块的 unload_ui 永不执行，插件 QTimer/线程/子进程永久泄漏。
+        old_module = _sys_backup.modules.get(module_name)
+        if old_module is not None or self.is_loaded(plugin_name):
             self.unload_plugin(plugin_name)
         # 丢弃本插件残留的过期恢复条目（上一轮 standalone unload / 回滚失败的残留），
         # 仅保留其他插件的条目——避免跨插件泄漏导致已删除卡片的错误恢复。
@@ -2214,6 +2241,7 @@ class UIPluginRegistry:
             or any(name == plugin_name for impls in self._ui_modules.values() for name, _p, _f in impls)
         )
 
+    @_serialized
     def unload_plugin(self, plugin_name: str) -> bool:
         """卸载插件 UI，清理所有该插件的注册
 
@@ -2229,7 +2257,16 @@ class UIPluginRegistry:
         # 插件无 ui/ 目录、从不在 _loaded_plugins，卸载时若仅凭此拦截会零清理，
         # 残留空卡片「插件配置」。故改为：仅当确无任何注册项且未 loaded 时才
         # 视为已卸载（幂等返回 False）。
-        if plugin_name not in self._loaded_plugins and not self._has_any_registration(plugin_name):
+        # 幂等判定同样要看 sys.modules：插件模块还在时不可跳过卸载（unload_ui
+        # 回调只能从旧模块取到），否则旧单例的 QTimer/线程继续泄漏。
+        import sys as _sys_probe
+
+        _mod_name = f"ui_plugin_{plugin_name.replace('-', '_').replace(':', '_')}"
+        if (
+            plugin_name not in self._loaded_plugins
+            and not self._has_any_registration(plugin_name)
+            and _mod_name not in _sys_probe.modules
+        ):
             return False
         # 0) 调用插件可选 unload_ui 回调（先于注册表清理，便于释放外部资源）
         try:

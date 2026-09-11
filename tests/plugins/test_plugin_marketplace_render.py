@@ -495,3 +495,253 @@ def test_task_done_refresh_keeps_incremental_rows(monkeypatch):
         if len(card._row_map) >= 40:
             break
     assert len(card._row_map) == 40, f"加载更多失效: {len(card._row_map)}"
+
+
+def test_sort_combo_is_fluent_combo(monkeypatch):
+    """排序下拉必须是 qfluentwidgets ComboBox，且不被自绘 QSS 污染
+
+    复现背景：排序下拉原为裸 QComboBox + 手写 QSS（drop-down 未给 down-arrow
+    图），Windows 上渲染成「文字底下一道横线」的错位控件，与左侧搜索框
+    （qfluentwidgets LineEdit）风格不一致。修复：改用 ComboBox。
+
+    回归点：
+    1. 控件类型是 qfluentwidgets ComboBox（禁止退回裸 QComboBox）；
+    2. 主题刷新不得改写它的 QSS —— _retheme 会遍历 QPushButton 追加自定义
+       QSS，而 ComboBox 也是 QPushButton，被追加后 Fluent 主题 QSS 会被顶掉
+       （箭头 / 悬停态失效）；
+    3. 系统字体经 setFont 注入（ComboBox 的 QSS 里 font-family 是注释掉的，
+       写 QSS 无效）；
+    4. 宽度自适应，放得下最长条目（固定 120px 会截断「下载量最多优先」）。
+    """
+    from PyQt5.QtGui import QFontMetrics
+    from qfluentwidgets import ComboBox
+
+    card = _new_card(monkeypatch)
+    combo = card._sort_combo
+
+    assert isinstance(combo, ComboBox), f"排序下拉应为 ComboBox，实际 {type(combo)}"
+    assert [combo.itemData(i) for i in range(combo.count())] == [
+        "default",
+        "downloads",
+        "name_asc",
+        "name_desc",
+    ]
+
+    # 主题刷新不得改写 QSS
+    ss_before = combo.styleSheet()
+    card._retheme()
+    assert combo.styleSheet() == ss_before, "ComboBox 的 Fluent QSS 被自绘样式顶掉了"
+
+    # 系统字体经 setFont 注入
+    card._cached_font_family = "Microsoft YaHei"
+    card._cached_font_size = 16
+    card._sync_sort_combo_metrics()
+    assert combo.font().family() == "Microsoft YaHei"
+    assert combo.font().pixelSize() == 16
+
+    # 宽度放得下最长条目
+    fm = QFontMetrics(combo.font())
+    longest = max(fm.horizontalAdvance(combo.itemText(i)) for i in range(combo.count()))
+    assert combo.width() >= longest + 30, f"宽度 {combo.width()} 放不下最长条目 {longest}"
+
+
+def _desc_squeezed(card) -> list:
+    """被压缩（分配高度 < 需要高度）的描述标签"""
+    out = []
+    for name, row in card._row_map.items():
+        d = row._desc_label
+        if d is None:
+            continue
+        need = d.heightForWidth(d.width())
+        if d.height() + 1 < need:
+            out.append(f"{name}({d.height()}<{need})")
+    return out
+
+
+def test_rows_not_squeezed_desc_visible(monkeypatch):
+    """行高必须容得下描述：内容高度按布局需求预留，不得压缩行
+
+    复现背景：_sync_content_size 早先用「逐行 sizeHint 累加」预留内容高度，
+    实测 30 行 / 视口宽 869 时为 2733，而 QVBoxLayout 实际需要 2823 —— 少算
+    90px。少算的后果不是空白而是压行：布局只能压缩行，而 wordWrap 的 QLabel
+    是行内唯一可压缩项，于是描述被挤掉一整行（表现为「字形被横向切一半」）。
+
+    修复：内容高度改取 ``_content_layout.heightForWidth(width)``；同时
+    ``_PluginRow.minimumSizeHint`` 对齐 ``sizeHint``，避免二次压缩。
+    """
+    card = _new_card(monkeypatch)
+    card.show()
+    card.show_card()
+    card._filter_bar.setCurrentItem("all")
+
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        _pump(0.05)
+        if card._row_map:
+            break
+    assert card._row_map, "首屏未渲染"
+    _pump(0.5)
+
+    squeezed = _desc_squeezed(card)
+    assert not squeezed, f"描述被压缩（行高不足）: {squeezed}"
+
+    need = card._content_layout.heightForWidth(card._content.width())
+    assert card._content.height() >= need, (
+        f"内容高度 {card._content.height()} < 布局需求 {need}（行会被压缩）"
+    )
+
+    # 反面约束：不得为了不压行而把内容撑得过高（底部出现大段空白）
+    lay = card._content_layout
+    rows_h = 0
+    for i in range(lay.count()):
+        w = lay.itemAt(i).widget()
+        if w is not None and w.isVisible():
+            rows_h += w.height()
+    assert card._content.height() - rows_h < 120, (
+        f"底部空白过大: content={card._content.height()} rows={rows_h}"
+    )
+
+
+def test_rows_not_squeezed_after_resize(monkeypatch):
+    """缩窄 / 加宽后描述仍不得被压缩（重排换行数变化 → 需求高度变化）"""
+    card = _new_card(monkeypatch)
+    card.show()
+    card.show_card()
+    card._filter_bar.setCurrentItem("all")
+
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        _pump(0.05)
+        if card._row_map:
+            break
+    assert card._row_map, "首屏未渲染"
+
+    for w in (620, 1000, 870):
+        card.resize(w, 900)
+        _pump(0.6)
+        squeezed = _desc_squeezed(card)
+        assert not squeezed, f"宽度 {w} 下描述被压缩: {squeezed}"
+
+
+# ── 详情弹窗 ────────────────────────────────────────────────
+
+_DLG_META = {
+    "name": "demo-plugin",
+    "version": "2.0.0",
+    "description": "详情弹窗测试用插件。",
+    "homepage": "https://example.com/demo-plugin",
+    "downloads": 7,
+    "_marketplace": "drifox-official",
+    "_cached_tags": ["demo"],
+}
+_DLG_THEME = dict(
+    tc="#111111",
+    tcs="#666666",
+    ff="Microsoft YaHei",
+    fs=14,
+    accent_bg="#62a0ea",
+    card_bg="#ffffff",
+    border_c="rgba(0,0,0,0.1)",
+)
+
+
+def _make_dialog(monkeypatch, *, installed, has_update=False, status="", meta=None):
+    """构造详情弹窗（parent 用普通 QWidget：MaskDialogBase 要求非空 parent）"""
+    from PyQt5.QtWidgets import QWidget
+
+    if str(PLUGIN_MARKETPLACE) not in sys.path:
+        sys.path.insert(0, str(PLUGIN_MARKETPLACE))
+    from ui.cards import _PluginDetailDialog
+
+    host = QWidget()
+    host.resize(1200, 900)
+    dlg = _PluginDetailDialog(
+        host,
+        dict(meta or _DLG_META),
+        installed=installed,
+        has_update=has_update,
+        local_version="1.0.0" if installed else None,
+        status=status,
+        **_DLG_THEME,
+    )
+    dlg.show()
+    _pump(0.3)
+    return dlg
+
+
+def _visible_buttons(dlg) -> list:
+    from qfluentwidgets import TransparentPushButton
+
+    return [b.text() for b in dlg.widget.findChildren(TransparentPushButton) if b.isVisible()]
+
+
+def test_detail_dialog_homepage_link_clickable(monkeypatch):
+    """详情弹窗的官网链接必须可点
+
+    复现背景：``setTextInteractionFlags(Qt.TextSelectableByMouse)`` 会把 QLabel
+    默认交互标志里的 ``LinksAccessibleByMouse`` 顶掉 → ``<a href>`` 看着是链接、
+    点了没反应。已安装插件的官网入口只有详情弹窗这一处（行内官网按钮对已安装
+    插件是隐藏的），所以这里失效等于官网彻底打不开。
+    """
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QLabel
+
+    dlg = _make_dialog(monkeypatch, installed=True, status="enabled")
+    links = [lb for lb in dlg.widget.findChildren(QLabel) if "<a href" in (lb.text() or "")]
+    assert links, "详情弹窗里没有渲染出官网链接"
+
+    for lb in links:
+        flags = lb.textInteractionFlags()
+        assert flags & Qt.LinksAccessibleByMouse, f"链接不可点（缺 LinksAccessibleByMouse）: {lb.text()[:60]}"
+        assert lb.openExternalLinks(), "未开启 openExternalLinks，点击不会跳浏览器"
+    dlg.close()
+
+
+def test_detail_dialog_manage_buttons_by_status(monkeypatch):
+    """详情弹窗底部管理操作与行内规则一致（禁用/启用、卸载、打开目录）
+
+    复现背景：详情弹窗原先只有「安装 / 更新 / 关闭」，已安装插件在行内能做的
+    操作（禁用、卸载、打开目录）在详情页全都没有。
+    """
+    cases = {
+        "": ["关闭", "禁用", "卸载"],
+        "enabled": ["关闭", "禁用", "卸载"],
+        "disabled": ["关闭", "启用", "卸载"],
+        "builtin_enabled": ["关闭", "禁用"],
+        "builtin_disabled": ["关闭", "启用"],
+        "system": ["关闭"],
+    }
+    for status, expect in cases.items():
+        dlg = _make_dialog(monkeypatch, installed=True, status=status)
+        got = _visible_buttons(dlg)
+        for text in expect:
+            assert text in got, f"status={status!r} 缺少按钮 {text!r}，实际 {got}"
+        assert "卸载" not in got or status not in ("builtin_enabled", "builtin_disabled"), (
+            f"内置插件不该有卸载（目录随主程序分发）: status={status!r} got={got}"
+        )
+        dlg.close()
+
+    # 未安装：只有安装 + 关闭
+    dlg = _make_dialog(monkeypatch, installed=False)
+    got = _visible_buttons(dlg)
+    assert "安装" in got and "关闭" in got, f"未安装应只有安装/关闭，实际 {got}"
+    assert not any(t in got for t in ("禁用", "启用", "卸载")), f"未安装不该有管理操作: {got}"
+    dlg.close()
+
+
+def test_detail_dialog_author_dict_not_dumped_raw(monkeypatch):
+    """author 是 dict 时不得把 Python repr 直接显示出来
+
+    复现背景：``author`` 在 manifest 里可以是 ``{"name":..., "url":...}``，旧实现
+    把它塞进 f-string，详情页会显示 ``{'name': 'xxx', 'url': '...'}`` 原文。
+    """
+    from PyQt5.QtWidgets import QLabel
+
+    meta = dict(_DLG_META)
+    meta["author"] = {"name": "Vincentwei1021", "url": "https://github.com/Vincentwei1021"}
+    dlg = _make_dialog(monkeypatch, installed=False, meta=meta)
+
+    joined = " ".join(lb.text() or "" for lb in dlg.widget.findChildren(QLabel))
+    assert "'name'" not in joined and "{" not in joined.split("http")[0], f"author dict 被原样打印: {joined[:200]}"
+    assert "Vincentwei1021" in joined, "author 名称未显示"
+    dlg.close()

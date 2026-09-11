@@ -9,7 +9,7 @@ Phase F：原 setup_ui 底部输入区域段（计划标注 3262-3410，实际 3
 - _bottom_input_container _bottom_input_layout _input_card _input_card_wrapper
 - _attach_container _attach_layout _attachments _history_working_attachments
 - input_area _command_card _file_mention_card _undo_delete_card
-- _undo_delete_cache _truncation_sentinel _pending_send_after_truncation _pending_send_user_text
+- _undo_delete_store _truncation_sentinel _pending_send_after_truncation _pending_send_user_text
 
 契约集提取命令（搬运基线）：
     python -X utf8 -c "import re; lines=open('app/main_widget.py',encoding='utf-8').read().split(chr(10)); pat=re.compile(r'self\\.([\\w]+)\\s*[:=]'); attrs=[m.group(1) for l in lines[3272:3414] if (m:=pat.match(l.strip()))]; print(chr(10).join(attrs))"
@@ -35,6 +35,7 @@ class InputCardModule(UIModule):
         from app.widgets.cards.floating.command_card import CommandCard
         from app.widgets.cards.floating.file_mention_card import FileMentionCard
         from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
+        from app.widgets.cards.floating.undo_delete_store import UndoDeleteStore
         from app.widgets.flow_layout import FlowLayout
 
         # ===== 底部输入区域（输入卡 + 工具栏紧贴拼接）=====
@@ -162,12 +163,16 @@ class InputCardModule(UIModule):
         host._undo_delete_card = UndoDeleteCard(host._bottom_input_container)
         host._undo_delete_card.setVisible(False)
         host._undo_delete_card.restoreRequested.connect(host._restore_deleted_message)
+        # 用户点 ✕ / TTL 到期 → 撤销窗口关闭，回退条目整体失效
+        host._undo_delete_card.dismissRequested.connect(host._on_undo_dismiss_requested)
+        # 被 CardManager 隐藏（被其他卡片遮挡）→ 仅记录，**不清空**回退条目
         host._undo_delete_card.dismissed.connect(host._on_undo_delete_dismissed)
         mgr.register_card(host._window_id, ContainerType.BOTTOM, "undo_delete", host._undo_delete_card)
         host._bottom_card_container.add_card("undo_delete", host._undo_delete_card)
 
-        # 初始化撤销删除缓存（只缓存一步）
-        host._undo_delete_cache = {}
+        # 撤销删除条目栈（替代原单步裸 dict `_undo_delete_cache` 与死代码
+        # `_undo_delete_stack`；支持连续删除逐步回退，上限见 UndoDeleteStore.MAX_ENTRIES）
+        host._undo_delete_store = UndoDeleteStore()
 
         # 🛡️ Bug 修复：截断哨兵 — 记录最近一次 session 截断的关键信息，
         # 用于在异步 finalize_stop / messages_updated 回调到达时识别"是否发生了截断"

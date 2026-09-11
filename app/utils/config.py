@@ -346,7 +346,7 @@ class Settings(QConfig):
     llm_enabled_skills = ConfigItem(
         "LLM",
         "EnabledSkills",
-        ["brainstorming", "visualization", "writing-plans", "find-skills", "skill-creator", "git-commit"],
+        ["brainstorming", "visualization", "writing-plans", "find-skills", "skill-creator", "git-commit", "plugin-creator", "ui-plugin-creator"],
     )
     # 主智能体选择（单选，通过 inject_agent_identity hook 注入系统提示词）
     llm_primary_agent = ConfigItem("LLM", "PrimaryAgent", "")
