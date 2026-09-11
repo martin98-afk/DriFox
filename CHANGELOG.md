@@ -1,20 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [v0.5.10] - 2026-09-11 (重新发布 #3)
 
-### ✨ 新功能 (New Features)
-
-- **工作树管理插件化（worktree-manager）+ 分支标签消失修复** (`plugins/worktree-manager/`, `app/main_widget.py`, `app/widgets/modules/title_bar_module.py`, `app/plugins/registries/ui_plugin_registry.py`, `plugins/system-ui/ui/__init__.py`): 工作树管理从 system-ui 与 main_widget 拆出为独立插件 `plugins/worktree-manager`（工作台工作树页 + worktree 树组件 + 分支标签 chip + WorktreeService），主程序仅留 5 个同名门面方法转发服务，19 处存量调用点零改动；插件缺失时门面 no-op（无分支标签、无自动切换，会话功能完整）。`UIPluginRegistry` 新增 `register_titlebar_widget`（标题栏 slot 装配）与 `register_service`（服务查询）两个扩展点。顺带修复分支标签「经常莫名其妙消失」三缺陷：① git 检测失败（超时/文件锁）不再把空结果写进类级缓存（旧实现一旦污染则标签永久隐藏）；② 检测回调携带任务 workdir 写对缓存槽 + 上屏前校验当前 workdir（切换项目竞态不再串显/写错槽）；③ 复制窗口继承时若源处于检测中，200ms 后兜底重检（消除复制瞬态永久隐藏）。设计文档见 `docs/superpowers/specs/2026-09-11-worktree-plugin-design.md`。
-
-### 🐛 问题修复 (Bug Fixes)
-
-- **team_workdir 注入点静态校验跟随插件化迁移** (`tests/core/test_team_workdir.py`): B7 注入点断言中 `_switch_to_worktree` / `_restore_main_repo` 的广播检查随实现迁移改为校验 `WorktreeService` 源码，并顺带暴露修复了搬运遗漏的 `restore_main_repo` 尾部团队广播。
-- **存量坏测试标注** (`tests/utils/test_worktree_create_switch.py`): 50479ce9 重命名 `_ensure_worktree_job` 后未同步该测试（自诞生即 ImportError 阻塞全量收集），现模块级 skip 并注明根因，待按 `_create_worktree_job` 现状重写。
-
-## [v0.5.10] - 2026-09-10 (重新发布 #2)
-
-自上一版本以来的变更 | 提交数：82 · 文件变更：414 · +27806/-27247 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：87 · 文件变更：442 · +29172/-27772 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -74,6 +63,27 @@ All notable changes to this project will be documented in this file.
 ### 🔧 其他 (Chores & Build)
 
 - **uv.lock 依赖锁更新** (`uv.lock`): `uv lock` 同步三方依赖到当前 lock 状态，1410 行变更（705 +/-）。
+
+### 🆕 重新发布 #3 增量（自 v0.5.10 #2 起）
+
+基于 `v0.5.10` (重新发布 #2) 标签的增量变更 | 提交数：5 · 文件变更：28 · +1366/-525 | 贡献者：dingma, mading
+
+#### ✨ 新功能 (New Features)
+
+- **工作树管理插件化（worktree-manager）+ 分支标签消失修复** (`plugins/worktree-manager/`, `app/main_widget.py`, `app/widgets/modules/title_bar_module.py`, `app/plugins/registries/ui_plugin_registry.py`, `plugins/system-ui/ui/__init__.py`): 工作树管理从 system-ui 与 main_widget 拆出为独立插件 `plugins/worktree-manager`（工作台工作树页 + worktree 树组件 + 分支标签 chip + WorktreeService），主程序仅留 5 个同名门面方法转发服务，19 处存量调用点零改动；插件缺失时门面 no-op（无分支标签、无自动切换，会话功能完整）。`UIPluginRegistry` 新增 `register_titlebar_widget`（标题栏 slot 装配）与 `register_service`（服务查询）两个扩展点。顺带修复分支标签「经常莫名其妙消失」三缺陷：① git 检测失败（超时/文件锁）不再把空结果写进类级缓存（旧实现一旦污染则标签永久隐藏）；② 检测回调携带任务 workdir 写对缓存槽 + 上屏前校验当前 workdir（切换项目竞态不再串显/写错槽）；③ 复制窗口继承时若源处于检测中，200ms 后兜底重检（消除复制瞬态永久隐藏）。设计文档见 `docs/superpowers/specs/2026-09-11-worktree-plugin-design.md`。
+- **plugin-marketplace 滚动基准脚本** (`scripts/bench_marketplace_scroll.py`): 帧级滚动模拟 + 计时统计（平均/p95），便于回归量化性能变化（5f2cfcec）。
+- **SquircleAvatar 渲染位图缓存 + icon_cache_patch 重构** (`plugins/plugin-marketplace/ui/_icon_cache_patch.py`, `plugins/plugin-marketplace/ui/_squircle_avatar.py`, `plugins/plugin-marketplace/ui/cards.py`): 根因 qfluentwidgets 图标渲染每次新建 QSvgRenderer 全量解析光栅化零缓存；两处修复（FluentIcon 渲染缓存 + SquircleAvatar 位图缓存），列表页 p95 从 128.7ms 降至 60.3ms（-53%）。
+- **`description_param` 支持可选 `required` 标记** (`plugins/system-tools/tools/_tool_desc.py`, `plugins/system-tools/tools/file_tools.py`): schema 描述参数化新增 `required` 可选开关，让不带必填字段的工具描述也能透出默认值；同时刷新相关 schemas。
+- **release workflow 支持重新发布与 force 操作** (`plugins/system-commands/commands/release.md`): 新增 `--republish`（明确意图重建同名版本）与 `--force`（跳过全部确认问句），并落地「双删重建 + GitHub Release 同步删除」流程。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **team_workdir 注入点静态校验跟随插件化迁移** (`tests/core/test_team_workdir.py`): B7 注入点断言中 `_switch_to_worktree` / `_restore_main_repo` 的广播检查随实现迁移改为校验 `WorktreeService` 源码，并顺带暴露修复了搬运遗漏的 `restore_main_repo` 尾部团队广播。
+- **存量坏测试标注** (`tests/utils/test_worktree_create_switch.py`): 50479ce9 重命名 `_ensure_worktree_job` 后未同步该测试（自诞生即 ImportError 阻塞全量收集），现模块级 skip 并注明根因，待按 `_create_worktree_job` 现状重写。
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **`OpenAIChatToolWindow._branch_widget` 改用 `__dict__` 直查** (`app/main_widget.py`, `plugins/worktree-manager/icon.svg`, `plugins/worktree-manager/icon_dark.svg`): Qt 桥在裸实例上对缺失属性的访问可能抛 RuntimeError（getattr 默认值只兜 AttributeError），且避免误读类属性；同步替换 worktree-manager 图标资源（去除多余 `</svg>` 行 + 新增 dark 版）。
 
 ## [v0.5.10b4] - 2026-09-09
 
