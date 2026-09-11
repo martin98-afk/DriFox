@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.5.10] - 2026-09-11 (重新发布 #4)
+## [v0.5.10] - 2026-09-11 (重新发布 #5)
 
-自上一版本以来的变更 | 提交数：89 · 文件变更：449 · +29403/-27778 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：97 · 文件变更：477 · +31646/-28793 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
@@ -105,6 +105,33 @@ All notable changes to this project will be documented in this file.
 #### 🐛 问题修复 (Bug Fixes)
 
 - **fix: add creation flags to subprocess call in _delete_worktree_job for Windows compatibility** (`plugins/worktree-manager/ui/worktree_section.py`): Windows 下 `_delete_worktree_job` 调用的 `subprocess.Popen` 补齐 `creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW`，避免 worktree 删除作业的子进程被父进程控制台绑定 / 信号传递阻塞，导致切换/清理路径在 Windows 上偶发挂起或僵尸进程残留。
+
+### 🆕 重新发布 #5 增量（自 v0.5.10 #4 起）
+
+基于 `v0.5.10` (重新发布 #4) 标签的增量变更 | 提交数：8 · 文件变更：28 · +2243/-1015 | 贡献者：mading
+
+#### ✨ 新功能 (New Features)
+
+- **feat: add image preview for attachments in tooltip and enhance tooltip functionality** (`app/widgets/simple_hover_tooltip.py`, `app/widgets/bottom_input_area.py`): 输入框附件栏的图像附件胶囊在 hover 时支持内嵌缩略图预览（继承自前一轮独立提交，落到 #5 增量内一并整理）。
+- **feat: enhance EngineSession with hook events and improve ComboBox integration in MarketplaceCard** (`app/core/conversation/engine_session.py`, `app/plugins/contracts/hook_policy.py`, `plugins/plugin-marketplace/ui/cards.py`): `EngineSession` 接入完整 hook 事件流（新增 `BuildSystemPromptEvent` 与统一 `_trigger_engine` 通道，`turn()` 补齐 `PreUserMessage`/`PostUserMessage` 触发点），8 个 hook 引擎事件点全链路打通；`MarketplaceCard` 的 ComboBox 集成同步增强。
+- **feat: improve layout handling in MarketplaceCard to prevent text clipping and enhance size calculations** (`plugins/plugin-marketplace/ui/cards.py`): 卡片布局防文本截断，尺寸计算增强；回归后单元测试覆盖。
+- **feat: add detail dialog tests for homepage link and button management** (`tests/plugins/test_plugin_marketplace_render.py`): 详情对话框首页链接与按钮管理相关测试补齐。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **fix: 插件市场 - 打开插件目录前将相对路径转为绝对路径** (`plugins/plugin-marketplace/ui/cards.py`): `_on_open_plugin_dir` 中对非绝对路径先以 `Path.cwd()` 解析为绝对路径，再调用 `explorer` / `open` / `xdg-open`。提升健壮性：应用从其他目录启动或后续 CWD 变化时仍可正确打开插件目录。
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **refactor(plugin-creator): components 按组件拆分至独立文件（渐进加载）** (`plugins/system-skills/skills/plugin-creator/references/components.md` → `components/`): 原 752 行单文件 `components.md` 拆分为 13 个独立子文件（agents/commands/engines/gateways/hook-policies/hooks/loop-policies/lsp/mcp/model-adapters/providers/serializers/skills/storages/team-templates/themes/tools/ui 共 18 类组件，对应 14 个 md 文件 + 旧的根文件清理），加载按需；`troubleshooting.md` 同步补 3 条实战坑（`qfluentwidgets userData` / 热重载信号脱钩 / daemon 线程看门狗）。`SKILL.md` 触发词表 +10。
+
+#### 📚 文档 (Documentation)
+
+- **docs(plugin-creator): 组件文档补全至 18 类 + 实战排障条目** (`plugins/system-skills/skills/plugin-creator/SKILL.md`, `plugins/system-skills/skills/plugin-creator/references/troubleshooting.md`): components 章节从 11 类扩展到 18 类（新增 HookPolicies/LoopPolicies/Engines/Storages/Serializers/Gateways/ModelAdapters 7 章），由 4 个 explore 子智能体分别调研 loop_policies / storages_serializers / engines / gateways_model_adapters 契约与案例得出素材；troubleshooting 章节补 3 条实战坑。
+
+#### 🧪 测试 (Tests)
+
+- **Add tests to ensure description labels are not squeezed in card rows** (`plugins/plugin-marketplace/ui/cards.py`, `tests/plugins/test_plugin_marketplace_render.py`): 实现 `_desc_squeezed` 识别描述被压缩的行；新增 `test_rows_not_squeezed_desc_visible` 验证行高能容纳描述标签不被压缩、`test_rows_not_squeezed_after_resize` 验证窗口缩放后描述不被压缩；调整布局高度算法防止底部出现过多留白。
 
 ## [v0.5.10b4] - 2026-09-09
 
