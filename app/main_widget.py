@@ -190,6 +190,13 @@ from app.widgets.ui_helpers import (
 # 全项目只允许存在这一个常量，判定一律走 MainWidget._is_view_at_bottom()。
 AT_BOTTOM_TOLERANCE = 24
 
+# [PERF] 滚动条上界校正里 `container.sizeHint()` 计算结果的复用窗口（秒）。
+# sizeHint() 是一次 O(卡片数) 的完整布局计算，而「程序置底 → valueChanged →
+# _on_scroll_changed → _is_view_at_bottom → _sync_scroll_maximum」构成 20Hz 级
+# 自激回路，长会话下是「滚动不跟手」的主因。窗口内直接复用上次结果；
+# 高度收敛的及时性由 _ensure_at_bottom 的 8×300ms 重试链兜底。
+SCROLL_MAX_CACHE_TTL = 0.03
+
 # 「回到底部」胶囊的显示阈值（px）：视口离底超过它才浮出。
 # ⚠️ 故意比 AT_BOTTOM_TOLERANCE 大一个数量级 —— 两者语义不同：
 #   - AT_BOTTOM_TOLERANCE 问的是「还算贴底吗」（决定是否跟随流式输出）
@@ -15909,8 +15916,21 @@ class OpenAIChatToolWindow(ToolWindow):
         `layout.sizeHint()` 是即时计算的，可以拿来当真实内容高度。
 
         只**抬高**不压低：Qt 随后自己算出的上界会覆盖它，不会互相打架。
+
+        [PERF] `container.sizeHint()` 是一次 O(卡片数) 的完整布局计算。本函数被
+        `_is_view_at_bottom` 调用，而后者挂在滚动信号上 —— 程序置底 →
+        `valueChanged` → `_on_scroll_changed` → `_is_view_at_bottom` → 本函数，
+        形成 20Hz 级的自激回路；长会话（数百张卡）下这条回路把主线程占满，
+        滚轮事件排队 → 「滚动不跟手」。故对 sizeHint 结果加 30ms 复用窗口：
+        窗口内直接返回当前 maximum（Qt 自己算的新上界只会更大，与「只抬高」
+        语义一致）。高度收敛的及时性由 `_ensure_at_bottom` 的 8×300ms 重试链兜底。
         """
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        now = time.monotonic()
+        cache = getattr(self, "_scroll_max_cache", None)
+        if cache is not None and (now - cache[0]) < SCROLL_MAX_CACHE_TTL:
+            # 命中窗口：跳过布局计算，返回「Qt 现值」与「上次抬高值」的较大者
+            return max(scroll_bar.maximum(), cache[1])
         try:
             container = self.chat_scroll_area.widget()
             if container is None:
@@ -15920,6 +15940,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 scroll_bar.setMaximum(max(0, real))
         except RuntimeError:
             pass
+        self._scroll_max_cache = (now, scroll_bar.maximum())
         return scroll_bar.maximum()
 
     def _should_follow_bottom(self) -> bool:

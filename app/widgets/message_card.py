@@ -3169,6 +3169,44 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     return html
 
 
+# ── [PERF] 尾部行内渲染的「纯文本快路径」─────────────────────────────────
+# 流式期间 _render_tail_inline 每次都要把整个 tail 走一遍完整管线（sanitize →
+# 公式提取 → code 解包 → 上下文链接 → fence 抽取 → think/tool/hook/tag 四次
+# inject → md.convert → 图片解析），是十余次 O(tail) 扫描 + 一次完整 markdown
+# 转换。中文正文绝大多数时候 tail 是**纯文本**（没有 `` ` `` `*` `[` 等任何
+# markdown 语法），此时这些扫描全部是无效功。
+#
+# 命中快路径时直接 escape 输出（与 nl2br 扩展对齐：空行分段、段内换行转
+# <br>），把 O(tail) × 10+ 降为 O(tail) × 1。判据保守：只要出现任一语法字符
+# 就退回完整管线，**宁可少快一次，不可错渲染一次**。
+_TAIL_MD_SYNTAX_RE = re.compile(
+    r"[`*_~\[\]#<>|\\$]"  # 行内/块级 markdown 标记（$ 为公式定界符，一并保守排除）
+    r"|!\["  # 图片
+    r"|https?://"  # 自动链接
+    r"|^\s{0,3}(?:[-+*]|\d+[.)])\s"  # 列表项
+    r"|^\s{0,3}>"  # 引用
+    r"|^\s{0,3}#{1,6}\s"  # 标题
+    r"|^\s{0,3}```"  # 代码围栏
+    r"|^\s{0,3}\|.*\|"  # 表格行
+    r"|^\s{0,3}(?:---+|\*\*\*+)$",  # 分隔线
+    re.MULTILINE,
+)
+
+
+def _render_plain_tail(text: str) -> str:
+    """纯文本尾部的等价 HTML（仅供 _render_inline_tail 快路径使用）。
+
+    与 markdown + nl2br 的输出对齐：空行分段为 <p>，段内单换行转 <br>。
+    """
+    parts = []
+    for para in text.split("\n\n"):
+        para = para.strip("\n")
+        if not para.strip():
+            continue
+        parts.append("<p>" + escape(para).replace("\n", "<br>") + "</p>")
+    return "".join(parts)
+
+
 def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     """渲染流式未闭合尾部为行内 HTML（差量渲染的即时格式化路径）。
 
@@ -3200,6 +3238,11 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     # 场景，此处双保险（防御历史残段/异常路径）。
     if "<think>" in md_text or "</think>" in md_text or "<tool>" in md_text or "</tool>" in md_text:
         return ""
+    # [PERF] 纯文本快路径：无任何 markdown / 公式 / 扩展语法时直接 escape 输出，
+    # 跳过下方十余道 O(tail) 扫描与一次完整 markdown 转换。中文正文命中率极高
+    # （实测长段落流式下这是主线程最大的单项开销）。
+    if not _TAIL_MD_SYNTAX_RE.search(md_text):
+        return _render_plain_tail(md_text)
     safe_md = _sanitize_incomplete_markdown(md_text)
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
@@ -3287,6 +3330,21 @@ _STREAMING_DOCK_JS = """
                     var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                     document.body.classList.toggle('streaming-dock', on);
                     if (!on && wasOn) {
+                        // 🐛 修复（坞态归位正文置顶）：坞态下正文容器限高内滚，用户
+                        // 阅读位置在 #content-placeholder.scrollTop。归位移除
+                        // max-height 后 clientHeight 骤增至全高，浏览器把该值钳到 0
+                        // → 正文跳顶、阅读位置丢失（坞态内展开工具完成框阅读时必现）。
+                        // 切 class 前先读出位置，切换后迁移到新滚动容器 document.body；
+                        // 归位后正文起点在工具区下方，迁移值需加工具区实际高度。
+                        var _cpDock = document.getElementById('content-placeholder');
+                        var _cpReading = _cpDock ? _cpDock.scrollTop : 0;
+                        if (_cpReading > 0 && _cpDock) {
+                            _cpDock.scrollTop = 0;
+                            var _tsDocked = ts ? ts.offsetHeight : 0;
+                            var _cpMigrated = _cpReading + (_tsDocked > 0 ? _tsDocked : 0);
+                            var _bodyMax = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
+                            document.body.scrollTop = Math.min(_cpMigrated, _bodyMax);
+                        }
                         // 坞态 → 归位顶部：正文整体下移 ≈ 工具区高度，
                         // 用户上滚阅读时补偿 scrollTop，避免阅读位置跳动
                         if (!_atBottom && _dockH > 0) {
@@ -9113,6 +9171,14 @@ class CodeWebViewer(QWebEngineView):
     _ADAPTIVE_INTERVAL_SLOW = 500
     _ADAPTIVE_THRESHOLD_FAST = 200  # ms
     _ADAPTIVE_THRESHOLD_SLOW = 500  # ms
+    # [PERF] 软边界（句号结尾）触发渲染的延迟（ms）。
+    # 软边界**不再同步渲染** —— 中文正文句号极密集（约每 15~40 字一个），
+    # 同步渲染会让上面 150~500ms 的自适应节流形同虚设，实测退化为
+    # 「每 chunk 一次 O(tail) 的 markdown 转换」：随消息长度呈 O(n²)，
+    # 是「流式越到后面越卡」的主因。
+    # 改为短定时器后：连续多个句号合并为一次渲染，且句子结束后仍在
+    # ~90ms 内完成格式化（远快于 300ms 安全兜底，人眼不可分辨）。
+    _SOFT_BOUNDARY_RENDER_DELAY_MS = 90
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
@@ -9180,10 +9246,12 @@ class CodeWebViewer(QWebEngineView):
         if not self._is_js_ready:
             return
         if self._streaming and len(text) > 3:
-            # 差量渲染：仅在自然边界（硬/软）触发，否则靠增量文本 + 安全兜底
-            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(
-                self._markdown_text
-            ):
+            # 差量渲染：仅在自然边界触发，否则靠增量文本 + 安全兜底
+            # [PERF] 软边界（句号）不再走 immediate —— 中文句号密度极高，
+            # 每命中一次就同步跑一遍 O(tail) 的 markdown 转换，随消息增长呈
+            # O(n²)。改由 _schedule_render 内部的 90ms 短定时器合并（见
+            # _SOFT_BOUNDARY_RENDER_DELAY_MS），硬边界仍保持 immediate。
+            if self._has_reached_clean_boundary(self._markdown_text):
                 self._schedule_render(immediate=True)
             else:
                 self._schedule_render(immediate=False)
@@ -9468,11 +9536,17 @@ class CodeWebViewer(QWebEngineView):
         # 1. 自然边界触发（由 append_chunk 检测到并传 immediate=True）
         # 2. 安全兜底：2s 内无边界到达，强制渲染确保格式最终正确
         if self._streaming:
-            # 流式模式下检查自然边界（硬边界空行 / 软边界句号结尾）
-            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(
-                self._markdown_text
-            ):
+            # 硬边界（段落结束 / think 闭合 / 代码块闭合）：立即渲染。
+            # 硬边界密度远低于软边界，且段落结束必须及时重排，保持同步。
+            if self._has_reached_clean_boundary(self._markdown_text):
                 self._perform_update()
+                return
+            # 软边界（句号结尾）：[PERF] 只启动短定时器，**不**同步渲染。
+            # 见 _SOFT_BOUNDARY_RENDER_DELAY_MS 注释 —— 同步渲染会让整个
+            # 自适应节流体系失效并退化为 O(n²)。连续句号在此合并为一次渲染。
+            if self._has_reached_soft_boundary(self._markdown_text):
+                if not self._render_timer.isActive():
+                    self._render_timer.start(self._SOFT_BOUNDARY_RENDER_DELAY_MS)
                 return
             # 无边界：启安全定时器（仅当未激活时）
             # [PERF] 使用自适应间隔：快速流式用 150ms，慢速用 500ms，默认 300ms
@@ -14923,9 +14997,9 @@ class MessageCard(SimpleCardWidget):
             # 文字即时性已由 _append_text_incremental 保证。全量 HTML 渲染
             # 仅在自然边界触发（段落结束 / 块闭合 / 句号软边界），非边界时只启安全定时器。
             # last_text 已通过 append_text_block 包含新追加文本，判断可靠。
-            if self._streaming and (
-                self.viewer._has_reached_clean_boundary(last_text) or self.viewer._has_reached_soft_boundary(last_text)
-            ):
+            # [PERF] 软边界（句号）不再 immediate —— 与 append_chunk /
+            # _schedule_render 保持一致，交由内部 90ms 短定时器合并。
+            if self._streaming and self.viewer._has_reached_clean_boundary(last_text):
                 self.viewer._schedule_render(immediate=True)
             else:
                 self.viewer._schedule_render(immediate=False)
