@@ -2,7 +2,7 @@
 """history-manager 插件 UI 注册入口
 
 职责：
-- 注册工作台「历史会话」页（``page_id="history"``），页面自带 ``HistoryCard``
+- 注册工作台「历史会话」页（``page_id="history-manager"``，与插件同名），页面自带 ``HistoryCard``
   与会话列表交互（原 ``app/widgets/workbench_panel.HistoryPage`` +
   ``app/widgets/cards/settings/history_card.py``）。
 - 注册 ``HistoryService``（``SERVICE_NAME="history"``）：宿主 ``MainWidget``
@@ -72,13 +72,13 @@ def register_ui(registry) -> None:
     try:
         registry.register_workbench_tab(
             plugin_name=_PLUGIN_NAME,
-            page_id="history",
+            page_id="history-manager",
             label="历史会话",
             widget_class=_BoundHistoryPage,
             priority=10,
             metadata={"source": "system", "order_hint": 20},
         )
-        logger.info("[history-manager] 已注册工作台 tab: history（历史会话页）")
+        logger.info("[history-manager] 已注册工作台 tab: history-manager（历史会话页）")
     except Exception as e:
         logger.warning(f"[history-manager] 注册 history tab 失败（历史页将缺失）: {e}")
 

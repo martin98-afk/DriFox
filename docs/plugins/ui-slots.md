@@ -133,7 +133,7 @@ def register_ui(registry):
 | 扩展点 | 命令语义 | 备注 |
 |---|---|---|
 | `register_floating_card` | 打开浮动卡片 | 同名系统命令优先（不抢占） |
-| `register_workbench_tab` | 展开工作台并定位该页 | `/history`、`/worktree`、`/artifacts` |
+| `register_workbench_tab` | 展开工作台并定位该页 | `/worktree-manager`、`/artifacts-manager`、`/history-manager`（page_id 即插件名） |
 | `register_workspace_page` | 打开工作区页面 | 由 `WorkspacePageHost` 经账本登记 |
 | `register_sidebar_item` | 等价点击侧边栏项（派发 `on_click(context)`） | 无回调时不注册 |
 | `register_input_button` | 等价点击输入区按钮（派发 `on_click(context)`） | 无回调时不注册 |

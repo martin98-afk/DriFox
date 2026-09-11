@@ -1653,7 +1653,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """确保「历史会话」工作台页已挂载（插件化：reconcile 插件页签）
 
         历史会话已从对话区底部卡片迁移到右侧工作台，并进一步拆分为
-        ``plugins/history-manager`` 独立插件（``page_id="history"``）。
+        ``plugins/history-manager`` 独立插件（``page_id="history-manager"``）。
         本方法只做「触发工作台页签 reconcile」，页面由面板按插件注册表构建。
         """
         tm = TabManagerWindow.get_instance()
@@ -8266,10 +8266,10 @@ class OpenAIChatToolWindow(ToolWindow):
         panel = getattr(tm, "workbench_panel", None) if tm is not None else None
         if tm is None or panel is None:
             return
-        if not tm.is_workbench_visible() or panel.current_tab_id() != "history":
+        if not tm.is_workbench_visible() or panel.current_tab_id() != "history-manager":
             tm.open_workbench_history()
         else:
-            panel.set_current_tab_by_id("worktree", user=True)
+            panel.set_current_tab_by_id("worktree-manager", user=True)
 
     def _close_history_panel(self):
         """历史卡片关闭钮收出口：仅在用户显式点 × 时离开历史页
@@ -8280,8 +8280,8 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             tm = TabManagerWindow.get_instance()
             panel = getattr(tm, "workbench_panel", None) if tm is not None else None
-            if panel is not None and panel.current_tab_id() == "history":
-                panel.set_current_tab_by_id("worktree", user=True)
+            if panel is not None and panel.current_tab_id() == "history-manager":
+                panel.set_current_tab_by_id("worktree-manager", user=True)
         except Exception:
             pass
 

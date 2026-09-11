@@ -13,9 +13,9 @@
 page_id 语义，全部页由插件通过
 ``UIPluginRegistry.register_workbench_tab(plugin_name, page_id, label, widget_class, metadata=...)``
 注册：
-- ``page_id="worktree"``  → ``plugins/worktree-manager/ui/worktree_page.py``（order_hint=0，默认落点）
-- ``page_id="artifacts"`` → ``plugins/artifacts-manager/ui/artifacts_page.py``（order_hint=10）
-- ``page_id="history"``   → ``plugins/history-manager/ui/history_page.py``（order_hint=20）
+- ``page_id="worktree-manager"``  → ``plugins/worktree-manager/ui/worktree_page.py``（order_hint=0，默认落点）
+- ``page_id="artifacts-manager"`` → ``plugins/artifacts-manager/ui/artifacts_page.py``（order_hint=10）
+- ``page_id="history-manager"``   → ``plugins/history-manager/ui/history_page.py``（order_hint=20）
 页序 = ``(metadata["order_hint"], 注册序)``；默认落点页 = ``metadata["default_landing"]``
 标记页，缺省为顺序第一页；一个页都没注册时显示空态页。页签一律按 **tab_id**
 定位（``set_current_tab_by_id`` / ``current_tab_id``），宿主不得假设 index。
@@ -68,7 +68,7 @@ TASKS_DEFAULT_HEIGHT = 180  # 任务区默认高度
 class _PagePlaceholder(QWidget):
     """页签占位页：插件页未注册 / 已卸载时的兜底内容
 
-    产物页（page_id="artifacts"）已完全插件化——面板不再内置实现，
+    产物页（page_id="artifacts-manager"）已完全插件化——面板不再内置实现，
     由 plugins/artifacts-manager/ui/artifacts_page.py 的 SystemArtifactsPage 提供。
     插件未加载时显示本占位，避免出现空白页。
     """

@@ -2,7 +2,7 @@
 """artifacts-manager 插件 UI 注册入口
 
 职责：
-- 注册工作台「产物」页（``page_id="artifacts"`` 为**保留** page_id —— 注册它即
+- 注册工作台「产物」页（``page_id="artifacts-manager"``，与插件同名）—— 注册它即
   填充产物页槽位，index 1；面板本身不提供产物实现，插件卸载后显示占位页）。
 
 宿主契约（插件版产物页必须实现，否则面板推送数据会失败）：
@@ -33,12 +33,12 @@ def register_ui(registry) -> None:
 
         registry.register_workbench_tab(
             plugin_name=_PLUGIN_NAME,
-            page_id="artifacts",
+            page_id="artifacts-manager",
             label="产物",
             widget_class=SystemArtifactsPage,
             priority=10,
             metadata={"source": "system", "order_hint": 10},
         )
-        logger.info("[artifacts-manager] 已注册工作台 tab: artifacts（产物页）")
+        logger.info("[artifacts-manager] 已注册工作台 tab: artifacts-manager（产物页）")
     except Exception as e:
         logger.warning(f"[artifacts-manager] 注册 artifacts tab 失败（产物页将显示占位）: {e}")

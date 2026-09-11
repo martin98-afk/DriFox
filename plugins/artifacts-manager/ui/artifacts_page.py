@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """产物页（SystemArtifactsPage）
 
-注册到 WorkbenchPanel 的 "artifacts" 保留页签（由
+注册到 WorkbenchPanel 的 "artifacts-manager" 页签（由
 ``plugins/artifacts-manager/ui/__init__.py`` 的 ``register_ui`` 完成）。
 
 数据通路：

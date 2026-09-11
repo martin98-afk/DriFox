@@ -1492,7 +1492,7 @@ class TabManagerWindow(FramelessWindow):
         可被任意插件页命令（``register_workbench_tab`` 联动注册的 ``/{page_id}``）复用。
 
         Args:
-            page_id: 工作台页签 id（如 "worktree" / "artifacts" / 插件自定义 page_id）
+            page_id: 工作台页签 id（如 "worktree-manager" / "history-manager" / 插件自定义 page_id）
 
         Returns:
             True 表示页签存在并已切换；False 表示面板不可用或当前无此页签
@@ -1526,13 +1526,13 @@ class TabManagerWindow(FramelessWindow):
         else:
             self.refresh_workbench()
         # 2) 定位「工作树」页
-        panel.set_current_tab_by_id("worktree", user=True)
+        panel.set_current_tab_by_id("worktree-manager", user=True)
 
     def open_workbench_history(self) -> None:
         """展开工作台并定位「历史会话」页（历史会话已从对话区底部卡片迁移至此）
 
         统一直达入口：底部工具栏历史按钮 / ``/history`` 命令都走这里。
-        历史会话页已插件化（``plugins/history-manager``，``page_id="history"``），
+        历史会话页已插件化（``plugins/history-manager``，``page_id="history-manager"``），
         故走通用 ``open_workbench_tab`` 通道；页内数据刷新由页面 ``showEvent``
         → ``HistoryPage.refresh()`` 自驱动（不再需要宿主补刷）。
         """
@@ -1551,7 +1551,7 @@ class TabManagerWindow(FramelessWindow):
             self.set_workbench_visible(True)
         else:
             self.refresh_workbench()
-        panel.set_current_tab_by_id("history", user=True)
+        panel.set_current_tab_by_id("history-manager", user=True)
 
     # ── 工作台差异入口（替代标题栏 diff_btn） ──
 

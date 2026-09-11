@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""历史会话页（workbench_tab：``page_id="history"``）
+"""历史会话页（workbench_tab：``page_id="history-manager"``）
 
 原为 ``app/widgets/workbench_panel.HistoryPage``（宿主内置页），现随
 ``history-manager`` 插件迁出：形态不变（历史会话 / 归档 子页签 + 列表上方
