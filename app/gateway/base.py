@@ -176,7 +176,7 @@ class BasePlatformAdapter(ABC):
     4. 管理连接状态
     """
 
-    # 子类应该设置这些类属性
+    # 子类应设置这些类属性；实例级标识由 __init__ 写入 _platform_id
     platform: Platform = Platform.WECOM
     name: str = "Base Platform"
 
@@ -235,10 +235,30 @@ class BasePlatformAdapter(ABC):
             message_handler: 消息处理回调
         """
         self.config = config
-        self._message_handler = message_handler
         self._running = False
         self._connected = False
         self._last_error: Optional[str] = None
+
+        # 第二位置参数兼容三种历史写法：
+        #   子类调 super().__init__(config) → message_handler=None
+        #   子类调 super().__init__(config, Platform.XXX) → 平台标识
+        #   子类调 super().__init__(config, handler) → 消息处理器
+        # 早期实现把它当 message_handler 直接存，平台标识被静默丢弃，
+        # 导致 adapter.platform 永远是类属性默认值 Platform.WECOM，
+        # 按平台查适配器（gateway_service._send_message）恒失败。
+        #
+        # 判定用鸭子类型（handler 有 handle 方法），不做 isinstance——
+        # MessageHandler 是泛型别名，isinstance 会抛 TypeError。
+        if message_handler is None or hasattr(message_handler, "handle"):
+            self._message_handler = message_handler
+            _pid = None
+        else:
+            self._message_handler = None
+            _pid = message_handler
+
+        self._platform_id = _platform_key(_pid if _pid is not None else type(self).platform)
+        if _pid is not None:
+            self.platform = _pid
 
         # 会话活跃状态
         self._active_sessions: Dict[str, asyncio.Event] = {}
@@ -246,6 +266,11 @@ class BasePlatformAdapter(ABC):
 
         # 消息去重：记录当前正在处理的消息 ID，防止平台重复投递
         self._active_message_ids: Dict[str, str] = {}  # session_key -> message_id
+
+    @property
+    def platform_id(self) -> str:
+        """平台 id 字符串（registry 键；第三方平台不经 Platform 枚举）"""
+        return self._platform_id
 
     @property
     def is_connected(self) -> bool:

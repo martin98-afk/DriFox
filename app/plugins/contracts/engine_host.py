@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """EngineHost 契约 — UI 插件 context["services"] 的类型化语义声明。
 
-现状：main_widget._build_ui_services() 返回 dict（15 个服务函数），插件按下标
+现状：main_widget._build_ui_services() 返回 dict（18 个服务函数），插件按下标
 取用、无静态检查。本 Protocol 是**语义锚点**——
 - 插件作者：以本文件为服务面清单写代码（IDE 补全/类型检查）
 - 主程序：dict 键集与本 Protocol 方法集保持一致（tests 守卫防漂移）
@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Protocol, runtime_checkable
 
 @runtime_checkable
 class EngineHost(Protocol):
-    """对话引擎插件可用的宿主服务面（对应 ctx["services"] 全部 15 键）"""
+    """对话引擎插件可用的宿主服务面（对应 ctx["services"] 全部 18 键）"""
 
     # ===== 对话栈驱动 =====
     def get_model_config(self) -> Dict[str, Any]:
@@ -94,4 +94,30 @@ class EngineHost(Protocol):
 
     def notify(self, title: str, message: str) -> None:
         """InfoBar 通知（右下角，5 秒）"""
+        ...
+
+    # ===== 通讯平台投递（cron-tasks 等后台任务的主动通知通道） =====
+    def send_to_platform(self, platform: Any, chat_id: str, content: str, **kwargs: Any) -> Any:
+        """向已连接通讯平台会话主动发送消息（返回 SendResult）。
+
+        platform 可传 Platform 枚举或 "feishu"/"dingtalk" 等 str 平台 id；
+        chat_id 为 gateway 会话 chat_id（经 list_platform_sessions 获取）。
+        服务未就绪返回 success=False 的 SendResult，不抛异常。
+        """
+        ...
+
+    def list_platform_sessions(self) -> List[Any]:
+        """已知 gateway 会话列表（GatewaySession：platform/chat_id/display_name）。
+
+        供插件渲染"投递目标"下拉；服务未就绪返回空列表。
+        """
+        ...
+
+    def list_platforms(self) -> List[Dict[str, Any]]:
+        """已注册通讯平台及其连接状态。
+
+        每项 {id, enabled, connected, available, error}。与会话列表正交：
+        平台已连接但从未收到消息时会话列表为空而本列表非空，插件可据此
+        区分"没配平台"与"配了没会话"。服务未就绪返回空列表。
+        """
         ...

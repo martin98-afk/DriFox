@@ -171,10 +171,21 @@ class PlatformManager:
         return adapter
 
     def get_adapter(self, platform: Platform) -> Optional[BasePlatformAdapter]:
-        """获取平台适配器"""
+        """获取平台适配器。
+
+        registry 键是平台 id 字符串；`Platform.FEISHU` 直接 str() 会得到
+        "Platform.FEISHU"（Enum 未继承 str 时），故统一走 `_platform_key`
+        取 `.value`。第三方 str 平台 id 原样直通。
+        """
         from app.gateway.base import _platform_key
 
-        return self._adapters.get(_platform_key(platform))
+        adapter = self._adapters.get(_platform_key(platform))
+        if adapter is not None:
+            return adapter
+        # 兜底：调用方可能传入已实例化的 adapter 自身
+        if isinstance(platform, BasePlatformAdapter):
+            return platform
+        return None
 
     @property
     def adapters(self) -> Dict[str, BasePlatformAdapter]:

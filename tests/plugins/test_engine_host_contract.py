@@ -30,6 +30,9 @@ def test_services_dict_satisfies_protocol_keys():
         def hide_card(self, card_id: str) -> None: ...
         def sync_working_directory(self) -> None: ...
         def notify(self, title: str, message: str) -> None: ...
+        def send_to_platform(self, platform, chat_id: str, content: str, **kwargs): ...
+        def list_platform_sessions(self) -> list: ...
+        def list_platforms(self) -> list: ...
 
     from app.plugins.contracts.engine_host import EngineHost
     from typing import runtime_checkable
@@ -74,4 +77,38 @@ def test_services_dict_contains_create_engine_session_key():
     src = inspect.getsource(mw.OpenAIChatToolWindow._build_ui_services)
     assert re.search(r'["\']create_engine_session["\']\s*:', src), (
         "services dict 必须包含 create_engine_session 键（EP3）"
+    )
+
+
+def test_engine_host_contract_declares_send_to_platform():
+    """EngineHost 契约包含 send_to_platform / list_platform_sessions 声明（防漂移）"""
+    from app.plugins.contracts.engine_host import EngineHost
+
+    assert "send_to_platform" in dir(EngineHost)
+    assert "list_platform_sessions" in dir(EngineHost)
+
+
+def test_engine_host_contract_declares_list_platforms():
+    """EngineHost 契约包含 list_platforms 声明（平台连接状态，会话列表正交）"""
+    from app.plugins.contracts.engine_host import EngineHost
+
+    assert "list_platforms" in dir(EngineHost)
+
+
+def test_services_dict_contains_gateway_send_keys():
+    """_build_ui_services 实际提供 gateway 投递服务键（防注入遗漏）"""
+    import inspect
+    import re
+
+    import app.main_widget as mw
+
+    src = inspect.getsource(mw.OpenAIChatToolWindow._build_ui_services)
+    assert re.search(r'["\']send_to_platform["\']\s*:', src), (
+        "services dict 必须包含 send_to_platform 键"
+    )
+    assert re.search(r'["\']list_platform_sessions["\']\s*:', src), (
+        "services dict 必须包含 list_platform_sessions 键"
+    )
+    assert re.search(r'["\']list_platforms["\']\s*:', src), (
+        "services dict 必须包含 list_platforms 键"
     )
