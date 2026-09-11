@@ -135,3 +135,61 @@ def test_workbench_panel_skips_background_window(monkeypatch):
 
     wbp.WorkbenchPanel._on_project_changed_event(panel, {"project": "项目B", "window_id": "w2"})
     assert calls == []
+
+
+def test_registry_dispatches_only_visible_cards(monkeypatch):
+    """可见且实现协议的卡片被调；隐藏卡片跳过"""
+    import app.plugins.registries.ui_plugin_registry as reg_mod
+
+    reg = reg_mod.UIPluginRegistry.__new__(reg_mod.UIPluginRegistry)
+    calls = []
+
+    class _Widget:
+        def __init__(self, name, visible, sensitive=True):
+            self.name = name
+            self._visible = visible
+            self._sensitive = sensitive
+
+        def isVisible(self):  # noqa: N802 (Qt 命名)
+            return self._visible
+
+        def on_project_changed(self, project="", workdir="", window_id=""):
+            if not self._sensitive:
+                raise AssertionError("未实现协议的卡片不应被调用")
+            calls.append((self.name, project))
+
+    reg._card_widget_instances = {
+        "win_a": {
+            "visible_ok": _Widget("visible_ok", True),
+            "hidden": _Widget("hidden", False),
+        }
+    }
+    monkeypatch.setattr(reg_mod, "is_active_window", lambda _wid: True)
+
+    reg_mod.UIPluginRegistry._on_project_changed_event(
+        reg, {"project": "项目C", "workdir": "D:/c", "window_id": "win_a"}
+    )
+    assert calls == [("visible_ok", "项目C")]
+
+
+def test_registry_skips_background_window(monkeypatch):
+    """非活跃窗口不派发"""
+    import app.plugins.registries.ui_plugin_registry as reg_mod
+
+    reg = reg_mod.UIPluginRegistry.__new__(reg_mod.UIPluginRegistry)
+    calls = []
+
+    class _Widget:
+        @staticmethod
+        def isVisible():  # noqa: N802 (Qt 命名)
+            return True
+
+        @staticmethod
+        def on_project_changed(project="", workdir="", window_id=""):
+            calls.append(project)
+
+    reg._card_widget_instances = {"win_b": {"card": _Widget()}}
+    monkeypatch.setattr(reg_mod, "is_active_window", lambda _wid: False)
+
+    reg_mod.UIPluginRegistry._on_project_changed_event(reg, {"project": "项目D", "window_id": "win_b"})
+    assert calls == []

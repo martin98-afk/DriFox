@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List,
 
 from loguru import logger
 
+from app.core.project_changed import dispatch_project_changed, is_active_window
+
 if TYPE_CHECKING:
     from app.core.command_manager import CommandType  # noqa: F401
 
@@ -656,12 +658,50 @@ class UIPluginRegistry:
         self._active_tab_scope: Optional[str] = None
         # 投影同步中标志：切换标签触发的 hide 不清除当前标签可见集合
         self._tab_sync_in_progress: bool = False
+        # 项目 / 工作目录变更订阅（UI 插件可选协议 on_project_changed）
+        self._subscribe_project_changed()
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    # ── 项目 / 工作目录联动（UI 插件可选协议 on_project_changed） ──
+
+    def _subscribe_project_changed(self) -> None:
+        """订阅项目 / 工作目录变更：向可见浮动卡派发（幂等）"""
+        if getattr(self, "_project_changed_subscribed", False):
+            return
+        try:
+            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+
+            self._project_changed_subscribed = True
+            UIEventBus.get_instance().subscribe(EV_PROJECT_CHANGED, self._on_project_changed_event)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 项目变更订阅失败: {e}")
+
+    def _on_project_changed_event(self, payload: dict) -> None:
+        """项目 / 工作目录变更：对可见且实现协议的浮动卡逐个派发
+
+        - 不可见卡片不派发：再次显示时 ``CardManager.show_card()`` → 卡片
+          ``show_card()`` 会重取 ctx（拉模型 provider），天然补刷
+        - Tab 模式浮动卡挂 GLOBAL_WINDOW_ID、代表当前活跃窗口，故不做
+          「卡片 window_id == payload window_id」的比较，只判活跃性
+        """
+        if not is_active_window(payload.get("window_id", "")):
+            return
+        project = payload.get("project", "")
+        workdir = payload.get("workdir", "")
+        window_id = payload.get("window_id", "")
+        for instances in list(self._card_widget_instances.values()):
+            for widget in list(instances.values()):
+                try:
+                    if not widget.isVisible():
+                        continue
+                except RuntimeError:
+                    continue  # C++ 对象已销毁
+                dispatch_project_changed(widget, project=project, workdir=workdir, window_id=window_id)
 
     # ---- 内部注册表操作（Task 2 起填充）----
 
