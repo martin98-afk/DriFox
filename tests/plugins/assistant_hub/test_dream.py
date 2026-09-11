@@ -226,9 +226,11 @@ def test_build_dream_forget_prompt():
         [{"date": "2026-08-30", "body": "# 2026-08-30\n\n- 30日的事"}],
     )
     text = msgs[-1]["content"]
-    # 火灾/物竞天择场景 + 名额数字 + 只删不增约束 + JSON 输出契约 + 四段输入
+    # 火灾/物竞天择场景 + 预算数字 + 只删不增约束 + JSON 输出契约 + 四段输入
     assert "火灾" in text and "名额" in text
-    assert "15" in text and "20" in text and "3" in text
+    assert "6000" in text and "20" in text and "3" in text
+    # facts 保持四分类结构，当前关注豁免待办淘汰
+    assert "工作背景" in text and "当前关注" in text
     assert "keep_daily" in text
     assert "不增" in text
     assert "- 事实A" in text and "- 长期沉淀" in text and "- 今日草稿" in text
@@ -350,7 +352,7 @@ def test_dream_forget_enforces_budget_when_llm_disobeys(tmp_path):
     """LLM 无视名额返回超长 facts → 确定性硬截到预算内（保重要度序前部）。"""
     aid = tmp_path / "a_trim"
     _seed_memory_multi(aid)
-    composed = "\n".join(f"- 合成事实{i}：{'内容' * 20}" for i in range(60))  # ~2500 字符
+    composed = "\n".join(f"- 合成事实{i}：{'内容' * 40}" for i in range(80))  # ~7000 字符，超新预算 6000
     llm = FakeLLM(
         list(_DREAM_REPLIES[:3])
         + [composed]  # compose：合成稿本身长，遗忘 reply 与其等长 → 幻觉守门过
@@ -361,6 +363,6 @@ def test_dream_forget_enforces_budget_when_llm_disobeys(tmp_path):
     assert r["ok"] is True
     facts_text = (aid / "memory" / "facts.md").read_text(encoding="utf-8").strip()
     # 硬截生效：不超预算、头部重要条目保留、尾部条目被丢
-    assert len(facts_text) <= 1500
+    assert len(facts_text) <= 6000
     assert "合成事实0" in facts_text
-    assert "合成事实59" not in facts_text
+    assert "合成事实79" not in facts_text

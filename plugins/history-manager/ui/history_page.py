@@ -31,6 +31,21 @@ from app.widgets._workbench_helpers import _EmptyHint
 from app.widgets.custom_title_bar import CustomTabButton
 
 
+# 项目过滤器哨兵值（「当前项目」跟随活跃窗口；「全部项目」混合视图）
+_PROJECT_CURRENT = "__current__"
+_PROJECT_ALL = "__all__"
+
+
+def _active_history_manager():
+    """会话数据全局唯一入口（HistoryManager 单例）；异常时返回 None"""
+    try:
+        from app.utils.history_manager import HistoryManager
+
+        return HistoryManager.get_instance()
+    except Exception:
+        return None
+
+
 def _active_window() -> Optional[Any]:
     """解析当前活跃聊天窗口（宿主 ``OpenAIChatToolWindow``）；不可用时 None"""
     try:
@@ -82,12 +97,24 @@ class HistoryPage(QWidget):
         tabs_row.addWidget(self._import_btn)
         layout.addLayout(tabs_row)
 
-        # ── 行2：搜索框（列表之上，整行） ──
+        # ── 行2：项目切换器 + 搜索框 ──
+        from qfluentwidgets import ComboBox
+
+        self._project_combo = ComboBox(self)
+        self._project_combo.setFixedHeight(24)
+        self._project_combo.setMinimumWidth(110)
+        self._project_combo.currentIndexChanged.connect(self._on_project_filter_changed)
+        self._project_filter_raw = _PROJECT_CURRENT  # 打开默认「当前项目」
+
         self._search_input = QLineEdit(self)
         self._search_input.setPlaceholderText("🔍 搜索会话...")
         self._search_input.setFixedHeight(24)
         self._apply_search_style()
-        layout.addWidget(self._search_input)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(6)
+        filter_row.addWidget(self._project_combo, 0)
+        filter_row.addWidget(self._search_input, 1)
+        layout.addLayout(filter_row)
 
         # ── 内容占位（attach 后隐藏） ──
         self._hint = _EmptyHint("历史会话未加载", self)
@@ -127,10 +154,14 @@ class HistoryPage(QWidget):
         self._card.teamRestoreRequested.connect(self._on_team_restore)
         self._card.teamArchiveRequested.connect(self._on_team_archive)
         self._card.memberSelected.connect(self._on_member_selected)
+        self._card.dataChanged.connect(self._on_card_data_changed)
+        self._card.pinToggled.connect(self._on_pin_toggled)
+        self._card.moveToProjectRequested.connect(self._on_move_to_project)
         self.attach(self._card)
         self.set_search_handler("🔍 搜索会话...", self._card.set_search_filter)
         self.set_extra_button_handler(self._card.get_import_button_handler(), tooltip="导入会话")
         self.tabChanged.connect(self._on_tab_changed)
+        self._rebuild_project_options()
 
     # ── 对外：卡片引用 ──
 
@@ -198,17 +229,105 @@ class HistoryPage(QWidget):
         super().showEvent(event)
         self.refresh()
 
+    # ── 数据自拉（架构反转：会话数据全局一份，经 HistoryManager 单例直接获取） ──
+
     def refresh(self) -> None:
-        """从当前活跃窗口拉取列表数据（历史 / 归档 分流）"""
-        win = _active_window()
-        if win is None:
-            return
+        """自拉数据渲染（不再绕宿主窗口方法）"""
         if self._current_tab == "archived":
             self._card.switch_tab("archived")
-            win._refresh_archived_sessions()
+            self._card.set_archived_sessions(self._enrich_archived_list())
         else:
             self._card.switch_tab("history")
-            win._refresh_history_toggle_panel()
+            hm = _active_history_manager()
+            history_list = hm.get_history_list(self._resolved_project_filter(), merge_team=True) if hm else []
+            self._card.set_history(history_list, self._locate_current_index(history_list))
+
+    def _resolved_project_filter(self) -> Optional[str]:
+        """解析项目过滤器（「当前项目」跟随活跃窗口；「全部项目」→ None 不过滤）"""
+        if self._project_filter_raw == _PROJECT_ALL:
+            return None
+        if self._project_filter_raw == _PROJECT_CURRENT:
+            win = _active_window()
+            return getattr(win, "_current_project", "默认项目") if win else "默认项目"
+        return self._project_filter_raw
+
+    def _locate_current_index(self, history_list: List[dict]) -> Optional[int]:
+        """在列表中定位活跃窗口当前会话（团队合并条目按成员命中）"""
+        win = _active_window()
+        current_sid = getattr(win, "_current_session_id", None) if win else None
+        if not current_sid:
+            return None
+        for i, session in enumerate(history_list):
+            if session.get("team_merged"):
+                members = session.get("members") or []
+                if any(m.get("session_id") == current_sid for m in members):
+                    return i
+            elif session.get("session_id") == current_sid:
+                return i
+        return None
+
+    def _enrich_archived_list(self) -> List[dict]:
+        """归档会话列表 enrich（mtime 预览缓存；逻辑自 main_widget._refresh_archived_sessions 迁入）"""
+        import json as _json
+        import os as _os
+
+        from app.utils.session_preview import get_message_preview
+
+        hm = _active_history_manager()
+        if hm is None:
+            return []
+        archived_list = hm.get_archived_sessions()
+        if not hasattr(self, "_archived_cache"):
+            self._archived_cache = {}  # path → (mtime, enrich_dict)
+
+        enriched_list = []
+        for session in archived_list:
+            fp = session["path"]
+            cached = self._archived_cache.get(fp)
+            try:
+                current_mtime = _os.path.getmtime(fp)
+            except OSError:
+                current_mtime = 0
+
+            if cached and cached[0] == current_mtime:
+                session["message_count"] = cached[1].get("message_count", 0)
+                session["last_time"] = cached[1].get("last_time", "")
+                session["preview"] = cached[1].get("preview", "")
+            else:
+                try:
+                    with open(fp, "r", encoding="utf-8") as f:
+                        data = _json.loads(f.read())
+                    messages = data.get("messages", [])
+                    # 🛡️ R7：team 邮件（_hook_event="TeamMail"）计入 user 消息数
+                    msg_count = data.get(
+                        "message_count",
+                        len(
+                            [
+                                m
+                                for m in messages
+                                if m.get("role") == "user"
+                                and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+                            ]
+                        ),
+                    )
+                    last_time = data.get("last_time", data.get("saved_at", ""))
+                    preview = get_message_preview(messages) if messages else ""
+                    session["message_count"] = msg_count
+                    session["last_time"] = last_time
+                    session["preview"] = preview
+                    self._archived_cache[fp] = (
+                        current_mtime,
+                        {"message_count": msg_count, "last_time": last_time, "preview": preview},
+                    )
+                except Exception:
+                    pass
+            enriched_list.append(session)
+
+        # 清理已不存在文件的缓存键（删除/恢复归档后立即生效，防无限增长）
+        current_paths = {s["path"] for s in archived_list}
+        for stale_key in [k for k in self._archived_cache if k not in current_paths]:
+            self._archived_cache.pop(stale_key, None)
+        return enriched_list
 
     def refresh_data(self) -> None:
         """工作台通用页协议入口（宿主 ``refresh_current_page_data`` 调用）"""
@@ -225,14 +344,7 @@ class HistoryPage(QWidget):
             self._search_input.setPlaceholderText(
                 "🔍 搜索历史会话..." if tab_id == "history" else "🔍 搜索归档会话..."
             )
-        win = self._win()
-        if win is None:
-            return
-        self._card.switch_tab(tab_id)
-        if tab_id == "archived":
-            win._refresh_archived_sessions()
-        else:
-            win._refresh_history_toggle_panel()
+        self.refresh()
 
     def _on_session_selected(self, index: int) -> None:
         win = self._win()
@@ -286,6 +398,83 @@ class HistoryPage(QWidget):
         win = self._win()
         if win is not None:
             win._on_team_member_selected(record)
+
+    # ── 纯数据写操作（插件直走数据服务，写后通知窗口联动） ──
+
+    def _notify_windows_data_changed(self) -> None:
+        """数据变更后通知窗口联动（欢迎卡片失效 + 跨窗口广播；窗口方法本体不变）"""
+        win = self._win()
+        if win is not None and hasattr(win, "_notify_history_data_changed"):
+            win._notify_history_data_changed()
+
+    def _on_pin_toggled(self, index: int, pinned: bool) -> None:
+        """右键置顶/取消置顶（纯数据操作，不经窗口）"""
+        hm = _active_history_manager()
+        record = self._card.get_history_at_index(index) if self._card is not None else None
+        if hm is None or not record:
+            return
+        session_id = record.get("session_id")
+        if not session_id:
+            return
+        hm.set_session_pinned(session_id, bool(pinned))
+        self._notify_windows_data_changed()
+
+    def _on_move_to_project(self, index: int, project: str) -> None:
+        """右键移动到项目（纯数据操作，不经窗口）"""
+        hm = _active_history_manager()
+        record = self._card.get_history_at_index(index) if self._card is not None else None
+        if hm is None or not record or not project:
+            return
+        session_id = record.get("session_id")
+        if not session_id:
+            return
+        full_index = hm.find_index_by_session_id(session_id)
+        if full_index is None:
+            return
+        hm.move_to_project(full_index, project)
+        self._notify_windows_data_changed()
+        self.refresh()
+
+    # ── 项目切换器 ──
+
+    def _rebuild_project_options(self) -> None:
+        """重建项目下拉（保留当前选择语义；「当前项目」标签动态显示窗口项目名）"""
+        combo = self._project_combo
+        combo.blockSignals(True)
+        combo.clear()
+        win = _active_window()
+        current = getattr(win, "_current_project", "默认项目") if win else "默认项目"
+        combo.addItem(f"当前项目（{current}）", userData=_PROJECT_CURRENT)
+        combo.addItem("全部项目", userData=_PROJECT_ALL)
+        try:
+            if self._card is not None:
+                for proj in self._card.get_project_list():
+                    combo.addItem(proj, userData=proj)
+        except Exception:
+            pass
+        idx = combo.findData(self._project_filter_raw)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _on_project_filter_changed(self, index: int) -> None:
+        """下拉切换：更新过滤器 → 项目标签显隐 → 自拉数据刷新"""
+        data = self._project_combo.itemData(index)
+        if data is None:
+            return
+        self._project_filter_raw = data
+        if self._card is not None:
+            self._card.set_show_project_labels(data == _PROJECT_ALL)
+        self.refresh()
+
+    def _on_card_data_changed(self) -> None:
+        """列表数据渲染完成：注入右键菜单项目列表 + 重建下拉选项"""
+        hm = _active_history_manager()
+        if hm is not None and self._card is not None:
+            try:
+                self._card.set_project_list(hm.get_project_list())
+            except Exception:
+                pass
+        self._rebuild_project_options()
 
     # ── 样式 ──
 
