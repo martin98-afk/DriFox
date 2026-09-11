@@ -14449,9 +14449,25 @@ class OpenAIChatToolWindow(ToolWindow):
     # 撤销删除：条目仓库 / 卡片显隐 / 恢复
     # ───────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _safe_instance_attr(obj, name, default=None):
+        """安全读取实例属性（**不要**用 getattr(obj, name, default)）
+
+        ⚠️ PyQt 对象在 ``__init__`` 未执行时（测试用 ``__new__`` 构造的桩实例、
+        构造中途的实例）执行 ``getattr(obj, name, default)`` 会抛
+        ``RuntimeError: super-class __init__() ... was never called`` 而不是返回
+        default —— 直接把调用方打断（2026-09-11 实测：_display_current_session 的
+        会话切换钩子让一批 __new__ 桩测试集体报错）。直接读实例 ``__dict__``
+        可绕开 sip 的属性转发。
+        """
+        try:
+            return obj.__dict__.get(name, default)
+        except Exception:
+            return default
+
     def _undo_store(self) -> UndoDeleteStore:
         """获取撤销条目仓库（惰性创建，兼容 __new__ 构造的测试桩实例）"""
-        store = getattr(self, "_undo_delete_store", None)
+        store = self._safe_instance_attr(self, "_undo_delete_store")
         if store is None:
             store = UndoDeleteStore()
             self._undo_delete_store = store
@@ -14526,8 +14542,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _show_undo_delete_card(self):
         """按栈顶条目刷新并显示撤销卡片（CardManager 为唯一显隐真源）"""
-        card = getattr(self, "_undo_delete_card", None)
-        card_manager = getattr(self, "_card_manager", None)
+        card = self._safe_instance_attr(self, "_undo_delete_card")
+        card_manager = self._safe_instance_attr(self, "_card_manager")
         if card is None or card_manager is None:
             return
         store = self._undo_store()
@@ -14542,11 +14558,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _hide_undo_delete_card(self):
         """隐藏撤销卡片（回退条目保留 —— 遮挡 ≠ 放弃撤销）"""
-        card_manager = getattr(self, "_card_manager", None)
+        card_manager = self._safe_instance_attr(self, "_card_manager")
         if card_manager is not None and card_manager.is_card_visible("undo_delete", self._window_id):
             card_manager.hide_card("undo_delete", self._window_id)
             return
-        card = getattr(self, "_undo_delete_card", None)
+        card = self._safe_instance_attr(self, "_undo_delete_card")
         if card is not None and card.isVisible():
             card.setVisible(False)
 
@@ -14567,7 +14583,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _clear_undo_store_for_session_switch(self):
         """会话切换：回退条目绑定具体 session，跨会话一律失效"""
-        store = getattr(self, "_undo_delete_store", None)
+        store = self._safe_instance_attr(self, "_undo_delete_store")
         if not store:
             return
         top = store.peek()
@@ -14618,6 +14634,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _restore_undo_entry(self, session, entry: UndoEntry) -> bool:
         """把一条回退条目写回：会话 → 视图 → 磁盘"""
+        # 中部恢复要保留阅读位置：插入点上方的卡片高度不受影响，记下当前滚动值
+        # 回填后复用即可；尾部恢复（用户本来就在末尾）才回到底部。
+        anchor_scroll = None
+        if not entry.appends_at_tail:
+            try:
+                anchor_scroll = self.chat_scroll_area.verticalScrollBar().value()
+            except (RuntimeError, AttributeError):
+                anchor_scroll = None
+
         # ── 1. 消息回填 ──
         messages = list(session.messages)
         insert_at = max(0, min(entry.insert_index, len(messages)))
@@ -14651,8 +14676,22 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[RESTORE] 收尾刷新失败: {e}")
         self._update_history_questions_badge()
-        QTimer.singleShot(200, self._scroll_to_bottom)
+
+        if anchor_scroll is None:
+            QTimer.singleShot(200, self._scroll_to_bottom)
+        else:
+            # 两次设值：抵消 WebEngine 异步上报卡片高度引起的一次视口漂移
+            self._restore_scroll_value(anchor_scroll)
+            QTimer.singleShot(120, lambda value=anchor_scroll: self._restore_scroll_value(value))
         return True
+
+    def _restore_scroll_value(self, value: int):
+        """把对话滚动条还原到指定位置（越界自动夹紧）"""
+        try:
+            bar = self.chat_scroll_area.verticalScrollBar()
+            bar.setValue(max(0, min(value, bar.maximum())))
+        except (RuntimeError, AttributeError):
+            pass
 
     def _render_restored_undo_region(self, insert_at: int, layout_anchor: Optional[int]) -> bool:
         """增量恢复：只重建被恢复的批次，卡片原位插回（保留滚动锚点）
