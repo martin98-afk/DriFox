@@ -525,7 +525,6 @@ def test_sort_combo_is_fluent_combo(monkeypatch):
         "downloads",
         "name_asc",
         "name_desc",
-        "version",
     ]
 
     # 主题刷新不得改写 QSS
@@ -544,3 +543,81 @@ def test_sort_combo_is_fluent_combo(monkeypatch):
     fm = QFontMetrics(combo.font())
     longest = max(fm.horizontalAdvance(combo.itemText(i)) for i in range(combo.count()))
     assert combo.width() >= longest + 30, f"宽度 {combo.width()} 放不下最长条目 {longest}"
+
+
+def _desc_squeezed(card) -> list:
+    """被压缩（分配高度 < 需要高度）的描述标签"""
+    out = []
+    for name, row in card._row_map.items():
+        d = row._desc_label
+        if d is None:
+            continue
+        need = d.heightForWidth(d.width())
+        if d.height() + 1 < need:
+            out.append(f"{name}({d.height()}<{need})")
+    return out
+
+
+def test_rows_not_squeezed_desc_visible(monkeypatch):
+    """行高必须容得下描述：内容高度按布局需求预留，不得压缩行
+
+    复现背景：_sync_content_size 早先用「逐行 sizeHint 累加」预留内容高度，
+    实测 30 行 / 视口宽 869 时为 2733，而 QVBoxLayout 实际需要 2823 —— 少算
+    90px。少算的后果不是空白而是压行：布局只能压缩行，而 wordWrap 的 QLabel
+    是行内唯一可压缩项，于是描述被挤掉一整行（表现为「字形被横向切一半」）。
+
+    修复：内容高度改取 ``_content_layout.heightForWidth(width)``；同时
+    ``_PluginRow.minimumSizeHint`` 对齐 ``sizeHint``，避免二次压缩。
+    """
+    card = _new_card(monkeypatch)
+    card.show()
+    card.show_card()
+    card._filter_bar.setCurrentItem("all")
+
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        _pump(0.05)
+        if card._row_map:
+            break
+    assert card._row_map, "首屏未渲染"
+    _pump(0.5)
+
+    squeezed = _desc_squeezed(card)
+    assert not squeezed, f"描述被压缩（行高不足）: {squeezed}"
+
+    need = card._content_layout.heightForWidth(card._content.width())
+    assert card._content.height() >= need, (
+        f"内容高度 {card._content.height()} < 布局需求 {need}（行会被压缩）"
+    )
+
+    # 反面约束：不得为了不压行而把内容撑得过高（底部出现大段空白）
+    lay = card._content_layout
+    rows_h = 0
+    for i in range(lay.count()):
+        w = lay.itemAt(i).widget()
+        if w is not None and w.isVisible():
+            rows_h += w.height()
+    assert card._content.height() - rows_h < 120, (
+        f"底部空白过大: content={card._content.height()} rows={rows_h}"
+    )
+
+
+def test_rows_not_squeezed_after_resize(monkeypatch):
+    """缩窄 / 加宽后描述仍不得被压缩（重排换行数变化 → 需求高度变化）"""
+    card = _new_card(monkeypatch)
+    card.show()
+    card.show_card()
+    card._filter_bar.setCurrentItem("all")
+
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        _pump(0.05)
+        if card._row_map:
+            break
+    assert card._row_map, "首屏未渲染"
+
+    for w in (620, 1000, 870):
+        card.resize(w, 900)
+        _pump(0.6)
+        squeezed = _desc_squeezed(card)
+        assert not squeezed, f"宽度 {w} 下描述被压缩: {squeezed}"
