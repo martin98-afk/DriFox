@@ -245,6 +245,29 @@ class TitlebarTabInfo:
 
 
 @dataclass(frozen=True)
+class TitlebarWidgetInfo:
+    """标题栏内嵌 widget 槽位（slot 装配式，区别于点击型 titlebar_tab）
+
+    窗口 build 时经 get_titlebar_widget(slot) 查询并用 widget_factory(host)
+    创建实例（如 worktree-manager 的分支标签 slot="branch"）；
+    插件缺失时槽位空置，宿主布局安全降级。
+
+    Attributes:
+        plugin_name: 所属插件名
+        slot: 预定义槽位名（如 "branch"）
+        widget_factory: (host) -> QWidget 工厂，widget 接口契约由槽位约定
+        priority: 优先级（同 slot 时高者覆盖低者）
+        metadata: 附加元数据
+    """
+
+    plugin_name: str
+    slot: str
+    widget_factory: Callable[[Any], Any]
+    priority: int = 0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class WorkbenchTabInfo:
     """右侧工作台页签注册信息
 
@@ -404,6 +427,8 @@ class UIPluginRegistry:
         self._settings_cards: Dict[str, SettingsCardInfo] = {}
         # 标题栏常驻 tab 槽位：{tab_id: TitlebarTabInfo}
         self._titlebar_tabs: Dict[str, TitlebarTabInfo] = {}
+        self._titlebar_widgets: Dict[str, TitlebarWidgetInfo] = {}
+        self._services: Dict[str, tuple] = {}  # name -> (plugin_name, instance)
         # 右侧工作台页签槽位：{page_id: WorkbenchTabInfo}
         self._workbench_tabs: Dict[str, WorkbenchTabInfo] = {}
         # right 容器卡片的工作区 tab 登记簿：{card_id: host_window_id}
@@ -1056,6 +1081,49 @@ class UIPluginRegistry:
     def get_workbench_tabs(self) -> List[WorkbenchTabInfo]:
         """获取全部工作台页签（按注册序返回）"""
         return list(self._workbench_tabs.values())
+
+    # ── 标题栏内嵌 widget 槽位 ──
+
+    def register_titlebar_widget(
+        self,
+        plugin_name: str,
+        slot: str,
+        widget_factory: Callable[[Any], Any],
+        priority: int = 0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """注册标题栏内嵌 widget（同 slot 高优先级覆盖低优先级；窗口 build 时装配）"""
+        info = TitlebarWidgetInfo(
+            plugin_name=plugin_name,
+            slot=slot,
+            widget_factory=widget_factory,
+            priority=priority,
+            metadata=metadata or {},
+        )
+        existing = self._titlebar_widgets.get(slot)
+        if existing is not None and existing.priority > priority:
+            return
+        self._titlebar_widgets[slot] = info
+
+    def unregister_titlebar_widgets(self, plugin_name: str) -> None:
+        """注销某插件的全部标题栏 widget（插件卸载时调用）"""
+        for slot in [s for s, v in self._titlebar_widgets.items() if v.plugin_name == plugin_name]:
+            del self._titlebar_widgets[slot]
+
+    def get_titlebar_widget(self, slot: str) -> Optional[TitlebarWidgetInfo]:
+        """按 slot 精确查询"""
+        return self._titlebar_widgets.get(slot)
+
+    # ── 通用服务槽 ──
+
+    def register_service(self, name: str, instance: Any, plugin_name: str = "") -> None:
+        """注册服务实例（同名后注册覆盖；主程序经 get_service 同步查询）"""
+        self._services[name] = (plugin_name, instance)
+
+    def get_service(self, name: str) -> Optional[Any]:
+        """按名取服务；未注册返回 None（主程序门面据此降级）"""
+        entry = self._services.get(name)
+        return entry[1] if entry else None
 
     # ── Phase G：WorkspacePage 页面槽 ──
 
@@ -2234,6 +2302,10 @@ class UIPluginRegistry:
         self.unregister_workbench_tabs(plugin_name)
         # 清理标题栏常驻 tab 槽位
         self.unregister_titlebar_tabs(plugin_name)
+        # 清理标题栏内嵌 widget 槽位
+        self.unregister_titlebar_widgets(plugin_name)
+        # 清理服务槽
+        self._services = {k: v for k, v in self._services.items() if v[0] != plugin_name}
         # 清理通用区域条目（Phase E）
         for region in self._regions.values():
             region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}

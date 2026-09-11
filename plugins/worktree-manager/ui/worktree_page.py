@@ -42,7 +42,7 @@ from qfluentwidgets import (
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.git_worktree import GitWorktreeDetector
 from app.utils.utils import get_font_family_css, get_icon
-from app.widgets.worktree_section import WorktreeSectionWidget
+from .worktree_section import WorktreeSectionWidget
 from app.widgets.common_dialogs import SingleInputDialog
 
 class DocDropListWidget(ListWidget):

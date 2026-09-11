@@ -192,64 +192,6 @@ AT_BOTTOM_TOLERANCE = 24
 SCROLL_JUMP_SHOW_THRESHOLD = 120
 
 
-# ───────────────────────────────────────────────────────────────────────────
-# 项目 icon tooltip 异步分支检测
-# ───────────────────────────────────────────────────────────────────────────
-class _BranchDetectSignals(QObject):
-    """后台 git 分支检测的信号桥接（后台线程 → 主线程）。"""
-
-    finished = pyqtSignal(int, str)  # request_id, branch_name（空字符串=无分支/出错）
-
-
-class _BranchDetectTask(QRunnable):
-    """异步 git 分支检测 worker。
-
-    设计动机：
-    - 旧实现 `subprocess.run(['git','branch','show-current'], timeout=3)`
-      阻塞主线程 0~3s，期间 tooltip 不更新（更新在函数末尾）
-    - 改为 QRunnable 后，tooltip 立即显示「项目名+路径」，
-      分支在后台完成后追加
-    - request_id 用于丢弃过期结果（用户连续切换项目时旧检测自动失效）
-    """
-
-    def __init__(self, workdir: str, request_id: int, signals: "_BranchDetectSignals"):
-        super().__init__()
-        self._workdir = workdir
-        self._request_id = request_id
-        self._signals = signals
-        self.setAutoDelete(True)
-
-    def run(self) -> None:
-        branch = ""
-        try:
-            if not self._workdir or not os.path.isdir(self._workdir):
-                pass
-            else:
-                from app.utils.git_worktree import GitWorktreeDetector
-
-                git_root = GitWorktreeDetector.detect_git(self._workdir)
-                if git_root:
-                    r = subprocess.run(
-                        ["git", "branch", "--show-current"],
-                        capture_output=True,
-                        text=True,
-                        cwd=self._workdir,
-                        timeout=3,
-                        encoding="utf-8",
-                        errors="replace",
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                    )
-                    if r.returncode == 0:
-                        branch = r.stdout.strip()
-        except Exception:
-            pass
-        try:
-            self._signals.finished.emit(self._request_id, branch)
-        except Exception:
-            # signals 可能在窗口销毁时被 GC，直接丢弃
-            pass
-
-
 class _ProjectUrlImportThread(QThread):
     """后台线程：从 URL 下载 .drifox_project 项目压缩包，避免 UI 冻结。
 
@@ -1110,10 +1052,7 @@ class OpenAIChatToolWindow(ToolWindow):
         "toggle-sidebar": "_handle_toggle_sidebar_command",
         "toggle-workbench": "_handle_toggle_workbench_command",
     }
-    # git 分支缓存：类级共享（workdir → branch）。
-    # 同项目多窗口共享，避免重复 git 探测；信号路由仍由实例级 _branch_detect_signals
-    # 负责（不同窗口发起检测，结果需送回自己的槽，不能在类级）。
-    _branch_cache: Dict[str, str] = {}
+    # git 分支缓存已随工作树插件化迁入 plugins/worktree-manager（WorktreeService._branch_cache）
     # models.dev 动态数据缓存：类级共享（DynamicModelsResult）。
     # 多窗口只发一路网络请求，结果广播到全部活跃窗口。
     _models_dev_cache: Optional[object] = None
@@ -1285,11 +1224,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._opencode_models_ready.connect(self._on_opencode_models_ready)
         # 线程安全桥接：models.dev 动态数据后台刷新结果回主线程
         self._models_dev_ready.connect(self._on_models_dev_ready)
-        # 线程安全桥接：后台 git 分支检测结果回主线程
-        self._branch_detect_signals = _BranchDetectSignals()
-        self._branch_detect_signals.finished.connect(self._on_branch_detected)
-        self._branch_detect_request_id = 0
-        # _branch_cache 已上提类级 OpenAIChatToolWindow._branch_cache（共享）
+        # 分支检测信号/缓存已随工作树插件化迁入 plugins/worktree-manager（BranchChip per-window 状态）
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -3311,6 +3246,9 @@ class OpenAIChatToolWindow(ToolWindow):
             ui_registry = UIPluginRegistry.get_instance()
             # 加载所有已启用的 UI 插件
             self._load_all_ui_plugins()
+            # 标题栏 slot 补装：首窗 build 早于 UI 插件注册（首帧后延迟加载），
+            # build 时 slot 查空 → 无分支标签；此处注册表已就绪，补装一次
+            self._install_titlebar_widgets()
             # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
             ui_registry.re_register_all_commands()
             # 多窗口隔离：为每个 UI 插件浮动卡片注册当前窗口的实例级处理器
@@ -3555,6 +3493,32 @@ class OpenAIChatToolWindow(ToolWindow):
                 w.setIcon(self._resolve_input_button_icon(info))
             except Exception as e:
                 logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 图标刷新失败：{e}")
+
+    def _install_titlebar_widgets(self):
+        """补装标题栏 slot widget（首窗 build 早于 UI 插件注册的一次性补装）
+
+        title_bar build 时从注册表装配分支标签等 slot widget；首窗场景下
+        UI 插件延迟到首帧后才加载，build 时 slot 查空。此方法在
+        _init_ui_plugins_deferred（插件加载完成后）调用，widget 已存在则跳过
+        （新窗口 build 时已装配 / 热重载场景保留旧 widget）。
+        """
+        if getattr(self, "_branch_widget", None) is not None:
+            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            info = UIPluginRegistry.get_instance().get_titlebar_widget("branch")
+            if info is None:
+                return
+            widget = info.widget_factory(self)
+            self._branch_widget = widget
+            container = getattr(self, "_project_branch_container", None)
+            if container is not None:
+                container.layout().addWidget(widget)
+            # 立即触发一次分支检测（workdir 未就绪时保持隐藏，后续变更事件再刷）
+            self._update_branch()
+        except Exception as e:
+            logger.warning(f"[MainWidget] 标题栏分支标签补装失败: {e}")
 
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
@@ -9952,12 +9916,7 @@ class OpenAIChatToolWindow(ToolWindow):
             _setting_cards = [w for w in _all_widgets if isinstance(w, SettingCard)]
         else:
             _setting_cards = []
-        from app.widgets.worktree_section import WorktreeSectionWidget
-
-        if is_font:
-            _worktree_widgets = [w for w in _all_widgets if isinstance(w, WorktreeSectionWidget)]
-        else:
-            _worktree_widgets = []
+        # WorktreeSectionWidget 已迁入 worktree-manager 插件，自订 EV_THEME_CHANGED 刷新，此处不再遍历
         from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
         _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
@@ -10046,10 +10005,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 设置弹窗字体
             if self._settings_popup:
                 apply_font_size_to_widget(self._settings_popup, 14)
-
-            # WorktreeSectionWidget 主题（含字体）
-            for wt_widget in _worktree_widgets:
-                wt_widget.refresh_style()
 
             # 上下文圆环 + 编码计划圆环 tooltip 字号随字号变化
             for ring_attr in ("context_usage_ring", "coding_plan_ring"):
@@ -13543,15 +13498,10 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-        # 自动切换到该会话关联的 worktree
-        # 规则：会话有 worktree_path → 切到该 worktree
-        #       会话没有 worktree_path → 切回主仓库（如果当前在 worktree 中）
-        worktree_path = session_record.get("worktree_path", "") or ""
-        current_wt = self._get_current_worktree_path()
-        if worktree_path and os.path.isdir(worktree_path) and worktree_path != current_wt:
-            self._switch_to_worktree(worktree_path)
-        elif not worktree_path and current_wt:
-            self._restore_main_repo()
+        # 自动切换到该会话关联的 worktree（规则内聚在 WorktreeService.on_session_loaded）
+        _wt_svc = self._worktree_service()
+        if _wt_svc is not None:
+            _wt_svc.on_session_loaded(self, session_record)
 
         self._display_current_session()
         self._release_inactive_session_messages()
@@ -16041,15 +15991,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # （仅 _team_run_id 非空才传团队字段）会把团队会话当成普通会话保存，
             # 团队元数据被清空 → 会话从团队分组消失 / 恢复时漏成员。
             self._sync_team_markers_from_record(session_record)
-            # 自动切换到该会话关联的 worktree
-            # 规则：会话有 worktree_path → 切到该 worktree
-            #       会话没有 worktree_path → 切回主仓库（如果当前在 worktree 中）
-            worktree_path = session_record.get("worktree_path", "") or ""
-            current_wt = self._get_current_worktree_path()
-            if worktree_path and os.path.isdir(worktree_path) and worktree_path != current_wt:
-                self._switch_to_worktree(worktree_path)
-            elif not worktree_path and current_wt:
-                self._restore_main_repo()
+            # 自动切换到该会话关联的 worktree（规则内聚在 WorktreeService.on_session_loaded）
+            _wt_svc = self._worktree_service()
+            if _wt_svc is not None:
+                _wt_svc.on_session_loaded(self, session_record)
             self._display_current_session()
             self._release_inactive_session_messages()
             self._hide_welcome_cards()
@@ -19016,32 +18961,43 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步刷新分支按钮样式
         self._refresh_branch_widget_style()
 
+    # ── 工作树门面：实现体在 plugins/worktree-manager/ui/service.py（WorktreeService）──
+    # 插件缺失时 no-op / 返回空串：无分支标签、无自动切换，会话功能不受影响。
+
+    @staticmethod
+    def _worktree_service():
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        return UIPluginRegistry.get_instance().get_service("worktree")
+
+    def _update_branch(self):
+        """门面：刷新分支标签（实现在 WorktreeService.update_branch）"""
+        svc = self._worktree_service()
+        if svc is not None:
+            svc.update_branch(self)
+
     def _copy_branch_from(self, source):
-        """性能优化：从源窗口复制 git 分支标签状态，跳过同步 git 子进程调用。
+        """门面：复制窗口继承分支标签状态（实现在 WorktreeService.copy_branch_state）"""
+        svc = self._worktree_service()
+        if svc is not None:
+            svc.copy_branch_state(self, source)
 
-        复制/分支窗口与源窗口共享完全相同的项目与工作目录，git 分支必然一致，
-        无需再次执行 `git branch --show-current`（最坏可达 3s 阻塞主线程）。
-        直接复制源窗口已渲染的分支标签 UI 状态（文本/可见性/提示/项目 avatar 提示）即可。
-        """
-        from PyQt5 import sip
+    def _get_current_worktree_path(self) -> str:
+        """门面：当前 worktree 路径（空串=不在；实现在 WorktreeService）"""
+        svc = self._worktree_service()
+        return svc.get_current_worktree_path(self) if svc is not None else ""
 
-        try:
-            if sip.isdeleted(source) or not hasattr(source, "_branch_widget"):
-                self._update_branch()
-                return
-            if sip.isdeleted(source._branch_widget):
-                self._update_branch()
-                return
-            branch_visible = source._branch_widget.isVisible()
-            self._branch_widget.setText(source._branch_widget.text())
-            self._branch_widget.setVisible(branch_visible)
-            self._branch_widget.setToolTip(source._branch_widget.toolTip())
-            # 同步项目 avatar tooltip（含完整项目名、路径、分支）
-            if hasattr(self, "_project_avatar") and hasattr(source, "_project_avatar"):
-                self._project_avatar.setToolTip(source._project_avatar.toolTip())
-        except Exception:
-            # 兜底：复制失败则回退到正常的 git 检测
-            self._update_branch()
+    def _switch_to_worktree(self, worktree_path: str):
+        """门面：切换 worktree（实现在 WorktreeService.switch_to_worktree）"""
+        svc = self._worktree_service()
+        if svc is not None:
+            svc.switch_to_worktree(self, worktree_path)
+
+    def _restore_main_repo(self):
+        """门面：回主仓库（实现在 WorktreeService.restore_main_repo）"""
+        svc = self._worktree_service()
+        if svc is not None:
+            svc.restore_main_repo(self)
 
     def _resolve_project_workdir(self) -> Optional[str]:
         """解析当前项目的工作目录（多窗口隔离：实例缓存 → DB → tool_executor）"""
@@ -19051,88 +19007,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if not workdir and self.backend and self.backend.tool_executor:
             workdir = getattr(self.backend.tool_executor, "_workdir", None)
         return str(workdir) if workdir else None
-
-    def _update_branch(self):
-        """更新项目 avatar tooltip 和分支标签（性能优化：异步 git 检测）
-
-        旧实现：在主线程同步执行 `git branch --show-current`（timeout=3），
-        tooltip 在子进程后才更新，导致项目切换/工作目录变更时 tooltip 延迟 0~3s。
-        改为：tooltip 立即显示「项目名+路径」，git 分支后台线程异步检测，
-        完成后通过 _on_branch_detected 回调追加分支信息。
-        """
-        workdir = self._resolve_project_workdir()
-
-        # Phase A（同步、即时）：tooltip 先显示项目名 + 工作目录
-        tooltip = self._current_project
-        if workdir:
-            tooltip += f"\n{workdir}"
-        self._project_avatar.setToolTip(tooltip)
-
-        # 先隐藏分支标签，等后台检测完成再决定显示
-        self._branch_widget.setVisible(False)
-
-        # Phase B（异步）：git 分支检测
-        if not workdir or not os.path.isdir(workdir):
-            return
-
-        # 缓存命中：直接应用，避免重复 git 调用（类级缓存，跨窗口共享）
-        if workdir in OpenAIChatToolWindow._branch_cache:
-            self._apply_branch_to_ui(workdir, OpenAIChatToolWindow._branch_cache[workdir])
-            return
-
-        # 启动后台检测（自增 request_id 用于丢弃过期结果）
-        self._branch_detect_request_id += 1
-        task = _BranchDetectTask(workdir, self._branch_detect_request_id, self._branch_detect_signals)
-        QThreadPool.globalInstance().start(task)
-
-    def _on_branch_detected(self, request_id: int, branch: str):
-        """后台 git 分支检测完成的主线程回调。"""
-        # 过期结果：用户已切换到其他项目，丢弃
-        if request_id != self._branch_detect_request_id:
-            return
-
-        workdir = self._resolve_project_workdir()
-        if not workdir:
-            return
-
-        # 缓存结果（同一路径下次直接命中，类级共享）
-        cache = OpenAIChatToolWindow._branch_cache
-        if len(cache) >= _MAX_BRANCH_CACHE:
-            # Python 3.7+ dict 保插入序：弹出最早插入的 key
-            oldest = next(iter(cache))
-            cache.pop(oldest, None)
-        cache[workdir] = branch
-        # 再次校验：缓存写完后若 request_id 又变了，说明并发切换，仍跳过
-        if request_id != self._branch_detect_request_id:
-            return
-        self._apply_branch_to_ui(workdir, branch)
-
-    def _apply_branch_to_ui(self, workdir: str, branch: str):
-        """应用分支结果到 tooltip 和分支标签。"""
-        # 完整 tooltip（项目名 + 路径 + 分支）
-        tooltip = self._current_project
-        if workdir:
-            tooltip += f"\n{workdir}"
-        if branch:
-            tooltip += f"\n🌿 {branch}"
-        self._project_avatar.setToolTip(tooltip)
-
-        # 分支标签
-        if branch:
-            display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
-            self._branch_widget.setText(display)
-            self._branch_widget.setToolTip(f"分支: {branch}\n点击打开关键文档")
-            self._branch_widget.setVisible(True)
-        else:
-            self._branch_widget.setVisible(False)
-
-    def _on_branch_label_clicked(self, event):
-        """分支标签点击 — 打开工作台工作树页的关键文档（记忆已迁移工作台）"""
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        tm = TabManagerWindow.get_instance()
-        if tm is not None and hasattr(tm, "open_workbench_memory"):
-            tm.open_workbench_memory("docs")
 
     def _toggle_project_selector_card(self):
         """切换项目选择卡片的显示"""
@@ -20432,131 +20306,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
         self._sync_dialog_title()
 
-    def _get_current_worktree_path(self) -> str:
-        """检测当前工作目录是否在 git worktree 中，返回 worktree 路径（空字符串表示不在）"""
-        workdir = self._current_workdir.get(self._current_project)
-        if not workdir or not os.path.isdir(str(workdir)):
-            return ""
-        from app.utils.git_worktree import GitWorktreeDetector
-
-        git_root = GitWorktreeDetector.detect_git(str(workdir))
-        if not git_root:
-            return ""
-        # worktree 的 .git 是文件，主仓库的 .git 是目录
-        if GitWorktreeDetector.is_worktree(git_root):
-            return git_root
-        # 工作目录可能是 worktree 内的子目录，向上探测
-        if GitWorktreeDetector.is_worktree(str(workdir)):
-            return str(workdir)
-        return ""
-
-    def _switch_to_worktree(self, worktree_path: str):
-        """切换到指定 worktree，幂等——已在目标 worktree 中则跳过。
-
-        加载会话时自动调用：会话关联了哪个 worktree，就切到哪个 worktree。
-        """
-        if not worktree_path or not os.path.isdir(worktree_path):
-            return
-        # zombie 过滤：.git 指向的 gitdir 已消失（主仓库 .git 被删/重建）的
-        # worktree 不切换，避免把工作目录切进 git 已不认的目录
-        from app.utils.git_worktree import GitWorktreeDetector
-
-        if not GitWorktreeDetector.is_valid_worktree_link(worktree_path):
-            logger.warning(
-                f"[MainWidget] 跳过切换到已失效的 worktree: {worktree_path}（项目: {self._current_project}）"
-            )
-            return
-        project = self._current_project
-
-        # 幂等：已在目标 worktree 中则跳过
-        if self._current_workdir.get(project) == worktree_path:
-            return
-
-        # 1. 通过 memory_manager 切换工作目录
-        if self.backend and self.backend.memory_manager:
-            mm = self.backend.memory_manager
-            db_wd = mm.get_working_directory(project)
-            mm.add_key_document(project, worktree_path, "git_worktree")
-            mm.set_working_directory(project, worktree_path)
-            # 恢复非 worktree 根目录的 is_working_dir 标记，确保记忆卡片
-            # 能正确识别用户设定的根目录。get_working_directory 可能返回
-            # worktree 路径（ORDER BY 优先），此时跳过 restore 以避免
-            # 错误地为 worktree 恢复标记。
-            if db_wd and db_wd != worktree_path and db_wd != "clear":
-                # 如果 db_wd 指向的是 worktree（added_by 为 git_worktree），
-                # 不恢复它 — 我们需要恢复的是主仓库/根目录的标记
-                all_docs = mm.get_key_documents(project)
-                is_db_wd_worktree = any(
-                    d.get("file_path") == db_wd and d.get("added_by") == "git_worktree" for d in all_docs
-                )
-                if not is_db_wd_worktree:
-                    mm.restore_working_directory_mark(project, db_wd)
-
-        # 2. 更新实例缓存 + 同步工具执行器 + 刷新分支标签
-        self._current_workdir[project] = worktree_path
-        if self.backend and self.backend.tool_executor:
-            self.backend.tool_executor.set_workdir(worktree_path)
-        self._update_branch()
-
-        # 3. 刷新右侧工作台关键文档/工作树 UI
-        try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None:
-                tm.refresh_workbench()
-        except Exception:
-            pass
-
-        logger.info(f"[MainWidget] 已自动切换到 worktree: {worktree_path}（项目: {project}）")
-        # 团队模式：worktree 切换全员同步（统一工作树）
-        self._broadcast_team_workdir(worktree_path)
-
-    def _restore_main_repo(self):
-        """从 worktree 切换回主仓库，幂等——已不在 worktree 中则跳过。
-
-        加载主仓库会话时自动调用：会话没有关联 worktree，说明属于主仓库。
-        """
-        project = self._current_project
-        current_wt = self._get_current_worktree_path()
-        if not current_wt:
-            # 已不在 worktree 中，无需切换
-            return
-
-        from app.utils.git_worktree import GitWorktreeDetector
-
-        main_repo = GitWorktreeDetector.get_main_repo_path(current_wt)
-        if not main_repo or not os.path.isdir(main_repo):
-            logger.warning(f"[MainWidget] 无法找到主仓库路径，跳过切换（当前 worktree: {current_wt}）")
-            self._update_branch()
-            return
-
-        # 幂等：已回到主仓库则跳过
-        if self._current_workdir.get(project) == main_repo:
-            return
-
-        if self.backend and self.backend.memory_manager:
-            mm = self.backend.memory_manager
-            mm.set_working_directory(project, main_repo)
-
-        self._current_workdir[project] = main_repo
-        if self.backend and self.backend.tool_executor:
-            self.backend.tool_executor.set_workdir(main_repo)
-        self._update_branch()
-
-        try:
-            from app.widgets.tab_manager_window import TabManagerWindow
-
-            tm = TabManagerWindow.get_instance()
-            if tm is not None:
-                tm.refresh_workbench()
-        except Exception:
-            pass
-
-        logger.info(f"[MainWidget] 已自动切换回主仓库: {main_repo}（项目: {project}）")
-        # 团队模式：切回主仓库全员同步（统一工作树）
-        self._broadcast_team_workdir(main_repo)
-
     @classmethod
     def _on_app_about_to_quit(cls):
         """应用退出时保存所有窗口的脏会话（单次注册，批量执行）"""
@@ -21626,7 +21375,6 @@ _MIN_RENDERED_CARDS_PER_WINDOW = 6  # 每窗口保底页数（闸门的下限保
 # （8 窗口 = 48 页，实测每页 27-39MB → 1.3GB+），_MAX_GLOBAL_RENDERED_PAGES=32
 # 被完全架空。现在保底随存活窗口数收缩，但降到本值即停，避免窗口被饿死到白屏。
 _MIN_RENDERED_CARDS_PER_WINDOW_FLOOR = 3
-_MAX_BRANCH_CACHE = 64  # workdir→branch 缓存上限（M5-B）：超出时淘汰最早插入项，防长期累积渗漏
 
 # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──
 # 双判据：主进程 RSS 超总阈值，且 WebEngine 子进程 RSS 超子阈值才触发强回收——
