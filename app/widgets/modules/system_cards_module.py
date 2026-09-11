@@ -5,13 +5,17 @@
 整段（2979-3112）原样搬移；self → host，赋值显式挂回 host；import 提升到 build 内。
 
 契约属性集（grep `self.[a-z_]+ *=` over 2979-3112，逐项 host.setattr）：
-- _history_card _history_popup_card _share_card _share_card_content
+- _share_card _share_card_content
 - _history_questions_card _history_questions_card_content
 - _memory_card _memory_card_popup _model_config_card _model_config_popup
 - _model_selector_card _model_selector_card_content
 - _tool_control_card _project_selector_card _project_selector_card_content
 - _project_new_edit _project_new_btn _project_open_folder_btn _project_import_btn
 - _question_floating_widget
+
+★ `_history_card` / `_history_popup_card` **不在**本模块契约内：历史会话页已
+插件化（history-manager 插件的工作台页），二者是 `MainWidget` 上的只读代理
+属性（转发插件服务），任何宿主模块都不应赋值。
 host 方法依赖（build 内调用/连接，插件 override 时应保持同名）：
 - _card_manager(_bottom_card_container) / _register_cards_to_manager / _system_card_ids
 - _on_project_selected 等信号回调 / _restore_after_system_close / _refresh_tool_toggle_btn
@@ -46,8 +50,9 @@ class SystemCardsModule(UIModule):
         # 原 setup_ui 同步段直接创建 6 张 BaseSettingsCard 框架（~160ms），
         # 改为 _ensure_xxx_card() 惰性创建：deferred 链预构建 + 打开入口兜底。
         # 属性名保持稳定（None 占位），引用点已有 hasattr/getattr/if 保护。
-        host._history_card = None
-        host._history_popup_card = None
+        # ★ _history_card / _history_popup_card 不在此占位：历史会话页已插件化
+        #   （history-manager），两者是 MainWidget 上的**只读代理属性**
+        #   （转发插件服务），不可赋值。
         host._share_card = None
         host._share_card_content = None
         host._history_questions_card = None

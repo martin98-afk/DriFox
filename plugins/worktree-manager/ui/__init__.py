@@ -19,14 +19,14 @@ def register_ui(registry) -> None:
     try:
         from .worktree_page import SystemWorktreePage
 
-        # 工作树页：page_id="worktree" 填工作树槽位（index 0，默认落点）
+        # 工作树页：page_id="worktree"，order_hint=0 → 页签首位 + 默认落点
         registry.register_workbench_tab(
             plugin_name=_PLUGIN_NAME,
             page_id="worktree",
             label="工作树",
             widget_class=SystemWorktreePage,
             priority=20,
-            metadata={"source": "system"},
+            metadata={"source": "system", "order_hint": 0, "default_landing": True},
         )
         logger.info("[worktree-manager] 已注册工作台 tab: worktree")
     except Exception as e:

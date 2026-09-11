@@ -6,7 +6,8 @@
 
 ## 十一、右侧工作台页模板（workbench_tab）
 
-> 参考实现：`plugins/system-ui/ui/__init__.py` + `_worktree_page.py`（工作树）、`_artifacts_page.py`（产物）。
+> 参考实现：`plugins/artifacts-manager/ui/__init__.py` + `artifacts_page.py`（产物页）、
+> `plugins/worktree-manager/ui/__init__.py` + `worktree_page.py`（工作树页）。
 > 适配场景：插件要一个**常驻内容页**挂在右侧工作台（Tab 侧栏切换的全页内容），
 > 与"点按钮弹出的浮动卡"不同——工作台页由面板槽位管理。
 

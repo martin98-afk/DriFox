@@ -169,7 +169,7 @@ from app.widgets.render_helpers import (
     get_tool_qrc_prefix,
     render_tool_block,
 )
-from app.widgets.cards.settings.history_card import format_relative_time
+from app.utils.session_preview import format_relative_time
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
 # ======== Markdown 实例 ========

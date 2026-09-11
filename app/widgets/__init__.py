@@ -13,8 +13,7 @@ import typing as _typing
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     # 核心卡片（已迁移到 cards/settings/）
     "BaseSettingsCard":   ("app.widgets.cards.settings.base_settings_card", "BaseSettingsCard"),
-    "HistoryCard":        ("app.widgets.cards.settings.history_card", "HistoryCard"),
-    "get_message_preview": ("app.widgets.cards.settings.history_card", "get_message_preview"),
+    "get_message_preview": ("app.utils.session_preview", "get_message_preview"),
     "LLMSettingsCard":    ("app.widgets.cards.settings.llm_settings_card", "LLMSettingsCard"),
     "MemoryCardContent":  ("app.widgets.cards.settings.memory_card", "MemoryCardContent"),
     "ModelConfigCard":    ("app.widgets.cards.settings.model_config_card", "ModelConfigCard"),
@@ -53,7 +52,6 @@ __all__ = [
     # 核心卡片
     "BaseSettingsCard",
     "LLMSettingsCard",
-    "HistoryCard",
     "get_message_preview",
     "MessageCard",
     "create_welcome_card",

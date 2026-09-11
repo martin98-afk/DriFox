@@ -106,7 +106,7 @@ class TestSelfContained:
         """手写 UI 卡已删（自动卡接管）"""
         import os
 
-        ui_init = "plugins/system-ui/ui/__init__.py"
+        ui_init = "plugins/artifacts-manager/ui/__init__.py"
         assert not os.path.exists(ui_init) or ("WebSearchKeySettingsCard" not in open(ui_init, encoding="utf-8").read())
 
     def test_no_settings_dependency(self):

@@ -8,20 +8,21 @@
 
 内置区域：
 - 任务：todowrite 工具回传的待办列表（窗口级）—— 置顶常驻，不进页签
-- 工作树（排第一，默认落点）：git 工作树切换 + 关键文档（原「记忆」页
-  的 docs 子页原样上移，从二级子页签升为一级页签）
-- 历史会话：宿主挂载当前活跃窗口的历史卡片（原对话区底部卡片迁移至此，
-  懒挂载——窗口侧 _ensure_history_card / open_workbench_history 首次触发）
 
-★ 产物页已完全插件化：面板**不再内置**产物实现，改由插件通过
-``UIPluginRegistry.register_workbench_tab(plugin_name, page_id="artifacts", ...)``
-注册（系统插件见 ``plugins/system-ui/ui/_artifacts_page.py``）。
-插件未注册时 index 2 显示 ``_PagePlaceholder`` 占位。
+★ 页面已**完全插件化 · 零保留槽位**：面板不内置任何页实现、不识任何
+page_id 语义，全部页由插件通过
+``UIPluginRegistry.register_workbench_tab(plugin_name, page_id, label, widget_class, metadata=...)``
+注册：
+- ``page_id="worktree"``  → ``plugins/worktree-manager/ui/worktree_page.py``（order_hint=0，默认落点）
+- ``page_id="artifacts"`` → ``plugins/artifacts-manager/ui/artifacts_page.py``（order_hint=10）
+- ``page_id="history"``   → ``plugins/history-manager/ui/history_page.py``（order_hint=20）
+页序 = ``(metadata["order_hint"], 注册序)``；默认落点页 = ``metadata["default_landing"]``
+标记页，缺省为顺序第一页；一个页都没注册时显示空态页。页签一律按 **tab_id**
+定位（``set_current_tab_by_id`` / ``current_tab_id``），宿主不得假设 index。
 
-其它 page_id 的插件页追加在「工作树 / 记忆 / 产物」之后（见 sync_plugin_pages）。
-
-数据由外部驱动（TabManagerWindow.refresh_workbench / MainWidget 推送），
-面板自身不持有 backend 引用，便于测试与解耦。
+数据由页面**自拉**：面板只提供无参 ``refresh_current_page_data()``（切页 /
+refresh_workbench 时调用），页面自行实现可选协议 ``refresh_data()`` 从
+``context`` / 活跃窗口取数 —— 面板不承载任何页面专属逻辑、不持有 backend 引用。
 """
 
 import json
@@ -61,18 +62,18 @@ TASKS_DEFAULT_HEIGHT = 180  # 任务区默认高度
 
 
 # 注：_EmptyHint / _SectionHeader 已迁移到 app.widgets._workbench_helpers 共享模块，
-# 被 TasksPage 和 plugins/system-ui/ui/_artifacts_page.py 共用。
+# 被 TasksPage 和 plugins/artifacts-manager/ui/artifacts_page.py 共用。
 
 
 class _PagePlaceholder(QWidget):
     """页签占位页：插件页未注册 / 已卸载时的兜底内容
 
     产物页（page_id="artifacts"）已完全插件化——面板不再内置实现，
-    由 plugins/system-ui/ui/_artifacts_page.py 的 SystemArtifactsPage 提供。
+    由 plugins/artifacts-manager/ui/artifacts_page.py 的 SystemArtifactsPage 提供。
     插件未加载时显示本占位，避免出现空白页。
     """
 
-    def __init__(self, text: str = "产物页未加载\n\n插件未注册或已卸载", parent=None):
+    def __init__(self, text: str = "页面未加载\n\n插件未注册或已卸载", parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -377,167 +378,6 @@ class TasksPage(QWidget):
                 self._apply_item_style(w)
 
 
-class HistoryPage(QWidget):
-    """历史会话页（一级页签）：历史会话 / 归档 子页签 + 列表上方搜索框
-
-    由对话区底部历史卡片迁移而来，对齐记忆页的统一 tab 形态：去卡片框架，
-    内容直接平铺在工作台页签下。HistoryCard 内容（会话列表本体）由宿主
-    窗口 ``attach`` 挂载（每窗口单实例，显示内容跟随当前活跃窗口投影）。
-
-    接口兼容：保留原 SystemCardFrame 的 ``tabChanged`` / ``set_current_tab`` /
-    ``set_search_handler`` / ``set_extra_button_handler`` / ``_search_input`` /
-    ``_current_tab`` / ``set_opacity`` 契约，宿主侧逻辑零改动。
-    """
-
-    closed = pyqtSignal()  # 兼容契约：页内无关闭钮，保留信号位（宿主连接不失效）
-    tabChanged = pyqtSignal(str)  # 子页签切换（history / archived）
-
-    SUB_TABS = (("history", "历史会话"), ("archived", "归档"))
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._content: Optional[QWidget] = None
-        self._current_tab = "history"
-        self._search_input: Optional[QLineEdit] = None
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        # ── 行1：子页签（居中，与记忆页统一）+ 右端导入按钮 ──
-        tabs_row = QHBoxLayout()
-        tabs_row.setSpacing(2)
-        tabs_row.addStretch(1)
-        self._sub_buttons: List[CustomTabButton] = []
-        for tab_id, label in self.SUB_TABS:
-            btn = CustomTabButton(tab_id, label, self)
-            btn.clicked.connect(self._on_sub_tab_clicked)
-            tabs_row.addWidget(btn)
-            self._sub_buttons.append(btn)
-        tabs_row.addStretch(1)
-        self._import_btn = TransparentToolButton(get_icon("导入"), self)
-        self._import_btn.setFixedSize(26, 26)
-        self._import_btn.setToolTip("导入会话")
-        self._import_btn.hide()  # handler 注入前隐藏（懒挂载期无导入能力）
-        tabs_row.addWidget(self._import_btn)
-        layout.addLayout(tabs_row)
-
-        # ── 行2：搜索框（列表之上，整行） ──
-        self._search_input = QLineEdit(self)
-        self._search_input.setPlaceholderText("🔍 搜索会话...")
-        self._search_input.setFixedHeight(24)
-        self._apply_search_style()
-        layout.addWidget(self._search_input)
-
-        # ── 内容占位（attach 后隐藏） ──
-        self._hint = _EmptyHint("历史会话未加载", self)
-        layout.addWidget(self._hint, 1)
-
-        # ── 内容滚动区：复刻原 SystemCardFrame 的 scroll_area > content_widget
-        #    > content_layout 结构。★ HistoryCard 自己无布局，条目经
-        #    get_content_layout() 沿父链上溯找 content_layout 属性后直接插入，
-        #    去掉滚动容器会被压缩成一条条（2026-09-01 用户实测回归）。
-        self._scroll_area = ScrollArea(self)
-        self._scroll_area.setWidgetResizable(True)
-        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        Colors.refresh()
-        self._scroll_area.setStyleSheet(
-            "QScrollArea { border: none; background: transparent; }"
-            "QScrollArea > QWidget > QWidget { background: transparent; }"
-            + get_unified_scrollbar_style(8)
-        )
-        self._content_widget = QWidget()
-        self._content_widget.setStyleSheet("background: transparent;")
-        self._content_layout = QVBoxLayout(self._content_widget)
-        self._content_layout.setContentsMargins(4, 2, 4, 2)
-        self._content_layout.setSpacing(4)
-        self._scroll_area.setWidget(self._content_widget)
-        self._scroll_area.hide()  # attach 前隐藏（空滚动区会闪白底）
-        layout.addWidget(self._scroll_area, 1)
-        self._set_sub_tab_active(0)
-
-    @property
-    def content_layout(self):
-        """内容布局（HistoryCard.get_content_layout() 沿父链上溯命中本属性）"""
-        return self._content_layout
-
-    # ── 子页签 ──
-
-    def _on_sub_tab_clicked(self, tab_id: str) -> None:
-        self.set_current_tab(tab_id)
-
-    def set_current_tab(self, tab_id: str) -> None:
-        """程序化切换子页签（变化时发射 tabChanged，由宿主驱动列表刷新）"""
-        if tab_id not in {t for t, _ in self.SUB_TABS} or tab_id == self._current_tab:
-            return
-        self._current_tab = tab_id
-        for btn in self._sub_buttons:
-            btn.set_active(btn.tab_id == tab_id)
-        self.tabChanged.emit(tab_id)
-
-    def _set_sub_tab_active(self, index: int) -> None:
-        for i, btn in enumerate(self._sub_buttons):
-            btn.set_active(i == index)
-
-    # ── 宿主注入（兼容原 SystemCardFrame 接口） ──
-
-    def attach(self, content: Any) -> None:
-        """挂载 HistoryCard 内容（原 content_layout.addWidget 等价：放进滚动区内容布局）"""
-        if self._content is not None:
-            return
-        self._content = content
-        self._hint.hide()
-        self._content_layout.addWidget(content)
-        content.show()
-        self._scroll_area.show()
-
-    def set_search_handler(self, placeholder: str, callback) -> None:
-        """设置搜索框占位文本 + 文本变化回调（原卡片头部搜索框 → 列表上方）"""
-        if self._search_input is None:
-            return
-        self._search_input.setPlaceholderText(placeholder)
-        self._search_input.textChanged.connect(callback)
-
-    def set_extra_button_handler(self, handler, icon=None, tooltip="") -> None:
-        """注入导入按钮回调（原卡片标题栏额外按钮 → 子页签行右端）"""
-        if icon is not None:
-            self._import_btn.setIcon(icon)
-        self._import_btn.setToolTip(tooltip or "导入会话")
-        self._import_btn.clicked.connect(handler)
-        self._import_btn.show()
-
-    def set_opacity(self, opacity: float) -> None:
-        """透明度联动契约（原 SystemCardFrame 为空实现，此处同语义）"""
-
-    def _apply_search_style(self) -> None:
-        Colors.refresh()
-        self._search_input.setStyleSheet(
-            f"""
-            QLineEdit {{
-                background: {Colors.HOVER_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: 2px 8px;
-                {font_size_css(11)}
-                {get_font_family_css()}
-            }}
-            QLineEdit:focus {{
-                border: 1px solid {Colors.TEXT_ACCENT};
-            }}
-            QLineEdit::placeholder {{
-                color: {Colors.INPUT_PLACEHOLDER};
-            }}
-        """
-        )
-
-    def refresh_style(self) -> None:
-        self._hint.refresh_style()
-        for btn in self._sub_buttons:
-            btn.refresh_style()
-        if self._search_input is not None:
-            self._apply_search_style()
-
-
 class WorkbenchPanel(QWidget):
     """右侧工作台面板（**嵌入式**：对话区右侧第三窗格，与左侧 TabPanel 对称）
 
@@ -565,19 +405,15 @@ class WorkbenchPanel(QWidget):
 
     close_requested = pyqtSignal()
     refresh_requested = pyqtSignal()
-    # 工作树页内工作目录变更（切 worktree/恢复主仓库/清除根目录）→ 宿主转发给活跃窗口
+    # 本页面板内任一页请求「切换工作目录」（页面自带 workingDirChanged 信号时由
+    # 面板通用转发，见 _wire_page_signals）→ 宿主转发给活跃窗口
     workingDirChanged = pyqtSignal(str)
     # 差异请求：file_paths 为 None 表示「查看所有产物差异」
     diff_requested = pyqtSignal(object)  # Optional[List[str]]
     # 卡片 tab × 关闭钮点击（registry 连接本信号，同步清理卡片归属状态并摘 tab）
     card_tab_close_requested = pyqtSignal(str)  # card_id
-    # 切到「历史会话」页时发射：宿主窗口此时刷新历史列表数据（面板隐藏期间
-    # isVisible()=False 会被 refresh_history_card_if_visible 跳过，靠本信号补刷）
-    history_tab_shown = pyqtSignal()
     # 当前页签变化（含程序化切换）：宿主用于按对话窗口独立记忆页签
     current_tab_changed = pyqtSignal(int)
-
-    TAB_WORKTREE, TAB_ARTIFACTS, TAB_HISTORY = 0, 1, 2
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -589,23 +425,17 @@ class WorkbenchPanel(QWidget):
 
         # 当前任务区高度（splitter 拖拽持久化用）
         self._tasks_height = TASKS_DEFAULT_HEIGHT
-        # 工作树槽位：page_id="worktree" 由系统插件填充（完全插件化，同产物页模式）
-        self._plugin_worktree_widget: Optional[QWidget] = None
-        self._worktree_plugin_sig: Optional[tuple] = None
-        self._worktree_plugin_info: Optional[Any] = None
-        # 构建前收到的项目信息（槽位页挂载后补投递）
-        self._pending_project: Optional[tuple] = None
+        # 页面账本（由插件注册表 reconcile，见 sync_plugin_pages）
+        # ★ 面板不认任何 page_id 语义、不保留槽位：worktree / artifacts / history
+        #   与其它插件页一视同仁，顺序由 metadata["order_hint"] 决定。
+        self._page_order: List[str] = []
+        self._default_page_id: Optional[str] = None
+        # 空态页（未注册任何插件页时占位，无对应页签）
+        self._empty_page: QWidget = _PagePlaceholder(parent=None)
         # 宿主窗口缓存（见 _host_window：hover 预览期间 window() 会取到浮层）
         self._host_window_ref: Optional[QWidget] = None
         # 页签记忆：None = 面板尚未打开过（首次打开默认第一个页签，之后恢复上次关闭时页签）
         self._last_tab_index: Optional[int] = None
-        # 历史会话页内容（宿主当前活跃窗口的历史卡片框架）；None = 未挂载（页签不出现）
-        self._history_page: Optional[QWidget] = None
-        # 产物页：插件注册时的来源签名（None = 显示占位页）
-        self._artifacts_plugin_sig: Optional[tuple] = None
-        self._plugin_artifacts_widget: Optional[QWidget] = None
-        self._artifacts_plugin_info: Optional[Any] = None
-        # 产物数据签名（数据未变时 update_artifacts 跳过全量重建）
         self._last_artifacts_sig: Optional[tuple] = None
 
         root = QVBoxLayout(self)
@@ -650,18 +480,11 @@ class WorkbenchPanel(QWidget):
         self._tab_ids: List[str] = []
         self._tab_labels: List[str] = []  # 与 _tab_ids 平行，供 _rebuild_tab_bar 标签变更判定
 
-        # 内容栈
-        # index 0 = 工作树页（git 工作树 + 关键文档，默认落点）
-        # index 1 = 产物页槽位（插件提供；未注册时为 _PagePlaceholder 占位）
-        # index 2 = 历史会话页；index 3+ = 其它插件页
+        # 内容栈：索引 = _page_order 顺序（全部由插件注册），卡片 tab 追加在后
         self._stack = QStackedWidget(self._bottom)
-        self._worktree_placeholder = _PagePlaceholder("工作树页未加载\n\n插件未注册或已卸载", parent=self._stack)
-        self._artifacts_placeholder = _PagePlaceholder(parent=self._stack)
-        self.artifacts_page: QWidget = self._artifacts_placeholder
-        self.worktree_page: QWidget = self._worktree_placeholder
-        self._stack.addWidget(self._worktree_placeholder)
-        self._stack.addWidget(self._artifacts_placeholder)
         self._bottom_layout.addWidget(self._stack, 1)
+        # 初始无任何插件页 → 先挂空态页（首帧不出现空白无提示）
+        self._sync_empty_page()
 
         self._body_splitter.addWidget(self._bottom)
 
@@ -837,85 +660,20 @@ class WorkbenchPanel(QWidget):
     def has_card_tab(self, card_id: str) -> bool:
         return card_id in self._card_tabs
 
-    # ── 历史会话页（宿主挂载当前活跃窗口的历史卡片） ──
-
-    def attach_history_page(self, widget: Optional[QWidget]) -> None:
-        """挂载「历史会话」页内容（宿主当前活跃窗口的历史卡片框架）
-
-        工作台是宿主级单例，历史页与其他页同一投影语义：内容始终来自
-        「当前活跃对话窗口」，窗口切换时由 refresh_workbench → 本方法换挂。
-        换挂时旧页不销毁（setParent(None) 还给它所属窗口，其 MainWidget
-        仍持有引用与信号连接，切回时再挂回来）。
-
-        Args:
-            widget: 窗口的历史卡片框架（SystemCardFrame）；None 跳过（幂等）
-        """
-        if widget is None or self._history_page is widget:
-            return
-        # ★ 换挂/首次挂载后页签集合变化：后续页签 index 整体平移（insert 前插
-        # 时 Qt 递增 currentIndex、remove 前删时递减，保持同一 current widget），
-        # 依赖 Qt 的 index 记账容易在组合路径下错位。这里统一按「此前所在页签的
-        # tab_id」重新定位：正显示历史页则延续新窗口的历史页（跨窗口不跳页），
-        # 停在插件/卡片页则按 id 找回新 index，页面与高亮都不丢。
-        prev_id = self._tab_id_at(self._stack.currentIndex())
-        if self._history_page is not None:
-            old = self._history_page
-            idx = self._stack.indexOf(old)
-            self._history_page = None
-            if idx >= 0:
-                self._stack.removeWidget(old)
-                old.setParent(None)
-        self._history_page = widget
-        # 固定插在 index 3（工作树/记忆/产物之后、插件页之前），页签顺序稳定
-        self._stack.insertWidget(self.TAB_HISTORY, widget)
-        self._rebuild_tab_bar()
-        # 还原用户此前所在页签：tab 集合变化后按 id 重新定位；此前正显示历史页
-        # 则延续显示新窗口的历史页（跨窗口切换不跳页的既有语义）
-        if prev_id is not None:
-            restore_idx = self._tab_id_index(prev_id)
-            if restore_idx is not None and restore_idx != self._stack.currentIndex():
-                self.set_current_tab(restore_idx)
-
-    def detach_history_page(self, widget: QWidget) -> None:
-        """摘除「历史会话」页（窗口关闭时由宿主窗口调用，防 stack 悬空引用）
-
-        仅当当前挂载的就是该 widget 时生效（幂等）。摘除后页签条同步重建，
-        当前正显示历史页时 QStackedWidget 已自动切到邻近页，这里同步按钮高亮。
-        """
-        if self._history_page is not widget:
-            return
-        self._history_page = None
-        idx = self._stack.indexOf(widget)
-        if idx >= 0:
-            self._stack.removeWidget(widget)
-            widget.setParent(None)
-        self._rebuild_tab_bar()
-        self.set_current_tab(max(0, self._stack.currentIndex()))
-
     # ── 页签条构建（内置 + 插件，顺序与 stack 一致） ──
 
     def _tab_specs(self) -> List[tuple]:
-        """内置页签 + 插件页签（顺序与 QStackedWidget 保持一致）
+        """页签规格：插件页（按 _page_order）+ 卡片页（顺序与 QStackedWidget 一致）
 
-        产物页标签：插件用 ``page_id="artifacts"`` 填充槽位时用插件的 label，
-        否则用 ``"产物"``（不会出现两个产物 tab）。
+        ★ 面板**不认任何 page_id 语义**：页与其标签均来自插件注册
+        （``register_workbench_tab``），顺序由 ``metadata["order_hint"]`` 决定。
         """
-        art_label = "产物"
-        art_info = getattr(self, "_artifacts_plugin_info", None)
-        if art_info is not None:
-            art_label = art_info.label or "产物"
+        infos = getattr(self, "_plugin_infos", {})
         specs: List[tuple] = [
-            ("worktree", "工作树"),
-            ("artifacts", art_label),
+            (pid, infos[pid].label if pid in infos and infos[pid].label else pid)
+            for pid in getattr(self, "_page_order", [])
         ]
-        # 历史会话页：宿主挂载历史卡片后常驻（懒挂载，见 attach_history_page），
-        # 顺序与 stack.insertWidget(TAB_HISTORY) 严格一致
-        if self._history_page is not None:
-            specs.append(("history", "历史会话"))
-        # _plugin_infos 已排除 artifacts（见 sync_plugin_pages），此处无需再过滤
-        for page_id, info in self._plugin_infos.items():
-            specs.append((page_id, info.label))
-        # 动态卡片 tab 追加在内置 + 插件页之后（与 stack 追加顺序一致）
+        # 动态卡片 tab 追加在插件页之后（与 stack 追加顺序一致）
         for card_id, entry in self._card_tabs.items():
             specs.append((card_id, entry["label"]))
         return specs
@@ -1066,224 +824,128 @@ class WorkbenchPanel(QWidget):
     # ── 插件页签 reconcile（宿主在 refresh_workbench 时调用） ──
 
     def sync_plugin_pages(self, tabs: List[Any], force: bool = False) -> None:
-        """按 UIPluginRegistry 的 workbench_tabs 增删插件页（签名不变则跳过重建）
+        """按插件注册表 reconcile 工作台页（签名不变则跳过重建）
 
-        产物页特例：``page_id="artifacts"`` 是**保留 id**，插件注册它即填充
-        index 2 的产物页槽位（面板本身不提供产物实现）。未注册时显示占位页。
-        其余 page_id 按注册序追加在「工作树 / 记忆 / 产物」之后。
+        ★ 面板对页面**零语义**：不识 page_id、不保留槽位、不内置任何页实现。
+        - 顺序：``(metadata["order_hint"], 注册序)``
+        - 默认落点：``metadata["default_landing"]`` 标记页，缺省为顺序第一页
+        - 未注册任何页时显示空态页（无页签）
 
-        force=True（热重载）：(page_id, label) 签名不变但实现已变，置空全部
-        签名并销毁现有插件页，强制按最新注册重建（worktree/artifacts 槽位
-        由 _use_plugin_* 感知 None 签名自动走替换；重建后数据由宿主
-        refresh_workbench 的推送链补投递）。
+        force=True（热重载）：签名不变但实现已变 → 销毁全部插件页强制重建
+        （数据由页面自身 ``refresh_data()`` / ``showEvent`` 重新拉取）。
         """
-        all_infos = {t.page_id: t for t in (tabs or [])}
-        # ── 保留页签槽位：worktree（index 0）/ artifacts（index 1），不进普通插件页列表 ──
-        wt_info = all_infos.get("worktree")
-        if force:
+        raw = list(tabs or [])
+        ordered = sorted(
+            enumerate(raw),
+            key=lambda pair: (int((getattr(pair[1], "metadata", None) or {}).get("order_hint", 0)), pair[0]),
+        )
+        infos: Dict[str, Any] = {info.page_id: info for _i, info in ordered}
+        order: List[str] = [info.page_id for _i, info in ordered]
+        sig = tuple((pid, infos[pid].label) for pid in order)
+
+        self._plugin_infos = infos
+        self._page_order = order
+        self._default_page_id = self._resolve_default_page_id(order, infos)
+
+        # ★ 残缺 context 自愈（插件页通用）：工作台 frame 在 hover 预览期间会被
+        #   setParent 到浮层，此时构建出的插件页可能只拿到残缺 UI context
+        #   （缺 backend）—— 症状：工作树页空列表、添加/删除/切换全部静默失效。
+        #   检出这种坏页时，即便 (page_id,label) 签名未变也强制重建；仅在
+        #   「宿主此刻确实能提供 backend」时触发，避免无 backend 的测试/降级
+        #   环境下反复销毁重建。
+        context_broken = False
+        if not force and self._plugin_widgets:
+            if any(self._page_context_incomplete(w) for w in self._plugin_widgets.values()):
+                try:
+                    probe_ctx = self._host_window()._build_ui_context()
+                except Exception:
+                    probe_ctx = {}
+                context_broken = "backend" in (probe_ctx or {})
+
+        if force or context_broken:
             self._plugin_sig = None
-            self._worktree_plugin_sig = None
-            self._artifacts_plugin_sig = None
             for page_id in list(self._plugin_widgets.keys()):
                 self._destroy_plugin_page(page_id)
-        if wt_info is not None:
-            self._use_plugin_worktree(wt_info)
-        else:
-            self._use_placeholder_worktree()
-        art_info = all_infos.get("artifacts")
-        if art_info is not None:
-            self._use_plugin_artifacts(art_info)
-        else:
-            self._use_placeholder_artifacts()
-
-        infos = {pid: info for pid, info in all_infos.items() if pid not in ("worktree", "artifacts")}
-        sig = tuple((t.page_id, t.label) for t in (tabs or []) if t.page_id not in ("worktree", "artifacts"))
-        if sig == self._plugin_sig and set(infos.keys()) == set(self._plugin_widgets.keys()):
-            # 集合未变也补一次页签条 reconcile：产物页 label 未入 sig，
-            # 插件注册/改名后标签可能残留旧值（_rebuild_tab_bar 内部再做
-            # id+label 比对，集合未变时仅重算 hover，成本为零）
+        elif sig == self._plugin_sig and set(order) == set(self._plugin_widgets.keys()):
+            # 页集合与 (page_id,label) 签名均未变：只补一次页签条 reconcile
+            # （label 未入旧签名时可能残留旧标签；_rebuild_tab_bar 内部再做
+            #  id+label 比对，集合未变时仅重算 hover，成本为零）
             self._rebuild_tab_bar()
             return
-        self._plugin_infos = infos
-        # 当前页是否是被卸载的插件页（卸载后 Qt 会自动切到邻近页，需回落第一个页签）
-        cur = self._stack.currentWidget()
-        was_plugin_current = cur is not None and any(cur is w for w in self._plugin_widgets.values())
+
+        # 空态页先对齐（非空时先摘除，避免占用 index 0 干扰下面的重排）
+        self._sync_empty_page()
         # 卸载已注销页
         for page_id in list(self._plugin_widgets.keys()):
             if page_id not in infos:
                 self._destroy_plugin_page(page_id)
-        # 挂载新页
-        for page_id, info in infos.items():
+        # 挂载新页 + 按 order 重排 stack
+        for index, page_id in enumerate(order):
             if page_id not in self._plugin_widgets:
-                self._mount_plugin_page(info)
+                self._mount_plugin_page(infos[page_id])
+            widget = self._plugin_widgets.get(page_id)
+            if widget is None:
+                continue
+            cur_idx = self._stack.indexOf(widget)
+            if cur_idx != index:
+                self._stack.removeWidget(widget)
+                self._stack.insertWidget(index, widget)
         self._plugin_sig = sig
         current = self._stack.currentIndex()
         self._rebuild_tab_bar()
-        # 当前页被移除（插件页）或越界时回落第一个页签（默认落点，非工作树特判）
-        if was_plugin_current or current >= self._stack.count() or current < 0:
+        if current >= self._stack.count() or current < 0:
             current = 0
         self.set_current_tab(current)
 
-    # ── 工作树页槽位（完全插件化，index 0 恒定，默认落点） ──
-    def _use_plugin_worktree(self, info: Any) -> None:
-        """用插件版工作树页替换 index 0 的当前内容（占位页或旧插件页）"""
-        sig = (info.page_id, info.label)
-        # ★ 签名相同但页面是"残缺 context"版本（见 _host_window 注释：hover 预览
-        # 期间构建）时必须重建，否则会一直沿用无 backend 的坏页面。
-        if (
-            sig == self._worktree_plugin_sig
-            and self._plugin_worktree_widget is not None
-            and not self._page_context_incomplete(self._plugin_worktree_widget)
-        ):
-            return
-        widget = self._make_page_widget(info)
-        if widget is None:
-            return
-        self._remove_worktree_slot_widget()
-        self._stack.insertWidget(self.TAB_WORKTREE, widget)
-        self._plugin_worktree_widget = widget
-        self.worktree_page = widget
-        self._worktree_plugin_sig = sig
-        self._worktree_plugin_info = info
-        # ★ 挂载点补刷：页面构造可能早于主题应用（启动期插件加载先于
-        #   Colors 就绪），构造期固化的 QSS 是旧主题色；此后无人再通知它。
-        #   有 refresh_style 的页面就地按当前主题重设一次。
-        if hasattr(widget, "refresh_style"):
-            widget.refresh_style()
-        # 工作目录变更 → panel 信号（宿主转发给活跃窗口）
-        self._wire_worktree_dir_change(widget)
-        # 挂载前缓存的项目信息补投递
-        if self._pending_project is not None:
-            project, workdir = self._pending_project
-            self._pending_project = None
-            self._push_worktree_project(project, workdir)
-        if self._stack.currentIndex() == self.TAB_WORKTREE:
-            self._stack.setCurrentIndex(self.TAB_WORKTREE)
+    def _resolve_default_page_id(self, order: List[str], infos: Dict[str, Any]) -> Optional[str]:
+        """默认落点页：显式 ``metadata["default_landing"]`` 优先，否则顺序第一页"""
+        for pid in order:
+            meta = getattr(infos[pid], "metadata", None) or {}
+            if meta.get("default_landing"):
+                return pid
+        return order[0] if order else None
 
-    def _use_placeholder_worktree(self) -> None:
-        """插件未注册工作树页 → 回落到占位页"""
-        if self._worktree_plugin_sig is None and self._plugin_worktree_widget is None:
-            return  # 已是占位，跳过
-        self._remove_worktree_slot_widget()
-        self._stack.insertWidget(self.TAB_WORKTREE, self._worktree_placeholder)
-        self._worktree_placeholder.show()
-        self.worktree_page = self._worktree_placeholder
-        self._worktree_plugin_sig = None
-        self._worktree_plugin_info = None
-        if self._stack.currentIndex() == self.TAB_WORKTREE:
-            self._stack.setCurrentIndex(self.TAB_WORKTREE)
+    def default_page_id(self) -> Optional[str]:
+        """默认落点页 id（工作台首次打开 / 无页签记忆时使用）"""
+        return getattr(self, "_default_page_id", None)
 
-    def _remove_worktree_slot_widget(self) -> None:
-        """移除工作树槽位（index 0）上的当前 widget（占位页保留实例）"""
-        current = self._stack.widget(self.TAB_WORKTREE)
-        if current is None:
-            return
-        self._stack.removeWidget(current)
-        if current is self._worktree_placeholder:
-            current.hide()
-        elif current is self._plugin_worktree_widget:
-            current.hide()
-            current.deleteLater()
-            self._plugin_worktree_widget = None
-        else:
-            current.hide()
+    def _sync_empty_page(self) -> None:
+        """页集合为空时挂上空态页（无页签），非空时移除"""
+        empty = self._empty_page
+        has_pages = bool(self._page_order)
+        if not has_pages:
+            if self._stack.indexOf(empty) < 0:
+                self._stack.addWidget(empty)
+        elif self._stack.indexOf(empty) >= 0:
+            self._stack.removeWidget(empty)
 
-    def _wire_worktree_dir_change(self, widget: QWidget) -> None:
-        """把插件页的工作目录变更入口接到 panel.workingDirChanged"""
-        if hasattr(widget, "workingDirChanged"):
-            try:
-                widget.workingDirChanged.connect(self.workingDirChanged.emit)
-            except Exception:
-                pass
+    def refresh_current_page_data(self) -> None:
+        """让当前页自拉数据（插件页可选协议：``refresh_data()``）
 
-    def _push_worktree_project(self, project: str, workdir: Optional[str] = None) -> None:
-        """向工作树槽位页推送当前项目（页未挂载时缓存，挂载后补投递）"""
-        setter = getattr(self.worktree_page, "set_project", None)
-        if callable(setter):
-            try:
-                setter(project, workdir)
-            except Exception:
-                pass
-
-    # ── 产物页槽位（完全插件化，index 2 恒定） ──
-
-    def _use_plugin_artifacts(self, info: Any) -> None:
-        """用插件版产物页**替换** index 2 的当前内容（占位页或旧插件页）
-
-        ★ 必须是"替换"而非 insertWidget：QStackedWidget.insertWidget(TAB_ARTIFACTS, w)
-        会把原 index 2 及其后所有页**整体后移**，导致后续插件页与 tab 错位
-        （表现为插件页显示出产物内容）。因此这里先移除旧页再插入，
-        保证 stack 索引与 tab 顺序严格一致：
-        0=工作树 / 1=记忆 / 2=产物 / 3+=其它插件页。
+        宿主不再为具体页面推送数据（原 ``update_artifacts`` / ``update_project``）：
+        页自己从 ``context`` / 活跃窗口取数，宿主只发「刷新」这一个无参指令，
+        从而不承载任何页面专属逻辑。
         """
-        sig = (info.page_id, info.label)
-        if (
-            sig == self._artifacts_plugin_sig
-            and self._plugin_artifacts_widget is not None
-            and not self._page_context_incomplete(self._plugin_artifacts_widget)
-        ):
-            return
-        widget = self._make_page_widget(info)
-        if widget is None:
-            return
-        # 先卸掉 index 0 上的旧页（占位页或上一个插件版），再插入新页
-        self._remove_artifacts_slot_widget()
-        self._stack.insertWidget(self.TAB_ARTIFACTS, widget)
-        self._plugin_artifacts_widget = widget
-        self.artifacts_page = widget
-        self._artifacts_plugin_sig = sig
-        self._artifacts_plugin_info = info
-        # 挂载点补刷（同 _use_plugin_worktree：构造早于主题应用的固化旧色）
-        if hasattr(widget, "refresh_style"):
-            widget.refresh_style()
-        # 新页实例无数据：重置产物脏标记，下一次推送必刷（否则新页空白）
-        self._last_artifacts_sig = None
-        # 差异入口接到 panel 的 diff_requested（插件版若有 set_diff_all_callback）
-        self._wire_artifacts_diff(widget)
-        if self._stack.currentIndex() == self.TAB_ARTIFACTS:
-            self._stack.setCurrentIndex(self.TAB_ARTIFACTS)
-
-    def _use_placeholder_artifacts(self) -> None:
-        """插件未注册产物页 → 回落到占位页（产物功能完全插件化，无内置实现）"""
-        if self._artifacts_plugin_sig is None and self._plugin_artifacts_widget is None:
-            return  # 已是占位，跳过
-        self._remove_artifacts_slot_widget()
-        self._stack.insertWidget(self.TAB_ARTIFACTS, self._artifacts_placeholder)
-        self._artifacts_placeholder.show()
-        self.artifacts_page = self._artifacts_placeholder
-        self._artifacts_plugin_sig = None
-        self._artifacts_plugin_info = None
-        # 回落占位页：重置产物脏标记，下一次推送必刷
-        self._last_artifacts_sig = None
-        if self._stack.currentIndex() == self.TAB_ARTIFACTS:
-            self._stack.setCurrentIndex(self.TAB_ARTIFACTS)
-
-    def _remove_artifacts_slot_widget(self) -> None:
-        """移除产物页槽位（index 0）上的当前 widget
-
-        占位页不销毁（留作后续回落复用），插件版则销毁回收。
-        """
-        current = self._stack.widget(self.TAB_ARTIFACTS)
-        if current is None:
-            return
-        self._stack.removeWidget(current)
-        if current is self._artifacts_placeholder:
-            current.hide()  # 占位页保留实例
-        elif current is self._plugin_artifacts_widget:
-            current.hide()
-            current.deleteLater()
-            self._plugin_artifacts_widget = None
-        else:
-            current.hide()
-
-    def _wire_artifacts_diff(self, widget: QWidget) -> None:
-        """把产物页的差异入口接到 panel.diff_requested"""
-        setter = getattr(widget, "set_diff_all_callback", None)
-        if callable(setter):
+        page = self._stack.currentWidget()
+        fn = getattr(page, "refresh_data", None)
+        if callable(fn):
             try:
-                setter(self._emit_diff)
+                fn()
+            except Exception:  # noqa: BLE001 — 诊断日志见 except 内
+                logger.exception(f"[WorkbenchPanel] 页面数据刷新失败: {type(page).__name__}")
+
+    def _wire_page_signals(self, widget: QWidget) -> None:
+        """通用页信号接线：页面若定义 ``workingDirChanged`` 则转发为面板同名信号
+
+        （工作树页切 worktree / 恢复主仓库 / 清除根目录等场景由页面发信号，
+        面板只做无差别转发，不识别页面语义。）
+        """
+        sig = getattr(widget, "workingDirChanged", None)
+        if sig is not None and hasattr(sig, "connect"):
+            try:
+                sig.connect(self.workingDirChanged.emit)
             except Exception:
-                pass
+                logger.exception(f"[WorkbenchPanel] workingDirChanged 接线失败: {type(widget).__name__}")
 
     def _host_window(self):
         """返回宿主主窗口（TabManagerWindow）
@@ -1360,9 +1022,12 @@ class WorkbenchPanel(QWidget):
             return
         self._stack.addWidget(widget)
         self._plugin_widgets[info.page_id] = widget
-        # 挂载点补刷（同 _use_plugin_worktree：构造早于主题应用的固化旧色）
+        # 挂载点补刷：页面构造可能早于主题应用（启动期插件加载先于 Colors 就绪），
+        # 构造期固化的 QSS 是旧主题色；此后无人再通知它。
         if hasattr(widget, "refresh_style"):
             widget.refresh_style()
+        # 通用信号接线（页面若定义 workingDirChanged 则转发为面板同名信号）
+        self._wire_page_signals(widget)
 
     def _destroy_plugin_page(self, page_id: str) -> None:
         """销毁插件页 widget（显式隐藏 + 移除布局，避免残影）"""
@@ -1379,48 +1044,41 @@ class WorkbenchPanel(QWidget):
 
         user=True 表示用户主动切换（页签点击 / 定向入口），仅此路径发射
         current_tab_changed 驱动宿主写入 per-window 页签记忆；程序化切换
-        （历史页换挂延续、切窗恢复 saved）不发射，避免污染活跃窗口记忆。
+        （切窗恢复 saved）不发射，避免污染活跃窗口记忆。
 
         ★ 越界保护：按窗口记忆恢复的页签可能已被卸载（卡片 tab 关闭 / 插件
-        卸载 / 历史页摘除）。此时 setCurrentIndex 是空操作而下方按钮循环会把
-        全部按钮置非激活 —— 「tab 选中丢失」根因。越界时不强行跳页，仅把
-        按钮高亮与 stack 当前页重新对齐。
+        卸载）。此时 setCurrentIndex 是空操作而下方按钮循环会把全部按钮置
+        非激活 —— 「tab 选中丢失」根因。越界时不强行跳页，仅把按钮高亮与
+        stack 当前页重新对齐。
+
+        ★ 切页后统一触发当前页 ``refresh_data()``（通用自拉，见
+        ``refresh_current_page_data``）：宿主不识别页面语义，页面自己决定
+        要不要重建（如产物页按数据签名跳过、历史页按子页签分流）。
         """
         if index < 0 or index >= self._stack.count():
             index = self._stack.currentIndex()
+        changed = index != self._stack.currentIndex()
         self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == index)
-        if index == self.TAB_HISTORY:
-            self.history_tab_shown.emit()
         # 通知宿主记录（当前页签按对话窗口独立记忆，见 TabManagerWindow 回调）
         if user:
             self.current_tab_changed.emit(index)
+        if changed:
+            self.refresh_current_page_data()
 
     def current_tab(self) -> int:
         return self._stack.currentIndex()
 
-    # ── 数据入口（宿主驱动） ──
+    def current_tab_id(self) -> Optional[str]:
+        """当前页签 id（越界/空页签返回 None）
 
-    def update_artifacts(self, operations: List[Dict[str, Any]], session_key: Optional[str] = None) -> None:
-        """刷新产物列表（数据未变时跳过重建）
-
-        ★ 签名 = (session_key, 条数, 首条/末条 file_path)：file_recorder 记录
-        为 append-only，同会话条数不变即内容不变；跨窗口由 session_key
-        （会话 id）区分。切对话标签的高频全量重建（含遍历全部消息分组）
-        是工作台开着时切换卡顿的主源之一。
+        历史会话页等**插件页**的位置由注册序决定，宿主不应假设 index，
+        一律用本方法 + ``set_current_tab_by_id`` 按 id 定位。
         """
-        ops = list(operations or [])
-        sig = (
-            session_key,
-            len(ops),
-            ops[0].get("file_path") if ops else None,
-            ops[-1].get("file_path") if ops else None,
-        )
-        if sig == self._last_artifacts_sig:
-            return
-        self._last_artifacts_sig = sig
-        self.artifacts_page.set_operations(ops)
+        return self._tab_id_at(self._stack.currentIndex())
+
+    # ── 数据入口（宿主驱动；仅任务区，页面数据由页面自拉） ──
 
     def update_todos(self, todos: List[Dict[str, Any]]) -> None:
         """刷新任务列表
@@ -1429,20 +1087,6 @@ class WorkbenchPanel(QWidget):
         它已覆盖「无任务 / 折叠 / 展开」三种情形，此处不再重复 setSizes。
         """
         self.tasks_page.update_todos(todos)
-
-    def update_project(self, project: str, workdir: Optional[str] = None) -> None:
-        """同步当前项目到工作树页（槽位未挂载时缓存，挂载后补投递）
-
-        ★ (project, workdir) 未变化时跳过：工作树页刷新含 DB 查询 + git 检测
-        + 列表重建，切标签高频路径重复推送是卡顿源之一。_pending_project
-        兼作脏标记（插件页挂载消费置 None 后首次推送必刷）；页面自身的
-        增删文档操作走独立刷新入口，不受此脏检查影响。
-        """
-        project = project or ""
-        if self._pending_project is not None and (project, workdir) == self._pending_project:
-            return
-        self._pending_project = (project, workdir)
-        self._push_worktree_project(project, workdir)
 
     # ── 主题 ──
 
@@ -1468,12 +1112,7 @@ class WorkbenchPanel(QWidget):
         #   （历史实锤：真机上 worktree 页残留 azure 旧色而 artifacts 正常，
         #   dispatch 外层 except 吞掉异常只留一行 warning）。每页独立捕获，
         #   异常带页类名落日志，保证一页炸不掉整面板。
-        for _label, _page in (
-            ("artifacts", self.artifacts_page),
-            ("tasks", self.tasks_page),
-            ("worktree", self.worktree_page),
-            ("history", self._history_page),
-        ):
+        for _label, _page in (("tasks", self.tasks_page),):
             if _page is None or not hasattr(_page, "refresh_style"):
                 continue
             try:

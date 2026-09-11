@@ -1,0 +1,18 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "history-manager",
+  "description": "DriFox 内置 UI 组件：工作台历史会话页（历史 / 归档列表、搜索、归档 · 重命名 · 恢复 · 导入）",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFox Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "MIT",
+  "type": "system",
+  "components": {
+    "ui": true
+  }
+}

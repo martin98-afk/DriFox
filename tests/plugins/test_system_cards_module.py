@@ -14,9 +14,9 @@ from app.widgets.ui_composition import compose
 pytest.importorskip("PyQt5.QtWidgets")
 
 # 契约属性集（grep `self.[a-z_]+ *=` over 3122-3255）：None 占位 + 懒创建卡片 + 标题栏按钮
+# ★ _history_card / _history_popup_card 已移出：历史会话页插件化（history-manager
+#   插件工作台页），二者是 MainWidget 的只读代理属性，本模块不再占位。
 _CONTRACT_ATTRS = (
-    "_history_card",
-    "_history_popup_card",
     "_share_card",
     "_share_card_content",
     "_history_questions_card",

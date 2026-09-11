@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
-"""
-历史会话卡片 - 包含当前会话列表和归档会话列表
+"""历史会话卡片 - 当前会话列表 + 归档会话列表
+
+归属 ``history-manager`` 插件（原 ``app/widgets/cards/settings/history_card.py``）。
+通用辅助 ``format_relative_time`` / ``get_message_preview`` 已上移到
+``app.utils.session_preview``（消息卡片等非历史模块也复用），此处仅转引，
+保持 ``from .history_card import get_message_preview`` 的旧导入路径可用。
 """
 
 import datetime
@@ -43,6 +47,7 @@ from app.utils.design_tokens import (
     scale_font_size,
 )
 from app.utils.utils import get_font_family_css, get_icon
+from app.utils.session_preview import format_relative_time, get_message_preview  # noqa: F401  (get_message_preview 转引)
 
 
 class _UrlImportThread(QThread):
@@ -71,50 +76,6 @@ class _UrlImportThread(QThread):
             self.finished.emit("", "URL内容不是有效的JSON格式")
         except Exception as e:
             self.finished.emit("", f"无法从URL获取数据: {e}")
-
-
-def format_relative_time(time_str: str) -> str:
-    """将时间字符串转换为相对时间显示"""
-    if not time_str or time_str == "未知":
-        return "更早"
-    try:
-        session_time = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-        now = datetime.datetime.now()
-        diff = now - session_time
-
-        if diff.total_seconds() < 60:
-            return "刚刚"
-        elif diff.total_seconds() < 3600:
-            minutes = int(diff.total_seconds() / 60)
-            return f"{minutes}分钟前"
-        elif diff.total_seconds() < 86400:
-            hours = int(diff.total_seconds() / 3600)
-            return f"{hours}小时前"
-        elif diff.days == 1:
-            return "昨天"
-        elif diff.days < 7:
-            return f"{diff.days}天前"
-        else:
-            return time_str[5:10] if len(time_str) >= 10 else time_str
-    except (ValueError, TypeError):
-        return time_str[5:10] if time_str and len(time_str) >= 10 else "更早"
-
-
-def get_message_preview(messages: List[Dict], max_len: int = 50) -> str:
-    """从消息列表中提取预览文本"""
-    if not messages:
-        return ""
-    for msg in reversed(messages):
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        # 跳过 hook 消息（role=user 但带 _hook_event 标记），避免预览显示 hook 内容
-        if msg.get("_hook_event"):
-            continue
-        if role == "user" and content:
-            if isinstance(content, list):
-                content = " ".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
-            return content[:max_len].strip() + ("..." if len(content) > max_len else "")
-    return ""
 
 
 def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) -> bool:

@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""系统插件版产物页（SystemArtifactsPage）
+"""产物页（SystemArtifactsPage）
 
-注册到 WorkbenchPanel 的 "system_artifacts" tab（由 plugins/system/ui/__init__.py
-register_ui 完成），作为 register_workbench_tab 通道的示例。
+注册到 WorkbenchPanel 的 "artifacts" 保留页签（由
+``plugins/artifacts-manager/ui/__init__.py`` 的 ``register_ui`` 完成）。
 
-与内置产物页（app.widgets.workbench_panel.ArtifactsPage）功能对齐，但
-通过插件通道加载，便于后续彻底替代内置版。区别：
+数据通路：
 - 数据由 context 注入（context["backend"] / context["session_id"]）
 - 差异请求通过 context["diff_requested_callback"] 转发
 
@@ -308,6 +307,8 @@ class SystemArtifactsPage(QWidget):
     def __init__(self, parent=None, context: Optional[Dict[str, Any]] = None):
         super().__init__(parent)
         self._context = context or {}
+        # 数据签名去抖（同会话条数+首末路径不变则跳过重建，见 refresh_data）
+        self._last_ops_sig: Optional[tuple] = None
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
@@ -336,7 +337,8 @@ class SystemArtifactsPage(QWidget):
         # 「查看所有产物差异」按钮
         self._header.set_action("差异对比", "查看所有产物差异", self._emit_diff_all)
         # 构造期不拉数据：context 里的 backend/session_id 未必就绪，
-        # 由宿主 refresh_workbench → panel.update_artifacts(ops) 推送。
+        # 构造期不拉数据：context 里的 backend/session_id 未必就绪，首个
+        # refresh_data()（宿主切页 / refresh_workbench）时自拉。
 
     def _emit_diff_all(self) -> None:
         cb = self._context.get("diff_requested_callback")
@@ -346,10 +348,27 @@ class SystemArtifactsPage(QWidget):
             except Exception:
                 pass
 
+    def _active_session(self) -> Tuple[Any, Optional[str]]:
+        """解析当前活跃窗口的 (backend, session_id)
+
+        ``context`` 是页面构造期的快照（工作台单例、按活跃窗口投影），切窗后
+        会过期；因此优先向 ``TabManagerWindow.get_current_window()`` 取实时值，
+        取不到才回退 context。
+        """
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            win = tm.get_current_window() if tm is not None else None
+            if win is not None and getattr(win, "backend", None) is not None:
+                return win.backend, getattr(win, "_current_session_id", None)
+        except Exception:
+            pass
+        return self._context.get("backend"), self._context.get("session_id")
+
     def get_operations(self) -> List[Dict[str, Any]]:
-        """从 context 拉数据（宿主未推送时的备用路径）"""
-        backend = self._context.get("backend")
-        session_id = self._context.get("session_id")
+        """从当前活跃会话拉取文件操作记录（页自拉，宿主不再推送）"""
+        backend, session_id = self._active_session()
         if backend is None or not session_id:
             return []
         try:
@@ -363,11 +382,27 @@ class SystemArtifactsPage(QWidget):
     def refresh_data(self, operations: Optional[List[Dict[str, Any]]] = None) -> None:
         """渲染产物列表（按用户问题分组，消息不可用时回退平铺）
 
+        工作台通用页协议入口（宿主 ``refresh_current_page_data`` 调用；也可由
+        其它路径显式传 operations）。
+
         Args:
-            operations: 宿主推送的文件操作记录；为 None 时从 context 自行拉取。
+            operations: 文件操作记录；为 None 时自拉当前活跃会话。
         """
         if operations is None:
             operations = self.get_operations()
+        # ★ 签名去抖（从面板迁入）：file_recorder 为 append-only，同会话条数不变
+        #   即内容不变；切页 / 切窗 / refresh_workbench 高频调用时避免全量重建
+        #   （遍历全部消息分组是工作台开着时切换卡顿的主源之一）。
+        _, session_id = self._active_session()
+        sig = (
+            session_id,
+            len(operations or []),
+            (operations[0].get("file_path") if operations else None),
+            (operations[-1].get("file_path") if operations else None),
+        )
+        if sig == self._last_ops_sig:
+            return
+        self._last_ops_sig = sig
         self._clear_list()
         groups, flat_mode = self._build_groups(operations or [])
         if flat_mode:
@@ -497,14 +532,15 @@ class SystemArtifactsPage(QWidget):
             self._list_layout.addWidget(item)
         self._list_layout.addStretch(1)
 
-    # ── 宿主契约（与内置 ArtifactsPage 同名） ──
+    # ── 数据入口 ──
 
     def set_operations(self, operations: List[Dict[str, Any]]) -> None:
-        """宿主数据入口（与内置 ArtifactsPage 同名契约）
+        """显式推送数据入口（外部调用方 / 测试用）
 
-        WorkbenchPanel.update_artifacts 会调 ``artifacts_page.set_operations(ops)``，
-        插件版必须实现同名方法才能被覆盖替换。
+        ``WorkbenchPanel`` 已不再推送数据（改由 ``refresh_data()`` 自拉），本方法
+        保留为显式入口：先置空签名以**强制**重建，避免被去抖逻辑跳过。
         """
+        self._last_ops_sig = None
         self.refresh_data(operations)
 
     def set_diff_all_callback(self, callback) -> None:

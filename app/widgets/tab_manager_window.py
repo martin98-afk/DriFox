@@ -773,11 +773,9 @@ class TabManagerWindow(FramelessWindow):
         self.workbench_panel.close_requested.connect(self._hide_workbench)
         self.workbench_panel.refresh_requested.connect(self.refresh_workbench)
         self.workbench_panel.diff_requested.connect(self._open_workbench_diff)
-        # 切到「历史会话」页时刷新当前活跃窗口的历史列表（面板隐藏期间 isVisible 跳过的补刷）
-        self.workbench_panel.history_tab_shown.connect(self._on_workbench_history_shown)
         # 🆕 页签按对话窗口独立记忆：页签变化 → 写入当前活跃窗口；切回窗口时恢复
         self.workbench_panel.current_tab_changed.connect(self._remember_workbench_tab)
-        # 工作树页内工作目录变更 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
+        # 页面请求切换工作目录 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
         self.workbench_panel.workingDirChanged.connect(self._on_workbench_working_dir_changed)
         self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
         # 主题 / 字号刷新：与桌宠同路径注册
@@ -1422,33 +1420,13 @@ class TabManagerWindow(FramelessWindow):
             pass
         win = self.get_current_window()
         backend = getattr(win, "backend", None) if win is not None else None
-        project = getattr(win, "_current_project", "") or ""
-        # 历史会话页：跟随当前活跃窗口换挂（与其他页同一投影语义；未构建时保持现状）
-        panel.attach_history_page(getattr(win, "_history_card", None) if win is not None else None)
-        # 换挂后若正显示历史页则补刷数据：切窗时 set_current_tab(saved) 相同值不触发
-        # history_tab_shown，刚挂上的页面数据可能未填充（空白）；幂等（多刷一次无害）
-        if win is not None and panel.current_tab() == panel.TAB_HISTORY:
-            try:
-                if hasattr(win, "_refresh_history_toggle_panel"):
-                    win._refresh_history_toggle_panel()
-            except Exception:
-                pass
-        if backend is not None:
-            # 工作树/产物页数据推送（页面由插件填充，未挂载时面板内部缓存补投递）
-            try:
-                workdir = (getattr(win, "_current_workdir", None) or {}).get(project)
-            except Exception:
-                workdir = None
-            panel.update_project(project, workdir)
-            # 产物：本会话文件写入记录（会话未落库时跳过）
-            session_id = getattr(win, "_current_session_id", None)
-            ops: list = []
-            try:
-                if backend.file_recorder is not None and session_id:
-                    ops = backend.file_recorder.get_all_operations_for_session(session_id)
-            except Exception:
-                ops = []
-            panel.update_artifacts(ops, session_key=session_id)
+        # 当前页数据刷新：页面自拉（插件页可选协议 refresh_data()）。
+        # ★ 宿主不再为具体页面推送数据（原 update_project / update_artifacts），
+        #   页面自己从 context / 活跃窗口取数，面板保持零页面语义。
+        try:
+            panel.refresh_current_page_data()
+        except Exception:
+            logger.exception("[Workbench] 当前页数据刷新失败")
         # 任务：优先窗口缓存（todowrite 结果联动），缺失回退 tool_executor 实时读
         todos = getattr(win, "_latest_todos", None)
         if not todos and backend is not None and getattr(backend, "_tool_executor", None) is not None:
@@ -1548,43 +1526,32 @@ class TabManagerWindow(FramelessWindow):
         else:
             self.refresh_workbench()
         # 2) 定位「工作树」页
-        panel.set_current_tab(panel.TAB_WORKTREE, user=True)
+        panel.set_current_tab_by_id("worktree", user=True)
 
     def open_workbench_history(self) -> None:
         """展开工作台并定位「历史会话」页（历史会话已从对话区底部卡片迁移至此）
 
-        统一直达入口：底部工具栏历史按钮 / /history 命令都走这里。历史页内容
-        是当前活跃窗口的历史卡片（懒创建，首次进入时构建并挂载）；切页后的
-        数据刷新由 history_tab_shown → _on_workbench_history_shown 驱动。
+        统一直达入口：底部工具栏历史按钮 / ``/history`` 命令都走这里。
+        历史会话页已插件化（``plugins/history-manager``，``page_id="history"``），
+        故走通用 ``open_workbench_tab`` 通道；页内数据刷新由页面 ``showEvent``
+        → ``HistoryPage.refresh()`` 自驱动（不再需要宿主补刷）。
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None:
             return
-        # 确保当前活跃窗口的历史卡片已构建并挂载（幂等；未挂载时页签不出现）
+        # 确保「历史会话」插件页已 reconcile 到工作台页签（插件未加载时无此页）
         win = self.get_current_window()
         if win is not None and hasattr(win, "_ensure_history_card"):
             try:
                 win._ensure_history_card()
             except Exception:
-                logger.exception("[Workbench] 构建历史会话卡片失败")
-        card = getattr(win, "_history_card", None) if win is not None else None
-        if card is not None:
-            panel.attach_history_page(card)
+                logger.exception("[Workbench] 历史会话页挂载失败")
         # 展开工作台（不可见时 set_workbench_visible 内部会触发 refresh_workbench）
         if not self.is_workbench_visible():
             self.set_workbench_visible(True)
         else:
             self.refresh_workbench()
-        panel.set_current_tab(panel.TAB_HISTORY, user=True)
-
-    def _on_workbench_history_shown(self) -> None:
-        """「历史会话」页显示 → 刷新当前活跃窗口的历史列表数据"""
-        win = self.get_current_window()
-        if win is not None and hasattr(win, "_refresh_history_toggle_panel"):
-            try:
-                win._refresh_history_toggle_panel()
-            except Exception:
-                pass
+        panel.set_current_tab_by_id("history", user=True)
 
     # ── 工作台差异入口（替代标题栏 diff_btn） ──
 

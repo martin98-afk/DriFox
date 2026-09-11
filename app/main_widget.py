@@ -1602,35 +1602,68 @@ class OpenAIChatToolWindow(ToolWindow):
     # 由 _deferred_build_cards 链（800ms 后）预构建 + 卡片打开入口 ensure 兜底，
     # 保证「打开卡片 → 框架已就绪」行为不变。属性名/注册语义与改造前完全一致。
 
-    def _ensure_history_card(self):
-        """确保历史会话页已创建（内容由 _build_deferred_card_history 填充）
+    # ── 历史会话页（已插件化：history-manager 插件的工作台页） ──
 
-        历史会话已从对话区底部卡片迁移到右侧工作台「历史会话」页签，并
-        对齐记忆页的统一 tab 形态：去卡片框架（HistoryPage：子页签 +
-        列表上方搜索框 + 导入按钮），HistoryCard 列表内容不变。
-        """
-        if self._history_card is not None:
-            return
-        from app.widgets.workbench_panel import HistoryPage
+    def _history_service(self):
+        """取 history-manager 插件服务（未加载 / 未实现时 None）"""
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-        self._history_card = HistoryPage(self)
-        # 子页签切换 → 宿主刷新（历史/归档列表分流）；closed 信号为兼容契约
-        self._history_card.tabChanged.connect(self._on_history_tab_changed)
-        self._history_card.set_current_tab("history")
-        self._history_card.closed.connect(self._close_history_panel)
-        # 挂到右侧工作台「历史会话」页签（幂等；面板未就绪时由
-        # TabManagerWindow.refresh_workbench / open_workbench_history 兜底补挂）
-        # 🛡️ 仅活跃窗口才挂载：后台/新建窗口的懒构建若无条件挂载，会把工作台上
-        # 活跃窗口有数据的历史页顶掉，挂上一个未填充的空白页 —— 打开历史会话
-        # 新建标签页后历史页签「什么都不显示」的根因（2026-09-01 用户实测）。
-        # 未挂载的窗口切回时由 _on_tab_selected → refresh_workbench →
-        # attach_history_page(win._history_card) 换挂补上。
+            return UIPluginRegistry.get_instance().get_service("history")
+        except Exception:
+            return None
+
+    def _is_active_window(self) -> bool:
+        """本窗口是否为 Tab 管理器当前活跃窗口（单例工作台的投影源）"""
         try:
             tm = TabManagerWindow.get_instance()
-            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
-            if panel is not None:
-                if tm.get_current_window() is self:
-                    panel.attach_history_page(self._history_card)
+            if tm is None:
+                return True  # 无 Tab 管理器（单窗口场景）视为活跃
+            return tm.get_current_window() is self
+        except Exception:
+            return True
+
+    @property
+    def _history_card(self):
+        """历史会话页（插件工作台页）；插件未加载时为 None
+
+        ★ 只读代理：页面归工作台面板所有（单例，跟随活跃窗口投影），
+        窗口不再持有自己的 HistoryPage。旧代码的 ``self._history_card = None``
+        初始化写入由 setter 吞掉（见下）。
+        """
+        svc = self._history_service()
+        return svc.page if svc is not None else None
+
+    @_history_card.setter
+    def _history_card(self, value) -> None:
+        """兼容旧初始化路径（``system_cards_module`` 置 None）；插件化后忽略写入"""
+        return
+
+    @property
+    def _history_popup_card(self):
+        """会话列表卡片（插件页面自带）；插件未加载时为 None"""
+        svc = self._history_service()
+        return svc.card if svc is not None else None
+
+    @_history_popup_card.setter
+    def _history_popup_card(self, value) -> None:
+        return
+
+    def _ensure_history_card(self):
+        """确保「历史会话」工作台页已挂载（插件化：reconcile 插件页签）
+
+        历史会话已从对话区底部卡片迁移到右侧工作台，并进一步拆分为
+        ``plugins/history-manager`` 独立插件（``page_id="history"``）。
+        本方法只做「触发工作台页签 reconcile」，页面由面板按插件注册表构建。
+        """
+        tm = TabManagerWindow.get_instance()
+        panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+        if panel is None:
+            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            panel.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs())
         except Exception:
             logger.exception("[MainWidget] 历史会话页挂载到工作台失败")
 
@@ -1784,38 +1817,16 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(0, step)
 
     def _build_deferred_card_history(self):
-        """── ① 历史会话卡片 ──"""
-        try:
-            from app.widgets.cards.settings.history_card import HistoryCard
+        """── ① 历史会话页（已插件化：仅确保工作台页签已 reconcile） ──
 
-            self._ensure_history_card()  # P0-1：框架惰性创建
-            self._history_popup_card = HistoryCard()
-            self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
-            self._history_popup_card.sessionArchived.connect(self._archive_history_session)
-            self._history_popup_card.sessionRenamed.connect(self._rename_history_session)
-            self._history_popup_card.refreshRequested.connect(self._refresh_history_toggle_panel)
-            self._history_popup_card.sessionImported.connect(self._on_session_imported)
-            self._history_popup_card.sessionRestored.connect(self._on_archived_session_restored)
-            self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
-            self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
-            self._history_popup_card.teamRestoreRequested.connect(self._on_team_restore_requested)
-            self._history_popup_card.teamArchiveRequested.connect(self._on_team_archive_requested)
-            self._history_popup_card.memberSelected.connect(self._on_team_member_selected)
-            self._history_card.set_extra_button_handler(
-                self._history_popup_card.get_import_button_handler(),
-                tooltip="导入会话",
-            )
-            self._history_card.attach(self._history_popup_card)
-            self._history_card.set_search_handler(
-                "🔍 搜索会话...",
-                lambda text: self._history_popup_card.set_search_filter(text),
-            )
-            # 首批评数据：卡片挂载后立即填充。此前依赖后续 _notify_history_data_changed
-            # 补刷，若历史会话加载提前返回（空消息）或异常，页面将永远空白（连
-            # 「暂无历史对话记录」提示都没有，因为 _update_display 从未执行过）。
-            self._refresh_history_toggle_panel()
+        页面本体（``HistoryPage`` + ``HistoryCard``）归 ``history-manager``
+        插件所有，由工作台面板按插件注册表构建；窗口侧不再创建卡片、不再
+        接线信号（页内信号由插件页转发回窗口方法）。
+        """
+        try:
+            self._ensure_history_card()
         except Exception:
-            logger.exception("[DeferredBuild] HistoryCard 构建失败")
+            logger.exception("[DeferredBuild] 历史会话页 reconcile 失败")
         finally:
             self._schedule_next_deferred_card()
 
@@ -3262,7 +3273,7 @@ class OpenAIChatToolWindow(ToolWindow):
             for card_id, card_info in ui_registry.get_floating_cards().items():
                 if ":" in card_id:
                     cmd_name = card_id
-                elif card_info.plugin_name in ("system", "system-ui") or card_id == card_info.plugin_name:
+                elif card_info.plugin_name in ("system",) or card_id == card_info.plugin_name:
                     cmd_name = card_id
                 else:
                     cmd_name = f"{card_info.plugin_name}:{card_id}"
@@ -8246,44 +8257,33 @@ class OpenAIChatToolWindow(ToolWindow):
 
         - 工作台不可见 → 展开并定位历史页
         - 可见但不在历史页 → 切到历史页
-        - 已在历史页 → 切回工作树页（等效原“关闭卡片”）
-        切页后的数据刷新由 history_tab_shown → TabManagerWindow 驱动。
+        - 已在历史页 → 切回默认落点页（等效原“关闭卡片”）
+        切页后的数据刷新由工作台通用协议
+        ``WorkbenchPanel.refresh_current_page_data()`` 驱动（页面自拉）。
         """
-        self._ensure_history_card()  # 懒创建 + 挂载工作台（幂等）
+        self._ensure_history_card()  # 触发插件页 reconcile（幂等）
         tm = TabManagerWindow.get_instance()
         panel = getattr(tm, "workbench_panel", None) if tm is not None else None
         if tm is None or panel is None:
             return
-        if not tm.is_workbench_visible() or panel.current_tab() != panel.TAB_HISTORY:
+        if not tm.is_workbench_visible() or panel.current_tab_id() != "history":
             tm.open_workbench_history()
         else:
-            panel.set_current_tab(panel.TAB_WORKTREE, user=True)
+            panel.set_current_tab_by_id("worktree", user=True)
 
     def _close_history_panel(self):
         """历史卡片关闭钮收出口：仅在用户显式点 × 时离开历史页
 
         ★ 加载会话路径已不再调用本方法（页签按用户选择保持）；
-        本方法只服务 _history_card.closed 信号的显式关闭语义。
+        本方法只服务 ``HistoryPage.closed`` 的显式关闭语义。
         """
         try:
             tm = TabManagerWindow.get_instance()
             panel = getattr(tm, "workbench_panel", None) if tm is not None else None
-            if panel is not None and panel.current_tab() == panel.TAB_HISTORY:
-                panel.set_current_tab(panel.TAB_WORKTREE, user=True)
+            if panel is not None and panel.current_tab_id() == "history":
+                panel.set_current_tab_by_id("worktree", user=True)
         except Exception:
             pass
-
-    def _sync_search_box_visibility(self):
-        """同步搜索框：两个标签页都显示搜索框"""
-        search_input = getattr(self._history_card, "_search_input", None)
-        if not search_input:
-            return
-        search_input.setVisible(True)
-        search_input.setFocus()
-
-        # 根据当前标签更新占位文本
-        current_tab = self._history_card._current_tab if hasattr(self._history_card, "_current_tab") else "history"
-        search_input.setPlaceholderText("🔍 搜索历史会话..." if current_tab == "history" else "🔍 搜索归档会话...")
 
     def _refresh_history_toggle_panel(self, is_archived: bool = False):
         """刷新历史面板数据"""
@@ -8343,18 +8343,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         # 1. 历史卡片可见时刷新
-        # 🛡️ 防御（2026-08-23 bug fix）：system_cards build 异常（plugin override import 失败等）
-        # 可能导致窗口缺 _history_card 等契约属性，硬访问会抛 AttributeError 中断
-        # _create_new_session 末尾的 notify，进而阻断欢迎卡片渲染链。getattr 兜底
-        # 后本次会话数据变更对历史卡片"无动作"——但 _create_new_session 之前的
-        # _schedule_initial_welcome 已调度，重建照常进行。
-        history_card = getattr(self, "_history_card", None)
-        if history_card is None and getattr(self, "_history_card", "__missing__") == "__missing__":
-            logger.warning(
-                "[OpenAIChatToolWindow] _notify_history_data_changed: 缺契约属性 _history_card，"
-                "跳过历史卡片刷新（欢迎卡片渲染不受影响）"
-            )
-        refresh_history_card_if_visible(history_card, self._refresh_history_toggle_panel)
+        # ★ 历史页已插件化：页面是工作台**单例**、跟随活跃窗口投影。只有本窗口
+        #   为活跃窗口时才允许把本窗口的列表写进共享页，否则后台窗口的数据变更
+        #   会污染活跃窗口正在看的历史列表（多窗口串态）。
+        if self._is_active_window():
+            history_card = getattr(self, "_history_card", None)
+            refresh_history_card_if_visible(history_card, self._refresh_history_toggle_panel)
         # 2. 欢迎卡片数据同步：优先「软更新」——缓存卡片仍在时保留
         #    QWebEngineView 实例、仅重渲染 body（避免其他标签页对话完成广播
         #    到本窗口时欢迎卡片被销毁重建，视觉上"重新加载一下"+ 100-500ms
@@ -8504,7 +8498,7 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 # 缓存过期或不存在，读取文件
                 try:
-                    from app.widgets.cards.settings.history_card import get_message_preview
+                    from app.utils.session_preview import get_message_preview
 
                     with open(fp, "r", encoding="utf-8") as f:
                         data = json.loads(f.read())
@@ -8547,22 +8541,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._archived_cache.pop(stale_key, None)
 
         self._history_popup_card.set_archived_sessions(enriched_list)
-
-    def _on_history_tab_changed(self, tab_id: str):
-        """处理历史/归档标签切换"""
-        self._sync_search_box_visibility()
-
-        # 切换标签时清空搜索
-        search_input = getattr(self._history_card, "_search_input", None)
-        if search_input:
-            search_input.clear()
-
-        self._history_popup_card.switch_tab(tab_id)
-
-        if tab_id == "archived":
-            self._refresh_archived_sessions()
-        else:
-            self._refresh_history_toggle_panel()
 
     def _on_history_session_selected(self, index: int):
         """从历史面板选择会话"""
@@ -20479,7 +20457,8 @@ class OpenAIChatToolWindow(ToolWindow):
             if tm.get_current_window() is not self:
                 return
             if panel.isVisible():
-                panel.update_project(project, workdir)
+                # 页面自拉数据（工作树页 refresh_data 会向活跃窗口取 project/workdir）
+                panel.refresh_current_page_data()
         except Exception:
             pass
 
@@ -20897,16 +20876,8 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-        # 历史会话页已迁移到右侧工作台：窗口关闭时摘除自己的历史卡片，
-        # 防止 workbench stack 持有已关闭窗口的悬空 widget（C++ 对象泄漏/残影）
-        try:
-            if self._history_card is not None:
-                tm = TabManagerWindow.get_instance()
-                panel = getattr(tm, "workbench_panel", None) if tm is not None else None
-                if panel is not None:
-                    panel.detach_history_page(self._history_card)
-        except Exception:
-            pass
+        # 历史会话页已插件化（history-manager）：页面归工作台面板所有、跟随活跃
+        # 窗口投影，窗口关闭无需摘除（面板不持有本窗口的 widget 引用）。
 
         # ★ 泄漏修复（P0）：注销窗口的 UI 插件状态，释放注册表对窗口的强引用。
         # 窗口 __init__ 调用 ui_registry.set_main_widget(self) +

@@ -3,11 +3,11 @@
     "light": "icon.svg",
     "dark": "icon_dark.svg"
   },
-  "name": "system-ui",
-  "description": "DriFox 内置 UI 组件：工作台工作树页与产物页",
+  "name": "artifacts-manager",
+  "description": "DriFox 内置 UI 组件：工作台产物页（按用户问题分组展示会话文件产物）",
   "version": "1.0.0",
   "author": {
-    "name": "DriFoxx Team"
+    "name": "DriFox Team"
   },
   "homepage": "https://github.com/martin98-afk/DriFox",
   "license": "MIT",

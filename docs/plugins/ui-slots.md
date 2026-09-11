@@ -121,7 +121,7 @@ def register_ui(registry):
 > - **常驻**（`register_titlebar_tab`）：始终显示在标题栏 tab 区（「聊天」右侧），不可关闭，点击触发插件回调。
 > - **非常驻**（`register_floating_card(container="full")`）：卡片打开时动态出现在标题栏（带 × 关闭钮），关闭即从标题栏移除；点击 tab 切换覆盖层显示。
 
-> **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台浮层（WorkbenchPanel）的页签条，自动出现在「产物」「记忆」之后；宿主在 `refresh_workbench` 时调用 `panel.sync_plugin_pages(tabs)` reconcile（签名不变则跳过重建）。同 page_id 高优先级覆盖低优先级，插件卸载时自动注销。系统插件 `plugins/system-ui/ui/_artifacts_page.py` 提供 `SystemArtifactsPage` 作为参考实现，演示如何通过 `context["backend"]` / `context["session_id"]` / `context["diff_requested_callback"]` 从宿主拉取数据与触发回调。
+> **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台浮层（WorkbenchPanel）的页签条，自动出现在「产物」「记忆」之后；宿主在 `refresh_workbench` 时调用 `panel.sync_plugin_pages(tabs)` reconcile（签名不变则跳过重建）。同 page_id 高优先级覆盖低优先级，插件卸载时自动注销。**注册即联动注册 `/{page_id}` 命令**（经 `UIPluginRegistry` 命令账本统一登记，`re_register_all_commands()` 全量重放，不会被内置命令重扫清空）。参考实现：`plugins/artifacts-manager/ui/artifacts_page.py`（`SystemArtifactsPage`，演示 `context["backend"]` / `context["session_id"]` / `context["diff_requested_callback"]` 数据通路）与 `plugins/worktree-manager/ui/worktree_page.py`。
 
 ---
 

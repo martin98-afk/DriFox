@@ -485,6 +485,26 @@ class SystemWorktreePage(QWidget):
         # 强制刷新关键文档
         self._load_key_documents()
 
+    def refresh_data(self) -> None:
+        """数据自拉入口（工作台通用页协议，宿主 ``refresh_current_page_data`` 调用）
+
+        面板不再向页面推送 project/workdir（原 ``WorkbenchPanel.update_project``）：
+        页面自己向当前活跃窗口取 ``_current_project`` 与实例缓存 ``_current_workdir``。
+        """
+        project = ""
+        workdir: Optional[str] = None
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            win = tm.get_current_window() if tm is not None else None
+            if win is not None:
+                project = getattr(win, "_current_project", "") or ""
+                workdir = (getattr(win, "_current_workdir", None) or {}).get(project)
+        except Exception:
+            pass
+        self.set_project(project, workdir)
+
     def _get_effective_workdir(self, project: str):
         """获取有效工作目录（多窗口隔离：实例缓存优先，回退 DB）
 

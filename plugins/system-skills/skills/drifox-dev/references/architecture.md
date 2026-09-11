@@ -99,7 +99,7 @@ app/tools/
 | 插件 | 提供组件 |
 |------|---------|
 | `system-tools` | `tools/` |
-| `system-ui` | `ui/`（UI 扩展点） |
+| `artifacts-manager` | `ui/`（工作台产物页，`register_workbench_tab` 通道） |
 | `system-hooks` | `hooks/` |
 | `system-hook-policies` | `hook_policies/` |
 | `system-commands` | `commands/` |

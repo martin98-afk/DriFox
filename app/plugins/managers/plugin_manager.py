@@ -420,7 +420,8 @@ class PluginManager:
         "storages": "system-storages",
         "serializers": "system-serializers",
         "tools": "system-tools",
-        "ui": "system-ui",
+        # 「ui」组件的系统插件锚点：产物页（工作树/历史已拆分为独立插件）
+        "ui": "artifacts-manager",
         "team_templates": "system-team-templates",
         "mcp": "system-mcp",
     }
