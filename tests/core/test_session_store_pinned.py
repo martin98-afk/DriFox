@@ -88,6 +88,27 @@ def test_pinned_save_load_roundtrip(store):
     assert store.get_session("s2").get("pinned") is False
 
 
+def test_lightweight_list_carries_pinned(store):
+    """轻量列表（启动/跨进程重载的加载路径）必须带出 pinned
+
+    轻量投影曾漏 SELECT pinned 列，导致内存历史列表重建后置顶全部丢失；
+    且后续 save_session 读到的现值恒为 False，把库中置顶写回 0（不可逆）。
+    """
+    store.save_session(_mk_session("s1", pinned=True))
+    store.save_session(_mk_session("s2"))
+    rows = {r["session_id"]: r for r in store.get_sessions_lightweight()}
+    assert rows["s1"]["pinned"] is True
+    assert rows["s2"]["pinned"] is False
+
+
+def test_pin_survives_lightweight_reload(store):
+    """置顶写入后重载（重启语义）：置顶仍在"""
+    store.save_session(_mk_session("s1"))
+    assert store.update_session_pinned("s1", True) is True
+    rows = {r["session_id"]: r for r in store.get_sessions_lightweight()}
+    assert rows["s1"]["pinned"] is True
+
+
 def test_update_session_pinned(store):
     store.save_session(_mk_session("s1"))
     assert store.update_session_pinned("s1", True) is True

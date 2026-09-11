@@ -1035,7 +1035,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # "provider_edit",
         # "mcp_edit",
         # "hook_edit",
-        "project_selector",
         "tool_control",
         "share",
         "history_questions",
@@ -1569,18 +1568,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # ===== TopCardContainer (chatscroll 上方) =====
         # 系统配置卡片，互斥显示
 
+        # 项目选择卡片已迁入 history-manager 插件（左侧停靠区历史卡内可折叠面板），
+        # 宿主不再注册 TOP 容器卡片；项目数据/切换方法仍由本窗口实现。
         # 注：mcp_edit/provider_edit/hook_edit 三张编辑卡片已改为懒创建，
         # 注册/入容器在 _ensure_xxx_card() 中按需执行，避免 setup_ui 关键路径上构建。
-
-        # 项目选择卡片（Top 容器，与 settings 同容器互斥）
-        mgr.register_card(
-            self._window_id,
-            ContainerType.TOP,
-            "project_selector",
-            self._project_selector_card,
-            system_card=True,
-        )
-        self._top_card_container.add_card("project_selector", self._project_selector_card)
 
         # ===== BottomCardContainer (chatscroll 下方) =====
         # Question: 强制覆盖所有其他卡片
@@ -3204,7 +3195,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "memory": ("打开工作树管理", self._open_workbench_memory),
             "model_selector": ("选择模型", self._toggle_model_selector_card),
             "tool_control": ("打开工具控制面板", self._toggle_tool_control_card),
-            "project_selector": ("选择项目", self._toggle_project_selector_card),
+            "project_selector": ("选择项目", self._open_project_selector_panel),
             "share": ("分享对话", self._on_share_clicked),
         }
 
@@ -10140,9 +10131,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._safe_refresh(getattr(self, "_model_selector_card", None))
             if getattr(self, "_model_selector_card", None) is not None:
                 self._update_model_selector_header()
-            # 项目选择卡片
-            self._safe_refresh(getattr(self, "_project_selector_card_content", None))
-            self._safe_refresh(getattr(self, "_project_selector_card", None))
+            # 项目选择面板已迁入 history-manager 插件（左侧停靠区历史卡内），
+            # 样式由插件页自身 refresh_style 负责（宿主不再持有卡片引用）
             # 工具控制卡片
             self._safe_refresh(getattr(self, "_tool_control_card", None))
 
@@ -10176,25 +10166,6 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
         if hasattr(self, "_settings_btn_icon"):
             self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
-        # 项目新建输入框（含 font_size_css + 颜色）
-        if hasattr(self, "_project_new_edit"):
-            self._project_new_edit.setStyleSheet(f"""
-                QLineEdit {{
-                    background: {Colors.HOVER_BG};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 4px;
-                    color: {Colors.TEXT_PRIMARY};
-                    padding: 2px 6px;
-                    {font_size_css(11)}
-                    {get_font_family_css()}
-                }}
-                QLineEdit:focus {{
-                    border: 1px solid {Colors.TEXT_ACCENT};
-                }}
-                QLineEdit::placeholder {{
-                    color: {Colors.INPUT_PLACEHOLDER};
-                }}
-            """)
 
         ThemeRefreshCoordinator.timer_end("total")
 
@@ -19185,9 +19156,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_dialog_title()
 
     def _on_project_label_clicked(self, event):
-        """项目标签点击 - 切换项目选择卡片"""
+        """项目标签点击 — 打开历史会话插件卡并展开项目选择面板"""
         event.accept()
-        self._toggle_project_selector_card()
+        self._open_project_selector_panel()
 
     def _refresh_branch_widget_style(self):
         """刷新分支标签的样式（兼容 _BranchChip 与传统 PushButton）。
@@ -19301,28 +19272,28 @@ class OpenAIChatToolWindow(ToolWindow):
             workdir = getattr(self.backend.tool_executor, "_workdir", None)
         return str(workdir) if workdir else None
 
-    def _toggle_project_selector_card(self):
-        """切换项目选择卡片的显示"""
-        self._card_manager.toggle_card("project_selector", self._window_id)
-        if self._card_manager.is_card_visible("project_selector", self._window_id):
-            # 加载项目数据
-            projects = self.history_manager.get_projects() if self.history_manager else ["默认项目"]
-            # 确保当前项目在列表中（新建项目可能还没有会话/文档记录）
-            if self._current_project not in projects:
-                projects.insert(0, self._current_project)
+    def _open_project_selector_panel(self):
+        """打开历史会话插件卡并展开项目选择面板（标题栏项目 icon / 命令入口）
 
-            # 获取每个项目的会话数和 worktree 数
-            meta_map = self._build_project_meta_map(projects)
-            # 获取每个项目的根目录（用于卡片显示）
-            root_dir_map = self._build_project_root_dir_map(projects)
+        项目选择卡片已迁入 history-manager 插件：宿主只负责「确保卡片可见」，
+        面板数据装配与展开由插件服务 ``open_project_selector`` 完成。
+        """
+        tm = TabManagerWindow.get_instance()
+        svc = self._history_service()
+        page = svc.page if svc is not None else None
+        if page is None or not page.isVisible():
+            # 卡片未创建 / 已关闭 → 走浮动卡显示通道（不 toggle，避免二次点击关闭）
+            if tm is not None:
+                tm.open_workbench_history()
+            svc = self._history_service()
+        if svc is not None and hasattr(svc, "open_project_selector"):
+            svc.open_project_selector()
 
-            self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map, root_dir_map
-            )
-            # 更新卡片标题 — 固定显示"项目切换"，不显示当前项目名
-            self._project_selector_card.set_title_text("📁 项目切换")
-            # 清空过滤输入框
-            self._project_new_edit.clear()
+    def _collapse_project_selector_panel(self):
+        """收起插件的项目选择面板（切项目 / 归档项目完成后调用）"""
+        svc = self._history_service()
+        if svc is not None and hasattr(svc, "collapse_project_selector"):
+            svc.collapse_project_selector()
 
     def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
         """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
@@ -19378,7 +19349,7 @@ class OpenAIChatToolWindow(ToolWindow):
         Tab 图标），但跳过：
         - _create_new_session()（避免连环新建会话）
         - cfg.current_project 全局写入（全局默认项目仅由发送方写）
-        - hide_card("project_selector")（关闭项目卡片仅针对发送方）
+        - 收起项目选择面板（仅针对发送方；接收方保持自己的面板状态）
         """
         if getattr(self, "_is_destroyed", False):
             return
@@ -19547,7 +19518,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if tm is not None:
                 new = tm.spawn_tab(self, new_session=True, project=project)
                 if new is not None:
-                    self._card_manager.hide_card("project_selector", self._window_id)
+                    self._collapse_project_selector_panel()
                     return
             # 降级原行为
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
@@ -19573,8 +19544,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._notify_history_data_changed()
         # 自动触发新建会话，避免原会话与切换后的项目不匹配
         self._create_new_session()
-        # 隐藏项目选择卡片
-        self._card_manager.hide_card("project_selector", self._window_id)
+        # 收起插件内的项目选择面板
+        self._collapse_project_selector_panel()
 
         # 团队模式：一人改项目全员同步（写团队 project + 广播同团队其他窗口）。
         # ★ 必须在 Tab 图标更新之前执行：广播先写入团队级 project，发送方自身的
@@ -19594,36 +19565,27 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
-    def _on_project_filter_changed(self, text: str):
-        """输入过滤文本变化时同步过滤项目列表"""
-        if hasattr(self, "_project_selector_card_content"):
-            self._project_selector_card_content.set_filter(text)
-
-    def _on_header_new_project(self):
-        """从标题栏新建项目按钮/回车触发
+    def _on_header_new_project(self, name: str = ""):
+        """新建/搜索项目（历史插件面板工具条输入框 + 回车 / + 按钮触发）
 
         行为：
         1. 如果输入内容完全匹配某个已有项目 → 切换到该项目
         2. 如果输入内容为空 → 不做任何操作
         3. 否则 → 创建新项目
         """
-        name = self._project_new_edit.text().strip()
+        name = (name or "").strip()
         if not name:
             return
 
         # 检查是否完全匹配某个已有项目
-        if hasattr(self, "_project_selector_card_content"):
-            matching = [p for p in self._project_selector_card_content._projects if p.lower() == name.lower()]
-            if matching:
-                # 匹配到已有项目 → 直接切换
-                self._project_new_edit.clear()
-                self._project_selector_card_content.set_filter("")
-                self._on_project_selected(matching[0])
-                return
+        projects = self.history_manager.get_projects() if self.history_manager else []
+        matching = [p for p in projects if p.lower() == name.lower()]
+        if matching:
+            # 匹配到已有项目 → 直接切换
+            self._on_project_selected(matching[0])
+            return
 
         # 无匹配 → 创建新项目
-        self._project_new_edit.clear()
-        self._project_selector_card_content.set_filter("")
         self._on_new_project_created(name)
 
     def _on_new_project_created(self, project: str, suppress_memory_card: bool = False, root_dir: str = ""):
@@ -19664,7 +19626,7 @@ class OpenAIChatToolWindow(ToolWindow):
                             tm.open_workbench_memory("docs")
                     except Exception as e:
                         logger.warning(f"[NewProject] 流式下新标签页项目上下文注册失败: {e}")
-                    self._card_manager.hide_card("project_selector", self._window_id)
+                    self._collapse_project_selector_panel()
                     return
             # TabManagerWindow 未就绪则降级原行为（原地切项目）
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
@@ -19706,8 +19668,8 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.warning(f"[NewProject] 展开工作台关键文档失败: {e}")
         # 自动触发新建会话
         self._create_new_session()
-        # 隐藏项目选择卡片
-        self._card_manager.hide_card("project_selector", self._window_id)
+        # 收起插件内的项目选择面板
+        self._collapse_project_selector_panel()
 
         # 团队模式：一人改项目全员同步（新建项目也是团队级项目切换）
         self._broadcast_team_project(project, prev_project)
@@ -19805,18 +19767,8 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         # 刷新项目选择卡片的列表
-        if hasattr(self, "_project_selector_card_content"):
-            projects = self.history_manager.get_projects() if self.history_manager else ["默认项目"]
-            # 确保刚归档的项目不在列表中（兜底，防止残留数据导致复活）
-            if project_name in projects:
-                projects.remove(project_name)
-            if self._current_project not in projects:
-                projects.insert(0, self._current_project)
-            meta_map = self._build_project_meta_map(projects)
-            root_dir_map = self._build_project_root_dir_map(projects)
-            self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map, root_dir_map
-            )
+        # 刷新历史插件内的项目选择面板（已归档项目应从列表消失）
+        self._refresh_project_selector()
 
         # 操作完成，恢复正常状态
         self._pet_set_state("idle")
@@ -20250,15 +20202,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._notify_history_data_changed()
 
     def _refresh_project_selector(self):
-        """刷新项目选择器列表"""
-        if not hasattr(self, "_project_selector_card_content"):
-            return
-        projects = self.history_manager.get_projects() if self.history_manager else ["默认项目"]
-        if self._current_project not in projects:
-            projects.insert(0, self._current_project)
-        meta_map = self._build_project_meta_map(projects)
-        root_dir_map = self._build_project_root_dir_map(projects)
-        self._project_selector_card_content.set_projects_data(projects, self._current_project, meta_map, root_dir_map)
+        """通知历史插件刷新项目选择面板数据（项目卡片已迁入 history-manager）"""
+        svc = self._history_service()
+        if svc is not None and hasattr(svc, "refresh_project_selector_data"):
+            svc.refresh_project_selector_data()
 
     def _on_open_project_folder(self, project_name: str, root_dir: str):
         """打开项目根目录（在文件管理器中打开）"""
@@ -20358,15 +20305,8 @@ class OpenAIChatToolWindow(ToolWindow):
             # 此时 DB 没有 workdir，分支标签停留在旧状态（隐藏或显示旧分支）。
             self._update_branch()
 
-            # ── 刷新项目选择卡片 ──
-            projects = self.history_manager.get_projects() if self.history_manager else [project_name]
-            if self._current_project not in projects:
-                projects.insert(0, self._current_project)
-            meta_map = self._build_project_meta_map(projects)
-            root_dir_map = self._build_project_root_dir_map(projects)
-            self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map, root_dir_map
-            )
+            # ── 刷新插件内的项目选择面板 ──
+            self._refresh_project_selector()
 
             InfoBar.success(
                 title="项目已创建",

@@ -14,24 +14,43 @@
   归档（含当前会话清场，``win._archive_history_session``）等
 - 当前会话高亮：只读活跃窗口 ``_current_session_id``（窗口态）
 
-项目切换器：``当前项目（跟随活跃窗口）/ 全部项目 / 具体项目``；「全部项目」
-视图下行内显示项目小标签，点击跨项目会话直接加载（窗口侧自动切项目与工作目录）。
+项目选择面板（可折叠，默认收起）：折叠头一行展示当前过滤目标（项目 icon +
+项目名），点开复用宿主 ``ProjectSelectorCardContent``（项目选择卡片本体：
+首行「全部项目」→ 不过滤项目，视图下行内显示项目小标签；点具体项目 →
+宿主窗口切项目并自动切工作目录，本页同时过滤到该项目）。新建 / 选择文件夹 /
+导入项目的工具条随面板一起迁入本页，均转调宿主窗口方法执行。
 
 接口契约（宿主 ``MainWidget._history_card`` 代理读取）：
 - ``tabChanged`` / ``closed`` / ``set_current_tab`` / ``set_search_handler`` /
   ``set_extra_button_handler`` / ``_search_input`` / ``_current_tab`` /
   ``set_opacity`` / ``content_layout`` / ``refresh_style``
+- ``open_project_selector`` / ``collapse_project_selector`` /
+  ``refresh_project_selector_data``（宿主标题栏项目 icon 与项目增删后的驱动入口）
 """
 
 from typing import Any, List, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout, QWidget
-from qfluentwidgets import ComboBox, ScrollArea, TransparentToolButton
+from PyQt5.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QVBoxLayout,
+    QWidget,
+)
+from qfluentwidgets import FluentIcon, ScrollArea, TransparentToolButton
+
+from loguru import logger
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets._workbench_helpers import _EmptyHint
+from app.widgets.cards.settings.project_selector_card import (
+    ProjectSelectorCardContent,
+    _SquareAvatar,
+    get_project_color,
+)
 from app.widgets.custom_title_bar import CustomTabButton
 
 
@@ -39,35 +58,77 @@ from app.widgets.custom_title_bar import CustomTabButton
 _PROJECT_CURRENT = "__current__"
 _PROJECT_ALL = "__all__"
 
-# 项目下拉最多同时展开的项数（超出在菜单内部滚动）
-_PROJECT_MENU_MAX_VISIBLE = 8
-
-# 项目选择器宽度约束（按项目名自适应后 clamp 到该区间）
-_PROJECT_COMBO_MIN_WIDTH = 56
-_PROJECT_COMBO_MAX_WIDTH = 150
+# 卡片最小宽度：左侧停靠区 / 分隔条压缩时的保底宽度（低于此值搜索框与条目被挤扁）
+_CARD_MIN_WIDTH = 240
 
 
-class _ProjectComboBox(ComboBox):
-    """项目选择器：无下拉箭头 + 半透明底（视觉与左侧搜索框一致）
+class _ProjectSelectorHeader(QFrame):
+    """项目选择折叠头：项目 icon + 项目全名 + 展开箭头（点击展开/收起面板）
 
-    - 箭头：基类 ``paintEvent`` 自绘 ``FIF.ARROW_DOWN``，此处跳过后不再绘制
-    - 宽度：``fit_to_text`` 按项目名自适应，避免固定 110px 挤压搜索框
-    - 下拉：最多展开 ``_PROJECT_MENU_MAX_VISIBLE`` 项，超出菜单内部滚动
+    左侧停靠区宽度有限，项目选择卡片默认收起只留这一行；宿主标题栏项目 icon
+    与本行点击都会展开面板。头像复用项目方块的缩写绘制逻辑（项目名 → 缩写 + 颜色），
+    名称展示**完整**项目名（不省略，宽度超出时挤压同行搜索框）。
     """
+
+    clicked = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMaxVisibleItems(_PROJECT_MENU_MAX_VISIBLE)
+        self.setObjectName("projectSelectorHeader")
+        self.setFixedHeight(30)
+        self.setCursor(Qt.PointingHandCursor)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 0, 8, 0)
+        layout.setSpacing(6)
+        self._avatar = _SquareAvatar("全", get_project_color("全部项目"), self, size=22)
+        layout.addWidget(self._avatar, 0)
+        self._name_label = QLabel("", self)
+        layout.addWidget(self._name_label, 1)
+        self._arrow_label = QLabel("▾", self)
+        layout.addWidget(self._arrow_label, 0)
+        self._apply_style()
 
-    def paintEvent(self, e):  # noqa: N802 (Qt 命名)
-        """只画背景与文本：跳过基类的箭头绘制"""
-        QPushButton.paintEvent(self, e)
+    def _apply_style(self) -> None:
+        Colors.refresh()
+        self.setStyleSheet(
+            f"""
+            QFrame#projectSelectorHeader {{
+                background: {Colors.HOVER_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+            }}
+            QFrame#projectSelectorHeader:hover {{
+                background: {Colors.HOVER_BG_STRONG};
+            }}
+            QFrame#projectSelectorHeader QLabel {{
+                background: transparent;
+                border: none;
+                color: {Colors.TEXT_PRIMARY};
+                {font_size_css(12)}
+                {get_font_family_css()}
+            }}
+        """
+        )
 
-    def fit_to_text(self) -> None:
-        """按当前文本宽度自适应控件宽度（clamp 到 min/max 区间）"""
-        text = self.currentText() or ""
-        width = self.fontMetrics().horizontalAdvance(text) + 22
-        self.setFixedWidth(max(_PROJECT_COMBO_MIN_WIDTH, min(width, _PROJECT_COMBO_MAX_WIDTH)))
+    def refresh_style(self) -> None:
+        """主题/字体变更后重刷样式"""
+        self._apply_style()
+
+    def set_project(self, name: str, is_all: bool = False) -> None:
+        """更新折叠头显示（项目 icon 缩写 + 颜色随项目名）"""
+        name = name or "默认项目"
+        self._name_label.setText(name)
+        self._avatar.set_project(name, get_project_color(name))
+        self._avatar.setToolTip(name)
+        self.setToolTip("全部项目（点击展开项目选择）" if is_all else f"当前项目：{name}（点击展开项目选择）")
+
+    def set_expanded(self, expanded: bool) -> None:
+        """更新展开箭头方向"""
+        self._arrow_label.setText("▴" if expanded else "▾")
+
+    def mousePressEvent(self, event):  # noqa: N802 (Qt 命名)
+        self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 def _active_history_manager():
@@ -113,7 +174,7 @@ class HistoryPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # ── 行1：子页签（居中）+ 右端导入按钮 ──
+        # ── 行1：子页签（居中，单独一行） ──
         tabs_row = QHBoxLayout()
         tabs_row.setSpacing(2)
         tabs_row.addStretch(1)
@@ -124,29 +185,44 @@ class HistoryPage(QWidget):
             tabs_row.addWidget(btn)
             self._sub_buttons.append(btn)
         tabs_row.addStretch(1)
-        self._import_btn = TransparentToolButton(get_icon("导入"), self)
-        self._import_btn.setFixedSize(26, 26)
-        self._import_btn.setToolTip("导入会话")
-        self._import_btn.hide()  # handler 注入前隐藏
-        tabs_row.addWidget(self._import_btn)
         layout.addLayout(tabs_row)
 
-        # ── 行2：项目切换器 + 搜索框 ──
-        self._project_combo = _ProjectComboBox(self)
-        self._project_combo.setFixedHeight(24)
-        self._project_combo.currentIndexChanged.connect(self._on_project_filter_changed)
-        self._project_filter_raw = _PROJECT_CURRENT  # 打开默认「当前项目」
-        self._apply_project_combo_style()
+        # ── 行2：项目选择（icon + 全名）+ 搜索框 + 导入 / 新建会话按钮 ──
+        self._project_header = _ProjectSelectorHeader(self)
+        self._project_header.clicked.connect(self._toggle_project_panel)
+        self._project_filter_raw = _PROJECT_CURRENT  # 默认「跟随活跃窗口项目」
 
         self._search_input = QLineEdit(self)
         self._search_input.setPlaceholderText("🔍 搜索会话...")
-        self._search_input.setFixedHeight(24)
+        self._search_input.setFixedHeight(30)
+        self._search_input.setMinimumWidth(80)  # 项目全名较长时的兜底
         self._apply_search_style()
         filter_row = QHBoxLayout()
         filter_row.setSpacing(6)
-        filter_row.addWidget(self._project_combo, 0)
+        filter_row.addWidget(self._project_header, 0)
         filter_row.addWidget(self._search_input, 1)
+        # 顺序：导入（左）→ 新建（右）
+        self._import_btn = TransparentToolButton(get_icon("导入"), self)
+        self._import_btn.setFixedSize(30, 30)
+        self._import_btn.setToolTip("导入会话")
+        self._import_btn.hide()  # handler 注入前隐藏
+        filter_row.addWidget(self._import_btn)
+        self._new_session_btn = TransparentToolButton(get_icon("新会话"), self)
+        self._new_session_btn.setFixedSize(30, 30)
+        self._new_session_btn.setToolTip("新建会话")
+        self._new_session_btn.clicked.connect(self._on_new_session_clicked)
+        filter_row.addWidget(self._new_session_btn)
         layout.addLayout(filter_row)
+
+        # ── 行3：项目选择面板（默认收起；展开时占满卡片高度） ──
+        self._project_panel = self._build_project_panel()
+        self._project_panel_open = False  # 不依赖 Qt 可见性（祖先未显示时 isVisible 恒 False）
+        self._content_ready = False  # attach 后置 True（面板展开时要让出列表区域）
+        self._project_panel.hide()
+        layout.addWidget(self._project_panel, 1)
+
+        # 卡片最小宽度保底（左侧停靠区拖窄时搜索框/条目不被挤扁）
+        self.setMinimumWidth(_CARD_MIN_WIDTH)
 
         # ── 内容占位（attach 后隐藏） ──
         self._hint = _EmptyHint("历史会话未加载", self)
@@ -191,7 +267,223 @@ class HistoryPage(QWidget):
         self.set_search_handler("🔍 搜索会话...", self._card.set_search_filter)
         self.set_extra_button_handler(self._card.get_import_button_handler(), tooltip="导入会话")
         self.tabChanged.connect(self._on_tab_changed)
-        self._rebuild_project_options()
+        # 构造期只同步折叠头文本；面板数据（项目列表 + 会话数/根目录）留到
+        # 展开或宿主驱动刷新时再拉，避免卡片创建路径上多打一轮 DB 统计查询。
+        self._sync_project_header()
+
+    # ── 项目选择面板（折叠；复用宿主项目选择卡片） ──
+
+    def _build_project_panel(self) -> QWidget:
+        """构建项目选择面板：项目选择卡片内容 + 新建/文件夹/导入工具条
+
+        复用宿主 ``ProjectSelectorCardContent``（项目行 icon / 元数据 / hover
+        导出归档与宿主项目卡片完全一致）；项目增删等数据操作仍由宿主窗口实现，
+        插件只做 UI 承载与信号转发。
+        """
+        panel = QFrame(self)
+        panel.setObjectName("projectSelectorPanel")
+        vbox = QVBoxLayout(panel)
+        vbox.setContentsMargins(0, 2, 0, 2)
+        vbox.setSpacing(4)
+
+        self._project_selector = ProjectSelectorCardContent(panel)
+        self._project_selector.allProjectsSelected.connect(self._on_all_projects_selected)
+        self._project_selector.projectSelected.connect(self._on_project_row_selected)
+        self._project_selector.newProjectCreated.connect(
+            lambda name: self._call_window("_on_new_project_created", name)
+        )
+        self._project_selector.archiveProject.connect(lambda name: self._call_window("_on_archive_project", name))
+        self._project_selector.exportProject.connect(lambda name: self._call_window("_on_export_project", name))
+        self._project_selector.importProjectRequested.connect(
+            lambda: self._call_window("_on_import_project")
+        )
+        self._project_selector.projectFileDropped.connect(
+            lambda path: self._call_window("_on_project_file_dropped", path)
+        )
+        self._project_selector.openFolderRequested.connect(
+            lambda name, root: self._call_window("_on_open_project_folder", name, root)
+        )
+        self._project_selector.folderDropped.connect(
+            lambda path: self._call_window("_on_project_folder_dropped", path)
+        )
+        vbox.addWidget(self._project_selector, 1)
+
+        # ── 工具条：新建/搜索输入框 + 新建 + 选择文件夹 + 导入项目 ──
+        tools = QHBoxLayout()
+        tools.setSpacing(4)
+        self._project_new_edit = QLineEdit(panel)
+        self._project_new_edit.setPlaceholderText("新建/搜索项目...")
+        self._project_new_edit.setFixedHeight(24)
+        self._project_new_edit.setMinimumWidth(80)
+        self._project_new_edit.setStyleSheet(
+            f"""
+            QLineEdit {{
+                background: {Colors.HOVER_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                padding: 2px 6px;
+                {font_size_css(11)}
+                {get_font_family_css()}
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {Colors.TEXT_ACCENT};
+            }}
+        """
+        )
+        self._project_new_edit.returnPressed.connect(self._on_new_project_submitted)
+        tools.addWidget(self._project_new_edit, 1)
+
+        self._project_new_btn = TransparentToolButton(FluentIcon.ADD, panel)
+        self._project_new_btn.setFixedSize(24, 24)
+        self._project_new_btn.setToolTip("创建项目")
+        self._project_new_btn.clicked.connect(self._on_new_project_submitted)
+        tools.addWidget(self._project_new_btn, 0)
+
+        self._project_folder_btn = TransparentToolButton(FluentIcon.FOLDER, panel)
+        self._project_folder_btn.setFixedSize(24, 24)
+        self._project_folder_btn.setToolTip("选择文件夹作为项目根目录")
+        self._project_folder_btn.clicked.connect(lambda: self._call_window("_on_project_open_folder_btn"))
+        tools.addWidget(self._project_folder_btn, 0)
+
+        self._project_import_btn = TransparentToolButton(get_icon("导入"), panel)
+        self._project_import_btn.setFixedSize(24, 24)
+        self._project_import_btn.setToolTip("导入项目（从 .drifox_project 压缩包）")
+        self._project_import_btn.clicked.connect(lambda: self._call_window("_on_import_project"))
+        tools.addWidget(self._project_import_btn, 0)
+
+        vbox.addLayout(tools)
+        return panel
+
+    def _call_window(self, method_name: str, *args) -> None:
+        """调用活跃窗口方法（插件只承载 UI，项目数据操作仍在宿主窗口）"""
+        win = _active_window()
+        fn = getattr(win, method_name, None) if win is not None else None
+        if callable(fn):
+            try:
+                fn(*args)
+            except Exception:
+                logger.warning(f"[history-manager] 调用窗口方法 {method_name} 失败")
+
+    def _sync_project_header(self) -> None:
+        """折叠头显示当前过滤目标（「全部项目」/ 具体项目）"""
+        if self._project_filter_raw == _PROJECT_ALL:
+            self._project_header.set_project("全部项目", is_all=True)
+            return
+        self._project_header.set_project(self._resolved_project_filter() or "默认项目")
+
+    def refresh_project_selector_data(self) -> None:
+        """刷新项目选择面板数据（项目列表 / 会话数·工作目录数 / 根目录）
+
+        项目列表来自 ``HistoryManager``（全局单例），当前项目与元数据来自活跃窗口；
+        宿主新增 ``all_entry_label="全部项目"`` 聚合行（不过滤项目视图）。
+        """
+        win = _active_window()
+        hm = _active_history_manager()
+        projects: List[str] = []
+        try:
+            projects = list(hm.get_project_list()) if hm is not None else []
+        except Exception:
+            projects = []
+        if not projects and self._card is not None:
+            projects = self._card.get_project_list()  # 兜底：从已加载列表聚合
+        current = getattr(win, "_current_project", "默认项目") if win is not None else "默认项目"
+        if current and current not in projects:
+            projects.insert(0, current)
+
+        meta_map = {}
+        root_dir_map = {}
+        if win is not None:
+            meta_builder = getattr(win, "_build_project_meta_map", None)
+            root_builder = getattr(win, "_build_project_root_dir_map", None)
+            try:
+                meta_map = meta_builder(projects) if callable(meta_builder) else {}
+            except Exception:
+                meta_map = {}
+            try:
+                root_dir_map = root_builder(projects) if callable(root_builder) else {}
+            except Exception:
+                root_dir_map = {}
+
+        self._project_selector.set_projects_data(
+            projects,
+            current,
+            meta_map,
+            root_dir_map,
+            all_entry_label="全部项目",
+        )
+        self._sync_project_header()
+
+    def open_project_selector(self) -> None:
+        """外部入口（宿主标题栏项目 icon / ``/project_selector``）：展开面板并刷新数据"""
+        self.refresh_project_selector_data()
+        self._set_project_panel_visible(True)
+
+    def collapse_project_selector(self) -> None:
+        """收起面板（宿主切换项目、归档项目后调用）"""
+        self._set_project_panel_visible(False)
+
+    def _toggle_project_panel(self) -> None:
+        """折叠头点击：展开/收起面板（展开时先拉最新数据）"""
+        will_show = not self._project_panel_open
+        if will_show:
+            self.refresh_project_selector_data()
+        self._set_project_panel_visible(will_show)
+
+    def _set_project_panel_visible(self, visible: bool) -> None:
+        """展开/收起面板；展开时占满卡片高度（临时让出会话列表区域）"""
+        self._project_panel_open = bool(visible)
+        self._project_panel.setVisible(visible)
+        self._scroll_area.setVisible((not visible) and self._content_ready)
+        self._hint.setVisible((not visible) and not self._content_ready)
+        self._project_header.set_expanded(visible)
+
+    def _on_project_row_selected(self, project: str) -> None:
+        """项目行点击：与旧项目下拉一致，仅作为会话筛选（不切窗口项目、不新建会话）
+
+        跨项目会话仍可直接点开：窗口侧 ``_on_history_session_selected`` 会按
+        会话记录自动切项目与工作目录。
+        """
+        self._project_filter_raw = project or _PROJECT_CURRENT
+        if self._card is not None:
+            self._card.set_show_project_labels(False)
+        self._set_project_panel_visible(False)
+        self._sync_project_header()
+        self.refresh()
+
+    def _on_all_projects_selected(self) -> None:
+        """「全部项目」行点击：不过滤项目（行内显示项目标签）+ 收起面板"""
+        self._project_filter_raw = _PROJECT_ALL
+        if self._card is not None:
+            self._card.set_show_project_labels(True)
+        self._set_project_panel_visible(False)
+        self._sync_project_header()
+        self.refresh()
+
+    def _on_new_session_clicked(self) -> None:
+        """新建会话：当前筛选到具体项目时先切到该项目；「全部项目」下保持原项目
+
+        与「点项目行仅做筛选」配套：筛选本身不动窗口项目；点「新建会话」时
+        才把窗口项目切到被筛选的项目（宿主 ``_on_project_selected`` 内含
+        「切项目 + 工作目录 + 新建会话 + 团队广播」）。筛选为「全部项目」
+        或跟随当前项目时，直接在原项目下新建。
+        """
+        target = self._project_filter_raw
+        win = _active_window()
+        current = getattr(win, "_current_project", None) if win is not None else None
+        if target and target not in (_PROJECT_ALL, _PROJECT_CURRENT) and target != current:
+            self._call_window("_on_project_selected", target)
+            return
+        self._call_window("_create_new_session")
+
+    def _on_new_project_submitted(self) -> None:
+        """工具条输入框回车 / + 按钮：交窗口统一处理（命中已有项目则切换）"""
+        name = self._project_new_edit.text().strip()
+        if not name:
+            return
+        self._project_new_edit.clear()
+        self._set_project_panel_visible(False)
+        self._call_window("_on_header_new_project", name)
 
     # ── 对外：卡片引用 ──
 
@@ -230,10 +522,11 @@ class HistoryPage(QWidget):
         if self._content is not None:
             return
         self._content = content
+        self._content_ready = True
         self._hint.hide()
         self._content_layout.addWidget(content)
         content.show()
-        self._scroll_area.show()
+        self._scroll_area.setVisible(not self._project_panel_open)
 
     def set_search_handler(self, placeholder: str, callback) -> None:
         """设置搜索框占位文本 + 文本变化回调"""
@@ -263,6 +556,7 @@ class HistoryPage(QWidget):
 
     def refresh(self) -> None:
         """自拉数据渲染（不再绕宿主窗口方法）"""
+        self._sync_project_header()
         if self._current_tab == "archived":
             self._card.switch_tab("archived")
             self._card.set_archived_sessions(self._enrich_archived_list())
@@ -466,55 +760,18 @@ class HistoryPage(QWidget):
         self._notify_windows_data_changed()
         self.refresh()
 
-    # ── 项目切换器 ──
-
-    def _rebuild_project_options(self) -> None:
-        """重建项目下拉（保留当前选择语义；首项直接显示活跃窗口项目名）"""
-        combo = self._project_combo
-        combo.blockSignals(True)
-        combo.clear()
-        win = _active_window()
-        current = getattr(win, "_current_project", "默认项目") if win else "默认项目"
-        combo.addItem(current, userData=_PROJECT_CURRENT)  # 只显示项目名，不加「当前项目」前缀
-        combo.addItem("全部项目", userData=_PROJECT_ALL)
-        try:
-            hm = _active_history_manager()
-            projects = hm.get_project_list() if hm is not None else None
-            if not projects and self._card is not None:
-                projects = self._card.get_project_list()  # 兜底：从已加载列表聚合
-            for proj in projects or []:
-                combo.addItem(proj, userData=proj)
-        except Exception:
-            pass
-        idx = combo.findData(self._project_filter_raw)
-        combo.setCurrentIndex(idx if idx >= 0 else 0)
-        combo.blockSignals(False)
-        self._sync_project_combo_width()
-
-    def _sync_project_combo_width(self) -> None:
-        """跟随当前文本自适应宽度 + 挂完整项目名 tooltip"""
-        self._project_combo.fit_to_text()
-        self._project_combo.setToolTip(self._project_combo.currentText() or "")
-
-    def _on_project_filter_changed(self, index: int) -> None:
-        """下拉切换：更新过滤器 → 项目标签显隐 → 自拉数据刷新"""
-        data = self._project_combo.itemData(index)
-        if data is None:
-            return
-        self._project_filter_raw = data
-        if self._card is not None:
-            self._card.set_show_project_labels(data == _PROJECT_ALL)
-        self.refresh()
+    # ── 列表数据联动 ──
 
     def _on_card_data_changed(self) -> None:
-        """列表数据渲染完成：注入右键菜单项目列表 + 重建下拉选项"""
+        """列表数据渲染完成：注入右键菜单项目列表 + （面板展开时）刷新项目数据"""
         hm = _active_history_manager()
         if hm is not None and self._card is not None:
             try:
                 self._card.set_project_list(hm.get_project_list())
             except Exception:
                 pass
-        self._rebuild_project_options()
+        if self._project_panel_open:
+            self.refresh_project_selector_data()
 
     # ── 样式 ──
 
@@ -528,7 +785,7 @@ class HistoryPage(QWidget):
                 border-radius: 4px;
                 color: {Colors.TEXT_PRIMARY};
                 padding: 2px 8px;
-                {font_size_css(11)}
+                {font_size_css(12)}
                 {get_font_family_css()}
             }}
             QLineEdit:focus {{
@@ -540,40 +797,12 @@ class HistoryPage(QWidget):
         """
         )
 
-    def _apply_project_combo_style(self) -> None:
-        """项目选择器样式：半透明底 + 无箭头，与左侧搜索框同款"""
-        Colors.refresh()
-        self._project_combo.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: {Colors.HOVER_BG};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: 2px 8px;
-                text-align: left;
-                {font_size_css(11)}
-                {get_font_family_css()}
-            }}
-            QPushButton:hover {{
-                background: {Colors.HOVER_BG_STRONG};
-            }}
-            QPushButton:pressed {{
-                background: {Colors.SELECTED_BG};
-            }}
-            QPushButton::menu-indicator {{
-                image: none;
-                width: 0px;
-            }}
-        """
-        )
-
     def refresh_style(self) -> None:
         self._hint.refresh_style()
         for btn in self._sub_buttons:
             btn.refresh_style()
         if self._search_input is not None:
             self._apply_search_style()
-        self._apply_project_combo_style()
+        self._project_header.refresh_style()
         if hasattr(self._card, "refresh_style"):
             self._card.refresh_style()

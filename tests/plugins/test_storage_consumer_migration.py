@@ -120,6 +120,11 @@ def test_engine_covers_consumer_methods(tmp_path, monkeypatch):
     assert engine.get_session_counts() == {"默认项目": 1}
     assert engine.get_projects() == ["默认项目"]
     assert engine.update_session_project("s1", "proj") is True
+    # update_session_pinned：曾漏加委托 → HistoryManager 置顶只改内存不落库，重启即丢
+    assert engine.update_session_pinned("s1", True) is True
+    assert engine.get_session("s1")["pinned"] is True
+    assert engine.update_session_pinned("s1", False) is True
+    assert engine.get_session("s1")["pinned"] is False
     assert engine.delete_session("s1") is True
 
 

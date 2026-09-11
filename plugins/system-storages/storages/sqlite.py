@@ -104,6 +104,15 @@ class SqliteStorageEngine:
     def update_session_project(self, session_id: str, project: str) -> bool:
         return self._store.update_session_project(session_id, project)
 
+    def update_session_pinned(self, session_id: str, pinned: bool) -> bool:
+        """更新会话置顶标记（历史会话置顶分组）
+
+        此前漏加此委托 → HistoryManager.set_session_pinned 抛
+        ``'SqliteStorageEngine' object has no attribute 'update_session_pinned'``，
+        置顶只改内存不落库，重启即丢。
+        """
+        return self._store.update_session_pinned(session_id, pinned)
+
     def archive_sessions_by_project(self, project: str) -> int:
         return self._store.archive_sessions_by_project(project)
 

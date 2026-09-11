@@ -16,6 +16,9 @@ pytest.importorskip("PyQt5.QtWidgets")
 # 契约属性集（grep `self.[a-z_]+ *=` over 3122-3255）：None 占位 + 懒创建卡片 + 标题栏按钮
 # ★ _history_card / _history_popup_card 已移出：历史会话页插件化（history-manager
 #   插件工作台页），二者是 MainWidget 的只读代理属性，本模块不再占位。
+# ★ _project_selector_card / _project_selector_card_content / _project_new_edit /
+#   _project_new_btn / _project_open_folder_btn / _project_import_btn 已移出：
+#   项目选择卡片迁入 history-manager 插件（左侧停靠区历史卡内可折叠面板）。
 _CONTRACT_ATTRS = (
     "_share_card",
     "_share_card_content",
@@ -28,12 +31,6 @@ _CONTRACT_ATTRS = (
     "_model_selector_card",
     "_model_selector_card_content",
     "_tool_control_card",
-    "_project_selector_card",
-    "_project_selector_card_content",
-    "_project_new_edit",
-    "_project_new_btn",
-    "_project_open_folder_btn",
-    "_project_import_btn",
     "_question_floating_widget",
 )
 

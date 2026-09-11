@@ -99,7 +99,7 @@ def main():
     from PyQt5.QtCore import Qt, QTimer
     from PyQt5.QtWidgets import QApplication
 
-    if _qt_pp:
+    if _qt_pp: 
         logger.info(f"[EnvCleanup] QT_PLUGIN_PATH 已清理: {_qt_pp}")
 
     # ========== 必须在创建 QApplication 之前设置 Qt 属性 ==========

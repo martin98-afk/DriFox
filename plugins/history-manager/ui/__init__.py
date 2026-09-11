@@ -4,7 +4,9 @@
 职责：
 - 注册对话左侧停靠区浮动卡「历史会话」（``card_id="history-manager"``，
   ``container="left"``，默认常驻显示），页面自带 ``HistoryCard``（搜索 /
-  项目切换器 / 会话列表）与自拉数据逻辑（``HistoryManager`` 全局单例）。
+  项目选择折叠面板 / 会话列表）与自拉数据逻辑（``HistoryManager`` 全局单例）。
+  项目选择面板复用宿主 ``ProjectSelectorCardContent``（首行「全部项目」），
+  面板数据的拉取/展开由宿主标题栏项目 icon 经服务入口驱动（见下）。
   左侧栏顶部系统插件区自动派生按钮（浮动卡兼容映射）。
 - 注册 ``HistoryService``（``SERVICE_NAME="history"``）：宿主 ``MainWidget``
   通过 ``_history_card`` / ``_history_popup_card`` 代理属性读取页面与卡片，
@@ -51,6 +53,23 @@ class HistoryService:
     def set_opacity(self, opacity: float) -> None:
         if self._page is not None:
             self._page.set_opacity(opacity)
+
+    # ── 项目选择面板代理（宿主标题栏项目 icon / 命令入口驱动） ──
+
+    def open_project_selector(self) -> None:
+        """展开项目选择面板（并刷新面板数据）"""
+        if self._page is not None and hasattr(self._page, "open_project_selector"):
+            self._page.open_project_selector()
+
+    def collapse_project_selector(self) -> None:
+        """收起项目选择面板（切项目 / 归档项目后）"""
+        if self._page is not None and hasattr(self._page, "collapse_project_selector"):
+            self._page.collapse_project_selector()
+
+    def refresh_project_selector_data(self) -> None:
+        """刷新项目选择面板数据（项目增删 / 导入导出后）"""
+        if self._page is not None and hasattr(self._page, "refresh_project_selector_data"):
+            self._page.refresh_project_selector_data()
 
 
 def register_ui(registry) -> None:

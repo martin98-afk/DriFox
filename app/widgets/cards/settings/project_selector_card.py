@@ -207,6 +207,7 @@ class ProjectItem(QWidget):
     """单个项目项 - 卡片内项目选择列表项"""
 
     clicked = pyqtSignal(str)
+    allClicked = pyqtSignal()  # 「全部项目」行点击（无项目名，仅表示不过滤）
     archiveClicked = pyqtSignal(str)
     exportClicked = pyqtSignal(str)  # 导出项目压缩包
     openFolderClicked = pyqtSignal(str, str)  # project_name, root_dir
@@ -215,10 +216,11 @@ class ProjectItem(QWidget):
     _SINGLE_LINE_HEIGHT = 30
     _DOUBLE_LINE_HEIGHT = 44
 
-    def __init__(self, name: str, is_current: bool = False, parent=None):
+    def __init__(self, name: str, is_current: bool = False, parent=None, is_all_entry: bool = False):
         super().__init__(parent)
         self._name = name
         self._is_current = is_current
+        self._is_all_entry = is_all_entry  # 「全部项目」行：无元数据/无导出归档按钮/无 root dir
         self._session_count = 0
         self._worktree_count = 0
         self._project_color = get_project_color(name)
@@ -350,7 +352,10 @@ class ProjectItem(QWidget):
             self.openFolderClicked.emit(self._name, self._root_dir)
 
     def mousePressEvent(self, event):
-        self.clicked.emit(self._name)
+        if self._is_all_entry:
+            self.allClicked.emit()
+        else:
+            self.clicked.emit(self._name)
         super().mousePressEvent(event)
 
     def set_meta(self, session_count: int, worktree_count: int):
@@ -396,10 +401,12 @@ class ProjectItem(QWidget):
             f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
         )
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};")
-        self._export_btn.show()
-        self._archive_btn.show()
-        if self._root_dir:
-            self._open_folder_btn.show()
+        # 聚合行（「全部项目」）不提供单项目操作：无导出/归档/根目录按钮
+        if not self._is_all_entry:
+            self._export_btn.show()
+            self._archive_btn.show()
+            if self._root_dir:
+                self._open_folder_btn.show()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -424,6 +431,7 @@ class ProjectSelectorCardContent(QWidget):
     projectFileDropped = pyqtSignal(str)  # 拖拽 .drifox_project 文件路径
     openFolderRequested = pyqtSignal(str, str)  # project_name, root_dir
     folderDropped = pyqtSignal(str)  # 拖拽文件夹路径
+    allProjectsSelected = pyqtSignal()  # 「全部项目」首行点击（聚合视图，无对应项目实体）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -433,6 +441,7 @@ class ProjectSelectorCardContent(QWidget):
         self._root_dir_map: Dict[str, str] = {}
         self._project_items: list = []  # 存储 ProjectItem 实例，用于过滤
         self._filter_text: str = ""
+        self._all_entry_label: str = ""  # 非空时列表首行插入该聚合行（历史插件项目选择面板用）
         self._setup_ui()
         # 启用拖拽
         self.setAcceptDrops(True)
@@ -549,6 +558,7 @@ class ProjectSelectorCardContent(QWidget):
         current_project: str,
         meta_map: Dict[str, Dict[str, int]] = None,
         root_dir_map: Dict[str, str] = None,
+        all_entry_label: str = "",
     ):
         """设置项目列表数据
 
@@ -557,11 +567,13 @@ class ProjectSelectorCardContent(QWidget):
             current_project: 当前项目名
             meta_map: {project: {"sessions": int, "worktrees": int}} 可选元数据
             root_dir_map: {project: root_dir_path} 可选根目录映射
+            all_entry_label: 非空时在列表首行插入该聚合行（点击发 allProjectsSelected）
         """
         self._projects = list(projects)
         self._current_project = current_project
         self._meta_map = meta_map or {}
         self._root_dir_map = root_dir_map or {}
+        self._all_entry_label = all_entry_label
         self._refresh_project_list()
         # 设置完后重新应用当前过滤
         if self._filter_text:
@@ -586,6 +598,13 @@ class ProjectSelectorCardContent(QWidget):
             if child.widget():
                 child.widget().deleteLater()
         self._project_items.clear()
+
+        # 聚合首行（「全部项目」）：无项目实体、无元数据、无导出/归档操作
+        if self._all_entry_label:
+            all_item = ProjectItem(self._all_entry_label, False, self, is_all_entry=True)
+            all_item.allClicked.connect(self.allProjectsSelected.emit)
+            self._content_layout.addWidget(all_item)
+            self._project_items.append(all_item)
 
         # 添加项目
         for proj_name in self._projects:

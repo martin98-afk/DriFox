@@ -520,7 +520,8 @@ class SessionRepository:
                 f"SELECT session_id, title, project, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
-                f"team_run_id, team_name, agent_name, team_members "
+                f"team_run_id, team_name, agent_name, team_members, "
+                f"pinned "
                 f"FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             )
@@ -595,6 +596,9 @@ class SessionRepository:
             "last_time": d.get("updated_at", ""),
             "saved_at": d.get("created_at", ""),
             "user_edited_title": d.get("user_edited_title", False),
+            # 会话置顶标记：轻量加载必须带上，否则启动重建内存列表后置顶丢失，
+            # 且后续 save_session 的「None→保留现值」读到的现值恒为 False（写库清零）
+            "pinned": bool(d.get("pinned", 0)),
         }
 
     def get_by_project(self, project: str, limit: int = 100) -> List[Dict]:
@@ -632,7 +636,8 @@ class SessionRepository:
                 f"SELECT session_id, title, project, system_prompt, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
-                f"team_run_id, team_name, agent_name, team_members "
+                f"team_run_id, team_name, agent_name, team_members, "
+                f"pinned "
                 f"FROM {self.TABLE_NAME} WHERE team_run_id = ? "
                 f"ORDER BY updated_at DESC",
                 (run_id,),
