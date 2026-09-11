@@ -270,6 +270,14 @@ class FileTreeCard(QWidget):
         # 挂到实例属性：WorkbenchPanel._page_context_incomplete 据此检测
         # 「启动早期宿主未就绪 → 拿到残缺 context」的坏页并触发重建
         self._context = context if isinstance(context, dict) else {}
+        # 宿主上下文拉取入口（工作台页由 WorkbenchPanel._make_page_widget 注入）：
+        # 构造时的 context 是快照，项目切换后 project_root 会过期，refresh_data
+        # 时经此重取最新上下文。
+        self._host_context_provider: Optional[Callable[[], dict]] = (
+            self._context.get("context_provider") if self._context else None
+        )
+        if not callable(self._host_context_provider):
+            self._host_context_provider = None
         if self._context:
 
             def _ctx_provider(_ctx=self._context):
@@ -426,6 +434,35 @@ class FileTreeCard(QWidget):
         self._apply_plugin_icon()
         self._async_load_tree()
         self.setVisible(True)
+
+    # ── 项目 / 工作目录联动（UI 插件可选协议） ──
+
+    def on_project_changed(self, project: str = "", workdir: str = "", window_id: str = "") -> None:
+        """项目 / 工作目录变更（宿主经 EV_PROJECT_CHANGED 派发）：立即重载目录树"""
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        """工作台页刷新协议入口（宿主切页 / 项目联动共用）
+
+        重取宿主上下文 → 应用主题与 project_root → 重载目录树。切走再切回
+        该页也会走这里，修掉「只加载一次」的旧行为。
+        """
+        self._refresh_host_context()
+        self._apply_latest_theme()
+        self._async_load_tree()
+
+    def _refresh_host_context(self) -> None:
+        """向宿主拉最新上下文（拿不到时保持旧 context，不抛）"""
+        provider = self._host_context_provider
+        if not callable(provider):
+            return
+        try:
+            ctx = provider()
+        except Exception:
+            return
+        if isinstance(ctx, dict) and ctx:
+            self._context = ctx
+            self._context_provider = lambda _ctx=ctx: _ctx
 
     def _apply_plugin_icon(self):
         if self._context_provider is None or self._icon_widget is None:

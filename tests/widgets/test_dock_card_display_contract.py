@@ -179,3 +179,35 @@ class TestHistoryEntrypoints:
             '历史会话页签已从工作台移除，继续 set_current_tab_by_id("history-manager") '
             "只会静默返回 False（历史会话打不开的直接原因）。"
         )
+
+
+# ═══════════════════════════════════════════════════════════════
+# 5. 项目切换联动（工作台页刷新协议 + 可选协议 on_project_changed）
+# ═══════════════════════════════════════════════════════════════
+
+
+class TestFileTreeProjectLinkage:
+    """文件树必须接入工作台页刷新协议与项目变更协议"""
+
+    _FILE_TREE_UI = "plugins/file-tree/ui/cards.py"
+
+    def test_file_tree_card_has_refresh_protocols(self):
+        tree = _parse(self._FILE_TREE_UI)
+        cls = _get_class(tree, "FileTreeCard")
+        names = _method_names(cls)
+        assert "refresh_data" in names, "FileTreeCard 缺 refresh_data（切页/项目联动都走它）"
+        assert "on_project_changed" in names, "FileTreeCard 缺 on_project_changed（项目变更即时刷新）"
+
+    def test_on_project_changed_delegates_to_refresh_data(self):
+        tree = _parse(self._FILE_TREE_UI)
+        cls = _get_class(tree, "FileTreeCard")
+        method = _get_method(cls, "on_project_changed")
+        assert _find_calls(method, "refresh_data"), "on_project_changed 需转调 refresh_data（单一刷新实现）"
+
+    def test_refresh_data_reloads_tree_from_fresh_context(self):
+        tree = _parse(self._FILE_TREE_UI)
+        cls = _get_class(tree, "FileTreeCard")
+        method = _get_method(cls, "refresh_data")
+        assert _find_calls(method, "_refresh_host_context"), "refresh_data 必须先拉最新宿主上下文"
+        assert _find_calls(method, "_apply_latest_theme"), "refresh_data 需应用最新主题/project_root"
+        assert _find_calls(method, "_async_load_tree"), "refresh_data 需重载目录树"
