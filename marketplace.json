@@ -106,7 +106,7 @@
         },
         {
             "name": "history-manager",
-            "description": "DriFox 内置 UI 组件：工作台历史会话页（历史 / 归档列表、搜索、归档 · 重命名 · 恢复 · 导入）",
+            "description": "DriFox 内置 UI 组件：工作台历史会话页（历史 / 归档列表、项目切换、置顶、归档 · 恢复 · 导入）",
             "version": "1.0.0",
             "author": "DriFox Team",
             "license": "MIT",
