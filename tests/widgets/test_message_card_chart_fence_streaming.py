@@ -77,3 +77,39 @@ def test_extract_closed_segments_fence_internal_start():
     joined = "\n\n".join(segs)
     assert stable > 0 and segs, "应产出闭合段"
     assert '"a":1' in joined, "fence 整块应作为闭合段产出（含内部空行）"
+
+
+# ── chunk 边界切开标记的半截拦截 ──
+def test_partial_fence_tail_intercepted():
+    """chunk 把 fence 开标记切成半截（尾部 "```e" / "``"）时必须拦截。"""
+    assert _has_unclosed_chart_fence("正文\n\n```e"), "半截 lang 前缀应拦截"
+    assert _has_unclosed_chart_fence("正文\n\n``"), "半截反引号应拦截"
+    assert _has_unclosed_chart_fence("正文\n\n```echarts"), "完整标记无内容也应拦截（inside）"
+
+
+def test_partial_tag_tail_intercepted():
+    """chunk 把 <mood> 切成半截（尾部 "<mo"）时必须拦截。"""
+    from app.widgets.message_card import _has_unclosed_registered_tag
+
+    assert _has_unclosed_registered_tag("正文<mood>a</mood>\n下一行<mo"), "半截标签应拦截"
+    assert not _has_unclosed_registered_tag("正文<mood>a</mood>"), "完整闭合不受影响"
+
+
+def test_first_unclosed_chart_fence_pos():
+    """未闭合渲染型 fence 的位置计算：截断点在 fence 开标记处。"""
+    from app.widgets.message_card import _first_unclosed_chart_fence_pos
+
+    md = "正文一\n\n```echarts\n{\"a\":1"
+    pos = _first_unclosed_chart_fence_pos(md)
+    assert pos == md.find("```echarts"), f"应指向 fence 开标记: {pos}"
+    assert _first_unclosed_chart_fence_pos("```echarts\n{}\n```\n正文") == -1, "闭合后应为 -1"
+    assert _first_unclosed_chart_fence_pos("```python\nx=1") == -1, "普通代码块不拦"
+
+
+def test_tail_before_unclosed_block_cuts_at_fence():
+    """差量 tail 截断：未闭合 fence 之前的正文保留，fence 起点之后静默。"""
+    from app.widgets.message_card import _tail_before_unclosed_block
+
+    tail = "正文一\n\n```echarts\n{\"a\":1"
+    cut = _tail_before_unclosed_block(tail)
+    assert cut == "正文一\n\n", f"应截到 fence 开标记: {cut!r}"

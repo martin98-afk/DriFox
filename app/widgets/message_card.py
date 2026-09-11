@@ -1705,6 +1705,10 @@ def _has_unclosed_registered_tag(text: str) -> bool:
     """
     if not text:
         return False
+    # chunk 边界可能把 <mood> 切成半截（尾部 "<mo"）：rfind 找不到 open 会误判
+    # 已闭合 → 放行生肉。宽松拦（误拦代价只是该 chunk 延迟一次渲染）。
+    if _PARTIAL_TAG_TAIL_RE.search(text):
+        return True
     for tag in _registered_tag_names_safe():
         last_open = text.rfind(f"<{tag}>")
         if last_open == -1:
@@ -1721,6 +1725,10 @@ def _has_unclosed_registered_tag(text: str) -> bool:
 # 未闭合期间静默累积，闭合后由全量渲染落地（chart-streaming 骨架/真图）。
 _CHART_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*(\w+)")
 _CHART_FENCE_LANGS = frozenset({"echarts", "mermaid", "html", "widget", "svg"})
+# chunk 边界切开标记的半截尾巴：行尾 1-3 个反引号/波浪（可能正在写 fence 开标记）
+_PARTIAL_FENCE_TAIL_RE = re.compile(r"(?:^|\n)[ \t]{0,3}[`~]{1,3}[a-zA-Z0-9]{0,15}$")
+# chunk 边界切开标签的半截尾巴：行尾 <xx（可能正在写 <mood> 等协议标签）
+_PARTIAL_TAG_TAIL_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]{0,11}$")
 
 
 def _is_render_fence_lang(lang: str) -> bool:
@@ -1744,6 +1752,10 @@ def _has_unclosed_chart_fence(text: str) -> bool:
     fence 开闭按行首 ``` / ~~~ 判定（与 _extract_fenced_code 同语义）。
     普通代码块（python/js 等）流式生肉显示是预期行为，不在本检测范围。
     """
+    # chunk 边界可能把 fence 开标记切成半截（尾部 "```e" 或 "``"）：状态机
+    # 匹配不到完整 lang 会误判闭合 → 放行生肉。宽松拦，代价同上。
+    if _PARTIAL_FENCE_TAIL_RE.search(text):
+        return True
     if "```" not in text and "~~~" not in text:
         return False
     inside = False
@@ -1765,6 +1777,41 @@ def _has_unclosed_chart_fence(text: str) -> bool:
             inside = False
             chart = False
     return inside and chart
+
+
+def _first_unclosed_chart_fence_pos(md: str) -> int:
+    """第一个未闭合渲染型 fence 的开标记起始偏移（无 → -1）。
+
+    差量 tail 行内渲染的截断基准：未闭合 fence 起点之前的正文照常行内
+    渲染，fence 起点之后静默（与 _tail_before_unclosed_block 的 tag/think
+    截断同语义，防 updateContentAppend 删增量节点时连带丢失正文）。
+    """
+    if "```" not in md and "~~~" not in md:
+        return -1
+    inside = False
+    chart = False
+    marker = ""
+    open_pos = -1
+    offset = 0
+    for line in md.split("\n"):
+        stripped = line.strip()
+        if not inside:
+            m = _CHART_FENCE_OPEN_RE.match(stripped)
+            if m:
+                inside = True
+                marker = m.group(1)
+                chart = _is_render_fence_lang(m.group(2))
+                if chart:
+                    open_pos = offset + line.find(marker)
+            elif stripped.startswith("```") or stripped.startswith("~~~"):
+                inside = True
+                marker = stripped[:3]
+        elif marker and stripped.startswith(marker):
+            inside = False
+            chart = False
+            open_pos = -1
+        offset += len(line) + 1
+    return open_pos if (inside and chart) else -1
 
 
 def _last_para_break_outside_fence(md: str) -> int:
@@ -3078,17 +3125,20 @@ def _last_unpaired_open_pos(md: str, open_tag: str, close_tag: str) -> int:
 
 
 def _tail_before_unclosed_block(md: str) -> str:
-    """截取 md 中第一个**未闭合** `<think>` / `<tool>` 块之前的部分。
+    """截取 md 中第一个**未闭合** `<think>` / `<tool>` / 注册 tag / 渲染型 fence 之前的部分。
 
     差量渲染的 tail（未闭合尾部）含未闭合协议块时会被静默丢弃（防思考内容泄漏
-    到正文、防半截 `<tool>` 被渲染成假卡片）。但 JS `updateContentAppend` 会
-    无条件 remove 全部 `[data-incremental]` 节点——若 tail 整段不重建，未闭合块
-    **之前**已经显示出来的正文会跟着一起消失，且此后无人补回（用户可见
-    “流式输出吞内容”）。
+    到正文、防半截 `<tool>` 被渲染成假卡片、防半截图表源码行内渲染成代码块）。
+    但 JS `updateContentAppend` 会无条件 remove 全部 `[data-incremental]` 节点
+    ——若 tail 整段不重建，未闭合块**之前**已经显示出来的正文会跟着一起消失，
+    且此后无人补回（用户可见“流式输出吞内容”）。
 
     因此丢弃只应发生在未闭合块起点**之后**：之前的正文照常行内渲染。
     """
-    if not md or not _has_unclosed_think_or_tool(md):
+    if not md:
+        return md
+    _fence_pos = _first_unclosed_chart_fence_pos(md)
+    if not _has_unclosed_think_or_tool(md) and _fence_pos == -1:
         return md
     cut = len(md)
     pairs = [("<think>", "</think>"), ("<tool>", "</tool>")]
@@ -3097,6 +3147,8 @@ def _tail_before_unclosed_block(md: str) -> str:
         pos = _last_unpaired_open_pos(md, open_tag, close_tag)
         if pos != -1:
             cut = min(cut, pos)
+    if _fence_pos != -1:
+        cut = min(cut, _fence_pos)
     return md[:cut] if cut != len(md) else md
 
 
@@ -4794,6 +4846,8 @@ class CodeWebViewer(QWebEngineView):
         # [PERF] 流式速度跟踪：用于自适应安全渲染间隔
         self._last_chunk_time = 0.0  # 上次 append_chunk 的时间戳（monotonic ns）
         self._current_adaptive_interval = self._SAFETY_RENDER_INTERVAL  # 当前自适应间隔
+        # [PERF] 上次 _perform_update 的时刻（monotonic 秒），供软边界合并窗口判断
+        self._last_render_ts = 0.0
 
         # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
         self._document_height = 0
@@ -9261,14 +9315,13 @@ class CodeWebViewer(QWebEngineView):
     _ADAPTIVE_INTERVAL_SLOW = 500
     _ADAPTIVE_THRESHOLD_FAST = 200  # ms
     _ADAPTIVE_THRESHOLD_SLOW = 500  # ms
-    # [PERF] 软边界（句号结尾）触发渲染的延迟（ms）。
-    # 软边界**不再同步渲染** —— 中文正文句号极密集（约每 15~40 字一个），
-    # 同步渲染会让上面 150~500ms 的自适应节流形同虚设，实测退化为
-    # 「每 chunk 一次 O(tail) 的 markdown 转换」：随消息长度呈 O(n²)，
-    # 是「流式越到后面越卡」的主因。
-    # 改为短定时器后：连续多个句号合并为一次渲染，且句子结束后仍在
-    # ~90ms 内完成格式化（远快于 300ms 安全兜底，人眼不可分辨）。
-    _SOFT_BOUNDARY_RENDER_DELAY_MS = 90
+    # [PERF] 软边界（句号结尾）的**最小渲染间隔**（ms）—— 不是固定延迟，而是
+    # 「距上次渲染不足此窗口才合并，否则照旧即时渲染」。
+    # 中文正文句号极密集（约每 15~40 字一个），密集流式下无脑 immediate 会让
+    # 上方 150~500ms 的自适应节流形同虚设，退化为「每 chunk 一次 O(tail) 转换」
+    # ——随消息长度呈 O(n²)，是「流式越到后面越卡」的主因。
+    # 用最小间隔而非固定延迟，可在快速流式合并的同时保住慢速流式的即时观感。
+    _SOFT_BOUNDARY_MERGE_MS = 40
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
@@ -9631,12 +9684,25 @@ class CodeWebViewer(QWebEngineView):
             if self._has_reached_clean_boundary(self._markdown_text):
                 self._perform_update()
                 return
-            # 软边界（句号结尾）：[PERF] 只启动短定时器，**不**同步渲染。
-            # 见 _SOFT_BOUNDARY_RENDER_DELAY_MS 注释 —— 同步渲染会让整个
-            # 自适应节流体系失效并退化为 O(n²)。连续句号在此合并为一次渲染。
+            # 软边界（句号结尾）：**仅在密集流式时合并**，否则仍即时渲染。
+            #
+            # 背景：中文句号极密集，无脑 immediate 会让整个自适应节流失效并退化
+            # 为 O(n²)；但一律延迟又会拖慢打字机观感（句子结束后格式迟迟不变）。
+            # 折中：只有「距上次渲染不足一个合并窗口」时才推迟到窗口末尾——
+            #   慢速流式（人能逐句阅读）→ 仍 immediate，观感与优化前一致；
+            #   快速流式（连续句号刷屏）→ 合并为窗口内一次，砍掉重复转换。
             if self._has_reached_soft_boundary(self._markdown_text):
-                if not self._render_timer.isActive():
-                    self._render_timer.start(self._SOFT_BOUNDARY_RENDER_DELAY_MS)
+                since_last_ms = (time.monotonic() - getattr(self, "_last_render_ts", 0.0)) * 1000
+                if since_last_ms < self._SOFT_BOUNDARY_MERGE_MS:
+                    # ⚠️ 定时器已激活时必须比较间隔再决定是否重启：
+                    # _render_timer 是 singleShot，若已被 150~500ms 的兜底定时器
+                    # 占用而不重启，句子结束也要干等到兜底间隔才渲染（观感明显变慢）。
+                    if (not self._render_timer.isActive()) or (
+                        self._render_timer.interval() > self._SOFT_BOUNDARY_MERGE_MS
+                    ):
+                        self._render_timer.start(self._SOFT_BOUNDARY_MERGE_MS)
+                else:
+                    self._perform_update()
                 return
             # 无边界：启安全定时器（仅当未激活时）
             # [PERF] 使用自适应间隔：快速流式用 150ms，慢速用 500ms，默认 300ms
@@ -9760,6 +9826,8 @@ class CodeWebViewer(QWebEngineView):
         # ⚠️ 必须无条件取时间：此前写成 `perf_counter() if FINISH_TIMING_ENABLED else 0.0`，
         # 未开打点时 _t_enter=0，render 会被算成 perf_counter()*1000（千万毫秒级假数据）。
         _t_enter = time.perf_counter()
+        # [PERF] 记录本次渲染时刻，供 _schedule_render 的软边界合并窗口判断
+        self._last_render_ts = time.monotonic()
         try:
             if not self.page():
                 return
