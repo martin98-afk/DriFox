@@ -202,6 +202,8 @@ class SessionRepository:
             "agent_name": d.get("agent_name", "") or "",
             # 团队成员快照（F3：JSON 字符串，恢复时找回无会话记录的手动成员）
             "team_members": d.get("team_members", "") or "",
+            # 会话置顶标记（历史面板置顶分组；默认 False）
+            "pinned": bool(d.get("pinned", 0)),
             # 添加兼容字段（HistoryManager 期望这些字段）
             # 优先使用消息列表中最后一条消息的时间
             "last_time": d.get("last_time")
@@ -283,6 +285,8 @@ class SessionRepository:
                 "agent_name": session.get("agent_name", "") or "",
                 # 团队成员快照透传（F3）：JSON 字符串，非团队会话保持空串
                 "team_members": session.get("team_members", "") or "",
+                # 会话置顶标记透传（历史面板置顶分组）
+                "pinned": 1 if session.get("pinned", False) else 0,
             }
             # 首问落库（T4 内存治理）：随保存增量写入，使团队合并条目的预览
             # 查询无需反序列化完整 messages（旧路径 246 条约 285MB 常驻）。
@@ -296,11 +300,13 @@ class SessionRepository:
                  worktree_path, preview, context_usage,
                  last_api_prompt_tokens, last_api_message_count,
                  team_run_id, team_name, agent_name, team_members,
+                 pinned,
                  first_user_msg, first_user_ts,
                  created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
+                    ?,
                     ?, ?,
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
@@ -324,6 +330,7 @@ class SessionRepository:
                     session_data["team_name"],
                     session_data["agent_name"],
                     session_data["team_members"],
+                    session_data["pinned"],
                     session_data["first_user_msg"],
                     session_data["first_user_ts"],
                     session_id,  # for coalesce
@@ -750,6 +757,21 @@ class SessionRepository:
             return success
         except Exception as e:
             logger.error(f"[SessionRepository] update_project 异常: {e}")
+            return False
+
+    def update_pinned(self, session_id: str, pinned: bool) -> bool:
+        """更新会话置顶标记（只写 pinned 列，不动 messages blob）"""
+        if not self.is_initialized:
+            return False
+        try:
+            success, result = self._execute(
+                f"UPDATE {self.TABLE_NAME} SET pinned = ? WHERE session_id = ?",
+                (1 if pinned else 0, session_id),
+            )
+            # rowcount==0 说明 session_id 不存在（UPDATE 语法成功但不命中行）
+            return bool(success) and int(result or 0) > 0
+        except Exception as e:
+            logger.error(f"[SessionRepository] update_pinned 异常: {e}")
             return False
 
     def archive_by_project(self, project: str) -> int:
