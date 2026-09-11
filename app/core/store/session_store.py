@@ -1005,6 +1005,9 @@ class SessionStore:
 
     def clear_old_subagent_tasks(self, days: int = 7) -> int:
         """清理旧子智能体任务"""
+        if self._subagent_log_repo:
+            return self._subagent_log_repo.clear_old_tasks(days)
+        return 0
 
     # ==================== 文件操作记录（委托给 FileOperationRepository）====================
 
