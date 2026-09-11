@@ -961,6 +961,9 @@ class HistoryCard(QWidget):
     teamRestoreRequested = pyqtSignal(str)  # 恢复团队会话（参数 = run_id）
     teamArchiveRequested = pyqtSignal(str)  # 归档团队会话（参数 = run_id）
     memberSelected = pyqtSignal(dict)  # 团队成员 session_record 被选中进入会话
+    pinToggled = pyqtSignal(int, bool)  # 右键置顶/取消置顶
+    moveToProjectRequested = pyqtSignal(int, str)  # 右键移动到项目
+    dataChanged = pyqtSignal()  # 列表渲染完成（页面刷新项目下拉等联动）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1000,6 +1003,13 @@ class HistoryCard(QWidget):
 
         # worktree 分支名缓存：worktree_path → branch_name（避免重复调 git）
         self._worktree_branch_cache: Dict[str, str] = {}
+
+        # 项目列表（右键「移动到项目」子菜单数据源，页面从 HistoryManager 拉取注入）
+        self._project_list: List[str] = []
+        # 行内项目标签显隐（仅「全部项目」视图为 True）
+        self._show_project_labels = False
+        # 条目右键菜单构建器（项目列表由本卡片集中持有）
+        self._item_menu_provider = self._make_item_menu_provider()
 
         # === 搜索防抖 ===
         from PyQt5.QtCore import QTimer
@@ -1052,6 +1062,48 @@ class HistoryCard(QWidget):
     def set_current_project(self, project: str):
         """设置当前过滤项目"""
         self._current_project = project
+
+    # ── 置顶 / 项目标签 / 右键菜单 ──
+
+    def set_project_list(self, projects: List[str]):
+        """注入项目列表（右键菜单「移动到项目」数据源，页面从 HistoryManager 拉取）"""
+        self._project_list = list(projects or [])
+
+    def get_project_list(self) -> List[str]:
+        """从当前列表数据聚合 distinct 项目名（页面下拉兑底数据源）"""
+        projects = {(s.get("project") or "默认项目").strip() or "默认项目" for s in self._all_history}
+        return sorted(projects)
+
+    def set_show_project_labels(self, show: bool):
+        """设置行内项目标签显隐（仅全部项目视图为 True；变化时全量重渲染）"""
+        if self._show_project_labels != show:
+            self._show_project_labels = show
+            self._update_display()
+
+    def _make_item_menu_provider(self):
+        """会话条目右键菜单构建器（置顶 / 移动到项目 / 重命名 / 归档）"""
+
+        def provider(card: "_HistoryItemCard", global_pos):
+            from PyQt5.QtWidgets import QMenu
+
+            menu = QMenu(card)
+            act_rename = menu.addAction(get_icon("重命名"), "重命名")
+            pin_text = "📌 取消置顶" if card._pinned else "📌 置顶"
+            act_pin = menu.addAction(pin_text)
+            move_menu = menu.addMenu("📁 移动到项目")
+            for proj in self._project_list:
+                if proj and proj != card._project:
+                    move_menu.addAction(proj, lambda p=proj: self.moveToProjectRequested.emit(card._index, p))
+            act_archive = menu.addAction(get_icon("归档"), "归档")
+            chosen = menu.exec(global_pos)
+            if chosen is act_rename:
+                card._start_edit()
+            elif chosen is act_pin:
+                self.pinToggled.emit(card._index, not card._pinned)
+            elif chosen is act_archive:
+                card.deleteRequested.emit(card._index)
+
+        return provider
 
     def _resolve_worktree_branch(self, worktree_path: str) -> str:
         """从 worktree 路径解析分支名（带缓存）"""
@@ -1432,6 +1484,8 @@ class HistoryCard(QWidget):
             self._add_load_more_if_needed(layout)
             self._refresh_font_size()
             self._restore_scroll_if_pending()
+            # 通知页面（列表数据已就绪，页面据此刷新项目下拉等联动）
+            self.dataChanged.emit()
 
     def _get_or_create_history_card(
         self, session: Dict, index: int, is_current: bool, preview: str
@@ -1452,6 +1506,9 @@ class HistoryCard(QWidget):
                 is_current=is_current,
                 preview=preview,
                 worktree_branch=worktree_branch,
+                pinned=bool(session.get("pinned", False)),
+                project=session.get("project", ""),
+                show_project=self._show_project_labels,
             )
             # 确保信号连接正确（用新 index）
             try:
@@ -1479,6 +1536,10 @@ class HistoryCard(QWidget):
                 is_current=is_current,
                 preview=preview,
                 worktree_branch=worktree_branch,
+                pinned=bool(session.get("pinned", False)),
+                project=session.get("project", ""),
+                show_project=self._show_project_labels,
+                menu_provider=self._item_menu_provider,
                 parent=self,
             )
             card.sessionClicked.connect(self._on_card_clicked)
@@ -1582,6 +1643,9 @@ class HistoryCard(QWidget):
                 (i, s) for i, s in other_sessions if _matches_search(s, self._search_filter, self._pinyin_cache)
             ]
 
+        # ── 置顶拆分：置顶组优先渲染（组内 last_time 降序），不占分页 limit ──
+        pinned_entries, other_sessions = split_pinned_entries(other_sessions)
+
         grouped = {}
         for original_index, session in other_sessions:
             category = self._get_date_category(session.get("last_time", ""))
@@ -1614,6 +1678,19 @@ class HistoryCard(QWidget):
         self._remaining_count = max(0, total_other - limit)
 
         has_items = current_session_widget
+
+        # ── 置顶分组（当前会话区之后、日期分组之前；不受分页限制） ──
+        if pinned_entries:
+            has_items = True
+            queue.append(("header", "置顶", len(pinned_entries)))
+            for original_index, session in pinned_entries:
+                if session.get("team_merged"):
+                    continue  # 团队合并条目无置顶语义，防御跳过
+                sid = session.get("session_id", "")
+                visible_ids.add(sid)
+                queue.append(("session", session, original_index, False))
+            queue.append(("spacer",))
+
         for section, sessions in final_order:
             if not sessions:
                 continue
