@@ -59,6 +59,7 @@ def split_pinned_entries(entries: List[tuple], exclude_index: Optional[int] = No
     pinned.sort(key=lambda x: x[1].get("last_time", ""), reverse=True)
     return pinned, rest
 
+
 from app.utils.design_tokens import (
     Colors,
     apply_font_size_to_widget,
@@ -172,7 +173,6 @@ class _HistoryItemCard(QFrame):
 
     sessionClicked = pyqtSignal(int)
     deleteRequested = pyqtSignal(int)
-    renameRequested = pyqtSignal(int, str)
     pinToggleRequested = pyqtSignal(int, bool)  # (index, 目标状态)
     moveToProjectRequested = pyqtSignal(int, str)  # (index, 目标项目)
 
@@ -230,24 +230,6 @@ class _HistoryItemCard(QFrame):
         )
         title_row.addWidget(self.title_label, 1)
 
-        self.title_edit = QLineEdit(title[:100], self)
-        self.title_edit.setStyleSheet(
-            f"""
-            QLineEdit {{
-                background-color: rgba(0, 0, 0, 0.3);
-                border: 1px solid {Colors.BORDER_ACCENT};
-                border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: 1px 4px;
-                {self._font_family}
-            }}
-            """
-        )
-        self.title_edit.hide()
-        self.title_edit.returnPressed.connect(self._finish_edit)
-        self.title_edit.editingFinished.connect(self._finish_edit)
-        title_row.addWidget(self.title_edit, 1, Qt.AlignLeft)
-
         # worktree 分支标记（沿用既有语义：仅非主分支显示）
         self._branch_label = CaptionLabel("", self)
         self._branch_label.setStyleSheet(
@@ -287,11 +269,11 @@ class _HistoryItemCard(QFrame):
         btns_layout = QHBoxLayout(self._btns)
         btns_layout.setContentsMargins(0, 0, 0, 0)
         btns_layout.setSpacing(0)
-        self.edit_btn = TransparentToolButton(get_icon("重命名"), self._btns)
-        self.edit_btn.setToolTip("重命名")
-        self.edit_btn.setFixedSize(22, 22)
-        self.edit_btn.clicked.connect(self._start_edit)
-        btns_layout.addWidget(self.edit_btn)
+        self.pin_btn = TransparentToolButton(FluentIcon.PIN, self._btns)
+        self.pin_btn.setToolTip("取消置顶" if pinned else "置顶")
+        self.pin_btn.setFixedSize(22, 22)
+        self.pin_btn.clicked.connect(lambda: self.pinToggleRequested.emit(self._index, not self._pinned))
+        btns_layout.addWidget(self.pin_btn)
         self.delete_btn = TransparentToolButton(get_icon("归档"), self._btns)
         self.delete_btn.setToolTip("归档")
         self.delete_btn.setFixedSize(22, 22)
@@ -382,7 +364,6 @@ class _HistoryItemCard(QFrame):
         self._pinned = pinned
         if getattr(self.title_label, "_full_text", "") != title or prefix_changed:
             self.title_label.setText(f"{'📌 ' if pinned else ''}{title}")
-            self.title_edit.setText(title[:100])
 
         # 活跃状态变化 → 重设样式
         if self._is_current != is_current:
@@ -410,34 +391,12 @@ class _HistoryItemCard(QFrame):
         self._project = project
         self._update_project_label(show_project)
 
+        # 置顶按钮图标/提示跟随状态
+        self.pin_btn.setIcon(FluentIcon.UNPIN if pinned else FluentIcon.PIN)
+        self.pin_btn.setToolTip("取消置顶" if pinned else "置顶")
+
         # 预览变化
         self._ensure_preview_label(preview)
-
-    def _strip_prefix(self) -> str:
-        """标题去掉置顶前缀（编辑态操作的是纯标题）"""
-        text = getattr(self.title_label, "_full_text", "") or self.title_label.text()
-        return text[2:] if text.startswith("📌 ") else text
-
-    def _start_edit(self):
-        self._is_editing = True
-        self.title_label.hide()
-        self.title_edit.show()
-        self.title_edit.setText(self._strip_prefix())
-        self.title_edit.setFocus()
-        self.title_edit.selectAll()
-
-    def _finish_edit(self):
-        if not self._is_editing:
-            return
-        new_title = self.title_edit.text().strip()
-        if new_title and new_title != self._strip_prefix():
-            self.renameRequested.emit(self._index, new_title)
-        self._is_editing = False
-        self.title_edit.hide()
-        self.title_label.show()
-
-    def update_title(self, new_title: str):
-        self.title_label.setText(f"{'📌 ' if self._pinned else ''}{new_title}")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and not self._is_editing:
@@ -450,7 +409,6 @@ class _ArchivedItemCard(QFrame):
 
     restored = pyqtSignal(str)  # 文件路径
     permanentlyDeleted = pyqtSignal(str)  # 文件路径
-    renameRequested = pyqtSignal(str, str)  # 旧路径, 新标题
 
     def __init__(
         self,
@@ -490,24 +448,6 @@ class _ArchivedItemCard(QFrame):
         )
         title_row.addWidget(self.title_label, 1)
 
-        self.title_edit = QLineEdit(title[:100], self)
-        self.title_edit.setStyleSheet(
-            f"""
-            QLineEdit {{
-                background-color: rgba(0, 0, 0, 0.3);
-                border: 1px solid {Colors.BORDER_ACCENT};
-                border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: 1px 4px;
-                {get_font_family_css()}
-            }}
-            """
-        )
-        self.title_edit.hide()
-        self.title_edit.returnPressed.connect(self._finish_edit)
-        self.title_edit.editingFinished.connect(self._finish_edit)
-        title_row.addWidget(self.title_edit, 1, Qt.AlignLeft)
-
         # 项目标签（归档会话显示原项目）
         self._project_label = CaptionLabel("", self)
         self._project_label.setStyleSheet(
@@ -541,11 +481,6 @@ class _ArchivedItemCard(QFrame):
         btns_layout = QHBoxLayout(self._btns)
         btns_layout.setContentsMargins(0, 0, 0, 0)
         btns_layout.setSpacing(0)
-        self.edit_btn = TransparentToolButton(get_icon("重命名"), self._btns)
-        self.edit_btn.setToolTip("重命名")
-        self.edit_btn.setFixedSize(22, 22)
-        self.edit_btn.clicked.connect(self._start_edit)
-        btns_layout.addWidget(self.edit_btn)
         self.delete_btn = TransparentToolButton(FluentIcon.DELETE, self._btns)
         self.delete_btn.setToolTip("彻底删除")
         self.delete_btn.setFixedSize(22, 22)
@@ -612,7 +547,6 @@ class _ArchivedItemCard(QFrame):
 
         if getattr(self.title_label, "_full_text", "") != title:
             self.title_label.setText(f"📦 {title}")
-            self.title_edit.setText(title[:100])
 
         rel_time = format_relative_time(last_time)
         meta_text = rel_time
@@ -631,39 +565,6 @@ class _ArchivedItemCard(QFrame):
         # 项目标签更新
         self._project = project
         self._update_project_label()
-
-        # 彻底删除按钮目标路径跟随新数据
-        try:
-            self.delete_btn.clicked.disconnect()
-        except TypeError:
-            pass
-        self.delete_btn.clicked.connect(lambda: self.permanentlyDeleted.emit(self._file_path))
-
-    def _strip_prefix(self) -> str:
-        """标题去掉归档前缀（编辑态操作的是纯标题）"""
-        text = getattr(self.title_label, "_full_text", "") or self.title_label.text()
-        return text[2:] if text.startswith("📦 ") else text
-
-    def _start_edit(self):
-        self._is_editing = True
-        self.title_label.hide()
-        self.title_edit.show()
-        self.title_edit.setText(self._strip_prefix())
-        self.title_edit.setFocus()
-        self.title_edit.selectAll()
-
-    def _finish_edit(self):
-        if not self._is_editing:
-            return
-        new_title = self.title_edit.text().strip()
-        if new_title and new_title != self._strip_prefix():
-            self.renameRequested.emit(self._file_path, new_title)
-        self._is_editing = False
-        self.title_edit.hide()
-        self.title_label.show()
-
-    def update_title(self, new_title: str):
-        self.title_label.setText(f"📦 {new_title}")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and not self._is_editing:
@@ -952,7 +853,6 @@ class HistoryCard(QWidget):
 
     sessionSelected = pyqtSignal(int)
     sessionArchived = pyqtSignal(int)
-    sessionRenamed = pyqtSignal(int, str)
     refreshRequested = pyqtSignal()
     sessionImported = pyqtSignal(dict)  # 导入会话时发出
     sessionRestored = pyqtSignal(str)  # 恢复归档会话
@@ -1081,24 +981,44 @@ class HistoryCard(QWidget):
             self._update_display()
 
     def _make_item_menu_provider(self):
-        """会话条目右键菜单构建器（置顶 / 移动到项目 / 重命名 / 归档）"""
+        """会话条目右键菜单构建器（置顶 / 移动到项目 / 归档）
+
+        样式与 TabPanel.contextMenuEvent 一致（主题色插值，深浅自适配）。
+        """
 
         def provider(card: "_HistoryItemCard", global_pos):
             from PyQt5.QtWidgets import QMenu
 
+            menu_style = f"""
+                QMenu {{
+                    background: {Colors.CARD_BG};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 6px;
+                    padding: 4px;
+                }}
+                QMenu::item {{
+                    padding: 6px 20px;
+                    border-radius: 4px;
+                    color: {Colors.TEXT_PRIMARY};
+                    {get_font_family_css()} {font_size_css(13)}
+                }}
+                QMenu::item:selected {{
+                    background: {Colors.HOVER_BG};
+                }}
+            """
             menu = QMenu(card)
-            act_rename = menu.addAction(get_icon("重命名"), "重命名")
-            pin_text = "📌 取消置顶" if card._pinned else "📌 置顶"
+            menu.setStyleSheet(menu_style)
+            pin_text = "取消置顶" if card._pinned else "置顶"
             act_pin = menu.addAction(pin_text)
-            move_menu = menu.addMenu("📁 移动到项目")
+            move_menu = menu.addMenu("移动到项目")
+            move_menu.setStyleSheet(menu_style)
             for proj in self._project_list:
                 if proj and proj != card._project:
                     move_menu.addAction(proj, lambda p=proj: self.moveToProjectRequested.emit(card._index, p))
-            act_archive = menu.addAction(get_icon("归档"), "归档")
+            menu.addSeparator()
+            act_archive = menu.addAction("归档")
             chosen = menu.exec(global_pos)
-            if chosen is act_rename:
-                card._start_edit()
-            elif chosen is act_pin:
+            if chosen is act_pin:
                 self.pinToggled.emit(card._index, not card._pinned)
             elif chosen is act_archive:
                 card.deleteRequested.emit(card._index)
@@ -1199,7 +1119,7 @@ class HistoryCard(QWidget):
                 return month_names[session_date.month - 1]
             else:
                 return f"{session_date.year}年"
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return "更早"
 
     def _clear_content(self):
@@ -1520,12 +1440,12 @@ class HistoryCard(QWidget):
             except TypeError:
                 pass
             try:
-                card.renameRequested.disconnect()
+                card.pinToggleRequested.disconnect()
             except TypeError:
                 pass
             card.sessionClicked.connect(self._on_card_clicked)
             card.deleteRequested.connect(self._on_card_deleted)
-            card.renameRequested.connect(self._on_card_renamed)
+            card.pinToggleRequested.connect(self.pinToggled)
         else:
             # 缓存未命中 → 创建新卡片并缓存
             card = _HistoryItemCard(
@@ -1544,7 +1464,7 @@ class HistoryCard(QWidget):
             )
             card.sessionClicked.connect(self._on_card_clicked)
             card.deleteRequested.connect(self._on_card_deleted)
-            card.renameRequested.connect(self._on_card_renamed)
+            card.pinToggleRequested.connect(self.pinToggled)
             card._session_id = session_id
             self._cached_cards[session_id] = card
 
@@ -1574,13 +1494,8 @@ class HistoryCard(QWidget):
                 card.permanentlyDeleted.disconnect()
             except TypeError:
                 pass
-            try:
-                card.renameRequested.disconnect()
-            except TypeError:
-                pass
             card.restored.connect(self._on_archived_restored)
             card.permanentlyDeleted.connect(self._on_archived_deleted)
-            card.renameRequested.connect(self._on_archived_renamed)
         else:
             card = _ArchivedItemCard(
                 file_path=file_path,
@@ -1594,7 +1509,6 @@ class HistoryCard(QWidget):
             )
             card.restored.connect(self._on_archived_restored)
             card.permanentlyDeleted.connect(self._on_archived_deleted)
-            card.renameRequested.connect(self._on_archived_renamed)
             self._cached_archived[file_path] = card
 
         return card
@@ -1941,9 +1855,6 @@ class HistoryCard(QWidget):
     def _on_card_deleted(self, index: int):
         self.sessionArchived.emit(index)
 
-    def _on_card_renamed(self, index: int, new_title: str):
-        self.sessionRenamed.emit(index, new_title)
-
     def _on_archived_restored(self, file_path: str):
         """恢复归档会话"""
         self.sessionRestored.emit(file_path)
@@ -1951,10 +1862,6 @@ class HistoryCard(QWidget):
     def _on_archived_deleted(self, file_path: str):
         """彻底删除归档会话"""
         self.sessionPermanentlyDeleted.emit(file_path)
-
-    def _on_archived_renamed(self, file_path: str, new_title: str):
-        """重命名归档会话"""
-        self.archivedSessionRenamed.emit(file_path, new_title)
 
     # ==================== 拖放和导入功能 ====================
 

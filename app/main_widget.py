@@ -171,7 +171,6 @@ from app.widgets.ui_helpers import (
     invalidate_session_card_cache,
     log_deletion_stats,
     post_append_user_message,
-    refresh_history_card_if_visible,
     materialize_batch_with_extras,
     render_batch_to_assistant_card,
     restore_input_from_card,
@@ -8304,49 +8303,24 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-    def _refresh_history_toggle_panel(self, is_archived: bool = False):
-        """刷新历史面板数据"""
-        if not self._history_card:
+    def _refresh_history_page_if_active(self):
+        """触发历史插件页自刷新（仅本窗口为活跃窗口且页面可见时）
+
+        架构反转后页面自拉数据（HistoryManager 单例），窗口只负责"何时刷新"
+        的时机通知，不再负责拉数据。
+        """
+        if not self._is_active_window():
             return
-
-        current_tab = self._history_card._current_tab if hasattr(self._history_card, "_current_tab") else "history"
-
-        if current_tab == "history" or is_archived:
-            # 获取当前项目的历史会话列表（M4：merge_team=True 团队会话合并为
-            # 单一条目，与普通会话混排；不再注入顶部团队分组区）
-            history_list = (
-                self.history_manager.get_history_list(self._current_project, merge_team=True)
-                if self.history_manager
-                else []
-            )
-            # 在项目过滤后的列表中查找当前会话的位置
-            current_idx = None
-            if self._current_session_id and self.history_manager:
-                for i, session in enumerate(history_list):
-                    # 🛡️ 合并条目：当前会话是组内成员之一时命中该合并条目
-                    if session.get("team_merged"):
-                        members = session.get("members") or []
-                        if any(m.get("session_id") == self._current_session_id for m in members):
-                            current_idx = i
-                            break
-                    elif session.get("session_id") == self._current_session_id:
-                        current_idx = i
-                        break
-            # 归档操作后需要清理归档会话列表
-            if is_archived:
-                self._history_popup_card.set_history(history_list, current_idx, clear_archived=True)
-            else:
-                self._history_popup_card.set_history(history_list, current_idx)
-        else:
-            # 刷新归档会话
-            self._refresh_archived_sessions()
+        page = getattr(self, "_history_card", None)
+        if page is not None and page.isVisible():
+            page.refresh()
 
     def _notify_history_data_changed(self, broadcast: bool = True):
         """会话数据变更统一通知：刷新历史卡片 + 失效欢迎卡片 + Tab 模式广播其他窗口
 
         收敛所有「会话状态变化 → 历史卡片/欢迎卡片同步」路径：
-        1. 本窗口历史卡片可见时刷新（_refresh_history_toggle_panel 内部按
-           current_tab 分流历史/归档列表）
+        1. 本窗口为活跃窗口且历史页可见时触发页面自刷新（页面按 current_tab
+           分流历史/归档列表）
         2. 本窗口欢迎卡片缓存失效；当前正显示欢迎卡片（空会话）时交错调度重建，
            确保 recent_sessions/top_by_count 拿到最新数据
         3. broadcast=True 时广播 Tab 管理器其他窗口（接收方 broadcast=False
@@ -8362,12 +8336,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         # 1. 历史卡片可见时刷新
-        # ★ 历史页已插件化：页面是工作台**单例**、跟随活跃窗口投影。只有本窗口
-        #   为活跃窗口时才允许把本窗口的列表写进共享页，否则后台窗口的数据变更
-        #   会污染活跃窗口正在看的历史列表（多窗口串态）。
-        if self._is_active_window():
-            history_card = getattr(self, "_history_card", None)
-            refresh_history_card_if_visible(history_card, self._refresh_history_toggle_panel)
+        # ★ 历史页已插件化 + 数据流反转：页面自拉数据（HistoryManager 单例），
+        #   窗口只通知时机；仅本窗口为活跃窗口时触发（后台窗口数据变更不打扰
+        #   活跃页面，多窗口串态防护语义不变）。
+        self._refresh_history_page_if_active()
         # 2. 欢迎卡片数据同步：优先「软更新」——缓存卡片仍在时保留
         #    QWebEngineView 实例、仅重渲染 body（避免其他标签页对话完成广播
         #    到本窗口时欢迎卡片被销毁重建，视觉上"重新加载一下"+ 100-500ms
@@ -8486,80 +8458,6 @@ class OpenAIChatToolWindow(ToolWindow):
                         parent=TabManagerWindow.get_instance() or self.window(),
                         position=InfoBarPosition.BOTTOM,
                     )
-
-    def _refresh_archived_sessions(self):
-        """刷新归档会话列表（带文件修改时间缓存，避免重复读取）"""
-        if not self.history_manager:
-            return
-
-        archived_list = self.history_manager.get_archived_sessions()
-
-        # 缓存归档文件预览数据（以文件路径+修改时间为键）
-        if not hasattr(self, "_archived_cache"):
-            self._archived_cache = {}  # path → (mtime, data_dict)
-
-        enriched_list = []
-
-        for session in archived_list:
-            fp = session["path"]
-            cached = self._archived_cache.get(fp)
-
-            try:
-                current_mtime = os.path.getmtime(fp)
-            except OSError:
-                current_mtime = 0
-
-            if cached and cached[0] == current_mtime:
-                # 缓存有效，直接复用
-                session["message_count"] = cached[1].get("message_count", 0)
-                session["last_time"] = cached[1].get("last_time", "")
-                session["preview"] = cached[1].get("preview", "")
-            else:
-                # 缓存过期或不存在，读取文件
-                try:
-                    from app.utils.session_preview import get_message_preview
-
-                    with open(fp, "r", encoding="utf-8") as f:
-                        data = json.loads(f.read())
-                    messages = data.get("messages", [])
-                    # 🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）计入 user 消息数
-                    # → mail-only 会话归档后历史列表不再显示"0 条消息"
-                    msg_count = data.get(
-                        "message_count",
-                        len(
-                            [
-                                m
-                                for m in messages
-                                if m.get("role") == "user"
-                                and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
-                            ]
-                        ),
-                    )
-                    last_time = data.get("last_time", data.get("saved_at", ""))
-                    preview = get_message_preview(messages) if messages else ""
-                    session["message_count"] = msg_count
-                    session["last_time"] = last_time
-                    session["preview"] = preview
-                    self._archived_cache[fp] = (
-                        current_mtime,
-                        {
-                            "message_count": msg_count,
-                            "last_time": last_time,
-                            "preview": preview,
-                        },
-                    )
-                except Exception:
-                    pass
-
-            enriched_list.append(session)
-
-        # 清理已不存在的归档文件缓存键（删除/恢复归档后立即生效，
-        # 防止 _archived_cache 随文件增删无限增长）
-        current_paths = {s["path"] for s in archived_list}
-        for stale_key in [k for k in self._archived_cache if k not in current_paths]:
-            self._archived_cache.pop(stale_key, None)
-
-        self._history_popup_card.set_archived_sessions(enriched_list)
 
     def _on_history_session_selected(self, index: int):
         """从历史面板选择会话"""
@@ -13310,7 +13208,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.warning(f"[恢复会话] 删除归档文件失败: {e}")
 
             # 刷新归档列表（归档 tab 下立即生效；历史 tab 下由 notify 兜底）
-            self._refresh_archived_sessions()
+            self._refresh_history_page_if_active()
             # 会话数据变更统一通知：刷新历史卡片（恢复的会话重新出现在
             # 历史列表）+ 失效欢迎卡片（recent_sessions 变化）+ 跨窗口广播
             self._notify_history_data_changed()
@@ -13367,12 +13265,8 @@ class OpenAIChatToolWindow(ToolWindow):
             os.remove(file_path)
             logger.info(f"[彻底删除] 成功: {file_path}")
 
-            # 清理归档缓存键（防止已删除文件的预览数据驻留 _archived_cache）
-            if hasattr(self, "_archived_cache"):
-                self._archived_cache.pop(file_path, None)
-
             # 刷新归档列表
-            self._refresh_archived_sessions()
+            self._refresh_history_page_if_active()
             # 会话数据变更统一通知：失效欢迎卡片（归档删除会让 recent_sessions
             # / top_by_count 顺序变化）+ 历史卡片刷新 + 跨窗口广播
             self._notify_history_data_changed()
@@ -13415,7 +13309,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info(f"[归档会话重命名] 成功: {file_path} -> {new_title}")
 
             # 刷新归档列表
-            self._refresh_archived_sessions()
+            self._refresh_history_page_if_active()
             # 会话数据变更统一通知：失效欢迎卡片（归档重命名会让 recent_sessions
             # 标题变化）+ 历史卡片刷新 + 跨窗口广播
             self._notify_history_data_changed()

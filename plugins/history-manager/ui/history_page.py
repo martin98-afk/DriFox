@@ -2,16 +2,20 @@
 """历史会话页（workbench_tab：``page_id="history-manager"``）
 
 原为 ``app/widgets/workbench_panel.HistoryPage``（宿主内置页），现随
-``history-manager`` 插件迁出：形态不变（历史会话 / 归档 子页签 + 列表上方
-搜索框 + 右端导入按钮），但**自带** ``HistoryCard``（会话列表本体），不再由
-宿主窗口 attach。
+``history-manager`` 插件迁出：历史会话 / 归档 子页签 + 项目切换器 + 搜索框 +
+右端导入按钮，**自带** ``HistoryCard``（会话列表本体）。
 
-数据与操作仍由宿主窗口驱动：
-- 列表数据：``win._refresh_history_toggle_panel()`` / ``win._refresh_archived_sessions()``
-- 会话操作：卡片信号 → ``win._archive_history_session`` 等
+数据流（架构反转：数据服务化）：
+- 列表数据：本页自拉（``HistoryManager.get_instance()`` 全局单例，会话数据
+  全局只有一份），不再经宿主窗口方法注入
+- 纯数据写操作（置顶 / 移动项目）：插件直走数据服务，写后调窗口
+  ``_notify_history_data_changed()`` 做欢迎卡片失效 + 跨窗口联动
+- 窗口态操作保留信号转发：点击加载会话（``win._on_history_session_selected``）、
+  归档（含当前会话清场，``win._archive_history_session``）等
+- 当前会话高亮：只读活跃窗口 ``_current_session_id``（窗口态）
 
-本页通过 ``TabManagerWindow.get_current_window()`` 解析当前活跃窗口，因此
-同一份页面天然跟随活跃窗口投影（宿主 ``refresh_workbench`` 会驱动重刷）。
+项目切换器：``当前项目（跟随活跃窗口）/ 全部项目 / 具体项目``；「全部项目」
+视图下行内显示项目小标签，点击跨项目会话直接加载（窗口侧自动切项目与工作目录）。
 
 接口契约（宿主 ``MainWidget._history_card`` 代理读取）：
 - ``tabChanged`` / ``closed`` / ``set_current_tab`` / ``set_search_handler`` /
@@ -145,12 +149,10 @@ class HistoryPage(QWidget):
         self._card = HistoryCard()
         self._card.sessionSelected.connect(self._on_session_selected)
         self._card.sessionArchived.connect(self._on_session_archived)
-        self._card.sessionRenamed.connect(self._on_session_renamed)
         self._card.refreshRequested.connect(self._on_refresh_requested)
         self._card.sessionImported.connect(self._on_session_imported)
         self._card.sessionRestored.connect(self._on_session_restored)
         self._card.sessionPermanentlyDeleted.connect(self._on_session_deleted)
-        self._card.archivedSessionRenamed.connect(self._on_archived_renamed)
         self._card.teamRestoreRequested.connect(self._on_team_restore)
         self._card.teamArchiveRequested.connect(self._on_team_archive)
         self._card.memberSelected.connect(self._on_member_selected)
@@ -341,9 +343,7 @@ class HistoryPage(QWidget):
     def _on_tab_changed(self, tab_id: str) -> None:
         if self._search_input is not None:
             self._search_input.clear()
-            self._search_input.setPlaceholderText(
-                "🔍 搜索历史会话..." if tab_id == "history" else "🔍 搜索归档会话..."
-            )
+            self._search_input.setPlaceholderText("🔍 搜索历史会话..." if tab_id == "history" else "🔍 搜索归档会话...")
         self.refresh()
 
     def _on_session_selected(self, index: int) -> None:
@@ -355,11 +355,6 @@ class HistoryPage(QWidget):
         win = self._win()
         if win is not None:
             win._archive_history_session(index)
-
-    def _on_session_renamed(self, index: int, new_title: str) -> None:
-        win = self._win()
-        if win is not None:
-            win._rename_history_session(index, new_title)
 
     def _on_refresh_requested(self) -> None:
         self.refresh()
@@ -378,11 +373,6 @@ class HistoryPage(QWidget):
         win = self._win()
         if win is not None:
             win._on_archived_session_deleted(file_path)
-
-    def _on_archived_renamed(self, file_path: str, new_title: str) -> None:
-        win = self._win()
-        if win is not None:
-            win._on_archived_session_renamed(file_path, new_title)
 
     def _on_team_restore(self, run_id: str) -> None:
         win = self._win()
@@ -447,9 +437,12 @@ class HistoryPage(QWidget):
         combo.addItem(f"当前项目（{current}）", userData=_PROJECT_CURRENT)
         combo.addItem("全部项目", userData=_PROJECT_ALL)
         try:
-            if self._card is not None:
-                for proj in self._card.get_project_list():
-                    combo.addItem(proj, userData=proj)
+            hm = _active_history_manager()
+            projects = hm.get_project_list() if hm is not None else None
+            if not projects and self._card is not None:
+                projects = self._card.get_project_list()  # 兜底：从已加载列表聚合
+            for proj in projects or []:
+                combo.addItem(proj, userData=proj)
         except Exception:
             pass
         idx = combo.findData(self._project_filter_raw)

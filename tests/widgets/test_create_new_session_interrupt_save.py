@@ -227,7 +227,7 @@ def _make_stub(streaming: bool, interrupted_messages=None):
     # refresh_history_card_if_visible）：设 None 走短路，避免 QWidget
     # 未初始化访问属性触发 RuntimeError
     inst._history_card = None
-    inst._refresh_history_toggle_panel = MagicMock()
+    inst._refresh_history_page_if_active = MagicMock()
     return inst
 
 

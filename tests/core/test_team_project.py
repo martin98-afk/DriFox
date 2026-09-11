@@ -255,7 +255,7 @@ class TestTeamProjectApply:
         win._refresh_project_branch_style = Mock()
         win._update_branch = Mock()
         win._invalidate_welcome_card = Mock()
-        win._refresh_history_toggle_panel = Mock()
+        win._refresh_history_page_if_active = Mock()
         win._sync_working_directory = Mock()
         win._create_new_session = Mock()
         return win

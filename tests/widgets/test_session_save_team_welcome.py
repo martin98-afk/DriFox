@@ -339,7 +339,7 @@ class TestTeamDisbandBlankSessionGuard:
         inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
         inst._get_current_worktree_path = lambda: ""
         inst._history_card = None
-        inst._refresh_history_toggle_panel = None
+        inst._refresh_history_page_if_active = None
         inst._update_node_preview = MagicMock()
 
         inst._save_current_session_to_history()
@@ -372,7 +372,7 @@ class TestTeamDisbandBlankSessionGuard:
         inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
         inst._get_current_worktree_path = lambda: ""
         inst._history_card = None
-        inst._refresh_history_toggle_panel = None
+        inst._refresh_history_page_if_active = None
         inst._update_node_preview = MagicMock()
 
         inst._save_current_session_to_history()
@@ -412,7 +412,7 @@ class TestTeamDisbandBlankSessionGuard:
         inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
         inst._get_current_worktree_path = lambda: ""
         inst._history_card = None
-        inst._refresh_history_toggle_panel = None
+        inst._refresh_history_page_if_active = None
         inst._update_node_preview = MagicMock()
         # 模拟快照生成：含本团队全部成员（含没对话的 review）
         inst._get_team_members_snapshot_json = lambda: (
@@ -456,7 +456,7 @@ class TestTeamDisbandBlankSessionGuard:
         inst._resolve_session_project_fallback = lambda *a, **k: "默认项目"
         inst._get_current_worktree_path = lambda: ""
         inst._history_card = None
-        inst._refresh_history_toggle_panel = None
+        inst._refresh_history_page_if_active = None
         inst._update_node_preview = MagicMock()
         # PyQt 子类用 __new__ 构造时访问普通属性触发 super 检查，用 __dict__ 注入
         inst.__dict__["_current_provider_name"] = ""
