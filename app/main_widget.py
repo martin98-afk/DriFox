@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -12206,6 +12207,22 @@ class OpenAIChatToolWindow(ToolWindow):
         # PyQt 层模式切换 → 持久化到 app.config（不重建卡片，避免 QWebEngine 重建开销）
         welcome_card.welcomeModeChanged.connect(self._on_welcome_mode_changed)
         self._welcome_card_cache[self._window_id] = welcome_card
+        # 🛡️ 悬垂指针防护：卡片 setParent(容器) 后 ownership 归 C++，父容器析构时
+        # Qt 会递归删除它，而本缓存仍持有 Python 引用。sip.isdeleted() 对
+        # 「ownership 在 C++ 侧」的对象**返回 False** —— 于是
+        # _invalidate_welcome_card 会对其调 hide() → access violation 闪退
+        # （实测：卸载 UI 插件后再重新启用）。挂 destroyed 信号，在 C++ 析构
+        # 瞬间摘掉缓存项，失效路径拿到 None 即安全返回。
+        #   弱引用 self：避免卡片反向持有窗口形成引用环，窗口无法回收。
+        _wid = self._window_id
+        _self_ref = weakref.ref(self)
+
+        def _drop_cached_card(_obj=None):
+            mw = _self_ref()
+            if mw is not None:
+                mw._welcome_card_cache.pop(_wid, None)
+
+        welcome_card.destroyed.connect(_drop_cached_card)
         return welcome_card
 
     def _on_welcome_mode_changed(self, new_mode: str):

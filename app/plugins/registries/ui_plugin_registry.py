@@ -2875,6 +2875,18 @@ class UIPluginRegistry:
         rescheduled = 0
         for mw in list(self._window_main_widgets.values()):
             try:
+                # 🛡️ 窗口 C++ 对象已析构（窗口关闭与插件热重载竞态）时，其缓存的
+                # 欢迎卡片必然已随父容器被 Qt 递归删除，而 Python 引用仍悬垂。
+                # sip.isdeleted() 对「ownership 在 C++ 侧」的 widget 返回 False，
+                # 只有显式检查宿主窗口本身才能拦下（否则 hide() → access violation）。
+                try:
+                    from PyQt5 import sip
+
+                    if sip.isdeleted(mw):
+                        skipped_no_method += 1
+                        continue
+                except Exception:
+                    pass
                 if not hasattr(mw, "_invalidate_welcome_card"):
                     skipped_no_method += 1
                     logger.debug(
