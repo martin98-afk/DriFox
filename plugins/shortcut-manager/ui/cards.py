@@ -717,7 +717,8 @@ class ShortcutManagerCard(QWidget):
 
         try:
             self._all_commands = _load_all_items()
-            self._render_list()
+            # 保留搜索框过滤词：保存/恢复快捷键后延迟刷新时列表不重置为全量
+            self._render_list(self._search.text())
             self._count_lb.setText(f"共 {len(self._all_commands)} 个")
             # 记录本次加载对应的 UI 命令账本版本（showEvent 据此判定是否需重载）
             try:
