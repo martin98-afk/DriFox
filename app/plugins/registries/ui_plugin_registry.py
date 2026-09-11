@@ -9,7 +9,6 @@ import functools
 import os
 import re
 import threading
-import time
 from dataclasses import dataclass, field
 from contextlib import contextmanager
 from pathlib import Path
@@ -25,13 +24,12 @@ from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 热重载精准刷新：槽位（可扩展）→ 视图域（稳定）的两层映射
+# UI 扩展点槽位声明表（数据驱动，取代散落的硬编码分支）
 # ═══════════════════════════════════════════════════════════════════════════
-# 问题：热重载一个 UI 插件时，若不去溯源它到底占了哪些位置，就只能「全量刷新」
-# （重建全部插件的输入区按钮 / 欢迎卡片 / 工作台页 …），既卡顿又会造成无关
-# 插件的界面闪烁与状态丢失。
+# 背景：早期每加一个 UI 扩展点，就要在卸载判据、热重载门控等多处补硬编码分支。
+# 这里改成声明式：一个槽位 = 一行 ``declare_slot``（取值器 + 归属解析器 + 视图域）。
 #
-# 分层设计（关键：只有**视图域**是硬概念，**槽位**是数据）：
+# 分层（关键：只有**视图域**是硬概念，**槽位**是数据）：
 #   ┌ 槽位 slot_id ────────┐        ┌ 视图域 scope ──────────┐
 #   │ content_renderer     │──┐     │ input_area  输入区按钮  │
 #   │ input_button         │──┼────▶│ welcome     欢迎卡片    │
@@ -46,9 +44,15 @@ from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo
 #
 # ★ 新增一个 UI 扩展点只需做一件事：在文件末尾的 ``_declare_builtin_slots()``
 #   里追加一条 ``declare_slot(...)``（槽位名 + 从注册表取条目的取值器 + 归属
-#   的视图域）。溯源、卸载判据、热重载门控全部由声明表自动驱动，无需改动。
-#   若忘记声明，``_has_any_registration`` 的兜底探测会把该插件判为「未知槽位」
-#   → 调用方回退全量刷新（漏声明只损失精度，不会漏刷新）。
+#   的视图域）。``_has_any_registration`` 与 ``get_plugin_ui_slots`` 均由声明表
+#   自动驱动，无需改动。
+#
+# ⚠️ 本表**不用于热重载门控**（2026-09 教训）：曾用「卸前 ∪ 装后」槽位快照推导
+#   该刷哪些视图域，但热重载是异步广播 + 多入口 + 可重入的，跨调用的可变快照
+#   必然与真实时序错位 —— 表现为「有时刷新、有时不刷、卸载后残留旧实例」。
+#   现在门控一律**无状态**：容器只能依据「此刻注册表 / 此刻已挂载实例」判断，
+#   见 ``WorkbenchPanel.sync_plugin_pages(force_plugin=...)``。
+#   声明表保留为纯查询与诊断用途。
 
 # ── 视图域：界面渲染位置（稳定，新增扩展点一般不需要动这里）──
 SCOPE_INPUT_AREA = "input_area"  # 输入区胶囊上的插件按钮
@@ -641,15 +645,6 @@ class UIPluginRegistry:
         self._ui_signatures: dict = {}
         self._signature_watch_started = False
         # ── 热重载槽位轨迹（精准刷新溯源）──
-        # {plugin_name: 本次 unload/load 周期「卸前 ∪ 装后」占用的 UI 槽位集合}
-        # 消费方（窗口热重载槽）据此只刷新该插件真正挂载的位置，避免「重载一个
-        # UI 插件 → 全部插件的输入区按钮/欢迎卡片/工作台页被无差别重建」。
-        # 取并集的理由：新版本可能**移除**了某槽位（如不再注册工作台页），此时
-        # 「装后」快照查不到它，但旧实例仍挂在界面上，必须靠「卸前」快照触发清理。
-        self._reload_slot_trace: Dict[str, frozenset] = {}
-        # 最近一次 load/unload 涉及的插件名与时刻（兜底溯源用，见上）
-        self._last_touched_plugin: str = ""
-        self._last_touched_at: float = 0.0
         # ── Tab 模式浮动卡片按标签页隔离（per-tab 可见集合）──
         # 卡片 widget 单实例挂 TabManagerWindow 全局容器；CardManager 的
         # GLOBAL 可见记录是「当前活跃标签页可见集合」的投影。切换标签时按
@@ -2643,15 +2638,11 @@ class UIPluginRegistry:
         return any(decl.has_plugin(self, plugin_name) for decl in UI_SLOT_DECLS.values())
 
     def get_plugin_ui_slots(self, plugin_name: str) -> frozenset:
-        """该插件**当前**占用的 UI 扩展点槽位集合（热重载精准刷新溯源用）
+        """该插件**当前**占用的 UI 扩展点槽位集合（纯查询，无副作用）
 
-        返回的是注册表此刻的快照：
-        - 热重载 unload **之前**调用 → 旧版本占用面（需清理的位置）
-        - 热重载 load **之后**调用 → 新版本占用面（需重建的位置）
-
-        消费方应取两者并集（见 ``get_reload_slot_trace``）：新版本可能移除某
-        槽位（如不再注册工作台页），此时「装后」快照查不到它，但旧实例仍挂在
-        界面上，必须靠「卸前」快照触发清理。
+        ⚠️ 只反映「此刻」的注册表状态，**不可**用于推导热重载该清理什么：
+        插件卸载后其条目已从注册表消失，这份快照查不到它，而旧实例仍挂在
+        界面上。清理必须走按归属的就地记账（见 WorkbenchPanel._page_owner）。
 
         ★ 遍历 UI_SLOT_DECLS 声明表，新增扩展点无需改动此处。
 
@@ -2688,12 +2679,8 @@ class UIPluginRegistry:
             and not self._has_any_registration(plugin_name)
             and _mod_name not in _sys_probe.modules
         ):
-            # 确无任何注册：留一条空轨迹，让热重载消费方区分「确定没占槽位」
-            # 与「轨迹缺失」，从而安全跳过全部 UI 刷新而非回退全量。
-            self._reload_slot_trace.setdefault(plugin_name, frozenset())
+            # 确无任何注册：返回 False（幂等）。
             return False
-        # 溯源：记录卸载前的槽位占用面（新版本可能移除某些槽位，靠这份快照清理旧实例）
-        self._record_slot_trace(plugin_name, self.get_plugin_ui_slots(plugin_name))
         # 0) 调用插件可选 unload_ui 回调（先于注册表清理，便于释放外部资源）
         try:
             import sys as _sys
@@ -3252,11 +3239,10 @@ class UIPluginRegistry:
 #
 # 之后下面这些能力全部自动获得，无需任何额外改动：
 #   - _has_any_registration()  卸载幂等判据
-#   - get_plugin_ui_slots()    槽位溯源
-#   - get_reload_scopes()      槽位 → 视图域翻译（供热重载精准刷新）
+#   - get_plugin_ui_slots()    槽位占用面查询（诊断/日志）
 #
-# scopes 留空的槽位被视为「未归类」：命中它时 get_reload_scopes 返回 None，
-# 调用方回退全量刷新。即漏配 scopes 只损失精度、不会漏刷新。
+# scopes 仅作标注用途（说明该槽位影响哪些界面位置），**不参与热重载门控**——
+# 门控一律无状态，见 WorkbenchPanel.sync_plugin_pages(force_plugin=...)。
 #
 # 取值器写成 lambda 延迟求值（模块导入时 UIPluginRegistry 尚未实例化），
 # 因此本表必须位于类定义之后调用、但可安全引用其私有属性名。

@@ -9578,40 +9578,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except (RuntimeError, AttributeError):
             return False
 
-    @staticmethod
-    def _resolve_hot_reload_scopes(result: dict):
-        """把热重载结果**溯源**成需要刷新的视图域集合（精准刷新判定）
-
-        单插件热重载时只刷新该插件真正占用的界面位置，避免「重载 A 把 B/C/D
-        的 UI 全部重建」。溯源链路：
-
-            result["_plugin_name"]
-              → UIPluginRegistry 的槽位轨迹（卸前 ∪ 装后）
-              → 槽位声明表 UI_SLOT_DECLS 翻译为视图域 SCOPE_*
-
-        ★ 本方法**不认识任何具体槽位名**，只认识 7 个稳定的视图域，因此新增
-        UI 扩展点无需改动热重载逻辑（只需在声明表补一行 declare_slot）。
-
-        Returns:
-            frozenset[SCOPE_*]：可精准刷新（空集 = 确定无需刷新任何 UI）
-            None：无法判定 → 调用方回退全量刷新（安全侧）
-        """
-        plugin_name = (result.get("_plugin_name") or "").strip()
-        try:
-            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-
-            reg = UIPluginRegistry.get_instance()
-            if not plugin_name:
-                # 兜底：部分启用/安装链路（组件开关、市场安装）未透传插件名。
-                # 广播总是紧随 load/unload 发出，用「刚刚被 touch 的插件」归属。
-                plugin_name = reg.get_recently_touched_plugin()
-                if not plugin_name:
-                    return None  # 全量/合并重载：无单一归属，走旧路径
-            return reg.get_reload_scopes(plugin_name)
-        except Exception as e:
-            logger.debug(f"[HotReload] 槽位溯源失败，回退全量刷新: {e}")
-            return None
-
     def _on_plugin_hot_reload(self, result: dict):
         """插件热更新完成时的回调（watchfiles 自动触发）
 
@@ -9680,40 +9646,26 @@ class OpenAIChatToolWindow(ToolWindow):
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
         # ⚠️ 本分支不重建命令快捷键（命令表没变）；只有上面的 commands 分支才重建。
         #
-        # ★ 精准刷新（2026-09）：ui=True 曾经无条件重建**全部**插件的输入区按钮、
-        # 欢迎卡片、工作台页——热重载插件 A 会连带销毁重建 B/C/D 的 UI，造成无关
-        # 插件界面闪烁、页内状态丢失与明显卡顿。现按「该插件占用了哪些 UI 槽位」
-        # 溯源，只刷新命中的**视图域**（SCOPE_*）。
-        # 溯源失败（scopes is None，如全量重载/未知槽位）→ 回退旧的全量刷新。
-        # UI 插件增删：按溯源视图域精准重建（_precise=False 时回退旧全量路径）
-        # ⚠️ 本分支不重建命令快捷键（命令表没变）；只有上面的 commands 分支才重建。
-        _ui_scopes = OpenAIChatToolWindow._resolve_hot_reload_scopes(result)
-        _precise = _ui_scopes is not None
-        # 视图域常量（界面渲染位置，稳定集合）— 局部导入避免启动时加载插件层。
-        # 无条件导入：下方多处门控在 _precise=False 时靠短路跳过，但保证名字始终存在。
+        # ★ 刷新动作一律**无条件**执行（2026-09 教训）：曾用「槽位溯源」推导该
+        # 刷哪些位置——热重载是异步广播 + 多入口 + 可重入的，跨调用的「卸前/装后」
+        # 槽位快照必然与真实时序错位，表现为「有时刷新、有时不刷、卸载后残留」。
+        # 精准化只保留在**无状态可判定**的位置：右侧工作台页按插件归属定向重建
+        # （见下方 refresh_workbench(force_plugin=...)）。
+        _ui_plugin_name = (result.get("_plugin_name") or "").strip()
         if result.get("ui"):
-            from app.plugins.registries.ui_plugin_registry import (
-                SCOPE_HOTKEY,
-                SCOPE_INPUT_AREA,
-                SCOPE_SYSTEM_CARDS,
-                SCOPE_WELCOME,
-            )
-
-            if _precise:
-                logger.debug(f"[HotReload] UI 精准刷新: plugin={result.get('_plugin_name')} scopes={sorted(_ui_scopes or ())}")
-            if not _precise or SCOPE_INPUT_AREA in _ui_scopes:
-                for win in list(window_registry.alive_window_instances()):
-                    if not OpenAIChatToolWindow._win_alive(win):
-                        continue
-                    try:
-                        win._build_plugin_input_buttons()
-                    except (RuntimeError, AttributeError):
-                        pass
+            if _ui_plugin_name:
+                logger.debug(f"[HotReload] UI 刷新: plugin={_ui_plugin_name}")
+            for win in list(window_registry.alive_window_instances()):
+                if not OpenAIChatToolWindow._win_alive(win):
+                    continue
+                try:
+                    win._build_plugin_input_buttons()
+                except (RuntimeError, AttributeError):
+                    pass
             # ★ 已打开标签页视图重绘：消息内容块是渲染时刻的快照，热重载后
             # 不会自动更新（新建标签页才显示新版）——遍历所有窗口的已渲染
             # 消息卡片，命中该插件的 custom 块时用最新 render_func 重新生成。
             # plugin_name 为空（全量/合并重载）时重绘全部 custom 块。
-            _ui_plugin_name = result.get("_plugin_name") or ""
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
@@ -9725,25 +9677,19 @@ class OpenAIChatToolWindow(ToolWindow):
                             pass
                 except (RuntimeError, AttributeError):
                     pass
-            # ★ 右侧工作台插件页强制重建：ui 热重载后 registry 已更新，但面板
+            # ★ 右侧工作台插件页重建：ui 热重载后 registry 已更新，但面板
             # widget 是构建时快照，(page_id, label) 签名不变会被 sync_plugin_pages
-            # 短路跳过——force=True 忽略签名销毁重建，常驻插件页（工作树/产物/
-            # 自注册 tab）才真正换用新代码。下一帧执行，避开广播栈内重建。
-            # 精准化：只定向重建本次重载插件拥有的 page_id，其余插件页原样保留。
+            # 短路跳过——强制销毁重建，常驻插件页（工作树/产物/自注册 tab）
+            # 才真正换用新代码。下一帧执行，避开广播栈内重建。
+            # ★ 精准且无状态：按**插件归属**定向重建（面板就地记录每页归属），
+            # 其余插件页原样保留，不丢滚动位置/展开项/输入草稿。插件名缺失
+            # （全量/合并重载）时退化为 force=True 全量重建。
             try:
                 from app.widgets.tab_manager_window import TabManagerWindow
 
                 _tmw = TabManagerWindow.get_instance()
                 if _tmw is not None:
-                    if _precise:
-                        from app.plugins.registries.ui_plugin_registry import (
-                            UIPluginRegistry as _UIReg,
-                        )
-
-                        _pids = _UIReg.get_instance().get_reload_workbench_page_ids(result.get("_plugin_name") or "")
-                        _kw = {"force_page_ids": _pids}
-                    else:
-                        _kw = {"force": True}
+                    _kw = {"force_plugin": _ui_plugin_name} if _ui_plugin_name else {"force": True}
                     QTimer.singleShot(0, lambda _kw=_kw: _tmw.refresh_workbench(**_kw))
             except Exception:
                 pass
@@ -9752,19 +9698,17 @@ class OpenAIChatToolWindow(ToolWindow):
             # register_welcome_tab → registry 链，实测安装新插件后已打开标签页
             # 不刷新（须新建会话才出现），此处显式兜底刷新（见 2026-08-23 故障）。
             try:
-                if not _precise or SCOPE_WELCOME in _ui_scopes:
-                    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-                    UIPluginRegistry.get_instance()._refresh_welcome_cards()
+                UIPluginRegistry.get_instance()._refresh_welcome_cards()
             except Exception:
                 logger.debug("[HotReload] 欢迎卡片刷新失败", exc_info=True)
             # toggle-window 可能被用户插件覆盖 → 同步更新全局热键
             try:
-                if not _precise or SCOPE_HOTKEY in _ui_scopes:
-                    from app.tray_manager import TrayManager
+                from app.tray_manager import TrayManager
 
-                    tray = TrayManager.get_instance()
-                    tray._setup_global_hotkey()
+                tray = TrayManager.get_instance()
+                tray._setup_global_hotkey()
             except Exception:
                 pass
 
@@ -9905,7 +9849,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # UI 组件变更：热重载可能已强制删除 UI 插件卡片，
         # 检查并恢复输入区（兜底：防止 _on_system_card_closed 回调链断裂）
-        if result.get("ui") and (not _precise or SCOPE_SYSTEM_CARDS in _ui_scopes):
+        if result.get("ui"):
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue

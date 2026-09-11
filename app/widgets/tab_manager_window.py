@@ -10,7 +10,7 @@ Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 import platform
 import sys
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5 import sip as _sip
 
@@ -1401,7 +1401,7 @@ class TabManagerWindow(FramelessWindow):
     def refresh_workbench(
         self,
         force: bool = False,
-        force_page_ids: Optional[Iterable[str]] = None,
+        force_plugin: str = "",
     ) -> None:
         """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
 
@@ -1412,8 +1412,9 @@ class TabManagerWindow(FramelessWindow):
 
         force=True：插件页强制重建（ui 热重载后签名未变但实现已变）。
 
-        ★ force_page_ids：只定向重建这些 page_id 对应的插件页（热重载单个插件
-        时避免连带销毁其余插件的页）。为 None 时沿用 force 的全量语义。
+        ★ force_plugin：只定向重建归属该插件的工作台页（热重载单个插件时避免
+        连带销毁其余插件的页）。留空时沿用 force 的全量语义。判定无状态，
+        由面板按「已挂载页记录的归属」就地比对。
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None or not panel.isVisible():
@@ -1425,7 +1426,7 @@ class TabManagerWindow(FramelessWindow):
             panel.sync_plugin_pages(
                 UIPluginRegistry.get_instance().get_workbench_tabs(),
                 force=force,
-                force_page_ids=force_page_ids,
+                force_plugin=force_plugin,
             )
         except Exception:
             pass

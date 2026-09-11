@@ -26,7 +26,7 @@ refresh_workbench 时调用），页面自行实现可选协议 ``refresh_data()
 """
 
 import json
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCursor
@@ -509,6 +509,9 @@ class WorkbenchPanel(QWidget):
 
         # 插件页签：{page_id: widget}，按注册表 reconcile（见 sync_plugin_pages）
         self._plugin_widgets: Dict[str, QWidget] = {}
+        # {page_id: 归属插件名}。热重载精准重建用：面板销毁页时需要知道「这页
+        # 属于谁」，而卸载后该页已从注册表消失，届时查不到归属——必须就地记账。
+        self._page_owner: Dict[str, str] = {}
         self._plugin_infos: Dict[str, Any] = {}
         self._plugin_sig: Optional[tuple] = None
         # 动态卡片 tab（right 容器 UI 插件卡片，见 open_card_tab）
@@ -827,7 +830,7 @@ class WorkbenchPanel(QWidget):
         self,
         tabs: List[Any],
         force: bool = False,
-        force_page_ids: Optional[Iterable[str]] = None,
+        force_plugin: str = "",
     ) -> None:
         """按插件注册表 reconcile 工作台页（签名不变则跳过重建）
 
@@ -839,15 +842,19 @@ class WorkbenchPanel(QWidget):
         force=True（热重载）：签名不变但实现已变 → 销毁全部插件页强制重建
         （数据由页面自身 ``refresh_data()`` / ``showEvent`` 重新拉取）。
 
-        ★ 精准重建（新增）：``force_page_ids`` 显式给出要销毁重建的 page_id
-        集合时，**只**重建这些页，其余插件页保持原样。用于「热重载插件 A 时不
-        连带销毁重建 B/C/D 的页」——旧行为 force=True 会无差别销毁全部插件页，
-        导致无关插件的页状态（滚动位置/展开项/输入草稿）丢失、并造成明显卡顿。
+        ★ 精准重建：``force_plugin="<插件名>"`` 只销毁重建**归属该插件**的页，
+        其余插件页原样保留。用于「热重载插件 A 时不连带销毁重建 B/C/D 的页」——
+        旧行为 force=True 会无差别销毁全部插件页，导致无关插件的页状态
+        （滚动位置/展开项/输入草稿）丢失、并造成明显卡顿。
+
+        ★ 判定完全**无状态**：只比对「此刻注册表传入的 tabs」与「此刻已挂载页
+        及其记录的归属」，不依赖任何跨调用的历史快照。热重载是异步广播 + 多
+        入口 + 可重入的，任何「上一次记录 → 这一次消费」的快照都会与真实时序
+        错位（曾导致「有时刷新、有时不刷、卸载后残留旧实例」）。
 
         Args:
-            force_page_ids: 需定向重建的 page_id 集合。传空集合 = 不做定向重建
-                （但仍会走下面的常规 reconcile，可摘除已注销的页）。
-                为 None 时按 force 参数决定（兼容旧行为）。
+            force_plugin: 需定向重建的**插件名**（不是 page_id）。插件卸载后其
+                页已从 tabs 中消失，靠 ``_page_owner`` 就地记账才能定位并销毁。
         """
         raw = list(tabs or [])
         ordered = sorted(
@@ -877,15 +884,17 @@ class WorkbenchPanel(QWidget):
                     probe_ctx = {}
                 context_broken = "backend" in (probe_ctx or {})
 
-        if force_page_ids is not None:
-            # 定向重建：只销毁目标页。置空签名使其落到下方常规 reconcile，
-            # 由 _mount_plugin_page 按新 widget_class 重建。
-            targets = {pid for pid in force_page_ids if pid in self._plugin_widgets}
+        if force_plugin:
+            # 定向重建：销毁归属该插件的全部页（含已从注册表注销的页）。
+            # 置空签名使其落到下方常规 reconcile，由 _mount_plugin_page 按新
+            # widget_class 重建；被卸载的页则因不在 infos 中而不再重建。
+            # 无目标页（首次安装 / 该插件本就没有工作台页）时交给下方 reconcile。
+            targets = [pid for pid, owner in self._page_owner.items() if owner == force_plugin]
             if targets:
                 self._plugin_sig = None
                 for page_id in targets:
                     self._destroy_plugin_page(page_id)
-        elif force or context_broken:
+        if force or context_broken:
             self._plugin_sig = None
             for page_id in list(self._plugin_widgets.keys()):
                 self._destroy_plugin_page(page_id)
@@ -1045,6 +1054,7 @@ class WorkbenchPanel(QWidget):
             return
         self._stack.addWidget(widget)
         self._plugin_widgets[info.page_id] = widget
+        self._page_owner[info.page_id] = getattr(info, "plugin_name", "") or ""
         # 挂载点补刷：页面构造可能早于主题应用（启动期插件加载先于 Colors 就绪），
         # 构造期固化的 QSS 是旧主题色；此后无人再通知它。
         if hasattr(widget, "refresh_style"):
@@ -1055,6 +1065,7 @@ class WorkbenchPanel(QWidget):
     def _destroy_plugin_page(self, page_id: str) -> None:
         """销毁插件页 widget（显式隐藏 + 移除布局，避免残影）"""
         widget = self._plugin_widgets.pop(page_id, None)
+        self._page_owner.pop(page_id, None)
         if widget is not None:
             widget.hide()
             self._stack.removeWidget(widget)
