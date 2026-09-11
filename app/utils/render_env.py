@@ -11,7 +11,9 @@ qfluentwidgets 全量配置拖慢启动 / 提前加载 GUI 栈），换算成环
 - RenderBackend: **software(默认, ANGLE warp)** / hardware(ANGLE d3d11) / software_gl
   / vulkan / d3d9 / swiftshader
   - software：默认档，Qt 走 ANGLE → WARP（CPU 光栅），完全不碰显卡驱动
-  - hardware：保留 GPU 进程，禁 SwiftShader 兜底（驱动异常时显式失败不静默退化）
+  - hardware：保留 GPU 进程，禁 SwiftShader 兜底（驱动异常时显式失败不静默退化）；
+    默认附加 --disable-gpu-compositing（GPU 光栅 + CPU 合成，规避 Qt/Chromium
+    双合成器异步交换 GPU 纹理在高频 resize 下的帧序错乱闪烁，2026-09-11）
   - software_gl：Mesa llvmpipe 桌面 GL，最慢最稳
   - vulkan / d3d9 / swiftshader：排障档，见 _ANGLE_PLATFORM 注释
   - **无 auto 档**（2026-09-10 移除）：它其实不检测机器，只是读人工放的
@@ -138,7 +140,9 @@ def compute_settings(render: dict) -> dict:
             render.get("RendererProcessLimit"), _DEFAULT_RENDERER_LIMIT, *_RENDERER_LIMIT_RANGE
         ),
         "js_heap_mb": _to_int(render.get("JsHeapMb"), _DEFAULT_JS_HEAP_MB, *_JS_HEAP_RANGE),
-        "low_end_device_mode": _to_bool(render.get("LowEndDeviceMode"), True),
+        # 低端设备模式：为 WARP/低配机设计的降级路径（省内存）。hardware 档默认关：
+        # 真实 GPU 光栅下启用降级 tile 策略只会加剧合成错位（显式设置仍被尊重）。
+        "low_end_device_mode": _to_bool(render.get("LowEndDeviceMode"), backend != "hardware"),
         "smooth_scrolling": _to_bool(render.get("SmoothScrolling"), False),
         # 共享 GL 上下文（Qt.AA_ShareOpenGLContexts）：省约 12.7% per-view 常驻内存，
         # 代价是所有卡片共用一个上下文（多卡/图表闪烁的排查开关）。默认开 = 历史行为。
@@ -167,6 +171,12 @@ def build_chromium_flags(s: dict) -> str:
         parts.append("--disable-gpu")
     if s.get("enable_swiftshader"):
         parts.append("--enable-unsafe-swiftshader")
+    # hardware 档：禁 GPU 合成、保留 GPU 光栅。Qt(ANGLE d3d11) 与 Chromium(viz)
+    # 双合成器异步交换 GPU 共享纹理，折叠框 max-height 过渡等高频 resize 场景
+    # 帧提交与上屏不同步 → 内容乱闪；合成收回 CPU 后每帧完整确定，速度损失小。
+    # 恢复 GPU 合成：ExtraChromiumFlags 填 --enable-gpu-compositing（后者覆盖前者）。
+    if s.get("backend") == "hardware":
+        parts.append("--disable-gpu-compositing")
     # SwiftShader 档：让 Chromium 用自己的 CPU 光栅（不碰显卡驱动）。
     # 只有这一档显式指定 --use-angle，其余档位交给 Qt 的 QT_ANGLE_PLATFORM。
     if s.get("backend") == "swiftshader":

@@ -513,6 +513,8 @@ class Settings(QConfig):
     # swiftshader = Qt 走 WARP + Chromium 走自带 CPU 光栅的双保险。
     # 兼容：历史配置里残留的 "auto"、手改的非法值一律按出厂默认 software 处理
     # （render_env 裸读原始值，旧检测链已删除）。
+    # hardware 档默认附加 --disable-gpu-compositing（GPU 光栅 + CPU 合成，规避
+    # 双合成器纹理交换闪烁，2026-09-11），ExtraChromiumFlags 可覆盖。
     render_backend = OptionsConfigItem(
         "Render",
         "RenderBackend",
@@ -532,7 +534,9 @@ class Settings(QConfig):
     )
     # 单 renderer JS 堆上限（MB），防单页膨胀
     render_js_heap_mb = RangeConfigItem("Render", "JsHeapMb", 128, RangeValidator(64, 1024))
-    # Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
+    # Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）。
+    # 默认开，但 hardware 档未显式设置时默认关（真实 GPU 光栅下降级 tile 策略
+    # 会加剧合成错位，见 render_env.compute_settings）。
     render_low_end_device_mode = ConfigItem("Render", "LowEndDeviceMode", True, BoolValidator())
     # 合成器平滑滚动动画（默认关闭：外层滚动由 Qt 承载，卡内滚动只是安全网场景）
     render_smooth_scrolling = ConfigItem("Render", "SmoothScrolling", False, BoolValidator())

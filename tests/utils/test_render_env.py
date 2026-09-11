@@ -95,11 +95,28 @@ def test_backend_software_is_default_and_detect_free(tmp_path):
 
 
 def test_backend_hardware_disables_swiftshader(tmp_path):
-    """显式 hardware → d3d11，不禁 GPU 但禁软件光栅兜底。"""
+    """显式 hardware → d3d11，不禁 GPU 但禁软件光栅兜底；默认禁 GPU 合成、关低端模式。"""
     apply_render_env(_write_config(tmp_path, {"RenderBackend": "hardware"}))
     assert os.environ.get("QT_ANGLE_PLATFORM") == "d3d11"
     assert "--disable-software-rasterizer" in _flags()
-    assert "--disable-gpu" not in _flags()
+    # 按 flag 边界精确匹配，避免 --disable-gpu-compositing 前缀误伤
+    assert "--disable-gpu" not in _flags().split()
+    # GPU 光栅 + CPU 合成：规避 Qt/Chromium 双合成器纹理交换闪烁（2026-09-11）
+    assert "--disable-gpu-compositing" in _flags()
+    assert "--enable-low-end-device-mode" not in _flags().split()
+
+
+def test_backend_hardware_low_end_mode_explicit_wins(tmp_path):
+    """hardware 档低端模式默认关，但显式设置仍被尊重。"""
+    apply_render_env(_write_config(tmp_path, {"RenderBackend": "hardware", "LowEndDeviceMode": True}))
+    assert "--enable-low-end-device-mode" in _flags()
+
+
+def test_low_end_device_mode_default_follows_backend():
+    """未显式设置：hardware 档默认关，其余档默认开（历史行为）。"""
+    assert compute_settings({"RenderBackend": "hardware"})["low_end_device_mode"] is False
+    assert compute_settings({"RenderBackend": "software"})["low_end_device_mode"] is True
+    assert compute_settings({})["low_end_device_mode"] is True
 
 
 def test_backend_software_gl_sets_qt_opengl_software(tmp_path):
@@ -142,10 +159,11 @@ def test_webgl_off_overrides_detect_chain(tmp_path, monkeypatch):
 
 
 def test_webgl_on_with_hardware_keeps_gpu_path(tmp_path):
-    """硬件路径本就支持 WebGL，不叠加 swiftshader。"""
+    """硬件路径本就支持 WebGL，不叠加 swiftshader；GPU 合成禁用不因 WebGL 豁免。"""
     apply_render_env(_write_config(tmp_path, {"RenderBackend": "hardware", "WebglEnabled": "on"}))
     assert "--enable-unsafe-swiftshader" not in _flags()
     assert "--disable-software-rasterizer" in _flags()
+    assert "--disable-gpu-compositing" in _flags()
 
 
 # ══ 数值钳制与非法值 ══
