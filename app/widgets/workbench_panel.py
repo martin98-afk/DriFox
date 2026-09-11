@@ -787,6 +787,28 @@ class WorkbenchPanel(QWidget):
         super().showEvent(event)
         # show 之前无有效几何，命中测试无意义；首帧布局后补一次
         self._schedule_tab_hover_sync()
+        # ★ 残缺 context 自愈补触发：启动早期挂载的插件页可能只拿到残缺
+        #   UI context（宿主窗口尚未就绪，如文件树页 project_root 恒空、
+        #   工作树页提示未设置工作目录）。sync_plugin_pages 的自愈只在
+        #   宿主 refresh_workbench 时驱动；单窗口场景用户不开工作台就
+        #   不会触发。面板 show 时补检一次，检出坏页即定向重建。
+        try:
+            broken = [w for w in self._plugin_widgets.values() if self._page_context_incomplete(w)]
+            if not broken:
+                return
+            try:
+                probe_ctx = self._host_window()._build_ui_context()
+            except Exception:
+                probe_ctx = {}
+            if "backend" in (probe_ctx or {}):
+                for widget in broken:
+                    try:
+                        if hasattr(widget, "set_context"):
+                            widget.set_context(dict(probe_ctx))
+                    except RuntimeError:
+                        continue  # C++ 对象已销毁
+        except Exception:
+            pass
 
     def _on_tab_clicked(self, tab_id: str) -> None:
         """页签点击：按 tab_id 定位 stack 索引（与 _tab_ids 顺序一致）"""

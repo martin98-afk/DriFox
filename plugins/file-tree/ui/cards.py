@@ -267,9 +267,12 @@ class FileTreeCard(QWidget):
         self._context_provider: Optional[Callable[[], dict]] = None
         # 工作台页形态：宿主 _build_ui_context() 一次性注入；转为 provider 复用
         # 浮动卡的取数链路（project_root / 主题色 / 字体等字段同构）
-        if isinstance(context, dict) and context:
+        # 挂到实例属性：WorkbenchPanel._page_context_incomplete 据此检测
+        # 「启动早期宿主未就绪 → 拿到残缺 context」的坏页并触发重建
+        self._context = context if isinstance(context, dict) else {}
+        if self._context:
 
-            def _ctx_provider(_ctx=context):
+            def _ctx_provider(_ctx=self._context):
                 return _ctx
 
             self._context_provider = _ctx_provider
@@ -411,6 +414,19 @@ class FileTreeCard(QWidget):
 
     def set_context_provider(self, provider: Callable[[], dict]):
         self._context_provider = provider
+
+    def set_context(self, context: dict):
+        """工作台页形态：宿主补注 UI context（推模型，浮动卡契约兼容）
+
+        context 到达即更新取数链并重载目录树（修「启动早期挂载时宿主未就绪、
+        project_root 恒空、一直显示加载中」的问题）。
+        """
+        if not isinstance(context, dict) or not context:
+            return
+        self._context = context
+        self._context_provider = lambda: context
+        if self.isVisible():
+            self.show_card()
 
     def show_card(self):
         self._apply_latest_theme()
