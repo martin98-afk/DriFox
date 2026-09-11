@@ -241,20 +241,25 @@ class TestPluginPageContextDuringPreview:
         assert "backend" in store[-1]._context, "预览期间构建的插件页不得丢失 backend"
 
     def test_incomplete_context_page_is_rebuilt(self, tm_window):
+        """残缺 context 的插件页即便签名未变也必须自愈重建
+
+        （通用规则：面板不识别页面语义，任何插件页 context 缺 backend 都重建）
+        """
         store = []
         tm_window._build_ui_context = lambda: {"backend": object()}
         panel = tm_window.workbench_panel
         info = self._worktree_info(store)
 
         panel.sync_plugin_pages([info], force=True)
-        first = panel.worktree_page
+        first = panel._plugin_widgets["worktree"]
         assert "backend" in first._context
 
         # 人为降级为"残缺 context"（等价修复前在浮层里构建出来的坏页面）
         first._context = {}
-        panel.sync_plugin_pages([info])  # 签名未变，但必须自愈重建
-        assert panel.worktree_page is not first
-        assert "backend" in panel.worktree_page._context
+        panel.sync_plugin_pages([info])  # 签名未变，但残缺 context 必须自愈重建
+        second = panel._plugin_widgets["worktree"]
+        assert second is not first
+        assert "backend" in second._context
 
 
 class TestNonPreviewToggleUnchanged:

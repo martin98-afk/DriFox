@@ -763,6 +763,8 @@ class CommandCard(QWidget):
         self._all_items: List[Dict[str, str]] = []
         self._all_items_cache: List[Dict[str, str]] = []  # 缓存，避免每次敲击都读磁盘
         self._cache_dirty: bool = True  # 缓存脏标记，热重载后置 True
+        # UI 插件命令账本版本号（变化即置脏，见 _refresh_data）
+        self._ui_cmds_version: int = -1
         self._filtered_items: List[Dict[str, str]] = []
         self._selected_index = 0
         self._last_selected_index = -1  # 上次选中索引，用于增量更新
@@ -2357,7 +2359,19 @@ class CommandCard(QWidget):
         使用缓存避免每次敲击都读磁盘。
         只有在 _cache_dirty=True 时才重建缓存（如插件热重载后）。
         首次调用时必然重建。
+
+        ★ 另比对 UI 插件命令账本版本号：插件加载/卸载/热重载会改变账本版本，
+        此时强制重建缓存 —— 修复「卡片缓存建立早于 UI 插件加载完成 → UI 插件
+        命令永久不出现」，且无需每次敲键都重扫磁盘（版本号未变即继续用缓存）。
         """
+        try:
+            _ui_ver = UIPluginRegistry.get_instance().get_ui_commands_version()
+        except Exception:
+            _ui_ver = 0
+        if _ui_ver != self._ui_cmds_version:
+            self._ui_cmds_version = _ui_ver
+            self._cache_dirty = True
+
         if not self._cache_dirty and self._all_items_cache:
             # 安全检查：缓存必须包含命令项，防止初始化时序导致缓存了只有技能的脏数据
             if any(item["type"] == "command" for item in self._all_items_cache):

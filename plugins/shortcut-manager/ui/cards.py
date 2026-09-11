@@ -484,6 +484,8 @@ class ShortcutManagerCard(QWidget):
         self._capture_popup: Optional[_KeyCapturePopup] = None
         self._pending_cmd: str = ""
         self._header_icon: Optional[IconWidget] = None
+        # UI 插件命令账本版本号（变化即重载列表，见 showEvent）
+        self._ui_cmds_version: int = -1
         self._setup_ui()
 
     # ── 拉模型上下文注入 ──
@@ -688,6 +690,17 @@ class ShortcutManagerCard(QWidget):
         if win:
             win.installEventFilter(self)
             self.updateGeometry()
+        # ★ 账本版本变化 → 重载列表：卡片实例可能在本会话早期就已构建（缓存了
+        #   当时还没有 UI 插件命令的列表），而宿主非激活路径显示卡片时不会调
+        #   show_card()，导致列表永久陈旧（症状：UI 插件命令在快捷键管理里不出现）。
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            ver = UIPluginRegistry.get_instance().get_ui_commands_version()
+            if ver != self._ui_cmds_version:
+                self._refresh()
+        except Exception:
+            pass
 
     def eventFilter(self, obj, event):
         from PyQt5.QtCore import QEvent
@@ -706,6 +719,13 @@ class ShortcutManagerCard(QWidget):
             self._all_commands = _load_all_items()
             self._render_list()
             self._count_lb.setText(f"共 {len(self._all_commands)} 个")
+            # 记录本次加载对应的 UI 命令账本版本（showEvent 据此判定是否需重载）
+            try:
+                from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+                self._ui_cmds_version = UIPluginRegistry.get_instance().get_ui_commands_version()
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"[ShortcutManager] 加载失败: {e}")
             self._count_lb.setText("加载失败")

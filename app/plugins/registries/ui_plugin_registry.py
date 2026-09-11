@@ -14,6 +14,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from loguru import logger
+
 if TYPE_CHECKING:
     from app.core.command_manager import CommandType  # noqa: F401
 
@@ -500,6 +502,10 @@ class UIPluginRegistry:
         # 浮动卡遇到外部同名命令时会主动让位（只登记不接管），这类名字不在本
         # 集合中，卸载时也不得去删外部命令（保持「不误删他人同名命令」语义）。
         self._ui_applied_names: set = set()
+        # 账本版本号：每次 UI 命令增删 +1。消费端（命令卡片等）缓存列表时
+        # 比对该版本号即可判定「是否需要重建」——避免「卡片缓存建立早于插件
+        # 加载完成」导致 UI 插件命令永久不出现（无需每次敲键都重扫磁盘）。
+        self._ui_commands_version: int = 0
         # 浮动卡 card_id → 实际命令名（含命名空间前缀），卸载时按此反查，
         # 修复「card_id 无 ':' 但注册时被加了 plugin: 前缀 → 卸载注销错名残留」
         self._card_command_names: Dict[str, str] = {}
@@ -1036,6 +1042,8 @@ class UIPluginRegistry:
         self._sidebar_items[item_id] = info
         # 写入 region 存储（Phase E 单源化）
         self.register_slot_entry("sidebar", item_id, plugin_name, priority=priority, payload=info, metadata=metadata)
+        # 联动命令：注册即获得「等价于点击该项」的命令（有回调时）
+        self._register_command_for_sidebar_item(info)
 
     def get_sidebar_items(self) -> List[SidebarItemInfo]:
         """获取全部侧边栏插件项（group 排序：system 在前，custom 在后；同组按 priority 降序 → 注册序）
@@ -1074,6 +1082,8 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._titlebar_tabs[tab_id] = info
+        # 联动命令：注册即获得「等价于点击该 tab」的命令（有回调时）
+        self._register_command_for_titlebar_tab(info)
 
     def unregister_titlebar_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部常驻 tab（插件卸载时调用）"""
@@ -1265,6 +1275,8 @@ class UIPluginRegistry:
         self.register_slot_entry(
             "toolbar:input", button_id, plugin_name, priority=priority, payload=info, metadata=metadata
         )
+        # 联动命令：注册即获得「等价于点击该按钮」的命令（有回调时）
+        self._register_command_for_input_button(info)
 
     def get_input_buttons(self) -> List[InputButtonInfo]:
         """获取全部输入区插件按钮（priority 降序 → 注册序）
@@ -1498,8 +1510,21 @@ class UIPluginRegistry:
                 系统命令）。该标记随账本持久化，重放 re_register_all_commands
                 时按原语义执行。
         """
+        # ★ 同插件同 id 重复登记 → 保留**首个**（先注册的界面优先）。
+        #   场景：agent_trace / assistant_hub 等插件把 floating_card 与
+        #   titlebar_tab 共用同一 id，两处都会尝试登记同名命令；若后注册者
+        #   覆盖，命令语义会从「打开浮动卡（带 per-window context）」漂移成
+        #   「点标题栏 tab」。热重载时 unload_plugin 已清空账本，本条不阻碍重载。
+        existing = self._ui_commands.get(name)
+        if existing is not None and owner and existing[2] == owner:
+            return
         self._ui_commands[name] = (description or "", handler, owner, override_external)
+        self._ui_commands_version += 1
         self._apply_ui_command(name)
+
+    def get_ui_commands_version(self) -> int:
+        """账本版本号（每次 UI 命令增删 +1；供消费端缓存失效判定）"""
+        return self._ui_commands_version
 
     def _apply_ui_command(self, name: str) -> None:
         """把账本中的一条命令落到 CommandManager + FunctionCommandHandlers（幂等）
@@ -1542,6 +1567,7 @@ class UIPluginRegistry:
         self._ui_commands.pop(name, None)
         if name not in self._ui_applied_names:
             return
+        self._ui_commands_version += 1
         self._ui_applied_names.discard(name)
         self._ui_command_names.discard(name)
         try:
@@ -1591,18 +1617,40 @@ class UIPluginRegistry:
 
     # ── 工作台页命令（register_workbench_tab 联动） ──
 
-    def _workbench_tab_command_name(self, info: WorkbenchTabInfo) -> str:
-        """工作台页命令名：优先短名（page_id），与他插件同名时加插件前缀"""
-        if ":" in info.page_id:
-            return info.page_id
-        existing = self._ui_commands.get(info.page_id)
-        if existing is not None and existing[2] not in ("", info.plugin_name):
-            return f"{info.plugin_name}:{info.page_id}"
-        return info.page_id
+    def _ui_command_name(self, base_id: str, plugin_name: str) -> str:
+        """UI 命令名：优先短名（base_id）
+
+        已在账本中被**其它插件**占用、或与系统/内置命令同名时，加
+        ``<plugin>:`` 前缀（避免让位后命令消失，也避免抢占系统命令）。
+        """
+        if ":" in base_id:
+            return base_id
+        existing = self._ui_commands.get(base_id)
+        if existing is not None and existing[2] not in ("", plugin_name):
+            return f"{plugin_name}:{base_id}"
+        if base_id not in self._ui_applied_names:
+            try:
+                from app.core.command_manager import CommandManager
+
+                if CommandManager.get_instance().has_command(base_id):
+                    return f"{plugin_name}:{base_id}"
+            except Exception:
+                pass
+        return base_id
+
+    def _active_host_window(self):
+        """当前活跃对话窗口（UI 命令派发上下文用）；不可用时 None"""
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            return tm.get_current_window() if tm is not None else None
+        except Exception:
+            return None
 
     def _register_command_for_workbench_tab(self, info: WorkbenchTabInfo) -> None:
         """为工作台页注册「打开该页」命令（对齐浮动卡语义）"""
-        cmd_name = self._workbench_tab_command_name(info)
+        cmd_name = self._ui_command_name(info.page_id, info.plugin_name)
 
         def _handler(args: str, pid=info.page_id):
             self.open_workbench_tab(pid)
@@ -1614,6 +1662,105 @@ class UIPluginRegistry:
             _handler,
             owner=info.plugin_name,
         )
+
+    # ── 输入区按钮 / 侧边栏项 / 标题栏 tab 联动命令 ──
+
+    def _register_command_for_input_button(self, info: "InputButtonInfo") -> None:
+        """为输入区插件按钮注册命令（等价于点击该按钮）"""
+        if getattr(info, "on_click", None) is None:
+            return
+        cmd_name = self._ui_command_name(info.button_id, info.plugin_name)
+
+        def _handler(args: str, bid=info.button_id):
+            self.invoke_input_button(bid)
+
+        self.register_ui_command(
+            cmd_name,
+            f"输入区按钮 · {info.tooltip or info.button_id}",
+            _handler,
+            owner=info.plugin_name,
+            override_external=False,
+        )
+
+    def invoke_input_button(self, button_id: str) -> None:
+        """命令处理器：等价点击输入区插件按钮（主线程，派发 on_click(context)）"""
+        info = self._input_buttons.get(button_id)
+        win = self._active_host_window()
+        if info is None or getattr(info, "on_click", None) is None or win is None:
+            return
+        try:
+            info.on_click(
+                {
+                    "button_id": info.button_id,
+                    "plugin_name": info.plugin_name,
+                    "window_id": getattr(win, "_window_id", None),
+                    "main_widget": win,
+                }
+            )
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 输入按钮 {button_id} 命令派发失败: {e}")
+
+    def _register_command_for_sidebar_item(self, info: "SidebarItemInfo") -> None:
+        """为侧边栏插件项注册命令（等价于点击该项）"""
+        if getattr(info, "on_click", None) is None:
+            return
+        cmd_name = self._ui_command_name(info.item_id, info.plugin_name)
+
+        def _handler(args: str, iid=info.item_id):
+            self.invoke_sidebar_item(iid)
+
+        self.register_ui_command(
+            cmd_name,
+            f"侧边栏 · {info.label or info.item_id}",
+            _handler,
+            owner=info.plugin_name,
+            override_external=False,
+        )
+
+    def invoke_sidebar_item(self, item_id: str) -> None:
+        """命令处理器：等价点击侧边栏插件项（主线程，派发 on_click(context)）"""
+        info = self._sidebar_items.get(item_id)
+        win = self._active_host_window()
+        if info is None or getattr(info, "on_click", None) is None or win is None:
+            return
+        try:
+            info.on_click(
+                {
+                    "item_id": info.item_id,
+                    "plugin_name": info.plugin_name,
+                    "window_id": getattr(win, "_window_id", None),
+                    "main_widget": win,
+                }
+            )
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 侧边栏项 {item_id} 命令派发失败: {e}")
+
+    def _register_command_for_titlebar_tab(self, info: "TitlebarTabInfo") -> None:
+        """为标题栏常驻 tab 注册命令（等价于点击该 tab）"""
+        if getattr(info, "on_click", None) is None:
+            return
+        cmd_name = self._ui_command_name(info.tab_id, info.plugin_name)
+
+        def _handler(args: str, tid=info.tab_id):
+            self.invoke_titlebar_tab(tid)
+
+        self.register_ui_command(
+            cmd_name,
+            f"标题栏 · {info.label or info.tab_id}",
+            _handler,
+            owner=info.plugin_name,
+            override_external=False,
+        )
+
+    def invoke_titlebar_tab(self, tab_id: str) -> None:
+        """命令处理器：等价点击标题栏常驻 tab（主线程，on_click() 无参）"""
+        info = self._titlebar_tabs.get(tab_id)
+        if info is None or getattr(info, "on_click", None) is None:
+            return
+        try:
+            info.on_click()
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 标题栏 tab {tab_id} 命令派发失败: {e}")
 
     def open_workbench_tab(self, page_id: str) -> None:
         """命令处理器：展开右侧工作台并定位到指定插件页（主线程）"""
@@ -2891,10 +3038,17 @@ class UIPluginRegistry:
 
         用于 register_all_commands / reload_all_commands 之后恢复 UI 插件命令
         （这些命令会被 reload 清空）。★ 全量重放：覆盖浮动卡 + 工作台页 +
-        工作区页等一切登记进账本的 UI 命令，而非只重放浮动卡。
+        工作区页 + 侧边栏项 + 输入区按钮 + 标题栏 tab 等一切登记进账本的 UI 命令。
         """
         for name in list(self._ui_commands):
             self._apply_ui_command(name)
+        # 诊断留档（支持排查「命令没出现在命令卡片 / 快捷键管理」）：
+        # 命中此日志说明命令确已进命令表，问题在消费端；看不到此日志说明账本为空。
+        if self._ui_commands:
+            logger.info(
+                f"[UIPluginRegistry] UI 命令已重放 {len(self._ui_commands)} 条 → CommandManager: "
+                f"{sorted(self._ui_commands)}"
+            )
 
 
     def unregister_window(self, window_id: str) -> None:

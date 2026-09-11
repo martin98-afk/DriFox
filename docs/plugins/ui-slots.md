@@ -102,10 +102,10 @@ def register_ui(registry):
         on_click=None, priority=0, metadata=None,
     )
 
-    # 右侧工作台 tab（WorkbenchPanel 页签条：产物 / 记忆 之后追加）
+    # 右侧工作台 page（WorkbenchPanel 页签：按 order_hint 排序，注册即得 /{page_id} 命令）
     registry.register_workbench_tab(
         plugin_name, page_id, label, widget_class,
-        priority=0, metadata=None,
+        priority=0, metadata=None,  # metadata 可带 order_hint / default_landing
     )
 
     # 工作区页面（Phase G，见 ui-workspace.md）
@@ -121,7 +121,31 @@ def register_ui(registry):
 > - **常驻**（`register_titlebar_tab`）：始终显示在标题栏 tab 区（「聊天」右侧），不可关闭，点击触发插件回调。
 > - **非常驻**（`register_floating_card(container="full")`）：卡片打开时动态出现在标题栏（带 × 关闭钮），关闭即从标题栏移除；点击 tab 切换覆盖层显示。
 
-> **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台浮层（WorkbenchPanel）的页签条，自动出现在「产物」「记忆」之后；宿主在 `refresh_workbench` 时调用 `panel.sync_plugin_pages(tabs)` reconcile（签名不变则跳过重建）。同 page_id 高优先级覆盖低优先级，插件卸载时自动注销。**注册即联动注册 `/{page_id}` 命令**（经 `UIPluginRegistry` 命令账本统一登记，`re_register_all_commands()` 全量重放，不会被内置命令重扫清空）。参考实现：`plugins/artifacts-manager/ui/artifacts_page.py`（`SystemArtifactsPage`，演示 `context["backend"]` / `context["session_id"]` / `context["diff_requested_callback"]` 数据通路）与 `plugins/worktree-manager/ui/worktree_page.py`。
+> **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台（WorkbenchPanel）的页签条。★ 面板**零保留槽位、零 page_id 语义**：页序 = `(metadata["order_hint"], 注册序)`，默认落点 = `metadata["default_landing"]` 标记页（缺省顺序第一页），一个页都没注册时空态页。宿主在 `refresh_workbench` 时调 `panel.sync_plugin_pages(tabs)` reconcile；页签一律按 **tab_id** 定位（`set_current_tab_by_id` / `current_tab_id`），宿主不得假设 index。**注册即联动注册 `/{page_id}` 命令**。数据由页面**自拉**：面板只发无参 `refresh_current_page_data()`，页面实现可选协议 `refresh_data()`（从 `context` / 活跃窗口取数）。参考实现：`plugins/artifacts-manager/ui/artifacts_page.py`、`plugins/worktree-manager/ui/worktree_page.py`、`plugins/history-manager/ui/history_page.py`。
+
+### UI 扩展点 → 自动命令（联动矩阵）
+
+`register_*` 时自动登记一条系统命令到 `UIPluginRegistry` 命令账本
+（`_ui_commands`），并在 `builtin_commands.register_all_commands()` 清空命令表后由
+`re_register_all_commands()` **全量重放**恢复；插件卸载时按 `owner` 批量注销。
+命令名优先短 id，与其它插件/系统命令重名时自动加 `<plugin>:` 前缀。
+
+| 扩展点 | 命令语义 | 备注 |
+|---|---|---|
+| `register_floating_card` | 打开浮动卡片 | 同名系统命令优先（不抢占） |
+| `register_workbench_tab` | 展开工作台并定位该页 | `/history`、`/worktree`、`/artifacts` |
+| `register_workspace_page` | 打开工作区页面 | 由 `WorkspacePageHost` 经账本登记 |
+| `register_sidebar_item` | 等价点击侧边栏项（派发 `on_click(context)`） | 无回调时不注册 |
+| `register_input_button` | 等价点击输入区按钮（派发 `on_click(context)`） | 无回调时不注册 |
+| `register_titlebar_tab` | 等价点击标题栏常驻 tab（`on_click()`） | 无回调时不注册 |
+
+**刻意不联动命令**的扩展点（非独立可触发界面，或需上下文）：
+`register_context_menu_action`（依赖右键目标上下文）、`register_settings_card`
+（设置面板内的分区卡，属导航而非独立界面）、`register_welcome_tab` /
+`register_welcome_action`（欢迎卡片内部 tab / HTML 点击动作，需欢迎卡片在场
+且携带内容参数）、`register_content_renderer` / `register_tag_renderer` /
+`register_fence_renderer` / `register_message_factory` / `register_mention_provider` /
+`register_ui_module`（渲染/装配类，无用户可触发界面）。
 
 ---
 
