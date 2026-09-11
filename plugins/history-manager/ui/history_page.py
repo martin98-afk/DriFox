@@ -26,8 +26,8 @@
 from typing import Any, List, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
-from qfluentwidgets import ScrollArea, TransparentToolButton
+from PyQt5.QtWidgets import QHBoxLayout, QLineEdit, QPushButton, QVBoxLayout, QWidget
+from qfluentwidgets import ComboBox, ScrollArea, TransparentToolButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_icon
@@ -38,6 +38,36 @@ from app.widgets.custom_title_bar import CustomTabButton
 # 项目过滤器哨兵值（「当前项目」跟随活跃窗口；「全部项目」混合视图）
 _PROJECT_CURRENT = "__current__"
 _PROJECT_ALL = "__all__"
+
+# 项目下拉最多同时展开的项数（超出在菜单内部滚动）
+_PROJECT_MENU_MAX_VISIBLE = 8
+
+# 项目选择器宽度约束（按项目名自适应后 clamp 到该区间）
+_PROJECT_COMBO_MIN_WIDTH = 56
+_PROJECT_COMBO_MAX_WIDTH = 150
+
+
+class _ProjectComboBox(ComboBox):
+    """项目选择器：无下拉箭头 + 半透明底（视觉与左侧搜索框一致）
+
+    - 箭头：基类 ``paintEvent`` 自绘 ``FIF.ARROW_DOWN``，此处跳过后不再绘制
+    - 宽度：``fit_to_text`` 按项目名自适应，避免固定 110px 挤压搜索框
+    - 下拉：最多展开 ``_PROJECT_MENU_MAX_VISIBLE`` 项，超出菜单内部滚动
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMaxVisibleItems(_PROJECT_MENU_MAX_VISIBLE)
+
+    def paintEvent(self, e):  # noqa: N802 (Qt 命名)
+        """只画背景与文本：跳过基类的箭头绘制"""
+        QPushButton.paintEvent(self, e)
+
+    def fit_to_text(self) -> None:
+        """按当前文本宽度自适应控件宽度（clamp 到 min/max 区间）"""
+        text = self.currentText() or ""
+        width = self.fontMetrics().horizontalAdvance(text) + 22
+        self.setFixedWidth(max(_PROJECT_COMBO_MIN_WIDTH, min(width, _PROJECT_COMBO_MAX_WIDTH)))
 
 
 def _active_history_manager():
@@ -102,13 +132,11 @@ class HistoryPage(QWidget):
         layout.addLayout(tabs_row)
 
         # ── 行2：项目切换器 + 搜索框 ──
-        from qfluentwidgets import ComboBox
-
-        self._project_combo = ComboBox(self)
+        self._project_combo = _ProjectComboBox(self)
         self._project_combo.setFixedHeight(24)
-        self._project_combo.setMinimumWidth(110)
         self._project_combo.currentIndexChanged.connect(self._on_project_filter_changed)
         self._project_filter_raw = _PROJECT_CURRENT  # 打开默认「当前项目」
+        self._apply_project_combo_style()
 
         self._search_input = QLineEdit(self)
         self._search_input.setPlaceholderText("🔍 搜索会话...")
@@ -441,13 +469,13 @@ class HistoryPage(QWidget):
     # ── 项目切换器 ──
 
     def _rebuild_project_options(self) -> None:
-        """重建项目下拉（保留当前选择语义；「当前项目」标签动态显示窗口项目名）"""
+        """重建项目下拉（保留当前选择语义；首项直接显示活跃窗口项目名）"""
         combo = self._project_combo
         combo.blockSignals(True)
         combo.clear()
         win = _active_window()
         current = getattr(win, "_current_project", "默认项目") if win else "默认项目"
-        combo.addItem(f"当前项目（{current}）", userData=_PROJECT_CURRENT)
+        combo.addItem(current, userData=_PROJECT_CURRENT)  # 只显示项目名，不加「当前项目」前缀
         combo.addItem("全部项目", userData=_PROJECT_ALL)
         try:
             hm = _active_history_manager()
@@ -461,6 +489,12 @@ class HistoryPage(QWidget):
         idx = combo.findData(self._project_filter_raw)
         combo.setCurrentIndex(idx if idx >= 0 else 0)
         combo.blockSignals(False)
+        self._sync_project_combo_width()
+
+    def _sync_project_combo_width(self) -> None:
+        """跟随当前文本自适应宽度 + 挂完整项目名 tooltip"""
+        self._project_combo.fit_to_text()
+        self._project_combo.setToolTip(self._project_combo.currentText() or "")
 
     def _on_project_filter_changed(self, index: int) -> None:
         """下拉切换：更新过滤器 → 项目标签显隐 → 自拉数据刷新"""
@@ -506,11 +540,40 @@ class HistoryPage(QWidget):
         """
         )
 
+    def _apply_project_combo_style(self) -> None:
+        """项目选择器样式：半透明底 + 无箭头，与左侧搜索框同款"""
+        Colors.refresh()
+        self._project_combo.setStyleSheet(
+            f"""
+            QPushButton {{
+                background: {Colors.HOVER_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                padding: 2px 8px;
+                text-align: left;
+                {font_size_css(11)}
+                {get_font_family_css()}
+            }}
+            QPushButton:hover {{
+                background: {Colors.HOVER_BG_STRONG};
+            }}
+            QPushButton:pressed {{
+                background: {Colors.SELECTED_BG};
+            }}
+            QPushButton::menu-indicator {{
+                image: none;
+                width: 0px;
+            }}
+        """
+        )
+
     def refresh_style(self) -> None:
         self._hint.refresh_style()
         for btn in self._sub_buttons:
             btn.refresh_style()
         if self._search_input is not None:
             self._apply_search_style()
+        self._apply_project_combo_style()
         if hasattr(self._card, "refresh_style"):
             self._card.refresh_style()
