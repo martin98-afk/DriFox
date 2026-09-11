@@ -621,3 +621,127 @@ def test_rows_not_squeezed_after_resize(monkeypatch):
         _pump(0.6)
         squeezed = _desc_squeezed(card)
         assert not squeezed, f"宽度 {w} 下描述被压缩: {squeezed}"
+
+
+# ── 详情弹窗 ────────────────────────────────────────────────
+
+_DLG_META = {
+    "name": "demo-plugin",
+    "version": "2.0.0",
+    "description": "详情弹窗测试用插件。",
+    "homepage": "https://example.com/demo-plugin",
+    "downloads": 7,
+    "_marketplace": "drifox-official",
+    "_cached_tags": ["demo"],
+}
+_DLG_THEME = dict(
+    tc="#111111",
+    tcs="#666666",
+    ff="Microsoft YaHei",
+    fs=14,
+    accent_bg="#62a0ea",
+    card_bg="#ffffff",
+    border_c="rgba(0,0,0,0.1)",
+)
+
+
+def _make_dialog(monkeypatch, *, installed, has_update=False, status="", meta=None):
+    """构造详情弹窗（parent 用普通 QWidget：MaskDialogBase 要求非空 parent）"""
+    from PyQt5.QtWidgets import QWidget
+
+    if str(PLUGIN_MARKETPLACE) not in sys.path:
+        sys.path.insert(0, str(PLUGIN_MARKETPLACE))
+    from ui.cards import _PluginDetailDialog
+
+    host = QWidget()
+    host.resize(1200, 900)
+    dlg = _PluginDetailDialog(
+        host,
+        dict(meta or _DLG_META),
+        installed=installed,
+        has_update=has_update,
+        local_version="1.0.0" if installed else None,
+        status=status,
+        **_DLG_THEME,
+    )
+    dlg.show()
+    _pump(0.3)
+    return dlg
+
+
+def _visible_buttons(dlg) -> list:
+    from qfluentwidgets import TransparentPushButton
+
+    return [b.text() for b in dlg.widget.findChildren(TransparentPushButton) if b.isVisible()]
+
+
+def test_detail_dialog_homepage_link_clickable(monkeypatch):
+    """详情弹窗的官网链接必须可点
+
+    复现背景：``setTextInteractionFlags(Qt.TextSelectableByMouse)`` 会把 QLabel
+    默认交互标志里的 ``LinksAccessibleByMouse`` 顶掉 → ``<a href>`` 看着是链接、
+    点了没反应。已安装插件的官网入口只有详情弹窗这一处（行内官网按钮对已安装
+    插件是隐藏的），所以这里失效等于官网彻底打不开。
+    """
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtWidgets import QLabel
+
+    dlg = _make_dialog(monkeypatch, installed=True, status="enabled")
+    links = [lb for lb in dlg.widget.findChildren(QLabel) if "<a href" in (lb.text() or "")]
+    assert links, "详情弹窗里没有渲染出官网链接"
+
+    for lb in links:
+        flags = lb.textInteractionFlags()
+        assert flags & Qt.LinksAccessibleByMouse, f"链接不可点（缺 LinksAccessibleByMouse）: {lb.text()[:60]}"
+        assert lb.openExternalLinks(), "未开启 openExternalLinks，点击不会跳浏览器"
+    dlg.close()
+
+
+def test_detail_dialog_manage_buttons_by_status(monkeypatch):
+    """详情弹窗底部管理操作与行内规则一致（禁用/启用、卸载、打开目录）
+
+    复现背景：详情弹窗原先只有「安装 / 更新 / 关闭」，已安装插件在行内能做的
+    操作（禁用、卸载、打开目录）在详情页全都没有。
+    """
+    cases = {
+        "": ["关闭", "禁用", "卸载"],
+        "enabled": ["关闭", "禁用", "卸载"],
+        "disabled": ["关闭", "启用", "卸载"],
+        "builtin_enabled": ["关闭", "禁用"],
+        "builtin_disabled": ["关闭", "启用"],
+        "system": ["关闭"],
+    }
+    for status, expect in cases.items():
+        dlg = _make_dialog(monkeypatch, installed=True, status=status)
+        got = _visible_buttons(dlg)
+        for text in expect:
+            assert text in got, f"status={status!r} 缺少按钮 {text!r}，实际 {got}"
+        assert "卸载" not in got or status not in ("builtin_enabled", "builtin_disabled"), (
+            f"内置插件不该有卸载（目录随主程序分发）: status={status!r} got={got}"
+        )
+        dlg.close()
+
+    # 未安装：只有安装 + 关闭
+    dlg = _make_dialog(monkeypatch, installed=False)
+    got = _visible_buttons(dlg)
+    assert "安装" in got and "关闭" in got, f"未安装应只有安装/关闭，实际 {got}"
+    assert not any(t in got for t in ("禁用", "启用", "卸载")), f"未安装不该有管理操作: {got}"
+    dlg.close()
+
+
+def test_detail_dialog_author_dict_not_dumped_raw(monkeypatch):
+    """author 是 dict 时不得把 Python repr 直接显示出来
+
+    复现背景：``author`` 在 manifest 里可以是 ``{"name":..., "url":...}``，旧实现
+    把它塞进 f-string，详情页会显示 ``{'name': 'xxx', 'url': '...'}`` 原文。
+    """
+    from PyQt5.QtWidgets import QLabel
+
+    meta = dict(_DLG_META)
+    meta["author"] = {"name": "Vincentwei1021", "url": "https://github.com/Vincentwei1021"}
+    dlg = _make_dialog(monkeypatch, installed=False, meta=meta)
+
+    joined = " ".join(lb.text() or "" for lb in dlg.widget.findChildren(QLabel))
+    assert "'name'" not in joined and "{" not in joined.split("http")[0], f"author dict 被原样打印: {joined[:200]}"
+    assert "Vincentwei1021" in joined, "author 名称未显示"
+    dlg.close()
