@@ -70,6 +70,17 @@ class SessionStartEvent(HookEvent):
     agent_name: str = ""
 
 
+@dataclass
+class BuildSystemPromptEvent(HookEvent):
+    """系统提示词构建触发（贡献内容拼入 system prompt）
+
+    主对话由 AgentManager 构建链触发；插件引擎（EngineSession）在
+    turn() 收到插件传入的 system 后按策略触发，贡献统一拼进 system。
+    """
+
+    agent_name: str = ""  # 插件引擎场景通常为空（system 由插件自行组装）
+
+
 
 
 @dataclass

@@ -495,3 +495,52 @@ def test_task_done_refresh_keeps_incremental_rows(monkeypatch):
         if len(card._row_map) >= 40:
             break
     assert len(card._row_map) == 40, f"加载更多失效: {len(card._row_map)}"
+
+
+def test_sort_combo_is_fluent_combo(monkeypatch):
+    """排序下拉必须是 qfluentwidgets ComboBox，且不被自绘 QSS 污染
+
+    复现背景：排序下拉原为裸 QComboBox + 手写 QSS（drop-down 未给 down-arrow
+    图），Windows 上渲染成「文字底下一道横线」的错位控件，与左侧搜索框
+    （qfluentwidgets LineEdit）风格不一致。修复：改用 ComboBox。
+
+    回归点：
+    1. 控件类型是 qfluentwidgets ComboBox（禁止退回裸 QComboBox）；
+    2. 主题刷新不得改写它的 QSS —— _retheme 会遍历 QPushButton 追加自定义
+       QSS，而 ComboBox 也是 QPushButton，被追加后 Fluent 主题 QSS 会被顶掉
+       （箭头 / 悬停态失效）；
+    3. 系统字体经 setFont 注入（ComboBox 的 QSS 里 font-family 是注释掉的，
+       写 QSS 无效）；
+    4. 宽度自适应，放得下最长条目（固定 120px 会截断「下载量最多优先」）。
+    """
+    from PyQt5.QtGui import QFontMetrics
+    from qfluentwidgets import ComboBox
+
+    card = _new_card(monkeypatch)
+    combo = card._sort_combo
+
+    assert isinstance(combo, ComboBox), f"排序下拉应为 ComboBox，实际 {type(combo)}"
+    assert [combo.itemData(i) for i in range(combo.count())] == [
+        "default",
+        "downloads",
+        "name_asc",
+        "name_desc",
+        "version",
+    ]
+
+    # 主题刷新不得改写 QSS
+    ss_before = combo.styleSheet()
+    card._retheme()
+    assert combo.styleSheet() == ss_before, "ComboBox 的 Fluent QSS 被自绘样式顶掉了"
+
+    # 系统字体经 setFont 注入
+    card._cached_font_family = "Microsoft YaHei"
+    card._cached_font_size = 16
+    card._sync_sort_combo_metrics()
+    assert combo.font().family() == "Microsoft YaHei"
+    assert combo.font().pixelSize() == 16
+
+    # 宽度放得下最长条目
+    fm = QFontMetrics(combo.font())
+    longest = max(fm.horizontalAdvance(combo.itemText(i)) for i in range(combo.count()))
+    assert combo.width() >= longest + 30, f"宽度 {combo.width()} 放不下最长条目 {longest}"

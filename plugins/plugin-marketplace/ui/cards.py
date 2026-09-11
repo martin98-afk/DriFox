@@ -30,9 +30,8 @@ _icon_patch._apply_icon_cache_patch()
 from PyQt5 import sip
 
 from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
-    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -2399,7 +2398,7 @@ class MarketplaceCard(QWidget):
                 )
             except RuntimeError:
                 pass
-            self._style_sort_combo()
+            self._sync_sort_combo_metrics()
             for sep in self.findChildren(QFrame):
                 try:
                     if sep.frameShape() == QFrame.HLine:
@@ -2476,6 +2475,10 @@ class MarketplaceCard(QWidget):
 
         # QPushButton 字体（"加载更多"按钮等）
         for child in self.findChildren(QPushButton):
+            # ComboBox 也是 QPushButton：它的主题 QSS 由 styleSheetManager 托管，
+            # 追加自定义 QSS 会顶掉 Fluent 样式 → 字体改走 setFont（见 _sync_sort_combo_metrics）
+            if isinstance(child, ComboBox):
+                continue
             try:
                 cur = child.styleSheet()
                 btn_fs = max(fs - 2, 11)
@@ -2632,17 +2635,17 @@ class MarketplaceCard(QWidget):
         self._search_edit.textChanged.connect(self._on_search_text_changed)
         filter_layout.addWidget(self._search_edit)
 
-        # 排序下拉
-        self._sort_combo = QComboBox(filter_row)
-        self._sort_combo.addItem("默认排序", "default")
-        self._sort_combo.addItem("下载量最多优先", "downloads")
-        self._sort_combo.addItem("名称 A-Z", "name_asc")
-        self._sort_combo.addItem("名称 Z-A", "name_desc")
-        self._sort_combo.addItem("版本最新优先", "version")
-        self._sort_combo.setFixedWidth(120)
+        # 排序下拉：qfluentwidgets ComboBox（与左侧搜索框、代理页同源控件，
+        # 自带 Fluent 主题 QSS / 下拉动画 / 箭头，不再自绘 QSS）
+        self._sort_combo = ComboBox(filter_row)
+        self._sort_combo.addItem("默认排序", userData="default")
+        self._sort_combo.addItem("下载量最多优先", userData="downloads")
+        self._sort_combo.addItem("名称 A-Z", userData="name_asc")
+        self._sort_combo.addItem("名称 Z-A", userData="name_desc")
+        self._sort_combo.addItem("版本最新优先", userData="version")
         # 与搜索框同高（LineEdit 视觉高度 33px）
         self._sort_combo.setFixedHeight(33)
-        self._style_sort_combo()
+        self._sync_sort_combo_metrics()
         self._sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         filter_layout.addWidget(self._sort_combo)
 
@@ -5232,35 +5235,39 @@ class MarketplaceCard(QWidget):
 
     # ── 排序 / 角标 ──
 
-    def _style_sort_combo(self):
-        """按上下文主题刷新排序下拉样式（与搜索框一致的圆角/内边距/无边框 + 全局字体）"""
-        tc = getattr(self, "_cached_tc", "") or _text_color()
+    def _sync_sort_combo_metrics(self):
+        """同步排序下拉的字体与宽度（主题/字号变化时调用）
+
+        两点与普通 QComboBox 不同，必须显式处理：
+
+        1. **字体**：qfluentwidgets ComboBox 的 QSS 里 font-family 是注释掉的，
+           字体完全由 QFont 决定（构造时 ``setFont(self)`` 用的是 qconfig 默认
+           families）→ 必须用 ``setFont`` 注入上下文的系统字体，QSS 改不动它。
+        2. **宽度**：ComboBox 继承 QPushButton，文本区左右内边距为 11px / 31px，
+           固定 120px 会把「下载量最多优先」截成省略号 → 按最长条目实测宽度自适应。
+
+        另：不能给它 ``setStyleSheet``——会把 Fluent 主题 QSS 顶掉（箭头/悬停态
+        全部失效），这正是改造前那个「下拉框上多一道下划线」的根因。
+        """
+        combo = getattr(self, "_sort_combo", None)
+        if combo is None:
+            return
         ff = getattr(self, "_cached_font_family", "") or ""
         fs = getattr(self, "_cached_font_size", 14) or 14
-        theme = getattr(self, "_cached_theme_colors", {}) or {}
-        card_bg = theme.get("content_bg", "#ffffff" if not isDarkTheme() else "#2a2a2e")
-        border_c = theme.get("border", "rgba(128,128,128,0.15)")
-        # 全局字体：font-family + font-size（下拉主体与弹出列表都应用）
-        combo_font = f" font-family: '{ff}';" if ff else ""
-        combo_font += f" font-size: {max(11, fs)}px;"
         try:
-            self._sort_combo.setStyleSheet(
-                f"QComboBox {{ background: rgba(128,128,128,0.1); color: {tc};"
-                f" border: none; border-radius: 8px; padding: 4px 8px;{combo_font} }}"
-                "QComboBox::drop-down { border: none; width: 18px; }"
-                f"QComboBox QAbstractItemView {{ background: {card_bg}; color: {tc};"
-                f" border: 1px solid {border_c}; border-radius: 6px;{combo_font}"
-                " selection-background-color: rgba(40,120,220,0.3); outline: none; }"
-                "QComboBox QAbstractItemView::item { padding: 4px 8px; }"
-                "QComboBox QAbstractItemView::item:hover { background: rgba(128,128,128,0.15); }"
-                # 下拉列表滚动条：对齐主程序 ComboBoxStyles.dark_combo_dropdown 规范
-                f"QComboBox QAbstractItemView QScrollBar:vertical {{ background: {card_bg};"
-                " border: none; width: 14px; margin: 4px 2px 4px 2px; }"
-                "QComboBox QAbstractItemView QScrollBar::add-line:vertical,"
-                " QComboBox QAbstractItemView QScrollBar::sub-line:vertical { height: 0px; }"
-                "QComboBox QAbstractItemView QScrollBar::add-page:vertical,"
-                " QComboBox QAbstractItemView QScrollBar::sub-page:vertical { background: none; }"
+            font = combo.font()
+            if ff:
+                font.setFamily(ff)
+            font.setPixelSize(max(11, fs))
+            combo.setFont(font)
+
+            fm = QFontMetrics(combo.font())
+            text_w = max(
+                (fm.horizontalAdvance(combo.itemText(i)) for i in range(combo.count())),
+                default=0,
             )
+            # 11px 左内边距 + 31px 箭头区 + 少量余量
+            combo.setFixedWidth(max(96, text_w + 46))
         except RuntimeError:
             pass
 
