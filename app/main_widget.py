@@ -9128,13 +9128,20 @@ class OpenAIChatToolWindow(ToolWindow):
         旧实现把 `_resize_preview_active = False` 散落在多个出口，任一出口被
         异常 / 已删除卡片打断都会让标志泄漏。这里统一收口：任何退出路径
         （含被 epoch 作废的旧恢复链提前收尾）都保证队列与标志复位。
+
+        ⚡ #侧栏动画卡顿：batch 不能在这里 end。Chromium 的高度回传是异步的
+        （宽度同步 → JS reflow → IPC reportHeight），通常在恢复链收尾**之后**
+        才陆续到达；立即 end 会让这些回传在 `_commit_viewer_height` 分流处
+        因 active=False 全部直调 setFixedHeight（实测 31 次 / 57ms，绕过
+        「一次布局 + 一次锚点修正」收敛）。改为续期 150ms 宽限（begin 的幂等
+        分支会重启 idle timer），由最后一次回传后的静默期自然收尾。
         """
         self._restore_queue = []
         self._restore_batch_idx = 0
         self._resize_preview_active = False
         batch = getattr(self, "_height_batch", None)
         if batch is not None:
-            batch.end()
+            batch.begin()
 
     def _process_restore_batch(self, epoch: int | None = None):
         """分批恢复离屏卡片 viewer（触发 GPU 分配，故分批以避免峰值）
@@ -10923,13 +10930,9 @@ class OpenAIChatToolWindow(ToolWindow):
         card = self._welcome_card_cache.get(self._window_id)
         if card is None:
             return
-        try:
-            from PyQt5 import sip
-
-            if sip.isdeleted(card):
-                return
-        except Exception:
-            pass
+        # 🛡️ 父链存活探测（见 _qt_widget_alive）
+        if not OpenAIChatToolWindow._qt_widget_alive(card):
+            return
         mode = getattr(card, "_welcome_mode", "")
         if not mode:
             return
@@ -10944,6 +10947,37 @@ class OpenAIChatToolWindow(ToolWindow):
             card.set_welcome_mode(mode)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[_rerender_welcome_card] re-render failed: {e}")
+
+    @staticmethod
+    def _qt_widget_alive(widget) -> bool:
+        """判断 widget 的 C++ 对象是否**真的**还活着（含父链）
+
+        🛡️ 单点 ``sip.isdeleted(widget)`` 不可靠：widget ``setParent(容器)`` 后
+        ownership 归 C++，父容器析构时 Qt 会递归删除子对象，而 sip 未必及时
+        标记到每一个子对象。此时对它调任何方法（哪怕只是 ``hide()``）都是
+        access violation —— **无法被 try/except 捕获**，直接闪退。
+
+        父链探测能覆盖这一类：若 widget 自身存活，其父链必然存活；父链任一
+        环被删，则它早已随父被递归删除。
+
+        注意：本方法只能降低风险，不能替代生命周期管理。缓存持有 widget 时
+        应同时挂 ``destroyed`` 信号（见 ``_get_or_create_welcome_card``）。
+        """
+        if widget is None:
+            return False
+        try:
+            from PyQt5 import sip
+
+            cur = widget
+            for _ in range(32):  # 深度上界，防御父链成环
+                if cur is None:
+                    return True
+                if sip.isdeleted(cur):
+                    return False
+                cur = cur.parent()
+            return True
+        except Exception:
+            return False
 
     def _invalidate_welcome_card(self):
         """显式失效欢迎卡片缓存（pop + delete widget）
@@ -10968,13 +11002,10 @@ class OpenAIChatToolWindow(ToolWindow):
         cached = self._welcome_card_cache.pop(self._window_id, None)
         if cached is None:
             return
-        try:
-            from PyQt5 import sip
-
-            if sip.isdeleted(cached):
-                return
-        except Exception:
-            pass
+        # 🛡️ 父链存活探测（单点 sip.isdeleted 不足以拦下「随父容器被递归删除」
+        # 的悬垂 widget，实测会导致 hide() access violation 闪退）
+        if not OpenAIChatToolWindow._qt_widget_alive(cached):
+            return
         # 从父控件摘除（如果还在布局里）。这里不调 removeWidget，因为
         # _clear_chat_area/deleteLater 路径会处理；摘 setParent 已经能断
         # 干净引用，避免下一帧布局刷新时再访问一个已被本流程标记为"待删"的 widget。
@@ -12144,13 +12175,8 @@ class OpenAIChatToolWindow(ToolWindow):
         cached = self._welcome_card_cache.get(self._window_id)
         if cached is None:
             return False
-        try:
-            from PyQt5 import sip
-
-            if sip.isdeleted(cached):
-                return False
-        except Exception:
-            pass
+        if not OpenAIChatToolWindow._qt_widget_alive(cached):
+            return False
         try:
             recent_sessions, top_by_count = self._collect_welcome_sessions()
             cached.refresh_welcome_data(recent_sessions, top_by_count)
@@ -12165,13 +12191,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口共享会串数据。缓存命中时跳过 QWebEngineView 重建（省 100-500ms 主线程占用）。
         cached = self._welcome_card_cache.get(self._window_id)
         if cached is not None:
-            try:
-                from PyQt5 import sip
-
-                if not sip.isdeleted(cached):
-                    return cached
-            except Exception:
-                pass
+            # 🛡️ 同上：父链存活探测，避免把悬垂 widget 重新插回布局
+            if OpenAIChatToolWindow._qt_widget_alive(cached):
+                return cached
             self._welcome_card_cache.pop(self._window_id, None)
 
         agent = self.backend.get_agent(self._current_agent)
@@ -21100,13 +21122,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._batch_cards = []
             self._pending_lazy_cards.clear()
             wc = self._welcome_card_cache.pop(self._window_id, None)
-            if wc is not None:
-                from PyQt5 import sip
-
-                if not sip.isdeleted(wc):
-                    if hasattr(wc, "cleanup"):
-                        wc.cleanup()
-                    wc.deleteLater()
+            if wc is not None and OpenAIChatToolWindow._qt_widget_alive(wc):
+                if hasattr(wc, "cleanup"):
+                    wc.cleanup()
+                wc.deleteLater()
             self._session_card_cache.clear()
         except Exception:
             pass
