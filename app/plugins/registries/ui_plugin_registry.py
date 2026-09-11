@@ -490,6 +490,21 @@ class UIPluginRegistry:
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
         self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
         self._ui_command_names: set = set()  # 由 UI 插件注册的命令名集合
+        # ★ UI 命令账本 {cmd_name: (description, handler, owner_plugin)}
+        # 单一数据源：register_all_commands() 会清空 CommandManager 全部命令，
+        # 之后只靠 re_register_all_commands() 重放恢复。这里集中登记**所有**具备
+        # 「可打开界面」语义的 UI 扩展点（浮动卡 / 工作台页 / 工作区页），
+        # 避免「只有浮动卡被重放、其余槽位命令被清空后永久消失」。
+        self._ui_commands: Dict[str, tuple] = {}
+        # 账本中「确已写入 CommandManager」的命令名。区别于 _ui_commands：
+        # 浮动卡遇到外部同名命令时会主动让位（只登记不接管），这类名字不在本
+        # 集合中，卸载时也不得去删外部命令（保持「不误删他人同名命令」语义）。
+        self._ui_applied_names: set = set()
+        # 浮动卡 card_id → 实际命令名（含命名空间前缀），卸载时按此反查，
+        # 修复「card_id 无 ':' 但注册时被加了 plugin: 前缀 → 卸载注销错名残留」
+        self._card_command_names: Dict[str, str] = {}
+        # 工作台页 page_id → 实际命令名
+        self._workbench_tab_command_names: Dict[str, str] = {}
         self._context_provider: Optional[Callable[[], Dict[str, Any]]] = None  # 向后兼容，单例上下文提供者
         # 多窗口隔离：每个窗口独立上下文提供者 (window_id → provider)
         self._context_providers: Dict[str, Callable[[], Dict[str, Any]]] = {}
@@ -1080,7 +1095,12 @@ class UIPluginRegistry:
         priority: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """注册右侧工作台页签（同 page_id 高优先级覆盖低优先级）"""
+        """注册右侧工作台页签（同 page_id 高优先级覆盖低优先级）
+
+        Side Effects:
+            联动注册「打开该页」命令 ``/{page_id}``（同名外部命令已存在时让位），
+            用户可在命令面板直接跳到该插件页。
+        """
         if metadata is None:
             metadata = {}
         info = WorkbenchTabInfo(
@@ -1095,11 +1115,16 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._workbench_tabs[page_id] = info
+        # 联动命令：与浮动卡一致，页面注册即获得直达命令
+        self._register_command_for_workbench_tab(info)
 
     def unregister_workbench_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部工作台页签（插件卸载时调用）"""
         for page_id in [pid for pid, v in self._workbench_tabs.items() if v.plugin_name == plugin_name]:
             del self._workbench_tabs[page_id]
+            cmd_name = self._workbench_tab_command_names.pop(page_id, None)
+            if cmd_name is not None:
+                self.unregister_ui_command(cmd_name)
 
     def get_workbench_tabs(self) -> List[WorkbenchTabInfo]:
         """获取全部工作台页签（按注册序返回）"""
@@ -1441,11 +1466,104 @@ class UIPluginRegistry:
         """按注册序返回所有 module_id（供 compose 排序验证）"""
         return list(self._ui_modules.keys())
 
+    # ── UI 命令账本（单一登记入口 + 全量重放） ──
+
+    def register_ui_command(
+        self,
+        name: str,
+        description: str,
+        handler: Callable[[str], None],
+        owner: str = "",
+        *,
+        override_external: bool = True,
+    ) -> None:
+        """登记一条 UI 命令（唯一登记入口）
+
+        所有「点击后打开某个界面」的 UI 扩展点（浮动卡 / 工作台页 / 工作区页）
+        都经此登记，写入 ``_ui_commands`` 账本并同步 CommandManager。
+
+        Why 需要账本：``builtin_commands.register_all_commands()`` 会清空
+        CommandManager 的**全部**命令，随后只调 ``re_register_all_commands()``
+        恢复 UI 命令。若某类扩展点只往 CommandManager 写、不进账本，清空后
+        便永久丢失（症状：热重载/重启后插件命令不再出现在命令面板）。
+        账本即重放数据源，保证清空后能原样重建。
+
+        Args:
+            name: 命令名（不含前导 "/"）
+            description: 命令描述（命令面板展示）
+            handler: (args: str) -> None，主线程执行
+            owner: 归属插件名（卸载时按 owner 批量注销）
+            override_external: False 时若已存在同名**外部**命令（非本账本所有）
+                则让位不抢占（浮动卡沿用此语义，避免插件覆盖内置 /history 等
+                系统命令）。该标记随账本持久化，重放 re_register_all_commands
+                时按原语义执行。
+        """
+        self._ui_commands[name] = (description or "", handler, owner, override_external)
+        self._apply_ui_command(name)
+
+    def _apply_ui_command(self, name: str) -> None:
+        """把账本中的一条命令落到 CommandManager + FunctionCommandHandlers（幂等）
+
+        override_external=False 且已存在同名外部命令（非本账本所有）时主动跳过，
+        保持「不抢占系统命令」语义；此时该名不进 ``_ui_applied_names``，
+        卸载也不会误删外部命令。
+        """
+        spec = self._ui_commands.get(name)
+        if spec is None:
+            return
+        description, handler = spec[0], spec[1]
+        override_external = spec[3] if len(spec) > 3 else True
+        try:
+            from app.core.builtin_commands import FunctionCommandHandlers
+            from app.core.command_manager import CommandManager, CommandType
+        except Exception:
+            return
+        cmd_mgr = CommandManager.get_instance()
+        if cmd_mgr.has_command(name) and name not in self._ui_applied_names and not override_external:
+            return
+        # handler 始终刷新：命令可能被 register_all_commands 清空后由本账本重建，
+        # 且热重载后闭包指向新实例
+        FunctionCommandHandlers.register(name, handler)
+        if not cmd_mgr.has_command(name):
+            cmd_mgr.register(
+                name=name,
+                command_type=CommandType.FUNCTION,
+                description=description,
+                argument_hint="",
+            )
+        self._ui_applied_names.add(name)
+        self._ui_command_names.add(name)
+
+    def unregister_ui_command(self, name: str) -> None:
+        """注销单条 UI 命令（账本 + CommandManager + 处理器三处同步）
+
+        仅删除「本账本确已接管」的命令；外部同名命令（曾被让位）不动。
+        """
+        self._ui_commands.pop(name, None)
+        if name not in self._ui_applied_names:
+            return
+        self._ui_applied_names.discard(name)
+        self._ui_command_names.discard(name)
+        try:
+            from app.core.builtin_commands import FunctionCommandHandlers
+            from app.core.command_manager import CommandManager
+
+            CommandManager.get_instance().unregister(name)
+            FunctionCommandHandlers._handlers.pop(name, None)
+        except Exception:
+            pass
+
+    def unregister_ui_commands(self, owner: str) -> None:
+        """按归属插件批量注销其全部 UI 命令（含浮动卡 / 工作台页 / 工作区页）"""
+        for name in [n for n, spec in self._ui_commands.items() if spec[2] == owner]:
+            self.unregister_ui_command(name)
+
+    def get_ui_commands(self) -> Dict[str, tuple]:
+        """返回账本快照（诊断/测试用）"""
+        return dict(self._ui_commands)
+
     def _register_command_for_card(self, card_info: FloatingCardInfo) -> None:
         """为浮动卡片自动注册对应 FUNCTION 命令"""
-        from app.core.command_manager import CommandManager, CommandType
-        from app.core.builtin_commands import FunctionCommandHandlers
-
         # 命名空间规则：
         # - card_id 已含 ":"（如 "plug-a:mycard"）→ 直接使用
         # - card_id 是简单名且 plugin_name == "system" → 使用短名
@@ -1458,23 +1576,55 @@ class UIPluginRegistry:
         else:
             cmd_name = f"{card_info.plugin_name}:{card_info.card_id}"
 
-        cmd_mgr = CommandManager.get_instance()
-        if cmd_mgr.has_command(cmd_name):
-            return  # 命令已存在则不重复注册
-
-        cmd_mgr.register(
-            name=cmd_name,
-            command_type=CommandType.FUNCTION,
-            description=card_info.title or f"打开 {card_info.card_id}",
-            argument_hint="",
-        )
-        self._ui_command_names.add(cmd_name)
-
-        # 注册处理器：延迟到执行时获取 main_widget
         def _handler(args: str, cid=card_info.card_id):
             self._show_floating_card(cid)
 
-        FunctionCommandHandlers.register(cmd_name, _handler)
+        self._card_command_names[card_info.card_id] = cmd_name
+        self.register_ui_command(
+            cmd_name,
+            card_info.title or f"打开 {card_info.card_id}",
+            _handler,
+            owner=card_info.plugin_name,
+            # 保持既有语义：同名系统命令优先，浮动卡不抢占
+            override_external=False,
+        )
+
+    # ── 工作台页命令（register_workbench_tab 联动） ──
+
+    def _workbench_tab_command_name(self, info: WorkbenchTabInfo) -> str:
+        """工作台页命令名：优先短名（page_id），与他插件同名时加插件前缀"""
+        if ":" in info.page_id:
+            return info.page_id
+        existing = self._ui_commands.get(info.page_id)
+        if existing is not None and existing[2] not in ("", info.plugin_name):
+            return f"{info.plugin_name}:{info.page_id}"
+        return info.page_id
+
+    def _register_command_for_workbench_tab(self, info: WorkbenchTabInfo) -> None:
+        """为工作台页注册「打开该页」命令（对齐浮动卡语义）"""
+        cmd_name = self._workbench_tab_command_name(info)
+
+        def _handler(args: str, pid=info.page_id):
+            self.open_workbench_tab(pid)
+
+        self._workbench_tab_command_names[info.page_id] = cmd_name
+        self.register_ui_command(
+            cmd_name,
+            f"打开工作台页 · {info.label or info.page_id}",
+            _handler,
+            owner=info.plugin_name,
+        )
+
+    def open_workbench_tab(self, page_id: str) -> None:
+        """命令处理器：展开右侧工作台并定位到指定插件页（主线程）"""
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                tm.open_workbench_tab(page_id)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] open_workbench_tab({page_id}) 失败: {e}")
 
     def _resolve_global_host(self):
         """获取 Tab 管理器全局卡片宿主（Tab 模式下浮动卡片统一挂这里）
@@ -2335,8 +2485,10 @@ class UIPluginRegistry:
         self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
         # 清理工作区页面槽（Phase G）
         self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
-        # 清理右侧工作台页签槽位
+        # 清理右侧工作台页签槽位（含其联动命令）
         self.unregister_workbench_tabs(plugin_name)
+        # 兜底：注销该插件登记进账本的其余 UI 命令（工作区页等）
+        self.unregister_ui_commands(plugin_name)
         # 清理标题栏常驻 tab 槽位
         self.unregister_titlebar_tabs(plugin_name)
         # 清理标题栏内嵌 widget 槽位
@@ -2576,16 +2728,9 @@ class UIPluginRegistry:
             pass
 
     def _unregister_command_for_card(self, card_id: str) -> None:
-        """卸载浮动卡片对应的命令"""
-        from app.core.command_manager import CommandManager
-        from app.core.builtin_commands import FunctionCommandHandlers
-
-        cmd_mgr = CommandManager.get_instance()
-        # card_id 可能是 "plug-a:mycard" 或 "mycard"
-        cmd_name = card_id
-        cmd_mgr.unregister(cmd_name)
-        FunctionCommandHandlers._handlers.pop(cmd_name, None)
-        self._ui_command_names.discard(cmd_name)
+        """卸载浮动卡片对应的命令（按注册时记录的实际命令名反查，避免前缀错配）"""
+        cmd_name = self._card_command_names.pop(card_id, card_id)
+        self.unregister_ui_command(cmd_name)
 
     def load_all_enabled_plugins(self, plugin_dirs) -> int:
         """批量加载所有已启用的 UI 插件
@@ -2742,13 +2887,14 @@ class UIPluginRegistry:
         return _provider
 
     def re_register_all_commands(self) -> None:
-        """重新注册所有浮动卡片命令到 CommandManager
+        """重放账本中的全部 UI 命令到 CommandManager
 
-        用于 register_all_commands / reload_all_commands 之后
-        恢复 UI 插件命令（这些命令会被 reload 清空）。
+        用于 register_all_commands / reload_all_commands 之后恢复 UI 插件命令
+        （这些命令会被 reload 清空）。★ 全量重放：覆盖浮动卡 + 工作台页 +
+        工作区页等一切登记进账本的 UI 命令，而非只重放浮动卡。
         """
-        for card_info in self._floating_cards.values():
-            self._register_command_for_card(card_info)
+        for name in list(self._ui_commands):
+            self._apply_ui_command(name)
 
 
     def unregister_window(self, window_id: str) -> None:

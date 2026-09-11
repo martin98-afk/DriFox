@@ -1003,6 +1003,8 @@ class HistoryCard(QWidget):
         self._remaining_count = 0  # 未显示的会话数
         self._total_session_count = 0  # 当前列表总会话数
         self._load_more_btn = None  # 加载更多按钮引用
+        # 「加载更多」前的滚动位置（渲染完成后恢复；其他刷新路径保持 None）
+        self._pending_scroll_restore: Optional[int] = None
 
         # === 增量更新缓存 ===
         # session_id → _HistoryItemCard 缓存（避免重复创建 widget）
@@ -1448,6 +1450,7 @@ class HistoryCard(QWidget):
             self._prune_cached_spacers()
             self._add_load_more_if_needed(layout)
             self._refresh_font_size()
+            self._restore_scroll_if_pending()
 
     def _get_or_create_history_card(
         self, session: Dict, index: int, is_current: bool, preview: str
@@ -1824,8 +1827,41 @@ class HistoryCard(QWidget):
 
     def _on_load_more(self):
         """加载下一批会话"""
+        # 🛡️ 保留滚动位置：_update_display 全清重建时内容瞬间清空，
+        # widgetResizable 模式下 scrollbar range 收缩会把 value clamp 到 0，
+        # 渲染完成后视口跳回顶部（此前每次点加载更多都弹回列表头）。
+        # 加载更多只在尾部追加、头部内容不变，恢复原 value 即可保持视口。
+        self._pending_scroll_restore = self._parent_scroll_vbar_value()
         self._show_limit += self._page_size
         self._update_display()
+
+    def _parent_scroll_vbar_value(self) -> Optional[int]:
+        """沿父链找宿主滚动区，返回当前垂直滚动值（找不到返回 None）"""
+        parent = self.parent()
+        while parent:
+            scroll_area = getattr(parent, "_scroll_area", None)
+            if scroll_area is not None:
+                return scroll_area.verticalScrollBar().value()
+            parent = parent.parent()
+        return None
+
+    def _restore_scroll_if_pending(self):
+        """渲染完成后恢复「加载更多」前记录的滚动位置（延迟一拍等布局生效）"""
+        if self._pending_scroll_restore is None:
+            return
+        target = self._pending_scroll_restore
+        self._pending_scroll_restore = None
+
+        def _apply():
+            parent = self.parent()
+            while parent:
+                scroll_area = getattr(parent, "_scroll_area", None)
+                if scroll_area is not None:
+                    scroll_area.verticalScrollBar().setValue(target)
+                    return
+                parent = parent.parent()
+
+        QTimer.singleShot(0, _apply)
 
     def _cleanup_orphan_archived_cards(self, active_paths: set):
         """清理不再显示的归档缓存卡片（搜索过滤时不清理）"""

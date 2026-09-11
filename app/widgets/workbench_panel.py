@@ -1041,6 +1041,22 @@ class WorkbenchPanel(QWidget):
                 return i
         return None
 
+    def set_current_tab_by_id(self, tab_id: str, *, user: bool = False) -> bool:
+        """按页签 id 切换（通用直达入口：插件命令 / 宿主定向跳转）
+
+        与 ``_on_tab_clicked`` 同一套索引定位逻辑，供工作台页命令
+        （``/{page_id}``）与宿主跨模块调用复用。
+
+        Returns:
+            True 表示页签存在并已切换；False 表示当前页签集合中无此 id
+            （典型场景：插件页尚未注册 / 已被卸载）
+        """
+        idx = self._tab_id_index(tab_id)
+        if idx is None:
+            return False
+        self.set_current_tab(idx, user=user)
+        return True
+
     def _tab_id_at(self, index: int) -> Optional[str]:
         """按当前页签顺序取 index 对应的 tab_id（越界返回 None）"""
         if 0 <= index < len(self._tab_ids):

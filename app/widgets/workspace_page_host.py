@@ -138,41 +138,39 @@ class WorkspacePageHost:
         self._page_indexes.pop(page_id, None)
 
     def _register_page_commands(self, reg: Any) -> None:
-        try:
-            from app.core.builtin_commands import FunctionCommandHandlers
-            from app.core.command_manager import CommandManager, CommandType
-        except Exception:
-            return
+        """把工作区页命令登记进 UIPluginRegistry 命令账本
+
+        ★ 不再直接写 CommandManager：``builtin_commands.register_all_commands()``
+        会清空 CommandManager 全部命令，仅重放 registry 账本。若此处直写
+        CommandManager，工作区页命令（约 0ms 注册）会被 100ms 的内置命令注册
+        清空后永久消失（症状：插件页命令在命令面板中查不到）。
+        登记进账本后由 ``re_register_all_commands()`` 统一重放恢复。
+        """
         for info in reg.get_workspace_pages():
             cmd_name = (
                 info.page_id
                 if ":" in info.page_id or info.plugin_name in ("system", "system-ui")
                 else f"{info.plugin_name}:{info.page_id}"
             )
-            mgr = CommandManager.get_instance()
             try:
-                mgr.register(
-                    name=cmd_name,
-                    command_type=CommandType.FUNCTION,
-                    description=f"打开页面 {info.title}",
-                    argument_hint="",
+                reg.register_ui_command(
+                    cmd_name,
+                    f"打开页面 {info.title}",
+                    lambda args, pid=info.page_id: self.show_page(pid),
+                    owner=info.plugin_name,
                 )
-                FunctionCommandHandlers.register(cmd_name, lambda args, pid=info.page_id: self.show_page(pid))
                 if cmd_name not in self._command_names:
                     self._command_names.append(cmd_name)
             except Exception as e:
                 logger.warning(f"[WorkspacePageHost] command register failed ({cmd_name}): {e}")
 
     def _unregister_page_commands(self) -> None:
-        try:
-            from app.core.command_manager import CommandManager
-            from app.core.builtin_commands import FunctionCommandHandlers
-        except Exception:
-            return
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        reg = UIPluginRegistry.get_instance()
         for name in self._command_names:
             try:
-                CommandManager.get_instance().unregister(name)
-                FunctionCommandHandlers._handlers.pop(name, None)
+                reg.unregister_ui_command(name)
             except Exception:
                 pass
         self._command_names = []

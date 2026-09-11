@@ -1506,6 +1506,30 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 logger.exception("[Workbench] 处理工作目录变更失败")
 
+    def open_workbench_tab(self, page_id: str) -> bool:
+        """展开工作台并定位到指定页签 id（插件工作台页命令的统一直达入口）
+
+        与 ``open_workbench_history`` / ``open_workbench_memory`` 的差异：本方法
+        不感知具体页语义（不触发任何懒构建），只做「展开 + 按 id 切页」，因此
+        可被任意插件页命令（``register_workbench_tab`` 联动注册的 ``/{page_id}``）复用。
+
+        Args:
+            page_id: 工作台页签 id（如 "worktree" / "artifacts" / 插件自定义 page_id）
+
+        Returns:
+            True 表示页签存在并已切换；False 表示面板不可用或当前无此页签
+        """
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None:
+            return False
+        # 展开工作台（不可见时 set_workbench_visible 内部会触发 refresh_workbench，
+        # 其中含 sync_plugin_pages —— 保证插件页已 reconcile 后再按 id 定位）
+        if not self.is_workbench_visible():
+            self.set_workbench_visible(True)
+        else:
+            self.refresh_workbench()
+        return panel.set_current_tab_by_id(page_id, user=True)
+
     def open_workbench_memory(self, sub_tab: str = "docs") -> None:
         """展开工作台并定位「工作树」页签（记忆功能已下线，保留兼容入口）
 
