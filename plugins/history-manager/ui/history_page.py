@@ -335,6 +335,10 @@ class HistoryPage(QWidget):
         """工作台通用页协议入口（宿主 ``refresh_current_page_data`` 调用）"""
         self.refresh()
 
+    def show_card(self) -> None:
+        """浮动卡显示入口（CardManager show_card 钩子）：显示即刷新列表"""
+        self.refresh()
+
     # ── 卡片信号 → 宿主窗口（会话管理逻辑仍由窗口实现） ──
 
     def _win(self):

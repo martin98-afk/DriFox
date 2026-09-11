@@ -262,9 +262,17 @@ class FileTreeCard(QWidget):
 
     closed = pyqtSignal()
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, context: Optional[dict] = None):
         super().__init__(parent)
         self._context_provider: Optional[Callable[[], dict]] = None
+        # 工作台页形态：宿主 _build_ui_context() 一次性注入；转为 provider 复用
+        # 浮动卡的取数链路（project_root / 主题色 / 字体等字段同构）
+        if isinstance(context, dict) and context:
+
+            def _ctx_provider(_ctx=context):
+                return _ctx
+
+            self._context_provider = _ctx_provider
         self._worker_thread: Optional[QThread] = None
         self._scanner: Optional[_TreeScanner] = None
         self._colors: dict = {}
@@ -281,6 +289,14 @@ class FileTreeCard(QWidget):
         self._setup_shortcuts()
 
         self.destroyed.connect(self._cleanup_worker)
+        self._first_show_done = False
+
+    def showEvent(self, event):  # noqa: N802 (Qt 命名)
+        """工作台页形态：首次显示时应用主题 + 懒加载目录树"""
+        super().showEvent(event)
+        if not self._first_show_done:
+            self._first_show_done = True
+            self.show_card()
 
     # ── UI 初始化 ──
 
@@ -303,22 +319,17 @@ class FileTreeCard(QWidget):
         self._icon_widget = IconWidget(FluentIcon.FOLDER, self._top_bar)
         self._icon_widget.setFixedSize(20, 20)
 
-        self._title_label = StrongBodyLabel("项目文件树", self._top_bar)
+        self._title_label = StrongBodyLabel("文件树", self._top_bar)
         self._title_label.setObjectName("file-tree-title")
 
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._top_bar)
         self._refresh_btn.setFixedSize(32, 32)
         self._refresh_btn.setToolTip("刷新文件树")
 
-        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, self._top_bar)
-        self._close_btn.setFixedSize(32, 32)
-        self._close_btn.setToolTip("关闭")
-
         top_layout.addWidget(self._icon_widget)
         top_layout.addWidget(self._title_label)
         top_layout.addStretch()
         top_layout.addWidget(self._refresh_btn)
-        top_layout.addWidget(self._close_btn)
 
         # ── 树控件区域 ──
         self._scroll_area = ScrollArea(self)
@@ -369,7 +380,6 @@ class FileTreeCard(QWidget):
 
     def _setup_connections(self):
         # 顶栏按钮
-        self._close_btn.clicked.connect(self._on_close)
         self._refresh_btn.clicked.connect(self._on_refresh)
 
         # Model 信号

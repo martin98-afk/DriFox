@@ -2,9 +2,10 @@
 """history-manager 插件 UI 注册入口
 
 职责：
-- 注册工作台「历史会话」页（``page_id="history-manager"``，与插件同名），页面自带 ``HistoryCard``
-  与会话列表交互（原 ``app/widgets/workbench_panel.HistoryPage`` +
-  ``app/widgets/cards/settings/history_card.py``）。
+- 注册对话左侧停靠区浮动卡「历史会话」（``card_id="history-manager"``，
+  ``container="left"``，默认常驻显示），页面自带 ``HistoryCard``（搜索 /
+  项目切换器 / 会话列表）与自拉数据逻辑（``HistoryManager`` 全局单例）。
+  左侧栏顶部系统插件区自动派生按钮（浮动卡兼容映射）。
 - 注册 ``HistoryService``（``SERVICE_NAME="history"``）：宿主 ``MainWidget``
   通过 ``_history_card`` / ``_history_popup_card`` 代理属性读取页面与卡片，
   会话操作仍由窗口方法实现（页内信号转发）。
@@ -70,17 +71,17 @@ def register_ui(registry) -> None:
             service.bind_page(self)
 
     try:
-        registry.register_workbench_tab(
+        registry.register_floating_card(
             plugin_name=_PLUGIN_NAME,
-            page_id="history-manager",
-            label="历史会话",
+            card_id="history-manager",
             widget_class=_BoundHistoryPage,
-            priority=10,
-            metadata={"source": "system", "order_hint": 20},
+            container="left",
+            title="历史会话",
+            default_visible=True,  # 左侧停靠区常驻显示
         )
-        logger.info("[history-manager] 已注册工作台 tab: history-manager（历史会话页）")
+        logger.info("[history-manager] 已注册左侧浮动卡: history-manager（历史会话）")
     except Exception as e:
-        logger.warning(f"[history-manager] 注册 history tab 失败（历史页将缺失）: {e}")
+        logger.warning(f"[history-manager] 注册浮动卡失败（历史列表将缺失）: {e}")
 
     try:
         registry.register_service(HistoryService.SERVICE_NAME, service, plugin_name=_PLUGIN_NAME)
