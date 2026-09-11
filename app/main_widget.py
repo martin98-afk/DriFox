@@ -3502,7 +3502,9 @@ class OpenAIChatToolWindow(ToolWindow):
         _init_ui_plugins_deferred（插件加载完成后）调用，widget 已存在则跳过
         （新窗口 build 时已装配 / 热重载场景保留旧 widget）。
         """
-        if getattr(self, "_branch_widget", None) is not None:
+        # 实例字典直查：__new__ 裸实例上 getattr 会触发 Qt 桥抛 RuntimeError
+        # （getattr 默认值只兜 AttributeError），且避免误读类属性
+        if self.__dict__.get("_branch_widget") is not None:
             return
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
