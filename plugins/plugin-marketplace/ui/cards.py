@@ -1153,6 +1153,32 @@ class _PluginRow(QFrame):
                 return QSize(base.width(), h)
         return base
 
+    def minimumSizeHint(self):
+        """行最小高度对齐 sizeHint —— 修复「描述文字被挤掉半行」
+
+        根因：Qt 的 ``QWidgetItem::sizeHint()`` 取
+        ``max(widget.sizeHint(), widget.minimumSizeHint())``，而 QLayout 就是按
+        这个值分配垂直空间的。本类覆写了 ``sizeHint()``（按当前宽度算
+        heightForWidth，避免 wordWrap QLabel 按理想宽度放大），但
+        ``minimumSizeHint()`` 仍是 QWidget 默认（``layout().totalMinimumSize()``，
+        wordWrap QLabel 按「不换行的单行宽度」推导）——实测 18/30 行出现
+        ``minimumSizeHint > sizeHint``（+1~7px，如 87 vs 80）。
+
+        于是列表容器按 ``sizeHint`` 之和预留高度（_content_height），比 Qt 实际
+        需要的少 ~70px/30 行 → QVBoxLayout 压缩行；而 wordWrap 的 QLabel 是唯一
+        可压缩项（minimumSizeHint 只按一行算）→ 描述被挤掉半行（截图里
+        anything2explainer / archify 那种「字形被横向切一半」）。
+
+        两者对齐后 ``QWidgetItem::sizeHint() == sizeHint()``，缺口归零，
+        既不会被压缩，也不会多出 stretch 空白。
+        """
+        from PyQt5.QtCore import QSize
+
+        hint = self.sizeHint()
+        if self.width() > 0 and hint.height() > 0:
+            return QSize(hint.width(), hint.height())
+        return super().minimumSizeHint()
+
     def _font_qss(self, size_px: int) -> str:
         """生成 font-size + font-family 的 QSS 片段"""
         qss = f"font-size: {size_px}px;"
@@ -3649,13 +3675,37 @@ class MarketplaceCard(QWidget):
         except RuntimeError:
             pass  # 卡片已销毁
 
+    def _layout_need_height(self, width: int) -> int:
+        """列表容器「需要多高」——以 QVBoxLayout 自己的 heightForWidth 为准
+
+        为什么不用「逐行 sizeHint 累加」（旧实现）：
+
+        实测 30 行、视口宽 869 时，``Σ 行.sizeHint() + 间距 + 边距 = 2733``，
+        而 ``layout.heightForWidth(869) = 2823`` —— 手动累加少算 90px。原因是
+        QVBoxLayout 的垂直分配走的是 ``QBoxLayoutPrivate::heightForWidth()``
+        这条链路，逐行读取的行高需求比 ``widget.sizeHint()`` 更大（尤其是描述
+        折行 + 标签 FlowLayout 的行：``sum_row_h`` 撑开后要到 2601，而
+        ``Σ sizeHint`` 只有 2543，差 58px）。
+
+        少算的后果不是「空白」而是「压行」：QVBoxLayout 拿到 2765 可用高度却
+        需要 2823，只能压缩行；而行内唯一可压缩项是 wordWrap 的 QLabel →
+        描述被挤掉一整行（截图里 anything2explainer / archify 那种「字形被横向
+        切一半」）。
+
+        回退：布局未布局过 / 返回 -1 时用逐行 sizeHint 累加兜底。
+        """
+        h = self._content_layout.heightForWidth(width)
+        if h > 0:
+            return h
+        return self._content_height()
+
     def _content_height(self) -> int:
-        """按布局内可见行理想高度累加内容高度（不依赖 C++ sizeHint 缓存）
+        """按布局内可见行理想高度累加内容高度（兜底，不依赖 C++ sizeHint 缓存）
 
         用 Python 侧 w.sizeHint()（_PluginRow override：已布局时返回
-        heightForWidth(当前宽度) = 与实际布局一致的理想高度），避免：
-        1. C++ QWidgetItem::sizeHint（QLabel wordWrap 放大值）
-        2. 行在受限 content 高度下被压缩后的实际几何高度
+        heightForWidth(当前宽度) = 与实际布局一致的理想高度），避免 C++
+        QWidgetItem::sizeHint（QLabel wordWrap 放大值）。行在受限 content 高度
+        下被压缩后的实际几何高度同样不能用，那会把「压行」状态固化下来。
         """
         lay = self._content_layout
         spacing = lay.spacing()
@@ -3666,45 +3716,34 @@ class MarketplaceCard(QWidget):
             it = lay.itemAt(i)
             w = it.widget()
             if w is not None and w.isVisible():
-                total += w.sizeHint().height()
+                total += max(w.sizeHint().height(), w.minimumSizeHint().height())
                 vis += 1
         return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
 
     def _sync_content_size(self):
         """手动同步列表内容 widget 尺寸（widgetResizable=False 路径）
 
-        两阶段：先用行 sizeHint（heightForWidth）初算撑开 content 高度
-        （行此时可能未按新宽度重排，sizeHint 与实际布局有偏差），resize
-        触发行重排后，再按行实际几何高度累加校正——保证 content 高度与
-        布局实际一致（底部无 stretch 空白区）。宽度 = 视口宽；行少时
-        高度保持视口高，stretch 填满底部不出现空白。
+        两阶段都以「布局需求高度」为准（_layout_need_height）：第一阶段先用
+        当前宽度撑开 content，resize 触发行按新宽度重排（wordWrap 换行数、
+        标签 FlowLayout 行数都可能变化）后再取一次，变化超过 4px 才二次 resize。
+
+        **注意**：绝不能用「行实际几何高度累加」回调 content 高度 —— 行被压缩
+        后实际高度会小于需求，回调等于把压行状态写死，且此后每轮都自洽，
+        再也弹不回来（这正是描述被裁掉半行后不恢复的机制）。宽度 = 视口宽；
+        行少时高度保持视口高，stretch 填满底部不出现空白。
         """
         try:
             vp = self._scroll.viewport()
-            h1 = self._content_height()
-            self._content.resize(vp.width(), max(h1, vp.height()))
-            # resize 后行按新宽度重排 → 用实际几何高度校正
+            w = vp.width()
+            h1 = self._layout_need_height(w)
+            self._content.resize(w, max(h1, vp.height()))
+            # resize 后行按新宽度重排 → 再取一次需求高度
             self._content_layout.activate()
-            h2 = self._content_height_real()
+            h2 = self._layout_need_height(w)
             if abs(h2 - h1) > 4:
-                self._content.resize(vp.width(), max(h2, vp.height()))
+                self._content.resize(w, max(h2, vp.height()))
         except RuntimeError:
             pass  # 卡片已销毁
-
-    def _content_height_real(self) -> int:
-        """按布局内可见行实际几何高度累加内容高度（布局稳定后调用）"""
-        lay = self._content_layout
-        spacing = lay.spacing()
-        mg = lay.contentsMargins()
-        total = 0
-        vis = 0
-        for i in range(lay.count()):
-            it = lay.itemAt(i)
-            w = it.widget()
-            if w is not None and w.isVisible():
-                total += w.height()
-                vis += 1
-        return total + spacing * max(0, vis - 1) + mg.top() + mg.bottom()
 
     def _update_empty_state(self):
         """匹配为空时显示空态提示（精选模式不参与，探索视图独立占位）"""
