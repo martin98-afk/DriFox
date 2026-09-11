@@ -20,7 +20,7 @@ QSvgRenderer 重新解析并光栅化 SVG，无任何缓存。列表滚动时视
 
 from typing import Optional
 
-from PyQt5.QtCore import QRectF, Qt, QSize
+from PyQt5.QtCore import QRectF, Qt
 from PyQt5.QtGui import QPainter, QPixmap
 from PyQt5.QtSvg import QSvgRenderer
 
@@ -35,19 +35,26 @@ _pixmaps: dict = {}
 _CACHE_LIMIT = 1000
 
 
-def _clear_cache():
+def clear_cache():
     """清空全部缓存（主题切换等大变化时可主动调用）"""
     _renderers.clear()
     _pixmaps.clear()
 
 
 def _apply_icon_cache_patch() -> bool:
-    """打补丁（幂等）。返回是否本次实际生效。"""
+    """打补丁（幂等）。返回是否本次实际生效。
+
+    幂等判据用目标函数身份而非本模块全局标志：插件热重载会重建本
+    模块（标志重置），但 qfluentwidgets 模块不会重载，重复打补丁会
+    把已补丁函数包成链，导致缓存穿透旧层。
+    """
     global _APPLIED
-    if _APPLIED:
-        return False
 
     import qfluentwidgets.common.icon as _icon_mod
+
+    if getattr(_icon_mod.drawSvgIcon, "__module__", "") == __name__:
+        _APPLIED = True
+        return False
 
     _orig_draw_svg_icon = _icon_mod.drawSvgIcon
 
@@ -79,7 +86,10 @@ def _apply_icon_cache_patch() -> bool:
             if renderer is None:
                 renderer = QSvgRenderer(icon)
                 _renderers[key] = renderer
-            pix = QPixmap(w * dpr, h * dpr)
+            # 物理像素尺寸必须 int（PyQt5 严格类型，float 会抛 TypeError）
+            pw = max(1, round(w * dpr))
+            ph = max(1, round(h * dpr))
+            pix = QPixmap(pw, ph)
             pix.setDevicePixelRatio(dpr)
             pix.fill(Qt.transparent)
             p = QPainter(pix)
