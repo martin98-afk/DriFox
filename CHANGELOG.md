@@ -133,6 +133,22 @@ All notable changes to this project will be documented in this file.
 
 - **Add tests to ensure description labels are not squeezed in card rows** (`plugins/plugin-marketplace/ui/cards.py`, `tests/plugins/test_plugin_marketplace_render.py`): 实现 `_desc_squeezed` 识别描述被压缩的行；新增 `test_rows_not_squeezed_desc_visible` 验证行高能容纳描述标签不被压缩、`test_rows_not_squeezed_after_resize` 验证窗口缩放后描述不被压缩；调整布局高度算法防止底部出现过多留白。
 
+### 🆕 重新发布 #6 增量（自 v0.5.10 #5 起）
+
+基于 `v0.5.10` (重新发布 #5) 标签的增量变更 | 提交数：4 · 文件变更：10 · +1134/-290 | 贡献者：mading
+
+#### ✨ 新功能 (New Features)
+
+- **feat: add safe attribute access method to prevent RuntimeError in PyQt instances** (`app/main_widget.py`): 新增 `_safe_instance_attr(obj, name, default)` 静态方法（直接读 `__dict__`，绕开 sip 属性转发），替换 `getattr(obj, name, default)` —— PyQt 对象在 `__init__` 未执行时（测试用 `__new__` 构造的桩实例、构造中途实例）执行 getattr 会抛 `RuntimeError: super-class __init__() ... was never called` 直接打断调用方（2026-09-11 实测：`_display_current_session` 的会话切换钩子让一批 `__new__` 桩测试集体报错）。`_undo_store` / `_show_undo_delete_card` / `_hide_undo_delete_card` / `_clear_undo_store_for_session_switch` 等 5 处全部改用安全读取；顺手给中部恢复（`appends_at_tail=False`）加上滚动锚点保留：恢复前记滚动值，恢复后立即 `_restore_scroll_value` 还原，120ms 后二次设值抵消 WebEngine 异步上报的视口漂移，尾部恢复仍按原行为 `QTimer.singleShot(200, _scroll_to_bottom)`。
+
+- **feat: implement UndoDeleteStore for managing undo entries and enhance UndoDeleteCard functionality** (`app/main_widget.py`, `app/widgets/cards/floating/undo_delete_card.py`, `app/widgets/cards/floating/undo_delete_store.py`, `app/widgets/modules/input_card_module.py`, `docs/plugins/ui-modules.md`, `tests/plugins/test_input_card_module.py`, `tests/widgets/test_undo_delete_store.py`): 引入 `UndoDeleteStore` 替换原单步缓存，允许多条撤销条目 + 最大条数上限；`UndoDeleteCard` 加 TTL —— 被其他卡片遮挡时不清条目（遮挡 ≠ 放弃撤销）；UI 元素升级（按钮样式、tooltip）；新增 `tests/widgets/test_undo_delete_store.py`（264 行）覆盖 `UndoDeleteStore` / `UndoDeleteCard` 行为。
+
+- **feat: add 'plugin-creator' and 'ui-plugin-creator' to enabled LLM skills** (`app/utils/config.py`): `llm_enabled_skills` 列表追加 `plugin-creator` 与 `ui-plugin-creator`，主程序默认加载这两个技能。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **fix(plugins): UIPluginRegistry 加载/卸载加锁并修正卸载判据，修复插件实例泄漏** (`app/plugins/registries/ui_plugin_registry.py`): `load_plugin` / `unload_plugin` 套 `_serialized`（`threading.RLock`，可重入 —— `load_plugin` 内部会调 `unload_plugin`）—— 安装路径与 watchfiles 热重载路径并发到达时，交错执行会让旧模块 `unload_ui` 永不执行、插件单例的 QTimer / 线程 / 子进程永久泄漏（2026-09-11 实测：进程内并存 3 套调度器，任务卡死后只能重启软件）。同时修正卸载判据：除 `_loaded_plugins` 集合外还要看 `sys.modules` 是否真存在模块（异常路径下集合与真实加载状态失配，导致「连续两次 Load 零 Unload」）；幂等退出条件同步把 `sys.modules` 算进来。
+
 ## [v0.5.10b4] - 2026-09-09
 
 自上一版本以来的变更 | 提交数：20 · 文件变更：57 · +4617/-895 | 贡献者：dingma, mading
