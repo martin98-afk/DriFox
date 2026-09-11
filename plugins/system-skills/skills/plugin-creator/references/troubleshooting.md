@@ -73,17 +73,6 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 # ✅ registry.register("my_tool", schema, impl=_impl, danger="safe")
 ```
 
-### ❌ Providers 没被识别 / 服务商列表少了一个
-
-**症状**：服务商列表少了一个；或后注册的同名服务商没生效。
-
-**原因**：
-1. `providers/foo.py` 只定义了函数，没暴露 `register(registry)` → loader 不扫描
-2. 同名冲突时**先注册者保留**（system 根先扫），后注册者被跳过并记 warning
-   （`ProviderRegistry.register` 同名不覆盖；跨根 user>system 覆盖是 tools 的规则，providers 没有）
-3. 与 user 插件同名导致自己的定义被跳过——日志有「已注册，跳过重复注册」warning
-
-**修法**：每个 `providers/*.py` 暴露 `register(registry)`；`ProviderDef.name` 保持唯一；需要替换内置服务商时换名或确认跳过 warning 是预期行为。
 
 ### ❌ 命令不显示 / 不触发
 
@@ -93,16 +82,6 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 
 **修法**：对照 `components.md §Commands` 检查。
 
-### ❌ Hook 不触发
-
-**症状**：事件发生但钩子函数没执行。
-
-**原因**：`hooks.json` 格式错误；事件名拼写错误（大小写敏感）；函数名与 `hooks.json` 引用不匹配；Python 文件语法错误。
-
-**修法**：
-```bash
-python -m py_compile hooks/<name>_hook.py
-```
 
 ### ❌ UI 卡片空白 / 不显示
 
@@ -173,19 +152,6 @@ git commit -m "chore: update marketplace.json"
 
 ## 其他
 
-### ❌ team_templates YAML 校验失败（TemplateError）
-
-**症状**：`/team --load` 报 `TemplateError`，或模板不出现在 `/team` 列表。
-
-**原因**：YAML 不合法——缺 `schema_version`（固定为 1）/`template_name`/非空 `agents`；`agents[].agent_name` 引用了不存在的 @角色；文件名含 `.`/`/`/反斜杠/`..`。
-
-**修法**：
-```yaml
-schema_version: 1            # 固定为 1
-template_name: my-team       # 建议与文件名一致
-agents:                      # 非空；agent_name 必须引用已存在的 @角色
-  - agent_name: build
-```
 
 ### ❌ 不知道从何开始
 
@@ -198,6 +164,10 @@ agents:                      # 非空；agent_name 必须引用已存在的 @角
 ### ❌ 需要 UI 插件
 
 **修法**：调用 `ui-plugin-creator` 技能，本技能不处理 UI 开发细节。
+
+### ❌ 组件专属问题
+
+**修法**：各组件文档自带「排障」小节——见 [components/](components/) 目录对应文件。
 
 ### ❌ qfluentwidgets ComboBox 存了数据但 currentData() 恒为 None
 

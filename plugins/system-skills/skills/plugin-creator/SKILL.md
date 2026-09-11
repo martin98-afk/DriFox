@@ -1,6 +1,6 @@
 ---
 name: plugin-creator
-description: "DriFox 插件全生命周期开发技能。涵盖全部 11 类组件（commands/agents/skills/hooks/mcp/lsp/themes/ui/tools/providers/team_templates），从脚手架生成 → 本地开发/调试 → 验证 → 发布到 drifox-plugins 官方市场的完整流程。UI 组件开发桥接 ui-plugin-creator 技能。主程序改动、一次性脚本、UI 卡片载体开发不适用本技能。"
+description: "DriFox 插件全生命周期开发技能。涵盖全部 18 类组件（commands/agents/skills/hooks/mcp/lsp/themes/ui/tools/providers/team_templates），从脚手架生成 → 本地开发/调试 → 验证 → 发布到 drifox-plugins 官方市场的完整流程。UI 组件开发桥接 ui-plugin-creator 技能。主程序改动、一次性脚本、UI 卡片载体开发不适用本技能。"
 license: MIT
 compatibility: Requires DriFox plugin system (目录即插件, register(registry) 契约); Python 3.10+
 allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
@@ -32,24 +32,24 @@ allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 | 你说 | 任务类型 | 去向 |
 |------|---------|------|
 | "做个新插件""创建插件" | 新建 | 第一动作=新建 → references/workflow.md Scaffold |
-| "加个 /xx 命令" | Commands | references/components.md §Commands |
-| "做个 @xx 智能体" | Agents | references/components.md §Agents |
-| "做个技能""写 SKILL.md" | Skills | references/components.md §Skills |
-| "加个钩子""事件驱动" | Hooks | references/components.md §Hooks |
-| "配置 MCP 服务器" | MCP | references/components.md §MCP |
-| "配置 LSP 语言服务器" | LSP | references/components.md §LSP |
-| "做个主题""改配色" | Themes | references/components.md §Themes |
+| "加个 /xx 命令" | Commands | references/components/commands.md |
+| "做个 @xx 智能体" | Agents | references/components/agents.md |
+| "做个技能""写 SKILL.md" | Skills | references/components/skills.md |
+| "加个钩子""事件驱动" | Hooks | references/components/hooks.md |
+| "配置 MCP 服务器" | MCP | references/components/mcp.md |
+| "配置 LSP 语言服务器" | LSP | references/components/lsp.md |
+| "做个主题""改配色" | Themes | references/components/themes.md |
 | "做 UI 卡片""浮动卡" | UI | → 调用 ui-plugin-creator 技能 |
-| "加个工具""做个 AI 工具" | Tools | references/components.md §Tools |
-| "加个服务商""接新模型厂商" | Providers | references/components.md §Providers |
-| "做团队模板""预设 @角色组合" | Team Templates | references/components.md §Team Templates |
-| "hook 策略""控制 hook 触发" | Hook Policies | references/components.md §Hook Policies |
-| "循环策略""控制工具循环轮数" | Loop Policies | references/components.md §Loop Policies |
-| "对话引擎""插件里跑一轮对话" | Engines | references/components.md §Engines |
-| "换会话存储""自定义存储引擎" | Storages | references/components.md §Storages |
-| "消息序列化""新协议序列化" | Serializers | references/components.md §Serializers |
-| "接新消息平台""通讯网关" | Gateways | references/components.md §Gateways |
-| "模型协议适配" | Model Adapters | references/components.md §Model Adapters |
+| "加个工具""做个 AI 工具" | Tools | references/components/tools.md |
+| "加个服务商""接新模型厂商" | Providers | references/components/providers.md |
+| "做团队模板""预设 @角色组合" | Team Templates | references/components/team-templates.md |
+| "hook 策略""控制 hook 触发" | Hook Policies | references/components/hook-policies.md |
+| "循环策略""控制工具循环轮数" | Loop Policies | references/components/loop-policies.md |
+| "对话引擎""插件里跑一轮对话" | Engines | references/components/engines.md |
+| "换会话存储""自定义存储引擎" | Storages | references/components/storages.md |
+| "消息序列化""新协议序列化" | Serializers | references/components/serializers.md |
+| "接新消息平台""通讯网关" | Gateways | references/components/gateways.md |
+| "模型协议适配" | Model Adapters | references/components/model-adapters.md |
 | "改 plugin.json""设置页配置" | Manifest | references/manifest.md |
 | "验证""跑测试" | 验证 | references/testing.md |
 | "发布到市场""提 PR" | 发布 | references/publishing.md |
