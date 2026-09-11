@@ -58,6 +58,7 @@ from app.widgets.cards.settings.plugin_components_card import PluginComponentsCa
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
 from app.widgets.cards.settings.render_restart_card import RenderRestartCard
 from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
+from app.widgets.cards.settings.render_backend_card import RenderBackendCard
 from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
@@ -626,13 +627,18 @@ class LLMSettingsCard(SystemCardFrame):
         )
         render_layout.addWidget(self.renderStatusCard)
 
-        # 渲染后端：Qt/Chromium 图形栈档位
-        self.renderBackendCard = OptionsSettingCard(
+        # 渲染后端：Qt/Chromium 图形栈档位（说明随所选档位变化，见 render_backend_card）
+        self.renderBackendCard = RenderBackendCard(
             self.cfg.render_backend,
-            FluentIcon.SPEED_HIGH,
-            "渲染后端",
-            "硬件 D3D11 最流畅；无独显选软件档",
-            texts=["自动", "硬件 (D3D11)", "软件 (WARP)", "软件 GL (最稳)"],
+            # ⚠️ 顺序必须与 render_backend 的 OptionsValidator 逐一对应
+            texts=[
+                "软件 (WARP)",
+                "硬件 (D3D11)",
+                "软件 GL (最稳)",
+                "Vulkan (排障)",
+                "D3D9 (老机器)",
+                "SwiftShader (双保险)",
+            ],
             parent=self,
         )
         render_layout.addWidget(self.renderBackendCard)

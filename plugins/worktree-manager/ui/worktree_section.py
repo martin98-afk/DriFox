@@ -520,6 +520,13 @@ class WorktreeSectionWidget(QWidget):
         self._create_busy = False
         self._pending_switch_path = None  # 创建完成后待切换的 worktree 路径
         self._setup_ui()
+        # 主题自刷：已迁移出 app/widgets，main_widget 不再 isinstance 遍历刷新，改订 UIEventBus
+        try:
+            from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, self.refresh_style, plugin_name="worktree-manager")
+        except Exception:
+            pass
 
     def paintEvent(self, event: QPaintEvent):
         """在每次绘制时检查 worktree 路径是否仍然存在

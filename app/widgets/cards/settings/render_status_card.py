@@ -38,6 +38,9 @@ _BACKEND_TEXT = {
     "hardware": "硬件 D3D11",
     "software": "软件 WARP",
     "software_gl": "软件 GL",
+    "vulkan": "Vulkan",
+    "d3d9": "D3D9",
+    "swiftshader": "SwiftShader",
     "custom": "外部覆盖",
     "": "系统默认",
 }

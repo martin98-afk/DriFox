@@ -3,11 +3,12 @@
 
 当前职责：
 - 把「产物」页注册到右侧工作台（WorkbenchPanel）。
+- （工作树页已拆分至独立插件 plugins/worktree-manager）
 
 page_id 约定：
 - ``"artifacts"`` 是**保留** page_id —— 注册它即**填充产物页槽位**（index 0）。
   面板本身**不提供产物实现**，产物功能完全插件化；插件卸载后槽位显示占位页。
-- 其它 page_id 一律作为新增 tab 追加在「产物 / 记忆」之后。
+- 其它 page_id 一律作为新增 tab 追加。
 
 产物页实现见 ``_artifacts_page.SystemArtifactsPage``：通过 context 从宿主
 拉取数据（``context["backend"]`` / ``context["session_id"]``），并通过
@@ -30,21 +31,6 @@ def register_ui(registry) -> None:
     Args:
         registry: UIPluginRegistry 单例
     """
-    try:
-        from ._worktree_page import SystemWorktreePage
-
-        # 工作树页：page_id="worktree" 填工作树槽位（index 0，默认落点）
-        registry.register_workbench_tab(
-            plugin_name=_PLUGIN_NAME,
-            page_id="worktree",
-            label="工作树",
-            widget_class=SystemWorktreePage,
-            priority=20,
-            metadata={"source": "system"},
-        )
-        logger.info("[system-ui] 已注册工作台 tab: worktree（工作树·系统插件版）")
-    except Exception as e:
-        logger.warning(f"[system-ui] 注册 worktree tab 失败（工作树页将显示占位）: {e}")
     try:
         from ._artifacts_page import SystemArtifactsPage
 

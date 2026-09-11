@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from PyQt5.QtCore import Qt, QUrl, pyqtSignal
+from PyQt5.QtCore import Qt, QUrl, QRectF, pyqtSignal
 from PyQt5.QtGui import QColor, QPainter, QPixmap
 from PyQt5.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PyQt5.QtSvg import QSvgWidget
@@ -145,6 +145,8 @@ class SquircleAvatar(QWidget):
         else:
             self._size = _AVATAR_MIN_SIZE
         self._font_size = font_size if font_size > 0 else 0
+        self._pix = None  # 渲染缓存（_cached_pixmap 维护）
+        self._pix_key = None
         self.setFixedSize(self._size, self._size)
 
     @staticmethod
@@ -199,28 +201,53 @@ class SquircleAvatar(QWidget):
         self.setFixedSize(size, size)
         self.update()
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
+    def _cached_pixmap(self):
+        """渲染缓存：内容不变时复用 QPixmap，避免滚动每帧重绘矢量+文字
+
+        列表滚动时视口内每行头像每帧都走 drawRoundedRect+drawText，
+        基准中占比约 6%；缓存后 paintEvent 只剩一次 drawPixmap。
+        """
+        try:
+            dpr = self.devicePixelRatioF()
+        except RuntimeError:
+            dpr = 1.0
+        font = self.font()
+        key = (self._text, self._color.rgba(), self._size, dpr, font.family())
+        if self._pix_key == key and self._pix is not None:
+            return self._pix
+
+        s = self._size
+        pix = QPixmap(max(1, round(s * dpr)), max(1, round(s * dpr)))
+        pix.setDevicePixelRatio(dpr)
+        pix.fill(Qt.transparent)
+
+        painter = QPainter(pix)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-
-        rect = self.rect()
         # 微妙圆角（约 5px，like VS Code squircle）
         corner_radius = 5
 
         # 纯色填充背景
         painter.setPen(Qt.NoPen)
         painter.setBrush(self._color)
-        painter.drawRoundedRect(rect, corner_radius, corner_radius)
+        painter.drawRoundedRect(QRectF(0, 0, s, s), corner_radius, corner_radius)
 
         # 居中白字
         painter.setPen(Qt.white)
-        font = painter.font()
         # 字号按 size 比例缩放（参考源算法：14/24 ≈ 0.58）
         font.setPixelSize(max(8, self._size * 14 // 24))
         font.setBold(True)
         painter.setFont(font)
-        painter.drawText(rect, Qt.AlignCenter, self._text)
+        painter.drawText(QRectF(0, 0, s, s), Qt.AlignCenter, self._text)
+        painter.end()
+
+        self._pix = pix
+        self._pix_key = key
+        return pix
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._cached_pixmap())
 
 
 # ── PluginIconWidget ──────────────────────────────────

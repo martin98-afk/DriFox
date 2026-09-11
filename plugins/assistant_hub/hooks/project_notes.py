@@ -364,6 +364,13 @@ def _auto_git_init(cwd: str) -> bool:
 def _parse_branch_header(line: str) -> dict[str, Any]:
     """解析 `git status --porcelain=v1 --branch` 输出里的 ## 头行"""
     out: dict[str, Any] = {"branch": "", "ahead": 0, "behind": 0, "is_detached": False}
+
+    # 空仓库（无任何提交）：## No commits yet on <branch>
+    m0 = re.match(r"^## No commits yet on (?P<branch>\S+)", line)
+    if m0:
+        out["branch"] = m0.group("branch")
+        return out
+
     if line.startswith("## HEAD (detached at "):
         m = re.search(r"detached at ([0-9a-f]+)", line)
         if m:
@@ -371,17 +378,16 @@ def _parse_branch_header(line: str) -> dict[str, Any]:
             out["is_detached"] = True
         return out
 
-    m = re.match(
-        r"^## (?P<branch>[^\s.]+)(?:\.{3}(?P<up>[^\s\[]+))?"
-        r"(?: \[ahead (?P<ahead>\d+)(?:, behind (?P<behind>\d+))?\])?",
-        line,
-    )
+    # 分支名懒惰匹配：不吞 upstream（dev...origin/dev 中 branch=dev）；
+    # 不排除点号（release/1.2.3 完整保留）；ahead/behind 裸词独立解析，
+    # 兼容 [ahead N] / [behind N] / [ahead N, behind N] 三种形态
+    m = re.match(r"^## (?P<branch>[^\s\[]+?)(?:\.{3}(?P<up>[^\s\[]+))?(?:\s|$)", line)
     if m:
         out["branch"] = m.group("branch")
-        if m.group("ahead"):
-            out["ahead"] = int(m.group("ahead"))
-        if m.group("behind"):
-            out["behind"] = int(m.group("behind"))
+        if ma := re.search(r"\bahead (\d+)", line):
+            out["ahead"] = int(ma.group(1))
+        if mb := re.search(r"\bbehind (\d+)", line):
+            out["behind"] = int(mb.group(1))
     return out
 
 

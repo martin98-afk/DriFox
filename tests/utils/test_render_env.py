@@ -4,8 +4,9 @@ render_env 单元测试：渲染配置 → 环境变量的换算逻辑
 
 render_env 运行于 Qt 之前、纯 stdlib，测试直接构造临时 app.config 验证：
 - 默认行为与历史 main.py 硬编码一致（无配置文件/缺 key）
-- auto 档检测链（环境变量 → 标记文件）
-- 显式档位覆盖检测链
+- 默认档 = 软件 (WARP)（缺 key / 历史 auto / 非法值均回退到此）
+- WebGL auto 检测链（环境变量 → 标记文件）
+- 显式档位生效
 - 数值越界钳制 / 非法值回退
 - QTWEBENGINE_CHROMIUM_FLAGS 外部优先（setdefault 语义）
 """
@@ -36,8 +37,7 @@ def _clean_env(monkeypatch):
         "DRIFOX_ENABLE_WEBGL",
     ):
         monkeypatch.delenv(key, raising=False)
-    # 检测链打桩：默认全关（硬件、无 WebGL），由各用例按需覆盖
-    monkeypatch.setattr("app.utils.render_env._detect_software_render", lambda: False)
+    # WebGL 检测链打桩：默认关闭，由各用例按需覆盖
     monkeypatch.setattr("app.utils.render_env._detect_webgl_enabled", lambda: False)
 
 
@@ -54,11 +54,11 @@ def _flags() -> str:
 # ══ 默认行为：升级零变化 ══
 
 
-def test_no_config_file_keeps_legacy_defaults(tmp_path, monkeypatch):
-    """无配置文件 → 环境变量与历史硬编码完全一致。"""
+def test_no_config_file_uses_software_default(tmp_path, monkeypatch):
+    """无配置文件 → 出厂默认软件档（WARP），其余开关保持历史值。"""
     apply_render_env(tmp_path / "missing.config")
     assert os.environ.get("QT_OPENGL") == "angle"
-    assert os.environ.get("QT_ANGLE_PLATFORM") == "d3d11"
+    assert os.environ.get("QT_ANGLE_PLATFORM") == "warp"
     assert "--renderer-process-limit=6" in _flags()
     assert "--js-flags=--max-old-space-size=128" in _flags()
     assert "--enable-low-end-device-mode" in _flags()
@@ -73,24 +73,22 @@ def test_corrupt_config_file_falls_back_to_defaults(tmp_path):
     path = tmp_path / "app.config"
     path.write_text("{not valid json", encoding="utf-8")
     apply_render_env(path)
-    assert os.environ.get("QT_ANGLE_PLATFORM") == "d3d11"
+    assert os.environ.get("QT_ANGLE_PLATFORM") == "warp"
     assert "--renderer-process-limit=6" in _flags()
 
 
 # ══ 渲染后端档位 ══
 
 
-def test_backend_auto_uses_detect_chain(tmp_path, monkeypatch):
-    """auto 档 → 检测链判定软件渲染 → warp。"""
-    monkeypatch.setattr("app.utils.render_env._detect_software_render", lambda: True)
+def test_legacy_auto_value_falls_back_to_software(tmp_path):
+    """历史 "auto"（检测链已删除）→ 按出厂默认 software 处理。"""
     apply_render_env(_write_config(tmp_path, {"RenderBackend": "auto"}))
     assert os.environ.get("QT_ANGLE_PLATFORM") == "warp"
     assert "--disable-gpu" in _flags()
 
 
-def test_backend_software_overrides_detect_chain(tmp_path, monkeypatch):
-    """显式 software 覆盖检测链（检测链返回硬件仍走软件）。"""
-    monkeypatch.setattr("app.utils.render_env._detect_software_render", lambda: False)
+def test_backend_software_is_default_and_detect_free(tmp_path):
+    """显式 software：与默认档一致（不依赖任何标记文件/环境变量）"""
     apply_render_env(_write_config(tmp_path, {"RenderBackend": "software"}))
     assert os.environ.get("QT_ANGLE_PLATFORM") == "warp"
     assert "--disable-gpu" in _flags()
@@ -112,9 +110,8 @@ def test_backend_software_gl_sets_qt_opengl_software(tmp_path):
     assert "--disable-gpu" in _flags()
 
 
-def test_invalid_backend_value_falls_back_to_auto(tmp_path, monkeypatch):
-    """手改非法档位 → 按 auto 处理。"""
-    monkeypatch.setattr("app.utils.render_env._detect_software_render", lambda: True)
+def test_invalid_backend_value_falls_back_to_default(tmp_path):
+    """手改非法档位 → 按出厂默认 software 处理。"""
     apply_render_env(_write_config(tmp_path, {"RenderBackend": "turbo"}))
     assert os.environ.get("QT_ANGLE_PLATFORM") == "warp"
 
@@ -227,7 +224,6 @@ def test_external_qt_opengl_wins(tmp_path, monkeypatch):
 def test_non_windows_skips_qt_backend_env(tmp_path, monkeypatch):
     """非 Windows 不设 QT_OPENGL/QT_ANGLE_PLATFORM（macOS 强设 d3d11 黑屏教训）。"""
     monkeypatch.setattr("app.utils.render_env.os.name", "posix")
-    monkeypatch.setattr("app.utils.render_env._detect_software_render", lambda: True)
     apply_render_env(_write_config(tmp_path, {"RenderBackend": "software"}))
     assert "QT_OPENGL" not in os.environ
     assert "QT_ANGLE_PLATFORM" not in os.environ
@@ -240,7 +236,7 @@ def test_non_windows_skips_qt_backend_env(tmp_path, monkeypatch):
 
 def test_compute_settings_defaults(monkeypatch):
     s = compute_settings({})
-    assert s["backend"] == "hardware"
+    assert s["backend"] == "software"  # 出厂默认 = 软件 (WARP)
     assert s["renderer_process_limit"] == 6
     assert s["js_heap_mb"] == 128
     assert s["low_end_device_mode"] is True
@@ -327,6 +323,57 @@ def test_describe_applied_software_variants():
     assert describe_applied({"QT_OPENGL": "software"})["backend"] == "software_gl"
     # 外部改过但不在四档内 → custom
     assert describe_applied({"QT_OPENGL": "desktop"})["backend"] == "custom"
+
+
+# ══ 排障档位：Vulkan / D3D9 / SwiftShader ══
+
+
+def test_angle_platform_follows_backend(tmp_path):
+    """排障档 → QT_ANGLE_PLATFORM；software_gl 走 QT_OPENGL=software"""
+    cases = {
+        "hardware": ("angle", "d3d11"),
+        "software": ("angle", "warp"),
+        "vulkan": ("angle", "vulkan"),
+        "d3d9": ("angle", "d3d9"),
+        # Qt 侧没有 swiftshader 这个 ANGLE 平台，仍走 WARP（靠 flag 区分）
+        "swiftshader": ("angle", "warp"),
+        "software_gl": ("software", None),
+    }
+    for backend, (opengl, angle) in cases.items():
+        os.environ.pop("QT_OPENGL", None)
+        os.environ.pop("QT_ANGLE_PLATFORM", None)
+        apply_render_env(_write_config(tmp_path, {"RenderBackend": backend}))
+        assert os.environ.get("QT_OPENGL") == opengl, backend
+        assert os.environ.get("QT_ANGLE_PLATFORM") == angle, backend
+
+
+def test_swiftshader_keeps_gpu_and_adds_angle_flag():
+    """SwiftShader 档：保留 GPU 进程 + 追加 --use-angle=swiftshader"""
+    s = compute_settings({"RenderBackend": "swiftshader"})
+    assert s["disable_gpu"] is False
+    assert s["enable_swiftshader"] is True
+    assert "--use-angle=swiftshader" in build_chromium_flags(s)
+
+
+def test_vulkan_and_d3d9_keep_gpu_without_swiftshader():
+    """Vulkan / D3D9 走真实 GPU：保留 GPU 进程，不追加 swiftshader"""
+    for backend in ("vulkan", "d3d9"):
+        s = compute_settings({"RenderBackend": backend})
+        assert s["disable_gpu"] is False, backend
+        assert s["enable_swiftshader"] is False, backend
+        assert "--use-angle=swiftshader" not in build_chromium_flags(s)
+
+
+def test_describe_applied_recognises_new_backends():
+    """回显能认出排障档（SwiftShader 只能靠 Chromium flag 认）"""
+    assert describe_applied({"QT_OPENGL": "angle", "QT_ANGLE_PLATFORM": "vulkan"})["backend"] == "vulkan"
+    assert describe_applied({"QT_OPENGL": "angle", "QT_ANGLE_PLATFORM": "d3d9"})["backend"] == "d3d9"
+    env = {
+        "QT_OPENGL": "angle",
+        "QT_ANGLE_PLATFORM": "warp",
+        "QTWEBENGINE_CHROMIUM_FLAGS": "--use-angle=swiftshader",
+    }
+    assert describe_applied(env)["backend"] == "swiftshader"
 
 
 def test_describe_applied_without_env():

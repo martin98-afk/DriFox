@@ -517,38 +517,22 @@ class TestModuleLevel:
         assert hasattr(mw, "_compact_process_heap_after_cleanup")
         assert callable(mw._compact_process_heap_after_cleanup)
 
-    def test_branch_detect_signals_class_exists(self):
-        """模块级 _BranchDetectSignals 辅助类存在"""
-        import app.main_widget as mw
+    def test_branch_detect_logic_migrated_to_plugin(self):
+        """分支检测辅助类已随工作树插件化迁入 plugins/worktree-manager（smoke 改查新归属）"""
+        import sys
+        from pathlib import Path
 
-        assert hasattr(mw, "_BranchDetectSignals")
+        plugin_ui = Path(__file__).resolve().parents[2] / "plugins" / "worktree-manager" / "ui"
+        if str(plugin_ui) not in sys.path:
+            sys.path.insert(0, str(plugin_ui))
+        import importlib
 
-    def test_branch_detect_signals_has_pyqt_signal(self):
-        """_BranchDetectSignals 持有 pyqtSignal 属性"""
-        import app.main_widget as mw
+        importlib.invalidate_caches()
+        bc = importlib.import_module("branch_chip")
 
-        cls = mw._BranchDetectSignals
-        # 检查类中至少定义了一个 pyqtSignal 类型的类属性
-        signal_found = False
-        for attr_name in dir(cls):
-            attr = getattr(cls, attr_name, None)
-            if callable(attr) and "signal" in attr_name.lower():
-                signal_found = True
-                break
-        assert signal_found, "_BranchDetectSignals 应定义 pyqtSignal 属性"
-
-    def test_branch_detect_task_class_exists(self):
-        """模块级 _BranchDetectTask 辅助类存在"""
-        import app.main_widget as mw
-
-        assert hasattr(mw, "_BranchDetectTask")
-
-    def test_branch_detect_task_has_run_method(self):
-        """_BranchDetectTask 有 run 方法（QRunnable 标准接口）"""
-        import app.main_widget as mw
-
-        cls = mw._BranchDetectTask
-        assert hasattr(cls, "run") or hasattr(cls, "run_impl"), "_BranchDetectTask 应有 run 方法"
+        assert hasattr(bc, "_BranchDetectSignals") or hasattr(bc, "BranchDetectSignals")
+        task_cls = getattr(bc, "_BranchDetectTask", None) or bc.BranchDetectTask
+        assert hasattr(task_cls, "run") or hasattr(task_cls, "run_impl"), "_BranchDetectTask 应有 run 方法"
 
 
 # ═══════════════════════════════════════════════════════════════

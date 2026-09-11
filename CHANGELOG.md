@@ -1,13 +1,15 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.5.10] - 2026-09-10 (重新发布)
+## [v0.5.10] - 2026-09-11 (重新发布 #3)
 
-自上一版本以来的变更 | 提交数：71 · 文件变更：404 · +26459/-26522 | 贡献者：dingma, mading
+自上一版本以来的变更 | 提交数：87 · 文件变更：442 · +29172/-27772 | 贡献者：dingma, mading
 
 ### ✨ 新功能 (New Features)
 
 - **渲染页手动重启项** (`app/utils/app_restart.py`, `app/widgets/cards/settings/render_restart_card.py`, `app/core/single_instance.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/utils/test_app_restart.py`): 「渲染」页首项新增「手动重启」卡 —— 右侧「立即重启」按钮拉起新进程并退出当前实例，左侧文案实时显示「有 N 项变更待重启生效」（挂载时记录 Render 组 10 个配置基线，任一变更即高亮计数）。两个关键点：① 子进程环境必须剥离 `QTWEBENGINE_CHROMIUM_FLAGS` / `QT_OPENGL` / `QT_ANGLE_PLATFORM`（否则 apply_render_env 的 setdefault 让新进程沿用旧值，重启等于白重启）；② 剥离一次性内部参数 `--configure-auto-start=*` / `--startup-error-file=*`（重放会让新进程走 helper 分支直接退出）。另给 `single_instance` 增加 `release_current_lock()`：开启「单实例限制」时先放锁再拉起，避免新进程 try_lock 失败后「通知旧窗口并退出」导致点了重启程序反而没了；4 条单元测试覆盖命令构造与环境变量剥离。
+- **移除「自动」渲染后端 + 说明随档位变化** (`app/utils/render_env.py`, `app/utils/config.py`, `app/widgets/cards/settings/render_backend_card.py`, `app/widgets/cards/settings/llm_settings_card.py`): 原 `auto` 档名不副实 —— 它不检测机器，只是读人工放置的 `~/.drifox/software_render` 标记文件 / `DRIFOX_SOFTWARE_RENDER` 环境变量，故从 UI 与校验器中移除，**默认值改为 `software`（WARP，CPU 光栅，不碰显卡驱动）** —— 出厂即最稳路径，硬件档由用户显式选择；旧检测链（`DRIFOX_SOFTWARE_RENDER` / `~/.drifox/software_render` 标记文件）一并删除，配置里残留的 `auto` / 手改非法值 / 缺 key 一律按出厂默认 software 处理。同时新增 `RenderBackendCard`：头部说明**跟着所选档位变**（如「真实显卡跑 D3D11，最快」/「Qt + Chromium 双侧 CPU 兜底」），展开后每个单选项挂 tooltip 写清实现路径与适用场景 —— 基类只有一个共用 content，6 个档位挤一行说不清差别。
+- **渲染后端新增三个排障档** (`app/utils/render_env.py`, `app/utils/config.py`, `app/widgets/cards/settings/llm_settings_card.py`, `app/widgets/cards/settings/render_status_card.py`, `tests/utils/test_render_env.py`): `RenderBackend` 在 auto / hardware(D3D11) / software(WARP) / software_gl(Mesa) 之外补上 —— **Vulkan**（`QT_ANGLE_PLATFORM=vulkan`，新显卡/新驱动上可能比 D3D11 稳）、**D3D9**（老机器 / Win7 这类没有 D3D11 的系统）、**SwiftShader**（Qt 侧走 WARP + Chromium 追加 `--use-angle=swiftshader --enable-unsafe-swiftshader`，Qt/Chromium 双侧都绕开显卡驱动的双保险）。三者均为排障档，下拉里标注「排障 / 老机器 / 双保险」；GPU 段联动也跟着改：vulkan / d3d9 与 hardware 同路径（保留 GPU 进程），swiftshader 与 WebGL 开同路径（保留 GPU + 软件光栅兜底）。回显侧 SwiftShader 无法从 QT_ANGLE_PLATFORM 认出（它仍是 warp），改靠 `--use-angle=swiftshader` 识别；4 条单测覆盖档位映射、GPU 段联动与回显识别。
 - **GL 上下文/ES 属性纳入渲染配置** (`main.py`, `app/utils/render_env.py`, `app/utils/config.py`, `app/widgets/cards/settings/llm_settings_card.py`, `app/widgets/cards/settings/render_status_card.py`, `tests/utils/test_render_env.py`): 原 main.py 无条件设置的 `Qt.AA_ShareOpenGLContexts` / `Qt.AA_UseOpenGLES` 纳入 `[Render]` 组管控 —— ① 新增 `ShareGLContexts`（默认开 = 历史行为）：共享 GL 上下文省约 12.7% per-view 常驻内存，代价是所有消息卡共用一个上下文，多卡/图表闪烁排查时可一键关闭；渲染页新增开关卡。② `AA_UseOpenGLES` **不单独暴露**，改由 `RenderBackend` 推导：ANGLE 档（hardware/software）开启、`software_gl`（Mesa llvmpipe 桌面 GL）关闭 —— 此前它对兜底档也强制 ES，与「最慢最稳」初衷冲突，本次一并修正。二者都是 Qt 属性而非环境变量，故 `apply_render_env` 新增 `applied_settings()` 留档，「当前生效参数」卡的文案与复制内容都会显示这两个开关的实际状态；3 条单测覆盖推导、非法值回退与留档读取。
 - **渲染页「当前生效参数」回显 + 后台渲染节流开关** (`app/utils/render_env.py`, `app/widgets/cards/settings/render_status_card.py`, `app/utils/config.py`, `app/widgets/cards/settings/llm_settings_card.py`, `tests/utils/test_render_env.py`): 渲染页新增只读「当前生效参数」卡，读环境变量反查本次进程真正生效的后端（`QT_OPENGL` / `QT_ANGLE_PLATFORM`）与 flags 摘要（进程上限 / JS 堆 / 开关数），hover 看完整串、icon-only 按钮一键复制、另一按钮把 Render 组全部写回默认值（仍需重启）—— 解决「改完不知道生没生效、误调没退路」。新增 `[Render] DisableBackgroundThrottling`（默认关 = 保持 Chromium 原生节流），开启后追加 `--disable-renderer-backgrounding` + `--disable-backgrounding-occluded-windows`，针对长对话离屏卡片被降优先级导致的流式卡顿；6 条单测覆盖默认值/非法值回退与回显解析（含非 Windows 未设 ANGLE 场景）。
 - **渲染页高级配置折叠卡（开关列表）** (`app/widgets/cards/settings/render_advanced_card.py`, `app/widgets/cards/settings/llm_settings_card.py`): `DisabledFeatures` / `ExtraChromiumFlags` 两项此前只能手改 `app.config` [Render] 组，现收进渲染页末尾的「高级配置」折叠卡 —— 折叠态显示「已调整 N 项 / 全部保持默认」，展开后**一条一项 + 右侧 SwitchButton 的扁平列表**（不分组、不用 chip）：每行「名称 | 描述 | 开关」，列布局与「工具配置」ItemRow 对齐（名称固定 150px、描述用省略号标签居中撑开、开关在最右），共 13 项（7 个 Chromium 开关：LCD 文字渲染 / 垂直同步 / 部分光栅 / 声音 / 本地文件访问 / 自动播放 / sRGB 色彩统一；6 个 feature：网页翻译 / 投屏 / 加载优化提示 / 窗口遮挡计算 / 前进后退缓存 / 音频独立进程）。开关一律读作「这个能力开不开」：`disable` 类（能力默认开）关掉才写入值、`allow` 类（能力默认关）打开才写入值，mode 写在清单里不会搞反；底层仍写回 `DisabledFeatures`（逗号分隔）/ `ExtraChromiumFlags`（空白分隔），预设之外的旧值原样保留。chip 文案直接显示当前状态（「垂直同步：开 / 关」，点一下翻转），消除「勾选是开还是关」的歧义；chip 容器高度主动管理（`FlowLayout` 容器在布局未激活时 `QWidget.sizeHint()` 会累加子项 sizeHint，撑出约 150px 空白）；
@@ -49,6 +51,39 @@ All notable changes to this project will be documented in this file.
 - **重组 docs/reports 目录、精简 8 篇过时文档、采用严格 gitignore 白名单（A2）** (`docs/`、`.gitignore`): 文档结构整理与仓库 ignore 规则强化。
 - **清理未用脚本/临时文件/未引用资产** (`scripts/`、`assets/`): 仓库批量瘦身。
 - **移除或跳过孤立测试（引用已删除插件）** (`tests/`): 配合插件清理同步移除/标记失效测试。
+
+### ✨ 新功能 (New Features)
+
+- **hover 热路径样式防抖 + `_parse_branch_header` 历史缺陷修复** (`app/widgets/hover_style_guard.py`、`app/widgets/cards/settings/model_selector_card.py`、`app/widgets/cards/settings/project_selector_card.py`、`app/widgets/cards/floating/question_floating_widget.py`、`plugins/assistant_hub/hooks/project_notes.py`、`tests/utils/test_worktree_create_switch.py`): ① 新增 `app/widgets/hover_style_guard.py` —— `style_if_changed(target, ss)` 仅在样式串与当前不同时才 `setStyleSheet`，并返回是否真正应用。背景：Qt 对 `setStyleSheet` 不论内容是否变化都会全量重解析 QSS + unpolish/polish + relayout，平滑滚动区（qfw SmoothScroll 引擎 60fps 合成 wheel 事件）里鼠标下的行持续变化，enter/leave 若无条件 `setStyleSheet` 会叠加成每帧两次的样式风暴，表现为滚动掉帧。统一约定三态样式收敛到一个纯函数（state → 样式串），enter/leave 各调一次，串未变则零开销跳过。已接入 ModelItem（model_selector_card.py，内联同款串比较）/ ProjectItem（project_selector_card.py） / `_CustomInputCard`（question_floating_widget.py）三处。同时顺手修了 assistant_hub `project_notes._parse_branch_header` 的三处历史缺陷：空仓库头行 `## No commits yet on main` 解析为 branch="No"、单独 `[behind N]` 形态丢失 behind、点号分支名 `release/1.2.3` 被截断为 `release/1`；ahead/behind 改用裸词独立匹配，兼容 `[ahead N]` / `[behind N]` / `[ahead N, behind N]` 三种形态。配套新增 `tests/utils/test_worktree_create_switch.py`（169 行，覆盖 worktree 复用/创建/重命名路径 + 全部 branch header 解析形态）。
+
+### 📚 文档 (Documentation)
+
+- **ui-plugin-creator 新增 5 条 UI 插件陷阱与 plugin-creator 热重载排查** (`plugins/system-skills/skills/plugin-creator/references/troubleshooting.md`、`plugins/system-skills/skills/ui-plugin-creator/references/pitfalls.md`): pitfalls 新增 `QPlainTextEdit 高度自适应：document().size() 返回行数非像素，需按 fontMetrics + viewport 宽估算`、`ExpandSettingCard 覆写 _adjustViewSize 后折叠失效（setExpand 调 _adjustViewSize 覆盖 setFixedHeight(0) hack）` 等 5 条踩坑；plugin-creator troubleshooting 补充 `SkillNotFoundException` 排查步骤。
+
+### 🔧 其他 (Chores & Build)
+
+- **uv.lock 依赖锁更新** (`uv.lock`): `uv lock` 同步三方依赖到当前 lock 状态，1410 行变更（705 +/-）。
+
+### 🆕 重新发布 #3 增量（自 v0.5.10 #2 起）
+
+基于 `v0.5.10` (重新发布 #2) 标签的增量变更 | 提交数：5 · 文件变更：28 · +1366/-525 | 贡献者：dingma, mading
+
+#### ✨ 新功能 (New Features)
+
+- **工作树管理插件化（worktree-manager）+ 分支标签消失修复** (`plugins/worktree-manager/`, `app/main_widget.py`, `app/widgets/modules/title_bar_module.py`, `app/plugins/registries/ui_plugin_registry.py`, `plugins/system-ui/ui/__init__.py`): 工作树管理从 system-ui 与 main_widget 拆出为独立插件 `plugins/worktree-manager`（工作台工作树页 + worktree 树组件 + 分支标签 chip + WorktreeService），主程序仅留 5 个同名门面方法转发服务，19 处存量调用点零改动；插件缺失时门面 no-op（无分支标签、无自动切换，会话功能完整）。`UIPluginRegistry` 新增 `register_titlebar_widget`（标题栏 slot 装配）与 `register_service`（服务查询）两个扩展点。顺带修复分支标签「经常莫名其妙消失」三缺陷：① git 检测失败（超时/文件锁）不再把空结果写进类级缓存（旧实现一旦污染则标签永久隐藏）；② 检测回调携带任务 workdir 写对缓存槽 + 上屏前校验当前 workdir（切换项目竞态不再串显/写错槽）；③ 复制窗口继承时若源处于检测中，200ms 后兜底重检（消除复制瞬态永久隐藏）。设计文档见 `docs/superpowers/specs/2026-09-11-worktree-plugin-design.md`。
+- **plugin-marketplace 滚动基准脚本** (`scripts/bench_marketplace_scroll.py`): 帧级滚动模拟 + 计时统计（平均/p95），便于回归量化性能变化（5f2cfcec）。
+- **SquircleAvatar 渲染位图缓存 + icon_cache_patch 重构** (`plugins/plugin-marketplace/ui/_icon_cache_patch.py`, `plugins/plugin-marketplace/ui/_squircle_avatar.py`, `plugins/plugin-marketplace/ui/cards.py`): 根因 qfluentwidgets 图标渲染每次新建 QSvgRenderer 全量解析光栅化零缓存；两处修复（FluentIcon 渲染缓存 + SquircleAvatar 位图缓存），列表页 p95 从 128.7ms 降至 60.3ms（-53%）。
+- **`description_param` 支持可选 `required` 标记** (`plugins/system-tools/tools/_tool_desc.py`, `plugins/system-tools/tools/file_tools.py`): schema 描述参数化新增 `required` 可选开关，让不带必填字段的工具描述也能透出默认值；同时刷新相关 schemas。
+- **release workflow 支持重新发布与 force 操作** (`plugins/system-commands/commands/release.md`): 新增 `--republish`（明确意图重建同名版本）与 `--force`（跳过全部确认问句），并落地「双删重建 + GitHub Release 同步删除」流程。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **team_workdir 注入点静态校验跟随插件化迁移** (`tests/core/test_team_workdir.py`): B7 注入点断言中 `_switch_to_worktree` / `_restore_main_repo` 的广播检查随实现迁移改为校验 `WorktreeService` 源码，并顺带暴露修复了搬运遗漏的 `restore_main_repo` 尾部团队广播。
+- **存量坏测试标注** (`tests/utils/test_worktree_create_switch.py`): 50479ce9 重命名 `_ensure_worktree_job` 后未同步该测试（自诞生即 ImportError 阻塞全量收集），现模块级 skip 并注明根因，待按 `_create_worktree_job` 现状重写。
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **`OpenAIChatToolWindow._branch_widget` 改用 `__dict__` 直查** (`app/main_widget.py`, `plugins/worktree-manager/icon.svg`, `plugins/worktree-manager/icon_dark.svg`): Qt 桥在裸实例上对缺失属性的访问可能抛 RuntimeError（getattr 默认值只兜 AttributeError），且避免误读类属性；同步替换 worktree-manager 图标资源（去除多余 `</svg>` 行 + 新增 dark 版）。
 
 ## [v0.5.10b4] - 2026-09-09
 

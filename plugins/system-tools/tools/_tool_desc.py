@@ -23,17 +23,20 @@
 DESCRIPTION_KEY = "description"
 
 
-def description_param(example: str) -> dict:
+def description_param(example: str, required: bool = True) -> dict:
     """生成 description 参数的 schema 片段（展开进 parameters.properties）
 
     Args:
         example: 给大模型的示例描述，用于校准粒度（应是"做什么"而非"怎么做"）
+        required: 是否必填。编辑类工具传 False（缺失时渲染端回退原预览，
+            不强制模型每次填写）；终端类默认 True。
     """
+    prefix = "必填。" if required else "可选。"
     return {
         DESCRIPTION_KEY: {
             "type": "string",
             "description": (
-                "必填。一句话自然语言描述这次调用要做什么（展示给用户看，替代原始参数），"
+                f"{prefix}一句话自然语言描述这次调用要做什么（展示给用户看，替代原始参数），"
                 f"例如 {example}。写意图，不要复述参数本身。"
             ),
         }

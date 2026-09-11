@@ -112,6 +112,23 @@ python -m py_compile hooks/<name>_hook.py
 
 **修法**：先按上述三点自检；仍不行 → **调用 `ui-plugin-creator` 技能**，提供详细症状。
 
+### ❌ 改了代码但热重载没生效 / 无法确认是否生效
+
+**症状**：往 `~/.drifox/plugins/<name>/` 复制/保存文件后，面板行为还是旧的；或不确定重载是否成功。
+
+**原因**：watchfiles 监控按批次合并事件，复制文件后偶尔不触发；且部分变更（如纯资源文件）不产生日志。
+
+**修法**：
+```powershell
+# 1) 强制触发：touch 文件 mtime
+(Get-Item "$env:USERPROFILE\.drifox\plugins\<name>\ui\*.py").LastWriteTime = Get-Date
+# 2) 查日志确认（出现即成功）
+#    [UIPluginRegistry] Loaded UI components for plugin: <name>
+#    [PluginHost] Plugin [<name>] reloaded via kernel: ... ui=True ...
+Get-Content "$env:USERPROFILE\.drifox\logs\all.log" | Select-String "<name>" | Select-String "reloaded|Loaded UI"
+```
+UI 逻辑离线实测（不依赖 DriFox 运行时）：`D:\work\DriFox\.venv\Scripts\python.exe` 带完整 PyQt5 + qfluentwidgets，可写 QTimer 序列脚本验证 QSS/高度/动画等 widget 行为（base 环境的 PyQt5 缺 QtCore，不可用）。
+
 ### ❌ 插件内修改被升级覆盖
 
 **症状**：改了 `plugins/` 下 system-* 系列内置插件，DriFox 更新后改动丢失或行为异常。

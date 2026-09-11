@@ -26,6 +26,7 @@ from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 # [PERF] 直接从源头导入 _ElidedLabel（mcp_setting_card 同样转引自 app.widgets.elided_label），
 # 避免为这一个类拉起 mcp_setting_card → mcp SDK（~715ms）整条重链
 from app.widgets.elided_label import _ElidedLabel
+from app.widgets.hover_style_guard import style_if_changed
 
 
 def extract_project_initials(name: str) -> str:
@@ -383,7 +384,7 @@ class ProjectItem(QWidget):
     def enterEvent(self, event):
         # hover 时：整行加半透明背景 + 更亮的项目颜色 + 元数据提亮
         Colors.refresh()
-        self.setStyleSheet(f"""
+        style_if_changed(self, f"""
             ProjectItem {{
                 background: {Colors.HOVER_BG};
                 border-radius: 6px;
@@ -391,10 +392,10 @@ class ProjectItem(QWidget):
             }}
         """)
         hover_color = get_project_color(self._name, alpha=240)
-        self._name_label.setStyleSheet(
+        style_if_changed(self._name_label,
             f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
         )
-        self._meta_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};")
+        style_if_changed(self._meta_label, f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};")
         self._export_btn.show()
         self._archive_btn.show()
         if self._root_dir:
@@ -402,10 +403,10 @@ class ProjectItem(QWidget):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        self.setStyleSheet("")
+        style_if_changed(self, "")
         self._apply_name_style()
         Colors.refresh()
-        self._meta_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
         self._export_btn.hide()
         self._archive_btn.hide()
         self._open_folder_btn.hide()

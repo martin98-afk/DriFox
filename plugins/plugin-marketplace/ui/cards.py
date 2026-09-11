@@ -22,6 +22,11 @@ from typing import Callable, Optional
 
 from loguru import logger
 
+# FluentIcon SVG 渲染缓存补丁：必须在导入 qfluentwidgets 前生效
+from . import _icon_cache_patch as _icon_patch
+
+_icon_patch._apply_icon_cache_patch()
+
 from PyQt5 import sip
 
 from PyQt5.QtCore import QObject, QRect, QSize, QThread, Qt, pyqtSignal

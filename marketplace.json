@@ -539,6 +539,30 @@
                 "ui": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox"
+        },
+        {
+            "name": "worktree-manager",
+            "description": "DriFox 内置 UI 组件：工作台工作树页、git worktree 管理与分支标签",
+            "version": "1.0.0",
+            "author": "DriFox Team",
+            "license": "MIT",
+            "categories": [
+                "ui"
+            ],
+            "source": {
+                "type": "git-subdir",
+                "url": "https://github.com/martin98-afk/DriFox",
+                "path": "plugins/worktree-manager",
+                "ref": "master"
+            },
+            "components": {
+                "ui": true
+            },
+            "homepage": "https://github.com/martin98-afk/DriFox",
+            "icon": {
+                "light": "icon.svg",
+                "dark": "icon.svg"
+            }
         }
     ]
 }
