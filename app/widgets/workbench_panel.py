@@ -800,7 +800,7 @@ class WorkbenchPanel(QWidget):
                 probe_ctx = self._host_window()._build_ui_context()
             except Exception:
                 probe_ctx = {}
-            if "backend" in (probe_ctx or {}):
+            if (probe_ctx or {}).get("backend"):
                 for widget in broken:
                     try:
                         if hasattr(widget, "set_context"):
@@ -904,7 +904,7 @@ class WorkbenchPanel(QWidget):
                     probe_ctx = self._host_window()._build_ui_context()
                 except Exception:
                     probe_ctx = {}
-                context_broken = "backend" in (probe_ctx or {})
+                context_broken = bool((probe_ctx or {}).get("backend"))
 
         if force_plugin:
             # 定向重建：销毁归属该插件的全部页（含已从注册表注销的页）。
@@ -1045,12 +1045,18 @@ class WorkbenchPanel(QWidget):
         return candidates[0] if candidates else self.parentWidget()
 
     def _page_context_incomplete(self, widget: Optional[QWidget]) -> bool:
-        """插件页构建时是否只拿到了残缺 UI context（缺 backend → 页面无数据源）"""
+        """插件页构建时是否只拿到了残缺 UI context（无 backend → 页面无数据源）
+
+        判据看**值**不看键：``_make_page_widget`` 恒以 ``_build_ui_context()``
+        的整体结果构造 context，启动早期 backend 尚未就绪时该键存在但值为
+        None，只查 ``"backend" in ctx`` 会把「早期坏页」误判为完整，自愈不再
+        触发（文件树页 project_root 恒空、工作树页提示未设置工作目录即此分支）。
+        """
         ctx = getattr(widget, "_context", None)
         # 老签名插件页没有 _context，不做干预
         if not isinstance(ctx, dict):
             return False
-        return "backend" not in ctx
+        return not ctx.get("backend")
 
     def _make_page_widget(self, info: Any) -> Optional[QWidget]:
         """构建插件页 widget（构造 parent + context，兼容无 context 的老签名）"""

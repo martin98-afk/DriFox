@@ -1541,29 +1541,24 @@ class TabManagerWindow(FramelessWindow):
         panel.set_current_tab_by_id("worktree-manager", user=True)
 
     def open_workbench_history(self) -> None:
-        """展开工作台并定位「历史会话」页（历史会话已从对话区底部卡片迁移至此）
+        """打开会话历史（已迁对话区左侧停靠区的常驻浮动卡）
 
         统一直达入口：底部工具栏历史按钮 / ``/history`` 命令都走这里。
-        历史会话页已插件化（``plugins/history-manager``，``page_id="history-manager"``），
-        故走通用 ``open_workbench_tab`` 通道；页内数据刷新由页面 ``showEvent``
-        → ``HistoryPage.refresh()`` 自驱动（不再需要宿主补刷）。
+        历史会话在 ``de49617c`` 从工作台页签迁为 ``plugins/history-manager``
+        的 ``container="left"`` 浮动卡（``card_id="history-manager"``），工作台
+        页签集合中已无 ``"history-manager"`` 页 —— 继续按 page_id 定位只会静默
+        返回 False，表现为「历史会话点不开」，故改走浮动卡显示通道。
+
+        卡片数据由 ``show_card()`` → ``HistoryPage.refresh()`` 自拉
+        （``HistoryManager`` 单例），无需宿主补刷；再次调用为 toggle 语义。
         """
-        panel = getattr(self, "workbench_panel", None)
-        if panel is None:
-            return
-        # 确保「历史会话」插件页已 reconcile 到工作台页签（插件未加载时无此页）
         win = self.get_current_window()
-        if win is not None and hasattr(win, "_ensure_history_card"):
-            try:
-                win._ensure_history_card()
-            except Exception:
-                logger.exception("[Workbench] 历史会话页挂载失败")
-        # 展开工作台（不可见时 set_workbench_visible 内部会触发 refresh_workbench）
-        if not self.is_workbench_visible():
-            self.set_workbench_visible(True)
-        else:
-            self.refresh_workbench()
-        panel.set_current_tab_by_id("history-manager", user=True)
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().toggle_floating_card("history-manager", main_widget=win)
+        except Exception:
+            logger.exception("[Workbench] 打开历史会话失败")
 
     # ── 工作台差异入口（替代标题栏 diff_btn） ──
 

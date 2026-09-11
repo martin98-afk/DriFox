@@ -336,7 +336,16 @@ class HistoryPage(QWidget):
         self.refresh()
 
     def show_card(self) -> None:
-        """浮动卡显示入口（CardManager show_card 钩子）：显示即刷新列表"""
+        """浮动卡显示入口（CardManager show_card 钩子）：显示即刷新列表
+
+        ★ ``setVisible(True)`` 必须留：CardContainer.add_card 挂载时显式
+        ``setVisible(False)``，容器靠 ``not isHidden()`` 判定是否有可见卡片
+        才展开（card_container._schedule_expand）。CardManager.show_card 只在
+        卡片**没有** ``show_card`` 方法时才兜底 ``setVisible(True)``；本页有
+        该方法，故显示动作只能由本方法自己完成，缺失即「点侧栏按钮无反应、
+        左侧卡打不开」。
+        """
+        self.setVisible(True)
         self.refresh()
 
     # ── 卡片信号 → 宿主窗口（会话管理逻辑仍由窗口实现） ──

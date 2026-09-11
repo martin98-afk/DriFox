@@ -3219,11 +3219,11 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
     def _open_workbench_history(self):
-        """快捷键/命令入口：打开右侧工作台并跳转「历史会话」页签（直开语义）
+        """快捷键/命令入口：打开会话历史（对话区左侧停靠区常驻浮动卡）
 
-        历史会话已从对话区底部卡片迁移到工作台；不再走旧 toggle 包装，
-        直接复用 TabManagerWindow.open_workbench_history（含活跃窗口历史卡
-        懒创建/挂载 + 展开工作台 + 切页 + 数据刷新）。
+        历史会话已从右侧工作台页签迁为左侧 ``card_id="history-manager"``
+        浮动卡，故直接复用 ``TabManagerWindow.open_workbench_history``
+        （入口内部的定位目标已切到浮动卡显示通道）。
         """
         tm = TabManagerWindow.get_instance()
         if tm is not None:

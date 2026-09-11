@@ -294,13 +294,6 @@ class FileTreeCard(QWidget):
         self.destroyed.connect(self._cleanup_worker)
         self._first_show_done = False
 
-    def showEvent(self, event):  # noqa: N802 (Qt 命名)
-        """工作台页形态：首次显示时应用主题 + 懒加载目录树"""
-        super().showEvent(event)
-        if not self._first_show_done:
-            self._first_show_done = True
-            self.show_card()
-
     # ── UI 初始化 ──
 
     def _setup_ui(self):
@@ -1239,8 +1232,18 @@ class FileTreeCard(QWidget):
             return QSize(max(base.width(), 200), int(win.height() * 0.85))
         return base
 
-    def showEvent(self, event):
+    def showEvent(self, event):  # noqa: N802 (Qt 命名)
+        """显示时：首次应用主题 + 懒加载目录树，随后跟随宿主窗口尺寸
+
+        ★ 本类只允许存在**一个** showEvent：早先工作台页形态的"首次显示加载"
+        曾另起同名方法定义在 ``__init__`` 之后，被这里的后定义覆盖 → 页面显示
+        时从不调用 ``show_card()``，永远停在「正在加载文件树...」占位，点刷新
+        又因 ``_project_root`` 未初始化而报「项目目录不存在」。
+        """
         super().showEvent(event)
+        if not self._first_show_done:
+            self._first_show_done = True
+            self.show_card()
         win = self.window()
         if win:
             win.installEventFilter(self)
