@@ -38,7 +38,8 @@ from .scanner import (
     _drifox_dir,
     _format_size,
     _get_process_memory,
-    _release_memory,
+    _release_memory_deep,
+    _release_memory_light,
 )
 
 
@@ -585,7 +586,16 @@ class SystemCleanerCard(QWidget):
     # ── ⚡ 内存释放 ──
 
     def _on_memory_release(self):
-        """深度释放进程内存并归还给操作系统。"""
+        """深度释放进程内存并归还给操作系统。
+
+        🐛 分拍执行（2026-09-11）：整个释放链含全代 GC、工作集修剪、终止 WebEngine
+        子进程等高危原生操作。原先同步塞在鼠标事件里，「GC 连带析构 QObject」「堆
+        修剪遍历」会与 Chromium 后台线程在途回调（console 上报等）撞在同一拍，是
+        crash_*.log 中 scanner.py:317/328 处 9 次 access violation 闪退的根因
+        （其中一次直接崩在 message_card 的 javaScriptConsoleMessage 回调里）。
+        现拆成两拍：轻清理 → 事件循环排干 120ms（在途回调、deleteLater 落地）→
+        再执行 GC/堆归还/杀进程，既缩小竞态窗口，也避免按钮点击期间 UI 冻结数秒。
+        """
         if self._is_releasing_mem:
             return
 
@@ -594,28 +604,38 @@ class SystemCleanerCard(QWidget):
         self._mem_release_btn.setText("⚡ 释放中…")
         self._set_status("深度清理内存 + WebEngine 进程中…")
 
-        mem_before, mem_after, collected, killed_procs = _release_memory()
+        mem_before = _get_process_memory()
+        _release_memory_light()
 
-        freed_mem = (mem_before - mem_after) if (mem_before and mem_after) else None
+        def _finish_deep():
+            try:
+                collected, killed_procs = _release_memory_deep()
+            except RuntimeError:
+                return  # 卡片/控件已销毁，直接放弃收尾
+            mem_after = _get_process_memory()
 
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        self._last_mem_release_time = now
+            freed_mem = (mem_before - mem_after) if (mem_before and mem_after) else None
 
-        parts = []
-        if freed_mem is not None and freed_mem > 0:
-            parts.append(f"释放 {_format_size(freed_mem)}")
-        if collected:
-            parts.append(f"回收 {collected} 对象")
-        if killed_procs:
-            parts.append(f"结束 {killed_procs} 个 WebEngine 进程")
-        self._mem_release_btn.setText(f"✅ {' · '.join(parts) if parts else '清理完成'}")
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            self._last_mem_release_time = now
 
-        self._refresh_memory()
-        self._mem_release_btn.setEnabled(True)
-        self._is_releasing_mem = False
-        self._set_status("")
+            parts = []
+            if freed_mem is not None and freed_mem > 0:
+                parts.append(f"释放 {_format_size(freed_mem)}")
+            if collected:
+                parts.append(f"回收 {collected} 对象")
+            if killed_procs:
+                parts.append(f"结束 {killed_procs} 个 WebEngine 进程")
+            self._mem_release_btn.setText(f"✅ {' · '.join(parts) if parts else '清理完成'}")
 
-        QTimer.singleShot(3000, self._reset_mem_release_btn)
+            self._refresh_memory()
+            self._mem_release_btn.setEnabled(True)
+            self._is_releasing_mem = False
+            self._set_status("")
+
+            QTimer.singleShot(3000, self._reset_mem_release_btn)
+
+        QTimer.singleShot(120, _finish_deep)
 
     def _reset_mem_release_btn(self):
         if not self._is_releasing_mem:
