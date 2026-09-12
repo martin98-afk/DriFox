@@ -742,6 +742,62 @@ class OpenAIChatWorker(QThread):
         except Exception as e:
             logger.debug(f"[HookManager] Failed to inject pending hook msgs: {e}")
 
+    def _drain_pending_hooks_before_exit(self, current_session_messages: List) -> bool:
+        """退出前 _hook_message_queue 收尾决策：非空则注入并续跑一轮。
+
+        队列是所有 hook 注入的公共通道（用户繁忙插话 / TeamMail /
+        SubAgentFinished 等），可能在最后一轮 API 调用期间到达。旧逻辑无条件
+        消费后直接退出，消息成为孤儿——进入消息列表但永远没有下一轮 API 响应，
+        且插话触发的 queued_user_injected 会让 UI 开出一张永远等不到流的新卡。
+
+        续轮受 LoopPolicy 门控：hook 队列注入与 Stop hook 注入同构（都是给
+        LLM 的补充上下文），故以 stop_hook_injected=True 判定——默认策略
+        CONTINUE 续轮，SingleTurn/Minimal 等恒 STOP 策略拒绝续轮维持完成路径；
+        max_rounds 上限由 while 顶部的 _check_loop_round_limit 兜底。
+
+        Returns:
+            True  = 已注入且应续跑一轮（调用方 continue while 循环）
+            False = 走完成路径（队列空，或策略拒绝续轮；此时兜底消费
+                    include_team_mail=False 防止 SubAgentFinished 等消息丢失）
+        """
+        backend = getattr(self.tool_executor, "_backend", None)
+        hook_q = getattr(backend, "_hook_message_queue", None) if backend else None
+        if hook_q is not None and not hook_q.empty():
+            from app.plugins.contracts.loop_policy import LoopDecision, LoopState
+
+            try:
+                decision = self._loop_policy().should_continue(
+                    LoopState(round_count=getattr(self, "_loop_round_count", 0), stop_hook_injected=True)
+                )
+            except Exception as exc:
+                logger.warning(f"[LoopPolicy] should_continue 调用异常（退出前续轮门控），回退 CONTINUE: {exc!r}")
+                decision = LoopDecision.CONTINUE
+            if decision is LoopDecision.CONTINUE:
+                # include_team_mail=True：邮件随续轮进入对话流由 LLM 正常响应
+                # （消费时已 mark_mail_running，流结束回调不会重复处理），替代
+                # T23 的「保持 pending 走非流式」绕行路径。
+                self._inject_pending_hook_messages(
+                    session_messages_target=current_session_messages, include_team_mail=True
+                )
+                # finished_with_messages 先行（queued 保序）：插话消费触发的
+                # queued_user_injected 已让 UI 开新卡承接下一轮流式；
+                # TeamMail/SubAgentFinished 无专用信号，续轮流式续写当前卡
+                self._emit_with_callback(
+                    "finished_with_messages",
+                    self.finished_with_messages,
+                    current_session_messages,
+                )
+                logger.info("[LoopPolicy] 退出前检测到待注入 hook 消息，注入并续跑一轮")
+                return True
+            logger.warning("[LoopPolicy] 策略拒绝退出前续轮，维持完成路径")
+        # 兜底消费（队列空时 no-op）：include_team_mail=False——完成路径上注入
+        # 的邮件会孤儿化（修复 T23），保持 pending 由流结束后的
+        # _check_and_process_pending 走非流式路径处理
+        self._inject_pending_hook_messages(
+            session_messages_target=current_session_messages, include_team_mail=False
+        )
+        return False
+
     def _inject_pending_pretool_messages(self, session_messages_target: List = None) -> None:
         """消费 backend 的 PreToolUse 消息队列，在 tool result 之前注入。
 
@@ -2171,15 +2227,16 @@ class OpenAIChatWorker(QThread):
                     # 真正结束：重置状态
                     self._stop_hook_active = False
 
-                    # ★ 退出前最后一次消费 _hook_message_queue，确保 SubAgentFinished
-                    # 等 hook 消息不被遗漏（子智能体可能在最后一轮 API 调用期间完成）。
-                    # ★ 修复 T23：include_team_mail=False——退出前不再注入 TeamManager
-                    # 待处理邮件。此时注入的邮件进入消息列表后对话即终止（无下一轮 API），
-                    # LLM 永远不会响应 → 收尾会被误判 done 导致永久丢失。邮件保持 pending，
-                    # 由流结束后的 _check_and_process_pending 走非流式路径正常处理。
-                    self._inject_pending_hook_messages(
-                        session_messages_target=current_session_messages, include_team_mail=False
-                    )
+                    # ★ 退出前 hook 队列收尾：非空则注入并续跑一轮，防止用户插话 /
+                    # TeamMail / SubAgentFinished 等消息孤儿化（详见方法 docstring）。
+                    # 返回 False（队列空或策略拒绝续轮）时方法内部已按 T23 以
+                    # include_team_mail=False 兜底消费，TeamMail 保持 pending。
+                    if self._drain_pending_hooks_before_exit(current_session_messages):
+                        # 对齐 Stop hook 续命路径：清 pending state 后回 while 顶部
+                        # 重跑 API；本轮 full_response 已随 response_sequence 落入
+                        # 消息列表与 API 缓存，清空当轮缓冲不丢内容
+                        self._clear_pending_response_state()
+                        continue
 
                     self._emit_with_callback(
                         "finished_with_messages", self.finished_with_messages, current_session_messages
