@@ -1513,6 +1513,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "stream_started": self._on_stream_started,
             "stream_finished": self._on_stream_finished,
             "messages_updated": self._on_messages_updated,
+            "queued_user_injected": self._on_queued_user_injected,
             "error": self._on_engine_error,
             "skill_requested": self._on_skill_requested,
             "question_asked": self._on_question_asked,
@@ -16878,6 +16879,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._update_history_questions_badge()
 
         QTimer.singleShot(0, _do_deferred_send)
+
+    def _on_queued_user_injected(self, count: int):
+        """worker 已消费用户插话 → 旧回复卡收尾，开新回复卡承接后续流式（Task 6 填实现）"""
+        if getattr(self, "_is_destroyed", False):
+            return
 
     def _on_stream_started(self):
         if getattr(self, "_is_destroyed", False):

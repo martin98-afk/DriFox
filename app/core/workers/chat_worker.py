@@ -167,6 +167,7 @@ class OpenAIChatWorker(QThread):
     error_occurred = pyqtSignal(str)
     finished_with_content = pyqtSignal(str)
     finished_with_messages = pyqtSignal(list)
+    queued_user_injected = pyqtSignal(int)  # 本轮消费到 N 条用户插话（繁忙时插话发送）
     compaction_status_changed = pyqtSignal(dict)
     tool_call_started = pyqtSignal(str, str, dict, str)
     tool_args_updated = pyqtSignal(str, str, dict)  # 工具参数流式更新 (tool_call_id, tool_name, partial_args)

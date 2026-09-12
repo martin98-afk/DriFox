@@ -110,6 +110,7 @@ class UIEngine(BaseEngine):
         )
         self._adapter.stream_finished.connect(lambda r: self._on_worker_finished(r))
         self._adapter.messages_updated.connect(lambda ms: self._emit("messages_updated", ms))
+        self._adapter.queued_user_injected.connect(lambda c: self._emit("queued_user_injected", c))
         self._adapter.error_occurred.connect(lambda e: self._on_error(e))
         self._adapter.retry_status.connect(lambda *a: self._emit("retry_status", *a))
         self._adapter.retry_resolved.connect(lambda: self._emit("retry_resolved"))

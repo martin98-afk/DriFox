@@ -27,6 +27,7 @@ class UIConversationAdapter(QObject):
     stream_started = pyqtSignal()
     stream_finished = pyqtSignal(str)
     messages_updated = pyqtSignal(list)
+    queued_user_injected = pyqtSignal(int)  # worker 本轮消费到 N 条用户插话
     error_occurred = pyqtSignal(str)
     retry_status = pyqtSignal(str, int, int, float)
     retry_resolved = pyqtSignal()
@@ -79,6 +80,9 @@ class UIConversationAdapter(QObject):
         # 避免主线程上两次全量遍历的冗余开销。
         self.messages_updated.emit(messages or [])
 
+    def on_queued_user_injected(self, count: int):
+        self.queued_user_injected.emit(int(count or 0))
+
     def on_error(self, error: str):
         self.error_occurred.emit(error)
 
@@ -106,6 +110,7 @@ class UIConversationAdapter(QObject):
             "permission_approval_requested": self.on_permission_approval_requested,
             "finished": self.on_finished,
             "messages_updated": self.on_messages_updated,
+            "queued_user_injected": self.on_queued_user_injected,
             "error": self.on_error,
             "retry_status": self.on_retry_status,
             "retry_resolved": self.on_retry_resolved,
