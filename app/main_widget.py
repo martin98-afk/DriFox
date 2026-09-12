@@ -10204,7 +10204,7 @@ class OpenAIChatToolWindow(ToolWindow):
             for widget in instances.values():
                 if widget is None or not widget.isVisible():
                     continue
-                for method_name in ("_apply_latest_theme", "_apply_theme", "_retheme"):
+                for method_name in ("_apply_latest_theme", "_apply_theme", "_retheme", "refresh_style"):
                     method = getattr(widget, method_name, None)
                     if callable(method):
                         try:

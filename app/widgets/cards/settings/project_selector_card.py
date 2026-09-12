@@ -359,14 +359,12 @@ class ProjectItem(QWidget):
         super().mousePressEvent(event)
 
     def set_meta(self, session_count: int, worktree_count: int):
-        """设置项目元数据（会话数、工作目录数）"""
+        """设置项目元数据（仅会话数；工作目录数已隐藏以精简显示密度）"""
         self._session_count = session_count
         self._worktree_count = worktree_count
         parts = []
         if session_count > 0:
             parts.append(f"{session_count}会话")
-        if worktree_count > 0:
-            parts.append(f"{worktree_count}工作目录")
         Colors.refresh()
         self._meta_label.setText(" · ".join(parts) if parts else "")
         self._meta_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")

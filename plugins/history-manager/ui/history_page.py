@@ -29,7 +29,6 @@
 """
 
 from typing import Any, List, Optional
-import weakref
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -156,38 +155,6 @@ def _active_window() -> Optional[Any]:
         return None
 
 
-# ── 主题切换自订阅（EV_THEME_CHANGED 是可靠广播源） ──
-# 🐛 背景：行卡颜色在构造时以 f-string 固化，主题加载晚于首次渲染（或用户切主题）
-# 时已构造的行永远停留在旧 token 色（症状：置顶/当前会话区标题暗色，日期分组区正常）。
-# 主程序的 _apply_runtime_ui_settings findChildren 只扫内置卡类型，扫不到插件浮动卡，
-# 因此本页自订主题事件；仿 scroll_to_bottom_button 的 WeakSet 模式防泄漏。
-_PAGES: "weakref.WeakSet" = weakref.WeakSet()
-_theme_subscribed = False
-
-
-def _on_theme_changed_event(payload) -> None:
-    """EV_THEME_CHANGED 回调：重刷所有存活历史页样式（含缓存行卡）"""
-    for page in list(_PAGES):
-        try:
-            page.refresh_style()
-        except Exception:  # noqa: BLE001
-            pass
-
-
-def _ensure_theme_subscription() -> None:
-    """订阅主题切换事件（幂等，只在首个页面创建时真正执行一次）"""
-    global _theme_subscribed
-    if _theme_subscribed:
-        return
-    try:
-        from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
-
-        UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, _on_theme_changed_event)
-        _theme_subscribed = True
-    except Exception:  # noqa: BLE001
-        pass
-
-
 class HistoryPage(QWidget):
     """历史会话页（一级页签）：历史会话 / 归档 子页签 + 列表上方搜索框"""
 
@@ -199,9 +166,6 @@ class HistoryPage(QWidget):
     def __init__(self, parent=None, context: Optional[dict] = None):
         super().__init__(parent)
         from .history_card import HistoryCard
-
-        _PAGES.add(self)
-        _ensure_theme_subscription()
 
         self._context = context or {}
         self._content: Optional[QWidget] = None

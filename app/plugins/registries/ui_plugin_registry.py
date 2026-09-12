@@ -660,6 +660,8 @@ class UIPluginRegistry:
         self._tab_sync_in_progress: bool = False
         # 项目 / 工作目录变更订阅（UI 插件可选协议 on_project_changed）
         self._subscribe_project_changed()
+        # 主题变更订阅（UI 插件可选协议 refresh_style）
+        self._subscribe_theme_changed()
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
@@ -702,6 +704,46 @@ class UIPluginRegistry:
                 except RuntimeError:
                     continue  # C++ 对象已销毁
                 dispatch_project_changed(widget, project=project, workdir=workdir, window_id=window_id)
+
+    # ── 主题变更联动（UI 插件可选协议 refresh_style） ──
+
+    def _subscribe_theme_changed(self) -> None:
+        """订阅主题变更：向全部已建浮动卡实例派发 refresh_style（幂等）
+
+        与宿主 ``main_widget._apply_runtime_ui_settings`` 尾部的探测派发互补：
+        - 宿主路径只刷当前窗口**可见**的卡；本路径全量（含隐藏卡、其他窗口、
+          GLOBAL tab 卡）——隐藏卡在再次显示时不会自愈（样式是构造期固化），
+          必须在主题切换时一并刷掉。
+        - 派发方法名：refresh_style（统一约定）→ _apply_latest_theme 系（兼容旧）。
+        """
+        if getattr(self, "_theme_changed_subscribed", False):
+            return
+        try:
+            from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+
+            self._theme_changed_subscribed = True
+            UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, self._on_theme_changed_event)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 主题变更订阅失败: {e}")
+
+    def _on_theme_changed_event(self, payload: dict) -> None:
+        """主题变更：对全部已建浮动卡实例派发样式刷新（鸭子类型，无实现则跳过）"""
+        for instances in list(self._card_widget_instances.values()):
+            for widget in list(instances.values()):
+                try:
+                    method = getattr(widget, "refresh_style", None)
+                    if not callable(method):
+                        # 兼容旧插件的三种私有命名
+                        for name in ("_apply_latest_theme", "_apply_theme", "_retheme"):
+                            method = getattr(widget, name, None)
+                            if callable(method):
+                                break
+                    if callable(method):
+                        method()
+                except RuntimeError:
+                    continue  # C++ 对象已销毁
+                except Exception as e:
+                    logger.warning(f"[UIPluginRegistry] 插件卡主题刷新失败: {e}")
 
     # ---- 内部注册表操作（Task 2 起填充）----
 
