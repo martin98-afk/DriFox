@@ -571,7 +571,8 @@
             "author": "DriFox Team",
             "license": "MIT",
             "categories": [
-                "ui"
+                "ui",
+                "tool"
             ],
             "source": {
                 "type": "git-subdir",
@@ -580,7 +581,8 @@
                 "ref": "master"
             },
             "components": {
-                "ui": true
+                "ui": true,
+                "tools": true
             },
             "homepage": "https://github.com/martin98-afk/DriFox",
             "icon": {
