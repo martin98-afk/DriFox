@@ -26,13 +26,13 @@ from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
+    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     IndeterminateProgressBar,
     LineEdit,
     PasswordLineEdit,
     PrimaryPushButton,
-    RadioButton,
     SpinBox,
     SwitchButton,
     TextEdit,
@@ -58,13 +58,12 @@ class _PlainEdit(TextEdit):
         self.editingFinished.emit()
 
 
-class SelectPillsRow(QWidget):
-    """select 字段选项选择控件：每行一个选项，前置 RadioButton 点击即选（即存即生效）。
+class SelectComboRow(QWidget):
+    """select 字段下拉选择控件（qfluentwidgets ComboBox，随主题自适配）。
 
-    纵向布局：新增选项自动往下堆叠，不再受单行宽度限制。
-    API 与旧版胶囊横排对齐：currentData()/setCurrentData() 读写当前值，
-    valueChanged 信号在用户点击切换时发射；程序化 setChecked 不触发
-    clicked，回显不会造成循环写盘。
+    API 兼容旧版胶囊/单选实现：currentData()/setCurrentData() 读写当前值，
+    valueChanged 信号仅在用户切换时发射；setCurrentData 内部阻断信号，
+    回显不会造成循环写盘。
     """
 
     valueChanged = pyqtSignal(object)
@@ -76,19 +75,20 @@ class SelectPillsRow(QWidget):
         self._values = [v for v, _ in self._options]
         self._current = None
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        self._buttons: Dict[Any, RadioButton] = {}
+        self._combo = ComboBox(self)
         for value, label in self._options:
-            btn = RadioButton(str(label), self)
-            btn.clicked.connect(lambda _checked=False, _v=value: self._on_clicked(_v))
-            layout.addWidget(btn)
-            self._buttons[value] = btn
+            self._combo.addItem(text=str(label), userData=value)
+        self._combo.currentIndexChanged.connect(self._on_index_changed)
 
-    def _on_clicked(self, value) -> None:
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._combo)
+        layout.addStretch(1)
+
+    def _on_index_changed(self, index: int) -> None:
+        value = self._combo.itemData(index)
         if value != self._current:
-            self.setCurrentData(value)
+            self._current = value
             self.valueChanged.emit(value)
 
     def currentData(self):
@@ -98,11 +98,9 @@ class SelectPillsRow(QWidget):
         if value not in self._values and self._values:
             value = self._values[0]
         self._current = value
-        for v, btn in self._buttons.items():
-            btn.setChecked(v == value)
-
-    def refresh_style(self) -> None:
-        """RadioButton 样式随 qfluentwidgets 主题自动刷新；保留空实现兼容旧调用。"""
+        self._combo.blockSignals(True)
+        self._combo.setCurrentIndex(self._values.index(value))
+        self._combo.blockSignals(False)
 
 
 class _FieldRow(QWidget):
@@ -164,11 +162,11 @@ class PluginConfigCard(ExpandSettingCard):
                 switch.setOffText(f.label)
                 switch.checkedChanged.connect(lambda _checked, _k=f.key: self._on_field_changed(_k))
             elif f.type == "select":
-                # 展开式分段选项：一排可点击胶囊替代下拉框（点击即选中保存）
-                pills = SelectPillsRow(f.options, self.view)
-                pills.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
-                row = _FieldRow(f.label, pills, self.view)
-                self._rows[f.key] = pills
+                # 下拉选择：点击选中即保存（SelectComboRow）
+                combo = SelectComboRow(f.options, self.view)
+                combo.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
+                row = _FieldRow(f.label, combo, self.view)
+                self._rows[f.key] = combo
                 self.viewLayout.addWidget(row)
             elif f.type == "number":
                 spin = SpinBox(self.view)

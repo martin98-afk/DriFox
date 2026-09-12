@@ -256,10 +256,10 @@ def test_rich_types_render(qapp, rich_schema):
     from PyQt5.QtWidgets import QTextEdit
     from qfluentwidgets import SpinBox
 
-    from app.widgets.cards.settings.plugin_config_card import SelectPillsRow
+    from app.widgets.cards.settings.plugin_config_card import SelectComboRow
 
     card = PluginConfigCard("plug-rich")
-    assert isinstance(card._rows["mode"], SelectPillsRow)
+    assert isinstance(card._rows["mode"], SelectComboRow)
     assert isinstance(card._rows["retry"], SpinBox)
     assert isinstance(card._rows["note"], QTextEdit)
     # textarea 行高按 rows 声明（4 行）
@@ -277,7 +277,10 @@ def test_rich_types_echo_defaults(qapp, rich_schema):
 def test_select_persists_on_change(qapp, rich_schema):
     """select 切换 → valueChanged 即时保存存储 value（非 label）"""
     card = PluginConfigCard("plug-rich")
-    card._rows["mode"]._on_clicked("b")  # 模拟点击选项（变化才发射信号）
+    # 模拟用户在下拉框选中 b：setCurrentIndex 触发 currentIndexChanged → valueChanged
+    card._rows["mode"]._combo.setCurrentIndex(
+        card._rows["mode"]._values.index("b")
+    )
     assert PluginConfigStore().get("plug-rich", "mode") == "b"
 
 
