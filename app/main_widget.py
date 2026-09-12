@@ -16550,7 +16550,11 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         return [{"type": "text", "text": user_text}] + image_blocks
 
-    def _on_send_clicked(self, user_text: str = "", hook_event: Optional[str] = None, preserve_input: bool = False):
+    def _on_send_clicked_inverse(self):
+        """Ctrl+Enter 发送入口：繁忙时恒为设置项的另一行为"""
+        self._on_send_clicked(inverse=True)
+
+    def _on_send_clicked(self, user_text: str = "", hook_event: Optional[str] = None, preserve_input: bool = False, inverse: bool = False):
         """发送消息（用户主动发送 / 系统自动发送共用）。
 
         preserve_input=True：系统自动发送（如团队任务邮件 _process_team_task），

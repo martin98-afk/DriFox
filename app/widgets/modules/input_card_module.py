@@ -100,6 +100,7 @@ class InputCardModule(UIModule):
         # host.input_area.setFixedHeight(52)
         setFont(host.input_area, scale_font_size(15))
         host.input_area.sendMessageRequested.connect(host._on_send_clicked)
+        host.input_area.sendMessageInverseRequested.connect(host._on_send_clicked_inverse)
         host.input_area.stopMessageRequested.connect(host._on_stop_clicked)
         host.input_area.clearRequested.connect(host._on_clear_shortcut)
         host.input_area.agentChanged.connect(host._on_agent_changed)

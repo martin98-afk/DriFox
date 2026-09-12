@@ -210,6 +210,7 @@ _PLACEHOLDER_ROTATE_INTERVAL_MS = 15000
 
 class SendableTextEdit(TextEdit):
     sendMessageRequested = pyqtSignal()
+    sendMessageInverseRequested = pyqtSignal()  # Ctrl+Enter 发送：繁忙时恒为设置项的另一行为
     stopMessageRequested = pyqtSignal()
     clearRequested = pyqtSignal()
     newSessionRequested = pyqtSignal()
@@ -1631,13 +1632,14 @@ class SendableTextEdit(TextEdit):
             self.toggle_send_button(False)
             self.sendMessageRequested.emit()
 
-    def _on_enter_send(self):
+    def _on_enter_send(self, inverse: bool = False):
         """Enter 键发送：始终触发发送流程
 
-        与按钮点击不同，Enter 键不检查停止模式，直接发射 sendMessageRequested。
+        与按钮点击不同，Enter 键不检查停止模式，直接发射发送信号。
         main_widget 的 _on_send_clicked 内部会处理：
         - 命令（/xxx）→ 不打断流式直接执行
-        - 非命令 + 流式中 → 先停止再发送新消息
+        - 非命令 + 流式中 → 按设置项路由：插话发送 / 排队发送；
+          inverse=True（Ctrl+Enter）恒为设置项的另一行为
         """
         if not self.toPlainText().strip():
             return
@@ -1649,8 +1651,11 @@ class SendableTextEdit(TextEdit):
         # 如果当前在发送模式（非流式），切换到停止模式表示正在请求
         if not self.send_btn.is_stop_mode():
             self.toggle_send_button(False)
-        # 直接发送请求，由 main_widget 内部逻辑处理命令/停止
-        self.sendMessageRequested.emit()
+        # 直接发送请求，由 main_widget 内部逻辑处理命令/繁忙路由
+        if inverse:
+            self.sendMessageInverseRequested.emit()
+        else:
+            self.sendMessageRequested.emit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1759,6 +1764,9 @@ class SendableTextEdit(TextEdit):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             if event.modifiers() & Qt.ShiftModifier:
                 super().keyPressEvent(event)  # 换行
+            elif event.modifiers() & Qt.ControlModifier:
+                self._on_enter_send(inverse=True)
+                event.accept()
             else:
                 self._on_enter_send()
                 event.accept()
