@@ -347,6 +347,10 @@ class ProjectItem(QWidget):
             self._emit_export()
 
     def mousePressEvent(self, event):
+        if event.button() != Qt.LeftButton:
+            # 右键留给 contextMenuEvent 弹菜单，不触发选中
+            super().mousePressEvent(event)
+            return
         if self._is_all_entry:
             self.allClicked.emit()
         else:

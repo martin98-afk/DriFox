@@ -3332,36 +3332,40 @@ class TabPanel(QWidget):
             self._gitee_account_row.refresh_style()
 
     def _apply_custom_card_style(self, compact: bool = False):
-        """应用自定义插件卡片分组样式（卡片背景 + 细边框 + 圆角，对齐团队分组框）。
+        """应用自定义插件卡片分组样式（二级菜单风：去边框 + 极淡底色块）。
 
+        分组感由淡底色块承担，层级靠组标题弱化 + 行 hover 反馈，不再描边。
         颜色取自主题 Colors，主题切换时由 _refresh_plugin_style 重新调用。
         compact=True：折叠态紧凑样式——margin 收紧，窄条下只容纳 icon 行。
         """
         if not hasattr(self, "_custom_plugin_card"):
             return
         Colors.refresh()
-        margin = "3px 4px" if compact else "5px 8px"
+        margin = "3px 4px" if compact else "4px 6px"
         self._custom_plugin_card.setStyleSheet(f"""
             #customPluginCard {{
-                background: {Colors.CARD_BG.format(alpha=40)};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 6px;
+                background: {Colors.CARD_BG.format(alpha=25)};
+                border: none;
+                border-radius: 8px;
                 margin: {margin};
             }}
             #customPluginHeader {{
                 background: transparent;
                 border: none;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
+                /* 嵌套圆角：顶部两角与外壳同心(8px)，底角独立(6px) */
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                border-bottom-left-radius: 6px;
+                border-bottom-right-radius: 6px;
             }}
             #customPluginHeader:hover {{
                 background: {Colors.HOVER_BG};
             }}
             #customPluginTitle {{
-                color: {Colors.TEXT_PRIMARY};
+                color: {Colors.TEXT_SECONDARY};
                 background: transparent;
-                {get_font_family_css()} {font_size_css(12)}
-                font-weight: bold;
+                {get_font_family_css()} {font_size_css(11)}
+                font-weight: 600;
                 padding: 0px;
             }}
             #customPluginBadge {{
