@@ -60,6 +60,7 @@ def test_compose_builds_input_card(fresh_registry, qapp):
                 "_update_title_gen_param_description",
                 "_ensure_file_mention_cache",
                 "_on_send_clicked",
+                "_on_send_clicked_inverse",
                 "_on_stop_clicked",
                 "_on_clear_shortcut",
                 "_on_agent_changed",
@@ -80,6 +81,9 @@ def test_compose_builds_input_card(fresh_registry, qapp):
                 "_restore_deleted_message",
                 "_on_undo_dismiss_requested",
                 "_on_undo_delete_dismissed",
+                "_on_queue_insert_requested",
+                "_on_queue_remove_requested",
+                "_on_queue_edit_requested",
                 "_on_subagent_model_config_changed",
                 "_on_title_gen_model_config_changed",
             ):

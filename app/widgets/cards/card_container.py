@@ -334,21 +334,30 @@ class CardContainer(QWidget):
                         w = max(w, iw)
             if w <= 0:
                 return self._axis_natural()
+        # 多卡共存（L2 状态层）：逐卡累加，含布局 spacing。只算第一张会让
+        # 容器高度不足、其余卡被裁切。单卡时结果与旧实现逐字节一致。
+        total = 0
+        counted = 0
         for card in self._cards.values():
-            if not card.isHidden() and card.hasHeightForWidth():
-                # 防御：容器宽度未分配（如首次展开/测试环境无真实布局）时，
-                # 用卡片布局理想宽度兜底，避免以极小宽度计算换行导致高度虚高。
-                cw = card.width()
-                if cw <= 0:
-                    cl = card.layout()
-                    cw = cl.sizeHint().width() if cl is not None else 0
-                if cw > 0:
-                    w = max(w, cw)
-                h = card.heightForWidth(w)
-                if h > 0:
-                    m = self._layout.contentsMargins()
-                    return h + m.top() + m.bottom()
-        return self._axis_natural()
+            if card.isHidden() or not card.hasHeightForWidth():
+                continue
+            # 防御：容器宽度未分配（如首次展开/测试环境无真实布局）时，
+            # 用卡片布局理想宽度兜底，避免以极小宽度计算换行导致高度虚高。
+            cw = card.width()
+            if cw <= 0:
+                cl = card.layout()
+                cw = cl.sizeHint().width() if cl is not None else 0
+            if cw > 0:
+                w = max(w, cw)
+            h = card.heightForWidth(w)
+            if h > 0:
+                total += h
+                counted += 1
+        if total <= 0:
+            return self._axis_natural()
+        m = self._layout.contentsMargins()
+        spacing = self._layout.spacing() * max(0, counted - 1)
+        return total + m.top() + m.bottom() + spacing
 
     def _splitter_index(self) -> int:
         if self._dock_splitter is None:

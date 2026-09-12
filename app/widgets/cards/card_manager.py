@@ -117,6 +117,17 @@ class CardManager:
                 "hidden_callbacks": {},
                 "suppress_others_map": {},  # card_id -> set of suppressed card_ids
                 "suppressed_by_others": set(),  # 被其他卡片压制的 card_id 集合
+                # 分层通道模型元数据：card_id -> {
+                #     "layer": 语义层标识（"completion"/"status"/"system"/"default"）,
+                #     "stackable": 层内是否允许多卡共存,
+                #     "visible_when": 状态谓词 Callable[[], bool] | None,
+                #     "order_hint": 层内排序权重（小值靠前）,
+                # }
+                "card_meta": {},
+                # 多卡共存可见集：ContainerType -> list[card_id]（按 order_hint 排序）
+                # ★ 与 visible_cards（单值/栈顶）并存：栈顶写单值兼容旧调用，
+                #   完整可见集写这里，避免"同层非栈顶卡无法被 is_card_visible 识别"。
+                "multi_visible": {},
                 # Phase G：dock（LEFT/RIGHT）多卡堆叠数据模型
                 "dock_visible_cards": {ct: [] for ct in DOCK_CONTAINER_TYPES},  # list[card_id]
                 "dock_active_cards": {ct: None for ct in DOCK_CONTAINER_TYPES},  # 栈顶 card_id
@@ -164,6 +175,10 @@ class CardManager:
         card_widget,
         system_card: bool = False,
         suppress_others: list = None,
+        layer: str = "default",
+        stackable: bool = False,
+        visible_when: Callable[[], bool] = None,
+        order_hint: int = 100,
     ):
         """注册卡片到管理器
 
@@ -174,6 +189,15 @@ class CardManager:
             card_widget: 控件
             system_card: 是否为系统卡片（系统卡片窗口内互斥）
             suppress_others: 该卡片显示时需要压制的其他卡片 ID 列表
+            layer: 语义层标识（"completion"/"status"/"system"/"default"）。
+                同层卡片由 refresh_layer() 统一重算可见集。
+            stackable: 层内是否允许多卡共存。为 True 时该卡
+                ① 豁免同容器互斥（不被普通卡片挤掉）、
+                ② 豁免其他卡片的 suppress_others 压制、
+                ③ 显隐改由 visible_when 谓词驱动（见 refresh_layer）。
+            visible_when: 状态谓词，返回该卡是否"应该可见"。为 None 表示
+                仅由显式 show_card/hide_card 驱动，不参与谓词重算。
+            order_hint: 层内排序权重，小值靠前
         """
         self._ensure_window_initialized(window_id)
 
@@ -186,6 +210,12 @@ class CardManager:
 
         win_data["cards"][container_type][card_id] = card_widget
         win_data["containers"][card_id] = container_type
+        win_data["card_meta"][card_id] = {
+            "layer": layer,
+            "stackable": bool(stackable),
+            "visible_when": visible_when,
+            "order_hint": order_hint,
+        }
         if system_card:
             win_data["system_cards"].add(card_id)
 
@@ -212,6 +242,12 @@ class CardManager:
         win_data["system_cards"].discard(card_id)
         win_data["shown_callbacks"].pop(card_id, None)
         win_data["hidden_callbacks"].pop(card_id, None)
+        win_data["card_meta"].pop(card_id, None)
+        for _ct, _mv in win_data.get("multi_visible", {}).items():
+            if card_id in _mv:
+                _mv.remove(card_id)
+                if win_data["visible_cards"].get(_ct) == card_id:
+                    win_data["visible_cards"][_ct] = _mv[0] if _mv else None
         suppressed = win_data["suppress_others_map"].pop(card_id, None)
         if suppressed:
             # 重算被压制集合（其他卡片可能仍压制相同目标）
@@ -237,6 +273,13 @@ class CardManager:
 
         # 多窗口隔离：检查 widget 是否已被删除
         if self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget):
+            return
+
+        # ★ L2 状态层：可堆叠卡片走"层可见集重算"路径
+        # 不与同层其他卡互斥（子智能体运行中打 / 不再吞掉状态卡），
+        # 且必须在"已可见"早退之前判定 —— 否则栈顶卡可见时会跳过整层重算。
+        if self._is_declared_stackable(card_id, window_id):
+            self.refresh_layer(window_id, win_data["card_meta"][card_id]["layer"])
             return
 
         # 如果卡片已经可见，不做任何事
@@ -298,7 +341,8 @@ class CardManager:
         # 的卡片，仅通过 QStackedWidget 视觉覆盖
         if card_id in win_data["system_cards"]:
             self._hide_system_cards(window_id, exclude_card_id=card_id, exclude_containers=coexist_cts)
-            self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
+            # 系统模态层覆盖：连 L2 状态层一并压制（关闭时由宿主 refresh_layer 恢复）
+            self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id, exempt_stackable=False)
             # 系统卡片激活时，隐藏所有可见的非系统卡片（跨容器），
             # 例如 BOTTOM 容器的 command/file_mention 应随 TOP 容器 settings 打开而关闭
             # 停靠区（LEFT/RIGHT）与共存容器（BOTTOM）豁免：
@@ -320,9 +364,14 @@ class CardManager:
             self._hide_same_container_cards(window_id, container_type, exclude_card_id=card_id)
 
             # 处理压制关系：该卡片压制其他卡片
+            # ★ L2 状态层豁免：状态卡表达的是"系统正在发生的事"（排队/撤销/子智能体），
+            #   与输入补全卡（command/file_mention）语义正交，不应被后者压掉——
+            #   旧实现里这正是"子智能体运行中打 / 后状态卡再也不回来"的根因。
             suppress_map = win_data.get("suppress_others_map", {})
             suppressed_ids = suppress_map.get(card_id, set())
             for suppressed_id in suppressed_ids:
+                if self._is_declared_stackable(suppressed_id, window_id):
+                    continue
                 if self.is_card_visible(suppressed_id, window_id):
                     self.hide_card(suppressed_id, window_id)
 
@@ -382,6 +431,17 @@ class CardManager:
 
         # 多窗口隔离：检查 widget 是否已被删除
         if self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget):
+            return
+
+        # ★ 多卡共存可见集：非栈顶卡不在 visible_cards 单值里，需按列表单独摘除
+        multi = win_data.get("multi_visible", {}).get(container_type)
+        if multi and card_id in multi:
+            self._set_card_visible_raw(card_id, window_id, False)
+            multi.remove(card_id)
+            win_data["visible_cards"][container_type] = multi[0] if multi else None
+            if card_id in win_data["system_cards"]:
+                if not any(self.is_card_visible(sc, window_id) for sc in win_data["system_cards"]):
+                    win_data["suppressed_by_system"] = False
             return
 
         if win_data["visible_cards"].get(container_type) != card_id:
@@ -504,23 +564,62 @@ class CardManager:
                 self.hide_card(card_id, window_id)
 
     def _hide_all_cards(self, window_id: str):
-        """隐藏窗口内所有卡片（停靠区 LEFT/RIGHT 与共存容器豁免）"""
+        """隐藏窗口内所有卡片（停靠区 LEFT/RIGHT 与共存容器豁免）
+
+        Question 强制覆盖路径：L2 状态层一并压制（exempt_stackable=False），
+        关闭后由宿主 refresh_layer 按谓词恢复。
+        """
         if window_id not in self._window_data:
             return
         coexist_cts = self._coexist_containers.get(window_id, frozenset())
         for container_type in ContainerType:
             if container_type in DOCK_CONTAINER_TYPES or container_type in coexist_cts:
                 continue
-            self._hide_same_container_cards(window_id, container_type)
+            self._hide_same_container_cards(window_id, container_type, exempt_stackable=False)
 
-    def _hide_same_container_cards(self, window_id: str, container_type: ContainerType, exclude_card_id: str = None):
-        """隐藏同容器的所有卡片"""
+    def _hide_same_container_cards(
+        self,
+        window_id: str,
+        container_type: ContainerType,
+        exclude_card_id: str = None,
+        exempt_stackable: bool = True,
+    ):
+        """隐藏同容器的所有卡片
+
+        Args:
+            exclude_card_id: 不隐藏的卡片 ID
+            exempt_stackable: 是否豁免 L2 可堆叠状态卡。
+                普通卡片显示引起的同容器互斥应为 True（状态层独立共存）；
+                系统模态卡 / question 的强制覆盖应为 False（压制一切）。
+        """
         if window_id not in self._window_data:
             return
         win_data = self._window_data[window_id]
 
+        # ★ 多卡共存可见集：仅在"强制覆盖"路径（exempt_stackable=False ——
+        #   系统模态卡 / question）才逐卡压制；普通卡片显示时 L2 状态层保持共存，
+        #   不受同容器互斥波及（这正是"打 / 吞掉子智能体卡"的修复点）。
+        if not exempt_stackable:
+            multi = win_data.get("multi_visible", {}).get(container_type)
+            if multi:
+                for cid in list(multi):
+                    if cid == exclude_card_id:
+                        continue
+                    self._set_card_visible_raw(cid, window_id, False)
+                if exclude_card_id in multi:
+                    win_data["multi_visible"][container_type] = [exclude_card_id]
+                    win_data["visible_cards"][container_type] = exclude_card_id
+                else:
+                    win_data["multi_visible"][container_type] = []
+                    if win_data["visible_cards"].get(container_type) in multi:
+                        win_data["visible_cards"][container_type] = None
+
         for card_id in list(win_data["cards"].get(container_type, {}).keys()):
-            if card_id != exclude_card_id and win_data["visible_cards"].get(container_type) == card_id:
+            if card_id == exclude_card_id:
+                continue
+            if exempt_stackable and self._is_declared_stackable(card_id, window_id):
+                continue
+            if win_data["visible_cards"].get(container_type) == card_id:
                 card_widget = win_data["cards"][container_type][card_id]
                 # 检查 widget 是否已被删除
                 if self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget):
@@ -545,7 +644,161 @@ class CardManager:
         if card_id not in win_data["containers"]:
             return False
         container_type = win_data["containers"][card_id]
+        # ★ 多卡共存容器：L2 卡在完整可见集里；普通卡仍走栈顶单值 ——
+        #   两者都在同一容器中真实可见，故任一路命中即为可见。
+        multi = win_data.get("multi_visible", {}).get(container_type)
+        if multi and card_id in multi:
+            return True
         return win_data["visible_cards"].get(container_type) == card_id
+
+    # ── 分层通道：多卡共存可见集（L2 状态层）──
+
+    def _is_declared_stackable(self, card_id: str, window_id: str) -> bool:
+        """卡片是否在注册时声明了层内堆叠（L2 状态层）
+
+        与 is_card_stackable 的区别：后者是停靠区（LEFT/RIGHT）分流语义，
+        本方法服务于分层通道模型，不限容器类型。
+        """
+        win_data = self._window_data.get(window_id)
+        if not win_data:
+            return False
+        return bool(win_data.get("card_meta", {}).get(card_id, {}).get("stackable"))
+
+    def refresh_layer(self, window_id: str, layer: str) -> None:
+        """重算某层可见集：内容 = 谓词为真的卡片，按 order_hint 排序
+
+        这是分层通道显隐的唯一真源 —— 调用方只更新数据（队列/回退栈/任务表）
+        后调一次本方法，不再手写 show_card/hide_card 组合。
+
+        从机制上消灭"卡片被挤掉后没人负责恢复"：谓词为真 → 必然回到可见集，
+        不需要任何调用方"记得把卡片显示回来"。
+        """
+        win_data = self._window_data.get(window_id)
+        if not win_data:
+            return
+        meta = win_data.get("card_meta", {})
+        members = [
+            cid for cid, m in meta.items() if m["layer"] == layer and m["stackable"] and cid in win_data["containers"]
+        ]
+        if not members:
+            return
+        container_type = win_data["containers"][members[0]]
+        current = list(win_data.get("multi_visible", {}).get(container_type, []))
+
+        desired: List[str] = []
+        for cid in members:
+            pred = meta[cid].get("visible_when")
+            if pred is None:
+                # 无谓词：仅由显式 show/hide 驱动，保持当前可见性
+                if cid in current:
+                    desired.append(cid)
+                continue
+            try:
+                if pred():
+                    desired.append(cid)
+            except Exception as e:
+                # 谓词可能持有已销毁 widget 的引用（窗口关闭竞态）
+                logger.debug(f"[CardManager] 层 {layer} 卡片 {cid} 谓词求值失败，按不可见处理: {e}")
+
+        desired.sort(key=lambda cid: meta[cid]["order_hint"])
+        self._apply_visible_set(window_id, container_type, desired)
+
+    def _apply_visible_set(self, window_id: str, container_type: ContainerType, desired: List[str]) -> None:
+        """按目标可见列表差分应用：show 新增 / hide 移除 / 重排布局顺序"""
+        win_data = self._window_data.get(window_id)
+        if not win_data:
+            return
+        multi = win_data.setdefault("multi_visible", {}).setdefault(container_type, [])
+        current = list(multi)
+        for cid in current:
+            if cid not in desired:
+                self._set_card_visible_raw(cid, window_id, False)
+        for cid in desired:
+            if cid not in current:
+                self._set_card_visible_raw(cid, window_id, True)
+        win_data["multi_visible"][container_type] = list(desired)
+        # 栈顶单值仅作旧调用兼容（is_card_visible 已优先查完整可见集）
+        win_data["visible_cards"][container_type] = desired[0] if desired else None
+        self._reorder_in_layout(window_id, container_type, desired)
+
+    def _set_card_visible_raw(self, card_id: str, window_id: str, visible: bool) -> None:
+        """底层显隐（不做互斥/压制决策）：驱动 widget + 回调 + 显隐事件"""
+        win_data = self._window_data.get(window_id)
+        if not win_data:
+            return
+        container_type = win_data["containers"].get(card_id)
+        if container_type is None:
+            return
+        card_widget = win_data["cards"].get(container_type, {}).get(card_id)
+        if card_widget is None:
+            return
+        if self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget):
+            return
+        try:
+            if visible:
+                if hasattr(card_widget, "show_card"):
+                    card_widget.show_card()
+                else:
+                    card_widget.setVisible(True)
+            elif hasattr(card_widget, "hide_card"):
+                card_widget.hide_card()
+            else:
+                card_widget.setVisible(False)
+        except RuntimeError:
+            self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
+            return
+        for cb in win_data["shown_callbacks" if visible else "hidden_callbacks"].get(card_id, []):
+            cb(card_id)
+        self._publish_card_visibility(card_id, window_id, visible)
+
+    @staticmethod
+    def _publish_card_visibility(card_id: str, window_id: str, visible: bool) -> None:
+        """发布卡片显隐事件（Phase E）"""
+        try:
+            from app.core.ui_event_bus import EV_CARD_VISIBILITY_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(
+                EV_CARD_VISIBILITY_CHANGED, card_id=card_id, window_id=window_id, visible=visible
+            )
+        except Exception:
+            pass
+
+    def _reorder_in_layout(self, window_id: str, container_type: ContainerType, ordered_ids: List[str]) -> None:
+        """按 order_hint 顺序重排容器布局内的可见卡（仅调下标，不改 widget 归属）
+
+        CardContainer.add_card 是注册期一次性 addWidget，布局顺序 = 注册顺序，
+        与 order_hint 不一定一致；这里在每次可见集变化后校正。
+        任何异常都静默放弃 —— 重排失败不应阻断显隐本身。
+        """
+        win_data = self._window_data.get(window_id)
+        if not win_data or len(ordered_ids) < 2:
+            return
+        cards = win_data["cards"].get(container_type, {})
+        widgets = [cards.get(cid) for cid in ordered_ids]
+        widgets = [w for w in widgets if w is not None]
+        if len(widgets) < 2:
+            return
+        try:
+            container = widgets[0].parentWidget()
+            layout = container.layout() if container is not None else None
+            if layout is None:
+                return
+            indices = [
+                i
+                for i in range(layout.count())
+                if layout.itemAt(i) is not None and layout.itemAt(i).widget() in widgets
+            ]
+            if len(indices) < 2:
+                return
+            base = min(indices)
+            if [layout.itemAt(i).widget() for i in sorted(indices)] == widgets:
+                return
+            for w in widgets:
+                layout.removeWidget(w)
+            for idx, w in enumerate(widgets):
+                layout.insertWidget(base + idx, w)
+        except (RuntimeError, AttributeError, TypeError):
+            pass
 
     # ── Phase G：dock 多卡堆叠 API ──
 

@@ -1612,6 +1612,15 @@ class OpenAIChatToolWindow(ToolWindow):
             ContainerType.BOTTOM,
             "sub_agent_compact",
             self._sub_agent_compact_widget,
+            layer="status",
+            stackable=True,
+            order_hint=10,
+            # 谓词 = 批次仍活跃且仍有任务行。卡片自身的 _auto_hide / 手动关闭
+            # 都会 closed.emit() → _on_sub_agent_compact_closed → _batch_started=False，
+            # 因此"卡片已结束"与谓词为假严格对应，不会被 refresh_layer 复活。
+            visible_when=lambda: bool(
+                self._sub_agent_compact_widget._batch_started and self._sub_agent_compact_widget._task_rows
+            ),
         )
         self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
 
@@ -1768,7 +1777,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._model_selector_card is not None:
             return
         self._model_selector_card = BaseSettingsCard("", "", self)
-        self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
+        # 最小可见下限（对齐 SystemCardFrame._MIN_CARD_VISIBLE_H）：窗口极矮时
+        # 布局需要能压缩卡片，过大下限会顶破可用空间导致卡片底部被窗口裁掉
+        self._model_selector_card.setMinimumHeight(120)
         self._model_selector_card.setVisible(False)
         self._model_selector_card.closed.connect(
             lambda: (
@@ -8097,6 +8108,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._is_any_system_card_visible():
             # 只有当所有系统卡片都关闭时才重置标志
             self._is_system_card_visible = False
+            # ★ 状态层按谓词恢复：系统模态卡显示期间被压制的 L2 状态卡
+            # （子智能体/排队/撤销）在此回到可见集，而不是永久消失。
+            self._card_manager.refresh_layer(self._window_id, "status")
 
     # ══════════════════════════════════════════════════════════════
     # 像素小狐桌宠 — 集中 AI 状态管理
@@ -14543,8 +14557,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._hide_undo_delete_card()
             return
         card.set_entry(entry.label, store.depth, entry.note)
-        card_manager.show_card("undo_delete", self._window_id)
-        # CardManager 认为已可见时会早退，但文案与 TTL 仍需刷新
+        # 只触发层级重算：undo_delete 的 visible_when 谓词（回退栈非空）决定显隐
+        card_manager.refresh_layer(self._window_id, "status")
+        # 条目内容变化时 TTL 需要重新起算
         card.restart_ttl()
 
     def _hide_undo_delete_card(self):
@@ -15452,8 +15467,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not found_any:
             return
 
-        # 显示紧凑卡片
-        self._card_manager.show_card("sub_agent_compact", self._window_id)
+        # 触发状态层重算（谓词：批次活跃且有任务行）
+        self._card_manager.refresh_layer(self._window_id, "status")
 
     def _on_card_diff_requested(self, round_index: int, message_index: int = -1):
         """
@@ -16976,15 +16991,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._scroll_to_bottom()
 
     def _refresh_queue_card(self):
-        """按队列状态刷新排队卡片显隐与内容"""
+        """按队列状态刷新排队卡片内容与显隐
+
+        只更新数据 + 触发层级重算：显隐由 message_queue 的 visible_when 谓词
+        （队列非空）决定，不再手写 show/hide 组合 —— 即便卡片曾被系统模态卡压制，
+        只要队列仍非空就会在恢复时机自动回到可见集。
+        """
         card = getattr(self, "_queue_message_card", None)
         if card is None:
             return
         if self._pending_message_queue:
             card.set_entries([{"id": e["id"], "text": e["text"]} for e in self._pending_message_queue])
-            self._card_manager.show_card("message_queue", self._window_id)
-        else:
-            self._card_manager.hide_card("message_queue", self._window_id)
+        self._card_manager.refresh_layer(self._window_id, "status")
 
     def _remove_queue_entry(self, msg_id: str):
         """按 id 移出队列，返回被移条目"""
@@ -17276,9 +17294,11 @@ class OpenAIChatToolWindow(ToolWindow):
         """子智能体紧凑卡片关闭时清理状态"""
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
-        # 通知 CardManager 卡片已关闭，否则 show_card 以为它仍可见而跳过
+        # 通知 CardManager 重算状态层：_batch_started=False 后谓词为假，
+        # 卡片随之退出可见集（旧实现依赖 hide_card 手动对齐，易与卡片自身
+        # 的 _auto_hide 定时器脱节）。
         if hasattr(self, "_card_manager"):
-            self._card_manager.hide_card("sub_agent_compact", self._window_id)
+            self._card_manager.refresh_layer(self._window_id, "status")
 
     def _on_sub_agent_stop_requested(self, task_id: str):
         """处理子智能体停止请求 - 中止当前运行中的子智能体"""
@@ -17504,7 +17524,8 @@ class OpenAIChatToolWindow(ToolWindow):
             compact.add_task(task_id, executor.agent_name, executor.task_description, model_name=model_name)
 
         compact._batch_started = True
-        self._card_manager.show_card("sub_agent_compact", self._window_id)
+        # 触发状态层重算（谓词：批次活跃且有任务行）
+        self._card_manager.refresh_layer(self._window_id, "status")
 
     def _handle_title_gen_command(self, args: str):
         """/title-gen 命令：切换标题生成使用的默认模型
@@ -19046,7 +19067,11 @@ class OpenAIChatToolWindow(ToolWindow):
             self._scroll_to_bottom()
 
     def _hide_all_cards_for_question(self):
-        """Question 卡片显示时，隐藏所有其他卡片（最高优先级）"""
+        """Question 卡片显示时，隐藏所有其他卡片（最高优先级）
+
+        含 L2 状态层三卡：question 关闭后由 _restore_after_question_close
+        按谓词重算恢复，因此这里的强制隐藏不会造成状态卡永久消失。
+        """
         # 通过 CardManager 隐藏所有卡片
         for card_id in [
             "tool",
@@ -19058,12 +19083,19 @@ class OpenAIChatToolWindow(ToolWindow):
             "provider_edit",
             "hook_edit",
             "undo_delete",
+            "message_queue",
+            "sub_agent_compact",
         ]:
             self._card_manager.hide_card(card_id, self._window_id)
 
     def _restore_after_question_close(self):
-        """Question 卡片关闭后，恢复非系统卡片的显示状态"""
-        # tool 和 sub_agent 有自我生命周期管理，不需要强制恢复
+        """Question 卡片关闭后，恢复非系统卡片的显示状态
+
+        question 通过 _hide_all_cards 压制了 L2 状态层，这里按谓词重算恢复。
+        L1 输入补全卡（command/file_mention）不参与谓词重算：它们的显隐由输入框
+        的 / 与 @ 触发驱动，被压制即关闭，用户重新触发即可 —— 与原行为一致。
+        """
+        self._card_manager.refresh_layer(self._window_id, "status")
 
     def _on_question_asked(self, tool_call_id: str, questions: list, extra: dict = None):
         if getattr(self, "_is_destroyed", False):

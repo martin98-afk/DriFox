@@ -133,13 +133,17 @@ class InputCardModule(UIModule):
         host._command_card.setVisible(False)
         host.input_area.set_command_card(host._command_card)
         mgr = host._card_manager
-        # 命令卡片压制 tool、sub_agent 和 sub_agent_compact
+        # 命令卡片压制 tool、sub_agent
+        # 注：不再压制 sub_agent_compact —— L2 状态层（子智能体/排队/撤销）表达的是
+        # "系统正在发生的事"，与输入补全语义正交；压制它会让"子智能体运行中打 /"
+        # 之后状态卡再也不回来（CardManager 有压制声明但无恢复栈）。
         mgr.register_card(
             host._window_id,
             ContainerType.BOTTOM,
             "command",
             host._command_card,
-            suppress_others=["tool", "sub_agent", "sub_agent_compact"],
+            suppress_others=["tool", "sub_agent"],
+            layer="completion",
         )
         host._bottom_card_container.add_card("command", host._command_card)
 
@@ -154,6 +158,7 @@ class InputCardModule(UIModule):
             ContainerType.BOTTOM,
             "file_mention",
             host._file_mention_card,
+            layer="completion",
         )
         host._bottom_card_container.add_card("file_mention", host._file_mention_card)
 
@@ -168,7 +173,18 @@ class InputCardModule(UIModule):
         host._undo_delete_card.dismissRequested.connect(host._on_undo_dismiss_requested)
         # 被 CardManager 隐藏（被其他卡片遮挡）→ 仅记录，**不清空**回退条目
         host._undo_delete_card.dismissed.connect(host._on_undo_delete_dismissed)
-        mgr.register_card(host._window_id, ContainerType.BOTTOM, "undo_delete", host._undo_delete_card)
+        mgr.register_card(
+            host._window_id,
+            ContainerType.BOTTOM,
+            "undo_delete",
+            host._undo_delete_card,
+            layer="status",
+            stackable=True,
+            order_hint=30,
+            # 谓词 = "撤销窗口是否仍有效"：用户点 ✕ / TTL 到期都会 store.clear()，
+            # 条目清空即窗口关闭；被系统模态卡压制时条目保留 → 关闭后自动恢复。
+            visible_when=lambda: bool(host._undo_store().peek()),
+        )
         host._bottom_card_container.add_card("undo_delete", host._undo_delete_card)
 
         # 排队消息卡片（繁忙时排队发送；无 TTL，队列空时由 main_widget 隐藏）
@@ -179,7 +195,18 @@ class InputCardModule(UIModule):
         host._queue_message_card.insertRequested.connect(host._on_queue_insert_requested)
         host._queue_message_card.removeRequested.connect(host._on_queue_remove_requested)
         host._queue_message_card.editRequested.connect(host._on_queue_edit_requested)
-        mgr.register_card(host._window_id, ContainerType.BOTTOM, "message_queue", host._queue_message_card)
+        mgr.register_card(
+            host._window_id,
+            ContainerType.BOTTOM,
+            "message_queue",
+            host._queue_message_card,
+            layer="status",
+            stackable=True,
+            order_hint=20,
+            # 谓词 = 队列非空。宿主只调 _refresh_queue_card 更新内容 + refresh_layer，
+            # 不再手写 show/hide 组合。
+            visible_when=lambda: bool(host._pending_message_queue),
+        )
         host._bottom_card_container.add_card("message_queue", host._queue_message_card)
 
         # 撤销删除条目栈（替代原单步裸 dict `_undo_delete_cache` 与死代码

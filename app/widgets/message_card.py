@@ -2966,7 +2966,7 @@ _SKELETON_CACHE_MAX = 48
 # _twFlush + rAF 帧级揭示）；② FLIP 位移动画与动画串行队列（_FLIP_JS：
 # _flipCapture/_flipPlay/_animEnqueue）。旧骨架两者都没有 —— 流式仍是整块蹦字、
 # 结束态三动画叠加跳变 —— 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 28
+_SKELETON_CACHE_VERSION = 29
 
 
 def _js_literal(value) -> str:
@@ -4734,6 +4734,19 @@ class _DialogEventFilter(QObject):
 # 模块级单例：全局仅此一个 QApplication 级事件过滤器
 _dialog_event_filter = _DialogEventFilter()
 
+# D3D11/WARP 单纹理物理上限 16384px，留余量取 16000（见 CodeWebViewer.MAX_HEIGHT 注释）
+_PHYSICAL_TEXTURE_LIMIT = 16000
+
+
+def _logical_height_cap(dpr, physical_limit: int = _PHYSICAL_TEXTURE_LIMIT) -> int:
+    """DPR → 不超物理纹理上限的逻辑高度（纯函数，供单测复用）。
+
+    Chromium 离屏表面按「逻辑尺寸 × DPR」分配物理纹理，逻辑上限必须随本机
+    缩放收缩。异常 DPR（0/负数）按 1.0 处理；结果保底 2000 保证可用性。
+    """
+    dpr = float(dpr) if dpr and float(dpr) > 0 else 1.0
+    return max(2000, int(physical_limit / dpr))
+
 
 class CodeWebViewer(QWebEngineView):
     contentHeightChanged = pyqtSignal(int)
@@ -4774,6 +4787,17 @@ class CodeWebViewer(QWebEngineView):
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
+        # 🛡️ 物理纹理上限钳制：Chromium 离屏表面按「逻辑尺寸 × DPR」分配物理纹理，
+        # D3D11/WARP 单纹理硬上限 16384px。225% 缩放（DPR 2.25）下 10000 逻辑
+        # → 22500 物理 → ResizeOffscreenFramebuffer 分配失败 → GPU 上下文丢失
+        # （gles2_cmd_decoder "excessive dimensions" → MakeCurrent failed for GetTextureQt）。
+        # 逻辑上限随本机 DPR 收缩，保物理 ≤ 16000（留 384 余量）；
+        # 超限内容回退内滚安全网（wheelEvent 内外转发，见 MAX_HEIGHT 注释）。
+        # 实例属性覆盖类常量：下方 resize/setFixedHeight 钳制与骨架 CSS
+        # max-height 均按 self.MAX_HEIGHT 取值，全部自动生效。
+        self.MAX_HEIGHT = min(
+            CodeWebViewer.MAX_HEIGHT, _logical_height_cap(self.devicePixelRatioF())
+        )
         # [B4-强回收] renderer 进程 PID（强回收层 kill 离屏进程用；0 = 未就绪/已清理）
         self._renderer_pid: int = 0
         # [B3] 连接线程池渲染完成信号（worker 线程 emit → 本槽在主线程执行）
