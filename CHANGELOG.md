@@ -1,6 +1,12 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### ✨ 新功能 (New Features)
+
+- **侧边栏智能折叠/展开** (`app/widgets/tab_panel.py`, `app/widgets/tab_manager_window.py`, `app/utils/config.py`, `tests/widgets/test_sidebar_smart_collapse.py`): 四条规则让左右折叠区「懂用户」—— ① **挤压即折叠**：折叠阈值 100px → 200px（对齐面板展开最小可用宽），面板被挤压到最小宽直接折叠成窄条，不再经历「压扁但没折叠」的废物区间，滞回区同步上移（展开 ≥210）；② **双面板协调（右先折）**：窗口放不下「会话栏 + 聊天区 + 工作台」时先瞬切收起工作台让位，释放后够用则保持会话栏展开，仍不够才折会话栏，恢复反向（先展左、再富余展右）；③ **空间恢复即展开**：自动展开的窗口增长门槛 200px → 80px（保留滞后防弹回），手动折叠永不自动展开（删除原 growth 豁免）；④ **启动记忆**：新增 `[UI] SidebarCollapsed` / `[UI] WorkbenchVisible` 两配置项，只记用户手动终态（按钮/拖拽松手落盘），挤压自动折叠不落盘，重启恢复上次选择；窗口大小/位置仍固定默认。19 条新测试 + 既有滞回回归适配。
+
 ## [v0.5.10] - 2026-09-11 (重新发布 #5)
 
 自上一版本以来的变更 | 提交数：97 · 文件变更：477 · +31646/-28793 | 贡献者：dingma, mading
