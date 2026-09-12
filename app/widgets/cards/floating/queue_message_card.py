@@ -178,12 +178,12 @@ class QueueMessageCard(QWidget):
     def _build_row(self, entry: dict) -> QWidget:
         row = QWidget(self._list_container)
         row.setObjectName("queueRow")
-        row.setProperty("msg_id", msg_id)
         layout = QHBoxLayout(row)
         layout.setContentsMargins(16, 10, 12, 10)
         layout.setSpacing(4)
         msg_id = str(entry.get("id", ""))
         raw_text = str(entry.get("text", ""))
+        row.setProperty("msg_id", msg_id)
 
         text_label = QLabel(summarize_entry_text(raw_text), row)
         text_label.setObjectName("queueRowText")
