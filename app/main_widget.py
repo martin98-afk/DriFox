@@ -16921,14 +16921,25 @@ class OpenAIChatToolWindow(ToolWindow):
     # ── 繁忙时发送：插话 / 排队 ──────────────────────────────────────
 
     def _enqueue_pending_message(self, user_text: str, image_paths: list):
-        """繁忙时排队发送：消息进 UI 队列 + 排队卡片；worker 自然结束后自动续发"""
+        """繁忙时排队发送：消息进 UI 队列 + 排队卡片；worker 自然结束后自动续发。
+
+        🚫 不提前创建用户气泡：消息尚未进入对话流，用户卡片在实际发送时
+        （立即插入 / 自动续发）再创建，避免「还没发就在消息列表显示」。
+        """
         self._pending_message_seq += 1
         self._pending_message_queue.append(
             {"id": f"q{self._pending_message_seq}", "text": user_text, "image_paths": list(image_paths)}
         )
-        self._append_user_message(user_text, image_attachments=image_paths or None)
-        if self._should_follow_bottom():
-            self._scroll_to_bottom()
+        self._refresh_queue_card()
+
+    def _on_queue_edit_requested(self, msg_id: str, new_text: str):
+        """排队卡片编辑保存：更新队列条目文本并刷新卡片"""
+        new_text = new_text.strip()
+        if not new_text:
+            return
+        entry = next((e for e in self._pending_message_queue if e["id"] == msg_id), None)
+        if entry is not None:
+            entry["text"] = new_text
         self._refresh_queue_card()
 
     def _interject_message(self, user_text: str, image_paths: list):
@@ -16993,7 +17004,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if entry is None:
             return
         if self._is_streaming:
-            self._interject_entry(entry)
+            self._interject_entry(entry, show_user_card=True)
         else:
             # 兜底：worker 已结束（理论上队首由自动续发出队）→ 直接作为新一轮发送
             self._continue_from_entry(entry)
@@ -17009,7 +17020,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._continue_from_entry(entry)
 
     def _continue_from_entry(self, entry: dict):
-        """把一条排队消息作为新一轮发送（用户卡片已在排队入队时创建，不重建）"""
+        """把一条排队消息作为新一轮发送（此刻才创建用户气泡 + 新回复卡）"""
         user_text = str(entry.get("text", ""))
         image_paths = entry.get("image_paths") or []
         llm_config = self._get_current_model_config() or {}
@@ -17020,6 +17031,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 image_paths=list(image_paths),
                 model_name=str(llm_config.get("模型名称", "") or ""),
             )
+        # 用户气泡在实际发送时才进入消息列表（排队时未显示）
+        self._append_user_message(user_text, image_attachments=image_paths or None)
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
             config_id=self._current_provider_name,
@@ -18305,6 +18320,11 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 🆕 流式结束：标记流式中 hook 注入的团队邮件为已完成
         self._finalize_injected_team_mails()
+
+        # 繁忙时排队消息：本轮自然结束后自动续发下一条（复用 worker 语义 = 无缝开新一轮）。
+        # 手动停止（cancel 路径）不走本回调，队列保留待手动处理。
+        if self._pending_message_queue:
+            QTimer.singleShot(0, self._continue_from_queue)
 
         self._focus_input_if_active()
 

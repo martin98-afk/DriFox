@@ -178,6 +178,7 @@ class InputCardModule(UIModule):
         host._queue_message_card.setVisible(False)
         host._queue_message_card.insertRequested.connect(host._on_queue_insert_requested)
         host._queue_message_card.removeRequested.connect(host._on_queue_remove_requested)
+        host._queue_message_card.editRequested.connect(host._on_queue_edit_requested)
         mgr.register_card(host._window_id, ContainerType.BOTTOM, "message_queue", host._queue_message_card)
         host._bottom_card_container.add_card("message_queue", host._queue_message_card)
 
