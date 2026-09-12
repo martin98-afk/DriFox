@@ -1124,6 +1124,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 无需重复执行同步子进程（最坏可达 3s 阻塞主线程，拖慢窗口出现速度）。
         self._is_duplicate_window = source_window is not None
         self._source_window = source_window
+        # 批4：per-window 延迟任务队列（必须在 super().__init__ 触发 setup_ui
+        # 之前创建：setup_ui 内 N9/N10/N11 的注册依赖此实例）
+        from app.core.deferred_task_queue import DeferredTaskQueue
+
+        self._deferred_queue = DeferredTaskQueue()
+        self._pending_agent_switch = None
         # ★ singleton 信号连接跟踪（销毁时统一断开，防泄漏）
         # 注意：self._singleton_connections 是纯 Python 属性，可先于 super().__init__()
         # 设置；但 self.destroyed 是 QObject 内置信号，其 .connect() 必须在父类
@@ -1134,6 +1140,8 @@ class OpenAIChatToolWindow(ToolWindow):
         super().__init__(homepage)
         # 父类 QObject.__init__ 已执行，此时连接 destroyed 信号安全
         self.destroyed.connect(self._disconnect_singleton_connections)
+        # 批4：窗口销毁 → 队列停止（未执行 critical 丢弃 + warning）
+        self.destroyed.connect(self._deferred_queue.stop)
         # 需要在 super().__init__() 之前初始化所有依赖项
         self.homepage = homepage  # 必须在 super() 之前设置，供 backend.initialize 使用
         self.cfg = Settings.get_instance()
@@ -1181,8 +1189,54 @@ class OpenAIChatToolWindow(ToolWindow):
             get_model_config=self._get_current_model_config,
             workdir=initial_workdir,
         )
-        # 🛡️ 将 controller 绑定到工具控制卡片(卡片在 super().__init__ 中已创建,
-        # 此时 controller 还没建好,需要延迟绑定)
+        # ── 批4：backend 延迟创建迁移至队列（N16-N19）+ 前置保护任务（4-0a/N21）──
+        q = self._deferred_queue
+        q.register(
+            "create_memory_manager",
+            lambda: self._safe_timer_call(self.backend._deferred_create_memory_manager),
+            priority="idle",
+            delay_ms=0,
+        )
+        q.register(
+            "create_tool_executor",
+            lambda: self._safe_timer_call(self.backend._deferred_create_tool_executor),
+            priority="critical",
+            delay_ms=200,
+        )
+        q.register(
+            "create_engines",
+            lambda: self._safe_timer_call(self.backend._deferred_create_engines),
+            priority="critical",
+            delay_ms=400,
+        )
+        q.register(
+            "create_sub_agent_and_misc",
+            lambda: self._safe_timer_call(self.backend._deferred_create_sub_agent_and_misc),
+            priority="idle",
+            delay_ms=600,
+        )
+        # 4-0a：ChatEngine(N18) 就绪后补执行暂存的智能体切换（O8）
+        q.register(
+            "apply_pending_agent",
+            lambda: self._safe_timer_call(self._apply_pending_agent_switch),
+            priority="critical",
+            delay_ms=0,
+        )
+        # N21：executor 就绪后 workdir 再同步（非复制/复制窗共用；O9）。
+        # T7 的 tool_executor_ready 信号兜底保留（双通道，showEvent 处连接）。
+        q.register(
+            "resync_workdir_after_executor",
+            lambda: self._safe_timer_call(self._sync_working_directory),
+            priority="critical",
+            delay_ms=0,
+        )
+        q.add_order_constraint("create_memory_manager", "create_tool_executor")  # O2
+        q.add_order_constraint("create_tool_executor", "create_engines")  # O3
+        q.add_order_constraint("create_engines", "apply_pending_agent")  # O8
+        q.add_order_constraint("create_tool_executor", "resync_workdir_after_executor")  # O9
+        q.start()
+        # 🛡️ 将 controller 绑定到工具控制卡片(批1 懒创建后卡片通常尚未创建，
+        # ensure 内为主绑定路径；此处仅兜底极端时序——卡片已建而 controller 后到)
         if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
             self._tool_control_card.set_controller(self._tool_permission_controller)
         # 注册子智能体默认模型解析回调（用于 subagent_para/dag 自动使用默认模型）
@@ -1448,7 +1502,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 避免每个后台 tab 都全量构建重型卡片。
         self._deferred_build_pending = False
         self._settings_popup_pending = False
-        QTimer.singleShot(800, self._deferred_build_cards)
+        # 批4 N9：迁移至队列（O4：init_ui_plugins_deferred 之后）
+        self._deferred_queue.register(
+            "deferred_build_cards",
+            lambda: self._safe_timer_call(self._deferred_build_cards),
+            priority="idle",
+            delay_ms=800,
+        )
 
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
     _global_auto_update_checked = False
@@ -1600,16 +1660,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 注册/入容器在 _ensure_xxx_card() 中按需执行，避免 setup_ui 关键路径上构建。
 
         # ===== BottomCardContainer (chatscroll 下方) =====
-        # Question: 强制覆盖所有其他卡片
+        # Question: 强制覆盖所有其他卡片（批1 懒创建：注册/入容器移入
+        # _ensure_question_floating_widget()，弹出链入口兜底）
         # Tool/SubAgent: 实时卡片
         # History/Memory/ModelConfig: 系统卡片
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "question",
-            self._question_floating_widget,
-        )
-        self._bottom_card_container.add_card("question", self._question_floating_widget)
 
         mgr.register_card(
             self._window_id,
@@ -1632,14 +1686,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 六张系统卡片框架已懒创建（P0-1），注册/入容器在各自 _ensure_xxx_card() 中执行，
         # 由 _deferred_build_cards 链预构建 + 打开入口兜底，避免 setup_ui 关键路径开销。
 
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "tool_control",
-            self._tool_control_card,
-            system_card=True,
-        )
-        self._bottom_card_container.add_card("tool_control", self._tool_control_card)
+        # 注：tool_control 卡批1 懒创建，注册/入容器在 _ensure_tool_control_card() 中执行，
+        # _toggle_tool_control_card 入口兜底。
 
         # 注：model_selector 卡片框架懒创建，注册/入容器见 _ensure_model_selector_card()
 
@@ -1740,6 +1788,65 @@ class OpenAIChatToolWindow(ToolWindow):
             self._window_id, ContainerType.TOP, "history_questions", self._history_questions_card, system_card=True
         )
         self._top_card_container.add_card("history_questions", self._history_questions_card)
+
+    def _ensure_tool_control_card(self):
+        """工具控制卡片懒创建（批1）：构造/接线/注册按需执行
+
+        原 system_cards_module.build 构造期同步创建（卡+下拉+内容区，关键路径开销），
+        现由入口（_toggle_tool_control_card / refresh / controller 绑定兜底）ensure。
+        """
+        if getattr(self, "_tool_control_card", None) is not None:
+            return
+        from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
+
+        self._tool_control_card = ToolControlCardFrame(self)
+        self._tool_control_card.setObjectName("toolControlCard")
+        self._tool_control_card.setMinimumHeight(250)
+        self._tool_control_card.setVisible(False)
+        self._tool_control_card.closed.connect(
+            lambda: (
+                self._card_manager.hide_card("tool_control", self._window_id),
+                self._restore_after_system_close(),
+            )
+        )
+        self._tool_control_card.togglesChanged.connect(lambda _: self._refresh_tool_toggle_btn())
+        # controller 若已就绪（__init__ 早期创建，常规路径恒成立）立即绑定
+        if getattr(self, "_tool_permission_controller", None) is not None:
+            self._tool_control_card.set_controller(self._tool_permission_controller)
+        if not getattr(self, "_tool_control_registered", False):
+            self._tool_control_registered = True
+            self._card_manager.register_card(
+                self._window_id,
+                ContainerType.BOTTOM,
+                "tool_control",
+                self._tool_control_card,
+                system_card=True,
+            )
+            self._bottom_card_container.add_card("tool_control", self._tool_control_card)
+
+    def _ensure_question_floating_widget(self):
+        """问题悬浮卡懒创建（批1）：构造/接线/注册按需执行
+
+        弹出链入口（_on_question_asked / _on_permission_approval_requested）兜底 ensure。
+        """
+        if getattr(self, "_question_floating_widget", None) is not None:
+            return
+        from app.widgets.cards.floating.question_floating_widget import QuestionFloatingWidget
+
+        self._question_floating_widget = QuestionFloatingWidget(self)
+        self._question_floating_widget.setVisible(False)
+        self._question_floating_widget.answered.connect(self._on_question_answered)
+        self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
+        self._question_floating_widget.previewRequested.connect(self._on_question_preview_requested)
+        if not getattr(self, "_question_floating_registered", False):
+            self._question_floating_registered = True
+            self._card_manager.register_card(
+                self._window_id,
+                ContainerType.BOTTOM,
+                "question",
+                self._question_floating_widget,
+            )
+            self._bottom_card_container.add_card("question", self._question_floating_widget)
 
     def _ensure_model_config_card(self):
         """确保模型配置卡片框架已创建（内容由 _build_deferred_card_model_config 填充）"""
@@ -2358,6 +2465,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 判断是否为复制/分支窗口（__init__ 中通过 source_window 参数设置）
         is_duplicate = getattr(self, "_is_duplicate_window", False)
+        q = self._deferred_queue
 
         # 🐛 修复（启动时工作目录未定义）：workdir 同步提前到会话创建之前执行。
         # 原先非复制窗口延迟 2000ms，而会话创建 QTimer(0) 先跑：0~2s 窗口内
@@ -2368,7 +2476,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 事件循环执行，不阻塞首帧绘制。singleShot 同延迟按注册顺序执行，
         # 故此调用必须先于下方会话加载定时器注册。
         if not is_duplicate:
-            QTimer.singleShot(0, lambda: self._safe_timer_call(self._sync_working_directory))
+            # 批4 N1：早同步（executor 未就绪时判空空转，真正同步由 N21 承担）
+            q.register(
+                "sync_working_directory",
+                lambda: self._safe_timer_call(self._sync_working_directory),
+                priority="critical",
+                delay_ms=0,
+            )
+            # 信号兜底（批4 附言：与 N21 双通道，sync 幂等无害）
+            self.backend.tool_executor_ready.connect(self._on_tool_executor_ready_for_sync)
 
         # 如果有分支数据，延迟调用分支会话处理，避免与 _restore_latest_or_create_session 冲突
         # 注：_load_agent_list 由 _create_new_session / _apply_branch_or_create_session 内部调用，此处不需要重复触发
@@ -2376,9 +2492,19 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🆕 流式保护：由 TabManagerWindow.spawn_tab 注入的目标历史会话，
             # 直接加载，跳过默认空会话创建，避免历史列表出现多余空会话。
             _rec = self._target_session_record
-            QTimer.singleShot(50, lambda: self._safe_timer_call(lambda: self._load_session_from_record(_rec)))
+            q.register(
+                "load_session_from_record",
+                lambda: self._safe_timer_call(lambda: self._load_session_from_record(_rec)),
+                priority="critical",
+                delay_ms=50,
+            )
         elif getattr(self, "_branch_session_data", None):
-            QTimer.singleShot(50, lambda: self._safe_timer_call(self._apply_branch_or_create_session))
+            q.register(
+                "apply_branch_or_create_session",
+                lambda: self._safe_timer_call(self._apply_branch_or_create_session),
+                priority="critical",
+                delay_ms=50,
+            )
         else:
             # 🆕 4a：创建团队场景——4 个窗口 add_window→showEvent 全在同一事件循环批次内
             # 排队，全部 QTimer(0) 会让 SessionStart→BuildSystemPrompt hook 背靠背同步
@@ -2386,31 +2512,71 @@ class OpenAIChatToolWindow(ToolWindow):
             # 提前写入 _initial_session_delay_ms（默认 0 行为不变），使各窗的
             # _create_new_session 错峰触发，UI 在创建期间可响应。
             _init_session_delay = int(getattr(self, "_initial_session_delay_ms", 0) or 0)
-            QTimer.singleShot(_init_session_delay, lambda: self._safe_timer_call(self._create_new_session))
+            q.register(
+                "create_new_session",
+                lambda: self._safe_timer_call(self._create_new_session),
+                priority="critical",
+                delay_ms=_init_session_delay,
+            )
 
         # 性能优化：复制窗口已从源窗口复制了 _valid_configs 和 workdir，
         # 跳过从磁盘重载模型配置和工作目录，直接进入完成状态
         if is_duplicate:
-            QTimer.singleShot(0, lambda: self._safe_timer_call(self._on_initialization_complete))
+            q.register(
+                "initialization_complete",
+                lambda: self._safe_timer_call(self._on_initialization_complete),
+                priority="critical",
+                delay_ms=0,
+            )
             # 【按项目定义】复制窗口 workdir 同步：
             # _duplicate_window 不再复制源窗口 workdir（tool_executor 延迟创建
-            # 时 set_workdir 也会被跳过），此处延迟到 tool_executor 创建后，
-            # 由 _sync_working_directory 按当前项目从 DB 读取项目定义的工作目录
+            # 时 set_workdir 也会被跳过），需等 tool_executor 就绪后由
+            # _sync_working_directory 按当前项目从 DB 读取项目定义的工作目录
             # （_current_workdir 为空 → get_working_directory 兜底 → 临时目录），
             # 保证 project_root 与项目一致，且复制链不传播错误路径。
-            QTimer.singleShot(500, lambda: self._safe_timer_call(self._sync_working_directory))
+            # 批4 N6：复制窗 workdir 同步由 N21（resync_workdir_after_executor，
+            # O9 保证 executor 已就绪）承担，不再有独立定时注册；T7 信号兜底保留。
+            self.backend.tool_executor_ready.connect(self._on_tool_executor_ready_for_sync)
         else:
             # [PERF] 延迟非关键初始化到窗口首帧绘制之后，让用户先看到可交互的 UI
             # _load_model_configs 遍历所有服务商配置（50-200ms），
             # _sync_working_directory 文件系统检测（20-50ms），
             # 均匀分散到 1.5s-2.5s 窗口内，避免同时爆发导致 UI 冻结
-            QTimer.singleShot(1500, lambda: self._safe_timer_call(self._load_model_configs))
-            # 工作目录同步已提前到上方 QTimer(0)（先于会话创建，修复启动时
+            q.register(
+                "load_model_configs",
+                lambda: self._safe_timer_call(self._load_model_configs),
+                priority="idle",
+                delay_ms=1500,
+            )
+            # 工作目录同步已提前到上方 N1（先于会话创建，修复启动时
             # workdir 未定义），此处不再重复调度。
-            # 初始化完成后解除保护
-            QTimer.singleShot(2500, lambda: self._safe_timer_call(self._on_initialization_complete))
+            # 初始化完成后解除保护（N8 屏障：critical 全完成后执行）
+            q.register(
+                "initialization_complete",
+                lambda: self._safe_timer_call(self._on_initialization_complete),
+                priority="critical",
+                delay_ms=2500,
+            )
+        # ── 批4：保序约束（O1/O4/O5）+ 屏障（O7）+ 启动（幂等）──
+        q.add_order_constraint("sync_working_directory", "load_session_from_record")  # O1
+        q.add_order_constraint("sync_working_directory", "apply_branch_or_create_session")  # O1
+        q.add_order_constraint("sync_working_directory", "create_new_session")  # O1
+        q.add_order_constraint("init_ui_plugins_deferred", "deferred_build_cards")  # O4
+        q.add_order_constraint("models_dev_sync", "load_model_configs")  # O5
+        q.set_barrier("initialization_complete")  # O7
+        q.start()
+
         self._connect_opacity_signal()
         super().showEvent(event)
+
+    def _on_tool_executor_ready_for_sync(self):
+        """tool_executor 延迟创建完成后：执行复制窗口的 workdir 同步。
+
+        原 QTimer(500) 固定等待的事件驱动替代。singleShot(0) 排到下一轮事件
+        循环，让创建批收尾（set_llm_config_getter 等后续装配）先行完成。
+        receiver=self，窗口销毁时 Qt 自动断开连接。
+        """
+        QTimer.singleShot(0, lambda: self._safe_timer_call(self._sync_working_directory))
 
     def _on_initialization_complete(self):
         """初始化完成后调用，解除保护标志"""
@@ -2423,12 +2589,28 @@ class OpenAIChatToolWindow(ToolWindow):
         # 复制/分支窗口的 _valid_configs（含模型列表）已在 _duplicate_window 中
         # 从源窗口直接复制，不需要再重新拉取 OpenCode 免费模型列表，避免冗余网络请求和日志
         if not getattr(self, "_is_duplicate_window", False):
-            QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
+            # 批4 N14/N15：迁移至队列（屏障后动态注册）
+            self._deferred_queue.register(
+                "opencode_model_refresh",
+                lambda: self._safe_timer_call(self._async_refresh_opencode_models),
+                priority="idle",
+                delay_ms=3000,
+            )
             # 设置弹窗在 3500ms 构建，提醒在 5s 后弹（确保弹窗已就绪）
-            QTimer.singleShot(5000, lambda: self._safe_timer_call(self._check_gitee_sync_reminder))
-        # models.dev 动态数据后台预热（内存缓存未填充才发网络，模块级单飞去重；
-        # 早于 1500ms _load_model_configs 的首次主线程读取，UI 路径零阻塞）
-        QTimer.singleShot(1000, lambda: self._safe_timer_call(self._start_models_dev_sync))
+            self._deferred_queue.register(
+                "gitee_sync_reminder",
+                lambda: self._safe_timer_call(self._check_gitee_sync_reminder),
+                priority="idle",
+                delay_ms=5000,
+            )
+        # 批4 N13：models.dev 动态数据后台预热（内存缓存未填充才发网络，模块级
+        # 单飞去重；早于 1500ms _load_model_configs 的首次主线程读取，UI 零阻塞）
+        self._deferred_queue.register(
+            "models_dev_sync",
+            lambda: self._safe_timer_call(self._start_models_dev_sync),
+            priority="idle",
+            delay_ms=1000,
+        )
 
     @classmethod
     def _on_class_cleanup_timer(cls):
@@ -2964,7 +3146,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 此后 register_all_commands / _register_command_shortcuts 启动期零调用——
         # 命令表仅剩 UI 卡片命令（无 shortcut），全部命令快捷键失效且不自愈，
         # 只能靠插件热重载事件偶然补救（症状：干净启动后快捷键全灭）。
-        QTimer.singleShot(100, self._init_builtin_commands)
+        # 批4 N10：迁移至队列（idle 100ms；N12 双注册中 module 侧已物理删除）
+        self._deferred_queue.register(
+            "init_builtin_commands",
+            lambda: self._safe_timer_call(self._init_builtin_commands),
+            priority="idle",
+            delay_ms=100,
+        )
 
         # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，
@@ -2976,7 +3164,13 @@ class OpenAIChatToolWindow(ToolWindow):
             ui_registry.set_main_widget(self)
             # 设置上下文提供者：UI 插件首次显示时通过 set_context() 获取当前项目信息
             ui_registry.set_context_provider(self._build_ui_context, self._window_id)
-            QTimer.singleShot(0, self._init_ui_plugins_deferred)
+            # 批4 N11：迁移至队列（idle 0ms）
+            self._deferred_queue.register(
+                "init_ui_plugins_deferred",
+                lambda: self._safe_timer_call(self._init_ui_plugins_deferred),
+                priority="idle",
+                delay_ms=0,
+            )
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
@@ -5213,6 +5407,36 @@ class OpenAIChatToolWindow(ToolWindow):
 
         _run_new_task_steps(0)
 
+    def _team_join_schedule_retry(self, win, agent_name, window_id, track_arrange, keep_team_name):
+        """C4 就绪轮询：安排一次延迟重试；耗尽则放弃并收口计数（E3）"""
+        retries = getattr(win, "_team_join_retries", 0)
+        if retries < self._TEAM_JOIN_MAX_RETRIES:
+            win._team_join_retries = retries + 1
+            logger.warning(
+                f"[_join_new_window_for_template] window {window_id} backend/chat_engine 未就绪，"
+                f"重试 {win._team_join_retries}/{self._TEAM_JOIN_MAX_RETRIES}"
+            )
+            QTimer.singleShot(
+                self._TEAM_JOIN_RETRY_INTERVAL_MS,
+                lambda w=win, a=agent_name, wid=window_id, ta=track_arrange, kn=keep_team_name: (
+                    self._join_new_window_for_template(w, a, wid, ta, kn)
+                ),
+            )
+            return
+        logger.error(f"[_join_new_window_for_template] window {window_id} backend 重试耗尽，放弃")
+        # C4a：watcher 不依赖 backend，无条件补启动（缺则任务邮件永不主动触发；
+        # 有 _is_destroyed 守卫 + _start_team_watcher 内部 try/except）
+        try:
+            if not getattr(win, "_is_destroyed", False):
+                win._start_team_watcher()
+        except Exception:
+            pass
+        # E3：重试耗尽同样收口计数
+        if track_arrange:
+            self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
+            if self._pending_arrange_count == 0:
+                self._do_team_window_arrange()
+
     def _join_new_window_for_template(
         self,
         win,
@@ -5256,22 +5480,26 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 补查 chat_engine，就绪后再回调，从根上消除竞态。
                 or not win.backend.chat_engine
             ):
-                # C4 就绪轮询：backend/chat_engine 未就绪 → 重试而非直接放弃
-                retries = getattr(win, "_team_join_retries", 0)
-                if retries < self._TEAM_JOIN_MAX_RETRIES:
-                    win._team_join_retries = retries + 1
-                    logger.warning(
-                        f"[_join_new_window_for_template] window {window_id} backend/chat_engine 未就绪，"
-                        f"重试 {win._team_join_retries}/{self._TEAM_JOIN_MAX_RETRIES}"
-                    )
-                    QTimer.singleShot(
-                        self._TEAM_JOIN_RETRY_INTERVAL_MS,
-                        lambda w=win, a=agent_name, wid=window_id, ta=track_arrange, kn=keep_team_name: (
-                            self._join_new_window_for_template(w, a, wid, ta, kn)
-                        ),
+                # 批4 4-0b：同步补建延迟组件（DeferredTaskQueue 下 backend 组件
+                # 可能仍在队列等待；发送路径同款 ensure 兜底）。补建后复查：
+                # 就绪则当轮继续 join（重试计数不增）；仍不就绪才进入 C4 轮询。
+                try:
+                    if getattr(win, "backend", None):
+                        win.backend.ensure_deferred_components()
+                except Exception:  # noqa: BLE001
+                    logger.warning("[_join_new_window_for_template] ensure_deferred_components 失败", exc_info=True)
+                if (
+                    getattr(win, "backend", None)
+                    and win.backend.agent_manager
+                    and win.backend.chat_engine
+                ):
+                    pass  # 补建成功 → 当轮继续（不增计数、不排队重试）
+                else:
+                    self._team_join_schedule_retry(
+                        win, agent_name, window_id, track_arrange, keep_team_name
                     )
                     return
-                logger.error(f"[_join_new_window_for_template] window {window_id} backend 重试耗尽，放弃")
+
                 # C4a：watcher 不依赖 backend，无条件补启动（缺则任务邮件永不主动触发；
                 # 有 _is_destroyed 守卫 + _start_team_watcher 内部 try/except）
                 try:
@@ -8224,6 +8452,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_tool_control_card(self):
         """切换工具控制卡片的显示"""
+        self._ensure_tool_control_card()
         if not self._card_manager.is_card_visible("tool_control", self._window_id):
             # 通知 card 从 controller 拉取最新状态
             self._tool_control_card.set_toggles(self._tool_permission_controller.get_toggles())
@@ -8273,9 +8502,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not hasattr(self, "_tool_permission_controller") or not self._tool_permission_controller:
             return
         self._tool_permission_controller.restore_user()
-        # 刷新卡片和按钮
-        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
-            self._tool_control_card.refresh()
+        # 刷新卡片和按钮（懒创建：ensure 兜底，刷新不静默丢失）
+        self._ensure_tool_control_card()
+        self._tool_control_card.refresh()
         self._refresh_tool_toggle_btn()
 
     def _load_model_config_to_card(self):
@@ -10463,6 +10692,14 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 btn.setStyleSheet(data["style"])
 
+    def _apply_pending_agent_switch(self):
+        """批4 4-0a：ChatEngine 就绪后补执行暂存的智能体切换（O8 队列任务体）"""
+        pending = getattr(self, "_pending_agent_switch", None)
+        if not pending:
+            return
+        self._pending_agent_switch = None
+        self._on_agent_changed(pending)
+
     def _on_agent_changed(self, agent_name: str, skip_welcome: bool = False):
         """智能体切换处理
 
@@ -10473,7 +10710,13 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if getattr(self, "_is_destroyed", False):
             return
-        if not agent_name or not self.backend.chat_engine:
+        if not agent_name:
+            return
+        if not self.backend.chat_engine:
+            # 批4 4-0a：引擎未就绪（ChatEngine 延迟创建中）不再静默丢弃切换，
+            # 暂存后由队列 apply_pending_agent 任务在 create_engines(N18) 完成
+            # 后补执行（保序对 O8：create_engines → apply_pending_agent）。
+            self._pending_agent_switch = agent_name
             return
 
         logger.info(f"[_on_agent_changed] Switching from {self._current_agent} to {agent_name}")
@@ -16603,8 +16846,8 @@ class OpenAIChatToolWindow(ToolWindow):
         logger.info(f"[AgentCommand] 已注入智能体 '{agent_name}' 的工具权限")
 
         # 主动刷新工具控制卡片(确保立即显示 agent 权限,避免信号时序问题)
-        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
-            self._tool_control_card.refresh()
+        self._ensure_tool_control_card()
+        self._tool_control_card.refresh()
 
     @staticmethod
     def _encode_image_attachments_to_multimodal(user_text: str, image_paths: list, model_name: str) -> list | None:
@@ -19153,6 +19396,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_question_asked(self, tool_call_id: str, questions: list, extra: dict = None):
         if getattr(self, "_is_destroyed", False):
             return
+        self._ensure_question_floating_widget()
         self._set_ai_state("question")  # 桌宠：等待用户回答
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         # （工具栏是 self 的直接子控件，不在 _bottom_input_container 里，
@@ -19287,6 +19531,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         if getattr(self, "_is_destroyed", False):
             return
+        self._ensure_question_floating_widget()
         # 🛠️ 与 _on_question_asked 对齐：必须先切到 question 状态，
         # 否则 TabPanel 听不到 ai_state_changed 变化、不会在 Tab 边框
         # 渲染问题动画，用户在多 Tab 场景下分不清"哪个窗口在等权限"。
@@ -19517,19 +19762,24 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         Colors.refresh()
         # 容器 — 仅保留透明占位（占 layout 宽度，无视觉装饰）
-        self._project_branch_container.setStyleSheet("""
+        # 批2：样式串缓存守卫（重复刷新链——build 期与 _build_new_window 复制后
+        # 各调一次本方法，串未变时跳过 setStyleSheet）
+        container_sheet = """
             QFrame#projectBranchContainer {{
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 6px;
             }}
-        """)
+        """
+        if getattr(self, "_last_pb_container_sheet", None) != container_sheet:
+            self._last_pb_container_sheet = container_sheet
+            self._project_branch_container.setStyleSheet(container_sheet)
         # 项目标签 — 面包屑第一级（粗体 + 项目专属色）
         project_color = get_project_color(self._current_project)
         # 同步更新方形 avatar
         if hasattr(self, "_project_avatar"):
             self._project_avatar.set_project(self._current_project, project_color)
-        self._project_label.setStyleSheet(f"""
+        label_sheet = f"""
             QLabel {{
                 color: {project_color};
                 {get_font_family_css()}
@@ -19540,7 +19790,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 border: none;
                 border-radius: 4px;
             }}
-        """)
+        """
+        if getattr(self, "_last_pb_label_sheet", None) != label_sheet:
+            self._last_pb_label_sheet = label_sheet
+            self._project_label.setStyleSheet(label_sheet)
         # 同步刷新分支按钮样式
         self._refresh_branch_widget_style()
 

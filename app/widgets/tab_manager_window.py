@@ -592,6 +592,9 @@ class TabManagerWindow(FramelessWindow):
     """Tab 管理器宿主窗口（单例）"""
 
     _instance: Optional["TabManagerWindow"] = None
+    # 批5 5b/5c：壳先行（首窗构造中）状态标记
+    _first_window_ready: bool = False
+    _pending_new_tab_request: bool = False
     # 标题栏拖拽由 Windows 原生管理（HTCAPTION + WS_CAPTION），Python 不干预
     # Windows 原生移动/缩放模态循环消息：拖拽起止的权威信号，
     # 用于替代 moveEvent + 防抖定时器的"猜测式"拖拽检测
@@ -4000,20 +4003,46 @@ class TabManagerWindow(FramelessWindow):
         except Exception as e:
             logger.warning(f"[TabManagerWindow] 打开历史会话失败: {e}")
 
-    def refresh_workspace_tree(self):
-        """刷新左侧工作区树（历史会话增删改后调用）"""
+    def refresh_workspace_tree(self, force: bool = False):
+        """刷新左侧工作区树（历史会话增删改后调用）
+
+        批2：默认 250ms 防抖合并（连续新建/关闭 tab、批量数据变更时整树
+        重建收敛为一次）；force=True 跳过防抖立即执行。
+        """
+        panel = getattr(self, "_tab_panel", None)
+        if panel is None or not hasattr(panel, "refresh_tree"):
+            return
+        if force:
+            panel.refresh_tree()
+            return
+        timer = getattr(self, "_tree_refresh_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(250)
+            timer.timeout.connect(self._flush_tree_refresh)
+            self._tree_refresh_timer = timer
+        timer.start()
+
+    def _flush_tree_refresh(self):
+        """树刷新防抖到期：真正执行 refresh_tree"""
         panel = getattr(self, "_tab_panel", None)
         if panel is not None and hasattr(panel, "refresh_tree"):
             panel.refresh_tree()
 
     def _on_tab_count_changed_for_tree(self, _count: int):
-        """Tab 数量变化 → 刷新工作区树（历史会话与已打开 Tab 会互相挤位）"""
+        """Tab 数量变化 → 刷新工作区树（批2：250ms 防抖合并连续新建/关闭）"""
         panel = getattr(self, "_tab_panel", None)
         if panel is not None and getattr(panel, "current_mode", lambda: "list")() == "tree":
             self.refresh_workspace_tree()
 
     def _on_new_tab_requested(self):
         """新建窗口 — 走当前窗口的复制逻辑，复用后端状态"""
+        # 批5 5b：壳期（首窗构造中）点击 + → 排队，ready 后由
+        # _mark_first_window_ready 补执行恰一次
+        if not getattr(self, "_first_window_ready", True):
+            self._pending_new_tab_request = True
+            return
         current = self.get_current_window()
         if current is not None:
             # 从当前窗口复制（保留后端上下文）并新开标签页
@@ -4027,6 +4056,53 @@ class TabManagerWindow(FramelessWindow):
             self.add_window(new_window)
             if not self.isVisible():
                 self.show()
+
+    def _mark_first_window_ready(self):
+        """批5 5b：首窗就绪标记；壳期排队的 + 请求在此补执行恰一次"""
+        self._first_window_ready = True
+        if getattr(self, "_pending_new_tab_request", False):
+            self._pending_new_tab_request = False
+            self._on_new_tab_requested()
+
+    # ── 批5 5a：壳期占位（首窗构造期间覆盖显示）──
+
+    def show_boot_placeholder(self):
+        """显示「正在准备会话…」空壳占位（覆盖在内容区上，不动 Tab 栈索引）"""
+        if getattr(self, "_boot_placeholder", None) is not None:
+            return
+        from qfluentwidgets import IndeterminateProgressRing
+
+        from app.utils.design_tokens import Colors, font_size_css
+        from app.utils.utils import get_font_family_css, get_unified_font
+
+        ph = QWidget(self)
+        ph.setObjectName("bootPlaceholder")
+        lay = QVBoxLayout(ph)
+        lay.setAlignment(Qt.AlignCenter)
+        lay.setSpacing(16)
+        ring = IndeterminateProgressRing(ph)
+        ring.setFixedSize(36, 36)
+        lay.addWidget(ring, 0, Qt.AlignCenter)
+        text = QLabel("正在准备会话…", ph)
+        text.setAlignment(Qt.AlignCenter)
+        text.setFont(get_unified_font(14))
+        text.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background: transparent; {font_size_css(14)}"
+        )
+        lay.addWidget(text)
+        ph.setStyleSheet("background: transparent;")
+        self._boot_placeholder = ph
+        ph.setGeometry(self._content_area.geometry())
+        ph.raise_()
+        ph.show()
+
+    def remove_boot_placeholder(self):
+        """首窗就绪后移除壳期占位"""
+        ph = getattr(self, "_boot_placeholder", None)
+        if ph is None:
+            return
+        self._boot_placeholder = None
+        ph.deleteLater()
 
     # ── Tab 面板 UI 插件列表 ──
 
@@ -4887,6 +4963,15 @@ class TabManagerWindow(FramelessWindow):
         event.ignore() 在此场景下会导致 Qt 内部状态不一致，
         后续 show() 无法正常恢复窗口。
         """
+        # 批5 5c：壳期（首窗构造中）关闭 → 最小关闭路径（几何落盘 + accept），
+        # 跳过依赖首窗的清理链，避免半构造状态异常
+        if not getattr(self, "_first_window_ready", True):
+            try:
+                self._do_save_geometry()
+            except Exception:
+                pass
+            event.accept()
+            return
         event.accept()
 
     # ── 资源清理 ──

@@ -16,6 +16,8 @@
 - _input_card_focused _input_area_collapsed _plugin_input_buttons
 """
 
+from PyQt5.QtCore import QTimer
+
 from app.plugins.contracts.ui_module import UIModule
 
 
@@ -368,4 +370,5 @@ class BottomToolbarModule(UIModule):
             pass
 
         # 统一安装自绘 hover tooltip，替换所有原生 QToolTip
-        batch_install_hover_tooltips(host)
+        # （批1：延迟到首帧之后安装，移出窗口同步构造段）
+        QTimer.singleShot(100, lambda: batch_install_hover_tooltips(host))
