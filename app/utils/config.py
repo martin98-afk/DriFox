@@ -362,6 +362,14 @@ class Settings(QConfig):
         "beep",
         OptionsValidator(["beep", "short", "none"]),
     )
+    # 繁忙时 Enter 键行为（仅智能体运行时生效；Ctrl+Enter 恒为另一行为）
+    # interject=插话发送（hook 式注入当前对话流，不停 worker）；queue=排队发送（排队卡片，结束后自动续发）
+    busy_enter_behavior = OptionsConfigItem(
+        "General",
+        "BusyEnterBehavior",
+        "interject",
+        OptionsValidator(["interject", "queue"]),
+    )
     # 全局字体设置
     llm_font_family = ConfigItem("LLM", "FontFamily", "楷体")
 
