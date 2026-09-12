@@ -275,6 +275,20 @@ class SendableTextEdit(TextEdit):
 
         self._setup_glow_effect()
         self._apply_input_style()
+        # Fluent 美化滚动条强制隐藏：
+        # qfluentwidgets TextEdit 基类自带 SmoothScrollDelegate，会在输入框右缘
+        # 挂一条 12px 的 Fluent 竖条（SmoothScrollBar）。构造期 viewport 未定型时
+        # 原生滚动条 range 短暂 >0，会把竖条误 show；高度自适应把它压回 range=0
+        # 后，某些时序下这条竖条收不起来 → 空/单行输入框右侧出现"假滚轮"。
+        # 原生滚动条已由 QSS width:0 隐形，这里把 delegate 的 Fluent 条永久关闭。
+        try:
+            self.scrollDelegate.vScrollBar.setForceHidden(True)
+            self.scrollDelegate.hScrollBar.setForceHidden(True)
+            self.scrollDelegate.vScrollBar.hide()
+            self.scrollDelegate.hScrollBar.hide()
+        except AttributeError:
+            # qfluentwidgets 版本差异：无 delegate 时无需处理
+            pass
         # placeholder 仅用 tips 轮播，不用通用提示语
         self.setPlaceholderText(random.choice(PLACEHOLDER_TIPS))
         self.setAcceptRichText(False)
