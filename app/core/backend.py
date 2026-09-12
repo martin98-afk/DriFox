@@ -227,6 +227,10 @@ class ChatBackend(QObject):
     # sub_agent_manager 尚为 None 跳过信号连接，创建完成后据此补连）
     sub_agent_ready = pyqtSignal()
 
+    # ToolExecutor 延迟创建完成信号（_deferred_create_tool_executor 成功后发射；
+    # 供复制窗口的 workdir 同步事件驱动，替代原 showEvent 的 QTimer(500) 固定等待）
+    tool_executor_ready = pyqtSignal()
+
     # Hook 执行状态信号（event_name, status_message, is_start）
     # TODO: 当前没有 UI 订阅此信号。状态消息字段 (`statusMessage`) 已可解析但尚未展示。
     #       待 hook_setting_card 或状态栏/通知组件接入后即可移除此 TODO。
@@ -597,27 +601,20 @@ class ChatBackend(QObject):
     # ========== 非首帧必需组件：QTimer 错峰创建 ==========
 
     def _defer_non_critical_components(self):
-        """[PERF] 非首帧必需组件用 QTimer 错峰创建（0/200/400/600ms）
+        """[PERF] 非首帧必需组件错峰创建（批4：已迁移至窗口 DeferredTaskQueue）
 
-        首帧路径（OpenAIChatToolWindow.__init__）只保留 SessionManager /
-        HookManager / create_session / AgentManager / HistoryManager，
-        其余组件延迟到事件循环就绪后分批构建，缩短窗口显示前的主线程阻塞：
+        组件与语义不变：
+        - 0ms:   MemoryManagerCore（全局单例，ToolExecutor 依赖）→ N16
+        - 200ms: ToolExecutor（app/tools 级联 import 8 模块 + LSP + codegraph）→ N17
+        - 400ms: ChatEngine（依赖 tool_executor）→ N18
+        - 600ms: SubAgentManager + MCP 连接 + git 缓存预热 → N19
 
-        - 0ms:   MemoryManagerCore（全局单例，ToolExecutor 依赖）
-        - 200ms: ToolExecutor（app/tools 级联 import 8 模块 + LSP + codegraph，
-                实测 import 重头，最值得延迟）
-        - 400ms: ChatEngine（依赖 tool_executor）
-        - 600ms: SubAgentManager + MCP 连接 + git 缓存预热（依赖 tool_executor）
-
-        失败处理：各批 try/except 只记日志，不抛到事件循环；
-        UI 使用处均有 None 守卫（tool_executor/chat_engine 等访问都判空）。
-        发送消息路径由 main_widget 调 ensure_deferred_components() 同步兜底。
+        注册与调度经窗口侧队列（OpenAIChatToolWindow.__init__ 持有
+        DeferredTaskQueue，保序 O2 create_memory→create_tool、
+        O3 create_tool→create_engines）；本方法保留为空壳兼容调用点。
+        失败处理与 None 守卫语义不变；发送消息路径仍由
+        ensure_deferred_components() 同步兜底。
         """
-
-        QTimer.singleShot(0, self._deferred_create_memory_manager)
-        QTimer.singleShot(200, self._deferred_create_tool_executor)
-        QTimer.singleShot(400, self._deferred_create_engines)
-        QTimer.singleShot(600, self._deferred_create_sub_agent_and_misc)
 
     def _deferred_create_memory_manager(self):
         """0ms 批：MemoryManagerCore（全局单例，跨窗口共享）"""
@@ -655,6 +652,7 @@ class ChatBackend(QObject):
                     "默认项目",  # 初始值，main_widget 初始化后会通过 set_current_project 覆盖
                 )
             logger.info("[ChatBackend] ToolExecutor 延迟创建完成")
+            self.tool_executor_ready.emit()
         except Exception as e:
             logger.error(f"[ChatBackend] ToolExecutor 延迟创建失败: {e}")
 

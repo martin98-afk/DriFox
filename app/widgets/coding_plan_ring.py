@@ -228,9 +228,7 @@ class CodingPlanTooltip(QWidget):
 
         # 标题
         self._title = QLabel("套餐用量")
-        self._title.setStyleSheet(
-            f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()} {font_size_css(13)}"
-        )
+        self._title.setObjectName("planTitle")
         self._layout.addWidget(self._title)
 
         # 3 层行容器（避免每次重建整个 layout）
@@ -247,14 +245,10 @@ class CodingPlanTooltip(QWidget):
             hrow.setSpacing(8)
 
             label_w = QLabel(cfg["label"], container)
-            label_w.setStyleSheet(
-                f"color: {self._text_primary}; {get_font_family_css()} {font_size_css(12)}"
-            )
+            label_w.setObjectName("planLabel")
 
             reset_w = QLabel("", container)
-            reset_w.setStyleSheet(
-                f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}"
-            )
+            reset_w.setObjectName("planReset")
 
             hrow.addWidget(label_w)
             hrow.addStretch(1)
@@ -269,14 +263,15 @@ class CodingPlanTooltip(QWidget):
             self._layout.addWidget(container)
             self._layer_rows.append((container, label_w, reset_w, bar))
 
+        # 批2：样式收敛——objectName 选择器 + 容器级一次 setStyleSheet，
+        # 替代循环内逐 QLabel 逐次 set（构造期 7 次 → 1 次）
+        self._apply_sheet()
+
     # ---------- 数据更新 ----------
 
     def set_data(self, layers: dict):
         """layers: {"rolling": {"percent": int, "reset_sec": int}, ...}"""
         self._load_theme_colors()
-        self._title.setStyleSheet(
-            f"color: {self._text_primary}; font-weight: 600; {get_font_family_css()} {font_size_css(13)}"
-        )
 
         has_any = False
         for i, cfg in enumerate(LAYER_CONFIG):
@@ -296,16 +291,29 @@ class CodingPlanTooltip(QWidget):
             else:
                 container.setVisible(False)
 
-            # 随主题切换刷新标签样式（颜色可能变化）
-            label_w.setStyleSheet(
-                f"color: {self._text_primary}; {get_font_family_css()} {font_size_css(12)}"
-            )
-            reset_w.setStyleSheet(
-                f"color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}"
-            )
-
         self._title.setVisible(has_any)
         self.adjustSize()
+
+    def _apply_sheet(self):
+        """容器级一次性样式表（批2：objectName 选择器替代逐 QLabel set）"""
+        self.setStyleSheet(
+            f"""
+            QLabel#planTitle {{
+                color: {self._text_primary}; font-weight: 600; {get_font_family_css()} {font_size_css(13)}
+            }}
+            QLabel#planLabel {{
+                color: {self._text_primary}; {get_font_family_css()} {font_size_css(12)}
+            }}
+            QLabel#planReset {{
+                color: {self._text_secondary}; {get_font_family_css()} {font_size_css(11)}
+            }}
+        """
+        )
+
+    def refresh_theme(self):
+        """主题切换时刷新配色（原 set_data 内顺带刷样式的显式接口）"""
+        self._load_theme_colors()
+        self._apply_sheet()
 
     # ---------- 绘制卡片背景 ----------
 

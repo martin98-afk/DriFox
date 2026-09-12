@@ -425,17 +425,25 @@ def main():
         from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
         tm = TabManagerWindow.create_instance()
+        # 批5 壳先行：先显示壳窗口（空态占位「正在准备会话…」）→ 进程级预热
+        # （SessionStore/StorageRegistry/内置工具链）→ 首窗构造 → add_window。
         # 首个 ChatWindow 必须在 TabManagerWindow 创建之后构造：
         # TabManagerWindow.__init__ 里 PluginHostService.ensure_started() 同步完成
         # PluginManager 扫描；若先构造本窗口，其 setup_ui 的 _load_all_ui_plugins 与
         # 首帧 singleShot(0) 重试都会早于 ensure_started 执行（pm 未就绪静默 return），
         # 此后无人再触发 UI 插件装载 → 主窗口插件内容（卡片/侧边栏/输入按钮）全部缺失。
+        tm.show()
+        tm.show_boot_placeholder()
+        from app.utils.preheat import preheat_process_level
+
+        preheat_process_level()
         chat_window = OpenAIChatToolWindow(fake_page)
         tm.add_window(chat_window)
+        tm.remove_boot_placeholder()
+        tm._mark_first_window_ready()
         _guard.show_requested.connect(lambda: _activate_window(tm))
-        tm.show()
         _apply_window_topmost(tm)
-        logger.info("DriFox 以 Tab 管理器模式启动")
+        logger.info("DriFox 以 Tab 管理器模式启动（壳先行 + 进程级预热）")
 
         # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条以 InfoBar 提示，不抢首帧。
         # 每条 InfoBar 创建成功即重命名 .reported（显示过就改状态），下次启动不再提示

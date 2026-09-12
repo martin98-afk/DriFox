@@ -150,7 +150,7 @@ class BranchChip(QFrame):
         from app.utils.utils import get_font_family_css
 
         Colors.refresh()
-        self.setStyleSheet(f"""
+        sheet = f"""
             #_branchWidget {{
                 background: transparent;
                 border: none;
@@ -167,7 +167,12 @@ class BranchChip(QFrame):
             #_branchWidget:hover #_branchText {{
                 color: {Colors.TEXT_PRIMARY};
             }}
-        """)
+        """
+        # 批2：样式串缓存守卫——串未变化（重复刷新链）跳过 setStyleSheet
+        if getattr(self, "_last_sheet", None) == sheet:
+            return
+        self._last_sheet = sheet
+        self.setStyleSheet(sheet)
         # 主题切换时强制重绘 icon（ThemeIconLabel 的 paintEvent 会重新取色）
         self._icon_label.update()
 
