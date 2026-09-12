@@ -139,11 +139,12 @@ def test_tc_a3_resize_auto_expand(panel, qtbot):
 
 
 def test_tc_a3_resize_auto_expand_gray_zone_stays_collapsed(panel, qtbot):
-    """灰色地带回归：收起态拖宽到 46~100 区间不得触发"展开→又折叠"震荡
+    """灰色地带回归：收起态拖宽到 46~折叠阈值 区间不得触发"展开→又折叠"震荡
 
     原 bug：展开阈值(>56)与折叠阈值(<100)不一致，收起态拖宽到 56~100
-    之间时先自动展开，同一次拖拽 resize 链里宽度仍 <100 又自动折叠，
-    表现为"拉开一半又弹回去"。修复后展开阈值与折叠阈值对齐(>=100)，
+    之间时先自动展开，同一次拖拽 resize 链里宽度仍 <阈值 又自动折叠，
+    表现为"拉开一半又弹回去"。修复后展开阈值需跨过滞回区
+    (>= _auto_collapse_width + 10，现阈值 200 → 展开 >=210)，
     灰色区间内保持收起态，不再震荡。
     """
     from PyQt5.QtCore import QSize
@@ -153,7 +154,7 @@ def test_tc_a3_resize_auto_expand_gray_zone_stays_collapsed(panel, qtbot):
     panel.set_collapsed(True)
     assert panel._items[0]._compact is True
     # 灰色区间内多次 resize（模拟用户缓慢拖宽）：必须保持收起，不得展开
-    for w in (60, 70, 80, 90, 99, 105, 109):
+    for w in (60, 70, 80, 90, 99, 105, 109, 150, 199):
         panel.resize(w, 600)
         ev = QResizeEvent(QSize(w, 600), QSize(panel._collapsed_min_width, 600))
         panel.resizeEvent(ev)
@@ -161,8 +162,8 @@ def test_tc_a3_resize_auto_expand_gray_zone_stays_collapsed(panel, qtbot):
         assert panel._collapsed is True, f"灰色区间 {w}px 不得自动展开"
         assert panel._items[0]._compact is True, f"灰色区间 {w}px 不得切换紧凑态"
     # 宽度跨过滞回区（>= _auto_collapse_width + 10）才能自动展开
-    panel.resize(115, 600)
-    ev = QResizeEvent(QSize(115, 600), QSize(panel._collapsed_min_width, 600))
+    panel.resize(215, 600)
+    ev = QResizeEvent(QSize(215, 600), QSize(panel._collapsed_min_width, 600))
     panel.resizeEvent(ev)
     qtbot.wait(50)
     assert panel._collapsed is False
@@ -170,13 +171,13 @@ def test_tc_a3_resize_auto_expand_gray_zone_stays_collapsed(panel, qtbot):
 
 
 def test_tc_a4_resize_auto_collapse_no_bounce_back(panel, qtbot):
-    """收窄回弹回归：展开态拖窄触发折叠后，宽度抖动回到 100~110 不得再次展开
+    """收窄回弹回归：展开态拖窄触发折叠后，宽度抖动回到滞回区不得再次展开
 
-    原 bug（上一版修复引入）：展开阈值与折叠阈值同为 100，展开态拖窄到 99
-    触发折叠（_collapsed=True）后，用户拖拽途中宽度短暂回到 >=100（手抖/
-    停顿），又立即满足"拖宽自动展开"条件，两个延迟信号先后排队，最终面板
-    回弹展开——表现为"往里拉时又往外回弹"。修复后展开阈值需跨过滞回区
-    （> _auto_collapse_width + 10）才允许再次展开。
+    原 bug（上一版修复引入）：展开阈值与折叠阈值相同，展开态拖窄触发折叠
+    后，用户拖拽途中宽度短暂回到折叠阈值以上（手抖/停顿），又立即满足
+    "拖宽自动展开"条件，两个延迟信号先后排队，最终面板回弹展开——表现为
+    "往里拉时又往外回弹"。修复后展开阈值需跨过滞回区
+    （> _auto_collapse_width + 10，现阈值 200 → 展开 >=210）才允许再次展开。
     """
     from PyQt5.QtCore import QSize
     from PyQt5.QtGui import QResizeEvent
@@ -188,27 +189,27 @@ def test_tc_a4_resize_auto_collapse_no_bounce_back(panel, qtbot):
     panel.resize(250, 600)
     panel.resizeEvent(QResizeEvent(QSize(250, 600), QSize(250, 600)))
     assert panel._collapsed is False
-    # 拖窄到 99 → 触发自动折叠
-    panel.resize(99, 600)
-    panel.resizeEvent(QResizeEvent(QSize(99, 600), QSize(250, 600)))
+    # 拖窄到 199 → 触发自动折叠
+    panel.resize(199, 600)
+    panel.resizeEvent(QResizeEvent(QSize(199, 600), QSize(250, 600)))
     qtbot.wait(50)
     assert panel._collapsed is True
     assert panel._items[0]._compact is True
-    # 拖拽抖动：宽度回到 105（仍在滞回区 100~110 内）→ 不得再次展开
-    for w in (101, 105, 109):
+    # 拖拽抖动：宽度回到滞回区（200~209）→ 不得再次展开
+    for w in (201, 205, 209):
         panel.resize(w, 600)
-        panel.resizeEvent(QResizeEvent(QSize(w, 600), QSize(99, 600)))
+        panel.resizeEvent(QResizeEvent(QSize(w, 600), QSize(199, 600)))
         qtbot.wait(10)
         assert panel._collapsed is True, f"滞回区 {w}px 不得再次展开（防止回弹）"
         assert panel._items[0]._compact is True
     # 继续往里拖 → 保持折叠
     panel.resize(80, 600)
-    panel.resizeEvent(QResizeEvent(QSize(80, 600), QSize(109, 600)))
+    panel.resizeEvent(QResizeEvent(QSize(80, 600), QSize(209, 600)))
     qtbot.wait(10)
     assert panel._collapsed is True
-    # 拖宽跨过滞回区（>= 110）→ 才允许展开
-    panel.resize(115, 600)
-    panel.resizeEvent(QResizeEvent(QSize(115, 600), QSize(80, 600)))
+    # 拖宽跨过滞回区（>= 210）→ 才允许展开
+    panel.resize(215, 600)
+    panel.resizeEvent(QResizeEvent(QSize(215, 600), QSize(80, 600)))
     qtbot.wait(50)
     assert panel._collapsed is False
     assert panel._items[0]._compact is False
