@@ -9,8 +9,8 @@
 - _history_questions_card _history_questions_card_content
 - _memory_card _memory_card_popup _model_config_card _model_config_popup
 - _model_selector_card _model_selector_card_content
-- _tool_control_card
-- _question_floating_widget
+- _tool_control_card（批1 懒创建：None 占位，_ensure_tool_control_card 按需构建）
+- _question_floating_widget（批1 懒创建：None 占位，_ensure_question_floating_widget 按需构建）
 
 ★ `_history_card` / `_history_popup_card` **不在**本模块契约内：历史会话页已
 插件化（history-manager 插件的工作台页），二者是 `MainWidget` 上的只读代理
@@ -33,13 +33,6 @@ class SystemCardsModule(UIModule):
 
     def build(self, host) -> None:
         from PyQt5.QtCore import QTimer
-        from qfluentwidgets import TransparentToolButton
-
-        from app.widgets.cards.floating.question_floating_widget import (
-            QuestionFloatingWidget,
-        )
-        from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
-
         # ── 六张系统卡片框架懒创建（P0-1 性能优化）──
         # 原 setup_ui 同步段直接创建 6 张 BaseSettingsCard 框架（~160ms），
         # 改为 _ensure_xxx_card() 惰性创建：deferred 链预构建 + 打开入口兜底。
@@ -58,22 +51,9 @@ class SystemCardsModule(UIModule):
         host._model_selector_card = None
         host._model_selector_card_content = None
 
-        # 工具控制卡片（controller 由 _tool_permission_controller 在后续 set_controller 注入）
-        host._tool_control_card = ToolControlCardFrame(host)
-        # 🛡️ 如果 controller 已存在（__init__ 中在 super 之前创建时），立即绑定
-        if hasattr(host, "_tool_permission_controller") and host._tool_permission_controller is not None:
-            host._tool_control_card.set_controller(host._tool_permission_controller)
-        host._tool_control_card.setObjectName("toolControlCard")
-        host._tool_control_card.setMinimumHeight(250)
-        host._tool_control_card.setVisible(False)
-        host._tool_control_card.closed.connect(
-            lambda: (
-                host._card_manager.hide_card("tool_control", host._window_id),
-                host._restore_after_system_close(),
-            )
-        )
-        host._tool_control_card.togglesChanged.connect(lambda _: host._refresh_tool_toggle_btn())
-        host._bottom_card_container.add_card("tool_control", host._tool_control_card)
+        # 工具控制卡片（批1 懒创建）：build 期仅 None 占位，构造/接线/注册在
+        # host._ensure_tool_control_card() 中按需执行（toggle 入口兜底）。
+        host._tool_control_card = None
 
         # 模型选择卡片框架懒创建（P0-1）：见上方 _ensure_model_selector_card() 说明
 
@@ -82,12 +62,9 @@ class SystemCardsModule(UIModule):
         # 宿主只保留项目数据与切换方法（_on_project_selected / _on_new_project_created 等），
         # 面板 UI 与信号转发见 plugins/history-manager/ui/history_page.py。
 
-        host._question_floating_widget = QuestionFloatingWidget(host)
-        host._question_floating_widget.setVisible(False)
-        host._question_floating_widget.answered.connect(host._on_question_answered)
-        host._question_floating_widget.cancelled.connect(host._on_question_cancelled)
-        host._question_floating_widget.previewRequested.connect(host._on_question_preview_requested)
-        host._bottom_card_container.add_card("question", host._question_floating_widget)
+        # 问题悬浮卡（批1 懒创建）：同上，构造/接线/注册在
+        # host._ensure_question_floating_widget() 中按需执行（弹出链入口兜底）。
+        host._question_floating_widget = None
 
         # 注册卡片到 CardManager（优先级：数值越小权限越高）
         host._register_cards_to_manager()
@@ -105,4 +82,3 @@ class SystemCardsModule(UIModule):
         # singleShot(0) 到期时间 ≈ 创建时间，早于 main.py 中 _show_popup 的
         # singleShot(0)（创建更晚），导致 BuiltinCommands 仍在窗口显示前执行。
         # 100ms 延迟确保到期时间晚于所有 singleShot(0)，在窗口第一次绘制后注册。
-        QTimer.singleShot(100, host._init_builtin_commands)

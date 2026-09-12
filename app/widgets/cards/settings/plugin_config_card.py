@@ -23,9 +23,10 @@ from typing import Any, Dict, Optional
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap
-from PyQt5.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QDialog, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
+    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     IndeterminateProgressBar,
@@ -57,52 +58,12 @@ class _PlainEdit(TextEdit):
         self.editingFinished.emit()
 
 
-class _OptionPill(QLabel):
-    """单个可点击选项胶囊：点击即选中（选中态 accent 高亮）"""
+class SelectComboRow(QWidget):
+    """select 字段下拉选择控件（qfluentwidgets ComboBox，随主题自适配）。
 
-    clicked = pyqtSignal()
-
-    def __init__(self, text: str, parent=None):
-        super().__init__(text, parent)
-        self._selected = False
-        self.setCursor(Qt.PointingHandCursor)
-        self.setAlignment(Qt.AlignCenter)
-        self.refresh_style()
-
-    def set_selected(self, selected: bool) -> None:
-        if self._selected != selected:
-            self._selected = selected
-            self.refresh_style()
-
-    def refresh_style(self) -> None:
-        from app.utils.design_tokens import Colors
-        from app.utils.utils import get_font_family_css
-
-        if self._selected:
-            self.setStyleSheet(
-                f"QLabel {{ color: {Colors.BUTTON_TEXT_ON_ACCENT}; background: {Colors.TEXT_ACCENT};"
-                f" border: 1px solid {Colors.TEXT_ACCENT}; border-radius: 11px;"
-                f" padding: 3px 14px; {get_font_family_css()} }}"
-            )
-        else:
-            self.setStyleSheet(
-                f"QLabel {{ color: {Colors.TEXT_SECONDARY}; background: transparent;"
-                f" border: 1px solid {Colors.BORDER}; border-radius: 11px;"
-                f" padding: 3px 14px; {get_font_family_css()} }}"
-                f"QLabel:hover {{ color: {Colors.TEXT_PRIMARY}; border-color: {Colors.TEXT_ACCENT}; }}"
-            )
-
-    def mousePressEvent(self, e) -> None:
-        if e.button() == Qt.LeftButton:
-            self.clicked.emit()
-        super().mousePressEvent(e)
-
-
-class SelectPillsRow(QWidget):
-    """select 字段的分段选项行：一排可点击胶囊，点击即选（替代下拉框）
-
-    API 与旧 ComboBox 用法对齐：currentData()/setCurrentData() 读写当前值，
-    valueChanged 信号在用户点击切换时发射。
+    API 兼容旧版胶囊/单选实现：currentData()/setCurrentData() 读写当前值，
+    valueChanged 信号仅在用户切换时发射；setCurrentData 内部阻断信号，
+    回显不会造成循环写盘。
     """
 
     valueChanged = pyqtSignal(object)
@@ -114,21 +75,20 @@ class SelectPillsRow(QWidget):
         self._values = [v for v, _ in self._options]
         self._current = None
 
+        self._combo = ComboBox(self)
+        for value, label in self._options:
+            self._combo.addItem(text=str(label), userData=value)
+        self._combo.currentIndexChanged.connect(self._on_index_changed)
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        self._pills = {}
-        for value, label in self._options:
-            pill = _OptionPill(label, self)
-            pill.clicked.connect(lambda v=value: self._on_pill_clicked(v))
-            layout.addWidget(pill)
-            self._pills[value] = pill
+        layout.addWidget(self._combo)
         layout.addStretch(1)
-        # 初始无选中态由 _echo/_apply_value 统一回显
 
-    def _on_pill_clicked(self, value) -> None:
+    def _on_index_changed(self, index: int) -> None:
+        value = self._combo.itemData(index)
         if value != self._current:
-            self.setCurrentData(value)
+            self._current = value
             self.valueChanged.emit(value)
 
     def currentData(self):
@@ -138,12 +98,9 @@ class SelectPillsRow(QWidget):
         if value not in self._values and self._values:
             value = self._values[0]
         self._current = value
-        for v, pill in self._pills.items():
-            pill.set_selected(v == value)
-
-    def refresh_style(self) -> None:
-        for pill in self._pills.values():
-            pill.refresh_style()
+        self._combo.blockSignals(True)
+        self._combo.setCurrentIndex(self._values.index(value))
+        self._combo.blockSignals(False)
 
 
 class _FieldRow(QWidget):
@@ -205,11 +162,11 @@ class PluginConfigCard(ExpandSettingCard):
                 switch.setOffText(f.label)
                 switch.checkedChanged.connect(lambda _checked, _k=f.key: self._on_field_changed(_k))
             elif f.type == "select":
-                # 展开式分段选项：一排可点击胶囊替代下拉框（点击即选中保存）
-                pills = SelectPillsRow(f.options, self.view)
-                pills.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
-                row = _FieldRow(f.label, pills, self.view)
-                self._rows[f.key] = pills
+                # 下拉选择：点击选中即保存（SelectComboRow）
+                combo = SelectComboRow(f.options, self.view)
+                combo.valueChanged.connect(lambda _v, _k=f.key: self._on_field_changed(_k))
+                row = _FieldRow(f.label, combo, self.view)
+                self._rows[f.key] = combo
                 self.viewLayout.addWidget(row)
             elif f.type == "number":
                 spin = SpinBox(self.view)

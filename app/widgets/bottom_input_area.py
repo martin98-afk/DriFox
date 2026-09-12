@@ -275,6 +275,20 @@ class SendableTextEdit(TextEdit):
 
         self._setup_glow_effect()
         self._apply_input_style()
+        # Fluent 美化滚动条强制隐藏：
+        # qfluentwidgets TextEdit 基类自带 SmoothScrollDelegate，会在输入框右缘
+        # 挂一条 12px 的 Fluent 竖条（SmoothScrollBar）。构造期 viewport 未定型时
+        # 原生滚动条 range 短暂 >0，会把竖条误 show；高度自适应把它压回 range=0
+        # 后，某些时序下这条竖条收不起来 → 空/单行输入框右侧出现"假滚轮"。
+        # 原生滚动条已由 QSS width:0 隐形，这里把 delegate 的 Fluent 条永久关闭。
+        try:
+            self.scrollDelegate.vScrollBar.setForceHidden(True)
+            self.scrollDelegate.hScrollBar.setForceHidden(True)
+            self.scrollDelegate.vScrollBar.hide()
+            self.scrollDelegate.hScrollBar.hide()
+        except AttributeError:
+            # qfluentwidgets 版本差异：无 delegate 时无需处理
+            pass
         # placeholder 仅用 tips 轮播，不用通用提示语
         self.setPlaceholderText(random.choice(PLACEHOLDER_TIPS))
         self.setAcceptRichText(False)
@@ -386,6 +400,8 @@ class SendableTextEdit(TextEdit):
 
     def _finish_initialization(self):
         """初始化完成后重置标志，允许高度调整"""
+        self._initializing = False
+        self._adjust_height_to_content()
 
     def _rotate_placeholder_tip(self):
         """定时随机切换 placeholder tips (QTimer 15s 触发 random.choice)"""
@@ -1582,10 +1598,10 @@ class SendableTextEdit(TextEdit):
             pass
 
         doc = self.document()
-        # 20 = QSS 上下 padding (12 + 6) + 2px 余量；最小高度 44 → 54
-        # （单行时文字区仍能完整容纳 15px 字号一行不裁切）
-        content_height = int(doc.size().height()) + 20
-        new_height = max(54, min(300, content_height))
+        # 14 = QSS 上下 padding (8 + 4) + 2px 余量；最小高度 44（单行时
+        # 文字区 44-12=32px，完整容纳 15px 字号一行不裁切）
+        content_height = int(doc.size().height()) + 14
+        new_height = max(44, min(300, content_height))
 
         if self.height() != new_height:
             self._adjusting_height = True
@@ -1686,8 +1702,8 @@ class SendableTextEdit(TextEdit):
             return
         btn_size = self.send_btn.size()
         send_btn_x = self.width() - btn_size.width() - 10
-        # 底部偏移与 QSS padding-bottom (6px) 对齐，按钮与文字底缘齐平
-        send_btn_y = self.height() - btn_size.height() - 6
+        # 底部偏移与 QSS padding-bottom (4px) 对齐，按钮与文字底缘齐平
+        send_btn_y = self.height() - btn_size.height() - 4
         self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -2001,7 +2017,7 @@ class SendableTextEdit(TextEdit):
                 color: {Colors.INPUT_TEXT};
                 border: none;
                 border-radius: 16px 16px 0 0;
-                padding: 12px 16px 6px 20px;
+                padding: 8px 12px 4px 12px;
                 selection-background-color: {Colors.SELECTED_BG};
                 {get_font_family_css()} {font_size_css(15)};
             }}

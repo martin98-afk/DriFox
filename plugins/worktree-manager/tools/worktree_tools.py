@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""worktree-manager 插件工具 — 大模型工作树管理（单一工具 manager_worktree，action 分发）
+"""worktree-manager 插件工具 — 大模型工作树管理（单一工具 manage_worktree，action 分发）
 
 对齐 manage_skill 的单工具多 action 风格：
-- list   → 列出全部工作树（路径/分支/领先落后，标注主仓库与当前会话）
+- list   → 列出全部工作树（路径/分支/领先落后，标注主仓库与当前会话）+ merge-tree 冲突预判
 - create → 创建工作树（默认基于 HEAD 新建分支，分支已存在则挂载；目录固定主仓库 .worktrees/ 下）
-- remove → 删除工作树（串行 remove → prune → branch -D，keep_branch 可保留分支）
-- merge  → 把工作树分支合并回主仓库当前分支；冲突时返回冲突文件与冲突块内容，
-           不 abort，保留冲突现场由模型用文件工具解决后提交
+- remove → 删除工作树（串行 remove → prune → branch 删除；有未提交改动默认拒绝，force=true 强制；
+           分支含未合并提交时默认保留分支，keep_branch=true 直接保留）
+- merge  → 把工作树分支合并回主仓库当前分支（target_branch 校验 + 双向 dirty 预检 + 可自定义信息）；
+           冲突时返回冲突文件与冲突块内容，不 abort，保留冲突现场由模型用文件工具解决后提交
 
 写操作成功/冲突后：
 1. 清 GitWorktreeDetector 相关缓存（否则 UI 刷新仍读旧数据）
@@ -45,6 +46,19 @@ def _run_git(args: list, cwd: str, timeout: int = 15) -> subprocess.CompletedPro
         creationflags=_CREATION_FLAGS,
         cwd=cwd,
     )
+
+
+def _norm(p: str) -> str:
+    """路径归一：abspath + normcase（Windows 大小写不敏感，混用会使前缀/相等比较漏判）"""
+    return os.path.normcase(os.path.abspath(p))
+
+
+def _dirty_files(cwd: str) -> list:
+    """git status --porcelain 列未提交/未跟踪项；命令失败视为不脏（不阻断主流程）"""
+    r = _run_git(["status", "--porcelain"], cwd, timeout=10)
+    if r.returncode != 0:
+        return []
+    return [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
 
 
 def _resolve_main_repo(tool_ctx: dict, path: str = "") -> Tuple[Optional[str], str]:
@@ -126,19 +140,34 @@ def _find_registered_worktree(tool_ctx: dict, path: str) -> Tuple[Optional[str],
 
     返回 (主仓库根, WorktreeInfo, 错误消息)；target 主仓库时也返回（is_main=True 由调用方裁决）。
     """
-    wt_path = os.path.abspath((path or "").strip())
+    raw = (path or "").strip()
+    wt_path = os.path.abspath(raw)
     if not wt_path or not os.path.isdir(wt_path):
-        return None, None, f"工作树路径无效或不存在: {wt_path or '(空)'}"
+        return None, None, f"工作树路径无效或不存在: {raw or '(空)'}"
     repo_root, err = _resolve_main_repo(tool_ctx or {}, path=wt_path)
     if err or repo_root is None:
         return None, None, err or "无法定位主仓库"
     info = GitWorktreeDetector.get_repo_info(repo_root)
     if info is None:
         return None, None, f"获取仓库信息失败: {repo_root}"
-    target = next((wt for wt in info.worktrees if os.path.abspath(wt.path) == wt_path), None)
+    target = next((wt for wt in info.worktrees if _norm(wt.path) == _norm(wt_path)), None)
     if target is None:
         return repo_root, None, f"{wt_path} 不是仓库 {repo_root} 登记的工作树（可用 action=list 查询）"
     return repo_root, target, ""
+
+
+def _merge_preview(repo_root: str, branch: str) -> str:
+    """merge-tree 预判 branch 合入主仓库 HEAD 的冲突情况（git ≥2.38，失败静默降级）"""
+    r = _run_git(["merge-tree", "--write-tree", "--name-only", "HEAD", branch], repo_root, timeout=15)
+    if r.returncode == 0:
+        return "合并预判: 无冲突，可直接合并"
+    if r.returncode == 1:
+        files = [ln for ln in (r.stdout or "").splitlines()[1:] if ln.strip()]
+        if not files:
+            return "合并预判: 存在冲突（文件列表不可用）"
+        shown = ", ".join(files[:5]) + ("…" if len(files) > 5 else "")
+        return f"合并预判: 将冲突 {len(files)} 个文件 ({shown})"
+    return "合并预判: 不可用（git 版本过低或仓库状态异常）"
 
 
 # ── action: list ──
@@ -152,19 +181,22 @@ def _action_list(tool_ctx: dict, kwargs: dict) -> ToolResult:
     if info is None or not info.worktrees:
         return ToolResult(False, error=f"获取仓库信息失败: {repo_root}")
 
-    current_workdir = os.path.abspath((tool_ctx or {}).get("workdir") or "")
+    current_workdir = _norm((tool_ctx or {}).get("workdir") or "")
     lines = []
     for wt in info.worktrees:
         tags = []
         if wt.is_main:
             tags.append("主仓库")
-        if current_workdir and current_workdir.startswith(os.path.abspath(wt.path)):
+        if current_workdir and current_workdir.startswith(_norm(wt.path)):
             tags.append("当前会话")
         tag = f" [{','.join(tags)}]" if tags else ""
         delta = ""
         if not wt.is_main and (wt.ahead_main or wt.behind_main):
             delta = f" (领先主仓库 {wt.ahead_main} / 落后 {wt.behind_main} 提交)"
-        lines.append(f"- {wt.path}{tag}\n  分支: {wt.branch}{delta}")
+        preview = ""
+        if not wt.is_main and wt.branch and wt.branch != "(detached)":
+            preview = f"\n  {_merge_preview(repo_root, wt.branch)}"
+        lines.append(f"- {wt.path}{tag}\n  分支: {wt.branch}{delta}{preview}")
     return ToolResult(True, content=f"仓库 {repo_root} 共 {len(info.worktrees)} 个工作树:\n" + "\n".join(lines))
 
 
@@ -212,6 +244,7 @@ def _action_create(tool_ctx: dict, kwargs: dict) -> ToolResult:
 
 def _action_remove(tool_ctx: dict, kwargs: dict) -> ToolResult:
     keep_branch = bool(kwargs.get("keep_branch") or False)
+    force = bool(kwargs.get("force") or False)
     repo_root, target, err = _find_registered_worktree(tool_ctx, kwargs.get("path", ""))
     if err:
         return ToolResult(False, error=err)
@@ -219,25 +252,48 @@ def _action_remove(tool_ctx: dict, kwargs: dict) -> ToolResult:
     wt_path = os.path.abspath(target.path)
     if target.is_main:
         return ToolResult(False, error=f"{wt_path} 是主仓库，拒绝删除")
-    current_workdir = os.path.abspath((tool_ctx or {}).get("workdir") or "")
-    if current_workdir and current_workdir.startswith(wt_path):
+    current_workdir = _norm((tool_ctx or {}).get("workdir") or "")
+    if current_workdir and current_workdir.startswith(_norm(wt_path)):
         return ToolResult(False, error=f"{wt_path} 是当前会话的工作目录，拒绝删除；请先切换工作目录或改用 UI 操作")
 
-    # 串行 remove → prune → branch -D（顺序依赖硬约束，对齐 UI _delete_worktree_job）
+    # 防数据丢失：有未提交改动默认拒绝删除
+    dirty = _dirty_files(wt_path)
+    if dirty and not force:
+        shown = "\n".join(dirty[:10])
+        more = f"\n…共 {len(dirty)} 项" if len(dirty) > 10 else ""
+        return ToolResult(
+            False,
+            error=f"工作树有未提交改动，删除将丢失（{len(dirty)} 项）:\n{shown}{more}\n确认丢弃请传 force=true",
+        )
+
+    # 串行 remove → prune → branch 删除（顺序依赖硬约束，对齐 UI _delete_worktree_job）
     try:
-        r = _run_git(["worktree", "remove", wt_path], repo_root, timeout=30)
+        cmd = ["worktree", "remove"] + (["--force"] if force else []) + [wt_path]
+        r = _run_git(cmd, repo_root, timeout=30)
+        if r.returncode != 0 and force:
+            # 双重 --force：处理锁定等残留场景
+            r = _run_git(["worktree", "remove", "--force", "--force", wt_path], repo_root, timeout=30)
         if r.returncode != 0:
-            r = _run_git(["worktree", "remove", "--force", wt_path], repo_root, timeout=30)
-            if r.returncode != 0:
-                return ToolResult(False, error=r.stderr.strip() or f"git worktree remove 失败 (rc={r.returncode})")
+            return ToolResult(False, error=r.stderr.strip() or f"git worktree remove 失败 (rc={r.returncode})")
         _run_git(["worktree", "prune"], repo_root, timeout=10)
     except Exception as e:
         return ToolResult(False, error=f"git worktree remove 执行失败: {e}")
 
+    # 分支删除：先 -d 探测未合并提交，被拒且无 force 时保留分支
     branch_note = f"分支 {target.branch} 已保留" if keep_branch else ""
     if not keep_branch and target.branch and target.branch != "(detached)":
-        br = _run_git(["branch", "-D", target.branch], repo_root, timeout=15)
-        branch_note = f"分支 {target.branch} 已删除" if br.returncode == 0 else f"分支删除失败: {br.stderr.strip()}"
+        br = _run_git(["branch", "-d", target.branch], repo_root, timeout=15)
+        if br.returncode == 0:
+            branch_note = f"分支 {target.branch} 已删除"
+        elif force:
+            br2 = _run_git(["branch", "-D", target.branch], repo_root, timeout=15)
+            branch_note = (
+                f"分支 {target.branch} 已强制删除"
+                if br2.returncode == 0
+                else f"分支删除失败: {br2.stderr.strip()}"
+            )
+        else:
+            branch_note = f"分支 {target.branch} 含未合并提交，已保留（确认丢弃可传 force=true 重删或手动 git branch -D）"
 
     _invalidate_info_cache(repo_root)
     _notify_changed(f"removed {wt_path}")
@@ -287,8 +343,33 @@ def _action_merge(tool_ctx: dict, kwargs: dict) -> ToolResult:
     if not branch or branch == "(detached)":
         return ToolResult(False, error=f"工作树 {target.path} 处于 detached HEAD 状态，无分支可合并")
 
+    # 目标分支校验：git merge 只能合并进主仓库当前 checkout 的分支
+    target_branch = str(kwargs.get("target_branch") or "").strip()
+    head_ref_r = _run_git(["symbolic-ref", "--short", "HEAD"], repo_root, timeout=10)
+    head_branch = (head_ref_r.stdout or "").strip()
+    if target_branch and target_branch != head_branch:
+        return ToolResult(
+            False,
+            error=(
+                f"目标分支 {target_branch} 不是主仓库当前 checkout 的分支（当前 {head_branch or 'detached HEAD'}）；"
+                "git merge 只能合并进当前分支，请先在主仓库切换"
+            ),
+        )
+
+    # 双向 dirty 预检：主仓库脏易撞车；工作树脏则未提交改动不进入合并
+    main_dirty = _dirty_files(repo_root)
+    if main_dirty:
+        return ToolResult(False, error=f"主仓库有 {len(main_dirty)} 项未提交改动，先提交或 stash 再合并")
+    wt_dirty = _dirty_files(os.path.abspath(target.path))
+    if wt_dirty:
+        return ToolResult(False, error=f"工作树有 {len(wt_dirty)} 项未提交改动，先提交再合并，否则这些改动不进入合并结果")
+
+    message = str(kwargs.get("message") or "").strip()
     try:
-        r = _run_git(["merge", branch], repo_root, timeout=60)
+        cmd = ["merge", branch]
+        if message:
+            cmd += ["-m", message]
+        r = _run_git(cmd, repo_root, timeout=60)
     except Exception as e:
         return ToolResult(False, error=f"git merge 执行失败: {e}")
 
@@ -348,15 +429,16 @@ def _worktree_manage_impl(tool_ctx, **kwargs) -> ToolResult:
 _WORKTREE_MANAGE_SCHEMA = {
     "type": "function",
     "function": {
-        "name": "manager_worktree",
+        "name": "manage_worktree",
         "description": (
             "项目 git 工作树管理（单一入口，action 分发）。"
-            "list=列出全部工作树（路径/分支/与主仓库领先落后，标注主仓库与当前会话；无其他参数）。"
+            "list=列出全部工作树（路径/分支/与主仓库领先落后 + merge-tree 冲突预判，标注主仓库与当前会话；无其他参数）。"
             "create=创建新工作树：默认基于 HEAD 新建分支 branch_name，该分支已存在则直接挂载（base_branch 被忽略）；"
             "目录固定在主仓库 .worktrees/ 下（dir_name 缺省用分支名，/ 转 -）。"
-            "remove=删除工作树：串行 remove → prune → branch -D（keep_branch=true 保留分支）；"
-            "不能删除主仓库，也不能删除当前会话工作目录所在的工作树。"
-            "merge=把工作树分支合并回主仓库当前分支：产生冲突时返回冲突文件与冲突块内容并保留冲突现场"
+            "remove=删除工作树：串行 remove → prune → branch 删除（keep_branch=true 保留分支）；"
+            "有未提交改动默认拒绝（force=true 强制）；不能删除主仓库，也不能删除当前会话工作目录所在的工作树。"
+            "merge=把工作树分支合并回主仓库当前分支（双向 dirty 预检；target_branch 须为主仓库当前分支）："
+            "产生冲突时返回冲突文件与冲突块内容并保留冲突现场"
             "（不 abort），按返回中的指引用文件工具解决后提交。"
             "create/remove/merge 操作后工作树面板自动刷新。"
         ),
@@ -380,7 +462,19 @@ _WORKTREE_MANAGE_SCHEMA = {
                 "dir_name": {"type": "string", "description": "create 可选：工作树目录名，缺省用分支名（/ 转 -）"},
                 "keep_branch": {
                     "type": "boolean",
-                    "description": "remove 可选：true=保留分支只删目录，默认 false（连分支一起删）",
+                    "description": "remove 可选：true=保留分支只删目录，默认 false（删分支；含未合并提交时仍保留除非 force=true）",
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "remove 可选：true=工作树有未提交改动时仍强制删除并强删未合并分支（默认拒绝/保留分支）",
+                },
+                "target_branch": {
+                    "type": "string",
+                    "description": "merge 可选：合并目标分支，须为主仓库当前 checkout 的分支，缺省即当前分支",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "merge 可选：合并提交信息（git merge -m），缺省用 git 默认信息",
                 },
             },
             "required": ["action"],
@@ -402,14 +496,14 @@ def _preview_manage(tool_args: dict) -> str:
 
 def register(registry) -> None:
     registry.register(
-        "manager_worktree",
+        "manage_worktree",
         _WORKTREE_MANAGE_SCHEMA,
         impl=_worktree_manage_impl,
         danger="dangerous",
-        icon="folder",
+        icon="manage_worktree",
         cn_name="管理工作树",
         group=_GROUP,
         description="工作树增删查与合并（list/create/remove/merge）",
-        aliases=["ManagerWorktree"],
+        aliases=["ManageWorktree"],
         preview=_preview_manage,
     )

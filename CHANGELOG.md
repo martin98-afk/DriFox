@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.5.11] - 2026-09-12
+## [v0.5.11] - 2026-09-13 (重新发布 #3)
 
-自上一版本以来的变更 | 提交数：73 · 文件变更：131 · +9813/-3872 | 贡献者：dingma, drifox-bot
+自上一版本以来的变更 | 提交数：83 · 文件变更：169 · +12545/-4202 | 贡献者：dingma, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -73,6 +73,26 @@ All notable changes to this project will be documented in this file.
 ### 🔧 其他 (Chores & Build)
 
 - **plugin.json 自动重新生成** (`plugins/marketplace.json`, `plugins/system/marketplace.json`): 3 次由 GitHub Actions 自动同步生成 [skip ci]。
+
+### 🆕 重新发布 #3 增量（自上次重新发布起）
+
+基于上次重新发布 v0.5.11 的增量变更 | 提交数：7 · 文件变更：32 · +2396/-290 | 贡献者：dingma
+
+#### ✨ 新功能 (New Features)
+
+- **新 Tab 启动性能优化** (`app/core/backend.py`, `app/core/deferred_task_queue.py`, `app/main_widget.py`, `app/utils/preheat.py`, `app/widgets/coding_plan_ring.py`, `app/widgets/modules/bottom_toolbar_module.py`, `app/widgets/modules/system_cards_module.py`, `app/widgets/tab_manager_window.py`, `main.py`, `plugins/worktree-manager/ui/branch_chip.py`, `tests/`): 新增 `DeferredTaskQueue` 延迟任务队列（208 行新模块）把非阻塞初始化任务入队到主循环空闲时段执行；`Preheater` 工具预热器（60 行新模块）把工具注册/Schema 预热从首启路径剥离；首屏卡片渲染、系统卡片懒加载、tree_refresh 防抖（82 行新测试覆盖 50/100/200/300ms 多场景）；main 入口精简与 CodingPlanRing 路径优化；`worktree-manager` BranchChip 修复热路径样式拼接。含 `tests/perf/test_new_tab_baseline.py` (615 行) + `tests/perf/test_shell_first_boot.py` (176 行) + 12 项新单测。7a8cda90。
+- **侧边栏自动折叠阈值提升** (`app/widgets/tab_panel.py`, `tests/widgets/test_sidebar_smart_collapse.py`, `tests/widgets/test_tab_panel_compact.py`, `plugins/system-tools/.drifox-plugin/plugin.json`, `tests/plugins/test_websearch_config_card.py`, `plugins/system-skills/skills/plugin-creator/SKILL.md`, `plugins/system-skills/skills/ui-plugin-creator/SKILL.md`): 自动折叠宽度调整改善侧边栏行为，相关测试同步更新；`system-tools` 插件 JSON 补 `tools_dir` 字段；`plugin-creator` / `ui-plugin-creator` SKILL.md 同步说明。f688e5fa。
+- **插件配置 select 字段改为下拉 ComboBox** (`app/widgets/cards/settings/plugin_config_card.py`, `tests/plugins/test_plugin_config_card.py`): 渲染层选择字段由单选列表改用下拉 ComboBox，配置更紧凑。24a60aa4。
+- **插件配置 select 字段垂直单选列表过渡版** (`app/widgets/cards/settings/plugin_config_card.py`, `tests/plugins/test_plugin_config_card.py`): 过渡 commit，下拉 ComboBox 之前先试垂直单选列表（19+/60- 重构）。219e9eb9。
+- **loop policy 增强：退出前消息注入** (`app/core/workers/chat_worker.py`, `tests/core/test_chat_worker_drain_hooks_before_exit.py`): ChatWorker 在退出循环前消费 hook 消息队列，避免插话消息成孤儿；测试用例扩展覆盖退出时序（80+/24- 调整，新增 69 行守卫测试）。456d079f。
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **SendableTextEdit padding/高度计算微调** (`app/widgets/bottom_input_area.py`): padding 与高度计算调整提升布局一致性（+7/-7 平衡调整）。f982fc38。
+
+#### 📚 文档 (Documentation)
+
+- **ui-plugin-creator 沉淀实战经验** (`plugins/system-skills/skills/ui-plugin-creator/SKILL.md`, `plugins/system-skills/skills/ui-plugin-creator/references/pitfalls.md`, `plugins/system-skills/skills/ui-plugin-creator/references/plugin-config.md`, `plugins/system-skills/skills/ui-plugin-creator/references/templates-entries.md`): 新增 pitfalls.md (57 行) + plugin-config.md (127 行)，覆盖声明式配置、云端 worker、模板生效通道实战经验；templates-entries.md 调整（36 行）。4613eacf。
 
 ## [v0.5.10] - 2026-09-11 (重新发布 #5)
 

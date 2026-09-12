@@ -1,6 +1,6 @@
 ---
 name: ui-plugin-creator
-description: "DriFox UI 插件开发技能。用于创建、修改、调试 UI 插件（浮动卡片 / 内容块渲染器 / 消息元素工厂 / 欢迎卡片插件 tab）。非 UI 组件、主程序改动、插件发布不适用本技能。"
+description: "DriFox UI 插件技能。何时使用：用户要在插件内做「看得见」的界面——创建/修改/美化/调试浮动卡片（悬浮卡）、内容块渲染器、消息元素工厂、欢迎页插件 tab、输入区按钮、侧栏入口、右键菜单、设置卡、工作台页签。触发语：「加个悬浮卡/浮动卡」「消息里渲染 xxx」「欢迎页加个入口」「输入框加个按钮」「卡片显示不出来/不刷新」「美化这个插件的界面」。新建完整 UI 插件时骨架+manifest 交给 plugin-creator，本技能只管 UI 载体部分。不适用：非 UI 组件与插件发布 → plugin-creator；改 app/ 主程序 widget → drifox-dev。"
 license: MIT
 compatibility: Requires DriFox UI plugin extension points (register_ui 契约); Python 3.10+
 allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
@@ -55,6 +55,7 @@ b) 跳过设计稿直接实现，但动手前必须用 question 确认三要素�
 | "右侧加个页""工作台加 tab""常驻内容页" | **右侧工作台页** | `templates-workbench.md` |
 | "做个插件市场""安装/管理插件" | **完整插件** | `templates-plugins.md` + `architecture.md` |
 | "插件要 requests/PIL/... 第三方包" | **外部依赖（_vendor/）** | `templates-plugins.md`（§五） |
+| "插件要设置项/配置卡/API Key 配置" | **声明式配置** | `plugin-config.md` |
 | "改现有插件""加个按钮""调样式" | **修改现有插件** | `modifying.md` |
 
 > ⚠️ 新插件优先浮动卡片（最常见形态）；图表/统计是卡片内组件，从 `widgets-*.md` 复用。
@@ -76,6 +77,7 @@ b) 跳过设计稿直接实现，但动手前必须用 question 确认三要素�
 | 3 渲染器 | templates-renderers.md | 内容渲染器/消息工厂 |
 | 3 欢迎 tab | templates-welcome-tab.md | 欢迎 tab/echarts |
 | 3 入口动作 | templates-entries.md | 输入框按钮/标题栏 tab |
+| 3 声明式配置 | plugin-config.md | 设置项/config_schema/API Key 存储 |
 | 3 工作台页 | templates-workbench.md | 右侧工作台页 |
 | 3 插件级骨架 | templates-plugins.md | register_ui/plugin.json/_vendor |
 | 4 控件选型 | widgets.md | 控件索引与设计原则 |

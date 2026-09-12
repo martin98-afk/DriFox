@@ -263,6 +263,63 @@ edit.setText("")        # ❌ QLineEdit/QLabel 的 API，这里 AttributeError
 `on_project_changed`（宿主切项目时派发），内部走 `refresh_data()` 重取 ctx 并重载数据。
 详见 `references/patterns.md §11`。
 
+## 15. config_schema 的 select options 写成 dict → 仓库校验 FAIL
+
+**症状**：插件本地功能正常，`validate_plugins.py` 报
+`config_schema.fields.N.options: {...} is not of type 'array'`。
+
+**原因**：主程序契约（`plugin_config.py`）兼容 dict/list/list[dict] 三种写法，
+但插件仓库的 JSON Schema 只收 array——运行时兼容 ≠ 校验通过。
+
+**修法**：一律写 `list[dict]`：
+
+```json
+"options": [
+    {"value": "auto", "label": "自动"},
+    {"value": "minimax", "label": "仅 MiniMax"}
+]
+```
+
+## 16. 宿主打包环境没有 requests → 云端 API 用标准库 multipart
+
+**症状**：插件 import requests 即 ModuleNotFoundError（DriFox 安装版 PyInstaller
+`_internal` 未收集 requests/urllib3/httpx）。
+
+**原因**：宿主是 PyInstaller onedir 打包，第三方库只有打包时显式收集的；
+插件不能假设宿主有任意网络库。
+
+**修法**：短音频/小文件上传直接用标准库 `urllib.request` 手写 multipart
+（边界 + Bearer 头 + `{"text": ...}` 响应，30s 超时）：
+
+```python
+def transcribe_wav(url: str, model: str, api_key: str, wav_path: str) -> str:
+    body = _build_multipart({"model": model}, Path(wav_path).read_bytes())
+    request = urllib.request.Request(url, data=body, headers={
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": f"multipart/form-data; boundary={_boundary}",
+    }, method="POST")
+    with urllib.request.urlopen(request, timeout=30) as resp:
+        return str(json.loads(resp.read().decode()).get("text") or "").strip()
+```
+
+大依赖（PIL、numpy 等）走 `_vendor/` 打包（见 templates-plugins.md §五 / testing-vendor.md）。
+实战参照：`drifox-plugins2/plugins/voice-input/ui/cloud_recognizer.py`。
+
+## 17. 「插件改了怎么没生效」→ 先分清生效通道
+
+**症状**：改了插件/主程序代码，界面行为照旧。
+
+**原因**：两类代码生效通道不同：
+- **插件文件**：源码即所得，但要求目标目录同步 + Python 不命中旧字节码；
+- **主程序 UI**（app/ 或设置页控件）：安装版是 PyInstaller pyc，源码改动
+  **必须 dev 运行或重新打包**才生效，直接改源码对安装版永远无效。
+
+**修法**：
+1. 插件：把仓库目录整个复制到 `~/.drifox/plugins/<name>/`（先删旧目录再复制，
+   并递归删 `__pycache__`），重启/热重载生效；
+2. 主程序：`python main.py` 跑 dev 验证，或走打包发版流程；
+3. 排查时先确认用户跑的是哪个（安装版 vs dev）再看「为什么没生效」。
+
 ---
 
 > 新坑写回格式：`## N. 标题` + **症状/原因/修法** 三段 + 可运行代码片段。

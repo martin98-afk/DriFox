@@ -593,7 +593,7 @@ class LLMSettingsCard(SystemCardFrame):
         # 繁忙时 Enter 键行为：智能体运行时按 Enter 的动作（Ctrl+Enter 恒为另一行为）
         self.busyEnterCard = OptionsSettingCard(
             self.cfg.busy_enter_behavior,
-            FluentIcon.SEARCH,
+            FluentIcon.SEND,
             "繁忙时 Enter 键行为",
             "仅在智能体运行时生效；Ctrl+Enter 使用另一行为",
             texts=["插话发送", "排队发送"],

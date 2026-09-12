@@ -135,7 +135,40 @@ def _notify(main_widget, title: str, msg: str) -> None:
 - 兜底原则：on_click 全流程 try/except，异常路径必须关闭已创建的全屏窗，
   **不允许残留置顶窗卡死桌面**。
 
-### 9.6 验证清单
+### 9.6 外部 API 调用型按钮的 worker 模式（多引擎回退链）
+
+按钮动作要调云端 API（ASR/LLM/生图等）时，固定这套骨架（实战参照 voice-input 0.4.x）：
+
+**worker（QThread，三信号）**：
+- `finished_ok(str)` 成功 / `failed(str)` 失败 / `status(str)` 浮窗阶段文案；
+- 纯函数核心 `transcribe_xxx(url, model, key, path) -> str`，无 Qt 依赖便于单测；
+- key 由主线程点击时从配置读出**作参数传入**，worker 不碰存储；
+- 全链路 try/except，失败人话化后 emit failed。
+
+**多引擎回退链（配置了「自动/仅A/仅B」时）**：
+
+```python
+chain = _build_chain(cfg)          # [(url, model, key, 名称), ...] 头部优先
+# 头部失败自动转下一个，本次任务不丢；链空在入口拦截提示去设置页
+worker.failed.connect(lambda err, rest=chain[1:]: _on_failed(context, err, rest))
+
+def _on_failed(context, err, rest):
+    if rest:
+        _notify(..., f"{tried}失败，转用{rest[0][3]}")
+        _start_cloud(context, rest)   # 递归转下一引擎
+    else:
+        _reset_state(); _notify(..., "error", err)
+```
+
+**实测先行（接新 API 必走）**：写 worker 前用临时脚本（%TEMP% 下，key 走环境变量）
+分两步验证：① 无 key 探测端点在线与鉴权模式；② 真实 key 走完整请求核对返回结构。
+免费通道常见「认证过了但请求挂起不响应」（限流），30s 超时必须兜，
+超时错误单独标记「可能限流」便于触发转备用。
+
+**会话状态机**：涉及录音/采集类动作时用 `idle → recording → recognizing → idle`
+单实例状态机，识别中再点只提示不叠加；60s 上限看门狗 QTimer 自动收尾。
+
+### 9.7 验证清单
 
 ```
 1. 按钮出现在锚定位置（如新建会话左侧）？      → position 锚点
@@ -144,6 +177,7 @@ def _notify(main_widget, title: str, msg: str) -> None:
 4. 剪贴板内容在 DriFox 输入框 Ctrl+V 有反应？  → setImage 而非 setPixmap（§9.3）
 5. 成功/失败提示都可见？                       → InfoBar（§9.4），别用 QToolTip
 6. 重复点击/热重载/异常路径无残留窗口？        → §9.5 单实例防护 + 兜底
+7. 云端动作：无 key/断网/备用引擎转推路径都有提示？ → §9.6 回退链 + 超时兕底
 ```
 
 > 完整验证清单见 `checklist.md §13`。
