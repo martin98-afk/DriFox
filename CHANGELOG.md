@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **繁忙时 Enter 键行为（插话发送 / 排队发送）** (`app/main_widget.py`, `app/utils/config.py`, `app/widgets/bottom_input_area.py`, `app/widgets/cards/floating/queue_message_card.py`, `app/widgets/modules/input_card_module.py`, `app/core/workers/chat_worker.py`, `app/core/backend.py`, `app/core/conversation/executor.py`, `app/core/conversation/adapters/ui.py`, `app/core/engines/ui/engine.py`, `app/widgets/cards/settings/llm_settings_card.py`): 智能体运行时按 Enter 发消息不再强行停止 worker。通用设置新增「繁忙时 Enter 键行为」下拉（`Ctrl+Enter` 恒为另一行为）：**插话发送**（默认）把消息经 `backend._hook_message_queue` 注入当前 worker 对话流（TeamMail 同通道，worker 每轮 API 调用前消费），LLM 在工具迭代间隙即可看到并回复；worker 消费到插话时经新信号 `queued_user_injected` 通知 UI 结束旧回复卡并开新回复卡承接后续流式（跨线程 queued 保序保证先建卡后收 chunk），插入 API 前剥离 `_interject*` 传输键，落库为干净 user 消息；**排队发送**把消息存入对话内排队卡片（可积累多条，每条 15px 加粗文本 + 插入/编辑/删除三图标按钮，支持行内编辑），worker 自然结束后自动逐条续发（复用 worker 语义无缝开新一轮），手动停止不续发、未消费插话回填输入框不丢失，切会话清空队列（内存态不持久化）；排队消息不提前显示用户气泡，实际发送时才创建。含 `resolve_busy_behavior` 互反判定与排队摘要纯函数 8 条测试。
+
 - **侧边栏智能折叠/展开** (`app/widgets/tab_panel.py`, `app/widgets/tab_manager_window.py`, `app/utils/config.py`, `tests/widgets/test_sidebar_smart_collapse.py`): 四条规则让左右折叠区「懂用户」—— ① **挤压即折叠**：折叠阈值 100px → 200px（对齐面板展开最小可用宽），面板被挤压到最小宽直接折叠成窄条，不再经历「压扁但没折叠」的废物区间，滞回区同步上移（展开 ≥210）；② **双面板协调（右先折）**：窗口放不下「会话栏 + 聊天区 + 工作台」时先瞬切收起工作台让位，释放后够用则保持会话栏展开，仍不够才折会话栏，恢复反向（先展左、再富余展右）；③ **空间恢复即展开**：自动展开的窗口增长门槛 200px → 80px（保留滞后防弹回），手动折叠永不自动展开（删除原 growth 豁免）；④ **启动记忆**：新增 `[UI] SidebarCollapsed` / `[UI] WorkbenchVisible` 两配置项，只记用户手动终态（按钮/拖拽松手落盘），挤压自动折叠不落盘，重启恢复上次选择；窗口大小/位置仍固定默认。19 条新测试 + 既有滞回回归适配。
 
 ## [v0.5.10] - 2026-09-11 (重新发布 #5)
