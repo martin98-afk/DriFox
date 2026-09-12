@@ -8,7 +8,6 @@ Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 """
 
 import platform
-import sys
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional
 
@@ -110,6 +109,7 @@ _IS_MAC = platform.system() == "Darwin"
 # _user32 is not None` 守卫，避免 NameError 打断窗口构造。
 _MSG_CAST = None
 _user32 = None
+_dwmapi = None
 _GWL_STYLE = -16
 _SNAP_STYLES = 0
 _SWP_FRAMECHANGED = 0
@@ -117,6 +117,18 @@ _HTCLIENT = 1
 _HTLEFT = _HTRIGHT = _HTTOP = 0
 _HTTOPLEFT = _HTTOPRIGHT = 0
 _HTBOTTOM = _HTBOTTOMLEFT = _HTBOTTOMRIGHT = 0
+
+# ── DWM 窗口外观（Win11 build 22000+）──
+# DWMWA_WINDOW_CORNER_PREFERENCE(33)：窗口圆角偏好
+# DWMWA_BORDER_COLOR(34)：窗口最外圈描边颜色
+_DWMWA_WINDOW_CORNER_PREFERENCE = 33
+_DWMWA_BORDER_COLOR = 34
+_DWMCP_ROUND = 2  # DWM_WINDOW_CORNER_PREFERENCE.DWMCP_ROUND
+# ★ DWMWA_COLOR_NONE：让 DWM「跳过」描边绘制（不是画成透明色）。官方文档：
+#   可得到"有圆角但无边框"的窗口。与之相对，DWMWA_COLOR_DEFAULT(0xFFFFFFFF)
+#   是**恢复系统默认描边** —— 即那条会随激活状态变亮/变暗的 2px 白线，
+#   所以千万不要用它来"复位"边框。
+_DWMWA_COLOR_NONE = 0xFFFFFFFE
 
 if _IS_WINDOWS:
     try:
@@ -166,6 +178,18 @@ if _IS_WINDOWS:
         ]
         _user32.SetWindowPos.restype = _ctypes.c_bool
 
+        # ── DWM 绑定（Win11 圆角 / 压边框描边，见 _apply_win11_dwm_chrome）──
+        # ★ 必须显式声明 argtypes：不声明时 ctypes 默认把 Python int 转成 C int
+        #   （32 位），64 位进程里 HWND 有被截断的风险。
+        _dwmapi = _ctypes.windll.dwmapi
+        _dwmapi.DwmSetWindowAttribute.argtypes = [
+            _wintypes.HWND,
+            _wintypes.DWORD,
+            _ctypes.c_void_p,
+            _wintypes.DWORD,
+        ]
+        _dwmapi.DwmSetWindowAttribute.restype = _ctypes.c_long
+
         # GetWindowLongPtr 索引
         _GWL_STYLE = -16
 
@@ -193,6 +217,7 @@ if _IS_WINDOWS:
     except Exception:
         _MSG_CAST = None
         _user32 = None
+        _dwmapi = None
 
 
 class EmptyStateWidget(QWidget):
@@ -574,6 +599,15 @@ class TabManagerWindow(FramelessWindow):
     _WM_EXITSIZEMOVE = 0x0232
     _WM_MOVING = 0x0216  # 仅"移动"触发；"缩放"发 WM_SIZING，二者互斥，可精确区分
     _WM_NCHITTEST = 0x0084  # 边缘/角落 resize 热区判定（自建，见 _native_hit_test）
+    # ── 非客户区（NC）消息：切窗白框闪的抑制点（见 nativeEvent 说明）──
+    _WM_NCACTIVATE = 0x0086  # 窗口激活状态变化 → 系统按默认外观重画非客户区（白框闪的来源）
+    _WM_NCPAINT = 0x0085  # 要求绘制非客户区（帧/标题栏）
+    _WM_ERASEBKGND = 0x0014  # 用窗口类背景刷擦除客户区（默认刷 = 白）
+    # 焦点消息：基类 qframelesswindow 在注册表 DWM\ColorPrevalence=1（"在标题栏和
+    # 边框上显示强调色"）时，会借它们把边框染成强调色 / 复位为系统默认描边，
+    # 故仍在此拦截（本机 ColorPrevalence=0，该分支不会触发）。
+    _WM_SETFOCUS = 0x0007
+    _WM_KILLFOCUS = 0x0008
 
     # resize 热区宽度（逻辑 px，按窗口 DPI 缩放）。系统默认无边框热区为 0，
     # 基类 qframelesswindow 固定 5px 不随 DPI 变化，高 DPI 下几乎抓不到。
@@ -853,20 +887,46 @@ class TabManagerWindow(FramelessWindow):
             self._on_replace_tab_clicked(tab_id)
         self._schedule_replace_highlight()
 
-    def _apply_win11_round_corner(self):
-        """Win11 DWM 圆角；Win10 及更早静默跳过
+    def _apply_win11_dwm_chrome(self):
+        """Win11 DWM 窗口外观：圆角 + **不画**边框描边（Win10 及更早静默跳过）
 
-        DWMWA_WINDOW_CORNER_PREFERENCE(33) = DWMCP_ROUND(2)，
-        调用失败（Win10 无此属性）不影响窗口功能。
+        - ``DWMWA_WINDOW_CORNER_PREFERENCE(33) = DWMCP_ROUND(2)`` → 窗口圆角；
+        - ``DWMWA_BORDER_COLOR(34) = DWMWA_COLOR_NONE(0xFFFFFFFE)`` → DWM 跳过
+          最外圈那 2px 描边的绘制。
+
+        ★ 为什么必须压掉描边（2026-09-12 像素级实测）：
+        本窗口为了边缘 resize / Aero Snap 补回了 ``WS_THICKFRAME``，DWM 因此把
+        它当"有框窗口"，会在窗口最外圈画一条 ``DWMWA_VISIBLE_FRAME_BORDER_
+        THICKNESS`` 像素宽的描边，且颜色随**激活状态**变化（失焦时变亮）。因此
+        把它设为 ``DWMWA_COLOR_NONE``，消除稳定态下这条"会随焦点变色的描边"。
+        注意描边**由 DWM 画**，与自建的 ``_native_hit_test`` 热区（纯判定、
+        不绘制任何像素）无关。
+
+        ★ 本方法**不能**消除"切窗时闪一下白框"：实测（焦点切换后逐帧抓屏）
+        过渡帧仍会在最外圈画出纯白 #FFFFFF（左/上 13px、右/下 1px），下一帧
+        即消失 —— 那是一次由系统在激活过渡帧完成的重画，只能在消息层拒掉，
+        见 ``TabManagerWindow.nativeEvent`` 对 WM_NCACTIVATE / WM_NCPAINT /
+        WM_ERASEBKGND 的拦截。
+
+        ★ 为什么不设成"和背景同色的描边"：``DWMWA_BORDER_COLOR`` 只接受
+        COLORREF，无 alpha 通道，画不出半透明描边；而 ``DWMWA_COLOR_NONE`` 是
+        **跳过描边绘制**，视觉上等价于把描边彻底去掉，官方说明其可保留圆角，
+        且不影响 DWM 投影阴影（实测确认：描边消失、窗口外侧阴影像素不变）。
+
+        幂等、极廉价（两条 DwmSetWindowAttribute）；hwnd 会因 setWindowFlags /
+        跨屏 DPI 变化重建，重建后 DWM 属性随之丢失，故挂在
+        ``_ensure_native_window_styles`` 里随每次 showEvent 一起重设。
         """
-        if sys.platform != "win32":
+        if not _IS_WINDOWS or _dwmapi is None:
             return
         try:
-            import ctypes
-
             hwnd = int(self.winId())
-            pref = ctypes.c_int(2)  # DWMCP_ROUND
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+            if hwnd == 0:
+                return
+            pref = _ctypes.c_int(_DWMCP_ROUND)
+            _dwmapi.DwmSetWindowAttribute(hwnd, _DWMWA_WINDOW_CORNER_PREFERENCE, _ctypes.byref(pref), 4)
+            border = _ctypes.c_uint32(_DWMWA_COLOR_NONE)
+            _dwmapi.DwmSetWindowAttribute(hwnd, _DWMWA_BORDER_COLOR, _ctypes.byref(border), 4)
         except Exception:
             pass
 
@@ -1676,8 +1736,9 @@ class TabManagerWindow(FramelessWindow):
                 /* ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
                    圆角外侧的三角区不会被绘制，底层透出系统默认窗口色 —— 表现为
                    窗口四角隐约有一圈"系统窗口"的白边，resize 重绘时尤其明显。
-                   窗口圆角由 DWM 负责（_apply_win11_round_corner / 补回的
-                   WS_THICKFRAME），Qt 侧保持矩形即可。 */
+                   窗口圆角由 DWM 负责（见 _apply_win11_dwm_chrome），Qt 侧保持
+                   矩形即可；该处同时把 DWM 的边框描边设为 DWMWA_COLOR_NONE，
+                   避免窗口最外圈出现一圈随激活状态忽明忽暗的 2px 白线。 */
             }}
             #tabManagerContent {{
                 background: transparent;
@@ -4014,8 +4075,9 @@ class TabManagerWindow(FramelessWindow):
         运行中用户可自由拖动/缩放窗口，不再重置；重启后恢复默认居中。
         """
         super().showEvent(event)
-        # 原生窗口能力补全（边缘 resize + Aero Snap）并压掉 DWM 白边。
-        # hwnd 会因 setWindowFlags / 跨屏 DPI 变化重建，故每次显示都校验。
+        # 原生窗口能力补全（边缘 resize + Aero Snap）+ Win11 DWM 圆角 / 压掉
+        # 边框描边。hwnd 会因 setWindowFlags / 跨屏 DPI 变化重建，DWM 属性随之
+        # 丢失，故每次显示都重设一遍（内部幂等）。
         self._ensure_native_window_styles()
         # 标题栏宽度必须显式同步：构造期几何恢复走的是 resize 节流路径，
         # 基类那次 titleBar.resize() 会被跳过（详见 _sync_title_bar_width）。
@@ -4023,8 +4085,6 @@ class TabManagerWindow(FramelessWindow):
         if not self._geometry_applied:
             self._geometry_applied = True
             self._restore_geometry()
-            # Win11 DWM 圆角（winId 此刻已有效；仅首次）
-            self._apply_win11_round_corner()
         # 几何恢复可能改变窗口宽度，再同步一次标题栏
         self._sync_title_bar_width()
         # 对话区限宽居中：首次显示同步 wrapper margins（Resize 事件链可能晚到）
@@ -4192,6 +4252,11 @@ class TabManagerWindow(FramelessWindow):
         except Exception:
             pass
 
+        # Win11 DWM 圆角 + 压掉稳定态的边框描边（过渡帧那次重画由 nativeEvent
+        # 拦截 WM_NCACTIVATE / WM_NCPAINT / WM_ERASEBKGND 负责，见方法文档）。
+        # 放在这里而非构造期：hwnd 重建后 DWM 属性会丢，必须随每次显示重设。
+        self._apply_win11_dwm_chrome()
+
     def _system_buttons_left(self) -> int:
         """标题栏三个系统按钮的左边界 x（顶边热区需让开这段范围）"""
         btn = getattr(getattr(self, "titleBar", None), "minBtn", None)
@@ -4269,6 +4334,14 @@ class TabManagerWindow(FramelessWindow):
         WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE 是 OS 对"用户正在拖动/缩放窗口"
         的权威信号——标题栏拖拽由系统原生管理（WS_CAPTION），Qt 收不到
         mousePress/Release，只能靠这两条消息准确判定拖拽区间。
+
+        另在此拦截非客户区（NC）消息：WM_NCACTIVATE / WM_NCPAINT /
+        WM_ERASEBKGND。窗口补回 WS_THICKFRAME 后系统会把它当"有框窗口"，
+        在激活状态变化的那一帧按默认外观重画一次非客户区 —— 表现为切窗 /
+        重聚焦时窗口最外圈闪一圈白框。本层直接声明"已处理"拒掉这次重画。
+
+        WM_SETFOCUS / WM_KILLFOCUS 也在拦截之列：基类在注册表
+        DWM\\ColorPrevalence=1 时会借它们改边框颜色（见分支内注释）。
         """
         # ★ 热路径：拖拽时每秒有上千条原生消息经过这里（WM_MOUSEMOVE /
         # WM_NCHITTEST 等），任何 per-call 开销都会被放大。
@@ -4278,6 +4351,35 @@ class TabManagerWindow(FramelessWindow):
             try:
                 msg = _MSG_CAST(int(message))[0]
                 msg_id = msg.message
+                # ── 切窗白框闪的抑制点（2026-09-12 像素级实测）──
+                # 实测：焦点切换后第一帧，窗口最外圈出现纯白 #FFFFFF ——
+                # 左 / 上各 13px、右 / 下各 1px（合计 14px 一圈，本机 150% DPI），
+                # 下一帧即消失。该圈由**系统**在激活过渡帧按默认窗口外观绘制，
+                # 与本窗口自绘内容无关（自建的 `_native_hit_test` 只做命中判定，
+                # 一个像素都不画）。DWMWA_BORDER_COLOR=NONE 只压掉了稳定态的
+                # 描边，压不住过渡帧这一次重画，故从消息层直接拒掉：
+                #   · WM_NCACTIVATE → TRUE：不触发默认的非客户区激活重画；
+                #   · WM_NCPAINT    → 0：不绘制帧 / 标题栏；
+                #   · WM_ERASEBKGND → 1：不让系统用窗口类默认刷（白）擦背景，
+                #     客户区由 Qt 整块自绘，不需要系统代劳。
+                # 三者都只作用于非客户区，不影响 Qt 的焦点链与客户区重绘。
+                if msg_id == self._WM_NCACTIVATE:
+                    return True, 1
+                if msg_id == self._WM_NCPAINT:
+                    return True, 0
+                if msg_id == self._WM_ERASEBKGND:
+                    return True, 1
+                if msg_id == self._WM_SETFOCUS or msg_id == self._WM_KILLFOCUS:
+                    # 基类 qframelesswindow 在注册表 DWM\ColorPrevalence=1
+                    # （"在标题栏和窗口边框上显示强调色"）时，会把
+                    # DWMWA_BORDER_COLOR 染成系统强调色、失焦时复位为
+                    # DWMWA_COLOR_DEFAULT(0xFFFFFFFF) —— "默认"即那条随激活
+                    # 状态忽明忽暗的描边。本窗口已把描边固定为 DWMWA_COLOR_NONE
+                    # （见 _apply_win11_dwm_chrome），这里返回 (False, 0) 跳过的
+                    # 只是基类的着色逻辑，Qt 的焦点消息处理完全不受影响。
+                    # 注：本机 ColorPrevalence=0，基类该分支本就不会触发，
+                    # 此处为跨机器防御（开启强调色边框的机器上才会生效）。
+                    return False, 0
                 if msg_id == self._WM_ENTERSIZEMOVE:
                     self._window_dragging_timer.stop()  # 原生信号权威，停用防抖回退
                     self._on_window_drag_start()
