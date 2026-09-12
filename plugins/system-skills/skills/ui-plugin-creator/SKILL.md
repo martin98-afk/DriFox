@@ -1,6 +1,6 @@
 ---
 name: ui-plugin-creator
-description: "DriFox UI 插件开发技能。用于创建、修改、调试 UI 插件（浮动卡片 / 内容块渲染器 / 消息元素工厂 / 欢迎卡片插件 tab）。非 UI 组件、主程序改动、插件发布不适用本技能。"
+description: "DriFox UI 插件技能。何时使用：用户要在插件内做「看得见」的界面——创建/修改/美化/调试浮动卡片（悬浮卡）、内容块渲染器、消息元素工厂、欢迎页插件 tab、输入区按钮、侧栏入口、右键菜单、设置卡、工作台页签。触发语：「加个悬浮卡/浮动卡」「消息里渲染 xxx」「欢迎页加个入口」「输入框加个按钮」「卡片显示不出来/不刷新」「美化这个插件的界面」。新建完整 UI 插件时骨架+manifest 交给 plugin-creator，本技能只管 UI 载体部分。不适用：非 UI 组件与插件发布 → plugin-creator；改 app/ 主程序 widget → drifox-dev。"
 license: MIT
 compatibility: Requires DriFox UI plugin extension points (register_ui 契约); Python 3.10+
 allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question

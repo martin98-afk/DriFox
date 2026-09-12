@@ -1142,7 +1142,7 @@ class TabPanel(QWidget):
         # 拖拽把手折叠——手动折叠不自动展开）。
         self._collapsed_by_squeeze: bool = False
         self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
-        self._auto_collapse_width: int = 200  # 展开态拖窄到该宽度(panel px)时自动折叠（=面板展开最小可用宽）
+        self._auto_collapse_width: int = 120  # 展开态拖窄到该宽度(panel px)时自动折叠（=面板展开最小可用宽）
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
         # 窗口 resize / relayout 过渡期抑制自动折叠：几何瞬变（_force_relayout
         # 重算、最大化/还原）会把左面板瞬时压到折叠阈值以下，若 resizeEvent

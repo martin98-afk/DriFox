@@ -36,7 +36,11 @@ def test_plugin_json_declares_config_schema():
     manifest = _load_system_manifest()
     schema = parse_config_schema("system-tools", manifest.get("config_schema"))
     assert schema is not None
-    assert {f.key for f in schema.fields} == {"tavily_api_key", "tinyfish_api_key"}
+    assert {f.key for f in schema.fields} == {
+        "tavily_api_key",
+        "tavily_homepage",
+        "tinyfish_api_key",
+    }
 
 
 def test_auto_card_registered_for_system(fresh_registry, monkeypatch):

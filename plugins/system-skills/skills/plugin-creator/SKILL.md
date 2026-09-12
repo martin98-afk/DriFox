@@ -1,6 +1,6 @@
 ---
 name: plugin-creator
-description: "DriFox 插件全生命周期开发技能。涵盖全部 18 类组件（commands/agents/skills/hooks/mcp/lsp/themes/ui/tools/providers/team_templates），从脚手架生成 → 本地开发/调试 → 验证 → 发布到 drifox-plugins 官方市场的完整流程。UI 组件开发桥接 ui-plugin-creator 技能。主程序改动、一次性脚本、UI 卡片载体开发不适用本技能。"
+description: "DriFox 插件开发技能。何时使用：用户要新建可安装插件（脚手架→开发→调试→发布到 drifox-plugins 市场），或在既有插件内增改非 UI 组件：tools 工具、commands 命令、hooks、agents、skills、MCP、LSP、themes 主题、模型适配器、存储、序列化、provider、team_templates 等。触发语：「写个插件」「给插件加个工具/命令/hook」「接入 MCP」「做个主题」「打包发布插件」。新建完整 UI 插件时由本技能主导骨架+manifest，UI 载体部分桥接 ui-plugin-creator。不适用：只做插件内 UI 载体（浮动卡/渲染器/欢迎 tab）→ ui-plugin-creator；改 app/ 主程序 → drifox-dev；学习组件概念不产出安装物 → plugin-dev。"
 license: MIT
 compatibility: Requires DriFox plugin system (目录即插件, register(registry) 契约); Python 3.10+
 allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question

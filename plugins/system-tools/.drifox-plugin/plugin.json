@@ -27,6 +27,13 @@
         "placeholder": "TAVILY_API_KEY"
       },
       {
+        "key": "tavily_homepage",
+        "label": "Tavily 官网",
+        "type": "link",
+        "url": "https://app.tavily.com",
+        "placeholder": "app.tavily.com"
+      },
+      {
         "key": "tinyfish_api_key",
         "label": "TinyFish 搜索",
         "type": "password",

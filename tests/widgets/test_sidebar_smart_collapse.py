@@ -87,17 +87,17 @@ def panel_collapsible(qtbot):
 # ── 规则 1：挤压即折叠 ──
 
 
-def test_auto_collapse_width_raised_to_200(qapp):
+def test_auto_collapse_width_set_to_120(qapp):
     from unittest.mock import patch
 
     from app.widgets.tab_panel import TabPanel
 
     with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
         p = TabPanel()
-    assert p._auto_collapse_width == 200
+    assert p._auto_collapse_width == 120
 
 
-def test_resize_to_199_collapses(panel_collapsible, qtbot):
+def test_resize_to_119_collapses(panel_collapsible, qtbot):
     from PyQt5.QtCore import QSize
     from PyQt5.QtGui import QResizeEvent
 
@@ -105,25 +105,25 @@ def test_resize_to_199_collapses(panel_collapsible, qtbot):
     panel_collapsible.resize(250, 600)
     panel_collapsible.resizeEvent(QResizeEvent(QSize(250, 600), QSize(250, 600)))
     assert panel_collapsible._collapsed is False
-    panel_collapsible.resize(199, 600)
-    panel_collapsible.resizeEvent(QResizeEvent(QSize(199, 600), QSize(250, 600)))
+    panel_collapsible.resize(119, 600)
+    panel_collapsible.resizeEvent(QResizeEvent(QSize(119, 600), QSize(250, 600)))
     qtbot.wait(50)
     assert panel_collapsible._collapsed is True
 
 
-def test_still_expanded_at_210(panel_collapsible, qtbot):
-    """滞回区：折叠态拉到 210 展开；210 以下保持折叠"""
+def test_still_expanded_at_130(panel_collapsible, qtbot):
+    """滞回区：折叠态拉到 130 展开；130 以下保持折叠"""
     from PyQt5.QtCore import QSize
     from PyQt5.QtGui import QResizeEvent
 
     panel_collapsible.add_tab("会话A")
     panel_collapsible.set_collapsed(True)
-    panel_collapsible.resize(205, 600)  # 滞回区（200~209）内不动
-    panel_collapsible.resizeEvent(QResizeEvent(QSize(205, 600), QSize(60, 600)))
+    panel_collapsible.resize(125, 600)  # 滞回区（120~129）内不动
+    panel_collapsible.resizeEvent(QResizeEvent(QSize(125, 600), QSize(60, 600)))
     qtbot.wait(50)
     assert panel_collapsible._collapsed is True
-    panel_collapsible.resize(210, 600)
-    panel_collapsible.resizeEvent(QResizeEvent(QSize(210, 600), QSize(205, 600)))
+    panel_collapsible.resize(130, 600)
+    panel_collapsible.resizeEvent(QResizeEvent(QSize(130, 600), QSize(125, 600)))
     qtbot.wait(50)
     assert panel_collapsible._collapsed is False
 
