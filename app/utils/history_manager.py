@@ -1539,7 +1539,22 @@ class HistoryManager:
 
         💡 内存优化：委托 get_session_by_session_id 处理懒加载，
         避免启动时一次性反序列化所有消息。
+
+        🛡️ 必须返回全量消息（主 blob + session_msg_extras 合并）：
+        SQLite 主 blob 的历史消息已被剥离 arguments/diff/reasoning_content
+        （仅 _x_idx 哨兵标记）。若把轻量列表直接塞进内存会话，用户在该
+        会话继续对话后的下一次保存会经 normalize_message 给轻量消息伪造
+        空 arguments={}，extract_offload_fields 视其为「无剥离字段」不产
+        extras 行，而 _write_extras 全删旧行后不插回 → 历史消息参数数据
+        永久丢失（症状：加载历史会话后工具完成框描述全空，重启不可逆，
+        2026-09-12 根因）。调用方均为低频加载动作，全量读取无性能顾虑。
         """
+        if not session_id:
+            return None
+        if self._use_sqlite and self._session_store and self._session_store.is_initialized:
+            full = self._session_store.get_full_messages(session_id)
+            if full:
+                return full
         session = self.get_session_by_session_id(session_id)
         if session:
             return session.get("messages", [])

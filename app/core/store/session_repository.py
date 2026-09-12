@@ -50,6 +50,15 @@ def extract_offload_fields(messages: List[Any]) -> Tuple[Dict[int, Dict[str, byt
             continue
         patch = {f: msg[f] for f in OFFLOAD_FIELDS if msg.get(f)}
         if not patch:
+            # 🛡️ 回归探测器：带 _x_idx 的消息说明曾从轻量 blob 读出，若其无任何
+            # 剥离字段却再次进入保存链，意味着调用方拿到了轻量消息列表（正常
+            # 情况下加载入口已全量物化）。该消息的历史 extras 行将在本次
+            # 全删全插中永久丢失——必须告警暴露，不得静默。
+            if isinstance(msg.get(OFFLOAD_IDX_FIELD), int):
+                logger.warning(
+                    f"[SessionRepository] 轻量剥离消息(role={msg.get('role')}, idx={i}) "
+                    f"无剥离字段进入保存链，历史 extras 数据将随本次保存丢失"
+                )
             light.append(msg)
             continue
         m2 = dict(msg)

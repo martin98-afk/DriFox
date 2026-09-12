@@ -797,7 +797,12 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
         normalized["tool_call_id"] = tool_call_id
         normalized["content"] = content_to_text(message.get("content", ""))
         normalized["name"] = str(message.get("name", "tool") or "tool")
-        normalized["arguments"] = message.get("arguments", {})
+        # 🛡️ 不伪造空 arguments：轻量剥离消息（无 arguments 键）normalize 后
+        # 若带上空 dict，extract_offload_fields 会误判「无剥离字段」，配合
+        # _write_extras 全删全插造成历史参数数据静默丢失（2026-09-12 回归）。
+        # 保留「键缺失」语义，让剥离状态穿透保存链可见。
+        if "arguments" in message:
+            normalized["arguments"] = message.get("arguments")
         normalized["success"] = bool(message.get("success", True))
         if message.get("round_id"):
             normalized["round_id"] = str(message.get("round_id"))
