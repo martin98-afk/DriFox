@@ -4974,9 +4974,7 @@ class CodeWebViewer(QWebEngineView):
         if not hidden:
             try:
                 area = self._find_chat_scroll_area()
-                self._saved_dialog_scroll_pos = (
-                    area.verticalScrollBar().value() if area is not None else -1
-                )
+                self._saved_dialog_scroll_pos = area.verticalScrollBar().value() if area is not None else -1
             except RuntimeError:
                 self._saved_dialog_scroll_pos = -1
         hidden.add(dialog)
