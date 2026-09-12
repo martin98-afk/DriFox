@@ -60,6 +60,9 @@ class _StubPanel:
     def _update_toggle_button(self):
         pass
 
+    def set_collapsed(self, collapsed):
+        self._collapsed = collapsed
+
     def sync_collapsed_ui(self):
         self.sync_calls += 1
 
@@ -172,6 +175,12 @@ class _Win:
     def set_workbench_visible(self, visible, animate=True, persist=False):
         self._wb_visible_target = visible
 
+    def _maybe_restore_workbench_after_squeeze(self, growth_required=True):
+        # 委托真实现：恢复逻辑依赖 splitter/panel/frame，stub 已全部提供
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        TabManagerWindow._maybe_restore_workbench_after_squeeze(self, growth_required=growth_required)
+
 
 def test_coordinate_collapse_wb_first_when_full_layout_fits_without_wb(qapp):
     """total 放得下「面板+聊天」但放不下「面板+聊天+工作台」→ 只折工作台，左栏恢复展开宽"""
@@ -229,36 +238,26 @@ def test_auto_expand_growth_lowered(qapp):
 
 
 def test_maybe_expand_left_first_then_workbench(qapp):
-    """左栏折叠 + 工作台挤压折叠：空间恢复 → 先展左栏；再触发一次 → 展工作台"""
-    from app.widgets.tab_manager_window import (
-        _EXPANDED_MIN_FRAME_WIDTH,
-        _MIN_CHAT_WIDTH,
-        TabManagerWindow,
-    )
+    """左栏折叠 + 工作台挤压折叠：空间恢复 → 左栏优先；空间再富余 → 工作台恢复"""
+    from app.widgets.tab_manager_window import TabManagerWindow
     from app.widgets.workbench_panel import PANEL_WIDTH_MIN
 
-    wb_min = PANEL_WIDTH_MIN + 14
-    total = _EXPANDED_MIN_FRAME_WIDTH + _MIN_CHAT_WIDTH + wb_min + 300
-    win = _Win(left=60, total=total, wb_visible=True, wb_width=0)
+    wb_min = PANEL_WIDTH_MIN + 14  # 334
+    # 空间够左栏展开（250+400=650）但不够再容工作台：左栏优先，工作台保持折叠
+    win = _Win(left=60, total=984, wb_visible=True, wb_width=0)
     win._tab_panel._collapsed = True
     win._tab_panel._collapsed_by_squeeze = True
     win._wb_collapsed_by_squeeze = True
-    win._squeeze_total_width = total - 300  # 模拟折叠时窗口更窄，现已 +300 > 80
+    win._squeeze_total_width = 984 - 300  # 模拟折叠时窗口更窄，现已 +300 > 80
 
-    set_sizes_calls = []
-    orig = win._splitter.setSizes
-
-    def _track(sizes):
-        set_sizes_calls.append(list(sizes))
-        orig(sizes)
-
-    win._splitter.setSizes = _track
     TabManagerWindow._maybe_auto_expand_after_squeeze(win)
     assert win._tab_panel._collapsed is False, "第一优先：左栏先展开"
-    assert win._wb_collapsed_by_squeeze is True, "同一轮不得同时展开（先左后右）"
+    assert win._wb_collapsed_by_squeeze is True, "空间不足以同时恢复时工作台保持折叠"
 
+    # 窗口继续拉宽：空间够工作台 → 自动重开
+    win._splitter.setSizes([250, 1500, 0])
     TabManagerWindow._maybe_auto_expand_after_squeeze(win)
-    assert win._wb_collapsed_by_squeeze is False, "第二轮：左栏已展，工作台恢复"
+    assert win._wb_collapsed_by_squeeze is False
     assert win._wb_visible_target is True
 
 
@@ -301,7 +300,10 @@ def test_wb_stays_collapsed_when_space_not_enough(qapp):
     """窗口只比折叠时宽 10（<80 增长门槛）→ 工作台保持折叠"""
     from app.widgets.tab_manager_window import TabManagerWindow
 
-    win = _Win(left=250, total=1110, wb_visible=True, wb_width=0)
+    win = _Win(left=250, total=1110, wb_visible=False, wb_width=0)
+    # 已挤压折叠的工作台：frame 实例存在但隐藏（可见性判定只用于折叠方向）
+    win._workbench_frame = _StubFrame(minimum_width=250, visible=False)
+    win.workbench_panel = _StubWorkbenchPanel()
     win._wb_collapsed_by_squeeze = True
     win._squeeze_total_width = 1100
     TabManagerWindow._maybe_restore_workbench_after_squeeze(win)

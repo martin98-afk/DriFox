@@ -91,7 +91,7 @@ _DEFAULT_PANEL_WIDTH = 187
 # 避免"折叠刚完成条件恰满足就弹回展开"的抖动（绝对条件在窗口 ~760 时
 # 折叠即满足展开条件，导致折叠态无法保持）。overlay 卡片关闭属布局恢复
 # （窗口总宽未变），不走增长条件。
-_AUTO_EXPAND_GROWTH = 200
+_AUTO_EXPAND_GROWTH = 80  # 自动展开的窗口增长门槛（原 200 过苛：挤压折叠后几乎永不恢复，保留滞后防"折叠完立刻弹回"）
 
 # ── 聊天区最小可用宽度（px）──
 # 判定"侧边栏是否真的被挤压"的下限：窗口总宽放得下
@@ -2461,22 +2461,22 @@ class TabManagerWindow(FramelessWindow):
         self.set_workbench_visible(False, animate=False)
 
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
-        """挤压折叠后空间恢复：自动展开回常规宽度
+        """挤压折叠后空间恢复：自动展开回常规宽度（含工作台反向恢复）
 
-        窗口主动拉宽（growth_required=True）不受挤压标记限制：用户拉宽窗口
-        即视为想要展开，点击折叠按钮/拖窄把手手动折叠后拉宽也退出折叠。
-        仅 relayout/关闭卡片恢复（growth_required=False）要求挤压标记，
-        避免把用户手动折叠的面板被动撑开（尊重手动意图）。
+        规则 3 确认项：手动折叠（无挤压标记）永不自动展开——只有 _collapsed_by_squeeze
+        标记的挤压折叠才参与自动恢复。原实现的 growth_required 豁免（手动折叠后
+        拉宽窗口也展开）已按用户确认删除。
 
         触发点：窗口 resize 结束、overlay 卡片关闭、折叠动画结束。
         空间判定（两条件都满足才展开）：
-        1. 相对增长（growth_required=True）：当前窗口总宽 ≥ 折叠时总宽 + 200。
-           防止"折叠刚完成绝对条件恰满足就弹回"——窗口只缩窄到 900 左右折叠
-           时，绝对空间（900-60 ≥ 展开宽+400）仍满足，若只看绝对条件会立刻
-           弹回展开，折叠态无法保持。仅当窗口比折叠时明显更宽（有新增空间）
-           才自动展开，语义即"再有剩余空间时自动展开"。
+        1. 相对增长（growth_required=True）：当前窗口总宽 ≥ 折叠时总宽 + 80。
+           防止"折叠刚完成绝对条件恰满足就弹回"。仅当窗口比折叠时更宽
+           （有新增空间）才自动展开，语义即"再有剩余空间时自动展开"。
         2. 绝对下限：窗口总宽 - 折叠宽 ≥ 展开目标宽 + 聊天区最小可用宽(400)，
            展开后面板与聊天区都放得下。
+
+        规则 2 反向（先左后右）：左栏展开完成后检查协调折叠的工作台，
+        空间再有富余则自动重开（_maybe_restore_workbench_after_squeeze）。
 
         动画时序兜底：若检测时折叠/展开动画仍在进行（_animating），延迟 250ms
         重试一次（动画 200ms 后必然结束），避免"用户快速开关卡片 → 折叠动画
@@ -2486,11 +2486,11 @@ class TabManagerWindow(FramelessWindow):
             return
         panel = self._tab_panel
         if not panel._collapsed:
+            # 左栏已展开：只查工作台的挤压恢复（规则 2 反向，先左后右由调用序保证）
+            self._maybe_restore_workbench_after_squeeze(growth_required=growth_required)
             return
-        # 窗口主动拉宽(growth_required=True)不受 _collapsed_by_squeeze 限制：
-        # 手动折叠(点按钮/拖窄把手)后用户拉宽窗口也应退出折叠。仅 relayout/
-        # 关闭卡片恢复(growth_required=False)要求挤压标记，避免被动撑开。
-        if not growth_required and not panel._collapsed_by_squeeze:
+        # 规则 3 确认项：手动折叠永不自动展开，只有挤压标记的折叠才恢复
+        if not panel._collapsed_by_squeeze:
             return
         if panel._animating:
             # 动画中：延迟重试一次（等动画结束，覆盖快速开关卡片的时序缺口）
@@ -2516,6 +2516,48 @@ class TabManagerWindow(FramelessWindow):
         panel.set_collapsed(False)
         self._saved_panel_frame_width = target_w
         self._on_sidebar_toggled(False)
+        # 左栏刚展开完成：再查工作台是否也能恢复（规则 2 反向）
+        self._maybe_restore_workbench_after_squeeze(growth_required=growth_required)
+
+    def _maybe_restore_workbench_after_squeeze(self, growth_required: bool = True) -> None:
+        """规则 2 反向：挤压折叠的工作台在空间恢复后自动重开
+
+        前提：左栏已展开（"先左后右"顺序由 _maybe_auto_expand_after_squeeze
+        的调用序保证）。判定（三者都满足才重开）：
+        1. 仅 _wb_collapsed_by_squeeze=True（协调挤压折叠）——手动关闭永不重开；
+        2. 相对增长（growth_required=True）：窗口比挤压时宽 _AUTO_EXPAND_GROWTH；
+        3. 绝对下限：左栏收起宽 + 工作台最小宽 + 目标面板宽 + 聊天区最小宽都放得下。
+        """
+        if not getattr(self, "_wb_collapsed_by_squeeze", False):
+            return
+        frame = getattr(self, "_workbench_frame", None)
+        if frame is None or getattr(self, "workbench_panel", None) is None:
+            self._wb_collapsed_by_squeeze = False
+            return
+        panel = self._tab_panel
+        if panel._animating:
+            # 左栏动画中：延迟重试一次（对齐左栏恢复的时序兜底）
+            QTimer.singleShot(
+                250,
+                lambda: self._maybe_restore_workbench_after_squeeze(growth_required=growth_required),
+            )
+            return
+        from app.widgets.workbench_panel import PANEL_WIDTH_MIN
+
+        try:
+            total = sum(self._splitter.sizes())
+        except Exception:
+            return
+        target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        wb_min = PANEL_WIDTH_MIN + 14
+        if growth_required:
+            base = getattr(self, "_squeeze_total_width", None)
+            if base is not None and total < base + _AUTO_EXPAND_GROWTH:
+                return  # 窗口未比挤压时更宽，不重开
+        if total - (panel._collapsed_min_width + 14) - wb_min < target_w + _MIN_CHAT_WIDTH:
+            return  # 空间不足，保持折叠
+        self._wb_collapsed_by_squeeze = False
+        self.set_workbench_visible(True)
 
     def _restore_sidebar_collapsed(self):
         """启动时固定侧边栏为展开态 + 默认宽度（不恢复配置记忆）"""
