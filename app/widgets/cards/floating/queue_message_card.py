@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
 
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css
+from app.widgets.cards.card_container import CardContainer
 from qfluentwidgets import FluentIcon, TransparentToolButton
 
 
@@ -48,6 +49,9 @@ class QueueMessageCard(QWidget):
         super().__init__(parent)
         self._editor: QLineEdit | None = None  # 当前行内编辑器
         self._editing_id: str | None = None
+        # 高度严格跟随内容：出入栈行数变化时容器高度同步收缩/展开
+        # （否则 dock 模式下容器锁在首次展开高度，出栈后底部留白）
+        self.setProperty(CardContainer.FOLLOW_CONTENT_PROP, True)
         self.setVisible(False)
         self._setup_ui()
 
@@ -174,6 +178,8 @@ class QueueMessageCard(QWidget):
             self._list_layout.addWidget(self._build_row(entry))
         self._count_label.setText(f"· {len(entries)} 条" if len(entries) > 1 else "")
         self._refresh_rows_style()
+        # 主动触发卡片 Resize → 容器 eventFilter → _schedule_expand 收缩/展开
+        self.adjustSize()
 
     def _build_row(self, entry: dict) -> QWidget:
         row = QWidget(self._list_container)
