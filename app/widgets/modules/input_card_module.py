@@ -53,7 +53,10 @@ class InputCardModule(UIModule):
         host._bottom_input_container.setObjectName("bottomContainer")
         bottom_layout = QVBoxLayout(host._bottom_input_container)
         host._bottom_input_layout = bottom_layout
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        # 呼吸感：输入区四周留出边距（左右 10 / 顶 6 / 底 7，叠加主布局 1px），
+        # 工具栏条 _position_bottom_toolbar 的绝对定位与这套 margins 严格对齐，
+        # 改这里必须同步改那边，否则输入卡与工具栏不等宽
+        bottom_layout.setContentsMargins(10, 6, 10, 7)
         bottom_layout.setSpacing(0)
 
         # ===== 输入卡片（上方圆角 + 渐变 + 边框，border-bottom: none）=====
@@ -61,8 +64,9 @@ class InputCardModule(UIModule):
         host._input_card.setObjectName("_input_card")
         host._input_card.setAcceptDrops(True)
         host._input_card.installEventFilter(host)
+        # 呼吸感留白：卡内边距 2px → 8px，给附件行/输入文字留出与卡缘的距离
         card_layout = QVBoxLayout(host._input_card)
-        card_layout.setContentsMargins(2, 2, 2, 2)
+        card_layout.setContentsMargins(8, 8, 8, 8)
         card_layout.setSpacing(0)
 
         # 输入卡环境光晕容器（包裹 _input_card，承载宽柔的外层环境光）

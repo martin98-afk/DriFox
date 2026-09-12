@@ -1582,8 +1582,10 @@ class SendableTextEdit(TextEdit):
             pass
 
         doc = self.document()
-        content_height = int(doc.size().height()) + 8
-        new_height = max(44, min(300, content_height))
+        # 20 = QSS 上下 padding (12 + 6) + 2px 余量；最小高度 44 → 54
+        # （单行时文字区仍能完整容纳 15px 字号一行不裁切）
+        content_height = int(doc.size().height()) + 20
+        new_height = max(54, min(300, content_height))
 
         if self.height() != new_height:
             self._adjusting_height = True
@@ -1675,12 +1677,18 @@ class SendableTextEdit(TextEdit):
         self._position_send_button()
 
     def _position_send_button(self):
-        """定位发送按钮到输入框右下角"""
-        if self.send_btn:
-            btn_size = self.send_btn.size()
-            send_btn_x = self.width() - btn_size.width() - 10
-            send_btn_y = self.height() - btn_size.height() - 4
-            self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
+        """定右下角（仅兼容兼底）：发送按钮已由 bottom_toolbar 模块迁入工具栏。
+
+        迁移成功时 send_btn 的 parent 不再是输入框，直接跳过；
+        若模块未装配（插件 override 等场景），按钮仍留在输入框内，照常定位。
+        """
+        if self.send_btn is None or self.send_btn.parent() is not self:
+            return
+        btn_size = self.send_btn.size()
+        send_btn_x = self.width() - btn_size.width() - 10
+        # 底部偏移与 QSS padding-bottom (6px) 对齐，按钮与文字底缘齐平
+        send_btn_y = self.height() - btn_size.height() - 6
+        self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
         # 强制 / 键直接输入 /，不受中文输入法影响（防止变成、）
@@ -1993,7 +2001,7 @@ class SendableTextEdit(TextEdit):
                 color: {Colors.INPUT_TEXT};
                 border: none;
                 border-radius: 16px 16px 0 0;
-                padding: 8px 52px 0px 20px;
+                padding: 12px 16px 6px 20px;
                 selection-background-color: {Colors.SELECTED_BG};
                 {get_font_family_css()} {font_size_css(15)};
             }}
@@ -2098,13 +2106,12 @@ class SendableTextEdit(TextEdit):
                     self._glow_target = card._input_card
             if self._glow_target:
                 # 后备样式：与 main_widget._apply_bottom_input_stack_style 保持一致
-                # 注意：不再 setGraphicsEffect（_input_card 已有 _input_card_primary_shadow 管理主光）
+                # （一体舱单色底，无渐变；不再 setGraphicsEffect，_input_card 已有
+                # _input_card_primary_shadow 管理主光）
                 if target_alpha > 0:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{
-                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 {Colors.INPUT_FOCUS_BG_START},
-                                stop:1 {Colors.INPUT_FOCUS_BG_END});
+                            background: {Colors.INPUT_FOCUS_BG_END};
                             border: 2px solid {Colors.INPUT_FOCUS_BORDER};
                             border-bottom: none;
                             border-top-left-radius: 16px;
@@ -2116,9 +2123,7 @@ class SendableTextEdit(TextEdit):
                 else:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{
-                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 {Colors.INPUT_BG_START},
-                                stop:1 {Colors.INPUT_BG_END});
+                            background: {Colors.INPUT_BG_END};
                             border: 1px solid {Colors.INPUT_BORDER};
                             border-bottom: none;
                             border-top-left-radius: 16px;

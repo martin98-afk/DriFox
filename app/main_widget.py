@@ -3015,21 +3015,31 @@ class OpenAIChatToolWindow(ToolWindow):
             cc.ensure_settings_popup()
 
     def _position_bottom_toolbar(self):
-        """将底部工具栏绝对定位到窗口底部 36px。
+        """将底部工具栏绝对定位到窗口底部 44px 高的条带。
 
         工具栏是 self 的直接子控件，不在 main layout 里。这样：
         - 输入卡折叠/展开时，工具栏的窗口绝对 Y 坐标完全不变。
         - 系统卡片打开时，工具栏也不会被推上去。
-        位置 = 窗口底部 1px margin 内缩 36px，与输入容器底部 36px spacer 对齐。
+        位置 = 窗口底部抬高 8px（主布局 1px + 输入容器 7px 底边距）、
+        左右缩进 11px（1px 主 margin + 10px 容器边距），与输入卡等宽同底。
         """
         if not hasattr(self, "_bottom_toolbar_strip"):
             return
         w = self.width()
         h = self.height()
-        toolbar_h = 36
-        toolbar_y = max(0, h - 1 - toolbar_h)
-        toolbar_w = max(0, w - 2)
-        self._bottom_toolbar_strip.setGeometry(1, toolbar_y, toolbar_w, toolbar_h)
+        toolbar_h = 44
+        # 与主布局 1px margin + 输入容器 margins(10, 6, 10, 7) 对齐：
+        # strip 左右缩进 11px，底部抬高 8px（1px 主 margin + 7px 容器 margin），
+        # 输入卡与工具栏条保持等宽同底，四周留出呼吸边距
+        toolbar_x = 11
+        toolbar_y = max(0, h - 8 - toolbar_h)
+        toolbar_w = max(0, w - 22)
+        self._bottom_toolbar_strip.setGeometry(toolbar_x, toolbar_y, toolbar_w, toolbar_h)
+        # 发送按钮挂主窗口（跨条带与输入区两段、避免被 strip 矩形裁剪），
+        # 几何变化时以主窗口坐标系同步：右距条带右缘 10px、底部距条带底边界 6px
+        send_btn = getattr(getattr(self, "input_area", None), "send_btn", None) if hasattr(self, "input_area") else None
+        if send_btn is not None and send_btn.parent() is self:
+            send_btn.move(toolbar_x + toolbar_w - 50, toolbar_y + toolbar_h - 6 - send_btn.height())
         # 工具栏位置 / 大小变了 → 胶囊光晕底层也需要同步
         self._position_input_glow_underlay()
 
@@ -3106,15 +3116,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 2px 的亮色 border 会形成明显的"边缘高亮"，和工具栏 1px 边框
         # 视觉上不一致；焦点态的差异改由 underlay 的内发光承担。
         input_border_width = 1
-        input_bg_start = Colors.INPUT_FOCUS_BG_START if focused else Colors.INPUT_BG_START
-        input_bg_end = Colors.INPUT_FOCUS_BG_END if focused else Colors.INPUT_BG_END
+        # 一体舱单色底：输入卡与工具条 strip 用同一纯色（取各自焦点态的 END 色）。
+        # 之前输入卡用渐变而 strip 用纯色，即使接缝处数值连续，「上亮下暗」
+        # 的观感仍被读成两层；且这些色都带 alpha，半透明色叠底对基底敏感，
+        # 失焦态（alpha 180）两段合成结果出现偏差 → 色差，聚焦态（alpha 250）
+        # 近不透明则无色差。这里统一把 alpha 钳到 250，合成结果与基底解耦，
+        # 两段像素级同色（渐变 START→END 仅 ~10 灰阶，损失可忽略）。
+        input_bg_raw = Colors.INPUT_FOCUS_BG_END if focused else Colors.INPUT_BG_END
+        input_bg = re.sub(r",\s*\d+\s*\)$", ", 250)", input_bg_raw.strip())
 
         # 输入卡：上圆角 + 下直角 + border-bottom: none（让 toolbar 上 border 兼任分隔线）
         self._input_card.setStyleSheet(f"""
             QWidget#_input_card {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {input_bg_start},
-                    stop:1 {input_bg_end});
+                background: {input_bg};
                 border: {input_border_width}px solid {input_border};
                 border-bottom: none;
                 border-top-left-radius: 16px;
@@ -3125,15 +3139,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """)
 
         # toolbar：上方直角（紧贴 input_card 下方）+ 下方 16px 圆角
-        # - 不 collapsed：四周边框完整，其中 border-top 1px 灰色作分隔线
-        # - collapsed：四角圆角（独立完整卡，主卡已缩到 0）
+        # 一体化输入舱：strip 与输入卡同一纯色底（input_bg）、同一边框色；
+        # 非 collapsed 时 border-top: none（输入卡 border-bottom 亦为 none），
+        # 两段共享一条连续外框，视觉上合成单张圆角卡；
+        # collapsed 时恢复完整边框 + 四角圆角，strip 作为独立卡显示。
         toolbar_top_radius = 16 if collapsed else 0
+        strip_border_top = f"1px solid {input_border}" if collapsed else "none"
         self._bottom_toolbar_strip.setStyleSheet(f"""
             QWidget#bottomToolbarStrip {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {Colors.TOOLBAR_STRIP_BG},
-                    stop:1 {Colors.TOOLBAR_STRIP_BG});
-                border: 1px solid {Colors.TOOLBAR_STRIP_BORDER};
+                background: {input_bg};
+                border: 1px solid {input_border};
+                border-top: {strip_border_top};
                 border-top-left-radius: {toolbar_top_radius}px;
                 border-top-right-radius: {toolbar_top_radius}px;
                 border-bottom-left-radius: 16px;
@@ -8219,8 +8235,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         toggles = self._tool_permission_controller.get_toggles()
         dangerous, safe = get_tool_counts(toggles)
-        self._tool_danger_label.setText(str(dangerous))
-        self._tool_safe_label.setText(str(safe))
+        # 工具计数小字「危险/安全」：中性灰常显；有危险工具未确认时转警示橙提醒
+        Colors.refresh()
+        count_color = Colors.WARNING if dangerous > 0 else Colors.TEXT_MUTED
+        self._tool_count_label.setText(f"{dangerous}/{safe}")
+        self._tool_count_label.setStyleSheet(f"""
+            color: {count_color};
+            background: transparent; border: none;
+            {font_size_css(12)} {get_font_family_css()}
+        """)
 
         # agent 覆盖 → 整个按钮背景变色
         Colors.refresh()
@@ -8234,15 +8257,13 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
         else:
             tooltip = f"🔧 工具控制 | 危险 {dangerous} 安全 {safe}\n点击查看详情"
-            self._tool_toggle_btn.setStyleSheet(f"""
-                background: {Colors.TOOLBAR_BG};
+            # 一体化视觉：无背景，图标 + 计数小字直接落在输入卡底色上
+            self._tool_toggle_btn.setStyleSheet("""
+                background: transparent;
                 border: none;
-                border-radius: 8px;
             """)
-        # 给按钮及其所有子 label 挂 tooltip（子控件会阻挡父控件的 tooltip 传播）
+        # 给按钮挂 tooltip（徽标已设鼠标穿透，不会阻挡 tooltip 传播）
         self._tool_toggle_btn.setToolTip(tooltip)
-        self._tool_danger_label.setToolTip(tooltip)
-        self._tool_safe_label.setToolTip(tooltip)
         # 恢复按钮显隐
         self._tool_restore_btn.setVisible(bool(agent_name))
 
@@ -10098,22 +10119,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._apply_bottom_input_stack_style()
             if hasattr(self, "_bottom_toolbar_strip"):
                 self._apply_bottom_input_stack_style()
-            # 模型按钮容器
+            # 模型按钮容器（一体化视觉：无背景胶囊，去卡中卡）
             if hasattr(self, "_model_btn_container"):
-                self._model_btn_container.setStyleSheet(f"""
-                    background: {Colors.TOOLBAR_BG};
+                self._model_btn_container.setStyleSheet("""
+                    background: transparent;
                     border: none;
-                    border-radius: 8px;
                 """)
                 # 同步刷新模型胶囊内竖向分隔线（主题色跟随 BORDER）
                 for _sep in (getattr(self, "_model_sep_name", None), getattr(self, "_model_sep_usage", None)):
                     if _sep is not None:
                         _sep.setStyleSheet(f"background: {Colors.BORDER};")
             if hasattr(self, "_toolbar_capsule"):
-                self._toolbar_capsule.setStyleSheet(f"""
-                    background: {Colors.TOOLBAR_BG};
+                self._toolbar_capsule.setStyleSheet("""
+                    background: transparent;
                     border: none;
-                    border-radius: 8px;
                 """)
             # 输入区样式（含文本框 + 下拉框，主题色敏感 → 每次必刷）
             if hasattr(self, "input_area") and hasattr(self.input_area, "refresh_style"):

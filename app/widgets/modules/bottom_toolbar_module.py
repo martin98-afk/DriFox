@@ -9,8 +9,8 @@
 - settings_btn effort_btn _tool_toggle_btn _toolbar_capsule
 - memory_btn history_btn new_session_btn _input_glow_underlay
 - _model_btn_icon _model_btn_text _model_sep_name _model_sep_usage
-- _settings_btn_icon _settings_effort_label _tool_danger_label
-- _tool_safe_label _tool_restore_btn _bottom_toolbar_shadow
+- _settings_btn_icon _settings_effort_label _tool_count_label
+- _tool_restore_btn _bottom_toolbar_shadow
 - _input_card_primary_shadow _input_card_ambient_shadow
 - _current_provider_name _current_model_name _user_manually_selected_model
 - _input_card_focused _input_area_collapsed _plugin_input_buttons
@@ -64,16 +64,17 @@ class BottomToolbarModule(UIModule):
         # 工具栏的窗口绝对 Y 坐标完全不变，不再被 VBoxLayout 推上/推下。
         host._bottom_toolbar_strip = QWidget(host)
         host._bottom_toolbar_strip.setObjectName("bottomToolbarStrip")
-        host._bottom_toolbar_strip.setFixedHeight(36)
+        host._bottom_toolbar_strip.setFixedHeight(44)
         strip_layout = QHBoxLayout(host._bottom_toolbar_strip)
-        # 上下 3px 留白 + 28px 内容 = 34px，工具栏 28px 居中放置
-        strip_layout.setContentsMargins(10, 4, 10, 4)
+        # 左 7px / 右 7px 留白 + 30px 内容；右侧另留 44px 给溢出式圆钮
+        # （发送按钮挂 strip 不进行行布局，见下方迁入段注释）
+        strip_layout.setContentsMargins(10, 7, 54, 7)
         strip_layout.setSpacing(8)
 
         # ===== 工具栏（现在挂在独立 strip 上）=====
         toolbar_widget = QWidget(host._bottom_toolbar_strip)
-        # 28px 高度匹配 strip 内部 28px 内容区，配合 VCenter 完美居中
-        toolbar_widget.setFixedHeight(28)
+        # 30px 高度匹配 strip 内部 30px 内容区，配合 VCenter 完美居中
+        toolbar_widget.setFixedHeight(30)
         toolbar_widget.setStyleSheet("background: transparent; border: none;")
         toolbar_layout = QHBoxLayout(toolbar_widget)
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
@@ -83,12 +84,12 @@ class BottomToolbarModule(UIModule):
 
         # 模型选择（无边框，只保留背景）
         host._model_btn_container = QWidget(toolbar_widget)
-        host._model_btn_container.setFixedHeight(26)
+        host._model_btn_container.setFixedHeight(28)
         Colors.refresh()
-        host._model_btn_container.setStyleSheet(f"""
-            background: {Colors.TOOLBAR_BG};
+        # 一体化视觉：去背景胶囊（卡中卡），模型区直接落在输入卡底色上
+        host._model_btn_container.setStyleSheet("""
+            background: transparent;
             border: none;
-            border-radius: 8px;
         """)
         model_layout = QHBoxLayout(host._model_btn_container)
         model_layout.setContentsMargins(8, 0, 4, 0)
@@ -98,10 +99,13 @@ class BottomToolbarModule(UIModule):
         host._model_sep_name.setFixedSize(1, 16)
         host._model_sep_name.setStyleSheet(f"background: {Colors.BORDER};")
         host._model_sep_name.setAttribute(Qt.WA_TransparentForMouseEvents)
+        # 一体化视觉：去竖向分隔线，改用间距分组（保留控件供主题刷新链引用）
+        host._model_sep_name.setVisible(False)
         host._model_sep_usage = QWidget(host._model_btn_container)
         host._model_sep_usage.setFixedSize(1, 16)
         host._model_sep_usage.setStyleSheet(f"background: {Colors.BORDER};")
         host._model_sep_usage.setAttribute(Qt.WA_TransparentForMouseEvents)
+        host._model_sep_usage.setVisible(False)  # 同上：去分隔线
         host.current_model_btn = QWidget(host._model_btn_container)
         host.current_model_btn.setCursor(Qt.PointingHandCursor)
         host.current_model_btn.setStyleSheet(MODEL_BTN_STYLE)
@@ -186,13 +190,13 @@ class BottomToolbarModule(UIModule):
 
         # ===== 工具开关双色分段按钮 =====
         host._tool_toggle_btn = QWidget(toolbar_widget)
-        host._tool_toggle_btn.setFixedHeight(26)
+        host._tool_toggle_btn.setFixedHeight(28)
         host._tool_toggle_btn.setCursor(Qt.PointingHandCursor)
         Colors.refresh()
-        host._tool_toggle_btn.setStyleSheet(f"""
-            background: {Colors.TOOLBAR_BG};
+        # 一体化视觉：无背景，图标 + 计数徽标直接落在输入卡底色上
+        host._tool_toggle_btn.setStyleSheet("""
+            background: transparent;
             border: none;
-            border-radius: 8px;
         """)
         host._tool_toggle_btn.mousePressEvent = lambda e: host._toggle_tool_control_card()
         tt_layout = QHBoxLayout(host._tool_toggle_btn)
@@ -205,31 +209,17 @@ class BottomToolbarModule(UIModule):
         tt_layout.addWidget(tt_icon)
         tt_layout.addSpacing(4)
 
-        # 左：危险工具数（暗红）
-        host._tool_danger_label = QLabel("0")
-        host._tool_danger_label.setAlignment(Qt.AlignCenter)
-        host._tool_danger_label.setFixedHeight(20)
-        host._tool_danger_label.setStyleSheet(f"""
-            background: {Colors.STATUS_DANGER_BG_DARK};
-            color: white; font-weight: 700;
-            border: none; border-top-left-radius: 4px; border-bottom-left-radius: 4px;
-            padding: 0 8px;
-            {font_size_css(13)} {get_font_family_css()}
+        # 工具计数：无底色小字「危险/安全」（如 11/25），中性灰不抢视线；
+        # 有危险工具时由 _refresh_tool_toggle_btn 转警示橙。替代 InfoBadge
+        # 角标（数字块叠在图标上遮挡图标）与更早的红绿硬底分段条。
+        host._tool_count_label = QLabel("0/0", host._tool_toggle_btn)
+        host._tool_count_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        host._tool_count_label.setStyleSheet(f"""
+            color: {Colors.TEXT_MUTED};
+            background: transparent; border: none;
+            {font_size_css(12)} {get_font_family_css()}
         """)
-        tt_layout.addWidget(host._tool_danger_label)
-
-        # 右：安全工具数（暗绿）
-        host._tool_safe_label = QLabel("0")
-        host._tool_safe_label.setAlignment(Qt.AlignCenter)
-        host._tool_safe_label.setFixedHeight(20)
-        host._tool_safe_label.setStyleSheet(f"""
-            background: {Colors.SUCCESS_DARK};
-            color: white; font-weight: 700;
-            border: none; border-top-right-radius: 4px; border-bottom-right-radius: 4px;
-            padding: 0 8px;
-            {font_size_css(13)} {get_font_family_css()}
-        """)
-        tt_layout.addWidget(host._tool_safe_label)
+        tt_layout.addWidget(host._tool_count_label)
 
         # 恢复按钮（仅 agent 覆盖时显示，不打开卡片即可恢复）
         host._tool_restore_btn = QPushButton("↺", host._tool_toggle_btn)
@@ -257,12 +247,12 @@ class BottomToolbarModule(UIModule):
 
         # 右侧功能按钮组（无边框，间距加宽）
         host._toolbar_capsule = QWidget(toolbar_widget)
-        host._toolbar_capsule.setFixedHeight(28)
+        host._toolbar_capsule.setFixedHeight(30)
         Colors.refresh()
-        host._toolbar_capsule.setStyleSheet(f"""
-            background: {Colors.TOOLBAR_BG};
+        # 一体化视觉：去右侧图标组背景胶囊
+        host._toolbar_capsule.setStyleSheet("""
+            background: transparent;
             border: none;
-            border-radius: 10px;
         """)
         capsule_layout = QHBoxLayout(host._toolbar_capsule)
         capsule_layout.setContentsMargins(6, 2, 6, 2)
@@ -301,6 +291,18 @@ class BottomToolbarModule(UIModule):
 
         toolbar_layout.addWidget(host._toolbar_capsule)
 
+        # 发送/停止按钮：条带最右端收尾，底部距条带底边界 6px、顶部探入输入区
+        # （一体舱设计：圆钮重心略高于工具行）。
+        # ⚠️ parent 必须挂主窗口 host：Qt 会把子控件裁剪在父控件矩形内，
+        # 挂 strip 的话探出条带的顶部会被切平；挂主窗口后跨两段完整可见。
+        # 模式切换（发送↔停止呼吸）仍由 SendableTextEdit.toggle_send_button 驱动，
+        # 点击信号链不变；迁出后输入框内 _position_send_button 自动进入 no-op 兼底。
+        send_btn = getattr(getattr(host, "input_area", None), "send_btn", None)
+        if send_btn is not None:
+            send_btn.setParent(host)
+            send_btn.setFixedSize(40, 40)
+            send_btn.raise_()
+
         # 工具栏挂到独立 strip（不在 _input_card 里了）
         strip_layout.addWidget(toolbar_widget)
 
@@ -332,10 +334,10 @@ class BottomToolbarModule(UIModule):
         host._apply_bottom_input_stack_style()
 
         bottom_layout.addWidget(host._input_card_wrapper)
-        # 预留 36px 空间给工具栏（工具栏本身不在 layout 里，绝对定位）。
-        # 输入卡 + 这 36px = 输入容器高度；工具栏钉死在窗口底部 36px，
-        # 与输入容器底部对齐（输入卡隐藏时容器仍占 36px，工具栏位置不变）。
-        bottom_layout.addSpacing(36)
+        # 预留 44px 空间给工具栏（工具栏本身不在 layout 里，绝对定位）。
+        # 输入卡 + 这 44px = 输入容器高度；工具栏钉死在窗口底部 44px，
+        # 与输入容器底部对齐（输入卡隐藏时容器仍占 44px，工具栏位置不变）。
+        bottom_layout.addSpacing(44)
 
         # 向内发光：underlay 必须在输入容器 / 工具栏 **之上** 才不会被它们
         # 的不透明背景盖住；setAttribute(Qt.WA_TranslucentBackground, True)

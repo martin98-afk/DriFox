@@ -400,7 +400,9 @@ class Colors:
     SEND_BTN_END = "#B8956A"
     SEND_BTN_HOVER_START = "#D4B878"
     SEND_BTN_HOVER_END = "#C9A060"
-    SEND_BTN_RADIUS = 17  # 按钮圆角半径
+    # 按钮圆角半径（主题可覆盖）：≥ 短边一半时呈正圆；代码侧会再按短边钳制。
+    # 20 = 34px 历史尺寸下 min(20,17)=17 视觉不变；40px 工具栏圆钮下正圆。
+    SEND_BTN_RADIUS = 20
 
     # 时间线
     TIMELINE_NODE = "#5A5A5A"
