@@ -1598,10 +1598,10 @@ class SendableTextEdit(TextEdit):
             pass
 
         doc = self.document()
-        # 20 = QSS 上下 padding (12 + 6) + 2px 余量；最小高度 44 → 54
-        # （单行时文字区仍能完整容纳 15px 字号一行不裁切）
-        content_height = int(doc.size().height()) + 20
-        new_height = max(54, min(300, content_height))
+        # 14 = QSS 上下 padding (8 + 4) + 2px 余量；最小高度 44（单行时
+        # 文字区 44-12=32px，完整容纳 15px 字号一行不裁切）
+        content_height = int(doc.size().height()) + 14
+        new_height = max(44, min(300, content_height))
 
         if self.height() != new_height:
             self._adjusting_height = True
@@ -1702,8 +1702,8 @@ class SendableTextEdit(TextEdit):
             return
         btn_size = self.send_btn.size()
         send_btn_x = self.width() - btn_size.width() - 10
-        # 底部偏移与 QSS padding-bottom (6px) 对齐，按钮与文字底缘齐平
-        send_btn_y = self.height() - btn_size.height() - 6
+        # 底部偏移与 QSS padding-bottom (4px) 对齐，按钮与文字底缘齐平
+        send_btn_y = self.height() - btn_size.height() - 4
         self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
@@ -2017,7 +2017,7 @@ class SendableTextEdit(TextEdit):
                 color: {Colors.INPUT_TEXT};
                 border: none;
                 border-radius: 16px 16px 0 0;
-                padding: 12px 16px 6px 20px;
+                padding: 8px 12px 4px 12px;
                 selection-background-color: {Colors.SELECTED_BG};
                 {get_font_family_css()} {font_size_css(15)};
             }}
