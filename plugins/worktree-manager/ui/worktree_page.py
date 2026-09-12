@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 from typing import Dict, Optional
 
+from loguru import logger
+
 from PyQt5.QtCore import QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent
 from PyQt5.QtWidgets import (
@@ -448,7 +450,23 @@ class SystemWorktreePage(QWidget):
         # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
         self._instance_workdir: Dict[str, str] = {}
         self._search_filter = ""  # 搜索过滤文本
+        # 工具线程创建/删除工作树 → 信号桥跨线程通知 → 主线程刷新
+        self._connect_change_bridge()
         self._init_ui()
+
+    def _connect_change_bridge(self) -> None:
+        """连接工具变更信号桥（emit 在后台线程，本槽在主线程执行）"""
+        try:
+            from .change_bridge import get_bridge
+
+            get_bridge().changed.connect(self._on_tool_worktree_changed)
+        except Exception as e:
+            logger.warning(f"[worktree-manager] 工具变更信号桥连接失败（工具操作后不自动刷新）: {e}")
+
+    def _on_tool_worktree_changed(self, summary: str) -> None:
+        """工具线程创建/删除工作树后刷新列表（主线程槽）"""
+        logger.info(f"[worktree-manager] 工具操作工作树，刷新页面: {summary}")
+        self.refresh_data()
 
     def _get_memory_manager(self):
         """从 context 的 backend 获取 memory_manager（宿主未就绪时返回 None）"""
