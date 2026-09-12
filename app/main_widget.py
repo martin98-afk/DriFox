@@ -16147,9 +16147,18 @@ class OpenAIChatToolWindow(ToolWindow):
         #   - 用户明确滚离 → 不跟随，位置保持
         # is_last_card 只影响「初始加载完成必须到底」这一类一次性场景，同样纳入守卫，
         # 因为「用户正在读历史时又有新卡片渲染完成」不应当抢走视口。
-        if self._should_follow_bottom() and (is_last_card or self._is_streaming):
+        # 🐛 卡片内阅读守卫：用户在 WebEngine 内部（正文/工具区/坞态正文）上滚
+        # 阅读时 Qt 滚动条纹丝不动，away 守卫对此失明。若不拦，流式中每次高度
+        # 变化（chunk 增高/工具块注入）都走下面的滚底 → 卡片被钉回「底部对齐」
+        # 姿态 → 正文视口每拍被推回同一固定位置。
+        _reading_inside = sender.is_user_reading_inside()
+        if (
+            self._should_follow_bottom()
+            and (is_last_card or self._is_streaming)
+            and not _reading_inside
+        ):
             self._scroll_to_bottom()
-        elif self._is_view_at_bottom():
+        elif self._is_view_at_bottom() and not _reading_inside:
             # 视口已经在底部附近 → 补一次滚底，吸收卡片高度增量（阈值统一）
             self._scroll_to_bottom()
 

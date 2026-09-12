@@ -29,8 +29,9 @@
 """
 
 from typing import Any, List, Optional
+import weakref
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -47,6 +48,7 @@ from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets._workbench_helpers import _EmptyHint
 from app.widgets.cards.settings.project_selector_card import (
+    ProjectItem,
     ProjectSelectorCardContent,
     _SquareAvatar,
     get_project_color,
@@ -154,10 +156,42 @@ def _active_window() -> Optional[Any]:
         return None
 
 
+# ── 主题切换自订阅（EV_THEME_CHANGED 是可靠广播源） ──
+# 🐛 背景：行卡颜色在构造时以 f-string 固化，主题加载晚于首次渲染（或用户切主题）
+# 时已构造的行永远停留在旧 token 色（症状：置顶/当前会话区标题暗色，日期分组区正常）。
+# 主程序的 _apply_runtime_ui_settings findChildren 只扫内置卡类型，扫不到插件浮动卡，
+# 因此本页自订主题事件；仿 scroll_to_bottom_button 的 WeakSet 模式防泄漏。
+_PAGES: "weakref.WeakSet" = weakref.WeakSet()
+_theme_subscribed = False
+
+
+def _on_theme_changed_event(payload) -> None:
+    """EV_THEME_CHANGED 回调：重刷所有存活历史页样式（含缓存行卡）"""
+    for page in list(_PAGES):
+        try:
+            page.refresh_style()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _ensure_theme_subscription() -> None:
+    """订阅主题切换事件（幂等，只在首个页面创建时真正执行一次）"""
+    global _theme_subscribed
+    if _theme_subscribed:
+        return
+    try:
+        from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+
+        UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, _on_theme_changed_event)
+        _theme_subscribed = True
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class HistoryPage(QWidget):
     """历史会话页（一级页签）：历史会话 / 归档 子页签 + 列表上方搜索框"""
 
-    closed = pyqtSignal()  # 兼容契约：页内无关闭钮，保留信号位（宿主连接不失效）
+    closed = pyqtSignal()  # 页内关闭钮 → UIPluginRegistry 自动接 hide_card
     tabChanged = pyqtSignal(str)  # 子页签切换（history / archived）
 
     SUB_TABS = (("history", "历史会话"), ("archived", "归档"))
@@ -166,8 +200,12 @@ class HistoryPage(QWidget):
         super().__init__(parent)
         from .history_card import HistoryCard
 
+        _PAGES.add(self)
+        _ensure_theme_subscription()
+
         self._context = context or {}
         self._content: Optional[QWidget] = None
+        self._style_synced = False  # 首次 show 时重设一次行样式（启动时序兜底）
         self._current_tab = "history"
         self._search_input: Optional[QLineEdit] = None
         layout = QVBoxLayout(self)
@@ -185,6 +223,11 @@ class HistoryPage(QWidget):
             tabs_row.addWidget(btn)
             self._sub_buttons.append(btn)
         tabs_row.addStretch(1)
+        self._close_btn = TransparentToolButton(get_icon("关闭"), self)
+        self._close_btn.setFixedSize(30, 30)
+        self._close_btn.setToolTip("关闭")
+        self._close_btn.clicked.connect(self.closed.emit)
+        tabs_row.addWidget(self._close_btn)
         layout.addLayout(tabs_row)
 
         # ── 行2：项目选择（icon + 全名）+ 搜索框 + 导入 / 新建会话按钮 ──
@@ -286,35 +329,18 @@ class HistoryPage(QWidget):
         vbox.setContentsMargins(0, 2, 0, 2)
         vbox.setSpacing(4)
 
-        self._project_selector = ProjectSelectorCardContent(panel)
-        self._project_selector.allProjectsSelected.connect(self._on_all_projects_selected)
-        self._project_selector.projectSelected.connect(self._on_project_row_selected)
-        self._project_selector.newProjectCreated.connect(
-            lambda name: self._call_window("_on_new_project_created", name)
-        )
-        self._project_selector.archiveProject.connect(lambda name: self._call_window("_on_archive_project", name))
-        self._project_selector.exportProject.connect(lambda name: self._call_window("_on_export_project", name))
-        self._project_selector.importProjectRequested.connect(
-            lambda: self._call_window("_on_import_project")
-        )
-        self._project_selector.projectFileDropped.connect(
-            lambda path: self._call_window("_on_project_file_dropped", path)
-        )
-        self._project_selector.openFolderRequested.connect(
-            lambda name, root: self._call_window("_on_open_project_folder", name, root)
-        )
-        self._project_selector.folderDropped.connect(
-            lambda path: self._call_window("_on_project_folder_dropped", path)
-        )
-        vbox.addWidget(self._project_selector, 1)
-
-        # ── 工具条：新建/搜索输入框 + 新建 + 选择文件夹 + 导入项目 ──
+        # ── 行1：「全部项目」聚合行 + 搜索/新建输入框 + 新建 + 选择文件夹 + 导入项目 ──
         tools = QHBoxLayout()
         tools.setSpacing(4)
+        # 「全部项目」行（与卡片内项目行同款 ProjectItem 聚合态）：点击切换为不过滤视图
+        self._project_all_item = ProjectItem("全部项目", False, panel, is_all_entry=True)
+        self._project_all_item.allClicked.connect(self._on_all_projects_selected)
+        tools.addWidget(self._project_all_item, 0)
+
         self._project_new_edit = QLineEdit(panel)
-        self._project_new_edit.setPlaceholderText("新建/搜索项目...")
+        self._project_new_edit.setPlaceholderText("搜索/新建项目...")
         self._project_new_edit.setFixedHeight(24)
-        self._project_new_edit.setMinimumWidth(80)
+        self._project_new_edit.setMinimumWidth(60)
         self._project_new_edit.setStyleSheet(
             f"""
             QLineEdit {{
@@ -332,6 +358,9 @@ class HistoryPage(QWidget):
         """
         )
         self._project_new_edit.returnPressed.connect(self._on_new_project_submitted)
+        self._project_new_edit.textChanged.connect(
+            lambda t: self._project_selector.set_filter(t)  # 实时搜索过滤项目列表
+        )
         tools.addWidget(self._project_new_edit, 1)
 
         self._project_new_btn = TransparentToolButton(FluentIcon.ADD, panel)
@@ -351,8 +380,25 @@ class HistoryPage(QWidget):
         self._project_import_btn.setToolTip("导入项目（从 .drifox_project 压缩包）")
         self._project_import_btn.clicked.connect(lambda: self._call_window("_on_import_project"))
         tools.addWidget(self._project_import_btn, 0)
-
         vbox.addLayout(tools)
+
+        self._project_selector = ProjectSelectorCardContent(panel)
+        self._project_selector.allProjectsSelected.connect(self._on_all_projects_selected)
+        self._project_selector.projectSelected.connect(self._on_project_row_selected)
+        self._project_selector.newProjectCreated.connect(
+            lambda name: self._call_window("_on_new_project_created", name)
+        )
+        self._project_selector.archiveProject.connect(lambda name: self._call_window("_on_archive_project", name))
+        self._project_selector.exportProject.connect(lambda name: self._call_window("_on_export_project", name))
+        self._project_selector.importProjectRequested.connect(lambda: self._call_window("_on_import_project"))
+        self._project_selector.projectFileDropped.connect(
+            lambda path: self._call_window("_on_project_file_dropped", path)
+        )
+        self._project_selector.openFolderRequested.connect(
+            lambda name, root: self._call_window("_on_open_project_folder", name, root)
+        )
+        self._project_selector.folderDropped.connect(lambda path: self._call_window("_on_project_folder_dropped", path))
+        vbox.addWidget(self._project_selector, 1)
         return panel
 
     def _call_window(self, method_name: str, *args) -> None:
@@ -405,13 +451,7 @@ class HistoryPage(QWidget):
             except Exception:
                 root_dir_map = {}
 
-        self._project_selector.set_projects_data(
-            projects,
-            current,
-            meta_map,
-            root_dir_map,
-            all_entry_label="全部项目",
-        )
+        self._project_selector.set_projects_data(projects, current, meta_map, root_dir_map)
         self._sync_project_header()
 
     def open_project_selector(self) -> None:
@@ -550,6 +590,12 @@ class HistoryPage(QWidget):
 
     def showEvent(self, event):  # noqa: N802 (Qt 命名)
         super().showEvent(event)
+        # 首次显示兜底：行卡样式固化于构造时 token，若构造早于主题就绪（启动
+        # 时序），渲染完成后以就绪 token 重设一次；后续主题切换由 EV_THEME_CHANGED
+        # 驱动。延迟触发避免与分批渲染交错（重入 _process_render_batch 会崩）。
+        if not self._style_synced:
+            self._style_synced = True
+            QTimer.singleShot(400, self.refresh_style)
         self.refresh()
 
     # ── 数据自拉（架构反转：会话数据全局一份，经 HistoryManager 单例直接获取） ──
@@ -804,5 +850,8 @@ class HistoryPage(QWidget):
         if self._search_input is not None:
             self._apply_search_style()
         self._project_header.refresh_style()
+        self._project_all_item.refresh_style()
+        if hasattr(self._project_selector, "refresh_style"):
+            self._project_selector.refresh_style()
         if hasattr(self._card, "refresh_style"):
             self._card.refresh_style()

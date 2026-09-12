@@ -3895,6 +3895,9 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 页面内收到的事件属冒泡残留，置位会让跟随被无关操作误锁死。
                     if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {
                         this._userScrolledUp = true;
+                        // 即时上报阅读状态：不等下一次渲染的 reportHeight，抢在
+                        // 「滚轮 → 下一帧 chunk 渲染 → 高度变化外层拉底」竞争窗口之前。
+                        if (typeof reportHeight === 'function') reportHeight();
                     }
                 }, {passive: true});
                 document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
@@ -4357,6 +4360,10 @@ class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
     heightReported = pyqtSignal(int)
+    # 🐛 卡片内阅读标志：reportHeight 第 4 字段翻转时推送（见 javaScriptConsoleMessage）。
+    # WebEngine 内滚动不动 Qt 滚动条，宿主 away 守卫对卡内阅读完全失明，
+    # 外层滚底判定必须显式查询此状态让位。
+    cardReadingChanged = pyqtSignal(bool)
     # 🐛 滚动判据修复：wheelEvent 原先只能用 page().scrollPosition()（文档级），
     # 但真正的滚动容器是 body（CSS: body{overflow-y:scroll}），文档级 scrollTop
     # 恒为 0 → at_top 恒真 / at_bottom 恒假 → 向下滚动永远被判为"内部处理"，
@@ -4420,10 +4427,18 @@ class ConsoleMonitorPage(QWebEnginePage):
             try:
                 payload = msg.split(":", 1)[1]
                 if "|" in payload:
-                    h_str, st_str, ch_str = payload.split("|", 2)
-                    h = int(float(h_str))
+                    # 第 4 字段（可选，旧格式兼容）：卡片内用户阅读标志。
+                    # 翻转才发信号：reportHeight 高频（流式 ~30ms/条），布尔去重后
+                    # 信号量与用户滚动行为同阶，宿主侧零轮询成本。
+                    parts = payload.split("|", 3)
+                    h = int(float(parts[0]))
+                    if len(parts) >= 4:
+                        _rd = parts[3] == "1"
+                        if _rd != getattr(self, "_last_card_reading", False):
+                            self._last_card_reading = _rd
+                            self.cardReadingChanged.emit(_rd)
                     self.heightReported.emit(h)
-                    self.bodyGeometryReported.emit(h, int(float(st_str)), int(float(ch_str)))
+                    self.bodyGeometryReported.emit(h, int(float(parts[1])), int(float(parts[2])))
                 else:
                     self.heightReported.emit(int(float(payload)))
             except Exception:
@@ -4898,8 +4913,10 @@ class CodeWebViewer(QWebEngineView):
 
         self._page.codeActionRequested.connect(self.codeActionRequested.emit)
         self._page.contextActionRequested.connect(self.contextActionRequested.emit)
+        self._user_reading_inside = False
         self._page.heightReported.connect(self._on_height_reported)
         self._page.bodyGeometryReported.connect(self._on_body_geometry_reported)
+        self._page.cardReadingChanged.connect(self._on_card_reading_changed)
         self._page.contentReady.connect(self._on_js_ready)
         self._page.toolDiffRequested.connect(self.toolDiffRequested.emit)
         self._page.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
@@ -5178,6 +5195,13 @@ class CodeWebViewer(QWebEngineView):
         if self._height_report_pending:
             self._height_report_pending = False
         self._do_resize_check()
+
+    def _on_card_reading_changed(self, reading: bool):
+        """记录「用户正在卡片内部滚动阅读」状态（reportHeight 第 4 字段翻转时推送）
+
+        宿主（MessageCard / main_widget）经 is_user_reading_inside() 查询。
+        """
+        self._user_reading_inside = reading
 
     def _on_height_reported(self, h):
         # 🐛 打点：结束这一拍的"JS 落地 + 布局"耗时 = 渲染派发 → 首个 reportHeight。
@@ -8194,7 +8218,19 @@ class CodeWebViewer(QWebEngineView):
                     // 故在高频回传中顺带携带 body 的 scrollTop / clientHeight，
                     // Python 侧据此算出真实可滚动量 = scrollHeight - clientHeight。
                     // 注意保持'|'分隔协议，旧解析器（仅高度）仍可工作。
-                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0));
+                    // 🐛 第 4 字段「卡片内阅读标志」：body/cp/tc/todo 任一被用户上滚
+                    // 即为 1（语义与各容器自动滚底守卫同源，单一真相）。缺此字段时
+                    // 流式每个高度变化都会把卡片拉回「底部对齐」固定姿态。
+                    var _rd = (window._userScrolledWithin === true);
+                    try {{
+                        var _cpR = document.getElementById('content-placeholder');
+                        if (_cpR && _cpR._userScrolledUp === true) _rd = true;
+                        var _tcR = document.getElementById('tool-content');
+                        if (_tcR && _tcR._userScrolledUp === true) _rd = true;
+                        var _tdR = document.getElementById('todo-content');
+                        if (_tdR && _tdR._userScrolledUp === true) _rd = true;
+                    }} catch (_e) {{}}
+                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0'));
                 }}
                 // 批量报告高度：流式每 chunk 一次 IPC 开销高，改为 3 帧合并
                 // （rAF ×3 后 reportHeight 一次），动画期间仍暂停报告
@@ -9195,6 +9231,8 @@ class CodeWebViewer(QWebEngineView):
                 document.getElementById('tool-content')?.addEventListener('wheel', function(e) {{
                     if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
                         this._userScrolledUp = true;
+                        // 即时上报阅读状态（竞争窗口同 #content-placeholder wheel）
+                        if (typeof reportHeight === 'function') reportHeight();
                     }}
                 }}, {{passive: true}});
                 // 任务列表滚动跟踪：与工具区同款（程序滚动/重建不算用户行为）
@@ -9209,6 +9247,8 @@ class CodeWebViewer(QWebEngineView):
                 document.getElementById('todo-content')?.addEventListener('wheel', function(e) {{
                     if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
                         this._userScrolledUp = true;
+                        // 即时上报阅读状态（竞争窗口同 #content-placeholder wheel）
+                        if (typeof reportHeight === 'function') reportHeight();
                     }}
                 }}, {{passive: true}});
                 {_STREAMING_DOCK_JS}
@@ -14226,6 +14266,17 @@ class MessageCard(SimpleCardWidget):
             """
         )
         self._retry_status_widget.setVisible(True)
+
+    def is_user_reading_inside(self) -> bool:
+        """用户是否正在卡片内部（WebEngine 侧）滚动阅读。
+
+        body / #content-placeholder / #tool-content / #todo-content 任一容器被
+        用户上滚即为 True。WebEngine 内滚动不会移动 Qt 滚动条，宿主的
+        ``_user_intentionally_away_from_bottom`` 对卡内阅读完全失明；外层滚底
+        判定必须显式查询此状态让位，否则流式中每个高度变化都会把卡片拉回
+        「底部对齐」固定姿态（正文阅读位置反复被推走的根因）。
+        """
+        return bool(getattr(self.viewer, "_user_reading_inside", False))
 
     def _emit_card_diff_requested(self):
         """发射卡片差异请求信号

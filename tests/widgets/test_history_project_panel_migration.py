@@ -33,11 +33,11 @@ def test_floating_card_declares_min_width():
 
 
 def test_project_panel_reuses_selector_card_with_all_entry():
-    """插件面板复用宿主项目选择卡片，聚合首行为「全部项目」"""
+    """插件面板复用宿主项目选择卡片，聚合行「全部项目」在面板首行工具条自建"""
     page = _read(_PAGE)
     assert "from app.widgets.cards.settings.project_selector_card import" in page
     assert "ProjectSelectorCardContent(panel)" in page
-    assert 'all_entry_label="全部项目"' in page
+    assert 'ProjectItem("全部项目", False, panel, is_all_entry=True)' in page
     assert "collapse_project_selector" in page
     card = _read(_CARD)
     assert "allProjectsSelected = pyqtSignal()" in card
