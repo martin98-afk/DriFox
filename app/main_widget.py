@@ -595,6 +595,23 @@ class _ThemedIconLabel(QWidget):
         self._icon.paint(painter, self.rect())
 
 
+def resolve_busy_behavior(behavior: str, inverse: bool) -> str:
+    """繁忙时行为判定：设置项 + Ctrl+Enter 互反（模块级纯函数便于测试）
+
+    Args:
+        behavior: 设置项值，"interject"（插话发送）或 "queue"（排队发送）；
+                  非法值回落 "interject"
+        inverse:  True 表示 Ctrl+Enter 触发，恒为设置项的另一行为
+
+    Returns:
+        "interject" 或 "queue"
+    """
+    base = behavior if behavior in ("queue", "interject") else "interject"
+    if inverse:
+        return "queue" if base == "interject" else "interject"
+    return base
+
+
 def _abort_team_window(win) -> None:
     """回收建窗成功但注册/join 失败的团队窗口（幽灵窗口兜底，E1/E2 共用）。
 
@@ -1267,6 +1284,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_agent_name: str = ""  # 团队模式下的 agent 名称，空=非团队模式
         self._team_name: str = ""  # 团队名（TeamManager 模板名），空=非团队模式；供 Tab 分组使用
         self._team_run_id: str = ""  # 团队运行标识（方案 A：/team --load 生成，团队会话自动保存时落库），空=非团队模式
+
+        # ── 繁忙时排队消息（内存态，不持久化；切会话清空）──
+        self._pending_message_queue: list = []  # [{id, text, image_paths}]
+        self._pending_message_seq: int = 0
 
         # [PERF] 底部锚定定时器：100ms 已足够维持粘性滚底
         self._bottom_anchor_timer = QTimer(self)
@@ -10526,6 +10547,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = False
         self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         self._toggle_send_stop(False)
+        # 繁忙时排队消息：切会话即失效（内存态不跨会话），同步隐藏排队卡片
+        self._clear_pending_message_queue()
 
         if self._sub_agent_compact_widget:
             self._sub_agent_compact_widget.clear()
@@ -13434,6 +13457,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 再被后续 save 错误持久化到会话 B 的记录中，造成"当前会话内容覆盖目标会话"的 bug。
         # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = True
+        # 繁忙时排队消息：切会话即失效（内存态不跨会话），同步隐藏排队卡片
+        self._clear_pending_message_queue()
 
         self.backend.reset_session_state()
 
@@ -16228,6 +16253,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置哨兵防止这些迟到回调将旧会话消息写入新加载的会话。
         # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = True
+        # 繁忙时排队消息：切会话即失效（内存态不跨会话），同步隐藏排队卡片
+        self._clear_pending_message_queue()
 
         # 清理旧会话的卡片
         self._cache_current_session_cards()
@@ -16758,9 +16785,20 @@ class OpenAIChatToolWindow(ToolWindow):
                         f"图片附件仅作为文件路径文本发送，模型将调用 read 读取"
                     )
 
-        # 非函数命令：检查是否正在流式输出
+        # 非函数命令：繁忙时按设置项路由（插话/排队），Ctrl+Enter 恒为另一行为。
+        # 命令/技能拦截在本分支之前，行为不变（永不排队）。
         if self._is_streaming:
-            self._on_stop_clicked()
+            from app.utils.config import Settings
+
+            behavior = resolve_busy_behavior(Settings.get_instance().busy_enter_behavior.value, inverse)
+            if behavior == "queue":
+                self._enqueue_pending_message(user_text, _image_paths)
+            else:
+                self._interject_message(user_text, _image_paths)
+            if not preserve_input:
+                self._clear_input_area()
+                self._clear_attachments()
+            return
 
         # 🛡️ 不清除截断哨兵！若此前发生过截断（撤销/删除），哨兵仍然有效，
         # 可在 event loop 后续处理中拦截旧 worker 的 finished_with_messages 回调（先于
@@ -16880,10 +16918,186 @@ class OpenAIChatToolWindow(ToolWindow):
 
         QTimer.singleShot(0, _do_deferred_send)
 
-    def _on_queued_user_injected(self, count: int):
-        """worker 已消费用户插话 → 旧回复卡收尾，开新回复卡承接后续流式（Task 6 填实现）"""
+    # ── 繁忙时发送：插话 / 排队 ──────────────────────────────────────
+
+    def _enqueue_pending_message(self, user_text: str, image_paths: list):
+        """繁忙时排队发送：消息进 UI 队列 + 排队卡片；worker 自然结束后自动续发"""
+        self._pending_message_seq += 1
+        self._pending_message_queue.append(
+            {"id": f"q{self._pending_message_seq}", "text": user_text, "image_paths": list(image_paths)}
+        )
+        self._append_user_message(user_text, image_attachments=image_paths or None)
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
+        self._refresh_queue_card()
+
+    def _interject_message(self, user_text: str, image_paths: list):
+        """繁忙时插话发送：hook 队列注入当前 worker 对话流，不停 worker"""
+        self._interject_entry({"text": user_text, "image_paths": list(image_paths)}, show_user_card=True)
+
+    def _interject_entry(self, entry: dict, show_user_card: bool = False):
+        """把一条消息 put 进 hook 队列
+
+        传输键 ``_interject*`` 仅用于 worker 侧识别（切卡信号 / 取消回收），
+        注入 API 前由 worker 剥离，落库后是干净 user 消息。
+        """
+        user_text = str(entry.get("text", ""))
+        image_paths = entry.get("image_paths") or []
+        llm_config = self._get_current_model_config() or {}
+        _user_content = None
+        if image_paths:
+            _user_content = self._encode_image_attachments_to_multimodal(
+                user_text=user_text,
+                image_paths=list(image_paths),
+                model_name=str(llm_config.get("模型名称", "") or ""),
+            )
+        msg = {
+            "role": "user",
+            "content": _user_content if _user_content is not None else user_text,
+            "_interject": True,
+            "_interject_text": user_text,
+            "_interject_image_paths": list(image_paths),
+        }
+        self.backend._hook_message_queue.put(msg)
+        if show_user_card:
+            self._append_user_message(user_text, image_attachments=image_paths or None)
+            if self._should_follow_bottom():
+                self._scroll_to_bottom()
+
+    def _refresh_queue_card(self):
+        """按队列状态刷新排队卡片显隐与内容"""
+        card = getattr(self, "_queue_message_card", None)
+        if card is None:
+            return
+        if self._pending_message_queue:
+            card.set_entries([{"id": e["id"], "text": e["text"]} for e in self._pending_message_queue])
+            self._card_manager.show_card("message_queue", self._window_id)
+        else:
+            self._card_manager.hide_card("message_queue", self._window_id)
+
+    def _remove_queue_entry(self, msg_id: str):
+        """按 id 移出队列，返回被移条目"""
+        entry = next((e for e in self._pending_message_queue if e["id"] == msg_id), None)
+        if entry is not None:
+            self._pending_message_queue.remove(entry)
+            self._refresh_queue_card()
+        return entry
+
+    def _on_queue_remove_requested(self, msg_id: str):
+        """排队卡片 ✕：移出队列"""
+        self._remove_queue_entry(msg_id)
+
+    def _on_queue_insert_requested(self, msg_id: str):
+        """排队卡片「立即插入」：该条立即注入当前对话流（不停 worker）"""
+        entry = self._remove_queue_entry(msg_id)
+        if entry is None:
+            return
+        if self._is_streaming:
+            self._interject_entry(entry)
+        else:
+            # 兜底：worker 已结束（理论上队首由自动续发出队）→ 直接作为新一轮发送
+            self._continue_from_entry(entry)
+
+    def _continue_from_queue(self):
+        """worker 自然结束后出队首条续发（复用 worker 语义 = 无缝开新一轮）"""
         if getattr(self, "_is_destroyed", False):
             return
+        if self._is_streaming or not self._pending_message_queue:
+            return
+        entry = self._pending_message_queue.pop(0)
+        self._refresh_queue_card()
+        self._continue_from_entry(entry)
+
+    def _continue_from_entry(self, entry: dict):
+        """把一条排队消息作为新一轮发送（用户卡片已在排队入队时创建，不重建）"""
+        user_text = str(entry.get("text", ""))
+        image_paths = entry.get("image_paths") or []
+        llm_config = self._get_current_model_config() or {}
+        _user_content = None
+        if image_paths:
+            _user_content = self._encode_image_attachments_to_multimodal(
+                user_text=user_text,
+                image_paths=list(image_paths),
+                model_name=str(llm_config.get("模型名称", "") or ""),
+            )
+        assistant_card = self._append_assistant_message(
+            model_name=self._current_model_name,
+            config_id=self._current_provider_name,
+        )
+        self._current_assistant_card = assistant_card
+        self._response_start_time = time.time()
+        assistant_card.start_elapsed_tracking()
+        self._is_streaming = True
+        self._toggle_send_stop(True)
+        session = self.session_manager.get_current_session()
+
+        def _do_deferred_send():
+            if getattr(self, "_is_destroyed", False):
+                return
+            if session and self.backend.tool_executor:
+                self.backend.set_session_context(session.session_id)
+            engine_kwargs = {}
+            if _user_content is not None:
+                engine_kwargs["_user_content"] = _user_content
+            self._session_dirty = True
+            if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
+                self._is_streaming = False
+                self._toggle_send_stop(False)
+                assistant_card.deleteLater()
+                self._current_assistant_card = None
+                InfoBar.warning(
+                    title="排队发送失败",
+                    content="剩余排队消息已保留，可稍后手动插入或删除",
+                    orient=Qt.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.BOTTOM,
+                    duration=3000,
+                    parent=TabManagerWindow.get_instance() or self.window(),
+                )
+                return
+            self._sync_batch_structures()
+            self._fix_new_card_message_index(user_text=user_text)
+            self._advance_visible_batch_window()
+            self._register_new_cards_into_batches()
+            self._send_epoch += 1
+            # 标题生成（TeamMail 同口径：排队消息视为真实用户问题）
+            if session:
+                user_msg_count = sum(
+                    1
+                    for m in session.messages
+                    if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+                )
+                if user_msg_count == 1:
+                    self._maybe_generate_topic_summary()
+            self._update_history_questions_badge()
+
+        QTimer.singleShot(0, _do_deferred_send)
+
+    def _clear_pending_message_queue(self):
+        """切会话/新建会话时清空排队消息（内存态不跨会话）"""
+        self._pending_message_queue = []
+        self._refresh_queue_card()
+
+    def _on_queued_user_injected(self, count: int):
+        """worker 已消费用户插话 → 旧回复卡收尾，开新回复卡承接后续流式
+
+        跨线程 queued 信号保序：本槽执行完成后，本轮 _make_api_call 的流式
+        chunk 才会到达，必然写进新卡。多条插话一次消费只开一张卡。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        old = self._current_assistant_card
+        if old is not None and not _is_sip_deleted(old):
+            old.stop_streaming_anim()
+            old.finish_streaming()
+        card = self._append_assistant_message(
+            model_name=self._current_model_name,
+            config_id=self._current_provider_name,
+        )
+        self._current_assistant_card = card
+        card.start_elapsed_tracking()
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
 
     def _on_stream_started(self):
         if getattr(self, "_is_destroyed", False):
@@ -21353,6 +21567,24 @@ class OpenAIChatToolWindow(ToolWindow):
         # ⚠️ 时间线节点在停止流式后不会更新 - 修复
         self._update_node_preview()
         self._sync_node_preview_to_last()
+
+        # 繁忙时插话：停止时未消费的插话消息回填输入框，不丢失
+        try:
+            recovered = self.backend.take_recovered_interjects() if self.backend else []
+        except Exception:
+            recovered = []
+        for item in recovered:
+            text = str(item.get("_interject_text", "") or "")
+            if not text:
+                continue
+            if not self.input_area.toPlainText().strip():
+                self.input_area.setPlainText(text)
+            else:
+                self.input_area.setPlainText(self.input_area.toPlainText() + "\n" + text)
+            paths = item.get("_interject_image_paths") or []
+            if paths:
+                self._attachments.extend(str(p) for p in paths)
+                self._rebuild_attachment_chips()
 
     # ================================================================
     #  UI 插件对话服务（插件式对话引擎的服务门面）

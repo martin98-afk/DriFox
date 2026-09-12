@@ -171,6 +171,16 @@ class InputCardModule(UIModule):
         mgr.register_card(host._window_id, ContainerType.BOTTOM, "undo_delete", host._undo_delete_card)
         host._bottom_card_container.add_card("undo_delete", host._undo_delete_card)
 
+        # 排队消息卡片（繁忙时排队发送；无 TTL，队列空时由 main_widget 隐藏）
+        from app.widgets.cards.floating.queue_message_card import QueueMessageCard
+
+        host._queue_message_card = QueueMessageCard(host._bottom_input_container)
+        host._queue_message_card.setVisible(False)
+        host._queue_message_card.insertRequested.connect(host._on_queue_insert_requested)
+        host._queue_message_card.removeRequested.connect(host._on_queue_remove_requested)
+        mgr.register_card(host._window_id, ContainerType.BOTTOM, "message_queue", host._queue_message_card)
+        host._bottom_card_container.add_card("message_queue", host._queue_message_card)
+
         # 撤销删除条目栈（替代原单步裸 dict `_undo_delete_cache` 与死代码
         # `_undo_delete_stack`；支持连续删除逐步回退，上限见 UndoDeleteStore.MAX_ENTRIES）
         host._undo_delete_store = UndoDeleteStore()
