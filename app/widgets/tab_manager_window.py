@@ -1091,7 +1091,7 @@ class TabManagerWindow(FramelessWindow):
             self._wb_promote_on_leave = True
             ctrl.on_clicked()  # 触发 _wb_preview_leave → slide_out → _done 里 promote
             return
-        self.set_workbench_visible(not self.is_workbench_visible())
+        self.set_workbench_visible(not self.is_workbench_visible(), persist=True)
 
     def is_workbench_visible(self) -> bool:
         """工作台当前是否可见（动画期间返回目标状态，避免半途状态误判）"""
@@ -1325,18 +1325,27 @@ class TabManagerWindow(FramelessWindow):
         st.unpolish(cf)
         st.polish(cf)
 
-    def set_workbench_visible(self, visible: bool, animate: bool = True) -> None:
+    def set_workbench_visible(self, visible: bool, animate: bool = True, persist: bool = False) -> None:
         """显示/隐藏工作台（带 200ms 宽度展开/收拢动画；animate=False 瞬切）
 
         隐藏时记忆当前宽度，展开时恢复。动画期间重复触发会重启反向动画。
         显隐状态写入当前活跃对话窗口（per-tab 显隐记忆，切换窗口时由
         _on_tab_selected 按目标窗口记忆瞬切恢复）。
+
+        Args:
+            persist: True 时写入用户显隐记忆（规则 4）；仅用户手动开关路径传，
+                per-tab 瞬切恢复/挤压协调/定向打开等程序化路径不写。
         """
         frame = getattr(self, "_workbench_frame", None)
         panel = getattr(self, "workbench_panel", None)
         if frame is None or panel is None:
             return
         visible = bool(visible)
+        if persist:
+            # 规则 4：用户手动开关记忆终态（置前于 early-return，保证每次手动点击都落账）
+            from app.utils.config import Settings
+
+            Settings.get_instance().ui_workbench_visible.value = visible
         # per-tab 显隐记忆：无论走哪条路径（含状态一致的 early-return）都以
         # 当前活跃窗口为准落账，切换标签页时按目标窗口记忆恢复
         # ★ 预览路径（_wb_suppress_memory=True）只复用落位/数据，不写记忆
@@ -1434,7 +1443,7 @@ class TabManagerWindow(FramelessWindow):
 
     def _hide_workbench(self) -> None:
         """工作台关闭按钮：直接隐藏（实例保留，再次开启零重建）"""
-        self.set_workbench_visible(False)
+        self.set_workbench_visible(False, persist=True)
 
     def _remember_workbench_tab(self, index: int) -> None:
         """用户主动切页回调：把页签记到当前活跃对话窗口（按窗口独立记忆）
@@ -2560,38 +2569,46 @@ class TabManagerWindow(FramelessWindow):
         self.set_workbench_visible(True)
 
     def _restore_sidebar_collapsed(self):
-        """启动时固定侧边栏为展开态 + 默认宽度（不恢复配置记忆）"""
+        """启动时按配置恢复侧边栏折叠态 + 面板宽度（规则 4：记住用户选择）
+
+        窗口大小/位置仍固定默认（几何记忆已按需求移除，_do_save_geometry 维持空实现）。
+        多轮补射（80/200/400/700ms）机制保留：对抗启动期多轮 relayout 弹跳，
+        恢复目标从「固定展开」改为「存档折叠态」。工作台存档为开则启动瞬切打开。
+        """
         if not hasattr(self, "_splitter"):
             return
-        # 始终展开 + 默认宽度。背景：_setup_ui 里 setSizes 在窗口未显示时调用，
-        # show 后首次 relayout 按 stretch/sizeHint 重新分配，左面板会被压到
-        # 最小宽度（< _auto_collapse_width，实测 46~60px），TabPanel.resizeEvent
-        # 误判为"用户拖窄"自动折叠；欢迎卡片懒渲染（QWebEngineView 创建）还会
-        # 引发后续 relayout 再次压缩。因此在启动早期多轮补射恢复（时间递增，
-        # 覆盖 2~3 次 relayout 窗口期，直到布局不再弹跳），期间均以默认宽度为准。
+        from app.utils.config import Settings
+
+        self._restored_sidebar_collapsed = bool(Settings.get_instance().ui_sidebar_collapsed.value)
         self._apply_restored_panel_width()
         for delay in (80, 200, 400, 700):
             QTimer.singleShot(delay, self._apply_restored_panel_width)
+        # 工作台：存档为开 → 启动瞬切打开（无动画，避免启动期叠加动画）
+        if bool(Settings.get_instance().ui_workbench_visible.value):
+            QTimer.singleShot(0, lambda: self.set_workbench_visible(True, animate=False))
 
     def _apply_restored_panel_width(self):
-        """按默认宽度恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
+        """按存档折叠态恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return
-        saved_w = _DEFAULT_PANEL_WIDTH
-        frame_w = max(_EXPANDED_MIN_FRAME_WIDTH, saved_w + 14)
+        saved_collapsed = getattr(self, "_restored_sidebar_collapsed", False)
+        frame_w = (
+            (self._tab_panel._collapsed_min_width + 14)
+            if saved_collapsed
+            else max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + 14)
+        )
         sizes = self._splitter.sizes()
         total = sum(sizes) if sizes else self.width()
         if total <= frame_w:
             return
-        # 仅当前宽度明显小于默认宽度时才恢复（避免覆盖用户手动拖宽）
-        if sizes and sizes[0] >= frame_w - 10:
+        # 已在目标宽度附近则不重设（避免覆盖用户手动拖宽）
+        if sizes and abs(sizes[0] - frame_w) <= 10:
             return
         frame_w = min(frame_w, total)
         self._splitter.setSizes([frame_w, max(0, total - frame_w)])
-        # 启动时 TabPanel 可能已被 relayout 压窄误触发折叠（_collapsed=True），
-        # 这里显式解除，并同步紧凑/展开 UI（不发射信号，避免与动画互打断）
-        if self._tab_panel._collapsed:
-            self._tab_panel.set_collapsed(False)
+        # 对齐存档折叠态（set_collapsed 不发信号，避免与启动期动画互打断）
+        if self._tab_panel._collapsed != saved_collapsed:
+            self._tab_panel.set_collapsed(saved_collapsed)
         self._tab_panel.sync_collapsed_ui()
 
     # ── 覆盖层状态切换 ──
