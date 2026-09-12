@@ -80,6 +80,7 @@ from app.core import (
     get_user_round_ranges,
     group_messages_for_display,
 )
+from app.core.message_content import _is_hook_message, strip_system_reminder
 from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
@@ -14557,11 +14558,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
     @staticmethod
     def _summarize_removed_messages(messages: List[Dict[str, Any]]) -> str:
-        """被删内容摘要（卡片 tooltip）：取首条 user 消息前 80 字"""
+        """被删内容摘要（卡片 tooltip）：取首条 user 消息前 80 字
+
+        跳过 hook 注入消息；user 内容混入的 <system-reminder> 注入段一并剥离，
+        只显示用户实际输入。
+        """
         for msg in messages:
-            if msg.get("role") != "user":
+            if msg.get("role") != "user" or _is_hook_message(msg):
                 continue
-            text = " ".join((msg.get("content") or "").split())
+            text = " ".join(strip_system_reminder(msg.get("content") or "").split())
             if text:
                 return text[:80] + ("…" if len(text) > 80 else "")
         return ""
@@ -19129,6 +19134,22 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         self._card_manager.refresh_layer(self._window_id, "status")
 
+    def _set_bottom_input_visible(self, visible: bool) -> None:
+        """提问卡 / 独占模式的输入区整区显隐：输入容器 + 工具条 + 发光层 + 发送按钮。
+
+        发送按钮迁移后挂在主窗口（跨条带与输入区、避免被 strip 矩形裁剪），
+        不随任何容器一起显隐，必须在这里单独同步，否则提问卡出现时它会孤零零悬着。
+        """
+        if hasattr(self, "_bottom_input_container"):
+            self._bottom_input_container.setVisible(visible)
+        if hasattr(self, "_bottom_toolbar_strip"):
+            self._bottom_toolbar_strip.setVisible(visible)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(visible)
+        send_btn = getattr(getattr(self, "input_area", None), "send_btn", None) if hasattr(self, "input_area") else None
+        if send_btn is not None and send_btn.parent() is self:
+            send_btn.setVisible(visible)
+
     def _on_question_asked(self, tool_call_id: str, questions: list, extra: dict = None):
         if getattr(self, "_is_destroyed", False):
             return
@@ -19136,12 +19157,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         # （工具栏是 self 的直接子控件，不在 _bottom_input_container 里，
         #  必须单独隐藏，否则会与提问卡片重叠）
-        if hasattr(self, "_bottom_input_container"):
-            self._bottom_input_container.setVisible(False)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(False)
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(False)
+        self._set_bottom_input_visible(False)
         self._question_tool_call_id = tool_call_id
         if not isinstance(questions, list):
             questions = []
@@ -19179,12 +19195,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._set_ai_state("streaming")  # 桌宠：已回答，准备继续生成
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
-        if hasattr(self, "_bottom_input_container"):
-            self._bottom_input_container.setVisible(True)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(True)
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(True)
+        self._set_bottom_input_visible(True)
         self._restore_after_question_close()
         self._pet_set_state("streaming")  # 回答后继续回复
         if self._pending_permission_tool_call_id:
@@ -19220,12 +19231,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._set_ai_state("idle")  # 桌宠：取消提问，恢复空闲
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
-        if hasattr(self, "_bottom_input_container"):
-            self._bottom_input_container.setVisible(True)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(True)
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(True)
+        self._set_bottom_input_visible(True)
         self._restore_after_question_close()
         self._pet_set_state("idle")  # 取消则回 idle
 
@@ -19288,12 +19294,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
-        if hasattr(self, "_bottom_input_container"):
-            self._bottom_input_container.setVisible(False)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(False)
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(False)
+        self._set_bottom_input_visible(False)
         # 先填充内容再展开容器：见 _on_question_asked 同源 bug 注释
         self._question_floating_widget.setUpdatesEnabled(False)
         try:
@@ -21846,12 +21847,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 隐藏消息列表（保持滚动位置不变）
         self.chat_scroll_area.setVisible(False)
         # 隐藏输入容器 + 工具栏
-        self._bottom_input_container.setVisible(False)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(False)
-        # 隐藏输入框的发光控件
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(False)
+        self._set_bottom_input_visible(False)
         # 禁用新建按钮
         self.new_session_btn.setDisabled(True)
         # 窗口自适应缩小（聊天区和输入框隐藏后只保留运行卡片）
@@ -21868,12 +21864,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 恢复消息列表
         self.chat_scroll_area.setVisible(True)
         # 恢复输入容器 + 工具栏
-        self._bottom_input_container.setVisible(True)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(True)
-        # 恢复输入框的发光控件
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(True)
+        self._set_bottom_input_visible(True)
         # 启用新建按钮
         self.new_session_btn.setDisabled(False)
         # 重新聚焦输入框（仅当此窗口为活动 Tab 时）

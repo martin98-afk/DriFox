@@ -965,6 +965,23 @@ _HOOK_CONTENT_PATTERN = re.compile(
     re.DOTALL
 )
 
+# 宽匹配：剥除混入消息内容里的整段 system-reminder 注入
+# （覆盖无内层 hook 标签的裸注入形态，_HOOK_CONTENT_PATTERN 只认双标签）
+_SYSTEM_REMINDER_BLOCK_PATTERN = re.compile(
+    r"<system-reminder>.*?</system-reminder>",
+    re.DOTALL,
+)
+
+
+def strip_system_reminder(text: str) -> str:
+    """剥除文本中混入的 <system-reminder>...</system-reminder> 注入段
+
+    用于摘要 / 预览等只应展示用户实际内容的场景（如撤销卡片 tooltip）。
+    """
+    if not text:
+        return ""
+    return _SYSTEM_REMINDER_BLOCK_PATTERN.sub("", text)
+
 
 def _is_team_mail_text(text: str) -> bool:
     """判断文本是否为 TeamMail 消息内容（Bug11 迁移识别特征）。
