@@ -161,6 +161,14 @@ class _Win:
             return [left_w, max(0, total - left_w - wb), wb]
         return [left_w, max(0, total - left_w)]
 
+    def _collapse_workbench_by_squeeze(self):
+        # 模拟瞬切收起：工作台宽度释放给中间区（与真实 frame.hide 后的重分配同构）
+        self._wb_collapsed_by_squeeze = True
+        sizes = self._splitter.sizes()
+        if len(sizes) >= 3:
+            self._splitter.setSizes([sizes[0], sizes[1] + sizes[2], 0])
+        self.set_workbench_visible(False, animate=False)
+
     def set_workbench_visible(self, visible, animate=True, persist=False):
         self._wb_visible_target = visible
 

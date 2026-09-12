@@ -2384,10 +2384,10 @@ class TabManagerWindow(FramelessWindow):
                 self._set_windows_resize_preview_suppressed(False)
 
     def _evaluate_squeeze_collapse(self) -> bool:
-        """按稳定后的几何判定"侧边栏确实被挤压"→ 自动折叠
+        """按稳定后的几何判定"侧边栏确实被挤压"→ 自动折叠（含双面板协调）
 
         背景：resize 周期内（尤其 _deferred_resize_complete 的 _force_relayout
-        全量重算）左面板宽度会瞬时跌到折叠阈值（100px）以下。TabPanel.resizeEvent
+        全量重算）左面板宽度会瞬时跌到折叠阈值以下。TabPanel.resizeEvent
         只看宽度，会把最大化/还原、覆盖层 relayout 这类几何瞬变误判为"用户
         把面板拖窄"而折叠；而折叠后窗口总宽往往不增反减，自动展开的相对增长
         条件（≥ 折叠时总宽 + _AUTO_EXPAND_GROWTH）永不满足 → 折叠态永久残留。
@@ -2397,6 +2397,11 @@ class TabManagerWindow(FramelessWindow):
         判定标准（"被挤压"）：左面板最终宽度低于折叠阈值，且窗口总宽已放不下
         「常规展开宽度 + 聊天区最小可用宽度」。空间其实够的（纯 relayout 瞬时
         压窄）保持展开，不折叠。
+
+        规则 2（右先折）：窗口放不下「左栏展开 + 聊天区最小宽 + 工作台」时，
+        先瞬切收起工作台让位；释放后放得下「左栏展开 + 聊天区最小宽」则保持
+        左栏展开；仍放不下才折叠左栏。协调折叠的工作台打 _wb_collapsed_by_squeeze
+        标记，空间恢复时自动重开（手动关闭永不重开）。
 
         Returns:
             True 表示本次触发了折叠（调用方应跳过随后的自动展开检测，
@@ -2420,6 +2425,21 @@ class TabManagerWindow(FramelessWindow):
         # 空间仍放得下"常规展开宽度 + 聊天区最小宽度" → 只是瞬时压窄，不折叠：
         # 把左面板恢复到常规展开宽度，避免停留在被压扁的窄条上。
         needed = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        wb_w = sizes[2] if len(sizes) >= 3 else 0
+        if total >= needed + _MIN_CHAT_WIDTH + wb_w:
+            tab_frame = getattr(self, "_tab_frame", None)
+            cap = tab_frame.maximumWidth() if tab_frame is not None else needed
+            frame_w = max(0, min(needed, cap))
+            if frame_w > 0 and frame_w != left:
+                self._splitter.setSizes(self._splitter_sizes_with_left(frame_w))
+                panel.sync_collapsed_ui()
+            return False
+        # 放不下全布局（含工作台）：先折工作台让位（规则 2，右先折）
+        _wb_frame = getattr(self, "_workbench_frame", None)
+        _wb_visible = _wb_frame is not None and _wb_frame.isVisible() and not _wb_frame.isHidden()
+        if _wb_visible:
+            self._collapse_workbench_by_squeeze()
+        # 工作台让位后重判：放得下「左栏展开 + 聊天最小宽」→ 保持左栏展开
         if total >= needed + _MIN_CHAT_WIDTH:
             tab_frame = getattr(self, "_tab_frame", None)
             cap = tab_frame.maximumWidth() if tab_frame is not None else needed
@@ -2434,6 +2454,11 @@ class TabManagerWindow(FramelessWindow):
         panel._update_toggle_button()
         QTimer.singleShot(0, lambda: self._on_sidebar_toggled(True))
         return True
+
+    def _collapse_workbench_by_squeeze(self) -> None:
+        """挤压协调第一步：瞬切收起工作台并打标记（animate=False 避开动画互打断）"""
+        self._wb_collapsed_by_squeeze = True
+        self.set_workbench_visible(False, animate=False)
 
     def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
         """挤压折叠后空间恢复：自动展开回常规宽度
