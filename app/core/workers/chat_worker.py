@@ -750,10 +750,10 @@ class OpenAIChatWorker(QThread):
         消费后直接退出，消息成为孤儿——进入消息列表但永远没有下一轮 API 响应，
         且插话触发的 queued_user_injected 会让 UI 开出一张永远等不到流的新卡。
 
-        续轮受 LoopPolicy 门控：hook 队列注入与 Stop hook 注入同构（都是给
-        LLM 的补充上下文），故以 stop_hook_injected=True 判定——默认策略
-        CONTINUE 续轮，SingleTurn/Minimal 等恒 STOP 策略拒绝续轮维持完成路径；
-        max_rounds 上限由 while 顶部的 _check_loop_round_limit 兜底。
+        续轮受 LoopPolicy 门控：先做 max_rounds 配额预检（不消耗计数，配额
+        耗尽则拒绝续轮），再以 stop_hook_injected=True 判定——hook 队列注入与
+        Stop hook 注入同构（都是给 LLM 的补充上下文），默认策略 CONTINUE 续轮，
+        SingleTurn/Minimal 等恒 STOP 策略拒绝续轮维持完成路径。
 
         Returns:
             True  = 已注入且应续跑一轮（调用方 continue while 循环）
@@ -765,13 +765,25 @@ class OpenAIChatWorker(QThread):
         if hook_q is not None and not hook_q.empty():
             from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 
+            # 续轮配额预检（不消耗计数）：续轮回顶部还要过 _check_loop_round_limit，
+            # 配额耗尽时不续——否则消息已注入却无下一轮 API（重新孤儿化），且
+            # finished_with_messages 会与超限完成路径重复发射
             try:
-                decision = self._loop_policy().should_continue(
-                    LoopState(round_count=getattr(self, "_loop_round_count", 0), stop_hook_injected=True)
-                )
+                max_rounds = self._loop_policy().max_rounds(self.llm_config or {})
             except Exception as exc:
-                logger.warning(f"[LoopPolicy] should_continue 调用异常（退出前续轮门控），回退 CONTINUE: {exc!r}")
-                decision = LoopDecision.CONTINUE
+                logger.warning(f"[LoopPolicy] max_rounds 调用异常（退出前续轮预检），回退不限: {exc!r}")
+                max_rounds = None
+            quota_left = max_rounds is None or getattr(self, "_loop_round_count", 0) + 1 <= max_rounds
+
+            decision = None
+            if quota_left:
+                try:
+                    decision = self._loop_policy().should_continue(
+                        LoopState(round_count=getattr(self, "_loop_round_count", 0), stop_hook_injected=True)
+                    )
+                except Exception as exc:
+                    logger.warning(f"[LoopPolicy] should_continue 调用异常（退出前续轮门控），回退 CONTINUE: {exc!r}")
+                    decision = LoopDecision.CONTINUE
             if decision is LoopDecision.CONTINUE:
                 # include_team_mail=True：邮件随续轮进入对话流由 LLM 正常响应
                 # （消费时已 mark_mail_running，流结束回调不会重复处理），替代
@@ -789,7 +801,10 @@ class OpenAIChatWorker(QThread):
                 )
                 logger.info("[LoopPolicy] 退出前检测到待注入 hook 消息，注入并续跑一轮")
                 return True
-            logger.warning("[LoopPolicy] 策略拒绝退出前续轮，维持完成路径")
+            if quota_left:
+                logger.warning("[LoopPolicy] 策略拒绝退出前续轮，维持完成路径")
+            else:
+                logger.info("[LoopPolicy] 退出前续轮将超出 max_rounds，维持完成路径")
         # 兜底消费（队列空时 no-op）：include_team_mail=False——完成路径上注入
         # 的邮件会孤儿化（修复 T23），保持 pending 由流结束后的
         # _check_and_process_pending 走非流式路径处理
