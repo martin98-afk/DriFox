@@ -277,7 +277,7 @@ def test_rich_types_echo_defaults(qapp, rich_schema):
 def test_select_persists_on_change(qapp, rich_schema):
     """select 切换 → valueChanged 即时保存存储 value（非 label）"""
     card = PluginConfigCard("plug-rich")
-    card._rows["mode"]._on_pill_clicked("b")  # 模拟点击 pill（变化才发射信号）
+    card._rows["mode"]._on_clicked("b")  # 模拟点击选项（变化才发射信号）
     assert PluginConfigStore().get("plug-rich", "mode") == "b"
 
 
