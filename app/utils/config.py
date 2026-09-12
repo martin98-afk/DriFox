@@ -414,6 +414,12 @@ class Settings(QConfig):
     # 插件 mode_key 纠正回 sessions，无法复用；用独立无验证器字段存任意字符串。
     welcome_plugin_tab = ConfigItem("UI", "WelcomePluginTab", "")
 
+    # 侧边栏折叠态记忆：仅记用户手动操作（标题栏按钮/拖拽把手松手）的终态，
+    # 挤压等自动折叠不落盘，重启恢复用户意图而非临时状态
+    ui_sidebar_collapsed = ConfigItem("UI", "SidebarCollapsed", False, BoolValidator())
+    # 工作台显隐记忆：仅记用户手动开关（标题栏「右侧边栏」按钮）终态
+    ui_workbench_visible = ConfigItem("UI", "WorkbenchVisible", False, BoolValidator())
+
     # ========== LLM API 服务配置 ==========
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())
     llm_api_port = RangeConfigItem("LLM", "APIPort", 8765, RangeValidator(1024, 65535))

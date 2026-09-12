@@ -2959,6 +2959,12 @@ class TabManagerWindow(FramelessWindow):
         _tab_panel.set_resizing(False)，复位拖拽首帧标记供下次拖拽重新冻结。
         """
         self._splitter_dragging = False
+        # 规则 4：拖拽把手属用户明确意图，松手落最终折叠态（值不变不写盘）
+        from app.utils.config import Settings
+
+        _cfg = Settings.get_instance()
+        if _cfg.ui_sidebar_collapsed.value != self._tab_panel._collapsed:
+            _cfg.ui_sidebar_collapsed.value = self._tab_panel._collapsed
         # ── #14 收尾：折叠/展开动画仍运行则跳过解冻，交 #4 动画 finally 统一恢复 ──
         # 防「拖拽跨折叠阈值触发动画 + 120ms idle timer 提前解冻」极端路径尾段
         # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复

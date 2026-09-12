@@ -1142,7 +1142,7 @@ class TabPanel(QWidget):
         # 拖拽把手折叠——手动折叠不自动展开）。
         self._collapsed_by_squeeze: bool = False
         self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
-        self._auto_collapse_width: int = 100  # 展开态拖窄到该宽度(panel px)时自动折叠
+        self._auto_collapse_width: int = 200  # 展开态拖窄到该宽度(panel px)时自动折叠（=面板展开最小可用宽）
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
         # 窗口 resize / relayout 过渡期抑制自动折叠：几何瞬变（_force_relayout
         # 重算、最大化/还原）会把左面板瞬时压到折叠阈值以下，若 resizeEvent
@@ -1408,9 +1408,9 @@ class TabPanel(QWidget):
         宽度动画进行中（_animating=True）跳过：动画里宽度会经过
         阈值区间，若在此触发会与动画互相打断。
 
-        注意：展开阈值与折叠阈值必须错开留滞回区（折叠 <100、展开 >=110），
-        否则拖拽途中宽度在阈值附近抖动（如 99→101）会先折叠后展开，
-        表现为"往里拉时又往外回弹"。滞回区（100~109）内保持当前状态不动。
+        注意：展开阈值与折叠阈值必须错开留滞回区（折叠 <200、展开 >=210），
+        否则拖拽途中宽度在阈值附近抖动（如 199→201）会先折叠后展开，
+        表现为"往里拉时又往外回弹"。滞回区（200~209）内保持当前状态不动。
         """
         super().resizeEvent(event)
         # 窗口 resize / relayout 过渡期：宽度是瞬时中间值，不代表用户意图，
@@ -1688,6 +1688,10 @@ class TabPanel(QWidget):
         self._collapsed_by_squeeze = False
         self._update_toggle_button(switch_ui=False)
         self.sidebarToggled.emit(self._collapsed)
+        # 规则 4：记忆用户手动终态（挤压自动折叠不落盘）
+        from app.utils.config import Settings
+
+        Settings.get_instance().ui_sidebar_collapsed.value = self._collapsed
 
     def set_collapsed(self, collapsed: bool):
         """外部设置侧边栏收起/展开状态（如启动时恢复配置，不发射信号）"""
