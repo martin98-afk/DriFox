@@ -3,9 +3,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [v0.5.11] - 2026-09-12
+## [v0.5.11] - 2026-09-12 (重新发布 #2)
 
-自上一版本以来的变更 | 提交数：73 · 文件变更：131 · +9813/-3872 | 贡献者：dingma, drifox-bot
+自上一版本以来的变更 | 提交数：76 · 文件变更：137 · +10149/-3912 | 贡献者：dingma, drifox-bot
 
 ### ✨ 新功能 (New Features)
 
@@ -73,6 +73,19 @@ All notable changes to this project will be documented in this file.
 ### 🔧 其他 (Chores & Build)
 
 - **plugin.json 自动重新生成** (`plugins/marketplace.json`, `plugins/system/marketplace.json`): 3 次由 GitHub Actions 自动同步生成 [skip ci]。
+
+### 🆕 重新发布 #2 增量（自 v0.5.11 首发起）
+
+基于 `v0.5.11` 首发标签的增量变更 | 提交数：3 · 文件变更：7 · +336/-40 | 贡献者：dingma
+
+#### ✨ 新功能 (New Features)
+
+- **退出前排空 hook 消息队列防孤儿消息** (`app/core/workers/chat_worker.py`, `tests/core/test_chat_worker_drain_hooks_before_exit.py`): 应用退出前对 worker 的 `_hook_message_queue` 做排空处理，未消费的插话消息不再成为孤儿，新增 127 行守卫测试（ceaa927f）。
+- **SendableTextEdit 隐藏 Fluent 滚动条** (`app/widgets/bottom_input_area.py`): 隐藏 Fluent 滚动条防止内容区视觉伪影（67efafc8）。
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **worktree-manager 功能增强与结构优化** (`plugins/worktree-manager/tools/worktree_tools.py`, `app/widgets/bottom_input_area.py`, `app/widgets/cards/settings/llm_settings_card.py`, `plugins/worktree-manager/tools/icons/`): `manager_worktree` 四块增强：① remove 前 `status --porcelain` 脏文件预检防丢数据（`force` 才放行）；② 删分支先 `-d` 探测未合并提交默认保留（`force` 才 `-D`）；③ merge 目标分支校验 + 双向 dirty 预检 + `message` 走 `-m`；④ `merge-tree --write-tree` 冲突预判，list 输出「合并预判」，低版本 git 静默降级；路径 normcase 归一（`d:/work` vs `D:/WORK`）。新增 `manage_worktree` 工具图标（亮/暗双版）；`SendableTextEdit._finish_initialization` 补初始化复位与立即高度校准；busyEnterCard 图标 SEARCH → SEND（57e69d05）。
 
 ## [v0.5.10] - 2026-09-11 (重新发布 #5)
 
