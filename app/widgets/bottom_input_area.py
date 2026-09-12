@@ -386,6 +386,8 @@ class SendableTextEdit(TextEdit):
 
     def _finish_initialization(self):
         """初始化完成后重置标志，允许高度调整"""
+        self._initializing = False
+        self._adjust_height_to_content()
 
     def _rotate_placeholder_tip(self):
         """定时随机切换 placeholder tips (QTimer 15s 触发 random.choice)"""
