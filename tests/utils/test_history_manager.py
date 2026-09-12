@@ -170,3 +170,61 @@ def test_import_before_first_history_load_survives_immediate_refresh(monkeypatch
     assert imported is not None
     assert "imported-session" in {session["session_id"] for session in manager._history_sessions}
     assert store.saved_session_ids == ["imported-session"]
+
+
+# ---------- pinned 字段 + 项目列表门面（历史面板置顶分组） ----------
+
+
+def _mk_record(sid, project="默认项目", pinned=False, last_time="2026-09-12 00:00:00"):
+    return {
+        "session_id": sid,
+        "title": f"会话{sid}",
+        "project": project,
+        "last_time": last_time,
+        "saved_at": last_time,
+        "message_count": 1,
+        "preview": "预览",
+        "messages": [{"role": "user", "content": "hi", "timestamp": last_time}],
+        "pinned": pinned,
+    }
+
+
+def _make_manager_with_records(monkeypatch, tmp_path, records):
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._history_sessions = list(records)
+    manager._history_loaded = True
+    manager._session_store = None  # 非 SQLite 路径：不碰真实 DB
+    return manager
+
+
+def test_lightweight_entry_passes_pinned(monkeypatch, tmp_path):
+    manager = _make_manager_with_records(monkeypatch, tmp_path, [_mk_record("a", pinned=True), _mk_record("b")])
+    by_id = {s["session_id"]: s for s in manager.get_history_list(None)}
+    assert by_id["a"]["pinned"] is True
+    assert by_id["b"]["pinned"] is False
+
+
+def test_save_session_preserves_pinned(monkeypatch, tmp_path):
+    manager = _make_manager_with_records(monkeypatch, tmp_path, [_mk_record("a", pinned=True)])
+    # 重新保存同一会话（不带 pinned 参数）→ 置顶状态保留
+    manager.save_session(
+        [{"role": "user", "content": "hi2", "timestamp": "2026-09-12 01:00:00"}],
+        title="会话a",
+        session_id="a",
+    )
+    assert manager._history_sessions[0]["pinned"] is True
+
+
+def test_set_session_pinned_updates_memory(monkeypatch, tmp_path):
+    manager = _make_manager_with_records(monkeypatch, tmp_path, [_mk_record("a"), _mk_record("b")])
+    assert manager.set_session_pinned("a", True) is True
+    assert manager.set_session_pinned("不存在", True) is False
+    by_id = {s["session_id"]: s for s in manager.get_history_list(None)}
+    assert by_id["a"]["pinned"] is True
+    assert by_id["b"]["pinned"] is False
+
+
+def test_get_project_list_distinct_sorted(monkeypatch, tmp_path):
+    records = [_mk_record("a", project="zero"), _mk_record("b", project="DriFox"), _mk_record("c", project="zero")]
+    manager = _make_manager_with_records(monkeypatch, tmp_path, records)
+    assert manager.get_project_list() == ["DriFox", "zero"]

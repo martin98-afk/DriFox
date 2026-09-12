@@ -101,7 +101,7 @@ class TestRefreshHistoryPanelOnSavePaths:
 
     def test_notify_entry_includes_refresh_and_invalidate(self):
         """统一入口 _notify_history_data_changed 内部必须：
-        - refresh_history_card_if_visible(self._history_card, self._refresh_history_toggle_panel)
+        - self._refresh_history_page_if_active()（数据流反转：页面自拉数据）
         - self._invalidate_welcome_card()
         - self._broadcast_history_data_changed()
         """
@@ -109,22 +109,10 @@ class TestRefreshHistoryPanelOnSavePaths:
         cls = _get_class(tree, "OpenAIChatToolWindow")
         method = _get_method(cls, "_notify_history_data_changed")
 
-        refresh_calls = _find_calls(method, "refresh_history_card_if_visible")
-        matched_refresh = []
-        for call in refresh_calls:
-            if len(call.args) < 2:
-                continue
-            a0, a1 = call.args[0], call.args[1]
-            if (
-                isinstance(a0, ast.Attribute)
-                and a0.attr == "_history_card"
-                and isinstance(a1, ast.Attribute)
-                and a1.attr == "_refresh_history_toggle_panel"
-            ):
-                matched_refresh.append(call)
-        assert matched_refresh, (
-            "_notify_history_data_changed 必须调用 refresh_history_card_if_visible("
-            "self._history_card, self._refresh_history_toggle_panel)。"
+        refresh_calls = _find_calls(method, "_refresh_history_page_if_active")
+        assert refresh_calls, (
+            "_notify_history_data_changed 必须调用 self._refresh_history_page_if_active()。"
+            "（数据流反转后页面自拉数据，窗口只负责时机通知）"
         )
 
         invalidate_calls = _find_calls(method, "_invalidate_welcome_card")
@@ -172,7 +160,7 @@ def _make_min_stub():
     inst._team_name = ""
     inst._team_agent_name = ""
 
-    inst._refresh_history_toggle_panel = MagicMock()
+    inst._refresh_history_page_if_active = MagicMock()
     inst._update_node_preview = MagicMock()
     inst._get_current_worktree_path = MagicMock(return_value="")
     inst._resolve_session_project_fallback = MagicMock(return_value="默认项目")

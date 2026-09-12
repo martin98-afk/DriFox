@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """_worktree_page.py — 系统插件版工作树页（关键文档 + git 工作树切换）
 
-page_id="worktree" 为保留 id：注册它即填充右侧工作台 index 0 的「工作树」槽位
-（面板本身不提供工作树实现，功能完全插件化；插件卸载后槽位显示占位页）。
+page_id="worktree-manager"（与插件同名）：注册它即填充右侧工作台的「工作树」页
+（面板本身不提供工作树实现，功能完全插件化；插件卸载后显示占位页）。
 
 页面内容自原 MemoryCardContent 的 docs 子页整体迁移：
 - 关键文档列表（拖拽添加文件/文件夹/URL，设为工作目录）
@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 from typing import Dict, Optional
+
+from loguru import logger
 
 from PyQt5.QtCore import QSize, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QDragEnterEvent, QDragMoveEvent, QDropEvent
@@ -448,7 +450,23 @@ class SystemWorktreePage(QWidget):
         # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
         self._instance_workdir: Dict[str, str] = {}
         self._search_filter = ""  # 搜索过滤文本
+        # 工具线程创建/删除工作树 → 信号桥跨线程通知 → 主线程刷新
+        self._connect_change_bridge()
         self._init_ui()
+
+    def _connect_change_bridge(self) -> None:
+        """连接工具变更信号桥（emit 在后台线程，本槽在主线程执行）"""
+        try:
+            from .change_bridge import get_bridge
+
+            get_bridge().changed.connect(self._on_tool_worktree_changed)
+        except Exception as e:
+            logger.warning(f"[worktree-manager] 工具变更信号桥连接失败（工具操作后不自动刷新）: {e}")
+
+    def _on_tool_worktree_changed(self, summary: str) -> None:
+        """工具线程创建/删除工作树后刷新列表（主线程槽）"""
+        logger.info(f"[worktree-manager] 工具操作工作树，刷新页面: {summary}")
+        self.refresh_data()
 
     def _get_memory_manager(self):
         """从 context 的 backend 获取 memory_manager（宿主未就绪时返回 None）"""
@@ -484,6 +502,26 @@ class SystemWorktreePage(QWidget):
             self._current_project = project
         # 强制刷新关键文档
         self._load_key_documents()
+
+    def refresh_data(self) -> None:
+        """数据自拉入口（工作台通用页协议，宿主 ``refresh_current_page_data`` 调用）
+
+        面板不再向页面推送 project/workdir（原 ``WorkbenchPanel.update_project``）：
+        页面自己向当前活跃窗口取 ``_current_project`` 与实例缓存 ``_current_workdir``。
+        """
+        project = ""
+        workdir: Optional[str] = None
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            win = tm.get_current_window() if tm is not None else None
+            if win is not None:
+                project = getattr(win, "_current_project", "") or ""
+                workdir = (getattr(win, "_current_workdir", None) or {}).get(project)
+        except Exception:
+            pass
+        self.set_project(project, workdir)
 
     def _get_effective_workdir(self, project: str):
         """获取有效工作目录（多窗口隔离：实例缓存优先，回退 DB）

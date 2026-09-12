@@ -315,3 +315,98 @@ def test_reload_then_group_preserves_tool_args_for_render(store):
         assert args == {"path": f"a{i}.py", "startline": i}, (
             f"第 {i} 条工具消息 arguments 补回失败（渲染后预览将为空）: {args}"
         )
+
+
+def test_reload_then_append_save_preserves_tool_args(store):
+    """回归（2026-09-12 工具完成框描述全空且不可逆）：
+
+    get_session_messages 返回轻量 blob（_x_idx、无 arguments）→ 加载历史
+    会话后继续对话并保存 → normalize_message 给轻量消息伪造 arguments={}
+    → extract_offload_fields 视为「无剥离字段」不产 extras 行 →
+    _write_extras 全删旧 extras 后不插回 → 历史消息参数永久丢失。
+
+    修复：加载路径必须返回全量消息（主 blob + extras 合并），使内存会话
+    始终持有完整数据，后续保存的剥离-写回循环自洽。
+    """
+    from app.utils.history_manager import HistoryManager, merge_session_messages
+
+    messages = [_msg("user", "q0")]
+    for i in range(4):
+        messages.append(
+            _msg(
+                "tool",
+                f"result-{i}",
+                name="grep",
+                tool_call_id=f"c{i}",
+                arguments={"pattern": f"p{i}"},
+                success=True,
+            )
+        )
+        messages.append(_msg("assistant", f"a{i}"))
+    store.save_session(_session("sa", messages))
+
+    ok, rows = store._db.execute_sql(
+        "SELECT COUNT(*) AS n FROM session_msg_extras WHERE session_id='sa'"
+    )
+    assert rows[0]["n"] > 0, "前置：保存后应有 extras 行"
+
+    # 模拟加载历史会话：get_session_messages 返回轻量形态（修复前）或全量（修复后）
+    hm = HistoryManager()
+    try:
+        hm._session_store = store
+        hm._use_sqlite = True
+        loaded = hm.get_session_messages("sa")
+    finally:
+        pass
+
+    # 断言 1：加载进内存的消息必须是全量（历史 tool 消息带 arguments）
+    tool_args = [m.get("arguments") for m in loaded if m.get("role") == "tool"]
+    assert all(a is not None for a in tool_args), (
+        f"加载后历史消息 arguments 缺失（轻量形态泄漏进内存）: {tool_args}"
+    )
+
+    # 断言 2：加载后继续对话 → 再保存 → extras 与 blob 保持完整（循环自洽）
+    loaded.append(_msg("user", "继续"))
+    loaded.append(_msg("assistant", "好的"))
+    merged = merge_session_messages(loaded)
+    store.save_session(_session("sa", merged))
+
+    ok, rows = store._db.execute_sql(
+        "SELECT COUNT(*) AS n FROM session_msg_extras WHERE session_id='sa'"
+    )
+    assert rows[0]["n"] > 0, "再保存后 extras 行被清空（历史参数数据丢失）"
+
+    full = store.get_full_messages("sa")
+    roundtrip = {
+        m.get("tool_call_id"): m.get("arguments")
+        for m in full
+        if m.get("role") == "tool"
+    }
+    for i in range(4):
+        assert roundtrip.get(f"c{i}") == {"pattern": f"p{i}"}, (
+            f"call_{i} arguments 丢失: {roundtrip.get(f'c{i}')}"
+        )
+
+
+def test_normalize_message_does_not_fake_empty_arguments():
+    """轻量剥离消息（无 arguments 键）经 normalize 后不得伪造空 dict。
+
+    伪造的 arguments={} 会让 extract_offload_fields 误判「无剥离字段」，
+    掩盖轻量消息泄漏进保存链的事实，是 2026-09-12 数据丢失链的放大器。
+    """
+    from app.core.message_content import normalize_message
+
+    light = {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "name": "grep",
+        "content": "r",
+        "_x_idx": 3,
+    }
+    item = normalize_message(light)
+    assert item is not None
+    assert "arguments" not in item, "normalize 不应为轻量消息伪造空 arguments"
+
+    full = dict(light, arguments={"pattern": "p"})
+    item2 = normalize_message(full)
+    assert item2.get("arguments") == {"pattern": "p"}, "真实 arguments 必须透传"

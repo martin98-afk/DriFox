@@ -10,7 +10,6 @@ import typing as _typing
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "BaseSettingsCard": ("app.widgets.cards.settings.base_settings_card", "BaseSettingsCard"),
     "GiteeCard": ("app.widgets.cards.settings.gitee_card", "GiteeCard"),
-    "HistoryCard": ("app.widgets.cards.settings.history_card", "HistoryCard"),
     "HookEditCard": ("app.widgets.cards.settings.hook_setting_card", "HookEditCard"),
     "HookListSettingCard": ("app.widgets.cards.settings.hook_setting_card", "HookListSettingCard"),
     "SkillListSettingCard": ("app.widgets.cards.settings.list_setting_card", "SkillListSettingCard"),
@@ -43,7 +42,6 @@ def __dir__() -> list[str]:
 
 __all__ = [
     "BaseSettingsCard",
-    "HistoryCard",
     "MemoryCardContent",
     "TAB_PROJECT_NOTES",
     "ModelConfigCard",

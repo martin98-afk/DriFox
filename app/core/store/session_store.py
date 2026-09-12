@@ -498,6 +498,7 @@ class SessionStore:
                 self._migrate_add_team_columns()
                 self._migrate_add_team_members_column()
                 self._migrate_add_first_user_columns()
+                self._migrate_add_pinned_column()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -725,6 +726,24 @@ class SessionStore:
         except Exception as e:
             logger.warning(f"[SessionStore] first_user_* 列迁移失败: {e}")
 
+    def _migrate_add_pinned_column(self):
+        """迁移：添加 pinned 列（INTEGER DEFAULT 0，会话置顶标记）
+
+        历史面板置顶分组：置顶会话聚合到列表顶部，不受日期分组影响。
+        老库 ALTER ADD COLUMN 非破坏性；默认 0（未置顶）。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            if "pinned" not in col_names:
+                logger.info("[SessionStore] 迁移：添加 pinned 列")
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN pinned INTEGER DEFAULT 0")
+                logger.info("[SessionStore] pinned 列迁移完成")
+        except Exception as e:
+            logger.warning(f"[SessionStore] pinned 列迁移失败(可能已存在): {e}")
+
     def _backfill_first_user_columns(self):
         """一次性回填团队会话的首问列（逐条读写，内存友好）
 
@@ -897,6 +916,12 @@ class SessionStore:
             return self._session_repo.update_project(session_id, project)
         return False
 
+    def update_session_pinned(self, session_id: str, pinned: bool) -> bool:
+        """更新会话置顶标记"""
+        if self._session_repo:
+            return self._session_repo.update_pinned(session_id, pinned)
+        return False
+
     def get_sessions_by_project(self, project: str, limit: int = 100) -> List[Dict]:
         """获取指定项目的会话列表"""
         if self._session_repo:
@@ -980,6 +1005,9 @@ class SessionStore:
 
     def clear_old_subagent_tasks(self, days: int = 7) -> int:
         """清理旧子智能体任务"""
+        if self._subagent_log_repo:
+            return self._subagent_log_repo.clear_old_tasks(days)
+        return 0
 
     # ==================== 文件操作记录（委托给 FileOperationRepository）====================
 

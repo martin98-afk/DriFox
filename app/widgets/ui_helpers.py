@@ -1713,6 +1713,14 @@ def init_after_loading_session(self_widget, session, session_id, title=None, bac
     self_widget._current_session_id = session_id
     self_widget.title_edit.setText(title or "历史对话")
 
+    # 🛡️ 加载会话 = 读操作，起点必须干净：重置脏标记。
+    # 此前脏标记跨会话切换传染——新建会话的 SessionStart hook 注入经
+    # _on_messages_updated 放行后置脏，但 hook-only 会话被 has_user_message
+    # 过滤永不落库，脏标记永无消费机会；残留脏挂到下一个加载的会话上，
+    # 切走时 _auto_save_current_session 对无变更会话做无意义保存，
+    # DB updated_at 被刷新 → 历史列表「最后对话时间」被错误更新。
+    self_widget._session_dirty = False
+
     if backend:
         backend.set_session_context(session_id)
 

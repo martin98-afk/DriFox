@@ -167,6 +167,7 @@ class OpenAIChatWorker(QThread):
     error_occurred = pyqtSignal(str)
     finished_with_content = pyqtSignal(str)
     finished_with_messages = pyqtSignal(list)
+    queued_user_injected = pyqtSignal(int)  # 本轮消费到 N 条用户插话（繁忙时插话发送）
     compaction_status_changed = pyqtSignal(dict)
     tool_call_started = pyqtSignal(str, str, dict, str)
     tool_args_updated = pyqtSignal(str, str, dict)  # 工具参数流式更新 (tool_call_id, tool_name, partial_args)
@@ -683,6 +684,21 @@ class OpenAIChatWorker(QThread):
                 except queue.Empty:
                     break
 
+            # ── 用户插话（繁忙时插话发送）：剥离传输键，统计条数通知 UI 开新回复卡 ──
+            # 传输键仅用于进程内识别（UI 切卡 / 取消回收），注入前必须剥净，
+            # 落库后是干净 user 消息；hook 流程照常触发，无特判。
+            interject_count = 0
+            for m in msgs:
+                if m.pop("_interject", None) is True:
+                    interject_count += 1
+                m.pop("_interject_text", None)
+                m.pop("_interject_image_paths", None)
+            if interject_count:
+                # 信号先于本轮 _make_api_call 的流式 chunk（queued 保序）→ UI 新卡先建好
+                self._emit_with_callback(
+                    "queued_user_injected", self.queued_user_injected, interject_count
+                )
+
             if msgs:
                 self._append_to_api_cache(msgs)
                 self._current_session_messages.extend(msgs)
@@ -1069,9 +1085,17 @@ class OpenAIChatWorker(QThread):
                         leftover.append(q.get_nowait())
                     except queue.Empty:
                         break
+                recovered = []
                 for item in leftover:
-                    if item.get("_hook_event") != "TeamMail":
+                    if item.get("_interject") is True:
+                        recovered.append(item)  # 用户插话：回收供停止后回填，不丢弃
+                    elif item.get("_hook_event") != "TeamMail":
                         q.put(item)
+                if recovered and backend is not None:
+                    try:
+                        backend.stash_recovered_interjects(recovered)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"[HookManager] 回收插话失败: {e}")
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[HookManager] Cancel path drain TeamMail hook queue failed: {e}")
 

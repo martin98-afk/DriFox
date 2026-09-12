@@ -11,6 +11,11 @@ Phase F：原 setup_ui 底部输入区域段（计划标注 3262-3410，实际 3
 - input_area _command_card _file_mention_card _undo_delete_card
 - _undo_delete_store _truncation_sentinel _pending_send_after_truncation _pending_send_user_text
 
+宿主依赖（host 预建，本模块只读取）：
+- _window_id _card_manager
+- _bottom_card_container（ContainerType.BOTTOM：状态卡 + 系统模态）
+- _completion_container（ContainerType.COMPLETION：L1 输入补全，命令卡/文件提及卡）
+
 契约集提取命令（搬运基线）：
     python -X utf8 -c "import re; lines=open('app/main_widget.py',encoding='utf-8').read().split(chr(10)); pat=re.compile(r'self\\.([\\w]+)\\s*[:=]'); attrs=[m.group(1) for l in lines[3272:3414] if (m:=pat.match(l.strip()))]; print(chr(10).join(attrs))"
 """
@@ -48,7 +53,10 @@ class InputCardModule(UIModule):
         host._bottom_input_container.setObjectName("bottomContainer")
         bottom_layout = QVBoxLayout(host._bottom_input_container)
         host._bottom_input_layout = bottom_layout
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        # 呼吸感：输入区四周留出边距（左右 10 / 顶 6 / 底 7，叠加主布局 1px），
+        # 工具栏条 _position_bottom_toolbar 的绝对定位与这套 margins 严格对齐，
+        # 改这里必须同步改那边，否则输入卡与工具栏不等宽
+        bottom_layout.setContentsMargins(10, 6, 10, 7)
         bottom_layout.setSpacing(0)
 
         # ===== 输入卡片（上方圆角 + 渐变 + 边框，border-bottom: none）=====
@@ -56,8 +64,9 @@ class InputCardModule(UIModule):
         host._input_card.setObjectName("_input_card")
         host._input_card.setAcceptDrops(True)
         host._input_card.installEventFilter(host)
+        # 呼吸感留白：卡内边距 2px → 8px，给附件行/输入文字留出与卡缘的距离
         card_layout = QVBoxLayout(host._input_card)
-        card_layout.setContentsMargins(2, 2, 2, 2)
+        card_layout.setContentsMargins(8, 8, 8, 8)
         card_layout.setSpacing(0)
 
         # 输入卡环境光晕容器（包裹 _input_card，承载宽柔的外层环境光）
@@ -100,6 +109,7 @@ class InputCardModule(UIModule):
         # host.input_area.setFixedHeight(52)
         setFont(host.input_area, scale_font_size(15))
         host.input_area.sendMessageRequested.connect(host._on_send_clicked)
+        host.input_area.sendMessageInverseRequested.connect(host._on_send_clicked_inverse)
         host.input_area.stopMessageRequested.connect(host._on_stop_clicked)
         host.input_area.clearRequested.connect(host._on_clear_shortcut)
         host.input_area.agentChanged.connect(host._on_agent_changed)
@@ -132,15 +142,21 @@ class InputCardModule(UIModule):
         host._command_card.setVisible(False)
         host.input_area.set_command_card(host._command_card)
         mgr = host._card_manager
-        # 命令卡片压制 tool、sub_agent 和 sub_agent_compact
+        # 命令卡片：注册到 L1 补全容器（ContainerType.COMPLETION），不再与
+        # BOTTOM 里的状态卡/系统卡同桶 —— 这是"命令卡参数态与排队卡抢高度、
+        # 排队卡被压在参数行上"的结构性修复（见 card_manager.ContainerType 注释）。
+        # 注：不再压制 sub_agent_compact —— L2 状态层（子智能体/排队/撤销）表达的是
+        # "系统正在发生的事"，与输入补全语义正交；压制它会让"子智能体运行中打 /"
+        # 之后状态卡再也不回来（CardManager 有压制声明但无恢复栈）。
         mgr.register_card(
             host._window_id,
-            ContainerType.BOTTOM,
+            ContainerType.COMPLETION,
             "command",
             host._command_card,
-            suppress_others=["tool", "sub_agent", "sub_agent_compact"],
+            suppress_others=["tool", "sub_agent"],
+            layer="completion",
         )
-        host._bottom_card_container.add_card("command", host._command_card)
+        host._completion_container.add_card("command", host._command_card)
 
         # 文件提及卡片（输入 @ 时显示文件列表）
         host._file_mention_card = FileMentionCard(host._bottom_input_container)
@@ -150,11 +166,12 @@ class InputCardModule(UIModule):
         host._file_mention_card.mentionSelected.connect(host._on_mention_selected)
         mgr.register_card(
             host._window_id,
-            ContainerType.BOTTOM,
+            ContainerType.COMPLETION,
             "file_mention",
             host._file_mention_card,
+            layer="completion",
         )
-        host._bottom_card_container.add_card("file_mention", host._file_mention_card)
+        host._completion_container.add_card("file_mention", host._file_mention_card)
 
         # 预缓存文件列表：延迟到事件循环空闲后执行，不阻塞 UI 初始化
         QTimer.singleShot(200, host._ensure_file_mention_cache)
@@ -167,8 +184,41 @@ class InputCardModule(UIModule):
         host._undo_delete_card.dismissRequested.connect(host._on_undo_dismiss_requested)
         # 被 CardManager 隐藏（被其他卡片遮挡）→ 仅记录，**不清空**回退条目
         host._undo_delete_card.dismissed.connect(host._on_undo_delete_dismissed)
-        mgr.register_card(host._window_id, ContainerType.BOTTOM, "undo_delete", host._undo_delete_card)
+        mgr.register_card(
+            host._window_id,
+            ContainerType.BOTTOM,
+            "undo_delete",
+            host._undo_delete_card,
+            layer="status",
+            stackable=True,
+            order_hint=30,
+            # 谓词 = "撤销窗口是否仍有效"：用户点 ✕ / TTL 到期都会 store.clear()，
+            # 条目清空即窗口关闭；被系统模态卡压制时条目保留 → 关闭后自动恢复。
+            visible_when=lambda: bool(host._undo_store().peek()),
+        )
         host._bottom_card_container.add_card("undo_delete", host._undo_delete_card)
+
+        # 排队消息卡片（繁忙时排队发送；无 TTL，队列空时由 main_widget 隐藏）
+        from app.widgets.cards.floating.queue_message_card import QueueMessageCard
+
+        host._queue_message_card = QueueMessageCard(host._bottom_input_container)
+        host._queue_message_card.setVisible(False)
+        host._queue_message_card.insertRequested.connect(host._on_queue_insert_requested)
+        host._queue_message_card.removeRequested.connect(host._on_queue_remove_requested)
+        host._queue_message_card.editRequested.connect(host._on_queue_edit_requested)
+        mgr.register_card(
+            host._window_id,
+            ContainerType.BOTTOM,
+            "message_queue",
+            host._queue_message_card,
+            layer="status",
+            stackable=True,
+            order_hint=20,
+            # 谓词 = 队列非空。宿主只调 _refresh_queue_card 更新内容 + refresh_layer，
+            # 不再手写 show/hide 组合。
+            visible_when=lambda: bool(host._pending_message_queue),
+        )
+        host._bottom_card_container.add_card("message_queue", host._queue_message_card)
 
         # 撤销删除条目栈（替代原单步裸 dict `_undo_delete_cache` 与死代码
         # `_undo_delete_stack`；支持连续删除逐步回退，上限见 UndoDeleteStore.MAX_ENTRIES）

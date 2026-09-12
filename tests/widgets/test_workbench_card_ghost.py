@@ -64,7 +64,23 @@ def test_projection_restore_keeps_card_hidden(qtbot, tm_window):
     assert widget.isVisible(), "打开后卡片应可见（此为正常路径）"
 
     # 2) 用户在工作台内切到常驻页签（写入窗口页签记忆）
-    panel.set_current_tab(panel.TAB_WORKTREE, user=True)
+    #    面板对页面零语义：先注册一个常驻页，再按 tab_id 定位（不再有 TAB_* 常量）
+    from types import SimpleNamespace
+
+    from PyQt5.QtWidgets import QWidget as _QW
+
+    panel.sync_plugin_pages(
+        [
+            SimpleNamespace(
+                page_id="home",
+                label="常驻页",
+                widget_class=_QW,
+                plugin_name="tp",
+                metadata={"order_hint": 0, "default_landing": True},
+            )
+        ]
+    )
+    panel.set_current_tab_by_id("home", user=True)
     QApplication.processEvents()
     assert panel._stack.currentWidget() is not widget
 

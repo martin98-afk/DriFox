@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """工作台浮层共享 UI 组件（_EmptyHint / _SectionHeader）
 
-被 app.widgets.workbench_panel（内置 fallback）和 plugins/system-ui/ui/_artifacts_page.py
-（系统插件版）共用，避免重复定义。
+被 app.widgets.workbench_panel（内置 fallback）和
+plugins/artifacts-manager/ui/artifacts_page.py（产物页插件）共用，避免重复定义。
 
 注意：本模块不应反向依赖 workbench_panel 或 plugins，避免循环导入。
 """

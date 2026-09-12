@@ -14,11 +14,130 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from loguru import logger
+
+from app.core.project_changed import dispatch_project_changed, is_active_window
+
 if TYPE_CHECKING:
     from app.core.command_manager import CommandType  # noqa: F401
 
 # re-export：让 `from app.plugins.registries.ui_plugin_registry import WorkspacePageInfo` 直接可用
 from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo  # noqa: E402,F401
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UI 扩展点槽位声明表（数据驱动，取代散落的硬编码分支）
+# ═══════════════════════════════════════════════════════════════════════════
+# 背景：早期每加一个 UI 扩展点，就要在卸载判据、热重载门控等多处补硬编码分支。
+# 这里改成声明式：一个槽位 = 一行 ``declare_slot``（取值器 + 归属解析器 + 视图域）。
+#
+# 分层（关键：只有**视图域**是硬概念，**槽位**是数据）：
+#   ┌ 槽位 slot_id ────────┐        ┌ 视图域 scope ──────────┐
+#   │ content_renderer     │──┐     │ input_area  输入区按钮  │
+#   │ input_button         │──┼────▶│ welcome     欢迎卡片    │
+#   │ welcome_tab          │──┤     │ workbench   工作台页    │
+#   │ workbench_tab        │──┤     │ messages    消息区重绘  │
+#   │ … 新增扩展点在此追加  │──┘     │ command     命令面板    │
+#   └──────────────────────┘        │ hotkey      全局热键    │
+#                                   │ system_cards 系统卡片   │
+#                                   └────────────────────────┘
+# 视图域 = 界面上真实存在的渲染位置，数量少且长期稳定；
+# 槽位 = 插件能挂载的扩展点，会随功能演进而增加。
+#
+# ★ 新增一个 UI 扩展点只需做一件事：在文件末尾的 ``_declare_builtin_slots()``
+#   里追加一条 ``declare_slot(...)``（槽位名 + 从注册表取条目的取值器 + 归属
+#   的视图域）。``_has_any_registration`` 与 ``get_plugin_ui_slots`` 均由声明表
+#   自动驱动，无需改动。
+#
+# ⚠️ 本表**不用于热重载门控**（2026-09 教训）：曾用「卸前 ∪ 装后」槽位快照推导
+#   该刷哪些视图域，但热重载是异步广播 + 多入口 + 可重入的，跨调用的可变快照
+#   必然与真实时序错位 —— 表现为「有时刷新、有时不刷、卸载后残留旧实例」。
+#   现在门控一律**无状态**：容器只能依据「此刻注册表 / 此刻已挂载实例」判断，
+#   见 ``WorkbenchPanel.sync_plugin_pages(force_plugin=...)``。
+#   声明表保留为纯查询与诊断用途。
+
+# ── 视图域：界面渲染位置（稳定，新增扩展点一般不需要动这里）──
+SCOPE_INPUT_AREA = "input_area"  # 输入区胶囊上的插件按钮
+SCOPE_WELCOME = "welcome"  # 欢迎卡片（QWebEngineView，重建代价最高）
+SCOPE_WORKBENCH = "workbench"  # 右侧工作台插件页
+SCOPE_MESSAGES = "messages"  # 已渲染消息的 custom / fence / tag 块
+SCOPE_COMMAND = "command"  # 命令面板 + 快捷键
+SCOPE_HOTKEY = "hotkey"  # 全局热键（托盘 toggle-window 等）
+SCOPE_SYSTEM_CARDS = "system_cards"  # 系统卡片容器（浮动卡所在的输入区恢复）
+
+
+def _owner_of(entry: Any) -> str:
+    """默认归属解析：条目自身带 plugin_name（绝大多数 info dataclass）
+
+    例外容器（元素为 tuple，如 _services / _ui_modules）在声明时单独传 owner。
+    """
+    return getattr(entry, "plugin_name", "") or ""
+
+
+@dataclass(frozen=True)
+class SlotDecl:
+    """一个 UI 扩展点槽位的声明（数据驱动，取代散落的硬编码分支）
+
+    Attributes:
+        slot_id: 槽位标识，通常与 register_* 方法名对应（register_input_button
+            → ``input_button``）。仅用于日志与调试，不参与任何 if 分支。
+        entries: ``(registry) -> Iterable[(key, entry)]``，枚举该槽位当前全部
+            条目。dict 容器用 ``.items()``，list 容器用 ``enumerate``。延迟求值
+            （lambda 内访问 registry 私有属性），故声明可写在类定义之前。
+        owner: ``(entry) -> plugin_name``，从条目解析所属插件名。
+        scopes: 该槽位命中时需要刷新的视图域集合。**空集表示未归类** →
+            溯源结果判为「未知」，调用方回退全量刷新（安全侧）。
+    """
+
+    slot_id: str
+    entries: Callable[[Any], Iterable[Tuple[Any, Any]]]
+    owner: Callable[[Any], str] = _owner_of
+    scopes: frozenset = frozenset()
+
+    def plugin_keys(self, registry: Any, plugin_name: str) -> List[Any]:
+        """该插件在此槽位占用的条目 key 列表（如工作台 page_id 列表）"""
+        if not plugin_name:
+            return []
+        try:
+            return [k for k, e in self.entries(registry) if self.owner(e) == plugin_name]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def has_plugin(self, registry: Any, plugin_name: str) -> bool:
+        """该插件是否占用了此槽位"""
+        if not plugin_name:
+            return False
+        try:
+            return any(self.owner(e) == plugin_name for _k, e in self.entries(registry))
+        except Exception:  # noqa: BLE001
+            return False
+
+
+# 槽位声明总表：{slot_id: SlotDecl}。新增扩展点 → 往里加一条即可。
+UI_SLOT_DECLS: Dict[str, SlotDecl] = {}
+
+
+def declare_slot(
+    slot_id: str,
+    entries: Callable[[Any], Iterable[Tuple[Any, Any]]],
+    *,
+    owner: Optional[Callable[[Any], str]] = None,
+    scopes: Iterable[str] = (),
+) -> None:
+    """声明一个 UI 扩展点槽位（幂等；重复声明以最后一条为准）
+
+    Args:
+        slot_id: 槽位标识
+        entries: 取值器，返回 ``(key, entry)`` 迭代
+        owner: 归属解析器，缺省取 entry.plugin_name
+        scopes: 命中该槽位时要刷新的视图域；留空表示暂未归类（回退全量刷新）
+    """
+    UI_SLOT_DECLS[slot_id] = SlotDecl(
+        slot_id=slot_id,
+        entries=entries,
+        owner=owner or _owner_of,
+        scopes=frozenset(scopes),
+    )
 
 
 @dataclass(frozen=True)
@@ -490,6 +609,25 @@ class UIPluginRegistry:
         self._main_widget: Optional[Any] = None  # 注入的主窗口引用（兼容旧代码，优先使用显式传参）
         self._card_widget_instances: Dict[str, Dict[str, Any]] = {}  # {window_id: {card_id: widget}} — per-window 隔离
         self._ui_command_names: set = set()  # 由 UI 插件注册的命令名集合
+        # ★ UI 命令账本 {cmd_name: (description, handler, owner_plugin)}
+        # 单一数据源：register_all_commands() 会清空 CommandManager 全部命令，
+        # 之后只靠 re_register_all_commands() 重放恢复。这里集中登记**所有**具备
+        # 「可打开界面」语义的 UI 扩展点（浮动卡 / 工作台页 / 工作区页），
+        # 避免「只有浮动卡被重放、其余槽位命令被清空后永久消失」。
+        self._ui_commands: Dict[str, tuple] = {}
+        # 账本中「确已写入 CommandManager」的命令名。区别于 _ui_commands：
+        # 浮动卡遇到外部同名命令时会主动让位（只登记不接管），这类名字不在本
+        # 集合中，卸载时也不得去删外部命令（保持「不误删他人同名命令」语义）。
+        self._ui_applied_names: set = set()
+        # 账本版本号：每次 UI 命令增删 +1。消费端（命令卡片等）缓存列表时
+        # 比对该版本号即可判定「是否需要重建」——避免「卡片缓存建立早于插件
+        # 加载完成」导致 UI 插件命令永久不出现（无需每次敲键都重扫磁盘）。
+        self._ui_commands_version: int = 0
+        # 浮动卡 card_id → 实际命令名（含命名空间前缀），卸载时按此反查，
+        # 修复「card_id 无 ':' 但注册时被加了 plugin: 前缀 → 卸载注销错名残留」
+        self._card_command_names: Dict[str, str] = {}
+        # 工作台页 page_id → 实际命令名
+        self._workbench_tab_command_names: Dict[str, str] = {}
         self._context_provider: Optional[Callable[[], Dict[str, Any]]] = None  # 向后兼容，单例上下文提供者
         # 多窗口隔离：每个窗口独立上下文提供者 (window_id → provider)
         self._context_providers: Dict[str, Callable[[], Dict[str, Any]]] = {}
@@ -508,6 +646,7 @@ class UIPluginRegistry:
         # P2-2：UI 目录 mtime 签名（静默写入兑底轮询用）
         self._ui_signatures: dict = {}
         self._signature_watch_started = False
+        # ── 热重载槽位轨迹（精准刷新溯源）──
         # ── Tab 模式浮动卡片按标签页隔离（per-tab 可见集合）──
         # 卡片 widget 单实例挂 TabManagerWindow 全局容器；CardManager 的
         # GLOBAL 可见记录是「当前活跃标签页可见集合」的投影。切换标签时按
@@ -519,12 +658,107 @@ class UIPluginRegistry:
         self._active_tab_scope: Optional[str] = None
         # 投影同步中标志：切换标签触发的 hide 不清除当前标签可见集合
         self._tab_sync_in_progress: bool = False
+        # 项目 / 工作目录变更订阅（UI 插件可选协议 on_project_changed）
+        self._subscribe_project_changed()
+        # 主题变更订阅（UI 插件可选协议 refresh_style）
+        self._subscribe_theme_changed()
 
     @classmethod
     def get_instance(cls) -> "UIPluginRegistry":
         if cls._instance is None:
             cls._instance = cls()
         return cls._instance
+
+    # ── 项目 / 工作目录联动（UI 插件可选协议 on_project_changed） ──
+
+    def _subscribe_project_changed(self) -> None:
+        """订阅项目 / 工作目录变更：向可见浮动卡派发（幂等）"""
+        if getattr(self, "_project_changed_subscribed", False):
+            return
+        try:
+            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+
+            self._project_changed_subscribed = True
+            UIEventBus.get_instance().subscribe(EV_PROJECT_CHANGED, self._on_project_changed_event)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 项目变更订阅失败: {e}")
+
+    def _on_project_changed_event(self, payload: dict) -> None:
+        """项目 / 工作目录变更：对可见且实现协议的浮动卡逐个派发
+
+        - 不可见卡片不派发：再次显示时 ``CardManager.show_card()`` → 卡片
+          ``show_card()`` 会重取 ctx（拉模型 provider），天然补刷
+        - Tab 模式浮动卡挂 GLOBAL_WINDOW_ID、代表当前活跃窗口，故不做
+          「卡片 window_id == payload window_id」的比较，只判活跃性
+        """
+        if not is_active_window(payload.get("window_id", "")):
+            return
+        project = payload.get("project", "")
+        workdir = payload.get("workdir", "")
+        window_id = payload.get("window_id", "")
+        for instances in list(self._card_widget_instances.values()):
+            for widget in list(instances.values()):
+                try:
+                    if not widget.isVisible():
+                        continue
+                except RuntimeError:
+                    continue  # C++ 对象已销毁
+                dispatch_project_changed(widget, project=project, workdir=workdir, window_id=window_id)
+
+    # ── 主题变更联动（UI 插件可选协议 refresh_style） ──
+
+    def _subscribe_theme_changed(self) -> None:
+        """订阅主题变更：向全部已建浮动卡实例派发 refresh_style（幂等）
+
+        与宿主 ``main_widget._apply_runtime_ui_settings`` 尾部的探测派发互补：
+        - 宿主路径只刷当前窗口**可见**的卡；本路径全量（含隐藏卡、其他窗口、
+          GLOBAL tab 卡）——隐藏卡在再次显示时不会自愈（样式是构造期固化），
+          必须在主题切换时一并刷掉。
+        - 派发方法名：refresh_style（统一约定）→ _apply_latest_theme 系（兼容旧）。
+        """
+        if getattr(self, "_theme_changed_subscribed", False):
+            return
+        try:
+            from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+
+            self._theme_changed_subscribed = True
+            UIEventBus.get_instance().subscribe(EV_THEME_CHANGED, self._on_theme_changed_event)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 主题变更订阅失败: {e}")
+
+    def _on_theme_changed_event(self, payload: dict) -> None:
+        """主题变更：对全部已建浮动卡实例派发样式刷新（鸭子类型，无实现则跳过）
+
+        两条互补路径：
+        1. ``refresh_style`` 系（约定）—— 卡片自己穷举重设各控件样式；
+        2. ``replay_theme_qss``（兜底）—— 重放控件上登记过的 QSS 工厂，覆盖
+           渲染期动态创建、未被 ``refresh_style`` 枚举到的控件（空态标签、
+           分页按钮等）。旧插件没登记则空转，无副作用。
+        """
+        from app.utils.theme_style import replay_theme_qss
+
+        for instances in list(self._card_widget_instances.values()):
+            for widget in list(instances.values()):
+                try:
+                    method = getattr(widget, "refresh_style", None)
+                    if not callable(method):
+                        # 兼容旧插件的三种私有命名
+                        for name in ("_apply_latest_theme", "_apply_theme", "_retheme"):
+                            method = getattr(widget, name, None)
+                            if callable(method):
+                                break
+                    if callable(method):
+                        method()
+                except RuntimeError:
+                    continue  # C++ 对象已销毁
+                except Exception as e:
+                    logger.warning(f"[UIPluginRegistry] 插件卡主题刷新失败: {e}")
+                try:
+                    replay_theme_qss(widget)
+                except RuntimeError:
+                    continue  # C++ 对象已销毁
+                except Exception as e:
+                    logger.warning(f"[UIPluginRegistry] 插件卡 QSS 重放失败: {e}")
 
     # ---- 内部注册表操作（Task 2 起填充）----
 
@@ -1021,6 +1255,8 @@ class UIPluginRegistry:
         self._sidebar_items[item_id] = info
         # 写入 region 存储（Phase E 单源化）
         self.register_slot_entry("sidebar", item_id, plugin_name, priority=priority, payload=info, metadata=metadata)
+        # 联动命令：注册即获得「等价于点击该项」的命令（有回调时）
+        self._register_command_for_sidebar_item(info)
 
     def get_sidebar_items(self) -> List[SidebarItemInfo]:
         """获取全部侧边栏插件项（group 排序：system 在前，custom 在后；同组按 priority 降序 → 注册序）
@@ -1059,6 +1295,8 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._titlebar_tabs[tab_id] = info
+        # 联动命令：注册即获得「等价于点击该 tab」的命令（有回调时）
+        self._register_command_for_titlebar_tab(info)
 
     def unregister_titlebar_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部常驻 tab（插件卸载时调用）"""
@@ -1080,7 +1318,12 @@ class UIPluginRegistry:
         priority: int = 0,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """注册右侧工作台页签（同 page_id 高优先级覆盖低优先级）"""
+        """注册右侧工作台页签（同 page_id 高优先级覆盖低优先级）
+
+        Side Effects:
+            联动注册「打开该页」命令 ``/{page_id}``（同名外部命令已存在时让位），
+            用户可在命令面板直接跳到该插件页。
+        """
         if metadata is None:
             metadata = {}
         info = WorkbenchTabInfo(
@@ -1095,11 +1338,16 @@ class UIPluginRegistry:
         if existing is not None and existing.priority > priority:
             return
         self._workbench_tabs[page_id] = info
+        # 联动命令：与浮动卡一致，页面注册即获得直达命令
+        self._register_command_for_workbench_tab(info)
 
     def unregister_workbench_tabs(self, plugin_name: str) -> None:
         """注销某插件的全部工作台页签（插件卸载时调用）"""
         for page_id in [pid for pid, v in self._workbench_tabs.items() if v.plugin_name == plugin_name]:
             del self._workbench_tabs[page_id]
+            cmd_name = self._workbench_tab_command_names.pop(page_id, None)
+            if cmd_name is not None:
+                self.unregister_ui_command(cmd_name)
 
     def get_workbench_tabs(self) -> List[WorkbenchTabInfo]:
         """获取全部工作台页签（按注册序返回）"""
@@ -1240,6 +1488,8 @@ class UIPluginRegistry:
         self.register_slot_entry(
             "toolbar:input", button_id, plugin_name, priority=priority, payload=info, metadata=metadata
         )
+        # 联动命令：注册即获得「等价于点击该按钮」的命令（有回调时）
+        self._register_command_for_input_button(info)
 
     def get_input_buttons(self) -> List[InputButtonInfo]:
         """获取全部输入区插件按钮（priority 降序 → 注册序）
@@ -1441,11 +1691,118 @@ class UIPluginRegistry:
         """按注册序返回所有 module_id（供 compose 排序验证）"""
         return list(self._ui_modules.keys())
 
+    # ── UI 命令账本（单一登记入口 + 全量重放） ──
+
+    def register_ui_command(
+        self,
+        name: str,
+        description: str,
+        handler: Callable[[str], None],
+        owner: str = "",
+        *,
+        override_external: bool = True,
+    ) -> None:
+        """登记一条 UI 命令（唯一登记入口）
+
+        所有「点击后打开某个界面」的 UI 扩展点（浮动卡 / 工作台页 / 工作区页）
+        都经此登记，写入 ``_ui_commands`` 账本并同步 CommandManager。
+
+        Why 需要账本：``builtin_commands.register_all_commands()`` 会清空
+        CommandManager 的**全部**命令，随后只调 ``re_register_all_commands()``
+        恢复 UI 命令。若某类扩展点只往 CommandManager 写、不进账本，清空后
+        便永久丢失（症状：热重载/重启后插件命令不再出现在命令面板）。
+        账本即重放数据源，保证清空后能原样重建。
+
+        Args:
+            name: 命令名（不含前导 "/"）
+            description: 命令描述（命令面板展示）
+            handler: (args: str) -> None，主线程执行
+            owner: 归属插件名（卸载时按 owner 批量注销）
+            override_external: False 时若已存在同名**外部**命令（非本账本所有）
+                则让位不抢占（浮动卡沿用此语义，避免插件覆盖内置 /history 等
+                系统命令）。该标记随账本持久化，重放 re_register_all_commands
+                时按原语义执行。
+        """
+        # ★ 同插件同 id 重复登记 → 保留**首个**（先注册的界面优先）。
+        #   场景：agent_trace / assistant_hub 等插件把 floating_card 与
+        #   titlebar_tab 共用同一 id，两处都会尝试登记同名命令；若后注册者
+        #   覆盖，命令语义会从「打开浮动卡（带 per-window context）」漂移成
+        #   「点标题栏 tab」。热重载时 unload_plugin 已清空账本，本条不阻碍重载。
+        existing = self._ui_commands.get(name)
+        if existing is not None and owner and existing[2] == owner:
+            return
+        self._ui_commands[name] = (description or "", handler, owner, override_external)
+        self._ui_commands_version += 1
+        self._apply_ui_command(name)
+
+    def get_ui_commands_version(self) -> int:
+        """账本版本号（每次 UI 命令增删 +1；供消费端缓存失效判定）"""
+        return self._ui_commands_version
+
+    def _apply_ui_command(self, name: str) -> None:
+        """把账本中的一条命令落到 CommandManager + FunctionCommandHandlers（幂等）
+
+        override_external=False 且已存在同名外部命令（非本账本所有）时主动跳过，
+        保持「不抢占系统命令」语义；此时该名不进 ``_ui_applied_names``，
+        卸载也不会误删外部命令。
+        """
+        spec = self._ui_commands.get(name)
+        if spec is None:
+            return
+        description, handler = spec[0], spec[1]
+        override_external = spec[3] if len(spec) > 3 else True
+        try:
+            from app.core.builtin_commands import FunctionCommandHandlers
+            from app.core.command_manager import CommandManager, CommandType
+        except Exception:
+            return
+        cmd_mgr = CommandManager.get_instance()
+        if cmd_mgr.has_command(name) and name not in self._ui_applied_names and not override_external:
+            return
+        # handler 始终刷新：命令可能被 register_all_commands 清空后由本账本重建，
+        # 且热重载后闭包指向新实例
+        FunctionCommandHandlers.register(name, handler)
+        if not cmd_mgr.has_command(name):
+            cmd_mgr.register(
+                name=name,
+                command_type=CommandType.FUNCTION,
+                description=description,
+                argument_hint="",
+            )
+        self._ui_applied_names.add(name)
+        self._ui_command_names.add(name)
+
+    def unregister_ui_command(self, name: str) -> None:
+        """注销单条 UI 命令（账本 + CommandManager + 处理器三处同步）
+
+        仅删除「本账本确已接管」的命令；外部同名命令（曾被让位）不动。
+        """
+        self._ui_commands.pop(name, None)
+        if name not in self._ui_applied_names:
+            return
+        self._ui_commands_version += 1
+        self._ui_applied_names.discard(name)
+        self._ui_command_names.discard(name)
+        try:
+            from app.core.builtin_commands import FunctionCommandHandlers
+            from app.core.command_manager import CommandManager
+
+            CommandManager.get_instance().unregister(name)
+            FunctionCommandHandlers._handlers.pop(name, None)
+        except Exception:
+            pass
+
+    def unregister_ui_commands(self, owner: str) -> None:
+        """按归属插件批量注销其全部 UI 命令（含浮动卡 / 工作台页 / 工作区页）"""
+        for name in [n for n, spec in self._ui_commands.items() if spec[2] == owner]:
+            self.unregister_ui_command(name)
+
+    def get_ui_commands(self) -> Dict[str, tuple]:
+        """返回账本快照（诊断/测试用）"""
+        return dict(self._ui_commands)
+
     def _register_command_for_card(self, card_info: FloatingCardInfo) -> None:
         """为浮动卡片自动注册对应 FUNCTION 命令"""
-        from app.core.command_manager import CommandManager, CommandType
-        from app.core.builtin_commands import FunctionCommandHandlers
-
         # 命名空间规则：
         # - card_id 已含 ":"（如 "plug-a:mycard"）→ 直接使用
         # - card_id 是简单名且 plugin_name == "system" → 使用短名
@@ -1458,23 +1815,176 @@ class UIPluginRegistry:
         else:
             cmd_name = f"{card_info.plugin_name}:{card_info.card_id}"
 
-        cmd_mgr = CommandManager.get_instance()
-        if cmd_mgr.has_command(cmd_name):
-            return  # 命令已存在则不重复注册
-
-        cmd_mgr.register(
-            name=cmd_name,
-            command_type=CommandType.FUNCTION,
-            description=card_info.title or f"打开 {card_info.card_id}",
-            argument_hint="",
-        )
-        self._ui_command_names.add(cmd_name)
-
-        # 注册处理器：延迟到执行时获取 main_widget
         def _handler(args: str, cid=card_info.card_id):
             self._show_floating_card(cid)
 
-        FunctionCommandHandlers.register(cmd_name, _handler)
+        self._card_command_names[card_info.card_id] = cmd_name
+        self.register_ui_command(
+            cmd_name,
+            card_info.title or f"打开 {card_info.card_id}",
+            _handler,
+            owner=card_info.plugin_name,
+            # 保持既有语义：同名系统命令优先，浮动卡不抢占
+            override_external=False,
+        )
+
+    # ── 工作台页命令（register_workbench_tab 联动） ──
+
+    def _ui_command_name(self, base_id: str, plugin_name: str) -> str:
+        """UI 命令名：优先短名（base_id）
+
+        已在账本中被**其它插件**占用、或与系统/内置命令同名时，加
+        ``<plugin>:`` 前缀（避免让位后命令消失，也避免抢占系统命令）。
+        """
+        if ":" in base_id:
+            return base_id
+        existing = self._ui_commands.get(base_id)
+        if existing is not None and existing[2] not in ("", plugin_name):
+            return f"{plugin_name}:{base_id}"
+        if base_id not in self._ui_applied_names:
+            try:
+                from app.core.command_manager import CommandManager
+
+                if CommandManager.get_instance().has_command(base_id):
+                    return f"{plugin_name}:{base_id}"
+            except Exception:
+                pass
+        return base_id
+
+    def _active_host_window(self):
+        """当前活跃对话窗口（UI 命令派发上下文用）；不可用时 None"""
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            return tm.get_current_window() if tm is not None else None
+        except Exception:
+            return None
+
+    def _register_command_for_workbench_tab(self, info: WorkbenchTabInfo) -> None:
+        """为工作台页注册「打开该页」命令（对齐浮动卡语义）"""
+        cmd_name = self._ui_command_name(info.page_id, info.plugin_name)
+
+        def _handler(args: str, pid=info.page_id):
+            self.open_workbench_tab(pid)
+
+        self._workbench_tab_command_names[info.page_id] = cmd_name
+        self.register_ui_command(
+            cmd_name,
+            f"打开工作台页 · {info.label or info.page_id}",
+            _handler,
+            owner=info.plugin_name,
+        )
+
+    # ── 输入区按钮 / 侧边栏项 / 标题栏 tab 联动命令 ──
+
+    def _register_command_for_input_button(self, info: "InputButtonInfo") -> None:
+        """为输入区插件按钮注册命令（等价于点击该按钮）"""
+        if getattr(info, "on_click", None) is None:
+            return
+        cmd_name = self._ui_command_name(info.button_id, info.plugin_name)
+
+        def _handler(args: str, bid=info.button_id):
+            self.invoke_input_button(bid)
+
+        self.register_ui_command(
+            cmd_name,
+            f"输入区按钮 · {info.tooltip or info.button_id}",
+            _handler,
+            owner=info.plugin_name,
+            override_external=False,
+        )
+
+    def invoke_input_button(self, button_id: str) -> None:
+        """命令处理器：等价点击输入区插件按钮（主线程，派发 on_click(context)）"""
+        info = self._input_buttons.get(button_id)
+        win = self._active_host_window()
+        if info is None or getattr(info, "on_click", None) is None or win is None:
+            return
+        try:
+            info.on_click(
+                {
+                    "button_id": info.button_id,
+                    "plugin_name": info.plugin_name,
+                    "window_id": getattr(win, "_window_id", None),
+                    "main_widget": win,
+                }
+            )
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 输入按钮 {button_id} 命令派发失败: {e}")
+
+    def _register_command_for_sidebar_item(self, info: "SidebarItemInfo") -> None:
+        """为侧边栏插件项注册命令（等价于点击该项）"""
+        if getattr(info, "on_click", None) is None:
+            return
+        cmd_name = self._ui_command_name(info.item_id, info.plugin_name)
+
+        def _handler(args: str, iid=info.item_id):
+            self.invoke_sidebar_item(iid)
+
+        self.register_ui_command(
+            cmd_name,
+            f"侧边栏 · {info.label or info.item_id}",
+            _handler,
+            owner=info.plugin_name,
+            override_external=False,
+        )
+
+    def invoke_sidebar_item(self, item_id: str) -> None:
+        """命令处理器：等价点击侧边栏插件项（主线程，派发 on_click(context)）"""
+        info = self._sidebar_items.get(item_id)
+        win = self._active_host_window()
+        if info is None or getattr(info, "on_click", None) is None or win is None:
+            return
+        try:
+            info.on_click(
+                {
+                    "item_id": info.item_id,
+                    "plugin_name": info.plugin_name,
+                    "window_id": getattr(win, "_window_id", None),
+                    "main_widget": win,
+                }
+            )
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 侧边栏项 {item_id} 命令派发失败: {e}")
+
+    def _register_command_for_titlebar_tab(self, info: "TitlebarTabInfo") -> None:
+        """为标题栏常驻 tab 注册命令（等价于点击该 tab）"""
+        if getattr(info, "on_click", None) is None:
+            return
+        cmd_name = self._ui_command_name(info.tab_id, info.plugin_name)
+
+        def _handler(args: str, tid=info.tab_id):
+            self.invoke_titlebar_tab(tid)
+
+        self.register_ui_command(
+            cmd_name,
+            f"标题栏 · {info.label or info.tab_id}",
+            _handler,
+            owner=info.plugin_name,
+            override_external=False,
+        )
+
+    def invoke_titlebar_tab(self, tab_id: str) -> None:
+        """命令处理器：等价点击标题栏常驻 tab（主线程，on_click() 无参）"""
+        info = self._titlebar_tabs.get(tab_id)
+        if info is None or getattr(info, "on_click", None) is None:
+            return
+        try:
+            info.on_click()
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] 标题栏 tab {tab_id} 命令派发失败: {e}")
+
+    def open_workbench_tab(self, page_id: str) -> None:
+        """命令处理器：展开右侧工作台并定位到指定插件页（主线程）"""
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                tm.open_workbench_tab(page_id)
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] open_workbench_tab({page_id}) 失败: {e}")
 
     def _resolve_global_host(self):
         """获取 Tab 管理器全局卡片宿主（Tab 模式下浮动卡片统一挂这里）
@@ -2219,27 +2729,26 @@ class UIPluginRegistry:
         用于 unload_plugin 的幂等判定：无 ui/ 组件但注册过 config_schema
         自动设置卡的插件（如 gateway 平台插件）不在 _loaded_plugins，
         但其 settings card 须能被卸载清理，故不能仅凭 _loaded_plugins 拦截。
+
+        ★ 遍历 UI_SLOT_DECLS 声明表，新增扩展点无需改动此处。
         """
-        return (
-            any(v.plugin_name == plugin_name for v in self._content_renderers.values())
-            or any(f.plugin_name == plugin_name for f in self._message_factories)
-            or any(v.plugin_name == plugin_name for v in self._tag_renderers.values())
-            or any(v.plugin_name == plugin_name for v in self._fence_renderers.values())
-            or any(v.plugin_name == plugin_name for v in self._welcome_tabs.values())
-            or any(v.plugin_name == plugin_name for v in self._welcome_actions.values())
-            or any(v.plugin_name == plugin_name for v in self._mention_providers.values())
-            or any(v.plugin_name == plugin_name for v in self._floating_cards.values())
-            or any(v.plugin_name == plugin_name for v in self._sidebar_items.values())
-            or any(v.plugin_name == plugin_name for v in self._input_buttons.values())
-            or any(v.plugin_name == plugin_name for v in self._context_actions.values())
-            or any(v.plugin_name == plugin_name for v in self._settings_cards.values())
-            or any(v.plugin_name == plugin_name for v in self._workspace_pages.values())
-            or any(v.plugin_name == plugin_name for v in self._workbench_tabs.values())
-            or any(
-                e.plugin_name == plugin_name for region in self._regions.values() for e in region["entries"].values()
-            )
-            or any(name == plugin_name for impls in self._ui_modules.values() for name, _p, _f in impls)
-        )
+        return any(decl.has_plugin(self, plugin_name) for decl in UI_SLOT_DECLS.values())
+
+    def get_plugin_ui_slots(self, plugin_name: str) -> frozenset:
+        """该插件**当前**占用的 UI 扩展点槽位集合（纯查询，无副作用）
+
+        ⚠️ 只反映「此刻」的注册表状态，**不可**用于推导热重载该清理什么：
+        插件卸载后其条目已从注册表消失，这份快照查不到它，而旧实例仍挂在
+        界面上。清理必须走按归属的就地记账（见 WorkbenchPanel._page_owner）。
+
+        ★ 遍历 UI_SLOT_DECLS 声明表，新增扩展点无需改动此处。
+
+        Returns:
+            frozenset[slot_id]；插件无任何注册时为空集。
+        """
+        if not plugin_name:
+            return frozenset()
+        return frozenset(decl.slot_id for decl in UI_SLOT_DECLS.values() if decl.has_plugin(self, plugin_name))
 
     @_serialized
     def unload_plugin(self, plugin_name: str) -> bool:
@@ -2267,6 +2776,7 @@ class UIPluginRegistry:
             and not self._has_any_registration(plugin_name)
             and _mod_name not in _sys_probe.modules
         ):
+            # 确无任何注册：返回 False（幂等）。
             return False
         # 0) 调用插件可选 unload_ui 回调（先于注册表清理，便于释放外部资源）
         try:
@@ -2335,8 +2845,10 @@ class UIPluginRegistry:
         self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
         # 清理工作区页面槽（Phase G）
         self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
-        # 清理右侧工作台页签槽位
+        # 清理右侧工作台页签槽位（含其联动命令）
         self.unregister_workbench_tabs(plugin_name)
+        # 兜底：注销该插件登记进账本的其余 UI 命令（工作区页等）
+        self.unregister_ui_commands(plugin_name)
         # 清理标题栏常驻 tab 槽位
         self.unregister_titlebar_tabs(plugin_name)
         # 清理标题栏内嵌 widget 槽位
@@ -2460,6 +2972,18 @@ class UIPluginRegistry:
         rescheduled = 0
         for mw in list(self._window_main_widgets.values()):
             try:
+                # 🛡️ 窗口 C++ 对象已析构（窗口关闭与插件热重载竞态）时，其缓存的
+                # 欢迎卡片必然已随父容器被 Qt 递归删除，而 Python 引用仍悬垂。
+                # sip.isdeleted() 对「ownership 在 C++ 侧」的 widget 返回 False，
+                # 只有显式检查宿主窗口本身才能拦下（否则 hide() → access violation）。
+                try:
+                    from PyQt5 import sip
+
+                    if sip.isdeleted(mw):
+                        skipped_no_method += 1
+                        continue
+                except Exception:
+                    pass
                 if not hasattr(mw, "_invalidate_welcome_card"):
                     skipped_no_method += 1
                     logger.debug(
@@ -2576,16 +3100,9 @@ class UIPluginRegistry:
             pass
 
     def _unregister_command_for_card(self, card_id: str) -> None:
-        """卸载浮动卡片对应的命令"""
-        from app.core.command_manager import CommandManager
-        from app.core.builtin_commands import FunctionCommandHandlers
-
-        cmd_mgr = CommandManager.get_instance()
-        # card_id 可能是 "plug-a:mycard" 或 "mycard"
-        cmd_name = card_id
-        cmd_mgr.unregister(cmd_name)
-        FunctionCommandHandlers._handlers.pop(cmd_name, None)
-        self._ui_command_names.discard(cmd_name)
+        """卸载浮动卡片对应的命令（按注册时记录的实际命令名反查，避免前缀错配）"""
+        cmd_name = self._card_command_names.pop(card_id, card_id)
+        self.unregister_ui_command(cmd_name)
 
     def load_all_enabled_plugins(self, plugin_dirs) -> int:
         """批量加载所有已启用的 UI 插件
@@ -2742,13 +3259,21 @@ class UIPluginRegistry:
         return _provider
 
     def re_register_all_commands(self) -> None:
-        """重新注册所有浮动卡片命令到 CommandManager
+        """重放账本中的全部 UI 命令到 CommandManager
 
-        用于 register_all_commands / reload_all_commands 之后
-        恢复 UI 插件命令（这些命令会被 reload 清空）。
+        用于 register_all_commands / reload_all_commands 之后恢复 UI 插件命令
+        （这些命令会被 reload 清空）。★ 全量重放：覆盖浮动卡 + 工作台页 +
+        工作区页 + 侧边栏项 + 输入区按钮 + 标题栏 tab 等一切登记进账本的 UI 命令。
         """
-        for card_info in self._floating_cards.values():
-            self._register_command_for_card(card_info)
+        for name in list(self._ui_commands):
+            self._apply_ui_command(name)
+        # 诊断留档（支持排查「命令没出现在命令卡片 / 快捷键管理」）：
+        # 命中此日志说明命令确已进命令表，问题在消费端；看不到此日志说明账本为空。
+        if self._ui_commands:
+            logger.info(
+                f"[UIPluginRegistry] UI 命令已重放 {len(self._ui_commands)} 条 → CommandManager: "
+                f"{sorted(self._ui_commands)}"
+            )
 
 
     def unregister_window(self, window_id: str) -> None:
@@ -2808,3 +3333,127 @@ class UIPluginRegistry:
         # 重置单例本身（建议）——让下一次 get_instance() 重新创建，
         # 避免测试间残留 _instance 上的实例属性
         UIPluginRegistry._instance = None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UI 扩展点槽位声明表
+# ═══════════════════════════════════════════════════════════════════════════
+# ★★ 新增一个 UI 扩展点时，**只需要在这里加一条 declare_slot** ★★
+#
+#   declare_slot(
+#       "<槽位名>",                       # 一般与 register_* 方法名对应
+#       lambda r: r._容器.items(),        # 枚举 (key, entry)
+#       scopes=(SCOPE_XXX, ...),          # 命中时该刷哪些界面位置
+#   )
+#
+# 之后下面这些能力全部自动获得，无需任何额外改动：
+#   - _has_any_registration()  卸载幂等判据
+#   - get_plugin_ui_slots()    槽位占用面查询（诊断/日志）
+#
+# scopes 仅作标注用途（说明该槽位影响哪些界面位置），**不参与热重载门控**——
+# 门控一律无状态，见 WorkbenchPanel.sync_plugin_pages(force_plugin=...)。
+#
+# 取值器写成 lambda 延迟求值（模块导入时 UIPluginRegistry 尚未实例化），
+# 因此本表必须位于类定义之后调用、但可安全引用其私有属性名。
+
+
+def _declare_builtin_slots() -> None:
+    """声明全部内置 UI 扩展点槽位（模块导入时执行一次，幂等）"""
+
+    # ── 消息区：已渲染消息的 custom / fence / tag 内容块 ──
+    declare_slot(
+        "content_renderer",
+        lambda r: r._content_renderers.items(),
+        scopes=(SCOPE_MESSAGES,),
+    )
+    declare_slot(
+        "fence_renderer",
+        lambda r: r._fence_renderers.items(),
+        scopes=(SCOPE_MESSAGES,),
+    )
+    declare_slot(
+        "tag_renderer",
+        lambda r: r._tag_renderers.items(),
+        scopes=(SCOPE_MESSAGES,),
+    )
+    declare_slot(
+        "message_factory",
+        lambda r: enumerate(r._message_factories),
+        scopes=(SCOPE_MESSAGES,),
+    )
+
+    # ── 输入区胶囊上的插件按钮 ──
+    declare_slot(
+        "input_button",
+        lambda r: r._input_buttons.items(),
+        scopes=(SCOPE_INPUT_AREA, SCOPE_COMMAND),
+    )
+
+    # ── 欢迎卡片（QWebEngineView，重建代价最高，务必精准）──
+    declare_slot(
+        "welcome_tab",
+        lambda r: r._welcome_tabs.items(),
+        scopes=(SCOPE_WELCOME,),
+    )
+    declare_slot(
+        "welcome_action",
+        lambda r: r._welcome_actions.items(),
+        scopes=(SCOPE_WELCOME,),
+    )
+
+    # ── 右侧工作台：注册页 + right 容器卡片（动态 tab）──
+    declare_slot(
+        "workbench_tab",
+        lambda r: r._workbench_tabs.items(),
+        scopes=(SCOPE_WORKBENCH, SCOPE_COMMAND),
+    )
+    declare_slot(
+        "workbench_card",
+        # right 容器的浮动卡片会被挂到工作台动态 tab 上，故归同一视图域
+        lambda r: ((k, v) for k, v in r._floating_cards.items() if getattr(v, "container", "") == "right"),
+        scopes=(SCOPE_WORKBENCH, SCOPE_COMMAND),
+    )
+
+    # ── 其余方位的浮动卡片（top/bottom/left/full）──
+    declare_slot(
+        "floating_card",
+        lambda r: ((k, v) for k, v in r._floating_cards.items() if getattr(v, "container", "") != "right"),
+        scopes=(SCOPE_SYSTEM_CARDS, SCOPE_COMMAND),
+    )
+
+    # ── 命令可触达的其它槽位 ──
+    declare_slot(
+        "workspace_page",
+        lambda r: r._workspace_pages.items(),
+        scopes=(SCOPE_COMMAND,),
+    )
+    declare_slot(
+        "titlebar_tab",
+        lambda r: r._titlebar_tabs.items(),
+        scopes=(SCOPE_COMMAND, SCOPE_HOTKEY),
+    )
+    declare_slot(
+        "sidebar_item",
+        lambda r: r._sidebar_items.items(),
+        scopes=(SCOPE_COMMAND,),
+    )
+
+    # ── 其余扩展点：改动后不牵动上述视图，仅登记占位（未归类 → 回退全量）──
+    # 这些槽位目前没有对应的「热重载后必须重建」视图；若将来出现，补上 scopes 即可。
+    declare_slot("titlebar_widget", lambda r: r._titlebar_widgets.items())
+    declare_slot("context_menu", lambda r: r._context_actions.items())
+    declare_slot("settings_card", lambda r: r._settings_cards.items())
+    declare_slot("mention_provider", lambda r: r._mention_providers.items())
+    declare_slot("service", lambda r: r._services.items(), owner=lambda e: e[0])
+    declare_slot(
+        "ui_module",
+        lambda r: ((f"{mid}:{i}", impl) for mid, impls in r._ui_modules.items() for i, impl in enumerate(impls)),
+        owner=lambda e: e[0],
+    )
+    declare_slot(
+        "region",
+        lambda r: ((f"{rid}:{eid}", e) for rid, reg in r._regions.items() for eid, e in reg.get("entries", {}).items()),
+    )
+
+
+_declare_builtin_slots()

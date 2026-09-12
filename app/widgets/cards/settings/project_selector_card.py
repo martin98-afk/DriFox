@@ -15,11 +15,12 @@ from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QMenu,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, ScrollArea, TransparentToolButton
+from qfluentwidgets import ScrollArea, TransparentToolButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -207,6 +208,7 @@ class ProjectItem(QWidget):
     """单个项目项 - 卡片内项目选择列表项"""
 
     clicked = pyqtSignal(str)
+    allClicked = pyqtSignal()  # 「全部项目」行点击（无项目名，仅表示不过滤）
     archiveClicked = pyqtSignal(str)
     exportClicked = pyqtSignal(str)  # 导出项目压缩包
     openFolderClicked = pyqtSignal(str, str)  # project_name, root_dir
@@ -215,10 +217,11 @@ class ProjectItem(QWidget):
     _SINGLE_LINE_HEIGHT = 30
     _DOUBLE_LINE_HEIGHT = 44
 
-    def __init__(self, name: str, is_current: bool = False, parent=None):
+    def __init__(self, name: str, is_current: bool = False, parent=None, is_all_entry: bool = False):
         super().__init__(parent)
         self._name = name
         self._is_current = is_current
+        self._is_all_entry = is_all_entry  # 「全部项目」行：无元数据/无导出归档按钮/无 root dir
         self._session_count = 0
         self._worktree_count = 0
         self._project_color = get_project_color(name)
@@ -272,45 +275,7 @@ class ProjectItem(QWidget):
         self._meta_label.setAlignment(Qt.AlignVCenter)
         layout.addWidget(self._meta_label)
 
-        # 打开根目录按钮（默认隐藏，有根目录且 hover 时显示）
-        self._open_folder_btn = TransparentToolButton(get_icon("根目录"), self)
-        self._open_folder_btn.setFixedSize(24, 24)
-        self._open_folder_btn.setStyleSheet(f"""
-            QToolButton {{
-                background: transparent;
-                border: none;
-                font-size: {scale_font_size(12)}px;
-            }}
-            QToolButton:hover {{
-                background: rgba(255, 255, 255, 50);
-                border-radius: 4px;
-            }}
-        """)
-        self._open_folder_btn.clicked.connect(self._emit_open_folder)
-        self._open_folder_btn.setToolTip("打开项目根目录")
-        self._open_folder_btn.hide()
-        layout.addWidget(self._open_folder_btn)
-
-        # 导出按钮（默认隐藏）
-        self._export_btn = TransparentToolButton(FluentIcon.SHARE, self)
-        self._export_btn.setFixedSize(24, 24)
-        self._export_btn.setStyleSheet(f"""
-            QToolButton {{
-                background: transparent;
-                border: none;
-                font-size: {scale_font_size(12)}px;
-            }}
-            QToolButton:hover {{
-                background: rgba(255, 255, 255, 50);
-                border-radius: 4px;
-            }}
-        """)
-        self._export_btn.clicked.connect(self._emit_export)
-        self._export_btn.setToolTip("导出项目压缩包（含会话+Git文件）")
-        self._export_btn.hide()
-        layout.addWidget(self._export_btn)
-
-        # 归档按钮（默认隐藏）
+        # 归档按钮（默认隐藏，hover 时显示）
         self._archive_btn = TransparentToolButton(get_icon("归档"), self)
         self._archive_btn.setFixedSize(24, 24)
         self._archive_btn.setStyleSheet(f"""
@@ -349,19 +314,56 @@ class ProjectItem(QWidget):
         if self._root_dir:
             self.openFolderClicked.emit(self._name, self._root_dir)
 
+    def contextMenuEvent(self, event):
+        """右键菜单：打开项目根目录 / 导出项目压缩包（原 hover 按钮迁此，精简 hover 密度）"""
+        if self._is_all_entry:
+            return  # 聚合行（「全部项目」）无单项目操作
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: {Colors.CARD_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            QMenu::item:selected {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        act_open = menu.addAction("打开项目根目录") if self._root_dir else None
+        act_export = menu.addAction("导出项目压缩包")
+        chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
+        if chosen is act_open:
+            self._emit_open_folder()
+        elif chosen is act_export:
+            self._emit_export()
+
     def mousePressEvent(self, event):
-        self.clicked.emit(self._name)
+        if event.button() != Qt.LeftButton:
+            # 右键留给 contextMenuEvent 弹菜单，不触发选中
+            super().mousePressEvent(event)
+            return
+        if self._is_all_entry:
+            self.allClicked.emit()
+        else:
+            self.clicked.emit(self._name)
         super().mousePressEvent(event)
 
     def set_meta(self, session_count: int, worktree_count: int):
-        """设置项目元数据（会话数、工作目录数）"""
+        """设置项目元数据（仅会话数；工作目录数已隐藏以精简显示密度）"""
         self._session_count = session_count
         self._worktree_count = worktree_count
         parts = []
         if session_count > 0:
             parts.append(f"{session_count}会话")
-        if worktree_count > 0:
-            parts.append(f"{worktree_count}工作目录")
         Colors.refresh()
         self._meta_label.setText(" · ".join(parts) if parts else "")
         self._meta_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
@@ -381,6 +383,16 @@ class ProjectItem(QWidget):
         self._root_dir_label.show()
         self.setFixedHeight(self._DOUBLE_LINE_HEIGHT)
 
+    def refresh_style(self) -> None:
+        """主题/字体变更后重刷动态样式（与 _ProjectSelectorHeader.refresh_style 同链路调用）"""
+        Colors.refresh()
+        self._apply_name_style()
+        style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        if self._root_dir:
+            style_if_changed(
+                self._root_dir_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+            )
+
     def enterEvent(self, event):
         # hover 时：整行加半透明背景 + 更亮的项目颜色 + 元数据提亮
         Colors.refresh()
@@ -396,10 +408,9 @@ class ProjectItem(QWidget):
             f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
         )
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};")
-        self._export_btn.show()
-        self._archive_btn.show()
-        if self._root_dir:
-            self._open_folder_btn.show()
+        # 聚合行（「全部项目」）不提供单项目操作：无归档按钮
+        if not self._is_all_entry:
+            self._archive_btn.show()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -407,9 +418,7 @@ class ProjectItem(QWidget):
         self._apply_name_style()
         Colors.refresh()
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
-        self._export_btn.hide()
         self._archive_btn.hide()
-        self._open_folder_btn.hide()
         super().leaveEvent(event)
 
 
@@ -424,6 +433,7 @@ class ProjectSelectorCardContent(QWidget):
     projectFileDropped = pyqtSignal(str)  # 拖拽 .drifox_project 文件路径
     openFolderRequested = pyqtSignal(str, str)  # project_name, root_dir
     folderDropped = pyqtSignal(str)  # 拖拽文件夹路径
+    allProjectsSelected = pyqtSignal()  # 「全部项目」首行点击（聚合视图，无对应项目实体）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -433,6 +443,7 @@ class ProjectSelectorCardContent(QWidget):
         self._root_dir_map: Dict[str, str] = {}
         self._project_items: list = []  # 存储 ProjectItem 实例，用于过滤
         self._filter_text: str = ""
+        self._all_entry_label: str = ""  # 非空时列表首行插入该聚合行（历史插件项目选择面板用）
         self._setup_ui()
         # 启用拖拽
         self.setAcceptDrops(True)
@@ -549,6 +560,7 @@ class ProjectSelectorCardContent(QWidget):
         current_project: str,
         meta_map: Dict[str, Dict[str, int]] = None,
         root_dir_map: Dict[str, str] = None,
+        all_entry_label: str = "",
     ):
         """设置项目列表数据
 
@@ -557,11 +569,13 @@ class ProjectSelectorCardContent(QWidget):
             current_project: 当前项目名
             meta_map: {project: {"sessions": int, "worktrees": int}} 可选元数据
             root_dir_map: {project: root_dir_path} 可选根目录映射
+            all_entry_label: 非空时在列表首行插入该聚合行（点击发 allProjectsSelected）
         """
         self._projects = list(projects)
         self._current_project = current_project
         self._meta_map = meta_map or {}
         self._root_dir_map = root_dir_map or {}
+        self._all_entry_label = all_entry_label
         self._refresh_project_list()
         # 设置完后重新应用当前过滤
         if self._filter_text:
@@ -586,6 +600,13 @@ class ProjectSelectorCardContent(QWidget):
             if child.widget():
                 child.widget().deleteLater()
         self._project_items.clear()
+
+        # 聚合首行（「全部项目」）：无项目实体、无元数据、无导出/归档操作
+        if self._all_entry_label:
+            all_item = ProjectItem(self._all_entry_label, False, self, is_all_entry=True)
+            all_item.allClicked.connect(self.allProjectsSelected.emit)
+            self._content_layout.addWidget(all_item)
+            self._project_items.append(all_item)
 
         # 添加项目
         for proj_name in self._projects:

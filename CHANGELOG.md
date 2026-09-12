@@ -1,6 +1,79 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+## [v0.5.11] - 2026-09-12
+
+自上一版本以来的变更 | 提交数：73 · 文件变更：131 · +9813/-3872 | 贡献者：dingma, drifox-bot
+
+### ✨ 新功能 (New Features)
+
+- **繁忙时 Enter 键行为（插话发送 / 排队发送）** (`app/main_widget.py`, `app/utils/config.py`, `app/widgets/bottom_input_area.py`, `app/widgets/cards/floating/queue_message_card.py`, `app/widgets/modules/input_card_module.py`, `app/core/workers/chat_worker.py`, `app/core/backend.py`, `app/core/conversation/executor.py`, `app/core/conversation/adapters/ui.py`, `app/core/engines/ui/engine.py`, `app/widgets/cards/settings/llm_settings_card.py`): 智能体运行时按 Enter 发消息不再强行停止 worker。通用设置新增「繁忙时 Enter 键行为」下拉（`Ctrl+Enter` 恒为另一行为）：**插话发送**（默认）把消息经 `backend._hook_message_queue` 注入当前 worker 对话流（TeamMail 同通道，worker 每轮 API 调用前消费），LLM 在工具迭代间隙即可看到并回复；worker 消费到插话时经新信号 `queued_user_injected` 通知 UI 结束旧回复卡并开新回复卡承接后续流式（跨线程 queued 保序保证先建卡后收 chunk），插入 API 前剥离 `_interject*` 传输键，落库为干净 user 消息；**排队发送**把消息存入对话内排队卡片（可积累多条，每条 15px 加粗文本 + 插入/编辑/删除三图标按钮，支持行内编辑），worker 自然结束后自动逐条续发（复用 worker 语义无缝开新一轮），手动停止不续发、未消费插话回填输入框不丢失，切会话清空队列（内存态不持久化）；排队消息不提前显示用户气泡，实际发送时才创建。含 `resolve_busy_behavior` 互反判定与排队摘要纯函数 8 条测试。
+
+- **侧边栏智能折叠/展开** (`app/widgets/tab_panel.py`, `app/widgets/tab_manager_window.py`, `app/utils/config.py`, `tests/widgets/test_sidebar_smart_collapse.py`): 四条规则让左右折叠区「懂用户」—— ① **挤压即折叠**：折叠阈值 100px → 200px（对齐面板展开最小可用宽），面板被挤压到最小宽直接折叠成窄条，不再经历「压扁但没折叠」的废物区间，滞回区同步上移（展开 ≥210）；② **双面板协调（右先折）**：窗口放不下「会话栏 + 聊天区 + 工作台」时先瞬切收起工作台让位，释放后够用则保持会话栏展开，仍不够才折会话栏，恢复反向（先展左、再富余展右）；③ **空间恢复即展开**：自动展开的窗口增长门槛 200px → 80px（保留滞后防弹回），手动折叠永不自动展开（删除原 growth 豁免）；④ **启动记忆**：新增 `[UI] SidebarCollapsed` / `[UI] WorkbenchVisible` 两配置项，只记用户手动终态（按钮/拖拽松手落盘），挤压自动折叠不落盘，重启恢复上次选择；窗口大小/位置仍固定默认。19 条新测试 + 既有滞回回归适配。
+
+- **worktree-manager 工作树管理工具** (`plugins/worktree-manager/tools/worktree_tools.py`): 新增 `manager_worktree` 单工具 action 分发（list/create/remove/merge，对齐 `manage_skill` 风格），建/删串行 Git 命令并经 `WorktreeChangeBridge` 跨线程 QueuedConnection 信号 → `SystemWorktreePage` 主线程自动刷新；写操作后清 `GitWorktreeDetector` 缓存；安全约束：拒删主仓库与当前会话工作目录所在工作树，拒合并主仓库自身；merge 冲突返回冲突文件与冲突块内容并保留现场不 abort，指引模型用文件工具解决后提交。
+
+- **EV_PROJECT_CHANGED 项目变更协议** (`app/core/project_changed.py`, `app/main_widget.py`, `app/widgets/workbench_panel.py`, `app/plugins/registries/ui_plugin_registry.py`, `plugins/file-tree/`): 新增可选方法 `on_project_changed(project, workdir, window_id)` 协议 + 派发助手，MainWidget 在 `(project, workdir)` 实际变化处广播事件，工作台面板按可见插件页派发、UI 插件注册表派发当前可见浮动卡；框架处理 window_id 过滤与异常隔离；插件接入实现一行方法即可接收通知（历史卡/文件树均已对接）；`ui-plugin-creator` 文档补项目切换联动可选协议说明。
+
+- **L2 state layer + 排队卡片 + 完成层分离** (`app/widgets/modules/card_manager.py`, `app/widgets/modules/input_card_module.py`, `app/widgets/cards/floating/queue_message_card.py`, `app/widgets/cards/floating/undo_delete_card.py`, `app/widgets/cards/floating/completion_container.py`): 卡片新增 `layer` / `stackable` / `visible_when` 元数据，L2 层允许多卡共存并绕过容器互斥，`visible_when` 谓词按应用状态动态显隐；新增 `COMPLETION` 容器类型让命令补全与 @ 文件提及卡与底部容器隔离避免高度冲突；排队消息卡按反馈重做（垃圾桶/编辑/大字 3 按钮 + 行内编辑 + 插入/删除图标），hover 渐进披露，气泡在「实际发送时」才创建（不预占用户气泡位）。
+
+- **系统提示词剥离 + 消息摘要改进** (`app/core/conversation/executor.py`, `app/core/conversation/adapters/ui.py`, `app/core/engines/ui/engine.py`, `app/core/backend.py`, `app/core/message_content.py`): 新增 `strip_system_reminder()` 在插话消息注入 API 前剥离 `_interject*` 传输键，落库为干净 user 消息；消息摘要路径同步改进。
+
+- **历史会话迁浮动卡 + 行式重构 + 置顶/移动项目** (`plugins/history-manager/ui/history_card.py`, `plugins/history-manager/ui/history_page.py`, `plugins/history-manager/ui/components/`, `app/utils/history_manager.py`, `app/core/store/session_repository.py`, `app/core/store/session_store.py`): 历史会话从侧边栏迁入左侧停靠区常驻浮动卡（`de49617c` + `c90d9f6c`），文件树迁右侧工作台页签并缩写；条目重构为行式布局（去边框/圆角/底色紧凑、padding 4px，hover 浮现重命名/归档）；新增 `pinned` 字段（sessions 表 + `update_session_pinned` 门面），置顶分组渲染 + 行内 📌 图标 + 右键「移动到项目/归档」；项目选择器改为自定义 ComboBox，支持搜索框上方下拉「全部项目」+ 各项目，选全部时行带项目标签，底座 `_load_session_from_record` 自动切工作目录；项目面板迁入历史插件并美化（折叠头+搜索框+180px 限宽+中间省略，「新会话」按钮）。
+
+- **UI 插件热重载精准化 + 主题 QSS 统一注册与重放** (`app/widgets/ui_plugin_hot_reload.py`, `app/plugins/registries/ui_plugin_registry.py`, `app/widgets/theme/style_registry.py`): UI 插件热重载改为基于 slot 声明的精准刷新机制（删除原全量重建），新增弱引用管理防访问冲突；主题切换新增订阅与 `refresh_style()` 公开方法；主题 QSS 统一注册表 + 重放机制让动态 UI 元素也能随主题切换刷新样式；新增 `ExpandSettingCard` 高度动画处理动态内容（含文档坑点说明）。
+
+- **UI 命令版本化 + 侧边栏快捷搜索持久化** (`app/core/ui_command_version.py`, `app/widgets/cards/command/`, `app/widgets/cards/sidebar/`): UI 命令新增版本号支持动态缓存管理（命令卡片与侧边栏条目共享版本链路），刷新后保留搜索过滤词（保存/恢复路径）。
+
+- **Win11 DWM 圆角与边框抑制 + CodeWebViewer 滚动恢复** (`app/widgets/win11_dwm.py`, `app/widgets/code_web_viewer.py`): Win11 平台启用 DWM 圆角并抑制系统边框（含图标资源）；新增滚动位置恢复测试与回归用例。
+
+- **主题感知图标资源** (`plugins/history-manager/ui/history_card.py`, `app/core/plugin_host_service.py`): hover 置顶按钮接入主题感知「置顶」图标；项目选择器图标随主题切换。
+
+- **历史管理器辅助门面** (`app/utils/history_manager.py`): `HistoryManager` 新增 `pinned` 字段支持 + 项目列表门面；`clear_old_subagent_tasks` 返回删除计数便于上层展示。
+
+- **条目 Tag 皮肤与生命周期管理** (`app/widgets/tag_skin.py`, `app/widgets/welcome_card.py`): Tag 皮肤新增动态调色板与图标分配；欢迎卡用弱引用管理防访问冲突；UI 控件生命周期增强防访问越界。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **默认窗口尺寸调为 960x800** (`app/utils/config.py`): 提升默认显示效果。
+- **排队卡 msg_id 赋值前引用崩溃 + followContent 高度不刷新** (`app/widgets/cards/floating/queue_message_card.py`, `app/widgets/modules/card_manager.py`): 修复排队卡构造时 `msg_id` 尚未分配就被引用导致 `NoneType` 异常；声明 `followContent` 后容器出入栈不再丢失高度。
+- **SystemCardFrame 高度调整防抖** (`app/widgets/cards/floating/system_card_frame.py`): 加防抖定时器同步父容器高度，避免频繁布局抖动。
+- **工作台页残缺 context 自愈** (`app/widgets/workbench_panel.py`, `plugins/file-tree/`): 修复工作台页 `_page_context_incomplete` 判据只查键存在不看值导致 `backend=None` 的坏页被判完整的 bug；文件树页卡在「正在加载」和工作树页未识别工作目录均已修复。
+- **hardware 档 GPU 合成闪烁** (`app/utils/render_env.py`): 默认禁 GPU 合成并关低端模式，规避双合成器纹理交换闪烁。
+- **system-cleaner 内存释放竞态崩溃** (`plugins/system-cleaner/`): 内存释放改为分拍执行，修复与 WebEngine 回调竞态导致的 access violation 闪退。
+- **技术支持图片恢复** (`images/技术支持.jpg`): 修复 cleanup 误删。
+- **行式历史条目 hover 操作按钮** (`plugins/history-manager/ui/history_card.py`): 渐进披露与右键菜单修复置顶/移动项目信号链。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **底部工具栏与停止按钮结构调整** (`app/widgets/modules/bottom_toolbar_module.py`, `app/widgets/modules/input_card_module.py`, `app/widgets/cards/floating/queue_message_card.py`): 布局结构调整配合 L2 state layer 与 COMPLETION 容器分离。
+- **separate completion layer from bottom container** (`app/widgets/modules/card_manager.py`, `app/widgets/modules/input_card_module.py`): 命令与文件提及卡从 BOTTOM 容器迁出至独立 COMPLETION 容器，避免与底部容器的高度冲突。
+- **历史会话数据职责剥离** (`app/main_widget.py`, `app/utils/history_manager.py`): 主窗口不再直接拉历史数据，刷新改为触发插件页自拉；项目切换/置顶/移动直走数据服务。
+- **历史会话条目重构为行式** (`plugins/history-manager/ui/history_card.py`): 归档条目收敛为行式布局；hover 渐进披露操作按钮；page_id 引用同步更新。
+- **system-ui 拆分为 artifacts-manager + history-manager** (`plugins/system/`): 按职责拆分为两个独立插件，注册表 page_id 引用同步更新。
+- **page_id 引用统一** (`app/widgets/workbench_panel.py`, `plugins/`): worktree/history 插件 page_id 引用同步更新。
+- **移除调试日志** (`app/widgets/openai_chat_tool_window.py`, `app/widgets/cards/message_card.py`): 清理 OpenAIChatToolWindow 与 MessageCard 的调试日志。
+
+### 🧪 测试 (Tests)
+
+- **侧边栏折叠滞回回归用例** (`tests/widgets/test_sidebar_smart_collapse.py`): 200px 阈值适配既有滞回回归。
+- **不闭合图表栅栏与注册标签检测** (`tests/widgets/test_streaming_output.py`): 新增回归测试覆盖未闭合的 echarts 围栏与已注册的自定义标签（streaming 输出场景）。
+- **消息防规范化伪造空参数** (`app/core/store/session_repository.py`, tests/): lightweight messages 防止 normalization 伪造空 arguments。
+- **滚动位置恢复** (`tests/widgets/test_code_web_viewer.py`): CodeWebViewer 滚动位置恢复回归测试。
+
+### 📚 文档 (Documentation)
+
+- **ui-plugin-creator 补项目切换联动协议说明** (`plugins/system-skills/skills/ui-plugin-creator/references/`): 项目切换联动可选协议说明文档。
+- **坑点库补充展开卡高度动画** (`docs/`): `ExpandSettingCard` 动画与动态内容冲突坑点文档化。
+- **繁忙时 Enter 行为功能记录** (`docs/`): 功能变更文档记录。
+- **侧边栏智能折叠变更记录** (`docs/`): 变更文档记录。
+
+### 🔧 其他 (Chores & Build)
+
+- **plugin.json 自动重新生成** (`plugins/marketplace.json`, `plugins/system/marketplace.json`): 3 次由 GitHub Actions 自动同步生成 [skip ci]。
+
 ## [v0.5.10] - 2026-09-11 (重新发布 #5)
 
 自上一版本以来的变更 | 提交数：97 · 文件变更：477 · +31646/-28793 | 贡献者：dingma, mading

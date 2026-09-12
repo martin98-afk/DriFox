@@ -8,7 +8,6 @@ Windows 原生保留 Aero Snap / 摇动 / 任务栏预览 / DWM 阴影。
 """
 
 import platform
-import sys
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional
 
@@ -92,7 +91,7 @@ _DEFAULT_PANEL_WIDTH = 187
 # 避免"折叠刚完成条件恰满足就弹回展开"的抖动（绝对条件在窗口 ~760 时
 # 折叠即满足展开条件，导致折叠态无法保持）。overlay 卡片关闭属布局恢复
 # （窗口总宽未变），不走增长条件。
-_AUTO_EXPAND_GROWTH = 200
+_AUTO_EXPAND_GROWTH = 80  # 自动展开的窗口增长门槛（原 200 过苛：挤压折叠后几乎永不恢复，保留滞后防"折叠完立刻弹回"）
 
 # ── 聊天区最小可用宽度（px）──
 # 判定"侧边栏是否真的被挤压"的下限：窗口总宽放得下
@@ -110,6 +109,7 @@ _IS_MAC = platform.system() == "Darwin"
 # _user32 is not None` 守卫，避免 NameError 打断窗口构造。
 _MSG_CAST = None
 _user32 = None
+_dwmapi = None
 _GWL_STYLE = -16
 _SNAP_STYLES = 0
 _SWP_FRAMECHANGED = 0
@@ -117,6 +117,18 @@ _HTCLIENT = 1
 _HTLEFT = _HTRIGHT = _HTTOP = 0
 _HTTOPLEFT = _HTTOPRIGHT = 0
 _HTBOTTOM = _HTBOTTOMLEFT = _HTBOTTOMRIGHT = 0
+
+# ── DWM 窗口外观（Win11 build 22000+）──
+# DWMWA_WINDOW_CORNER_PREFERENCE(33)：窗口圆角偏好
+# DWMWA_BORDER_COLOR(34)：窗口最外圈描边颜色
+_DWMWA_WINDOW_CORNER_PREFERENCE = 33
+_DWMWA_BORDER_COLOR = 34
+_DWMCP_ROUND = 2  # DWM_WINDOW_CORNER_PREFERENCE.DWMCP_ROUND
+# ★ DWMWA_COLOR_NONE：让 DWM「跳过」描边绘制（不是画成透明色）。官方文档：
+#   可得到"有圆角但无边框"的窗口。与之相对，DWMWA_COLOR_DEFAULT(0xFFFFFFFF)
+#   是**恢复系统默认描边** —— 即那条会随激活状态变亮/变暗的 2px 白线，
+#   所以千万不要用它来"复位"边框。
+_DWMWA_COLOR_NONE = 0xFFFFFFFE
 
 if _IS_WINDOWS:
     try:
@@ -166,6 +178,18 @@ if _IS_WINDOWS:
         ]
         _user32.SetWindowPos.restype = _ctypes.c_bool
 
+        # ── DWM 绑定（Win11 圆角 / 压边框描边，见 _apply_win11_dwm_chrome）──
+        # ★ 必须显式声明 argtypes：不声明时 ctypes 默认把 Python int 转成 C int
+        #   （32 位），64 位进程里 HWND 有被截断的风险。
+        _dwmapi = _ctypes.windll.dwmapi
+        _dwmapi.DwmSetWindowAttribute.argtypes = [
+            _wintypes.HWND,
+            _wintypes.DWORD,
+            _ctypes.c_void_p,
+            _wintypes.DWORD,
+        ]
+        _dwmapi.DwmSetWindowAttribute.restype = _ctypes.c_long
+
         # GetWindowLongPtr 索引
         _GWL_STYLE = -16
 
@@ -193,6 +217,7 @@ if _IS_WINDOWS:
     except Exception:
         _MSG_CAST = None
         _user32 = None
+        _dwmapi = None
 
 
 class EmptyStateWidget(QWidget):
@@ -574,6 +599,15 @@ class TabManagerWindow(FramelessWindow):
     _WM_EXITSIZEMOVE = 0x0232
     _WM_MOVING = 0x0216  # 仅"移动"触发；"缩放"发 WM_SIZING，二者互斥，可精确区分
     _WM_NCHITTEST = 0x0084  # 边缘/角落 resize 热区判定（自建，见 _native_hit_test）
+    # ── 非客户区（NC）消息：切窗白框闪的抑制点（见 nativeEvent 说明）──
+    _WM_NCACTIVATE = 0x0086  # 窗口激活状态变化 → 系统按默认外观重画非客户区（白框闪的来源）
+    _WM_NCPAINT = 0x0085  # 要求绘制非客户区（帧/标题栏）
+    _WM_ERASEBKGND = 0x0014  # 用窗口类背景刷擦除客户区（默认刷 = 白）
+    # 焦点消息：基类 qframelesswindow 在注册表 DWM\ColorPrevalence=1（"在标题栏和
+    # 边框上显示强调色"）时，会借它们把边框染成强调色 / 复位为系统默认描边，
+    # 故仍在此拦截（本机 ColorPrevalence=0，该分支不会触发）。
+    _WM_SETFOCUS = 0x0007
+    _WM_KILLFOCUS = 0x0008
 
     # resize 热区宽度（逻辑 px，按窗口 DPI 缩放）。系统默认无边框热区为 0，
     # 基类 qframelesswindow 固定 5px 不随 DPI 变化，高 DPI 下几乎抓不到。
@@ -773,11 +807,9 @@ class TabManagerWindow(FramelessWindow):
         self.workbench_panel.close_requested.connect(self._hide_workbench)
         self.workbench_panel.refresh_requested.connect(self.refresh_workbench)
         self.workbench_panel.diff_requested.connect(self._open_workbench_diff)
-        # 切到「历史会话」页时刷新当前活跃窗口的历史列表（面板隐藏期间 isVisible 跳过的补刷）
-        self.workbench_panel.history_tab_shown.connect(self._on_workbench_history_shown)
         # 🆕 页签按对话窗口独立记忆：页签变化 → 写入当前活跃窗口；切回窗口时恢复
         self.workbench_panel.current_tab_changed.connect(self._remember_workbench_tab)
-        # 工作树页内工作目录变更 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
+        # 页面请求切换工作目录 → 转发给当前活跃窗口（实例缓存/分支标签/团队广播）
         self.workbench_panel.workingDirChanged.connect(self._on_workbench_working_dir_changed)
         self.titleBar.workbench_toggle_requested.connect(self.toggle_workbench)
         # 主题 / 字号刷新：与桌宠同路径注册
@@ -855,20 +887,46 @@ class TabManagerWindow(FramelessWindow):
             self._on_replace_tab_clicked(tab_id)
         self._schedule_replace_highlight()
 
-    def _apply_win11_round_corner(self):
-        """Win11 DWM 圆角；Win10 及更早静默跳过
+    def _apply_win11_dwm_chrome(self):
+        """Win11 DWM 窗口外观：圆角 + **不画**边框描边（Win10 及更早静默跳过）
 
-        DWMWA_WINDOW_CORNER_PREFERENCE(33) = DWMCP_ROUND(2)，
-        调用失败（Win10 无此属性）不影响窗口功能。
+        - ``DWMWA_WINDOW_CORNER_PREFERENCE(33) = DWMCP_ROUND(2)`` → 窗口圆角；
+        - ``DWMWA_BORDER_COLOR(34) = DWMWA_COLOR_NONE(0xFFFFFFFE)`` → DWM 跳过
+          最外圈那 2px 描边的绘制。
+
+        ★ 为什么必须压掉描边（2026-09-12 像素级实测）：
+        本窗口为了边缘 resize / Aero Snap 补回了 ``WS_THICKFRAME``，DWM 因此把
+        它当"有框窗口"，会在窗口最外圈画一条 ``DWMWA_VISIBLE_FRAME_BORDER_
+        THICKNESS`` 像素宽的描边，且颜色随**激活状态**变化（失焦时变亮）。因此
+        把它设为 ``DWMWA_COLOR_NONE``，消除稳定态下这条"会随焦点变色的描边"。
+        注意描边**由 DWM 画**，与自建的 ``_native_hit_test`` 热区（纯判定、
+        不绘制任何像素）无关。
+
+        ★ 本方法**不能**消除"切窗时闪一下白框"：实测（焦点切换后逐帧抓屏）
+        过渡帧仍会在最外圈画出纯白 #FFFFFF（左/上 13px、右/下 1px），下一帧
+        即消失 —— 那是一次由系统在激活过渡帧完成的重画，只能在消息层拒掉，
+        见 ``TabManagerWindow.nativeEvent`` 对 WM_NCACTIVATE / WM_NCPAINT /
+        WM_ERASEBKGND 的拦截。
+
+        ★ 为什么不设成"和背景同色的描边"：``DWMWA_BORDER_COLOR`` 只接受
+        COLORREF，无 alpha 通道，画不出半透明描边；而 ``DWMWA_COLOR_NONE`` 是
+        **跳过描边绘制**，视觉上等价于把描边彻底去掉，官方说明其可保留圆角，
+        且不影响 DWM 投影阴影（实测确认：描边消失、窗口外侧阴影像素不变）。
+
+        幂等、极廉价（两条 DwmSetWindowAttribute）；hwnd 会因 setWindowFlags /
+        跨屏 DPI 变化重建，重建后 DWM 属性随之丢失，故挂在
+        ``_ensure_native_window_styles`` 里随每次 showEvent 一起重设。
         """
-        if sys.platform != "win32":
+        if not _IS_WINDOWS or _dwmapi is None:
             return
         try:
-            import ctypes
-
             hwnd = int(self.winId())
-            pref = ctypes.c_int(2)  # DWMCP_ROUND
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), 4)
+            if hwnd == 0:
+                return
+            pref = _ctypes.c_int(_DWMCP_ROUND)
+            _dwmapi.DwmSetWindowAttribute(hwnd, _DWMWA_WINDOW_CORNER_PREFERENCE, _ctypes.byref(pref), 4)
+            border = _ctypes.c_uint32(_DWMWA_COLOR_NONE)
+            _dwmapi.DwmSetWindowAttribute(hwnd, _DWMWA_BORDER_COLOR, _ctypes.byref(border), 4)
         except Exception:
             pass
 
@@ -1033,7 +1091,7 @@ class TabManagerWindow(FramelessWindow):
             self._wb_promote_on_leave = True
             ctrl.on_clicked()  # 触发 _wb_preview_leave → slide_out → _done 里 promote
             return
-        self.set_workbench_visible(not self.is_workbench_visible())
+        self.set_workbench_visible(not self.is_workbench_visible(), persist=True)
 
     def is_workbench_visible(self) -> bool:
         """工作台当前是否可见（动画期间返回目标状态，避免半途状态误判）"""
@@ -1267,18 +1325,27 @@ class TabManagerWindow(FramelessWindow):
         st.unpolish(cf)
         st.polish(cf)
 
-    def set_workbench_visible(self, visible: bool, animate: bool = True) -> None:
+    def set_workbench_visible(self, visible: bool, animate: bool = True, persist: bool = False) -> None:
         """显示/隐藏工作台（带 200ms 宽度展开/收拢动画；animate=False 瞬切）
 
         隐藏时记忆当前宽度，展开时恢复。动画期间重复触发会重启反向动画。
         显隐状态写入当前活跃对话窗口（per-tab 显隐记忆，切换窗口时由
         _on_tab_selected 按目标窗口记忆瞬切恢复）。
+
+        Args:
+            persist: True 时写入用户显隐记忆（规则 4）；仅用户手动开关路径传，
+                per-tab 瞬切恢复/挤压协调/定向打开等程序化路径不写。
         """
         frame = getattr(self, "_workbench_frame", None)
         panel = getattr(self, "workbench_panel", None)
         if frame is None or panel is None:
             return
         visible = bool(visible)
+        if persist:
+            # 规则 4：用户手动开关记忆终态（置前于 early-return，保证每次手动点击都落账）
+            from app.utils.config import Settings
+
+            Settings.get_instance().ui_workbench_visible.value = visible
         # per-tab 显隐记忆：无论走哪条路径（含状态一致的 early-return）都以
         # 当前活跃窗口为准落账，切换标签页时按目标窗口记忆恢复
         # ★ 预览路径（_wb_suppress_memory=True）只复用落位/数据，不写记忆
@@ -1376,7 +1443,7 @@ class TabManagerWindow(FramelessWindow):
 
     def _hide_workbench(self) -> None:
         """工作台关闭按钮：直接隐藏（实例保留，再次开启零重建）"""
-        self.set_workbench_visible(False)
+        self.set_workbench_visible(False, persist=True)
 
     def _remember_workbench_tab(self, index: int) -> None:
         """用户主动切页回调：把页签记到当前活跃对话窗口（按窗口独立记忆）
@@ -1400,7 +1467,11 @@ class TabManagerWindow(FramelessWindow):
         except Exception:
             pass
 
-    def refresh_workbench(self, force: bool = False) -> None:
+    def refresh_workbench(
+        self,
+        force: bool = False,
+        force_plugin: str = "",
+    ) -> None:
         """从当前活跃窗口拉取数据填充工作台（产物/任务/项目记忆）
 
         数据源均为既有单一数据源：
@@ -1409,6 +1480,10 @@ class TabManagerWindow(FramelessWindow):
         - 项目：win._current_project + _current_workdir → MemoryCardContent
 
         force=True：插件页强制重建（ui 热重载后签名未变但实现已变）。
+
+        ★ force_plugin：只定向重建归属该插件的工作台页（热重载单个插件时避免
+        连带销毁其余插件的页）。留空时沿用 force 的全量语义。判定无状态，
+        由面板按「已挂载页记录的归属」就地比对。
         """
         panel = getattr(self, "workbench_panel", None)
         if panel is None or not panel.isVisible():
@@ -1417,38 +1492,22 @@ class TabManagerWindow(FramelessWindow):
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-            panel.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs(), force=force)
+            panel.sync_plugin_pages(
+                UIPluginRegistry.get_instance().get_workbench_tabs(),
+                force=force,
+                force_plugin=force_plugin,
+            )
         except Exception:
             pass
         win = self.get_current_window()
         backend = getattr(win, "backend", None) if win is not None else None
-        project = getattr(win, "_current_project", "") or ""
-        # 历史会话页：跟随当前活跃窗口换挂（与其他页同一投影语义；未构建时保持现状）
-        panel.attach_history_page(getattr(win, "_history_card", None) if win is not None else None)
-        # 换挂后若正显示历史页则补刷数据：切窗时 set_current_tab(saved) 相同值不触发
-        # history_tab_shown，刚挂上的页面数据可能未填充（空白）；幂等（多刷一次无害）
-        if win is not None and panel.current_tab() == panel.TAB_HISTORY:
-            try:
-                if hasattr(win, "_refresh_history_toggle_panel"):
-                    win._refresh_history_toggle_panel()
-            except Exception:
-                pass
-        if backend is not None:
-            # 工作树/产物页数据推送（页面由插件填充，未挂载时面板内部缓存补投递）
-            try:
-                workdir = (getattr(win, "_current_workdir", None) or {}).get(project)
-            except Exception:
-                workdir = None
-            panel.update_project(project, workdir)
-            # 产物：本会话文件写入记录（会话未落库时跳过）
-            session_id = getattr(win, "_current_session_id", None)
-            ops: list = []
-            try:
-                if backend.file_recorder is not None and session_id:
-                    ops = backend.file_recorder.get_all_operations_for_session(session_id)
-            except Exception:
-                ops = []
-            panel.update_artifacts(ops, session_key=session_id)
+        # 当前页数据刷新：页面自拉（插件页可选协议 refresh_data()）。
+        # ★ 宿主不再为具体页面推送数据（原 update_project / update_artifacts），
+        #   页面自己从 context / 活跃窗口取数，面板保持零页面语义。
+        try:
+            panel.refresh_current_page_data()
+        except Exception:
+            logger.exception("[Workbench] 当前页数据刷新失败")
         # 任务：优先窗口缓存（todowrite 结果联动），缺失回退 tool_executor 实时读
         todos = getattr(win, "_latest_todos", None)
         if not todos and backend is not None and getattr(backend, "_tool_executor", None) is not None:
@@ -1506,6 +1565,30 @@ class TabManagerWindow(FramelessWindow):
             except Exception:
                 logger.exception("[Workbench] 处理工作目录变更失败")
 
+    def open_workbench_tab(self, page_id: str) -> bool:
+        """展开工作台并定位到指定页签 id（插件工作台页命令的统一直达入口）
+
+        与 ``open_workbench_history`` / ``open_workbench_memory`` 的差异：本方法
+        不感知具体页语义（不触发任何懒构建），只做「展开 + 按 id 切页」，因此
+        可被任意插件页命令（``register_workbench_tab`` 联动注册的 ``/{page_id}``）复用。
+
+        Args:
+            page_id: 工作台页签 id（如 "worktree-manager" / "history-manager" / 插件自定义 page_id）
+
+        Returns:
+            True 表示页签存在并已切换；False 表示面板不可用或当前无此页签
+        """
+        panel = getattr(self, "workbench_panel", None)
+        if panel is None:
+            return False
+        # 展开工作台（不可见时 set_workbench_visible 内部会触发 refresh_workbench，
+        # 其中含 sync_plugin_pages —— 保证插件页已 reconcile 后再按 id 定位）
+        if not self.is_workbench_visible():
+            self.set_workbench_visible(True)
+        else:
+            self.refresh_workbench()
+        return panel.set_current_tab_by_id(page_id, user=True)
+
     def open_workbench_memory(self, sub_tab: str = "docs") -> None:
         """展开工作台并定位「工作树」页签（记忆功能已下线，保留兼容入口）
 
@@ -1524,43 +1607,27 @@ class TabManagerWindow(FramelessWindow):
         else:
             self.refresh_workbench()
         # 2) 定位「工作树」页
-        panel.set_current_tab(panel.TAB_WORKTREE, user=True)
+        panel.set_current_tab_by_id("worktree-manager", user=True)
 
     def open_workbench_history(self) -> None:
-        """展开工作台并定位「历史会话」页（历史会话已从对话区底部卡片迁移至此）
+        """打开会话历史（已迁对话区左侧停靠区的常驻浮动卡）
 
-        统一直达入口：底部工具栏历史按钮 / /history 命令都走这里。历史页内容
-        是当前活跃窗口的历史卡片（懒创建，首次进入时构建并挂载）；切页后的
-        数据刷新由 history_tab_shown → _on_workbench_history_shown 驱动。
+        统一直达入口：底部工具栏历史按钮 / ``/history`` 命令都走这里。
+        历史会话在 ``de49617c`` 从工作台页签迁为 ``plugins/history-manager``
+        的 ``container="left"`` 浮动卡（``card_id="history-manager"``），工作台
+        页签集合中已无 ``"history-manager"`` 页 —— 继续按 page_id 定位只会静默
+        返回 False，表现为「历史会话点不开」，故改走浮动卡显示通道。
+
+        卡片数据由 ``show_card()`` → ``HistoryPage.refresh()`` 自拉
+        （``HistoryManager`` 单例），无需宿主补刷；再次调用为 toggle 语义。
         """
-        panel = getattr(self, "workbench_panel", None)
-        if panel is None:
-            return
-        # 确保当前活跃窗口的历史卡片已构建并挂载（幂等；未挂载时页签不出现）
         win = self.get_current_window()
-        if win is not None and hasattr(win, "_ensure_history_card"):
-            try:
-                win._ensure_history_card()
-            except Exception:
-                logger.exception("[Workbench] 构建历史会话卡片失败")
-        card = getattr(win, "_history_card", None) if win is not None else None
-        if card is not None:
-            panel.attach_history_page(card)
-        # 展开工作台（不可见时 set_workbench_visible 内部会触发 refresh_workbench）
-        if not self.is_workbench_visible():
-            self.set_workbench_visible(True)
-        else:
-            self.refresh_workbench()
-        panel.set_current_tab(panel.TAB_HISTORY, user=True)
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
-    def _on_workbench_history_shown(self) -> None:
-        """「历史会话」页显示 → 刷新当前活跃窗口的历史列表数据"""
-        win = self.get_current_window()
-        if win is not None and hasattr(win, "_refresh_history_toggle_panel"):
-            try:
-                win._refresh_history_toggle_panel()
-            except Exception:
-                pass
+            UIPluginRegistry.get_instance().toggle_floating_card("history-manager", main_widget=win)
+        except Exception:
+            logger.exception("[Workbench] 打开历史会话失败")
 
     # ── 工作台差异入口（替代标题栏 diff_btn） ──
 
@@ -1678,8 +1745,9 @@ class TabManagerWindow(FramelessWindow):
                 /* ★ 顶层窗口不要设 border-radius：Qt 只会把"背景绘制"裁成圆角，
                    圆角外侧的三角区不会被绘制，底层透出系统默认窗口色 —— 表现为
                    窗口四角隐约有一圈"系统窗口"的白边，resize 重绘时尤其明显。
-                   窗口圆角由 DWM 负责（_apply_win11_round_corner / 补回的
-                   WS_THICKFRAME），Qt 侧保持矩形即可。 */
+                   窗口圆角由 DWM 负责（见 _apply_win11_dwm_chrome），Qt 侧保持
+                   矩形即可；该处同时把 DWM 的边框描边设为 DWMWA_COLOR_NONE，
+                   避免窗口最外圈出现一圈随激活状态忽明忽暗的 2px 白线。 */
             }}
             #tabManagerContent {{
                 background: transparent;
@@ -2325,10 +2393,10 @@ class TabManagerWindow(FramelessWindow):
                 self._set_windows_resize_preview_suppressed(False)
 
     def _evaluate_squeeze_collapse(self) -> bool:
-        """按稳定后的几何判定"侧边栏确实被挤压"→ 自动折叠
+        """按稳定后的几何判定"侧边栏确实被挤压"→ 自动折叠（含双面板协调）
 
         背景：resize 周期内（尤其 _deferred_resize_complete 的 _force_relayout
-        全量重算）左面板宽度会瞬时跌到折叠阈值（100px）以下。TabPanel.resizeEvent
+        全量重算）左面板宽度会瞬时跌到折叠阈值以下。TabPanel.resizeEvent
         只看宽度，会把最大化/还原、覆盖层 relayout 这类几何瞬变误判为"用户
         把面板拖窄"而折叠；而折叠后窗口总宽往往不增反减，自动展开的相对增长
         条件（≥ 折叠时总宽 + _AUTO_EXPAND_GROWTH）永不满足 → 折叠态永久残留。
@@ -2338,6 +2406,11 @@ class TabManagerWindow(FramelessWindow):
         判定标准（"被挤压"）：左面板最终宽度低于折叠阈值，且窗口总宽已放不下
         「常规展开宽度 + 聊天区最小可用宽度」。空间其实够的（纯 relayout 瞬时
         压窄）保持展开，不折叠。
+
+        规则 2（右先折）：窗口放不下「左栏展开 + 聊天区最小宽 + 工作台」时，
+        先瞬切收起工作台让位；释放后放得下「左栏展开 + 聊天区最小宽」则保持
+        左栏展开；仍放不下才折叠左栏。协调折叠的工作台打 _wb_collapsed_by_squeeze
+        标记，空间恢复时自动重开（手动关闭永不重开）。
 
         Returns:
             True 表示本次触发了折叠（调用方应跳过随后的自动展开检测，
@@ -2361,6 +2434,21 @@ class TabManagerWindow(FramelessWindow):
         # 空间仍放得下"常规展开宽度 + 聊天区最小宽度" → 只是瞬时压窄，不折叠：
         # 把左面板恢复到常规展开宽度，避免停留在被压扁的窄条上。
         needed = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        wb_w = sizes[2] if len(sizes) >= 3 else 0
+        if total >= needed + _MIN_CHAT_WIDTH + wb_w:
+            tab_frame = getattr(self, "_tab_frame", None)
+            cap = tab_frame.maximumWidth() if tab_frame is not None else needed
+            frame_w = max(0, min(needed, cap))
+            if frame_w > 0 and frame_w != left:
+                self._splitter.setSizes(self._splitter_sizes_with_left(frame_w))
+                panel.sync_collapsed_ui()
+            return False
+        # 放不下全布局（含工作台）：先折工作台让位（规则 2，右先折）
+        _wb_frame = getattr(self, "_workbench_frame", None)
+        _wb_visible = _wb_frame is not None and _wb_frame.isVisible() and not _wb_frame.isHidden()
+        if _wb_visible:
+            self._collapse_workbench_by_squeeze()
+        # 工作台让位后重判：放得下「左栏展开 + 聊天最小宽」→ 保持左栏展开
         if total >= needed + _MIN_CHAT_WIDTH:
             tab_frame = getattr(self, "_tab_frame", None)
             cap = tab_frame.maximumWidth() if tab_frame is not None else needed
@@ -2376,23 +2464,28 @@ class TabManagerWindow(FramelessWindow):
         QTimer.singleShot(0, lambda: self._on_sidebar_toggled(True))
         return True
 
-    def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
-        """挤压折叠后空间恢复：自动展开回常规宽度
+    def _collapse_workbench_by_squeeze(self) -> None:
+        """挤压协调第一步：瞬切收起工作台并打标记（animate=False 避开动画互打断）"""
+        self._wb_collapsed_by_squeeze = True
+        self.set_workbench_visible(False, animate=False)
 
-        窗口主动拉宽（growth_required=True）不受挤压标记限制：用户拉宽窗口
-        即视为想要展开，点击折叠按钮/拖窄把手手动折叠后拉宽也退出折叠。
-        仅 relayout/关闭卡片恢复（growth_required=False）要求挤压标记，
-        避免把用户手动折叠的面板被动撑开（尊重手动意图）。
+    def _maybe_auto_expand_after_squeeze(self, growth_required: bool = True, _retried: bool = False):
+        """挤压折叠后空间恢复：自动展开回常规宽度（含工作台反向恢复）
+
+        规则 3 确认项：手动折叠（无挤压标记）永不自动展开——只有 _collapsed_by_squeeze
+        标记的挤压折叠才参与自动恢复。原实现的 growth_required 豁免（手动折叠后
+        拉宽窗口也展开）已按用户确认删除。
 
         触发点：窗口 resize 结束、overlay 卡片关闭、折叠动画结束。
         空间判定（两条件都满足才展开）：
-        1. 相对增长（growth_required=True）：当前窗口总宽 ≥ 折叠时总宽 + 200。
-           防止"折叠刚完成绝对条件恰满足就弹回"——窗口只缩窄到 900 左右折叠
-           时，绝对空间（900-60 ≥ 展开宽+400）仍满足，若只看绝对条件会立刻
-           弹回展开，折叠态无法保持。仅当窗口比折叠时明显更宽（有新增空间）
-           才自动展开，语义即"再有剩余空间时自动展开"。
+        1. 相对增长（growth_required=True）：当前窗口总宽 ≥ 折叠时总宽 + 80。
+           防止"折叠刚完成绝对条件恰满足就弹回"。仅当窗口比折叠时更宽
+           （有新增空间）才自动展开，语义即"再有剩余空间时自动展开"。
         2. 绝对下限：窗口总宽 - 折叠宽 ≥ 展开目标宽 + 聊天区最小可用宽(400)，
            展开后面板与聊天区都放得下。
+
+        规则 2 反向（先左后右）：左栏展开完成后检查协调折叠的工作台，
+        空间再有富余则自动重开（_maybe_restore_workbench_after_squeeze）。
 
         动画时序兜底：若检测时折叠/展开动画仍在进行（_animating），延迟 250ms
         重试一次（动画 200ms 后必然结束），避免"用户快速开关卡片 → 折叠动画
@@ -2402,11 +2495,11 @@ class TabManagerWindow(FramelessWindow):
             return
         panel = self._tab_panel
         if not panel._collapsed:
+            # 左栏已展开：只查工作台的挤压恢复（规则 2 反向，先左后右由调用序保证）
+            self._maybe_restore_workbench_after_squeeze(growth_required=growth_required)
             return
-        # 窗口主动拉宽(growth_required=True)不受 _collapsed_by_squeeze 限制：
-        # 手动折叠(点按钮/拖窄把手)后用户拉宽窗口也应退出折叠。仅 relayout/
-        # 关闭卡片恢复(growth_required=False)要求挤压标记，避免被动撑开。
-        if not growth_required and not panel._collapsed_by_squeeze:
+        # 规则 3 确认项：手动折叠永不自动展开，只有挤压标记的折叠才恢复
+        if not panel._collapsed_by_squeeze:
             return
         if panel._animating:
             # 动画中：延迟重试一次（等动画结束，覆盖快速开关卡片的时序缺口）
@@ -2432,40 +2525,90 @@ class TabManagerWindow(FramelessWindow):
         panel.set_collapsed(False)
         self._saved_panel_frame_width = target_w
         self._on_sidebar_toggled(False)
+        # 左栏刚展开完成：再查工作台是否也能恢复（规则 2 反向）
+        self._maybe_restore_workbench_after_squeeze(growth_required=growth_required)
+
+    def _maybe_restore_workbench_after_squeeze(self, growth_required: bool = True) -> None:
+        """规则 2 反向：挤压折叠的工作台在空间恢复后自动重开
+
+        前提：左栏已展开（"先左后右"顺序由 _maybe_auto_expand_after_squeeze
+        的调用序保证）。判定（三者都满足才重开）：
+        1. 仅 _wb_collapsed_by_squeeze=True（协调挤压折叠）——手动关闭永不重开；
+        2. 相对增长（growth_required=True）：窗口比挤压时宽 _AUTO_EXPAND_GROWTH；
+        3. 绝对下限：左栏收起宽 + 工作台最小宽 + 目标面板宽 + 聊天区最小宽都放得下。
+        """
+        if not getattr(self, "_wb_collapsed_by_squeeze", False):
+            return
+        frame = getattr(self, "_workbench_frame", None)
+        if frame is None or getattr(self, "workbench_panel", None) is None:
+            self._wb_collapsed_by_squeeze = False
+            return
+        panel = self._tab_panel
+        if panel._animating:
+            # 左栏动画中：延迟重试一次（对齐左栏恢复的时序兜底）
+            QTimer.singleShot(
+                250,
+                lambda: self._maybe_restore_workbench_after_squeeze(growth_required=growth_required),
+            )
+            return
+        from app.widgets.workbench_panel import PANEL_WIDTH_MIN
+
+        try:
+            total = sum(self._splitter.sizes())
+        except Exception:
+            return
+        target_w = max(_EXPANDED_MIN_FRAME_WIDTH, getattr(self, "_saved_panel_frame_width", 250))
+        wb_min = PANEL_WIDTH_MIN + 14
+        if growth_required:
+            base = getattr(self, "_squeeze_total_width", None)
+            if base is not None and total < base + _AUTO_EXPAND_GROWTH:
+                return  # 窗口未比挤压时更宽，不重开
+        if total - (panel._collapsed_min_width + 14) - wb_min < target_w + _MIN_CHAT_WIDTH:
+            return  # 空间不足，保持折叠
+        self._wb_collapsed_by_squeeze = False
+        self.set_workbench_visible(True)
 
     def _restore_sidebar_collapsed(self):
-        """启动时固定侧边栏为展开态 + 默认宽度（不恢复配置记忆）"""
+        """启动时按配置恢复侧边栏折叠态 + 面板宽度（规则 4：记住用户选择）
+
+        窗口大小/位置仍固定默认（几何记忆已按需求移除，_do_save_geometry 维持空实现）。
+        多轮补射（80/200/400/700ms）机制保留：对抗启动期多轮 relayout 弹跳，
+        恢复目标从「固定展开」改为「存档折叠态」。工作台存档为开则启动瞬切打开。
+        """
         if not hasattr(self, "_splitter"):
             return
-        # 始终展开 + 默认宽度。背景：_setup_ui 里 setSizes 在窗口未显示时调用，
-        # show 后首次 relayout 按 stretch/sizeHint 重新分配，左面板会被压到
-        # 最小宽度（< _auto_collapse_width，实测 46~60px），TabPanel.resizeEvent
-        # 误判为"用户拖窄"自动折叠；欢迎卡片懒渲染（QWebEngineView 创建）还会
-        # 引发后续 relayout 再次压缩。因此在启动早期多轮补射恢复（时间递增，
-        # 覆盖 2~3 次 relayout 窗口期，直到布局不再弹跳），期间均以默认宽度为准。
+        from app.utils.config import Settings
+
+        self._restored_sidebar_collapsed = bool(Settings.get_instance().ui_sidebar_collapsed.value)
         self._apply_restored_panel_width()
         for delay in (80, 200, 400, 700):
             QTimer.singleShot(delay, self._apply_restored_panel_width)
+        # 工作台：存档为开 → 启动瞬切打开（无动画，避免启动期叠加动画）
+        if bool(Settings.get_instance().ui_workbench_visible.value):
+            QTimer.singleShot(0, lambda: self.set_workbench_visible(True, animate=False))
 
     def _apply_restored_panel_width(self):
-        """按默认宽度恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
+        """按存档折叠态恢复左面板宽度 + 解除启动误折叠（启动兜底）"""
         if not hasattr(self, "_splitter") or self._splitter.count() == 0:
             return
-        saved_w = _DEFAULT_PANEL_WIDTH
-        frame_w = max(_EXPANDED_MIN_FRAME_WIDTH, saved_w + 14)
+        saved_collapsed = getattr(self, "_restored_sidebar_collapsed", False)
+        frame_w = (
+            (self._tab_panel._collapsed_min_width + 14)
+            if saved_collapsed
+            else max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + 14)
+        )
         sizes = self._splitter.sizes()
         total = sum(sizes) if sizes else self.width()
         if total <= frame_w:
             return
-        # 仅当前宽度明显小于默认宽度时才恢复（避免覆盖用户手动拖宽）
-        if sizes and sizes[0] >= frame_w - 10:
+        # 已在目标宽度附近则不重设（避免覆盖用户手动拖宽）
+        if sizes and abs(sizes[0] - frame_w) <= 10:
             return
         frame_w = min(frame_w, total)
         self._splitter.setSizes([frame_w, max(0, total - frame_w)])
-        # 启动时 TabPanel 可能已被 relayout 压窄误触发折叠（_collapsed=True），
-        # 这里显式解除，并同步紧凑/展开 UI（不发射信号，避免与动画互打断）
-        if self._tab_panel._collapsed:
-            self._tab_panel.set_collapsed(False)
+        # 对齐存档折叠态（set_collapsed 不发信号，避免与启动期动画互打断）
+        if self._tab_panel._collapsed != saved_collapsed:
+            self._tab_panel.set_collapsed(saved_collapsed)
         self._tab_panel.sync_collapsed_ui()
 
     # ── 覆盖层状态切换 ──
@@ -2900,6 +3043,12 @@ class TabManagerWindow(FramelessWindow):
         _tab_panel.set_resizing(False)，复位拖拽首帧标记供下次拖拽重新冻结。
         """
         self._splitter_dragging = False
+        # 规则 4：拖拽把手属用户明确意图，松手落最终折叠态（值不变不写盘）
+        from app.utils.config import Settings
+
+        _cfg = Settings.get_instance()
+        if _cfg.ui_sidebar_collapsed.value != self._tab_panel._collapsed:
+            _cfg.ui_sidebar_collapsed.value = self._tab_panel._collapsed
         # ── #14 收尾：折叠/展开动画仍运行则跳过解冻，交 #4 动画 finally 统一恢复 ──
         # 防「拖拽跨折叠阈值触发动画 + 120ms idle timer 提前解冻」极端路径尾段
         # 额外 WebView 重绘。动画收尾由 _on_sidebar_anim_finished(try/finally) 恢复
@@ -3993,14 +4142,14 @@ class TabManagerWindow(FramelessWindow):
         """
 
     def _restore_geometry(self):
-        """固定默认窗口几何：960x720，屏幕居中，确保不超出屏幕"""
+        """固定默认窗口几何：960x800，屏幕居中，确保不超出屏幕"""
         screen = QApplication.primaryScreen()
         screen_rect = screen.availableGeometry() if screen else None
         if not screen_rect:
-            self.resize(960, 740)
+            self.resize(960, 800)
             return
 
-        w, h = 960, 740
+        w, h = 960, 800
         self._suppress_drag_detection = True
         self.setGeometry(
             screen_rect.x() + (screen_rect.width() - w) // 2,
@@ -4016,8 +4165,9 @@ class TabManagerWindow(FramelessWindow):
         运行中用户可自由拖动/缩放窗口，不再重置；重启后恢复默认居中。
         """
         super().showEvent(event)
-        # 原生窗口能力补全（边缘 resize + Aero Snap）并压掉 DWM 白边。
-        # hwnd 会因 setWindowFlags / 跨屏 DPI 变化重建，故每次显示都校验。
+        # 原生窗口能力补全（边缘 resize + Aero Snap）+ Win11 DWM 圆角 / 压掉
+        # 边框描边。hwnd 会因 setWindowFlags / 跨屏 DPI 变化重建，DWM 属性随之
+        # 丢失，故每次显示都重设一遍（内部幂等）。
         self._ensure_native_window_styles()
         # 标题栏宽度必须显式同步：构造期几何恢复走的是 resize 节流路径，
         # 基类那次 titleBar.resize() 会被跳过（详见 _sync_title_bar_width）。
@@ -4025,8 +4175,6 @@ class TabManagerWindow(FramelessWindow):
         if not self._geometry_applied:
             self._geometry_applied = True
             self._restore_geometry()
-            # Win11 DWM 圆角（winId 此刻已有效；仅首次）
-            self._apply_win11_round_corner()
         # 几何恢复可能改变窗口宽度，再同步一次标题栏
         self._sync_title_bar_width()
         # 对话区限宽居中：首次显示同步 wrapper margins（Resize 事件链可能晚到）
@@ -4194,6 +4342,11 @@ class TabManagerWindow(FramelessWindow):
         except Exception:
             pass
 
+        # Win11 DWM 圆角 + 压掉稳定态的边框描边（过渡帧那次重画由 nativeEvent
+        # 拦截 WM_NCACTIVATE / WM_NCPAINT / WM_ERASEBKGND 负责，见方法文档）。
+        # 放在这里而非构造期：hwnd 重建后 DWM 属性会丢，必须随每次显示重设。
+        self._apply_win11_dwm_chrome()
+
     def _system_buttons_left(self) -> int:
         """标题栏三个系统按钮的左边界 x（顶边热区需让开这段范围）"""
         btn = getattr(getattr(self, "titleBar", None), "minBtn", None)
@@ -4271,6 +4424,14 @@ class TabManagerWindow(FramelessWindow):
         WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE 是 OS 对"用户正在拖动/缩放窗口"
         的权威信号——标题栏拖拽由系统原生管理（WS_CAPTION），Qt 收不到
         mousePress/Release，只能靠这两条消息准确判定拖拽区间。
+
+        另在此拦截非客户区（NC）消息：WM_NCACTIVATE / WM_NCPAINT /
+        WM_ERASEBKGND。窗口补回 WS_THICKFRAME 后系统会把它当"有框窗口"，
+        在激活状态变化的那一帧按默认外观重画一次非客户区 —— 表现为切窗 /
+        重聚焦时窗口最外圈闪一圈白框。本层直接声明"已处理"拒掉这次重画。
+
+        WM_SETFOCUS / WM_KILLFOCUS 也在拦截之列：基类在注册表
+        DWM\\ColorPrevalence=1 时会借它们改边框颜色（见分支内注释）。
         """
         # ★ 热路径：拖拽时每秒有上千条原生消息经过这里（WM_MOUSEMOVE /
         # WM_NCHITTEST 等），任何 per-call 开销都会被放大。
@@ -4280,6 +4441,35 @@ class TabManagerWindow(FramelessWindow):
             try:
                 msg = _MSG_CAST(int(message))[0]
                 msg_id = msg.message
+                # ── 切窗白框闪的抑制点（2026-09-12 像素级实测）──
+                # 实测：焦点切换后第一帧，窗口最外圈出现纯白 #FFFFFF ——
+                # 左 / 上各 13px、右 / 下各 1px（合计 14px 一圈，本机 150% DPI），
+                # 下一帧即消失。该圈由**系统**在激活过渡帧按默认窗口外观绘制，
+                # 与本窗口自绘内容无关（自建的 `_native_hit_test` 只做命中判定，
+                # 一个像素都不画）。DWMWA_BORDER_COLOR=NONE 只压掉了稳定态的
+                # 描边，压不住过渡帧这一次重画，故从消息层直接拒掉：
+                #   · WM_NCACTIVATE → TRUE：不触发默认的非客户区激活重画；
+                #   · WM_NCPAINT    → 0：不绘制帧 / 标题栏；
+                #   · WM_ERASEBKGND → 1：不让系统用窗口类默认刷（白）擦背景，
+                #     客户区由 Qt 整块自绘，不需要系统代劳。
+                # 三者都只作用于非客户区，不影响 Qt 的焦点链与客户区重绘。
+                if msg_id == self._WM_NCACTIVATE:
+                    return True, 1
+                if msg_id == self._WM_NCPAINT:
+                    return True, 0
+                if msg_id == self._WM_ERASEBKGND:
+                    return True, 1
+                if msg_id == self._WM_SETFOCUS or msg_id == self._WM_KILLFOCUS:
+                    # 基类 qframelesswindow 在注册表 DWM\ColorPrevalence=1
+                    # （"在标题栏和窗口边框上显示强调色"）时，会把
+                    # DWMWA_BORDER_COLOR 染成系统强调色、失焦时复位为
+                    # DWMWA_COLOR_DEFAULT(0xFFFFFFFF) —— "默认"即那条随激活
+                    # 状态忽明忽暗的描边。本窗口已把描边固定为 DWMWA_COLOR_NONE
+                    # （见 _apply_win11_dwm_chrome），这里返回 (False, 0) 跳过的
+                    # 只是基类的着色逻辑，Qt 的焦点消息处理完全不受影响。
+                    # 注：本机 ColorPrevalence=0，基类该分支本就不会触发，
+                    # 此处为跨机器防御（开启强调色边框的机器上才会生效）。
+                    return False, 0
                 if msg_id == self._WM_ENTERSIZEMOVE:
                     self._window_dragging_timer.stop()  # 原生信号权威，停用防抖回退
                     self._on_window_drag_start()

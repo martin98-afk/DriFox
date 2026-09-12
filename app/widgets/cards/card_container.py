@@ -334,8 +334,21 @@ class CardContainer(QWidget):
                         w = max(w, iw)
             if w <= 0:
                 return self._axis_natural()
+        # 多卡共存（L1 补全层 / L2 状态层）：逐卡累加，含布局 spacing。
+        # 只算第一张会让容器高度不足、其余卡被裁切 —— 实测表现为「排队卡被压在
+        # 命令卡参数行上重叠 24px」。
+        #
+        # ★ 不能只统计实现了 heightForWidth 的卡片：未实现该接口的卡（如排队消息卡
+        #   —— 内部全是定高行、无 wordWrap 文本）会被整卡漏掉，容器据此锁高后
+        #   该卡只能被压缩/重叠。这类卡的 C++ sizeHint 不存在"wordWrap 高估"问题
+        #   （见本方法 docstring），是正确口径。
+        total = 0
+        counted = 0
         for card in self._cards.values():
-            if not card.isHidden() and card.hasHeightForWidth():
+            if card.isHidden():
+                continue
+            h = 0
+            if card.hasHeightForWidth():
                 # 防御：容器宽度未分配（如首次展开/测试环境无真实布局）时，
                 # 用卡片布局理想宽度兜底，避免以极小宽度计算换行导致高度虚高。
                 cw = card.width()
@@ -345,10 +358,18 @@ class CardContainer(QWidget):
                 if cw > 0:
                     w = max(w, cw)
                 h = card.heightForWidth(w)
-                if h > 0:
-                    m = self._layout.contentsMargins()
-                    return h + m.top() + m.bottom()
-        return self._axis_natural()
+            if h <= 0:
+                # 未实现 heightForWidth（或尚未测量出目标高）：退回布局 sizeHint
+                h = card.sizeHint().height()
+            if h > 0:
+                h = max(h, card.minimumHeight())  # 尊重 setMinimumHeight 硬下限
+                total += h
+                counted += 1
+        if total <= 0:
+            return self._axis_natural()
+        m = self._layout.contentsMargins()
+        spacing = self._layout.spacing() * max(0, counted - 1)
+        return total + m.top() + m.bottom() + spacing
 
     def _splitter_index(self) -> int:
         if self._dock_splitter is None:
@@ -1062,11 +1083,58 @@ class TopCardContainer(CardContainer):
         super().__init__(ContainerType.TOP)
 
 
+class CompletionCardContainer(CardContainer):
+    """输入补全卡片容器（L1）—— 紧贴输入框上方，只承托不画表面
+
+    与 BottomCardContainer 的两点区别：
+
+    1. **不画背景/边框**：命令卡与文件提及卡自带表面
+       （``CommandCard._apply_self_style``），容器再画一圈就是"框套框"；
+    2. **不写 ``bottomCard`` 属性**：该属性把卡片底部圆角改成直角以"与输入框
+       融合"，对自带完整圆角的补全浮层不适用。
+
+    为什么需要独立容器（而不是继续放 BOTTOM）：
+
+    补全卡是"输入的延伸"（跟光标绑定，用户主动触发），BOTTOM 里住的是
+    "系统状态"（子智能体/排队/撤销，系统被动触发）与"系统模态"。同容器时
+    两者争抢同一段高度预算，实测排队卡会被压在命令卡参数行上（重叠 24px）。
+    拆层后 L2 状态层永远在 L1 之上，补全浮层始终紧贴输入框。
+    """
+
+    def __init__(self):
+        super().__init__(ContainerType.COMPLETION)
+        # 与 BottomCardContainer 一致的左右留白：保证两层卡片的左右边缘对齐
+        self._layout.setContentsMargins(8, 6, 8, 6)
+        self._layout.setSpacing(6)
+
+    def _apply_background_style(self):
+        """透明承托：面板表面由卡片自绘（见类 docstring）"""
+        self.setStyleSheet("""
+            CompletionCardContainer {
+                background: transparent;
+                border: none;
+            }
+        """)
+
+    def add_card(self, card_id: str, card_widget: QWidget):
+        """添加入容器（不做 bottomCard 圆角修正：补全卡自带完整圆角）"""
+        CardContainer.add_card(self, card_id, card_widget)
+
+
 class BottomCardContainer(CardContainer):
     """下方卡片容器 - 底部直角设计，与输入框视觉融合"""
 
+    # L2 状态卡（message_queue / undo_delete / sub_agent_compact）可同时可见，
+    # 需要可见的垂直间距把彼此分开，否则两张卡边框直接贴合。
+    STACK_SPACING = 6
+
     def __init__(self):
         super().__init__(ContainerType.BOTTOM)
+        # 基类给的是单侧 padding（左 0 / 右 8，"让卡片内容不贴右边缘"）。
+        # 卡片改为自绘表面后，单侧 padding 会让卡片边框左右明显不对称
+        # （左边框贴容器边、右边框悬空 8px），故改为左右对称 + 上下留白。
+        self._layout.setContentsMargins(8, 6, 8, 6)
+        self._layout.setSpacing(self.STACK_SPACING)
 
     def _apply_background_style(self):
         """底部容器背景：8px 上圆角 + 底部直角，与输入框视觉拼接"""

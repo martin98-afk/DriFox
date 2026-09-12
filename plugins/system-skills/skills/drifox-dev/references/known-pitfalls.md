@@ -74,7 +74,17 @@
 | P032 | 用量刷新停更 | 关窗误杀共享 key；TTL == tick 周期导致每两轮才刷新 | 销毁前查同 key 存活窗口；`force` 强制重拉 |
 | P017 | 保存后面板 UI 停在旧快照 | 保存路径未触发 UI 刷新 | 保存入口统一追加刷新（内部判 `isVisible()`，不可见零开销） |
 
-## 七、往坑点库写条目的格式
+## 七、UI 组件与动画
+
+| # | 症状 | 根因模式 | 通用规避 |
+|---|------|---------|---------|
+| — | 设置里「工具 / 智能体 / 技能」三张卡折叠展开没有动画（Hooks / MCP / LSP / 服务商有） | 动态内容卡接 `DynamicHeightExpandCardMixin` 绕开 spaceWidget 与内容高度失配时，`setExpand` 里 `expandAni.stop()` 后直接 `setFixedHeight`——把展开动画一并停掉了 | 高度仍由 mixin 接管，改成逐帧 `setFixedHeight` 的高度动画（`animate_expand_height`，200ms OutCubic，结束按实测高度定格）；插件自带配置卡复用同一 helper |
+| — | `QPropertyAnimation(card, b"maximumHeight")` 跑完高度纹丝不动 | 改上限只让**父布局**有机会重排；控件脱离布局（或无父级）时高度不变，动画等于没跑 | 动画驱动中间对象属性、逐帧 `setFixedHeight`，不依赖外部布局（offscreen 单测也能验证） |
+| — | 折叠动画途中内容凭空消失 / 展开后底部被裁 | 折叠时立即 `view.setVisible(False)`；或动画前不先 `setVisible(True)` 就量内容高度（`QLayout.sizeHint()` 忽略隐藏控件） | 折叠保持内容可见到高度收完再隐藏；展开先显示再量高度 |
+
+> 模式总结：**qfluentwidgets 的 `ExpandSettingCard` 动画与「内容高度会变」天然冲突**（动画驱动滚动条 + spaceWidget 占位）。要么像 LSP 卡那样「展开前把内容建完再 `super().setExpand()`」，要么像 mixin 这样自己动画高度。别只停动画不加替代。
+
+## 八、往坑点库写条目的格式
 
 ```bash
 python scripts/state_manager.py pitfall \

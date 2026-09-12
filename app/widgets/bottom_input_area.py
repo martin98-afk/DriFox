@@ -103,7 +103,7 @@ PLACEHOLDER_TIPS = [
     "项目笔记自动关联，切换项目即切换笔记",
     "文档中添加文件夹作为工具工作目录",
     "/project-note 快速新建/优化项目笔记",
-    "/worktree 管理 Git 工作树并行开发",
+    "/worktree-manager 管理 Git 工作树并行开发",
     # ════ 模型与参数 ════
     "点击顶部模型名快速切换模型",
     "温度/最大Token影响回复风格",
@@ -210,6 +210,7 @@ _PLACEHOLDER_ROTATE_INTERVAL_MS = 15000
 
 class SendableTextEdit(TextEdit):
     sendMessageRequested = pyqtSignal()
+    sendMessageInverseRequested = pyqtSignal()  # Ctrl+Enter 发送：繁忙时恒为设置项的另一行为
     stopMessageRequested = pyqtSignal()
     clearRequested = pyqtSignal()
     newSessionRequested = pyqtSignal()
@@ -1581,8 +1582,10 @@ class SendableTextEdit(TextEdit):
             pass
 
         doc = self.document()
-        content_height = int(doc.size().height()) + 8
-        new_height = max(44, min(300, content_height))
+        # 20 = QSS 上下 padding (12 + 6) + 2px 余量；最小高度 44 → 54
+        # （单行时文字区仍能完整容纳 15px 字号一行不裁切）
+        content_height = int(doc.size().height()) + 20
+        new_height = max(54, min(300, content_height))
 
         if self.height() != new_height:
             self._adjusting_height = True
@@ -1631,13 +1634,14 @@ class SendableTextEdit(TextEdit):
             self.toggle_send_button(False)
             self.sendMessageRequested.emit()
 
-    def _on_enter_send(self):
+    def _on_enter_send(self, inverse: bool = False):
         """Enter 键发送：始终触发发送流程
 
-        与按钮点击不同，Enter 键不检查停止模式，直接发射 sendMessageRequested。
+        与按钮点击不同，Enter 键不检查停止模式，直接发射发送信号。
         main_widget 的 _on_send_clicked 内部会处理：
         - 命令（/xxx）→ 不打断流式直接执行
-        - 非命令 + 流式中 → 先停止再发送新消息
+        - 非命令 + 流式中 → 按设置项路由：插话发送 / 排队发送；
+          inverse=True（Ctrl+Enter）恒为设置项的另一行为
         """
         if not self.toPlainText().strip():
             return
@@ -1649,8 +1653,11 @@ class SendableTextEdit(TextEdit):
         # 如果当前在发送模式（非流式），切换到停止模式表示正在请求
         if not self.send_btn.is_stop_mode():
             self.toggle_send_button(False)
-        # 直接发送请求，由 main_widget 内部逻辑处理命令/停止
-        self.sendMessageRequested.emit()
+        # 直接发送请求，由 main_widget 内部逻辑处理命令/繁忙路由
+        if inverse:
+            self.sendMessageInverseRequested.emit()
+        else:
+            self.sendMessageRequested.emit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1670,12 +1677,18 @@ class SendableTextEdit(TextEdit):
         self._position_send_button()
 
     def _position_send_button(self):
-        """定位发送按钮到输入框右下角"""
-        if self.send_btn:
-            btn_size = self.send_btn.size()
-            send_btn_x = self.width() - btn_size.width() - 10
-            send_btn_y = self.height() - btn_size.height() - 4
-            self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
+        """定右下角（仅兼容兼底）：发送按钮已由 bottom_toolbar 模块迁入工具栏。
+
+        迁移成功时 send_btn 的 parent 不再是输入框，直接跳过；
+        若模块未装配（插件 override 等场景），按钮仍留在输入框内，照常定位。
+        """
+        if self.send_btn is None or self.send_btn.parent() is not self:
+            return
+        btn_size = self.send_btn.size()
+        send_btn_x = self.width() - btn_size.width() - 10
+        # 底部偏移与 QSS padding-bottom (6px) 对齐，按钮与文字底缘齐平
+        send_btn_y = self.height() - btn_size.height() - 6
+        self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
         # 强制 / 键直接输入 /，不受中文输入法影响（防止变成、）
@@ -1759,6 +1772,9 @@ class SendableTextEdit(TextEdit):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             if event.modifiers() & Qt.ShiftModifier:
                 super().keyPressEvent(event)  # 换行
+            elif event.modifiers() & Qt.ControlModifier:
+                self._on_enter_send(inverse=True)
+                event.accept()
             else:
                 self._on_enter_send()
                 event.accept()
@@ -1985,7 +2001,7 @@ class SendableTextEdit(TextEdit):
                 color: {Colors.INPUT_TEXT};
                 border: none;
                 border-radius: 16px 16px 0 0;
-                padding: 8px 52px 0px 20px;
+                padding: 12px 16px 6px 20px;
                 selection-background-color: {Colors.SELECTED_BG};
                 {get_font_family_css()} {font_size_css(15)};
             }}
@@ -2090,13 +2106,12 @@ class SendableTextEdit(TextEdit):
                     self._glow_target = card._input_card
             if self._glow_target:
                 # 后备样式：与 main_widget._apply_bottom_input_stack_style 保持一致
-                # 注意：不再 setGraphicsEffect（_input_card 已有 _input_card_primary_shadow 管理主光）
+                # （一体舱单色底，无渐变；不再 setGraphicsEffect，_input_card 已有
+                # _input_card_primary_shadow 管理主光）
                 if target_alpha > 0:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{
-                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 {Colors.INPUT_FOCUS_BG_START},
-                                stop:1 {Colors.INPUT_FOCUS_BG_END});
+                            background: {Colors.INPUT_FOCUS_BG_END};
                             border: 2px solid {Colors.INPUT_FOCUS_BORDER};
                             border-bottom: none;
                             border-top-left-radius: 16px;
@@ -2108,9 +2123,7 @@ class SendableTextEdit(TextEdit):
                 else:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{
-                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 {Colors.INPUT_BG_START},
-                                stop:1 {Colors.INPUT_BG_END});
+                            background: {Colors.INPUT_BG_END};
                             border: 1px solid {Colors.INPUT_BORDER};
                             border-bottom: none;
                             border-top-left-radius: 16px;

@@ -1142,7 +1142,7 @@ class TabPanel(QWidget):
         # 拖拽把手折叠——手动折叠不自动展开）。
         self._collapsed_by_squeeze: bool = False
         self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
-        self._auto_collapse_width: int = 100  # 展开态拖窄到该宽度(panel px)时自动折叠
+        self._auto_collapse_width: int = 200  # 展开态拖窄到该宽度(panel px)时自动折叠（=面板展开最小可用宽）
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
         # 窗口 resize / relayout 过渡期抑制自动折叠：几何瞬变（_force_relayout
         # 重算、最大化/还原）会把左面板瞬时压到折叠阈值以下，若 resizeEvent
@@ -1408,9 +1408,9 @@ class TabPanel(QWidget):
         宽度动画进行中（_animating=True）跳过：动画里宽度会经过
         阈值区间，若在此触发会与动画互相打断。
 
-        注意：展开阈值与折叠阈值必须错开留滞回区（折叠 <100、展开 >=110），
-        否则拖拽途中宽度在阈值附近抖动（如 99→101）会先折叠后展开，
-        表现为"往里拉时又往外回弹"。滞回区（100~109）内保持当前状态不动。
+        注意：展开阈值与折叠阈值必须错开留滞回区（折叠 <200、展开 >=210），
+        否则拖拽途中宽度在阈值附近抖动（如 199→201）会先折叠后展开，
+        表现为"往里拉时又往外回弹"。滞回区（200~209）内保持当前状态不动。
         """
         super().resizeEvent(event)
         # 窗口 resize / relayout 过渡期：宽度是瞬时中间值，不代表用户意图，
@@ -1688,6 +1688,10 @@ class TabPanel(QWidget):
         self._collapsed_by_squeeze = False
         self._update_toggle_button(switch_ui=False)
         self.sidebarToggled.emit(self._collapsed)
+        # 规则 4：记忆用户手动终态（挤压自动折叠不落盘）
+        from app.utils.config import Settings
+
+        Settings.get_instance().ui_sidebar_collapsed.value = self._collapsed
 
     def set_collapsed(self, collapsed: bool):
         """外部设置侧边栏收起/展开状态（如启动时恢复配置，不发射信号）"""
@@ -3332,36 +3336,40 @@ class TabPanel(QWidget):
             self._gitee_account_row.refresh_style()
 
     def _apply_custom_card_style(self, compact: bool = False):
-        """应用自定义插件卡片分组样式（卡片背景 + 细边框 + 圆角，对齐团队分组框）。
+        """应用自定义插件卡片分组样式（二级菜单风：去边框 + 极淡底色块）。
 
+        分组感由淡底色块承担，层级靠组标题弱化 + 行 hover 反馈，不再描边。
         颜色取自主题 Colors，主题切换时由 _refresh_plugin_style 重新调用。
         compact=True：折叠态紧凑样式——margin 收紧，窄条下只容纳 icon 行。
         """
         if not hasattr(self, "_custom_plugin_card"):
             return
         Colors.refresh()
-        margin = "3px 4px" if compact else "5px 8px"
+        margin = "3px 4px" if compact else "4px 6px"
         self._custom_plugin_card.setStyleSheet(f"""
             #customPluginCard {{
-                background: {Colors.CARD_BG.format(alpha=40)};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 6px;
+                background: {Colors.CARD_BG.format(alpha=25)};
+                border: none;
+                border-radius: 8px;
                 margin: {margin};
             }}
             #customPluginHeader {{
                 background: transparent;
                 border: none;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
+                /* 嵌套圆角：顶部两角与外壳同心(8px)，底角独立(6px) */
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                border-bottom-left-radius: 6px;
+                border-bottom-right-radius: 6px;
             }}
             #customPluginHeader:hover {{
                 background: {Colors.HOVER_BG};
             }}
             #customPluginTitle {{
-                color: {Colors.TEXT_PRIMARY};
+                color: {Colors.TEXT_SECONDARY};
                 background: transparent;
-                {get_font_family_css()} {font_size_css(12)}
-                font-weight: bold;
+                {get_font_family_css()} {font_size_css(11)}
+                font-weight: 600;
                 padding: 0px;
             }}
             #customPluginBadge {{

@@ -26,6 +26,7 @@ import base64
 import importlib.util
 import mimetypes
 import sys
+import zlib
 from html import escape
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -511,14 +512,45 @@ _TAG_SKINS = {
     "plan": {"title": "PLAN", "subtitle": "行动推演", "icon": "&#9678;", "accent": "#6c8ebf"},
     "snap": {"title": "SNAP", "subtitle": "毒舌快攻", "icon": "&#9889;", "accent": "#db2777"},
 }
-_NEUTRAL_SKIN = {"title": "", "subtitle": "", "icon": "&#9671;", "accent": "#8a8f98"}
+# 匿名 tag 兜底皮肤：按 tag 名 CRC32 从调色板 + 图标池取色，同 tag 恒定、
+# 异 tag 基本不同色（固定色明暗主题均可读；具名皮肤优先于此表）
+_TAG_PALETTE = [
+    "#7a9e7e",  # 鼠尾草绿
+    "#b08d57",  # 琥珀驼金
+    "#8f7ab8",  # 紫藤
+    "#5fa5a0",  # 青
+    "#c98a4b",  # 暖橙
+    "#b56576",  # 玫瑰木
+    "#8ea04e",  # 橄榄
+    "#4e9db5",  # 湖蓝
+    "#a8766b",  # 陶土
+    "#7e8aa8",  # 灰蓝紫
+]
+_TAG_ICONS = [
+    "&#9824;",  # ♠
+    "&#9827;",  # ♣
+    "&#9830;",  # ♦
+    "&#9790;",  # ☾
+    "&#10022;",  # ✦
+    "&#10048;",  # ❀
+    "&#10010;",  # ✚
+    "&#10047;",  # ✿
+]
 
 # 副标题兜底灰（不透明度写法 QTextDocument 不支持，用固定灰）
 _MUTED = "#9aa0a8"
 
 
 def _tag_skin(tag: str) -> dict:
-    skin = _TAG_SKINS.get(tag) or dict(_NEUTRAL_SKIN)
+    skin = dict(_TAG_SKINS.get(tag) or {})
+    if not skin:
+        h = zlib.crc32(tag.encode("utf-8"))
+        skin = {
+            "title": "",
+            "subtitle": "",
+            "icon": _TAG_ICONS[(h >> 8) % len(_TAG_ICONS)],
+            "accent": _TAG_PALETTE[h % len(_TAG_PALETTE)],
+        }
     if not skin["title"]:
         skin["title"] = tag.upper()
     return skin

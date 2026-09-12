@@ -306,7 +306,7 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.5.10"
+    current_version = "v0.5.11"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -362,6 +362,14 @@ class Settings(QConfig):
         "beep",
         OptionsValidator(["beep", "short", "none"]),
     )
+    # 繁忙时 Enter 键行为（仅智能体运行时生效；Ctrl+Enter 恒为另一行为）
+    # interject=插话发送（hook 式注入当前对话流，不停 worker）；queue=排队发送（排队卡片，结束后自动续发）
+    busy_enter_behavior = OptionsConfigItem(
+        "General",
+        "BusyEnterBehavior",
+        "interject",
+        OptionsValidator(["interject", "queue"]),
+    )
     # 全局字体设置
     llm_font_family = ConfigItem("LLM", "FontFamily", "楷体")
 
@@ -413,6 +421,12 @@ class Settings(QConfig):
     # 插件注册的欢迎 tab 记忆：welcome_mode 的 OptionsValidator.correct 会把
     # 插件 mode_key 纠正回 sessions，无法复用；用独立无验证器字段存任意字符串。
     welcome_plugin_tab = ConfigItem("UI", "WelcomePluginTab", "")
+
+    # 侧边栏折叠态记忆：仅记用户手动操作（标题栏按钮/拖拽把手松手）的终态，
+    # 挤压等自动折叠不落盘，重启恢复用户意图而非临时状态
+    ui_sidebar_collapsed = ConfigItem("UI", "SidebarCollapsed", False, BoolValidator())
+    # 工作台显隐记忆：仅记用户手动开关（标题栏「右侧边栏」按钮）终态
+    ui_workbench_visible = ConfigItem("UI", "WorkbenchVisible", False, BoolValidator())
 
     # ========== LLM API 服务配置 ==========
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())
@@ -513,6 +527,8 @@ class Settings(QConfig):
     # swiftshader = Qt 走 WARP + Chromium 走自带 CPU 光栅的双保险。
     # 兼容：历史配置里残留的 "auto"、手改的非法值一律按出厂默认 software 处理
     # （render_env 裸读原始值，旧检测链已删除）。
+    # hardware 档默认附加 --disable-gpu-compositing（GPU 光栅 + CPU 合成，规避
+    # 双合成器纹理交换闪烁，2026-09-11），ExtraChromiumFlags 可覆盖。
     render_backend = OptionsConfigItem(
         "Render",
         "RenderBackend",
@@ -532,7 +548,9 @@ class Settings(QConfig):
     )
     # 单 renderer JS 堆上限（MB），防单页膨胀
     render_js_heap_mb = RangeConfigItem("Render", "JsHeapMb", 128, RangeValidator(64, 1024))
-    # Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）
+    # Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）。
+    # 默认开，但 hardware 档未显式设置时默认关（真实 GPU 光栅下降级 tile 策略
+    # 会加剧合成错位，见 render_env.compute_settings）。
     render_low_end_device_mode = ConfigItem("Render", "LowEndDeviceMode", True, BoolValidator())
     # 合成器平滑滚动动画（默认关闭：外层滚动由 Qt 承载，卡内滚动只是安全网场景）
     render_smooth_scrolling = ConfigItem("Render", "SmoothScrolling", False, BoolValidator())

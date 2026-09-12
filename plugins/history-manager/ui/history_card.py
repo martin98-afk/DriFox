@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
-"""
-历史会话卡片 - 包含当前会话列表和归档会话列表
+"""历史会话卡片 - 当前会话列表 + 归档会话列表
+
+归属 ``history-manager`` 插件（原 ``app/widgets/cards/settings/history_card.py``）。
+通用辅助 ``format_relative_time`` / ``get_message_preview`` 已上移到
+``app.utils.session_preview``（消息卡片等非历史模块也复用），此处仅转引，
+保持 ``from .history_card import get_message_preview`` 的旧导入路径可用。
 """
 
 import datetime
@@ -17,14 +21,13 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QFrame,
 )
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
-    CardWidget,
     FluentIcon,
     MaskDialogBase,
-    PrimaryPushButton,
     PushButton,
     SimpleCardWidget,
     TransparentToolButton,
@@ -35,6 +38,26 @@ from app.widgets.elided_label import _ElidedLabel
 # ── 分页常量 ──
 _PAGE_SIZE = 30  # 每页显示的会话数（含当前会话）
 
+# 项目过滤器哨兵值（HistoryPage 项目切换器语义）
+_PROJECT_ALL = "__all__"  # 全部项目混合视图
+
+
+def split_pinned_entries(entries: List[tuple], exclude_index: Optional[int] = None) -> tuple:
+    """拆分置顶/非置顶条目（纯函数，供置顶分组与单测使用）
+
+    Args:
+        entries: [(original_index, session)]；session 需含 pinned 字段（缺省 False）
+        exclude_index: 剔除的 original_index（当前会话已在顶部独立区显示，需排除防重复）
+
+    Returns:
+        (pinned, rest)：pinned 组内按 last_time 降序；rest 保持入参相对顺序
+    """
+    pinned = [(i, s) for i, s in entries if i != exclude_index and s.get("pinned")]
+    rest = [(i, s) for i, s in entries if i == exclude_index or not s.get("pinned")]
+    pinned.sort(key=lambda x: x[1].get("last_time", ""), reverse=True)
+    return pinned, rest
+
+
 from app.utils.design_tokens import (
     Colors,
     apply_font_size_to_widget,
@@ -42,7 +65,9 @@ from app.utils.design_tokens import (
     get_ui_font_size,
     scale_font_size,
 )
+from app.utils.theme_style import bind_theme_qss
 from app.utils.utils import get_font_family_css, get_icon
+from app.utils.session_preview import format_relative_time, get_message_preview  # noqa: F401  (get_message_preview 转引)
 
 
 class _UrlImportThread(QThread):
@@ -71,50 +96,6 @@ class _UrlImportThread(QThread):
             self.finished.emit("", "URL内容不是有效的JSON格式")
         except Exception as e:
             self.finished.emit("", f"无法从URL获取数据: {e}")
-
-
-def format_relative_time(time_str: str) -> str:
-    """将时间字符串转换为相对时间显示"""
-    if not time_str or time_str == "未知":
-        return "更早"
-    try:
-        session_time = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-        now = datetime.datetime.now()
-        diff = now - session_time
-
-        if diff.total_seconds() < 60:
-            return "刚刚"
-        elif diff.total_seconds() < 3600:
-            minutes = int(diff.total_seconds() / 60)
-            return f"{minutes}分钟前"
-        elif diff.total_seconds() < 86400:
-            hours = int(diff.total_seconds() / 3600)
-            return f"{hours}小时前"
-        elif diff.days == 1:
-            return "昨天"
-        elif diff.days < 7:
-            return f"{diff.days}天前"
-        else:
-            return time_str[5:10] if len(time_str) >= 10 else time_str
-    except (ValueError, TypeError):
-        return time_str[5:10] if time_str and len(time_str) >= 10 else "更早"
-
-
-def get_message_preview(messages: List[Dict], max_len: int = 50) -> str:
-    """从消息列表中提取预览文本"""
-    if not messages:
-        return ""
-    for msg in reversed(messages):
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        # 跳过 hook 消息（role=user 但带 _hook_event 标记），避免预览显示 hook 内容
-        if msg.get("_hook_event"):
-            continue
-        if role == "user" and content:
-            if isinstance(content, list):
-                content = " ".join(c.get("text", "") if isinstance(c, dict) else str(c) for c in content)
-            return content[:max_len].strip() + ("..." if len(content) > max_len else "")
-    return ""
 
 
 def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) -> bool:
@@ -186,12 +167,13 @@ def _matches_search(session: Dict, search_text: str, pinyin_cache: dict = None) 
     return False
 
 
-class _HistoryItemCard(SimpleCardWidget):
-    """历史会话项卡片"""
+class _HistoryItemCard(QFrame):
+    """历史会话条目（行式）：双行文本 + 右侧时间，hover 时时间换操作按钮"""
 
     sessionClicked = pyqtSignal(int)
     deleteRequested = pyqtSignal(int)
-    renameRequested = pyqtSignal(int, str)
+    pinToggleRequested = pyqtSignal(int, bool)  # (index, 目标状态)
+    moveToProjectRequested = pyqtSignal(int, str)  # (index, 目标项目)
 
     def __init__(
         self,
@@ -202,6 +184,10 @@ class _HistoryItemCard(SimpleCardWidget):
         is_current: bool,
         preview: str = "",
         worktree_branch: str = "",
+        pinned: bool = False,
+        project: str = "",
+        show_project: bool = False,
+        menu_provider=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -209,158 +195,180 @@ class _HistoryItemCard(SimpleCardWidget):
         self._is_current = is_current
         self._is_editing = False
         self._session_id = None  # 用于缓存匹配
-        self._worktree_branch = worktree_branch  # 保留用于后续更新
+        self._worktree_branch = worktree_branch
+        self._pinned = pinned
+        self._project = project
+        self._menu_provider = menu_provider
         self.setCursor(Qt.PointingHandCursor)
+        self.setObjectName("historyItemCard")
 
-        # 批量读取颜色 token 和字体尺寸（避免多次 refresh/scale_font_size 的累积开销）
+        # 批量读取颜色 token 和字体尺寸
         Colors.refresh()
         self._font_family = get_font_family_css()
-        self._font_size = scale_font_size(14)
-        self._caption_size = scale_font_size(12)
-        _font_family = self._font_family
-        _font_size = self._font_size
-        _caption_size = self._caption_size
-        _selected_bg = Colors.SELECTED_BG
-        _border_accent = Colors.BORDER_ACCENT
-        _tab_active_bg = Colors.TAB_ACTIVE_BG
-        _text_accent = Colors.TEXT_ACCENT
-        _card_bg_dim = Colors.CARD_BG_DIM
-        _border = Colors.BORDER
-        _hover_bg = Colors.HOVER_BG
-        _text_primary = Colors.TEXT_PRIMARY
-        _accent_warm = Colors.ACCENT_WARM
-        _text_secondary = Colors.TEXT_SECONDARY
-        _tag_bg = Colors.TAB_ACTIVE_BG
-        _tag_text = Colors.ACCENT_WARM
+        self._font_size = scale_font_size(13)
+        self._caption_size = scale_font_size(11)
 
-        if is_current:
-            self.setStyleSheet(f"""
-                CardWidget {{
-                    background-color: {_selected_bg};
-                    border: 2px solid {_border_accent};
-                    border-radius: 10px;
-                }}
-                CardWidget:hover {{
-                    background-color: {_tab_active_bg};
-                    border: 2px solid {_text_accent};
-                }}
-            """)
-        else:
-            self.setStyleSheet(f"""
-                CardWidget {{
-                    background-color: {_card_bg_dim};
-                    border: 1px solid {_border};
-                    border-radius: 10px;
-                }}
-                CardWidget:hover {{
-                    background-color: {_hover_bg};
-                    border: 1px solid {_border_accent};
-                }}
-            """)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(8, 4, 6, 4)
+        h.setSpacing(6)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 8, 8)
-        layout.setSpacing(4)
+        body = QVBoxLayout()
+        body.setSpacing(1)
+        self._body = body
 
-        top_row = QHBoxLayout()
-        top_row.setSpacing(8)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(4)
+        prefix = "📌 " if pinned else ""
+        self.title_label = _ElidedLabel(f"{prefix}{title}", self)
+        self._apply_title_style()
+        title_row.addWidget(self.title_label, 1)
 
-        self.title_label = _ElidedLabel(title, self)
-        self.title_label.setStyleSheet(
-            f"color: {_text_primary}; font-weight: bold; font-size: {_font_size}px; background: transparent; {_font_family}"
-            if is_current
-            else f"color: {_text_primary}; font-size: {_font_size}px; background: transparent; {_font_family}"
-        )
-        top_row.addWidget(self.title_label, 1)
-
-        self.title_edit = QLineEdit(title[:100], self)
-        self.title_edit.setStyleSheet(
-            f"""
-            QLineEdit {{
-                background-color: rgba(0, 0, 0, 0.3);
-                border: 1px solid {_border_accent};
-                border-radius: 4px;
-                color: {_text_primary};
-                padding: 2px 6px;
-                {_font_family}
-            }}
-            """
-        )
-        self.title_edit.hide()
-        self.title_edit.setMaximumWidth(250)
-        self.title_edit.returnPressed.connect(self._finish_edit)
-        self.title_edit.editingFinished.connect(self._finish_edit)
-        top_row.addWidget(self.title_edit, 1, Qt.AlignLeft)
-
-        # worktree 分支标记（仅非主分支显示）
+        # worktree 分支标记（沿用既有语义：仅非主分支显示）
         self._branch_label = CaptionLabel("", self)
-        self._branch_label.setStyleSheet(f"""
-            CaptionLabel {{
-                color: {_tag_text};
-                background-color: {_tag_bg};
-                border-radius: 3px;
-                padding: 1px 5px;
-                font-size: {_caption_size - 1}px;
-                {_font_family}
-            }}
-        """)
+        self._branch_label.setStyleSheet(
+            f"color: {Colors.ACCENT_WARM}; background-color: {Colors.TAB_ACTIVE_BG};"
+            f" border-radius: 3px; padding: 0px 4px; font-size: {self._caption_size - 1}px; {self._font_family}"
+        )
         self._branch_label.setVisible(bool(worktree_branch))
         if worktree_branch:
             self._branch_label.setText(f"🌿 {worktree_branch}")
-        top_row.addWidget(self._branch_label, 0, Qt.AlignTop)
+        title_row.addWidget(self._branch_label, 0)
 
-        btn_container = QHBoxLayout()
-        btn_container.setSpacing(2)
-
-        self.edit_btn = TransparentToolButton(get_icon("重命名"), self)
-        self.edit_btn.setToolTip("重命名")
-        self.edit_btn.setFixedSize(24, 24)
-        self.edit_btn.clicked.connect(self._start_edit)
-        btn_container.addWidget(self.edit_btn)
-
-        self.delete_btn = TransparentToolButton(get_icon("归档"), self)
-        self.delete_btn.setToolTip("归档")
-        self.delete_btn.setFixedSize(24, 24)
-        self.delete_btn.clicked.connect(lambda: self.deleteRequested.emit(self._index))
-        btn_container.addWidget(self.delete_btn)
-
-        top_row.addLayout(btn_container, 0)
-
-        layout.addLayout(top_row)
-
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(8)
-
-        rel_time = format_relative_time(last_time)
-        meta_text = f"{rel_time} · {message_count} 轮对话"
-        self.meta_label = CaptionLabel(meta_text, self)
-        self.meta_label.setStyleSheet(
-            f"color: {_accent_warm}; font-size: {_caption_size}px; {_font_family}"
-            if is_current
-            else f"color: {_text_secondary}; font-size: {_caption_size}px; {_font_family}"
+        # 项目标签（仅「全部项目」视图显示）
+        self._project_label = CaptionLabel("", self)
+        self._project_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background-color: {Colors.HOVER_BG};"
+            f" border-radius: 3px; padding: 0px 4px; font-size: {self._caption_size - 1}px; {self._font_family}"
         )
-        bottom_row.addWidget(self.meta_label)
+        title_row.addWidget(self._project_label, 0)
+        body.addLayout(title_row)
 
-        bottom_row.addStretch()
-
-        layout.addLayout(bottom_row)
-
-        # 预览标签独立一行（不放在 bottom_row 中，避免与右侧按钮竞争水平空间）
-        self._preview_label = None  # 懒创建，便于更新
+        # 预览行
+        self._preview_label: Optional[_ElidedLabel] = None
         if preview:
             self._ensure_preview_label(preview)
 
+        h.addLayout(body, 1)
+
+        # 右侧相对时间（hover 时隐藏、换操作按钮）
+        self.meta_label = CaptionLabel(format_relative_time(last_time), self)
+        self.meta_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {self._caption_size}px; {self._font_family}"
+        )
+        h.addWidget(self.meta_label, 0, Qt.AlignVCenter)
+
+        # hover 浮现的操作按钮（与 meta_label 同位置互斥显隐）
+        self._btns = QWidget(self)
+        btns_layout = QHBoxLayout(self._btns)
+        btns_layout.setContentsMargins(0, 0, 0, 0)
+        btns_layout.setSpacing(0)
+        self.pin_btn = TransparentToolButton(get_icon("置顶"), self._btns)
+        self.pin_btn.setToolTip("取消置顶" if pinned else "置顶")
+        self.pin_btn.setFixedSize(22, 22)
+        self.pin_btn.clicked.connect(lambda: self.pinToggleRequested.emit(self._index, not self._pinned))
+        btns_layout.addWidget(self.pin_btn)
+        self.delete_btn = TransparentToolButton(get_icon("归档"), self._btns)
+        self.delete_btn.setToolTip("归档")
+        self.delete_btn.setFixedSize(22, 22)
+        self.delete_btn.clicked.connect(lambda: self.deleteRequested.emit(self._index))
+        btns_layout.addWidget(self.delete_btn)
+        self._btns.hide()
+        h.addWidget(self._btns, 0, Qt.AlignVCenter)
+
+        self._apply_style()
+        self._update_project_label(show_project)
+
+    # ── 样式 ──
+
+    def _apply_style(self):
+        """行式样式：当前会话左色条 + 淡底；普通行透明，hover 微底色"""
+        Colors.refresh()
+        if self._is_current:
+            self.setStyleSheet(
+                f"QFrame#historyItemCard {{ background-color: {Colors.SELECTED_BG};"
+                f" border-left: 3px solid {Colors.TEXT_ACCENT}; border-radius: 4px; }}"
+                f"QFrame#historyItemCard:hover {{ background-color: {Colors.TAB_ACTIVE_BG}; }}"
+            )
+        else:
+            self.setStyleSheet(
+                "QFrame#historyItemCard { background-color: transparent; border: none; border-radius: 4px; }"
+                f"QFrame#historyItemCard:hover {{ background-color: {Colors.HOVER_BG}; }}"
+            )
+
+    def _apply_title_style(self):
+        """标题样式（当前会话加粗；构造与主题刷新共用）"""
+        if self._is_current:
+            self.title_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {self._font_size}px;"
+                f" background: transparent; {self._font_family}"
+            )
+        else:
+            self.title_label.setStyleSheet(
+                f"color: {Colors.TEXT_PRIMARY}; font-size: {self._font_size}px;"
+                f" background: transparent; {self._font_family}"
+            )
+
+    def refresh_style(self):
+        """主题切换后重刷行样式（颜色在构造时已固化为 f-string，需在此重建）"""
+        Colors.refresh()
+        self._apply_style()
+        self._apply_title_style()
+        self._branch_label.setStyleSheet(
+            f"color: {Colors.ACCENT_WARM}; background-color: {Colors.TAB_ACTIVE_BG};"
+            f" border-radius: 3px; padding: 0px 4px; font-size: {self._caption_size - 1}px; {self._font_family}"
+        )
+        self._project_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background-color: {Colors.HOVER_BG};"
+            f" border-radius: 3px; padding: 0px 4px; font-size: {self._caption_size - 1}px; {self._font_family}"
+        )
+        self.meta_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {self._caption_size}px; {self._font_family}"
+        )
+        if self._preview_label is not None:
+            self._preview_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; font-size: {self._caption_size}px; {self._font_family}"
+            )
+
+    def _update_project_label(self, show_project: bool):
+        """项目小标签显隐（仅全部项目视图且有项目名时显示）"""
+        text = f"📁 {self._project}" if show_project and self._project else ""
+        self._project_label.setText(text)
+        self._project_label.setVisible(bool(text))
+
     def _ensure_preview_label(self, text: str):
-        """确保存在预览标签（独立一行，不挤占右侧按钮空间）"""
+        """预览行（标题行下方独立一行，空文本时隐藏）"""
         if self._preview_label is None:
             self._preview_label = _ElidedLabel("", self)
             self._preview_label.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {self._caption_size}px; {self._font_family}"
+                f"color: {Colors.TEXT_MUTED}; font-size: {self._caption_size}px; {self._font_family}"
             )
-            # 添加到主布局底部（bottom_row 下方），占满整行宽度
-            self.layout().addWidget(self._preview_label)
+            self._body.addWidget(self._preview_label)
         self._preview_label.setText(text)
         self._preview_label.setVisible(bool(text))
+
+    # ── hover：时间 ↔ 操作按钮互斥 ──
+
+    def enterEvent(self, event):  # noqa: N802 (Qt 命名)
+        if not self._is_editing:
+            self.meta_label.hide()
+            self._btns.show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 (Qt 命名)
+        self._btns.hide()
+        self.meta_label.show()
+        super().leaveEvent(event)
+
+    # ── 右键菜单（菜单构建委托 HistoryCard 注入的 provider，项目列表集中持有） ──
+
+    def contextMenuEvent(self, event):
+        if self._menu_provider is not None:
+            self._menu_provider(self, event.globalPos())
+            event.accept()
+        else:
+            super().contextMenuEvent(event)
+
+    # ── 数据更新 ──
 
     def update_data(
         self,
@@ -371,92 +379,42 @@ class _HistoryItemCard(SimpleCardWidget):
         is_current: bool,
         preview: str = "",
         worktree_branch: str = "",
+        pinned: bool = False,
+        project: str = "",
+        show_project: bool = False,
     ):
-        """原地更新卡片数据，避免重建widget"""
+        """原地更新卡片数据（增量复用关键路径，字段级 diff 避免 QSS 重设）"""
         self._index = index
 
-        # 标题变化
-        if getattr(self.title_label, "_full_text", "") != title:
-            self.title_label.setText(title)
-            self.title_edit.setText(title[:100])
+        # 标题变化（含置顶前缀变化）
+        prefix_changed = self._pinned != pinned
+        self._pinned = pinned
+        if getattr(self.title_label, "_full_text", "") != title or prefix_changed:
+            self.title_label.setText(f"{'📌 ' if pinned else ''}{title}")
 
-        # 活跃状态变化 → 需重设样式
+        # 活跃状态变化 → 重设样式
         if self._is_current != is_current:
             self._is_current = is_current
-            Colors.refresh()
-            if is_current:
-                self.setStyleSheet(f"""
-                    CardWidget {{
-                        background-color: {Colors.SELECTED_BG};
-                        border: 2px solid {Colors.BORDER_ACCENT};
-                        border-radius: 10px;
-                    }}
-                    CardWidget:hover {{
-                        background-color: {Colors.TAB_ACTIVE_BG};
-                        border: 2px solid {Colors.TEXT_ACCENT};
-                    }}
-                """)
-                self.title_label.setStyleSheet(
-                    f"color: {Colors.TEXT_PRIMARY}; font-weight: bold; font-size: {self._font_size}px; {self._font_family}"
-                )
-                self.meta_label.setStyleSheet(
-                    f"color: {Colors.ACCENT_WARM}; font-size: {self._caption_size}px; {self._font_family}"
-                )
-            else:
-                self.setStyleSheet(f"""
-                    CardWidget {{
-                        background-color: {Colors.CARD_BG_DIM};
-                        border: 1px solid {Colors.BORDER};
-                        border-radius: 10px;
-                    }}
-                    CardWidget:hover {{
-                        background-color: {Colors.HOVER_BG};
-                        border: 1px solid {Colors.BORDER_ACCENT};
-                    }}
-                """)
-                self.title_label.setStyleSheet(
-                    f"color: {Colors.TEXT_PRIMARY}; font-size: {self._font_size}px; {self._font_family}"
-                )
-                self.meta_label.setStyleSheet(
-                    f"color: {Colors.TEXT_SECONDARY}; font-size: {self._caption_size}px; {self._font_family}"
-                )
+            self._apply_style()
+            self._apply_title_style()
 
         # 元信息变化
-        rel_time = format_relative_time(last_time)
-        meta_text = f"{rel_time} · {message_count} 轮对话"
-        self.meta_label.setText(meta_text)
+        self.meta_label.setText(format_relative_time(last_time))
 
         # worktree 分支变化
         self._worktree_branch = worktree_branch
-        if worktree_branch:
-            self._branch_label.setText(f"🌿 {worktree_branch}")
-            self._branch_label.setVisible(True)
-        else:
-            self._branch_label.setVisible(False)
+        self._branch_label.setText(f"🌿 {worktree_branch}" if worktree_branch else "")
+        self._branch_label.setVisible(bool(worktree_branch))
+
+        # 项目标签变化
+        self._project = project
+        self._update_project_label(show_project)
+
+        # 置顶按钮提示跟随状态
+        self.pin_btn.setToolTip("取消置顶" if pinned else "置顶")
 
         # 预览变化
         self._ensure_preview_label(preview)
-
-    def _start_edit(self):
-        self._is_editing = True
-        self.title_label.hide()
-        self.title_edit.show()
-        self.title_edit.setText(self.title_label.text())
-        self.title_edit.setFocus()
-        self.title_edit.selectAll()
-
-    def _finish_edit(self):
-        if not self._is_editing:
-            return
-        new_title = self.title_edit.text().strip()
-        if new_title and new_title != self.title_label.text():
-            self.renameRequested.emit(self._index, new_title)
-        self._is_editing = False
-        self.title_edit.hide()
-        self.title_label.show()
-
-    def update_title(self, new_title: str):
-        self.title_label.setText(new_title)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and not self._is_editing:
@@ -464,12 +422,11 @@ class _HistoryItemCard(SimpleCardWidget):
         super().mousePressEvent(event)
 
 
-class _ArchivedItemCard(CardWidget):
-    """归档会话项卡片 - 用于归档列表"""
+class _ArchivedItemCard(QFrame):
+    """归档会话条目（行式，与 _HistoryItemCard 同构）：恢复 / 彻底删除"""
 
     restored = pyqtSignal(str)  # 文件路径
     permanentlyDeleted = pyqtSignal(str)  # 文件路径
-    renameRequested = pyqtSignal(str, str)  # 旧路径, 新标题
 
     def __init__(
         self,
@@ -490,133 +447,128 @@ class _ArchivedItemCard(CardWidget):
         self._message_count = message_count
         self._project = project
         self.setCursor(Qt.PointingHandCursor)
+        self.setObjectName("archivedItemCard")
 
-        # 归档卡片样式 - 使用不同的背景色区分
-        self.setStyleSheet(
-            """
-            CardWidget {
-                background-color: rgba(255, 180, 100, 0.08);
-                border: 1px solid rgba(255, 150, 80, 0.2);
-                border-radius: 10px;
-            }
-            CardWidget:hover {
-                background-color: rgba(255, 180, 100, 0.15);
-                border: 1px solid rgba(255, 150, 80, 0.4);
-            }
-            """
-        )
+        h = QHBoxLayout(self)
+        h.setContentsMargins(8, 4, 6, 4)
+        h.setSpacing(6)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 8, 8)
-        layout.setSpacing(4)
+        body = QVBoxLayout()
+        body.setSpacing(1)
+        self._body = body
 
-        top_row = QHBoxLayout()
-        top_row.setSpacing(8)
-
-        # 归档图标
-        archive_icon = QLabel("📦", self)
-        archive_icon.setStyleSheet(f"font-size: {font_size_css(14)};")
-        top_row.addWidget(archive_icon)
-
-        self.title_label = _ElidedLabel(title, self)
-        body_size = scale_font_size(14)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(4)
+        self.title_label = _ElidedLabel(f"📦 {title}", self)
         self.title_label.setStyleSheet(
-            f"color: {Colors.TEXT_PRIMARY}; font-size: {body_size}px; background: transparent; {get_font_family_css()}"
+            f"color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(13)}px;"
+            f" background: transparent; {get_font_family_css()}"
         )
-        top_row.addWidget(self.title_label, 1)
+        title_row.addWidget(self.title_label, 1)
 
-        self.title_edit = QLineEdit(title[:100], self)
-        self.title_edit.setStyleSheet(
-            f"""
-            QLineEdit {{
-                background-color: rgba(0, 0, 0, 0.3);
-                border: 1px solid rgba(255, 180, 100, 0.5);
-                border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
-                padding: 2px 6px;
-                {get_font_family_css()}
-            }}
-            """
+        # 项目标签（归档会话显示原项目）
+        self._project_label = CaptionLabel("", self)
+        self._project_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background-color: {Colors.HOVER_BG};"
+            f" border-radius: 3px; padding: 0px 4px; font-size: {scale_font_size(11)}px; {get_font_family_css()}"
         )
-        self.title_edit.hide()
-        self.title_edit.setMaximumWidth(250)
-        self.title_edit.returnPressed.connect(self._finish_edit)
-        self.title_edit.editingFinished.connect(self._finish_edit)
-        top_row.addWidget(self.title_edit, 1, Qt.AlignLeft)
+        title_row.addWidget(self._project_label, 0)
+        body.addLayout(title_row)
 
-        layout.addLayout(top_row)
-
-        # 项目标签（归档会话显示原项目）- 懒创建，支持 update_data 复用
-        self._project_label = None
-        if project:
-            self._init_project_label(project)
-
-        btn_container = QHBoxLayout()
-        btn_container.setSpacing(2)
-
-        # 重命名按钮
-        self.edit_btn = TransparentToolButton(get_icon("重命名"), self)
-        self.edit_btn.setToolTip("重命名")
-        self.edit_btn.setFixedSize(24, 24)
-        self.edit_btn.clicked.connect(self._start_edit)
-        btn_container.addWidget(self.edit_btn)
-
-        # 彻底删除按钮
-        self.delete_btn = TransparentToolButton(FluentIcon.DELETE, self)
-        self.delete_btn.setToolTip("彻底删除")
-        self.delete_btn.setFixedSize(24, 24)
-        self.delete_btn.clicked.connect(lambda: self.permanentlyDeleted.emit(self._file_path))
-        btn_container.addWidget(self.delete_btn)
-
-        top_row.addLayout(btn_container, 0)
-
-        layout.addLayout(top_row)
-
-        bottom_row = QHBoxLayout()
-        bottom_row.setSpacing(8)
-
-        rel_time = format_relative_time(last_time)
-        meta_text = f"{rel_time}"
-        if message_count > 0:
-            meta_text += f" · {message_count} 轮对话"
-        self.meta_label = CaptionLabel(meta_text, self)
-        caption_size = scale_font_size(12)
-        Colors.refresh()
-        self.meta_label.setStyleSheet(
-            f"color: {Colors.TEXT_SECONDARY}; font-size: {caption_size}px; {get_font_family_css()}"
-        )
-        bottom_row.addWidget(self.meta_label)
-
-        bottom_row.addStretch()
-
-        layout.addLayout(bottom_row)
-
-        # 预览标签独立一行（不放在 bottom_row 中，避免与右侧按钮竞争水平空间）
-        self._preview_label = None  # 懒创建
+        # 预览行
+        self._preview_label: Optional[_ElidedLabel] = None
         if preview:
             self._init_preview_label(preview)
 
+        h.addLayout(body, 1)
+
+        # 右侧元信息（相对时间 [+ 轮次]），hover 时隐藏换操作按钮
+        caption_size = scale_font_size(11)
+        rel_time = format_relative_time(last_time)
+        meta_text = rel_time
+        if message_count > 0:
+            meta_text += f" · {message_count} 轮"
+        self.meta_label = CaptionLabel(meta_text, self)
+        self.meta_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {caption_size}px; {get_font_family_css()}"
+        )
+        h.addWidget(self.meta_label, 0, Qt.AlignVCenter)
+
+        # hover 浮现的操作按钮
+        self._btns = QWidget(self)
+        btns_layout = QHBoxLayout(self._btns)
+        btns_layout.setContentsMargins(0, 0, 0, 0)
+        btns_layout.setSpacing(0)
+        self.delete_btn = TransparentToolButton(FluentIcon.DELETE, self._btns)
+        self.delete_btn.setToolTip("彻底删除")
+        self.delete_btn.setFixedSize(22, 22)
+        self.delete_btn.clicked.connect(lambda: self.permanentlyDeleted.emit(self._file_path))
+        btns_layout.addWidget(self.delete_btn)
+        self._btns.hide()
+        h.addWidget(self._btns, 0, Qt.AlignVCenter)
+
+        self._apply_style()
+        self._update_project_label()
+
+    # ── 样式 ──
+
+    def _apply_style(self):
+        """行式样式：普通行透明 + hover 微底色"""
+        Colors.refresh()
+        self.setStyleSheet(
+            "QFrame#archivedItemCard { background-color: transparent; border: none; border-radius: 4px; }"
+            f"QFrame#archivedItemCard:hover {{ background-color: {Colors.HOVER_BG}; }}"
+        )
+
+    def refresh_style(self):
+        """主题切换后重刷行样式（颜色在构造时已固化，需在此重建）"""
+        Colors.refresh()
+        self._apply_style()
+        caption = scale_font_size(11)
+        self.title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; font-size: {scale_font_size(13)}px;"
+            f" background: transparent; {get_font_family_css()}"
+        )
+        self._project_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background-color: {Colors.HOVER_BG};"
+            f" border-radius: 3px; padding: 0px 4px; font-size: {caption - 1}px; {get_font_family_css()}"
+        )
+        self.meta_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {caption}px; {get_font_family_css()}"
+        )
+        if self._preview_label is not None:
+            self._preview_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; font-size: {caption}px; {get_font_family_css()}"
+            )
+
+    def _update_project_label(self):
+        """项目标签显隐（有项目名才显示）"""
+        text = f"📁 {self._project}" if self._project else ""
+        self._project_label.setText(text)
+        self._project_label.setVisible(bool(text))
+
     def _init_preview_label(self, text: str):
-        """初始化预览标签（独立一行，不挤占右侧按钮空间）"""
-        caption_size = scale_font_size(12)
+        """预览行（标题行下方独立一行）"""
         self._preview_label = _ElidedLabel(text, self)
         self._preview_label.setStyleSheet(
-            f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {caption_size}px; {get_font_family_css()}"
+            f"color: {Colors.TEXT_MUTED}; font-size: {scale_font_size(11)}px; {get_font_family_css()}"
         )
-        # 添加到主布局底部（bottom_row 下方），占满整行宽度
-        self.layout().addWidget(self._preview_label)
+        self._body.addWidget(self._preview_label)
 
-    def _init_project_label(self, project: str):
-        """初始化项目标签"""
-        caption_size = scale_font_size(11)
-        self._project_label = QLabel(f"📁 {project}", self)
-        self._project_label.setStyleSheet(f"""
-            color: rgba(245, 158, 11, 0.7);
-            {get_font_family_css()} font-size: {caption_size}px;
-            padding: 2px 0px 2px 0px;
-        """)
-        # 插入到布局第二个位置（top_row 之后）
-        self.layout().insertWidget(1, self._project_label)
+    # ── hover：时间 ↔ 操作按钮互斥 ──
+
+    def enterEvent(self, event):  # noqa: N802 (Qt 命名)
+        if not self._is_editing:
+            self.meta_label.hide()
+            self._btns.show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 (Qt 命名)
+        self._btns.hide()
+        self.meta_label.show()
+        super().leaveEvent(event)
+
+    # ── 数据更新 ──
 
     def update_data(
         self,
@@ -628,61 +580,30 @@ class _ArchivedItemCard(CardWidget):
         preview: str = "",
         project: str = "",
     ):
-        """原地更新归档卡片数据"""
+        """原地更新归档条目数据"""
         self._file_path = file_path
         self._session_id = session_id
 
         if getattr(self.title_label, "_full_text", "") != title:
-            self.title_label.setText(title)
-            self.title_edit.setText(title[:100])
+            self.title_label.setText(f"📦 {title}")
 
         rel_time = format_relative_time(last_time)
-        meta_text = f"{rel_time}"
+        meta_text = rel_time
         if message_count > 0:
-            meta_text += f" · {message_count} 轮对话"
+            meta_text += f" · {message_count} 轮"
         self.meta_label.setText(meta_text)
 
         # 预览更新
         if self._preview_label is None:
-            self._init_preview_label(preview or "")
+            if preview:
+                self._init_preview_label(preview)
         else:
             self._preview_label.setText(preview)
             self._preview_label.setVisible(bool(preview))
 
         # 项目标签更新
-        if self._project_label is None:
-            self._init_project_label(project)
-        else:
-            self._project_label.setText(f"📁 {project}")
-            self._project_label.setVisible(bool(project))
-
-        # 重连信号以传递新路径
-        try:
-            self.delete_btn.clicked.disconnect()
-        except TypeError:
-            pass
-        self.delete_btn.clicked.connect(lambda: self.permanentlyDeleted.emit(self._file_path))
-
-    def _start_edit(self):
-        self._is_editing = True
-        self.title_label.hide()
-        self.title_edit.show()
-        self.title_edit.setText(self.title_label.text())
-        self.title_edit.setFocus()
-        self.title_edit.selectAll()
-
-    def _finish_edit(self):
-        if not self._is_editing:
-            return
-        new_title = self.title_edit.text().strip()
-        if new_title and new_title != self.title_label.text():
-            self.renameRequested.emit(self._file_path, new_title)
-        self._is_editing = False
-        self.title_edit.hide()
-        self.title_label.show()
-
-    def update_title(self, new_title: str):
-        self.title_label.setText(new_title)
+        self._project = project
+        self._update_project_label()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and not self._is_editing:
@@ -699,28 +620,31 @@ class _HistorySectionHeader(QLabel):
         self._apply_style()
 
     def _apply_style(self):
-        """应用/刷新样式（支持主题切换时重刷）"""
-        Colors.refresh()
-        caption_size = scale_font_size(12)
-        self.setStyleSheet(
-            f"""
-            color: {Colors.TEXT_SECONDARY};
-            {get_font_family_css()} font-size: {caption_size}px;
+        """应用/刷新样式（支持主题切换时重刷）
+
+        走主题 QSS 登记而非一次性 setStyleSheet：宿主 / 页面重放子树时
+        自动带上本控件，不依赖上层 refresh_style 的枚举清单。
+        """
+        bind_theme_qss(
+            self,
+            lambda c: f"""
+            color: {c.TEXT_SECONDARY};
+            {get_font_family_css()} font-size: {scale_font_size(12)}px;
             font-weight: bold;
             padding: 4px 2px;
-            """
+            """,
         )
 
 
-class _TeamGroupCard(CardWidget):
-    """团队对话合并条目卡片 - 显示团队名 + 成员数 + 首问预览 + 恢复/归档按钮 + 成员展开
+class _TeamGroupCard(QFrame):
+    """团队对话合并条目（行式，与普通/归档会话行同款式）
 
     方案 A（M4）：取消顶部团队分组区，团队会话在普通列表内按 run_id 合并为
     单一条目（数据层 merge_team=True 提供），此处渲染该条目：
-    - 顶行：👥 团队名 + 恢复团队 + 归档按钮
-    - 元信息行：N 位成员 · M 轮 · 相对时间
-    - 预览行：团队首问（数据层 get_team_first_question 提供）
-    - 展开区：点击卡片仅切换展开/收起（不再触发恢复）；展开后渲染成员行
+    - 标题行：展开箭头 + 👥 团队名 + 成员/轮数小标签（一眼识别团队）
+    - 预览行：团队首问（样式与普通会话行一致）
+    - 右侧：相对时间，hover 时换「恢复团队 / 归档」图标按钮
+    - 展开区：点击行切换成员展开/收起；展开后渲染成员行
       （角色胶囊 + 标题 + 相对时间），点击成员行 → memberSelected(session_record)
     """
 
@@ -734,117 +658,123 @@ class _TeamGroupCard(CardWidget):
         self._run_id = group.get("run_id") or group.get("team_run_id") or ""
         self._members: List[Dict] = []
         self._members_visible = False
+        self._last_time = group.get("last_time", "")
         self.setCursor(Qt.PointingHandCursor)
+        self.setObjectName("teamGroupCard")
 
         Colors.refresh()
-        _card_bg = Colors.CARD_BG
-        _border = Colors.BORDER
-        _text_primary = Colors.TEXT_PRIMARY
-        _text_secondary = Colors.TEXT_SECONDARY
-        _text_muted = Colors.TEXT_MUTED
-        _accent = Colors.TEXT_ACCENT
-        _tag_bg = Colors.TAB_ACTIVE_BG
-        _ff = get_font_family_css()
-        _body = scale_font_size(13)
-        _caption = scale_font_size(11)
+        self._font_family = get_font_family_css()
+        self._font_size = scale_font_size(13)
+        self._caption_size = scale_font_size(11)
 
-        self.setStyleSheet(f"""
-            CardWidget {{
-                background-color: {_card_bg.format(alpha=140)};
-                border: 1px solid {_border};
-                border-radius: 10px;
-            }}
-            CardWidget:hover {{
-                border: 1px solid {_accent};
-            }}
-        """)
+        h = QHBoxLayout(self)
+        h.setContentsMargins(8, 4, 6, 4)
+        h.setSpacing(6)
 
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(12, 8, 8, 8)
-        self._layout.setSpacing(6)
+        body = QVBoxLayout()
+        body.setSpacing(1)
+        self._body = body
 
-        # 顶行：团队名 + 恢复 + 归档按钮
-        top_row = QHBoxLayout()
-        top_row.setSpacing(8)
-
-        self.title_label = QLabel(f"👥 {group.get('team_name') or '团队对话'}", self)
-        self.title_label.setStyleSheet(
-            f"color: {_text_primary}; font-weight: bold; font-size: {_body}px; background: transparent; {_ff}"
+        # 标题行：展开箭头 + 👥 团队名 + 成员/轮数小标签
+        title_row = QHBoxLayout()
+        title_row.setSpacing(4)
+        self._arrow_label = QLabel("▸", self)
+        self._arrow_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; font-size: {self._caption_size}px; background: transparent;"
+            f" {self._font_family}"
         )
-        top_row.addWidget(self.title_label, 1)
+        self._arrow_label.setFixedWidth(12)
+        title_row.addWidget(self._arrow_label, 0)
 
-        self._last_time = group.get("last_time", "")
+        self.title_label = _ElidedLabel("", self)
+        self.title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; font-size: {self._font_size}px; background: transparent;"
+            f" {self._font_family}"
+        )
+        title_row.addWidget(self.title_label, 1)
 
-        archive_btn = TransparentToolButton(get_icon("归档"), self)
-        archive_btn.setToolTip("归档该团队")
-        archive_btn.setFixedSize(24, 24)
-        archive_btn.clicked.connect(lambda: self.archiveRequested.emit(self._run_id))
-        top_row.addWidget(archive_btn, 0)
-
-        restore_btn = PrimaryPushButton("恢复团队", self)
-        restore_btn.setFixedHeight(26)
-        restore_btn.setStyleSheet(f"""
-            PrimaryPushButton {{
-                color: white;
-                background-color: {Colors.INFO};
-                border: none;
-                border-radius: 6px;
-                padding: 2px 14px;
-                font-size: {_caption}px;
-                {_ff}
-            }}
-            PrimaryPushButton:hover {{
-                background-color: {Colors.SEND_BTN_END};
-            }}
-        """)
-        restore_btn.setCursor(Qt.PointingHandCursor)
-        restore_btn.clicked.connect(lambda: self.restoreRequested.emit(self._run_id))
-        top_row.addWidget(restore_btn, 0)
-
-        self._layout.addLayout(top_row)
-
-        # 元信息行：N 位成员 · M 轮
+        # 成员/轮数小标签（胶囊样式，与分支/项目标签同款）
         self.meta_label = CaptionLabel("", self)
         self.meta_label.setStyleSheet(
-            f"color: {_text_secondary}; font-size: {_caption}px; background: transparent; {_ff}"
+            f"color: {Colors.TEXT_MUTED}; background-color: {Colors.HOVER_BG};"
+            f" border-radius: 3px; padding: 0px 4px; font-size: {self._caption_size - 1}px; {self._font_family}"
         )
-        self._layout.addWidget(self.meta_label)
+        title_row.addWidget(self.meta_label, 0)
+        body.addLayout(title_row)
 
-        # 预览行（首问预览，复用 _HistoryItemCard 的预览样式）
+        # 预览行（团队首问，样式与普通会话行一致）
         self._preview_label: Optional[_ElidedLabel] = None
         self._ensure_preview_label(group.get("preview", "") or "")
+
+        h.addLayout(body, 1)
+
+        # 右侧相对时间（hover 时隐藏、换操作按钮）
+        self.time_label = CaptionLabel(format_relative_time(self._last_time), self)
+        self.time_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {self._caption_size}px; {self._font_family}"
+        )
+        h.addWidget(self.time_label, 0, Qt.AlignVCenter)
+
+        # hover 浮现操作按钮（与时间同位置互斥）：恢复团队 + 归档
+        self._btns = QWidget(self)
+        btns_layout = QHBoxLayout(self._btns)
+        btns_layout.setContentsMargins(0, 0, 0, 0)
+        btns_layout.setSpacing(0)
+        self.restore_btn = TransparentToolButton(FluentIcon.PLAY, self._btns)
+        self.restore_btn.setToolTip("恢复团队")
+        self.restore_btn.setFixedSize(22, 22)
+        self.restore_btn.clicked.connect(lambda: self.restoreRequested.emit(self._run_id))
+        btns_layout.addWidget(self.restore_btn)
+        self.archive_btn = TransparentToolButton(get_icon("归档"), self._btns)
+        self.archive_btn.setToolTip("归档该团队")
+        self.archive_btn.setFixedSize(22, 22)
+        self.archive_btn.clicked.connect(lambda: self.archiveRequested.emit(self._run_id))
+        btns_layout.addWidget(self.archive_btn)
+        self._btns.hide()
+        h.addWidget(self._btns, 0, Qt.AlignVCenter)
 
         # 展开区容器：成员行列表（懒创建）
         self._members_container: Optional[QWidget] = None
         self._members_layout: Optional[QVBoxLayout] = None
 
+        self._apply_style()
         self.update_group(group)
 
+    # ── 样式 ──
+
+    def _apply_style(self):
+        """行式样式与普通会话行对齐：透明底，hover 微底色"""
+        Colors.refresh()
+        self.setStyleSheet(
+            "QFrame#teamGroupCard { background-color: transparent; border: none; border-radius: 4px; }"
+            f"QFrame#teamGroupCard:hover {{ background-color: {Colors.HOVER_BG}; }}"
+        )
+
     def _ensure_preview_label(self, text: str):
-        """确保存在预览标签（独立一行，样式与 _HistoryItemCard 一致）"""
+        """确保存在预览标签（独立一行，样式与普通会话行一致）"""
         if self._preview_label is None:
             self._preview_label = _ElidedLabel("", self)
             self._preview_label.setStyleSheet(
-                f"color: {Colors.TEXT_MUTED}; font-style: italic; font-size: {scale_font_size(11)}px; "
-                f"{get_font_family_css()}"
+                f"color: {Colors.TEXT_MUTED}; font-size: {self._caption_size}px; {self._font_family}"
             )
-            self._layout.addWidget(self._preview_label)
+            self._body.addWidget(self._preview_label)
         self._preview_label.setText(text)
         self._preview_label.setVisible(bool(text))
 
     def _ensure_members_container(self):
-        """懒创建成员展开容器"""
+        """懒创建成员展开容器（左缩进体现层级）"""
         if self._members_container is not None:
             return
         self._members_container = QWidget(self)
         self._members_layout = QVBoxLayout(self._members_container)
-        self._members_layout.setContentsMargins(0, 0, 0, 0)
+        self._members_layout.setContentsMargins(14, 2, 0, 0)
         self._members_layout.setSpacing(4)
-        self._layout.addWidget(self._members_container)
+        self._body.addWidget(self._members_container)
 
     def _toggle_members(self):
         """切换成员展开/收起"""
         self._members_visible = not self._members_visible
+        self._arrow_label.setText("▾" if self._members_visible else "▸")
         if not self._members_visible:
             if self._members_container is not None:
                 self._members_container.hide()
@@ -932,19 +862,18 @@ class _TeamGroupCard(CardWidget):
             self.memberSelected.emit(member_record)
 
     def update_group(self, group: Dict):
-        """增量刷新团队合并条目（团队名/时间/元信息/预览/成员列表）"""
+        """增量刷新团队合并条目（团队名/时间/成员·轮数标签/预览/成员列表）"""
         self._run_id = group.get("run_id", self._run_id)
         team_name = group.get("team_name") or "团队对话"
         self.title_label.setText(f"👥 {team_name}")
 
         self._last_time = group.get("last_time", "") or ""
+        self.time_label.setText(format_relative_time(self._last_time))
 
         member_count = group.get("member_count", len(group.get("agent_names") or []))
         message_count = group.get("message_count", 0)
-        meta_text = f"{member_count} 位成员 · {message_count} 轮"
-        if self._last_time:
-            meta_text += f" · {format_relative_time(self._last_time)}"
-        self.meta_label.setText(meta_text)
+        self.meta_label.setText(f"{member_count}人 · {message_count}轮")
+        self.meta_label.setVisible(member_count > 0 or message_count > 0)
 
         preview = group.get("preview", "") or ""
         self._ensure_preview_label(preview)
@@ -965,21 +894,58 @@ class _TeamGroupCard(CardWidget):
             self._toggle_members()
         super().mousePressEvent(event)
 
+    def enterEvent(self, event):  # noqa: N802 (Qt 命名)
+        self.time_label.hide()
+        self._btns.show()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 (Qt 命名)
+        self._btns.hide()
+        self.time_label.show()
+        super().leaveEvent(event)
+
+    def refresh_style(self):
+        """主题切换后重刷行样式（颜色在构造时已固化，需在此重建）"""
+        Colors.refresh()
+        self._apply_style()
+        self._arrow_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; font-size: {self._caption_size}px; background: transparent;"
+            f" {self._font_family}"
+        )
+        self.title_label.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; font-size: {self._font_size}px; background: transparent;"
+            f" {self._font_family}"
+        )
+        self.meta_label.setStyleSheet(
+            f"color: {Colors.TEXT_MUTED}; background-color: {Colors.HOVER_BG};"
+            f" border-radius: 3px; padding: 0px 4px; font-size: {self._caption_size - 1}px; {self._font_family}"
+        )
+        self.time_label.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; font-size: {self._caption_size}px; {self._font_family}"
+        )
+        if self._preview_label is not None:
+            self._preview_label.setStyleSheet(
+                f"color: {Colors.TEXT_MUTED}; font-size: {self._caption_size}px; {self._font_family}"
+            )
+        if self._members_visible:
+            self._rebuild_member_rows()
+
 
 class HistoryCard(QWidget):
     """历史会话卡片内容 - 支持历史会话和归档会话切换"""
 
     sessionSelected = pyqtSignal(int)
     sessionArchived = pyqtSignal(int)
-    sessionRenamed = pyqtSignal(int, str)
     refreshRequested = pyqtSignal()
     sessionImported = pyqtSignal(dict)  # 导入会话时发出
     sessionRestored = pyqtSignal(str)  # 恢复归档会话
     sessionPermanentlyDeleted = pyqtSignal(str)  # 彻底删除归档会话
-    archivedSessionRenamed = pyqtSignal(str, str)  # 归档会话重命名
     teamRestoreRequested = pyqtSignal(str)  # 恢复团队会话（参数 = run_id）
     teamArchiveRequested = pyqtSignal(str)  # 归档团队会话（参数 = run_id）
     memberSelected = pyqtSignal(dict)  # 团队成员 session_record 被选中进入会话
+    pinToggled = pyqtSignal(int, bool)  # 右键置顶/取消置顶
+    moveToProjectRequested = pyqtSignal(int, str)  # 右键移动到项目
+    dataChanged = pyqtSignal()  # 列表渲染完成（页面刷新项目下拉等联动）
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1003,6 +969,8 @@ class HistoryCard(QWidget):
         self._remaining_count = 0  # 未显示的会话数
         self._total_session_count = 0  # 当前列表总会话数
         self._load_more_btn = None  # 加载更多按钮引用
+        # 「加载更多」前的滚动位置（渲染完成后恢复；其他刷新路径保持 None）
+        self._pending_scroll_restore: Optional[int] = None
 
         # === 增量更新缓存 ===
         # session_id → _HistoryItemCard 缓存（避免重复创建 widget）
@@ -1017,6 +985,13 @@ class HistoryCard(QWidget):
 
         # worktree 分支名缓存：worktree_path → branch_name（避免重复调 git）
         self._worktree_branch_cache: Dict[str, str] = {}
+
+        # 项目列表（右键「移动到项目」子菜单数据源，页面从 HistoryManager 拉取注入）
+        self._project_list: List[str] = []
+        # 行内项目标签显隐（仅「全部项目」视图为 True）
+        self._show_project_labels = False
+        # 条目右键菜单构建器（项目列表由本卡片集中持有）
+        self._item_menu_provider = self._make_item_menu_provider()
 
         # === 搜索防抖 ===
         from PyQt5.QtCore import QTimer
@@ -1057,10 +1032,14 @@ class HistoryCard(QWidget):
         apply_font_size_to_widget(self, actual_size)
 
     def refresh_style(self):
-        """刷新主题样式：更新所有分组标题的颜色"""
+        """刷新主题样式：分组标题 + 缓存的会话行/归档行/团队行（颜色构造时固化，必须重建）"""
         Colors.refresh()
         for header in self.findChildren(_HistorySectionHeader):
             header._apply_style()
+        for cache in (self._cached_cards, self._cached_archived, self._cached_team_cards):
+            for card in cache.values():
+                if hasattr(card, "refresh_style"):
+                    card.refresh_style()
 
     def _setup_ui(self):
         """不需要创建自己的布局，直接使用父控件的 scroll_area"""
@@ -1069,6 +1048,68 @@ class HistoryCard(QWidget):
     def set_current_project(self, project: str):
         """设置当前过滤项目"""
         self._current_project = project
+
+    # ── 置顶 / 项目标签 / 右键菜单 ──
+
+    def set_project_list(self, projects: List[str]):
+        """注入项目列表（右键菜单「移动到项目」数据源，页面从 HistoryManager 拉取）"""
+        self._project_list = list(projects or [])
+
+    def get_project_list(self) -> List[str]:
+        """从当前列表数据聚合 distinct 项目名（页面下拉兑底数据源）"""
+        projects = {(s.get("project") or "默认项目").strip() or "默认项目" for s in self._all_history}
+        return sorted(projects)
+
+    def set_show_project_labels(self, show: bool):
+        """设置行内项目标签显隐（仅全部项目视图为 True；变化时全量重渲染）"""
+        if self._show_project_labels != show:
+            self._show_project_labels = show
+            self._update_display()
+
+    def _make_item_menu_provider(self):
+        """会话条目右键菜单构建器（置顶 / 移动到项目 / 归档）
+
+        样式与 TabPanel.contextMenuEvent 一致（主题色插值，深浅自适配）。
+        """
+
+        def provider(card: "_HistoryItemCard", global_pos):
+            from PyQt5.QtWidgets import QMenu
+
+            menu_style = f"""
+                QMenu {{
+                    background: {Colors.CARD_BG};
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 6px;
+                    padding: 4px;
+                }}
+                QMenu::item {{
+                    padding: 6px 20px;
+                    border-radius: 4px;
+                    color: {Colors.TEXT_PRIMARY};
+                    {get_font_family_css()} {font_size_css(13)}
+                }}
+                QMenu::item:selected {{
+                    background: {Colors.HOVER_BG};
+                }}
+            """
+            menu = QMenu(card)
+            menu.setStyleSheet(menu_style)
+            pin_text = "取消置顶" if card._pinned else "置顶"
+            act_pin = menu.addAction(pin_text)
+            move_menu = menu.addMenu("移动到项目")
+            move_menu.setStyleSheet(menu_style)
+            for proj in self._project_list:
+                if proj and proj != card._project:
+                    move_menu.addAction(proj, lambda p=proj: self.moveToProjectRequested.emit(card._index, p))
+            menu.addSeparator()
+            act_archive = menu.addAction("归档")
+            chosen = menu.exec(global_pos)
+            if chosen is act_pin:
+                self.pinToggled.emit(card._index, not card._pinned)
+            elif chosen is act_archive:
+                card.deleteRequested.emit(card._index)
+
+        return provider
 
     def _resolve_worktree_branch(self, worktree_path: str) -> str:
         """从 worktree 路径解析分支名（带缓存）"""
@@ -1164,7 +1205,7 @@ class HistoryCard(QWidget):
                 return month_names[session_date.month - 1]
             else:
                 return f"{session_date.year}年"
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             return "更早"
 
     def _clear_content(self):
@@ -1427,11 +1468,15 @@ class HistoryCard(QWidget):
                 card.show()
 
             elif item_type == "empty":
+                # ★ 空态标签是渲染期动态创建、不进 _cached_* 缓存表 → HistoryCard
+                #   .refresh_style 枚举不到，必须登记主题 QSS 由宿主/页面重放，
+                #   否则主题切换后（搜索无结果、列表为空时）文字颜色残留旧主题。
                 text = item[1]
                 empty_label = QLabel(text)
                 empty_label.setAlignment(Qt.AlignCenter)
-                empty_label.setStyleSheet(
-                    f"color: {Colors.TEXT_MUTED}; padding: 16px; {font_size_css(14)} {get_font_family_css()}"
+                bind_theme_qss(
+                    empty_label,
+                    lambda c: f"color: {c.TEXT_MUTED}; padding: 16px; {font_size_css(14)} {get_font_family_css()}",
                 )
                 layout.insertWidget(layout.count() - 1, empty_label)
 
@@ -1448,6 +1493,9 @@ class HistoryCard(QWidget):
             self._prune_cached_spacers()
             self._add_load_more_if_needed(layout)
             self._refresh_font_size()
+            self._restore_scroll_if_pending()
+            # 通知页面（列表数据已就绪，页面据此刷新项目下拉等联动）
+            self.dataChanged.emit()
 
     def _get_or_create_history_card(
         self, session: Dict, index: int, is_current: bool, preview: str
@@ -1468,6 +1516,9 @@ class HistoryCard(QWidget):
                 is_current=is_current,
                 preview=preview,
                 worktree_branch=worktree_branch,
+                pinned=bool(session.get("pinned", False)),
+                project=session.get("project", ""),
+                show_project=self._show_project_labels,
             )
             # 确保信号连接正确（用新 index）
             try:
@@ -1479,12 +1530,12 @@ class HistoryCard(QWidget):
             except TypeError:
                 pass
             try:
-                card.renameRequested.disconnect()
+                card.pinToggleRequested.disconnect()
             except TypeError:
                 pass
             card.sessionClicked.connect(self._on_card_clicked)
             card.deleteRequested.connect(self._on_card_deleted)
-            card.renameRequested.connect(self._on_card_renamed)
+            card.pinToggleRequested.connect(self.pinToggled)
         else:
             # 缓存未命中 → 创建新卡片并缓存
             card = _HistoryItemCard(
@@ -1495,11 +1546,15 @@ class HistoryCard(QWidget):
                 is_current=is_current,
                 preview=preview,
                 worktree_branch=worktree_branch,
+                pinned=bool(session.get("pinned", False)),
+                project=session.get("project", ""),
+                show_project=self._show_project_labels,
+                menu_provider=self._item_menu_provider,
                 parent=self,
             )
             card.sessionClicked.connect(self._on_card_clicked)
             card.deleteRequested.connect(self._on_card_deleted)
-            card.renameRequested.connect(self._on_card_renamed)
+            card.pinToggleRequested.connect(self.pinToggled)
             card._session_id = session_id
             self._cached_cards[session_id] = card
 
@@ -1529,13 +1584,8 @@ class HistoryCard(QWidget):
                 card.permanentlyDeleted.disconnect()
             except TypeError:
                 pass
-            try:
-                card.renameRequested.disconnect()
-            except TypeError:
-                pass
             card.restored.connect(self._on_archived_restored)
             card.permanentlyDeleted.connect(self._on_archived_deleted)
-            card.renameRequested.connect(self._on_archived_renamed)
         else:
             card = _ArchivedItemCard(
                 file_path=file_path,
@@ -1549,7 +1599,6 @@ class HistoryCard(QWidget):
             )
             card.restored.connect(self._on_archived_restored)
             card.permanentlyDeleted.connect(self._on_archived_deleted)
-            card.renameRequested.connect(self._on_archived_renamed)
             self._cached_archived[file_path] = card
 
         return card
@@ -1598,6 +1647,9 @@ class HistoryCard(QWidget):
                 (i, s) for i, s in other_sessions if _matches_search(s, self._search_filter, self._pinyin_cache)
             ]
 
+        # ── 置顶拆分：置顶组优先渲染（组内 last_time 降序），不占分页 limit ──
+        pinned_entries, other_sessions = split_pinned_entries(other_sessions)
+
         grouped = {}
         for original_index, session in other_sessions:
             category = self._get_date_category(session.get("last_time", ""))
@@ -1630,6 +1682,19 @@ class HistoryCard(QWidget):
         self._remaining_count = max(0, total_other - limit)
 
         has_items = current_session_widget
+
+        # ── 置顶分组（当前会话区之后、日期分组之前；不受分页限制） ──
+        if pinned_entries:
+            has_items = True
+            queue.append(("header", "置顶", len(pinned_entries)))
+            for original_index, session in pinned_entries:
+                if session.get("team_merged"):
+                    continue  # 团队合并条目无置顶语义，防御跳过
+                sid = session.get("session_id", "")
+                visible_ids.add(sid)
+                queue.append(("session", session, original_index, False))
+            queue.append(("spacer",))
+
         for section, sessions in final_order:
             if not sessions:
                 continue
@@ -1784,11 +1849,17 @@ class HistoryCard(QWidget):
         total = self._total_session_count
         shown = total - self._remaining_count
         btn = PushButton(f"共 {total} 个会话，点击加载更多（已显示 {shown} 个）", self)
-        btn.setStyleSheet(
-            "PushButton { background: rgba(128,128,128,0.06); border: 1px solid rgba(128,128,128,0.15);"
-            " border-radius: 8px; padding: 10px; color: rgba(128,128,128,0.6); }"
-            "PushButton:hover { background: rgba(128,128,128,0.15); border-color: rgba(128,128,128,0.3);"
-            " color: rgba(255,255,255,0.85); }"
+        # ★ 原实现硬编码 rgba(128,128,128,…) + hover 文字 rgba(255,255,255,0.85)：
+        #   浅色主题下 hover 变白字压白底几乎不可见，且该按钮不在 refresh_style
+        #   枚举范围内、主题切换后颜色永不更新。改用主题 token 并登记重放。
+        bind_theme_qss(
+            btn,
+            lambda c: (
+                f"PushButton {{ background: {c.CARD_BG_DIM}; border: 1px solid {c.BORDER};"
+                f" border-radius: 8px; padding: 10px; color: {c.TEXT_MUTED}; }}"
+                f"PushButton:hover {{ background: {c.HOVER_BG}; border-color: {c.BORDER_ACCENT};"
+                f" color: {c.TEXT_PRIMARY}; }}"
+            ),
         )
         btn.setCursor(Qt.PointingHandCursor)
         btn.clicked.connect(self._on_load_more)
@@ -1824,8 +1895,41 @@ class HistoryCard(QWidget):
 
     def _on_load_more(self):
         """加载下一批会话"""
+        # 🛡️ 保留滚动位置：_update_display 全清重建时内容瞬间清空，
+        # widgetResizable 模式下 scrollbar range 收缩会把 value clamp 到 0，
+        # 渲染完成后视口跳回顶部（此前每次点加载更多都弹回列表头）。
+        # 加载更多只在尾部追加、头部内容不变，恢复原 value 即可保持视口。
+        self._pending_scroll_restore = self._parent_scroll_vbar_value()
         self._show_limit += self._page_size
         self._update_display()
+
+    def _parent_scroll_vbar_value(self) -> Optional[int]:
+        """沿父链找宿主滚动区，返回当前垂直滚动值（找不到返回 None）"""
+        parent = self.parent()
+        while parent:
+            scroll_area = getattr(parent, "_scroll_area", None)
+            if scroll_area is not None:
+                return scroll_area.verticalScrollBar().value()
+            parent = parent.parent()
+        return None
+
+    def _restore_scroll_if_pending(self):
+        """渲染完成后恢复「加载更多」前记录的滚动位置（延迟一拍等布局生效）"""
+        if self._pending_scroll_restore is None:
+            return
+        target = self._pending_scroll_restore
+        self._pending_scroll_restore = None
+
+        def _apply():
+            parent = self.parent()
+            while parent:
+                scroll_area = getattr(parent, "_scroll_area", None)
+                if scroll_area is not None:
+                    scroll_area.verticalScrollBar().setValue(target)
+                    return
+                parent = parent.parent()
+
+        QTimer.singleShot(0, _apply)
 
     def _cleanup_orphan_archived_cards(self, active_paths: set):
         """清理不再显示的归档缓存卡片（搜索过滤时不清理）"""
@@ -1847,9 +1951,6 @@ class HistoryCard(QWidget):
     def _on_card_deleted(self, index: int):
         self.sessionArchived.emit(index)
 
-    def _on_card_renamed(self, index: int, new_title: str):
-        self.sessionRenamed.emit(index, new_title)
-
     def _on_archived_restored(self, file_path: str):
         """恢复归档会话"""
         self.sessionRestored.emit(file_path)
@@ -1857,10 +1958,6 @@ class HistoryCard(QWidget):
     def _on_archived_deleted(self, file_path: str):
         """彻底删除归档会话"""
         self.sessionPermanentlyDeleted.emit(file_path)
-
-    def _on_archived_renamed(self, file_path: str, new_title: str):
-        """重命名归档会话"""
-        self.archivedSessionRenamed.emit(file_path, new_title)
 
     # ==================== 拖放和导入功能 ====================
 

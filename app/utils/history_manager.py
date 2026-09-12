@@ -506,6 +506,7 @@ class HistoryManager:
         team_name: str = None,
         agent_name: str = None,
         team_members: str = None,
+        pinned: bool = None,
     ):
         """保存会话
 
@@ -518,6 +519,7 @@ class HistoryManager:
             team_name: 团队名（模板名），None 保留现值
             agent_name: 产出该会话的 agent 角色名，None 保留现值
             team_members: 团队成员快照（JSON 字符串，F3），None 保留现值
+            pinned: 置顶标记，None 保留现值
         """
         if not messages:
             return
@@ -549,6 +551,13 @@ class HistoryManager:
                 agent_name = agent_name or ""
                 team_members = team_members or ""
 
+        # pinned「None→保留现值」：与团队元数据同范式，防止重存丢置顶
+        if pinned is None:
+            existing_for_pin = None
+            if session_id:
+                existing_for_pin = self.get_session_by_session_id(session_id)
+            pinned = bool(existing_for_pin.get("pinned", False)) if existing_for_pin else False
+
         merged_messages = merge_session_messages(messages)
         session_record = self._build_session_record(
             merged_messages,
@@ -565,6 +574,7 @@ class HistoryManager:
             team_name=team_name,
             agent_name=agent_name,
             team_members=team_members,
+            pinned=pinned,
         )
         new_session_id = session_record["session_id"]
 
@@ -609,6 +619,7 @@ class HistoryManager:
         team_name: str = "",
         agent_name: str = "",
         team_members: str = "",
+        pinned: bool = False,
     ) -> Dict:
         now = datetime.now()
         saved_at = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -655,6 +666,8 @@ class HistoryManager:
             "agent_name": agent_name or "",
             # 团队成员快照（F3：JSON 字符串，恢复时找回无会话记录的手动成员）
             "team_members": team_members or "",
+            # 会话置顶标记（历史面板置顶分组；新会话默认未置顶）
+            "pinned": bool(pinned),
         }
 
     def get_current_title(self, index: int) -> str:
@@ -902,6 +915,8 @@ class HistoryManager:
             "agent_name": s.get("agent_name", "") or "",
             # 团队成员快照（F3：JSON 字符串，透传）
             "team_members": s.get("team_members", "") or "",
+            # 会话置顶标记（历史面板置顶分组）
+            "pinned": bool(s.get("pinned", False)),
         }
 
     def _merge_team_lightweight(self, sessions: List[Dict]) -> List[Dict]:
@@ -1453,6 +1468,36 @@ class HistoryManager:
         return None
 
 
+    def set_session_pinned(self, session_id: str, pinned: bool) -> bool:
+        """设置会话置顶标记（改内存 + 持久化 pinned 列，不动消息）
+
+        Returns:
+            True=成功；False=会话不存在
+        """
+        self._ensure_history_loaded()
+        idx = self.find_index_by_session_id(session_id)
+        if idx is None:
+            return False
+        record = self._history_sessions[idx]
+        if bool(record.get("pinned", False)) == bool(pinned):
+            return True  # 幂等：状态未变不写盘
+        record["pinned"] = bool(pinned)
+        self._mark_cache_dirty()
+        # 只写 pinned 列（SQLite 路径）；JSON 存储路径随下次整体 flush 落盘
+        if self._use_sqlite and self._session_store is not None:
+            try:
+                self._session_store.update_session_pinned(session_id, bool(pinned))
+            except Exception as e:
+                logger.warning(f"[HistoryManager] update_session_pinned 失败: {e}")
+        return True
+
+    def get_project_list(self) -> List[str]:
+        """全部会话的 distinct 项目名（内存聚合，排序返回；供历史页项目切换器）"""
+        self._ensure_history_loaded()
+        self._deduplicate_history_sessions()
+        projects = {(s.get("project") or "默认项目").strip() or "默认项目" for s in self._history_sessions}
+        return sorted(projects)
+
     def find_index_by_session_id(self, session_id: str) -> Optional[int]:
         """根据 session_id 查找索引"""
         if not session_id:
@@ -1494,7 +1539,22 @@ class HistoryManager:
 
         💡 内存优化：委托 get_session_by_session_id 处理懒加载，
         避免启动时一次性反序列化所有消息。
+
+        🛡️ 必须返回全量消息（主 blob + session_msg_extras 合并）：
+        SQLite 主 blob 的历史消息已被剥离 arguments/diff/reasoning_content
+        （仅 _x_idx 哨兵标记）。若把轻量列表直接塞进内存会话，用户在该
+        会话继续对话后的下一次保存会经 normalize_message 给轻量消息伪造
+        空 arguments={}，extract_offload_fields 视其为「无剥离字段」不产
+        extras 行，而 _write_extras 全删旧行后不插回 → 历史消息参数数据
+        永久丢失（症状：加载历史会话后工具完成框描述全空，重启不可逆，
+        2026-09-12 根因）。调用方均为低频加载动作，全量读取无性能顾虑。
         """
+        if not session_id:
+            return None
+        if self._use_sqlite and self._session_store and self._session_store.is_initialized:
+            full = self._session_store.get_full_messages(session_id)
+            if full:
+                return full
         session = self.get_session_by_session_id(session_id)
         if session:
             return session.get("messages", [])

@@ -102,10 +102,10 @@ def register_ui(registry):
         on_click=None, priority=0, metadata=None,
     )
 
-    # 右侧工作台 tab（WorkbenchPanel 页签条：产物 / 记忆 之后追加）
+    # 右侧工作台 page（WorkbenchPanel 页签：按 order_hint 排序，注册即得 /{page_id} 命令）
     registry.register_workbench_tab(
         plugin_name, page_id, label, widget_class,
-        priority=0, metadata=None,
+        priority=0, metadata=None,  # metadata 可带 order_hint / default_landing
     )
 
     # 工作区页面（Phase G，见 ui-workspace.md）
@@ -121,7 +121,31 @@ def register_ui(registry):
 > - **常驻**（`register_titlebar_tab`）：始终显示在标题栏 tab 区（「聊天」右侧），不可关闭，点击触发插件回调。
 > - **非常驻**（`register_floating_card(container="full")`）：卡片打开时动态出现在标题栏（带 × 关闭钮），关闭即从标题栏移除；点击 tab 切换覆盖层显示。
 
-> **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台浮层（WorkbenchPanel）的页签条，自动出现在「产物」「记忆」之后；宿主在 `refresh_workbench` 时调用 `panel.sync_plugin_pages(tabs)` reconcile（签名不变则跳过重建）。同 page_id 高优先级覆盖低优先级，插件卸载时自动注销。系统插件 `plugins/system-ui/ui/_artifacts_page.py` 提供 `SystemArtifactsPage` 作为参考实现，演示如何通过 `context["backend"]` / `context["session_id"]` / `context["diff_requested_callback"]` 从宿主拉取数据与触发回调。
+> **工作台 tab（`register_workbench_tab`）**：注册到右侧工作台（WorkbenchPanel）的页签条。★ 面板**零保留槽位、零 page_id 语义**：页序 = `(metadata["order_hint"], 注册序)`，默认落点 = `metadata["default_landing"]` 标记页（缺省顺序第一页），一个页都没注册时空态页。宿主在 `refresh_workbench` 时调 `panel.sync_plugin_pages(tabs)` reconcile；页签一律按 **tab_id** 定位（`set_current_tab_by_id` / `current_tab_id`），宿主不得假设 index。**注册即联动注册 `/{page_id}` 命令**。数据由页面**自拉**：面板只发无参 `refresh_current_page_data()`，页面实现可选协议 `refresh_data()`（从 `context` / 活跃窗口取数）。参考实现：`plugins/artifacts-manager/ui/artifacts_page.py`、`plugins/worktree-manager/ui/worktree_page.py`、`plugins/history-manager/ui/history_page.py`。
+
+### UI 扩展点 → 自动命令（联动矩阵）
+
+`register_*` 时自动登记一条系统命令到 `UIPluginRegistry` 命令账本
+（`_ui_commands`），并在 `builtin_commands.register_all_commands()` 清空命令表后由
+`re_register_all_commands()` **全量重放**恢复；插件卸载时按 `owner` 批量注销。
+命令名优先短 id，与其它插件/系统命令重名时自动加 `<plugin>:` 前缀。
+
+| 扩展点 | 命令语义 | 备注 |
+|---|---|---|
+| `register_floating_card` | 打开浮动卡片 | 同名系统命令优先（不抢占） |
+| `register_workbench_tab` | 展开工作台并定位该页 | `/worktree-manager`、`/artifacts-manager`、`/history-manager`（page_id 即插件名） |
+| `register_workspace_page` | 打开工作区页面 | 由 `WorkspacePageHost` 经账本登记 |
+| `register_sidebar_item` | 等价点击侧边栏项（派发 `on_click(context)`） | 无回调时不注册 |
+| `register_input_button` | 等价点击输入区按钮（派发 `on_click(context)`） | 无回调时不注册 |
+| `register_titlebar_tab` | 等价点击标题栏常驻 tab（`on_click()`） | 无回调时不注册 |
+
+**刻意不联动命令**的扩展点（非独立可触发界面，或需上下文）：
+`register_context_menu_action`（依赖右键目标上下文）、`register_settings_card`
+（设置面板内的分区卡，属导航而非独立界面）、`register_welcome_tab` /
+`register_welcome_action`（欢迎卡片内部 tab / HTML 点击动作，需欢迎卡片在场
+且携带内容参数）、`register_content_renderer` / `register_tag_renderer` /
+`register_fence_renderer` / `register_message_factory` / `register_mention_provider` /
+`register_ui_module`（渲染/装配类，无用户可触发界面）。
 
 ---
 
@@ -252,6 +276,39 @@ def register_ui(registry):
 ### 异常隔离
 
 单个订阅回调抛异常不影响其他订阅者（记 warning 日志）。
+
+### 主题色刷新（界面残留旧主题的根治）
+
+宿主已自动派发：浮动卡（含隐藏卡、其他窗口）与工作台插件页在主题切换时会收到
+一次 `refresh_style()`，**无需自己订阅 `EV_THEME_CHANGED`**。但 `refresh_style`
+里逐个 `setStyleSheet` 的清单必然随功能演进而漏 —— 尤其是渲染期动态创建、
+没进缓存表的控件（空态标签、分页按钮、滚动条）。
+
+推荐用**主题 QSS 登记**代替裸 `setStyleSheet`：把生成函数登记到控件上，主题切换
+时宿主遍历插件子树自动重放，**控件在则样式在**。
+
+```python
+from app.utils.theme_style import bind_theme_qss, replay_theme_qss
+
+def _build_toolbar(self):
+    label = QLabel("共 12 条")
+    # ✅ 登记式：颜色一律从入参 c 取，宿主/页面重放时自动带上本控件
+    bind_theme_qss(label, lambda c: f"color: {c.TEXT_MUTED}; padding: 4px;")
+    # ❌ 反例：构造期一次性求值，Colors 更新后字符串已与主题脱钩
+    # label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 4px;")
+
+def refresh_style(self):
+    replay_theme_qss(self)   # 兜底：重放本页子树里所有登记过的控件
+```
+
+| 项 | 说明 |
+|---|---|
+| 工厂签名 | `(colors) -> str`；兼容无参 `() -> str`（旧写法可直接搬进来） |
+| 生效时机 | 浮动卡 / 工作台插件页由宿主自动重放；其他扩展点（`sidebar_item` / `input_button` / `welcome_tab`）在自己的 `refresh_style` 里调 `replay_theme_qss(self)` |
+| 未登记控件 | 不受影响（也不会被修复）—— 裸 `setStyleSheet` 的旧代码继续走各自的 `refresh_style` |
+| 内存 | 登记位是控件上的 Python 属性，随 C++ 对象销毁自然消失，无全局表、无泄漏 |
+| 销毁安全 | 控件已销毁时重放静默跳过（吞 `RuntimeError`），无需手动解绑 |
+| 批量管理 | 一组控件可用 `ThemeStyleBinder`：`bind()` 登记、`refresh()` 一键重放 |
 
 ---
 

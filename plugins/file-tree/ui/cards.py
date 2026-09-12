@@ -262,9 +262,28 @@ class FileTreeCard(QWidget):
 
     closed = pyqtSignal()
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, parent: Optional[QWidget] = None, context: Optional[dict] = None):
         super().__init__(parent)
         self._context_provider: Optional[Callable[[], dict]] = None
+        # 工作台页形态：宿主 _build_ui_context() 一次性注入；转为 provider 复用
+        # 浮动卡的取数链路（project_root / 主题色 / 字体等字段同构）
+        # 挂到实例属性：WorkbenchPanel._page_context_incomplete 据此检测
+        # 「启动早期宿主未就绪 → 拿到残缺 context」的坏页并触发重建
+        self._context = context if isinstance(context, dict) else {}
+        # 宿主上下文拉取入口（工作台页由 WorkbenchPanel._make_page_widget 注入）：
+        # 构造时的 context 是快照，项目切换后 project_root 会过期，refresh_data
+        # 时经此重取最新上下文。
+        self._host_context_provider: Optional[Callable[[], dict]] = (
+            self._context.get("context_provider") if self._context else None
+        )
+        if not callable(self._host_context_provider):
+            self._host_context_provider = None
+        if self._context:
+
+            def _ctx_provider(_ctx=self._context):
+                return _ctx
+
+            self._context_provider = _ctx_provider
         self._worker_thread: Optional[QThread] = None
         self._scanner: Optional[_TreeScanner] = None
         self._colors: dict = {}
@@ -281,6 +300,7 @@ class FileTreeCard(QWidget):
         self._setup_shortcuts()
 
         self.destroyed.connect(self._cleanup_worker)
+        self._first_show_done = False
 
     # ── UI 初始化 ──
 
@@ -303,22 +323,17 @@ class FileTreeCard(QWidget):
         self._icon_widget = IconWidget(FluentIcon.FOLDER, self._top_bar)
         self._icon_widget.setFixedSize(20, 20)
 
-        self._title_label = StrongBodyLabel("项目文件树", self._top_bar)
+        self._title_label = StrongBodyLabel("文件树", self._top_bar)
         self._title_label.setObjectName("file-tree-title")
 
         self._refresh_btn = TransparentToolButton(FluentIcon.SYNC, self._top_bar)
         self._refresh_btn.setFixedSize(32, 32)
         self._refresh_btn.setToolTip("刷新文件树")
 
-        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, self._top_bar)
-        self._close_btn.setFixedSize(32, 32)
-        self._close_btn.setToolTip("关闭")
-
         top_layout.addWidget(self._icon_widget)
         top_layout.addWidget(self._title_label)
         top_layout.addStretch()
         top_layout.addWidget(self._refresh_btn)
-        top_layout.addWidget(self._close_btn)
 
         # ── 树控件区域 ──
         self._scroll_area = ScrollArea(self)
@@ -369,7 +384,6 @@ class FileTreeCard(QWidget):
 
     def _setup_connections(self):
         # 顶栏按钮
-        self._close_btn.clicked.connect(self._on_close)
         self._refresh_btn.clicked.connect(self._on_refresh)
 
         # Model 信号
@@ -402,11 +416,53 @@ class FileTreeCard(QWidget):
     def set_context_provider(self, provider: Callable[[], dict]):
         self._context_provider = provider
 
+    def set_context(self, context: dict):
+        """工作台页形态：宿主补注 UI context（推模型，浮动卡契约兼容）
+
+        context 到达即更新取数链并重载目录树（修「启动早期挂载时宿主未就绪、
+        project_root 恒空、一直显示加载中」的问题）。
+        """
+        if not isinstance(context, dict) or not context:
+            return
+        self._context = context
+        self._context_provider = lambda: context
+        if self.isVisible():
+            self.show_card()
+
     def show_card(self):
         self._apply_latest_theme()
         self._apply_plugin_icon()
         self._async_load_tree()
         self.setVisible(True)
+
+    # ── 项目 / 工作目录联动（UI 插件可选协议） ──
+
+    def on_project_changed(self, project: str = "", workdir: str = "", window_id: str = "") -> None:
+        """项目 / 工作目录变更（宿主经 EV_PROJECT_CHANGED 派发）：立即重载目录树"""
+        self.refresh_data()
+
+    def refresh_data(self) -> None:
+        """工作台页刷新协议入口（宿主切页 / 项目联动共用）
+
+        重取宿主上下文 → 应用主题与 project_root → 重载目录树。切走再切回
+        该页也会走这里，修掉「只加载一次」的旧行为。
+        """
+        self._refresh_host_context()
+        self._apply_latest_theme()
+        self._async_load_tree()
+
+    def _refresh_host_context(self) -> None:
+        """向宿主拉最新上下文（拿不到时保持旧 context，不抛）"""
+        provider = self._host_context_provider
+        if not callable(provider):
+            return
+        try:
+            ctx = provider()
+        except Exception:
+            return
+        if isinstance(ctx, dict) and ctx:
+            self._context = ctx
+            self._context_provider = lambda _ctx=ctx: _ctx
 
     def _apply_plugin_icon(self):
         if self._context_provider is None or self._icon_widget is None:
@@ -1213,8 +1269,18 @@ class FileTreeCard(QWidget):
             return QSize(max(base.width(), 200), int(win.height() * 0.85))
         return base
 
-    def showEvent(self, event):
+    def showEvent(self, event):  # noqa: N802 (Qt 命名)
+        """显示时：首次应用主题 + 懒加载目录树，随后跟随宿主窗口尺寸
+
+        ★ 本类只允许存在**一个** showEvent：早先工作台页形态的"首次显示加载"
+        曾另起同名方法定义在 ``__init__`` 之后，被这里的后定义覆盖 → 页面显示
+        时从不调用 ``show_card()``，永远停在「正在加载文件树...」占位，点刷新
+        又因 ``_project_root`` 未初始化而报「项目目录不存在」。
+        """
         super().showEvent(event)
+        if not self._first_show_done:
+            self._first_show_done = True
+            self.show_card()
         win = self.window()
         if win:
             win.installEventFilter(self)

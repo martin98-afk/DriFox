@@ -797,7 +797,12 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
         normalized["tool_call_id"] = tool_call_id
         normalized["content"] = content_to_text(message.get("content", ""))
         normalized["name"] = str(message.get("name", "tool") or "tool")
-        normalized["arguments"] = message.get("arguments", {})
+        # 🛡️ 不伪造空 arguments：轻量剥离消息（无 arguments 键）normalize 后
+        # 若带上空 dict，extract_offload_fields 会误判「无剥离字段」，配合
+        # _write_extras 全删全插造成历史参数数据静默丢失（2026-09-12 回归）。
+        # 保留「键缺失」语义，让剥离状态穿透保存链可见。
+        if "arguments" in message:
+            normalized["arguments"] = message.get("arguments")
         normalized["success"] = bool(message.get("success", True))
         if message.get("round_id"):
             normalized["round_id"] = str(message.get("round_id"))
@@ -959,6 +964,23 @@ _HOOK_CONTENT_PATTERN = re.compile(
     r'<system-reminder>\s*<([a-z0-9-]+-hook)>.*?</\1>\s*</system-reminder>',
     re.DOTALL
 )
+
+# 宽匹配：剥除混入消息内容里的整段 system-reminder 注入
+# （覆盖无内层 hook 标签的裸注入形态，_HOOK_CONTENT_PATTERN 只认双标签）
+_SYSTEM_REMINDER_BLOCK_PATTERN = re.compile(
+    r"<system-reminder>.*?</system-reminder>",
+    re.DOTALL,
+)
+
+
+def strip_system_reminder(text: str) -> str:
+    """剥除文本中混入的 <system-reminder>...</system-reminder> 注入段
+
+    用于摘要 / 预览等只应展示用户实际内容的场景（如撤销卡片 tooltip）。
+    """
+    if not text:
+        return ""
+    return _SYSTEM_REMINDER_BLOCK_PATTERN.sub("", text)
 
 
 def _is_team_mail_text(text: str) -> bool:

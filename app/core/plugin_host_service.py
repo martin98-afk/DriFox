@@ -1093,7 +1093,13 @@ class PluginHostService(QObject):
         self._last_reload_at = now
         try:
             result = self._do_single_reload(plugin_name, component)
-            self.emit_plugin_changed(result, plugin_name)
+            # ★ __NEW__ 是哨兵而非真名：其真实插件名由 component 参数承载
+            # （见 _do_single_reload → _reload_new_plugin(component)）。若原样广播，
+            # 窗口拿到的 _plugin_name="__NEW__"，据此溯源 UI 槽位必然落空
+            # （轨迹记在真实插件名下）→ 退化成全量刷新，新装插件的精准安装失效。
+            # 此处解析成真实插件名再广播。
+            _broadcast_name = component if plugin_name == self._NEW_PLUGIN_SENTINEL else plugin_name
+            self.emit_plugin_changed(result, _broadcast_name)
         except Exception as e:
             logger.error(f"[PluginHost] 插件热更新失败: {e}")
         finally:
@@ -1575,7 +1581,13 @@ class PluginHostService(QObject):
             logger.warning("[PluginHost] PluginManager not initialized, skip component toggle")
             return {}
         if enabled:
-            return self._reload_single_plugin(plugin_name, component)
+            result = self._reload_single_plugin(plugin_name, component)
+            # ★ 广播到窗口：此前本方法只返回 result 从不上抛 plugin_changed，
+            # 「启用组件」后窗口完全收不到通知 → 新启用的 UI 组件（输入区按钮 /
+            # 欢迎卡片 tab / 工作台页）在已打开标签页中不出现，必须重启才可见。
+            # 带上真实插件名，窗口侧才能精准刷新该插件的槽位而非全量重建。
+            self.emit_plugin_changed(result, plugin_name, action="enabled")
+            return result
         registry = get_reloader_registry()
         reloaded = registry.reload(
             ReloadContext(plugin_name=plugin_name, plugin=None, component=component, is_new_plugin=False)
@@ -1583,7 +1595,10 @@ class PluginHostService(QObject):
         # mcp 依赖 30s TTL 缓存失效懒生效；其余组件卸载即时
         pm.invalidate_mcp_cache()
         logger.info(f"[PluginHost] Plugin '{plugin_name}' component '{component}' disabled → unloaded={reloaded}")
-        return {component: reloaded if reloaded is not None else False}
+        result = {component: reloaded if reloaded is not None else False}
+        # 同上：停用组件也要广播，否则已渲染的 UI 组件实例不会被摘除。
+        self.emit_plugin_changed(result, plugin_name, action="disabled")
+        return result
 
     def on_plugin_item_toggled(self, plugin_name: str, component: str, item_id: str, enabled: bool) -> dict:
         """插件细项开关后的热生效入口（系统设置「插件组件」卡调用，D10）

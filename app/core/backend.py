@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -422,6 +423,11 @@ class ChatBackend(QObject):
         # chat_worker 内部 hook（PreAssistant/PostAssistant/Stop）由 worker 直接注入
         self._hook_message_queue: "queue.Queue[Dict]" = queue.Queue()
         self._pre_tool_message_queue: "queue.Queue[Dict]" = queue.Queue()
+
+        # 繁忙时插话消息的取消回收：worker 取消排空 hook 队列时，未消费的用户插话
+        # 收集到此（供停止后回填输入框，不丢失）；queue.Queue 无法删项，只能取回。
+        self._interject_lock = threading.Lock()
+        self._recovered_interjects: list = []
 
         # Hook 完成回调 — 仅处理需要通过队列传递给 worker 的事件
         # 预对话事件（SessionStart, PreUserMessage, PostUserMessage 等）不经过此回调，
@@ -1058,6 +1064,19 @@ class ChatBackend(QObject):
         """提供问题答案"""
         if self._chat_engine:
             self._chat_engine.provide_question_answer(answer)
+
+    def stash_recovered_interjects(self, items: list) -> None:
+        """worker 取消路径回收的未消费用户插话（线程安全）"""
+        if not items:
+            return
+        with self._interject_lock:
+            self._recovered_interjects.extend(items)
+
+    def take_recovered_interjects(self) -> list:
+        """取出全部回收的插话消息（停止回填输入框后清空）"""
+        with self._interject_lock:
+            items, self._recovered_interjects = self._recovered_interjects, []
+            return items
 
     def send_message_to_engine(self, text: str, **kwargs) -> bool:
         """发送消息到引擎，支持 _user_content（multimodal list）"""

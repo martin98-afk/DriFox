@@ -446,6 +446,7 @@ class ConversationExecutor:
         safe_connect("error_occurred", "error")
         safe_connect("finished_with_content", "finished")
         safe_connect("finished_with_messages", "messages_updated")
+        safe_connect("queued_user_injected", "queued_user_injected")
         safe_connect("question_asked", "question_asked")
         safe_connect("permission_approval_requested", "permission_approval_requested")
         safe_connect("retry_status", "retry_status")

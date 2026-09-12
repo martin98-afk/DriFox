@@ -29,12 +29,11 @@ logger = logging.getLogger(__name__)
 _THIS = Path(__file__).resolve()
 _MAX_REVISIONS = 10
 # ── 遗忘步名额（火灾取物 · 物竞天择）─────────────────────
-FORGET_FACTS_LIMIT = 15
+# facts 为四分类画像（工作背景/个人背景/关键事实/当前关注），以字符预算为主约束
 FORGET_DAILY_LIMIT = 3
-FORGET_LONGTERM_LIMIT = 20
-FORGET_BUDGET_CHARS = 3000
+FORGET_BUDGET_CHARS = 8000
 # 确定性硬截预算：LLM 无视名额时按行截断（输出已要求重要度降序）
-FORGET_FACTS_BUDGET_CHARS = 1500
+FORGET_FACTS_BUDGET_CHARS = 6000
 FORGET_LONGTERM_BUDGET_CHARS = 1400
 _locks: Dict[str, threading.Lock] = {}
 

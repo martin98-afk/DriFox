@@ -169,7 +169,7 @@ from app.widgets.render_helpers import (
     get_tool_qrc_prefix,
     render_tool_block,
 )
-from app.widgets.cards.settings.history_card import format_relative_time
+from app.utils.session_preview import format_relative_time
 from app.widgets.simple_hover_tooltip import install_hover_tooltip
 
 # ======== Markdown 实例 ========
@@ -1683,6 +1683,174 @@ def _has_unclosed_think(text: str) -> bool:
     return last_close == -1
 
 
+def _registered_tag_names_safe() -> List[str]:
+    """安全获取插件注册的块标签名列表（注册表不可用时返回空列表）。
+
+    mood/plan 等人格块标签与 <think>/<tool> 同属流式协议标签：未闭合期间
+    内容不得以正文/纯文本形态进 DOM。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        return list(UIPluginRegistry.get_instance().get_registered_tag_names())
+    except Exception:
+        return []
+
+
+def _has_unclosed_registered_tag(text: str) -> bool:
+    """检测文本中是否存在未闭合的插件注册标签（如 <mood>，判据同 _has_unclosed_think）。
+
+    未闭合注册 tag 的内容若以正文/纯文本形态进 DOM，全量渲染落地时会被
+    _inject_tag_cards 替换为插件卡片 → 视觉上"文字先流式出现又消失"。
+    """
+    if not text:
+        return False
+    # chunk 边界可能把 <mood> 切成半截（尾部 "<mo"）：rfind 找不到 open 会误判
+    # 已闭合 → 放行生肉。宽松拦（误拦代价只是该 chunk 延迟一次渲染）。
+    if _PARTIAL_TAG_TAIL_RE.search(text):
+        return True
+    for tag in _registered_tag_names_safe():
+        last_open = text.rfind(f"<{tag}>")
+        if last_open == -1:
+            continue
+        if text.rfind(f"</{tag}>", last_open) == -1:
+            return True
+    return False
+
+
+# ===== 渲染型 fence 流式静默 =====
+# ```echarts / ```mermaid / ```html / ```widget（及插件注册 fence lang）闭合后
+# 由全量渲染分发为图表/卡片。半截 fence 的代码若以生肉形式增量注入 DOM，
+# 观感是"代码流式打出来、fence 闭合后被替换消失"（与 think/mood 泄漏同族）。
+# 未闭合期间静默累积，闭合后由全量渲染落地（chart-streaming 骨架/真图）。
+_CHART_FENCE_OPEN_RE = re.compile(r"^\s*(```|~~~)\s*(\w+)")
+_CHART_FENCE_LANGS = frozenset({"echarts", "mermaid", "html", "widget", "svg"})
+# chunk 边界切开标记的半截尾巴：行尾 1-3 个反引号/波浪（可能正在写 fence 开标记）
+_PARTIAL_FENCE_TAIL_RE = re.compile(r"(?:^|\n)[ \t]{0,3}[`~]{1,3}[a-zA-Z0-9]{0,15}$")
+# chunk 边界切开标签的半截尾巴：行尾 <xx（可能正在写 <mood> 等协议标签）
+_PARTIAL_TAG_TAIL_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]{0,11}$")
+
+
+def _is_render_fence_lang(lang: str) -> bool:
+    """lang 是否会渲染成卡片/图表（内置集合 + 插件 fence 渲染器注册表）。"""
+    if not lang:
+        return False
+    lang = lang.strip().lower()
+    if lang in _CHART_FENCE_LANGS:
+        return True
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        return lang in UIPluginRegistry.get_instance().get_all_fence_renderers()
+    except Exception:
+        return False
+
+
+def _has_unclosed_chart_fence(text: str) -> bool:
+    """检测文本是否停在未闭合的渲染型 fence（图表/卡片类）内部。
+
+    fence 开闭按行首 ``` / ~~~ 判定（与 _extract_fenced_code 同语义）。
+    普通代码块（python/js 等）流式生肉显示是预期行为，不在本检测范围。
+    """
+    # chunk 边界可能把 fence 开标记切成半截（尾部 "```e" 或 "``"）：状态机
+    # 匹配不到完整 lang 会误判闭合 → 放行生肉。宽松拦，代价同上。
+    if _PARTIAL_FENCE_TAIL_RE.search(text):
+        return True
+    if "```" not in text and "~~~" not in text:
+        return False
+    inside = False
+    chart = False
+    marker = ""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not inside:
+            m = _CHART_FENCE_OPEN_RE.match(stripped)
+            if m:
+                inside = True
+                marker = m.group(1)
+                chart = _is_render_fence_lang(m.group(2))
+            elif stripped.startswith("```") or stripped.startswith("~~~"):
+                inside = True
+                marker = stripped[:3]
+                chart = False
+        elif marker and stripped.startswith(marker):
+            inside = False
+            chart = False
+    return inside and chart
+
+
+def _first_unclosed_chart_fence_pos(md: str) -> int:
+    """第一个未闭合渲染型 fence 的开标记起始偏移（无 → -1）。
+
+    差量 tail 行内渲染的截断基准：未闭合 fence 起点之前的正文照常行内
+    渲染，fence 起点之后静默（与 _tail_before_unclosed_block 的 tag/think
+    截断同语义，防 updateContentAppend 删增量节点时连带丢失正文）。
+    """
+    if "```" not in md and "~~~" not in md:
+        return -1
+    inside = False
+    chart = False
+    marker = ""
+    open_pos = -1
+    offset = 0
+    for line in md.split("\n"):
+        stripped = line.strip()
+        if not inside:
+            m = _CHART_FENCE_OPEN_RE.match(stripped)
+            if m:
+                inside = True
+                marker = m.group(1)
+                chart = _is_render_fence_lang(m.group(2))
+                if chart:
+                    open_pos = offset + line.find(marker)
+            elif stripped.startswith("```") or stripped.startswith("~~~"):
+                inside = True
+                marker = stripped[:3]
+        elif marker and stripped.startswith(marker):
+            inside = False
+            chart = False
+            open_pos = -1
+        offset += len(line) + 1
+    return open_pos if (inside and chart) else -1
+
+
+def _last_para_break_outside_fence(md: str) -> int:
+    """最后一个不在 fence 内部的 ``\n\n`` 偏移（无 → -1）。
+
+    差量基线推进点若落进未闭合 fence 内部，后续差量切片起点就在 fence 内，
+    切片内的 fence 状态机（从外判起）会把内部代码行当普通段落产出 → 图表
+    源码以生肉段流入正文。stable 永不越过未闭合 fence 起点。
+    """
+    if "```" not in md and "~~~" not in md:
+        return md.rfind("\n\n")
+    inside = False
+    marker = ""
+    last = -1
+    i = 0
+    n = len(md)
+    while i < n:
+        if i == 0 or md[i - 1] == "\n":
+            # 行首：判定 fence 开闭
+            j = i
+            while j < n and md[j] in " \t":
+                j += 1
+            tok = md[j : j + 3]
+            if tok in ("```", "~~~"):
+                if not inside:
+                    inside = True
+                    marker = tok
+                elif tok == marker:
+                    inside = False
+                i = j + 3
+                continue
+        if not inside and md.startswith("\n\n", i):
+            last = i
+            i += 2
+            continue
+        i += 1
+    return last
+
+
 # ── 方案 D：data-order 统一排序 ──────────────────────────────────
 # 根因（Bug B 复发的第三条路径）：JS 直接注入 #tool-content 的工具块
 # （_inject_tool_streaming_html 流式块 / append_tool_result 完成块 /
@@ -2798,7 +2966,7 @@ _SKELETON_CACHE_MAX = 48
 # _twFlush + rAF 帧级揭示）；② FLIP 位移动画与动画串行队列（_FLIP_JS：
 # _flipCapture/_flipPlay/_animEnqueue）。旧骨架两者都没有 —— 流式仍是整块蹦字、
 # 结束态三动画叠加跳变 —— 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 28
+_SKELETON_CACHE_VERSION = 29
 
 
 def _js_literal(value) -> str:
@@ -2914,7 +3082,7 @@ _CHAR_COUNT_HTML = '<div id="char-count" style="color: var(--text-muted); font-s
 # - segments：闭合段列表（每段是一段完整 markdown 文本）
 # ============================================================
 def _has_unclosed_think_or_tool(md: str) -> bool:
-    """md 中是否存在未闭合的 `<think>` / `<tool>` 块（开标签数 > 闭合标签数）。
+    """md 中是否存在未闭合的 ``<think>`` / ``<tool>`` / 插件注册 tag 块（开标签数 > 闭合标签数）。
 
     用途：全量渲染应用后决定是否推进差量基线 `_stable_md_len`。
     首次流式迭代的 `append_reasoning` 首 chunk 会触发全量渲染（显示
@@ -2926,7 +3094,11 @@ def _has_unclosed_think_or_tool(md: str) -> bool:
     """
     if not md:
         return False
-    return md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>")
+    if md.count("<think>") > md.count("</think>") or md.count("<tool>") > md.count("</tool>"):
+        return True
+    # 插件注册 tag（如 <mood>）未闭合同样视为未闭合协议块：tail 行内渲染、
+    # 差量基线推进等守卫点共用本函数，tag 泄漏与 think 泄漏同症（闪现后消失）
+    return _has_unclosed_registered_tag(md)
 
 
 def _last_unpaired_open_pos(md: str, open_tag: str, close_tag: str) -> int:
@@ -2953,23 +3125,30 @@ def _last_unpaired_open_pos(md: str, open_tag: str, close_tag: str) -> int:
 
 
 def _tail_before_unclosed_block(md: str) -> str:
-    """截取 md 中第一个**未闭合** `<think>` / `<tool>` 块之前的部分。
+    """截取 md 中第一个**未闭合** `<think>` / `<tool>` / 注册 tag / 渲染型 fence 之前的部分。
 
     差量渲染的 tail（未闭合尾部）含未闭合协议块时会被静默丢弃（防思考内容泄漏
-    到正文、防半截 `<tool>` 被渲染成假卡片）。但 JS `updateContentAppend` 会
-    无条件 remove 全部 `[data-incremental]` 节点——若 tail 整段不重建，未闭合块
-    **之前**已经显示出来的正文会跟着一起消失，且此后无人补回（用户可见
-    “流式输出吞内容”）。
+    到正文、防半截 `<tool>` 被渲染成假卡片、防半截图表源码行内渲染成代码块）。
+    但 JS `updateContentAppend` 会无条件 remove 全部 `[data-incremental]` 节点
+    ——若 tail 整段不重建，未闭合块**之前**已经显示出来的正文会跟着一起消失，
+    且此后无人补回（用户可见“流式输出吞内容”）。
 
     因此丢弃只应发生在未闭合块起点**之后**：之前的正文照常行内渲染。
     """
-    if not md or not _has_unclosed_think_or_tool(md):
+    if not md:
+        return md
+    _fence_pos = _first_unclosed_chart_fence_pos(md)
+    if not _has_unclosed_think_or_tool(md) and _fence_pos == -1:
         return md
     cut = len(md)
-    for open_tag, close_tag in (("<think>", "</think>"), ("<tool>", "</tool>")):
+    pairs = [("<think>", "</think>"), ("<tool>", "</tool>")]
+    pairs += [(f"<{t}>", f"</{t}>") for t in _registered_tag_names_safe()]
+    for open_tag, close_tag in pairs:
         pos = _last_unpaired_open_pos(md, open_tag, close_tag)
         if pos != -1:
             cut = min(cut, pos)
+    if _fence_pos != -1:
+        cut = min(cut, _fence_pos)
     return md[:cut] if cut != len(md) else md
 
 
@@ -3015,6 +3194,13 @@ def _extract_closed_segments(md: str):
     _first_close_tool = md.find("</tool>")
     if _first_close_tool != -1 and (_first_open_tool == -1 or _first_close_tool < _first_open_tool):
         return 0, []
+    # 插件注册 tag 同防护：切片起点落在未闭合 tag 内部（历史遗留基线）时，
+    # 第一个 close 在 open 之前 → 整个切片不产出，交给全量渲染兜底
+    for _tag in _registered_tag_names_safe():
+        _fo = md.find(f"<{_tag}>")
+        _fc = md.find(f"</{_tag}>")
+        if _fc != -1 and (_fo == -1 or _fc < _fo):
+            return 0, []
 
     segments = []
     stable_len = 0
@@ -3069,6 +3255,11 @@ def _extract_closed_segments(md: str):
             break  # think 未闭合 → 停止（尾部留在稳定区之外）
         if seg.count("<tool>") > seg.count("</tool>"):
             break  # tool 未闭合 → 停止
+        # 插件注册 tag（如 <mood>，人格块常含 \n\n 多段落）未闭合 → 停止：
+        # 半截 tag 段若照常产出，基线推进到 tag 内部，闭合后的 tail 无 open 有
+        # close → 孤立 close 被清理、内容当正文渲染（泄漏后随全量渲染消失）
+        if _has_unclosed_registered_tag(seg):
+            break
 
         # 该段完整闭合：产出
         segments.append(seg)
@@ -3120,6 +3311,44 @@ def _render_stable_segment(md_seg: str, compact: bool = False) -> str:
     return html
 
 
+# ── [PERF] 尾部行内渲染的「纯文本快路径」─────────────────────────────────
+# 流式期间 _render_tail_inline 每次都要把整个 tail 走一遍完整管线（sanitize →
+# 公式提取 → code 解包 → 上下文链接 → fence 抽取 → think/tool/hook/tag 四次
+# inject → md.convert → 图片解析），是十余次 O(tail) 扫描 + 一次完整 markdown
+# 转换。中文正文绝大多数时候 tail 是**纯文本**（没有 `` ` `` `*` `[` 等任何
+# markdown 语法），此时这些扫描全部是无效功。
+#
+# 命中快路径时直接 escape 输出（与 nl2br 扩展对齐：空行分段、段内换行转
+# <br>），把 O(tail) × 10+ 降为 O(tail) × 1。判据保守：只要出现任一语法字符
+# 就退回完整管线，**宁可少快一次，不可错渲染一次**。
+_TAIL_MD_SYNTAX_RE = re.compile(
+    r"[`*_~\[\]#<>|\\$]"  # 行内/块级 markdown 标记（$ 为公式定界符，一并保守排除）
+    r"|!\["  # 图片
+    r"|https?://"  # 自动链接
+    r"|^\s{0,3}(?:[-+*]|\d+[.)])\s"  # 列表项
+    r"|^\s{0,3}>"  # 引用
+    r"|^\s{0,3}#{1,6}\s"  # 标题
+    r"|^\s{0,3}```"  # 代码围栏
+    r"|^\s{0,3}\|.*\|"  # 表格行
+    r"|^\s{0,3}(?:---+|\*\*\*+)$",  # 分隔线
+    re.MULTILINE,
+)
+
+
+def _render_plain_tail(text: str) -> str:
+    """纯文本尾部的等价 HTML（仅供 _render_inline_tail 快路径使用）。
+
+    与 markdown + nl2br 的输出对齐：空行分段为 <p>，段内单换行转 <br>。
+    """
+    parts = []
+    for para in text.split("\n\n"):
+        para = para.strip("\n")
+        if not para.strip():
+            continue
+        parts.append("<p>" + escape(para).replace("\n", "<br>") + "</p>")
+    return "".join(parts)
+
+
 def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     """渲染流式未闭合尾部为行内 HTML（差量渲染的即时格式化路径）。
 
@@ -3151,6 +3380,11 @@ def _render_inline_tail(md_text: str, compact: bool = False) -> str:
     # 场景，此处双保险（防御历史残段/异常路径）。
     if "<think>" in md_text or "</think>" in md_text or "<tool>" in md_text or "</tool>" in md_text:
         return ""
+    # [PERF] 纯文本快路径：无任何 markdown / 公式 / 扩展语法时直接 escape 输出，
+    # 跳过下方十余道 O(tail) 扫描与一次完整 markdown 转换。中文正文命中率极高
+    # （实测长段落流式下这是主线程最大的单项开销）。
+    if not _TAIL_MD_SYNTAX_RE.search(md_text):
+        return _render_plain_tail(md_text)
     safe_md = _sanitize_incomplete_markdown(md_text)
     safe_md = _extract_formulas(safe_md)  # KaTeX 公式提取
     safe_md = _unwrap_code_blocks_with_context_links(safe_md)
@@ -3238,6 +3472,21 @@ _STREAMING_DOCK_JS = """
                     var _flipPrev = (typeof window._flipCapture === 'function') ? window._flipCapture() : null;
                     document.body.classList.toggle('streaming-dock', on);
                     if (!on && wasOn) {
+                        // 🐛 修复（坞态归位正文置顶）：坞态下正文容器限高内滚，用户
+                        // 阅读位置在 #content-placeholder.scrollTop。归位移除
+                        // max-height 后 clientHeight 骤增至全高，浏览器把该值钳到 0
+                        // → 正文跳顶、阅读位置丢失（坞态内展开工具完成框阅读时必现）。
+                        // 切 class 前先读出位置，切换后迁移到新滚动容器 document.body；
+                        // 归位后正文起点在工具区下方，迁移值需加工具区实际高度。
+                        var _cpDock = document.getElementById('content-placeholder');
+                        var _cpReading = _cpDock ? _cpDock.scrollTop : 0;
+                        if (_cpReading > 0 && _cpDock) {
+                            _cpDock.scrollTop = 0;
+                            var _tsDocked = ts ? ts.offsetHeight : 0;
+                            var _cpMigrated = _cpReading + (_tsDocked > 0 ? _tsDocked : 0);
+                            var _bodyMax = Math.max(0, document.body.scrollHeight - document.body.clientHeight);
+                            document.body.scrollTop = Math.min(_cpMigrated, _bodyMax);
+                        }
                         // 坞态 → 归位顶部：正文整体下移 ≈ 工具区高度，
                         // 用户上滚阅读时补偿 scrollTop，避免阅读位置跳动
                         if (!_atBottom && _dockH > 0) {
@@ -3646,6 +3895,9 @@ _CONTENT_AUTOSCROLL_JS = """
                     // 页面内收到的事件属冒泡残留，置位会让跟随被无关操作误锁死。
                     if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {
                         this._userScrolledUp = true;
+                        // 即时上报阅读状态：不等下一次渲染的 reportHeight，抢在
+                        // 「滚轮 → 下一帧 chunk 渲染 → 高度变化外层拉底」竞争窗口之前。
+                        if (typeof reportHeight === 'function') reportHeight();
                     }
                 }, {passive: true});
                 document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
@@ -4108,6 +4360,10 @@ class ConsoleMonitorPage(QWebEnginePage):
     codeActionRequested = pyqtSignal(str, str)
     contextActionRequested = pyqtSignal(str, str)
     heightReported = pyqtSignal(int)
+    # 🐛 卡片内阅读标志：reportHeight 第 4 字段翻转时推送（见 javaScriptConsoleMessage）。
+    # WebEngine 内滚动不动 Qt 滚动条，宿主 away 守卫对卡内阅读完全失明，
+    # 外层滚底判定必须显式查询此状态让位。
+    cardReadingChanged = pyqtSignal(bool)
     # 🐛 滚动判据修复：wheelEvent 原先只能用 page().scrollPosition()（文档级），
     # 但真正的滚动容器是 body（CSS: body{overflow-y:scroll}），文档级 scrollTop
     # 恒为 0 → at_top 恒真 / at_bottom 恒假 → 向下滚动永远被判为"内部处理"，
@@ -4171,10 +4427,18 @@ class ConsoleMonitorPage(QWebEnginePage):
             try:
                 payload = msg.split(":", 1)[1]
                 if "|" in payload:
-                    h_str, st_str, ch_str = payload.split("|", 2)
-                    h = int(float(h_str))
+                    # 第 4 字段（可选，旧格式兼容）：卡片内用户阅读标志。
+                    # 翻转才发信号：reportHeight 高频（流式 ~30ms/条），布尔去重后
+                    # 信号量与用户滚动行为同阶，宿主侧零轮询成本。
+                    parts = payload.split("|", 3)
+                    h = int(float(parts[0]))
+                    if len(parts) >= 4:
+                        _rd = parts[3] == "1"
+                        if _rd != getattr(self, "_last_card_reading", False):
+                            self._last_card_reading = _rd
+                            self.cardReadingChanged.emit(_rd)
                     self.heightReported.emit(h)
-                    self.bodyGeometryReported.emit(h, int(float(st_str)), int(float(ch_str)))
+                    self.bodyGeometryReported.emit(h, int(float(parts[1])), int(float(parts[2])))
                 else:
                     self.heightReported.emit(int(float(payload)))
             except Exception:
@@ -4464,10 +4728,24 @@ class _DialogEventFilter(QObject):
                 hidden.discard(obj)
                 if not hidden:
                     viewer.show()
+                    viewer._restore_chat_scroll_pos()
 
 
 # 模块级单例：全局仅此一个 QApplication 级事件过滤器
 _dialog_event_filter = _DialogEventFilter()
+
+# D3D11/WARP 单纹理物理上限 16384px，留余量取 16000（见 CodeWebViewer.MAX_HEIGHT 注释）
+_PHYSICAL_TEXTURE_LIMIT = 16000
+
+
+def _logical_height_cap(dpr, physical_limit: int = _PHYSICAL_TEXTURE_LIMIT) -> int:
+    """DPR → 不超物理纹理上限的逻辑高度（纯函数，供单测复用）。
+
+    Chromium 离屏表面按「逻辑尺寸 × DPR」分配物理纹理，逻辑上限必须随本机
+    缩放收缩。异常 DPR（0/负数）按 1.0 处理；结果保底 2000 保证可用性。
+    """
+    dpr = float(dpr) if dpr and float(dpr) > 0 else 1.0
+    return max(2000, int(physical_limit / dpr))
 
 
 class CodeWebViewer(QWebEngineView):
@@ -4509,6 +4787,17 @@ class CodeWebViewer(QWebEngineView):
 
     def __init__(self, parent=None, light=False):
         super().__init__(parent)
+        # 🛡️ 物理纹理上限钳制：Chromium 离屏表面按「逻辑尺寸 × DPR」分配物理纹理，
+        # D3D11/WARP 单纹理硬上限 16384px。225% 缩放（DPR 2.25）下 10000 逻辑
+        # → 22500 物理 → ResizeOffscreenFramebuffer 分配失败 → GPU 上下文丢失
+        # （gles2_cmd_decoder "excessive dimensions" → MakeCurrent failed for GetTextureQt）。
+        # 逻辑上限随本机 DPR 收缩，保物理 ≤ 16000（留 384 余量）；
+        # 超限内容回退内滚安全网（wheelEvent 内外转发，见 MAX_HEIGHT 注释）。
+        # 实例属性覆盖类常量：下方 resize/setFixedHeight 钳制与骨架 CSS
+        # max-height 均按 self.MAX_HEIGHT 取值，全部自动生效。
+        self.MAX_HEIGHT = min(
+            CodeWebViewer.MAX_HEIGHT, _logical_height_cap(self.devicePixelRatioF())
+        )
         # [B4-强回收] renderer 进程 PID（强回收层 kill 离屏进程用；0 = 未就绪/已清理）
         self._renderer_pid: int = 0
         # [B3] 连接线程池渲染完成信号（worker 线程 emit → 本槽在主线程执行）
@@ -4597,6 +4886,8 @@ class CodeWebViewer(QWebEngineView):
         # [PERF] 流式速度跟踪：用于自适应安全渲染间隔
         self._last_chunk_time = 0.0  # 上次 append_chunk 的时间戳（monotonic ns）
         self._current_adaptive_interval = self._SAFETY_RENDER_INTERVAL  # 当前自适应间隔
+        # [PERF] 上次 _perform_update 的时刻（monotonic 秒），供软边界合并窗口判断
+        self._last_render_ts = 0.0
 
         # 内部文档高度跟踪（用于 wheelEvent 判断内部是否可滚动）
         self._document_height = 0
@@ -4647,8 +4938,10 @@ class CodeWebViewer(QWebEngineView):
 
         self._page.codeActionRequested.connect(self.codeActionRequested.emit)
         self._page.contextActionRequested.connect(self.contextActionRequested.emit)
+        self._user_reading_inside = False
         self._page.heightReported.connect(self._on_height_reported)
         self._page.bodyGeometryReported.connect(self._on_body_geometry_reported)
+        self._page.cardReadingChanged.connect(self._on_card_reading_changed)
         self._page.contentReady.connect(self._on_js_ready)
         self._page.toolDiffRequested.connect(self.toolDiffRequested.emit)
         self._page.subAgentLogRequested.connect(self.subAgentLogRequested.emit)
@@ -4664,6 +4957,8 @@ class CodeWebViewer(QWebEngineView):
         # ── 对话框层级管理 ──
         # _hidden_dialogs: set，记录当前导致 WebView 隐藏的对话框对象
         self._hidden_dialogs = set()
+        # 遮罩对话框隐藏期间记录的外层滚动位置（-1 = 无记录），恢复显示后回设
+        self._saved_dialog_scroll_pos = -1
 
     # ──────────────────────────────────────────────
     # 对话框 HWND 穿透防护
@@ -4676,6 +4971,19 @@ class CodeWebViewer(QWebEngineView):
     #       额外用 eventFilter 监听 Hide/Close/Destroy 事件兜底，
     #       避免原生对话框（无 Qt 信号）导致永久隐藏。
 
+    def _find_chat_scroll_area(self):
+        """沿 Qt 父链找到外层聊天滚动区（宿主窗口的 chat_scroll_area 属性）"""
+        try:
+            widget = self.parentWidget()
+            while widget is not None:
+                area = getattr(widget, "chat_scroll_area", None)
+                if area is not None:
+                    return area
+                widget = widget.parentWidget()
+        except RuntimeError:
+            pass
+        return None
+
     def _hide_for_dialog(self, dialog):
         """对话框显示时隐藏 WebView，防止原生 HWND 穿透遮罩"""
         hidden = getattr(self, "_hidden_dialogs", None)
@@ -4684,6 +4992,15 @@ class CodeWebViewer(QWebEngineView):
             self._hidden_dialogs = hidden
         if dialog in hidden:
             return  # 同一对话框重复 Show/FocusIn 不叠加计数
+        # 首个 viewer 隐藏前记录外层滚动位置：viewer 隐藏令卡片高度塌缩、
+        # chat_scroll_area 内容总高骤减，滚动条 value 被 Qt 自动 clamp，
+        # 恢复显示后无人回设 → 滚动位置丢失（跳到底部/顶部）
+        if not hidden:
+            try:
+                area = self._find_chat_scroll_area()
+                self._saved_dialog_scroll_pos = area.verticalScrollBar().value() if area is not None else -1
+            except RuntimeError:
+                self._saved_dialog_scroll_pos = -1
         hidden.add(dialog)
         self.hide()
         # finished + destroyed 双信号：dismiss 即恢复，销毁兜底
@@ -4705,6 +5022,30 @@ class CodeWebViewer(QWebEngineView):
             hidden.discard(sender)
         if not hidden:
             self.show()
+            self._restore_chat_scroll_pos()
+
+    def _restore_chat_scroll_pos(self):
+        """恢复 hide 前记录的外层滚动位置。
+
+        show() 触发的布局重排经 posted LayoutRequest 事件完成，Qt 事件循环
+        中 posted 事件先于 timer 处理，故 singleShot(0) 时 maximum 已恢复。
+        """
+        pos = getattr(self, "_saved_dialog_scroll_pos", -1)
+        self._saved_dialog_scroll_pos = -1
+        if pos < 0:
+            return
+
+        def _apply():
+            try:
+                area = self._find_chat_scroll_area()
+                if area is None:
+                    return
+                bar = area.verticalScrollBar()
+                bar.setValue(max(bar.minimum(), min(pos, bar.maximum())))
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(0, _apply)
 
     @property
     def _tool_compact_mode(self) -> bool:
@@ -4927,6 +5268,13 @@ class CodeWebViewer(QWebEngineView):
         if self._height_report_pending:
             self._height_report_pending = False
         self._do_resize_check()
+
+    def _on_card_reading_changed(self, reading: bool):
+        """记录「用户正在卡片内部滚动阅读」状态（reportHeight 第 4 字段翻转时推送）
+
+        宿主（MessageCard / main_widget）经 is_user_reading_inside() 查询。
+        """
+        self._user_reading_inside = reading
 
     def _on_height_reported(self, h):
         # 🐛 打点：结束这一拍的"JS 落地 + 布局"耗时 = 渲染派发 → 首个 reportHeight。
@@ -7943,7 +8291,19 @@ class CodeWebViewer(QWebEngineView):
                     // 故在高频回传中顺带携带 body 的 scrollTop / clientHeight，
                     // Python 侧据此算出真实可滚动量 = scrollHeight - clientHeight。
                     // 注意保持'|'分隔协议，旧解析器（仅高度）仍可工作。
-                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0));
+                    // 🐛 第 4 字段「卡片内阅读标志」：body/cp/tc/todo 任一被用户上滚
+                    // 即为 1（语义与各容器自动滚底守卫同源，单一真相）。缺此字段时
+                    // 流式每个高度变化都会把卡片拉回「底部对齐」固定姿态。
+                    var _rd = (window._userScrolledWithin === true);
+                    try {{
+                        var _cpR = document.getElementById('content-placeholder');
+                        if (_cpR && _cpR._userScrolledUp === true) _rd = true;
+                        var _tcR = document.getElementById('tool-content');
+                        if (_tcR && _tcR._userScrolledUp === true) _rd = true;
+                        var _tdR = document.getElementById('todo-content');
+                        if (_tdR && _tdR._userScrolledUp === true) _rd = true;
+                    }} catch (_e) {{}}
+                    console.log('pywebview_height:' + h + '|' + (_b.scrollTop|0) + '|' + (_b.clientHeight|0) + '|' + (_rd ? '1' : '0'));
                 }}
                 // 批量报告高度：流式每 chunk 一次 IPC 开销高，改为 3 帧合并
                 // （rAF ×3 后 reportHeight 一次），动画期间仍暂停报告
@@ -8944,6 +9304,8 @@ class CodeWebViewer(QWebEngineView):
                 document.getElementById('tool-content')?.addEventListener('wheel', function(e) {{
                     if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
                         this._userScrolledUp = true;
+                        // 即时上报阅读状态（竞争窗口同 #content-placeholder wheel）
+                        if (typeof reportHeight === 'function') reportHeight();
                     }}
                 }}, {{passive: true}});
                 // 任务列表滚动跟踪：与工具区同款（程序滚动/重建不算用户行为）
@@ -8958,6 +9320,8 @@ class CodeWebViewer(QWebEngineView):
                 document.getElementById('todo-content')?.addEventListener('wheel', function(e) {{
                     if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
                         this._userScrolledUp = true;
+                        // 即时上报阅读状态（竞争窗口同 #content-placeholder wheel）
+                        if (typeof reportHeight === 'function') reportHeight();
                     }}
                 }}, {{passive: true}});
                 {_STREAMING_DOCK_JS}
@@ -9064,6 +9428,13 @@ class CodeWebViewer(QWebEngineView):
     _ADAPTIVE_INTERVAL_SLOW = 500
     _ADAPTIVE_THRESHOLD_FAST = 200  # ms
     _ADAPTIVE_THRESHOLD_SLOW = 500  # ms
+    # [PERF] 软边界（句号结尾）的**最小渲染间隔**（ms）—— 不是固定延迟，而是
+    # 「距上次渲染不足此窗口才合并，否则照旧即时渲染」。
+    # 中文正文句号极密集（约每 15~40 字一个），密集流式下无脑 immediate 会让
+    # 上方 150~500ms 的自适应节流形同虚设，退化为「每 chunk 一次 O(tail) 转换」
+    # ——随消息长度呈 O(n²)，是「流式越到后面越卡」的主因。
+    # 用最小间隔而非固定延迟，可在快速流式合并的同时保住慢速流式的即时观感。
+    _SOFT_BOUNDARY_MERGE_MS = 40
     # 预编译代码块闭合检测
     _CLEAN_BOUNDARY_CODE_BLOCK_RE = re.compile(r"```[\s]*$")
     # 长内容**历史渲染**走线程池的字符阈值（仅用于非"流式结束"的渲染）。
@@ -9131,10 +9502,12 @@ class CodeWebViewer(QWebEngineView):
         if not self._is_js_ready:
             return
         if self._streaming and len(text) > 3:
-            # 差量渲染：仅在自然边界（硬/软）触发，否则靠增量文本 + 安全兜底
-            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(
-                self._markdown_text
-            ):
+            # 差量渲染：仅在自然边界触发，否则靠增量文本 + 安全兜底
+            # [PERF] 软边界（句号）不再走 immediate —— 中文句号密度极高，
+            # 每命中一次就同步跑一遍 O(tail) 的 markdown 转换，随消息增长呈
+            # O(n²)。改由 _schedule_render 内部的 90ms 短定时器合并（见
+            # _SOFT_BOUNDARY_RENDER_DELAY_MS），硬边界仍保持 immediate。
+            if self._has_reached_clean_boundary(self._markdown_text):
                 self._schedule_render(immediate=True)
             else:
                 self._schedule_render(immediate=False)
@@ -9419,11 +9792,30 @@ class CodeWebViewer(QWebEngineView):
         # 1. 自然边界触发（由 append_chunk 检测到并传 immediate=True）
         # 2. 安全兜底：2s 内无边界到达，强制渲染确保格式最终正确
         if self._streaming:
-            # 流式模式下检查自然边界（硬边界空行 / 软边界句号结尾）
-            if self._has_reached_clean_boundary(self._markdown_text) or self._has_reached_soft_boundary(
-                self._markdown_text
-            ):
+            # 硬边界（段落结束 / think 闭合 / 代码块闭合）：立即渲染。
+            # 硬边界密度远低于软边界，且段落结束必须及时重排，保持同步。
+            if self._has_reached_clean_boundary(self._markdown_text):
                 self._perform_update()
+                return
+            # 软边界（句号结尾）：**仅在密集流式时合并**，否则仍即时渲染。
+            #
+            # 背景：中文句号极密集，无脑 immediate 会让整个自适应节流失效并退化
+            # 为 O(n²)；但一律延迟又会拖慢打字机观感（句子结束后格式迟迟不变）。
+            # 折中：只有「距上次渲染不足一个合并窗口」时才推迟到窗口末尾——
+            #   慢速流式（人能逐句阅读）→ 仍 immediate，观感与优化前一致；
+            #   快速流式（连续句号刷屏）→ 合并为窗口内一次，砍掉重复转换。
+            if self._has_reached_soft_boundary(self._markdown_text):
+                since_last_ms = (time.monotonic() - getattr(self, "_last_render_ts", 0.0)) * 1000
+                if since_last_ms < self._SOFT_BOUNDARY_MERGE_MS:
+                    # ⚠️ 定时器已激活时必须比较间隔再决定是否重启：
+                    # _render_timer 是 singleShot，若已被 150~500ms 的兜底定时器
+                    # 占用而不重启，句子结束也要干等到兜底间隔才渲染（观感明显变慢）。
+                    if (not self._render_timer.isActive()) or (
+                        self._render_timer.interval() > self._SOFT_BOUNDARY_MERGE_MS
+                    ):
+                        self._render_timer.start(self._SOFT_BOUNDARY_MERGE_MS)
+                else:
+                    self._perform_update()
                 return
             # 无边界：启安全定时器（仅当未激活时）
             # [PERF] 使用自适应间隔：快速流式用 150ms，慢速用 500ms，默认 300ms
@@ -9547,6 +9939,8 @@ class CodeWebViewer(QWebEngineView):
         # ⚠️ 必须无条件取时间：此前写成 `perf_counter() if FINISH_TIMING_ENABLED else 0.0`，
         # 未开打点时 _t_enter=0，render 会被算成 perf_counter()*1000（千万毫秒级假数据）。
         _t_enter = time.perf_counter()
+        # [PERF] 记录本次渲染时刻，供 _schedule_render 的软边界合并窗口判断
+        self._last_render_ts = time.monotonic()
         try:
             if not self.page():
                 return
@@ -9812,6 +10206,10 @@ class CodeWebViewer(QWebEngineView):
         # 当正文泄漏显示），等闭合后由差量段/全量渲染处理。
         if _has_unclosed_think_or_tool(_tail):
             return
+        # 渲染型 fence 未闭合：静默累积（半截图表代码不能行内渲染成普通代码块，
+        # 闭合后由全量渲染分发 chart-streaming 骨架/真图）
+        if _has_unclosed_chart_fence(_tail):
+            return
         _h = hash(_tail)
         if _h == self._tail_html_hash:
             return
@@ -9958,7 +10356,9 @@ class CodeWebViewer(QWebEngineView):
                 # 推进到最后段落边界后，末段整体划入 tail 区：打标删除与 tail 重建
                 # 语义闭环（删掉的正是 tail 会重建的），不丢不重。
                 _md_r = self._last_rendered_markdown
-                _last_break = _md_r.rfind("\n\n")
+                # fence 感知：推进点不落在未闭合 fence 内部（否则后续差量切片
+                # 起点在 fence 内，内部代码行被当普通段产出 → 图表源码生肉流入）
+                _last_break = _last_para_break_outside_fence(_md_r)
                 self._stable_md_len = _last_break + 2 if _last_break != -1 else 0
             # 🐛 修复（思考框/工具框重复）：md 含未闭合块时基线**不推进**（防残段
             # 泄漏到正文），但 DOM 里已渲染出该块（think-streaming / 工具框）。
@@ -10077,6 +10477,15 @@ class CodeWebViewer(QWebEngineView):
                 return
             extra = latest[len(snapshot) :]
             if not extra.strip():
+                return
+            # 🐛 未闭合 tag/think/渲染型 fence 的半截内容不能以纯文本回补 DOM
+            # （快照可能切在块中间，extra 检不出 open 标签 → 检测用全量 latest）：
+            # 回补后会在下一次全量渲染被卡片/图表替换 → "文字闪现后消失"
+            if (
+                _has_unclosed_registered_tag(latest)
+                or _has_unclosed_think(latest)
+                or _has_unclosed_chart_fence(latest)
+            ):
                 return
             self._append_text_incremental(extra)
         except RuntimeError:
@@ -13931,6 +14340,17 @@ class MessageCard(SimpleCardWidget):
         )
         self._retry_status_widget.setVisible(True)
 
+    def is_user_reading_inside(self) -> bool:
+        """用户是否正在卡片内部（WebEngine 侧）滚动阅读。
+
+        body / #content-placeholder / #tool-content / #todo-content 任一容器被
+        用户上滚即为 True。WebEngine 内滚动不会移动 Qt 滚动条，宿主的
+        ``_user_intentionally_away_from_bottom`` 对卡内阅读完全失明；外层滚底
+        判定必须显式查询此状态让位，否则流式中每个高度变化都会把卡片拉回
+        「底部对齐」固定姿态（正文阅读位置反复被推走的根因）。
+        """
+        return bool(getattr(self.viewer, "_user_reading_inside", False))
+
     def _emit_card_diff_requested(self):
         """发射卡片差异请求信号
 
@@ -14827,16 +15247,22 @@ class MessageCard(SimpleCardWidget):
             # 🆕 检测未闭合 <think> 标签：静默累积不触发渲染，与 append_reasoning 策略一致
             # 避免每个思考文本 chunk 都触发全量渲染 → reorganizeContent → think-streaming
             # DOM 节点反复 destroy+recreate 导致"思考中"状态闪烁。
+            # 🆕 检测未闭合 <think> / 插件注册 tag / 渲染型 fence：静默累积不触发渲染，与 append_reasoning 策略一致
             last_block = self._content_data[-1] if self._content_data else None
             last_text = last_block.get("text", "") if isinstance(last_block, dict) else ""
             _think_unclosed = _has_unclosed_think(last_text)
+            _tag_unclosed = _has_unclosed_registered_tag(last_text)
+            _fence_unclosed = _has_unclosed_chart_fence(last_text)
             # 流式模式下增量追加纯文本到 DOM，让用户立即看到文字。
             # 🐛 修复（高块闪现）：think 未闭合期间**不**调用 _append_text_incremental ——
             # 否则思考内容会以普通正文逐行注入 #content-placeholder 堆叠成高块，
             # 待 </think> 闭合后才由 _inject_think_cards 折叠成 think-compact，高块
             # 闪现后消失。与 append_reasoning 一致：未闭合期间静默累积、仅靠全量
             # 渲染落地；think 已闭合 / 无 think 标签时保持原有增量注入行为不变。
-            if self._streaming and not _think_unclosed:
+            # 插件注册 tag（<mood> 等）与渲染型 fence（```echarts 等）未闭合同样
+            # 跳过增量注入：生肉进 DOM 后会被全量渲染的卡片/图表替换 →
+            # "文字/代码先流式出现又消失"
+            if self._streaming and not _think_unclosed and not _tag_unclosed and not _fence_unclosed:
                 self.viewer._append_text_incremental(text)
             if _think_unclosed:
                 if not self.viewer._think_text_streaming_started:
@@ -14847,6 +15273,15 @@ class MessageCard(SimpleCardWidget):
                 # 后续 chunk：静默累积，不触发渲染/高度更新
                 self._content_just_loaded = True
                 return
+            # 🐛 插件注册 tag（<mood> 等）未闭合：增量注入已跳过（与 think 同策略）。
+            # 状态翻转（tag 首现/闭合）时强制全量渲染一次——差量快路径的闭合段
+            # append 与 tail 行内均被 tag 守卫拦截，占位行（"解析中…"）与完整
+            # 卡片只能由全量管线的 _inject_tag_cards 产出；闭合翻转也走全量，
+            # 卡片即刻展开而无需等下一个边界。
+            if _tag_unclosed != getattr(self.viewer, "_tag_text_streaming", False):
+                self.viewer._needs_full_render = True
+                self.viewer._schedule_render(immediate=True)
+            self.viewer._tag_text_streaming = _tag_unclosed
             # <think> 已闭合或无 think 标签：恢复正常渲染
             self.viewer._think_text_streaming_started = False
             # 恢复 _thinking_finalized：避免 _render_markdown_to_html 误剥离
@@ -14856,9 +15291,9 @@ class MessageCard(SimpleCardWidget):
             # 文字即时性已由 _append_text_incremental 保证。全量 HTML 渲染
             # 仅在自然边界触发（段落结束 / 块闭合 / 句号软边界），非边界时只启安全定时器。
             # last_text 已通过 append_text_block 包含新追加文本，判断可靠。
-            if self._streaming and (
-                self.viewer._has_reached_clean_boundary(last_text) or self.viewer._has_reached_soft_boundary(last_text)
-            ):
+            # [PERF] 软边界（句号）不再 immediate —— 与 append_chunk /
+            # _schedule_render 保持一致，交由内部 90ms 短定时器合并。
+            if self._streaming and self.viewer._has_reached_clean_boundary(last_text):
                 self.viewer._schedule_render(immediate=True)
             else:
                 self.viewer._schedule_render(immediate=False)
@@ -15978,10 +16413,6 @@ class MessageCard(SimpleCardWidget):
                 → 坞态永久沉底、正文限矮（流式结构残留 bug 根因），
                 故打断/错误调用方必须传 True。
         """
-        logger.info(
-            f"[DBG-SCF] finish_streaming card={id(self) % 100000} "
-            f"history={history} force_dock_off={force_dock_off}"
-        )
         try:
             # [PERF] 先停 20fps 流式脉冲动画：它会周期性 update() 整卡（重绘
             # 渐变边框/流动光点），与紧随其后的最终全量渲染抢主线程。

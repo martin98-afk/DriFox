@@ -8,7 +8,7 @@ SystemCardFrame — QFrame 基类 + 标准头部布局 + 固定边框
 - ScrollArea 内容区
 """
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -33,6 +33,13 @@ class SystemCardFrame(QFrame):
     # 高度模式：'proportional' = 随窗口缩放（默认），'content' = 按内容自适应
     _height_mode: str = "proportional"
 
+    # proportional 期望高度的固定 UI 预留（标题栏 + 输入框 + 边距）。
+    # 0.85 比例隐含“其余 15% 足够容纳窗口外固定 UI”，窗口矮时 15% 远不够，
+    # 期望高度会顶破可用空间 → 卡片底部（含滚动条）被窗口裁掉。
+    _PROPORTIONAL_RESERVED = 200
+    # 窗口再矮也保底的卡片可见高度（头部 + 一两行内容，内容区滚动查看）
+    _MIN_CARD_VISIBLE_H = 120
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # 构造期间即隐藏：系统卡片内容重（子卡片多），若构造时父窗口已可见
@@ -40,6 +47,8 @@ class SystemCardFrame(QFrame):
         # 所有系统卡片均经 CardManager 切换显隐，默认隐藏不影响正常使用。
         self.setVisible(False)
         self._height_mode = SystemCardFrame._height_mode
+        # 窗口 resize 后重算父容器高度的防抖定时器（懒创建，见 eventFilter）
+        self._container_sync_timer: QTimer = None
         self._build_base_ui()
 
     def set_height_mode(self, mode: str):
@@ -478,11 +487,15 @@ class SystemCardFrame(QFrame):
                 cap = max(self.minimumHeight(), int(win.height() * 0.80))
                 h = min(h, cap)
             return QSize(w, max(h, self.minimumHeight()))
-        # proportional 模式：按窗口比例缩放
+        # proportional 模式：按窗口比例缩放，但不超过「窗口高 - 固定 UI 预留」。
+        # 窗口矮时 0.85 比例的期望高度会超过窗口实际可分配空间（标题栏 + 输入框
+        # 固定占用 ~200px），硬下限也随之让位，保底 _MIN_CARD_VISIBLE_H；
+        # 否则卡片底部（含滚动条）会被窗口边缘裁掉，内容无法触达。
         win = self.window()
         if win and win.height() > 0:
             target_h = max(self.minimumHeight(), int(win.height() * 0.85))
-            return QSize(w, target_h)
+            ceiling = max(self._MIN_CARD_VISIBLE_H, win.height() - self._PROPORTIONAL_RESERVED)
+            return QSize(w, min(target_h, ceiling))
         return base
 
     def showEvent(self, event):
@@ -499,7 +512,33 @@ class SystemCardFrame(QFrame):
 
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()
+            self._schedule_container_sync()
         return super().eventFilter(obj, event)
+
+    def _schedule_container_sync(self):
+        """窗口高度变化后，防抖通知父容器按新 sizeHint 重新展开
+
+        CardContainer._do_expand 展开完成后会锁 min=max=自然高度（setFixedHeight），
+        之后窗口 resize 时布局无法压缩/拉伸容器，卡片高度冻结在旧值：
+        窗口变小 → 卡片底部溢出窗口被裁（内容遮挡）。
+        这里用自有定时器防抖（而非直接调容器 _schedule_expand）：Tab 窗口
+        缩放走模态循环（any_window_dragging=True），容器会吞掉拖拽期间的
+        调度且松手后无新事件补偿；自有定时器不依赖容器内部状态，松手后
+        必然补发一次。
+        """
+        if self._container_sync_timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.setInterval(200)
+            timer.timeout.connect(self._sync_container_height)
+            self._container_sync_timer = timer
+        self._container_sync_timer.start()
+
+    def _sync_container_height(self):
+        """防抖到期：让父级 CardContainer 按新窗口尺寸重算展开高度"""
+        parent = self.parentWidget()
+        if parent is not None and hasattr(parent, "_schedule_expand"):
+            parent._schedule_expand("resize")
 
     def set_opacity(self, opacity: float):
         pass

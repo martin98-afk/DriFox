@@ -430,13 +430,17 @@ class _HoverTooltipFilter(QObject):
         self._image_loader = loader
 
     def eventFilter(self, obj, event):
-        if obj is not self._parent():
+        # _cleanup 后 _parent 已置 None（非 weakref）；对象销毁竞态窗口内
+        # 事件过滤器仍可能被再调一次 → 安全解引用，拿不到目标直接放行。
+        ref = self._parent
+        p = ref() if callable(ref) else None
+        if obj is not p:
             return False
         t = event.type()
         if t == event.ToolTip:
             return True  # 拦截原生
         elif t in (event.Enter, event.HoverEnter):
-            tip = self._parent().toolTip() or ""
+            tip = p.toolTip() or ""
             if tip:
                 self._text = tip
                 self._timer.start()

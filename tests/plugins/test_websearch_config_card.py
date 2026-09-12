@@ -2,7 +2,7 @@
 """websearch 自动配置卡测试（E1 契约化后）。
 
 替代原手写 WebSearchKeySettingsCard 测试：
-- 不再 import plugins.system-ui.ui（手写卡已删除）
+- 不再 import 手写 UI 卡模块（手写卡已删除）
 - 验证 plugin.json config_schema 声明后，UIPluginRegistry 注册了 system-config 自动卡
 - 卡片回显走 PluginConfigStore（与 PluginConfigCard 一致）
 """

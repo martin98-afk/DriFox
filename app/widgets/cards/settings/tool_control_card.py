@@ -744,7 +744,9 @@ class ToolControlCardFrame(SystemCardFrame):
         super().__init__(parent)
         self._controller = controller
         self.set_height_mode("proportional")
-        self.setMinimumHeight(250)
+        # 最小可见下限（对齐 SystemCardFrame._MIN_CARD_VISIBLE_H）：窗口极矮时
+        # 布局需要能压缩卡片，过大下限会顶破可用空间导致卡片底部被窗口裁掉
+        self.setMinimumHeight(120)
 
         self.title_label.setText("工具控制")
         # 使用主题感知 SVG 图标代替 emoji
