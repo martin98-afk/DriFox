@@ -4728,6 +4728,7 @@ class _DialogEventFilter(QObject):
                 hidden.discard(obj)
                 if not hidden:
                     viewer.show()
+                    viewer._restore_chat_scroll_pos()
 
 
 # 模块级单例：全局仅此一个 QApplication 级事件过滤器
@@ -4932,6 +4933,8 @@ class CodeWebViewer(QWebEngineView):
         # ── 对话框层级管理 ──
         # _hidden_dialogs: set，记录当前导致 WebView 隐藏的对话框对象
         self._hidden_dialogs = set()
+        # 遮罩对话框隐藏期间记录的外层滚动位置（-1 = 无记录），恢复显示后回设
+        self._saved_dialog_scroll_pos = -1
 
     # ──────────────────────────────────────────────
     # 对话框 HWND 穿透防护
@@ -4944,6 +4947,19 @@ class CodeWebViewer(QWebEngineView):
     #       额外用 eventFilter 监听 Hide/Close/Destroy 事件兜底，
     #       避免原生对话框（无 Qt 信号）导致永久隐藏。
 
+    def _find_chat_scroll_area(self):
+        """沿 Qt 父链找到外层聊天滚动区（宿主窗口的 chat_scroll_area 属性）"""
+        try:
+            widget = self.parentWidget()
+            while widget is not None:
+                area = getattr(widget, "chat_scroll_area", None)
+                if area is not None:
+                    return area
+                widget = widget.parentWidget()
+        except RuntimeError:
+            pass
+        return None
+
     def _hide_for_dialog(self, dialog):
         """对话框显示时隐藏 WebView，防止原生 HWND 穿透遮罩"""
         hidden = getattr(self, "_hidden_dialogs", None)
@@ -4952,6 +4968,17 @@ class CodeWebViewer(QWebEngineView):
             self._hidden_dialogs = hidden
         if dialog in hidden:
             return  # 同一对话框重复 Show/FocusIn 不叠加计数
+        # 首个 viewer 隐藏前记录外层滚动位置：viewer 隐藏令卡片高度塌缩、
+        # chat_scroll_area 内容总高骤减，滚动条 value 被 Qt 自动 clamp，
+        # 恢复显示后无人回设 → 滚动位置丢失（跳到底部/顶部）
+        if not hidden:
+            try:
+                area = self._find_chat_scroll_area()
+                self._saved_dialog_scroll_pos = (
+                    area.verticalScrollBar().value() if area is not None else -1
+                )
+            except RuntimeError:
+                self._saved_dialog_scroll_pos = -1
         hidden.add(dialog)
         self.hide()
         # finished + destroyed 双信号：dismiss 即恢复，销毁兜底
@@ -4973,6 +5000,30 @@ class CodeWebViewer(QWebEngineView):
             hidden.discard(sender)
         if not hidden:
             self.show()
+            self._restore_chat_scroll_pos()
+
+    def _restore_chat_scroll_pos(self):
+        """恢复 hide 前记录的外层滚动位置。
+
+        show() 触发的布局重排经 posted LayoutRequest 事件完成，Qt 事件循环
+        中 posted 事件先于 timer 处理，故 singleShot(0) 时 maximum 已恢复。
+        """
+        pos = getattr(self, "_saved_dialog_scroll_pos", -1)
+        self._saved_dialog_scroll_pos = -1
+        if pos < 0:
+            return
+
+        def _apply():
+            try:
+                area = self._find_chat_scroll_area()
+                if area is None:
+                    return
+                bar = area.verticalScrollBar()
+                bar.setValue(max(bar.minimum(), min(pos, bar.maximum())))
+            except RuntimeError:
+                pass
+
+        QTimer.singleShot(0, _apply)
 
     @property
     def _tool_compact_mode(self) -> bool:

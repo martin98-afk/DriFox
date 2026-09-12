@@ -15,11 +15,12 @@ from PyQt5.QtGui import QColor, QPainter
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QMenu,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import FluentIcon, ScrollArea, TransparentToolButton
+from qfluentwidgets import ScrollArea, TransparentToolButton
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
@@ -274,45 +275,7 @@ class ProjectItem(QWidget):
         self._meta_label.setAlignment(Qt.AlignVCenter)
         layout.addWidget(self._meta_label)
 
-        # 打开根目录按钮（默认隐藏，有根目录且 hover 时显示）
-        self._open_folder_btn = TransparentToolButton(get_icon("根目录"), self)
-        self._open_folder_btn.setFixedSize(24, 24)
-        self._open_folder_btn.setStyleSheet(f"""
-            QToolButton {{
-                background: transparent;
-                border: none;
-                font-size: {scale_font_size(12)}px;
-            }}
-            QToolButton:hover {{
-                background: rgba(255, 255, 255, 50);
-                border-radius: 4px;
-            }}
-        """)
-        self._open_folder_btn.clicked.connect(self._emit_open_folder)
-        self._open_folder_btn.setToolTip("打开项目根目录")
-        self._open_folder_btn.hide()
-        layout.addWidget(self._open_folder_btn)
-
-        # 导出按钮（默认隐藏）
-        self._export_btn = TransparentToolButton(FluentIcon.SHARE, self)
-        self._export_btn.setFixedSize(24, 24)
-        self._export_btn.setStyleSheet(f"""
-            QToolButton {{
-                background: transparent;
-                border: none;
-                font-size: {scale_font_size(12)}px;
-            }}
-            QToolButton:hover {{
-                background: rgba(255, 255, 255, 50);
-                border-radius: 4px;
-            }}
-        """)
-        self._export_btn.clicked.connect(self._emit_export)
-        self._export_btn.setToolTip("导出项目压缩包（含会话+Git文件）")
-        self._export_btn.hide()
-        layout.addWidget(self._export_btn)
-
-        # 归档按钮（默认隐藏）
+        # 归档按钮（默认隐藏，hover 时显示）
         self._archive_btn = TransparentToolButton(get_icon("归档"), self)
         self._archive_btn.setFixedSize(24, 24)
         self._archive_btn.setStyleSheet(f"""
@@ -351,6 +314,38 @@ class ProjectItem(QWidget):
         if self._root_dir:
             self.openFolderClicked.emit(self._name, self._root_dir)
 
+    def contextMenuEvent(self, event):
+        """右键菜单：打开项目根目录 / 导出项目压缩包（原 hover 按钮迁此，精简 hover 密度）"""
+        if self._is_all_entry:
+            return  # 聚合行（「全部项目」）无单项目操作
+        menu = QMenu(self)
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background: {Colors.CARD_BG};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 6px;
+                padding: 4px;
+            }}
+            QMenu::item {{
+                padding: 6px 20px;
+                border-radius: 4px;
+                color: {Colors.TEXT_PRIMARY};
+                {get_font_family_css()} {font_size_css(13)}
+            }}
+            QMenu::item:selected {{
+                background: {Colors.HOVER_BG};
+            }}
+        """)
+        act_open = menu.addAction("打开项目根目录") if self._root_dir else None
+        act_export = menu.addAction("导出项目压缩包")
+        chosen = menu.exec(event.globalPos())
+        if chosen is None:
+            return
+        if chosen is act_open:
+            self._emit_open_folder()
+        elif chosen is act_export:
+            self._emit_export()
+
     def mousePressEvent(self, event):
         if self._is_all_entry:
             self.allClicked.emit()
@@ -384,6 +379,16 @@ class ProjectItem(QWidget):
         self._root_dir_label.show()
         self.setFixedHeight(self._DOUBLE_LINE_HEIGHT)
 
+    def refresh_style(self) -> None:
+        """主题/字体变更后重刷动态样式（与 _ProjectSelectorHeader.refresh_style 同链路调用）"""
+        Colors.refresh()
+        self._apply_name_style()
+        style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
+        if self._root_dir:
+            style_if_changed(
+                self._root_dir_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};"
+            )
+
     def enterEvent(self, event):
         # hover 时：整行加半透明背景 + 更亮的项目颜色 + 元数据提亮
         Colors.refresh()
@@ -399,12 +404,9 @@ class ProjectItem(QWidget):
             f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
         )
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};")
-        # 聚合行（「全部项目」）不提供单项目操作：无导出/归档/根目录按钮
+        # 聚合行（「全部项目」）不提供单项目操作：无归档按钮
         if not self._is_all_entry:
-            self._export_btn.show()
             self._archive_btn.show()
-            if self._root_dir:
-                self._open_folder_btn.show()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -412,9 +414,7 @@ class ProjectItem(QWidget):
         self._apply_name_style()
         Colors.refresh()
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
-        self._export_btn.hide()
         self._archive_btn.hide()
-        self._open_folder_btn.hide()
         super().leaveEvent(event)
 
 

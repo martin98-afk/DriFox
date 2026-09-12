@@ -727,7 +727,16 @@ class UIPluginRegistry:
             logger.warning(f"[UIPluginRegistry] 主题变更订阅失败: {e}")
 
     def _on_theme_changed_event(self, payload: dict) -> None:
-        """主题变更：对全部已建浮动卡实例派发样式刷新（鸭子类型，无实现则跳过）"""
+        """主题变更：对全部已建浮动卡实例派发样式刷新（鸭子类型，无实现则跳过）
+
+        两条互补路径：
+        1. ``refresh_style`` 系（约定）—— 卡片自己穷举重设各控件样式；
+        2. ``replay_theme_qss``（兜底）—— 重放控件上登记过的 QSS 工厂，覆盖
+           渲染期动态创建、未被 ``refresh_style`` 枚举到的控件（空态标签、
+           分页按钮等）。旧插件没登记则空转，无副作用。
+        """
+        from app.utils.theme_style import replay_theme_qss
+
         for instances in list(self._card_widget_instances.values()):
             for widget in list(instances.values()):
                 try:
@@ -744,6 +753,12 @@ class UIPluginRegistry:
                     continue  # C++ 对象已销毁
                 except Exception as e:
                     logger.warning(f"[UIPluginRegistry] 插件卡主题刷新失败: {e}")
+                try:
+                    replay_theme_qss(widget)
+                except RuntimeError:
+                    continue  # C++ 对象已销毁
+                except Exception as e:
+                    logger.warning(f"[UIPluginRegistry] 插件卡 QSS 重放失败: {e}")
 
     # ---- 内部注册表操作（Task 2 起填充）----
 

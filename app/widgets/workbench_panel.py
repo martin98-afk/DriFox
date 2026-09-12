@@ -1224,20 +1224,34 @@ class WorkbenchPanel(QWidget):
             except Exception:  # noqa: BLE001 — 诊断日志见 except 内
                 logger.exception(f"[WorkbenchPanel] 页面主题刷新失败: {_label} ({type(_page).__name__})")
         # 插件页签 / 卡片 tab（right 容器 UI 插件卡片）：外部不广播主题事件，
-        # 面板统一分发；无 refresh_style 的插件页跳过
+        # 面板统一分发；无 refresh_style 的插件页跳过。
+        # 分发后追加 replay_theme_qss 兜底：重放页面上登记过的 QSS 工厂，
+        # 覆盖渲染期动态创建、refresh_style 未枚举到的控件（空态标签/分页按钮等）。
+        from app.utils.theme_style import replay_theme_qss
+
         for widget in self._plugin_widgets.values():
             if hasattr(widget, "refresh_style"):
                 try:
                     widget.refresh_style()
                 except Exception:  # noqa: BLE001
                     logger.exception(f"[WorkbenchPanel] 插件页主题刷新失败: {type(widget).__name__}")
+            try:
+                replay_theme_qss(widget)
+            except Exception:  # noqa: BLE001
+                logger.exception(f"[WorkbenchPanel] 插件页 QSS 重放失败: {type(widget).__name__}")
         for entry in self._card_tabs.values():
             widget = entry.get("widget")
-            if widget is not None and hasattr(widget, "refresh_style"):
+            if widget is None:
+                continue
+            if hasattr(widget, "refresh_style"):
                 try:
                     widget.refresh_style()
                 except Exception:  # noqa: BLE001
                     logger.exception(f"[WorkbenchPanel] 卡片页主题刷新失败: {type(widget).__name__}")
+            try:
+                replay_theme_qss(widget)
+            except Exception:  # noqa: BLE001
+                logger.exception(f"[WorkbenchPanel] 卡片页 QSS 重放失败: {type(widget).__name__}")
 
     def refresh_theme(self) -> None:
         """ThemeManager 协议入口（dispatch_refresh 只认 refresh_theme）

@@ -44,6 +44,7 @@ from qfluentwidgets import FluentIcon, ScrollArea, TransparentToolButton
 from loguru import logger
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.theme_style import bind_theme_qss, replay_theme_qss
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets._workbench_helpers import _EmptyHint
 from app.widgets.cards.settings.project_selector_card import (
@@ -241,10 +242,13 @@ class HistoryPage(QWidget):
         self._scroll_area = ScrollArea(self)
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        Colors.refresh()
-        self._scroll_area.setStyleSheet(
-            "QScrollArea { border: none; background: transparent; }"
-            "QScrollArea > QWidget > QWidget { background: transparent; }" + get_unified_scrollbar_style(8)
+        # ★ 滚动条样式含主题色 token，必须登记（否则主题切换后滚动条停留旧色）
+        bind_theme_qss(
+            self._scroll_area,
+            lambda c: (
+                "QScrollArea { border: none; background: transparent; }"
+                "QScrollArea > QWidget > QWidget { background: transparent; }" + get_unified_scrollbar_style(8)
+            ),
         )
         self._content_widget = QWidget()
         self._content_widget.setStyleSheet("background: transparent;")
@@ -305,21 +309,24 @@ class HistoryPage(QWidget):
         self._project_new_edit.setPlaceholderText("搜索/新建项目...")
         self._project_new_edit.setFixedHeight(24)
         self._project_new_edit.setMinimumWidth(60)
-        self._project_new_edit.setStyleSheet(
-            f"""
+        # ★ 面板默认收起（构造期建好但不可见）→ 宿主 refresh_style 派发时若只刷
+        #   可见卡有可能被跳过，故走主题 QSS 登记，主题切换时随子树重放
+        bind_theme_qss(
+            self._project_new_edit,
+            lambda c: f"""
             QLineEdit {{
-                background: {Colors.HOVER_BG};
-                border: 1px solid {Colors.BORDER};
+                background: {c.HOVER_BG};
+                border: 1px solid {c.BORDER};
                 border-radius: 4px;
-                color: {Colors.TEXT_PRIMARY};
+                color: {c.TEXT_PRIMARY};
                 padding: 2px 6px;
                 {font_size_css(11)}
                 {get_font_family_css()}
             }}
             QLineEdit:focus {{
-                border: 1px solid {Colors.TEXT_ACCENT};
+                border: 1px solid {c.TEXT_ACCENT};
             }}
-        """
+        """,
         )
         self._project_new_edit.returnPressed.connect(self._on_new_project_submitted)
         self._project_new_edit.textChanged.connect(
@@ -808,6 +815,7 @@ class HistoryPage(QWidget):
         )
 
     def refresh_style(self) -> None:
+        Colors.refresh()
         self._hint.refresh_style()
         for btn in self._sub_buttons:
             btn.refresh_style()
@@ -819,3 +827,7 @@ class HistoryPage(QWidget):
             self._project_selector.refresh_style()
         if hasattr(self._card, "refresh_style"):
             self._card.refresh_style()
+        # ★ 兜底：重放本页子树里登记过的主题 QSS（滚动区滚动条、项目搜索框，
+        #   以及列表渲染期动态创建的空态标签 / 分页按钮）。上方枚举必然随功能
+        #   演进而漏，重放走"控件在则样式在"，不依赖人工维护清单。
+        replay_theme_qss(self)

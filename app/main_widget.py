@@ -10194,7 +10194,8 @@ class OpenAIChatToolWindow(ToolWindow):
         ):
             self._safe_refresh(card)
 
-        # ── UI 插件浮动卡片：拉模型，卡片自带 _apply_latest_theme / _apply_theme / _retheme ──
+        # ── UI 插件浮动卡片：refresh_style 为统一约定（覆盖最全），旧插件的
+        #    _apply_latest_theme / _apply_theme / _retheme 作为兼容兜底排在后面 ──
         # （detect-by-hasattr 防止强制依赖某个具体方法名，向后兼容多版本插件）
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -10204,7 +10205,7 @@ class OpenAIChatToolWindow(ToolWindow):
             for widget in instances.values():
                 if widget is None or not widget.isVisible():
                     continue
-                for method_name in ("_apply_latest_theme", "_apply_theme", "_retheme", "refresh_style"):
+                for method_name in ("refresh_style", "_apply_latest_theme", "_apply_theme", "_retheme"):
                     method = getattr(widget, method_name, None)
                     if callable(method):
                         try:

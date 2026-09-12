@@ -277,6 +277,39 @@ def register_ui(registry):
 
 单个订阅回调抛异常不影响其他订阅者（记 warning 日志）。
 
+### 主题色刷新（界面残留旧主题的根治）
+
+宿主已自动派发：浮动卡（含隐藏卡、其他窗口）与工作台插件页在主题切换时会收到
+一次 `refresh_style()`，**无需自己订阅 `EV_THEME_CHANGED`**。但 `refresh_style`
+里逐个 `setStyleSheet` 的清单必然随功能演进而漏 —— 尤其是渲染期动态创建、
+没进缓存表的控件（空态标签、分页按钮、滚动条）。
+
+推荐用**主题 QSS 登记**代替裸 `setStyleSheet`：把生成函数登记到控件上，主题切换
+时宿主遍历插件子树自动重放，**控件在则样式在**。
+
+```python
+from app.utils.theme_style import bind_theme_qss, replay_theme_qss
+
+def _build_toolbar(self):
+    label = QLabel("共 12 条")
+    # ✅ 登记式：颜色一律从入参 c 取，宿主/页面重放时自动带上本控件
+    bind_theme_qss(label, lambda c: f"color: {c.TEXT_MUTED}; padding: 4px;")
+    # ❌ 反例：构造期一次性求值，Colors 更新后字符串已与主题脱钩
+    # label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 4px;")
+
+def refresh_style(self):
+    replay_theme_qss(self)   # 兜底：重放本页子树里所有登记过的控件
+```
+
+| 项 | 说明 |
+|---|---|
+| 工厂签名 | `(colors) -> str`；兼容无参 `() -> str`（旧写法可直接搬进来） |
+| 生效时机 | 浮动卡 / 工作台插件页由宿主自动重放；其他扩展点（`sidebar_item` / `input_button` / `welcome_tab`）在自己的 `refresh_style` 里调 `replay_theme_qss(self)` |
+| 未登记控件 | 不受影响（也不会被修复）—— 裸 `setStyleSheet` 的旧代码继续走各自的 `refresh_style` |
+| 内存 | 登记位是控件上的 Python 属性，随 C++ 对象销毁自然消失，无全局表、无泄漏 |
+| 销毁安全 | 控件已销毁时重放静默跳过（吞 `RuntimeError`），无需手动解绑 |
+| 批量管理 | 一组控件可用 `ThemeStyleBinder`：`bind()` 登记、`refresh()` 一键重放 |
+
 ---
 
 ## 4. IWindowHost Protocol（Phase E 显式契约）

@@ -65,6 +65,7 @@ from app.utils.design_tokens import (
     get_ui_font_size,
     scale_font_size,
 )
+from app.utils.theme_style import bind_theme_qss
 from app.utils.utils import get_font_family_css, get_icon
 from app.utils.session_preview import format_relative_time, get_message_preview  # noqa: F401  (get_message_preview 转引)
 
@@ -619,16 +620,19 @@ class _HistorySectionHeader(QLabel):
         self._apply_style()
 
     def _apply_style(self):
-        """应用/刷新样式（支持主题切换时重刷）"""
-        Colors.refresh()
-        caption_size = scale_font_size(12)
-        self.setStyleSheet(
-            f"""
-            color: {Colors.TEXT_SECONDARY};
-            {get_font_family_css()} font-size: {caption_size}px;
+        """应用/刷新样式（支持主题切换时重刷）
+
+        走主题 QSS 登记而非一次性 setStyleSheet：宿主 / 页面重放子树时
+        自动带上本控件，不依赖上层 refresh_style 的枚举清单。
+        """
+        bind_theme_qss(
+            self,
+            lambda c: f"""
+            color: {c.TEXT_SECONDARY};
+            {get_font_family_css()} font-size: {scale_font_size(12)}px;
             font-weight: bold;
             padding: 4px 2px;
-            """
+            """,
         )
 
 
@@ -1464,11 +1468,15 @@ class HistoryCard(QWidget):
                 card.show()
 
             elif item_type == "empty":
+                # ★ 空态标签是渲染期动态创建、不进 _cached_* 缓存表 → HistoryCard
+                #   .refresh_style 枚举不到，必须登记主题 QSS 由宿主/页面重放，
+                #   否则主题切换后（搜索无结果、列表为空时）文字颜色残留旧主题。
                 text = item[1]
                 empty_label = QLabel(text)
                 empty_label.setAlignment(Qt.AlignCenter)
-                empty_label.setStyleSheet(
-                    f"color: {Colors.TEXT_MUTED}; padding: 16px; {font_size_css(14)} {get_font_family_css()}"
+                bind_theme_qss(
+                    empty_label,
+                    lambda c: f"color: {c.TEXT_MUTED}; padding: 16px; {font_size_css(14)} {get_font_family_css()}",
                 )
                 layout.insertWidget(layout.count() - 1, empty_label)
 
@@ -1841,11 +1849,17 @@ class HistoryCard(QWidget):
         total = self._total_session_count
         shown = total - self._remaining_count
         btn = PushButton(f"共 {total} 个会话，点击加载更多（已显示 {shown} 个）", self)
-        btn.setStyleSheet(
-            "PushButton { background: rgba(128,128,128,0.06); border: 1px solid rgba(128,128,128,0.15);"
-            " border-radius: 8px; padding: 10px; color: rgba(128,128,128,0.6); }"
-            "PushButton:hover { background: rgba(128,128,128,0.15); border-color: rgba(128,128,128,0.3);"
-            " color: rgba(255,255,255,0.85); }"
+        # ★ 原实现硬编码 rgba(128,128,128,…) + hover 文字 rgba(255,255,255,0.85)：
+        #   浅色主题下 hover 变白字压白底几乎不可见，且该按钮不在 refresh_style
+        #   枚举范围内、主题切换后颜色永不更新。改用主题 token 并登记重放。
+        bind_theme_qss(
+            btn,
+            lambda c: (
+                f"PushButton {{ background: {c.CARD_BG_DIM}; border: 1px solid {c.BORDER};"
+                f" border-radius: 8px; padding: 10px; color: {c.TEXT_MUTED}; }}"
+                f"PushButton:hover {{ background: {c.HOVER_BG}; border-color: {c.BORDER_ACCENT};"
+                f" color: {c.TEXT_PRIMARY}; }}"
+            ),
         )
         btn.setCursor(Qt.PointingHandCursor)
         btn.clicked.connect(self._on_load_more)
