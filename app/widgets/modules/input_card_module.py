@@ -11,6 +11,11 @@ Phase F：原 setup_ui 底部输入区域段（计划标注 3262-3410，实际 3
 - input_area _command_card _file_mention_card _undo_delete_card
 - _undo_delete_store _truncation_sentinel _pending_send_after_truncation _pending_send_user_text
 
+宿主依赖（host 预建，本模块只读取）：
+- _window_id _card_manager
+- _bottom_card_container（ContainerType.BOTTOM：状态卡 + 系统模态）
+- _completion_container（ContainerType.COMPLETION：L1 输入补全，命令卡/文件提及卡）
+
 契约集提取命令（搬运基线）：
     python -X utf8 -c "import re; lines=open('app/main_widget.py',encoding='utf-8').read().split(chr(10)); pat=re.compile(r'self\\.([\\w]+)\\s*[:=]'); attrs=[m.group(1) for l in lines[3272:3414] if (m:=pat.match(l.strip()))]; print(chr(10).join(attrs))"
 """
@@ -133,19 +138,21 @@ class InputCardModule(UIModule):
         host._command_card.setVisible(False)
         host.input_area.set_command_card(host._command_card)
         mgr = host._card_manager
-        # 命令卡片压制 tool、sub_agent
+        # 命令卡片：注册到 L1 补全容器（ContainerType.COMPLETION），不再与
+        # BOTTOM 里的状态卡/系统卡同桶 —— 这是"命令卡参数态与排队卡抢高度、
+        # 排队卡被压在参数行上"的结构性修复（见 card_manager.ContainerType 注释）。
         # 注：不再压制 sub_agent_compact —— L2 状态层（子智能体/排队/撤销）表达的是
         # "系统正在发生的事"，与输入补全语义正交；压制它会让"子智能体运行中打 /"
         # 之后状态卡再也不回来（CardManager 有压制声明但无恢复栈）。
         mgr.register_card(
             host._window_id,
-            ContainerType.BOTTOM,
+            ContainerType.COMPLETION,
             "command",
             host._command_card,
             suppress_others=["tool", "sub_agent"],
             layer="completion",
         )
-        host._bottom_card_container.add_card("command", host._command_card)
+        host._completion_container.add_card("command", host._command_card)
 
         # 文件提及卡片（输入 @ 时显示文件列表）
         host._file_mention_card = FileMentionCard(host._bottom_input_container)
@@ -155,12 +162,12 @@ class InputCardModule(UIModule):
         host._file_mention_card.mentionSelected.connect(host._on_mention_selected)
         mgr.register_card(
             host._window_id,
-            ContainerType.BOTTOM,
+            ContainerType.COMPLETION,
             "file_mention",
             host._file_mention_card,
             layer="completion",
         )
-        host._bottom_card_container.add_card("file_mention", host._file_mention_card)
+        host._completion_container.add_card("file_mention", host._file_mention_card)
 
         # 预缓存文件列表：延迟到事件循环空闲后执行，不阻塞 UI 初始化
         QTimer.singleShot(200, host._ensure_file_mention_cache)

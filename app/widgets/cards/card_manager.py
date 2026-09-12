@@ -24,8 +24,20 @@ from loguru import logger
 
 
 class ContainerType(Enum):
+    """卡片容器类型（全项目唯一权威定义）
+
+    ⚠️ 任何模块都必须从本处导入，不要再定义第二份同名枚举：Enum 成员按 `is`
+    比较，两份枚举的同名成员互不相等，而 CardManager 内部用容器类型作 dict 键
+    —— 混用时注册与查询会静默落在不同桶里（详见 app/widgets/cards/__init__.py）。
+    """
+
     TOP = "top"  # chatscroll 上方
     BOTTOM = "bottom"  # chatscroll 下方
+    # 输入补全浮层（命令卡片 / 文件提及卡片）——紧贴输入框上方、位于 BOTTOM 之下。
+    # 与 BOTTOM 分离的理由：补全卡是"输入的延伸"（跟光标绑定），而 BOTTOM 里的
+    # 是"系统状态"（子智能体/排队/撤销）与"系统模态"。同容器时两者争抢同一段
+    # 高度预算，实测排队卡会被压在命令卡参数行上重叠；拆层后互不干扰。
+    COMPLETION = "completion"
     LEFT = "left"  # 内容区左侧停靠区（Tab 级全局卡片 / UI 插件卡片）
     RIGHT = "right"  # 内容区右侧停靠区（Tab 级全局卡片 / UI 插件卡片）
 
@@ -326,15 +338,11 @@ class CardManager:
             logger.debug(f"[CardManager] question 已显示，跳过显示 {card_id}（question 强制覆盖所有）")
             return
 
-        # ---- 优先卡片保护：流式对话中，除 question/system 外不打断优先卡片 ----
-        # command/file_mention 卡片正在显示时，其他非优先非 question 卡片不应将其覆盖
-        priority_cards = {"command", "file_mention"}
-        if card_id not in priority_cards | {"question"}:
-            for pc in priority_cards:
-                if self.is_card_visible(pc, window_id):
-                    if card_id not in win_data.get("system_cards", set()):
-                        logger.debug(f"[CardManager] {pc} 卡片可见，跳过显示 {card_id}（仅 question/系统卡片可打断）")
-                        return
+        # ---- 输入补全卡（command/file_mention）的保护已上移到容器结构 ----
+        # 旧实现把 card_id 字面量 {"command", "file_mention"} 硬编码在本类里，用于
+        # "补全卡可见时不许其他卡覆盖"。L1 拆层后补全卡独占 ContainerType.COMPLETION，
+        # 与其他卡的互斥由容器天然保证（它们根本不在同一个桶里），该硬编码已无必要
+        # ——留在 Manager 里等于让主程序承载业务语义，与本层职责相悖，故删除。
 
         # 系统卡片：窗口内互斥（隐藏所有其他系统卡片）
         # 注意：覆盖层（TOP 系统卡片）打开时不关闭共存容器（LEFT/RIGHT/BOTTOM）

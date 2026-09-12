@@ -121,6 +121,7 @@ except Exception:  # noqa: BLE001
 from app.widgets.cards import (
     BottomCardContainer,
     CardManager,
+    CompletionCardContainer,
     ContainerType,
     TopCardContainer,
 )
@@ -1586,6 +1587,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 绑定容器到 CardManager（传入窗口ID用于隔离）
         self._top_card_container.bind_card_manager(mgr, self._window_id)
         self._bottom_card_container.bind_card_manager(mgr, self._window_id)
+        # L1 补全容器：command/file_mention 在 input_card 模块里注册到它
+        self._completion_container.bind_card_manager(mgr, self._window_id)
 
         # ===== TopCardContainer (chatscroll 上方) =====
         # 系统配置卡片，互斥显示
@@ -2799,6 +2802,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 创建卡片容器
         self._top_card_container = TopCardContainer()
         self._bottom_card_container = BottomCardContainer()
+        # L1 输入补全容器（命令卡/文件提及卡）：由本窗口持有，装配点在
+        # setup_ui 末尾与 _bottom_input_container 相邻，保证"补全浮层紧贴输入框上方"
+        # 在 chat_area 默认实现与插件 override 两条路径下都成立。
+        self._completion_container = CompletionCardContainer()
 
         # ── 对话框背景完全透明 ──
         # 不再为 OpenAIChatToolWindow 叠加独立背景层（palette window_bg +
@@ -2984,6 +2991,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         compose(host=self, module_ids=["bottom_toolbar"], root_layout_factory=lambda h: None)
 
+        # L1 输入补全层：夹在 BOTTOM 卡容器与输入区之间 —— 补全浮层始终紧贴输入框，
+        # 状态卡（子智能体/排队/撤销）在其上方堆叠。放在此处（而非 chat_area 模块内）
+        # 是为了让插件 override chat_area 时该层同样存在。
+        layout.addWidget(self._completion_container)
         layout.addWidget(self._bottom_input_container)
 
     def _build_settings_popup(self):
@@ -10156,6 +10167,8 @@ class OpenAIChatToolWindow(ToolWindow):
             # 卡片容器
             self._safe_refresh(getattr(self, "_top_card_container", None))
             self._safe_refresh(getattr(self, "_bottom_card_container", None))
+            # L1 补全容器（透明承托，刷新以保持与卡片表面一致）
+            self._safe_refresh(getattr(self, "_completion_container", None))
             # 命令卡片
             self._safe_refresh(getattr(self, "_command_card", None))
             # 文件提及卡片（滚动条颜色随主题）

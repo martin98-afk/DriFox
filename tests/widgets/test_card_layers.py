@@ -225,3 +225,135 @@ class TestStatusLayerStacking:
         cm.register_card(W, ContainerType.BOTTOM, "plain", _FakeCard(), layer="status")
         cm.refresh_layer(W, "status")
         assert cm.is_card_visible("plain", W) is False
+
+
+class TestCompletionLayerSeparation:
+    """L1 输入补全层：拆成独立容器（ContainerType.COMPLETION）
+
+    背景：命令卡（参数态）与排队卡同处 BOTTOM 容器时会争抢同一段高度预算，
+    实测排队卡被压在命令卡参数行上（重叠 56px）。拆层后两者分属不同桶，
+    互不干扰，且补全浮层始终紧贴输入框。
+    """
+
+    def test_container_type_has_single_definition(self):
+        """ContainerType 只能有一个类对象
+
+        历史上 app/widgets/cards/__init__.py 重复定义过一份只含 TOP/BOTTOM 的
+        同名枚举。Enum 成员按 `is` 比较（哈希虽相同），而 CardManager 用容器类型
+        做 dict 键 —— 两份枚举混用会让注册与查询落进不同的桶，且完全不报错。
+        """
+        import app.widgets.cards as pkg
+        from app.widgets.cards import card_manager as cm_mod
+
+        assert pkg.ContainerType is cm_mod.ContainerType
+        assert pkg.ContainerType.COMPLETION is cm_mod.ContainerType.COMPLETION
+
+    def test_completion_bucket_isolated_from_bottom(self, cm):
+        """command 在 COMPLETION 桶：刷新 BOTTOM 状态层不得波及它"""
+        W = "w"
+        cm.register_window(W)
+        cmd, queue = _FakeCard(), _FakeCard()
+        cm.register_card(W, ContainerType.COMPLETION, "command", cmd, layer="completion")
+        cm.register_card(
+            W,
+            ContainerType.BOTTOM,
+            "message_queue",
+            queue,
+            layer="status",
+            stackable=True,
+            visible_when=lambda: True,
+        )
+
+        cm.refresh_layer(W, "status")
+        assert cm.is_card_visible("message_queue", W) is True
+
+        cm.show_card("command", W)
+        assert cm.is_card_visible("command", W) is True
+        assert cm.is_card_visible("message_queue", W) is True, "跨桶不得互斥"
+
+        cm.hide_card("message_queue", W)
+        assert cm.is_card_visible("command", W) is True, "BOTTOM 桶的显隐不得波及 COMPLETION 桶"
+
+    def test_completion_layer_is_mutually_exclusive_inside(self, cm):
+        """L1 层内仍互斥：file_mention 显示时 command 关闭"""
+        W = "w"
+        cm.register_window(W)
+        cmd, fm = _FakeCard(), _FakeCard()
+        cm.register_card(W, ContainerType.COMPLETION, "command", cmd, layer="completion")
+        cm.register_card(W, ContainerType.COMPLETION, "file_mention", fm, layer="completion")
+
+        cm.show_card("command", W)
+        assert cm.is_card_visible("command", W) is True
+        cm.show_card("file_mention", W)
+        assert cm.is_card_visible("file_mention", W) is True
+        assert cm.is_card_visible("command", W) is False
+
+    def test_question_covers_completion_layer(self, cm):
+        """question（系统模态）仍覆盖 L1：打开 question → 补全卡关闭"""
+        W = "w"
+        cm.register_window(W)
+        cm.register_card(W, ContainerType.COMPLETION, "command", _FakeCard(), layer="completion")
+        cm.register_card(W, ContainerType.BOTTOM, "question", _FakeCard(), layer="system")
+        cm.show_card("command", W)
+        cm.show_card("question", W)
+        assert cm.is_card_visible("command", W) is False
+
+
+class TestMultiCardFollowContentHeight:
+    """容器高度预算必须覆盖**所有**可见卡，而非只覆盖实现 heightForWidth 的卡
+
+    旧口径把未实现 heightForWidth 的卡（排队消息卡：内部全是定高行、无 wordWrap
+    文本）整卡漏掉 → 容器按"只有命令卡"锁高 → 排队卡高度预算为负，被压进命令卡
+    参数行里。这是"命令卡参数态与排队卡冲突"的直接机制。
+    """
+
+    def test_natural_h_includes_cards_without_height_for_width(self, qapp):
+        from PyQt5.QtCore import QSize
+        from PyQt5.QtWidgets import QWidget
+
+        from app.widgets.cards.card_container import CardContainer
+
+        class _HfwCard(QWidget):
+            HEIGHT = 60
+
+            def hasHeightForWidth(self):
+                return True
+
+            def heightForWidth(self, w):
+                return self.HEIGHT
+
+            def sizeHint(self):
+                return QSize(200, self.HEIGHT)
+
+        class _FixedCard(QWidget):
+            """不实现 heightForWidth（等价于排队消息卡：整卡只有 sizeHint 可用）"""
+
+            HEIGHT = 90
+
+            def sizeHint(self):
+                return QSize(200, self.HEIGHT)
+
+        c = CardContainer(ContainerType.BOTTOM)
+        c.setFixedWidth(400)
+        a, b = _HfwCard(), _FixedCard()
+        c.add_card("a", a)
+        c.add_card("b", b)
+        a.setVisible(True)
+        b.setVisible(True)
+
+        m = c._layout.contentsMargins()
+        spacing = c._layout.spacing()
+        expected = m.top() + _HfwCard.HEIGHT + spacing + _FixedCard.HEIGHT + m.bottom()
+
+        assert c._follow_content_natural_h() == expected, "未实现 heightForWidth 的卡被整卡漏算了"
+
+    def test_completion_container_is_transparent_and_own_type(self, qapp):
+        from app.widgets.cards.card_container import CompletionCardContainer
+
+        c = CompletionCardContainer()
+        assert c.container_type is ContainerType.COMPLETION
+        # 表面由卡片自绘，容器必须是透明承托（否则框套框）
+        assert "transparent" in c.styleSheet()
+        # 左右留白与 BottomCardContainer 对齐，两层卡片边缘才不会错位
+        m = c._layout.contentsMargins()
+        assert (m.left(), m.right()) == (8, 8)
