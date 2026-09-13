@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### ✨ 新功能 (New Features)
+
+- **编辑工具运行框的增删行数流式显示** (`app/core/tool_arg_lines.py`, `app/core/workers/chat_worker.py`, `app/widgets/message_card.py`, `plugins/system-tools/tools/_tool_desc.py`): write/edit/multi_edit 在参数流式接收期间显示 `+N/-M`，取代对编辑场景没有信息量的 `(N字符)`。行数从 worker 手里的**半截 JSON 缓冲**估算：按字段取 `"field": "…"` 片段（未闭合截到缓冲末尾），转义感知计数（连续反斜杠奇数才是 `\n`），行数 = 换行转义数 + 1 对齐 diff 语义；同一 tool_call 内只增不减防正则失配抖动，完成后由真实 diff 统计接管。顺带修两处预览缺陷：progress 阶段路径字段扩展 `path/file_path/file/target`，且 path 未到达时显示「编辑文件中」而非空窗「准备中...」；`description` 与文件路径拼接时超 30 字符截断，保证路径不被单行省略裁掉。
+
 ### 🐛 问题修复 (Bug Fixes)
 
 - **工具块 restore 判据根治（不再假设 markdown 必定重建）** (`app/widgets/message_card.py`, `tests/widgets/test_message_card_tool_box_disappear.py`, `tests/widgets/test_message_card_edit_tool_swallow_inflight.py`): save/restore 的 restore 条件由「未完成（`!_isFinished`）且 DOM 无同 id 块」收紧为「**DOM 无同 id 块**」。旧判据默认「已完成块的 markdown 一定会重建」，把「是否恢复」与「HTML 是否真的含该块」解耦——任何一次全量渲染的 HTML 缺块（在途旧快照落地、`_lazy_markdown_cb` 未刷新、注入失败、md 生成失败）都会让该块被 `el.remove()` 后无人恢复、永久消失，是「工具完成框被吞」的根因族。新判据只看 DOM：markdown 已重建同 id 块 → 跳过（防重复，行为与旧版一致）；没重建 → 把保存的块原样放回（无论是否 finished）。`_finishedSet` 不再参与判定，仅用于给恢复出的已完成块打 `data-restored-finished` 排查标记。既有用例 `test_save_restore_js_finished_blocks_not_restored` 改名为 `test_save_restore_js_restores_finished_block_when_html_missing_it` 并反转断言。
