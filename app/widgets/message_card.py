@@ -1481,12 +1481,44 @@ def _render_svg_pixmap(
     return pixmap
 
 
+# 编辑类工具在 progress 阶段（path 尚未到达）的兜底文案：避免运行框空窗成「准备中...」
+_FILE_EDIT_TOOLS_FALLBACK_TEXT = {
+    "write": "写入文件",
+    "edit": "编辑文件",
+    "multi_edit": "批量编辑文件",
+}
+
+
+def _format_tool_progress_badge(char_count: int, add_lines: int = 0, del_lines: int = 0) -> str:
+    """运行框进度徽标：编辑类工具显示 `+N -M`，其它工具显示 `(N字符)`。
+
+    行数优先——编辑类工具的字符数对用户没有信息量（设计：
+    docs/superpowers/specs/2026-09-13-tool-streaming-line-stats-design.md）。
+    配色对齐完成框的 diff 统计（绿 + / 红 -）。
+    """
+    if add_lines or del_lines:
+        parts = []
+        if add_lines:
+            parts.append(f'<span style="color:#4CAF50;">+{add_lines}</span>')
+        if del_lines:
+            parts.append(f'<span style="color:#F44336;">-{del_lines}</span>')
+        return f'<span style="font-size:{scale_font_size(10)}px;margin-left:4px;">{" ".join(parts)}</span>'
+    if char_count > 0:
+        return (
+            f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; '
+            f'margin-left: 4px;">({char_count}字符)</span>'
+        )
+    return ""
+
+
 def _render_tool_streaming_block(
     tool_call_id: str,
     tool_name: str,
     preview: str,
     char_count: int = 0,
     completed: bool = False,
+    add_lines: int = 0,
+    del_lines: int = 0,
 ) -> str:
     """渲染工具流式调用块 HTML — 无折叠 inline 卡片。
 
@@ -1541,8 +1573,8 @@ def _render_tool_streaming_block(
 
     # 合并预览文本 + 字符数进度（放在同一个 span 里，JS 更新 innerHTML 时一起走）
     preview_display = escape(preview) if preview else "准备中..."
-    if not completed and char_count > 0:
-        preview_display += f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
+    if not completed:
+        preview_display += _format_tool_progress_badge(char_count, add_lines, del_lines)
 
     streaming_state = "false" if completed else "true"
     # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
@@ -15758,6 +15790,8 @@ class MessageCard(SimpleCardWidget):
         preview: str,
         char_count: int = 0,
         completed: bool = False,
+        add_lines: int = 0,
+        del_lines: int = 0,
     ):
         """通过 JS 注入/更新工具流式块
 
@@ -15780,8 +15814,8 @@ class MessageCard(SimpleCardWidget):
         # 构建预览文本（含 char_count），用于后续内容比较和 JS 注入
         _text_only = preview is None
         preview_content = escape(preview) if preview else "准备中..."
-        if not completed and char_count > 0:
-            preview_content += f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
+        if not completed:
+            preview_content += _format_tool_progress_badge(char_count, add_lines, del_lines)
 
         # ── 内容去重：相同预览内容跳过 JS 执行，减少流式高频更新压力 ──
         _cache_key = (tool_call_id, completed)
@@ -15836,6 +15870,8 @@ class MessageCard(SimpleCardWidget):
                 preview=preview if preview else "",
                 char_count=char_count,
                 completed=completed,
+                add_lines=add_lines,
+                del_lines=del_lines,
             )
             # 编辑类工具流式块始终注入到正文区域
             _stream_target = "content-placeholder" if tool_name in _edit_tools() else self.viewer._tool_target_id
@@ -16202,6 +16238,8 @@ class MessageCard(SimpleCardWidget):
         self._maybe_finish_thinking_for_tool(tool_call_id)
         preview = ""
         char_count = 0
+        add_lines = 0
+        del_lines = 0
         if partial_args:
             display = {k: v for k, v in partial_args.items() if not k.startswith("_")}
             if display:
@@ -16231,9 +16269,22 @@ class MessageCard(SimpleCardWidget):
                 if natural:
                     preview = natural + "中"
                 else:
-                    preview = "准备中..."
+                    # 🆕 编辑类工具在 path 未到达时不再空窗「准备中...」
+                    _fallback = _FILE_EDIT_TOOLS_FALLBACK_TEXT.get(tool_name, "")
+                    preview = f"{_fallback}中" if _fallback else "准备中..."
                 char_count = args_len if args_len else len(preview)
-        self._inject_tool_streaming_html(tool_call_id, tool_name, preview, char_count, completed=False)
+                # 🆕 编辑类工具的增删行数（worker 从半截 JSON 估算），取代字数显示
+                add_lines = int(partial_args.get("_add_lines") or 0)
+                del_lines = int(partial_args.get("_del_lines") or 0)
+        self._inject_tool_streaming_html(
+            tool_call_id,
+            tool_name,
+            preview,
+            char_count,
+            completed=False,
+            add_lines=add_lines,
+            del_lines=del_lines,
+        )
 
     def finish_tool_streaming(
         self,
