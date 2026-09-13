@@ -112,6 +112,28 @@ GROUP_WRITE = "文件写入"
 # ========== 常量（与主程序对齐） ==========
 
 IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
+
+# 图片 magic number 校验表：扩展名 → [(偏移, 魔数), ...]
+_IMAGE_MAGICS = {
+    ".png": ((0, b"\x89PNG\r\n\x1a\n"),),
+    ".jpg": ((0, b"\xff\xd8\xff"),),
+    ".jpeg": ((0, b"\xff\xd8\xff"),),
+    ".gif": ((0, b"GIF87a"), (0, b"GIF89a")),
+    ".bmp": ((0, b"BM"),),
+    ".webp": ((0, b"RIFF"), (8, b"WEBP")),
+}
+
+
+def _looks_like_image(data: bytes, ext: str) -> bool:
+    """按 magic number 校验文件内容与图片扩展名是否相符。
+
+    背景：伪装图（如 HTML 错误页存成 .png）若按扩展名标注 mime 发给视觉 API，
+    服务端解析失败报「图片输入格式/解析错误」（智谱 1210）。内容不符时按文本处理。
+    """
+    magics = _IMAGE_MAGICS.get(ext)
+    if not magics:
+        return False
+    return any(data[off : off + len(m)] == m for off, m in magics)
 _MAX_GREP_CONTENT_LENGTH = 15000
 
 _GREP_EXCLUDE_DIRS = frozenset(
@@ -309,20 +331,22 @@ def _read_impl(tool_ctx, **kwargs):
             return _list_impl(tool_ctx, path=str(full_path))
         display = _display_path(workdir, full_path, path)
 
-        # 图片：base64 返回（视觉模型注入）
+        # 图片：base64 返回（视觉模型注入）；magic 校验不符的伪图回退按文本读
         ext = full_path.suffix.lower()
         if ext in IMAGE_EXTENSIONS:
             img_bytes = full_path.read_bytes()
-            mime_map = {
-                ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
-            }
-            mime = mime_map.get(ext, "image/png")
-            img_b64 = base64.b64encode(img_bytes).decode("utf-8")
-            size_kb = len(img_bytes) / 1024
-            preview = f"[图片: {display} ({size_kb:.1f} KB, {ext.upper()})]"
-            _record_mtime(tool_ctx, full_path)
-            return ToolResult(True, content=preview, image_data={"mime": mime, "data": img_b64})
+            if _looks_like_image(img_bytes, ext):
+                mime_map = {
+                    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+                }
+                mime = mime_map.get(ext, "image/png")
+                img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                size_kb = len(img_bytes) / 1024
+                preview = f"[图片: {display} ({size_kb:.1f} KB, {ext.upper()})]"
+                _record_mtime(tool_ctx, full_path)
+                return ToolResult(True, content=preview, image_data={"mime": mime, "data": img_b64})
+            # 内容与扩展名不符（伪装图，如 HTML 存成 .png）：按文本读取，避免污染视觉注入链路
 
         _record_mtime(tool_ctx, full_path)
         start_idx = max(0, startline - 1)

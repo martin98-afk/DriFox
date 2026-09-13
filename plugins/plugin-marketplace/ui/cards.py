@@ -5866,6 +5866,11 @@ class MarketplaceCard(QWidget):
         """
         tc = getattr(self, "_cached_tc", None) or _text_color()
         tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
+        # 裸 QLabel 的 QSS 带 font-size 时 Qt 会用应用默认字体族渲染（非全局字体）。
+        # qfluentwidgets 的 setFontFamilies 只管它自己的组件，管不到裸 QLabel
+        # → 必须在 QSS 里显式写 font-family（与代理页记录行 _refresh_records_ui 同款）。
+        ff = getattr(self, "_cached_font_family", "") or ""
+        ff_qss = f" font-family: '{ff}';" if ff else ""
         row = QWidget(self._markets_content)
         row.setStyleSheet("background: rgba(128,128,128,0.08); border-radius: 8px;")
         h = QHBoxLayout(row)
@@ -5890,7 +5895,7 @@ class MarketplaceCard(QWidget):
         # 名称用 _ElidedLabel：长名自动中间省略 + tooltip 全文，不再把徽标挤出行
         name_label = _ElidedLabel(name_text, name_row)
         name_label.setObjectName("marketRowName")
-        name_label.setStyleSheet(f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;")
+        name_label.setStyleSheet(f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;{ff_qss}")
         name_row_layout.addWidget(name_label, 1)
 
         # 拉取状态徽标（读 manager 持久化状态；无记录 → 未拉取）
@@ -5909,7 +5914,7 @@ class MarketplaceCard(QWidget):
         # （原为 len>60 硬截断加 "..."，全文无法查看）
         url_label = _ElidedLabel(src_text, row)
         url_label.setObjectName("marketRowUrl")
-        url_label.setStyleSheet(f"color: {tcs}; font-size: 14px; background: transparent;")
+        url_label.setStyleSheet(f"color: {tcs}; font-size: 14px; background: transparent;{ff_qss}")
         info.addWidget(url_label)
 
         h.addLayout(info, 1)
