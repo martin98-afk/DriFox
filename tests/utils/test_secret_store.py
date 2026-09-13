@@ -12,6 +12,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from app.utils import secret_store as ss
+from app.utils.config import Settings
 
 
 class _FakeStore:
@@ -34,7 +35,7 @@ class _FakeStore:
         self.data.pop(account, None)
 
 
-def _make_data(api_key="sk-test-123", gitee_token="", github_token=""):
+def _make_data(api_key="sk-test-123"):
     """构造 app.config 形态的 dict（与 toDict() 输出同构）"""
     return {
         "LLM": {
@@ -47,8 +48,6 @@ def _make_data(api_key="sk-test-123", gitee_token="", github_token=""):
                 }
             }
         },
-        "Gitee": {"UserToken": gitee_token, "UserRefreshToken": ""},
-        "Patch": {"GitHub/Token": github_token},
         "General": {"AutoStart": False},
     }
 
@@ -69,24 +68,16 @@ def test_strip_moves_provider_key_to_store():
     assert data["LLM"]["SavedProviders"]["abc12345"]["API_URL"] == "https://api.example.com/v1"
 
 
-def test_strip_flat_items():
-    data = _make_data(gitee_token="gt-1", github_token="gh-1")
-    store = _FakeStore()
-    ss.strip_secrets(data, store)
-    assert data["Gitee"]["UserToken"] == ""
-    assert data["Patch"]["GitHub/Token"] == ""
-    assert store.data["gitee/user_token"] == "gt-1"
-    assert store.data["github/patch_token"] == "gh-1"
+def test_strip_keeps_plaintext_when_set_fails():
+    """keyring 写入失败时保留明文（fail-open），严禁双丢"""
 
+    class _BrokenStore(_FakeStore):
+        def set(self, account, value):
+            return False
 
-def test_strip_bypass_when_unavailable():
     data = _make_data()
-    store = _FakeStore()
-    store.available = False
-    ss.strip_secrets(data, store)
-    # 旁路：明文保留（与旧版行为一致）
+    ss.strip_secrets(data, _BrokenStore())
     assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == "sk-test-123"
-    assert store.data == {}
 
 
 def test_unwrap_migrates_plaintext_and_keeps_memory():
@@ -105,16 +96,6 @@ def test_unwrap_backfills_empty_from_store():
     store.data["provider/abc12345"] = "sk-from-store"
     ss.unwrap_secrets(data, store)
     assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == "sk-from-store"
-
-
-def test_unwrap_flat_items_roundtrip():
-    store = _FakeStore()
-    data1 = _make_data(gitee_token="gt-1", github_token="gh-1")
-    ss.strip_secrets(data1, store)
-    data2 = _make_data(gitee_token="", github_token="")
-    ss.unwrap_secrets(data2, store)
-    assert data2["Gitee"]["UserToken"] == "gt-1"
-    assert data2["Patch"]["GitHub/Token"] == "gh-1"
 
 
 def test_unwrap_bypass_when_unavailable():
@@ -144,3 +125,36 @@ def test_secret_store_fallback_when_no_backend(monkeypatch):
         assert store.set("provider/x", "v") is False
     finally:
         ss.SecretStore._instance = None
+
+
+def test_recover_flat_secrets_migrates_back_and_deletes(monkeypatch):
+    """v0.5.11 误剥的扁平 token 从凭证库回迁文件并删除凭证库条目。
+
+    背景：扁平 ConfigItem 的 str 值不可变，toDict 外壳回填写不回 item.value，
+    曾导致 Gitee 绑定 token 丢失；且 Gitee token 已按决策退出 keyring 范围。
+    """
+
+    class _FakeItem:
+        def __init__(self, value):
+            self.value = value
+
+    class _FakeCfg:
+        def __init__(self):
+            self.gitee_user_token = _FakeItem("")
+            self.gitee_user_refresh_token = _FakeItem("")
+            self.github_token = _FakeItem("")
+            self.saved = False
+
+        def save(self):
+            self.saved = True
+
+    store = _FakeStore()
+    store.data = {"gitee/user_token": "tok-x", "github/patch_token": "gh-x"}
+    monkeypatch.setattr(ss, "SecretStore", lambda: store)  # 隔离真实凭证库
+    cfg = _FakeCfg()
+    Settings._recover_flat_secrets_from_keyring(cfg)
+    assert cfg.gitee_user_token.value == "tok-x"
+    assert cfg.github_token.value == "gh-x"
+    assert cfg.gitee_user_refresh_token.value == ""
+    assert store.data == {}
+    assert cfg.saved is True

@@ -909,13 +909,6 @@ class ConfigSyncService(QObject):
 
             with open(cfg.file, encoding="utf-8") as _f:
                 _data = _json.load(_f)
-            # 密钥回填：token 段已 keyring 化，文件为空时从 OS 凭证库取回（同 _reload_settings_on_main_thread）
-            try:
-                from app.utils.secret_store import SecretStore, unwrap_secrets
-
-                unwrap_secrets(_data, SecretStore())
-            except Exception as _se:
-                logger.warning(f"[SecretStore] token 回填失败: {_se}")
             _g = _data.get("Gitee", {})
             cfg.gitee_bound.value = bool(_g.get("Bound", False))
             cfg.gitee_user_token.value = _g.get("UserToken", "") or ""

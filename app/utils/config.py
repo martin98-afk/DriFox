@@ -313,7 +313,7 @@ class Settings(QConfig):
             f.write(json.dumps(data, option=json.OPT_INDENT_2))
 
     def load(self):
-        """load config，加载后从系统密钥库回填敏感值（keyring 迁移入口）。
+        """load config，加载后从系统密钥库回填服务商 API_KEY（keyring 迁移入口）。
 
         必须在 _migrate_saved_providers（get_instance 中紧随 load 调用）之前
         完成：config_id 是 (API_URL, API_KEY) 的 hash，回填晚了会算错 hash。
@@ -325,10 +325,41 @@ class Settings(QConfig):
             from app.utils.secret_store import SecretStore, unwrap_secrets
 
             # toDict(serialize=False) 外壳是新 dict、内层是 item.value 原引用，
-            # unwrap_secrets 就地改内层即写回内存态
+            # unwrap_secrets 就地改内层即写回内存态（仅对 dict 类 value 有效）
             unwrap_secrets(self.toDict(serialize=False), SecretStore())
+            self._recover_flat_secrets_from_keyring()
         except Exception:
             logger.exception("[SecretStore] 密钥回填失败，按文件值继续")
+
+    def _recover_flat_secrets_from_keyring(self):
+        """一次性回迁：v0.5.11 keyring 化误剥的扁平 token 从凭证库迁回 app.config。
+
+        背景：扁平 ConfigItem（Gitee OAuth token / GitHub token）的 value 是
+        不可变 str，toDict 外壳上的回填写不回 item.value，导致 Gitee 绑定
+        token 丢失、被迫重新绑定；且用户决策 Gitee token 不参与 keyring 加密
+        （其云同步面由 config_sync 上传剔除/下载合并覆盖）。本方法把凭证库
+        残留条目取回内存并落盘，然后删除凭证库条目，彻底退出 keyring 范围。
+        """
+        from app.utils.secret_store import LEGACY_FLAT_ACCOUNTS, SecretStore
+
+        store = SecretStore()
+        recovered = False
+        for account in LEGACY_FLAT_ACCOUNTS:
+            back = store.get(account)
+            if not back:
+                continue
+            item = {
+                "gitee/user_token": self.gitee_user_token,
+                "gitee/user_refresh_token": self.gitee_user_refresh_token,
+                "github/patch_token": self.github_token,
+            }.get(account)
+            if item is not None and not str(item.value or ""):
+                item.value = back
+                recovered = True
+            store.delete(account)
+        if recovered:
+            self.save()
+            logger.info("[SecretStore] 已从凭证库回迁扁平 token 至 app.config")
 
     # 开机自启
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())

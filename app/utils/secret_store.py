@@ -15,21 +15,26 @@ Linux Secret Service），配置文件落盘时不再含明文密钥。
 本机凭证库无对应条目，密钥保持为空由用户重输。
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from loguru import logger
 
 # keyring service 名：Windows 凭据管理器显示为「普通凭据 DriFox:provider/<id>」
 SERVICE = "DriFox"
 
-# app.config 顶层扁平敏感项：(组, 键, keyring account)
-FLAT_SECRET_ITEMS: List[Tuple[str, str, str]] = [
-    ("Gitee", "UserToken", "gitee/user_token"),
-    ("Gitee", "UserRefreshToken", "gitee/user_refresh_token"),
-    ("Patch", "GitHub/Token", "github/patch_token"),
-]
+# 仅服务商 API_KEY 进 keyring。扁平 ConfigItem（Gitee OAuth token / GitHub token）
+# 已退出 keyring 范围：它们的 value 是不可变 str，toDict(serialize=False) 外壳上的
+# 回填写不回 item.value（v0.5.11 曾因此丢失 Gitee 绑定 token），且用户决策 Gitee
+# token 不参与加密（config_sync 上传剔除/下载合并已覆盖其云同步面）。
 
 _PROVIDER_ACCOUNT_PREFIX = "provider/"
+
+# v0.5.11 keyring 化误剥的扁平项：(keyring account, 说明)，供一次性回迁使用
+LEGACY_FLAT_ACCOUNTS = (
+    "gitee/user_token",
+    "gitee/user_refresh_token",
+    "github/patch_token",
+)
 
 
 def provider_account(config_id: str) -> str:
@@ -96,9 +101,10 @@ class SecretStore:
 
 
 def strip_secrets(data: Dict[str, Any], store) -> None:
-    """就地剥出 data（Settings.toDict() 的深拷贝）中的敏感值，送 keyring 后清空。
+    """就地剥出 data（Settings.toDict() 的深拷贝）中的服务商 API_KEY，送 keyring 后清空。
 
-    store 不可用时整体旁路（明文落盘，与旧版一致）。
+    store 不可用时整体旁路（明文落盘，与旧版一致）；写入 keyring 失败时
+    保留明文（fail-open），严禁双丢。
     """
     if not store.available:
         return
@@ -108,18 +114,15 @@ def strip_secrets(data: Dict[str, Any], store) -> None:
             if not isinstance(info, dict):
                 continue
             key = str(info.get("API_KEY") or "")
-            if key:
-                store.set(provider_account(str(cfg_id)), key)
+            if key and store.set(provider_account(str(cfg_id)), key):
                 info["API_KEY"] = ""
-    for group, name, account in FLAT_SECRET_ITEMS:
-        g = data.get(group)
-        if isinstance(g, dict) and g.get(name):
-            store.set(account, str(g[name]))
-            g[name] = ""
 
 
 def unwrap_secrets(data: Dict[str, Any], store) -> None:
-    """load 后就地回填 data 中的敏感值（data 内层须为 Settings 内存态原引用）。
+    """load 后就地回填 data 中的服务商 API_KEY（data 内层须为 Settings 内存态原引用）。
+
+    仅适用于 value 为可变 dict 的 ConfigItem（SavedProviders）：dict 内部就地改
+    可穿透到 item.value；不可变 str 类扁平项写不回 item.value，禁止加入本函数范围。
 
     - 文件值非空（旧版明文残留）→ 迁入 keyring，内存保留明文，运行不中断；
     - 文件值空 → 从 keyring 取回填内存；
@@ -141,14 +144,3 @@ def unwrap_secrets(data: Dict[str, Any], store) -> None:
                 back = store.get(account)
                 if back:
                     info["API_KEY"] = back
-    for group, name, account in FLAT_SECRET_ITEMS:
-        g = data.get(group)
-        if not isinstance(g, dict):
-            continue
-        value = str(g.get(name) or "")
-        if value:
-            store.set(account, value)
-        else:
-            back = store.get(account)
-            if back:
-                g[name] = back
