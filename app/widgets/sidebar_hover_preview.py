@@ -188,22 +188,28 @@ class HoverPreviewOverlay(QWidget):
 
 
 class HoverPreviewController:
-    """hover 悬浮预览状态机：按钮/浮层的进出事件 + 可取消的缓收计时。
+    """hover 悬浮预览状态机：按钮/浮层的进出事件 + 可取消的缓开/缓收计时。
 
-    不持有业务数据、不读写显隐记忆；通过回调把「进入/退出预览」的具体动作
-    （reparent、落位、还原 splitter）交给宿主。
+    进入按钮不立即展开（show_delay_ms 延时），鼠标划过即取消，避免误触发；
+    预览中离开走 hide_delay_ms 缓收。不持有业务数据、不读写显隐记忆；通过
+    回调把「进入/退出预览」的具体动作（reparent、落位、还原 splitter）交给宿主。
     """
 
-    def __init__(self, overlay, can_preview, on_enter, on_leave, hide_delay_ms=300):
+    def __init__(self, overlay, can_preview, on_enter, on_leave, hide_delay_ms=300, show_delay_ms=250):
         self._overlay = overlay
         self._can_preview = can_preview
         self._on_enter = on_enter
         self._on_leave = on_leave
         self._previewing = False
+        self._show_pending = False  # 挂起的展开意图（_do_enter 的判据，防迟到触发）
         self._hide_timer = QTimer()
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(int(hide_delay_ms))
         self._hide_timer.timeout.connect(self._do_leave)
+        self._show_timer = QTimer()
+        self._show_timer.setSingleShot(True)
+        self._show_timer.setInterval(int(show_delay_ms))
+        self._show_timer.timeout.connect(self._do_enter)
 
     def is_previewing(self) -> bool:
         return self._previewing
@@ -212,9 +218,10 @@ class HoverPreviewController:
         if on:
             self._cancel_hide()
             if not self._previewing and self._can_preview():
-                self._previewing = True
-                self._on_enter()
+                self._show_pending = True
+                self._show_timer.start()  # 延时展开：划过不触发，停稳才出
         else:
+            self._cancel_show()
             self._start_hide_if_previewing()
 
     def on_overlay_hover(self, on: bool) -> None:
@@ -225,6 +232,7 @@ class HoverPreviewController:
 
     def on_clicked(self) -> None:
         self._cancel_hide()
+        self._cancel_show()  # 点击转显式开关，取消挂起的 hover 展开
         if self._previewing:
             self._do_leave()
 
@@ -234,6 +242,18 @@ class HoverPreviewController:
 
     def _cancel_hide(self) -> None:
         self._hide_timer.stop()
+
+    def _cancel_show(self) -> None:
+        self._show_pending = False
+        self._show_timer.stop()
+
+    def _do_enter(self) -> None:
+        # 延时窗口内状态可能已变（划过取消/点击已展开常驻），二次确认
+        if self._show_pending:
+            self._show_pending = False
+            if not self._previewing and self._can_preview():
+                self._previewing = True
+                self._on_enter()
 
     def _do_leave(self) -> None:
         self._hide_timer.stop()

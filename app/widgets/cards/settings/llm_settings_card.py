@@ -445,7 +445,6 @@ class LLMSettingsCard(SystemCardFrame):
         content_layout.addWidget(body)
         self._update_nav_styles()
 
-
         # ════ 服务商页 ════
         provider_layout = self._page_layouts["provider"]
 

@@ -87,11 +87,39 @@ def _mk(window, qtbot, *, can=True, delay=300):
     return ctrl, events
 
 
-def test_hover_shows_immediately_when_collapsed(window, qtbot):
+def test_hover_shows_after_delay_when_collapsed(window, qtbot):
+    """hover 进入不立即展开：show 延时到期才进入预览（防划过误触）"""
     ctrl, events = _mk(window, qtbot, can=True)
     ctrl.on_button_hover(True)
+    # 延时窗口内：未进入预览
+    assert events == []
+    assert ctrl.is_previewing() is False
+    assert ctrl._show_timer.isActive() is True
+    ctrl._show_timer.timeout.emit()
     assert events == ["enter"]
     assert ctrl.is_previewing() is True
+
+
+def test_hover_cancelled_when_leave_before_delay(window, qtbot):
+    """延时窗口内鼠标离开（划过）：取消展开，既不 enter 也不 leave"""
+    ctrl, events = _mk(window, qtbot, can=True)
+    ctrl.on_button_hover(True)
+    ctrl.on_button_hover(False)
+    assert ctrl._show_timer.isActive() is False
+    ctrl._show_timer.timeout.emit()  # 计时已取消，迟到的 timeout 不得触发
+    assert events == []
+    assert ctrl.is_previewing() is False
+
+
+def test_click_cancels_pending_show(window, qtbot):
+    """延时窗口内点击：取消挂起的 hover 展开（点击自身走宿主常驻开关）"""
+    ctrl, events = _mk(window, qtbot, can=True)
+    ctrl.on_button_hover(True)
+    ctrl.on_clicked()
+    assert ctrl._show_timer.isActive() is False
+    ctrl._show_timer.timeout.emit()
+    assert events == []
+    assert ctrl.is_previewing() is False
 
 
 def test_no_preview_when_already_expanded(window, qtbot):
@@ -99,17 +127,19 @@ def test_no_preview_when_already_expanded(window, qtbot):
     ctrl.on_button_hover(True)
     assert events == []
     assert ctrl.is_previewing() is False
+    assert ctrl._show_timer.isActive() is False  # 不可预览时不挂起展开计时
 
 
 def test_leave_then_reenter_cancels_hide(window, qtbot):
     ctrl, events = _mk(window, qtbot, delay=50)
     ctrl.on_button_hover(True)
+    ctrl._show_timer.timeout.emit()
     ctrl.on_button_hover(False)
     ctrl.on_overlay_hover(True)
     ctrl.on_overlay_hover(False)
     ctrl.on_button_hover(True)
     ctrl._hide_timer.stop()
-    # 首次 hover(True) 进入预览，后续 hover(True) 只取消缓收计时；
+    # 首次 hover 进入预览后，previewing 期间再 hover(True) 只取消缓收计时；
     # 多次进出若 timer 一直未 timeout，leave 不触发。
     assert events.count("enter") == 1
     assert "leave" not in events
@@ -118,6 +148,7 @@ def test_leave_then_reenter_cancels_hide(window, qtbot):
 def test_leave_fires_after_delay(window, qtbot):
     ctrl, events = _mk(window, qtbot, delay=30)
     ctrl.on_button_hover(True)
+    ctrl._show_timer.timeout.emit()
     ctrl.on_button_hover(False)
     assert events == ["enter"]
     qtbot.wait(120)
@@ -128,6 +159,7 @@ def test_leave_fires_after_delay(window, qtbot):
 def test_clicked_cancels_preview_to_embed(window, qtbot):
     ctrl, events = _mk(window, qtbot, delay=300)
     ctrl.on_button_hover(True)
+    ctrl._show_timer.timeout.emit()
     ctrl.on_clicked()
     assert events == ["enter", "leave"]
     assert ctrl.is_previewing() is False
