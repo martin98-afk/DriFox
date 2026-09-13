@@ -674,6 +674,15 @@ class ConfigSyncService(QObject):
                 with open(cfg.file, encoding="utf-8") as _f:
                     _file_data = _json.load(_f)
 
+                # 密钥回填：keyring 化后落盘文件不含明文密钥，写回内存前
+                # 从 OS 凭证库取回；文件仍有明文（旧版/降级）则幂等迁移
+                try:
+                    from app.utils.secret_store import SecretStore, unwrap_secrets
+
+                    unwrap_secrets(_file_data, SecretStore())
+                except Exception as _se:
+                    logger.warning(f"[SecretStore] 同步回填失败: {_se}")
+
                 for _section_name, _section_data in _file_data.items():
                     for _key, _value in _section_data.items():
                         _matched = None
@@ -900,6 +909,13 @@ class ConfigSyncService(QObject):
 
             with open(cfg.file, encoding="utf-8") as _f:
                 _data = _json.load(_f)
+            # 密钥回填：token 段已 keyring 化，文件为空时从 OS 凭证库取回（同 _reload_settings_on_main_thread）
+            try:
+                from app.utils.secret_store import SecretStore, unwrap_secrets
+
+                unwrap_secrets(_data, SecretStore())
+            except Exception as _se:
+                logger.warning(f"[SecretStore] token 回填失败: {_se}")
             _g = _data.get("Gitee", {})
             cfg.gitee_bound.value = bool(_g.get("Bound", False))
             cfg.gitee_user_token.value = _g.get("UserToken", "") or ""

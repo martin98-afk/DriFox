@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 
 ### ✨ 新功能 (New Features)
 
+- **系统级密钥存储（keyring）** (`app/utils/secret_store.py` 新增, `app/utils/config.py`, `app/core/config_sync.py`, `build.py`, `Drifox.spec`): 服务商 API Key / Gitee OAuth token / GitHub token 迁入操作系统凭证库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），app.config 落盘与云端同步不再含明文密钥（此前 API_KEY 与 GitHub token 会原样上传 Gitee 私库）。`Settings.save()` 深拷贝后剥钥（toDict 内层与内存共享引用，必须隔离）、`load()` 后回填内存（须早于 config_id hash 迁移）；config_sync 两处「磁盘读回」路径（全量重载 / Gitee token 恢复）同步回填，防跨设备同步后本机密钥丢失。降级 fail-open：keyring 未装 / 无后端 / 异常 / 开关关闭（`General/UseSystemKeyring`）→ 完全旁路，明文照旧。密钥不跨设备同步，新设备拉到配置后需重输；PyInstaller 下 keyring 后端发现走 entry points 收不齐，build.py / spec 按平台显式声明后端模块（jaraco/keyring #439/#468）。已知边界：OS 凭证库不防本机同用户进程读取；更换服务商 URL/Key 后旧凭据条目会残留在系统凭据管理器（条目名 `DriFox:provider/xxx`），可手动删除。10 条单元测试 + WinVaultKeyring 真机全链冒烟（迁移/剥钥/回填）。
+
 - **编辑工具运行框的增删行数流式显示** (`app/core/tool_arg_lines.py`, `app/core/workers/chat_worker.py`, `app/widgets/message_card.py`, `plugins/system-tools/tools/_tool_desc.py`): write/edit/multi_edit 在参数流式接收期间显示 `+N/-M` 胶囊（复用完成框 diff 统计的 `.tool-diff-stats` 结构，运行中与完成态形态一致），取代对编辑场景没有信息量的 `(N字符)`。行数从 worker 手里的**半截 JSON 缓冲**估算：按字段取 `"field": "…"` 片段（未闭合截到缓冲末尾），转义感知计数（连续反斜杠奇数才是 `\n`），行数 = 换行转义数 + 1 对齐 diff 语义；同一 tool_call 内只增不减防正则失配抖动，完成后由真实 diff 统计接管。顺带修两处预览缺陷：progress 阶段路径字段扩展 `path/file_path/file/target`，且 path 未到达时显示「编辑文件中」而非空窗「准备中...」；`description` 与文件路径拼接时超 30 字符截断，保证路径不被单行省略裁掉。
 
 ### 🐛 问题修复 (Bug Fixes)

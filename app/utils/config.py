@@ -298,9 +298,37 @@ class Settings(QConfig):
             pass
         # 确保目录存在
         self.file.parent.mkdir(parents=True, exist_ok=True)
+        # toDict() 内层值与 item.value 共享引用，必须深拷贝后剥钥，
+        # 否则会污染内存态导致 UI 回显 / API 请求丢 key
+        data = deepcopy(self.toDict())
+        if self.use_system_keyring.value:
+            try:
+                from app.utils.secret_store import SecretStore, strip_secrets
+
+                strip_secrets(data, SecretStore())
+            except Exception:
+                logger.exception("[SecretStore] 密钥剥出失败，本次按明文落盘")
         # 写入文件
         with open(self.file, "wb") as f:
-            f.write(json.dumps(self.toDict(), option=json.OPT_INDENT_2))
+            f.write(json.dumps(data, option=json.OPT_INDENT_2))
+
+    def load(self):
+        """load config，加载后从系统密钥库回填敏感值（keyring 迁移入口）。
+
+        必须在 _migrate_saved_providers（get_instance 中紧随 load 调用）之前
+        完成：config_id 是 (API_URL, API_KEY) 的 hash，回填晚了会算错 hash。
+        """
+        super().load()
+        try:
+            if not self.use_system_keyring.value:
+                return
+            from app.utils.secret_store import SecretStore, unwrap_secrets
+
+            # toDict(serialize=False) 外壳是新 dict、内层是 item.value 原引用，
+            # unwrap_secrets 就地改内层即写回内存态
+            unwrap_secrets(self.toDict(serialize=False), SecretStore())
+        except Exception:
+            logger.exception("[SecretStore] 密钥回填失败，按文件值继续")
 
     # 开机自启
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
@@ -312,6 +340,10 @@ class Settings(QConfig):
 
     # 单实例限制：开启后同时只允许运行一个 Drifox 实例（重启生效）
     enable_single_instance = ConfigItem("General", "EnableSingleInstance", False, BoolValidator())
+
+    # 系统密钥存储（keyring）：开启后服务商 API Key / OAuth token 迁入 OS 凭证库，
+    # app.config 落盘不含明文；关闭则回退明文落盘（与旧版一致）
+    use_system_keyring = ConfigItem("General", "UseSystemKeyring", True, BoolValidator())
 
     # 灰度开关：消息正文用纯 Qt 块级渲染器（MarkdownBlockViewer）替代 QWebEngineView。
     # 仅作用于 assistant 卡片（welcome 卡 JS 交互复杂暂不灰度）；默认关闭。

@@ -28,7 +28,7 @@ refresh_workbench 时调用），页面自行实现可选协议 ``refresh_data()
 import json
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QRect, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
     QFrame,
@@ -50,7 +50,7 @@ from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
 from loguru import logger
 from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
-from app.widgets.custom_title_bar import CustomTabButton
+from app.widgets.custom_title_bar import CustomTabButton, TabIndicatorController
 from app.widgets.flow_layout import FlowLayout
 from app.widgets.cards.floating.sub_agent_compact_widget import _RotatingIcon
 
@@ -454,6 +454,14 @@ class WorkbenchPanel(QWidget):
         # FlowLayout：tab 多时自动折行；AlignRight 整体右对齐（每行独立计算）
         self._tab_bar_layout = FlowLayout(tab_bar_host, spacing=2, alignment=Qt.AlignRight, margins=0)
         root.addWidget(tab_bar_host)
+        # 页签滑动指示器：与标题栏顶栏 tab 同款（先于任何按钮创建，天然垫在底层）
+        self._indicator_ctl = TabIndicatorController(
+            tab_bar_host,
+            self,
+            lambda: self._tab_buttons[self._stack.currentIndex()].geometry()
+            if 0 <= self._stack.currentIndex() < len(self._tab_buttons)
+            else None,
+        )
 
         # ── 主体：QSplitter(垂直) 切分内容栈 / 任务区 ──
         # 上：tab 条已上移，这里只剩 QStackedWidget（工作树 / 记忆 / 产物 / 插件页 / 卡片页）
@@ -716,7 +724,7 @@ class WorkbenchPanel(QWidget):
         self._tab_labels = []
         for tab_id, label in specs:
             closable = tab_id in self._card_tabs
-            btn = CustomTabButton(tab_id, label, self, closable=closable)
+            btn = CustomTabButton(tab_id, label, self, closable=closable, indicator_managed=True)
             btn.clicked.connect(self._on_tab_clicked)
             if closable:
                 btn.close_clicked.connect(self.card_tab_close_requested.emit)
@@ -773,6 +781,8 @@ class WorkbenchPanel(QWidget):
     def _run_tab_hover_sync(self) -> None:
         self._hover_sync_pending = False
         self.sync_tab_hover()
+        # 胶囊钉位由 TabIndicatorController 自己监听 tab_bar_host 的
+        # LayoutRequest/Resize 完成，这里只管 hover 仲裁
 
     def leaveEvent(self, event) -> None:
         # 鼠标离开面板时兜底清空（动画/其它窗口抢焦点时子 widget 的
@@ -1167,6 +1177,9 @@ class WorkbenchPanel(QWidget):
         self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == index)
+        # 滑动指示器：用户点击切换时滑过去；程序性切换（切窗恢复 saved）瞬移落位
+        if 0 <= index < len(self._tab_buttons):
+            self._indicator_ctl.move_to(self._tab_buttons[index].geometry(), animate=user)
         # 通知宿主记录（当前页签按对话窗口独立记忆，见 TabManagerWindow 回调）
         if user:
             self.current_tab_changed.emit(index)

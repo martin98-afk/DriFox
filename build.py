@@ -193,6 +193,16 @@ _hidden_imports = [
     # 插件源文件（运行时动态加载，PyInstaller 不分析其依赖）引用的标准库：
     # assistant_hub/core/persona.py import getpass，漏打会导致人格卡片全空
     "getpass",
+    # keyring：后端发现走 entry points，PyInstaller 收不齐会报
+    # "No recommended backend was available"（jaraco/keyring #439/#468），
+    # 按平台显式声明后端模块；运行时找不到后端则应用侧自动降级明文（fail-open）
+    "keyring",
+    *(
+        {
+            "Windows": ["keyring.backends.Windows"],
+            "Darwin": ["keyring.backends.macOS"],
+        }.get(platform.system(), ["keyring.backends.chainer"])
+    ),
 ]
 
 # 打包排除：由插件自包含 deps/ 提供（codegraph-tools / desktop-automation），
