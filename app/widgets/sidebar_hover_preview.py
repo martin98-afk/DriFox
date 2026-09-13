@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from PyQt5.QtCore import QEasingCurve, QPoint, QVariantAnimation, Qt, QTimer
+from PyQt5.QtCore import QPoint, QVariantAnimation, Qt, QTimer
 from PyQt5.QtWidgets import QWidget
 
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Animations, Colors
+from app.utils.motion import retarget
 
 
 class HoverPreviewOverlay(QWidget):
@@ -133,35 +134,57 @@ class HoverPreviewOverlay(QWidget):
 
     # ── 几何滑入/滑出（逐帧全局坐标 setGeometry） ──
 
+    def _slide_anim(self) -> QVariantAnimation:
+        """取（或惰性创建）几何滑入滑出动画
+
+        ★ 必须复用同一个动画对象：hover 反复进出时若每次 new 一个且不停旧的，
+        两条动画会同时 ``valueChanged`` 写同一宽度 → 面板来回抽搐。
+        """
+        anim = getattr(self, "_slide", None)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.valueChanged.connect(lambda v: self._place_at_width(int(v)))
+            self._slide = anim
+        return anim
+
     def slide_in(self, target_w: int, on_done=None) -> None:
-        """从贴边外缘向内滑到 target_w（180ms OutCubic）。滑入期覆盖的对话区不 resize。"""
+        """滑入到 target_w（ENTER_MS + EASE_OUT），**从当前宽度续接**
+
+        ★ 不能先 ``_place_at_width(0)`` 再启动动画：上一次滑出未跑完时（宽度
+        还剩一截）会先跳到 0 再滑入 —— 肉眼可见的回抽。起点统一取实测的
+        ``_current_w``。
+        """
         self._target_w = int(target_w)
-        self._place_at_width(0)
         self.show()
         self.raise_()
-        anim = QVariantAnimation(self)
-        anim.setDuration(180)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.setStartValue(0.0)
-        anim.setEndValue(float(self._target_w))
-        anim.valueChanged.connect(lambda v: self._place_at_width(int(v)))
-        if on_done is not None:
-            anim.finished.connect(on_done)
-        self._slide = anim  # 持引用防 GC
-        anim.start()
+        if not retarget(
+            self._slide_anim(),
+            float(self._current_w),
+            float(self._target_w),
+            duration=Animations.ENTER_MS,
+            curve=Animations.EASE_OUT,
+            on_finished=on_done,
+        ):
+            self._place_at_width(self._target_w)
+            if on_done is not None:
+                on_done()
 
     def slide_out(self, on_done=None) -> None:
-        """从当前宽滑回贴边外缘（150ms OutQuad），动画结束调 on_done（交宿主 reparent 回挂）。"""
-        anim = QVariantAnimation(self)
-        anim.setDuration(150)
-        anim.setEasingCurve(QEasingCurve.OutQuad)
-        anim.setStartValue(float(self._current_w))
-        anim.setEndValue(0.0)
-        anim.valueChanged.connect(lambda v: self._place_at_width(int(v)))
-        if on_done is not None:
-            anim.finished.connect(on_done)
-        self._slide = anim
-        anim.start()
+        """滑回贴边外缘（EXIT_MS + EASE_IN），结束调 on_done（交宿主 reparent 回挂）
+
+        退出比进入短一档是刻意的：收起阶段用户注意力已经移开，拖长了显得黏。
+        """
+        if not retarget(
+            self._slide_anim(),
+            float(self._current_w),
+            0.0,
+            duration=Animations.EXIT_MS,
+            curve=Animations.EASE_IN,
+            on_finished=on_done,
+        ):
+            self._place_at_width(0)
+            if on_done is not None:
+                on_done()
 
 
 class HoverPreviewController:

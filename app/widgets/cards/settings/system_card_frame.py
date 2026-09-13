@@ -9,7 +9,6 @@ SystemCardFrame — QFrame 基类 + 标准头部布局 + 固定边框
 """
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -40,6 +39,9 @@ class SystemCardFrame(QFrame):
     _PROPORTIONAL_RESERVED = 200
     # 窗口再矮也保底的卡片可见高度（头部 + 一两行内容，内容区滚动查看）
     _MIN_CARD_VISIBLE_H = 120
+
+    # 头部 SVG 图标基准尺寸（随系统字体大小经 scale_icon_size 缩放）
+    _ICON_SVG_BASE_SIZE = 20
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -82,6 +84,8 @@ class SystemCardFrame(QFrame):
 
         self.icon_label = QLabel(self)
         self.icon_label.setFont(get_unified_font(11))
+        # 当前 SVG 图标名（set_icon_svg 时记录，refresh_style 重刷 pixmap；None = 文字 emoji 模式）
+        self._svg_icon_name: str | None = None
 
         self.title_label = StrongBodyLabel(self)
         self.title_label.setFont(get_unified_font(11, True))
@@ -180,6 +184,9 @@ class SystemCardFrame(QFrame):
         self.title_label.setFont(get_unified_font(12, True))
         if self.icon_label is not None:
             self.icon_label.setFont(get_unified_font(12))
+            if self._svg_icon_name:
+                s = scale_icon_size(self._ICON_SVG_BASE_SIZE)
+                self.icon_label.setPixmap(get_icon(self._svg_icon_name).pixmap(s, s))
         icon_widget = getattr(self, "_icon_widget", None)
         if icon_widget is not None:
             base_size = getattr(self, "_icon_base_size", 20)
@@ -269,25 +276,26 @@ class SystemCardFrame(QFrame):
 
     # ── 公开控制 ───────────────────────────────────────
 
-    def set_icon(self, icon):
-        """设置头部图标
+    def set_icon(self, icon: str):
+        self._svg_icon_name = None
+        if self.icon_label is not None:
+            # 撤销 set_icon_svg 留下的固定尺寸，恢复文字自适应布局
+            self.icon_label.setMinimumSize(0, 0)
+            self.icon_label.setMaximumSize(16777215, 16777215)  # QWIDGETSIZE_MAX
+            self.icon_label.setText(icon)
 
-        接受 str（emoji 字符）或 QIcon（SVG 资源）。
-        - str：保留旧行为，icon_label.setText 渲染（兼容注释/提示里的 emoji）
-        - QIcon：自动按系统字体大小缩放到 20px，主题感知（深/浅色自动切换）
+    def set_icon_svg(self, name: str):
+        """头部图标改用主题感知 SVG（qrc 资源，dark/light 自动适配）
+
+        与 set_icon_widget 一致：基准 20px，随系统字体大小经 scale_icon_size 缩放。
+        主题切换后由 refresh_style 重刷 pixmap（_ThemeIconEngine 按当前主题取图）。
         """
         if self.icon_label is None:
             return
-        if isinstance(icon, QIcon):
-            # 切到图像路径前先清空文本残留，避免宽字符撑高列宽
-            self.icon_label.setText("")
-            sz = scale_icon_size(self._icon_base_size if hasattr(self, "_icon_base_size") else 20)
-            self.icon_label.setFixedSize(sz, sz)
-            self.icon_label.setPixmap(icon.pixmap(sz, sz))
-        else:
-            self.icon_label.setFixedSize(self.icon_label.sizeHint())
-            self.icon_label.setPixmap(QPixmap())  # 清掉之前的 svg pixmap
-            self.icon_label.setText(str(icon) if icon is not None else "")
+        self._svg_icon_name = name
+        s = scale_icon_size(self._ICON_SVG_BASE_SIZE)
+        self.icon_label.setPixmap(get_icon(name).pixmap(s, s))
+        self.icon_label.setFixedSize(s, s)
 
     def set_icon_widget(self, widget):
         """用自定义 widget 替换头部文字图标（如 ProviderIconWidget）

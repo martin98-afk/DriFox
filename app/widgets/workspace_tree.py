@@ -42,7 +42,8 @@ from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayou
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import TransparentToolButton, isDarkTheme
 
-from app.utils.design_tokens import Colors, font_size_css, scale_icon_size
+from app.utils.design_tokens import Animations, Colors, font_size_css, scale_icon_size
+from app.utils.motion import retarget
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.utils import icons_light_rc as _icons_light_rc  # noqa: F401
 from app.widgets.elided_label import _ElidedLabel
@@ -199,15 +200,15 @@ class _ProjectBadge(QWidget):
 
 
 class _TreeArrow(QWidget):
-    """折叠指示箭头：0° 指向右（折叠），90° 指向下（展开），140ms 缓动旋转"""
+    """折叠指示箭头：0° 指向右（折叠），90° 指向下（展开），HOVER_MS 缓动旋转"""
 
     def __init__(self, parent=None, size: int = 12):
         super().__init__(parent)
         self._angle = 90.0
         self.setFixedSize(size, size)
         self._anim = QPropertyAnimation(self, b"angle", self)
-        self._anim.setDuration(140)
-        self._anim.setEasingCurve(QEasingCurve.InOutQuad)
+        self._anim.setDuration(Animations.HOVER_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
 
     def get_angle(self) -> float:
         return self._angle
@@ -219,20 +220,26 @@ class _TreeArrow(QWidget):
     angle = pyqtProperty(float, get_angle, set_angle)
 
     def set_expanded(self, expanded: bool, animate: bool = True):
-        """收敛式设置：动画进行中绝不重启，否则缓动曲线被反复重置、进度到不了终点"""
+        """切换到目标角度：**从当前角度续接**，绝不丢弃请求
+
+        ★ 旧实现是「动画进行中直接 return」——上层 ``_TreeRow.set_expanded``
+        已经先写了 ``self._expanded``，连点时树内容已展开而箭头仍停在旧目标，
+        视觉与真实状态**相反且不可自愈**（必须再点一次）。正解是重定向：
+        ``stop()`` 后以当前实测角度为新起点，进度不丢、方向立刻跟上。
+        """
         target = 90.0 if expanded else 0.0
-        if self._anim.state() == QPropertyAnimation.Running:
-            return
-        if abs(self._angle - target) < 0.5:
-            return
         if not animate:
             self._anim.stop()
-            self._angle = target
-            self.update()
+            self.set_angle(target)
             return
-        self._anim.setStartValue(self._angle)
-        self._anim.setEndValue(target)
-        self._anim.start()
+        if not retarget(
+            self._anim,
+            self._angle,
+            target,
+            duration=Animations.HOVER_MS,
+            curve=Animations.EASE_OUT,
+        ):
+            self.set_angle(target)
 
     def paintEvent(self, event):  # noqa: N802 - Qt 约定
         painter = QPainter(self)

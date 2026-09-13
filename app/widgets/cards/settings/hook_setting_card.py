@@ -1153,6 +1153,8 @@ class HookListSettingCard(ExpandSettingCard):
         # 第二张设置卡（P024）。
         # 布局尺寸本就不需要泵事件：takeAt 已把 item 摘出布局，sizeHint 不会再
         # 计入；hide() 保证残留 widget 在真正被 delete 之前不会重绘出来。
+        # 布局尺寸本就不需要泵事件：takeAt 已把 item 摘出布局，sizeHint 不会再
+        # 计入；hide() 保证残留 widget 在真正被 delete 之前不会重绘出来。
         self.viewLayout.activate()
         self.view.updateGeometry()
 

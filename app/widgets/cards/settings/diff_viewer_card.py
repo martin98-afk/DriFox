@@ -13,7 +13,6 @@ from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineView
 
 from app.core.webengine_profile import create_transient_web_profile
 from app.utils.diff_viewer import _cleanup_temp_files, _load_html_to_webview
-from app.utils.utils import get_icon
 from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
 
@@ -61,7 +60,7 @@ class DiffViewerCard(BaseSettingsCard):
     """内嵌差异对比卡片，用法类似系统设置面板覆盖右侧对话区域"""
 
     def __init__(self, parent=None):
-        super().__init__("文件差异对比", get_icon("差异对比"), parent=parent)
+        super().__init__("文件差异对比", "📄", parent=parent)
         self.setMinimumHeight(200)
         self.set_height_mode("proportional")
         self._current_html = None
