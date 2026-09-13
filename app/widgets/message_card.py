@@ -1499,12 +1499,14 @@ def _format_tool_progress_badge(char_count: int, add_lines: int = 0, del_lines: 
     块末尾：预览 span 是 `overflow:hidden + ellipsis`，徽标嵌在里面会被长文本裁掉。
     """
     if add_lines or del_lines:
+        # 颜色与完成框的 diff 统计完全一致（render_helpers 里同款内联色，
+        # 不依赖 .tool-diff-stats__add/__del 的 CSS —— 流式块下 CSS 优先级不可靠）
         return (
             f'<span class="tool-diff-stats tool-streaming-badge" '
             f'style="font-size: {scale_font_size(11)}px; flex: 0 0 auto; margin-left: 6px;">'
-            f'<span class="tool-diff-stats__add">+{add_lines}</span>'
+            f'<span class="tool-diff-stats__add" style="color: #39d353; font-weight: 600;">+{add_lines}</span>'
             f'<span class="tool-diff-stats__sep">/</span>'
-            f'<span class="tool-diff-stats__del">-{del_lines}</span>'
+            f'<span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{del_lines}</span>'
             f"</span>"
         )
     if char_count > 0:
@@ -1592,7 +1594,7 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
-        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 0 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_display}
         </span>{badge_html}
     </div>"""

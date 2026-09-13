@@ -107,3 +107,27 @@ def test_identical_payload_still_deduplicated(monkeypatch):
     n1 = len(page.calls)
     card.update_tool_streaming(TOOL_ID, "write", dict(payload))
     assert len(page.calls) == n1, "完全相同的更新应继续被去重"
+
+
+def test_badge_inherits_completion_diff_colors(monkeypatch):
+    """徽标必须用完成框同款内联色（不依赖 .tool-diff-stats__* 的 CSS 优先级）。"""
+    card = _make_card(monkeypatch)
+    page = card.viewer._page
+
+    card.update_tool_streaming(
+        TOOL_ID, "write", {"_status": "loading", "_args_len": 5120, "_add_lines": 88, "_del_lines": 3}
+    )
+    js = page.calls[-1]
+    assert "#39d353" in js, "新增行数用完成框同款绿色"
+    assert "#f85149" in js, "删除行数用完成框同款红色"
+
+
+def test_preview_span_does_not_push_badge_to_right(monkeypatch):
+    """预览 span 不得 flex-grow 撑满；否则徽标被顶到最右，而设计要与文字排在一起。"""
+    card = _make_card(monkeypatch)
+    page = card.viewer._page
+
+    card.update_tool_streaming(TOOL_ID, "write", {"_status": "loading", "_args_len": 32})
+    js = page.calls[-1]
+    assert "flex: 0 1 auto" in js, "预览 span 应可收缩但不撑满，让徽标紧跟文字"
+    assert "flex: 1 1 auto" not in js, "预览 span 不得撑满剩余空间"
