@@ -1786,7 +1786,12 @@ class HookManager:
             return None
 
     def trigger_event(
-        self, event_name: str, context: Dict[str, Any] = None, current_message: str = "", trigger_async: bool = True
+        self,
+        event_name: str,
+        context: Dict[str, Any] = None,
+        current_message: str = "",
+        trigger_async: bool = True,
+        skip_finished_callback: bool = False,
     ) -> List[HookExecutionResult]:
         """
         触发事件，执行所有匹配的 Hooks（支持同事件内 Hook 级并行）
@@ -1796,6 +1801,11 @@ class HookManager:
             context: 上下文信息
             current_message: 当前消息 (用于 matcher 匹配)
             trigger_async: 是否异步执行
+            skip_finished_callback: 同步路径是否跳过完成回调（默认 False）。
+                worker 内部 hook（PreAssistantMessage/PostAssistantMessage/Stop）
+                的返回值已由调用方直接从 results 注入消息列表，完成回调再入队
+                属于重复投递；置 True 可从根上避免重复，无需事后按队列长度差排出
+                （该排出会误伤同期入队的用户插话等外部消息）。
 
         Returns:
             执行结果列表（按原始注册顺序返回）
@@ -1859,7 +1869,9 @@ class HookManager:
         # Phase 2: 同步阶段 hook（PROMPT + PYTHON 注入型）按序执行，输出需立即注入
         for idx in sync_indices:
             hook = all_hooks[idx]
-            results[idx] = self._execute_hook(hook, context, trigger_async=False)
+            results[idx] = self._execute_hook(
+                hook, context, trigger_async=False, skip_finished_callback=skip_finished_callback
+            )
 
         # Phase 3: 非 PROMPT hook 并行执行
         if parallel_indices:
@@ -2039,8 +2051,18 @@ class HookManager:
             hook.type == HookType.COMMAND.value or not hook.add_output_to_context
         )
 
-    def _execute_hook(self, hook: Hook, context: Dict[str, Any], trigger_async: bool = True) -> HookExecutionResult:
-        """执行单个 Hook"""
+    def _execute_hook(
+        self,
+        hook: Hook,
+        context: Dict[str, Any],
+        trigger_async: bool = True,
+        skip_finished_callback: bool = False,
+    ) -> HookExecutionResult:
+        """执行单个 Hook
+
+        skip_finished_callback=True 时同步路径不调用完成回调（不同步入队）：
+        调用方已通过返回值自行注入消息列表（见 trigger_event 参数说明）。
+        """
         # cwd: 智能解析（显式设置 > 从命令脚本路径推导 > 默认项目根目录）
         cwd = self._resolve_command_cwd(hook, context)
 
@@ -2265,8 +2287,8 @@ class HookManager:
                 if status_message and self._on_status_callback:
                     self._on_status_callback(context.get("event_name", ""), status_message, False)
 
-                # 触发完成回调
-                if hook.add_output_to_context and self._on_finished_callback:
+                # 触发完成回调（skip_finished_callback=True 时跳过：调用方已用返回值注入）
+                if hook.add_output_to_context and self._on_finished_callback and not skip_finished_callback:
                     callback_event = context.get("event_name", "")
                     # PROMPT 类型 hook 用前缀标记，backend 据此总是加入消息列表
                     if hook.type == HookType.PROMPT.value:
@@ -2290,7 +2312,7 @@ class HookManager:
                 if status_message and self._on_status_callback:
                     self._on_status_callback(context.get("event_name", ""), status_message, False)
 
-                if hook.add_output_to_context and self._on_finished_callback:
+                if hook.add_output_to_context and self._on_finished_callback and not skip_finished_callback:
                     callback_event = context.get("event_name", "")
                     if hook.type == HookType.PROMPT.value:
                         callback_event = f"__prompt__:{callback_event}"

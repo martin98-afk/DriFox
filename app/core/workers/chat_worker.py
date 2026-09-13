@@ -953,39 +953,21 @@ class OpenAIChatWorker(QThread):
             if extra_context:
                 ctx.update(extra_context)
 
-            # 记录 trigger_event 前的队列大小，用于后续精确 drain
-            # 只排出本轮同步执行中入队的消息，不误伤其他路径（如 SubAgentFinished）放入的消息
-            _q = getattr(backend, "_hook_message_queue", None)
-            qsize_before = _q.qsize() if _q is not None else 0
-
+            # 🛡️ skip_finished_callback=True：本函数的 hook 输出已由下方 results
+            # 循环直接注入消息列表（current_messages / current_session_messages），
+            # 完成回调再经 backend.on_hook_finished 入队属于重复投递。
+            # 旧实现改为事后按「队列长度差 + FIFO 头取」排出，无法区分 hook 自身
+            # 入队与同期到达的外部消息：用户插话（_interject_entry）、TeamMail 等
+            # 排在 hook 消息之前时被 get_nowait() 当作 hook 输出丢弃 → 消息进了 UI
+            # 但 AI 永不响应（"stophook 执行期间发消息无反应"的根因）。
+            # 现在从源头不再入队，无需任何事后排出。
             results = backend.hook_manager.trigger_event(
                 event_name,
                 context=ctx,
                 current_message=current_message_text,
                 trigger_async=False,
+                skip_finished_callback=True,
             )
-
-            # 🛡️ 精确排出 _hook_message_queue：同步执行路径中 _execute_hook 也会调用
-            # on_hook_finished 回调将输出入队，但同步返回值已由下方 results 循环直接
-            # 注入消息列表。若不排出，_inject_pending_hook_messages 会在下一轮循环顶部
-            # 从队列取出再注入一次，导致重复（尤其是 PROMPT 类型 hook）。
-            # ★ 修复：只排出本轮 trigger_event 新增的消息，不误伤其他路径放入的消息
-            #   （如 SubAgentFinished，由主线程通过 _inject_subagent_completion_into_stream 放入）
-            # 注意：PostToolUse 等事件由 tool_executor 的同步路径触发并通过队列传递，
-            # 不经过 _trigger_worker_hook，不受此排出影响。
-            if _q is not None:
-                qsize_after = _q.qsize()
-                to_drain = qsize_after - qsize_before
-                for _ in range(to_drain):
-                    try:
-                        _q.get_nowait()
-                    except Exception:
-                        break
-                if to_drain > 0:
-                    logger.debug(
-                        f"[HookManager] Drained {to_drain} msg(s) from hook queue"
-                        f" after sync trigger_event({event_name})"
-                    )
 
             # 收集所有 hook 结果中的 block reason（按 hook 顺序，最后一个覆盖前面的）
             block_reason: Optional[str] = None
