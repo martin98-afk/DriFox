@@ -1785,7 +1785,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """确保分享卡片框架已创建（内容由 _build_deferred_card_share 填充）"""
         if self._share_card is not None:
             return
-        self._share_card = BaseSettingsCard("分享当前对话", "📤", self)
+        self._share_card = BaseSettingsCard("分享当前对话", icon_svg="邮件-发送", parent=self)
         self._share_card.set_height_mode("content")
         self._share_card.setVisible(False)
         self._share_card.closed.connect(lambda: self._card_manager.hide_card("share", self._window_id))
@@ -1798,7 +1798,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """确保历史问题卡片框架已创建（内容由 _build_deferred_card_history_questions 填充）"""
         if self._history_questions_card is not None:
             return
-        self._history_questions_card = BaseSettingsCard("历史问题", "💬", self)
+        self._history_questions_card = BaseSettingsCard("历史问题", icon_svg="question", parent=self)
         self._history_questions_card.set_height_mode("content")
         self._history_questions_card.setVisible(False)
         self._history_questions_card.closed.connect(
@@ -1872,7 +1872,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """确保模型配置卡片框架已创建（内容由 _build_deferred_card_model_config 填充）"""
         if self._model_config_card is not None:
             return
-        self._model_config_card = BaseSettingsCard("模型配置", "🔧", self)
+        self._model_config_card = BaseSettingsCard("模型配置", icon_svg="大模型", parent=self)
         self._model_config_card.setMinimumHeight(250)  # set_config 时 ModelConfigCard 会重新计算
         self._model_config_card.set_height_mode("content")  # 按内容自适应高度
         self._model_config_card.setVisible(False)
@@ -7417,7 +7417,7 @@ class OpenAIChatToolWindow(ToolWindow):
             self._model_selector_card.set_title_text(display)
         else:
             # 无服务商：显示默认图标 + "模型选择"
-            self._model_selector_card.set_icon("🤖")
+            self._model_selector_card.set_icon_svg("模型选择")
             self._model_selector_card.set_title_text("模型选择")
 
     def _on_sticky_provider_changed(self, provider_name: str):

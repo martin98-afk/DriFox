@@ -4,7 +4,7 @@ from typing import Dict, Optional
 from PyQt5.QtCore import Qt, QEasingCurve, QEvent, QPropertyAnimation, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Animations, Colors
 from app.widgets.cards.card_manager import CardManager, ContainerType
 
 

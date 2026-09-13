@@ -119,11 +119,31 @@ class Harness:
     # ── 观测 ──
 
     def blank_px(self):
-        """卡片底部到容器槽位底部的空白高度（容器背景可见区）"""
+        """容器背景净空隙：容器底边距之下未被任何可见子控件覆盖的高度
+
+        （状态卡是真实内容，不算空白；只量"谁都没盖住"的容器底色区）
+        """
         if self.card.isHidden():
             return -1
-        card_bottom = self.card.y() + self.card.height()
-        return self.container.height() - card_bottom
+        max_bottom = 0
+        for i in range(self.container.layout().count()):
+            it = self.container.layout().itemAt(i)
+            w = it.widget() if it is not None else None
+            if w is None or w.isHidden():
+                continue
+            max_bottom = max(max_bottom, w.y() + w.height())
+        return self.container.height() - 6 - max_bottom  # 6 = 容器底边距
+
+    def card_slack(self):
+        """提问卡内部弹性空隙：卡片实际高 - 内容真实高（hfw 口径）- 自身边距
+
+        follow 判定失效时容器锁高被污染，卡片被拉伸 → 问题文字区与选项区
+        之间出现大块空白，即该值。
+        """
+        if self.card.isHidden():
+            return -1
+        natural = self.card.heightForWidth(self.card.width())
+        return self.card.height() - natural - 4  # 4 = 卡片自身 margins(2+2)
 
     def snapshot(self, tag=""):
         self.samples.append(
@@ -132,6 +152,7 @@ class Harness:
                 "cont_h": self.container.height(),
                 "card_h": self.card.height(),
                 "blank": self.blank_px(),
+                "slack": self.card_slack(),
                 "follow": self.container._visible_cards_follow_content(),
                 "status_visible": not self.status.isHidden(),
                 "sp": list(self.vsplitter.sizes()),
@@ -183,8 +204,10 @@ QS = [
 
 def analyze(tag, samples, expect_blank=False):
     blanks = [s["blank"] for s in samples if s["blank"] >= 0]
+    slacks = [s["slack"] for s in samples if s["slack"] >= 0]
     follow_flags = [s["follow"] for s in samples]
     max_blank = max(blanks) if blanks else 0
+    max_slack = max(slacks) if slacks else 0
     blank_turns = 0
     prev_state = None
     for b in blanks:
@@ -195,14 +218,14 @@ def analyze(tag, samples, expect_blank=False):
     ok = True
     print(f"\n=== [{tag}] ===")
     print(f"  follow_content 判定序列（去重）: {_dedup(follow_flags)}")
-    print(f"  空白峰值: {max_blank}px, 空白状态翻转次数: {blank_turns}")
+    print(f"  容器净空隙峰值: {max_blank}px, 卡片内部拉伸峰值: {max_slack}px, 空白状态翻转: {blank_turns}")
     keys = [0, 2, 5, 10, 20, 40, len(samples) - 1]
-    print("  帧 | cont_h card_h blank follow status_visible mem_q min max | splitter")
+    print("  帧 | cont_h card_h blank slack follow status_visible mem_q min max | splitter")
     for i in keys:
         if i < len(samples):
             s = samples[i]
             print(
-                f"  {i:3d} | {s['cont_h']:6d} {s['card_h']:6d} {s['blank']:5d} {str(s['follow']):5s}"
+                f"  {i:3d} | {s['cont_h']:6d} {s['card_h']:6d} {s['blank']:5d} {s['slack']:5d} {str(s['follow']):5s}"
                 f" {str(s['status_visible']):5s} {s['mem_q']:5d} {s['min']:5d} {s['max']:8d} | {s['sp']}"
             )
     return ok, max_blank, blank_turns

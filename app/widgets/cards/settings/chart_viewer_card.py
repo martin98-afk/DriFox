@@ -444,7 +444,7 @@ class ChartViewerCard(BaseSettingsCard):
     """内嵌图表查看卡片，用法类似文件差异对比面板"""
 
     def __init__(self, parent=None):
-        super().__init__("图表查看", "📊", parent=parent)
+        super().__init__("图表查看", icon_svg="chart", parent=parent)
         self.setMinimumHeight(200)
         self.set_height_mode("proportional")
         self._tmp_files: List[str] = []

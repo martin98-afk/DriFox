@@ -28,7 +28,8 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QColor, QPainter, QPen
 from PyQt5.QtWidgets import QLabel, QWidget
 
-from app.utils.design_tokens import Colors, Shadows
+from app.utils.design_tokens import Animations, Colors, Shadows
+from app.utils.motion import retarget
 
 from .assistant_avatar import RoundAvatar, qcolor_from
 
@@ -43,8 +44,8 @@ ARC_HEADROOM = 32  # 顶部弧度余量（收起态上摆溢出）
 LIFT_HOVER = 6  # 单卡悬停上浮
 CONTAINER_H = ARC_HEADROOM + CARD_SIZE + REST_GAP + NAME_AREA
 
-_DUR_EXPAND = 800  # 展开动画时长（原版 0.8s ease-out）
-_DUR_COLLAPSE = 600
+# 展开/收起动画时长已收敛到全局 token（Animations.SLOW_MS / ENTER_MS）。
+# 旧值 800/600ms 是全局 180–300ms 语言的 3~4 倍，扇形重排显得慢半拍。
 Anim = QPropertyAnimation
 
 
@@ -144,25 +145,39 @@ class _AgentCard(QWidget):
         self._update_badge_geom()
         self.update()
 
+    def _scaled_anim(self, attr: str, apply_cb) -> QVariantAnimation:
+        """取（或惰性创建）缩放/上浮动画对象：同名属性全程只用一个动画
+
+        ★ 旧实现每次 new 一个且不停旧的：连点/快速 hover 时新旧两条同时
+        ``valueChanged`` 写同一个 ``_scale`` / ``_lift`` → 数值打架、非单调抖动。
+        """
+        key = f"{attr}_anim"
+        anim = getattr(self, key, None)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.valueChanged.connect(lambda v: apply_cb(float(v)))
+            setattr(self, key, anim)
+        return anim
+
     def _animate_scale(self, target: float) -> None:
-        anim = QVariantAnimation(self)
-        anim.setDuration(180)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.setStartValue(self._scale)
-        anim.setEndValue(target)
-        anim.valueChanged.connect(lambda v: self._apply_scale(float(v)))
-        anim.finished.connect(anim.deleteLater)
-        anim.start()
+        if not retarget(
+            self._scaled_anim("scale", self._apply_scale),
+            self._scale,
+            target,
+            duration=Animations.HOVER_MS,
+            curve=Animations.EASE_HOVER,
+        ):
+            self._apply_scale(target)
 
     def _animate_lift(self, target: float) -> None:
-        anim = QVariantAnimation(self)
-        anim.setDuration(160)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.setStartValue(self._lift)
-        anim.setEndValue(target)
-        anim.valueChanged.connect(lambda v: self._apply_lift(float(v)))
-        anim.finished.connect(anim.deleteLater)
-        anim.start()
+        if not retarget(
+            self._scaled_anim("lift", self._apply_lift),
+            self._lift,
+            target,
+            duration=Animations.HOVER_MS,
+            curve=Animations.EASE_HOVER,
+        ):
+            self._apply_lift(target)
 
     # ── 事件 ──
     def enterEvent(self, e):  # noqa: N802
@@ -387,7 +402,14 @@ class ArcCardStack(QWidget):
                 add_x = self.width() / 2 - CARD_SIZE / 2
                 add_y = base_y
         self._anims.stop()
-        self._anims = QParallelAnimationGroup(self)
+        # ★ 复用同一个 group：旧实现每次 relayout 都 new 一个 group，旧的及其
+        # N 条子动画挂在 self 上永不删除 → 每次 hover 泄漏一组动画对象。
+        # clear() 会移除并删除上一次的子动画，再重新装填。
+        self._anims.clear()
+        # 展开/收起时长走全局 token：原 800/600ms 是全局 180–300ms 语言的
+        # 3~4 倍，扇形重排会显得"慢半拍"。
+        duration = Animations.SLOW_MS if self._expanded else Animations.ENTER_MS
+        curve = Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT
         # z 序：从右往左 raise → 左侧盖右侧；选中卡最后 raise（最顶层）
         ordered = list(reversed(list(enumerate(self._cards))))
         if self._selected_aid:
@@ -401,10 +423,10 @@ class ArcCardStack(QWidget):
                 continue
             tx, ty = positions[i]
             card.raise_()
-            if animate:
+            if animate and Animations.motion_enabled():
                 anim = Anim(card, b"pos")
-                anim.setDuration(_DUR_EXPAND if self._expanded else _DUR_COLLAPSE)
-                anim.setEasingCurve(QEasingCurve.OutCubic)
+                anim.setDuration(duration)
+                anim.setEasingCurve(QEasingCurve(curve))
                 anim.setStartValue(card.pos())
                 anim.setEndValue(QPoint(int(tx), int(ty)))
                 self._anims.addAnimation(anim)
@@ -416,16 +438,17 @@ class ArcCardStack(QWidget):
             else:
                 # 收起态：新建卡压在扇形最下层（z 轴正确层级），hover 展开时才抬起
                 self._add_card.lower()
-            if animate:
+            if animate and Animations.motion_enabled():
                 anim = Anim(self._add_card, b"pos")
-                anim.setDuration(_DUR_EXPAND if self._expanded else _DUR_COLLAPSE)
-                anim.setEasingCurve(QEasingCurve.OutCubic)
+                anim.setDuration(duration)
+                anim.setEasingCurve(QEasingCurve(curve))
                 anim.setStartValue(self._add_card.pos())
                 anim.setEndValue(QPoint(int(add_x), int(add_y)))
                 self._anims.addAnimation(anim)
             else:
                 self._add_card.move(int(add_x), int(add_y))
-        self._anims.start()
+        if self._anims.animationCount():
+            self._anims.start()
 
     # ── 事件 ──
     def enterEvent(self, e):  # noqa: N802

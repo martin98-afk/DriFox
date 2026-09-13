@@ -406,7 +406,7 @@ class LLMSettingsCard(SystemCardFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.set_icon("⚙️")
+        self.set_icon_svg("配置管理")
         self.set_title_text("系统设置")
         self.setMinimumHeight(250)  # 自适应窗口高度，showEvent 会自动设置 maximumHeight
 
@@ -1804,22 +1804,6 @@ class LLMSettingsCard(SystemCardFrame):
         QTimer.singleShot(300, self._prefetch_skills)
         # 非首屏页内容在空闲帧补齐（见 _prefetch_pages）
         self._prefetch_pages()
-
-    def _prefetch_pages(self):
-        """空闲帧错峰预热：把非首屏页的内容在卡片显示后逐页补齐
-
-        为什么不是「一次性补齐」：五页合计数百毫秒（冷缓存下工具/智能体页单页
-        可达 360ms），挤在一帧里就是打开设置后的一次明显顿卡。按页错峰后单帧
-        只付一页的钱。
-
-        为什么不是「只等在首次进入该页时」：那样「填充内容」与「展开卡片」会
-        落在同一 tick，而原实现里两者相隔很久（构造时填充、用户点导航时才展开），
-        ExpandSettingCard 的展开动画依赖其间的布局轮次。预热后用户点导航时内容
-        早已就位，时序回到原实现；_expand_page_cards 里的调用退化为「用户点得
-        比预热还快」时的兜底。
-        """
-        for i, tab_id in enumerate(("hooks", "plugins", "tools", "agents", "skills")):
-            QTimer.singleShot(250 + i * 200, lambda t=tab_id: self._ensure_page_ready(t))
         # 打开设置时刷新工具/智能体列表（插件热重载/启停后保持最新）。
         # ★ 仅限「已访问过的页」：未访问页的第一次 refresh_components 会走全量
         # 构建（数百毫秒），那笔由 _ensure_page_ready 在该页首次进入时付，
@@ -1837,6 +1821,25 @@ class LLMSettingsCard(SystemCardFrame):
             f"provider={_ms(t0, t_provider)} hot_reload={_ms(t_provider, t_hot)} "
             f"components={_ms(t_hot, t_components)} super={_ms(t_components)}"
         )
+
+    def _prefetch_pages(self):
+        """空闲帧错峰预热：把非首屏页的内容在卡片显示后逐页补齐
+
+        为什么不是「一次性补齐」：五页合计数百毫秒（冷缓存下工具/智能体页单页
+        可达 360ms），挤在一帧里就是打开设置后的一次明显顿卡。按页错峰后单帧
+        只付一页的钱。
+
+        为什么不是「只等在首次进入该页时」：那样「填充内容」与「展开卡片」会
+        落在同一 tick，而原实现里两者相隔很久（构造时填充、用户点导航时才展开），
+        ExpandSettingCard 的展开动画依赖其间的布局轮次。预热后用户点导航时内容
+        早已就位，时序回到原实现；_expand_page_cards 里的调用退化为「用户点得
+        比预热还快」时的兜底。
+        """
+        tabs = ("hooks", "plugins", "tools", "agents", "skills")
+        if all(t in self._page_ready for t in tabs):
+            return
+        for i, tab_id in enumerate(tabs):
+            QTimer.singleShot(250 + i * 200, lambda t=tab_id: self._ensure_page_ready(t))
 
     def set_opacity(self, opacity: float):
         """设置透明度（保留接口，暂不实现动态透明度）"""

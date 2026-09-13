@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import Colors
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon, get_unified_font
+from app.widgets.cards.card_container import CardContainer
 
 # 卡片最大高度（超出时出现滚动条）
 _MAX_CARD_HEIGHT = 320
@@ -520,6 +521,10 @@ class SubAgentCompactFloatingWidget(QWidget):
         # 动画期间的 Resize 事件，导致批量 task 到达时卡片高度被锁死。
         # snap 模式确保容器直接跟随 fixedHeight，无动画，无抑制。
         self.setProperty("noContainerAnimation", True)
+        # 高度严格跟随内容（L2 状态层契约，见 2026-09-12-bottom-card-layers-design）：
+        # 批量任务行增删时容器同步收缩/展开。漏声明会让共存的 followContent 卡
+        # （question / command）判定失效 → 容器走 30% 占比地板 → 卡片下方空白。
+        self.setProperty(CardContainer.FOLLOW_CONTENT_PROP, True)
         Colors.refresh()
         self._apply_style(None)
 

@@ -276,7 +276,7 @@ class GlobalCardController:
         from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
         from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 
-        self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self._tab_manager)
+        self._provider_edit_card = BaseSettingsCard("服务商配置", icon_svg="大模型", parent=self._tab_manager)
         self._provider_edit_card.setMinimumHeight(300)
         self._provider_edit_card.set_height_mode("content")
         self._provider_edit_popup = ProviderEditCard(parent=self._provider_edit_card)
@@ -300,7 +300,7 @@ class GlobalCardController:
 
         self._ensure_provider_edit_card()
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._provider_edit_card.set_title("⚙️ 添加服务商")
+        self._provider_edit_card.set_title("添加服务商", icon_svg="大模型")
         self._provider_edit_popup = ProviderEditCard(
             provider_name="", provider_info={}, is_new=True, parent=self._provider_edit_card
         )
@@ -326,7 +326,7 @@ class GlobalCardController:
         self._ensure_provider_edit_card()
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
         display_name = provider_info.get("name", "") or provider_info.get("provider_name", config_id)
-        self._provider_edit_card.set_title(f"⚙️ 编辑: {display_name}")
+        self._provider_edit_card.set_title(f"编辑: {display_name}", icon_svg="大模型")
         if "provider_name" not in provider_info:
             provider_info["provider_name"] = display_name
         self._provider_edit_popup = ProviderEditCard(
@@ -424,7 +424,7 @@ class GlobalCardController:
         from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
-        self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self._tab_manager)
+        self._hook_edit_card = BaseSettingsCard("Hook 配置", icon_svg="hooks", parent=self._tab_manager)
         self._hook_edit_card.setMinimumHeight(200)
         self._hook_edit_card.set_height_mode("proportional")
         self._hook_edit_popup = HookEditCard(parent=self._hook_edit_card)
@@ -444,7 +444,7 @@ class GlobalCardController:
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._hook_edit_card.set_title("➕ 添加 Hook")
+        self._hook_edit_card.set_title("添加 Hook", icon_svg="hooks")
         hm = None
         if self._settings_popup is not None:
             hm = self._settings_popup.hookListCard._hook_manager
@@ -466,7 +466,7 @@ class GlobalCardController:
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._hook_edit_card.set_title("✏️ 编辑 Hook")
+        self._hook_edit_card.set_title("编辑 Hook", icon_svg="hooks")
         hm = None
         if self._settings_popup is not None:
             hm = self._settings_popup.hookListCard._hook_manager
@@ -551,7 +551,7 @@ class GlobalCardController:
             return
         from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
-        self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self._tab_manager)
+        self._mcp_edit_card = BaseSettingsCard("MCP 服务器", icon_svg="MCP", parent=self._tab_manager)
         self._mcp_edit_card.setMinimumHeight(200)
         self._mcp_edit_card.set_height_mode("content")
         self._mcp_edit_popup = None
@@ -567,7 +567,7 @@ class GlobalCardController:
 
         self._ensure_mcp_edit_card()
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._mcp_edit_card.set_title("🔌 添加 MCP 服务器")
+        self._mcp_edit_card.set_title("添加 MCP 服务器", icon_svg="MCP")
         self._mcp_edit_popup = MCPEditCard(server_data=None, parent=self._mcp_edit_card)
         self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
         self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
@@ -589,7 +589,7 @@ class GlobalCardController:
 
         self._ensure_mcp_edit_card()
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._mcp_edit_card.set_title(f"🌐 编辑: {name}")
+        self._mcp_edit_card.set_title(f"编辑: {name}", icon_svg="MCP")
         self._mcp_edit_popup = MCPEditCard(server_data=server_data, parent=self._mcp_edit_card)
         self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
         self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
