@@ -3,6 +3,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### 🐛 问题修复 (Bug Fixes)
+
+- **提问卡片提交后关不掉、点击无反应** (`app/widgets/cards/card_manager.py`, `tests/widgets/test_question_card_stuck.py`): 修掉一处栈顶记账被抢走的竞态。`CardManager` 用 `visible_cards[容器]` 单值记「谁是栈顶」，而 L2 状态层的 `refresh_layer() → _apply_visible_set()` 会无条件覆写该单值；提问卡注册在 `BOTTOM` 且非 stackable，因此只要提问等待期间状态层刷过一次（子智能体进度刷新 / 紧凑卡 auto_hide 定时器 / 撤销卡 TTL / 新消息进队列，共 4 处可自发触发），记账就被换成状态卡或置空，此后 `hide_card("question")` 命中「记账不匹配」早退，widget 永不 `setVisible(False)`。表现为：提交后卡片仍压在输入框上方、再点提交/忽略全无反应（答案其实每次都送达、正文照常输出），而非提问卡独占的输入区隐藏与卡片隐藏是两条独立动作，前者成功后者失败。修复两处结构性问题且均不硬编码 `question` 字面量：① `_apply_visible_set` 写栈顶记账时，若现栈顶不在本次重算的管辖集内（非本层成员）则不抢，保住「question 覆盖一切」的优先级判定（`is_card_visible` 不再被侵蚀）；② `hide_card` 语义由「按记账判定该不该隐藏」改为「让指定卡消失」，新增 `_hand_over_stack_top` 只在记账确实属于本卡时交接、不动其他卡占位（同修 `multi_visible` 分支同类抢占）。5 条回归测试锁死关不掉路径、反复点击、优先级不被侵蚀，以及状态层在无提问卡时照常接管栈顶。
+
 ## [v0.5.11] - 2026-09-13 (重新发布 #3)
 
 自上一版本以来的变更 | 提交数：83 · 文件变更：169 · +12545/-4202 | 贡献者：dingma, drifox-bot

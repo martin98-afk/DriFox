@@ -959,9 +959,34 @@ class _GiteeMorePopup(QWidget):
     # ── 快捷设置回调 ──
 
     def _on_dark_mode_toggled(self, checked: bool):
-        """深色模式切换"""
-        self._cfg.ui_light_mode.value = not checked
+        """深色模式切换
+
+        完整刷新链（ui_light_mode.valueChanged → LLMSettingsCard._on_light_mode_changed
+        → ui_theme_style → configChanged → 全量刷新）依赖懒构建设置卡；本次启动
+        未打开过设置页时无人监听 valueChanged，界面不会切换。此处兜底：设置卡
+        未构建时直写目标主题并 dispatch_refresh 显式全量刷新（与 config_sync 同款）。
+        """
+        is_light = not checked
+        self._cfg.ui_light_mode.value = is_light
         self._cfg.save()
+
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        controller = get_global_card_controller()
+        if controller is not None and controller._settings_popup is not None:
+            # 设置卡已构建 → valueChanged 链自动完成主题切换，不重复触发
+            return
+
+        from app.utils.config import update_theme_options
+        from app.utils.theme_manager import theme_manager
+
+        # 写 ui_theme_style 前先刷新 validator 选项集，防止目标主题未注册时
+        # 被 OptionsValidator.correct() 静默回退到 options[0]
+        update_theme_options()
+        target_theme = "lumia" if is_light else "fallout"
+        if self._cfg.ui_theme_style.value != target_theme:
+            self._cfg.set(self._cfg.ui_theme_style, target_theme, save=True)
+        theme_manager.dispatch_refresh()
 
     def _on_compact_toggled(self, checked: bool):
         """简洁输出模式切换"""
