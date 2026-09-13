@@ -114,6 +114,37 @@ class _PanelHeightDriver(QObject):
     value = pyqtProperty(int, _get_value, _set_value)
 
 
+class _CrossHeightDriver(QObject):
+    """交叉高度驱动：一次赋值同时落两端（head = v，tail = total − v）
+
+    面板与列表区若各跑一个独立动画，两条插值各自取整会累积误差 —— 实测中间
+    帧 411 + 214 = 625，而可用高度是 626 → 过渡途中底部露 1px 缝。同一驱动
+    互补计算 = 两端严格守恒，也省掉一条动画。
+    """
+
+    def __init__(self, head: QWidget, tail: QWidget, parent=None):
+        super().__init__(parent)
+        self._head = _PanelHeightDriver(head, self)
+        self._tail = _PanelHeightDriver(tail, self)
+        self._total = 0
+        self._value = 0
+
+    def set_total(self, total: int) -> None:
+        """设定守恒总量（每轮动画起点的可用高度）"""
+        self._total = max(int(total), 0)
+
+    def _get_value(self) -> int:
+        return self._value
+
+    def _set_value(self, v) -> None:
+        self._value = int(v)
+        head = max(min(self._value, self._total), 0)
+        self._head.value = head
+        self._tail.value = max(self._total - head, 0)
+
+    value = pyqtProperty(int, _get_value, _set_value)
+
+
 class _TopPadDriver(QObject):
     """面板内容顶部内边距驱动器：展开时内容小幅上滑（裁开 + 滑入 = 下拉感）
 
@@ -433,7 +464,6 @@ class HistoryPage(QWidget):
         shell_lay.setContentsMargins(0, 0, 0, 0)
         shell_lay.setSpacing(0)
         swap_lay.addWidget(self._list_shell, 1)
-        self._list_height_driver = _PanelHeightDriver(self._list_shell)
         self._list_body = QWidget(self._list_shell)
         list_body_lay = QVBoxLayout(self._list_body)
         list_body_lay.setContentsMargins(0, 0, 0, 0)
@@ -466,6 +496,8 @@ class HistoryPage(QWidget):
         self._scroll_area.setWidget(self._content_widget)
         self._scroll_area.hide()  # attach 前隐藏（空滚动区会闪白底）
         list_body_lay.addWidget(self._scroll_area, 1)
+        # 交叉驱动：head = 面板、tail = 列表区（两端高度严格互补）
+        self._cross_driver = _CrossHeightDriver(self._project_panel, self._list_shell, self)
         self._set_sub_tab_active(0)
 
         # ── 自带历史卡片 + 接线（替代宿主 _build_deferred_card_history） ──
@@ -603,7 +635,6 @@ class HistoryPage(QWidget):
         self._project_selector.folderDropped.connect(lambda path: self._call_window("_on_project_folder_dropped", path))
         vbox.addWidget(self._project_selector, 1)
         shell.addWidget(body, 1)
-        self._panel_height_driver = _PanelHeightDriver(panel)
         self._panel_pad_driver = _TopPadDriver(vbox)
         return panel
 
@@ -741,39 +772,34 @@ class HistoryPage(QWidget):
         shell.setVisible(True)
         list_body.setVisible(True)
 
+        self._cross_driver.set_total(total)
         if visible:
             self._sync_list_visibility()  # 列表区按内容态显隐（随后被外壳裁掉）
             panel.setVisible(True)
             body.setFixedHeight(max(total, 1))  # 面板内容钉到终高，只被外壳逐帧露出
             list_body.setFixedHeight(max(shell_from, 1))  # 列表内容钉住，只被裁掉
-            panel_to, shell_to = total, 0
+            panel_to = total
         else:
             body.setFixedHeight(max(panel_from, 1))  # 收起方向：面板内容钉住不被压缩
             list_body.setFixedHeight(max(total, 1))  # 列表内容钉到终高，只被外壳露出
-            panel_to, shell_to = 0, total
-        panel.setFixedHeight(panel_from)
-        shell.setFixedHeight(shell_from)
+            panel_to = 0
+        self._cross_driver.value = panel_from  # 两端同时落到起点
 
         if not self.isVisible() or not Animations.motion_enabled():
             # 页面不可见（启动期/卡片隐藏中）或系统减少动效：跳过动画直置终值
-            panel.setFixedHeight(panel_to)
-            shell.setFixedHeight(shell_to)
+            self._cross_driver.value = panel_to
             self._release_panel_area()
             return
 
         duration = _PANEL_EXPAND_MS if visible else _PANEL_COLLAPSE_MS
         curve = QEasingCurve(_PANEL_EASE_COLLAPSE if not visible else _PANEL_EASE_EXPAND)
         group = QParallelAnimationGroup(self)
-        for driver, frm, to in (
-            (self._panel_height_driver, panel_from, panel_to),
-            (self._list_height_driver, shell_from, shell_to),
-        ):
-            anim = QPropertyAnimation(driver, b"value", group)
-            anim.setDuration(duration)
-            anim.setStartValue(frm)
-            anim.setEndValue(to)
-            anim.setEasingCurve(curve)
-            group.addAnimation(anim)
+        anim = QPropertyAnimation(self._cross_driver, b"value", group)
+        anim.setDuration(duration)
+        anim.setStartValue(panel_from)
+        anim.setEndValue(panel_to)
+        anim.setEasingCurve(curve)
+        group.addAnimation(anim)
         # 内容滑入（收起方向幅度减半：退出要干脆，全幅滑出会拖）
         pad = QPropertyAnimation(self._panel_pad_driver, b"value", group)
         pad.setDuration(duration)
