@@ -4643,6 +4643,8 @@ class _DialogVisibilityBridge:
         类级 patch 无法安全撤销（会破坏弹窗自身的 showEvent 链），故总线常驻，
         最后一个 viewer 注销时不卸载 —— 只剩空注册表，广播回调立即 return。
         """
+        if viewer not in self._viewers:
+            return  # 未注册/已注销：不必再去动 destroyed 连接（PySide 会报断连告警）
         self._viewers.discard(viewer)
         try:
             viewer.destroyed.disconnect(self._on_viewer_destroyed)

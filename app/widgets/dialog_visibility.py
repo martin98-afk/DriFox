@@ -43,21 +43,26 @@ def add_listener(on_shown, on_hidden) -> None:
 def install() -> bool:
     """给目标弹窗类装上显隐广播。幂等：重复调用不会二次包装。
 
-    返回是否至少包装成功了一个类。qfluentwidgets 缺失/结构变更时返回 False，
-    仅影响 WebView 让位这一项体验，不影响启动。
+    返回**总线是否可用** —— 「已被别的调用方包装过」同样算可用，不能报 False：
+    消费方普遍写成 `if install(): add_listener(...)`，这里误报失败会让它永远
+    不登记监听者，WebView 让位静默失效（且现象与「依赖缺失」完全一样，极难查）。
+
+    qfluentwidgets 缺失/结构变更时返回 False，仅影响 WebView 让位这一项体验，
+    不影响启动。
     """
-    patched = 0
+    usable = False
     for module_name, class_name in _TARGET_MODULES:
         cls = _resolve(module_name, class_name)
         if cls is None:
             continue
         if getattr(cls, _PATCH_FLAG, False):
+            usable = True  # 已包装：总线可用，跳过以免一次显隐广播两遍
             continue
         if _patch(cls):
-            patched += 1
-    if patched == 0:
+            usable = True
+    if not usable:
         logger.warning("[DialogVisibility] 未能包装任何弹窗类，WebView 让位逻辑不生效")
-    return patched > 0
+    return usable
 
 
 def _resolve(module_name: str, class_name: str):
