@@ -21,8 +21,12 @@ class _FakeSessionStore:
 
     is_initialized = True
 
-    def __init__(self, sessions: List[Dict]):
+    def __init__(self, sessions: List[Dict], projects: Optional[List[str]] = None):
         self.sessions = sessions
+        # 项目列表（对齐真实 store.get_projects：sessions ∪ key_documents 已过滤排序）
+        self._projects: List[str] = list(projects) if projects is not None else sorted(
+            {s.get("project", "默认项目") for s in sessions}
+        )
         self.saved_session_ids: List[str] = []
         # 已保存的完整会话记录（save_session 写入，get_session 回读）
         self._saved_sessions: Dict[str, Dict] = {}
@@ -41,6 +45,9 @@ class _FakeSessionStore:
     def get_session(self, session_id: str) -> Optional[Dict]:
         """返回已保存的完整会话；未保存过返回 None（真实 SQLite 语义）。"""
         return self._saved_sessions.get(session_id)
+
+    def get_projects(self) -> List[str]:
+        return list(self._projects)
 
 
 def _make_manager(monkeypatch, tmp_path: Path) -> HistoryManager:
@@ -227,4 +234,20 @@ def test_set_session_pinned_updates_memory(monkeypatch, tmp_path):
 def test_get_project_list_distinct_sorted(monkeypatch, tmp_path):
     records = [_mk_record("a", project="zero"), _mk_record("b", project="DriFox"), _mk_record("c", project="zero")]
     manager = _make_manager_with_records(monkeypatch, tmp_path, records)
+    assert manager.get_project_list() == ["DriFox", "zero"]
+
+
+def test_get_project_list_sqlite_includes_projects_without_sessions(monkeypatch, tmp_path):
+    """SQLite 模式：仅有 key_documents 记录的空项目也必须出现在项目列表。
+
+    回归（2026-09-13）：新建项目只写 key_documents（工作目录），首轮对话后才
+    落 sessions；get_project_list 若只从会话聚合，新建项目 A 后再新建 B，
+    A 失去「当前项目」兑底即从列表消失，且查重命中导致无法重建同名。
+    """
+    manager = _make_manager(monkeypatch, tmp_path)
+    manager._history_loaded = True
+    manager._history_sessions = [_mk_record("a", project="DriFox")]
+    # 真实 store 口径：sessions ∪ key_documents，含无会话的空项目 zero
+    manager._session_store = _FakeSessionStore([], projects=["DriFox", "zero"])
+    manager._use_sqlite = True
     assert manager.get_project_list() == ["DriFox", "zero"]
