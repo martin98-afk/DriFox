@@ -182,7 +182,7 @@ def _viewer_cls():
 def _make_card(monkeypatch):
     _ensure_qapp()
     monkeypatch.setattr(mc, "_edit_tools", lambda: frozenset({"edit", "write", "multi_edit"}))
-    monkeypatch.setattr(mc.sip, "isdeleted", lambda o: False)
+    monkeypatch.setattr(mc.shiboken6, "isValid", lambda o: True)
     card = MessageCard(role="assistant")
     card._lazy_rendered = True
     card.viewer = _viewer_cls()()

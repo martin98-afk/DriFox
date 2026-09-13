@@ -89,12 +89,15 @@ class TestInvalidateWelcomeCardMethod:
         assert args[0].arg == "self"
 
     def test_method_uses_sip_isdeleted(self):
-        """方法内应检查 sip.isdeleted（防御性双保险）"""
+        """方法内应检查 sip.isdeleted / shiboken6 isValid（防御性双保险）"""
         cls = _get_target_class()
         method = _get_method(cls, "_invalidate_welcome_card")
         assert method is not None
         src = ast.unparse(method)
-        assert "isdeleted" in src, "失效方法应检查 sip.isdeleted"
+        # PySide6/shiboken6 下 isdeleted 已由 isValid 表达（语义等价反转）
+        assert (
+            "isdeleted" in src or "isValid" in src
+        ), "失效方法应检查 sip.isdeleted / sip.isValid"
 
 
 class TestInvalidationCallSites:

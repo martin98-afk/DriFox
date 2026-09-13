@@ -1004,8 +1004,8 @@ def test_create_fresh_window_aborts_on_add_window_failure(qapp):
             fake_tm_win.add_window.side_effect = RuntimeError("add_window boom")
             fake_tm_win.isVisible.return_value = True
             m_get_tm.return_value = fake_tm_win
-            # homepage 需有效（sip.isdeleted 检查通过）
-            with patch.object(mw.sip, "isdeleted", return_value=False):
+            # homepage 需有效（shiboken6 isValid 检查通过）
+            with patch.object(mw.sip, "isValid", return_value=True):
                 result = inst._create_fresh_window()
     assert result is None, "注册失败应返回 None"
     m_abort.assert_called_once_with(fake_win), "已构造窗口应调用 _abort_team_window 回收"

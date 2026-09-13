@@ -93,7 +93,7 @@ def _live_marked_shortcuts(win) -> list:
     out = []
     for qs in win.findChildren(QShortcut):
         try:
-            if sip.isdeleted(qs):
+            if not sip.isValid(qs):
                 continue
             if qs.property(marker):
                 out.append(qs)

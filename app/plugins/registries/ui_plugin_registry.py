@@ -2979,7 +2979,7 @@ class UIPluginRegistry:
                 try:
                     import shiboken6 as sip
 
-                    if sip.isdeleted(mw):
+                    if not sip.isValid(mw):
                         skipped_no_method += 1
                         continue
                 except Exception:

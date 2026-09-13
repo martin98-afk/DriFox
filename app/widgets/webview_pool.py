@@ -199,7 +199,7 @@ class WebViewPool:
             return False
         if sip is not None:
             try:
-                if sip.isdeleted(widget):
+                if not sip.isValid(widget):
                     return False
             except Exception:
                 return False

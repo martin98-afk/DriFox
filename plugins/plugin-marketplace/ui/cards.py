@@ -6180,7 +6180,7 @@ class MarketplaceCard(QWidget):
     def _alive(self) -> bool:
         """卡片 C++ 对象是否存活（销毁后迟到回调防护）"""
         try:
-            return not sip.isdeleted(self)
+            return sip.isValid(self)
         except (RuntimeError, TypeError):
             return False
 
@@ -6197,7 +6197,7 @@ class MarketplaceCard(QWidget):
         if thread is None:
             return
         try:
-            if sip.isdeleted(thread):
+            if not sip.isValid(thread):
                 # C++ 对象已被前轮 finished→deleteLater 销毁：仅清理悬垂引用
                 try:
                     if thread in _orphan_threads:

@@ -279,7 +279,7 @@ class WorktreeService:
             tgt_bw = getattr(target, "_branch_widget", None)
             if src_bw is None or tgt_bw is None:
                 return
-            if sip.isdeleted(source) or sip.isdeleted(src_bw):
+            if not sip.isValid(source) or not sip.isValid(src_bw):
                 return
             branch_visible = src_bw.isVisible()
             tgt_bw.setText(src_bw.text())

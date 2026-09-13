@@ -28,7 +28,7 @@ import contextlib
 from typing import Any, Callable, Dict, Optional
 
 try:  # 仅用于剔除已销毁的页面引用，缺失时退化为不清理
-    import sip
+    import shiboken6 as sip
 except Exception:  # pragma: no cover
     sip = None
 
@@ -97,7 +97,7 @@ class ResizeOrchestrator:
         if sip is None:
             return
         for store in (self._dirty, self._paused):
-            for key in [k for k, w in store.items() if sip.isdeleted(w)]:
+            for key in [k for k, w in store.items() if not sip.isValid(w)]:
                 store.pop(key, None)
 
     def mark_paused(self, widget: Any) -> None:

@@ -32,8 +32,8 @@ _app = QApplication.instance() or QApplication(sys.argv)
 from app.widgets import message_card as mc  # noqa: E402
 from app.widgets.message_card import CodeWebViewer, MessageCard  # noqa: E402
 
-# 桩对象不是 QObject，屏蔽 sip 存活检测
-mc.sip = types.SimpleNamespace(isdeleted=lambda o: False)
+# 桩对象不是 QObject，屏蔽 shiboken6 存活检测（源码以 shiboken6.isValid 判活）
+mc.shiboken6 = types.SimpleNamespace(isValid=lambda o: True)
 
 
 _VOID_TAGS = {"br", "img", "hr", "input", "meta", "link", "source"}

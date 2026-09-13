@@ -93,7 +93,7 @@ def _qconfig_alive() -> bool:
 
         import shiboken6 as sip
 
-        return not sip.isdeleted(qconfig)
+        return sip.isValid(qconfig)
     except Exception:
         return False
 
