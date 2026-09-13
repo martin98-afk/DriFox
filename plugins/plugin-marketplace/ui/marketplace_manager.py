@@ -232,9 +232,12 @@ class MarketplaceSourceManager:
         """确保默认市场源已写入持久化文件
 
         - 文件不存在：写入全部默认源
-        - 文件已存在：按 name 将缺失的 builtin 默认源追加（去重合并）。
-          存量用户升级后自动补齐新增的 builtin 源（如 drifox-system），
-          保留用户自定义源的顺序与字段，不覆盖任何已有条目。
+        - 文件已存在：按 name 将缺失的 builtin 默认源追加（去重合并）；
+          同时把存量 builtin 源的 source 同步为当前版本默认值——默认源 URL
+          会随主程序线调整（如 pyside6 线切 drifox-plugins/pyside6 分支），
+          只追加不更新会让老用户 sources.json 锁死旧 URL，永远拉旧清单。
+          builtin 语义 = 随版本分发的官方源；用户自定义源（builtin 非真）
+          与条目顺序不受影响。
         """
         if not self._sources_file.exists():
             self._sources_file.write_text(
@@ -253,14 +256,27 @@ class MarketplaceSourceManager:
             return
         existing_names = {s.get("name") for s in existing if isinstance(s, dict)}
         missing = [d for d in _DEFAULT_SOURCES if d.get("name") not in existing_names]
-        if not missing:
+        # 存量 builtin 源跟随版本更新（仅覆盖 source 字段）
+        default_by_name = {d.get("name"): d for d in _DEFAULT_SOURCES if d.get("builtin")}
+        updated_names: List[str] = []
+        for entry in existing:
+            if not isinstance(entry, dict):
+                continue
+            d = default_by_name.get(entry.get("name"))
+            if d and entry.get("builtin") and entry.get("source") != d.get("source"):
+                entry["source"] = d["source"]
+                updated_names.append(str(entry.get("name")))
+        if not missing and not updated_names:
             return
         try:
             self._sources_file.write_text(
                 json.dumps(existing + missing, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            logger.info(f"[Marketplace] 已追加缺失的默认市场源: {[m.get('name') for m in missing]}")
+            if updated_names:
+                logger.info(f"[Marketplace] 已同步 builtin 市场源到当前版本默认值: {updated_names}")
+            if missing:
+                logger.info(f"[Marketplace] 已追加缺失的默认市场源: {[m.get('name') for m in missing]}")
         except OSError as e:
             logger.warning(f"[Marketplace] 写回市场源配置失败: {e}")
 
