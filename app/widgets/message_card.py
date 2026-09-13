@@ -10527,6 +10527,19 @@ class CodeWebViewer(QWebEngineView):
             # [B2] IPC 瘦身：仅当工具 DOM 被 JS 增量注入（_tool_dom_dirty）或存在
             # 已完成工具块待 restore（_restore_finished_ids）时才走 save/restore 包装
             _needs_save_restore = self._tool_dom_dirty or bool(getattr(self, "_restore_finished_ids", set()))
+            # [DIAG-RF] 临时诊断（完成框沉底排查）：记录渲染侧判据与渲染用 markdown
+            # 是否含工具块。md 不含 data-tool-call-id → 渲染 HTML 无块 → restore 必然
+            # 走「恢复已完成块」分支 → appendChild 到容器末尾（沉底）。
+            try:
+                _md = self._last_rendered_markdown or ""
+                logger.info(
+                    f"[DIAG-RF] render seq={seq} streaming={self._streaming} "
+                    f"dirty={self._tool_dom_dirty} save_restore={_needs_save_restore} "
+                    f"md_len={len(_md)} md_tcid={_md.count('data-tool-call-id')} "
+                    f"finished_ids={len(getattr(self, '_restore_finished_ids', set()) or set())}"
+                )
+            except Exception:
+                pass
             if _needs_save_restore:
                 js_code = self._build_save_and_restore_js(html, getattr(self, "_restore_finished_ids", set())).replace(
                     "})();", auto_scroll_js + "})();"
@@ -10539,7 +10552,12 @@ class CodeWebViewer(QWebEngineView):
             # 原理同 _perform_update 非流式分支——避免异步 JS 未执行期间被下一次渲染
             # 误判"无工具 DOM"而裸 updateContent 抹掉 JS 注入的运行框。
             _gen = self._tool_dom_dirty_gen
-            self.page().runJavaScript(js_code, lambda _r, _g=_gen: self._clear_tool_dom_dirty_guarded(_g))
+
+            def _after_render_js(_r, _g=_gen) -> None:
+                self._clear_tool_dom_dirty_guarded(_g)
+                self._diag_rf_probe()
+
+            self.page().runJavaScript(js_code, _after_render_js)
             # 🐛 修复（刚打出的字被抹掉）：updateContent 用的是「渲染快照」的 HTML，
             # 在途期间到达的 chunk 只存在于 DOM 增量节点，整体替换会连它们一起删掉。
             # 落地后把快照之后的增量补回（排在 updateContent 之后执行）。
@@ -10555,6 +10573,30 @@ class CodeWebViewer(QWebEngineView):
                 pseq, pmd, pcompact = self._render_pending
                 self._render_pending = None
                 self._sequence_render(pmd, pcompact)
+
+    def _diag_rf_probe(self):
+        """[DIAG-RF] 临时诊断（完成框沉底排查）：渲染落地后检查 restore 恢复的已完成块。
+
+        输出：被 restore 恢复的「已完成」工具块 id 列表 + 正文容器直接子级顺序快照。
+        用于确认沉底路径是「restore appendChild 到容器末尾」还是「渲染 HTML 本身顺序」。
+        """
+        try:
+            if not self._is_js_ready or not self.page():
+                return
+            self.page().runJavaScript(
+                "(function(){"
+                "var els=document.querySelectorAll('[data-restored-finished=\"true\"]');"
+                "if(!els.length)return '';"
+                "var cp=document.getElementById('content-placeholder');"
+                "var kids=cp?Array.prototype.map.call(cp.children,function(e){"
+                "return (e.getAttribute('data-tool-call-id')||(e.tagName+(e.hasAttribute('data-incremental')?'[inc]':'')));"
+                "}):[];"
+                "var ids=Array.prototype.map.call(els,function(e){return e.getAttribute('data-tool-call-id');});"
+                "return JSON.stringify({ids:ids,kids:kids});})()",
+                lambda r: logger.info(f"[DIAG-RF] restored_finished={r}") if r else None,
+            )
+        except RuntimeError:
+            pass
 
     def _push_unrendered_tail_text(self):
         """把「渲染快照之后新增」的文本重新推回 DOM（防全量渲染落地时抹掉）。

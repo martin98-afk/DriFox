@@ -7,6 +7,7 @@
 """
 
 import pytest
+from PySide6.QtGui import QTextCursor
 
 from app.widgets.bottom_input_area import SendableTextEdit
 
@@ -27,7 +28,7 @@ def test_pill_then_typing_does_not_trigger_at(editor):
     """胶囊后继续打字也不应触发（胶囊自带空格曾被坐标错位切掉）"""
     editor.insert_assistant_mention("hanako", "#DB2777")
     cursor = editor.textCursor()
-    cursor.movePosition(cursor.End)
+    cursor.movePosition(QTextCursor.MoveOperation.End)
     cursor.insertText("继续输入")
     editor.setTextCursor(cursor)
     editor._on_at_trigger_check()
@@ -38,7 +39,7 @@ def test_manual_at_still_triggers(editor):
     """胶囊存在时手打 @ 仍应正常触发"""
     editor.insert_assistant_mention("DriFox", "#7C3AED")
     cursor = editor.textCursor()
-    cursor.movePosition(cursor.End)
+    cursor.movePosition(QTextCursor.MoveOperation.End)
     cursor.insertText("@dv")
     editor.setTextCursor(cursor)
     editor._on_at_trigger_check()

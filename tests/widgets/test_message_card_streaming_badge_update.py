@@ -16,8 +16,8 @@
 
 import sys
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 # Qt 属性必须先于 message_card（顶层拉入 QWebEngineView）设置，否则 native crash
 QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)

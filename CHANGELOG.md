@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### 🐛 问题修复
+
+- **消息卡片文字瞬间竖向拉伸伪影** (`app/utils/render_env.py` + `app/utils/config.py`): Qt6 下 WebEngine 双合成器异步交换纹理，卡片高频 resize / 新内容首帧时旧帧纹理被拉伸填满新几何，文字瞬间竖向拉长后恢复。全档默认追加 `--disable-gpu-compositing`（2026-09-11 hardware 档先行，本次推广至 software 默认档；vulkan / d3d9 排障档豁免），`ExtraChromiumFlags` 填 `--enable-gpu-compositing` 可覆盖。
+
 ### 🔧 工程 (Chore)
 
 - **PySide6 版数据根目录 `.drifox` → `.drifox6`**：两版插件（依赖各自 Qt 绑定的 UI 代码与编译扩展）互不兼容，共用目录会在切换版本时加载到错版插件，故整体隔离。覆盖开发态仓库根目录、打包态 `~/.drifox6`、macOS `~/Library/Application Support/Drifox/.drifox6`，以及插件自带的同类路径实现（plugin-marketplace / share-history / system-cleaner / assistant_hub / system-tools）；单实例锁 key 同步改为 `Drifox6`。**不做旧数据迁移**：新目录首次启动即为空环境，需重新配置 API Key 并重装插件。目录名真源见 `app/utils/utils.py` 的 `APP_DATA_DIR_NAME`。

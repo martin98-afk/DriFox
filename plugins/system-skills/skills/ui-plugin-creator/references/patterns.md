@@ -221,7 +221,7 @@ def _make_style(color: str, font_family: str = "", font_size: int = 0, extra: st
 ```python
 def sizeHint(self):
     """与 SystemCardFrame proportional 模式一致：返回窗口高度的 85%"""
-    from PyQt5.QtCore import QSize
+    from PySide6.QtCore import QSize
     base = super().sizeHint()
     win = self.window()
     if win and win.height() > 0:
@@ -238,7 +238,7 @@ def showEvent(self, event):
 
 def eventFilter(self, obj, event):
     """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
-    from PyQt5.QtCore import QEvent
+    from PySide6.QtCore import QEvent
     if obj is self.window() and event.type() == QEvent.Resize:
         self.updateGeometry()
     return super().eventFilter(obj, event)
@@ -260,13 +260,13 @@ def eventFilter(self, obj, event):
 ### 3.1 标准 Worker 模板
 
 ```python
-from PyQt5.QtCore import QObject, QThread, pyqtSignal
+from PySide6.QtCore import QObject, QThread, Signal
 
 
 class _Worker(QObject):
     """后台执行阻塞操作，通过信号返回结果"""
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, fn, *args, **kwargs):
         super().__init__()
@@ -415,7 +415,7 @@ def _ctx_text_color(ctx: dict, secondary: bool = False) -> str:
 
 ```python
 class MyCard(QWidget):
-    closed = pyqtSignal()
+    closed = Signal()
 
     def _on_close(self):
         self.setVisible(False)
@@ -628,7 +628,7 @@ shot.setDevicePixelRatio(dpr)
 - 信号验证用 `qtbot.waitSignal(overlay.captured)`；剪贴板断言注意剪贴板是全局资源，
   断言尺寸即可，别依赖具体内容。
 - lint 关卡是 **ruff**；`npx pyright` 默认配置在本项目是满屏基线噪音
-  （无 pyrightconfig、PyQt5 stub 缺枚举），别当硬关卡，也别为它改代码。
+  （无 pyrightconfig、PySide6 stub 缺枚举），别当硬关卡，也别为它改代码。
 
 ---
 

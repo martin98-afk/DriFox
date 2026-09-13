@@ -4395,8 +4395,10 @@ class MarketplaceCard(QWidget):
                 return
             area = mw.input_area
             area.setPlainText("本地安装git")
+            from PySide6.QtGui import QTextCursor
+
             cursor = area.textCursor()
-            cursor.movePosition(cursor.End)
+            cursor.movePosition(QTextCursor.MoveOperation.End)
             area.setTextCursor(cursor)
             area.setFocus()
         except Exception as e:

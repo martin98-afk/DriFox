@@ -530,8 +530,9 @@ class Settings(QConfig):
     # swiftshader = Qt 走 WARP + Chromium 走自带 CPU 光栅的双保险。
     # 兼容：历史配置里残留的 "auto"、手改的非法值一律按出厂默认 software 处理
     # （render_env 裸读原始值，旧检测链已删除）。
-    # hardware 档默认附加 --disable-gpu-compositing（GPU 光栅 + CPU 合成，规避
-    # 双合成器纹理交换闪烁，2026-09-11），ExtraChromiumFlags 可覆盖。
+    # 全档默认附加 --disable-gpu-compositing（Qt/Chromium 双合成器异步交换纹理，
+    # 高频 resize 下旧帧被拉伸 → 文字瞬间竖向拉伸伪影；2026-09-11 hardware 档
+    # 确认，2026-09-13 推广全档；vulkan/d3d9 排障档豁免），ExtraChromiumFlags 可覆盖。
     render_backend = OptionsConfigItem(
         "Render",
         "RenderBackend",

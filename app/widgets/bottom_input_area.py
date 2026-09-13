@@ -14,7 +14,6 @@ from typing import Optional
 from PySide6.QtCore import (
     QEasingCurve,
     QMimeData,
-    QObject,
     QRectF,
     QSize,
     QSizeF,
@@ -40,7 +39,7 @@ from PySide6.QtGui import (
     QTextCharFormat,
     QTextCursor,
     QTextFormat,
-    QTextObjectInterface,
+    QPyTextObject,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -2668,13 +2667,15 @@ class AttachmentChip(QFrame):
         self._apply_style()
 
 
-class FileMentionObject(QObject, QTextObjectInterface):
+class FileMentionObject(QPyTextObject):
     """输入框正文中的 inline 文件引用胶囊（圆角背景 + 类型图标 + 文件名）
 
-    ⚠️ 必须同时继承 QObject：``QTextDocument.documentLayout().registerHandler()``
-    的签名要求 component 是 QObject，纯 QTextObjectInterface 会被拒绝
-    （TypeError: argument 2 has unexpected type）。
-    继承顺序必须是 (QObject, QTextObjectInterface)，反了会导致 MRO 冲突。
+    ⚠️ 必须继承 ``QPyTextObject``（PySide 为 Python 实现 QTextObjectInterface
+    提供的桥接基类）。不能按 PyQt5 写法多继承
+    ``(QObject, QTextObjectInterface)``：在 PySide6 下 registerHandler 不报错，
+    但 intrinsicSize / drawObject 永远不会被文档布局回调，胶囊整个画不出来
+    （PySide6 6.11 实测）。QPyTextObject 本身即 QObject 子类，
+    满足 registerHandler 对 component 的 QObject 要求。
 
 
     为什么不用字面 ``[[basename]]``（旧实现）:
@@ -2775,7 +2776,7 @@ class FileMentionObject(QObject, QTextObjectInterface):
         return cls._icon_cache[key]
 
 
-class AssistantMentionObject(QObject, QTextObjectInterface):
+class AssistantMentionObject(QPyTextObject):
     """输入框正文中的 inline 助手提及胶囊（@ 智能体角色）
 
     与 FileMentionObject 同款机制：文档里占一个字符（U+FFFC），

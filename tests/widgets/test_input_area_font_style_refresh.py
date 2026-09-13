@@ -51,7 +51,7 @@ def _set_font_config(monkeypatch, family="Segoe UI"):
     invalidate_font_family_css_cache()
 
 
-def test_refresh_style_rebuilds_qss_with_current_font(monkeypatch):
+def test_refresh_style_rebuilds_qss_with_current_font(qapp, monkeypatch):
     """refresh_style() 后 QSS 应包含当前配置的字体族（而非旧值）。"""
     _set_font_config(monkeypatch, family="Segoe UI")
     editor = SendableTextEdit()
@@ -65,7 +65,7 @@ def test_refresh_style_rebuilds_qss_with_current_font(monkeypatch):
     assert "Segoe UI" not in editor.styleSheet()
 
 
-def test_qss_font_overrides_setfont(monkeypatch):
+def test_qss_font_overrides_setfont(qapp, monkeypatch):
     """Qt 规则：QSS 中 font-family 优先于 setFont —— 证明仅 setFont 不够。"""
     _set_font_config(monkeypatch, family="Segoe UI")
     editor = SendableTextEdit()

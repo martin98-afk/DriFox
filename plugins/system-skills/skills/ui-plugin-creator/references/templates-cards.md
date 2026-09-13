@@ -25,9 +25,9 @@ import traceback
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QObject, QThread, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import (
+from PySide6.QtCore import QObject, QThread, Qt, QTimer, Signal
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -130,8 +130,8 @@ def _adjust_color(hex_color: str, amount: int) -> str:
 class _Worker(QObject):
     """后台执行阻塞操作，通过信号返回结果"""
 
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, fn, *args, **kwargs):
         super().__init__()
@@ -153,7 +153,7 @@ class _Worker(QObject):
 class MyCardWidget(QWidget):
     """<CardName> 浮动卡片"""
 
-    closed = pyqtSignal()
+    closed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -181,7 +181,7 @@ class MyCardWidget(QWidget):
         if self._context_provider is None or self._header_icon is None:
             return
         try:
-            from PyQt5.QtGui import QIcon
+            from PySide6.QtGui import QIcon
 
             ctx = self._context_provider()
             icon_info = ctx.get("plugin_icon", {})
@@ -395,7 +395,7 @@ class MyCardWidget(QWidget):
 
     def sizeHint(self):
         """与 SystemCardFrame proportional 模式一致：返回窗口高度的 85%"""
-        from PyQt5.QtCore import QSize
+        from PySide6.QtCore import QSize
         base = super().sizeHint()
         win = self.window()
         if win and win.height() > 0:
@@ -412,7 +412,7 @@ class MyCardWidget(QWidget):
 
     def eventFilter(self, obj, event):
         """监听窗口 resize，触发 updateGeometry → CardContainer 重算高度"""
-        from PyQt5.QtCore import QEvent
+        from PySide6.QtCore import QEvent
         if obj is self.window() and event.type() == QEvent.Resize:
             self.updateGeometry()
         return super().eventFilter(obj, event)
@@ -631,8 +631,8 @@ def _apply_latest_theme(self):
 ```python
 class _DataWorker(QObject):
     """后台线程执行 SQLite 读取"""
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
+    finished = Signal(object)
+    error = Signal(str)
 
     def __init__(self, fn, *args, **kwargs):
         super().__init__()
@@ -1060,7 +1060,7 @@ def _apply_latest_theme(self):
 ### 7.5 所需额外 import
 
 ```python
-from PyQt5.QtGui import QColor
+from PySide6.QtGui import QColor
 from qfluentwidgets import BodyLabel, MaskDialogBase
 ```
 

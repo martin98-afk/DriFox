@@ -4212,8 +4212,10 @@ class OpenAIChatToolWindow(ToolWindow):
         insert = f"/{command_name} "
         self.input_area.blockSignals(True)
         self.input_area.setPlainText(insert)
+        from PySide6.QtGui import QTextCursor
+
         cursor = self.input_area.textCursor()
-        cursor.movePosition(cursor.End)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
         self.input_area.setTextCursor(cursor)
         self.input_area.blockSignals(False)
         self.input_area.setFocus()

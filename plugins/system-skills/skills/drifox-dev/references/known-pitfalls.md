@@ -29,7 +29,7 @@
 | P049 | 设置卡开关每次都卡 | UI 线程同步做全目录 stat + 全量写盘 + 信号回环 | TTL 缓存 + `blockSignals` + 写盘防抖（4-18ms → 1.6-4.2ms） |
 | P014 | 主线程卡 30s+ | **同步网络 I/O 混进只读缓存接口** | 读接口永不发网络；刷新走后台单飞 + 信号回主线程 |
 | P047 | 多窗口状态串台 | 延迟刷新任务乱序执行，旧任务覆盖新状态 | 调度加自增序号，过期任务作废 |
-| P010/P011/P012 | 列表底部大段空白 | `QLabel(wordWrap)` 的 C++ `sizeHint` 按理想宽度算，与实际布局差 8-50%；且 PyQt5 不派发 Python override | 手动管理 content 尺寸 + 覆盖 `sizeHint()` 用 `heightForWidth(当前宽度)`；两阶段同步（先撑开 → resize 重排 → 再校正） |
+| P010/P011/P012 | 列表底部大段空白 | `QLabel(wordWrap)` 的 C++ `sizeHint` 按理想宽度算，与实际布局差 8-50%；且 PySide6 不派发 Python override | 手动管理 content 尺寸 + 覆盖 `sizeHint()` 用 `heightForWidth(当前宽度)`；两阶段同步（先撑开 → resize 重排 → 再校正） |
 | P015 | 搜索过滤偶发失效 | 异步 reveal 任务晚于过滤执行，无差别 show 覆盖结果 | 异步显示前**重新判定当前过滤条件** |
 
 > 模式总结：**offscreen 测不出的 UI 问题**（字体、sizeHint、真实布局）必须开真实应用验证。

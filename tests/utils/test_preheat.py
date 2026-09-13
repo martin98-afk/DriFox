@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("PyQt5.QtWidgets")
+pytest.importorskip("PySide6.QtWidgets")
 
 
 def test_preheat_idempotent_and_warms_targets(qapp, tmp_path, monkeypatch):

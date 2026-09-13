@@ -148,8 +148,8 @@ Get-ChildItem plugins/my-plugin/ui/_vendor -Recurse -Filter "__pycache__" | Remo
 import requests
 from markdown import markdown
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QWidget
 
 
 class MyCard(QWidget):
