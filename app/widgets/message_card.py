@@ -4604,45 +4604,33 @@ class ConsoleMonitorPage(QWebEnginePage):
         self.contentReady.emit()
 
 
-class _DialogEventFilter(QObject):
-    """全局对话框事件过滤器（模块级单例 + viewer 注册表）。
+class _DialogVisibilityBridge:
+    """弹窗显隐广播 → WebView 让位 的桥（模块级单例 + viewer 注册表）。
 
-    原实现：每个 CodeWebViewer 都向 QApplication 安装一个全局事件过滤器，
-    N 个 viewer = N 个过滤器，任意鼠标移动等事件都会触发 O(N) 次 eventFilter
-    转发。本类合并为单实例：同一事件只经过一次 eventFilter，按 event.type()
-    快速短路（仅关心 Show/FocusIn/Hide/Close/Destroy 5 类低频事件），再遍历
-    注册表分发，高频事件路由降为 O(1)。
+    为什么不再挂 QApplication 级事件过滤器（mac 闪退根因）：
+    PySide6/shiboken 在 `QObjectWrapper::sbk_o_eventFilter` 里会把事件接收者无条件
+    包装成 Python 对象；接收者正处于析构过程中（`QObject::d_ptr` 已被置空）时该
+    包装直接读地址 0x8 → SIGSEGV。崩溃发生在进入 Python 回调之前，Python 侧加
+    `shiboken6.isValid` 判活根本执行不到，无法防御（PyQt5/sip 同场景抛的是可捕获
+    的 RuntimeError）。改用 `dialog_visibility` 的显隐广播总线（一次性 patch 已知
+    弹窗类的 showEvent/hideEvent），Python 代码不再进入 app 级事件分发链。
+
+    与原过滤器的差异：不再广播 QMenu / QComboBox 下拉 / QToolTip —— 它们是
+    Qt.Popup|Qt.ToolTip 独立原生顶层窗口，天然绘制在 Qt 合成内容之上，WebView
+    盖不住，本就不需要让位。恢复 WebView 的主路径仍是 `_hide_for_dialog` 里连的
+    finished/destroyed 信号，hideEvent 广播只作兜底。
     """
 
-    # 关注的事件类型（QEvent 枚举值）：
-    # Show=17, FocusIn=8（弹窗出现）; Hide=18, Close=19, Destroy=52（弹窗关闭/销毁兜底恢复）
-    _WATCHED_EVENT_TYPES = (17, 8, 18, 19, 52)
-    # 弹窗类名关键词（与原每 viewer 独立过滤器的判定一致）
-    _POPUP_KEYWORDS = (
-        "Dialog",
-        "Popup",
-        "Flyout",
-        "InfoBar",
-        "Toast",
-        "ComboBox",
-        "Menu",
-        "ToolTip",
-    )
-
     def __init__(self):
-        super().__init__()
         self._viewers = set()  # 已注册的 CodeWebViewer 集合（生命周期随 viewer 增删）
-        self._attached = False  # 是否已安装到 QApplication（幂等 attach/detach 标志）
 
     def register(self, viewer):
-        """注册 viewer：确保全局过滤器已安装（幂等）；销毁时自动注销防引用滞留"""
-        # 每次注册都检查安装：QApplication 尚未创建（服务先行等时序）时
-        # 本次警告跳过，后续 register 会再次尝试，时序问题可自愈
-        self._attach_to_application()
+        """注册 viewer：懒装显隐广播；viewer 销毁时自动注销防引用滞留"""
+        _ensure_visibility_bus()
         self._viewers.add(viewer)
         try:
             # 兜底：viewer 未走 cleanup（正常路径 deleteLater → cleanup）就销毁时，
-            # 自动从注册表移除，避免单例过滤器滞留已销毁对象引用
+            # 自动从注册表移除，避免桥滞留已销毁对象引用
             viewer.destroyed.connect(self._on_viewer_destroyed)
         except (RuntimeError, TypeError):
             pass
@@ -4650,49 +4638,14 @@ class _DialogEventFilter(QObject):
     def unregister(self, viewer):
         """注销 viewer：从注册表移除并断开销毁监听（幂等，销毁后调用亦安全）。
 
-        最后一个 viewer 注销后从 QApplication 卸载过滤器（对称清理）。
+        类级 patch 无法安全撤销（会破坏弹窗自身的 showEvent 链），故总线常驻，
+        最后一个 viewer 注销时不卸载 —— 只剩空注册表，广播回调立即 return。
         """
         self._viewers.discard(viewer)
         try:
             viewer.destroyed.disconnect(self._on_viewer_destroyed)
         except (RuntimeError, TypeError):
             pass
-        if not self._viewers:
-            self._detach_from_application()
-
-    def _attach_to_application(self):
-        """向 QApplication 安装本过滤器（幂等：已安装则直接返回）。
-
-        QApplication.instance() 为 None（如服务先行创建）时输出警告，
-        由后续 register 再次尝试补装，时序问题可自愈。
-        """
-        if self._attached:
-            return
-        try:
-            from PySide6.QtWidgets import QApplication
-
-            app = QApplication.instance()
-            if app is None:
-                logger.warning("[MessageCard] 全局事件过滤器未安装：QApplication 尚未创建")
-                return
-            app.installEventFilter(self)
-            self._attached = True
-        except Exception as e:
-            logger.warning(f"[MessageCard] 全局事件过滤器安装异常: {e}")
-
-    def _detach_from_application(self):
-        """从 QApplication 卸载过滤器（最后一个 viewer 注销/销毁时对称清理）"""
-        if not self._attached:
-            return
-        try:
-            from PySide6.QtWidgets import QApplication
-
-            app = QApplication.instance()
-            if app is not None:
-                app.removeEventFilter(self)
-            self._attached = False
-        except Exception as e:
-            logger.warning(f"[MessageCard] 全局事件过滤器卸载异常: {e}")
 
     @staticmethod
     def _is_viewer_alive(viewer) -> bool:
@@ -4705,69 +4658,95 @@ class _DialogEventFilter(QObject):
     def _on_viewer_destroyed(self, *_args):
         """任一 viewer 销毁：惰性清理注册表中 C++ 对象已删的条目。
 
-        destroyed 信号在销毁过程中发射，其 QObject 参数可能被 PyQt 包装为
-        新 wrapper（与原对象不等），故不依赖参数匹配，改用 sip 判活清理。
+        destroyed 信号在销毁过程中发射，其 QObject 参数可能被包装为
+        新 wrapper（与原对象不等），故不依赖参数匹配，改用 shiboken 判活清理。
         """
         for v in tuple(self._viewers):
             if not self._is_viewer_alive(v):
                 self._viewers.discard(v)
-        if not self._viewers:
-            self._detach_from_application()
 
-    def eventFilter(self, obj, event):
-        # 快速短路：非关注事件（鼠标移动/绘制/键盘等高频事件）立即返回，
-        # 不再像旧实现那样对每个 viewer 转发一次
-        event_type = event.type()
-        if event_type not in self._WATCHED_EVENT_TYPES:
-            return False
-        # 关注事件为低频事件（弹窗显示/关闭），此时才遍历注册表分发
+    def on_dialog_shown(self, dialog) -> None:
+        """弹窗显示：遮罩对话框隐藏 WebView，其余弹层压低 viewer 层级。
+
+        由 dialog_visibility 在弹窗自己的 showEvent 里回调 —— 那一刻弹窗 C++
+        对象必然存活，不存在 app 级过滤器「接收者正在析构」的危险窗口。
+        """
         for viewer in tuple(self._viewers):
             try:
-                self._dispatch(viewer, obj, event_type)
+                self._apply_shown(viewer, dialog)
             except RuntimeError as e:
                 # 区分「viewer 已销毁」与「父链对象已删等瞬时异常」：
                 # 前者惰性剔除防引用滞留；后者 viewer 仍存活，仅记录日志
                 # 不剔除（误剔除会使 MaskDialog 防穿透静默失效且无法恢复）
                 if self._is_viewer_alive(viewer):
-                    logger.debug(f"[MessageCard] 对话框过滤分派异常（viewer 存活）: {e}")
+                    logger.debug(f"[MessageCard] 弹窗显隐分派异常（viewer 存活）: {e}")
                 else:
                     self._viewers.discard(viewer)
-        return False
 
-    def _dispatch(self, viewer, obj, event_type):
-        """对单个 viewer 执行过滤逻辑（与原每 viewer 独立过滤器的行为等价）"""
-        if event_type in (17, 8):  # QEvent.Show, QEvent.FocusIn
-            obj_class = obj.__class__.__name__
-            if any(kw in obj_class for kw in self._POPUP_KEYWORDS):
-                # 只对透明遮罩对话框（MaskDialogBase 等）隐藏 WebView 防穿透；
-                # 普通对话框（QFileDialog 等）无需隐藏，仅降低层级即可
-                if "Dialog" in obj_class and hasattr(obj, "winId") and viewer._is_mask_dialog(obj):
-                    # 全屏 MaskDialog → 隐藏 WebView 防止原生 HWND 穿透遮罩
-                    viewer._hide_for_dialog(obj)
-                else:
-                    # 小弹窗（Menu/ComboBox/ToolTip等）→ 降低 Qt 层级
-                    viewer.lower()
-                    parent = viewer.parent()
-                    while parent:
-                        parent.lower()
-                        # 找到 MessageCard 或聊天容器为止
-                        if hasattr(parent, "chat_layout") or parent.__class__.__name__ == "MessageCard":
-                            break
-                        parent = parent.parent()
-                    if hasattr(obj, "raise_"):
-                        obj.raise_()
-        else:  # QEvent.Hide, QEvent.Close, QEvent.Destroy
-            # 兜底恢复：对话框关闭/隐藏/销毁时，若它是导致 WebView 隐藏的对象则恢复
-            hidden = getattr(viewer, "_hidden_dialogs", None)
-            if hidden and obj in hidden:
-                hidden.discard(obj)
-                if not hidden:
-                    viewer.show()
-                    viewer._restore_chat_scroll_pos()
+    @staticmethod
+    def _apply_shown(viewer, dialog):
+        """对单个 viewer 执行让位逻辑（与原 _dispatch 的 Show 分支等价）"""
+        # 只对透明遮罩对话框（MaskDialogBase 系）隐藏 WebView 防原生层穿透；
+        # Flyout 虽也设了 WA_TranslucentBackground，但它是贴附式子控件，只需压层级
+        if "Dialog" in dialog.__class__.__name__ and viewer._is_mask_dialog(dialog):
+            viewer._hide_for_dialog(dialog)
+            return
+        # 弹层 → 降低 viewer 及其父链的 Qt 层级，再把弹层抬到最前
+        viewer.lower()
+        parent = viewer.parent()
+        while parent:
+            parent.lower()
+            # 找到 MessageCard 或聊天容器为止
+            if hasattr(parent, "chat_layout") or parent.__class__.__name__ == "MessageCard":
+                break
+            parent = parent.parent()
+        dialog.raise_()
+
+    def on_dialog_hidden(self, dialog) -> None:
+        """弹窗隐藏：兜底恢复被它隐藏的 WebView。
+
+        主恢复路径是 `_hide_for_dialog` 连的 finished/destroyed 信号；这里覆盖
+        对话框被直接 hide()（不走 close()）因而不发信号的情形。
+        """
+        for viewer in tuple(self._viewers):
+            try:
+                hidden = getattr(viewer, "_hidden_dialogs", None)
+                if hidden and dialog in hidden:
+                    hidden.discard(dialog)
+                    if not hidden:
+                        viewer.show()
+                        viewer._restore_chat_scroll_pos()
+            except RuntimeError:
+                self._viewers.discard(viewer)
 
 
-# 模块级单例：全局仅此一个 QApplication 级事件过滤器
-_dialog_event_filter = _DialogEventFilter()
+# 模块级单例：弹窗显隐广播的唯一消费方
+_dialog_visibility_bridge = _DialogVisibilityBridge()
+
+# 总线是否已装好（装失败时保持 False，下次 register 再试；qfluentwidgets 缺失/
+# 结构变更属可恢复的降级，不该永久关掉 WebView 让位能力）
+_visibility_bus_ready = False
+
+
+def _ensure_visibility_bus() -> None:
+    """给已知弹窗类装显隐广播，并把本模块的桥登记为监听者。
+
+    懒装：首次有 viewer 注册时才做（此时 QApplication 已存在，qfluentwidgets 也
+    已随主窗口导入完成）。`install()` 与 `add_listener()` 各自幂等的程度不同
+    （后者不去重），故用本标志保证一个进程只登记一次监听者。
+    """
+    global _visibility_bus_ready
+    if _visibility_bus_ready:
+        return
+    try:
+        from app.widgets.dialog_visibility import add_listener, install
+
+        if install():
+            add_listener(_dialog_visibility_bridge.on_dialog_shown, _dialog_visibility_bridge.on_dialog_hidden)
+            _visibility_bus_ready = True
+    except Exception as e:
+        logger.warning(f"[MessageCard] 弹窗显隐广播安装异常，WebView 让位暂不生效: {e}")
+
 
 # D3D11/WARP 单纹理物理上限 16384px，留余量取 16000（见 CodeWebViewer.MAX_HEIGHT 注释）
 _PHYSICAL_TEXTURE_LIMIT = 16000
@@ -5234,8 +5213,11 @@ class CodeWebViewer(QWebEngineView):
         super().setFixedWidth(safe_w)
 
     def _install_dialog_filter(self):
-        """注册到全局单例事件过滤器（注册表方式，不再每 viewer 安装一个过滤器）"""
-        _dialog_event_filter.register(self)
+        """注册到显隐广播桥（方法名沿用，避免扰动 6 处外部调用点）。
+
+        不再向 QApplication 挂事件过滤器，改为接收 dialog_visibility 的显隐广播。
+        """
+        _dialog_visibility_bridge.register(self)
 
     def reset_for_reuse(self):
         """归还 ``WebViewPool`` 前的重置：**保留骨架**，只清空内容与卡片状态。
@@ -11747,9 +11729,9 @@ class CodeWebViewer(QWebEngineView):
         清理 CodeWebViewer 持有的资源，防止内存泄漏。
         应该在删除 viewer 前调用，或者在 deleteLater 中自动调用。
         """
-        # 🔧 内存修复：从全局单例过滤器注销，防止注册表持有对已销毁
-        # CodeWebViewer 实例的引用，导致 GC 无法回收且事件循环误调用已释放对象
-        _dialog_event_filter.unregister(self)
+        # 🔧 内存修复：从显隐广播桥注销，防止注册表持有对已销毁
+        # CodeWebViewer 实例的引用，导致 GC 无法回收且广播误调用已释放对象
+        _dialog_visibility_bridge.unregister(self)
 
         # [B3] 视口销毁：递增渲染序号使在途线程池任务过期（weakref 判活兜底下，
         # 序号守卫提供第二道防线，防止旧任务结果应用到已释放的 DOM）。
