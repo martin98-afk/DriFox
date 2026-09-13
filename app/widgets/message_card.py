@@ -5258,6 +5258,18 @@ class CodeWebViewer(QWebEngineView):
         保留，池中 viewer 的 PID 要交给 B4 强回收护栏做「在用」判定，
         清零会让该进程被误杀。
         """
+        # 🐛 离屏冻结残留：滚出视口的卡片会被 set_page_suspended 冻成
+        # Frozen + page.setVisible(False)。带这状态入池，复用给新卡片后
+        # Chromium 仍按「不可见 + 已冻结」渲染 → 整块白屏。
+        # 不能复用 set_page_suspended(False)：那条路径有流式/JS 未就绪等守卫会跳过，
+        # 入池复位必须无条件（对未冻结的 viewer 是幂等空操作）。
+        try:
+            page = self.page()
+            if page is not None:
+                page.setLifecycleState(QWebEnginePage.LifecycleState.Active)
+                page.setVisible(True)
+        except (RuntimeError, AttributeError):
+            pass
         try:
             if self.page() and self._is_js_ready:
                 self.page().runJavaScript(_RESET_CONTENT_FOR_REUSE_JS)
@@ -15033,6 +15045,19 @@ class MessageCard(SimpleCardWidget):
         except RuntimeError:
             pass
         return False
+
+    def set_viewer_suspended(self, suspended: bool) -> None:
+        """转发离屏冻结请求给正文 viewer（Qt 6.5+ LifecycleState）。
+
+        - user 卡无 viewer / viewer 未创建：跳过；
+        - welcome 卡：JS 交互复杂（tab 切换/渲染编排），不参与冻结；
+        - MarkdownBlockViewer（纯 Qt 灰度渲染器）：无 renderer，天然 no-op。
+        """
+        if suspended and getattr(self, "_is_welcome", False):
+            return
+        viewer = self.viewer
+        if viewer is not None and isinstance(viewer, CodeWebViewer):
+            viewer.set_page_suspended(suspended)
 
     def ensure_rendered(self, delay_ms: int = 0):
         """如果还没渲染，懒加载创建QWebViewer并渲染内容

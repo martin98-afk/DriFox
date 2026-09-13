@@ -7,20 +7,25 @@
     JS 定时器照跑、合成器照跑、renderer 内存不释放。滚动停止 500ms 后的
     _recycle_out_of_view_batches 是天然的限频挂点。
 
-    修复三处（Qt 6.5+ LifecycleState API，PySide6>=6.9 满足）：
+    修复四处（Qt 6.5+ LifecycleState API，PySide6>=6.9 满足）：
       1. CodeWebViewer.set_page_suspended：Suspended/Active 切换，含守卫
          （流式中 / 在途渲染 / JS 未就绪 / 渲染被推迟 / 上下文丢失时拒绝冻结）。
       2. MessageCard.set_viewer_suspended：转发；welcome 卡与纯 Qt 渲染器
          （MarkdownBlockViewer，无 renderer）不参与。
       3. MainWidget._recycle_out_of_view_batches：可视区 ±1 批恢复 Active，
          可视区 ±2 批之外、active 缓冲区之内冻结 Suspended（留 1 批过渡带）。
+      4. CodeWebViewer.reset_for_reuse：归还 WebViewPool 前无条件解除冻结
+         （Active + page.setVisible(True)）——冻结态随 viewer 入池，
+         复用给新卡片就是整块白屏。
 
     另有两项配套 profile 级调优：
       - app/core/webengine_profile.py：关闭 WebGL / PDF Viewer / Plugins /
         ScrollAnimator（消息卡渲染场景用不到，ScrollAnimator 在软件合成下
         每帧 CPU 光栅，关闭后滚轮直接步进、更跟手）。
-      - main.py：GPU 光栅参数化（DRIFOX_WEBENGINE_GPU=1 试用 GPU 模式，
-        默认保持 --disable-gpu 纯软件光栅，规避 DirectComposition 历史闪烁）。
+      - app/utils/render_env.py：GPU 光栅/合成已档位化（[Render] RenderBackend）。
+        默认软件档禁 GPU 进程（保留 --disable-gpu 语义，规避 DirectComposition
+        历史闪烁），hardware / swiftshader 档按档位放开。遮挡误判双禁 workaround
+        与档位无关，任何模式下都在 disabled-features 里保留。
 
 (b) 本测试未修改任何业务代码，仅静态分析：用 pathlib 读取 app/ 源码文本 +
     re 匹配，不 import PySide6、不实例化任何 GUI 对象。
@@ -37,7 +42,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MESSAGE_CARD = REPO_ROOT / "app" / "widgets" / "message_card.py"
 MAIN_WIDGET = REPO_ROOT / "app" / "main_widget.py"
 WEB_PROFILE = REPO_ROOT / "app" / "core" / "webengine_profile.py"
-MAIN_ENTRY = REPO_ROOT / "main.py"
+RENDER_ENV = REPO_ROOT / "app" / "utils" / "render_env.py"
 
 
 @pytest.fixture(scope="module")
@@ -56,8 +61,8 @@ def profile_src() -> str:
 
 
 @pytest.fixture(scope="module")
-def main_src() -> str:
-    return MAIN_ENTRY.read_text(encoding="utf-8")
+def render_src() -> str:
+    return RENDER_ENV.read_text(encoding="utf-8")
 
 
 def test_perf_code_web_viewer_has_lifecycle_freeze(card_src: str):
@@ -112,9 +117,30 @@ def test_perf_shared_profile_disables_unused_web_features(profile_src: str):
         assert f"WebAttribute.{attr}" in body, f"共享 profile 未关闭 {attr}"
 
 
-def test_perf_gpu_flags_behind_env_switch(main_src: str):
-    """GPU 光栅参数化：默认禁用（历史闪烁兜底），DRIFOX_WEBENGINE_GPU=1 可试用。"""
-    assert "DRIFOX_WEBENGINE_GPU" in main_src, "main.py 缺少 GPU 模式环境变量开关"
-    assert "--disable-gpu-compositing" in main_src, "默认软件合成 flags 丢失"
-    # 遮挡误判修复与 GPU 无关，任何模式都必须保留
-    assert "CalculateNativeWinOcclusion,NativeWindowOcclusionTracking" in main_src, "遮挡误判双禁 flags 丢失"
+def test_perf_gpu_flags_behind_render_config(render_src: str):
+    """GPU 光栅档位化：flags 由 render_env.compute_settings 按 RenderBackend 换算。"""
+    start = render_src.find("def compute_settings(")
+    assert start != -1, "未找到 compute_settings 定义"
+    end = render_src.find("\ndef ", start + 1)
+    body = render_src[start:end if end != -1 else len(render_src)]
+    # 默认软件档必须禁 GPU 进程（历史闪烁兜底），hardware/swiftshader 档才放开
+    assert "disable_gpu" in body, "compute_settings 不再推导 GPU 进程开关"
+    flags = render_src[render_src.find("def build_chromium_flags(") :]
+    assert '"--disable-gpu"' in flags, "build_chromium_flags 丢失 --disable-gpu"
+    assert "--disable-gpu-compositing" in flags, "缺少软件合成兜底 flag"
+    # 遮挡误判 workaround 与 GPU 档位无关，任何模式都必须保留
+    assert "CalculateNativeWinOcclusion" in render_src, "遮挡误判 disabled-features 丢失"
+
+
+def test_perf_pool_reset_releases_suspend(card_src: str):
+    """归还 WebViewPool 前必须解除离屏冻结，否则复用该 viewer 的新卡片白屏。
+
+    冻结态（LifecycleState Frozen/Suspended + page.setVisible(False)）是 viewer
+    自身状态，detach_viewer 只断信号不清它；池里存带冻结态的实例是隐性白屏源。
+    """
+    start = card_src.find("def reset_for_reuse(self):")
+    assert start != -1, "未找到 CodeWebViewer.reset_for_reuse 定义"
+    end = card_src.find("\n    def ", start + 1)
+    body = card_src[start:end if end != -1 else len(card_src)]
+    assert "LifecycleState.Active" in body, "入池未解除 renderer 冻结（复用会白屏）"
+    assert "setVisible(True)" in body, "入池未复位 page 可见性"
