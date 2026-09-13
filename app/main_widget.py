@@ -17086,13 +17086,11 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.utils.config import Settings
 
             behavior = resolve_busy_behavior(Settings.get_instance().busy_enter_behavior.value, inverse)
-            if behavior == "queue":
-                self._enqueue_pending_message(user_text, _image_paths)
-            else:
-                self._interject_message(user_text, _image_paths)
-            if not preserve_input:
-                self._clear_input_area()
-                self._clear_attachments()
+            # 🛡️ 延迟一 tick 复核 worker 真实状态再派发：UI 的 _is_streaming 在流式
+            # 收尾阶段领先于 worker（worker 已退出、finished_with_content 尚未派发），
+            # 此时按「繁忙」入队即孤儿——插话进 hook 队列无人消费、排队等不到
+            # _on_stream_finished 的续发调度，表现为「发了消息 AI 无响应」。
+            self._schedule_busy_send(user_text, _image_paths, behavior, preserve_input)
             return
 
         # 🛡️ 不清除截断哨兵！若此前发生过截断（撤销/删除），哨兵仍然有效，
@@ -17215,6 +17213,53 @@ class OpenAIChatToolWindow(ToolWindow):
 
     # ── 繁忙时发送：插话 / 排队 ──────────────────────────────────────
 
+    def _worker_actually_busy(self) -> bool:
+        """worker 真实繁忙判据（engine/executor 侧状态）
+
+        与 UI 的 _is_streaming 的差异：流式收尾阶段 worker 可能已退出而
+        finished_with_content 尚未派发，UI 标志领先于真实状态。插话/排队入队
+        只能发生在 worker 存活期间（hook 队列由 worker 消费，排队续发由
+        _on_stream_finished 调度），所以入队前必须用真实状态复核。
+        """
+        engine = getattr(self.backend, "chat_engine", None)
+        if engine is None:
+            return self._is_streaming
+        try:
+            return bool(engine.is_streaming)
+        except Exception:
+            return self._is_streaming
+
+    def _schedule_busy_send(self, user_text: str, image_paths: list, behavior: str, preserve_input: bool) -> None:
+        """延迟一 tick 派发繁忙发送（供 _dispatch_busy_send 复核 worker 真实状态）
+
+        ⚠️ QTimer.singleShot 只接受 (msec, receiver, callable) 位置参数，业务参数
+        直接跟在 callable 后面会抛 “expected at most 4 arguments”，必须用 lambda 包一层。
+        """
+        QTimer.singleShot(0, lambda: self._dispatch_busy_send(user_text, image_paths, behavior, preserve_input))
+
+    def _dispatch_busy_send(self, user_text: str, image_paths: list, behavior: str, preserve_input: bool):
+        """繁忙发送的延迟派发：复核 worker 真实状态后决定入队还是立即开新一轮
+
+        worker 已退出（UI 标志滞后）时不再入队，直接按新一轮发送，避免消息
+        进入无人消费的队列（插话留在 hook 队列 / 排队等不到续发调度）。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        if self._worker_actually_busy():
+            if behavior == "queue":
+                self._enqueue_pending_message(user_text, image_paths)
+            else:
+                self._interject_message(user_text, image_paths)
+            if not preserve_input:
+                self._clear_input_area()
+                self._clear_attachments()
+            return
+        # worker 已退出：复位滞后的流式标志，按新一轮发送（复用排队续发语义）
+        logger.info("[BusySend] worker 已结束（UI 流式标志滞后），改走新一轮发送")
+        self._is_streaming = False
+        self._toggle_send_stop(False)
+        self._continue_from_entry({"text": user_text, "image_paths": list(image_paths)})
+
     def _enqueue_pending_message(self, user_text: str, image_paths: list):
         """繁忙时排队发送：消息进 UI 队列 + 排队卡片；worker 自然结束后自动续发。
 
@@ -17301,7 +17346,8 @@ class OpenAIChatToolWindow(ToolWindow):
         entry = self._remove_queue_entry(msg_id)
         if entry is None:
             return
-        if self._is_streaming:
+        # 🛡️ 用 worker 真实状态判定：worker 已退出时插话会留在 hook 队列无人消费
+        if self._worker_actually_busy():
             self._interject_entry(entry, show_user_card=True)
         else:
             # 兜底：worker 已结束（理论上队首由自动续发出队）→ 直接作为新一轮发送
@@ -17311,7 +17357,11 @@ class OpenAIChatToolWindow(ToolWindow):
         """worker 自然结束后出队首条续发（复用 worker 语义 = 无缝开新一轮）"""
         if getattr(self, "_is_destroyed", False):
             return
-        if self._is_streaming or not self._pending_message_queue:
+        if not self._pending_message_queue:
+            return
+        # 🛡️ 用 worker 真实状态判定（而非可能滞后的 _is_streaming）：worker 已退出时
+        # 必须续发，否则排队消息永远等不到下一次调度
+        if self._worker_actually_busy():
             return
         entry = self._pending_message_queue.pop(0)
         self._refresh_queue_card()
@@ -17358,6 +17408,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._toggle_send_stop(False)
                 assistant_card.deleteLater()
                 self._current_assistant_card = None
+                # 🛡️ 条目放回队首：出队后若发送失败会静默丢弃（用户已看到气泡却
+                # 永远等不到回复），放回后可由下次续发或卡片「立即插入」重试
+                self._pending_message_queue.insert(0, entry)
+                self._refresh_queue_card()
                 InfoBar.warning(
                     title="排队发送失败",
                     content="剩余排队消息已保留，可稍后手动插入或删除",
