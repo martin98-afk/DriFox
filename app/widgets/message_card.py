@@ -99,6 +99,7 @@ from app.core import (
 from app.core.message_content import make_tool_result_block
 from app.core.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
+    Animations,
     BorderRadius,
     Colors,
     _get_global_font,
@@ -344,11 +345,12 @@ WHEEL_STUCK_MIN_INTERVAL = 0.1
 # 背景：流式结束时卡片高度会从"坞态限高"收敛到自然高度（常是数百 px 的突变），
 # 原来 _update_height 对大 delta 直接 snap（noContainerAnimation），外层滚动区
 # 跟着瞬移 —— 页面内的位移已被 FLIP 补间，唯独 Qt 侧这一跳没动画。
-# 这里在"结束态窗口"内改用既有的 _height_anim 做 200ms 缓动。
+# 这里在"结束态窗口"内改用既有的 _height_anim 做缓动（时长走全局 token，
+# 与 JS 侧 FLIP 的 220ms 完全一致，Qt 侧与页内补间同拍收尾）。
 # 关闭方式：环境变量 DRIFOX_FINISH_HEIGHT_ANIM=0，或运行时
 # set_finish_height_anim_enabled(False)。
 FINISH_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_FINISH_HEIGHT_ANIM", "1") != "0"
-FINISH_HEIGHT_ANIM_MS = 200  # 与 JS 侧 FLIP 时长（220ms）接近，观感一致
+FINISH_HEIGHT_ANIM_MS = Animations.ENTER_MS  # 与 JS 侧 FLIP 时长 220ms 对齐
 FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪声抖动）
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
@@ -6947,6 +6949,16 @@ class CodeWebViewer(QWebEngineView):
                     from {{ transform: translateX(-100%); }}
                     to   {{ transform: translateX(100%); }}
                 }}
+                /* ── 减少动态效果：停掉所有**无限循环**的装饰性 CSS 动画 ──
+                   这些动画（骨架脉冲/扫光、思考提示流光、工具预览流光）会一直
+                   重绘直到元素被移除；流式期间与逐字渲染叠加会明显加剧掉帧与
+                   图表闪烁。关掉后仍有静态骨架与文字，状态反馈不受影响。 */
+                @media (prefers-reduced-motion: reduce) {{
+                    .chart-skeleton__bars i,
+                    .chart-skeleton::after,
+                    .think-streaming-tip,
+                    .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{ animation: none !important; }}
+                }}
                 /* option 解析失败兜底（fence 已闭合但 JSON 畸形）：收起空洞，给出提示。
                    成功渲染时 JS 移除该 class，容器恢复 300px。 */
                 .echarts-container.echarts-failed {{
@@ -9208,11 +9220,22 @@ class CodeWebViewer(QWebEngineView):
                 // 即使 updateContent 重建DOM，新SVG元素在下一帧立即获得正确偏移，
                 // 不再因 CSS animation 重启而导致视觉跳跃。
                 let _snakeStartTime = null;
+                let _snakeRafId = null;
                 function _animateThinkSnake() {{
+                    const nodes = document.querySelectorAll('.think-snake-arc');
+                    if (!nodes.length) {{
+                        // 蛇形图标已从 DOM 移除（思考结束 / 内容重建）：停掉 rAF。
+                        // 旧实现在此仍无条件 requestAnimationFrame，形成**永不停止**
+                        // 的 60fps 空转 + 每帧全表扫描，思考结束后白烧主线程。
+                        // 元素重新出现时由下方 MutationObserver 自动唤醒。
+                        _snakeRafId = null;
+                        _snakeStartTime = null;
+                        return;
+                    }}
                     if (_snakeStartTime === null) _snakeStartTime = performance.now();
                     const elapsed = performance.now() - _snakeStartTime;
                     // 周期 1.5s，完整一圈对应 stroke-dashoffset: 0→-50.265（周长 2π×8 ≈ 50.265）
-                    document.querySelectorAll('.think-snake-arc').forEach(el => {{
+                    nodes.forEach(el => {{
                         let extraDelay = 0;
                         if (el.classList.contains('think-snake-head')) extraDelay = 350;
                         else if (el.classList.contains('think-snake-body')) extraDelay = 180;
@@ -9220,9 +9243,17 @@ class CodeWebViewer(QWebEngineView):
                         const offset = -(phase / 1500) * 50.265;
                         el.setAttribute('stroke-dashoffset', offset);
                     }});
-                    requestAnimationFrame(_animateThinkSnake);
+                    _snakeRafId = requestAnimationFrame(_animateThinkSnake);
                 }}
-                _animateThinkSnake();
+                function _ensureThinkSnake() {{
+                    // 幂等：rAF 已在跑时立即返回（成本 = 一次空判断）
+                    if (_snakeRafId === null && document.querySelector('.think-snake-arc')) {{
+                        _animateThinkSnake();
+                    }}
+                }}
+                window._ensureThinkSnake = _ensureThinkSnake;
+                new MutationObserver(_ensureThinkSnake).observe(document.body, {{ childList: true, subtree: true }});
+                _ensureThinkSnake();
 
                 // ===== 任务列表（嵌入工具区，随工具区折叠/归位/沉底）=====
                 var _TODO_SNAKE_SVG = '{_THINK_SNAKE_SVG}';
@@ -12630,7 +12661,9 @@ class MessageCard(SimpleCardWidget):
         ) = QPainterPath()
         self._clip_w = self._clip_h = -1
         self._height_anim = QVariantAnimation(self)
-        self._height_anim.setDuration(180)
+        # 插值时长占位（见下：随即被 setDuration(0) 覆盖，实际长度由每轮动画
+        # 自行设置 —— 结束态收敛用 FINISH_HEIGHT_ANIM_MS，其余为 0 禁用插值）
+        self._height_anim.setDuration(Animations.EXIT_MS)
         self._height_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._height_anim.valueChanged.connect(self._apply_viewer_height)
         self._height_anim.stateChanged.connect(self._on_height_anim_state_changed)
@@ -13825,6 +13858,10 @@ class MessageCard(SimpleCardWidget):
         # 恢复可见后下一拍定时器自动续跑，无需显式重启。
         if not self.isVisible():
             return
+        # 系统「减少动态效果」：脉冲边框是纯装饰动画，直接不重绘。
+        # 这是流式热路径上 20fps 的全卡 update()，关掉即省下这段绘制开销。
+        if not Animations.motion_enabled():
+            return
         # 拖拽期间暂停重绘：原生拖拽时主线程在 DefWindowProc 模态循环里，
         # 每 50ms 触发一次 update() 会强制 DWM 对整窗重新合成 → 拖拽卡顿。
         # 直接跳过 update() 让窗口保持静止，DWM 仅平移已有纹理，拖拽顺滑；
@@ -14511,6 +14548,9 @@ class MessageCard(SimpleCardWidget):
         """
         global FINISH_HEIGHT_ANIM_ENABLED
         if not FINISH_HEIGHT_ANIM_ENABLED:
+            return False
+        # 系统「减少动态效果」：不走缓动，退回调用方的 snap（内容照样到位）
+        if not Animations.motion_enabled():
             return False
         if getattr(self, "_finish_height_anim_until", 0.0) <= 0.0:
             return False

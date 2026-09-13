@@ -42,7 +42,7 @@ from loguru import logger
 from qframelesswindow.titlebar import TitleBarBase
 from qframelesswindow.titlebar.title_bar_buttons import TitleBarButton, TitleBarButtonState
 
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
 
 # ── Windows 原生消息常量（仅 win32 分支使用，模块级常量避免热路径重复定义）──
@@ -326,7 +326,7 @@ class CustomTabButton(QWidget):
     ALPHA_HOVER = 0.06
     ALPHA_ACTIVE = 0.14
 
-    ANIM_MS = 180
+    ANIM_MS = Animations.HOVER_MS
 
     def __init__(
         self,
@@ -381,16 +381,26 @@ class CustomTabButton(QWidget):
     def _make_anim(self, slot) -> QVariantAnimation:
         anim = QVariantAnimation(self)
         anim.setDuration(self.ANIM_MS)
-        anim.setEasingCurve(QEasingCurve.InOutQuad)
+        # hover 曲线不能用 InOutQuad：它两头都慢，手指快速划过一排 tab 时
+        # 高亮明显滞后（发钝、拖影）。OutQuad 起步即到、收尾放缓。
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_HOVER))
         anim.valueChanged.connect(slot)
         return anim
 
     @staticmethod
     def _start(anim: QVariantAnimation, current: float, target: float) -> None:
-        """从当前进度续接到目标进度（避免连续 hover 时跳变）"""
+        """从当前进度续接到目标进度（避免连续 hover 时跳变）
+
+        系统「减少动态效果」时直接落终值：hover 仍要给出状态反馈（颜色变化
+        必须可见），只是去掉过渡过程；靠 ``setValue`` 走同一条 valueChanged
+        通路，调用方无需感知两条路径的差异。
+        """
         if abs(current - target) < 0.001:
             return
         anim.stop()
+        if not Animations.motion_enabled():
+            anim.setValue(target)
+            return
         anim.setStartValue(current)
         anim.setEndValue(target)
         anim.start()

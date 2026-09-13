@@ -33,13 +33,15 @@ from loguru import logger
 from PyQt5.QtCore import QEasingCurve, QObject, QPropertyAnimation, QTimer, pyqtProperty
 from PyQt5.QtWidgets import QApplication, QScrollArea, QWidget
 
+from app.utils.design_tokens import Animations
+
 # 高度校正的最大帧数。新挂载的行要等布局跑完才会被 sizeHint() 计入，
 # 分批构建期间每批都会改变高度，因此校正到「连续两帧高度一致」为止。
 _RESYNC_ROUNDS = 6
 
-# 展开/折叠动画时长（ms）：与基类 expandAni 的 200ms 保持一致。
+# 展开/折叠动画时长（ms）：走全局动效 token（进入档）。
 # ⚠️ 模块级常量而非类属性：热重载对旧实例打补丁时类属性不一定存在（见 P005）。
-_EXPAND_DURATION = 200
+_EXPAND_DURATION = Animations.ENTER_MS
 
 
 def _invoke_card_callback(card, attr: str) -> None:
@@ -113,10 +115,17 @@ def animate_expand_height(card, target: int, on_finished=None) -> bool:
 
     Returns:
         True = 已启动动画；False = 高度已等于目标（调用方直接定格即可）
+
+    Notes:
+        系统「减少动态效果」时直接返回 False，由调用方 ``setFixedHeight``
+        定格 —— 本函数的动画对象是**长期复用**的（``card._expand_height_ani``，
+        finished 为长期连接），所以不走 ``motion.retarget``（它会断开 finished）。
     """
     target = max(0, int(target))
     start = int(card.height())
     if target == start:
+        return False
+    if not Animations.motion_enabled():
         return False
     card._expand_height_finish = on_finished
     ani = _card_height_animation(card)

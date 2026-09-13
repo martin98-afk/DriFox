@@ -609,18 +609,53 @@ class PixelPetWidget(QWidget):
     # 过渡动画
     # ═══════════════════════════════════════════════════════════
 
-    def _play_transition(self, old_state: str, new_state: str) -> None:
-        """状态切换时的微过渡：Y轴小弹跳 + 透明度呼吸"""
-        self._transition_anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self._transition_anim.setDuration(120)
-        self._transition_anim.setKeyValueAt(0, self.windowOpacity())
-        self._transition_anim.setKeyValueAt(0.5, 0.85)
-        self._transition_anim.setKeyValueAt(1, 1.0)
-        self._transition_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._transition_anim.start()
+    def _track_animation(self, anim) -> None:
+        """持有动画引用防 GC，并在结束后自动摘除
+
+        ★ 旧实现是裸 ``self._animations.append(anim)`` 且从不清理：每次状态切换
+        / 点击 / 弹跳都往列表里塞一个 QPropertyAnimation，桌宠是**常驻**控件，
+        跑一整天可累积上千个对象（列表只增不减 = 稳定内存泄漏）。
+        这里在 finished 时摘除；另加长度兜底，清掉已停止的残留。
+        """
+        if anim is None:
+            return
         if not hasattr(self, "_animations"):
             self._animations = []
-        self._animations.append(self._transition_anim)
+        if anim in self._animations:
+            return
+        self._animations.append(anim)
+
+        def _drop() -> None:
+            try:
+                self._animations.remove(anim)
+            except ValueError:
+                pass
+
+        anim.finished.connect(_drop)
+        if len(self._animations) > 24:
+            # 兜底：异常路径下 finished 可能没连上，清掉已停止的
+            self._animations = [a for a in self._animations if a.state() != QAbstractAnimation.Stopped]
+
+    def _play_transition(self, old_state: str, new_state: str) -> None:
+        """状态切换时的微过渡：Y轴小弹跳 + 透明度呼吸
+
+        ⚠️ 已知无效：此处动的是 ``windowOpacity``，而 PixelPet 是 TabManagerWindow
+        的**子 widget**（非顶层 window），Qt 对该属性在子控件上不生效 —— 本动画
+        实际全程空转。保留是因为其 finished 语义可能被外部依赖，且改为 geometry
+        动画需另行验证与 _play_bounce / _shake 的位移叠加。
+        """
+        # 复用同一个动画对象：旧实现每次覆盖成员，被覆盖的那条仍在跑且静默丢弃
+        if getattr(self, "_transition_anim", None) is None:
+            self._transition_anim = QPropertyAnimation(self, b"windowOpacity", self)
+            self._transition_anim.setDuration(120)
+            self._transition_anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim = self._transition_anim
+        anim.stop()
+        anim.setKeyValueAt(0, self.windowOpacity())
+        anim.setKeyValueAt(0.5, 0.85)
+        anim.setKeyValueAt(1, 1.0)
+        anim.start()
+        self._track_animation(anim)
 
     def _on_recover(self) -> None:
         """恢复计时器回调：重置宠物状态和 AI 状态跟踪，防止状态卡死"""
@@ -1056,9 +1091,7 @@ class PixelPetWidget(QWidget):
         anim.setKeyValueAt(1, geo)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.start()
-        if not hasattr(self, "_animations"):
-            self._animations = []
-        self._animations.append(anim)
+        self._track_animation(anim)
 
     def _play_bounce_small(self) -> None:
         """小弹跳（比 bounce 更低更柔和）"""
@@ -1071,9 +1104,7 @@ class PixelPetWidget(QWidget):
         anim.setKeyValueAt(1, geo)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.start()
-        if not hasattr(self, "_animations"):
-            self._animations = []
-        self._animations.append(anim)
+        self._track_animation(anim)
 
     def _play_cuddle(self) -> None:
         """快速连击 → 蹭蹭动画"""
@@ -1089,9 +1120,7 @@ class PixelPetWidget(QWidget):
         anim.setKeyValueAt(1, geo)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.start()
-        if not hasattr(self, "_animations"):
-            self._animations = []
-        self._animations.append(anim)
+        self._track_animation(anim)
         # 短暂闪烁爱心效果（改变状态到 success 帧再回来）
         if self._current_state == "idle":
             self._frame_index = 4  # success 的爱心帧
@@ -1497,17 +1526,22 @@ class PixelPetWidget(QWidget):
         else:
             self.move(target_x, target_y)
 
-    def _animate_to(self, x: int, y: int, duration: int = 300) -> None:
-        """平滑移动到目标位置"""
-        self._position_anim = QPropertyAnimation(self, b"geometry", self)
-        self._position_anim.setDuration(duration)
-        self._position_anim.setStartValue(self.geometry())
-        self._position_anim.setEndValue(QRect(x, y, self.width(), self.height()))
-        self._position_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._position_anim.start()
-        if not hasattr(self, "_animations"):
-            self._animations = []
-        self._animations.append(self._position_anim)
+    def _animate_to(self, x: int, y: int, duration: int = Animations.SLOW_MS) -> None:
+        """平滑移动到目标位置（复用动画对象，起点取当前 geometry 续接）
+
+        旧实现每次新建并覆盖 ``_position_anim``：被覆盖的那条若无 parent 会被
+        GC 打断，有 parent 则继续与新的同时写 geometry → 位置打架。
+        """
+        if getattr(self, "_position_anim", None) is None:
+            self._position_anim = QPropertyAnimation(self, b"geometry", self)
+            self._position_anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER))
+        anim = self._position_anim
+        anim.stop()
+        anim.setDuration(max(1, int(duration)))
+        anim.setStartValue(self.geometry())
+        anim.setEndValue(QRect(x, y, self.width(), self.height()))
+        anim.start()
+        self._track_animation(anim)
 
     # ═══════════════════════════════════════════════════════════
     # 尺寸变化响应

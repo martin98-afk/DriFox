@@ -13,7 +13,7 @@ import os
 from typing import Dict, List, Optional
 
 from loguru import logger
-from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import QSize, Qt, QTimer, pyqtSignal, pyqtProperty, QPropertyAnimation
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap, QPen, QTransform
 from PyQt5.QtGui import (
     QColor as _QColor,
@@ -47,7 +47,8 @@ from qfluentwidgets import (
 )
 
 from app.utils.config import Settings
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style, scale_font_size, scale_icon_size
+from app.utils.design_tokens import Animations, Colors, font_size_css, get_unified_scrollbar_style, scale_font_size, scale_icon_size
+from app.utils.motion import retarget
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.settings.gitee_card import GiteeAccountRow
@@ -904,17 +905,24 @@ class _RotatableArrow(QWidget):
 
     def set_expanded(self, expanded: bool, animate: bool = True):
         target = 90.0 if expanded else 0.0
-        if not animate or self._angle == target:
+        if not animate:
+            if self._anim is not None:
+                self._anim.stop()
             self._set_angle(target)
             return
-        if self._anim is not None:
-            self._anim.stop()
-        self._anim = QPropertyAnimation(self, b"angle")
-        self._anim.setDuration(160)
-        self._anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._anim.setStartValue(self._angle)
-        self._anim.setEndValue(target)
-        self._anim.start()
+        if self._anim is None:
+            # parent=self：旧实现没传 parent，箭头销毁后动画对象可能被 GC 提前回收
+            self._anim = QPropertyAnimation(self, b"angle", self)
+        # 从当前角度续接（retarget 内已 stop 旧动画）→ 连点不再抖动；
+        # 减少动态效果时直接落终值，仍保留箭头指向的状态反馈。
+        if not retarget(
+            self._anim,
+            self._angle,
+            target,
+            duration=Animations.HOVER_MS,
+            curve=Animations.EASE_HOVER,
+        ):
+            self._set_angle(target)
 
     def paintEvent(self, ev):
         p = QPainter(self)
@@ -3261,7 +3269,14 @@ class TabPanel(QWidget):
                 self._stop_anim_timer()
 
     def _ensure_anim_timer(self):
-        """确保彩虹动画定时器已启动"""
+        """确保彩虹动画定时器已启动
+
+        ★ 系统「减少动态效果」时直接不启动：彩虹流光 / question 呼吸是**纯
+        装饰性**的无限循环动画，关掉后仍有静态状态色与图标反馈，不需要运动。
+        放在这个唯一入口上，``set_resizing(False)`` 的恢复路径也自动受控。
+        """
+        if not Animations.motion_enabled():
+            return
         if self._anim_timer is None:
             from PyQt5.QtCore import QTimer
 

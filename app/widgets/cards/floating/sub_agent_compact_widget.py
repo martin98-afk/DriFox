@@ -25,6 +25,7 @@ from PyQt5.QtWidgets import (
 
 from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import Colors
+from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
 
@@ -495,18 +496,18 @@ class SubAgentCompactFloatingWidget(QWidget):
         super().__init__(parent)
         self._task_rows: Dict[str, _AgentTaskRow] = {}
         self._rotation_angle = 0
-        self._rotation_timer = QTimer(self)
-        self._rotation_timer.timeout.connect(self._update_all_rotations)
         self._has_running = False
+        # 旋转 tick 与耗时刷新都走 LoopTimer：卡片不可见 / 系统「减少动态效果」
+        # / 没有 running 行时跳过回调 —— 旋转图标每帧要重新光栅化 SVG，是这一
+        # 块最重的绘制，空转代价很高。
+        self._rotation_timer = LoopTimer(self, self._ROTATION_TICK_MS, self._update_all_rotations, gate=self._rotation_needed)
         self._batch_started: bool = False
         self._hide_timer = QTimer(self)
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(2000)
         self._hide_timer.timeout.connect(self._auto_hide)
 
-        self._time_timer = QTimer(self)
-        self._time_timer.timeout.connect(self._update_all_times)
-        self._time_timer.setInterval(1000)
+        self._time_timer = LoopTimer(self, 1000, self._update_all_times, gate=self._rotation_needed)
 
         self._reflow_deferred_guard = False  # 防止 deferred reflow 无限循环
         self._setup_ui()
@@ -720,17 +721,22 @@ class SubAgentCompactFloatingWidget(QWidget):
 
     # ── 旋转动画 ──────────────────────────────────────
 
-    # [PERF] 旋转指示器刷新间隔：30ms(≈33fps) → 60ms(≈17fps)。
-    # 每行 set_rotation_angle 都会触发一次重绘，子代理并行数较多时这是持续的
-    # CPU/重绘开销。加载指示器对帧率不敏感，60ms 视觉上依然顺滑；
-    # 步长同步由 12° 提到 24°，保持角速度不变（约 400°/s）。
-    _ROTATION_TICK_MS = 60
-    _ROTATION_STEP_DEG = 24
+    # [PERF] 旋转指示器刷新间隔：30ms(≈33fps) → 80ms(12.5fps)。
+    # 每行 set_rotation_angle 都会触发一次重绘（内部要重新光栅化 SVG 到
+    # QPixmap），子代理并行数较多时是这一块最重的持续开销。加载指示器对帧率
+    # 不敏感，80ms 视觉上依然顺滑；步长同步由 12° 提到 32°，保持角速度不变
+    # （80ms × 32° = 400°/s）。再叠加 LoopTimer 门控，不可见时零开销。
+    _ROTATION_TICK_MS = 80
+    _ROTATION_STEP_DEG = 32
+
+    def _rotation_needed(self) -> bool:
+        """门控：只有存在 running 行时才需要旋转 / 刷新耗时"""
+        return bool(getattr(self, "_has_running", False))
 
     def _start_rotation(self):
-        if not self._rotation_timer.isActive():
+        if not self._rotation_timer.running:
             self._rotation_timer.start(self._ROTATION_TICK_MS)
-        if not self._time_timer.isActive():
+        if not self._time_timer.running:
             self._time_timer.start(1000)
 
     def _stop_rotation(self):
@@ -1098,7 +1104,7 @@ class SubAgentCompactFloatingWidget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if self._has_running and not self._rotation_timer.isActive():
+        if self._has_running and not self._rotation_timer.running:
             self._start_rotation()
         # widget 变为可见后，子 widget 布局才被 Qt 真正处理，
         # 调度延迟重算以纠正之前隐藏状态下计算的过小高度

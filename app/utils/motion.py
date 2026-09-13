@@ -329,6 +329,11 @@ class LoopTimer(QObject):
         return self._timer
 
     @property
+    def running(self) -> bool:
+        """底层定时器是否在跑（与 ``active`` 区分：active 表示**门控也通过**）"""
+        return self._timer.isActive()
+
+    @property
     def active(self) -> bool:
         """当前是否满足运行条件（可见 + 未减少动效 + 自定义门控）"""
         if not Animations.motion_enabled():

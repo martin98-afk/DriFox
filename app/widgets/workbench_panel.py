@@ -46,6 +46,7 @@ from qfluentwidgets import ScrollArea, TransparentToolButton
 
 from app.core.project_changed import dispatch_project_changed, is_active_window
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
 from loguru import logger
 from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
@@ -295,18 +296,19 @@ class TasksPage(QWidget):
             mark_widget: QWidget = _RotatingIcon(":/icons/执行中.svg", size=16, parent=frame)
             # 浅色主题叠加半透明黑色，避免亮背景下图标不可见（与子智能体悬浮框一致）
             mark_widget.set_tint("#88000000" if _is_current_theme_light() else None)
-            # _RotatingIcon 无自驱动定时器，条目自带 QTimer 驱动
-            # （60ms/24° 与子智能体悬浮框旋转参数一致；定时器挂 frame，条目销毁自动停）
-            spin_timer = QTimer(mark_widget)
+            # _RotatingIcon 无自驱动定时器，条目自带循环驱动。用 LoopTimer 门控：
+            # 条目不可见（面板收起 / 页签切走）或系统「减少动态效果」时自动跳过
+            # 回调，不再在隐藏状态下空转重绘 SVG。80ms/32° 与子智能体悬浮框
+            # 旋转参数一致（400°/s）；宿主取 mark_widget，条目销毁即自动停。
             _angle = 0
 
             def _spin_tick() -> None:
                 nonlocal _angle
-                _angle = (_angle + 24) % 360
+                _angle = (_angle + 32) % 360
                 mark_widget.set_angle(_angle)
 
-            spin_timer.timeout.connect(_spin_tick)
-            spin_timer.start(60)
+            spin_timer = LoopTimer(mark_widget, 80, _spin_tick)
+            spin_timer.start()
             layout.addWidget(mark_widget)
         else:
             mark_label = QLabel(mark, frame)

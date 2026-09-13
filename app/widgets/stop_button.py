@@ -4,7 +4,7 @@
 import math
 from typing import Optional
 
-from PyQt5.QtCore import QPointF, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QPointF, Qt, pyqtSignal
 from PyQt5.QtGui import (
     QColor,
     QIcon,
@@ -16,6 +16,8 @@ from PyQt5.QtGui import (
 )
 from PyQt5.QtWidgets import QWidget
 from qfluentwidgets import FluentIcon
+
+from app.utils.motion import LoopTimer
 
 
 class SendStopButton(QWidget):
@@ -36,7 +38,10 @@ class SendStopButton(QWidget):
     # 呼吸周期参数
     CYCLE_MS = 2500
     SCALE_AMPLITUDE = 0.14  # 缩放幅度 ±14%
-    FRAME_INTERVAL_MS = 33
+    # [PERF] 33ms(30fps) → 50ms(20fps)：2.5s 周期的呼吸 + 32 顶点形变用 30fps
+    # 属过采样（肉眼在慢速正弦上分辨不出），重绘量直接降 40%。相位推进按
+    # FRAME_INTERVAL_MS 换算，角速度与周期完全不变。
+    FRAME_INTERVAL_MS = 50
     MORPH_VERTICES = 32  # 多边形顶点数（越多越平滑）
     GLOW_STRENGTH = 0.55  # 辉光最大强度因子
 
@@ -57,9 +62,9 @@ class SendStopButton(QWidget):
         # 动画状态 — 两个独立连续累计的相位（弧度），保证 sin() 回绕点连续
         self._phase_scale = 0.0  # 缩放相位，每个 CYCLE_MS 走 2π
         self._phase_shape = 0.0  # 形状相位，比缩放稍慢
-        self._timer = QTimer(self)
-        self._timer.setInterval(self.FRAME_INTERVAL_MS)
-        self._timer.timeout.connect(self._advance)
+        # 用 LoopTimer 统一门控：按钮不可见 / 系统「减少动态效果」时跳过回调，
+        # 不再让 20fps 的呼吸重绘空转（流式期间它一直在屏幕角落跑）。
+        self._timer = LoopTimer(self, self.FRAME_INTERVAL_MS, self._advance)
 
         # 颜色
         self._square_color = QColor(self.SQUARE_COLOR)

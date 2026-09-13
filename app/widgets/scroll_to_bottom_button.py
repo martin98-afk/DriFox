@@ -46,9 +46,9 @@ _MARGIN_RIGHT = 20  # 距 chat_scroll_area 右边缘
 _MARGIN_BOTTOM = 14  # 距 chat_scroll_area 下边缘
 _ICON_SIZE = 18
 
-# 浮出/隐藏淡入淡出时长：浮层标准区间 125-200ms，隐藏稍短更利落
-_FADE_IN_MS = 160
-_FADE_OUT_MS = 120
+# 浮出/隐藏淡入淡出时长：走全局动效 token（进入 ENTER_MS / 离场 EXIT_MS）
+_FADE_IN_MS = Animations.ENTER_MS
+_FADE_OUT_MS = Animations.EXIT_MS
 
 # 图标资源名（qrc 前缀 / 源码树相对路径共用同一个文件名）
 _ICON_DARK_REL = "icons/scroll_to_bottom.svg"
@@ -185,6 +185,7 @@ class ScrollToBottomButton(QPushButton):
         self._style_sig = None  # 已应用样式的主题签名（用于跳过重复刷新）
         # 淡入淡出状态：_opacity_value 跟随动画实时值，retarget 时从它续接
         self._fade_anim: Optional[QPropertyAnimation] = None
+        self._fade_effect: Optional[QGraphicsOpacityEffect] = None
         self._fade_target = 1.0
         self._opacity_value = 1.0
 
@@ -325,22 +326,27 @@ class ScrollToBottomButton(QPushButton):
     def _fade_to(self, target: float, duration: int):
         """淡入/淡出到目标透明度（复用动画对象；中途反向时从当前值续接）"""
         self._fade_target = target
-        if not Animations.motion_enabled():
-            self._set_opacity(target)
-            if target <= 0.0:
-                self.hide()
-            return
-        if self._fade_anim is None:
+        # effect 与动画分开惰性创建：减少动态效果分支也要能**真正**把透明度
+        # 写到 effect 上（旧实现只改 _opacity_value，控件其实没变淡/变实）。
+        if self._fade_effect is None:
             effect = QGraphicsOpacityEffect(self)
             effect.setOpacity(self._opacity_value)
             self.setGraphicsEffect(effect)
-            anim = QPropertyAnimation(effect, b"opacity", self)
+            self._fade_effect = effect
+        if self._fade_anim is None:
+            anim = QPropertyAnimation(self._fade_effect, b"opacity", self)
             anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
             anim.valueChanged.connect(self._set_opacity)
             anim.finished.connect(self._on_fade_done)
             self._fade_anim = anim
         anim = self._fade_anim
         anim.stop()
+        if not Animations.motion_enabled():
+            self._fade_effect.setOpacity(target)
+            self._set_opacity(target)
+            if target <= 0.0:
+                self.hide()
+            return
         anim.setDuration(int(duration))
         anim.setStartValue(self._opacity_value)
         anim.setEndValue(target)

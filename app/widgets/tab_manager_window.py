@@ -33,7 +33,7 @@ from PyQt5.QtWidgets import (
 from qframelesswindow import FramelessWindow
 
 from app.utils.config import Settings
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Animations, Colors, font_size_css
 from app.utils.theme_manager import theme_manager
 from app.utils.utils import get_font_family_css, get_unified_font
 
@@ -1228,16 +1228,24 @@ class TabManagerWindow(FramelessWindow):
         # 中途反向重启时旧收尾回调直接丢弃，只执行最新一次的回调
         self._wb_anim_finished_cb = on_finished
         anim.stop()
+        # ★ 系统「减少动态效果」：跳过插值直接落位，并走**同一条收尾路径**
+        # （预览抑制、panel 最小宽度、frame 最小尺寸提示都靠它恢复），
+        # 否则这几项开关会永久停在「动画中」状态。
+        if not Animations.motion_enabled():
+            self._apply_wb_width(float(end_w))
+            self._on_wb_anim_finished()
+            return
         # ★ 最小尺寸提示归零必须在 anim.stop() 之后：stop 不发射 finished，
         # 旧回调被丢弃，此处统一保证新动画从"无下限"状态起跑。
         if frame is not None:
             frame.set_min_hint_disabled(True)
-        # ★ 曲线/时长按方向分离：展开 OutCubic（快速露出内容）；收起 OutQuad
-        # + 160ms —— OutCubic 的尾段拖尾（后 12.5% 宽度要磨掉一半时间）在收起
-        # 时观感为“收到一半顿一下才收完”（用户实测反馈）
+        # ★ 曲线/时长按方向分离：Duration/曲线走全局 token —— 进入
+        # ENTER_MS + EASE_ENTER（快速露出内容）；离场 EXIT_MS + EASE_EXIT。
+        # 离场不能用 OutCubic：其尾段拖尾（后 12.5% 宽度要磨掉一半时间）
+        # 观感为“收到一半顿一下才收完”（用户实测反馈）。
         collapsing = end_w < start_w
-        anim.setDuration(160 if collapsing else 200)
-        anim.setEasingCurve(QEasingCurve.OutQuad if collapsing else QEasingCurve.OutCubic)
+        anim.setDuration(Animations.EXIT_MS if collapsing else Animations.ENTER_MS)
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_EXIT if collapsing else Animations.EASE_ENTER))
         # ★ 设值期间屏蔽信号：QVariantAnimation 在 setEndValue 后会立刻以
         # 新终值补发一次 valueChanged，导致动画尚未 start 就先 _apply_wb_width(0)
         # 把窗格瞬间推到下限（收起起手闪一下）。起止值就绪后再解除屏蔽。
@@ -2387,7 +2395,7 @@ class TabManagerWindow(FramelessWindow):
         self._start_sidebar_anim(cur_w, target_w, collapsing=collapsed)
 
     def _start_sidebar_anim(self, start_w: int, end_w: int, collapsing: bool):
-        """启动侧边栏宽度动画（200ms OutCubic）"""
+        """启动侧边栏宽度动画（时长/曲线走全局 token，按方向分离）"""
         # ── #31 中间对话区原样实时显示：不再冻结 _content_area 重绘 ──
         # 改为抑制卡片进入 resize 预览模式（WebView 保持可见），动画期
         # 每帧 restart 的宽度同步防抖在动画结束后一次执行。
@@ -2395,8 +2403,6 @@ class TabManagerWindow(FramelessWindow):
         anim = self._sidebar_anim
         if anim is None:
             anim = QVariantAnimation(self)
-            anim.setDuration(200)
-            anim.setEasingCurve(QEasingCurve.OutCubic)
             anim.valueChanged.connect(self._on_sidebar_anim_value)
             anim.finished.connect(self._on_sidebar_anim_finished)
             self._sidebar_anim = anim
@@ -2407,6 +2413,14 @@ class TabManagerWindow(FramelessWindow):
         self._sidebar_anim_collapsing = collapsing
         self._sidebar_anim_ui_switched = False
         anim.stop()
+        # ★ 系统「减少动态效果」：直接落位并走同一条收尾路径 —— 收拾动画
+        # 结束标志 / 解除 TabPanel 抑制 / 恢复 resize 预览都靠它。
+        if not Animations.motion_enabled():
+            self._on_sidebar_anim_value(float(end_w))
+            self._on_sidebar_anim_finished()
+            return
+        anim.setDuration(Animations.EXIT_MS if collapsing else Animations.ENTER_MS)
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_EXIT if collapsing else Animations.EASE_ENTER))
         anim.setStartValue(float(start_w))
         anim.setEndValue(float(end_w))
         anim.start()
