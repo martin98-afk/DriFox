@@ -5,6 +5,8 @@ from app.core.tool_arg_lines import (
     build_progress_payload,
     count_escaped_newlines,
     estimate_streaming_lines,
+    extract_partial_path,
+    should_emit_progress,
 )
 
 
@@ -57,3 +59,31 @@ def test_build_progress_payload_omits_lines_when_zero():
     payload, est = build_progress_payload("edit", '{"path": "a.py"}', 18, "a.py", (0, 0))
     assert "_add_lines" not in payload and "_del_lines" not in payload
     assert est == (0, 0)
+
+
+def test_extract_partial_path_tolerates_unclosed():
+    """未闭合的 path 片段也要能提取（原正则要求引号闭合，是运行框长时间没文件名的原因）"""
+    assert extract_partial_path('{"path": "novel/ch01') == "novel/ch01"
+    assert extract_partial_path('{"path": "a.py", "content": "x') == "a.py"
+    assert extract_partial_path('{"description": "写第二章", "path": "') == ""
+    assert extract_partial_path('{"content": "no path here') == ""
+    assert extract_partial_path("") == ""
+
+
+def test_should_emit_progress_rules():
+    """首帧必发；字符涨够且间隔够才发；超保底间隔无条件发"""
+    assert should_emit_progress(0, 10, 0.0, 1000.0) is True
+    assert should_emit_progress(100, 110, 900.0, 1000.0) is False
+    assert should_emit_progress(100, 150, 800.0, 1000.0) is True
+    assert should_emit_progress(100, 105, 500.0, 1000.0) is True
+
+
+def test_build_progress_payload_reuse_lines_skips_scan():
+    """reuse_lines=True 沿用上次行数（超长参数下跳过全量扫描，避免 O(n²) 拖住界面）"""
+    buf = r'{"content": "a\nb\nc\nd\ne'
+    payload, est = build_progress_payload("write", buf, 9999, "", (7, 2), True)
+    assert payload["_add_lines"] == 7 and payload["_del_lines"] == 2
+    assert est == (7, 2)
+    # 同一 buffer 不 reuse 时按实际扫描（content 片段 4 个换行 → 5 行）
+    payload2, est2 = build_progress_payload("write", buf, 9999, "", (0, 0), False)
+    assert payload2["_add_lines"] == 5 and est2 == (5, 0)
