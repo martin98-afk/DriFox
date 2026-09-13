@@ -21,7 +21,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QFile, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QFile, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap, QTextOption
 from PySide6.QtWidgets import (
     QApplication,
@@ -29,7 +29,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
@@ -46,7 +45,8 @@ except Exception:  # pragma: no cover
 
 import html as _html_mod
 
-from app.utils.design_tokens import Colors, get_unified_scrollbar_style, scale_font_size
+from qfluentwidgets import ScrollArea
+from app.utils.design_tokens import Animations, Colors, get_unified_scrollbar_style, scale_font_size
 from app.utils.utils import get_font_family_css, get_icon
 
 try:  # pygments 独立包，顶层安全导入
@@ -204,6 +204,61 @@ def _measure_expanded_height(wrap: QWidget) -> int:
     return int(total)
 
 
+# ── 思考 spinner：SVG 预渲染缓存 ──────────────────────────────────
+# [PERF] 原实现在 paintEvent 里 `QSvgRenderer(svg.encode())` —— 每帧都重新构造
+# 渲染器并重新解析一遍 SVG XML（含 4 个 circle + dasharray），40ms 定时器即 25fps，
+# 每个可见思考块每秒 25 次解析，多思考块线性放大。
+# 改为：模块级单例渲染器 + 按 devicePixelRatio 缓存位图，每帧只剩 drawPixmap。
+# 旋转仍交给 painter 变换（省内存，无需缓存 30 个角度）。
+_SPINNER_RENDERER: Any = None  # None=未初始化 / False=不可用 / QSvgRenderer=就绪
+_SPINNER_PIXMAP_CACHE: Dict[float, QPixmap] = {}
+_SPINNER_PIXMAP_CACHE_MAX = 8  # DPR 取值极少（1.0/1.25/1.5/2.0…），封顶防异常环境膨胀
+
+
+def _get_spinner_renderer() -> Any:
+    """惰性构造全局唯一的 QSvgRenderer（解析一次，终身复用）。"""
+    global _SPINNER_RENDERER
+    if _SPINNER_RENDERER is None:
+        if not _HAS_QT_SVG:
+            _SPINNER_RENDERER = False
+        else:
+            try:
+                from app.widgets.message_card import _THINK_SNAKE_SVG
+
+                r = QSvgRenderer(_THINK_SNAKE_SVG.encode("utf-8"))
+                _SPINNER_RENDERER = r if r.isValid() else False
+            except Exception:
+                _SPINNER_RENDERER = False
+    return _SPINNER_RENDERER or None
+
+
+def _get_spinner_pixmap(dpr: float) -> Optional[QPixmap]:
+    """按 devicePixelRatio 返回预渲染好的 spinner 位图，失败返回 None。"""
+    renderer = _get_spinner_renderer()
+    if renderer is None:
+        return None
+    cached = _SPINNER_PIXMAP_CACHE.get(dpr)
+    if cached is not None:
+        return cached
+    try:
+        sz = renderer.defaultSize()
+        w = int(sz.width()) if sz.width() > 0 else 18
+        h = int(sz.height()) if sz.height() > 0 else 18
+        pm = QPixmap(int(w * dpr), int(h * dpr))
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.Antialiasing)
+        renderer.render(painter)
+        painter.end()
+    except Exception:
+        return None
+    if len(_SPINNER_PIXMAP_CACHE) >= _SPINNER_PIXMAP_CACHE_MAX:
+        _SPINNER_PIXMAP_CACHE.clear()
+    _SPINNER_PIXMAP_CACHE[dpr] = pm
+    return pm
+
+
 class _ThinkingSpinner(QWidget):
     """思考流式 spinner：金色 snake 圆环旋转（复刻 WebEngine 版 _THINK_SNAKE_SVG 观感）。"""
 
@@ -229,24 +284,23 @@ class _ThinkingSpinner(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        drawn = False
         if _HAS_QT_SVG:
             try:
-                from app.widgets.message_card import _THINK_SNAKE_SVG
-
-                p.translate(self.width() / 2, self.height() / 2)
-                p.rotate(self._angle)
-                p.translate(-self.width() / 2, -self.height() / 2)
-                QSvgRenderer(_THINK_SNAKE_SVG.encode("utf-8")).render(p)
-                p.end()
-                return
+                pm = _get_spinner_pixmap(self.devicePixelRatioF())
+                if pm is not None:
+                    p.translate(self.width() / 2, self.height() / 2)
+                    p.rotate(self._angle)
+                    p.translate(-self.width() / 2, -self.height() / 2)
+                    p.drawPixmap(0, 0, pm)
+                    drawn = True
             except Exception:
-                pass
-        # 兜底：无 SVG 时画简单圆弧
-        from PySide6.QtCore import QRectF
-
-        rect = QRectF(3, 3, self.width() - 6, self.height() - 6)
-        p.setPen(QPen(QColor(255, 200, 50), 2.5, Qt.SolidLine, Qt.RoundCap))
-        p.drawArc(rect, self._angle * 16, 100 * 16)
+                drawn = False
+        if not drawn:
+            # 兜底：无 SVG / 渲染失败时画简单圆弧
+            rect = QRectF(3, 3, self.width() - 6, self.height() - 6)
+            p.setPen(QPen(QColor(255, 200, 50), 2.5, Qt.SolidLine, Qt.RoundCap))
+            p.drawArc(rect, self._angle * 16, 100 * 16)
         p.end()
 
 
@@ -421,7 +475,7 @@ def _parse_tool_block(content: str) -> Dict[str, Any]:
 
 
 def parse_blocks(md_text: str) -> List[Dict[str, Any]]:
-    """markdown 全文 → 块列表。type ∈ think/tool/code/html。"""
+    """markdown 全文 → 块列表。type ∈ think/tool/code/html/tag。"""
     blocks: List[Dict[str, Any]] = []
     for kind, content, closed in _split_tag_segments(md_text, _THINK_OPEN, _THINK_CLOSE):
         if kind == "tag":
@@ -436,11 +490,69 @@ def parse_blocks(md_text: str) -> List[Dict[str, Any]]:
                 if ckind == "code":
                     blocks.append({"type": "code", "lang": lang, "code": cbody, "closed": fence_closed})
                 else:
-                    blocks.append({"type": "html", "html": _md_to_html(cbody)})
+                    blocks.extend(_split_plugin_tags(cbody))
     return blocks
 
 
-SIDE_TYPES = ("think", "tool")
+def _split_plugin_tags(text: str) -> List[Dict[str, Any]]:
+    """文本段按插件注册的内联标签切分（如 assistant_hub 的 <mood>）。
+
+    无注册标签时零开销直通（单个 html 块）；命中时已注册标签段转
+    {type:"tag", tag, content, completed, html} 块，剩余文本保持
+    html 块不变。渲染失败/空内容的 tag 块丢弃（不原文泄漏）。
+    """
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        tag_names = UIPluginRegistry.get_instance().get_registered_tag_names()
+    except Exception:
+        tag_names = []
+    if not tag_names:
+        return [{"type": "html", "html": _md_to_html(text)}]
+
+    # 逐标签切分：tag 段标记为 f"tag:{name}"，普通段继续下一层
+    queue: List[Tuple[str, str, bool]] = [("plain", text, True)]
+    for tag in tag_names:
+        open_tag, close_tag = f"<{tag}>", f"</{tag}>"
+        if not any(kind == "plain" and open_tag in body for kind, body, _c in queue):
+            continue
+        nxt: List[Tuple[str, str, bool]] = []
+        for kind, body, closed in queue:
+            if kind != "plain":
+                nxt.append((kind, body, closed))
+                continue
+            for skind, sbody, sclosed in _split_tag_segments(body, open_tag, close_tag):
+                if skind == "tag":
+                    nxt.append((f"tag:{tag}", sbody, sclosed))
+                else:
+                    nxt.append(("plain", sbody, True))
+        queue = nxt
+
+    out: List[Dict[str, Any]] = []
+    for kind, body, closed in queue:
+        if kind.startswith("tag:"):
+            tag = kind[4:]
+            html = _render_plugin_tag_html(tag, body, closed)
+            if html:
+                out.append({"type": "tag", "tag": tag, "content": body, "completed": closed, "html": html})
+        elif body.strip():
+            out.append({"type": "html", "html": _md_to_html(body)})
+    return out
+
+
+def _render_plugin_tag_html(tag: str, content: str, completed: bool) -> str:
+    """已注册内联标签 → 插件渲染器 HTML（Qt 路径）。失败/空内容返回空串（丢弃，不泄漏原文）。"""
+    if not content.strip():
+        return ""
+    try:
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        info = UIPluginRegistry.get_instance().get_tag_renderer(tag)
+        if info is None:
+            return ""
+        return info.render_func(content, {"tag": tag, "completed": completed, "compact": False})
+    except Exception:
+        return ""
 
 
 def _block_key(b: Dict[str, Any]) -> str:
@@ -793,8 +905,16 @@ class ThinkCard(QFrame):
             target = 0
             self._expanded = False
         self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
+        if not Animations.motion_enabled():
+            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
+            self._on_anim_done()
+            return
+        if self._anim is not None:
+            self._anim.stop()
         self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        self._anim.setDuration(180)
+        self._anim.setDuration(Animations.EXPAND_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
         self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_anim_done)
@@ -1175,8 +1295,16 @@ class ToolCardWidget(QFrame):
             target = 0
             self._expanded = False
         self._chevron.setText(self.CHEVRON_DOWN if self._expanded else self.CHEVRON_RIGHT)
+        if not Animations.motion_enabled():
+            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
+            self._body_wrap.setMaximumHeight(_QWIDGETSIZE_MAX if self._expanded else 0)
+            self._on_anim_done()
+            return
+        if self._anim is not None:
+            self._anim.stop()
         self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        self._anim.setDuration(180)
+        self._anim.setDuration(Animations.EXPAND_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
         self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_anim_done)
@@ -1349,7 +1477,7 @@ class ToolSectionWidget(QWidget):
         cv.setContentsMargins(0, 0, 0, 0)
         cv.setSpacing(2)
         # ── 卡片内滚容器：坞态限高的载体 ──
-        self._cards_scroll = QScrollArea(self)
+        self._cards_scroll = ScrollArea(self)
         self._cards_scroll.setWidgetResizable(True)
         self._cards_scroll.setFocusPolicy(Qt.NoFocus)
         self._cards_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1452,8 +1580,14 @@ class ToolSectionWidget(QWidget):
             start = 0
             self._collapsed = False
         self._separator.set_collapsed(self._collapsed)
+        if not Animations.motion_enabled():
+            # reduced-motion：跳过补间，直接落终值（收尾回调幂等）
+            self._content_wrap.setMaximumHeight(0 if self._collapsed else _QWIDGETSIZE_MAX)
+            self._on_done()
+            return
         self._anim = QPropertyAnimation(self._content_wrap, b"maximumHeight", self)
-        self._anim.setDuration(180)
+        self._anim.setDuration(Animations.EXPAND_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
         self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_done)
@@ -1483,7 +1617,7 @@ class TodoPanel(QWidget):
         self._separator = _SeparatorRow("任务列表", self, icon_name="todo")
         self._separator.clicked.connect(self._toggle)
         root.addWidget(self._separator)
-        self._list_scroll = QScrollArea(self)
+        self._list_scroll = ScrollArea(self)
         self._list_scroll.setWidgetResizable(True)
         self._list_scroll.setFocusPolicy(Qt.NoFocus)
         self._list_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -1524,7 +1658,9 @@ class TodoPanel(QWidget):
         done = 0
         for t in todos:
             status = (t.get("status") or "pending") if isinstance(t, dict) else "pending"
-            content = (t.get("content") or "") if isinstance(t, dict) else str(t)
+            raw = (t.get("content") if isinstance(t, dict) else t) or ""
+            # 兜存量脏数据：content 非 str 时 dict/list 转 JSON 文本（html.escape 只收 str）
+            content = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False)
             priority = ((t.get("priority") or "medium") if isinstance(t, dict) else "medium") or "medium"
             if status == "completed":
                 done += 1
@@ -1564,6 +1700,42 @@ class _NullPage:
 
     def toHtml(self, *args, **kwargs):  # noqa: N802
         return ""
+
+
+# ===== 图表 fence 在灰度渲染器下的降级说明 =====
+# 纯 Qt 组件没有 JS 引擎，渲染不了 echarts / mermaid / 插件 fence。设计稿
+# （docs/superpowers/specs/2026-09-04-plugin-fence-renderer-design.md:102）
+# 明确"灰度渲染器不接插件 fence，降级代码块，留 TODO"。这里只把静默降级
+# 变成体面降级：补一张说明卡片，源码照常保留。
+_CHART_FENCE_LANGS = ("echarts", "mermaid", "html", "svg")
+
+
+def _chart_fence_notice(lang: str):
+    """图表类 fence 的说明卡片；非图表 fence 返回 None。
+
+    覆盖宿主内置的 echarts / mermaid / svg / html，以及插件注册的任意
+    fence lang（查 UIPluginRegistry，与 WebEngine 侧同一张表）。
+    """
+    key = (lang or "").strip().lower()
+    if key.endswith("-streaming"):
+        key = key[: -len("-streaming")]
+    if not key:
+        return None
+    if key not in _CHART_FENCE_LANGS:
+        try:
+            from app.widgets.message_card import _get_plugin_fence_renderer
+
+            if _get_plugin_fence_renderer(key) is None:
+                return None
+        except Exception:
+            return None
+    # lang 来自 LLM 输出，拼进富文本前必须转义
+    safe = _html_mod.escape(key)
+    return RichTextLabel(
+        "<table cellspacing='0' cellpadding='6' width='100%'>"
+        f"<tr><td><b>{safe}</b> 需要 WebEngine 渲染，当前 Qt 灰度渲染器不渲染图表。"
+        "在设置中关闭「Qt 灰度渲染器」后重开会话即可查看；下方为原始源码。</td></tr></table>"
+    )
 
 
 class MarkdownBlockViewer(QWidget):
@@ -1762,7 +1934,7 @@ class MarkdownBlockViewer(QWidget):
             [b for b in blocks if b["type"] == "think" or (b["type"] == "tool" and not b.get("is_edit"))]
         )
         body_items = _slot_items(
-            [b for b in blocks if b["type"] in ("html", "code") or (b["type"] == "tool" and b.get("is_edit"))]
+            [b for b in blocks if b["type"] in ("html", "code", "tag") or (b["type"] == "tool" and b.get("is_edit"))]
         )
         self._widgets, self._keys = reconcile_widgets(
             self._body_lay, self._widgets, self._keys, body_items, self._build_block_widget, self._streaming
@@ -1772,7 +1944,20 @@ class MarkdownBlockViewer(QWidget):
     @staticmethod
     def _build_block_widget(b: Dict[str, Any]) -> QWidget:
         if b["type"] == "code":
+            notice = _chart_fence_notice(b["lang"])
+            if notice is not None:
+                # 图表类 fence：上方说明卡片 + 下方源码，而不是把图表源码
+                # 默默当成普通代码高亮（用户会以为"图表渲染成这样了"）
+                holder = QWidget()
+                lay = QVBoxLayout(holder)
+                lay.setContentsMargins(0, 0, 0, 0)
+                lay.setSpacing(6)
+                lay.addWidget(notice)
+                lay.addWidget(CodeBlockWidget(b["code"], b["lang"]))
+                return holder
             return CodeBlockWidget(b["code"], b["lang"])
         if b["type"] == "tool":
             return ToolCardWidget(b)  # 编辑类工具：结果展示在正文之中
+        if b["type"] == "tag":
+            return RichTextLabel(b["html"])  # 插件内联标签卡（已由渲染器生成 HTML）
         return RichTextLabel(b["html"])

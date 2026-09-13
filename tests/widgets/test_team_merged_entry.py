@@ -258,7 +258,7 @@ class TestTeamArchiveChain:
 
         win.history_manager.get_team_sessions_by_run_id.assert_called_once_with("R1")
         win.history_manager.archive_sessions_by_run_id.assert_called_once_with("R1")
-        win._refresh_history_toggle_panel.assert_called_once()
+        win._notify_history_data_changed.assert_called_once()
         mock_state.assert_not_called(), "非当前会话归档不应创建新会话状态"
         mock_init.assert_not_called(), "非当前会话归档不应初始化新会话"
 
@@ -320,7 +320,7 @@ class TestTeamArchiveChain:
 
         win.history_manager.get_team_sessions_by_run_id.assert_called_once_with("R1")
         win.history_manager.archive_sessions_by_run_id.assert_not_called(), "无成员不应归档"
-        win._refresh_history_toggle_panel.assert_not_called(), "无成员不应刷新"
+        win._notify_history_data_changed.assert_not_called(), "无成员不应刷新"
         _mock_infobar.warning.assert_called_once(), "应提示未找到成员会话"
 
 
@@ -595,33 +595,50 @@ class TestMergedCurrentIndex:
         win.history_manager = MagicMock()
         return win
 
-    def test_current_session_is_team_member_highlights_merged_index(self):
-        """当前会话是合并条目 members 成员 → set_history 收到 current_idx = 合并条目 index。"""
-        _ensure_qapp()
-        from app.main_widget import OpenAIChatToolWindow
+    def _load_history_page_module(self):
+        """加载插件页模块（current_idx 定位逻辑已随数据流反转迁入 HistoryPage）"""
+        import importlib.util
 
-        win = self._make_win()
+        spec = importlib.util.spec_from_file_location(
+            "history_page_mod", "plugins/history-manager/ui/history_page.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_current_session_is_team_member_highlights_merged_index(self):
+        """当前会话是合并条目 members 成员 → current_idx = 合并条目 index。"""
+        from unittest.mock import patch
+
+        hp = self._load_history_page_module()
         merged = _merged_entry()
         normal = _normal_entry()
-        win.history_manager.get_history_list.return_value = [merged, normal]
+        history_list = [merged, normal]
 
-        OpenAIChatToolWindow._refresh_history_toggle_panel(win)
+        page = hp.HistoryPage.__new__(hp.HistoryPage)  # 绕过 Qt 构造，仅测纯定位逻辑
 
-        _args, _kwargs = win._history_popup_card.set_history.call_args
-        assert _args[1] == 0, "当前会话是 R1 成员 → current_idx 应为合并条目 index(0)"
+        class _FakeWin:
+            _current_session_id = "R1-s1"  # 团队成员会话
+
+        with patch.object(hp, "_active_window", return_value=_FakeWin()):
+            idx = hp.HistoryPage._locate_current_index(page, history_list)
+
+        assert idx == 0, "当前会话是 R1 成员 → current_idx 应为合并条目 index(0)"
 
     def test_current_session_not_in_team_idx_none(self):
         """当前会话不在任何 members → current_idx 不指向团队条目。"""
-        _ensure_qapp()
-        from app.main_widget import OpenAIChatToolWindow
+        from unittest.mock import patch
 
-        win = self._make_win()
-        win._current_session_id = "not-a-member"
+        hp = self._load_history_page_module()
         merged = _merged_entry()
         normal = _normal_entry()
-        win.history_manager.get_history_list.return_value = [merged, normal]
+        history_list = [merged, normal]
 
-        OpenAIChatToolWindow._refresh_history_toggle_panel(win)
+        page = hp.HistoryPage.__new__(hp.HistoryPage)
 
-        _args, _kwargs = win._history_popup_card.set_history.call_args
-        assert _args[1] is None, "非成员会话 → current_idx 应为 None"
+        class _FakeWin:
+            _current_session_id = "not-a-member"
+
+        with patch.object(hp, "_active_window", return_value=_FakeWin()):
+            idx = hp.HistoryPage._locate_current_index(page, history_list)
+        assert idx is None, "非成员会话 → current_idx 应为 None"

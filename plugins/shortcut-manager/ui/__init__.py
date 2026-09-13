@@ -22,7 +22,7 @@ def register_ui(registry):
         plugin_name="shortcut-manager",
         card_id="shortcut-manager",
         widget_class=ShortcutManagerCard,
-        container="right",
+        container="left",
         title="快捷键管理",
         default_visible=False,
     )

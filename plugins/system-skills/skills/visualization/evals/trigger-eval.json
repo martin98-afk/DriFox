@@ -1,0 +1,183 @@
+{
+  "skill": "visualization",
+  "version": "3.1",
+  "note": "触发评测用例。expect_visualization=true 表示应产出可视化；channel_hint 为期望通道；type ∈ positive/negative/near-miss/edge/katex。v3.1 新增：正文 LaTeX 公式（宿主 KaTeX）通道用例。",
+  "trigger_cases": [
+    {
+      "id": "explicit-chart",
+      "type": "positive",
+      "input": "画个最近 7 天的内存占用曲线",
+      "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "显式触发：用户点名「曲线」"
+    },
+    {
+      "id": "explicit-ui",
+      "type": "positive",
+      "input": "这个设置页的开关长什么样比较好看",
+      "expect_visualization": true,
+      "channel_hint": "html-widget",
+      "reason": "显式触发 + UI 设计专项：效果图即回答"
+    },
+    {
+      "id": "proactive-edu",
+      "type": "positive",
+      "input": "讲解一下 FOPDT 一阶惯性加纯滞后模型",
+      "expect_visualization": true,
+      "reason": "教学请求必出图（主动触发）"
+    },
+    {
+      "id": "proactive-compare",
+      "type": "positive",
+      "input": "微服务和单体架构怎么选",
+      "expect_visualization": true,
+      "channel_hint": "html-widget",
+      "reason": "方案选型对比命中选型报告配方：对比卡 + radar + 决策矩阵"
+    },
+    {
+      "id": "spec-state-machine",
+      "type": "positive",
+      "input": "订单状态机：draft → submitted → approved → shipped",
+      "expect_visualization": true,
+      "channel_hint": "mermaid",
+      "reason": "规格即渲染：名词短语直接渲染，不用文字描述"
+    },
+    {
+      "id": "proactive-metrics",
+      "type": "positive",
+      "input": "总结一下刚才压测的各项指标结果",
+      "expect_visualization": true,
+      "channel_hint": "html-widget",
+      "reason": "指标展示命中监控总览配方（指标卡组先行）"
+    },
+    {
+      "id": "new-radar",
+      "type": "positive",
+      "input": "Redis、Memcached 和 KeyDB 从吞吐、延迟、持久化、集群、内存模型五个维度对比一下",
+      "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "多维评分对比 → radar（v3 图型路由）"
+    },
+    {
+      "id": "new-sankey",
+      "type": "positive",
+      "input": "画一下明年预算从公司到各事业部的分配流向",
+      "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "资金/流量分配 → sankey（v3 图型路由）"
+    },
+    {
+      "id": "new-candlestick",
+      "type": "positive",
+      "input": "画个这只股票本月的日 K 线",
+      "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "金融 OHLC → candlestick，涨红跌绿（v3 图型路由）"
+    },
+    {
+      "id": "new-quadrant-cjk",
+      "type": "positive",
+      "input": "把这几个需求按价值和成本放到四象限里排个优先级",
+      "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "中文标签象限 → echarts scatter+markLine（quadrantChart 词法拒中文，runtime 实测）"
+    },
+    {
+      "id": "new-quadrant-en",
+      "type": "positive",
+      "input": "Plot these frameworks on a quadrant chart by cost and value",
+      "expect_visualization": true,
+      "channel_hint": "mermaid",
+      "reason": "纯英文标签 → quadrantChart 可用"
+    },
+    {
+      "id": "new-treemap",
+      "type": "positive",
+      "input": "展示一下项目里各模块的代码量占比和层级结构",
+      "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "层级占比 → treemap（v3 图型路由）"
+    },
+    {
+      "id": "new-playbook",
+      "type": "positive",
+      "input": "昨晚压测整体情况总结一下：核心指标、哪段耗时异常、结论",
+      "expect_visualization": true,
+      "channel_hint": "html-widget",
+      "reason": "复合场景命中性能排查配方：指标卡 → 瀑布分解 → 因果流程图 → checklist"
+    },
+    {
+      "id": "katex-formula",
+      "type": "katex",
+      "input": "写一下正态分布的概率密度公式",
+      "expect_visualization": true,
+      "channel_hint": "katex",
+      "reason": "公式表达式走正文 LaTeX 定界符（宿主 KaTeX 渲染），非图表通道"
+    },
+    {
+      "id": "katex-vs-chart-boundary",
+      "type": "katex",
+      "input": "画一下正态分布的钟形曲线",
+      "expect_visualization": true,
+      "channel_hint": "echarts",
+      "reason": "函数形状/曲线走 echarts；公式 ≠ 图像，不能只给 LaTeX"
+    },
+    {
+      "id": "negative-code",
+      "type": "negative",
+      "input": "git rebase 和 merge 的命令分别怎么写",
+      "expect_visualization": false,
+      "reason": "纯代码操作说明，命中降级条件"
+    },
+    {
+      "id": "negative-fact",
+      "type": "negative",
+      "input": "Python 的 list.append 返回什么",
+      "expect_visualization": false,
+      "reason": "单行事实问答，命中降级条件"
+    },
+    {
+      "id": "negative-debug",
+      "type": "negative",
+      "input": "这个函数抛 IndexError 了帮我看看哪的事",
+      "expect_visualization": false,
+      "reason": "代码排查任务，交付的是定位与分析不是图"
+    },
+    {
+      "id": "nearmiss-echarts-code",
+      "type": "near-miss",
+      "input": "帮我写一个 echarts 饼图的配置代码，我要贴到自己项目里",
+      "expect_visualization": false,
+      "reason": "near-miss：用户要可复制的配置文本，交付代码块；「提到 echarts」不等于要渲染组件"
+    },
+    {
+      "id": "nearmiss-compare-table",
+      "type": "near-miss",
+      "input": "给我一份这三个版本的对比表",
+      "expect_visualization": true,
+      "channel_hint": "html-widget",
+      "reason": "near-miss：点名「对比表」要的是视觉组件，markdown 表不是等价物"
+    },
+    {
+      "id": "edge-css-task",
+      "type": "edge",
+      "input": "帮我写一个按钮 hover 效果的 CSS",
+      "expect_visualization": false,
+      "reason": "边界：代码交付请求，非 UI 设计建议，期望直接给代码"
+    },
+    {
+      "id": "edge-vague-edu",
+      "type": "edge",
+      "input": "随便讲讲 TCP 握手",
+      "expect_visualization": true,
+      "reason": "边界：泛泛讲解仍属教学场景，主动触发命中，应出时序示意"
+    },
+    {
+      "id": "edge-no-context",
+      "type": "edge",
+      "input": "这数据有点意思，你看着画点什么",
+      "expect_visualization": false,
+      "reason": "边界：无数据上下文，先澄清数据来源与口径再决定通道，不凭空造数"
+    }
+  ]
+}

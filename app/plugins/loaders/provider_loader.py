@@ -9,7 +9,7 @@
 - 服务商定义（icon/url/模型/能力/余额/用量 fetcher）完全由插件内联声明
 
 扫描范围（含系统插件）：
-- 工作树 `plugins/`（含 `plugins/system/providers/` 系统内置服务商插件）
+- 工作树 `plugins/`（含 `plugins/system-providers/providers/` 系统内置服务商插件）
 - 用户插件目录 `<app_data>/plugins/`
 
 热重载：
@@ -23,9 +23,8 @@ from __future__ import annotations
 import importlib.util
 import sys
 import threading
-import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 from loguru import logger
 
@@ -67,6 +66,27 @@ def _root_kind(root: Optional[Path]) -> str:
 _PLUGIN_ROOTS: List[Path] = _plugin_roots()
 
 
+def _is_plugin_load_blocked(plugin_name: str) -> bool:
+    """P1/P2：检查插件是否被版本/平台门禁拦截（load_blocked）。
+
+    仅在 PluginManager 已初始化且能查到插件时检查；否则视为不拦截（放行）。
+    拦截的插件其服务商不进 registry——已注册过的会在后续重扫中被清理。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if not pm.is_initialized():
+            return False
+        plugin = pm.get_plugin(plugin_name)
+        if plugin is None:
+            return False
+        return bool(getattr(plugin, "load_blocked", False))
+    except Exception as e:
+        logger.warning(f"[ProviderLoader] 门禁检查失败，默认放行 {plugin_name}: {e}")
+        return False
+
+
 def _is_plugin_enabled(plugin_name: str) -> bool:
     """按插件启用状态过滤服务商加载（对齐 PluginToolLoader._is_plugin_enabled）。
 
@@ -91,6 +111,29 @@ def _is_plugin_enabled(plugin_name: str) -> bool:
         return plugin_name in saved
     except Exception as e:
         logger.warning(f"[ProviderLoader] 插件启用状态检查失败，默认加载 {plugin_name}: {e}")
+        return True
+
+
+def _is_component_enabled(plugin_name: str, component: str = "providers") -> bool:
+    """按组件级禁用集过滤服务商加载（D9：插件内部 providers 子项开关）
+
+    与 _is_plugin_enabled 同源策略：pm 已初始化时走 pm（带进程内缓存），
+    否则直接读 Settings（导入期可用）。读取失败默认加载。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if pm.is_initialized():
+            if not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_component_enabled(plugin_name, component)
+        from app.utils.config import Settings
+
+        disabled = Settings.get_instance().disabled_plugin_components.value or []
+        return f"{plugin_name}:{component}" not in set(disabled)
+    except Exception as e:
+        logger.warning(f"[ProviderLoader] 组件启停检查失败，默认加载 {plugin_name}: {e}")
         return True
 
 
@@ -189,6 +232,30 @@ def _load_module(plugin_name: str, path: Path):
     """加载服务商插件模块（唯一模块名，避免命名冲突；显式 compile 绕过 pyc 缓存）"""
     mod_name = f"_plugin_provider_{plugin_name}_{path.stem}"
     sys.modules.pop(mod_name, None)
+    # P5/P1b：exec 前 AST 聚合门（parse-once）——sys.modules 声明式放行判定
+    # + register 入口检查 + 危险 import 审计，共享单次 ast.parse（原为 2 次）。
+    # 服务商约定与 tool 一致：必须 register(registry)。
+    try:
+        source = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        logger.warning(f"[ProviderLoader] 读取 {path} 失败: {e}")
+        return None
+    from app.plugins.loaders._ast_guard import guard_plugin_module_once
+
+    guard = guard_plugin_module_once(
+        source, path, require_register=True, component="ProviderLoader", plugin_dir=path.parent.parent
+    )
+    if guard.syntax_error or guard.rejected_writes or not guard.has_register:
+        sys.modules.pop(mod_name, None)
+        # 拒载原因已由聚合门输出 warning
+        return None
+    if guard.dangerous_imports:
+        # A4：危险 import 审计（仅日志告警，不拒载）——对齐 tool/runtime loader 审计口径。
+        _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in guard.dangerous_imports)
+        logger.warning(
+            f"[ProviderLoader] [AST审计] 插件 {plugin_name} 服务商模块含模块级危险 import"
+            f"（已放行，仅告警）: {_audit_detail} ({path})"
+        )
     spec = importlib.util.spec_from_file_location(mod_name, path)
     if spec is None or spec.loader is None:
         logger.warning(f"[ProviderLoader] 无法加载 {path}")
@@ -197,7 +264,6 @@ def _load_module(plugin_name: str, path: Path):
     module.__dict__["__builtins__"] = __builtins__
     sys.modules[mod_name] = module
     try:
-        source = path.read_text(encoding="utf-8")
         code = compile(source, str(path), "exec")
         exec(code, module.__dict__)
     except Exception as e:
@@ -258,6 +324,14 @@ def load_providers(
             if not _is_plugin_enabled(plugin_name):
                 logger.info(f"[ProviderLoader] 跳过已禁用插件的服务商: {plugin_name}")
                 continue
+            # D9：providers 组件整类停用时跳过
+            if not _is_component_enabled(plugin_name):
+                logger.info(f"[ProviderLoader] 跳过 providers 组件已停用的插件: {plugin_name}")
+                continue
+            # P1/P2：版本/平台门禁——load_blocked 插件不加载其服务商
+            if _is_plugin_load_blocked(plugin_name):
+                logger.warning(f"[ProviderLoader] 跳过被门禁拦截插件的服务商: {plugin_name}")
+                continue
             try:
                 new_names = _run_register(registry, plugin_name, py_path, Path(root), root_tracker)
                 loaded.setdefault(plugin_name, set()).update(new_names)
@@ -277,8 +351,6 @@ class ProviderWatcher:
         self._roots = roots if roots is not None else _PLUGIN_ROOTS
         self._root_tracker: Dict[str, Path] = {}
         self._scan_lock = threading.Lock()
-        self._thread = None
-        self._stop = False
 
     def scan_now(self) -> None:
         """全量重扫：先注销注册表中全部插件来源服务商，再全量重新注册（幂等）。
@@ -366,6 +438,14 @@ class ProviderWatcher:
             if not _is_plugin_enabled(plugin_name):
                 logger.info(f"[ProviderLoader] 跳过已禁用插件的服务商: {plugin_name}")
                 return
+            # D9：providers 组件整类被停用 → 只注销不重注册（与全量扫描一致）
+            if not _is_component_enabled(plugin_name):
+                logger.info(f"[ProviderLoader] 跳过 providers 组件已停用的重载: {plugin_name}")
+                return
+            # P1/P2：版本/平台门禁——load_blocked 插件不重注册其服务商
+            if _is_plugin_load_blocked(plugin_name):
+                logger.warning(f"[ProviderLoader] 跳过被门禁拦截插件的服务商重载: {plugin_name}")
+                return
             for root in self._roots:
                 root_path = Path(root)
                 for pname, py in _iter_provider_modules(root_path):
@@ -382,21 +462,6 @@ class ProviderWatcher:
         保留是为向后兼容旧调用点，空转即可。scan_now() 语义不变。
         """
         return
-
-    def stop(self) -> None:
-        self._stop = True
-
-    def _signature(self) -> Tuple:
-        """目录变更指纹：(path, mtime, size) 列表（多根聚合）"""
-        sig = []
-        for root in self._roots:
-            for plugin_name, py in _iter_provider_modules(Path(root)):
-                try:
-                    st = py.stat()
-                    sig.append((str(py), st.st_mtime_ns, st.st_size))
-                except OSError:
-                    pass
-        return tuple(sig)
 
 
 # ========== 进程级惰性启动 ==========

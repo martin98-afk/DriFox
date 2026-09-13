@@ -75,4 +75,5 @@ def _meta(platform):
         "qt_version": QtCore.QT_VERSION_STR,
         "platform": platform,
         "machine": sys.platform,
-        "note": "控件级基准：标准 Qt 控件（QListWidget/QStackedWidget），反映
+        "note": "控件级基准：标准 Qt 控件（QListWidget/QStackedWidget），反映框架层交互开销",
+    }

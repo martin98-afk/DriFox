@@ -65,7 +65,8 @@ def test_family_override_e2e(fresh_adapter_registry, fresh_serializer_registry, 
 
         def matches(self, llm_config):
             # 保持与原家族同源条件（仅 deepseek 命中），避免抢占其他家族
-            from plugins.system.model_adapters import _detectors as det
+            from importlib import import_module
+            det = import_module("plugins.system-model-adapters.model_adapters._detectors")
 
             return 3 if det.detect_requires_reasoning(llm_config) else 0
 

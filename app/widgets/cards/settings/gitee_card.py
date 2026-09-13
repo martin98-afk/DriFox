@@ -44,27 +44,6 @@ def _color_for_name(name: str) -> str:
     return _AVATAR_COLORS[idx]
 
 
-def _make_avatar_pixmap(text: str, size: int = 28) -> QPixmap:
-    """生成圆形头像 QPixmap，HiDPI 感知（物理像素 = size * DPR）"""
-    dpr = QApplication.instance().devicePixelRatio()
-    physical_size = max(1, int(round(size * dpr)))
-    pix = QPixmap(physical_size, physical_size)
-    pix.setDevicePixelRatio(dpr)
-    pix.fill(Qt.transparent)
-    painter = QPainter(pix)
-    painter.setRenderHint(QPainter.Antialiasing)
-    painter.scale(dpr, dpr)  # 坐标系缩放为逻辑像素
-    painter.setBrush(QColor(_color_for_name(text)))
-    painter.setPen(Qt.NoPen)
-    painter.drawEllipse(QRectF(1, 1, size - 2, size - 2))
-    painter.setPen(QColor("#ffffff"))
-    font = get_unified_font(int(size * 0.42), True)
-    painter.setFont(font)
-    painter.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, text[0].upper())
-    painter.end()
-    return pix
-
-
 class _AvatarCircleWidget(QWidget):
     """使用 QPainter 绘制的圆形头像 — DPI 感知
 
@@ -134,13 +113,6 @@ class _AvatarCircleWidget(QWidget):
             painter.setPen(QPen(QColor("#ffffff"), 1.0))
             painter.setBrush(QColor("#f85149"))
             painter.drawEllipse(QRectF(size - 2 * dot_r - 1, 0, 2 * dot_r, 2 * dot_r))
-
-    def mousePressEvent(self, event: QMouseEvent):
-        self.clicked.emit()
-
-
-class _ClickableAvatar(QLabel):
-    clicked = Signal()
 
     def mousePressEvent(self, event: QMouseEvent):
         self.clicked.emit()
@@ -461,59 +433,6 @@ class GiteeAccountRow(QFrame):
         # 更新整行可点状态
         self._settings_btn.setEnabled(not self._binding)
         self._apply_style()
-
-    def set_compact_mode(self, compact: bool):
-        """切换紧凑模式：收起时头像和设置按钮垂直堆叠"""
-        if self._compact == compact:
-            return
-        self._compact = compact
-
-        # 保存要重用的子控件
-        avatar = self._avatar
-        name_label = self._name_label
-        repo_label = self._repo_label
-        settings_btn = self._settings_btn
-
-        # 卸载旧布局（用临时 widget 接管 old layout 使其析构）
-        old_layout = self.layout()
-        temp = QWidget()
-        temp.setLayout(old_layout)
-        temp.deleteLater()
-
-        if compact:
-            # 垂直堆叠：头像居中（缩小），设置按钮居中
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(4, 2, 4, 2)
-            layout.setSpacing(2)
-            avatar_size = scale_font_size(20)
-            self._avatar.set_size(avatar_size)
-            layout.addWidget(avatar, 0, Qt.AlignCenter)
-            btn_size = scale_font_size(20)
-            settings_btn.setFixedSize(btn_size, btn_size)
-            settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
-            layout.addWidget(settings_btn, 0, Qt.AlignCenter)
-            name_label.setVisible(False)
-            repo_label.setVisible(False)
-        else:
-            # 水平恢复：头像 + 文字 + 设置按钮
-            layout = QHBoxLayout(self)
-            layout.setContentsMargins(6, 6, 6, 6)
-            layout.setSpacing(8)
-            avatar_size = scale_font_size(28)
-            self._avatar.set_size(avatar_size)
-            layout.addWidget(avatar)
-            text_container = QVBoxLayout()
-            text_container.setContentsMargins(0, 0, 0, 0)
-            text_container.setSpacing(0)
-            text_container.addWidget(name_label)
-            text_container.addWidget(repo_label)
-            layout.addLayout(text_container, 1)
-            btn_size = scale_font_size(24)
-            settings_btn.setFixedSize(btn_size, btn_size)
-            settings_btn.setIconSize(QSize(btn_size - 2, btn_size - 2))
-            layout.addWidget(settings_btn)
-            name_label.setVisible(True)
-            repo_label.setVisible(True)
 
     def _apply_style(self):
         self.setStyleSheet("""
@@ -1049,9 +968,34 @@ class _GiteeMorePopup(QWidget):
     # ── 快捷设置回调 ──
 
     def _on_dark_mode_toggled(self, checked: bool):
-        """深色模式切换"""
-        self._cfg.ui_light_mode.value = not checked
+        """深色模式切换
+
+        完整刷新链（ui_light_mode.valueChanged → LLMSettingsCard._on_light_mode_changed
+        → ui_theme_style → configChanged → 全量刷新）依赖懒构建设置卡；本次启动
+        未打开过设置页时无人监听 valueChanged，界面不会切换。此处兜底：设置卡
+        未构建时直写目标主题并 dispatch_refresh 显式全量刷新（与 config_sync 同款）。
+        """
+        is_light = not checked
+        self._cfg.ui_light_mode.value = is_light
         self._cfg.save()
+
+        from app.widgets.cards.global_card_controller import get_global_card_controller
+
+        controller = get_global_card_controller()
+        if controller is not None and controller._settings_popup is not None:
+            # 设置卡已构建 → valueChanged 链自动完成主题切换，不重复触发
+            return
+
+        from app.utils.config import update_theme_options
+        from app.utils.theme_manager import theme_manager
+
+        # 写 ui_theme_style 前先刷新 validator 选项集，防止目标主题未注册时
+        # 被 OptionsValidator.correct() 静默回退到 options[0]
+        update_theme_options()
+        target_theme = "lumia" if is_light else "fallout"
+        if self._cfg.ui_theme_style.value != target_theme:
+            self._cfg.set(self._cfg.ui_theme_style, target_theme, save=True)
+        theme_manager.dispatch_refresh()
 
     def _on_compact_toggled(self, checked: bool):
         """简洁输出模式切换"""
@@ -1364,7 +1308,6 @@ class GiteeCard(SettingCard):
             if main_win and getattr(main_win, "_is_destroyed", False):
                 return
 
-            from app.main_widget import OpenAIChatToolWindow
 
             # 1. 通过标准配置变更路径逐窗口刷新（与用户手动更改设置走同一路径）
             #    _apply_runtime_ui_settings 内部：

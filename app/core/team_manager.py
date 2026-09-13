@@ -108,7 +108,7 @@ class TeamManager:
                     counter = int(self._window_counter_file.read_text().strip())
                 else:
                     counter = 1
-            except ValueError, FileNotFoundError:
+            except (ValueError, FileNotFoundError):
                 counter = 1
 
             window_id = f"win_{counter:02d}"
@@ -187,7 +187,7 @@ class TeamManager:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except FileNotFoundError, json.JSONDecodeError:
+        except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
     @staticmethod
@@ -254,7 +254,7 @@ class TeamManager:
                 data = json.loads(active_file.read_text())
                 if data:
                     return set(data)
-        except json.JSONDecodeError, FileNotFoundError, OSError, TypeError:
+        except (json.JSONDecodeError, FileNotFoundError, OSError, TypeError):
             pass
         return None
 

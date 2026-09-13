@@ -173,9 +173,6 @@ class BuiltinTools(QObject):
         logger.info(f"[BuiltinTools] Workdir updated to: {self.workdir}")
 
 
-def create_builtin_tools(homepage=None, workdir: str = None) -> BuiltinTools:
-    """创建内置工具实例"""
-    return BuiltinTools(homepage, workdir)
 
 
 # Tool schema definitions - keep separate from class
@@ -184,7 +181,7 @@ def create_builtin_tools(homepage=None, workdir: str = None) -> BuiltinTools:
 # ============================================================
 # 工具插件化：系统插件工具加载 + schema 聚合（registry 驱动）
 # ============================================================
-# 系统工具插件位于 plugins/system/tools/*.py，通过 register(registry) 注册
+# 系统工具插件位于 plugins/system-tools/tools/*.py，通过 register(registry) 注册
 # schema / impl / icon / cn_name / danger / group / description / aliases。
 # 模块导入时加载一次（幂等），热重载由 PluginToolWatcher 后台轮询驱动。
 
@@ -234,15 +231,19 @@ except Exception:
 # 语义等价：任何 ToolRegistry 消费者首次读取前插件必已加载（幂等）。
 
 
-def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dict]:
+def get_builtin_tools_schema(agent_manager=None, builtin_tools=None, session_id: str = "") -> List[Dict]:
     """获取工具的 schema 定义（用于给 LLM 调用，registry 驱动）
 
-    系统插件工具（plugins/system/tools/*.py）与第三方插件工具经
+    系统插件工具（plugins/system-tools/tools/*.py）与第三方插件工具经
     ToolRegistry 注册后自动进入 schema 流；MCP 工具在此动态注入。
+
+    出口统一应用 registry 注册的 schema 过滤器（如 assistant_hub 按
+    助手权限档位裁剪）：过滤发生在缓存之后，不污染缓存。
 
     Args:
         agent_manager: AgentManager 实例，用于动态注入可用子智能体列表
         builtin_tools: BuiltinTools 实例，用于动态注入 MCP 工具 schema
+        session_id: 当前会话 id（供过滤器按会话归属解析，空走全局默认）
     """
     global _CACHE_RESULT, _CACHE_TIMESTAMP, _CACHE_VERSION, _CACHE_AGENT_REF
 
@@ -261,7 +262,13 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         and _CACHE_VERSION == current_version
         and _CACHE_AGENT_REF is agent_manager  # 引用比对：agent 实例更换即失效（多窗口隔离）
     ):
-        return copy.deepcopy(_CACHE_RESULT)
+        result = copy.deepcopy(_CACHE_RESULT)
+        # 对话前 schema 过滤（缓存之后应用，助手权限档位等按 owner 裁剪）
+        try:
+            result = ToolRegistry.get_instance().apply_schema_filters(result, {"session_id": session_id})
+        except Exception as e:
+            logger.warning(f"[BuiltinTools] schema 过滤失败，返回全量: {e}")
+        return result
 
     # 动态获取子智能体名称列表
     subagent_names = []
@@ -273,10 +280,25 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
 
     # 从 registry 读取全部 schema（深拷贝，避免 description 改写污染注册数据）
     try:
-        schemas = ToolRegistry.get_instance().schemas()
+        _tool_registry = ToolRegistry.get_instance()
+        schemas = _tool_registry.schemas()
     except Exception as e:
         logger.warning(f"[BuiltinTools] 读取 registry schema 失败: {e}")
         schemas = []
+        _tool_registry = None
+
+    # 通用动态描述：工具注册时带 metadata.description_builder(subagent_names)->str
+    # 即可运行时重写 description（如注入可用角色列表）。主程序不感知具体工具，
+    # 也不 import 插件模块（打包环境 plugins/ 是数据目录，包导入不可用）。
+    description_builders = {}
+    if _tool_registry is not None:
+        try:
+            for reg in _tool_registry.list():
+                builder = (reg.metadata or {}).get("description_builder")
+                if callable(builder):
+                    description_builders[reg.name] = builder
+        except Exception as e:
+            logger.warning(f"[BuiltinTools] 读取动态描述构造器失败: {e}")
 
     # 动态生成 subagent_para 工具描述
     subagent_para_desc = "批量分发子智能体任务(并行执行)。调完后不可等——继续调其他工具或结束本轮。完成后系统发[后台任务状态]，届时用subagent_status查。"
@@ -287,11 +309,12 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
         name = schema.get("function", {}).get("name", "")
         if name == "subagent_para":
             schema["function"]["description"] = subagent_para_desc
-        elif name == "subagent_dag":
-            if subagent_names:
-                schema["function"]["description"] += "\n\n可用子智能体见系统提示 ## Available Subagents。"
         elif name == "bash":
             schema["function"]["description"] += f"\n\n当前平台: {platform.system()}。"
+        else:
+            builder = description_builders.get(name)
+            if callable(builder):
+                schema["function"]["description"] = builder(subagent_names)
 
     # 动态注入 MCP 工具 schema
     if builtin_tools and hasattr(builtin_tools, "_mcp_manager"):
@@ -325,4 +348,10 @@ def get_builtin_tools_schema(agent_manager=None, builtin_tools=None) -> List[Dic
     _CACHE_VERSION = current_version
     _CACHE_AGENT_REF = agent_manager
 
-    return copy.deepcopy(schemas)
+    result = copy.deepcopy(schemas)
+    # 对话前 schema 过滤（缓存之后应用，助手权限档位等按 owner 裁剪）
+    try:
+        result = ToolRegistry.get_instance().apply_schema_filters(result, {"session_id": session_id})
+    except Exception as e:
+        logger.warning(f"[BuiltinTools] schema 过滤失败，返回全量: {e}")
+    return result

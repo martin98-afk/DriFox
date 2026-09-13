@@ -1,0 +1,18 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-loop-policies",
+  "description": "DriFox 内置循环策略：default / minimal / subagent",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "MIT",
+  "type": "system",
+  "components": {
+    "loop_policies": true
+  }
+}

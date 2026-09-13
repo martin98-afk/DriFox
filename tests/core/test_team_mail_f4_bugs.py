@@ -24,15 +24,6 @@ import pytest
 from app.core import team_manager as tm_mod
 
 
-@pytest.fixture
-def team_manager(tmp_path, monkeypatch):
-    """隔离数据目录的真实 TeamManager（避免污染真实 teams 目录）"""
-    monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path / "teams"))
-    tm_mod.TeamManager._instance = None
-    tm = tm_mod.TeamManager.get_instance()
-    yield tm
-    tm_mod.TeamManager._instance = None
-
 
 def _drop_mail(tm, window_id, mail_id="mail_1", status="pending"):
     """直接向邮箱目录落一封 task 邮件（等价 send_task 的落盘）"""

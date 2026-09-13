@@ -124,37 +124,7 @@ class ThemeRefreshCoordinator:
         """
         return f"{image_path or '__none__'}:{opacity:.{_BG_OPACITY_PRECISION}f}"
 
-    @classmethod
-    def get_cached_bg_pixmap(cls, cache_key: str) -> QPixmap | None:
-        """从缓存获取背景 QPixmap。
 
-        Args:
-            cache_key: 由 get_bg_cache_key() 生成的缓存键
-
-        Returns:
-            缓存的 QPixmap，不存在则返回 None
-        """
-        with cls._lock:
-            return cls._bg_cache.get(cache_key)
-
-    @classmethod
-    def set_cached_bg_pixmap(cls, cache_key: str, pixmap: QPixmap) -> None:
-        """将背景 QPixmap 存入缓存。
-
-        Args:
-            cache_key: 由 get_bg_cache_key() 生成的缓存键
-            pixmap:   要缓存的 QPixmap
-        """
-        with cls._lock:
-            if cache_key in cls._bg_cache:
-                return  # 已缓存，跳过
-            if len(cls._bg_cache) >= _MAX_BG_CACHE:
-                # LRU：删除最早插入的条目
-                first_key = next(iter(cls._bg_cache))
-                old = cls._bg_cache.pop(first_key, None)
-                if old is not None:
-                    old.detach()  # 释放 Qt 底层资源
-            cls._bg_cache[cache_key] = pixmap
 
     # ══════════════════════════════════════════════════════════════
     #  计时工具

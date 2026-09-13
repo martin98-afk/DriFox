@@ -152,62 +152,6 @@ WINDOWS_BUILTIN_COMMANDS = frozenset(
 # 命令白名单/黑名单
 # ============================================================
 # 自动允许的安全命令（只读/无害操作）
-SAFE_COMMANDS = frozenset(
-    {
-        # 文件查看
-        "echo",
-        "cat",
-        "type",
-        "ls",
-        "dir",
-        "more",
-        "less",
-        "head",
-        "tail",
-        "grep",
-        "findstr",
-        "find",
-        "sort",
-        "wc",
-        "uniq",
-        "cut",
-        "tee",
-        # 系统信息
-        "pwd",
-        "date",
-        "time",
-        "whoami",
-        "hostname",
-        "uname",
-        "id",
-        "uptime",
-        "env",
-        "printenv",
-        "set",
-        # 开发工具
-        "python",
-        "python3",
-        "node",
-        "deno",
-        "bun",
-        "npm",
-        "pip",
-        "pip3",
-        "uv",
-        "cargo",
-        "git",
-        "curl",
-        "wget",
-        "make",
-        # 文件操作（只读）
-        "stat",
-        "file",
-        "du",
-        "df",
-        "which",
-        "where",
-    }
-)
 
 # 需要用户确认的危险命令
 CONFIRM_COMMANDS = frozenset(

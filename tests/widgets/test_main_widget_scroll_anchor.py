@@ -20,15 +20,22 @@ import sys
 from unittest.mock import MagicMock
 
 import pytest
+from PySide6.QtCore import QObject
 
-sys.path.insert(0, "app")
+# 注意：不得在此插入 "app" 到 sys.path——app/plugins（regular package）会
+# 劫持顶层 `plugins.*` 命名空间解析，令 tests/plugins 下 import plugins.* 的
+# 测试在混合收集时全部 ModuleNotFoundError。仓库根已由 pytest rootdir 提供。
 
-from app.main_widget import OpenAIChatToolWindow  # noqa: E402
+from app.main_widget import AT_BOTTOM_TOLERANCE, OpenAIChatToolWindow  # noqa: E402
 
 
 def _make_window(**overrides):
     """构造 _process_next_lazy_batch 可运行的最小实例"""
     win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    # ⚠️ 必须显式给值：PyQt 对象未经 __init__ 时 getattr(self, "_is_destroyed", False)
+    # 会抛 RuntimeError（super-class __init__ was never called），而带默认值的
+    # getattr 兜不住这个异常。凡走 _is_destroyed 守卫的方法都要靠它。
+    win._is_destroyed = False
     win._pending_lazy_cards = []
     win._loading_session = False
     win._lazy_batch_timer_active = False
@@ -36,6 +43,9 @@ def _make_window(**overrides):
     win._rendered_card_count = 0
     win._max_rendered_cards = 100
     win._recycle_lru_batches = MagicMock()
+    # 🛡️ _process_next_lazy_batch 排空分支调 _log_render_quota（近期新增打点），
+    # 裸 __new__ 实例 getattr 未定义属性会抛 RuntimeError —— 必须预置
+    win._last_quota_log_at = 0.0
     win._initial_scroll_to_bottom = False
     win._user_intentionally_away_from_bottom = False
     win._scroll_to_bottom = MagicMock()
@@ -173,3 +183,681 @@ def test_away_flag_set_when_scroll_up_then_cleared_at_bottom():
     scroll_bar.value.return_value = 990
     win._on_scroll_changed(990)
     assert win._user_intentionally_away_from_bottom is False
+
+
+# ─── 统一守卫：AT_BOTTOM_TOLERANCE / _should_follow_bottom ───────
+# 背景：同一语义曾散落 5 套阈值（20/30/50/80），且 4 处滚底入口绕过 away 守卫，
+# 导致「流式输出时无法自由阅读」。以下用例锁定收敛后的单点裁决语义。
+
+
+def test_is_view_at_bottom_uses_single_tolerance():
+    """贴底判定只认 AT_BOTTOM_TOLERANCE，边界值不得有两套解释"""
+    win = _make_window()
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+
+    bar.value.return_value = 1000 - AT_BOTTOM_TOLERANCE  # 恰好在阈值内
+    assert win._is_view_at_bottom() is True
+    bar.value.return_value = 1000 - AT_BOTTOM_TOLERANCE - 1  # 越过阈值 1px
+    assert win._is_view_at_bottom() is False
+
+
+def test_is_view_at_bottom_true_when_content_shorter_than_viewport():
+    """内容不足一屏（maximum==0，无处可滚）必须判为贴底"""
+    win = _make_window()
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 0
+    bar.value.return_value = 0
+    assert win._is_view_at_bottom() is True
+
+
+def test_should_follow_bottom_falls_back_to_actual_position():
+    """away 标志与实际位置冲突时以实际位置为准，避免标志卡死后永不跟随"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+
+    bar.value.return_value = 1000
+    assert win._should_follow_bottom() is True
+    bar.value.return_value = 0
+    assert win._should_follow_bottom() is False
+
+
+def test_reset_bottom_follow_clears_away():
+    """用户点击发送 → 恢复跟随（否则「发了消息没反应」）"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    win._reset_bottom_follow()
+    assert win._user_intentionally_away_from_bottom is False
+
+
+def test_away_cleared_when_content_shorter_than_viewport():
+    """回归：旧实现 `elif maximum > 0` 在 maximum==0 时不复位 → away 永久卡 True"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 0
+    bar.value.return_value = 0
+    win._on_scroll_changed(0)
+    assert win._user_intentionally_away_from_bottom is False
+
+
+def test_ensure_at_bottom_skipped_when_user_away():
+    """回归：流式结束兜底重试链曾靠「2s 宽限期」显式忽略 away，强行拽回视口"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+    bar.value.return_value = 0
+    win._ensure_at_bottom(retries=0)
+    bar.setValue.assert_not_called()
+
+
+def test_scroll_to_bottom_if_following_guarded():
+    """延迟兜底滚底（500ms/1000ms）同样要过守卫"""
+    win = _make_window(_user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+    bar.value.return_value = 0
+    win._scroll_to_bottom_if_following()
+    win._scroll_to_bottom.assert_not_called()
+
+
+# ─── 批次卸载等高占位 ───────────────────────────────────────────
+# 背景：B4 回收把卡片移出布局后容器高度瞬间塌陷，随后卡片高度再异步上报，
+# 与 _ensure_at_bottom 的 8×300ms 重试链重叠 → 长对话滚动期抖动。
+# 占位让总高度在回收瞬间保持不变。
+
+
+def _make_placeholder_window():
+    """造一个带真实 chat_layout / chat_container 的最小实例"""
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    win = _make_window()
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    win.chat_container = container
+    win.chat_layout = layout
+    win._batch_placeholders = {}
+    return win, container, layout
+
+
+def test_install_batch_placeholder_keeps_height(qapp):
+    """占位等高且落在原位；摘掉卡片后布局里仍留着它 → 高度不塌陷"""
+    from PySide6.QtWidgets import QWidget
+
+    win, container, layout = _make_placeholder_window()
+    card = QWidget(container)
+    card.setFixedHeight(120)
+    layout.addWidget(card)
+    idx = layout.indexOf(card)
+
+    assert win._install_batch_placeholder(3, 120, idx) is True
+    ph = win._batch_placeholders[3]
+    assert ph.minimumHeight() == 120  # 等高
+    assert layout.indexOf(ph) == idx  # 原位
+
+    layout.removeWidget(card)
+    card.setParent(None)
+    assert layout.count() == 1  # 占位还在 → 容器总高度没塌
+
+
+def test_take_batch_placeholder_returns_index_and_removes(qapp):
+    """取回占位要还回原索引 —— 否则重建的卡片会被追加到末尾，顺序错乱"""
+    from PySide6.QtWidgets import QWidget
+
+    win, container, layout = _make_placeholder_window()
+    card = QWidget(container)
+    layout.addWidget(card)
+    idx = layout.indexOf(card)
+
+    win._install_batch_placeholder(7, 80, idx)
+    assert win._take_batch_placeholder(7) == idx
+    assert win._take_batch_placeholder(7) is None  # 幂等：取过就没了
+
+
+def test_install_batch_placeholder_rejects_bad_args(qapp):
+    """高度 0 / 索引非法时不安装，调用方必须回退到旧的滚动值补偿"""
+    win, _container, _layout = _make_placeholder_window()
+    assert win._install_batch_placeholder(0, 0, 0) is False
+    assert win._install_batch_placeholder(0, 100, -1) is False
+    assert win._batch_placeholders == {}
+
+
+def test_clear_batch_placeholders(qapp):
+    """清空会话 / 重建布局时必须能一次性摘干净，防止索引错位"""
+    from PySide6.QtWidgets import QWidget
+
+    win, container, layout = _make_placeholder_window()
+    card = QWidget(container)
+    layout.addWidget(card)
+    win._install_batch_placeholder(1, 60, layout.indexOf(card))
+    win._install_batch_placeholder(2, 60, layout.indexOf(card))
+    assert len(win._batch_placeholders) == 2
+    win._clear_batch_placeholders(remove_from_layout=True)
+    assert win._batch_placeholders == {}
+    assert layout.count() == 1  # 只剩原来那张 card，占位已摘掉
+
+
+# ─── 主题切换刷新 ───────────────────────────────────────────────
+
+
+def test_theme_changed_event_refreshes_button(qapp):
+    """回归：按钮必须靠 EV_THEME_CHANGED 刷新，光注册 refresh_target 收不到
+
+    🐛 主程序主题切换走 `main_widget._execute_batched_theme_refresh`，它只做
+    Colors.refresh() + theme_manager.on_theme_changed() + per-window
+    `_apply_runtime_ui_settings()`，**从不调用 theme_manager.dispatch_refresh()**
+    → 注册进 `_refresh_targets` 的 widget 一个都收不到 refresh_theme()。
+    （main_widget.py 的批量刷新注释里也点明了这一点。）
+    """
+    from app.core.ui_event_bus import EV_THEME_CHANGED, UIEventBus
+    from app.utils.design_tokens import Colors
+    from app.utils.theme_manager import theme_manager
+    from app.widgets.scroll_to_bottom_button import ScrollToBottomButton
+
+    _win, container, _layout = _make_placeholder_window()
+    btn = ScrollToBottomButton(container, anchor=None, on_click=None)
+    before = btn.styleSheet()
+
+    # 订阅必须真实存在（模块级只订阅一次）
+    assert UIEventBus.get_instance().subscriptions().get(EV_THEME_CHANGED, 0) >= 1
+
+    saved = (Colors.CARD_BG, Colors.BORDER, Colors.HOVER_BG)
+    try:
+        Colors.CARD_BG = "rgba(250, 250, 250, {alpha})"
+        Colors.BORDER = "#dddddd"
+        Colors.HOVER_BG = "rgba(0, 0, 0, 0.12)"
+        # 模拟主程序主题切换：Colors 刷新 + on_theme_changed（内部 publish 事件）
+        theme_manager.on_theme_changed()
+        assert btn.styleSheet() != before
+        assert "#dddddd" in btn.styleSheet()
+    finally:
+        Colors.CARD_BG, Colors.BORDER, Colors.HOVER_BG = saved
+        theme_manager.on_theme_changed()
+
+
+def test_apply_style_skips_when_signature_unchanged(qapp):
+    """签名未变时不重复渲染 SVG（按钮每次浮出都会调 _apply_style）"""
+    from app.widgets.scroll_to_bottom_button import ScrollToBottomButton
+
+    _win, container, _layout = _make_placeholder_window()
+    btn = ScrollToBottomButton(container, anchor=None, on_click=None)
+    sig = btn._style_sig
+    btn._apply_style()
+    assert btn._style_sig == sig  # 没变 → 没重刷
+    btn._apply_style(force=True)
+    assert btn._style_sig == sig  # 强制重刷后签名依然一致
+
+
+# ─── 卡片高度锚定补偿（v2）─────────────────────────────────────────
+# 背景：锚定补偿初版用 `card_top < value` 作为「增量发生在视口上方」的代理
+# 判据。工具折叠框展开后卡片常高于视口 → 该条件恒成立；而流式正文是在卡片
+# **底部**增长的 → 每个流式高度回调（~80ms 一次）都 += delta，视口被持续
+# 下拽，内容从用户眼下漂走 —— 即「滚轮位置反复被重置到奇怪位置」。
+#
+# ⚠️ v2 按「卡片是否在流式」一刀切关补偿，结果把跟底通道也堵死了 → 流式
+# 中途「置顶」（补偿是流式期间唯一的跟底手段，见源码注释）。
+#
+# v3 判据（补偿成立只需其一）：
+#   A. 整张卡片在视口上方（card_bottom <= value）→ 增量必然在视口之上 → 补偿；
+#   B. 视口处于跟随态（_should_follow_bottom）→ 补偿 == 保持贴底。
+# 用户已上滚阅读且卡片跨视口顶部 → 不补偿。
+
+
+class _AnchorHarness(QObject):
+    """承载 `_on_message_card_height_changed` 的真实 QObject 载体
+
+    该处理器依赖 `self.sender()` 取信号发送者，必须是已完成 C++ 初始化的
+    QObject；直接复写类属性即可把它挂到轻量载体上，避免实例化整个主窗口。
+    """
+
+    _on_message_card_height_changed = OpenAIChatToolWindow._on_message_card_height_changed
+    _should_follow_bottom = OpenAIChatToolWindow._should_follow_bottom
+    _is_view_at_bottom = OpenAIChatToolWindow._is_view_at_bottom
+
+
+def _make_anchor_window(card_top, card_height, value, maximum=5000, streaming=False, away=False):
+    """构造带真实容器/卡片 + 可控滚动条的窗口，用于验证锚定补偿判据
+
+    ⚠️ 不能用 `_make_window()`（`OpenAIChatToolWindow.__new__`）—— 未经
+    `QObject.__init__` 的实例调 `self.sender()` 拿不到信号发送者，处理器会在
+    `isinstance(sender, MessageCard)` 处直接 return，测不到补偿逻辑。
+    故用一个真实 QObject 载体承载该处理器（它只依赖 self.sender/聊天滚动区）。
+
+    Args:
+        card_top: 卡片顶部在容器中的 y（用等高占位撑出）
+        card_height: 卡片高度（决定 card_bottom = card_top + card_height）
+        value: 滚动条当前值（视口顶部在内容坐标系的位置）
+        maximum: 滚动条最大值
+        streaming: 卡片是否处于流式输出中
+        away: 用户是否已主动滚离底部（_user_intentionally_away_from_bottom）
+    """
+    from PySide6.QtCore import QObject, QRect
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+    from app.widgets.message_card import MessageCard
+
+    container = QWidget()
+    layout = QVBoxLayout(container)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+
+    if card_top:
+        filler = QWidget(container)
+        filler.setFixedHeight(card_top)
+        layout.addWidget(filler)
+
+    card = MessageCard(role="assistant", parent=container)
+    card.setFixedHeight(card_height)
+    layout.addWidget(card)
+    # 末尾 stretch：否则 QVBoxLayout 会把唯一子项垂直居中，card_top 不可控
+    layout.addStretch(1)
+    # 显式布排：未 show 的顶层 widget 不会自动激活布局，card_top 会恒为 0
+    total_h = max(2000, card_top + card_height + 500)
+    container.resize(400, total_h)
+    layout.setGeometry(QRect(0, 0, 400, total_h))
+
+    card._streaming = streaming
+    card._content_just_loaded = False
+
+    bar = MagicMock()
+    bar.value.return_value = value
+    bar.maximum.return_value = maximum
+    area = MagicMock()
+    area.widget.return_value = container
+    area.verticalScrollBar.return_value = bar
+
+    win = _AnchorHarness()
+    win.chat_scroll_area = area
+    win._is_streaming = streaming
+    win._user_intentionally_away_from_bottom = away
+
+    card.heightChanged.connect(win._on_message_card_height_changed)
+    return win, card, bar
+
+
+def test_streaming_card_not_compensated_when_user_scrolled_away(qapp):
+    """回归核心：用户上滚阅读 + 卡片跨视口顶部（折叠框展开的典型形态）→ 不补偿
+
+    折叠框展开后卡片 1200px 高于视口，card_top(0) < value(300) 恒成立；
+    但正文在卡片**底部**增长（增量在视口之下），补偿会把视口每 ~80ms
+    下拽 Δ → 内容持续从用户眼下漂走。
+    """
+    win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=300, streaming=True, away=True)
+    card._last_height_delta = 20
+    card.heightChanged.emit(1220)
+
+    bar.setValue.assert_not_called()  # 视口不得被下拽
+
+
+def test_streaming_card_keeps_bottom_follow_when_user_at_bottom(qapp):
+    """回归 v2 引入的「流式中途置顶」：跟随态必须继续补偿（补偿 == 跟底）
+
+    ⚠️ 补偿是流式期间唯一的跟底通道 —— 下方滚底逻辑被 `_content_just_loaded`
+    挡着，而流式 chunk / 工具·思考更新故意不置该标记。v2 按「卡片是否在流式」
+    一刀切关补偿，视口就停在原地、内容在下方越长越多 → 用户看到「置顶」。
+    """
+    win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=300, streaming=True, away=False)
+    card._last_height_delta = 20
+    card.heightChanged.emit(1220)
+
+    bar.setValue.assert_called_once_with(320)  # 300 + 20 == 新的 maximum
+
+
+def test_short_streaming_card_keeps_bottom_follow(qapp):
+    """卡片矮于视口（card_top >= value）且跟随态 → 仍要补偿，否则丢失跟底
+
+    流式刚开始、卡片还没长过视口时正是这个形态：card_top(1000) > value(300)，
+    若因「顶部已在视口内」而跳过补偿，视口会随内容增长被落在后面。
+    """
+    win, card, bar = _make_anchor_window(card_top=1000, card_height=200, value=300, streaming=True, away=False)
+    card._last_height_delta = 30
+    card.heightChanged.emit(230)
+
+    bar.setValue.assert_called_once_with(330)  # 300 + 30
+
+
+def test_card_entirely_above_viewport_compensated_even_when_user_away(qapp):
+    """整张卡片都在视口上方 → 增量必然在视口之上 → 补偿（与跟随态无关）"""
+    win, card, bar = _make_anchor_window(card_top=0, card_height=200, value=500, streaming=True, away=True)
+    card._last_height_delta = 40
+    card.heightChanged.emit(240)
+
+    bar.setValue.assert_called_once_with(540)  # 500 + 40
+
+
+def test_card_below_viewport_top_not_compensated_when_user_away(qapp):
+    """用户已上滚阅读 + 卡片整体位于视口下方 → 增量不可能影响视口 → 不补偿"""
+    win, card, bar = _make_anchor_window(card_top=1000, card_height=200, value=300, streaming=False, away=True)
+    card._last_height_delta = 100
+    card.heightChanged.emit(300)
+
+    bar.setValue.assert_not_called()
+
+
+# ─── sticky anchor 到期后的兜底接力 ───────────────────────────────────
+# 背景：会话加载排空走 _scroll_to_bottom(sticky_ms=900)，anchor 定时器每
+# 100ms setValue(max) 维持贴底；到期分支直接清零 return，不接力任何兜底。
+# WebEngine 卡片高度异步上报晚于 900ms 窗口（大会话/慢机器常态）→ 内容撑高
+# 后视口永久停在消息列表中部，即「加载历史会话偶尔不置底」的根因。
+# 非 sticky 路径（_do_scroll_to_bottom 的 else 分支）有 _ensure_at_bottom
+# (retries=8) 兜底窗口 —— sticky 路径恰恰缺失。修复：到期接力同款兜底。
+
+
+class _FakeClock:
+    """可控单调时钟，patch 进 app.main_widget.time"""
+
+    def __init__(self):
+        self.t = 1000.0
+
+    def monotonic(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+class _FakeScrollBar:
+    """带真实 value/max 状态的滚动条替身（MagicMock 的 setValue 无侧效）"""
+
+    def __init__(self, maximum=1000, value=0):
+        self._max = maximum
+        self._val = value
+
+    def maximum(self):
+        return self._max
+
+    def value(self):
+        return self._val
+
+    def setValue(self, v):
+        self._val = max(0, min(v, self._max))
+
+
+def _make_sticky_window(away=False):
+    """构造 _scroll_to_bottom / _maintain_bottom_anchor 可运行的最小实例"""
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._is_destroyed = False
+    win._pending_scroll_to_bottom = False
+    win._bottom_anchor_deadline = 0.0
+    win._bottom_anchor_timer = MagicMock()
+    win._scroll_bottom_timer = MagicMock()
+    win._suppress_scroll_sync_count = 0
+    win._user_intentionally_away_from_bottom = away
+    bar = _FakeScrollBar(maximum=1000, value=1000)  # 贴底起点
+    area = MagicMock()
+    area.verticalScrollBar.return_value = bar
+    win.chat_scroll_area = area
+    return win
+
+
+def _drive_sticky_lifecycle(win, clock):
+    """驱动 sticky(900ms) 完整生命周期：置底 → anchor 100ms tick → 到期清零"""
+    win._scroll_to_bottom(sticky_ms=900)
+    clock.advance(0.05)
+    win._do_scroll_to_bottom()  # 50ms 后置底并启动 anchor
+    for _ in range(8):
+        clock.advance(0.1)
+        win._maintain_bottom_anchor()  # 100~800ms tick，维持贴底
+    clock.advance(0.1)
+    win._maintain_bottom_anchor()  # ~900ms 到期 → 清零 return
+    assert win._bottom_anchor_deadline == 0.0
+
+
+def test_sticky_anchor_expiry_relays_bottom_guard(qapp):
+    """sticky 900ms 到期后晚到的高度上报必须仍被追平（加载不置底根因）
+
+    修复前：到期分支清零 return，链路终止 —— 之后的高度上报把视口顶离底部
+    后无人再管，永久停在中间。修复后：到期接力 _ensure_at_bottom 兜底窗口。
+    """
+    import types
+    from unittest import mock
+
+    import app.main_widget as mw
+
+    clock = _FakeClock()
+    singles = []
+    win = _make_sticky_window()
+    bar = win.chat_scroll_area.verticalScrollBar()
+    with (
+        mock.patch.object(mw, "time", types.SimpleNamespace(monotonic=clock.monotonic)),
+        mock.patch.object(mw.QTimer, "singleShot", staticmethod(lambda ms, cb: singles.append((ms, cb)))),
+    ):
+        _drive_sticky_lifecycle(win, clock)
+        # 晚到高度上报：内容撑高 400px，视口距底 400（远超 AT_BOTTOM_TOLERANCE）
+        bar._max = 1400
+        clock.advance(0.15)  # 接力 singleShot(150) 到期
+        for _ms, cb in list(singles):
+            cb()
+    assert bar.value() == 1400  # 修复前停 1000（红），修复后追平（绿）
+
+
+def test_sticky_anchor_expiry_relay_respects_away(qapp):
+    """到期接力不得覆盖用户阅读位置：away=True 时守卫拦截，不强制置底"""
+    import types
+    from unittest import mock
+
+    import app.main_widget as mw
+
+    clock = _FakeClock()
+    singles = []
+    win = _make_sticky_window(away=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar._val = 400  # 用户停在消息列表中部阅读
+    win._bottom_anchor_deadline = clock.t + 0.9
+    with (
+        mock.patch.object(mw, "time", types.SimpleNamespace(monotonic=clock.monotonic)),
+        mock.patch.object(mw.QTimer, "singleShot", staticmethod(lambda ms, cb: singles.append((ms, cb)))),
+    ):
+        clock.advance(1.0)
+        win._maintain_bottom_anchor()  # 到期 → 清零 + 接力
+        assert win._bottom_anchor_deadline == 0.0
+        bar._max = 1400  # 内容撑高
+        clock.advance(0.15)
+        for _ms, cb in list(singles):
+            cb()
+    assert bar.value() == 400  # away 守卫拦截，阅读位置不被打扰
+
+
+# ─── 加载期 away 污染（加载不置底的真正主因）──────────────────────────
+# 背景：首屏 12 批渲染必超单窗配额 12 张 → B4 回收触发补偿
+# setValue(value-removed_total)。此刻加载中 maximum 因卡片高度异步上报
+# 持续增长，value 停在最后程序置底处（差值 >24px），valueChanged →
+# _on_scroll_changed 把「不在底部」误归因为用户滚离 → away=True。
+# 之后批次置底、最后卡救场、排空 sticky 全被守卫拦下且无复位事件
+# → 视口永久停在消息列表中间。短会话（<12 卡）不触发回收 → 「偶尔」。
+
+
+def test_loading_scroll_change_does_not_pollute_away():
+    """加载期程序性 value 移动（B4 补偿触发 valueChanged）不得置 away"""
+    win = _make_window(_loading_session=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1400
+    bar.value.return_value = 1000  # 差值 400 > 24（加载中 max 涨、value 未跟）
+
+    win._on_scroll_changed(1000)
+
+    assert win._user_intentionally_away_from_bottom is False
+
+
+def test_loading_scroll_change_still_resets_away():
+    """加载期贴底时仍复位 away（保留原语义）"""
+    win = _make_window(_loading_session=True, _user_intentionally_away_from_bottom=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1000
+    bar.value.return_value = 1000  # 贴底
+
+    win._on_scroll_changed(1000)
+
+    assert win._user_intentionally_away_from_bottom is False
+
+
+def test_non_loading_scroll_still_marks_away():
+    """非加载期行为不变：不贴底的 valueChanged 仍置 away（用户滚离阅读）"""
+    win = _make_window(_loading_session=False)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1400
+    bar.value.return_value = 400
+
+    win._on_scroll_changed(400)
+
+    assert win._user_intentionally_away_from_bottom is True
+
+
+def test_away_pollution_blocks_sticky_end_to_end():
+    """端到端复现：加载期 away 被污染 → 排空 sticky 不启动 → 停在中间
+
+    模拟真实信号序列：首批置底后 max 因高度上报涨到 1400，B4 回收补偿
+    触发 valueChanged(1000)，随后懒渲染排空。修复前 away=True 拦下
+    sticky，修复后 sticky 启动把视口追平到底。
+    """
+    win = _make_window(_loading_session=True)
+    bar = win.chat_scroll_area.verticalScrollBar()
+    bar.maximum.return_value = 1400
+    bar.value.return_value = 1000
+
+    # B4 回收补偿 setValue(1000-removed) 触发 valueChanged → _on_scroll_changed
+    win._on_scroll_changed(1000)
+    # 懒渲染排空分支的 sticky 条件：initial_scroll 已 True + not away
+    win._initial_scroll_to_bottom = True
+    win._loading_session = False
+    if not win._user_intentionally_away_from_bottom:
+        win._scroll_to_bottom(sticky_ms=900)
+
+    win._scroll_to_bottom.assert_called_once()  # 修复前不调用（红）
+
+
+def test_height_delta_is_one_shot(qapp):
+    """增量是一次性令牌：同一 delta 不得被后续 heightChanged 重复补偿
+
+    heightChanged 可能由多条路径发射（含"重发已应用高度"的动画结束回调），
+    若 delta 不清零，同一增量会被反复累加 → 视口持续漂移。
+    """
+    win, card, bar = _make_anchor_window(card_top=0, card_height=200, value=500, streaming=False, away=True)
+    card._last_height_delta = 40
+    card.heightChanged.emit(240)
+    bar.setValue.assert_called_once_with(540)
+
+    bar.setValue.reset_mock()
+    card.heightChanged.emit(240)  # 无新增量 → 不得再补
+    bar.setValue.assert_not_called()
+
+
+def test_negative_delta_clamped_at_zero(qapp):
+    """卡片收拢（负增量）时补偿不得让 value 变负
+
+    跟随态 + 卡片大幅收拢（如坞态归位、内容重渲染变短）时最容易撞到负值。
+    """
+    win, card, bar = _make_anchor_window(card_top=0, card_height=1200, value=30, streaming=False, away=False)
+    card._last_height_delta = -80
+    card.heightChanged.emit(1120)
+
+    bar.setValue.assert_called_once_with(0)  # max(0, 30 - 80)
+
+
+# ─── T5-5: _build_node_to_batch_mapping 等价性（指纹缓存 + 单 pass） ───────────
+def _map_window(batches):
+    """最小实例：_build_node_to_batch_mapping 仅依赖 _message_batch 与缓存属性"""
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._message_batch = batches
+    win._node_batch_map_cache = None
+    return win
+
+
+def _u():
+    return [{"role": "user", "content": "hi"}]
+
+
+def _a():
+    return [{"role": "assistant", "content": "ok"}]
+
+
+def _t():
+    return [{"role": "tool", "content": "result"}]
+
+
+def test_mapping_interleave_user_assistant_tool():
+    """形态1：user/assistant/tool 交错 → 每个 user 都有配对"""
+    win = _map_window([_u(), _a(), _t(), _u(), _a()])
+    assert win._build_node_to_batch_mapping() == [0, 3]
+
+
+def test_mapping_trailing_user():
+    """形态2：trailing user（无配对）→ trailing check 补节点"""
+    win = _map_window([_u(), _a(), _u()])
+    assert win._build_node_to_batch_mapping() == [0, 2]
+
+
+def test_mapping_consecutive_users_only_last_paired():
+    """形态3：连续 user → 只有配对 assistant 的最后一个生成节点"""
+    win = _map_window([_u(), _u(), _a()])
+    assert win._build_node_to_batch_mapping() == [1]
+
+
+def test_mapping_empty_batches_skipped():
+    """形态4：空 batch 跳过，不影响配对判定"""
+    win = _map_window([_u(), [], _a()])
+    assert win._build_node_to_batch_mapping() == [0]
+
+
+def test_mapping_cache_hit_and_invalidate():
+    """指纹命中返回缓存；批次变化后自动失效重建"""
+    win = _map_window([_u(), _a()])
+    first = win._build_node_to_batch_mapping()
+    assert win._node_batch_map_cache is not None
+    assert win._build_node_to_batch_mapping() is first  # 缓存命中（同一对象）
+    win._message_batch.append(_u())  # 追加 trailing user → 指纹变化
+    second = win._build_node_to_batch_mapping()
+    assert second == [0, 2]
+    assert second is not first
+
+
+def test_mapping_equivalence_with_reference_fuzz():
+    """fuzz 对照：固定 seed 伪随机批次序列，新算法与参考实现逐例同输出
+
+    参考实现 = 旧 O(B²) 扫描（规格的直译，保留在测试内作为行为锚）。
+    覆盖 spec 四形态之外的分支配对：空 batch / role=None / 未知 role 的
+    非空 batch（旧语义：不参与配对也不终止扫描）。
+    """
+    import random
+
+    def _reference_mapping(batches):
+        mapping = []
+        last_user_batch_idx = -1
+        for idx, batch in enumerate(batches):
+            if not batch or batch[0].get("role") != "user":
+                continue
+            last_user_batch_idx = idx
+            has_paired = False
+            for next_idx in range(idx + 1, len(batches)):
+                next_batch = batches[next_idx]
+                if not next_batch:
+                    continue
+                next_role = next_batch[0].get("role")
+                if next_role in ("assistant", "tool"):
+                    has_paired = True
+                    break
+                if next_role == "user":
+                    break
+            if has_paired:
+                mapping.append(idx)
+        if last_user_batch_idx >= 0 and (not mapping or mapping[-1] != last_user_batch_idx):
+            mapping.append(last_user_batch_idx)
+        return mapping
+
+    rng = random.Random(0xB2C0)
+    for case in range(300):
+        n = rng.randint(0, 25)
+        batches = []
+        for _ in range(n):
+            kind = rng.random()
+            if kind < 0.12:
+                batches.append([])  # 空 batch
+            elif kind < 0.18:
+                batches.append([{"content": "no-role"}])  # role 缺失
+            elif kind < 0.22:
+                batches.append([{"role": "system", "content": "x"}])  # 其他 role
+            else:
+                batches.append(rng.choice([_u(), _a(), _t()]))
+        win = _map_window(batches)
+        assert win._build_node_to_batch_mapping() == _reference_mapping(batches), (
+            f"fuzz case {case} 不等价: batches={batches!r}"
+        )

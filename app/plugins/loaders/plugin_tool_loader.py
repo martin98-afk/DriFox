@@ -10,7 +10,7 @@
 - 危险级别强制校验：register 必须显式声明 danger（registry 层拒绝未声明插件工具）
 
 扫描范围（含系统插件）：
-- 工作树 `plugins/`（含 `plugins/system/tools/` 系统内置工具插件）
+- 工作树 `plugins/`（含 `plugins/system-tools/tools/` 系统内置工具插件）
 - 用户插件目录 `<app_data>/plugins/`
 
 热重载：
@@ -26,11 +26,9 @@
 
 from __future__ import annotations
 
-import ast
 import importlib.util
 import sys
 import threading
-import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -131,6 +129,11 @@ class _PluginRegistryProxy:
 
     def register(self, name, schema, impl=None, danger=None, source=None, metadata=None, **meta) -> bool:
         """注册（透传全部元数据：icon/cn_name/group/description/aliases）"""
+        # D10：单个工具被停用 → 不注册（且不让其占用 root_tracker 槽位，
+        # 低优先级根的同名工具因此有机会补位）
+        if not _is_item_enabled(self._plugin_name, name):
+            logger.debug(f"[PluginToolLoader] 工具已停用，跳过注册: {self._plugin_name}:{name}")
+            return False
         # 同名工具覆盖判定（root_kind 优先级）
         # - 同根/无 root/首次注册：已被其他插件占用 → 拒绝（先注册者优先；同插件重扫由 watcher 卸载兜底）
         # - 跨根：高等级根（user）可覆盖低等级根（system）的同名工具；同级/反向拒绝
@@ -187,61 +190,7 @@ class _PluginRegistryProxy:
         return ok
 
 
-def _is_tool_entry_module(source: str, path: Path) -> bool:
-    """判断文件是否为工具入口模块（须定义 register(registry) 且不得污染 sys.modules）。
-
-    加载安全网：仅当文件确实暴露 register 入口、且不在模块级直接操作
-    sys.modules（如 sys.modules.update 覆盖核心模块 app.tools）时才 exec。
-    跳过测试脚本/临时文件/误放入 tools/ 目录的其他模块，防止其模块级代码
-    在 exec 时污染全局 sys.modules。
-
-    文件名快速过滤（test_*/conftest）+ AST 精确判定（register 函数 +
-    拒绝 sys.modules 变异），防止误判 'tool_register=' 等相似标识符。
-    """
-    name = path.name
-    if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
-        return False
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return False
-    has_register = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "register":
-            has_register = True
-        if _is_sys_modules_mutation(node):
-            logger.warning(f"[PluginToolLoader] 拒绝加载疑似污染 sys.modules 的文件: {path}")
-            return False
-    return has_register
-
-
-def _is_sys_modules_mutation(node: "ast.AST") -> bool:
-    """检测节点是否为直接操作 sys.modules 的危险语句（污染核心模块的元凶）。
-
-    覆盖两种常见形式：sys.modules.update({...}) 与 sys.modules['x'] = <obj>。
-    """
-    # sys.modules.update(...)
-    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-        val = node.func.value
-        if (
-            isinstance(val, ast.Attribute)
-            and val.attr == "modules"
-            and isinstance(val.value, ast.Name)
-            and val.value.id == "sys"
-            and node.func.attr == "update"
-        ):
-            return True
-    # sys.modules[...] = ...
-    if isinstance(node, ast.Assign):
-        for target in node.targets:
-            if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Attribute):
-                val = target.value
-                if val.attr == "modules" and isinstance(val.value, ast.Name) and val.value.id == "sys":
-                    return True
-    return False
-
-
-def _load_module(plugin_name: str, path: Path):
+def _load_module(plugin_name: str, path: Path, root_kind: str = ""):
     """加载插件工具模块（唯一模块名，避免命名冲突）。
 
     显式 compile 绕过 SourceFileLoader 的 __pycache__ 缓存：
@@ -267,17 +216,39 @@ def _load_module(plugin_name: str, path: Path):
         sys.modules.pop(mod_name, None)
         logger.warning(f"[PluginToolLoader] 读取/编译失败 {path}: {e}")
         return None
-    # [SAFETY] 加载安全网：仅加载暴露 register(registry) 入口的工具文件。
-    # 跳过无 register 入口的文件（测试脚本/临时文件/误放入 tools/ 目录的模块），
-    # 避免其模块级代码（如 sys.modules.update 覆盖核心模块 app.tools）在 exec
-    # 时污染全局 sys.modules。
-    # 事故复盘 2026-08-22：自测脚本 test_scaffold_storage.py 落入 self-evolver/tools/，
-    # 其模块级 sys.modules.update({"app.tools": ModuleType(...)}) 覆盖真模块，
-    # 导致后续 `from app.tools import X` 全部 (unknown location) 崩溃。
-    if not _is_tool_entry_module(source, path):
+    # P1b：parse-once 聚合门——sys.modules 声明式放行判定 + register 入口检查
+    # + 危险 import 审计，共享单次 ast.parse（原为 3 次独立解析）。
+    # [SAFETY] 事故复盘 2026-08-22：自测脚本落入 tools/ 其模块级
+    # sys.modules.update 覆盖真模块导致全局导入崩溃——聚合门沿用同一拒载面。
+    # 文件名快速过滤（test_*/conftest）保留在调用侧（与原 _is_tool_entry_module 一致）。
+    name = path.name
+    if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
+        sys.modules.pop(mod_name, None)
+        return None
+    from app.plugins.loaders._ast_guard import guard_plugin_module_once
+
+    guard = guard_plugin_module_once(
+        source,
+        path,
+        require_register=True,
+        component="PluginToolLoader",
+        plugin_dir=path.parent.parent,
+    )
+    if guard.syntax_error or guard.rejected_writes:
+        sys.modules.pop(mod_name, None)
+        # 拒载原因已由聚合门按行号输出 warning
+        return None
+    if not guard.has_register:
         sys.modules.pop(mod_name, None)
         logger.debug(f"[PluginToolLoader] 跳过非工具入口文件（无 register 函数）: {path}")
         return None
+    if guard.dangerous_imports:
+        # A4：危险 import 审计（仅日志告警，不拒载）
+        _audit_detail = "; ".join(f"line {ln}: {sym}" for ln, sym in guard.dangerous_imports)
+        logger.warning(
+            f"[PluginToolLoader] [AST审计] 插件 {plugin_name} 工具模块含模块级危险 import"
+            f"（已放行，仅告警）: {_audit_detail} ({path}) kind={root_kind or 'unknown'}"
+        )
     code = compile(source, str(path), "exec")
     try:
         exec(code, module.__dict__)
@@ -326,6 +297,65 @@ def _is_plugin_enabled(plugin_name: str) -> bool:
         return True
 
 
+def _is_plugin_load_blocked(plugin_name: str) -> bool:
+    """P1/P2：检查插件是否被版本/平台门禁拦截（load_blocked）。
+
+    仅在 PluginManager 已初始化且能查到插件时检查；否则视为不拦截（放行）。
+    拦截的插件其工具不进 registry——已注册过的会在后续重扫中被清理。
+    """
+    try:
+        from app.plugins.managers.plugin_manager import PluginManager
+
+        pm = PluginManager.get_instance()
+        if not pm.is_initialized():
+            return False
+        plugin = pm.get_plugin(plugin_name)
+        if plugin is None:
+            return False
+        return bool(getattr(plugin, "load_blocked", False))
+    except Exception as e:
+        logger.warning(f"[PluginToolLoader] 门禁检查失败，默认放行 {plugin_name}: {e}")
+        return False
+
+
+def _is_component_enabled(plugin_name: str, component: str = "tools") -> bool:
+    """按组件级禁用集过滤工具加载（D9：插件内部 tools 子项开关）。
+
+    与 _is_plugin_enabled 同源策略：直接读 Settings（import 期可用，不依赖
+    pm 初始化状态）。组件未禁用即启用；读取失败默认加载（与 _is_plugin_enabled 对齐）。
+    """
+    try:
+        from app.utils.config import Settings
+
+        disabled = Settings.get_instance().disabled_plugin_components.value or []
+        return f"{plugin_name}:{component}" not in set(disabled)
+    except Exception as e:
+        logger.warning(f"[PluginToolLoader] 组件启停检查失败，默认加载 {plugin_name}: {e}")
+        return True
+
+
+def _is_item_enabled(plugin_name: str, item_id: str, component: str = "tools") -> bool:
+    """按细项级禁用集过滤单个工具的注册（D10：只关掉某一个工具）
+
+    语义：整类停用 ⇒ 其下全部工具停用；整类启用时再看该工具自身。
+    与 _is_component_enabled 同源策略：直接读 Settings，失败默认加载。
+
+    选择在**注册阶段**过滤而非执行阶段，是为了让下游（LLM schema、工具执行、
+    权限卡片、危险等级统计）自动保持一致——工具不在 registry 里，
+    所有消费方自然都看不到它。
+    """
+    try:
+        from app.utils.config import Settings
+
+        disabled = set(Settings.get_instance().disabled_plugin_components.value or [])
+        if f"{plugin_name}:{component}" in disabled:
+            return False
+        return f"{plugin_name}:{component}:{item_id}" not in disabled
+    except Exception as e:
+        logger.warning(f"[PluginToolLoader] 细项启停检查失败，默认加载 {plugin_name}:{item_id} ({e})")
+        return True
+
+
 def _run_register(
     registry: ToolRegistry,
     plugin_name: str,
@@ -339,7 +369,7 @@ def _run_register(
     覆盖场景（工具已存在、仅替换 source/impl）下 diff 为空集，会导致 watcher
     的 _loaded 漏记被覆盖工具，用户插件删除后系统插件无法恢复。
     """
-    module = _load_module(plugin_name, py_path)
+    module = _load_module(plugin_name, py_path, root_kind=_root_kind(root))
     register_fn = getattr(module, "register", None) if module else None
     if not callable(register_fn):
         return set()
@@ -387,6 +417,14 @@ def load_plugin_tools(
             if not _is_plugin_enabled(plugin_name):
                 logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")
                 continue
+            # D9：组件级禁用——tools 子项被关后不再注册
+            if not _is_component_enabled(plugin_name):
+                logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {plugin_name}")
+                continue
+            # P1/P2：版本/平台门禁——load_blocked 插件不加载其工具
+            if _is_plugin_load_blocked(plugin_name):
+                logger.warning(f"[PluginToolLoader] 跳过被门禁拦截插件的工具: {plugin_name}")
+                continue
             try:
                 new_tools = _run_register(registry, plugin_name, py_path, Path(root), root_tracker)
                 loaded.setdefault(plugin_name, set()).update(new_tools)
@@ -409,6 +447,11 @@ def unload_plugin_tools(
             （如用户插件删除后，残留的 read→user_root 会挡住 system 恢复）。
     """
     registry = registry or ToolRegistry.get_instance()
+    # 同步清理该插件的 schema 过滤器（禁用/卸载/热重载路径统一走这里，防残留）
+    try:
+        registry.unregister_schema_filter(plugin_name)
+    except Exception as e:
+        logger.warning(f"[PluginToolLoader] 清理插件 schema 过滤器失败: {plugin_name} {e}")
     for name in tool_names:
         reg = registry.get(name)
         if reg is not None and reg.source == f"plugin:{plugin_name}":
@@ -437,8 +480,6 @@ class PluginToolWatcher:
         self._loaded: Dict[str, Set[str]] = {}  # plugin_name -> tool_names（当前生效）
         self._root_tracker: Dict[str, Path] = {}  # tool_name -> 来源根（跨根优先级）
         self._scan_lock = threading.Lock()  # 重扫互斥（UI 触发 + 轮询线程并发安全）
-        self._thread = None
-        self._stop = False
         # 热重载完成监听（轮询检测到变更并完成重扫后触发，后台线程回调）
         # 用途：UI 弹风险通知等。仅 watcher 轮询路径触发，
         # 显式 scan_now()（启动对齐 / 插件启停）不触发——那些场景用户已知情。
@@ -539,8 +580,28 @@ class PluginToolWatcher:
         跨根覆盖恢复：与 unload_plugin 相同，注销后对更低等级根重扫一次，
         被覆盖工具按 root_kind 优先级自然恢复；随后重注册本插件（高等级根）
         再次按优先级覆盖 → 最终状态与全量重扫一致。
+
+        P2-2 last-known-good：先试加载新模块（exec 层面），任一失败即放弃本次
+        重载并保留旧注册（坏版本重载失败旧版仍可用；新版成功前旧 registry 项
+        不清空）；同名注册冲突以新加载结果为准（旧项已随成功路径注销）。
         """
         with self._scan_lock:
+            pending: list = []
+            for root in self._roots:
+                root_path = Path(root)
+                for pname, py in _iter_tool_modules(root_path):
+                    if pname != plugin_name:
+                        continue
+                    try:
+                        _load_module(plugin_name, py, root_kind=_root_kind(root_path))
+                    except Exception as e:
+                        logger.warning(
+                            f"[PluginToolLoader] 插件 {plugin_name} 新模块加载失败，"
+                            f"保留旧注册（last-known-good）: {e}"
+                        )
+                        return
+                    pending.append((root_path, py))
+
             with self._registry.notify_batch():
                 tool_names = set(self._loaded.get(plugin_name, set()))
                 # 兜底：_loaded 未跟踪但 registry 残留的同源工具（防御状态漂移）
@@ -559,18 +620,24 @@ class PluginToolWatcher:
                 if not _is_plugin_enabled(plugin_name):
                     logger.info(f"[PluginToolLoader] 跳过已禁用插件的工具: {plugin_name}")
                     return
+                # D9：组件级禁用——tools 子项被关后不再重注册
+                if not _is_component_enabled(plugin_name):
+                    logger.info(f"[PluginToolLoader] 跳过 tools 组件已禁用的插件: {plugin_name}")
+                    return
+                # P1/P2：版本/平台门禁——load_blocked 插件不重注册其工具
+                if _is_plugin_load_blocked(plugin_name):
+                    logger.warning(f"[PluginToolLoader] 跳过被门禁拦截插件的工具: {plugin_name}")
+                    return
                 new_names: Set[str] = set()
-                for root in self._roots:
-                    root_path = Path(root)
-                    for pname, py in _iter_tool_modules(root_path):
-                        if pname != plugin_name:
-                            continue
-                        try:
-                            new_names.update(
-                                _run_register(self._registry, plugin_name, py, root_path, self._root_tracker)
-                            )
-                        except Exception as e:
-                            logger.warning(f"[PluginToolLoader] 插件 {plugin_name} register 失败: {e}")
+                for root_path, py in pending:
+                    try:
+                        new_names.update(
+                            _run_register(self._registry, plugin_name, py, root_path, self._root_tracker)
+                        )
+                    except Exception as e:
+                        # exec 已在试加载阶段验证通过；此处失败属 register 期错误，
+                        # 旧项已注销无法原地恢复——warning 上报（与既有语义一致）
+                        logger.warning(f"[PluginToolLoader] 插件 {plugin_name} register 失败: {e}")
                 if new_names:
                     self._loaded[plugin_name] = new_names
 
@@ -586,19 +653,6 @@ class PluginToolWatcher:
             except Exception as e:
                 logger.warning(f"[PluginToolWatcher] 热重载监听回调失败: {e}")
 
-    def start(self, poll_interval: float = 2.0) -> None:
-        """[已退役] 轮询线程不再启动。
-
-        tools 组件变更改由 backend watchfiles 主链驱动：kernel
-        KNOWN_COMPONENTS 已含 tools → _identify_all_components_from_changes
-        识别 → builtin_reloaders._reload_tools 调 scan_now。本方法保留
-        是为向后兼容旧调用点，空转即可。scan_now() 语义不变。
-        """
-        return
-
-    def stop(self) -> None:
-        self._stop = True
-
     def _signature(self) -> Tuple:
         """目录变更指纹：(path, mtime, size) 列表（多根聚合）"""
         sig = []
@@ -612,14 +666,18 @@ class PluginToolWatcher:
         return tuple(sig)
 
 
-# ========== 进程级惰性启动 ==========
+# ========== 进程级惰性单例 ==========
 
 _plugin_watcher: Optional[PluginToolWatcher] = None
 _plugin_watcher_lock = threading.Lock()
 
 
 def ensure_plugin_tool_watcher() -> Optional[PluginToolWatcher]:
-    """确保插件工具热重载 watcher 已启动（进程级一次，幂等）"""
+    """获取进程级 watcher 单例（惰性构造，幂等）。
+
+    watcher 自身无线程/轮询语义（scan_now 由 watchfiles 主链驱动：
+    builtin_reloaders._reload_tools），本函数仅负责单例构造。
+    """
     global _plugin_watcher
     if _plugin_watcher is not None:
         return _plugin_watcher
@@ -628,8 +686,7 @@ def ensure_plugin_tool_watcher() -> Optional[PluginToolWatcher]:
             return _plugin_watcher
         try:
             _plugin_watcher = PluginToolWatcher()
-            _plugin_watcher.start()
-            logger.info("[PluginToolWatcher] 插件工具热重载 watcher 已启动")
+            logger.debug("[PluginToolWatcher] watcher 单例已创建（事件驱动，无线程）")
         except Exception as e:
-            logger.warning(f"[PluginToolWatcher] watcher 启动失败: {e}")
+            logger.warning(f"[PluginToolWatcher] watcher 创建失败: {e}")
     return _plugin_watcher

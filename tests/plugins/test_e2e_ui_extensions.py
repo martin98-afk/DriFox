@@ -47,13 +47,6 @@ def register_ui(registry):
 '''
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch, tmp_path):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 def _write_plugin(tmp_path: Path, name: str = "demo-plugin") -> Path:
     plugin_dir = tmp_path / name

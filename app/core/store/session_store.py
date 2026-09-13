@@ -26,7 +26,7 @@ from app.core.store.input_history_repo import InputHistoryRepository
 from app.core.store.memory_repository import MemoryRepository
 
 # 导入子模块
-from app.core.store.session_repository import SessionRepository
+from app.core.store.session_repository import SessionRepository, extract_first_user_question
 from app.core.store.subagent_log_repository import SubAgentLogRepository
 from app.utils.db_manager import DatabaseManager
 from app.utils.utils import get_app_data_dir
@@ -397,6 +397,8 @@ class SessionStore:
                         {"name": "team_name", "type": "TEXT", "default": ""},
                         {"name": "agent_name", "type": "TEXT", "default": ""},
                         {"name": "team_members", "type": "TEXT", "default": ""},
+                        {"name": "first_user_msg", "type": "TEXT", "default": ""},
+                        {"name": "first_user_ts", "type": "TEXT", "default": ""},
                     ],
                 )
 
@@ -457,6 +459,21 @@ class SessionStore:
                     ],
                 )
 
+                # UI 态字段剥离表（message_extras 方案）：reasoning_content /
+                # arguments / diff 按行存储，value 为 zstd 压缩字节。复合主键
+                # 需原生 DDL（DatabaseManager.create_table 不支持多列 PRIMARY KEY）。
+                self._db.execute_sql(
+                    """
+                    CREATE TABLE IF NOT EXISTS session_msg_extras (
+                        session_id TEXT NOT NULL,
+                        msg_idx    INTEGER NOT NULL,
+                        field      TEXT NOT NULL,
+                        value      BLOB NOT NULL,
+                        PRIMARY KEY (session_id, msg_idx, field)
+                    )
+                    """
+                )
+
                 # 创建索引
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_updated ON {self.TABLE_NAME}(updated_at DESC)")
                 self._db.execute_sql(f"CREATE INDEX IF NOT EXISTS idx_project ON {self.TABLE_NAME}(project)")
@@ -464,6 +481,10 @@ class SessionStore:
                 self._db.execute_sql("CREATE INDEX IF NOT EXISTS idx_file_ops_session ON file_operations(session_id)")
                 self._db.execute_sql(
                     "CREATE INDEX IF NOT EXISTS idx_file_ops_call ON file_operations(session_id, call_id)"
+                )
+                # session_msg_extras 表索引：剥离读回按 session_id + msg_idx 定位
+                self._db.execute_sql(
+                    "CREATE INDEX IF NOT EXISTS idx_msg_extras_session ON session_msg_extras(session_id, msg_idx)"
                 )
 
                 # 迁移逻辑
@@ -476,6 +497,8 @@ class SessionStore:
                 self._migrate_add_api_context_columns()
                 self._migrate_add_team_columns()
                 self._migrate_add_team_members_column()
+                self._migrate_add_first_user_columns()
+                self._migrate_add_pinned_column()
 
                 # 初始化子模块
                 self._session_repo = SessionRepository(self._db)
@@ -676,6 +699,102 @@ class SessionStore:
         except Exception as e:
             logger.warning(f"[SessionStore] team_members 列迁移失败(可能已存在): {e}")
 
+    def _migrate_add_first_user_columns(self):
+        """迁移：添加首问落库列 first_user_msg / first_user_ts（如果不存在）
+
+        🛡️ T4 内存治理：历史列表的团队合并条目需要「首问预览」，旧实现为此反
+        序列化该 run 下全部成员会话的完整 messages（实测 246 条约 285MB 常驻、
+        放大 9.9 倍）。落库列让预览查询退化为纯字符串读取。
+
+        新增列后对**团队会话**做一次性回填（逐条读、逐条写，任意时刻只有一条
+        会话的 messages 在内存，峰值约等于最大单条会话）。普通会话不回填——
+        目前无消费方，其首问会在下次 save 时随增量写入自然补齐。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            missing = [c for c in ("first_user_msg", "first_user_ts") if c not in col_names]
+            if not missing:
+                return
+            for col in missing:
+                logger.info(f"[SessionStore] 迁移：添加 {col} 列")
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN {col} TEXT DEFAULT ''")
+            logger.info("[SessionStore] first_user_* 列迁移完成，开始回填团队会话首问")
+            self._backfill_first_user_columns()
+        except Exception as e:
+            logger.warning(f"[SessionStore] first_user_* 列迁移失败: {e}")
+
+    def _migrate_add_pinned_column(self):
+        """迁移：添加 pinned 列（INTEGER DEFAULT 0，会话置顶标记）
+
+        历史面板置顶分组：置顶会话聚合到列表顶部，不受日期分组影响。
+        老库 ALTER ADD COLUMN 非破坏性；默认 0（未置顶）。
+        """
+        if not self._db or not self._db.is_connected:
+            return
+        try:
+            columns = self._db.get_table_info(self.TABLE_NAME)
+            col_names = [c.get("name", "") for c in columns]
+            if "pinned" not in col_names:
+                logger.info("[SessionStore] 迁移：添加 pinned 列")
+                self._db.execute_sql(f"ALTER TABLE {self.TABLE_NAME} ADD COLUMN pinned INTEGER DEFAULT 0")
+                logger.info("[SessionStore] pinned 列迁移完成")
+        except Exception as e:
+            logger.warning(f"[SessionStore] pinned 列迁移失败(可能已存在): {e}")
+
+    def _backfill_first_user_columns(self):
+        """一次性回填团队会话的首问列（逐条读写，内存友好）
+
+        只处理团队会话（team_run_id 非空）：它们是首问列的唯一消费方。逐条
+        SELECT messages → 提取 → UPDATE，避免一次性加载全部 messages 造成的
+        数百 MB 峰值。失败仅跳过单条，不阻塞启动。
+        """
+        from app.core.store.serde import deserialize
+
+        try:
+            ok, rows = self._db.execute_sql(
+                f"SELECT session_id FROM {self.TABLE_NAME} "
+                f"WHERE team_run_id IS NOT NULL AND team_run_id != '' "
+                f"AND (first_user_msg IS NULL OR first_user_msg = '')"
+            )
+            if not ok or not rows:
+                return
+            ids = []
+            for r in rows:
+                try:
+                    sid = r["session_id"] if hasattr(r, "keys") else r[0]
+                except Exception:
+                    continue
+                if sid:
+                    ids.append(sid)
+            if not ids:
+                return
+            done = 0
+            for sid in ids:
+                try:
+                    ok2, r2 = self._db.execute_sql(
+                        f"SELECT messages FROM {self.TABLE_NAME} WHERE session_id = ?", (sid,)
+                    )
+                    if not ok2 or not r2:
+                        continue
+                    row0 = r2[0]
+                    raw = row0["messages"] if hasattr(row0, "keys") else row0[0]
+                    ts, msg = extract_first_user_question(deserialize(raw))
+                    if not msg:
+                        continue
+                    self._db.execute_sql(
+                        f"UPDATE {self.TABLE_NAME} SET first_user_msg = ?, first_user_ts = ? WHERE session_id = ?",
+                        (msg, ts, sid),
+                    )
+                    done += 1
+                except Exception as e:
+                    logger.debug(f"[SessionStore] 回填首问失败 {str(sid)[:8]}: {e}")
+            logger.info(f"[SessionStore] 团队会话首问回填完成: {done}/{len(ids)}")
+        except Exception as e:
+            logger.warning(f"[SessionStore] 团队会话首问回填异常: {e}")
+
     @property
     def is_initialized(self) -> bool:
         return self._initialized and self._db is not None and self._db.is_connected
@@ -721,6 +840,24 @@ class SessionStore:
             return self._session_repo.get_by_team_run_id(run_id)
         return []
 
+    def get_team_first_question_candidates(self, run_id: str) -> List[Tuple[str, str]]:
+        """取团队首问候选（纯字符串列，零反序列化）"""
+        if self._session_repo:
+            return self._session_repo.get_team_first_question_candidates(run_id)
+        return []
+
+    def load_msg_extras(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict]:
+        """读取剥离的 UI 态字段（message_extras）。idxs=None 读全部。"""
+        if self._session_repo:
+            return self._session_repo.load_extras_for_session(session_id, idxs)
+        return {}
+
+    def get_full_messages(self, session_id: str) -> List[Dict]:
+        """主 blob + extras 合并的全量消息（导出 / 深读用）。"""
+        if self._session_repo:
+            return self._session_repo.get_full_messages(session_id)
+        return []
+
     def delete_session(self, session_id: str) -> bool:
         """删除会话"""
         if self._session_repo:
@@ -755,10 +892,18 @@ class SessionStore:
             logger.error(f"[SessionStore] 数据库未连接，无法清理项目 {project_name}")
             return False
         try:
+            # 先快照待删会话 id（顺序倒置后 extras 删除必须基于此快照，
+            # 否则前置 sessions DELETE 会让基于 sessions 的子查询返空、留下孤儿行）。
+            ids_ok, id_rows = self._execute("SELECT session_id FROM sessions WHERE project = ?", (project_name,))
+            target_ids = [r["session_id"] for r in id_rows] if ids_ok and id_rows else []
             # 删除会话（直接 SQL，不经过 repo 层）
             self._execute("DELETE FROM sessions WHERE project = ?", (project_name,))
             # 删除关键文档
             self._execute("DELETE FROM key_documents WHERE project = ?", (project_name,))
+            # message_extras 级联清理（最后删）：前两步失败则 extras 与会话保持一致保留；
+            # 前两步成功而 extras 失败只剩无害孤儿行（会话已不存在，无人查询）。
+            for sid in target_ids:
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (sid,))
             logger.info(f"[SessionStore] 已强制清理项目 {project_name} 的所有关联数据")
             return True
         except Exception as e:
@@ -769,6 +914,12 @@ class SessionStore:
         """更新会话的项目归属"""
         if self._session_repo:
             return self._session_repo.update_project(session_id, project)
+        return False
+
+    def update_session_pinned(self, session_id: str, pinned: bool) -> bool:
+        """更新会话置顶标记"""
+        if self._session_repo:
+            return self._session_repo.update_pinned(session_id, pinned)
         return False
 
     def get_sessions_by_project(self, project: str, limit: int = 100) -> List[Dict]:
@@ -804,87 +955,11 @@ class SessionStore:
             return self._memory_repo.save(memory)
         return False
 
-    def save_memories(self, memories: List[Dict]) -> bool:
-        """批量保存记忆"""
-        if self._memory_repo:
-            return self._memory_repo.save_all(memories)
-        return False
 
-    def load_memories(self, limit: int = 200, include_disabled: bool = False) -> List[Dict]:
-        """加载所有记忆"""
-        if self._memory_repo:
-            return self._memory_repo.load_all(limit, include_disabled)
-        return []
 
-    def delete_memory(self, memory_id: str) -> bool:
-        """删除指定记忆"""
-        if self._memory_repo:
-            return self._memory_repo.delete(memory_id)
-        return False
 
-    def delete_memories_by_category(self, category: str) -> int:
-        """删除指定分类的所有记忆"""
-        if self._memory_repo:
-            return self._memory_repo.delete_by_category(category)
-        return 0
 
-    def clear_memories(self) -> bool:
-        """清空所有记忆"""
-        if self._memory_repo:
-            return self._memory_repo.clear_all()
-        return False
 
-    def update_memory_enabled(self, memory_id: str, enabled: bool) -> bool:
-        """更新记忆的启用状态"""
-        if self._memory_repo:
-            return self._memory_repo.update_enabled(memory_id, enabled)
-        return False
-
-    def update_last_accessed(self, memory_id: str) -> bool:
-        """更新记忆的最后访问时间"""
-        if self._memory_repo:
-            return self._memory_repo.update_last_accessed(memory_id)
-        return False
-
-    def search_memories(self, query_terms: List[str], limit: int = 20) -> List[Dict]:
-        """搜索记忆"""
-        if self._memory_repo:
-            return self._memory_repo.search(query_terms, limit)
-        return []
-
-    def migrate_memories_from_json(self, json_path: str) -> int:
-        """从 JSON 文件迁移记忆到 SQLite"""
-        import json as json_module
-
-        from app.utils.utils import deserialize_from_json
-
-        if not self.is_initialized:
-            return 0
-
-        try:
-            with open(json_path, "r", encoding="utf-8") as f:
-                data = deserialize_from_json(json_module.load(f))
-
-            if not isinstance(data, list):
-                return 0
-
-            count = 0
-            for memory in data:
-                memory_id = memory.get("memory_id") or memory.get("id")
-                if memory_id:
-                    existing = self._memory_repo.get(memory_id) if self._memory_repo else None
-                    if not existing:
-                        if self.save_memory(memory):
-                            count += 1
-
-            logger.info(f"[SessionStore] 从 {json_path} 迁移了 {count} 条记忆")
-            return count
-
-        except Exception as e:
-            logger.error(f"[SessionStore] 记忆迁移失败: {e}")
-            return 0
-
-    # ==================== 子智能体日志操作（委托给 SubAgentLogRepository）====================
 
     def save_subagent_task(
         self,
@@ -925,23 +1000,8 @@ class SessionStore:
             return self._subagent_log_repo.get_task(task_id)
         return None
 
-    def get_subagent_tasks(self, task_ids: List[str]) -> List[Dict]:
-        """获取多个子智能体任务"""
-        if self._subagent_log_repo:
-            return self._subagent_log_repo.get_tasks(task_ids)
-        return []
 
-    def get_all_subagent_tasks(self, limit: int = 100) -> List[Dict]:
-        """获取所有子智能体任务"""
-        if self._subagent_log_repo:
-            return self._subagent_log_repo.get_all_tasks(limit)
-        return []
 
-    def delete_subagent_task(self, task_id: str) -> bool:
-        """删除子智能体任务"""
-        if self._subagent_log_repo:
-            return self._subagent_log_repo.delete_task(task_id)
-        return False
 
     def clear_old_subagent_tasks(self, days: int = 7) -> int:
         """清理旧子智能体任务"""
@@ -959,11 +1019,6 @@ class SessionStore:
             return self._file_op_repo.record(session_id, call_id, tool_name, file_path, backup_path)
         return False
 
-    def get_file_operations_after_call(self, session_id: str, call_id: str) -> List[Dict]:
-        """获取某 call_id 之后的所有文件操作"""
-        if self._file_op_repo:
-            return self._file_op_repo.get_after_call(session_id, call_id)
-        return []
 
     def get_file_operations_by_call_id(self, session_id: str, call_id: str) -> List[Dict]:
         """根据 call_id 获取文件操作记录"""
@@ -977,11 +1032,6 @@ class SessionStore:
             return self._file_op_repo.get_all(session_id)
         return []
 
-    def delete_file_operations_after_id(self, session_id: str, after_id: int) -> int:
-        """删除指定 session 中 id 大于 after_id 的所有操作记录"""
-        if self._file_op_repo:
-            return self._file_op_repo.delete_after_id(session_id, after_id)
-        return 0
 
     def clear_session_file_operations(self, session_id: str) -> Tuple[int, List[str]]:
         """清空会话的所有文件操作记录"""
@@ -1034,17 +1084,5 @@ class SessionStore:
         """获取会话仓储（用于高级操作）"""
         return self._session_repo
 
-    @property
-    def memory_repo(self) -> Optional[MemoryRepository]:
-        """获取记忆仓储（用于高级操作）"""
-        return self._memory_repo
 
-    @property
-    def file_op_repo(self) -> Optional[FileOperationRepository]:
-        """获取文件操作记录仓储（用于高级操作）"""
-        return self._file_op_repo
 
-    @property
-    def subagent_log_repo(self) -> Optional[SubAgentLogRepository]:
-        """获取子智能体日志仓储（用于高级操作）"""
-        return self._subagent_log_repo

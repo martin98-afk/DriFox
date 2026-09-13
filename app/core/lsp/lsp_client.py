@@ -102,6 +102,21 @@ class LspClient:
             )
             return False
 
+        # P1-3：启动门禁（审计 + shell 元字符拒启 + 非内置源确认流）
+        from app.core.mcp_lsp_safety import gate_server_launch
+
+        verdict = gate_server_launch(
+            "lsp",
+            self.config.plugin_name,
+            self.config.name,
+            [self.config.command] + list(self.config.args or []),
+        )
+        if verdict != "proceed":
+            logger.warning(
+                f"[LspClient:{self.config.name}] 启动被安全门禁拦截（{verdict}）"
+            )
+            return False
+
         try:
             self._client = JsonRPCClient()
 
@@ -465,9 +480,6 @@ class LspClient:
         except Exception:
             return list(self._diagnostics)
 
-    def set_diagnostics_callback(self, cb: Callable[[str, list], None]) -> None:
-        """设置诊断推送回调"""
-        self._diag_callback = cb
 
     def is_command_available(self) -> bool:
         """检查 LSP 服务器可执行文件是否在 PATH 中
@@ -488,9 +500,6 @@ class LspClient:
             return None
         return self._cmd_cache_result is not None
 
-    def invalidate_command_cache(self) -> None:
-        """手动失效命令解析缓存（安装新 LSP 服务器后调用）"""
-        self._cmd_cache_time = 0.0
 
     # ── 内部 ─────────────────────────────────────────────────────
 

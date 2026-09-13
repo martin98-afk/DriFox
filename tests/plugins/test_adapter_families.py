@@ -8,7 +8,8 @@
 import pytest
 
 from app.plugins.contracts.model_adapter import ProtocolFlags
-from plugins.system.model_adapters import _detectors as det
+from importlib import import_module
+det = import_module("plugins.system-model-adapters.model_adapters._detectors")
 
 _CASES = [
     # (llm_config, 预期选中家族, 预期 flags 三判定)
@@ -30,7 +31,7 @@ _CASES = [
 
 
 @pytest.fixture()
-def fresh_registry(monkeypatch):
+def fresh_adapter_registry(monkeypatch):
     """每用例独立 registry + warmup 注册三家族（系统插件）"""
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
 
@@ -43,9 +44,9 @@ def fresh_registry(monkeypatch):
 
 
 @pytest.mark.parametrize("cfg,family_id,expected", _CASES)
-def test_family_equivalence_matrix(fresh_registry, cfg, family_id, expected):
+def test_family_equivalence_matrix(fresh_adapter_registry, cfg, family_id, expected):
     """等价矩阵：选中家族 id + flags 与拆分前逐点等价"""
-    adapter = fresh_registry.resolve(cfg)
+    adapter = fresh_adapter_registry.resolve(cfg)
     assert adapter is not None
     assert adapter.id == family_id, f"{cfg} 应命中 {family_id}"
     flags = adapter.protocol_flags(cfg)
@@ -56,11 +57,14 @@ def test_family_equivalence_matrix(fresh_registry, cfg, family_id, expected):
     ) == expected, f"flags 不等价: {cfg}"
 
 
-def test_family_priorities(fresh_registry):
+def test_family_priorities(fresh_adapter_registry):
     """matches 优先级：deepseek 3 > gemini 2 > openai 1（兜底）"""
-    from plugins.system.model_adapters.deepseek_family import DeepSeekFamilyAdapter
-    from plugins.system.model_adapters.gemini_family import GeminiFamilyAdapter
-    from plugins.system.model_adapters.openai_family import OpenAIFamilyAdapter
+    from importlib import import_module
+    DeepSeekFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.deepseek_family").DeepSeekFamilyAdapter
+    from importlib import import_module
+    GeminiFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.gemini_family").GeminiFamilyAdapter
+    from importlib import import_module
+    OpenAIFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.openai_family").OpenAIFamilyAdapter
 
     deepseek_cfg = {"API_URL": "https://api.deepseek.com/v1", "模型名称": "deepseek-chat", "思考模式": True}
     gemini_cfg = {"API_URL": "https://generativelanguage.googleapis.com/v1", "模型名称": "gemini-2.5-pro"}
@@ -73,9 +77,9 @@ def test_family_priorities(fresh_registry):
     assert DeepSeekFamilyAdapter().matches(plain_cfg) == 0
 
     # resolve 选最高分
-    assert fresh_registry.resolve(deepseek_cfg).id == "deepseek-family"
-    assert fresh_registry.resolve(gemini_cfg).id == "gemini-family"
-    assert fresh_registry.resolve(plain_cfg).id == "openai-family"
+    assert fresh_adapter_registry.resolve(deepseek_cfg).id == "deepseek-family"
+    assert fresh_adapter_registry.resolve(gemini_cfg).id == "gemini-family"
+    assert fresh_adapter_registry.resolve(plain_cfg).id == "openai-family"
 
 
 def test_shared_detectors_still_exposed():
@@ -91,14 +95,15 @@ def test_no_legacy_openai_module():
     """旧单适配器 openai.py 已删除（无残留 import）"""
     import importlib.util
 
-    spec = importlib.util.find_spec("plugins.system.model_adapters.openai")
+    spec = importlib.util.find_spec("plugins.system-model-adapters.model_adapters.openai")
     assert spec is None
 
 
 def test_serializer_id_default_openai():
     """家族 adapter 的 serializer_id 保持默认 openai（暂无专属序列化器）"""
     from app.plugins.registries.model_adapter_registry import ModelAdapterRegistry
-    from plugins.system.model_adapters.openai_family import OpenAIFamilyAdapter
+    from importlib import import_module
+    OpenAIFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.openai_family").OpenAIFamilyAdapter
 
     flags = OpenAIFamilyAdapter().protocol_flags({"API_URL": "https://api.openai.com/v1", "模型名称": "gpt-4o"})
     assert flags.serializer_id == "openai"

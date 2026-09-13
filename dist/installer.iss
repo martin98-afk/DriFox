@@ -4,7 +4,10 @@
 
 #define MyAppName "Drifox"
 #ifndef MyAppVersion
-  #define MyAppVersion "v0.5.5"
+  #define MyAppVersion "v0.5.11"
+#endif
+#ifndef MyAppSuffix
+  #define MyAppSuffix "dev"
 #endif
 #ifndef MyAppSuffix
   #define MyAppSuffix "dev"
@@ -51,6 +54,14 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ChangesAssociations=yes
 DisableProgramGroupPage=yes
+; 应用内更新以 /SILENT 运行，不会弹「以下程序正在使用文件」的确认框：由安装器直接结束
+; 占用 {app} 文件的进程（通常是尚未退干净的旧 Drifox.exe），否则 [InstallDelete] 清目录会失败
+CloseApplications=yes
+CloseApplicationsFilter=*.exe,*.dll,*.chm
+; 不自动重启被关闭的进程：新版本统一由下面的 [Run] 条目拉起，避免双开
+RestartApplications=no
+; 注：「选择目标目录」页由 Inno Setup 默认的 DisableDirPage=auto 在升级时自动跳过，
+; 沿用首次安装目录，避免装出第二份孤儿副本（DisableReadyPage 不支持 auto，故不改）
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
 OutputDir=./output
@@ -61,6 +72,11 @@ Name: "chinesesimplified"; MessagesFile: "./ChineseSimplified.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; 
+
+[InstallDelete]
+; 升级前清空安装目录：旧版本删除/改名的文件（插件、依赖等）不会残留
+; 注意：用户数据在用户目录（~/.drifox），安装目录为纯产物，可安全清空
+Type: filesandordirs; Name: "{app}"
 
 [Files]
 Source: "Drifox\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -76,4 +92,9 @@ Name: "{autoprograms}\Drifox"; Filename: "{app}\Drifox.exe";
 Name: "{autodesktop}\Drifox"; Filename: "{app}\Drifox.exe"; Tasks: desktopicon;
 
 [Run]
+; 交互安装（用户双击）：完成页复选框，默认勾选、用户可取消
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; 静默/半静默更新（应用内「立即更新」带 /SILENT）：装完自动拉起新版本。
+; skipifnotsilent = 只在静默模式执行，双击安装仍由上面的完成页复选框决定；
+; runasoriginaluser = 安装器提权后仍以启动它的原用户身份运行，新进程不继承管理员权限
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent skipifdoesntexist runasoriginaluser

@@ -77,7 +77,8 @@ def test_facade_returns_sqlite_when_empty(fresh_storage_registry, fresh_serializ
 def test_facade_returns_active_plugin_engine(fresh_storage_registry, fresh_serializer_registry):
     """已注册自定义引擎并 set_active → 门面返回自定义引擎"""
     from app.core.backend import get_session_storage
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
 
     fresh_storage_registry.register(SqliteStorageEngine(db_dir=":memory:"), source="plugin:system")
     mem = _MemEngine()
@@ -88,7 +89,8 @@ def test_facade_returns_active_plugin_engine(fresh_storage_registry, fresh_seria
 
 def test_engine_shares_session_store_singleton(tmp_path, monkeypatch):
     """引擎与 SessionStore 共享同一底层单例（db 路径/连接不分叉）"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.core.store.session_store import SessionStore
 
     monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
@@ -102,7 +104,8 @@ def test_engine_shares_session_store_singleton(tmp_path, monkeypatch):
 
 def test_engine_covers_consumer_methods(tmp_path, monkeypatch):
     """引擎覆盖三个消费方的全部调用方法（委托 SessionStore，行为等价）"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.core.store.session_store import SessionStore
 
     monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
@@ -117,6 +120,11 @@ def test_engine_covers_consumer_methods(tmp_path, monkeypatch):
     assert engine.get_session_counts() == {"默认项目": 1}
     assert engine.get_projects() == ["默认项目"]
     assert engine.update_session_project("s1", "proj") is True
+    # update_session_pinned：曾漏加委托 → HistoryManager 置顶只改内存不落库，重启即丢
+    assert engine.update_session_pinned("s1", True) is True
+    assert engine.get_session("s1")["pinned"] is True
+    assert engine.update_session_pinned("s1", False) is True
+    assert engine.get_session("s1")["pinned"] is False
     assert engine.delete_session("s1") is True
 
 

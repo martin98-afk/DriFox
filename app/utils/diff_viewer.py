@@ -31,8 +31,8 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout
 
 from app.core.webengine_profile import create_transient_web_profile
 
-# Pygments 语法高亮（与 render_helpers 一致，确保 diff 弹窗预渲染文件不依赖 JS 即有着色）
-from app.widgets.render_helpers import (
+# Pygments 语法高亮（行内 diff 高亮子系统，确保 diff 弹窗预渲染文件不依赖 JS 即有着色）
+from app.utils.diff_highlight import (
     _highlight_code_line,
     _highlighted_word_diff_html,
     _get_diff_lexer,
@@ -1442,7 +1442,6 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
 
             elif ln.startswith("-") and not ln.startswith("---"):
                 # 收集删除块
-                del_start = i
                 del_texts = []
                 del_nums = []
                 while i < len(lines) and lines[i].startswith("-") and not lines[i].startswith("---"):
@@ -1453,7 +1452,6 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
                 dc = len(del_texts)
 
                 # 收集紧随的新增块
-                add_start = i
                 add_texts = []
                 add_nums = []
                 while i < len(lines) and lines[i].startswith("+") and not lines[i].startswith("+++"):
@@ -1674,9 +1672,6 @@ try{{ document.querySelectorAll('.file-block').forEach(function(b){{ postHighlig
             logger.error(f"[DiffHtml] 获取 diff 失败: {e}")
             return ""
 
-    @classmethod
-    def generate_report_for_files(cls, file_paths: List[str], session_id: str = "") -> str:
-        return cls.generate_html_report(cls.get_diff_for_files(file_paths, session_id) or "", session_id)
 
 
 # ==========================================================================
@@ -1872,14 +1867,6 @@ class _DiffWebPage(QWebEnginePage):
 class DiffViewerWindow:
     _instances = []
 
-    @classmethod
-    def close_all(cls):
-        for w in cls._instances[:]:
-            try:
-                w.close()
-            except Exception:
-                pass
-        cls._instances.clear()
 
     def __init__(self, parent=None, title: str = "文件差异对比"):
         self._disposed = False

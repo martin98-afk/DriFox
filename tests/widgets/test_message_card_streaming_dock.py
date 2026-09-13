@@ -22,14 +22,17 @@ def _ensure_qapp():
 
 
 def test_streaming_dock_css_content():
-    """坞态 CSS 必须包含：flex 调换、order 沉底、110px 限高。"""
+    """坞态 CSS 必须包含：flex 调换、order 沉底、限高。"""
     css = mc._STREAMING_DOCK_CSS
     assert "body.streaming-dock" in css
     assert "flex-direction: column" in css
     assert "body.streaming-dock #tool-section" in css
     assert "order: 2" in css
     assert "body.streaming-dock #tool-content" in css
-    assert "max-height: 110px" in css
+    # 工具区限高：110→220（原 3-4 行看不见进度，放宽到 ≈8 行）
+    assert "max-height: 220px" in css
+    # 正文限高：330→450→600（流式长回复展示更多正文）
+    assert "max-height: 600px" in css
 
 
 def test_streaming_dock_content_no_horizontal_scrollbar():
@@ -83,8 +86,8 @@ def test_content_autoscroll_respects_user_scroll():
     assert "_cp._progScroll = true" in js, "程序置底必须打 _progScroll 标记"
     # 正文容器必须有 scroll 监听跟踪用户滚动（滚回底部附近恢复跟随）
     assert "getElementById('content-placeholder')?.addEventListener('scroll'" in js, "正文容器必须有独立 scroll 监听"
-    # 监听内恢复跟随：滚回底部清 _userScrolledUp
-    assert "cp._userScrolledUp = false" in js, "滚回底部附近必须恢复自动跟随"
+    # 监听内恢复跟随：位置判定（接近底部=跟随，离开=用户阅读）
+    assert "cp._userScrolledUp = !atBottom" in js, "滚回底部附近必须恢复自动跟随（位置判定）"
     # DOM 操作期间程序性 scroll 必须忽略（防误标正文上滚→置顶），与 body 监听对称
     assert "if (window._suppressScrollEvent) return;" in js, "DOM 操作期间的程序 scroll 必须忽略"
     # 程序滚动事件吞掉（不误标用户）
@@ -111,19 +114,18 @@ def test_content_autoscroll_marks_user_scroll_via_wheel():
     assert "addEventListener('wheel'" in js, "必须有 wheel 监听同步标记用户上滚"
     assert "deltaY < 0" in js, "wheel 上滚方向判定（deltaY<0）必须存在"
     assert "this._userScrolledUp = true" in js, "wheel 上滚必须同步置 _userScrolledUp"
-    # scroll 监听只做恢复跟随（atBottom 清标志），不得置位（防钳制 scroll 误标）
-    assert "_userScrolledUp = !atBottom" not in js, "scroll 事件不得置位 _userScrolledUp（异步派发有竞争窗口）"
+    # scroll 监听只做恢复跟随（位置判定 atBottom → 清标志），不得置位（防钳制 scroll 误标）
+    # 注：置位唯一入口是 wheel 同步标记；scroll 监听内的位置判定赋值是恢复跟随语义。
     # wheel 监听必须是 passive（不阻断浏览器原生滚动）
     assert "{passive: true}" in js, "wheel 监听必须 passive"
     # 🐛 回归（工具折叠框展开→视口弹到随机位置）：
-    # 1) wheel 置位必须门控"容器实际可滚"——无溢出时 wheel 属冒泡残留
-    #    （本应转发外层聊天列表），误置位会锁死正文跟随；
+    # wheel 置位必须门控"容器实际可滚"——无溢出时 wheel 属冒泡残留
+    # （本应转发外层聊天列表），误置位会锁死正文跟随；
     assert "scrollHeight > this.clientHeight" in js, "wheel 置位必须检查 cp 实际可滚（防冒泡残留误置位）"
-    # 2) scroll 清标志必须有时间窗门控——折叠框动画/高度报告应用引发 viewport
-    #    resize → Chromium 钳制/anchor 补偿被动贴底 → 原实现距底<30px 即清标志
-    #    → 下个 chunk 无条件拉底。要求近期真实滚轮行为才允许恢复跟随。
-    assert "_lastUserWheelAt" in js, "必须有用户滚轮时间戳用于清标志门控"
-    assert "800" in js, "清标志必须限制在最近一次用户滚轮后 800ms 内（防程序性贴底误清）"
+    # 历史注：原实现要求 _lastUserWheelAt/800ms 时间窗门控 scroll 清标志；
+    # 现实现改为位置判定（离开底部=阅读，滚回底部=恢复）+ _progScroll 排除，
+    # 消除了"下滚回底不刷新时间戳 → 标志卡死为已离开 → 跟随失效弹回中间"的根因。
+    assert "_suppressScrollEvent" in js, "DOM 操作期间的程序 scroll 必须忽略"
 
 
 def test_skeleton_template_includes_content_autoscroll():
@@ -155,6 +157,19 @@ class _ViewerStub:
         # 与 CodeWebViewer._init_render_state 同语义：渲染序号，finish_streaming
         # 递增使在途线程池任务过期（9c76d04f 新增，stub 需同步）
         self._render_seq: int = 0
+        # 同步 CodeWebViewer 后续演进新增的属性（缺失会 AttributeError）：
+        self.viewer = None  # finish_streaming 的 hasattr 守卫分支
+        self._light_skeleton = False  # 欢迎卡片不进坞态守卫
+        self._needs_full_render = False
+        self._stable_html = ""
+        self._stable_md_len = 0
+        self._render_pending = None
+        self._tool_dom_dirty = False
+        self._cached_streaming_html = None
+        self._processed_md_hash = 0
+        self._cached_raw_md_hash = 0
+        self._think_text_streaming_started = False
+        self._reasoning_streaming_started = False
 
     def page(self):
         return self._page
@@ -430,3 +445,116 @@ def test_update_content_preserves_content_scroll():
     src = inspect.getsource(CodeWebViewer._load_skeleton)
     assert "_cpPrevTop" in src, "必须保存正文容器 scrollTop"
     assert "Math.min(_cpPrevTop" in src, "必须在 DOM 操作完成后恢复（钳制到新 max）"
+
+
+# ──────────────────────────────────────────────
+# force_dock_off：打断/错误收尾强制归位（流式结构残留 bug 回归）
+#
+# 根因：打断路径（手动停止/自动压缩/引擎错误）worker 已终止，活跃工具结果
+# 永不到达 → append_tool_result 的 F2 兜底归位永不触发；若仍按 S1 语义
+# keep_dock=True，坞态永久沉底、正文限矮（卡片保持流式结构）。
+# 引擎错误路径还有一层：update_content 在 _streaming=False 时经
+# start_streaming_anim 重开流式态与坞态，收尾必须在其后强制关坞。
+# ──────────────────────────────────────────────
+
+
+class _ForceDockViewer:
+    """模拟 CodeWebViewer.finish_streaming 坞态行为的 viewer 桩。
+
+    finish_streaming(keep_dock) 时记录 keep_dock 并在 keep_dock=False 时
+    关坞（与 CodeWebViewer.finish_streaming 内部 `_sync_streaming_dock(False)`
+    行为一致），供断言 MessageCard 层参数传递是否正确。
+    """
+
+    def __init__(self):
+        self._streaming = True
+        self.dock_calls = []
+        self.finish_keep_dock = None
+
+    def _sync_streaming_dock(self, active):
+        self.dock_calls.append(active)
+
+    def finish_streaming(self, keep_dock=False):
+        self.finish_keep_dock = keep_dock
+        if not keep_dock:
+            self._sync_streaming_dock(False)
+
+
+def test_finish_streaming_force_dock_off_overrides_active_tools():
+    """force_dock_off=True：即使有活跃工具也必须关坞态（打断/错误收尾语义）。"""
+    from app.widgets.message_card import MessageCard as _MC
+
+    _ensure_qapp()
+    card = _MC(role="assistant")
+    card._lazy_rendered = True
+    card.viewer = _ForceDockViewer()
+    # 打断时刻仍有活跃工具（登记未完成）
+    card._tool_call_order["t1"] = 0
+    card._streaming = True
+    card.finish_streaming(force_dock_off=True)
+    assert card._streaming is False
+    assert card.viewer.finish_keep_dock is False, "force_dock_off=True 必须覆盖活跃工具判据"
+    assert card.viewer.dock_calls == [False], (
+        f"force_dock_off=True 必须关坞态，实际 dock_calls={card.viewer.dock_calls}"
+    )
+
+
+def test_finish_streaming_without_force_keeps_s1_dock_semantics():
+    """无 force_dock_off 时保持 S1 语义：有活跃工具 → keep_dock=True（坞态保留）。"""
+    from app.widgets.message_card import MessageCard as _MC
+
+    _ensure_qapp()
+    card = _MC(role="assistant")
+    card._lazy_rendered = True
+    card.viewer = _ForceDockViewer()
+    card._tool_call_order["t1"] = 0
+    card._streaming = True
+    card.finish_streaming()
+    assert card.viewer.finish_keep_dock is True, "S1 语义：活跃工具时 keep_dock=True"
+    assert card.viewer.dock_calls == [], (
+        f"S1 语义：活跃工具时不得关坞（等工具完成兜底归位），实际 dock_calls={card.viewer.dock_calls}"
+    )
+
+
+def test_finish_streaming_force_dock_off_no_tools_still_docks_off():
+    """force_dock_off=True 且无活跃工具：正常关坞（与默认行为一致）。"""
+    from app.widgets.message_card import MessageCard as _MC
+
+    _ensure_qapp()
+    card = _MC(role="assistant")
+    card._lazy_rendered = True
+    card.viewer = _ForceDockViewer()
+    card._streaming = True
+    card.finish_streaming(force_dock_off=True)
+    assert card.viewer.finish_keep_dock is False
+    assert card.viewer.dock_calls == [False]
+
+
+# ──────────────────────────────────────────────
+# 重建流式态同步：后台标签页切回后卡片重现流式结构（多 tab 并行高发）
+#
+# 根因：已结束卡片（_streaming_finished=True）经虚拟滚动/配额回收重建时，
+# ensure_rendered 只在 _is_history=True（磁盘历史）分支同步 viewer 非流式态；
+# 本轮已结束对话 _is_history=False → 新建 viewer 的 _streaming=True 初始值
+# 残留（池化实例经 reset_for_reuse 已置 False，两路径行为不一致）→ 渲染走
+# 流式分支，且 _on_js_ready 旧兜底 `_setStreamingDock(!!_act||!_co)` 因新骨架
+# 无 data-collapsed 属性（_co=false）误开坞态 → 工具区沉底 + 正文限矮。
+# ──────────────────────────────────────────────
+
+
+def test_ensure_rendered_syncs_streaming_false_for_finished_cards():
+    """重建时卡片非流式中必须同步 viewer._streaming=False（Qt/池化两个分支都要）。"""
+    src = inspect.getsource(MessageCard.ensure_rendered)
+    assert src.count("if not self._streaming:") >= 2, (
+        "ensure_rendered 的 Qt 渲染器分支与池化/新建分支都必须同步 viewer._streaming，"
+        "否则新建重建的已结束卡片残留流式态"
+    )
+
+
+def test_on_js_ready_dock_sync_uses_python_streaming_flag():
+    """_on_js_ready 坞态兜底必须以 Python 端 _streaming 判定，禁止「未折叠 → 开坞」推导。"""
+    src = inspect.getsource(CodeWebViewer._on_js_ready)
+    # 剥离注释后断言（根因说明的注释里会引用旧表达式原文）
+    code = "\n".join(ln.split("#")[0] for ln in src.splitlines())
+    assert "!!_act||!_co" not in code, "不得保留 !_co（未折叠）开坞推导：新骨架无 data-collapsed 会误开坞态"
+    assert "_dock_on" in code, "必须用 Python 端 _streaming 真值参与坞态判定"

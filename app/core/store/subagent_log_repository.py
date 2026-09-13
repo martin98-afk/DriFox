@@ -223,18 +223,6 @@ class SubAgentLogRepository:
             return [self._row_to_task(row) for row in rows]
         return []
 
-    def get_tasks_by_session(self, session_id: str, limit: int = 100) -> List[Dict]:
-        """获取指定会话的所有任务（按创建时间倒序）"""
-        if not self._ensure_table():
-            return []
-
-        success, rows = self._execute(
-            f'SELECT * FROM "{self.TABLE_NAME}" WHERE session_id = ? ORDER BY created_at DESC LIMIT ?',
-            (session_id, limit)
-        )
-        if success and rows:
-            return [self._row_to_task(row) for row in rows]
-        return []
 
     def get_all_tasks(self, limit: int = 100) -> List[Dict]:
         """获取所有任务（按创建时间倒序）"""

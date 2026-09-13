@@ -183,25 +183,6 @@ class SearchableEditableComboBox(EditableComboBox):
                 models.append(text)
         return models
 
-    def removeItemByText(self, text: str) -> bool:
-        """按文本移除项"""
-        idx = self.findText(text)
-        if idx >= 0:
-            self.removeItem(idx)
-            return True
-        return False
-
-    def renameItem(self, old_text: str, new_text: str):
-        """重命名项"""
-        idx = self.findText(old_text)
-        if idx >= 0:
-            self.setItemText(idx, new_text)
-            # 更新补全器
-            if old_text in self._item_texts:
-                idx_list = self._item_texts.index(old_text)
-                self._item_texts[idx_list] = new_text
-                self._update_completer_model()
-
     # ── 下拉菜单 ───────────────────────────────────────────
 
     def _createComboMenu(self):

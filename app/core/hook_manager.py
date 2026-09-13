@@ -45,14 +45,6 @@ def _get_parallel_executor() -> ThreadPoolExecutor:
     return _PARALLEL_EXECUTOR
 
 
-def shutdown_parallel_executor():
-    """由应用退出路径调用，释放并行执行器资源"""
-    global _PARALLEL_EXECUTOR
-    if _PARALLEL_EXECUTOR is not None:
-        _PARALLEL_EXECUTOR.shutdown(wait=False)
-        _PARALLEL_EXECUTOR = None
-
-
 # PluginChanged 快照基线（模块级共享：多窗口 / 多触发点一份 diff 基线）
 # None = 未初始化（首次触发只建基线不 diff，避免启动风暴误报）
 # tools 快照存 {name: signature_hash}：检测增删 + 同名工具 schema 变化（updated）
@@ -278,6 +270,109 @@ class HookCondition:
         return cls(type=d.get("type", "env"), pattern=d.get("pattern", ""))
 
 
+# ============================================================
+# A2：hook 执行安全基座（python 标准路径白名单 / http 私网拦截 / 审计）
+# ============================================================
+
+
+def _hook_safe_python_modules() -> set:
+    """python hook「标准路径」白名单：HookManager.SAFE_PYTHON_MODULES 内置基座
+    + Settings.safe_python_modules 用户扩展（读取失败仅用内置集）。"""
+    mods = set(HookManager.SAFE_PYTHON_MODULES)
+    try:
+        from app.utils.config import Settings
+
+        extra = Settings.get_instance().safe_python_modules.value or []
+        mods |= {str(m) for m in extra if str(m)}
+    except Exception:
+        pass
+    return mods
+
+
+def _is_safe_python_module(module_path: str) -> bool:
+    """标准路径白名单判定：精确或子模块前缀（app.utils → app.utils.utils 放行）。
+
+    相对路径（hooks.json 同目录，_import_relative_function）与
+    registered_functions 注册表不受此限（白名单只管 importlib.import_module）。
+    """
+    if not module_path:
+        return False
+    for base in _hook_safe_python_modules():
+        if module_path == base or module_path.startswith(base + "."):
+            return True
+    return False
+
+
+def _reject_unsafe_python_module(module_path: str) -> str:
+    """白名单拒执行时的统一报错文本（两条路径共用，方便测试断言）。"""
+    return f"Rejected: module '{module_path}' is not in the safe python modules whitelist"
+
+
+def _validate_http_hook_url(url: Optional[str]) -> tuple:
+    """http hook URL 校验：强制 https；私网段默认拦截（Settings 可关）。
+
+    私网口径：IP 字面量按 ipaddress is_private/is_loopback/is_link_local
+    （覆盖 127/8、10/8、172.16/12、192.168/16、169.254/16、::1）；
+    localhost 主机名按 loopback 处理；纯域名不做 DNS 解析（anti-rebinding
+    超出本层职责）。
+
+    Returns:
+        (ok, reason) — ok=False 时 reason 为拒执行原因。
+    """
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url or "")
+        if parsed.scheme != "https":
+            return False, f"仅允许 https（当前 scheme: {parsed.scheme or '缺失'}）"
+        allow_private = False
+        try:
+            from app.utils.config import Settings
+
+            allow_private = bool(Settings.get_instance().hook_allow_private_network.value)
+        except Exception:
+            pass
+        if allow_private:
+            return True, ""
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            return False, "URL 缺少主机名"
+        if host == "localhost" or host.endswith(".localhost"):
+            return False, "私网地址被拦截: localhost"
+        try:
+            import ipaddress
+
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return True, ""  # 域名：非 IP 字面量，放行
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return False, f"私网地址被拦截: {host}"
+        return True, ""
+    except Exception as e:
+        return False, f"URL 校验失败: {e}"
+
+
+def _hook_owner_name(hook) -> str:
+    """审计日志用插件名推导：skill_root 目录名 > config_file 一级父目录 > unknown。"""
+    try:
+        from pathlib import Path as _P
+
+        if hook.skill_root:
+            return _P(hook.skill_root).name
+        if hook.config_file:
+            return _P(hook.config_file).parent.name
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _audit_command(hook, event_name: str, command: str) -> None:
+    """command hook 执行审计（一行：插件名+事件+命令前 80 字符摘要）。"""
+    logger.warning(
+        f"[HookCommandAudit] plugin={_hook_owner_name(hook)} event={event_name} cmd={command[:80]!r}"
+    )
+
+
 @dataclass
 class Hook:
     """
@@ -332,7 +427,7 @@ class Hook:
     # config_file: 所属的 hooks.json 配置文件路径（用于 UI 保存）
     config_file: Optional[str] = None
 
-    # 是否来自系统内置插件（plugins/system/）。系统级 hook 在 UI 上禁止删除。
+    # 是否来自系统内置插件（plugins/ 内置 system 族插件）。系统级 hook 在 UI 上禁止删除。
     # 该字段由 HookManager.register_hooks_from_json() 注入，不会写回源文件。
     is_system_plugin: bool = False
 
@@ -618,10 +713,17 @@ class HookWorker(QRunnable):
         # 修复路径分隔符问题：Unix / 转 Windows \
         if os.name == "nt":
             command = command.replace("/", "\\")
-            # Windows cmd.exe 对 `subprocess.run(..., shell=True)` 传入的多行命令里 `\n`
-            # 处理不可靠（实际只跑第一行）。统一转换为 `&` 分隔符确保 exit 2 等能真正执行。
-            if "\n" in command:
-                command = command.replace("\n", " & ")
+        # A2：多行 command 拒收（历史行为是 \n→& 拼接后全部执行，任意代码面过大）。
+        # 多行命令必须拆成多条单行 hook 或使用脚本文件 + 单行调用。
+        if "\n" in command or "\r" in command:
+            logger.warning(
+                f"[HookCommandAudit] 多行 command 已拒收（请拆分为多条单行 hook）: {command[:80]!r}"
+            )
+            return (
+                "Rejected: multi-line command is not allowed (split into single-line hooks)",
+                False,
+                1,
+            )
 
         # 构造 subprocess 参数
         subprocess_kwargs = {
@@ -725,6 +827,8 @@ class HookWorker(QRunnable):
             effective_cmd = self.hook.commandWindows
         # 变量插值（含 ${CLAUDE_PLUGIN_ROOT} 等插件路径变量）
         effective_cmd = HookManager._interpolate_variables(effective_cmd, self.context)
+        # A2：command 执行审计（异步路径；同步路径在 HookManager._execute_hook）
+        _audit_command(self.hook, self.event_name, effective_cmd)
         stdin_data = _json.dumps(self.context) if self.context else None
         # 注入 Claude Code 兼容环境变量（第三方插件依赖）
         extra_env = HookManager._build_claude_env(self.context)
@@ -743,7 +847,19 @@ class HookWorker(QRunnable):
             import urllib.error
             import urllib.request
 
-            url = self.hook.url
+            url = self.hook.url or ""
+            # A2：http hook 校验（https 强制 + 私网拦截）+ 审计
+            _ok, _reason = _validate_http_hook_url(url)
+            if not _ok:
+                logger.warning(
+                    f"[HookHTTPAudit] plugin={_hook_owner_name(self.hook)} event={self.event_name} "
+                    f"URL 拒执行: {_reason} ({url})"
+                )
+                return f"HTTP hook rejected: {_reason}", False
+            logger.warning(
+                f"[HookHTTPAudit] plugin={_hook_owner_name(self.hook)} event={self.event_name} "
+                f"url={url[:120]}"
+            )
             headers = self.hook.headers or {}
             headers["Content-Type"] = "application/json"
 
@@ -851,8 +967,15 @@ class HookWorker(QRunnable):
             if module_path.startswith(".") and self.hook.config_file:
                 func = HookWorker._import_relative_function(clean_function, self.hook.config_file)
 
-            # 标准路径：importlib.import_module
+            # 标准路径：importlib.import_module（A2：白名单校验，拒绝任意模块导入）
             if func is None:
+                if not _is_safe_python_module(module_path):
+                    logger.warning(
+                        f"[HookPythonAudit] 标准路径模块不在白名单，已拒执行: {module_path} "
+                        f"(内置白名单: {sorted(HookManager.SAFE_PYTHON_MODULES)}，"
+                        f"可用 Settings.safe_python_modules 扩展)"
+                    )
+                    return _reject_unsafe_python_module(module_path), False
                 import importlib
 
                 module = importlib.import_module(module_path)
@@ -1644,6 +1767,24 @@ class HookManager:
 
     # ========== 事件触发 ==========
 
+    @staticmethod
+    def _disabled_component_keys():
+        """取插件组件/细项禁用 key 集合（每轮触发取一次，热路径优化）
+
+        Returns:
+            frozenset；PluginManager 未初始化（单测 / 启动早期）时返回 None，
+            调用方据此整体跳过细项判断。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized():
+                return None
+            return pm.disabled_keys()
+        except Exception:
+            return None
+
     def trigger_event(
         self, event_name: str, context: Dict[str, Any] = None, current_message: str = "", trigger_async: bool = True
     ) -> List[HookExecutionResult]:
@@ -1668,12 +1809,23 @@ class HookManager:
             return []
 
         # Phase 1: 收集所有匹配的 hook（串行，仅做规则匹配，不执行实际 hook）
+        # D10：细项级停用集合整轮只取一次，避免热路径里逐条查询 Settings
+        disabled_keys = self._disabled_component_keys()
         all_hooks: List[Hook] = []
         for rule in self._hooks[event_name]:
             if not rule.matches(context):
                 continue
+            if disabled_keys is not None:
+                # 整类停用（D9 加载链已过滤，这里是热切换后的兜底）
+                if f"{rule.skill_name}:hooks" in disabled_keys:
+                    continue
             for hook in rule.hooks:
                 if not hook.enabled:
+                    continue
+                # 单条 hook 被停用（D10）。与 hook_states 的 enabled 是串联
+                # 关系：二者都为真才执行。这里在执行时判断而非加载时过滤，
+                # 所以开关切换即时生效，无需重载 hooks。
+                if disabled_keys is not None and f"{rule.skill_name}:hooks:{hook.id}" in disabled_keys:
                     continue
                 if not self._check_conditions(hook, context):
                     logger.debug(f"[HookManager] Hook conditions not met: {event_name}")
@@ -1969,6 +2121,8 @@ class HookManager:
 
                 if hook.type == HookType.COMMAND.value:
                     extra_env = HookManager._build_claude_env(context)
+                    # A2：command 执行审计（同步路径；异步路径在 HookWorker._execute_command）
+                    _audit_command(hook, context.get("event_name", ""), command)
                     output, success, exit_code = HookWorker._run_command_sync(
                         command,
                         cwd,
@@ -1982,15 +2136,29 @@ class HookManager:
                     import urllib.error
                     import urllib.request
 
-                    data = json.dumps({"event": context.get("event_name"), "context": context}).encode("utf-8")
-                    headers = hook.headers or {}
-                    headers["Content-Type"] = "application/json"
+                    # A2：http hook 校验（https 强制 + 私网拦截）+ 审计
+                    _ok, _reason = _validate_http_hook_url(url)
+                    if not _ok:
+                        logger.warning(
+                            f"[HookHTTPAudit] plugin={_hook_owner_name(hook)} "
+                            f"event={context.get('event_name')} URL 拒执行: {_reason} ({url})"
+                        )
+                        output = f"HTTP hook rejected: {_reason}"
+                        success = False
+                    else:
+                        logger.warning(
+                            f"[HookHTTPAudit] plugin={_hook_owner_name(hook)} "
+                            f"event={context.get('event_name')} url={url[:120]}"
+                        )
+                        data = json.dumps({"event": context.get("event_name"), "context": context}).encode("utf-8")
+                        headers = hook.headers or {}
+                        headers["Content-Type"] = "application/json"
 
-                    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+                        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
 
-                    with urllib.request.urlopen(req, timeout=hook.timeout) as response:
-                        output = response.read().decode("utf-8")
-                        success = True
+                        with urllib.request.urlopen(req, timeout=hook.timeout) as response:
+                            output = response.read().decode("utf-8")
+                            success = True
 
                 elif hook.type == HookType.PROMPT.value:
                     output = hook.prompt or hook.command or ""
@@ -2023,19 +2191,32 @@ class HookManager:
                                 else:
                                     module_path, func_name = parts
                                     func = None
+                                    whitelisted_reject = False
 
                                     # 相对路径：基于 hooks.json 目录解析
                                     if module_path.startswith(".") and hook.config_file:
                                         func = HookWorker._import_relative_function(clean_function, hook.config_file)
 
-                                    # 标准路径：importlib.import_module
+                                    # 标准路径：importlib.import_module（A2：白名单校验）
                                     if func is None:
-                                        import importlib
+                                        if not _is_safe_python_module(module_path):
+                                            logger.warning(
+                                                f"[HookPythonAudit] 标准路径模块不在白名单，已拒执行: {module_path} "
+                                                f"(内置白名单: {sorted(HookManager.SAFE_PYTHON_MODULES)}，"
+                                                f"可用 Settings.safe_python_modules 扩展)"
+                                            )
+                                            output = _reject_unsafe_python_module(module_path)
+                                            success = False
+                                            whitelisted_reject = True
+                                        else:
+                                            import importlib
 
-                                        module = importlib.import_module(module_path)
-                                        func = getattr(module, func_name, None)
+                                            module = importlib.import_module(module_path)
+                                            func = getattr(module, func_name, None)
 
-                                    if not callable(func):
+                                    if whitelisted_reject:
+                                        pass  # output/success 已在白名单拒分支设置，不执行
+                                    elif not callable(func):
                                         output = f"Function not found: {hook.function}"
                                         success = False
                                     else:
@@ -2276,47 +2457,7 @@ class HookManager:
 
         return env
 
-    def get_registered_events(self) -> List[str]:
-        """获取所有已注册事件"""
-        return list(self._hooks.keys())
-
-    def get_hook_info(self, event_name: str) -> List[dict]:
-        """获取指定事件的 Hook 信息"""
-        if event_name not in self._hooks:
-            return []
-
-        info = []
-        for rule in self._hooks[event_name]:
-            for hook in rule.hooks:
-                info.append(hook.to_dict())
-        return info
-
-    def export_config(self) -> dict:
-        """导出当前配置（用于保存）"""
-        hooks = {}
-        for event_name, rules in self._hooks.items():
-            rules_data = []
-            for rule in rules:
-                hooks_data = [h.to_dict() for h in rule.hooks]
-                if hooks_data:
-                    rules_data.append({"matcher": rule.matcher, "hooks": hooks_data})
-            if rules_data:
-                hooks[event_name] = rules_data
-        return {"hooks": hooks}
-
     # ==================== UI 集成方法 ====================
-
-    def get_all_hooks(self) -> Dict[str, List[dict]]:
-        """获取所有已注册的 hooks，用于 UI 显示（覆写层的 enabled 优先）"""
-        result = {}
-        for event_name, rules in self._hooks.items():
-            result[event_name] = []
-            for rule in rules:
-                for hook in rule.hooks:
-                    hook_dict = self._get_effective_hook_dict(hook)
-                    hook_dict["matcher"] = rule.matcher
-                    result[event_name].append(hook_dict)
-        return result
 
     def get_all_hooks_grouped(self) -> Dict[str, Dict[str, List[dict]]]:
         """
@@ -2667,7 +2808,7 @@ class HookManager:
         hook.enabled = enabled
 
         # 双轨制持久化：
-        # - 系统 hook（plugins/system/）：保留覆盖层（hook_states.json）
+        # - 系统 hook（plugins/ 内置 system 族插件）：保留覆盖层（hook_states.json）
         # - 非系统 hook（插件/user-custom）：写回源文件 enabled 字段（覆盖式）
         #   并清理覆盖层残留（迁移兜底）
         if hook.is_system_plugin:
@@ -2690,7 +2831,7 @@ class HookManager:
         """
         通过 id 删除 hook
 
-        系统内置插件（plugins/system/）的 hook 不可删除。
+        系统内置插件（plugins/ 内置 system 族插件）的 hook 不可删除。
 
         Args:
             hook_id: hook 唯一标识
@@ -2747,51 +2888,6 @@ class HookManager:
         logger.info(f"[HookManager] Deleted hook {hook_id}")
         return True
 
-    def set_hook_enabled(self, event_name: str, hook_index: int, enabled: bool):
-        """设置 hook 启用状态（内部委托给 toggle_hook_by_id）"""
-        if event_name not in self._hooks:
-            return
-
-        rules = self._hooks[event_name]
-        hook_count = 0
-        for rule in rules:
-            for h in rule.hooks:
-                if hook_count == hook_index:
-                    self.toggle_hook_by_id(h.id, enabled)
-                    return
-                hook_count += 1
-
-    def _save_hook_to_file(self, hook: Hook, event_name: str):
-        """保存单个 hook 的状态到配置文件"""
-        try:
-            with open(hook.config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
-
-            # 递归查找并更新 hook
-            self._update_hook_in_config(config, event_name, hook)
-
-            with open(hook.config_file, "w", encoding="utf-8") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-
-            logger.debug(f"[HookManager] Saved hook enabled={hook.enabled} to {hook.config_file}")
-        except Exception as e:
-            logger.error(f"[HookManager] Failed to save hook to {hook.config_file}: {e}")
-
-    def _update_hook_in_config(self, config: dict, event_name: str, target_hook: Hook):
-        """递归更新配置中的 hook enabled 状态"""
-        raw_hooks = config.get("hooks", config)
-        if event_name not in raw_hooks:
-            return
-
-        rules = raw_hooks[event_name]
-        for rule in rules:
-            hooks = rule.get("hooks", [])
-            for h in hooks:
-                # 通过 command 匹配（假设 command 是唯一的）
-                if h.get("command") == target_hook.command:
-                    h["enabled"] = target_hook.enabled
-                    return
-
     def reload_global_hooks(self, config_file: str = None):
         """仅重新加载全局 hooks 配置，不影响 skill/agent hooks"""
         if config_file is None:
@@ -2817,68 +2913,7 @@ class HookManager:
         except Exception as e:
             logger.error(f"Failed to reload global hooks: {e}")
 
-    def reload_all_plugin_hooks(self):
-        """重新加载所有已启用插件的 hooks（不碰 user-custom 全局 hooks）
 
-        用于卡片 _save_hooks() 后同步插件 hooks 的最新文件内容。
-        """
-        try:
-            from app.plugins.managers.plugin_manager import PluginManager
-
-            pm = PluginManager.get_instance()
-            if not pm.is_initialized():
-                return
-            for plugin in pm.get_enabled_plugins():
-                if plugin.name == "user-custom":
-                    # user-custom 由 reload_global_hooks 单独管理，跳过
-                    continue
-                hooks_dir = plugin.path / "hooks"
-                hooks_file = hooks_dir / "hooks.json"
-                if not hooks_dir.exists() or not hooks_dir.is_dir():
-                    continue
-                # 先注销旧的，清除去重缓存
-                self.unregister_skill_hooks(plugin.name)
-                if hooks_file.exists():
-                    self._clear_config_watcher(str(hooks_file))
-                # 重新注册
-                count = self.load_hooks_from_directory_flat(hooks_dir, skill_name=plugin.name)
-                if count > 0:
-                    logger.debug(f"[HookManager] Reloaded {count} hooks for plugin {plugin.name}")
-        except Exception as e:
-            logger.error(f"[HookManager] Failed to reload all plugin hooks: {e}")
-
-    def load_hooks_from_directory(self, agents_dir: Path, is_system_plugin: bool = False) -> int:
-        """从 agents_dir 子目录加载 hooks.json (agents/{name}/hooks/hooks.json)
-
-        Args:
-            agents_dir: agents 目录路径
-            is_system_plugin: 是否来自系统内置插件（plugins/system/），标记的 hook 在 UI 上禁止删除
-        """
-        count = 0
-        if not agents_dir.exists():
-            return count
-
-        for agent_dir in agents_dir.iterdir():
-            if not agent_dir.is_dir():
-                continue
-            hooks_file = agent_dir / "hooks" / "hooks.json"
-            if hooks_file.exists():
-                try:
-                    with open(hooks_file, "r", encoding="utf-8") as f:
-                        config = json.load(f)
-                    n = self.register_hooks_from_json(
-                        agent_dir.name,
-                        str(agent_dir.absolute()),
-                        config,
-                        str(hooks_file),
-                        is_system_plugin=is_system_plugin,
-                    )
-                    count += n
-                    if n > 0:
-                        logger.info(f"[HookManager] Loaded {n} hooks from {agent_dir.name}")
-                except Exception as e:
-                    logger.error(f"[HookManager] Failed to load hooks from {hooks_file}: {e}")
-        return count
 
     def load_hooks_from_directory_flat(
         self, dir_path: Path, skill_name: str = None, is_system_plugin: bool = False
@@ -2890,7 +2925,7 @@ class HookManager:
         Args:
             dir_path: hooks 目录路径
             skill_name: 注册用的 skill 名称。为 None 时使用 dir_path.name（兼容旧调用）
-            is_system_plugin: 是否来自系统内置插件（plugins/system/），标记的 hook 在 UI 上禁止删除
+            is_system_plugin: 是否来自系统内置插件（plugins/ 内置 system 族插件），标记的 hook 在 UI 上禁止删除
         """
         count = 0
         if not dir_path.exists() or not dir_path.is_dir():

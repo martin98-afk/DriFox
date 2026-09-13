@@ -16,6 +16,7 @@ import os
 import re
 import socket
 import sys
+import time
 import weakref
 from collections import OrderedDict
 from pathlib import Path
@@ -179,31 +180,8 @@ def migrate_app_data_if_needed():
         logger.warning("[迁移] sessions.db 未找到，数据可能是空的")
 
 
-def get_pinyin_search_keys(text):
-    """生成拼音全拼和首字母缩写"""
-    if not text:
-        return ""
-    try:
-        from pypinyin import Style, pinyin as _pinyin
-    except ImportError:
-        return text.lower()
-    # 提取首字母 (Style.FIRST_LETTER)
-    first_letters = "".join([i[0][0] for i in _pinyin(text, style=Style.FIRST_LETTER)])
-    # 提取全拼 (Style.NORMAL)
-    full_pinyin = "".join([i[0] for i in _pinyin(text, style=Style.NORMAL)])
-    return f"{first_letters} {full_pinyin} {text}".lower()
 
 
-def kill_proc_tree(pid):
-    try:
-        parent = psutil.Process(pid)
-        children = parent.children(recursive=True)
-        for child in children:
-            child.kill()
-        parent.kill()
-        psutil.wait_procs(children + [parent], timeout=5)
-    except psutil.NoSuchProcess:
-        pass
 
 
 # 预编译 ANSI 处理正则表达式
@@ -260,11 +238,6 @@ def ansi_to_html(text):
     return text
 
 
-def ansi_to_rich_text(text):
-    """
-    将 ANSI 转换为 Qt Rich Text（备用方案）
-    """
-    return f"<pre style='font-family: Consolas, monospace;'>{ansi_to_html(text)}</pre>"
 
 
 def resource_path(relative_path) -> str:
@@ -279,16 +252,23 @@ def resource_path(relative_path) -> str:
     return os.path.join(base_path, relative_path)
 
 
-def get_port_node(port):
-    """安全获取端口所属节点，兼容 property 和 method"""
-    node = port.node
-    return node() if callable(node) else node
 
 
 # 图标缓存（仅按 icon_name 缓存 QIcon，theme 感知由 QIconEngine 处理）
 # LRU 缓存（max 256），超限驱逐最久未访问条目，避免图标字典无限膨胀。
 _ICON_CACHE: OrderedDict = OrderedDict()
 _ICON_CACHE_MAX = 256
+
+
+# 主题感知图标缓存：key=(icon_name, is_light)。
+# [PERF] 原 `_load()` 注释自承「无缓存，每次调用都检查」——即每次 paint 都执行
+# `QIcon(":/icons/xxx.svg")`：从 qrc 读取数据 + 解析 SVG。自绘控件
+# （CustomTitleBar 的 3 个系统按钮、main_widget._ThemedIconLabel 等）每次重绘
+# 都会走到这里，是重绘路径的固定开销。
+# 缓存按 (名称, 主题) 分桶：主题切换由 `key()` 实时判定驱动 Qt pixmap 缓存失效，
+# 随后 `_load()` 用新的 is_light 命中另一个分桶 —— 语义与无缓存版本完全一致。
+_ICON_ENGINE_CACHE: OrderedDict = OrderedDict()
+_ICON_ENGINE_CACHE_MAX = 512
 
 
 class _ThemeIconEngine(QIconEngine):
@@ -303,10 +283,22 @@ class _ThemeIconEngine(QIconEngine):
         self._icon_name = icon_name
 
     def _load(self) -> QIcon:
-        """根据当前主题加载正确颜色的图标（无缓存，每次调用都检查）"""
+        """根据当前主题加载正确颜色的图标（按 (名称, 主题) 缓存）。"""
+        is_light = _is_current_theme_light()
+        cache_key = (self._icon_name, is_light)
+        cached = _ICON_ENGINE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        icon = self._load_uncached(is_light)
+        _ICON_ENGINE_CACHE[cache_key] = icon
+        if len(_ICON_ENGINE_CACHE) > _ICON_ENGINE_CACHE_MAX:
+            _ICON_ENGINE_CACHE.popitem(last=False)
+        return icon
+
+    def _load_uncached(self, is_light: bool) -> QIcon:
+        """真正执行一次图标加载（缓存未命中时调用）。"""
         from app.utils.icon_name_map import ICON_NAME_TO_FILE
 
-        is_light = _is_current_theme_light()
         prefix = ":/icons_light" if is_light else ":/icons"
 
         # 浅色模式：优先查浅色映射表
@@ -347,9 +339,6 @@ class _ThemeIconEngine(QIconEngine):
         # 主题切换后 key 变化 → Qt pixmap 缓存自动失效
         is_light = _is_current_theme_light()
         return f"_ThemeIconEngine:{self._icon_name}:{'light' if is_light else 'dark'}"
-
-    def iconName(self):
-        return self._icon_name
 
 
 def get_icon(icon_name: str) -> QIcon:
@@ -392,6 +381,7 @@ def invalidate_icon_cache():
     """清除图标缓存（主题切换时调用，已不再必需——引擎自动感知）"""
     global _ICON_CACHE
     _ICON_CACHE.clear()
+    _ICON_ENGINE_CACHE.clear()
 
 
 
@@ -479,6 +469,10 @@ def get_local_skills() -> list:
 # ========== Skills 缓存（性能优化：避免每次 /skill 命令都重读所有 SKILL.md）==========
 _skills_cache: list | None = None
 _skills_cache_key: tuple = ()
+# key 计算的二级 TTL 缓存（见 _compute_skills_cache_key docstring）
+_SKILLS_KEY_TTL = 1.0  # 秒
+_skills_key_cache: tuple | None = None
+_skills_key_cached_at: float = 0.0
 
 
 def _compute_skills_cache_key() -> tuple:
@@ -486,7 +480,17 @@ def _compute_skills_cache_key() -> tuple:
 
     比逐文件 stat 列表更轻：单次扫描 ~2 ms（vs 旧 12 ms）。
     任何 SKILL.md / skill.md 增删改都改 mtime 或 count，自动失效。
+
+    二级 TTL 缓存：key 计算本身要 stat 全部技能目录的 SKILL.md，
+    Windows + 杀软环境下单次可达数十 ms。技能开关切换等短时间
+    密集调用场景（每次 toggle 走 2~3 遍）没必要每遍都真扫盘，
+    1 秒内的重复调用直接复用上次结果；1 秒足以及时感知文件增删改。
     """
+    global _skills_key_cache, _skills_key_cached_at
+    now = time.monotonic()
+    if _skills_key_cache is not None and now - _skills_key_cached_at < _SKILLS_KEY_TTL:
+        return _skills_key_cache
+
     scan_dirs: list[Path] = []
 
     try:
@@ -534,14 +538,18 @@ def _compute_skills_cache_key() -> tuple:
         except OSError:
             pass
 
-    return (file_count, max_mtime, total_size)
+    key = (file_count, max_mtime, total_size)
+    _skills_key_cache = key
+    _skills_key_cached_at = now
+    return key
 
 
 def invalidate_skills_cache() -> None:
     """手动失效 skills 缓存。插件启用/禁用后如需立即生效可调用。"""
-    global _skills_cache, _skills_cache_key
+    global _skills_cache, _skills_cache_key, _skills_key_cache
     _skills_cache = None
     _skills_cache_key = ()
+    _skills_key_cache = None
 
 
 def _parse_skill_dir(skill_dir: Path, plugin_name: str | None = None,
@@ -682,56 +690,8 @@ def load_skill(name: str) -> tuple[bool, str, str]:
     return (True, content, workspace)
 
 
-def list_skills_with_intro() -> str:
-    """获取技能列表，包含 SKILLS.md 介绍"""
-    skills = get_local_skills()
-
-    # 从插件路径查找 SKILLS.md（优先使用优先级最高的）
-    skills_intro = ""
-    try:
-        from app.plugins.managers.plugin_manager import PluginManager
-        pm = PluginManager.get_instance()
-        if pm.is_initialized():
-            for item in pm.get_skills_with_plugin():
-                readme = item["path"] / "SKILLS.md"
-                if readme.exists():
-                    skills_intro = readme.read_text(encoding="utf-8") + "\n\n"
-                    break
-    except (ImportError, Exception):
-        pass
-
-    # 回退：旧路径
-    if not skills_intro:
-        main_skills_dir = Path(__file__).parent.parent / "skills"
-        skills_readme = main_skills_dir / "SKILLS.md"
-        if skills_readme.exists():
-            skills_intro = skills_readme.read_text(encoding="utf-8") + "\n\n"
-
-    # 生成 XML 格式（使用 qualified_name 以示含前缀）
-    skills_xml = "<available_skills>\n"
-    for skill in skills:
-        desc = skill.get("description", "").replace("<", "&lt;").replace(">", "&gt;")
-        name = skill.get("qualified_name", skill["name"])
-        skills_xml += f"  <skill>\n    <name>{name}</name>\n    <description>{desc}</description>\n  </skill>\n"
-    skills_xml += "</available_skills>"
-
-    return skills_intro + skills_xml
 
 
-def get_canvas_font(size=10, bold=False):
-    from app.utils.design_tokens import scale_font_size
-    try:
-        font_family = Settings.get_instance().llm_font_family.value
-    except Exception:
-        try:
-            font_family = Settings.get_instance().canvas_font_selected.value
-        except Exception:
-            font_family = "Segoe UI"
-
-    font = QFont(font_family, scale_font_size(size))
-    if bold:
-        font.setBold(True)
-    return font
 
 
 def get_unified_font(size=10, bold=False):
@@ -778,17 +738,8 @@ def invalidate_font_family_css_cache() -> None:
     _cached_font_family_css = None
 
 
-def str_to_bool(value):
-    """可靠的布尔值转换"""
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() in ("true", "1", "yes", "on")
 
 
-def get_free_port():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
 
 
 def serialize_for_json(obj, large_list_threshold=1000):

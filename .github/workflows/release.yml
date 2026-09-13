@@ -543,7 +543,14 @@ jobs:
               contains(github.ref_name, 'rc') ||
               contains(github.ref_name, 'beta') ||
               contains(github.ref_name, 'alpha') ||
-              contains(github.ref_name, 'test')
+              contains(github.ref_name, 'test') ||
+              contains(github.ref_name, 'gamma') ||
+              contains(github.ref_name, 'dev') ||
+              endsWith(github.ref_name, 'b1') ||
+              endsWith(github.ref_name, 'b2') ||
+              endsWith(github.ref_name, 'b3') ||
+              endsWith(github.ref_name, 'b4') ||
+              endsWith(github.ref_name, 'b5')
             }}
           generate_release_notes: false
           files: |

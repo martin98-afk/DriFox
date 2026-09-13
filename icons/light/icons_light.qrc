@@ -10,6 +10,7 @@
     <file>lsp.svg</file>
     <file>question.svg</file>
     <file>read.svg</file>
+    <file>scroll_to_bottom.svg</file>
     <file>shell.svg</file>
     <file>tab切换.svg</file>
     <file>todo.svg</file>
@@ -22,6 +23,7 @@
     <file>分支.svg</file>
     <file>删除.svg</file>
     <file>历史对话.svg</file>
+    <file>右侧边栏.svg</file>
     <file>团队.svg</file>
     <file>复制.svg</file>
     <file>大模型.svg</file>
@@ -49,7 +51,12 @@
     <file>最小化.svg</file>
     <file>根目录.svg</file>
     <file>模型选择.svg</file>
+    <file>窗体-关闭.svg</file>
+    <file>窗体-向下还原.svg</file>
+    <file>窗体-最大化.svg</file>
+    <file>窗体-最小化.svg</file>
     <file>编辑.svg</file>
+    <file>置顶.svg</file>
     <file>裁剪.svg</file>
     <file>解锁.svg</file>
     <file>设置-subagent.svg</file>

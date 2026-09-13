@@ -23,7 +23,7 @@ import hashlib
 import json as stdjson
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import orjson
 from loguru import logger
@@ -43,7 +43,7 @@ SKIP_TOOLS = frozenset(
         "question",  # 用户问答结果
         "todowrite",  # todo 写入
         "todoread",  # todo 读取
-        "list_skills",  # 技能列表
+        "manage_skill",  # 技能管理
         "mcp_list_servers",  # MCP 服务器列表
         "skill",  # 技能加载结果
     }
@@ -426,6 +426,3 @@ class ToolResultPersister:
 
         return block
 
-    def cleanup_session(self) -> None:
-        """会话结束时清理 (暂不删除文件, 方便调试; 后续可加保留期策略)"""
-        self._frozen.clear()

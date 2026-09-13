@@ -33,7 +33,7 @@ def _register_system_policies():
     from app.plugins.registries.hook_policy_registry import HookPolicyRegistry
 
     reg = HookPolicyRegistry.get_instance()
-    base = Path(__file__).resolve().parents[2] / "plugins" / "system" / "hook_policies"
+    base = Path(__file__).resolve().parents[2] / "plugins" / "system-hook-policies" / "hook_policies"
     for name in ("all", "tool_only", "none", "subagent_default", "team_member"):
         spec = importlib.util.spec_from_file_location(f"_hp_{name}", base / f"{name}.py")
         mod = importlib.util.module_from_spec(spec)
@@ -47,7 +47,8 @@ def _register_system_policies():
 
 
 def test_all_policy_triggers_everything():
-    from plugins.system.hook_policies.all import AllHookPolicy
+    from importlib import import_module
+    AllHookPolicy = import_module("plugins.system-hook-policies.hook_policies.all").AllHookPolicy
 
     p = AllHookPolicy()
     for ev in (
@@ -62,7 +63,8 @@ def test_all_policy_triggers_everything():
 
 
 def test_tool_only_policy_only_tool_events():
-    from plugins.system.hook_policies.tool_only import ToolOnlyHookPolicy
+    from importlib import import_module
+    ToolOnlyHookPolicy = import_module("plugins.system-hook-policies.hook_policies.tool_only").ToolOnlyHookPolicy
 
     p = ToolOnlyHookPolicy()
     assert p.should_trigger(PreToolUseEvent()) == HookDecision.TRIGGER
@@ -72,7 +74,8 @@ def test_tool_only_policy_only_tool_events():
 
 
 def test_none_policy_skips_all():
-    from plugins.system.hook_policies.none import NoneHookPolicy
+    from importlib import import_module
+    NoneHookPolicy = import_module("plugins.system-hook-policies.hook_policies.none").NoneHookPolicy
 
     p = NoneHookPolicy()
     for ev in (
@@ -86,9 +89,11 @@ def test_none_policy_skips_all():
 
 
 def test_subagent_default_policy_scope():
-    from plugins.system.hook_policies.subagent_default import (
-        SubagentDefaultHookPolicy,
-    )
+    from importlib import import_module
+
+    SubagentDefaultHookPolicy = import_module(
+        "plugins.system-hook-policies.hook_policies.subagent_default"
+    ).SubagentDefaultHookPolicy
 
     p = SubagentDefaultHookPolicy()
     # 保留：工具级 / Stop / PluginChanged
@@ -102,7 +107,8 @@ def test_subagent_default_policy_scope():
 
 
 def test_team_member_policy_skips_pre_post_assistant():
-    from plugins.system.hook_policies.team_member import TeamMemberHookPolicy
+    from importlib import import_module
+    TeamMemberHookPolicy = import_module("plugins.system-hook-policies.hook_policies.team_member").TeamMemberHookPolicy
 
     p = TeamMemberHookPolicy()
     # 保留：工具级 / SessionStart / Stop / TeamMail / PluginChanged

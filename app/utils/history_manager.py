@@ -119,7 +119,28 @@ def _clean_orphan_tool_calls(messages: List[Dict]) -> List[Dict]:
 
         cleaned.append(msg)
 
-    return cleaned
+    # 反向清理孤儿 tool 消息（结果存在，但之前的 assistant 均未声明该 id）。
+    # 逻辑同 chat_worker._fix_tool_result_order 第三步，保证持久化后的历史
+    # 不会触发 MiniMax 2013（tool result's tool id not found）。
+    final_messages = []
+    declared_ids: set = set()
+    for msg in cleaned:
+        role = msg.get("role")
+        if role == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                tc_id = tc.get("id", "")
+                if tc_id:
+                    declared_ids.add(tc_id)
+            final_messages.append(msg)
+        elif role == "tool":
+            tc_id = msg.get("tool_call_id", "")
+            if tc_id and tc_id not in declared_ids:
+                continue
+            final_messages.append(msg)
+        else:
+            final_messages.append(msg)
+
+    return final_messages
 
 
 # 预编译文件名清理正则
@@ -354,7 +375,9 @@ class HistoryManager:
         self.archive_dir.mkdir(parents=True, exist_ok=True)
 
         # 与 SQLite 轻量懒加载上限保持一致，避免首次加载后保存任意会话又截断。
-        self._history_limit = 500
+        # 5000：旧值 500 会让更旧的会话彻底不出现在列表里（UI 只读内存、不分页）。
+        # 轻量投影已剔除 system_prompt，单条约 0.16KB，5000 条常驻约 0.8MB，可接受。
+        self._history_limit = 5000
         self._save_timer: Optional[QTimer] = None
         self._save_delay_ms = 1000
 
@@ -466,37 +489,6 @@ class HistoryManager:
         if self._session_store.get_session_count() > 0:
             return
 
-    def _normalize_sessions(self, data: List) -> List[Dict]:
-        """规范化会话数据"""
-        normalized = []
-        seen_ids = set()
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            sid = item.get("session_id")
-            if sid and sid in seen_ids:
-                continue
-            if sid:
-                seen_ids.add(sid)
-            fallback_ts = item.get("last_time") or item.get("saved_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            item["messages"] = self._ensure_message_timestamps(
-                merge_session_messages(item.get("messages", [])),
-                fallback_ts,
-            )
-            if "title" not in item:
-                item["title"] = item.get("topic_summary", "新对话")
-            if "last_time" not in item:
-                item["last_time"] = self._extract_last_message_time(item.get("messages", []))
-            if "message_count" not in item:
-                item["message_count"] = len(item.get("messages", []))
-            if "session_id" not in item:
-                item["session_id"] = uuid.uuid4().hex[:8]
-            item["compaction_state"] = dict(item.get("compaction_state") or {})
-            item["compaction_cache"] = dict(item.get("compaction_cache") or {})
-            if "project" not in item:
-                item["project"] = "默认项目"
-            normalized.append(item)
-        return normalized
 
     def save_session(
         self,
@@ -514,6 +506,7 @@ class HistoryManager:
         team_name: str = None,
         agent_name: str = None,
         team_members: str = None,
+        pinned: bool = None,
     ):
         """保存会话
 
@@ -526,6 +519,7 @@ class HistoryManager:
             team_name: 团队名（模板名），None 保留现值
             agent_name: 产出该会话的 agent 角色名，None 保留现值
             team_members: 团队成员快照（JSON 字符串，F3），None 保留现值
+            pinned: 置顶标记，None 保留现值
         """
         if not messages:
             return
@@ -557,6 +551,13 @@ class HistoryManager:
                 agent_name = agent_name or ""
                 team_members = team_members or ""
 
+        # pinned「None→保留现值」：与团队元数据同范式，防止重存丢置顶
+        if pinned is None:
+            existing_for_pin = None
+            if session_id:
+                existing_for_pin = self.get_session_by_session_id(session_id)
+            pinned = bool(existing_for_pin.get("pinned", False)) if existing_for_pin else False
+
         merged_messages = merge_session_messages(messages)
         session_record = self._build_session_record(
             merged_messages,
@@ -573,6 +574,7 @@ class HistoryManager:
             team_name=team_name,
             agent_name=agent_name,
             team_members=team_members,
+            pinned=pinned,
         )
         new_session_id = session_record["session_id"]
 
@@ -617,6 +619,7 @@ class HistoryManager:
         team_name: str = "",
         agent_name: str = "",
         team_members: str = "",
+        pinned: bool = False,
     ) -> Dict:
         now = datetime.now()
         saved_at = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -663,6 +666,8 @@ class HistoryManager:
             "agent_name": agent_name or "",
             # 团队成员快照（F3：JSON 字符串，恢复时找回无会话记录的手动成员）
             "team_members": team_members or "",
+            # 会话置顶标记（历史面板置顶分组；新会话默认未置顶）
+            "pinned": bool(pinned),
         }
 
     def get_current_title(self, index: int) -> str:
@@ -681,11 +686,6 @@ class HistoryManager:
             self._history_sessions[index]["user_edited_title"] = edited
             self._cache_dirty = True
 
-    def get_user_edited_title(self, index: int) -> bool:
-        """获取会话标题是否被用户编辑"""
-        if 0 <= index < len(self._history_sessions):
-            return self._history_sessions[index].get("user_edited_title", False)
-        return False
 
     def update_topic_summary(self, index: int, summary: str):
         self.update_session_title(index, summary)
@@ -693,19 +693,6 @@ class HistoryManager:
     def get_topic_summary(self, index: int) -> str:
         return self.get_current_title(index)
 
-    def should_generate_summary(self, index: int) -> bool:
-        if 0 <= index < len(self._history_sessions):
-            session = self._history_sessions[index]
-            messages = session.get("messages", [])
-            # 口径与 _count_conversation_pairs（L640）一致：TeamMail 视为真实 user 轮次，
-            # 其他 hook 排除（R1 残余清理）。
-            user_count = sum(
-                1
-                for msg in messages
-                if msg.get("role") == "user" and (not msg.get("_hook_event") or msg.get("_hook_event") == "TeamMail")
-            )
-            return user_count >= 1
-        return False
 
     def _count_conversation_pairs(self, messages: List[Dict]) -> int:
         count = 0
@@ -719,36 +706,13 @@ class HistoryManager:
                 count += 1
         return count
 
-    def load_latest_session(self) -> Optional[Dict]:
-        if not self._history_sessions:
-            return None
-        latest = self._history_sessions[0]
-        if not latest.get("messages"):
-            return None
-        return latest
 
-    def load_most_recently_updated_session(self) -> Optional[Dict]:
-        """加载最近更新的会话"""
-        if not self._history_sessions:
-            return None
-        most_recent = None
-        most_recent_time = None
-        for session in self._history_sessions:
-            messages = session.get("messages", [])
-            if not messages:
-                continue
-            last_updated = session.get("last_updated") or session.get("last_time") or ""
-            if not most_recent_time or last_updated > most_recent_time:
-                most_recent_time = last_updated
-                most_recent = session
-        return most_recent
 
     def _ensure_history_loaded(self):
         """懒加载历史会话数据（首次访问时从 SQLite 加载）
 
         🛡️ H1（T4-TOP8）：持 _history_load_lock 保护"检查-加载"原子性——
         后台预热线程（_prewarm_history）与主线程首次访问可能并发进入：
-        - 预热已完成：主线程检查 _history_loaded 直接返回（0 阻塞）
         - 预热进行中：主线程等待锁（至多=查询耗时，与原同步方案等价，
           不劣化；预热把耗时从"用户操作时"提前到"启动后台"）
         - 预热失败：_history_loaded 不置 True，主线程首次访问兜底重试
@@ -951,6 +915,8 @@ class HistoryManager:
             "agent_name": s.get("agent_name", "") or "",
             # 团队成员快照（F3：JSON 字符串，透传）
             "team_members": s.get("team_members", "") or "",
+            # 会话置顶标记（历史面板置顶分组）
+            "pinned": bool(s.get("pinned", False)),
         }
 
     def _merge_team_lightweight(self, sessions: List[Dict]) -> List[Dict]:
@@ -1446,17 +1412,6 @@ class HistoryManager:
         except Exception as e:
             logger.exception(f"[HistoryManager] 归档扫描回调异常: {e}")
 
-    def invalidate_archive_cache(self, file_path: Optional[str] = None) -> None:
-        """失效归档元数据缓存。
-
-        Args:
-            file_path: 仅失效该路径；传 None 清空全部。
-        """
-        with self._archive_cache_lock:
-            if file_path is None:
-                self._archive_meta_cache.clear()
-            else:
-                self._archive_meta_cache.pop(file_path, None)
 
     def get_archived_sessions(self) -> List[Dict]:
         """同步获取归档列表（兼容旧调用方，UI 层请优先使用 scan_archives_async）。
@@ -1512,10 +1467,36 @@ class HistoryManager:
             )
         return None
 
-    def get_session_id_by_index(self, index: int) -> Optional[str]:
-        if 0 <= index < len(self._history_sessions):
-            return self._history_sessions[index].get("session_id")
-        return None
+
+    def set_session_pinned(self, session_id: str, pinned: bool) -> bool:
+        """设置会话置顶标记（改内存 + 持久化 pinned 列，不动消息）
+
+        Returns:
+            True=成功；False=会话不存在
+        """
+        self._ensure_history_loaded()
+        idx = self.find_index_by_session_id(session_id)
+        if idx is None:
+            return False
+        record = self._history_sessions[idx]
+        if bool(record.get("pinned", False)) == bool(pinned):
+            return True  # 幂等：状态未变不写盘
+        record["pinned"] = bool(pinned)
+        self._mark_cache_dirty()
+        # 只写 pinned 列（SQLite 路径）；JSON 存储路径随下次整体 flush 落盘
+        if self._use_sqlite and self._session_store is not None:
+            try:
+                self._session_store.update_session_pinned(session_id, bool(pinned))
+            except Exception as e:
+                logger.warning(f"[HistoryManager] update_session_pinned 失败: {e}")
+        return True
+
+    def get_project_list(self) -> List[str]:
+        """全部会话的 distinct 项目名（内存聚合，排序返回；供历史页项目切换器）"""
+        self._ensure_history_loaded()
+        self._deduplicate_history_sessions()
+        projects = {(s.get("project") or "默认项目").strip() or "默认项目" for s in self._history_sessions}
+        return sorted(projects)
 
     def find_index_by_session_id(self, session_id: str) -> Optional[int]:
         """根据 session_id 查找索引"""
@@ -1543,6 +1524,10 @@ class HistoryManager:
                     if full:
                         session["messages"] = full.get("messages", [])
                         session["message_count"] = full.get("message_count", len(session["messages"]))
+                        # system_prompt 轻量列表不再加载，借这次全量查询回填
+                        # （full 已含该字段，零额外 I/O）
+                        if session.get("system_prompt") is None:
+                            session["system_prompt"] = full.get("system_prompt", "")
                 return session
         # 2. 内存没有则直接查 SQLite（跨窗口同步最新数据）
         if self._session_store and self._session_store.is_initialized:
@@ -1554,7 +1539,22 @@ class HistoryManager:
 
         💡 内存优化：委托 get_session_by_session_id 处理懒加载，
         避免启动时一次性反序列化所有消息。
+
+        🛡️ 必须返回全量消息（主 blob + session_msg_extras 合并）：
+        SQLite 主 blob 的历史消息已被剥离 arguments/diff/reasoning_content
+        （仅 _x_idx 哨兵标记）。若把轻量列表直接塞进内存会话，用户在该
+        会话继续对话后的下一次保存会经 normalize_message 给轻量消息伪造
+        空 arguments={}，extract_offload_fields 视其为「无剥离字段」不产
+        extras 行，而 _write_extras 全删旧行后不插回 → 历史消息参数数据
+        永久丢失（症状：加载历史会话后工具完成框描述全空，重启不可逆，
+        2026-09-12 根因）。调用方均为低频加载动作，全量读取无性能顾虑。
         """
+        if not session_id:
+            return None
+        if self._use_sqlite and self._session_store and self._session_store.is_initialized:
+            full = self._session_store.get_full_messages(session_id)
+            if full:
+                return full
         session = self.get_session_by_session_id(session_id)
         if session:
             return session.get("messages", [])
@@ -1572,6 +1572,38 @@ class HistoryManager:
         # 非 SQLite 模式（JSON 存储）：退化为内存列表过滤
         sessions = self.get_history_list(with_messages=False)
         return [s for s in sessions if (s.get("team_run_id") or "").strip() == run_id]
+
+    def _lookup_team_first_question(self, run_id: str, max_len: int = 50) -> Optional[str]:
+        """从落库列 first_user_msg / first_user_ts 直接求团队首问（零反序列化）。
+
+        候选按 updated_at DESC 返回，与 get_by_team_run_id 的遍历顺序一致，从而
+        复现旧实现「时间戳并列时保留首个」的语义：首个候选无条件成为 best（即使
+        ts 为空），后续候选仅在 ts 非空且严格小于 best.ts 时覆盖。
+
+        Args:
+            run_id: 团队运行标识
+            max_len: 预览截断长度
+
+        Returns:
+            首问预览文本；落库列缺失（未迁移 / 老数据 / 存储未就绪）时返回 None，
+            调用方据此退回全量扫描路径，功能零退化。
+        """
+        if not (self._use_sqlite and self._session_store):
+            return None
+        getter = getattr(self._session_store, "get_team_first_question_candidates", None)
+        if getter is None:
+            return None
+        candidates = getter(run_id) or []
+        best: Optional[Dict] = None
+        for ts, content in candidates:
+            if not content:
+                continue
+            if best is None or (ts and (not best["ts"] or ts < best["ts"])):
+                best = {"ts": ts, "content": content}
+        if best is None:
+            return None
+        content = best["content"]
+        return content[:max_len].strip() + ("..." if len(content) > max_len else "")
 
     def get_team_first_question(self, run_id: str, max_len: int = 50) -> str:
         """获取团队首问：该 run_id 下所有会话中时间戳最早的真实 user 消息文本。
@@ -1597,6 +1629,12 @@ class HistoryManager:
         """
         if not run_id:
             return ""
+        # 🚀 T4 快路径（内存治理）：首问已随会话落库时直接读字符串列，零反序列化。
+        # 旧路径为此反序列化该 run 下全部成员会话的完整 messages —— 实测 246 条
+        # 约 285MB 常驻、放大 9.9 倍、耗时 1.0s；落库后退化为一列字符串读取。
+        _quick = self._lookup_team_first_question(run_id, max_len)
+        if _quick is not None:
+            return _quick
         sessions = self.get_team_sessions_by_run_id(run_id)
         if not sessions:
             return ""
@@ -1634,6 +1672,27 @@ class HistoryManager:
         content = best["content"]
         return content[:max_len].strip() + ("..." if len(content) > max_len else "")
 
+    def _resolve_existing_system_prompt(self, existing: Dict) -> str:
+        """取会话既有 system_prompt；未加载（哨兵 None）时回查 SQLite。
+
+        背景：轻量列表不再 SELECT system_prompt，内存里的值为 None。
+        若 update_session 直接拿 None 当空串写回，会把 DB 中真实的
+        system_prompt 清空 —— 故此处必须回查兜底。
+        """
+        val = existing.get("system_prompt")
+        if val is not None:
+            return val
+        sid = existing.get("session_id") or ""
+        if not sid or not self._session_store or not self._session_store.is_initialized:
+            return ""
+        try:
+            repo = getattr(self._session_store, "_session_repo", None)
+            if repo is not None and hasattr(repo, "get_system_prompt"):
+                return repo.get_system_prompt(sid)
+        except Exception as e:
+            logger.warning(f"[HistoryManager] system_prompt 回查失败 {sid}: {e}")
+        return ""
+
     def update_session(
         self,
         index: int,
@@ -1669,7 +1728,11 @@ class HistoryManager:
                 compaction_cache=(
                     compaction_cache if compaction_cache is not None else existing.get("compaction_cache", {})
                 ),
-                system_prompt=(system_prompt if system_prompt is not None else existing.get("system_prompt", "")),
+                system_prompt=(
+                    system_prompt
+                    if system_prompt is not None
+                    else self._resolve_existing_system_prompt(existing)
+                ),
                 project=project if project is not None else existing.get("project", "默认项目"),
                 worktree_path=worktree_path if worktree_path is not None else existing.get("worktree_path", ""),
                 team_run_id=team_run_id if team_run_id is not None else existing.get("team_run_id", ""),
@@ -1809,18 +1872,6 @@ class HistoryManager:
             normalized.append(copied)
         return normalized
 
-    def get_session_preview(self, index: int, max_len: int = 50) -> str:
-        if 0 <= index < len(self._history_sessions):
-            messages = self._history_sessions[index].get("messages", [])
-            for msg in reversed(messages):
-                if msg.get("_hook_event"):
-                    continue
-                if msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        content = content_to_text(content)
-                    return content[:max_len].strip() + ("..." if len(content) > max_len else "")
-        return ""
 
     def get_total_storage_size(self) -> int:
         """获取总存储大小"""
@@ -1832,22 +1883,6 @@ class HistoryManager:
             if db_path.exists():
                 return db_path.stat().st_size
 
-    def get_memory_stats(self) -> Dict:
-        total_messages = sum(s.get("message_count", 0) for s in self._history_sessions)
-        total_chars = 0
-        for session in self._history_sessions:
-            for msg in session.get("messages", []):
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = content_to_text(content)
-                total_chars += len(content)
-        return {
-            "session_count": len(self._history_sessions),
-            "total_messages": total_messages,
-            "total_chars": total_chars,
-            "storage_size": self.get_total_storage_size(),
-            "storage_mode": "sqlite" if self._use_sqlite else "json",
-        }
 
     # ============================================================
     # 项目归档导出/导入（ZIP 压缩包）
@@ -1877,21 +1912,11 @@ class HistoryManager:
             logger.warning(f"[HistoryManager] 项目「{project_name}」无会话，无法导出")
             return None
 
-        # 🐛 修复：轻量加载的消息为空，必须逐条从 SQLite 补全完整消息数据
-        sessions = []
-        for s in sessions_light:
-            sid = s.get("session_id", "")
-            if sid:
-                full = self.get_session_by_session_id(sid)
-                if full and full.get("messages"):
-                    sessions.append(full)
-                    continue
-            # 兜底：没有完整数据也用轻量数据
-            sessions.append(s)
-
-        if not sessions:
-            logger.warning(f"[HistoryManager] 项目「{project_name}」无有效会话，无法导出")
-            return None
+        # 🚀 T4：不再先把整个项目的完整会话攒进内存。
+        # 旧实现此处对每条会话调 get_session_by_session_id()，会把完整 messages
+        # 回填进 _history_sessions（无淘汰常驻），且 sessions 列表本身也持有全部
+        # 完整消息 —— 导出 1283 条会话的项目实测 1035 MB。改为在写 ZIP 的循环里
+        # 逐条直查 SQLite、写完即弃（见下方流式写入），峰值降到单条会话。
 
         # 构建 ZIP 文件名
         safe_name = sanitize_filename(project_name[:50])
@@ -1910,13 +1935,32 @@ class HistoryManager:
                 meta = {
                     "project_name": project_name,
                     "exported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "session_count": len(sessions),
+                    "session_count": len(sessions_light),
                     "version": 1,
                 }
                 zf.writestr("project.json", json.dumps(serialize_for_json(meta), option=json.OPT_INDENT_2))
 
-                # ── 写入所有会话 JSON ──
-                for session in sessions:
+                # ── 流式写入会话 JSON（🚀 T4 内存治理）──
+                # 逐条「直查 SQLite（不经过 _history_sessions，因此不产生回填常驻）
+                # → 立即写 ZIP → 下一条覆盖引用后即可回收」。峰值 = 单条会话，
+                # 而非旧实现的整个项目（1283 条 ≈ 1035 MB → 约 17 MB）。
+                # 基底仍是轻量条目，只补 messages / system_prompt，保持产物字段不变。
+                exported = 0
+                for s in sessions_light:
+                    session = s
+                    sid = s.get("session_id", "")
+                    if sid and self._use_sqlite and self._session_store:
+                        try:
+                            # 直查 SQLite 取完整行：不经过 _history_sessions，因此不
+                            # 产生回填常驻；写入 ZIP 后引用即被下一条覆盖回收。
+                            # 用完整行而非轻量条目，保证导出产物字段与旧实现一致
+                            # （含 created_at / updated_at / name / topic_summary /
+                            # compaction_state 等），导入侧无差异。
+                            full = self._session_store.get_session(sid)
+                            if full:
+                                session = full
+                        except Exception as e:
+                            logger.debug(f"[HistoryManager] 导出读取完整会话失败 {sid[:8]}: {e}")
                     session_id = session.get("session_id", uuid.uuid4().hex[:8])
                     title = session.get("title", "未命名")
                     safe_title = sanitize_filename(title[:50])
@@ -1927,6 +1971,9 @@ class HistoryManager:
                         session_filename,
                         json.dumps(serialize_for_json(session), option=json.OPT_INDENT_2),
                     )
+                    exported += 1
+                if exported == 0:
+                    raise RuntimeError("无有效会话可写入")
 
                 # ── 写入 Git 仓库信息（如果支持） ──
                 git_info = self._collect_git_info(root_dir)

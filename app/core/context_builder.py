@@ -13,10 +13,9 @@
 """
 
 import re
+from collections import OrderedDict
+from hashlib import md5
 from typing import Any, Dict, List, Optional
-
-import anyio
-from loguru import logger
 
 from app.core.message_content import consolidate_messages
 from app.core.model_capabilities import resolve_context_limit
@@ -215,9 +214,9 @@ class ContextBudgetAllocator:
         self.backend = backend
         self._compactor = compactor
 
-        # ========== 性能优化：系统提示 token 缓存 ==========
-        # 避免重复计算相同系统内容的 token 数
-        self._system_tokens_cache: Dict[str, int] = {}
+        # ========== 性能优化：系统提示 token 缓存（LRU，md5 键跨进程稳定） ==========
+        # 避免重复计算相同系统内容的 token 数；容量 64，最久未用者先逐
+        self._system_tokens_cache: "OrderedDict[str, int]" = OrderedDict()
 
     def _get_cached_system_tokens(self, system_content: str) -> int:
         """
@@ -229,19 +228,18 @@ class ContextBudgetAllocator:
         Returns:
             token 数
         """
-        # 使用内容 hash 作为缓存键
-        cache_key = hash(system_content)
-        if cache_key not in self._system_tokens_cache:
-            self._system_tokens_cache[cache_key] = count_messages_tokens(
-                [{"role": "system", "content": system_content}]
-            )
-            # 限制缓存大小
-            if len(self._system_tokens_cache) > 64:
-                # 清除最旧的条目
-                self._system_tokens_cache.pop(next(iter(self._system_tokens_cache)))
-                from loguru import logger
-
-                logger.warning(f"[ContextBuilder] Token 缓存超限 (大小={len(self._system_tokens_cache)})")
+        # 使用内容 md5 摘要作为缓存键（跨进程稳定，避免 hash() 随机化与碰撞歧义）
+        cache_key = md5(system_content.encode("utf-8")).hexdigest()
+        cached = self._system_tokens_cache.get(cache_key)
+        if cached is not None:
+            self._system_tokens_cache.move_to_end(cache_key)
+            return cached
+        self._system_tokens_cache[cache_key] = count_messages_tokens(
+            [{"role": "system", "content": system_content}]
+        )
+        # LRU 淘汰：容量超限逐最久未用条目
+        if len(self._system_tokens_cache) > 64:
+            self._system_tokens_cache.popitem(last=False)
         return self._system_tokens_cache[cache_key]
 
     def build_messages(
@@ -278,6 +276,10 @@ class ContextBudgetAllocator:
                 # 项目笔记由 read_project_notes hook 从本地 AGENTS.md 直接读取，不再预取
             except Exception:
                 pass
+        # 会话标识：assistant_hub 等插件按 session_id 做会话级助手覆盖
+        sid = getattr(session, "session_id", "")
+        if sid:
+            extra_context["session_id"] = sid
 
         # 复用缓存的 system prompt：避免每次 tool iteration 都重新触发 BuildSystemPrompt hooks
         # 仅在 agent 切换或首次调用时重建
@@ -315,16 +317,16 @@ class ContextBudgetAllocator:
             params = history_messages[-1].get("params", {})
             history_messages = history_messages[:-1]
 
-        # 上下文压缩 - 使用分配器计算的预算
+        # 上下文压缩 —— 使用分配器计算的预算
         budget = self._allocate_history_budget(full_system_content, llm_config)
-        history_for_api, compaction_state, compaction_cache = anyio.run(
-            anyio.to_thread.run_sync,
-            lambda: self._compactor.compact(
-                history_messages,
-                budget,
-                existing_cache=getattr(session, "compaction_cache", None),
-                allow_llm_summary=allow_llm_summary,
-            ),
+        # compact 为纯同步函数，调用方（PreSendWorker / chat_worker /
+        # gateway 主线程入口）已各自决定执行线程；此前的 anyio.run(to_thread) 包装
+        # 只增加 event loop 创建与线程切换开销，不改阻塞语义（同步等待）。
+        history_for_api, compaction_state, compaction_cache = self._compactor.compact(
+            history_messages,
+            budget,
+            existing_cache=getattr(session, "compaction_cache", None),
+            allow_llm_summary=allow_llm_summary,
         )
         session.set_compaction_state(compaction_state)
         session.set_compaction_cache(compaction_cache)
@@ -414,31 +416,4 @@ class ContextBudgetAllocator:
         """
         return self._compactor.get_budget(llm_config)
 
-    def get_budget_breakdown(self, llm_config: Dict, system_content: str = None) -> Dict[str, int]:
-        """
-        获取预算分解（用于 UI 显示）。
 
-        Args:
-            llm_config: LLM 配置
-            system_content: 系统提示内容（可选）
-
-        Returns:
-            预算分解字典，包含 total、system、history 等
-        """
-        total = self._compactor.get_budget(llm_config)
-        result = {
-            "total": total,
-            "system": 0,
-            "history": total,
-        }
-
-        if system_content:
-            system_tokens = self._get_cached_system_tokens(system_content)
-            result["system"] = system_tokens
-            result["history"] = max(500, total - system_tokens)
-
-        return result
-
-    def count_tokens(self, messages: List[Dict]) -> int:
-        """计算消息列表的 token 数"""
-        return count_messages_tokens(messages)

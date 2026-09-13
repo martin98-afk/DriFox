@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# 提交前自检：拦截「整文件行尾翻转」混入提交。
+#
+# 背景：patch 脚本以文本模式写文件时，Windows 会把 \n 翻成 \r\n，导致
+# 声明改动上千行、实质改动几十行的噪声提交（2026-09-06 连中 3 个文件，
+# session_repository.py 声明 569/543、git show -w 实际仅 28/2）。
+#
+# 安装（每个克隆执行一次）：
+#   git config core.hooksPath scripts/hooks
+# 卸载：
+#   git config --unset core.hooksPath
+# 确认真的是整文件重写时临时跳过：
+#   git commit --no-verify
+#
+# 可调阈值（环境变量）：
+#   EOL_GUARD_MIN_LINES  最小改动行数，低于此不检查（默认 20）
+#   EOL_GUARD_NOISE_PCT  行尾噪声占比阈值%，超过即拦截（默认 80）
+
+set -uo pipefail
+
+MIN_LINES="${EOL_GUARD_MIN_LINES:-20}"
+NOISE_PCT="${EOL_GUARD_NOISE_PCT:-80}"
+
+offenders=()
+details=()
+
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+
+    raw=$(git diff --cached --numstat -- "$f" | head -1)
+    [ -z "$raw" ] && continue
+
+    ra=$(printf '%s' "$raw" | awk '{print $1}')
+    rd=$(printf '%s' "$raw" | awk '{print $2}')
+    # 二进制文件 numstat 输出 "-"，跳过
+    [ "$ra" = "-" ] && continue
+
+    total=$((ra + rd))
+    [ "$total" -lt "$MIN_LINES" ] && continue
+
+    wa=0
+    wd=0
+    w=$(git diff --cached -w --numstat -- "$f" | head -1)
+    if [ -n "$w" ]; then
+        wa=$(printf '%s' "$w" | awk '{print $1}')
+        wd=$(printf '%s' "$w" | awk '{print $2}')
+        [ "$wa" = "-" ] && wa=0
+        [ "$wd" = "-" ] && wd=0
+    fi
+
+    noise=$((total - wa - wd))
+    [ "$noise" -le 0 ] && continue
+
+    # 噪声占比 = noise * 100 / total，避免浮点
+    if [ $((noise * 100)) -ge $((total * NOISE_PCT)) ]; then
+        offenders+=("$f")
+        details+=("    $f  声明改动 ${total} 行，其中 ${noise} 行是纯行尾噪声（实质仅 $((wa + wd)) 行）")
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+if [ "${#offenders[@]}" -eq 0 ]; then
+    exit 0
+fi
+
+echo ""
+echo "[eol-guard] 检测到行尾翻转噪声，已阻止本次提交："
+echo ""
+printf '%s\n' "${details[@]}"
+echo ""
+echo "  这些改动几乎全是 LF <-> CRLF 转换，会把真实 diff 淹没并毁掉 git blame。"
+echo ""
+echo "  处理步骤："
+echo "    1. 查看实质改动：  git diff --cached -w -- <file>"
+echo "    2. 还原行尾：      python tools/eol_guard.py fix <file>"
+echo "    3. 重新暂存：      git add <file>"
+echo ""
+echo "  确属整文件重写（非行尾问题）时：git commit --no-verify"
+echo ""
+
+exit 1

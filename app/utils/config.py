@@ -44,14 +44,6 @@ class ListDictValidator(ConfigValidator):
         return []
 
 
-class QuickComponentsSerializer(ConfigSerializer):
-    def serialize(self, value):
-        return value  # list[dict] 是 JSON-safe
-
-    def deserialize(self, value):
-        if isinstance(value, list):
-            return value
-        return []
 
 
 class Settings(QConfig):
@@ -131,7 +123,6 @@ class Settings(QConfig):
         for old_key, info in saved_providers.items():
             if not isinstance(info, dict):
                 info = {}
-            api_key = info.get("API_KEY", "")
             # 构造临时表项走 apply_provider_save：
             #   1) 计算新 hash；2) 合并同 apikey 重复条目；3) 写入 config_id 字段
             tmp_info = dict(info)
@@ -250,11 +241,6 @@ class Settings(QConfig):
 
             logging.warning(f"[_extend_theme_validator_before_load] failed: {e}")
 
-    @classmethod
-    def save_config(cls):
-        """保存配置"""
-        instance = cls.get_instance()
-        instance.save()
 
     def set(self, item, value, save=False, copy=True):
         """set the value of config item
@@ -320,9 +306,12 @@ class Settings(QConfig):
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.5.5"
+    current_version = "v0.5.11"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
+
+    # 单实例限制：开启后同时只允许运行一个 Drifox 实例（重启生效）
+    enable_single_instance = ConfigItem("General", "EnableSingleInstance", False, BoolValidator())
 
     # 灰度开关：消息正文用纯 Qt 块级渲染器（MarkdownBlockViewer）替代 QWebEngineView。
     # 仅作用于 assistant 卡片（welcome 卡 JS 交互复杂暂不灰度）；默认关闭。
@@ -349,7 +338,7 @@ class Settings(QConfig):
     llm_model_overrides = ConfigItem("LLM", "ModelOverrides", {})
     # 最近选择的模型
     llm_selected_model = ConfigItem("LLM", "SelectedModel", "")
-    # 子智能体默认模型（用于 subagent_para / subagent_dag，空字符串表示使用主模型）
+    # 子智能体默认模型（用于 subagent_para，空字符串表示使用主模型）
     llm_subagent_default_model = ConfigItem("LLM", "SubagentDefaultModel", "")
     # 标题生成默认模型（用于 topic_summary，空字符串表示使用主模型）
     llm_title_gen_default_model = ConfigItem("LLM", "TitleGenDefaultModel", "")
@@ -357,7 +346,7 @@ class Settings(QConfig):
     llm_enabled_skills = ConfigItem(
         "LLM",
         "EnabledSkills",
-        ["brainstorming", "writing-plans", "find-skills", "skill-creator", "git-commit", "minimax-image-understanding"],
+        ["brainstorming", "visualization", "writing-plans", "find-skills", "skill-creator", "git-commit", "plugin-creator", "ui-plugin-creator"],
     )
     # 主智能体选择（单选，通过 inject_agent_identity hook 注入系统提示词）
     llm_primary_agent = ConfigItem("LLM", "PrimaryAgent", "")
@@ -372,6 +361,14 @@ class Settings(QConfig):
         "NotifySound",
         "beep",
         OptionsValidator(["beep", "short", "none"]),
+    )
+    # 繁忙时 Enter 键行为（仅智能体运行时生效；Ctrl+Enter 恒为另一行为）
+    # interject=插话发送（hook 式注入当前对话流，不停 worker）；queue=排队发送（排队卡片，结束后自动续发）
+    busy_enter_behavior = OptionsConfigItem(
+        "General",
+        "BusyEnterBehavior",
+        "interject",
+        OptionsValidator(["interject", "queue"]),
     )
     # 全局字体设置
     llm_font_family = ConfigItem("LLM", "FontFamily", "楷体")
@@ -406,17 +403,30 @@ class Settings(QConfig):
     ui_compact_tool_area = ConfigItem("UI", "CompactToolArea", True, BoolValidator())
 
     # ========== 像素桌宠 ==========
-    pet_enabled = ConfigItem("UI", "PetEnabled", True, BoolValidator())
+    pet_enabled = ConfigItem("UI", "PetEnabled", False, BoolValidator())
+    # 对话页（TabPanel）显示模式：list=列表 / tree=工作区树
+    tab_panel_mode = OptionsConfigItem(
+        "UI", "TabPanelMode", "list", OptionsValidator(["list", "tree"])
+    )
+    # 工作区树折叠态：{节点 key: 是否展开}
+    workspace_tree_expansion = ConfigItem("UI", "WorkspaceTreeExpansion", {})
     pet_size = OptionsConfigItem("UI", "PetSize", "small", OptionsValidator(["small", "medium", "large"]))
 
     # ========== 会话项目管理 ==========
     current_project = ConfigItem("Session", "CurrentProject", "默认项目")
 
-    # ========== 欢迎卡片模式（sessions / changelog）==========
-    welcome_mode = OptionsConfigItem("UI", "WelcomeMode", "sessions", OptionsValidator(["sessions", "changelog"]))
+    # ========== 欢迎卡片模式（sessions / 插件注册 tab）==========
+    # 内置 mode 仅保留 sessions；其余（📜 更新 等）由插件注册，禁用插件后自动消失。
+    welcome_mode = OptionsConfigItem("UI", "WelcomeMode", "sessions", OptionsValidator(["sessions"]))
     # 插件注册的欢迎 tab 记忆：welcome_mode 的 OptionsValidator.correct 会把
     # 插件 mode_key 纠正回 sessions，无法复用；用独立无验证器字段存任意字符串。
     welcome_plugin_tab = ConfigItem("UI", "WelcomePluginTab", "")
+
+    # 侧边栏折叠态记忆：仅记用户手动操作（标题栏按钮/拖拽把手松手）的终态，
+    # 挤压等自动折叠不落盘，重启恢复用户意图而非临时状态
+    ui_sidebar_collapsed = ConfigItem("UI", "SidebarCollapsed", False, BoolValidator())
+    # 工作台显隐记忆：仅记用户手动开关（标题栏「右侧边栏」按钮）终态
+    ui_workbench_visible = ConfigItem("UI", "WorkbenchVisible", False, BoolValidator())
 
     # ========== LLM API 服务配置 ==========
     llm_api_enabled = ConfigItem("LLM", "APIEnabled", False, BoolValidator())
@@ -430,44 +440,28 @@ class Settings(QConfig):
     # ========== 插件系统配置 ==========
     enabled_plugins = ConfigItem("Plugin", "EnabledPlugins", [])
     disabled_plugins = ConfigItem("Plugin", "DisabledPlugins", [])
+    # 组件级禁用（D9）：["plugin:component", ...]，如 "calendar:hooks"
+    disabled_plugin_components = ConfigItem("Plugin", "DisabledComponents", [])
 
-    # ========== Gateway 通讯平台配置 ==========
-    # 企业微信
-    gateway_wecom_enabled = ConfigItem("Gateway", "WeCom/Enabled", False, BoolValidator())
-    gateway_wecom_bot_id = ConfigItem("Gateway", "WeCom/BotID", "")
-    gateway_wecom_secret = ConfigItem("Gateway", "WeCom/Secret", "")
-    gateway_wecom_websocket_url = ConfigItem("Gateway", "WeCom/WebSocketURL", "wss://openws.work.weixin.qq.com")
+    # ========== Hook 安全配置（A2） ==========
+    # python hook「标准路径」白名单扩展（叠加在内置基座 app.hooks/app.utils 之上）
+    safe_python_modules = ConfigItem("Hooks", "SafePythonModules", [])
+    # http hook 是否放行私网地址（默认拦截 127/8、10/8、172.16/12、192.168/16、169.254/16、::1）
+    hook_allow_private_network = ConfigItem("Hooks", "AllowPrivateNetwork", False, BoolValidator())
 
-    # 钉钉
-    gateway_dingtalk_enabled = ConfigItem("Gateway", "DingTalk/Enabled", False, BoolValidator())
-    gateway_dingtalk_client_id = ConfigItem("Gateway", "DingTalk/ClientID", "")
-    gateway_dingtalk_client_secret = ConfigItem("Gateway", "DingTalk/ClientSecret", "")
+    # ========== 插件市场安全配置（C1） ==========
+    # 市场源 url 类型允许的 git host 扩展（叠加在内置 github/gitlab/gitee/bitbucket/gitcode 之上，
+    # 内网 git 源显式加白用）
+    marketplace_allowed_git_hosts = ConfigItem("Marketplace", "AllowedGitHosts", [])
 
-    # Telegram
-    gateway_telegram_enabled = ConfigItem("Gateway", "Telegram/Enabled", False, BoolValidator())
-    gateway_telegram_token = ConfigItem("Gateway", "Telegram/Token", "")
-    gateway_telegram_require_mention = ConfigItem("Gateway", "Telegram/RequireMention", True, BoolValidator())
+    # ========== 插件覆盖策略（同名覆盖显性化） ==========
+    # false 时用户目录同名插件跳过、系统版生效；默认 true 保 junction 部署工作流
+    allow_user_override = ConfigItem("Plugin", "AllowUserOverride", True, BoolValidator())
 
-    # Discord
-    gateway_discord_enabled = ConfigItem("Gateway", "Discord/Enabled", False, BoolValidator())
-    gateway_discord_token = ConfigItem("Gateway", "Discord/Token", "")
-    gateway_discord_require_mention = ConfigItem("Gateway", "Discord/RequireMention", True, BoolValidator())
-
-    # WhatsApp (Twilio)
-    gateway_whatsapp_enabled = ConfigItem("Gateway", "WhatsApp/Enabled", False, BoolValidator())
-    gateway_whatsapp_account_sid = ConfigItem("Gateway", "WhatsApp/AccountSID", "")
-    gateway_whatsapp_auth_token = ConfigItem("Gateway", "WhatsApp/AuthToken", "")
-    gateway_whatsapp_from_number = ConfigItem("Gateway", "WhatsApp/FromNumber", "")
-
-    # 飞书
-    gateway_feishu_enabled = ConfigItem("Gateway", "Feishu/Enabled", False, BoolValidator())
-    gateway_feishu_app_id = ConfigItem("Gateway", "Feishu/AppID", "")
-    gateway_feishu_app_secret = ConfigItem("Gateway", "Feishu/AppSecret", "")
-
-    # Slack
-    gateway_slack_enabled = ConfigItem("Gateway", "Slack/Enabled", False, BoolValidator())
-    gateway_slack_bot_token = ConfigItem("Gateway", "Slack/BotToken", "")
-    gateway_slack_app_token = ConfigItem("Gateway", "Slack/AppToken", "")
+    # ========== MCP/LSP 启动确认白名单（P1-3） ==========
+    # 键格式 "<kind>:<plugin>:<server>"（如 "mcp:user-custom:fetch"），
+    # 用户对非内置源 server 首次启动点「允许」后写入；拒绝仅本会话生效不落盘
+    confirmed_plugin_servers = ConfigItem("Plugin", "ConfirmedPluginServers", [])
 
     # ========== Gitee 图床配置 ==========
     gitee_enabled = ConfigItem("Gitee", "Enabled", True, BoolValidator())
@@ -519,6 +513,66 @@ class Settings(QConfig):
     # 窗口几何/面板宽度不做记忆（打开时固定默认 960x640 居中 + panel 280），
     # 原 tab_panel_width / tab_panel_collapsed / tab_manager_geometry 配置项已移除
     window_always_on_top = ConfigItem("UI", "WindowAlwaysOnTop", False, BoolValidator())
+
+    # ========== 渲染与性能（Webview）==========
+    # 说明：本组配置在 main.py 启动最早期由 app/utils/render_env.py 裸 JSON
+    # 读取并换算为环境变量，QtWebEngine 初始化后修改无效 —— **所有项均重启生效**。
+    # 默认值 = 历史 main.py 硬编码行为；"auto" 档沿用旧检测链
+    # （DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL 环境变量 → ~/.drifox 标记文件）。
+    # 渲染后端（**已移除 auto 档** —— 它不检测机器，只是读 ~/.drifox/software_render
+    # 标记文件，名不副实）。默认 = software（WARP，CPU 光栅，不碰显卡驱动）：
+    # 出厂即最稳路径，硬件档由用户显式选择。
+    # vulkan / d3d9 / swiftshader 是三个排障档（见 render_env._ANGLE_PLATFORM 注释）：
+    # 仅「显卡驱动有问题」时试 —— 驱动支持不全可能黑屏（vulkan / d3d9）；
+    # swiftshader = Qt 走 WARP + Chromium 走自带 CPU 光栅的双保险。
+    # 兼容：历史配置里残留的 "auto"、手改的非法值一律按出厂默认 software 处理
+    # （render_env 裸读原始值，旧检测链已删除）。
+    # hardware 档默认附加 --disable-gpu-compositing（GPU 光栅 + CPU 合成，规避
+    # 双合成器纹理交换闪烁，2026-09-11），ExtraChromiumFlags 可覆盖。
+    render_backend = OptionsConfigItem(
+        "Render",
+        "RenderBackend",
+        "software",
+        OptionsValidator(["software", "hardware", "software_gl", "vulkan", "d3d9", "swiftshader"]),
+    )
+    # WebGL 解禁（3D 图形需要）：auto / on / off
+    render_webgl = OptionsConfigItem(
+        "Render",
+        "WebglEnabled",
+        "auto",
+        OptionsValidator(["auto", "on", "off"]),
+    )
+    # Chromium renderer 进程硬上限（内存治理核心项）
+    render_renderer_process_limit = RangeConfigItem(
+        "Render", "RendererProcessLimit", 6, RangeValidator(1, 32)
+    )
+    # 单 renderer JS 堆上限（MB），防单页膨胀
+    render_js_heap_mb = RangeConfigItem("Render", "JsHeapMb", 128, RangeValidator(64, 1024))
+    # Chromium 低内存模式：压低渲染缓冲/缓存（省 50-150MB，抗锯齿略降）。
+    # 默认开，但 hardware 档未显式设置时默认关（真实 GPU 光栅下降级 tile 策略
+    # 会加剧合成错位，见 render_env.compute_settings）。
+    render_low_end_device_mode = ConfigItem("Render", "LowEndDeviceMode", True, BoolValidator())
+    # 合成器平滑滚动动画（默认关闭：外层滚动由 Qt 承载，卡内滚动只是安全网场景）
+    render_smooth_scrolling = ConfigItem("Render", "SmoothScrolling", False, BoolValidator())
+    # 2D canvas 抗锯齿（默认关闭：echarts 软件光栅下省内存提速，锯齿微增）
+    render_canvas_aa = ConfigItem("Render", "CanvasAA", False, BoolValidator())
+    # 后台渲染节流：关（默认，Chromium 原生节流）/ 开 ——
+    # 追加 --disable-renderer-backgrounding + --disable-backgrounding-occluded-windows。
+    # 长对话里离屏卡片被降优先级导致的流式卡顿可开，代价是离屏卡片回收变慢。
+    render_disable_background_throttling = ConfigItem(
+        "Render", "DisableBackgroundThrottling", False, BoolValidator()
+    )
+    # 共享 GL 上下文（Qt.AA_ShareOpenGLContexts）：默认开，省约 12.7% per-view 常驻
+    # 内存；代价是全部消息卡共用一个 GL 上下文。多卡/图表闪烁排查时可关掉验证。
+    render_share_gl_contexts = ConfigItem("Render", "ShareGLContexts", True, BoolValidator())
+    # 禁用的 Chromium feature 列表（翻译/媒体路由/优化提示/窗口遮挡计算）
+    render_disabled_features = ConfigItem(
+        "Render",
+        "DisabledFeatures",
+        "Translate,MediaRouter,optimizeHints,CalculateNativeWinOcclusion",
+    )
+    # 高级：追加任意 Chromium 开关（置于内置 flags 末尾，同 flag 后者覆盖前者）
+    render_extra_flags = ConfigItem("Render", "ExtraChromiumFlags", "")
 
 
 def update_theme_options():

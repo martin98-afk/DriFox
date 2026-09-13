@@ -12,13 +12,6 @@ from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.core import window_registry
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 @pytest.fixture()
 def widget(qtbot, monkeypatch):

@@ -2,7 +2,7 @@
 """
 后台任务管理器 — 平台级基础设施（主程序侧，插件热重载不触碰）
 
-从 plugins/system/tools/terminal_tools.py 迁出：BackgroundTaskManager 持有
+从 plugins/system-tools/tools/terminal_tools.py 迁出：BackgroundTaskManager 持有
 运行中的后台任务（_tasks/_instance 单例）。若留在插件模块，watcher 全量重扫
 （任意插件文件被编辑）会重新 exec 模块 → 单例归零 → 正在运行的任务"消失"
 （进程还在跑但 stop/logs/list 全部找不到，无法管理 + 资源泄漏）。
@@ -375,12 +375,3 @@ PID: {task.pid}
 
         return "\n".join(lines)
 
-    def cleanup_completed(self):
-        """清理已结束且超过 1 小时的僵尸任务"""
-        with self._manager_lock:
-            to_remove = []
-            for task_id, task in self._tasks.items():
-                if task.status in ("stopped", "completed") and (time.time() - task.start_time) > 3600:
-                    to_remove.append(task_id)
-            for task_id in to_remove:
-                del self._tasks[task_id]

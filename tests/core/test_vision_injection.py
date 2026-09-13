@@ -25,6 +25,21 @@ if str(PROJECT_ROOT) not in sys.path:
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+@pytest.fixture(autouse=True)
+def _stub_tool_registry(monkeypatch):
+    """测试环境不加载插件，真实 registry 里没有 read → provides_image_tools 为空。
+
+    stub 成含 read 的集合，保证本文件单独跑与全量跑行为一致。
+    （异常回退用例内部会再覆盖此 stub。）
+    """
+    monkeypatch.setattr(
+        "app.tools.registry.ToolRegistry.get_instance",
+        lambda: type("FakeReg", (), {
+            "provides_image_tools": lambda self: frozenset({"read"})
+        })(),
+    )
+
+
 def _make_vision_worker(model: str):
     """轻量构造 OpenAIChatWorker（__new__ 绕过 __init__，仅初始化视觉注入路径依赖）。"""
     from app.core.workers.chat_worker import OpenAIChatWorker
@@ -206,23 +221,22 @@ class TestProtocolAPathExtraction:
 class TestNonVisionHint:
     """T25-5：非视觉模型 + 视觉工具成功 → 追加"不支持视觉"提示"""
 
-    def test_non_vision_hint_appended(self):
-        """minimax-m2.5 + read 成功 → tool 消息追加不支持视觉提示"""
+    def test_non_vision_text_result_no_hint(self):
+        """非视觉 + read 普通文本（无图像载荷）→ 不追加不支持视觉提示"""
         w = _make_vision_worker("minimax-m2.5")
-        tool_msg = {"role": "tool", "name": "read", "content": "截图完成"}
+        tool_msg = {"role": "tool", "name": "read", "content": "普通文本内容"}
         current_messages = [
-            {"role": "user", "content": "截图给我看"},
+            {"role": "user", "content": "读下这个文件"},
             {"role": "assistant", "content": "好", "tool_calls": []},
             tool_msg,
         ]
 
         ok = w._try_inject_vision_content(tool_results=[{
-            "name": "read", "success": True, "content": "截图完成",
+            "name": "read", "success": True, "content": "普通文本内容",
         }], current_messages=current_messages, session_messages=[])
 
         assert not ok
-        assert "does not support vision" in tool_msg["content"], "应追加不支持视觉提示"
-        assert "<system-reminder>" in tool_msg["content"]
+        assert "does not support vision" not in tool_msg["content"], "无图像载荷不应追加提示"
 
     def test_non_vision_read_image_hint(self):
         """非视觉 + read 图片（image_data）→ 同样提示"""
@@ -236,12 +250,89 @@ class TestNonVisionHint:
         assert "does not support vision" in tool_msg["content"]
 
     def test_non_vision_hint_idempotent(self):
-        """重复调用不重复追加提示"""
+        """重复调用不重复追加提示（image_data 结果）"""
         w = _make_vision_worker("minimax-m2.5")
-        tool_msg = {"role": "tool", "name": "read", "content": "截图完成"}
+        tool_msg = {"role": "tool", "name": "read", "content": "[图片: x.png]"}
         current_messages = [{"role": "user", "content": "x"}, tool_msg]
-        tr = [{"name": "read", "success": True, "content": "截图完成"}]
+        tr = [_read_result_with_image()]
 
         w._try_inject_vision_content(tr, current_messages, session_messages=[])
         w._try_inject_vision_content(tr, current_messages, session_messages=[])
         assert tool_msg["content"].count("does not support vision") == 1
+
+
+class TestVisionNoticeSuppression:
+    """read 文本结果不应追加 Vision Notice（_build_result_dict 注入判定）"""
+
+    @staticmethod
+    def _make_worker(model: str):
+        from app.core.workers.chat_worker import OpenAIChatWorker
+
+        w = OpenAIChatWorker.__new__(OpenAIChatWorker)
+        w.llm_config = {"模型名称": model}
+        w._take_tool_phases = lambda call_id: {}
+        return w
+
+    @staticmethod
+    def _fake_registry(monkeypatch):
+        monkeypatch.setattr(
+            "app.tools.registry.ToolRegistry.get_instance",
+            lambda: type("FakeReg", (), {
+                "provides_image_tools": lambda self: frozenset({"read"})
+            })(),
+        )
+
+    @staticmethod
+    def _set_caps(monkeypatch, supports_vision: bool):
+        import app.core.model_capabilities as mc
+
+        monkeypatch.setattr(
+            mc, "get_model_capabilities", lambda name: {"supports_vision": supports_vision}
+        )
+
+    def _build(self, monkeypatch, result_obj, model="gpt-4o", vision=True):
+        self._fake_registry(monkeypatch)
+        self._set_caps(monkeypatch, vision)
+        w = self._make_worker(model)
+        return w._build_result_dict("call-1", "read", {"path": "x.txt"}, str(result_obj), True, 1, result_obj)
+
+    def test_read_text_no_vision_notice(self, monkeypatch):
+        """视觉模型 + read 文本（无图像载荷）→ 不追加 Vision Notice"""
+        from app.tools.result import ToolResult
+
+        result = self._build(monkeypatch, ToolResult(True, content="#File: x.txt\nhello"))
+        assert "Vision Notice" not in result["content"]
+        assert "does not support vision" not in result["content"]
+
+    def test_read_image_has_vision_notice(self, monkeypatch):
+        """视觉模型 + read 图片（image_data 协议 B）→ 追加 Vision Notice"""
+        from app.tools.result import ToolResult
+
+        obj = ToolResult(True, content="[图片: a.png]", image_data={"mime": "image/png", "data": "aGk="})
+        result = self._build(monkeypatch, obj)
+        assert "Vision Notice" in result["content"]
+
+    def test_protocol_a_path_has_vision_notice(self, monkeypatch):
+        """视觉模型 + 协议 A（content dict 带 absolute_path）→ 追加 Vision Notice"""
+        from app.tools.result import ToolResult
+
+        obj = ToolResult(True, content={"absolute_path": "C:/tmp/shot.png"})
+        result = self._build(monkeypatch, obj)
+        assert "Vision Notice" in result["content"]
+
+    def test_non_vision_model_image_notice(self, monkeypatch):
+        """非视觉模型 + read 图片 → 追加不支持视觉提示（而非 Vision Notice）"""
+        from app.tools.result import ToolResult
+
+        obj = ToolResult(True, content="[图片: a.png]", image_data={"mime": "image/png", "data": "aGk="})
+        result = self._build(monkeypatch, obj, model="minimax-m2.5", vision=False)
+        assert "Vision Notice" not in result["content"]
+        assert "不支持视觉" in result["content"]
+
+    def test_result_obj_none_no_crash(self, monkeypatch):
+        """result_obj 为 None（异常路径）→ 不追加提示且不崩溃"""
+        self._fake_registry(monkeypatch)
+        self._set_caps(monkeypatch, True)
+        w = self._make_worker("gpt-4o")
+        result = w._build_result_dict("call-1", "read", {}, "Tool execution error: x", False, 1, None)
+        assert "Vision Notice" not in result["content"]

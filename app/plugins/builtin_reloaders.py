@@ -17,30 +17,13 @@ from typing import Any
 from loguru import logger
 
 from app.core.builtin_commands import reload_agent_commands, reload_all_commands
-from app.plugins.kernel import ComponentReloaderRegistry, ReloadContext
+from app.plugins.kernel import KNOWN_COMPONENTS, ComponentReloaderRegistry, ReloadContext
 from app.utils.utils import invalidate_skills_cache
 
-# 本模块注册的组件全集（= kernel.KNOWN_COMPONENTS）
-RELOADED_COMPONENTS = {
-    "agents",
-    "hooks",
-    "commands",
-    "themes",
-    "skills",
-    "mcp",
-    "lsp",
-    "ui",
-    "tools",
-    "providers",
-    "team_templates",
-    "model_adapters",
-    "loop_policies",
-    "hook_policies",
-    "storages",
-    "serializers",
-    "gateways",
-    "engines",
-}
+# 本模块注册的组件全集 —— 单一事实源为 kernel.KNOWN_COMPONENTS（继承全集：
+# 新增组件类型只需在 kernel 登记即自动出现在此处，避免双份漂移）。
+# 历史：本集合曾手抄自 kernel 且缺 hook_policies，导致 G1 归因链断裂。
+RELOADED_COMPONENTS = set(KNOWN_COMPONENTS)
 
 _BUILTIN_REGISTERED: list = []  # 强引用已注册的 registry 对象（防 GC 后 id 复用误判）
 
@@ -143,6 +126,13 @@ def _reload_ui(ctx: ReloadContext) -> Any:
         return True
     if not ctx.plugin.has_component("ui"):
         return False
+    # D9：ui 组件整类停用时只卸载、不重新挂载
+    from app.plugins.managers.plugin_manager import PluginManager
+
+    if not PluginManager.get_instance().is_component_enabled(ctx.plugin_name, "ui"):
+        UIPluginRegistry.get_instance().unload_plugin(ctx.plugin_name)
+        logger.info(f"[builtin_reloaders] ui 组件已停用，已卸载: {ctx.plugin_name}")
+        return True
     UIPluginRegistry.get_instance().reload_plugin(ctx.plugin_name, ctx.plugin.path)
     return True
 
@@ -190,8 +180,14 @@ def _reload_providers(ctx: ReloadContext) -> Any:
 
 
 def _reload_team_templates(ctx: ReloadContext) -> Any:
-    """team_templates 分支：懒加载，无缓存需失效 — 记日志即成功"""
-    logger.debug(f"[builtin_reloaders] team_templates for '{ctx.plugin_name}' (lazy)")
+    """team_templates 分支：无缓存可失效，读取时实时过滤
+
+    模板不驻留内存——TemplateManager.list_templates / load 每次都按
+    _template_sources() 现读磁盘并应用组件级 + 细项级过滤，因此开关本身
+    就是立即生效的，这里无需做任何事。返回 True 表示「该组件已处理」，
+    不代表有缓存被刷新。
+    """
+    logger.debug(f"[builtin_reloaders] team_templates for '{ctx.plugin_name}' (read-through, no cache)")
     return True
 
 

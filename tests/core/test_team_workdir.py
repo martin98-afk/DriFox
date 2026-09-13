@@ -29,23 +29,13 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.core import team_manager as tm_mod
-
-# 模块导入时缓存真实 get_instance（对齐 test_team_project.py 的隔离防护）
-_ORIG_GET_INSTANCE = tm_mod.TeamManager.__dict__["get_instance"]
 
 _MAIN_WIDGET = Path(__file__).resolve().parent.parent.parent / "app" / "main_widget.py"
+# 工作树插件化后 _switch_to_worktree / _restore_main_repo 的实现在 WorktreeService（门面转发）
+_WORKTREE_SERVICE = (
+    Path(__file__).resolve().parent.parent.parent / "plugins" / "worktree-manager" / "ui" / "service.py"
+)
 
-
-@pytest.fixture
-def fresh_tm(tmp_path, monkeypatch):
-    """指向 tmp_path 的全新 TeamManager 实例（隔离，不污染真实 ~/.drifox/）。"""
-    monkeypatch.setattr(tm_mod.TeamManager, "get_instance", _ORIG_GET_INSTANCE)
-    monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path))
-    tm_mod.TeamManager._instance = None
-    tm = tm_mod.TeamManager.get_instance()
-    yield tm
-    tm_mod.TeamManager._instance = None
 
 
 def _team_file(tm, team_name: str) -> Path:
@@ -301,11 +291,20 @@ class TestTeamWorkdirInjectPoints:
         assert "_broadcast_team_workdir" not in calls, "接收方不应转发广播（防循环）"
 
     def test_workdir_change_triggers_broadcast(self):
-        """B7: 工作目录/工作树变更入口应广播团队 workdir。"""
+        """B7: 工作目录/工作树变更入口应广播团队 workdir。
+
+        工作树插件化后：_on_working_dir_changed 仍在 main_widget；
+        _switch_to_worktree / _restore_main_repo 是门面（实现体在 WorktreeService），
+        广播调用随实现迁移，静态校验跟随源码位置。
+        """
         text = _MAIN_WIDGET.read_text(encoding="utf-8")
-        for method in ("_on_working_dir_changed", "_switch_to_worktree", "_restore_main_repo"):
-            body = _method_body(text, method)
-            assert "_broadcast_team_workdir" in body, f"{method} 未广播团队 workdir"
+        body = _method_body(text, "_on_working_dir_changed")
+        assert "_broadcast_team_workdir" in body, "_on_working_dir_changed 未广播团队 workdir"
+
+        svc_text = _WORKTREE_SERVICE.read_text(encoding="utf-8")
+        for method in ("switch_to_worktree", "restore_main_repo"):
+            svc_body = _method_body(svc_text, method)
+            assert "_broadcast_team_workdir" in svc_body, f"WorktreeService.{method} 未广播团队 workdir"
 
     def test_team_join_applies_team_workdir(self):
         """B7: 团队成员加入/创建路径应读取并应用团队级 workdir。"""

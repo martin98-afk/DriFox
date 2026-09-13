@@ -1,37 +1,45 @@
 # -*- coding: utf-8 -*-
-"""轮询退役验证 — start() 不再起线程，scan_now() 仍可用
+"""watcher 单例合约验证 — 无线程语义，scan_now() 仍可用
 
 背景：tools/providers 组件变更改由 backend watchfiles 主链驱动
 （kernel KNOWN_COMPONENTS 已含 tools/providers → builtin_reloaders
-_reload_tools/_reload_providers 调 scan_now）。PluginToolWatcher.start
-与 ProviderWatcher.start 的轮询线程退役，方法保留为空转；scan_now()
-语义不变，外部调用方无需改。
+_reload_tools/_reload_providers 调 scan_now）。PluginToolWatcher 与
+ProviderWatcher 均无线程/轮询语义；ensure_plugin_tool_watcher 为
+进程级惰性单例。scan_now() 语义不变，外部调用方无需改。
 """
 
-import threading
-import time
-
-from app.plugins.loaders.plugin_tool_loader import PluginToolWatcher
+from app.plugins.loaders.plugin_tool_loader import (
+    PluginToolWatcher,
+    ensure_plugin_tool_watcher,
+)
 from app.plugins.loaders.provider_loader import ProviderWatcher
 
 
-def test_tool_watcher_start_no_thread(tmp_path, monkeypatch):
-    """PluginToolWatcher.start 不再创建轮询线程（_thread 保持 None）。"""
+def test_tool_watcher_singleton_and_no_thread(tmp_path, monkeypatch):
+    """ensure_plugin_tool_watcher 单例：两次调用同实例；watcher 无线程属性。"""
     monkeypatch.setattr("app.plugins.loaders.plugin_tool_loader._PLUGIN_ROOTS", [tmp_path])
-    w = PluginToolWatcher(roots=[tmp_path])
-    w.start()
-    time.sleep(0.2)
-    assert w._thread is None  # 不再创建轮询线程
-    w.stop()
+    # 重置进程级单例，保证本测试构造的是干净实例
+    import app.plugins.loaders.plugin_tool_loader as mod
+
+    old = mod._plugin_watcher
+    mod._plugin_watcher = None
+    try:
+        w1 = ensure_plugin_tool_watcher()
+        w2 = ensure_plugin_tool_watcher()
+        assert w1 is w2  # 单例
+        assert not hasattr(w1, "_thread"), "退役后不应有线程槽位"
+        w1.scan_now()  # 空目录 → 幂等无操作
+    finally:
+        mod._plugin_watcher = old
 
 
-def test_provider_watcher_start_no_thread(tmp_path):
-    """ProviderWatcher.start 不再创建轮询线程（_thread 保持 None）。"""
+def test_provider_watcher_no_thread(tmp_path):
+    """ProviderWatcher 无线程语义：无线程槽位，start/stop 不存在。"""
     w = ProviderWatcher(roots=[tmp_path])
-    w.start()
-    time.sleep(0.2)
-    assert w._thread is None
-    w.stop()
+    assert not hasattr(w, "_thread"), "退役后不应有线程槽位"
+    assert not hasattr(w, "stop"), "退役后不应保留 stop"
+    w.scan_now()  # 空目录 → 幂等无操作
+    assert w._root_tracker == {}
 
 
 def test_scan_now_still_works(tmp_path):

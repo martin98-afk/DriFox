@@ -28,7 +28,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SubAgentExecutor":        ("app.core.workers", "SubAgentExecutor"),
     "SubAgentManager":         ("app.core.workers", "SubAgentManager"),
     "TopicSummaryTask":        ("app.core.workers", "TopicSummaryTask"),
-    "ShellExecutionTask":      ("app.core.workers", "ShellExecutionTask"),
     # Store
     "SessionStore":            ("app.core.store", "SessionStore"),
     "SubAgentLogRepository":   ("app.core.store", "SubAgentLogRepository"),
@@ -100,7 +99,6 @@ __all__ = [
     "SubAgentExecutor",
     "SubAgentManager",
     "TopicSummaryTask",
-    "ShellExecutionTask",
     # Store
     "SessionStore",
     "SubAgentLogRepository",

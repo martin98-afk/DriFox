@@ -3,46 +3,88 @@ import logging
 import math
 import os
 import random
+import re
 import tempfile
 import threading
 import time
-import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QMimeData, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QMimeData,
+    QObject,
+    QRectF,
+    QSize,
+    QSizeF,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    Signal,
+)
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFont,
+    QFontMetrics,
     QImage,
     QInputMethodEvent,
     QKeyEvent,
     QKeySequence,
     QPainter,
     QPainterPath,
+    QPixmap,
     QPen,
     QSyntaxHighlighter,
     QTextCharFormat,
     QTextCursor,
+    QTextFormat,
+    QTextObjectInterface,
 )
-from PySide6.QtGui import QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QWidget,
+)
+from PySide6.QtGui import (
+    QShortcut,
 )
 from qfluentwidgets import ComboBox, FluentIcon, IconWidget, TextEdit, TransparentToolButton
 
 from app.widgets.stop_button import SendStopButton
 
-from app.utils.design_tokens import Colors, font_size_css
+from app.utils.design_tokens import Animations, Colors, font_size_css, qcolor_from_token
 from app.utils.utils import get_font_family_css
-from app.widgets.simple_hover_tooltip import install_hover_tooltip
+from app.widgets.simple_hover_tooltip import (
+    get_hover_filter,
+    install_hover_tooltip,
+    load_preview_pixmap,
+)
 
 logger = logging.getLogger(__name__)
+
+# 正文中的附件引用占位符：[[basename]]
+# 这是附件的 **文本表示**，服务于所有纯文本通道（toPlainText、输入历史、
+# 发送文本构建、反向同步扫描）。屏幕上的呈现由下面的 inline object 胶囊负责，
+# 二者由 SendableTextEdit.toPlainText() 双向对齐。
+_PLACEHOLDER_RE = re.compile(r"\[\[([^\]]*)\]\]")
+
+# ── inline 文件引用胶囊（QTextDocument 自定义对象）──────────────────
+# Qt 用 U+FFFC（object replacement character）在文档里代表一个 inline object。
+_FILE_MENTION_TYPE = QTextFormat.UserObject + 1
+_OBJECT_REPLACEMENT = "\ufffc"
+# 文件路径存在 charFormat 的自定义属性里（int key，见 QTextFormat.UserProperty）
+_FILE_MENTION_PATH_PROP = QTextFormat.UserProperty + 1
+
+# ── inline 助手提及胶囊（@ 智能体角色，圆角高亮胶囊）──
+_ASSISTANT_MENTION_TYPE = QTextFormat.UserObject + 2
+_ASSISTANT_MENTION_NAME_PROP = QTextFormat.UserProperty + 2
+_ASSISTANT_MENTION_COLOR_PROP = QTextFormat.UserProperty + 3
 
 # ======== 输入框 placeholder 定时轮播 tips ========
 PLACEHOLDER_TIPS = [
@@ -54,16 +96,16 @@ PLACEHOLDER_TIPS = [
     "输入 / 查看内建指令、技能与智能体",
     "Ctrl+Z 撤销 / Ctrl+Shift+Z 重做",
     # ════ 快捷键 ════
-    "Ctrl+N 新建对话，Ctrl+L 清空会话",
-    "Ctrl+Shift+G 重排分组窗口",
-    "Shift+esc 拆散所有分组",
-    "Shift+点击窗口头添加分组",
+    "Ctrl+Shift+N 新建对话，Ctrl+L 清空会话",
+    "Ctrl+N 新建窗口，Ctrl+Shift+G 重排分组窗口",
+    "Alt+Q 收起/展开左侧边栏",
+    "Alt+E 打开/关闭右侧工作台",
     # ════ 项目 ════
     "点击顶部项目名切换/新建/归档项目",
     "项目笔记自动关联，切换项目即切换笔记",
     "文档中添加文件夹作为工具工作目录",
     "/project-note 快速新建/优化项目笔记",
-    "/worktree 管理 Git 工作树并行开发",
+    "/worktree-manager 管理 Git 工作树并行开发",
     # ════ 模型与参数 ════
     "点击顶部模型名快速切换模型",
     "温度/最大Token影响回复风格",
@@ -74,7 +116,6 @@ PLACEHOLDER_TIPS = [
     "/explore 探索分析代码库结构",
     "/code-reviewer 审查代码修改并提改进建议",
     "/review 代码审查（简版）",
-    "/autoloop:config 自动循环（插件：规划→执行→归档）",
     "/leader 统筹子智能体团队协作",
     "/compaction 手动触发上下文压缩",
     "/task-executor 执行批量预设任务",
@@ -82,27 +123,19 @@ PLACEHOLDER_TIPS = [
     # ════ 技能系统 ════
     "/brainstorming 集思广益探索需求方案",
     "/tdd 测试驱动开发：红→绿→重构",
-    "/caveman 极简模式节省 Token 提升效率",
     "/diagnose 系统诊断 Bug 与性能回归",
     "/drifox-dev DriFox 专属开发技能",
     "/skill-creator 创建自定义技能",
-    "/git-commit 生成规范提交信息",
-    "/minimax-image-understanding 理解分析图片内容",
     "/ui-plugin-creator 创建自定义 UI 插件扩展界面",
     "/find-skills 搜索发现可用技能",
     "/github-ops GitHub 操作自动化",
     "/grill-me 基于代码库深度提问",
     "/grill-with-docs 结合文档深度分析",
     "/improve-codebase-architecture 分析优化架构",
-    "/session-summary 生成会话摘要",
     "/writing-plans 编写实施计划",
-    "/zoom-out 宏观视角审视项目",
-    "/triage 问题分类与优先级评估",
     "/to-issues 转 GitHub Issues",
     "/to-prd 生成产品需求文档",
     "/subagent-driven-development 子智能体驱动开发",
-    "/agent-canvas-designer 设计智能体协作蓝图",
-    "/using-superpowers 使用全部高级工具能力",
     "/dispatching-parallel-agents 并行分派子智能体",
     "/executing-plans 执行编码实施计划",
     # ════ 代码与工具 ════
@@ -114,7 +147,7 @@ PLACEHOLDER_TIPS = [
     # ════ 窗口与布局 ════
     "右上角「新建窗口」并发处理多任务",
     "「分支」按钮复制会话到新窗口",
-    "右下角展开历史会话卡片继续对话",
+    "右侧工作台「历史会话」页签继续对话",
     "记忆管理让 AI 记住你的偏好",
     "像素宠物陪伴开发，点击互动",
     # ════ 消息卡片页脚 ════
@@ -142,11 +175,6 @@ PLACEHOLDER_TIPS = [
     # ════ UI 插件系统 ════
     "UI 插件提供可热加载的组件，支持自定义按钮、面板、卡片等",
     "已安装插件：插件市场 / 文件树 / 系统清理 / Token 统计",
-    # ════ 插件与市场 ════
-    "/plugin-market 浏览安装社区插件，即装即用（含启用/禁用/卸载管理）",
-    "/system-cleaner 清理系统缓存和临时文件",
-    "/context-usage-stats Token 趋势/消息量图表",
-    "/file-tree 浏览/搜索/实时监听文件变更",
     # ════ Hook 预设 ════
     "系统 Hook 链：会话注入→安全检查→自动压缩→智能增强",
     "安全守卫在写/改文件前自动审查指令安全性",
@@ -163,9 +191,8 @@ PLACEHOLDER_TIPS = [
     "/lsp-install 安装语言服务器协议支持",
     # ════ 内建指令 ════
     "/new 新建会话 /branch 创建分支",
-    "/init 笔记 /theme 主题色 /compact 压缩",
+    "/theme 主题配色 /compact 压缩上下文",
     "/subagents 启动子智能体任务",
-    "/subagent_dag 编排多步骤 DAG 工作流",
     "/team 团队协作模式启动",
     "/title-gen 自动生成会话标题",
     "/receive-review 接收外部审查意见",
@@ -185,6 +212,7 @@ _PLACEHOLDER_ROTATE_INTERVAL_MS = 15000
 
 class SendableTextEdit(TextEdit):
     sendMessageRequested = Signal()
+    sendMessageInverseRequested = Signal()  # Ctrl+Enter 发送：繁忙时恒为设置项的另一行为
     stopMessageRequested = Signal()
     clearRequested = Signal()
     newSessionRequested = Signal()
@@ -197,14 +225,35 @@ class SendableTextEdit(TextEdit):
     atTriggered = Signal(str)  # 检测到 @ 触发，携带查询文本
     atDismissed = Signal()  # @ 触发结束
     files_dropped = Signal(list)  # list[str] 拖入/粘贴的文件路径
+    paste_image_saved = Signal(str)  # 粘贴图片后台落盘完成（跨线程刷新附件芯片用）
     enteringHistoryMode = Signal()  # 即将进入历史浏览模式（main_widget 需保存当前附件）
     historyAttachmentsRestored = Signal(list)  # 恢复附件路径列表
     historyModeExited = Signal()  # 退出历史浏览模式（main_widget 从备份恢复附件）
+    attachmentsRemoved = Signal(list)  # list[str] 正文中被用户删除的 [[basename]] 引用名
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._initializing = True
         self._glow_effect = None
+
+        # ⚠️ 状态属性前置区 —— 必须在 textChanged 连接（下方）之前初始化
+        #
+        # 以下属性全部会被 textChanged 的槽函数（_on_text_changed /
+        # _on_slash_trigger_check / _on_at_trigger_check）读取。而 textChanged
+        # 在信号连接完成的那一刻起就可能被触发：PlaceholderHighlighter 构造时的
+        # rehighlight、样式应用、文档初始化等都会让 Qt 发出内容变更信号。
+        # 一旦属性晚于连接初始化，就会在构造期间炸 AttributeError
+        # （'_SendableTextEdit' object has no attribute 'xxx'）。
+        # 因此这里集中声明，后续各功能区只保留注释、不再重复赋值。
+        self._ime_composing = False  # IME 输入法组合状态
+        self._slash_trigger_pos = -1  # / 触发位置
+        self._at_trigger_pos = -1  # @ 触发位置
+        self._setting_history_text = False  # 正在 _set_history_text 中，阻止 _on_text_changed 误触发 reset
+        self._suppress_slash_trigger = False  # 切换历史时临时阻止 / 触发
+        # 文本 → 附件 反向同步（详见 _sync_placeholder_removals）
+        self._last_placeholder_names: list[str] = []  # 上一次文本里的 [[...]] 快照
+        self._syncing_attachments = False  # 程序化改文本中：只校准快照，不上报删除
+        self._sync_attachments_enabled = True  # 总开关：批量流程整体暂停反向同步
 
         # 🛡️ R1：粘贴图片异步保存的进行中集合（threading.Event，发送前等待就绪）
         self._pending_image_saves: list = []
@@ -214,8 +263,34 @@ class SendableTextEdit(TextEdit):
         # 并发信号量：限制 PNG 编码线程数（大图 64MB 驻留 × N 线程，R1-R2）
         self._paste_save_semaphore = threading.Semaphore(2)
 
+        # ⚠️ 必须先于 textChanged.connect 初始化：
+        # _on_text_changed → _schedule_detail_sync() 会读 _detail_sync_timer；
+        # _on_text_changed → _reset_history_mode 分支会读 _history_index/_history_list。
+        # QTimer 占位为 None，下方原位置再创建实例（依赖 self 的 QObject 父对象）。
+        self._detail_sync_timer: Optional[QTimer] = None
+        self._history_list: list = []  # 最近输入历史（最新在前）
+        self._history_index: int = -1  # -1 = 不在浏览模式
+        self._history_working_line: str = ""  # 进入历史模式时保存的当前输入（退出时恢复）
+        # 卡片引用前置：_on_slash_trigger_check → _get_card() 会读 _command_card_ref
+        self._command_card_ref = None
+        self._file_mention_card_ref = None
+
         self._setup_glow_effect()
         self._apply_input_style()
+        # Fluent 美化滚动条强制隐藏：
+        # qfluentwidgets TextEdit 基类自带 SmoothScrollDelegate，会在输入框右缘
+        # 挂一条 12px 的 Fluent 竖条（SmoothScrollBar）。构造期 viewport 未定型时
+        # 原生滚动条 range 短暂 >0，会把竖条误 show；高度自适应把它压回 range=0
+        # 后，某些时序下这条竖条收不起来 → 空/单行输入框右侧出现"假滚轮"。
+        # 原生滚动条已由 QSS width:0 隐形，这里把 delegate 的 Fluent 条永久关闭。
+        try:
+            self.scrollDelegate.vScrollBar.setForceHidden(True)
+            self.scrollDelegate.hScrollBar.setForceHidden(True)
+            self.scrollDelegate.vScrollBar.hide()
+            self.scrollDelegate.hScrollBar.hide()
+        except AttributeError:
+            # qfluentwidgets 版本差异：无 delegate 时无需处理
+            pass
         # placeholder 仅用 tips 轮播，不用通用提示语
         self.setPlaceholderText(random.choice(PLACEHOLDER_TIPS))
         self.setAcceptRichText(False)
@@ -246,23 +321,24 @@ class SendableTextEdit(TextEdit):
 
         self._setup_keyboard_shortcuts()
 
-        # [[filename]] 占位符高亮
+        # [[filename]] 占位符高亮（仅对纯文本残留的 [[...]] 生效，胶囊不走这里）
         self._placeholder_highlighter = PlaceholderHighlighter(self.document())
 
-        # 命令卡片引用（由 main_widget 注入）
-        self._command_card_ref = None
-        self._slash_trigger_pos = -1  # / 触发位置
-
-        # 文件提及卡片引用（由 main_widget 注入）
-        self._file_mention_card_ref = None
-        self._at_trigger_pos = -1  # @ 触发位置
-        self._ime_composing = False  # IME 输入法组合状态
+        # inline 文件引用胶囊：注册自定义对象处理器
+        # ⚠️ 必须持有强引用（self._file_mention_object），否则被 GC 后
+        #    文档布局拿到悬空指针，绘制时直接崩溃。
+        self._file_mention_object = FileMentionObject()
+        self.document().documentLayout().registerHandler(_FILE_MENTION_TYPE, self._file_mention_object)
+        # 助手提及胶囊（@ 智能体角色）同款强引用要求
+        self._assistant_mention_object = AssistantMentionObject()
+        self.document().documentLayout().registerHandler(_ASSISTANT_MENTION_TYPE, self._assistant_mention_object)
 
         # detail 参数同步防抖（参考 / 命令触发节流：合并快速敲键 + IME 保护）
         # 值选择模式（枚举列表）每次 textChanged 都会触发 _sync_detail_params →
         # update_active_params → _refresh_value_list 重建全部 widget。打拼音时
         # 每敲一个字母 textChanged 就触发一次重建，打断输入法且浪费性能。
         # 统一 100ms 防抖：快速敲键期间只执行最后一次过滤/渲染。
+        # 前置属性区已声明 self._detail_sync_timer = None 占位；此处创建实例。
         self._detail_sync_timer = QTimer(self)
         self._detail_sync_timer.setSingleShot(True)
         self._detail_sync_timer.timeout.connect(self._on_detail_sync_timeout)
@@ -287,12 +363,11 @@ class SendableTextEdit(TextEdit):
         self._last_at_trigger_time = 0  # 上次 @ 触发时间（毫秒）
         self._at_trigger_count = 0  # @ 快速触发计数（保留用于兼容）
 
-        # 输入历史浏览
-        self._history_list: list = []  # 最近输入历史（最新在前）
-        self._history_index: int = -1  # -1 = 不在浏览模式
-        self._history_working_line: str = ""  # 进入历史模式时保存的当前输入（退出时恢复）
-        self._setting_history_text: bool = False  # 正在 _set_history_text 中，阻止 _on_text_changed 误触发 reset
-        self._suppress_slash_trigger: bool = False  # 切换历史时临时阻止 / 触发
+        # _history_list / _history_index / _history_working_line 见顶部状态属性前置区
+        #
+        # 反向同步说明：常规路径下正文不再出现 [[...]]（附件栏是唯一真相源），但两类
+        # 文本仍会带占位符 —— 历史输入记录恢复的文本、用户手动键入的引用。
+        # 这里保存「上一次文本里的占位符」快照，只在占位符数量减少时判定为用户删除。
 
         # placeholder 定时随机切换 tips
         self._placeholder_tip_timer = QTimer(self)
@@ -327,6 +402,8 @@ class SendableTextEdit(TextEdit):
 
     def _finish_initialization(self):
         """初始化完成后重置标志，允许高度调整"""
+        self._initializing = False
+        self._adjust_height_to_content()
 
     def _rotate_placeholder_tip(self):
         """定时随机切换 placeholder tips (QTimer 15s 触发 random.choice)"""
@@ -391,7 +468,6 @@ class SendableTextEdit(TextEdit):
                 return
 
             # 仅当 / 在文本开头（位置0）时触发
-            text_before_cursor = text[:cursor_pos]
 
             if not text.startswith("/"):
                 # 没有在开头
@@ -567,7 +643,11 @@ class SendableTextEdit(TextEdit):
             return
 
         try:
-            text = self.toPlainText()
+            # ⚠ 必须用原始文档文本（胶囊=U+FFFC 占 1 字符），与 textCursor 坐标
+            # 同系。override 的 toPlainText 会把胶囊展开成 "@名字 "（多字符），
+            # 混用会让 text[:cursor_pos] 切出幽灵 "@"（含胶囊自带的空白终止位
+            # 被切掉）→ 插入胶囊后每次输入都误弹 @ 卡片。
+            text = TextEdit.toPlainText(self)
             cursor = self.textCursor()
             cursor_pos = cursor.position()
 
@@ -614,6 +694,16 @@ class SendableTextEdit(TextEdit):
                     self.atDismissed.emit()
                 return
 
+            # 空白终止：@ 后的过滤词不允许包含空白。已完成的提及
+            # （如胶囊展开的 "@助手名 "）之后的正文不应再触发补全
+            if any(ch in query for ch in (" ", "\t", "\u3000")):
+                self._cancel_at_throttle()
+                self._at_trigger_pos = -1
+                if file_card and file_card.is_card_visible:
+                    file_card.dismiss()
+                    self.atDismissed.emit()
+                return
+
             self._at_trigger_pos = at_pos
             # 使用节流发射（合并快速敲键，只发最后一次）
             self._apply_at_throttle(query)
@@ -621,12 +711,68 @@ class SendableTextEdit(TextEdit):
         except Exception:
             pass
 
-    def insert_file_mention(self, file_path: str):
-        """将 @ 提及文本替换为 [[basename]] 占位符（选中文件后由 main_widget 调用）
+    def toPlainText(self) -> str:
+        """返回纯文本，inline 文件胶囊展开为 ``[[basename]]`` 形式
 
-        用户选中文件后，移除输入框中的 @query 文本并插入 [[basename]] 占位符。
-        main_widget 随后会创建 AttachmentChip。
-        发送时 _build_user_text_with_attachments 会将 [[basename]] 替换为完整路径。
+        QTextDocument 用 U+FFFC 表示 inline object，``super().toPlainText()``
+        会原样吐出 ``\\ufffc``，文件名信息就丢了。这里遍历 document 的 fragment
+        把它还原成 ``[[basename]]``，从而 **对上层完全透明** —— 命令检测、@ 检测、
+        输入历史、发送文本构建、附件反向同步等所有既有的 toPlainText() 调用点
+        拿到的字符串与旧的「字面占位符」实现完全一致，无需任何改动。
+        """
+        raw = super().toPlainText()
+        if _OBJECT_REPLACEMENT not in raw:
+            return raw
+        return self._expand_mention_objects()
+
+    def _expand_mention_objects(self) -> str:
+        """把文档中的 inline 胶囊展开为纯文本
+
+        文件胶囊 → ``[[basename]]``；助手胶囊 → ``@名字``（保留 @ 前缀，
+        发送链路的 @提及检测依赖它）。
+        """
+        parts: list[str] = []
+        block = self.document().begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    fmt = frag.charFormat()
+                    if fmt.objectType() == _FILE_MENTION_TYPE:
+                        path = fmt.stringProperty(_FILE_MENTION_PATH_PROP) or ""
+                        parts.append(f"[[{os.path.basename(path)}]]")
+                    elif fmt.objectType() == _ASSISTANT_MENTION_TYPE:
+                        name = fmt.stringProperty(_ASSISTANT_MENTION_NAME_PROP) or ""
+                        parts.append(f"@{name}")
+                    else:
+                        parts.append(frag.text())
+                it += 1
+            parts.append("\n")
+            block = block.next()
+        text = "".join(parts)
+        # 末位换行是块分隔符，不是文档内容
+        return text[:-1] if text.endswith("\n") else text
+
+    @staticmethod
+    def _make_mention_format(file_path: str) -> QTextCharFormat:
+        """构造 inline 文件胶囊的字符格式（objectType + 路径属性 + tooltip）
+
+        路径存在自定义 property 里，读取侧统一用 ``fmt.stringProperty(key)``。
+        ⚠️ 写入只能用 ``setProperty``：Qt 只有只读的 ``stringProperty(int)``，
+        没有配对的 setter（``setStringProperty`` 并不存在）。
+        """
+        fmt = QTextCharFormat()
+        fmt.setObjectType(_FILE_MENTION_TYPE)
+        fmt.setProperty(_FILE_MENTION_PATH_PROP, file_path)
+        fmt.setToolTip(file_path)
+        return fmt
+
+    def insert_file_mention(self, file_path: str):
+        """@ 提及选中文件 → 把已键入的 @query 替换为一枚 inline 文件胶囊
+
+        与拖放/粘贴走同一个通道（见 insertFromMimeData），因此 @ 选中的文件
+        在正文里的呈现也是圆角胶囊，而非字面 ``[[basename]]``。
         """
         cursor = self.textCursor()
         cursor_pos = cursor.position()
@@ -635,8 +781,13 @@ class SendableTextEdit(TextEdit):
         if trigger_pos >= 0:
             cursor.setPosition(trigger_pos)
             cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
-            basename = os.path.basename(file_path)
-            cursor.insertText(f"[[{basename}]] ")
+
+        # 先插入 U+FFFC（带 object 格式），再插一个普通空格 —— 两步必须分开：
+        # insertText(text, fmt) 会把 fmt 应用到整段文本，若空格也带上 objectType，
+        # 空格会被当成 inline object 渲染成第二个胶囊。
+        cursor.insertText(_OBJECT_REPLACEMENT, self._make_mention_format(file_path))
+        cursor.insertText(" ")
+        self.setTextCursor(cursor)
 
         self._cancel_at_throttle()
         self._at_trigger_pos = -1
@@ -644,10 +795,40 @@ class SendableTextEdit(TextEdit):
 
     # ==================== 命令文本插入 ====================
 
+    def insert_assistant_mention(self, name: str, color: str = ""):
+        """@ 提及选中助手 → 把已键入的 @query 替换为一枚助手胶囊
+
+        胶囊在文档里占一个字符（U+FFFC），整体删除不可拆坏；
+        ``toPlainText()`` 展开为 ``@名字``，发送后 PreUserMessage hook
+        依旧能识别并切换会话临时助手。
+        """
+        cursor = self.textCursor()
+        cursor_pos = cursor.position()
+        trigger_pos = self._at_trigger_pos
+
+        fmt = QTextCharFormat()
+        fmt.setObjectType(_ASSISTANT_MENTION_TYPE)
+        fmt.setProperty(_ASSISTANT_MENTION_NAME_PROP, name)
+        fmt.setProperty(_ASSISTANT_MENTION_COLOR_PROP, color or "#7C3AED")
+        fmt.setToolTip(f"临时使用助手：{name}")
+
+        if trigger_pos >= 0:
+            cursor.setPosition(trigger_pos)
+            cursor.setPosition(cursor_pos, QTextCursor.KeepAnchor)
+
+        # 与 insert_file_mention 同款两步插入：胶囊与后续空格分开，
+        # 避免空格带上 objectType 被渲染成第二个胶囊
+        cursor.insertText(_OBJECT_REPLACEMENT, fmt)
+        cursor.insertText(" ")
+        self.setTextCursor(cursor)
+
+        self._cancel_at_throttle()
+        self._at_trigger_pos = -1
+        self.setFocus(Qt.OtherFocusReason)
+
     def insert_command_text(self, item_name: str):
         """将选中的命令/技能文本插入输入框（由 main_widget 调用）"""
         cursor = self.textCursor()
-        text = self.toPlainText()
         cursor_pos = cursor.position()
 
         trigger_pos = self._slash_trigger_pos
@@ -1029,6 +1210,8 @@ class SendableTextEdit(TextEdit):
                 text = entry["text"]
                 self._suppress_slash_trigger = text.strip().startswith("/")
                 self.setPlainText(text)
+                # [[basename]] 字面占位符转回 inline 胶囊（依条目附件路径还原）
+                self.convert_placeholders_to_mentions(entry.get("attachments", []))
                 self.historyAttachmentsRestored.emit(entry.get("attachments", []))
                 # 选中全部文本，方便继续编辑
                 cursor = self.textCursor()
@@ -1109,10 +1292,260 @@ class SendableTextEdit(TextEdit):
             idx = self._history_index
             if idx < len(self._history_list) and self._history_list[idx].get("text", "") != self.toPlainText():
                 self._reset_history_mode(clear_attachments=False)
+        # 文本 → 附件 反向同步：正文里的 [[basename]] 被删掉时通知附件栏
+        self._sync_placeholder_removals()
         # detail 模式参数同步（防抖：合并快速敲键，参考 / 命令触发节流）
         # IME 组合进行中（打拼音）跳过同步，避免每次敲键重建值列表打断输入法；
         # 提交后（preedit 清空）textChanged 再次触发，走防抖后正常同步。
         self._schedule_detail_sync()
+
+    # ==================== 文本 → 附件 反向同步 ====================
+
+    def _sync_placeholder_removals(self):
+        """扫描正文中的 [[basename]]，与上一次快照做差集并上报被删除的引用
+
+        这是「删除文字里的附件引用 → 附件栏同步删除」的实现。判定规则：
+
+        - **多重集差，不是集合差**：两个同名文件各自占一个占位符，删掉其中一个
+          不应把另一个也带走。因此逐个消耗式做差，而非简单 set 相减。
+        - **只在减少时上报**：``[[a]] [[b]]`` 变成 ``[[a]]`` 才上报 ``b``；
+          新增占位符不上报（附件只能由附件栏或拖放产生，正文打字不会凭空造附件）。
+        - **基线校准**：程序化设置文本（历史浏览切换、附件→文本同步）时只更新
+          快照不上报，否则「恢复历史文本」会被误判成「用户删光了引用」→ 附件被清空。
+        """
+        if not self._sync_attachments_enabled:
+            return
+
+        current = _PLACEHOLDER_RE.findall(self.toPlainText())
+        last = self._last_placeholder_names
+
+        # 程序化改文本：只校准基线
+        if self._setting_history_text or self._syncing_attachments:
+            self._last_placeholder_names = current
+            return
+        # IME 组合期间 preedit 未提交，文本处于不稳定中间态，等提交后再判
+        if self._ime_composing:
+            return
+        if current == last:
+            return
+
+        remaining = list(current)
+        removed: list[str] = []
+        for name in last:
+            if name in remaining:
+                remaining.remove(name)
+            else:
+                removed.append(name)
+
+        self._last_placeholder_names = current
+        if removed:
+            self.attachmentsRemoved.emit(removed)
+
+    def remove_placeholder(self, basename: str) -> bool:
+        """删除正文中第一个 [[basename]] 占位符（附件 → 文本 方向的同步）
+
+        与 :meth:`_sync_placeholder_removals` 互补：点 chip 的 × 删除附件时，
+        正文里对应的引用也应一并消失。
+
+        只删第一个匹配 —— 旧实现用 ``str.replace(placeholder, "")`` 会把同名
+        占位符一次删光，两个同名文件删一个会连带删掉另一个的引用。
+
+        Returns:
+            是否实际发生了改动
+        """
+        pattern = re.compile(r"\[\[" + re.escape(basename) + r"\]\][ \u3000]?")
+        current = self.toPlainText()
+        new_text = pattern.sub("", current, count=1)
+        if new_text == current:
+            return False
+
+        cursor_pos = self.textCursor().position()
+        # 守卫：setPlainText 会同步触发 textChanged → _sync_placeholder_removals。
+        # 不加守卫的话，这次程序化删除会被误判成「用户删了引用」，反过来再删一遍附件。
+        self._syncing_attachments = True
+        try:
+            self.setPlainText(new_text)
+        finally:
+            self._syncing_attachments = False
+
+        # setPlainText 会把光标重置到开头，恢复原位置（截断到新文本长度内）
+        cursor = self.textCursor()
+        cursor.setPosition(max(0, min(cursor_pos, len(new_text))))
+        self.setTextCursor(cursor)
+        return True
+
+    def remove_mention_objects(self, path: str) -> bool:
+        """删除正文中指向 path 的 inline 文件胶囊（附件 → 正文 方向的同步）
+
+        与 :meth:`_sync_placeholder_removals` 互补：点附件栏 chip 的 × 删除附件时，
+        正文里对应的胶囊也应一并消失。
+
+        Returns:
+            是否实际删除了
+        """
+        doc = self.document()
+        spans: list[tuple[int, int]] = []
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    fmt = frag.charFormat()
+                    if (
+                        fmt.objectType() == _FILE_MENTION_TYPE
+                        and (fmt.stringProperty(_FILE_MENTION_PATH_PROP) or "") == path
+                    ):
+                        spans.append((frag.position(), frag.position() + frag.length()))
+                it += 1
+            block = block.next()
+
+        if not spans:
+            return False
+
+        last = doc.characterCount() - 1
+        # 守卫：删除会同步触发 textChanged → _sync_placeholder_removals，
+        # 不抑制的话这次程序化删除会被误判成「用户删了引用」，反过来再删一遍附件。
+        self._syncing_attachments = True
+        try:
+            # 从后往前删：前面的 span 位置不会因删除而偏移
+            for start, end in reversed(spans):
+                cursor = QTextCursor(doc)
+                cursor.setPosition(start)
+                stop = end
+                # 连胶囊后紧跟的一个空格一起删，避免正文里留下一串空格
+                probe = QTextCursor(doc)
+                probe.setPosition(end)
+                probe.setPosition(min(end + 1, last), QTextCursor.KeepAnchor)
+                if probe.selectedText() == " ":
+                    stop = end + 1
+                cursor.setPosition(stop, QTextCursor.KeepAnchor)
+                cursor.removeSelectedText()
+        finally:
+            self._syncing_attachments = False
+        return True
+
+    def convert_placeholders_to_mentions(self, attachments: list):
+        """把正文中的 [[basename]] / @名字 字面文本转回 inline 胶囊
+
+        历史条目 / working line 恢复走 setPlainText（纯文本通道），胶囊信息
+        在保存时已被 toPlainText() 展开成 [[basename]] / @名字。这里还原：
+
+        - 文件占位符：依条目保存的附件路径，与「同名文件逐个消耗」的发送侧
+          替换（_build_user_text_with_attachments）互为逆操作。只还原能匹配
+          到路径的占位符；手动键入的无路径引用保持字面，发送时由占位符
+          替换逻辑兜底。
+        - 助手胶囊：名字精确匹配当前 @ 提供者条目才转（颜色取列表值），
+          匹配不到保持字面——发送链路 PreUserMessage hook 认 @名字 字面
+          文本，不转也不影响功能，纯视觉差异。
+
+        必须在 _setting_history_text / _syncing_attachments 守卫内调用：
+        替换触发的 textChanged 在守卫内只校准反向同步快照，不会误报；
+        且转换后 toPlainText() 重新展开为同样的 [[basename]] / @名字，
+        快照不变。
+        """
+        name_colors = self._collect_assistant_name_colors()
+        if not attachments and not name_colors:
+            return
+        # basename → 待消耗路径队列（同名文件按占位符出现顺序逐个消耗）
+        queues: dict[str, list[str]] = {}
+        for p in attachments:
+            queues.setdefault(os.path.basename(p), []).append(p)
+
+        # 此刻文档内无胶囊对象，super().toPlainText() 与重写版等价且更省事；
+        # 文件占位符与 @名字 两种模式不重叠，span 可在同一份文本上收集
+        raw = super().toPlainText()
+        spans: list[tuple[int, int, QTextCharFormat]] = []
+        for m in _PLACEHOLDER_RE.finditer(raw):
+            queue = queues.get(m.group(1))
+            if queue:
+                # 正序消耗：正文第 N 个同名占位符 ↔ 附件列表第 N 个同名路径
+                spans.append((m.start(), m.end(), self._make_mention_format(queue.pop(0))))
+        for start, end, fmt in self._find_assistant_mention_spans(raw, name_colors):
+            spans.append((start, end, fmt))
+        if not spans:
+            return
+
+        # 从后往前替换：前面的 span 位置不会因替换而偏移
+        spans.sort(key=lambda s: s[0], reverse=True)
+        doc = self.document()
+        self._syncing_attachments = True
+        try:
+            for start, end, fmt in spans:
+                cursor = QTextCursor(doc)
+                cursor.setPosition(start)
+                cursor.setPosition(end, QTextCursor.KeepAnchor)
+                # 占位符整体换成一枚 U+FFFC；原文本自带的尾随空格保持不动
+                cursor.insertText(_OBJECT_REPLACEMENT, fmt)
+        finally:
+            self._syncing_attachments = False
+
+    def _collect_assistant_name_colors(self) -> dict[str, str]:
+        """从 @ 提及提供者拉取 名字→颜色 映射（历史恢复胶囊还原用）
+
+        与 file_mention_card._collect_mention_items 同款取数模式：
+        provider list_func 均为内存回调，同步拉取无阻塞；异常静默返回空。
+        """
+        result: dict[str, str] = {}
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            providers = UIPluginRegistry.get_instance().get_mention_providers()
+        except Exception:
+            return result
+        for provider in providers:
+            try:
+                for entry in provider.list_func() or []:
+                    name = str(entry.get("name", "")).strip()
+                    if name and name not in result:
+                        result[name] = str(entry.get("color", "")) or "#7C3AED"
+            except Exception:
+                continue
+        return result
+
+    def _find_assistant_mention_spans(
+        self, raw: str, name_colors: dict[str, str]
+    ) -> list[tuple[int, int, QTextCharFormat]]:
+        """在纯文本 raw 中定位可还原的 @名字，返回 (start, end, 格式) 列表
+
+        - 长名优先 + 重叠丢弃："阿明2" 与 "阿明" 同时在列时前者整段成胶囊，
+          不给后者留前缀残段
+        - 后边界要求名字后是串尾/空白/常见标点；前边界只挡 ASCII 字母数字与
+          @ _（邮箱、路径里的 @），中文紧邻（"问下@阿明"）放行
+        """
+        spans: list[tuple[int, int, QTextCharFormat]] = []
+        taken: list[tuple[int, int]] = []
+        _AFTER = "，。！？；：、)）】」》\"'"
+        for name in sorted(name_colors, key=len, reverse=True):
+            for m in re.finditer("@" + re.escape(name) + r"(?=$|\s|[" + re.escape(_AFTER) + r"])", raw):
+                start, end = m.start(), m.end()
+                if start > 0:
+                    prev = raw[start - 1]
+                    if prev.isascii() and (prev.isalnum() or prev in "@_"):
+                        continue
+                if any(start < e and s < end for s, e in taken):
+                    continue
+                taken.append((start, end))
+                fmt = QTextCharFormat()
+                fmt.setObjectType(_ASSISTANT_MENTION_TYPE)
+                fmt.setProperty(_ASSISTANT_MENTION_NAME_PROP, name)
+                fmt.setProperty(_ASSISTANT_MENTION_COLOR_PROP, name_colors[name])
+                fmt.setToolTip(f"临时使用助手：{name}")
+                spans.append((start, end, fmt))
+        return spans
+
+    def set_attachment_sync_enabled(self, enabled: bool):
+        """暂停 / 恢复「文本 → 附件」反向同步
+
+        发送、清空输入框等批量流程会连续改动文本与附件列表，中间态不应触发
+        反向同步（否则正文占位符随文本一起消失时，会被误判成用户删除了附件）。
+        由调用方显式决定附件去留更安全。
+
+        恢复时会把快照校准到当前文本，暂停期间的改动被忽略。
+        """
+        self._sync_attachments_enabled = bool(enabled)
+        if enabled:
+            self._last_placeholder_names = _PLACEHOLDER_RE.findall(self.toPlainText())
 
     def _schedule_detail_sync(self):
         """detail 参数同步防抖调度（参考命令卡片列表刷新方式）
@@ -1124,8 +1557,12 @@ class SendableTextEdit(TextEdit):
         """
         if self._ime_composing:
             return
-        self._detail_sync_timer.stop()
-        self._detail_sync_timer.start(100)
+        # 防 __init__ 期间被提前触发的 textChanged 命中：定时器尚未创建
+        timer = self._detail_sync_timer
+        if timer is None:
+            return
+        timer.stop()
+        timer.start(100)
 
     def _on_detail_sync_timeout(self):
         """detail 参数同步防抖超时：执行真正的同步"""
@@ -1163,7 +1600,9 @@ class SendableTextEdit(TextEdit):
             pass
 
         doc = self.document()
-        content_height = int(doc.size().height()) + 8
+        # 14 = QSS 上下 padding (8 + 4) + 2px 余量；最小高度 44（单行时
+        # 文字区 44-12=32px，完整容纳 15px 字号一行不裁切）
+        content_height = int(doc.size().height()) + 14
         new_height = max(44, min(300, content_height))
 
         if self.height() != new_height:
@@ -1213,13 +1652,14 @@ class SendableTextEdit(TextEdit):
             self.toggle_send_button(False)
             self.sendMessageRequested.emit()
 
-    def _on_enter_send(self):
+    def _on_enter_send(self, inverse: bool = False):
         """Enter 键发送：始终触发发送流程
 
-        与按钮点击不同，Enter 键不检查停止模式，直接发射 sendMessageRequested。
+        与按钮点击不同，Enter 键不检查停止模式，直接发射发送信号。
         main_widget 的 _on_send_clicked 内部会处理：
         - 命令（/xxx）→ 不打断流式直接执行
-        - 非命令 + 流式中 → 先停止再发送新消息
+        - 非命令 + 流式中 → 按设置项路由：插话发送 / 排队发送；
+          inverse=True（Ctrl+Enter）恒为设置项的另一行为
         """
         if not self.toPlainText().strip():
             return
@@ -1231,8 +1671,11 @@ class SendableTextEdit(TextEdit):
         # 如果当前在发送模式（非流式），切换到停止模式表示正在请求
         if not self.send_btn.is_stop_mode():
             self.toggle_send_button(False)
-        # 直接发送请求，由 main_widget 内部逻辑处理命令/停止
-        self.sendMessageRequested.emit()
+        # 直接发送请求，由 main_widget 内部逻辑处理命令/繁忙路由
+        if inverse:
+            self.sendMessageInverseRequested.emit()
+        else:
+            self.sendMessageRequested.emit()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1252,12 +1695,18 @@ class SendableTextEdit(TextEdit):
         self._position_send_button()
 
     def _position_send_button(self):
-        """定位发送按钮到输入框右下角"""
-        if self.send_btn:
-            btn_size = self.send_btn.size()
-            send_btn_x = self.width() - btn_size.width() - 10
-            send_btn_y = self.height() - btn_size.height() - 4
-            self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
+        """定右下角（仅兼容兼底）：发送按钮已由 bottom_toolbar 模块迁入工具栏。
+
+        迁移成功时 send_btn 的 parent 不再是输入框，直接跳过；
+        若模块未装配（插件 override 等场景），按钮仍留在输入框内，照常定位。
+        """
+        if self.send_btn is None or self.send_btn.parent() is not self:
+            return
+        btn_size = self.send_btn.size()
+        send_btn_x = self.width() - btn_size.width() - 10
+        # 底部偏移与 QSS padding-bottom (4px) 对齐，按钮与文字底缘齐平
+        send_btn_y = self.height() - btn_size.height() - 4
+        self.send_btn.move(max(0, send_btn_x), max(0, send_btn_y))
 
     def keyPressEvent(self, event: QKeyEvent):
         # 强制 / 键直接输入 /，不受中文输入法影响（防止变成、）
@@ -1341,6 +1790,9 @@ class SendableTextEdit(TextEdit):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
             if event.modifiers() & Qt.ShiftModifier:
                 super().keyPressEvent(event)  # 换行
+            elif event.modifiers() & Qt.ControlModifier:
+                self._on_enter_send(inverse=True)
+                event.accept()
             else:
                 self._on_enter_send()
                 event.accept()
@@ -1409,27 +1861,48 @@ class SendableTextEdit(TextEdit):
             # 粘贴剪贴板图片 → 保存到临时文件
             if source.hasImage() and not file_paths:
                 img = source.imageData()
+                if isinstance(img, QPixmap):
+                    # 同进程 clipboard().setPixmap() 写入的剪贴板，同进程回读为
+                    # QPixmap（未走系统 CF_DIB 转换）；外部进程截图则为 QImage。
+                    img = img.toImage()
                 if isinstance(img, QImage) and not img.isNull():
                     tmp_dir = Path(tempfile.gettempdir()) / "drifox_paste"
                     tmp_dir.mkdir(parents=True, exist_ok=True)
-                    name = f"paste_{uuid.uuid4().hex[:8]}.png"
-                    path = str(tmp_dir / name)
+                    # 可读命名：原为 paste_<uuid8>.png，显示为附件名时是一串无意义
+                    # 的十六进制。改为「截图_月日_时分秒.png」，同秒内追加序号防覆盖。
+                    stamp = datetime.now().strftime("%m%d_%H%M%S")
+                    path = tmp_dir / f"截图_{stamp}.png"
+                    seq = 1
+                    while path.exists() and seq < 100:
+                        path = tmp_dir / f"截图_{stamp}_{seq}.png"
+                        seq += 1
                     # 🛡️ R1：PNG 编码+写盘移出主线程（大截图同步 save 100-500ms
-                    # 冻结 UI）。UI 立即返回：附件芯片 + [[basename]] 占位符照常
-                    # 插入；发送前 _wait_pending_image_saves 保证文件就绪。
-                    self._save_paste_image_async(img, path)
-                    file_paths.append(path)
+                    # 冻结 UI）。UI 立即返回：附件芯片照常创建；
+                    # 发送前 _wait_pending_image_saves 保证文件就绪。
+                    self._save_paste_image_async(img, str(path))
+                    file_paths.append(str(path))
 
             if file_paths:
+                # 附件栏芯片由 main_widget 创建；正文里同步插入 inline 胶囊，
+                # 让「这句话引用的是哪个文件」在正文里可见。
                 self.files_dropped.emit(file_paths)
-                # 在光标位置插入 [[basename]] 占位符（发送时替换为完整路径）
                 cursor = self.textCursor()
                 for fp in file_paths:
-                    basename = os.path.basename(fp)
-                    cursor.insertText(f"[[{basename}]] ")
+                    # U+FFFC 与尾随空格分开插入，理由见 insert_file_mention
+                    cursor.insertText(_OBJECT_REPLACEMENT, self._make_mention_format(fp))
+                    cursor.insertText(" ")
+                self.setTextCursor(cursor)
                 return
 
             # 纯文本 → 默认处理
+            # 复制带胶囊的文本再粘贴回来时，剪贴板里会带着 U+FFFC 裸字符。
+            # 它已失去 charFormat（不含路径属性），留着只会渲染成一个空白块。
+            if source.hasText() and _OBJECT_REPLACEMENT in source.text():
+                cleaned = QMimeData()
+                cleaned.setText(source.text().replace(_OBJECT_REPLACEMENT, ""))
+                super().insertFromMimeData(cleaned)
+                return
+
             super().insertFromMimeData(source)
 
         except Exception:
@@ -1464,6 +1937,12 @@ class SendableTextEdit(TextEdit):
                         self._pending_image_saves.remove(ev)
                     except ValueError:
                         pass
+                # 通知主线程落盘完成：芯片创建早于文件写入，需刷新解除"不存在"误报
+                # （跨线程 emit → queued 到主线程；窗口销毁竞态时静默）
+                try:
+                    self.paste_image_saved.emit(path)
+                except RuntimeError:
+                    pass
 
         threading.Thread(target=_do_save, daemon=True, name="drifox-paste-image-save").start()
 
@@ -1540,7 +2019,7 @@ class SendableTextEdit(TextEdit):
                 color: {Colors.INPUT_TEXT};
                 border: none;
                 border-radius: 16px 16px 0 0;
-                padding: 8px 52px 0px 20px;
+                padding: 8px 12px 4px 12px;
                 selection-background-color: {Colors.SELECTED_BG};
                 {get_font_family_css()} {font_size_css(15)};
             }}
@@ -1570,6 +2049,14 @@ class SendableTextEdit(TextEdit):
                 background: none;
             }}
         """)
+
+        # 同步文档默认字体：inline 文件胶囊（FileMentionObject）用
+        # document().defaultFont() 计算尺寸并绘制文件名。QSS 的 font 只作用于
+        # widget 自身，不会同步到 QTextDocument —— 不同步的话胶囊会比正文小一号，
+        # 宽度也按错误字号计算，出现文字截断/胶囊过窄。
+        doc = self.document()
+        if doc is not None and doc.defaultFont() != self.font():
+            doc.setDefaultFont(self.font())
 
     def _build_combo_style(self) -> str:
         """构建智能体下拉框样式"""
@@ -1637,13 +2124,12 @@ class SendableTextEdit(TextEdit):
                     self._glow_target = card._input_card
             if self._glow_target:
                 # 后备样式：与 main_widget._apply_bottom_input_stack_style 保持一致
-                # 注意：不再 setGraphicsEffect（_input_card 已有 _input_card_primary_shadow 管理主光）
+                # （一体舱单色底，无渐变；不再 setGraphicsEffect，_input_card 已有
+                # _input_card_primary_shadow 管理主光）
                 if target_alpha > 0:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{
-                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 {Colors.INPUT_FOCUS_BG_START},
-                                stop:1 {Colors.INPUT_FOCUS_BG_END});
+                            background: {Colors.INPUT_FOCUS_BG_END};
                             border: 2px solid {Colors.INPUT_FOCUS_BORDER};
                             border-bottom: none;
                             border-top-left-radius: 16px;
@@ -1655,9 +2141,7 @@ class SendableTextEdit(TextEdit):
                 else:
                     self._glow_target.setStyleSheet(f"""
                         QWidget {{
-                            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                                stop:0 {Colors.INPUT_BG_START},
-                                stop:1 {Colors.INPUT_BG_END});
+                            background: {Colors.INPUT_BG_END};
                             border: 1px solid {Colors.INPUT_BORDER};
                             border-bottom: none;
                             border-top-left-radius: 16px;
@@ -1796,6 +2280,10 @@ class InputGlowUnderlay(QWidget):
         self._pill_w = 0
         self._pill_h = 0
         self._radius = self.DEFAULT_RADIUS
+        # 辉光过渡动画：0..1 归一化插值 + from/target 快照，retarget 时从当前值续接
+        self._glow_anim: Optional[QVariantAnimation] = None
+        self._glow_from: tuple = (0, 0, 0, 0)
+        self._glow_target: tuple = (0, 0, 0, 0)
 
     def set_color(self, color: QColor):
         c = QColor(color)
@@ -1823,6 +2311,61 @@ class InputGlowUnderlay(QWidget):
         self._ambient_alpha = max(0, int(ambient_alpha))
         self._ambient_blur = max(0, int(ambient_blur))
         self.update()
+
+    def animate_glow_to(
+        self,
+        primary_alpha: int,
+        primary_blur: int,
+        ambient_alpha: int,
+        ambient_blur: int,
+        duration: int = 200,
+    ):
+        """辉光参数平滑过渡到目标值（聚焦/失焦切换用）
+
+        中途反向切换时从当前实际值续接（retarget），不会跳回起点。
+        reduced-motion 开启时直接落终值。
+        """
+        target = (
+            max(0, int(primary_alpha)),
+            max(0, int(primary_blur)),
+            max(0, int(ambient_alpha)),
+            max(0, int(ambient_blur)),
+        )
+        current = (
+            self._primary_alpha,
+            self._primary_blur,
+            self._ambient_alpha,
+            self._ambient_blur,
+        )
+        if target == current:
+            return
+        if not Animations.motion_enabled() or duration <= 0:
+            self.set_glow(*target)
+            return
+        if self._glow_anim is None:
+            anim = QVariantAnimation(self)
+            anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+            anim.valueChanged.connect(self._on_glow_anim_tick)
+            self._glow_anim = anim
+        anim = self._glow_anim
+        anim.stop()
+        self._glow_from = current
+        self._glow_target = target
+        anim.setDuration(int(duration))
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.start()
+
+    def _on_glow_anim_tick(self, t: float):
+        t = max(0.0, min(1.0, float(t)))
+        f = self._glow_from
+        d = self._glow_target
+        self.set_glow(
+            f[0] + (d[0] - f[0]) * t,
+            f[1] + (d[1] - f[1]) * t,
+            f[2] + (d[2] - f[2]) * t,
+            f[3] + (d[3] - f[3]) * t,
+        )
 
     def set_pill_geometry(
         self,
@@ -1921,27 +2464,65 @@ class InputGlowUnderlay(QWidget):
 
 
 class PlaceholderHighlighter(QSyntaxHighlighter):
-    """[[filename]] 占位符语法高亮：输入框中的 [[...]] 标记高亮显示"""
+    """[[filename]] 占位符语法高亮
+
+    样式刻意做得克制（主题强调色 + 淡底，不加粗）：正文里出现 [[...]] 现在只是
+    「这是一个附件引用标记」的提示，而不是附件的主体呈现 —— 主体在附件栏的 chip 上。
+    旧实现的「金色加粗」过于抢眼，满屏方括号正是「附件显示很简陋」的直接观感来源。
+    """
 
     def __init__(self, document):
         super().__init__(document)
         self._fmt = QTextCharFormat()
-        self._fmt.setForeground(QColor(201, 168, 92))  # 金色，与主题色一致
-        self._fmt.setFontWeight(QFont.Bold)
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        """主题切换后重取颜色
+
+        必须走 qcolor_from_token：主题 YAML 里的色值是 rgba(r,g,b,a) 写法，
+        QColor(str) 不认这种格式（实测 isValid() == False），直接传会静默失效。
+        """
+        Colors.refresh()
+        self._fmt.setForeground(qcolor_from_token(Colors.INPUT_FOCUS_BORDER))
+        self._fmt.setBackground(qcolor_from_token(Colors.TOOLBAR_BG))
+        self._fmt.setFontWeight(QFont.Normal)
+        self.rehighlight()
 
     def highlightBlock(self, text: str):
-        import re
-
-        for match in re.finditer(r"\[\[[^\]]*\]\]", text):
+        for match in _PLACEHOLDER_RE.finditer(text):
             self.setFormat(match.start(), match.end() - match.start(), self._fmt)
 
 
 class AttachmentChip(QFrame):
-    """附件标签块：显示文件类型图标 + 文件名 + 删除按钮，响应式圆角矩形"""
+    """附件标签块：文件类型图标 + 文件名 + 删除按钮
+
+    尺寸约定（直接影响外层 FlowLayout 的 minimumWidth，进而影响 QSplitter 布局）：
+
+    - 高度固定 26px，圆角 13px（半高胶囊）。
+    - 文件名中间省略，像素上限 :data:`_MAX_NAME_WIDTH`；
+      chip 整体宽度上限 :data:`_MAX_CHIP_WIDTH` 兜底。
+      两者共同保证单个 chip 不会宽到把父布局顶开。
+
+    配色约定：**禁止硬编码 rgba(255,255,255,x)**。该写法在浅色主题下是「白叠白」，
+    完全不可见（本项目反复出现的缺陷模式）。一律取 :class:`Colors` 的大写属性，
+    它们由主题 YAML 自动填充，是主题感知的安全值。
+    """
 
     removed = Signal(str)  # file path
 
+    #: 文件名最大像素宽度，超出部分中间省略
+    _MAX_NAME_WIDTH = 148
+    #: chip 整体宽度硬上限（兜底，防止极端长名顶开布局）
+    _MAX_CHIP_WIDTH = 210
+    #: chip 固定高度
+    _CHIP_HEIGHT = 26
+    #: hover 可预览缩略图的图像扩展名（与 _FILE_ICON_MAP 图片行一致；
+    #  svg/ico 依赖 Qt 图像插件能力，读取失败自动回退纯文本 tooltip）
+    _IMAGE_PREVIEW_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico")
+
     # 文件扩展名 → FluentIcon 映射
+    # 注意：单元素元组必须写尾随逗号，否则 (".cs") 是 str，
+    # ``ext in exts`` 会退化成子串判断（历史 bug，曾漏掉三处逗号）。
     _FILE_ICON_MAP: dict[tuple[str, ...], FluentIcon] = {
         # 代码
         (".py", ".pyw", ".pyx"): FluentIcon.CODE,
@@ -1950,10 +2531,10 @@ class AttachmentChip(QFrame):
         (".html", ".htm", ".css", ".scss", ".less"): FluentIcon.CODE,
         (".java", ".kt", ".kts"): FluentIcon.CODE,
         (".cpp", ".c", ".h", ".hpp", ".hxx", ".cxx", ".cc"): FluentIcon.CODE,
-        (".cs"): FluentIcon.CODE,
+        (".cs",): FluentIcon.CODE,
         (".go", ".rs", ".rb", ".php"): FluentIcon.CODE,
         (".swift", ".m", ".mm"): FluentIcon.CODE,
-        (".sql"): FluentIcon.CODE,
+        (".sql",): FluentIcon.CODE,
         (".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd"): FluentIcon.COMMAND_PROMPT,
         # 图片
         (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"): FluentIcon.IMAGE_EXPORT,
@@ -1964,7 +2545,7 @@ class AttachmentChip(QFrame):
         # 压缩包
         (".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst"): FluentIcon.ZIP_FOLDER,
         # 文档/数据
-        (".pdf"): FluentIcon.DOCUMENT,
+        (".pdf",): FluentIcon.DOCUMENT,
         (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"): FluentIcon.DOCUMENT,
         (".txt", ".md", ".rst", ".log"): FluentIcon.DOCUMENT,
         (".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf"): FluentIcon.DOCUMENT,
@@ -1974,6 +2555,7 @@ class AttachmentChip(QFrame):
     def __init__(self, filepath: str, parent=None):
         super().__init__(parent)
         self.filepath = filepath
+        self._missing = not os.path.exists(filepath)
         self._setup_ui()
 
     @staticmethod
@@ -1987,11 +2569,28 @@ class AttachmentChip(QFrame):
                 return icon
         return FluentIcon.DOCUMENT
 
+    @staticmethod
+    def _human_size(path: str) -> str:
+        """人类可读的文件大小；目录或读取失败返回空串"""
+        try:
+            if os.path.isdir(path):
+                return "文件夹"
+            size = os.path.getsize(path)
+        except OSError:
+            return ""
+        for unit in ("B", "KB", "MB", "GB"):
+            if size < 1024 or unit == "GB":
+                return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+            size /= 1024
+        return ""
+
     def _setup_ui(self):
         Colors.refresh()
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(6, 2, 4, 2)
-        layout.setSpacing(5)
+        layout.setContentsMargins(7, 0, 3, 0)
+        layout.setSpacing(4)
+
+        name_color = Colors.REALTIME_ERROR if self._missing else Colors.INPUT_TEXT
 
         # 文件类型图标
         self._icon_widget = IconWidget(self)
@@ -1999,39 +2598,262 @@ class AttachmentChip(QFrame):
         self._icon_widget.setFixedSize(14, 14)
         layout.addWidget(self._icon_widget)
 
-        # 文件名
-        name = os.path.basename(self.filepath)
-        if len(name) > 22:
-            name = name[:19] + "..."
-
-        self._label = QLabel(name, self)
+        # 文件名：中间省略（原实现是硬编码截断 22 字符，长名一律 "xxx..."）
+        name = os.path.basename(self.filepath.rstrip(os.sep)) or self.filepath
+        self._label = QLabel(self)
         self._label.setStyleSheet(
-            f"color: {Colors.INPUT_TEXT}; {get_font_family_css()} {font_size_css(12)} background: transparent; border: none; padding: 0;"
+            f"color: {name_color}; {get_font_family_css()} {font_size_css(12)}"
+            " background: transparent; border: none; padding: 0;"
         )
+        fm = QFontMetrics(self._label.font())
+        self._label.setText(fm.elidedText(name, Qt.ElideMiddle, self._MAX_NAME_WIDTH))
         layout.addWidget(self._label)
 
-        # 删除按钮
-        close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
-        close_btn.setFixedSize(10, 10)
-        close_btn.clicked.connect(lambda: self.removed.emit(self.filepath))
-        layout.addWidget(close_btn)
+        # 删除按钮：16x16 命中区，图标 9x9 保持视觉轻盈
+        # （原实现是 10x10 按钮，图标几乎看不见且难点中）
+        self._close_btn = TransparentToolButton(FluentIcon.CLOSE, self)
+        self._close_btn.setFixedSize(16, 16)
+        self._close_btn.setIconSize(QSize(9, 9))
+        self._close_btn.clicked.connect(lambda: self.removed.emit(self.filepath))
+        layout.addWidget(self._close_btn)
 
         # 整体样式：QFrame 的 border-radius 渲染更可靠，:hover 伪态支持更好
-        border_color = Colors.INPUT_BORDER
-        self.setFixedHeight(28)
+        self.setFixedHeight(self._CHIP_HEIGHT)
+        self.setMaximumWidth(self._MAX_CHIP_WIDTH)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self._apply_style()
+
+        # tooltip：完整路径 + 大小；文件已失效时额外提示
+        size_text = self._human_size(self.filepath)
+        tip = self.filepath + (f"\n{size_text}" if size_text else "")
+        if self._missing:
+            tip += "\n⚠ 文件已不存在，发送时将被忽略"
+        self.setToolTip(tip)
+        # 图像附件：hover 时在气泡内预览缩略图（loader 失败/非图像自动回退纯文本）
+        if not self._missing and os.path.splitext(self.filepath)[1].lower() in self._IMAGE_PREVIEW_EXTS:
+            _f = get_hover_filter(self)
+            if _f is not None:
+                _f.set_image_loader(lambda: load_preview_pixmap(self.filepath))
+
+    def _apply_style(self):
+        """按当前主题与文件状态生成样式表
+
+        所有颜色取自 Colors（主题感知）。hover 时边框切换为主题强调色，
+        比单纯加深背景更容易被察觉。
+        """
+        Colors.refresh()
+        if self._missing:
+            border = Colors.REALTIME_ERROR
+            border_hover = Colors.REALTIME_ERROR
+        else:
+            border = Colors.BORDER
+            border_hover = Colors.INPUT_FOCUS_BORDER
+        radius = self._CHIP_HEIGHT // 2
         self.setStyleSheet(
             f"""
             AttachmentChip {{
-                background: rgba(255, 255, 255, 0.06);
-                border: 1px solid {border_color};
-                border-radius: 14px;
+                background: {Colors.TOOLBAR_BG};
+                border: 1px solid {border};
+                border-radius: {radius}px;
             }}
             AttachmentChip:hover {{
-                background: rgba(255, 255, 255, 0.12);
-                border: 1px solid rgba(255, 255, 255, 0.25);
+                background: {Colors.HOVER_BG};
+                border: 1px solid {border_hover};
             }}
             """
         )
 
-        # 悬浮 tooltip 显示完整路径
-        self.setToolTip(self.filepath)
+    def refresh_theme(self):
+        """主题切换后刷新配色（由 main_widget 统一调用）"""
+        self._apply_style()
+
+
+class FileMentionObject(QObject, QTextObjectInterface):
+    """输入框正文中的 inline 文件引用胶囊（圆角背景 + 类型图标 + 文件名）
+
+    ⚠️ 必须同时继承 QObject：``QTextDocument.documentLayout().registerHandler()``
+    的签名要求 component 是 QObject，纯 QTextObjectInterface 会被拒绝
+    （TypeError: argument 2 has unexpected type）。
+    继承顺序必须是 (QObject, QTextObjectInterface)，反了会导致 MRO 冲突。
+
+
+    为什么不用字面 ``[[basename]]``（旧实现）:
+
+    - 观感就是「一对方括号」，加粗高亮后更显眼，这正是「附件显示很简陋」的来源；
+    - 它可以被任意部分编辑 —— 删掉半个括号、在中间插入字符，引用就破损了，
+      随之而来的是各种占位符匹配不上的降级分支。
+
+    用 QTextObjectInterface 的好处:
+
+    - 文档里是真正的 inline object，外观完全自绘：圆角胶囊 + 文件类型图标 + 文件名；
+    - 底层只占 **一个字符**（U+FFFC），Backspace 整体删除、光标不会进入内部，
+      引用在结构上不可能被拆坏；
+    - :meth:`SendableTextEdit.toPlainText` 会把它展开回 ``[[basename]]``，
+      因此对上层（命令检测、@ 检测、输入历史、发送文本构建、附件反向同步）完全透明。
+    """
+
+    _PAD_LEFT = 6
+    _PAD_RIGHT = 6
+    _ICON_SIZE = 13
+    _GAP = 4
+    _HEIGHT = 20
+    _RADIUS = 6
+    #: 文件名最大像素宽度，超出中间省略（保证胶囊不会宽到撑坏换行）
+    _MAX_TEXT_WIDTH = 148
+
+    # FluentIcon → QIcon 缓存（构造 QIcon 涉及 SVG 解析，绘制期反复调用太贵）
+    _icon_cache: dict[str, object] = {}
+
+    def intrinsicSize(self, doc, posInDocument, format) -> QSizeF:  # noqa: A002
+        """胶囊尺寸（由文档布局在排版时查询）"""
+        name, fm = self._name_and_metrics(doc, format)
+        text_w = fm.horizontalAdvance(fm.elidedText(name, Qt.ElideMiddle, self._MAX_TEXT_WIDTH))
+        width = self._PAD_LEFT + self._ICON_SIZE + self._GAP + text_w + self._PAD_RIGHT
+        return QSizeF(width, self._HEIGHT)
+
+    def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002
+        """绘制胶囊（由文档布局在重绘时调用）"""
+        Colors.refresh()
+        name, fm = self._name_and_metrics(doc, format)
+        path = (format.stringProperty(_FILE_MENTION_PATH_PROP) or "") if format else ""
+
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+            # 胶囊背景：在 rect 内垂直居中（rect 高度 = 行高，通常大于胶囊高度）
+            h = min(self._HEIGHT, rect.height())
+            top = rect.top() + (rect.height() - h) / 2
+            pill = QRectF(rect.left(), top, rect.width(), h)
+
+            painter.setPen(QPen(qcolor_from_token(Colors.BORDER), 1))
+            painter.setBrush(QBrush(qcolor_from_token(Colors.TOOLBAR_BG)))
+            painter.drawRoundedRect(pill, self._RADIUS, self._RADIUS)
+
+            # 文件类型图标
+            x = pill.left() + self._PAD_LEFT
+            icon = self._icon_for(path)
+            if icon is not None:
+                pm = icon.pixmap(QSize(self._ICON_SIZE, self._ICON_SIZE))
+                if not pm.isNull():
+                    painter.drawPixmap(int(x), int(top + (h - self._ICON_SIZE) / 2), pm)
+            x += self._ICON_SIZE + self._GAP
+
+            # 文件名（中间省略）
+            text = fm.elidedText(name, Qt.ElideMiddle, self._MAX_TEXT_WIDTH)
+            text_rect = QRectF(x, pill.top(), max(0.0, pill.right() - self._PAD_RIGHT - x), h)
+            painter.setFont(doc.defaultFont() if doc else QFont())
+            painter.setPen(QPen(qcolor_from_token(Colors.INPUT_TEXT)))
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+        finally:
+            painter.restore()
+
+    # ── 内部辅助 ──────────────────────────────
+
+    @staticmethod
+    def _name_and_metrics(doc, format) -> tuple[str, QFontMetrics]:
+        """(文件名, 字体度量) —— 字体跟随文档，保证与正文一致"""
+        path = (format.stringProperty(_FILE_MENTION_PATH_PROP) or "") if format else ""
+        name = os.path.basename(path) or path or "?"
+        font = doc.defaultFont() if doc else QFont()
+        return name, QFontMetrics(font)
+
+    @classmethod
+    def _icon_for(cls, path: str):
+        """按扩展名取图标（复用 AttachmentChip 的映射），失败返回 None"""
+        try:
+            icon_enum = AttachmentChip._get_file_icon(path)
+        except Exception:  # noqa: BLE001
+            return None
+        key = str(icon_enum)
+        if key not in cls._icon_cache:
+            try:
+                cls._icon_cache[key] = icon_enum.icon()
+            except Exception:  # noqa: BLE001
+                cls._icon_cache[key] = None
+        return cls._icon_cache[key]
+
+
+class AssistantMentionObject(QObject, QTextObjectInterface):
+    """输入框正文中的 inline 助手提及胶囊（@ 智能体角色）
+
+    与 FileMentionObject 同款机制：文档里占一个字符（U+FFFC），
+    Backspace 整体删除；toPlainText() 展开为 ``@名字``，发送文本与
+    PreUserMessage hook 的 @提及检测保持兼容。
+
+    外观：助手主色圆角胶囊 + 纯文字名字（无 emoji/图标），与文件胶囊（灰底）形成视觉区分。
+    名字/主色存在 charFormat 自定义属性（_ASSISTANT_MENTION_*_PROP）。
+    """
+
+    _PAD_LEFT = 6
+    _PAD_RIGHT = 6
+    _HEIGHT = 20
+    _RADIUS = 6
+    _MAX_TEXT_WIDTH = 120
+
+    def intrinsicSize(self, doc, posInDocument, format) -> QSizeF:  # noqa: A002
+        name, fm = self._name_and_metrics(doc, format)
+        text_w = fm.horizontalAdvance(fm.elidedText(name, Qt.ElideRight, self._MAX_TEXT_WIDTH))
+        width = self._PAD_LEFT + text_w + self._PAD_RIGHT
+        return QSizeF(width, self._HEIGHT)
+
+    def drawObject(self, painter, rect, doc, posInDocument, format):  # noqa: A002
+        """绘制胶囊（助手主色描边 + 淡色底 + 纯文字名字）"""
+        name, fm = self._name_and_metrics(doc, format)
+        color = (format.stringProperty(_ASSISTANT_MENTION_COLOR_PROP) or "#7C3AED") if format else "#7C3AED"
+
+        painter.save()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setRenderHint(QPainter.TextAntialiasing, True)
+
+            h = min(self._HEIGHT, rect.height())
+            top = rect.top() + (rect.height() - h) / 2
+            pill = QRectF(rect.left(), top, rect.width(), h)
+
+            border = QColor(color)
+            bg = QColor(color)
+            bg.setAlpha(28)
+            painter.setPen(QPen(border, 1))
+            painter.setBrush(QBrush(bg))
+            painter.drawRoundedRect(pill, self._RADIUS, self._RADIUS)
+
+            x = pill.left() + self._PAD_LEFT
+            painter.setFont(doc.defaultFont() if doc else QFont())
+
+            text = fm.elidedText(name, Qt.ElideRight, self._MAX_TEXT_WIDTH)
+            text_rect = QRectF(x, pill.top(), max(0.0, pill.right() - self._PAD_RIGHT - x), h)
+            painter.setPen(QPen(QColor(Colors.INPUT_TEXT)))
+            painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+        finally:
+            painter.restore()
+
+    @staticmethod
+    def _name_and_metrics(doc, format) -> tuple[str, QFontMetrics]:
+        name = (format.stringProperty(_ASSISTANT_MENTION_NAME_PROP) or "") if format else ""
+        font = doc.defaultFont() if doc else QFont()
+        return name or "?", QFontMetrics(font)
+
+
+class AttachmentOverflowChip(QLabel):
+    """附件数量溢出提示：附件过多时显示「+N」，不可删除
+
+    附件栏没有滚动条，靠限制渲染数量控制高度。超出上限的附件仍然参与发送，
+    只是不再单独渲染 chip。
+    """
+
+    _CHIP_HEIGHT = AttachmentChip._CHIP_HEIGHT
+
+    def __init__(self, count: int, total: int, parent=None):
+        super().__init__(parent)
+        Colors.refresh()
+        self.setFixedHeight(self._CHIP_HEIGHT)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet(
+            f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(12)}"
+            f" background: transparent; border: 1px dashed {Colors.BORDER};"
+            f" border-radius: {self._CHIP_HEIGHT // 2}px; padding: 0 8px;"
+        )
+        self.setText(f"+{count}")
+        self.setToolTip(f"还有 {count} 个附件未显示（共 {total} 个）\n全部附件都会随消息一起发送")

@@ -15,23 +15,24 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
+from qfluentwidgets import ScrollArea
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
+from app.widgets.hover_style_guard import style_if_changed
 
 # ═══════════════════════════════════════════════════════════
 # 自适应高度滚动区
 # ═══════════════════════════════════════════════════════════
 
 
-class _AutoHeightScrollArea(QScrollArea):
+class _AutoHeightScrollArea(ScrollArea):
     """高度跟随内容的自适应滚动区
 
     短内容 → 高度 = 内容高度（不产生空白）；
@@ -44,51 +45,77 @@ class _AutoHeightScrollArea(QScrollArea):
         # 垂直改为 Preferred：布局尊重 sizeHint，不再把滚动区拉伸占满剩余空间
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
 
+    def hasHeightForWidth(self):
+        """声明支持 heightForWidth
+
+        父布局（QVBoxLayout.heightForWidth）据此用**传入宽度**测量本区，
+        而不是退回到 sizeHint 里读 viewport 的瞬时宽度——后者会随滚动条
+        出现/消失跳变，是布局自激循环的根源（见 _height_for_width 注释）。
+        """
+        return True
+
+    def heightForWidth(self, w):
+        return self._height_for_width(w)
+
+    def _height_for_width(self, outer_w):
+        """按外层可用宽度 outer_w 计算本区高度（纯函数，无副作用）
+
+        ⚠ 测量基准必须与"布局最终给到内容的宽度"一致，否则形成反馈环：
+        viewport().width() 随滚动条出现/消失跳变 → sizeHint 变化 → 容器重排
+        → 内容重排 → 滚动条状态再变 → 无限循环。实测超长问题（标题区触发
+        滚动条）时 1.5s 内 CardContainer._do_expand 被调用 1.7 万次，主线程
+        被布局占满，卡片内文字上下横跳。
+
+        这里以**控件外宽**为唯一输入，内部自行扣除 frame 与"需要滚动时"的
+        滚动条宽度，同一 outer_w 恒定输出同一高度 → 存在不动点 → 循环收敛。
+        """
+        w = self.widget()
+        if w is None:
+            return super().sizeHint().height()
+        frame = 2 * self.frameWidth()
+        sb_w = self.verticalScrollBar().sizeHint().width()
+        vw = max(1, outer_w - frame)
+        content_h = w.heightForWidth(vw) if w.hasHeightForWidth() else w.sizeHint().height()
+        if content_h + frame > self.maximumHeight() and sb_w > 0:
+            # 需要滚动：滚动条会占掉宽度 → 内容按更窄视口重排 → 更高。
+            # 只迭代一次即可收敛：内容高度关于宽度单调不增，第二次迭代
+            # 不会让"是否需要滚动"的结论翻转。
+            vw2 = max(1, vw - sb_w)
+            content_h = w.heightForWidth(vw2) if w.hasHeightForWidth() else w.sizeHint().height()
+        return max(self.minimumHeight(), min(content_h + frame, self.maximumHeight()))
+
+    def _outer_width(self) -> int:
+        """测量用的控件外宽（唯一输入，不读 viewport 的瞬时宽度）
+
+        首帧布局前 self.width() 为 0，此时不能用 super().sizeHint().width()
+        兜底——它含内容全文单行宽度（wordWrap QLabel sizeHint 宽 = 全文不折行
+        宽度），会污染首轮高度测量。用一个有界常量兜底即可（仅影响首轮估算，
+        布局落地后 self.width() 生效）。
+        """
+        return self.width() if self.width() > 0 else 320
+
     def minimumSizeHint(self):
         # QAbstractScrollArea 默认 minimumSizeHint 含滚动条尺寸（~42px），
         # 会把短内容强行垫高，因此不复用默认值。改为返回"内容高度下限"：
         # 容器高度动画滞后 / 布局空间不足时，问题标题区是布局中唯一可被
         # 压到 0 的成员，minimumSizeHint=(0,0) 会被优先压没（标题完全不可见）。
         # 下限 = 内容高度（封顶 maximumHeight），保证问题标题区始终可见。
-        base = super().sizeHint()
+        # ⚠ 宽度必须返回 0：super().sizeHint().width() 会传播内容（wordWrap
+        # 长文本）的全文单行宽度作为最小宽度诉求，顶层布局 SetDefaultConstraint
+        # 会把主窗口强行撑宽 → 容器宽度突变 → hfw 重算 → 锁高跳变（文字抖动）。
         w = self.widget()
         if w is None:
             return QSize(0, 0)
-        frame = 2 * self.frameWidth()
-        vw = self.viewport().width()
-        if vw <= 0:
-            vw = max(1, base.width() - frame)
-        else:
-            # 预留垂直滚动条宽度：内容高度临界时滚动条出现会使视口宽骤减，
-            # wordWrap 内容重折行 → 高度变化 → 滚动条消失 → 宽度反馈环抖动。
-            # 按“含滚动条”的最窄视口测高，滚动条出现后测量基准不变，环闭合。
-            vw = max(1, vw - self.verticalScrollBar().sizeHint().width())
-        if w.hasHeightForWidth():
-            content_h = w.heightForWidth(vw)
-        else:
-            content_h = w.sizeHint().height()
-        h = max(self.minimumHeight(), min(content_h + frame, self.maximumHeight()))
-        return QSize(base.width(), h)
+        return QSize(0, self._height_for_width(self._outer_width()))
 
     def sizeHint(self):
         base = super().sizeHint()
         w = self.widget()
         if w is None:
             return base
-        frame = 2 * self.frameWidth()
-        # 用当前视口宽度估算换行后内容高度（QLabel wordWrap 时 heightForWidth 最准）
-        vw = self.viewport().width()
-        if vw <= 0:
-            vw = max(1, base.width() - frame)
-        else:
-            # 同 minimumSizeHint：预留垂直滚动条宽度，消除滚动条出现/消失的宽度反馈环
-            vw = max(1, vw - self.verticalScrollBar().sizeHint().width())
-        if w.hasHeightForWidth():
-            content_h = w.heightForWidth(vw)
-        else:
-            content_h = w.sizeHint().height()
-        h = max(self.minimumHeight(), min(content_h + frame, self.maximumHeight()))
-        return QSize(base.width(), h)
+        # 宽度同样返回 0（不参与宽度诉求，见 minimumSizeHint 注释）；
+        # 本区水平策略是 Expanding，宽度由布局分配，不需要 sizeHint 表达。
+        return QSize(0, self._height_for_width(self._outer_width()))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -146,6 +173,7 @@ class _OptionRadioCard(QWidget):
 
         self._title_label = QLabel(self._label_text)
         self._title_label.setFont(get_unified_font(11, True))
+        self._title_label.setWordWrap(True)  # 长标题折行而不是撑宽/裁切
         self._title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self._desc_label = QLabel(self._desc_text)
@@ -153,6 +181,15 @@ class _OptionRadioCard(QWidget):
         self._desc_label.setWordWrap(True)
         self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._desc_label.setVisible(bool(self._desc_text))
+
+        # 文本 label 水平一律 Ignored：不参与卡片的宽度诉求。
+        # wordWrap 的 QLabel sizeHint 宽度 = 全文单行宽度（可达数千 px），
+        # 且会经 qSmartMinSize 变成卡片 minimumSize 宽度 → 顶层布局
+        # SetDefaultConstraint 把主窗口强行撑宽 → 容器宽度突变 →
+        # heightForWidth 重算 → CardContainer 锁高跳变（卡片内文字抖动）。
+        # Ignored 后文本按实际分得宽度折行，卡片永远不要求额外宽度。
+        self._title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         text_layout.addWidget(self._title_label)
         text_layout.addWidget(self._desc_label)
@@ -263,6 +300,7 @@ class _OptionCheckCard(QWidget):
 
         self._title_label = QLabel(self._label_text)
         self._title_label.setFont(get_unified_font(11, True))
+        self._title_label.setWordWrap(True)  # 长标题折行而不是撑宽/裁切
         self._title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self._desc_label = QLabel(self._desc_text)
@@ -270,6 +308,15 @@ class _OptionCheckCard(QWidget):
         self._desc_label.setWordWrap(True)
         self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._desc_label.setVisible(bool(self._desc_text))
+
+        # 文本 label 水平一律 Ignored：不参与卡片的宽度诉求。
+        # wordWrap 的 QLabel sizeHint 宽度 = 全文单行宽度（可达数千 px），
+        # 且会经 qSmartMinSize 变成卡片 minimumSize 宽度 → 顶层布局
+        # SetDefaultConstraint 把主窗口强行撑宽 → 容器宽度突变 →
+        # heightForWidth 重算 → CardContainer 锁高跳变（卡片内文字抖动）。
+        # Ignored 后文本按实际分得宽度折行，卡片永远不要求额外宽度。
+        self._title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._desc_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         text_layout.addWidget(self._title_label)
         text_layout.addWidget(self._desc_label)
@@ -345,7 +392,7 @@ class _OptionCheckCard(QWidget):
 
 
 class _CustomInputCard(QWidget):
-    """输入自己的答案选项 — 默认显示描述，选中后变成文本输入框"""
+    """输入自己的答案选项 — 输入框常驻显示，点击/聚焦即视为选中"""
 
     PLACEHOLDER = "输入你的答案..."
     activated = Signal()  # 用户主动点击选中时触发
@@ -411,11 +458,9 @@ class _CustomInputCard(QWidget):
         self._title_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._right_layout.addWidget(self._title_label)
 
-        self._desc_label = QLabel(self.PLACEHOLDER)
-        self._desc_label.setFont(get_unified_font(9))
-        self._desc_label.setStyleSheet(f"color:{Colors.REALTIME_TEXT_SECONDARY};background:transparent;")
-        self._desc_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-        self._right_layout.addWidget(self._desc_label)
+        # 同选项卡片：文本 label 水平 Ignored，不参与卡片宽度诉求
+        # （防止长文本经 sizeHint/minimumSize 把主窗口撑宽引发锁高跳变）。
+        self._title_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
         self._text_edit = QTextEdit()
         self._text_edit.setPlaceholderText(self.PLACEHOLDER)
@@ -427,7 +472,6 @@ class _CustomInputCard(QWidget):
         # 兜底：即使 auto-grow 临时失效，垂直滚动条也能让用户看到溢出内容
         self._text_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._text_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._text_edit.setVisible(False)
         self._text_edit.textChanged.connect(self._on_text_changed)
         self._text_edit.installEventFilter(self)  # 监听 Resize/Show，等布局完成后再算高度
         # 强制白色文字：Qt 样式表 color 对 QTextEdit 经常不生效，需用 QPalette
@@ -445,8 +489,13 @@ class _CustomInputCard(QWidget):
         必须延迟到下一轮事件循环（QTimer.singleShot(0, ...)），
         因为 Resize 事件触发时 viewport().width() 还没更新好。
         """
-        if obj is self._text_edit and self._active:
-            if event.type() in (QEvent.Resize, QEvent.Show):
+        if obj is self._text_edit:
+            if event.type() == QEvent.FocusIn:
+                # 输入框常驻后，聚焦即视为选中自定义输入（单选下取消其他选项）
+                if not self._active:
+                    self.set_active(True)
+                    self.activated.emit()
+            elif event.type() in (QEvent.Resize, QEvent.Show):
                 QTimer.singleShot(0, self._adjust_height_to_content)
         return super().eventFilter(obj, event)
 
@@ -514,23 +563,11 @@ class _CustomInputCard(QWidget):
                 self._adjusting_height = False
 
     def set_active(self, active: bool):
+        """切换选中态：输入框常驻，此处仅更新图标与样式"""
         self._active = active
         a_icon = "☑" if self._multiple else "●"
         i_icon = "□" if self._multiple else "○"
         self._icon.setText(a_icon if active else i_icon)
-        self._desc_label.setVisible(not active)
-        self._text_edit.setVisible(active)
-        if active:
-            self._text_edit.setFixedHeight(self.MIN_INPUT_HEIGHT)
-            # ★ 仅在可见时聚焦——防止 QStackedWidget 隐藏页窃取焦点
-            if self.isVisible():
-                self._text_edit.setFocus()
-            if self._text_value:
-                self._text_edit.setPlainText(self._text_value)
-            # 延迟到下一轮事件循环，等布局完成（viewport().width() > 0）后再算高度
-            # _adjust_height_to_content 内部已在高度变化时调用 _emit_height_update
-            # 不需要额外的 10ms 兜底 timer（避免与导航路径的 heightChanged 重复触发）
-            QTimer.singleShot(0, self._adjust_height_to_content)
         self._apply_style()
 
     def _emit_height_update(self):
@@ -538,22 +575,13 @@ class _CustomInputCard(QWidget):
         self.updateGeometry()
         self.heightNeedsUpdate.emit()
 
-    def toggle(self):
-        new_state = not self._active
-        self.set_active(new_state)
-        if new_state:
-            self.activated.emit()
-
     def get_text(self) -> str:
-        if self._active:
-            return self._text_edit.toPlainText().strip()
-        return self._text_value.strip()
+        return self._text_edit.toPlainText().strip()
 
     def set_content(self, text: str):
         """恢复已保存的文本内容"""
         self._text_value = text
-        if self._active:
-            self._text_edit.setPlainText(text)
+        self._text_edit.setPlainText(text)
 
     def _apply_style(self):
         Colors.refresh()
@@ -592,7 +620,7 @@ class _CustomInputCard(QWidget):
 
     def enterEvent(self, e):
         if not self._active:
-            self.setStyleSheet(
+            style_if_changed(self,
                 f"_CustomInputCard{{background-color:{Colors.REALTIME_TAG_BG};border:1px solid {Colors.REALTIME_TAG_BORDER};border-radius:8px;}}"
             )
         super().enterEvent(e)
@@ -604,7 +632,13 @@ class _CustomInputCard(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            self.toggle()
+            # 点击卡片任意位置 → 激活自定义输入。
+            # 不能只靠 FocusIn：焦点可能已在本输入框（如选选项后焦点未离开），
+            # setFocus 是 no-op 不产生 FocusIn，会导致图标点了没反应。
+            if not self._active:
+                self.set_active(True)
+                self.activated.emit()
+            self._text_edit.setFocus()
         super().mousePressEvent(e)
 
 
@@ -631,6 +665,8 @@ class QuestionFloatingWidget(QWidget):
         self._show_custom_input = True
         self._preview_payload = None
         self._collapsed = False
+        # 高度通知合并标志（见 _emit_height_changed）
+        self._height_emit_pending = False
         # 高度严格跟随内容：即使容器处于 dock 模式（高度由 QSplitter 分配、
         # 默认不随内容收缩），也锁定容器高度 = 卡片 sizeHint，
         # 避免"容器比内容高 → 卡片内部/底部出现空白"。
@@ -669,7 +705,7 @@ class QuestionFloatingWidget(QWidget):
         if not self.isVisible():
             return
         self.updateGeometry()
-        self.heightChanged.emit()
+        self._emit_height_changed()
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -906,7 +942,7 @@ class QuestionFloatingWidget(QWidget):
         if new_w != getattr(self, "_last_layout_width", -1):
             self._last_layout_width = new_w
             self.updateGeometry()
-            QTimer.singleShot(0, self.heightChanged.emit)
+            self._emit_height_changed()
 
     def heightForWidth(self, w):
         """按宽度 w 计算真实内容高度
@@ -963,6 +999,23 @@ class QuestionFloatingWidget(QWidget):
         q_max = max(40, min(int(win_h * 0.30), 320))
         self._question_scroll.setMaximumHeight(q_max)
 
+    def _emit_height_changed(self):
+        """合并同一轮事件循环内的多次 heightChanged（防布局自激循环）
+
+        卡片有多个高度通知源（问题区重排 / 选项区变化 / 卡片 resize /
+        自定义输入框增高 / 折叠切换），同一帧内叠加会逼迫 CardContainer
+        连续 _do_expand，每次都重排整条布局链。合并成一次后，容器每轮
+        最多展开一次，配合 _AutoHeightScrollArea 的确定性测量即可收敛。
+        """
+        if self._height_emit_pending:
+            return
+        self._height_emit_pending = True
+        QTimer.singleShot(0, self._flush_height_changed)
+
+    def _flush_height_changed(self):
+        self._height_emit_pending = False
+        self.heightChanged.emit()
+
     def _sync_question_area(self):
         """问题区高度跟随内容：短内容收缩、长内容限高滚动
 
@@ -973,7 +1026,7 @@ class QuestionFloatingWidget(QWidget):
         want_h = sc.sizeHint().height()
         if want_h != sc.height():
             sc.updateGeometry()
-            QTimer.singleShot(0, self.heightChanged.emit)
+            self._emit_height_changed()
 
     def _toggle_collapse(self):
         """折叠/展开提问卡片，仅保留顶栏"""
@@ -985,7 +1038,7 @@ class QuestionFloatingWidget(QWidget):
         self._footer_widget.setVisible(visible)
         self._collapse_btn.setIcon(get_icon("展开" if self._collapsed else "折叠"))
         self._collapse_btn.setToolTip("展开问题" if self._collapsed else "折叠问题")
-        QTimer.singleShot(0, self.heightChanged.emit)
+        self._emit_height_changed()
 
     def _setup_shortcuts(self):
         """设置键盘快捷键"""
@@ -1023,7 +1076,7 @@ class QuestionFloatingWidget(QWidget):
         # 强制几何重新计算，确保 _options_container 的 sizeHint 反映最新内容
         # 避免 CardContainer._do_expand 读到过期的 sizeHint 而跳过展开
         self.updateGeometry()
-        QTimer.singleShot(0, self.heightChanged.emit)
+        self._emit_height_changed()
 
     def clear(self):
         self._questions = []
@@ -1182,7 +1235,7 @@ class QuestionFloatingWidget(QWidget):
 
     def _on_options_height_changed(self):
         """选项区域高度变化时，更新卡片高度"""
-        QTimer.singleShot(0, self.heightChanged.emit)
+        self._emit_height_changed()
 
     def _recycle_options(self):
         """仅隐藏 old option widgets（不销毁），供下次 _render_current 复用"""
@@ -1221,6 +1274,7 @@ class QuestionFloatingWidget(QWidget):
         return results
 
     def _get_custom_input_text(self) -> str:
+        """计入答案的自定义文本：仅激活态（草稿不丢但也不盲提交）"""
         if self._custom_input_widget and self._custom_input_widget._active:
             return self._custom_input_widget.get_text()
         return ""
@@ -1228,17 +1282,18 @@ class QuestionFloatingWidget(QWidget):
     def _save_current_answer(self):
         selected = self._get_selected_options()
         custom = self._get_custom_input_text()
-        has_custom = bool(custom)
+        # 草稿：无论激活与否都保留（切选项/翻页不丢字），但只有激活态才计入提交
+        draft = self._custom_input_widget.get_text() if self._custom_input_widget else ""
         parts = []
         if selected:
             parts.extend(f"【{s['label']}】" for s in selected)
         if custom:
             parts.append(custom)
-        if parts:
+        if parts or draft:
             self._answers[self._current_index] = {
                 "text": "；".join(parts),
-                "custom": has_custom,
-                "custom_text": custom,  # 保存原始自定义输入文本，用于恢复
+                "custom": bool(custom),
+                "custom_text": draft,  # 全量草稿，用于翻页恢复
             }
         else:
             self._answers.pop(self._current_index, None)
@@ -1266,7 +1321,7 @@ class QuestionFloatingWidget(QWidget):
                     w.set_checked(text and w._label_text in text)
         if self._custom_input_widget:
             self._custom_input_widget.set_active(custom_used)
-            if custom_used and isinstance(answer, dict):
+            if isinstance(answer, dict):
                 custom_text = answer.get("custom_text", "") or answer.get("text", "")
                 # 如果是混合答案（选项+自定义），提取纯自定义部分
                 import re
@@ -1284,7 +1339,7 @@ class QuestionFloatingWidget(QWidget):
             self.setUpdatesEnabled(True)
             # 内容变更后强制几何重新计算，确保容器高度同步更新
             self.updateGeometry()
-            QTimer.singleShot(0, self.heightChanged.emit)
+            self._emit_height_changed()
 
     def _on_next(self):
         self._save_current_answer()
@@ -1296,7 +1351,7 @@ class QuestionFloatingWidget(QWidget):
             self.setUpdatesEnabled(True)
             # 内容变更后强制几何重新计算，确保容器高度同步更新
             self.updateGeometry()
-            QTimer.singleShot(0, self.heightChanged.emit)
+            self._emit_height_changed()
         else:
             self._build_and_emit_answer()
 

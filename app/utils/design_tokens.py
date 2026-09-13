@@ -6,7 +6,11 @@
 主题完全从 app/themes/ 目录读取，不硬编码主题数据
 """
 
-from PySide6.QtCore import QSize
+import ctypes
+import sys
+from typing import Optional
+
+from PySide6.QtCore import QEasingCurve, QSize
 
 
 # ─── 字体/字号缓存 ──────────────────────────────────────────
@@ -250,28 +254,8 @@ def current_theme() -> dict:
     return theme_manager.get_current_colors()
 
 
-def get_window_style() -> str:
-    """获取窗口渐变背景样式"""
-    from app.utils.theme_manager import theme_manager
-
-    window = theme_manager.get_theme_window(theme_manager.get_current_theme_id())
-    return f"""
-    #OpenAIChatToolWindow {{
-        background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-            stop:0 {window.get("gradient_start", "rgba(10, 14, 22, 255)")},
-            stop:1 {window.get("gradient_end", "rgba(15, 20, 30, 255)")});
-    }}
-    """
 
 
-def get_capsule_style() -> str:
-    """获取胶囊样式"""
-    theme = current_theme()
-    return f"""
-        background: {theme["capsule_bg"]};
-        border: 1px solid {theme["capsule_border"]};
-        border-radius: {BorderRadius.LG};
-    """
 
 
 # ============ 发光预设（glow presets）============
@@ -416,7 +400,9 @@ class Colors:
     SEND_BTN_END = "#B8956A"
     SEND_BTN_HOVER_START = "#D4B878"
     SEND_BTN_HOVER_END = "#C9A060"
-    SEND_BTN_RADIUS = 17  # 按钮圆角半径
+    # 按钮圆角半径（主题可覆盖）：≥ 短边一半时呈正圆；代码侧会再按短边钳制。
+    # 20 = 34px 历史尺寸下 min(20,17)=17 视觉不变；40px 工具栏圆钮下正圆。
+    SEND_BTN_RADIUS = 20
 
     # 时间线
     TIMELINE_NODE = "#5A5A5A"
@@ -628,12 +614,43 @@ class Animations:
     NORMAL_MS = 200  # 卡片淡入、过渡
     SLOW_MS = 300  # 展开/折叠
 
-    # 缓动曲线
-    EASE_OUT = "QEasingCurve::OutCubic"
-    EASE_IN_OUT = "QEasingCurve::InOutQuad"
+    # 缓动曲线（QEasingCurve.Type，用法：QEasingCurve(Animations.EASE_OUT)）
+    EASE_OUT = QEasingCurve.OutCubic
+    EASE_IN_OUT = QEasingCurve.InOutQuad
+
+    # 展开/收起动画标准时长（轴向 maximumHeight/Width 动画）
+    EXPAND_MS = 180
 
     # 位移量
     FADE_SLIDE_Y = 8  # 淡入上滑像素数
+
+    # 「减少动态效果」检测结果缓存（None = 未检测）
+    _reduce_motion: bool | None = None
+
+    @classmethod
+    def motion_enabled(cls) -> bool:
+        """系统未开启「减少动态效果」时返回 True。
+
+        消费方约定：返回 False 时跳过动画、直接把属性置为终值
+        （保留状态反馈，去掉运动过程）。结果进程内缓存一次。
+        """
+        if cls._reduce_motion is None:
+            cls._reduce_motion = cls._detect_reduce_motion()
+        return not cls._reduce_motion
+
+    @staticmethod
+    def _detect_reduce_motion() -> bool:
+        """读取系统动画偏好；仅实现 Windows，其他平台视为开启动画。"""
+        if sys.platform == "win32":
+            try:
+                # SPI_GETCLIENTAREAANIMATION = 0x1042：pvParam 收到 BOOL，
+                # True = 客户区动画开启。查询失败按「开启动画」处理。
+                v = ctypes.c_bool(True)
+                ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(v), 0)
+                return not v.value
+            except Exception:
+                return False
+        return False
 
 
 # ============ 阴影系统 ============
@@ -726,32 +743,11 @@ class BorderRadius:
 
 
 # ============ 间距系统 ============
-class Spacing:
-    """间距 Token（单位：px）"""
-
-    XS = 4
-    SM = 8
-    MD = 12
-    LG = 16
-    XL = 20
-    XXL = 24
 
 
 # ============ 字体系统 ============
-class FontSizes:
-    """字体大小 Token"""
-
-    XS = "10px"
-    SM = "11px"  # 正文、标签
-    MD = "12px"  # 标题
-    LG = "14px"  # 大标题
 
 
-class FontWeights:
-    """字重 Token"""
-
-    NORMAL = ""
-    BOLD = "bold"
 
 
 # ============ 组件尺寸 ============
@@ -791,14 +787,6 @@ class CardStyles:
             }}
         """
 
-    @staticmethod
-    def card_content() -> str:
-        """卡片内容区样式"""
-        Colors.refresh()
-        return f"""
-            background-color: {Colors.CONTENT_BG};
-            border-radius: {BorderRadius.SM};
-        """
 
     @staticmethod
     def scroll_area() -> str:
@@ -876,10 +864,6 @@ class CardStyles:
         }}
         """
 
-    @staticmethod
-    def title_icon(emoji: str = "⚙️") -> str:
-        """标题图标样式（返回 emoji）"""
-        return emoji
 
     @staticmethod
     def title_label() -> str:
@@ -887,10 +871,6 @@ class CardStyles:
         Colors.refresh()
         return f"color: {Colors.TEXT_ACCENT};"
 
-    @staticmethod
-    def close_button() -> str:
-        """关闭按钮样式"""
-        return "color: #888888; cursor: pointer; padding: 4px;"
 
 
 class TabStyles:
@@ -930,38 +910,6 @@ class TabStyles:
         """
 
 
-class ItemStyles:
-    """列表项样式模板"""
-
-    @staticmethod
-    def radio_button() -> str:
-        """单选按钮样式"""
-        return """
-            QRadioButton::indicator {
-                width: 16px;
-                height: 16px;
-                /* 刻意保持 8px 字面量：等于尺寸的一半 = 正圆指示器。
-                   此处语义是"半径"而非"圆角档位"，套用 token 会丢失该语义。 */
-                border-radius: 8px;
-                border: 2px solid #8e8e8e;
-                background-color: transparent;
-            }
-            QRadioButton::indicator:checked {
-                border: 2px solid #0078d4;
-                background-color: #0078d4;
-            }
-        """
-
-    @staticmethod
-    def tag() -> str:
-        """标签样式"""
-        return f"""
-            color: #fff; 
-            font-weight: bold; 
-            background-color: rgba(102, 198, 255, 0.35); 
-            border-radius: {BorderRadius.XS}; 
-            padding: 2px 8px;
-        """
 
 
 class ButtonStyles:
@@ -1107,14 +1055,8 @@ class ComboBoxStyles:
 
 
 # ============ 便捷函数 ============
-def get_card_style(alpha: int = 250) -> str:
-    """获取卡片样式字符串"""
-    return CardStyles.card(alpha)
 
 
-def get_scroll_style() -> str:
-    """获取滚动区域样式字符串"""
-    return CardStyles.scroll_area()
 
 
 def get_unified_scrollbar_style(width: int = 6) -> str:
@@ -1174,16 +1116,12 @@ def get_unified_scrollbar_style(width: int = 6) -> str:
     """
 
 
-def get_content_bg_style() -> str:
-    """获取内容区背景样式"""
-    return f"""
-        background-color: {Colors.CONTENT_BG};
-        border-radius: {BorderRadius.SM};
-    """
 
 
 def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
     """为 widget 添加淡入动画（透明度 0→1），简洁克制"""
+    if not Animations.motion_enabled():
+        return  # reduced-motion：跳过淡入（控件默认 opacity 即 1）
     from PySide6.QtCore import QPropertyAnimation
     from PySide6.QtWidgets import QGraphicsOpacityEffect
 
@@ -1198,34 +1136,6 @@ def fade_in_widget(widget, duration: int = Animations.NORMAL_MS):
     widget._fade_anim = anim
 
 
-def apply_card_shadow(widget, shadow_type: str = "card"):
-    """为 widget 添加预设阴影效果
-
-    Args:
-        widget: 目标控件
-        shadow_type: "card" | "floating" | "glow" | "glow_primary" | "glow_ambient"
-            - "card"/"floating": 静态 drop shadow（深色 + offset）
-            - "glow*": 聚焦发光 halo，颜色取自 Colors.INPUT_FOCUS_BORDER（主题感知），
-              alpha / blur_radius 来自对应 token
-    """
-    from PySide6.QtGui import QColor
-    from PySide6.QtWidgets import QGraphicsDropShadowEffect
-
-    config = getattr(Shadows, shadow_type.upper(), Shadows.CARD)
-    effect = QGraphicsDropShadowEffect(widget)
-    effect.setBlurRadius(config["blur_radius"])
-    effect.setOffset(config["offset_x"], config["offset_y"])
-
-    if shadow_type.lower().startswith("glow"):
-        # GLOW_* 系列：颜色跟随主题，alpha 来自 token
-        Colors.refresh()
-        glow = QColor(Colors.INPUT_FOCUS_BORDER)
-        glow.setAlpha(config.get("alpha", 170))
-        effect.setColor(glow)
-    else:
-        # CARD / FLOATING：颜色直接来自 token 的 color 字段
-        effect.setColor(QColor(config["color"]))
-    widget.setGraphicsEffect(effect)
 
 
 # ── 全局 tooltip 样式（跟随主题） ──────────────────────
@@ -1261,6 +1171,12 @@ def _rgba_to_qcolor(value: str) -> "QColor":
         return QColor(s)
     except Exception:
         return QColor(33, 33, 38, 246)
+
+
+#: 公开别名 —— 主题色值（主题 YAML 里大量使用 rgba(r,g,b,a)）转 QColor 的唯一入口。
+#: 新代码请用这个名字，不要自己写解析，也不要直接 ``QColor(Colors.X)``
+#: （对 rgba() 会得到一个 invalid 的 QColor，渲染时表现为颜色不生效）。
+qcolor_from_token = _rgba_to_qcolor
 
 
 # 模块级状态：供 monkey-patched qfluentwidgets ToolTip.showEvent 读取当前主题色

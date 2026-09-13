@@ -71,9 +71,6 @@ class UsageService(QObject):
 
     # ========== 套餐用量 ==========
 
-    def has_coding_plan_fetcher(self, provider_name: str) -> bool:
-        """该服务商（或其 family）是否注册了套餐用量获取器"""
-        return self._resolve_fetcher(provider_name) is not None
 
     @staticmethod
     def _resolve_fetcher(provider_name: str) -> Optional[Callable]:

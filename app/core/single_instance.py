@@ -61,6 +61,7 @@ class SingleInstanceGuard(QObject):
         if self._shared_memory.create(1):
             logger.info("单实例锁已获取，作为第一个实例启动")
             self._is_first_instance = True
+            _register_current_guard(self)
             self._start_local_server()
             return True
 
@@ -72,6 +73,7 @@ class SingleInstanceGuard(QObject):
                 "单实例锁已接管（残留共享内存），作为第一个实例启动"
             )
             self._is_first_instance = True
+            _register_current_guard(self)
             self._start_local_server()
             return True
 
@@ -157,3 +159,32 @@ class SingleInstanceGuard(QObject):
             self._shared_memory = None
 
         logger.info("单实例资源已清理")
+
+
+# 当前进程持有的守护实例（try_lock 成功时登记），供自重启前主动放锁
+_CURRENT_GUARD: Optional[SingleInstanceGuard] = None
+
+
+def _register_current_guard(guard: SingleInstanceGuard) -> None:
+    """登记本进程持有的单实例锁（内部用）。"""
+    global _CURRENT_GUARD
+    _CURRENT_GUARD = guard
+
+
+def release_current_lock() -> None:
+    """释放本进程持有的单实例锁（自重启场景必须调用）。
+
+    背景：开启「单实例限制」后，重启时若旧进程还握着 QSharedMemory，新进程
+    try_lock 会失败 → 走「通知已有实例显示窗口后退出」分支 → 用户看到点了重启
+    结果程序直接没了。因此拉起新进程之前必须先放锁。
+    """
+    global _CURRENT_GUARD
+    if _CURRENT_GUARD is None:
+        return
+    try:
+        _CURRENT_GUARD.cleanup()
+        logger.info("[single_instance] 自重启前已释放单实例锁")
+    except Exception as e:
+        logger.warning(f"[single_instance] 释放单实例锁失败（忽略）: {e}")
+    finally:
+        _CURRENT_GUARD = None

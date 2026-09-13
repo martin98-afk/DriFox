@@ -35,15 +35,7 @@ from PySide6.QtWidgets import (
 # 适配 _chat_frame 的 8px 圆角；SceneLayer 自身和内部图片标签都按此设置
 _CHAT_FRAME_RADIUS = 8
 
-from typing import Optional
 
-from PySide6.QtCore import QEvent, Qt
-from PySide6.QtWidgets import (
-    QGraphicsBlurEffect,
-    QGraphicsOpacityEffect,
-    QLabel,
-    QWidget,
-)
 
 
 class SceneLayer(QWidget):

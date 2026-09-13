@@ -1,0 +1,18 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-team-templates",
+  "description": "DriFox 内置团队模板：default-team",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "MIT",
+  "type": "system",
+  "components": {
+    "team_templates": true
+  }
+}

@@ -6,7 +6,8 @@ import pytest
 
 def test_sqlite_engine_interface(tmp_path, monkeypatch):
     """SqliteStorageEngine 暴露契约全部方法（空库基本读写）"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.core.store.session_store import SessionStore
 
     # 隔离全局单例：SessionStore 是 _instance 单例（非 _instances dict）；
@@ -24,7 +25,8 @@ def test_sqlite_engine_interface(tmp_path, monkeypatch):
 
 def test_registry_fallback_default(monkeypatch):
     """注册 sqlite 插件引擎（系统插件路径）→ get_active 回落 sqlite"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.plugins.registries.storage_registry import StorageRegistry
 
     reg = StorageRegistry()
@@ -34,7 +36,8 @@ def test_registry_fallback_default(monkeypatch):
 
 
 def test_plugin_engine_override(monkeypatch):
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.plugins.registries.storage_registry import StorageRegistry
 
     class _MemEngine:
@@ -73,7 +76,8 @@ def test_plugin_engine_override(monkeypatch):
 
 def test_sqlite_engine_implements_capabilities(tmp_path, monkeypatch):
     """SQLite 引擎声明全部可选能力（标题/计数/输入历史）"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.core.store.session_store import SessionStore
     from app.plugins.contracts.storage import (
         InputHistoryCapability,
@@ -90,7 +94,8 @@ def test_sqlite_engine_implements_capabilities(tmp_path, monkeypatch):
 
 def test_sqlite_capability_methods_delegate(tmp_path, monkeypatch):
     """能力方法实际委托 SessionStore 同名方法（标题更新 / 计数 / 输入历史读写）"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.core.store.session_store import SessionStore
 
     monkeypatch.setattr(SessionStore, "_instance", None, raising=False)
@@ -106,7 +111,8 @@ def test_sqlite_capability_methods_delegate(tmp_path, monkeypatch):
 
 def test_engine_without_capability_safe_degrades(monkeypatch):
     """无能力引擎：isinstance 探测为 False，消费方走降级分支（不炸）"""
-    from plugins.system.storages.sqlite import SqliteStorageEngine
+    from importlib import import_module
+    SqliteStorageEngine = import_module("plugins.system-storages.storages.sqlite").SqliteStorageEngine
     from app.plugins.contracts.storage import SessionTitleCapability
 
     class _PlainEngine:

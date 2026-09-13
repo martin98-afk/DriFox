@@ -115,6 +115,8 @@ class ConversationExecutor:
             "hook_policy": getattr(self._config, "hook_policy", None),
             # 可选：HookPolicy 插件 id（优先级高于 hook_policy 枚举）
             "hook_policy_id": getattr(self._config, "hook_policy_id", None),
+            # 可选：LoopPolicy 插件 id（引擎级声明，不改全局激活槽）
+            "loop_policy_id": getattr(self._config, "loop_policy_id", None),
         }
         self._current_worker = self._worker_factory(**worker_kwargs)
 
@@ -444,6 +446,7 @@ class ConversationExecutor:
         safe_connect("error_occurred", "error")
         safe_connect("finished_with_content", "finished")
         safe_connect("finished_with_messages", "messages_updated")
+        safe_connect("queued_user_injected", "queued_user_injected")
         safe_connect("question_asked", "question_asked")
         safe_connect("permission_approval_requested", "permission_approval_requested")
         safe_connect("retry_status", "retry_status")

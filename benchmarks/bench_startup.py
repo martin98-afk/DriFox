@@ -21,6 +21,7 @@ TabManagerWindow.show），在隔离临时目录运行，QTimer 自动退出。
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import subprocess

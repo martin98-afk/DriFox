@@ -41,7 +41,6 @@
 import math
 import random
 import sys
-from pathlib import Path
 
 import shiboken6 as sip
 from PySide6.QtCore import (

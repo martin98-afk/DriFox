@@ -5,7 +5,7 @@
 - _welcome_card_cache 仅按 _window_id 缓存，但卡片内容依赖
   _current_project / _current_agent。
 - 切换项目/智能体/新建会话时必须显式失效，否则会展示上一个项目/智能体的陈旧数据。
-- 之前唯一的失效路径 not sip.isValid(cached) 存在竞态：
+- 之前唯一的失效路径 sip.isdeleted(cached) 存在竞态：
   _clear_chat_area 之后 QTimer.singleShot(0, _show_initial_welcome) 可能
   在 deleteLater 实际执行前先触发，导致缓存命中返回旧卡片。
 
@@ -94,7 +94,7 @@ class TestInvalidateWelcomeCardMethod:
         method = _get_method(cls, "_invalidate_welcome_card")
         assert method is not None
         src = ast.unparse(method)
-        assert "isValid" in src, "失效方法应检查 shiboken6.isValid"
+        assert "isdeleted" in src, "失效方法应检查 sip.isdeleted"
 
 
 class TestInvalidationCallSites:
@@ -360,9 +360,10 @@ class TestRerenderWelcomeCard:
         assert not other_widget_cache.deleteLater.called
 
     def test_skips_builtin_modes(self):
-        """内置 mode（sessions/changelog）跳过重渲染：不依赖 project_root，
-        重渲染只会因随机 greeting 使 HTML 变化、触发进入动画重复播放"""
-        for builtin_mode in ("sessions", "changelog"):
+        """内置 mode（sessions）跳过重渲染：不依赖 project_root，
+        重渲染只会因随机 greeting 使 HTML 变化、触发进入动画重复播放。
+        「更新」tab 已迁出为独立插件，由插件自管重渲策略。"""
+        for builtin_mode in ("sessions",):
             widget = self._make_widget()
             card = MagicMock()
             card._welcome_mode = builtin_mode

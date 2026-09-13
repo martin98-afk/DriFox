@@ -33,27 +33,6 @@ class FileOperationRepository:
             return False, "数据库未初始化"
         return self._db.execute_sql(sql, params)
 
-    def _row_to_operation(self, row) -> Dict:
-        """将数据库行转换为操作字典"""
-        if not row:
-            return {}
-
-        if hasattr(row, 'keys'):
-            d = {k: row[k] for k in row.keys()}
-        elif isinstance(row, dict):
-            d = dict(row)
-        else:
-            return {}
-
-        return {
-            "id": d.get("id"),
-            "session_id": d.get("session_id", ""),
-            "call_id": d.get("call_id", ""),
-            "tool_name": d.get("tool_name", ""),
-            "file_path": d.get("file_path", ""),
-            "backup_path": d.get("backup_path", ""),
-            "created_at": d.get("created_at", ""),
-        }
 
     def record(self, session_id: str, call_id: str,
                tool_name: str, file_path: str,

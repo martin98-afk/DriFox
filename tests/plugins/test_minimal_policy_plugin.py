@@ -6,7 +6,7 @@ def test_minimal_policy_loadable_from_plugin_dir():
     import importlib.util
     from pathlib import Path
 
-    py = Path(__file__).resolve().parents[2] / "plugins" / "system" / "loop_policies" / "minimal.py"
+    py = Path(__file__).resolve().parents[2] / "plugins" / "system-loop-policies" / "loop_policies" / "minimal.py"
     assert py.exists(), f"缺少验收插件: {py}"
     spec = importlib.util.spec_from_file_location("drifox_test_minimal_policy", py)
     mod = importlib.util.module_from_spec(spec)

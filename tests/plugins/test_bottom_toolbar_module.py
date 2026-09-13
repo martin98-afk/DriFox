@@ -10,13 +10,6 @@ import pytest
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 def test_bottom_toolbar_module_id():
     from app.widgets.modules.bottom_toolbar_module import BottomToolbarModule
@@ -83,8 +76,7 @@ def test_compose_builds_bottom_toolbar(fresh_registry, qapp):
         "_model_sep_usage",
         "_settings_btn_icon",
         "_settings_effort_label",
-        "_tool_danger_label",
-        "_tool_safe_label",
+        "_tool_count_label",
         "_tool_restore_btn",
         "_bottom_toolbar_shadow",
         "_input_card_primary_shadow",

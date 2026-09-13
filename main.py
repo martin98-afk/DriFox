@@ -6,7 +6,19 @@ LLM Chatter 主入口
 
 import os
 import sys
+import time
 import warnings
+
+# ========== 开机自启提权 helper（最早处理，不加载 Qt）==========
+# 拨动自启开关时主进程通过 runas 以管理员身份把本进程再次拉起，
+# 命令行携带 --configure-auto-start=on|off。helper 写完 HKLM 注册表
+# 立即退出，成败通过 --startup-error-file 回传（见 app/utils/startup_manager.py）。
+# 必须放在 qfluentwidgets/Qt 导入之前：helper 进程无需也不应加载 GUI 栈。
+if os.name == "nt" and any(arg.startswith("--configure-auto-start=") for arg in sys.argv[1:]):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from app.utils.startup_manager import maybe_handle_startup_helper
+
+    sys.exit(maybe_handle_startup_helper(sys.argv[1:]) or 0)
 
 from qfluentwidgets import setFontFamilies
 
@@ -16,57 +28,22 @@ warnings.filterwarnings("ignore")
 os.environ.setdefault("PYPINYIN_NO_DICT_COPY", "1")
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
-# ========== Chromium 进程治理（WebEngine 内存占用的根因）==========
-# 必须在 QApplication 创建之前设置：QtWebEngine 在首次初始化时读取该环境变量，
-# 之后修改无效（这也是它必须放在 main.py 最顶部的原因）。
-#
-# 背景：每张消息卡片正文是一个独立的 QWebEngineView，Chromium 默认进程模型下
-# 会为每张卡片派生独立 renderer 进程（各约数十 MB）。长对话滚动过程中进程数
-# 随卡片数单调增长 —— 这是"长时间运行内存溢出"的主要来源。
-#
-# --renderer-process-limit：硬性封顶 renderer 进程总数，达到上限后 Chromium
-#   自动复用已有进程而非继续派生，把内存曲线从"线性增长"压成"恒定上限"。
-#   注意：不使用 --process-per-site —— 它会使所有同源卡片共享同一进程，与
-#   现有的「按 PID kill 离屏 renderer」回收机制冲突（kill 一个会误伤全部卡片）。
-#
-# 其余开关均为本地 setHtml 渲染场景下的纯开销，关闭后无功能损失。
-#
-# GPU 加速开关（Qt6 WebEngine 调优）：默认纯软件光栅（省 GPU 进程常驻内存、
-# 绕开 DirectComposition 历史闪烁问题）。设 DRIFOX_WEBENGINE_GPU=1 可试用
-# GPU 光栅+合成（Qt 6.9 / Chromium 122+ 上 DirectComposition 遮挡 bug 已修复
-# 多轮，软件光栅是流式重排/滚动掉帧的 CPU 瓶颈来源）；若闪烁回归，
-# 不设该变量即回退现状。遮挡误判双禁 flags 与 GPU 无关（独立 bug 的
-# workaround），任何模式下都保留。
-#
-# 覆盖方式：用 setdefault，外部若已设置 QTWEBENGINE_CHROMIUM_FLAGS 则以其为准
-# （便于调试或快速回退，例如 QTWEBENGINE_CHROMIUM_FLAGS="" 即完全禁用本组开关）。
-_GPU_RENDER_FLAGS = (
-    ""
-    if os.environ.get("DRIFOX_WEBENGINE_GPU") == "1"
-    else (
-        " --disable-gpu"  # 聊天正文无 WebGL/视频需求，省掉 GPU 进程常驻内存
-        " --disable-gpu-compositing"  # 纯软件合成：绕开 DirectComposition 视觉树（窗口闪没的扰动源）
-    )
-)
-_CHROMIUM_FLAGS = (
-    # PySide6 迁移注记：Qt6 的 Chromium（108+）在 --disable-gpu 后回退 SwiftShader
-    # 软件光栅化；若再加 --disable-software-rasterizer 会把唯一回退路径也禁掉，
-    # 导致所有 QWebEngineView 内容空白（Qt5/Chromium 83 无此问题）。
-    # 故 Qt6 下不再传 --disable-software-rasterizer。
-    "--renderer-process-limit=6"  # renderer 进程硬上限（核心）
-    + _GPU_RENDER_FLAGS
-    # Windows 遮挡计算误判：Chromium 会把宿主窗口判定为"被遮挡"而 cloak 掉
-    # → 主窗口整个消失后重现（setHtml/首次渲染时触发，QtWebEngine on Windows
-    # 已知问题）。两个 feature 名都禁，覆盖新旧 Chromium 版本。
-    + " --disable-features=CalculateNativeWinOcclusion,NativeWindowOcclusionTracking"
-    + " --disable-backgrounding-occluded-windows"  # 配套：被误判遮挡时也不降速/挂起
-    + " --disable-dev-shm-usage"  # 避免容器/小 /dev/shm 环境下的渲染异常
-    + " --disable-extensions"
-    + " --disable-background-networking"  # 纯本地渲染，不需要后台网络服务
-    + " --disable-background-timer-throttling"  # 隐藏 tab 的计时器节流会拖慢流式渲染
-    + " --js-flags=--max-old-space-size=128"  # 限制单 renderer JS 堆，防单页膨胀
-)
-os.environ.setdefault("QTWEBENGINE_CHROMIUM_FLAGS", _CHROMIUM_FLAGS)
+# ========== 渲染配置 → 环境变量（QtWebEngine 首次初始化前一次性生效）==========
+# 原 main.py 硬编码的 QT_OPENGL / QT_ANGLE_PLATFORM / QTWEBENGINE_CHROMIUM_FLAGS
+# 已配置化：设置界面「渲染与性能」→ app.config [Render] 组，重启生效。
+# app/utils/render_env.py 在 Qt 加载前裸 JSON 读取该组并换算环境变量，档位语义、
+# 旧检测链（DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL → ~/.drifox 标记文件）、
+# 外部环境变量优先（setdefault）与平台限定（macOS 强设 d3d11 黑屏）见其模块注释。
+# 返回值里还有两个「Qt 属性类」设置（AA_UseOpenGLES / AA_ShareOpenGLContexts）：
+# 它们不是环境变量，只能在 QApplication 创建前 setAttribute，故由 main() 取用。
+from app.utils.render_env import apply_render_env, default_config_path
+
+RENDER_SETTINGS = apply_render_env(default_config_path())
+
+# 防御：QSG_RHI* 残留会让场景图走 RHI D3D11 合成，WebEngine 的 GL 纹理接不上 → 整块黑。
+for _env_key in ("QSG_RHI", "QSG_RHI_BACKEND"):
+    os.environ.pop(_env_key, None)
+
 
 # ========== 内存诊断开关 ==========
 # 设为 False 可禁用所有 [MEM] 诊断日志和 mem_diag.log 文件
@@ -93,45 +70,71 @@ else:
 project_root = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, project_root)
 
+# ========== 崩溃捕获（VEH → minidump + C 栈，仅 Windows）==========
+# Intel 核显驱动崩溃发生在 native 层，Python traceback 看不到调用链；
+# 此捕获器在致命异常时自动落 logs/crash/*.dmp + 模块!RVA 级 C 栈日志。
+# 回退：DRIFOX_NO_VEH=1 跳过安装。确认驱动修复稳定后可移除本段。
+if os.name == "nt":
+    try:
+        from app.utils.veh_minidump import install as _install_veh
+
+        _install_veh()
+    except Exception:
+        pass  # 捕获器失败绝不阻塞启动
+
 
 def main():
     """启动 LLM Chatter"""
 
     # ========== 环境清理：避免与已安装 Drifox.app 的 Qt 冲突 ==========
     # macOS 上如果通过 Login Items 启动了已打包的 Drifox.app，其启动脚本可能
-    # 将 QT_PLUGIN_PATH 设置为 App bundle 内 PyQt5 的 plugin 路径。该路径
-    # 指向的 QtCore 与开发环境 .venv 中的 PyQt5 QtCore 不是同一份二进制，
+    # 将 QT_PLUGIN_PATH 设置为 App bundle 内 PySide6 的 plugin 路径。该路径
+    # 指向的 QtCore 与开发环境 .venv 中的 PySide6 QtCore 不是同一份二进制，
     # 导致在 QApplication 创建时加载两套 Qt 框架 → 类重复注册 → 最终触发
     # CoreFoundation __CFDataValidateRange 断言失败（SIGABRT）。
-    # 开发环境下 PyQt5 会自动感知自身 plugin 路径，无需外部 QT_PLUGIN_PATH。
+    # 开发环境下 PySide6 会自动感知自身 plugin 路径，无需外部 QT_PLUGIN_PATH。
     _qt_pp = os.environ.pop("QT_PLUGIN_PATH", "")
 
     from loguru import logger
-    from PySide6.QtCore import QCoreApplication, Qt, QTimer
+    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtWidgets import QApplication
 
-    if _qt_pp:
+    if _qt_pp: 
         logger.info(f"[EnvCleanup] QT_PLUGIN_PATH 已清理: {_qt_pp}")
 
     # ========== 必须在创建 QApplication 之前设置 Qt 属性 ==========
     # 这些设置必须在任何 Qt 模块导入之前或 QApplication 创建之前完成
 
     # DPI 缩放设置
-    # 迁移注记：Qt6 高 DPI 永远启用，AA_EnableHighDpiScaling/AA_UseHighDpiPixmaps
-    # 已无效果（Qt6 中设置会触发弃用警告），仅保留 rounding policy。
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-
-    # 共享 OpenGL contexts —— Qt6 WebEngine 官方要求（tests/conftest.py 同款）。
-    # 缺失时 WebEngine 首次初始化 Chromium 会重设 GL context，扰动原生窗口层级，
-    # 表现为主窗口短暂 HIDE 再 SHOW（启动闪烁）。
-    QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+    # 迁移注记：Qt6 高 DPI 永远启用，AA_EnableHighDpiScaling/AA_UseHighDpiPixmaps
+    # 已无效果（设置会触发弃用警告），仅保留 rounding policy。
+    # OpenGL 走 ANGLE(D3D11)：绕开 Intel OpenGL ICD 缺陷路径（见文件顶部说明）。
+    # 必须在 QApplication 与 WebEngine 导入之前设置。
+    # 由 RenderBackend 推导（见 render_env.compute_settings）：hardware / software
+    # 走 ANGLE 才需要；software_gl 是 Mesa llvmpipe 桌面 GL 兜底档，强制 ES 反而
+    # 与「最慢最稳」的初衷冲突 —— 故该档位下不设这个属性。
+    if RENDER_SETTINGS.get("use_open_gles", True):
+        QApplication.setAttribute(Qt.AA_UseOpenGLES)
+    # [MEM] 共享 GL 上下文：默认每个 QWebEngineView 会创建自己的 OpenGL 上下文，
+    # 并发对话下 40+ 张消息卡 = 40+ 个独立上下文，每个都要独立的命令缓冲与合成
+    # 表面后备存储。开启后所有 view 复用同一上下文，per-view 常驻开销下降
+    # （实测 12 个 view 总增量 250MB → 218MB，约 -12.7%）。
+    # 必须在 QApplication 创建之前设置（benchmarks/README.md 同样要求此项）。
+    # [Render] ShareGLContexts 可关：多卡共用上下文被怀疑与卡片/图表闪烁相关，
+    # 出问题时关掉即可验证是否由它引起。
+    if RENDER_SETTINGS.get("share_gl_contexts", True):
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts)
 
     # ========== 导入可能触发 WebEngine 的模块（在 QApplication 创建之前）==========
     # 必须在 QApplication 创建之前导入所有 QWebEngine 类，
     # 否则后续模块（如 message_card.py）中延迟导入会导致：
     #   ImportError: QtWebEngineWidgets must be imported before a QCoreApplication instance is created
+    # Qt6 迁移：QWebEnginePage/QWebEngineSettings 已移至 QtWebEngineCore，
+    # QWebEngineView 仍在 QtWebEngineWidgets（Qt6 拆分模块）。
     from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings  # noqa: F401
     from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401
+
     # 创建应用 — 尽早创建 QApplication，让 Qt 事件循环尽快就绪
     app = QApplication(sys.argv)
 
@@ -165,6 +168,17 @@ def main():
         except Exception:
             pass
 
+        # 原生崩溃捕获（faulthandler）：Qt/C++ 层段错误不经过 Python excepthook，
+        # 打包版表现为「闪退且 all.log 无任何记录」。启用后崩溃栈 dump 到
+        # logs/crash/，下次启动由 crash_handler.check_pending_crashes 检测并弹窗。
+        try:
+            from app.core.crash_handler import install_crash_handler
+            from app.utils.utils import get_app_data_dir
+
+            install_crash_handler(get_app_data_dir() / "logs")
+        except Exception:
+            pass
+
         # 同步开机自启注册表状态
         try:
             from app.utils.startup_manager import sync_auto_start_from_config
@@ -182,6 +196,29 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] init_shared_web_profile 失败")
 
+        # 启动后台 RSS 采样器：把 psutil 进程表遍历从主线程搬走。
+        # 采样结果供 B4 强回收阈值判定使用（原为每 content chunk 同步采样，
+        # 单次 20-80ms，是流式卡顿主因之一）。
+        try:
+            from app.core.rss_sampler import rss_sampler
+
+            rss_sampler.ensure_started()
+        except Exception:
+            logger.exception("[DeferredStartup] rss_sampler 启动失败（降级为同步采样）")
+
+        # 预热纯 Qt 块级渲染器（仅灰度开启时）。
+        # [PERF] markdown_block_viewer 已从启动关键路径移除（延迟导入），
+        # 开启灰度的实例在这里补热，避免首张 assistant 卡片渲染时抖动 ~340ms。
+        try:
+            from app.utils.config import Settings
+
+            if Settings.get_instance().qt_message_renderer.value:
+                from app.widgets.message_card import prewarm_markdown_block_viewer
+
+                prewarm_markdown_block_viewer()
+        except Exception:
+            logger.exception("[DeferredStartup] prewarm_markdown_block_viewer 失败")
+
         # 预导入 openai resources 子模块（chat/responses 等）
         # 必须在任何 worker 线程启动前完成：openai SDK 懒加载 + Python 3.14
         # import 锁死锁检测，多线程首次并发访问 client.chat/client.responses
@@ -194,9 +231,33 @@ def main():
         except Exception:
             logger.exception("[DeferredStartup] openai resources 预导入失败（非致命）")
 
-        # [PERF] WebEngine 预热已前移到 _show_popup 中窗口显示前同步完成
-        # （Qt6 迁移：Chromium 首次初始化的 native 扰动发生在显示前，避免启动闪烁），
-        # 此处不再重复预热。
+        # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
+        # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
+        # 可复用已就绪的进程基础设施，避免首帧后突发 200-500ms 主线程阻塞。
+        try:
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+
+            _preheat_view = QWebEngineView()
+            _preheat_view.setHtml("<html><body></body></html>")
+            _preheat_view.hide()
+            # 保持引用，防止 GC 回收导致进程退出
+            app._preheat_webengine = _preheat_view
+
+            # [MEM] 预热完成后销毁视图本身：Chromium 基础设施（browser process /
+            # profile）此时已初始化完毕且随 app 级 profile 常驻，空白 renderer
+            # 约占 15-30MB 无保留价值。延时 5s：覆盖启动窗口，之后首张真实卡片
+            # 的 renderer 已就位，销毁无副作用。
+            def _release_preheat():
+                try:
+                    _preheat_view.deleteLater()
+                    app._preheat_webengine = None
+                except Exception:
+                    pass
+
+            QTimer.singleShot(5000, _release_preheat)
+            logger.debug("[DeferredStartup] WebEngine 预热视图已创建（5s 后释放）")
+        except Exception:
+            logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
 
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
@@ -218,6 +279,16 @@ def main():
             threading.Thread(target=_sync_models_dev, daemon=True).start()
         except Exception:
             logger.exception("[DeferredStartup] 启动 models.dev 后台同步线程失败")
+
+        # 崩溃取证自检（仅调试）：DRIFOX_CRASH_TEST=1 时在 faulthandler 安装后
+        # 触发真实 SIGSEGV，验证 crash log/WER 链路。正常运行永不设置此变量。
+        # ⚠️ 必须在主线程触发：Windows CRT 的 signal handler 只在主线程路由
+        # 硬件异常，子线程触发时 faulthandler 不落盘（实测）。
+        if os.environ.get("DRIFOX_CRASH_TEST") == "1":
+            logger.warning("[CrashHandler] DRIFOX_CRASH_TEST=1，3 秒后触发测试性段错误")
+            import faulthandler as _fh
+
+            _fh._sigsegv()
 
     # 禁用 Qt 的 qFatal 默认行为（abort），改为记录 ERROR 日志
     from loguru import logger as _logger
@@ -256,12 +327,14 @@ def main():
 
     # ========== 单实例检查 ==========
     from app.core.single_instance import SingleInstanceGuard
+    from app.utils.config import Settings
 
     _guard = SingleInstanceGuard("Drifox")
-    # if not _guard.try_lock():
-    #     _guard.request_show_window()
-    #     _guard.cleanup()
-    #     return
+    # 开关关闭时不取锁，允许多实例并行（改动重启生效）
+    if Settings.get_instance().enable_single_instance.value and not _guard.try_lock():
+        _guard.request_show_window()
+        _guard.cleanup()
+        return
 
     # 设置 qfluentwidgets 主题 — 跟随 DriFox 主题的 mode
     from qfluentwidgets import Theme, setTheme
@@ -355,45 +428,41 @@ def main():
         from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
         tm = TabManagerWindow.create_instance()
+        # 批5 壳先行：先显示壳窗口（空态占位「正在准备会话…」）→ 进程级预热
+        # （SessionStore/StorageRegistry/内置工具链）→ 首窗构造 → add_window。
         # 首个 ChatWindow 必须在 TabManagerWindow 创建之后构造：
         # TabManagerWindow.__init__ 里 PluginHostService.ensure_started() 同步完成
         # PluginManager 扫描；若先构造本窗口，其 setup_ui 的 _load_all_ui_plugins 与
         # 首帧 singleShot(0) 重试都会早于 ensure_started 执行（pm 未就绪静默 return），
         # 此后无人再触发 UI 插件装载 → 主窗口插件内容（卡片/侧边栏/输入按钮）全部缺失。
+        tm.show()
+        tm.show_boot_placeholder()
+        from app.utils.preheat import preheat_process_level
+
+        preheat_process_level()
         chat_window = OpenAIChatToolWindow(fake_page)
         tm.add_window(chat_window)
+        tm.remove_boot_placeholder()
+        tm._mark_first_window_ready()
         _guard.show_requested.connect(lambda: _activate_window(tm))
-        # 强制提前物化原生窗口句柄：Qt6 WebEngine 首次渲染（setHtml）会在顶层
-        # HWND 下创建 Chromium 原生子窗口，若顶层句柄彼时才物化，会触发原生
-        # 层级扰动 → 主窗口短暂 HIDE 再 SHOW（启动闪烁，hideEvent 已插桩实证）。
-        tm.winId()
         _apply_window_topmost(tm)
-        # ── 同步预热 Chromium（Qt6 迁移关键）──
-        # 本机 GPU 探测失败重试（GLES3 fallback / shared context 虚拟化失败）期间，
-        # 首次 setHtml 会让主窗口短暂 HIDE（插桩实证：hideEvent 栈在 setHtml 内）。
-        # 把首次初始化 + setHtml 挪到窗口显示之前同步完成，抖动发生在显示前，不可见。
-        try:
-            from PySide6.QtWebEngineWidgets import QWebEngineView as _QWebEngineView
-            from PySide6.QtCore import QEventLoop as _QEventLoop, QTimer as _QTimer
+        logger.info("DriFox 以 Tab 管理器模式启动（壳先行 + 进程级预热）")
 
-            # parent 必须挂进真实窗口树：offscreen 预热只暖了 Chromium 进程，
-            # 「首次在已显示窗口树中创建 WebEngine native delegate」的层级扰动
-            # 仍会在 welcome 卡 ensure_rendered → setHtml 时发生（顶层窗口 HIDE 闪，
-            # hideEvent 插桩实证）。挂到 tm 后首次 native 嵌入发生在 tm.show() 之前，
-            # 抖动不可见（对齐 Qt 论坛已知结论：dummy view 不进 layout 则无效）。
-            _preheat = _QWebEngineView(tm)
-            _preheat.hide()  # 显式隐藏：否则 tm.show() 的 showChildren 会把它显示出来（左上角白框）
-            _loop = _QEventLoop()
-            _preheat.loadFinished.connect(_loop.quit)
-            _preheat.setHtml("<html><body></body></html>")
-            _QTimer.singleShot(2000, _loop.quit)  # 兜底：Chromium 异常时不无限等
-            _loop.exec()
-            app._preheat_webengine = _preheat  # 保持引用防 GC
-            logger.debug("[Startup] WebEngine 同步预热完成（Chromium 已就绪）")
-        except Exception:
-            logger.exception("[Startup] WebEngine 同步预热失败（非致命）")
-        tm.show()
-        logger.info("DriFox 以 Tab 管理器模式启动")
+        # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条以 InfoBar 提示，不抢首帧。
+        # 每条 InfoBar 创建成功即重命名 .reported（显示过就改状态），下次启动不再提示
+        def _check_last_crash():
+            try:
+                from app.core.crash_handler import check_pending_crashes, prompt_crash_report
+                from app.utils.utils import get_app_data_dir
+
+                dumps = check_pending_crashes(get_app_data_dir() / "logs")
+                for dump in dumps:
+                    logger.warning(f"[CrashHandler] 检测到上次崩溃报告: {dump}")
+                    prompt_crash_report(dump, parent=tm)
+            except Exception:
+                pass
+
+        QTimer.singleShot(8000, _check_last_crash)
 
     # 应用退出时清理
     app.aboutToQuit.connect(_guard.cleanup)

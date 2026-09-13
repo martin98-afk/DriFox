@@ -13,8 +13,7 @@ import typing as _typing
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     # 核心卡片（已迁移到 cards/settings/）
     "BaseSettingsCard":   ("app.widgets.cards.settings.base_settings_card", "BaseSettingsCard"),
-    "HistoryCard":        ("app.widgets.cards.settings.history_card", "HistoryCard"),
-    "get_message_preview": ("app.widgets.cards.settings.history_card", "get_message_preview"),
+    "get_message_preview": ("app.utils.session_preview", "get_message_preview"),
     "LLMSettingsCard":    ("app.widgets.cards.settings.llm_settings_card", "LLMSettingsCard"),
     "MemoryCardContent":  ("app.widgets.cards.settings.memory_card", "MemoryCardContent"),
     "ModelConfigCard":    ("app.widgets.cards.settings.model_config_card", "ModelConfigCard"),
@@ -28,7 +27,6 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "CodingPlanRing":     ("app.widgets.coding_plan_ring", "CodingPlanRing"),
     "ContextUsageRing":   ("app.widgets.context_usage_ring", "ContextUsageRing"),
     "ConversationNodePreview": ("app.widgets.conversation_node_preview", "ConversationNodePreview"),
-    "FileUndoPreviewDialog": ("app.widgets.file_undo_dialog", "FileUndoPreviewDialog"),
     "MessageCard":        ("app.widgets.message_card", "MessageCard"),
     "create_welcome_card": ("app.widgets.message_card", "create_welcome_card"),
 }
@@ -54,7 +52,6 @@ __all__ = [
     # 核心卡片
     "BaseSettingsCard",
     "LLMSettingsCard",
-    "HistoryCard",
     "get_message_preview",
     "MessageCard",
     "create_welcome_card",
@@ -68,5 +65,4 @@ __all__ = [
     "CodingPlanRing",
     "ContextUsageRing",
     "ConversationNodePreview",
-    "FileUndoPreviewDialog",
 ]

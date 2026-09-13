@@ -5,7 +5,7 @@
 背景 bug：自定义插件注入的 welcome tab 切换后无法被记住（重启回 sessions）。
 根因（两层拦截）：
 1. main_widget._on_welcome_mode_changed 对非内置 mode 直接 return，不写配置；
-2. 即使写入，welcome_mode 的 OptionsValidator(["sessions","changelog"]) 会在
+2. 即使写入，welcome_mode 的 OptionsValidator(["sessions"]) 会在
    value setter 把插件 mode_key correct 回 sessions。
 
 修复：插件 tab 存独立无验证器字段 welcome_plugin_tab；初始 mode 由
@@ -59,16 +59,16 @@ def test_plugin_tab_write_goes_to_dedicated_field():
     cfg = Settings.get_instance()
     _on_welcome_mode_changed(PLUGIN_KEY)
     assert cfg.welcome_plugin_tab.value == PLUGIN_KEY
-    assert cfg.welcome_mode.value in ("sessions", "changelog")
+    assert cfg.welcome_mode.value == "sessions"
 
 
 def test_builtin_tab_clears_plugin_memory():
-    """切回内置 tab → 清空插件记忆并更新 welcome_mode"""
+    """切回内置 tab → 清空插件记忆并更新 welcome_mode（sessions 是当前唯一内置 mode）"""
     cfg = Settings.get_instance()
     _on_welcome_mode_changed(PLUGIN_KEY)
-    _on_welcome_mode_changed("changelog")
+    _on_welcome_mode_changed("sessions")
     assert cfg.welcome_plugin_tab.value == ""
-    assert cfg.welcome_mode.value == "changelog"
+    assert cfg.welcome_mode.value == "sessions"
 
 
 def test_resolve_prefers_registered_plugin_tab():
@@ -84,8 +84,8 @@ def test_resolve_falls_back_when_plugin_gone():
     """保存的插件 tab 未注册（插件卸载/停用）→ 回退内置 mode，不崩溃"""
     from app.widgets.message_card import resolve_initial_welcome_mode
 
-    mode = resolve_initial_welcome_mode("changelog", PLUGIN_KEY, {})
-    assert mode == "changelog"
+    mode = resolve_initial_welcome_mode("sessions", PLUGIN_KEY, {})
+    assert mode == "sessions"
 
 
 def test_resolve_falls_back_when_empty():

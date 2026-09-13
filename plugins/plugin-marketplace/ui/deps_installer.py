@@ -28,7 +28,6 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
-from urllib.parse import urlparse
 
 from loguru import logger
 
@@ -207,7 +206,6 @@ class DepsInstaller:
 
 def _platform_wheel_tags() -> List[str]:
     """当前平台的 wheel 兼容 tag 优先级列表（前缀匹配，通用在前）。"""
-    machine = (sys.maxsize > 2**32 and "64") or "32"
     import platform as _pf
 
     arch = _pf.machine().lower()  # amd64 / x86_64 / arm64 ...

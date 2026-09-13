@@ -31,7 +31,7 @@ from __future__ import annotations
 from abc import ABC
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Dict, List, Protocol, runtime_checkable
 
 SCOPE_MAIN = "main"
 SCOPE_SUBAGENT = "subagent"
@@ -58,12 +58,6 @@ class HookEvent(ABC):
     """
 
 
-@dataclass
-class BuildSystemPromptEvent(HookEvent):
-    """系统 prompt 构建前触发"""
-
-    current_role: str = "primary"  # primary / subagent
-    agent_name: str = ""
 
 
 @dataclass
@@ -77,11 +71,16 @@ class SessionStartEvent(HookEvent):
 
 
 @dataclass
-class UserPromptSubmitEvent(HookEvent):
-    """用户提问提交触发"""
+class BuildSystemPromptEvent(HookEvent):
+    """系统提示词构建触发（贡献内容拼入 system prompt）
 
-    message: str = ""
-    is_team_member: bool = False
+    主对话由 AgentManager 构建链触发；插件引擎（EngineSession）在
+    turn() 收到插件传入的 system 后按策略触发，贡献统一拼进 system。
+    """
+
+    agent_name: str = ""  # 插件引擎场景通常为空（system 由插件自行组装）
+
+
 
 
 @dataclass

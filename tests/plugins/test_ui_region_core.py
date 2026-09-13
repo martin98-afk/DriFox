@@ -8,13 +8,6 @@ from app.plugins.contracts.ui_slots import MENU, SlotEntry
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 class TestRegionCore:
     def test_declare_and_register(self, fresh_registry):

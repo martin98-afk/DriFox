@@ -133,4 +133,3 @@ def test_stdio_with_url_stays_stdio_in_form():
     # 显隐也应符合 stdio：command 可见、url 隐藏
     assert card.commandEdit.testAttribute(Qt.WA_WState_Hidden) is False
     assert card.urlEdit.testAttribute(Qt.WA_WState_Hidden) is True
-

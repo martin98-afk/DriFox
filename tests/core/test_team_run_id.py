@@ -16,23 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from app.core import team_manager as tm_mod
-
 # 🛡️ 模块导入时缓存真实 get_instance（test_team_template.py 部分用例直接赋值
 # TeamManager.get_instance 为 _FakeTM 且不恢复，属既有隔离缺陷；此处提前
 # 缓存真实引用，fixture 中强制恢复，避免本文件用例被污染类方法误导）。
-_ORIG_GET_INSTANCE = tm_mod.TeamManager.__dict__["get_instance"]
 
-
-@pytest.fixture
-def fresh_tm(tmp_path, monkeypatch):
-    """指向 tmp_path 的全新 TeamManager 实例（隔离，不污染真实 ~/.drifox/）。"""
-    monkeypatch.setattr(tm_mod.TeamManager, "get_instance", _ORIG_GET_INSTANCE)
-    monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path))
-    tm_mod.TeamManager._instance = None
-    tm = tm_mod.TeamManager.get_instance()
-    yield tm
-    tm_mod.TeamManager._instance = None
 
 
 def _team_file(tm, team_name: str) -> Path:

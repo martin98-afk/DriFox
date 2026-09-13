@@ -7,10 +7,8 @@ from uuid import uuid4
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
 from PySide6.QtGui import QIcon
-from PySide6.QtCore import QSize
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -23,7 +21,6 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     BodyLabel,
-    ComboBox,
     ExpandSettingCard,
     FluentIcon,
     PushButton,
@@ -38,13 +35,12 @@ from app.utils.design_tokens import (
     ButtonStyles,
     CardStyles,
     Colors,
-    ComboBoxStyles,
     Sizes,
     SwitchStyles,
     scale_font_size,
 )
-from app.utils.utils import get_app_data_dir, get_font_family_css, get_unified_font
-from app.widgets.cards.settings.mcp_setting_card import EDIT_CARD_STYLE, NoWheelComboBox, _make_row
+from app.utils.utils import get_app_data_dir, get_font_family_css
+from app.widgets.cards.settings.mcp_setting_card import NoWheelComboBox, _make_row
 from app.widgets.elided_label import _ElidedLabel
 
 # 事件顺序定义（按实际会话触发先后排列）
@@ -153,9 +149,6 @@ class _FlowLayout(QLayout):
     def _do_layout(self, rect, test_only):
         x = rect.x()
         y = rect.y()
-        line_height = 0
-        line_widths = []  # 每行总宽度（含 spacing）
-        cur_line_items = []  # 当前行尚未布局的 items
 
         # 第一遍：分行 + 计算每行总宽度
         # 注意：不跳过不可见的 widget。offscreen/异步渲染下，
@@ -288,7 +281,7 @@ class HookItem(QWidget):
         self.delBtn.setStyleSheet(ButtonStyles.tool_button())
         self.delBtn.clicked.connect(lambda: self.removed.emit(self.hook_id))
 
-        # 系统级 hook（来自 plugins/system/ 内置插件）禁止删除
+        # 系统级 hook（来自 plugins/ 内置 system 族插件）禁止删除
         is_system_plugin = self._hook_data.get("_is_system_plugin", False)
         if is_system_plugin:
             self.delBtn.setEnabled(False)
@@ -342,15 +335,6 @@ class _AgentComboBox(NoWheelComboBox):
     - 名称作为显示文本（默认 Qt 样式渲染）
     - 描述存到 itemData(Qt.ToolTipRole)，鼠标悬停时显示
     """
-
-    def add_agent(self, name: str, description: str = ""):
-        """添加一个智能体选项（名称 + 描述 tooltip）"""
-        self.addItem(name)
-        idx = self.count() - 1
-        if description:
-            self.setItemData(idx, description, Qt.ToolTipRole)
-            self.setItemData(idx, description, Qt.WhatsThisRole)
-
 
 class HookEditCard(QWidget):
     """
@@ -429,7 +413,7 @@ class HookEditCard(QWidget):
         style = CardStyles.edit_card_style()
         self.setStyleSheet(style)
         # QLineEdit::placeholder 由 CSS 覆盖，但仍设置 palette 确保兼容
-        from PySide6.QtGui import QColor, QPalette
+        from PySide6.QtGui import QPalette
 
         ph_color = self._parse_placeholder_color()
         for le in self._line_edits:
@@ -1038,7 +1022,6 @@ class HookEditCard(QWidget):
         agent_identity_hook = self._is_agent_identity_hook()
         if agent_identity_hook:
             # 从下拉框取选中的智能体名，matcher 固定为 "primary"
-            agent_name = self._agent_combo.currentText()
             matcher = "primary"
         else:
             matcher = self.matcherEdit.text().strip()
@@ -1085,12 +1068,6 @@ class HookEditCard(QWidget):
         if not values["event"] or not values["command"]:
             return
         self.saved.emit(values)
-
-    def get_title(self) -> str:
-        if self._is_new:
-            return "➕ 添加 Hook"
-        return "✏️ 编辑 Hook"
-
 
 class HookListSettingCard(ExpandSettingCard):
     """Hook 管理设置卡片"""

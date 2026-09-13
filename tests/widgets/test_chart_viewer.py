@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """图表查看器测试：HTML 模板、b64 往返、payload 上限、弹窗回退、白名单注册
-
 运行: python -m pytest tests/widgets/test_chart_viewer.py -v
+
+注意：与 tests 既有 stub 风格一致——不初始化真实 QWebEngineProfile/WebEngine
+（offscreen + pytest 下 profile 创建会卡死），信号链/compose 均用骨架 + stub 验证
+Python 侧解析与像素合成逻辑，WebEngine 运行时行为需人工/集成验证。
 """
 
 import base64
@@ -14,7 +17,6 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from app.widgets.cards.settings.chart_viewer_card import (
@@ -41,21 +43,24 @@ class TestDecodePayload:
 
 class TestBuildHtml:
     def test_echarts_mode(self):
-        """echarts 模式：含 vendor script、payload、导出入口、dark 主题"""
+        """echarts 模式：含 vendor script、payload、导出入口、dark 主题、dataZoom 缩放"""
         html = build_chart_viewer_html("echarts", _b64('{"series": []}'))
         assert "echarts.min.js" in html
         assert "echarts.init" in html
         assert "'dark'" in html
         assert "window._exportChartPng" in html
+        assert "dataZoom" in html  # 滚轮缩放 + 底部滑条（局部放大）
         assert _b64('{"series": []}') in html  # payload 原样嵌入
 
     def test_mermaid_mode(self):
-        """mermaid 模式：不引 echarts，SVG 注入 + 自适应 CSS + canvas 导出"""
+        """mermaid 模式：不引 echarts，SVG 注入 + 自适应 CSS + canvas 导出 + 容器级平移缩放"""
         svg = '<svg width="800" height="600">'
         html = build_chart_viewer_html("mermaid", _b64(svg))
         assert "echarts.min.js" not in html
         assert "new Image" in html  # SVG → Image → canvas 导出链路
         assert "max-width: 100%" in html
+        assert "_enablePanZoom(wrap" in html  # mermaid 用容器级平移缩放（dataZoom 不适用）
+        assert "chart.setOption({ dataZoom:" not in html  # 不注入 echarts dataZoom
 
     def test_payload_too_large_rejected(self):
         """payload 超 8MB 上限 → ValueError（防御，JS 侧也有同限拦截）"""
@@ -63,36 +68,54 @@ class TestBuildHtml:
         with pytest.raises(ValueError):
             build_chart_viewer_html("echarts", big)
 
+    def test_svg_mode_injects_theme_css_vars(self):
+        """内联 SVG 依赖聊天骨架 :root 变量（var(--text)/var(--accent-soft) 等），
+        预览页必须注入同名变量块：缺变量时 fill 解析无效回退 SVG 默认黑 → 整块黑
+        （回归：曾导致 svg 全屏预览黑块 + 文字隐形）"""
+        svg = '<svg width="10" height="10"><rect fill="var(--accent-soft)"/></svg>'
+        for ctype in ("svg", "mermaid", "html"):
+            html = build_chart_viewer_html(ctype, _b64(svg))
+            assert ":root {" in html, f"{ctype} 缺 :root 变量块"
+            for var in (
+                "--text",
+                "--text-secondary",
+                "--text-muted",
+                "--accent",
+                "--accent-soft",
+                "--accent-soft-strong",
+                "--accent-text",
+                "--accent-border-weak",
+                "--panel",
+                "--border",
+                "--r-md",
+            ):
+                assert var + ":" in html, f"{ctype} 缺变量 {var}"
+
+    def test_svg_mode_vars_survive_bg_formatting(self):
+        """变量块拼在 %(bg)s 格式化之后：模板替换不得被变量值中的裸 % 破坏
+        （% 格式化遇裸 % 会抛 ValueError/输出错乱），背景字面值必须原样落盘"""
+        html = build_chart_viewer_html("svg", _b64("<svg/>"), is_dark=False)
+        assert "background: #FFFFFF" in html
+        html_dark = build_chart_viewer_html("svg", _b64("<svg/>"), is_dark=True)
+        assert "background: #1B1E24" in html_dark
+
+    def test_svg_mode_injects_viewbox_size_fallback(self):
+        """无 width/height 属性、只有 viewBox 的内联 SVG 必须注入按 viewBox 补尺寸的兜底 JS。
+
+        回归：旧 Chromium（Qt5 WebEngine）对无 width/height 属性的 svg intrinsic
+        size 按 0 算，flex 容器下 0x0 整图不可见（visualization 内联 SVG 常只给
+        viewBox；mermaid 产物自带尺寸不受影响）。"""
+        svg = '<svg viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg"></svg>'
+        for ctype in ("svg", "mermaid"):
+            html = build_chart_viewer_html(ctype, _b64(svg))
+            assert "setAttribute('width'" in html, f"{ctype} 缺 viewBox 补宽兜底"
+            assert "setAttribute('height'" in html, f"{ctype} 缺 viewBox 补高兜底"
+            assert "getAttribute('width')" in html, f"{ctype} 缺已有尺寸判断（勿覆盖显式尺寸）"
+
 
 class TestSavePngFromB64:
-    def test_save_writes_file(self, tmp_path, monkeypatch):
-        """弹窗路径选择后写出 PNG 字节（依赖 Task 2 新增 ui_helpers.save_png_from_b64）"""
-        from app.widgets import ui_helpers as _uh
-
-        if not hasattr(_uh, "save_png_from_b64"):
-            pytest.skip("save_png_from_b64 由 Task 2 提供")
-
-        from PySide6.QtWidgets import QFileDialog
-
-        from app.widgets.ui_helpers import save_png_from_b64
-
-        target = tmp_path / "out.png"
-        monkeypatch.setattr(
-            QFileDialog,
-            "getSaveFileName",
-            staticmethod(lambda *a, **k: (str(target), "PNG 图片 (*.png)")),
-        )
-        raw = b"\x89PNG-fake-bytes"
-        path = save_png_from_b64(None, base64.b64encode(raw).decode("ascii"), "测试图")
-        assert path is not None and Path(path).read_bytes() == raw
-
-    def test_cancel_returns_none(self, monkeypatch):
-        """用户取消 → None，不写文件（依赖 Task 2 新增 ui_helpers.save_png_from_b64）"""
-        from app.widgets import ui_helpers as _uh
-
-        if not hasattr(_uh, "save_png_from_b64"):
-            pytest.skip("save_png_from_b64 由 Task 2 提供")
-
+    def test_user_cancel_returns_none(self, qapp, monkeypatch):
+        """用户取消保存 → None"""
         from PySide6.QtWidgets import QFileDialog
 
         from app.widgets.ui_helpers import save_png_from_b64
@@ -104,11 +127,32 @@ class TestSavePngFromB64:
         )
         assert save_png_from_b64(None, _b64("x"), "n") is None
 
+    def test_saves_and_appends_ext(self, qapp, monkeypatch, tmp_path):
+        """正常保存 + 自动补 .png 后缀"""
+        from PySide6.QtWidgets import QFileDialog
+
+        from app.widgets.ui_helpers import save_png_from_b64
+
+        target = tmp_path / "out"
+        monkeypatch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a, **k: (str(target), "PNG 图片 (*.png)")),
+        )
+        import base64 as b64mod
+
+        raw = b"\x89PNG fake"
+        path = save_png_from_b64(None, base64.b64encode(raw).decode("ascii"), "n")
+        assert path is not None
+        assert path == str(tmp_path / "out.png")
+        assert Path(path).read_bytes() == raw
+        assert b64mod.b64encode(Path(path).read_bytes()).decode("ascii")
+
 
 class TestRegistry:
     def test_replace_tab_bar_whitelist(self):
-        """chart_viewer 进白名单 + 中文标题（tab 栏出现可关闭「图表查看」）"""
-        from app.widgets.replace_tab_bar import GLOBAL_REPLACE_TITLES, KNOWN_GLOBAL_REPLACE_CARDS
+        """chart_viewer 进白名单 + 中文标题（标题栏出现可关闭「图表查看」tab）"""
+        from app.widgets.tab_manager_window import GLOBAL_REPLACE_TITLES, KNOWN_GLOBAL_REPLACE_CARDS
 
         assert "chart_viewer" in KNOWN_GLOBAL_REPLACE_CARDS
         assert GLOBAL_REPLACE_TITLES.get("chart_viewer") == "图表查看"
@@ -134,6 +178,17 @@ class TestCardSkeletonHooks:
         assert "pywebview_action:save_chart_png:" in src
         assert "_chartInstance" in src
 
+    def test_capture_has_fallback_chain(self):
+        """整卡导出含稳健回退链：3x 健康检查 → 1x 完整路径 → 裸 grab"""
+        import inspect
+
+        from app.widgets import message_card
+
+        src = inspect.getsource(message_card)
+        assert "_capture_looks_healthy" in src
+        assert "_wait_render_stable" in src
+        assert "_capture_full_content_1x" in src
+
     def test_skeleton_css_position_relative(self):
         """容器 CSS 含 position: relative（工具栏绝对定位前提）"""
         import inspect
@@ -146,77 +201,85 @@ class TestCardSkeletonHooks:
 
 
 class TestSignalChain:
-    def test_console_message_emits_chart_expand(self, qapp):
+    """console 消息解析 → 信号发射（stub 信号收集，不初始化真实 WebEngine）"""
+
+    @staticmethod
+    def _make_page_with_stub_signals():
+        from app.widgets.message_card import ConsoleMonitorPage
+
+        page = ConsoleMonitorPage.__new__(ConsoleMonitorPage)  # 跳过 __init__，不触碰 Qt WebEngine
+
+        class _FakeSig:
+            def __init__(self, sink):
+                self._sink = sink
+
+            def emit(self, *a):
+                self._sink.append(a)
+
+        expand_events = []
+        png_events = []
+        # PySide6 信号是非数据描述符，实例属性赋值可安全遮蔽（仅测试期，对象不外泄）
+        page.chartExpandRequested = _FakeSig(expand_events)  # type: ignore[assignment]
+        page.saveChartPngRequested = _FakeSig(png_events)  # type: ignore[assignment]
+        return page, expand_events, png_events
+
+    def test_console_message_emits_chart_expand(self):
         """console 消息 chart_expand → ConsoleMonitorPage 信号 (type, payload)"""
-        from PySide6.QtWebEngineCore import QWebEngineProfile
+        page, expand_events, _ = self._make_page_with_stub_signals()
+        page.javaScriptConsoleMessage(0, "pywebview_action:chart_expand:echarts:eyJhIjoxfQ==", 0, "")  # type: ignore[arg-type]
+        assert expand_events == [("echarts", "eyJhIjoxfQ==")]
 
-        from app.widgets.message_card import ConsoleMonitorPage
+    def test_console_message_emits_chart_expand_mermaid(self):
+        """mermaid 类型同样放行"""
+        page, expand_events, _ = self._make_page_with_stub_signals()
+        page.javaScriptConsoleMessage(0, "pywebview_action:chart_expand:mermaid:PHN2Zz48L3N2Zz4=", 0, "")  # type: ignore[arg-type]
+        assert expand_events == [("mermaid", "PHN2Zz48L3N2Zz4=")]
 
-        profile = QWebEngineProfile("test-chart", None)
-        page = ConsoleMonitorPage(profile, None)
-        got = []
-        page.chartExpandRequested.connect(lambda t, p: got.append((t, p)))
-        page.javaScriptConsoleMessage(0, "pywebview_action:chart_expand:echarts:eyJhIjoxfQ==", 0, "")
-        assert got == [("echarts", "eyJhIjoxfQ==")]
-
-    def test_console_message_emits_save_png(self, qapp):
+    def test_console_message_emits_save_png(self):
         """console 消息 save_chart_png → (name, png_b64) 信号"""
-        from PySide6.QtWebEngineCore import QWebEngineProfile
+        page, _, png_events = self._make_page_with_stub_signals()
+        page.javaScriptConsoleMessage(0, "pywebview_action:save_chart_png:aGVsbG8=:UENHXg==", 0, "")  # type: ignore[arg-type]
+        assert png_events == [("aGVsbG8=", "UENHXg==")]  # page 层透传原始 b64，name 解码在 MessageCard 槽
 
-        from app.widgets.message_card import ConsoleMonitorPage
-
-        profile = QWebEngineProfile("test-chart2", None)
-        page = ConsoleMonitorPage(profile, None)
-        got = []
-        page.saveChartPngRequested.connect(lambda n, p: got.append((n, p)))
-        page.javaScriptConsoleMessage(0, "pywebview_action:save_chart_png:aGVsbG8=:UENHXg==", 0, "")
-        assert got == [("aGVsbG8=", "UENHXg==")]  # page 层透传原始 b64，name 解码在 MessageCard 槽
-
-    def test_oversize_payload_rejected(self, qapp):
+    def test_oversize_payload_rejected(self):
         """超 8MB payload 拒绝发射"""
-        from PySide6.QtWebEngineCore import QWebEngineProfile
+        from app.widgets.message_card import _MAX_CHART_PAYLOAD_B64
 
-        from app.widgets.message_card import _MAX_CHART_PAYLOAD_B64, ConsoleMonitorPage
-
-        profile = QWebEngineProfile("test-chart3", None)
-        page = ConsoleMonitorPage(profile, None)
-        got = []
-        page.chartExpandRequested.connect(lambda t, p: got.append(p))
+        page, expand_events, _ = self._make_page_with_stub_signals()
+        payload = "pywebview_action:chart_expand:echarts:" + "A" * (_MAX_CHART_PAYLOAD_B64 + 1)
         page.javaScriptConsoleMessage(
-            0, "pywebview_action:chart_expand:echarts:" + "A" * (_MAX_CHART_PAYLOAD_B64 + 1), 0, ""
+            0,  # type: ignore[arg-type]
+            payload,
+            0,
+            "",
         )
-        assert got == []
+        assert expand_events == []
 
-    def test_unknown_chart_type_rejected(self, qapp):
+    def test_unknown_chart_type_rejected(self):
         """非 echarts/mermaid 类型拒绝发射"""
-        from PySide6.QtWebEngineCore import QWebEngineProfile
-
-        from app.widgets.message_card import ConsoleMonitorPage
-
-        profile = QWebEngineProfile("test-chart4", None)
-        page = ConsoleMonitorPage(profile, None)
-        got = []
-        page.chartExpandRequested.connect(lambda t, p: got.append(p))
-        page.javaScriptConsoleMessage(0, "pywebview_action:chart_expand:evil:AAAA", 0, "")
-        assert got == []
+        page, expand_events, _ = self._make_page_with_stub_signals()
+        page.javaScriptConsoleMessage(0, "pywebview_action:chart_expand:evil:AAAA", 0, "")  # type: ignore[arg-type]
+        assert expand_events == []
 
 
 class TestComposeWithDpr:
-    @staticmethod
-    def _make_viewer(qapp):
-        """CodeWebViewer 需要共享 profile 先初始化（应用启动时由 main.py 调用）"""
-        from app.core.webengine_profile import init_shared_web_profile
+    """_compose_with_solid_bg 的 dpr 物理像素行为（__new__ 骨架 + stub 背景色，不初始化真实 WebEngine）"""
 
-        init_shared_web_profile(qapp)
+    @staticmethod
+    def _make_viewer_with_stub_bg():
         from app.widgets.message_card import CodeWebViewer
 
-        return CodeWebViewer()
+        viewer = CodeWebViewer.__new__(CodeWebViewer)
+        from PySide6.QtGui import QColor
+
+        viewer._get_card_bg_color = lambda: QColor("#2B2B2B")  # stub：沿父链找卡色需完整控件树
+        return viewer
 
     def test_compose_scales_physical_pixels(self, qapp):
         """compose 带 dpr=3 → 输出物理像素 3x、逻辑尺寸还原"""
         from PySide6.QtGui import QPixmap
 
-        viewer = self._make_viewer(qapp)
+        viewer = self._make_viewer_with_stub_bg()
         src = QPixmap(30, 20)
         out = viewer._compose_with_solid_bg(src, 100, 50, dpr=3.0)
         assert out.width() == 300 and out.height() == 150
@@ -227,7 +290,7 @@ class TestComposeWithDpr:
         """dpr 缺省 1.0 行为与旧版一致"""
         from PySide6.QtGui import QPixmap
 
-        viewer = self._make_viewer(qapp)
+        viewer = self._make_viewer_with_stub_bg()
         out = viewer._compose_with_solid_bg(QPixmap(), 80, 40)
         assert out.width() == 80 and out.height() == 40
 
@@ -235,7 +298,7 @@ class TestComposeWithDpr:
         """dpr<1 被钳制为 1.0（防止导出反而降采样）"""
         from PySide6.QtGui import QPixmap
 
-        viewer = self._make_viewer(qapp)
+        viewer = self._make_viewer_with_stub_bg()
         out = viewer._compose_with_solid_bg(QPixmap(), 60, 30, dpr=0.5)
         assert out.width() == 60 and out.height() == 30
         assert abs(out.devicePixelRatio() - 1.0) < 1e-6

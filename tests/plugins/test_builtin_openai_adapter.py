@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """协议家族适配器与 chat_worker 旧协议检测方法行为逐点等价。
 
-实现已从旧单适配器迁入系统插件三家族 plugins/system/model_adapters/：
+实现已从旧单适配器迁入系统插件三家族 plugins/system-model-adapters/model_adapters/：
 openai-family（兜底）/ gemini-family / deepseek-family。
 """
 
@@ -54,9 +54,12 @@ def test_flags_equivalent_to_legacy(llm_config):
 
 def test_family_adapters_always_positive():
     """三家族 matches 恒正/条件正：openai-family 恒 1，其余按命中条件"""
-    from plugins.system.model_adapters.deepseek_family import DeepSeekFamilyAdapter
-    from plugins.system.model_adapters.gemini_family import GeminiFamilyAdapter
-    from plugins.system.model_adapters.openai_family import OpenAIFamilyAdapter
+    from importlib import import_module
+    DeepSeekFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.deepseek_family").DeepSeekFamilyAdapter
+    from importlib import import_module
+    GeminiFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.gemini_family").GeminiFamilyAdapter
+    from importlib import import_module
+    OpenAIFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.openai_family").OpenAIFamilyAdapter
 
     assert OpenAIFamilyAdapter().matches({}) >= 1
     assert GeminiFamilyAdapter().matches({"模型名称": "gemini-2.5-pro"}) >= 1

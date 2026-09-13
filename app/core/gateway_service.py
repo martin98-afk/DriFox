@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 from loguru import logger
 from PySide6.QtCore import QObject, Signal
@@ -163,8 +163,17 @@ class GatewayService(QObject):
             self._initialized = True
             logger.info("[GatewayService] PlatformManager 就绪")
 
-            # 引擎同步就绪（轻量构造；避免首批消息撞上不可用引擎）
-            self._ensure_engine()
+            # [PERF] 引擎构造不再阻塞启动关键路径：_ensure_engine 触发的懒加载
+            # import 链（GatewayEngine → adapters → mcp SDK 3s + tool_executor
+            # 1.4s + SessionStore DB 迁移）实测 ~8.5s，是 create_instance 的最大
+            # 单项。延迟到首帧后（事件循环首拍）执行，tm.show() 大幅提前。
+            # 时序安全：
+            # - 首批外部平台消息早于引擎就绪 → _on_gateway_input 的
+            #   _ensure_engine 自愈守卫兜底（幂等 + 5s 冷却）
+            # - 应用退出早于引擎就绪 → stop() 只动 _manager，_engine=None 无害
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, self._ensure_engine)
 
             self._manager.start_all_async()
         except Exception as e:
@@ -263,6 +272,77 @@ class GatewayService(QObject):
                 return SendResult(success=False, error=str(e))
         logger.warning(f"[Gateway] No adapter for platform {platform}")
         return SendResult(success=False, error="No adapter")
+
+    def send_to_platform(self, platform: Any, chat_id: str, content: str, timeout: float = 30.0) -> Any:
+        """同步向指定平台会话发送消息（供插件调用，任意线程安全）。
+
+        与 `_send_message` 的区别：本方法是**公开的插件服务面**，
+        在 PlatformManager 的持久事件循环上调度协程并等待结果，
+        无需插件自行 import asyncio / 持有 manager 单例引用。
+
+        Args:
+            platform: 平台标识（`Platform` 枚举或 str 平台 id，如 "feishu"）
+            chat_id: 目标会话 id（gateway 会话的 chat_id）
+            content: 消息文本
+            timeout: 等待发送结果的秒数
+
+        Returns:
+            SendResult（success/error 字段可判定结果）。服务未就绪时
+            返回 success=False 的 SendResult，不抛异常。
+        """
+        from app.gateway.base import SendResult
+
+        if self._manager is None:
+            return SendResult(success=False, error="Gateway 未启动")
+
+        async def _run() -> Any:
+            return await self._send_message(platform, chat_id, content)
+
+        try:
+            coro = _run()
+            loop = getattr(self._manager, "_loop", None)
+            if loop is None or not loop.is_running():
+                return SendResult(success=False, error="Gateway 事件循环未运行")
+            future = asyncio.run_coroutine_threadsafe(coro, loop)
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            logger.warning(f"[Gateway] send_to_platform 超时: {platform}:{chat_id}")
+            return SendResult(success=False, error="发送超时")
+        except Exception as e:
+            logger.warning(f"[Gateway] send_to_platform 失败: {e}")
+            return SendResult(success=False, error=str(e))
+
+    def list_platform_sessions(self) -> list:
+        """已知 gateway 会话列表（供插件选择投递目标）。
+
+        返回 GatewaySession 对象列表；服务未就绪时返回空列表。
+        """
+        if self._manager is None:
+            return []
+        try:
+            return self._manager.get_sessions()
+        except Exception as e:
+            logger.warning(f"[Gateway] list_platform_sessions 失败: {e}")
+            return []
+
+    def list_platforms(self) -> list:
+        """已注册通讯平台及其连接状态（供插件区分「没配平台」和「配了没会话」）。
+
+        与会话列表无关：平台是连接通道，会话是入站消息产生的记录。
+        平台已连接但从未收到消息时，会话列表为空而本列表非空。
+
+        Returns:
+            list[dict]，每项 {id, enabled, connected, available, error}；
+            服务未就绪时返回空列表。
+        """
+        if self._manager is None:
+            return []
+        try:
+            platforms = self._manager.get_status().get("platforms") or {}
+            return [{"id": pid, **(info or {})} for pid, info in platforms.items()]
+        except Exception as e:
+            logger.warning(f"[Gateway] list_platforms 失败: {e}")
+            return []
 
     async def _send_image(self, platform: Any, chat_id: str, image_path: str, **kwargs) -> Any:
         from app.gateway.base import SendResult

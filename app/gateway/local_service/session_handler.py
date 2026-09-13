@@ -264,8 +264,6 @@ class APISessionHandler:
     def _get_context_provider(self):
         return None
 
-    def set_api_callback(self, event: str, callback: Callable) -> None:
-        self._api_callbacks[event] = callback
 
     def _create_isolated_chat_engine(self, worker_callbacks=None, api_mode=False, target_session=None, context_id=None):
         from app.gateway.local_service.isolated_context import IsolatedChatContext
@@ -420,16 +418,6 @@ class APISessionHandler:
             logger.error(f"[GatewayLocal] switch_session 失败: {e}")
             return None
 
-    def _set_engine_session(self, engine, session: ChatSession) -> None:
-        session_copy = ChatSession.from_dict({
-            "session_id": session.session_id,
-            "name": session.name,
-            "messages": list(session.messages),
-            "topic_summary": session.topic_summary,
-            "created_at": session.created_at,
-            "last_updated": session.last_updated,
-        })
-        engine._session_manager.set_current_session(session_copy)
 
     async def chat_stream(self, session_id: str, message: str, context_params=None) -> AsyncGenerator[str, None]:
         stream_id = str(uuid.uuid4())
@@ -569,5 +557,3 @@ class APISessionHandler:
         logger.info(f"[GatewayLocal] 已停止流请求: {target_id}")
         return True
 
-    def get_active_streams(self) -> List[str]:
-        return [sid for sid, ctx in self._active_streams.items() if ctx.is_active]

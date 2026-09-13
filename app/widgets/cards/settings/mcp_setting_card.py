@@ -38,6 +38,11 @@ from qfluentwidgets import (
     ToolButton,
 )
 
+from app.core.mcp_lsp_safety import (
+    confirm_by_key,
+    is_pending_confirm_by_key,
+    is_session_denied,
+)
 from app.tools.mcp_tools import MCPState
 from app.utils.config import Settings
 from app.utils.design_tokens import (
@@ -138,7 +143,7 @@ class MCPEditCard(QWidget):
         if hasattr(self, "jsonEdit"):
             self.jsonEdit.setStyleSheet(style)
         # QPlainTextEdit 不支持 CSS ::placeholder，通过 palette 设置
-        from PySide6.QtGui import QColor, QPalette
+        from PySide6.QtGui import QPalette
 
         ph_color = self._parse_placeholder_color()
         for pte in self._plain_text_edits:
@@ -188,7 +193,7 @@ class MCPEditCard(QWidget):
         data = dict(self._server_data)
         name = data.pop("name", "my-server")
         # 去掉内部字段
-        enabled = data.pop("enabled", True)
+        data.pop("enabled", True)
         server_type = data.pop("type", "stdio")
         # 如果是 stdio，type 不输出（标准格式默认 stdio）
         # 如果是 sse/http，输出 url/headers 标准结构
@@ -763,6 +768,8 @@ class MCPListSettingCard(ExpandSettingCard):
         # 若用布尔标记会永久停在 True，导致此后所有热重载刷新被吞掉（计数更新、列表不更新）。
         # 窗口取 3s（> watchfiles 的 2s 防抖），既能在自触发刷新到达时正确抑制，又会自动过期。
         self._suppress_hot_reload_until = 0.0
+        # need_confirm 确认弹窗去重：key → InfoBar。同 key 多次失败回调只保留首个弹窗
+        self._confirm_bars: Dict[str, object] = {}
         # 状态轮询定时器（3秒刷新一次连接状态指示灯 + token 占用）
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(3000)
@@ -863,6 +870,69 @@ class MCPListSettingCard(ExpandSettingCard):
 
         mgr.connect_server_background(name, config, on_done=on_done)
 
+    def _mcp_gate_key(self, name: str) -> str:
+        """按服务器名推导门禁 key（与 mcp_lsp_safety 门禁拼接口径一致）"""
+        from app.core.mcp_lsp_safety import plugin_from_source, server_key
+
+        src = next((s.get("_source", "") for s in self._get_servers() if s.get("name", "") == name), "")
+        return server_key("mcp", plugin_from_source(src), name)
+
+    def _show_mcp_confirm_bar(self, name: str, key: str):
+        """need_confirm 确认弹窗：带「允许启动/本次拒绝」按钮，同 key 去重只弹一个"""
+        if key in self._confirm_bars:
+            logger.debug(f"[MCP] '{name}' 待确认弹窗已存在，跳过重复弹窗")
+            return
+
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QHBoxLayout, QWidget
+        from qfluentwidgets import InfoBar, InfoBarIcon, InfoBarPosition, PrimaryPushButton, PushButton
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        _parent = TabManagerWindow.get_instance() or self.window()
+        infobar = InfoBar(
+            icon=InfoBarIcon.WARNING,
+            title=f"MCP 安全确认: {name}",
+            content="该服务器来自非内置源（用户级插件），首次启动需确认是否放行",
+            orient=Qt.Vertical,
+            isClosable=False,
+            duration=-1,
+            position=InfoBarPosition.BOTTOM,
+            parent=_parent,
+        )
+        self._confirm_bars[key] = infobar
+
+        btn_container = QWidget()
+        btn_layout = QHBoxLayout(btn_container)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.setSpacing(8)
+        server_cfg = next((s for s in self._get_servers() if s.get("name", "") == name), {})
+
+        def _allow():
+            confirm_by_key(key, allow=True)
+            self._confirm_bars.pop(key, None)
+            infobar.close()
+            self._hot_connect(name, server_cfg, force=True)
+
+        def _deny():
+            confirm_by_key(key, allow=False)
+            self._confirm_bars.pop(key, None)
+            infobar.close()
+            self._refresh_status_dots()
+
+        btn_allow = PrimaryPushButton("允许启动")
+        btn_allow.setFixedWidth(90)
+        btn_allow.clicked.connect(_allow)
+        btn_layout.addWidget(btn_allow)
+
+        btn_deny = PushButton("本次拒绝")
+        btn_deny.setFixedWidth(90)
+        btn_deny.clicked.connect(_deny)
+        btn_layout.addWidget(btn_deny)
+
+        infobar.widgetLayout.addWidget(btn_container, 0, Qt.AlignRight)
+        infobar.destroyed.connect(lambda *_: self._confirm_bars.pop(key, None))
+        infobar.show()
+
     def _on_hot_connect_result(self, name: str, success: bool, error_msg: str = ""):
         """连接结果回调（主线程，可安全操作 UI）"""
         # 立即刷新对应行的状态指示灯
@@ -879,6 +949,18 @@ class MCPListSettingCard(ExpandSettingCard):
                 # 防重丢弃：另一入口正在连接同一服务器，属正常竞态抑制，
                 # 不是失败，不弹错误提示（否则热重载+开关并发时频繁误报）
                 logger.debug(f"[MCP] '{name}' 连接请求被防重丢弃（已有连接在进行中）")
+                return
+            if "（need_confirm）" in hint:
+                # 门禁待确认：弹「允许/拒绝」确认框（同 key 去重），不再重复发起自动重连
+                # （修复：确认 UI 此前未接线，need_confirm 成死路；且插件批量安装时
+                # 每次热重载广播都对同一台服务器重复发起注定被拦的连接）
+                key = self._mcp_gate_key(name)
+                logger.warning(f"[MCP] '{name}' 非内置源首次启动，等待用户确认 (key={key})")
+                self._show_mcp_confirm_bar(name, key)
+                return
+            if "（denied）" in hint and is_session_denied(self._mcp_gate_key(name)):
+                # 用户已明确拒绝：本会话内静默，不再弹失败提示刷屏
+                logger.debug(f"[MCP] '{name}' 已被用户拒绝，本会话内静默")
                 return
             if "请检查配置类型是否正确" in hint:
                 # 拆分为标题和内容
@@ -1088,13 +1170,6 @@ class MCPListSettingCard(ExpandSettingCard):
         if hasattr(card, "contentLabel"):
             card.contentLabel.setText(text)
 
-    def _save_servers(self, servers: list):
-        """保存服务器列表（底层写入 PluginManager）"""
-        # 不再直接写 Settings.mcp_servers，而是通过 PluginManager 管理
-        # 此方法保留为空，实际增删改走 PluginManager 的方法
-        self._refresh()
-        self.serversChanged.emit()
-
     def _on_remove_server(self, name: str):
         from app.widgets.common_dialogs import ConfirmDialog
 
@@ -1190,6 +1265,12 @@ class MCPListSettingCard(ExpandSettingCard):
             if not s.get("enabled", True):
                 continue
             name = s.get("name", "")
+            # 门禁待确认的服务器跳过：插件批量安装时每次热重载广播都会走到这里，
+            # 不跳过则对同一台待确认服务器重复发起注定被拦的连接（失败日志刷屏）。
+            # 用户手动开关（force=True）不受此限，仍可触发确认弹窗。
+            if is_pending_confirm_by_key(self._mcp_gate_key(name)):
+                logger.debug(f"[MCP] '{name}' 待用户确认，跳过自动补连")
+                continue
             # 只重新连接已断开或未连接过的
             status_list = mgr.get_status()
             already = any(st["name"] == name and st["connected"] for st in status_list)
@@ -1242,38 +1323,3 @@ class MCPListSettingCard(ExpandSettingCard):
 
     # ── 供外部调用的添加/更新方法 ──────────────────────
 
-    def add_server(self, server_data: dict):
-        """添加 MCP 服务器（保留兼容，实际由 PluginManager 管理）"""
-        from app.plugins.managers.plugin_manager import PluginManager
-        from app.widgets.tab_manager_window import TabManagerWindow
-
-        pm = PluginManager.get_instance()
-        name = server_data.get("name", "")
-        servers = self._get_servers()
-        if any(s.get("name") == name for s in servers):
-            InfoBar.warning(
-                title="名称重复",
-                content=f"MCP Server '{name}' 已存在",
-                position=InfoBarPosition.BOTTOM,
-                duration=3000,
-                parent=TabManagerWindow.get_instance() or self.window(),
-            )
-            return False
-        pm.add_mcp_server(name, server_data)
-        self._refresh()
-        # 热连接
-        if server_data.get("enabled", True) and self.cfg.mcp_enabled.value:
-            self._hot_connect(name, server_data)
-        return True
-
-    def update_server(self, name: str, server_data: dict):
-        """更新 MCP 服务器配置（实际由 PluginManager 管理）"""
-        from app.plugins.managers.plugin_manager import PluginManager
-
-        pm = PluginManager.get_instance()
-        pm.update_mcp_server(name, server_data)
-        self._refresh()
-        # 先断开旧连接，再重新连接
-        self._hot_disconnect(name)
-        if server_data.get("enabled", True) and self.cfg.mcp_enabled.value:
-            self._hot_connect(name, server_data)

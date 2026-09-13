@@ -129,8 +129,8 @@ def test_nav_btn_style_follows_font_delta(monkeypatch):
         monkeypatch.setattr("app.utils.config.Settings.get_instance", lambda: fake)
         return LLMSettingsCard._nav_btn_style(True)
 
-    assert "font-size: 12px;" in _style_at("0")  # 导航基准 12 + delta 0
-    assert "font-size: 17px;" in _style_at("5")  # 12 + 5
+    assert "font-size: 13px;" in _style_at("0")  # 导航基准 13 + delta 0
+    assert "font-size: 18px;" in _style_at("5")  # 13 + 5
     monkeypatch.setattr(design_tokens, "_cached_font_size_key", None)
 
 

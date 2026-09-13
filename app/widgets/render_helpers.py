@@ -3,7 +3,6 @@
 UI 渲染辅助函数
 """
 
-import difflib
 import hashlib
 import os
 import re
@@ -16,12 +15,19 @@ from app.tools.registry import DEFAULT_FALLBACK_ICON
 from app.utils.design_tokens import Colors, _get_global_font, scale_font_size
 from app.utils.utils import get_font_family_css
 
-# ===== Pygments 语法高亮（行内 diff 代码着色，复用与 message_card 一致的 dracula 主题）=====
-# 注意：render_helpers 被 message_card 反向依赖，若从 message_card 导入会形成循环导入，
-# 因此在此处就地维护一套带缓存的轻量着色逻辑（与 message_card 的 lexer/formatter 模式一致）。
-from pygments import highlight as _pyg_highlight
-from pygments.formatters import HtmlFormatter
-from pygments.lexers import get_lexer_for_filename, get_lexer_by_name, TextLexer
+# 行内 diff 高亮子系统已抽取至 app/utils/diff_highlight（消除 utils→widgets 反向依赖）。
+# 此处 re-export 供内部渲染管线（format_tool_block 等）与存量引用使用，tests 无需改动。
+# invalidate_render_caches 所清的 diff formatter/lexer 缓存现居新模块，一并 re-export。
+from app.utils.diff_highlight import (
+    _DIFF_FORMATTER_CACHE,
+    _DIFF_LEXER_CACHE,
+    _TEXT_LEXER,
+    _get_diff_lexer,
+    _highlight_code_line,
+    _highlighted_word_diff_html,
+    _sync_diff_style_to_theme,
+    set_diff_highlight_style,
+)
 
 
 # ===== 主题感知的 qrc 图标前缀（单一来源，替代 render_helpers / message_card 散落的硬编码） =====
@@ -63,188 +69,6 @@ def _qrc_icon_exists(prefix: str, icon_name: str) -> bool:
         _QRC_ICON_EXISTS_CACHE.clear()
     _QRC_ICON_EXISTS_CACHE[key] = exists
     return exists
-# 行内 diff 专用 formatter（缓存）：按风格切换，nowrap 不包裹 <pre>，noclasses 输出内联 color 的 token <span>
-_DIFF_FORMATTER_CACHE: dict = {"style": None, "formatter": None}
-
-
-# 行内 diff 高亮风格（与 message_card.py 同步，由 set_diff_highlight_style 切换）
-_current_diff_style = "dracula"
-
-
-def _sync_diff_style_to_theme() -> None:
-    """根据当前主题同步 _current_diff_style，确保 _get_diff_formatter 返回正确风格。
-
-    🐛 工具渲染管线（render_helpers.format_tool_block → _render_edit_diff_body）
-    调用 _render_diff_preview 时不会经过 message_card._render_markdown_to_html
-    的 set_diff_highlight_style 入口，因此主题切换后 _current_diff_style 可能
-    仍是旧值，formatter 仍用 dracula 风格的前景色渲染到浅色主题背景上
-    → 白字白底不可见（"偶尔出现"是因为切主题后第一次 markdown 渲染恰好
-    把 _current_diff_style 同步过去才看起来正常）。
-    此处按当前主题即时同步，避免渲染管线入口漏同步导致颜色错位。
-    """
-    try:
-        from app.utils.theme_manager import theme_manager
-
-        target = "friendly" if theme_manager.is_light_theme() else "dracula"
-        if target != _current_diff_style:
-            set_diff_highlight_style(target)
-    except Exception:
-        # 主题管理器尚未初始化（如单元测试/导入期）→ 保持当前风格，不破坏渲染
-        pass
-
-
-def set_diff_highlight_style(style_name: str):
-    """设置 diff 高亮风格并清除缓存"""
-    global _current_diff_style
-    if style_name != _current_diff_style:
-        _current_diff_style = style_name
-        _DIFF_FORMATTER_CACHE["style"] = None
-
-
-def _get_diff_formatter():
-    """获取当前 diff 高亮 formatter，随主题风格切换重建"""
-    style = _current_diff_style
-    if _DIFF_FORMATTER_CACHE["style"] != style:
-        _DIFF_FORMATTER_CACHE["style"] = style
-        _DIFF_FORMATTER_CACHE["formatter"] = HtmlFormatter(nowrap=True, style=style, noclasses=True)
-    return _DIFF_FORMATTER_CACHE["formatter"]
-
-
-_TEXT_LEXER = TextLexer()
-_DIFF_LEXER_CACHE: dict = {}
-# 防御上限：扩展名种类有限（<64），超限整体清空防膨胀
-_DIFF_LEXER_CACHE_MAX = 64
-
-# 扩展名 → pygments lexer 别名（get_lexer_for_filename 找不到时的兜底）
-_EXT_LEXER_MAP = {
-    ".py": "python",
-    ".pyi": "python",
-    ".js": "javascript",
-    ".mjs": "javascript",
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    ".jsx": "jsx",
-    ".html": "html",
-    ".htm": "html",
-    ".css": "css",
-    ".scss": "scss",
-    ".less": "less",
-    ".json": "json",
-    ".jsonc": "json",
-    ".md": "markdown",
-    ".markdown": "markdown",
-    ".yml": "yaml",
-    ".yaml": "yaml",
-    ".java": "java",
-    ".go": "go",
-    ".rs": "rust",
-    ".c": "c",
-    ".h": "c",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".cxx": "cpp",
-    ".hpp": "cpp",
-    ".cs": "csharp",
-    ".rb": "ruby",
-    ".php": "php",
-    ".sh": "bash",
-    ".bash": "bash",
-    ".zsh": "bash",
-    ".fish": "bash",
-    ".sql": "sql",
-    ".xml": "xml",
-    ".toml": "toml",
-    ".ini": "ini",
-    ".cfg": "ini",
-    ".conf": "ini",
-    ".lua": "lua",
-    ".kt": "kotlin",
-    ".kts": "kotlin",
-    ".swift": "swift",
-    ".r": "r",
-    ".pl": "perl",
-    ".pm": "perl",
-    ".dart": "dart",
-    ".vue": "vue",
-    ".dockerfile": "docker",
-    ".mk": "makefile",
-    ".cmake": "cmake",
-    ".tf": "hcl",
-    ".ex": "elixir",
-    ".exs": "elixir",
-    ".erl": "erlang",
-    ".hs": "haskell",
-    ".scala": "scala",
-    ".groovy": "groovy",
-    ".ps1": "powershell",
-    ".bat": "batch",
-}
-
-
-def _get_diff_lexer(path: str):
-    """根据文件路径推断 lexer，按扩展名缓存，避免重复构造（构造开销大）"""
-    if not path or path == "/dev/null":
-        return _TEXT_LEXER
-    key = os.path.splitext(path)[1].lower() or path
-    cached = _DIFF_LEXER_CACHE.get(key)
-    if cached is not None:
-        return cached
-    lex = _TEXT_LEXER
-    try:
-        lex = get_lexer_for_filename(path)
-    except Exception:
-        alias = _EXT_LEXER_MAP.get(key)
-        if alias:
-            try:
-                lex = get_lexer_by_name(alias)
-            except Exception:
-                lex = _TEXT_LEXER
-    if len(_DIFF_LEXER_CACHE) >= _DIFF_LEXER_CACHE_MAX:
-        _DIFF_LEXER_CACHE.clear()  # 防御膨胀：超限整体清空
-    _DIFF_LEXER_CACHE[key] = lex
-    return lex
-
-
-def _highlight_code_line(text: str, lexer) -> str:
-    """对单行代码做语法高亮，返回带内联 color 的 HTML（nowrap，无 <pre> 包裹）
-
-    注意：Pygments 在 nowrap 模式下会在输出末尾追加一个 "\\n"。词级差异会把每个
-    词段单独高亮后拼接，若保留该换行，整行会被切碎、出现多余空白与异常换行。
-    这里统一剥掉末尾换行（高亮的都是单行/单词段，不含真实换行）。
-    """
-    if lexer is None or lexer is _TEXT_LEXER:
-        return escape(text)
-    try:
-        return _pyg_highlight(text, lexer, _get_diff_formatter()).rstrip("\n")
-    except Exception:
-        return escape(text)
-
-
-def _highlighted_word_diff_html(old_text: str, new_text: str, lexer) -> tuple:
-    """词级差异高亮（背景叠加）+ 每段语法高亮，返回 (old_html, new_html)
-
-    在原有词级差异（.word-del/.word-add 背景叠加）基础上，对每个词段再做
-    Pygments 着色，使"改了什么"和"语法结构"同时可见。
-    """
-    if len(old_text) + len(new_text) > 2000:
-        return _highlight_code_line(old_text, lexer), _highlight_code_line(new_text, lexer)
-    old_tokens = _WORD_RE.findall(old_text) or [old_text]
-    new_tokens = _WORD_RE.findall(new_text) or [new_text]
-    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens, autojunk=False)
-    old_parts = []
-    new_parts = []
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            old_parts.append(_highlight_code_line("".join(old_tokens[i1:i2]), lexer))
-            new_parts.append(_highlight_code_line("".join(new_tokens[j1:j2]), lexer))
-        elif tag == "delete":
-            old_parts.append(f'<span class="word-del">{_highlight_code_line("".join(old_tokens[i1:i2]), lexer)}</span>')
-        elif tag == "insert":
-            new_parts.append(f'<span class="word-add">{_highlight_code_line("".join(new_tokens[j1:j2]), lexer)}</span>')
-        elif tag == "replace":
-            old_parts.append(f'<span class="word-del">{_highlight_code_line("".join(old_tokens[i1:i2]), lexer)}</span>')
-            new_parts.append(f'<span class="word-add">{_highlight_code_line("".join(new_tokens[j1:j2]), lexer)}</span>')
-    return "".join(old_parts), "".join(new_parts)
 
 
 # 预编译正则表达式（模块级别缓存，避免重复编译）
@@ -379,19 +203,24 @@ def _format_unified_table(
     """
     将参数字典和结果合并为一个表格。
     前几行是参数（key=value 形式），最后一行是结果。
+
+    状态色一律走主题变量（--success / --danger / --text-muted）：早先写死
+    #F44336 / #5FD18C / #666，跟主题脱节。结果超长时给「展开全部」而不是直接砍断
+    （用原生 <details>，展开时折叠体已 height:auto，不会被裁掉）。
     """
+    max_result_len = 500
     rows = []
 
     # 根据成功/失败状态确定颜色
     if success is False:
         row_class = "args-row result-row result-fail"
-        key_color = "#F44336"
+        key_color = "var(--danger)"
     elif success is True:
         row_class = "args-row result-row result-success"
-        key_color = "#5FD18C"
+        key_color = "var(--success)"
     else:
         row_class = "args-row result-row"
-        key_color = "#9C9C9C"
+        key_color = "var(--text-muted)"
 
     # 参数行
     if tool_args:
@@ -422,24 +251,32 @@ def _format_unified_table(
     else:
         rows.append('<div class="args-row empty">无参数</div>')
 
-    # 结果行（最后一行）
+    # 结果行（最后一行）：结果通常是一大段文本，超长时给「展开全部」
     result_label = "调用子智能体" if is_sub_agent_task else "结果"
     if result:
-        result_text = _escape_text_for_plain(str(result))
-        max_result_len = 500
-        if len(result_text) > max_result_len:
-            result_text = result_text[:max_result_len] + "..."
+        full_text = _escape_text_for_plain(str(result))
+        if len(full_text) > max_result_len:
+            result_inner = (
+                f"{escape(full_text[:max_result_len])}…"
+                f'<details style="display:block;margin-top:6px;">'
+                f'<summary style="cursor:pointer;color:var(--accent);'
+                f'font-size:{scale_font_size(11)}px;">展开全部（共 {len(full_text)} 字符）</summary>'
+                f'<div style="margin-top:6px;max-height:420px;overflow-y:auto;">{escape(full_text)}</div>'
+                f"</details>"
+            )
+        else:
+            result_inner = escape(full_text)
         rows.append(
             f'<div class="{row_class}">'
             f'<span class="args-key" style="color: {key_color};">{result_label}</span>'
-            f'<span class="args-value">{escape(result_text)}</span>'
+            f'<span class="args-value">{result_inner}</span>'
             f"</div>"
         )
     else:
         rows.append(
             f'<div class="{row_class}">'
             f'<span class="args-key" style="color: {key_color};">{result_label}</span>'
-            f'<span class="args-value" style="color: #666; font-style: italic;">无结果</span>'
+            f'<span class="args-value" style="color: var(--text-muted); font-style: italic;">无结果</span>'
             f"</div>"
         )
 
@@ -472,9 +309,6 @@ def _parse_subagent_task_ids(result: str) -> str:
         return ",".join(matches)
 
     return ""
-
-
-_WORD_RE = re.compile(r"(\w+|\W+)")
 
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+),?\d* \+(\d+),?\d* @@(.*)")
@@ -533,9 +367,7 @@ def _render_diff_preview(diff_text: str) -> str:
     while lines and lines[-1] == "":
         lines.pop()
     MAX_LINES = 500
-    truncated = False
     if len(lines) > MAX_LINES:
-        truncated = True
         half = MAX_LINES // 2
         shown = len(lines) - MAX_LINES
         lines = lines[:half] + [None] + lines[-half:]
@@ -991,7 +823,8 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
     """
     if not isinstance(result, str):
         result = str(result)
-    raw = _unescape_newlines(result)[:_MAX_OUTPUT_CHARS]
+    full = _unescape_newlines(result)
+    raw = full[:_MAX_OUTPUT_CHARS]
     if not raw.strip():
         return ""
     tool_args = tool_args or {}
@@ -1013,15 +846,43 @@ def _render_text_output(result: str, tool_name: str = "", tool_args: dict = None
         logger.warning(f"[render] 工具 {tool_name} render 闭包异常，回退默认渲染: {e}")
 
     # ── 通用文本输出兜底 (webfetch, websearch, mouse, keyboard 等) ──
+    # 颜色一律走主题变量：早先写死深色底 + 浅色字（rgba(13,17,23,.40) / #c9d1d9），
+    # 浅色主题下就是一块突兀的深色盒子。
+    # word-break 用 break-word 而非 break-all：搜索摘要这类散文会被 break-all 切碎。
+    # max-height + 内部滚动：兜底块最长 5000 字符，不设限会把正文顶掉整屏。
+    note = ""
+    if len(full) > _MAX_OUTPUT_CHARS:
+        note = (
+            f'<div style="margin-top:6px;color:var(--text-muted);'
+            f'font-size:{scale_font_size(11)}px;font-style:italic;">'
+            f"共 {len(full)} 字符，已截断显示前 {_MAX_OUTPUT_CHARS} 字符</div>"
+        )
+    # 复制按钮：骨架里已有 document 级委托（button[data-action=copy] → clipboard），
+    # 复用即可，不用改骨架 JS。复制的是当前显示的内容（截断后的 raw）。
+    copy_btn = ""
+    if raw.strip():
+        try:
+            import base64 as _b64
+
+            copy_btn = (
+                f'<button type="button" data-action="copy" class="code-btn" data-tooltip="复制结果" '
+                f'data-copy="{_b64.b64encode(raw.encode("utf-8")).decode("ascii")}" '
+                f'style="position:absolute;top:6px;right:6px;height:22px;padding:0 8px;'
+                f'background:var(--panel-soft);border:1px solid var(--border);border-radius:6px;'
+                f'cursor:pointer;color:var(--text-secondary);font-size:{scale_font_size(11)}px;">复制</button>'
+            )
+        except Exception:  # base64 失败不影响展示
+            copy_btn = ""
     return f"""
-    <pre style="margin:0;padding:10px 12px;background:rgba(13,17,23,0.40);color:#c9d1d9;font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-all;overflow-x:auto;border:1px solid rgba(48,54,61,0.25);border-radius:8px;">{escape(raw)}</pre>"""
+    <div style="position:relative;">
+    <pre style="margin:0;padding:10px 12px;background:var(--panel-soft);color:var(--text);font-family:'{_gf}',Consolas,monospace;font-size:{scale_font_size(13)}px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:520px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;">{escape(raw)}</pre>{copy_btn}</div>{note}"""
 
 
 def _keep_in_content_tools() -> frozenset:
     """始终展示在正文的工具集合（registry 派生，与 message_card._edit_tools 同源）。
 
     规则：注册时显式声明 keep_in_content=True（write/edit/multi_edit、
-    subagent_para/subagent_dag、question 等）。用于工具块渲染 data-keep-in-content 属性。
+    subagent_para、question 等）。用于工具块渲染 data-keep-in-content 属性。
     """
     try:
         from app.tools.registry import ToolRegistry
@@ -1087,13 +948,6 @@ def render_tool_block(
     badge_html = _render_tool_status_badge(success)
     icon_html = _get_tool_icon_html(icon_name, tool_name=tool_name)
     cn_name = _get_tool_cn_name(tool_name)
-
-    # 子智能体任务特殊处理
-    if is_sub_agent_task:
-        agent_name = tool_args.get("agent", "unknown")
-        task_desc = tool_args.get("description", "")[:50]
-        if tool_args.get("description"):
-            task_desc = tool_args["description"][:50] + ("..." if len(tool_args["description"]) > 50 else "")
 
     # 参数展示型工具 → 紧凑单行卡片（无折叠、无 body；render_mode="inline"，read 风格）
     try:
@@ -1185,7 +1039,7 @@ def render_tool_block(
     echarts_html = ""
     if echarts:
         try:
-            # 工具自定义渲染闭包优先（如 subagent_dag 注册的 DAG 图渲染）
+            # 工具自定义渲染闭包优先（注册时声明 render 的工具）
             from app.tools.registry import ToolRegistry
             from app.tools.result import ToolResult as _TR
 

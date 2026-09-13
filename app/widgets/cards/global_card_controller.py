@@ -77,6 +77,29 @@ class GlobalCardController:
     # 窗口辅助
     # ───────────────────────────────────────────────────────────
 
+    def refresh_theme_styles(self):
+        """主题/字号变更时刷新本层持有的全局卡片
+
+        这些卡片 parent 挂在 TabManagerWindow 层，不在 main_widget widget
+        树内，main_widget._apply_runtime_ui_settings 的 findChildren 扫不到，
+        需由 TabManagerWindow._on_theme_changed 显式调用。
+        """
+        for card in (
+            self._settings_popup,
+            self._provider_edit_card,
+            self._hook_edit_card,
+            self._mcp_edit_card,
+            self._diff_viewer_card,
+            self._chart_viewer_card,
+            self._file_undo_card,
+            self._sub_agent_session_card,
+        ):
+            if card is not None and hasattr(card, "refresh_style"):
+                try:
+                    card.refresh_style()
+                except Exception as e:
+                    logger.warning(f"[GlobalCard] 卡片主题刷新失败: {e}")
+
     def _active_window(self):
         """当前激活的对话窗口（per-window 状态的读写目标）"""
         from app.widgets.tab_manager_window import TabManagerWindow
@@ -86,7 +109,6 @@ class GlobalCardController:
             w = tm.get_current_window()
             if w is not None and not getattr(w, "_is_destroyed", False):
                 return w
-        from app.main_widget import OpenAIChatToolWindow
 
         for w in window_registry.alive_window_instances():
             if not getattr(w, "_is_destroyed", False):
@@ -95,7 +117,6 @@ class GlobalCardController:
 
     def _all_windows(self) -> List:
         """所有未销毁的对话窗口"""
-        from app.main_widget import OpenAIChatToolWindow
 
         result = []
         for w in window_registry.alive_window_instances():
@@ -131,6 +152,17 @@ class GlobalCardController:
         会递归构建多张设置卡 → 容器内多卡重叠（P024）。构建中标志直接短路重入调用。
         """
         if self._settings_popup is not None:
+            return
+        # ★ 拖动守卫：窗口拖拽期间禁止同步构建。LLMSettingsCard 构造链
+        # （MCPListSettingCard._refresh 含 QCoreApplication.processEvents）
+        # 会创建原生子窗口/干扰焦点捕获，Windows 据此取消标题栏拖动的
+        # SC_MOVE 模态循环 → 窗口被系统弹回拖动起点（用户看到的
+        # "拖完又跳回原位置"，[DRAG-POS] 日志 2026-09-01 现场定位）。
+        # 延迟重试而非丢弃，保证懒构建语义不变；读模块属性避免值拷贝。
+        from app.utils import window_drag_state as _wds
+
+        if _wds.any_window_dragging:
+            QTimer.singleShot(800, self.ensure_settings_popup)
             return
         if self._settings_popup_building:
             # 事件重入：正在构建中，直接返回（外层构建完成后 _settings_popup 已赋值）
@@ -266,6 +298,9 @@ class GlobalCardController:
                 item.widget().deleteLater()
         self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
         self._provider_edit_card.set_save_button_handler(lambda: self._provider_edit_popup._on_save())
+        from app.utils.design_tokens import apply_font_size_to_widget
+
+        apply_font_size_to_widget(self._provider_edit_popup, 14)
         self._card_manager.show_card("provider_edit", GLOBAL_WINDOW_ID)
 
     def _show_provider_edit_card(self, config_id: str, provider_info: dict):
@@ -294,6 +329,9 @@ class GlobalCardController:
                 item.widget().deleteLater()
         self._provider_edit_card.content_layout.addWidget(self._provider_edit_popup)
         self._provider_edit_card.set_save_button_handler(lambda: self._provider_edit_popup._on_save())
+        from app.utils.design_tokens import apply_font_size_to_widget
+
+        apply_font_size_to_widget(self._provider_edit_popup, 14)
         self._card_manager.show_card("provider_edit", GLOBAL_WINDOW_ID)
 
     def _on_provider_edit_saved(self, provider_name: str, provider_info: dict, is_new: bool = False):

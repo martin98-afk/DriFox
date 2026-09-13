@@ -1,0 +1,101 @@
+{
+  "description": "plugin-creator 触发评测：正例应进入本技能，反例应路由到其他技能，边界考察路由精确性",
+  "cases": [
+    {
+      "id": "T01",
+      "type": "positive",
+      "query": "帮我做一个自定义 AI 工具，让助手可以查询我的数据库",
+      "expected_route": "plugin-creator:tools 组件"
+    },
+    {
+      "id": "T02",
+      "type": "positive",
+      "query": "我想接入一个新的模型服务商，API 文档在这里",
+      "expected_route": "plugin-creator:providers 组件"
+    },
+    {
+      "id": "T03",
+      "type": "positive",
+      "query": "每次会话结束自动把聊天记录存到本地文件",
+      "expected_route": "plugin-creator:hooks + 完整插件 scaffold"
+    },
+    {
+      "id": "T04",
+      "type": "positive",
+      "query": "我的插件做完了，帮我发布到插件市场",
+      "expected_route": "plugin-creator:publishing 流程"
+    },
+    {
+      "id": "T05",
+      "type": "positive",
+      "query": "插件的设置页里要能填 API key，保存后插件能读到",
+      "expected_route": "plugin-creator:manifest + E1 配置契约（config_schema password 字段 + PluginConfigStore）"
+    },
+    {
+      "id": "T06",
+      "type": "positive",
+      "query": "做一个预设的 @角色组合，一键拉起代码审查团队",
+      "expected_route": "plugin-creator:team_templates 组件"
+    },
+    {
+      "id": "T07",
+      "type": "positive",
+      "query": "做一个完整插件：斜杠命令入口 + 一个清理临时文件的工具 + 设置页开关",
+      "expected_route": "plugin-creator:完整插件 scaffold（commands+tools+config_schema）"
+    },
+    {
+      "id": "N01",
+      "type": "negative",
+      "query": "在主程序的设置对话框里加一个新的选项卡",
+      "expected_route": "drifox-dev（改 app/ 主程序）"
+    },
+    {
+      "id": "N02",
+      "type": "negative",
+      "query": "给我的浮动卡片再加一个刷新按钮",
+      "expected_route": "ui-plugin-creator（已有 UI 插件的载体开发）"
+    },
+    {
+      "id": "N03",
+      "type": "negative",
+      "query": "解释一下 DriFox 插件的 plugin-structure 是什么结构",
+      "expected_route": "plugin-dev（概念学习，不产出安装物）"
+    },
+    {
+      "id": "N04",
+      "type": "negative",
+      "query": "聊天界面流式输出卡顿，文字重影，帮我修一下",
+      "expected_route": "drifox-dev + diagnose（主程序性能/渲染 bug）"
+    },
+    {
+      "id": "N05",
+      "type": "negative",
+      "query": "写个脚本把当前目录的图片批量压缩一遍",
+      "expected_route": "not-a-skill（一次性任务，无插件形态）"
+    },
+    {
+      "id": "N06",
+      "type": "negative",
+      "query": "帮我写一个新的 skill，教 AI 怎么做横向对比分析",
+      "expected_route": "skill-creator（写 skill 本身）"
+    },
+    {
+      "id": "M01",
+      "type": "near-miss",
+      "query": "做一个插件市场管理界面，能浏览、安装、卸载插件",
+      "expected_route": "near-miss:plugin-creator 主导骨架+manifest+发布，UI 载体桥接 ui-plugin-creator"
+    },
+    {
+      "id": "M02",
+      "type": "near-miss",
+      "query": "我装的插件突然不加载了，/plugin-marketplace 里也看不到",
+      "expected_route": "troubleshooting 路由（references/troubleshooting.md 症状排查）"
+    },
+    {
+      "id": "A01",
+      "type": "ambiguous",
+      "query": "帮我做个卡片",
+      "expected_route": "ambiguous:先确认载体（主程序内置 UI / 已有插件扩展 / 新 UI 插件）再路由"
+    }
+  ]
+}

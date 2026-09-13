@@ -1119,9 +1119,6 @@ class HistoryCompactor:
         else:
             summary_note = f"已压缩 {len(compacted)} 条较早消息"
 
-        # 计算摘要实际占用的 token 数（确保非负）
-        # 使用安全的 token 计数函数
-        summary_tokens = _safe_token_count([summary_message])
         recent_tokens_safe = _safe_token_count(recent_messages)
         summary_count = _safe_subtract(current_tokens, recent_tokens_safe)
 
@@ -1252,12 +1249,6 @@ class HistoryCompactor:
         kept_count = len([m for m in recent_messages if m in result_messages])
         return result_messages, kept_count, note + f"，保留 {kept_count}/{compacted_len} 条"
 
-    def _calculate_dynamic_summary_chars(self, compacted_count: int) -> int:
-        """根据压缩消息数动态计算摘要字符上限"""
-        return min(
-            MAX_HEURISTIC_SUMMARY_CHARS_ABS,
-            MAX_HEURISTIC_SUMMARY_CHARS + compacted_count * MAX_HEURISTIC_SUMMARY_CHARS_PER_MSG,
-        )
 
     def _summarize(
         self,

@@ -1,6 +1,6 @@
 [project]
 name = "drifox"
-version = "0.5.5"
+version = "0.5.11"
 description = "DriFox - AI Chat Desktop Application"
 readme = "README.md"
 requires-python = ">=3.14"
@@ -44,7 +44,6 @@ dependencies = [
     "mcp>=1.0.0",
     # 插件热更新
     "watchfiles>=1.0.0",
-    "aiohttp",
     # LSP 集成 (Language Server Protocol)
     "pygls>=2.0.0",
     "lsprotocol",

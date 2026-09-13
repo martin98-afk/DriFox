@@ -26,19 +26,12 @@ _CONTRACT_ATTRS = (
     "_command_card",
     "_file_mention_card",
     "_undo_delete_card",
-    "_undo_delete_cache",
+    "_undo_delete_store",
     "_truncation_sentinel",
     "_pending_send_after_truncation",
     "_pending_send_user_text",
 )
 
-
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
 
 
 def test_module_id():
@@ -50,6 +43,7 @@ def test_module_id():
 def test_compose_builds_input_card(fresh_registry, qapp):
     from PySide6.QtWidgets import QWidget
 
+    from app.widgets.cards.card_container import CompletionCardContainer
     from app.widgets.modules.input_card_module import InputCardModule
 
     fresh_registry.register_ui_module("input_card", InputCardModule, plugin_name="system")
@@ -61,12 +55,16 @@ def test_compose_builds_input_card(fresh_registry, qapp):
             self._window_id = "test-window"
             self._card_manager = MagicMock()
             self._bottom_card_container = MagicMock()
+            # L1 补全容器用真实控件而非 MagicMock：build 会对它调 add_card()，
+            # 桩掉就测不出"补全卡真的进了容器"这条契约
+            self._completion_container = CompletionCardContainer()
             for _m in (
                 "_load_input_history",
                 "_update_subagents_param_description",
                 "_update_title_gen_param_description",
                 "_ensure_file_mention_cache",
                 "_on_send_clicked",
+                "_on_send_clicked_inverse",
                 "_on_stop_clicked",
                 "_on_clear_shortcut",
                 "_on_agent_changed",
@@ -79,10 +77,17 @@ def test_compose_builds_input_card(fresh_registry, qapp):
                 "_on_entering_history_mode",
                 "_on_history_attachments_restored",
                 "_on_history_mode_exited",
+                "_on_attachments_removed_from_text",
                 "_on_pet_typing",
                 "_on_file_mention_selected",
+                "_on_mention_selected",
+                "_rebuild_attachment_chips",
                 "_restore_deleted_message",
+                "_on_undo_dismiss_requested",
                 "_on_undo_delete_dismissed",
+                "_on_queue_insert_requested",
+                "_on_queue_remove_requested",
+                "_on_queue_edit_requested",
                 "_on_subagent_model_config_changed",
                 "_on_title_gen_model_config_changed",
             ):
@@ -93,3 +98,15 @@ def test_compose_builds_input_card(fresh_registry, qapp):
     assert report["input_card"] == "system"
     for attr in _CONTRACT_ATTRS:
         assert hasattr(host, attr), f"missing host attribute: {attr}"
+
+    # ── L1 拆层契约：补全卡（command / file_mention）进 COMPLETION 容器，
+    #    BOTTOM 容器只留会话状态卡。同容器会让两者争抢同一段高度预算，
+    #    实测排队卡会被压在命令卡参数行上（见 test_card_layers 的多卡高度用例）。
+    from app.widgets.cards.card_manager import ContainerType
+
+    assert host._completion_container.container_type is ContainerType.COMPLETION
+    assert set(host._completion_container._cards) == {"command", "file_mention"}
+    assert {c.args[0] for c in host._bottom_card_container.add_card.call_args_list} == {
+        "undo_delete",
+        "message_queue",
+    }

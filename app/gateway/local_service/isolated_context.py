@@ -86,11 +86,6 @@ class IsolatedChatContext:
             if self._tool_executor:
                 self._tool_executor.set_call_id(call_id)
 
-    def update_session_context(self) -> None:
-        with self._lock:
-            current_session = self._session_manager.get_current_session()
-            if current_session and self._tool_executor:
-                self._tool_executor.set_session_context(current_session.session_id, call_id=None)
 
     def create_chat_engine(self, worker_callbacks=None, api_mode=True):
         from app.core.engines.ui import ChatEngine
@@ -114,19 +109,7 @@ class IsolatedChatContext:
     def get_current_session(self):
         return self._session_manager.get_current_session()
 
-    def add_message(self, role: str, content: str) -> None:
-        session = self._session_manager.get_current_session()
-        if session:
-            if role == "user":
-                session.add_user_message(content)
-            else:
-                session.add_assistant_message(content)
 
-    def get_messages(self) -> List[Dict[str, Any]]:
-        session = self._session_manager.get_current_session()
-        if session:
-            return list(session.messages or [])
-        return []
 
     def cleanup(self) -> None:
         with self._lock:
@@ -157,19 +140,6 @@ class IsolatedContextRegistry:
     def get_instance(cls) -> "IsolatedContextRegistry":
         return cls()
 
-    def create_context(self, context_id, main_widget, target_session=None, model_config=None):
-        with self._context_lock:
-            if context_id in self._contexts:
-                self._contexts[context_id].cleanup()
-            ctx = IsolatedChatContext(
-                context_id=context_id,
-                main_widget=main_widget,
-                target_session=target_session,
-                model_config=model_config,
-            )
-            self._contexts[context_id] = ctx
-            logger.debug(f"[ContextRegistry] 创建新上下文: {context_id}")
-            return ctx
 
     def get_context(self, context_id: str) -> Optional[IsolatedChatContext]:
         with self._context_lock:
@@ -182,13 +152,4 @@ class IsolatedContextRegistry:
                 del self._contexts[context_id]
                 logger.debug(f"[ContextRegistry] 移除上下文: {context_id}")
 
-    def get_active_count(self) -> int:
-        with self._context_lock:
-            return len(self._contexts)
 
-    def cleanup_all(self) -> None:
-        with self._context_lock:
-            for ctx in self._contexts.values():
-                ctx.cleanup()
-            self._contexts.clear()
-            logger.info("[ContextRegistry] 所有上下文已清理")

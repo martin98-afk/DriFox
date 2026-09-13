@@ -7,13 +7,6 @@ from app.plugins.contracts.ui_module import UIModule
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 class TestSystemUIModules:
     def test_chat_area_module(self, fresh_registry):

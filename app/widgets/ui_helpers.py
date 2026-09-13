@@ -358,6 +358,7 @@ def is_widget_alive(widget: Optional[object]) -> bool:
         return False
     try:
         import shiboken6 as sip
+
         return sip.isValid(widget)
     except Exception:
         return True
@@ -1321,12 +1322,95 @@ def save_png_from_b64(parent, png_b64: str, default_name: str = "图表") -> Opt
         return None
 
 
+def save_svg_source(parent, content_b64: str, default_name: str = "SVG") -> Optional[str]:
+    """把 SVG widget 源码保存为本地 .svg 文件（弹保存对话框）
+
+    缺 xmlns 时补默认命名空间，保证浏览器可直接打开。
+
+    Args:
+        parent: 父控件
+        content_b64: SVG 源码的 base64 字符串
+        default_name: 默认文件名主体
+
+    Returns:
+        保存路径；用户取消返回 None
+    """
+    import base64 as _b64mod
+
+    from PySide6.QtWidgets import QFileDialog
+
+    try:
+        content = _b64mod.b64decode(content_b64).decode("utf-8") if content_b64 else ""
+    except Exception as e:
+        logger.error(f"[Widget] 源码解码失败: {e}")
+        return None
+    if not content.strip():
+        return None
+
+    # 缺 xmlns 的 svg 存盘后浏览器拒渲染，兜底注入默认命名空间
+    if "xmlns=" not in content[:1000]:
+        content = content.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"', 1)
+    default_file = f"{default_name}_{time.strftime('%Y%m%d_%H%M%S')}.svg"
+    file_path, _ = QFileDialog.getSaveFileName(parent, "保存 SVG 源文件", default_file, "SVG 文件 (*.svg)")
+    if not file_path:
+        return None
+    if not file_path.lower().endswith(".svg"):
+        file_path += ".svg"
+
+    try:
+        with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        return file_path
+    except Exception as e:
+        logger.error(f"[Widget] 源文件保存失败: {e}")
+        return None
+
+
+def save_html_source(parent, content_b64: str, default_name: str = "HTML") -> Optional[str]:
+    """把 HTML widget（```html fence 净化产物）源码保存为本地 .html 文件（弹保存对话框）
+
+    Args:
+        parent: 父控件
+        content_b64: HTML 源码的 base64 字符串
+        default_name: 默认文件名主体
+
+    Returns:
+        保存路径；用户取消返回 None
+    """
+    import base64 as _b64mod
+
+    from PySide6.QtWidgets import QFileDialog
+
+    try:
+        content = _b64mod.b64decode(content_b64).decode("utf-8") if content_b64 else ""
+    except Exception as e:
+        logger.error(f"[Widget] 源码解码失败: {e}")
+        return None
+    if not content.strip():
+        return None
+
+    default_file = f"{default_name}_{time.strftime('%Y%m%d_%H%M%S')}.html"
+    file_path, _ = QFileDialog.getSaveFileName(parent, "保存 HTML 源文件", default_file, "HTML 文件 (*.html)")
+    if not file_path:
+        return None
+    if not file_path.lower().endswith(".html"):
+        file_path += ".html"
+
+    try:
+        with open(file_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        return file_path
+    except Exception as e:
+        logger.error(f"[Widget] 源文件保存失败: {e}")
+        return None
+
+
 def show_chart_viewer(parent, chart_type: str, payload_b64: str) -> Any:
     """显示图表放大查看器（内嵌卡覆盖对话区域；无全局卡片容器时回退弹窗）
 
     Args:
         parent: 父控件（仅弹窗回退时使用）
-        chart_type: "echarts" | "mermaid"
+        chart_type: "echarts" | "mermaid" | "svg"
         payload_b64: 图表数据 b64
     """
     logger.debug(f"[ChartViewer] show_chart_viewer type={chart_type}, payload_len={len(payload_b64 or '')}")
@@ -1367,6 +1451,37 @@ def _is_hook_message_ui(msg: dict) -> bool:
     if isinstance(content, str) and _HOOK_CONTENT_PATTERN.search(content):
         return True
     return False
+
+
+def materialize_batch_with_extras(batch: list, session_id: str, load_extras) -> list:
+    """渲染副本注入（message_extras 方案）：为带 _x_idx 哨兵的批次消息补回剥离字段。
+
+    - 批次内无哨兵消息（活跃会话 / 老数据）→ 原样返回，零开销
+    - 仅被补回的消息做浅拷贝；session.messages 始终保持轻量，批次卸载随卡片销毁
+    - load_extras 异常安全：读库失败按「无 extras」处理，渲染不阻塞
+    """
+    if not batch or not session_id or not callable(load_extras):
+        return batch
+    idxs = [m.get("_x_idx") for m in batch if isinstance(m, dict) and isinstance(m.get("_x_idx"), int)]
+    if not idxs:
+        return batch
+    try:
+        patch_by_idx = load_extras(session_id, idxs) or {}
+    except Exception:
+        return batch
+    if not patch_by_idx:
+        return batch
+    out = []
+    for m in batch:
+        idx = m.get("_x_idx") if isinstance(m, dict) else None
+        patch = patch_by_idx.get(idx) if idx is not None else None
+        if patch:
+            m2 = dict(m)
+            m2.update(patch)
+            out.append(m2)
+        else:
+            out.append(m)
+    return out
 
 
 def render_batch_to_assistant_card(assistant_card, batch: list) -> None:
@@ -1485,33 +1600,6 @@ def restore_input_from_card(input_area, card) -> None:
     input_area.setFocus()
 
 
-def find_user_card_at_index(chat_layout, target_index: int) -> Any:
-    """
-    找到指定索引的 user 卡片
-
-    Args:
-        chat_layout: 聊天布局
-        target_index: 目标索引
-
-    Returns:
-        找到的卡片或 None
-    """
-    # 延迟导入避免循环依赖
-    pair_index = 0
-    for i in range(chat_layout.count()):
-        item = chat_layout.itemAt(i)
-        if not item or not item.widget():
-            continue
-        widget = item.widget()
-        if not isinstance(widget, MessageCard):
-            continue
-        if widget.role == "user":
-            if pair_index == target_index:
-                return widget
-            pair_index += 1
-    return None
-
-
 def find_user_round_index(session, user_text: str, timestamp: str) -> int:
     """
     从 session 中找到 user 消息对应的 round_index。
@@ -1626,6 +1714,14 @@ def init_after_loading_session(self_widget, session, session_id, title=None, bac
     self_widget._current_session_id = session_id
     self_widget.title_edit.setText(title or "历史对话")
 
+    # 🛡️ 加载会话 = 读操作，起点必须干净：重置脏标记。
+    # 此前脏标记跨会话切换传染——新建会话的 SessionStart hook 注入经
+    # _on_messages_updated 放行后置脏，但 hook-only 会话被 has_user_message
+    # 过滤永不落库，脏标记永无消费机会；残留脏挂到下一个加载的会话上，
+    # 切走时 _auto_save_current_session 对无变更会话做无意义保存，
+    # DB updated_at 被刷新 → 历史列表「最后对话时间」被错误更新。
+    self_widget._session_dirty = False
+
     if backend:
         backend.set_session_context(session_id)
 
@@ -1697,27 +1793,6 @@ def invalidate_session_card_cache(session, session_card_cache) -> None:
         session_card_cache.pop(session.session_id, None)
 
 
-def refresh_session_view(
-    self_widget, invalidate_cache_func=None, display_session_func=None, refresh_context_func=None
-) -> None:
-    """
-    刷新会话视图
-
-    Args:
-        self_widget: 自身 widget
-        invalidate_cache_func: 使缓存失效的函数
-        display_session_func: 显示会话的函数
-        refresh_context_func: 刷新上下文的函数
-    """
-    if invalidate_cache_func:
-        invalidate_cache_func()
-    self_widget._history_preview_messages = None
-    if display_session_func:
-        display_session_func()
-    if refresh_context_func:
-        refresh_context_func()
-
-
 def refresh_history_card_if_visible(history_card, refresh_func=None) -> None:
     """
     如果历史卡片可见则刷新
@@ -1742,8 +1817,21 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
 
     Returns:
         删除的数量
+
+    [PERF] 布局成员一次性建索引：原实现对每个待删 widget 都从头线性扫描
+    ``chat_layout``（O(n×m)）。批量回收场景下（``_recycle_out_of_view_batches``
+    一次传入几十张卡）卡片数上千时是滚动卡顿的隐性来源。
+    改为先建一次 ``id(widget)`` 索引集合，整体降为 O(n+m)。
     """
     deleted = 0
+    # 一次性快照布局成员（removeWidget 会改变布局索引，故必须预先建索引）
+    layout_member_ids = set()
+    for i in range(chat_layout.count()):
+        item = chat_layout.itemAt(i)
+        w = item.widget() if item is not None else None
+        if w is not None:
+            layout_member_ids.add(id(w))
+
     for widget in widgets_to_remove:
         if not is_widget_alive(widget):
             logger.warning(f"[DELETE] Widget already deleted: {widget}")
@@ -1763,17 +1851,18 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
         # HWND）直接脱离父窗口树会变独立顶层窗口 → 白窗一闪（切换项目/新建
         # 标签页清理旧卡片时 Chromium 弹出原生窗口）。
         layout_removed = False
-        for i in range(chat_layout.count()):
-            item = chat_layout.itemAt(i)
-            if item and item.widget() is widget:
-                widget.hide()
-                chat_layout.removeWidget(widget)
-                try:
-                    widget.setParent(None)
-                except Exception:
-                    pass
-                layout_removed = True
-                break
+        widget_id = id(widget)
+        if widget_id in layout_member_ids:
+            # 命中后即从索引中摘除，保证同一 widget 被重复传入时行为与原实现
+            # 一致（第二次视为「已不在布局中」，走 warning 分支）
+            layout_member_ids.discard(widget_id)
+            widget.hide()
+            chat_layout.removeWidget(widget)
+            try:
+                widget.setParent(None)
+            except Exception:
+                pass
+            layout_removed = True
 
         if layout_removed:
             widget.deleteLater()
@@ -1783,36 +1872,6 @@ def delete_widgets_from_layout(widgets_to_remove: list, chat_layout, call_cleanu
             logger.warning(f"[DELETE] Widget not found in layout: role={widget.role}")
 
     return deleted
-
-
-def find_last_tool_call_id_after_round(messages: list, round_ranges: list, round_index: int) -> Optional[str]:
-    """
-    查找指定 round 之后最后一个 tool_call_id
-
-    Args:
-        messages: 消息列表
-        round_ranges: round 范围列表
-        round_index: 目标 round 索引
-
-    Returns:
-        最后一个 tool_call_id 或 None
-    """
-    if round_index < 0 or round_index >= len(round_ranges):
-        return None
-
-    # 获取该 round 之后的所有消息的 start index
-    _, end_idx = round_ranges[round_index]
-
-    # 查找 end_idx 之后的所有 tool_call_id
-    last_call_id = None
-    for i in range(end_idx, len(messages)):
-        msg = messages[i]
-        if msg.get("role") == "tool":
-            call_id = msg.get("tool_call_id")
-            if call_id:
-                last_call_id = call_id
-
-    return last_call_id
 
 
 def create_assistant_card_widget(
@@ -1888,40 +1947,6 @@ def create_assistant_card_widget(
 
 
 # ==================== 滚动位置辅助 ====================
-
-
-def calculate_scroll_progress(visible_top: float, viewport_height: float, widget_tops: list) -> tuple:
-    """
-    计算滚动进度和可见索引
-
-    Args:
-        visible_top: 滚动条当前值（可见区域顶部）
-        viewport_height: 视口高度
-        widget_tops: 用户消息卡片顶部位置列表
-
-    Returns:
-        (progress, visible_index)
-    """
-    anchor_y = visible_top + max(viewport_height / 2, 1)
-
-    if len(widget_tops) == 1:
-        return 0.0, 0
-    elif anchor_y <= widget_tops[0]:
-        return 0.0, 0
-    elif anchor_y >= widget_tops[-1]:
-        return float(len(widget_tops) - 1), len(widget_tops) - 1
-    else:
-        progress = 0.0
-        for idx in range(len(widget_tops) - 1):
-            start_top = widget_tops[idx]
-            end_top = widget_tops[idx + 1]
-            if start_top <= anchor_y <= end_top:
-                span = max(end_top - start_top, 1)
-                ratio = (anchor_y - start_top) / span
-                progress = idx + ratio
-                break
-        visible_index = min(max(int(round(progress)), 0), len(widget_tops) - 1)
-        return progress, visible_index
 
 
 def add_message_to_layout(widget, chat_layout, is_alive_func=None) -> None:

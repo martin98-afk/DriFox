@@ -110,6 +110,7 @@ class UIEngine(BaseEngine):
         )
         self._adapter.stream_finished.connect(lambda r: self._on_worker_finished(r))
         self._adapter.messages_updated.connect(lambda ms: self._emit("messages_updated", ms))
+        self._adapter.queued_user_injected.connect(lambda c: self._emit("queued_user_injected", c))
         self._adapter.error_occurred.connect(lambda e: self._on_error(e))
         self._adapter.retry_status.connect(lambda *a: self._emit("retry_status", *a))
         self._adapter.retry_resolved.connect(lambda: self._emit("retry_resolved"))
@@ -287,13 +288,6 @@ class UIEngine(BaseEngine):
         if worker:
             worker.deny_permission(tool_call_id)
 
-    def clear_session_permission_cache(self, tool_name: str = None):
-        """清除会话级权限缓存"""
-        cache = self._conversation_core.permission_cache
-        if tool_name:
-            cache.deny(tool_name)
-        else:
-            cache.clear_session()
 
     # ========== 回调管理 ==========
 
@@ -380,6 +374,9 @@ class UIEngine(BaseEngine):
         _user_content = kwargs.pop("_user_content", None)
         content_to_store = _user_content or user_text
 
+        # ---- 提取图片附件路径（仅用户主动上传的图片，供 session 标记 + UI 预览）----
+        _image_attachments = kwargs.pop("_image_attachments", None)
+
         # ---- 提取 hook_event 标记（团队任务邮件等），写入 session 消息时打标 ----
         hook_event = kwargs.pop("_hook_event", None)
 
@@ -398,12 +395,11 @@ class UIEngine(BaseEngine):
 
         pre_user_ctx = None
         if hook_mgr:
-            memory_ctx = {}
             worktree_ctx = {}
             try:
                 if self._backend:
-                    memory_ctx = self._backend.build_memory_context_dict() or {}
                     worktree_ctx = self._backend._build_worktree_context_dict() or {}
+                    worktree_ctx.update(self._backend.build_key_documents_context() or {})
             except Exception:
                 pass
             # ⚠️ metadata.pop 必须在主线程（避免与 worker 线程竞态）
@@ -413,7 +409,7 @@ class UIEngine(BaseEngine):
             pre_user_ctx = {
                 "message": user_text,
                 "session_id": _session_id,
-                **memory_ctx,
+                "current_role": "primary",
                 **worktree_ctx,
             }
             if pending_cmd:
@@ -441,6 +437,7 @@ class UIEngine(BaseEngine):
             agent_manager=self._get_agent_manager(),
             tool_executor=self._tool_executor,
             hook_event=hook_event,
+            image_attachments=_image_attachments,
         )
         worker.start()
 
@@ -653,7 +650,7 @@ class UIEngine(BaseEngine):
                 if isinstance(msg.get("content"), str) and len(msg["content"]) > TOOL_RESULT_MAX_LEN:
                     _m = dict(msg)
                     _m["content"] = prune_tool_result(_m["content"])
-                tool_tokens += per_message_tokens(_m, model)
+                tool_tokens += per_message_tokens(_m, model, ratio)
             else:
                 # 其它角色（如内联 system 消息）兜底归入用户侧
                 user_tokens += t
@@ -682,7 +679,7 @@ class UIEngine(BaseEngine):
                 # 上次 API 调用后新增了消息：API 精确值 + 新增消息估算
                 # 性能优化（O-01）：per_message_tokens 累加，避免临时列表+缓存 MISS
                 new_msgs = session.messages[api_message_count:]
-                delta = sum(per_message_tokens(m, model) for m in new_msgs)
+                delta = sum(per_message_tokens(m, model, ratio) for m in new_msgs)
                 used_tokens = api_prompt_tokens + delta
             else:
                 used_tokens = api_prompt_tokens
@@ -736,14 +733,16 @@ class UIEngine(BaseEngine):
     ):
         """启动 Worker（委托 ConversationExecutor + UIConversationAdapter）"""
         callbacks = self._adapter.get_callbacks()
-        success = self._conversation_executor.execute(
+        # ⚠️ stream_started 由 executor.execute() 统一发射（执行 callbacks 里的
+        # adapter 回调 → 本类 _emit → 各消费者）。这里**不能再补发一次**：
+        # 2026-05 重构后两处各发一次 → 双信号 → agent_trace 每轮多出 2 条
+        # 「正在生成」尾巴 + 流 timing 表错位（end=0 僵尸流 → 时长异常）。
+        self._conversation_executor.execute(
             messages=messages,
             llm_config=llm_config,
             tools=tools,
             callbacks=callbacks,
         )
-        if success and not self._api_mode:
-            self._emit("stream_started")
 
     def _on_worker_finished(self, response: str):
         # 🛡️ 防御性检查：如果 Executor 已不在流式状态（stop() 已调用或被新 worker 覆盖），
@@ -902,6 +901,7 @@ class _PreSendWorker(QThread):
         agent_manager,
         tool_executor,
         hook_event: str | None = None,
+        image_attachments: list | None = None,
     ):
         super().__init__()
         self._hook_mgr = hook_mgr
@@ -918,6 +918,7 @@ class _PreSendWorker(QThread):
         self._agent_manager = agent_manager
         self._tool_executor = tool_executor
         self._hook_event = hook_event
+        self._image_attachments = image_attachments
 
         # 结果
         self._messages: list = []
@@ -978,6 +979,8 @@ class _PreSendWorker(QThread):
             _add_kwargs = {}
             if self._hook_event:
                 _add_kwargs["_hook_event"] = self._hook_event
+            if self._image_attachments:
+                _add_kwargs["_image_attachments"] = self._image_attachments
             session.add_user_message(content=self._content_to_store, **_add_kwargs)
 
         # ---- 4. PostUserMessage hooks ----
@@ -991,6 +994,7 @@ class _PreSendWorker(QThread):
         )
 
         # ---- 6. 获取 tool schema ----
+        session_id = str(getattr(self._session, "session_id", "") or "")
         if self._current_agent:
             self._available_tools = self._agent_manager.get_agent_tools_schema(
                 self._current_agent,
@@ -1000,4 +1004,5 @@ class _PreSendWorker(QThread):
             self._available_tools = get_builtin_tools_schema(
                 self._agent_manager,
                 builtin_tools=self._tool_executor._builtin_tools if self._tool_executor else None,
+                session_id=session_id,
             )

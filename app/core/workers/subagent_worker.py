@@ -15,14 +15,14 @@ from PySide6.QtCore import QCoreApplication, QObject, QThread, QTimer, Signal
 
 from app.constants import PARAM_SCHEMA
 from app.constants import provider_quota_exclude_keys as QUOTA_EXCLUDE_KEYS
-from app.core.message_content import messages_to_responses_input, to_api_message
 from app.core.model_capabilities import (
     get_model_capabilities,
     normalize_reasoning_effort,
     resolve_context_limit,
     resolve_max_output_tokens,
 )
-from app.core.provider_profile import detect_provider_family, get_provider_profile
+from app.core.message_content import extract_reasoning_delta
+from app.core.provider_profile import get_provider_profile
 from app.core.tool_call_parser import smart_parse_arguments
 from app.plugins.contracts.loop_policy import LoopDecision, LoopState
 from app.tools.result import ToolResult
@@ -53,7 +53,6 @@ class _BoundedTaskDict(dict):
         while len(self) > self._maxlen:
             oldest = next(iter(self))  # dict 保序：首个即最旧
             super().__delitem__(oldest)
-
 
 # 最终总结提示词兕底文案（激活策略无 final_summary_prompt 时使用，内容与原硬编码等价）
 _FALLBACK_FINAL_SUMMARY_PROMPT = """
@@ -124,7 +123,7 @@ class SubAgentExecutor(QThread):
         max_iterations: Optional[
             int
         ] = None,  # 轮数上限（per-agent steps 优先）；None=走激活策略（默认 subagent 策略 30）
-        hook_policy_id: Optional[str] = None,  # 子智能体域 hook 策略插件 id（plugins/system/hook_policies/）
+        hook_policy_id: Optional[str] = None,  # 子智能体域 hook 策略插件 id（plugins/system-hook-policies/hook_policies/）
     ):
         super().__init__()
         self.task_id = task_id
@@ -136,7 +135,7 @@ class SubAgentExecutor(QThread):
         self.parent_context = parent_context
         self.is_subagent_call = is_subagent_call  # 传递给提示词构建
         self.max_iterations = max_iterations  # 轮数上限（None=走激活策略）
-        # 子智能体域 hook 策略：默认 None → 走 plugins/system/hook_policies/ 的
+        # 子智能体域 hook 策略：默认 None → 走 plugins/system-hook-policies/hook_policies/ 的
         # "subagent_default"（仅工具级 + Stop + PluginChanged）。可显式传 id 覆盖。
         self._hook_policy_id = hook_policy_id
         self._hook_policy_obj = None  # 懒解析缓存
@@ -445,11 +444,10 @@ class SubAgentExecutor(QThread):
                 result = f"执行出错: {str(e)}"
 
             if self._is_cancelled:
-                # 【关键修复】被取消时也要发射错误信号，让 DAG 知道节点结束了
-                # 不然 DAG 会永远卡在等这个节点的完成回调上
+                # 被取消时也要发射错误信号，让管理器知道任务已结束
                 self._execution_error = "Task cancelled"
                 logger.warning(
-                    f"[SubAgentExecutor] Task {self.task_id} ({self.agent_name}) cancelled, emitting error_occurred to notify DAG"
+                    f"[SubAgentExecutor] Task {self.task_id} ({self.agent_name}) cancelled, emitting error_occurred"
                 )
                 if self._log_store_callback:
                     try:
@@ -637,7 +635,7 @@ class SubAgentExecutor(QThread):
         """当前激活的子智能体 hook 触发策略对象
 
         优先级：_hook_policy_id 显式 id > 默认 scope=subagent 的激活策略
-        （默认 plugins/system/hook_policies/subagent_default.py，仅工具级 + Stop +
+        （默认 plugins/system-hook-policies/hook_policies/subagent_default.py，仅工具级 + Stop +
         PluginChanged）。Registry 未加载时回退到内置 SubagentDefaultHookPolicy（保持
         现状行为：仅工具级 + Stop + PluginChanged）。
         """
@@ -735,7 +733,7 @@ class SubAgentExecutor(QThread):
             adapter = self._resolve_adapter_with_warmup(registry, config or {})
         if adapter is None:
             raise RuntimeError(
-                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system/model_adapters/ 已启用"
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system-model-adapters/ 已启用"
             )
         return adapter.protocol_flags(config or {})
 
@@ -754,7 +752,7 @@ class SubAgentExecutor(QThread):
             adapter = self._resolve_adapter_with_warmup(registry, llm_config)
         if adapter is None:
             raise RuntimeError(
-                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system/model_adapters/ 已启用"
+                "未注册任何 ModelAdapter 插件（含系统插件 openai），请确认 plugins/system-model-adapters/ 已启用"
             )
         return adapter.protocol_flags(llm_config or {}).requires_reasoning_content
 
@@ -968,23 +966,6 @@ class SubAgentExecutor(QThread):
             logger.debug(f"[SubAgent] drain hook queues failed: {e}")
         return msgs
 
-    def _parse_tool_arguments_json(self, raw_arguments: Any):
-        if isinstance(raw_arguments, dict):
-            return raw_arguments, ""
-
-        text = str(raw_arguments or "")
-        if not text.strip():
-            return {}, ""
-
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError as exc:
-            return None, str(exc)
-
-        if not isinstance(parsed, dict):
-            return None, f"expected JSON object, got {type(parsed).__name__}"
-
-        return parsed, ""
 
     def _make_api_call(self, messages: List[Dict], tools: List[Dict] = None, llm_config: Dict = None) -> tuple:
         """调用 LLM API（非流式，子智能体后台执行无需流式输出）"""
@@ -1126,7 +1107,7 @@ class SubAgentExecutor(QThread):
         # 非流式：直接读取响应
         message = response.choices[0].message
         response_content = self._filter_thinking_content(message.content or "")
-        reasoning_content = getattr(message, "reasoning_content", "") or ""
+        reasoning_content = extract_reasoning_delta(message)
 
         # 提取工具调用
         tool_calls_found = []
@@ -1627,9 +1608,7 @@ class SubAgentManager(QObject):
         self._get_llm_config = get_llm_config
         self._running_tasks: Dict[str, SubAgentExecutor] = {}
         # H1：有界字典，防止 _finished_tasks 无限增长（进程生命周期内巨漏）；上限 200，超出弹最旧
-        self._finished_tasks = _BoundedTaskDict(
-            maxlen=200
-        )  # task_id -> {"result": str, "error": str, "session_id": str}
+        self._finished_tasks = _BoundedTaskDict(maxlen=200)  # task_id -> {"result": str, "error": str, "session_id": str}
         self._session_store = None  # 使用 SessionStore 替代 SubAgentLogStore
         # 批次计数：本次启动的任务总数
         self._batch_total = 0
@@ -1649,10 +1628,6 @@ class SubAgentManager(QObject):
         self._stall_timer = QTimer(self)
         self._stall_timer.setInterval(10000)  # 每 10 秒检查一次
         self._stall_timer.timeout.connect(self._check_stalled_tasks)
-
-        # DAG 回调延后连接：监听自己的 task_started，在此时连接 DAG 回调到 executor
-        # （与 UI 回调 _on_sub_agent_task_started 完全相同的连接时机）
-        self.task_started.connect(self._on_dag_task_started_slot)
 
     def set_current_session_id(self, session_id: str):
         """设置当前会话 ID，用于会话隔离"""
@@ -1716,10 +1691,6 @@ class SubAgentManager(QObject):
             self._stall_timer.stop()
             logger.info("[SubAgentManager] Stall 检测器已停止")
 
-    def set_stall_timeout(self, seconds: int):
-        """设置日志静默超时阈值（最少 30 秒）"""
-        self._stall_timeout = max(30, seconds)
-        logger.info(f"[SubAgentManager] Stall 超时已设置为 {self._stall_timeout}s")
 
     def _check_stalled_tasks(self):
         """
@@ -1778,21 +1749,30 @@ class SubAgentManager(QObject):
                 session_id=task_session_id,
             )
 
-            # 4. 通知 DAG（如果有）
-            self._notify_dag_task_failed(task_id, error_msg)
-
-            # 5. 通知 UI
+            # 4. 通知 UI
             try:
                 self.task_finished.emit(task_id, "")
             except Exception as e:
                 logger.error(f"[SubAgentManager] task_finished.emit 失败 (stalled path): {e}")
 
-            # 6. 从 running_tasks 移除（避免 get_finished_tasks 再处理一次）
+            # 5. 从 running_tasks 移除（避免 get_finished_tasks 再处理一次）
             #    注意：executor 线程可能还在运行（卡在 API 调用中），
             #    但已经从管理器角度"移除"了，后续 finished_with_result 回调
             #    会因 task_id 不在 running_tasks 而被安全忽略。
             if task_id in self._running_tasks:
                 del self._running_tasks[task_id]
+
+    @staticmethod
+    def _connect_cb(signal, callback, connection_type: int = None):
+        """连接回调；connection_type 为 None 时沿用 Qt 默认（AutoConnection）。
+
+        抽成方法是为了让「同步等待型」调用方能显式指定 DirectConnection——
+        详见 execute_task 的 connection_type 文档。
+        """
+        if connection_type is None:
+            signal.connect(callback)
+        else:
+            signal.connect(callback, connection_type)
 
     def _dispatch_executor_finished(self, task_id: str, result: str):
         """executor finished_with_result → 外部 on_finished 回调（queued 回主线程后执行）"""
@@ -1837,6 +1817,7 @@ class SubAgentManager(QObject):
         share_context: bool = False,  # 是否共享主智能体上下文
         session_id: str = "",  # 所属会话 ID（任务创建时锁定，避免跨会话覆盖）
         llm_config: Dict = None,  # 可选：预解析的 LLM 配置（支持覆盖模型）
+        connection_type: int = None,  # 回调连接方式；None=沿用默认 AutoConnection
     ) -> bool:
         """执行子智能体任务
 
@@ -1846,6 +1827,15 @@ class SubAgentManager(QObject):
                         避免同一窗口内切换会话后异步回调用错 session_id。
             llm_config: 预解析的 LLM 配置（可选）。传入时跳过内部 _get_llm_config() 调用，
                         用于 --model=xxx 覆盖模型/服务商的场景。
+            connection_type: on_finished/on_error/on_progress 的连接方式（Qt.ConnectionType）。
+                默认 None 表示沿用 Qt 默认（AutoConnection）。
+
+                ★ 调用方若要在回调里做「同步等待」（典型：workflow 插件 agent() 派发后
+                用 threading.Event.wait() 阻塞等结果），必须显式传 Qt.DirectConnection(1)：
+                AutoConnection 会把回调排进**发起连接那个线程**的事件循环，而该线程此刻正
+                阻塞在 wait() 上——若它是普通 Python 线程（无 Qt 事件循环）更永不会投递，
+                结果是子任务早已跑完、回调永不触发的**永久死锁**（无超时则永远不返回）。
+                DirectConnection 让回调直接在 executor 线程里执行，等待方即可被唤醒。
         """
         # 在任务创建时即锁定 session_id，不依赖后续的全局状态
         task_session_id = session_id or self._current_session_id
@@ -1954,12 +1944,17 @@ class SubAgentManager(QObject):
             # ⚠️ 外部回调不能直接 connect（lambda/closure 的 receiver 归属 sender=executor，
             # 而 executor 在 ChatWorker 子线程创建 → queued 投到无事件循环的线程 → 永不执行）。
             # 统一存到 executor 上，由 Manager 的 bound method（receiver=主线程）分发。
+            # connection_type 透传给 dispatch 连接：DirectConnection 时回调立即在 emit 线程执行
+            #（同步等待型调用方语义不变）。
             executor._cb_finished = on_finished
             executor._cb_error = on_error
             executor._cb_progress = on_progress
-            executor.finished_with_result.connect(self._dispatch_executor_finished)
-            executor.error_occurred.connect(self._dispatch_executor_error)
-            executor.progress_updated.connect(self._dispatch_executor_progress)
+            if on_finished:
+                self._connect_cb(executor.finished_with_result, self._dispatch_executor_finished, connection_type)
+            if on_error:
+                self._connect_cb(executor.error_occurred, self._dispatch_executor_error, connection_type)
+            if on_progress:
+                self._connect_cb(executor.progress_updated, self._dispatch_executor_progress, connection_type)
 
             # ★ T24：转发子智能体 ask 权限请求到主线程（带 window_id 供多窗口定位弹窗）
             executor.permission_requested.connect(self._forward_permission_request)
@@ -2010,704 +2005,13 @@ class SubAgentManager(QObject):
         else:
             logger.warning(f"[SubAgentManager] respond_permission: task {task_id} 不存在")
 
-    def execute_dag(self, nodes: List[Dict], edges: List[Dict], session_id: str = "") -> ToolResult:
-        """
-        执行 DAG 工作流（异步）。验证 DAG 后立即返回 ECharts 节点图，
-        后台按拓扑顺序执行，全部完成后回调通知。
-
-        Args:
-            nodes: [{"id": str, "agent": str, "description": str, "context": str}]
-            edges: [{"from": str, "to": str}]
-            session_id: 会话 ID
-
-        Returns:
-            ToolResult: success=True, echarts=节点图JSON
-        """
-        import uuid
-
-        # 1. 验证 DAG
-        node_map = {n["id"]: dict(n) for n in nodes}
-        for edge in edges:
-            if edge["from"] not in node_map:
-                return ToolResult(False, error=f"节点 '{edge['from']}' 不存在")
-            if edge["to"] not in node_map:
-                return ToolResult(False, error=f"节点 '{edge['to']}' 不存在")
-
-        # 构建邻接表 + 入度表
-        adj = {nid: [] for nid in node_map}
-        in_degree = {nid: 0 for nid in node_map}
-        for edge in edges:
-            adj[edge["from"]].append(edge["to"])
-            in_degree[edge["to"]] += 1
-
-        # 环检测
-        queue = [nid for nid in node_map if in_degree[nid] == 0]
-        sorted_count = 0
-        while queue:
-            nid = queue.pop(0)
-            sorted_count += 1
-            for neighbor in adj[nid]:
-                in_degree[neighbor] -= 1
-                if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
-        if sorted_count != len(node_map):
-            return ToolResult(False, error="DAG 中存在环，请检查 edges 定义")
-
-        # 2. 初始化 DAG 状态
-        task_session_id = session_id or self._current_session_id
-        dag_id = str(uuid.uuid4())
-
-        # 为每个节点生成 task_id
-        for n in nodes:
-            nid = n["id"]
-            node_map[nid]["_task_id"] = str(uuid.uuid4())
-            node_map[nid]["_status"] = "pending"
-            node_map[nid]["_result"] = ""
-            node_map[nid]["_error"] = ""
-
-        # 存储 DAG 状态到管理器
-        dag_state = {
-            "dag_id": dag_id,
-            "node_map": node_map,
-            "adj": adj,
-            "in_degree": {nid: 0 for nid in node_map},  # 重新计算
-            "upstream_results": {nid: [] for nid in node_map},
-            "session_id": task_session_id,
-        }
-        for edge in edges:
-            dag_state["in_degree"][edge["to"]] += 1
-
-        if not hasattr(self, "_dag_states"):
-            self._dag_states: Dict[str, Dict] = {}
-        self._dag_states[dag_id] = dag_state
-
-        # 【新增】建立 task_id → (dag_id, nid) 映射，让 cleanup_dead_tasks / cancel_task
-        # 在清理 task 时能反向通知对应的 DAG 节点，避免 DAG 永远卡在"等下游"
-        if not hasattr(self, "_task_to_dag"):
-            self._task_to_dag: Dict[str, tuple] = {}
-        for nid in node_map:
-            tid = node_map[nid]["_task_id"]
-            self._task_to_dag[tid] = (dag_id, nid)
-
-        # 3. 设置批次计数器（所有 DAG 节点计入同一批次）
-        all_task_ids = [node_map[nid]["_task_id"] for nid in node_map]
-        self._batch_total += len(all_task_ids)
-        self._batch_task_ids.update(all_task_ids)
-
-        # 4. 启动入度为0的节点
-        ready_nodes = [nid for nid in node_map if dag_state["in_degree"][nid] == 0]
-        logger.info(f"[DAG] 初始启动: dag_id={dag_id}, total_nodes={len(nodes)}, ready={ready_nodes}, edges={edges}")
-        for nid in ready_nodes:
-            self._start_dag_node(dag_id, nid)
-
-        # 5. 生成 ECharts 节点图并立即返回
-        echarts_json = self._build_dag_echarts_json(nodes, edges, node_map)
-        # 附带每个节点的 task_id，方便 LLM 通过 subagent_status 查询单个节点结果
-        nodes_info = [
-            {
-                "id": n["id"],
-                "task_id": node_map[n["id"]]["_task_id"],
-                "agent": n["agent"],
-            }
-            for n in nodes
-        ]
-        return ToolResult(
-            True,
-            content={
-                "dag_id": dag_id,
-                "status": "running",
-                "total": len(nodes),
-                "nodes": nodes_info,
-            },
-            echarts=echarts_json,
-        )
-
-    def _start_dag_node(self, dag_id: str, nid: str):
-        """启动 DAG 中的单个节点"""
-        dag_state = self._dag_states[dag_id]
-        node_map = dag_state["node_map"]
-        node = node_map[nid]
-        task_id = node["_task_id"]
-        task_session_id = dag_state["session_id"]
-
-        # 检查上游是否有失败的节点（failed 或 skipped 都级联跳过）
-        upstream_failed = any(
-            node_map[up["from"]]["_status"] in ("failed", "skipped") for up in dag_state["upstream_results"][nid]
-        )
-        if upstream_failed:
-            node["_status"] = "skipped"
-            node["_error"] = "上游节点执行失败，跳过"
-            # 跳过的节点也需要触发完成信号，让批次计数器工作
-            self._finished_tasks[task_id] = {
-                "result": "",
-                "error": "上游节点执行失败，跳过",
-                "agent_name": node.get("agent", ""),
-                "task_description": node.get("description", ""),
-                "session_id": task_session_id,
-            }
-            try:
-                self.task_finished.emit(task_id, "")
-            except Exception as e:
-                logger.error(f"[DAG] task_finished.emit 失败 (upstream failed path): {e}")
-            # 跳过节点也要检查下游
-            self._check_dag_downstream(dag_id, nid)
-            return
-
-        # 构建 context：自动注入上游结果
-        context_parts = []
-        if dag_state["upstream_results"][nid]:
-            context_parts.append("## 上游节点结果")
-            for up in dag_state["upstream_results"][nid]:
-                up_node = node_map[up["from"]]
-                result_text = up_node.get("_result", "") or "(无输出)"
-                context_parts.append(f"### {up['from']} ({up_node.get('agent', '')})\n{result_text}")
-        if node.get("context"):
-            context_parts.append(node["context"])
-        full_context = "\n\n".join(context_parts) if context_parts else ""
-
-        llm_config = self._get_llm_config()
-        if not isinstance(llm_config, dict):
-            llm_config = {}
-
-        agent_name = node.get("agent", "")
-        task_description = node.get("description", "")
-
-        agent = self._agent_manager.get_agent(agent_name)
-        # 轮数上限：agent.steps 显式声明优先（None=激活策略兜底，默认 subagent 策略 30）
-        max_iterations = agent.steps if agent else None
-
-        executor = SubAgentExecutor(
-            task_id=task_id,
-            agent_name=agent_name,
-            task_description=task_description,
-            llm_config=llm_config,
-            agent_manager=self._agent_manager,
-            tool_executor=self._tool_executor,
-            parent_context=full_context,
-            is_subagent_call=True,
-            max_iterations=max_iterations,
-        )
-        executor._task_session_id = task_session_id
-
-        if self._session_store:
-            executor.set_log_store_callback(
-                lambda *args, _sid=task_session_id: self._save_task_to_store(*args, session_id=_sid)
-            )
-        if self._get_history_messages:
-            executor.set_history_getter(self._get_history_messages)
-
-        # 节点完成回调
-        # 【第N次修复】不在 _start_dag_node 中直接连接 finished_with_result，
-        # 而是延后到 task_started 信号处理过程中连接（与 UI 回调完全一致）。
-        # 原因：PySide6 对在嵌套信号上下文（_start_dag_node 被 _check_dag_downstream
-        # 调用，_check_dag_downstream 被 finished_with_result 信号处理器调用）中
-        # 创建的 lambda 连接可能有微妙行为差异，导致 callback 被静默丢弃。
-        # 通过在这里只记录元数据，在 _on_dag_task_started_slot 中真正连接，
-        # 确保与 UI 回调完全相同的连接时序。
-        pass  # ← 实际连接在 _on_dag_task_started_slot 中完成
-        # 节点出错回调（补充 finished_with_result 的缺失路径）
-        # 同理，error 回调也在 task_started 处理中进行连接
-        pass  # ← 实际连接在 _on_dag_task_started_slot 中完成
-
-        self._running_tasks[task_id] = executor
-        node["_status"] = "running"
-        executor.start()
-
-        logger.info(f"[DAG] 节点已启动: dag_id={dag_id}, nid={nid}, agent={node.get('agent')}, task_id={task_id}")
-
-        # 【关键修复】将 _save_task_to_store 和 task_started.emit 都包裹在 try/except 中
-        # 如果其中任何一个抛异常（比如 UI 回调 _on_sub_agent_task_started 失败），
-        # executor 已经在后台运行，异常冒泡会让 execute_dag 整体失败，
-        # 导致 LLM 收到错误而不会继续等待 DAG 完成。
-        # 但 executor 已经在子线程中运行了，它的 finished_with_result 迟早会发射。
-        # 所以这里必须吞噬异常，让 DAG 的正常流程不被破坏。
-        try:
-            self._save_task_to_store(task_id, agent_name, task_description, "running", session_id=task_session_id)
-        except Exception as e:
-            logger.error(f"[DAG] _save_task_to_store 失败: {e}", exc_info=True)
-        try:
-            self.task_started.emit(task_id, agent_name, task_description)
-        except Exception as e:
-            logger.error(f"[DAG] task_started.emit 失败 (UI 回调异常): {e}", exc_info=True)
-
-    def _on_dag_task_started_slot(self, task_id: str, agent_name: str, task_description: str):
-        """
-        当 task_started 信号发射时（_start_dag_node 末尾），在此完成 DAG 回调的连接。
-
-        关键设计：不直接在 _start_dag_node 中连接 DAG 回调，而是延后到
-        task_started 的信号处理过程中。这与 UI 回调（_on_sub_agent_task_started）
-        完全相同的连接时机，消除了 PySide6 对嵌套信号上下文中创建 lambda 的潜在
-        行为差异（这种差异会导致 DAG 回调被静默丢弃而 UI 回调正常工作）。
-        """
-        # 只处理属于 DAG 的任务（在 _task_to_dag 中有记录的）
-        if not hasattr(self, "_task_to_dag") or task_id not in self._task_to_dag:
-            return
-        dag_id, nid = self._task_to_dag[task_id]
-
-        # 获取 executor（此时一定在 _running_tasks 中，因为 _start_dag_node 在
-        # task_started.emit 之前已经 self._running_tasks[task_id] = executor）
-        executor = self._running_tasks.get(task_id)
-        if not executor:
-            logger.warning(f"[DAG] _on_dag_task_started_slot: executor not found for task_id={task_id[:8]}")
-            return
-
-        # 连接 DAG 回调 —— ⚠️ 必须连接 bound method（receiver=self=Manager，主线程），
-        # 禁止连接裸 lambda：lambda 的 receiver 归属 sender（executor），而 executor
-        # 在 ChatWorker 子线程创建（thread affinity 在子线程），emit 时 Auto 判定
-        # queued 到子线程 —— 工作线程无 Qt 事件循环，回调永不执行（DAG 永远卡在等节点）。
-        # bound method receiver=Manager（主线程）→ queued 必投主线程事件循环。
-        # dag_id/nid 通过 task_id 反查 _task_to_dag（信号参数自带 task_id）。
-        executor.finished_with_result.connect(self._on_dag_executor_finished)
-        executor.error_occurred.connect(self._on_dag_executor_error)
-        logger.info(f"[DAG] 🔗 DAG callbacks connected for nid={nid} (via task_started slot)")
-
-    def _dag_route(self, task_id: str):
-        """按 task_id 反查 DAG 路由信息（dag_id, nid）；不在映射中返回 None"""
-        return getattr(self, "_task_to_dag", {}).get(task_id)
-
-    def _on_dag_executor_finished(self, task_id: str, result: str):
-        """executor finished_with_result → DAG 节点完成（queued 回主线程后执行）"""
-        route = self._dag_route(task_id)
-        if not route:
-            return
-        dag_id, nid = route
-        self._safe_dag_node_finished(dag_id, nid, task_id, result)
-
-    def _on_dag_executor_error(self, task_id: str, error: str):
-        """executor error_occurred → DAG 节点失败（queued 回主线程后执行）"""
-        route = self._dag_route(task_id)
-        if not route:
-            return
-        dag_id, nid = route
-        self._safe_dag_node_error(dag_id, nid, task_id, error)
-
-    def _safe_dag_node_finished(self, dag_id: str, nid: str, task_id: str, result: str):
-        """
-        DAG 完成回调的安全包装 —— 关键作用：
-        1. 在 lambda 边界上 100% 捕获异常，**不让任何异常抛给 PySide6**。
-           PySide6 在某些版本下，如果 slot 抛异常会自动 disconnect，
-           这会让下游节点永远不被启动。
-        2. 添加诊断日志，确认这个 lambda 真的被发射信号触发了。
-        """
-        logger.info(f"[DAG] 🔥 DAG finished callback FIRED: nid={nid}, task_id={task_id[:8]}")
-        try:
-            self._on_dag_node_finished(dag_id, nid, task_id, result)
-        except BaseException as e:
-            logger.error(
-                f"[DAG] ❌ _on_dag_node_finished 抛异常被吞噬: nid={nid}, err={e}",
-                exc_info=True,
-            )
-
-    def _safe_dag_node_error(self, dag_id: str, nid: str, task_id: str, error: str):
-        """DAG 错误回调的安全包装（防 PySide6 异常自动断开连接）"""
-        logger.info(f"[DAG] 🔥 DAG error callback FIRED: nid={nid}, task_id={task_id[:8]}, error={error[:50]}")
-        try:
-            self._on_dag_node_error(dag_id, nid, task_id, error)
-        except BaseException as e:
-            logger.error(
-                f"[DAG] ❌ _on_dag_node_error 抛异常被吞噬: nid={nid}, err={e}",
-                exc_info=True,
-            )
-
-    def _on_dag_node_finished(self, dag_id: str, nid: str, task_id: str, result: str):
-        """DAG 节点执行完成（正常路径）
-
-        注意：不在此处 emit task_finished，由 _on_sub_agent_task_started 连接的
-        UI 回调路径（finished_with_result → _on_sub_agent_finished → task_finished）
-        统一触发批次数和 _finished_tasks 写入，避免双重计数。
-        """
-        # 【关键诊断】在 dag_state 检查之前先记录，证明这个方法被实际调用了
-        logger.info(
-            f"[DAG] 🔥 _on_dag_node_finished ENTERED: dag_id={dag_id}, nid={nid}, task_id={task_id[:8]}, has_dag_state={dag_id in getattr(self, '_dag_states', {})}"
-        )
-        dag_state = self._dag_states.get(dag_id)
-        if not dag_state:
-            logger.warning(f"[DAG] _on_dag_node_finished: dag_state 已为空! dag_id={dag_id}, nid={nid}")
-            return
-        node_map = dag_state["node_map"]
-        node = node_map[nid]
-
-        # 更新节点状态
-        executor = self._running_tasks.get(task_id)
-        error = getattr(executor, "_execution_error", None) if executor else None
-        node["_status"] = "failed" if error else "completed"
-        node["_result"] = result
-        node["_error"] = error or ""
-        logger.info(
-            f"[DAG] 节点完成: dag_id={dag_id}, nid={nid}, status={node['_status']}, has_downstream={bool(dag_state['adj'].get(nid))}"
-        )
-
-        # 检查下游节点（用 try/except 包裹，防止因下游节点启动异常导致本节点状态和 all_done 检查被跳过）
-        try:
-            self._check_dag_downstream(dag_id, nid)
-        except Exception as e:
-            logger.error(f"[DAG] _on_dag_node_finished: 检查下游节点失败: {e}", exc_info=True)
-
-        # 检查是否全部完成
-        all_done = all(node_map[nid]["_status"] in ("completed", "failed", "skipped", "cancelled") for nid in node_map)
-        if all_done:
-            # DAG 整体完成，清理 _task_to_dag 映射
-            if hasattr(self, "_task_to_dag"):
-                for n in node_map.values():
-                    tid = n.get("_task_id", "")
-                    if tid:
-                        self._task_to_dag.pop(tid, None)
-            self._dag_states.pop(dag_id, None)
-
-    def _on_dag_node_error(self, dag_id: str, nid: str, task_id: str, error: str):
-        """DAG 节点执行出错（error_occurred 路径）
-
-        当 executor 遇到未预期异常（agent 不存在、LLM 配置无效等），
-        只 emit error_occurred 而不 emit finished_with_result。
-        此方法确保：
-        1. 节点状态标记为 failed
-        2. 写入 _finished_tasks（UI 回调不会触发）
-        3. 触发 task_finished，让批次计数器和 UI 更新
-        4. 级联跳过下游节点
-        5. 检查 DAG 是否全部完成
-        """
-        dag_state = self._dag_states.get(dag_id)
-        if not dag_state:
-            logger.warning(f"[DAG] _on_dag_node_error: dag_state 已为空! dag_id={dag_id}, nid={nid}, error={error}")
-            return
-        node_map = dag_state["node_map"]
-        node = node_map[nid]
-
-        node["_status"] = "failed"
-        node["_result"] = ""
-        node["_error"] = error or "节点执行失败"
-        logger.info(f"[DAG] 节点出错: dag_id={dag_id}, nid={nid}, error={error}")
-
-        # 写入 _finished_tasks（此路径没有 UI 回调，必须手动写）
-        self._finished_tasks[task_id] = {
-            "result": "",
-            "error": error or "节点执行失败",
-            "agent_name": node.get("agent", ""),
-            "task_description": node.get("description", ""),
-            "session_id": dag_state["session_id"],
-        }
-
-        # 触发 task_finished（让批次计数器和 UI 紧凑卡片更新）
-        try:
-            self.task_finished.emit(task_id, "")
-        except Exception as e:
-            logger.error(f"[DAG] task_finished.emit 失败 (_on_dag_node_error path): {e}")
-
-        # 级联跳过下游节点（用 try/except 包裹，防止因异常导致状态检查和 cleanup 被跳过）
-        try:
-            self._check_dag_downstream(dag_id, nid)
-        except Exception as e:
-            logger.error(f"[DAG] _on_dag_node_error: 级联跳过下游节点失败: {e}", exc_info=True)
-
-        # 检查是否全部完成
-        all_done = all(node_map[nid]["_status"] in ("completed", "failed", "skipped", "cancelled") for nid in node_map)
-        if all_done:
-            # DAG 整体完成，清理 _task_to_dag 映射
-            if hasattr(self, "_task_to_dag"):
-                for n in node_map.values():
-                    tid = n.get("_task_id", "")
-                    if tid:
-                        self._task_to_dag.pop(tid, None)
-            self._dag_states.pop(dag_id, None)
-
-    def _check_dag_downstream(self, dag_id: str, nid: str):
-        """DAG 节点完成后，检查并启动下游节点"""
-        dag_state = self._dag_states.get(dag_id)
-        if not dag_state:
-            logger.warning(f"[DAG] _check_dag_downstream: dag_state 已为空! dag_id={dag_id}, nid={nid}")
-            return
-        adj = dag_state.get("adj", {})
-        adj_neighbors = list(adj.get(nid, []))
-        logger.info(
-            f"[DAG] 检查下游: dag_id={dag_id}, nid={nid}, downstream_nodes={adj_neighbors}, adj_keys={list(adj.keys())}"
-        )
-        if not adj_neighbors:
-            return
-
-        in_degree = dag_state["in_degree"]
-        upstream_results = dag_state["upstream_results"]
-        node_map = dag_state["node_map"]
-        task_session_id = dag_state.get("session_id", "")
-
-        for neighbor in adj_neighbors:
-            try:
-                # 【关键修复】整个邻居处理逻辑都用 try/except 包裹，
-                # 否则若 upstream_results/in_degree 中缺 key（比如 adj 包含未注册的 nid），
-                # 异常会一路冒到 _on_dag_node_finished，被静默吞噬，导致
-                # 下游节点既不在 _running_tasks 也不在 _finished_tasks，呈现"unknown"
-                upstream_results[neighbor].append({"from": nid})
-                in_degree[neighbor] -= 1
-                new_degree = in_degree[neighbor]
-                logger.info(f"[DAG]   下游 {neighbor}: in_degree -> {new_degree}")
-                if new_degree == 0:
-                    logger.info(f"[DAG]   启动下游节点: {neighbor}")
-                    self._start_dag_node(dag_id, neighbor)
-            except KeyError as e:
-                # 邻接表和入度表数据不一致：adj 有这个 neighbor，但
-                # upstream_results / in_degree 中没有。可能是 LLM 生成的 edges
-                # 包含 nodes 中不存在的 id（理论上被 execute_dag 校验拦截，但兜底）
-                logger.error(
-                    f"[DAG] ❌ 下游 {neighbor} 数据不一致 (KeyError: {e})，"
-                    f"adj={list(adj.keys())}, in_degree_keys={list(in_degree.keys())}",
-                    exc_info=True,
-                )
-                if neighbor in node_map:
-                    node = node_map[neighbor]
-                    node["_status"] = "failed"
-                    node["_error"] = f"数据不一致: KeyError {e}"
-                    task_id = node.get("_task_id", "")
-                    if task_id:
-                        self._finished_tasks[task_id] = {
-                            "result": "",
-                            "error": node["_error"],
-                            "agent_name": node.get("agent", ""),
-                            "task_description": node.get("description", ""),
-                            "session_id": task_session_id,
-                        }
-                        try:
-                            self.task_finished.emit(task_id, "")
-                        except Exception as e:
-                            logger.error(f"[DAG] task_finished.emit 失败 (KeyError cascade): {e}")
-                    # 跳过该节点后继续级联它的下游
-                    try:
-                        self._check_dag_downstream(dag_id, neighbor)
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.error(
-                    f"[DAG] ❌ 启动/处理下游节点 {neighbor} 失败: {e}",
-                    exc_info=True,
-                )
-                if neighbor in node_map:
-                    node = node_map[neighbor]
-                    node["_status"] = "failed"
-                    node["_error"] = f"启动失败: {e}"
-                    task_id = node.get("_task_id", "")
-                    if task_id:
-                        self._finished_tasks[task_id] = {
-                            "result": "",
-                            "error": node["_error"],
-                            "agent_name": node.get("agent", ""),
-                            "task_description": node.get("description", ""),
-                            "session_id": task_session_id,
-                        }
-                        try:
-                            self.task_finished.emit(task_id, "")
-                        except Exception as e:
-                            logger.error(f"[DAG] task_finished.emit 失败 (Exception cascade): {e}")
-                    # 跳过该节点后继续级联它的下游
-                    try:
-                        self._check_dag_downstream(dag_id, neighbor)
-                    except Exception:
-                        pass
-
-    def _build_dag_echarts_json(self, nodes: List[Dict], edges: List[Dict], node_map: Dict) -> str:
-        """
-        根据 DAG 生成 ECharts 力导向图 JSON。
-
-        节点颜色按状态区分：
-        - pending:   #FFC107 (黄)
-        - running:   #2196F3 (蓝)
-        - completed: #4CAF50 (绿)
-        - failed:    #F44336 (红)
-        - skipped:   #9E9E9E (灰)
-        """
-        status_categories = [
-            {
-                "name": "pending",
-                "itemStyle": {
-                    "color": "#FFC107",
-                    "borderColor": "#d4a020",
-                    "borderWidth": 2,
-                    "shadowBlur": 8,
-                    "shadowColor": "rgba(255,193,7,0.4)",
-                },
-            },
-            {
-                "name": "running",
-                "itemStyle": {
-                    "color": "#2196F3",
-                    "borderColor": "#1976D2",
-                    "borderWidth": 2,
-                    "shadowBlur": 8,
-                    "shadowColor": "rgba(33,150,243,0.4)",
-                },
-            },
-            {
-                "name": "completed",
-                "itemStyle": {
-                    "color": "#4CAF50",
-                    "borderColor": "#388E3C",
-                    "borderWidth": 2,
-                    "shadowBlur": 8,
-                    "shadowColor": "rgba(76,175,80,0.4)",
-                },
-            },
-            {
-                "name": "failed",
-                "itemStyle": {
-                    "color": "#F44336",
-                    "borderColor": "#D32F2F",
-                    "borderWidth": 2,
-                    "shadowBlur": 8,
-                    "shadowColor": "rgba(244,67,54,0.4)",
-                },
-            },
-            {
-                "name": "skipped",
-                "itemStyle": {
-                    "color": "#9E9E9E",
-                    "borderColor": "#757575",
-                    "borderWidth": 2,
-                    "shadowBlur": 8,
-                    "shadowColor": "rgba(158,158,158,0.4)",
-                },
-            },
-        ]
-        status_map = {c["name"]: i for i, c in enumerate(status_categories)}
-
-        echarts_nodes = []
-        for n in nodes:
-            nid = n["id"]
-            node_info = node_map[nid]
-            status = node_info["_status"]
-            agent = n.get("agent", "")
-            desc = n.get("description", "")
-            # 用 agent 名作为节点显示名，tooltip 显示完整描述
-            echarts_nodes.append(
-                {
-                    "id": nid,
-                    "name": f"{nid} ({agent})",
-                    "symbolSize": 50,
-                    "category": status_map.get(status, 4),
-                    "draggable": True,
-                    "description": desc[:100],
-                }
-            )
-
-        echarts_edges = []
-        for e in edges:
-            echarts_edges.append(
-                {
-                    "source": e["from"],
-                    "target": e["to"],
-                    "lineStyle": {"width": 2, "opacity": 0.6, "curveness": 0.15},
-                }
-            )
-
-        chart_config = {
-            "title": {
-                "text": "子智能体工作流",
-                "left": "center",
-                "textStyle": {"fontSize": 16, "fontWeight": "bold", "color": "#ccc"},
-            },
-            "tooltip": {
-                "trigger": "item",
-                "formatter": "{b}",
-            },
-            "series": [
-                {
-                    "type": "graph",
-                    "layout": "force",
-                    "symbolSize": 50,
-                    "roam": True,
-                    "draggable": True,
-                    "focusNodeAdjacency": True,
-                    "edgeSymbol": ["none", "arrow"],
-                    "edgeSymbolSize": [0, 8],
-                    "label": {
-                        "show": True,
-                        "position": "bottom",
-                        "fontSize": 11,
-                        "fontWeight": "bold",
-                        "color": "#ccc",
-                        "offset": [0, 6],
-                    },
-                    "lineStyle": {
-                        "color": "source",
-                        "curveness": 0.15,
-                        "width": 1.5,
-                        "opacity": 0.6,
-                    },
-                    "force": {
-                        "repulsion": 500,
-                        "edgeLength": [80, 200],
-                        "layoutAnimation": True,
-                        "friction": 0.1,
-                        "gravity": 0.05,
-                    },
-                    "categories": status_categories,
-                    "data": echarts_nodes,
-                    "links": echarts_edges,
-                    "emphasis": {
-                        "focus": "adjacency",
-                        "lineStyle": {"width": 3},
-                    },
-                    "blur": {"opacity": 0.2},
-                    "animation": True,
-                    "animationDuration": 1000,
-                    "animationEasing": "cubicOut",
-                }
-            ],
-        }
-
-        return json.dumps(chart_config, option=orjson.OPT_INDENT_2).decode("utf-8")
-
     def cancel_task(self, task_id: str) -> bool:
         """取消子智能体任务"""
         if task_id in self._running_tasks:
             self._running_tasks[task_id].cancel()
-            self._notify_dag_task_failed(task_id, "Task cancelled by user")
             del self._running_tasks[task_id]
             return True
         return False
-
-    def _notify_dag_task_failed(self, task_id: str, error_msg: str):
-        """
-        当一个 task 被取消/超时清理时，反向通知对应的 DAG 节点
-
-        否则如果 executor 在 _is_cancelled 后没来得及发射信号就被从 _running_tasks 移除，
-        DAG 会永远卡在"等这个节点完成"。
-        """
-        if not hasattr(self, "_task_to_dag"):
-            return
-        info = self._task_to_dag.pop(task_id, None)
-        if not info:
-            return
-        dag_id, nid = info
-        if not hasattr(self, "_dag_states") or dag_id not in self._dag_states:
-            return
-        dag_state = self._dag_states[dag_id]
-        node = dag_state.get("node_map", {}).get(nid)
-        if not node or node.get("_status") != "running":
-            return
-
-        logger.warning(
-            f"[DAG] 任务 {task_id} (nid={nid}, dag_id={dag_id}) 已被清理但节点仍是 running，"
-            f"标记为 failed 并级联: {error_msg}"
-        )
-        node["_status"] = "failed"
-        node["_error"] = error_msg
-        task_session_id = dag_state.get("session_id", "")
-        # 写入 _finished_tasks 以便 subagent_status 能查到
-        if task_id not in self._finished_tasks:
-            self._finished_tasks[task_id] = {
-                "result": "",
-                "error": error_msg,
-                "agent_name": node.get("agent", ""),
-                "task_description": node.get("description", ""),
-                "session_id": task_session_id,
-            }
-        # 触发 task_finished 让批次计数器能继续
-        try:
-            self.task_finished.emit(task_id, "")
-        except Exception as e:
-            logger.error(f"[DAG] task_finished.emit 失败 (_notify_dag path): {e}")
-        # 级联：触发该节点的下游处理
-        try:
-            self._check_dag_downstream(dag_id, nid)
-        except Exception as e:
-            logger.error(f"[DAG] 通知任务失败时级联异常: {e}", exc_info=True)
 
     def get_running_tasks(self) -> List[str]:
         """获取正在运行的任务ID列表"""
@@ -2758,66 +2062,10 @@ class SubAgentManager(QObject):
                     task_id, agent_name, task_description, "finished", result, error, session_id=task_session_id
                 )
 
-                # 【安全网】如果这个 task 是一个 DAG 节点，但 DAG 回调没触发（节点还是 running），
-                # 手动触发 DAG cascade（否则 DAG 永远卡在第一层）
-                if hasattr(self, "_task_to_dag") and task_id in self._task_to_dag:
-                    dag_id, nid = self._task_to_dag[task_id]
-                    dag_state = getattr(self, "_dag_states", {}).get(dag_id)
-                    if dag_state and dag_state.get("node_map", {}).get(nid, {}).get("_status") == "running":
-                        logger.warning(
-                            f"[DAG] ⚠️ get_finished_tasks 发现 DAG 节点 {nid} 已完成但节点状态仍是 running，"
-                            f"手动触发 _on_dag_node_finished (task_id={task_id[:8]})"
-                        )
-                        try:
-                            self._on_dag_node_finished(dag_id, nid, task_id, result)
-                        except BaseException as e:
-                            logger.error(f"[DAG] get_finished_tasks 手动触发 DAG 完成失败: {e}", exc_info=True)
-
                 del self._running_tasks[task_id]
                 finished.append(task_id)
         return finished
 
-    def cleanup_dead_tasks(self, timeout_seconds: int = 300) -> List[str]:
-        """
-        清理卡死的任务（运行时间超过 timeout_seconds 的任务）
-
-        Returns: 已清理的任务ID列表
-        """
-        import time
-
-        cleaned = []
-        now = time.time()
-
-        for task_id in list(self._running_tasks.keys()):
-            executor = self._running_tasks[task_id]
-            start_time = executor.start_time
-
-            if start_time and (now - start_time) > timeout_seconds:
-                logger.warning(f"[SubAgentManager] Task {task_id} dead for {now - start_time}s, cancelling")
-                executor.cancel()
-                agent_name = executor.agent_name
-                task_description = executor.task_description
-                logs = executor.get_logs()
-                task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
-                error_msg = f"Task cancelled due to timeout ({timeout_seconds}s)"
-                self._finished_tasks[task_id] = {
-                    "result": "",
-                    "error": error_msg,
-                    "agent_name": agent_name,
-                    "task_description": task_description,
-                    "session_id": task_session_id,
-                    "logs": logs,
-                }
-                # 更新数据库（传入锁定的 session_id）
-                self._save_task_to_store(
-                    task_id, agent_name, task_description, "timeout", "", error_msg, session_id=task_session_id
-                )
-                del self._running_tasks[task_id]
-                # 【关键修复】通知 DAG：被超时清理的任务如果属于某个 DAG 节点，标记为 failed 并级联
-                self._notify_dag_task_failed(task_id, error_msg)
-                cleaned.append(task_id)
-
-        return cleaned
 
     def cancel_all(self):
         """取消所有运行中的子智能体任务 + 停止 Stall 检测器
@@ -2860,8 +2108,6 @@ class SubAgentManager(QObject):
                     logs,
                     session_id=task_session_id,
                 )
-                # 通知 DAG（如果有）
-                self._notify_dag_task_failed(task_id, error_msg)
                 # 发送完成信号让 UI 知道
                 try:
                     self.task_finished.emit(task_id, "")
@@ -2872,9 +2118,72 @@ class SubAgentManager(QObject):
 
         self._running_tasks.clear()
 
-    def get_task_result(self, task_id: str) -> Dict:
-        """获取指定任务的执行结果"""
-        return self._finished_tasks.get(task_id, {"result": "", "error": ""})
+
+    def mark_task_finished(self, task_id: str, result: str, error: str = "") -> Dict:
+        """任务完成归档：写入内存 _finished_tasks，并把数据库状态推进到 finished。
+
+        数据库在运行期间由 executor 实时日志回调持续写 running 状态；本方法是
+        正常完成路径上唯一把 DB 推进到 finished 的入口。若缺失，get_task_logs
+        查库命中 running 即返回，会话卡片（SubAgentSessionCard）会永远显示
+        「执行中」，工具数/耗时冻结在最后一条日志时刻。
+
+        Returns:
+            Dict: {agent_name, task_description, session_id} 供批次汇总/流式注入使用
+        """
+        executor = self._running_tasks.pop(task_id, None)
+        if executor is not None:
+            agent_name = executor.agent_name
+            task_description = executor.task_description
+            task_session_id = getattr(executor, "_task_session_id", self._current_session_id)
+            logs = executor.get_logs()
+            summary = executor.get_summary()
+            final_error = error or ""
+        else:
+            # executor 已被其他路径归档（get_finished_tasks / DAG 提前删除），
+            # 从已有条目恢复字段；条目可能已带更准的 error（如 DAG 跳过信息），不覆盖
+            existing = self._finished_tasks.get(task_id, {})
+            agent_name = existing.get("agent_name", "")
+            task_description = existing.get("task_description", "")
+            task_session_id = existing.get("session_id", "")
+            logs = existing.get("logs")
+            summary = None
+            final_error = existing.get("error") or (error or "")
+
+        if task_id in self._finished_tasks:
+            entry = self._finished_tasks[task_id]
+            entry["result"] = result
+            if not entry.get("error"):
+                entry["error"] = final_error
+            entry.setdefault("agent_name", agent_name)
+            entry.setdefault("task_description", task_description)
+            entry.setdefault("session_id", task_session_id)
+            if logs:
+                entry.setdefault("logs", logs)
+        else:
+            self._finished_tasks[task_id] = {
+                "result": result,
+                "error": final_error,
+                "agent_name": agent_name,
+                "task_description": task_description,
+                "session_id": task_session_id,
+                "logs": logs or [],
+                "tool_call_count": (summary or {}).get("tool_call_count", 0),
+                "elapsed_seconds": (summary or {}).get("elapsed_seconds", 0),
+            }
+
+        # 落库用部分更新语义（None 字段不覆盖）：executor 缺席时 summary 传 None，
+        # 保留运行期最后写入的 tool_call_count/elapsed_seconds，避免被清空
+        if self._session_store:
+            try:
+                self._session_store.update_subagent_task_status(task_id, "finished", result, final_error, logs, summary)
+            except Exception as e:
+                logger.warning(f"[SubAgentManager] mark_task_finished 落库失败: {e}")
+
+        return {
+            "agent_name": agent_name,
+            "task_description": task_description,
+            "session_id": task_session_id,
+        }
 
     def get_task_logs(self, task_id: str) -> Dict:
         """
@@ -2887,7 +2196,13 @@ class SubAgentManager(QObject):
                 "found": bool       # 是否找到任务
             }
         """
-        # 先从数据库获取
+        # 先归档已完成的任务（会同步把 DB 状态推进到 finished），再查库。
+        # 顺序很关键：executor 运行期间实时日志回调持续写 DB running 状态，
+        # 若先查库命中即返回，get_finished_tasks 永不执行，DB 状态永挂 running，
+        # 会话卡片（SubAgentSessionCard）会永远显示「执行中」且工具数/时间冻结。
+        self.get_finished_tasks()
+
+        # 从数据库获取
         if self._session_store:
             db_task = self._session_store.get_subagent_task(task_id)
             if db_task:
@@ -2910,9 +2225,6 @@ class SubAgentManager(QObject):
                     "result": db_task.get("result", ""),
                     "error": db_task.get("error", ""),
                 }
-
-        # 清理并检查内存中的任务
-        self.get_finished_tasks()
 
         # 检查运行中的任务
         if task_id in self._running_tasks:
@@ -2946,87 +2258,7 @@ class SubAgentManager(QObject):
 
         return {"summary": {}, "logs": [], "found": False, "status": "unknown"}
 
-    def get_all_task_logs(self) -> List[Dict]:
-        """
-        获取所有任务的日志（运行中和已完成的）。
 
-        Returns:
-            List[Dict]: 每个任务的日志信息列表
-        """
-        results = []
-        self.get_finished_tasks()  # 先清理
-
-        # 收集运行中的任务
-        for task_id, executor in self._running_tasks.items():
-            results.append(
-                {
-                    "task_id": task_id,
-                    "summary": executor.get_summary(),
-                    "logs": executor.get_logs(),
-                    "status": "running",
-                }
-            )
-
-        # 收集已完成的任务
-        for task_id, task_info in self._finished_tasks.items():
-            results.append(
-                {
-                    "task_id": task_id,
-                    "summary": {
-                        "task_id": task_id,
-                        "agent_name": task_info.get("agent_name", ""),
-                        "task_description": task_info.get("task_description", ""),
-                        "result": task_info.get("result", ""),
-                        "error": task_info.get("error", ""),
-                        "tool_call_count": task_info.get("tool_call_count", 0),
-                        "elapsed_seconds": task_info.get("elapsed_seconds", 0),
-                    },
-                    "logs": task_info.get("logs", []),
-                    "status": "finished",
-                }
-            )
-
-        return results
-
-    def get_tasks_status(self, task_ids: List[str], session_id: str = None) -> ToolResult:
-        """获取指定任务的状态（会话隔离）
-
-        Args:
-            session_id: 可选，传入时只返回属于该会话的任务
-        """
-        effective_session = session_id if session_id else self._current_session_id
-        tasks_info = []
-        for tid in task_ids:
-            if tid in self._running_tasks:
-                executor = self._running_tasks[tid]
-                # 会话隔离：检查 running 任务的 session
-                if effective_session:
-                    task_session = getattr(executor, "_task_session_id", "")
-                    if task_session != effective_session:
-                        continue
-                tasks_info.append(
-                    {
-                        "task_id": tid,
-                        "status": "running" if executor.isRunning() else "finishing",
-                        "agent": executor.agent_name,
-                    }
-                )
-            elif tid in self._finished_tasks:
-                task_info = self._finished_tasks[tid]
-                task_session = task_info.get("session_id", "")
-                # 会话隔离：只返回当前会话的任务
-                # 注意: 当 task_session 为空（旧记录/边缘情况）时，也视为不属于当前会话
-                if effective_session and task_session != effective_session:
-                    continue
-                tasks_info.append(
-                    {
-                        "task_id": tid,
-                        "status": "finished",
-                        "agent": task_info.get("agent_name", ""),
-                    }
-                )
-            # 其他情况（unknown）不返回，隐藏不存在或不属于当前会话的任务
-        return ToolResult(True, content={"tasks": tasks_info})
 
     def get_tasks_status_with_details(
         self, task_ids: List[str], with_log: bool = False, with_result: bool = True, session_id: str = None
@@ -3067,7 +2299,6 @@ class SubAgentManager(QObject):
                 summary = task_data.get("summary", {}) or {}
                 elapsed = summary.get("elapsed_seconds", 0) or 0
                 tool_calls = summary.get("tool_call_count", 0) or 0
-                task_info["elapsed_seconds"] = elapsed
                 task_info["tool_call_count"] = tool_calls
                 task_info["_hint"] = (
                     f"⏳ 该任务还在后台运行中（已用时 {elapsed}s，已调用 {tool_calls} 次工具）。"
@@ -3203,15 +2434,3 @@ class SubAgentManager(QObject):
 
         return ToolResult(True, content={"tasks": tasks_info})
 
-    def get_all_active_tasks(self) -> ToolResult:
-        """获取所有活跃任务"""
-        tasks_info = []
-        for task_id, executor in self._running_tasks.items():
-            tasks_info.append(
-                {
-                    "task_id": task_id,
-                    "status": "running" if executor.isRunning() else "finishing",
-                    "agent": executor.agent_name,
-                }
-            )
-        return ToolResult(True, content={"tasks": tasks_info})

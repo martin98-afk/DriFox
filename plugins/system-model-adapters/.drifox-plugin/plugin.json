@@ -1,0 +1,18 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-model-adapters",
+  "description": "DriFox 内置模型协议适配器：OpenAI / DeepSeek / Gemini 协议家族",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "MIT",
+  "type": "system",
+  "components": {
+    "model_adapters": true
+  }
+}

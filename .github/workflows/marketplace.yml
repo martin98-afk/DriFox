@@ -3,7 +3,7 @@ name: Marketplace Consistency
 # 系统插件市场一致性检查 + 自动修复
 #
 # marketplace.json（DriFox 系统插件市场，source 指向 master 分支）由
-# tools/generate_marketplace.py 从 plugins/system/.drifox-plugin/plugin.json 生成。
+# tools/generate_marketplace.py 从 plugins/ 下各插件目录的 .drifox-plugin/plugin.json 生成（23 个插件）。
 # 本 workflow 保证 marketplace.json 与 manifest 不漂移：
 #   - check：marketplace.json 与插件 manifest 不一致时失败
 #   - auto-fix-marketplace：check 失败且 marketplace.json 确有变化时，

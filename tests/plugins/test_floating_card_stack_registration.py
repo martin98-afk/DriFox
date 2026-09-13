@@ -9,13 +9,6 @@ from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 pytest.importorskip("PySide6.QtWidgets")
 
 
-@pytest.fixture()
-def fresh_registry(monkeypatch):
-    reg = UIPluginRegistry()
-    monkeypatch.setattr(UIPluginRegistry, "_instance", reg)
-    monkeypatch.setattr(UIPluginRegistry, "get_instance", classmethod(lambda cls: reg))
-    return reg
-
 
 def test_stack_metadata_sets_widget_property(fresh_registry, qapp, monkeypatch):
     from PySide6.QtWidgets import QWidget

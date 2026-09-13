@@ -141,12 +141,6 @@ def _fast_estimate_tokens(text: str) -> int:
     return max(1, estimated)
 
 
-def _encode_with_tiktoken(text: str, model: str = "gpt-4") -> List[int]:
-    """使用 tiktoken 编码文本为 token IDs"""
-    encoder = _get_encoder(_get_encoding_name(model))
-    if encoder:
-        return encoder.encode(text, disallowed_special=())
-    return None
 
 
 @lru_cache(maxsize=1024)
@@ -431,40 +425,6 @@ def count_tools_tokens(
     return int(total * ratio)
 
 
-def count_response_tokens(
-    prompt_tokens: int,
-    model: str = "gpt-4",
-    max_tokens: Optional[int] = None
-) -> int:
-    """
-    计算响应可能的 token 数
-    
-    用于计算总费用/限制
-    
-    Args:
-        prompt_tokens: 提示的 token 数
-        model: 模型名称
-        max_tokens: 最大生成 token 数
-    
-    Returns:
-        估算的总 token 数
-    """
-    # 响应 overhead
-    overhead = 3  # completion message overhead
-
-    if max_tokens is not None:
-        return prompt_tokens + overhead + max_tokens
-
-    # 根据模型估算最大值
-    limits = {
-        "gpt-4": 8192,
-        "gpt-4o": 16384,
-        "gpt-3.5-turbo": 4096,
-        "claude-3": 4096,
-    }
-
-    default_limit = limits.get(model.lower(), 4096)
-    return prompt_tokens + overhead + default_limit
 
 
 def truncate_text_to_token_limit(
@@ -563,26 +523,9 @@ class TokenCounter:
         self._miss_count = 0
         self._hit_count = 0
 
-    @property
-    def cache_hit_rate(self) -> float:
-        """缓存命中率"""
-        total = self._hit_count + self._miss_count
-        if total == 0:
-            return 0.0
-        return self._hit_count / total
 
-    def enable_cache(self, enabled: bool = True):
-        """启用/禁用缓存"""
-        self._cache_enabled = enabled
 
 
 # 全局默认实例
-_default_counter: Optional[TokenCounter] = None
 
 
-def get_default_counter(model: str = "gpt-4") -> TokenCounter:
-    """获取默认的 TokenCounter 实例"""
-    global _default_counter
-    if _default_counter is None or _default_counter.model != model:
-        _default_counter = TokenCounter(model)
-    return _default_counter

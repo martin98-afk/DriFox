@@ -26,7 +26,7 @@ def register_ui(registry):
         plugin_name="system-cleaner",
         card_id="system-cleaner",
         widget_class=SystemCleanerCard,
-        container="bottom",
+        container="full",
         title="系统清理",
         default_visible=False,
     )

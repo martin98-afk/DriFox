@@ -72,14 +72,14 @@ class TestReplaceTabCloseFromCardInside:
 
     @staticmethod
     def _seed_open(tm, card_ids):
-        """向 open 集合灌入卡片并同步 tab 栏（模拟 settings + 编辑卡互斥共存）"""
+        """向 open 集合灌入卡片并同步标题栏 tab（模拟 settings + 编辑卡互斥共存）"""
         from collections import OrderedDict
 
         from app.widgets.cards.card_manager import GLOBAL_WINDOW_ID
 
         tm._replace_open[GLOBAL_WINDOW_ID] = OrderedDict((cid, cid) for cid in card_ids)
         tm._replace_active[GLOBAL_WINDOW_ID] = card_ids[-1]
-        tm._refresh_replace_tab_bar()
+        tm._refresh_titlebar_cards()
 
     def test_card_inside_close_removes_tab_though_settings_visible(self, qtbot):
         """卡片内关闭编辑卡：即使 settings 仍可见，hook_edit tab 也应移除"""
@@ -88,15 +88,15 @@ class TestReplaceTabCloseFromCardInside:
         tm = TabManagerWindow.create_instance()
         qtbot.addWidget(tm)
         self._seed_open(tm, ["settings", "hook_edit"])
-        assert "hook_edit" in tm._replace_tab_bar._buttons
+        assert "hook_edit" in tm.titleBar._tabs
 
         tm.close_replace_card("hook_edit")
 
         assert "hook_edit" not in tm._replace_open[GLOBAL_WINDOW_ID]
         assert tm._replace_active.get(GLOBAL_WINDOW_ID) is None
-        assert "hook_edit" not in tm._replace_tab_bar._buttons
+        assert "hook_edit" not in tm.titleBar._tabs
         # settings 保留（卡片内关闭编辑卡 → 回到设置面板）
-        assert "settings" in tm._replace_tab_bar._buttons
+        assert "settings" in tm.titleBar._tabs
 
     def test_tab_close_click_uses_same_public_entry(self, qtbot):
         """tab × 关闭走同一公共方法（行为一致）"""
@@ -109,7 +109,7 @@ class TestReplaceTabCloseFromCardInside:
         tm._on_replace_tab_close_clicked("mcp_edit")
 
         assert "mcp_edit" not in tm._replace_open[GLOBAL_WINDOW_ID]
-        assert "mcp_edit" not in tm._replace_tab_bar._buttons
+        assert "mcp_edit" not in tm.titleBar._tabs
 
 
 class TestTabManagerWindowShowEvent:

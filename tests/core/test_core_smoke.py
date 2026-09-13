@@ -451,14 +451,8 @@ class TestMemoryManagerCore:
 
     def test_entry_memory_methods(self, mod):
         inst = mod.MemoryManagerCore.get_instance()
-        for method in (
-            "get_entry_memories",
-            "add_entry_memory",
-            "update_entry_memory",
-            "delete_entry_memory",
-            "toggle_entry_memory",
-            "save_entry_memories",
-        ):
+        # 条目记忆写接口已随 UI 下线移除，仅读接口保留供 compile 链使用
+        for method in ("get_entry_memories",):
             assert hasattr(inst, method), f"MemoryManagerCore missing method '{method}'"
             assert callable(getattr(inst, method)), f"MemoryManagerCore.{method} not callable"
 
@@ -471,12 +465,6 @@ class TestMemoryManagerCore:
             "clear_key_documents",
             "get_worktree_counts",
         ):
-            assert hasattr(inst, method), f"MemoryManagerCore missing method '{method}'"
-            assert callable(getattr(inst, method)), f"MemoryManagerCore.{method} not callable"
-
-    def test_project_note_methods(self, mod):
-        inst = mod.MemoryManagerCore.get_instance()
-        for method in ("get_or_create_project_note", "save_project_note"):
             assert hasattr(inst, method), f"MemoryManagerCore missing method '{method}'"
             assert callable(getattr(inst, method)), f"MemoryManagerCore.{method} not callable"
 

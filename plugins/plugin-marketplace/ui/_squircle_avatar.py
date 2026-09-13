@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, QRectF, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest, QNetworkReply
 from PySide6.QtSvgWidgets import QSvgWidget
@@ -145,6 +145,8 @@ class SquircleAvatar(QWidget):
         else:
             self._size = _AVATAR_MIN_SIZE
         self._font_size = font_size if font_size > 0 else 0
+        self._pix = None  # 渲染缓存（_cached_pixmap 维护）
+        self._pix_key = None
         self.setFixedSize(self._size, self._size)
 
     @staticmethod
@@ -199,106 +201,58 @@ class SquircleAvatar(QWidget):
         self.setFixedSize(size, size)
         self.update()
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
+    def _cached_pixmap(self):
+        """渲染缓存：内容不变时复用 QPixmap，避免滚动每帧重绘矢量+文字
+
+        列表滚动时视口内每行头像每帧都走 drawRoundedRect+drawText，
+        基准中占比约 6%；缓存后 paintEvent 只剩一次 drawPixmap。
+        """
+        try:
+            dpr = self.devicePixelRatioF()
+        except RuntimeError:
+            dpr = 1.0
+        font = self.font()
+        key = (self._text, self._color.rgba(), self._size, dpr, font.family())
+        if self._pix_key == key and self._pix is not None:
+            return self._pix
+
+        s = self._size
+        pix = QPixmap(max(1, round(s * dpr)), max(1, round(s * dpr)))
+        pix.setDevicePixelRatio(dpr)
+        pix.fill(Qt.transparent)
+
+        painter = QPainter(pix)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setRenderHint(QPainter.TextAntialiasing, True)
-
-        rect = self.rect()
         # 微妙圆角（约 5px，like VS Code squircle）
         corner_radius = 5
 
         # 纯色填充背景
         painter.setPen(Qt.NoPen)
         painter.setBrush(self._color)
-        painter.drawRoundedRect(rect, corner_radius, corner_radius)
+        painter.drawRoundedRect(QRectF(0, 0, s, s), corner_radius, corner_radius)
 
         # 居中白字
         painter.setPen(Qt.white)
-        font = painter.font()
         # 字号按 size 比例缩放（参考源算法：14/24 ≈ 0.58）
         font.setPixelSize(max(8, self._size * 14 // 24))
         font.setBold(True)
         painter.setFont(font)
-        painter.drawText(rect, Qt.AlignCenter, self._text)
+        painter.drawText(QRectF(0, 0, s, s), Qt.AlignCenter, self._text)
+        painter.end()
+
+        self._pix = pix
+        self._pix_key = key
+        return pix
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._cached_pixmap())
 
 
 # ── PluginIconWidget ──────────────────────────────────
 
 
-class PluginIconWidget(QWidget):
-    """插件图标组件：SVG 图标 + SquircleAvatar fallback
-
-    根据当前主题自动选择 light/dark SVG。
-    无 SVG 时回退到缩写哈希头像（SquircleAvatar）。
-    尺寸自适应：font_size * 1.7，最低 20px。
-    """
-
-    def __init__(
-        self,
-        plugin_dir: Path,
-        manifest: dict,
-        font_size: int = 0,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self._plugin_dir = plugin_dir
-        self._manifest = manifest
-        self._font_size = font_size
-        self._svg_widget: Optional["QSvgWidget"] = None
-        self._avatar: Optional[SquircleAvatar] = None
-        self._setup_ui()
-
-    def _resolve_icon_path(self) -> Optional[Path]:
-        """根据 manifest 和当前主题解析实际图标路径"""
-        raw = self._manifest.get("icon")
-        if not raw:
-            default = self._plugin_dir / "icon.svg"
-            return default if default.exists() else None
-        theme = "dark" if isDarkTheme() else "light"
-        if isinstance(raw, str):
-            p = self._plugin_dir / raw
-            return p if p.exists() else None
-        if isinstance(raw, dict):
-            path_str = raw.get(theme) or raw.get("light", "")
-            if path_str:
-                p = (self._plugin_dir / path_str).resolve()
-                return p if p.exists() else None
-        return None
-
-    def _setup_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-
-        icon_path = self._resolve_icon_path()
-        if icon_path is not None:
-            self._svg_widget = QSvgWidget(str(icon_path), self)
-            self._svg_widget.setFixedSize(self._icon_size(), self._icon_size())
-            layout.addWidget(self._svg_widget)
-        else:
-            plugin_name = self._manifest.get("name", "?")
-            # 把 icon_size 传给 SquircleAvatar，确保兜底头像与 SVG 图标尺寸一致
-            self._avatar = SquircleAvatar(
-                extract_initials(plugin_name),
-                name_color(plugin_name),
-                self,
-                size=self._icon_size_override,
-                font_size=self._font_size,
-            )
-            layout.addWidget(self._avatar)
-
-    def set_font_size(self, font_size: int):
-        """更新字号并重建组件（主题切换时也调用此方法）"""
-        self._font_size = font_size
-        while self.layout().count():
-            item = self.layout().takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._setup_ui()
-
-    def reload_icon(self):
-        """主题变化后刷新图标（深浅切换）"""
-        self.set_font_size(self._font_size)
 
 
 # ── 远程 icon 解析 ──────────────────────────────────
@@ -357,7 +311,6 @@ def _normalize_github_url(url: str) -> Optional[str]:
     if p.netloc and "github.com" not in p.netloc:
         return None
     parts = p.path.strip("/").split("/")
-    netloc = p.netloc or (stripped.split("/")[0] + "/" if False else "")
     if len(parts) < 2:
         return None
     return "/".join(parts[:2]).removesuffix(".git")

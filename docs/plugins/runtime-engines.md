@@ -57,8 +57,8 @@ class EngineFactory(Protocol):
 
 | 槽位常量 | 值 | 说明 |
 |---|---|---|
-| `ENGINE_SLOT_UI` | `"ui"` | 主程序 `ChatEngine`（app/core/engines/ui.py） |
-| `ENGINE_SLOT_GATEWAY` | `"gateway"` | 主程序 `GatewayEngine`（app/gateway/engines/gateway.py），平台网关侧对话引擎 |
+| `ENGINE_SLOT_UI` | `"ui"` | 主程序 `ChatEngine`（app/core/engines/ui/engine.py） |
+| `ENGINE_SLOT_GATEWAY` | `"gateway"` | 主程序 `GatewayEngine`（app/core/engines/gateway/engine.py），平台网关侧对话引擎 |
 
 **便捷工厂 `ClassEngineFactory(slot, cls)`**：直接包装引擎类，
 `create(**kwargs) == cls(**kwargs)`。绝大多数场景用它就够了。
@@ -150,7 +150,7 @@ import，改为栈工厂调用。
 
 ```python
 from app.plugins.contracts.dialogue_engine import ENGINE_SLOT_UI
-from app.core.engines.ui import ChatEngine
+from app.core.engines.ui.engine import ChatEngine
 
 
 class MyFactory:
@@ -173,7 +173,7 @@ def register(registry):
 | 槽位 | 创建入口 | fallback 内置类 |
 |---|---|---|
 | `ui` | `ChatBackend._deferred_create_engines` / `IsolatedContext.create_chat_engine` | `app.core.engines.ui.ChatEngine` |
-| `gateway` | `GatewayEngine.get_instance()` (单例工厂化) | `app.gateway.engines.gateway.GatewayEngine` |
+| `gateway` | `GatewayEngine.get_instance()` (单例工厂化) | `app.core.engines.gateway.engine.GatewayEngine` |
 
 **单例语义保留**：`GatewayEngine.get_instance()` 仍返回进程级单例，但内部
 `create_engine_for_slot("gateway", GatewayEngine, ...)` 由 `EngineRegistry`
@@ -256,12 +256,11 @@ def register(registry):
 | `app/plugins/registries/engine_registry.py` | `EngineRegistry` + `create_engine_for_slot`（含 isinstance 安全网） |
 | `app/plugins/loaders/runtime_component_loader.py` | `_make_engine_loader` + `ensure_engine_watcher`（五类运行时组件统一入口） |
 | `app/plugins/builtin_reloaders.py` | `_reload_engines`（删除/更新路径） |
-| `app/core/engines/ui.py` | 内置 `ChatEngine`（替换类的基类） |
+| `app/core/engines/ui/engine.py` | 内置 `ChatEngine`（替换类的基类） |
 | `app/core/backend.py` | `ChatBackend._deferred_create_engines`（工厂化创建点之一） |
 | `app/gateway/local_service/isolated_context.py` | `IsolatedContext.create_chat_engine`（工厂化创建点之二） |
-| `app/gateway/engines/gateway.py` | 内置 `GatewayEngine`（gateway 槽位替换类的基类 + 单例工厂化入口） |
-| `app/widgets/cards/settings/engine_slot_card.py` | 引擎槽位选择卡（持久化 Settings.engine_slot_<slot>） |
-| `app/utils/config.py` | `Settings.engine_slot_ui` / `engine_slot_gateway` 两个 `ConfigItem` |
+| `app/core/engines/gateway/engine.py` | 内置 `GatewayEngine`（gateway 槽位替换类的基类 + 单例工厂化入口） |
+| `app/utils/config.py` | 引擎槽位相关 `ConfigItem` 预留（当前无选择 UI，见 §7） |
 | `app/plugins/kernel.py` | `KNOWN_COMPONENTS` / `COMPONENT_ORDER` 含 `engines` 登记 |
 | `app/plugins/contracts/engine_host.py` | `EngineHost` Protocol（`ctx["services"]` 14 键的语义锚点，含 `conversation_stack`） |
 | `app/plugins/contracts/conversation_stack.py` | `ConversationStackFactory` Protocol（`create_core` / `create_executor`） |
@@ -270,4 +269,3 @@ def register(registry):
 | `tests/plugins/test_engine_registry.py` | 注册表单测（register/unregister/create_engine_for_slot） |
 | `tests/plugins/test_engine_host_contract.py` | `EngineHost` 契约守卫（含 `conversation_stack` 服务满足 `ConversationStackFactory`） |
 | `tests/plugins/test_conversation_stack_contract.py` | `ConversationStackFactory` 契约单测（防签名漂移） |
-| `tests/widgets/test_engine_slot_card.py` | 选择卡单测（行渲染 + 选择持久化） |

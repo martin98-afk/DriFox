@@ -25,11 +25,17 @@ deps 目录规范：
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from loguru import logger
+
+# P1-4：pip spec 白名单——首字符字母数字（拒 -flag 与 . 开头）、包名 + extras 可选 +
+# 版本约束可选（裸包名合法）；另拒常见文件扩展名（requirements.txt 等间接注入链）
+_PIP_SPEC_RE = re.compile(r"^(?!-)[A-Za-z0-9_][\w.\[\]-]*(\[\w[.\w-]*\])?((==|>=|<=|~=|!=|>|<)\d[\d.*]*)?$")
+_PIP_FILE_EXT_RE = re.compile(r"\.(txt|whl|tar|gz|zip|git|json|cfg|ini|yml|yaml)$", re.IGNORECASE)
 
 # 友好名 → sys.platform 值（目录名 / pip key 用）
 PLATFORM_DIR_MAP = {
@@ -93,6 +99,9 @@ def check_platform(manifest: dict) -> Tuple[bool, str]:
 def resolve_pip_deps(manifest: dict, platform_key: Optional[str] = None) -> List[str]:
     """合并 dependencies.pip 的 default 与指定平台列表（去重、保序）。
 
+    P1-4：PEP 508 白名单校验——包名+extras 可选+版本约束必需；
+    git+/file:///-r/--flag 等 注入形态拒收（移除 + warning）。
+
     Args:
         manifest: 插件清单
         platform_key: 平台 key，缺省用当前平台
@@ -115,6 +124,12 @@ def resolve_pip_deps(manifest: dict, platform_key: Optional[str] = None) -> List
             return
         for s in specs:
             if isinstance(s, str) and s and s not in merged:
+                # P1-4：spec 白名单 + 文件扩展名拒绝（-r 间接注入链）
+                if not _PIP_SPEC_RE.match(s) or _PIP_FILE_EXT_RE.search(s):
+                    logger.warning(
+                        f"[deps_loader] 拒收非法 pip spec（白名单外，疑似注入/非固定版本）: {s!r}"
+                    )
+                    continue
                 merged.append(s)
 
     _add(pip.get("default"))
@@ -138,7 +153,65 @@ def deps_paths(plugin_dir: Path) -> List[Path]:
     if common.is_dir() and any(common.iterdir()):
         # 平台目录是 deps/ 的子目录，已单独注入；公共注入仍保留（纯 Python 包在顶层）
         paths.append(common)
-    return paths
+
+    # —— 安全：剔除会劫持 stdlib / 宿主包的 deps 目录 ——
+    # deps 位于 sys.path[0]（优先于 stdlib），deps/json.py 即可替换全进程
+    # 的 json 模块。此处按目录粒度拒注入并告警，不影响其余 deps 生效。
+    safe: List[Path] = []
+    for d in paths:
+        shadowed = _shadowing_entries(d)
+        if shadowed:
+            logger.warning(
+                f"[deps_loader] {plugin_dir.name} 的 {d.name} 含与 stdlib/宿主同名的顶层模块 "
+                f"{shadowed}，已拒绝注入 sys.path（疑似依赖劫持）"
+            )
+            continue
+        safe.append(d)
+    return safe
+
+
+_STDLIB_TOPLEVEL: Optional[frozenset] = None
+
+
+def _stdlib_toplevel_names() -> frozenset:
+    """stdlib 顶层模块名集合（sys.stdlib_module_names，3.10+）。
+
+    用于识别 deps/ 里的"同名劫持"：deps 被 insert 到 sys.path[0]，
+    若其中存在 json.py / os.py / typing.py 等，会整体替换全进程对 stdlib 的导入。
+
+    P4：结果模块级缓存（stdlib 集合进程内不变，免每次调用重建 frozenset）。
+    """
+    global _STDLIB_TOPLEVEL
+    if _STDLIB_TOPLEVEL is None:
+        names = getattr(sys, "stdlib_module_names", None)
+        _STDLIB_TOPLEVEL = frozenset(names) if names else frozenset()
+    return _STDLIB_TOPLEVEL
+
+
+def _host_toplevel_names() -> frozenset:
+    """宿主自身顶层包名（app / plugins）— 同样禁止被 deps 覆盖。"""
+    return frozenset({"app", "plugins"})
+
+
+def _shadowing_entries(dep_dir: Path) -> List[str]:
+    """返回 dep_dir 下会劫持 stdlib / 宿主包的顶层模块名列表。"""
+    banned = _stdlib_toplevel_names() | _host_toplevel_names()
+    if not banned:
+        return []
+    hits: List[str] = []
+    try:
+        for entry in dep_dir.iterdir():
+            stem = entry.name
+            is_pkg = entry.is_dir() and (entry / "__init__.py").exists()
+            if entry.is_file() and entry.suffix == ".py":
+                stem = entry.stem
+            elif not is_pkg:
+                continue
+            if stem in banned:
+                hits.append(stem)
+    except OSError as e:
+        logger.debug(f"[deps_loader] 扫描 deps 目录失败 {dep_dir}: {e}")
+    return sorted(set(hits))
 
 
 def ensure_deps_on_path(plugin_dir: Path) -> List[str]:
@@ -176,14 +249,28 @@ def missing_pip_deps(plugin_dir: Path, manifest: dict) -> List[str]:
 
     missing: List[str] = []
     have_dirs = deps_paths(plugin_dir)
+    # P4：一次性收集 deps 目录顶层可用包名（目录含 __init__.py 或 .py 文件 stem），
+    # 消除逐 spec glob 的重复目录扫描；`-` 归一为 `_` 后集合查询，
+    # 替代原 `pkg.replace("_", "?")` 单字符通配（通配会误匹配任意字符）。
+    have_names: set = set()
+    for d in have_dirs:
+        try:
+            for entry in d.iterdir():
+                # 原语义（glob 通配）：同名目录/模块文件存在即算"已就绪"，
+                # 不校验 __init__.py；`-` 归一为 `_` 后集合查询
+                if entry.is_dir():
+                    have_names.add(entry.name.replace("-", "_"))
+                elif entry.is_file() and entry.suffix == ".py":
+                    have_names.add(entry.stem.replace("-", "_"))
+        except OSError:
+            continue
     for spec in resolve_pip_deps(manifest):
         pkg = spec.split("==")[0].split(">=")[0].split("<=")[0].split("~=")[0].split("!=")[0]
         pkg = pkg.split("[")[0].strip().replace("-", "_")
         if not pkg:
             continue
-        # deps 目录里已有同名顶层包（或包名带下划线/连字符变体）
-        top = pkg.replace("_", "?")
-        if any(hit for d in have_dirs for hit in d.glob(top)):
+        # deps 目录里已有同名顶层包 → 就绪
+        if pkg in have_names:
             continue
         if importlib.util.find_spec(pkg) is not None:
             continue

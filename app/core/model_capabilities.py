@@ -40,6 +40,11 @@ from app.core.provider_profile import get_provider_profile
 # =============================================================================
 _CONTEXT_LIMIT_KEYS = ("最大Token", "context_limit", "上下文长度", "max_context_tokens")
 
+# 表示"关闭思考"的 reasoning_effort 取值：不参与默认等级选择，也不作为
+# 无效值的回退目标（models.dev 把 none/no_think 排在 values 首位，如
+# hy4-preview 的 ["none", "high"]，按位置取中间值会静默关掉思考）。
+_EFFORT_OFF_VALUES = {"none", "no_think", "nothink", "off", "disabled"}
+
 # =============================================================================
 # 硬编码兜底默认值
 # 当 providers 插件没有这个服务商、MODEL_CAPABILITIES 也没覆盖该字段时，用这里
@@ -410,7 +415,10 @@ def normalize_reasoning_effort(effort, values=None) -> str:
     lowers = [v.lower() for v in values]
     if eff.lower() in lowers:
         return values[lowers.index(eff.lower())]
-    return values[(len(values) - 1) // 2]
+    # 回退目标剔除关闭态：否则无效等级会退化成"不思考"（hy4-preview 等
+    # 只有 ["none", "high"] 两档的模型首当其冲）
+    effective = [v for v in values if v.lower() not in _EFFORT_OFF_VALUES] or values
+    return effective[(len(effective) - 1) // 2]
 
 
 def resolve_context_limit(llm_config: Dict[str, Any], default: int = 128000) -> int:
@@ -530,7 +538,11 @@ def apply_model_defaults(config: Dict[str, Any], model_name: str) -> Dict[str, A
                 # 默认等级优先取 models.dev 给出的 effort 可选值第一个，
                 # 否则回退固定默认（如 deepseek 等无 values 数据的模型）
                 effort_values = caps.get("reasoning_effort_values") or []
-                result["思考等级"] = effort_values[0] if effort_values else "medium"
+                # 默认取第一个"非关闭"档位：values 首项常是 none/no_think
+                default_effort = next(
+                    (v for v in effort_values if str(v).lower() not in _EFFORT_OFF_VALUES), None
+                )
+                result["思考等级"] = default_effort or (effort_values[0] if effort_values else "medium")
         else:
             # 模型不支持思考 → 主动移除思考相关字段
             # （用户如果之前在 model_overrides 里显式开过，会在 _load_model_config_to_card 后续被补回）

@@ -82,11 +82,17 @@ class ConversationConfig:
     interactive_check_callback: Optional[Callable[[str, dict], str]] = None
     # Hook 参与级别（默认 ALL：UI/Gateway 主对话行为不变；插件引擎建议 NONE/TOOL_EVENTS_ONLY）
     hook_policy: "HookPolicy" = HookPolicy.ALL
-    # 可选：HookPolicy 插件 id（plugins/system/hook_policies/ 注册）。
+    # 可选：HookPolicy 插件 id（plugins/system-hook-policies/hook_policies/ 注册）。
     # 优先级高于 hook_policy 枚举：设置后由 HookPolicyRegistry 取对应插件对象，
     # 未设置时按 hook_policy 枚举回落（ALL→"all" / TOOL_EVENTS_ONLY→"tool_only" /
     # NONE→"none"）。允许插件自建引擎（autoloop/象棋）声明更精细的策略。
     hook_policy_id: Optional[str] = None
+    # 可选：LoopPolicy 插件 id（plugins/*/loop_policies/ 注册）。
+    # 设置后本引擎的 worker 按 id 直接取策略对象，不调用
+    # LoopPolicyRegistry.set_active —— 避免污染全局激活槽（主对话仍用 default）。
+    # 用途：插件自建引擎声明自己的循环语义，如 assistant_hub 记忆整理
+    # 只需要一回合（assistant_hub_single_turn）。未设置时回落全局激活策略。
+    loop_policy_id: Optional[str] = None
 
 
 # ============================================================
@@ -135,15 +141,3 @@ class PermissionCache:
         self._round_cache.clear()
         self._session_cache.clear()
 
-    def get_session_cache(self) -> DictType[str, bool]:
-        return self._session_cache.copy()
-
-    def sync_session_cache(self, cache: DictType[str, bool]) -> None:
-        self._session_cache = cache.copy()
-        logger.info(f"[PermissionCache] 同步 session 缓存: {len(cache)} 项")
-
-    def get_cache_stats(self) -> DictType[str, int]:
-        return {
-            "round_count": len(self._round_cache),
-            "session_count": len(self._session_cache),
-        }

@@ -27,9 +27,9 @@ _agent_file_cache: Dict[str, Dict[str, tuple]] = {}
 def _subagent_forbidden_tools() -> set:
     """子智能体调用时禁止使用的工具集合（registry 派生，不硬编码工具名）。
 
-    规则（与旧硬编码 {question, subagent_para, subagent_status, subagent_dag} 等价）：
+    规则（与旧硬编码集合语义等价）：
     - metadata["interactive"]：交互式提问（question）
-    - group=="子智能体"：嵌套子智能体工具（subagent_para/subagent_status/subagent_dag）
+    - group=="子智能体"：嵌套子智能体工具（subagent_para/subagent_status）
     """
     try:
         from app.tools.registry import ToolRegistry
@@ -41,7 +41,7 @@ def _subagent_forbidden_tools() -> set:
         }
     except Exception:
         # registry 不可用：回退旧集合（保持过滤语义不失效）
-        return {"question", "subagent_para", "subagent_status", "subagent_dag"}
+        return {"question", "subagent_para", "subagent_status"}
 
 
 @dataclass
@@ -467,6 +467,12 @@ class AgentManager:
         self._hook_manager.unregister_skill_hooks(plugin.name)
         if hooks_file.exists():
             self._hook_manager._clear_config_watcher(str(hooks_file))
+        # D9：hooks 组件整类停用时只卸载、不重载。
+        # 注：单条 hook 的停用（细项级）不在这里处理——走 HookManager 执行链
+        # 按 hook id 过滤，开关即可立即生效，无需重载。
+        if not pm.is_component_enabled(plugin_name, "hooks"):
+            logger.info(f"[AgentManager] hooks 组件已停用，跳过重载: {plugin_name}")
+            return False
         if hooks_dir.exists() and hooks_dir.is_dir():
             # is_system_plugin 用于标记系统内置插件的 hook，在 UI 上禁止删除
             self._hook_manager.load_hooks_from_directory_flat(
@@ -535,6 +541,9 @@ class AgentManager:
             pm = PluginManager.get_instance()
             if pm.is_initialized():
                 for plugin in pm.get_enabled_plugins():
+                    # D9：hooks 组件被整类停用的插件不注册其 hooks
+                    if not pm.is_component_enabled(plugin.name, "hooks"):
+                        continue
                     hooks_dir = plugin.path / "hooks"
                     if not hooks_dir.exists() or not hooks_dir.is_dir():
                         continue
@@ -705,7 +714,7 @@ class AgentManager:
         if not agents:
             return ""
 
-        lines = ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para和subagent_dag使用)："]
+        lines = ["## Available Subagents\n可直接使用的子智能体列表(可供subagent_para使用)："]
         for a in agents:
             lines.append(f"- **{a.name}**: {a.description[:300]}")
 
@@ -748,7 +757,7 @@ class AgentManager:
         all_tools = get_builtin_tools_schema(self, builtin_tools=_bt)
 
         # 【新增】子智能体禁止使用交互和嵌套子智能体工具（需要用户交互或发布子智能体，不支持）
-        # registry 派生：interactive（question）+ 子智能体组（subagent_para/subagent_status/subagent_dag）
+        # registry 派生：interactive（question）+ 子智能体组（subagent_para/subagent_status）
         forbidden_tools = _subagent_forbidden_tools()
         if is_subagent_call:
             # 被主智能体调用时，强制过滤
@@ -915,7 +924,7 @@ Use the tools available to you based on your permissions."""
 
         all_skills = get_local_skills()
         result_parts = [
-            "\n\n## 偏好技能\n以下是部分用户偏好的智能体技能，如果以下技能不能满足用户需求，可以使用 `list_skills` 技能加载完整技能列表：\n"
+            "\n\n## 偏好技能\n凡用户请求命中以下技能 description 描述的场景，必须先调用 `skill` 工具加载对应技能再回答，禁止跳过直接作答；以下技能无法满足时用 `manage_skill(action=\"list\")` 查看完整列表：\n"
         ]
 
         for skill in all_skills:

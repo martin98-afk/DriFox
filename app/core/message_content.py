@@ -5,7 +5,6 @@ import threading
 from typing import Any, Dict, List, Optional
 
 import orjson as json
-from loguru import logger
 
 # ========== Gemini thought_signature 适配 ==========
 # Gemini 2.5+/3 在多轮工具调用时，要求把模型返回 functionCall 时携带的
@@ -18,46 +17,89 @@ from loguru import logger
 # （仅略微降低推理质量，不会中断对话）。
 GEMINI_DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
 
-# ========== consolidate_messages 多入口 LRU 缓存 ==========
+# ========== consolidate_messages 多入口增量 LRU 缓存 ==========
 # 旧实现为单入口缓存（key=None/result=None），交替处理不同消息列表时
 # 互相踢出。升级为 4-entry LRU，覆盖多数场景（主消息列表 + 临时列表）。
-# 主键：(id, len, fp) — fp 为 O(1) 首尾角色指纹，防 id 被 GC 回收后复用导致脏命中。
-# 逐出策略为最久未命中。
+# 主键：(id(list), 前 2 条特征)，逐出策略为最久未命中。
+#
+# [PERF] 旧主键是 (id, len, **全列表**指纹)，有两个严重后果：
+#   1. **每追加一条消息必然 miss**（len 变化），于是每次都要 O(n) 重算指纹
+#      + O(n) 全表 normalize → 长会话累计 O(n²)。n=3000 时是流式后期
+#      越来越卡、内存持续上涨的隐性主因之一。
+#   2. 4 个 LRU 条目各自持有一份**完整**归一化列表 → 同一会话最多 4 份副本
+#      （3000 条 ≈ 12000 个 dict，5-7MB）。
+#
+# 新实现：主键只保留 id(list) + O(1) 的首部特征，值改为
+# (长度, 尾部窗口特征, 归一化结果)，配合三级命中策略：
+#   - 长度不变 → 仅重算最后 _TAIL_CHECK_W 条特征比对（O(W)），命中即复用同一对象；
+#   - 纯追加   → 校验旧前缀尾部未变后，只 normalize 新增的 Δ 条，
+#                旧结果用 list() 浅拷贝（只复制指针，不复制 dict）→
+#                多个 LRU 条目共享同一批消息 dict，内存从 4 份降到 1 份；
+#   - 变短 / 校验失败 → 全量重算。
+#
+# 正确性契约（与原实现一致）：消息列表「只追加或整体替换，不原地修改历史条目」。
+# 原地补写元数据（Bug9：流式收尾写 model_name/elapsed/provider_name/config_id）
+# 只发生在列表末尾几条，故尾部窗口 W=16 足以覆盖；窗口外的历史条目原地修改
+# 不在支持范围内（原实现的全列表指纹能覆盖，但代价是 O(n²)，见上）。
 _MAX_CONSOLIDATE_ENTRIES = 4
+_TAIL_CHECK_W = 16  # 尾部校验窗口：检测流式收尾对末尾消息的原地补写
 _consolidate_cache_local = threading.local()
 
 
-def _msg_role_fingerprint(messages: list) -> int:
-    """消息列表缓存指纹：覆盖原地可变元数据字段（Bug9 防脏命中）。
+def _msg_feature(msg: Any):
+    """单条消息的缓存特征（Bug9 防脏命中：覆盖原地可变的元数据字段 + 内容长度）。
 
-    原实现仅 hash 首尾 role：流式收尾/更新会在**原消息对象上原地补写**
-    model_name/provider_name/config_id/elapsed（_on_stream_finished /
-    _on_messages_updated）而不改变长度与首尾 role → consolidate_messages
-    缓存命中返回缺这些字段的旧列表（脏数据，Bug9）。改为对每条消息的
-    关键字段（role/_hook_event/model_name/provider_name/config_id/elapsed）
-    取特征 hash：字段值变化即指纹变化 → 缓存失效。
+    [PERF] 全部取值均为 O(1)，不复制长文本。
 
-    性能：consolidate_messages 本身 O(n)（逐条 normalize），此处仅 hash
-    短字段（非长文本 content/tool_calls），不改变总复杂度，开销可忽略。
+    ⚠️ 为什么要带内容长度：只按元数据取特征时，「整表替换成等长但内容不同的
+    列表」在 id 地址被复用后会脏命中 —— 实测 `test_tool_result_pruner.py::
+    test_short_tool_result_untouched_in_context` 就是这条路径：前一个用例留下
+    content=50000 字符的历史，本用例新建 content="ok" 的列表恰好拿到同一地址，
+    元数据特征全同 → 被误判为「纯追加」而复用了旧结果。
+    加入内容长度后等长替换之外的场景都能被检出。
+    """
+    if isinstance(msg, dict):
+        content = msg.get("content")
+        if isinstance(content, (str, bytes, list)):
+            content_len = len(content)
+        else:
+            content_len = None
+        return (
+            msg.get("role", ""),
+            msg.get("_hook_event", ""),
+            msg.get("model_name", ""),
+            msg.get("provider_name", ""),
+            msg.get("config_id", ""),
+            msg.get("elapsed"),
+            content_len,
+        )
+    return None
+
+
+
+
+def _msg_head_key(messages: list) -> tuple:
+    """缓存主键第二段：前 2 条消息特征（O(1)）。
+
+    key 里若只剩 id(list)，地址被 GC 复用后可能脏命中（这正是原实现引入
+    指纹的原因）。但把「全列表指纹」放进 key 又会让每次追加都 miss（O(n²)）。
+    折中：首部 2 条消息在整个会话生命周期内不变（system / 首条 user），
+    用它们的特征做防复用的第二段 key，代价 O(1)。
     """
     if not messages:
-        return 0
-    feature = []
-    for msg in messages:
-        if isinstance(msg, dict):
-            feature.append(
-                (
-                    msg.get("role", ""),
-                    msg.get("_hook_event", ""),
-                    msg.get("model_name", ""),
-                    msg.get("provider_name", ""),
-                    msg.get("config_id", ""),
-                    msg.get("elapsed"),
-                )
-            )
-        else:
-            feature.append(None)
-    return hash(tuple(feature))
+        return ()
+    head = [_msg_feature(messages[0])]
+    if len(messages) > 1:
+        head.append(_msg_feature(messages[1]))
+    return tuple(head)
+
+
+def _msg_tail_features(messages: list, end: int, count: int = _TAIL_CHECK_W) -> tuple:
+    """messages[max(0, end-count):end] 的特征元组（O(W)，用于增量命中校验）。"""
+    start = end - count
+    if start < 0:
+        start = 0
+    return tuple(_msg_feature(m) for m in messages[start:end])
 
 
 def _get_consolidate_cache() -> dict:
@@ -69,13 +111,18 @@ def _get_consolidate_cache() -> dict:
     return cache
 
 
-def _set_consolidate_cache(list_id: int, list_len: int, result: list, fingerprint: int):
-    """写入 LRU 缓存；超上限时逐出最久未命中条目"""
-    cache = _get_consolidate_cache()
-    key = (list_id, list_len, fingerprint)
-    entries = cache["_entries"]
-    entries[key] = result
-    entries.move_to_end(key)
+def _set_consolidate_cache(cache_key: tuple, list_len: int, result: list, tail_features: tuple):
+    """写入 LRU 缓存；超上限时逐出最久未命中条目
+
+    Args:
+        cache_key: 完整主键 (id(list), 首部特征)
+        list_len: 写入时列表长度
+        result: 归一化结果
+        tail_features: 写入时列表尾部窗口特征（下次命中校验用）
+    """
+    entries = _get_consolidate_cache()["_entries"]
+    entries[cache_key] = (list_len, tail_features, result)
+    entries.move_to_end(cache_key)
     if len(entries) > _MAX_CONSOLIDATE_ENTRIES:
         entries.popitem(last=False)  # FIFO 逐出最旧条目
 
@@ -615,43 +662,8 @@ def content_to_markdown(content: Any) -> str:
     return "\n\n".join(part for part in parts if part).strip()
 
 
-def extract_tool_result_blocks(content: Any) -> List[Dict[str, Any]]:
-    return [
-        dict(block)
-        for block in ensure_content_blocks(content)
-        if block.get("type") == "tool_result"
-    ]
 
 
-def dedupe_tool_result_blocks(blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    deduped: List[Dict[str, Any]] = []
-    seen = set()
-    for block in blocks or []:
-        if not isinstance(block, dict) or block.get("type") != "tool_result":
-            continue
-        key = (
-            block.get("tool_call_id"),
-            block.get("name"),
-            json.dumps(
-                block.get("arguments", {}) or {}, option=json.OPT_SORT_KEYS
-            ).decode("utf-8"),
-            block.get("result", ""),
-            bool(block.get("success", True)),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(
-            make_tool_result_block(
-                tool_name=block.get("name", "tool"),
-                arguments=block.get("arguments", {}),
-                result=block.get("result", ""),
-                success=block.get("success", True),
-                tool_call_id=block.get("tool_call_id"),
-                diff=block.get("diff"),
-            )
-        )
-    return deduped
 
 
 def normalize_tool_call(tool_call: Any) -> Optional[Dict[str, Any]]:
@@ -702,6 +714,26 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
     if message.get("timestamp"):
         normalized["timestamp"] = str(message.get("timestamp"))
 
+    # 毫秒级时间戳（所有 role 通用）。``timestamp`` 只有秒级精度，同秒连发的
+    # 多条消息（hook 注入、并行工具结果）排不出先后 → 轨迹分析必需的字段。
+    # ⚠️ 新字段必须加进这个白名单，否则会被 consolidate_messages 剥掉。
+    ts_ms = message.get("ts_ms")
+    if isinstance(ts_ms, (int, float)) and not isinstance(ts_ms, bool) and ts_ms > 0:
+        normalized["ts_ms"] = int(ts_ms)
+
+    # 工具执行分阶段耗时 {perm, exec, other, total}（毫秒，chat_worker 写入）
+    phases = message.get("trace_phases")
+    if isinstance(phases, dict) and phases:
+        normalized["trace_phases"] = {str(k): float(v) for k, v in phases.items() if isinstance(v, (int, float))}
+
+    # message_extras 剥离哨兵（session_repository 写库时打上的绝对索引）。
+    # 历史会话加载后渲染前会经本函数重建消息，若在此剥掉哨兵，
+    # materialize_batch_with_extras 找不到索引 → 剥离的 arguments/diff/
+    # reasoning_content 永远补不回 → 工具折叠框预览参数全空（2026-09-08 回归）。
+    x_idx = message.get("_x_idx")
+    if isinstance(x_idx, int) and not isinstance(x_idx, bool):
+        normalized["_x_idx"] = x_idx
+
     if role == "assistant":
         content = content_to_text(message.get("content", ""))
         if content:
@@ -731,6 +763,15 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["config_id"] = str(message.get("config_id"))
         if message.get("elapsed") is not None:
             normalized["elapsed"] = float(message["elapsed"])
+        # 单次 LLM 调用耗时（毫秒，chat_worker 写入）—— 持久化后重新加载
+        # 会话也能看到真实耗时，不再依赖只存在于内存里的实时信号。
+        llm_ms = message.get("elapsed_ms")
+        if isinstance(llm_ms, (int, float)) and not isinstance(llm_ms, bool) and llm_ms > 0:
+            normalized["elapsed_ms"] = float(llm_ms)
+        # 首 token 延迟（毫秒，chat_worker 写入）—— 轨迹统计（吞吐量/生成时长）用
+        ttft_ms = message.get("ttft_ms")
+        if isinstance(ttft_ms, (int, float)) and not isinstance(ttft_ms, bool) and ttft_ms > 0:
+            normalized["ttft_ms"] = float(ttft_ms)
         if isinstance(message.get("token_usage"), dict):
             normalized["token_usage"] = dict(message["token_usage"])
         # 保留 _hook_event 标记，确保能通过 save/load 持久化
@@ -756,7 +797,12 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
         normalized["tool_call_id"] = tool_call_id
         normalized["content"] = content_to_text(message.get("content", ""))
         normalized["name"] = str(message.get("name", "tool") or "tool")
-        normalized["arguments"] = message.get("arguments", {})
+        # 🛡️ 不伪造空 arguments：轻量剥离消息（无 arguments 键）normalize 后
+        # 若带上空 dict，extract_offload_fields 会误判「无剥离字段」，配合
+        # _write_extras 全删全插造成历史参数数据静默丢失（2026-09-12 回归）。
+        # 保留「键缺失」语义，让剥离状态穿透保存链可见。
+        if "arguments" in message:
+            normalized["arguments"] = message.get("arguments")
         normalized["success"] = bool(message.get("success", True))
         if message.get("round_id"):
             normalized["round_id"] = str(message.get("round_id"))
@@ -777,6 +823,11 @@ def normalize_message(message: Any) -> Optional[Dict[str, Any]]:
             normalized["content"] = content_to_text(raw_content)
         params = message.get("params")
         normalized["params"] = dict(params) if isinstance(params, dict) else {}
+        # 图片附件路径标记（UI 恢复会话时渲染缩略图预览用），同 _hook_event 一样
+        # 必须显式保留，否则会被 consolidate_messages 剥掉
+        atts = message.get("_image_attachments")
+        if isinstance(atts, list) and atts:
+            normalized["_image_attachments"] = [str(p) for p in atts if p]
     else:
         normalized["content"] = content_to_text(raw_content)
 
@@ -804,28 +855,48 @@ def consolidate_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     每个 assistant 消息只包含自己的内容和 tool_calls。
     每个 tool 结果独立为一条 tool 消息。
 
-    使用脏标记缓存：调用方传入同一个列表对象且长度未变时不重复计算。
-    消息列表只追加（长度增加）或整体替换（id 变化），不原地修改内容，此策略安全。
+    使用增量缓存：调用方传入同一个列表对象时，只 normalize 新增的消息；
+    对末尾消息元数据的原地补写（流式收尾）会触发全量重算，不会返回脏数据。
+    消息列表只追加（长度增加）或整体替换（id 变化），不原地修改历史条目。
+
+    详见模块顶部 ``_MAX_CONSOLIDATE_ENTRIES`` 处的缓存策略说明。
     """
-    # 多入口 LRU 缓存：key=(id, len)，仅对非空列表有效
-    # 消息从不原地修改内容，只追加或整体替换，此策略正确
-    if messages is not None:
-        cache_key = (id(messages), len(messages), _msg_role_fingerprint(messages))
-        _cache = _get_consolidate_cache()
-        entries = _cache["_entries"]
-        cached = entries.get(cache_key)
-        if cached is not None:
-            entries.move_to_end(cache_key)  # 更新 LRU 位置
-            return cached
+    if messages is None:
+        return []
+
+    entries = _get_consolidate_cache()["_entries"]
+    cache_key = (id(messages), _msg_head_key(messages))
+    n = len(messages)
+
+    cached = entries.get(cache_key)
+    if cached is not None:
+        cached_n, cached_tail, cached_norm = cached
+        if n == cached_n:
+            # 长度未变：仅校验尾部窗口（O(W)），命中则复用同一列表对象
+            if _msg_tail_features(messages, n) == cached_tail:
+                entries.move_to_end(cache_key)  # 更新 LRU 位置
+                return cached_norm
+        elif n > cached_n:
+            # 纯追加：旧前缀尾部未变 → 只 normalize 新增的 Δ 条。
+            # list() 是浅拷贝：只复制指针数组，消息 dict 与旧缓存条目共享，
+            # 因此同一会话的多个长度快照不会放大内存。
+            if _msg_tail_features(messages, cached_n) == cached_tail:
+                normalized: List[Dict[str, Any]] = list(cached_norm)
+                for message in messages[cached_n:]:
+                    item = normalize_message(message)
+                    if item:
+                        normalized.append(item)
+                _set_consolidate_cache(cache_key, n, normalized, _msg_tail_features(messages, n))
+                return normalized
+        # 变短（删除/回退/截断）或尾部校验失败 → 落到下面的全量重算
 
     normalized: List[Dict[str, Any]] = []
-    for message in messages or []:
+    for message in messages:
         item = normalize_message(message)
         if item:
             normalized.append(item)
 
-    if messages is not None:
-        _set_consolidate_cache(id(messages), len(messages), normalized, _msg_role_fingerprint(messages))
+    _set_consolidate_cache(cache_key, n, normalized, _msg_tail_features(messages, n))
 
     return normalized
 
@@ -893,6 +964,23 @@ _HOOK_CONTENT_PATTERN = re.compile(
     r'<system-reminder>\s*<([a-z0-9-]+-hook)>.*?</\1>\s*</system-reminder>',
     re.DOTALL
 )
+
+# 宽匹配：剥除混入消息内容里的整段 system-reminder 注入
+# （覆盖无内层 hook 标签的裸注入形态，_HOOK_CONTENT_PATTERN 只认双标签）
+_SYSTEM_REMINDER_BLOCK_PATTERN = re.compile(
+    r"<system-reminder>.*?</system-reminder>",
+    re.DOTALL,
+)
+
+
+def strip_system_reminder(text: str) -> str:
+    """剥除文本中混入的 <system-reminder>...</system-reminder> 注入段
+
+    用于摘要 / 预览等只应展示用户实际内容的场景（如撤销卡片 tooltip）。
+    """
+    if not text:
+        return ""
+    return _SYSTEM_REMINDER_BLOCK_PATTERN.sub("", text)
 
 
 def _is_team_mail_text(text: str) -> bool:
@@ -1025,25 +1113,23 @@ def _prune_tool_content_for_api(content: str) -> str:
 def _resolve_serializer():
     """经 SerializerRegistry 解析默认序列化器（id="openai"）。
 
-    冷启动防御（同 chat_worker._adapter_flags）：注册表为空时幂等触发
-    系统插件扫描再重试；仍为空才抛错（真实配置错误）。函数体内 import
+    冷启动防御（P3 修正）：resolve 已改为永不抛错（空时降级内置 passthrough），
+    无法再靠 except RuntimeError 驱动冷启动重载。故这里前置探测：registry 空
+    则幂等触发系统插件扫描再取，确保真实环境拿到 openai serializer 而非
+    passthrough（passthrough 不做协议特判，特性会丢）。函数体内 import
     注册表，避免与 app/core/__init__.py LazyLoader 循环导入。
     """
     from app.plugins.registries.serializer_registry import SerializerRegistry
 
     registry = SerializerRegistry.get_instance()
-    try:
-        return registry.resolve()
-    except RuntimeError:
-        if registry.serializers():
-            raise
+    if not registry.serializers():
         try:
             from app.plugins.loaders.runtime_component_loader import warmup_runtime_components
 
             warmup_runtime_components()
         except Exception:
             pass
-        return registry.resolve()
+    return registry.resolve()
 
 
 def _default_ctx(supports_vision: bool = True, is_gemini: bool = False, requires_reasoning_content: bool = False):
@@ -1232,3 +1318,50 @@ def messages_to_responses_input(
     ctx.flags.use_responses_api = True
     result = serializer.serialize(messages, ctx)
     return result.input_items, result.instructions
+
+
+def extract_reasoning_delta(obj: Any) -> str:
+    """从流式 delta / message 对象里提取思考增量，兼容各厂商字段名。
+
+    厂商差异（实测）：
+        - ``reasoning_content`` : DeepSeek / GLM / 混元官方 / vLLM reasoning-parser
+        - ``reasoning``         : OpenRouter 及兼容网关（OpenCode Go）的归一化字段
+        - ``reasoning_details`` : OpenRouter 结构化数组
+          ``[{"type": "reasoning.text", "text": "...", "index": 0}]``
+
+    只取第一个命中的字段，避免同一段思考被重复计入（网关通常同时下发
+    ``reasoning`` 与 ``reasoning_details``，两者内容一致）。
+
+    Args:
+        obj: openai SDK 的 ``ChoiceDelta`` / ``ChatCompletionMessage``，或等价 dict。
+
+    Returns:
+        思考文本增量；无思考内容时返回空字符串。
+    """
+
+    def _pick(container, key):
+        if isinstance(container, dict):
+            return container.get(key)
+        return getattr(container, key, None)
+
+    for key in ("reasoning_content", "reasoning"):
+        value = _pick(obj, key)
+        # 只接受标量文本：dict/list（某些网关的 reasoning 是对象）不塞进思考框
+        if isinstance(value, str) and value:
+            return value
+        if value and not isinstance(value, (dict, list, tuple)):
+            return str(value)
+
+    details = _pick(obj, "reasoning_details")
+    if isinstance(details, list) and details:
+        parts = []
+        for item in details:
+            if isinstance(item, dict):
+                piece = item.get("text") or item.get("summary") or ""
+            else:
+                piece = getattr(item, "text", None) or getattr(item, "summary", None) or ""
+            if piece:
+                parts.append(str(piece))
+        if parts:
+            return "".join(parts)
+    return ""

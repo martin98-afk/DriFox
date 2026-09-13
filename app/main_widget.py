@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -31,6 +32,8 @@ from PySide6.QtCore import (
     QThreadPool,
     QTimer,
     QUrl,
+    QEasingCurve,
+    QVariantAnimation,
     Signal,
     Slot,
 )
@@ -38,7 +41,6 @@ from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
-    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -53,8 +55,6 @@ from qfluentwidgets import (
     CaptionLabel,
     FluentIcon,
     IconWidget,
-    InfoBadge,
-    InfoBadgePosition,
     InfoBar,
     InfoBarPosition,
     MaskDialogBase,
@@ -80,9 +80,11 @@ from app.core import (
     get_user_round_ranges,
     group_messages_for_display,
 )
+from app.core.message_content import _is_hook_message, strip_system_reminder
 from app.core.builtin_commands import FunctionCommandHandlers
 from app.core.command_manager import CommandManager, CommandType
 from app.core.model_capabilities import apply_model_defaults, get_model_capabilities, normalize_reasoning_effort
+from app.core.rss_sampler import rss_sampler
 from app.core.tool_permission_controller import ToolPermissionController
 from app.core import window_registry
 
@@ -90,6 +92,7 @@ from app.core import window_registry
 # [PERF] get_tool_counts 已移入 _refresh_tool_toggle_btn 方法内，避免模块加载时触发 app.tools 导入
 from app.utils.config import Settings, update_theme_options
 from app.utils.design_tokens import (
+    Animations,
     Colors,
     apply_font_size_to_widget,
     font_size_css,
@@ -103,11 +106,9 @@ from app.utils.utils import get_font_family_css, get_icon
 # ── App Widget 导入 ──
 # Note: 保留模块级导入而非方法内导入，因为 widget 类型在 100+ 方法中通过 isinstance 引用，
 # 方法级导入无法跨方法共享。仅将重型导入 app.tools.tool_classifier 移入方法。
-from app.widgets.balance_display import BalanceDisplay
 from app.widgets.bottom_input_area import (
     AttachmentChip,
-    InputGlowUnderlay,
-    SendableTextEdit,
+    AttachmentOverflowChip,
 )
 
 # TabManagerWindow 延迟导入：133 处 InfoBar parent 统一表达式（get_instance() or self.window()）
@@ -121,20 +122,15 @@ except Exception:  # noqa: BLE001
 from app.widgets.cards import (
     BottomCardContainer,
     CardManager,
+    CompletionCardContainer,
     ContainerType,
     TopCardContainer,
-)
-from app.widgets.cards.floating.command_card import CommandCard
-from app.widgets.cards.floating.file_mention_card import FileMentionCard
-from app.widgets.cards.floating.question_floating_widget import (
-    QuestionFloatingWidget,
 )
 from app.widgets.cards.floating.sub_agent_compact_widget import (
     SubAgentCompactFloatingWidget,
 )
 from app.widgets.cards.floating.history_questions_card import HistoryQuestionsCardContent
 from app.widgets.cards.floating.share_card import ShareCardContent
-from app.widgets.cards.floating.undo_delete_card import UndoDeleteCard
 
 # [PERF] 设置卡导入纪律：顶层仅保留 __init__/setup_ui 直线构造的卡片；
 # 延迟构建（_ensure_*）与运行时回调使用的卡片全部在使用点函数内导入，
@@ -143,22 +139,19 @@ from app.widgets.cards.settings.base_settings_card import (
     BaseSettingsCard,
 )
 from app.widgets.cards.settings.project_selector_card import (
-    ProjectSelectorCardContent,
     get_project_color,
-)
-from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
-from app.widgets.coding_plan_ring import (
-    CodingPlanRing,
-)
-from app.widgets.context_usage_ring import (
-    ContextUsageRing,
 )
 from app.widgets.conversation_node_preview import (
     ConversationNodePreview,
 )
+from app.widgets.height_commit_batch import HeightCommitBatch
+from app.widgets.resize_orchestrator import ResizeOrchestrator
 from app.widgets.cards.settings.file_undo_card import FileUndoCard
-from app.widgets.file_undo_dialog import (
-    FileUndoPreviewDialog,
+from app.widgets.cards.floating.undo_delete_store import (
+    KIND_DELETE_ROUND,
+    KIND_UNDO_TO_ROUND,
+    UndoDeleteStore,
+    UndoEntry,
 )
 from app.widgets.message_card import (
     MessageCard,
@@ -166,7 +159,6 @@ from app.widgets.message_card import (
     create_welcome_card,
     resolve_initial_welcome_mode,
 )
-from app.widgets.simple_hover_tooltip import install_hover_tooltip, batch_install_hover_tooltips
 from app.widgets.ui_helpers import *
 from app.widgets.ui_helpers import (
     add_message_to_layout,
@@ -174,7 +166,6 @@ from app.widgets.ui_helpers import (
     clear_and_show_welcome,
     create_assistant_card_widget,
     delete_widgets_from_layout,
-    find_last_tool_call_id_after_round,
     find_user_round_index,
     get_first_file_operation,
     init_after_loading_session,
@@ -182,8 +173,7 @@ from app.widgets.ui_helpers import (
     invalidate_session_card_cache,
     log_deletion_stats,
     post_append_user_message,
-    refresh_history_card_if_visible,
-    refresh_session_view,
+    materialize_batch_with_extras,
     render_batch_to_assistant_card,
     restore_input_from_card,
     save_or_archive_session,
@@ -195,61 +185,34 @@ from app.widgets.ui_helpers import (
 
 
 # ───────────────────────────────────────────────────────────────────────────
-# 项目 icon tooltip 异步分支检测
+# 消息列表滚动：统一的「视口是否贴底」判定阈值（px）
 # ───────────────────────────────────────────────────────────────────────────
-class _BranchDetectSignals(QObject):
-    """后台 git 分支检测的信号桥接（后台线程 → 主线程）。"""
+# 历史债务：同一语义曾散落 5 套阈值（20 / 30 / 50 / 80），造成「上滚一点就被判
+# 离底、再动一点又判贴底」的状态抖动，是「强制滚动太多」体感的直接来源。
+# 全项目只允许存在这一个常量，判定一律走 MainWidget._is_view_at_bottom()。
+AT_BOTTOM_TOLERANCE = 24
 
-    finished = Signal(int, str)  # request_id, branch_name（空字符串=无分支/出错）
+# [PERF] 滚动条上界校正里 `container.sizeHint()` 计算结果的复用窗口（秒）。
+# sizeHint() 是一次 O(卡片数) 的完整布局计算，而「程序置底 → valueChanged →
+# _on_scroll_changed → _is_view_at_bottom → _sync_scroll_maximum」构成 20Hz 级
+# 自激回路，长会话下是「滚动不跟手」的主因。窗口内直接复用上次结果；
+# 高度收敛的及时性由 _ensure_at_bottom 的 8×300ms 重试链兜底。
+SCROLL_MAX_CACHE_TTL = 0.03
 
+# 「回到底部」胶囊的显示阈值（px）：视口离底超过它才浮出。
+# ⚠️ 故意比 AT_BOTTOM_TOLERANCE 大一个数量级 —— 两者语义不同：
+#   - AT_BOTTOM_TOLERANCE 问的是「还算贴底吗」（决定是否跟随流式输出）
+#   - SCROLL_JUMP_SHOW_THRESHOLD 问的是「值得给个按钮吗」
+# 共用阈值会让胶囊在跟随边界上反复闪现/消失。
+SCROLL_JUMP_SHOW_THRESHOLD = 120
 
-class _BranchDetectTask(QRunnable):
-    """异步 git 分支检测 worker。
-
-    设计动机：
-    - 旧实现 `subprocess.run(['git','branch','show-current'], timeout=3)`
-      阻塞主线程 0~3s，期间 tooltip 不更新（更新在函数末尾）
-    - 改为 QRunnable 后，tooltip 立即显示「项目名+路径」，
-      分支在后台完成后追加
-    - request_id 用于丢弃过期结果（用户连续切换项目时旧检测自动失效）
-    """
-
-    def __init__(self, workdir: str, request_id: int, signals: "_BranchDetectSignals"):
-        super().__init__()
-        self._workdir = workdir
-        self._request_id = request_id
-        self._signals = signals
-        self.setAutoDelete(True)
-
-    def run(self) -> None:
-        branch = ""
-        try:
-            if not self._workdir or not os.path.isdir(self._workdir):
-                pass
-            else:
-                from app.utils.git_worktree import GitWorktreeDetector
-
-                git_root = GitWorktreeDetector.detect_git(self._workdir)
-                if git_root:
-                    r = subprocess.run(
-                        ["git", "branch", "--show-current"],
-                        capture_output=True,
-                        text=True,
-                        cwd=self._workdir,
-                        timeout=3,
-                        encoding="utf-8",
-                        errors="replace",
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                    )
-                    if r.returncode == 0:
-                        branch = r.stdout.strip()
-        except Exception:
-            pass
-        try:
-            self._signals.finished.emit(self._request_id, branch)
-        except Exception:
-            # signals 可能在窗口销毁时被 GC，直接丢弃
-            pass
+# 宽度同步分帧批大小：实测 sync_width 约 1.4ms/张（setMin/MaxWidth 布局失效
+# + update_height 的 runJavaScript IPC），8 张 ≈ 11ms，低于单帧预算（16ms），
+# 保证批间让出主线程后 UI 无冻结感。
+# ⚠️ 故意放模块级而非类属性：热重载会把新方法应用到旧实例上，
+# 新增的类常量不在旧类里（self._SYNC_WIDTH_BATCH 会 AttributeError），
+# 模块级常量经函数 __globals__ 查找，新旧实例都安全。
+_SYNC_WIDTH_BATCH = 8
 
 
 class _ProjectUrlImportThread(QThread):
@@ -634,6 +597,23 @@ class _ThemedIconLabel(QWidget):
         self._icon.paint(painter, self.rect())
 
 
+def resolve_busy_behavior(behavior: str, inverse: bool) -> str:
+    """繁忙时行为判定：设置项 + Ctrl+Enter 互反（模块级纯函数便于测试）
+
+    Args:
+        behavior: 设置项值，"interject"（插话发送）或 "queue"（排队发送）；
+                  非法值回落 "interject"
+        inverse:  True 表示 Ctrl+Enter 触发，恒为设置项的另一行为
+
+    Returns:
+        "interject" 或 "queue"
+    """
+    base = behavior if behavior in ("queue", "interject") else "interject"
+    if inverse:
+        return "queue" if base == "interject" else "interject"
+    return base
+
+
 def _abort_team_window(win) -> None:
     """回收建窗成功但注册/join 失败的团队窗口（幽灵窗口兜底，E1/E2 共用）。
 
@@ -685,7 +665,7 @@ class ToolWindowTitleBar(QWidget):
         layout.setSpacing(4)
 
         self._icon_widget = IconWidget(self)
-        self._icon_widget.setFixedSize(16, 16)
+        self._icon_widget.setFixedSize(20, 20)
 
         self._title_label = QLabel(self)
         self._title_label.setObjectName("titleLabel")
@@ -785,12 +765,6 @@ class ToolWindowTitleBar(QWidget):
         self._action_layout.insertWidget(index, widget, stretch=stretch)
         self._custom_buttons.append(widget)
 
-    def remove_button(self, widget):
-        self._action_layout.removeWidget(widget)
-        if widget in self._custom_buttons:
-            self._custom_buttons.remove(widget)
-        widget.setParent(None)
-
     def _on_popup_clicked(self):
         self.popupRequested.emit()
 
@@ -869,10 +843,6 @@ class ToolWindow(QWidget):
 
     def _setup_title_bar(self):
         pass
-
-    def register_action_button(self, widget):
-        if self._title_bar:
-            self._title_bar.add_button(widget)
 
     def get_title_bar(self):
         return self._title_bar
@@ -1055,6 +1025,10 @@ class OpenAIChatToolWindow(ToolWindow):
     # resize 防抖间隔（（ms）：80ms 已足够覆盖感知刷新率，减少慢速 resize
     # 拖拽场景下的冗余布局重算（每帧比 16ms/32ms 少一次）。
     _RESIZE_DEBOUNCE_MS: int = 80
+    # 判定"视口内卡片"的上下缓冲（px）：resize 结束后该范围内的卡片一次性
+    # 恢复真实内容，其余离屏卡片分批恢复。缓冲略大于一屏可避免滚动时
+    # 立刻撞上尚未恢复的占位卡片。
+    _RESTORE_VISIBLE_BUFFER: int = 400
     # 新建任务：相邻成员窗口会话创建的交错间隔（C3，避免 N 窗同步链冻结 UI）
     _TEAM_NEW_TASK_STAGGER_MS: int = 50
     # 模板加载时待排列的新窗口计数（延迟 join 完成后递减，归零时触发自动排列）
@@ -1080,7 +1054,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # "provider_edit",
         # "mcp_edit",
         # "hook_edit",
-        "project_selector",
         "tool_control",
         "share",
         "history_questions",
@@ -1115,11 +1088,10 @@ class OpenAIChatToolWindow(ToolWindow):
         "team": "_handle_team_command",
         "toggle-window": "_handle_toggle_window_command",
         "clear": "_handle_clear_command",
+        "toggle-sidebar": "_handle_toggle_sidebar_command",
+        "toggle-workbench": "_handle_toggle_workbench_command",
     }
-    # git 分支缓存：类级共享（workdir → branch）。
-    # 同项目多窗口共享，避免重复 git 探测；信号路由仍由实例级 _branch_detect_signals
-    # 负责（不同窗口发起检测，结果需送回自己的槽，不能在类级）。
-    _branch_cache: Dict[str, str] = {}
+    # git 分支缓存已随工作树插件化迁入 plugins/worktree-manager（WorktreeService._branch_cache）
     # models.dev 动态数据缓存：类级共享（DynamicModelsResult）。
     # 多窗口只发一路网络请求，结果广播到全部活跃窗口。
     _models_dev_cache: Optional[object] = None
@@ -1152,6 +1124,12 @@ class OpenAIChatToolWindow(ToolWindow):
         # 无需重复执行同步子进程（最坏可达 3s 阻塞主线程，拖慢窗口出现速度）。
         self._is_duplicate_window = source_window is not None
         self._source_window = source_window
+        # 批4：per-window 延迟任务队列（必须在 super().__init__ 触发 setup_ui
+        # 之前创建：setup_ui 内 N9/N10/N11 的注册依赖此实例）
+        from app.core.deferred_task_queue import DeferredTaskQueue
+
+        self._deferred_queue = DeferredTaskQueue()
+        self._pending_agent_switch = None
         # ★ singleton 信号连接跟踪（销毁时统一断开，防泄漏）
         # 注意：self._singleton_connections 是纯 Python 属性，可先于 super().__init__()
         # 设置；但 self.destroyed 是 QObject 内置信号，其 .connect() 必须在父类
@@ -1162,11 +1140,15 @@ class OpenAIChatToolWindow(ToolWindow):
         super().__init__(homepage)
         # 父类 QObject.__init__ 已执行，此时连接 destroyed 信号安全
         self.destroyed.connect(self._disconnect_singleton_connections)
+        # 批4：窗口销毁 → 队列停止（未执行 critical 丢弃 + warning）
+        self.destroyed.connect(self._deferred_queue.stop)
         # 需要在 super().__init__() 之前初始化所有依赖项
         self.homepage = homepage  # 必须在 super() 之前设置，供 backend.initialize 使用
         self.cfg = Settings.get_instance()
         # 初始化当前项目（在 backend.initialize 之前）
         self._current_project = self.cfg.current_project.value or "默认项目"  # 当前项目
+        # 上次广播的项目上下文 (project, workdir)：EV_PROJECT_CHANGED 去重用
+        self._last_project_ctx: Optional[tuple] = None
         # 多窗口隔离：实例级工作目录缓存（{project: workdir_path}）
         # 优先级：实例缓存 > DB；DB 写入仅作为新窗口的默认恢复值
         self._current_workdir: Dict[str, str] = {}
@@ -1207,8 +1189,54 @@ class OpenAIChatToolWindow(ToolWindow):
             get_model_config=self._get_current_model_config,
             workdir=initial_workdir,
         )
-        # 🛡️ 将 controller 绑定到工具控制卡片(卡片在 super().__init__ 中已创建,
-        # 此时 controller 还没建好,需要延迟绑定)
+        # ── 批4：backend 延迟创建迁移至队列（N16-N19）+ 前置保护任务（4-0a/N21）──
+        q = self._deferred_queue
+        q.register(
+            "create_memory_manager",
+            lambda: self._safe_timer_call(self.backend._deferred_create_memory_manager),
+            priority="idle",
+            delay_ms=0,
+        )
+        q.register(
+            "create_tool_executor",
+            lambda: self._safe_timer_call(self.backend._deferred_create_tool_executor),
+            priority="critical",
+            delay_ms=200,
+        )
+        q.register(
+            "create_engines",
+            lambda: self._safe_timer_call(self.backend._deferred_create_engines),
+            priority="critical",
+            delay_ms=400,
+        )
+        q.register(
+            "create_sub_agent_and_misc",
+            lambda: self._safe_timer_call(self.backend._deferred_create_sub_agent_and_misc),
+            priority="idle",
+            delay_ms=600,
+        )
+        # 4-0a：ChatEngine(N18) 就绪后补执行暂存的智能体切换（O8）
+        q.register(
+            "apply_pending_agent",
+            lambda: self._safe_timer_call(self._apply_pending_agent_switch),
+            priority="critical",
+            delay_ms=0,
+        )
+        # N21：executor 就绪后 workdir 再同步（非复制/复制窗共用；O9）。
+        # T7 的 tool_executor_ready 信号兜底保留（双通道，showEvent 处连接）。
+        q.register(
+            "resync_workdir_after_executor",
+            lambda: self._safe_timer_call(self._sync_working_directory),
+            priority="critical",
+            delay_ms=0,
+        )
+        q.add_order_constraint("create_memory_manager", "create_tool_executor")  # O2
+        q.add_order_constraint("create_tool_executor", "create_engines")  # O3
+        q.add_order_constraint("create_engines", "apply_pending_agent")  # O8
+        q.add_order_constraint("create_tool_executor", "resync_workdir_after_executor")  # O9
+        q.start()
+        # 🛡️ 将 controller 绑定到工具控制卡片(批1 懒创建后卡片通常尚未创建，
+        # ensure 内为主绑定路径；此处仅兜底极端时序——卡片已建而 controller 后到)
         if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
             self._tool_control_card.set_controller(self._tool_permission_controller)
         # 注册子智能体默认模型解析回调（用于 subagent_para/dag 自动使用默认模型）
@@ -1243,8 +1271,15 @@ class OpenAIChatToolWindow(ToolWindow):
         # 值越大回收越保守（减少 WebEngine 重建），值越小内存越低
         self._virtual_scroll_buffer = 1
         self._message_batch: List[List[Dict[str, Any]]] = []
+        # [T5-5] 节点→batch 映射缓存：(指纹, mapping)。指纹变化自动失效，
+        # 无需在各 _message_batch 变更点手动清理
+        self._node_batch_map_cache = None
         # 存储每个batch对应的UI卡片：None表示已回收（只存数据不存UI）
         self._batch_cards: List[Optional[List[MessageCard]]] = []
+        # 卸载批次后留在原位的等高空白占位：batch_idx → spacer。
+        # 见 `_install_batch_placeholder` —— 没有它，回收会让容器高度瞬间塌陷，
+        # 随后卡片高度再异步上报，与滚底重试链叠加成长对话滚动期抖动。
+        self._batch_placeholders: Dict[int, QWidget] = {}
         # 前缀和缓存：_user_prefix[i] = 前 i 个 batch 中有多少个 user（用于 O(1) 的 round_index 计算）
         self._user_prefix_cache: List[int] = []
         self._visible_batch_start = 0
@@ -1284,11 +1319,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._opencode_models_ready.connect(self._on_opencode_models_ready)
         # 线程安全桥接：models.dev 动态数据后台刷新结果回主线程
         self._models_dev_ready.connect(self._on_models_dev_ready)
-        # 线程安全桥接：后台 git 分支检测结果回主线程
-        self._branch_detect_signals = _BranchDetectSignals()
-        self._branch_detect_signals.finished.connect(self._on_branch_detected)
-        self._branch_detect_request_id = 0
-        # _branch_cache 已上提类级 OpenAIChatToolWindow._branch_cache（共享）
+        # 分支检测信号/缓存已随工作树插件化迁入 plugins/worktree-manager（BranchChip per-window 状态）
         self._pending_scroll_to_bottom = False
         self._bottom_anchor_deadline = 0.0
         self._last_visible_user_pair_index = -1
@@ -1309,6 +1340,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._team_agent_name: str = ""  # 团队模式下的 agent 名称，空=非团队模式
         self._team_name: str = ""  # 团队名（TeamManager 模板名），空=非团队模式；供 Tab 分组使用
         self._team_run_id: str = ""  # 团队运行标识（方案 A：/team --load 生成，团队会话自动保存时落库），空=非团队模式
+
+        # ── 繁忙时排队消息（内存态，不持久化；切会话清空）──
+        self._pending_message_queue: list = []  # [{id, text, image_paths}]
+        self._pending_message_seq: int = 0
 
         # [PERF] 底部锚定定时器：100ms 已足够维持粘性滚底
         self._bottom_anchor_timer = QTimer(self)
@@ -1343,11 +1378,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_session_hook = False
         self._loading_session = False  # 加载会话标志，用于懒渲染期间保持滚动位置
         self._initial_scroll_to_bottom = False  # 首次滚底标记：只在首次强制滚底，后续只有用户在底部才继续
-        self._user_intentionally_away_from_bottom = False  # 用户主动滚上去标记
-        # 🆕 流式结束滚底宽限截止（monotonic 时间戳，0 = 无宽限）：
-        # 流式刚结束 2s 内忽略 _user_intentionally_away_from_bottom 拦截，
-        # 防止用户流式中途上滚导致结束时的兜底滚底被跳过（详见 _ensure_at_bottom）。
-        self._stream_finished_grace_until: float = 0.0
+        # 用户主动滚上去标记。置/复位只在 `_on_scroll_changed`（用户真实滚动）
+        # 与 `_reset_bottom_follow`（用户点击发送 / 切会话 / 清空聊天区）两处；
+        # 判定一律走 `_should_follow_bottom()`。禁止在别处直接读写这个标志。
+        self._user_intentionally_away_from_bottom = False
         self._pending_lazy_cards: List[MessageCard] = []  # 待处理的懒渲染卡片队列
         self._lazy_batch_timer_active = False  # 懒批量渲染定时器是否已激活，防止重复调度
         # resize 防抖定时器 - 性能优化：32ms（~30fps）已足够覆盖感知刷新率
@@ -1361,8 +1395,22 @@ class OpenAIChatToolWindow(ToolWindow):
         self._resize_complete_timer.setSingleShot(True)
         self._resize_complete_timer.setInterval(100)  # resize 结束后尽快恢复真实内容
         self._resize_complete_timer.timeout.connect(self._sync_all_cards_width)
-        self._pending_resize_sync = False
         self._resize_preview_active = False
+        # [L1] 高度批量提交器：惰性创建（依赖 chat_scroll_area 就绪）
+        self._height_batch: HeightCommitBatch | None = None
+        # #31 侧栏/工作台宽度动画期间由宿主置 True：动画每帧 resize 对话区，
+        # 但不应把卡片 WebView 藏进静态预览（用户要求中间区域原样实时显示）。
+        # 宽度同步仍由上方防抖定时器在动画结束后一次完成。
+        self._suppress_resize_preview = False
+        # 🐛 恢复链代次：每轮 resize 递增，用于作废旧的单次恢复链。
+        # 没有它时连续拖拽会并存多条链，互相清空 _restore_queue，
+        # 导致部分卡片永久停留在 placeholder 空白态。
+        self._restore_epoch = 0
+        self._restore_queue = []
+        self._restore_batch_idx = 0
+        # ⚡ 宽度同步分帧链状态（见 _sync_all_cards_width 注释）
+        self._sync_width_queue: list = []
+        self._sync_width_idx = 0
         self._last_chat_viewport_width = 0
         # [PERF] 滚动同步定时器：100ms 已足够跟踪滚动停止
         self._scroll_sync_timer = QTimer(self)
@@ -1393,8 +1441,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_scroll_to_index: Optional[int] = None  # 时间线节点滚动目标索引
         self._pending_scroll_to_batch: Optional[int] = None  # 时间线节点滚动目标 batch 索引
         self._pending_scroll_to_update: Optional[int] = None  # 待更新的节点索引（用于同步高亮和进度）
-        # 撤销删除功能：删除消息的缓存栈
-        self._undo_delete_stack: List[Dict[str, Any]] = []  # 每个元素包含 deleted_messages, round_index, widgets
+        # 撤销删除功能：回退条目栈由 input_card_module 创建（_undo_delete_store），
+        # 这里不再声明 —— 旧字段 _undo_delete_stack 是「声明为缓存栈但全仓零引用」
+        # 的死代码，单步缓存 _undo_delete_cache 也已被类型化栈取代。
 
         self._current_session_id = self.session_manager.get_current_session().session_id
 
@@ -1453,7 +1502,13 @@ class OpenAIChatToolWindow(ToolWindow):
         # 避免每个后台 tab 都全量构建重型卡片。
         self._deferred_build_pending = False
         self._settings_popup_pending = False
-        QTimer.singleShot(800, self._deferred_build_cards)
+        # 批4 N9：迁移至队列（O4：init_ui_plugins_deferred 之后）
+        self._deferred_queue.register(
+            "deferred_build_cards",
+            lambda: self._safe_timer_call(self._deferred_build_cards),
+            priority="idle",
+            delay_ms=800,
+        )
 
     # 全局标志：自动更新检查在整个应用生命周期内只触发一次
     _global_auto_update_checked = False
@@ -1469,7 +1524,7 @@ class OpenAIChatToolWindow(ToolWindow):
         for signal, slot in self._singleton_connections:
             try:
                 signal.disconnect(slot)
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
         self._singleton_connections.clear()
 
@@ -1541,6 +1596,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "stream_started": self._on_stream_started,
             "stream_finished": self._on_stream_finished,
             "messages_updated": self._on_messages_updated,
+            "queued_user_injected": self._on_queued_user_injected,
             "error": self._on_engine_error,
             "skill_requested": self._on_skill_requested,
             "question_asked": self._on_question_asked,
@@ -1592,40 +1648,37 @@ class OpenAIChatToolWindow(ToolWindow):
         # 绑定容器到 CardManager（传入窗口ID用于隔离）
         self._top_card_container.bind_card_manager(mgr, self._window_id)
         self._bottom_card_container.bind_card_manager(mgr, self._window_id)
+        # L1 补全容器：command/file_mention 在 input_card 模块里注册到它
+        self._completion_container.bind_card_manager(mgr, self._window_id)
 
         # ===== TopCardContainer (chatscroll 上方) =====
         # 系统配置卡片，互斥显示
 
+        # 项目选择卡片已迁入 history-manager 插件（左侧停靠区历史卡内可折叠面板），
+        # 宿主不再注册 TOP 容器卡片；项目数据/切换方法仍由本窗口实现。
         # 注：mcp_edit/provider_edit/hook_edit 三张编辑卡片已改为懒创建，
         # 注册/入容器在 _ensure_xxx_card() 中按需执行，避免 setup_ui 关键路径上构建。
 
-        # 项目选择卡片（Top 容器，与 settings 同容器互斥）
-        mgr.register_card(
-            self._window_id,
-            ContainerType.TOP,
-            "project_selector",
-            self._project_selector_card,
-            system_card=True,
-        )
-        self._top_card_container.add_card("project_selector", self._project_selector_card)
-
         # ===== BottomCardContainer (chatscroll 下方) =====
-        # Question: 强制覆盖所有其他卡片
+        # Question: 强制覆盖所有其他卡片（批1 懒创建：注册/入容器移入
+        # _ensure_question_floating_widget()，弹出链入口兜底）
         # Tool/SubAgent: 实时卡片
         # History/Memory/ModelConfig: 系统卡片
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "question",
-            self._question_floating_widget,
-        )
-        self._bottom_card_container.add_card("question", self._question_floating_widget)
 
         mgr.register_card(
             self._window_id,
             ContainerType.BOTTOM,
             "sub_agent_compact",
             self._sub_agent_compact_widget,
+            layer="status",
+            stackable=True,
+            order_hint=10,
+            # 谓词 = 批次仍活跃且仍有任务行。卡片自身的 _auto_hide / 手动关闭
+            # 都会 closed.emit() → _on_sub_agent_compact_closed → _batch_started=False，
+            # 因此"卡片已结束"与谓词为假严格对应，不会被 refresh_layer 复活。
+            visible_when=lambda: bool(
+                self._sub_agent_compact_widget._batch_started and self._sub_agent_compact_widget._task_rows
+            ),
         )
         self._bottom_card_container.add_card("sub_agent_compact", self._sub_agent_compact_widget)
 
@@ -1633,14 +1686,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 六张系统卡片框架已懒创建（P0-1），注册/入容器在各自 _ensure_xxx_card() 中执行，
         # 由 _deferred_build_cards 链预构建 + 打开入口兜底，避免 setup_ui 关键路径开销。
 
-        mgr.register_card(
-            self._window_id,
-            ContainerType.BOTTOM,
-            "tool_control",
-            self._tool_control_card,
-            system_card=True,
-        )
-        self._bottom_card_container.add_card("tool_control", self._tool_control_card)
+        # 注：tool_control 卡批1 懒创建，注册/入容器在 _ensure_tool_control_card() 中执行，
+        # _toggle_tool_control_card 入口兜底。
 
         # 注：model_selector 卡片框架懒创建，注册/入容器见 _ensure_model_selector_card()
 
@@ -1649,34 +1696,70 @@ class OpenAIChatToolWindow(ToolWindow):
     # 由 _deferred_build_cards 链（800ms 后）预构建 + 卡片打开入口 ensure 兜底，
     # 保证「打开卡片 → 框架已就绪」行为不变。属性名/注册语义与改造前完全一致。
 
+    # ── 历史会话页（已插件化：history-manager 插件的工作台页） ──
+
+    def _history_service(self):
+        """取 history-manager 插件服务（未加载 / 未实现时 None）"""
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            return UIPluginRegistry.get_instance().get_service("history")
+        except Exception:
+            return None
+
+    def _is_active_window(self) -> bool:
+        """本窗口是否为 Tab 管理器当前活跃窗口（单例工作台的投影源）"""
+        try:
+            tm = TabManagerWindow.get_instance()
+            if tm is None:
+                return True  # 无 Tab 管理器（单窗口场景）视为活跃
+            return tm.get_current_window() is self
+        except Exception:
+            return True
+
+    @property
+    def _history_card(self):
+        """历史会话页（插件工作台页）；插件未加载时为 None
+
+        ★ 只读代理：页面归工作台面板所有（单例，跟随活跃窗口投影），
+        窗口不再持有自己的 HistoryPage。旧代码的 ``self._history_card = None``
+        初始化写入由 setter 吞掉（见下）。
+        """
+        svc = self._history_service()
+        return svc.page if svc is not None else None
+
+    @_history_card.setter
+    def _history_card(self, value) -> None:
+        """兼容旧初始化路径（``system_cards_module`` 置 None）；插件化后忽略写入"""
+        return
+
+    @property
+    def _history_popup_card(self):
+        """会话列表卡片（插件页面自带）；插件未加载时为 None"""
+        svc = self._history_service()
+        return svc.card if svc is not None else None
+
+    @_history_popup_card.setter
+    def _history_popup_card(self, value) -> None:
+        return
+
     def _ensure_history_card(self):
-        """确保历史会话卡片框架已创建（内容由 _build_deferred_card_history 填充）"""
-        if self._history_card is not None:
+        """确保「历史会话」工作台页已挂载（插件化：reconcile 插件页签）
+
+        历史会话已从对话区底部卡片迁移到右侧工作台，并进一步拆分为
+        ``plugins/history-manager`` 独立插件（``page_id="history-manager"``）。
+        本方法只做「触发工作台页签 reconcile」，页面由面板按插件注册表构建。
+        """
+        tm = TabManagerWindow.get_instance()
+        panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+        if panel is None:
             return
-        self._history_card = BaseSettingsCard("历史会话", "📜", self)
-        self._history_card.setMinimumHeight(300)  # 自适应窗口高度
-        # 设置历史/归档标签
-        self._history_card.setup_tabs(
-            [
-                ("history", "历史会话"),
-                ("archived", "归档"),
-            ],
-            "history",
-        )
-        # 强制触发首次 tab 渲染
-        self._history_card.tabChanged.connect(self._on_history_tab_changed)
-        self._history_card.set_current_tab("history")
-        self._history_card.setVisible(False)
-        self._history_card.closed.connect(
-            lambda: (
-                self._card_manager.hide_card("history", self._window_id),
-                self._restore_after_system_close(),
-            )
-        )
-        self._card_manager.register_card(
-            self._window_id, ContainerType.BOTTOM, "history", self._history_card, system_card=True
-        )
-        self._bottom_card_container.add_card("history", self._history_card)
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            panel.sync_plugin_pages(UIPluginRegistry.get_instance().get_workbench_tabs())
+        except Exception:
+            logger.exception("[MainWidget] 历史会话页挂载到工作台失败")
 
     def _ensure_share_card(self):
         """确保分享卡片框架已创建（内容由 _build_deferred_card_share 填充）"""
@@ -1706,35 +1789,64 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         self._top_card_container.add_card("history_questions", self._history_questions_card)
 
-    def _ensure_memory_card(self):
-        """确保记忆管理卡片框架已创建（内容由 _build_deferred_card_memory 填充）"""
-        if self._memory_card is not None:
+    def _ensure_tool_control_card(self):
+        """工具控制卡片懒创建（批1）：构造/接线/注册按需执行
+
+        原 system_cards_module.build 构造期同步创建（卡+下拉+内容区，关键路径开销），
+        现由入口（_toggle_tool_control_card / refresh / controller 绑定兜底）ensure。
+        """
+        if getattr(self, "_tool_control_card", None) is not None:
             return
-        self._memory_card = BaseSettingsCard("记忆管理", "🧠", self)
-        self._memory_card.setMinimumHeight(300)  # 自适应窗口高度
-        # 设置记忆管理标签（条目记忆/项目笔记/关键文档）
-        self._memory_card.setup_tabs(
-            [
-                ("entries", "条目记忆"),
-                ("notes", "项目笔记"),
-                ("docs", "关键文档"),
-            ],
-            "entries",
-        )
-        self._memory_card.tabChanged.connect(self._on_memory_tab_changed)
-        # 强制触发首次 tab 渲染
-        self._memory_card.set_current_tab("entries")
-        self._memory_card.setVisible(False)
-        self._memory_card.closed.connect(
+        from app.widgets.cards.settings.tool_control_card import ToolControlCardFrame
+
+        self._tool_control_card = ToolControlCardFrame(self)
+        self._tool_control_card.setObjectName("toolControlCard")
+        self._tool_control_card.setMinimumHeight(250)
+        self._tool_control_card.setVisible(False)
+        self._tool_control_card.closed.connect(
             lambda: (
-                self._card_manager.hide_card("memory", self._window_id),
+                self._card_manager.hide_card("tool_control", self._window_id),
                 self._restore_after_system_close(),
             )
         )
-        self._card_manager.register_card(
-            self._window_id, ContainerType.BOTTOM, "memory", self._memory_card, system_card=True
-        )
-        self._bottom_card_container.add_card("memory", self._memory_card)
+        self._tool_control_card.togglesChanged.connect(lambda _: self._refresh_tool_toggle_btn())
+        # controller 若已就绪（__init__ 早期创建，常规路径恒成立）立即绑定
+        if getattr(self, "_tool_permission_controller", None) is not None:
+            self._tool_control_card.set_controller(self._tool_permission_controller)
+        if not getattr(self, "_tool_control_registered", False):
+            self._tool_control_registered = True
+            self._card_manager.register_card(
+                self._window_id,
+                ContainerType.BOTTOM,
+                "tool_control",
+                self._tool_control_card,
+                system_card=True,
+            )
+            self._bottom_card_container.add_card("tool_control", self._tool_control_card)
+
+    def _ensure_question_floating_widget(self):
+        """问题悬浮卡懒创建（批1）：构造/接线/注册按需执行
+
+        弹出链入口（_on_question_asked / _on_permission_approval_requested）兜底 ensure。
+        """
+        if getattr(self, "_question_floating_widget", None) is not None:
+            return
+        from app.widgets.cards.floating.question_floating_widget import QuestionFloatingWidget
+
+        self._question_floating_widget = QuestionFloatingWidget(self)
+        self._question_floating_widget.setVisible(False)
+        self._question_floating_widget.answered.connect(self._on_question_answered)
+        self._question_floating_widget.cancelled.connect(self._on_question_cancelled)
+        self._question_floating_widget.previewRequested.connect(self._on_question_preview_requested)
+        if not getattr(self, "_question_floating_registered", False):
+            self._question_floating_registered = True
+            self._card_manager.register_card(
+                self._window_id,
+                ContainerType.BOTTOM,
+                "question",
+                self._question_floating_widget,
+            )
+            self._bottom_card_container.add_card("question", self._question_floating_widget)
 
     def _ensure_model_config_card(self):
         """确保模型配置卡片框架已创建（内容由 _build_deferred_card_model_config 填充）"""
@@ -1776,7 +1888,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._model_selector_card is not None:
             return
         self._model_selector_card = BaseSettingsCard("", "", self)
-        self._model_selector_card.setMinimumHeight(250)  # 自适应窗口高度
+        # 最小可见下限（对齐 SystemCardFrame._MIN_CARD_VISIBLE_H）：窗口极矮时
+        # 布局需要能压缩卡片，过大下限会顶破可用空间导致卡片底部被窗口裁掉
+        self._model_selector_card.setMinimumHeight(120)
         self._model_selector_card.setVisible(False)
         self._model_selector_card.closed.connect(
             lambda: (
@@ -1845,7 +1959,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._build_deferred_card_history,
             self._build_deferred_card_share,
             self._build_deferred_card_history_questions,
-            self._build_deferred_card_memory,
             self._build_deferred_card_model_config,
             self._build_deferred_card_model_selector,
         ]
@@ -1859,34 +1972,16 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(0, step)
 
     def _build_deferred_card_history(self):
-        """── ① 历史会话卡片 ──"""
-        try:
-            from app.widgets.cards.settings.history_card import HistoryCard
+        """── ① 历史会话页（已插件化：仅确保工作台页签已 reconcile） ──
 
-            self._ensure_history_card()  # P0-1：框架惰性创建
-            self._history_popup_card = HistoryCard()
-            self._history_popup_card.sessionSelected.connect(self._on_history_session_selected)
-            self._history_popup_card.sessionArchived.connect(self._archive_history_session)
-            self._history_popup_card.sessionRenamed.connect(self._rename_history_session)
-            self._history_popup_card.refreshRequested.connect(self._refresh_history_toggle_panel)
-            self._history_popup_card.sessionImported.connect(self._on_session_imported)
-            self._history_popup_card.sessionRestored.connect(self._on_archived_session_restored)
-            self._history_popup_card.sessionPermanentlyDeleted.connect(self._on_archived_session_deleted)
-            self._history_popup_card.archivedSessionRenamed.connect(self._on_archived_session_renamed)
-            self._history_popup_card.teamRestoreRequested.connect(self._on_team_restore_requested)
-            self._history_popup_card.teamArchiveRequested.connect(self._on_team_archive_requested)
-            self._history_popup_card.memberSelected.connect(self._on_team_member_selected)
-            self._history_card.set_extra_button_handler(
-                self._history_popup_card.get_import_button_handler(),
-                tooltip="导入会话",
-            )
-            self._history_card.content_layout.addWidget(self._history_popup_card)
-            self._history_card.set_search_handler(
-                "🔍 搜索会话...",
-                lambda text: self._history_popup_card.set_search_filter(text),
-            )
+        页面本体（``HistoryPage`` + ``HistoryCard``）归 ``history-manager``
+        插件所有，由工作台面板按插件注册表构建；窗口侧不再创建卡片、不再
+        接线信号（页内信号由插件页转发回窗口方法）。
+        """
+        try:
+            self._ensure_history_card()
         except Exception:
-            logger.exception("[DeferredBuild] HistoryCard 构建失败")
+            logger.exception("[DeferredBuild] 历史会话页 reconcile 失败")
         finally:
             self._schedule_next_deferred_card()
 
@@ -1913,26 +2008,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._history_questions_card.content_layout.addWidget(self._history_questions_card_content)
         except Exception:
             logger.exception("[DeferredBuild] HistoryQuestionsCard 构建失败")
-        finally:
-            self._schedule_next_deferred_card()
-
-    def _build_deferred_card_memory(self):
-        """── ④ 记忆管理卡片 ──"""
-        try:
-            from app.widgets.cards.settings.memory_card import MemoryCardContent
-
-            self._ensure_memory_card()  # P0-1：框架惰性创建
-            self._memory_card_popup = MemoryCardContent(self.backend.memory_manager, self)
-            self._memory_card_popup.memorySaved.connect(self._on_memory_card_saved)
-            self._memory_card_popup.workingDirChanged.connect(self._on_working_dir_changed)
-            self._memory_card_popup.set_project(self._current_project)
-            self._memory_card.content_layout.addWidget(self._memory_card_popup)
-            self._memory_card.set_search_handler(
-                "🔍 搜索条目记忆...",
-                lambda text: self._memory_card_popup.set_search_filter(text),
-            )
-        except Exception:
-            logger.exception("[DeferredBuild] MemoryCard 构建失败")
         finally:
             self._schedule_next_deferred_card()
 
@@ -1988,12 +2063,6 @@ class OpenAIChatToolWindow(ToolWindow):
         cc = get_global_card_controller()
         if cc is not None:
             cc.toggle_settings()
-
-    def _open_api_docs(self):
-        """打开 API 文档页面"""
-        from app.gateway import open_docs
-
-        open_docs()
 
     def _safe_duplicate_window(self, branch: bool = False):
         """安全包装 _duplicate_window，确保任何异常都不会传播到 PySide6 信号槽链
@@ -2281,16 +2350,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同时避免鼠标/动画等高频事件长时间占住主线程）。
         QApplication.processEvents(QEventLoop.AllEvents, 5)
 
-    def _get_chat_cards_for_engine(self):
-        cards = []
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if item and item.widget():
-                widget = item.widget()
-                if isinstance(widget, MessageCard):
-                    cards.append(widget)
-        return cards
-
     def _ensure_thinking_fields(self, config: dict):
         """以 models.dev / 模型能力为准，确保思考字段与模型实际能力一致。
 
@@ -2406,6 +2465,26 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 判断是否为复制/分支窗口（__init__ 中通过 source_window 参数设置）
         is_duplicate = getattr(self, "_is_duplicate_window", False)
+        q = self._deferred_queue
+
+        # 🐛 修复（启动时工作目录未定义）：workdir 同步提前到会话创建之前执行。
+        # 原先非复制窗口延迟 2000ms，而会话创建 QTimer(0) 先跑：0~2s 窗口内
+        # _current_workdir 缓存为空 + frozen 环境 initial_workdir=None，欢迎卡/
+        # 工作台/插件 UI 读 project_root 全拿到空串（"workdir unset" 警告），
+        # 手动切换项目后才恢复。_sync_working_directory 在团队/项目切换路径本就
+        # 被同步调用（内部全量判空，安全性已验证）；singleShot(0) 在下一轮
+        # 事件循环执行，不阻塞首帧绘制。singleShot 同延迟按注册顺序执行，
+        # 故此调用必须先于下方会话加载定时器注册。
+        if not is_duplicate:
+            # 批4 N1：早同步（executor 未就绪时判空空转，真正同步由 N21 承担）
+            q.register(
+                "sync_working_directory",
+                lambda: self._safe_timer_call(self._sync_working_directory),
+                priority="critical",
+                delay_ms=0,
+            )
+            # 信号兜底（批4 附言：与 N21 双通道，sync 幂等无害）
+            self.backend.tool_executor_ready.connect(self._on_tool_executor_ready_for_sync)
 
         # 如果有分支数据，延迟调用分支会话处理，避免与 _restore_latest_or_create_session 冲突
         # 注：_load_agent_list 由 _create_new_session / _apply_branch_or_create_session 内部调用，此处不需要重复触发
@@ -2413,9 +2492,19 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🆕 流式保护：由 TabManagerWindow.spawn_tab 注入的目标历史会话，
             # 直接加载，跳过默认空会话创建，避免历史列表出现多余空会话。
             _rec = self._target_session_record
-            QTimer.singleShot(50, lambda: self._safe_timer_call(lambda: self._load_session_from_record(_rec)))
+            q.register(
+                "load_session_from_record",
+                lambda: self._safe_timer_call(lambda: self._load_session_from_record(_rec)),
+                priority="critical",
+                delay_ms=50,
+            )
         elif getattr(self, "_branch_session_data", None):
-            QTimer.singleShot(50, lambda: self._safe_timer_call(self._apply_branch_or_create_session))
+            q.register(
+                "apply_branch_or_create_session",
+                lambda: self._safe_timer_call(self._apply_branch_or_create_session),
+                priority="critical",
+                delay_ms=50,
+            )
         else:
             # 🆕 4a：创建团队场景——4 个窗口 add_window→showEvent 全在同一事件循环批次内
             # 排队，全部 QTimer(0) 会让 SessionStart→BuildSystemPrompt hook 背靠背同步
@@ -2423,31 +2512,71 @@ class OpenAIChatToolWindow(ToolWindow):
             # 提前写入 _initial_session_delay_ms（默认 0 行为不变），使各窗的
             # _create_new_session 错峰触发，UI 在创建期间可响应。
             _init_session_delay = int(getattr(self, "_initial_session_delay_ms", 0) or 0)
-            QTimer.singleShot(_init_session_delay, lambda: self._safe_timer_call(self._create_new_session))
+            q.register(
+                "create_new_session",
+                lambda: self._safe_timer_call(self._create_new_session),
+                priority="critical",
+                delay_ms=_init_session_delay,
+            )
 
         # 性能优化：复制窗口已从源窗口复制了 _valid_configs 和 workdir，
         # 跳过从磁盘重载模型配置和工作目录，直接进入完成状态
         if is_duplicate:
-            QTimer.singleShot(0, lambda: self._safe_timer_call(self._on_initialization_complete))
+            q.register(
+                "initialization_complete",
+                lambda: self._safe_timer_call(self._on_initialization_complete),
+                priority="critical",
+                delay_ms=0,
+            )
             # 【按项目定义】复制窗口 workdir 同步：
             # _duplicate_window 不再复制源窗口 workdir（tool_executor 延迟创建
-            # 时 set_workdir 也会被跳过），此处延迟到 tool_executor 创建后，
-            # 由 _sync_working_directory 按当前项目从 DB 读取项目定义的工作目录
+            # 时 set_workdir 也会被跳过），需等 tool_executor 就绪后由
+            # _sync_working_directory 按当前项目从 DB 读取项目定义的工作目录
             # （_current_workdir 为空 → get_working_directory 兜底 → 临时目录），
             # 保证 project_root 与项目一致，且复制链不传播错误路径。
-            QTimer.singleShot(500, lambda: self._safe_timer_call(self._sync_working_directory))
+            # 批4 N6：复制窗 workdir 同步由 N21（resync_workdir_after_executor，
+            # O9 保证 executor 已就绪）承担，不再有独立定时注册；T7 信号兜底保留。
+            self.backend.tool_executor_ready.connect(self._on_tool_executor_ready_for_sync)
         else:
             # [PERF] 延迟非关键初始化到窗口首帧绘制之后，让用户先看到可交互的 UI
             # _load_model_configs 遍历所有服务商配置（50-200ms），
             # _sync_working_directory 文件系统检测（20-50ms），
             # 均匀分散到 1.5s-2.5s 窗口内，避免同时爆发导致 UI 冻结
-            QTimer.singleShot(1500, lambda: self._safe_timer_call(self._load_model_configs))
-            # 初始化当前项目的工作目录
-            QTimer.singleShot(2000, lambda: self._safe_timer_call(self._sync_working_directory))
-            # 初始化完成后解除保护
-            QTimer.singleShot(2500, lambda: self._safe_timer_call(self._on_initialization_complete))
+            q.register(
+                "load_model_configs",
+                lambda: self._safe_timer_call(self._load_model_configs),
+                priority="idle",
+                delay_ms=1500,
+            )
+            # 工作目录同步已提前到上方 N1（先于会话创建，修复启动时
+            # workdir 未定义），此处不再重复调度。
+            # 初始化完成后解除保护（N8 屏障：critical 全完成后执行）
+            q.register(
+                "initialization_complete",
+                lambda: self._safe_timer_call(self._on_initialization_complete),
+                priority="critical",
+                delay_ms=2500,
+            )
+        # ── 批4：保序约束（O1/O4/O5）+ 屏障（O7）+ 启动（幂等）──
+        q.add_order_constraint("sync_working_directory", "load_session_from_record")  # O1
+        q.add_order_constraint("sync_working_directory", "apply_branch_or_create_session")  # O1
+        q.add_order_constraint("sync_working_directory", "create_new_session")  # O1
+        q.add_order_constraint("init_ui_plugins_deferred", "deferred_build_cards")  # O4
+        q.add_order_constraint("models_dev_sync", "load_model_configs")  # O5
+        q.set_barrier("initialization_complete")  # O7
+        q.start()
+
         self._connect_opacity_signal()
         super().showEvent(event)
+
+    def _on_tool_executor_ready_for_sync(self):
+        """tool_executor 延迟创建完成后：执行复制窗口的 workdir 同步。
+
+        原 QTimer(500) 固定等待的事件驱动替代。singleShot(0) 排到下一轮事件
+        循环，让创建批收尾（set_llm_config_getter 等后续装配）先行完成。
+        receiver=self，窗口销毁时 Qt 自动断开连接。
+        """
+        QTimer.singleShot(0, lambda: self._safe_timer_call(self._sync_working_directory))
 
     def _on_initialization_complete(self):
         """初始化完成后调用，解除保护标志"""
@@ -2460,12 +2589,28 @@ class OpenAIChatToolWindow(ToolWindow):
         # 复制/分支窗口的 _valid_configs（含模型列表）已在 _duplicate_window 中
         # 从源窗口直接复制，不需要再重新拉取 OpenCode 免费模型列表，避免冗余网络请求和日志
         if not getattr(self, "_is_duplicate_window", False):
-            QTimer.singleShot(3000, lambda: self._safe_timer_call(self._async_refresh_opencode_models))
+            # 批4 N14/N15：迁移至队列（屏障后动态注册）
+            self._deferred_queue.register(
+                "opencode_model_refresh",
+                lambda: self._safe_timer_call(self._async_refresh_opencode_models),
+                priority="idle",
+                delay_ms=3000,
+            )
             # 设置弹窗在 3500ms 构建，提醒在 5s 后弹（确保弹窗已就绪）
-            QTimer.singleShot(5000, lambda: self._safe_timer_call(self._check_gitee_sync_reminder))
-        # models.dev 动态数据后台预热（内存缓存未填充才发网络，模块级单飞去重；
-        # 早于 1500ms _load_model_configs 的首次主线程读取，UI 路径零阻塞）
-        QTimer.singleShot(1000, lambda: self._safe_timer_call(self._start_models_dev_sync))
+            self._deferred_queue.register(
+                "gitee_sync_reminder",
+                lambda: self._safe_timer_call(self._check_gitee_sync_reminder),
+                priority="idle",
+                delay_ms=5000,
+            )
+        # 批4 N13：models.dev 动态数据后台预热（内存缓存未填充才发网络，模块级
+        # 单飞去重；早于 1500ms _load_model_configs 的首次主线程读取，UI 零阻塞）
+        self._deferred_queue.register(
+            "models_dev_sync",
+            lambda: self._safe_timer_call(self._start_models_dev_sync),
+            priority="idle",
+            delay_ms=1000,
+        )
 
     @classmethod
     def _on_class_cleanup_timer(cls):
@@ -2596,9 +2741,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新历史会话卡片
         if self._history_card:
             self._history_card.set_opacity(opacity)
-        # 更新记忆管理卡片
-        if self._memory_card:
-            self._memory_card.set_opacity(opacity)
         # 更新设置卡片
         if self._settings_popup:
             self._settings_popup.set_opacity(opacity)
@@ -2693,6 +2835,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 清空批量渲染索引，防止虚拟滚动定时器触发的回收访问已移出布局的旧卡片
         self._batch_cards = []
         self._message_batch = []
+        self._node_batch_map_cache = None  # [T5-5] 指纹自动失效，此处显式重置双保险
         self._visible_batch_start = 0
         self._visible_batch_end = 0
         self._virtual_scroll_timer.stop()
@@ -2825,12 +2968,14 @@ class OpenAIChatToolWindow(ToolWindow):
         theme_manager.register_refresh_target(self)
         # 动态更新主题选项
         update_theme_options()
-        # 模块级 override 前置：必须在 compose 前注册 UI 插件，否则 register_ui_module
-        # (priority=100) 晚于 compose 生效，override 被系统版（priority=0）覆盖。
-        # 首帧后 _init_ui_plugins_deferred 仍会调用本方法，但 registry 单例已加载会跳过，
-        # 仅执行其后的命令重注册等窗口级初始化。
-        self._load_all_ui_plugins()
-        # Phase F：注册 5 个系统 UI 模块（瘦版占位；插件可 register_ui_module override）
+        # T5-2R：插件全量加载已移出首帧（首帧后 _init_ui_plugins_deferred 统一执行：
+        # 加载 + 命令重注册 + 浮动卡 handler + 输入区按钮 + 共享 Launcher 刷新补挂）。
+        # setup_ui 期间 compose 仅消费系统模块（_register_system_ui_modules 注册），
+        # 侧边栏/顶部 tab 的插件项由补挂的 _update_shared_launcher 延迟刷新。
+        # 已知边界：①插件欢迎卡首启不生效（构建期读取+按窗口缓存，切会话/软刷新恢复）；
+        # ②用户自定义插件若走 register_ui_module override 协议，延迟后 override 失效
+        # （compose 一次性），项目自带插件不受影响。
+        # Phase F：注册 5 个系统 UI 模块（瘦版占位）
         _register_system_ui_modules()
 
         layout = QVBoxLayout(self)
@@ -2840,6 +2985,10 @@ class OpenAIChatToolWindow(ToolWindow):
         # 创建卡片容器
         self._top_card_container = TopCardContainer()
         self._bottom_card_container = BottomCardContainer()
+        # L1 输入补全容器（命令卡/文件提及卡）：由本窗口持有，装配点在
+        # setup_ui 末尾与 _bottom_input_container 相邻，保证"补全浮层紧贴输入框上方"
+        # 在 chat_area 默认实现与插件 override 两条路径下都成立。
+        self._completion_container = CompletionCardContainer()
 
         # ── 对话框背景完全透明 ──
         # 不再为 OpenAIChatToolWindow 叠加独立背景层（palette window_bg +
@@ -2917,7 +3066,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 在 _ensure_xxx_card() 中按需添加至容器，此处跳过避免访问 None。
 
         # ── 对话区装配（Phase F：已迁移到 ChatAreaModule，由 compose 驱动）──
-        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
         from app.widgets.modules.chat_area_module import ChatAreaModule
         from app.widgets.ui_composition import compose
 
@@ -2988,6 +3136,24 @@ class OpenAIChatToolWindow(ToolWindow):
                 except Exception as e2:
                     logger.error(f"[MainWidget] system_cards 兜底 build 也失败，契约属性将缺失: {e2}")
 
+        # ===== 内置命令先注册（UI 插件命令依赖 CommandManager） =====
+        # [PERF] 延迟 100ms 到首帧之后注册，节省 ~200ms 关键路径时间。
+        # 为什么是 100ms 而非 singleShot(0)：Qt QTimer 按到期时间排序，
+        # singleShot(0) 到期时间 ≈ 创建时间，早于 main.py 中 _show_popup 的
+        # singleShot(0)（创建更晚），导致 BuiltinCommands 仍在窗口显示前执行。
+        # 100ms 延迟确保到期时间晚于所有 singleShot(0)，在窗口第一次绘制后注册。
+        # ⚠️ 2026-09-04 修复：f3da81c0 抽 SystemCardsModule 时误删本调用且未迁移，
+        # 此后 register_all_commands / _register_command_shortcuts 启动期零调用——
+        # 命令表仅剩 UI 卡片命令（无 shortcut），全部命令快捷键失效且不自愈，
+        # 只能靠插件热重载事件偶然补救（症状：干净启动后快捷键全灭）。
+        # 批4 N10：迁移至队列（idle 100ms；N12 双注册中 module 侧已物理删除）
+        self._deferred_queue.register(
+            "init_builtin_commands",
+            lambda: self._safe_timer_call(self._init_builtin_commands),
+            priority="idle",
+            delay_ms=100,
+        )
+
         # ===== UI 插件系统集成（轻量：仅注册 registry 上下文） =====
         # 性能优化：插件加载 + 命令注册 + 浮动卡片处理器注册延迟到首帧后，
         # 让窗口外壳尽快出现，压缩首次启动感知耗时
@@ -2998,14 +3164,19 @@ class OpenAIChatToolWindow(ToolWindow):
             ui_registry.set_main_widget(self)
             # 设置上下文提供者：UI 插件首次显示时通过 set_context() 获取当前项目信息
             ui_registry.set_context_provider(self._build_ui_context, self._window_id)
-            QTimer.singleShot(0, self._init_ui_plugins_deferred)
+            # 批4 N11：迁移至队列（idle 0ms）
+            self._deferred_queue.register(
+                "init_ui_plugins_deferred",
+                lambda: self._safe_timer_call(self._init_ui_plugins_deferred),
+                priority="idle",
+                delay_ms=0,
+            )
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin registry init failed: {e}")
 
         self.chat_scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
 
         # ── 底部输入区域（Phase F 模块化：装配代码已迁 app/widgets/modules/input_card_module.py）──
-        from app.widgets.modules.input_card_module import InputCardModule
         from app.widgets.ui_composition import compose
 
         compose(host=self, module_ids=["input_card"], root_layout_factory=lambda h: None)
@@ -3015,6 +3186,10 @@ class OpenAIChatToolWindow(ToolWindow):
 
         compose(host=self, module_ids=["bottom_toolbar"], root_layout_factory=lambda h: None)
 
+        # L1 输入补全层：夹在 BOTTOM 卡容器与输入区之间 —— 补全浮层始终紧贴输入框，
+        # 状态卡（子智能体/排队/撤销）在其上方堆叠。放在此处（而非 chat_area 模块内）
+        # 是为了让插件 override chat_area 时该层同样存在。
+        layout.addWidget(self._completion_container)
         layout.addWidget(self._bottom_input_container)
 
     def _build_settings_popup(self):
@@ -3035,21 +3210,31 @@ class OpenAIChatToolWindow(ToolWindow):
             cc.ensure_settings_popup()
 
     def _position_bottom_toolbar(self):
-        """将底部工具栏绝对定位到窗口底部 36px。
+        """将底部工具栏绝对定位到窗口底部 44px 高的条带。
 
         工具栏是 self 的直接子控件，不在 main layout 里。这样：
         - 输入卡折叠/展开时，工具栏的窗口绝对 Y 坐标完全不变。
         - 系统卡片打开时，工具栏也不会被推上去。
-        位置 = 窗口底部 1px margin 内缩 36px，与输入容器底部 36px spacer 对齐。
+        位置 = 窗口底部抬高 8px（主布局 1px + 输入容器 7px 底边距）、
+        左右缩进 11px（1px 主 margin + 10px 容器边距），与输入卡等宽同底。
         """
         if not hasattr(self, "_bottom_toolbar_strip"):
             return
         w = self.width()
         h = self.height()
-        toolbar_h = 36
-        toolbar_y = max(0, h - 1 - toolbar_h)
-        toolbar_w = max(0, w - 2)
-        self._bottom_toolbar_strip.setGeometry(1, toolbar_y, toolbar_w, toolbar_h)
+        toolbar_h = 44
+        # 与主布局 1px margin + 输入容器 margins(10, 6, 10, 7) 对齐：
+        # strip 左右缩进 11px，底部抬高 8px（1px 主 margin + 7px 容器 margin），
+        # 输入卡与工具栏条保持等宽同底，四周留出呼吸边距
+        toolbar_x = 11
+        toolbar_y = max(0, h - 8 - toolbar_h)
+        toolbar_w = max(0, w - 22)
+        self._bottom_toolbar_strip.setGeometry(toolbar_x, toolbar_y, toolbar_w, toolbar_h)
+        # 发送按钮挂主窗口（跨条带与输入区两段、避免被 strip 矩形裁剪），
+        # 几何变化时以主窗口坐标系同步：右距条带右缘 10px、底部距条带底边界 6px
+        send_btn = getattr(getattr(self, "input_area", None), "send_btn", None) if hasattr(self, "input_area") else None
+        if send_btn is not None and send_btn.parent() is self:
+            send_btn.move(toolbar_x + toolbar_w - 50, toolbar_y + toolbar_h - 6 - send_btn.height())
         # 工具栏位置 / 大小变了 → 胶囊光晕底层也需要同步
         self._position_input_glow_underlay()
 
@@ -3126,15 +3311,19 @@ class OpenAIChatToolWindow(ToolWindow):
         # 2px 的亮色 border 会形成明显的"边缘高亮"，和工具栏 1px 边框
         # 视觉上不一致；焦点态的差异改由 underlay 的内发光承担。
         input_border_width = 1
-        input_bg_start = Colors.INPUT_FOCUS_BG_START if focused else Colors.INPUT_BG_START
-        input_bg_end = Colors.INPUT_FOCUS_BG_END if focused else Colors.INPUT_BG_END
+        # 一体舱单色底：输入卡与工具条 strip 用同一纯色（取各自焦点态的 END 色）。
+        # 之前输入卡用渐变而 strip 用纯色，即使接缝处数值连续，「上亮下暗」
+        # 的观感仍被读成两层；且这些色都带 alpha，半透明色叠底对基底敏感，
+        # 失焦态（alpha 180）两段合成结果出现偏差 → 色差，聚焦态（alpha 250）
+        # 近不透明则无色差。这里统一把 alpha 钳到 250，合成结果与基底解耦，
+        # 两段像素级同色（渐变 START→END 仅 ~10 灰阶，损失可忽略）。
+        input_bg_raw = Colors.INPUT_FOCUS_BG_END if focused else Colors.INPUT_BG_END
+        input_bg = re.sub(r",\s*\d+\s*\)$", ", 250)", input_bg_raw.strip())
 
         # 输入卡：上圆角 + 下直角 + border-bottom: none（让 toolbar 上 border 兼任分隔线）
         self._input_card.setStyleSheet(f"""
             QWidget#_input_card {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {input_bg_start},
-                    stop:1 {input_bg_end});
+                background: {input_bg};
                 border: {input_border_width}px solid {input_border};
                 border-bottom: none;
                 border-top-left-radius: 16px;
@@ -3145,15 +3334,17 @@ class OpenAIChatToolWindow(ToolWindow):
         """)
 
         # toolbar：上方直角（紧贴 input_card 下方）+ 下方 16px 圆角
-        # - 不 collapsed：四周边框完整，其中 border-top 1px 灰色作分隔线
-        # - collapsed：四角圆角（独立完整卡，主卡已缩到 0）
+        # 一体化输入舱：strip 与输入卡同一纯色底（input_bg）、同一边框色；
+        # 非 collapsed 时 border-top: none（输入卡 border-bottom 亦为 none），
+        # 两段共享一条连续外框，视觉上合成单张圆角卡；
+        # collapsed 时恢复完整边框 + 四角圆角，strip 作为独立卡显示。
         toolbar_top_radius = 16 if collapsed else 0
+        strip_border_top = f"1px solid {input_border}" if collapsed else "none"
         self._bottom_toolbar_strip.setStyleSheet(f"""
             QWidget#bottomToolbarStrip {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {Colors.TOOLBAR_STRIP_BG},
-                    stop:1 {Colors.TOOLBAR_STRIP_BG});
-                border: 1px solid {Colors.TOOLBAR_STRIP_BORDER};
+                background: {input_bg};
+                border: 1px solid {input_border};
+                border-top: {strip_border_top};
                 border-top-left-radius: {toolbar_top_radius}px;
                 border-top-right-radius: {toolbar_top_radius}px;
                 border-bottom-left-radius: 16px;
@@ -3180,20 +3371,22 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 只要柔和的内发光（环境光层），不要主光那层紧致高亮 ─→
                 # 避免边缘出现"亮色描边"的 lit-border 观感，让上下视觉一致。
                 # 同时复用下方的 INPUT_GLOW_AMBIENT_* token，主题可微调。
-                self._input_glow_underlay.set_glow(
+                self._input_glow_underlay.animate_glow_to(
                     primary_alpha=0,
                     primary_blur=0,
                     ambient_alpha=Colors.INPUT_GLOW_AMBIENT_ALPHA,
                     ambient_blur=Colors.INPUT_GLOW_AMBIENT_BLUR,
+                    duration=Animations.NORMAL_MS,
                 )
             else:
                 # 失焦态：默认完全关闭；glow preset（如 breath）会通过
                 # INPUT_GLOW_UNFOCUSED_* token 保留微光，营造"持续呼吸"的奢华感
-                self._input_glow_underlay.set_glow(
+                self._input_glow_underlay.animate_glow_to(
                     primary_alpha=0,
                     primary_blur=0,
                     ambient_alpha=Colors.INPUT_GLOW_UNFOCUSED_AMBIENT_ALPHA,
                     ambient_blur=Colors.INPUT_GLOW_UNFOCUSED_AMBIENT_BLUR,
+                    duration=Animations.NORMAL_MS,
                 )
             # 焦点 / 折叠状态变化都可能改变胶囊几何（如 toolbar 圆角切换、
             # input_card 折叠到 0），同步一次确保 underlay 跟上
@@ -3253,11 +3446,11 @@ class OpenAIChatToolWindow(ToolWindow):
         #   model_selector 加载模型数据、project_selector 加载项目列表等）
         _SYSTEM_CARD_COMMANDS = {
             "settings": ("打开设置面板", self._toggle_settings_card),
-            "history": ("打开对话历史", self._toggle_history_card),
-            "memory": ("打开记忆管理", self._toggle_memory_card),
+            "history": ("打开对话历史", self._open_workbench_history),
+            "memory": ("打开工作树管理", self._open_workbench_memory),
             "model_selector": ("选择模型", self._toggle_model_selector_card),
             "tool_control": ("打开工具控制面板", self._toggle_tool_control_card),
-            "project_selector": ("选择项目", self._toggle_project_selector_card),
+            "project_selector": ("选择项目", self._open_project_selector_panel),
             "share": ("分享对话", self._on_share_clicked),
         }
 
@@ -3272,6 +3465,27 @@ class OpenAIChatToolWindow(ToolWindow):
                 description=description,
                 argument_hint="",
             )
+
+    def _open_workbench_history(self):
+        """快捷键/命令入口：打开会话历史（对话区左侧停靠区常驻浮动卡）
+
+        历史会话已从右侧工作台页签迁为左侧 ``card_id="history-manager"``
+        浮动卡，故直接复用 ``TabManagerWindow.open_workbench_history``
+        （入口内部的定位目标已切到浮动卡显示通道）。
+        """
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.open_workbench_history()
+
+    def _open_workbench_memory(self):
+        """快捷键/命令入口：打开右侧工作台并跳转「工作树」页签（直开语义）
+
+        记忆管理已下线：置顶记忆在助手中心管理，右侧工作台只保留
+        工作树页签（关键文档 + 工作树）。/memory 命令直达该页。
+        """
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.open_workbench_memory("docs")
 
     def _clear_command_shortcuts(self):
         """清空本实例对命令快捷键的引用
@@ -3301,7 +3515,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 else:
                     self.destroyed.disconnect()
                 self._cmd_shortcuts_destroy_connected = False
-        except TypeError, RuntimeError:
+        except (TypeError, RuntimeError):
             pass
         try:
             self._clear_command_shortcuts()
@@ -3316,13 +3530,16 @@ class OpenAIChatToolWindow(ToolWindow):
             ui_registry = UIPluginRegistry.get_instance()
             # 加载所有已启用的 UI 插件
             self._load_all_ui_plugins()
+            # 标题栏 slot 补装：首窗 build 早于 UI 插件注册（首帧后延迟加载），
+            # build 时 slot 查空 → 无分支标签；此处注册表已就绪，补装一次
+            self._install_titlebar_widgets()
             # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
             ui_registry.re_register_all_commands()
             # 多窗口隔离：为每个 UI 插件浮动卡片注册当前窗口的实例级处理器
             for card_id, card_info in ui_registry.get_floating_cards().items():
                 if ":" in card_id:
                     cmd_name = card_id
-                elif card_info.plugin_name == "system" or card_id == card_info.plugin_name:
+                elif card_info.plugin_name in ("system",) or card_id == card_info.plugin_name:
                     cmd_name = card_id
                 else:
                     cmd_name = f"{card_info.plugin_name}:{card_id}"
@@ -3338,6 +3555,17 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._build_plugin_input_buttons()
             except Exception as e:
                 logger.error(f"[MainWidget] 输入区插件按钮初始化失败: {e}")
+
+            # T5-2R: UI plugins load deferred; sidebar/titlebar built with empty
+            # registry during setup_ui, refresh here (idempotent chain)
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                _tm = TabManagerWindow.get_instance()
+                if _tm is not None:
+                    _tm._update_shared_launcher()
+            except Exception:
+                logger.exception("[UIPluginDeferred] Failed to refresh shared launcher")
         except Exception as e:
             logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
 
@@ -3355,6 +3583,21 @@ class OpenAIChatToolWindow(ToolWindow):
             info.on_click(context)
         except Exception as e:
             logger.error(f"[MainWidget] 输入区插件按钮 {info.button_id} 回调失败：{e}")
+
+    def _on_plugin_input_button_right_clicked(self, info):
+        """输入区插件按钮右键：组同款上下文派发 info.on_right_click（未注册则忽略）"""
+        try:
+            if getattr(info, "on_right_click", None) is None:
+                return
+            context = {
+                "button_id": info.button_id,
+                "plugin_name": info.plugin_name,
+                "window_id": getattr(self, "_window_id", None),
+                "main_widget": self,
+            }
+            info.on_right_click(context)
+        except Exception as e:
+            logger.error(f"[MainWidget] 输入区插件按钮 {info.button_id} 右键回调失败：{e}")
 
     def _build_plugin_input_menu(self, menu) -> None:
         """向输入框右键菜单追加插件项（Phase E：target=input_area）
@@ -3397,16 +3640,17 @@ class OpenAIChatToolWindow(ToolWindow):
     def _build_plugin_input_buttons(self):
         """重建输入区插件按钮（Phase D + E 扩展点，幂等）
 
-        先清空本方法构建的按钮 + 分隔线，再按 UIPluginRegistry.get_input_buttons()
+        先清空本方法构建的按钮，再按 UIPluginRegistry.get_input_buttons()
         重新构建；未注册任何按钮时不渲染任何东西（行为零变化）。
         热重载/卸载经 _on_plugin_hot_reload 触发重建。
 
         Phase E：按 info.position 决定插入位置：
         - "start"        插入 capsule_layout 首位
-        - "end"          默认：末尾追加（与分隔线一起）
+        - "end"          默认：末尾追加
         - "before:<id>"  锚定到 objectName=<id> 的 widget 左侧
         - "after:<id>"   锚定到 objectName=<id> 的 widget 右侧
-        锚点缺失降级末尾追加。
+        锚点缺失（典型场景：老插件使用 memory/history 锚点，系统按钮已迁出）→ 降级到
+        新建会话按钮左侧插入；新建会话按钮也不存在时兜底末尾追加。
         """
         if not hasattr(self, "_toolbar_capsule"):
             return
@@ -3445,6 +3689,13 @@ class OpenAIChatToolWindow(ToolWindow):
             btn.setObjectName(info.button_id)  # 供其他插件锚点匹配
             btn._plugin_input_info = info  # 供主题切换时刷新图标
             btn.clicked.connect(lambda checked=False, i=info: self._on_plugin_input_button_clicked(i))
+            if getattr(info, "on_right_click", None) is not None:
+                from PySide6.QtCore import Qt
+
+                btn.setContextMenuPolicy(Qt.CustomContextMenu)
+                btn.customContextMenuRequested.connect(
+                    lambda pos, i=info: self._on_plugin_input_button_right_clicked(i)
+                )
             return btn
 
         def _find_anchor_index(anchor_id: str) -> int:
@@ -3477,7 +3728,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 rel, _, anchor_id = info.position.partition(":")
                 idx = _find_anchor_index(anchor_id)
                 if idx < 0:
-                    capsule_layout.addWidget(btn)  # 锚点缺失降级末尾
+                    # 锚点缺失（老插件用 memory/history 等已迁出按钮的 objectName）：
+                    # 降级到新建会话按钮左侧插入，保留视觉上的"系统按钮区"语义。
+                    ns_idx = _find_anchor_index("new_session")
+                    if ns_idx < 0:
+                        capsule_layout.addWidget(btn)  # 兜底：末尾追加
+                    else:
+                        capsule_layout.insertWidget(ns_idx, btn)
                 elif rel == "before":
                     capsule_layout.insertWidget(idx, btn)
                 else:  # after
@@ -3485,15 +3742,7 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 构建失败：{e}")
 
-        # 3) end：末尾追加（与分隔线一起）
-        if end_buttons or anchored:
-            # 分隔线：系统按钮与插件按钮区分
-            separator = QFrame(self._toolbar_capsule)
-            separator.setFrameShape(QFrame.VLine)
-            separator.setStyleSheet(f"color: {Colors.DIVIDER_COLOR};")
-            separator.setFixedHeight(16)
-            capsule_layout.addWidget(separator)
-            self._plugin_input_buttons.append(separator)
+        # 3) end：末尾追加
         for info in sorted(end_buttons, key=lambda b: -b.priority):
             try:
                 btn = _make_btn(info)
@@ -3529,6 +3778,34 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[MainWidget] 输入区插件按钮 {info.button_id} 图标刷新失败：{e}")
 
+    def _install_titlebar_widgets(self):
+        """补装标题栏 slot widget（首窗 build 早于 UI 插件注册的一次性补装）
+
+        title_bar build 时从注册表装配分支标签等 slot widget；首窗场景下
+        UI 插件延迟到首帧后才加载，build 时 slot 查空。此方法在
+        _init_ui_plugins_deferred（插件加载完成后）调用，widget 已存在则跳过
+        （新窗口 build 时已装配 / 热重载场景保留旧 widget）。
+        """
+        # 实例字典直查：__new__ 裸实例上 getattr 会触发 Qt 桥抛 RuntimeError
+        # （getattr 默认值只兜 AttributeError），且避免误读类属性
+        if self.__dict__.get("_branch_widget") is not None:
+            return
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            info = UIPluginRegistry.get_instance().get_titlebar_widget("branch")
+            if info is None:
+                return
+            widget = info.widget_factory(self)
+            self._branch_widget = widget
+            container = getattr(self, "_project_branch_container", None)
+            if container is not None:
+                container.layout().addWidget(widget)
+            # 立即触发一次分支检测（workdir 未就绪时保持隐藏，后续变更事件再刷）
+            self._update_branch()
+        except Exception as e:
+            logger.warning(f"[MainWidget] 标题栏分支标签补装失败: {e}")
+
     def _load_all_ui_plugins(self):
         """加载所有已启用的 UI 插件"""
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -3550,6 +3827,9 @@ class OpenAIChatToolWindow(ToolWindow):
 
         plugin_dirs = []
         for plugin in pm.get_enabled_plugins():
+            # D9：ui 组件被整类停用的插件不挂载其界面扩展
+            if not pm.is_component_enabled(plugin.name, "ui"):
+                continue
             if plugin.has_component("ui"):
                 plugin_dirs.append((plugin.name, plugin.path))
         logger.info(f"[MainWidget] Found {len(plugin_dirs)} UI-enabled plugins: {[p[0] for p in plugin_dirs]}")
@@ -3602,6 +3882,17 @@ class OpenAIChatToolWindow(ToolWindow):
             workdir = self._current_workdir.get(project, "")
             if workdir:
                 logger.debug(f"[_build_ui_context] workdir from _current_workdir cache: {workdir}")
+            elif project and self.backend and self.backend.memory_manager:
+                # 启动早期（首帧渲染早于 singleShot(0) 的 _sync_working_directory）
+                # 实例缓存与 tool_executor 尚未同步，从项目 DB 兜底恢复，
+                # 与 _resolve_project_workdir 的三级取值链一致。
+                try:
+                    workdir = self.backend.memory_manager.get_working_directory(project) or ""
+                except Exception:
+                    workdir = ""
+                if workdir:
+                    self._current_workdir[project] = workdir
+                    logger.debug(f"[_build_ui_context] workdir from project DB: {workdir}")
 
         if not workdir:
             logger.warning(
@@ -3647,6 +3938,7 @@ class OpenAIChatToolWindow(ToolWindow):
             "font_size": font_size,
             "colors": theme_colors,
             "main_widget": self,
+            "backend": self.backend,
             "services": self._build_ui_services(),
         }
 
@@ -3689,8 +3981,84 @@ class OpenAIChatToolWindow(ToolWindow):
     # 创建/销毁都不再影响快捷键可用性。
     _window_shortcut_cache: Dict[int, list] = {}
 
-    def _register_command_shortcuts(self):
+    # 命令快捷键标记（用于按标记扫描残留，兜住缓存之外的孤儿）
+    _COMMAND_SHORTCUT_MARKER = "drifox_command_shortcut"
+
+    @classmethod
+    def _prune_marked_shortcuts(cls, parent) -> None:
+        """按标记摘除窗口上残留的命令 QShortcut（自愈缓存之外的孤儿）
+
+        _window_shortcut_cache 只能管住「它自己登记过」的对象。历史代码路径、
+        未来新增路径、以及本修复落地前已经产生的孤儿都不在缓存里，但同样会
+        与新建快捷键撞键序列触发 ambiguous。统一打标记后，任何一次 force
+        重建都会把窗口上所有带标记的旧快捷键清干净。
+        """
+        try:
+            from PySide6.QtGui import QShortcut
+        except ImportError:
+            return
+        try:
+            candidates = parent.findChildren(QShortcut)
+        except RuntimeError:
+            return
+        for qs in candidates:
+            try:
+                if _is_sip_deleted(qs):
+                    continue
+                if not qs.property(cls._COMMAND_SHORTCUT_MARKER):
+                    continue
+                qs.setProperty(cls._COMMAND_SHORTCUT_MARKER, False)
+                qs.setEnabled(False)
+                try:
+                    qs.activated.disconnect()
+                    qs.activatedAmbiguously.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+                qs.deleteLater()
+            except (RuntimeError, AttributeError):
+                continue
+
+    @classmethod
+    def _destroy_window_command_shortcuts(cls, win_id: int) -> None:
+        """彻底销毁某窗口已注册的命令快捷键（含 C++ 对象）
+
+        ⚠️ 只做 `cls._window_shortcut_cache.clear()`（旧实现）是不够的：QShortcut 的
+        Qt 父对象是顶层窗口，Python wrapper 被回收并不会带走 C++ 对象，旧 QShortcut
+        仍注册在 Qt 的 QShortcutMap 中。此时重新注册会产生「同窗口 + 同键序列」的
+        多套 QShortcut → Qt 判定 ambiguous，只发 activatedAmbiguously()，
+        而处理器只连了 activated() → 全部命令快捷键静默失效（2026-09-08 故障：
+        任何一次命令热重载 / 快捷键管理器改绑之后，程序内快捷键全灭，只能重启恢复）。
+        """
+        cached = cls._window_shortcut_cache.pop(win_id, None)
+        if not cached:
+            return
+        for qs in cached:
+            try:
+                if _is_sip_deleted(qs):
+                    continue
+                # setEnabled(False) 同步把条目从 QShortcutMap 摘除；
+                # 只调 deleteLater() 不行（延迟删除，同一轮事件内新快捷键仍会撞上旧条目）
+                qs.setEnabled(False)
+                try:
+                    qs.activated.disconnect()
+                    qs.activatedAmbiguously.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+                qs.deleteLater()
+            except (RuntimeError, AttributeError):
+                continue
+
+    @classmethod
+    def _destroy_all_command_shortcuts(cls) -> None:
+        """销毁全部窗口的命令快捷键（命令表整体重建前调用）"""
+        for win_id in list(cls._window_shortcut_cache):
+            cls._destroy_window_command_shortcuts(win_id)
+
+    def _register_command_shortcuts(self, force: bool = False):
         """为所有有 shortcut 配置的命令注册 QShortcut
+
+        force=True 时先销毁该窗口已缓存的 QShortcut 再重建（命令表或快捷键
+        绑定变更后的正确姿势）；force=False 为幂等 ensure，缓存内对象存活即跳过。
 
         父对象取顶层窗口（self.window()）而非 self(MainWidget)：
         "替换(full)" 类卡片打开时 TabManagerWindow 会切换 QStackedWidget 隐藏对话区
@@ -3726,6 +4094,12 @@ class OpenAIChatToolWindow(ToolWindow):
         shortcut_parent = self.window() or self
         win_id = id(shortcut_parent)
 
+        # ── 强制重建：命令/快捷键绑定变更后必须先销毁旧 QShortcut ──
+        if force:
+            OpenAIChatToolWindow._destroy_window_command_shortcuts(win_id)
+            # 二次兜底：按标记清理缓存之外的残留孤儿
+            OpenAIChatToolWindow._prune_marked_shortcuts(shortcut_parent)
+
         # ── 幂等 ensure：窗口已有存活的命令快捷键集合则直接复用 ──
         cached = OpenAIChatToolWindow._window_shortcut_cache.get(win_id)
         if cached is not None:
@@ -3755,7 +4129,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     OpenAIChatToolWindow._window_shortcut_cache.pop(id(_parent), None)
 
                 shortcut_parent.destroyed.connect(_pop_shortcut_cache)
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             pass
 
         cache: list = OpenAIChatToolWindow._window_shortcut_cache.setdefault(win_id, [])
@@ -3768,6 +4142,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 key_seq = cmd_def.shortcut
 
                 qs = QShortcut(QKeySequence(key_seq), shortcut_parent)
+                qs.setProperty(OpenAIChatToolWindow._COMMAND_SHORTCUT_MARKER, True)
 
                 name = cmd_def.name
 
@@ -3820,7 +4195,7 @@ class OpenAIChatToolWindow(ToolWindow):
         if FunctionCommandHandlers.has(name):
             return True
         # 硬编码内置命令
-        if name in ("new", "new-window", "branch", "remember"):
+        if name in ("new", "new-window", "branch"):
             return True
         return False
 
@@ -3904,9 +4279,6 @@ class OpenAIChatToolWindow(ToolWindow):
                     tm.spawn_tab(self, branch=True)
                 else:
                     self._duplicate_window(branch=True)
-                return True
-            elif command_name == "remember":
-                self._remember_to_memory(args)
                 return True
             else:
                 # 无 Python 处理器注册 → 降级到 prompt 注入（缺处理器语义）
@@ -4396,7 +4768,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 🆕 缺失角色不再弹 InfoBar 报错 → 抛 CommandNeedDegrade 降级到
             # prompt 注入补全流程：由 _execute_command 捕获后 select_prompt 按
             # --load= 参数匹配 `<!-- section:load_missing -->` 段（详见
-            # `plugins/system/commands/team.md`），AI 走补全流程。
+            # `plugins/system-commands/commands/team.md`），AI 走补全流程。
             from app.core.command_manager import CommandNeedDegrade
 
             raise CommandNeedDegrade("team", f"--load={name} 缺失角色: {', '.join(missing)}")
@@ -5035,6 +5407,36 @@ class OpenAIChatToolWindow(ToolWindow):
 
         _run_new_task_steps(0)
 
+    def _team_join_schedule_retry(self, win, agent_name, window_id, track_arrange, keep_team_name):
+        """C4 就绪轮询：安排一次延迟重试；耗尽则放弃并收口计数（E3）"""
+        retries = getattr(win, "_team_join_retries", 0)
+        if retries < self._TEAM_JOIN_MAX_RETRIES:
+            win._team_join_retries = retries + 1
+            logger.warning(
+                f"[_join_new_window_for_template] window {window_id} backend/chat_engine 未就绪，"
+                f"重试 {win._team_join_retries}/{self._TEAM_JOIN_MAX_RETRIES}"
+            )
+            QTimer.singleShot(
+                self._TEAM_JOIN_RETRY_INTERVAL_MS,
+                lambda w=win, a=agent_name, wid=window_id, ta=track_arrange, kn=keep_team_name: (
+                    self._join_new_window_for_template(w, a, wid, ta, kn)
+                ),
+            )
+            return
+        logger.error(f"[_join_new_window_for_template] window {window_id} backend 重试耗尽，放弃")
+        # C4a：watcher 不依赖 backend，无条件补启动（缺则任务邮件永不主动触发；
+        # 有 _is_destroyed 守卫 + _start_team_watcher 内部 try/except）
+        try:
+            if not getattr(win, "_is_destroyed", False):
+                win._start_team_watcher()
+        except Exception:
+            pass
+        # E3：重试耗尽同样收口计数
+        if track_arrange:
+            self._pending_arrange_count = max(0, self._pending_arrange_count - 1)
+            if self._pending_arrange_count == 0:
+                self._do_team_window_arrange()
+
     def _join_new_window_for_template(
         self,
         win,
@@ -5078,22 +5480,26 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 补查 chat_engine，就绪后再回调，从根上消除竞态。
                 or not win.backend.chat_engine
             ):
-                # C4 就绪轮询：backend/chat_engine 未就绪 → 重试而非直接放弃
-                retries = getattr(win, "_team_join_retries", 0)
-                if retries < self._TEAM_JOIN_MAX_RETRIES:
-                    win._team_join_retries = retries + 1
-                    logger.warning(
-                        f"[_join_new_window_for_template] window {window_id} backend/chat_engine 未就绪，"
-                        f"重试 {win._team_join_retries}/{self._TEAM_JOIN_MAX_RETRIES}"
-                    )
-                    QTimer.singleShot(
-                        self._TEAM_JOIN_RETRY_INTERVAL_MS,
-                        lambda w=win, a=agent_name, wid=window_id, ta=track_arrange, kn=keep_team_name: (
-                            self._join_new_window_for_template(w, a, wid, ta, kn)
-                        ),
+                # 批4 4-0b：同步补建延迟组件（DeferredTaskQueue 下 backend 组件
+                # 可能仍在队列等待；发送路径同款 ensure 兜底）。补建后复查：
+                # 就绪则当轮继续 join（重试计数不增）；仍不就绪才进入 C4 轮询。
+                try:
+                    if getattr(win, "backend", None):
+                        win.backend.ensure_deferred_components()
+                except Exception:  # noqa: BLE001
+                    logger.warning("[_join_new_window_for_template] ensure_deferred_components 失败", exc_info=True)
+                if (
+                    getattr(win, "backend", None)
+                    and win.backend.agent_manager
+                    and win.backend.chat_engine
+                ):
+                    pass  # 补建成功 → 当轮继续（不增计数、不排队重试）
+                else:
+                    self._team_join_schedule_retry(
+                        win, agent_name, window_id, track_arrange, keep_team_name
                     )
                     return
-                logger.error(f"[_join_new_window_for_template] window {window_id} backend 重试耗尽，放弃")
+
                 # C4a：watcher 不依赖 backend，无条件补启动（缺则任务邮件永不主动触发；
                 # 有 _is_destroyed 守卫 + _start_team_watcher 内部 try/except）
                 try:
@@ -5757,20 +6163,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
             self._finalize_single_team_mail(mail, done_result="用户手动停止")
 
-    def _get_model_config_obj(self) -> dict:
-        """获取当前模型配置（兜底）"""
-        try:
-            from app.utils.config import Settings
-
-            cfg = Settings.get_instance()
-            return {
-                "api_base": cfg.llm_api_base.value or "",
-                "api_key": cfg.llm_api_key.value or "",
-                "model": cfg.llm_selected_model.value or "",
-            }
-        except Exception:
-            return {}
-
     def _sync_active_windows_to_team_manager(self):
         """同步当前所有活跃窗口 ID 到 TeamManager，触发失效成员清理"""
         from app.core.team_manager import TeamManager
@@ -5927,7 +6319,7 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         # 清空输入框（和函数型命令一样处理）
-        self.input_area.clear()
+        self._clear_input_area()
 
         # 检查 AgentManager 中是否存在该智能体
         agent_mgr = self.backend.agent_manager
@@ -6297,7 +6689,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._toggle_send_stop(False)
             if self._current_assistant_card:
                 self._current_assistant_card.stop_streaming_anim()
-                self._current_assistant_card.finish_streaming()
+                # 🐛 打断路径强制归位（同 _on_stop_clicked）：压缩触发后 worker
+                # 已停止，活跃工具结果不再到达，keep_dock 会永久保留坞态。
+                self._current_assistant_card.finish_streaming(force_dock_off=True)
             try:
                 interrupted = self.backend.stop_streaming()
                 if interrupted:
@@ -6408,7 +6802,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._toggle_send_stop(False)
             if self._current_assistant_card:
                 self._current_assistant_card.stop_streaming_anim()
-                self._current_assistant_card.finish_streaming()
+                # 🐛 打断路径强制归位（同 _on_stop_clicked）。
+                self._current_assistant_card.finish_streaming(force_dock_off=True)
             try:
                 # 清空语义下中断消息无需回写 session（即将整体清空），
                 # 旧 worker 延迟快照由下方 _post_compact_guard 拦截
@@ -6509,37 +6904,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self._refresh_context_usage_indicator()
         finally:
             self._pending_session_hook = False
-
-    def _remember_to_memory(self, content: str):
-        """将内容存入长期记忆"""
-        content = content.strip()
-        if not content:
-            InfoBar.warning(
-                "记忆为空",
-                "请在 /remember 后输入要记忆的内容",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                position=InfoBarPosition.BOTTOM,
-            )
-            return
-
-        from app.core.memory_manager import MemoryManagerCore
-
-        mm = MemoryManagerCore.get_instance()
-        success = mm.add_entry_memory(content, source="manual")
-        if success:
-            InfoBar.success(
-                "已记忆",
-                f'"{content[:30]}{"..." if len(content) > 30 else ""}" 已存入长期记忆',
-                parent=TabManagerWindow.get_instance() or self.window(),
-                position=InfoBarPosition.BOTTOM,
-            )
-        else:
-            InfoBar.error(
-                "记忆失败",
-                "无法保存到长期记忆",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                position=InfoBarPosition.BOTTOM,
-            )
 
     # ========== 命令卡片处理 ==========
 
@@ -6666,20 +7030,45 @@ class OpenAIChatToolWindow(ToolWindow):
         self._file_mention_card.dismiss()
         self._card_manager.hide_card("file_mention", self._window_id)
 
-        # 移除输入框中的 @query 文本
+        # 移除输入框中的 @query 文本（不再插入 [[basename]]，附件栏是唯一真相源）
         self.input_area.insert_file_mention(file_path)
 
         # 添加到附件列表（复用拖拽文件的 chip 机制）
-        if file_path not in self._attachments:
-            self._attachments.append(file_path)
-            from app.widgets.bottom_input_area import AttachmentChip
-
-            chip = AttachmentChip(file_path, self._attach_container)
-            chip.removed.connect(lambda path=file_path: self._remove_attachment(path))
-            self._attach_layout.insertWidget(self._attach_layout.count() - 1, chip)
-        self._attach_container.setVisible(bool(self._attachments))
+        if self._add_attachment(file_path):
+            self._rebuild_attachment_chips()
 
         # 聚焦输入框
+        self.input_area.setFocus(Qt.OtherFocusReason)
+
+    def _on_mention_selected(self, entry: dict):
+        """插件提及条目被选中（@ 卡片顶部智能体区）
+
+        通用行为：@query 替换为 ``@名称 `` 字面文本；随后派发给
+        提供者插件接管语义行为（如 assistant_hub 临时切换会话助手）。
+        """
+        if not hasattr(self, "_file_mention_card"):
+            return
+        self._file_mention_card.dismiss()
+        self._card_manager.hide_card("file_mention", self._window_id)
+
+        self.input_area.insert_assistant_mention(entry.get("name", ""), entry.get("color", ""))
+
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            session = self.backend.get_current_session() if self.backend else None
+            UIPluginRegistry.get_instance().dispatch_mention_selected(
+                str(entry.get("provider_id", "")),
+                entry,
+                {
+                    "window_id": self._window_id,
+                    "main_widget": self,
+                    "session_id": getattr(session, "session_id", "") if session else "",
+                },
+            )
+        except Exception as e:
+            logger.warning(f"[MainWidget] 派发 mention 选中失败: {e}")
+
         self.input_area.setFocus(Qt.OtherFocusReason)
 
     def _get_all_model_options_flat(self) -> list:
@@ -7015,7 +7404,15 @@ class OpenAIChatToolWindow(ToolWindow):
         """滚动时吸顶服务商变化，更新标题栏显示当前服务商名和图标
 
         provider_name 是从 model_selector 传来的 display_name（不是 config_id）。
+
+        去重：滚动过程中 valueChanged 每像素都会触发本回调，而吸顶服务商名
+        往往长时间不变；同名时直接返回，避免每个滚轮 tick 都 delete 旧
+        ProviderIconWidget + new 新 widget（replaceWidget 触发重排重绘）导致
+        标题栏图标闪烁。
         """
+        if getattr(self, "_last_sticky_provider", None) == provider_name:
+            return
+        self._last_sticky_provider = provider_name
         if provider_name:
             from app.widgets.cards.settings.provider_setting_card import ProviderIconWidget
 
@@ -7079,8 +7476,10 @@ class OpenAIChatToolWindow(ToolWindow):
     def _expand_provider_list_card(self):
         """展开服务商列表卡片"""
         try:
-            if hasattr(self._settings_popup, "llmProviderCard"):
-                self._settings_popup.llmProviderCard.toggleExpand()
+            # 设置卡片首屏已默认展开服务商列表，此处只在未展开时补展开（避免又被收起）
+            card = getattr(self._settings_popup, "llmProviderCard", None)
+            if card is not None and not getattr(card, "isExpand", False):
+                card.toggleExpand()
         except Exception:
             pass
 
@@ -7333,9 +7732,6 @@ class OpenAIChatToolWindow(ToolWindow):
         model_overrides[override_key] = existing
         self.cfg.set(self.cfg.llm_model_overrides, model_overrides, save=True)
 
-    def _on_context_selection_changed(self, _selected_keys=None):
-        self._refresh_context_usage_indicator()
-
     def _refresh_context_usage_indicator(self):
         """刷新上下文使用环。
 
@@ -7412,7 +7808,6 @@ class OpenAIChatToolWindow(ToolWindow):
             return
 
         config = self._valid_configs.get(config_id, {})
-        api_key = config.get("API_KEY", "")
         provider_name = config.get("provider_name", "")
 
         balance_display.set_provider(provider_name, config_id)
@@ -7549,14 +7944,6 @@ class OpenAIChatToolWindow(ToolWindow):
         cc = get_global_card_controller()
         if cc is not None:
             cc.check_gitee_token_invalid_reminder()
-
-    def _open_gitee_bind_from_reminder(self, infobar):
-        """（委托全局卡片控制器 GlobalCardController）"""
-        from app.widgets.cards.global_card_controller import get_global_card_controller
-
-        cc = get_global_card_controller()
-        if cc is not None:
-            cc.open_gitee_bind_from_reminder(infobar)
 
     def _dismiss_gitee_reminder(self, infobar):
         """提醒中点击「不再提醒」：持久化设置并关闭"""
@@ -7763,32 +8150,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if cc is not None:
             cc._on_mcp_servers_toggled()
 
-    def _hide_main_popups(self):
-        """隐藏主要的悬浮面板（互斥显示）
-
-        包括：系统设置、模型配置、历史会话、记忆管理
-        现在也保存并隐藏 tool/sub_agent 实时卡片
-        """
-        # 标记系统卡片打开状态，阻止实时卡片自行显示
-        self._is_system_card_visible = True
-        # 通过 CardManager 隐藏所有卡片
-        for card_id in [
-            "tool",
-            "sub_agent",
-            "question",
-            "model_config",
-            "history",
-            "memory",
-            "undo_delete",
-        ]:
-            self._card_manager.hide_card(card_id, self._window_id)
-        # 全局卡片（settings/provider_edit/hook_edit/mcp_edit）已迁移到 Tab 窗口层，统一隐藏
-        from app.widgets.cards.global_card_controller import get_global_card_controller
-
-        cc = get_global_card_controller()
-        if cc is not None:
-            cc.hide_all_global_cards()
-
     def register_system_card(self, card_id: str) -> None:
         """将一个卡片 ID 注册为"系统卡片" — 显示时自动隐藏输入区域
 
@@ -7828,16 +8189,60 @@ class OpenAIChatToolWindow(ToolWindow):
             # 标记系统卡片处于打开状态
             self._system_cards_open = True
 
-            self.setUpdatesEnabled(False)
-            # 隐藏输入区释放空间给系统卡片
-            self.input_area.setVisible(False)
             self.input_area.setFocusPolicy(Qt.NoFocus)
             self._input_area_collapsed = True
             self._apply_bottom_input_stack_style(False)
-            # 释放 _input_card 的高度约束，让它缩到 0
-            self._input_card.setMinimumHeight(0)
-            self._input_card.setMaximumHeight(0)
-            self.setUpdatesEnabled(True)
+            card = self._input_card
+            start_h = card.height()
+            self._input_card_uncollapsed_h = max(start_h, 1)
+            card.setMinimumHeight(0)
+            if not Animations.motion_enabled() or start_h <= 0:
+                # reduced-motion / 已收起：保持原同步行为
+                card.setMaximumHeight(0)
+                self.input_area.setVisible(False)
+                card.update()
+                return
+            # 高度动画收起：input_area 保持可见跟随裁切，动画收尾再隐藏
+            # （原版 setUpdatesEnabled(False) 同步隐藏是为避免中间帧抖动；
+            #   动画版有意展示过渡帧，收尾时一次性隐藏 + 锁死高度）
+            card.setMaximumHeight(start_h)
+            self._start_input_collapse_anim(float(start_h), 0.0)
+
+    def _start_input_collapse_anim(self, start_h: float, end_h: float):
+        """输入卡高度收起/展开动画（复用同一动画对象，方向由 end_h 决定）"""
+        anim = getattr(self, "_collapse_anim", None)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+            anim.valueChanged.connect(self._on_input_collapse_value)
+            anim.finished.connect(self._on_input_collapse_finished)
+            self._collapse_anim = anim
+        anim.stop()
+        anim.setDuration(Animations.NORMAL_MS)
+        anim.setStartValue(float(start_h))
+        anim.setEndValue(float(end_h))
+        anim.start()
+
+    def _on_input_collapse_value(self, v):
+        if hasattr(self, "_input_card"):
+            self._input_card.setMaximumHeight(max(0, int(round(float(v)))))
+
+    def _on_input_collapse_finished(self):
+        """收起/展开动画收尾：按方向分别锁死高度或交还内容自适应"""
+        anim = getattr(self, "_collapse_anim", None)
+        if anim is None or not hasattr(self, "_input_card"):
+            return
+        end_h = int(round(float(anim.endValue() or 0)))
+        if end_h <= 0:
+            # 收起完成：隐藏输入区并锁死高度
+            if getattr(self, "_system_cards_open", False):
+                self.input_area.setVisible(False)
+                self._input_card.setMaximumHeight(0)
+                self._input_card.update()
+        else:
+            # 展开完成：放开高度约束，交还内容自适应
+            self._input_card.setMaximumHeight(16777215)
+            self._on_input_area_height_changed()
             self._input_card.update()
 
     def _do_hide_input_area(self):
@@ -7879,16 +8284,20 @@ class OpenAIChatToolWindow(ToolWindow):
         self._system_cards_open = False
 
         if hasattr(self, "input_area"):
-            self.setUpdatesEnabled(False)
             self.input_area.setFocusPolicy(Qt.ClickFocus)
             self._input_area_collapsed = False
             self._apply_bottom_input_stack_style(self.input_area.hasFocus())
-            self._input_card.setMinimumHeight(0)
-            self._input_card.setMaximumHeight(16777215)
-            self._on_input_area_height_changed()
+            card = self._input_card
+            card.setMinimumHeight(0)
+            target_h = int(getattr(self, "_input_card_uncollapsed_h", 91))
             self.input_area.setVisible(True)
-            self.setUpdatesEnabled(True)
-            self._input_card.update()
+            if not Animations.motion_enabled():
+                card.setMaximumHeight(16777215)
+                self._on_input_area_height_changed()
+                card.update()
+                return
+            # 高度从当前值动画回塌缩前高度，动画结束后放开约束
+            self._start_input_collapse_anim(float(max(card.height(), 0)), float(target_h))
 
     def _system_cards(self) -> list:
         """返回所有系统卡片的列表，用于检查是否有系统卡片可见
@@ -7899,8 +8308,6 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         cards = [
             self._model_config_card,
-            self._history_card,
-            self._memory_card,
         ]
         return [c for c in cards if c is not None]
 
@@ -7957,10 +8364,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._is_any_system_card_visible():
             # 只有当所有系统卡片都关闭时才重置标志
             self._is_system_card_visible = False
-            # 恢复被系统卡片延迟弹出的子智能体紧凑卡片（有任务行时才显示）
-            compact = getattr(self, "_sub_agent_compact_widget", None)
-            if compact is not None and compact._task_rows and not compact.isVisible():
-                compact.setVisible(True)
+            # ★ 状态层按谓词恢复：系统模态卡显示期间被压制的 L2 状态卡
+            # （子智能体/排队/撤销）在此回到可见集，而不是永久消失。
+            self._card_manager.refresh_layer(self._window_id, "status")
 
     # ══════════════════════════════════════════════════════════════
     # 像素小狐桌宠 — 集中 AI 状态管理
@@ -8046,6 +8452,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _toggle_tool_control_card(self):
         """切换工具控制卡片的显示"""
+        self._ensure_tool_control_card()
         if not self._card_manager.is_card_visible("tool_control", self._window_id):
             # 通知 card 从 controller 拉取最新状态
             self._tool_control_card.set_toggles(self._tool_permission_controller.get_toggles())
@@ -8058,8 +8465,15 @@ class OpenAIChatToolWindow(ToolWindow):
 
         toggles = self._tool_permission_controller.get_toggles()
         dangerous, safe = get_tool_counts(toggles)
-        self._tool_danger_label.setText(str(dangerous))
-        self._tool_safe_label.setText(str(safe))
+        # 工具计数小字「危险/安全」：中性灰常显；有危险工具未确认时转警示橙提醒
+        Colors.refresh()
+        count_color = Colors.WARNING if dangerous > 0 else Colors.TEXT_MUTED
+        self._tool_count_label.setText(f"{dangerous}/{safe}")
+        self._tool_count_label.setStyleSheet(f"""
+            color: {count_color};
+            background: transparent; border: none;
+            {font_size_css(12)} {get_font_family_css()}
+        """)
 
         # agent 覆盖 → 整个按钮背景变色
         Colors.refresh()
@@ -8073,15 +8487,13 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
         else:
             tooltip = f"🔧 工具控制 | 危险 {dangerous} 安全 {safe}\n点击查看详情"
-            self._tool_toggle_btn.setStyleSheet(f"""
-                background: {Colors.TOOLBAR_BG};
+            # 一体化视觉：无背景，图标 + 计数小字直接落在输入卡底色上
+            self._tool_toggle_btn.setStyleSheet("""
+                background: transparent;
                 border: none;
-                border-radius: 8px;
             """)
-        # 给按钮及其所有子 label 挂 tooltip（子控件会阻挡父控件的 tooltip 传播）
+        # 给按钮挂 tooltip（徽标已设鼠标穿透，不会阻挡 tooltip 传播）
         self._tool_toggle_btn.setToolTip(tooltip)
-        self._tool_danger_label.setToolTip(tooltip)
-        self._tool_safe_label.setToolTip(tooltip)
         # 恢复按钮显隐
         self._tool_restore_btn.setVisible(bool(agent_name))
 
@@ -8090,9 +8502,9 @@ class OpenAIChatToolWindow(ToolWindow):
         if not hasattr(self, "_tool_permission_controller") or not self._tool_permission_controller:
             return
         self._tool_permission_controller.restore_user()
-        # 刷新卡片和按钮
-        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
-            self._tool_control_card.refresh()
+        # 刷新卡片和按钮（懒创建：ensure 兜底，刷新不静默丢失）
+        self._ensure_tool_control_card()
+        self._tool_control_card.refresh()
         self._refresh_tool_toggle_btn()
 
     def _load_model_config_to_card(self):
@@ -8150,68 +8562,56 @@ class OpenAIChatToolWindow(ToolWindow):
         self._model_config_popup.set_config(current_name, config, self._current_model_name)
 
     def _toggle_history_card(self):
-        """切换历史会话卡片的显示"""
-        self._ensure_history_card()  # P0-1：框架懒创建，确保注册/入容器
-        self._card_manager.toggle_card("history", self._window_id)
-        # 显示时刷新历史会话数据
-        if self._card_manager.is_card_visible("history", self._window_id):
-            self._refresh_history_toggle_panel()
+        """切换历史会话（已迁移到右侧工作台「历史会话」页签）
 
-    def _sync_search_box_visibility(self):
-        """同步搜索框：两个标签页都显示搜索框"""
-        search_input = getattr(self._history_card, "_search_input", None)
-        if not search_input:
+        - 工作台不可见 → 展开并定位历史页
+        - 可见但不在历史页 → 切到历史页
+        - 已在历史页 → 切回默认落点页（等效原“关闭卡片”）
+        切页后的数据刷新由工作台通用协议
+        ``WorkbenchPanel.refresh_current_page_data()`` 驱动（页面自拉）。
+        """
+        self._ensure_history_card()  # 触发插件页 reconcile（幂等）
+        tm = TabManagerWindow.get_instance()
+        panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+        if tm is None or panel is None:
             return
-        search_input.setVisible(True)
-        search_input.setFocus()
-
-        # 根据当前标签更新占位文本
-        current_tab = self._history_card._current_tab if hasattr(self._history_card, "_current_tab") else "history"
-        search_input.setPlaceholderText("🔍 搜索历史会话..." if current_tab == "history" else "🔍 搜索归档会话...")
-
-    def _refresh_history_toggle_panel(self, is_archived: bool = False):
-        """刷新历史面板数据"""
-        if not self._history_card:
-            return
-
-        current_tab = self._history_card._current_tab if hasattr(self._history_card, "_current_tab") else "history"
-
-        if current_tab == "history" or is_archived:
-            # 获取当前项目的历史会话列表（M4：merge_team=True 团队会话合并为
-            # 单一条目，与普通会话混排；不再注入顶部团队分组区）
-            history_list = (
-                self.history_manager.get_history_list(self._current_project, merge_team=True)
-                if self.history_manager
-                else []
-            )
-            # 在项目过滤后的列表中查找当前会话的位置
-            current_idx = None
-            if self._current_session_id and self.history_manager:
-                for i, session in enumerate(history_list):
-                    # 🛡️ 合并条目：当前会话是组内成员之一时命中该合并条目
-                    if session.get("team_merged"):
-                        members = session.get("members") or []
-                        if any(m.get("session_id") == self._current_session_id for m in members):
-                            current_idx = i
-                            break
-                    elif session.get("session_id") == self._current_session_id:
-                        current_idx = i
-                        break
-            # 归档操作后需要清理归档会话列表
-            if is_archived:
-                self._history_popup_card.set_history(history_list, current_idx, clear_archived=True)
-            else:
-                self._history_popup_card.set_history(history_list, current_idx)
+        if not tm.is_workbench_visible() or panel.current_tab_id() != "history-manager":
+            tm.open_workbench_history()
         else:
-            # 刷新归档会话
-            self._refresh_archived_sessions()
+            panel.set_current_tab_by_id("worktree-manager", user=True)
+
+    def _close_history_panel(self):
+        """历史卡片关闭钮收出口：仅在用户显式点 × 时离开历史页
+
+        ★ 加载会话路径已不再调用本方法（页签按用户选择保持）；
+        本方法只服务 ``HistoryPage.closed`` 的显式关闭语义。
+        """
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is not None and panel.current_tab_id() == "history-manager":
+                panel.set_current_tab_by_id("worktree-manager", user=True)
+        except Exception:
+            pass
+
+    def _refresh_history_page_if_active(self):
+        """触发历史插件页自刷新（仅本窗口为活跃窗口且页面可见时）
+
+        架构反转后页面自拉数据（HistoryManager 单例），窗口只负责"何时刷新"
+        的时机通知，不再负责拉数据。
+        """
+        if not self._is_active_window():
+            return
+        page = getattr(self, "_history_card", None)
+        if page is not None and page.isVisible():
+            page.refresh()
 
     def _notify_history_data_changed(self, broadcast: bool = True):
         """会话数据变更统一通知：刷新历史卡片 + 失效欢迎卡片 + Tab 模式广播其他窗口
 
         收敛所有「会话状态变化 → 历史卡片/欢迎卡片同步」路径：
-        1. 本窗口历史卡片可见时刷新（_refresh_history_toggle_panel 内部按
-           current_tab 分流历史/归档列表）
+        1. 本窗口为活跃窗口且历史页可见时触发页面自刷新（页面按 current_tab
+           分流历史/归档列表）
         2. 本窗口欢迎卡片缓存失效；当前正显示欢迎卡片（空会话）时交错调度重建，
            确保 recent_sessions/top_by_count 拿到最新数据
         3. broadcast=True 时广播 Tab 管理器其他窗口（接收方 broadcast=False
@@ -8227,18 +8627,10 @@ class OpenAIChatToolWindow(ToolWindow):
         if getattr(self, "_is_destroyed", False):
             return
         # 1. 历史卡片可见时刷新
-        # 🛡️ 防御（2026-08-23 bug fix）：system_cards build 异常（plugin override import 失败等）
-        # 可能导致窗口缺 _history_card 等契约属性，硬访问会抛 AttributeError 中断
-        # _create_new_session 末尾的 notify，进而阻断欢迎卡片渲染链。getattr 兜底
-        # 后本次会话数据变更对历史卡片"无动作"——但 _create_new_session 之前的
-        # _schedule_initial_welcome 已调度，重建照常进行。
-        history_card = getattr(self, "_history_card", None)
-        if history_card is None and getattr(self, "_history_card", "__missing__") == "__missing__":
-            logger.warning(
-                "[OpenAIChatToolWindow] _notify_history_data_changed: 缺契约属性 _history_card，"
-                "跳过历史卡片刷新（欢迎卡片渲染不受影响）"
-            )
-        refresh_history_card_if_visible(history_card, self._refresh_history_toggle_panel)
+        # ★ 历史页已插件化 + 数据流反转：页面自拉数据（HistoryManager 单例），
+        #   窗口只通知时机；仅本窗口为活跃窗口时触发（后台窗口数据变更不打扰
+        #   活跃页面，多窗口串态防护语义不变）。
+        self._refresh_history_page_if_active()
         # 2. 欢迎卡片数据同步：优先「软更新」——缓存卡片仍在时保留
         #    QWebEngineView 实例、仅重渲染 body（避免其他标签页对话完成广播
         #    到本窗口时欢迎卡片被销毁重建，视觉上"重新加载一下"+ 100-500ms
@@ -8358,98 +8750,6 @@ class OpenAIChatToolWindow(ToolWindow):
                         position=InfoBarPosition.BOTTOM,
                     )
 
-    def _refresh_archived_sessions(self):
-        """刷新归档会话列表（带文件修改时间缓存，避免重复读取）"""
-        if not self.history_manager:
-            return
-
-        archived_list = self.history_manager.get_archived_sessions()
-
-        # 缓存归档文件预览数据（以文件路径+修改时间为键）
-        if not hasattr(self, "_archived_cache"):
-            self._archived_cache = {}  # path → (mtime, data_dict)
-
-        enriched_list = []
-        need_reparse = False
-
-        for session in archived_list:
-            fp = session["path"]
-            cached = self._archived_cache.get(fp)
-
-            try:
-                current_mtime = os.path.getmtime(fp)
-            except OSError:
-                current_mtime = 0
-
-            if cached and cached[0] == current_mtime:
-                # 缓存有效，直接复用
-                session["message_count"] = cached[1].get("message_count", 0)
-                session["last_time"] = cached[1].get("last_time", "")
-                session["preview"] = cached[1].get("preview", "")
-            else:
-                # 缓存过期或不存在，读取文件
-                try:
-                    from app.widgets.cards.settings.history_card import get_message_preview
-
-                    with open(fp, "r", encoding="utf-8") as f:
-                        data = json.loads(f.read())
-                    messages = data.get("messages", [])
-                    # 🛡️ R7 修复：team 邮件（_hook_event="TeamMail"）计入 user 消息数
-                    # → mail-only 会话归档后历史列表不再显示"0 条消息"
-                    msg_count = data.get(
-                        "message_count",
-                        len(
-                            [
-                                m
-                                for m in messages
-                                if m.get("role") == "user"
-                                and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
-                            ]
-                        ),
-                    )
-                    last_time = data.get("last_time", data.get("saved_at", ""))
-                    preview = get_message_preview(messages) if messages else ""
-                    session["message_count"] = msg_count
-                    session["last_time"] = last_time
-                    session["preview"] = preview
-                    self._archived_cache[fp] = (
-                        current_mtime,
-                        {
-                            "message_count": msg_count,
-                            "last_time": last_time,
-                            "preview": preview,
-                        },
-                    )
-                    need_reparse = True
-                except Exception:
-                    pass
-
-            enriched_list.append(session)
-
-        # 清理已不存在的归档文件缓存键（删除/恢复归档后立即生效，
-        # 防止 _archived_cache 随文件增删无限增长）
-        current_paths = {s["path"] for s in archived_list}
-        for stale_key in [k for k in self._archived_cache if k not in current_paths]:
-            self._archived_cache.pop(stale_key, None)
-
-        self._history_popup_card.set_archived_sessions(enriched_list)
-
-    def _on_history_tab_changed(self, tab_id: str):
-        """处理历史/归档标签切换"""
-        self._sync_search_box_visibility()
-
-        # 切换标签时清空搜索
-        search_input = getattr(self._history_card, "_search_input", None)
-        if search_input:
-            search_input.clear()
-
-        self._history_popup_card.switch_tab(tab_id)
-
-        if tab_id == "archived":
-            self._refresh_archived_sessions()
-        else:
-            self._refresh_history_toggle_panel()
-
     def _on_history_session_selected(self, index: int):
         """从历史面板选择会话"""
         if getattr(self, "_is_destroyed", False):
@@ -8465,7 +8765,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     record = self._history_popup_card.get_history_at_index(index)
                     new = tm.spawn_tab(self, session_record=record) if record is not None else None
                 if new is not None:
-                    self._card_manager.hide_card("history", self._window_id)
+                    # 页签保持：开新标签页不改变工作台当前页签（无历史页强切）
                     return
             # 降级原行为
         if index == -1:
@@ -8473,8 +8773,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._create_new_session()
         else:
             self._load_history_session_from_popup(index)
-        # 关闭历史会话卡片（通过 CardManager 更新显隐状态）
-        self._card_manager.hide_card("history", self._window_id)
+        # ★ 页签保持：加载会话不再强制离开历史页/跳工作树，
+        # 工作台页签完全按用户选择保持（用户可继续点选其他会话）
 
     def _on_team_restore_requested(self, run_id: str):
         """从历史面板恢复团队会话（方案 A 一键恢复）
@@ -8738,34 +9038,36 @@ class OpenAIChatToolWindow(ToolWindow):
         # 会话数据变更统一通知：恢复团队会话产生新会话记录（新 run_id），
         # 历史面板/欢迎卡片需同步 + 跨窗口广播
         self._notify_history_data_changed()
-        # 关闭历史会话卡片
-        self._card_manager.hide_card("history", self._window_id)
+        # ★ 页签保持：团队恢复后不强制切页签（原跳工作树已移除）
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # 极小窗口时对话区让出横向空间给左右 dock：
+        # 极小窗口时对话区让出横向空间给左 dock：
         # 卡片渲染下限 320 由 sync_width(target_width=max(320, ...)) 兜底，
         # 对话区被压窄/遮挡没关系。判据：
-        # - Tab 模式（宿主窗口有 dockSplitter）：用窗口总宽 - 左右 dock 最小
+        # - Tab 模式（宿主窗口有 dockSplitter）：用窗口总宽 - 左 dock 最小
         #   需求（含 handle），剩余不足 320 时让位为 0。不能只看 self.width()
         #   ——溢出时对话区窗格会被 clamp 在 min 320，永远 ≥320 造成死锁。
+        #   ★ 右侧 dock 停靠区已移除（container="right" 的卡片改道工作台），
+        #   dockSplitter 只有 [左停靠区, 内容区] 两格，不能再取 widget(2)。
         # - 无 dock（多窗口模式）：按自身可用宽判断。
         if hasattr(self, "chat_scroll_area"):
             target_min_w = 320
             host = self.window()
             sp = host.findChild(QSplitter, "dockSplitter") if host is not None else None
-            if sp is not None and sp.count() >= 3:
+            if sp is not None and sp.count() >= 2:
                 win_w = host.width()
-                dock_min = sp.widget(0).minimumWidth() + sp.widget(2).minimumWidth() + sp.handleWidth() * 2
+                dock_min = sp.widget(0).minimumWidth() + sp.handleWidth()
                 if win_w - dock_min < 320:
                     target_min_w = 0
             elif self.width() < 320:
                 target_min_w = 0
             if self.chat_scroll_area.minimumWidth() != target_min_w:
                 self.chat_scroll_area.setMinimumWidth(target_min_w)
-        self._set_cards_resize_preview_mode(True)
+        # 动画期间宿主会抑制预览模式：中间对话区原样实时显示（#31）
+        if not getattr(self, "_suppress_resize_preview", False):
+            self._set_cards_resize_preview_mode(True)
         # resize 期间持续重置防抖，避免在拖拽过程中提前批量重排
-        self._pending_resize_sync = True
         self._resize_debounce_timer.stop()
         self._resize_debounce_timer.start()
         self._resize_complete_timer.stop()
@@ -8791,7 +9093,12 @@ class OpenAIChatToolWindow(ToolWindow):
         卡片 minimumWidth 阻止 chat_container 缩小 → parent.width() 卡在旧值
         → sync_width 算出旧宽度 → 死锁。绕过方式：从视口直接推算。
         """
-        self._pending_resize_sync = False
+        # [L2] 后台页挂起：本页已被切到后台时不再推进恢复链。
+        # QTimer 不受可见性约束，不挂起的话后台页的定时器会与前台页争抢主线程。
+        orchestrator = ResizeOrchestrator.get_instance()
+        if not orchestrator.is_current(self):
+            orchestrator.mark_dirty(self)
+            return
 
         scroll_area = getattr(self, "chat_scroll_area", None)
         if not scroll_area:
@@ -8833,7 +9140,20 @@ class OpenAIChatToolWindow(ToolWindow):
             card.sync_width(target_width=max(320, viewport_width - margin))
 
     def _sync_all_cards_width(self):
-        """resize 完成后分批恢复卡片，避免所有 WebEngineView 同时分配 GPU 缓冲区"""
+        """resize 完成后恢复卡片：宽度同步分帧摊平 + 分批 GPU 恢复。
+
+        ⚡ #侧栏动画卡顿：实测 30 张卡一次性全量宽度同步会冻结主线程
+        44~132ms（约 1.4ms/张：setMin/MaxWidth 布局失效 + update_height 的
+        runJavaScript IPC），表现为「侧边栏动画放完后界面顿一下」。现改为
+        分帧批处理：每批 _SYNC_WIDTH_BATCH 张、批间让出主线程，单帧阻塞
+        <15ms（无感），总完成时间增加 <50ms。
+        """
+        # [L2] 后台页：整条恢复链挂起，等该页重新激活时（on_activated）同步补跑。
+        orchestrator = ResizeOrchestrator.get_instance()
+        if not orchestrator.is_current(self):
+            orchestrator.mark_paused(self)
+            return
+
         scroll_area = getattr(self, "chat_scroll_area", None)
         viewport_width = 0
         if scroll_area:
@@ -8841,15 +9161,56 @@ class OpenAIChatToolWindow(ToolWindow):
             if viewport_width > 0:
                 self._last_chat_viewport_width = viewport_width
 
-        # 第一步：全量同步所有卡片宽度（轻量，仅 setMinimumWidth/setMaximumWidth，无 GPU 分配）
+        # epoch 令牌提前到链头：宽度同步分帧链与后续恢复链共用同一代次，
+        # 新一轮 resize 周期（complete timer 重新到期）会使旧链全部作废。
+        self._restore_epoch += 1
+        epoch = self._restore_epoch
+
+        # [L1] 高度批量提交提前到宽度同步前开启：分帧期间 sync_width 驱动的
+        # update_height → JS 高度回传同样要被收敛为「一次布局 + 一次锚点修正」。
+        batch = self._ensure_height_batch()
+        if batch is not None:
+            batch.begin()
+
+        # 第一阶段：全量同步所有卡片宽度（分帧批处理）。
         # 🐛 修复：不能只同步视口 ±buffer 内卡片——离屏卡片残留旧宽度(尤其窗口被拉宽又缩小后)
         # 会锁死 chat_container 无法缩小（parent.width()→旧宽度→死锁），滚动补同步也用错 parent 宽。
-        # 宽度同步本身轻量，全量遍历开销可接受；真正昂贵的是第二步 GPU preview 恢复(已分批)。
+        cards = []
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
             if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
                 continue
-            card = item.widget()
+            cards.append(item.widget())
+        self._sync_width_queue = cards
+        self._sync_width_idx = 0
+        self._process_sync_width_batch(epoch)
+
+    def _process_sync_width_batch(self, epoch: int | None = None):
+        """第一阶段：分帧推进全量宽度同步；完成后进入第二阶段恢复链。
+
+        Args:
+            epoch: 链代次。与 self._restore_epoch 不符说明本轮 resize 已作废本链。
+        """
+        if epoch is not None and epoch != self._restore_epoch:
+            return
+        # [L2] 后台页挂起：切回激活时 on_activated 重跑 _sync_all_cards_width（新 epoch）。
+        orchestrator = ResizeOrchestrator.get_instance()
+        if not orchestrator.is_current(self):
+            orchestrator.mark_paused(self)
+            return
+
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        viewport_width = 0
+        if scroll_area:
+            viewport_width = scroll_area.viewport().width()
+            if viewport_width > 0:
+                self._last_chat_viewport_width = viewport_width
+
+        queue = self._sync_width_queue
+        idx = self._sync_width_idx
+        end = min(idx + _SYNC_WIDTH_BATCH, len(queue))
+        for i in range(idx, end):
+            card = queue[i]
             try:
                 if viewport_width > 0:
                     margin = 20 if card.role != "user" else max(24, int(viewport_width * 0.06))
@@ -8858,25 +9219,137 @@ class OpenAIChatToolWindow(ToolWindow):
                     card.sync_width(force=True)
             except RuntimeError:
                 pass
+        self._sync_width_idx = end
+        if end < len(queue):
+            QTimer.singleShot(0, lambda: self._process_sync_width_batch(epoch))
+            return
+        self._sync_width_queue = []
+        self._sync_width_idx = 0
+        # 宽度全部就位 → 第二阶段恢复链
+        self._begin_restore_chain(epoch)
 
-        # 第二步：收集卡片，分批退出 preview 模式
-        self._restore_queue = []
+    def _begin_restore_chain(self, epoch: int):
+        """第二阶段：分区恢复 —— 视口内立即全量恢复，离屏大批量快恢复。
+
+        🐛 竞态修复（窗口拖拽时部分卡片永久空白的根因）：
+        旧实现把全部卡片塞进同一个 _restore_queue，用 QTimer.singleShot 链式
+        分批推进，但**没有任何机制取消上一条链**。连续 resize（拖拽必然产生）
+        会启动多条链，它们共享 _restore_queue / _restore_batch_idx：
+        先结束的那条把 _restore_queue 清空并置 _resize_preview_active=False，
+        另一条链随后读到空队列直接收尾 → 大量卡片从未被 set_resize_preview_mode(False)
+        → 永远停留在 placeholder 空白态，表现为"窗口变大后内容迟迟不刷新"。
+        引入 epoch 令牌作废旧链，保证同一时刻只有一条恢复链存活
+        （宽度同步分帧链同样受 epoch 约束，见 _sync_all_cards_width）。
+
+        🐛 性能修复：固定 5 张/80ms 的节奏下，100 张卡片需 20 批 × 80ms ≈ 1.6s。
+        视口内卡片是用户正在看的，数量有限（通常 <20）且本来就要渲染，一次性
+        恢复没有额外 GPU 风险，却能让内容"立刻"适配；离屏卡片不参与渲染，
+        放宽到 20 张/30ms 快速收尾。
+        """
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        visible_cards = []
+        offscreen_cards = []
+        viewport_rect = scroll_area.viewport().rect() if scroll_area else None
+        if viewport_rect is not None:
+            viewport_top = scroll_area.verticalScrollBar().value()
+            viewport_bottom = viewport_top + viewport_rect.height()
         for i in range(self.chat_layout.count()):
             item = self.chat_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), MessageCard):
-                self._restore_queue.append(item.widget())
+            if not (item and item.widget() and isinstance(item.widget(), MessageCard)):
+                continue
+            card = item.widget()
+            if viewport_rect is None:
+                visible_cards.append(card)
+                continue
+            card_rect = card.geometry()
+            if (
+                card_rect.bottom() < viewport_top - self._RESTORE_VISIBLE_BUFFER
+                or card_rect.top() > viewport_bottom + self._RESTORE_VISIBLE_BUFFER
+            ):
+                offscreen_cards.append(card)
+            else:
+                visible_cards.append(card)
 
-        if not self._restore_queue:
-            self._resize_preview_active = False
-            return
+        for card in visible_cards:
+            try:
+                card.set_resize_preview_mode(False)
+            except RuntimeError:
+                pass
 
+        self._restore_queue = offscreen_cards
         self._restore_batch_idx = 0
-        self._process_restore_batch()
+        if self._restore_queue:
+            self._process_restore_batch(epoch)
+        else:
+            self._end_resize_cycle()
 
-    def _process_restore_batch(self):
-        """分批恢复卡片 viewer（触发 GPU 分配，必须分批以避免峰值）"""
-        BATCH_SIZE = 5
-        INTERVAL_MS = 80
+    def _ensure_height_batch(self) -> "HeightCommitBatch | None":
+        """惰性创建高度批量提交器（需要 chat_scroll_area 已构建）。"""
+        batch = getattr(self, "_height_batch", None)
+        if batch is not None:
+            return batch
+        scroll_area = getattr(self, "chat_scroll_area", None)
+        container = scroll_area.widget() if scroll_area is not None else None
+        if scroll_area is None or container is None:
+            return None
+        batch = HeightCommitBatch(scroll_area, container, self._should_follow_bottom)
+        self._height_batch = batch
+        return batch
+
+    def _is_resize_cycle_active(self) -> bool:
+        """判断 resize 周期是否真的在飞行中（而不是只残留一个标志位）。
+
+        用于「新卡片入列时是否立刻进入占位模式」的判定。旧实现只看
+        `_resize_preview_active`：该标志一旦因异常路径泄漏（卡片被删除、
+        恢复链被 epoch 作废等），之后**所有**新建卡片都会一诞生就被 hide
+        成占位 → 永久空白。这里改为「定时器在跑 或 恢复队列非空」，
+        即使标志泄漏也不再有破坏性后果。
+        """
+        return (
+            self._resize_debounce_timer.isActive()
+            or self._resize_complete_timer.isActive()
+            or bool(self._restore_queue)
+        )
+
+    def _end_resize_cycle(self):
+        """resize 周期的唯一收口。
+
+        旧实现把 `_resize_preview_active = False` 散落在多个出口，任一出口被
+        异常 / 已删除卡片打断都会让标志泄漏。这里统一收口：任何退出路径
+        （含被 epoch 作废的旧恢复链提前收尾）都保证队列与标志复位。
+
+        ⚡ #侧栏动画卡顿：batch 不能在这里 end。Chromium 的高度回传是异步的
+        （宽度同步 → JS reflow → IPC reportHeight），通常在恢复链收尾**之后**
+        才陆续到达；立即 end 会让这些回传在 `_commit_viewer_height` 分流处
+        因 active=False 全部直调 setFixedHeight（实测 31 次 / 57ms，绕过
+        「一次布局 + 一次锚点修正」收敛）。改为续期 150ms 宽限（begin 的幂等
+        分支会重启 idle timer），由最后一次回传后的静默期自然收尾。
+        """
+        self._restore_queue = []
+        self._restore_batch_idx = 0
+        self._resize_preview_active = False
+        batch = getattr(self, "_height_batch", None)
+        if batch is not None:
+            batch.begin()
+
+    def _process_restore_batch(self, epoch: int | None = None):
+        """分批恢复离屏卡片 viewer（触发 GPU 分配，故分批以避免峰值）
+
+        Args:
+            epoch: 恢复链代次。与 self._restore_epoch 不符说明本链已被新一轮
+                resize 作废，立即退出，避免多链并存互相清空队列。
+        """
+        if epoch is not None and epoch != self._restore_epoch:
+            return
+        # [L2] 链式恢复途中被切到后台：挂起剩余批次，激活时补跑。
+        # 不挂起的话，后台页会继续以 20 张/30ms 的节奏分配 GPU 缓冲，
+        # 与前台页的恢复链争抢主线程。
+        orchestrator = ResizeOrchestrator.get_instance()
+        if not orchestrator.is_current(self):
+            orchestrator.mark_paused(self)
+            return
+        BATCH_SIZE = 20
+        INTERVAL_MS = 30
         end = min(self._restore_batch_idx + BATCH_SIZE, len(self._restore_queue))
         for i in range(self._restore_batch_idx, end):
             card = self._restore_queue[i]
@@ -8886,10 +9359,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 pass
         self._restore_batch_idx = end
         if end < len(self._restore_queue):
-            QTimer.singleShot(INTERVAL_MS, self._process_restore_batch)
+            QTimer.singleShot(INTERVAL_MS, lambda: self._process_restore_batch(epoch))
         else:
-            self._restore_queue = []
-            self._resize_preview_active = False
+            self._end_resize_cycle()
 
     def _sync_single_card_width(self, card, force: bool = True):
         """按当前滚动区 viewport 宽度同步单张卡片宽度（统一宽度来源）。"""
@@ -8913,6 +9385,8 @@ class OpenAIChatToolWindow(ToolWindow):
         scroll_area = getattr(self, "chat_scroll_area", None)
         if not scroll_area:
             return
+        # 观测：稳态下的并发渲染页 / 复用池占用（内部自带 2s 节流）
+        self._log_render_quota("scroll")
 
         viewport_rect = scroll_area.viewport().rect()
         viewport_top = scroll_area.verticalScrollBar().value()
@@ -9193,7 +9667,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=1500,
                 position=InfoBarPosition.BOTTOM,
             )
-        self.input_area.clear()
+        self._clear_input_area()
         if not self._is_streaming:
             self.input_area.toggle_send_button(True)
 
@@ -9208,7 +9682,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     card = popup.llmSkillsCard
                     card._sync_skill_states()
                     card._update_skill_token_count()
-            except RuntimeError, AttributeError:
+            except (RuntimeError, AttributeError):
                 pass
 
     def _on_skills_config_changed(self, enabled_skills):
@@ -9217,27 +9691,6 @@ class OpenAIChatToolWindow(ToolWindow):
         当一个窗口启用/禁用了技能，轻量同步开关状态，不重建列表。
         """
         self._sync_skill_list_cards()
-
-    def _reload_plugin_system(self):
-        """运行时重载所有插件子系统（设置中点击「重载插件」时调用）"""
-        if hasattr(self, "backend") and self.backend:
-            # force_full=True：按钮显式语义——无论是否有变更都全量重载所有子系统
-            from app.core.plugin_host_service import PluginHostService
-
-            result = PluginHostService.get_instance().reload_plugin_subsystems(force_full=True)
-            from qfluentwidgets import InfoBar, InfoBarPosition
-
-            InfoBar.success(
-                title="插件已重载",
-                content=f"智能体: {result.get('agents', 0)}个, "
-                f"命令: {'✓' if result.get('commands') else '✗'}, "
-                f"主题: {'✓' if result.get('themes') else '✗'}, "
-                f"技能: {'✓' if result.get('skills') else '✗'}, "
-                f"MCP: {'✓' if result.get('mcp') else '✗'}",
-                parent=TabManagerWindow.get_instance() or self.window(),
-                duration=3000,
-                position=InfoBarPosition.BOTTOM,
-            )
 
     def _register_tool_reload_notice(self):
         """注册工具热重载风险通知监听（进程级一次，多窗口只注册首个）
@@ -9319,7 +9772,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if win._is_destroyed:
                 return False
             return not attr or hasattr(win, attr)
-        except RuntimeError, AttributeError:
+        except (RuntimeError, AttributeError):
             return False
 
     def _on_plugin_hot_reload(self, result: dict):
@@ -9369,35 +9822,47 @@ class OpenAIChatToolWindow(ToolWindow):
                 # refresh_if_visible 在 detail 模式下保留参数视图，列表模式下保留过滤
                 try:
                     win._command_card.refresh_if_visible()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
 
         # 命令变更：同步刷新快捷键绑定
         if result.get("commands"):
-            # 清除窗口级快捷键缓存，允许重新注册
-            OpenAIChatToolWindow._window_shortcut_cache.clear()
+            # ⚠️ 不能用 _window_shortcut_cache.clear() 代替：那只丢 Python 引用，
+            # C++ QShortcut 仍留在 QShortcutMap，重建后同键序列多套 → Qt 判
+            # ambiguous → activated() 永不触发（快捷键全灭，仅重启可恢复）。
+            OpenAIChatToolWindow._destroy_all_command_shortcuts()
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
-                    win._register_command_shortcuts()
-                except RuntimeError, AttributeError:
+                    win._register_command_shortcuts(force=True)
+                except (RuntimeError, AttributeError):
                     pass
+            logger.debug("[HotReload] 命令快捷键已重建（先销毁旧 QShortcut 再注册）")
         # UI 插件增删：重建输入区插件按钮（幂等；未注册任何按钮时零渲染）
+        # ⚠️ 本分支不重建命令快捷键（命令表没变）；只有上面的 commands 分支才重建。
+        #
+        # ★ 刷新动作一律**无条件**执行（2026-09 教训）：曾用「槽位溯源」推导该
+        # 刷哪些位置——热重载是异步广播 + 多入口 + 可重入的，跨调用的「卸前/装后」
+        # 槽位快照必然与真实时序错位，表现为「有时刷新、有时不刷、卸载后残留」。
+        # 精准化只保留在**无状态可判定**的位置：右侧工作台页按插件归属定向重建
+        # （见下方 refresh_workbench(force_plugin=...)）。
+        _ui_plugin_name = (result.get("_plugin_name") or "").strip()
         if result.get("ui"):
+            if _ui_plugin_name:
+                logger.debug(f"[HotReload] UI 刷新: plugin={_ui_plugin_name}")
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
                 try:
                     win._build_plugin_input_buttons()
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             # ★ 已打开标签页视图重绘：消息内容块是渲染时刻的快照，热重载后
             # 不会自动更新（新建标签页才显示新版）——遍历所有窗口的已渲染
             # 消息卡片，命中该插件的 custom 块时用最新 render_func 重新生成。
             # plugin_name 为空（全量/合并重载）时重绘全部 custom 块。
-            _ui_plugin_name = result.get("_plugin_name") or ""
             for win in list(window_registry.alive_window_instances()):
                 if not OpenAIChatToolWindow._win_alive(win):
                     continue
@@ -9405,10 +9870,26 @@ class OpenAIChatToolWindow(ToolWindow):
                     for _card in win.findChildren(MessageCard):
                         try:
                             _card.rerender_custom_blocks(_ui_plugin_name)
-                        except RuntimeError, AttributeError:
+                        except (RuntimeError, AttributeError):
                             pass
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
+            # ★ 右侧工作台插件页重建：ui 热重载后 registry 已更新，但面板
+            # widget 是构建时快照，(page_id, label) 签名不变会被 sync_plugin_pages
+            # 短路跳过——强制销毁重建，常驻插件页（工作树/产物/自注册 tab）
+            # 才真正换用新代码。下一帧执行，避开广播栈内重建。
+            # ★ 精准且无状态：按**插件归属**定向重建（面板就地记录每页归属），
+            # 其余插件页原样保留，不丢滚动位置/展开项/输入草稿。插件名缺失
+            # （全量/合并重载）时退化为 force=True 全量重建。
+            try:
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                _tmw = TabManagerWindow.get_instance()
+                if _tmw is not None:
+                    _kw = {"force_plugin": _ui_plugin_name} if _ui_plugin_name else {"force": True}
+                    QTimer.singleShot(0, lambda _kw=_kw: _tmw.refresh_workbench(**_kw))
+            except Exception:
+                pass
             # 欢迎卡片插件 tab 刷新：ui 组件重载（安装/更新/卸载）后，已打开的
             # 欢迎卡片需重建以显示新增/移除的插件 tab。原刷新完全依赖
             # register_welcome_tab → registry 链，实测安装新插件后已打开标签页
@@ -9427,7 +9908,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 tray._setup_global_hotkey()
             except Exception:
                 pass
-            logger.debug("[HotReload] command shortcuts re-registered")
 
         # 技能变更：刷新技能列表（settings popup + 卡片 token 估算）
         # 注意：settings popup 是全局共享单例（所有窗口通过 property 访问同一实例），
@@ -9443,7 +9923,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     win._settings_popup.llmSkillsCard._refresh_skills()
                     break
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] skills list re-discovered")
@@ -9463,7 +9943,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         card._hook_manager.reload_global_hooks(str(card._hooks_config_file))
                     card._refresh(reload=True)
                     break
-                except (RuntimeError, AttributeError) as e:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             logger.debug("[HotReload] hooks card refreshed")
@@ -9478,7 +9958,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         continue
                     win._settings_popup.refresh_theme_options()
                     break
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] settings theme dropdown refreshed")
 
@@ -9529,7 +10009,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         mcp_card.refresh_connections()
                         logger.debug("[HotReload] MCP server list refreshed")
                     break
-                except (RuntimeError, AttributeError) as e:
+                except (RuntimeError, AttributeError):
                     # 多窗口竞态：窗口已被销毁
                     pass
             # 插件删除 / 服务器移除 / 禁用后，断开已不在启用列表中的运行连接（避免子进程残留）。
@@ -9560,7 +10040,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     if hasattr(card, "_rebuild"):
                         card._rebuild()
                     break
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] LSP server list refreshed")
 
@@ -9587,18 +10067,50 @@ class OpenAIChatToolWindow(ToolWindow):
                     if all_closed:
                         win._on_system_card_closed("hot_reload_restore")
                         logger.debug("[HotReload] UI 组件变更后兜底恢复输入区")
-                except RuntimeError, AttributeError:
+                except (RuntimeError, AttributeError):
                     pass
             logger.debug("[HotReload] UI 组件变更后系统卡片状态检查完成")
 
             # Tab 模式下刷新共享 Launcher（热重载可能新增 / 卸载了 UI 插件）
+            # ★ 不加 isVisible() 门槛：隐藏窗口的 titleBar tab / 工作区页同样
+            # 需要同步（刷新链幂等），否则隐藏期间重载的插件在重新显示后仍是旧版。
             try:
                 _tm = TabManagerWindow.get_instance()
-                if _tm is not None and _tm.isVisible():
+                if _tm is not None:
                     _tm._update_shared_launcher()
             except Exception:
                 logger.exception("[HotReload] 刷新共享 Launcher 异常")
             logger.debug("[HotReload] UI 插件列表已刷新")
+
+    def _safe_refresh(self, widget, method_name: str = "refresh_style") -> None:
+        """周期内刷新去重：同一 widget 的同名刷新方法每周期只调一次。
+
+        5a（颜色）与 5b（字体）块对同一批浮动卡片的 refresh_style 重复调用
+        是已知冗余（setStyleSheet 解析 + 向下传播非免费）。周期集合在
+        _apply_runtime_ui_settings 入口重置。
+        """
+        if widget is None or not hasattr(widget, method_name):
+            return
+        key = (id(widget), method_name)
+        if key in self._refreshed_in_cycle:
+            return
+        self._refreshed_in_cycle.add(key)
+        try:
+            getattr(widget, method_name)()
+        except Exception as e:
+            logger.warning(f"[theme refresh] {type(widget).__name__}.{method_name}: {e}")
+
+    def _safe_refresh_tooltips(self) -> None:
+        """refresh_all_tooltips 的周期内去重（主题块与字体块各有一处调用）。"""
+        if getattr(self, "_tooltips_refreshed_in_cycle", False):
+            return
+        self._tooltips_refreshed_in_cycle = True
+        try:
+            from app.widgets.simple_hover_tooltip import refresh_all_tooltips
+
+            refresh_all_tooltips()
+        except Exception as e:
+            logger.warning(f"[theme refresh] refresh_all_tooltips: {e}")
 
     def _apply_runtime_ui_settings(self, scope=None, _skip_global=False):
         """
@@ -9643,6 +10155,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not _skip_global:
             Colors.refresh()
 
+        # ── 周期内刷新去重（5a + 5b 块对同一 widget 的 refresh_style 重复调用
+        # 是已知冗余；set/flag 在每次进入本方法时重置，即一个刷新周期） ──
+        self._refreshed_in_cycle: set = set()
+        self._tooltips_refreshed_in_cycle = False
+
         # ── 0. 按需扫描 widget 树，按类型缓存 ──
         # [PERF] 单次 findChildren(QWidget) 全树遍历 + isinstance 分类，
         # 替代多次独立类型 findChildren（每次都是完整树遍历，实测 5 次 ≈ 80ms）。
@@ -9663,12 +10180,7 @@ class OpenAIChatToolWindow(ToolWindow):
             _setting_cards = [w for w in _all_widgets if isinstance(w, SettingCard)]
         else:
             _setting_cards = []
-        from app.widgets.worktree_section import WorktreeSectionWidget
-
-        if is_font:
-            _worktree_widgets = [w for w in _all_widgets if isinstance(w, WorktreeSectionWidget)]
-        else:
-            _worktree_widgets = []
+        # WorktreeSectionWidget 已迁入 worktree-manager 插件，自订 EV_THEME_CHANGED 刷新，此处不再遍历
         from app.widgets.cards.settings.system_card_frame import SystemCardFrame
 
         _popup_frames = self._settings_popup.findChildren(SystemCardFrame) if self._settings_popup else []
@@ -9712,17 +10224,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 if ring and hasattr(ring, "refresh_theme"):
                     ring.refresh_theme()
 
-            # 消息卡片主题
+            # 消息卡片主题（per-card 隔离：单卡 refresh_theme 异常不得中断
+            # 后续刷新项——2026-09-06 NameError 曾致同窗口输入框/设置弹窗卡片
+            # 全部停留在旧主题）
             ThemeRefreshCoordinator.timer_start("msg_cards")
             for card in _message_cards:
                 if hasattr(card, "refresh_theme"):
-                    card.refresh_theme()
+                    try:
+                        card.refresh_theme()
+                    except Exception as e:
+                        logger.warning(f"[theme refresh] message card {id(card):#x}: {e}")
             ThemeRefreshCoordinator.timer_end("msg_cards")
 
-            # 自绘 hover tooltip 主题刷新
-            from app.widgets.simple_hover_tooltip import refresh_all_tooltips
-
-            refresh_all_tooltips()
+            # 自绘 hover tooltip 主题刷新（周期内去重，见 _safe_refresh_tooltips）
+            self._safe_refresh_tooltips()
 
             # 输入区插件按钮图标随主题切换（浅色/深色图标）
             self._refresh_plugin_input_button_icons()
@@ -9755,20 +10270,14 @@ class OpenAIChatToolWindow(ToolWindow):
             if self._settings_popup:
                 apply_font_size_to_widget(self._settings_popup, 14)
 
-            # WorktreeSectionWidget 主题（含字体）
-            for wt_widget in _worktree_widgets:
-                wt_widget.refresh_style()
-
             # 上下文圆环 + 编码计划圆环 tooltip 字号随字号变化
             for ring_attr in ("context_usage_ring", "coding_plan_ring"):
                 ring = getattr(self, ring_attr, None)
                 if ring and hasattr(ring, "refresh_font_size"):
                     ring.refresh_font_size()
 
-            # 自绘 hover tooltip 字号刷新
-            from app.widgets.simple_hover_tooltip import refresh_all_tooltips
-
-            refresh_all_tooltips()
+            # 自绘 hover tooltip 字号刷新（周期内去重，见 _safe_refresh_tooltips）
+            self._safe_refresh_tooltips()
 
             # 分支标签（包含字号 + 颜色的样式，字体变化时需同步刷新）
             if hasattr(self, "_project_label"):
@@ -9840,22 +10349,20 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._apply_bottom_input_stack_style()
             if hasattr(self, "_bottom_toolbar_strip"):
                 self._apply_bottom_input_stack_style()
-            # 模型按钮容器
+            # 模型按钮容器（一体化视觉：无背景胶囊，去卡中卡）
             if hasattr(self, "_model_btn_container"):
-                self._model_btn_container.setStyleSheet(f"""
-                    background: {Colors.TOOLBAR_BG};
+                self._model_btn_container.setStyleSheet("""
+                    background: transparent;
                     border: none;
-                    border-radius: 8px;
                 """)
                 # 同步刷新模型胶囊内竖向分隔线（主题色跟随 BORDER）
                 for _sep in (getattr(self, "_model_sep_name", None), getattr(self, "_model_sep_usage", None)):
                     if _sep is not None:
                         _sep.setStyleSheet(f"background: {Colors.BORDER};")
             if hasattr(self, "_toolbar_capsule"):
-                self._toolbar_capsule.setStyleSheet(f"""
-                    background: {Colors.TOOLBAR_BG};
+                self._toolbar_capsule.setStyleSheet("""
+                    background: transparent;
                     border: none;
-                    border-radius: 8px;
                 """)
             # 输入区样式（含文本框 + 下拉框，主题色敏感 → 每次必刷）
             if hasattr(self, "input_area") and hasattr(self.input_area, "refresh_style"):
@@ -9873,8 +10380,7 @@ class OpenAIChatToolWindow(ToolWindow):
             # 设置弹窗 — 子卡片主题样式
             if self._settings_popup:
                 for frame in _popup_frames:
-                    if hasattr(frame, "refresh_style"):
-                        frame.refresh_style()
+                    self._safe_refresh(frame)
                 # 补充刷新设置弹窗中的命名子卡片（不在 findChildren 范围的子类）
                 for card_name in (
                     "uiFontSizeCard",
@@ -9885,19 +10391,19 @@ class OpenAIChatToolWindow(ToolWindow):
                     "llmProviderCard",
                     "mcpListCard",
                     "lspListCard",
+                    # 手风琴类卡片（ExpandSettingCard 子类，不在 SystemCardFrame
+                    # findChildren 范围，漏刷会导致内部选项颜色停留旧主题）
+                    "pluginToolCard",
+                    "pluginAgentCard",
                 ):
-                    card = getattr(self._settings_popup, card_name, None)
-                    if card is not None and hasattr(card, "refresh_style"):
-                        card.refresh_style()
+                    self._safe_refresh(getattr(self._settings_popup, card_name, None))
                 # 刷新设置弹窗分隔标签
                 if hasattr(self._settings_popup, "_refresh_sep_labels"):
                     self._settings_popup._refresh_sep_labels()
             # 设置卡片（全窗口递归）
             for card in _base_settings:
-                if hasattr(card, "refresh_style"):
-                    card.refresh_style()
-            if self._settings_popup and hasattr(self._settings_popup, "refresh_style"):
-                self._settings_popup.refresh_style()
+                self._safe_refresh(card)
+            self._safe_refresh(self._settings_popup)
             # 浮动卡片
             for card in (
                 self._question_floating_widget,
@@ -9906,54 +10412,31 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._history_questions_card_content,
                 self._undo_delete_card,
             ):
-                if card and hasattr(card, "refresh_style"):
-                    card.refresh_style()
+                self._safe_refresh(card)
             # 卡片容器
-            if (
-                hasattr(self, "_top_card_container")
-                and self._top_card_container
-                and hasattr(self._top_card_container, "refresh_style")
-            ):
-                self._top_card_container.refresh_style()
-            if (
-                hasattr(self, "_bottom_card_container")
-                and self._bottom_card_container
-                and hasattr(self._bottom_card_container, "refresh_style")
-            ):
-                self._bottom_card_container.refresh_style()
+            self._safe_refresh(getattr(self, "_top_card_container", None))
+            self._safe_refresh(getattr(self, "_bottom_card_container", None))
+            # L1 补全容器（透明承托，刷新以保持与卡片表面一致）
+            self._safe_refresh(getattr(self, "_completion_container", None))
             # 命令卡片
-            if hasattr(self, "_command_card") and self._command_card and hasattr(self._command_card, "refresh_style"):
-                self._command_card.refresh_style()
+            self._safe_refresh(getattr(self, "_command_card", None))
             # 文件提及卡片（滚动条颜色随主题）
-            if (
-                hasattr(self, "_file_mention_card")
-                and self._file_mention_card
-                and hasattr(self._file_mention_card, "refresh_style")
-            ):
-                self._file_mention_card.refresh_style()
+            self._safe_refresh(getattr(self, "_file_mention_card", None))
             # 模型选择卡片
-            if hasattr(self, "_model_selector_card_content") and self._model_selector_card_content:
-                self._model_selector_card_content.refresh_style()
+            self._safe_refresh(getattr(self, "_model_selector_card_content", None))
             # 🛡️ 懒创建框架下 _model_selector_card 可能仍为 None（deferred 链未执行），
             # 必须判 None 而非 hasattr（属性恒存在，值为 None 时 hasattr 返回 True）
+            self._safe_refresh(getattr(self, "_model_selector_card", None))
             if getattr(self, "_model_selector_card", None) is not None:
-                self._model_selector_card.refresh_style()
                 self._update_model_selector_header()
-            # 项目选择卡片
-            if hasattr(self, "_project_selector_card_content"):
-                self._project_selector_card_content.refresh_style()
-            if hasattr(self, "_project_selector_card"):
-                self._project_selector_card.refresh_style()
-            # 记忆卡片
-            if hasattr(self, "_memory_card_popup") and hasattr(self._memory_card_popup, "refresh_style"):
-                self._memory_card_popup.refresh_style()
+            # 项目选择面板已迁入 history-manager 插件（左侧停靠区历史卡内），
+            # 样式由插件页自身 refresh_style 负责（宿主不再持有卡片引用）
             # 工具控制卡片
-            if hasattr(self, "_tool_control_card") and hasattr(self._tool_control_card, "refresh_style"):
-                self._tool_control_card.refresh_style()
+            self._safe_refresh(getattr(self, "_tool_control_card", None))
 
         # ── 5b. 字体相关公共块（颜色或字体变化时都执行） ──
         # 内嵌 font_size_css / get_font_family_css 的浮动卡片：
-        #   - 颜色变化：上面 5a 已调过 refresh_style（重复但无害，setStyleSheet 幂等）
+        #   - 5a/5b 通过 _safe_refresh 周期内自动去重，5b 跳过 5a 已刷卡片
         #   - 字体变化：5a 不走 → 这里补一次刷新，否则字号/字族切换时
         #     内嵌硬编码 font-size 的 QSS 不重建，setFont 被 QSS 盖住，视觉不响应
         self._refresh_floating_cards_font_style()
@@ -9981,25 +10464,6 @@ class OpenAIChatToolWindow(ToolWindow):
             """)
         if hasattr(self, "_settings_btn_icon"):
             self._settings_btn_icon.setPixmap(get_icon("模型选择").pixmap(16, 16))
-        # 项目新建输入框（含 font_size_css + 颜色）
-        if hasattr(self, "_project_new_edit"):
-            self._project_new_edit.setStyleSheet(f"""
-                QLineEdit {{
-                    background: {Colors.HOVER_BG};
-                    border: 1px solid {Colors.BORDER};
-                    border-radius: 4px;
-                    color: {Colors.TEXT_PRIMARY};
-                    padding: 2px 6px;
-                    {font_size_css(11)}
-                    {get_font_family_css()}
-                }}
-                QLineEdit:focus {{
-                    border: 1px solid {Colors.TEXT_ACCENT};
-                }}
-                QLineEdit::placeholder {{
-                    color: {Colors.INPUT_PLACEHOLDER};
-                }}
-            """)
 
         ThemeRefreshCoordinator.timer_end("total")
 
@@ -10015,7 +10479,7 @@ class OpenAIChatToolWindow(ToolWindow):
         ctx 拉取 font_size/font_family，show_card 之后需要主动调
         _apply_latest_theme 重新拉 ctx 应用新字号/字族。
         """
-        # ── 主窗口内嵌浮动卡片 ──
+        # ── 主窗口内嵌浮动卡片（周期内去重：5b 跳过 5a 已刷卡片） ──
         for card in (
             self._question_floating_widget,
             self._sub_agent_compact_widget,
@@ -10024,16 +10488,12 @@ class OpenAIChatToolWindow(ToolWindow):
             self._undo_delete_card,
             getattr(self, "_command_card", None),
             getattr(self, "_file_mention_card", None),
-            getattr(self, "_memory_card_popup", None),
             getattr(self, "_tool_control_card", None),
         ):
-            if card and hasattr(card, "refresh_style"):
-                try:
-                    card.refresh_style()
-                except Exception:
-                    pass
+            self._safe_refresh(card)
 
-        # ── UI 插件浮动卡片：拉模型，卡片自带 _apply_latest_theme / _apply_theme / _retheme ──
+        # ── UI 插件浮动卡片：refresh_style 为统一约定（覆盖最全），旧插件的
+        #    _apply_latest_theme / _apply_theme / _retheme 作为兼容兜底排在后面 ──
         # （detect-by-hasattr 防止强制依赖某个具体方法名，向后兼容多版本插件）
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -10043,7 +10503,7 @@ class OpenAIChatToolWindow(ToolWindow):
             for widget in instances.values():
                 if widget is None or not widget.isVisible():
                     continue
-                for method_name in ("_apply_latest_theme", "_apply_theme", "_retheme"):
+                for method_name in ("refresh_style", "_apply_latest_theme", "_apply_theme", "_retheme"):
                     method = getattr(widget, method_name, None)
                     if callable(method):
                         try:
@@ -10232,6 +10692,14 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 btn.setStyleSheet(data["style"])
 
+    def _apply_pending_agent_switch(self):
+        """批4 4-0a：ChatEngine 就绪后补执行暂存的智能体切换（O8 队列任务体）"""
+        pending = getattr(self, "_pending_agent_switch", None)
+        if not pending:
+            return
+        self._pending_agent_switch = None
+        self._on_agent_changed(pending)
+
     def _on_agent_changed(self, agent_name: str, skip_welcome: bool = False):
         """智能体切换处理
 
@@ -10242,7 +10710,13 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if getattr(self, "_is_destroyed", False):
             return
-        if not agent_name or not self.backend.chat_engine:
+        if not agent_name:
+            return
+        if not self.backend.chat_engine:
+            # 批4 4-0a：引擎未就绪（ChatEngine 延迟创建中）不再静默丢弃切换，
+            # 暂存后由队列 apply_pending_agent 任务在 create_engines(N18) 完成
+            # 后补执行（保序对 O8：create_engines → apply_pending_agent）。
+            self._pending_agent_switch = agent_name
             return
 
         logger.info(f"[_on_agent_changed] Switching from {self._current_agent} to {agent_name}")
@@ -10273,26 +10747,6 @@ class OpenAIChatToolWindow(ToolWindow):
             self.input_area._adjust_height_to_content()
         except Exception:
             pass
-
-    def _show_agent_intro(self, agent_name: str):
-        """显示智能体介绍卡片"""
-        if not self.backend.agent_manager:
-            return
-        agent = self.backend.get_agent(agent_name)
-        if not agent:
-            return
-
-        intro_md = f"""\
-### 🤖 已切换到智能体：{agent.name}
-
-{agent.description}
-
-"""
-        card = MessageCard(parent=self, role="assistant", timestamp="系统")
-        card.update_content(intro_md)
-        card.finish_streaming()
-        self._add_chat_widget(card)
-        self._scroll_to_bottom()
 
     def _update_agent_status(self, agent_name: str):
         """更新智能体状态显示（按钮组模式下主要更新按钮提示）"""
@@ -10383,6 +10837,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_streaming = False
         self._topic_summary_cancelled = True  # 🛡️ 取消标题生成重试
         self._toggle_send_stop(False)
+        # 繁忙时排队消息：切会话即失效（内存态不跨会话），同步隐藏排队卡片
+        self._clear_pending_message_queue()
 
         if self._sub_agent_compact_widget:
             self._sub_agent_compact_widget.clear()
@@ -10488,9 +10944,18 @@ class OpenAIChatToolWindow(ToolWindow):
             pass
 
     def _display_current_session(self):
+        # 会话切换：撤销条目绑定在具体 session 上，跨会话一律失效
+        # （本方法是所有会话加载路径的汇聚点，在此兜底即可覆盖全部调用方）
+        self._clear_undo_store_for_session_switch()
+
         session = self.session_manager.get_current_session()
         if not session:
             self._clear_chat_area()
+            # 🐛 修复（产物区刷新不及时）：会话显示出口同步重拉工作台产物/任务，
+            # 否则切换会话后产物区仍显示上一会话的文件记录。
+            # _push_workbench_updates 自带活跃窗口隔离（非活跃窗口跳过）与
+            # 面板不可见零开销（refresh_workbench 首行 return），可安全调用。
+            self._push_workbench_updates(refresh_artifacts=True)
             return
 
         self.title_edit.setText(session.topic_summary or session.name or "新对话")
@@ -10507,6 +10972,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._scroll_to_bottom(sticky_ms=900)
             # 滚动完成后同步时间线节点到最后一个
             QTimer.singleShot(100, self._sync_node_preview_to_last)
+            # 🐛 修复（产物区刷新不及时）：缓存恢复也是一次会话切换，同步刷新工作台
+            self._push_workbench_updates(refresh_artifacts=True)
             return
 
         self._clear_chat_area()
@@ -10527,11 +10994,17 @@ class OpenAIChatToolWindow(ToolWindow):
             # _switch_to_session_by_id 等全部调用方，无需在每处重复失效。
             self._invalidate_welcome_card()
             self._show_initial_welcome()
+            # 🐛 修复（产物区刷新不及时）：切到空会话也需刷新工作台（清掉上一会话产物）
+            self._push_workbench_updates(refresh_artifacts=True)
             return
 
         self._load_message_batch(initial=True)
         # 同步 batch 结构：确保 _batch_cards 和 _message_index 与布局一致
         self._sync_batch_structures()
+        # 🐛 修复（产物区刷新不及时）：会话显示完成的统一出口，按新 session_id
+        # 重拉工作台产物/任务/项目数据（_load_session_from_record / _create_new_session /
+        # _switch_to_session_by_id 等所有加载路径都经过本方法，无需逐处补刷）
+        self._push_workbench_updates(refresh_artifacts=True)
 
     def _show_initial_welcome(self):
         """仅在UI上显示欢迎卡片，不改动Session数据
@@ -10559,6 +11032,8 @@ class OpenAIChatToolWindow(ToolWindow):
 
     _WELCOME_SLOT_MS = 50  # 相邻窗口 welcome 渲染的最小间隔
     _WELCOME_SLOT_COUNT = 20  # 槽位数：50ms × 20 = 1000ms 上限轮转
+    # pending 守卫超时：slot 回调丢失（QTimer 竞态）时强制放行重建，防永久熔断
+    _WELCOME_PENDING_TIMEOUT_S = 3.0
 
     def _schedule_initial_welcome(self):
         """QTimer 交错调度欢迎卡片渲染（C2：并发会话创建不卡 UI）
@@ -10577,16 +11052,31 @@ class OpenAIChatToolWindow(ToolWindow):
         在同事件批次内可能连续调度，无守卫会双次重建 QWebEngineView（100-500ms×2）。
         渲染回调读 _get_or_create_welcome_card 时缓存已被 invalidate，合并调度
         仍拿到最新数据，不丢失更新。
+
+        🛡️ pending 超时兜底（2026-09-02 bug fix）：守卫依赖 slot 回调必然执行来
+        复位 pending；实测插件热重载风暴中 slot 回调可能丢失（QTimer 竞态，
+        win_676 案例：21:58:01 调度后回调未 fire，pending 永久 True），此后该
+        窗口所有欢迎卡片重建请求被永久拦截 → 插件启停/更新后欢迎卡片无法
+        刷新出来。pending 超过 3s 未回调即视为泄漏，强制放行重建。
         """
+        now = time.monotonic()
         try:
             if self._welcome_render_pending:
-                logger.debug(
-                    f"[OpenAIChatToolWindow] _schedule_initial_welcome: 已有 pending 渲染，跳过（wid={self._window_id}）"
+                since = getattr(self, "_welcome_render_pending_since", None)
+                if since is not None and (now - since) < self._WELCOME_PENDING_TIMEOUT_S:
+                    logger.debug(
+                        f"[OpenAIChatToolWindow] _schedule_initial_welcome: 已有 pending 渲染，跳过（wid={self._window_id}）"
+                    )
+                    return
+                # pending 超时：slot 回调丢失，强制放行（防永久熔断）
+                logger.warning(
+                    f"[OpenAIChatToolWindow] _schedule_initial_welcome: pending 超 "
+                    f"{self._WELCOME_PENDING_TIMEOUT_S:.0f}s 未回调，视为泄漏强制重建（wid={self._window_id}）"
                 )
-                return
-        except AttributeError, RuntimeError:
+        except (AttributeError, RuntimeError):
             pass  # stub（__new__ 绕过 __init__）实例无此属性，视为未 pending
         self._welcome_render_pending = True
+        self._welcome_render_pending_since = now
         cls = type(self)
         slot = getattr(cls, "_welcome_slot", 0) + 1
         setattr(cls, "_welcome_slot", slot)
@@ -10600,7 +11090,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """交错调度槽位回调：清 pending 后实际渲染欢迎卡片"""
         try:
             self._welcome_render_pending = False
-        except AttributeError, RuntimeError:
+        except (AttributeError, RuntimeError):
             pass
         logger.debug(f"[OpenAIChatToolWindow] _on_welcome_render_slot fired: wid={self._window_id}")
         self._show_initial_welcome()
@@ -10626,17 +11116,13 @@ class OpenAIChatToolWindow(ToolWindow):
         card = self._welcome_card_cache.get(self._window_id)
         if card is None:
             return
-        try:
-            import shiboken6 as sip
-
-            if not sip.isValid(card):
-                return
-        except Exception:
-            pass
+        # 🛡️ 父链存活探测（见 _qt_widget_alive）
+        if not OpenAIChatToolWindow._qt_widget_alive(card):
+            return
         mode = getattr(card, "_welcome_mode", "")
         if not mode:
             return
-        if mode in ("sessions", "changelog"):
+        if mode == "sessions":
             # 内置 mode 不依赖 project_root/workdir，跳过重渲染。
             # 否则每次 workdir 同步（启动 2s / 项目切换）都会全量重渲染：
             # _render_welcome_with_body 每次生成随机 greeting → markdown/HTML
@@ -10647,6 +11133,37 @@ class OpenAIChatToolWindow(ToolWindow):
             card.set_welcome_mode(mode)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[_rerender_welcome_card] re-render failed: {e}")
+
+    @staticmethod
+    def _qt_widget_alive(widget) -> bool:
+        """判断 widget 的 C++ 对象是否**真的**还活着（含父链）
+
+        🛡️ 单点 ``sip.isdeleted(widget)`` 不可靠：widget ``setParent(容器)`` 后
+        ownership 归 C++，父容器析构时 Qt 会递归删除子对象，而 sip 未必及时
+        标记到每一个子对象。此时对它调任何方法（哪怕只是 ``hide()``）都是
+        access violation —— **无法被 try/except 捕获**，直接闪退。
+
+        父链探测能覆盖这一类：若 widget 自身存活，其父链必然存活；父链任一
+        环被删，则它早已随父被递归删除。
+
+        注意：本方法只能降低风险，不能替代生命周期管理。缓存持有 widget 时
+        应同时挂 ``destroyed`` 信号（见 ``_get_or_create_welcome_card``）。
+        """
+        if widget is None:
+            return False
+        try:
+            import shiboken6 as sip
+
+            cur = widget
+            for _ in range(32):  # 深度上界，防御父链成环
+                if cur is None:
+                    return True
+                if not sip.isValid(cur):
+                    return False
+                cur = cur.parent()
+            return True
+        except Exception:
+            return False
 
     def _invalidate_welcome_card(self):
         """显式失效欢迎卡片缓存（pop + delete widget）
@@ -10671,13 +11188,10 @@ class OpenAIChatToolWindow(ToolWindow):
         cached = self._welcome_card_cache.pop(self._window_id, None)
         if cached is None:
             return
-        try:
-            import shiboken6 as sip
-
-            if not sip.isValid(cached):
-                return
-        except Exception:
-            pass
+        # 🛡️ 父链存活探测（单点 sip.isdeleted 不足以拦下「随父容器被递归删除」
+        # 的悬垂 widget，实测会导致 hide() access violation 闪退）
+        if not OpenAIChatToolWindow._qt_widget_alive(cached):
+            return
         # 从父控件摘除（如果还在布局里）。这里不调 removeWidget，因为
         # _clear_chat_area/deleteLater 路径会处理；摘 setParent 已经能断
         # 干净引用，避免下一帧布局刷新时再访问一个已被本流程标记为"待删"的 widget。
@@ -10703,6 +11217,10 @@ class OpenAIChatToolWindow(ToolWindow):
         visible_batches = self._message_batch[self._visible_batch_start : self._visible_batch_end]
         self._suspend_auto_scroll = not initial
         self._loading_session = True  # 标记加载状态，懒渲染期间保持滚动
+        # 🐛 切会话时必须清掉上一个会话遗留的「用户在读历史」状态：否则加载期间
+        # 内容一边撑高、滚动条 maximum 一边增大，_on_scroll_changed 会把 away 置
+        # True，于是加载完成的强制滚底被守卫拦下 → 新会话停在历史中间而不是底部。
+        self._reset_bottom_follow()
         self._initial_scroll_to_bottom = False  # 重置滚底标记，让首次懒渲染强制滚底
         try:
             self._render_message_to_card(
@@ -10716,7 +11234,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_node_preview()
         QTimer.singleShot(100, self._sync_node_preview_to_last)
         self._refresh_context_usage_indicator()
-        QTimer.singleShot(500, lambda: gc.collect())
+        # gc.collect(1)：仅扫年轻代（微秒级）。全代 collect 会 stop-the-world 20~80ms，
+        # 是切会话/翻历史顿挫的根因（与 chat_worker MEM_DIAG 先例同源）
+        QTimer.singleShot(500, lambda: gc.collect(1))
 
     def _has_more_history_batches(self) -> bool:
         return self._visible_batch_start > 0
@@ -10754,6 +11274,85 @@ class OpenAIChatToolWindow(ToolWindow):
                 self._is_loading_history_batches = False
 
         QTimer.singleShot(0, restore_anchor)
+
+    # ── 批次卸载占位：消除回收导致的高度塌陷 ────────────────────
+
+    def _install_batch_placeholder(self, batch_idx: int, height: int, layout_index: int) -> bool:
+        """卸载批次后在原位留一个等高空白占位。
+
+        目的：B4 回收把卡片从 chat_layout 移除后，容器高度会瞬间归零，随后卡片
+        高度再异步上报（WebEngine 80ms 防抖）。这段窗口里滚动条的 maximum
+        先塌后涨，正好与 `_ensure_at_bottom` 的 8×300ms 重试链重叠 —— 长对话
+        滚动时会持续抖动。留一个等高占位可让总高度在回收瞬间保持不变。
+
+        Args:
+            batch_idx: 被卸载的批次索引
+            height: 被移除卡片的总高度（<=0 时不安装）
+            layout_index: 被移除的第一张卡片在 chat_layout 中的位置
+
+        Returns:
+            是否成功安装。False = 调用方必须回退到「滚动值补偿」的旧行为。
+        """
+        if height <= 0 or layout_index < 0:
+            return False
+        try:
+            spacer = QWidget(self.chat_container)
+            spacer.setFixedHeight(height)
+            spacer.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            spacer.setFocusPolicy(Qt.NoFocus)
+            self.chat_layout.insertWidget(min(layout_index, self.chat_layout.count()), spacer)
+            old = self._batch_placeholders.get(batch_idx)
+            if old is not None:
+                self._remove_placeholder_widget(old)
+            self._batch_placeholders[batch_idx] = spacer
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[virtual-scroll] 批次 {batch_idx} 占位安装失败，回退补偿: {e}")
+            return False
+
+    def _remove_placeholder_widget(self, widget) -> None:
+        """从布局摘掉并销毁一个占位控件（全程吞异常，不能影响回收主流程）"""
+        try:
+            if widget is None or not sip.isValid(widget):
+                return
+            self.chat_layout.removeWidget(widget)
+            widget.setParent(None)
+            widget.deleteLater()
+        except Exception:
+            pass
+
+    def _take_batch_placeholder(self, batch_idx: int):
+        """取出并移除 batch_idx 的占位，返回它当时在 chat_layout 中的位置。
+
+        供 `_render_message_to_card` 在重建该批次时把新卡片插回原位 —— 这是
+        「用占位换来的高度稳定」必须付的代价：顺序要显式还回去，否则新卡片
+        会被追加到末尾，消息顺序错乱。
+        """
+        widget = self._batch_placeholders.pop(batch_idx, None)
+        if widget is None:
+            return None
+        try:
+            if not sip.isValid(widget):
+                return None
+            index = self.chat_layout.indexOf(widget)
+            self._remove_placeholder_widget(widget)
+            return index if index >= 0 else None
+        except Exception:
+            return None
+
+    def _clear_batch_placeholders(self, remove_from_layout: bool = True):
+        """清空全部批次占位。会话切换 / 布局重建时必须调用，防止索引错位。
+
+        Args:
+            remove_from_layout: 是否同时从 chat_layout 摘除并销毁。
+                布局本身马上要被整体清空时传 False，省一轮开销。
+        """
+        widgets = list(self._batch_placeholders.values())
+        self._batch_placeholders.clear()
+        if not remove_from_layout:
+            return
+        for w in widgets:
+            self._remove_placeholder_widget(w)
 
     def _recycle_out_of_view_batches(self):
         """回收超出可视缓冲区范围的批次UI，只保留数据，节省内存
@@ -10811,6 +11410,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
             # ── 收集上方（历史方向）需要回收的卡片 ──
             above_widgets = []
+            # 只有占位失败的高度才需要下面的滚动值补偿
             above_removed_height = 0
             for batch_idx in range(0, active_start):
                 if self._batch_cards[batch_idx] is not None:
@@ -10819,11 +11419,25 @@ class OpenAIChatToolWindow(ToolWindow):
                     if cards and self._current_assistant_card in cards:
                         continue
                     if cards:
+                        batch_cards = []
+                        batch_height = 0
+                        first_index = -1
                         for card in cards:
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
-                                above_removed_height += card.height()
+                                if first_index < 0:
+                                    first_index = self.chat_layout.indexOf(card)
+                                batch_height += card.height()
                                 recycled_card_ids.add(id(card))
-                                above_widgets.append(card)
+                                batch_cards.append(card)
+                        if batch_cards:
+                            # 🐛 等高占位优先：总高度在回收瞬间保持不变，下面的
+                            # setValue 补偿就成了空操作 —— 不再与滚底重试链打架。
+                            if not self._install_batch_placeholder(batch_idx, batch_height, first_index):
+                                above_removed_height += batch_height
+                            above_widgets.extend(batch_cards)
+                            # [池化] 高度已记录、占位已装好，此时摘 WebView 不影响几何
+                            for card in batch_cards:
+                                self._try_detach_card_viewer(card)
                         recycled_count += 1
                     # 🛡️ B9 修复：只卸载 UI（_batch_cards=None），
                     # 保留 _message_batch 数据（上滚回可重建，数据不丢失）
@@ -10837,10 +11451,23 @@ class OpenAIChatToolWindow(ToolWindow):
                     if cards and self._current_assistant_card in cards:
                         continue
                     if cards:
+                        batch_cards = []
+                        batch_height = 0
+                        first_index = -1
                         for card in cards:
                             if isinstance(card, MessageCard) and self._is_widget_alive(card):
+                                if first_index < 0:
+                                    first_index = self.chat_layout.indexOf(card)
+                                batch_height += card.height()
                                 recycled_card_ids.add(id(card))
-                                below_widgets.append(card)
+                                batch_cards.append(card)
+                        if batch_cards:
+                            # 同上方批次：优先留等高占位，保持容器总高度不变
+                            self._install_batch_placeholder(batch_idx, batch_height, first_index)
+                            below_widgets.extend(batch_cards)
+                            # [池化] 同上：几何已固定后再摘 WebView
+                            for card in batch_cards:
+                                self._try_detach_card_viewer(card)
                         recycled_count += 1
                     # 🛡️ B9 修复：只卸载 UI，保留数据
                     self._batch_cards[batch_idx] = None
@@ -10869,7 +11496,8 @@ class OpenAIChatToolWindow(ToolWindow):
                     f"[virtual-scroll] 懒渲染 {lazy_render_count}，回收 {recycled_count} 个离屏批次（含数据清理）"
                 )
                 if recycled_count > 0:
-                    QTimer.singleShot(100, lambda: gc.collect())
+                    # 同上：降为年轻代回收，避免滚动中全代 GC 停顿
+                    QTimer.singleShot(100, lambda: gc.collect(1))
 
         finally:
             self._is_virtual_recycling = False
@@ -10925,6 +11553,30 @@ class OpenAIChatToolWindow(ToolWindow):
             ordered = sorted(self._unloaded_pids, key=lambda x: x[1])
             self._unloaded_pids = ordered[-_UNLOADED_PIDS_MAX:]
 
+    @staticmethod
+    def _try_detach_card_viewer(card) -> bool:
+        """尝试把卡片的 CodeWebViewer 摘下归还复用池（任何异常静默忽略）。
+
+        池化失败不影响既有流程：返回 False 时调用方照旧走销毁路径。
+        """
+        fn = getattr(card, "detach_viewer", None)
+        if fn is None:
+            return False
+        try:
+            ok = bool(fn())
+            if not ok:
+                # 观测：池化为什么没发生（release=0 时靠这行定位）
+                logger.debug(
+                    f"[pool-detach] 未池化 role={getattr(card, 'role', None)} "
+                    f"streaming={getattr(card, '_streaming', None)} "
+                    f"lazy_rendered={getattr(card, '_lazy_rendered', None)} "
+                    f"viewer={type(getattr(card, 'viewer', None)).__name__}"
+                )
+            return ok
+        except Exception as _e:
+            logger.debug(f"[pool-detach] 异常：{_e!r}")
+            return False
+
     def _unload_batch(self, batch_idx: int) -> int:
         """卸载一个批次的 UI（释放 WebEngine renderer），保留 _message_batch 数据。
 
@@ -10935,36 +11587,58 @@ class OpenAIChatToolWindow(ToolWindow):
             batch_idx: 批次索引
 
         Returns:
-            被移除卡片的总高度（用于滚动补偿）
+            布局实际丢失的**净**高度（用于滚动补偿）。安装等高占位成功时为 0
+            —— 总高度没变，无需补偿，也就不会与滚底重试链相互拉扯。
         """
         if not (0 <= batch_idx < len(self._batch_cards)):
             return 0
         cards = self._batch_cards[batch_idx]
         if not cards:
             return 0
-        # 强回收：卸载前收集存活卡片的 renderer PID（PID>0 才登记）
-        now = time.time()
-        for card in cards:
-            pid = getattr(card, "_renderer_pid", 0) or 0
-            if pid > 0 and self._is_widget_alive(card):
-                self._register_unloaded_pid(pid, now, batch_idx)
+        # ── 第一步：先按「viewer 仍在」的状态量出真实高度 ──
+        # ⚠️ 顺序关键：摘掉 viewer 会让卡片高度立刻塌陷，必须在摘之前量完，
+        # 否则占位高度与滚动补偿都会算错（表现为回收后视口跳动）。
         removed_h = 0
         alive_cards = []
+        first_index = -1
         for card in cards:
             if isinstance(card, MessageCard) and self._is_widget_alive(card):
                 try:
+                    if first_index < 0:
+                        first_index = self.chat_layout.indexOf(card)
                     removed_h += card.height()
                 except RuntimeError:
                     pass
                 alive_cards.append(card)
+
+        # ── 第二步：高度已记录，安全摘下 WebView 归还复用池 ──
+        detached_ids = {id(c) for c in alive_cards if self._try_detach_card_viewer(c)}
+
+        # ── 第三步：只对**未能池化**的卡片登记 renderer PID ──
+        # 池中 viewer 的 renderer 仍存活且随时会被取出复用，登记进
+        # _unloaded_pids 会被强回收 kill → 复用时卡片直接白屏。
+        now = time.time()
+        for card in alive_cards:
+            if id(card) in detached_ids:
+                continue
+            pid = getattr(card, "_renderer_pid", 0) or 0
+            if pid > 0:
+                self._register_unloaded_pid(pid, now, batch_idx)
+
+        placeholder_ok = False
         if alive_cards:
             delete_widgets_from_layout(alive_cards, self.chat_layout, call_cleanup=True)
+            # 🐛 等高占位优先：总高度不变 → 调用方无需补偿，也就不会与
+            # _ensure_at_bottom 的重试链相互拉扯。失败则回退旧的补偿行为。
+            placeholder_ok = self._install_batch_placeholder(batch_idx, removed_h, first_index)
+        # 占位成功 = 布局没丢高度 → 返回 0，调用方的 setValue(value - 0) 成为空操作
+        net_removed_h = 0 if placeholder_ok else removed_h
         # 🛡️ B9：只置 _batch_cards=None（卸载 UI），保留 _message_batch 数据
         self._batch_cards[batch_idx] = None
         # 只减已渲染的卡数（_rendered_card_count 语义 = 已渲染未卸载）
         rendered_in_batch = sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
-        self._rendered_card_count = max(0, self._rendered_card_count - rendered_in_batch)
-        return removed_h
+        self._decr_rendered_count(rendered_in_batch)
+        return net_removed_h
 
     def _batch_is_protected(self, batch_idx: int) -> bool:
         """判断批次是否受保护（不可淘汰）：
@@ -10997,10 +11671,65 @@ class OpenAIChatToolWindow(ToolWindow):
             return batch_idx - (self._visible_batch_end + 1)
         return 0
 
+    def _effective_max_rendered_cards(self) -> int:
+        """本窗口当前的并发渲染页配额（全局闸门 + 每窗口下限保护）。
+
+        [PERF] 见 ``_MAX_GLOBAL_RENDERED_PAGES`` 处的说明：per-window 配额在
+        多窗口下会线性放大内存占用。这里按「全局剩余配额」动态收缩本窗口上限，
+        同时用保底值避免窗口被饿死。
+        """
+        try:
+            others = max(0, _global_rendered_pages - self._rendered_card_count)
+            remaining = _MAX_GLOBAL_RENDERED_PAGES - others
+        except Exception:
+            return self._max_rendered_cards
+        return max(self._render_floor(), min(self._max_rendered_cards, remaining))
+
+    def _render_floor(self) -> int:
+        """每窗口保底页数（随存活窗口数与全局占用率动态收缩）。
+
+        [MEM] 修复「保底值架空全局闸门」：原先保底是常量
+        ``_MIN_RENDERED_CARDS_PER_WINDOW=6``，N 个窗口必然 N×6 页
+        （8 窗口 = 48 页，实测每页 27-39MB → 1.3GB+），
+        ``_MAX_GLOBAL_RENDERED_PAGES=32`` 形同虚设。
+
+        现在保底取「全局闸门 / 存活窗口数」的公平份额；且当全局占用已超过
+        闸门时压到 ``_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR`` —— 这一条同时
+        覆盖同窗口多对话页的场景（此时窗口数为 1，但累计页数同样会超标）。
+        """
+        try:
+            n = max(1, len(window_registry.alive_window_instances()))
+        except Exception:
+            n = 1
+        floor = min(_MIN_RENDERED_CARDS_PER_WINDOW, max(1, _MAX_GLOBAL_RENDERED_PAGES // n))
+        try:
+            if _global_rendered_pages >= _MAX_GLOBAL_RENDERED_PAGES:
+                floor = _MIN_RENDERED_CARDS_PER_WINDOW_FLOOR
+        except Exception:
+            pass
+        return max(_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR, floor)
+
+    def _sync_global_rendered_pages(self, new_count: int) -> None:
+        """把本窗口已渲染计数校准为 new_count，并同步增减全局闸门计数。
+
+        所有「重算/清零」计数的地方都必须走这里，否则全局计数会漂移，
+        进而让闸门误判（配额被永久占用 → 其他窗口被饿死）。
+        """
+        global _global_rendered_pages
+        new_count = max(0, new_count)
+        _global_rendered_pages = max(0, _global_rendered_pages - self._rendered_card_count + new_count)
+        self._rendered_card_count = new_count
+
+    def _decr_rendered_count(self, n: int) -> None:
+        """已渲染卡片数递减 n（卸载批次路径），同步全局闸门计数。"""
+        if n <= 0:
+            return
+        self._sync_global_rendered_pages(self._rendered_card_count - n)
+
     def _recycle_lru_batches(self):
         """B4 温和层：并发页超限时按「距可视区最远优先」淘汰批次 UI。
 
-        仅回收超过 _max_rendered_cards 的部分；受保护批次跳过；
+        仅回收超过配额（见 _effective_max_rendered_cards）的部分；受保护批次跳过；
         每卸一批做滚动补偿（setValue(值 - removed_h)）防止视口跳动。
         """
         if self._is_virtual_recycling or not self._batch_cards:
@@ -11013,12 +11742,12 @@ class OpenAIChatToolWindow(ToolWindow):
             for cards in self._batch_cards:
                 if cards:
                     actual += sum(1 for c in cards if getattr(c, "_lazy_rendered", False))
-            self._rendered_card_count = actual
+            self._sync_global_rendered_pages(actual)
 
-        if self._rendered_card_count <= self._max_rendered_cards:
+        quota = self._effective_max_rendered_cards()
+        if self._rendered_card_count <= quota:
             return
 
-        over = self._rendered_card_count - self._max_rendered_cards
         # 候选：所有非空批次（跳过受保护），按距离降序（最远先淘汰）
         candidates = []
         for idx, cards in enumerate(self._batch_cards):
@@ -11034,7 +11763,7 @@ class OpenAIChatToolWindow(ToolWindow):
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
             removed_total = 0
             for dist, idx in candidates:
-                if self._rendered_card_count <= self._max_rendered_cards:
+                if self._rendered_card_count <= quota:
                     break
                 removed_h = self._unload_batch(idx)
                 removed_total += removed_h
@@ -11045,8 +11774,11 @@ class OpenAIChatToolWindow(ToolWindow):
                     pass
                 logger.debug(
                     f"[B4-recycle] 淘汰 {len(candidates)} 候选中的超限批次，"
-                    f"_rendered_card_count={self._rendered_card_count}/{self._max_rendered_cards}"
+                    f"_rendered_card_count={self._rendered_card_count}/{quota}"
+                    f" (global={_global_rendered_pages}/{_MAX_GLOBAL_RENDERED_PAGES})"
                 )
+                # 观测：回收后并发页数与复用池占用（判断是否真的回收下来了）
+                self._log_render_quota("recycle")
         finally:
             self._is_virtual_recycling = False
 
@@ -11085,6 +11817,15 @@ class OpenAIChatToolWindow(ToolWindow):
                     return True
             except RuntimeError:
                 pass
+        # [池化] 复用池中 viewer 的 renderer 进程仍存活且随时会被取出复用，
+        # 必须视为「在用」——否则强回收 kill 掉它，复用时卡片直接白屏。
+        try:
+            from app.widgets.webview_pool import WebViewPool
+
+            if pid in WebViewPool.get_instance().pids():
+                return True
+        except Exception:
+            pass
         return False
 
     @staticmethod
@@ -11113,7 +11854,7 @@ class OpenAIChatToolWindow(ToolWindow):
             except psutil.TimeoutExpired:
                 p.kill()
             return True
-        except psutil.NoSuchProcess, psutil.AccessDenied:
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
             return False
         except Exception:
             return False
@@ -11135,57 +11876,69 @@ class OpenAIChatToolWindow(ToolWindow):
         T30 双判据的 WebEngine 侧：renderer/GPU/network 子进程各自数百 MB，
         累计 RSS 反映 WebEngine 内存压力是否值得强回收（kill 离屏 renderer）。
         无 psutil 或找不到子进程时返回 0.0（退化：不触发 WebEngine 判据）。
-        """
-        try:
-            import psutil
 
-            self_proc = psutil.Process()
-            total = 0.0
-            for child in self_proc.children(recursive=True):
-                try:
-                    name = (child.name() or "").lower()
-                    if "qwebengine" in name or "webengine" in name or "chrome" in name:
-                        total += child.memory_info().rss / (1024 * 1024)
-                except Exception:
-                    continue
-            return total
-        except Exception:
-            return 0.0
+        ⚡ [PERF] 本方法位于流式热路径（每 content chunk 一次）。原实现在此
+        直接执行 ``psutil.Process().children(recursive=True)`` + 逐子进程
+        ``memory_info()``，单次 20-80ms，与 chat_worker 的 80ms 批处理周期
+        同量级 → 主线程 25%-50% 时间用于遍历进程表，是流式卡顿主因之一。
+        现改为读取后台采样器缓存（`app.core.rss_sampler`），主线程零 psutil 调用。
+        """
+        return rss_sampler.web_rss_mb()
 
     def _over_memory_threshold(self, active: bool = False) -> bool:
-        """内存阈值判定（T30 双判据）：主进程 RSS > _MEM_THRESHOLD_TOTAL_MB
-        且（WebEngine 子进程 RSS > _WEB_MEM_THRESHOLD_MB 或子进程统计不可用时
-        退化单判据）→ True。
+        """内存阈值判定：以 WebEngine 子进程 RSS 为**主判据**。
+
+        [MEM] 旧实现是「主进程 RSS > _MEM_THRESHOLD_TOTAL_MB 且 WebEngine 子进程
+        RSS > _WEB_MEM_THRESHOLD_MB」的双 AND 判据。实测
+        （tools/diag_webengine_mem_probe.py，dpr=2.25）显示：并发 8 个
+        QWebEngineView 时子进程涨 216MB、主进程只涨 4MB —— 并发对话的内存
+        几乎全落在 renderer 子进程上，主进程 RSS 根本涨不到 900/1400MB 门槛，
+        强回收因此永不触发，子进程一路涨到 4GB。
+
+        现改为子进程 RSS 单独作主判据；主进程 RSS 只在子进程采样不可用时兜底。
+        原设计意图（不因 Python 堆高就误杀 renderer）依然成立：子进程不高就不触发。
 
         Args:
             active: 本窗口是否处于激活状态。活跃窗口用户正在交互，采用更高的
-                触发阈值（_MEM_THRESHOLD_TOTAL_MB_ACTIVE）避免频繁 kill 造成
+                触发阈值（_WEB_MEM_THRESHOLD_MB_ACTIVE）避免频繁 kill 造成
                 滚动回看时的重建抖动；但绝不再完全跳过（旧实现跳过 = 内存泄漏）。
 
-        无 psutil 时退化判定：并发页 > _MAX_RENDERED_CARDS 且存在
+        ⚡ [PERF] 采样值来自后台线程（`app.core.rss_sampler`）。本方法每
+        content chunk 调用一次，绝不能在这里执行 psutil 系统调用。
+
+        子进程采样不可用时退化：并发页 > _MAX_RENDERED_CARDS 且存在
         距可视区 ≥ _OFFSCREEN_BATCHES_FOR_KILL 的已卸载批次（说明内存压力来自 WebEngine）。
         """
         try:
-            import psutil
-
-            threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
-            rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
-            if rss_mb <= threshold:
-                return False
-            # 主进程已超总阈值：再核对 WebEngine 侧，避免误杀
-            web_mb = self._web_children_rss_mb()
-            if web_mb > 0 and web_mb < _WEB_MEM_THRESHOLD_MB:
-                return False
-            return True
+            web_mb = rss_sampler.web_rss_mb()
         except Exception:
-            # 退化：有已卸载 PID 且存在远距批次 + 并发页仍超限
-            if not self._unloaded_pids:
-                return False
-            offscreen = any(
-                (self._batch_distance(idx) if 0 <= idx < len(self._batch_cards) else 0) >= _OFFSCREEN_BATCHES_FOR_KILL
-                for _, _, idx in self._unloaded_pids
-            )
-            return offscreen and self._rendered_card_count > self._max_rendered_cards
+            web_mb = 0.0
+        if web_mb > 0.0:
+            web_threshold = _WEB_MEM_THRESHOLD_MB_ACTIVE if active else _WEB_MEM_THRESHOLD_MB
+            return web_mb >= web_threshold
+        # 子进程采样不可用（无 psutil / 尚未创建 view）→ 退回主进程 RSS 判据
+        try:
+            rss_mb = rss_sampler.rss_mb()
+        except Exception:
+            return self._over_memory_threshold_fallback()
+        if rss_mb <= 0.0:
+            return self._over_memory_threshold_fallback()
+        threshold = _MEM_THRESHOLD_TOTAL_MB_ACTIVE if active else _MEM_THRESHOLD_TOTAL_MB
+        return rss_mb > threshold
+
+    def _over_memory_threshold_fallback(self) -> bool:
+        """psutil 不可用时的退化判定：并发页超限 + 存在远距已卸载批次。
+
+        从 `_over_memory_threshold` 拆出，保证异常路径与「采样不可用」路径
+        共用同一套退化逻辑，避免两处逻辑漂移。
+        """
+        if not self._unloaded_pids:
+            return False
+        offscreen = any(
+            (self._batch_distance(idx) if 0 <= idx < len(self._batch_cards) else 0) >= _OFFSCREEN_BATCHES_FOR_KILL
+            for _, _, idx in self._unloaded_pids
+        )
+        return offscreen and self._rendered_card_count > self._max_rendered_cards
 
     def _kill_lru_unloaded_renderers(self, keep: int = None, min_offscreen: int = 0) -> int:
         """按卸载时间升序（最老在前）kill 超 keep 部分，每轮 ≤ _KILL_BATCH_MAX。
@@ -11406,8 +12159,11 @@ class OpenAIChatToolWindow(ToolWindow):
         self._is_loading_history_batches = False
         self._pending_lazy_cards.clear()
         self._lazy_batch_timer_active = False
+        # 🐛 清空聊天区 = 会话上下文已切换，必须复位底部跟随。
+        # 否则上一个会话遗留的 away=True 会让新会话首屏停在历史中间。
+        self._reset_bottom_follow()
         # ★ B4：清空聊天区 = 本窗口已渲染卡片数归零（_batch_cards 由调用方重建）
-        self._rendered_card_count = 0
+        self._sync_global_rendered_pages(0)
         # 先收集所有 widget（不能在迭代中修改 layout），再统一处理
         widgets = []
         while self.chat_layout.count():
@@ -11533,6 +12289,7 @@ class OpenAIChatToolWindow(ToolWindow):
         return is_widget_alive(widget)
 
     def _restore_cached_session_cards(self, session: ChatSession) -> bool:
+        """缓存仅存元信息，恒走全量重建（本方法恒返回 False）。"""
         if not session.messages:
             return False
 
@@ -11565,43 +12322,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 轻量快照只保留元信息，实际恢复仍由 session.messages 重建
         return False
 
-        alive_cards, removed = filter_alive_cards(cached_cards)
-        if removed:
-            self._session_card_cache.pop(session.session_id, None)
-        if not alive_cards:
-            return False
-
-        self._clear_chat_area(delete_widgets=False)
-        for card in alive_cards:
-            self._add_chat_widget(card)
-        self._displayed_session_id = session.session_id
-        # 关键修复：同步 _current_session_id 与实际显示的会话
-        self._current_session_id = session.session_id
-        self._current_assistant_card = alive_cards[-1] if alive_cards and alive_cards[-1].role == "assistant" else None
-        self._message_batch = group_messages_for_display(session.messages)
-        # 重建 user 前缀和缓存（用于 O(1) 的 round_index 计算）
-        self._build_user_prefix_cache()
-        # 同步 _batch_cards 长度
-        self._sync_batch_structures()
-        # 从缓存卡片的 _message_index 重建 _batch_cards 引用（缓存卡片已有正确的索引）
-        for card in alive_cards:
-            mi = getattr(card, "_message_index", None)
-            if mi is not None and 0 <= mi < len(self._batch_cards):
-                if self._batch_cards[mi] is None:
-                    self._batch_cards[mi] = []
-                if card not in self._batch_cards[mi]:
-                    self._batch_cards[mi].append(card)
-        self._visible_batch_start = max(0, int(cache_entry.get("visible_batch_start", 0)))
-        self._visible_batch_end = min(
-            len(self._message_batch),
-            int(cache_entry.get("visible_batch_end", len(self._message_batch))),
-        )
-        # 延迟恢复所有助手卡片的差异统计（避免文件 I/O 阻塞首屏）
-        for card in alive_cards:
-            if card.role == "assistant":
-                QTimer.singleShot(0, lambda c=card: self._update_card_diff_stats(c))
-        return True
-
     def _collect_welcome_sessions(self):
         """收集欢迎卡片会话列表数据（按当前项目过滤，剔除团队会话）
 
@@ -11624,6 +12344,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "last_time": session.get("last_time"),
                     "session_id": session.get("session_id"),
                     "message_count": session.get("message_count", 0),
+                    "created_at": session.get("created_at") or session.get("saved_at") or "",
                 }
             )
 
@@ -11637,6 +12358,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     "last_time": session.get("last_time"),
                     "session_id": session.get("session_id"),
                     "message_count": session.get("message_count", 0),
+                    "created_at": session.get("created_at") or session.get("saved_at") or "",
                 }
             )
         return recent_sessions, top_by_count
@@ -11655,13 +12377,8 @@ class OpenAIChatToolWindow(ToolWindow):
         cached = self._welcome_card_cache.get(self._window_id)
         if cached is None:
             return False
-        try:
-            import shiboken6 as sip
-
-            if not sip.isValid(cached):
-                return False
-        except Exception:
-            pass
+        if not OpenAIChatToolWindow._qt_widget_alive(cached):
+            return False
         try:
             recent_sessions, top_by_count = self._collect_welcome_sessions()
             cached.refresh_welcome_data(recent_sessions, top_by_count)
@@ -11676,13 +12393,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 多窗口共享会串数据。缓存命中时跳过 QWebEngineView 重建（省 100-500ms 主线程占用）。
         cached = self._welcome_card_cache.get(self._window_id)
         if cached is not None:
-            try:
-                import shiboken6 as sip
-
-                if sip.isValid(cached):
-                    return cached
-            except Exception:
-                pass
+            # 🛡️ 同上：父链存活探测，避免把悬垂 widget 重新插回布局
+            if OpenAIChatToolWindow._qt_widget_alive(cached):
+                return cached
             self._welcome_card_cache.pop(self._window_id, None)
 
         agent = self.backend.get_agent(self._current_agent)
@@ -11692,7 +12405,7 @@ class OpenAIChatToolWindow(ToolWindow):
         recent_sessions, top_by_count = self._collect_welcome_sessions()
 
         # 首次构建后按窗口缓存；会话数据变更点（删除/重命名等）可调用失效（见遗留）
-        # 模式：sessions（默认）/ changelog / 插件注册 tab
+        # 模式：sessions（默认）/ 插件注册 tab
         from app.utils.config import Settings
 
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -11718,6 +12431,22 @@ class OpenAIChatToolWindow(ToolWindow):
         # PyQt 层模式切换 → 持久化到 app.config（不重建卡片，避免 QWebEngine 重建开销）
         welcome_card.welcomeModeChanged.connect(self._on_welcome_mode_changed)
         self._welcome_card_cache[self._window_id] = welcome_card
+        # 🛡️ 悬垂指针防护：卡片 setParent(容器) 后 ownership 归 C++，父容器析构时
+        # Qt 会递归删除它，而本缓存仍持有 Python 引用。sip.isdeleted() 对
+        # 「ownership 在 C++ 侧」的对象**返回 False** —— 于是
+        # _invalidate_welcome_card 会对其调 hide() → access violation 闪退
+        # （实测：卸载 UI 插件后再重新启用）。挂 destroyed 信号，在 C++ 析构
+        # 瞬间摘掉缓存项，失效路径拿到 None 即安全返回。
+        #   弱引用 self：避免卡片反向持有窗口形成引用环，窗口无法回收。
+        _wid = self._window_id
+        _self_ref = weakref.ref(self)
+
+        def _drop_cached_card(_obj=None):
+            mw = _self_ref()
+            if mw is not None:
+                mw._welcome_card_cache.pop(_wid, None)
+
+        welcome_card.destroyed.connect(_drop_cached_card)
         return welcome_card
 
     def _on_welcome_mode_changed(self, new_mode: str):
@@ -11725,7 +12454,7 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.utils.config import Settings
 
         cfg = Settings.get_instance()
-        if new_mode in ("sessions", "projects", "changelog"):
+        if new_mode in ("sessions", "projects"):
             # 内置 mode：写 welcome_mode 并清空插件 tab 记忆
             if cfg.welcome_plugin_tab.value:
                 cfg.welcome_plugin_tab.value = ""
@@ -11856,6 +12585,52 @@ class OpenAIChatToolWindow(ToolWindow):
         elif new_len < len(self._batch_cards):
             self._batch_cards = self._batch_cards[:new_len]
 
+    def _register_new_cards_into_batches(self) -> None:
+        """把 chat_layout 中尚未登记进 _batch_cards 的卡片补齐登记。
+
+        🔧 内存修复（T5）：_sync_batch_structures() 只把 _batch_cards 扩展到新长度
+        （填 None），新建的 MessageCard 不会自动登记；而回收函数
+        _recycle_out_of_view_batches 只遍历 _batch_cards 且跳过 None 项，导致聊天
+        新建的卡片永远进不了回收视野 —— 每张卡正文是一个 CodeWebViewer
+        （QWebEngineView），长时间对话会无限累积，聊几十轮即达 1GB。
+
+        幂等：已登记的批次只做去重追加，不重复、不覆盖、不重排、不动占位。
+        """
+        n = len(self._batch_cards)
+        if n == 0:
+            return
+        try:
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                widget = item.widget() if item else None
+                if not isinstance(widget, MessageCard):
+                    continue
+                if getattr(widget, "_is_welcome", False):
+                    continue
+                if not self._is_widget_alive(widget):
+                    continue
+                mi = getattr(widget, "_message_index", None)
+                if mi is None or not (0 <= mi < n):
+                    continue
+                if self._batch_cards[mi] is None:
+                    self._batch_cards[mi] = [widget]
+                elif widget not in self._batch_cards[mi]:
+                    self._batch_cards[mi].append(widget)
+        except Exception as e:
+            logger.debug(f"[Memory] 登记新卡片到批次失败: {e}")
+
+    def _advance_visible_batch_window(self) -> None:
+        """发新消息/流式完成后推进可见批次窗口（视口在底部语义）。
+
+        🔧 内存修复（T5）：原代码只推进 _visible_batch_end 而不推进
+        _visible_batch_start，于是 active_start 恒为 0、active_end 恒为
+        「批次总数 + buffer」——回收范围为空，_recycle_out_of_view_batches
+        永远不回收任何卡片。补推进 start 后，上方超出缓冲区的历史卡片才会被回收，
+        底部新卡片仍在窗口内，不会被误删。
+        """
+        self._visible_batch_end = len(self._message_batch)
+        self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
+
     def _rebuild_batch_cards_from_layout(self) -> None:
         """
         从 chat_layout 中存活卡片按顺序重建 _batch_cards。
@@ -11873,6 +12648,9 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 按顺序分配到 _batch_cards，同步更新每个 card 的 _message_index
         """
         new_len = len(self._message_batch)
+        # 🛡️ 布局即将按存活卡片重建，占位必须一并摘掉：否则它们会留在
+        # chat_layout 里占位，且与重建后的 _batch_cards 索引错位。
+        self._clear_batch_placeholders(remove_from_layout=True)
         new_batch_cards: List[Optional[List[MessageCard]]] = [None] * new_len
 
         # 收集 layout 中所有存活的非 welcome MessageCard（按 layout 顺序）
@@ -12010,14 +12788,48 @@ class OpenAIChatToolWindow(ToolWindow):
 
         QTimer.singleShot(0, card._refresh_footer_separators)
 
+    def _get_load_msg_extras_fn(self):
+        """message_extras 懒读函数（探测式：引擎不支持时返回 None）。"""
+        try:
+            from app.core.backend import get_session_storage
+
+            storage = get_session_storage()
+        except Exception:
+            return None
+        fn = getattr(storage, "load_msg_extras", None)
+        return fn if callable(fn) else None
+
+    def _current_session_id_for_extras(self) -> str:
+        """当前会话 ID（message_extras 查询键；异常/无会话返回空串）。"""
+        try:
+            session = self.session_manager.get_current_session()
+            return getattr(session, "session_id", "") or ""
+        except Exception:
+            return ""
+
     def _render_message_to_card(
         self,
         batches: List[List[Dict[str, Any]]],
         insert_at_top: bool = False,
         batch_offset: int = 0,
+        anchor_layout_index: Optional[int] = None,
     ):
-        insert_index = 0 if insert_at_top else None
+        if insert_at_top:
+            insert_index = 0
+        elif anchor_layout_index is not None:
+            # 原位插回（增量恢复路径）：把恢复的批次插到指定布局位置，
+            # 而不是追加到末尾导致消息顺序错乱。
+            insert_index = max(0, min(anchor_layout_index, self.chat_layout.count()))
+        else:
+            insert_index = None
         for local_index, batch in enumerate(batches):
+            # message_extras：session.messages 为轻量形态，渲染前补回剥离字段。
+            # 副本注入不写回 session.messages，批次卸载（B4 回收）随卡片销毁。
+            load_fn = self._get_load_msg_extras_fn()
+            if load_fn is not None:
+                batch = materialize_batch_with_extras(batch, self._current_session_id_for_extras(), load_fn)
+            if not batch:
+                continue
             role = batch[0].get("role")
             timestamp = batch[0].get("timestamp") or get_default_timestamp()
             model_name = batch[0].get("model_name")
@@ -12040,6 +12852,11 @@ class OpenAIChatToolWindow(ToolWindow):
                 continue
 
             # 需要重新创建
+            # 🐛 等高占位归还：卸载时留过占位的批次必须在其原位重建，
+            # 否则新卡片会被追加到末尾 → 消息顺序错乱。
+            ph_index = self._take_batch_placeholder(global_batch_index)
+            if ph_index is not None:
+                insert_index = ph_index
             cards = []
             if role == "user":
                 content = self._sanitize_user_message_for_display(batch[0].get("content", ""))
@@ -12050,6 +12867,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     insert_index=insert_index,
                     user_round_index=round_index,
                     update_preview=not insert_at_top,
+                    image_attachments=batch[0].get("_image_attachments"),
                 )
                 if user_card:
                     # 设置 message_index 用于卡片差异功能
@@ -12126,11 +12944,42 @@ class OpenAIChatToolWindow(ToolWindow):
             self._lazy_batch_timer_active = True
             QTimer.singleShot(0, self._process_next_lazy_batch)
 
-    def _get_rendered_message_cards(self) -> List[MessageCard]:
-        def is_user_or_assistant(widget):
-            return widget.role in ("user", "assistant")
+    # 渲染配额打点的最小间隔（秒）：事件密集（滚动/懒渲染/回收）时避免刷屏
+    RENDER_QUOTA_LOG_MIN_INTERVAL = 2.0
 
-        return collect_message_cards_from_layout(self.chat_layout, is_user_or_assistant)
+    def _log_render_quota(self, reason: str) -> None:
+        """渲染配额 / 池化占用打点（自带 2s 节流）。
+
+        用于回答"加载大会话内存为什么涨"：并发渲染页数是否超配额、批次是否
+        没被回收、复用池里囤了多少常驻 Chromium 实例。
+        日志形如：
+        ``[render-quota] <reason> rendered=… quota=… global=…/… batches=总/非空
+        pool(full/light)=…/… stats={…}``
+        """
+        now = time.time()
+        if now - getattr(self, "_last_quota_log_at", 0.0) < self.RENDER_QUOTA_LOG_MIN_INTERVAL:
+            return
+        self._last_quota_log_at = now
+        try:
+            from app.widgets.webview_pool import WebViewPool
+
+            pool = WebViewPool.get_instance()
+            stats = pool.stats
+            pool_full, pool_light = pool.size(light=False), pool.size(light=True)
+        except Exception:
+            stats, pool_full, pool_light = {}, -1, -1
+        try:
+            batches = getattr(self, "_batch_cards", None) or []
+            non_empty = sum(1 for b in batches if b)
+            logger.info(
+                f"[render-quota] {reason} rendered={self._rendered_card_count} "
+                f"quota={self._effective_max_rendered_cards()} "
+                f"global={_global_rendered_pages}/{_MAX_GLOBAL_RENDERED_PAGES} "
+                f"batches={len(batches)}/{non_empty} "
+                f"pool(full/light)={pool_full}/{pool_light} stats={stats}"
+            )
+        except Exception:
+            pass
 
     def _process_next_lazy_batch(self):
         """批量懒渲染：16ms 时间片内处理尽量多卡片，减少 WebEngine 创建开销
@@ -12183,15 +13032,15 @@ class OpenAIChatToolWindow(ToolWindow):
             self._rendered_card_count += new_count
             global _global_rendered_pages
             _global_rendered_pages += new_count
-            if self._rendered_card_count > self._max_rendered_cards:
+            if self._rendered_card_count > self._effective_max_rendered_cards():
                 QTimer.singleShot(0, lambda: self._recycle_lru_batches())
 
         # 批次全部渲染完成，统一更新滚动
         # 🐛 修复：用户已主动滚离底部时禁止在此强制置底——否则向上滚动
         # 到顶加载历史批次时，懒渲染完成会把视口拉回底部（滚轮自动置底回归）。
-        if self._loading_session and not self._user_intentionally_away_from_bottom:
+        if self._loading_session and self._should_follow_bottom():
             scroll_bar = self.chat_scroll_area.verticalScrollBar()
-            if not self._initial_scroll_to_bottom or scroll_bar.value() >= scroll_bar.maximum() - 50:
+            if not self._initial_scroll_to_bottom or self._is_view_at_bottom():
                 scroll_bar.setValue(scroll_bar.maximum())
                 self._initial_scroll_to_bottom = True
 
@@ -12202,6 +13051,8 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(80, self._process_next_lazy_batch)
         else:
             self._loading_session = False
+            # 懒渲染队列排空：打一次配额/池化占用（加载大会话的观测点）
+            self._log_render_quota("lazy-drained")
             self._lazy_batch_timer_active = False
             # 🐛 修复：所有懒渲染批次完成后，卡片仍在异步报告高度，
             # layout 持续扩展但不再触发滚底。用 sticky 模式在接下来
@@ -12259,29 +13110,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 user_card_idx += 1
         return None
 
-    def findRoundIndexForCard(self, card: MessageCard) -> Optional[int]:
-        """
-        供 MessageCard 回调使用，根据 assistant card 查找对应的 round_index。
-        通过遍历布局找到该 assistant card 前面的 user card 数量来确定 round_index。
-        """
-        if not card or card.role != "assistant":
-            return None
-        # 遍历布局，统计该 assistant card 之前有多少 user card
-        round_index = 0
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
-                continue
-            widget = item.widget()
-            if not isinstance(widget, MessageCard):
-                continue
-            if widget is card:
-                # 找到了，返回当前 round_index
-                return round_index
-            if widget.role == "user":
-                round_index += 1
-        return None
-
     def _find_user_round_index_from_session(
         self,
         session,
@@ -12302,88 +13130,6 @@ class OpenAIChatToolWindow(ToolWindow):
             round_index 或 None
         """
         return find_user_round_index(session, user_text, timestamp)
-
-    def _remove_cards_for_round(self, round_index: int) -> bool:
-        session = self.session_manager.get_current_session()
-        if not session:
-            return False
-
-        canonical_messages = consolidate_messages(session.messages)
-        round_ranges = get_user_round_ranges(canonical_messages)
-        if round_index < 0 or round_index >= len(round_ranges):
-            return False
-
-        start_idx, end_idx = round_ranges[round_index]
-        cards_to_remove = end_idx - start_idx
-
-        user_card_idx = 0
-        removed = 0
-        removing = False
-        widgets_to_remove = []
-
-        # 遍历 chat_layout
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
-                continue
-            widget = item.widget()
-            if not isinstance(widget, MessageCard):
-                continue
-            if getattr(widget, "_is_welcome", False):
-                continue
-            if widget.role not in ("user", "assistant"):
-                continue
-
-            if widget.role == "user":
-                if user_card_idx == round_index:
-                    widgets_to_remove.append(widget)
-                    removed += 1
-                    removing = True
-                else:
-                    removing = False
-                user_card_idx += 1
-            elif widget.role == "assistant" and removing:
-                widgets_to_remove.append(widget)
-                removed += 1
-
-            if removed >= cards_to_remove:
-                break
-
-        logger.info(f"[DELETE] Cards to remove: {len(widgets_to_remove)}, cards_to_remove: {cards_to_remove}")
-
-        # 使用辅助函数执行删除
-        delete_widgets_from_layout(widgets_to_remove, self.chat_layout)
-        return removed > 0
-
-    def _remove_cards_from_round(self, round_index: int) -> bool:
-        """从指定 round 开始删除所有卡片（包括后续卡片）"""
-        # 计算预期删除的卡片数量
-        session = self.session_manager.get_current_session()
-        cards_to_remove_hint = 0
-        if session:
-            from app.core import consolidate_messages, get_user_round_ranges
-
-            canonical_messages = consolidate_messages(session.messages)
-            round_ranges = get_user_round_ranges(canonical_messages)
-            if round_index < len(round_ranges):
-                start_idx, end_idx = round_ranges[round_index]
-                cards_to_remove_hint = end_idx - start_idx
-
-        widgets_to_remove = find_widgets_to_remove_from_round(self.chat_layout, round_index, cards_to_remove_hint)
-        delete_widgets_from_layout(widgets_to_remove, self.chat_layout)
-
-        # 关键修复：如果 UI 删除的卡片数量少于预期，清空整个聊天区域并重新渲染
-        if cards_to_remove_hint > 0 and len(widgets_to_remove) < cards_to_remove_hint:
-            from loguru import logger
-
-            logger.warning(
-                f"[UNDO] UI cards incomplete: deleting {len(widgets_to_remove)}/{cards_to_remove_hint}. "
-                f"Clearing and re-rendering session view."
-            )
-            self._clear_chat_area()
-            self._display_current_session()
-            return False
-        return len(widgets_to_remove) > 0
 
     def _invalidate_current_session_card_cache(self):
         invalidate_session_card_cache(self.session_manager.get_current_session(), self._session_card_cache)
@@ -12433,15 +13179,6 @@ class OpenAIChatToolWindow(ToolWindow):
             "messages_len": len(session.messages),
             "set_at": time.time(),
         }
-
-    def _refresh_session_view_after_mutation(self):
-        # 使用辅助函数刷新视图
-        refresh_session_view(
-            self,
-            self._invalidate_current_session_card_cache,
-            self._display_current_session,
-            self._refresh_context_usage_indicator,
-        )
 
     def _sync_current_assistant_card_ref(self):
         self._current_assistant_card = find_last_assistant_card(self.chat_layout)
@@ -12520,7 +13257,9 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
             widget.heightChanged.connect(self._on_message_card_height_changed)
-            if self._resize_preview_active:
+            # 🐛 修复：只在 resize 周期**真的在飞行**时才把新卡片置为占位。
+            # 仅凭 _resize_preview_active（可能泄漏）会让新卡片永久空白。
+            if self._resize_preview_active and self._is_resize_cycle_active():
                 widget.set_resize_preview_mode(True)
             # 🐛 修复：新增卡片宽度同样用 viewport 直接推算，避免 parent.width()
             # 被 chat_container 撑大后返回旧大值（与 _sync_visible_cards_on_scroll 一致）。
@@ -12773,7 +13512,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 logger.warning(f"[恢复会话] 删除归档文件失败: {e}")
 
             # 刷新归档列表（归档 tab 下立即生效；历史 tab 下由 notify 兜底）
-            self._refresh_archived_sessions()
+            self._refresh_history_page_if_active()
             # 会话数据变更统一通知：刷新历史卡片（恢复的会话重新出现在
             # 历史列表）+ 失效欢迎卡片（recent_sessions 变化）+ 跨窗口广播
             self._notify_history_data_changed()
@@ -12830,12 +13569,8 @@ class OpenAIChatToolWindow(ToolWindow):
             os.remove(file_path)
             logger.info(f"[彻底删除] 成功: {file_path}")
 
-            # 清理归档缓存键（防止已删除文件的预览数据驻留 _archived_cache）
-            if hasattr(self, "_archived_cache"):
-                self._archived_cache.pop(file_path, None)
-
             # 刷新归档列表
-            self._refresh_archived_sessions()
+            self._refresh_history_page_if_active()
             # 会话数据变更统一通知：失效欢迎卡片（归档删除会让 recent_sessions
             # / top_by_count 顺序变化）+ 历史卡片刷新 + 跨窗口广播
             self._notify_history_data_changed()
@@ -12878,7 +13613,7 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info(f"[归档会话重命名] 成功: {file_path} -> {new_title}")
 
             # 刷新归档列表
-            self._refresh_archived_sessions()
+            self._refresh_history_page_if_active()
             # 会话数据变更统一通知：失效欢迎卡片（归档重命名会让 recent_sessions
             # 标题变化）+ 历史卡片刷新 + 跨窗口广播
             self._notify_history_data_changed()
@@ -12899,9 +13634,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=3000,
                 parent=TabManagerWindow.get_instance() or self.window(),
             )
-
-    def _load_history_session(self, index: int):
-        self._load_history_session_from_popup(index)
 
     def _sync_team_markers_from_record(self, session_record: Dict):
         """从会话记录同步窗口团队标记（F4 公共逻辑，两个加载路径共用）
@@ -13031,6 +13763,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 再被后续 save 错误持久化到会话 B 的记录中，造成"当前会话内容覆盖目标会话"的 bug。
         # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = True
+        # 繁忙时排队消息：切会话即失效（内存态不跨会话），同步隐藏排队卡片
+        self._clear_pending_message_queue()
 
         self.backend.reset_session_state()
 
@@ -13059,6 +13793,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步到 tool_executor，确保 stage_files 等工具写入正确的项目
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(session_project)
+        # 🐛 修复（跨项目会话加载后 workdir 不跟随）：按会话所属项目同步工作
+        # 目录（实例缓存 → DB → 临时目录），同时刷新分支标签并推送工作台
+        # 项目/工作树数据。否则加载其他项目的历史会话后，工作树页仍指向
+        # 加载前项目的工作目录。
+        self._sync_working_directory()
 
         # 🛡️ F4：加载历史会话后同步窗口团队标记，防止普通/团队会话互相污染。
         # 判定依据：team_run_id 非空 = 团队会话（权威字段；普通会话恒为空串）。
@@ -13077,15 +13816,10 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
-        # 自动切换到该会话关联的 worktree
-        # 规则：会话有 worktree_path → 切到该 worktree
-        #       会话没有 worktree_path → 切回主仓库（如果当前在 worktree 中）
-        worktree_path = session_record.get("worktree_path", "") or ""
-        current_wt = self._get_current_worktree_path()
-        if worktree_path and os.path.isdir(worktree_path) and worktree_path != current_wt:
-            self._switch_to_worktree(worktree_path)
-        elif not worktree_path and current_wt:
-            self._restore_main_repo()
+        # 自动切换到该会话关联的 worktree（规则内聚在 WorktreeService.on_session_loaded）
+        _wt_svc = self._worktree_service()
+        if _wt_svc is not None:
+            _wt_svc.on_session_loaded(self, session_record)
 
         self._display_current_session()
         self._release_inactive_session_messages()
@@ -13115,9 +13849,7 @@ class OpenAIChatToolWindow(ToolWindow):
         full_record = self.history_manager.get_session_by_session_id(session_id) if self.history_manager else None
         record = full_record or member_record
         self._load_session_from_record(record)
-        # 关闭历史会话卡片
-        if self._card_manager:
-            self._card_manager.hide_card("history", self._window_id)
+        # ★ 页签保持：成员会话加载后不强制切页签（原跳工作树已移除）
 
     def _load_history_session_from_popup(self, index: int):
         # 🛡️ 使用历史面板缓存的 _all_history 列表来查找 session_id，
@@ -13139,6 +13871,7 @@ class OpenAIChatToolWindow(ToolWindow):
         insert_index: Optional[int] = None,
         user_round_index: Optional[int] = None,
         update_preview: bool = True,
+        image_attachments: Optional[list] = None,
     ):
         session = self.session_manager.get_current_session()
         if session:
@@ -13156,13 +13889,19 @@ class OpenAIChatToolWindow(ToolWindow):
         card = MessageCard(parent=self, role="user", timestamp=timestamp)
         card._round_index = user_round_index
         card.update_content(content)
+        # 图片附件预览：正文上方缩略图条（恢复会话时 content 为 multimodal list，
+        # 传入作路径失效兑底；发送当下 content 是纯文本，路径必然有效）
+        if image_attachments:
+            card.set_image_attachments(image_attachments, fallback_content=content)
         card.finish_streaming()
 
         # 设置卡片信号
         setup_user_card_signals(card, self._delete_message, self._undo_from_message, self._on_code_action)
 
         self._add_chat_widget(card, insert_index=insert_index)
-        if scroll and not self._suspend_auto_scroll:
+        # 🐛 补 away 守卫：此前只看 _suspend_auto_scroll，用户正在阅读历史时
+        # 任何一次新卡片插入（含团队成员消息回填）都会把视口拽到底。
+        if scroll and not self._suspend_auto_scroll and self._should_follow_bottom():
             self._scroll_to_bottom()
 
         # 使用辅助函数后处理
@@ -13222,7 +13961,7 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         if custom_widget is not None:
             self._add_chat_widget(custom_widget, insert_index=insert_index)
-            if scroll and not self._suspend_auto_scroll:
+            if scroll and not self._suspend_auto_scroll and self._should_follow_bottom():
                 self._scroll_to_bottom()
             return custom_widget
 
@@ -13247,16 +13986,12 @@ class OpenAIChatToolWindow(ToolWindow):
         card.modelLabelClicked.connect(self._on_footer_model_label_clicked)
 
         self._add_chat_widget(card, insert_index=insert_index)
-        # 流式新建卡片时同步最新任务列表（模型跨轮继续执行任务时，
-        # 新回复卡片底部延续显示当前任务进度；历史加载 scroll=False 不同步）
-        # 若已有任务全部完成，则不同步——避免新消息卡片底部残留旧任务完成态。
-        if (
-            scroll
-            and self._latest_todos
-            and any(isinstance(t, dict) and t.get("status") != "completed" for t in self._latest_todos)
-        ):
-            card.update_todo_list(self._latest_todos)
-        if scroll and not self._suspend_auto_scroll:
+        # 任务列表已迁至工作台（WorkbenchPanel 任务区），消息卡片不再内嵌 todo 区；
+        # _latest_todos 缓存仍由 todowrite 结果联动（工作台数据源，切 tab 时拉取）。
+        # 🐛 这是流式输出期间最热的强制滚底点（`_append_assistant_message`）：
+        # 每个工具轮次都会新建 assistant 卡片。此前无条件置底，用户上滚读历史时
+        # 只要后台有工具回调就会被拽回。纳入统一守卫。
+        if scroll and not self._suspend_auto_scroll and self._should_follow_bottom():
             self._scroll_to_bottom()
         return card
 
@@ -13374,7 +14109,6 @@ class OpenAIChatToolWindow(ToolWindow):
                 if i < len(user_card_info) - 1:
                     # 当前区间是从这个user卡片开始，到下一个user卡片之前
                     # 包含这个user问题和它对应的所有大模型回答卡片
-                    segment_start_y = user_card_info[i]["y"]
                     segment_end_y = user_card_info[i + 1]["y"]
 
                     if visible_top < segment_end_y:
@@ -13392,16 +14126,13 @@ class OpenAIChatToolWindow(ToolWindow):
 
                 if current_segment_index < len(user_card_info) - 1:
                     end_y = user_card_info[current_segment_index + 1]["y"]
-                    end_node_index = user_card_info[current_segment_index + 1]["index"]
                 else:
                     # 最后一个区间，使用最后一个卡片的bottom作为终点
                     if len(user_card_info) > 0:
                         last_item = user_card_info[-1]
                         end_y = last_item["bottom"] + 500  # 增加一点余量
-                        end_node_index = last_item["index"]
                     else:
                         end_y = start_y
-                        end_node_index = start_node_index
 
                 # 计算在当前区间的比例
                 if end_y > start_y:
@@ -13550,34 +14281,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         logger.warning(f"[NodePreview] Card not found after history load, index={target_index}")
 
-    def _find_user_card_in_batch(self, target_batch_index):
-        """从 _batch_cards 中查找指定 batch 的 user card"""
-        if target_batch_index is None or target_batch_index < 0:
-            return None
-        if target_batch_index >= len(self._batch_cards):
-            return None
-        cards = self._batch_cards[target_batch_index]
-        if not cards:
-            return None
-        for card in cards:
-            if not sip.isValid(card):
-                continue
-            if isinstance(card, MessageCard) and card.role == "user":
-                return card
-        return None
-
-    def _find_user_card_by_message_index(self, target_batch_index):
-        """在布局中查找 _message_index 等于目标 batch 的 user card"""
-        for i in range(self.chat_layout.count()):
-            item = self.chat_layout.itemAt(i)
-            if not item or not item.widget():
-                continue
-            widget = item.widget()
-            if isinstance(widget, MessageCard) and widget.role == "user":
-                if getattr(widget, "_message_index", None) == target_batch_index:
-                    return widget
-        return None
-
     def _scroll_to_batch_index(self, batch_index: int, node_index: int = -1):
         """
         滚动到指定 batch 索引的位置。
@@ -13623,38 +14326,43 @@ class OpenAIChatToolWindow(ToolWindow):
         - _message_batch 中最后一个 user batch 也生成节点（trailing check）
 
         返回: mapping[node_index] = batch_index
+
+        [T5-5] 滚动 tick 内高频调用。原实现对每个 user batch 向后线性扫描
+        配对（O(B²)）；现改为指纹缓存 + 倒序单 pass：命中走 O(B) 指纹校验
+        （小常数，消除重建 O(B²) 尖峰），失效重建 O(B)。
+        指纹 = 各 batch 首消息 role 序列（映射输出仅依赖它）。
         """
+        batches = self._message_batch
+        fingerprint = tuple(b[0].get("role") if b else None for b in batches)
+        cache = self._node_batch_map_cache
+        if cache is not None and cache[0] == fingerprint:
+            return cache[1]
+
         mapping = []
         last_user_batch_idx = -1
-
-        for idx, batch in enumerate(self._message_batch):
-            if not batch:
-                continue
-            if batch[0].get("role") != "user":
-                continue
-
-            last_user_batch_idx = idx
-
-            # 检查当前 user batch 之后是否有配对的 assistant/tool batch
-            has_paired = False
-            for next_idx in range(idx + 1, len(self._message_batch)):
-                next_batch = self._message_batch[next_idx]
-                if not next_batch:
-                    continue
-                next_role = next_batch[0].get("role")
-                if next_role in ("assistant", "tool"):
-                    has_paired = True
-                    break
-                if next_role == "user":
-                    break  # 在 assistant 前遇到另一个 user → 无配对
-
-            if has_paired:
-                mapping.append(idx)
+        # 倒序单 pass：decisive_after = i 之后首个 role ∈ {assistant, tool, user}
+        # 的 batch 的 role。与旧扫描语义一致：空 batch 与 role 为 None/其他值的
+        # batch 不参与配对判定也不终止扫描（继续向后找）。
+        decisive_after = None
+        for i in range(len(batches) - 1, -1, -1):
+            batch = batches[i]
+            role = batch[0].get("role") if batch else None
+            if role == "user":
+                # 倒序遍历：首个遇到的 user 即最大 index（last_user），
+                # 后续（更小 index）的 user 不得覆盖
+                if last_user_batch_idx < 0:
+                    last_user_batch_idx = i
+                if decisive_after in ("assistant", "tool"):
+                    mapping.append(i)
+            if role in ("assistant", "tool", "user"):
+                decisive_after = role
+        mapping.reverse()
 
         # 最后一个 user（即使是无配对的）也生成节点
         if last_user_batch_idx >= 0 and (not mapping or mapping[-1] != last_user_batch_idx):
             mapping.append(last_user_batch_idx)
 
+        self._node_batch_map_cache = (fingerprint, mapping)
         return mapping
 
     def _get_batch_index_from_node_index(self, node_index: int) -> int:
@@ -13688,7 +14396,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         from app.core import consolidate_messages
 
-        messages = consolidate_messages(session.messages)
+        messages = self._load_full_messages_for_export(session) or consolidate_messages(session.messages)
         if not messages:
             from qfluentwidgets import InfoBar, InfoBarPosition
 
@@ -13706,6 +14414,31 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._share_card_content:
             self._share_card_content.set_messages(record, session.name or "")
         self._card_manager.toggle_card("share", self._window_id)
+
+    def _load_full_messages_for_export(self, session) -> list:
+        """导出用全量消息：从存储合并 extras；不可用/落后于内存时返回 []（回退内存）。
+
+        DB 全量条数 >= 内存条数才采用（流式中最新一轮尚未落盘的场景回退内存）。
+        """
+        try:
+            sid = getattr(session, "session_id", "")
+            if not sid:
+                return []
+            from app.core.backend import get_session_storage
+
+            storage = get_session_storage()
+            fn = getattr(storage, "get_full_messages", None)
+            if not callable(fn):
+                return []
+            msgs = fn(sid) or []
+            mem = getattr(session, "messages", None) or []
+            if len(msgs) >= len(mem):
+                from app.core import consolidate_messages
+
+                return consolidate_messages(msgs)
+        except Exception:
+            logger.warning("[Share] 全量消息读取失败，回退内存消息", exc_info=True)
+        return []
 
     def _build_share_record(self, session, merged_messages: list) -> dict:
         """构建与归档（archive）一致的完整 session 记录字典，供分享导出（JSON/HTML）使用。
@@ -13842,16 +14575,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 目标 batch 未渲染，触发加载
         self._scroll_to_target_node_index(index)
 
-    def _is_card_index_valid(self, card, expected_batch_index: int) -> bool:
-        """
-        验证卡片是否真的对应目标 batch index。
-        用于防止虚拟回收后计数错位返回错误卡片。
-        """
-        if card is None or expected_batch_index < 0:
-            return False
-        card_index = getattr(card, "_message_index", None)
-        return card_index == expected_batch_index
-
     def _on_chat_scrolled(self, value):
         """聊天区域滚动时，触发虚拟滚动回收并通知所有 MessageCard 更新浮动头"""
         self._virtual_scroll_timer.start()
@@ -13865,12 +14588,19 @@ class OpenAIChatToolWindow(ToolWindow):
             if value < scroll_bar.maximum():
                 self._bottom_anchor_deadline = 0.0
                 self._bottom_anchor_timer.stop()
-        # 检测用户是否主动滚离底部（距离底部超过 30px）；
-        # 滚回底部附近时复位，保证 away 标志状态机闭合（置 True 处见上）
-        if value < scroll_bar.maximum() - 30:
-            self._user_intentionally_away_from_bottom = True
-        elif scroll_bar.maximum() > 0:
+        # away 状态机 —— 全项目**唯一**的置/复位点，阈值统一走 AT_BOTTOM_TOLERANCE。
+        # 程序置底（setValue(maximum)）会同步触发本回调 → 自动复位 away，
+        # 所以 `_do_scroll_to_bottom` 里不需要（也绝不能再）手动复位。
+        # 旧实现 `elif scroll_bar.maximum() > 0` 在「内容不足一屏」(maximum==0)
+        # 时不复位，会把 away 永久卡在 True —— 这里用 _is_view_at_bottom 覆盖。
+        # 🐛 加载期（_loading_session）滚动条 value 会被 B4 回收补偿等程序路径
+        # 移动，且 maximum 因卡片高度异步上报持续增长 ——「此刻不在底部」不代表
+        # 用户意图。此窗口置位 away 会让批次置底/最后卡救场/排空 sticky 全链
+        # 静默失效（加载停在消息列表中间的根因），故只允许复位不允许置位。
+        if self._is_view_at_bottom() or self._loading_session:
             self._user_intentionally_away_from_bottom = False
+        elif not self._loading_session:
+            self._user_intentionally_away_from_bottom = True
         if value <= self._history_load_threshold:
             self._load_more_history_batches()
         # 滚动时复用单个防抖定时器，避免堆积大量 singleShot 回调
@@ -13913,7 +14643,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 from app.widgets.ui_helpers import delete_widgets_from_layout
 
                 # 注意：不调用 cleanup，因为撤销操作需要在删除后仍能访问卡片数据
-                deleted_count = delete_widgets_from_layout(widgets_to_remove, self.chat_layout, call_cleanup=False)
+                delete_widgets_from_layout(widgets_to_remove, self.chat_layout, call_cleanup=False)
 
                 # 清理 _batch_cards 中对已删除卡片的引用，防止后续遍历时 RuntimeError
                 for batch_idx in range(len(self._batch_cards)):
@@ -13980,198 +14710,479 @@ class OpenAIChatToolWindow(ToolWindow):
             }
             self._on_stop_clicked()
 
-        # 🛡️ 先清理 CardManager 中残留的可见状态（上次恢复时 _on_restore_clicked
-        # 直接调 setVisible(False) 绕过了 CardManager），再设新缓存，防止后续
-        # hide_card → dismissed → _on_undo_delete_dismissed 清空刚设好的缓存。
-        if self._card_manager.is_card_visible("undo_delete", self._window_id):
-            self._card_manager.hide_card("undo_delete", self._window_id)
+        # === 抓取回退锚点（必须在删除前，删除后 widget 已从布局摘除）===
+        # layout_index 记录被删区域在 chat_layout 中的起始位置，恢复时原位插回；
+        # 旧实现恢复一律走全量重建，滚动位置和阅读锚点全部丢失。
+        entry = self._build_undo_entry(
+            session=session,
+            round_index=card._round_index,
+            kind=KIND_DELETE_ROUND,
+            layout_index=self._layout_index_of_card(card),
+        )
 
-        # === 缓存删除数据，用于撤销恢复（只缓存一步）===
-        if session and card._round_index is not None:
-            try:
-                canonical_messages = consolidate_messages(session.messages)
-                round_ranges = get_user_round_ranges(canonical_messages)
-                if 0 <= card._round_index < len(round_ranges):
-                    start_idx, end_idx = round_ranges[card._round_index]
-                    msg_count = end_idx - start_idx
-                    self._undo_delete_cache = {
-                        "session_id": session.session_id,
-                        "messages": list(canonical_messages[start_idx:end_idx]),
-                        "insert_index": start_idx,
-                        "count": msg_count,
-                    }
-                    logger.debug(
-                        "[DELETE] Cache set: "
-                        f"session_id={session.session_id!r}, "
-                        f"start_idx={start_idx}, end_idx={end_idx}, "
-                        f"msg_count={msg_count}, "
-                        f"session_messages_len={len(session.messages)}, "
-                        f"canonical_len={len(canonical_messages)}"
-                    )
-            except Exception:
-                self._undo_delete_cache = {}
+        before_len = len(session.messages) if session else 0
 
-        # 执行删除（清理状态后才设缓存，此时 hide_card 的清空效果对本次缓存无害）
+        # 执行删除（卡片自身的可见性全部由 CardManager 驱动，无需再预清理状态）
         self._delete_user_round(card)
 
         # 非流式场景：_on_finalize_complete 不会运行，手动清除哨兵
         if not was_streaming:
             self._truncation_sentinel = None
 
-        # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
-        if self._undo_delete_cache:
-            self._undo_delete_card.set_count(self._undo_delete_cache.get("count", 0))
-            if self._card_manager.is_card_visible("undo_delete", self._window_id):
-                self._card_manager.hide_card("undo_delete", self._window_id)
-            self._card_manager.show_card("undo_delete", self._window_id)
-
-    def _restore_deleted_message(self):
-        """恢复被撤销删除的消息"""
-        from loguru import logger
-
-        if not self._undo_delete_cache:
+        # 删除未生效（round_index 失效 / 卡片不在布局中）时不入栈，避免"幽灵条目"
+        if entry is None or not session or len(session.messages) >= before_len:
+            if entry is not None:
+                logger.warning("[DELETE] 删除未改变会话内容，跳过撤销条目入栈")
             return
 
-        cache = self._undo_delete_cache
-        self._undo_delete_cache = {}  # 立即清空，防止重复恢复
+        self._undo_store().push(entry)
+        logger.debug(
+            f"[DELETE] Undo entry pushed: kind={entry.kind}, count={entry.count}, "
+            f"insert_index={entry.insert_index}, layout_index={entry.layout_index}, depth={self._undo_store().depth}"
+        )
+        self._show_undo_delete_card()
+
+    # ───────────────────────────────────────────────────────────
+    # 撤销删除：条目仓库 / 卡片显隐 / 恢复
+    # ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _safe_instance_attr(obj, name, default=None):
+        """安全读取实例属性（**不要**用 getattr(obj, name, default)）
+
+        ⚠️ PyQt 对象在 ``__init__`` 未执行时（测试用 ``__new__`` 构造的桩实例、
+        构造中途的实例）执行 ``getattr(obj, name, default)`` 会抛
+        ``RuntimeError: super-class __init__() ... was never called`` 而不是返回
+        default —— 直接把调用方打断（2026-09-11 实测：_display_current_session 的
+        会话切换钩子让一批 __new__ 桩测试集体报错）。直接读实例 ``__dict__``
+        可绕开 sip 的属性转发。
+        """
+        try:
+            return obj.__dict__.get(name, default)
+        except Exception:
+            return default
+
+    def _undo_store(self) -> UndoDeleteStore:
+        """获取撤销条目仓库（惰性创建，兼容 __new__ 构造的测试桩实例）"""
+        store = self._safe_instance_attr(self, "_undo_delete_store")
+        if store is None:
+            store = UndoDeleteStore()
+            self._undo_delete_store = store
+        return store
+
+    def _build_undo_entry(
+        self,
+        session,
+        round_index: Optional[int],
+        kind: str,
+        layout_index: Optional[int] = None,
+    ) -> Optional[UndoEntry]:
+        """构造一条可回退条目（必须在删除动作之前调用，删除后 session 已变）
+
+        Args:
+            session: 当前会话
+            round_index: 目标轮次（卡片上的 _round_index）
+            kind: KIND_DELETE_ROUND（删单轮，移除中间一段）
+                / KIND_UNDO_TO_ROUND（撤销到该轮，移除该轮及其之后全部）
+            layout_index: 被移除区域在 chat_layout 中的起始下标（仅删单轮需要）
+
+        Returns:
+            UndoEntry；round_index 失效 / 无可移除消息时返回 None
+        """
+        if session is None or round_index is None:
+            return None
+        try:
+            canonical = consolidate_messages(session.messages)
+            round_ranges = get_user_round_ranges(canonical)
+            if not (0 <= round_index < len(round_ranges)):
+                return None
+            start_idx, end_idx = round_ranges[round_index]
+            if kind == KIND_UNDO_TO_ROUND:
+                end_idx = len(canonical)
+            removed = list(canonical[start_idx:end_idx])
+            if not removed:
+                return None
+            return UndoEntry(
+                session_id=session.session_id,
+                messages=removed,
+                insert_index=start_idx,
+                count=len(removed),
+                kind=kind,
+                layout_index=layout_index if kind == KIND_DELETE_ROUND else None,
+                note=self._summarize_removed_messages(removed),
+            )
+        except Exception as e:
+            logger.warning(f"[UNDO] 构造回退条目失败: {e}")
+            return None
+
+    @staticmethod
+    def _summarize_removed_messages(messages: List[Dict[str, Any]]) -> str:
+        """被删内容摘要（卡片 tooltip）：取首条 user 消息前 80 字
+
+        跳过 hook 注入消息；user 内容混入的 <system-reminder> 注入段一并剥离，
+        只显示用户实际输入。
+        """
+        for msg in messages:
+            if msg.get("role") != "user" or _is_hook_message(msg):
+                continue
+            text = " ".join(strip_system_reminder(msg.get("content") or "").split())
+            if text:
+                return text[:80] + ("…" if len(text) > 80 else "")
+        return ""
+
+    def _layout_index_of_card(self, card) -> Optional[int]:
+        """card 在 chat_layout 中的下标（不在布局中返回 None）"""
+        try:
+            for i in range(self.chat_layout.count()):
+                item = self.chat_layout.itemAt(i)
+                if item and item.widget() is card:
+                    return i
+        except RuntimeError, AttributeError:
+            pass
+        return None
+
+    def _show_undo_delete_card(self):
+        """按栈顶条目刷新并显示撤销卡片（CardManager 为唯一显隐真源）"""
+        card = self._safe_instance_attr(self, "_undo_delete_card")
+        card_manager = self._safe_instance_attr(self, "_card_manager")
+        if card is None or card_manager is None:
+            return
+        store = self._undo_store()
+        entry = store.peek()
+        if entry is None:
+            self._hide_undo_delete_card()
+            return
+        card.set_entry(entry.label, store.depth, entry.note)
+        # 只触发层级重算：undo_delete 的 visible_when 谓词（回退栈非空）决定显隐
+        card_manager.refresh_layer(self._window_id, "status")
+        # 条目内容变化时 TTL 需要重新起算
+        card.restart_ttl()
+
+    def _hide_undo_delete_card(self):
+        """隐藏撤销卡片（回退条目保留 —— 遮挡 ≠ 放弃撤销）"""
+        card_manager = self._safe_instance_attr(self, "_card_manager")
+        if card_manager is not None and card_manager.is_card_visible("undo_delete", self._window_id):
+            card_manager.hide_card("undo_delete", self._window_id)
+            return
+        card = self._safe_instance_attr(self, "_undo_delete_card")
+        if card is not None and card.isVisible():
+            card.setVisible(False)
+
+    def _on_undo_dismiss_requested(self):
+        """撤销窗口关闭（用户点 ✕ / TTL 到期）→ 回退条目整体失效"""
+        dropped = self._undo_store().clear("dismiss")
+        logger.debug(f"[UNDO-DISMISS] 窗口关闭，丢弃 {dropped} 条回退条目")
+        self._hide_undo_delete_card()
+
+    def _on_undo_delete_dismissed(self):
+        """卡片被 CardManager 隐藏 —— 仅记录，**不清空**回退条目
+
+        旧实现把「被别的卡片遮挡」当作「用户放弃撤销」，于是每次删除前都得先
+        hide_card 清残留状态，否则会误清新写的缓存 —— 这是双状态源问题的放大器。
+        现在卡片显隐完全由 CardManager 驱动，条目失效只由 ✕ / TTL / 会话切换触发。
+        """
+        logger.debug("[UNDO-DISMISS] 卡片隐藏，回退条目保留")
+
+    def _clear_undo_store_for_session_switch(self):
+        """会话切换：回退条目绑定具体 session，跨会话一律失效"""
+        store = self._safe_instance_attr(self, "_undo_delete_store")
+        if not store:
+            return
+        top = store.peek()
+        if top is None:
+            return
+        session = self.session_manager.get_current_session()
+        if session is None or top.session_id != session.session_id:
+            store.clear("session-switch")
+            self._hide_undo_delete_card()
+
+    # ── 恢复 ──────────────────────────────────────────────
+
+    def _restore_deleted_message(self):
+        """恢复最近一次被删除 / 撤销的消息（弹出栈顶条目）"""
+        store = self._undo_store()
+        entry = store.peek()
+        if entry is None:
+            return
 
         session = self.session_manager.get_current_session()
-        if not session or session.session_id != cache["session_id"]:
+        if session is None or session.session_id != entry.session_id:
             logger.warning(
-                "[RESTORE] Session changed, cannot restore: "
-                f"cache_session_id={cache['session_id']!r}, "
+                "[RESTORE] 会话已切换，回退条目失效: "
+                f"entry_session_id={entry.session_id!r}, "
                 f"current_session_id={session.session_id if session else None!r}, "
-                f"session_exists={session is not None}, "
-                f"cache_insert_index={cache.get('insert_index')}, "
-                f"cache_msg_count={cache.get('count')}, "
-                f"session_messages_len={len(session.messages) if session else 0}"
+                f"kind={entry.kind}, count={entry.count}"
+            )
+            store.clear("session-mismatch")
+            self._hide_undo_delete_card()
+            InfoBar.warning(
+                "无法恢复",
+                "当前会话已切换，被删除的消息无法恢复",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=4000,
+                position=InfoBarPosition.BOTTOM,
             )
             return
 
-        # 恢复消息到 session
+        entry = store.pop()
+        if not self._restore_undo_entry(session, entry):
+            return
+
+        # 栈里还有更早的条目 → 卡片继续驻留，支持逐步回退
+        if store:
+            self._show_undo_delete_card()
+        else:
+            self._hide_undo_delete_card()
+
+    def _restore_undo_entry(self, session, entry: UndoEntry) -> bool:
+        """把一条回退条目写回：会话 → 视图 → 磁盘"""
+        # 中部恢复要保留阅读位置：插入点上方的卡片高度不受影响，记下当前滚动值
+        # 回填后复用即可；尾部恢复（用户本来就在末尾）才回到底部。
+        anchor_scroll = None
+        if not entry.appends_at_tail:
+            try:
+                anchor_scroll = self.chat_scroll_area.verticalScrollBar().value()
+            except (RuntimeError, AttributeError):
+                anchor_scroll = None
+
+        # ── 1. 消息回填 ──
         messages = list(session.messages)
-        insert_at = min(cache["insert_index"], len(messages))
-        messages[insert_at:insert_at] = cache["messages"]
+        insert_at = max(0, min(entry.insert_index, len(messages)))
+        messages[insert_at:insert_at] = entry.messages
         session.set_messages(messages, preserve_compaction=False)
         self._session_dirty = True  # 🛡️ 消息被恢复，脏标记兜底
 
-        # 保存并刷新视图
         if self._current_session_id != session.session_id:
             self._current_session_id = session.session_id
 
-        # 直接保存到 history_manager，确保数据不丢失
+        # ── 2. 视图：优先原位增量插回，异常时回退全量重建 ──
+        rendered = False
         try:
-            if self.history_manager:
-                from app.widgets.ui_helpers import get_session_compaction_info
+            rendered = self._render_restored_undo_region(insert_at, entry.layout_index)
+        except Exception as e:
+            logger.error(f"[RESTORE] 增量恢复失败，回退全量重建: {e}")
+        if not rendered:
+            self._full_rebuild_after_restore()
 
-                compaction_info = get_session_compaction_info(session)
-                idx = self.history_manager.find_index_by_session_id(self._current_session_id)
-                worktree_path = self._get_current_worktree_path()
-                worktree_kwargs = {"worktree_path": worktree_path or ""}
-                if idx is not None:
-                    # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
-                    self.history_manager.update_session(
-                        idx,
-                        session.messages,
-                        **compaction_info,
-                        **worktree_kwargs,
-                    )
-                else:
-                    # 🛡️ 罕见路径（恢复时历史被截断）：用 originating_project 优先的
-                    # fallback 链，避免被当前 _current_project 错误覆盖
-                    resolved_project = self._resolve_session_project_fallback(
-                        session.session_id, self._current_project, session=session
-                    )
-                    self.history_manager.save_session(
-                        session.messages,
-                        session_id=session.session_id,
-                        project=resolved_project,
-                        **compaction_info,
-                        **worktree_kwargs,
-                    )
+        # ── 3. 落盘 ──
+        self._persist_restored_session(session)
+
+        # ── 4. 文件内容回写（撤销时缓存下来的「AI 编辑后」快照）──
+        self._apply_file_restore_ops(entry)
+
+        # ── 5. 收尾：节点预览 / 上下文占用 / 历史徽章 / 滚动 ──
+        # 会话此时必然非空（刚回填了消息），_finalize_local_session_mutation
+        # 走非空分支：只做引用与预览同步，不会清空对话区。
+        try:
+            self._finalize_local_session_mutation()
+        except Exception as e:
+            logger.error(f"[RESTORE] 收尾刷新失败: {e}")
+        self._update_history_questions_badge()
+
+        if anchor_scroll is None:
+            QTimer.singleShot(200, self._scroll_to_bottom)
+        else:
+            # 两次设值：抵消 WebEngine 异步上报卡片高度引起的一次视口漂移
+            self._restore_scroll_value(anchor_scroll)
+            QTimer.singleShot(120, lambda value=anchor_scroll: self._restore_scroll_value(value))
+        return True
+
+    def _restore_scroll_value(self, value: int):
+        """把对话滚动条还原到指定位置（越界自动夹紧）"""
+        try:
+            bar = self.chat_scroll_area.verticalScrollBar()
+            bar.setValue(max(0, min(value, bar.maximum())))
+        except (RuntimeError, AttributeError):
+            pass
+
+    def _render_restored_undo_region(self, insert_at: int, layout_anchor: Optional[int]) -> bool:
+        """增量恢复：只重建被恢复的批次，卡片原位插回（保留滚动锚点）
+
+        与删除路径镜像：删除是「摘掉若干批次 + 重建 _message_batch/_batch_cards」，
+        恢复就是「插回若干批次 + 原位补上卡片」。只有增量路径失败时才回退全量重建。
+
+        Returns:
+            True 表示增量渲染完成；False 表示调用方应回退到全量重建。
+        """
+        session = self.session_manager.get_current_session()
+        if session is None:
+            return False
+
+        old_batch_count = len(self._message_batch)
+        all_batches = group_messages_for_display(session.messages)
+        batch_index = len(group_messages_for_display(list(session.messages[:insert_at])))
+        restored_count = len(all_batches) - old_batch_count
+        if restored_count <= 0:
+            # 回填的消息不产生新的展示批次（如全是 hook 消息）：只同步结构
+            self._message_batch = all_batches
+            self._sync_batch_structures()
+            self._build_user_prefix_cache()
+            self._refresh_all_cards_round_index()
+            return True
+
+        batch_index = max(0, min(batch_index, len(self._batch_cards)))
+        restored_batches = all_batches[batch_index : batch_index + restored_count]
+
+        # _batch_cards 原位插入占位，其后存活卡片整体后移并同步 _message_index
+        old_cards = list(self._batch_cards)
+        new_cards: List[Optional[List[MessageCard]]] = (
+            old_cards[:batch_index] + [None] * restored_count + old_cards[batch_index:]
+        )
+        self._message_batch = all_batches
+        self._batch_cards = new_cards
+        self._build_user_prefix_cache()
+        for idx in range(batch_index + restored_count, len(new_cards)):
+            for card in new_cards[idx] or []:
+                if self._is_widget_alive(card):
+                    card._message_index = idx
+
+        # 占位控件必须随批次下标整体后移：否则后续回收/重建会按错位的
+        # batch_idx 取到别人的占位，把消息插到错误位置。
+        if self._batch_placeholders:
+            self._batch_placeholders = {
+                (k + restored_count if k >= batch_index else k): v for k, v in self._batch_placeholders.items()
+            }
+
+        # 可见窗口同步：
+        # - 视口本来就在底部（end == 原总数）→ 跟随到新底部，否则刚渲染的
+        #   恢复批次会被当作"离屏"立即回收掉；
+        # - 恢复点在窗口之前 → 窗口整体后移；
+        # - 恢复点落在窗口中间 → 只扩窗口末尾。
+        if self._visible_batch_end >= old_batch_count:
+            self._advance_visible_batch_window()
+        elif self._visible_batch_start >= batch_index:
+            self._visible_batch_start += restored_count
+            self._visible_batch_end += restored_count
+        elif self._visible_batch_end > batch_index:
+            self._visible_batch_end += restored_count
+
+        # 删除至空会话时展示过欢迎卡片，恢复到非空需要让它让位
+        self._hide_welcome_cards()
+
+        self._render_message_to_card(
+            restored_batches,
+            batch_offset=batch_index,
+            anchor_layout_index=layout_anchor,
+        )
+        self._refresh_all_cards_round_index()
+        logger.debug(
+            f"[RESTORE] 增量恢复完成: batch_index={batch_index}, batches={restored_count}, anchor={layout_anchor}"
+        )
+        return True
+
+    def _full_rebuild_after_restore(self):
+        """全量重建兜底（增量渲染抛异常时使用）"""
+        session = self.session_manager.get_current_session()
+        if session is None or getattr(self, "_is_destroyed", False):
+            return
+        try:
+            self._invalidate_current_session_card_cache()
+            self._clear_chat_area()
+            self._message_batch = group_messages_for_display(session.messages)
+            self._batch_cards = [None for _ in self._message_batch]
+            self._build_user_prefix_cache()
+            if self._message_batch:
+                self._visible_batch_end = len(self._message_batch)
+                self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
+                self._load_message_batch(initial=True)
+                self._sync_batch_structures()
+        except Exception as e:
+            logger.error(f"[RESTORE] 全量重建失败: {e}")
+
+    def _persist_restored_session(self, session):
+        """恢复后落盘（更新 / 重建 / 兜底三分支）"""
+        try:
+            if not self.history_manager:
+                return
+            from app.widgets.ui_helpers import get_session_compaction_info
+
+            compaction_info = get_session_compaction_info(session)
+            idx = self.history_manager.find_index_by_session_id(self._current_session_id)
+            worktree_path = self._get_current_worktree_path()
+            worktree_kwargs = {"worktree_path": worktree_path or ""}
+            if idx is not None:
+                # 🛡️ 更新已有会话时不传 project，保留该会话原有的项目归属
+                self.history_manager.update_session(
+                    idx,
+                    session.messages,
+                    **compaction_info,
+                    **worktree_kwargs,
+                )
+            else:
+                # 🛡️ 罕见路径（恢复时历史被截断 / 已归档）：用 originating_project
+                # 优先的 fallback 链，避免被当前 _current_project 错误覆盖
+                resolved_project = self._resolve_session_project_fallback(
+                    session.session_id, self._current_project, session=session
+                )
+                self.history_manager.save_session(
+                    session.messages,
+                    session_id=session.session_id,
+                    project=resolved_project,
+                    **compaction_info,
+                    **worktree_kwargs,
+                )
         except Exception as e:
             logger.error(f"[RESTORE] Failed to persist session: {e}")
 
-        # 恢复文件操作（重写 AI 编辑后的文件内容）
-        # （write_file 兼容分支已删：DB 实证 0 记录；fr_op 通用结构保留，
-        #   含 content 的条目即按内容重写）
-        file_restore_ops = cache.get("file_restore_ops", [])
-        for fr_op in file_restore_ops:
+    def _apply_file_restore_ops(self, entry: UndoEntry):
+        """把撤销时缓存的「AI 编辑后文件内容」写回磁盘
+
+        用二进制写（write_bytes）而非文本模式：Windows 上 open(p, "w") 会把 \\n
+        静默转成 \\r\\n，导致整文件行尾翻转（见 AGENTS.md 行尾纪律）。
+        """
+        ops = entry.file_restore_ops or []
+        if not ops:
+            return
+        restored = 0
+        for op in ops:
+            file_path = op.get("file_path")
+            content = op.get("content")
+            if not file_path or content is None:
+                continue
             try:
-                fp = fr_op.get("file_path")
-                content = fr_op.get("content", "")
-                if fp and content:
-                    Path(fp).parent.mkdir(parents=True, exist_ok=True)
-                    with open(fp, "w", encoding="utf-8") as f:
-                        f.write(content)
-                    logger.info(f"[RESTORE] 已恢复文件编辑: {fp}")
+                target = Path(file_path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                restored += 1
+                logger.info(f"[RESTORE] 已恢复文件编辑: {file_path}")
             except Exception as e:
-                logger.error(f"[RESTORE] 文件恢复失败: {fr_op.get('file_path')} - {e}")
-
-        # 刷新视图
-        self._invalidate_current_session_card_cache()
-        try:
-            self._display_current_session()
-        except Exception as e:
-            logger.error(f"[RESTORE] _display_current_session failed: {e}")
-            # fallback: 强制重建
-            try:
-                self._clear_chat_area()
-                self._message_batch = group_messages_for_display(session.messages)
-                self._batch_cards = [None for _ in self._message_batch]
-                self._build_user_prefix_cache()
-                if self._message_batch:
-                    self._visible_batch_end = len(self._message_batch)
-                    self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
-                    self._load_message_batch(initial=True)
-                    self._sync_batch_structures()
-            except Exception as e2:
-                logger.error(f"[RESTORE] Fallback render also failed: {e2}")
-
-        # 🛡️ 验证恢复是否成功：检查 _display_current_session 后布局中是否有消息卡片
-        # 若 chat_layout 中没有消息卡片（可能被某些边缘情况重置），强制重建
-        if self.chat_layout.count() == 0 or not any(
-            isinstance(self.chat_layout.itemAt(i).widget(), MessageCard)
-            for i in range(self.chat_layout.count())
-            if self.chat_layout.itemAt(i) and self.chat_layout.itemAt(i).widget()
-        ):
-            if session.messages and not getattr(self, "_is_destroyed", False):
-                logger.warning("[RESTORE] Display session produced no cards, forcing rebuild")
-                try:
-                    self._clear_chat_area()
-                    self._message_batch = group_messages_for_display(session.messages)
-                    self._batch_cards = [None for _ in self._message_batch]
-                    self._build_user_prefix_cache()
-                    if self._message_batch:
-                        self._visible_batch_end = len(self._message_batch)
-                        self._visible_batch_start = max(0, self._visible_batch_end - self._initial_visible_batch_count)
-                        self._load_message_batch(initial=True)
-                        self._sync_batch_structures()
-                except Exception as e:
-                    logger.error(f"[RESTORE] Force rebuild failed: {e}")
-
-        # 恢复后消息数变化，显式刷新历史问题徽章（不依赖 _display_current_session
-        # 的内部分支路由，保证 badge 计数与恢复后的会话一致）
-        self._update_history_questions_badge()
-
-        # 确保用户看到恢复后的最后一条消息
-        QTimer.singleShot(200, self._scroll_to_bottom)
-
-        # 🛡️ 恢复成功后同步 CardManager 状态：_on_restore_clicked 直接调了
-        # setVisible(False) 绕过 CardManager，这里通知 CardManager 更新状态，
-        # 防止下次删除时 hide_card → dismissed 清空新缓存。
-        if self._card_manager.is_card_visible("undo_delete", self._window_id):
-            self._card_manager.hide_card("undo_delete", self._window_id)
-
-    def _on_undo_delete_dismissed(self):
-        """撤销删除卡片自动消失或被关闭时，清空缓存"""
-        if self._undo_delete_cache:
-            logger.debug(
-                "[UNDO-DISMISS] Cache cleared without restore: "
-                f"session_id={self._undo_delete_cache.get('session_id')!r}, "
-                f"count={self._undo_delete_cache.get('count')}"
+                logger.error(f"[RESTORE] 文件恢复失败: {file_path} - {e}")
+        if restored:
+            InfoBar.success(
+                "文件已恢复",
+                f"已还原 {restored} 个文件",
+                parent=TabManagerWindow.get_instance() or self.window(),
+                duration=3000,
+                position=InfoBarPosition.BOTTOM,
             )
-        self._undo_delete_cache = {}
+
+    # 单文件快照上限：超过此大小的文件不缓存内容（恢复消息时不写回，仅记日志）
+    FILE_SNAPSHOT_MAX_BYTES = 5 * 1024 * 1024
+
+    def _snapshot_files_for_restore(self, operations) -> List[Dict[str, Any]]:
+        """回滚前快照「AI 编辑后」的文件内容，供恢复消息时写回
+
+        读原始字节而非文本：写回走 ``write_bytes``，避免 Windows 文本模式
+        ``open(p, "w")`` 把 \\n 静默转成 \\r\\n、翻转整文件行尾（AGENTS.md 行尾纪律）。
+        """
+        snapshots: List[Dict[str, Any]] = []
+        seen = set()
+        for op in operations or []:
+            file_path = op.get("file_path")
+            if not file_path or file_path in seen:
+                continue
+            seen.add(file_path)
+            try:
+                target = Path(file_path)
+                if not target.is_file():
+                    continue
+                if target.stat().st_size > self.FILE_SNAPSHOT_MAX_BYTES:
+                    logger.warning(f"[UNDO] 文件超过快照上限，恢复消息时不会写回: {file_path}")
+                    continue
+                snapshots.append({"file_path": file_path, "content": target.read_bytes()})
+            except Exception as e:
+                logger.warning(f"[UNDO] 文件快照失败: {file_path} - {e}")
+        return snapshots
 
     def _delete_user_round(self, card: MessageCard):
         """
@@ -14246,9 +15257,8 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.info(
                 "[DEBUG-diagnose-welcome] _delete_user_round: INVALID round_index, will return without showing welcome"
             )
-            # 仍显示撤销卡片（缓存已设置）
-            if self._undo_delete_cache:
-                self._card_manager.show_card("undo_delete", self._window_id)
+            # 校验失败 = 什么都没删，撤销条目不入栈、卡片不显示
+            # （调用方 _delete_message 会检测会话未变化而跳过 push）
             return
 
         success, old_count, new_count = truncate_and_remove_round(session, round_index, round_ranges)
@@ -14303,12 +15313,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_session_id != session.session_id:
             self._current_session_id = session.session_id
 
-        # 🛡️ 先清理 CardManager 中残留的可见状态（与 _delete_message 同理，
-        # _on_restore_clicked 直接调 setVisible(False) 绕过了 CardManager），
-        # 防止后续显示撤销卡片时 hide_card → dismissed 清空缓存。
-        if self._card_manager.is_card_visible("undo_delete", self._window_id):
-            self._card_manager.hide_card("undo_delete", self._window_id)
-
         # 获取当前 session 的 round_ranges，用于验证 round_index
         canonical_now = consolidate_messages(session.messages)
         round_ranges_now = get_user_round_ranges(canonical_now)
@@ -14350,30 +15354,26 @@ class OpenAIChatToolWindow(ToolWindow):
             logger.warning("[UNDO] Cannot determine valid round_index for card")
             return
 
-        # === 缓存撤销数据，用于恢复（只缓存一步）===
-        try:
-            # 撤销：删除从该 round 到末尾的所有消息
-            # 🛡️ 使用 canonical_now 而非 session.messages，确保索引一致。
-            # consolidate_messages 可能过滤掉非标准消息，导致 session.messages
-            # 与 canonical_now 长度不一致，直接使用 session.messages 切片会取错位置。
-            start_idx = round_ranges_now[round_index][0]
-            msg_count = len(canonical_now) - start_idx
-            self._undo_delete_cache = {
-                "session_id": session.session_id,
-                "messages": list(canonical_now[start_idx:]),  # 使用 canonical 消息
-                "insert_index": start_idx,
-                "count": msg_count,
-            }
-            logger.debug(
-                "[UNDO] Cache set: "
-                f"session_id={session.session_id!r}, "
-                f"start_idx={start_idx}, "
-                f"msg_count={msg_count}, "
-                f"session_messages_len={len(session.messages)}, "
-                f"canonical_len={len(canonical_now)}"
-            )
-        except Exception:
-            self._undo_delete_cache = {}
+        # === 构造回退条目（本地持有，截断成功后才入栈）===
+        # 🛡️ 索引口径基于 canonical_now 而非 session.messages：consolidate_messages
+        # 可能过滤掉非标准消息，长度不一致时直接切片会取错位置（见 _build_undo_entry）。
+        # 撤销移除的是尾部（该轮及其之后全部），恢复时直接追加 → layout_index=None。
+        undo_entry = self._build_undo_entry(
+            session=session,
+            round_index=round_index,
+            kind=KIND_UNDO_TO_ROUND,
+        )
+        if undo_entry is None:
+            logger.warning(f"[UNDO] 无法构造回退条目: round_index={round_index}")
+            return
+        logger.debug(
+            "[UNDO] Entry prepared: "
+            f"session_id={session.session_id!r}, "
+            f"start_idx={undo_entry.insert_index}, "
+            f"msg_count={undo_entry.count}, "
+            f"session_messages_len={len(session.messages)}, "
+            f"canonical_len={len(canonical_now)}"
+        )
 
         # 🛡️ 设置截断哨兵，必须领先于 _on_stop_clicked（与 _delete_message 同理）：
         # stop 触发的 deferred finalize（_on_finalize_complete / finished_with_messages）
@@ -14399,6 +15399,10 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
             if operations:
+                # 🛡️ 快照必须在弹窗打开**之前**完成：弹窗内既能整体回滚，也能逐行
+                # 撤销（FileUndoCard._undo_one），事后再读磁盘拿到的已是回滚后的旧内容。
+                file_snapshots = self._snapshot_files_for_restore(operations)
+
                 dialog = FileUndoCard(operations, self.backend.file_recorder, self)
                 result = dialog.exec()
 
@@ -14412,15 +15416,18 @@ class OpenAIChatToolWindow(ToolWindow):
                 # 执行回滚 - 只还原选中的操作
                 selected_ops = dialog.get_selected_operations()
                 if selected_ops:
-                    # 在回滚前，缓存文件当前内容（AI 编辑后的版本），用于后续恢复
-                    # （write_file 兼容分支已删：DB 实证 0 记录，工具名已为
-                    #   write/edit/multi_edit；file_restore_ops 通用结构保留，
-                    #   供后续按 registry 文件写入组分组的恢复实现复用）
-                    file_restore_ops = []
-                    self._undo_delete_cache["file_restore_ops"] = file_restore_ops
+                    # 已回滚的文件 = 本次选中的 + 弹窗内逐行撤销掉的（后者已从
+                    # dialog.operations 移除）。这些文件恢复消息时要一起写回。
+                    rolled_back = {op.get("file_path") for op in selected_ops}
+                    rolled_back |= {op.get("file_path") for op in operations} - {
+                        op.get("file_path") for op in dialog.operations
+                    }
+                    undo_entry.file_restore_ops = [
+                        snap for snap in file_snapshots if snap.get("file_path") in rolled_back
+                    ]
 
-                    result = self.backend.file_recorder.rollback_operations(selected_ops)
-                    self._show_undo_result(result)
+                    rollback_result = self.backend.file_recorder.rollback_operations(selected_ops)
+                    self._show_undo_result(rollback_result)
 
         # 再次验证 round_index 是否仍有效（dialog.exec() 期间 session 可能变化）
         session_final = self.session_manager.get_current_session()
@@ -14441,29 +15448,20 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._truncate_session_from_user_round(round_index=round_index, card=card):
             return
 
-        # 显示撤销卡片（先隐藏再显示，绕过 CardManager 的"已可见"检查）
-        if self._undo_delete_cache:
-            self._undo_delete_card.set_count(self._undo_delete_cache.get("count", 0))
-            if self._card_manager.is_card_visible("undo_delete", self._window_id):
-                self._card_manager.hide_card("undo_delete", self._window_id)
-            self._card_manager.show_card("undo_delete", self._window_id)
+        # 入栈并显示撤销卡片（显隐统一由 CardManager 驱动）
+        self._undo_store().push(undo_entry)
+        logger.debug(
+            f"[UNDO] Entry pushed: kind={undo_entry.kind}, count={undo_entry.count}, "
+            f"insert_index={undo_entry.insert_index}, file_ops={len(undo_entry.file_restore_ops)}, "
+            f"depth={self._undo_store().depth}"
+        )
+        self._show_undo_delete_card()
 
         # 恢复输入框内容
         restore_input_from_card(self.input_area, card)
 
         # 撤销后消息数变化，显式刷新历史问题徽章
         self._update_history_questions_badge()
-
-    def _get_last_tool_call_id_after_round(self, round_index: int) -> Optional[str]:
-        """获取指定 round_index 之后最后一个 tool_call_id"""
-        session = self.session_manager.get_current_session()
-        if not session:
-            return None
-
-        canonical_messages = consolidate_messages(session.messages)
-        round_ranges = get_user_round_ranges(canonical_messages)
-
-        return find_last_tool_call_id_after_round(canonical_messages, round_ranges, round_index)
 
     def _get_all_tool_call_ids_from_round(self, round_index: int) -> List[str]:
         """获取从指定 round 到最后的所有 tool_call_id"""
@@ -14696,7 +15694,7 @@ class OpenAIChatToolWindow(ToolWindow):
                         _candidate = str(_parsed.get("diff"))
                     elif isinstance(_parsed, list):
                         _candidate = "\n".join(str(x) for x in _parsed if x)
-                except ValueError, SyntaxError:
+                except (ValueError, SyntaxError):
                     pass  # 非字面量 repr，保持原样
             diff_parts.append(_candidate)
 
@@ -14765,8 +15763,8 @@ class OpenAIChatToolWindow(ToolWindow):
         if not found_any:
             return
 
-        # 显示紧凑卡片
-        self._card_manager.show_card("sub_agent_compact", self._window_id)
+        # 触发状态层重算（谓词：批次活跃且有任务行）
+        self._card_manager.refresh_layer(self._window_id, "status")
 
     def _on_card_diff_requested(self, round_index: int, message_index: int = -1):
         """
@@ -15213,6 +16211,114 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.error(f"[_on_code_action] 异常: {e}")
 
+    def _is_view_at_bottom(self, tolerance: int = AT_BOTTOM_TOLERANCE) -> bool:
+        """视口是否贴在底部（全项目唯一权威判定）。
+
+        Args:
+            tolerance: 距底部多少 px 内算「贴底」，默认 `AT_BOTTOM_TOLERANCE`。
+
+        Returns:
+            True = 视口在底部附近（或内容不足一屏，无处可滚）。
+        """
+        scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        self._sync_scroll_maximum()
+        return scroll_bar.maximum() - scroll_bar.value() <= tolerance
+
+    def _sync_scroll_maximum(self) -> int:
+        """把滚动条上界校正到**真实**内容高度，返回校正后的 maximum。
+
+        🐛 卡片 `setFixedHeight` 之后，Qt 布局要到下一次事件循环才传播：这段窗口里
+        `container.height()` 与 `scrollBar.maximum()` 都还是旧值（实测滞后可达数千
+        px —— 流式结束那一次高度收敛会让视口停在消息列表中间）。而
+        `layout.sizeHint()` 是即时计算的，可以拿来当真实内容高度。
+
+        只**抬高**不压低：Qt 随后自己算出的上界会覆盖它，不会互相打架。
+
+        [PERF] `container.sizeHint()` 是一次 O(卡片数) 的完整布局计算。本函数被
+        `_is_view_at_bottom` 调用，而后者挂在滚动信号上 —— 程序置底 →
+        `valueChanged` → `_on_scroll_changed` → `_is_view_at_bottom` → 本函数，
+        形成 20Hz 级的自激回路；长会话（数百张卡）下这条回路把主线程占满，
+        滚轮事件排队 → 「滚动不跟手」。故对 sizeHint 结果加 30ms 复用窗口：
+        窗口内直接返回当前 maximum（Qt 自己算的新上界只会更大，与「只抬高」
+        语义一致）。高度收敛的及时性由 `_ensure_at_bottom` 的 8×300ms 重试链兜底。
+        """
+        scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        now = time.monotonic()
+        cache = getattr(self, "_scroll_max_cache", None)
+        if cache is not None and (now - cache[0]) < SCROLL_MAX_CACHE_TTL:
+            # 命中窗口：跳过布局计算，返回「Qt 现值」与「上次抬高值」的较大者
+            return max(scroll_bar.maximum(), cache[1])
+        try:
+            container = self.chat_scroll_area.widget()
+            if container is None:
+                return scroll_bar.maximum()
+            real = container.sizeHint().height() - self.chat_scroll_area.viewport().height()
+            if real > scroll_bar.maximum():
+                scroll_bar.setMaximum(max(0, real))
+        except RuntimeError:
+            pass
+        self._scroll_max_cache = (now, scroll_bar.maximum())
+        return scroll_bar.maximum()
+
+    def _should_follow_bottom(self) -> bool:
+        """程序是否应该把视口拽回底部。
+
+        语义：用户**明确**滚离底部阅读历史时不跟随；除此之外（含视口本来就贴底、
+        用户刚发送消息、内容不足一屏）都跟随。
+
+        ⚠️ 所有自动滚底调用点都必须先过这道守卫。此前多处绕过它（见
+        `_do_scroll_to_bottom` / `_ensure_at_bottom` 的修改记录），正是
+        「流式输出时无法自由阅读」的根因。
+        """
+        if not self._user_intentionally_away_from_bottom:
+            return True
+        # 兜底：away 标志与实际位置不一致时以实际位置为准，避免标志卡死
+        return self._is_view_at_bottom()
+
+    def _scroll_to_bottom_if_following(self):
+        """延迟兜底滚底：只有用户仍在跟随底部时才真的滚。
+
+        供 `QTimer.singleShot` 直接连接 —— 兜底触发时用户可能已经上滚，
+        此时再滚一次就是纯粹的打断。
+        """
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
+
+    def _reset_bottom_follow(self):
+        """用户明确表达「我要看最新内容」→ 恢复自动跟随。
+
+        调用点：用户点击发送 / 会话加载 / 清空聊天区。不在这里复位的话，
+        用户上滚看过历史后再发消息，新回复会因为 away 守卫而不滚底
+        —— 表现为「发了消息没反应」。守卫越强，这个复位点就越不能少。
+        """
+        self._user_intentionally_away_from_bottom = False
+
+    def _update_scroll_to_bottom_button(self):
+        """同步「回到底部」浮动胶囊的显隐。
+
+        由滚动条的 valueChanged（用户滚动）与 rangeChanged（内容高度变化）驱动：
+        后者覆盖「内容撑高把用户推离底部」这一场景 —— 此时 value 并没变，
+        只监听 valueChanged 会漏掉。
+        """
+        btn = getattr(self, "_scroll_to_bottom_button", None)
+        if btn is None:
+            return
+        try:
+            scroll_bar = self.chat_scroll_area.verticalScrollBar()
+            away = scroll_bar.maximum() - scroll_bar.value() > SCROLL_JUMP_SHOW_THRESHOLD
+            btn.set_visible_pref(away)
+        except RuntimeError:
+            pass
+
+    def _on_scroll_to_bottom_clicked(self):
+        """点击「回到底部」胶囊：恢复跟随并滚到底。
+
+        sticky 900ms 与懒渲染批次结束的 sticky 一致，覆盖后续卡片高度上报
+        把视口重新推离底部的那段窗口。
+        """
+        self._reset_bottom_follow()
+        self._scroll_to_bottom(sticky_ms=900)
+
     def _scroll_to_bottom(self, sticky_ms: int = 0):
         self._pending_scroll_to_bottom = True
         if sticky_ms > 0:
@@ -15229,12 +16335,18 @@ class OpenAIChatToolWindow(ToolWindow):
         if not self._pending_scroll_to_bottom:
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        max_val = scroll_bar.maximum()
+        max_val = self._sync_scroll_maximum()
         scroll_bar.setValue(max_val)
         # 再次设置确保卡片高度变化后仍在底部
         scroll_bar.setValue(max_val)
         self._pending_scroll_to_bottom = False
-        self._user_intentionally_away_from_bottom = False
+        # 🐛 原此处无条件 `self._user_intentionally_away_from_bottom = False`：
+        # 任何一次程序置底都会清空用户的「我在读历史」意图，于是守卫形同虚设
+        # （下一次 token 批/工具回调立刻把视口拽回）。away 只由两处驱动：
+        #   1. 用户真实滚动 → `_on_scroll_changed` 按 AT_BOTTOM_TOLERANCE 置/复位
+        #   2. 用户点击发送 / 切会话 / 清空 → `_reset_bottom_follow`
+        # 程序置底本身会触发 valueChanged → _on_scroll_changed → 自动复位 away，
+        # 因此这里不需要（也绝不能再）手动复位。
         if self._bottom_anchor_deadline > time.monotonic():
             self._bottom_anchor_timer.start()
         else:
@@ -15256,14 +16368,14 @@ class OpenAIChatToolWindow(ToolWindow):
         # 访问已释放的 chat_scroll_area 触发 RuntimeError
         if getattr(self, "_is_destroyed", False):
             return
-        # 如果用户已经主动滚离底部，不再强制拉回。
-        # 🆕 例外：流式刚结束的 2s 宽限期内仍强制滚底（防止用户流式中途上滚
-        # 导致结束时的兜底滚底被跳过 —— 用户意图此时通常仍是"看最新回复"，
-        # 2s 后恢复拦截，避免打断用户读取历史）。
-        if self._user_intentionally_away_from_bottom and time.monotonic() >= self._stream_finished_grace_until:
+        # 🐛 原此处有「流式结束 2s 宽限期」例外：用户流式中途上滚后，
+        # 结束时的兜底滚底会强行覆盖其阅读位置。用户意图已由
+        # `_user_intentionally_away_from_bottom` 精确表达，不需要宽限期来猜。
+        if not self._should_follow_bottom():
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
-        if scroll_bar.value() < scroll_bar.maximum() - 20:
+        self._sync_scroll_maximum()
+        if not self._is_view_at_bottom():
             scroll_bar.setValue(scroll_bar.maximum())
             # 懒渲染可能需要更长时间，延迟再次检查
             # 如果还有重试次数，即使 bottom anchor 过期也继续重试
@@ -15280,6 +16392,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._bottom_anchor_deadline <= time.monotonic():
             self._bottom_anchor_deadline = 0.0
             self._suppress_scroll_sync_count = 0
+            # 🐛 anchor 到期 ≠ 卡片高度稳定：WebEngine 高度异步上报可能晚于
+            # sticky 窗口（大会话/慢机器常态），视口随后被顶离底部且无人再
+            # 追平 → 「加载历史会话偶尔停在消息列表中间」。到期接力与非
+            # sticky 路径（_do_scroll_to_bottom else 分支）同款的
+            # _ensure_at_bottom 兜底窗口；away 守卫保证不打扰用户主动阅读。
+            QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
         scroll_bar.setValue(scroll_bar.maximum())
@@ -15299,6 +16417,41 @@ class OpenAIChatToolWindow(ToolWindow):
         sender = self.sender()
         if not isinstance(sender, MessageCard):
             return
+        # 🐛 滚动锚定补偿（v3）：Qt 滚动区没有 scroll anchoring——卡片高度变化时
+        # value 不动、视口内内容整体位移。补偿**只在增量确实发生在视口上方**
+        # 时才能执行，否则补偿本身会变成反向拖拽。
+        #
+        # ⚠️ 但补偿同时是流式期间**唯一的跟底通道**：下方滚底逻辑被
+        # `_content_just_loaded` 挡着，而流式 chunk / 工具·思考更新**故意**不置
+        # 该标记（见 message_card 注释「不应触发外部消息列表滚动」）。贴底时
+        # `value += delta` 恒等于滚到新的 maximum —— 跟底正是靠它维持的。
+        # 一刀切关掉补偿 → 视口停在原地、内容在下方越长越多 = 中途「置顶」。
+        #
+        # 因此补偿成立只需两个理由之一：
+        #   A. `card_bottom <= value`：整张卡片都在视口上方 → 增量必然在视口
+        #      之上，锚定补偿（覆盖懒渲染/异步高度上报顶走下方内容的场景）。
+        #   B. `_should_follow_bottom()`：视口处于跟随态 → 补偿 == 保持贴底。
+        #
+        # 用户已上滚阅读（非跟随态）且卡片跨视口顶部时一律不动：此时正文在
+        # 卡片**底部**增长，增量在视口之下，补偿会把视口每 ~80ms 下拽 Δ →
+        # 内容持续从用户眼下漂走（「滚轮位置反复被重置到奇怪位置」的根因）。
+        # 代价：非跟随态下跨视口顶部的折叠框展开不再补偿，会有一次性位移。
+        try:
+            delta = int(getattr(sender, "_last_height_delta", 0) or 0)
+            # 增量是一次性令牌：读取即清零。否则后续任何一次 heightChanged
+            # （如动画结束回调）都会把同一个 delta 再补偿一遍 → 视口累加漂移。
+            sender._last_height_delta = 0
+            container = self.chat_scroll_area.widget()
+            if delta and container is not None and sender.parentWidget() is container:
+                sb = self.chat_scroll_area.verticalScrollBar()
+                self._sync_scroll_maximum()
+                value = sb.value()
+                card_top = sender.mapTo(container, sender.rect().topLeft()).y()
+                card_bottom = card_top + sender.height()
+                if card_bottom <= value or self._should_follow_bottom():
+                    sb.setValue(max(0, value + delta))
+        except RuntimeError:
+            pass
         if not sender._content_just_loaded:
             return
 
@@ -15325,28 +16478,41 @@ class OpenAIChatToolWindow(ToolWindow):
                     break
 
         # 判断规则
-        # 🐛 away 守卫：流式中用户已主动滚离底部时不再强制拽回（位置保持）。
-        # is_last_card 保留原语义（初始加载完成保证到底），不受守卫影响。
-        if is_last_card or (self._is_streaming and not self._user_intentionally_away_from_bottom):
+        # 🐛 原实现里 `is_last_card` 完全绕过 away 守卫：卡片高度变化回调在流式中
+        # 每 ~80ms 一次，最后一张卡几乎恒为真 → 用户上滚后必然被拽回。
+        # 现在「是否跟随底部」由 `_should_follow_bottom()` 单点裁决：
+        #   - 用户未滚离底部（含刚发送、内容不足一屏）→ 跟随
+        #   - 用户明确滚离 → 不跟随，位置保持
+        # is_last_card 只影响「初始加载完成必须到底」这一类一次性场景，同样纳入守卫，
+        # 因为「用户正在读历史时又有新卡片渲染完成」不应当抢走视口。
+        # 🐛 卡片内阅读守卫：用户在 WebEngine 内部（正文/工具区/坞态正文）上滚
+        # 阅读时 Qt 滚动条纹丝不动，away 守卫对此失明。若不拦，流式中每次高度
+        # 变化（chunk 增高/工具块注入）都走下面的滚底 → 卡片被钉回「底部对齐」
+        # 姿态 → 正文视口每拍被推回同一固定位置。
+        _reading_inside = sender.is_user_reading_inside()
+        if (
+            self._should_follow_bottom()
+            and (is_last_card or self._is_streaming)
+            and not _reading_inside
+        ):
             self._scroll_to_bottom()
-        else:
-            scroll_bar = self.chat_scroll_area.verticalScrollBar()
-            max_val = scroll_bar.maximum()
-            current_val = scroll_bar.value()
-            # 如果滚动条已经在底部附近 → 滚底（严格阈值，避免误触发）
-            if max_val - current_val < 20:
-                self._scroll_to_bottom()
+        elif self._is_view_at_bottom() and not _reading_inside:
+            # 视口已经在底部附近 → 补一次滚底，吸收卡片高度增量（阈值统一）
+            self._scroll_to_bottom()
 
         sender._content_just_loaded = False
 
     def handle_recommended_question(self, content: str, action: str):
         if action == "ask":
-            self.input_area.clear()
+            self._clear_input_area()
             self.send_preset_question(content)
         elif action == "session":
             # session_id 直接就是 content
             session_id = content.strip()
             self._switch_to_session_by_id(session_id)
+        elif action == "workbench_history":
+            # 欢迎卡片「全部」快捷按钮：直开右侧工作台并跳转「历史会话」页签
+            self._open_workbench_history()
         else:
             # 插件注册的自定义欢迎动作（如 marketplace-recommend 的点击安装）：
             # 无人接手则静默忽略，保持旧行为
@@ -15398,6 +16564,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 设置哨兵防止这些迟到回调将旧会话消息写入新加载的会话。
         # 哨兵在 _on_send_clicked 发起新 AI 请求时清零。
         self._session_switched = True
+        # 繁忙时排队消息：切会话即失效（内存态不跨会话），同步隐藏排队卡片
+        self._clear_pending_message_queue()
 
         # 清理旧会话的卡片
         self._cache_current_session_cards()
@@ -15436,15 +16604,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # （仅 _team_run_id 非空才传团队字段）会把团队会话当成普通会话保存，
             # 团队元数据被清空 → 会话从团队分组消失 / 恢复时漏成员。
             self._sync_team_markers_from_record(session_record)
-            # 自动切换到该会话关联的 worktree
-            # 规则：会话有 worktree_path → 切到该 worktree
-            #       会话没有 worktree_path → 切回主仓库（如果当前在 worktree 中）
-            worktree_path = session_record.get("worktree_path", "") or ""
-            current_wt = self._get_current_worktree_path()
-            if worktree_path and os.path.isdir(worktree_path) and worktree_path != current_wt:
-                self._switch_to_worktree(worktree_path)
-            elif not worktree_path and current_wt:
-                self._restore_main_repo()
+            # 自动切换到该会话关联的 worktree（规则内聚在 WorktreeService.on_session_loaded）
+            _wt_svc = self._worktree_service()
+            if _wt_svc is not None:
+                _wt_svc.on_session_loaded(self, session_record)
             self._display_current_session()
             self._release_inactive_session_messages()
             self._hide_welcome_cards()
@@ -15492,77 +16655,146 @@ class OpenAIChatToolWindow(ToolWindow):
         然后根据历史条目保存的路径列表重建 AttachmentChip。
         """
         self._clear_attachments()
-        for p in paths:
-            if p not in self._attachments and os.path.exists(p):
-                self._attachments.append(p)
-                chip = AttachmentChip(p, self._attach_container)
-                chip.removed.connect(lambda path=p: self._remove_attachment(path))
-                self._attach_layout.insertWidget(self._attach_layout.count() - 1, chip)
-        self._attach_container.setVisible(bool(self._attachments))
+        for p in paths or []:
+            # 文件可能已被删除/移动，失效的不予恢复（chip 会标红提示）
+            if os.path.exists(p):
+                self._add_attachment(p)
+        self._rebuild_attachment_chips()
 
     def _on_history_mode_exited(self):
         """退出历史浏览模式 — 恢复进入时保存的附件"""
         self._on_history_attachments_restored(self._history_working_attachments)
+        # working line 经 toPlainText() 保存时胶囊已展开成 [[basename]]，
+        # setPlainText 回填后需依进入时保存的附件路径把占位符转回胶囊
+        self.input_area.convert_placeholders_to_mentions(self._history_working_attachments)
 
     # ==================== 附件管理 ====================
+    #
+    # 设计原则：**附件栏是唯一真相源**。
+    # 附件不在正文里以 [[...]] 文本形式重复存在，因此不存在「两处状态需要对齐」的
+    # 问题。正文里若仍出现 [[...]]（历史记录恢复的文本、用户手动键入），
+    # 走 _on_attachments_removed_from_text 做反向同步兜底。
+
+    #: 附件栏最多渲染多少个 chip，超出折叠为一枚「+N」
+    _MAX_VISIBLE_CHIPS = 12
 
     def _on_files_dropped(self, paths: list[str]):
-        """文件拖入/粘贴 → 添加 AttachmentChip"""
+        """文件拖入/粘贴 → 登记附件并重建芯片"""
+        added = False
         for p in paths:
-            if p not in self._attachments:
-                self._attachments.append(p)
-                chip = AttachmentChip(p, self._attach_container)
-                chip.removed.connect(lambda path=p: self._remove_attachment(path))
-                # 插入到 stretch 之前
-                self._attach_layout.insertWidget(self._attach_layout.count() - 1, chip)
+            if self._add_attachment(p):
+                added = True
+        if added:
+            self._rebuild_attachment_chips()
+
+    def _add_attachment(self, path: str) -> bool:
+        """登记一个附件（去重）。返回是否实际新增
+
+        只维护数据、不碰 UI —— UI 由 :meth:`_rebuild_attachment_chips` 统一重建。
+        分开是为了让「一次拖入 20 个文件」只触发一次布局重排，而不是 20 次。
+        """
+        if not path or path in self._attachments:
+            return False
+        self._attachments.append(path)
+        return True
+
+    def _clear_attachment_chips(self):
+        """移除附件栏中所有 chip widget（不动 self._attachments）"""
+        while self._attach_layout.count():
+            item = self._attach_layout.takeAt(0)
+            widget = item.widget() if item else None
+            if widget is None:
+                continue
+            self._attach_layout.removeWidget(widget)
+            try:
+                widget.setParent(None)
+            except RuntimeError:
+                # C++ 对象已被回收（窗口关闭竞态），忽略
+                pass
+            widget.deleteLater()
+
+    def _rebuild_attachment_chips(self):
+        """按 self._attachments 全量重建附件栏
+
+        渲染上限 :attr:`_MAX_VISIBLE_CHIPS`：附件栏没有滚动条，靠限制渲染数量
+        控制高度，避免几十个附件时把输入框挤到看不见。超限的附件 **仍然会随消息
+        一起发送**，只是不再单独渲染 chip，末尾用一枚「+N」提示还有多少。
+        """
+        self._clear_attachment_chips()
+        visible = self._attachments[: self._MAX_VISIBLE_CHIPS]
+        overflow = len(self._attachments) - len(visible)
+        for path in visible:
+            chip = AttachmentChip(path, self._attach_container)
+            # 直连槽而非 lambda：removed 自带 path 参数，语义等价，
+            # 且不会像循环内的 lambda 那样因闭包迟绑定捕获到错误的变量。
+            chip.removed.connect(self._remove_attachment)
+            self._attach_layout.addWidget(chip)
+        if overflow > 0:
+            self._attach_layout.addWidget(
+                AttachmentOverflowChip(overflow, len(self._attachments), self._attach_container)
+            )
         self._attach_container.setVisible(bool(self._attachments))
 
     def _remove_attachment(self, path: str):
-        """移除指定附件"""
-        if path in self._attachments:
-            self._attachments.remove(path)
-            # 清理对应的 chip widget
-            for i in range(self._attach_layout.count()):
-                item = self._attach_layout.itemAt(i)
-                if item and item.widget() and isinstance(item.widget(), AttachmentChip):
-                    if item.widget().filepath == path:
-                        item.widget().deleteLater()
-                        break
-        self._attach_container.setVisible(bool(self._attachments))
+        """移除指定附件（点 chip 的 × 触发）"""
+        if path not in self._attachments:
+            return
+        self._attachments.remove(path)
+        self._rebuild_attachment_chips()
+        # 同步清理正文里的引用：inline 胶囊优先，兼容遗留的 [[basename]] 字面文本
+        if not self.input_area.remove_mention_objects(path):
+            self.input_area.remove_placeholder(os.path.basename(path))
 
-        # 清理输入框中对应的 [[basename]] 占位符
-        try:
-            basename = os.path.basename(path)
-            placeholder = f"[[{basename}]]"
-            current = self.input_area.toPlainText()
-            if placeholder in current:
-                new_text = current.replace(placeholder, "")
-                # 清理多余空格
-                new_text = new_text.replace("  ", " ").strip()
-                self.input_area.setPlainText(new_text)
-        except Exception:
-            pass
+    def _on_attachments_removed_from_text(self, names: list):
+        """正文里的 [[basename]] 被删除 → 同步移除附件栏对应的 chip
+
+        胶囊被删除同样走到这里：toPlainText() 把胶囊展开成 [[basename]]，
+        胶囊没了，展开结果里对应的占位符也就消失了。
+
+        与 :meth:`_remove_attachment` 互为反向，共同构成双向同步：
+        删附件 → 删正文引用；删正文引用 → 删附件。
+        """
+        if not self._attachments:
+            return
+        removed_any = False
+        for name in names:
+            # 只删一个匹配项：两个同名文件删掉其中一个的引用，不应连带删掉另一个
+            for path in self._attachments:
+                if os.path.basename(path) == name:
+                    self._attachments.remove(path)
+                    removed_any = True
+                    break
+        if removed_any:
+            self._rebuild_attachment_chips()
 
     def _clear_attachments(self):
         """清空所有附件"""
         self._attachments.clear()
-        # 先收集 widgets 再统一 removeWidget（不能在迭代中修改 layout）
-        chips = []
-        while self._attach_layout.count() > 1:
-            item = self._attach_layout.takeAt(0)
-            if item and item.widget():
-                chips.append(item.widget())
-        for chip in chips:
-            self._attach_layout.removeWidget(chip)
-            try:
-                chip.setParent(None)
-            except Exception:
-                pass
-            chip.deleteLater()
+        self._clear_attachment_chips()
         self._attach_container.hide()
+
+    def _clear_input_area(self):
+        """清空输入框，且不触发「文本 → 附件」反向同步
+
+        发送 / 命令执行路径会连续改动文本与附件列表。若直接 input_area.clear()，
+        正文里残留的 [[...]] 占位符随文本一起消失，会被反向同步误判成
+        「用户删除了附件引用」，进而把附件也删掉。
+
+        这在命令降级时是实打实的数据丢失：_execute_command 返回 False 时附件应当
+        保留、继续走普通发送流程（review#15-#2 的修复），若被这层误删就会静默吞掉。
+        """
+        self.input_area.set_attachment_sync_enabled(False)
+        try:
+            self.input_area.clear()
+        finally:
+            self.input_area.set_attachment_sync_enabled(True)
 
     def _build_user_text_with_attachments(self, user_text: str) -> str:
         """将附件文件路径拼接到用户文本末尾，支持 [[basename]] 内联占位符替换
+
+        常规路径下正文不再含 [[...]]（附件栏是唯一真相源），所有附件走「拼到末尾」
+        分支。保留占位符替换是为了兼容两类遗留文本：历史输入记录恢复的文本、
+        用户手动键入的引用 —— 它们能精确指定附件在句子中的位置。
 
         文本中出现 [[filename.ext]] 占位符的 → 替换为完整路径（精确定位）
         未出现占位符的附件 → 照旧拼接到末尾（优雅降级）
@@ -15630,8 +16862,8 @@ class OpenAIChatToolWindow(ToolWindow):
         logger.info(f"[AgentCommand] 已注入智能体 '{agent_name}' 的工具权限")
 
         # 主动刷新工具控制卡片(确保立即显示 agent 权限,避免信号时序问题)
-        if hasattr(self, "_tool_control_card") and self._tool_control_card is not None:
-            self._tool_control_card.refresh()
+        self._ensure_tool_control_card()
+        self._tool_control_card.refresh()
 
     @staticmethod
     def _encode_image_attachments_to_multimodal(user_text: str, image_paths: list, model_name: str) -> list | None:
@@ -15657,7 +16889,11 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         return [{"type": "text", "text": user_text}] + image_blocks
 
-    def _on_send_clicked(self, user_text: str = "", hook_event: Optional[str] = None, preserve_input: bool = False):
+    def _on_send_clicked_inverse(self):
+        """Ctrl+Enter 发送入口：繁忙时恒为设置项的另一行为"""
+        self._on_send_clicked(inverse=True)
+
+    def _on_send_clicked(self, user_text: str = "", hook_event: Optional[str] = None, preserve_input: bool = False, inverse: bool = False):
         """发送消息（用户主动发送 / 系统自动发送共用）。
 
         preserve_input=True：系统自动发送（如团队任务邮件 _process_team_task），
@@ -15673,6 +16909,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._session_switched = False
         # 🛡️ 压缩守卫同步清零：新对话轮次开始，旧 worker 快照已无意义
         self._post_compact_guard = False
+        # 🐛 用户主动发消息 = 明确表达「我要看最新内容」，必须恢复底部跟随。
+        # 否则：用户上滚看过历史后再发消息，新回复会被 away 守卫拦住不滚底，
+        # 表现为「发了消息没反应」。守卫越强，这个复位点就越不能少。
+        self._reset_bottom_follow()
 
         # 独占模式拦截已移除（用户决策 2026-08-21）：同新建会话——其他标签页
         # 对话不受 autoloop 运行影响（运行卡仅物理覆盖发起 tab 的对话区）。
@@ -15708,7 +16948,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     # 插件 FUNCTION 命令无处理器注册）——_execute_command 捕获后
                     # 写 _pending_command 并置 _team_load_degraded=True。
                     if not preserve_input:
-                        self.input_area.clear()
+                        self._clear_input_area()
                     # ⚠️ review#15-#2：附件仅在 handler 实际执行成功后清除
                     # （_execute_command 返回 True）。降级到 prompt 注入时命令
                     # 未真正执行（如插件无 handler 命令 /team --create=），附件
@@ -15856,9 +17096,20 @@ class OpenAIChatToolWindow(ToolWindow):
                         f"图片附件仅作为文件路径文本发送，模型将调用 read 读取"
                     )
 
-        # 非函数命令：检查是否正在流式输出
+        # 非函数命令：繁忙时按设置项路由（插话/排队），Ctrl+Enter 恒为另一行为。
+        # 命令/技能拦截在本分支之前，行为不变（永不排队）。
         if self._is_streaming:
-            self._on_stop_clicked()
+            from app.utils.config import Settings
+
+            behavior = resolve_busy_behavior(Settings.get_instance().busy_enter_behavior.value, inverse)
+            if behavior == "queue":
+                self._enqueue_pending_message(user_text, _image_paths)
+            else:
+                self._interject_message(user_text, _image_paths)
+            if not preserve_input:
+                self._clear_input_area()
+                self._clear_attachments()
+            return
 
         # 🛡️ 不清除截断哨兵！若此前发生过截断（撤销/删除），哨兵仍然有效，
         # 可在 event loop 后续处理中拦截旧 worker 的 finished_with_messages 回调（先于
@@ -15873,9 +17124,10 @@ class OpenAIChatToolWindow(ToolWindow):
         self._hide_welcome_cards()
 
         if not preserve_input:
-            self.input_area.clear()
+            self._clear_input_area()
             self._clear_attachments()
-        self._append_user_message(user_text)
+        # 视觉模型时图片以 multimodal 注入：卡片同步预览 + session 消息打标记（恢复会话可回显）
+        self._append_user_message(user_text, image_attachments=_image_paths or None)
 
         assistant_card = self._append_assistant_message(
             model_name=self._current_model_name,
@@ -15929,6 +17181,10 @@ class OpenAIChatToolWindow(ToolWindow):
             # （None 时不写入，保持历史行为不变）
             if hook_event:
                 engine_kwargs["_hook_event"] = hook_event
+            # 图片附件路径透传给引擎：session 消息打 _image_attachments 标记，
+            # 恢复会话时渲染缩略图预览条（此前漏传导致历史加载不显示图片预览）
+            if _image_paths:
+                engine_kwargs["_image_attachments"] = list(_image_paths)
             # 🛡️ 标记会话脏：用户即将发送消息，引擎会在后台调用
             # add_user_message 修改 session.messages。即使后续被 / 命令拦截
             # 或引擎报错提前返回，脏标记也能确保关闭窗口/新建会话时不会漏存。
@@ -15948,8 +17204,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self._sync_batch_structures()
             # 给新创建的用户卡片设置正确的 _message_index（_append_user_message 中未设置）
             self._fix_new_card_message_index(user_text=user_text)
-            # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片
-            self._visible_batch_end = len(self._message_batch)
+            # 修复：扩展可见范围以覆盖新增的 batch，否则回收机制会误删新卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
+            self._advance_visible_batch_window()
+            self._register_new_cards_into_batches()
 
             # 🆕 发送纪元 +1：新一轮 worker 已启动。压缩守卫（_post_compact_guard）
             # 依赖 epoch 判定"清空后新 worker"，其结果不得被当作旧快照丢弃
@@ -15971,6 +17228,205 @@ class OpenAIChatToolWindow(ToolWindow):
             self._update_history_questions_badge()
 
         QTimer.singleShot(0, _do_deferred_send)
+
+    # ── 繁忙时发送：插话 / 排队 ──────────────────────────────────────
+
+    def _enqueue_pending_message(self, user_text: str, image_paths: list):
+        """繁忙时排队发送：消息进 UI 队列 + 排队卡片；worker 自然结束后自动续发。
+
+        🚫 不提前创建用户气泡：消息尚未进入对话流，用户卡片在实际发送时
+        （立即插入 / 自动续发）再创建，避免「还没发就在消息列表显示」。
+        """
+        self._pending_message_seq += 1
+        self._pending_message_queue.append(
+            {"id": f"q{self._pending_message_seq}", "text": user_text, "image_paths": list(image_paths)}
+        )
+        self._refresh_queue_card()
+
+    def _on_queue_edit_requested(self, msg_id: str, new_text: str):
+        """排队卡片编辑保存：更新队列条目文本并刷新卡片"""
+        new_text = new_text.strip()
+        if not new_text:
+            return
+        entry = next((e for e in self._pending_message_queue if e["id"] == msg_id), None)
+        if entry is not None:
+            entry["text"] = new_text
+        self._refresh_queue_card()
+
+    def _interject_message(self, user_text: str, image_paths: list):
+        """繁忙时插话发送：hook 队列注入当前 worker 对话流，不停 worker"""
+        self._interject_entry({"text": user_text, "image_paths": list(image_paths)}, show_user_card=True)
+
+    def _interject_entry(self, entry: dict, show_user_card: bool = False):
+        """把一条消息 put 进 hook 队列
+
+        传输键 ``_interject*`` 仅用于 worker 侧识别（切卡信号 / 取消回收），
+        注入 API 前由 worker 剥离，落库后是干净 user 消息。
+        """
+        user_text = str(entry.get("text", ""))
+        image_paths = entry.get("image_paths") or []
+        llm_config = self._get_current_model_config() or {}
+        _user_content = None
+        if image_paths:
+            _user_content = self._encode_image_attachments_to_multimodal(
+                user_text=user_text,
+                image_paths=list(image_paths),
+                model_name=str(llm_config.get("模型名称", "") or ""),
+            )
+        msg = {
+            "role": "user",
+            "content": _user_content if _user_content is not None else user_text,
+            "_interject": True,
+            "_interject_text": user_text,
+            "_interject_image_paths": list(image_paths),
+        }
+        self.backend._hook_message_queue.put(msg)
+        if show_user_card:
+            self._append_user_message(user_text, image_attachments=image_paths or None)
+            if self._should_follow_bottom():
+                self._scroll_to_bottom()
+
+    def _refresh_queue_card(self):
+        """按队列状态刷新排队卡片内容与显隐
+
+        只更新数据 + 触发层级重算：显隐由 message_queue 的 visible_when 谓词
+        （队列非空）决定，不再手写 show/hide 组合 —— 即便卡片曾被系统模态卡压制，
+        只要队列仍非空就会在恢复时机自动回到可见集。
+        """
+        card = getattr(self, "_queue_message_card", None)
+        if card is None:
+            return
+        if self._pending_message_queue:
+            card.set_entries([{"id": e["id"], "text": e["text"]} for e in self._pending_message_queue])
+        self._card_manager.refresh_layer(self._window_id, "status")
+
+    def _remove_queue_entry(self, msg_id: str):
+        """按 id 移出队列，返回被移条目"""
+        entry = next((e for e in self._pending_message_queue if e["id"] == msg_id), None)
+        if entry is not None:
+            self._pending_message_queue.remove(entry)
+            self._refresh_queue_card()
+        return entry
+
+    def _on_queue_remove_requested(self, msg_id: str):
+        """排队卡片 ✕：移出队列"""
+        self._remove_queue_entry(msg_id)
+
+    def _on_queue_insert_requested(self, msg_id: str):
+        """排队卡片「立即插入」：该条立即注入当前对话流（不停 worker）"""
+        entry = self._remove_queue_entry(msg_id)
+        if entry is None:
+            return
+        if self._is_streaming:
+            self._interject_entry(entry, show_user_card=True)
+        else:
+            # 兜底：worker 已结束（理论上队首由自动续发出队）→ 直接作为新一轮发送
+            self._continue_from_entry(entry)
+
+    def _continue_from_queue(self):
+        """worker 自然结束后出队首条续发（复用 worker 语义 = 无缝开新一轮）"""
+        if getattr(self, "_is_destroyed", False):
+            return
+        if self._is_streaming or not self._pending_message_queue:
+            return
+        entry = self._pending_message_queue.pop(0)
+        self._refresh_queue_card()
+        self._continue_from_entry(entry)
+
+    def _continue_from_entry(self, entry: dict):
+        """把一条排队消息作为新一轮发送（此刻才创建用户气泡 + 新回复卡）"""
+        user_text = str(entry.get("text", ""))
+        image_paths = entry.get("image_paths") or []
+        llm_config = self._get_current_model_config() or {}
+        _user_content = None
+        if image_paths:
+            _user_content = self._encode_image_attachments_to_multimodal(
+                user_text=user_text,
+                image_paths=list(image_paths),
+                model_name=str(llm_config.get("模型名称", "") or ""),
+            )
+        # 用户气泡在实际发送时才进入消息列表（排队时未显示）
+        self._append_user_message(user_text, image_attachments=image_paths or None)
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
+        assistant_card = self._append_assistant_message(
+            model_name=self._current_model_name,
+            config_id=self._current_provider_name,
+        )
+        self._current_assistant_card = assistant_card
+        self._response_start_time = time.time()
+        assistant_card.start_elapsed_tracking()
+        self._is_streaming = True
+        self._toggle_send_stop(True)
+        session = self.session_manager.get_current_session()
+
+        def _do_deferred_send():
+            if getattr(self, "_is_destroyed", False):
+                return
+            if session and self.backend.tool_executor:
+                self.backend.set_session_context(session.session_id)
+            engine_kwargs = {}
+            if _user_content is not None:
+                engine_kwargs["_user_content"] = _user_content
+            self._session_dirty = True
+            if not self.backend.send_message_to_engine(user_text, **engine_kwargs):
+                self._is_streaming = False
+                self._toggle_send_stop(False)
+                assistant_card.deleteLater()
+                self._current_assistant_card = None
+                InfoBar.warning(
+                    title="排队发送失败",
+                    content="剩余排队消息已保留，可稍后手动插入或删除",
+                    orient=Qt.Horizontal,
+                    isClosable=True,
+                    position=InfoBarPosition.BOTTOM,
+                    duration=3000,
+                    parent=TabManagerWindow.get_instance() or self.window(),
+                )
+                return
+            self._sync_batch_structures()
+            self._fix_new_card_message_index(user_text=user_text)
+            self._advance_visible_batch_window()
+            self._register_new_cards_into_batches()
+            self._send_epoch += 1
+            # 标题生成（TeamMail 同口径：排队消息视为真实用户问题）
+            if session:
+                user_msg_count = sum(
+                    1
+                    for m in session.messages
+                    if m.get("role") == "user" and (not m.get("_hook_event") or m.get("_hook_event") == "TeamMail")
+                )
+                if user_msg_count == 1:
+                    self._maybe_generate_topic_summary()
+            self._update_history_questions_badge()
+
+        QTimer.singleShot(0, _do_deferred_send)
+
+    def _clear_pending_message_queue(self):
+        """切会话/新建会话时清空排队消息（内存态不跨会话）"""
+        self._pending_message_queue = []
+        self._refresh_queue_card()
+
+    def _on_queued_user_injected(self, count: int):
+        """worker 已消费用户插话 → 旧回复卡收尾，开新回复卡承接后续流式
+
+        跨线程 queued 信号保序：本槽执行完成后，本轮 _make_api_call 的流式
+        chunk 才会到达，必然写进新卡。多条插话一次消费只开一张卡。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        old = self._current_assistant_card
+        if old is not None and not _is_sip_deleted(old):
+            old.stop_streaming_anim()
+            old.finish_streaming()
+        card = self._append_assistant_message(
+            model_name=self._current_model_name,
+            config_id=self._current_provider_name,
+        )
+        self._current_assistant_card = card
+        card.start_elapsed_tracking()
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
 
     def _on_stream_started(self):
         if getattr(self, "_is_destroyed", False):
@@ -16134,9 +17590,11 @@ class OpenAIChatToolWindow(ToolWindow):
         """子智能体紧凑卡片关闭时清理状态"""
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget._batch_started = False
-        # 通知 CardManager 卡片已关闭，否则 show_card 以为它仍可见而跳过
+        # 通知 CardManager 重算状态层：_batch_started=False 后谓词为假，
+        # 卡片随之退出可见集（旧实现依赖 hide_card 手动对齐，易与卡片自身
+        # 的 _auto_hide 定时器脱节）。
         if hasattr(self, "_card_manager"):
-            self._card_manager.hide_card("sub_agent_compact", self._window_id)
+            self._card_manager.refresh_layer(self._window_id, "status")
 
     def _on_sub_agent_stop_requested(self, task_id: str):
         """处理子智能体停止请求 - 中止当前运行中的子智能体"""
@@ -16236,9 +17694,9 @@ class OpenAIChatToolWindow(ToolWindow):
             todos = []
         if todos:
             self._latest_todos = todos
-            card = self._current_assistant_card or self._find_latest_assistant_card()
-            if card and hasattr(card, "update_todo_list"):
-                card.update_todo_list(todos)
+            # 任务列表已迁至工作台（不再内嵌消息卡片），仅刷新缓存 + 推工作台
+            # 工作台浮层任务区同步
+            self._push_workbench_updates(todos=todos)
         else:
             from qfluentwidgets import InfoBar, InfoBarPosition
 
@@ -16364,7 +17822,8 @@ class OpenAIChatToolWindow(ToolWindow):
             self._bind_executor_ui_signals(task_id)
 
         compact._batch_started = True
-        self._card_manager.show_card("sub_agent_compact", self._window_id)
+        # 触发状态层重算（谓词：批次活跃且有任务行）
+        self._card_manager.refresh_layer(self._window_id, "status")
 
     def _handle_title_gen_command(self, args: str):
         """/title-gen 命令：切换标题生成使用的默认模型
@@ -16462,6 +17921,18 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.tray_manager import TrayManager
 
         TrayManager.get_instance()._toggle_all_windows()
+
+    def _handle_toggle_sidebar_command(self, args: str):
+        """/toggle-sidebar 命令：切换左侧边栏收起/展开（同标题栏左侧按钮）"""
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm._tab_panel._toggle_sidebar()
+
+    def _handle_toggle_workbench_command(self, args: str):
+        """/toggle-workbench 命令：切换右侧工作台显示/隐藏（同标题栏右侧按钮）"""
+        tm = TabManagerWindow.get_instance()
+        if tm is not None:
+            tm.toggle_workbench()
 
     def _handle_clear_command(self, args: str):
         """/clear 命令：清空当前会话的所有消息（重新显示欢迎页）"""
@@ -16665,38 +18136,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if hasattr(self, "_sub_agent_compact_widget"):
             self._sub_agent_compact_widget.finish_task(task_id, success)
 
-        # 从管理器移除并记录结果
-        if executor:
-            agent_name = getattr(executor, "agent_name", "")
-            task_description = getattr(executor, "task_description", "")
-            task_session_id = getattr(executor, "_task_session_id", "")
-            del sub_agent_mgr._running_tasks[task_id]
-        else:
-            # executor 可能已被 get_finished_tasks() 移除（DAG 节点由 _on_dag_node_finished 提前删除 running_tasks）
-            # 此时从 _finished_tasks 恢复字段（此时 DAG 已写入 error 信息，不要覆盖）
-            existing = sub_agent_mgr._finished_tasks.get(task_id, {})
-            agent_name = existing.get("agent_name", "")
-            task_description = existing.get("task_description", "")
-            task_session_id = existing.get("session_id", "")
-
-        # 如果 get_finished_tasks() 已经写入过完整数据，只更新 result/error 避免丢失 session_id/日志
-        if task_id in sub_agent_mgr._finished_tasks:
-            existing = sub_agent_mgr._finished_tasks[task_id]
-            existing["result"] = result
-            # 已有 error（如 DAG 写入的跳过信息）不要覆盖
-            if "error" not in existing or not existing["error"]:
-                existing["error"] = execution_error or ""
-            existing.setdefault("agent_name", agent_name)
-            existing.setdefault("task_description", task_description)
-            existing.setdefault("session_id", task_session_id)
-        else:
-            sub_agent_mgr._finished_tasks[task_id] = {
-                "result": result,
-                "error": execution_error or "",
-                "agent_name": agent_name,
-                "task_description": task_description,
-                "session_id": task_session_id,
-            }
+        # 归档到管理器：内存 _finished_tasks + 数据库 finished 状态（含最终 logs/summary）。
+        # 之前只写内存不落库，DB 永挂 running → 会话卡片永远显示执行中、工具数/时间冻结
+        info = sub_agent_mgr.mark_task_finished(task_id, result, execution_error or "")
+        agent_name = info["agent_name"]
+        task_description = info["task_description"]
 
         # 批次完成检查：先检查当前计数，用于精确诊断
         _batch_before = sub_agent_mgr._batch_completed
@@ -16878,8 +18322,11 @@ class OpenAIChatToolWindow(ToolWindow):
         else:
             # send_message 成功后同步 batch 结构（send 会往 session 写入消息，因此同步必须在 send 之后）
             self._sync_batch_structures()
-            self._fix_new_card_message_index(user_text=callback_content)
-            self._visible_batch_end = len(self._message_batch)
+            self._fix_new_card_message_index(
+                user_text=callback_content
+            )  # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
+            self._advance_visible_batch_window()
+            self._register_new_cards_into_batches()
             # ⚠️ 时间线节点在子智能体任务完成时不会更新 - 修复
             self._sync_node_preview_to_last()
             # 🆕 发送纪元 +1 并解除压缩守卫：本回调路径不走 _on_send_clicked
@@ -16936,7 +18383,6 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_tool_result_received(self, tool_call_id: str, tool_name: str, arguments: dict, result: Any):
         if getattr(self, "_is_destroyed", False):
             return
-        import time
 
         # 去重保护：_emit_with_callback 双路径（event_bus + signal.emit）
         # 会导致本方法被调用两次，产生重复工具块
@@ -16953,8 +18399,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._exclusive_ui_modes:
             # 独占模式（如 AutoLoop）：只记录日志，不操作 UI
             logger.debug(f"[ToolUI] 工具完成（独占模式跳过 UI）: {tool_name}")
-
-        elapsed = time.time() - self._current_tool_start_time if hasattr(self, "_current_tool_start_time") else 0
 
         # 支持 ToolResult 对象和 dict 格式的 result
         # ⚠️ content 可能是 dict/list（如子智能体工具 subagent_para/subagent_status/dag
@@ -16982,18 +18426,26 @@ class OpenAIChatToolWindow(ToolWindow):
             # dict/list 等非字符串 content → 序列化为 JSON，避免 Python repr 破坏渲染
             try:
                 content = json.dumps(raw_content).decode("utf-8", errors="replace")
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 content = str(raw_content)
 
-        # 统一处理工具完成状态
-        # 字段驱动：任何工具结果携带 todos 字段 → 联动消息卡片内嵌任务列表
-        # （插件声明，主程序不写死工具名）
+        # 字段驱动：任何工具结果携带 todos 字段 → 更新任务列表缓存
+        # （插件声明，主程序不写死工具名）。显示在工作台任务区，不再内嵌消息卡片。
         todos = result.get("todos") if isinstance(result, dict) else getattr(result, "todos", None)
         if todos:
             self._latest_todos = todos
-            card = self._current_assistant_card or self._find_latest_assistant_card()
-            if card and hasattr(card, "update_todo_list"):
-                card.update_todo_list(todos)
+        # 工作台浮层联动：任务到达推任务；文件写入类工具完成后重拉产物列表
+        try:
+            if todos:
+                self._push_workbench_updates(todos=todos)
+            elif (
+                tool_name
+                and self.backend.file_recorder is not None
+                and self.backend.file_recorder.is_tracked_operation(tool_name)
+            ):
+                self._push_workbench_updates(refresh_artifacts=True)
+        except Exception:
+            pass
         # （T11-3c：原 if/elif 空分支已删——todo 更新由上方完成；
         #   工具结果块由 append_tool_result 原地转换处理，无需额外动作）
 
@@ -17025,7 +18477,10 @@ class OpenAIChatToolWindow(ToolWindow):
                 echarts=echarts_val,
             )
 
-        self._scroll_to_bottom()
+        # 🐛 工具结果回填是流式期间最高频的强制滚底源（长任务一次跑十几轮工具，
+        # 每轮一次），此前完全不看用户位置 → 「强制滚动太多」的主要来源之一。
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
 
         # 字段驱动：任何工具结果携带 diff 时实时更新差异统计（插件声明，主程序不写死工具名）
         if diff_val:
@@ -17114,14 +18569,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             return None
 
-    def _on_notification_clicked(self):
-        window = self.window()
-        if window:
-            window.show()
-            if window.isMinimized():
-                window.showNormal()
-            window.activateWindow()
-
     def _on_stream_finished(self, response: str):
         if getattr(self, "_is_destroyed", False):
             return
@@ -17168,16 +18615,18 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 流式完成后显式滚底：finish_streaming 触发的最后一次全量渲染
         # 替换 DOM 后，contentHeightChanged 可能因高度不变而不触发，或
         # 触发时 _is_streaming 已为 False 导致 _on_message_card_height_changed
-        # 不滚底。此处显式调用（内部有 24ms 定时器等待 WebEngine 布局完成）。
-        self._scroll_to_bottom()
-        # 🆕 流式结束滚底宽限 2s：此窗口内 _ensure_at_bottom 忽略用户滚离拦截
-        # （防止用户流式中途上滚导致兜底滚底被跳过）。
-        self._stream_finished_grace_until = time.monotonic() + 2.0
-        # 🆕 延迟兜底滚底：finish_streaming 的 WebEngine 全量重渲染是异步的，
-        # 立即滚底时 scrollbar.maximum() 可能仍是旧值；500ms/1000ms 两次
-        # 延迟兜底覆盖重渲染完成后的最终高度（长消息渲染可能更久）。
-        QTimer.singleShot(500, self._scroll_to_bottom)
-        QTimer.singleShot(1000, self._scroll_to_bottom)
+        # 不滚底。此处显式调用（内部有 50ms 定时器等待 WebEngine 布局完成）。
+        # 🐛 但必须过守卫：原实现无条件滚底 + 「流式结束 2s 宽限期」显式忽略
+        # away，用户流式中途上滚读历史后，结束瞬间必被拽回 —— 这是最被诟病的一处。
+        # 现在改为「用户已离开底部就保持位置」，等用户自己滚回底部再恢复跟随。
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
+            # 🆕 延迟兜底滚底：finish_streaming 的 WebEngine 全量重渲染是异步的，
+            # 立即滚底时 scrollbar.maximum() 可能仍是旧值；500ms/1000ms 两次
+            # 延迟兜底覆盖重渲染完成后的最终高度（长消息渲染可能更久）。
+            # ⚠️ 兜底同样要守卫：用户可能在等待期间上滚去看别的内容。
+            QTimer.singleShot(500, self._scroll_to_bottom_if_following)
+            QTimer.singleShot(1000, self._scroll_to_bottom_if_following)
 
         # 🚀 [PERF] 拆分持久化：save 立即执行（快，仅序列化），flush 延迟执行
         # 原同步执行 save + flush 与 finish_streaming 的 WebEngine 重渲染连续阻塞主线程。
@@ -17207,6 +18656,11 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🆕 流式结束：标记流式中 hook 注入的团队邮件为已完成
         self._finalize_injected_team_mails()
 
+        # 繁忙时排队消息：本轮自然结束后自动续发下一条（复用 worker 语义 = 无缝开新一轮）。
+        # 手动停止（cancel 路径）不走本回调，队列保留待手动处理。
+        if self._pending_message_queue:
+            QTimer.singleShot(0, self._continue_from_queue)
+
         self._focus_input_if_active()
 
     def _do_post_stream_cleanup(self):
@@ -17228,8 +18682,9 @@ class OpenAIChatToolWindow(ToolWindow):
             self.history_manager.flush()
             # 流式完成后同步 batch 结构，确保 _message_batch 包含完整的 assistant batch
             self._sync_batch_structures()
-            # 修复：同步可见范围，避免回收机制误删当前轮次的卡片
-            self._visible_batch_end = len(self._message_batch)
+            # 修复：同步可见范围，避免回收机制误删当前轮次的卡片            # 🔧 T5：同时推进 start（否则回收范围为空）+ 登记新卡片（否则永不可回收）
+            self._advance_visible_batch_window()
+            self._register_new_cards_into_batches()
 
         session = self.session_manager.get_current_session()
         if session and session.messages:
@@ -17792,7 +19247,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if self._current_assistant_card:
             self._current_assistant_card.stop_streaming_anim()
             self._current_assistant_card.set_error_state(True, error_message=error)
+            # 🐛 注意顺序：update_content 在 _streaming=False 时会经 start_streaming_anim
+            # 重开流式态与坞态，必须在其后强制收尾，否则错误卡片永久停留在
+            # 流式结构（坞态沉底 + 正文限矮）。
             self._current_assistant_card.update_content(error)
+            self._current_assistant_card.finish_streaming(force_dock_off=True)
 
         self._is_streaming = False
         self._set_ai_state("error")  # 桌宠：发生错误
@@ -17905,10 +19364,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         QTimer.singleShot(0, self._refresh_context_usage_indicator)
 
-    def _on_user_message_added(self, user_text: str):
-        """TODO: 实现用户消息添加时的回调处理"""
-        pass
-
     def _on_skill_requested(self, method: str, params: dict):
         if getattr(self, "_is_destroyed", False):
             return
@@ -17922,10 +19377,15 @@ class OpenAIChatToolWindow(ToolWindow):
         )
         new_card.update_content(str(content))
         new_card.finish_streaming()
-        self._scroll_to_bottom()
+        if self._should_follow_bottom():
+            self._scroll_to_bottom()
 
     def _hide_all_cards_for_question(self):
-        """Question 卡片显示时，隐藏所有其他卡片（最高优先级）"""
+        """Question 卡片显示时，隐藏所有其他卡片（最高优先级）
+
+        含 L2 状态层三卡：question 关闭后由 _restore_after_question_close
+        按谓词重算恢复，因此这里的强制隐藏不会造成状态卡永久消失。
+        """
         # 通过 CardManager 隐藏所有卡片
         for card_id in [
             "tool",
@@ -17937,26 +19397,45 @@ class OpenAIChatToolWindow(ToolWindow):
             "provider_edit",
             "hook_edit",
             "undo_delete",
+            "message_queue",
+            "sub_agent_compact",
         ]:
             self._card_manager.hide_card(card_id, self._window_id)
 
     def _restore_after_question_close(self):
-        """Question 卡片关闭后，恢复非系统卡片的显示状态"""
-        # tool 和 sub_agent 有自我生命周期管理，不需要强制恢复
+        """Question 卡片关闭后，恢复非系统卡片的显示状态
+
+        question 通过 _hide_all_cards 压制了 L2 状态层，这里按谓词重算恢复。
+        L1 输入补全卡（command/file_mention）不参与谓词重算：它们的显隐由输入框
+        的 / 与 @ 触发驱动，被压制即关闭，用户重新触发即可 —— 与原行为一致。
+        """
+        self._card_manager.refresh_layer(self._window_id, "status")
+
+    def _set_bottom_input_visible(self, visible: bool) -> None:
+        """提问卡 / 独占模式的输入区整区显隐：输入容器 + 工具条 + 发光层 + 发送按钮。
+
+        发送按钮迁移后挂在主窗口（跨条带与输入区、避免被 strip 矩形裁剪），
+        不随任何容器一起显隐，必须在这里单独同步，否则提问卡出现时它会孤零零悬着。
+        """
+        if hasattr(self, "_bottom_input_container"):
+            self._bottom_input_container.setVisible(visible)
+        if hasattr(self, "_bottom_toolbar_strip"):
+            self._bottom_toolbar_strip.setVisible(visible)
+        if hasattr(self, "_input_glow_underlay"):
+            self._input_glow_underlay.setVisible(visible)
+        send_btn = getattr(getattr(self, "input_area", None), "send_btn", None) if hasattr(self, "input_area") else None
+        if send_btn is not None and send_btn.parent() is self:
+            send_btn.setVisible(visible)
 
     def _on_question_asked(self, tool_call_id: str, questions: list, extra: dict = None):
         if getattr(self, "_is_destroyed", False):
             return
+        self._ensure_question_floating_widget()
         self._set_ai_state("question")  # 桌宠：等待用户回答
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
         # （工具栏是 self 的直接子控件，不在 _bottom_input_container 里，
         #  必须单独隐藏，否则会与提问卡片重叠）
-        if hasattr(self, "_bottom_input_container"):
-            self._bottom_input_container.setVisible(False)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(False)
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(False)
+        self._set_bottom_input_visible(False)
         self._question_tool_call_id = tool_call_id
         if not isinstance(questions, list):
             questions = []
@@ -17994,12 +19473,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._set_ai_state("streaming")  # 桌宠：已回答，准备继续生成
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
-        if hasattr(self, "_bottom_input_container"):
-            self._bottom_input_container.setVisible(True)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(True)
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(True)
+        self._set_bottom_input_visible(True)
         self._restore_after_question_close()
         self._pet_set_state("streaming")  # 回答后继续回复
         if self._pending_permission_tool_call_id:
@@ -18035,12 +19509,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._set_ai_state("idle")  # 桌宠：取消提问，恢复空闲
         self._card_manager.hide_card("question", self._window_id)
         # 恢复输入框 + 工具栏 + 胶囊发光层
-        if hasattr(self, "_bottom_input_container"):
-            self._bottom_input_container.setVisible(True)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(True)
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(True)
+        self._set_bottom_input_visible(True)
         self._restore_after_question_close()
         self._pet_set_state("idle")  # 取消则回 idle
 
@@ -18096,6 +19565,7 @@ class OpenAIChatToolWindow(ToolWindow):
     def _on_permission_approval_requested(self, tool_call_id: str, tool_name: str, arguments: dict):
         if getattr(self, "_is_destroyed", False):
             return
+        self._ensure_question_floating_widget()
         # 🛠️ 与 _on_question_asked 对齐：必须先切到 question 状态，
         # 否则 TabPanel 听不到 ai_state_changed 变化、不会在 Tab 边框
         # 渲染问题动画，用户在多 Tab 场景下分不清"哪个窗口在等权限"。
@@ -18103,12 +19573,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._pending_permission_tool_call_id = tool_call_id
         self._pending_permission_auto_allow = False
         # 隐藏输入框 + 工具栏 + 胶囊发光层，让用户专注看问题
-        if hasattr(self, "_bottom_input_container"):
-            self._bottom_input_container.setVisible(False)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(False)
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(False)
+        self._set_bottom_input_visible(False)
         # 先填充内容再展开容器：见 _on_question_asked 同源 bug 注释
         self._question_floating_widget.setUpdatesEnabled(False)
         try:
@@ -18288,22 +19753,26 @@ class OpenAIChatToolWindow(ToolWindow):
         # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
         self._sync_dialog_title()
 
-    def _update_project_display(self, project: str):
-        """更新项目名称显示"""
-        self._current_project = project
-        self.backend._current_project = project
-        self._project_label.setText(project)
-        self._refresh_project_branch_style()
-
     def _on_project_label_clicked(self, event):
-        """项目标签点击 - 切换项目选择卡片"""
+        """项目标签点击 — 打开历史会话插件卡并展开项目选择面板"""
         event.accept()
-        self._toggle_project_selector_card()
+        self._open_project_selector_panel()
 
     def _refresh_branch_widget_style(self):
-        """刷新分支按钮的文字样式"""
+        """刷新分支标签的样式（兼容 _BranchChip 与传统 PushButton）。
+
+        极简化：_branch_widget 现在是 _BranchChip（QFrame + git 分支线稿 icon + 文字），
+        由其自身 _apply_style() 统一管样式；主程序只需转发调用。
+        """
+        bw = getattr(self, "_branch_widget", None)
+        if bw is None:
+            return
+        if hasattr(bw, "refresh_style"):
+            bw.refresh_style()
+            return
+        # 兜底：传统 PushButton 路径
         Colors.refresh()
-        self._branch_widget.setStyleSheet(f"""
+        bw.setStyleSheet(f"""
             #_branchWidget {{
                 background: transparent;
                 border: none;
@@ -18320,25 +19789,31 @@ class OpenAIChatToolWindow(ToolWindow):
         """)
 
     def _refresh_project_branch_style(self):
-        """刷新项目+分支组合控件的整体样式（面包屑风格）"""
+        """刷新项目+分支组合控件的整体样式（极简：仅容器，hover 由子元素各自处理）
+
+        极简化：移除容器级 hover 底色（避免与 avatar / branch_widget 各自的 hover 嵌套双层）。
+        avatar 点击 = 切项目，branch 点击 = 打开关键文档，语义不同，必须各自独立 hover。
+        """
         Colors.refresh()
-        # 容器 — 面包屑整体底框
-        self._project_branch_container.setStyleSheet(f"""
+        # 容器 — 仅保留透明占位（占 layout 宽度，无视觉装饰）
+        # 批2：样式串缓存守卫（重复刷新链——build 期与 _build_new_window 复制后
+        # 各调一次本方法，串未变时跳过 setStyleSheet）
+        container_sheet = """
             QFrame#projectBranchContainer {{
                 background: transparent;
                 border: 1px solid transparent;
                 border-radius: 6px;
             }}
-            QFrame#projectBranchContainer:hover {{
-                background: {Colors.HOVER_BG};
-            }}
-        """)
+        """
+        if getattr(self, "_last_pb_container_sheet", None) != container_sheet:
+            self._last_pb_container_sheet = container_sheet
+            self._project_branch_container.setStyleSheet(container_sheet)
         # 项目标签 — 面包屑第一级（粗体 + 项目专属色）
         project_color = get_project_color(self._current_project)
         # 同步更新方形 avatar
         if hasattr(self, "_project_avatar"):
             self._project_avatar.set_project(self._current_project, project_color)
-        self._project_label.setStyleSheet(f"""
+        label_sheet = f"""
             QLabel {{
                 color: {project_color};
                 {get_font_family_css()}
@@ -18349,49 +19824,50 @@ class OpenAIChatToolWindow(ToolWindow):
                 border: none;
                 border-radius: 4px;
             }}
-        """)
-        # 分隔符 — 三角箭头（小号 + 次级色）
-        self._pb_separator.setStyleSheet(f"""
-            QLabel {{
-                color: {Colors.TEXT_MUTED};
-                {get_font_family_css()}
-                {font_size_css(16)}
-                background: transparent;
-                border: none;
-                padding: 2px;
-            }}
-        """)
+        """
+        if getattr(self, "_last_pb_label_sheet", None) != label_sheet:
+            self._last_pb_label_sheet = label_sheet
+            self._project_label.setStyleSheet(label_sheet)
         # 同步刷新分支按钮样式
         self._refresh_branch_widget_style()
 
+    # ── 工作树门面：实现体在 plugins/worktree-manager/ui/service.py（WorktreeService）──
+    # 插件缺失时 no-op / 返回空串：无分支标签、无自动切换，会话功能不受影响。
+
+    @staticmethod
+    def _worktree_service():
+        from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+        return UIPluginRegistry.get_instance().get_service("worktree")
+
+    def _update_branch(self):
+        """门面：刷新分支标签（实现在 WorktreeService.update_branch）"""
+        svc = self._worktree_service()
+        if svc is not None:
+            svc.update_branch(self)
+
     def _copy_branch_from(self, source):
-        """性能优化：从源窗口复制 git 分支标签状态，跳过同步 git 子进程调用。
+        """门面：复制窗口继承分支标签状态（实现在 WorktreeService.copy_branch_state）"""
+        svc = self._worktree_service()
+        if svc is not None:
+            svc.copy_branch_state(self, source)
 
-        复制/分支窗口与源窗口共享完全相同的项目与工作目录，git 分支必然一致，
-        无需再次执行 `git branch --show-current`（最坏可达 3s 阻塞主线程）。
-        直接复制源窗口已渲染的分支标签 UI 状态（文本/可见性/提示/项目 avatar 提示）即可。
-        """
-        import shiboken6 as sip
+    def _get_current_worktree_path(self) -> str:
+        """门面：当前 worktree 路径（空串=不在；实现在 WorktreeService）"""
+        svc = self._worktree_service()
+        return svc.get_current_worktree_path(self) if svc is not None else ""
 
-        try:
-            if not sip.isValid(source) or not hasattr(source, "_branch_widget"):
-                self._update_branch()
-                return
-            if not sip.isValid(source._branch_widget):
-                self._update_branch()
-                return
-            branch_visible = source._branch_widget.isVisible()
-            self._branch_widget.setText(source._branch_widget.text())
-            self._branch_widget.setVisible(branch_visible)
-            self._branch_widget.setToolTip(source._branch_widget.toolTip())
-            if hasattr(self, "_pb_separator"):
-                self._pb_separator.setVisible(branch_visible)
-            # 同步项目 avatar tooltip（含完整项目名、路径、分支）
-            if hasattr(self, "_project_avatar") and hasattr(source, "_project_avatar"):
-                self._project_avatar.setToolTip(source._project_avatar.toolTip())
-        except Exception:
-            # 兜底：复制失败则回退到正常的 git 检测
-            self._update_branch()
+    def _switch_to_worktree(self, worktree_path: str):
+        """门面：切换 worktree（实现在 WorktreeService.switch_to_worktree）"""
+        svc = self._worktree_service()
+        if svc is not None:
+            svc.switch_to_worktree(self, worktree_path)
+
+    def _restore_main_repo(self):
+        """门面：回主仓库（实现在 WorktreeService.restore_main_repo）"""
+        svc = self._worktree_service()
+        if svc is not None:
+            svc.restore_main_repo(self)
 
     def _resolve_project_workdir(self) -> Optional[str]:
         """解析当前项目的工作目录（多窗口隔离：实例缓存 → DB → tool_executor）"""
@@ -18402,117 +19878,28 @@ class OpenAIChatToolWindow(ToolWindow):
             workdir = getattr(self.backend.tool_executor, "_workdir", None)
         return str(workdir) if workdir else None
 
-    def _update_branch(self):
-        """更新项目 avatar tooltip 和分支标签（性能优化：异步 git 检测）
+    def _open_project_selector_panel(self):
+        """打开历史会话插件卡并展开项目选择面板（标题栏项目 icon / 命令入口）
 
-        旧实现：在主线程同步执行 `git branch --show-current`（timeout=3），
-        tooltip 在子进程后才更新，导致项目切换/工作目录变更时 tooltip 延迟 0~3s。
-        改为：tooltip 立即显示「项目名+路径」，git 分支后台线程异步检测，
-        完成后通过 _on_branch_detected 回调追加分支信息。
+        项目选择卡片已迁入 history-manager 插件：宿主只负责「确保卡片可见」，
+        面板数据装配与展开由插件服务 ``open_project_selector`` 完成。
         """
-        workdir = self._resolve_project_workdir()
+        tm = TabManagerWindow.get_instance()
+        svc = self._history_service()
+        page = svc.page if svc is not None else None
+        if page is None or not page.isVisible():
+            # 卡片未创建 / 已关闭 → 走浮动卡显示通道（不 toggle，避免二次点击关闭）
+            if tm is not None:
+                tm.open_workbench_history()
+            svc = self._history_service()
+        if svc is not None and hasattr(svc, "open_project_selector"):
+            svc.open_project_selector()
 
-        # Phase A（同步、即时）：tooltip 先显示项目名 + 工作目录
-        tooltip = self._current_project
-        if workdir:
-            tooltip += f"\n{workdir}"
-        self._project_avatar.setToolTip(tooltip)
-
-        # 先隐藏分支标签，等后台检测完成再决定显示
-        self._branch_widget.setVisible(False)
-        self._pb_separator.setVisible(False)
-
-        # Phase B（异步）：git 分支检测
-        if not workdir or not os.path.isdir(workdir):
-            return
-
-        # 缓存命中：直接应用，避免重复 git 调用（类级缓存，跨窗口共享）
-        if workdir in OpenAIChatToolWindow._branch_cache:
-            self._apply_branch_to_ui(workdir, OpenAIChatToolWindow._branch_cache[workdir])
-            return
-
-        # 启动后台检测（自增 request_id 用于丢弃过期结果）
-        self._branch_detect_request_id += 1
-        task = _BranchDetectTask(workdir, self._branch_detect_request_id, self._branch_detect_signals)
-        QThreadPool.globalInstance().start(task)
-
-    def _on_branch_detected(self, request_id: int, branch: str):
-        """后台 git 分支检测完成的主线程回调。"""
-        # 过期结果：用户已切换到其他项目，丢弃
-        if request_id != self._branch_detect_request_id:
-            return
-
-        workdir = self._resolve_project_workdir()
-        if not workdir:
-            return
-
-        # 缓存结果（同一路径下次直接命中，类级共享）
-        cache = OpenAIChatToolWindow._branch_cache
-        if len(cache) >= _MAX_BRANCH_CACHE:
-            # Python 3.7+ dict 保插入序：弹出最早插入的 key
-            oldest = next(iter(cache))
-            cache.pop(oldest, None)
-        cache[workdir] = branch
-        # 再次校验：缓存写完后若 request_id 又变了，说明并发切换，仍跳过
-        if request_id != self._branch_detect_request_id:
-            return
-        self._apply_branch_to_ui(workdir, branch)
-
-    def _apply_branch_to_ui(self, workdir: str, branch: str):
-        """应用分支结果到 tooltip 和分支标签。"""
-        # 完整 tooltip（项目名 + 路径 + 分支）
-        tooltip = self._current_project
-        if workdir:
-            tooltip += f"\n{workdir}"
-        if branch:
-            tooltip += f"\n🌿 {branch}"
-        self._project_avatar.setToolTip(tooltip)
-
-        # 分支标签
-        if branch:
-            display = branch if len(branch) <= 20 else branch[:8] + "…" + branch[-8:]
-            self._branch_widget.setText(display)
-            self._branch_widget.setToolTip(f"分支: {branch}\n点击打开关键文档")
-            self._branch_widget.setVisible(True)
-            self._pb_separator.setVisible(True)
-        else:
-            self._branch_widget.setVisible(False)
-            self._pb_separator.setVisible(False)
-
-    def _on_branch_label_clicked(self, event):
-        """分支标签点击 — 打开关键文档卡片"""
-        self._toggle_memory_card()
-        # 确保切换到关键文档 Tab
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
-
-            self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
-            # 同步卡片 Tab 按钮
-            if hasattr(self, "_memory_card") and self._memory_card:
-                self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
-
-    def _toggle_project_selector_card(self):
-        """切换项目选择卡片的显示"""
-        self._card_manager.toggle_card("project_selector", self._window_id)
-        if self._card_manager.is_card_visible("project_selector", self._window_id):
-            # 加载项目数据
-            projects = self.history_manager.get_projects() if self.history_manager else ["默认项目"]
-            # 确保当前项目在列表中（新建项目可能还没有会话/文档记录）
-            if self._current_project not in projects:
-                projects.insert(0, self._current_project)
-
-            # 获取每个项目的会话数和 worktree 数
-            meta_map = self._build_project_meta_map(projects)
-            # 获取每个项目的根目录（用于卡片显示）
-            root_dir_map = self._build_project_root_dir_map(projects)
-
-            self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map, root_dir_map
-            )
-            # 更新卡片标题 — 固定显示"项目切换"，不显示当前项目名
-            self._project_selector_card.set_title_text("📁 项目切换")
-            # 清空过滤输入框
-            self._project_new_edit.clear()
+    def _collapse_project_selector_panel(self):
+        """收起插件的项目选择面板（切项目 / 归档项目完成后调用）"""
+        svc = self._history_service()
+        if svc is not None and hasattr(svc, "collapse_project_selector"):
+            svc.collapse_project_selector()
 
     def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
         """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
@@ -18568,7 +19955,7 @@ class OpenAIChatToolWindow(ToolWindow):
         Tab 图标），但跳过：
         - _create_new_session()（避免连环新建会话）
         - cfg.current_project 全局写入（全局默认项目仅由发送方写）
-        - hide_card("project_selector")（关闭项目卡片仅针对发送方）
+        - 收起项目选择面板（仅针对发送方；接收方保持自己的面板状态）
         """
         if getattr(self, "_is_destroyed", False):
             return
@@ -18591,12 +19978,6 @@ class OpenAIChatToolWindow(ToolWindow):
             workdir = self.backend.memory_manager.get_working_directory(project)
             if workdir:
                 self._current_workdir[project] = workdir
-        if getattr(self, "_memory_card_popup", None):
-            self._memory_card_popup.set_project(project, workdir=workdir)
-        # 🐛 修复：tool_executor 工作目录同步不能挂在记忆卡片 UI 的惰性构建状态上。
-        # PreUserMessage hook（format_memory_context 的 githook 项目根目录/Git 状态）
-        # 数据源是 tool_executor.get_workdir()，卡片未构建时跳过同步会导致切换项目后
-        # hook 仍注入旧项目的根目录与 Git 状态（残留）。
         self._sync_working_directory()
         # 刷新历史面板（切换项目过滤）
         self._current_history_project = project
@@ -18690,8 +20071,6 @@ class OpenAIChatToolWindow(ToolWindow):
             resolved = self._ensure_temp_workdir(project) or None
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_workdir(resolved or None)
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            self._memory_card_popup._instance_workdir[project] = resolved or ""
         self._update_branch()
         logger.info(f"[TeamWorkdir] 窗口 {self._window_id} 已应用团队工作目录: {resolved or 'cleared'}")
 
@@ -18745,7 +20124,7 @@ class OpenAIChatToolWindow(ToolWindow):
             if tm is not None:
                 new = tm.spawn_tab(self, new_session=True, project=project)
                 if new is not None:
-                    self._card_manager.hide_card("project_selector", self._window_id)
+                    self._collapse_project_selector_panel()
                     return
             # 降级原行为
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
@@ -18764,23 +20143,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 更新 tool_executor 的当前项目
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_current_project(project)
-        # 性能优化：先算 workdir（实例缓存 / DB 单次读取），再下发给 memory_card_popup，
-        # 避免 set_project 内部又走一遍 _get_effective_workdir。
-        workdir = self._current_workdir.get(project)
-        if workdir is None and self.backend and self.backend.memory_manager:
-            workdir = self.backend.memory_manager.get_working_directory(project)
-            if workdir:
-                self._current_workdir[project] = workdir
-        # 刷新记忆卡片的项目（项目笔记、关键文档会跟着刷新）
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            from loguru import logger
-
-            logger.info(f"[MainWidget] Calling set_project({project}) on memory_card_popup")
-            self._memory_card_popup.set_project(project, workdir=workdir)
-        # 🐛 修复：workdir 同步移出 _memory_card_popup 惰性判断——卡片未构建时
-        # 也必须更新 tool_executor，否则 PreUserMessage hook 的 project_root
-        # 残留旧项目（githook 显示旧项目根目录 + Git 状态）。
-        # _sync_working_directory 内部已对 _memory_card_popup 判空，可安全无条件调用。
         self._sync_working_directory()
         # 刷新历史面板（切换项目过滤）
         self._current_history_project = project
@@ -18788,8 +20150,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._notify_history_data_changed()
         # 自动触发新建会话，避免原会话与切换后的项目不匹配
         self._create_new_session()
-        # 隐藏项目选择卡片
-        self._card_manager.hide_card("project_selector", self._window_id)
+        # 收起插件内的项目选择面板
+        self._collapse_project_selector_panel()
 
         # 团队模式：一人改项目全员同步（写团队 project + 广播同团队其他窗口）。
         # ★ 必须在 Tab 图标更新之前执行：广播先写入团队级 project，发送方自身的
@@ -18809,36 +20171,27 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception:
                 pass
 
-    def _on_project_filter_changed(self, text: str):
-        """输入过滤文本变化时同步过滤项目列表"""
-        if hasattr(self, "_project_selector_card_content"):
-            self._project_selector_card_content.set_filter(text)
-
-    def _on_header_new_project(self):
-        """从标题栏新建项目按钮/回车触发
+    def _on_header_new_project(self, name: str = ""):
+        """新建/搜索项目（历史插件面板工具条输入框 + 回车 / + 按钮触发）
 
         行为：
         1. 如果输入内容完全匹配某个已有项目 → 切换到该项目
         2. 如果输入内容为空 → 不做任何操作
         3. 否则 → 创建新项目
         """
-        name = self._project_new_edit.text().strip()
+        name = (name or "").strip()
         if not name:
             return
 
         # 检查是否完全匹配某个已有项目
-        if hasattr(self, "_project_selector_card_content"):
-            matching = [p for p in self._project_selector_card_content._projects if p.lower() == name.lower()]
-            if matching:
-                # 匹配到已有项目 → 直接切换
-                self._project_new_edit.clear()
-                self._project_selector_card_content.set_filter("")
-                self._on_project_selected(matching[0])
-                return
+        projects = self.history_manager.get_projects() if self.history_manager else []
+        matching = [p for p in projects if p.lower() == name.lower()]
+        if matching:
+            # 匹配到已有项目 → 直接切换
+            self._on_project_selected(matching[0])
+            return
 
         # 无匹配 → 创建新项目
-        self._project_new_edit.clear()
-        self._project_selector_card_content.set_filter("")
         self._on_new_project_created(name)
 
     def _on_new_project_created(self, project: str, suppress_memory_card: bool = False, root_dir: str = ""):
@@ -18852,6 +20205,36 @@ class OpenAIChatToolWindow(ToolWindow):
                       （~/.drifox/workspaces/<project>/），AGENTS.md 等文件
                       写入指定路径而非默认路径。
         """
+        # 🆕 流式保护：当前标签页流式输出时，新建项目改开新标签页
+        # （新项目·新会话），不污染当前流式对话的项目归属、不强行停流。
+        # 项目上下文（_current_project / backend / tool_executor / 工作目录）
+        # 只落到新窗口，当前流式窗口保持旧项目（对齐 _on_project_selected 的
+        # 流式保护写法；修复前此处直接改 self 项目，新建项目会把原 tab 的
+        # 项目偷偷切走，流式输出的项目归属与工具写入全部错位）。
+        if self._is_streaming:
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                new = tm.spawn_tab(self, new_session=True, project=project)
+                if new is not None:
+                    # 在新窗口上补齐「新建项目」的上下文注册（不碰当前流式窗口）：
+                    # 根目录预置 → 工作目录同步（含临时目录创建 + DB 注册）→
+                    # 团队广播（发送方保持旧项目，同团队同旧项目的成员窗口跟随。
+                    # _broadcast_team_project 跳过发送方，接收方须在旧项目才应用）
+                    try:
+                        if root_dir:
+                            new._current_workdir[project] = root_dir
+                            if new.backend and new.backend.memory_manager:
+                                new.backend.memory_manager.add_key_document(project, root_dir, added_by="manual")
+                                new.backend.memory_manager.set_working_directory(project, root_dir)
+                        new._sync_working_directory()
+                        self._broadcast_team_project(project, self._current_project)
+                        if not suppress_memory_card:
+                            tm.open_workbench_memory("docs")
+                    except Exception as e:
+                        logger.warning(f"[NewProject] 流式下新标签页项目上下文注册失败: {e}")
+                    self._collapse_project_selector_panel()
+                    return
+            # TabManagerWindow 未就绪则降级原行为（原地切项目）
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
         prev_project = self._current_project
         self._current_project = project
@@ -18865,12 +20248,9 @@ class OpenAIChatToolWindow(ToolWindow):
         # 保存到配置
         self.cfg.current_project.value = project
         self.cfg.save()
-        # 刷新记忆卡片的项目
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            self._memory_card_popup.set_project(project)
-        # 🐛 修复：切换项目时无条件同步工作目录（不依赖记忆卡片惰性构建状态），
+        # 🐛 修复：切换项目时无条件同步工作目录，
         # 否则 tool_executor.get_workdir() 残留旧项目 → PreUserMessage hook 的
-        # githook 显示旧项目根目录。
+        # 项目上下文显示旧项目根目录。
         # 指定了项目根目录：先预置实例缓存 + 写 DB，_sync_working_directory 直接
         # 使用该路径，不再走 _ensure_temp_workdir 创建默认项目文件夹；
         # 同时确保团队广播时其他窗口从 DB 也能读到正确路径（不会回退默认目录）。
@@ -18882,26 +20262,20 @@ class OpenAIChatToolWindow(ToolWindow):
         self._sync_working_directory()
         # 刷新历史面板
         self._history_popup_card.refreshRequested.emit()
-        # 自动弹出长期记忆卡片（已设根目录时跳过，避免干扰已绑定的文件夹）
+        # 自动展开工作台记忆页的「关键文档」（记忆功能已完全迁移到工作台，
+        # 不再弹出旧的独立记忆卡片）。
+        # suppress_memory_card=True 时跳过（拖拽/选择文件夹已设根目录，避免干扰）。
         if not suppress_memory_card:
-            # P0-1：卡片懒创建，未创建视为不可见 → toggle 内部会 ensure
-            if not getattr(self, "_memory_card", None) or not self._memory_card.isVisible():
-                self._toggle_memory_card()
-            # 卡片弹出后，再切换到关键文档标签
-            # 🐛 修复：TAB_KEY_DOCUMENTS 必须局部导入（此前未导入导致 NameError，
-            # 中断后续 _create_new_session / _update_tab_icon，新建会话与 Tab 图标
-            # 同步全部失效）；同时显式 switch_tab 内容层（对齐 _on_branch_label_clicked，
-            # 不依赖 set_current_tab → tabChanged 信号链）。
-            if hasattr(self, "_memory_card") and self._memory_card:
-                from app.widgets.cards.settings.memory_card import TAB_KEY_DOCUMENTS
-
-                if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                    self._memory_card_popup.switch_tab(TAB_KEY_DOCUMENTS)
-                self._memory_card.set_current_tab(TAB_KEY_DOCUMENTS)
+            try:
+                tm = TabManagerWindow.get_instance()
+                if tm is not None and hasattr(tm, "open_workbench_memory"):
+                    tm.open_workbench_memory("docs")
+            except Exception as e:
+                logger.warning(f"[NewProject] 展开工作台关键文档失败: {e}")
         # 自动触发新建会话
         self._create_new_session()
-        # 隐藏项目选择卡片
-        self._card_manager.hide_card("project_selector", self._window_id)
+        # 收起插件内的项目选择面板
+        self._collapse_project_selector_panel()
 
         # 团队模式：一人改项目全员同步（新建项目也是团队级项目切换）
         self._broadcast_team_project(project, prev_project)
@@ -18999,18 +20373,8 @@ class OpenAIChatToolWindow(ToolWindow):
             )
 
         # 刷新项目选择卡片的列表
-        if hasattr(self, "_project_selector_card_content"):
-            projects = self.history_manager.get_projects() if self.history_manager else ["默认项目"]
-            # 确保刚归档的项目不在列表中（兜底，防止残留数据导致复活）
-            if project_name in projects:
-                projects.remove(project_name)
-            if self._current_project not in projects:
-                projects.insert(0, self._current_project)
-            meta_map = self._build_project_meta_map(projects)
-            root_dir_map = self._build_project_root_dir_map(projects)
-            self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map, root_dir_map
-            )
+        # 刷新历史插件内的项目选择面板（已归档项目应从列表消失）
+        self._refresh_project_selector()
 
         # 操作完成，恢复正常状态
         self._pet_set_state("idle")
@@ -19236,7 +20600,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
     def _on_import_project_from_url(self):
         """从URL导入项目压缩包"""
-        from app.widgets.cards.settings.memory_card import SingleInputDialog
+        from app.widgets.common_dialogs import SingleInputDialog
 
         dialog = SingleInputDialog(
             title="🔗 从URL导入项目",
@@ -19444,15 +20808,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._notify_history_data_changed()
 
     def _refresh_project_selector(self):
-        """刷新项目选择器列表"""
-        if not hasattr(self, "_project_selector_card_content"):
-            return
-        projects = self.history_manager.get_projects() if self.history_manager else ["默认项目"]
-        if self._current_project not in projects:
-            projects.insert(0, self._current_project)
-        meta_map = self._build_project_meta_map(projects)
-        root_dir_map = self._build_project_root_dir_map(projects)
-        self._project_selector_card_content.set_projects_data(projects, self._current_project, meta_map, root_dir_map)
+        """通知历史插件刷新项目选择面板数据（项目卡片已迁入 history-manager）"""
+        svc = self._history_service()
+        if svc is not None and hasattr(svc, "refresh_project_selector_data"):
+            svc.refresh_project_selector_data()
 
     def _on_open_project_folder(self, project_name: str, root_dir: str):
         """打开项目根目录（在文件管理器中打开）"""
@@ -19480,7 +20839,7 @@ class OpenAIChatToolWindow(ToolWindow):
         3. 将拖入文件夹加入关键文档并设为工作目录（根目录）
         4. 刷新项目列表
         """
-        from app.widgets.cards.settings.memory_card import SingleInputDialog
+        from app.widgets.common_dialogs import SingleInputDialog
 
         # ── 提取文件夹名作为默认项目名 ──
         folder_name = os.path.basename(folder_path.rstrip("/\\"))
@@ -19544,11 +20903,6 @@ class OpenAIChatToolWindow(ToolWindow):
             # 后续 _get_effective_workdir 返回 None，has_active_wd=False，
             # 关键文档 Tab 中工作目录条目下方的 worktree section 永远不显示。
             self._current_workdir[project_name] = folder_path
-            if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                self._memory_card_popup._instance_workdir[project_name] = folder_path
-                # 主动刷新关键文档 UI，确保 worktree section 立即显示
-                # （与 _switch_to_worktree 行为保持一致）
-                self._memory_card_popup._load_key_documents()
             # 同步到 tool_executor
             if self.backend and self.backend.tool_executor:
                 self.backend.tool_executor.set_workdir(folder_path)
@@ -19557,15 +20911,8 @@ class OpenAIChatToolWindow(ToolWindow):
             # 此时 DB 没有 workdir，分支标签停留在旧状态（隐藏或显示旧分支）。
             self._update_branch()
 
-            # ── 刷新项目选择卡片 ──
-            projects = self.history_manager.get_projects() if self.history_manager else [project_name]
-            if self._current_project not in projects:
-                projects.insert(0, self._current_project)
-            meta_map = self._build_project_meta_map(projects)
-            root_dir_map = self._build_project_root_dir_map(projects)
-            self._project_selector_card_content.set_projects_data(
-                projects, self._current_project, meta_map, root_dir_map
-            )
+            # ── 刷新插件内的项目选择面板 ──
+            self._refresh_project_selector()
 
             InfoBar.success(
                 title="项目已创建",
@@ -19601,24 +20948,6 @@ class OpenAIChatToolWindow(ToolWindow):
         # 复用手动选择文件夹 → 弹出建项目对话框
         self._on_project_folder_dropped(folder_path)
 
-    def _on_memory_tab_changed(self, tab_id: str):
-        """处理记忆管理标签切换"""
-        # 清空搜索
-        search_input = getattr(self._memory_card, "_search_input", None)
-        if search_input:
-            search_input.clear()
-        # 更新占位文本
-        placeholders = {
-            "entries": "🔍 搜索条目记忆...",
-            "notes": "🔍 搜索项目笔记...",
-            "docs": "🔍 搜索关键文档...",
-        }
-        if search_input:
-            search_input.setPlaceholderText(placeholders.get(tab_id, "🔍 搜索..."))
-        # 切换内容（_deferred_build_cards 可能尚未运行）
-        if self._memory_card_popup:
-            self._memory_card_popup.switch_tab(tab_id)
-
     def _on_working_dir_changed(self, file_path: str):
         """工作目录变更 → 更新实例缓存 + 同步到工具执行器 + 刷新分支标签
 
@@ -19636,9 +20965,6 @@ class OpenAIChatToolWindow(ToolWindow):
         if self.backend and self.backend.tool_executor:
             self.backend.tool_executor.set_workdir(resolved_path or None)
             logger.info(f"[MainWidget] Working directory synced to tool executor: {resolved_path or 'cleared'}")
-        # 同步到记忆卡片的实例缓存（使内部 get_effective_workdir 保持一致）
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            self._memory_card_popup._instance_workdir[self._current_project] = resolved_path or ""
         # 工作目录变更后刷新分支标签
         self._update_branch()
         # 工作目录变更后重扫文件列表（预缓存，下次 @ 即时显示）
@@ -19647,6 +20973,60 @@ class OpenAIChatToolWindow(ToolWindow):
         # 团队模式：一人改工作目录全员同步（统一工作树）
         if resolved_path:
             self._broadcast_team_workdir(resolved_path)
+
+    # ── 右侧工作台浮层联动 ──
+
+    def _push_workbench_updates(self, todos: Optional[list] = None, refresh_artifacts: bool = False) -> None:
+        """向右侧工作台浮层推送增量更新（面板隐藏/无宿主时零开销跳过）
+
+        ★ 标签页隔离：工作台是宿主级单例，数据投影自「当前活跃对话窗口」。
+        非活跃窗口的工具回调（如后台正在跑的另一个标签页）只更新自己的
+        ``_latest_todos`` 缓存，不写工作台 UI——否则当前标签页的工作台
+        会被其他标签页的任务/产物覆盖。切回时 refresh_workbench 会拉取。
+
+        Args:
+            todos: todowrite 等工具回传的最新任务列表；None 表示本次不更新任务区
+            refresh_artifacts: True 时重拉产物列表（文件写入类工具完成后调用）
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is None:
+                return
+            # 标签页隔离：仅活跃窗口可推送 UI 更新
+            if tm.get_current_window() is not self:
+                return
+            if todos is not None:
+                # todo 更新自动展开工作台（set_workbench_visible 内部会 refresh_workbench）
+                if not tm.is_workbench_visible():
+                    tm.set_workbench_visible(True)
+                panel.update_todos(todos)
+            if refresh_artifacts:
+                tm.refresh_workbench()
+        except Exception:
+            pass
+
+    def _push_workbench_project(self, project: str, workdir: Optional[str] = None) -> None:
+        """向右侧工作台浮层同步当前项目（记忆页跟随当前窗口项目）
+
+        ★ 与 _push_workbench_updates 同一隔离语义：非活跃窗口不推送。
+        """
+        if getattr(self, "_is_destroyed", False):
+            return
+        try:
+            tm = TabManagerWindow.get_instance()
+            panel = getattr(tm, "workbench_panel", None) if tm is not None else None
+            if panel is None:
+                return
+            if tm.get_current_window() is not self:
+                return
+            if panel.isVisible():
+                # 页面自拉数据（工作树页 refresh_data 会向活跃窗口取 project/workdir）
+                panel.refresh_current_page_data()
+        except Exception:
+            pass
 
     def _sync_working_directory(self):
         """切换项目时自动加载并同步工作目录
@@ -19682,16 +21062,39 @@ class OpenAIChatToolWindow(ToolWindow):
         if new_wd != prev_wd:
             self._rerender_welcome_card()
 
-        # 同步到记忆卡片的实例缓存（确保关键文档能感知到当前工作目录）
-        if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-            self._memory_card_popup._instance_workdir[project] = workdir or ""
-
         # 工作目录变化后刷新分支标签
         self._update_branch()
+        # 工作台浮层记忆页跟随当前项目
+        self._push_workbench_project(project, workdir)
+        # UI 插件项目联动：项目 / 工作目录定稿后广播（可选协议 on_project_changed）
+        self._publish_project_changed(project, workdir)
 
         from loguru import logger
 
         logger.info(f"[MainWidget] Synced working directory for project '{project}': {workdir or 'default'}")
+
+    def _publish_project_changed(self, project: str, workdir: str) -> None:
+        """广播项目 / 工作目录变更（UI 插件可选协议 on_project_changed 的触发源）
+
+        去重：同 (project, workdir) 重复同步不重复发布 —— showEvent 首帧、
+        切会话、分支恢复、切项目共 6 条路径都会走 _sync_working_directory。
+        首次同步也发一次（_last_project_ctx 初值 None），供插件做首次初始化。
+        """
+        signature = (project, workdir or "")
+        if signature == getattr(self, "_last_project_ctx", None):
+            return
+        self._last_project_ctx = signature
+        try:
+            from app.core.ui_event_bus import EV_PROJECT_CHANGED, UIEventBus
+
+            UIEventBus.get_instance().publish(
+                EV_PROJECT_CHANGED,
+                project=project,
+                workdir=workdir or "",
+                window_id=getattr(self, "_window_id", "") or "",
+            )
+        except Exception as e:
+            logger.warning(f"[MainWidget] 项目变更广播失败: {e}")
 
     def _ensure_temp_workdir(self, project: str) -> str:
         """确保项目有临时工作目录
@@ -19720,11 +21123,13 @@ class OpenAIChatToolWindow(ToolWindow):
             except Exception as e:
                 logger.warning(f"[MainWidget] Failed to sync temp workdir to key docs: {e}")
 
-            # 刷新关键文档卡片 UI，使新增的根目录立即可见
+            # 刷新右侧工作台关键文档 UI，使新增的根目录立即可见
             try:
-                if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                    self._memory_card_popup._instance_workdir[project] = temp_dir
-                    self._memory_card_popup._load_key_documents()
+                from app.widgets.tab_manager_window import TabManagerWindow
+
+                tm = TabManagerWindow.get_instance()
+                if tm is not None:
+                    tm.refresh_workbench()
             except Exception as e:
                 logger.warning(f"[MainWidget] Failed to refresh key docs UI: {e}")
 
@@ -19733,48 +21138,6 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[MainWidget] Failed to create temp workdir: {e}")
             return ""
-
-    def _show_soul_memory(self):
-        """切换记忆管理卡片的显示"""
-        self._toggle_memory_card()
-
-    def _toggle_memory_card(self):
-        """切换记忆管理卡片的显示"""
-        self._ensure_memory_card()  # P0-1：框架懒创建，确保注册/入容器
-        self._card_manager.toggle_card("memory", self._window_id)
-        # 显示时刷新记忆数据
-        if self._card_manager.is_card_visible("memory", self._window_id) and hasattr(self, "_memory_card_popup"):
-            # 默认切换到条目记忆标签
-            default_tab = "entries"
-            # 强制切换 tab
-            if hasattr(self._memory_card_popup, "_current_tab"):
-                self._memory_card_popup._current_tab = None  # 临时改变，确保 switch_tab 执行
-                self._memory_card_popup.switch_tab(default_tab)
-            # 同时更新 BaseSettingsCard 的 tab 状态
-            if hasattr(self._memory_card, "set_current_tab"):
-                self._memory_card.set_current_tab(default_tab)
-
-    def _on_memory_card_saved(self, memories: list):
-        """记忆卡片保存后的回调"""
-        # 数据已经在 MemoryCardContent 中通过 backend 保存
-        # 这里只显示提示信息
-        InfoBar.success(
-            "已保存",
-            "长期记忆已更新",
-            parent=TabManagerWindow.get_instance() or self.window(),
-            duration=1500,
-            position=InfoBarPosition.BOTTOM,
-        )
-
-    def _on_memory_updated(self, memories: list):
-        self.backend.update_user_memories(memories)
-        InfoBar.success(
-            "已保存",
-            "长期记忆已更新",
-            parent=TabManagerWindow.get_instance() or self.window(),
-            duration=1500,
-            position=InfoBarPosition.BOTTOM,
-        )
 
     def _on_title_edit_finished(self):
         """标题编辑完成 - 保存用户编辑的标题"""
@@ -19807,129 +21170,6 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
         self._sync_dialog_title()
-
-    def _restore_title_display(self):
-        """恢复标题显示（编辑取消时）"""
-        session = self.session_manager.get_current_session()
-        if session:
-            current_title = session.topic_summary or session.name or "新对话"
-            self.title_edit.setText(current_title)
-            # 同步对话框窗口标题（便于 Windows 任务栏区分各窗口）
-            self._sync_dialog_title()
-
-    def _get_current_worktree_path(self) -> str:
-        """检测当前工作目录是否在 git worktree 中，返回 worktree 路径（空字符串表示不在）"""
-        workdir = self._current_workdir.get(self._current_project)
-        if not workdir or not os.path.isdir(str(workdir)):
-            return ""
-        from app.utils.git_worktree import GitWorktreeDetector
-
-        git_root = GitWorktreeDetector.detect_git(str(workdir))
-        if not git_root:
-            return ""
-        # worktree 的 .git 是文件，主仓库的 .git 是目录
-        if GitWorktreeDetector.is_worktree(git_root):
-            return git_root
-        # 工作目录可能是 worktree 内的子目录，向上探测
-        if GitWorktreeDetector.is_worktree(str(workdir)):
-            return str(workdir)
-        return ""
-
-    def _switch_to_worktree(self, worktree_path: str):
-        """切换到指定 worktree，幂等——已在目标 worktree 中则跳过。
-
-        加载会话时自动调用：会话关联了哪个 worktree，就切到哪个 worktree。
-        """
-        if not worktree_path or not os.path.isdir(worktree_path):
-            return
-        project = self._current_project
-
-        # 幂等：已在目标 worktree 中则跳过
-        if self._current_workdir.get(project) == worktree_path:
-            return
-
-        # 1. 通过 memory_manager 切换工作目录
-        if self.backend and self.backend.memory_manager:
-            mm = self.backend.memory_manager
-            db_wd = mm.get_working_directory(project)
-            mm.add_key_document(project, worktree_path, "git_worktree")
-            mm.set_working_directory(project, worktree_path)
-            # 恢复非 worktree 根目录的 is_working_dir 标记，确保记忆卡片
-            # 能正确识别用户设定的根目录。get_working_directory 可能返回
-            # worktree 路径（ORDER BY 优先），此时跳过 restore 以避免
-            # 错误地为 worktree 恢复标记。
-            if db_wd and db_wd != worktree_path and db_wd != "clear":
-                # 如果 db_wd 指向的是 worktree（added_by 为 git_worktree），
-                # 不恢复它 — 我们需要恢复的是主仓库/根目录的标记
-                all_docs = mm.get_key_documents(project)
-                is_db_wd_worktree = any(
-                    d.get("file_path") == db_wd and d.get("added_by") == "git_worktree" for d in all_docs
-                )
-                if not is_db_wd_worktree:
-                    mm.restore_working_directory_mark(project, db_wd)
-
-        # 2. 更新实例缓存 + 同步工具执行器 + 刷新分支标签
-        self._current_workdir[project] = worktree_path
-        if self.backend and self.backend.tool_executor:
-            self.backend.tool_executor.set_workdir(worktree_path)
-        self._update_branch()
-
-        # 3. 同步记忆卡片 UI
-        try:
-            if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                mc = self._memory_card_popup
-                mc._instance_workdir[project] = worktree_path
-                mc._load_key_documents()
-        except Exception:
-            pass
-
-        logger.info(f"[MainWidget] 已自动切换到 worktree: {worktree_path}（项目: {project}）")
-        # 团队模式：worktree 切换全员同步（统一工作树）
-        self._broadcast_team_workdir(worktree_path)
-
-    def _restore_main_repo(self):
-        """从 worktree 切换回主仓库，幂等——已不在 worktree 中则跳过。
-
-        加载主仓库会话时自动调用：会话没有关联 worktree，说明属于主仓库。
-        """
-        project = self._current_project
-        current_wt = self._get_current_worktree_path()
-        if not current_wt:
-            # 已不在 worktree 中，无需切换
-            return
-
-        from app.utils.git_worktree import GitWorktreeDetector
-
-        main_repo = GitWorktreeDetector.get_main_repo_path(current_wt)
-        if not main_repo or not os.path.isdir(main_repo):
-            logger.warning(f"[MainWidget] 无法找到主仓库路径，跳过切换（当前 worktree: {current_wt}）")
-            self._update_branch()
-            return
-
-        # 幂等：已回到主仓库则跳过
-        if self._current_workdir.get(project) == main_repo:
-            return
-
-        if self.backend and self.backend.memory_manager:
-            mm = self.backend.memory_manager
-            mm.set_working_directory(project, main_repo)
-
-        self._current_workdir[project] = main_repo
-        if self.backend and self.backend.tool_executor:
-            self.backend.tool_executor.set_workdir(main_repo)
-        self._update_branch()
-
-        try:
-            if hasattr(self, "_memory_card_popup") and self._memory_card_popup:
-                mc = self._memory_card_popup
-                mc._instance_workdir[project] = main_repo
-                mc._load_key_documents()
-        except Exception:
-            pass
-
-        logger.info(f"[MainWidget] 已自动切换回主仓库: {main_repo}（项目: {project}）")
-        # 团队模式：切回主仓库全员同步（统一工作树）
-        self._broadcast_team_workdir(main_repo)
 
     @classmethod
     def _on_app_about_to_quit(cls):
@@ -20227,6 +21467,9 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception:
             pass
 
+        # 历史会话页已插件化（history-manager）：页面归工作台面板所有、跟随活跃
+        # 窗口投影，窗口关闭无需摘除（面板不持有本窗口的 widget 引用）。
+
         # ★ 泄漏修复（P0）：注销窗口的 UI 插件状态，释放注册表对窗口的强引用。
         # 窗口 __init__ 调用 ui_registry.set_main_widget(self) +
         # set_context_provider(self._build_ui_context, self._window_id)——
@@ -20258,7 +21501,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     slot = getattr(self, signal_pair[1], None)
                     if sig is not None and slot is not None:
                         sig.disconnect(slot)
-                except TypeError, RuntimeError:
+                except (TypeError, RuntimeError):
                     pass
 
             # 🔧 断开应用级 PluginHostService 的 plugin_changed（窗口销毁后
@@ -20267,7 +21510,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 from app.core.plugin_host_service import PluginHostService
 
                 PluginHostService.get_instance().plugin_changed.disconnect(self._on_plugin_hot_reload)
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
             # 🔧 泄漏修复（M6）：断开全局单例 coding_plan_ready，关窗后不再幽灵回调
@@ -20275,7 +21518,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 from app.core.usage_service import UsageService
 
                 UsageService.get_instance().coding_plan_ready.disconnect(self._on_coding_plan_result)
-            except TypeError, RuntimeError:
+            except (TypeError, RuntimeError):
                 pass
 
             # 🛡️ B5 异步化：closeEvent 不再同步调用 backend.stop_streaming()
@@ -20346,13 +21589,10 @@ class OpenAIChatToolWindow(ToolWindow):
             self._batch_cards = []
             self._pending_lazy_cards.clear()
             wc = self._welcome_card_cache.pop(self._window_id, None)
-            if wc is not None:
-                import shiboken6 as sip
-
-                if sip.isValid(wc):
-                    if hasattr(wc, "cleanup"):
-                        wc.cleanup()
-                    wc.deleteLater()
+            if wc is not None and OpenAIChatToolWindow._qt_widget_alive(wc):
+                if hasattr(wc, "cleanup"):
+                    wc.cleanup()
+                wc.deleteLater()
             self._session_card_cache.clear()
         except Exception:
             pass
@@ -20446,7 +21686,9 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 self._stop_elapsed = None
             self._current_assistant_card.stop_streaming_anim()
-            self._current_assistant_card.finish_streaming()
+            # 🐛 打断路径必须强制归位：worker 已取消，活跃工具结果永不到达，
+            # keep_dock 的兑底归位永不触发 → 坞态永久沉底。
+            self._current_assistant_card.finish_streaming(force_dock_off=True)
 
         # 优先显示中止提示，让用户立即感知到操作已生效
         InfoBar.warning(
@@ -20698,8 +21940,23 @@ class OpenAIChatToolWindow(ToolWindow):
         self._update_node_preview()
         self._sync_node_preview_to_last()
 
-    def _create_context_menu(self):
-        self._context_menu_actions = {}
+        # 繁忙时插话：停止时未消费的插话消息回填输入框，不丢失
+        try:
+            recovered = self.backend.take_recovered_interjects() if self.backend else []
+        except Exception:
+            recovered = []
+        for item in recovered:
+            text = str(item.get("_interject_text", "") or "")
+            if not text:
+                continue
+            if not self.input_area.toPlainText().strip():
+                self.input_area.setPlainText(text)
+            else:
+                self.input_area.setPlainText(self.input_area.toPlainText() + "\n" + text)
+            paths = item.get("_interject_image_paths") or []
+            if paths:
+                self._attachments.extend(str(p) for p in paths)
+                self._rebuild_attachment_chips()
 
     # ================================================================
     #  UI 插件对话服务（插件式对话引擎的服务门面）
@@ -20764,6 +22021,57 @@ class OpenAIChatToolWindow(ToolWindow):
                 **kwargs,
             )
 
+        def _send_to_platform(platform: Any, chat_id: str, content: str, **kwargs):
+            """向已连接通讯平台会话发送消息（cron-tasks 等插件的通知通道）。
+
+            走 GatewayService 应用级单例，不依赖插件侧 import app.gateway
+            （其 _manager_instance 由 GatewayService 持有，插件拿不到）。
+
+            Args:
+                platform: 平台标识（Platform 枚举或 "feishu"/"dingtalk" 等 str）
+                chat_id: gateway 会话 chat_id
+                content: 消息文本
+                kwargs: timeout（秒，默认 30）
+
+            Returns:
+                SendResult（success/error 可判定）。服务未就绪时返回
+                success=False 的 SendResult，不抛异常。
+            """
+            from app.core.gateway_service import GatewayService
+            from app.gateway.base import SendResult
+
+            try:
+                svc = GatewayService.get_instance()
+            except Exception as e:
+                return SendResult(success=False, error=f"GatewayService 不可用: {e}")
+            return svc.send_to_platform(platform, chat_id, content, **kwargs)
+
+        def _list_platform_sessions():
+            """已知 gateway 会话列表（供插件选择投递目标）。
+
+            返回 GatewaySession 列表（含 platform/chat_id/display_name）；
+            服务未就绪时返回空列表。
+            """
+            from app.core.gateway_service import GatewayService
+
+            try:
+                return GatewayService.get_instance().list_platform_sessions()
+            except Exception:
+                return []
+
+        def _list_platforms():
+            """已注册通讯平台及连接状态（供插件区分「没配平台」与「配了没会话」）。
+
+            返回 list[dict]：{id, enabled, connected, available, error}；
+            服务未就绪时返回空列表。
+            """
+            from app.core.gateway_service import GatewayService
+
+            try:
+                return GatewayService.get_instance().list_platforms()
+            except Exception:
+                return []
+
         return {
             "get_model_config": self._get_current_model_config,
             "get_tool_executor": lambda: backend.tool_executor if backend else None,
@@ -20787,6 +22095,9 @@ class OpenAIChatToolWindow(ToolWindow):
                 duration=5000,
                 position=InfoBarPosition.BOTTOM,
             ),
+            "send_to_platform": _send_to_platform,
+            "list_platform_sessions": _list_platform_sessions,
+            "list_platforms": _list_platforms,
         }
 
     def _build_agent_tools_schema(self, agent_name: str) -> List[Dict]:
@@ -20819,16 +22130,11 @@ class OpenAIChatToolWindow(ToolWindow):
         if not first:
             return
         # 清空输入框内容
-        self.input_area.clear()
+        self._clear_input_area()
         # 隐藏消息列表（保持滚动位置不变）
         self.chat_scroll_area.setVisible(False)
         # 隐藏输入容器 + 工具栏
-        self._bottom_input_container.setVisible(False)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(False)
-        # 隐藏输入框的发光控件
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(False)
+        self._set_bottom_input_visible(False)
         # 禁用新建按钮
         self.new_session_btn.setDisabled(True)
         # 窗口自适应缩小（聊天区和输入框隐藏后只保留运行卡片）
@@ -20845,12 +22151,7 @@ class OpenAIChatToolWindow(ToolWindow):
         # 恢复消息列表
         self.chat_scroll_area.setVisible(True)
         # 恢复输入容器 + 工具栏
-        self._bottom_input_container.setVisible(True)
-        if hasattr(self, "_bottom_toolbar_strip"):
-            self._bottom_toolbar_strip.setVisible(True)
-        # 恢复输入框的发光控件
-        if hasattr(self, "_input_glow_underlay"):
-            self._input_glow_underlay.setVisible(True)
+        self._set_bottom_input_visible(True)
         # 启用新建按钮
         self.new_session_btn.setDisabled(False)
         # 重新聚焦输入框（仅当此窗口为活动 Tab 时）
@@ -20970,15 +22271,38 @@ _gc_hook_pending = False
 # 每渲染卡 ~64MB renderer 进程，长对话必须锁峰值：
 # 温和层：并发页 ≤ _MAX_RENDERED_CARDS（18 = 可视 12 批 + 上下 6 批缓冲）。
 # 强回收层（kill 离屏 renderer）依赖 message_card 的 renderer_pid 记录，暂缓。
-_MAX_RENDERED_CARDS = 18
+# 2026-09-09 内存治理：18 → 12（可视 ~8 批 + 上下 4 批缓冲）。真机日志显示
+# 大会话（60+ 批次）内存主体是**并发 WebEngine 页数**而非单卡 HTML 体积
+# （单卡 DOM 数百 KB vs 每页数十 MB 常驻），砍 6 页 ≈ 直接省下数百 MB，
+# 且历史渲染已异步化，回滚重建不再阻塞主线程。
+_MAX_RENDERED_CARDS = 12
 _global_rendered_pages: int = 0  # 跨窗口观测计数（日志用，非硬约束）
-_MAX_BRANCH_CACHE = 64  # workdir→branch 缓存上限（M5-B）：超出时淘汰最早插入项，防长期累积渗漏
+
+# ── B4 温和层：跨窗口全局渲染页闸门 ──
+# [PERF] _MAX_RENDERED_CARDS 原本是 **per-window** 常量，多窗口场景下
+# N 窗口 = N×18 张已渲染卡片常驻。每张卡片的 DOM/JS heap 都要挤在
+# --renderer-process-limit 封顶的那几个 renderer 进程里，内存随窗口数线性增长
+# （4 窗口 ≈ 72 页）。改为全局配额：新窗口只能分到「全局剩余配额」，
+# 但每窗口至少保留 _MIN_RENDERED_CARDS_PER_WINDOW 张 —— 宁可全局超限，
+# 也不能让某个窗口白屏（可用性优先于内存）。
+_MAX_GLOBAL_RENDERED_PAGES = 32  # 跨窗口并发渲染页硬闸门
+_MIN_RENDERED_CARDS_PER_WINDOW = 6  # 每窗口保底页数（闸门的下限保护）
+# [MEM] 保底页数的收缩下限。原实现保底是常量 6 —— N 个窗口必然 N×6 页
+# （8 窗口 = 48 页，实测每页 27-39MB → 1.3GB+），_MAX_GLOBAL_RENDERED_PAGES=32
+# 被完全架空。现在保底随存活窗口数收缩，但降到本值即停，避免窗口被饿死到白屏。
+_MIN_RENDERED_CARDS_PER_WINDOW_FLOOR = 3
 
 # ── B4 强回收层：内存超阈值时 kill 离屏 renderer 进程（T13 蓝图 / T30 双判据） ──
 # 双判据：主进程 RSS 超总阈值，且 WebEngine 子进程 RSS 超子阈值才触发强回收——
 # 避免仅主进程内存高（如 Python 堆）时误杀 renderer。
-_MEM_THRESHOLD_TOTAL_MB = 900  # 总 RSS 阈值触发强回收（1800→900：修复 renderer 永不回收）
-_WEB_MEM_THRESHOLD_MB = 300  # WebEngine 子进程 RSS 阈值（待窗口期回填校准）
+# [MEM] 强回收的主判据已改为 WebEngine 子进程 RSS（见 _over_memory_threshold）。
+# 实测（tools/diag_webengine_mem_probe.py，dpr=2.25）：并发 8 个 QWebEngineView
+# 让子进程涨 216MB、主进程只涨 4MB —— 并发对话的内存主体全在 renderer 子进程，
+# 拿主进程 RSS 当门槛等于永远够不着，强回收永不触发 → 子进程一路涨到 4GB。
+_WEB_MEM_THRESHOLD_MB = 600  # 非活跃窗口：WebEngine 子进程 RSS 触发阈值
+_WEB_MEM_THRESHOLD_MB_ACTIVE = 1000  # 活跃窗口：阈值更高，避免滚动回看时重建抖动
+# 兜底：子进程采样不可用时（无 psutil / 尚未创建 view）退回主进程 RSS 判据
+_MEM_THRESHOLD_TOTAL_MB = 900
 _LRU_RENDERER_KEEP = 8  # 强回收后保留最近活跃 renderer 数
 _KILL_COOLDOWN_S = 60  # kill 冷却（防抖动）
 _KILL_BATCH_MAX = 12  # 每轮最多 kill

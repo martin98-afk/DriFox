@@ -10,7 +10,7 @@
 模板来源（优先级从高到低）：
   1. user-custom  — .drifox/plugins/user-custom/team_templates/（可写、可删）
   2. plugin       — 各插件声明的 team_templates/ 目录（只读）
-  3. system       — plugins/system/team_templates/（只读）
+  3. system       — plugins/system-team-templates/team_templates/（只读）
 
 设计要点：
 - 单例模式：与 TeamManager 风格保持一致
@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 from loguru import logger
 
-from app.core.team.template_schema import SUPPORTED_SCHEMA_VERSIONS, Template, TemplateError
+from app.core.team.template_schema import Template, TemplateError
 
 
 # 模板名允许字符（Unicode 模式）：首字符为字母/数字（含中文），后续允许字母/数字/_/-；
@@ -76,9 +76,12 @@ class TemplateManager:
 
     @classmethod
     def _resolve_system_templates_dir(cls) -> Path:
-        """解析系统模板根目录（<repo>/plugins/system/team_templates/）。"""
+        """解析系统模板根目录（<repo>/plugins/system-team-templates/team_templates/）。
+
+        system 插件按类型拆分后，内置团队模板由 system-team-templates 插件承载。
+        """
         project_root = Path(__file__).resolve().parent.parent.parent.parent
-        return project_root / "plugins" / "system" / cls._TEMPLATES_SUBDIR
+        return project_root / "plugins" / "system-team-templates" / cls._TEMPLATES_SUBDIR
 
     def _get_user_dir(self) -> Optional[Path]:
         """获取 user-custom 插件下的 team_templates/ 目录（不存在则创建）。
@@ -109,13 +112,79 @@ class TemplateManager:
         Returns:
             插件 team_templates/ 目录列表（按插件优先级排序）。
         """
+        return [d for _, d in cls._get_plugin_template_dirs_named()]
+
+    @classmethod
+    def _get_plugin_template_dirs_named(cls) -> List[tuple]:
+        """获取插件模板目录并保留插件名：[(plugin_name, dir), ...]
+
+        system-team-templates 插件同样作为「插件源」出现，其细项开关归属插件名
+        "system-team-templates"。
+        """
         try:
             from app.plugins.managers.plugin_manager import PluginManager
 
             pm = PluginManager.get_instance()
-            return pm.get_plugin_dirs("team_templates")
+            return pm.get_plugin_dirs_named("team_templates")
         except Exception:
             return []
+
+    # ── 组件级 / 细项级停用过滤（D9 / D10） ──────────────
+
+    @staticmethod
+    def _source_enabled(plugin_name: str) -> bool:
+        """检查某来源所属插件的 team_templates 组件是否被整类停用
+
+        system 源固定归属 "system-team-templates" 插件、user 源固定归属
+        "user-custom" 插件。这两路来源按硬编码路径读取、不经过 PluginManager
+        的目录枚举，若不在此显式判断就会出现「关了团队模板，系统模板仍在列表里」。
+
+        插件未注册时（如 user-custom 清单尚未创建）保持原语义——始终可用，
+        避免开关把用户自建模板一起屏蔽。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized() or not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_component_enabled(plugin_name, "team_templates")
+        except Exception:
+            return True
+
+    @staticmethod
+    def _item_enabled(plugin_name: str, template_name: str) -> bool:
+        """检查单个模板是否被细项级停用（整类停用同样返回 False）"""
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            pm = PluginManager.get_instance()
+            if not pm.is_initialized() or not pm.has_plugin(plugin_name):
+                return True
+            return pm.is_item_enabled(plugin_name, "team_templates", template_name)
+        except Exception:
+            return True
+
+    def _template_sources(self) -> List[tuple]:
+        """按优先级返回全部来源：[(dir, source, plugin_name), ...]
+
+        三路来源（user-custom / plugin / system）统一在此组装并应用停用过滤，
+        list / load / get_source 共用，避免各方法各自拼装导致遗漏。
+        """
+        sources: List[tuple] = []
+
+        user_dir = self._get_user_dir()
+        if user_dir and user_dir.exists() and self._source_enabled("user-custom"):
+            sources.append((user_dir, self.SOURCE_USER, "user-custom"))
+
+        for plugin_name, plugin_dir in self._get_plugin_template_dirs_named():
+            if plugin_dir.exists():
+                sources.append((plugin_dir, self.SOURCE_PLUGIN, plugin_name))
+
+        if self._system_dir.exists() and self._source_enabled("system-team-templates"):
+            sources.append((self._system_dir, self.SOURCE_SYSTEM, "system-team-templates"))
+
+        return sources
 
     # ── 文件名校验与路径 ────────────────────────────
 
@@ -136,8 +205,12 @@ class TemplateManager:
 
     # ── 单目录扫描 ─────────────────────────────────
 
-    def _list_from_dir(self, directory: Path, source: str) -> List[Dict[str, Any]]:
-        """扫描单个目录下的所有模板，添加 source 标识。"""
+    def _list_from_dir(self, directory: Path, source: str, plugin_name: str = "") -> List[Dict[str, Any]]:
+        """扫描单个目录下的所有模板，添加 source 标识。
+
+        Args:
+            plugin_name: 目录所属插件名；传入时额外应用细项级停用过滤（D10）
+        """
         results: List[Dict[str, Any]] = []
         if not directory or not directory.exists():
             return results
@@ -148,6 +221,9 @@ class TemplateManager:
         for path in sorted(directory.glob("*.yaml")):
             name = path.stem
             if name in seen_in_this_dir:
+                continue
+            # D10：单个模板被停用时整条跳过（对外表现为不存在）
+            if plugin_name and not self._item_enabled(plugin_name, name):
                 continue
             try:
                 tpl = self._load_from_path(path, name)
@@ -246,20 +322,10 @@ class TemplateManager:
         """
         name = self._validate_name(name)
 
-        search_dirs: List[tuple] = []
-        # 用户目录最优先
-        user_dir = self._get_user_dir()
-        if user_dir and user_dir.exists():
-            search_dirs.append((user_dir, self.SOURCE_USER))
-        # 插件目录
-        for plugin_dir in self._get_plugin_template_dirs():
-            if plugin_dir.exists():
-                search_dirs.append((plugin_dir, self.SOURCE_PLUGIN))
-        # 系统目录
-        if self._system_dir.exists():
-            search_dirs.append((self._system_dir, self.SOURCE_SYSTEM))
-
-        for directory, source in search_dirs:
+        for directory, source, plugin_name in self._template_sources():
+            # 单个模板被停用时，该来源视为不含此模板（继续找低优先级来源）
+            if plugin_name and not self._item_enabled(plugin_name, name):
+                continue
             path = self._template_path_in_dir(directory, name)
             if path.exists():
                 logger.debug(f"[TemplateManager] 从 {source} 加载模板 {name} → {path}")
@@ -278,18 +344,8 @@ class TemplateManager:
         results: List[Dict[str, Any]] = []
 
         # 顺序：user-custom → plugin → system（优先级从高到低）
-        sources: List[tuple] = []
-        user_dir = self._get_user_dir()
-        if user_dir and user_dir.exists():
-            sources.append((user_dir, self.SOURCE_USER))
-        for plugin_dir in self._get_plugin_template_dirs():
-            if plugin_dir.exists():
-                sources.append((plugin_dir, self.SOURCE_PLUGIN))
-        if self._system_dir.exists():
-            sources.append((self._system_dir, self.SOURCE_SYSTEM))
-
-        for directory, source in sources:
-            for t in self._list_from_dir(directory, source):
+        for directory, source, plugin_name in self._template_sources():
+            for t in self._list_from_dir(directory, source, plugin_name):
                 if t["name"] in seen_names:
                     continue
                 seen_names.add(t["name"])
@@ -297,29 +353,6 @@ class TemplateManager:
 
         return results
 
-    def list_templates_by_source(self, source: str) -> List[Dict[str, Any]]:
-        """仅列出指定来源的模板。
-
-        Args:
-            source: SOURCE_USER / SOURCE_PLUGIN / SOURCE_SYSTEM
-
-        Returns:
-            同 list_templates 格式，但只包含指定来源的模板。
-        """
-        results: List[Dict[str, Any]] = []
-
-        if source == self.SOURCE_USER:
-            user_dir = self._get_user_dir()
-            if user_dir and user_dir.exists():
-                results = self._list_from_dir(user_dir, source)
-        elif source == self.SOURCE_SYSTEM:
-            if self._system_dir.exists():
-                results = self._list_from_dir(self._system_dir, source)
-        elif source == self.SOURCE_PLUGIN:
-            for plugin_dir in self._get_plugin_template_dirs():
-                if plugin_dir.exists():
-                    results.extend(self._list_from_dir(plugin_dir, source))
-        return results
 
     def delete(self, name: str) -> bool:
         """删除 user-custom 目录下的模板文件。
@@ -366,17 +399,9 @@ class TemplateManager:
         except TemplateError:
             return None
 
-        search: List[tuple] = []
-        user_dir = self._get_user_dir()
-        if user_dir and user_dir.exists():
-            search.append((user_dir, self.SOURCE_USER))
-        for plugin_dir in self._get_plugin_template_dirs():
-            if plugin_dir.exists():
-                search.append((plugin_dir, self.SOURCE_PLUGIN))
-        if self._system_dir.exists():
-            search.append((self._system_dir, self.SOURCE_SYSTEM))
-
-        for directory, source in search:
+        for directory, source, plugin_name in self._template_sources():
+            if plugin_name and not self._item_enabled(plugin_name, name):
+                continue
             if self._template_path_in_dir(directory, name).exists():
                 return source
 

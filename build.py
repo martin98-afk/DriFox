@@ -170,6 +170,9 @@ _hidden_imports = [
     # system 插件引用的第三方包
     "html2text",
     "bs4",
+    # 插件源文件（运行时动态加载，PyInstaller 不分析其依赖）引用的标准库：
+    # assistant_hub/core/persona.py import getpass，漏打会导致人格卡片全空
+    "getpass",
 ]
 
 # 打包排除：由插件自包含 deps/ 提供（codegraph-tools / desktop-automation），
@@ -194,6 +197,8 @@ params = [
     # mermaid vendor：polyfill 无 CDN 降级（Chromium 83 必需），mermaid 降级 jsdelivr 国内不稳
     f"--add-data=app/resources/web/vendor/chromium83-polyfill.js{os.pathsep}app/resources/web/vendor",
     f"--add-data=app/resources/web/vendor/mermaid.min.js{os.pathsep}app/resources/web/vendor",
+    # KaTeX 公式渲染 vendor：整目录收集（js + css + fonts/，css 相对路径引字体）
+    f"--add-data=app/resources/web/vendor/katex{os.pathsep}app/resources/web/vendor",
     # 隐藏导入：gateway adapter 模块（importlib.import_module 动态加载，PyInstaller 无法自动发现）
     *[f"--hidden-import={m}" for m in _hidden_imports],
     # 排除插件自包含依赖（由插件 deps/ 目录运行时提供）

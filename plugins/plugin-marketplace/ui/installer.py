@@ -40,6 +40,21 @@ _COUNT_KEY_PREFIX = "drifox-plugins-"
 _COUNT_UA = "DriFox/0.5 (+https://github.com/martin98-afk/drifox-plugins)"
 
 
+class GitNotFoundError(RuntimeError):
+    """git 可执行文件缺失（未安装或不在 PATH）
+
+    由 ``_sparse_clone._run`` 的 ``Popen(["git", ...])`` 抛 ``FileNotFoundError``
+    时转抛，供 UI 层识别「环境缺 git」并给出针对性引导（而非网络/源错误）。
+    消息即最终展示文案。
+    """
+
+# git 传输停滞自断：连续 30s 平均速度 < 1KB/s 视为连接已死（代理失效/半开），
+# git 自行断开报错。覆盖绝大多数网络挂死场景，避免走到总超时强杀。
+_GIT_STALL_ARGS = ("-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=30")
+# git 单命令总超时兜底（大仓库浅克隆 + 慢网络留足余量）
+_GIT_CMD_TIMEOUT = 300.0
+
+
 def report_plugin_install(plugin_name: str):
     """异步上报插件安装/更新计数（后台线程，绝不阻塞/影响安装流程）"""
 
@@ -368,10 +383,9 @@ class PluginInstaller:
                 for entry in os.scandir(system_dir):
                     if not entry.is_dir() or entry.name in result:
                         continue
-                    # 按 manifest type 区分：type=system → 真系统插件（仅更新）；
-                    # 其余（type=user/缺失）→ 内置非 system 插件，可禁用/启用
-                    manifest = self._read_manifest_at(Path(entry.path))
-                    if manifest is not None and manifest.get("type") == "system":
+                    # 名单制分类：黑名单（system/plugin-marketplace）→ 核心插件（仅更新，
+                    # 不可禁用）；其余（含 manifest type=system 的内置插件）→ 可禁用/启用
+                    if entry.name in self._non_disableable_names():
                         result[entry.name] = "system"
                     else:
                         result[entry.name] = "builtin_disabled" if entry.name in disabled_set else "builtin_enabled"
@@ -382,6 +396,19 @@ class PluginInstaller:
             self._status_map_cache = result
             self._status_map_ts = now
         return result
+
+    @staticmethod
+    def _non_disableable_names() -> set:
+        """不可禁用核心插件名单（单一数据源：PluginManager._NON_DISABLEABLE）。
+
+        getattr 兼底：兼容测试用 __new__ 手赋属性的构造（import 失败等）。
+        """
+        try:
+            from app.plugins.managers.plugin_manager import PluginManager
+
+            return set(PluginManager._NON_DISABLEABLE)
+        except Exception:
+            return {"system", "plugin-marketplace"}
 
     @staticmethod
     def _read_version_full(plugin_dir: Path) -> Tuple[Optional[str], Optional[dict]]:
@@ -624,6 +651,14 @@ class PluginInstaller:
             logger.error(f"[Installer] 不支持的 source 类型: {type(source)}")
             return False
 
+        # C1：下载执行前二次校验同一白名单（防 sources 文件被手改绕过 UI）
+        from .marketplace_manager import validate_marketplace_source
+
+        ok, reason = validate_marketplace_source(source)
+        if not ok:
+            logger.warning(f"[MarketplaceGuard] install 前二次校验拒绝: {name} {reason}")
+            return False
+
         # 识别 source 类型：优先 Claude Code 的 "source" 字段，其次 DriFox 的 "type" 字段
         src_type = source.get("source") or source.get("type", "")
 
@@ -676,6 +711,14 @@ class PluginInstaller:
         """
         if not marketplace_source:
             logger.warning(f"[Installer] 无法安装相对路径插件 {name}：缺少市场源信息")
+            return False
+
+        # C1：相对路径安装依赖市场源，同样过白名单
+        from .marketplace_manager import validate_marketplace_source
+
+        ok, reason = validate_marketplace_source(marketplace_source)
+        if not ok:
+            logger.warning(f"[MarketplaceGuard] 相对路径安装前校验拒绝: {name} {reason}")
             return False
 
         # 去掉 "./" 前缀得到子目录路径
@@ -736,6 +779,12 @@ class PluginInstaller:
                 for i, (cu, ce) in enumerate(candidates):
                     if i > 0:
                         logger.info(f"[Installer] retry #{i}: {cu}")
+                    if cache_tmp.exists() and not _rmtree_readonly(cache_tmp):
+                        # Windows 下 git 残留句柄会让删除静默失败，沿用同名目录
+                        # 重试必报「already exists」→ 换新目录名（真实案例：
+                        # 2026-09 使用者 attempt #0 checkout 失败后 retry 全灭）
+                        logger.warning(f"[Installer] 残留下载目录删除失败，改用新目录: {cache_tmp}")
+                        cache_tmp = self._cache_dir / f"{name}_{int(time.time())}_r{i}"
                     shutil.rmtree(cache_tmp, ignore_errors=True)
                     cache_tmp.mkdir(parents=True, exist_ok=True)
                     try:
@@ -814,12 +863,23 @@ class PluginInstaller:
             logger.error(f"[Installer] Download {name} failed: {self.last_error}")
             return False
 
-    def _sparse_clone(self, url: str, subpath: str, ref: str, cache_dir: Path, extra_args: Optional[list] = None):
+    def _sparse_clone(
+        self,
+        url: str,
+        subpath: str,
+        ref: str,
+        cache_dir: Path,
+        extra_args: Optional[list] = None,
+        timeout: Optional[float] = None,
+    ):
         """克隆仓库指定子目录到 cache_dir
 
         对 subpath="." 的情况，全量浅克隆（不用 sparse-checkout）。
         extra_args: git 前置参数（如 ['-c', 'http.proxy=...']），
         插在 git 与子命令之间。
+        timeout: 单条 git 命令总超时秒数（默认 _GIT_CMD_TIMEOUT）。超时后
+            强杀整棵进程树并抛 CalledProcessError，防止 git 对半开连接无限
+            等待导致安装任务永久卡在「安装中…」。
 
         失败时把 git 的 stderr 一起抛（不要直接 ``check=True`` —— 那样
         ``CalledProcessError.stderr`` 是 ``None``，外层日志看不到真实错误）。
@@ -827,16 +887,51 @@ class PluginInstaller:
         kwargs = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        extra = list(extra_args or [])
+        extra = list(extra_args or []) + list(_GIT_STALL_ARGS)
+        cmd_timeout = _GIT_CMD_TIMEOUT if timeout is None else float(timeout)
 
         def _run(cmd):
-            result = subprocess.run(cmd, capture_output=True, text=True, **kwargs)
-            if result.returncode != 0:
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs
+                )
+            except FileNotFoundError:
+                # git 可执行文件不存在（未安装或不在 PATH）：转抛专门异常，
+                # 让 UI 层能识别并引导用户安装，而非显示误导性的网络/源错误。
+                raise GitNotFoundError(
+                    "未检测到 git 可执行文件（git 未安装或不在 PATH），请先安装 git 后再安装插件"
+                ) from None
+            try:
+                out, err = proc.communicate(timeout=cmd_timeout)
+            except subprocess.TimeoutExpired:
+                # Windows 上 proc.kill() 只杀 git 主进程，孙进程（git-remote-http）
+                # 持有管道句柄会让随后的 communicate 再次挂死；必须杀整棵树。
+                if sys.platform == "win32":
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        capture_output=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                else:
+                    proc.kill()
+                try:
+                    out, err = proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    out, err = "", ""
+                tail = (err or "").strip().splitlines()[-3:]
                 raise subprocess.CalledProcessError(
-                    result.returncode,
-                    result.args,
-                    output=result.stdout,
-                    stderr=result.stderr,
+                    124,
+                    cmd,
+                    output=out,
+                    stderr=(f"git 命令超过 {cmd_timeout:.0f}s 未完成，已强制终止"
+                            f"（网络停滞或仓库过大）" + ("; ".join(tail) if tail else "")),
+                ) from None
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    proc.returncode,
+                    cmd,
+                    output=out,
+                    stderr=err,
                 )
 
         if subpath in (".", ""):
@@ -847,11 +942,13 @@ class PluginInstaller:
             # 导致 ref=pyside6 的清单装出 main 的源码）
             _run(["git", *extra, "clone", "--depth=1", "--filter=blob:none", "--sparse",
                   "--branch", ref, url, str(cache_dir)])
-            _run(["git", "-C", str(cache_dir), "sparse-checkout", "set", subpath])
+            _run(["git", *extra, "-C", str(cache_dir), "sparse-checkout", "set", subpath])
 
     @staticmethod
     def _format_git_err(e: Exception) -> str:
         """从 git 异常里抽出 stderr/returncode 拼成一行可读消息"""
+        if isinstance(e, GitNotFoundError):
+            return str(e)
         if isinstance(e, subprocess.CalledProcessError):
             stderr = (e.stderr or "").strip()
             if stderr:
@@ -909,14 +1006,22 @@ class PluginInstaller:
     def _suppress_backend_watcher(self, duration: float = 180.0) -> None:
         """安装期间抑制 backend 插件热重载 watcher，避免半安装插件被提前 import 报错。
 
-        抑制目标：PluginHostService._suppress_watcher_until（应用级单例）。
-        旧实现写 ChatBackend._suppress_watcher_until，但 watcher 实际读 PluginHostService
-        的同名属性，写入即失效（PluginHostService 迁移遗留）。
+        委托模块级引用计数 API（app.core.plugin_host_service.suppress_plugin_watcher）：
+        - 多个 worker（安装/卸载/启停并发，市场并发上限 >1）各自 suppress 时，
+          引用计数叠加，**先结束的 worker 不会解除后结束 worker 的抑制**；
+          最后一个 resume 才真正放开 watcher（并发批量装卸时杜绝事件风暴 + 半成品
+          import + 主线程重载风暴 = 卡死）。
+        - 截止时间戳兼容旧调用方直接写 PluginHostService._suppress_watcher_until
+          （如 config_sync），两路叠加任一命中即抑制。
+
+        旧实现直接写 PluginHostService._suppress_watcher_until（非引用计数），
+        并发场景先完成方把抑制清零 → watcher 在其余 worker 大规模写/删插件目录时
+        复活 → 事件风暴。此为迁移遗留缺陷。
         """
         try:
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.plugin_host_service import suppress_plugin_watcher
 
-            PluginHostService._suppress_watcher_until = time.time() + duration
+            suppress_plugin_watcher(duration)
         except Exception as e:
             logger.debug(f"[Installer] 无法抑制 backend watcher（不影响安装）: {e}")
 
@@ -924,6 +1029,9 @@ class PluginInstaller:
         self, reload: bool = False, plugin_name: Optional[str] = None, action: Optional[str] = None
     ) -> None:
         """恢复 backend watcher；安装/启停成功时精准重载目标插件（不触发全量）
+
+        委托模块级引用计数 API（resume_plugin_watcher）释放一次抑制。只有引用
+        计数归零时 watcher 才真正解除抑制（多 worker 并发时最后一个结束者生效）。
 
         旧实现 reload=True 时调 reload_plugin_subsystems() 全量重载——卸载/安装
         一个插件会把全部插件的 hooks 注销重注册、全部 agents 重载（数十个插件
@@ -934,13 +1042,13 @@ class PluginInstaller:
         但该方法已上移 PluginHostService，ChatBackend 上无此属性（PluginHostService 迁移遗留）。
 
         Args:
-            action: PluginChanged hook 动作语义（installed/updated/disabled/enabled），
+            action: PluginChanged hook 动作语义（installed/updated/disabled/enabled/uninstalled），
                 None 时由 backend 按插件注册表状态自动推断
         """
         try:
-            from app.core.plugin_host_service import PluginHostService
+            from app.core.plugin_host_service import resume_plugin_watcher
 
-            PluginHostService._suppress_watcher_until = 0.0
+            resume_plugin_watcher()
         except Exception:
             return
         if not reload:
@@ -1171,42 +1279,54 @@ class PluginInstaller:
     def remove(self, name: str) -> bool:
         """删除插件目录（更新/卸载共用）
 
-        Args:
-            name: 插件名
+        卸载整树会产生成百上千 delete 事件；若 watcher 不抑制，会风暴触发
+        卸载重载链（registry 摘除 + commands 全量重建 + plugin_changed 广播到
+        全部窗口），并与市场并发 worker（并发上限 3）交错时互相污染——旧实现
+        仅 enable/disable/install/update 抑制 watcher，**卸载不抑制**，多个插件
+        同时卸载时主线程被重复清理链反复阻塞（卡死）。
 
-        Returns:
-            True 删除成功或目录不存在
+        现整个删除动作持引用计数式抑制（多 worker 并发时最后一个结束者才真正
+        放开 watcher），结束后精准重载目标插件一次（仅清理该插件，不触发全量）。
         """
-        # 0. 停止并摘除该插件注册的 gateway 平台 adapter：adapter 依赖的 SDK
-        #    （如 lark_oapi → Crypto）被进程加载后 .pyd/.dll 句柄占用，不摘除
-        #    会导致 rmtree 删不干净（残留 deps 目录）。stop_plugin_platforms
-        #    内部先调度 stop（释放 WS 连接线程）再 pop 摘除实例引用；
-        #    wait=True 确保 stop 完成后再删，最大限度避免 .pyd 占用。
-        self._stop_gateway_platforms(name, wait=True)
-        # 清理模块缓存（UI 注册表卸载由 GUI 线程在主线程先行完成）
-        self._purge_plugin_module_cache(name)
+        self._suppress_backend_watcher()
         removed = False
-        leftover: list = []
-        for base in (self._plugins_dir, self._disabled_dir):
-            target = base / name
-            if target.exists():
-                # _rmtree_relocate：先正常删，删不掉的被锁 .pyd/.dll 同卷改名移出
-                # 插件目录（让空），再二次 rmtree 清空；仅当文件被其它进程永久独占、
-                # 连 rename 都不行时才残留到 leftover（记录待重启清理）。
-                if _rmtree_relocate(self, target, leftover):
-                    removed = True
-                    logger.info(f"[Installer] Removed plugin {name}")
-        if leftover:
-            # 部分文件被其它进程永久独占、连 rename 都失败 → 记录待下次启动/重启清理。
-            # 占用文件已被尽可能移出，目录通常已让空，市场侧不再显示为插件，
-            # 用户视角卸载已完成；残留仅占磁盘，重启后自动清掉。
-            self._record_pending_delete(leftover)
-            logger.warning(
-                f"[Installer] 插件 {name} 部分文件残留（可能被其它进程占用），已记录待下次启动清理: {leftover[:5]}"
+        try:
+            # 0. 停止并摘除该插件注册的 gateway 平台 adapter：adapter 依赖的 SDK
+            #    （如 lark_oapi → Crypto）被进程加载后 .pyd/.dll 句柄占用，不摘除
+            #    会导致 rmtree 删不干净（残留 deps 目录）。stop_plugin_platforms
+            #    内部先调度 stop（释放 WS 连接线程）再 pop 摘除实例引用；
+            #    wait=True 确保 stop 完成后再删，最大限度避免 .pyd 占用。
+            self._stop_gateway_platforms(name, wait=True)
+            # 清理模块缓存（UI 注册表卸载由 GUI 线程在主线程先行完成）
+            self._purge_plugin_module_cache(name)
+            leftover: list = []
+            for base in (self._plugins_dir, self._disabled_dir):
+                target = base / name
+                if target.exists():
+                    # _rmtree_relocate：先正常删，删不掉的被锁 .pyd/.dll 同卷改名移出
+                    # 插件目录（让空），再二次 rmtree 清空；仅当文件被其它进程永久独占、
+                    # 连 rename 都不行时才残留到 leftover（记录待重启清理）。
+                    if _rmtree_relocate(self, target, leftover):
+                        removed = True
+                        logger.info(f"[Installer] Removed plugin {name}")
+            if leftover:
+                # 部分文件被其它进程永久独占、连 rename 都失败 → 记录待下次启动/重启清理。
+                # 占用文件已被尽可能移出，目录通常已让空，市场侧不再显示为插件，
+                # 用户视角卸载已完成；残留仅占磁盘，重启后自动清掉。
+                self._record_pending_delete(leftover)
+                logger.warning(
+                    f"[Installer] 插件 {name} 部分文件残留（可能被其它进程占用），已记录待下次启动清理: {leftover[:5]}"
+                )
+            if removed:
+                self.invalidate_installed_cache()
+            return True
+        finally:
+            # 卸载成功后精准重载目标插件（走 __manifest__ 删除路径，仅清理该插件
+            # 组件并广播 plugin_changed action=uninstalled）；未真正删除（残留/目录
+            # 不存在）时不重载。
+            self._resume_backend_watcher(
+                reload=removed, plugin_name=name, action="uninstalled" if removed else None
             )
-        if removed:
-            self.invalidate_installed_cache()
-        return True
 
     @staticmethod
     def _stop_gateway_platforms(name: str, wait: bool = False) -> None:
@@ -1274,11 +1394,10 @@ class PluginInstaller:
                 # 恢复 watcher（不重载），避免抑制窗口残留
                 self._resume_backend_watcher(reload=False)
                 return False
-        # 内置非 system 插件（项目根 plugins/ 且 type != system）→ 配置禁用
+        # 内置插件（项目根 plugins/ 且非黑名单）→ 配置禁用
         system_dir = getattr(self, "_system_dir", None)
         if system_dir is not None and (system_dir / name).is_dir():
-            manifest = self._read_manifest_at(system_dir / name)
-            if manifest is None or manifest.get("type") != "system":
+            if name not in self._non_disableable_names():
                 return self._set_managed_enabled(name, enabled=False)
         return False
 
@@ -1286,7 +1405,7 @@ class PluginInstaller:
         """启用已禁用的插件
 
         - 用户插件（plugins-disabled/）：移回 plugins/
-        - 内置非 system 插件（项目根 plugins/ 且 type != system）：
+        - 内置插件（项目根 plugins/ 且非黑名单）：
           通过 PluginManager 写 Settings 启用
         """
         src = self._disabled_dir / name
@@ -1310,11 +1429,10 @@ class PluginInstaller:
                 # 恢复 watcher（不重载），避免抑制窗口残留
                 self._resume_backend_watcher(reload=False)
                 return False
-        # 内置非 system 插件 → 配置启用
+        # 内置插件 → 配置启用
         system_dir = getattr(self, "_system_dir", None)
         if system_dir is not None and (system_dir / name).is_dir():
-            manifest = self._read_manifest_at(system_dir / name)
-            if manifest is None or manifest.get("type") != "system":
+            if name not in self._non_disableable_names():
                 return self._set_managed_enabled(name, enabled=True)
         return False
 

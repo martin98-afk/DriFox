@@ -38,7 +38,7 @@ class _MockSerializer:
 
 
 @pytest.fixture()
-def fresh_registry(monkeypatch):
+def fresh_serializer_registry(monkeypatch):
     """每用例独立 registry（绕过单例状态污染）"""
     from app.plugins.registries.serializer_registry import SerializerRegistry
 
@@ -48,10 +48,10 @@ def fresh_registry(monkeypatch):
 
 
 class TestDelegation:
-    def test_messages_to_api_delegates(self, fresh_registry):
+    def test_messages_to_api_delegates(self, fresh_serializer_registry):
         """messages_to_api → registry 委托（mock serializer 结果透传 + 上下文正确）"""
         mock = _MockSerializer()
-        fresh_registry.register(mock)
+        fresh_serializer_registry.register(mock)
         msgs = [{"role": "user", "content": "hi"}]
         result = mc.messages_to_api(msgs, supports_vision=False, is_gemini=True, requires_reasoning_content=True)
         assert result == [{"role": "user", "content": "MOCK"}]
@@ -63,17 +63,17 @@ class TestDelegation:
         assert ctx.flags.requires_reasoning_content is True
         assert ctx.flags.use_responses_api is False
 
-    def test_to_api_message_delegates(self, fresh_registry):
+    def test_to_api_message_delegates(self, fresh_serializer_registry):
         """to_api_message → registry 委托（单条 Dict 返回形态不变）"""
         mock = _MockSerializer()
-        fresh_registry.register(mock)
+        fresh_serializer_registry.register(mock)
         result = mc.to_api_message({"role": "user", "content": "hi"}, is_gemini=True)
         assert result == {"role": "user", "content": "MOCK"}
 
-    def test_responses_delegates(self, fresh_registry):
+    def test_responses_delegates(self, fresh_serializer_registry):
         """messages_to_responses_input → serialize_responses 委托（tuple 形态不变）"""
         mock = _MockSerializer()
-        fresh_registry.register(mock)
+        fresh_serializer_registry.register(mock)
         msgs = [{"role": "user", "content": "hi"}]
         result = mc.messages_to_responses_input(msgs, supports_vision=False)
         assert result == ([{"type": "message", "role": "user", "content": []}], "MOCK-INSTR")
@@ -83,11 +83,11 @@ class TestDelegation:
         assert ctx.supports_vision is False
         assert ctx.flags.use_responses_api is True
 
-    def test_unregister_falls_back_to_cold_start(self, fresh_registry):
+    def test_unregister_falls_back_to_cold_start(self, fresh_serializer_registry):
         """mock 卸载后注册表空 → 冷启动幂等加载系统插件 openai，行为回到默认"""
         mock = _MockSerializer()
-        fresh_registry.register(mock, source="plugin:demo")
-        fresh_registry.unregister_source("plugin:demo")
+        fresh_serializer_registry.register(mock, source="plugin:demo")
+        fresh_serializer_registry.unregister_source("plugin:demo")
         result = mc.messages_to_api([{"role": "system", "content": "s"}])
         assert result == [{"role": "system", "content": "s"}]
 

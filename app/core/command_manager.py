@@ -336,16 +336,6 @@ class CommandManager:
             raw_val = raw_val[1:].rstrip('"\'')
         return raw_val
 
-    def is_builtin_command(self, text: str) -> bool:
-        """判断输入文本是否匹配某个已注册的内置命令"""
-        name = self.parse_command_name(text)
-        if name is None:
-            return False
-        # 去除后缀检查
-        base_name, suffix_type = self.parse_suffixed_name(name)
-        if suffix_type == "skill":
-            return False  # 技能由外部处理
-        return self.has_command(base_name or name)
 
     def is_known_command_name(self, name: str) -> bool:
         """根据命令名判断是否为内置命令（不含 /，任一类型存在即可）"""

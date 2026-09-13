@@ -133,39 +133,5 @@ def deserialize(data) -> Any:
     return orjson.loads(data)
 
 
-def is_compressed(data) -> bool:
-    """
-    检测数据是否被 zstd 压缩
-
-    Args:
-        data: bytes / str
-
-    Returns:
-        bool: True 表示 zstd 压缩格式
-    """
-    if data is None:
-        return False
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-    return data.startswith(_MAGIC_ZSTD)
 
 
-def compression_stats(data) -> dict:
-    """
-    计算压缩率（用于调试和统计）
-
-    Args:
-        data: 待压缩的 Python 对象
-
-    Returns:
-        dict: {raw_size, compressed_size, ratio, magic}
-    """
-    raw = orjson.dumps(data)
-    compressed = _zstd_compress(raw)
-    return {
-        "raw_size": len(raw),
-        "compressed_size": len(_MAGIC_ZSTD) + len(_VERSION_V1) + len(compressed),
-        "payload_size": len(compressed),
-        "ratio": 1 - len(compressed) / len(raw) if raw else 0,
-        "magic": _MAGIC_ZSTD.decode("ascii"),
-    }

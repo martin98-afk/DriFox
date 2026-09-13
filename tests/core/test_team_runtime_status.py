@@ -26,9 +26,9 @@ import pytest
 
 from app.core import team_manager as tm_mod
 
-# 工具插件化：TeamTools 类已删除，团队工具迁移为 plugins/system/tools/subagent_tools.py
+# 工具插件化：TeamTools 类已删除，团队工具迁移为 plugins/system-tools/tools/subagent_tools.py
 # 模块级函数 _team_list_members（tool_ctx 签名）。复用 _load_module 模式加载插件模块。
-_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system" / "tools"
+_PLUGIN_TOOLS = Path(__file__).resolve().parent.parent.parent / "plugins" / "system-tools" / "tools"
 
 
 def _load_subagent_tools():

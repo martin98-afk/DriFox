@@ -189,15 +189,6 @@ class ContextUsageRing(QWidget):
         self._tooltip.move(x, y)
         self._tooltip.show()
 
-    def _is_dark_theme(self, app) -> bool:
-        try:
-            palette = app.palette()
-            bg = palette.window().color()
-            luminance = 0.299 * bg.red() + 0.587 * bg.green() + 0.114 * bg.blue()
-            return luminance < 128
-        except Exception:
-            return True
-
     @staticmethod
     def _compute_track_color() -> QColor:
         """计算轨道颜色：浅色主题用深色半透明，深色主题用白色半透明"""

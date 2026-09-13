@@ -41,10 +41,6 @@ _LONG_TEXT = (
 )
 
 
-@pytest.fixture(scope="module")
-def qapp():
-    yield QApplication.instance() or QApplication(sys.argv)
-
 
 def _flush(qapp, ms=80):
     """跑事件循环让 10ms singleShot(_schedule_update_height) 等定时器落地。"""

@@ -10,7 +10,7 @@ ConversationCore`` deep import 主程序内部路径——主程序重构即断�
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Protocol, runtime_checkable
 
 
 @runtime_checkable

@@ -1,0 +1,18 @@
+{
+  "icon": {
+    "light": "icon.svg",
+    "dark": "icon_dark.svg"
+  },
+  "name": "system-hook-policies",
+  "description": "DriFox 内置 Hook 触发策略：all / none / tool_only / subagent_default / team_member",
+  "version": "1.0.0",
+  "author": {
+    "name": "DriFoxx Team"
+  },
+  "homepage": "https://github.com/martin98-afk/DriFox",
+  "license": "MIT",
+  "type": "system",
+  "components": {
+    "hook_policies": true
+  }
+}

@@ -13,7 +13,6 @@ import time as _time
 import shiboken6 as sip
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
-    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -24,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import ComboBox, SwitchButton
 
-from app.tools.registry import DANGER_DANGEROUS, DANGER_SAFE, ToolRegistry
+from app.tools.registry import DANGER_DANGEROUS, ToolRegistry
 from app.tools.tool_classifier import get_all_tools, get_default_toggles
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
@@ -745,7 +744,9 @@ class ToolControlCardFrame(SystemCardFrame):
         super().__init__(parent)
         self._controller = controller
         self.set_height_mode("proportional")
-        self.setMinimumHeight(250)
+        # 最小可见下限（对齐 SystemCardFrame._MIN_CARD_VISIBLE_H）：窗口极矮时
+        # 布局需要能压缩卡片，过大下限会顶破可用空间导致卡片底部被窗口裁掉
+        self.setMinimumHeight(120)
 
         self.title_label.setText("工具控制")
         # 使用主题感知 SVG 图标代替 emoji

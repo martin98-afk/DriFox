@@ -37,7 +37,7 @@ def _mail_preview_data(messages):
     from app.main_widget import OpenAIChatToolWindow
 
     batches = group_messages_for_display(messages)
-    fake = SimpleNamespace(_message_batch=batches)
+    fake = SimpleNamespace(_message_batch=batches, _node_batch_map_cache=None)
     fake._build_node_to_batch_mapping = MethodType(OpenAIChatToolWindow._build_node_to_batch_mapping, fake)
     return batches, fake._build_node_to_batch_mapping()
 

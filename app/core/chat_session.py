@@ -13,6 +13,7 @@ ChatSession & SessionManager - 会话管理模块
 - 压缩合并：支持多轮对话的历史压缩合并（保留摘要或固定尾部）
 """
 
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -96,6 +97,9 @@ class ChatSession:
             "role": "assistant",
             "content": content,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            # 毫秒级时间戳：``timestamp`` 只有秒级精度，同秒连发的多条消息
+            # 排不出先后（轨迹/耗时分析需要）。消费方：agent_trace 插件。
+            "ts_ms": int(time.time() * 1000),
         }
         if model_name:
             msg["model_name"] = model_name
@@ -107,12 +111,22 @@ class ChatSession:
 
     def add_user_message(self, content, **kwargs):
         """添加用户消息，支持 str 和 list（multimodal content）"""
-        msg = {"role": "user", "content": content, "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        msg = {
+            "role": "user",
+            "content": content,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ts_ms": int(time.time() * 1000),  # 毫秒级，同秒连发时用于排序（见上）
+        }
         if kwargs.get("params"):
             msg["params"] = kwargs["params"]
         hook_event = kwargs.get("_hook_event")
         if hook_event:
             msg["_hook_event"] = hook_event
+        # 图片附件路径标记：仅记录用户主动上传/粘贴的图片，供 UI 恢复会话时
+        # 渲染气泡上方缩略图预览（消息级字段，API 序列化只取 role/content，不会泄漏）
+        atts = kwargs.get("_image_attachments")
+        if isinstance(atts, list) and atts:
+            msg["_image_attachments"] = [str(p) for p in atts if p]
         self.messages.append(msg)
         # 追加操作不走全量 consolidate，由持久化层在 save 时统一做
         self._update_timestamp()
@@ -299,10 +313,6 @@ class SessionManager(QObject):
             # 后续索引前移，更新映射
             session_index = {s.session_id: i for i, s in enumerate(self.sessions)}
 
-    def set_max_cached_sessions(self, max_cached: int):
-        """设置最大缓存会话数"""
-        self.max_cached_sessions = max_cached
-        self._evict_if_needed()
 
     def switch_to_session(self, index: int):
         if 0 <= index < len(self.sessions):
@@ -316,13 +326,6 @@ class SessionManager(QObject):
     def get_session_names(self) -> List[str]:
         return [s.name for s in self.sessions]
 
-    def set_session_from_messages(self, messages: List[Dict]):
-        if self.current_index < 0:
-            self.current_index = 0
-        if self.current_index >= len(self.sessions):
-            self.sessions.append(ChatSession(messages=messages.copy()))
-        else:
-            self.sessions[self.current_index] = ChatSession(messages=messages.copy())
 
     def set_current_session(self, session: ChatSession):
         if self.current_index < 0:

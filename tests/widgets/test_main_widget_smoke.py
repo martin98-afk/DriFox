@@ -517,38 +517,22 @@ class TestModuleLevel:
         assert hasattr(mw, "_compact_process_heap_after_cleanup")
         assert callable(mw._compact_process_heap_after_cleanup)
 
-    def test_branch_detect_signals_class_exists(self):
-        """模块级 _BranchDetectSignals 辅助类存在"""
-        import app.main_widget as mw
+    def test_branch_detect_logic_migrated_to_plugin(self):
+        """分支检测辅助类已随工作树插件化迁入 plugins/worktree-manager（smoke 改查新归属）"""
+        import sys
+        from pathlib import Path
 
-        assert hasattr(mw, "_BranchDetectSignals")
+        plugin_ui = Path(__file__).resolve().parents[2] / "plugins" / "worktree-manager" / "ui"
+        if str(plugin_ui) not in sys.path:
+            sys.path.insert(0, str(plugin_ui))
+        import importlib
 
-    def test_branch_detect_signals_has_pyqt_signal(self):
-        """_BranchDetectSignals 持有 Signal 属性"""
-        import app.main_widget as mw
+        importlib.invalidate_caches()
+        bc = importlib.import_module("branch_chip")
 
-        cls = mw._BranchDetectSignals
-        # 检查类中至少定义了一个 Signal 类型的类属性
-        signal_found = False
-        for attr_name in dir(cls):
-            attr = getattr(cls, attr_name, None)
-            if callable(attr) and "signal" in attr_name.lower():
-                signal_found = True
-                break
-        assert signal_found, "_BranchDetectSignals 应定义 Signal 属性"
-
-    def test_branch_detect_task_class_exists(self):
-        """模块级 _BranchDetectTask 辅助类存在"""
-        import app.main_widget as mw
-
-        assert hasattr(mw, "_BranchDetectTask")
-
-    def test_branch_detect_task_has_run_method(self):
-        """_BranchDetectTask 有 run 方法（QRunnable 标准接口）"""
-        import app.main_widget as mw
-
-        cls = mw._BranchDetectTask
-        assert hasattr(cls, "run") or hasattr(cls, "run_impl"), "_BranchDetectTask 应有 run 方法"
+        assert hasattr(bc, "_BranchDetectSignals") or hasattr(bc, "BranchDetectSignals")
+        task_cls = getattr(bc, "_BranchDetectTask", None) or bc.BranchDetectTask
+        assert hasattr(task_cls, "run") or hasattr(task_cls, "run_impl"), "_BranchDetectTask 应有 run 方法"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -769,3 +753,36 @@ class TestMockedInit:
                 pass
             except Exception:
                 raise
+
+
+# ─── T5-2R: UI 插件延迟加载 → 共享 Launcher 补挂防回归 ────────────────────────
+def test_deferred_ui_plugins_refresh_shared_launcher(monkeypatch):
+    """_init_ui_plugins_deferred 末尾必须刷新共享 Launcher
+
+    T5-2R 把 _load_all_ui_plugins 移出 setup_ui 后，侧边栏/顶部 tab 在
+    compose 期间基于空 registry 构建；若 deferred 链末尾缺失
+    TabManagerWindow._update_shared_launcher() 补挂，插件项将永久消失
+    （T5-2 翻车点）。
+    """
+    from app.main_widget import OpenAIChatToolWindow
+
+    win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
+    win._is_destroyed = False
+    win._function_command_handlers = {}
+    win._load_all_ui_plugins = MagicMock()
+    win._build_plugin_input_buttons = MagicMock()
+
+    reg = MagicMock()
+    reg.get_floating_cards.return_value = {}
+    import app.plugins.registries.ui_plugin_registry as uir
+
+    monkeypatch.setattr(uir.UIPluginRegistry, "get_instance", lambda *a, **k: reg)
+
+    tm = MagicMock()
+    import app.widgets.tab_manager_window as tmw
+
+    monkeypatch.setattr(tmw.TabManagerWindow, "get_instance", lambda *a, **k: tm)
+
+    win._init_ui_plugins_deferred()
+
+    tm._update_shared_launcher.assert_called_once()

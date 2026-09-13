@@ -13,6 +13,102 @@ from loguru import logger
 
 from app.core.store.serde import deserialize, serialize
 
+# 落库时 first_user_msg 的存储上限。团队首问预览只取前 50 字符，留 500 是为了
+# 将来 UI 需要更长预览时不必重新回扫 messages BLOB。
+FIRST_USER_MSG_STORE_LIMIT = 500
+
+# ============================================================
+# message_extras：UI 态字段剥离（specs/2026-09-07-message-extras-offload-design.md）
+# ============================================================
+# 三字段不进 API 请求（openai serializer 只取 role/content/tool_calls/
+# tool_call_id/name），历史轮次剥离进 session_msg_extras 表，回看时按需读回。
+OFFLOAD_FIELDS = ("reasoning_content", "arguments", "diff")
+# 保活窗：尾部 N 条消息不剥离（活跃轮次参与 API 请求，DeepSeek thinking
+# 连续推理依赖最近上下文的 reasoning_content）。
+KEEP_RECENT_ROUNDS = 3
+# 剥离哨兵：轻量消息携带的绝对索引（int）。渲染/轨迹懒读据此定位 extras 行；
+# 老消息与保活窗内消息无哨兵 → 字段本就在消息里，无需查表。
+OFFLOAD_IDX_FIELD = "_x_idx"
+
+
+def extract_offload_fields(messages: List[Any]) -> Tuple[Dict[int, Dict[str, bytes]], List[Any]]:
+    """提取保活窗外的 UI 态字段，返回 (extras, 轻量消息副本)。
+
+    - 不修改入参消息：session.messages 是内存唯一事实源（UI/agent_trace
+      正在读全量），剥离只作用于写库的轻量副本，且仅待剥离项为浅拷贝
+    - 待剥离消息打上 _x_idx 绝对索引哨兵；已带哨兵的消息重复保存时索引不变
+      （messages 追加式增长，历史索引稳定）
+    """
+    n = len(messages)
+    keep_from = max(0, n - KEEP_RECENT_ROUNDS)
+    extras: Dict[int, Dict[str, bytes]] = {}
+    light: List[Any] = []
+    for i, msg in enumerate(messages):
+        # 保活窗（i >= keep_from）内字段原样保留；窗外（i < keep_from）剥离
+        if i >= keep_from or not isinstance(msg, dict):
+            light.append(msg)
+            continue
+        patch = {f: msg[f] for f in OFFLOAD_FIELDS if msg.get(f)}
+        if not patch:
+            # 🛡️ 回归探测器：带 _x_idx 的消息说明曾从轻量 blob 读出，若其无任何
+            # 剥离字段却再次进入保存链，意味着调用方拿到了轻量消息列表（正常
+            # 情况下加载入口已全量物化）。该消息的历史 extras 行将在本次
+            # 全删全插中永久丢失——必须告警暴露，不得静默。
+            if isinstance(msg.get(OFFLOAD_IDX_FIELD), int):
+                logger.warning(
+                    f"[SessionRepository] 轻量剥离消息(role={msg.get('role')}, idx={i}) "
+                    f"无剥离字段进入保存链，历史 extras 数据将随本次保存丢失"
+                )
+            light.append(msg)
+            continue
+        m2 = dict(msg)
+        for f in patch:
+            m2.pop(f, None)
+        m2[OFFLOAD_IDX_FIELD] = i
+        extras[i] = {f: serialize(v) for f, v in patch.items()}
+        light.append(m2)
+    return extras, light
+
+
+def extract_first_user_question(messages: Optional[List]) -> Tuple[str, str]:
+    """从消息列表中提取首条「真实用户提问」（团队首问语义）。
+
+    筛选规则与 HistoryManager.get_team_first_question 严格一致：
+    - 跳过带 _hook_event 的系统消息
+    - 跳过 role != user
+    - content 为 list 时用 content_to_text 转换
+    - 跳过空 content
+    - 跳过 "📨 **来自" 开头的任务邮件注入（兼容无 _hook_event 标记的旧数据）
+
+    Args:
+        messages: 会话消息列表
+
+    Returns:
+        (timestamp, content)；无有效提问时返回 ("", "")。
+        content 已按 FIRST_USER_MSG_STORE_LIMIT 截断。
+    """
+    if not messages:
+        return "", ""
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("_hook_event"):
+            continue
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            from app.core.message_content import content_to_text
+
+            content = content_to_text(content)
+        if not content:
+            continue
+        content = str(content)
+        if content.startswith("📨 **来自"):
+            continue
+        return str(msg.get("timestamp") or ""), content[:FIRST_USER_MSG_STORE_LIMIT]
+    return "", ""
+
 
 class SessionRepository:
     """会话数据仓储，处理会话的 CRUD 操作"""
@@ -115,6 +211,8 @@ class SessionRepository:
             "agent_name": d.get("agent_name", "") or "",
             # 团队成员快照（F3：JSON 字符串，恢复时找回无会话记录的手动成员）
             "team_members": d.get("team_members", "") or "",
+            # 会话置顶标记（历史面板置顶分组；默认 False）
+            "pinned": bool(d.get("pinned", 0)),
             # 添加兼容字段（HistoryManager 期望这些字段）
             # 优先使用消息列表中最后一条消息的时间
             "last_time": d.get("last_time")
@@ -163,6 +261,13 @@ class SessionRepository:
             if cached is not None and cached == content_key:
                 return True  # 消息未变，跳过昂贵的序列化+压缩+写盘
 
+        # message_extras：提取剥离字段（不就地修改 session.messages）
+        try:
+            extras, light_messages = extract_offload_fields(messages)
+        except Exception as e:
+            logger.warning(f"[SessionRepository] extract_offload_fields 失败，按全量保存: {e}")
+            extras, light_messages = {}, messages
+
         try:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             user_edited = 1 if session.get("user_edited_title", False) else 0
@@ -172,7 +277,7 @@ class SessionRepository:
                 "title": session.get("topic_summary") or session.get("name") or session.get("title", ""),
                 "project": session.get("project", "默认项目"),
                 # 使用 serde 透明压缩（zstd + 格式魔数），DB 体积减少 50-80%
-                "messages": serialize(messages),
+                "messages": serialize(light_messages),
                 "system_prompt": session.get("system_prompt", ""),
                 "compaction_state": serialize(session.get("compaction_state", {})),
                 "compaction_cache": serialize(session.get("compaction_cache", {})),
@@ -189,7 +294,12 @@ class SessionRepository:
                 "agent_name": session.get("agent_name", "") or "",
                 # 团队成员快照透传（F3）：JSON 字符串，非团队会话保持空串
                 "team_members": session.get("team_members", "") or "",
+                # 会话置顶标记透传（历史面板置顶分组）
+                "pinned": 1 if session.get("pinned", False) else 0,
             }
+            # 首问落库（T4 内存治理）：随保存增量写入，使团队合并条目的预览
+            # 查询无需反序列化完整 messages（旧路径 246 条约 285MB 常驻）。
+            session_data["first_user_ts"], session_data["first_user_msg"] = extract_first_user_question(messages)
 
             success, result = self._execute(
                 f"""
@@ -199,10 +309,14 @@ class SessionRepository:
                  worktree_path, preview, context_usage,
                  last_api_prompt_tokens, last_api_message_count,
                  team_run_id, team_name, agent_name, team_members,
+                 pinned,
+                 first_user_msg, first_user_ts,
                  created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?, ?,
+                    ?,
+                    ?, ?,
                     COALESCE((SELECT created_at FROM {self.TABLE_NAME} WHERE session_id = ?), ?),
                     ?)
             """,
@@ -225,6 +339,9 @@ class SessionRepository:
                     session_data["team_name"],
                     session_data["agent_name"],
                     session_data["team_members"],
+                    session_data["pinned"],
+                    session_data["first_user_msg"],
+                    session_data["first_user_ts"],
                     session_id,  # for coalesce
                     now,  # created_at default
                     now,  # updated_at
@@ -241,6 +358,14 @@ class SessionRepository:
                 # 此处检测 freelist 是否超过安全阈值（5000 页 ≈ 20MB），超过则
                 # 增量回收 500 页（≈2MB），防止 freelist 滚雪球到 GB 级。
                 self._reclaim_freelist_if_needed()
+                # message_extras：全删全插。compaction 重写/截断导致的索引漂移
+                # 由此天然覆盖（每次 save 后 extras 与主 blob 严格一致）。
+                # 🛡️ 独立隔离：extras 写入失败只记日志，不得让异常冒泡到外层
+                # try（主 blob 已落库，误报 False 会误导调用方重试/报错）。
+                try:
+                    self._write_extras(session_id, extras)
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"[SessionRepository] write_extras 调用异常（不影响主保存）: {e}")
 
             return success
 
@@ -276,6 +401,81 @@ class SessionRepository:
             self._execute(f"PRAGMA incremental_vacuum({reclaim_pages})")
         except Exception:
             pass  # auto_vacuum 未启用时静默跳过，不阻塞保存流程
+
+    def _write_extras(self, session_id: str, extras: Dict[int, Dict[str, bytes]]) -> None:
+        """全删全插该会话的剥离字段（失败不阻塞主保存，仅记日志）。"""
+        try:
+            self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
+            if not extras:
+                return
+            for i, fields in extras.items():
+                for f, v in fields.items():
+                    self._execute(
+                        "INSERT OR REPLACE INTO session_msg_extras (session_id, msg_idx, field, value) "
+                        "VALUES (?, ?, ?, ?)",
+                        (session_id, i, f, v),
+                    )
+        except Exception as e:
+            logger.error(f"[SessionRepository] write_extras 异常: {e}")
+
+    def load_extras_for_session(self, session_id: str, idxs: Optional[List[int]] = None) -> Dict[int, Dict[str, Any]]:
+        """读取剥离的 UI 态字段（message_extras）。
+
+        Args:
+            session_id: 会话 ID
+            idxs: 消息绝对索引列表；None 读全部
+
+        Returns:
+            {msg_idx: {field: 反序列化后的值}}；异常/未初始化返回 {}
+
+        契约：
+        - idxs 规模由调用方保证（批次级，≤数百）；不做截断，静默截断反而丢数据
+        - 异常时返回 {}，与「无 extras」不可区分；消费方（渲染/轨迹/导出）
+          均有降级回退，不得依赖本方法区分「读失败」与「真没有」
+        """
+        if not self.is_initialized or not session_id:
+            return {}
+        try:
+            if idxs:
+                placeholders = ",".join("?" * len(idxs))
+                sql = (
+                    "SELECT msg_idx, field, value FROM session_msg_extras "
+                    f"WHERE session_id = ? AND msg_idx IN ({placeholders})"
+                )
+                ok, rows = self._execute(sql, (session_id, *idxs))
+            else:
+                ok, rows = self._execute(
+                    "SELECT msg_idx, field, value FROM session_msg_extras WHERE session_id = ?",
+                    (session_id,),
+                )
+            result: Dict[int, Dict[str, Any]] = {}
+            if ok:
+                for row in rows or []:
+                    mi = row["msg_idx"] if hasattr(row, "keys") else row[0]
+                    f = row["field"] if hasattr(row, "keys") else row[1]
+                    v = row["value"] if hasattr(row, "keys") else row[2]
+                    result.setdefault(int(mi), {})[str(f)] = deserialize(v)
+            return result
+        except Exception as e:
+            logger.error(f"[SessionRepository] load_extras 异常: {e}")
+            return {}
+
+    def get_full_messages(self, session_id: str) -> List[Dict[str, Any]]:
+        """主 blob + extras 合并的全量消息（导出 / agent_trace 深读用）。
+
+        get() 每次返回新反序列化的消息列表，就地合并无副作用。
+        """
+        sess = self.get(session_id)
+        if not sess:
+            return []
+        msgs = sess.get("messages", [])
+        extras = self.load_extras_for_session(session_id)
+        if not extras:
+            return msgs
+        for i, patch in extras.items():
+            if i < len(msgs) and isinstance(msgs[i], dict):
+                msgs[i].update(patch)
+        return msgs
 
     def get(self, session_id: str) -> Optional[Dict]:
         """根据 ID 获取单个会话（同时失效内容 hash 缓存）"""
@@ -323,10 +523,14 @@ class SessionRepository:
             # 🚀 只选轻量列表展示所需的字段，跳过 compaction_state/cache
             # 等重量级 BLOB 列，减少 SQLite I/O 和传输开销。
             success, rows = self._execute(
-                f"SELECT session_id, title, project, system_prompt, "
+                # 内存优化：不再 SELECT system_prompt。该列均值约 10KB/条，
+                # 5000 条常驻内存约 50MB，而会话列表渲染完全用不到它。
+                # 需要时通过 get_system_prompt(session_id) 单列回查。
+                f"SELECT session_id, title, project, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
-                f"team_run_id, team_name, agent_name, team_members "
+                f"team_run_id, team_name, agent_name, team_members, "
+                f"pinned "
                 f"FROM {self.TABLE_NAME} ORDER BY updated_at DESC LIMIT ? OFFSET ?",
                 (limit, offset),
             )
@@ -336,6 +540,27 @@ class SessionRepository:
         except Exception as e:
             logger.error(f"[SessionRepository] get_all_lightweight 异常: {e}")
             return []
+
+    def get_system_prompt(self, session_id: str) -> str:
+        """单列取 system_prompt（轻量列表不再 SELECT 该列后的按需回查入口）。
+
+        Returns:
+            该会话的 system_prompt；会话不存在或查询失败返回空串。
+        """
+        if not self.is_initialized or not session_id:
+            return ""
+        try:
+            success, rows = self._execute(
+                f"SELECT system_prompt FROM {self.TABLE_NAME} WHERE session_id = ?",
+                (session_id,),
+            )
+            if success and rows:
+                row = rows[0]
+                val = row["system_prompt"] if hasattr(row, "keys") else row[0]
+                return val or ""
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_system_prompt 异常: {e}")
+        return ""
 
     def _row_to_session_lightweight(self, row) -> Dict:
         """将数据库行转换为不含 messages 的轻量会话字典"""
@@ -360,7 +585,9 @@ class SessionRepository:
             "topic_summary": raw_title,
             "project": d.get("project", "默认项目"),
             "messages": [],  # 懒加载：不在启动时加载
-            "system_prompt": d.get("system_prompt", ""),
+            # 未 SELECT 该列时为 None —— 哨兵表示"未加载"，区别于真实空串。
+            # 消费方（HistoryManager）据此决定是否需要回查，不可当成空值写回。
+            "system_prompt": d.get("system_prompt"),
             "compaction_state": {},
             "compaction_cache": {},
             "message_count": d.get("message_count", 0),
@@ -378,6 +605,9 @@ class SessionRepository:
             "last_time": d.get("updated_at", ""),
             "saved_at": d.get("created_at", ""),
             "user_edited_title": d.get("user_edited_title", False),
+            # 会话置顶标记：轻量加载必须带上，否则启动重建内存列表后置顶丢失，
+            # 且后续 save_session 的「None→保留现值」读到的现值恒为 False（写库清零）
+            "pinned": bool(d.get("pinned", 0)),
         }
 
     def get_by_project(self, project: str, limit: int = 100) -> List[Dict]:
@@ -415,7 +645,8 @@ class SessionRepository:
                 f"SELECT session_id, title, project, system_prompt, "
                 f"message_count, user_edited_title, worktree_path, "
                 f"preview, context_usage, created_at, updated_at, "
-                f"team_run_id, team_name, agent_name, team_members "
+                f"team_run_id, team_name, agent_name, team_members, "
+                f"pinned "
                 f"FROM {self.TABLE_NAME} WHERE team_run_id = ? "
                 f"ORDER BY updated_at DESC",
                 (run_id,),
@@ -425,6 +656,42 @@ class SessionRepository:
             return []
         except Exception as e:
             logger.error(f"[SessionRepository] get_by_team_run_id 异常: {e}")
+            return []
+
+    def get_team_first_question_candidates(self, run_id: str) -> List[Tuple[str, str]]:
+        """取该 run 下所有会话已落库的首问候选（纯字符串，零反序列化）。
+
+        团队合并条目的预览只需要「时间戳最早的那条 user 消息」，完全不必翻开
+        messages BLOB。候选按 updated_at DESC 返回，与 get_by_team_run_id 的
+        遍历顺序一致，保证旧实现「时间戳并列时保留首个」的语义可复现。
+
+        Returns:
+            [(timestamp, content), ...]；无候选时为空列表
+        """
+        if not self.is_initialized or not run_id:
+            return []
+        try:
+            success, rows = self._execute(
+                f"SELECT first_user_ts, first_user_msg FROM {self.TABLE_NAME} "
+                f"WHERE team_run_id = ? AND first_user_msg IS NOT NULL AND first_user_msg != '' "
+                f"ORDER BY updated_at DESC",
+                (run_id,),
+            )
+            if not success:
+                return []
+            out: List[Tuple[str, str]] = []
+            for row in rows or []:
+                try:
+                    if hasattr(row, "keys"):
+                        ts, msg = row["first_user_ts"], row["first_user_msg"]
+                    else:
+                        ts, msg = row[0], row[1]
+                except Exception:
+                    continue
+                out.append((str(ts or ""), str(msg or "")))
+            return out
+        except Exception as e:
+            logger.error(f"[SessionRepository] get_team_first_question_candidates 异常: {e}")
             return []
 
     def get_projects(self) -> List[str]:
@@ -467,6 +734,10 @@ class SessionRepository:
         try:
             self._content_hash_cache.pop(session_id, None)
             success, _ = self._execute(f"DELETE FROM {self.TABLE_NAME} WHERE session_id = ?", (session_id,))
+            if success:
+                # message_extras 级联清理（后删子表）：主表失败则整体未删保持一致；
+                # 主表成功而子表失败只剩无害孤儿行（会话已不存在，无人查询）。
+                self._execute("DELETE FROM session_msg_extras WHERE session_id = ?", (session_id,))
             return success
         except Exception as e:
             logger.error(f"[SessionRepository] delete_session 异常: {e}")
@@ -500,6 +771,21 @@ class SessionRepository:
             return success
         except Exception as e:
             logger.error(f"[SessionRepository] update_project 异常: {e}")
+            return False
+
+    def update_pinned(self, session_id: str, pinned: bool) -> bool:
+        """更新会话置顶标记（只写 pinned 列，不动 messages blob）"""
+        if not self.is_initialized:
+            return False
+        try:
+            success, result = self._execute(
+                f"UPDATE {self.TABLE_NAME} SET pinned = ? WHERE session_id = ?",
+                (1 if pinned else 0, session_id),
+            )
+            # rowcount==0 说明 session_id 不存在（UPDATE 语法成功但不命中行）
+            return bool(success) and int(result or 0) > 0
+        except Exception as e:
+            logger.error(f"[SessionRepository] update_pinned 异常: {e}")
             return False
 
     def archive_by_project(self, project: str) -> int:

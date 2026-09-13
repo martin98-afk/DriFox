@@ -26,15 +26,6 @@ import pytest
 from app.core import team_manager as tm_mod
 
 
-@pytest.fixture
-def team_manager(tmp_path, monkeypatch):
-    """隔离数据目录的真实 TeamManager（避免污染真实 teams 目录）"""
-    monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path / "teams"))
-    tm_mod.TeamManager._instance = None
-    tm = tm_mod.TeamManager.get_instance()
-    yield tm
-    tm_mod.TeamManager._instance = None
-
 
 def _recorder():
     """返回 (calls:list, callable)——记录任意调用"""

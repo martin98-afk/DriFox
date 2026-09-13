@@ -11,7 +11,6 @@ import traceback
 from typing import List, Optional, Set
 
 from PySide6.QtCore import QObject, Signal
-from loguru import logger
 
 
 # ── 过滤规则 ──────────────────────────────────────────────

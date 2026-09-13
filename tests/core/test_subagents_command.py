@@ -4,7 +4,7 @@
 覆盖范围：
 1. `_handle_subagents_command` 必须对 `--create=` 抛 `CommandNeedDegrade("subagents", ...)`
    降级到 prompt 注入（与 /team --create 一致），而非落入无参数兜底分支弹 InfoBar
-2. `plugins/system/commands/subagents.md` 必须声明 `--create=` 参数与对应
+2. `plugins/system-commands/commands/subagents.md` 必须声明 `--create=` 参数与对应
    prompt_sections 段（注入侧完备，select_prompt 能匹配到 section:create）
 
 设计说明：
@@ -68,7 +68,7 @@ class TestSubagentsCreateDegradation:
 
     def test_subagents_md_defines_create_prompt_section(self):
         """`subagents.md` 必须声明 `--create=` 参数及 prompt_sections 映射（注入侧完备）。"""
-        md_path = PROJECT_ROOT / "plugins" / "system" / "commands" / "subagents.md"
+        md_path = PROJECT_ROOT / "plugins" / "system-commands" / "commands" / "subagents.md"
         md = md_path.read_text(encoding="utf-8")
 
         assert re.search(r"\[--create=\]", md), "subagents.md 必须声明 [--create=] 参数"

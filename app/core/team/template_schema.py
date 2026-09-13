@@ -30,7 +30,7 @@ class TemplateAgent:
     """模板中的一个智能体条目。
 
     字段：
-    - agent_name: 引用 plugins/system/agents/ 下的角色名（如 build、review）
+    - agent_name: 引用 plugins/system-agents/agents/ 下的角色名（如 build、review）
     - description: 角色描述（可选，注入团队上下文时附带；为空则跳过）
     """
 

@@ -2,13 +2,15 @@
 """协议判定器共享模块测试：detect_* 纯函数行为与旧方法逐字等价。
 
 背景：判定器从旧 OpenAIAdapter._method 拆为模块级纯函数（行为零变化），
-Phase C 迁入 plugins/system/model_adapters/_detectors.py 供协议家族复用。
+Phase C 迁入 plugins/system-model-adapters/model_adapters/_detectors.py 供协议家族复用。
 """
 
 import pytest
 
-from plugins.system.model_adapters import _detectors as det
-from plugins.system.model_adapters.openai_family import OpenAIFamilyAdapter
+from importlib import import_module
+
+det = import_module("plugins.system-model-adapters.model_adapters._detectors")
+OpenAIFamilyAdapter = import_module("plugins.system-model-adapters.model_adapters.openai_family").OpenAIFamilyAdapter
 
 
 # ---------- detect_requires_reasoning ----------

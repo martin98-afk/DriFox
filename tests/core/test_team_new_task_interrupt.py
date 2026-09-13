@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """回归：新建任务打断流式时团队邮件锁不可死锁（_team_processing 必须复位）。
 
 复现场景：成员 B 正在处理任务邮件（_team_processing=True + running 邮件），
@@ -18,14 +18,6 @@ import pytest
 from app.core import team_manager as tm_mod
 from app.main_widget import OpenAIChatToolWindow
 
-
-@pytest.fixture
-def team_manager(tmp_path, monkeypatch):
-    monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path / "teams"))
-    tm_mod.TeamManager._instance = None
-    tm = tm_mod.TeamManager.get_instance()
-    yield tm
-    tm_mod.TeamManager._instance = None
 
 
 class _Null:

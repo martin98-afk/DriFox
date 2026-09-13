@@ -2,7 +2,7 @@
 """消息序列化器注册表 — 单例，按 serializer_id 解析，无该 id 回退 "openai"，仍无抛错。
 
 零硬编码兜底：registry 不自带 fallback serializer（系统插件
-plugins/system/serializers/openai.py 提供默认实现）。resolve 回退逻辑仅做
+plugins/system-serializers/serializers/openai.py 提供默认实现）。resolve 回退逻辑仅做
 id 回退（"openai" 是约定默认 id），不 new 任何实例。
 """
 
@@ -42,10 +42,17 @@ class SerializerRegistry:
         with self._lock:
             item = self._serializers.get(requested) or self._serializers.get(_DEFAULT_ID)
         if item is None:
-            raise RuntimeError(
-                "未注册任何 MessageSerializer 插件（含系统插件 openai），"
-                "请确认 plugins/system/serializers/ 已启用"
+            # P3 兜底：无任何 MessageSerializer 插件 → 返回内置 passthrough + warning
+            # 行为：serialize 直接透传 messages（不做协议特判）；多模态等高级特性会丢失，
+            # 但主链路不抛错，发送链不至于炸。
+            from loguru import logger
+            from app.plugins.registries._builtin_fallback import BuiltInPassthroughSerializer
+
+            logger.warning(
+                "[SerializerRegistry] 未注册任何 MessageSerializer 插件（含系统插件 openai），"
+                "降级使用内置 passthrough（不做协议特判，特性可能丢失）"
             )
+            return BuiltInPassthroughSerializer()
         return item[0]
 
     def serializers(self) -> Dict[str, MessageSerializer]:

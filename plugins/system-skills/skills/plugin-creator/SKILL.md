@@ -1,0 +1,160 @@
+---
+name: plugin-creator
+description: "DriFox 插件开发技能。何时使用：用户要新建可安装插件（脚手架→开发→调试→发布到 drifox-plugins 市场），或在既有插件内增改非 UI 组件：tools 工具、commands 命令、hooks、agents、skills、MCP、LSP、themes 主题、模型适配器、存储、序列化、provider、team_templates 等。触发语：「写个插件」「给插件加个工具/命令/hook」「接入 MCP」「做个主题」「打包发布插件」。新建完整 UI 插件时由本技能主导骨架+manifest，UI 载体部分桥接 ui-plugin-creator。不适用：只做插件内 UI 载体（浮动卡/渲染器/欢迎 tab）→ ui-plugin-creator；改 app/ 主程序 → drifox-dev；学习组件概念不产出安装物 → plugin-dev。"
+license: MIT
+compatibility: Requires DriFox plugin system (目录即插件, register(registry) 契约); Python 3.10+
+allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
+---
+
+# plugin-creator — DriFox 插件开发技能
+
+> 从需求到发布，构建可安装的 DriFox 插件。本文件是路由面：按需加载 `references/`，不在本文件找实现细节。
+
+## 0. 何时用我 / 何时交回对方
+
+| 需求 | 归属 |
+|------|------|
+| 可安装插件（11 类组件 / manifest / 发布） | **本技能** |
+| 插件内 UI 载体（浮动卡/渲染器/欢迎 tab） | ui-plugin-creator |
+| 完整 UI 插件（如插件市场） | **本技能主导**骨架+manifest+发布，UI 载体桥接 ui-plugin-creator |
+| 改 app/ 主程序（含 plugins/system-* 内置） | drifox-dev |
+| 主程序 bug/崩溃/性能 | drifox-dev + diagnose |
+| 学习单组件概念，不产出安装物 | plugin-dev 分项技能 |
+| 写 skill 本身 | skill-creator |
+
+> plugin-dev 让位条款：用户在学习单个组件概念 → plugin-dev；一旦要产出可安装插件 → 本技能。
+> plugin-dev 各分项阅读指引：`~/.drifox/plugins/plugin-dev/skills/<name>/SKILL.md`（相对路径，需自行在用户插件根下查找；Claude Code 生态教程，字段语义与 DriFox 有差异，以本技能 references 为准）。
+
+## 1. 触发与第一动作
+
+**触发词表**（详解决策见 references/components.md 对应组件章节）：
+
+| 你说 | 任务类型 | 去向 |
+|------|---------|------|
+| "做个新插件""创建插件" | 新建 | 第一动作=新建 → references/workflow.md Scaffold |
+| "加个 /xx 命令" | Commands | references/components/commands.md |
+| "做个 @xx 智能体" | Agents | references/components/agents.md |
+| "做个技能""写 SKILL.md" | Skills | references/components/skills.md |
+| "加个钩子""事件驱动" | Hooks | references/components/hooks.md |
+| "配置 MCP 服务器" | MCP | references/components/mcp.md |
+| "配置 LSP 语言服务器" | LSP | references/components/lsp.md |
+| "做个主题""改配色" | Themes | references/components/themes.md |
+| "做 UI 卡片""浮动卡" | UI | → 调用 ui-plugin-creator 技能 |
+| "加个工具""做个 AI 工具" | Tools | references/components/tools.md |
+| "加个服务商""接新模型厂商" | Providers | references/components/providers.md |
+| "做团队模板""预设 @角色组合" | Team Templates | references/components/team-templates.md |
+| "hook 策略""控制 hook 触发" | Hook Policies | references/components/hook-policies.md |
+| "循环策略""控制工具循环轮数" | Loop Policies | references/components/loop-policies.md |
+| "对话引擎""插件里跑一轮对话" | Engines | references/components/engines.md |
+| "换会话存储""自定义存储引擎" | Storages | references/components/storages.md |
+| "消息序列化""新协议序列化" | Serializers | references/components/serializers.md |
+| "接新消息平台""通讯网关" | Gateways | references/components/gateways.md |
+| "模型协议适配" | Model Adapters | references/components/model-adapters.md |
+| "改 plugin.json""设置页配置" | Manifest | references/manifest.md |
+| "验证""跑测试" | 验证 | references/testing.md |
+| "发布到市场""提 PR" | 发布 | references/publishing.md |
+| "不工作""报错""不加载" | 除错 | references/troubleshooting.md |
+| "改现有插件" | 修改 | 跳过 Scaffold，直改组件 + 更新 version |
+
+**第一动作三问分流**：新建？修改现有？发布？→ 新建走 workflow.md Scaffold；修改定位目标插件后直改；发布走 publishing.md。
+
+## 2. 渐进加载表
+
+| 阶段 | 读取 | 何时使用 |
+|------|------|---------|
+| 路由决策 | 本 SKILL.md（只读这一个） | 任务进入时 |
+| 脚手架与流程 | references/workflow.md | 新建插件、迭代循环、版本策略（SemVer） |
+| 组件实现 | references/components.md | 开发任一组件（模板+约束+真实案例） |
+| manifest 与配置 | references/manifest.md | 新建/修改 plugin.json、config_schema/E1 契约 |
+| 测试验证 | references/testing.md | 热更新测试、validate_plugins.py、除错 |
+| 发布 | references/publishing.md | Fork→PR 上架官方市场 |
+| 排障 | references/troubleshooting.md | 报错、不加载、CI 失败 |
+| 参考成品 | examples/ 与 ui-plugin-creator/examples/（浮动卡/欢迎 tab） | 工具插件、config_schema 最小骨架；UI 骨架在对方包 |
+
+## 3. 插件解剖速览
+
+插件位于 `~/.drifox/plugins/<name>/`，manifest 固定在 `<name>/.drifox-plugin/plugin.json`：
+
+```
+your-plugin/
+├── .drifox-plugin/plugin.json   ← manifest（必需，插件身份证）
+├── commands/*.md                ← 斜杠命令
+├── agents/*.md                  ← @智能体
+├── skills/<name>/SKILL.md       ← AI 技能
+├── hooks/hooks.json + *.py      ← 事件钩子
+├── themes/<name>/*.yaml         ← 配色
+├── ui/__init__.py + *.py        ← UI 组件（register_ui）
+├── tools/*.py + icons/          ← 工具（register(registry)）
+├── providers/*.py + icons/      ← 服务商（register(registry)）
+├── team_templates/*.yaml        ← 团队模板
+├── hook_policies/*.py           ← hook 触发策略（register(registry)）
+├── loop_policies/*.py           ← 循环策略（register(registry)）
+├── storages/*.py                ← 会话存储引擎（register(registry)）
+├── serializers/*.py             ← 消息序列化器（register(registry)）
+├── engines/*.py                 ← 对话引擎替换（进阶）
+├── gateways/*.py + deps/        ← 消息网关平台适配器
+├── model_adapters/*.py          ← 模型协议适配器
+├── .mcp.json / .lsp.json        ← MCP / LSP（插件根）
+└── README.md / __init__.py      ← 说明 / 包标记（可选）
+```
+
+18 类组件速查（字段细节、代码模板 → references/components.md）：
+
+| 组件 | manifest flag | 触发方式 |
+|------|--------------|---------|
+| Commands | `commands: true` | 用户输入 `/xxx` |
+| Agents | `agents: true` | 用户输入 `@xxx` |
+| Skills | `skills: true` | AI 自动匹配 description |
+| Hooks | `hooks: true` | DriFox 事件触发 |
+| MCP | `mcp: true` | DriFox 启动注入 |
+| LSP | `lsp: true` | DriFox 启动注入 |
+| Themes | `themes: true` | 用户 `/theme xx` |
+| UI | `ui: true` | 启动加载 + `/<card_id>` 命令 |
+| Tools | `tools: true` | AI 工具调用 |
+| Providers | `providers: true` | 用户选择模型/服务商 |
+| Team Templates | `team_templates: true` | `/team --load=<name>` |
+| Hook Policies | `hook_policies: true` | 引擎声明 hook_policy_id 生效 |
+| Loop Policies | `loop_policies: true` | 引擎声明 loop_policy_id / 全局 set_active |
+| Engines | `engines: true` | 替换主窗口对话引擎（进阶） |
+| Storages | `storages: true` | 设置卡选择存储后端 |
+| Serializers | `serializers: true` | ModelAdapter 的 serializer_id 命中 |
+| Gateways | `gateways: true` | 平台连接后收发消息 |
+| Model Adapters | `model_adapters: true` | worker 按 llm_config 打分 resolve |
+
+## 4. 硬停止（触达即停，不得绕行）
+
+1. 要改 `app/` 主程序 → 停，转交 drifox-dev
+2. 一次性任务、无插件形态 → 停，not-a-skill，直接实现
+3. UI 载体开发（卡片/渲染器内部实现）→ 停，路由 ui-plugin-creator
+4. drifox-dev 未加载 → 停，先加载再继续
+5. 新建/修改对象不明 → 停，用 question 问清再动手
+6. `validate_plugins.py` 未通过 → 禁止提 PR
+
+## 5. 验证
+
+```bash
+# 本包自检（结构/引用/evals 完整性）
+python scripts/check_skill_package.py .
+
+# 插件完整验证（在 drifox-plugins clone 中，发布前必做）
+python tools/validate_plugins.py && python tools/generate_marketplace.py
+```
+
+细节（热更新延迟表、检查项清单、除错流程）→ references/testing.md。
+
+## 6. 闭环
+
+- 新踩的坑 → 写回 `references/troubleshooting.md`（症状→原因→修法）
+- 技能改进 → writeback / 明确 none-with-reason
+- 收尾前跑 `python scripts/check_skill_package.py .` 留证据
+
+## 附：技能衔接
+
+```
+plugin-creator（本技能）
+├─ 🟡 需求不明确 → brainstorming
+├─ 🟡 UI 插件     → ui-plugin-creator
+├─ 🟡 编码规范     → drifox-dev/references/conventions.md
+├─ 🟡 修 Bug      → diagnose
+└─ 🟡 复杂任务     → subagent-driven-development
+```

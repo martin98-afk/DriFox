@@ -1142,4 +1142,3 @@ def test_apply_model_selection_no_match_falls_back_to_builder(qapp):
 
     assert fake_win._current_provider_name == "prov-1"
     assert fake_win._current_model_name == "gpt-4o"
-

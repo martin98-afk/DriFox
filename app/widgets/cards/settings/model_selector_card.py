@@ -11,12 +11,11 @@ from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
     QLabel,
-    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
-from qfluentwidgets import IconWidget
+from qfluentwidgets import IconWidget, ScrollArea
 
 from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_icon
@@ -93,8 +92,6 @@ _MAX_ITEMS = 10  # 最多显示 item 数
 # 成本金额：完整显示三项价格（不可裁剪）。等宽字体 + 名称等宽对齐实现起点一致，
 # 金额自身不设窄固定宽（Minimum 自适应），保证 in/out/cache · $/M 全部可见。
 _COST_MONO_FAMILY = "'Consolas', 'Segoe UI Mono', 'monospace'"
-_COST_RIGHT_PAD = 2  # 行内右侧留白
-
 # 滚动区域高度计算
 _MIN_SCROLL_HEIGHT = _MIN_ITEMS * _ITEM_HEIGHT  # 最小高度：约 102px
 _MAX_SCROLL_HEIGHT = _MAX_ITEMS * _ITEM_HEIGHT + _HEADER_HEIGHT  # 最大高度：约 274px
@@ -349,16 +346,25 @@ class ModelItem(QWidget):
         color = Colors.TEXT_ACCENT if self.is_active else "transparent"
         self.dot.setStyleSheet(f"color: {color}; {get_font_family_css()} {font_size_css(18)}; font-weight: bold;")
 
-    def _apply_name_style(self):
-        Colors.refresh()
-        if self.is_active:
-            self.name_label.setStyleSheet(
-                f"color: {Colors.TEXT_ACCENT}; font-weight: bold; {get_font_family_css()} {font_size_css(15)};"
-            )
+    def _apply_name_style(self, state: str = None):
+        """应用名称样式（默认按选中态）。
+
+        样式串未变化时跳过 setStyleSheet：滚动期间鼠标下的行持续变化，
+        enter/leave 若无条件 setStyleSheet 会触发 QSS 重解析 + polish +
+        relayout，叠加平滑滚动的每帧重绘造成掉帧。
+        """
+        if state is None:
+            state = "active" if self.is_active else "normal"
+        ff = get_font_family_css()
+        fs = font_size_css(15)
+        if state == "active":
+            ss = f"color: {Colors.TEXT_ACCENT}; font-weight: bold; {ff} {fs};"
+        elif state == "hover":
+            ss = f"color: {Colors.TEXT_PRIMARY}; {ff} {fs};"
         else:
-            self.name_label.setStyleSheet(
-                f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(15)};"
-            )
+            ss = f"color: {Colors.TEXT_SECONDARY}; {ff} {fs};"
+        if self.name_label.styleSheet() != ss:
+            self.name_label.setStyleSheet(ss)
 
     def refresh_style(self):
         """主题切换后重刷 dot/名称/金额色（不重建 widget）。"""
@@ -379,7 +385,7 @@ class ModelItem(QWidget):
 
     def enterEvent(self, event):
         if not self.is_active:
-            self.name_label.setStyleSheet(f"color: {Colors.TEXT_PRIMARY}; {get_font_family_css()} {font_size_css(15)};")
+            self._apply_name_style("hover")
         super().enterEvent(event)
 
     def leaveEvent(self, event):
@@ -419,7 +425,7 @@ class ModelSelectorCardContent(QWidget):
         layout.setSpacing(0)
 
         # 滚动区域
-        self.scroll_area = QScrollArea(self)
+        self.scroll_area = ScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)

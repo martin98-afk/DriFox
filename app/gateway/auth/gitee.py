@@ -33,28 +33,6 @@ SETTINGS_REPO_NAME = "DriFox_settings"  # 配置备份仓库（强制私有）
 # ── Gitee API 层（网络调用集中在这里） ────────────────────
 
 
-def exchange_token(code: str, client_id: str, client_secret: str, redirect_uri: str) -> Tuple[Optional[str], str]:
-    """用授权码换取 access_token。Returns: (access_token|None, err_msg)"""
-    resp = requests.post(
-        GITEE_TOKEN_URL,
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri,
-        },
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        return None, f"换取 Token 失败：{parse_error(resp)}"
-
-    access_token = resp.json().get("access_token")
-    if not access_token:
-        return None, "换取 Token 失败：响应中缺少 access_token"
-
-    logger.info("[GiteeOAuth] 获取 access_token 成功")
-    return access_token, ""
 
 
 def refresh_access_token(refresh_token: str, client_id: str, client_secret: str) -> Tuple[Optional[dict], str]:

@@ -165,11 +165,12 @@ class SendStopButton(QWidget):
         w, h = self.width(), self.height()
         center_x, center_y = w / 2, h / 2
 
-        # 1. 绘制按钮背景（圆角矩形，半径取自主题）
+        # 1. 绘制按钮背景（圆角矩形，半径取自主题，短边钳制防大尺寸爆形：
+        #    主题值 ≥ 短边一半时即呈现正圆）
         # _get_bg_colors 中已 Colors.refresh()，这里直接读缓存值
         from app.utils.design_tokens import Colors as _C
 
-        btn_r = _C.SEND_BTN_RADIUS
+        btn_r = min(_C.SEND_BTN_RADIUS, w / 2, h / 2)
 
         bg_path = QPainterPath()
         bg_path.addRoundedRect(0, 0, w, h, btn_r, btn_r)

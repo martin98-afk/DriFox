@@ -4,7 +4,7 @@
 
 历史版本在此直接实现 OpenCode / 火山 / MiniMax / 智谱 / OpenAI 的
 套餐用量抓取逻辑并维护本地注册表。服务商插件化后：
-- 各 fetcher 逻辑移入 plugins/system/providers/<provider>.py 插件文件
+- 各 fetcher 逻辑移入 plugins/system-providers/providers/<provider>.py 插件文件
 - 统一注册表为 app.plugins.registries.provider_registry.ProviderRegistry
   （ProviderDef.coding_plan_fetcher 字段）
 

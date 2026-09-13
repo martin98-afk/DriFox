@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""worker 循环接入 LoopPolicy — 轮数上限与策略判定可被插件接管"""
+"""worker 循环接入 LoopPolicy — 轮数上限与策略判定可被插件接管。
+
+含引擎级 loop_policy_id（ConversationConfig → Executor → Worker）：
+插件自建引擎可声明自己的循环策略，按 id 直接取对象，**不污染全局激活槽**。
+"""
 
 import pytest
 
@@ -95,3 +99,123 @@ def test_strategy_exception_falls_back(fresh_loop_registry, monkeypatch):
         LoopPolicyRegistry.get_instance().unregister_source("plugin:test-boom")
         # 复位激活策略为 default，避免污染其他测试
         LoopPolicyRegistry.get_instance().set_active("default")
+
+
+# ── 引擎级 loop_policy_id（不污染全局激活槽）────────────────────
+
+
+def _register_plugin_policy(policy_id="plugin-single-turn", source="plugin:test-engine-scope", max_rounds=1):
+    from app.plugins.contracts.loop_policy import LoopDecision
+
+    class _PluginSingleTurnPolicy:
+        id = policy_id
+
+        def should_continue(self, state):
+            return LoopDecision.STOP
+
+        def max_rounds(self, llm_config):
+            return max_rounds
+
+    from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
+
+    LoopPolicyRegistry.get_instance().register(_PluginSingleTurnPolicy(), source=source)
+    return source
+
+
+def test_worker_resolves_engine_loop_policy_id_without_touching_active(fresh_loop_registry):
+    """引擎声明 loop_policy_id → worker 按 id 取策略，主对话激活槽仍为 default。"""
+    from app.plugins.registries.loop_policy_registry import LoopPolicyRegistry
+
+    source = _register_plugin_policy()
+    try:
+        worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
+        w = worker_cls.__new__(worker_cls)
+        w._loop_policy_obj = None
+        w._loop_policy_id = "plugin-single-turn"
+
+        assert w._loop_policy().id == "plugin-single-turn"
+        assert w._loop_policy().max_rounds({}) == 1
+        # 全局激活槽未被改动（set_active 未被调用）
+        assert LoopPolicyRegistry.get_instance().get_active().id == "default"
+    finally:
+        LoopPolicyRegistry.get_instance().unregister_source(source)
+
+
+def test_worker_falls_back_to_active_when_id_unknown(fresh_loop_registry):
+    """id 不存在（插件未加载/已卸载）→ 回落全局激活策略，不炸。"""
+    worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
+    w = worker_cls.__new__(worker_cls)
+    w._loop_policy_obj = None
+    w._loop_policy_id = "does-not-exist"
+    assert w._loop_policy().id == "default"
+
+
+def test_worker_without_id_uses_active(fresh_loop_registry):
+    """未声明 id（主对话路径）→ 行为零变化，走全局激活策略。"""
+    worker_cls = pytest.importorskip("app.core.workers.chat_worker").OpenAIChatWorker
+    w = worker_cls.__new__(worker_cls)
+    w._loop_policy_obj = None
+    # _loop_policy_id 为类级默认 None（__new__ 构造也不触发 RuntimeError）
+    assert w._loop_policy_id is None
+    assert w._loop_policy().id == "default"
+
+
+def test_executor_forwards_loop_policy_id_to_worker():
+    """ConversationExecutor 把 config.loop_policy_id 透传给 worker。"""
+    from app.core.conversation.config import ConversationConfig
+
+    captured = {}
+
+    class _FakeSignal:
+        def connect(self, *a, **k):
+            return None
+
+        def disconnect(self, *a, **k):
+            return None
+
+    class _FakeWorker:
+        finished = _FakeSignal()  # executor 无条件连接 finished，必须存在
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            pass
+
+        def isRunning(self):
+            return False
+
+        def cleanup(self):
+            pass
+
+        def deleteLater(self):
+            pass
+
+    class _FakeCore:
+        class session_manager:
+            @staticmethod
+            def get_current_session():
+                return None
+
+        permission_cache = None
+        compactor = None
+
+    from app.core.conversation.executor import ConversationExecutor
+
+    ex = ConversationExecutor(
+        core=_FakeCore(),
+        config=ConversationConfig(loop_policy_id="plugin-single-turn"),
+        tool_executor=None,
+        agent_manager=None,
+        worker_factory=_FakeWorker,
+    )
+    assert ex.execute(messages=[], llm_config={}, tools=[]) is True
+    assert captured["loop_policy_id"] == "plugin-single-turn"
+    assert "hook_policy_id" in captured
+
+
+def test_conversation_config_defaults_loop_policy_id_none():
+    """默认未声明 → 主对话引擎零行为变化。"""
+    from app.core.conversation.config import ConversationConfig
+
+    assert ConversationConfig().loop_policy_id is None

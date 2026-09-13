@@ -17,7 +17,16 @@ from loguru import logger
 EV_THEME_CHANGED = "theme_changed"  # payload: theme_id, theme_name, is_dark
 EV_TAB_SWITCHED = "tab_switched"  # payload: tab_index, window_id
 EV_CARD_VISIBILITY_CHANGED = "card_visibility_changed"  # payload: card_id, window_id, visible
-EV_WINDOW_ACTIVATED = "window_activated"  # payload: window_id
+EV_WELCOME_TAB_REFRESHED = "welcome_tab_refreshed"
+# 欢迎卡片插件 tab 数据已更新（异步 fetcher 完成 / 数据源刷新等），
+# 通知主程序对指定 mode_key 触发重渲染（不重建 QWebEngineView）。
+# payload: mode_key, plugin_name, window_id（可选；缺省 = 全窗口）
+EV_PROJECT_CHANGED = "project_changed"  # payload: project, workdir, window_id
+# 项目 / 工作目录已变更（MainWidget._sync_working_directory 收尾处发布，按
+# (project, workdir) 去重）。UI 插件实现可选协议 on_project_changed 即接收：
+# 只对可见的工作台页与浮动卡派发，不可见的由切页 refresh_data() / 再次显示
+# show_card() 自行补刷（详见 app/core/project_changed.py 与
+# docs/superpowers/specs/2026-09-12-ui-plugin-project-changed-design.md）
 
 _Callback = Callable[[Dict[str, Any]], None]
 
@@ -44,6 +53,19 @@ class UIEventBus:
     def subscribe(self, event: str, callback: _Callback, plugin_name: Optional[str] = None) -> None:
         """订阅事件；plugin_name 非空时随插件 unload 自动退订"""
         self._subs.setdefault(event, []).append((plugin_name, callback))
+
+    def unsubscribe(self, event: str, callback: _Callback) -> None:
+        """按 callback 退订（主程序对象生命周期管理：widget 销毁时释放悬挂回调）
+
+        ``plugin_name=None`` 的订阅者不走 ``unsubscribe_plugin``，需调用方手动退订
+        防止 callback 引用已销毁对象。
+        """
+        pairs = self._subs.get(event)
+        if not pairs:
+            return
+        self._subs[event] = [pair for pair in pairs if pair[1] is not callback]
+        if not self._subs[event]:
+            del self._subs[event]
 
     def unsubscribe_plugin(self, plugin_name: str) -> None:
         """退订某插件的全部事件（unload_plugin 调用）"""

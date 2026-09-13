@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, Signal
-from loguru import logger
 
 
 # ── 路径常量 ──────────────────────────────────────────────
@@ -29,22 +28,23 @@ def _drifox_dir() -> Path:
     PyInstaller打包: ~/.drifox（用户 home 目录，可写）
     macOS .app: ~/Library/Application Support/Drifox/.drifox
     """
-    if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
-        return Path('.drifox')
-    if sys.platform == 'darwin':
+    if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
+        return Path(".drifox")
+    if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
+
             paths = NSFileManager.defaultManager().URLsForDirectory_inDomains_(
                 NSApplicationSupportDirectory, NSUserDomainMask
             )
             if paths:
-                app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
-                app_support = Path(app_support_path) / 'Drifox'
+                app_support_path = paths[0].fileSystemRepresentation().decode("utf-8")
+                app_support = Path(app_support_path) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / '.drifox'
+                return app_support / ".drifox"
         except Exception:
             pass
-    return Path.home() / '.drifox'
+    return Path.home() / ".drifox"
 
 
 # ── 缓存类型定义 ──────────────────────────────────────────
@@ -90,17 +90,27 @@ def _calc_dir_size(path: Path, dir_mode: bool) -> int:
 
 
 def _walk_dir_size(path: Path) -> int:
-    """递归计算目录总大小"""
+    """递归计算目录总大小（迭代式 scandir，栈替代递归）
+
+    Windows 上 entry.stat() 的 size 信息由目录枚举直接携带，
+    相比 os.walk + os.path.getsize（每文件额外一次系统调用）快数倍。
+    """
     total = 0
-    try:
-        for root, _dirs, files in os.walk(str(path)):
-            for f in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, f))
-                except (OSError, PermissionError):
-                    pass
-    except (OSError, PermissionError):
-        pass
+    stack = [str(path)]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
     return total
 
 
@@ -244,28 +254,15 @@ def _kill_qwebengine_processes() -> int:
 # ── 内存释放 ──────────────────────────────────────────
 
 
-def _release_memory():
-    """
-    深度释放进程内存，归还给操作系统。
+def _release_memory_light():
+    """第一阶段：清理各类进程内缓存（无原生风险）。
 
     链路：
     1. 清理 DriFox 全局 LRU 缓存（HTML 渲染/token 估算/grep 编译等）
     2. 清理 Qt QPixmapCache
     3. 清理 importlib 缓存
     4. 清理 re 正则编译缓存 + linecache 行缓存
-    5. gc.collect(2) 全代回收
-    6. 堆压缩 + 激进工作集归还 OS（Windows: SetProcessWorkingSetSize / Linux: malloc_trim）
-    7. 终止残留 QtWebEngine(Chromium) 子进程，归还其内存
-
-    Returns:
-        (before_rss, after_rss, collected_objects, killed_procs)
     """
-    import ctypes
-    import gc
-    import sys as _sys
-
-    before = _get_process_memory()
-
     # ── 1. DriFox 内部 LRU 缓存 ──
     try:
         from app.main_widget import _cleanup_global_lru_caches
@@ -304,19 +301,36 @@ def _release_memory():
     except Exception:
         pass
 
+
+def _release_memory_deep():
+    """第二阶段：全代 GC + 工作集归还 OS + 清理 WebEngine 子进程（高危原生操作）。
+
+    ⚠️ 调用前必须让主线程事件循环排干在途回调（见 cards._on_memory_release 的
+    分拍设计）：本阶段的 gc.collect(2) 可能连带析构 Python 独占的 QObject，
+    与 Chromium 后台线程正在派发的回调相撞会 access violation。
+
+    Returns:
+        (collected_objects, killed_procs)
+    """
+    import ctypes
+    import gc
+    import sys as _sys
+
     # ── 5. Python GC 全代回收 ──
     # gc.collect() 默认只收第 0 代；gc.collect(2) 收全部三代
     collected = gc.collect(2)
 
-    # ── 6. 堆压缩 + 归还 OS ──
+    # ── 6. 激进工作集归还 OS ──
+    # 🐛 崩溃修复（2026-09-11）：删除原步骤 6a 的 HeapCompact(GetProcessHeap(), 0)。
+    # 该调用在 UI 线程遍历并压缩进程默认堆，与 Chromium 十几个后台线程
+    # （IO/GPU/worker/audio）的堆分配/释放直接竞态，是崩溃日志 crash_*.log 中
+    # scanner.py:328 处 4 次 access violation 的直接崩点；且它只合并空闲块、
+    # 几乎不归还内存给 OS，收益远小于下方工作集修剪。另外 GetProcessHeap 返回的
+    # HANDLE 未声明 restype，64 位下存在被 c_int 截断成伪句柄的风险（P008 同款坑）。
     try:
         if _sys.platform == "win32":
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            # 6a. 压缩堆（消除碎片，合并空闲块）
-            heap = kernel32.GetProcessHeap()
-            if heap:
-                kernel32.HeapCompact(heap, 0)
-            # 6b. 激进工作集修剪：SetProcessWorkingSetSize(-1, -1)
+            # 激进工作集修剪：SetProcessWorkingSetSize(-1, -1)
             #     移除进程最小工作集限制，让 Windows 积极换出未使用页面
             #     比 EmptyWorkingSet 更彻底——不再保留任何"锁住"的页面
             h = kernel32.GetCurrentProcess()
@@ -329,6 +343,25 @@ def _release_memory():
 
     # ── 7. 终止残留 QtWebEngine(Chromium) 子进程，归还其内存 ──
     killed_procs = _kill_qwebengine_processes()
+
+    return collected, killed_procs
+
+
+def _release_memory():
+    """兼容入口：不分拍一次性执行两阶段（轻清理 → 深度释放）。
+
+    ⚠️ 推荐走 cards._on_memory_release 的分拍调用（light → 事件循环排干 → deep），
+    单拍同步执行时全代 GC 与 Chromium 在途回调撞车的概率显著更高。
+
+    Returns:
+        (before_rss, after_rss, collected_objects, killed_procs)
+    """
+    import ctypes
+
+    before = _get_process_memory()
+
+    _release_memory_light()
+    collected, killed_procs = _release_memory_deep()
 
     after = _get_process_memory()
     return before, after, collected, killed_procs
@@ -346,13 +379,22 @@ class _ScanWorker(QObject):
     def __init__(self, drifox_dir: Path):
         super().__init__()
         self._drifox_dir = drifox_dir
+        self._cancelled = False
+
+    def cancel(self):
+        """协作式取消：置位后 run() 在下一个目录边界快速退出，不发 finished"""
+        self._cancelled = True
 
     def run(self):
         try:
             sizes: Dict[str, int] = {}
             for cid, _icon, _label, rel_path, dir_mode in CACHE_DEFS:
+                if self._cancelled:
+                    return
                 full = self._drifox_dir / rel_path
                 sizes[cid] = _calc_dir_size(full, dir_mode)
+            if self._cancelled:
+                return
             self.finished.emit(sizes)
         except Exception as e:
             self.error.emit(f"{e}\n{traceback.format_exc()}")
