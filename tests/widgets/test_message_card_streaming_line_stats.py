@@ -60,7 +60,7 @@ def test_badge_shows_line_stats_and_hides_chars():
         add_lines=8,
         del_lines=3,
     )
-    assert 'class="tool-diff-stats"' in html, "行数徽标必须复用完成框的胶囊结构"
+    assert 'class="tool-diff-stats tool-streaming-badge"' in html, "行数徽标必须复用完成框胶囊且为独立元素"
     assert 'class="tool-diff-stats__add">+8</span>' in html
     assert 'class="tool-diff-stats__del">-3</span>' in html
     assert 'class="tool-diff-stats__sep">/</span>' in html
@@ -117,7 +117,7 @@ def test_update_tool_streaming_passes_line_stats(monkeypatch):
     # JS 里的 HTML 经 json.dumps 转义（引号变 \"），故按片段断言
     assert "tool-diff-stats__add" in js and "+9" in js
     assert "tool-diff-stats__del" in js and "-4" in js
-    assert "字符" not in js
+    assert "字符)" not in js  # 编辑类工具不再显示 (N字符)
 
 
 def test_update_tool_streaming_fallback_text_without_path(monkeypatch):

@@ -1495,12 +1495,14 @@ def _format_tool_progress_badge(char_count: int, add_lines: int = 0, del_lines: 
 
     行数优先——编辑类工具的字符数对用户没有信息量（设计：
     docs/superpowers/specs/2026-09-13-tool-streaming-line-stats-design.md）。
-    胶囊结构与完成框的 diff 统计完全一致（复用 `.tool-diff-stats` 系列 class，
-    颜色/圆角/内边距由骨架 CSS 给，运行框与完成框形态统一）。
+    胶囊结构与完成框的 diff 统计完全一致（复用 `.tool-diff-stats` 系列 class）。
+    返回值是**独立元素**（class 含 `tool-streaming-badge`），需与预览 span 平级放在
+    块末尾：预览 span 是 `overflow:hidden + ellipsis`，徽标嵌在里面会被长文本裁掉。
     """
     if add_lines or del_lines:
         return (
-            f'<span class="tool-diff-stats" style="font-size: {scale_font_size(11)}px;">'
+            f'<span class="tool-diff-stats tool-streaming-badge" '
+            f'style="font-size: {scale_font_size(11)}px; flex: 0 0 auto; margin-left: 6px;">'
             f'<span class="tool-diff-stats__add">+{add_lines}</span>'
             f'<span class="tool-diff-stats__sep">/</span>'
             f'<span class="tool-diff-stats__del">-{del_lines}</span>'
@@ -1508,8 +1510,9 @@ def _format_tool_progress_badge(char_count: int, add_lines: int = 0, del_lines: 
         )
     if char_count > 0:
         return (
-            f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; '
-            f'margin-left: 4px;">({char_count}字符)</span>'
+            f'<span class="tool-streaming-badge" style="color: var(--text); '
+            f'font-size: {scale_font_size(10)}px; flex: 0 0 auto; margin-left: 6px;">'
+            f"({char_count}字符)</span>"
         )
     return ""
 
@@ -1574,10 +1577,9 @@ def _render_tool_streaming_block(
     # spinner
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
 
-    # 合并预览文本 + 字符数进度（放在同一个 span 里，JS 更新 innerHTML 时一起走）
+    # 预览文本（右侧徽标是独立兄弟节点，避免长文本 ellipsis 把徽标裁掉）
     preview_display = escape(preview) if preview else "准备中..."
-    if not completed:
-        preview_display += _format_tool_progress_badge(char_count, add_lines, del_lines)
+    badge_html = "" if completed else _format_tool_progress_badge(char_count, add_lines, del_lines)
 
     streaming_state = "false" if completed else "true"
     # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
@@ -1593,7 +1595,7 @@ def _render_tool_streaming_block(
         </span>
         <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_display}
-        </span>
+        </span>{badge_html}
     </div>"""
 
 
@@ -15864,8 +15866,8 @@ class MessageCard(SimpleCardWidget):
         # 构建预览文本（含 char_count），用于后续内容比较和 JS 注入
         _text_only = preview is None
         preview_content = escape(preview) if preview else "准备中..."
-        if not completed:
-            preview_content += _format_tool_progress_badge(char_count, add_lines, del_lines)
+        # 徽标作为预览 span 的**兄弟节点**更新（长文本省略号不会把它裁掉）
+        badge_html = "" if completed else _format_tool_progress_badge(char_count, add_lines, del_lines)
 
         # ── 内容去重：相同预览内容跳过 JS 执行，减少流式高频更新压力 ──
         _cache_key = (tool_call_id, completed)
@@ -15938,6 +15940,7 @@ class MessageCard(SimpleCardWidget):
 
             safe_html = json.dumps(block_html).decode("utf-8")
             safe_preview = json.dumps(preview_content).decode("utf-8")
+            safe_badge = json.dumps(badge_html).decode("utf-8")
             streaming_flag = "true" if not completed else "false"
             _text_only_js = "true" if _text_only else "false"
             js_code = f"""
@@ -15948,6 +15951,17 @@ class MessageCard(SimpleCardWidget):
                 }}
                 var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : reportHeight;
+                // 徽标（+N/-M 或字符数）是预览 span 的兄弟节点，避免长文本省略号把徽标裁掉
+                var _dfxSetBadge = function(_bel, _bhtml) {{
+                    var _b = _bel.querySelector('.tool-streaming-badge');
+                    if (_bhtml) {{
+                        if (_b) {{ _b.outerHTML = _bhtml; }}
+                        else {{
+                            var _bp = _bel.querySelector('.tool-streaming-preview');
+                            if (_bp && _bp.parentNode) {{ _bp.insertAdjacentHTML('afterend', _bhtml); }}
+                        }}
+                    }} else if (_b) {{ _b.remove(); }}
+                }};
                 if (el) {{
                     // 🐛 FIX: 清除旧 data-tool-injected，消除 save-remove-restore 闪烁循环
                     el.removeAttribute('data-tool-injected');
@@ -15976,12 +15990,14 @@ class MessageCard(SimpleCardWidget):
                         if (previewEl2) {{
                             previewEl2.innerHTML = {safe_preview};
                         }}
+                        _dfxSetBadge(el, {safe_badge});
                     }} else {{
                         el.setAttribute('data-streaming', '{streaming_flag}');
                         var previewEl = el.querySelector('.tool-streaming-preview');
                         if (previewEl) {{
                             previewEl.innerHTML = {safe_preview};
                         }}
+                        _dfxSetBadge(el, {safe_badge});
                     }}
                     // 🐛 修复：预览内容更新后 body 自动滚底
                     // 区域独立 II：预览内容更新是纯工具区更新 → bodyOnly
