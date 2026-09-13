@@ -769,6 +769,11 @@ class TabManagerWindow(FramelessWindow):
         self._plugin_titlebar_tab_infos: dict = {}
         # 标题栏高亮重算合并标志（见 _schedule_replace_highlight）
         self._replace_highlight_pending = False
+        # tab 点击重活队列：show/hide 卡片链路是主线程长任务（WebEngine 卡片
+        # 首建 + 系统卡互斥批量显隐），同步执行会饿死滑动指示器的动画帧；
+        # 点击后动画先跑，重活延到动画结束后逐项执行（项间让一帧）
+        self._tab_switch_queue: list = []
+        self._tab_switch_timer: Optional[QTimer] = None
 
         self._setup_ui()
         self._setup_signals()
@@ -923,16 +928,45 @@ class TabManagerWindow(FramelessWindow):
         """顶栏 tab 点击：「聊天」→ 对话视图；full 卡片 tab → 切换/显示；
         插件常驻 tab 的展示由注册时的 on_click 回调处理，此处忽略。
 
+        ★ 重活延后：show/hide 卡片链路是主线程长任务（WebEngine 卡片首次
+        创建 + 系统卡互斥批量显隐），同步执行会饿死滑动指示器的动画帧
+        （实测「点 tab 看不到滑动、直接跳变」，内容轻时偶现正常）。
+        这里只入队，重活由 _drain_tab_switch_work 在动画结束后执行。
+        连点不取消只顺延：toggle 语义依赖执行时的卡片状态，乱序取消会
+        产生与点击序列相反的最终状态。
+
         无论走哪条分支，最后都调度一次高亮收敛（见 ``_sync_replace_highlight``）：
         插件常驻 tab 的 on_click 内部若把卡片 toggle 成隐藏，高亮必须回退，
         而这条路径此前完全没有同步点。
         """
         logger.debug(f"[TitleBar] tab clicked: {tab_id}")
+        self._enqueue_tab_switch_work(tab_id)
+        self._schedule_replace_highlight()
+
+    def _enqueue_tab_switch_work(self, tab_id: str) -> None:
+        """tab 切换重活入队，定时器对齐滑动动画结束（减少动态效果时立即执行）"""
+        from app.widgets.custom_title_bar import TabIndicatorController
+
+        self._tab_switch_queue.append(tab_id)
+        if self._tab_switch_timer is None:
+            self._tab_switch_timer = QTimer(self)
+            self._tab_switch_timer.setSingleShot(True)
+            self._tab_switch_timer.timeout.connect(self._drain_tab_switch_work)
+        if not self._tab_switch_timer.isActive():
+            delay = 0 if not Animations.motion_enabled() else TabIndicatorController.ANIM_MS + 30
+            self._tab_switch_timer.start(delay)
+
+    def _drain_tab_switch_work(self) -> None:
+        """依次执行排队的 tab 切换重活；相邻两项之间让出一帧，避免同帧连发集中阻塞"""
+        if not self._tab_switch_queue:
+            return
+        tab_id = self._tab_switch_queue.pop(0)
         if tab_id == CHAT_TAB_ID:
             self._show_conversation_view()
         elif tab_id not in self._plugin_titlebar_tab_ids:
             self._on_replace_tab_clicked(tab_id)
-        self._schedule_replace_highlight()
+        if self._tab_switch_queue:
+            QTimer.singleShot(0, self._drain_tab_switch_work)
 
     def _apply_win11_dwm_chrome(self):
         """Win11 DWM 窗口外观：圆角 + **不画**边框描边（Win10 及更早静默跳过）

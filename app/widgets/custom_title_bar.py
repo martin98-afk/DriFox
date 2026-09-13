@@ -593,11 +593,14 @@ class TabIndicatorController(QObject):
     的 parent 都是宿主 widget，宿主销毁时它们随之销毁，本对象随之失活）。
     """
 
+    #: 滑动动画时长；宿主若有「动画结束后再做重活」的需求按此值 + 余量延迟
+    ANIM_MS = Animations.NORMAL_MS
+
     def __init__(self, indicator_parent: QWidget, anim_parent: QObject, active_geometry: Callable[[], Optional[QRect]]):
         super().__init__(anim_parent)
         self._indicator = _TabIndicator(indicator_parent)
         self._anim = QVariantAnimation(anim_parent)
-        self._anim.setDuration(Animations.NORMAL_MS)  # 位移过渡：200ms
+        self._anim.setDuration(self.ANIM_MS)
         self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
         self._anim.valueChanged.connect(self._on_value)
         self._active_geometry = active_geometry
