@@ -101,7 +101,7 @@ from app.utils.design_tokens import (
 )
 from app.utils.theme_manager import theme_manager
 from app.utils.provider_icons import get_provider_icon
-from app.utils.utils import get_font_family_css, get_icon
+from app.utils.utils import APP_DATA_DIR_NAME, get_font_family_css, get_icon
 
 # ── App Widget 导入 ──
 # Note: 保留模块级导入而非方法内导入，因为 widget 类型在 100+ 方法中通过 isinstance 引用，
@@ -20790,7 +20790,7 @@ class OpenAIChatToolWindow(ToolWindow):
         safe_name = re.sub(r'[<>:"/\\|?*]', "_", (project_name or "imported_project")[:40]).strip()
         if not safe_name:
             safe_name = "imported_project"
-        default_dir = Path.home() / ".drifox6" / "workspaces" / safe_name
+        default_dir = Path.home() / APP_DATA_DIR_NAME / "workspaces" / safe_name
         logger.info(f"[MainWidget] 使用默认路径恢复: {default_dir}")
         return str(default_dir)
 
@@ -21116,7 +21116,7 @@ class OpenAIChatToolWindow(ToolWindow):
         当项目未设置根目录时，在 ~/.drifox6/workspaces/{project}/ 下创建
         临时工作目录，确保文件操作总有安全的基础目录。
 
-        使用 Path.home() / '.drifox6'（用户家目录）而非 resource_path("")，原因：
+        使用 Path.home() / APP_DATA_DIR_NAME（用户家目录）而非 resource_path("")，原因：
         - 用户数据归属：工作区数据应归属用户数据目录而非项目目录
         - 持久性：~/.drifox6 在开发和打包环境下始终可写、路径固定
         - 多窗口隔离：所有窗口统一使用同一基准，避免进程 cwd 飘移导致混乱
@@ -21125,7 +21125,7 @@ class OpenAIChatToolWindow(ToolWindow):
         try:
             from pathlib import Path
 
-            base_dir = str(Path.home() / ".drifox6")
+            base_dir = str(Path.home() / APP_DATA_DIR_NAME)
             temp_dir = os.path.join(base_dir, "workspaces", project)
             os.makedirs(temp_dir, exist_ok=True)
             self._current_workdir[project] = temp_dir

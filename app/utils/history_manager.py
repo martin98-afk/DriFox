@@ -27,7 +27,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 
 from app.core.message_content import consolidate_messages, content_to_text
 from app.core.token_estimator import count_messages_tokens
-from app.utils.utils import deserialize_from_json, get_app_data_dir, serialize_for_json
+from app.utils.utils import APP_DATA_DIR_NAME, deserialize_from_json, get_app_data_dir, serialize_for_json
 
 
 def parse_team_members_snapshot(snap_raw: str) -> List[Dict]:
@@ -1492,7 +1492,15 @@ class HistoryManager:
         return True
 
     def get_project_list(self) -> List[str]:
-        """全部会话的 distinct 项目名（内存聚合，排序返回；供历史页项目切换器）"""
+        """全部项目名（排序返回；供历史页项目切换器）
+
+        SQLite 模式走 sessions ∪ key_documents 权威口径（与 get_projects 查重
+        口径一致）：新建项目只写 key_documents（工作目录），首轮对话后才落
+        sessions；若只从会话聚合，空项目在切换当前项目后会从列表消失，且因
+        查重命中而无法重建同名（2026-09-13 修复）。
+        """
+        if self._use_sqlite and self._session_store and self._session_store.is_initialized:
+            return sorted(p for p in self._session_store.get_projects() if p)
         self._ensure_history_loaded()
         self._deduplicate_history_sessions()
         projects = {(s.get("project") or "默认项目").strip() or "默认项目" for s in self._history_sessions}
@@ -2218,7 +2226,7 @@ class HistoryManager:
                 git_file_entries = [n for n in zf.namelist() if n.startswith("git_files/")]
                 if git_file_entries:
                     safe_proj = sanitize_filename(result["project_name"][:30])
-                    extract_dir = Path.home() / ".drifox6" / "project_imports" / safe_proj
+                    extract_dir = Path.home() / APP_DATA_DIR_NAME / "project_imports" / safe_proj
                     # 清空旧目录防止残留
                     if extract_dir.exists():
                         shutil.rmtree(str(extract_dir))

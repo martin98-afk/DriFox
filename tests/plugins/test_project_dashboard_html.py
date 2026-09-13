@@ -5,8 +5,14 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 # project-dashboard 已迁至 .drifox6/plugins（引擎插件化），用唯一模块名加载（T8）
 _UI_DIR = Path(__file__).resolve().parent.parent.parent / ".drifox6" / "plugins" / "project-dashboard" / "ui"
+if not (_UI_DIR / "dashboard.py").exists():
+    # 该插件只存在于用户数据目录，仓库不含其源码；未安装（如全新的 .drifox6）时跳过，
+    # 不让收集阶段抛 FileNotFoundError 污染整个测试会话
+    pytest.skip(f"project-dashboard 未安装：{_UI_DIR}", allow_module_level=True)
 _spec = importlib.util.spec_from_file_location("pd_dashboard", _UI_DIR / "dashboard.py")
 _dashboard = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_dashboard)
