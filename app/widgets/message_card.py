@@ -1500,12 +1500,14 @@ def _format_tool_progress_badge(char_count: int, add_lines: int = 0, del_lines: 
     块末尾：预览 span 是 `overflow:hidden + ellipsis`，徽标嵌在里面会被长文本裁掉。
     """
     if add_lines or del_lines:
+        # 颜色与完成框的 diff 统计完全一致（render_helpers 里同款内联色，
+        # 不依赖 .tool-diff-stats__add/__del 的 CSS —— 流式块下 CSS 优先级不可靠）
         return (
             f'<span class="tool-diff-stats tool-streaming-badge" '
             f'style="font-size: {scale_font_size(11)}px; flex: 0 0 auto; margin-left: 6px;">'
-            f'<span class="tool-diff-stats__add">+{add_lines}</span>'
+            f'<span class="tool-diff-stats__add" style="color: #39d353; font-weight: 600;">+{add_lines}</span>'
             f'<span class="tool-diff-stats__sep">/</span>'
-            f'<span class="tool-diff-stats__del">-{del_lines}</span>'
+            f'<span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{del_lines}</span>'
             f"</span>"
         )
     if char_count > 0:
@@ -1593,7 +1595,7 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
-        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 0 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_display}
         </span>{badge_html}
     </div>"""
@@ -15869,10 +15871,14 @@ class MessageCard(SimpleCardWidget):
         # 徽标作为预览 span 的**兄弟节点**更新（长文本省略号不会把它裁掉）
         badge_html = "" if completed else _format_tool_progress_badge(char_count, add_lines, del_lines)
 
-        # ── 内容去重：相同预览内容跳过 JS 执行，减少流式高频更新压力 ──
+        # ── 内容去重：预览文本**与徽标**都相同才跳过 JS 执行，减少流式高频更新压力 ──
+        # 🐛 修复（编辑工具流式徽标不更新）：原实现只比较 preview_content，而编辑类
+        # 工具的预览文本在路径完整后就恒定（如「写入文件中」），导致此后每个进度事件
+        # 都被去重跳过 —— +N/-M 行数与字符数徽标停更，运行框看上去"卡死"在首帧。
         _cache_key = (tool_call_id, completed)
+        _cache_val = (preview_content, badge_html)
         _last = getattr(self, "_tool_streaming_preview_cache", None) or {}
-        if _last.get(_cache_key) == preview_content:
+        if _last.get(_cache_key) == _cache_val:
             # 🐛 修复（编辑工具框运行中消失）：preview 相同不重新注入，但 DOM 中
             # 运行框仍在 → 仍需 dirty 保护标记。否则 dirty 被某次渲染回调清除后，
             # 该工具框永远失去 save/restore 保护，下一次全量渲染裸 updateContent
@@ -15886,7 +15892,7 @@ class MessageCard(SimpleCardWidget):
             return
         if not hasattr(self, "_tool_streaming_preview_cache"):
             self._tool_streaming_preview_cache = {}
-        self._tool_streaming_preview_cache[_cache_key] = preview_content
+        self._tool_streaming_preview_cache[_cache_key] = _cache_val
 
         # 🐛 修复（编辑工具框运行中消失）：dirty 标记必须**先于** _schedule_render
         # 设置。completed=True 时 _schedule_render(immediate=True) 会立即执行

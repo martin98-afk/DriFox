@@ -19901,6 +19901,17 @@ class OpenAIChatToolWindow(ToolWindow):
         if svc is not None and hasattr(svc, "collapse_project_selector"):
             svc.collapse_project_selector()
 
+    def _history_page_follow_window_project(self):
+        """历史页项目过滤器跟随当前窗口项目（新建项目后驱动）
+
+        页面若仍过滤旧项目，新建项目后列表停留在旧项目会话；重置为
+        「跟随活跃窗口项目」后列表即显示新项目（插件未加载时静默跳过）。
+        """
+        svc = self._history_service()
+        page = svc.page if svc is not None else None
+        if page is not None and hasattr(page, "follow_window_project"):
+            page.follow_window_project()
+
     def _build_project_meta_map(self, projects: List[str]) -> Dict[str, Dict[str, int]]:
         """构建项目元数据映射 {项目名: {"sessions": N, "worktrees": N}}
 
@@ -20233,6 +20244,7 @@ class OpenAIChatToolWindow(ToolWindow):
                     except Exception as e:
                         logger.warning(f"[NewProject] 流式下新标签页项目上下文注册失败: {e}")
                     self._collapse_project_selector_panel()
+                    self._history_page_follow_window_project()
                     return
             # TabManagerWindow 未就绪则降级原行为（原地切项目）
         # P2-B：捕获切换前项目，供团队广播校验接收方一致性
@@ -20276,6 +20288,8 @@ class OpenAIChatToolWindow(ToolWindow):
         self._create_new_session()
         # 收起插件内的项目选择面板
         self._collapse_project_selector_panel()
+        # 历史页项目过滤器跟随新项目（否则仍过滤旧项目，列表停留在旧项目会话）
+        self._history_page_follow_window_project()
 
         # 团队模式：一人改项目全员同步（新建项目也是团队级项目切换）
         self._broadcast_team_project(project, prev_project)
