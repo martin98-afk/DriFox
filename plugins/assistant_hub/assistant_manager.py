@@ -382,8 +382,8 @@ class AssistantManager:
         except Exception:
             app_data = None
         if not app_data:
-            # 兜底：用户目录/.drifox/assistant_hub
-            app_data = str(Path.home() / ".drifox")
+            # 兜底：用户目录/.drifox6/assistant_hub
+            app_data = str(Path.home() / ".drifox6")
         return Path(app_data) / "assistant_hub"
 
     @property

@@ -22,10 +22,10 @@ ROLES = ("user", "assistant")
 
 
 def _candidate_db_paths() -> List[Path]:
-    """sessions.db 常见位置：主程序 app_data（开发=.drifox / 打包=~/.drifox）→ APPDATA → home。"""
+    """sessions.db 常见位置：主程序 app_data（开发=.drifox6 / 打包=~/.drifox6）→ APPDATA → home。"""
     out: List[Path] = []
     try:
-        # 主程序同源定位（开发环境 get_app_data_dir 返回相对 .drifox，依赖 cwd；resolve 兜底）
+        # 主程序同源定位（开发环境 get_app_data_dir 返回相对 .drifox6，依赖 cwd；resolve 兜底）
         from app.utils.utils import get_app_data_dir
 
         out.append(Path(get_app_data_dir()).resolve() / "sessions.db")
@@ -41,7 +41,7 @@ def _candidate_db_paths() -> List[Path]:
     if appdata:
         out.append(Path(appdata) / "DriFox" / "sessions.db")
         out.append(Path(appdata) / "drifox" / "sessions.db")
-    out.append(Path.home() / ".drifox" / "sessions.db")
+    out.append(Path.home() / ".drifox6" / "sessions.db")
     return out
 
 

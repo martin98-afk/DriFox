@@ -2218,7 +2218,7 @@ class HistoryManager:
                 git_file_entries = [n for n in zf.namelist() if n.startswith("git_files/")]
                 if git_file_entries:
                     safe_proj = sanitize_filename(result["project_name"][:30])
-                    extract_dir = Path.home() / ".drifox" / "project_imports" / safe_proj
+                    extract_dir = Path.home() / ".drifox6" / "project_imports" / safe_proj
                     # 清空旧目录防止残留
                     if extract_dir.exists():
                         shutil.rmtree(str(extract_dir))

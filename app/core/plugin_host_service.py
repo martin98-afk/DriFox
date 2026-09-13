@@ -520,9 +520,9 @@ class PluginHostService(QObject):
             导致一次性复制多个新插件时只检测到 1 个。现改为返回所有新插件名集合。
 
             🛡️ 双重校验（2026-08-23 bug fix）：父目录链匹配 .drifox-plugin/plugin.json
-            会把任何运行时数据目录（如 .drifox/backups/、.drifox/logs/、sessions.db）
-            的变更误识别为插件变更（change_path 在 .drifox/backups/ 下，父目录链
-            上溯到 .drifox/plugins/calendar/.drifox-plugin/plugin.json → 标记为
+            会把任何运行时数据目录（如 .drifox6/backups/、.drifox6/logs/、sessions.db）
+            的变更误识别为插件变更（change_path 在 .drifox6/backups/ 下，父目录链
+            上溯到 .drifox6/plugins/calendar/.drifox-plugin/plugin.json → 标记为
             calendar 新插件变更，但 change_path 实际不在 calendar 代码目录里 →
             _identify_components_from_changes_fallback 返回空 → emit("") →
             _reload_single_plugin(calendar, "") → "root change, skip component reload"
@@ -555,13 +555,13 @@ class PluginHostService(QObject):
                     except Exception:
                         candidate_name = parent.name
                     # 双重校验：candidate_name 是否已注册，且 change_path 必须**直接**
-                    # 在其 plugin.path 子树下（排除 .drifox/backups/ 等运行时目录
+                    # 在其 plugin.path 子树下（排除 .drifox6/backups/ 等运行时目录
                     # 通过父目录链误命中插件 manifest 的情况）。
                     plugin = _PM.get_instance().get_plugin(candidate_name)
                     if plugin is None:
                         # 未注册：manifest 位于受监控的插件根目录下 → 这是真正的新装
                         # 插件（整目录复制进 plugins/ 的场景），交给后续 rescan_plugin
-                        # 注册；否则（.drifox/backups/ 等运行时数据目录）按误判丢弃。
+                        # 注册；否则（.drifox6/backups/ 等运行时数据目录）按误判丢弃。
                         # 旧逻辑无条件 break 导致「新装插件的首次变更」永远无法触发
                         # 注册，用户必须手动重启/重载才能看到新插件。
                         parent_lower = str(parent.resolve()).lower().rstrip(os.sep)

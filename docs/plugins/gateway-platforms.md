@@ -10,7 +10,7 @@
 ## 1. 插件结构
 
 第三方平台插件目录长这样（社区仓 `drifox-plugins2/plugins/gateway-teams/`
-或 user 根 `~/.drifox/plugins/gateway-teams/`）：
+或 user 根 `~/.drifox6/plugins/gateway-teams/`）：
 
 ```
 gateway-teams/
@@ -288,7 +288,7 @@ default/env），主程序自动渲染设置卡 + `PluginConfigStore` 统一存�
 
 ### 步骤 ③：测试 + 发布
 
-- **本地调试**：把 `gateway-teams/` 软链/拷贝到 `~/.drifox/plugins/`，重启
+- **本地调试**：把 `gateway-teams/` 软链/拷贝到 `~/.drifox6/plugins/`，重启
   DriFox 或等待 `watchfiles` 热重载；进入「设置 → 网关」看到 Teams 卡片即注册成功。
 - **E2E 测试模式**：`tests/plugins/gateways/test_e2e_third_party_platform.py`
   给出 monkeypatch `_plugin_roots` + 临时插件目录构造验收链（4 测试 PASSED）；

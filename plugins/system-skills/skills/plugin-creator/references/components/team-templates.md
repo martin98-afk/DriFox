@@ -52,7 +52,7 @@ agents:
 
 同名时高优先级覆盖低优先级：
 
-1. **user-custom** — `.drifox/plugins/user-custom/team_templates/`（可写、可删）
+1. **user-custom** — `.drifox6/plugins/user-custom/team_templates/`（可写、可删）
 2. **plugin** — 各启用插件声明的 `team_templates/`（只读，按插件优先级排序）
 3. **system** — `plugins/system-team-templates/team_templates/`（只读，内置 default-team）
 

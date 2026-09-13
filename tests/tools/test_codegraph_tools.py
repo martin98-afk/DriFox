@@ -18,12 +18,12 @@ import pytest
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-# ── 跳过条件（工具插件化：引擎迁社区插件 .drifox/plugins/codegraph-tools/） ──
+# ── 跳过条件（工具插件化：引擎迁社区插件 .drifox6/plugins/codegraph-tools/） ──
 try:
     import codegraph  # noqa: F401
     import importlib.util
 
-    _PLUGIN_PATH = PROJECT_ROOT / ".drifox" / "plugins" / "codegraph-tools" / "tools" / "codegraph.py"
+    _PLUGIN_PATH = PROJECT_ROOT / ".drifox6" / "plugins" / "codegraph-tools" / "tools" / "codegraph.py"
     # 社区插件未安装/未同步时优雅跳过（不报收集错误）
     if not _PLUGIN_PATH.exists():
         raise ImportError(f"codegraph-tools 社区插件未安装: {_PLUGIN_PATH}")
@@ -62,7 +62,7 @@ def cg_tools():
 class TestCodeGraphContract:
     """社区插件契约：缺插件/缺依赖时加载器容错（T2 计划 P11）。
 
-    契约语义：codegraph 引擎是社区插件（.drifox/plugins/codegraph-tools），
+    契约语义：codegraph 引擎是社区插件（.drifox6/plugins/codegraph-tools），
     未安装/未同步时主程序必须优雅降级——加载不报错、registry 无 codegraph 工具。
     安装后由 TestCodeGraphModule（skipif 保护）验证功能。
     """
@@ -134,7 +134,7 @@ class TestCodeGraphModule:
         assert hasattr(codegraph, "__version__")
 
     def test_import_codegraph_tools(self):
-        # 工具插件化：引擎迁社区插件 .drifox/plugins/codegraph-tools/tools/codegraph.py
+        # 工具插件化：引擎迁社区插件 .drifox6/plugins/codegraph-tools/tools/codegraph.py
         assert _cg_plugin is not None
         assert _cg_plugin._HAS_CODEGRAPH
 

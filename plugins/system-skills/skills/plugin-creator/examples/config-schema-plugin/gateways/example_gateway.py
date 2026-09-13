@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """带 config_schema 的示例插件 — gateways/example_gateway.py
 
-参照自真实插件 gateway-qq（~/.drifox/plugins/gateway-qq/gateways/qq.py 尾部注册段），
+参照自真实插件 gateway-qq（~/.drifox6/plugins/gateway-qq/gateways/qq.py 尾部注册段），
 Adapter 收发逻辑全部省略，只保留 E1 配置契约的完整链路。
 
 链路全景：

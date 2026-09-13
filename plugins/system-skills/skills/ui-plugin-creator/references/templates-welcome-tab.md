@@ -10,7 +10,7 @@
 > （纯 HTML + 内联 CSS，或含 ` ```echarts ` 代码块的交互式图表），
 > 经欢迎卡片 markdown→CodeWebViewer(QWebEngineView) 管线渲染。
 > 参考实现：
-> - `calendar` 插件（.drifox/plugins/calendar/ui/__init__.py）— HTML + onclick 交互
+> - `calendar` 插件（.drifox6/plugins/calendar/ui/__init__.py）— HTML + onclick 交互
 > - `context-stats` 插件（D:/work/drifox-plugins2/plugins/context-stats）— echarts 复杂图表
 
 ### 8.1 适用场景

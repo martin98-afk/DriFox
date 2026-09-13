@@ -23,7 +23,7 @@ $ARGUMENTS
 
 ### 输出要求
 
-使用 `write` 工具创建文件，目标目录：`~/.drifox/plugins/user-custom/agents/<agent-name>.md`
+使用 `write` 工具创建文件，目标目录：`~/.drifox6/plugins/user-custom/agents/<agent-name>.md`
 
 文件名 `<agent-name>` 请根据描述自动生成，规则：
 - 使用英文小写 + 连字符（kebab-case）
@@ -163,7 +163,7 @@ tools:
 | C: 规划分析 | `plugins/system-agents/agents/plan.md` — 规划分析（含 Question 权限） |
 
 ### 注意事项
-1. 文件创建到 `.drifox/plugins/user-custom/agents/` 后，watchfiles 会在 1-3 秒内自动热加载，无需手动重载
+1. 文件创建到 `.drifox6/plugins/user-custom/agents/` 后，watchfiles 会在 1-3 秒内自动热加载，无需手动重载
 2. description 会被截断到 300 字符注入主智能体提示词，请在前 300 字符内传达核心信息，可含 `<example>` 标记增强触发精度
 3. mode 说明：`subagent` = 仅作子智能体；`primary` = 仅作主智能体；`all` = 两者皆可
 4. 提示词正文建议 500-2000 字，结构清晰，指令明确

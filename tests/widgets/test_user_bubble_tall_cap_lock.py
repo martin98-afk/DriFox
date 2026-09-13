@@ -27,7 +27,7 @@ from PySide6.QtWidgets import QApplication  # noqa: F401  # 须先于 design_tok
 
 from app.widgets.message_card import PlainTextViewer
 
-_SHORT = "你看d:/work/DriFox/.drifox/plugins/context-stats 这个字体大小没有用ui上下文的"
+_SHORT = "你看d:/work/DriFox/.drifox6/plugins/context-stats 这个字体大小没有用ui上下文的"
 
 
 def _flush(ms=120):

@@ -55,7 +55,7 @@ class GatewaySessionManager:
         初始化会话管理器
         
         Args:
-            data_dir: 数据目录，默认为 ~/.drifox/gateway
+            data_dir: 数据目录，默认为 ~/.drifox6/gateway
         """
         if data_dir is None:
             data_dir = get_app_data_dir() / "gateway"

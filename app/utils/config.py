@@ -307,6 +307,9 @@ class Settings(QConfig):
 
     # 版本信息
     current_version = "v0.5.11"
+    # 构建变体：pyqt5 | pyside6。同一 Release 同时挂两套安装包，更新器据此选包。
+    # CI 构建期由 release.yml 的 Inject build_variant 步骤按 matrix 覆写，缺省取本分支值。
+    build_variant = "pyside6"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
@@ -518,8 +521,8 @@ class Settings(QConfig):
     # 说明：本组配置在 main.py 启动最早期由 app/utils/render_env.py 裸 JSON
     # 读取并换算为环境变量，QtWebEngine 初始化后修改无效 —— **所有项均重启生效**。
     # 默认值 = 历史 main.py 硬编码行为；"auto" 档沿用旧检测链
-    # （DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL 环境变量 → ~/.drifox 标记文件）。
-    # 渲染后端（**已移除 auto 档** —— 它不检测机器，只是读 ~/.drifox/software_render
+    # （DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL 环境变量 → ~/.drifox6 标记文件）。
+    # 渲染后端（**已移除 auto 档** —— 它不检测机器，只是读 ~/.drifox6/software_render
     # 标记文件，名不副实）。默认 = software（WARP，CPU 光栅，不碰显卡驱动）：
     # 出厂即最稳路径，硬件档由用户显式选择。
     # vulkan / d3d9 / swiftshader 是三个排障档（见 render_env._ANGLE_PLATFORM 注释）：

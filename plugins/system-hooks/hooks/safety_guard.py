@@ -2,7 +2,7 @@
 """
 PreToolUse Hook 函数 — 危险操作拦截（命令/写文件/读敏感文件）
 
-参照 .drifox/plugins/security-guidance 的"pre-execution gate"模式：
+参照 .drifox6/plugins/security-guidance 的"pre-execution gate"模式：
 - HARD BLOCK：灾难性、零合理场景的工具调用 → 每次都 BLOCK，不去重
 - SOFT BLOCK：可教育改进的工具调用 → 首次 BLOCK（同 session 内），后续放行
 - 拦截消息用 `{"decision": "block", "output": "..."}` 阻断工具执行，

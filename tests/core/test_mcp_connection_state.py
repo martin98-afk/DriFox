@@ -57,27 +57,41 @@ def _make_conn(name, state=MCPState.CONNECTED, config=None):
 
 
 class TestResolvePluginPaths:
-    _SOURCE = "D:/work/DriFox/.drifox/plugins/browser/.mcp.json"
+    """兜底解析：从 _source 反推 plugin_root 并展开占位符。
 
-    def test_expands_root_placeholder(self):
+    被测函数要求 _source 的父目录真实存在，故用 tmp_path 自建插件根，
+    不依赖本机数据目录下是否装过某个插件（原先写死仓库内绝对路径就是这个坑）。
+    """
+
+    @staticmethod
+    def _plugin_root(tmp_path):
+        root = tmp_path / "plugins" / "browser"
+        root.mkdir(parents=True)
+        return root
+
+    def test_expands_root_placeholder(self, tmp_path):
+        root = self._plugin_root(tmp_path)
         cfg = {
             "command": "py",
             "args": ["-3", "${CLAUDE_PLUGIN_ROOT}/mcp/server.py"],
             "env": {},
             "url": "",
             "headers": {},
-            "_source": self._SOURCE,
+            "_source": str(root / ".mcp.json"),
         }
         out = _resolve_plugin_paths(cfg)
-        assert out["args"][1] == "D:/work/DriFox/.drifox/plugins/browser/mcp/server.py"
+        assert out["args"][1] == f"{root.as_posix()}/mcp/server.py"
 
-    def test_expands_data_placeholder(self):
-        cfg = {"args": [], "env": {"X": "${CLAUDE_PLUGIN_ROOT}/data"}, "_source": self._SOURCE}
+    def test_expands_data_placeholder(self, tmp_path):
+        root = self._plugin_root(tmp_path)
+        cfg = {"args": [], "env": {"X": "${CLAUDE_PLUGIN_ROOT}/data"}, "_source": str(root / ".mcp.json")}
         out = _resolve_plugin_paths(cfg)
-        assert out["env"]["X"] == "D:/work/DriFox/.drifox/plugins/browser/data"
+        assert out["env"]["X"] == f"{root.as_posix()}/data"
 
-    def test_idempotent_on_already_expanded(self):
-        cfg = {"args": ["D:/work/DriFox/.drifox/plugins/browser/mcp/server.py"], "_source": self._SOURCE}
+    def test_idempotent_on_already_expanded(self, tmp_path):
+        root = self._plugin_root(tmp_path)
+        expanded = f"{root.as_posix()}/mcp/server.py"
+        cfg = {"args": [expanded], "_source": str(root / ".mcp.json")}
         # 已展开的绝对值不应被二次改变
         assert _resolve_plugin_paths(cfg)["args"] == cfg["args"]
 
@@ -86,8 +100,9 @@ class TestResolvePluginPaths:
         # 无 _source 时原样返回，不影响普通配置
         assert _resolve_plugin_paths(cfg) is cfg
 
-    def test_does_not_mutate_original(self):
-        cfg = {"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"], "_source": self._SOURCE}
+    def test_does_not_mutate_original(self, tmp_path):
+        root = self._plugin_root(tmp_path)
+        cfg = {"args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"], "_source": str(root / ".mcp.json")}
         _resolve_plugin_paths(cfg)
         assert cfg["args"][0] == "${CLAUDE_PLUGIN_ROOT}/mcp/server.py"
 

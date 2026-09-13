@@ -17,10 +17,10 @@ qfluentwidgets 全量配置拖慢启动 / 提前加载 GUI 栈），换算成环
   - software_gl：Mesa llvmpipe 桌面 GL，最慢最稳
   - vulkan / d3d9 / swiftshader：排障档，见 _ANGLE_PLATFORM 注释
   - **无 auto 档**（2026-09-10 移除）：它其实不检测机器，只是读人工放的
-    ~/.drifox/software_render 标记文件 / DRIFOX_SOFTWARE_RENDER 环境变量，名不副实。
+    ~/.drifox6/software_render 标记文件 / DRIFOX_SOFTWARE_RENDER 环境变量，名不副实。
     该检测链已删除；历史配置里残留的 "auto"（以及手改的非法值、缺 key）一律按
     出厂默认 software 处理。
-- WebglEnabled: auto（旧检测链：DRIFOX_ENABLE_WEBGL → ~/.drifox/webgl_enabled）/ on / off
+- WebglEnabled: auto（旧检测链：DRIFOX_ENABLE_WEBGL → ~/.drifox6/webgl_enabled）/ on / off
 - RendererProcessLimit / JsHeapMb / LowEndDeviceMode / SmoothScrolling /
   CanvasAA / DisableBackgroundThrottling / DisabledFeatures / ExtraChromiumFlags：
   直通 Chromium 开关（DisableBackgroundThrottling 默认关，保持 Chromium 原生节流）
@@ -87,11 +87,11 @@ _APPLIED: dict = {}
 
 
 def _detect_webgl_enabled() -> bool:
-    """WebGL 解禁检测链：DRIFOX_ENABLE_WEBGL 环境变量 → ~/.drifox/webgl_enabled 标记文件。"""
+    """WebGL 解禁检测链：DRIFOX_ENABLE_WEBGL 环境变量 → ~/.drifox6/webgl_enabled 标记文件。"""
     if os.environ.get("DRIFOX_ENABLE_WEBGL", "").strip().lower() in ("1", "true", "on", "yes"):
         return True
     try:
-        return os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox", "webgl_enabled"))
+        return os.path.isfile(os.path.join(os.path.expanduser("~"), ".drifox6", "webgl_enabled"))
     except Exception:
         return False
 
@@ -99,7 +99,7 @@ def _detect_webgl_enabled() -> bool:
 def compute_settings(render: dict) -> dict:
     """[Render] 配置组 → 渲染设置（纯函数；WebGL 检测链为模块级函数，便于测试打桩）。"""
     # 缺 key（从未设置过）/ 历史 "auto" / 手改非法值 → 出厂默认：软件 (WARP)。
-    # 原 auto 检测链（DRIFOX_SOFTWARE_RENDER → ~/.drifox/software_render 标记文件）
+    # 原 auto 检测链（DRIFOX_SOFTWARE_RENDER → ~/.drifox6/software_render 标记文件）
     # 已删除：默认档本身就是最保守的软件档，那条链既没有升级空间，也不是真检测。
     backend_raw = render.get("RenderBackend", "")
     if backend_raw in _ANGLE_PLATFORM or backend_raw == "software_gl":
@@ -317,15 +317,16 @@ def default_config_path() -> str:
     """app.config 路径，与 app.utils.utils.get_app_data_dir 对齐。
 
     不直接 import 它：该模块顶层拖 PyQt5 / Settings，而本模块必须能在
-    Qt 加载之前独立运行。
+    Qt 加载之前独立运行。目录名字面量须与 app.utils.utils.APP_DATA_DIR_NAME
+    （PySide6 版用 .drifox6 与 PyQt5 版隔离）保持一致。
     """
     if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
         if sys.platform == "darwin":
-            base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Drifox", ".drifox")
+            base = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Drifox", ".drifox6")
         else:
-            base = os.path.join(os.path.expanduser("~"), ".drifox")
+            base = os.path.join(os.path.expanduser("~"), ".drifox6")
     else:
-        base = os.path.join(".drifox")
+        base = os.path.join(".drifox6")
     return os.path.join(base, "app.config")
 
 

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""验收夹具：看板工作区页面（复制到 ~/.drifox/plugins/workspace-demo/ 手动验收）
+"""验收夹具：看板工作区页面（复制到 ~/.drifox6/plugins/workspace-demo/ 手动验收）
 
 手动点检步骤：
-  1. cp -r tests/plugins/e2e/workspace-demo ~/.drifox/plugins/
+  1. cp -r tests/plugins/e2e/workspace-demo ~/.drifox6/plugins/
   2. 启动 DriFox，侧边栏出现「看板」入口
   3. 点击进入页面（content_area 切页）
   4. 输入 `/workspace-demo:kanban` 命令直达

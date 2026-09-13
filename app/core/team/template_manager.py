@@ -8,7 +8,7 @@
 - delete(name)          仅删除 user-custom 目录下的模板
 
 模板来源（优先级从高到低）：
-  1. user-custom  — .drifox/plugins/user-custom/team_templates/（可写、可删）
+  1. user-custom  — .drifox6/plugins/user-custom/team_templates/（可写、可删）
   2. plugin       — 各插件声明的 team_templates/ 目录（只读）
   3. system       — plugins/system-team-templates/team_templates/（只读）
 

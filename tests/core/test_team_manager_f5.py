@@ -7,7 +7,7 @@
 - Bug12: send_task/send_reply 邮件 dict 含 team_name
 
 设计说明：
-- team_manager fixture 隔离数据目录（tmp_path），不污染真实 ~/.drifox/teams
+- team_manager fixture 隔离数据目录（tmp_path），不污染真实 ~/.drifox6/teams
 - 并发测试用线程 + barrier 制造 read-modify-write 竞争窗口，验证锁生效
 """
 

@@ -16,7 +16,7 @@ _ORIG_GET_INSTANCE = tm_mod.TeamManager.__dict__["get_instance"]
 
 @pytest.fixture
 def fresh_tm(tmp_path, monkeypatch):
-    """指向 tmp_path 的全新 TeamManager 实例（隔离，不污染真实 ~/.drifox/）。"""
+    """指向 tmp_path 的全新 TeamManager 实例（隔离，不污染真实 ~/.drifox6/）。"""
     monkeypatch.setattr(tm_mod.TeamManager, "get_instance", _ORIG_GET_INSTANCE)
     monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path))
     tm_mod.TeamManager._instance = None

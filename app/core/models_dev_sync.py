@@ -52,8 +52,8 @@ def _default_cache_path() -> Path:
 
         return get_app_data_dir() / "cache" / "models_dev_cache.json"
     except Exception:
-        # 兜底：项目根目录下的 .drifox/cache/
-        return Path(__file__).resolve().parent.parent.parent / ".drifox" / "cache" / "models_dev_cache.json"
+        # 兜底：项目根目录下的 .drifox6/cache/
+        return Path(__file__).resolve().parent.parent.parent / ".drifox6" / "cache" / "models_dev_cache.json"
 
 
 # DriFox 服务商名 -> models.dev provider id

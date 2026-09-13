@@ -14,7 +14,7 @@
 设计说明：
 - TeamManager 直接构造实例（隔离 tmp_path）+ 将 get_instance 单例指向该隔离实例
   （monkeypatch 自动恢复），保证 team_tools 查询路径（TeamTools._get_team_manager
-  → get_instance）也命中隔离数据，避免读到真实 ~/.drifox/teams 残留成员
+  → get_instance）也命中隔离数据，避免读到真实 ~/.drifox6/teams 残留成员
 - 落盘断言直接读 team.json 文件，验证持久化语义而非仅内存缓存
 """
 

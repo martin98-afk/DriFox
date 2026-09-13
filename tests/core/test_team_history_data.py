@@ -341,7 +341,7 @@ class TestTeamFirstQuestionI1:
     """I-1 补测核对（plan 蓝图场景 6）
 
     ⚠️ 必须用 hm fixture（临时目录）：直接 HistoryManager() 会创建指向
-    真实 .drifox 数据库的连接并写入测试记录（R-close I-1' 污染修复）。
+    真实 .drifox6 数据库的连接并写入测试记录（R-close I-1' 污染修复）。
     """
 
     def test_first_question_uses_message_ts_when_light_last_time_tied(self, hm):

@@ -209,7 +209,7 @@ class SessionStore:
 
         SQLite 限制: 已存在的数据库必须先 VACUUM 一次, INCREMENTAL 模式才会真正
         开始跟踪历史 freelist. 如果未生效, 启动时打印一次性提示, 引导用户跑一次
-        VACUUM (例如执行 .drifox/_vacuum.py 脚本).
+        VACUUM (例如执行 .drifox6/_vacuum.py 脚本).
         """
         if conn is None and (not self._db or not self._db.is_connected):
             return
@@ -234,7 +234,7 @@ class SessionStore:
                         logger.warning(
                             f"[SessionStore] auto_vacuum=INCREMENTAL 已启用, "
                             f"但历史 freelist 累积 {freelist_mb:.0f}MB 尚未进入回收队列. "
-                            f"建议关闭软件后执行一次 VACUUM 启用 (例如: python .drifox/_vacuum.py)"
+                            f"建议关闭软件后执行一次 VACUUM 启用 (例如: python .drifox6/_vacuum.py)"
                         )
                     else:
                         logger.info(f"[SessionStore] auto_vacuum=INCREMENTAL 已生效, 当前 freelist={freelist_mb:.1f}MB")

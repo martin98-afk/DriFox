@@ -13,7 +13,7 @@ description: 发布插件到 drifox-plugins 官方市场的完整流程
 ```
 ① Fork 官方仓库 → https://github.com/martin98-afk/drifox-plugins（点右上角 Fork）
 ② Clone 你的 fork → git clone https://github.com/<你的帐号>/drifox-plugins.git
-③ 把你的插件复制到仓库中 → cp -r ~/.drifox/plugins/<name> plugins/<name>
+③ 把你的插件复制到仓库中 → cp -r ~/.drifox6/plugins/<name> plugins/<name>
 ④ 跑验证 → python tools/validate_plugins.py + generate_marketplace.py
 ⑤ Commit & Push 到你的 fork
 ⑥ 在 GitHub 提交 PR（你的 fork → martin98-afk/drifox-plugins main）
@@ -39,7 +39,7 @@ git remote add upstream https://github.com/martin98-afk/drifox-plugins.git
 git checkout -b feat/<plugin-name>
 
 # 5. 把你的插件从本地开发目录复制进来
-cp -r ~/.drifox/plugins/<plugin-name> plugins/<plugin-name>
+cp -r ~/.drifox6/plugins/<plugin-name> plugins/<plugin-name>
 
 # 6. 跑验证
 python tools/validate_plugins.py

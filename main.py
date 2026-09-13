@@ -32,7 +32,7 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 # 原 main.py 硬编码的 QT_OPENGL / QT_ANGLE_PLATFORM / QTWEBENGINE_CHROMIUM_FLAGS
 # 已配置化：设置界面「渲染与性能」→ app.config [Render] 组，重启生效。
 # app/utils/render_env.py 在 Qt 加载前裸 JSON 读取该组并换算环境变量，档位语义、
-# 旧检测链（DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL → ~/.drifox 标记文件）、
+# 旧检测链（DRIFOX_SOFTWARE_RENDER / DRIFOX_ENABLE_WEBGL → ~/.drifox6 标记文件）、
 # 外部环境变量优先（setdefault）与平台限定（macOS 强设 d3d11 黑屏）见其模块注释。
 # 返回值里还有两个「Qt 属性类」设置（AA_UseOpenGLES / AA_ShareOpenGLContexts）：
 # 它们不是环境变量，只能在 QApplication 创建前 setAttribute，故由 main() 取用。
@@ -329,7 +329,8 @@ def main():
     from app.core.single_instance import SingleInstanceGuard
     from app.utils.config import Settings
 
-    _guard = SingleInstanceGuard("Drifox")
+    # 锁名带 6 后缀：与 PyQt5 版（Drifox）分开，两版可同时开、互不误判为对方在运行
+    _guard = SingleInstanceGuard("Drifox6")
     # 开关关闭时不取锁，允许多实例并行（改动重启生效）
     if Settings.get_instance().enable_single_instance.value and not _guard.try_lock():
         _guard.request_show_window()

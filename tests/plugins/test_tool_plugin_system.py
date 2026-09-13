@@ -182,7 +182,7 @@ class TestSystemPluginTools:
             "upload_file",
         }
         assert expected <= names, f"缺失: {expected - names}"
-        # codegraph_explore：依赖 .drifox/plugins/codegraph-tools/ 社区插件（可能未安装）
+        # codegraph_explore：依赖 .drifox6/plugins/codegraph-tools/ 社区插件（可能未安装）
         if "codegraph_explore" in names:
             assert reg.get_danger("codegraph_explore") == DANGER_SAFE
 

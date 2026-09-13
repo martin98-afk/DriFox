@@ -242,10 +242,10 @@ def test_plugin_icon_widget_resolve_url_helper_integration():
 
 
 def test_resolve_remote_icon_urls_with_real_drifox_cache():
-    """端到端：从 .drifox 实际缓存读取 breakout 插件数据，验证 URL 可构造"""
+    """端到端：从 .drifox6 实际缓存读取 breakout 插件数据，验证 URL 可构造"""
     from ui._squircle_avatar import resolve_remote_icon_urls
 
-    cache_path = ROOT / ".drifox" / "cache" / "marketplaces" / "drifox-official.json"
+    cache_path = ROOT / ".drifox6" / "cache" / "marketplaces" / "drifox-official.json"
     if not cache_path.exists():
         import pytest
 

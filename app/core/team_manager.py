@@ -4,7 +4,7 @@ TeamManager — 多窗口团队协作管理（任务邮件版）
 
 基于文件邮箱的任务分发系统。
 
-数据结构：~/.drifox/teams/{team_name}/
+数据结构：~/.drifox6/teams/{team_name}/
   team.json              — 团队元信息 + 成员列表
   mailboxes/{window_id}/ — 每个成员的消息邮箱（JSON 文件）
 """

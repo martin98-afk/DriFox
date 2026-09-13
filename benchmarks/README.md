@@ -4,7 +4,7 @@
 
 ## 环境与纪律
 
-- 每次运行自动 chdir 到独立临时目录（`.drifox` 用户数据隔离，不污染真实 sessions.db/配置）
+- 每次运行自动 chdir 到独立临时目录（`.drifox6` 用户数据隔离，不污染真实 sessions.db/配置）
 - 关闭本机正在运行的 DriFox 主程序后测试（避免资源争抢干扰数据）
 - 结果 JSON 落盘 `benchmarks/results/`，环境信息（python/平台/CPU/内存/时间戳）自动附上
 

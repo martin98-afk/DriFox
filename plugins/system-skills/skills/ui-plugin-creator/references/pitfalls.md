@@ -315,7 +315,7 @@ def transcribe_wav(url: str, model: str, api_key: str, wav_path: str) -> str:
   **必须 dev 运行或重新打包**才生效，直接改源码对安装版永远无效。
 
 **修法**：
-1. 插件：把仓库目录整个复制到 `~/.drifox/plugins/<name>/`（先删旧目录再复制，
+1. 插件：把仓库目录整个复制到 `~/.drifox6/plugins/<name>/`（先删旧目录再复制，
    并递归删 `__pycache__`），重启/热重载生效；
 2. 主程序：`python main.py` 跑 dev 验证，或走打包发版流程；
 3. 排查时先确认用户跑的是哪个（安装版 vs dev）再看「为什么没生效」。

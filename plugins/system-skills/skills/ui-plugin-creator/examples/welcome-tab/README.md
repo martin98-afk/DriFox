@@ -30,7 +30,7 @@ welcome-tab/
 
 ## 如何使用
 
-1. 复制本目录到 `~/.drifox/plugins/welcome-tab-example/`
+1. 复制本目录到 `~/.drifox6/plugins/welcome-tab-example/`
 2. 搜索 `[改名]` 标记：plugin_name / mode_key / label 三处对齐
 3. 重启后在欢迎卡片看到「⭐ 示例」tab；在 `_render.py` 里替换成你的内容
 4. tab 的显隐跟随插件的启用/禁用，无需额外代码

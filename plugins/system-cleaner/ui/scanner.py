@@ -24,12 +24,12 @@ from PySide6.QtCore import QObject, Signal
 def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
 
-    开发环境: 当前目录/.drifox
-    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
-    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    开发环境: 当前目录/.drifox6
+    PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
+    macOS .app: ~/Library/Application Support/Drifox/.drifox6
     """
     if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
-        return Path(".drifox")
+        return Path(".drifox6")
     if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
@@ -41,10 +41,10 @@ def _drifox_dir() -> Path:
                 app_support_path = paths[0].fileSystemRepresentation().decode("utf-8")
                 app_support = Path(app_support_path) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / ".drifox"
+                return app_support / ".drifox6"
         except Exception:
             pass
-    return Path.home() / ".drifox"
+    return Path.home() / ".drifox6"
 
 
 # ── 缓存类型定义 ──────────────────────────────────────────

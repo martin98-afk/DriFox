@@ -13,7 +13,7 @@
 打点方式：pytest 进程内 monkeypatch 类方法计时 + loguru 捕获业务内建
 [Perf-CreateSession] 日志，不修改任何业务代码。
 
-数据落点：cwd=仓库根的 .drifox/（已 gitignore）。测试会创建若干空会话，
+数据落点：cwd=仓库根的 .drifox6/（已 gitignore）。测试会创建若干空会话，
 属预期副作用。
 
 运行：
@@ -562,7 +562,7 @@ def test_two_tabs_context_independence(tab_env):
     win_a._current_model_name = "model-isolation-A"
 
     # ── A：改工作目录（实例级缓存 {project: path}）──
-    win_a._current_workdir[proj_a] = str(REPO_ROOT / ".drifox" / "perf_isolation_workdir_a")
+    win_a._current_workdir[proj_a] = str(REPO_ROOT / ".drifox6" / "perf_isolation_workdir_a")
 
     # ── A：改工具权限（真实 API：关掉一个当前开启的工具）──
     toggles_a = win_a._tool_permission_controller.get_toggles()

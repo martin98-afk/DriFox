@@ -63,7 +63,7 @@ def _get_user_custom_path() -> Path:
 
 
 def _get_user_custom_backup_path() -> Path:
-    """获取 user-custom 绑定前备份路径（放 .drifox/ 根目录，避免触发插件 watch）"""
+    """获取 user-custom 绑定前备份路径（放 .drifox6/ 根目录，避免触发插件 watch）"""
     return get_app_data_dir() / "user-custom.pre_bind"
 
 
@@ -480,7 +480,7 @@ class ConfigSyncService(QObject):
         records_name = self._records_path.name
 
         # 构建精确监听路径列表。
-        # 关键修复：旧实现直接递归监听整个 .drifox 根目录（self._config_path.parent），
+        # 关键修复：旧实现直接递归监听整个 .drifox6 根目录（self._config_path.parent），
         # 导致 cache/install_tmp、plugins 等子目录的千级文件变更全部被 watchfiles 计入，
         # 既产出大量 [INFO] N changes detected 噪声、徒增 CPU，又让 plugins 目录被 backend
         # 与 config_sync 双重监听。改为精确监听业务真正关心的三个目标：
@@ -1950,7 +1950,7 @@ class ConfigSyncService(QObject):
             if not ok:
                 return False
 
-            # 解压前备份当前 user-custom（异常时回滚，备份放 .drifox/ 根目录避免触发插件 watch）
+            # 解压前备份当前 user-custom（异常时回滚，备份放 .drifox6/ 根目录避免触发插件 watch）
             rollback_path = get_app_data_dir() / "user-custom.backup"
             if self._user_custom_path.exists():
                 if rollback_path.exists():

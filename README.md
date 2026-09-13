@@ -173,7 +173,7 @@ python main.py
 ### 团队 = 多窗口 + 文件邮箱
 
 ```
-~/.drifox/teams/
+~/.drifox6/teams/
 ├── default/                     ← 团队目录（每个团队一个目录）
 │   ├── team.json                ← 团队元信息 + 成员列表
 │   └── mailboxes/{window_id}/   ← 每个成员的消息邮箱（JSON 文件）
@@ -289,7 +289,7 @@ python main.py
 
 ```
 plugins/system/          # 系统内置插件（打包在 exe 中）
-.drifox/plugins/         # 用户安装的第三方插件
+.drifox6/plugins/         # 用户安装的第三方插件
 ```
 
 **插件组件类型**：commands/（命令）、agents/（智能体）、skills/（技能）、themes/（主题）、hooks/（Hook）、.mcp.json（MCP 配置）、ui/（UI 组件）

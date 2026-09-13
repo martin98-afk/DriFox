@@ -22,7 +22,7 @@
 | `ui_plugin_registry` | `ui_host.py` / `ui_module.py` / `ui_page.py` / `ui_slots.py` |
 | `coding_plan_fetcher` | — |
 
-用法：`XxxRegistry.get_instance()` → 插件 `register(registry)` 注册 → 主程序查表。用户级插件根（`~/.drifox/plugins/`）覆盖系统根。
+用法：`XxxRegistry.get_instance()` → 插件 `register(registry)` 注册 → 主程序查表。用户级插件根（`~/.drifox6/plugins/`）覆盖系统根。
 序列化单入口 `MessageSerializer.serialize(messages, ctx)`，按 `ctx.flags.use_responses_api` 路由。
 激活循环策略：`LoopPolicyRegistry.get_instance().set_active(<id>)`。
 
@@ -53,7 +53,7 @@
 ## 四、热更新链路
 
 ```
-watchfiles 检测 ~/.drifox/plugins/ 变更
+watchfiles 检测 ~/.drifox6/plugins/ 变更
   → reload_plugin_subsystems / rescan_plugin
     → 工具 / providers / ui / hook / 命令 / 主题 各子系统刷新
     → 广播 PluginChanged → main_widget._on_plugin_hot_reload（ui / mcp / workbench 各分支）

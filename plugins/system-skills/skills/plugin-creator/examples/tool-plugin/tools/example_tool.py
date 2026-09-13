@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """最小工具插件示例 — tools/example_tool.py
 
-参照自真实插件 win-powershell（~/.drifox/plugins/win-powershell/tools/powershell.py），
+参照自真实插件 win-powershell（~/.drifox6/plugins/win-powershell/tools/powershell.py），
 只保留「可运行的最小结构」，实现逻辑已精简。
 
 结构三要素（缺一不可）：

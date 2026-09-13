@@ -141,7 +141,7 @@ registry.register_workspace_page("plugin-b", "docs", "文档", DocsPage, order_h
 
 ## 4. 完整示例插件
 
-`tests/plugins/e2e/workspace-demo/` 提供验收夹具（cp 到 `~/.drifox/plugins/` 手动点检）。
+`tests/plugins/e2e/workspace-demo/` 提供验收夹具（cp 到 `~/.drifox6/plugins/` 手动点检）。
 
 ### 目录结构
 
@@ -186,11 +186,11 @@ def register_ui(registry):
 
 ### 手动点检流程
 
-1. `cp -r tests/plugins/e2e/workspace-demo ~/.drifox/plugins/`
+1. `cp -r tests/plugins/e2e/workspace-demo ~/.drifox6/plugins/`
 2. 启动 DriFox → 侧边栏出现「看板」入口
 3. 点击 → `content_area` 切到看板页
 4. 命令面板输入 `/workspace-demo:kanban` → 直达
-5. `rm -rf ~/.drifox/plugins/workspace-demo` → 热卸载 → 入口与页面消失，回退对话页
+5. `rm -rf ~/.drifox6/plugins/workspace-demo` → 热卸载 → 入口与页面消失，回退对话页
 
 ---
 

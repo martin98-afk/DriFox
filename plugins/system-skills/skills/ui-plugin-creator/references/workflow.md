@@ -237,7 +237,7 @@ plugins/<your-plugin>/
 ```
 
 > 系统插件放在 `plugins/<plugin-name>/`（仓库内）。
-> 用户插件放在 `~/.drifox/plugins/<plugin-name>/`（用户目录，运行时下载）。
+> 用户插件放在 `~/.drifox6/plugins/<plugin-name>/`（用户目录，运行时下载）。
 
 ### 2.3 plugin.json 模板
 
@@ -357,7 +357,7 @@ chore(<plugin-name>): <杂项>)
 用户插件不在仓库内，运行时从市场下载：
 - 打成 zip 包（含整个 `plugins/<plugin-name>/` 目录）
 - 上传到插件市场
-- 用户点击安装后解压到 `~/.drifox/plugins/<plugin-name>/`
+- 用户点击安装后解压到 `~/.drifox6/plugins/<plugin-name>/`
 
 打包脚本示例：
 

@@ -25,6 +25,8 @@ logs/
 Thumbs.db
 /.drifox/
 /.drifox/app.config
+/.drifox6/
+/.drifox6/app.config
 .workbuddy/
 
 # docs 仅白名单 6 个 tracked 文件入库

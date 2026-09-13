@@ -1460,7 +1460,7 @@ class TabPanel(QWidget):
            独立 sidebar 项，则以 sidebar 为准（避免同一插件重复渲染两行）
 
         系统 UI 插件（plugins/ 目录下自带）→ 常驻显示，无滚动。
-        自定义 UI 插件（~/.drifox/plugins/ 用户安装）→ 默认折叠，展开后可滚轮滚动。
+        自定义 UI 插件（~/.drifox6/plugins/ 用户安装）→ 默认折叠，展开后可滚轮滚动。
         """
         try:
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
@@ -2853,7 +2853,7 @@ class TabPanel(QWidget):
                 pass
             # ⚠️ 归一：目录已不存在 / 主仓库根目录 / 临时工作目录 一律回落到主仓库("")。
             # 否则会话会挂到一个「与项目同名的幽灵工作树」下 —— 典型是
-            # ~/.drifox/workspaces/<项目名> 这类没落地的临时工作目录。
+            # ~/.drifox6/workspaces/<项目名> 这类没落地的临时工作目录。
             registered_norm = self._norm_registered(registered)
             plain_pairs = [
                 (r, self._resolve_worktree((r.get("worktree_path") or "").strip(), registered_norm)) for r in plain
@@ -2982,7 +2982,7 @@ class TabPanel(QWidget):
         """把一个「工作目录路径」归一到树里的一个工作树节点，"" 表示主仓库
 
         会话记录里的 worktree_path 存的是**当前工作目录**，不一定是工作树：它可能是
-        主仓库根目录、~/.drifox/workspaces/<项目名> 这类临时目录，或者指向一个已被
+        主仓库根目录、~/.drifox6/workspaces/<项目名> 这类临时目录，或者指向一个已被
         外部删除的路径。直接拿它建节点就会长出「与项目同名的幽灵工作树」。
 
         判定顺序（全走文件系统判断，**不起 git 子进程** —— 本方法在树每次重建时

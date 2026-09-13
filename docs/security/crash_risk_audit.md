@@ -63,7 +63,7 @@ EngineSession 只把 `finished / error / messages_updated` 换成线程安全的
 **其余 key 原样透传插件传入的回调**。
 
 真实调用方是插件 daemon 线程，例如：
-- `.drifox/plugins/cron-tasks/crontasks_core/executor.py:100-115`（`threading.Thread(daemon=True, name="cron-turn")`）
+- `.drifox6/plugins/cron-tasks/crontasks_core/executor.py:100-115`（`threading.Thread(daemon=True, name="cron-turn")`）
 - `plugins/assistant_hub/core/memory/ticker.py:80`
 
 **崩溃条件**：任何插件往这些 key 传一个会操作 QWidget / Qt 对象的回调 →

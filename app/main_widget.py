@@ -4628,7 +4628,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """保存当前活跃窗口的 agent 列表为命名模板到 user-custom 插件。
 
         收集所有 window_registry.window_instances 的 _current_agent，
-        去重后写入 .drifox/plugins/user-custom/team_templates/<name>.yaml。
+        去重后写入 .drifox6/plugins/user-custom/team_templates/<name>.yaml。
         """
         from app.core.team.template_manager import TemplateManager
         from app.core.team.template_schema import Template, TemplateAgent
@@ -20213,7 +20213,7 @@ class OpenAIChatToolWindow(ToolWindow):
                                   （拖拽/选择文件夹设了根目录时使用）
             root_dir: 指定的项目根目录（拖拽/选择文件夹建项目时传入）。
                       传入时直接绑定该目录为工作目录，不再创建默认项目文件夹
-                      （~/.drifox/workspaces/<project>/），AGENTS.md 等文件
+                      （~/.drifox6/workspaces/<project>/），AGENTS.md 等文件
                       写入指定路径而非默认路径。
         """
         # 🆕 流式保护：当前标签页流式输出时，新建项目改开新标签页
@@ -20772,7 +20772,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         优先级：
         1. 原路径存在且合法（不含 .. 遍历） → 恢复回原路径，尊重用户已有配置
-        2. 否则 → 默认恢复到 ~/.drifox/workspaces/<project_name>/
+        2. 否则 → 默认恢复到 ~/.drifox6/workspaces/<project_name>/
         """
         if original_root:
             resolved = os.path.abspath(original_root)
@@ -20786,11 +20786,11 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 logger.info(f"[MainWidget] 原始路径不存在，将使用默认路径: {original_root}")
 
-        # 默认恢复路径：与 _ensure_temp_workdir 一致，使用 ~/.drifox/workspaces/<project_name>/
+        # 默认恢复路径：与 _ensure_temp_workdir 一致，使用 ~/.drifox6/workspaces/<project_name>/
         safe_name = re.sub(r'[<>:"/\\|?*]', "_", (project_name or "imported_project")[:40]).strip()
         if not safe_name:
             safe_name = "imported_project"
-        default_dir = Path.home() / ".drifox" / "workspaces" / safe_name
+        default_dir = Path.home() / ".drifox6" / "workspaces" / safe_name
         logger.info(f"[MainWidget] 使用默认路径恢复: {default_dir}")
         return str(default_dir)
 
@@ -20898,7 +20898,7 @@ class OpenAIChatToolWindow(ToolWindow):
 
         # ── 创建项目（已设根目录，跳过关键文档卡片弹出） ──
         # 传入 root_dir=folder_path：直接绑定指定文件夹为工作目录，
-        # 不再创建默认项目文件夹（~/.drifox/workspaces/<project>/），
+        # 不再创建默认项目文件夹（~/.drifox6/workspaces/<project>/），
         # AGENTS.md 等文件写入指定路径而非默认路径。
         self._on_new_project_created(project_name, suppress_memory_card=True, root_dir=folder_path)
 
@@ -21113,19 +21113,19 @@ class OpenAIChatToolWindow(ToolWindow):
     def _ensure_temp_workdir(self, project: str) -> str:
         """确保项目有临时工作目录
 
-        当项目未设置根目录时，在 ~/.drifox/workspaces/{project}/ 下创建
+        当项目未设置根目录时，在 ~/.drifox6/workspaces/{project}/ 下创建
         临时工作目录，确保文件操作总有安全的基础目录。
 
-        使用 Path.home() / '.drifox'（用户家目录）而非 resource_path("")，原因：
+        使用 Path.home() / '.drifox6'（用户家目录）而非 resource_path("")，原因：
         - 用户数据归属：工作区数据应归属用户数据目录而非项目目录
-        - 持久性：~/.drifox 在开发和打包环境下始终可写、路径固定
+        - 持久性：~/.drifox6 在开发和打包环境下始终可写、路径固定
         - 多窗口隔离：所有窗口统一使用同一基准，避免进程 cwd 飘移导致混乱
         - 稳定性：os.getcwd() 可能被外部工具/IDE 改变，家目录是固定路径
         """
         try:
             from pathlib import Path
 
-            base_dir = str(Path.home() / ".drifox")
+            base_dir = str(Path.home() / ".drifox6")
             temp_dir = os.path.join(base_dir, "workspaces", project)
             os.makedirs(temp_dir, exist_ok=True)
             self._current_workdir[project] = temp_dir

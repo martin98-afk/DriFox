@@ -8,6 +8,10 @@ on:
       tag:
         description: "Git tag（例如 v0.2.9，需已存在）"
         required: true
+      pyqt5_ref:
+        description: "PyQt5 变体取码的 ref（分支名 / tag / commit SHA）"
+        required: false
+        default: dev
 
 permissions:
   contents: write                   # 创建 Release 必需
@@ -16,14 +20,24 @@ jobs:
   # ════════════════════════════════════════════════
   # Job 0: Lint & Import Check（构建前置检查）
   #         在所有构建之前运行，失败则跳过后续耗时 job
+  #         两个变体各查一遍：pyqt5 那格跑的是 dev 分支代码，坏在这里就省下 3 个平台 job
   # ════════════════════════════════════════════════
   check:
-    name: Lint & Import Check
+    name: Lint & Import Check (${{ matrix.variant.id }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - id: pyqt5
+            ref: ${{ inputs.pyqt5_ref || 'dev' }}
+          - id: pyside6
+            ref: ${{ inputs.tag || github.ref_name }}
 
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ matrix.variant.ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -32,7 +46,7 @@ jobs:
           version: latest
           python-version: "3.14"
           enable-cache: true
-          cache-suffix: "uv-check"
+          cache-suffix: "uv-check-${{ matrix.variant.id }}"
 
       - name: Sync dev dependencies
         run: uv sync --group dev
@@ -56,14 +70,34 @@ jobs:
   # ════════════════════════════════════════════════
   # Job 1: Windows (PyInstaller + Inno Setup)
   # ════════════════════════════════════════════════
+  #
+  # ── variant 维度：一次运行同时产出 PyQt5 与 PySide6 两套包 ──
+  # 硬约束：一个 git tag 只能指向一个 commit，两套代码不能靠「两个分支各打同名 tag」发布
+  # （tag 名全局唯一，第二次推送会指向同一 commit）。解法是把代码 ref 提到 matrix 维度，
+  # 每格显式 checkout 各自分支，产物统一由 release job 挂到同一个 Release。
+  # 命名沿用单边后缀：pyqt5 无后缀（存量用户按 Drifox-Windows-Setup-<tag>.exe 找包），
+  # pyside6 带 -pyside6 后缀。
   build-windows:
     needs: [check]
-    name: Windows (PyInstaller + Inno Setup)
+    name: Windows (${{ matrix.variant.id }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - id: pyqt5
+            ref: ${{ inputs.pyqt5_ref || 'dev' }}
+            suffix: ''
+            file_suffix: ''
+          - id: pyside6
+            ref: ${{ inputs.tag || github.ref_name }}
+            suffix: pyside6
+            file_suffix: '-pyside6'
 
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ matrix.variant.ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -72,50 +106,29 @@ jobs:
           version: latest
           python-version: "3.14"
           enable-cache: true
-          cache-suffix: "uv-win"
+          cache-suffix: "uv-win-${{ matrix.variant.id }}"
 
       - name: Sync dependencies
         run: uv sync --all-groups
 
-      # ── 解析版本号 + 分支后缀 ──
-      # suffix 规则（单边后缀）：
-      #   dev 分支     → suffix=""         产物名保持原样 Drifox-Windows-Setup-v0.5.6.exe
-      #   pyside6 分支 → suffix="pyside6"  产物名 Drifox-Windows-Setup-v0.5.6-pyside6.exe
-      # 理由：dev (PyQt5) 是历史版本，更新器按 Drifox-Windows-Setup-v0.5.6.exe 找包；
-      #       不加后缀避免破坏 update checker；pyside6 是新分支必须显式区分。
-      #
-      # 注意：push tag 触发时 ${{ github.ref_name }} 是 tag 名（如 v0.5.6-rc1）
-      # 不是分支名。需要用 git branch --contains HEAD 反查 tag 所在分支。
-      - name: Resolve version & suffix
+      # ── 解析版本号 ──
+      # 后缀与代码 ref 现在都由 matrix 给出，不再需要 git branch --contains 反查分支。
+      - name: Resolve version
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          # 取所有包含当前 commit 的 origin/* 分支名（detached HEAD 下依然有效）
-          candidates="$(git branch -r --contains HEAD 2>/dev/null | sed 's|^[[:space:]]*origin/||' || true)"
-          # 优先级：pyside6 > dev > master > 其他
-          branch=""
-          for b in pyside6 dev master; do
-            if echo "$candidates" | grep -qx "$b"; then
-              branch="$b"
-              break
-            fi
-          done
-          branch="${branch:-unknown}"
-          # 单边后缀：只有 pyside6 加后缀，dev 保持历史文件名
-          case "$branch" in
-            pyside6)  suffix="pyside6"; file_suffix="-pyside6" ;;
-            *)        suffix="";        file_suffix=""         ;;
-          esac
-          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
-          echo "file_suffix=$file_suffix" >> "$GITHUB_OUTPUT"
-          if [ -z "$file_suffix" ]; then
-            echo "💡 Version: $v | Detected branch: $branch | Suffix: (none, 保持历史文件名)"
-          else
-            echo "💡 Version: $v | Detected branch: $branch | Suffix: $file_suffix"
-          fi
-          echo "    (candidates: $(echo "$candidates" | tr '\n' ' '))"
+          echo "💡 Version: $v | Variant: ${{ matrix.variant.id }} | ref: ${{ matrix.variant.ref }}"
+          echo "    HEAD: $(git rev-parse --short HEAD) - $(git log -1 --format=%s)"
+
+      # ── 把构建变体写进包内：更新器据此挑同变体的安装包 ──
+      # dev 分支若无该字段，sed 无匹配即跳过；更新器 getattr 兜底 pyqt5，行为已正确。
+      - name: Inject build_variant
+        shell: bash
+        run: |
+          sed -i "s|^\([[:space:]]*build_variant = \).*|\1\"${{ matrix.variant.id }}\"|" app/utils/config.py
+          grep -n "build_variant = " app/utils/config.py || echo "  (本分支无 build_variant 字段，更新器按 pyqt5 兜底)"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -138,7 +151,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $fileSuffix = "${{ steps.version.outputs.file_suffix }}"  # "" 或 "-pyside6"
+          $fileSuffix = "${{ matrix.variant.file_suffix }}"  # "" 或 "-pyside6"
           $outputBase = "Drifox-Windows-Setup-$tag$fileSuffix"
           Write-Host "💡 编译安装包: $outputBase  (tag=$tag, file_suffix='$fileSuffix')"
           & "C:\Program Files (x86)\Inno Setup 6\iscc.exe" dist\installer.iss /DMyAppVersion=$tag /DOutputBaseFilename=$outputBase
@@ -151,7 +164,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $fileSuffix = "${{ steps.version.outputs.file_suffix }}"  # "" 或 "-pyside6"
+          $fileSuffix = "${{ matrix.variant.file_suffix }}"  # "" 或 "-pyside6"
           $base = "Drifox-Windows-Setup-$tag$fileSuffix"
           $installer = "dist/output/$base.exe"
           if (-not (Test-Path $installer)) {
@@ -165,7 +178,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ steps.version.outputs.tag }}"
-          $fileSuffix = "${{ steps.version.outputs.file_suffix }}"
+          $fileSuffix = "${{ matrix.variant.file_suffix }}"
           $base = "Drifox-Windows-Setup-$tag$fileSuffix"
           $installer = "dist/output/$base.exe"
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLower()
@@ -175,7 +188,7 @@ jobs:
       - name: Upload artifact (Windows)
         uses: actions/upload-artifact@v4
         with:
-          name: Drifox-Windows-${{ steps.version.outputs.tag }}${{ steps.version.outputs.file_suffix }}
+          name: Drifox-Windows-${{ matrix.variant.id }}
           path: |
             dist/output/*
           if-no-files-found: error
@@ -185,13 +198,26 @@ jobs:
   # Job 2: macOS (PyInstaller + DMG)
   # ════════════════════════════════════════════════
   build-macos:
-    name: macOS (PyInstaller + DMG)
+    name: macOS (${{ matrix.variant.id }})
     needs: [check]
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - id: pyqt5
+            ref: ${{ inputs.pyqt5_ref || 'dev' }}
+            suffix: ''
+            file_suffix: ''
+          - id: pyside6
+            ref: ${{ inputs.tag || github.ref_name }}
+            suffix: pyside6
+            file_suffix: '-pyside6'
 
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ matrix.variant.ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -200,40 +226,27 @@ jobs:
           version: latest
           python-version: "3.14"
           enable-cache: true
-          cache-suffix: "uv-mac"
+          cache-suffix: "uv-mac-${{ matrix.variant.id }}"
 
       - name: Sync dependencies (build + mac-build)
         run: uv sync --group build --group mac-build
 
-      # ── 解析版本号 + 分支后缀 ──
-      - name: Resolve version & suffix
+      # ── 解析版本号（后缀与 ref 由 matrix 给出）──
+      - name: Resolve version
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          candidates="$(git branch -r --contains HEAD 2>/dev/null | sed 's|^[[:space:]]*origin/||' || true)"
-          branch=""
-          for b in pyside6 dev master; do
-            if echo "$candidates" | grep -qx "$b"; then
-              branch="$b"
-              break
-            fi
-          done
-          branch="${branch:-unknown}"
-          # 单边后缀：只有 pyside6 加后缀，dev 保持历史文件名
-          case "$branch" in
-            pyside6)  suffix="pyside6"; file_suffix="-pyside6" ;;
-            *)        suffix="";        file_suffix=""         ;;
-          esac
-          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
-          echo "file_suffix=$file_suffix" >> "$GITHUB_OUTPUT"
-          if [ -z "$file_suffix" ]; then
-            echo "💡 Version: $v | Detected branch: $branch | Suffix: (none, 保持历史文件名)"
-          else
-            echo "💡 Version: $v | Detected branch: $branch | Suffix: $file_suffix"
-          fi
-          echo "    (candidates: $(echo "$candidates" | tr '\n' ' '))"
+          echo "💡 Version: $v | Variant: ${{ matrix.variant.id }} | ref: ${{ matrix.variant.ref }}"
+          echo "    HEAD: $(git rev-parse --short HEAD) - $(git log -1 --format=%s)"
+
+      # ── 把构建变体写进包内（dev 分支无此字段则跳过，更新器兜底 pyqt5）──
+      - name: Inject build_variant
+        shell: bash
+        run: |
+          sed -i "s|^\([[:space:]]*build_variant = \).*|\1\"${{ matrix.variant.id }}\"|" app/utils/config.py
+          grep -n "build_variant = " app/utils/config.py || echo "  (无 build_variant 字段，按 pyqt5 兜底)"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -315,13 +328,13 @@ jobs:
         run: uv run python create_dmg.py
         env:
           DMG_VERSION: ${{ steps.version.outputs.tag }}
-          DMG_SUFFIX: ${{ steps.version.outputs.suffix }}
+          DMG_SUFFIX: ${{ matrix.variant.suffix }}
 
       - name: Verify DMG output
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          file_suffix="${{ steps.version.outputs.file_suffix }}"  # "" 或 "-pyside6"
+          file_suffix="${{ matrix.variant.file_suffix }}"  # "" 或 "-pyside6"
           dmg="dist/Drifox-macOS-${tag}${file_suffix}.dmg"
           if [ ! -f "$dmg" ]; then
             echo "❌ DMG 未生成: $dmg"
@@ -334,14 +347,14 @@ jobs:
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          file_suffix="${{ steps.version.outputs.file_suffix }}"
+          file_suffix="${{ matrix.variant.file_suffix }}"
           sha256sum "dist/Drifox-macOS-${tag}${file_suffix}.dmg" | tee dist/SHA256SUMS
 
       # ── 上传产物 ──
       - name: Upload artifact (macOS)
         uses: actions/upload-artifact@v4
         with:
-          name: Drifox-macOS-${{ steps.version.outputs.tag }}${{ steps.version.outputs.file_suffix }}
+          name: Drifox-macOS-${{ matrix.variant.id }}
           path: |
             dist/Drifox-macOS-*.dmg
             dist/SHA256SUMS
@@ -352,13 +365,26 @@ jobs:
   # Job 3: Linux (PyInstaller + tar.gz)
   # ════════════════════════════════════════════════
   build-linux:
-    name: Linux (PyInstaller + tar.gz)
+    name: Linux (${{ matrix.variant.id }})
     needs: [check]
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - id: pyqt5
+            ref: ${{ inputs.pyqt5_ref || 'dev' }}
+            suffix: ''
+            file_suffix: ''
+          - id: pyside6
+            ref: ${{ inputs.tag || github.ref_name }}
+            suffix: pyside6
+            file_suffix: '-pyside6'
 
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ matrix.variant.ref }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -367,7 +393,7 @@ jobs:
           version: latest
           python-version: "3.14"
           enable-cache: true
-          cache-suffix: "uv-linux"
+          cache-suffix: "uv-linux-${{ matrix.variant.id }}"
 
       - name: Install system dependencies
         run: |
@@ -381,35 +407,22 @@ jobs:
       - name: Sync dependencies
         run: uv sync --group linux-build
 
-      # ── 解析版本号 + 分支后缀 ──
-      - name: Resolve version & suffix
+      # ── 解析版本号（后缀与 ref 由 matrix 给出）──
+      - name: Resolve version
         id: version
         shell: bash
         run: |
           v="${{ inputs.tag || github.ref_name }}"
           echo "tag=$v" >> "$GITHUB_OUTPUT"
-          candidates="$(git branch -r --contains HEAD 2>/dev/null | sed 's|^[[:space:]]*origin/||' || true)"
-          branch=""
-          for b in pyside6 dev master; do
-            if echo "$candidates" | grep -qx "$b"; then
-              branch="$b"
-              break
-            fi
-          done
-          branch="${branch:-unknown}"
-          # 单边后缀：只有 pyside6 加后缀，dev 保持历史文件名
-          case "$branch" in
-            pyside6)  suffix="pyside6"; file_suffix="-pyside6" ;;
-            *)        suffix="";        file_suffix=""         ;;
-          esac
-          echo "suffix=$suffix" >> "$GITHUB_OUTPUT"
-          echo "file_suffix=$file_suffix" >> "$GITHUB_OUTPUT"
-          if [ -z "$file_suffix" ]; then
-            echo "💡 Version: $v | Detected branch: $branch | Suffix: (none, 保持历史文件名)"
-          else
-            echo "💡 Version: $v | Detected branch: $branch | Suffix: $file_suffix"
-          fi
-          echo "    (candidates: $(echo "$candidates" | tr '\n' ' '))"
+          echo "💡 Version: $v | Variant: ${{ matrix.variant.id }} | ref: ${{ matrix.variant.ref }}"
+          echo "    HEAD: $(git rev-parse --short HEAD) - $(git log -1 --format=%s)"
+
+      # ── 把构建变体写进包内（dev 分支无此字段则跳过，更新器兜底 pyqt5）──
+      - name: Inject build_variant
+        shell: bash
+        run: |
+          sed -i "s|^\([[:space:]]*build_variant = \).*|\1\"${{ matrix.variant.id }}\"|" app/utils/config.py
+          grep -n "build_variant = " app/utils/config.py || echo "  (无 build_variant 字段，按 pyqt5 兜底)"
 
       # ── PyInstaller ──
       - name: PyInstaller build
@@ -430,7 +443,7 @@ jobs:
         run: |
           cd dist
           tag="${{ steps.version.outputs.tag }}"
-          file_suffix="${{ steps.version.outputs.file_suffix }}"  # "" 或 "-pyside6"
+          file_suffix="${{ matrix.variant.file_suffix }}"  # "" 或 "-pyside6"
           tar czf "Drifox-Linux-${tag}${file_suffix}.tar.gz" Drifox/
           echo "✅ tar.gz: $(du -h Drifox-Linux-${tag}${file_suffix}.tar.gz | cut -f1)"
 
@@ -438,7 +451,7 @@ jobs:
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          file_suffix="${{ steps.version.outputs.file_suffix }}"
+          file_suffix="${{ matrix.variant.file_suffix }}"
           if [ ! -f "dist/Drifox-Linux-${tag}${file_suffix}.tar.gz" ]; then
             echo "❌ tar.gz 未生成: dist/Drifox-Linux-${tag}${file_suffix}.tar.gz"
             exit 1
@@ -449,7 +462,7 @@ jobs:
         shell: bash
         run: |
           tag="${{ steps.version.outputs.tag }}"
-          file_suffix="${{ steps.version.outputs.file_suffix }}"
+          file_suffix="${{ matrix.variant.file_suffix }}"
           cd dist
           sha256sum "Drifox-Linux-${tag}${file_suffix}.tar.gz" | tee SHA256SUMS
 
@@ -457,7 +470,7 @@ jobs:
       - name: Upload artifact (Linux)
         uses: actions/upload-artifact@v4
         with:
-          name: Drifox-Linux-${{ steps.version.outputs.tag }}${{ steps.version.outputs.file_suffix }}
+          name: Drifox-Linux-${{ matrix.variant.id }}
           path: |
             dist/Drifox-Linux-*.tar.gz
             dist/SHA256SUMS
@@ -483,18 +496,23 @@ jobs:
         with:
           path: artifacts
 
-      - name: Flatten artifacts (flat dir)
+      - name: Flatten artifacts (by variant)
         shell: bash
         run: |
-          mkdir -p release-assets
-          # 收集各平台安装包
-          find artifacts -type f \
-            \( -name "*.exe" -o -name "*.dmg" -o -name "*.tar.gz" \) \
-            -exec cp {} release-assets/ \;
-          # 合并所有平台 SHA256SUMS（避免平台间相互覆盖）
+          # 按变体分目录。softprops/action-gh-release 按 files 列出顺序逐个上传，
+          # 而存量旧版更新器只认「本平台第一个包」——所以 pyqt5 目录必须排在最前，
+          # 否则旧 PyQt5 用户会被推 PySide6 包，覆盖安装后 Qt5/Qt6 动态库混杂。
+          mkdir -p release-assets/pyqt5 release-assets/pyside6
+          for v in pyqt5 pyside6; do
+            find artifacts -type f -path "*-$v/*" \
+              \( -name "*.exe" -o -name "*.dmg" -o -name "*.tar.gz" \) \
+              -exec cp {} "release-assets/$v/" \;
+            echo "  [$v] $(ls -1 release-assets/$v | tr '\n' ' ')"
+          done
+          # 合并各平台/各变体 SHA256SUMS（避免相互覆盖）
           find artifacts -type f -name "SHA256SUMS" -exec cat {} \; \
             > release-assets/SHA256SUMS
-          ls -la release-assets/
+          ls -la release-assets/pyqt5 release-assets/pyside6
 
       - name: Extract changelog for release body
         shell: bash
@@ -517,19 +535,20 @@ jobs:
               open('release_body.txt', 'w').close()
           "
 
-      - name: Annotate suffix in release body
+      - name: Annotate variants in release body
         shell: bash
         run: |
-          # 仅 pyside6 分支的 release body 加 PySide6 标记；dev 保持原样（更新器期望）
-          suffix="${{ steps.version.outputs.suffix }}"
-          if [ "$suffix" = "pyside6" ]; then
-            echo "" >> release_body.txt
-            echo "---" >> release_body.txt
-            echo "" >> release_body.txt
-            echo "**PySide6 构建版本** （分支: \`${{ github.ref_name }}\`）" >> release_body.txt
-            echo "" >> release_body.txt
-            echo "> 此版本为 PySide6 移植版，产物名带 \`-pyside6\` 后缀；dev 分支的 PyQt5 正式版请访问同 tag 的另一个 release asset。" >> release_body.txt
-          fi
+          # 同一 Release 挂两套安装包，说明写进 body，避免用户选错包。
+          # 用 printf 而非 heredoc：heredoc 正文必须顶格，会击穿 YAML block scalar 的缩进。
+          printf '%s\n' '' '---' '' '**本版本同时提供两套构建：**' '' \
+            '| 包名 | 内核 | 适用 |' \
+            '|---|---|---|' \
+            '| 无后缀 | PyQt5 / Qt5 | 存量用户，与旧版同一安装目录 |' \
+            '| `-pyside6` 后缀 | PySide6 / Qt6 | 新装机或需 Qt6 能力的用户 |' \
+            '' \
+            '> 两套包不互通：软件内自动更新只会选与自己构建变体一致的包。' \
+            >> release_body.txt
+          tail -n 14 release_body.txt
 
       - name: Create / Update Release
         uses: softprops/action-gh-release@v2
@@ -553,8 +572,12 @@ jobs:
               endsWith(github.ref_name, 'b5')
             }}
           generate_release_notes: false
+          # 上传顺序即页面展示顺序，也是旧版更新器命中顺序：pyqt5 在前，pyside6 在后
           files: |
-            release-assets/Drifox-Windows-Setup-*.exe
-            release-assets/Drifox-macOS-*.dmg
-            release-assets/Drifox-Linux-*.tar.gz
+            release-assets/pyqt5/Drifox-Windows-Setup-*.exe
+            release-assets/pyqt5/Drifox-macOS-*.dmg
+            release-assets/pyqt5/Drifox-Linux-*.tar.gz
+            release-assets/pyside6/Drifox-Windows-Setup-*.exe
+            release-assets/pyside6/Drifox-macOS-*.dmg
+            release-assets/pyside6/Drifox-Linux-*.tar.gz
             release-assets/SHA256SUMS

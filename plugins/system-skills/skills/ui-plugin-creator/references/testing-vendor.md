@@ -155,7 +155,7 @@ vendor_dir exists: True
 
 1. **复制插件到用户目录**：
    ```bash
-   cp -r plugins/my-plugin ~/.drifox/plugins/my-plugin
+   cp -r plugins/my-plugin ~/.drifox6/plugins/my-plugin
    ```
 2. **启动 DriFox**（开发模式：`python main.py`）
 3. **执行插件命令**（如 `/my-card`）

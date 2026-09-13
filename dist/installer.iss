@@ -23,6 +23,11 @@
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
 ; (To generate a new GUID, click Tools | Generate GUID inside the IDE.)
+; 两个构建变体（PyQt5 / PySide6）故意共用同一 AppId 与 DefaultDirName：
+; 一台机器只装一套绑定，同变体升级走覆盖安装（配置与数据在 %APPDATA%，不受影响）。
+; 跳变体安装（拿 -pyside6 包覆盖 PyQt5 版）会把两套 Qt 目录叠在同一 _internal 下，
+; 启动即崩——所以软件内更新由 update_checker._pick_asset 按 build_variant 选包拦住，
+; 手动下载请先卸载另一个变体。
 AppId={{9F1BD92B-9BD5-4952-BA03-D7EA4C7B2434}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
@@ -32,9 +37,10 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
-; 产物名由 CI 决定后通过 /DOutputBaseFilename= 传入（见 release.yml build-windows step）
-; 单边后缀：dev (PyQt5) → Drifox-Windows-Setup-{version}.exe（历史文件名，更新器识别）
-;         pyside6      → Drifox-Windows-Setup-{version}-pyside6.exe（区分用）
+; 产物名由 CI 决定后通过 /DOutputBaseFilename= 传入（见 release.yml 的 matrix.variant）
+; 单边后缀，与 create_dmg.py / update_checker 保持一致：
+;   pyqt5   → Drifox-Windows-Setup-{version}.exe        （历史文件名，存量更新器靠它找包）
+;   pyside6 → Drifox-Windows-Setup-{version}-pyside6.exe（显式区分，同 Release 共存）
 ; 本地测试 fallback：使用 {version}（不带后缀，符合历史格式）
 #ifndef OutputBaseFilename
   #define OutputBaseFilename "Drifox-Windows-Setup-{#MyAppVersion}"

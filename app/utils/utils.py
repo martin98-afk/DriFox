@@ -71,16 +71,25 @@ ANSI_COLOR_MAP = {
 }
 
 
+# PySide6 版应用数据根目录名。PyQt5 版用的是 '.drifox'，两版插件（含依赖各自 Qt 绑定
+# 的 UI 代码与编译扩展）互不兼容，共用一个目录会让用户在两版之间切换时加载到错版
+# 插件，因此这里整体改名隔离；新目录首次启动即为空环境，刻意不做旧数据迁移。
+# 注意：app/utils/render_env.py、app/utils/share_records.py 以及若干插件因各自的
+# 导入约束复制了同一段定位逻辑，其中的目录名字面量必须与本常量保持一致。
+APP_DATA_DIR_NAME = '.drifox6'
+
+
 def get_app_data_dir() -> Path:
     """获取应用数据目录（跨平台兼容）
 
-    开发环境: 当前目录/.drifox
-    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
-    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    目录名见 APP_DATA_DIR_NAME：
+    开发环境: 当前目录/.drifox6
+    PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
+    macOS .app: ~/Library/Application Support/Drifox/.drifox6
     """
     # 开发环境
     if not hasattr(sys, '_MEIPASS') and not getattr(sys, 'frozen', False):
-        return Path('.drifox')
+        return Path(APP_DATA_DIR_NAME)
 
     # macOS .app: 使用 Application Support（用户可写）
     if sys.platform == 'darwin':
@@ -92,10 +101,10 @@ def get_app_data_dir() -> Path:
             app_support_path = paths[0].fileSystemRepresentation().decode('utf-8')
             app_support = Path(app_support_path) / 'Drifox'
             app_support.mkdir(parents=True, exist_ok=True)
-            return app_support / '.drifox'
+            return app_support / APP_DATA_DIR_NAME
 
-    # Windows/Linux 打包: 使用 ~/.drifox（用户 home，不受安装位置限制）
-    return Path.home() / '.drifox'
+    # Windows/Linux 打包: 使用 ~/.drifox6（用户 home，不受安装位置限制）
+    return Path.home() / APP_DATA_DIR_NAME
 
 
 _MIGRATED_FLAG = False  # 防止重复迁移
@@ -116,7 +125,7 @@ def migrate_app_data_if_needed():
     """将旧版本数据迁移到用户可写目录（仅打包版需要）
 
     旧路径: <安装目录>/.drifox (Program Files 等，可能权限受限)
-    新路径: ~/.drifox 或 macOS: Application Support
+    新路径: ~/.drifox6 或 macOS: Application Support
 
     迁移仅在以下情况执行：
     1. 旧目录存在有效数据（app.config 或 sessions.db）
@@ -135,7 +144,8 @@ def migrate_app_data_if_needed():
 
     from loguru import logger
 
-    # 旧路径：安装目录旁（Program Files）
+    # 旧路径：安装目录旁（Program Files）——目录名固定为 '.drifox'，
+    # 那是早期打包版实际落盘的位置，不随 APP_DATA_DIR_NAME 改名而变
     old_dir = Path(sys._MEIPASS).parent / '.drifox' if hasattr(sys, '_MEIPASS') else None
     if not old_dir or not old_dir.exists():
         logger.debug(f"[迁移] 旧目录不存在，跳过迁移: {old_dir}")

@@ -180,6 +180,34 @@ class UpdateChecker(QWidget):
         self._start_download(latest_release)
 
 
+    # Release 资产命名约定（见 .github/workflows/release.yml 的 variant matrix）：
+    #   PyQt5 版 → 无后缀 Drifox-Windows-Setup-v0.6.0.exe（历史文件名，存量旧版靠它更新）
+    #   PySide6 版 → 带 -pyside6 后缀
+    # 同一 Release 挂两套包，必须按 build_variant 过滤；跨绑定覆盖安装会让 _internal 里
+    # Qt5 / Qt6 动态库混杂，启动即崩。
+    _PYSIDE6_MARK = "pyside6"
+
+    def _pick_asset(self, assets, system):
+        """按当前平台与构建变体挑选安装包。
+
+        变体无命中时退回本平台第一个包：历史 Release 只有无后缀的 PyQt5 包，
+        PySide6 版在旧 Release 上找不到对应资产时不该让更新链彻底断掉。
+        """
+        if system not in ("darwin", "windows"):
+            return None
+        ext = ".dmg" if system == "darwin" else ".exe"
+        want_pyside = getattr(self.cfg, "build_variant", "pyqt5") == self._PYSIDE6_MARK
+        fallback = None
+        for asset in assets:
+            name = asset["name"].lower()
+            if not name.endswith(ext):
+                continue
+            if fallback is None:
+                fallback = asset
+            if want_pyside == (self._PYSIDE6_MARK in name):
+                return asset
+        return fallback
+
     def _start_download(self, latest_release):
         """下载并安装新版本。"""
         assets = latest_release.get("assets", []) or []
@@ -191,19 +219,11 @@ class UpdateChecker(QWidget):
         # 获取当前系统平台
         system = platform.system().lower()
 
-        # 遍历 Release 资产定位安装文件
-        for asset in assets:
-            asset_name = asset["name"].lower()
-            if system == "darwin" and asset_name.endswith(".dmg"):
-                # macOS 下载 dmg
-                update_url = asset["browser_download_url"]
-                exe_name = asset["name"]
-                break
-            elif system == "windows" and asset_name.endswith(".exe"):
-                # Windows 下载 exe
-                update_url = asset["browser_download_url"]
-                exe_name = asset["name"]
-                break
+        # 按平台 + 构建变体定位安装文件
+        asset = self._pick_asset(assets, system)
+        if asset:
+            update_url = asset["browser_download_url"]
+            exe_name = asset["name"]
 
         if not update_url:
             self.create_errorbar("未找到安装程序", "请前往 Release 手动下载")
