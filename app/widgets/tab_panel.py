@@ -1363,7 +1363,11 @@ class TabPanel(QWidget):
         self._tree_widget = WorkspaceTree(self._tree_scroll)
         self._tree_widget.setStyleSheet("background: transparent;")
         self._tree_widget.newSessionRequested.connect(self.newSessionInWorkspaceRequested)
-        self._tree_widget.openSessionRequested.connect(self.openSessionRecordRequested)
+        # PySide6 迁移注记：QVariantMap(dict) → PyObject(object) 信号对信号直连
+        # 签名不兼容（RuntimeError: Failed to connect signal），改 lambda 转发。
+        self._tree_widget.openSessionRequested.connect(
+            lambda rec: self.openSessionRecordRequested.emit(rec)
+        )
         self._tree_widget.expansionChanged.connect(self._on_tree_expansion_changed)
         self._tree_scroll.setWidget(self._tree_widget)
         self._tree_scroll.setVisible(False)
