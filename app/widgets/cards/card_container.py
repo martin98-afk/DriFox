@@ -40,8 +40,9 @@ class CardContainer(QWidget):
     # 不再覆盖其设定。左右栏为横向轴、卡片天然较宽，沿用最小宽即可。
     _DOCK_DEFAULT_RATIO_V = 0.30
     # 展开/收起动画参数（按方向分离，与 TabManagerWindow._start_wb_anim 对齐）
-    _EXPAND_ANIM_MS = 200
-    _COLLAPSE_ANIM_MS = 160
+    # 走全局动效 token：进入 ENTER_MS/EASE_ENTER、离场 EXIT_MS/EASE_EXIT
+    _EXPAND_ANIM_MS = Animations.ENTER_MS
+    _COLLAPSE_ANIM_MS = Animations.EXIT_MS
 
     # 卡片可通过 setProperty(NO_ANIMATION_PROP, True) 声明不参与容器的展开/折叠动画
     # 适用场景：卡片自带 resize / 拖拽 等会持续触发 heightChanged 的交互，
@@ -317,13 +318,23 @@ class CardContainer(QWidget):
         return axis_min
 
     def _visible_cards_follow_content(self) -> bool:
-        """当前可见卡片是否声明了"高度严格跟随内容"（FOLLOW_CONTENT_PROP）
+        """当前可见卡片是否存在声明了"高度严格跟随内容"（FOLLOW_CONTENT_PROP）的卡
 
-        有可见卡片且全部声明时返回 True：dock 模式下容器也按 sizeHint 收缩，
-        不套 30% 下限 / 记忆高度 / 展开后早退，避免内容与容器高度不匹配产生空白。
+        判定用 any 而非 all：BOTTOM 是共存容器，question 强制清场对 L2 状态卡
+        豁免（_hide_same_container_cards 默认 exempt_stackable=True），提问卡与
+        状态卡（sub_agent_compact / message_queue / undo_delete）可同容器共存。
+        若按 all 判定，任一未声明 followContent 的状态卡都会让判定失效 →
+        _do_expand 走 dock 通用分支（30% 占比地板 + 记忆高度 + 布局 sizeHint
+        的 wordWrap 高估）→ 容器槽位远大于提问卡内容 → 卡片下方出现大块空白；
+        状态卡 visible_when 谓词翻转时 follow / 非 follow 分支交替 → 空白反复
+        出现消失。any 语义下只要 followContent 卡可见就走内容跟随分支，
+        _follow_content_natural_h 本就逐卡累加所有可见卡的内容高度（含状态卡），
+        共存时容器 = 各卡内容之和，既无空白也不裁切。
+        无 followContent 卡可见时（纯状态卡 / dock 卡）返回 False，维持
+        30% 占比地板 / 记忆恢复的原有行为不变。
         """
         visible = [w for w in self._cards.values() if not w.isHidden()]
-        return bool(visible) and all(w.property(self.FOLLOW_CONTENT_PROP) for w in visible)
+        return bool(visible) and any(w.property(self.FOLLOW_CONTENT_PROP) for w in visible)
 
     def _follow_content_natural_h(self) -> int:
         """followContent 卡片：用卡片 heightForWidth(容器宽) 计算真实内容高度
@@ -952,6 +963,12 @@ class CardContainer(QWidget):
             # 折叠前轴向 max 可能是 _EXPAND_MAX 或动画中间值，确保放开以读取真实尺寸
             if self._axis_max() < self._EXPAND_MAX:
                 self._set_axis_max(self._EXPAND_MAX)
+                # ★ 放开约束后必须让布局同步生效再读尺寸：Qt 不会在 setMaximum
+                # 后立即重排，直接读 height() 拿到的是放开前的旧值（布局未刷
+                # 新时甚至更旧）→ 折叠起手先「撑满」一下再收，肉眼可见闪跳。
+                lay = self.layout()
+                if lay is not None:
+                    lay.activate()
             current_h = self._axis_current()
             if current_h <= 0 or skip_anim:
                 _on_collapsed()
@@ -974,12 +991,18 @@ class CardContainer(QWidget):
         """
         anim = self._expand_animation
         collapsing = end_h < start_h
+        # 减少动态效果 / 未挂载父级：跳过动画直落终值（保留状态反馈，去掉运动）
+        if not Animations.motion_enabled() or self.parentWidget() is None:
+            self._set_axis_max(int(end_h))
+            if on_finished is not None:
+                on_finished()
+            return
         if anim is None:
             anim = QPropertyAnimation(self, self._axis_property())
             self._expand_animation = anim
         # 每次都重设：复用同一对象时方向可能反转
         anim.setDuration(self._COLLAPSE_ANIM_MS if collapsing else self._EXPAND_ANIM_MS)
-        anim.setEasingCurve(QEasingCurve.OutQuad if collapsing else QEasingCurve.OutCubic)
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_EXIT if collapsing else Animations.EASE_ENTER))
 
         # 断开上次的 on_finished 回调（避免重复连接）
         try:
