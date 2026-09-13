@@ -132,6 +132,19 @@ def font_size_css(size: int) -> str:
     return f"font-size: {scale_font_size(size)}px;"
 
 
+def _set_style_sheet(widget, css: str) -> None:
+    """setStyleSheet 的同串短路（Qt5 自己不做）
+
+    Qt5 每次 setStyleSheet 都会让 QStyleSheetStyle 重建并 repolish 整棵子树，
+    对**完全相同**的样式串也不例外（实测 1200 控件子树单次约 26ms）。全树字号
+    应用 / 外观刷新会反复重写同样的串：设置卡首次显示后的一次外观刷新里
+    194 次 setStyleSheet 占 230ms，其中 97 次来自本模块且绝大多数是同串重写。
+    主题/字号真变化时会走到不同串，届时自然生效，无需额外失效逻辑。
+    """
+    if css != widget.styleSheet():
+        widget.setStyleSheet(css)
+
+
 def apply_font_size_to_widget(widget, base_size: int = 14):
     """递归设置 widget 及其所有子控件的字体像素大小
 
@@ -191,20 +204,23 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
     # ── SettingCard / ExpandSettingCard ──
     # ExpandSettingCard 继承 SettingCard，已被 setting_cards 包含
     for card in setting_cards:
-        card.titleLabel.setStyleSheet(f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
-        card.contentLabel.setStyleSheet(
-            f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
+        _set_style_sheet(card.titleLabel, f"QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
+        _set_style_sheet(
+            card.contentLabel,
+            f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}",
         )
 
         # ExpandSettingCard 内部的 HeaderSettingCard 需额外覆盖
         if isinstance(card, ExpandSettingCard):
             if hasattr(card, "card") and hasattr(card.card, "titleLabel"):
-                card.card.titleLabel.setStyleSheet(
-                    f"QLabel#titleLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
+                _set_style_sheet(
+                    card.card.titleLabel,
+                    f"QLabel#titleLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}",
                 )
             if hasattr(card, "card") and hasattr(card.card, "contentLabel"):
-                card.card.contentLabel.setStyleSheet(
-                    f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}"
+                _set_style_sheet(
+                    card.card.contentLabel,
+                    f"QLabel#contentLabel {{ font-size: {content_scaled}px; font-family: '{font_family}'; }}",
                 )
 
     # ── ExpandSettingCard / OptionsSettingCard QSS 硬编码覆盖 ──
@@ -244,7 +260,9 @@ def apply_font_size_to_widget(widget, base_size: int = 14):
 
     # ── SwitchButton ──
     for switch in switches:
-        switch.setStyleSheet(f"SwitchButton>QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}")
+        _set_style_sheet(
+            switch, f"SwitchButton>QLabel {{ font-size: {scaled}px; font-family: '{font_family}'; }}"
+        )
 
 
 def current_theme() -> dict:

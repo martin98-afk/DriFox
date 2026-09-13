@@ -418,6 +418,10 @@ class LLMSettingsCard(SystemCardFrame):
         # 插件设置分区指纹：清单未变时跳过「销毁 + 重建」整片插件卡
         # （历史上每次打开设置面板都无条件重建，见 rebuild_plugin_cards）
         self._plugin_cards_sig = None
+        # 插件设置分区是否已真正实例化（未实例化时只同步导航显隐，不构造 widget）
+        self._plugin_cards_built = False
+        # 已"就绪"的分页（首次进入时付一次性准备成本，见 _ensure_page_ready）
+        self._page_ready: set[str] = set()
 
         self._setup_content()
 
@@ -528,6 +532,7 @@ class LLMSettingsCard(SystemCardFrame):
         lsp_layout.addWidget(self.lspListCard)
         lsp_layout.addStretch(1)
 
+        _ck("lsp")
         # ════ 工具 / 智能体 / 技能 启停（按插件维度 D9/D10，各自独立分页）════
         tools_layout = self._page_layouts["tools"]
         self.pluginToolCard = PluginComponentsCard(
@@ -564,6 +569,7 @@ class LLMSettingsCard(SystemCardFrame):
         skills_layout.addWidget(self.llmSkillsCard)
         skills_layout.addStretch(1)
 
+        _ck("tools+agents+skills")
         # ════ 通用设置页 ════
         common_layout = self._page_layouts["common"]
 
@@ -631,6 +637,7 @@ class LLMSettingsCard(SystemCardFrame):
         common_layout.addWidget(self.busyEnterCard)
         common_layout.addStretch(1)
 
+        _ck("common")
         # ════ 渲染与性能页（Webview 环境变量配置化，全部重启生效）════
         # 换算逻辑见 app/utils/render_env.py；高级项（DisabledFeatures /
         # ExtraChromiumFlags）不进 UI，走 app.config [Render] 组直达。
@@ -776,6 +783,7 @@ class LLMSettingsCard(SystemCardFrame):
         render_layout.addWidget(self.renderAdvancedCard)
         render_layout.addStretch(1)
 
+        _ck("render")
         # ════ 通知页 ════
         notify_layout = self._page_layouts["notify"]
 
@@ -801,6 +809,7 @@ class LLMSettingsCard(SystemCardFrame):
         notify_layout.addWidget(self.llmSoundCard)
         notify_layout.addStretch(1)
 
+        _ck("notify")
         # ════ 外观样式页 ════
         appearance_layout = self._page_layouts["appearance"]
 
@@ -840,6 +849,7 @@ class LLMSettingsCard(SystemCardFrame):
         # pet_layout.addWidget(self.petSizeCard)
         # pet_layout.addStretch(1)
 
+        _ck("appearance")
         # ════ 版本更新页 ════
         update_layout = self._page_layouts["update"]
 
@@ -862,6 +872,7 @@ class LLMSettingsCard(SystemCardFrame):
         update_layout.addWidget(self.manualUpdateCard)
         update_layout.addStretch(1)
 
+        _ck("update")
         # ════ 插件设置页（初始隐藏，有注册卡片时显示）════
         self._plugin_cards_widget = QWidget(self)
         self._plugin_cards_layout = QVBoxLayout(self._plugin_cards_widget)
@@ -870,11 +881,9 @@ class LLMSettingsCard(SystemCardFrame):
         self._page_layouts["plugins"].addWidget(self._plugin_cards_widget)
         self._page_layouts["plugins"].addStretch(1)
         self._plugin_cards_widget.setVisible(False)
-        # 左侧导航：初始隐藏（rebuild_plugin_cards 按注册卡片显隐）
-        try:
-            self._nav_buttons["plugins"].setVisible(False)
-        except Exception:
-            pass
+        # 左侧导航：按「有无注册卡片」显隐（只查清单不构造卡片；实际实例化
+        # 延迟到首次进入该页，见 _ensure_page_ready）
+        self._sync_plugin_nav_visibility()
 
         # 连接信号
         # 注意：只有真正影响外观的变更才走 _on_config_changed（触发全量刷新）
@@ -896,6 +905,10 @@ class LLMSettingsCard(SystemCardFrame):
             self.lspListCard,
         ]
         self._apply_list_accordion()
+        _ck("plugins+accordion")
+        big = " ".join(f"{k}={v:.1f}" for k, v in _marks if v >= 20)
+        if big:
+            logger.info(f"[Perf-OpenSettings] setup_content total={sum(v for _, v in _marks):.1f}ms {big}")
 
     def rebuild_plugin_cards(self, force: bool = False):
         """重建插件设置分区（Phase D，幂等）
@@ -912,8 +925,20 @@ class LLMSettingsCard(SystemCardFrame):
         清单增删（插件装卸/热重载）才需要真正重建。
         """
         t0 = time.perf_counter()
-        # 工具/智能体开关卡同步重建（插件增删/热重载后组件列表可能变化）
-        for card_name in ("pluginToolCard", "pluginAgentCard"):
+        # 首次构建延迟到「插件设置页首次进入」：实例化 5 张插件卡（含 ExpandSettingCard
+        # 内部 view/滚动区）是笔一次性重活，不该在打开设置的那一帧同步付。
+        # 未访问该页时只同步导航显隐（查清单，几乎零成本）。
+        if not force and not self._plugin_cards_built:
+            has = self._sync_plugin_nav_visibility()
+            logger.info(
+                f"[Perf-OpenSettings] rebuild_plugin_cards={_ms(t0)}ms deferred=True has_cards={has}"
+            )
+            return
+        # 工具/智能体开关卡：仅在其页已访问过后才顺带刷新（首次构建由
+        # _ensure_page_ready 在该页首次进入时付，非 force 路径命中脏检查时近乎零成本）
+        for tab_id, card_name in (("tools", "pluginToolCard"), ("agents", "pluginAgentCard")):
+            if tab_id not in self._page_ready:
+                continue
             try:
                 getattr(self, card_name).refresh_components()
             except Exception as e:
@@ -940,6 +965,7 @@ class LLMSettingsCard(SystemCardFrame):
             )
             return
         self._plugin_cards_sig = sig
+        self._plugin_cards_built = True
 
         # 清空旧卡片
         while self._plugin_cards_layout.count():
@@ -1183,8 +1209,61 @@ class LLMSettingsCard(SystemCardFrame):
         self._expand_page_cards(tab_id)
         self.tabChanged.emit(tab_id)
 
+    def _sync_plugin_nav_visibility(self) -> bool:
+        """同步「插件设置」导航项与分区显隐：只查注册清单，不构造卡片（成本可忽略）"""
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            has_cards = bool(UIPluginRegistry.get_instance().get_settings_cards())
+        except Exception:
+            has_cards = False
+        self._plugin_cards_widget.setVisible(has_cards)
+        try:
+            self._nav_buttons["plugins"].setVisible(has_cards)
+        except Exception:
+            pass
+        return has_cards
+
+    def _ensure_page_ready(self, tab_id: str):
+        """分页首次进入时的一次性准备：把「只有这页才需要的重活」从打开设置挪走
+
+        首开设置卡的成本里，非首屏页的一次性准备占了七成以上（Hooks 页的
+        HookManager 注入 + 全量重渲染、工具/智能体页的组件清单首次构建、插件
+        设置页的插件卡实例化）。用户可能整场会话都不点开这些页，却要在点开
+        设置的那一刻同步付完 —— 这就是"点设置要卡 1~2 秒"的主体。
+
+        改为按页延迟 + 只做一次：进入该页时才付，付完即止。
+        """
+        if tab_id in self._page_ready:
+            return
+        self._page_ready.add(tab_id)
+        t0 = time.perf_counter()
+        try:
+            if tab_id == "hooks":
+                # 构造期 hook_manager 为 None（parent 无 backend），原实现在
+                # controller 里构造完立刻注入并全量重渲染一次（实测 ~0.7s）
+                if getattr(self.hookListCard, "_hook_manager", None) is None:
+                    from app.core.hook_manager import HookManager
+
+                    self.hookListCard._hook_manager = HookManager()
+                self.hookListCard._refresh(reload=True)
+            elif tab_id in ("tools", "agents"):
+                card = getattr(self, "pluginToolCard" if tab_id == "tools" else "pluginAgentCard", None)
+                if card is not None:
+                    card.refresh_components()
+            elif tab_id == "plugins":
+                self.rebuild_plugin_cards(force=True)
+            elif tab_id == "skills":
+                self._prefetch_skills()
+        except Exception as e:
+            logger.warning(f"[LLMSettingsCard] {tab_id} 页首次准备失败: {e}")
+        spent = (time.perf_counter() - t0) * 1000
+        if spent >= 30:
+            logger.info(f"[Perf-OpenSettings] page_ready[{tab_id}]={spent:.1f}ms")
+
     def _expand_page_cards(self, tab_id: str):
         """进入分页时展开页内可展开卡片：进页即见列表，无需再点一次标题栏"""
+        self._ensure_page_ready(tab_id)
         layout = self._page_layouts.get(tab_id)
         if layout is None:
             return
@@ -1213,7 +1292,11 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _update_nav_styles(self):
         for tab_id, btn in self._nav_buttons.items():
-            btn.setStyleSheet(self._nav_btn_style(tab_id == self._current_tab))
+            css = self._nav_btn_style(tab_id == self._current_tab)
+            # setStyleSheet 对同串也会全量 repolish（Qt5 不短路），13 个导航按钮
+            # 每次外观刷新都重写一遍，短路掉
+            if css != btn.styleSheet():
+                btn.setStyleSheet(css)
 
     def _nav_frame_style(self) -> str:
         return f"""
@@ -1693,8 +1776,13 @@ class LLMSettingsCard(SystemCardFrame):
         # 预热技能发现：展开技能卡时要同步扫盘 + parse 每个 SKILL.md（~90ms），
         # 挪到打开设置后的空闲帧做，用户点开卡片时就不必再等
         QTimer.singleShot(300, self._prefetch_skills)
-        # 每次打开设置时刷新工具/智能体列表（插件热重载/启停后保持最新）
-        for card_name in ("pluginToolCard", "pluginAgentCard"):
+        # 打开设置时刷新工具/智能体列表（插件热重载/启停后保持最新）。
+        # ★ 仅限「已访问过的页」：未访问页的第一次 refresh_components 会走全量
+        # 构建（数百毫秒），那笔由 _ensure_page_ready 在该页首次进入时付，
+        # 不在这里替用户垫付。
+        for tab_id, card_name in (("tools", "pluginToolCard"), ("agents", "pluginAgentCard")):
+            if tab_id not in self._page_ready:
+                continue
             card = getattr(self, card_name, None)
             if card is not None:
                 card.refresh_components()

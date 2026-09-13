@@ -1140,14 +1140,19 @@ class HookListSettingCard(ExpandSettingCard):
             item = self.viewLayout.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()
                 w.deleteLater()
 
         self._hook_items.clear()
         self._render_hooks()
 
-        from PyQt5.QtCore import QCoreApplication
-
-        QCoreApplication.processEvents()
+        # ★ 原实现在这里 QCoreApplication.processEvents()：它会把当时事件队列里
+        # 积压的**全部**事件一并泵走，于是本函数的耗时变成"那一刻队列里有什么"
+        # ——实测把 HookManager 注入从 ~170ms 顶到 778ms，LSP 首建从 ~58ms 顶到
+        # 691ms（都是替别人还债）。它还可能事件重入 ensure_settings_popup 构造出
+        # 第二张设置卡（P024）。
+        # 布局尺寸本就不需要泵事件：takeAt 已把 item 摘出布局，sizeHint 不会再
+        # 计入；hide() 保证残留 widget 在真正被 delete 之前不会重绘出来。
         self.viewLayout.activate()
         self.view.updateGeometry()
 

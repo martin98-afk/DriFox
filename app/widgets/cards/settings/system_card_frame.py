@@ -9,6 +9,7 @@ SystemCardFrame — QFrame 基类 + 标准头部布局 + 固定边框
 """
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QIcon, QPixmap
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -268,9 +269,25 @@ class SystemCardFrame(QFrame):
 
     # ── 公开控制 ───────────────────────────────────────
 
-    def set_icon(self, icon: str):
-        if self.icon_label is not None:
-            self.icon_label.setText(icon)
+    def set_icon(self, icon):
+        """设置头部图标
+
+        接受 str（emoji 字符）或 QIcon（SVG 资源）。
+        - str：保留旧行为，icon_label.setText 渲染（兼容注释/提示里的 emoji）
+        - QIcon：自动按系统字体大小缩放到 20px，主题感知（深/浅色自动切换）
+        """
+        if self.icon_label is None:
+            return
+        if isinstance(icon, QIcon):
+            # 切到图像路径前先清空文本残留，避免宽字符撑高列宽
+            self.icon_label.setText("")
+            sz = scale_icon_size(self._icon_base_size if hasattr(self, "_icon_base_size") else 20)
+            self.icon_label.setFixedSize(sz, sz)
+            self.icon_label.setPixmap(icon.pixmap(sz, sz))
+        else:
+            self.icon_label.setFixedSize(self.icon_label.sizeHint())
+            self.icon_label.setPixmap(QPixmap())  # 清掉之前的 svg pixmap
+            self.icon_label.setText(str(icon) if icon is not None else "")
 
     def set_icon_widget(self, widget):
         """用自定义 widget 替换头部文字图标（如 ProviderIconWidget）

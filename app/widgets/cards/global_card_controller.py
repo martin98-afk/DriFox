@@ -172,7 +172,6 @@ class GlobalCardController:
         self._settings_popup_building = True
         _t0 = time.perf_counter()
         try:
-            from app.core.hook_manager import HookManager
             from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
             self._settings_popup = LLMSettingsCard(self._tab_manager)
@@ -181,14 +180,11 @@ class GlobalCardController:
             self._settings_popup.configChanged.connect(self.on_settings_config_changed)
             self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID))
 
-            # 全局 Hook 列表：HookManager 使用类级共享状态，单例即可跨窗口共用
-            try:
-                self._settings_popup.hookListCard._hook_manager = HookManager()
-                # 重新加载一次（构建时 manager 可能为 None 导致列表为空）
-                self._settings_popup.hookListCard._refresh(reload=True)
-            except Exception as e:
-                logger.warning(f"[GlobalCard] 设置 HookManager 注入失败: {e}")
             _t_hook = time.perf_counter()
+            # ★ 原实现在这里注入 HookManager 并全量重渲染一次（实测 ~0.7s，
+            # 其中 _refresh 内的 processEvents 会把构造期积压的事件一并泵走）。
+            # Hooks 页并非首屏，改为延迟到该页首次进入时做（LLMSettingsCard
+            # ._ensure_page_ready("hooks")），首开设置卡不再为它垫付。
 
             # 连接服务商添加/编辑信号
             self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)

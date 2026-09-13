@@ -254,6 +254,7 @@ class LspListSettingCard(ExpandSettingCard):
         while self.viewLayout.count():
             item = self.viewLayout.takeAt(0)
             if item.widget():
+                item.widget().hide()
                 item.widget().deleteLater()
 
         # 更新开关状态（与配置同步）
@@ -286,9 +287,10 @@ class LspListSettingCard(ExpandSettingCard):
                 self._rows[name] = row
                 self.viewLayout.addWidget(row)
 
-        from PyQt5.QtCore import QCoreApplication
-
-        QCoreApplication.processEvents()
+        # ★ 原实现在这里 QCoreApplication.processEvents()：泵走当时事件队列里的
+        # 全部事件，本函数耗时因此变成"那一刻队列里积压了什么"（实测首建被顶到
+        # 691ms，其中绝大部分是替别人还债）。布局尺寸不需要它：takeAt 已把 item
+        # 摘出布局，sizeHint 不再计入；hide() 保证残留 widget 在被 delete 前不重绘。
         self.viewLayout.activate()
         self.view.updateGeometry()
         self._adjustViewSize()

@@ -157,6 +157,21 @@ class CardContainer(QWidget):
                 return True
         return False
 
+    def _set_style_sheet_cached(self, css: str):
+        """setStyleSheet 的同串短路
+
+        ★ Qt5 的 setStyleSheet 对**完全相同**的样式串也不会短路：每次调用都会
+        让 QStyleSheetStyle 重建并 repolish 整棵子树。实测 1200 控件的子树
+        单次约 26ms；系统设置卡子树控件数以千计，而容器 showEvent 每次显示都
+        调 _apply_background_style → 每次打开卡片都白付一次百毫秒级 repolish
+        （线上 toggle_card 170~270ms，离屏不 paint 所以复现不出来）。
+
+        串未变则直接跳过。无需额外失效逻辑：主题切换会改变颜色 token、透明
+        卡片集合变化会切换分支——两种情况都会让串内容不同，届时自然应用。
+        """
+        if css != self.styleSheet():
+            self.setStyleSheet(css)
+
     def _apply_background_style(self):
         """应用主题背景 + 边框
 
@@ -169,7 +184,7 @@ class CardContainer(QWidget):
         if self._overlay_mode:
             # 覆盖层模式：卡片声明透明 → 容器只做透明承托，透出宿主背景
             if self._has_transparent_card():
-                self.setStyleSheet("""
+                self._set_style_sheet_cached("""
                     CardContainer {
                         background: transparent;
                         border: none;
@@ -177,7 +192,7 @@ class CardContainer(QWidget):
                 """)
                 return
             # 覆盖层模式：四角圆角独立面板视觉 + 较实背景，与对话区形成明确边界
-            self.setStyleSheet(f"""
+            self._set_style_sheet_cached(f"""
                 CardContainer {{
                     background: {Colors.CARD_BG.format(alpha=246)};
                     border: 1px solid {Colors.BORDER};
@@ -188,7 +203,7 @@ class CardContainer(QWidget):
         if self._horizontal or self._dock_splitter is not None:
             # 停靠区（左右容器 / 启用停靠模式的上下容器）：
             # 四角圆角独立面板视觉 + 更实的背景，与对话区形成明确边界
-            self.setStyleSheet(f"""
+            self._set_style_sheet_cached(f"""
                 CardContainer {{
                     background: {Colors.CARD_BG.format(alpha=246)};
                     border: 1px solid {Colors.BORDER};
@@ -196,7 +211,7 @@ class CardContainer(QWidget):
                 }}
             """)
             return
-        self.setStyleSheet(f"""
+        self._set_style_sheet_cached(f"""
             CardContainer {{
                 background: {bg};
                 border: 1px solid {Colors.BORDER};
@@ -1109,7 +1124,7 @@ class CompletionCardContainer(CardContainer):
 
     def _apply_background_style(self):
         """透明承托：面板表面由卡片自绘（见类 docstring）"""
-        self.setStyleSheet("""
+        self._set_style_sheet_cached("""
             CompletionCardContainer {
                 background: transparent;
                 border: none;
@@ -1140,7 +1155,7 @@ class BottomCardContainer(CardContainer):
         """底部容器背景：8px 上圆角 + 底部直角，与输入框视觉拼接"""
         Colors.refresh()
         bg = Colors.CARD_BG.format(alpha=232)
-        self.setStyleSheet(f"""
+        self._set_style_sheet_cached(f"""
             BottomCardContainer {{
                 background: {bg};
                 border: 1px solid {Colors.BORDER};

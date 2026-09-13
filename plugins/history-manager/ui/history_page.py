@@ -33,6 +33,7 @@ from typing import Any, List, Optional
 from PyQt5.QtCore import (
     QEasingCurve,
     QObject,
+    QParallelAnimationGroup,
     QPropertyAnimation,
     Qt,
     QTimer,
@@ -75,9 +76,18 @@ _CARD_MIN_WIDTH = 240
 # 面板 min/max 约束复位值（QWIDGETSIZE_MAX）：动画终态 _release_panel_area 成对放开用
 _PANEL_H_UNLIMITED = 16777215
 
-# 折叠头上方两固定行高：行1 子页签（CustomTabButton.HEIGHT）+ 行2 过滤行（搜索框 30）
-_TAB_ROW_H = 28
-_FILTER_ROW_H = 30
+# ── 项目面板展开/收起动画 ──
+# 展开比收起慢：进入需要减速铺垫（decelerate），退出需要干脆（accelerate）；
+# 时长也短于旧值（180ms 一闪而过 + OutCubic 长尾 = 观感拖沓）。
+_PANEL_EXPAND_MS = 220
+_PANEL_COLLAPSE_MS = 170
+_PANEL_EASE_EXPAND = QEasingCurve.OutCubic
+_PANEL_EASE_COLLAPSE = QEasingCurve.InCubic
+# 内容滑入：面板内容顶部内边距由「基准 + 位移量」收回基准，与外壳裁开叠加成
+# 下拉感。只改边距（子控件宽度不变 → 内嵌滚动区不重排条目），比 QGraphicsOpacity
+# Effect 淡入安全：不切换渲染路径、不给内嵌 ScrollArea 制造闪烁。
+_PANEL_BODY_PAD_TOP = 4
+_PANEL_SLIDE_IN_Y = 10
 
 
 class _PanelHeightDriver(QObject):
@@ -100,6 +110,30 @@ class _PanelHeightDriver(QObject):
     def _set_value(self, h) -> None:
         self._value = int(h)
         self._widget.setFixedHeight(self._value)
+
+    value = pyqtProperty(int, _get_value, _set_value)
+
+
+class _TopPadDriver(QObject):
+    """面板内容顶部内边距驱动器：展开时内容小幅上滑（裁开 + 滑入 = 下拉感）
+
+    逐帧只改 ``contentsMargins().top``：子控件宽度不变 → 内嵌滚动区不会重排
+    条目（重排 = 抖动）。相比 ``QGraphicsOpacityEffect`` 淡入，不切渲染路径、
+    不给内嵌 ScrollArea 制造半透明合成闪烁。
+    """
+
+    def __init__(self, layout, parent=None):
+        super().__init__(parent)
+        self._layout = layout
+        self._value = _PANEL_BODY_PAD_TOP
+
+    def _get_value(self) -> int:
+        return self._value
+
+    def _set_value(self, v) -> None:
+        self._value = int(v)
+        m = self._layout.contentsMargins()
+        self._layout.setContentsMargins(m.left(), self._value, m.right(), m.bottom())
 
     value = pyqtProperty(int, _get_value, _set_value)
 
@@ -129,8 +163,12 @@ class _HeaderChevron(QWidget):
 
     angle = pyqtProperty(float, _get_angle, _set_angle)
 
-    def set_expanded(self, expanded: bool) -> None:
-        """切换展开态并做旋转过渡（收敛式：动画中不重启；减少动效时直置终值）"""
+    def set_expanded(self, expanded: bool, duration: int = 0, ease_in: bool = False) -> None:
+        """切换展开态并做旋转过渡（收敛式：动画中不重启；减少动效时直置终值）
+
+        ``duration`` / ``ease_in`` 让箭头与面板高度动画同步（展开 decelerate、
+        收起 accelerate）：箭头先转完而面板还在长 = 两个动作脱节。
+        """
         self._expanded = bool(expanded)
         target = 180.0 if expanded else 0.0
         if self._anim.state() == QPropertyAnimation.Running:
@@ -142,6 +180,8 @@ class _HeaderChevron(QWidget):
             self._angle = target
             self.update()
             return
+        self._anim.setDuration(duration or Animations.EXPAND_MS)
+        self._anim.setEasingCurve(QEasingCurve(_PANEL_EASE_COLLAPSE if ease_in else _PANEL_EASE_EXPAND))
         self._anim.setStartValue(self._angle)
         self._anim.setEndValue(target)
         self._anim.start()
@@ -245,10 +285,14 @@ class _ProjectSelectorHeader(QFrame):
         self.setToolTip("全部项目（点击展开项目选择）" if is_all else f"当前项目：{name}（点击展开项目选择）")
         self._apply_style()
 
-    def set_expanded(self, expanded: bool) -> None:
-        """更新展开态：chevron 旋转过渡 + 描边/底色切换"""
+    def set_expanded(self, expanded: bool, duration: int = 0, ease_in: bool = False) -> None:
+        """更新展开态：chevron 旋转过渡 + 描边/底色切换
+
+        ``duration`` / ``ease_in`` 透传给箭头：箭头必须与面板高度动画同时长同
+        曲线，否则箭头转完了面板还在长（两个动作脱节）。
+        """
         self._expanded = bool(expanded)
-        self._chevron.set_expanded(self._expanded)
+        self._chevron.set_expanded(self._expanded, duration=duration, ease_in=ease_in)
         self._apply_style()
 
     def mousePressEvent(self, event):  # noqa: N802 (Qt 命名)
@@ -360,25 +404,50 @@ class HistoryPage(QWidget):
         filter_row.addWidget(self._new_session_btn)
         layout.addLayout(filter_row)
 
-        # ── 行3：项目选择面板（默认收起；展开时占满卡片高度） ──
-        self._panel_anim: Optional[QPropertyAnimation] = None  # 进行中的面板高度动画
-        self._project_panel = self._build_project_panel()
+        # ── 行3：项目选择面板 ↔ 会话列表区（互斥切换，交叉过渡） ──
+        #    ★ 两者必须装进同一个 ``_swap_host``（内部 spacing=0）再挂外层布局：
+        #      外层只看到 1 个拉伸项 → 面板显隐不改变外层 spacing 条数，
+        #      「面板高 + 列表高」恒等于 host 高度 → 交叉动画严格守恒、收尾不弹。
+        #      （两者直接挂外层布局时，收起态面板隐藏会少算 1 处 spacing，
+        #        列表终态比动画末值高出一个 spacing → 收尾弹 6px。）
+        self._swap_host = QWidget(self)
+        swap_lay = QVBoxLayout(self._swap_host)
+        swap_lay.setContentsMargins(0, 0, 0, 0)
+        swap_lay.setSpacing(0)  # 两端紧贴，过渡中不露缝
+        layout.addWidget(self._swap_host, 1)
+
+        self._panel_anim: Optional[QParallelAnimationGroup] = None  # 进行中的交叉动画组
+        self._project_panel = self._build_project_panel(self._swap_host)
         self._project_panel_open = False  # 不依赖 Qt 可见性（祖先未显示时 isVisible 恒 False）
         self._content_ready = False  # attach 后置 True（面板展开时要让出列表区域）
         self._project_panel.hide()
-        layout.addWidget(self._project_panel, 1)
+        swap_lay.addWidget(self._project_panel, 1)
 
         # 卡片最小宽度保底（左侧停靠区拖窄时搜索框/条目不被挤扁）
         self.setMinimumWidth(_CARD_MIN_WIDTH)
 
+        # ── 列表区：裁剪外壳（高度动画）+ 钉住内容（只被裁剪、不被压缩）──
+        #    与面板同一套两层结构，保证交叉过渡两侧对称、内容都不重排。
+        self._list_shell = QWidget(self._swap_host)
+        shell_lay = QVBoxLayout(self._list_shell)
+        shell_lay.setContentsMargins(0, 0, 0, 0)
+        shell_lay.setSpacing(0)
+        swap_lay.addWidget(self._list_shell, 1)
+        self._list_height_driver = _PanelHeightDriver(self._list_shell)
+        self._list_body = QWidget(self._list_shell)
+        list_body_lay = QVBoxLayout(self._list_body)
+        list_body_lay.setContentsMargins(0, 0, 0, 0)
+        list_body_lay.setSpacing(0)
+        shell_lay.addWidget(self._list_body)
+
         # ── 内容占位（attach 后隐藏） ──
-        self._hint = _EmptyHint("历史会话未加载", self)
-        layout.addWidget(self._hint, 1)
+        self._hint = _EmptyHint("历史会话未加载", self._list_body)
+        list_body_lay.addWidget(self._hint, 1)
 
         # ── 内容滚动区：scroll_area > content_widget > content_layout。
         #    ★ HistoryCard 自己无布局，条目经 get_content_layout() 沿父链上溯
         #    找 content_layout 属性后直接插入，去掉滚动容器会被压缩成一条条。
-        self._scroll_area = ScrollArea(self)
+        self._scroll_area = ScrollArea(self._list_body)
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         # ★ 滚动条样式含主题色 token，必须登记（否则主题切换后滚动条停留旧色）
@@ -396,7 +465,7 @@ class HistoryPage(QWidget):
         self._content_layout.setSpacing(4)
         self._scroll_area.setWidget(self._content_widget)
         self._scroll_area.hide()  # attach 前隐藏（空滚动区会闪白底）
-        layout.addWidget(self._scroll_area, 1)
+        list_body_lay.addWidget(self._scroll_area, 1)
         self._set_sub_tab_active(0)
 
         # ── 自带历史卡片 + 接线（替代宿主 _build_deferred_card_history） ──
@@ -423,7 +492,7 @@ class HistoryPage(QWidget):
 
     # ── 项目选择面板（折叠；复用宿主项目选择卡片） ──
 
-    def _build_project_panel(self) -> QWidget:
+    def _build_project_panel(self, host: QWidget) -> QWidget:
         """构建项目选择面板：「裁剪外壳 + 钉住内容」两层结构 + 工具条/列表
 
         外壳只做圆角底与逐帧高度裁剪，内容挂 ``body``：若内容直接挂外壳，逐帧
@@ -433,7 +502,7 @@ class HistoryPage(QWidget):
         宿主项目卡片完全一致）；项目增删等数据操作仍由宿主窗口实现，插件只做
         UI 承载与信号转发。
         """
-        panel = QFrame(self)
+        panel = QFrame(host)
         panel.setObjectName("projectSelectorPanel")
         # 面板容器轻底色 + 边框 + 圆角：展开后是一个明确的「下拉面板」块面，
         # 与折叠头/搜索框区分；走主题 QSS 登记随主题切换重放（面板默认收起，
@@ -455,7 +524,7 @@ class HistoryPage(QWidget):
         body = QFrame(panel)
         self._project_panel_body = body
         vbox = QVBoxLayout(body)
-        vbox.setContentsMargins(4, 4, 4, 4)
+        vbox.setContentsMargins(4, _PANEL_BODY_PAD_TOP, 4, 4)
         vbox.setSpacing(4)
 
         # ── 行1：「全部项目」聚合行 + 搜索/新建输入框 + 新建 + 选择文件夹 + 导入项目 ──
@@ -535,6 +604,7 @@ class HistoryPage(QWidget):
         vbox.addWidget(self._project_selector, 1)
         shell.addWidget(body, 1)
         self._panel_height_driver = _PanelHeightDriver(panel)
+        self._panel_pad_driver = _TopPadDriver(vbox)
         return panel
 
     def _call_window(self, method_name: str, *args) -> None:
@@ -620,68 +690,105 @@ class HistoryPage(QWidget):
         self._set_project_panel_visible(will_show)
 
     def _set_project_panel_visible(self, visible: bool) -> None:
-        """展开/收起面板：外壳高度动画（Animations.EXPAND_MS，OutCubic）
+        """展开/收起面板：面板与列表区**交叉过渡**（同帧反向缩放，总高守恒）
 
-        两层结构：外壳 ``_project_panel`` 逐帧 ``setFixedHeight`` 裁剪；内容挂
-        ``body`` 并按动画方向钉死高度（展开钉满高、收起钉起始高），只被外壳
-        裁剪不被压缩。动画启动前先冻结下方列表区/占位（面板与列表同属一个
-        QVBoxLayout，不冻结会两头夹）。系统「减少动态效果」或页面不可见时
-        跳过动画直置终值。
+        旧实现是「先隐藏列表区 → 面板从 0 长出」：列表在第 0 帧凭空消失、收起
+        时又在末帧凭空出现 → 两次硬切，这是「难看」的主因。这里改为两端反向
+        动画：面板 0↔A、列表区 A↔0 同帧推进，卡片总高恒定，视觉上一个块面把
+        另一个块面推开，没有突变。
+
+        守恒前提：两端同挂 ``_swap_host``（内部 spacing=0）→ 隐藏端不吃外层
+        spacing，「面板高 + 列表高」恒等于 host 高度，且 A 直接取两端当前高度
+        之和 —— 不必按「卡片高度 − 常量」去**估算**（旧实现的估算误差会让面板
+        比可用区差几个像素 → 内容被挤出或留缝）。
+
+        两个内容体（``_project_panel_body`` / ``_list_body``）在动画期都钉住高度：
+        只被外壳裁剪、不被布局压缩（否则列表条目随每帧重排 → 抖动）。
+        中途反向（连点）从当前高度续接，不重置到 0 → 不跳。
         """
-        self._project_panel_open = bool(visible)
-        self._project_header.set_expanded(visible)
-        body = self._project_panel_body
-        target = self._measure_panel_height()
+        visible = bool(visible)
+        self._project_panel_open = visible
+        self._project_header.set_expanded(
+            visible,
+            duration=_PANEL_EXPAND_MS if visible else _PANEL_COLLAPSE_MS,
+            ease_in=not visible,
+        )
         self._stop_project_panel_anim()
+
+        panel = self._project_panel
+        body = self._project_panel_body
+        shell = self._list_shell
+        list_body = self._list_body
+
+        # 交叉总量 A = 切换区总高（守恒量）。★ 取 ``_swap_host.height()`` 而不是
+        #   两端高度之和：隐藏端不被布局更新，会**残留上次的高度**
+        #   （实测首帧 panel=30 而 shell=626 → 和 656 远大于可用 626，
+        #     照此展开会把面板撑出容器）。可见端的起点按 A 反推，保证和恒为 A。
+        total = self._swap_host.height()
+        if total <= 0:  # 尚未布局（启动期）：退回两端之和
+            total = max(panel.height(), 0) + max(shell.height(), 0)
         if visible:
-            # 冻结下方区域（必须在启动动画前，否则布局把腾出的空间分给列表区）
-            self._scroll_area.setVisible(False)
-            self._hint.setVisible(False)
-            self._project_panel.setVisible(True)
-            body.setFixedHeight(target)  # 展开方向：内容钉满高，只被外壳逐帧露出
-            start = 0
-            self._project_panel.setFixedHeight(0)  # 展开起点真实为 0（防首帧按 sizeHint 撑满）
+            panel_from = min(max(panel.height(), 0) if panel.isVisible() else 0, total)
+            shell_from = max(total - panel_from, 0)
         else:
-            start = self._project_panel.height()
-            body.setFixedHeight(max(body.height(), start))  # 收起方向：内容钉住不被压缩
+            shell_from = min(max(shell.height(), 0) if shell.isVisible() else 0, total)
+            panel_from = max(total - shell_from, 0)
+
+        # 复位上一轮动画钉死的约束（否则 setFixedHeight 起点被 min/max 夹住）
+        for w in (panel, shell, body, list_body):
+            w.setMinimumHeight(0)
+            w.setMaximumHeight(_PANEL_H_UNLIMITED)
+        shell.setVisible(True)
+        list_body.setVisible(True)
+
+        if visible:
+            self._sync_list_visibility()  # 列表区按内容态显隐（随后被外壳裁掉）
+            panel.setVisible(True)
+            body.setFixedHeight(max(total, 1))  # 面板内容钉到终高，只被外壳逐帧露出
+            list_body.setFixedHeight(max(shell_from, 1))  # 列表内容钉住，只被裁掉
+            panel_to, shell_to = total, 0
+        else:
+            body.setFixedHeight(max(panel_from, 1))  # 收起方向：面板内容钉住不被压缩
+            list_body.setFixedHeight(max(total, 1))  # 列表内容钉到终高，只被外壳露出
+            panel_to, shell_to = 0, total
+        panel.setFixedHeight(panel_from)
+        shell.setFixedHeight(shell_from)
+
         if not self.isVisible() or not Animations.motion_enabled():
             # 页面不可见（启动期/卡片隐藏中）或系统减少动效：跳过动画直置终值
-            self._project_panel.setFixedHeight(target if visible else 0)
+            panel.setFixedHeight(panel_to)
+            shell.setFixedHeight(shell_to)
             self._release_panel_area()
             return
-        driver = self._panel_height_driver
-        anim = QPropertyAnimation(driver, b"value", self)
-        anim.setDuration(Animations.EXPAND_MS)
-        anim.setStartValue(start)
-        anim.setEndValue(target if visible else 0)
-        anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
-        anim.finished.connect(self._on_project_panel_anim_finished)
-        self._panel_anim = anim
-        anim.start()
 
-    def _measure_panel_height(self) -> int:
-        """面板展开目标高度 = 卡片当前可用高度（占满，不是内容高度）
+        duration = _PANEL_EXPAND_MS if visible else _PANEL_COLLAPSE_MS
+        curve = QEasingCurve(_PANEL_EASE_COLLAPSE if not visible else _PANEL_EASE_EXPAND)
+        group = QParallelAnimationGroup(self)
+        for driver, frm, to in (
+            (self._panel_height_driver, panel_from, panel_to),
+            (self._list_height_driver, shell_from, shell_to),
+        ):
+            anim = QPropertyAnimation(driver, b"value", group)
+            anim.setDuration(duration)
+            anim.setStartValue(frm)
+            anim.setEndValue(to)
+            anim.setEasingCurve(curve)
+            group.addAnimation(anim)
+        # 内容滑入（收起方向幅度减半：退出要干脆，全幅滑出会拖）
+        pad = QPropertyAnimation(self._panel_pad_driver, b"value", group)
+        pad.setDuration(duration)
+        pad.setStartValue(_PANEL_BODY_PAD_TOP + (_PANEL_SLIDE_IN_Y if visible else 0))
+        pad.setEndValue(_PANEL_BODY_PAD_TOP + (0 if visible else _PANEL_SLIDE_IN_Y // 2))
+        pad.setEasingCurve(curve)
+        group.addAnimation(pad)
+        group.finished.connect(self._on_project_panel_anim_finished)
+        self._panel_anim = group
+        group.start()
 
-        按内容量高：项目少（如 1 个）时面板只占约 100px，而列表区在展开态是
-        冻结隐藏的 → 视觉上一大片空白（用户实测反馈）。正解 = 占满可用高度，
-        内容不足的空白由面板内部滚动区吸收。
-        """
-        return max(self._available_panel_height(), 0)
-
-    def _available_panel_height(self) -> int:
-        """卡片高度 − 上方各行与边距/间距 = 面板可占用高度
-
-        上方固定行：行1 子页签（CustomTabButton 28px）+ 行2 过滤行（搜索框
-        30px）。展开是面板与列表区的互斥替换：行数不变（隐藏一个显示一个），
-        间距数不变（5 行中可见 3 行 → 2 处间距）。行高估算误差由面板内部
-        滚动区吸收，不影响正确性。
-        """
-        lay = self.layout()
-        if lay is None:
-            return 0
-        cm = lay.contentsMargins()
-        used = _TAB_ROW_H + _FILTER_ROW_H + cm.top() + cm.bottom() + lay.spacing() * 2
-        return self.height() - used
+    def _sync_list_visibility(self) -> None:
+        """列表区内部显隐（未加载占位 / 会话滚动区 二选一）"""
+        self._hint.setVisible(not self._content_ready)
+        self._scroll_area.setVisible(self._content_ready)
 
     def _release_panel_area(self) -> None:
         """动画终态统一出口：放开 min/max 约束并按开合状态落位
@@ -689,33 +796,41 @@ class HistoryPage(QWidget):
         动画期间走 ``setFixedHeight``（min 与 max 同时收紧）；终态若只放开
         maximumHeight 会永久卡死在动画末值高度，必须 min/max 成对恢复。
         """
-        body = self._project_panel_body
-        body.setMinimumHeight(0)
-        body.setMaximumHeight(_PANEL_H_UNLIMITED)
-        self._project_panel.setMinimumHeight(0)
-        self._project_panel.setMaximumHeight(_PANEL_H_UNLIMITED)
+        for w in (self._project_panel_body, self._list_body, self._project_panel, self._list_shell):
+            w.setMinimumHeight(0)
+            w.setMaximumHeight(_PANEL_H_UNLIMITED)
         if self._project_panel_open:
+            # 展开态：列表区让位（钉 0 高 + 停绘），面板由布局给满
+            self._list_shell.setFixedHeight(0)
+            self._list_body.setVisible(False)
+            self._project_panel.setVisible(True)
             self._project_new_edit.setFocus()  # 展开完成：聚焦搜索/新建框
         else:
             self._project_panel.setVisible(False)
-            self._scroll_area.setVisible(self._content_ready)
-            self._hint.setVisible(not self._content_ready)
+            self._project_panel.setFixedHeight(0)  # 防残留高度（下次展开从 0 起）
+            self._list_body.setVisible(True)
+            self._list_shell.setVisible(True)
+            self._sync_list_visibility()
 
     def _stop_project_panel_anim(self) -> None:
-        """停止进行中的面板动画；stop 后必须补齐终态（否则面板停在半高且列表不回来）"""
-        anim = self._panel_anim
-        if anim is None:
+        """停止进行中的交叉动画（保留当前高度，供反向切换续接）
+
+        只 stop、不补齐终态：旧实现 stop 后立刻 ``_release_panel_area()`` →
+        连点时先跳到终态、再从反向起点动（「跳一下再动」）。落位交给下一轮
+        动画终态或显式关闭路径。
+        """
+        group = self._panel_anim
+        if group is None:
             return
         self._panel_anim = None
-        anim.stop()
-        anim.deleteLater()
-        self._release_panel_area()
+        group.stop()
+        group.deleteLater()
 
     def _on_project_panel_anim_finished(self) -> None:
         """动画自然结束：清引用并落位（展开 → 聚焦搜索框；收起 → 交还列表区）"""
-        anim, self._panel_anim = self._panel_anim, None
-        if anim is not None:
-            anim.deleteLater()
+        group, self._panel_anim = self._panel_anim, None
+        if group is not None:
+            group.deleteLater()
         self._release_panel_area()
 
     def _on_project_row_selected(self, project: str) -> None:
