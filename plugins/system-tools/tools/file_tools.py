@@ -116,14 +116,14 @@ _MAX_GREP_CONTENT_LENGTH = 15000
 
 _GREP_EXCLUDE_DIRS = frozenset(
     {
-        ".drifox", ".mypy_cache", ".git", "node_modules", "__pycache__",
+        ".drifox", ".drifox6", ".mypy_cache", ".git", "node_modules", "__pycache__",
         "venv", ".venv", "dist", "build", ".idea", ".vscode",
     }
 )
 
 _SCAN_EXCLUDE_DIRS = frozenset(
     {
-        ".drifox", ".mypy_cache*", ".git*", "node_modules*", "__pycache__",
+        ".drifox", ".drifox6", ".mypy_cache*", ".git*", "node_modules*", "__pycache__",
         "venv*", ".venv*", "dist*", "build*", ".idea*", ".vscode*",
         ".pytest_cache*", ".tox*", "site-packages*", ".eggs*",
         ".ipynb_checkpoints*", "htmlcov*", ".ruff_cache*",

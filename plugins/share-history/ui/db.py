@@ -2,7 +2,7 @@
 """share-history — 基于 records.json 的分享记录存储层
 
 目录结构:
-    ~/.drifox/share/
+    ~/.drifox6/share/
     ├── sessions/        # 会话分享文件
     ├── projects/        # 项目导出文件
     └── records.json     # 所有分享记录 (JSON 数组)
@@ -22,14 +22,14 @@ from loguru import logger
 def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
 
-    开发环境: 当前目录/.drifox
-    PyInstaller打包: ~/.drifox
-    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    开发环境: 当前目录/.drifox6
+    PyInstaller打包: ~/.drifox6
+    macOS .app: ~/Library/Application Support/Drifox/.drifox6
     """
     import sys as _sys
 
     if not hasattr(_sys, "_MEIPASS") and not getattr(_sys, "frozen", False):
-        return Path(".drifox")
+        return Path(".drifox6")
     if _sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
@@ -40,10 +40,10 @@ def _drifox_dir() -> Path:
             if paths:
                 app_support = Path(paths[0].fileSystemRepresentation().decode("utf-8")) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / ".drifox"
+                return app_support / ".drifox6"
         except Exception:
             pass
-    return Path.home() / ".drifox"
+    return Path.home() / ".drifox6"
 
 
 def _records_path() -> Path:

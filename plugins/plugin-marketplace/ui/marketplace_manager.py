@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """市场源管理器 — 多市场源的增删改查、拉取合并
 
-市场源配置持久化到 .drifox/plugins/user-custom/marketplaces/sources.json
+市场源配置持久化到 .drifox6/plugins/user-custom/marketplaces/sources.json
 （随 user-custom 插件一起被云端备份/同步），拉取缓存仍在 cache 目录。
 不依赖 app 核心 Settings。
 """
@@ -26,11 +26,11 @@ from .proxy import get_proxy_config
 def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
 
-    开发环境: 仓库根/.drifox（解析为绝对路径，避免依赖可变 cwd）
-    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
-    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    开发环境: 仓库根/.drifox6（解析为绝对路径，避免依赖可变 cwd）
+    PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
+    macOS .app: ~/Library/Application Support/Drifox/.drifox6
 
-    注意：相对路径 Path(".drifox") 会在每次文件操作时按当前 cwd 解析；
+    注意：相对路径 Path(".drifox6") 会在每次文件操作时按当前 cwd 解析；
     Windows 原生 QFileDialog 会静默改变进程 cwd，导致相对路径被解析到
     错误目录而 FileNotFoundError。开发环境改为基于 __file__ 定位仓库根，
     返回绝对路径，彻底脱离 cwd 依赖。
@@ -40,8 +40,8 @@ def _drifox_dir() -> Path:
         root = here.parent
         for _ in range(8):
             if (root / ".git").exists():
-                return root / ".drifox"
-        return here.parents[3] / ".drifox"
+                return root / ".drifox6"
+        return here.parents[3] / ".drifox6"
     if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
@@ -53,10 +53,10 @@ def _drifox_dir() -> Path:
                 app_support_path = paths[0].fileSystemRepresentation().decode("utf-8")
                 app_support = Path(app_support_path) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / ".drifox"
+                return app_support / ".drifox6"
         except Exception:
             pass
-    return Path.home() / ".drifox"
+    return Path.home() / ".drifox6"
 
 
 # ── 默认市场源 ─────────────────────────────────────────────

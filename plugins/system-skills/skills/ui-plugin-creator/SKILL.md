@@ -34,7 +34,7 @@ brainstorming（需求边界） → frontend-design（视觉稿） → 本技能
 
 **frontend-design 未安装降级**：skill 加载失败时告知用户二选一：
 
-a) 安装：本机曾装于 `~/.drifox/plugins/frontend-design/`，若已被移入 `plugins-disabled` 可直接恢复；
+a) 安装：本机曾装于 `~/.drifox6/plugins/frontend-design/`，若已被移入 `plugins-disabled` 可直接恢复；
 b) 跳过设计稿直接实现，但动手前必须用 question 确认三要素：**布局结构、配色方案、交互流程**。禁止无确认直接编码。
 
 ## 2. 触发与第一动作（组件类型决策树）

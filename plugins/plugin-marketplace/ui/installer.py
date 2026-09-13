@@ -206,12 +206,12 @@ def _rmtree_relocate(installer: "PluginInstaller", path: Path, failures_out: Opt
 def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致）
 
-    开发环境: 当前目录/.drifox
-    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
-    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    开发环境: 当前目录/.drifox6
+    PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
+    macOS .app: ~/Library/Application Support/Drifox/.drifox6
     """
     if not hasattr(sys, "_MEIPASS") and not getattr(sys, "frozen", False):
-        return Path(".drifox")
+        return Path(".drifox6")
     if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
@@ -223,10 +223,10 @@ def _drifox_dir() -> Path:
                 app_support_path = paths[0].fileSystemRepresentation().decode("utf-8")
                 app_support = Path(app_support_path) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / ".drifox"
+                return app_support / ".drifox6"
         except Exception:
             pass
-    return Path.home() / ".drifox"
+    return Path.home() / ".drifox6"
 
 
 def _resolve_github_url(repo: str) -> str:
@@ -291,7 +291,7 @@ class PluginInstaller:
     def get_installed_map(self, use_cache: bool = True) -> dict:
         """批量扫描已安装插件，返回 {插件名: 版本号或 None}
 
-        扫描范围：用户启用（.drifox/plugins）+ 用户禁用（.drifox/plugins-disabled）
+        扫描范围：用户启用（.drifox6/plugins）+ 用户禁用（.drifox6/plugins-disabled）
         + 系统插件（项目根 plugins/）。系统插件仅当与用户插件不重名时计入，
         避免覆盖用户同名插件的版本号。
 
@@ -349,8 +349,8 @@ class PluginInstaller:
         """批量扫描插件状态，返回 {插件名: "enabled"|"disabled"|"system"|"builtin_enabled"|"builtin_disabled"}
 
         与 get_installed_map 的扫描范围一致：
-        - .drifox/plugins → enabled
-        - .drifox/plugins-disabled → disabled
+        - .drifox6/plugins → enabled
+        - .drifox6/plugins-disabled → disabled
         - 项目根 plugins/（不重名）→ 按 manifest type 区分：
           type=system → system（真系统插件）；type!=system → builtin_enabled/
           builtin_disabled（内置非 system 插件，按 Settings.disabled_plugins 判定）
@@ -815,7 +815,7 @@ class PluginInstaller:
                 # 更新场景：旧版已在 → 先备份到 cache，新版落位成功后再删
                 # 旧版；替换失败回滚旧版（下载已完成，失败只可能来自本地
                 # IO/句柄，回滚保证插件不落入「旧版已删、新版未装」状态）。
-                # 备份在 cache 目录（.drifox/cache），不触发插件目录监听。
+                # 备份在 cache 目录（.drifox6/cache），不触发插件目录监听。
                 backup = self._cache_dir / f"{name}_old_{int(time.time())}"
                 # 释放旧目录的模块/字节码句柄（Windows 下 move 可能失败）
                 self._purge_plugin_module_cache(name)
@@ -1368,7 +1368,7 @@ class PluginInstaller:
     def disable(self, name: str) -> bool:
         """禁用已启用的插件
 
-        - 用户插件（.drifox/plugins/）：移动到 plugins-disabled 目录
+        - 用户插件（.drifox6/plugins/）：移动到 plugins-disabled 目录
         - 内置非 system 插件（项目根 plugins/ 且 manifest type != system）：
           通过 PluginManager 写 Settings 禁用（不移动文件，目录随主程序分发）
         真系统插件（manifest type == system）不可禁用。

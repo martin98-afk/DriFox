@@ -14,7 +14,7 @@ import pytest
 def _load_module():
     p = (
         Path(__file__).parent.parent.parent
-        / ".drifox"
+        / ".drifox6"
         / "plugins"
         / "self-evolver"
         / "tools"

@@ -7,7 +7,7 @@
 
 ## 一、Agent 定义
 
-位置：`plugins/system-agents/agents/<name>.md`（用户级：`.drifox/plugins/<p>/agents/`）
+位置：`plugins/system-agents/agents/<name>.md`（用户级：`.drifox6/plugins/<p>/agents/`）
 
 ```markdown
 ---

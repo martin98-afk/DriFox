@@ -45,7 +45,7 @@ DriFox/
 │   │   ├── agent.py
 │   │   └── backend.py
 │   └── widgets/              # UI components
-├── .drifox/                  # App data (sessions.db, skills, backups)
+├── .drifox6/                # App data (sessions.db, skills, backups)
 └── requirements.txt
 ```
 

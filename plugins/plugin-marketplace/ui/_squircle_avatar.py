@@ -272,7 +272,7 @@ def _get_icon_nam() -> QNetworkAccessManager:
 
 
 def _icon_cache_dir() -> Path:
-    """插件 icon 本地缓存目录（.drifox/cache/plugin_icons/）"""
+    """插件 icon 本地缓存目录（.drifox6/cache/plugin_icons/）"""
     from .installer import _drifox_dir
 
     return _drifox_dir() / "cache" / "plugin_icons"

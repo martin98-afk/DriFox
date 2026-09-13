@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 主题管理器
-- 支持两层扫描：内置主题 (app/themes/) + 用户主题 (~/.drifox/themes/)
+- 支持两层扫描：内置主题 (app/themes/) + 用户主题 (~/.drifox6/themes/)
 - 用户主题优先级高，同名覆盖内置主题
 - 每个主题一个文件夹，支持资源文件（图片等）
 - 完全从文件读取，不硬编码主题数据
@@ -76,7 +76,7 @@ class ThemeManager:
         except (ImportError, Exception):
             pass
 
-        # 4. 用户主题（~/.drifox/themes/，可写，优先级最高，不可被内置覆盖）
+        # 4. 用户主题（~/.drifox6/themes/，可写，优先级最高，不可被内置覆盖）
         from app.utils.utils import get_app_data_dir
 
         user_dir = get_app_data_dir() / "themes"
@@ -110,7 +110,7 @@ class ThemeManager:
                     if theme_dir.exists():
                         self._load_from_dir(theme_dir, is_builtin=True)
 
-        # 用户插件目录: ~/.drifox/plugins/
+        # 用户插件目录: ~/.drifox6/plugins/
         try:
             from app.utils.utils import get_app_data_dir
 
@@ -573,7 +573,7 @@ class ThemeManager:
         1. 内置主题目录（plugins/system/themes）
         2. 插件主题直扫（plugins/*/themes，系统 + 用户插件目录）
         3. PluginManager 提供的已启用插件主题路径
-        4. 用户主题目录（~/.drifox/themes）
+        4. 用户主题目录（~/.drifox6/themes）
 
         mtime_ns 纳秒精度：主题文件任何真实改动（增/删/改）都会改变指纹；
         仅重扫 stat 不读文件内容，比 YAML 解析快两个数量级。

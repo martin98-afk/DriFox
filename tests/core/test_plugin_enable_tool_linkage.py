@@ -190,7 +190,7 @@ class TestPersistAcrossRestart:
         pm = PluginManager.get_instance()
         _register_plugin_in_pm(pm, plugin_dir, _TEST_PLUGIN)
 
-        # 构造独立 app_data（模拟 .drifox 用户插件目录，避免污染真实环境）
+        # 构造独立 app_data（模拟 .drifox6 用户插件目录，避免污染真实环境）
         app_data = tmp_path / "_app_data"
         app_data.mkdir()
         pm.initialize(app_data)

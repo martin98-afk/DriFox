@@ -26,7 +26,7 @@ uv run python scripts/tab_cycle_bench.py --n-tabs 10 --rounds 5 -o bench.json
 # 耗时统计自测
 uv run python scripts/action_timer.py
 
-# 性能回归对比（真实 GUI，2 轮 × 8 tab，自动隔离 .drifox 数据目录）
+# 性能回归对比（真实 GUI，2 轮 × 8 tab，自动隔离 .drifox6 数据目录）
 uv run python scripts/perf_regression.py
 
 # 指定轮数/tab 数/输出路径
@@ -72,7 +72,7 @@ report = bench.run()
 
 ## perf_regression.py 说明（真实 GUI 回归）
 
-- **测量语义**：每轮 = 独立子进程 + 干净 `.drifox`（自动备份/恢复），避免泄漏对象跨轮污染；流程为 启动 → 基线 RSS → 开 N tab（计时）→ 峰值 → 逐个关闭 → 强制 GC → 关闭后 RSS → UI 响应 → 用量请求计数。
+- **测量语义**：每轮 = 独立子进程 + 干净 `.drifox6`（自动备份/恢复），避免泄漏对象跨轮污染；流程为 启动 → 基线 RSS → 开 N tab（计时）→ 峰值 → 逐个关闭 → 强制 GC → 关闭后 RSS → UI 响应 → 用量请求计数。
 - **LEAK 判定**：关闭后 RSS - 打开峰值 > 5MB 判定泄漏不回落（阈值可在 `LEAK_THRESHOLD_MB` 调整）。
 - **注意事项**：
   - 需真实桌面会话（`QT_QPA_PLATFORM=windows`）；RDP/无 GPU 环境多窗口 WebEngine 可能受限。

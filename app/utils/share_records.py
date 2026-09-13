@@ -2,7 +2,7 @@
 """统一的分享记录存储层 — 基于 JSON 文件，取代 SQLite
 
 目录结构:
-    ~/.drifox/share/
+    ~/.drifox6/share/
     ├── sessions/        # 会话分享文件
     ├── projects/        # 项目导出文件
     └── records.json     # 所有分享记录 (JSON 数组)
@@ -34,11 +34,12 @@ from loguru import logger
 
 
 def _drifox_dir() -> Path:
-    """获取应用数据目录"""
+    """获取应用数据目录（复制自 app.utils.utils.get_app_data_dir，避免把拖 Qt 的
+    utils 模块拉进分享链路；目录名字面量须与 APP_DATA_DIR_NAME 保持一致）"""
     import sys as _sys
 
     if not hasattr(_sys, "_MEIPASS") and not getattr(_sys, "frozen", False):
-        return Path(".drifox")
+        return Path(".drifox6")
     if _sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
@@ -49,29 +50,29 @@ def _drifox_dir() -> Path:
             if paths:
                 app_support = Path(paths[0].fileSystemRepresentation().decode("utf-8")) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / ".drifox"
+                return app_support / ".drifox6"
         except Exception:
             pass
-    return Path.home() / ".drifox"
+    return Path.home() / ".drifox6"
 
 
 def get_share_dir() -> Path:
-    """获取分享根目录 ~/.drifox/share/"""
+    """获取分享根目录 ~/.drifox6/share/"""
     return _drifox_dir() / "share"
 
 
 def get_sessions_dir() -> Path:
-    """获取会话分享目录 ~/.drifox/share/sessions/"""
+    """获取会话分享目录 ~/.drifox6/share/sessions/"""
     return get_share_dir() / "sessions"
 
 
 def get_projects_dir() -> Path:
-    """获取项目导出目录 ~/.drifox/share/projects/"""
+    """获取项目导出目录 ~/.drifox6/share/projects/"""
     return get_share_dir() / "projects"
 
 
 def get_records_path() -> Path:
-    """获取分享记录文件路径 ~/.drifox/share/records.json"""
+    """获取分享记录文件路径 ~/.drifox6/share/records.json"""
     return get_share_dir() / "records.json"
 
 

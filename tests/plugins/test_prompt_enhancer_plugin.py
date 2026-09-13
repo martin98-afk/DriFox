@@ -13,7 +13,7 @@ from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 from app.plugins.managers.plugin_config_store import PluginConfigStore
 
-PLUGIN_SRC = Path("C:/Users/black/.drifox/plugins/prompt-enhancer")
+PLUGIN_SRC = Path("C:/Users/black/.drifox6/plugins/prompt-enhancer")
 PLUGIN_NAME = "prompt-enhancer"
 
 

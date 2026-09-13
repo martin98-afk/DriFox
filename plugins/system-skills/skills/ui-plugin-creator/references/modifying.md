@@ -14,7 +14,7 @@
 ls plugins/<plugin-name>/
 
 # 用户插件（运行时下载的）
-ls ~/.drifox/plugins/<plugin-name>/
+ls ~/.drifox6/plugins/<plugin-name>/
 ```
 
 ### 1.2 阅读入口

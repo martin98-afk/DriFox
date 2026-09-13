@@ -29,7 +29,7 @@ brainstorming 技能
 
 ## 阶段二：Scaffold（四步）
 
-所有插件建立在 `~/.drifox/plugins/` 下，DriFox 的 watchfiles 会自动热加载。
+所有插件建立在 `~/.drifox6/plugins/` 下，DriFox 的 watchfiles 会自动热加载。
 
 ```
 ① 获取 example-plugin 作为起点：
@@ -39,11 +39,11 @@ brainstorming 技能
    cd /tmp/dfp
    git sparse-checkout set plugins/example-plugin
    git checkout main
-   cp -r plugins/example-plugin ~/.drifox/plugins/<your-plugin>
+   cp -r plugins/example-plugin ~/.drifox6/plugins/<your-plugin>
    rm -rf /tmp/dfp
 
 ② 修改 manifest：
-   编辑 ~/.drifox/plugins/<your-plugin>/.drifox-plugin/plugin.json →
+   编辑 ~/.drifox6/plugins/<your-plugin>/.drifox-plugin/plugin.json →
    - name:        "<your-plugin>"（小写 kebab-case，与目录名一致）
    - description: "一句话描述"
    - version:     "0.1.0"
@@ -56,7 +56,7 @@ brainstorming 技能
 ④ 按组件类型逐一实现（顺序建议见阶段三）
 ```
 
-> 💡 也可以不复制，直接在 `~/.drifox/plugins/<your-plugin>/` 下手动建目录 + 写 plugin.json
+> 💡 也可以不复制，直接在 `~/.drifox6/plugins/<your-plugin>/` 下手动建目录 + 写 plugin.json
 > （完整字段见 references/manifest.md）。最小真实骨架可直接参考本技能 `examples/` 目录。
 
 ---

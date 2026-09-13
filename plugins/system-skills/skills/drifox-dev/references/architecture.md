@@ -16,7 +16,7 @@ Worker 层   app/core/workers/                            QThread 流式循环�
 核心服务    app/core/*.py（38 个平铺模块）                backend / hook / tool / team / usage ...
 工具层      app/tools/                                   BuiltinTools + ToolRegistry + 别名映射
 插件内核    app/plugins/                                 contracts(Protocol) + registries(单例注册表)
-插件资产    plugins/system-*/  +  ~/.drifox/plugins/      系统插件族 + 用户插件
+插件资产    plugins/system-*/  +  ~/.drifox6/plugins/      系统插件族 + 用户插件
 ```
 
 ## 二、`app/core/`（平铺 38 模块 + 5 子包）
@@ -117,7 +117,7 @@ app/tools/
 | `assistant_hub` | 人格 / 记忆 / Dream 编译（独立大插件） |
 | `agent_trace` `context-usage-stats` `file-tree` `plugin-marketplace` `share-history` `shortcut-manager` `welcome_changelog` | 功能插件 |
 
-用户级插件：`~/.drifox/plugins/`（watchfiles 热扫描，用户根覆盖 system 根）。
+用户级插件：`~/.drifox6/plugins/`（watchfiles 热扫描，用户根覆盖 system 根）。
 
 ## 七、关键信号链（后端 → 前端）
 

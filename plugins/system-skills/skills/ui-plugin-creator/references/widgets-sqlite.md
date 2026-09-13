@@ -29,8 +29,8 @@
 ## 一、路径查找（dev / 用户环境兜底）
 
 > 插件可能运行在两种环境：
-> - **dev 环境**：直接 `python main.py`，DB 在项目根目录 `.drifox/sessions.db`
-> - **打包后**：用户在 `~/.drifox/sessions.db`（用户目录）
+> - **dev 环境**：直接 `python main.py`，DB 在项目根目录 `.drifox6/sessions.db`
+> - **打包后**：用户在 `~/.drifox6/sessions.db`（用户目录）
 >
 > 必须两种环境都支持，否则打包后插件会找不到数据库。
 
@@ -43,8 +43,8 @@ from typing import Optional
 # 假设插件位于 plugins/<plugin-name>/ui/cards.py
 # 那么 _PROJECT_ROOT 是 plugins/<plugin-name>/ 向上 4 级 → 项目根目录
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-_DEV_DB_PATH = _PROJECT_ROOT / ".drifox" / "sessions.db"
-_USER_DB_PATH = Path.home() / ".drifox" / "sessions.db"
+_DEV_DB_PATH = _PROJECT_ROOT / ".drifox6" / "sessions.db"
+_USER_DB_PATH = Path.home() / ".drifox6" / "sessions.db"
 
 
 def _find_db() -> Optional[Path]:
@@ -106,7 +106,7 @@ plugins/
 #   = Path(".").resolve()
 ```
 
-如果你的插件在用户目录 `~/.drifox/plugins/<plugin-name>/`，调整向上层级数即可。
+如果你的插件在用户目录 `~/.drifox6/plugins/<plugin-name>/`，调整向上层级数即可。
 
 ---
 
@@ -320,7 +320,7 @@ def _fetch_daily_tokens_with_fallback(conn, days: int = 14) -> List[Tuple[str, i
 | 陷阱 | 症状 | 修复 |
 |------|------|------|
 | 路径层级数错 | 找不到 dev 环境 DB | 打印 `_PROJECT_ROOT` 验证 |
-| 打包后 DB 找不到 | 用户环境运行失败 | `_find_db()` 兜底到 `~/.drifox/` |
+| 打包后 DB 找不到 | 用户环境运行失败 | `_find_db()` 兜底到 `~/.drifox6/` |
 | `row_factory` 未设置 | `row[0]` 数字索引 | `conn.row_factory = sqlite3.Row` |
 | 数据库被锁 | "database is locked" | `timeout=3` + 短事务 |
 | 旧数据 NULL | `TypeError: unsupported operand` | `COALESCE(col, 0)` 包一层 |
@@ -422,7 +422,7 @@ def _fetch_all_stats() -> dict:
 
 | 场景 | 推荐 |
 |------|------|
-| 读自己的独立 DB | ✅ 直读（如插件专属 `~/.drifox/my-plugin/data.db`） |
-| 读主程序 `.drifox/sessions.db` | ⚠️ 直读 + 注意时区/锁问题（context-usage-stats 就是这样做的） |
+| 读自己的独立 DB | ✅ 直读（如插件专属 `~/.drifox6/my-plugin/data.db`） |
+| 读主程序 `.drifox6/sessions.db` | ⚠️ 直读 + 注意时区/锁问题（context-usage-stats 就是这样做的） |
 | 读主程序内存中的对象 | ❌ 违反插件闭包，应该走主程序提供的 API（如果主程序有的话） |
 | 读网络资源 | ✅ HTTP 请求，不需要 SQLite |

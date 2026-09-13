@@ -358,7 +358,7 @@ discover → load → enable → disable → unload
 
 | 策略 | 说明 |
 |---|---|
-| 新字段全可选 | 旧 plugin.json 不新增字段也按默认契约加载，33+ 现有插件零迁移（T2 实测：`plugins/system/` + 6 内置 UI 插件 + `~/.drifox/plugins/` 50+） |
+| 新字段全可选 | 旧 plugin.json 不新增字段也按默认契约加载，33+ 现有插件零迁移（T2 实测：`plugins/system/` + 6 内置 UI 插件 + `~/.drifox6/plugins/` 50+） |
 | 双轨加载 | 阶段 1 同时支持「组件目录约定」（旧）与「apply(ctx) 服务注册」（新），新机制缺省时回落旧逻辑 |
 | 启用状态不破坏 | enabled_plugins / disabled_plugins 语义与存储格式不变，仅内部实现换生命周期驱动（T2 实测：`plugin_manager._get_enabled_set/_get_disabled_set` 双集合并存 → 改为单来源 + 派生） |
 | UI 与运行时分离 | 先物理分目录、后独立契约，窗口隔离语义保留（T2 实测：`ui_plugin_registry._card_widget_instances[window_id]` 按窗口隔离） |

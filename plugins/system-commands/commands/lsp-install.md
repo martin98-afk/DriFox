@@ -71,7 +71,7 @@ prompt_sections:
 
 1. **解析参数**，确定要安装的目标语言
 2. **检测并安装** LSP 服务器所需的二进制依赖
-3. **创建插件目录**（`～/.drifox/plugins/lsp-<lang>/`），包含 `plugin.json`、`.lsp.json`、`README.md`
+3. **创建插件目录**（`～/.drifox6/plugins/lsp-<lang>/`），包含 `plugin.json`、`.lsp.json`、`README.md`
 4. **通知用户**安装结果，watchfiles 热重载将在 1-3 秒内自动加载新插件
 
 ## ⚠️ 铁律
@@ -86,10 +86,10 @@ prompt_sections:
 
 ## 📁 插件目录结构规范
 
-每个 LSP 插件创建在 `～/.drifox/plugins/lsp-<lang>/` 下，结构如下：
+每个 LSP 插件创建在 `～/.drifox6/plugins/lsp-<lang>/` 下，结构如下：
 
 ```
-～/.drifox/plugins/lsp-<lang>/
+～/.drifox6/plugins/lsp-<lang>/
 ├── .drifox-plugin/
 │   └── plugin.json          # 插件清单
 ├── .lsp.json                # LSP 服务器配置
@@ -190,9 +190,9 @@ which <binary-name> && <binary-name> --version 2>&1 || echo "NOT_FOUND"
 ```
 
 ### 步骤 4：创建插件文件
-1. 创建目录：`mkdir -p ～/.drifox/plugins/lsp-<lang>/.drifox-plugin`
+1. 创建目录：`mkdir -p ～/.drifox6/plugins/lsp-<lang>/.drifox-plugin`
 2. 按模板写入 `plugin.json`、`.lsp.json`、`README.md`
-3. 验证写入：对每个文件执行 `lsp(path="～/.drifox/plugins/lsp-<lang>/.lsp.json", operation="diagnostics")`
+3. 验证写入：对每个文件执行 `lsp(path="～/.drifox6/plugins/lsp-<lang>/.lsp.json", operation="diagnostics")`
 
 ### 步骤 5：测试诊断是否正常
 
@@ -215,7 +215,7 @@ bash("rm ～/Desktop/_lsp_test_temp.ts")
 ### 步骤 6：通知用户
 安装完成告知：
 - ✅ 安装成功
-- 📂 插件路径：`～/.drifox/plugins/lsp-<lang>/`
+- 📂 插件路径：`～/.drifox6/plugins/lsp-<lang>/`
 - 🔄 watchfiles 将在 1-3 秒内自动加载
 - 🧪 已测试诊断功能正常（行号应正确显示，非 `?:?`）
 
@@ -506,7 +506,7 @@ bash("rm ～/Desktop/_lsp_test_temp.ts")
 
 在安装前，检查目标插件目录是否已存在：
 ```bash
-test -d ～/.drifox/plugins/lsp-<lang> && echo "EXISTS" || echo "NOT_FOUND"
+test -d ～/.drifox6/plugins/lsp-<lang> && echo "EXISTS" || echo "NOT_FOUND"
 ```
 
 如果 `EXISTS`，**跳过安装**并告知用户：
@@ -550,7 +550,7 @@ test -d ～/.drifox/plugins/lsp-<lang> && echo "EXISTS" || echo "NOT_FOUND"
 
 当前已安装的 LSP 插件：
 ```bash
-ls -d ～/.drifox/plugins/lsp-* 2>/dev/null || echo "(尚未安装任何 LSP 插件)"
+ls -d ～/.drifox6/plugins/lsp-* 2>/dev/null || echo "(尚未安装任何 LSP 插件)"
 ```
 <!-- end -->
 

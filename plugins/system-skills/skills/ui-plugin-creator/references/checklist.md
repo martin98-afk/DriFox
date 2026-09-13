@@ -212,7 +212,7 @@
 
 ## 5. SQLite 验证（如果读了数据库）
 
-- [ ] `_find_db()` 兜底到 `~/.drifox/` 用户目录
+- [ ] `_find_db()` 兜底到 `~/.drifox6/` 用户目录
 - [ ] `sqlite3.connect(..., timeout=3)` 设了超时
 - [ ] `conn.row_factory = sqlite3.Row` 设为字典式访问
 - [ ] SQL 用 `COALESCE(col, 0)` 包了 NULL 值
@@ -288,7 +288,7 @@
 
 - [ ] dev 环境（`python main.py`）能加载
 - [ ] 打包后（PyInstaller exe）能加载
-- [ ] 用户插件路径（`~/.drifox/plugins/<name>/`）能加载
+- [ ] 用户插件路径（`~/.drifox6/plugins/<name>/`）能加载
 - [ ] 主程序主题切换不破坏卡片显示
 - [ ] 主程序语言切换不破坏卡片显示
 

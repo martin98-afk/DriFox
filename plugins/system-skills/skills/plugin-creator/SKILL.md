@@ -23,7 +23,7 @@ allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 | 写 skill 本身 | skill-creator |
 
 > plugin-dev 让位条款：用户在学习单个组件概念 → plugin-dev；一旦要产出可安装插件 → 本技能。
-> plugin-dev 各分项阅读指引：`~/.drifox/plugins/plugin-dev/skills/<name>/SKILL.md`（相对路径，需自行在用户插件根下查找；Claude Code 生态教程，字段语义与 DriFox 有差异，以本技能 references 为准）。
+> plugin-dev 各分项阅读指引：`~/.drifox6/plugins/plugin-dev/skills/<name>/SKILL.md`（相对路径，需自行在用户插件根下查找；Claude Code 生态教程，字段语义与 DriFox 有差异，以本技能 references 为准）。
 
 ## 1. 触发与第一动作
 
@@ -73,7 +73,7 @@ allowed-tools: Read, Glob, Grep, Write, Edit, Bash(python:*), question
 
 ## 3. 插件解剖速览
 
-插件位于 `~/.drifox/plugins/<name>/`，manifest 固定在 `<name>/.drifox-plugin/plugin.json`：
+插件位于 `~/.drifox6/plugins/<name>/`，manifest 固定在 `<name>/.drifox-plugin/plugin.json`：
 
 ```
 your-plugin/

@@ -23,14 +23,14 @@
         └── core/
             └── plugin_manager.py
 
-    ~/.drifox/
+    ~/.drifox6/
     └── plugins/                 # 用户安装的插件
         └── {plugin-name}/
             └── ...
 
 类型约定：
     - "system": 系统内置插件（project-root/plugins/）
-    - "user": 用户安装插件（~/.drifox/plugins/）
+    - "user": 用户安装插件（~/.drifox6/plugins/）
 
 命名空间约定：
     - system 插件：命令/智能体直接用短名称（/new, /explore）
@@ -332,7 +332,7 @@ class PluginManager:
             "plugin-marketplace",
         }
     )
-    # 用户插件：~/.drifox/plugins/（相对于 app_data_dir）
+    # 用户插件：~/.drifox6/plugins/（相对于 app_data_dir）
     _USER_PLUGIN_DIR_NAME = "plugins"
     # Claude Code 插件目录（同时支持两种生态）
     _CLAUDE_USER_SKILLS_DIR = Path.home() / ".claude" / "skills"
@@ -360,7 +360,7 @@ class PluginManager:
         """初始化插件管理器，扫描并加载所有插件
 
         Args:
-            app_data_dir: 应用数据目录（如 .drifox/），用于定位用户插件
+            app_data_dir: 应用数据目录（如 .drifox6/），用于定位用户插件
         """
         if self._initialized:
             return
@@ -1220,7 +1220,7 @@ class PluginManager:
             self._plugins[p.name] = p
 
     def _discover_user_plugins(self, app_data_dir: Path):
-        """扫描用户插件目录 ~/.drifox/plugins/"""
+        """扫描用户插件目录 ~/.drifox6/plugins/"""
         user_plugin_dir = app_data_dir / self._USER_PLUGIN_DIR_NAME
         plugins = self._scan_plugins(user_plugin_dir, "user")
         for p in plugins:

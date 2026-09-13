@@ -1500,12 +1500,14 @@ def _format_tool_progress_badge(char_count: int, add_lines: int = 0, del_lines: 
     块末尾：预览 span 是 `overflow:hidden + ellipsis`，徽标嵌在里面会被长文本裁掉。
     """
     if add_lines or del_lines:
+        # 颜色与完成框的 diff 统计完全一致（render_helpers 里同款内联色，
+        # 不依赖 .tool-diff-stats__add/__del 的 CSS —— 流式块下 CSS 优先级不可靠）
         return (
             f'<span class="tool-diff-stats tool-streaming-badge" '
             f'style="font-size: {scale_font_size(11)}px; flex: 0 0 auto; margin-left: 6px;">'
-            f'<span class="tool-diff-stats__add">+{add_lines}</span>'
+            f'<span class="tool-diff-stats__add" style="color: #39d353; font-weight: 600;">+{add_lines}</span>'
             f'<span class="tool-diff-stats__sep">/</span>'
-            f'<span class="tool-diff-stats__del">-{del_lines}</span>'
+            f'<span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{del_lines}</span>'
             f"</span>"
         )
     if char_count > 0:
@@ -1593,7 +1595,7 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
-        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 0 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_display}
         </span>{badge_html}
     </div>"""
@@ -5238,6 +5240,18 @@ class CodeWebViewer(QWebEngineView):
         保留，池中 viewer 的 PID 要交给 B4 强回收护栏做「在用」判定，
         清零会让该进程被误杀。
         """
+        # 🐛 离屏冻结残留：滚出视口的卡片会被 set_page_suspended 冻成
+        # Frozen + page.setVisible(False)。带这状态入池，复用给新卡片后
+        # Chromium 仍按「不可见 + 已冻结」渲染 → 整块白屏。
+        # 不能复用 set_page_suspended(False)：那条路径有流式/JS 未就绪等守卫会跳过，
+        # 入池复位必须无条件（对未冻结的 viewer 是幂等空操作）。
+        try:
+            page = self.page()
+            if page is not None:
+                page.setLifecycleState(QWebEnginePage.LifecycleState.Active)
+                page.setVisible(True)
+        except (RuntimeError, AttributeError):
+            pass
         try:
             if self.page() and self._is_js_ready:
                 self.page().runJavaScript(_RESET_CONTENT_FOR_REUSE_JS)
@@ -15014,6 +15028,19 @@ class MessageCard(SimpleCardWidget):
             pass
         return False
 
+    def set_viewer_suspended(self, suspended: bool) -> None:
+        """转发离屏冻结请求给正文 viewer（Qt 6.5+ LifecycleState）。
+
+        - user 卡无 viewer / viewer 未创建：跳过；
+        - welcome 卡：JS 交互复杂（tab 切换/渲染编排），不参与冻结；
+        - MarkdownBlockViewer（纯 Qt 灰度渲染器）：无 renderer，天然 no-op。
+        """
+        if suspended and getattr(self, "_is_welcome", False):
+            return
+        viewer = self.viewer
+        if viewer is not None and isinstance(viewer, CodeWebViewer):
+            viewer.set_page_suspended(suspended)
+
     def ensure_rendered(self, delay_ms: int = 0):
         """如果还没渲染，懒加载创建QWebViewer并渲染内容
 
@@ -15851,10 +15878,14 @@ class MessageCard(SimpleCardWidget):
         # 徽标作为预览 span 的**兄弟节点**更新（长文本省略号不会把它裁掉）
         badge_html = "" if completed else _format_tool_progress_badge(char_count, add_lines, del_lines)
 
-        # ── 内容去重：相同预览内容跳过 JS 执行，减少流式高频更新压力 ──
+        # ── 内容去重：预览文本**与徽标**都相同才跳过 JS 执行，减少流式高频更新压力 ──
+        # 🐛 修复（编辑工具流式徽标不更新）：原实现只比较 preview_content，而编辑类
+        # 工具的预览文本在路径完整后就恒定（如「写入文件中」），导致此后每个进度事件
+        # 都被去重跳过 —— +N/-M 行数与字符数徽标停更，运行框看上去"卡死"在首帧。
         _cache_key = (tool_call_id, completed)
+        _cache_val = (preview_content, badge_html)
         _last = getattr(self, "_tool_streaming_preview_cache", None) or {}
-        if _last.get(_cache_key) == preview_content:
+        if _last.get(_cache_key) == _cache_val:
             # 🐛 修复（编辑工具框运行中消失）：preview 相同不重新注入，但 DOM 中
             # 运行框仍在 → 仍需 dirty 保护标记。否则 dirty 被某次渲染回调清除后，
             # 该工具框永远失去 save/restore 保护，下一次全量渲染裸 updateContent
@@ -15868,7 +15899,7 @@ class MessageCard(SimpleCardWidget):
             return
         if not hasattr(self, "_tool_streaming_preview_cache"):
             self._tool_streaming_preview_cache = {}
-        self._tool_streaming_preview_cache[_cache_key] = preview_content
+        self._tool_streaming_preview_cache[_cache_key] = _cache_val
 
         # 🐛 修复（编辑工具框运行中消失）：dirty 标记必须**先于** _schedule_render
         # 设置。completed=True 时 _schedule_render(immediate=True) 会立即执行

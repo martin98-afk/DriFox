@@ -3,7 +3,7 @@
 
 复现背景：
 - 打开插件市场（默认进入「精选」探索页）
-- 清掉市场缓存（~/.drifox/cache/marketplaces/）或远端尚未到达
+- 清掉市场缓存（~/.drifox6/cache/marketplaces/）或远端尚未到达
   → _all_plugins == []
 - _render_local_installed() 用本地 extras 触发 _render_plugins([]) → _rebuild_explore()
 - 历史实现：view_plugins = list(self._all_plugins) + self._build_local_extra_plugins()

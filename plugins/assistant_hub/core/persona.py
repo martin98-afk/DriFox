@@ -324,7 +324,7 @@ def _persona_data_dir() -> Path:
                 return p
     except Exception:
         pass
-    return Path.home() / ".drifox" / "assistant_hub"
+    return Path.home() / ".drifox6" / "assistant_hub"
 
 
 def load_module_standalone(module_path: Path, name: str):

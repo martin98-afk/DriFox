@@ -24,7 +24,7 @@
 ```
 
 > 如果插件放在 `plugins/<plugin-name>/`（系统插件），`type` 可以省略。
-> 用户插件放在 `~/.drifox/plugins/<plugin-name>/`。
+> 用户插件放在 `~/.drifox6/plugins/<plugin-name>/`。
 
 ### 4.2 ui/__init__.py 完整模板
 

@@ -39,7 +39,7 @@ pytest tests/ -m perf                  # 仅性能基准
 | `app/plugins/contracts/` | Protocol：ModelAdapter/LoopPolicy/SessionStorageEngine/MessageSerializer |
 | `app/plugins/registries/` | 四注册表单例(adapter/loop policy/storage/serializer) |
 | `plugins/system/` | 系统插件：tools/model_adapters/loop_policies/storages/serializers/hooks/skills/themes/commands/ui |
-| `~/.drifox/plugins/` | 用户级社区插件(watchfiles 热扫描) |
+| `~/.drifox6/plugins/` | 用户级社区插件(watchfiles 热扫描) |
 | `tests/` | 与源码按模块对齐：core/widgets/plugins/utils/perf/gateway/debug |
 | `docs/` | plugins/perf/security/superpowers 四大知识库 |
 
@@ -67,5 +67,5 @@ pytest tests/ -m perf                  # 仅性能基准
 - **单实例**：`app/core/single_instance.py` 保证唯一进程
 - **日志**：`logs/` 目录（loguru）
 - **会话存储**：`ChatBackend.get_session_storage()` 门面，能力用 `isinstance` 探测
-- **热更新**：watchfiles 监控 `~/.drifox/plugins/`，插件 reload 触发 `PluginChanged` 钩子
+- **热更新**：watchfiles 监控 `~/.drifox6/plugins/`，插件 reload 触发 `PluginChanged` 钩子
 - **多平台打包**：Win PyInstaller（onefile，see `Drifox.spec`）；mac dmgbuild；Linux AppImage

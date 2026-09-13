@@ -602,7 +602,7 @@ class TestJoinTeamPreservesMailbox:
         但仅清理「不在活跃窗口集合中的 stale 成员」。只要主窗口正常调用
         set_active_window_ids() 同步活跃集合，已 join 窗口不会被误判为 stale。
         """
-        # 重定向 TeamManager 的数据目录到 tmp_path（不污染真实 ~/.drifox/）
+        # 重定向 TeamManager 的数据目录到 tmp_path（不污染真实 ~/.drifox6/）
         from app.core import team_manager as tm_mod
 
         monkeypatch.setattr(tm_mod.TeamManager, "_get_teams_dir", staticmethod(lambda: tmp_path))
@@ -1420,7 +1420,7 @@ class TestLoadMissingDegradation:
         assert "write" in section_body, "load_missing section 应包含 write 工具写入骨架指令"
         assert "/team --load=" in section_body, "load_missing section 应提示用户重新执行 `/team --load=<name>` 完成加载"
         assert "user-custom/agents/" in section_body, (
-            "load_missing section 应说明写到 `~/.drifox/plugins/user-custom/agents/<role>.md`"
+            "load_missing section 应说明写到 `~/.drifox6/plugins/user-custom/agents/<role>.md`"
         )
 
         # 🆕 公共规范必须位于 section 之外（create 段之前），供两个 section 共享

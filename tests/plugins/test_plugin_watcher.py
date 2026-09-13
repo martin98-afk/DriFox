@@ -3,7 +3,7 @@
 PluginToolWatcher 插件工具热重载测试（插件化新行为，此前无覆盖）
 
 覆盖：
-1. scan_now 全量重扫注册（临时插件目录注入，不碰真实 .drifox/plugins）
+1. scan_now 全量重扫注册（临时插件目录注入，不碰真实 .drifox6/plugins）
 2. scan_now 幂等：重复重扫不重复注册
 3. 文件内容变更 → 重扫 → 注册更新（impl 更新）
 4. 删除插件文件 → 重扫 → 工具注销（残留清理——旧 diff 实现 bug 回归点）

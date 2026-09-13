@@ -20,7 +20,7 @@ prompt_sections:
 > 以下规范被 `create` 与 `load_missing` 两个 section 共同引用，
 > 置于 section 之外保证 `select_prompt` 过滤后始终保留（所有命令注入时都能看到）。
 
-### 1. 完整骨架模板（写入 `~/.drifox/plugins/user-custom/agents/<role>.md`）
+### 1. 完整骨架模板（写入 `~/.drifox6/plugins/user-custom/agents/<role>.md`）
 
 **Frontmatter**（变量替换 `<role>` 为 kebab-case 角色名，`<description>` 为 30-80 字角色定位）：
 
@@ -64,7 +64,7 @@ permission:
 先用 `bash` 工具确保目录存在：
 
 ```bash
-mkdir -p ~/.drifox/plugins/user-custom/agents/
+mkdir -p ~/.drifox6/plugins/user-custom/agents/
 ```
 
 然后对每个确认新建的 role，用 `write` 工具写入完整骨架。
@@ -86,8 +86,8 @@ mkdir -p ~/.drifox/plugins/user-custom/agents/
 
 | 类型 | 路径 |
 |---|---|
-| 新建智能体 | `~/.drifox/plugins/user-custom/agents/<role>.md` |
-| 团队模板 yaml | `~/.drifox/plugins/user-custom/team_templates/<name>.yaml` |
+| 新建智能体 | `~/.drifox6/plugins/user-custom/agents/<role>.md` |
+| 团队模板 yaml | `~/.drifox6/plugins/user-custom/team_templates/<name>.yaml` |
 
 `<role>`：kebab-case，2-4 单词（与 Available Subagents 命名风格一致，如 `perf-tester`）。
 `<name>`：kebab-case，2-4 单词，表达团队核心用途（如 `perf-test-team`）。
@@ -169,10 +169,10 @@ question: 缺失智能体 "<role>"，是否在 user-custom/agents/ 新建？
 |---|---|---|
 | leader | ✅ 已有 | — |
 | build | ✅ 已有 | — |
-| perf-tester | 🆕 已创建 | `~/.drifox/plugins/user-custom/agents/perf-tester.md` |
+| perf-tester | 🆕 已创建 | `~/.drifox6/plugins/user-custom/agents/perf-tester.md` |
 | perf-analyzer | ⏭️ 已跳过 | — |
 
-**团队模板**：`~/.drifox/plugins/user-custom/team_templates/perf-test-team.yaml`
+**团队模板**：`~/.drifox6/plugins/user-custom/team_templates/perf-test-team.yaml`
 **下一步**：`/team --load=perf-test-team`
 ```
 
@@ -202,7 +202,7 @@ agents:
 
 `agent_name` 来源**优先**从你的系统提示词中 `## Available Subagents` 节列出的子智能体名称中选取。
 
-**如果某个所需角色不在 Available Subagents 中**，遵循上方「子智能体创建规范」在 `~/.drifox/plugins/user-custom/agents/` 创建该角色的智能体定义（仅用户确认后才创建）。
+**如果某个所需角色不在 Available Subagents 中**，遵循上方「子智能体创建规范」在 `~/.drifox6/plugins/user-custom/agents/` 创建该角色的智能体定义（仅用户确认后才创建）。
 
 所有 Available Subagents 列出的子智能体 + 本流程新建的角色都可作为团队成员角色。
 
@@ -226,7 +226,7 @@ agents:
 - 如果用户描述不够具体，请基于常识合理推断
 
 ### 注意事项
-1. 文件创建到 `.drifox/plugins/user-custom/team_templates/` 后，可通过 `/team --load=<name>` 立即加载使用
+1. 文件创建到 `.drifox6/plugins/user-custom/team_templates/` 后，可通过 `/team --load=<name>` 立即加载使用
 2. `leader` 必须存在且位于 `agents` 第一位
 3. `agents` 中角色名不能重复（schema 校验会拒绝重复项，包括与 Available Subagents 已有角色重名）
 4. description 会显示在模板列表界面，请简洁清晰
@@ -262,7 +262,7 @@ question: 缺失智能体 "<role>"，是否在 user-custom/agents/ 新建？
     4. 改名（输入新名字后重新比对）
 ```
 
-- **选项 1**：按上方「子智能体创建规范」第 1/2 节，用 `write` 工具写入完整骨架到 `~/.drifox/plugins/user-custom/agents/<role>.md`，记录为 🆕 已创建
+- **选项 1**：按上方「子智能体创建规范」第 1/2 节，用 `write` 工具写入完整骨架到 `~/.drifox6/plugins/user-custom/agents/<role>.md`，记录为 🆕 已创建
 - **选项 2**：从 Available Subagents 中选最相似的 1-2 个作为替换，记录为 ✅ 已有（替代）
 - **选项 3**：记录为 ⏭️ 已跳过，**不写入 yaml / .md**（跳过不是改名，用户接受该角色不在模板中）
 - **选项 4**：用户输入新名 → 回到步骤 2 重新比对 → 重复本流程
@@ -286,7 +286,7 @@ question: 缺失智能体 "<role>"，是否在 user-custom/agents/ 新建？
 
 | 角色 | 状态 | 路径 |
 |---|---|---|
-| <role_a> | 🆕 已创建 | `~/.drifox/plugins/user-custom/agents/<role_a>.md` |
+| <role_a> | 🆕 已创建 | `~/.drifox6/plugins/user-custom/agents/<role_a>.md` |
 | <role_b> | ✅ 已有（替代） | — |
 | <role_c> | ⏭️ 已跳过 | — |
 

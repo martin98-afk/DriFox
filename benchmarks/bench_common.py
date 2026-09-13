@@ -2,7 +2,7 @@
 """基准测试公共工具
 
 所有基准脚本共用：
-- 数据隔离：开发环境 get_app_data_dir() = cwd/.drifox（含 sessions.db），
+- 数据隔离：开发环境 get_app_data_dir() = cwd/.drifox6（含 sessions.db），
   基准运行前 chdir 到独立临时目录，避免污染真实用户数据。
 - 采样：psutil RSS + tracemalloc
 - 分析：线性回归斜率、Top-N 大对象
@@ -34,14 +34,14 @@ RESULTS_DIR.mkdir(exist_ok=True)
 
 
 def setup_isolation(tag: str) -> Path:
-    """chdir 到独立临时目录，隔离 .drifox 用户数据（sessions.db/插件/配置）。
+    """chdir 到独立临时目录，隔离 .drifox6 用户数据（sessions.db/插件/配置）。
 
     必须在任何 app.* 模块导入【之前】调用（get_app_data_dir 按需解析，
     SessionStore/PluginManager 单例首次 get_instance 时才锁定路径）。
     """
     tmp = Path(tempfile.mkdtemp(prefix=f"drifox_bench_{tag}_"))
     os.chdir(tmp)
-    (tmp / ".drifox").mkdir(exist_ok=True)
+    (tmp / ".drifox6").mkdir(exist_ok=True)
     return tmp
 
 

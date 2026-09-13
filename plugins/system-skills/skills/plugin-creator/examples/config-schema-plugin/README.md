@@ -30,7 +30,7 @@
 
 ## 如何使用
 
-1. 复制本目录到 `~/.drifox/plugins/config-schema-example/`
+1. 复制本目录到 `~/.drifox6/plugins/config-schema-example/`
 2. 搜索 `[改名]` / `[必改]` 标记：平台标识、Adapter、存储 key 与 plugin.json `name` 对齐
 3. 重启后在设置里能看到「示例网关配置」卡片；改动字段并保存
 4. 纯工具插件想加配置：把本例的 `config_schema` 与读取代码移植过去即可（tools 组件同样支持 config_schema，见 workflow 插件）

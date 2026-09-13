@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### 🔧 工程 (Chore)
+
+- **PySide6 版数据根目录 `.drifox` → `.drifox6`**：两版插件（依赖各自 Qt 绑定的 UI 代码与编译扩展）互不兼容，共用目录会在切换版本时加载到错版插件，故整体隔离。覆盖开发态仓库根目录、打包态 `~/.drifox6`、macOS `~/Library/Application Support/Drifox/.drifox6`，以及插件自带的同类路径实现（plugin-marketplace / share-history / system-cleaner / assistant_hub / system-tools）；单实例锁 key 同步改为 `Drifox6`。**不做旧数据迁移**：新目录首次启动即为空环境，需重新配置 API Key 并重装插件。目录名真源见 `app/utils/utils.py` 的 `APP_DATA_DIR_NAME`。
+
 ## [v0.5.6] - 2026-08-29
 
 PySide6 系列的图表主题适配里程碑：从「深色硬编码」升级为「主题联动」。

@@ -55,11 +55,11 @@ def _share_dir() -> Path:
     import sys as _sys
 
     if not hasattr(_sys, "_MEIPASS") and not getattr(_sys, "frozen", False):
-        base = Path(".drifox")
+        base = Path(".drifox6")
     elif _sys.platform == "darwin":
-        base = Path.home() / "Library" / "Application Support" / "Drifox" / ".drifox"
+        base = Path.home() / "Library" / "Application Support" / "Drifox" / ".drifox6"
     else:
-        base = Path.home() / ".drifox"
+        base = Path.home() / ".drifox6"
     return base / "share"
 
 

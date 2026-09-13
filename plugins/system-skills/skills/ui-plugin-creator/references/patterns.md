@@ -500,7 +500,7 @@ def _on_uninstall(self):
 
 ### 8.1 适用场景
 
-UI 插件从 PyInstaller exe 解包后下载到 `~/.drifox/plugins/` 使用，**不能再次打包**主程序。
+UI 插件从 PyInstaller exe 解包后下载到 `~/.drifox6/plugins/` 使用，**不能再次打包**主程序。
 
 - PyInstaller `--onedir` 打包后，`_internal/` 只包含构建期检测到的第三方包
 - 用户从市场下载的插件无法重新打包

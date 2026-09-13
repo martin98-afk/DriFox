@@ -8,7 +8,7 @@
 
 ## 1. 插件结构
 
-引擎插件目录（用户根 `~/.drifox/plugins/<name>/` 或社区仓 `plugins/<name>/`）：
+引擎插件目录（用户根 `~/.drifox6/plugins/<name>/` 或社区仓 `plugins/<name>/`）：
 
 ```
 my-engine/
@@ -186,7 +186,7 @@ def register(registry):
 ### 5.3 user 根覆盖 system 根
 
 `runtime_component_loader` 与 provider_loader 同构：user 根插件覆盖 system 根
-同名实现（`user > system`）。同名引擎插件放 `~/.drifox/plugins/` 即可覆盖内置行为，
+同名实现（`user > system`）。同名引擎插件放 `~/.drifox6/plugins/` 即可覆盖内置行为，
 无需修改主程序代码。
 
 ### 5.4 热重载

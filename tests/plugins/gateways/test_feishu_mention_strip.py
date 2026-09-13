@@ -20,7 +20,7 @@
 3. 私聊无 mentions → 文本不变，命令识别正常
 4. 群聊 @机器人 + 文本中 @他人 → 剥前缀 + 替换人名都生效
 
-不依赖 .drifox/ 插件目录：直接对 `_normalize_feishu_text` 这套剥离/替换
+不依赖 .drifox6/ 插件目录：直接对 `_normalize_feishu_text` 这套剥离/替换
 行为建立契约；适配器改版时只调一处（不调本测试），本测试即保证回归。
 """
 
@@ -30,7 +30,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 
-# ── 被测契约：与 .drifox/plugins/gateway-feishu/gateways/feishu.py
+# ── 被测契约：与 .drifox6/plugins/gateway-feishu/gateways/feishu.py
 # `_on_feishu_message` 中"@提及处理"段严格对齐。 ──────────────
 
 

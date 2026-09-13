@@ -18,8 +18,8 @@ parameters:
 | 类型 | 路径（相对当前工作目录） |
 |------|--------------------------|
 | 系统内置插件 | `plugins/<name>/` |
-| 用户安装插件（开发环境） | `.drifox/plugins/<name>/` |
-| 用户安装插件（打包环境） | `~/.drifox/plugins/<name>/`（用 home 目录展开） |
+| 用户安装插件（开发环境） | `.drifox6/plugins/<name>/` |
+| 用户安装插件（打包环境） | `~/.drifox6/plugins/<name>/`（用 home 目录展开） |
 | Claude Code 插件 | `~/.claude/skills/<name>/`、`~/.claude/plugins/cache/<name>/` |
 
 每个插件的清单文件是 `.drifox-plugin/plugin.json` 或 `.claude-plugin/plugin.json`（二选一）。
@@ -30,7 +30,7 @@ parameters:
 
 列出全部已安装插件的概览：
 
-1. 用 `list_directory` 依次探测 `plugins/`、`.drifox/plugins/`（不存在则跳过，不要报错）
+1. 用 `list_directory` 依次探测 `plugins/`、`.drifox6/plugins/`（不存在则跳过，不要报错）
 2. 对每个插件目录，读其 plugin.json 的 `name` / `description` / `version` 字段
 3. 按系统/用户分组输出概览表，每行：`插件名（v版本）— 一句话描述`
 4. 结尾提示：输入 `/help --plugin=<插件名>` 可深入了解某个插件

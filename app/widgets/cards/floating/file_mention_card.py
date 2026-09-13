@@ -1049,7 +1049,9 @@ class FileMentionCard(QWidget):
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
-        ".drifox",  # 项目数据目录
+        ".drifox",  # 项目数据目录（PyQt5 版遗留）
+        ".drifox",  # 项目数据目录（PyQt5 版遗留）
+        ".drifox6",  # 项目数据目录（PySide6 版）（PySide6 版）
         # 构建输出目录
         "target",  # Rust cargo build
         "bin",

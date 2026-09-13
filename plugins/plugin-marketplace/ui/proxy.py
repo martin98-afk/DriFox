@@ -7,7 +7,7 @@
 - http：HTTP 正向代理（http://ip:port），httpx 走 proxy= 参数、
   git 走 -c http.proxy= 参数
 
-配置持久化到 .drifox/plugins/user-custom/marketplaces/proxy.json
+配置持久化到 .drifox6/plugins/user-custom/marketplaces/proxy.json
 （随 user-custom 插件一起被云端备份/同步）。损坏/缺失视为未启用。
 """
 
@@ -25,11 +25,11 @@ from loguru import logger
 def _drifox_dir() -> Path:
     """获取应用数据目录（与 app.utils.utils.get_app_data_dir 保持一致，开发环境解析为绝对路径）
 
-    开发环境: 仓库根/.drifox（基于 __file__ 定位，脱离可变 cwd）
-    PyInstaller打包: ~/.drifox（用户 home 目录，可写）
-    macOS .app: ~/Library/Application Support/Drifox/.drifox
+    开发环境: 仓库根/.drifox6（基于 __file__ 定位，脱离可变 cwd）
+    PyInstaller打包: ~/.drifox6（用户 home 目录，可写）
+    macOS .app: ~/Library/Application Support/Drifox/.drifox6
 
-    注意：相对路径 Path(".drifox") 会在每次文件操作时按当前 cwd 解析；
+    注意：相对路径 Path(".drifox6") 会在每次文件操作时按当前 cwd 解析；
     Windows 原生 QFileDialog 会静默改变进程 cwd，导致相对路径被解析到
     错误目录而 FileNotFoundError。开发环境改为基于 __file__ 定位仓库根，
     返回绝对路径，彻底脱离 cwd 依赖。
@@ -39,8 +39,8 @@ def _drifox_dir() -> Path:
         root = here.parent
         for _ in range(8):
             if (root / ".git").exists():
-                return root / ".drifox"
-        return here.parents[3] / ".drifox"
+                return root / ".drifox6"
+        return here.parents[3] / ".drifox6"
     if sys.platform == "darwin":
         try:
             from AppKit import NSApplicationSupportDirectory, NSFileManager, NSUserDomainMask
@@ -52,10 +52,10 @@ def _drifox_dir() -> Path:
                 app_support_path = paths[0].fileSystemRepresentation().decode("utf-8")
                 app_support = Path(app_support_path) / "Drifox"
                 app_support.mkdir(parents=True, exist_ok=True)
-                return app_support / ".drifox"
+                return app_support / ".drifox6"
         except Exception:
             pass
-    return Path.home() / ".drifox"
+    return Path.home() / ".drifox6"
 
 
 class ProxyConfig:

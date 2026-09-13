@@ -93,18 +93,18 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 
 ### ❌ 改了代码但热重载没生效 / 无法确认是否生效
 
-**症状**：往 `~/.drifox/plugins/<name>/` 复制/保存文件后，面板行为还是旧的；或不确定重载是否成功。
+**症状**：往 `~/.drifox6/plugins/<name>/` 复制/保存文件后，面板行为还是旧的；或不确定重载是否成功。
 
 **原因**：watchfiles 监控按批次合并事件，复制文件后偶尔不触发；且部分变更（如纯资源文件）不产生日志。
 
 **修法**：
 ```powershell
 # 1) 强制触发：touch 文件 mtime
-(Get-Item "$env:USERPROFILE\.drifox\plugins\<name>\ui\*.py").LastWriteTime = Get-Date
+(Get-Item "$env:USERPROFILE\.drifox6\plugins\<name>\ui\*.py").LastWriteTime = Get-Date
 # 2) 查日志确认（出现即成功）
 #    [UIPluginRegistry] Loaded UI components for plugin: <name>
 #    [PluginHost] Plugin [<name>] reloaded via kernel: ... ui=True ...
-Get-Content "$env:USERPROFILE\.drifox\logs\all.log" | Select-String "<name>" | Select-String "reloaded|Loaded UI"
+Get-Content "$env:USERPROFILE\.drifox6\logs\all.log" | Select-String "<name>" | Select-String "reloaded|Loaded UI"
 ```
 UI 逻辑离线实测（不依赖 DriFox 运行时）：`D:\work\DriFox\.venv\Scripts\python.exe` 带完整 PyQt5 + qfluentwidgets，可写 QTimer 序列脚本验证 QSS/高度/动画等 widget 行为（base 环境的 PyQt5 缺 QtCore，不可用）。
 
@@ -114,7 +114,7 @@ UI 逻辑离线实测（不依赖 DriFox 运行时）：`D:\work\DriFox\.venv\Sc
 
 **原因**：system-* 是 DriFox 内置插件，不应手动修改。
 
-**修法**：把需要的代码 fork 成自己的插件放到 `~/.drifox/plugins/<your-plugin>/`（用户插件根），基于它开发；system 插件保持原样。
+**修法**：把需要的代码 fork 成自己的插件放到 `~/.drifox6/plugins/<your-plugin>/`（用户插件根），基于它开发；system 插件保持原样。
 
 ### ❌ 改了代码但 version 没动
 

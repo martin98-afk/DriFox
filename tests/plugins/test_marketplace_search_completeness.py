@@ -66,7 +66,7 @@ def _new_card(monkeypatch):
     # 默认进入页为「精选」（列表页被切出内容栈，行不可见）；
     # 列表渲染/搜索相关测试需显式切回「全部」列表模式
     card._filter_bar.setCurrentItem("all")
-    # 隔离本地已安装插件（真实环境 .drifox 有 minimax-h3 等，名字/描述含数字会干扰搜索断言）
+    # 隔离本地已安装插件（真实环境 .drifox6 有 minimax-h3 等，名字/描述含数字会干扰搜索断言）
     card._build_local_extra_plugins = lambda: []
     return card
 

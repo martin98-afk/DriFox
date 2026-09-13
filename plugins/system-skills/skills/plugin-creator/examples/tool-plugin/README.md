@@ -32,7 +32,7 @@ tool-plugin/
 
 ## 如何使用
 
-1. 复制本目录到 `~/.drifox/plugins/tool-plugin-example/`
+1. 复制本目录到 `~/.drifox6/plugins/tool-plugin-example/`
 2. 全局搜索 `[改名]` / `[必改]` 标记，改工具名、danger 等级、icon
 3. 重启或等 watchfiles 热更新（1-3 秒），用 `/plugin-marketplace` 确认加载状态
 4. 改成你自己的实现逻辑

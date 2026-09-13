@@ -106,7 +106,7 @@ class TestRefreshConnections:
         from app.core import mcp_lsp_safety
 
         srv = _server("browser")
-        srv["_source"] = str(Path.home() / ".drifox" / "plugins" / "browser" / ".mcp.json")
+        srv["_source"] = str(Path.home() / ".drifox6" / "plugins" / "browser" / ".mcp.json")
         key = mcp_lsp_safety.server_key("mcp", "browser", "browser")
         mcp_lsp_safety._PENDING_CONFIRM.add(key)
         try:

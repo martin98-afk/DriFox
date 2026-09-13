@@ -828,7 +828,7 @@ class ShareCardContent(QWidget):
         ext_map = {"markdown": ".md", "json": ".json", "html": ".html"}
         ext = ext_map.get(fmt, ".txt")
 
-        # 自动保存到 ~/.drifox/share/sessions/
+        # 自动保存到 ~/.drifox6/share/sessions/
         try:
             ensure_dirs()
         except Exception as e:

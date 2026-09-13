@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-PLUGIN_DIR = Path(r"D:\work\DriFox\.drifox\plugins\gateway-feishu\gateways")
+PLUGIN_DIR = Path(r"D:\work\DriFox\.drifox6\plugins\gateway-feishu\gateways")
 
 
 def load_adapter_cls():

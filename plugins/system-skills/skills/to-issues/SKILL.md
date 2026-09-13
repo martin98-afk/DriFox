@@ -23,7 +23,7 @@ description: 自动分析代码问题并提交规范化的 GitHub Issues。遵�
 
 1. **GitHub Token** (优先级):
    - 从长期记忆 `minimax apikey` 或 `github token` 中读取
-   - 或从项目 `.drifox/app.config` 中读取
+   - 或从项目 `.drifox6/app.config` 中读取
    - 或从环境变量 `GITHUB_TOKEN` 获取
 
 2. **仓库地址**:
@@ -100,8 +100,8 @@ def get_config():
     config['token'] = os.environ.get('GITHUB_TOKEN', '')
     config['repo'] = os.environ.get('GITHUB_REPO', '')
     
-    # 2. 从 .drifox/app.config
-    config_file = Path('.drifox/app.config')
+    # 2. 从 .drifox6/app.config
+    config_file = Path('.drifox6/app.config')
     if config_file.exists():
         try:
             with open(config_file, 'r', encoding='utf-8') as f:
