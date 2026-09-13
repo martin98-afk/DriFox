@@ -124,6 +124,9 @@ PROGRESS_MIN_CHARS = 40
 PROGRESS_MIN_INTERVAL_MS = 150
 PROGRESS_MAX_INTERVAL_MS = 400
 
+# 行数重算步长：content 很长时每步长才重扫一次 buffer（每次进度都全量扫是 O(n²)）
+LINE_ESTIMATE_STEP = 2000
+
 
 def should_emit_progress(
     prev_len: int,
@@ -154,8 +157,14 @@ def build_progress_payload(
     args_len: int,
     path: str = "",
     prev_lines: Tuple[int, int] = (0, 0),
+    reuse_lines: bool = False,
 ) -> Tuple[Dict[str, object], Tuple[int, int]]:
     """构造 progress 事件参数，并返回本次行数估计（供调用方保存以实现「只增不减」）。
+
+    Args:
+        reuse_lines: True 时沿用 prev_lines（跳过本次全量扫描）。超长参数下每 40 字符
+            就全量扫一遍 buffer 是 O(n²)（十万字级参数会持 GIL 拖住界面），
+            调用方按 `LINE_ESTIMATE_STEP` 步长决定何时真正重算。
 
     Returns:
         (payload, (add, dele)) —— payload 至少含 `_status` / `_args_len`；
@@ -164,10 +173,13 @@ def build_progress_payload(
     payload: Dict[str, object] = {"_status": "loading", "_args_len": args_len}
     if path:
         payload["_path"] = path
-    add, dele = estimate_streaming_lines(tool_name, buffer_text)
-    # 只增不减：流式期间参数只增，已计出的值不回退（防正则失配导致数字抖动）
-    add = max(add, int(prev_lines[0]))
-    dele = max(dele, int(prev_lines[1]))
+    if reuse_lines:
+        add, dele = int(prev_lines[0]), int(prev_lines[1])
+    else:
+        add, dele = estimate_streaming_lines(tool_name, buffer_text)
+        # 只增不减：流式期间参数只增，已计出的值不回退（防正则失配导致数字抖动）
+        add = max(add, int(prev_lines[0]))
+        dele = max(dele, int(prev_lines[1]))
     if add or dele:
         payload["_add_lines"] = add
         payload["_del_lines"] = dele

@@ -76,3 +76,14 @@ def test_should_emit_progress_rules():
     assert should_emit_progress(100, 110, 900.0, 1000.0) is False
     assert should_emit_progress(100, 150, 800.0, 1000.0) is True
     assert should_emit_progress(100, 105, 500.0, 1000.0) is True
+
+
+def test_build_progress_payload_reuse_lines_skips_scan():
+    """reuse_lines=True 沿用上次行数（超长参数下跳过全量扫描，避免 O(n²) 拖住界面）"""
+    buf = r'{"content": "a\nb\nc\nd\ne'
+    payload, est = build_progress_payload("write", buf, 9999, "", (7, 2), True)
+    assert payload["_add_lines"] == 7 and payload["_del_lines"] == 2
+    assert est == (7, 2)
+    # 同一 buffer 不 reuse 时按实际扫描（content 片段 4 个换行 → 5 行）
+    payload2, est2 = build_progress_payload("write", buf, 9999, "", (0, 0), False)
+    assert payload2["_add_lines"] == 5 and est2 == (5, 0)

@@ -508,6 +508,7 @@ class OpenAIChatWorker(QThread):
         self._last_progress_len = s.response.last_progress_len
         self._last_progress_ts = s.response.last_progress_ts
         self._last_line_est = s.response.last_line_est
+        self._last_est_len = s.response.last_est_len
         self._last_compaction_state = s.compaction.last_state
         self._current_session_messages = s.session.current_messages
         self._last_usage = s.session.last_usage
@@ -3853,6 +3854,7 @@ class OpenAIChatWorker(QThread):
                                 # 短参数的 JSON 解析失败，记录到等待队列
                                 # 同时也发射长度进度，避免 UI 一直卡在"正在准备参数..."
                                 from app.core.tool_arg_lines import (
+                                    LINE_ESTIMATE_STEP,
                                     build_progress_payload,
                                     extract_partial_path,
                                     should_emit_progress,
@@ -3864,6 +3866,9 @@ class OpenAIChatWorker(QThread):
                                     self._last_progress_len[tc_id] = args_len
                                     self._last_progress_ts[tc_id] = _now_ms
                                     _buf_name = buffer["function"].get("name", tool_name)
+                                    # 行数按步长重算，未到步长沿用上次（超长参数下避免 O(n²) 扫描）
+                                    _est_len = self._last_est_len.get(tc_id, 0)
+                                    _reuse = bool(_est_len) and (args_len - _est_len) < LINE_ESTIMATE_STEP
                                     # 编辑类工具顺带估算增删行数（运行框显示 +N/-M）+ 未闭合路径提前提取
                                     progress_args, _est = build_progress_payload(
                                         _buf_name or tool_name,
@@ -3871,7 +3876,10 @@ class OpenAIChatWorker(QThread):
                                         args_len,
                                         extract_partial_path(buffer["function"]["arguments"]),
                                         self._last_line_est.get(tc_id, (0, 0)),
+                                        _reuse,
                                     )
+                                    if not _reuse:
+                                        self._last_est_len[tc_id] = args_len
                                     self._last_line_est[tc_id] = _est
                                     self._emit_with_callback(
                                         "tool_args_updated",
@@ -3891,6 +3899,7 @@ class OpenAIChatWorker(QThread):
                             # 参数已超过 1000 字符，跳过逐块 JSON 解析以节省开销
                             # 但仍推送长度进度 + 累积尾部预览，让 UI 显示接收进度
                             from app.core.tool_arg_lines import (
+                                LINE_ESTIMATE_STEP,
                                 build_progress_payload,
                                 extract_partial_path,
                                 should_emit_progress,
@@ -3902,6 +3911,9 @@ class OpenAIChatWorker(QThread):
                                 self._last_progress_len[tc_id] = args_len
                                 self._last_progress_ts[tc_id] = _now_ms
                                 _buf_name = buffer["function"].get("name", tool_name)
+                                # 行数按步长重算，未到步长沿用上次（超长参数下避免 O(n²) 扫描）
+                                _est_len = self._last_est_len.get(tc_id, 0)
+                                _reuse = bool(_est_len) and (args_len - _est_len) < LINE_ESTIMATE_STEP
                                 # 编辑类工具顺带估算增删行数（运行框显示 +N/-M）+ 未闭合路径提前提取
                                 progress_args, _est = build_progress_payload(
                                     _buf_name or tool_name,
@@ -3909,7 +3921,10 @@ class OpenAIChatWorker(QThread):
                                     args_len,
                                     extract_partial_path(buffer["function"]["arguments"]),
                                     self._last_line_est.get(tc_id, (0, 0)),
+                                    _reuse,
                                 )
+                                if not _reuse:
+                                    self._last_est_len[tc_id] = args_len
                                 self._last_line_est[tc_id] = _est
                                 self._emit_with_callback(
                                     "tool_args_updated",

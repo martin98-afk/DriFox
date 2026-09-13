@@ -47,6 +47,7 @@ class ResponseContentState:
     last_progress_len: Dict[str, int] = field(default_factory=dict)  # tc_id -> 上一次推送进度时的字符数
     last_progress_ts: Dict[str, float] = field(default_factory=dict)  # tc_id -> 上一次推送时间（monotonic ms）
     last_line_est: Dict[str, Tuple[int, int]] = field(default_factory=dict)  # tc_id -> 编辑工具行数估计 (add, del)
+    last_est_len: Dict[str, int] = field(default_factory=dict)  # tc_id -> 上次重算行数时的参数长度
 
 
 @dataclass
@@ -202,6 +203,7 @@ class ChatWorkerState:
         self.response.last_progress_len = {}
         self.response.last_progress_ts = {}
         self.response.last_line_est = {}
+        self.response.last_est_len = {}
 
     def full_cleanup(self):
         """
