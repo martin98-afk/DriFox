@@ -53,7 +53,14 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import (
     QShortcut,
 )
-from qfluentwidgets import ComboBox, FluentIcon, IconWidget, TextEdit, TransparentToolButton
+from qfluentwidgets import (
+    ComboBox,
+    FluentIcon,
+    IconWidget,
+    TextEdit,
+    TransparentToolButton,
+    setCustomStyleSheet,
+)
 
 from app.widgets.stop_button import SendStopButton
 
@@ -301,7 +308,7 @@ class SendableTextEdit(TextEdit):
 
         self._agent_combo = ComboBox(self)
         self._agent_combo.setFixedSize(75, 28)
-        self._agent_combo.setStyleSheet(self._build_combo_style())
+        self._apply_agent_combo_style()
         self._agent_combo.currentTextChanged.connect(self._on_agent_changed)
 
         self.send_btn = SendStopButton(self)
@@ -2010,9 +2017,17 @@ class SendableTextEdit(TextEdit):
         self._glow_target = None
 
     def _apply_input_style(self):
-        """应用输入框样式 - 融入卡片，无边框"""
+        """应用输入框样式 - 融入卡片，无边框
+
+        必须走 qfw 官方 setCustomStyleSheet 通道注入：自定义 QSS 会并入
+        styleSheetManager 的组合源（qfw LINE_EDIT qss + 本样式），主题切换
+        updateStyleSheet 重设时自动携带，不会再被顶掉。
+        历史坑：裸 setStyleSheet 会被任何一次 setTheme 无条件重置为
+        Fluent 白底描边样式；一旦刷新链因幂等跳过/异常中断没盖回，
+        输入框就停留在错误样式（楷体 placeholder + 青色下划线）。
+        """
         Colors.refresh()
-        self.setStyleSheet(f"""
+        qss = f"""
             QTextEdit {{
                 background: transparent;
                 color: {Colors.INPUT_TEXT};
@@ -2022,9 +2037,17 @@ class SendableTextEdit(TextEdit):
                 selection-background-color: {Colors.SELECTED_BG};
                 {get_font_family_css()} {font_size_css(15)};
             }}
+            QTextEdit:hover,
             QTextEdit:focus {{
+                background: transparent;
                 border: none;
+            }}
+            QTextEdit:focus {{
                 color: {Colors.INPUT_FOCUS_TEXT};
+            }}
+            QTextEdit:disabled {{
+                background: transparent;
+                border: none;
             }}
             QTextEdit QScrollBar:vertical {{
                 background: transparent;
@@ -2047,7 +2070,8 @@ class SendableTextEdit(TextEdit):
             QTextEdit QScrollBar::sub-page:vertical {{
                 background: none;
             }}
-        """)
+        """
+        setCustomStyleSheet(self, qss, qss)
 
         # 同步文档默认字体：inline 文件胶囊（FileMentionObject）用
         # document().defaultFont() 计算尺寸并绘制文件名。QSS 的 font 只作用于
@@ -2056,6 +2080,12 @@ class SendableTextEdit(TextEdit):
         doc = self.document()
         if doc is not None and doc.defaultFont() != self.font():
             doc.setDefaultFont(self.font())
+
+    def _apply_agent_combo_style(self):
+        """智能体下拉框样式注入 — 同 _apply_input_style，走 setCustomStyleSheet
+        通道并入 qfw 组合源，防止主题切换 setTheme 重设时被 Fluent QSS 顶掉"""
+        qss = self._build_combo_style()
+        setCustomStyleSheet(self._agent_combo, qss, qss)
 
     def _build_combo_style(self) -> str:
         """构建智能体下拉框样式"""
@@ -2097,7 +2127,7 @@ class SendableTextEdit(TextEdit):
         """刷新样式（响应主题切换）"""
         self._apply_input_style()
         if hasattr(self, "_agent_combo") and self._agent_combo:
-            self._agent_combo.setStyleSheet(self._build_combo_style())
+            self._apply_agent_combo_style()
 
     def _animate_glow(self, target_blur, target_alpha, duration=300):
         try:

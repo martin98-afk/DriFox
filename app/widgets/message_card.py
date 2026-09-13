@@ -14692,6 +14692,59 @@ class MessageCard(SimpleCardWidget):
             widget = widget.parentWidget()
         return None
 
+    # ── viewer 高度限幅分帧（WebEngine 旧帧拉伸伪影规避）──
+    # 高度一次大跳（流式 burst / 首帧撑开）时，Qt 侧在 Chromium 新帧到达前把
+    # 旧帧纹理拉伸填满新几何 → 文字瞬间竖向拉长一闪（Qt6 合成路径特有，Qt5 无；
+    # 2026-09-13 最小复现 + ffmpeg 逐帧证实：行厚放大 ~3.7 倍、持续约 130ms）。
+    # 把单帧几何跳变限幅分帧后，每次拉伸比例压到视觉阈值以下。
+    _SMOOTH_STEP_PX = 160
+    _SMOOTH_FRAME_MS = 16
+
+    def _cancel_height_smooth(self) -> None:
+        """停掉未完成的分帧高度序列（viewer 归还/销毁前调用）。"""
+        timer = getattr(self, "_smooth_height_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._smooth_height_target = None
+
+    def _apply_height_smooth(self, target: int) -> None:
+        """流式直跳路径的限幅分帧：每帧最多逼近 _SMOOTH_STEP_PX。
+
+        新目标到来时以最新值为准继续逼近（自然追赶，不堆积序列）。
+        每步同步维护 _last_height_delta / _last_applied_viewer_height，
+        外层滚动补偿与去重语义与直接 set 路径保持一致。
+        """
+        cur = self.viewer.height()
+        if abs(target - cur) <= self._SMOOTH_STEP_PX:
+            self._cancel_height_smooth()
+            self._last_height_delta = target - cur
+            self._last_applied_viewer_height = target
+            self.viewer.setFixedHeight(target)
+            self.heightChanged.emit(target)
+            return
+        step = self._SMOOTH_STEP_PX if target > cur else -self._SMOOTH_STEP_PX
+        nxt = cur + step
+        if (nxt > target) if step > 0 else (nxt < target):
+            nxt = target
+        self._last_height_delta = nxt - cur
+        self._last_applied_viewer_height = nxt
+        self.viewer.setFixedHeight(nxt)
+        self.heightChanged.emit(nxt)
+        timer = getattr(self, "_smooth_height_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(
+                lambda: (
+                    self._apply_height_smooth(self._smooth_height_target)
+                    if self._smooth_height_target is not None
+                    else None
+                )
+            )
+            self._smooth_height_timer = timer
+        self._smooth_height_target = target
+        timer.start(self._SMOOTH_FRAME_MS)
+
     def _commit_viewer_height(self, height: int) -> None:
         """高度应用的统一出口。
 
@@ -14705,8 +14758,7 @@ class MessageCard(SimpleCardWidget):
         if batch is not None and batch.active and not self._streaming:
             batch.submit(self, height)
             return
-        self.viewer.setFixedHeight(height)
-        self.heightChanged.emit(height)
+        self._apply_height_smooth(height)
 
     def _apply_viewer_height(self, value):
         height = max(40, int(value))
@@ -15049,6 +15101,8 @@ class MessageCard(SimpleCardWidget):
         # 流式输出中的卡片不可摘：摘掉会中断正在进行的渲染与高度回传
         if self._streaming:
             return False
+        # 未完成的分帧高度序列必须停掉，避免把归还池中的 viewer 高度拉走
+        self._cancel_height_smooth()
 
         from app.widgets.webview_pool import WebViewPool
 
