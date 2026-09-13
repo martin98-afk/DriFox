@@ -43,6 +43,7 @@ from PyQt5.QtWidgets import (
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets.cards.card_container import CardContainer
+from app.widgets.elided_label import _ElidedLabel
 from qfluentwidgets import TransparentToolButton
 
 
@@ -287,9 +288,9 @@ class QueueMessageCard(QWidget):
         index_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         layout.addWidget(index_label)
 
-        text_label = QLabel(summarize_entry_text(raw_text), row)
+        text_label = _ElidedLabel(summarize_entry_text(raw_text), row)
         text_label.setObjectName("queueRowText")
-        text_label.setToolTip(raw_text)
+        text_label.setToolTip(raw_text)  # 覆盖 _ElidedLabel 自动设的摘要 tooltip，悬浮看完整原文
         layout.addWidget(text_label, stretch=1)
 
         # 插入：立即注入当前对话流（不停 worker）
