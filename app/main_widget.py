@@ -1115,6 +1115,8 @@ class OpenAIChatToolWindow(ToolWindow):
     _opencode_models_ready = pyqtSignal(object)
     # models.dev 动态模型数据后台刷新完成（后台线程 → 主线程）
     _models_dev_ready = pyqtSignal(object)
+    # 工具注册表变更桥接（registry.on_change 回调可能来自后台 watcher 线程 → 主线程）
+    _tool_registry_changed = pyqtSignal(int)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -1172,6 +1174,24 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 工具权限控制器（per-window 多窗口隔离）
         # 必须在 backend.initialize 之前创建并注入,engine 启动时会读取
         self._tool_permission_controller = ToolPermissionController(self)
+
+        # 输入框工具计数刷新直连两个数据源（2026-09-13 修复：此前刷新寄生在
+        # 懒创建的工具控制卡上——未开过卡片的窗口，插件装/卸/热重载后计数停在
+        # 启动值；agent 激活的 emit 也先于卡片转发连接而丢失）：
+        # a) registry 变更（工具数量变化）：on_change 回调可能来自后台 watcher
+        #    线程，经 _tool_registry_changed 信号排队主线程；
+        # b) controller 权限变化（用户开关 / agent 激活 / 恢复 / 配置同步）：
+        #    不再依赖卡片转发。
+        # 两个源统一走 0ms 单发去抖：一次热重载重扫会产生几十次 notify。
+        self._tool_count_dirty_timer = QTimer(self)
+        self._tool_count_dirty_timer.setSingleShot(True)
+        self._tool_count_dirty_timer.timeout.connect(self._refresh_tool_toggle_btn)
+        self._tool_registry_changed.connect(self._on_tool_count_dirty)
+        self._tool_permission_controller.togglesChanged.connect(lambda _t: self._on_tool_count_dirty())
+        self._tool_permission_controller.activeAgentChanged.connect(lambda _n: self._on_tool_count_dirty())
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.get_instance().on_change(self._on_tool_registry_changed)
 
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
@@ -8457,6 +8477,16 @@ class OpenAIChatToolWindow(ToolWindow):
             # 通知 card 从 controller 拉取最新状态
             self._tool_control_card.set_toggles(self._tool_permission_controller.get_toggles())
         self._card_manager.toggle_card("tool_control", self._window_id)
+
+    def _on_tool_registry_changed(self, _version: int):
+        """registry 变更回调（可能来自后台 watcher 线程）：只 emit 排队，不碰 UI"""
+        self._tool_registry_changed.emit(_version)
+
+    def _on_tool_count_dirty(self):
+        """工具计数脏标记：0ms 单发去抖合并同批变更后统一刷新输入框计数"""
+        if getattr(self, "_tool_count_label", None) is None:
+            return
+        self._tool_count_dirty_timer.start(0)
 
     def _refresh_tool_toggle_btn(self):
         """刷新工具开关按钮上的数字和 agent 覆盖指示"""
