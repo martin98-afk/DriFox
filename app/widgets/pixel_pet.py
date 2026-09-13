@@ -44,6 +44,7 @@ import sys
 
 from PyQt5 import sip
 from PyQt5.QtCore import (
+    QAbstractAnimation,
     QEasingCurve,
     QElapsedTimer,
     QPoint,
@@ -57,6 +58,8 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QWidget
 from loguru import logger
+
+from app.utils.design_tokens import Animations
 
 
 # =============================================================================
@@ -139,6 +142,10 @@ FRAME_INTERVALS = {
 # 空闲超过此时间自动进入睡眠 (ms) — 随机化，不再固定间隔
 SLEEP_TIMEOUT_MIN_MS = 45_000   # 最早 45s
 SLEEP_TIMEOUT_MAX_MS = 120_000  # 最晚 2 分钟
+
+# error 抖动的最长帧数（40ms/帧 → 约 1.6s）。
+# 超过即停：抖够就够，error 持久化时不无限抖动。
+_SHAKE_MAX_FRAMES = 40
 
 # 成功/错误状态持续后恢复 idle (ms)
 RECOVER_MS = 2500
@@ -783,16 +790,15 @@ class PixelPetWidget(QWidget):
                 target_y = ph - self.height() - 100
             self.move(target_x, ph)  # 从底部开始
             anim = QPropertyAnimation(self, b"geometry", self)
-            anim.setDuration(400)
+            # 入场欢迎是整窗位移（跨大半屏），走 SLOW_MS 档 + OutBack 回弹
+            anim.setDuration(Animations.SLOW_MS)
             start_geo = QRect(target_x, ph, self.width(), self.height())
             end_geo = QRect(target_x, target_y, self.width(), self.height())
             anim.setStartValue(start_geo)
             anim.setEndValue(end_geo)
-            anim.setEasingCurve(QEasingCurve.OutBack)
+            anim.setEasingCurve(QEasingCurve(Animations.EASE_OVERSHOOT))
             anim.start()
-            if not hasattr(self, "_animations"):
-                self._animations = []
-            self._animations.append(anim)
+            self._track_animation(anim)
             # 短暂显示 success 帧作为欢迎
             self.set_state("success")
             logger.debug("[PixelPet] 入场欢迎动画")
@@ -1159,6 +1165,12 @@ class PixelPetWidget(QWidget):
             self._stop_shake()
             return
         self._shake_frame += 1
+        # ★ 抖动上限：error 持久化（重试中）时旧实现会以 25fps **无限**位移下去，
+        # 每帧两次 randint + move + 整窗重绘，既扰人又纯耗 CPU。抖够即停，
+        # error 状态自身的红色边框 / 泪痕 / 哭泣帧完全不受影响。
+        if self._shake_frame > _SHAKE_MAX_FRAMES:
+            self._stop_shake()
+            return
         if self._shake_original_pos is None:
             self._shake_original_pos = QPoint(self.x(), self.y())
         intensity = self._shake_intensity
@@ -1592,14 +1604,65 @@ class PixelPetWidget(QWidget):
     def showEvent(self, event: object) -> None:
         super().showEvent(event)
         self.raise_()
+        self._resume_loops()
         # ★ 显示时恢复 raise_timer（除非在睡觉）
         if self._current_state != "sleeping" and not self._raise_timer.isActive():
             self._raise_timer.start(5000)
 
     def hideEvent(self, event: object) -> None:
-        """★ 隐藏时停止不必要的定时器"""
+        """★ 隐藏（含窗口最小化）时停掉**全部**循环定时器
+
+        旧实现只停 ``_raise_timer``，主帧循环（idle 3–5fps 的宠物帧动画）与
+        行为调度器（睡眠 / 闲逛 / 求关注）仍在后台跑。桌宠是常驻控件，隐藏后
+        这些全是纯 CPU 空转（还会随窗口最小化一直持续）。恢复显示时由
+        ``showEvent`` 按当前状态续上。
+        """
         super().hideEvent(event)
-        self._raise_timer.stop()
+        self._pause_loops()
+
+    # 全部循环/调度定时器（隐藏时统一暂停；新增 timer 记得加入本清单）
+    _LOOP_TIMER_ATTRS = (
+        "_frame_timer",
+        "_sleep_timer",
+        "_sleep_wake_timer",
+        "_recover_timer",
+        "_raise_timer",
+        "_idle_behavior_timer",
+        "_attention_timer",
+        "_inertia_timer",
+        "_click_timer",
+        "_shake_timer",
+        "_particle_timer",
+    )
+
+    def _pause_loops(self) -> None:
+        """暂停全部循环/调度定时器（隐藏时调用）"""
+        for name in self._LOOP_TIMER_ATTRS:
+            timer = getattr(self, name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except RuntimeError:
+                    pass
+
+    def _resume_loops(self) -> None:
+        """恢复循环/调度定时器（显示时调用）：只恢复当前状态真正需要的
+
+        - 帧循环：按当前状态重设间隔
+        - 睡眠/闲逛/求关注：睡觉时不重排（唤醒时自会重排）
+        - 粒子：仅在有存活粒子时
+        惯性 / 抖动 / 点击链都是短时自停的，隐藏期间已自然结束，不恢复。
+        """
+        try:
+            self._start_frame_timer(self._current_state)
+        except Exception:
+            pass
+        if self._current_state != "sleeping":
+            self._reset_sleep_timer()
+            self._reset_idle_behavior_timer()
+            self._reset_attention_timer()
+        if getattr(self, "_particles", None):
+            self._particle_timer.start(50)
 
     def cleanup(self) -> None:
         self._frame_timer.stop()

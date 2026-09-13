@@ -504,8 +504,8 @@ class WorktreeSectionWidget(QWidget):
     workingDirRestored = pyqtSignal(str)  # 外部删除导致工作目录恢复时发射（无重建）
     sizeChanged = pyqtSignal(int)  # 高度变化通知
 
-    def refresh_style(self):
-        """刷新样式（用于系统字体大小切换时重绘）"""
+    def refresh_style(self, _payload: dict = None):
+        """刷新样式（EV_THEME_CHANGED 订阅回调；payload 为事件数据，忽略）"""
         self._repopulate()
 
     def __init__(self, repo_info, original_folder: str, parent=None, current_workdir: str = None, project: str = None):

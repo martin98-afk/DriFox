@@ -16,8 +16,6 @@ per-window 的派生状态（如当前窗口选中的服务商、模型列表）
 """
 
 import copy
-import time
-
 from app.core import window_registry
 from typing import List, Optional
 
@@ -170,17 +168,14 @@ class GlobalCardController:
             # 事件重入：正在构建中，直接返回（外层构建完成后 _settings_popup 已赋值）
             return
         self._settings_popup_building = True
-        _t0 = time.perf_counter()
         try:
             from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
             self._settings_popup = LLMSettingsCard(self._tab_manager)
-            _t_card = time.perf_counter()
             self._settings_popup.setVisible(False)
             self._settings_popup.configChanged.connect(self.on_settings_config_changed)
             self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID))
 
-            _t_hook = time.perf_counter()
             # ★ 原实现在这里注入 HookManager 并全量重渲染一次（实测 ~0.7s，
             # 其中 _refresh 内的 processEvents 会把构造期积压的事件一并泵走）。
             # Hooks 页并非首屏，改为延迟到该页首次进入时做（LLMSettingsCard
@@ -211,13 +206,6 @@ class GlobalCardController:
                 self._settings_popup.rebuild_plugin_cards()
             except Exception as e:
                 logger.warning(f"[GlobalCard] 插件设置分区初始化失败: {e}")
-            _t_rebuild = time.perf_counter()
-            logger.info(
-                f"[Perf-OpenSettings] build_card={(_t_card - _t0) * 1000:.1f}ms "
-                f"hook_inject={(_t_hook - _t_card) * 1000:.1f}ms "
-                f"rebuild_plugins={(_t_rebuild - _t_hook) * 1000:.1f}ms "
-                f"total={(_t_rebuild - _t0) * 1000:.1f}ms"
-            )
         finally:
             self._settings_popup_building = False
 
@@ -227,21 +215,13 @@ class GlobalCardController:
 
     def toggle_settings(self):
         """切换设置卡片的显示"""
-        _t0 = time.perf_counter()
         self.ensure_settings_popup()
-        _t_ensure = time.perf_counter()
         # Phase D：每次打开重建插件分区（插件增删/热重载后内容最新）
         try:
             self._settings_popup.rebuild_plugin_cards()
         except Exception as e:
             logger.warning(f"[GlobalCard] 插件设置分区重建失败: {e}")
-        _t_rebuild = time.perf_counter()
         self._card_manager.toggle_card("settings", GLOBAL_WINDOW_ID)
-        logger.info(
-            f"[Perf-OpenSettings] toggle total={(time.perf_counter() - _t0) * 1000:.1f}ms "
-            f"ensure={(_t_ensure - _t0) * 1000:.1f}ms rebuild={(_t_rebuild - _t_ensure) * 1000:.1f}ms "
-            f"toggle_card={(time.perf_counter() - _t_rebuild) * 1000:.1f}ms"
-        )
 
     def open_settings(self):
         """打开设置卡片并确保宿主窗口前置"""

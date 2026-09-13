@@ -4,8 +4,6 @@
 现已迁移到 SystemCardFrame 基类，获得统一头部布局和固定边框
 """
 
-import time
-
 from loguru import logger
 from PyQt5.QtCore import QPointF, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen
@@ -63,14 +61,6 @@ from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
 from app.widgets.cards.settings.render_backend_card import RenderBackendCard
 from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
-
-
-def _ms(t0: float, t1: float | None = None) -> str:
-    """perf_counter 起点 → 毫秒字符串（性能埋点用，保留一位小数）
-
-    传 t1 时度量 [t0, t1] 区间，否则度量 [t0, now]。
-    """
-    return f"{((t1 if t1 is not None else time.perf_counter()) - t0) * 1000:.1f}"
 
 
 class NoWheelFontComboBox(QFontComboBox):
@@ -431,15 +421,6 @@ class LLMSettingsCard(SystemCardFrame):
         QTimer.singleShot(0, lambda: self._expand_page_cards("provider"))
 
     def _setup_content(self):
-        # 分段计时：构造期各分区成本（首开延迟大头，留作长期埋点，仅 ≥20ms 才打）
-        _marks: list[tuple[str, float]] = []
-        _t_prev = [time.perf_counter()]
-
-        def _ck(label: str):
-            now = time.perf_counter()
-            _marks.append((label, (now - _t_prev[0]) * 1000))
-            _t_prev[0] = now
-
         content_layout = self.content_layout
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
@@ -463,7 +444,7 @@ class LLMSettingsCard(SystemCardFrame):
         body_layout.addWidget(self._pages_stack, 1)
         content_layout.addWidget(body)
         self._update_nav_styles()
-        _ck("nav")
+
 
         # ════ 服务商页 ════
         provider_layout = self._page_layouts["provider"]
@@ -484,7 +465,6 @@ class LLMSettingsCard(SystemCardFrame):
         provider_layout.addWidget(self.llmProviderCard)
         provider_layout.addStretch(1)
 
-        _ck("provider")
         # ════ Hooks 页 ════
         hooks_layout = self._page_layouts["hooks"]
 
@@ -505,7 +485,6 @@ class LLMSettingsCard(SystemCardFrame):
         hooks_layout.addWidget(self.hookListCard)
         hooks_layout.addStretch(1)
 
-        _ck("hooks")
         # ════ MCP 页 ════
         mcp_layout = self._page_layouts["mcp"]
         self.mcpListCard = MCPListSettingCard(
@@ -517,7 +496,6 @@ class LLMSettingsCard(SystemCardFrame):
         mcp_layout.addWidget(self.mcpListCard)
         mcp_layout.addStretch(1)
 
-        _ck("mcp")
         # ════ LSP 页 ════
         lsp_layout = self._page_layouts["lsp"]
 
@@ -532,7 +510,6 @@ class LLMSettingsCard(SystemCardFrame):
         lsp_layout.addWidget(self.lspListCard)
         lsp_layout.addStretch(1)
 
-        _ck("lsp")
         # ════ 工具 / 智能体 / 技能 启停（按插件维度 D9/D10，各自独立分页）════
         tools_layout = self._page_layouts["tools"]
         self.pluginToolCard = PluginComponentsCard(
@@ -569,7 +546,6 @@ class LLMSettingsCard(SystemCardFrame):
         skills_layout.addWidget(self.llmSkillsCard)
         skills_layout.addStretch(1)
 
-        _ck("tools+agents+skills")
         # ════ 通用设置页 ════
         common_layout = self._page_layouts["common"]
 
@@ -637,7 +613,6 @@ class LLMSettingsCard(SystemCardFrame):
         common_layout.addWidget(self.busyEnterCard)
         common_layout.addStretch(1)
 
-        _ck("common")
         # ════ 渲染与性能页（Webview 环境变量配置化，全部重启生效）════
         # 换算逻辑见 app/utils/render_env.py；高级项（DisabledFeatures /
         # ExtraChromiumFlags）不进 UI，走 app.config [Render] 组直达。
@@ -783,7 +758,6 @@ class LLMSettingsCard(SystemCardFrame):
         render_layout.addWidget(self.renderAdvancedCard)
         render_layout.addStretch(1)
 
-        _ck("render")
         # ════ 通知页 ════
         notify_layout = self._page_layouts["notify"]
 
@@ -809,7 +783,6 @@ class LLMSettingsCard(SystemCardFrame):
         notify_layout.addWidget(self.llmSoundCard)
         notify_layout.addStretch(1)
 
-        _ck("notify")
         # ════ 外观样式页 ════
         appearance_layout = self._page_layouts["appearance"]
 
@@ -849,7 +822,6 @@ class LLMSettingsCard(SystemCardFrame):
         # pet_layout.addWidget(self.petSizeCard)
         # pet_layout.addStretch(1)
 
-        _ck("appearance")
         # ════ 版本更新页 ════
         update_layout = self._page_layouts["update"]
 
@@ -872,7 +844,6 @@ class LLMSettingsCard(SystemCardFrame):
         update_layout.addWidget(self.manualUpdateCard)
         update_layout.addStretch(1)
 
-        _ck("update")
         # ════ 插件设置页（初始隐藏，有注册卡片时显示）════
         self._plugin_cards_widget = QWidget(self)
         self._plugin_cards_layout = QVBoxLayout(self._plugin_cards_widget)
@@ -905,10 +876,6 @@ class LLMSettingsCard(SystemCardFrame):
             self.lspListCard,
         ]
         self._apply_list_accordion()
-        _ck("plugins+accordion")
-        big = " ".join(f"{k}={v:.1f}" for k, v in _marks if v >= 20)
-        if big:
-            logger.info(f"[Perf-OpenSettings] setup_content total={sum(v for _, v in _marks):.1f}ms {big}")
 
     def rebuild_plugin_cards(self, force: bool = False):
         """重建插件设置分区（Phase D，幂等）
@@ -924,15 +891,11 @@ class LLMSettingsCard(SystemCardFrame):
         (card_id, widget_class) 清单指纹：内容型变化由各卡自身的 refresh 负责，
         清单增删（插件装卸/热重载）才需要真正重建。
         """
-        t0 = time.perf_counter()
         # 首次构建延迟到「插件设置页首次进入」：实例化 5 张插件卡（含 ExpandSettingCard
         # 内部 view/滚动区）是笔一次性重活，不该在打开设置的那一帧同步付。
         # 未访问该页时只同步导航显隐（查清单，几乎零成本）。
         if not force and not self._plugin_cards_built:
-            has = self._sync_plugin_nav_visibility()
-            logger.info(
-                f"[Perf-OpenSettings] rebuild_plugin_cards={_ms(t0)}ms deferred=True has_cards={has}"
-            )
+            self._sync_plugin_nav_visibility()
             return
         # 工具/智能体开关卡：仅在其页已访问过后才顺带刷新（首次构建由
         # _ensure_page_ready 在该页首次进入时付，非 force 路径命中脏检查时近乎零成本）
@@ -960,9 +923,6 @@ class LLMSettingsCard(SystemCardFrame):
         except Exception:
             pass
         if not force and sig == self._plugin_cards_sig:
-            logger.info(
-                f"[Perf-OpenSettings] rebuild_plugin_cards={_ms(t0)}ms cards={len(cards)} skipped=True"
-            )
             return
         self._plugin_cards_sig = sig
         self._plugin_cards_built = True
@@ -974,7 +934,6 @@ class LLMSettingsCard(SystemCardFrame):
             if widget is not None:
                 widget.deleteLater()
         if not has_cards:
-            logger.info(f"[Perf-OpenSettings] rebuild_plugin_cards={_ms(t0)}ms cards=0 hidden")
             return
         for info in cards:
             try:
@@ -991,7 +950,6 @@ class LLMSettingsCard(SystemCardFrame):
                     logger.warning(f"[LLMSettingsCard] 插件卡片字号应用失败 {info.card_id}: {e}")
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] 插件设置卡片 {info.card_id} 构建失败：{e}")
-        logger.info(f"[Perf-OpenSettings] rebuild_plugin_cards={_ms(t0)}ms cards={len(cards)} rebuilt")
 
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果
@@ -1092,7 +1050,6 @@ class LLMSettingsCard(SystemCardFrame):
         try:
             scroll_area = self._ancestor_scroll_area(card) or self.scroll_area
             if scroll_area is None:
-                logger.warning("[FocusScroll] scroll_area 为空，提前 return")
                 return
             content_widget = scroll_area.widget()
             if content_widget is None:
@@ -1100,20 +1057,13 @@ class LLMSettingsCard(SystemCardFrame):
             # ExpandSettingCard 自带的 header widget（含图标/标题/展开按钮）
             header_widget = getattr(card, "card", None)
             if header_widget is None:
-                logger.warning(f"[FocusScroll] {card.__class__.__name__} 没有 .card 属性")
                 return
             doc_y = header_widget.mapTo(content_widget, QPoint(0, 0)).y()
             # header 顶部对齐视窗顶部，留 5px 边距
             target = max(0, doc_y - 5)
-            scroll_bar = scroll_area.verticalScrollBar()
-            old_val = scroll_bar.value()
-            scroll_bar.setValue(target)
-            logger.info(
-                f"[FocusScroll] {card.__class__.__name__} -> header doc_y={doc_y} target={target} "
-                f"old={old_val} new={scroll_bar.value()}"
-            )
-        except Exception as e:
-            logger.warning(f"[FocusScroll] 异常: {e}")
+            scroll_area.verticalScrollBar().setValue(target)
+        except Exception:
+            pass
 
     # ── 左侧导航 + 分页 ──────────────────────────────
 
@@ -1236,7 +1186,6 @@ class LLMSettingsCard(SystemCardFrame):
         """
         if tab_id in self._page_ready:
             return
-        t0 = time.perf_counter()
         try:
             if tab_id == "hooks":
                 # 构造期 hook_manager 为 None（parent 无 backend），原实现在
@@ -1259,9 +1208,6 @@ class LLMSettingsCard(SystemCardFrame):
             logger.warning(f"[LLMSettingsCard] {tab_id} 页首次准备失败: {e}")
             return
         self._page_ready.add(tab_id)
-        spent = (time.perf_counter() - t0) * 1000
-        if spent >= 30:
-            logger.info(f"[Perf-OpenSettings] page_ready[{tab_id}]={spent:.1f}ms")
 
     def _prefetch_pages(self):
         """空闲帧预热：把非首屏页的内容在卡片显示后补齐
@@ -1282,8 +1228,6 @@ class LLMSettingsCard(SystemCardFrame):
         layout = self._page_layouts.get(tab_id)
         if layout is None:
             return
-        t0 = time.perf_counter()
-        spent = []
         for i in range(layout.count()):
             item = layout.itemAt(i)
             card = item.widget() if item is not None else None
@@ -1303,15 +1247,9 @@ class LLMSettingsCard(SystemCardFrame):
                     inner = card.widget() if hasattr(card, "widget") else None
                     if inner is not None and inner.sizeHint().height() > inner.height():
                         inner.adjustSize()
-                    t_card = time.perf_counter()
                     card.toggleExpand()
-                    spent.append(f"{card.__class__.__name__}={_ms(t_card)}")
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] {tab_id} 页卡片展开失败: {e}")
-        # 只在该页展开确实有成本时打点，避免切页刷日志
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        if spent and elapsed_ms >= 30:
-            logger.info(f"[Perf-OpenSettings] expand_page[{tab_id}]={elapsed_ms:.1f}ms {' '.join(spent)}")
         page = self._page_scrolls.get(tab_id)
         if page is not None:
             page.verticalScrollBar().setValue(0)
@@ -1791,14 +1729,11 @@ class LLMSettingsCard(SystemCardFrame):
             ).show()
 
     def showEvent(self, event):
-        t0 = time.perf_counter()
         if hasattr(self, "llmProviderCard"):
             self.llmProviderCard._refresh_items()
-        t_provider = time.perf_counter()
         # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，
         # 后者会连带全量加载智能体 + 启动文件监听，实测约 330ms）
         self._ensure_hot_reload_connected()
-        t_hot = time.perf_counter()
         # 预热技能发现：展开技能卡时要同步扫盘 + parse 每个 SKILL.md（~90ms），
         # 挪到打开设置后的空闲帧做，用户点开卡片时就不必再等
         QTimer.singleShot(300, self._prefetch_skills)
@@ -1814,13 +1749,7 @@ class LLMSettingsCard(SystemCardFrame):
             card = getattr(self, card_name, None)
             if card is not None:
                 card.refresh_components()
-        t_components = time.perf_counter()
         super().showEvent(event)
-        logger.info(
-            f"[Perf-OpenSettings] showEvent={_ms(t0)}ms "
-            f"provider={_ms(t0, t_provider)} hot_reload={_ms(t_provider, t_hot)} "
-            f"components={_ms(t_hot, t_components)} super={_ms(t_components)}"
-        )
 
     def _prefetch_pages(self):
         """空闲帧错峰预热：把非首屏页的内容在卡片显示后逐页补齐
