@@ -50,7 +50,7 @@ UI 插件运行在浮动卡片里，卡片背景可能很暗（半透明黑）�
 ### 2.1 `_make_chart_colors_from_context(ctx: dict) -> dict`
 
 ```python
-from PyQt5.QtGui import QColor
+from PySide6.QtGui import QColor
 
 
 def _make_chart_colors_from_context(ctx: dict) -> dict:

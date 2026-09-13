@@ -1,6 +1,6 @@
 # 可复用控件 — 统计卡片 `_StatCard`
 
-> 来自 `context-usage-stats` 等项目提炼的 PyQt5 自绘控件。
+> 来自 `context-usage-stats` 等项目提炼的 PySide6 自绘控件。
 > 索引和设计原则见 `widgets.md`。
 
 ---
@@ -24,9 +24,9 @@
 # -*- coding: utf-8 -*-
 """_StatCard — 多层级统计信息卡片"""
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QFont
-from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QFont
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
 from qfluentwidgets import IconWidget
 
 

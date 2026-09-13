@@ -7,8 +7,7 @@
 - 必须是 QWidget 子类
 - __init__ 必须接受 parent=None（主程序会传停靠区容器作 parent）
 - 后台线程必须在 destroyed 信号里清理，否则关窗后线程残留崩溃
-- Qt 绑定：DriFox 当前使用 PyQt5（2026-09 实测仓库现状；
-  动手时以 grep "from PyQt5" 仓库结果为准）
+- Qt 绑定：DriFox 当前使用 PySide6（动手时以 grep "from PySide6" 仓库结果为准）
 
 样式注入惯用法：跟随明暗主题取色（isDarkTheme），objectName 供 QSS 定位。
 """

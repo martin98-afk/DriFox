@@ -88,7 +88,7 @@ val_size = max(round(base_font_size * 24 / 14), 18)  # 原 22/14 → 改 24/14
 
 ```python
 # ui/cards.py 顶部
-from PyQt5.QtWidgets import ...  # 确保 QPainter 等导入
+from PySide6.QtWidgets import ...  # 确保 QPainter 等导入
 
 # 加 _BarChartWidget 类（或 import）
 

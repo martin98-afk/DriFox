@@ -23,7 +23,7 @@
 | 坑 | 根因 | 规避 |
 |----|------|------|
 | 列表底部大段空白 | `QLabel(wordWrap)` 的 C++ `sizeHint` 按**理想宽度**算换行，比实际高 8~50% | 覆盖行 `sizeHint()` 返回 `layout.heightForWidth(当前宽度)`；`QScrollArea` 用 `setWidgetResizable(False)` + 手动 `_sync_content_size()` |
-| 覆盖 `sizeHint()` 不生效 | PyQt5 的 `QWidgetItem::sizeHint` → C++ 内部调用**不派发 Python override** | 由容器主动调用，不依赖 Qt 自动派发 |
+| 覆盖 `sizeHint()` 不生效 | PySide6 的 `QWidgetItem::sizeHint` → C++ 内部调用**不派发 Python override** | 由容器主动调用，不依赖 Qt 自动派发 |
 | 窗口 resize / 滚动条出现后重排错乱 | 行按新宽度重排，content 高度未重算 | 两阶段同步：先按 sizeHint 撑开 → resize 触发重排 → 按实际几何校正；监听 viewport resize |
 | 异步显示覆盖过滤结果 | reveal 任务晚于过滤执行 | 异步 show 前重新判定当前过滤条件 |
 | offscreen 测不出的问题 | 无字体 / 无样式环境 | 布局类改动必须开真实应用验证 |

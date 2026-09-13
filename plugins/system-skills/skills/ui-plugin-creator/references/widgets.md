@@ -1,6 +1,6 @@
 # UI 插件可复用控件库 — 索引
 
-> 来自 `context-usage-stats` 等实际项目中提炼的可复用 PyQt5 自绘控件、工具函数与最佳实践。
+> 来自 `context-usage-stats` 等实际项目中提炼的可复用 PySide6 自绘控件、工具函数与最佳实践。
 > 所有控件都遵循**插件闭包原则**（不导入 `app.core` / `app.widgets`），可独立放到任何 UI 插件的 `ui/` 目录下。
 
 ---
@@ -28,7 +28,7 @@
 ## 1. 设计原则（所有控件都遵循）
 
 1. **插件闭包**：不导入 `app.core` / `app.widgets`，可独立搬运
-2. **依赖最小**：仅 `PyQt5` / `qfluentwidgets` / `loguru` / stdlib
+2. **依赖最小**：仅 `PySide6` / `qfluentwidgets` / `loguru` / stdlib
 3. **主题色拉模型**：实现 `set_colors(colors: dict)` 方法，由父卡片统一注入（详见 `widgets-theme.md`）
 4. **自适应宽度**：所有 `paintEvent` 用 `if w >= 420` 等条件分支调整边距和字号
 5. **完整的 paintEvent**：圆角、网格、标签防裁剪等都封装好，调用方只需 `set_data(...)`

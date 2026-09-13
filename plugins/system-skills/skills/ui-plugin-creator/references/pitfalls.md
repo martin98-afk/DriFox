@@ -161,7 +161,7 @@ while blk.isValid():
 target = max(36, min(max(1, lines) * fm.lineSpacing() + 24, 160))
 ```
 
-验证：用 D:\work\DriFox\.venv 的 python（带完整 PyQt5）写 QTimer 序列脚本离线实测，见 plugin-creator troubleshooting.md「热重载」条。
+验证：用 D:\work\DriFox\.venv 的 python（带完整 PySide6）写 QTimer 序列脚本离线实测，见 plugin-creator troubleshooting.md「热重载」条。
 
 ## 10. ExpandSettingCard 覆写 _adjustViewSize 后展开收不回
 

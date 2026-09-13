@@ -93,7 +93,7 @@
 
 ### 1.6 异步操作（如果用了 worker）
 
-- [ ] `_Worker` 类有 `finished` / `error` 两个 pyqtSignal
+- [ ] `_Worker` 类有 `finished` / `error` 两个 Signal
 - [ ] 每次新任务前调用 `_cleanup_worker()`
 - [ ] `worker.deleteLater` / `thread.deleteLater` 都连接到 finish/error
 - [ ] 重写了 `deleteLater()` 调用 `_cleanup_worker()`

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-pytest.importorskip("PyQt5.QtGui")
+pytest.importorskip("PySide6.QtGui")
 
 from plugins.agent_trace.ui.trace_collector import TraceCollector  # noqa: E402
 

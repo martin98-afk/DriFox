@@ -177,7 +177,7 @@
 |------|------|------|
 | 放在哪个**方位**？ | `container="bottom"` / `container="top"` / `container="left"` / `container="right"` / `container="full"` | bottom 隐藏输入区；left/right 停靠在 Tab 窗口左右侧（类似 IDE 侧边栏）；full 完整覆盖对话区 |
 | 数据来源？ | 本地（SQLite / 文件）/ 远程（HTTP API） | 决定异步 worker 是否需要 |
-| 需要**异步操作**吗？ | 是 → QThread + pyqtSignal | 列表加载、安装/卸载、网络请求都算 |
+| 需要**异步操作**吗？ | 是 → QThread + Signal | 列表加载、安装/卸载、网络请求都算 |
 | 需要**上下文注入**吗？ | 是 → `set_context_provider` + 拉模型 | 主题色/字体跟随系统变化 |
 | 需要复用现成 widgets 吗？ | 见 `widgets.md` 索引 | 节省开发时间 |
 | 需要外部依赖吗？ | 见 `templates-plugins.md`（`_vendor/` 模式） | 引入第三方包 |
@@ -201,7 +201,7 @@
 | 场景 | 推荐 |
 |------|------|
 | 读 SQLite < 100ms | 可同步（不阻塞 UI 时） |
-| 读 SQLite > 100ms / 大数据量 | 必须异步（QThread + pyqtSignal） |
+| 读 SQLite > 100ms / 大数据量 | 必须异步（QThread + Signal） |
 | HTTP 请求 | 必须异步 |
 | 文件扫描（> 1k 文件） | 必须异步 |
 | 读小文件 / 静态数据 | 可同步 |

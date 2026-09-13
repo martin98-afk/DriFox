@@ -81,7 +81,7 @@ def test_changelog_fetcher_run_builds_private_md_with_tables():
     )
 
 
-@pytest.mark.skipif(not _QT_APP_INSTALLED, reason="需要 PyQt5")
+@pytest.mark.skipif(not _QT_APP_INSTALLED, reason="需要 PySide6")
 def test_ensure_fetcher_does_not_raise_name_error(monkeypatch):
     """回归：_ensure_fetcher 使用 Qt.AutoConnection，曾漏 import Qt（NameError）。
 

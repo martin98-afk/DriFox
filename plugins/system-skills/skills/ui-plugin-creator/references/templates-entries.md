@@ -82,7 +82,7 @@ def _on_clicked(context: Dict[str, Any]) -> None:
     main_widget = context.get("main_widget")
     _close_stale()  # 单实例防护：旧窗口存活先关（见 §9.4）
     try:
-        # 延迟 import PyQt5/qfluentwidgets/子模块 —— 注册期不加载 UI 依赖
+        # 延迟 import PySide6/qfluentwidgets/子模块 —— 注册期不加载 UI 依赖
         ...
     except Exception as e:  # noqa: BLE001 — 全流程兜底，不留残留窗口
         logger.error(f"[{PLUGIN_NAME}] 动作失败: {e}")
@@ -118,8 +118,8 @@ def _notify(main_widget, title: str, msg: str) -> None:
         InfoBar.success(title, msg, parent=main_widget,
                         position=InfoBarPosition.BOTTOM, duration=2500)
     except Exception:  # noqa: BLE001 — InfoBar 失败才降级 QToolTip
-        from PyQt5.QtGui import QCursor
-        from PyQt5.QtWidgets import QToolTip
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QToolTip
 
         QToolTip.showText(QCursor.pos(), msg)
 ```

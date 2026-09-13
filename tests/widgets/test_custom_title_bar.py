@@ -3,6 +3,7 @@
 import sys
 
 import pytest
+from PySide6.QtCore import QAbstractAnimation
 from PySide6.QtWidgets import QWidget
 
 from app.widgets.custom_title_bar import CustomTitleBar
@@ -135,7 +136,7 @@ def test_tab_active_animates_progress(qtbot, container):
 
     tb.set_active_tab("usage")
     assert btn._active is True  # 状态立即翻转
-    assert btn._anim_active.state() == btn._anim_active.Running  # 进度走动画
+    assert btn._anim_active.state() == QAbstractAnimation.Running  # 进度走动画
 
     # 动画结束后进度收拢到 1
     btn._anim_active.stop()
@@ -160,7 +161,7 @@ def test_set_active_heals_stuck_progress(qtbot, container):
     btn._active_t = 0.4
 
     tb.set_active_tab("chat")  # 意图未变，但进度没到位 → 必须重启
-    assert btn._anim_active.state() == btn._anim_active.Running
+    assert btn._anim_active.state() == QAbstractAnimation.Running
 
 
 def test_set_active_is_noop_when_settled(qtbot, container):
@@ -177,7 +178,7 @@ def test_set_active_is_noop_when_settled(qtbot, container):
     btn._anim_active.stop()
     btn._active_t = 1.0
     tb.set_active_tab("chat")
-    assert btn._anim_active.state() != btn._anim_active.Running
+    assert btn._anim_active.state() != QAbstractAnimation.Running
 
 
 def test_sync_tab_hover_picks_the_tab_under_cursor(qtbot, container, monkeypatch):

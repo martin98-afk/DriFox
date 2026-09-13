@@ -93,7 +93,7 @@ Step 3  推进中持续回写 state（focus / pitfall / decision / question）�
 | 项目 | 值 |
 |------|-----|
 | 项目 | DriFox（飘狐） · github.com/martin98-afk/DriFox |
-| 技术栈 | Python 3.14+ / PyQt5 + PyQt-Fluent-Widgets / QWebEngine |
+| 技术栈 | Python 3.14+ / PySide6 + PySide6-Fluent-Widgets / QWebEngine |
 | 包管理 | uv（`uv sync --all-groups`）；也有 pyproject + pip 兜底 |
 | 入口 | `main.py`（GUI）/ `cli.py` |
 | 主分支 | `dev`（发布分支 `main`） |

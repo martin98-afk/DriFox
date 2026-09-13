@@ -106,7 +106,7 @@ description: 插件开发常见问题与解决方案（症状→原因→修法�
 #    [PluginHost] Plugin [<name>] reloaded via kernel: ... ui=True ...
 Get-Content "$env:USERPROFILE\.drifox6\logs\all.log" | Select-String "<name>" | Select-String "reloaded|Loaded UI"
 ```
-UI 逻辑离线实测（不依赖 DriFox 运行时）：`D:\work\DriFox\.venv\Scripts\python.exe` 带完整 PyQt5 + qfluentwidgets，可写 QTimer 序列脚本验证 QSS/高度/动画等 widget 行为（base 环境的 PyQt5 缺 QtCore，不可用）。
+UI 逻辑离线实测（不依赖 DriFox 运行时）：`D:\work\DriFox\.venv\Scripts\python.exe` 带完整 PySide6 + qfluentwidgets，可写 QTimer 序列脚本验证 QSS/高度/动画等 widget 行为（base 环境的 PySide6 缺 QtCore，不可用）。
 
 ### ❌ 插件内修改被升级覆盖
 

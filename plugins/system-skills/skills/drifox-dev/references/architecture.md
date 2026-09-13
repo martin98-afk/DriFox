@@ -8,7 +8,7 @@
 ## 一、分层总览
 
 ```
-UI 层      app/widgets/  +  app/main_widget.py          PyQt5 组件 · 信号槽 · QWebEngine
+UI 层      app/widgets/  +  app/main_widget.py          PySide6 组件 · 信号槽 · QWebEngine
 模块层      app/widgets/modules/  app/widgets/cards/     主窗口拆分模块 · 卡片·浮动卡
 引擎层      app/core/engines/{base,ui/gateway}           双引擎：UI 交互 / 网关机器人
 对话层      app/core/conversation/                       ConversationCore + Executor + adapters
