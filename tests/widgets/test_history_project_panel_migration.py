@@ -131,7 +131,7 @@ def test_project_row_click_is_filter_only():
     src = _read(_PAGE)
     body = src[src.index("def _on_project_row_selected") : src.index("def _on_all_projects_selected")]
     assert "_on_project_selected" not in body
-    assert "self._project_filter_raw = project" in body
+    assert "self._set_tab_filter(project" in body  # 按标签页分桶写筛选记忆
 
 
 def test_panel_expand_takes_full_height():

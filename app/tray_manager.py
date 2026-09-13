@@ -215,6 +215,9 @@ class TrayManager(QObject):
             )
             self._tray_menu.addAction(tm_action)
             self._tray_menu.addSeparator()
+            restart_action = QAction("🔄 重启", self._tray_menu)
+            restart_action.triggered.connect(self._restart_application)
+            self._tray_menu.addAction(restart_action)
             quit_action = QAction("退出", self._tray_menu)
             quit_action.triggered.connect(self._quit_application)
             self._tray_menu.addAction(quit_action)
@@ -1128,6 +1131,13 @@ class TrayManager(QObject):
                     logger.debug("[TrayManager] 热键健康检查失败，保留旧热键")
         except Exception as exc:
             logger.debug(f"[TrayManager] 健康检查异常（非致命）: {exc}")
+
+    def _restart_application(self) -> None:
+        """托盘菜单重启：拉起新进程替换当前实例（与设置页「立即重启」同源）"""
+        from app.utils.app_restart import restart_application
+
+        if not restart_application():
+            self._tray_icon.showMessage("Drifox", "重启失败：无法拉起新进程", QSystemTrayIcon.MessageIcon(3), 4000)
 
     def _quit_application(self) -> None:
         """退出应用：强制关闭所有窗口后退出"""

@@ -173,6 +173,12 @@ SLEEP_DURATION_FRAMES = 12         # 入睡过渡完整一轮（按帧数精确�
 INERTIA_DECAY = 0.92
 INERTIA_MIN_VELOCITY = 0.5
 
+# 宠物弹跳动效时长 (ms) — 娱乐性动效，手感优先独立标定，不进全局 token 阶梯；
+# 系统开「减少动态效果」时各 _play_* 跳过位移补间直落终态
+BOUNCE_MS = 350
+BOUNCE_SMALL_MS = 250
+CUDDLE_MS = 400
+
 # ★ 情绪 emoji 映射（画在桌宠上方，直观显示心情）
 STATE_EMOJI = {
     "idle": "😊",
@@ -788,6 +794,12 @@ class PixelPetWidget(QWidget):
                 target_y = btn_top - 42
             else:
                 target_y = ph - self.height() - 100
+            if not Animations.motion_enabled():
+                # 减少动态效果：跳过补间，直接落到目标位（入场位置必须落定）
+                self.move(target_x, target_y)
+                self.set_state("success")
+                logger.debug("[PixelPet] 入场欢迎动画（减少动态效果直落）")
+                return
             self.move(target_x, ph)  # 从底部开始
             anim = QPropertyAnimation(self, b"geometry", self)
             # 入场欢迎是整窗位移（跨大半屏），走 SLOW_MS 档 + OutBack 回弹
@@ -1087,9 +1099,11 @@ class PixelPetWidget(QWidget):
 
     def _play_bounce(self) -> None:
         """弹跳动画"""
+        if not Animations.motion_enabled():
+            return  # 减少动态效果：起止同位，无需位移补间
         anim = QPropertyAnimation(self, b"geometry", self)
         geo = self.geometry()
-        anim.setDuration(350)
+        anim.setDuration(BOUNCE_MS)
         anim.setKeyValueAt(0, geo)
         anim.setKeyValueAt(0.2, QRect(geo.x(), geo.y() - 2, geo.width(), geo.height()))
         anim.setKeyValueAt(0.5, QRect(geo.x(), geo.y() - 3, geo.width(), geo.height()))
@@ -1101,9 +1115,11 @@ class PixelPetWidget(QWidget):
 
     def _play_bounce_small(self) -> None:
         """小弹跳（比 bounce 更低更柔和）"""
+        if not Animations.motion_enabled():
+            return  # 减少动态效果：起止同位，无需位移补间
         anim = QPropertyAnimation(self, b"geometry", self)
         geo = self.geometry()
-        anim.setDuration(250)
+        anim.setDuration(BOUNCE_SMALL_MS)
         anim.setKeyValueAt(0, geo)
         anim.setKeyValueAt(0.3, QRect(geo.x(), geo.y() - 2, geo.width(), geo.height()))
         anim.setKeyValueAt(0.6, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
@@ -1115,23 +1131,24 @@ class PixelPetWidget(QWidget):
     def _play_cuddle(self) -> None:
         """快速连击 → 蹭蹭动画"""
         self._reset_interaction_timer()
-        anim = QPropertyAnimation(self, b"geometry", self)
-        geo = self.geometry()
-        anim.setDuration(400)
-        anim.setKeyValueAt(0, geo)
-        anim.setKeyValueAt(0.15, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
-        anim.setKeyValueAt(0.3, QRect(geo.x() + 2, geo.y(), geo.width(), geo.height()))
-        anim.setKeyValueAt(0.5, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
-        anim.setKeyValueAt(0.7, QRect(geo.x() - 1, geo.y(), geo.width(), geo.height()))
-        anim.setKeyValueAt(1, geo)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.start()
-        self._track_animation(anim)
-        # 短暂闪烁爱心效果（改变状态到 success 帧再回来）
+        if Animations.motion_enabled():
+            anim = QPropertyAnimation(self, b"geometry", self)
+            geo = self.geometry()
+            anim.setDuration(CUDDLE_MS)
+            anim.setKeyValueAt(0, geo)
+            anim.setKeyValueAt(0.15, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
+            anim.setKeyValueAt(0.3, QRect(geo.x() + 2, geo.y(), geo.width(), geo.height()))
+            anim.setKeyValueAt(0.5, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
+            anim.setKeyValueAt(0.7, QRect(geo.x() - 1, geo.y(), geo.width(), geo.height()))
+            anim.setKeyValueAt(1, geo)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.start()
+            self._track_animation(anim)
+        # 短暂闪烁爱心效果（改变状态到 success 帧再回来）——静态反馈，减少动效时保留
         if self._current_state == "idle":
             self._frame_index = 4  # success 的爱心帧
             self.update()
-            QTimer.singleShot(400, lambda: self.update())
+            QTimer.singleShot(CUDDLE_MS, lambda: self.update())
         logger.debug("[PixelPet] 蹭蹭~")
 
     # ═══════════════════════════════════════════════════════════

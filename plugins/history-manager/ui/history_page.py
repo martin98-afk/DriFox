@@ -28,7 +28,7 @@
   ``refresh_project_selector_data``（宿主标题栏项目 icon 与项目增删后的驱动入口）
 """
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from PyQt5.QtCore import (
     QEasingCurve,
@@ -411,7 +411,19 @@ class HistoryPage(QWidget):
         # ── 行2：项目选择（icon + 全名）+ 搜索框 + 导入 / 新建会话按钮 ──
         self._project_header = _ProjectSelectorHeader(self)
         self._project_header.clicked.connect(self._toggle_project_panel)
-        self._project_filter_raw = _PROJECT_CURRENT  # 默认「跟随活跃窗口项目」
+        # 项目筛选按标签页独立：window_id → 筛选值（只存显式筛选，
+        # 跟随模式不占桶）。单例页共享一份 UI，状态必须分桶，
+        # 否则 A 标签页筛选项目 X 后 B 标签页打开也是 X。
+        self._project_filter_by_tab: Dict[str, str] = {}
+        # tab 切换时投影切到新活跃标签页自己的筛选记忆（页面可见才刷）
+        try:
+            from app.widgets.tab_manager_window import TabManagerWindow
+
+            tm = TabManagerWindow.get_instance()
+            if tm is not None:
+                tm.currentChanged.connect(self._on_host_tab_changed)
+        except Exception:
+            pass
 
         self._search_input = QLineEdit(self)
         self._search_input.setPlaceholderText("🔍 搜索会话...")
@@ -650,7 +662,7 @@ class HistoryPage(QWidget):
 
     def _sync_project_header(self) -> None:
         """折叠头显示当前过滤目标（「全部项目」/ 具体项目）"""
-        if self._project_filter_raw == _PROJECT_ALL:
+        if self._get_tab_filter() == _PROJECT_ALL:
             self._project_header.set_project("全部项目", is_all=True)
             return
         self._project_header.set_project(self._resolved_project_filter() or "默认项目")
@@ -704,10 +716,11 @@ class HistoryPage(QWidget):
         """项目过滤器切回「跟随活跃窗口项目」（宿主新建项目后驱动）
 
         新建项目 = 窗口项目已切到新项目；若本页仍过滤着旧项目，刷新后列表
-        停留在旧项目会话（窗口项目与筛选脱节）。重置为 ``_PROJECT_CURRENT``
-        后 ``_resolved_project_filter()`` 跟随活跃窗口项目，列表即显示新项目。
+        停留在旧项目会话（窗口项目与筛选脱节）。清掉当前活跃标签页的筛选
+        记忆（跟随模式不占桶）后 ``_resolved_project_filter()`` 跟随活跃
+        窗口项目，列表即显示新项目。
         """
-        self._project_filter_raw = _PROJECT_CURRENT
+        self._set_tab_filter(_PROJECT_CURRENT)
         if self._card is not None:
             self._card.set_show_project_labels(False)
         self._sync_project_header()
@@ -865,7 +878,7 @@ class HistoryPage(QWidget):
         跨项目会话仍可直接点开：窗口侧 ``_on_history_session_selected`` 会按
         会话记录自动切项目与工作目录。
         """
-        self._project_filter_raw = project or _PROJECT_CURRENT
+        self._set_tab_filter(project or _PROJECT_CURRENT)
         if self._card is not None:
             self._card.set_show_project_labels(False)
         self._set_project_panel_visible(False)
@@ -874,7 +887,7 @@ class HistoryPage(QWidget):
 
     def _on_all_projects_selected(self) -> None:
         """「全部项目」行点击：不过滤项目（行内显示项目标签）+ 收起面板"""
-        self._project_filter_raw = _PROJECT_ALL
+        self._set_tab_filter(_PROJECT_ALL)
         if self._card is not None:
             self._card.set_show_project_labels(True)
         self._set_project_panel_visible(False)
@@ -889,7 +902,7 @@ class HistoryPage(QWidget):
         「切项目 + 工作目录 + 新建会话 + 团队广播」）。筛选为「全部项目」
         或跟随当前项目时，直接在原项目下新建。
         """
-        target = self._project_filter_raw
+        target = self._get_tab_filter()
         win = _active_window()
         current = getattr(win, "_current_project", None) if win is not None else None
         if target and target not in (_PROJECT_ALL, _PROJECT_CURRENT) and target != current:
@@ -984,6 +997,8 @@ class HistoryPage(QWidget):
     def refresh(self) -> None:
         """自拉数据渲染（不再绕宿主窗口方法）"""
         self._sync_project_header()
+        if self._card is not None:
+            self._card.set_show_project_labels(self._get_tab_filter() == _PROJECT_ALL)
         if self._current_tab == "archived":
             self._card.switch_tab("archived")
             self._card.set_archived_sessions(self._enrich_archived_list())
@@ -993,14 +1008,48 @@ class HistoryPage(QWidget):
             history_list = hm.get_history_list(self._resolved_project_filter(), merge_team=True) if hm else []
             self._card.set_history(history_list, self._locate_current_index(history_list))
 
+    # ── 项目筛选：按标签页独立（window_id 分桶）──
+
+    def _active_window_id(self) -> Optional[str]:
+        """当前活跃标签页窗口 ID（分桶键）；不可用时 None"""
+        win = _active_window()
+        wid = getattr(win, "_window_id", None) if win is not None else None
+        return str(wid) if wid else None
+
+    def _get_tab_filter(self) -> str:
+        """当前活跃标签页的筛选值；未筛选过 = 跟随当前项目"""
+        wid = self._active_window_id()
+        if wid is None:
+            return _PROJECT_CURRENT
+        return self._project_filter_by_tab.get(wid, _PROJECT_CURRENT)
+
+    def _set_tab_filter(self, value: str) -> None:
+        """写当前活跃标签页的筛选记忆（跟随模式清除桶条目）"""
+        wid = self._active_window_id()
+        if wid is None:
+            return
+        if value == _PROJECT_CURRENT:
+            self._project_filter_by_tab.pop(wid, None)
+        else:
+            self._project_filter_by_tab[wid] = value
+
+    def _on_host_tab_changed(self, _index: int) -> None:
+        """tab 切换：投影切到新活跃标签页自己的筛选记忆（页面可见才刷）"""
+        if not self.isVisible():
+            return
+        self.refresh()
+        if self._project_panel_open:
+            self.refresh_project_selector_data()
+
     def _resolved_project_filter(self) -> Optional[str]:
         """解析项目过滤器（「当前项目」跟随活跃窗口；「全部项目」→ None 不过滤）"""
-        if self._project_filter_raw == _PROJECT_ALL:
+        raw = self._get_tab_filter()
+        if raw == _PROJECT_ALL:
             return None
-        if self._project_filter_raw == _PROJECT_CURRENT:
+        if raw == _PROJECT_CURRENT:
             win = _active_window()
             return getattr(win, "_current_project", "默认项目") if win else "默认项目"
-        return self._project_filter_raw
+        return raw
 
     def _locate_current_index(self, history_list: List[dict]) -> Optional[int]:
         """在列表中定位活跃窗口当前会话（团队合并条目按成员命中）"""
