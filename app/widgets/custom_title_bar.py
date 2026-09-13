@@ -336,12 +336,17 @@ class CustomTabButton(QWidget):
         *,
         closable: bool = False,
         icon_path: str = "",
+        indicator_managed: bool = False,
     ):
         super().__init__(parent)
         self.tab_id = tab_id
         self._closable = closable
         self._active = False
         self._hovered = False
+        #: True = 选中底色由外部滑动指示器（_TabIndicator）接管，按钮只画
+        #: hover（CustomTitleBar 顶栏专用）；False = 自绘选中底（默认，兼容
+        #: 工作台面板等直接复用方——它们没有指示器，选中表达不能被抽走）
+        self._indicator_managed = indicator_managed
         # 动画进度（0..1），paintEvent 按此插值
         self._hover_t = 0.0
         self._active_t = 0.0
@@ -475,8 +480,11 @@ class CustomTabButton(QWidget):
         return _qcolor(Colors.TEXT_PRIMARY, "#ffffff")
 
     def _bg_alpha(self) -> float:
-        """按钮底色只承担 hover；选中胶囊由滑动指示器（_TabIndicator）画"""
-        return self._hover_t * self.ALPHA_HOVER
+        """选中底色：indicator_managed 时由滑动指示器画，按钮只承担 hover；
+        普通复用方（工作台面板）自绘选中底 + hover，行为同旧版"""
+        if self._indicator_managed:
+            return self._hover_t * self.ALPHA_HOVER
+        return min(1.0, max(self._active_t * self.ALPHA_ACTIVE, self._hover_t * self.ALPHA_HOVER))
 
     def paintEvent(self, e):  # pragma: no cover - 纯绘制
         painter = QPainter(self)
@@ -959,7 +967,12 @@ class CustomTitleBar(TitleBarBase):
         if tab_id in self._tabs:
             return
         btn = CustomTabButton(
-            tab_id, text, self._tab_container, closable=closable, icon_path=icon_path
+            tab_id,
+            text,
+            self._tab_container,
+            closable=closable,
+            icon_path=icon_path,
+            indicator_managed=True,  # 选中胶囊由 _TabIndicator 滑动接管
         )
         btn.clicked.connect(self._on_tab_clicked)
         btn.close_clicked.connect(self.tab_close_clicked.emit)
