@@ -1490,19 +1490,21 @@ _FILE_EDIT_TOOLS_FALLBACK_TEXT = {
 
 
 def _format_tool_progress_badge(char_count: int, add_lines: int = 0, del_lines: int = 0) -> str:
-    """运行框进度徽标：编辑类工具显示 `+N -M`，其它工具显示 `(N字符)`。
+    """运行框进度徽标：编辑类工具显示 `+N/-M` 胶囊，其它工具显示 `(N字符)`。
 
     行数优先——编辑类工具的字符数对用户没有信息量（设计：
     docs/superpowers/specs/2026-09-13-tool-streaming-line-stats-design.md）。
-    配色对齐完成框的 diff 统计（绿 + / 红 -）。
+    胶囊结构与完成框的 diff 统计完全一致（复用 `.tool-diff-stats` 系列 class，
+    颜色/圆角/内边距由骨架 CSS 给，运行框与完成框形态统一）。
     """
     if add_lines or del_lines:
-        parts = []
-        if add_lines:
-            parts.append(f'<span style="color:#4CAF50;">+{add_lines}</span>')
-        if del_lines:
-            parts.append(f'<span style="color:#F44336;">-{del_lines}</span>')
-        return f'<span style="font-size:{scale_font_size(10)}px;margin-left:4px;">{" ".join(parts)}</span>'
+        return (
+            f'<span class="tool-diff-stats" style="font-size: {scale_font_size(11)}px;">'
+            f'<span class="tool-diff-stats__add">+{add_lines}</span>'
+            f'<span class="tool-diff-stats__sep">/</span>'
+            f'<span class="tool-diff-stats__del">-{del_lines}</span>'
+            f"</span>"
+        )
     if char_count > 0:
         return (
             f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; '

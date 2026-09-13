@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""运行框进度徽标测试：编辑类工具显示 +N/-M 取代字数，非编辑类保持字数。
+"""运行框进度徽标测试：编辑类工具显示 +N/-M 胶囊（与完成框同款），非编辑类保持字数。
 
 ⚠️ QApplication 必须先于 message_card 导入（qfluentwidgets 的 qconfig 需 QApplication 已存在，
 否则构造 QWidget 抛 RuntimeError / 连锁 native 崩 0xC0000409）。
@@ -60,8 +60,26 @@ def test_badge_shows_line_stats_and_hides_chars():
         add_lines=8,
         del_lines=3,
     )
-    assert "+8" in html and "-3" in html
+    assert 'class="tool-diff-stats"' in html, "行数徽标必须复用完成框的胶囊结构"
+    assert 'class="tool-diff-stats__add">+8</span>' in html
+    assert 'class="tool-diff-stats__del">-3</span>' in html
+    assert 'class="tool-diff-stats__sep">/</span>' in html
     assert "字符" not in html
+
+
+def test_badge_renders_zero_deletions_like_completed_card():
+    """删除行为 0 也照完成框的样式显示（+N/-0）"""
+    html = _render_tool_streaming_block(
+        tool_call_id="t6",
+        tool_name="write",
+        preview='写入 "a.md" 中',
+        char_count=0,
+        completed=False,
+        add_lines=68,
+        del_lines=0,
+    )
+    assert 'class="tool-diff-stats__add">+68</span>' in html
+    assert 'class="tool-diff-stats__del">-0</span>' in html
 
 
 def test_badge_keeps_char_count_for_other_tools():
@@ -96,7 +114,9 @@ def test_update_tool_streaming_passes_line_stats(monkeypatch):
         partial_args={"_status": "loading", "_args_len": 120, "_path": "a.py", "_add_lines": 9, "_del_lines": 4},
     )
     js = card.viewer._page.calls[-1]
-    assert "+9" in js and "-4" in js
+    # JS 里的 HTML 经 json.dumps 转义（引号变 \"），故按片段断言
+    assert "tool-diff-stats__add" in js and "+9" in js
+    assert "tool-diff-stats__del" in js and "-4" in js
     assert "字符" not in js
 
 
