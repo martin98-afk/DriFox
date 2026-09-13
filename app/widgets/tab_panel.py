@@ -1105,6 +1105,7 @@ class TabPanel(QWidget):
     tabSelected = pyqtSignal(int)  # 选中 Tab 索引
     tabCloseRequested = pyqtSignal(int)  # 关闭 Tab 索引
     tabBranchRequested = pyqtSignal(int)  # 分支窗口 Tab 索引
+    tabSwitchSessionRequested = pyqtSignal(int)  # 切换会话（跳转 Tab + 打开历史会话）Tab 索引
     newTabRequested = pyqtSignal()  # 新建 Tab
     tabsReordered = pyqtSignal(list)  # 拖拽排序后新顺序（索引列表）
     sidebarToggled = pyqtSignal(bool)  # 侧边栏收起(true)/展开(false)
@@ -1136,13 +1137,37 @@ class TabPanel(QWidget):
         self._error_count: int = 0  # 当前报错 tab 计数（报错红流同样需要动画驱动）
         self._question_count: int = 0  # 当前 question 状态 tab 计数
         self._is_resizing: bool = False  # resize 活跃态，用于节流动画/绘制
+        # ★★ 拖拽会话标记：用户正按住 splitter 把手拖动。
+        #   置位期间 resizeEvent **不得** emit sidebarToggled —— 否则宽度每跨过一次
+        #   阈值就启动一次 200ms 折叠/展开动画，而用户的手还在拖，动画与拖拽同时
+        #   写 QSplitter.setSizes 互相打断 = 抖动（实测复现：拖到 149px 触发折叠，
+        #   动画收窄途中 Qt 每帧仍按用户拖拽位置回写宽度，两者对打）。
+        #   拖拽期只做"UI 形态实时跟随"（文字/胶囊即时切换，无延迟感），
+        #   真正落定交给松手后宿主 _on_splitter_idle 一次性处理。
+        self._dragging_splitter: bool = False
         self._collapsed: bool = False  # 侧边栏收起状态
         # 挤压折叠标记：非用户主动（窗口 resize / 覆盖层 relayout 压缩）导致
         # 自动折叠。用于空间恢复后管理器自动展开（区别于按钮手动折叠 / 手动
         # 拖拽把手折叠——手动折叠不自动展开）。
         self._collapsed_by_squeeze: bool = False
-        self._collapsed_min_width: int = 46  # 收起时的最小宽度(仅容纳图标)
-        self._auto_collapse_width: int = 120  # 展开态拖窄到该宽度(panel px)时自动折叠（=面板展开最小可用宽）
+        # ── 宽度常量：统一从 tab_manager_window 单一真源引用（禁止裸数字）──
+        # ★★ 坐标系：本类 resizeEvent 里比较的是 self.width()（**content 宽**，
+        #   = frame 宽 − 14），因此这里的阈值必须是 content 口径。此前误用 frame
+        #   域的 _EXPANDED_MIN_FRAME_WIDTH 直接比较，等价于把折叠线抬高 14px、
+        #   把滞回区撑到 24px → 用户拉宽到 188px（content 174，视觉已完全够用）
+        #   仍是折叠态。禁止再跨坐标系赋值。
+        # _collapsed_min_width：收起态 content 宽（仅容纳图标条）
+        # _auto_collapse_width：折叠线（content 宽），低于即自动折叠
+        # _auto_expand_width：展开线（content 宽）= 折叠线 + 滞回区
+        from app.widgets.tab_manager_window import (
+            _COLLAPSED_PANEL_WIDTH,
+            _EXPANDED_MIN_CONTENT_WIDTH,
+            _HYSTERESIS_WIDTH,
+        )
+
+        self._collapsed_min_width: int = _COLLAPSED_PANEL_WIDTH
+        self._auto_collapse_width: int = _EXPANDED_MIN_CONTENT_WIDTH
+        self._auto_expand_width: int = _EXPANDED_MIN_CONTENT_WIDTH + _HYSTERESIS_WIDTH
         self._animating: bool = False  # 侧边栏宽度动画进行中（抑制 resizeEvent 自动展开/折叠）
         # 窗口 resize / relayout 过渡期抑制自动折叠：几何瞬变（_force_relayout
         # 重算、最大化/还原）会把左面板瞬时压到折叠阈值以下，若 resizeEvent
@@ -1404,13 +1429,16 @@ class TabPanel(QWidget):
 
         展开态：拖拽把手把面板收窄到 _auto_collapse_width 以下 → 自动折叠
         为图标条（宽度由 TabManagerWindow 动画平滑收到收起宽度）。
-        收起态：拖拽把手拉开超过阈值 → 自动切回展开态。
+        收起态：拖拽把手拉开超过 _auto_expand_width → 自动切回展开态。
         宽度动画进行中（_animating=True）跳过：动画里宽度会经过
         阈值区间，若在此触发会与动画互相打断。
 
-        注意：展开阈值与折叠阈值必须错开留滞回区（折叠 <200、展开 >=210），
-        否则拖拽途中宽度在阈值附近抖动（如 199→201）会先折叠后展开，
-        表现为"往里拉时又往外回弹"。滞回区（200~209）内保持当前状态不动。
+        ★★ 坐标系：本方法比较的 self.width() 是 **content 宽**（TabPanel 自身
+        宽度 = #tabFrame 宽 − 14 padding），因此 _auto_collapse_width /
+        _auto_expand_width 都必须是 content 口径（见 __init__ 注释）。
+        默认值：折叠线 186、展开线 192（滞回区 6px，仅吸收手抖/量化误差）。
+        滞回区不可放大：用户拉宽是连续动作，滞回区一大就变成"明显拉宽了却
+        仍是折叠态"（实测把滞回区撑到 20px+ 即复现此手感问题）。
         """
         super().resizeEvent(event)
         # 窗口 resize / relayout 过渡期：宽度是瞬时中间值，不代表用户意图，
@@ -1419,6 +1447,25 @@ class TabPanel(QWidget):
         # 被误判成"用户把面板拖窄"。
         if self._auto_collapse_suppressed:
             return
+        # ★★ 拖拽期：只跟随 UI 形态，绝不 emit（抖动的根因，见 _dragging_splitter 注释）。
+        #   此处按同一对阈值（content 口径）即时切换紧凑/展开，保证拖拽时文字不会
+        #   在窄条里被挤压；但折叠态与宽度落定一律等松手后由宿主处理。
+        if self._dragging_splitter:
+            want_collapsed = self.width() < self._auto_collapse_width
+            # 收起态拖宽时：用展开线（滞回区）判定，避免刚过折叠线就弹回展开态 UI
+            if self._collapsed and self.width() >= self._auto_expand_width:
+                want_collapsed = False
+            if want_collapsed != self._collapsed:
+                self._collapsed = want_collapsed
+                self._update_toggle_button(switch_ui=True)
+            return
+        # ★ 时序纪律：本方法内"改状态"与"发信号"必须成对完成，禁止在
+        # emit 之前 return。此前用 QTimer.singleShot(0, emit) 延后发射，
+        # 副作用是本次 resize 已把 _collapsed 改成新值并写入标记，而宿主
+        # 要下一轮事件循环才收到通知 —— 中间若再来一次 resize，判定依据的
+        # 宽度与已改的状态是错位的（抖动/回弹来源之一）。改为同步 emit：
+        # _on_sidebar_toggled 内部走动画（不嵌套 setSizes），无重入风险。
+        #
         # 拖窄自动折叠（展开态 → 收起态）
         if not self._collapsed and not self._animating and self.width() < self._auto_collapse_width:
             self._collapsed = True
@@ -1428,24 +1475,18 @@ class TabPanel(QWidget):
             # 手动拖拽把手会在 splitterMoved 中清除该标记（尊重手动意图）。
             self._collapsed_by_squeeze = True
             self._update_toggle_button()
-            # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
-            from PyQt5.QtCore import QTimer
-
-            QTimer.singleShot(0, lambda: self.sidebarToggled.emit(True))
+            self.sidebarToggled.emit(True)
             return
-        # 拖宽自动展开（收起态 → 展开态）：阈值高于折叠阈值 10px 形成滞回区，
-        # 折叠后拖拽抖动（宽度回到 100~109）不得再次展开，消除回弹。
+        # 拖宽自动展开（收起态 → 展开态）：阈值高于折叠阈值形成滞回区，
+        # 折叠后拖拽抖动（宽度回到折叠线与展开线之间）不得再次展开，消除回弹。
         # 不区分折叠来源（手动/挤压）：任何收起态下拉宽超过滞回区即退出折叠，
         # 与窗口拉宽路径(_maybe_auto_expand_after_squeeze)行为一致——用户把
         # 面板/窗口拉宽即视为想要展开。手动拖把手拉开由 splitterMoved 显式处理。
-        if self._collapsed and not self._animating and self.width() >= self._auto_collapse_width + 10:
+        if self._collapsed and not self._animating and self.width() >= self._auto_expand_width:
             self._collapsed = False
             self._collapsed_by_squeeze = False
             self._update_toggle_button()
-            # 延迟发射信号，避免在 resize 链中直接嵌套 setSizes
-            from PyQt5.QtCore import QTimer
-
-            QTimer.singleShot(0, lambda: self.sidebarToggled.emit(False))
+            self.sidebarToggled.emit(False)
 
     def refresh_ui_plugins(self):
         """刷新 Tab 模式顶部的 UI 插件按钮列表
@@ -1657,6 +1698,22 @@ class TabPanel(QWidget):
         由 TabManagerWindow 宽度动画开始/结束时调用。
         """
         self._animating = animating
+
+    def set_dragging_splitter(self, dragging: bool):
+        """标记用户正按住 splitter 把手拖动（拖拽会话开关）
+
+        由 TabManagerWindow 在 splitterMoved / idle 超时时调用。
+
+        置位期间 resizeEvent 只做 UI 形态实时跟随，**不 emit sidebarToggled**：
+        宽度逐帧跨过阈值会反复启动折叠/展开动画，动画与用户拖拽同时写
+        QSplitter.setSizes 相互打断 → 抖动。落定延后到松手（见 _on_splitter_idle）。
+        """
+        if dragging == self._dragging_splitter:
+            return
+        self._dragging_splitter = dragging
+        if not dragging:
+            # 松手：把拖拽期的 UI 形态对齐到真实折叠态（宿主随后会接管落定动画）
+            self._update_toggle_button(switch_ui=True)
 
     def set_auto_collapse_suppressed(self, suppressed: bool):
         """开关"resize/relayout 过渡期抑制自动折叠"
@@ -3475,6 +3532,13 @@ class TabPanel(QWidget):
                 background: {Colors.HOVER_BG};
             }}
         """)
+        switch_session_action = None
+        branch_action = None
+        close_action = None
+        if clicked_index >= 0:
+            # 切换会话（主操作，置顶）：跳转到该标签页并展开左侧历史会话卡
+            switch_session_action = menu.addAction("切换会话")
+            menu.addSeparator()
         new_action = menu.addAction("新建标签页")
         if clicked_index >= 0:
             branch_action = menu.addAction("分支标签页")
@@ -3494,7 +3558,9 @@ class TabPanel(QWidget):
             action = menu.exec_(event.globalPos())
         finally:
             self._current_context_menu = None
-        if action == new_action:
+        if switch_session_action is not None and action == switch_session_action:
+            self.tabSwitchSessionRequested.emit(clicked_index)
+        elif action == new_action:
             self.newTabRequested.emit()
         elif clicked_index >= 0:
             if action == close_action:

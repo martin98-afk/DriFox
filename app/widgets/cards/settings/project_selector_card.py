@@ -117,6 +117,21 @@ def get_project_color(name: str, alpha: int = 255) -> str:
     return f"rgba({int(round(r * 255))}, {int(round(g * 255))}, {int(round(b * 255))}, {alpha})"
 
 
+def _alpha_tint(rgba: str, ratio: float, fallback: str = "transparent") -> str:
+    """把 ``rgba(r, g, b, a)`` 色按比例压成淡染底色（保持同色系关联）
+
+    用于「当前项目」行静止态底纹：取项目强调色的一层极淡底色，与头像/色条
+    同色系。解析失败（主题 token 占位符等）回退 ``fallback``。
+    """
+    try:
+        inner = rgba[rgba.index("(") + 1 : rgba.rindex(")")]
+        parts = [p.strip() for p in inner.split(",")]
+        r, g, b = (int(float(parts[0])), int(float(parts[1])), int(float(parts[2])))
+        return f"rgba({r}, {g}, {b}, {int(round(255 * ratio))})"
+    except Exception:
+        return fallback
+
+
 class _SquareAvatar(QWidget):
     """使用 QPainter 绘制的方形项目头像 — flat design squircle 风格
 
@@ -294,6 +309,9 @@ class ProjectItem(QWidget):
         self._archive_btn.hide()
         layout.addWidget(self._archive_btn)
 
+        # 静止态底色（当前项目淡染 + 左侧项目色条）
+        self._apply_base_style()
+
     def _apply_name_style(self):
         if self._is_current:
             self._name_label.setStyleSheet(
@@ -303,6 +321,38 @@ class ProjectItem(QWidget):
             # 非当前项目用半透明版本
             semi_color = get_project_color(self._name, alpha=160)
             self._name_label.setStyleSheet(f"color: {semi_color}; {get_font_family_css()} {font_size_css(13)};")
+
+    def _apply_base_style(self) -> None:
+        """静止态底色：当前项目常驻淡染 + 左侧项目色条（hover 态在 enterEvent 覆盖）
+
+        单行列表里「哪个是当前项目」原先只靠 ✓ + 彩色加粗字，扫视时容易被
+        相邻行淹没；补一层低饱和同色底纹 + 左侧 3px 色条后，选中项在静止态
+        也有明确块面，且与折叠头（同色条）视觉同源。
+        """
+        Colors.refresh()
+        if self._is_current:
+            tint = _alpha_tint(self._project_color, 0.10, fallback=Colors.HOVER_BG)
+            style_if_changed(
+                self,
+                f"""
+                ProjectItem {{
+                    background: {tint};
+                    border-left: 3px solid {self._project_color};
+                    border-radius: 6px;
+                }}
+            """,
+            )
+        else:
+            style_if_changed(
+                self,
+                """
+                ProjectItem {
+                    background: transparent;
+                    border-left: 3px solid transparent;
+                    border-radius: 6px;
+                }
+            """,
+            )
 
     def _emit_export(self):
         self.exportClicked.emit(self._name)
@@ -386,6 +436,7 @@ class ProjectItem(QWidget):
     def refresh_style(self) -> None:
         """主题/字体变更后重刷动态样式（与 _ProjectSelectorHeader.refresh_style 同链路调用）"""
         Colors.refresh()
+        self._apply_base_style()
         self._apply_name_style()
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
         if self._root_dir:
@@ -396,25 +447,31 @@ class ProjectItem(QWidget):
     def enterEvent(self, event):
         # hover 时：整行加半透明背景 + 更亮的项目颜色 + 元数据提亮
         Colors.refresh()
-        style_if_changed(self, f"""
+        style_if_changed(
+            self,
+            f"""
             ProjectItem {{
-                background: {Colors.HOVER_BG};
+                background: {Colors.HOVER_BG_STRONG};
+                border-left: 3px solid {self._project_color};
                 border-radius: 6px;
-                border: none;
             }}
-        """)
-        hover_color = get_project_color(self._name, alpha=240)
-        style_if_changed(self._name_label,
-            f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
+        """,
         )
-        style_if_changed(self._meta_label, f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};")
+        hover_color = get_project_color(self._name, alpha=240)
+        style_if_changed(
+            self._name_label, f"color: {hover_color}; font-weight: bold; {get_font_family_css()} {font_size_css(13)};"
+        )
+        style_if_changed(
+            self._meta_label, f"color: {Colors.TEXT_SECONDARY}; {get_font_family_css()} {font_size_css(10)};"
+        )
         # 聚合行（「全部项目」）不提供单项目操作：无归档按钮
         if not self._is_all_entry:
             self._archive_btn.show()
         super().enterEvent(event)
 
     def leaveEvent(self, event):
-        style_if_changed(self, "")
+        # 复位到静止态（当前项目保留淡染底 + 色条，非当前项目透明）
+        self._apply_base_style()
         self._apply_name_style()
         Colors.refresh()
         style_if_changed(self._meta_label, f"color: {Colors.TEXT_MUTED}; {get_font_family_css()} {font_size_css(10)};")
@@ -475,9 +532,10 @@ class ProjectSelectorCardContent(QWidget):
         self._content_widget.setAcceptDrops(True)
         # 内容 widget 也接受拖拽，扩大拖拽热区
         self._content_layout = QVBoxLayout(self._content_widget)
-        self._content_layout.setContentsMargins(0, 0, 0, 0)
-        # 项目之间用 1px 细缝：避免 0 完全相连导致看不出分隔，又比 2px 紧凑
-        self._content_layout.setSpacing(1)
+        self._content_layout.setContentsMargins(0, 2, 0, 2)
+        # 项目行间距 2px：当前项目带常驻底纹 + 左色条后，1px 会让相邻行块面
+        # 粘在一起（淡染底贴着色条像同一块），2px 让每行边界清楚但仍紧凑
+        self._content_layout.setSpacing(2)
 
         self._scroll_area.setWidget(self._content_widget)
         self._scroll_area.setMinimumHeight(40)

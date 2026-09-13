@@ -36,8 +36,8 @@ def test_project_panel_reuses_selector_card_with_all_entry():
     """插件面板复用宿主项目选择卡片，聚合行「全部项目」在面板首行工具条自建"""
     page = _read(_PAGE)
     assert "from app.widgets.cards.settings.project_selector_card import" in page
-    assert "ProjectSelectorCardContent(panel)" in page
-    assert 'ProjectItem("全部项目", False, panel, is_all_entry=True)' in page
+    assert "ProjectSelectorCardContent(body)" in page
+    assert 'ProjectItem("全部项目", False, body, is_all_entry=True)' in page
     assert "collapse_project_selector" in page
     card = _read(_CARD)
     assert "allProjectsSelected = pyqtSignal()" in card
@@ -95,9 +95,13 @@ def test_import_left_of_new_session_in_filter_row():
 
 
 def test_filter_row_controls_are_enlarged():
-    """项目选择 / 搜索框 / 按钮整行放大（30px 高，名称 12px 字号）"""
+    """项目选择 / 搜索框 / 按钮整行放大（搜索框 30px 高，折叠头 32px，名称 12px 字号）
+
+    折叠头 32px（原 30px）：容纳 16px 旋转 chevron + 更明显的块面（底色/
+    描边/左侧项目色条），比同行搜索框高 2px 以形成"入口行"的视觉重量。
+    """
     src = _read(_PAGE)
-    assert "self.setFixedHeight(30)" in src  # 折叠头
+    assert "self.setFixedHeight(32)" in src  # 折叠头
     assert "self._search_input.setFixedHeight(30)" in src
     assert "self._import_btn.setFixedSize(30, 30)" in src
     assert "self._new_session_btn.setFixedSize(30, 30)" in src
@@ -118,8 +122,8 @@ def test_new_session_switches_to_filtered_project():
     src = _read(_PAGE)
     body = src[src.index("def _on_new_session_clicked") : src.index("def _on_new_project_submitted")]
     assert "_PROJECT_ALL" in body and "_PROJECT_CURRENT" in body
-    assert "self._call_window(\"_on_project_selected\", target)" in body
-    assert "self._call_window(\"_create_new_session\")" in body
+    assert 'self._call_window("_on_project_selected", target)' in body
+    assert 'self._call_window("_create_new_session")' in body
 
 
 def test_project_row_click_is_filter_only():
@@ -131,8 +135,124 @@ def test_project_row_click_is_filter_only():
 
 
 def test_panel_expand_takes_full_height():
-    """面板展开时让出会话列表区域，占满卡片高度（不再限高 220）"""
+    """面板展开时让出会话列表区域，占满卡片高度（不再限高；走高度动画）
+
+    ★ 面板 stretch 必须为 1：展开态占满卡片剩余空间（按内容高度会在项目少时
+    留下一大片空白）。动画期间由 setFixedHeight 硬控（min=max），stretch 抢不走。
+    """
     src = _read(_PAGE)
     assert "_PROJECT_PANEL_MAX_HEIGHT" not in src
-    assert "self._scroll_area.setVisible((not visible) and self._content_ready)" in src
+    # 展开态：列表区/占位隐藏；收起终态：列表区按 _content_ready 恢复
+    assert "self._scroll_area.setVisible(False)" in src
+    assert "self._scroll_area.setVisible(self._content_ready)" in src
     assert "layout.addWidget(self._project_panel, 1)" in src
+    # 展开/收起走高度动画（Animations.EXPAND_MS）
+    body = src[src.index("def _set_project_panel_visible") : src.index("def _release_panel_area")]
+    assert "QPropertyAnimation" in body
+    assert "Animations.EXPAND_MS" in body
+    assert "Animations.motion_enabled()" in body  # 减少动效时直置终值
+
+
+def test_panel_target_height_fills_available_not_content():
+    """★ 展开目标高度必须是「卡片可用高度」，不是内容高度
+
+    按内容高度量：项目少（如 1 个）时面板只占约 100px，而列表区在展开态是隐藏的
+    → 视觉上一大片空白（用户实测反馈）。正解 = 占满可用高度，内容不足的空白由
+    面板内部滚动区吸收。
+    """
+    src = _read(_PAGE)
+    measure = src[src.index("def _measure_panel_height") : src.index("def _available_panel_height")]
+    assert "self._available_panel_height()" in measure
+    assert "sizeHint" not in measure, "不得按内容 sizeHint 定高（会留白）"
+    # 可用高度 = 卡片高度 − 上方各行与边距/间距
+    avail = src[src.index("def _available_panel_height") : src.index("def _release_panel_area")]
+    assert "self.height() - used" in avail
+
+
+def test_panel_is_clipping_shell_over_fixed_body():
+    """★ 面板必须是「裁剪外壳 + 钉住内容」两层结构
+
+    若内容直接挂在面板上，逐帧 ``setFixedHeight`` 时面板内 ``QVBoxLayout`` 会
+    **压缩子控件**（内嵌滚动区自带 ``setMinimumHeight(40)``）→ 视觉上「内容被
+    挤扁往中间缩」。故内容挂在 body，动画期间 body 高度钉死、只被外壳裁剪。
+    """
+    src = _read(_PAGE)
+    assert "self._project_panel_body = body" in src
+    # 动画期间 body 被钉住（setFixedHeight），而非随外壳收缩
+    body = src[src.index("def _set_project_panel_visible") : src.index("def _measure_panel_height")]
+    assert "body.setFixedHeight(target)" in body  # 展开方向钉住
+    assert "body.setFixedHeight(max(body.height(), start))" in body  # 收起方向同样钉住
+
+
+def test_panel_height_driver_uses_fixed_height_not_maximum():
+    """★ 动画驱动必须是逐帧 ``setFixedHeight``，不是 ``maximumHeight``
+
+    ``maximumHeight`` 只给父布局一个上限，控件实际高度仍由布局施舍；面板内有
+    最小高度约束的子控件时每帧重排 → 双向收缩。正解是驱动对象逐帧
+    ``setFixedHeight``（与宿主 ``expand_height_mixin._CardHeightDriver`` 同机制）。
+    """
+    src = _read(_PAGE)
+    assert "class _PanelHeightDriver(QObject)" in src
+    driver = src[src.index("class _PanelHeightDriver") : src.index("class _HeaderChevron")]
+    assert "setFixedHeight(self._value)" in driver
+    assert "pyqtProperty(int" in driver
+    anim_body = src[src.index("def _set_project_panel_visible") : src.index("def _measure_panel_height")]
+    assert 'QPropertyAnimation(driver, b"value"' in anim_body
+    # 不得用 maximumHeight 属性做动画（docstring 里的对比说明不算）
+    assert 'QPropertyAnimation(self._project_panel, b"maximumHeight")' not in anim_body
+
+
+def test_panel_expand_anim_is_single_directional():
+    """★ 动画必须单向：面板与列表区同属一个 QVBoxLayout，若动画期间列表区可见，
+    布局会把腾出/收回的空间分给它 → 表现为「上面往下压、下面往上顶」两头夹。
+
+    守卫：动画启动前先把下方区域冻结（隐藏），动画结束才交还。
+    """
+    src = _read(_PAGE)
+    body = src[src.index("def _set_project_panel_visible") : src.index("def _release_panel_area")]
+    # 冻结语句必须出现在启动动画之前
+    freeze = body.index("self._scroll_area.setVisible(False)")
+    start = body.index("anim.start()")
+    assert freeze < start, "必须先把列表区冻结再启动动画（否则下方会往上顶）"
+    assert "self._hint.setVisible(False)" in body[:start]
+    # 展开起点必须真实为 0：先 setFixedHeight(0) 再启动，避免 setVisible 那次
+    # 布局按 sizeHint 撑满一帧（先跳后动）
+    assert body.index("self._project_panel.setFixedHeight(0)") < start
+    # 终态交还走统一出口
+    assert "def _release_panel_area" in src
+    assert "self._project_panel.setVisible(False)" in src[src.index("def _release_panel_area") :]
+
+
+def test_panel_anim_interrupt_releases_area():
+    """动画被打断（快速连点）不得留下「半开高度 + 列表区消失」的坏状态"""
+    src = _read(_PAGE)
+    stop = src[src.index("def _stop_project_panel_anim") : src.index("def _on_project_panel_anim_finished")]
+    assert "_release_panel_area()" in stop, "stop 后必须补齐终态（否则面板停在半高且列表不回来）"
+
+
+def test_panel_release_clears_both_min_and_max():
+    """动画终态必须同时放开 min/max
+
+    动画期间走的是 ``setFixedHeight``（min 与 max 被同时收紧）；只放开
+    maximumHeight 的话面板会永久卡死在动画末值高度。
+    """
+    src = _read(_PAGE)
+    release = src[src.index("def _release_panel_area") : src.index("def _stop_project_panel_anim")]
+    assert "body.setMinimumHeight(0)" in release
+    assert "body.setMaximumHeight(_PANEL_H_UNLIMITED)" in release
+    assert "self._project_panel.setMinimumHeight(0)" in release
+    assert "self._project_panel.setMaximumHeight(_PANEL_H_UNLIMITED)" in release
+
+
+def test_project_header_is_visually_prominent():
+    """折叠头视觉强化：左侧项目色条 + 展开态/收起态可辨 + 旋转箭头动画"""
+    src = _read(_PAGE)
+    header = (
+        src[src.index("class _HeaderChevron") : src.index("def _alpha_tint")]
+        + src[src.index("def _alpha_tint") : src.index("def _active_history_manager")]
+    )
+    assert "border-left: 3px solid" in header  # 左侧项目色条
+    assert "BORDER_ACCENT" in header  # 展开/hover 描边强调色
+    assert "CARD_BG" in header or "HOVER_BG_STRONG" in header  # 更实的底色
+    assert "QPropertyAnimation" in header  # 箭头旋转动画
+    assert "bind_theme_qss" in src[: src.index("class _HeaderChevron")] or "bind_theme_qss" in header

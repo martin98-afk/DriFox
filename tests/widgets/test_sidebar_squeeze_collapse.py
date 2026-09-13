@@ -44,13 +44,19 @@ class _StubFrame:
 
 
 class _StubPanel:
-    """最小 TabPanel 替身：只提供折叠判定所需状态"""
+    """最小 TabPanel 替身：只提供折叠判定所需状态
+
+    ★ 宽度口径与真实 TabPanel 一致：_auto_collapse_width 是 **content 宽**，
+    _evaluate_squeeze_collapse 内部会 + _FRAME_PADDING_X 换算到 frame 域比较。
+    """
 
     def __init__(self):
+        from app.widgets.tab_manager_window import _EXPANDED_MIN_CONTENT_WIDTH
+
         self._collapsed = False
         self._collapsed_by_squeeze = False
         self._animating = False
-        self._auto_collapse_width = 100
+        self._auto_collapse_width = _EXPANDED_MIN_CONTENT_WIDTH
         self._auto_collapse_suppressed = False
         self.sync_calls = 0
         self.toggle_btn_calls = 0
