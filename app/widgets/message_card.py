@@ -10287,6 +10287,20 @@ class CodeWebViewer(QWebEngineView):
             "code_font_size": _CODE_FONT_SIZE,
         }
 
+    def invalidate_inflight_render(self) -> None:
+        """B3 兜底：作废在途异步渲染（其结果快照已被新内容超越）。
+
+        使用场景：编辑类工具完成只做 JS 增量注入、不触发渲染（防闪烁设计）。
+        若此时恰有在途异步渲染（长内容的非流式渲染走线程池），其 HTML 快照不含
+        该工具完成块；结果落地时 save/restore 会把 DOM 中的完成框 `el.remove()`，
+        而 restore 判定该 id 已 finished → 不恢复 → 完成框被吞（永久消失）。
+        递增 seq 让在途结果过期丢弃，pending 快照一并清空；DOM 由增量注入的块
+        与后续任意一次渲染（含 finish_streaming 终渲染）兜底。
+        """
+        if self._render_inflight:
+            self._render_seq += 1
+            self._render_pending = None
+
     def _sequence_render(self, md: str, compact: bool):
         """B3: 序列化异步渲染——提交线程池，在途时只记 pending（防抖积压最新快照）
 
@@ -10599,19 +10613,25 @@ class CodeWebViewer(QWebEngineView):
             f"var _finishedSet={_finished_js};"
             f"if(_saved.length){{_tc=document.getElementById('{_target_id}');if(_tc){{"
             "_saved.forEach(function(b){"
-            # 🐛 修复（编辑工具框"运行中→完成"中间消失）：restore 条件从
-            # `b.streaming==='true'` 放宽为 `streaming 或未完成`——finish_tool_streaming
-            # 注入的完成态预览块（data-streaming="false"）在 append_tool_result 之前
-            # **不在 markdown 中**（_content_data 尚无结果块），若只恢复 streaming=true，
-            # 该预览块 save 后不 restore → 全量渲染后被抹掉，直到 append_tool_result
-            # 才重现。已完成（结果已 append_tool_result）的块才由 markdown 重新生成，
-            # 无需 restore（且恢复会与 markdown 生成的块重复）。
+            # 🐛 修复（工具块被吞·restore 判据根治）：restore 条件由「未完成
+            # （!isFinished）且 DOM 无同 id 块」改为「**DOM 无同 id 块**」。
+            # 旧判据默认「已完成块的 markdown 一定会重建」，把「是否恢复」与「HTML
+            # 是否真的含该块」解耦——任何一次全量渲染的 HTML 缺块（在途旧快照落地、
+            # _lazy_markdown_cb 未刷新、注入失败、md 生成失败…）都会让该块被 save
+            # 移除后无人恢复，永久消失（“编辑工具完成框被吞”的根因族）。
+            # 新判据只看 DOM：markdown 已重建同 id 块 → 跳过（防重复，与旧行为一致）；
+            # 没重建 → 把保存的块原样放回（无论是否 finished），块不再丢。
+            # 历史沿革：`b.streaming==='true'`（只恢复流式块）→ `streaming 或未完成`
+            # （补 finish_tool_streaming 的完成态预览块）→ 本次的 DOM 存在性判据。
             "var _isFinished=(_finishedSet.indexOf(b.id)!==-1);"
-            "if(!_isFinished&&!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
+            "if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
             "var _t=document.createElement('div');_t.innerHTML=b.html;"
             "var _bk=_t.firstElementChild;if(_bk){"
             "_bk.removeAttribute('data-tool-injected');"
             "_bk.setAttribute('data-restored','true');"
+            # _isFinished 不再参与恢复判定，仅作排查标记：恢复的块若属于「已完成」
+            # （本该由 markdown 重建却没重建），打 data-restored-finished 供定位来源。
+            "if(_isFinished)_bk.setAttribute('data-restored-finished','true');"
             # 🆕 F1：restore 恢复的运行中块（data-streaming="true"）直接 appendChild 沉底——
             # 不再按 data-order 插位。be57674d 方案 D 的按 data-order 插位逻辑本意是
             # 让"流式块恢复后保持交错顺序"，但运行中块 data-order 是调用时刻快照，
@@ -15407,6 +15427,14 @@ class MessageCard(SimpleCardWidget):
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             if not _is_edit_tool:
                 self.viewer._schedule_render(immediate=True)
+            else:
+                # 🐛 修复（编辑工具完成框被吞·在途异步渲染）：编辑工具不触发渲染
+                # （防闪烁），但必须作废在途异步渲染——其 HTML 快照不含本工具完成块，
+                # 落地时 save 把 DOM 完成框 el.remove()，restore 又因该 id 已 finished
+                # 跳过恢复 → 完成框永久消失（长内容非流式渲染的时间窗口）。
+                _invalidate = getattr(self.viewer, "invalidate_inflight_render", None)
+                if _invalidate is not None:
+                    _invalidate()
 
             # 简洁模式：工具块默认折叠；非简洁模式：默认展开便于查看结果
             _collapsed = self.viewer._tool_compact_mode if self.viewer else True
