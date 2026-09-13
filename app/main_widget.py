@@ -1115,6 +1115,8 @@ class OpenAIChatToolWindow(ToolWindow):
     _opencode_models_ready = Signal(object)
     # models.dev 动态模型数据后台刷新完成（后台线程 → 主线程）
     _models_dev_ready = Signal(object)
+    # 工具注册表变更桥接（registry.on_change 回调可能来自后台 watcher 线程 → 主线程）
+    _tool_registry_changed = Signal(int)
 
     def __init__(self, homepage, source_window=None):
         # 性能优化：标记是否为复制/分支窗口，必须在 super().__init__() 之前设置，
@@ -1172,6 +1174,24 @@ class OpenAIChatToolWindow(ToolWindow):
         # 🛡️ 工具权限控制器（per-window 多窗口隔离）
         # 必须在 backend.initialize 之前创建并注入,engine 启动时会读取
         self._tool_permission_controller = ToolPermissionController(self)
+
+        # 输入框工具计数刷新直连两个数据源（2026-09-13 修复：此前刷新寄生在
+        # 懒创建的工具控制卡上——未开过卡片的窗口，插件装/卸/热重载后计数停在
+        # 启动值；agent 激活的 emit 也先于卡片转发连接而丢失）：
+        # a) registry 变更（工具数量变化）：on_change 回调可能来自后台 watcher
+        #    线程，经 _tool_registry_changed 信号排队主线程；
+        # b) controller 权限变化（用户开关 / agent 激活 / 恢复 / 配置同步）：
+        #    不再依赖卡片转发。
+        # 两个源统一走 0ms 单发去抖：一次热重载重扫会产生几十次 notify。
+        self._tool_count_dirty_timer = QTimer(self)
+        self._tool_count_dirty_timer.setSingleShot(True)
+        self._tool_count_dirty_timer.timeout.connect(self._refresh_tool_toggle_btn)
+        self._tool_registry_changed.connect(self._on_tool_count_dirty)
+        self._tool_permission_controller.togglesChanged.connect(lambda _t: self._on_tool_count_dirty())
+        self._tool_permission_controller.activeAgentChanged.connect(lambda _n: self._on_tool_count_dirty())
+        from app.tools.registry import ToolRegistry
+
+        ToolRegistry.get_instance().on_change(self._on_tool_registry_changed)
 
         # 创建后端（后端自己创建所有组件）- 需要在 super() 之前创建并初始化
         # 因为 setup_ui() 中会用到 self.backend.get_primary_agents()
@@ -8459,6 +8479,16 @@ class OpenAIChatToolWindow(ToolWindow):
             # 通知 card 从 controller 拉取最新状态
             self._tool_control_card.set_toggles(self._tool_permission_controller.get_toggles())
         self._card_manager.toggle_card("tool_control", self._window_id)
+
+    def _on_tool_registry_changed(self, _version: int):
+        """registry 变更回调（可能来自后台 watcher 线程）：只 emit 排队，不碰 UI"""
+        self._tool_registry_changed.emit(_version)
+
+    def _on_tool_count_dirty(self):
+        """工具计数脏标记：0ms 单发去抖合并同批变更后统一刷新输入框计数"""
+        if getattr(self, "_tool_count_label", None) is None:
+            return
+        self._tool_count_dirty_timer.start(0)
 
     def _refresh_tool_toggle_btn(self):
         """刷新工具开关按钮上的数字和 agent 覆盖指示"""
@@ -16235,6 +16265,8 @@ class OpenAIChatToolWindow(ToolWindow):
         `layout.sizeHint()` 是即时计算的，可以拿来当真实内容高度。
 
         只**抬高**不压低：Qt 随后自己算出的上界会覆盖它，不会互相打架。
+        例外：贴底（value 距上界 ≤ AT_BOTTOM_TOLERANCE）时若 real 更小也**压低**
+        —— 见下方 🐛 注释。
 
         [PERF] `container.sizeHint()` 是一次 O(卡片数) 的完整布局计算。本函数被
         `_is_view_at_bottom` 调用，而后者挂在滚动信号上 —— 程序置底 →
@@ -16254,9 +16286,17 @@ class OpenAIChatToolWindow(ToolWindow):
             container = self.chat_scroll_area.widget()
             if container is None:
                 return scroll_bar.maximum()
-            real = container.sizeHint().height() - self.chat_scroll_area.viewport().height()
+            real = max(0, container.sizeHint().height() - self.chat_scroll_area.viewport().height())
             if real > scroll_bar.maximum():
-                scroll_bar.setMaximum(max(0, real))
+                scroll_bar.setMaximum(real)
+            elif real < scroll_bar.maximum() and scroll_bar.maximum() - scroll_bar.value() <= AT_BOTTOM_TOLERANCE:
+                # 🐛 滚到底仍能继续下滚出大片空白：卡片高度异步收敛（JS 上报 →
+                # 80ms 防抖 → 平滑限幅分帧），某卡 fixedHeight 虚高时上界被上面
+                # 的「只抬高」逻辑抬过真实内容底，贴底用户就能滚进越界空白区，
+                # 高度收回后空白又消失。仅贴底时压低：视口在内容中间时压上界会
+                # 改变滚动比例，且懒渲染重建窗口 sizeHint 短暂塌陷（等高占位机制
+                # 防的就是它），不压。压低后 Qt 把 value 钳回新上界，视觉无跳动。
+                scroll_bar.setMaximum(real)
         except RuntimeError:
             pass
         self._scroll_max_cache = (now, scroll_bar.maximum())
@@ -16402,6 +16442,10 @@ class OpenAIChatToolWindow(ToolWindow):
             QTimer.singleShot(150, lambda: self._ensure_at_bottom(retries=8))
             return
         scroll_bar = self.chat_scroll_area.verticalScrollBar()
+        # 🐛 先校正上界再钉底：maximum 含卡片高度异步收敛的虚高时，直接
+        # setValue(maximum) 会把视口钉进内容底之下的空白区（同
+        # _do_scroll_to_bottom 的 _sync_scroll_maximum 前置）。
+        self._sync_scroll_maximum()
         scroll_bar.setValue(scroll_bar.maximum())
         self._bottom_anchor_timer.start()
 

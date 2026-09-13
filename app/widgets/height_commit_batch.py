@@ -134,10 +134,12 @@ class HeightCommitBatch:
                     # 🐛 同 main_widget._sync_scroll_maximum：卡片 setFixedHeight 之后
                     # 布局尚未传播，sb.maximum() 仍是旧值 → setValue(maximum) 只会停在
                     # "上一拍的底"。用即时计算的 sizeHint 校正上界后再置底。
+                    # 双向校正（不设 real > maximum 条件）：follow 即贴底/跟随态，
+                    # 上界虚高时若只抬高，setValue(maximum) 会把视口钉进内容底之下的
+                    # 空白区（「滚到底还能继续下滚」的组成环节之一）。
                     with contextlib.suppress(RuntimeError):
-                        real = self._container.sizeHint().height() - self._sa.viewport().height()
-                        if real > sb.maximum():
-                            sb.setMaximum(max(0, real))
+                        real = max(0, self._container.sizeHint().height() - self._sa.viewport().height())
+                        sb.setMaximum(real)
                     sb.setValue(sb.maximum())
                 elif self._anchor_card is not None:
                     top = self._anchor_card.mapTo(self._container, QPoint(0, 0)).y()
