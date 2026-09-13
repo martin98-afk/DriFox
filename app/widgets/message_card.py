@@ -15821,10 +15821,14 @@ class MessageCard(SimpleCardWidget):
         # 徽标作为预览 span 的**兄弟节点**更新（长文本省略号不会把它裁掉）
         badge_html = "" if completed else _format_tool_progress_badge(char_count, add_lines, del_lines)
 
-        # ── 内容去重：相同预览内容跳过 JS 执行，减少流式高频更新压力 ──
+        # ── 内容去重：预览文本**与徽标**都相同才跳过 JS 执行，减少流式高频更新压力 ──
+        # 🐛 修复（编辑工具流式徽标不更新）：原实现只比较 preview_content，而编辑类
+        # 工具的预览文本在路径完整后就恒定（如「写入文件中」），导致此后每个进度事件
+        # 都被去重跳过 —— +N/-M 行数与字符数徽标停更，运行框看上去"卡死"在首帧。
         _cache_key = (tool_call_id, completed)
+        _cache_val = (preview_content, badge_html)
         _last = getattr(self, "_tool_streaming_preview_cache", None) or {}
-        if _last.get(_cache_key) == preview_content:
+        if _last.get(_cache_key) == _cache_val:
             # 🐛 修复（编辑工具框运行中消失）：preview 相同不重新注入，但 DOM 中
             # 运行框仍在 → 仍需 dirty 保护标记。否则 dirty 被某次渲染回调清除后，
             # 该工具框永远失去 save/restore 保护，下一次全量渲染裸 updateContent
@@ -15838,7 +15842,7 @@ class MessageCard(SimpleCardWidget):
             return
         if not hasattr(self, "_tool_streaming_preview_cache"):
             self._tool_streaming_preview_cache = {}
-        self._tool_streaming_preview_cache[_cache_key] = preview_content
+        self._tool_streaming_preview_cache[_cache_key] = _cache_val
 
         # 🐛 修复（编辑工具框运行中消失）：dirty 标记必须**先于** _schedule_render
         # 设置。completed=True 时 _schedule_render(immediate=True) 会立即执行

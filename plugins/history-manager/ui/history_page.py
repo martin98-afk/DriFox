@@ -434,6 +434,19 @@ class HistoryPage(QWidget):
         """收起面板（宿主切换项目、归档项目后调用）"""
         self._set_project_panel_visible(False)
 
+    def follow_window_project(self) -> None:
+        """项目过滤器切回「跟随活跃窗口项目」（宿主新建项目后驱动）
+
+        新建项目 = 窗口项目已切到新项目；若本页仍过滤着旧项目，刷新后列表
+        停留在旧项目会话（窗口项目与筛选脱节）。重置为 ``_PROJECT_CURRENT``
+        后 ``_resolved_project_filter()`` 跟随活跃窗口项目，列表即显示新项目。
+        """
+        self._project_filter_raw = _PROJECT_CURRENT
+        if self._card is not None:
+            self._card.set_show_project_labels(False)
+        self._sync_project_header()
+        self.refresh()
+
     def _toggle_project_panel(self) -> None:
         """折叠头点击：展开/收起面板（展开时先拉最新数据）"""
         will_show = not self._project_panel_open
