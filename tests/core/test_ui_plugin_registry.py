@@ -1378,3 +1378,85 @@ def test_workbench_card_reclick_closes_tab_and_workbench(monkeypatch):
     assert panel.has_card_tab("plug-right:card")
 
     reg.reset()
+
+
+def test_workbench_card_close_over_real_qt_signal(qapp):
+    """真 Qt 信号链回归：点 tab × 必须摘掉页签。
+
+    锁死的坑：旧写法 `connect(self._close_workbench_card_tab, type=Qt.UniqueConnection)`，
+    而 UIPluginRegistry 不是 QObject 子类 → PySide6 直接拒绝该连接，只往 stderr 打一行
+    `unique connections require a pointer to member function` 警告、不抛 Python 异常。
+    结果是信号发得出、无人接收，表现为「点 × 没反应且日志无任何报错」。
+
+    必须用真 WorkbenchPanel + 真 QPushButton：_FakeSignal 桩会掩盖这个断点（桩的 connect
+    无条件收下 slot），上一版回归测试就是这么漏过去的。
+    """
+    from PySide6.QtWidgets import QWidget
+
+    from app.widgets.workbench_panel import WorkbenchPanel
+
+    class _RealHost(QWidget):
+        def __init__(self):
+            super().__init__()
+            self._window_id = "probe-win"
+            self.workbench_panel = None
+
+        def is_workbench_visible(self):
+            return True
+
+        def set_workbench_visible(self, visible):
+            pass
+
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    host = _RealHost()
+    panel = WorkbenchPanel(host)
+    host.workbench_panel = panel
+    reg._resolve_global_host = lambda: host  # 绕开 TabManagerWindow 单例依赖
+    card_id = "probe-close:card"
+    try:
+        reg.register_floating_card("probe-close", card_id, QWidget, "right", title="探针卡")
+        reg._show_floating_card_in_workbench(reg.get_floating_cards()[card_id], panel, host)
+        assert panel.has_card_tab(card_id), "前置：卡片页签应已挂载"
+
+        close_btns = [b for b in panel._tab_buttons if b.tab_id == card_id]
+        assert close_btns and close_btns[0]._close_btn is not None, "卡片页签应带 × 关闭钮"
+        close_btns[0]._close_btn.click()  # 真按钮点击，走完整 Qt 信号链
+
+        assert not panel.has_card_tab(card_id), "点 × 后页签应被摘除（接线静默失败则此处必挂）"
+        assert card_id not in reg._workbench_card_tabs, "registry 侧登记应同步清掉"
+    finally:
+        reg.reset()
+        panel.deleteLater()
+        host.deleteLater()
+
+
+def test_workbench_card_close_signal_wired_per_panel(monkeypatch):
+    """回归：tab × 的关闭信号必须对**每个** panel 都接线
+
+    修复前接线幂等标志挂在 registry 单例上，而 panel 每宿主一份 —— 第一个
+    panel 接上线之后，后续问世的 panel 全部接不上：× 照常 emit、无人接收，
+    表现为「点关闭钮没反应且日志无任何报错」。
+    """
+    reg = UIPluginRegistry.get_instance()
+    reg.reset()
+    card_id = "plug-x:card"
+    host = _TabFakeHost()
+    monkeypatch.setattr(UIPluginRegistry, "_resolve_global_host", lambda self: host)
+    reg.register_floating_card(
+        plugin_name="plug-x",
+        card_id=card_id,
+        widget_class=_TabStatefulCard,
+        container="right",
+        title="可关闭卡",
+    )
+
+    for i, panel in enumerate([_FakeWorkbenchPanel(), _FakeWorkbenchPanel()]):
+        host.workbench_panel = panel
+        reg._show_floating_card_in_workbench(reg.get_floating_cards()[card_id], panel, host)
+        assert panel.has_card_tab(card_id), f"第 {i} 个 panel 应已挂载卡片页签"
+        # 模拟点击 tab 上的 ×：面板 emit，registry 必须收到并摘 tab
+        panel.card_tab_close_requested.emit(card_id)
+        assert not panel.has_card_tab(card_id), f"第 {i} 个 panel 的 × 未接上关闭信号"
+
+    reg.reset()

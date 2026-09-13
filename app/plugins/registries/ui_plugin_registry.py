@@ -2308,16 +2308,21 @@ class UIPluginRegistry:
         # 记录 window_id → 宿主映射，供 unload 时清理容器使用
         self._window_main_widgets[window_id] = host
 
+        # tab × 关闭钮 → registry 同步清理卡片状态并摘 tab。
+        # ★ 严禁使用 type=Qt.UniqueConnection：UIPluginRegistry 不是 QObject 子类，
+        #   PySide6 对「非 QObject 成员函数 + UniqueConnection」的连接会直接拒绝，
+        #   且只往 stderr 打一行 qt.core.qobject.connect 警告、不抛 Python 异常，
+        #   于是 connect 静默失败、标志位照样被置 True，表现为「点 × 毫无反应且无报错」。
+        #   去重已由下面 panel 级幂等标志保证，UniqueConnection 是多余且致命的。
+        # ★ 幂等标志必须挂在 panel 上：registry 是全局单例、panel 每宿主一份，挂在 self 上
+        #   会让第二个 panel 永远接不上线。
+        if not getattr(panel, "_drifox_card_close_wired", False):
+            panel.card_tab_close_requested.connect(self._close_workbench_card_tab)
+            panel._drifox_card_close_wired = True
+
         win_instances = self._card_widget_instances.setdefault(window_id, {})
         widget = win_instances.get(card_id)
         if widget is None:
-            # tab × 关闭钮 → registry 同步清理卡片状态并摘 tab。
-            # UniqueConnection 防止多次 open 重复连接导致 _close_workbench_card_tab 多次调用。
-            if not getattr(self, "_workbench_card_signal_wired", False):
-                from PySide6.QtCore import Qt as _Qt
-
-                panel.card_tab_close_requested.connect(self._close_workbench_card_tab, type=_Qt.UniqueConnection)
-                self._workbench_card_signal_wired = True
             widget = card_info.widget_class(parent=panel)
             if card_info.metadata.get("stack"):
                 try:
@@ -2373,11 +2378,25 @@ class UIPluginRegistry:
             cards.discard(card_id)
         host = self._resolve_global_host()
         panel = getattr(host, "workbench_panel", None) if host is not None else None
-        if panel is not None:
-            try:
-                panel.close_card_tab(card_id)
-            except Exception:
-                pass
+        if panel is None:
+            # 静默 return 会让「点了没反应」永远查不到证据，必须留痕
+            logger.warning(
+                "[UIPluginRegistry] 关闭卡片页签时拿不到工作台面板，tab 不会被摘除 (card_id=%s, host=%s)",
+                card_id,
+                type(host).__name__ if host is not None else None,
+            )
+            return
+        try:
+            closed = panel.close_card_tab(card_id)
+        except Exception:
+            logger.exception(
+                "[UIPluginRegistry] panel.close_card_tab 异常，页签摘除中断 (card_id=%s)", card_id
+            )
+            return
+        if not closed:
+            logger.warning(
+                "[UIPluginRegistry] 面板回应该页签不存在，可能已与实际显示脱节 (card_id=%s)", card_id
+            )
 
     def sync_workbench_cards_to_tab(self, scope: Optional[str]) -> None:
         """切换对话标签页时按目标标签页投影工作台卡片 tab（per-tab 隔离）
