@@ -602,14 +602,30 @@ class TabIndicatorController(QObject):
         self._anim.valueChanged.connect(self._on_value)
         self._active_geometry = active_geometry
         self._layout_parent = indicator_parent
+        self._snap_pending = False
         indicator_parent.installEventFilter(self)
 
     def eventFilter(self, obj, event) -> bool:
-        # 布局收敛 / 宿主尺寸变化都会经过这两个事件（可能跨多拍），每次都
-        # 重新钉位到 active 按钮；动画运行中 move_to 会自动降级为重定向
+        # 布局收敛 / 宿主尺寸变化都会经过这两个事件（可能跨多拍）
         if obj is self._layout_parent and event.type() in (QEvent.LayoutRequest, QEvent.Resize):
-            self.snap_to_active()
+            self._schedule_snap()
         return False
+
+    def _schedule_snap(self) -> None:
+        """延迟一拍钉位（pending 合并）
+
+        ★ 不能在 filter 里立刻 snap：eventFilter 拦截在布局执行**之前**，
+        此刻读按钮 geometry 还是旧值（实测钉回 sizeHint 初值）。singleShot(0)
+        落在布局完成后，才能拿到收敛后的几何。
+        """
+        if self._snap_pending:
+            return
+        self._snap_pending = True
+        QTimer.singleShot(0, self._run_snap)
+
+    def _run_snap(self) -> None:
+        self._snap_pending = False
+        self.snap_to_active()
 
     def snap_to_active(self) -> None:
         """把胶囊钉到当前 active 按钮的几何（不动画；无效几何则跳过）"""
