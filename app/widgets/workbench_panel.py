@@ -781,8 +781,13 @@ class WorkbenchPanel(QWidget):
     def _run_tab_hover_sync(self) -> None:
         self._hover_sync_pending = False
         self.sync_tab_hover()
-        # 胶囊钉位由 TabIndicatorController 自己监听 tab_bar_host 的
-        # LayoutRequest/Resize 完成，这里只管 hover 仲裁
+        # 显式钉位：show() 首次布局走 QLayout 同步 activate，不产生
+        # LayoutRequest，controller 的事件链接不到；showEvent 会调度到这里，
+        # 延迟一拍后按钮几何已收敛，能正确落位。与 controller 内建事件链
+        # （覆盖后续动态布局）双保险，幂等。
+        idx = self._stack.currentIndex()
+        if 0 <= idx < len(self._tab_buttons):
+            self._indicator_ctl.move_to(self._tab_buttons[idx].geometry(), animate=False)
 
     def leaveEvent(self, event) -> None:
         # 鼠标离开面板时兜底清空（动画/其它窗口抢焦点时子 widget 的
