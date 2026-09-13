@@ -5,6 +5,7 @@
 第一个 panel 接上线之后，后续问世的 panel 全部接不上：× 照常 emit、无人接收，
 表现为「点关闭钮没反应且日志无报错」。修复：标志挂 panel 实例、接线移出分支。
 """
+
 from PyQt5.QtWidgets import QWidget
 
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
