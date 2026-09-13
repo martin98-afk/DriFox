@@ -106,6 +106,20 @@ def test_backend_hardware_disables_swiftshader(tmp_path):
     assert "--enable-low-end-device-mode" not in _flags().split()
 
 
+def test_gpu_compositing_disabled_except_troubleshoot_tiers():
+    """各档默认禁 GPU 合成（Qt6 双合成器 resize 旧帧拉伸伪影）；排障档豁免。"""
+    assert "--disable-gpu-compositing" in build_chromium_flags(compute_settings({})).split()
+    assert "--disable-gpu-compositing" in build_chromium_flags(compute_settings({"RenderBackend": "hardware"})).split()
+    assert "--disable-gpu-compositing" in build_chromium_flags(compute_settings({"WebglEnabled": "on"})).split()
+    assert (
+        "--disable-gpu-compositing" in build_chromium_flags(compute_settings({"RenderBackend": "swiftshader"})).split()
+    )
+    assert (
+        "--disable-gpu-compositing" not in build_chromium_flags(compute_settings({"RenderBackend": "vulkan"})).split()
+    )
+    assert "--disable-gpu-compositing" not in build_chromium_flags(compute_settings({"RenderBackend": "d3d9"})).split()
+
+
 def test_backend_hardware_low_end_mode_explicit_wins(tmp_path):
     """hardware 档低端模式默认关，但显式设置仍被尊重。"""
     apply_render_env(_write_config(tmp_path, {"RenderBackend": "hardware", "LowEndDeviceMode": True}))
@@ -140,7 +154,8 @@ def test_webgl_on_with_software_enables_swiftshader(tmp_path):
     """软件路径 + WebGL 开 → swiftshader 兜底，不 disable-gpu。"""
     apply_render_env(_write_config(tmp_path, {"RenderBackend": "software", "WebglEnabled": "on"}))
     assert "--enable-unsafe-swiftshader" in _flags()
-    assert "--disable-gpu" not in _flags()
+    # 按 flag 边界精确匹配，避免 --disable-gpu-compositing 前缀误伤
+    assert "--disable-gpu" not in _flags().split()
 
 
 def test_webgl_auto_uses_detect_chain(tmp_path, monkeypatch):
@@ -280,6 +295,7 @@ def test_build_chromium_flags_order():
     )
     assert flags == (
         "--renderer-process-limit=6"
+        " --disable-gpu-compositing"
         " --disable-software-rasterizer"
         " --disable-dev-shm-usage"
         " --disable-extensions"
