@@ -223,21 +223,31 @@ def test_save_restore_js_restores_unfinished_blocks():
     v = _StubViewer()
 
     js = CodeWebViewer._build_save_and_restore_js(v, "<p>html</p>", finished_ids={"done_1"})
-    # restore 条件：!isFinished（未完成块恢复），不只看 streaming
+    # restore 判据：DOM 无同 id 块即恢复（不再看 finished——防 HTML 缺块时块永久消失）
     assert "_isFinished=(_finishedSet.indexOf(b.id)!==-1)" in js
-    assert "if(!_isFinished&&!document.querySelector" in js
+    assert "if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){" in js
+    assert "if(!_isFinished&&" not in js
     # 已完成集合注入 JS
     assert '"done_1"' in js
 
 
-def test_save_restore_js_finished_blocks_not_restored():
-    """已完成块（结果已 append_tool_result）不 restore——markdown 会重新生成，
-    恢复会造成重复。"""
+def test_save_restore_js_restores_finished_block_when_html_missing_it():
+    """已完成块在 DOM 缺同 id 块时也必须恢复。
+
+    旧判据（finished 则不恢复）依赖「markdown 一定会重建该块」；一旦某次全量渲染
+    的 HTML 缺块（在途旧快照、懒回调未刷新…），完成框会被 save 移除且无人恢复，
+    永久消失。新判据只看 DOM 存在性，这里锁死判据不再引用 _isFinished。
+    """
     from app.widgets.message_card import CodeWebViewer
 
     _ensure_qapp()
     v = _StubViewer()
     js = CodeWebViewer._build_save_and_restore_js(v, "<p>html</p>", finished_ids={"done_1", "done_2"})
     assert '"done_1"' in js and '"done_2"' in js
+    # 恢复条件不得以 finished 为前置（否则 HTML 缺块时永久消失）
+    assert "if(!_isFinished&&" not in js
+    assert "if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){" in js
+    # 排查标记保留：恢复的"已完成"块打 data-restored-finished
+    assert "data-restored-finished" in js
     # 未完成时也要恢复（防止回归到"只恢复 streaming=true"）
     assert "b.streaming==='true'" not in js.replace("data-streaming", "")

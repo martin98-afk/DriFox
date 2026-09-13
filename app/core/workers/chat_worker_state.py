@@ -11,7 +11,7 @@ ChatWorker 状态管理 - 使用 dataclass 统一定义所有状态
 from collections import deque
 from dataclasses import dataclass, field
 from threading import Event
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 @dataclass
@@ -45,6 +45,7 @@ class ResponseContentState:
     content_blocks: List = field(default_factory=list)  # 响应内容块
     response_chunks: deque = field(default_factory=lambda: deque())  # 响应片段
     last_progress_len: Dict[str, int] = field(default_factory=dict)  # tc_id -> 上一次推送进度时的字符数
+    last_line_est: Dict[str, Tuple[int, int]] = field(default_factory=dict)  # tc_id -> 编辑工具行数估计 (add, del)
 
 
 @dataclass
@@ -198,6 +199,7 @@ class ChatWorkerState:
         # 🔧 修复：清除流式文本 chunks，防止跨迭代累积
         self.response.response_chunks = deque()
         self.response.last_progress_len = {}
+        self.response.last_line_est = {}
 
     def full_cleanup(self):
         """
