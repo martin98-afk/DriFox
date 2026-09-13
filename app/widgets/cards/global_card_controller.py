@@ -743,7 +743,15 @@ class GlobalCardController:
 
     def _show_file_undo_diff(self, html, title):
         self.show_diff_viewer(html, title)
-        self._diff_viewer_card.closed.connect(self._return_to_file_undo, type=Qt.UniqueConnection)
+        # ★ 不能用 type=Qt.UniqueConnection：diff 卡是 ensure_diff_viewer 懒建的复用
+        #   单例，本方法每次进入都执行到 connect，重复连接时 UniqueConnection 会抛
+        #   TypeError（PyQt5）/静默拒连（PySide6），两种绑定下都不是正确写法。
+        #   标志挂在 card 实例上：万一 card 被重建，标志随之复位，不会留下「以为连过」的谎。
+        #   （同步 pyside6 ad524790）
+        card = self._diff_viewer_card
+        if card is not None and not getattr(card, "_file_undo_wired", False):
+            card.closed.connect(self._return_to_file_undo)
+            card._file_undo_wired = True
 
     def _return_to_file_undo(self):
         self._card_manager.hide_card("diff_viewer", GLOBAL_WINDOW_ID)
