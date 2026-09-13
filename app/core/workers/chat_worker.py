@@ -506,6 +506,7 @@ class OpenAIChatWorker(QThread):
         self._tool_execution_cancelled = s.tool_call.execution_cancelled
         self._waiting_tool_params = s.tool_call.waiting_params
         self._last_progress_len = s.response.last_progress_len
+        self._last_line_est = s.response.last_line_est
         self._last_compaction_state = s.compaction.last_state
         self._current_session_messages = s.session.current_messages
         self._last_usage = s.session.last_usage
@@ -3852,19 +3853,24 @@ class OpenAIChatWorker(QThread):
                                 # 同时也发射长度进度，避免 UI 一直卡在"正在准备参数..."
                                 prev = self._last_progress_len.get(tc_id, 0)
                                 if not prev or args_len - prev >= 200:
+                                    from app.core.tool_arg_lines import build_progress_payload
+
                                     self._last_progress_len[tc_id] = args_len
-                                    progress_args = {
-                                        "_status": "loading",
-                                        "_args_len": args_len,
-                                    }
-                                    # 缓冲区已有 path/file_path 时提前提取，让 UI 显示真实文件名
+                                    # 缓冲区已有 path/file_path/file/target 时提前提取，让 UI 显示真实文件名
                                     _pm = re.search(
-                                        r'"(?:path|file_path)"\s*:\s*"([^"]+)"',
+                                        r'"(?:path|file_path|file|target)"\s*:\s*"([^"]+)"',
                                         buffer["function"]["arguments"],
                                     )
-                                    if _pm:
-                                        progress_args["_path"] = _pm.group(1)
                                     _buf_name = buffer["function"].get("name", tool_name)
+                                    # 编辑类工具顺带估算增删行数（运行框显示 +N/-M）
+                                    progress_args, _est = build_progress_payload(
+                                        _buf_name or tool_name,
+                                        buffer["function"]["arguments"],
+                                        args_len,
+                                        _pm.group(1) if _pm else "",
+                                        self._last_line_est.get(tc_id, (0, 0)),
+                                    )
+                                    self._last_line_est[tc_id] = _est
                                     self._emit_with_callback(
                                         "tool_args_updated",
                                         self.tool_args_updated,
@@ -3884,19 +3890,24 @@ class OpenAIChatWorker(QThread):
                             # 但仍推送长度进度 + 累积尾部预览，让 UI 显示接收进度
                             prev = self._last_progress_len.get(tc_id, 0)
                             if not prev or args_len - prev >= 500:
+                                from app.core.tool_arg_lines import build_progress_payload
+
                                 self._last_progress_len[tc_id] = args_len
-                                progress_args = {
-                                    "_status": "loading",
-                                    "_args_len": args_len,
-                                }
-                                # 缓冲区已有 path/file_path 时提前提取
+                                # 缓冲区已有 path/file_path/file/target 时提前提取
                                 _pm = re.search(
-                                    r'"(?:path|file_path)"\s*:\s*"([^"]+)"',
+                                    r'"(?:path|file_path|file|target)"\s*:\s*"([^"]+)"',
                                     buffer["function"]["arguments"],
                                 )
-                                if _pm:
-                                    progress_args["_path"] = _pm.group(1)
                                 _buf_name = buffer["function"].get("name", tool_name)
+                                # 编辑类工具顺带估算增删行数（运行框显示 +N/-M）
+                                progress_args, _est = build_progress_payload(
+                                    _buf_name or tool_name,
+                                    buffer["function"]["arguments"],
+                                    args_len,
+                                    _pm.group(1) if _pm else "",
+                                    self._last_line_est.get(tc_id, (0, 0)),
+                                )
+                                self._last_line_est[tc_id] = _est
                                 self._emit_with_callback(
                                     "tool_args_updated",
                                     self.tool_args_updated,
