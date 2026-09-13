@@ -30,7 +30,16 @@
 
 from typing import Any, List, Optional
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import (
+    QEasingCurve,
+    QObject,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    pyqtProperty,
+    pyqtSignal,
+)
+from PyQt5.QtGui import QColor, QPainter, QPainterPath, QPen
 from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -43,7 +52,7 @@ from qfluentwidgets import FluentIcon, ScrollArea, TransparentToolButton
 
 from loguru import logger
 
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.design_tokens import Animations, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.theme_style import bind_theme_qss, replay_theme_qss
 from app.utils.utils import get_font_family_css, get_icon
 from app.widgets._workbench_helpers import _EmptyHint
@@ -63,6 +72,96 @@ _PROJECT_ALL = "__all__"
 # 卡片最小宽度：左侧停靠区 / 分隔条压缩时的保底宽度（低于此值搜索框与条目被挤扁）
 _CARD_MIN_WIDTH = 240
 
+# 面板 min/max 约束复位值（QWIDGETSIZE_MAX）：动画终态 _release_panel_area 成对放开用
+_PANEL_H_UNLIMITED = 16777215
+
+# 折叠头上方两固定行高：行1 子页签（CustomTabButton.HEIGHT）+ 行2 过滤行（搜索框 30）
+_TAB_ROW_H = 28
+_FILTER_ROW_H = 30
+
+
+class _PanelHeightDriver(QObject):
+    """面板外壳高度驱动器：pyqtProperty(int) 逐帧 ``setFixedHeight``
+
+    为什么不用 maximumHeight 动画：max 只给父布局一个上限，控件实际高度仍由
+    布局施舍；面板内有最小高度约束的子控件（内嵌滚动区 setMinimumHeight(40)）
+    时每帧重排 → 双向收缩。逐帧 setFixedHeight（min 与 max 同步钉死）与宿主
+    ``expand_height_mixin._CardHeightDriver`` 同机制。
+    """
+
+    def __init__(self, widget: QWidget, parent=None):
+        super().__init__(parent)
+        self._widget = widget
+        self._value = 0
+
+    def _get_value(self) -> int:
+        return self._value
+
+    def _set_value(self, h) -> None:
+        self._value = int(h)
+        self._widget.setFixedHeight(self._value)
+
+    value = pyqtProperty(int, _get_value, _set_value)
+
+
+class _HeaderChevron(QWidget):
+    """折叠头旋转箭头（16px 自绘 chevron）：展开/收起 180° 旋转过渡
+
+    QSS 做不了连续旋转插值，同 CustomTabButton 思路：QPropertyAnimation 驱动
+    自定义 angle 属性，paintEvent 按角度旋转绘制；颜色随展开态切强调色。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(16, 16)
+        self._angle = 0.0  # 0 = 收起（朝下）；180 = 展开（朝上）
+        self._expanded = False
+        self._anim = QPropertyAnimation(self, b"angle", self)
+        self._anim.setDuration(Animations.EXPAND_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+
+    def _get_angle(self) -> float:
+        return self._angle
+
+    def _set_angle(self, value) -> None:
+        self._angle = float(value)
+        self.update()  # 每帧重绘旋转 chevron
+
+    angle = pyqtProperty(float, _get_angle, _set_angle)
+
+    def set_expanded(self, expanded: bool) -> None:
+        """切换展开态并做旋转过渡（收敛式：动画中不重启；减少动效时直置终值）"""
+        self._expanded = bool(expanded)
+        target = 180.0 if expanded else 0.0
+        if self._anim.state() == QPropertyAnimation.Running:
+            return
+        if abs(self._angle - target) < 0.5:
+            return
+        if not Animations.motion_enabled():
+            self._anim.stop()
+            self._angle = target
+            self.update()
+            return
+        self._anim.setStartValue(self._angle)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def paintEvent(self, event):  # noqa: N802 (Qt 命名)
+        Colors.refresh()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(Colors.TEXT_ACCENT if self._expanded else Colors.TEXT_MUTED))
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        painter.setPen(pen)
+        painter.translate(self.width() / 2, self.height() / 2)
+        painter.rotate(self._angle)
+        path = QPainterPath()
+        path.moveTo(-3.2, -1.2)
+        path.lineTo(0.0, 2.0)
+        path.lineTo(3.2, -1.2)
+        painter.drawPath(path)
+
 
 class _ProjectSelectorHeader(QFrame):
     """项目选择折叠头：项目 icon + 项目全名 + 展开箭头（点击展开/收起面板）
@@ -77,30 +176,46 @@ class _ProjectSelectorHeader(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("projectSelectorHeader")
-        self.setFixedHeight(30)
+        self.setFixedHeight(32)  # 比同行搜索框（30）高 2px，形成「入口行」的视觉重量
         self.setCursor(Qt.PointingHandCursor)
+        self._project_name = "全部项目"
+        self._is_all = True
+        self._expanded = False
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 8, 0)
         layout.setSpacing(6)
         self._avatar = _SquareAvatar("全", get_project_color("全部项目"), self, size=22)
         layout.addWidget(self._avatar, 0)
         self._name_label = QLabel("", self)
+        self._name_label.setObjectName("projectSelectorHeaderName")
         layout.addWidget(self._name_label, 1)
-        self._arrow_label = QLabel("▾", self)
-        layout.addWidget(self._arrow_label, 0)
+        self._chevron = _HeaderChevron(self)
+        layout.addWidget(self._chevron, 0)
         self._apply_style()
 
     def _apply_style(self) -> None:
+        """折叠头样式：项目色淡染底 + 左侧项目色条 + hover/展开 BORDER_ACCENT 描边
+
+        与列表内当前项目行（ProjectItem._apply_base_style 同语言：淡染 + 左色条）
+        视觉同源；描边用全局强调色表达交互态（悬停/展开），项目色只负责身份。
+        """
         Colors.refresh()
+        color = get_project_color(self._project_name)
+        tint = _alpha_tint(color, 0.12, fallback=Colors.HOVER_BG)
+        hover_tint = _alpha_tint(color, 0.22, fallback=Colors.HOVER_BG_STRONG)
+        idle_border = color if self._expanded else Colors.BORDER
         self.setStyleSheet(
             f"""
             QFrame#projectSelectorHeader {{
-                background: {Colors.HOVER_BG};
-                border: 1px solid {Colors.BORDER};
+                background: {tint};
+                border: 1px solid {idle_border};
+                border-left: 3px solid {color};
                 border-radius: 4px;
             }}
             QFrame#projectSelectorHeader:hover {{
-                background: {Colors.HOVER_BG_STRONG};
+                background: {hover_tint};
+                border: 1px solid {Colors.BORDER_ACCENT};
+                border-left: 3px solid {color};
             }}
             QFrame#projectSelectorHeader QLabel {{
                 background: transparent;
@@ -108,6 +223,9 @@ class _ProjectSelectorHeader(QFrame):
                 color: {Colors.TEXT_PRIMARY};
                 {font_size_css(12)}
                 {get_font_family_css()}
+            }}
+            QFrame#projectSelectorHeader QLabel#projectSelectorHeaderName {{
+                font-weight: 600;
             }}
         """
         )
@@ -119,18 +237,38 @@ class _ProjectSelectorHeader(QFrame):
     def set_project(self, name: str, is_all: bool = False) -> None:
         """更新折叠头显示（项目 icon 缩写 + 颜色随项目名）"""
         name = name or "默认项目"
+        self._project_name = name
+        self._is_all = is_all
         self._name_label.setText(name)
         self._avatar.set_project(name, get_project_color(name))
         self._avatar.setToolTip(name)
         self.setToolTip("全部项目（点击展开项目选择）" if is_all else f"当前项目：{name}（点击展开项目选择）")
+        self._apply_style()
 
     def set_expanded(self, expanded: bool) -> None:
-        """更新展开箭头方向"""
-        self._arrow_label.setText("▴" if expanded else "▾")
+        """更新展开态：chevron 旋转过渡 + 描边/底色切换"""
+        self._expanded = bool(expanded)
+        self._chevron.set_expanded(self._expanded)
+        self._apply_style()
 
     def mousePressEvent(self, event):  # noqa: N802 (Qt 命名)
         self.clicked.emit()
         super().mousePressEvent(event)
+
+
+def _alpha_tint(rgba: str, ratio: float, fallback: str = "transparent") -> str:
+    """把 ``rgba(r, g, b, a)`` 色按比例压成淡染底色（保持同色系关联）
+
+    用于「当前项目」折叠头/列表行的静止态底纹：取项目强调色的一层极淡底色，
+    与头像/色条同色系。解析失败（主题 token 占位符等）回退 ``fallback``。
+    """
+    try:
+        inner = rgba[rgba.index("(") + 1 : rgba.rindex(")")]
+        parts = [p.strip() for p in inner.split(",")]
+        r, g, b = (int(float(parts[0])), int(float(parts[1])), int(float(parts[2])))
+        return f"rgba({r}, {g}, {b}, {int(round(255 * ratio))})"
+    except Exception:
+        return fallback
 
 
 def _active_history_manager():
@@ -223,6 +361,7 @@ class HistoryPage(QWidget):
         layout.addLayout(filter_row)
 
         # ── 行3：项目选择面板（默认收起；展开时占满卡片高度） ──
+        self._panel_anim: Optional[QPropertyAnimation] = None  # 进行中的面板高度动画
         self._project_panel = self._build_project_panel()
         self._project_panel_open = False  # 不依赖 Qt 可见性（祖先未显示时 isVisible 恒 False）
         self._content_ready = False  # attach 后置 True（面板展开时要让出列表区域）
@@ -285,27 +424,49 @@ class HistoryPage(QWidget):
     # ── 项目选择面板（折叠；复用宿主项目选择卡片） ──
 
     def _build_project_panel(self) -> QWidget:
-        """构建项目选择面板：项目选择卡片内容 + 新建/文件夹/导入工具条
+        """构建项目选择面板：「裁剪外壳 + 钉住内容」两层结构 + 工具条/列表
 
-        复用宿主 ``ProjectSelectorCardContent``（项目行 icon / 元数据 / hover
-        导出归档与宿主项目卡片完全一致）；项目增删等数据操作仍由宿主窗口实现，
-        插件只做 UI 承载与信号转发。
+        外壳只做圆角底与逐帧高度裁剪，内容挂 ``body``：若内容直接挂外壳，逐帧
+        ``setFixedHeight`` 时外壳内 QVBoxLayout 会压缩子控件（内嵌滚动区自带
+        ``setMinimumHeight(40)``）→ 视觉上「内容被挤扁往中间缩」。复用宿主
+        ``ProjectSelectorCardContent``（项目行 icon / 元数据 / hover 导出归档与
+        宿主项目卡片完全一致）；项目增删等数据操作仍由宿主窗口实现，插件只做
+        UI 承载与信号转发。
         """
         panel = QFrame(self)
         panel.setObjectName("projectSelectorPanel")
-        vbox = QVBoxLayout(panel)
-        vbox.setContentsMargins(0, 2, 0, 2)
+        # 面板容器轻底色 + 边框 + 圆角：展开后是一个明确的「下拉面板」块面，
+        # 与折叠头/搜索框区分；走主题 QSS 登记随主题切换重放（面板默认收起，
+        # 宿主 refresh_style 派发时可能被跳过，同 _project_new_edit 的原因）
+        bind_theme_qss(
+            panel,
+            lambda c: (
+                f"""
+            QFrame#projectSelectorPanel {{
+                background: {c.CARD_BG_DIM};
+                border: 1px solid {c.BORDER};
+                border-radius: 6px;
+            }}
+        """
+            ),
+        )
+        shell = QVBoxLayout(panel)
+        shell.setContentsMargins(0, 0, 0, 0)
+        body = QFrame(panel)
+        self._project_panel_body = body
+        vbox = QVBoxLayout(body)
+        vbox.setContentsMargins(4, 4, 4, 4)
         vbox.setSpacing(4)
 
         # ── 行1：「全部项目」聚合行 + 搜索/新建输入框 + 新建 + 选择文件夹 + 导入项目 ──
         tools = QHBoxLayout()
         tools.setSpacing(4)
         # 「全部项目」行（与卡片内项目行同款 ProjectItem 聚合态）：点击切换为不过滤视图
-        self._project_all_item = ProjectItem("全部项目", False, panel, is_all_entry=True)
+        self._project_all_item = ProjectItem("全部项目", False, body, is_all_entry=True)
         self._project_all_item.allClicked.connect(self._on_all_projects_selected)
         tools.addWidget(self._project_all_item, 0)
 
-        self._project_new_edit = QLineEdit(panel)
+        self._project_new_edit = QLineEdit(body)
         self._project_new_edit.setPlaceholderText("搜索/新建项目...")
         self._project_new_edit.setFixedHeight(24)
         self._project_new_edit.setMinimumWidth(60)
@@ -313,7 +474,8 @@ class HistoryPage(QWidget):
         #   可见卡有可能被跳过，故走主题 QSS 登记，主题切换时随子树重放
         bind_theme_qss(
             self._project_new_edit,
-            lambda c: f"""
+            lambda c: (
+                f"""
             QLineEdit {{
                 background: {c.HOVER_BG};
                 border: 1px solid {c.BORDER};
@@ -326,7 +488,8 @@ class HistoryPage(QWidget):
             QLineEdit:focus {{
                 border: 1px solid {c.TEXT_ACCENT};
             }}
-        """,
+        """
+            ),
         )
         self._project_new_edit.returnPressed.connect(self._on_new_project_submitted)
         self._project_new_edit.textChanged.connect(
@@ -334,26 +497,26 @@ class HistoryPage(QWidget):
         )
         tools.addWidget(self._project_new_edit, 1)
 
-        self._project_new_btn = TransparentToolButton(FluentIcon.ADD, panel)
+        self._project_new_btn = TransparentToolButton(FluentIcon.ADD, body)
         self._project_new_btn.setFixedSize(24, 24)
         self._project_new_btn.setToolTip("创建项目")
         self._project_new_btn.clicked.connect(self._on_new_project_submitted)
         tools.addWidget(self._project_new_btn, 0)
 
-        self._project_folder_btn = TransparentToolButton(FluentIcon.FOLDER, panel)
+        self._project_folder_btn = TransparentToolButton(FluentIcon.FOLDER, body)
         self._project_folder_btn.setFixedSize(24, 24)
         self._project_folder_btn.setToolTip("选择文件夹作为项目根目录")
         self._project_folder_btn.clicked.connect(lambda: self._call_window("_on_project_open_folder_btn"))
         tools.addWidget(self._project_folder_btn, 0)
 
-        self._project_import_btn = TransparentToolButton(get_icon("导入"), panel)
+        self._project_import_btn = TransparentToolButton(get_icon("导入"), body)
         self._project_import_btn.setFixedSize(24, 24)
         self._project_import_btn.setToolTip("导入项目（从 .drifox_project 压缩包）")
         self._project_import_btn.clicked.connect(lambda: self._call_window("_on_import_project"))
         tools.addWidget(self._project_import_btn, 0)
         vbox.addLayout(tools)
 
-        self._project_selector = ProjectSelectorCardContent(panel)
+        self._project_selector = ProjectSelectorCardContent(body)
         self._project_selector.allProjectsSelected.connect(self._on_all_projects_selected)
         self._project_selector.projectSelected.connect(self._on_project_row_selected)
         self._project_selector.newProjectCreated.connect(
@@ -370,6 +533,8 @@ class HistoryPage(QWidget):
         )
         self._project_selector.folderDropped.connect(lambda path: self._call_window("_on_project_folder_dropped", path))
         vbox.addWidget(self._project_selector, 1)
+        shell.addWidget(body, 1)
+        self._panel_height_driver = _PanelHeightDriver(panel)
         return panel
 
     def _call_window(self, method_name: str, *args) -> None:
@@ -455,12 +620,103 @@ class HistoryPage(QWidget):
         self._set_project_panel_visible(will_show)
 
     def _set_project_panel_visible(self, visible: bool) -> None:
-        """展开/收起面板；展开时占满卡片高度（临时让出会话列表区域）"""
+        """展开/收起面板：外壳高度动画（Animations.EXPAND_MS，OutCubic）
+
+        两层结构：外壳 ``_project_panel`` 逐帧 ``setFixedHeight`` 裁剪；内容挂
+        ``body`` 并按动画方向钉死高度（展开钉满高、收起钉起始高），只被外壳
+        裁剪不被压缩。动画启动前先冻结下方列表区/占位（面板与列表同属一个
+        QVBoxLayout，不冻结会两头夹）。系统「减少动态效果」或页面不可见时
+        跳过动画直置终值。
+        """
         self._project_panel_open = bool(visible)
-        self._project_panel.setVisible(visible)
-        self._scroll_area.setVisible((not visible) and self._content_ready)
-        self._hint.setVisible((not visible) and not self._content_ready)
         self._project_header.set_expanded(visible)
+        body = self._project_panel_body
+        target = self._measure_panel_height()
+        self._stop_project_panel_anim()
+        if visible:
+            # 冻结下方区域（必须在启动动画前，否则布局把腾出的空间分给列表区）
+            self._scroll_area.setVisible(False)
+            self._hint.setVisible(False)
+            self._project_panel.setVisible(True)
+            body.setFixedHeight(target)  # 展开方向：内容钉满高，只被外壳逐帧露出
+            start = 0
+            self._project_panel.setFixedHeight(0)  # 展开起点真实为 0（防首帧按 sizeHint 撑满）
+        else:
+            start = self._project_panel.height()
+            body.setFixedHeight(max(body.height(), start))  # 收起方向：内容钉住不被压缩
+        if not self.isVisible() or not Animations.motion_enabled():
+            # 页面不可见（启动期/卡片隐藏中）或系统减少动效：跳过动画直置终值
+            self._project_panel.setFixedHeight(target if visible else 0)
+            self._release_panel_area()
+            return
+        driver = self._panel_height_driver
+        anim = QPropertyAnimation(driver, b"value", self)
+        anim.setDuration(Animations.EXPAND_MS)
+        anim.setStartValue(start)
+        anim.setEndValue(target if visible else 0)
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+        anim.finished.connect(self._on_project_panel_anim_finished)
+        self._panel_anim = anim
+        anim.start()
+
+    def _measure_panel_height(self) -> int:
+        """面板展开目标高度 = 卡片当前可用高度（占满，不是内容高度）
+
+        按内容量高：项目少（如 1 个）时面板只占约 100px，而列表区在展开态是
+        冻结隐藏的 → 视觉上一大片空白（用户实测反馈）。正解 = 占满可用高度，
+        内容不足的空白由面板内部滚动区吸收。
+        """
+        return max(self._available_panel_height(), 0)
+
+    def _available_panel_height(self) -> int:
+        """卡片高度 − 上方各行与边距/间距 = 面板可占用高度
+
+        上方固定行：行1 子页签（CustomTabButton 28px）+ 行2 过滤行（搜索框
+        30px）。展开是面板与列表区的互斥替换：行数不变（隐藏一个显示一个），
+        间距数不变（5 行中可见 3 行 → 2 处间距）。行高估算误差由面板内部
+        滚动区吸收，不影响正确性。
+        """
+        lay = self.layout()
+        if lay is None:
+            return 0
+        cm = lay.contentsMargins()
+        used = _TAB_ROW_H + _FILTER_ROW_H + cm.top() + cm.bottom() + lay.spacing() * 2
+        return self.height() - used
+
+    def _release_panel_area(self) -> None:
+        """动画终态统一出口：放开 min/max 约束并按开合状态落位
+
+        动画期间走 ``setFixedHeight``（min 与 max 同时收紧）；终态若只放开
+        maximumHeight 会永久卡死在动画末值高度，必须 min/max 成对恢复。
+        """
+        body = self._project_panel_body
+        body.setMinimumHeight(0)
+        body.setMaximumHeight(_PANEL_H_UNLIMITED)
+        self._project_panel.setMinimumHeight(0)
+        self._project_panel.setMaximumHeight(_PANEL_H_UNLIMITED)
+        if self._project_panel_open:
+            self._project_new_edit.setFocus()  # 展开完成：聚焦搜索/新建框
+        else:
+            self._project_panel.setVisible(False)
+            self._scroll_area.setVisible(self._content_ready)
+            self._hint.setVisible(not self._content_ready)
+
+    def _stop_project_panel_anim(self) -> None:
+        """停止进行中的面板动画；stop 后必须补齐终态（否则面板停在半高且列表不回来）"""
+        anim = self._panel_anim
+        if anim is None:
+            return
+        self._panel_anim = None
+        anim.stop()
+        anim.deleteLater()
+        self._release_panel_area()
+
+    def _on_project_panel_anim_finished(self) -> None:
+        """动画自然结束：清引用并落位（展开 → 聚焦搜索框；收起 → 交还列表区）"""
+        anim, self._panel_anim = self._panel_anim, None
+        if anim is not None:
+            anim.deleteLater()
+        self._release_panel_area()
 
     def _on_project_row_selected(self, project: str) -> None:
         """项目行点击：与旧项目下拉一致，仅作为会话筛选（不切窗口项目、不新建会话）

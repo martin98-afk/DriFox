@@ -2360,9 +2360,7 @@ class TabManagerWindow(FramelessWindow):
             #   （187 content，距折叠线 37px、距展开线 31px），保证展开后
             #   稳稳落在展开区内侧，且与"固定默认宽度"语义一致。
             _min_expand_w = max(_EXPANDED_MIN_FRAME_WIDTH, _DEFAULT_PANEL_WIDTH + _FRAME_PADDING_X)
-            target_w = max(
-                _min_expand_w, getattr(self, "_saved_panel_frame_width", _min_expand_w)
-            )
+            target_w = max(_min_expand_w, getattr(self, "_saved_panel_frame_width", _min_expand_w))
             # 拖拽把手拉开的场景（当前宽度已远超收起最小宽度，说明用户
             # 手动拖到位）：保持用户拖出的宽度，不覆盖为保存值。
             # 按钮点击展开时 cur_w == 收起宽度(60)，不满足此条件。
@@ -4545,15 +4543,14 @@ class TabManagerWindow(FramelessWindow):
         self._sync_wb_overlay_geometry()
 
     def _sync_wb_overlay_geometry(self) -> None:
-        """主窗口 move/resize 后同步 hover 浮层全局坐标（未装配/隐藏时跳过）
+        """主窗口 move/resize 后同步工作台 hover 浮层全局坐标（未装配/隐藏时跳过）
 
         浮层是独立 Tool 顶层窗口，不会随主窗口布局自动移动，须在宿主
         moveEvent/resizeEvent 里手动重定位（见 sidebar_hover_preview 跟随策略）。
-        左右两个浮层同源处理（左侧收起态可 hover 预览）。"""
-        for name in ("_wb_overlay", "_sb_overlay"):
-            ov = getattr(self, name, None)
-            if ov is not None:
-                ov.sync_to_window()
+        """
+        ov = getattr(self, "_wb_overlay", None)
+        if ov is not None:
+            ov.sync_to_window()
 
     # ── 原生窗口能力：边缘/角落 resize + Aero Snap 分屏 ──
 

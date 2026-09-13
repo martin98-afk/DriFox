@@ -1436,7 +1436,7 @@ class TabPanel(QWidget):
         ★★ 坐标系：本方法比较的 self.width() 是 **content 宽**（TabPanel 自身
         宽度 = #tabFrame 宽 − 14 padding），因此 _auto_collapse_width /
         _auto_expand_width 都必须是 content 口径（见 __init__ 注释）。
-        默认值：折叠线 186、展开线 192（滞回区 6px，仅吸收手抖/量化误差）。
+        默认值：折叠线 150、展开线 156（滞回区 6px，仅吸收手抖/量化误差）。
         滞回区不可放大：用户拉宽是连续动作，滞回区一大就变成"明显拉宽了却
         仍是折叠态"（实测把滞回区撑到 20px+ 即复现此手感问题）。
         """
@@ -1451,10 +1451,16 @@ class TabPanel(QWidget):
         #   此处按同一对阈值（content 口径）即时切换紧凑/展开，保证拖拽时文字不会
         #   在窄条里被挤压；但折叠态与宽度落定一律等松手后由宿主处理。
         if self._dragging_splitter:
-            want_collapsed = self.width() < self._auto_collapse_width
-            # 收起态拖宽时：用展开线（滞回区）判定，避免刚过折叠线就弹回展开态 UI
-            if self._collapsed and self.width() >= self._auto_expand_width:
-                want_collapsed = False
+            # ★ 滞回区正确语义：**进入方向决定保持态**，而不是各自单向判定。
+            #   已折叠 → 只有越过展开线才转展开（滞回区内保持折叠）；
+            #   已展开 → 只有跌破折叠线才转折叠（滞回区内保持展开）。
+            #   此前写成 "want = w < 折叠线；若已折叠且 w >= 展开线则 False"，
+            #   等价于折叠态在滞回区内直接判成展开（153 落在 150~156 之间时
+            #   已折叠仍被翻开）→ 拖拽微抖即来回跳变。
+            if self._collapsed:
+                want_collapsed = self.width() < self._auto_expand_width
+            else:
+                want_collapsed = self.width() < self._auto_collapse_width
             if want_collapsed != self._collapsed:
                 self._collapsed = want_collapsed
                 self._update_toggle_button(switch_ui=True)

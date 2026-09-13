@@ -4,6 +4,8 @@
 现已迁移到 SystemCardFrame 基类，获得统一头部布局和固定边框
 """
 
+import time
+
 from loguru import logger
 from PyQt5.QtCore import QPointF, QRectF, QPoint, QSize, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen
@@ -61,6 +63,14 @@ from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
 from app.widgets.cards.settings.render_backend_card import RenderBackendCard
 from app.widgets.cards.settings.render_status_card import RenderStatusCard
 from app.widgets.cards.settings.system_card_frame import SystemCardFrame
+
+
+def _ms(t0: float, t1: float | None = None) -> str:
+    """perf_counter 起点 → 毫秒字符串（性能埋点用，保留一位小数）
+
+    传 t1 时度量 [t0, t1] 区间，否则度量 [t0, now]。
+    """
+    return f"{((t1 if t1 is not None else time.perf_counter()) - t0) * 1000:.1f}"
 
 
 class NoWheelFontComboBox(QFontComboBox):
@@ -388,6 +398,9 @@ class LLMSettingsCard(SystemCardFrame):
 
     _autostart_toggling = False  # 类级防重入标志
     _last_change_type: str | None = None  # "theme" | "font_family" | "font_size" | None(=全部)
+    # 插件分区指纹的类级默认：`__new__` 造的桩（测试 fixture）不跑 __init__，
+    # QObject 未初始化时读实例属性会抛 RuntimeError 而非 AttributeError → 必须给默认值
+    _plugin_cards_sig: tuple | None = None
     closed = pyqtSignal()
     configChanged = pyqtSignal()
 
@@ -402,6 +415,9 @@ class LLMSettingsCard(SystemCardFrame):
         # 左侧导航 + 右侧分页：分区归属见 _setup_content
         self._current_tab = "provider"
         self._nav_frame = None  # _build_side_nav 中创建
+        # 插件设置分区指纹：清单未变时跳过「销毁 + 重建」整片插件卡
+        # （历史上每次打开设置面板都无条件重建，见 rebuild_plugin_cards）
+        self._plugin_cards_sig = None
 
         self._setup_content()
 
@@ -411,6 +427,15 @@ class LLMSettingsCard(SystemCardFrame):
         QTimer.singleShot(0, lambda: self._expand_page_cards("provider"))
 
     def _setup_content(self):
+        # 分段计时：构造期各分区成本（首开延迟大头，留作长期埋点，仅 ≥20ms 才打）
+        _marks: list[tuple[str, float]] = []
+        _t_prev = [time.perf_counter()]
+
+        def _ck(label: str):
+            now = time.perf_counter()
+            _marks.append((label, (now - _t_prev[0]) * 1000))
+            _t_prev[0] = now
+
         content_layout = self.content_layout
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
@@ -434,6 +459,7 @@ class LLMSettingsCard(SystemCardFrame):
         body_layout.addWidget(self._pages_stack, 1)
         content_layout.addWidget(body)
         self._update_nav_styles()
+        _ck("nav")
 
         # ════ 服务商页 ════
         provider_layout = self._page_layouts["provider"]
@@ -454,6 +480,7 @@ class LLMSettingsCard(SystemCardFrame):
         provider_layout.addWidget(self.llmProviderCard)
         provider_layout.addStretch(1)
 
+        _ck("provider")
         # ════ Hooks 页 ════
         hooks_layout = self._page_layouts["hooks"]
 
@@ -474,6 +501,7 @@ class LLMSettingsCard(SystemCardFrame):
         hooks_layout.addWidget(self.hookListCard)
         hooks_layout.addStretch(1)
 
+        _ck("hooks")
         # ════ MCP 页 ════
         mcp_layout = self._page_layouts["mcp"]
         self.mcpListCard = MCPListSettingCard(
@@ -485,6 +513,7 @@ class LLMSettingsCard(SystemCardFrame):
         mcp_layout.addWidget(self.mcpListCard)
         mcp_layout.addStretch(1)
 
+        _ck("mcp")
         # ════ LSP 页 ════
         lsp_layout = self._page_layouts["lsp"]
 
@@ -673,6 +702,7 @@ class LLMSettingsCard(SystemCardFrame):
             "消息卡片渲染进程数硬上限",
             parent=self,
         )
+        self.renderProcessLimitCard.slider.setFixedWidth(160)  # qfluentwidgets 默认 minWidth=268，压缩滑条长度
         render_layout.addWidget(self.renderProcessLimitCard)
 
         # 单 renderer JS 堆上限
@@ -683,6 +713,7 @@ class LLMSettingsCard(SystemCardFrame):
             "限制单张消息卡片的内存",
             parent=self,
         )
+        self.renderJsHeapCard.slider.setFixedWidth(160)
         render_layout.addWidget(self.renderJsHeapCard)
 
         # Chromium 低内存模式
@@ -866,13 +897,21 @@ class LLMSettingsCard(SystemCardFrame):
         ]
         self._apply_list_accordion()
 
-    def rebuild_plugin_cards(self):
+    def rebuild_plugin_cards(self, force: bool = False):
         """重建插件设置分区（Phase D，幂等）
 
         按 UIPluginRegistry.get_settings_cards() 实例化插件卡片 widget_class；
         无注册卡片时整个分区隐藏（行为零变化）。设置弹窗每次打开时调用，
         保证插件增删/热重载后分区内容最新。
+
+        ★ 性能（2026-09-13）：插件清单未变时跳过「清空 + 重建整片卡片」。
+        原来每次打开设置面板都走 `deleteLater()` + 全量 new，即使清单一个都没变
+        —— 每张插件卡（含 ExpandSettingCard 内部 view/滚动区）都要重新构造并
+        应用字号，是打开设置时纯浪费的一笔主线程开销。签名只取
+        (card_id, widget_class) 清单指纹：内容型变化由各卡自身的 refresh 负责，
+        清单增删（插件装卸/热重载）才需要真正重建。
         """
+        t0 = time.perf_counter()
         # 工具/智能体开关卡同步重建（插件增删/热重载后组件列表可能变化）
         for card_name in ("pluginToolCard", "pluginAgentCard"):
             try:
@@ -885,18 +924,31 @@ class LLMSettingsCard(SystemCardFrame):
             cards = UIPluginRegistry.get_instance().get_settings_cards()
         except Exception:
             cards = []
+
+        sig = tuple((getattr(info, "card_id", ""), getattr(info, "widget_class", None)) for info in cards)
+        # 分区显隐无论是否重建都幂等同步一次：不让「跳过重建」路径依赖上一轮留下的
+        # 界面状态（插件全被停用 / 最后一张卡被卸载后仍显示空分区就是这种脏状态）。
+        has_cards = bool(cards)
+        self._plugin_cards_widget.setVisible(has_cards)
+        try:
+            self._nav_buttons["plugins"].setVisible(has_cards)
+        except Exception:
+            pass
+        if not force and sig == self._plugin_cards_sig:
+            logger.info(
+                f"[Perf-OpenSettings] rebuild_plugin_cards={_ms(t0)}ms cards={len(cards)} skipped=True"
+            )
+            return
+        self._plugin_cards_sig = sig
+
         # 清空旧卡片
         while self._plugin_cards_layout.count():
             item = self._plugin_cards_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        if not cards:
-            self._plugin_cards_widget.setVisible(False)
-            try:
-                self._nav_buttons["plugins"].setVisible(False)
-            except Exception:
-                pass
+        if not has_cards:
+            logger.info(f"[Perf-OpenSettings] rebuild_plugin_cards={_ms(t0)}ms cards=0 hidden")
             return
         for info in cards:
             try:
@@ -913,11 +965,7 @@ class LLMSettingsCard(SystemCardFrame):
                     logger.warning(f"[LLMSettingsCard] 插件卡片字号应用失败 {info.card_id}: {e}")
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] 插件设置卡片 {info.card_id} 构建失败：{e}")
-        self._plugin_cards_widget.setVisible(True)
-        try:
-            self._nav_buttons["plugins"].setVisible(True)
-        except Exception:
-            pass
+        logger.info(f"[Perf-OpenSettings] rebuild_plugin_cards={_ms(t0)}ms cards={len(cards)} rebuilt")
 
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果
@@ -996,7 +1044,9 @@ class LLMSettingsCard(SystemCardFrame):
         if not self.isVisible():
             return
         try:
-            self.rebuild_plugin_cards()
+            # force=True：热重载后插件设置卡必须重建，避免卡片实例仍持有旧类；
+            # 且插件可能只改了卡内部实现（清单指纹不变），跳过就刷新不到。
+            self.rebuild_plugin_cards(force=True)
             # force=True：热重载可能只改了组件内部的细项（工具/智能体增删），
             # 插件清单未变 → 签名相同 → 非 force 的脏检查会跳过，必须强制重建
             for card_name in ("pluginToolCard", "pluginAgentCard"):
@@ -1138,6 +1188,8 @@ class LLMSettingsCard(SystemCardFrame):
         layout = self._page_layouts.get(tab_id)
         if layout is None:
             return
+        t0 = time.perf_counter()
+        spent = []
         for i in range(layout.count()):
             item = layout.itemAt(i)
             card = item.widget() if item is not None else None
@@ -1146,9 +1198,15 @@ class LLMSettingsCard(SystemCardFrame):
             try:
                 # qfluentwidgets ExpandSettingCard 的展开状态属性是 isExpand
                 if not getattr(card, "isExpand", False):
+                    t_card = time.perf_counter()
                     card.toggleExpand()
+                    spent.append(f"{card.__class__.__name__}={_ms(t_card)}")
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] {tab_id} 页卡片展开失败: {e}")
+        # 只在该页展开确实有成本时打点，避免切页刷日志
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        if spent and elapsed_ms >= 30:
+            logger.info(f"[Perf-OpenSettings] expand_page[{tab_id}]={elapsed_ms:.1f}ms {' '.join(spent)}")
         page = self._page_scrolls.get(tab_id)
         if page is not None:
             page.verticalScrollBar().setValue(0)
@@ -1624,11 +1682,14 @@ class LLMSettingsCard(SystemCardFrame):
             ).show()
 
     def showEvent(self, event):
+        t0 = time.perf_counter()
         if hasattr(self, "llmProviderCard"):
             self.llmProviderCard._refresh_items()
+        t_provider = time.perf_counter()
         # 订阅热重载广播（放这里而非 __init__：避免过早拉起 PluginHostService，
         # 后者会连带全量加载智能体 + 启动文件监听，实测约 330ms）
         self._ensure_hot_reload_connected()
+        t_hot = time.perf_counter()
         # 预热技能发现：展开技能卡时要同步扫盘 + parse 每个 SKILL.md（~90ms），
         # 挪到打开设置后的空闲帧做，用户点开卡片时就不必再等
         QTimer.singleShot(300, self._prefetch_skills)
@@ -1637,7 +1698,13 @@ class LLMSettingsCard(SystemCardFrame):
             card = getattr(self, card_name, None)
             if card is not None:
                 card.refresh_components()
+        t_components = time.perf_counter()
         super().showEvent(event)
+        logger.info(
+            f"[Perf-OpenSettings] showEvent={_ms(t0)}ms "
+            f"provider={_ms(t0, t_provider)} hot_reload={_ms(t_provider, t_hot)} "
+            f"components={_ms(t_hot, t_components)} super={_ms(t_components)}"
+        )
 
     def set_opacity(self, opacity: float):
         """设置透明度（保留接口，暂不实现动态透明度）"""

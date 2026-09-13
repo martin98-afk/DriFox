@@ -15365,6 +15365,13 @@ class OpenAIChatToolWindow(ToolWindow):
             round_index = self._find_user_round_index_from_session(session, user_text, timestamp)
 
         if round_index is None or round_index < 0 or round_index >= len(round_ranges_now):
+            # 🛡️ 幽灵卡片兜底：四层定位全败 + 文本匹配确认 session 中无此消息
+            # （典型：插话被停止回收后遗留的卡片）。撤回语义 = 仅移除 UI 卡片，
+            # 无需截断 session。只处理带 _interject_pending 标记的卡片（语义
+            # 确定），其余情况维持告警不误删。
+            if self._remove_interject_ghost_card(card.get_plain_text()):
+                logger.info("[UNDO] 幽灵插话卡片已移除（session 无对应消息），撤回完成")
+                return
             logger.warning("[UNDO] Cannot determine valid round_index for card")
             return
 
@@ -17341,9 +17348,56 @@ class OpenAIChatToolWindow(ToolWindow):
         }
         self.backend._hook_message_queue.put(msg)
         if show_user_card:
-            self._append_user_message(user_text, image_attachments=image_paths or None)
+            card = self._append_user_message(user_text, image_attachments=image_paths or None)
+            if card is not None:
+                # 🛡️ 标记插话卡片：此刻消息仅在 hook 队列，尚未落库。若 worker
+                # 取消时回收该插话（_cancel_with_stop_hook 排空队列），finalize
+                # 后可凭此标记定位并删除幽灵卡片（session 中无对应消息的卡片）。
+                card._interject_pending = True
             if self._should_follow_bottom():
                 self._scroll_to_bottom()
+
+    def _remove_interject_ghost_card(self, text: str) -> bool:
+        """删除插话被回收后遗留的幽灵用户卡片
+
+        插话消息仅在 hook 队列中（尚未落库），worker 取消时被回收回填输入框；
+        但 _interject_entry 创建的用户卡片无人清理 → session 无对应消息的
+        幽灵卡片会让撤回/删除因 round_index 无法确定而静默失败。
+        按 _interject_pending 标记 + 文本匹配倒序查找（同文本多次插话取最近）。
+
+        Returns:
+            True = 已删除卡片；False = 未找到匹配的幽灵卡片
+        """
+        from app.widgets.ui_helpers import delete_widgets_from_layout
+
+        target_idx = -1
+        for i in range(self.chat_layout.count() - 1, -1, -1):
+            item = self.chat_layout.itemAt(i)
+            w = item.widget() if item else None
+            if not isinstance(w, MessageCard) or w.role != "user":
+                continue
+            if not getattr(w, "_interject_pending", False):
+                continue
+            if w.get_plain_text() == text:
+                target_idx = i
+                break
+        if target_idx < 0:
+            return False
+
+        # 删除该卡片及其后到下一 user 卡为止的 widgets（对齐 _delete_user_round 口径）
+        widgets_to_remove = [self.chat_layout.itemAt(target_idx).widget()]
+        for i in range(target_idx + 1, self.chat_layout.count()):
+            item = self.chat_layout.itemAt(i)
+            w = item.widget() if item else None
+            if not w:
+                continue
+            if hasattr(w, "role") and w.role == "user" and not getattr(w, "_is_welcome", False):
+                break
+            widgets_to_remove.append(w)
+        delete_widgets_from_layout(widgets_to_remove, self.chat_layout)
+        self._rebuild_batch_cards_from_layout()
+        self._refresh_all_cards_round_index()
+        return True
 
     def _refresh_queue_card(self):
         """按队列状态刷新排队卡片内容与显隐
@@ -22013,6 +22067,10 @@ class OpenAIChatToolWindow(ToolWindow):
             text = str(item.get("_interject_text", "") or "")
             if not text:
                 continue
+            # 🛡️ 插话被回收 = 消息从未落库：删除 _interject_entry 创建的幽灵卡片，
+            # 否则该卡片撤回/删除时因 session 无对应消息而静默失败
+            # （[UNDO] Cannot determine valid round_index for card）。
+            self._remove_interject_ghost_card(text)
             if not self.input_area.toPlainText().strip():
                 self.input_area.setPlainText(text)
             else:
