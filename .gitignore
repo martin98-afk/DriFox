@@ -23,7 +23,7 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
-/.drifox/
+/.drifox*/
 /.drifox/app.config
 .workbuddy/
 
