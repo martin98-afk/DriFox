@@ -26,6 +26,8 @@ def cfg(qapp, tmp_path, monkeypatch):
         pytest.skip("Qt 对象已被同会话内的其他测试销毁")
 
     monkeypatch.setattr(ss, "_load_keyring", lambda: None)
+    # Windows 下 SecretStore 直连真实凭证库（_WIN=True），测试需隔离到 fake 后端
+    monkeypatch.setattr(ss, "_WIN", False)
     ss.SecretStore._instance = None
     # 本组只验密钥状态：屏蔽 config_id 迁移（它会拉起服务商插件注册表与 Qt 对象，
     # 在测试会话中易被 GC 析构，污染后续用例）

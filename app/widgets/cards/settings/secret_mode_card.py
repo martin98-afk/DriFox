@@ -1,18 +1,16 @@
 # -*- coding: utf-8 -*-
-"""API Key 加密方式设置卡片（加密开关 + 钥匙串/密码两种方式）
+"""API Key 加密方式设置卡片（加密开关 + 列表行二选一）
 
 挂载位置：设置 → 服务商页，Gitee 账号绑定卡片下方。
-展开式卡片（ExpandSettingCard）：
-- 开关「加密 API Key」：关闭 = 明文落盘（none 模式）；
-- 下拉二选一：系统钥匙串（keyring）/ 密码加密（password）。
+- header 右侧开关：关闭 = 明文落盘（none 模式）；
+- 展开区：列表行二选一（系统钥匙串 / 密码加密），点整行选中，选中高亮。
 卡片只做交互与提示，加解密、落盘、模式迁移全部走 Settings.switch_secret_mode。
 """
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QWidget
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QWidget
 from qfluentwidgets import (
     BodyLabel,
-    ComboBox,
     ExpandSettingCard,
     InfoBar,
     InfoBarPosition,
@@ -24,10 +22,9 @@ from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css
 from app.utils.secret_store import MODE_KEYRING, MODE_NONE, MODE_PASSWORD, SecretStore
 from app.utils.utils import get_font_family_css, get_icon
+from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
 from app.widgets.common_dialogs import ConfirmDialog
 from app.widgets.secret_unlock_dialog import SecretPasswordSetupDialog, SecretUnlockDialog
-
-_COMBO_INDEX_MODES = (MODE_KEYRING, MODE_PASSWORD)  # 下拉 index → mode
 
 
 def _hint(text: str, parent) -> BodyLabel:
@@ -60,8 +57,60 @@ def _small_button(text: str, parent) -> PushButton:
     return btn
 
 
-class SecretModeSettingCard(ExpandSettingCard):
-    """API Key 加密方式选择卡（展开式：开关 + 二选一）"""
+class _ModeRow(QFrame):
+    """加密方式可选行：整行点击选中，选中态高亮边框"""
+
+    selected = pyqtSignal()
+
+    def __init__(self, title: str, desc: str, parent=None):
+        super().__init__(parent)
+        self._selected = False
+        self.setCursor(Qt.PointingHandCursor)
+
+        h = QHBoxLayout(self)
+        h.setContentsMargins(12, 8, 12, 8)
+        h.setSpacing(8)
+        self._title = QLabel(title, self)
+        self._title.setStyleSheet(
+            f"color: {Colors.TEXT_PRIMARY}; background: transparent;"
+            f"{get_font_family_css()} {font_size_css(13)}; font-weight: 600;"
+        )
+        h.addWidget(self._title)
+        h.addWidget(_hint(desc, self), 1)
+        self._apply_style()
+
+    def set_selected(self, selected: bool):
+        if self._selected == selected:
+            return
+        self._selected = selected
+        self._apply_style()
+
+    def _apply_style(self):
+        border = Colors.BORDER_ACCENT if self._selected else Colors.BORDER
+        bg = Colors.HOVER_BG if self._selected else "transparent"
+        self.setStyleSheet(f"""
+            QFrame {{
+                background-color: {bg};
+                border: 1px solid {border};
+                border-radius: 6px;
+            }}
+            QFrame:hover {{
+                border-color: {Colors.BORDER_ACCENT};
+            }}
+            QLabel {{
+                border: none;
+                background: transparent;
+            }}
+        """)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.selected.emit()
+        super().mouseReleaseEvent(e)
+
+
+class SecretModeSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
+    """API Key 加密方式选择卡（header 开关 + 展开区列表行二选一）"""
 
     def __init__(self, parent=None):
         super().__init__(
@@ -72,68 +121,47 @@ class SecretModeSettingCard(ExpandSettingCard):
         )
         self.cfg = Settings.get_instance()
         self._switching = False  # 抑制控件信号回环
-        self._build_header_value()
+        self._build_header_switch()
         self._build_content()
         self._connect_signals()
         self._refresh()
 
     # ── UI ──
 
-    def _build_header_value(self):
-        """header 右侧实时显示当前状态"""
-        self._header_label = QLabel(self)
-        self._header_label.setObjectName("titleLabel")
-        self.addWidget(self._header_label)
+    def _build_header_switch(self):
+        """header 右侧：加密总开关（开关自己消费点击，不会触发展开/折叠）"""
+        self._encrypt_switch = SwitchButton("", self)
+        self._encrypt_switch.checkedChanged.connect(self._on_switch_changed)
+        self.addWidget(self._encrypt_switch)
 
     def _build_content(self):
         self.viewLayout.setContentsMargins(48, 4, 24, 12)
-        self.viewLayout.setSpacing(10)
+        self.viewLayout.setSpacing(8)
 
-        # ── 行 1：加密总开关 ──
-        switch_row = QWidget(self.view)
-        h1 = QHBoxLayout(switch_row)
-        h1.setContentsMargins(0, 0, 0, 0)
-        h1.setSpacing(12)
-        self._encrypt_switch = SwitchButton("加密 API Key", switch_row)
-        self._encrypt_switch.checkedChanged.connect(self._on_switch_changed)
-        h1.addWidget(self._encrypt_switch)
-        h1.addWidget(_hint("关闭后密钥明文保存在 app.config，仅建议本机离线使用", switch_row), 1)
-        self.viewLayout.addWidget(switch_row)
+        self._rows: dict[str, _ModeRow] = {}
+        for mode, title, desc in (
+            (MODE_KEYRING, "系统钥匙串", "存系统凭证库，换机需重填"),
+            (MODE_PASSWORD, "密码加密", "随配置同步，换机输密码解出"),
+        ):
+            row = _ModeRow(title, desc, self.view)
+            row.selected.connect(lambda m=mode: self._on_row_selected(m))
+            self._rows[mode] = row
+            self.viewLayout.addWidget(row)
 
-        # ── 行 2：加密方式下拉 ──
-        combo_row = QWidget(self.view)
-        h2 = QHBoxLayout(combo_row)
-        h2.setContentsMargins(0, 0, 0, 0)
-        h2.setSpacing(12)
-        self._mode_label = BodyLabel("加密方式", combo_row)
-        self._mode_combo = ComboBox(combo_row)
-        self._mode_combo.addItems(["系统钥匙串", "密码加密"])
-        self._mode_combo.setMinimumWidth(140)
-        self._mode_combo.currentIndexChanged.connect(self._on_combo_changed)
-        h2.addWidget(self._mode_label)
-        h2.addWidget(self._mode_combo)
-        self._mode_desc = _hint("", combo_row)
-        h2.addWidget(self._mode_desc, 1)
-        self.viewLayout.addWidget(combo_row)
-
-        # ── 行 3：密码子区（密码加密时可用） ──
-        pwd_row = QWidget(self.view)
-        h3 = QHBoxLayout(pwd_row)
+        # 密码子区（仅密码方式显示）
+        self._pwd_row = QWidget(self.view)
+        h3 = QHBoxLayout(self._pwd_row)
         h3.setContentsMargins(0, 0, 0, 0)
         h3.setSpacing(8)
-        self._pwd_status = _hint("", pwd_row)
-        self._pwd_btn = _small_button("设置密码", pwd_row)
+        self._pwd_status = _hint("", self._pwd_row)
+        self._pwd_btn = _small_button("设置密码", self._pwd_row)
         self._pwd_btn.clicked.connect(self._on_set_password)
-        self._forget_btn = _small_button("清除记住的密码", pwd_row)
+        self._forget_btn = _small_button("清除记住的密码", self._pwd_row)
         self._forget_btn.clicked.connect(self._on_forget_remembered)
         h3.addWidget(self._pwd_status, 1)
         h3.addWidget(self._pwd_btn)
         h3.addWidget(self._forget_btn)
-        self.viewLayout.addWidget(pwd_row)
-
-        # ── 行 4：本机无钥匙串降级提示 ──
-        self._keyring_warn = _hint("", self.view)
-        self.viewLayout.addWidget(self._keyring_warn)
+        self.viewLayout.addWidget(self._pwd_row)
 
     def _connect_signals(self):
         try:
@@ -149,51 +177,27 @@ class SecretModeSettingCard(ExpandSettingCard):
     def _refresh(self):
         self._switching = True
         try:
-            current = str(self.cfg.secret_mode.value or MODE_KEYRING)
+            current = self._current_mode()
             encrypted = current != MODE_NONE
             self._encrypt_switch.setChecked(encrypted)
-            self._mode_combo.setEnabled(encrypted)
-            if current in _COMBO_INDEX_MODES:
-                self._mode_combo.setCurrentIndex(_COMBO_INDEX_MODES.index(current))
+            for mode, row in self._rows.items():
+                row.set_selected(encrypted and mode == current)
         finally:
             self._switching = False
 
-        # header 与下拉旁说明
-        if current == MODE_NONE:
-            self._header_label.setText("未加密（明文）")
-            self._mode_desc.setText("开启加密后可选择保存方式")
-        else:
-            if current == MODE_PASSWORD:
-                self._header_label.setText("已加密（密码）")
-                self._mode_desc.setText("密钥加密后随配置云同步，换机输入同一密码即可解出")
-            else:
-                self._header_label.setText("已加密（钥匙串）")
-                self._mode_desc.setText("密钥存操作系统凭证库，本机免配置；换机器需重新填写")
-
-        # 密码子区
+        # 密码子区（仅密码方式显示）
         is_password = current == MODE_PASSWORD
         locked = bool(getattr(self.cfg, "_cipher_backup", {}))
+        self._pwd_row.setVisible(is_password)
         self._pwd_status.setText(
-            "状态：" + ("等待解锁（密钥已同步但未解锁）" if locked else "密码已设置") if is_password else "未启用密码加密"
+            "状态：" + ("等待解锁（密钥已同步但未解锁）" if locked else "密码已设置") if is_password else ""
         )
-        self._pwd_btn.setVisible(is_password)
         self._pwd_btn.setText("输入密码解锁" if locked else ("修改密码" if self._has_password() else "设置密码"))
-        self._forget_btn.setVisible(is_password)
         self._forget_btn.setEnabled(SecretStore().available)
 
-        store_available = SecretStore().available
-        warn = (
-            "" if store_available else "⚠ 本机无可用系统钥匙串：钥匙串方式将退化为明文，密码方式下每次启动都需输入密码"
-        )
-        self._keyring_warn.setText(warn)
-        self._keyring_warn.setVisible(bool(warn))
-
         if self.isExpand:
-            # 展开态下子区可见性/文本变化会改变内容高度，需重算展开高度
-            try:
-                self._adjustViewSize()
-            except Exception:
-                pass
+            # 展开态下内容变化会改变高度，mixin 负责重算
+            self._adjust_view_size()
 
     def _has_password(self) -> bool:
         """是否已有加密密码（内存持有 / 存在未解密密文）"""
@@ -209,20 +213,15 @@ class SecretModeSettingCard(ExpandSettingCard):
             return
         current = self._current_mode()
         if checked and current == MODE_NONE:
-            target = _COMBO_INDEX_MODES[self._mode_combo.currentIndex()]
-            self._switch_to(target)
+            self._switch_to(MODE_KEYRING)
         elif not checked and current != MODE_NONE:
             self._switch_to(MODE_NONE)
 
-    def _on_combo_changed(self, _index: int):
+    def _on_row_selected(self, mode: str):
         if self._switching:
             return
-        current = self._current_mode()
-        if current == MODE_NONE:
-            return  # 开关关闭时下拉置灰，不该有信号
-        target = _COMBO_INDEX_MODES[self._mode_combo.currentIndex()]
-        if target != current:
-            self._switch_to(target)
+        if mode != self._current_mode():
+            self._switch_to(mode)
 
     def _switch_to(self, target: str):
         """切换到目标模式；需要密码时按需弹窗，取消/失败回滚并刷新"""

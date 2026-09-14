@@ -53,6 +53,10 @@ dependencies = [
     "pyqtwebengine-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",
     "pywinpty>=3.0.5 ; sys_platform == 'win32'",
     "keyring>=25.0.0",
+    # keyring 的 Windows 凭证库后端（WinVaultKeyring）需要 win32cred。keyring 会优先
+    # 尝试 pywin32-ctypes，但其 cffi 实现在部分环境损坏且异常类型绕过 ImportError
+    # 回退，直接提供 pywin32 走回退分支最稳
+    "pywin32>=306 ; sys_platform == 'win32'",
 ]
 
 # 依赖组（供 uv sync --group / --all-groups 使用）

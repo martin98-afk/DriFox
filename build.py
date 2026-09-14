@@ -199,7 +199,7 @@ _hidden_imports = [
     "keyring",
     *(
         {
-            "Windows": ["keyring.backends.Windows"],
+            "Windows": ["keyring.backends.Windows", "win32cred", "pywintypes"],
             "Darwin": ["keyring.backends.macOS"],
         }.get(platform.system(), ["keyring.backends.chainer"])
     ),

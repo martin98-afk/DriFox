@@ -26,6 +26,8 @@ import base64
 import hashlib
 import hmac
 import os
+import sys
+import ctypes as _ctypes
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -81,6 +83,99 @@ def provider_account(config_id: str) -> str:
     return f"{_PROVIDER_ACCOUNT_PREFIX}{config_id}"
 
 
+# ── Windows 凭证库直连（advapi32 CredReadW/CredWriteW/CredDeleteW）──
+# 不走 keyring：WinVaultKeyring 的 pywintypes 动态加载链在部分环境/时序下偶发失败
+# （priority 抛 Requires Windows and pywin32），后端被跳过后已存密钥读不回，
+# 表现为 401 Missing API key。ctypes 直连零依赖、加载稳定；target 命名与
+# keyring 完全一致（username@service），已有条目直接兼容。
+
+_WIN = sys.platform == "win32"
+
+if _WIN:
+    from ctypes import wintypes as _wt
+
+    class _CREDENTIAL(_ctypes.Structure):
+        _fields_ = [
+            ("Flags", _wt.DWORD),
+            ("Type", _wt.DWORD),
+            ("TargetName", _wt.LPWSTR),
+            ("Comment", _wt.LPWSTR),
+            ("LastWritten", _wt.FILETIME),
+            ("CredentialBlobSize", _wt.DWORD),
+            ("CredentialBlob", _ctypes.POINTER(_ctypes.c_byte)),
+            ("Persist", _wt.DWORD),
+            ("AttributeCount", _wt.DWORD),
+            ("Attributes", _ctypes.c_void_p),
+            ("TargetAlias", _wt.LPWSTR),
+            ("UserName", _wt.LPWSTR),
+        ]
+
+    _advapi32 = _ctypes.WinDLL("advapi32", use_last_error=True)
+    _CredWriteW = _advapi32.CredWriteW
+    _CredWriteW.argtypes = [_ctypes.POINTER(_CREDENTIAL), _wt.DWORD]
+    _CredWriteW.restype = _wt.BOOL
+    _CredReadW = _advapi32.CredReadW
+    _CredReadW.argtypes = [
+        _wt.LPCWSTR,
+        _wt.DWORD,
+        _wt.DWORD,
+        _ctypes.POINTER(_ctypes.POINTER(_CREDENTIAL)),
+    ]
+    _CredReadW.restype = _wt.BOOL
+    _CredDeleteW = _advapi32.CredDeleteW
+    _CredDeleteW.argtypes = [_wt.LPCWSTR, _wt.DWORD, _wt.DWORD]
+    _CredDeleteW.restype = _wt.BOOL
+    _kernel32 = _ctypes.WinDLL("kernel32", use_last_error=True)
+    _LocalFree = _kernel32.LocalFree
+    _LocalFree.argtypes = [_wt.HGLOBAL]
+
+_CRED_TYPE_GENERIC = 1
+_CRED_PERSIST_ENTERPRISE = 3
+
+
+def _win_target(account: str) -> str:
+    """凭证条目 TargetName，与 keyring WinVault 的 username@service 命名一致"""
+    return f"{account}@{SERVICE}"
+
+
+def _win_read(account: str) -> str:
+    p_cred = _ctypes.POINTER(_CREDENTIAL)()
+    if not _CredReadW(_win_target(account), _CRED_TYPE_GENERIC, 0, _ctypes.byref(p_cred)):
+        return ""  # 条目不存在或读取失败（fail-open，与旧 keyring 行为一致）
+    try:
+        blob_size = p_cred.contents.CredentialBlobSize
+        if not blob_size:
+            return ""
+        raw = _ctypes.string_at(p_cred.contents.CredentialBlob, blob_size)
+        return raw.decode("utf-16-le", errors="replace")
+    finally:
+        _LocalFree(p_cred)
+
+
+def _win_write(account: str, value: str) -> bool:
+    blob = value.encode("utf-16-le")
+    blob_buf = (_ctypes.c_char * len(blob)).from_buffer_copy(blob)
+    cred = _CREDENTIAL(
+        Flags=0,
+        Type=_CRED_TYPE_GENERIC,
+        TargetName=_win_target(account),
+        Comment="DriFox",
+        LastWritten=_wt.FILETIME(0, 0),
+        CredentialBlobSize=len(blob),
+        CredentialBlob=_ctypes.cast(blob_buf, _ctypes.POINTER(_ctypes.c_byte)),
+        Persist=_CRED_PERSIST_ENTERPRISE,
+        AttributeCount=0,
+        Attributes=None,
+        TargetAlias=None,
+        UserName=account,
+    )
+    return bool(_CredWriteW(_ctypes.byref(cred), 0))
+
+
+def _win_delete(account: str) -> None:
+    _CredDeleteW(_win_target(account), _CRED_TYPE_GENERIC, 0)
+
+
 def _load_keyring():
     """延迟导入 keyring 并校验后端可用；不可用返回 None（调用方旁路）"""
     try:
@@ -97,21 +192,26 @@ def _load_keyring():
 
 
 class SecretStore:
-    """keyring 单例封装。available=False 时所有操作为无操作（旁路）"""
+    """密钥库单例。Windows 直连系统凭证库（恒可用）；其他平台用 keyring（不可用时旁路）"""
 
     _instance: Optional["SecretStore"] = None
 
     def __new__(cls) -> "SecretStore":
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._kr = _load_keyring()  # type: ignore[attr-defined]
+            # Windows 走 advapi32 直连，不依赖 keyring 实例
+            cls._instance._kr = None if _WIN else _load_keyring()  # type: ignore[attr-defined]
         return cls._instance
 
     @property
     def available(self) -> bool:
+        if _WIN:
+            return True
         return self._kr is not None
 
     def get(self, account: str) -> str:
+        if _WIN:
+            return _win_read(account)
         if not self.available:
             return ""
         try:
@@ -121,6 +221,8 @@ class SecretStore:
             return ""
 
     def set(self, account: str, value: str) -> bool:
+        if _WIN:
+            return bool(value) and _win_write(account, value)
         if not self.available or not value:
             return False
         try:
@@ -131,6 +233,12 @@ class SecretStore:
             return False
 
     def delete(self, account: str) -> None:
+        if _WIN:
+            try:
+                _win_delete(account)
+            except Exception:
+                pass
+            return
         if not self.available:
             return
         try:

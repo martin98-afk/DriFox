@@ -3006,7 +3006,7 @@ _SKELETON_CACHE_MAX = 48
 # _twFlush + rAF 帧级揭示）；② FLIP 位移动画与动画串行队列（_FLIP_JS：
 # _flipCapture/_flipPlay/_animEnqueue）。旧骨架两者都没有 —— 流式仍是整块蹦字、
 # 结束态三动画叠加跳变 —— 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 29
+_SKELETON_CACHE_VERSION = 31
 
 
 def _js_literal(value) -> str:
@@ -3535,7 +3535,7 @@ _STREAMING_DOCK_JS = """
                         // 归位后滚到底部展示最新条目——仅当用户未在上方阅读时；
                         // 用户上滚查看中则保持其位置（内容未更新，不打扰阅读）
                         var tc = document.getElementById('tool-content');
-                        if (tc && !tc._userScrolledUp) { tc._progScroll = true; tc.scrollTop = tc.scrollHeight; }
+                        if (tc && !tc._userScrolledUp) { _progScroll(tc, tc.scrollHeight); }
                     } else if (on && !wasOn) {
                         // 顶部 → 坞态：正文上移，做对称补偿
                         if (!_atBottom && _dockH > 0) {
@@ -3547,8 +3547,7 @@ _STREAMING_DOCK_JS = """
                         var _cp = document.getElementById('content-placeholder');
                         if (_cp) {
                             _cp._userScrolledUp = false;
-                            _cp._progScroll = true;
-                            _cp.scrollTop = _cp.scrollHeight;
+                            _progScroll(_cp, _cp.scrollHeight);
                         }
                     }
                     // 高度变化（110px ↔ 600px max-height）后报告文档高度。
@@ -3902,6 +3901,153 @@ _FLIP_JS = """
 # 改用 wheel 事件（同步派发、仅用户滚轮/触控板触发，无程序来源）标记上滚
 # 意图；scroll 事件只做"滚回底部恢复跟随"，不再置位。
 _CONTENT_AUTOSCROLL_JS = """
+                // ── 滚动锚点：DOM 重建期间保持阅读位置 ──
+                // 旧实现用「绝对 scrollTop + 新 max 钳制」恢复，而 save 与 restore 之间
+                // 内容结构会变（reorganizeContent 搬走工具/思考块、save/restore 移除工具
+                // 块）→ scrollHeight 收缩 → 恢复值被钳到「新内容底部」，与用户原阅读位置
+                // 不是同一语义点（表现为「跳到别处、也不是滚底」）。
+                // 改为记录「视口顶部第一个可见块 + 相对偏移」，重建后把同一块拉回同一偏移：
+                // 等价于浏览器 scroll anchoring（本页多处显式禁用原生锚定），同时覆盖
+                // 「上方内容被搬走」与「下方内容增长」两种情形。
+                // 🐛 二次修复（置顶回归）：锚块只认「重建后仍存在且顺序稳定」的 markdown
+                // 块。data-incremental（tail 增量节点，每轮整体替换）与 think/tool 块
+                // （会被 reorganizeContent 搬走）一当作锚，重建后 key/idx 全对不上，
+                // 恢复值系统性偏小，反复更新把阅读位置一步步顶到 0。
+                function _anchorable(k) {
+                    if (!k || k.nodeType !== 1) return false;
+                    if (k.hasAttribute('data-incremental') || k.hasAttribute('data-tool-call-id')) return false;
+                    var cl = k.classList;
+                    return !(cl.contains('think-block') || cl.contains('think-streaming') ||
+                             cl.contains('think-compact') || cl.contains('tool-block') ||
+                             cl.contains('tool-streaming-block'));
+                }
+                function _anchorables(el) {
+                    var out = [];
+                    var kids = el.children;
+                    for (var i = 0; i < kids.length; i++) {
+                        if (_anchorable(kids[i])) out.push(kids[i]);
+                    }
+                    return out;
+                }
+                function _captureAnchor(el) {
+                    if (!el) return null;
+                    var st = el.scrollTop;
+                    var list = _anchorables(el);
+                    for (var i = 0; i < list.length; i++) {
+                        var k = list[i];
+                        if (k.offsetTop + k.offsetHeight > st) {
+                            var key = (k.getAttribute && (k.getAttribute('data-order') || k.getAttribute('data-block-key'))) || '';
+                            // 文本前缀：markdown 块重建后内容不变，用它校验 idx 对位是否可靠
+                            var text = (k.textContent || '').replace(/\\s+/g, ' ').slice(0, 64);
+                            return { idx: i, delta: k.offsetTop - st, key: key, text: text };
+                        }
+                    }
+                    return null;
+                }
+                function _applyAnchor(el, a) {
+                    if (!el || !a) return false;
+                    var target = null;
+                    if (a.key) {
+                        var byKey = el.querySelector('[data-order="' + a.key + '"],[data-block-key="' + a.key + '"]');
+                        if (byKey && byKey.parentNode === el) target = byKey;
+                    }
+                    if (!target) {
+                        var list = _anchorables(el);
+                        if (!list.length) return false;
+                        var c = list[Math.min(a.idx, list.length - 1)];
+                        // idx 对位校验：文本对不上说明块序列漂移，线性找同文本块；
+                        // 再找不到就放弃锚点（回退绝对值兜底），宁准勿跳。
+                        if (a.text && (c.textContent || '').replace(/\\s+/g, ' ').slice(0, 64) !== a.text) {
+                            var found = null;
+                            for (var i = 0; i < list.length; i++) {
+                                if ((list[i].textContent || '').replace(/\\s+/g, ' ').slice(0, 64) === a.text) { found = list[i]; break; }
+                            }
+                            if (!found) return false;
+                            c = found;
+                        }
+                        target = c;
+                    }
+                    if (!target) return false;
+                    var max = Math.max(0, el.scrollHeight - el.clientHeight);
+                    var want = Math.max(0, Math.min(target.offsetTop - a.delta, max));
+                    if (Math.abs(el.scrollTop - want) < 1) return false;
+                    _progScroll(el, want);
+                    return true;
+                }
+                // 程序滚动令牌：计数而非布尔。布尔在「赋值前后值未变 → 不触发 scroll 事件」
+                // 时会残留，吞掉下一次真实用户滚动（跟随标志错乱的根因）；rAF 兜底清零。
+                function _progBegin(el) {
+                    el._progDepth = (el._progDepth || 0) + 1;
+                    requestAnimationFrame(function () { if (el._progDepth > 0) el._progDepth--; });
+                }
+                function _progScroll(el, value) {
+                    _progBegin(el);
+                    el.scrollTop = value;
+                }
+                // 用户滚动意图：只由**真实输入**驱动（wheel / 触摸 / 键盘）。scroll 事件
+                // 不再承担置位职责 —— 程序性滚动与浏览器钳制同样派发 scroll，用它推断
+                // 意图必然误判（P033）。置位同步完成，用于抢占「滚轮 → 在途渲染 JS 拉底」
+                // 的竞争窗口（scroll 事件异步派发，抢不过渲染 JS）。
+                function _bindUserScrollIntent(el) {
+                    if (!el || el._intentBound) return;
+                    el._intentBound = true;
+                    var mark = function () {
+                        // 🐛 门控：仅当容器实际可滚（内容溢出）才记为上滚 —— 无溢出时 wheel
+                        // 本应转发外层聊天列表，页面内收到的事件属冒泡残留，置位会让
+                        // 跟随被无关操作误锁死。
+                        if (el.scrollHeight > el.clientHeight) {
+                            el._userScrolledUp = true;
+                            // 即时上报阅读状态：不等下一次渲染的 reportHeight，抢在
+                            // 「滚轮 → 下一帧 chunk 渲染 → 高度变化外层拉底」之前。
+                            if (typeof reportHeight === 'function') reportHeight();
+                        }
+                    };
+                    el.addEventListener('wheel', function (e) { if (e.deltaY < 0) mark(); }, {passive: true});
+                    el.addEventListener('touchstart', mark, {passive: true});
+                    el.addEventListener('keydown', function (e) {
+                        if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') mark();
+                    });
+                }
+                // DOM 重建事务：最外层（save/restore 包装 / updateContent）开始前捕获锚点 +
+                // 用户上滚意图，结束后按锚点复位。嵌套只由最外层生效（depth 守卫）。
+                window._domUpdateDepth = 0;
+                window._domUpdateAnchors = null;
+                function _beginDomUpdate() {
+                    if (window._domUpdateDepth++ > 0) return;
+                    var cp = document.getElementById('content-placeholder');
+                    var tc = document.getElementById('tool-content');
+                    window._domUpdateAnchors = {
+                        cp: cp ? { a: _captureAnchor(cp), top: cp.scrollTop, up: !!cp._userScrolledUp } : null,
+                        tc: tc ? { a: _captureAnchor(tc), top: tc.scrollTop, up: !!tc._userScrolledUp } : null
+                    };
+                }
+                function _endDomUpdate() {
+                    window._domUpdateDepth = Math.max(0, window._domUpdateDepth - 1);
+                    if (window._domUpdateDepth > 0) return;
+                    var s = window._domUpdateAnchors;
+                    window._domUpdateAnchors = null;
+                    if (!s) return;
+                    var cp = document.getElementById('content-placeholder');
+                    var tc = document.getElementById('tool-content');
+                    if (cp && s.cp) {
+                        // 锚点失效（块整体消失）→ 兜底用绝对值钳到新 max
+                        if (!_applyAnchor(cp, s.cp.a)) {
+                            var cMax = Math.max(0, cp.scrollHeight - cp.clientHeight);
+                            var cWant = Math.min(s.cp.top, cMax);
+                            if (Math.abs(cp.scrollTop - cWant) >= 1) _progScroll(cp, cWant);
+                        }
+                        // 恢复用户上滚意图：重建期的钳制不得反过来改写跟随态
+                        cp._userScrolledUp = s.cp.up;
+                    }
+                    if (tc && s.tc) {
+                        if (!_applyAnchor(tc, s.tc.a)) {
+                            var tMax = Math.max(0, tc.scrollHeight - tc.clientHeight);
+                            var tWant = Math.min(s.tc.top, tMax);
+                            if (Math.abs(tc.scrollTop - tWant) >= 1) _progScroll(tc, tWant);
+                        }
+                        tc._userScrolledUp = s.tc.up;
+                    }
+                }
                 function _autoScrollStreamingBody(bodyOnly) {
                     // bodyOnly=true：调用方是工具/思考更新路径（流式块注入/
                     // 完成块替换/高度回调），正文内容未变 → 严禁触碰正文容器
@@ -3912,8 +4058,7 @@ _CONTENT_AUTOSCROLL_JS = """
                     var _cp = document.getElementById('content-placeholder');
                     if (document.body.classList.contains('streaming-dock') && _cp) {
                         if (!_cp._userScrolledUp) {
-                            _cp._progScroll = true;
-                            _cp.scrollTop = _cp.scrollHeight;
+                            _progScroll(_cp, _cp.scrollHeight);
                         }
                     }
                     // 🔧 核心修复：正文（document.body）只在「跟随底部」状态
@@ -3928,25 +4073,15 @@ _CONTENT_AUTOSCROLL_JS = """
                 // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为。
                 // wheel/键盘**同步**标记上滚意图（scroll 事件异步派发，与流式
                 // 渲染 JS 存在竞争窗口，不得作为置位依据）；scroll 事件仅恢复跟随。
-                document.getElementById('content-placeholder')?.addEventListener('wheel', function(e) {
-                    // 上滚（deltaY<0）：同步置位，抢占任何在途渲染 JS 的拉底。
-                    // 🐛 门控：仅当容器实际可滚（内容溢出）才记为"上滚正文"——
-                    // 无溢出时 wheel 本应转发外层聊天列表（Qt wheelEvent 转发分支），
-                    // 页面内收到的事件属冒泡残留，置位会让跟随被无关操作误锁死。
-                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {
-                        this._userScrolledUp = true;
-                        // 即时上报阅读状态：不等下一次渲染的 reportHeight，抢在
-                        // 「滚轮 → 下一帧 chunk 渲染 → 高度变化外层拉底」竞争窗口之前。
-                        if (typeof reportHeight === 'function') reportHeight();
-                    }
-                }, {passive: true});
+                // 用户滚动意图绑定（wheel / 触摸 / 键盘），语义见 _bindUserScrollIntent
+                _bindUserScrollIntent(document.getElementById('content-placeholder'));
                 document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
                     var cp = this;
                     // DOM 操作期间（updateContent 重写 innerHTML / reorganizeContent
                     // 搬移 think 块）触发的程序性 scroll 事件必须忽略——与 body 监听的
                     // _suppressScrollEvent 抑制对称。
                     if (window._suppressScrollEvent) return;
-                    if (cp._progScroll) { cp._progScroll = false; return; }
+                    if (cp._progDepth > 0) { cp._progDepth--; return; }
                     // 位置判定（与 body / #tool-content 监听完全一致）：
                     // 接近底部 = 恢复跟随（_userScrolledUp=false），离开底部 =
                     // 用户主动阅读（_userScrolledUp=true），保留其阅读位置——
@@ -7901,6 +8036,9 @@ class CodeWebViewer(QWebEngineView):
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
+                        // 🐛 DOM 重建事务：必须在**任何** DOM 操作（_twReset / _stashCharts /
+                        // _saveCharts）之前捕获锚点，否则捕获到的已是被钳制的位置。
+                        _beginDomUpdate();
                         // 打字机：本次将整体替换增量节点，Python 侧 markdown 已含全部
                         // 文本（含尚未揭示部分），故丢弃揭示缓冲，避免重复追加。
                         if (typeof window._twReset === 'function') window._twReset();
@@ -8083,8 +8221,7 @@ class CodeWebViewer(QWebEngineView):
                             var _cpMax = Math.max(0, _cpEl2.scrollHeight - _cpEl2.clientHeight);
                             var _cpTarget = Math.min(_cpPrevTop, _cpMax);
                             if (_cpEl2.scrollTop !== _cpTarget) {{
-                                _cpEl2._progScroll = true;
-                                _cpEl2.scrollTop = _cpTarget;
+                                _progScroll(_cpEl2, _cpTarget);
                             }}
                         }}
                         // 🐛 修复（流式滚动位置重置）：恢复工具区滚动位置（钳制补偿）。
@@ -8096,11 +8233,13 @@ class CodeWebViewer(QWebEngineView):
                             var _tcMax0 = Math.max(0, _tcEl0.scrollHeight - _tcEl0.clientHeight);
                             var _tcTarget0 = Math.min(_tcPrevTop0, _tcMax0);
                             if (_tcEl0.scrollTop !== _tcTarget0) {{
-                                _tcEl0._progScroll = true;
-                                _tcEl0.scrollTop = _tcTarget0;
+                                _progScroll(_tcEl0, _tcTarget0);
                             }}
                         }}
 
+                        // 🐛 锚点复位（必须早于下方 auto-scroll）：跟随态由 auto-scroll
+                        // 置底覆盖，上滚阅读态保持锚点位置，两者不互相打架。
+                        _endDomUpdate();
                         // 🐛 修复：auto-scroll 延后到所有 DOM 操作（table 包裹、折叠框状态恢复、
                         // think-block 展开、ECharts 初始化、reorganizeContent）之后执行，
                         // 确保 scrollHeight 值反映最终渲染结果，避免因 collapsible 展开 /
@@ -8197,10 +8336,6 @@ class CodeWebViewer(QWebEngineView):
                     if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
-                    // 移除增量纯文本节点（差量渲染会以格式化 HTML 替代它们）
-                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
-                        el.remove();
-                    }});
                     // 段落分隔已由本次渲染的 HTML 表达，清掉挂起分段标记
                     container.removeAttribute('data-pending-break');
                     // 追加格式化 HTML（含 table 包裹等后续处理）
@@ -8219,6 +8354,13 @@ class CodeWebViewer(QWebEngineView):
                         tailDiv.innerHTML = tailHtml;
                         container.appendChild(tailDiv);
                     }}
+                    // 🐛 修复（阅读位置被钳制）：旧增量节点改为**最后**删除。
+                    // 「先删后插」会让容器 scrollHeight 瞬时塌陷，浏览器把 scrollTop 钳到
+                    // 更小的 max —— 坞态正文内滚时每来一个 chunk 用户位置就漂一次。
+                    // 先插新内容再删旧的，高度单调不减，scrollTop 没有钳制机会。
+                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
+                        if (el !== tailDiv) el.remove();
+                    }});
                     // 骨架挂回末尾（图表仍在生成中）→ CSS 动画相位连续，不抖动
                     window._reattachSkeleton(container, _skel, newHtml, tailHtml, typeof tailDiv !== 'undefined' ? tailDiv : null);
                     // 🐛 修复（思考块滞留正文）：与全量 updateContent 对齐——简洁模式下
@@ -8278,9 +8420,6 @@ class CodeWebViewer(QWebEngineView):
                     if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
-                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
-                        el.remove();
-                    }});
                     // 段落分隔已由本次尾部 HTML 表达，清掉挂起分段标记
                     container.removeAttribute('data-pending-break');
                     // ⚠️ 用 <div> 而非 <p> 包裹：html 是 md.convert 产物（块级元素），
@@ -8290,6 +8429,10 @@ class CodeWebViewer(QWebEngineView):
                     tailDiv.setAttribute('data-rendered', 'true');
                     tailDiv.innerHTML = html;
                     container.appendChild(tailDiv);
+                    // 🐛 修复（阅读位置被钳制）：同 updateContentAppend，先加后删。
+                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
+                        if (el !== tailDiv) el.remove();
+                    }});
                     // 骨架挂回末尾（图表仍在生成中）；闭合时 _reattachSkeleton 自动丢弃
                     window._reattachSkeleton(container, _skel, html, '', tailDiv);
                     // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
@@ -9302,7 +9445,7 @@ class CodeWebViewer(QWebEngineView):
                     // 且归零触发的 scroll 事件会误置 _userScrolledUp（用 _progScroll 吞掉）
                     var _wasUp = !!content._userScrolledUp;
                     var _prevTop = content.scrollTop;
-                    content._progScroll = true;
+                    _progBegin(content);
                     content.innerHTML = html;
                     var progText = ' ' + done + '/' + todos.length + ' 完成';
                     window._todoProgressText = progText;
@@ -9320,17 +9463,16 @@ class CodeWebViewer(QWebEngineView):
                     requestAnimationFrame(function() {{
                         requestAnimationFrame(function() {{
                             if (_tk !== window._todoScrollToken) return;  // 已有更新，放弃旧滚动
-                            content._progScroll = true;
                             if (_wasUp) {{
                                 var _maxT = Math.max(0, content.scrollHeight - content.clientHeight);
-                                content.scrollTop = Math.min(_prevTop, _maxT);
+                                _progScroll(content, Math.min(_prevTop, _maxT));
                                 return;
                             }}
                             var act = content.querySelector('.todo-item[data-status="in_progress"]');
                             if (!act) return;
                             var target = act.offsetTop - (content.clientHeight - act.offsetHeight) / 2;
                             var maxScroll = content.scrollHeight - content.clientHeight;
-                            content.scrollTop = Math.max(0, Math.min(target, Math.max(0, maxScroll)));
+                            _progScroll(content, Math.max(0, Math.min(target, Math.max(0, maxScroll))));
                         }});
                     }});
                     if (hr) hr();
@@ -9347,8 +9489,7 @@ class CodeWebViewer(QWebEngineView):
                     // 抑制本次程序滚底触发的 scroll 事件：异步 scroll 到达时
                     // scrollHeight 可能已增长（流式新块加入），atBottom 误判 false
                     // 会错误置位 _userScrolledUp 导致跟随中断。
-                    tc._progScroll = true;
-                    tc.scrollTop = tc.scrollHeight;
+                    _progScroll(tc, tc.scrollHeight);
                 }}
                 // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
                 document.getElementById('tool-content')?.addEventListener('scroll', function() {{
@@ -9361,7 +9502,7 @@ class CodeWebViewer(QWebEngineView):
                     // #content-placeholder 监听的 _suppressScrollEvent 抑制对称。
                     if (window._suppressScrollEvent) return;
                     // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
-                    if (tc._progScroll) {{ tc._progScroll = false; return; }}
+                    if (tc._progDepth > 0) {{ tc._progDepth--; return; }}
                     var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
                     tc._userScrolledUp = !atBottom;
                     if (atBottom) tc._userScrolledUp = false;
@@ -9370,29 +9511,18 @@ class CodeWebViewer(QWebEngineView):
                 // 事件异步派发，与流式 JS（_scrollToolContentToBottom）存在竞争窗口：
                 // 用户滚轮后 scroll 未派发，流式 JS 判 _userScrolledUp=false 抢先拉底
                 // 覆盖阅读位置。对齐 #content-placeholder 的 wheel 修复模式。
-                document.getElementById('tool-content')?.addEventListener('wheel', function(e) {{
-                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
-                        this._userScrolledUp = true;
-                        // 即时上报阅读状态（竞争窗口同 #content-placeholder wheel）
-                        if (typeof reportHeight === 'function') reportHeight();
-                    }}
-                }}, {{passive: true}});
+                // 用户滚动意图绑定（wheel / 触摸 / 键盘），语义见 _bindUserScrollIntent
+                _bindUserScrollIntent(document.getElementById('tool-content'));
                 // 任务列表滚动跟踪：与工具区同款（程序滚动/重建不算用户行为）
                 document.getElementById('todo-content')?.addEventListener('scroll', function() {{
                     var td = this;
                     if (window._suppressScrollEvent) return;
-                    if (td._progScroll) {{ td._progScroll = false; return; }}
+                    if (td._progDepth > 0) {{ td._progDepth--; return; }}
                     var atBottom = Math.abs(td.scrollHeight - td.scrollTop - td.clientHeight) < 30;
                     td._userScrolledUp = !atBottom;
                     if (atBottom) td._userScrolledUp = false;
                 }});
-                document.getElementById('todo-content')?.addEventListener('wheel', function(e) {{
-                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
-                        this._userScrolledUp = true;
-                        // 即时上报阅读状态（竞争窗口同 #content-placeholder wheel）
-                        if (typeof reportHeight === 'function') reportHeight();
-                    }}
-                }}, {{passive: true}});
+                _bindUserScrollIntent(document.getElementById('todo-content'));
                 {_STREAMING_DOCK_JS}
                 {_TYPEWRITER_JS}
                 {_PREVIEW_TYPEWRITER_JS}
@@ -10624,6 +10754,10 @@ class CodeWebViewer(QWebEngineView):
             # "排在其前的流式工具数"修正 → restore 按保存的 data-order 插回时与思考块
             # 尺度不一致 → 找不到比它大的节点 → appendChild 沉底 → 折叠框内
             # "所有思考在前、所有工具在后"（坞态归位瞬间错乱）。
+            # 🐛 锚点事务：save 阶段会 el.remove() 掉工具块 → 容器 scrollHeight 收缩。
+            # 必须在**任何** DOM 操作之前捕获锚点，否则 updateContent 内部捕获到的
+            # 已是钳制后的位置 —— 这正是阅读位置漂到「新内容底部」的根因。
+            "if(typeof _beginDomUpdate==='function')_beginDomUpdate();"
             "window.__pendingStreamFloors=[];"
             f"var _tc=document.getElementById('{_target_id}');"
             # 🐛 修复（流式滚动位置重置）：save 会清空 #tool-content（el.remove()）
@@ -10723,8 +10857,10 @@ class CodeWebViewer(QWebEngineView):
             "if(_tc&&_tcPrevTop>0){"
             "var _tcMax=Math.max(0,_tc.scrollHeight-_tc.clientHeight);"
             "var _tcTarget=Math.min(_tcPrevTop,_tcMax);"
-            "if(_tc.scrollTop!==_tcTarget){_tc._progScroll=true;_tc.scrollTop=_tcTarget;}"
+            "if(_tc.scrollTop!==_tcTarget){_progScroll(_tc,_tcTarget);}"
             "}"
+            # 🐛 锚点复位：放在工具区自动滚底**之前**，跟随态仍由后者置底覆盖
+            "if(typeof _endDomUpdate==='function')_endDomUpdate();"
             # 🐛 修复：save-restore 恢复块后工具区自动滚底
             "if(typeof _scrollToolContentToBottom==='function')_scrollToolContentToBottom();"
             "if(window._toolCompactMode){"

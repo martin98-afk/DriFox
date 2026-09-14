@@ -114,8 +114,9 @@ def test_unwrap_no_entry_in_store_keeps_empty():
     assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == ""
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows 下 SecretStore 直连凭证库，不依赖 keyring 后端")
 def test_secret_store_fallback_when_no_backend(monkeypatch):
-    """无 keyring 后端时 SecretStore.available=False（降级旁路）"""
+    """无 keyring 后端时 SecretStore.available=False（降级旁路；仅非 Windows 平台适用）"""
     monkeypatch.setattr(ss, "_load_keyring", lambda: None)
     ss.SecretStore._instance = None
     try:
