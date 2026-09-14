@@ -158,3 +158,68 @@ def test_recover_flat_secrets_migrates_back_and_deletes(monkeypatch):
     assert cfg.gitee_user_refresh_token.value == ""
     assert store.data == {}
     assert cfg.saved is True
+
+
+# ── 密码模式 ──
+
+
+def test_password_roundtrip_and_prefix():
+    token = ss.encrypt_secret("sk-live-abc", "pwd-123")
+    assert ss.is_ciphertext(token)
+    assert "sk-live-abc" not in token
+    assert ss.decrypt_secret(token, "pwd-123") == "sk-live-abc"
+    # 每次加密密文不同（salt/nonce 随机），但都能解出
+    assert ss.encrypt_secret("sk-live-abc", "pwd-123") != token
+
+
+def test_decrypt_wrong_password_raises():
+    token = ss.encrypt_secret("sk-live-abc", "pwd-123")
+    with pytest.raises(ss.SecretDecryptError):
+        ss.decrypt_secret(token, "wrong")
+    with pytest.raises(ss.SecretDecryptError):
+        ss.decrypt_secret("not-a-cipher", "pwd-123")
+
+
+def test_password_mode_locks_without_password_and_keeps_ciphertext():
+    """换机器首次启动：无密码 → 内存置空（不把密文当 key 用），密文进备份"""
+    data = _make_data(api_key=ss.encrypt_secret("sk-live-abc", "pwd-123"))
+    backup = ss.collect_ciphertexts(data)
+    assert backup == {"abc12345": data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"]}
+    ss.unwrap_secrets(data, _FakeStore(), mode=ss.MODE_PASSWORD, password="")
+    assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == ""
+    # locked 期间保存：靠备份原样回写，严禁丢密文
+    ss.seal_secrets(data, "", backup)
+    assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == backup["abc12345"]
+
+
+def test_password_mode_unlocks_with_password():
+    token = ss.encrypt_secret("sk-live-abc", "pwd-123")
+    data = _make_data(api_key=token)
+    ss.unwrap_secrets(data, _FakeStore(), mode=ss.MODE_PASSWORD, password="pwd-123")
+    assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == "sk-live-abc"
+    # 密码错误：内存置空（不把密文当 key 用）
+    bad = _make_data(api_key=token)
+    ss.unwrap_secrets(bad, _FakeStore(), mode=ss.MODE_PASSWORD, password="bad")
+    assert bad["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == ""
+
+
+def test_password_mode_seals_plaintext_and_leaves_ciphertext():
+    data = _make_data(api_key="sk-plain")
+    ss.seal_secrets(data, "pwd-123")
+    sealed = data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"]
+    assert ss.is_ciphertext(sealed)
+    assert ss.decrypt_secret(sealed, "pwd-123") == "sk-plain"
+    # 已是密文 → 原样保留（不二次加密）
+    ss.seal_secrets(data, "pwd-123")
+    assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == sealed
+
+
+def test_password_mode_seal_without_password_falls_back_to_backup():
+    """明文但无密码（解锁后又丢密码）：有备份用备份，无备份保留明文并告警"""
+    data = _make_data(api_key="sk-plain")
+    backup = {"abc12345": ss.encrypt_secret("sk-backup", "pwd-old")}
+    ss.seal_secrets(data, "", backup)
+    assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == backup["abc12345"]
+    data2 = _make_data(api_key="sk-plain")
+    ss.seal_secrets(data2, "")
+    assert data2["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == "sk-plain"

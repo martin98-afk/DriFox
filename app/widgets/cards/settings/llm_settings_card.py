@@ -56,6 +56,7 @@ from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
+from app.widgets.cards.settings.secret_mode_card import SecretModeSettingCard
 from app.widgets.cards.settings.render_restart_card import RenderRestartCard
 from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
 from app.widgets.cards.settings.render_backend_card import RenderBackendCard
@@ -451,6 +452,10 @@ class LLMSettingsCard(SystemCardFrame):
         # Gitee 账号绑定（保持原默认页顶部位置）
         self.giteeCard = GiteeCard(self)
         provider_layout.addWidget(self.giteeCard)
+
+        # API Key 加密方式（系统钥匙串 / 密码加密 / 不加密）
+        self.secretModeCard = SecretModeSettingCard(self)
+        provider_layout.addWidget(self.secretModeCard)
 
         self.llmProviderCard = ProviderListSettingCard(
             icon=get_icon("大模型"),

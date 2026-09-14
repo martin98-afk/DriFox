@@ -683,6 +683,11 @@ class TabManagerWindow(FramelessWindow):
             raise RuntimeError("TabManagerWindow 是单例，请使用 get_instance() 获取")
         TabManagerWindow._instance = self
 
+        # 启动分段打点（DEBUG）：定位 __init__ 内部耗时段（TrayManager 单例等）
+        import time as _sm_time
+
+        _sm_t0 = _sm_time.perf_counter()
+
         self._windows: List = []  # List[OpenAIChatToolWindow]
         # ── 几何防抖保存：拖拽/缩放结束后 200ms 才写盘 ──
         self._geo_save_timer = QTimer(self)
@@ -779,13 +784,14 @@ class TabManagerWindow(FramelessWindow):
         self._setup_signals()
         # 不在 __init__ 设位置，等第一次 showEvent 时再设
 
-        # ── 应用级服务（本类是应用生命周期容器，故在此创建/启停） ──
-        # 一个应用一个实例：与任何 ChatWindow/tab 生命周期解耦。
-        from app.core.gateway_service import GatewayService
-        from app.core.plugin_host_service import PluginHostService
-
-        GatewayService.get_instance().ensure_started()
-        PluginHostService.get_instance().ensure_started()
+        # ── 应用级服务启动已挪至 main.py（壳显示后、首窗构造前）──
+        # [PERF 2026-09-14] GatewayService/PluginHostService.ensure_started()
+        # （插件发现 55 个 + tools/agents/hooks 注册，实测 ~1.1s）原先同步卡在
+        # __init__ 里挡住壳窗口出现。挪出后本构造只负责 UI；时序约束不变：
+        # 首个 ChatWindow 仍必须在 ensure_started 之后构造（由 main.py 保证），
+        # 否则首窗 _load_all_ui_plugins 会因 pm 未就绪静默 return 且无人重试。
+        _sm_t1 = _sm_time.perf_counter()
+        logger.debug(f"[TabManager] __init__ UI 构建段耗时 {(_sm_t1 - _sm_t0) * 1000:.0f}ms")
 
         # app 级 API 会话处理器：始终路由到当前活跃 tab
         # 修复多 tab 下后建窗口静默覆盖先建窗口的问题（之前由 MainWidget
@@ -814,9 +820,14 @@ class TabManagerWindow(FramelessWindow):
         # 刷新 Tab 面板内嵌的 UI 插件列表
         self._tab_panel.refresh_ui_plugins()
         # 注册到 TrayManager
+        _sm_t2 = _sm_time.perf_counter()
+        logger.debug(f"[TabManager] __init__ API 会话/全局卡段耗时 {(_sm_t2 - _sm_t1) * 1000:.0f}ms")
         from app.tray_manager import TrayManager
 
         TrayManager.get_instance()._tab_manager_window = self
+        logger.debug(
+            f"[TabManager] __init__ TrayManager 单例段耗时 {(_sm_time.perf_counter() - _sm_t2) * 1000:.0f}ms"
+        )
 
         # 注册主题刷新回调（虽主题切换路径不走 dispatch_refresh，
         # 但保持接口一致性便于将来扩展）

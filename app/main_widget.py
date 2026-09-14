@@ -2640,6 +2640,13 @@ class OpenAIChatToolWindow(ToolWindow):
                 priority="idle",
                 delay_ms=5000,
             )
+            # 密码加密模式：本机无记住的密码 → 弹窗解锁（早于模型列表刷新）
+            self._deferred_queue.register(
+                "secret_unlock",
+                lambda: self._safe_timer_call(self._check_secret_unlock),
+                priority="idle",
+                delay_ms=2500,
+            )
         # 批4 N13：models.dev 动态数据后台预热（内存缓存未填充才发网络，模块级
         # 单飞去重；早于 1500ms _load_model_configs 的首次主线程读取，UI 零阻塞）
         self._deferred_queue.register(
@@ -8005,6 +8012,56 @@ class OpenAIChatToolWindow(ToolWindow):
         if cc is not None:
             cc.open_settings()
 
+    def _check_secret_unlock(self):
+        """密码加密模式下密钥未解锁 → 弹窗要求输入密码（启动后一次性）"""
+        if not getattr(self.cfg, "secrets_locked", False):
+            return
+        self._prompt_secret_unlock("")
+
+    def _prompt_secret_unlock(self, error_message: str):
+        from app.utils.secret_store import SecretStore
+        from app.widgets.secret_unlock_dialog import SecretUnlockDialog
+
+        dialog = SecretUnlockDialog(can_remember=SecretStore().available, parent=self)
+        dialog.unlocked.connect(self._on_secret_unlocked)
+        dialog.forgotPassword.connect(self._on_secret_password_forgotten)
+        if error_message:
+            dialog.set_error(error_message)
+        dialog.exec_()
+
+    def _on_secret_unlocked(self, password: str, remember: bool):
+        if not self.cfg.unlock_secrets(password):
+            self._prompt_secret_unlock("密码不正确，请重试")
+            return
+        if remember:
+            self.cfg.remember_secret_password(password)
+        # 明文就绪后刷新模型配置，让需要 key 的服务商立即可用
+        try:
+            self._load_model_configs()
+        except Exception:
+            logger.exception("[SecretUnlock] 刷新模型配置失败")
+
+    def _on_secret_password_forgotten(self):
+        """忘记密码：二次确认后清空所有已保存密钥并转明文模式（不可恢复）"""
+        from app.widgets.common_dialogs import ConfirmDialog
+
+        dialog = ConfirmDialog(
+            title="忘记密码",
+            content="密码无法找回。继续将清空所有已保存的 API Key，并把加密方式切换为不加密。\n确定继续吗？",
+            confirm_text="清空并继续",
+            parent=self,
+        )
+        dialog.confirmed.connect(self._do_reset_locked_secrets)
+        dialog.exec_()
+
+    def _do_reset_locked_secrets(self):
+        self.cfg.reset_locked_secrets()
+        logger.warning("[SecretUnlock] 用户选择忘记密码：已清空所有已保存 API Key")
+        try:
+            self._load_model_configs()
+        except Exception:
+            logger.exception("[SecretUnlock] 重置后刷新模型配置失败")
+
     def _check_gitee_sync_reminder(self):
         """（委托全局卡片控制器 GlobalCardController）"""
         from app.widgets.cards.global_card_controller import get_global_card_controller
@@ -8021,6 +8078,9 @@ class OpenAIChatToolWindow(ToolWindow):
         延迟 5s 确保设置弹窗已构建（与 _check_gitee_sync_reminder 同一节奏）。
         """
         if success:
+            # 同步过来的配置可能是密码加密的：本机没密码就提示解锁
+            if getattr(self.cfg, "secrets_locked", False):
+                QTimer.singleShot(500, lambda: self._safe_timer_call(self._check_secret_unlock))
             return
         if "已失效" not in message:
             return  # 网络异常/未授权等其他失败不触发失效提醒

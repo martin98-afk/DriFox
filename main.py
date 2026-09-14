@@ -470,18 +470,25 @@ def main():
         # 会销毁并重建 native 窗口，表现为「窗口出现后闪一下（消失又出现）」。
         # 未 show 时改 flags 不触发重建，后续 tm.show() 一次性显示。
         _apply_window_topmost(tm)
-        # 批5 壳先行：先显示壳窗口（空态占位「正在准备会话…」）→ 进程级预热
-        # （SessionStore/StorageRegistry/内置工具链）→ 首窗构造 → add_window。
-        # 首个 ChatWindow 必须在 TabManagerWindow 创建之后构造：
-        # TabManagerWindow.__init__ 里 PluginHostService.ensure_started() 同步完成
-        # PluginManager 扫描；若先构造本窗口，其 setup_ui 的 _load_all_ui_plugins 与
-        # 首帧 singleShot(0) 重试都会早于 ensure_started 执行（pm 未就绪静默 return），
-        # 此后无人再触发 UI 插件装载 → 主窗口插件内容（卡片/侧边栏/输入按钮）全部缺失。
+        # 批5 壳先行：先显示壳窗口（空态占位「正在准备会话…」）→ 应用级服务启动
+        # → 进程级预热（SessionStore/StorageRegistry/内置工具链）→ 首窗构造 → add_window。
+        # [PERF 2026-09-14] GatewayService/PluginHostService.ensure_started() 从
+        # TabManagerWindow.__init__ 挪到此处：插件发现 + tools/agents/hooks 注册
+        # 实测 ~1.1s，不再挡在壳窗口出现之前。时序约束不变：首个 ChatWindow 仍
+        # 必须在 ensure_started 之后构造——若先构造首窗，其 _load_all_ui_plugins
+        # 会因 pm 未就绪静默 return 且无人重试，主窗口插件内容（卡片/侧边栏/
+        # 输入按钮）全部缺失。
         tm.show()
         tm.show_boot_placeholder()
-        from app.utils.preheat import preheat_process_level
+        from app.core.gateway_service import GatewayService
+        from app.core.plugin_host_service import PluginHostService
 
         _smark("shell_show")
+        GatewayService.get_instance().ensure_started()
+        PluginHostService.get_instance().ensure_started()
+        _smark("app_services_start")
+        from app.utils.preheat import preheat_process_level
+
         preheat_process_level()
         _smark("preheat_process")
         chat_window = OpenAIChatToolWindow(fake_page)

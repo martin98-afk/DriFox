@@ -675,11 +675,25 @@ class ConfigSyncService(QObject):
                     _file_data = _json.load(_f)
 
                 # 密钥回填：keyring 化后落盘文件不含明文密钥，写回内存前
-                # 从 OS 凭证库取回；文件仍有明文（旧版/降级）则幂等迁移
+                # 从 OS 凭证库取回；密码模式则用本机密码解密密文
                 try:
-                    from app.utils.secret_store import SecretStore, unwrap_secrets
+                    from app.utils.secret_store import (
+                        MASTER_PASSWORD_ACCOUNT,
+                        MODE_KEYRING,
+                        MODE_PASSWORD,
+                        SecretStore,
+                        collect_ciphertexts,
+                        unwrap_secrets,
+                    )
 
-                    unwrap_secrets(_file_data, SecretStore())
+                    _mode = str(cfg.secret_mode.value or MODE_KEYRING)
+                    if _mode == MODE_PASSWORD:
+                        cfg._cipher_backup = collect_ciphertexts(_file_data)
+                        _pwd = cfg._secret_password or SecretStore().get(MASTER_PASSWORD_ACCOUNT)
+                        unwrap_secrets(_file_data, SecretStore(), mode=_mode, password=_pwd)
+                        cfg._secrets_locked = cfg._has_locked_cipher()
+                    else:
+                        unwrap_secrets(_file_data, SecretStore(), mode=_mode)
                 except Exception as _se:
                     logger.warning(f"[SecretStore] 同步回填失败: {_se}")
 

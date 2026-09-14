@@ -53,6 +53,8 @@ dependencies = [
     "pyqtwebengine-qt5>=5.15.2,<5.15.3; sys_platform == 'win32'",
     "pywinpty>=3.0.5 ; sys_platform == 'win32'",
     "keyring>=25.0.0",
+    # API Key 密码加密模式：AES-GCM（scrypt KDF 走 stdlib hashlib）
+    "cryptography>=42.0.0",
 ]
 
 # 依赖组（供 uv sync --group / --all-groups 使用）
