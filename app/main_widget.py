@@ -8035,7 +8035,10 @@ class OpenAIChatToolWindow(ToolWindow):
         from app.utils.secret_store import SecretStore
         from app.widgets.secret_unlock_dialog import SecretUnlockDialog
 
-        dialog = SecretUnlockDialog(can_remember=SecretStore().available, parent=self)
+        # parent 取顶层主窗口（Tab 模式下为 TabManagerWindow），而非 self 这个
+        # 嵌入 QStackedWidget 的子 widget——MaskDialogBase 用 parent 尺寸铺遮罩，
+        # 传子 widget 会导致遮罩只覆盖聊天区、弹窗层级/定位异常。
+        dialog = SecretUnlockDialog(can_remember=SecretStore().available, parent=self.window())
         dialog.unlocked.connect(self._on_secret_unlocked)
         dialog.forgotPassword.connect(self._on_secret_password_forgotten)
         if error_message:
@@ -8062,7 +8065,7 @@ class OpenAIChatToolWindow(ToolWindow):
             title="忘记密码",
             content="密码无法找回。继续将清空所有已保存的 API Key，并把加密方式切换为不加密。\n确定继续吗？",
             confirm_text="清空并继续",
-            parent=self,
+            parent=self.window(),
         )
         dialog.confirmed.connect(self._do_reset_locked_secrets)
         dialog.exec_()
