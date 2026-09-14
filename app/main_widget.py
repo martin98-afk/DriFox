@@ -22,6 +22,7 @@ import orjson as json
 import sip
 from loguru import logger
 from PyQt5.QtCore import (
+    QElapsedTimer,
     QEvent,
     QEventLoop,
     QFileSystemWatcher,
@@ -213,6 +214,19 @@ SCROLL_JUMP_SHOW_THRESHOLD = 120
 # 新增的类常量不在旧类里（self._SYNC_WIDTH_BATCH 会 AttributeError），
 # 模块级常量经函数 __globals__ 查找，新旧实例都安全。
 _SYNC_WIDTH_BATCH = 8
+
+# [PERF] 卡片恢复（set_resize_preview_mode(False) → viewer.show()）按时间预算分批。
+# 实测 show 是恢复阶段唯一大头：约 6.4ms/张（短消息）~12ms/张（长回复 1800px），
+# 而 update_height 的 runJavaScript 只占 ~1ms（12 张共 1ms），可忽略。
+# 旧实现「视口±400px 一次性全量 + 离屏 20 张/批」在视口内 11 张时单帧冻结
+# 70~130ms。改为按实测耗时自适应批大小，把单帧压进 ~20ms。
+_RESTORE_BATCH_INIT = 4  # 首批：4 张 ≈ 27ms，卡片少时一次收尾、不额外延迟
+_RESTORE_BATCH_MAX = 8
+_RESTORE_BATCH_MIN = 1
+_RESTORE_BATCH_FAST_MS = 8  # 本批快于此 → 下一批扩容
+_RESTORE_BATCH_SLOW_MS = 20  # 本批慢于此 → 下一批缩容
+_RESTORE_INTERVAL_VISIBLE_MS = 16  # 视口内未恢复完：让出一帧
+_RESTORE_INTERVAL_OFFSCREEN_MS = 30  # 已进入离屏段：沿用旧节奏
 
 
 class _ProjectUrlImportThread(QThread):
@@ -1428,6 +1442,9 @@ class OpenAIChatToolWindow(ToolWindow):
         self._restore_epoch = 0
         self._restore_queue = []
         self._restore_batch_idx = 0
+        # [PERF] 恢复链自适应批大小与「视口内段」边界（见 _process_restore_batch）
+        self._restore_batch_size = _RESTORE_BATCH_INIT
+        self._restore_visible_count = 0
         # ⚡ 宽度同步分帧链状态（见 _sync_all_cards_width 注释）
         self._sync_width_queue: list = []
         self._sync_width_idx = 0
@@ -9297,7 +9314,7 @@ class OpenAIChatToolWindow(ToolWindow):
         self._begin_restore_chain(epoch)
 
     def _begin_restore_chain(self, epoch: int):
-        """第二阶段：分区恢复 —— 视口内立即全量恢复，离屏大批量快恢复。
+        """第二阶段：分区恢复 —— 视口内优先，全部走时间预算分批。
 
         🐛 竞态修复（窗口拖拽时部分卡片永久空白的根因）：
         旧实现把全部卡片塞进同一个 _restore_queue，用 QTimer.singleShot 链式
@@ -9310,9 +9327,12 @@ class OpenAIChatToolWindow(ToolWindow):
         （宽度同步分帧链同样受 epoch 约束，见 _sync_all_cards_width）。
 
         🐛 性能修复：固定 5 张/80ms 的节奏下，100 张卡片需 20 批 × 80ms ≈ 1.6s。
-        视口内卡片是用户正在看的，数量有限（通常 <20）且本来就要渲染，一次性
-        恢复没有额外 GPU 风险，却能让内容"立刻"适配；离屏卡片不参与渲染，
-        放宽到 20 张/30ms 快速收尾。
+        视口内卡片优先恢复，离屏卡片排在后面快速收尾。
+
+        ⚡ 性能修复（#webview-resize）：视口内「一次性全量恢复」在 10+ 张卡片时
+        单帧冻结 70~130ms（实测 viewer.show() 6.4ms/张，短消息；长回复 12ms/张）。
+        视口内卡片同样交给 _process_restore_batch 按时间预算分批，只是排在队列
+        前部、批间隔更短（16ms），既保住「用户看到的内容先就位」，又不冻帧。
         """
         scroll_area = getattr(self, "chat_scroll_area", None)
         visible_cards = []
@@ -9338,14 +9358,14 @@ class OpenAIChatToolWindow(ToolWindow):
             else:
                 visible_cards.append(card)
 
-        for card in visible_cards:
-            try:
-                card.set_resize_preview_mode(False)
-            except RuntimeError:
-                pass
-
-        self._restore_queue = offscreen_cards
+        # [PERF] 视口内卡片不再一次性全量恢复：与离屏卡合并成「视口内优先」的
+        # 单一队列，交给 _process_restore_batch 按时间预算分批推进。
+        # 实测 viewer.show() 约 6.4ms/张（短）~12ms/张（长），视口±400px 内有
+        # 10+ 张时一次性恢复 = 单帧冻结 70~130ms（「松手后顿一下」的直接来源）。
+        self._restore_queue = visible_cards + offscreen_cards
         self._restore_batch_idx = 0
+        self._restore_visible_count = len(visible_cards)
+        self._restore_batch_size = _RESTORE_BATCH_INIT
         if self._restore_queue:
             self._process_restore_batch(epoch)
         else:
@@ -9395,13 +9415,19 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         self._restore_queue = []
         self._restore_batch_idx = 0
+        self._restore_visible_count = 0
         self._resize_preview_active = False
         batch = getattr(self, "_height_batch", None)
         if batch is not None:
             batch.begin()
 
     def _process_restore_batch(self, epoch: int | None = None):
-        """分批恢复离屏卡片 viewer（触发 GPU 分配，故分批以避免峰值）
+        """按时间预算分批恢复卡片 viewer（视口内优先，触发 GPU 分配故需摊平）
+
+        [PERF] 批大小按上一批实测耗时自适应：show 的成本随卡片内容长度浮动
+        （短消息 ~6.4ms/张、长回复 ~12ms/张），固定批大小要么在小卡片场景
+        白白多让几帧，要么在长内容场景仍冻帧。这里用「快则扩容、慢则缩容」
+        把单帧稳定压在 ~20ms。
 
         Args:
             epoch: 恢复链代次。与 self._restore_epoch 不符说明本链已被新一轮
@@ -9410,24 +9436,36 @@ class OpenAIChatToolWindow(ToolWindow):
         if epoch is not None and epoch != self._restore_epoch:
             return
         # [L2] 链式恢复途中被切到后台：挂起剩余批次，激活时补跑。
-        # 不挂起的话，后台页会继续以 20 张/30ms 的节奏分配 GPU 缓冲，
+        # 不挂起的话，后台页会继续以批间隔的节奏分配 GPU 缓冲，
         # 与前台页的恢复链争抢主线程。
         orchestrator = ResizeOrchestrator.get_instance()
         if not orchestrator.is_current(self):
             orchestrator.mark_paused(self)
             return
-        BATCH_SIZE = 20
-        INTERVAL_MS = 30
-        end = min(self._restore_batch_idx + BATCH_SIZE, len(self._restore_queue))
+        batch_size = max(_RESTORE_BATCH_MIN, min(_RESTORE_BATCH_MAX, self._restore_batch_size))
+        timer = QElapsedTimer()
+        timer.start()
+        end = min(self._restore_batch_idx + batch_size, len(self._restore_queue))
         for i in range(self._restore_batch_idx, end):
             card = self._restore_queue[i]
             try:
                 card.set_resize_preview_mode(False)
             except RuntimeError:
                 pass
+        elapsed = timer.elapsed()
+        # 自适应：以本批实测耗时调整下一批大小（当前批已跑完，只影响后续）
+        if elapsed < _RESTORE_BATCH_FAST_MS:
+            self._restore_batch_size = min(_RESTORE_BATCH_MAX, batch_size + 1)
+        elif elapsed > _RESTORE_BATCH_SLOW_MS:
+            self._restore_batch_size = max(_RESTORE_BATCH_MIN, batch_size - 1)
+        else:
+            self._restore_batch_size = batch_size
         self._restore_batch_idx = end
         if end < len(self._restore_queue):
-            QTimer.singleShot(INTERVAL_MS, lambda: self._process_restore_batch(epoch))
+            # 视口内段用 16ms（让出一帧，尽快把用户看到的内容就位）；
+            # 越过视口内段后退回 30ms（离屏卡不急，避免与滚动/渲染抢占）
+            interval = _RESTORE_INTERVAL_VISIBLE_MS if end < self._restore_visible_count else _RESTORE_INTERVAL_OFFSCREEN_MS
+            QTimer.singleShot(interval, lambda: self._process_restore_batch(epoch))
         else:
             self._end_resize_cycle()
 
@@ -9474,11 +9512,32 @@ class OpenAIChatToolWindow(ToolWindow):
             if card_bottom < viewport_top - 200 or card_top > viewport_bottom + 200:
                 continue
 
+            # [PERF] 恢复链改为时间预算分批后，离屏卡就位比旧「20 张/30ms」慢。
+            # 滚动进入视口的卡片若还停在 preview 占位态，就地立即恢复并从队列
+            # 摘除，避免用户滚过去看到一片空白（分批换来的平滑不该由可见区买单）。
+            if self._restore_queue and getattr(card, "_resize_preview_mode", False):
+                self._restore_card_now(card)
+
             # 🐛 修复：必须用 viewport 宽度直接推算 target，
             # 不能走 card.sync_width()（内部用 parent.width()）——
             # chat_container 会被偏大的卡片最小宽撑宽，parent 返回旧大值 → 循环。
             # 滚动入视口时用 parent 推算会持续覆盖掉 resize 已修正的正确宽度。
             self._sync_single_card_width(card)
+
+    def _restore_card_now(self, card):
+        """把卡片从恢复队列摘除并就地退出 preview（滚动即时命中路径）。
+
+        队列里已移除的卡片不会被恢复链重复处理；链读到空/走完剩余项时
+        照常经 _end_resize_cycle 收口，不受影响。
+        """
+        try:
+            self._restore_queue.remove(card)
+        except ValueError:
+            pass
+        try:
+            card.set_resize_preview_mode(False)
+        except RuntimeError:
+            pass
 
     def _on_config_applied(self, new_config: dict):
         if getattr(self, "_is_destroyed", False):

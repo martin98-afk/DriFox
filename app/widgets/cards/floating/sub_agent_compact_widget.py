@@ -24,7 +24,7 @@ from PyQt5.QtWidgets import (
 )
 
 from qfluentwidgets import ScrollArea
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import CardStyles, Colors
 from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon, get_unified_font
 from app.widgets.cards.card_container import CardContainer
@@ -127,14 +127,19 @@ class _AgentTaskRow(QFrame):
 
     def _setup_ui(self):
         self.setObjectName("AgentTaskRow")
-        self.setStyleSheet("""
+        # 自定义 QWidget 子类不设 WA_StyledBackground 时，QSS 的 background 一行
+        # 都不绘制（见 CardStyles.floating 说明）；原先还写成 {{ 双花括号，
+        # 非 f-string 下是字面量，选择器本身也不合法。两处一起修。
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        Colors.refresh()
+        self.setStyleSheet(f"""
             #AgentTaskRow {{
-                background: rgba(255,255,255,0.03);
+                background: {Colors.HOVER_BG};
                 border: none;
                 border-radius: 6px;
             }}
             #AgentTaskRow:hover {{
-                background: rgba(255,255,255,0.06);
+                background: {Colors.HOVER_BG_STRONG};
             }}
         """)
 
@@ -510,6 +515,9 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._time_timer = LoopTimer(self, 1000, self._update_all_times, gate=self._rotation_needed)
 
         self._reflow_deferred_guard = False  # 防止 deferred reflow 无限循环
+        # 自定义 QWidget 子类必须显式开启，否则 _apply_style 写的背景/边框/圆角
+        # 一行都不会绘制（内容直接裸浮在对话区上）。
+        self.setAttribute(Qt.WA_StyledBackground, True)
         self._setup_ui()
 
     # ── UI 初始化 ──────────────────────────────────────
@@ -629,25 +637,21 @@ class SubAgentCompactFloatingWidget(QWidget):
         self._reflow()
 
     def _apply_style(self, running: bool = None):
-        """更新卡片样式"""
-        Colors.refresh()
-        if running is None:
-            border_color = Colors.REALTIME_BORDER
-        elif running:
-            border_color = Colors.REALTIME_ACCENT_WARM
-        else:
-            border_color = Colors.REALTIME_SUCCESS
+        """更新卡片表面：底色/圆角走 CardStyles.floating，状态语义只落在边框上
 
-        self.setStyleSheet(f"""
-            SubAgentCompactFloatingWidget {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {border_color};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }}
-        """)
+        旧写法用 REALTIME_BG 作底 + 上圆角 8 / 下直角。浅色主题下 realtime_bg
+        (#f5f5f5) 比承托它的容器底 (card_bg #ffffff) 还暗，边界几乎为零；而容器
+        已给卡片留出 8px 内边距、卡片底部实际悬空，切直角反而割裂。
+        现统一为四角同圆角，空闲态回落到主题中性边框。
+        """
+        Colors.refresh()
+        if running:
+            border_color = Colors.REALTIME_ACCENT_WARM
+        elif running is False:
+            border_color = Colors.REALTIME_SUCCESS
+        else:
+            border_color = None
+        self.setStyleSheet(CardStyles.floating("SubAgentCompactFloatingWidget", border=border_color))
 
     def _update_header_icon(self):
         """更新头部图标为设置-subagent（主题感知，由 refresh_style 在主题切换时调用）"""
@@ -700,24 +704,14 @@ class SubAgentCompactFloatingWidget(QWidget):
             row.refresh_row_style()
 
     def set_opacity(self, opacity: float):
-        """设置透明度"""
+        """淡出通道：底色按 opacity 降 alpha，其余表面参数与 _apply_style 同源"""
         Colors.refresh()
-        bg = Colors.REALTIME_BG
-        if bg.startswith("rgba("):
-            alpha = max(1, int(opacity * 255))
-            bg = bg.rsplit(",", 1)[0] + f", {alpha})"
+        alpha = max(1, int(opacity * 255))
         running = self._has_running
         border_color = Colors.REALTIME_ACCENT_WARM if running else Colors.REALTIME_SUCCESS
-        self.setStyleSheet(f"""
-            SubAgentCompactFloatingWidget {{
-                background-color: {bg};
-                border: 1px solid {border_color};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }}
-        """)
+        self.setStyleSheet(
+            CardStyles.floating("SubAgentCompactFloatingWidget", alpha=alpha, border=border_color)
+        )
 
     # ── 旋转动画 ──────────────────────────────────────
 

@@ -1421,6 +1421,59 @@ class OpenAIChatWorker(QThread):
             self._response_chunks = list(backup.get("response_chunks", []) or [])
         self._partial_content_backup = None
 
+    def _has_pending_interject(self) -> bool:
+        """探测 hook 队列中是否有用户插话（繁忙时插话发送）
+
+        只探测不消费：插话仍由循环顶部的 _inject_pending_hook_messages 正常注入
+        对话流。取出的条目按原顺序放回，不改变后续注入顺序。
+
+        Returns:
+            True = 队列中至少有一条 _interject 标记的插话消息。
+        """
+        q = None
+        try:
+            backend = getattr(self.tool_executor, "_backend", None)
+            q = getattr(backend, "_hook_message_queue", None) if backend is not None else None
+        except Exception as exc:  # noqa: BLE001
+            # worker 未持有 tool_executor（单测最小实例/已清理对象）时属性访问即抛错
+            logger.debug(f"[Interject] 取 hook 队列失败: {exc}")
+            return False
+        if q is None:
+            return False
+        items: List[Dict] = []
+        try:
+            while True:
+                try:
+                    items.append(q.get_nowait())
+                except queue.Empty:
+                    break
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[Interject] 探测 hook 队列失败: {exc}")
+            return False
+        finally:
+            for item in items:
+                try:
+                    q.put(item)
+                except Exception:  # noqa: BLE001
+                    pass
+        return any(isinstance(m, dict) and m.get("_interject") is True for m in items)
+
+    def _abort_retry_for_interject(self):
+        """放弃剩余重试，让插话尽快进入对话流
+
+        返回 (None, None) 与取消路径同形：主循环走到 ``if not tool_calls_found`` 的
+        完成路径，已接收内容由 _build_response_message_sequence 落库，随后
+        _drain_pending_hooks_before_exit 注入插话并续跑一轮。
+        """
+        # 🛡️ 恢复备份：协议错误重试清空过 _response_content_blocks
+        self._restore_partial_content_backup()
+        # 通知 UI：重试状态结束，收掉重试动画（续轮开始后自行重新进入流式态）
+        try:
+            self.retry_resolved.emit()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[Interject] retry_resolved 发射失败: {exc}")
+        return None, None
+
     @staticmethod
     def _detect_repetitive_tool_loop(messages: List[Dict]) -> Optional[Dict]:
         """
@@ -3364,6 +3417,11 @@ class OpenAIChatWorker(QThread):
             if self._is_cancelled:
                 logger.info("[API] 重试被用户取消")
                 return None, None
+            # 用户插话打断重试：仅在已失败过一次（attempt > 0）时生效。首次调用前
+            # 队列里的插话属上一轮遗留，循环顶部已消费，此处不打断。
+            if attempt > 0 and self._has_pending_interject():
+                logger.info(f"[API] 检测到用户插话，放弃剩余重试（attempt={attempt}）")
+                return self._abort_retry_for_interject()
             try:
                 if use_responses:
                     # Responses API 解析器仅支持事件流（非流式返回 Response 对象不可迭代）
@@ -3539,6 +3597,10 @@ class OpenAIChatWorker(QThread):
                     elapsed = 0.0
                     step = 0.5
                     while elapsed < wait_time:
+                        # 用户插话：立即中止退避等待，不等剩余重试
+                        if self._has_pending_interject():
+                            logger.info(f"[API] 重试等待被用户插话打断（attempt={attempt + 1}）")
+                            return self._abort_retry_for_interject()
                         if self._is_cancelled:
                             logger.info("[API] 重试等待被用户取消")
                             # 🛡️ 恢复备份：协议错误重试清空了 _response_content_blocks，

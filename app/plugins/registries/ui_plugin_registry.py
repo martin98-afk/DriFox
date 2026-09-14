@@ -1653,6 +1653,28 @@ class UIPluginRegistry:
         infos.sort(key=lambda i: -i.priority)
         return infos
 
+    def unregister_auto_config_cards(self, plugin_name: str) -> None:
+        """移除插件的 config_schema 自动设置卡（E1，metadata.auto_config_card）。
+
+        与 unload_plugin 分离：自动卡的清理只由 manifest 层触发
+        （PluginManager._unregister_config_schema，插件真正卸载/schema 删除时）；
+        ui 组件的 unload/load 不触碰它，避免热重载误杀 rescan 刚注册的卡。
+        """
+        self._settings_cards = {
+            k: v
+            for k, v in self._settings_cards.items()
+            if not (v.plugin_name == plugin_name and v.metadata.get("auto_config_card"))
+        }
+        for region in self._regions.values():
+            region["entries"] = {
+                k: v
+                for k, v in region["entries"].items()
+                if not (
+                    v.plugin_name == plugin_name
+                    and (getattr(v.payload, "metadata", None) or {}).get("auto_config_card")
+                )
+            }
+
     # ── Phase E：Region 通用挂载模型 ──
 
     def declare_region(self, region_id: str, kind: str, description: str = "") -> None:
@@ -2950,7 +2972,15 @@ class UIPluginRegistry:
         self._sidebar_items = {k: v for k, v in self._sidebar_items.items() if v.plugin_name != plugin_name}
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
         self._context_actions = {k: v for k, v in self._context_actions.items() if v.plugin_name != plugin_name}
-        self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
+        # config_schema 自动设置卡（metadata.auto_config_card）保留：其生命周期归
+        # manifest 层（PluginManager._unregister_config_schema），ui 组件的 unload/load
+        # 不得误伤——否则 targeted 热重载「rescan 注册卡 → ui 卸载清卡」会让插件配置卡
+        # 从设置页消失，直到下一次全量扫描才回来（2026-09-14 安装/更新后配置卡不刷新回归）。
+        self._settings_cards = {
+            k: v
+            for k, v in self._settings_cards.items()
+            if v.plugin_name != plugin_name or v.metadata.get("auto_config_card")
+        }
         # 清理工作区页面槽（Phase G）
         self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
         # 清理右侧工作台页签槽位（含其联动命令）
@@ -2963,9 +2993,14 @@ class UIPluginRegistry:
         self.unregister_titlebar_widgets(plugin_name)
         # 清理服务槽
         self._services = {k: v for k, v in self._services.items() if v[0] != plugin_name}
-        # 清理通用区域条目（Phase E）
+        # 清理通用区域条目（Phase E）；settings: 分区中 auto_config_card 条目保留（同上）
         for region in self._regions.values():
-            region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}
+            region["entries"] = {
+                k: v
+                for k, v in region["entries"].items()
+                if v.plugin_name != plugin_name
+                or (getattr(v.payload, "metadata", None) or {}).get("auto_config_card")
+            }
         # 清理 UI 模块槽（Phase F）：仅移除该 plugin 的实现，其余保留
         for module_id, impls in list(self._ui_modules.items()):
             kept = [s for s in impls if s[0] != plugin_name]

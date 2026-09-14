@@ -576,7 +576,7 @@ class PluginManager:
         # 目录签名短路：目录层面无变化时直接返回空 diff（与全量重扫结果等价，
         # 但省掉三次 _scan_plugins 的全目录遍历与 manifest 解析）
         sig = self._plugins_dir_signature()
-        if not force and self._plugins and sig == self._last_scan_signature:
+        if not force and self._plugins and sig == getattr(self, "_last_scan_signature", None):
             logger.debug("[PluginManager] 插件目录签名未变，rescan 短路（跳过全量重扫）")
             return {"added": [], "removed": [], "changed": []}
         self._last_scan_signature = sig
@@ -1235,6 +1235,9 @@ class PluginManager:
         raw_schema = manifest.get("config_schema")
         config_schema = parse_config_schema(plugin_name, raw_schema)
         if config_schema is None:
+            # manifest 已无合法 schema：显式清掉历史注册（含自动设置卡），避免残留旧卡。
+            # unload_plugin 已改为保留 auto_config_card，清理只能走这里（manifest 层职责）。
+            self._unregister_config_schema(plugin_name)
             return
 
         # 注册表（必需）
@@ -1256,18 +1259,30 @@ class PluginManager:
                 f"{plugin_name}-config",
                 config_schema.title,
                 make_card_class(plugin_name),
+                metadata={"auto_config_card": True},
             )
         except Exception as e:
             logger.warning(f"[PluginManager] config_schema 设置卡注册失败({plugin_name}): {e}")
 
     def _unregister_config_schema(self, plugin_name: str) -> None:
-        """E1：插件移除时清理 config_schema 注册（设置卡由 UIPluginRegistry.unload_plugin 清理）。"""
+        """E1：插件移除/Schema 删除时清理 config_schema 注册 + 自动设置卡。
+
+        设置卡的清理在此显式触发（manifest 层职责）。UIPluginRegistry.unload_plugin
+        已改为保留 auto_config_card——ui 组件热重载（unload→load）不能误杀
+        rescan 刚注册的卡，清理收敛到本函数单一入口。
+        """
         try:
             from app.plugins.registries.plugin_config_registry import PluginConfigRegistry
 
             PluginConfigRegistry.get_instance().unregister_plugin(plugin_name)
         except Exception as e:
             logger.warning(f"[PluginManager] config_schema 清理失败({plugin_name}): {e}")
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            UIPluginRegistry.get_instance().unregister_auto_config_cards(plugin_name)
+        except Exception as e:
+            logger.warning(f"[PluginManager] config_schema 设置卡清理失败({plugin_name}): {e}")
 
     def _discover_system_plugins(self):
         """扫描系统插件目录 app/plugins/"""

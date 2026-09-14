@@ -1175,18 +1175,18 @@ class BottomCardContainer(CardContainer):
         self._layout.setSpacing(self.STACK_SPACING)
 
     def _apply_background_style(self):
-        """底部容器背景：8px 上圆角 + 底部直角，与输入框视觉拼接"""
-        Colors.refresh()
-        bg = Colors.CARD_BG.format(alpha=232)
-        self._set_style_sheet_cached(f"""
-            BottomCardContainer {{
-                background: {bg};
-                border: 1px solid {Colors.BORDER};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }}
+        """底部容器：透明承托，不画面板背景与边框。
+
+        L2 状态卡（子智能体/排队/撤销）与系统模态卡可堆叠共存，每张卡已由
+        CardStyles.floating 自绘完整表面；容器再画一圈 CARD_BG+BORDER 就是双层
+        边框嵌套（两层之间只隔 8px padding）。故容器只保留 padding 与卡间距，
+        边界交给卡片自己表达。
+        """
+        self._set_style_sheet_cached("""
+            BottomCardContainer {
+                background: transparent;
+                border: none;
+            }
         """)
 
     def add_card(self, card_id: str, card_widget: QWidget):

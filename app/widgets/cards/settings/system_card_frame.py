@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import FluentIcon, PrimaryToolButton, ScrollArea, StrongBodyLabel, TransparentToolButton
 
-from app.utils.design_tokens import Colors, TabStyles, font_size_css, get_unified_scrollbar_style, scale_icon_size
+from app.utils.design_tokens import CardStyles, Colors, TabStyles, font_size_css, get_unified_scrollbar_style, scale_icon_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -71,6 +71,9 @@ class SystemCardFrame(QFrame):
 
     def _build_base_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # 自定义 QWidget 子类不设 WA_StyledBackground 时，_apply_base_style 写的
+        # 背景/边框/圆角一行都不会绘制（见 CardStyles.floating 说明）。
+        self.setAttribute(Qt.WA_StyledBackground, True)
         Colors.refresh()
         self._apply_base_style()
 
@@ -159,13 +162,8 @@ class SystemCardFrame(QFrame):
 
     def _apply_base_style(self):
         # Colors.refresh() 由调用方（refresh_style / _build_base_ui）确保已执行
-        self.setStyleSheet(f"""
-            SystemCardFrame {{
-                background: {Colors.CARD_BG.format(alpha=230)};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 10px;
-            }}
-        """)
+        # 表面规范与浮层卡同源（CardStyles.floating），alpha 沿用原本的 230。
+        self.setStyleSheet(CardStyles.floating("SystemCardFrame", alpha=230))
 
     def refresh_style(self):
         """刷新主题底色和边框 — 子控件样式各自独立更新，不依赖 Qt 级联

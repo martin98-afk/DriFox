@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
 from qfluentwidgets import ScrollArea
 from app.core.command_manager import CommandManager, CommandParameter, CommandType
 from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.design_tokens import CardStyles, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css, get_local_skills, get_skill_by_name
 from app.widgets.cards.card_container import CardContainer
 from app.widgets.elided_label import _ElidedLabel
@@ -821,8 +821,10 @@ class CommandCard(QWidget):
     def _setup_ui(self):
         # 自身填充父容器宽度
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # 自定义 QWidget 子类不设 WA_StyledBackground 时，QSS 写的背景/边框/圆角
+        # 一行都不会绘制（见 CardStyles.floating 说明）。
+        self.setAttribute(Qt.WA_StyledBackground, True)
 
-        # 自身样式：使用系统实时卡片背景色，底部直角与输入框融合
         Colors.refresh()
         self._apply_self_style()
 
@@ -893,21 +895,16 @@ class CommandCard(QWidget):
         layout.addWidget(self._detail_container)
 
     def _apply_self_style(self):
-        """应用 CommandCard 自身的样式（背景/边框/圆角）。
+        """应用 CommandCard 自身的表面样式（背景/边框/圆角）。
+
+        统一走 CardStyles.floating：旧写法用 REALTIME_BG 底 + REALTIME_BORDER
+        饱和蓝描边 + 上圆角 8 / 下直角，浅色主题下底色与对话区几乎同色、
+        而容器已留 8px 内边距使卡片底部悬空，直角反而割裂。
 
         抽出为独立方法以便主题切换时重新调用。
         """
         Colors.refresh()
-        self.setStyleSheet(f"""
-            CommandCard {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-            }}
-        """)
+        self.setStyleSheet(CardStyles.floating("CommandCard"))
 
     def _apply_scroll_area_styles(self, scroll_area: "ScrollArea"):
         """应用列表/参数/值三个滚动区的统一样式（滚动条 + viewport）

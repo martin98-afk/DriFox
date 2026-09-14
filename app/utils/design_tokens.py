@@ -843,6 +843,37 @@ class CardStyles:
             }}
         """
 
+    # 浮层卡表面圆角（与 SystemCardFrame / QueueMessageCard / UndoDeleteCard 同族）
+    FLOATING_RADIUS = 10
+
+    @staticmethod
+    def floating(cls_name: str, alpha: int = 250, border: str | None = None) -> str:
+        """浮层卡表面规范单一真源：CARD_BG 底 + 中性边框 + 四角同圆角。
+
+        底部/顶部悬浮卡（子智能体、命令、文件提及、问题、排队、撤销）与系统卡
+        框架共用本函数，避免各卡各写一套导致主题漂移。
+
+        Args:
+            cls_name: QSS 类型选择器名，必须与 widget 类名逐字一致。
+            alpha: 底色不透明度；250 而非 255，留一点透底让边缘过渡自然。
+            border: 边框色，默认主题中性 BORDER。需要状态语义时才传饱和色。
+
+        ⚠️ 配套要求：调用方必须 setAttribute(Qt.WA_StyledBackground, True)。
+        自定义 QWidget 子类不设该属性时，QSS 的 background / border /
+        border-radius 一行都不会绘制（QLabel 例外，它天然绘制背景）。
+        2026-09-14 排查「子智能体/命令/文件卡没有容器」时实测：全项目 13 处
+        自绘表面只有排队卡、撤销卡配对了该属性，其余全部静默失效——样式写了
+        等于没写，卡片内容直接裸浮在对话区上。
+        """
+        Colors.refresh()
+        return (
+            f"{cls_name} {{"
+            f" background-color: {Colors.CARD_BG.format(alpha=alpha)};"
+            f" border: 1px solid {border or Colors.BORDER};"
+            f" border-radius: {CardStyles.FLOATING_RADIUS}px;"
+            f" }}"
+        )
+
 
     @staticmethod
     def scroll_area() -> str:
