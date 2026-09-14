@@ -354,13 +354,30 @@ def _get_dynamic_model_capabilities(model_name: str) -> Optional[Dict[str, Any]]
         return None
 
 
-def get_model_capabilities(model_name: str) -> Dict[str, Any]:
+def _read_user_override(provider_name: str, model_name: str) -> Dict[str, Any]:
+    """读用户层能力覆盖（中文键 dict）。失败返回空 dict。
+
+    独立成函数便于测试 monkeypatch，同时把「读配置」这个可能抛异常的
+    动作隔离在能力查找主路径之外。
+    """
+    try:
+        from app.utils.model_capability_override import get_override
+
+        return get_override(provider_name, model_name)
+    except Exception:
+        return {}
+
+
+def get_model_capabilities(model_name: str, provider_name: str = "") -> Dict[str, Any]:
     """按模型名查表，返回能力 dict；查不到返回空 dict。
 
     匹配规则：先按 strip 后的精确匹配，再按小写精确匹配。
-    优先级：models.dev 动态数据 > 硬编码 MODEL_CAPABILITIES。
+    优先级：用户覆盖 > models.dev 动态数据 > 硬编码 MODEL_CAPABILITIES。
     动态数据更准确（可修正硬编码错误），同名 key 用动态值覆盖。
     硬编码独有的字段（如 thinking_enable_value）保留作为补充。
+
+    provider_name 可选：只有传了才查用户覆盖（覆盖值按「服务商||模型」存）。
+    缺省时行为与「无覆盖层」完全一致，保证既有调用零回归。
     """
     if not model_name:
         return {}
@@ -392,6 +409,13 @@ def get_model_capabilities(model_name: str) -> Dict[str, Any]:
         thinking_keys = {"supports_thinking", "thinking_param"}
         hc_fallback = {k: v for k, v in result.items() if k not in thinking_keys and k not in dynamic_caps}
         result = {**dynamic_caps, **hc_fallback}
+
+    # 用户覆盖层（最高优先级）：只有显式传 provider_name 才查。
+    # 用户显式配置的意图优先于自动同步的 models.dev 数据。
+    if provider_name:
+        from app.utils.model_capability_override import apply_override
+
+        result = apply_override(result, _read_user_override(provider_name, name))
 
     return result
 
@@ -504,16 +528,19 @@ def resolve_max_output_tokens(llm_config: Dict[str, Any], default: int = 4096) -
         return max(1, int(default))
 
 
-def apply_model_defaults(config: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+def apply_model_defaults(config: Dict[str, Any], model_name: str, provider_name: str = "") -> Dict[str, Any]:
     """对 config 字典叠加上模型默认值，返回新 dict（不修改原对象）。
 
     合并顺序（低 → 高）：
         L1: DEFAULT_MODEL_PARAMS        （硬编码兜底）
         L2: config 中已有的值           （已保存/saved_providers/插件默认）
-        L3: MODEL_CAPABILITIES[模型名]  （模型固有能力，覆盖 L1/L2 中对应的键）
+        L3: MODEL_CAPABILITIES[模型名]  （模型固有能力，含用户覆盖层，覆盖 L1/L2 中对应的键）
         ─ 后续在 _load_model_config_to_card 中还有 model_overrides（最高）
 
     所以最终优先级：model_overrides > 模型能力 > config > 硬编码兜底
+
+    provider_name 可选：透传给 get_model_capabilities 以命中用户能力覆盖。
+    缺省时行为与「无覆盖层」完全一致。
 
     用途：当服务商不在 providers 插件（自定义服务商）时，
     确保 UI 能看到合理的默认值（温度 0.7、top_p 1.0 等）。
@@ -525,28 +552,30 @@ def apply_model_defaults(config: Dict[str, Any], model_name: str) -> Dict[str, A
     # L2: config 已有值（saved_providers + 插件默认）
     result.update(config)
     # L3: 模型能力（覆盖前两层，之后 model_overrides 还会覆盖回来）
-    caps = get_model_capabilities(model_name)
+    caps = get_model_capabilities(model_name, provider_name)
     if caps.get("context_limit"):
         result["最大Token"] = caps["context_limit"]
         result["上下文长度"] = caps["context_limit"]
-        if caps.get("supports_thinking"):
-            # 仅在 config 还没显式设置时填默认（避免覆盖用户的 model_overrides）
-            if "思考模式" not in result:
-                result["思考模式"] = True
-            # 思考等级只对 reasoning_effort 型模型有意义（toggle/budget 型无强度概念）
-            if "思考等级" not in result and caps.get("thinking_param") == "reasoning_effort":
-                # 默认等级优先取 models.dev 给出的 effort 可选值第一个，
-                # 否则回退固定默认（如 deepseek 等无 values 数据的模型）
-                effort_values = caps.get("reasoning_effort_values") or []
-                # 默认取第一个"非关闭"档位：values 首项常是 none/no_think
-                default_effort = next(
-                    (v for v in effort_values if str(v).lower() not in _EFFORT_OFF_VALUES), None
-                )
-                result["思考等级"] = default_effort or (effort_values[0] if effort_values else "medium")
-        else:
-            # 模型不支持思考 → 主动移除思考相关字段
-            # （用户如果之前在 model_overrides 里显式开过，会在 _load_model_config_to_card 后续被补回）
-            result.pop("思考模式", None)
-            result.pop("思考等级", None)
-            result.pop("思考预算", None)
+
+    # 思考字段独立于 context_limit 判断：自定义模型可能只声明了思考能力、
+    # 没有 context_limit 数据。旧实现把两块耦合成一个分支，导致这类模型的
+    # 思考默认值永不注入（自定义模型思考锁死的三道关卡之一）。
+    if caps.get("supports_thinking"):
+        # 仅在 config 还没显式设置时填默认（避免覆盖用户的 model_overrides）
+        if "思考模式" not in result:
+            result["思考模式"] = True
+        # 思考等级只对 reasoning_effort 型模型有意义（toggle/budget 型无强度概念）
+        if "思考等级" not in result and caps.get("thinking_param") == "reasoning_effort":
+            # 默认等级优先取 models.dev / 用户覆盖给出的 effort 可选值第一个，
+            # 否则回退固定默认（如 deepseek 等无 values 数据的模型）
+            effort_values = caps.get("reasoning_effort_values") or []
+            # 默认取第一个"非关闭"档位：values 首项常是 none/no_think
+            default_effort = next((v for v in effort_values if str(v).lower() not in _EFFORT_OFF_VALUES), None)
+            result["思考等级"] = default_effort or (effort_values[0] if effort_values else "medium")
+    else:
+        # 模型不支持思考 → 主动移除思考相关字段
+        # （用户如果之前在 model_overrides 里显式开过，会在 _load_model_config_to_card 后续被补回）
+        result.pop("思考模式", None)
+        result.pop("思考等级", None)
+        result.pop("思考预算", None)
     return result
