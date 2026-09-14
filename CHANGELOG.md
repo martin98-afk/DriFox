@@ -1,9 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
-## [v0.6.0] - 2026-09-14 (重新发布 #3)
+## [v0.6.0] - 2026-09-15 (重新发布 #4)
 
-自上一版本以来的变更 | 提交数：19 · 文件变更：86 · +5360/-1280 | 贡献者：mading, drifox-bot
+自上一版本以来的变更（累计） | 提交数：39 · 文件变更：125 · +10625/-3979 | 贡献者：mading, drifox-bot, dingma
 
 ### ✨ 新功能 (New Features)
 
@@ -44,6 +44,36 @@ All notable changes to this project will be documented in this file.
 ### 🐛 问题修复（重新发布补充 #3）
 
 - **模型列表获取卡死** (`app/widgets/cards/settings/provider_edit_card.py`, `tests/widgets/test_provider_edit_card_models_hook.py` 新增): 服务商走 `capabilities["models_hook"]` 自定义获取时（CodeBuddy 即此类），UI 侧 `_do_fetch_thread` 零参调用 `fetch_func()`，而插件实现为 `_fetch_models(config)` 需要当前表单值（按 `API_KEY` 里的 refresh_token 换取访问令牌）—— `TypeError` 在线程内抛出后直接杀死线程，`fetchSuccess` / `fetchFailed` 两个信号一个都不发，按钮停在禁用态且无任何提示，用户表现为「一直卡住获取不到」。修复三处：① `_on_fetch_models` 组装当前表单值（`API_URL` / `API_KEY` / `模型名称` / `认证方式`）作为 config 传给 hook；② `_do_fetch_thread` 加异常兜底，任何异常转成 `fetchFailed` 信号，杜绝线程静默死亡；③ `fetchFailed` 信号签名改为 `pyqtSignal(str)` 携带失败原因，`_on_fetch_failed` 直接展示插件给出的具体原因（如「尚未登录：请先点击登录」），取代笼统的「请检查配置」。新增 6 条回归测试，覆盖传参契约、异常透传、空结果、成功刷新下拉框与失败文案。`ce57a5ad`, `cd007556`
+
+### 🆕 重新发布 #4 增量（自重新发布 #3 起）
+
+基于上次重新发布 v0.6.0 (重新发布 #3) 的增量变更 | 提交数：20 · 文件变更：39 · +5265/-2699 | 贡献者：dingma
+
+#### ✨ 新功能 (New Features)
+
+- **流式消息增量式终结，减少全量重绘** (`app/widgets/message_card.py`, `tests/widgets/test_incremental_finalize.py` 新增): 引入增量终结机制，仅对当前活跃块与受影响的尾部片段做增量 DOM 更新，避免每 chunk 触发全卡重渲染，大幅降低流式期主线程负载。`c8c67d11`
+
+- **模型列表编辑器三段式升级 + 能力覆盖层 + 隐藏/别名** (`app/widgets/model_list_edit_dialog.py`, `app/widgets/cards/settings/model_selector_card.py`, `app/widgets/cards/settings/model_config_card.py`, `app/widgets/cards/settings/provider_edit_card.py`, `app/main_widget.py`, `app/core/workers/chat_worker.py`, `app/core/workers/subagent_worker.py`, `app/utils/model_list_ops.py` 新增, `app/utils/model_capability_override.py` 新增, `app/core/model_capabilities.py`, `app/core/provider_profile.py`, `app/constants.py`, `tests/`): 模型列表编辑器由平面单段升级为「工具栏 + 列表 + 元数据」三段式，新增勾选隐藏、别名编辑、批量导入、搜索、元数据展示五类操作；新增模型能力覆盖模块（中文键防泄漏），能力查找链接入用户覆盖层、思考注入独立分支、多模态覆盖，模型配置卡新增「模型能力」分组，能力查询透传 `provider_name`；main_widget / worker 接入隐藏过滤、别名显示与能力覆盖透传；新增纯函数操作模块（增量合并 / 隐藏过滤 / 别名解析）。`951d32ba`, `ef7f7685`, `d9549b4a`, `5facfceb`, `7d3e6cad`, `e060c89a`, `99e43f8b`
+
+- **ChatSession 惰性消息释放与重载** (`app/core/chat_session.py`, `app/core/backend.py`, `app/main_widget.py`, `.gitignore`, `tests/core/test_session_message_release.py` 新增, `tools/diag_session_mem_probe.py` 新增): 会话消息改为按需惰性释放（加载时仅初始化当前可视窗口附近的批次），切换会话时主动释放已加载批次，避免长会话内存暴涨；引入 `.probe/` 目录忽略模式。`51d80207`
+
+- **更新下载代理设置卡 + 链路接入** (`app/utils/update_proxy.py` 新增, `app/utils/config.py`, `app/update_checker.py`, `app/utils/utils.py`, `app/widgets/cards/settings/update_proxy_card.py` 新增, `app/widgets/cards/settings/llm_settings_card.py`, `app/main_widget.py`, `tests/utils/test_update_proxy.py` 新增): 新增 `Update.ProxyMode`（direct / system / prefix / http）配置项 + 代理解析模块；新增「更新下载代理」设置卡组件（位于设置页更新分区），检查更新与下载链路接入代理配置；加速前缀只作用于安装包下载，检查更新始终直连 `api.github.com`。`c74f714e`, `5f0bbd24`, `69a077af`, `a83e1aea`
+
+#### 🐛 问题修复 (Bug Fixes)
+
+- **加载长会话渲染配额被架空导致内存暴涨** (`app/main_widget.py`, `tests/widgets/test_render_quota_enforcement.py` 新增, `docs/perf/memory-governance.md`): `_recycle_out_of_view_batches` 第一步补渲染只累加日志用的 `lazy_render_count` 而不写回 `_rendered_card_count`，配额永久低估 → `_recycle_lru_batches` 淘汰链一次不跑；保留范围误用「加载窗口」、候选耗尽无降级。修复后按真实布局几何取视口相交批次 + 实况写回 + 超配额接续淘汰 + `_recount_rendered_cards` 兜底；新增 10 条回归测试 + 内存治理文档。`e1a59e2e`
+
+- **服务商编辑卡拉取增量合并 + 保存保留未知键 + 写入隐藏/别名** (`app/widgets/cards/settings/provider_edit_card.py`, `tests/widgets/test_model_list_editor.py`): 拉取模型走增量合并，保存时保留未知键并写入隐藏/别名到配置。`dfab4c85`
+
+- **代理设置卡输入框遮挡标题 + 展开后底部空白** (`app/widgets/cards/settings/update_proxy_card.py`): 输入框在未选中模式下浮出遮挡标题；展开后底部残留空白。两处独立修复。`ef4d34d5`, `f3a4324e`
+
+#### ♻️ 代码重构 (Refactoring)
+
+- **代码结构清理** (`app/`): 22 个文件变更（+860/-2422），主要为重构后的孤立 helper 与实验分支清理，保留对所有现有功能的引用链。`9d05553a`
+
+#### 📚 文档 (Documentation)
+
+- **CHANGELOG 增量记录** (`CHANGELOG.md`): 补记模型列表编辑器升级、自定义模型能力配置、下载代理配置变更。`ccf8b0a2`, `94c1b1f1`
 
 ## [v0.5.12] - 2026-09-14
 
