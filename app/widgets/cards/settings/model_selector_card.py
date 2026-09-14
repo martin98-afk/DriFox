@@ -536,15 +536,26 @@ class ModelSelectorCardContent(QWidget):
             self.content_layout.addWidget(header)
             self._provider_headers.append((header, provider_name))
 
-            # 该服务商内最长模型名宽度（模型名固定宽 → 金额列从同一 x 开始对齐比价）
-            name_width = _measure_name_width(filtered_models)
+            # 该服务商内最长名称宽度（名称固定宽 → 金额列从同一 x 开始对齐比价）
+            # 按显示名计宽：别名可能比真实 id 长，用 id 计宽会让成本列错位
+            name_width = _measure_name_width(
+                [self._model_aliases.get(m) or m for m in filtered_models]
+            )
 
             # 模型列表
             for model_name in filtered_models:
                 is_active = provider_name == current_provider and model_name == current_model
                 note = (model_notes or {}).get(model_name, "") if model_notes else ""
                 alias = self._model_aliases.get(model_name, "")
-                item = ModelItem(provider_name, model_name, is_active, note, name_width, alias, self.content_widget)
+                item = ModelItem(
+                    provider_name,
+                    model_name,
+                    is_active,
+                    note,
+                    name_width,
+                    display_alias=alias,
+                    parent=self.content_widget,
+                )
                 if is_active:
                     self._active_model_item = item
                 item.clicked.connect(self._on_model_clicked)
