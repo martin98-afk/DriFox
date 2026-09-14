@@ -29,7 +29,6 @@ from loguru import logger
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel,
     ExpandSettingCard,
     FluentIcon,
     InfoBar,
@@ -43,6 +42,7 @@ from app.utils.config import Settings
 from app.utils.design_tokens import Colors, font_size_css, scale_font_size
 from app.utils.utils import get_font_family_css
 from app.widgets.cards.settings.expand_height_mixin import DynamicHeightExpandCardMixin
+from app.widgets.elided_label import _ElidedLabel
 
 # 模式清单：(模式常量, 标题, 说明文案)
 # 「跟随系统」的说明在 _refresh 里动态生成（含实时探测结果）
@@ -58,9 +58,19 @@ _MODE_LABEL = {m: t for m, t, _ in MODES}
 _ADDR_MODES = (update_proxy.MODE_PREFIX, update_proxy.MODE_HTTP)
 
 
-def _hint(text: str, parent) -> BodyLabel:
-    label = BodyLabel(text, parent)
-    label.setWordWrap(True)
+def _hint(text: str, parent) -> _ElidedLabel:
+    """说明文字（单行省略）
+
+    ⚠️ 用 `_ElidedLabel` 而非 `BodyLabel(wordWrap=True)`：后者是自动换行的
+    QLabel，其 C++ sizeHint 按**理想宽度**算换行高度，实测虚高 12px 以上；
+    多行累加后卡片底部多出一大块空白。而 PyQt5 里布局对 QWidgetItem 的
+    sizeHint 调用不派发 Python override，覆写 sizeHint() 无效。
+    项目内 `render_advanced_card` 已经在用本方案（同源坑）。
+    """
+    label = _ElidedLabel(text, parent)
+    label.setMinimumWidth(40)
+    # _ElidedLabel 构造时会把全文设成 tooltip；本行已有整体 tooltip，清掉避免重复
+    label.setToolTip("")
     label.setStyleSheet(
         f"color: {Colors.TEXT_MUTED}; background: transparent; {get_font_family_css()} {font_size_css(11)}"
     )
@@ -79,6 +89,7 @@ class _ModeRow(QFrame):
         self.setCursor(Qt.PointingHandCursor)
 
         v = QVBoxLayout(self)
+        self._vbox = v
         v.setContentsMargins(12, 8, 12, 8)
         v.setSpacing(2)
 
@@ -93,7 +104,7 @@ class _ModeRow(QFrame):
         self._desc = _hint(desc, self)
         v.addWidget(self._desc)
 
-        # 输入区（仅 prefix / http 模式创建；由卡片控制显隐）
+        # 输入区（仅 prefix / http 模式创建）
         self._input_row: QWidget | None = None
         self.edit: LineEdit | None = None
         self.test_btn: PushButton | None = None
@@ -108,8 +119,7 @@ class _ModeRow(QFrame):
             self.test_btn.setFixedWidth(64)
             h.addWidget(self.edit, 1)
             h.addWidget(self.test_btn)
-            self._input_row.setVisible(False)
-            v.addWidget(self._input_row)
+            # 不在这里 addWidget：初始未选中，由 set_input_visible 按需挂载
 
         self.refresh_style()
         self._apply_style()
@@ -118,8 +128,24 @@ class _ModeRow(QFrame):
         self._desc.setText(text)
 
     def set_input_visible(self, visible: bool) -> None:
-        if self._input_row is not None:
-            self._input_row.setVisible(visible)
+        """显隐输入区
+
+        ⚠️ 用「从布局里摘掉 / 挂回」而非 setVisible——后者只隐藏控件，
+        但行的 sizeHint 仍含输入区高度（QVBoxLayout 对嵌套子布局的隐藏
+        子项算不准，PyQt5 又不派发 Python 的 sizeHint override），
+        表现为卡片底部多出一条输入框高的大片空白。摘掉后行高才是真的。
+        """
+        if self._input_row is None:
+            return
+        in_layout = self._vbox.indexOf(self._input_row) != -1
+        if visible and not in_layout:
+            self._vbox.addWidget(self._input_row)
+            self._input_row.setVisible(True)
+        elif not visible and in_layout:
+            self._vbox.removeWidget(self._input_row)
+            self._input_row.setParent(self)
+            self._input_row.setVisible(False)
+        self.updateGeometry()
 
     def set_selected(self, selected: bool):
         if self._selected == selected:
@@ -148,11 +174,12 @@ class _ModeRow(QFrame):
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:
             # 点输入区不该触发选中。输入框/按钮的 mouseRelease 会冒泡到这里，
-            # 所以必须按坐标排除 —— e.pos() 与几何坐标同以本行为原点。
-            if self._input_row is not None and self._input_row.isVisible():
-                if self._input_row.geometry().contains(e.pos()):
-                    super().mouseReleaseEvent(e)
-                    return
+            # 所以按坐标排除 —— 输入区已挂载时是本行的子控件，e.pos() 与
+            # geometry() 同以本行为原点，可直接比较。
+            ir = self._input_row
+            if ir is not None and ir.isVisible() and ir.geometry().contains(e.pos()):
+                super().mouseReleaseEvent(e)
+                return
             self.selected.emit()
         super().mouseReleaseEvent(e)
 
