@@ -741,10 +741,18 @@ class TrayManager(QObject):
 
         # —— 注册失败：组合键被占用，回退到 keyboard LL 钩子 ——
         err = ctypes.GetLastError()
-        logger.warning(
-            f"[TrayManager] RegisterHotKey 注册失败({hotkey_str}): 错误码 {err}"
-            f"（组合键已被其它程序占用，自动回退到 keyboard 钩子兼容模式）"
-        )
+        if getattr(self, "_hotkey_failed_once", False) and self._hotkey_failed_hotkey == hotkey_str:
+            # 已提示过占用：kbd 兜底态每次调用都会重试原生注册（升回机制），
+            # 占用方仍在时每次都失败——降为 debug，避免热重载/健康检查刷 warning
+            logger.debug(
+                f"[TrayManager] RegisterHotKey 重试失败({hotkey_str}): 错误码 {err}"
+                f"（占用方仍在，维持 keyboard 钩子兼容模式）"
+            )
+        else:
+            logger.warning(
+                f"[TrayManager] RegisterHotKey 注册失败({hotkey_str}): 错误码 {err}"
+                f"（组合键已被其它程序占用，自动回退到 keyboard 钩子兼容模式）"
+            )
         # 仅首次失败 / 更换组合时弹一次托盘提示，引导用户换键
         if not getattr(self, "_hotkey_failed_once", False) or self._hotkey_failed_hotkey != hotkey_str:
             self._hotkey_failed_once = True

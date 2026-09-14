@@ -874,10 +874,14 @@ class AsyncUpdateChecker(QThread):
             if resp.status_code == 200:
                 logger.debug(f"GitHub API 响应: {resp.json()}")
                 return resp.json()
-            else:
+            if resp.status_code in (403, 429) and "rate limit" in resp.text.lower():
+                # 限流与一般失败区分提示：匿名配额 60 次/小时/IP，易被共享出口耗尽
                 logger.debug(f"GitHub API 响应: {resp.text}")
-                self.error.emit(f"GitHub API 请求失败：{resp.status_code}")
+                self.error.emit("GitHub API 限流（未配置 token 时 60 次/小时），请稍后重试或配置 GitHub token")
                 return None
+            logger.debug(f"GitHub API 响应: {resp.text}")
+            self.error.emit(f"GitHub API 请求失败：{resp.status_code}")
+            return None
 
     async def fetch_gitee(self):
         headers = {"Authorization": self.token} if self.token else {}

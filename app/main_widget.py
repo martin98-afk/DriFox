@@ -3592,6 +3592,15 @@ class OpenAIChatToolWindow(ToolWindow):
                         _tm._update_shared_launcher()
                 except Exception:
                     logger.exception("[UIPluginDeferred] Failed to refresh shared launcher")
+
+                # 启动装载完成：收口 watcher 启动基线期（插件装载期自身写文件
+                # 不再触发即时热重载；窗口内累积变更由合并兑底重载消费）
+                try:
+                    from app.core.plugin_host_service import PluginHostService
+
+                    PluginHostService.get_instance().finish_watcher_baseline()
+                except Exception as e:
+                    logger.debug(f"[MainWidget] watcher 基线期收口失败（不影响启动）: {e}")
             except Exception as e:
                 logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
 
@@ -3835,8 +3844,10 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[MainWidget] 标题栏分支标签补装失败: {e}")
 
-    # 单个 UI 插件装载超过该阈值时让出事件循环一帧（防主线程连续冻结）
-    _UI_PLUGIN_YIELD_MS = 200
+    # 单帧 UI 插件装载预算：本帧累计装载耗时达到预算即让出事件循环一帧。
+    # 快插件（几十 ms）打包在同一帧连续装载，避免逐个让帧引入的调度间隙
+    # （实测 25 个插件因此拖出 4.7s 总窗口）；慢插件独占一帧后仍会让出。
+    _UI_PLUGIN_FRAME_BUDGET_MS = 60
 
     def _load_all_ui_plugins(self, on_done=None):
         """加载所有已启用的 UI 插件
@@ -3878,12 +3889,12 @@ class OpenAIChatToolWindow(ToolWindow):
         logger.info(f"[MainWidget] Found {len(plugin_dirs)} UI-enabled plugins: {[p[0] for p in plugin_dirs]}")
         self._load_ui_plugins_step(plugin_dirs, 0, 0, on_done)
 
-    def _load_ui_plugins_step(self, plugin_dirs, idx: int, loaded: int, on_done=None):
-        """逐个装载 UI 插件：单插件耗时超阈值时让出事件循环一帧
+    def _load_ui_plugins_step(self, plugin_dirs, idx: int, loaded: int, on_done=None, frame_spent: float = 0.0):
+        """分帧装载 UI 插件：单帧累计装载耗时超预算时让出事件循环一帧
 
-        顺序与一次性装载完全一致（多数插件几十 ms，连续跑完不产生额外调度），
-        只在遇到慢插件（实测 browser 曾独占 3.4s）时插一帧，把连续数秒的主线程
-        冻结切成可响应的碎片；装载数量与最终注册表状态不变。
+        装载顺序不变；快插件（几十 ms）在同一帧内连续跑完不产生额外调度，
+        累计耗时达 _UI_PLUGIN_FRAME_BUDGET_MS 才让帧，把连续数秒的主线程
+        冻结切成可响应碎片的同时，避免逐个插件让帧的调度间隙。
         """
         if idx >= len(plugin_dirs):
             if loaded > 0:
@@ -3904,10 +3915,13 @@ class OpenAIChatToolWindow(ToolWindow):
         cost_ms = (time.perf_counter() - t0) * 1000
         if ok:
             loaded += 1
+        frame_spent += cost_ms
 
-        next_call = lambda: self._load_ui_plugins_step(plugin_dirs, idx + 1, loaded, on_done)  # noqa: E731
-        if cost_ms >= self._UI_PLUGIN_YIELD_MS:
-            logger.info(f"[MainWidget] UI 插件 {name} 装载耗时 {cost_ms:.0f}ms（让出一帧继续）")
+        next_call = lambda: self._load_ui_plugins_step(plugin_dirs, idx + 1, loaded, on_done, 0.0)  # noqa: E731
+        if frame_spent >= self._UI_PLUGIN_FRAME_BUDGET_MS:
+            logger.info(
+                f"[MainWidget] UI 插件 {name} 装载耗时 {cost_ms:.0f}ms（本帧累计 {frame_spent:.0f}ms，让出事件循环）"
+            )
             QTimer.singleShot(0, lambda: self._safe_timer_call(next_call))
         else:
             next_call()
@@ -11153,6 +11167,7 @@ class OpenAIChatToolWindow(ToolWindow):
                 return
             self._displayed_session_id = None
             self._add_chat_widget(welcome_card)
+            self._welcome_rendered_once = True
             logger.debug(f"[OpenAIChatToolWindow] _show_initial_welcome OK: wid={self._window_id}")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[OpenAIChatToolWindow] _show_initial_welcome 渲染失败（wid={self._window_id}）: {e}")
@@ -11161,6 +11176,12 @@ class OpenAIChatToolWindow(ToolWindow):
     _WELCOME_SLOT_COUNT = 20  # 槽位数：50ms × 20 = 1000ms 上限轮转
     # pending 守卫超时：slot 回调丢失（QTimer 竞态）时强制放行重建，防永久熔断
     _WELCOME_PENDING_TIMEOUT_S = 3.0
+    # 启动窗口合并：进程启动后该时长内，首屏渲染之后的重复 welcome 调度
+    # 不再逐次渲染，改为尾触去抖合并为一次（UI 插件逐个装载期每个带
+    # welcome_tab 的插件都会 invalidate+reschedule，实测启动期欢迎卡重建 4 次）
+    _WELCOME_STARTUP_MERGE_S = 20.0
+    _WELCOME_STARTUP_DEBOUNCE_MS = 600
+    _welcome_first_schedule_at = None  # 类级：首次 welcome 调度时刻（启动窗口基准）
 
     def _schedule_initial_welcome(self):
         """QTimer 交错调度欢迎卡片渲染（C2：并发会话创建不卡 UI）
@@ -11202,6 +11223,39 @@ class OpenAIChatToolWindow(ToolWindow):
                 )
         except (AttributeError, RuntimeError):
             pass  # stub（__new__ 绕过 __init__）实例无此属性，视为未 pending
+        # 启动窗口合并（性能）：首屏已渲染过、且距进程首次 welcome 调度未超
+        # _WELCOME_STARTUP_MERGE_S 的重复调度，改为尾触去抖（600ms 内只渲染
+        # 最后一次）；异常（stub/已销毁窗口）回退立即调度，不破坏既有语义。
+        cls = type(self)
+        now_m = time.monotonic()
+        first_t = getattr(cls, "_welcome_first_schedule_at", None)
+        if first_t is None:
+            cls._welcome_first_schedule_at = now_m
+            first_t = now_m
+        try:
+            rendered_once = bool(self._welcome_rendered_once)
+        except (AttributeError, RuntimeError):
+            rendered_once = False
+        if rendered_once and (now_m - first_t) < cls._WELCOME_STARTUP_MERGE_S:
+            try:
+                timer = getattr(self, "_welcome_startup_merge_timer", None)
+                if timer is None:
+                    from PyQt5.QtCore import QTimer as _QTimer
+
+                    timer = _QTimer(self)
+                    timer.setSingleShot(True)
+                    timer.timeout.connect(
+                        lambda: self._safe_timer_call(self._on_welcome_render_slot)
+                    )
+                    self._welcome_startup_merge_timer = timer
+                timer.start(cls._WELCOME_STARTUP_DEBOUNCE_MS)
+                logger.debug(
+                    f"[OpenAIChatToolWindow] _schedule_initial_welcome: 启动窗口合并去抖 "
+                    f"{cls._WELCOME_STARTUP_DEBOUNCE_MS}ms（wid={self._window_id}）"
+                )
+                return
+            except (AttributeError, RuntimeError, TypeError):
+                pass  # stub/已销毁窗口：回退立即调度
         self._welcome_render_pending = True
         self._welcome_render_pending_since = now
         cls = type(self)

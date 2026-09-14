@@ -360,6 +360,13 @@ class PluginHostService(QObject):
     # _watcher_pending_reload: 抑制窗口内被跳过的 user-custom 变更标志，
     # 由 config_sync 下载完成后兜底合并触发一次 reload_plugin_subsystems。
     _suppress_watcher_until = 0.0
+    # 启动基线期截止时间戳（0=已结束）：watcher 启动后的一段窗口内，
+    # 插件自身在装载期写的 runtime 文件（日志/状态/控制端点 token 等）
+    # 会被当成外部变更触发即时重载（实测 browser 启动后 8s 被自己触发的
+    # mcp 重载拖住主线程 ~450ms）。基线期内变更进 pending，窗口结束后
+    # 走既有的合并兑底重载一次消费，不丢变更。由 main_widget 在 UI 插件
+    # 全部装载完成后调 finish_watcher_baseline() 提前收口（留 2s 缓冲）。
+    _watcher_baseline_until = 0.0
     _watcher_pending_reload = False
     # 引用计数式抑制（suppress_plugin_watcher/resume_plugin_watcher 维护，
     # 并发安装/卸载互不清除的语义基础——见模块头注释）
@@ -468,6 +475,10 @@ class PluginHostService(QObject):
         if not watch_paths:
             logger.warning("[PluginHost] 无插件目录可监听，跳过热更新")
             return
+
+        # 启动基线期（兜底 15s，正常由 finish_watcher_baseline 提前收口）：
+        # UI 插件装载期内插件自身写文件不再触发即时重载（风暴治理）。
+        self._watcher_baseline_until = time.time() + 15.0
 
         logger.info(f"[PluginHost] 启动插件文件变更监听: {watch_paths}")
 
@@ -845,8 +856,22 @@ class PluginHostService(QObject):
         t.start()
 
     def _watcher_suppressed(self) -> bool:
-        """watcher 当前是否处于抑制窗口（引用计数 + 截止时间戳任一命中）"""
-        return self._watcher_suppress_refs > 0 or time.time() < self._suppress_watcher_until
+        """watcher 当前是否处于抑制窗口（引用计数 + 截止时间戳 + 启动基线期任一命中）"""
+        return (
+            self._watcher_suppress_refs > 0
+            or time.time() < self._suppress_watcher_until
+            or time.time() < self._watcher_baseline_until
+        )
+
+    def finish_watcher_baseline(self) -> None:
+        """启动装载完成，提前收口 watcher 基线期（留 2s 缓冲后恢复即时热更新）。
+
+        由 main_widget 在 UI 插件全部装载完成后调用；窗口内累积的变更
+        由 _watch_loop 既有逻辑合并为一次兑底重载，不丢变更。
+        """
+        if self._watcher_baseline_until > 0.0:
+            self._watcher_baseline_until = min(self._watcher_baseline_until, time.time() + 2.0)
+            logger.debug("[PluginHost] watcher 启动基线期收口（2s 缓冲后恢复即时热更新）")
 
     def _stop_plugin_watcher(self):
         """backend 关闭时递减 watcher 引用计数；归零时停止 watchfiles 线程。
@@ -2028,10 +2053,22 @@ class PluginHostService(QObject):
         禁用插件跳过（其组件本就不该加载）。
         """
         missed: Dict[str, List[str]] = {}
+        try:
+            from app.utils.config import Settings
+
+            disabled_components = set(Settings.get_instance().disabled_plugin_components.value or [])
+        except Exception:
+            disabled_components = set()
         for plugin in pm.list_plugins():
             if not pm.is_enabled(plugin.name):
                 continue
             declared = {c for c, v in (plugin.components or {}).items() if v}
+            if not declared:
+                continue
+            # 组件级禁用（D9）不算漏载：加载链本就跳过它们，补载会被
+            # 再次跳过，白耗 rescan + reload（实测启动期 3 个禁用插件
+            # 被误补载一遍）。
+            declared = {c for c in declared if f"{plugin.name}:{c}" not in disabled_components}
             if not declared:
                 continue
             lack = [c for c in sorted(declared) if self._component_registered(plugin.name, c) is False]

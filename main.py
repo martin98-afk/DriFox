@@ -99,6 +99,18 @@ def main():
     from PyQt5.QtCore import Qt, QTimer
     from PyQt5.QtWidgets import QApplication
 
+    # 启动分段打点：壳前各段（巨型 import / 主窗口构造）历史上有累计 ~3s
+    # 的无日志空窗，逐段 DEBUG 打点便于定位后续优化目标（行为零变更）
+    import time as _sm_time
+
+    _sm_seg = _sm_time.perf_counter()
+
+    def _smark(label: str) -> None:
+        nonlocal _sm_seg
+        _now = _sm_time.perf_counter()
+        logger.debug(f"[StartupMark] {label} 耗时 {(_now - _sm_seg) * 1000:.0f}ms")
+        _sm_seg = _now
+
     if _qt_pp: 
         logger.info(f"[EnvCleanup] QT_PLUGIN_PATH 已清理: {_qt_pp}")
 
@@ -387,7 +399,11 @@ def main():
     logger.info("LLM Chatter 启动中...")
 
     from PyQt5.QtWidgets import QWidget
+
+    _smark("pre_import（单实例/主题/字体）")
     from app.main_widget import OpenAIChatToolWindow
+
+    _smark("import_main_widget")
 
     class FakePage(QWidget):
         def __init__(self):
@@ -423,6 +439,7 @@ def main():
             pass
 
     fake_page = FakePage()
+    _smark("fake_page")
 
     def _activate_window(window):
         """激活窗口：显示 + 置前 + 还原"""
@@ -446,7 +463,9 @@ def main():
         # ── Tab 模式 ──
         from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
+        _smark("import_tab_manager")
         tm = TabManagerWindow.create_instance()
+        _smark("tab_manager_create")
         # [体验] 置顶 hint 必须在首次 show 之前应用：setWindowFlags 在窗口已可见时
         # 会销毁并重建 native 窗口，表现为「窗口出现后闪一下（消失又出现）」。
         # 未 show 时改 flags 不触发重建，后续 tm.show() 一次性显示。
@@ -462,8 +481,11 @@ def main():
         tm.show_boot_placeholder()
         from app.utils.preheat import preheat_process_level
 
+        _smark("shell_show")
         preheat_process_level()
+        _smark("preheat_process")
         chat_window = OpenAIChatToolWindow(fake_page)
+        _smark("first_chat_window")
         tm.add_window(chat_window)
         tm.remove_boot_placeholder()
         tm._mark_first_window_ready()
