@@ -163,3 +163,32 @@ class TestSetAllChecked:
         editor.set_search_text("glm")
         editor.set_all_checked(False)
         assert editor.get_result()[1] == ["glm-5"], "hy3 被搜索过滤掉，不应受影响"
+
+
+class TestNoQtBuiltinEditing:
+    """回归：Qt 内置编辑器与 QInputDialog 双路径打架。
+
+    item.text 含元数据摘要（如「glm-5    204K · 思考」），若启用 Qt 内置编辑，
+    双击会把整串当模型名编辑，改完还只写回 item.text（不回写 _models），
+    导致模型名被污染且改动丢失。改名必须走单一写路径（QInputDialog）。
+    """
+
+    def test_edit_triggers_disabled(self, editor):
+        from PyQt5.QtWidgets import QListWidget
+
+        assert editor.listWidget.editTriggers() == QListWidget.NoEditTriggers
+
+    def test_items_not_editable(self, editor):
+        from PyQt5.QtCore import Qt
+
+        editor.set_models(["glm-5"])
+        item = editor.listWidget.item(0)
+        assert not (item.flags() & Qt.ItemIsEditable), "item 不应可编辑（避免内置编辑器改坏文本）"
+
+    def test_item_text_contains_metadata(self, editor):
+        """item.text 确实带元数据摘要，故绝不能让 Qt 内置编辑器碰它"""
+        editor.set_models(["glm-5"])
+        text = editor.listWidget.item(0).text()
+        assert text.startswith("glm-5")
+        # 模型名仍是纯 id（item.text 是展示串，权威数据在 _models）
+        assert editor.get_result()[0] == ["glm-5"]

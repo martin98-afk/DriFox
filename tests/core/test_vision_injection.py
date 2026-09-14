@@ -286,8 +286,9 @@ class TestVisionNoticeSuppression:
     def _set_caps(monkeypatch, supports_vision: bool):
         import app.core.model_capabilities as mc
 
+        # 桩需兼容真实签名 get_model_capabilities(model_name, provider_name="")
         monkeypatch.setattr(
-            mc, "get_model_capabilities", lambda name: {"supports_vision": supports_vision}
+            mc, "get_model_capabilities", lambda name, provider="": {"supports_vision": supports_vision}
         )
 
     def _build(self, monkeypatch, result_obj, model="gpt-4o", vision=True):

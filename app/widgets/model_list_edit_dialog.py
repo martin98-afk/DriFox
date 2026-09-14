@@ -127,7 +127,9 @@ class ModelListEditorWidget(QWidget):
         self.listWidget.setDragDropMode(QListWidget.InternalMove)
         self.listWidget.setDefaultDropAction(Qt.MoveAction)
         self.listWidget.setSelectionBehavior(QListWidget.SelectRows)
-        self.listWidget.setEditTriggers(QListWidget.DoubleClicked | QListWidget.EditKeyPressed)
+        # 禁用 Qt 内置编辑：item.text 含元数据摘要，内置编辑器会把整串当作模型名。
+        # 改名统一走双击 → QInputDialog（单一写路径，避免两套编辑器打架）。
+        self.listWidget.setEditTriggers(QListWidget.NoEditTriggers)
         self.listWidget.itemDoubleClicked.connect(self._start_edit)
         self.listWidget.itemChanged.connect(self._on_item_changed)
         self.listWidget.model().rowsMoved.connect(self._on_rows_moved)
@@ -174,7 +176,8 @@ class ModelListEditorWidget(QWidget):
                 continue
             item = QListWidgetItem()
             item.setData(_ROLE_MODEL_ID, model_id)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+            # 不置 ItemIsEditable：编辑走 QInputDialog，见 setEditTriggers 注释
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked if model_id.lower() in hidden_lower else Qt.Checked)
             item.setText(self._item_text(model_id))
             self.listWidget.addItem(item)
@@ -370,18 +373,21 @@ class ModelListEditorWidget(QWidget):
         super().keyPressEvent(event)
 
     def _add_new(self):
-        """添加新项并立即编辑"""
-        model_id = "新模型"
-        suffix = 1
-        while model_id in self._models:
-            suffix += 1
-            model_id = f"新模型{suffix}"
+        """回车新增：弹输入框要名字，直接入列（不用 Qt 内置编辑态）。"""
+        parent = self.window()
+        text, ok = QInputDialog.getText(parent, "新增模型", "模型名（API 请求用的真实 id）：")
+        if not ok:
+            return
+        model_id = str(text or "").strip()
+        if not model_id:
+            return
+        if any(m.lower() == model_id.lower() for m in self._models):
+            return
         self._models.append(model_id)
         self._rebuild_list()
         target = self._find_item(model_id)
         if target is not None:
             self.listWidget.setCurrentItem(target)
-            self.listWidget.editItem(target)
 
     def _delete_selected(self):
         """删除选中项（彻底移除，非隐藏）"""
