@@ -119,7 +119,9 @@ class _ModeRow(QFrame):
             self.test_btn.setFixedWidth(64)
             h.addWidget(self.edit, 1)
             h.addWidget(self.test_btn)
-            # 不在这里 addWidget：初始未选中，由 set_input_visible 按需挂载
+            # 初始未选中：不挂进布局，并且必须显式隐藏 —— 否则父控件 show 时
+            # 它会以“无布局子控件”的身份在 (0,0) 浮出来，压在自己的标题上
+            self._input_row.setVisible(False)
 
         self.refresh_style()
         self._apply_style()
@@ -130,10 +132,14 @@ class _ModeRow(QFrame):
     def set_input_visible(self, visible: bool) -> None:
         """显隐输入区
 
-        ⚠️ 用「从布局里摘掉 / 挂回」而非 setVisible——后者只隐藏控件，
+        ⚠️ 用「从布局里摘掉 / 挂回」而非只 setVisible——后者只隐藏控件，
         但行的 sizeHint 仍含输入区高度（QVBoxLayout 对嵌套子布局的隐藏
         子项算不准，PyQt5 又不派发 Python 的 sizeHint override），
-        表现为卡片底部多出一条输入框高的大片空白。摘掉后行高才是真的。
+        表现为卡片底部多出一条输入框高的大片空白。
+
+        ⚠️ 两条路都必须调 setVisible：只 removeWidget 的话控件仍留在父控件
+        可见性体系里，父控件 show 时会以「无布局子控件」身份在 (0,0)
+        浮出来，直接压在自己的标题上。
         """
         if self._input_row is None:
             return
@@ -141,9 +147,9 @@ class _ModeRow(QFrame):
         if visible and not in_layout:
             self._vbox.addWidget(self._input_row)
             self._input_row.setVisible(True)
-        elif not visible and in_layout:
-            self._vbox.removeWidget(self._input_row)
-            self._input_row.setParent(self)
+        elif not visible:
+            if in_layout:
+                self._vbox.removeWidget(self._input_row)
             self._input_row.setVisible(False)
         self.updateGeometry()
 
