@@ -15,11 +15,8 @@ import pytest
 
 from app.core.provider_profile import detect_provider_family, get_provider_profile
 from app.plugins.registries.provider_registry import ProviderRegistry
-from app.utils.utils import get_app_data_dir
 
-_PROVIDER_FILE = (
-    get_app_data_dir() / "plugins" / "codebuddy-provider" / "providers" / "codebuddy.py"
-)
+_PROVIDER_FILE = Path("plugins/system-providers/providers/codebuddy.py")
 
 pytestmark = pytest.mark.skipif(
     not _PROVIDER_FILE.exists(), reason="codebuddy-provider 插件未安装"
@@ -68,10 +65,11 @@ def test_capabilities_carry_disguise_headers(fresh_provider_registry):
 
 
 def test_declares_login_hook(fresh_provider_registry):
-    """capabilities["login_hook"] 可调用（编辑卡「自动登录」按钮数据源）"""
+    """capabilities["login_hook"] / ["models_hook"] 可调用"""
     _load_codebuddy_plugin().register(fresh_provider_registry)
     caps = fresh_provider_registry.family_capabilities("codebuddy")
     assert callable(caps.get("login_hook"))
+    assert callable(caps.get("models_hook"))
 
 
 # ── family 探测 ─────────────────────────────────────────

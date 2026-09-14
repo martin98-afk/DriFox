@@ -132,6 +132,16 @@ if _WIN:
 _CRED_TYPE_GENERIC = 1
 _CRED_PERSIST_ENTERPRISE = 3
 
+# 单个凭证 Blob 上限 2560 字节（CRED_MAX_CREDENTIAL_BLOB_SIZE = 5*512），
+# utf-16 下等于 1280 字符。超限时 CredWriteW 直接失败（err 1783），旧实现在
+# strip_secrets 里 fail-open → 密钥静默退回明文落盘（CodeBuddy 的 1472 字符
+# JWT 即此例）。解法：超限值拆成 <account>#0..#n-1 分片，主条目只存分片标记，
+# 读取时按标记拼回；老条目无标记，按单片直接读（向后兼容）。
+_WIN_BLOB_MAX = 2560
+_CHUNK_MARKER = "\x00drifox:chunks:"
+_CHUNK_SEP = "#"
+_CHUNK_PROBE_MAX = 32  # 主条目标记缺失时删除分片的探测上限（32 片 ≈ 40960 字符）
+
 
 def _win_target(account: str) -> str:
     """凭证条目 TargetName，与 keyring WinVault 的 username@service 命名一致"""
@@ -172,8 +182,88 @@ def _win_write(account: str, value: str) -> bool:
     return bool(_CredWriteW(_ctypes.byref(cred), 0))
 
 
-def _win_delete(account: str) -> None:
-    _CredDeleteW(_win_target(account), _CRED_TYPE_GENERIC, 0)
+def _win_delete(account: str) -> bool:
+    return bool(_CredDeleteW(_win_target(account), _CRED_TYPE_GENERIC, 0))
+
+
+def _chunk_count(value: str) -> int:
+    """主条目值 → 分片数；非分片标记（单片老数据）返回 0"""
+    if not value.startswith(_CHUNK_MARKER):
+        return 0
+    try:
+        return max(0, int(value[len(_CHUNK_MARKER) :]))
+    except ValueError:
+        return 0
+
+
+def _split_chunks(value: str) -> list:
+    """按 Blob 字节预算切分；逐字符累计，不切断代理对（单字符最多 4 字节 < 上限）"""
+    chunks: list = []
+    buf: list = []
+    size = 0
+    for ch in value:
+        w = len(ch.encode("utf-16-le"))
+        if buf and size + w > _WIN_BLOB_MAX:
+            chunks.append("".join(buf))
+            buf, size = [], 0
+        buf.append(ch)
+        size += w
+    if buf:
+        chunks.append("".join(buf))
+    return chunks
+
+
+def _win_read_value(account: str) -> str:
+    """读凭证（含分片拼回）；任一分片缺失按未找到处理，绝不返回半截密钥"""
+    main = _win_read(account)
+    n = _chunk_count(main)
+    if not n:
+        return main
+    parts = []
+    for i in range(n):
+        part = _win_read(f"{account}{_CHUNK_SEP}{i}")
+        if not part:
+            logger.warning(f"[SecretStore] 分片缺失 account={account} idx={i}/{n}，按未找到处理")
+            return ""
+        parts.append(part)
+    return "".join(parts)
+
+
+def _win_drop_extra_chunks(account: str, keep: int, old_n: int) -> None:
+    """清理本次不再需要的旧分片（值改短 / 分片数变少时残留）"""
+    for i in range(keep, max(keep, old_n)):
+        _win_delete(f"{account}{_CHUNK_SEP}{i}")
+
+
+def _win_write_value(account: str, value: str) -> bool:
+    """写凭证（超限自动分片）。失败即回滚已写分片，主条目保持原值，不损坏旧数据"""
+    old_n = _chunk_count(_win_read(account))
+    if len(value.encode("utf-16-le")) <= _WIN_BLOB_MAX:
+        if not _win_write(account, value):
+            return False
+        _win_drop_extra_chunks(account, 0, old_n)
+        return True
+    chunks = _split_chunks(value)
+    for i, chunk in enumerate(chunks):
+        if not _win_write(f"{account}{_CHUNK_SEP}{i}", chunk):
+            for j in range(i):
+                _win_delete(f"{account}{_CHUNK_SEP}{j}")
+            return False
+    if not _win_write(account, f"{_CHUNK_MARKER}{len(chunks)}"):
+        for i in range(len(chunks)):
+            _win_delete(f"{account}{_CHUNK_SEP}{i}")
+        return False
+    _win_drop_extra_chunks(account, len(chunks), old_n)
+    return True
+
+
+def _win_delete_value(account: str) -> None:
+    """删除凭证：主条目 + 分片；主条目标记缺失时探测清理脏残留分片"""
+    n = _chunk_count(_win_read(account))
+    _win_delete(account)
+    for i in range(n or _CHUNK_PROBE_MAX):
+        if not _win_delete(f"{account}{_CHUNK_SEP}{i}") and not n:
+            break
 
 
 def _load_keyring():
@@ -211,7 +301,7 @@ class SecretStore:
 
     def get(self, account: str) -> str:
         if _WIN:
-            return _win_read(account)
+            return _win_read_value(account)
         if not self.available:
             return ""
         try:
@@ -222,7 +312,7 @@ class SecretStore:
 
     def set(self, account: str, value: str) -> bool:
         if _WIN:
-            return bool(value) and _win_write(account, value)
+            return bool(value) and _win_write_value(account, value)
         if not self.available or not value:
             return False
         try:
@@ -235,7 +325,7 @@ class SecretStore:
     def delete(self, account: str) -> None:
         if _WIN:
             try:
-                _win_delete(account)
+                _win_delete_value(account)
             except Exception:
                 pass
             return
@@ -404,6 +494,9 @@ def strip_secrets(data: Dict[str, Any], store, mode: str = MODE_KEYRING) -> None
         key = str(info.get("API_KEY") or "")
         if key and store.set(provider_account(str(cfg_id)), key):
             info["API_KEY"] = ""
+        elif key:
+            # fail-open 的代价是静默明文落盘，必须留下痕迹才能事后定位
+            logger.warning(f"[SecretStore] 密钥入凭证库失败，cfg={cfg_id} 本次按明文落盘")
 
 
 def unwrap_secrets(data: Dict[str, Any], store, mode: str = MODE_KEYRING, password: str = "") -> None:

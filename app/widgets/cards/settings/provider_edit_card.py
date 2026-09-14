@@ -637,6 +637,15 @@ class ProviderEditCard(QWidget):
         api_key = self.apiKeyEdit.text().strip()
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
 
+        # capabilities["models_hook"]：服务商自定义获取（自包含，无需输入框参数）
+        p = ProviderRegistry.get_instance().get(provider_name)
+        hook = p.capabilities.get("models_hook") if p else None
+        if hook is not None:
+            self.fetchBtn.setEnabled(False)
+            InfoBar.info("获取中", "正在获取模型列表...", parent=parent, duration=3000, position=InfoBarPosition.BOTTOM)
+            threading.Thread(target=self._do_fetch_thread, args=(hook,), daemon=True).start()
+            return
+
         if not api_url or not api_key:
             InfoBar.warning(
                 "提示", "请先填写 API URL 和 Key", parent=parent, duration=2000, position=InfoBarPosition.BOTTOM

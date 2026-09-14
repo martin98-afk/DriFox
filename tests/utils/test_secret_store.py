@@ -265,3 +265,190 @@ def test_seal_batch_shares_salt_and_roundtrips():
     assert len(salts) == 1
     assert ss.decrypt_secret(toks[0], "pwd-123") == "sk-one"
     assert ss.decrypt_secret(toks[1], "pwd-123") == "sk-two"
+
+
+# ── 超长密钥分片（凭证库单条 Blob 上限 2560 字节，utf-16 下 1280 字符） ──
+
+
+class _QuotaStore:
+    """模拟 Windows 凭证库 2560 字节 Blob 上限；超限写入失败（err 1783）"""
+
+    def __init__(self, limit_bytes=2560):
+        self.data = {}
+        self.limit = limit_bytes
+        self.available = True
+
+    def get(self, account):
+        return self.data.get(account, "")
+
+    def set(self, account, value):
+        if not value or len(value.encode("utf-16-le")) > self.limit:
+            return False
+        self.data[account] = value
+        return True
+
+    def delete(self, account):
+        self.data.pop(account, None)
+
+
+def test_split_chunks_respects_byte_budget():
+    """分片不超预算，且拼回等于原值"""
+    value = "A" * 3000
+    chunks = ss._split_chunks(value)
+    assert len(chunks) >= 3
+    assert all(len(c.encode("utf-16-le")) <= ss._WIN_BLOB_MAX for c in chunks)
+    assert "".join(chunks) == value
+
+
+def test_split_chunks_does_not_break_surrogate_pairs():
+    """代理对字符（emoji，4 字节）不被切断，拼回后仍是合法 utf-16"""
+    value = "🔑" * 1000
+    chunks = ss._split_chunks(value)
+    assert all(len(c.encode("utf-16-le")) <= ss._WIN_BLOB_MAX for c in chunks)
+    joined = "".join(chunks)
+    assert joined == value
+    assert joined.encode("utf-16-le").decode("utf-16-le") == value
+
+
+def test_win_write_value_splits_overlong_and_reads_back(monkeypatch):
+    """超长值走分片：主条目存标记，读取拼回原文"""
+    store = _QuotaStore()
+    monkeypatch.setattr(ss, "_win_write", lambda a, v: store.set(a, v))
+    monkeypatch.setattr(ss, "_win_read", lambda a: store.get(a))
+    monkeypatch.setattr(ss, "_win_delete", lambda a: store.delete(a) or True)
+
+    key = "x" * 2944  # CodeBuddy access_token 量级
+    assert ss._win_write_value("provider/abc", key) is True
+    assert store.get("provider/abc").startswith(ss._CHUNK_MARKER)
+    assert ss._win_read_value("provider/abc") == key
+
+
+def test_win_write_value_keeps_short_value_intact():
+    """短值不分片，主条目就是原值（老数据形态不变）"""
+    store = _QuotaStore()
+    assert store.set("provider/short", "sk-123") is True
+    assert ss._chunk_count(store.get("provider/short")) == 0
+
+
+def test_win_write_value_rolls_back_on_partial_failure(monkeypatch):
+    """分片写入中途失败：回滚已写分片，主条目不留标记，旧值不被破坏"""
+    store = _QuotaStore()
+    monkeypatch.setattr(ss, "_win_write", lambda a, v: store.set(a, v))
+    monkeypatch.setattr(ss, "_win_read", lambda a: store.get(a))
+    monkeypatch.setattr(ss, "_win_delete", lambda a: store.delete(a) or True)
+
+    store.set("provider/abc", "OLD-KEY")
+    calls = {"n": 0}
+    real_set = store.set
+
+    def _flaky(account, value):
+        if account.startswith("provider/abc#"):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return False  # 第 2 片失败
+        return real_set(account, value)
+
+    monkeypatch.setattr(ss, "_win_write", _flaky)
+    assert ss._win_write_value("provider/abc", "y" * 3000) is False
+    assert store.get("provider/abc") == "OLD-KEY"
+    assert not any(k.startswith("provider/abc#") for k in store.data)
+
+
+def test_win_read_value_returns_empty_when_chunk_missing(monkeypatch):
+    """分片缺失：按未找到处理，绝不返回半截密钥"""
+    store = _QuotaStore()
+    monkeypatch.setattr(ss, "_win_read", lambda a: store.get(a))
+    monkeypatch.setattr(ss, "_win_delete", lambda a: store.delete(a) or True)
+
+    store.data["provider/abc"] = f"{ss._CHUNK_MARKER}3"
+    store.data["provider/abc#0"] = "part0"
+    # #1、#2 缺失
+    assert ss._win_read_value("provider/abc") == ""
+
+
+def test_win_write_value_shrinks_and_drops_stale_chunks(monkeypatch):
+    """值改短：旧分片被清理，避免脏数据残留"""
+    store = _QuotaStore()
+    monkeypatch.setattr(ss, "_win_write", lambda a, v: store.set(a, v))
+    monkeypatch.setattr(ss, "_win_read", lambda a: store.get(a))
+    monkeypatch.setattr(ss, "_win_delete", lambda a: store.delete(a) or True)
+
+    long_key = "z" * 4000
+    assert ss._win_write_value("provider/abc", long_key) is True
+    assert any(k.startswith("provider/abc#") for k in store.data)
+
+    assert ss._win_write_value("provider/abc", "short-now") is True
+    assert store.get("provider/abc") == "short-now"
+    assert not any(k.startswith("provider/abc#") for k in store.data)
+
+
+def test_win_delete_value_removes_main_and_chunks(monkeypatch):
+    """删除：主条目 + 全部分片一并清理"""
+    store = _QuotaStore()
+    monkeypatch.setattr(ss, "_win_write", lambda a, v: store.set(a, v))
+    monkeypatch.setattr(ss, "_win_read", lambda a: store.get(a))
+    monkeypatch.setattr(ss, "_win_delete", lambda a: store.delete(a) or True)
+
+    assert ss._win_write_value("provider/abc", "q" * 4000) is True
+    ss._win_delete_value("provider/abc")
+    assert not any(k.startswith("provider/abc") for k in store.data)
+
+
+def test_win_delete_value_sweeps_orphan_chunks(monkeypatch):
+    """主条目标记缺失但存在脏分片：探测清理（超长写入中断的历史残留）"""
+    store = _QuotaStore()
+    monkeypatch.setattr(ss, "_win_read", lambda a: store.get(a))
+    monkeypatch.setattr(ss, "_win_delete", lambda a: store.delete(a) or True)
+
+    store.data["provider/abc#0"] = "orphan0"
+    store.data["provider/abc#1"] = "orphan1"
+    ss._win_delete_value("provider/abc")
+    assert not any(k.startswith("provider/abc") for k in store.data)
+
+
+def test_strip_secrets_warns_when_store_write_fails(monkeypatch):
+    """写入失败必须留痕：fail-open 明文落盘不再静默"""
+
+    class _BrokenStore(_FakeStore):
+        def set(self, account, value):
+            return False
+
+    warns = []
+    monkeypatch.setattr(ss.logger, "warning", lambda msg: warns.append(str(msg)))
+    data = _make_data(api_key="sk-too-long")
+    ss.strip_secrets(data, _BrokenStore())
+    assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == "sk-too-long"
+    assert any("明文落盘" in w for w in warns)
+
+
+def test_end_to_end_overlong_key_roundtrip_through_chunked_store(monkeypatch):
+    """端到端：1472 字符 JWT 级别的 key 经 strip/unwrap 后完整闭环，不再退回明文"""
+    store = _QuotaStore()
+    monkeypatch.setattr(ss, "_win_write", lambda a, v: store.set(a, v))
+    monkeypatch.setattr(ss, "_win_read", lambda a: store.get(a))
+    monkeypatch.setattr(ss, "_win_delete", lambda a: store.delete(a) or True)
+
+    class _WinStore:
+        available = True
+
+        def get(self, account):
+            return ss._win_read_value(account)
+
+        def set(self, account, value):
+            return bool(value) and ss._win_write_value(account, value)
+
+        def delete(self, account):
+            ss._win_delete_value(account)
+
+    jwt = "eyJhbGciOiJSUzI1NiIsImtpZCI6Im15ZkV6cDc4M0tp" + "A" * 1420
+    assert len(jwt) > 1280  # 超过 2560 字节 Blob 上限（utf-16 下 1280 字符）
+
+    data = _make_data(api_key=jwt)
+    ss.strip_secrets(data, _WinStore(), mode=ss.MODE_KEYRING)
+    assert data["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == ""
+    assert all(len(v.encode("utf-16-le")) <= ss._WIN_BLOB_MAX for v in store.data.values())
+
+    # 重载：从凭证库拼回内存
+    reloaded = _make_data(api_key="")
+    ss.unwrap_secrets(reloaded, _WinStore(), mode=ss.MODE_KEYRING)
+    assert reloaded["LLM"]["SavedProviders"]["abc12345"]["API_KEY"] == jwt
