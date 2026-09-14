@@ -1,6 +1,38 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.6.0] - 2026-09-14
+
+自上一版本以来的变更 | 提交数：16 · 文件变更：83 · +5041/-1262 | 贡献者：mading, drifox-bot
+
+### ✨ 新功能 (New Features)
+
+- **API Key 加密三档可配置（keyring / password / none）** (`app/utils/secret_store.py`, `app/utils/config.py`, `app/widgets/cards/settings/secret_mode_card.py` 新增, `app/widgets/secret_unlock_dialog.py` 新增, `app/widgets/secret_password_setup_dialog.py` 新增, `app/widgets/cards/settings/llm_settings_card.py`, `app/main_widget.py`, `app/core/config_sync.py`, `tests/config/test_secret_mode.py` 新增, `tests/utils/test_secret_store.py`, `pyproject.toml`): 服务商 API Key 不再只能依赖「本机绑定」的系统钥匙串——新增 `General.SecretMode`（`keyring` / `password` / `none`）实时切换，老用户旧布尔项 `UseSystemKeyring` 一次性迁移到 `keyring`，行为不变。设置卡位于「设置 → 服务商 → Gitee 账号绑定」下方，切换入口直接调用 `Settings.switch_secret_mode`。密码模式用 scrypt 派生 + Encrypt-then-MAC（`enc:v2:` 前缀），纯 stdlib 零第三方依赖；密文留在 app.config 里随配置云同步，换机器输入同一密码即可解出，不必逐台重填。TabManagerWindow 启动路径延迟服务初始化，加速首屏。`b09126c4`, `687b3298`, `79a50789`, `7075cc13`
+
+- **CodeBuddy 服务商集成 + 认证头重构** (`app/core/auth_headers.py`, `app/core/provider_capabilities.py`, `plugins/codebuddy-provider/`, `tests/plugins/test_codebuddy_provider.py` 新增, `tests/utils/test_secret_store.py`): OAuth 多账户绑定 + 积分直用 + 6h token 自动刷新 + 每日签到；重构 `auth_headers` 让各 provider 共用同一套注入路径，`provider_capabilities` 注册表统一管理每个 provider 的特性探测；SecretStore 适配各平台 keyring 后端（Windows 缺包时 fallback）。`865fce20`, `31a187ed`
+
+- **插件管理：基础监视周期 + 缓存优化** (`app/core/plugin_manager.py`): 加入「目录签名缓存」与 `force reload` 通道，watcher 周期走基准值避免频繁扫描；OpenAI 资源异步预加载不再阻塞主线程。`3b14d026`
+
+- **v0.6.0 发布海报** (`images/release-poster-v0.6.0.png`, `build/poster-v0.6.0/`): 深色科技风（深靛底 + 青绿安全色 + 暖金经济色）海报，含密钥加密 / CodeBuddy / WebDAV 备份 / 语音输入 等 7 张素材图 + 5 个成品尺寸（full / large / share / thumb / preview），标语「更安全 · 更经济」。`bc3ce50e`
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **工具完成块残留** (`app/widgets/message_card.py`, `tests/widgets/test_streaming_output.py`): `<tool>` 协议块缺 `tool_call_id` 时 `data-tool-call-id=""`（空串），`reorganizeContent` 用 `if (_tid)` 判定空串为假，登记/过期清理/去重全失效，每改一次 `block_key` 旧块永不清理即积 N 份。修复：空 id 块按 `tool_name+preview` 生成 `data-block-key="syn-<hash>"` 补身份；`reorganizeContent` 加 `_currentToolBlockKeys` 集合，过期清理分支同时认 `data-block-key`（有 id 用 id，无 id 用 bk）；新增回归测试覆盖缺 `tool_call_id` 场景。`d03fe5cb`, `821bca9e`
+
+- **SecretUnlockDialog 父对象改为主窗口** (`app/widgets/secret_unlock_dialog.py`): 解锁弹窗此前 parent 引用不准，遮罩层盖不到位；改为绑定 `main_window` 后遮罩正确生效。`e048ee6b`
+
+- **splitter 方向改为 Qt.Vertical** (`app/widgets/`): 显式指定 `Qt.Vertical` 消除跨平台方向歧义，修复 macOS / Linux 上分裂条方向偶发反向的问题。`2e0676c9`
+
+- **登录按钮文案统一** (`app/widgets/cards/settings/provider_edit_card.py`): 「自动登录」→「登录」，与设置卡其它登录入口保持一致。`fc9654dd`
+
+### 🔧 其他 (Chores & Build)
+
+- **代码结构清理** (`app/`): 删除一批未使用代码块（增量 `+1480/-727`，主要为重构后的孤立 helper 与实验分支），保留对所有现有功能的引用链。`845fe1c7`
+
+- **版本号同步至 v0.6.0** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): `0.5.12` → `0.6.0` 四文件统一；徽章与架构图同步更新。`f393110f`
+
+- **marketplace 自动重生** (`plugins/marketplace.json`, `plugins/system/marketplace.json`): GitHub Actions 由 plugin.json 自动同步生成。`03a9df56`
+
 ## [v0.5.12] - 2026-09-14
 
 自上一版本以来的变更 | 提交数：49 · 文件变更：212 · +10623/-2586 | 贡献者：dingma, mading
