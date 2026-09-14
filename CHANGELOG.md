@@ -1,6 +1,96 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.5.12] - 2026-09-14
+
+自上一版本以来的变更 | 提交数：49 · 文件变更：212 · +10623/-2586 | 贡献者：dingma, mading
+
+### ✨ 新功能 (New Features)
+
+- **插件管理与 UI 组件样式统一** (`app/core/plugin_manager.py`, `app/widgets/cards/floating/command_card.py`, `app/widgets/cards/floating/file_mention_card.py`, `app/widgets/cards/floating/question_widget.py`, `app/widgets/cards/floating/floating_card_mixin.py`, `app/widgets/cards/floating/card_styles.py` 新增, `tests/widgets/`): PluginManager 加入「目录签名缓存 + force reload」参数，OpenAI 资源改为异步预加载不再阻塞主线程；UI 插件注册表新增自动配置卡卸载幂等保护与新的 `CardStyles` 集中样式表（统一 CommandCard / FileMentionCard / QuestionFloatingWidget 等的视觉规范），resize 期间卡片恢复更平滑；测试侧 mock `_load_all_ui_plugins` 保证 `on_done` 回调被调到（修复启动器刷新）。`27d997c0`, `633a0fdd`
+
+- **UI 插件快捷键绑定持久化与旧命令清理** (`app/plugins/registries/ui_plugin_registry.py`, `tests/plugins/test_ui_command_shortcuts.py`): UI 命令快捷键现在落盘到设置文件，重启后仍在；新增绑定持久化回归测试 + 清理历史遗留的旧命令（不破坏现有用户数据）。`36f8ba18`, `0afb5b92`
+
+- **标签切换队列与指示器滑动** (`app/widgets/modules/tab_manager.py`, `app/widgets/workbench_panel.py`, `app/widgets/custom_title_bar.py`, `app/widgets/modules/tray_manager.py`): tab 切换请求走队列收敛（动画中再点不抖）；自定义标题栏的 tab 指示器实现「滑动到 active」过渡 + 延迟 snap（修复布局抖动）；托盘菜单加入「重启 DriFox」项；`workbench-panel` show 事件确保 tab 指示器定位正确。`a4efa2ac`, `自定义标题栏`, `tray-manager`
+
+- **编辑工具运行框的增删行数流式显示** (`app/core/tool_arg_lines.py`, `app/core/workers/chat_worker.py`, `app/widgets/message_card.py`, `plugins/system-tools/tools/_tool_desc.py`): write/edit/multi_edit 在参数流式接收期间显示 `+N/-M` 胶囊（复用完成框 diff 统计的 `.tool-diff-stats` 结构，运行中与完成态形态一致），取代对编辑场景没有信息量的 `(N字符)`。行数从 worker 手里的**半截 JSON 缓冲**估算：按字段取 `"field": "…"` 片段（未闭合截到缓冲末尾），转义感知计数（连续反斜杠奇数才是 `\n`），行数 = 换行转义数 + 1 对齐 diff 语义；同一 tool_call 内只增不减防正则失配抖动，完成后由真实 diff 统计接管。顺带修两处预览缺陷：progress 阶段路径字段扩展 `path/file_path/file/target`，且 path 未到达时显示「编辑文件中」而非空窗「准备中...」；`description` 与文件路径拼接时超 30 字符截断，保证路径不被单行省略裁掉。
+
+- **图像文件魔数校验** (`plugins/system-tools/tools/_file_tools.py`): read 工具读取图像时先用文件头魔数判断真实类型（不再依赖扩展名/Content-Type），避免把同名但非图像文件识别为图片引发的预览/处理错误。
+
+- **跨高度同步驱动（cross-height driver）** (`app/widgets/animation/cross_height_driver.py` 新增, `app/widgets/modules/tab_manager.py`, `app/widgets/history_page.py`): 同一窗口内的「面板」与「列表区」高度过渡走同一驱动，避免两端时长/曲线不一致造成的 1px 缝隙；面板与列表过渡时长同步。
+
+- **历史项目选择面板动画高度过渡** (`plugins/history-manager/ui/history_project_panel.py`, `plugins/history-manager/ui/history_page.py`): 项目切换面板展开/收起带高度动画，项目过滤记忆（上次选的项目重启后仍选中）。
+
+- **历史页项目过滤跟随 + 卡片徽标更新逻辑改进** (`app/widgets/cards/history_*.py`, `app/widgets/message_card.py`): 历史页项目过滤与主页消息卡的徽标状态实时联动，刷新不再依赖重建。
+
+- **崩溃取证增强** (`app/core/crash_handler.py`, `app/main.py`): `qInstallMessageHandler` 把所有 Qt 日志落 `qt_messages.log`（含 `qFatal` abort 前的最后消息），Windows 侧加 `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` 写 `dumps/*.dmp`，崩溃现场可在用户报修后还原；`import` 适配 PyQt5（`sip.isdeleted`）保持与 pyside6 一致。`feat(crash)` 同步 pyside6 `34d9f8dd`
+
+- **卡片重试功能 + 标签展示** (`app/widgets/cards/message_card.py`, `app/widgets/cards/floating/floating_card.py`): 卡片新增重试入口（短描述走 `_ElidedLabel` 避免被省略号裁掉），长文本/窄列下也能完整显示。
+
+- **测试侧 sidebar 折叠与 tab 上下文切换会话** (`tests/widgets/test_sidebar_collapse.py`, `tests/core/test_tab_context_switch_session.py`): 覆盖侧栏折叠状态切换与 tab 上下文切换时的会话延续行为。
+
+- **样式改进（test 模块 docstring 风格统一）** (`tests/`): 各测试模块补模块 docstring 后空行，提升 flake8/编辑器可读性。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **Gitee token / GitHub token 退出 keyring 范围 + 一次性回迁** (`app/utils/secret_store.py`, `app/utils/config.py`, `app/core/config_sync.py`): 扁平 ConfigItem（Gitee OAuth token / GitHub token）的 value 是不可变 str，`toDict(serialize=False)` 只有最内层 dict/value 是原引用，`unwrap_secrets` 在外壳上的回填写不回 `item.value`——升级后首次重启内存 token 为空 → `_ensure_valid_token` 报「access_token 为空」→ 自动清绑。修复：按用户决策 **Gitee token / GitHub token 彻底退出 keyring 范围**（其云同步面本就由 config_sync 上传剔除/下载合并覆盖），keyring 仅存服务商 API_KEY；新增 `_recover_flat_secrets_from_keyring` 一次性把凭证库残留的 `gitee/user_token`、`gitee/user_refresh_token`、`github/patch_token` 回迁 app.config 并删除条目；顺带修 `strip_secrets` 写凭证库失败时仍清空落盘的双丢缺陷（改为 fail-open 保留明文）。测试隔离：回迁用例 monkeypatch SecretStore，不触碰真实凭证库。
+
+- **输入框主题样式持久化（不依赖裸 `setStyleSheet`）** (`app/widgets/bottom_input_area.py`, `tests/widgets/test_input_theme_style_persistence.py`): `SendableTextEdit` 继承 qfluentwidgets 的 `TextEdit`，构造时被注册进 qfw `styleSheetManager`（LINE_EDIT 源）；DriFox 历史上用裸 `setStyleSheet` 覆盖为「透明融入卡片」样式，但任何一次 qfw `setTheme` 都会 `updateStyleSheet` 遍历重设所有注册 widget 的 Fluent QSS，把自定义样式顶掉——一旦 DriFox 刷新链因幂等跳过或异常中断没盖回，输入框就停留在 Fluent 白底描边样式（楷体 placeholder + 青色下划线，正是「主题更新后输入框变样」的观感）。修复：`_apply_input_style` / `_apply_agent_combo_style`（新增）改走 qfw 官方 `setCustomStyleSheet` 通道，自定义 QSS 并入 styleSheetManager 组合源，主题切换重设时自动携带不再被顶掉；并补 `:hover` / `:focus` / `:disabled` 三态显式透明覆盖（qfw 亮色 qss 的 focus 规则特异性更高，基础规则压不住白底与青色 border-bottom）。3 条回归测试锁死主题 LIGHT/DARK 往返样式存活、`refresh_style` 后仍存活、focus/hover 态不渗入。（同步 pyside6 `74a0d290`）
+
+- **输入框工具计数即时刷新（双数据源直连）** (`app/main_widget.py`, `tests/plugins/test_tool_count_refresh.py`): 输入框「危险/安全」计数（`_tool_count_label`）的刷新此前寄生在懒创建的工具控制卡上——未开过工具卡片的窗口，插件装/卸/热重载（registry 变更）后计数停在启动值；且 agent 激活的 `togglesChanged` emit 先于卡片的转发连接而丢失。修复：`main_widget.__init__` 直连两个数据源——registry `on_change` 回调（可能来自后台 watcher 线程，经新增 `_tool_registry_changed` 信号排队主线程）+ controller 的 `togglesChanged` / `activeAgentChanged` 信号，不再依赖卡片转发；两源统一走 0ms 单发去抖定时器（一次热重载重扫会产生几十次 notify，合并后统一刷 `_refresh_tool_toggle_btn`）。2 条回归测试验证「不创建工具控制卡时」registry 增删与 agent 权限注入都能即时刷新计数。（同步 pyside6 `42d56151`）
+
+- **历史页 SQLite 项目列表走 `sessions ∪ key_documents` 权威口径** (`app/utils/history_manager.py`): 此前 get_project_list 在 SQLite 模式下口径不一致——空项目从切换器消失，且同名项目无法重建。修复：统一从 `sessions` ∪ `key_documents` 派生项目列表，保证空项目可见、同名按预期处理。同步 pyside6 `3c41ee2a`
+
+- **插件 host watcher 误报目录删除 + 插件市场 sparse clone 缺 `--branch`** (`app/core/plugin_host.py`, `app/core/plugin_marketplace.py`): watcher 卸载时只看名字匹配、未做磁盘 `isdir` 核实，偶发误判「插件目录已删除」触发卸载-重载风暴；sparse clone（git-subdir 安装）没传 `--branch ref`，永远拉默认分支。修复：watcher 卸载前先 `isdir` 核实磁盘状态；sparse clone 显式传 `--branch <ref>`。同步 pyside6 `1c37a92f`, `1321d87f`
+
+- **看门狗扫描探活先行 + 失效条目就地剔除** (`app/core/thread_guard.py`): C++ 析构后 `QThread.isRunning()` 会抛 `RuntimeError` 直接打死看门狗线程；修复：先 `sip.isdeleted(obj)` 探活再访问 `isRunning`，失效条目立刻从监控列表剔除。同步 pyside6 `ad524790`
+
+- **卡片关闭接线幂等（不再 widget-is-None 路径下接不上）** (`app/plugins/registries/ui_plugin_registry.py`, `app/widgets/cards/floating/diff_card.py`): 第二个 panel 永远接不上 × 信号；diff 卡接线改实例级标志；吞异常改留痕（异常仍然记到日志而非静默）。同步 pyside6 `ad524790`
+
+- **stophook 执行期间用户插话被吞 + 繁忙发送派发加固** (`app/core/workers/chat_worker.py`, `app/core/hook_manager.py`): stophook 串行执行期间 `_hook_message_queue` 仍按顺序派发，但 stophook 内 emit 的 hook 消息被排到下轮 API 调用前才消费，期间用户发出的插话会被 stophook 队列排出吞掉。修复：插话标记条目在 stophook 队列派发前显式优先处理；繁忙发送派发加固，stophook 链不再饿死插话。
+
+- **message_card 多个问题合集** (`app/widgets/message_card.py`):
+  - `QLabel` 改 `_ElidedLabel`：`queue-message-card` 与 `plugin-config-card` 用 `_ElidedLabel` 处理长文本，避免路径/文件名被单行省略裁掉（QLabel 在固定宽度下会直接截断）。
+  - **运行框行数徽标改为独立元素**：长文本不再把徽标挤掉。
+  - **运行框行数徽标复用完成框 diff 胶囊样式**：运行态与完成态视觉一致。
+  - **运行框进度节流放宽 + 未闭合路径提取**：解决「参数接收中长时间不动」的卡顿观感（throttle 间距加大，path 未闭合时按当前缓冲显示「编辑 X 行」而不是停在「准备中」）。
+  - **修复工具完成框被吞**（在途异步渲染 + restore 判据）：异步渲染竞态导致某些工具完成后框消失。
+  - **question card 关闭栈管理**：用户提交后 question card 不再卡在栈顶关闭不掉。
+
+- **历史页面板/列表区过渡 1px 缝** (`app/widgets/modules/history_manager.py`): cross-height driver 引入后旧高度仍按各自时序推进，相邻元素过渡完成瞬间出现 1px 缝隙；修复走统一驱动同步完成时点。
+
+- **BOTTOM followContent 判定改 all → any** (`app/widgets/cards/floating/*`, `app/widgets/modules/input_card_module.py`): 状态卡共存时 BOTTOM 容器高度误判为空 → 留出额外空白；修复：followContent 判定改 any（任一子卡需要即撑开）。
+
+- **GitHub `.drifox` gitignore 模式** (`.gitignore`): `.drifox` 之前只忽略顶层目录，子目录（如 `plugins/.drifox/`）未覆盖 → 误入库；改为匹配任意子目录模式。
+
+- **tool_desc 有 tail 时截断 description** (`plugins/system-tools/tools/_tool_desc.py`): `description` 与文件路径拼接超 30 字符时优先截 description，保证文件路径始终在可见区。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **tab-indicator 延迟 snap 到 active button** (`app/widgets/modules/tab_indicator.py`): 布局抖动时 snap 到 active 按钮改为延迟执行，避免布局未稳定时算错位置。
+
+- **hover-preview 延迟展开** (`app/widgets/simple_hover_tooltip.py`): hover 触发预览改为带延迟展开 + 自动收起阈值，减少误触。
+
+- **宠物动画 hide/show 计时器优化** (`app/widgets/pixmap_pet.py`): hide/show 状态切换复用单一计时器，减少 QTimer 创建销毁；尊重系统 reduce-motion 设置。
+
+- **UI 系统卡片头部图标 SVG 化 + BOTTOM 卡高度跟随声明 + arc_stack 动画收敛** (`app/widgets/cards/`, `app/widgets/animations/arc_stack.py`): 系统卡头部图标统一走 SVG 资源（避免位图缩放模糊）；BOTTOM 卡片显式声明高度跟随语义；arc_stack 动画收敛到统一驱动，减少重复动画片段。
+
+- **settings 卡片 + 设计令牌 / 图标 / 动效系统收尾** (`app/widgets/cards/settings/`, `app/widgets/design_tokens.py` 新增): 设置卡片样式统一走设计令牌；图标系统收尾；动效系统接入统一驱动。
+
+- **整体代码结构可读性与可维护性提升** (`app/widgets/`, `app/widgets/cards/settings/`): settings 卡片与动画系统重构，整理命名与目录边界，减少跨模块耦合。
+
+### ⚡ 性能优化 (Performance)
+
+- **运行框行数估算按 2000 字符步长重算** (`app/core/tool_arg_lines.py`, `app/widgets/message_card.py`): 避免超长参数 O(n²) 扫描拖住界面，长输入按 2000 字符步长分段估算。
+
+### 📚 文档 (Documentation)
+
+- **CHANGELOG 增补编辑工具运行框增删行数流式显示说明** (`CHANGELOG.md`): 在本版本条目中记录新增流式行数徽标的语义与边界。
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号升级到 v0.5.12** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): `0.5.11` → `0.5.12`。
+
 ## [Unreleased]
 
 ### ✨ 新功能 (New Features)
