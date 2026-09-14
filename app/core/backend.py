@@ -374,6 +374,21 @@ class ChatBackend(QObject):
     def history_manager(self):
         return self._history_manager
 
+
+    def _reload_session_messages(self, session_id: str):
+        """消息体重载器：SessionManager 释放非活跃会话消息体后按需重读。
+
+        返回 None 表示重载器暂不可用，调用方会保持「已释放」状态而不写空消息。
+        """
+        hm = getattr(self, "_history_manager", None)
+        if not hm:
+            return None
+        try:
+            return hm.get_session_messages(session_id)
+        except Exception as e:
+            logger.warning(f"[ChatBackend] 重载会话消息失败 {session_id[:8]}: {e}")
+            return None
+
     # ========== 初始化 ==========
 
     def initialize(
@@ -586,6 +601,14 @@ class ChatBackend(QObject):
         from app.utils.history_manager import HistoryManager
 
         self._history_manager = HistoryManager.get_instance()
+
+        # [MEM] 注入消息体重载器：此后 SessionManager 才会释放非活跃会话的消息体
+        # （只保留当前 + 最近 DEFAULT_KEEP_MESSAGES 个常驻；实测单会话 27MB、
+        # 15 个常驻 127MB）。未注入前一律不释放，保证数据可恢复。
+        try:
+            self._session_manager.set_messages_loader(self._reload_session_messages)
+        except Exception as e:
+            logger.warning(f"[ChatBackend] 注入消息体重载器失败（沿用全量常驻）: {e}")
 
         # 连接 hook 消息更新信号 → UI 刷新（跨线程安全）
         self._hook_messages_updated.connect(self._on_hook_messages_changed)

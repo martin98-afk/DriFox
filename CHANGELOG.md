@@ -169,6 +169,10 @@ All notable changes to this project will be documented in this file.
 
 - **超长 API Key 无法存入系统凭证库，静默退回明文落盘** (`app/utils/secret_store.py`, `tests/utils/test_secret_store.py`): Windows 单个凭证 Blob 上限 2560 字节（`CRED_MAX_CREDENTIAL_BLOB_SIZE = 5*512`，utf-16 下 1280 字符），超出时 `CredWriteW` 直接失败（错误码 1783）。此前 `strip_secrets` 的 fail-open 逻辑「写入失败则保留明文」虽避免双丢，但 Windows 分支的 `set()` 不落任何日志，叠加后表现为**该服务商密钥静默以明文留在 app.config 里**——典型如 CodeBuddy 的 1472 字符 access_token JWT（需 2944 字节，溢出 384 字节），而其余短密钥正常入库，用户只看到「钥匙串已生效」与「某一条仍是明文」并存。修复：超限值自动分片，拆成 `provider/<id>#0..#n-1`，主条目只存 `\x00drifox:chunks:<n>` 标记，读取按标记拼回；向后兼容老条目（无标记按单片直读）；任一分片缺失返回空而非半截密钥；写入中途失败回滚已写分片、主条目保持原值；值改短时清理陈旧分片；删除时主条目与分片一并清理（主条目标记缺失时探测清理脏残留）。同时给 `strip_secrets` 的失败分支补 warning 日志，杜绝同类静默降级。10 条新增用例覆盖分片边界（含代理对不切断）、回滚、残缺分片、收缩清理与 1472 字符 key 的端到端闭环。
 
+### ⚡ 性能优化 (Performance)
+
+- **会话消息体惰性释放：长会话常驻内存 −107MB** (`app/core/chat_session.py`, `app/core/backend.py`, `tools/diag_session_mem_probe.py` 新增, `tests/core/test_session_message_release.py` 新增): 加载多个历史会话后，`SessionManager` 会把每个会话的完整消息体一直攥在内存里（默认最多 15 个）。实测（dev 库 283MB / 1721 会话，取最大的 15 个）：15 个会话全量常驻 RSS **+126.8MB**，单会话最大 **+26.9MB**（19.4MB blob / 228 条），而单次从 SQLite 反序列化重载只要 **22-56ms**。改为「当前会话 + 最近 `DEFAULT_KEEP_MESSAGES=3` 个常驻，其余只留元数据」：消息体经 `ChatSession.release_messages()` 释放，访问 `session.messages` 或 `switch_to_session()` 时经 `SessionManager` 注入的 loader 自动重载（对调用方透明）。同一实测场景 RSS 增量 **+126.8MB → +19.9MB**，稳态常驻 4 个会话。安全契约：未注入 loader 时一律不释放；重载器返回 `None`（如 HistoryManager 尚未就绪）时保持「已释放」状态而不写成空消息——空消息一旦被 save 覆盖 SQLite 就是丢历史，这是本次改动唯一的高危点，由 7 条回归测试锁死（含 `to_dict()` 导出路径先重载）。会话对象、索引与淘汰逻辑（`_evict_if_needed`）完全不变，仅消息体可换出。
+
 ## [v0.5.11] - 2026-09-13 (重新发布 #3)
 
 自上一版本以来的变更 | 提交数：83 · 文件变更：169 · +12545/-4202 | 贡献者：dingma, drifox-bot

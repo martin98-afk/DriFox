@@ -16,8 +16,9 @@ ChatSession & SessionManager - 会话管理模块
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
+from loguru import logger
 from PyQt5.QtCore import QObject
 
 from app.core.message_content import consolidate_messages
@@ -29,12 +30,24 @@ MAX_SESSION_MESSAGES = 500
 # 默认最大缓存会话数（内存中同时保留的会话）
 DEFAULT_MAX_CACHED_SESSIONS = 15
 
+# 常驻消息体的会话数（当前会话 + 最近访问的前 N-1 个）。
+# 其余会话只保留元数据，消息体释放后按需从 SQLite 重载。
+# [MEM] 实测（tools/diag_session_mem_probe.py，dev 库 283MB / 1721 会话）：
+#   15 个最大会话全量常驻 = RSS +126.8MB（单会话最大 +26.9MB / 228 条）；
+#   单会话反序列化重载 22-56ms，用户无感。
+# 保留 3 个常驻 → 稳态约 55-60MB，省 ~70MB，且会话对象与索引结构不变。
+DEFAULT_KEEP_MESSAGES = 3
+
 
 class ChatSession:
     def __init__(self, name: str = None, messages: Optional[List[Dict]] = None):
         self.session_id: str = uuid.uuid4().hex
         self.name = name or f"对话 {datetime.now().strftime('%m-%d %H:%M')}"
-        self.messages: List[Dict[str, str]] = consolidate_messages(messages or [])
+        # 消息体惰性重载器：由 SessionManager 注入（按 session_id 从 SQLite 重读）
+        self._messages_loader: Optional[Callable[[str], Optional[List[Dict]]]] = None
+        self._messages_released: bool = False
+        # 赋值走 property setter（不加类型注解，避免与 property 声明冲突）
+        self.messages = consolidate_messages(messages or [])
         # topic_summary 初始化为 name 的副本，确保首次保存时 title 字段不为空
         self.topic_summary: str = self.name
         self.user_edited_title: bool = False  # 用户是否手动编辑过标题
@@ -81,6 +94,61 @@ class ChatSession:
             "summary_message": None,
             "generated_at": "",
         }
+
+    # ── 消息体：惰性重载（内存治理）──────────────────────────────
+    @property
+    def messages(self) -> List[Dict[str, str]]:
+        """消息列表。已释放时经 loader 自动重载，对调用方透明。"""
+        if self._messages_released:
+            self._reload_messages()
+        return self._messages
+
+    @messages.setter
+    def messages(self, value: Optional[List[Dict]]) -> None:
+        self._messages = value or []
+        self._messages_released = False
+
+    @property
+    def messages_released(self) -> bool:
+        """消息体是否已释放（仅保留元数据，访问时重载）。"""
+        return self._messages_released
+
+    def _reload_messages(self) -> None:
+        """从 loader 重载消息体。失败或 loader 不可用时保持 released，不静默变空。"""
+        loader = self._messages_loader
+        if loader is None:
+            return
+        try:
+            loaded = loader(self.session_id)
+        except Exception as e:
+            logger.warning(f"[ChatSession] 重载会话消息失败 {self.session_id[:8]}: {e}")
+            return
+        if loaded is None:
+            # 重载器暂不可用（如 HistoryManager 尚未就绪）：保持已释放状态，
+            # 不写成空消息（空消息一旦被 save 覆盖 SQLite 就是丢历史）。
+            return
+        self._messages = consolidate_messages(loaded)
+        self._messages_released = False
+
+    def ensure_messages(self) -> None:
+        """确保消息体已加载（已释放则重载），幂等。"""
+        if self._messages_released:
+            self._reload_messages()
+
+    def release_messages(self) -> int:
+        """释放消息体（保留元数据与 message_count），返回释放的条数。
+
+        前置条件：已注入 loader，否则拒绝释放（数据不可恢复就不释放）。
+        """
+        if self._messages_released or not self._messages:
+            return 0
+        if self._messages_loader is None:
+            return 0
+        released = len(self._messages)
+        self.message_count = released
+        self._messages = []
+        self._messages_released = True
+        return released
 
     def get_context_messages(self) -> List[Dict[str, str]]:
         return consolidate_messages(self.messages)
@@ -172,6 +240,7 @@ class ChatSession:
 
     def clear(self):
         self.messages.clear()
+        self._messages_released = False
         self.topic_summary = ""
         self.invalidate_compaction()
         self._update_timestamp()
@@ -235,19 +304,53 @@ class ChatSession:
 
 
 class SessionManager(QObject):
-    def __init__(self, max_cached: int = DEFAULT_MAX_CACHED_SESSIONS):
+    def __init__(self, max_cached: int = DEFAULT_MAX_CACHED_SESSIONS,
+                 keep_messages: int = DEFAULT_KEEP_MESSAGES):
         super().__init__()
         self.sessions: List[ChatSession] = []
         self._last_access: Dict[str, float] = {}  # session_id -> last access time (timestamp)
         self.max_cached_sessions: int = max_cached
+        self.keep_messages: int = keep_messages
+        self._messages_loader: Optional[Callable[[str], Optional[List[Dict]]]] = None
         self.current_index = -1
+
+    # ── 消息体惰性重载（内存治理）──────────────────────────────
+    def set_messages_loader(self, loader) -> None:
+        """注入消息体重载器。未注入时一律不释放（数据不可恢复就不释放）。"""
+        self._messages_loader = loader
+        for s in self.sessions:
+            s._messages_loader = loader
+
+    def _attach_loader(self, session: ChatSession) -> None:
+        session._messages_loader = self._messages_loader
+
+    def _release_stale_messages(self) -> None:
+        """释放非活跃会话的消息体，只保留当前会话与最近 keep_messages 个。"""
+        if self._messages_loader is None:
+            return
+        current = self.get_current_session()
+        current_id = current.session_id if current else None
+        candidates = [
+            s for s in self.sessions
+            if s.session_id != current_id and not s.messages_released and s._messages
+        ]
+        if len(candidates) <= self.keep_messages:
+            return
+        # 按最后访问时间升序：最久未访问的先释放
+        candidates.sort(key=lambda s: self._last_access.get(s.session_id, 0.0))
+        for s in candidates[: len(candidates) - self.keep_messages]:
+            released = s.release_messages()
+            if released:
+                logger.debug(f"[Memory] 释放非活跃会话消息 {s.session_id[:8]} ({released} 条)")
 
     def create_new_session(self) -> ChatSession:
         session = ChatSession()
+        self._attach_loader(session)
         self.sessions.append(session)
         self.current_index = len(self.sessions) - 1
         self._touch_session(session.session_id)
         self._evict_if_needed()
+        self._release_stale_messages()
 
         return session
 
@@ -320,29 +423,28 @@ class SessionManager(QObject):
             # 更新访问时间
             session = self.sessions[index]
             self._touch_session(session.session_id)
+            # 消息体可能已被释放，切换后立即重载（实测 22-56ms）
+            session.ensure_messages()
             # 如果超过最大缓存数，淘汰最久未访问的非当前会话
             self._evict_if_needed()
+            self._release_stale_messages()
 
     def get_session_names(self) -> List[str]:
         return [s.name for s in self.sessions]
 
 
     def set_current_session(self, session: ChatSession):
-        if self.current_index < 0:
+        # 三个分支（首次 / 索引越界 / 覆盖当前位）语义一致：append 或覆盖后设为当前，
+        # 末尾统一执行淘汰与非活跃消息体释放。
+        self._attach_loader(session)
+        if self.current_index < 0 or self.current_index >= len(self.sessions):
             self.sessions.append(session)
             self.current_index = len(self.sessions) - 1
-            self._touch_session(session.session_id)
-            self._evict_if_needed()
-            return
-        if self.current_index >= len(self.sessions):
-            self.sessions.append(session)
-            self.current_index = len(self.sessions) - 1
-            self._touch_session(session.session_id)
-            self._evict_if_needed()
-            return
-        self.sessions[self.current_index] = session
+        else:
+            self.sessions[self.current_index] = session
         self._touch_session(session.session_id)
         self._evict_if_needed()
+        self._release_stale_messages()
 
     def delete_session(self, index: int) -> bool:
         if 0 <= index < len(self.sessions):
