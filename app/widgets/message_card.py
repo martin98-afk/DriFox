@@ -1587,8 +1587,24 @@ def _render_tool_streaming_block(
     streaming_state = "false" if completed else "true"
     # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _edit_tools() else ""
+    # 🐛 修复（工具完成框残留/两份/沉底）：无 tool_call_id 时合成 data-block-key。
+    # 【根因】`<tool>` 协议块解析不到 tool_call_id 时（模型正文复述协议格式、
+    # 输出被截断/停止、旧历史数据缺该字段），产物是 data-tool-call-id="" —— 而
+    # reorganizeContent 全线用 `if (_tid)` 判定，**空串为假**：
+    #   · 不登记 tool id / posMap → 过期清理分支短路 → 块永不清理
+    #   · 排序 getPos 无 data-order / 无 posMap 记录 → 返回 1e9 → 恒沉底
+    # 内容一变 block_key 就变（tool_name+args+result 的 sha1）→ 新块迁入工具区、
+    # 旧块留在原地，渲染几次就几份，全部 data-order 相同且不再重排（真实 DOM
+    # 复现见 tests/debug/unclosed_tool_completed_linger.py：结果逐版变化时
+    # 工具区块数 1→2→3→4，永不回落）。
+    # 【修复】按「工具名 + 预览文本 + 完成态」合成稳定身份：同内容重复渲染 key
+    # 不变（可查重、可清理），内容变化 key 变化（不与新块撞身份被误删）。
+    _syn_key_attr = ""
+    if not tool_call_id:
+        _seed = f"{tool_name}|{preview}|{streaming_state}"
+        _syn_key_attr = ' data-block-key="syn-' + hashlib.sha1(_seed.encode("utf-8")).hexdigest()[:12] + '"'
 
-    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}"{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}"{_syn_key_attr}{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
@@ -3006,7 +3022,14 @@ _SKELETON_CACHE_MAX = 48
 # _twFlush + rAF 帧级揭示）；② FLIP 位移动画与动画串行队列（_FLIP_JS：
 # _flipCapture/_flipPlay/_animEnqueue）。旧骨架两者都没有 —— 流式仍是整块蹦字、
 # 结束态三动画叠加跳变 —— 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 31
+# v28~v31（2026-09-14）：滚动锚点恢复（_anchorable/_anchorables/_progScroll +
+# _beginDomUpdate/_endDomUpdate 事务深度）。旧骨架仍用绝对 scrollTop + 钳制恢复
+# → 阅读位置漂移 —— 必须靠版本号让旧缓存失效。
+# v32（2026-09-14）：reorganizeContent 过期清理支持无 tool_call_id 的工具块
+# （_currentToolBlockKeys 按 data-block-key 判定）。旧骨架只认 tool-call-id，
+# 空串 id 的块（未闭合 <tool> 协议文本渲染产物）永不清理 → 每轮渲染追加一份、
+# 全部同 data-order 且不再重排（工具完成框残留/两份/沉底）。
+_SKELETON_CACHE_VERSION = 32
 
 
 def _js_literal(value) -> str:
@@ -8578,6 +8601,15 @@ class CodeWebViewer(QWebEngineView):
                     var posMap = Object.create(null);
                     var _currentThinkKeys = new Set();
                     var _currentToolIds = new Set();
+                    // 🐛 修复（工具完成框残留/两份/沉底）：无 tool_call_id 的块也要登记身份。
+                    // 【根因】`<tool>` 协议块解析不到 tool_call_id 时产物是 data-tool-call-id=""，
+                    // 而下方过期清理分支用 `if (_etid && ...)` 判定 —— **空串为假**，整个条件
+                    // 短路 → 这类块永不清理。内容一变 block_key 就变（sha1 of 工具名+参数+结果），
+                    // 新块迁入工具区、旧块留在原地，渲染几次就几份（真实 DOM 复现：
+                    // tests/debug/unclosed_tool_completed_linger.py 工具区块数 1→2→3→4）。
+                    // 【修复】用 data-block-key 作为第二身份判据：无 id 的块按 bk 判过期。
+                    // 与 _currentToolIds 同处单次扫描登记（保持 PERF v2 的 O(n) 单遍结构）。
+                    var _currentToolBlockKeys = new Set();
                     var _hasNewThinkStreaming = false;
                     var _thinkStreamingEl = null;
                     for (var _bi = 0; _bi < blocks.length; _bi++) {{
@@ -8595,6 +8627,10 @@ class CodeWebViewer(QWebEngineView):
                             || _el.classList.contains('think-compact')
                         )) {{
                             _currentThinkKeys.add(_bk);
+                        }}
+                        // 工具块（含空 id）统一登记 block_key，供清理判据使用
+                        if (_bk && !_tid && _el.classList.contains('tool-block')) {{
+                            _currentToolBlockKeys.add(_bk);
                         }}
                         if (_el.classList.contains('think-streaming')) {{
                             _hasNewThinkStreaming = true;
@@ -8638,11 +8674,18 @@ class CodeWebViewer(QWebEngineView):
                             continue;
                         }}
                         // 过期 tool 块（保留流式进行中的块）
+                        // 🐛 修复（工具完成框残留/两份/沉底）：身份判据由「仅 tool_call-id」
+                        // 扩为「id 或 block_key」。无 id 的块（data-tool-call-id=""）在旧条件下
+                        // 整个短路 → 永不清理 → 每轮渲染追加一份、恒沉底（详见扫描处注释）。
+                        // ⚠️ 两个判据互斥使用：有 id 用 id（同一工具多形态块共用 id），
+                        // 无 id 才用 bk（避免 id 与 bk 双判据对同一块给出矛盾结论）。
                         if (
-                            _etid
-                            && !_currentToolIds.has(_etid)
-                            && _eel.getAttribute('data-streaming') !== 'true'
+                            _eel.getAttribute('data-streaming') !== 'true'
                             && _eel.classList.contains('tool-block')
+                            && (
+                                (_etid && !_currentToolIds.has(_etid))
+                                || (!_etid && _ebk && !_currentToolBlockKeys.has(_ebk))
+                            )
                         ) {{
                             _eel.remove();
                             continue;
