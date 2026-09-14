@@ -1831,14 +1831,23 @@ class UIPluginRegistry:
             )
         self._ui_applied_names.add(name)
         self._ui_command_names.add(name)
-        # 带快捷键的 UI 命令落表后需重建 QShortcut 绑定（幂等；无快捷键时跳过避免启动期浪费）
+        # 带快捷键的 UI 命令落表后需重建 QShortcut 绑定（幂等；无快捷键时跳过避免启动期浪费）。
+        # 守卫：仅 QApplication 与活窗口均已就绪时才 rebind——_rebind 会惰性创建
+        # TrayManager 单例，启动早期/无头环境（测试）拉起托盘会 native crash。
+        # 冷启动场景由主窗口初始化时的 _register_command_shortcuts 全量扫描兑底。
         if saved_shortcut:
             try:
-                from app.core.builtin_commands import _rebind_command_shortcuts
+                from PyQt5.QtWidgets import QApplication
 
-                _rebind_command_shortcuts()
+                from app.core import window_registry
+
+                if QApplication.instance() is not None and window_registry.alive_window_instances():
+                    from app.core.builtin_commands import _rebind_command_shortcuts
+
+                    logger.info(f"[UIPluginRegistry] UI 命令 /{name} 带快捷键落表，重建 QShortcut 绑定")
+                    _rebind_command_shortcuts()
             except Exception:
-                pass
+                logger.warning(f"[UIPluginRegistry] /{name} 快捷键重绑失败", exc_info=True)
 
     def unregister_ui_command(self, name: str) -> None:
         """注销单条 UI 命令（账本 + CommandManager + 处理器三处同步）
@@ -1859,12 +1868,17 @@ class UIPluginRegistry:
             FunctionCommandHandlers._handlers.pop(name, None)
         except Exception:
             pass
-        # 注销带快捷键的 UI 命令后重建 QShortcut，清掉幽灵绑定
+        # 注销带快捷键的 UI 命令后重建 QShortcut，清掉幽灵绑定（环境守卫同 _apply_ui_command）
         if load_ui_command_shortcuts().get(name, ""):
             try:
-                from app.core.builtin_commands import _rebind_command_shortcuts
+                from PyQt5.QtWidgets import QApplication
 
-                _rebind_command_shortcuts()
+                from app.core import window_registry
+
+                if QApplication.instance() is not None and window_registry.alive_window_instances():
+                    from app.core.builtin_commands import _rebind_command_shortcuts
+
+                    _rebind_command_shortcuts()
             except Exception:
                 pass
 
