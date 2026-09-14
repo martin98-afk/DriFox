@@ -244,6 +244,10 @@ class SecretModeSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
         ok, message = self.cfg.switch_secret_mode(target, new_password)
         if not ok:
             self._notify(False, "切换失败", message or "无法切换加密方式")
+        elif target == MODE_PASSWORD and SecretStore().available:
+            # 与 _on_set_password 同款：新密码写入本机钥匙串。漏掉这步会让本次
+            # 运行用内存密码正常工作，但下次启动钥匙串读不到 → 必弹解锁窗。
+            self.cfg.remember_secret_password(new_password)
         self._refresh()
 
     def _ensure_unlocked(self) -> bool:
