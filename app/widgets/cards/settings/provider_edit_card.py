@@ -144,8 +144,8 @@ class ProviderEditCard(QWidget):
     closed = pyqtSignal()
     fetchSuccess = pyqtSignal(list)  # 获取成功信号
     fetchFailed = pyqtSignal()  # 获取失败信号
-    loginSuccess = pyqtSignal(str, str)  # 自动登录成功（api_key, info）
-    loginFailed = pyqtSignal(str)  # 自动登录失败（原因）
+    loginSuccess = pyqtSignal(str, str)  # 登录成功（api_key, info）
+    loginFailed = pyqtSignal(str)  # 登录失败（原因）
 
     def __init__(self, provider_name: str = "", provider_info: dict = None, is_new: bool = True, parent=None):
         super().__init__(parent)
@@ -271,7 +271,7 @@ class ProviderEditCard(QWidget):
         if current_key:
             self.apiKeyEdit.setText(current_key)
         key_row.addWidget(self.apiKeyEdit, 1)
-        self.loginBtn = PrimaryPushButton("自动登录")
+        self.loginBtn = PrimaryPushButton("登录")
         self.loginBtn.clicked.connect(self._on_auto_login)
         self.loginBtn.setVisible(False)
         key_row.addWidget(self.loginBtn)
@@ -546,7 +546,7 @@ class ProviderEditCard(QWidget):
         self._sync_login_btn()
 
     def _sync_login_btn(self):
-        """按当前服务商 capabilities 是否含 login_hook 显示/隐藏「自动登录」按钮"""
+        """按当前服务商 capabilities 是否含 login_hook 显示/隐藏「登录」按钮"""
         if not hasattr(self, "loginBtn"):
             return
         provider = self.nameCombo.currentText() if self.is_new else self.provider_name
@@ -554,7 +554,7 @@ class ProviderEditCard(QWidget):
         self.loginBtn.setVisible(bool(p and p.capabilities.get("login_hook")))
 
     def _on_auto_login(self):
-        """自动登录：后台执行 capabilities["login_hook"]，成功后回填 API Key 输入框"""
+        """登录：后台执行 capabilities["login_hook"]，成功后回填 API Key 输入框"""
         provider = self.nameCombo.currentText() if self.is_new else self.provider_name
         p = ProviderRegistry.get_instance().get(provider)
         hook = p.capabilities.get("login_hook") if p else None
@@ -566,7 +566,7 @@ class ProviderEditCard(QWidget):
 
         parent = TabManagerWindow.get_instance() or self.window()
         InfoBar.info(
-            "自动登录",
+            "登录",
             "已打开浏览器等待授权，完成后自动回填（最长等待 5 分钟）",
             parent=parent,
             duration=6000,
@@ -610,7 +610,7 @@ class ProviderEditCard(QWidget):
 
         parent = TabManagerWindow.get_instance() or self.window()
         InfoBar.error(
-            "自动登录失败",
+            "登录失败",
             reason[:120],
             parent=parent,
             duration=5000,
