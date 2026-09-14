@@ -100,9 +100,11 @@ def test_perf_preview_exit_applies_pending_height(src_text: str):
     assert "getattr(self, \"_pending_viewer_height\", None)" in body, (
         "set_resize_preview_mode(False) 必须读取 _pending_viewer_height 累积值"
     )
-    # 必须一次性 setFixedHeight
-    assert "self.viewer.setFixedHeight(pending_h)" in body, (
-        "set_resize_preview_mode(False) 必须一次性 setFixedHeight 应用累积高度"
+    # 必须一次性应用累积高度。出口自 66b66adc 起收敛到 _commit_viewer_height
+    # （批量提交器激活时走 batch.submit，否则直接 setFixedHeight），
+    # 断言跟着改：只认 setFixedHeight 会漏掉走 batch 的那条路径。
+    assert "self._commit_viewer_height(pending_h)" in body, (
+        "set_resize_preview_mode(False) 必须经 _commit_viewer_height 一次性应用累积高度"
     )
     # 必须强制一次高度上报
     assert "reportHeight()" in body, (

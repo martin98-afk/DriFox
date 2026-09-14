@@ -14777,15 +14777,20 @@ class MessageCard(SimpleCardWidget):
         if enabled == self._resize_preview_mode:
             return
 
-        self._resize_preview_mode = enabled
-
         # user 卡片使用 PlainTextViewer，weight 很轻，不需要 placeholder
         if self.role == "user":
             return
 
         # 懒渲染还没创建viewer，跳过（welcome 卡已创建 viewer 时同样走占位逻辑）
+        # 🐛 D1：赋值必须在所有守卫之后。旧实现先置标志再判 viewer，未懒渲染的卡片
+        # 会在 resize 周期里被标成「已占位」，而它什么都没隐藏。随后 ensure_rendered
+        # 创建 viewer，_apply_viewer_height 命中该标志把真实高度写进
+        # _pending_viewer_height 就 return → 卡片永久停在 40px 空白。恢复链队列是
+        # _begin_restore_chain 时刻的快照，不会再回头看这张卡，只能等下一次 resize。
         if self.viewer is None:
             return
+
+        self._resize_preview_mode = enabled
 
         if enabled:
             viewer_height = max(self.viewer.height(), self.viewer.minimumHeight(), 40)

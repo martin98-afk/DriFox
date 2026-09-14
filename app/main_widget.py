@@ -9504,9 +9504,35 @@ class OpenAIChatToolWindow(ToolWindow):
         self._restore_batch_idx = 0
         self._restore_visible_count = 0
         self._resize_preview_active = False
+        # 🐛 残留占位兜底：_restore_queue 是 _begin_restore_chain 时刻的 layout 快照，
+        # resize 周期内新入列 / 批次重建的卡片不在其中；而
+        # _set_cards_resize_preview_mode(True) 开头有 `enabled == _resize_preview_active`
+        # 短路，标志长期为 True 的连续拖拽里后续 resize 事件整函数跳过，永远补不到
+        # 这些卡片。没有这次扫描，它们的 viewer 被 hide 后无人 show → 永久空白。
+        # 放在 batch 宽期之前：卡片退出占位时提交的高度仍能进本轮 batch 统一收敛。
+        self._release_leftover_preview_placeholders()
         batch = getattr(self, "_height_batch", None)
         if batch is not None:
             batch.begin()
+
+    def _release_leftover_preview_placeholders(self) -> None:
+        """复位所有仍停留在 resize 占位态的卡片（恢复链收口的兜底扫描）。
+
+        只在 `_end_resize_cycle` 调用，O(布局卡片数)、每个 resize 周期一次：正常卡片
+        此时 `_resize_preview_mode` 已为 False，循环里只多一次属性读取。
+        """
+        layout = getattr(self, "chat_layout", None)
+        if layout is None:
+            return
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            card = item.widget() if item is not None else None
+            if not isinstance(card, MessageCard) or not getattr(card, "_resize_preview_mode", False):
+                continue
+            try:
+                card.set_resize_preview_mode(False)
+            except RuntimeError:
+                pass
 
     def _process_restore_batch(self, epoch: int | None = None):
         """按时间预算分批恢复卡片 viewer（视口内优先，触发 GPU 分配故需摊平）
