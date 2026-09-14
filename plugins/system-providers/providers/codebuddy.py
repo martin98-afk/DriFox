@@ -2,22 +2,22 @@
 """服务商插件 — 腾讯 CodeBuddy（copilot.tencent.com 模型池）。
 
 伪装 CodeBuddyIDE 客户端接入：身份标识（X-Domain / X-Product / X-Product-Code /
-User-Agent）经 capabilities["extra_headers"] 静态头通道注入每个 LLM 请求，
-主程序（chat_worker._provider_extra_headers）通用消费，无需感知具体服务商。
+User-Agent）经 capabilities["extra_headers"] 注入每个 LLM 请求，主程序
+（chat_worker._provider_extra_headers）通用消费，无需感知具体服务商。
 
-模型池：capabilities["models_hook"] 拉远端 /v3/config 实时列表。
-自动登录：capabilities["login_hook"]，弹浏览器授权后回填 API Key 输入框。
-自动续期：access_token 有效期 72h，守护线程每 6h 用 refresh_token 刷新，
-    新 token 直写 _EXTRA_HEADERS["Authorization"]（family_capabilities 浅
-    合并同引用，chat 请求实时生效；不回写 SavedProviders，config_id 不漂移）。
-积分余额：balance_fetcher 汇总 get-user-resource 各资源包剩余（IDE 积分面板
-    同款接口），每日自动签到在刷新循环内完成（status 幂等）。
+多账号模型：一条服务商配置 = 一个号。
+    API Key 字段存该号的 refresh_token（长效不变 → config_id 稳定、原生加密链）。
+    Authorization 头为可调用值：chat_worker 每次请求传入 llm_config，按
+    refresh_token 从本地缓存取 access_token（临期自动刷新）——各配置各号，
+    余额各显，没余额用户自行切换配置。
+自动签到：守护线程遍历缓存内全部号，临期刷新 + 每日自动签到（status 幂等）。
 
-凭据缓存：<app_data>/codebuddy/（access_token.txt / refresh_token.txt），
-    不落仓库目录。CLI：python buddy_auth.py {login,refresh,checkin,credits}。
+凭据缓存：<app_data>/codebuddy/cache/<hash>.json，不落仓库目录。
+    CLI：python buddy_auth.py {login,refresh,checkin,credits}。
 
 风险提示：非官方客户端协议实现，存在违反服务条款与封号风险，自行评估。
 """
+import hashlib
 import json
 import threading
 import time
@@ -27,23 +27,90 @@ from app.plugins.registries.provider_registry import ProviderDef
 from app.utils.utils import get_app_data_dir
 
 _ENDPOINT = "https://copilot.tencent.com"
-_CRED_DIR = get_app_data_dir() / "codebuddy"
-_CRED_DIR.mkdir(parents=True, exist_ok=True)
-_TOKEN_FILE = _CRED_DIR / "access_token.txt"
-_REFRESH_FILE = _CRED_DIR / "refresh_token.txt"
-_REFRESH_INTERVAL_SEC = 6 * 3600  # token 72h 有效期，6h 刷一次足够
+_CACHE_DIR = get_app_data_dir() / "codebuddy" / "cache"
+_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_REFRESH_INTERVAL_SEC = 6 * 3600  # access_token 实测 72h，6h 一轮足够
+_TOKEN_TTL_SEC = 72 * 3600  # 服务端未回过期时间，按实测有效期记
+
+_CACHE_LOCK = threading.Lock()
+_CACHE: dict = {}  # refresh_token -> {"access_token","expires_at","refresh_token"}
+
+
+def _load_auth_module():
+    """按路径加载同目录认证模块（providers 目录非包，loader 按文件加载）。"""
+    import importlib.util
+
+    auth_path = Path(__file__).with_name("buddy_auth.py")
+    spec = importlib.util.spec_from_file_location("codebuddy_buddy_auth", auth_path)
+    ba = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ba)
+    return ba
+
+
+def _cache_path(refresh_token: str) -> Path:
+    digest = hashlib.sha1(refresh_token.encode("utf-8")).hexdigest()[:12]
+    return _CACHE_DIR / f"{digest}.json"
+
+
+def _cache_get(refresh_token: str) -> dict:
+    with _CACHE_LOCK:
+        if refresh_token in _CACHE:
+            return _CACHE[refresh_token]
+    try:
+        entry = json.loads(_cache_path(refresh_token).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        entry = {}
+    entry.setdefault("refresh_token", refresh_token)
+    with _CACHE_LOCK:
+        _CACHE[refresh_token] = entry
+    return entry
+
+
+def _cache_put(refresh_token: str, access_token: str) -> None:
+    entry = {
+        "refresh_token": refresh_token,
+        "access_token": access_token,
+        "expires_at": time.time() + _TOKEN_TTL_SEC,
+    }
+    with _CACHE_LOCK:
+        _CACHE[refresh_token] = entry
+    _cache_path(refresh_token).write_text(json.dumps(entry), encoding="utf-8")
+
+
+def _exchange_access_token(refresh_token: str, max_skew_sec: float = 3600.0) -> str:
+    """按 refresh_token 取可用 access_token：缓存命中（未临期）直接返回，否则刷新。"""
+    entry = _cache_get(refresh_token)
+    if entry.get("access_token") and entry.get("expires_at", 0) > time.time() + max_skew_sec:
+        return entry["access_token"]
+    new = _load_auth_module().refresh(refresh_token)
+    if not new.get("access_token"):
+        raise RuntimeError("刷新未返回 access_token")
+    _cache_put(refresh_token, new["access_token"])
+    return new["access_token"]
+
+
+def _auth_header(llm_config: dict) -> str:
+    """动态 Authorization 头：按当前配置的 API_KEY（refresh_token）换取。"""
+    refresh_token = str((llm_config or {}).get("API_KEY", "") or "").strip()
+    if not refresh_token:
+        return ""
+    try:
+        return f"Bearer {_exchange_access_token(refresh_token)}"
+    except Exception:
+        return ""  # 换取失败回退空头（SDK 用 API_KEY 鉴权，报错由请求层透出）
+
 
 # 伪装身份头（真机校准 2026-09；值取自 CodeBuddyIDE 1.106.1）。
-# Authorization 由登录/续期链路动态维护：None = 不注入（回退 API_KEY 鉴权）。
+# Authorization 为可调用值：chat_worker 每次请求传入 llm_config，按配置各号取 token。
 _EXTRA_HEADERS = {
     "X-Domain": "copilot.tencent.com",
     "X-Product": "SaaS",
     "X-Product-Code": "codebuddy",
     "User-Agent": "CodeBuddyIDE/1.106.1",
-    "Authorization": None,
+    "Authorization": _auth_header,
 }
 
-# 内置兜底模型目录（远端不可用时可用；正式列表以 models_hook 实时拉取为准）
+# 内置兜底模型目录（远端不可用时可用；正式列表以远端 /v3/config 为准）
 _MODELS = [
     "auto",
     "hy4-preview",
@@ -64,47 +131,22 @@ _MODELS = [
 ]
 
 
-def _current_token() -> str:
-    """当前可用 access_token：内存优先，回退落盘文件。"""
-    auth = _EXTRA_HEADERS.get("Authorization")
-    if isinstance(auth, str) and auth.startswith("Bearer "):
-        return auth[7:]
-    if _TOKEN_FILE.exists():
-        return _TOKEN_FILE.read_text(encoding="utf-8").strip()
-    return ""
-
-
-def _set_token(access_token: str) -> None:
-    """更新内存头 + 落盘（chat 请求经 extra_headers 注入实时生效）。"""
-    _EXTRA_HEADERS["Authorization"] = f"Bearer {access_token}"
-    _TOKEN_FILE.write_text(access_token, encoding="utf-8")
-
-
-def _load_auth_module():
-    """按路径加载同目录认证模块（providers 目录非包，loader 按文件加载）。"""
-    import importlib.util
-
-    auth_path = Path(__file__).with_name("buddy_auth.py")
-    spec = importlib.util.spec_from_file_location("codebuddy_buddy_auth", auth_path)
-    ba = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(ba)
-    return ba
-
-
 def _auto_login():
-    """自动登录钩子（编辑卡后台线程调用）：弹浏览器授权，返回回填凭据。"""
+    """自动登录钩子（编辑卡后台线程调用）：弹浏览器授权，回填长效 refresh_token。"""
     ba = _load_auth_module()
     result = ba.login(timeout_sec=280)
     access_token = result["access_token"]
     refresh_token = result.get("refresh_token", "")
-    nickname = (result.get("account") or {}).get("nickname") or "CodeBuddy"
-    info = f"登录成功（{nickname}）"
+    account = result.get("account") or {}
+    nickname = account.get("nickname") or "CodeBuddy"
 
-    _set_token(access_token)
+    api_key = refresh_token or access_token
     if refresh_token:
-        _REFRESH_FILE.write_text(refresh_token, encoding="utf-8")
+        _cache_put(refresh_token, access_token)  # 预热：保存后立即可聊天
 
-    # 顺带带出签到状态（积分无余额接口，连签天数是唯一可见口径）
+    info = f"登录成功（{nickname}）：API Key 为长效续期令牌，聊天自动换取访问令牌"
+
+    # 顺带带出签到状态
     try:
         status = ba.checkin_status(access_token)
         streak = status.get("streak_days")
@@ -115,16 +157,17 @@ def _auto_login():
             info += f"，连签 {streak} 天，{state}"
     except Exception:
         pass
-    return {"api_key": access_token, "info": info + "，API Key 已回填请保存"}
+    return {"api_key": api_key, "info": info + "，API Key 已回填请保存"}
 
 
-def _fetch_models():
-    """模型列表获取钩子（编辑卡「获取模型列表」调用）：拉 /v3/config 实时模型池。"""
+def _fetch_models(config):
+    """模型列表获取钩子（签名对齐 balance_fetcher）：按本配置的号拉 /v3/config。"""
     import urllib.request
 
-    token = _current_token()
-    if not token:
+    refresh_token = str((config or {}).get("API_KEY", "") or "").strip()
+    if not refresh_token:
         raise RuntimeError("尚未登录：请先点击「自动登录」")
+    token = _exchange_access_token(refresh_token)
     req = urllib.request.Request(
         f"{_ENDPOINT}/v3/config", headers=_load_auth_module().build_headers(token)
     )
@@ -135,10 +178,14 @@ def _fetch_models():
 
 
 def _fetch_balance(config):
-    """余额查询（DeepSeek 余额同款通道）：返回当前可用积分合计。"""
-    token = _current_token() or (config or {}).get("API_KEY", "")
-    if not token:
+    """余额查询（DeepSeek 余额同款通道）：按本配置的号返回可用积分合计。"""
+    refresh_token = str((config or {}).get("API_KEY", "") or "").strip()
+    if not refresh_token:
         return None
+    try:
+        token = _exchange_access_token(refresh_token)
+    except Exception:
+        return {"hide": True, "tooltip": "登录凭据失效，请重新自动登录"}
     ba = _load_auth_module()
     left = sum(
         float(r.get("CycleCapacityRemainPrecise") or 0) for r in ba.user_resources(token)
@@ -147,37 +194,46 @@ def _fetch_balance(config):
 
 
 def _refresh_loop():
-    """守护循环：启动即刷新一次，之后每 6h 用 refresh_token 换新 access_token。"""
+    """守护循环：遍历缓存内全部号 —— 临期刷新 access_token + 每日自动签到（幂等）。"""
     while True:
         try:
-            rt = _REFRESH_FILE.read_text(encoding="utf-8").strip() if _REFRESH_FILE.exists() else ""
-            if rt:
-                ba = _load_auth_module()
-                new = ba.refresh(rt)
-                if new["access_token"]:
-                    _set_token(new["access_token"])
-                    if new.get("refresh_token"):
-                        _REFRESH_FILE.write_text(new["refresh_token"], encoding="utf-8")
-                # 每日自动签到（status 幂等：已签/未开启直接跳过）
-                token = _current_token()
-                if token:
-                    status = ba.checkin_status(token)
-                    if (
-                        isinstance(status, dict)
-                        and status.get("active")
-                        and not (status.get("today_checked_in") or status.get("todayCheckedIn"))
-                    ):
-                        ba.checkin_claim(token)
+            ba = _load_auth_module()
+            for path in sorted(_CACHE_DIR.glob("*.json")):
+                try:
+                    entry = json.loads(path.read_text(encoding="utf-8"))
+                    rt = entry.get("refresh_token", "")
+                    if not rt:
+                        continue
+                    at = entry.get("access_token", "")
+                    if entry.get("expires_at", 0) <= time.time() + 24 * 3600:
+                        new = ba.refresh(rt)
+                        if new.get("access_token"):
+                            at = new["access_token"]
+                            rt = new.get("refresh_token") or rt
+                            _cache_put(rt, at)
+                            if _cache_path(entry.get("refresh_token", "")) != _cache_path(rt):
+                                path.unlink(missing_ok=True)
+                            path = _cache_path(rt)
+                    if at:
+                        status = ba.checkin_status(at)
+                        if (
+                            isinstance(status, dict)
+                            and status.get("active")
+                            and not (
+                                status.get("today_checked_in")
+                                or status.get("todayCheckedIn")
+                            )
+                        ):
+                            ba.checkin_claim(at)
+                except Exception:
+                    continue  # 单号失败不影响其余号
         except Exception:
-            pass  # 网络/凭据异常下轮再试，守护线程不允许退出
+            pass  # 守护线程不允许退出
         time.sleep(_REFRESH_INTERVAL_SEC)
 
 
 def _bootstrap():
-    """注册时恢复 token 与守护线程（热重载重复启动无害：daemon 且幂等写）。"""
-    token = _current_token()
-    if token:
-        _EXTRA_HEADERS["Authorization"] = f"Bearer {token}"
+    """注册时启动守护线程（热重载重复启动无害：daemon 且幂等写）。"""
     threading.Thread(target=_refresh_loop, daemon=True).start()
 
 

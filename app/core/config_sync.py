@@ -692,6 +692,10 @@ class ConfigSyncService(QObject):
                         _pwd = cfg._secret_password or SecretStore().get(MASTER_PASSWORD_ACCOUNT)
                         unwrap_secrets(_file_data, SecretStore(), mode=_mode, password=_pwd)
                         cfg._secrets_locked = cfg._has_locked_cipher()
+                        if not cfg._secrets_locked:
+                            # 与 Settings._apply_secret_mode 同一语义：解锁成功即清备份，
+                            # 否则设置卡会把「有密文备份」误读成「等待解锁」
+                            cfg._cipher_backup = {}
                     else:
                         unwrap_secrets(_file_data, SecretStore(), mode=_mode)
                 except Exception as _se:

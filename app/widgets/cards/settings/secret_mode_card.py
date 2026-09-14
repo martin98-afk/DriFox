@@ -187,7 +187,10 @@ class SecretModeSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
 
         # 密码子区（仅密码方式显示）
         is_password = current == MODE_PASSWORD
-        locked = bool(getattr(self.cfg, "_cipher_backup", {}))
+        # 锁定判据必须走 secrets_locked（由 _apply_secret_mode 按解密结果设定）：
+        # _cipher_backup 语义是「未解密密文的回写备份」，已解锁时为便于落盘仍可能
+        # 留存，据此判断会把正常解锁态误报成「等待解锁」。
+        locked = bool(getattr(self.cfg, "secrets_locked", False))
         self._pwd_row.setVisible(is_password)
         self._pwd_status.setText(
             "状态：" + ("等待解锁（密钥已同步但未解锁）" if locked else "密码已设置") if is_password else ""
@@ -245,7 +248,7 @@ class SecretModeSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
 
     def _ensure_unlocked(self) -> bool:
         """存在未解密密文时弹解锁窗；返回密钥是否已就绪"""
-        if not getattr(self.cfg, "_cipher_backup", {}):
+        if not bool(getattr(self.cfg, "secrets_locked", False)):
             return True
         result = {"ok": False}
 
@@ -277,7 +280,7 @@ class SecretModeSettingCard(DynamicHeightExpandCardMixin, ExpandSettingCard):
 
     def _on_set_password(self):
         # 换机未解锁：按钮即「解锁」入口，成功后回到已解锁态
-        if self.cfg._cipher_backup:
+        if bool(getattr(self.cfg, "secrets_locked", False)):
             if not self._ensure_unlocked():
                 return
             self._refresh()

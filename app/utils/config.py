@@ -422,6 +422,11 @@ class Settings(QConfig):
             self._secrets_locked = self._has_locked_cipher()
             if self._secrets_locked:
                 logger.info("[SecretStore] 密码模式：本机无记住的密码或解密失败，等待用户解锁")
+            else:
+                # 自动解锁成功（本机记住的密码可用）：备份密文只在 locked 期间用于
+                # 原样回写，解锁后留着会让「是否存在未解密密文」的判断失准 —— 设置卡
+                # 据此显示「等待解锁」，表现为每次启动都误报未解锁（明文实际已就绪）。
+                self._cipher_backup = {}
             return
         unwrap_secrets(data, store, mode=mode)
         self._recover_flat_secrets_from_keyring()

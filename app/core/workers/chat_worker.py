@@ -3203,7 +3203,11 @@ class OpenAIChatWorker(QThread):
             for name, value in extra.items():
                 if value is None:
                     continue
-                headers[str(name)] = str(value)
+                # 可调用值 = 动态头：按当前请求的 llm_config 取值
+                # （如 CodeBuddy 按各配置的 refresh_token 换 access_token）
+                headers[str(name)] = (
+                    str(value(self.llm_config or {})) if callable(value) else str(value)
+                )
         if self.session_id:
             header = profile.get("session_header")
             if header:

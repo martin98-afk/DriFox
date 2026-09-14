@@ -137,3 +137,26 @@ def test_set_password_rejected_when_locked(cfg):
         assert cfg.set_secret_password("brand-new", "pwd-123") is True
     except RuntimeError:
         pytest.skip("Settings 的 Qt 对象在同会话中被其他测试销毁")
+
+
+def test_remembered_password_auto_unlock_clears_backup(cfg, monkeypatch):
+    """本机记住密码 → 启动自动解锁：不 locked，且密文备份必须清空
+
+    备份残留会让设置卡（据 _cipher_backup 判断）把已解锁态误报成「等待解锁」，
+    表现为每次启动状态都停在待解锁。
+    """
+    _setup_password_machine(cfg)
+    # 模拟本机钥匙串记住了密码（换机场景无此条目 → 保持 locked）
+    monkeypatch.setattr(
+        ss.SecretStore,
+        "get",
+        lambda self, account: "pwd-123" if account == ss.MASTER_PASSWORD_ACCOUNT else "",
+    )
+    _reboot(cfg)
+    assert cfg.secrets_locked is False
+    assert cfg._cipher_backup == {}
+    assert _mem_key(cfg) == "sk-x"
+    # 解锁态落盘仍加密：备份清空后明文不能漏进文件
+    cfg.save()
+    assert is_ciphertext(_disk_key(cfg))
+    assert "sk-x" not in cfg.file.read_text(encoding="utf-8")
