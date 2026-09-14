@@ -284,7 +284,12 @@ class SessionStore:
 
                 # 2. 一次性激活：若文件头 auto_vacuum 不是 INCREMENTAL，执行 VACUUM 永久写入
                 #    (迁移已在同步段完成，VACUUM 基于完整 schema 重建)
-                if file_auto_vacuum and file_auto_vacuum != "incremental":
+                # ⚠️ PRAGMA 返回整数（0/1/2），归一化后再比较——此前 "2" != "incremental"
+                # 恒为真，导致已是 INCREMENTAL 的库每次启动都白跑一次全量 VACUUM（秒级）
+                _av_normalized = {"0": "none", "1": "full", "2": "incremental"}.get(
+                    str(file_auto_vacuum).strip().lower(), file_auto_vacuum
+                )
+                if file_auto_vacuum and _av_normalized != "incremental":
                     logger.info(
                         f"[SessionStore] 文件头 auto_vacuum={file_auto_vacuum}, "
                         f"后台执行一次性 VACUUM 永久激活 INCREMENTAL..."

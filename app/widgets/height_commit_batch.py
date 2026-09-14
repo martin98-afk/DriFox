@@ -101,8 +101,9 @@ class HeightCommitBatch:
         if self._anchor_card is None:
             self._capture_anchor()
         self._pending[id(card)] = (card, height)
-        # 与同步路径保持一致的去重语义：同一高度不会被重复提交/重复应用
-        card._last_applied_viewer_height = height
+        # 注：_last_applied_viewer_height 必须在 flush **真正应用后**才写。
+        # 提前写会让后续同值上报被 _apply_viewer_height 的等值短路吞掉；本条一旦
+        # 在 flush 里因卡片被回收而作废，该高度就永久丢失（无重试）。
         if not self._scheduled:
             self._scheduled = True
             QTimer.singleShot(0, self.flush)
@@ -124,10 +125,19 @@ class HeightCommitBatch:
                 self._sa.setUpdatesEnabled(False)
             try:
                 for card, height in items:
-                    with contextlib.suppress(RuntimeError):
+                    # suppress 必须含 AttributeError：卡片在本轮 submit 之后、flush 之前
+                    # 被虚拟滚动池化摘走时 viewer 为 None（detach_viewer 显式置 None），
+                    # 旧实现只 suppress RuntimeError → AttributeError 直接穿出于本循环，
+                    # 同批后面所有卡片的高度全部不应用（表现为 resize 后一片空白）。
+                    with contextlib.suppress(RuntimeError, AttributeError):
+                        viewer = getattr(card, "viewer", None)
+                        if viewer is None:
+                            # 本条作废：卡片重新渲染后会自行上报正确高度
+                            continue
                         # 本轮统一走锚定，关闭 per-card 增量补偿
                         card._last_height_delta = 0
-                        card.viewer.setFixedHeight(height)
+                        viewer.setFixedHeight(height)
+                        card._last_applied_viewer_height = height
                         card.heightChanged.emit(height)
             finally:
                 if follow:

@@ -1,7 +1,157 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+## [v0.6.0] - 2026-09-14
+
+自上一版本以来的变更 | 提交数：16 · 文件变更：83 · +5041/-1262 | 贡献者：mading, drifox-bot
+
+### ✨ 新功能 (New Features)
+
+- **API Key 加密三档可配置（keyring / password / none）** (`app/utils/secret_store.py`, `app/utils/config.py`, `app/widgets/cards/settings/secret_mode_card.py` 新增, `app/widgets/secret_unlock_dialog.py` 新增, `app/widgets/secret_password_setup_dialog.py` 新增, `app/widgets/cards/settings/llm_settings_card.py`, `app/main_widget.py`, `app/core/config_sync.py`, `tests/config/test_secret_mode.py` 新增, `tests/utils/test_secret_store.py`, `pyproject.toml`): 服务商 API Key 不再只能依赖「本机绑定」的系统钥匙串——新增 `General.SecretMode`（`keyring` / `password` / `none`）实时切换，老用户旧布尔项 `UseSystemKeyring` 一次性迁移到 `keyring`，行为不变。设置卡位于「设置 → 服务商 → Gitee 账号绑定」下方，切换入口直接调用 `Settings.switch_secret_mode`。密码模式用 scrypt 派生 + Encrypt-then-MAC（`enc:v2:` 前缀），纯 stdlib 零第三方依赖；密文留在 app.config 里随配置云同步，换机器输入同一密码即可解出，不必逐台重填。TabManagerWindow 启动路径延迟服务初始化，加速首屏。`b09126c4`, `687b3298`, `79a50789`, `7075cc13`
+
+- **CodeBuddy 服务商集成 + 认证头重构** (`app/core/auth_headers.py`, `app/core/provider_capabilities.py`, `plugins/codebuddy-provider/`, `tests/plugins/test_codebuddy_provider.py` 新增, `tests/utils/test_secret_store.py`): OAuth 多账户绑定 + 积分直用 + 6h token 自动刷新 + 每日签到；重构 `auth_headers` 让各 provider 共用同一套注入路径，`provider_capabilities` 注册表统一管理每个 provider 的特性探测；SecretStore 适配各平台 keyring 后端（Windows 缺包时 fallback）。`865fce20`, `31a187ed`
+
+- **插件管理：基础监视周期 + 缓存优化** (`app/core/plugin_manager.py`): 加入「目录签名缓存」与 `force reload` 通道，watcher 周期走基准值避免频繁扫描；OpenAI 资源异步预加载不再阻塞主线程。`3b14d026`
+
+- **v0.6.0 发布海报** (`images/release-poster-v0.6.0.png`, `build/poster-v0.6.0/`): 深色科技风（深靛底 + 青绿安全色 + 暖金经济色）海报，含密钥加密 / CodeBuddy / WebDAV 备份 / 语音输入 等 7 张素材图 + 5 个成品尺寸（full / large / share / thumb / preview），标语「更安全 · 更经济」。`bc3ce50e`
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **工具完成块残留** (`app/widgets/message_card.py`, `tests/widgets/test_streaming_output.py`): `<tool>` 协议块缺 `tool_call_id` 时 `data-tool-call-id=""`（空串），`reorganizeContent` 用 `if (_tid)` 判定空串为假，登记/过期清理/去重全失效，每改一次 `block_key` 旧块永不清理即积 N 份。修复：空 id 块按 `tool_name+preview` 生成 `data-block-key="syn-<hash>"` 补身份；`reorganizeContent` 加 `_currentToolBlockKeys` 集合，过期清理分支同时认 `data-block-key`（有 id 用 id，无 id 用 bk）；新增回归测试覆盖缺 `tool_call_id` 场景。`d03fe5cb`, `821bca9e`
+
+- **SecretUnlockDialog 父对象改为主窗口** (`app/widgets/secret_unlock_dialog.py`): 解锁弹窗此前 parent 引用不准，遮罩层盖不到位；改为绑定 `main_window` 后遮罩正确生效。`e048ee6b`
+
+- **splitter 方向改为 Qt.Vertical** (`app/widgets/`): 显式指定 `Qt.Vertical` 消除跨平台方向歧义，修复 macOS / Linux 上分裂条方向偶发反向的问题。`2e0676c9`
+
+- **登录按钮文案统一** (`app/widgets/cards/settings/provider_edit_card.py`): 「自动登录」→「登录」，与设置卡其它登录入口保持一致。`fc9654dd`
+
+### 🔧 其他 (Chores & Build)
+
+- **代码结构清理** (`app/`): 删除一批未使用代码块（增量 `+1480/-727`，主要为重构后的孤立 helper 与实验分支），保留对所有现有功能的引用链。`845fe1c7`
+
+- **版本号同步至 v0.6.0** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): `0.5.12` → `0.6.0` 四文件统一；徽章与架构图同步更新。`f393110f`
+
+- **marketplace 自动重生** (`plugins/marketplace.json`, `plugins/system/marketplace.json`): GitHub Actions 由 plugin.json 自动同步生成。`03a9df56`
+
+## [v0.5.12] - 2026-09-14
+
+自上一版本以来的变更 | 提交数：49 · 文件变更：212 · +10623/-2586 | 贡献者：dingma, mading
+
+### ✨ 新功能 (New Features)
+
+- **插件管理与 UI 组件样式统一** (`app/core/plugin_manager.py`, `app/widgets/cards/floating/command_card.py`, `app/widgets/cards/floating/file_mention_card.py`, `app/widgets/cards/floating/question_widget.py`, `app/widgets/cards/floating/floating_card_mixin.py`, `app/widgets/cards/floating/card_styles.py` 新增, `tests/widgets/`): PluginManager 加入「目录签名缓存 + force reload」参数，OpenAI 资源改为异步预加载不再阻塞主线程；UI 插件注册表新增自动配置卡卸载幂等保护与新的 `CardStyles` 集中样式表（统一 CommandCard / FileMentionCard / QuestionFloatingWidget 等的视觉规范），resize 期间卡片恢复更平滑；测试侧 mock `_load_all_ui_plugins` 保证 `on_done` 回调被调到（修复启动器刷新）。`27d997c0`, `633a0fdd`
+
+- **UI 插件快捷键绑定持久化与旧命令清理** (`app/plugins/registries/ui_plugin_registry.py`, `tests/plugins/test_ui_command_shortcuts.py`): UI 命令快捷键现在落盘到设置文件，重启后仍在；新增绑定持久化回归测试 + 清理历史遗留的旧命令（不破坏现有用户数据）。`36f8ba18`, `0afb5b92`
+
+- **标签切换队列与指示器滑动** (`app/widgets/modules/tab_manager.py`, `app/widgets/workbench_panel.py`, `app/widgets/custom_title_bar.py`, `app/widgets/modules/tray_manager.py`): tab 切换请求走队列收敛（动画中再点不抖）；自定义标题栏的 tab 指示器实现「滑动到 active」过渡 + 延迟 snap（修复布局抖动）；托盘菜单加入「重启 DriFox」项；`workbench-panel` show 事件确保 tab 指示器定位正确。`a4efa2ac`, `自定义标题栏`, `tray-manager`
+
+- **编辑工具运行框的增删行数流式显示** (`app/core/tool_arg_lines.py`, `app/core/workers/chat_worker.py`, `app/widgets/message_card.py`, `plugins/system-tools/tools/_tool_desc.py`): write/edit/multi_edit 在参数流式接收期间显示 `+N/-M` 胶囊（复用完成框 diff 统计的 `.tool-diff-stats` 结构，运行中与完成态形态一致），取代对编辑场景没有信息量的 `(N字符)`。行数从 worker 手里的**半截 JSON 缓冲**估算：按字段取 `"field": "…"` 片段（未闭合截到缓冲末尾），转义感知计数（连续反斜杠奇数才是 `\n`），行数 = 换行转义数 + 1 对齐 diff 语义；同一 tool_call 内只增不减防正则失配抖动，完成后由真实 diff 统计接管。顺带修两处预览缺陷：progress 阶段路径字段扩展 `path/file_path/file/target`，且 path 未到达时显示「编辑文件中」而非空窗「准备中...」；`description` 与文件路径拼接时超 30 字符截断，保证路径不被单行省略裁掉。
+
+- **图像文件魔数校验** (`plugins/system-tools/tools/_file_tools.py`): read 工具读取图像时先用文件头魔数判断真实类型（不再依赖扩展名/Content-Type），避免把同名但非图像文件识别为图片引发的预览/处理错误。
+
+- **跨高度同步驱动（cross-height driver）** (`app/widgets/animation/cross_height_driver.py` 新增, `app/widgets/modules/tab_manager.py`, `app/widgets/history_page.py`): 同一窗口内的「面板」与「列表区」高度过渡走同一驱动，避免两端时长/曲线不一致造成的 1px 缝隙；面板与列表过渡时长同步。
+
+- **历史项目选择面板动画高度过渡** (`plugins/history-manager/ui/history_project_panel.py`, `plugins/history-manager/ui/history_page.py`): 项目切换面板展开/收起带高度动画，项目过滤记忆（上次选的项目重启后仍选中）。
+
+- **历史页项目过滤跟随 + 卡片徽标更新逻辑改进** (`app/widgets/cards/history_*.py`, `app/widgets/message_card.py`): 历史页项目过滤与主页消息卡的徽标状态实时联动，刷新不再依赖重建。
+
+- **崩溃取证增强** (`app/core/crash_handler.py`, `app/main.py`): `qInstallMessageHandler` 把所有 Qt 日志落 `qt_messages.log`（含 `qFatal` abort 前的最后消息），Windows 侧加 `SetUnhandledExceptionFilter` + `MiniDumpWriteDump` 写 `dumps/*.dmp`，崩溃现场可在用户报修后还原；`import` 适配 PyQt5（`sip.isdeleted`）保持与 pyside6 一致。`feat(crash)` 同步 pyside6 `34d9f8dd`
+
+- **卡片重试功能 + 标签展示** (`app/widgets/cards/message_card.py`, `app/widgets/cards/floating/floating_card.py`): 卡片新增重试入口（短描述走 `_ElidedLabel` 避免被省略号裁掉），长文本/窄列下也能完整显示。
+
+- **测试侧 sidebar 折叠与 tab 上下文切换会话** (`tests/widgets/test_sidebar_collapse.py`, `tests/core/test_tab_context_switch_session.py`): 覆盖侧栏折叠状态切换与 tab 上下文切换时的会话延续行为。
+
+- **样式改进（test 模块 docstring 风格统一）** (`tests/`): 各测试模块补模块 docstring 后空行，提升 flake8/编辑器可读性。
+
+- **API Key 加密方式可配置（系统钥匙串 / 密码加密 / 不加密）** (`app/utils/secret_store.py`, `app/utils/config.py`, `app/widgets/cards/settings/secret_mode_card.py` 新增, `app/widgets/secret_unlock_dialog.py` 新增, `app/widgets/cards/settings/llm_settings_card.py`, `app/main_widget.py`, `app/core/config_sync.py`, `tests/config/test_secret_mode.py` 新增, `tests/utils/test_secret_store.py`): 服务商 API Key 不再只能用「本机绑定」的系统钥匙串——新增 `General.SecretMode`（`keyring` / `password` / `none`，旧布尔项 `UseSystemKeyring` 一次性迁移，老用户行为不变），设置卡位于「设置 → 服务商 → Gitee 账号绑定」下方。密码模式用 scrypt KDF + AES-GCM 加密，密文以 `enc:v1:` 前缀留在 app.config 里随配置云同步，换机器输入同一密码即可解出，不必逐台重填；密码可记在本机钥匙串（无钥匙串时退化成每次启动输入）。本机拿不到密码时密钥处于 locked：内存置空（杜绝把密文当 key 发出去）、落盘用密文备份原样回写（不把云端密文覆盖成空），主窗口显示后弹窗解锁，取消不阻塞使用。配套两处关键防护：`_migrate_saved_providers` 在 locked 时跳过 `config_id = hash(API_URL, API_KEY)` 重算（否则 AES-GCM 随机 nonce 会让 config_id 每次启动漂移、打乱已选模型映射），解锁后补跑；模式切换/改密码时若存在未解密密文必须给出正确旧密码，否则拒绝而不是硬切。云同步下载后复用同一回填入口。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **密钥存储 Windows 直连系统凭证库（修复 401 回归）** (`app/utils/secret_store.py`): keyring 的 WinVaultKeyring 依赖 pywintypes 动态加载链，部分环境/启动时序下 priority 探测偶发失败，后端被跳过后已入库密钥读不回（文件里 API_KEY 已剥空 → 请求 401 Missing API key）。改为 Windows 下 ctypes 直连 advapi32（CredReadW/CredWriteW/CredDeleteW），零第三方依赖、加载稳定，target 命名与 keyring 完全一致（`username@service`），已存条目直接兼容；卡片侧同步去掉「无可用钥匙串」告警行。
+
+- **Gitee token / GitHub token 退出 keyring 范围 + 一次性回迁** (`app/utils/secret_store.py`, `app/utils/config.py`, `app/core/config_sync.py`): 扁平 ConfigItem（Gitee OAuth token / GitHub token）的 value 是不可变 str，`toDict(serialize=False)` 只有最内层 dict/value 是原引用，`unwrap_secrets` 在外壳上的回填写不回 `item.value`——升级后首次重启内存 token 为空 → `_ensure_valid_token` 报「access_token 为空」→ 自动清绑。修复：按用户决策 **Gitee token / GitHub token 彻底退出 keyring 范围**（其云同步面本就由 config_sync 上传剔除/下载合并覆盖），keyring 仅存服务商 API_KEY；新增 `_recover_flat_secrets_from_keyring` 一次性把凭证库残留的 `gitee/user_token`、`gitee/user_refresh_token`、`github/patch_token` 回迁 app.config 并删除条目；顺带修 `strip_secrets` 写凭证库失败时仍清空落盘的双丢缺陷（改为 fail-open 保留明文）。测试隔离：回迁用例 monkeypatch SecretStore，不触碰真实凭证库。
+
+- **输入框主题样式持久化（不依赖裸 `setStyleSheet`）** (`app/widgets/bottom_input_area.py`, `tests/widgets/test_input_theme_style_persistence.py`): `SendableTextEdit` 继承 qfluentwidgets 的 `TextEdit`，构造时被注册进 qfw `styleSheetManager`（LINE_EDIT 源）；DriFox 历史上用裸 `setStyleSheet` 覆盖为「透明融入卡片」样式，但任何一次 qfw `setTheme` 都会 `updateStyleSheet` 遍历重设所有注册 widget 的 Fluent QSS，把自定义样式顶掉——一旦 DriFox 刷新链因幂等跳过或异常中断没盖回，输入框就停留在 Fluent 白底描边样式（楷体 placeholder + 青色下划线，正是「主题更新后输入框变样」的观感）。修复：`_apply_input_style` / `_apply_agent_combo_style`（新增）改走 qfw 官方 `setCustomStyleSheet` 通道，自定义 QSS 并入 styleSheetManager 组合源，主题切换重设时自动携带不再被顶掉；并补 `:hover` / `:focus` / `:disabled` 三态显式透明覆盖（qfw 亮色 qss 的 focus 规则特异性更高，基础规则压不住白底与青色 border-bottom）。3 条回归测试锁死主题 LIGHT/DARK 往返样式存活、`refresh_style` 后仍存活、focus/hover 态不渗入。（同步 pyside6 `74a0d290`）
+
+- **输入框工具计数即时刷新（双数据源直连）** (`app/main_widget.py`, `tests/plugins/test_tool_count_refresh.py`): 输入框「危险/安全」计数（`_tool_count_label`）的刷新此前寄生在懒创建的工具控制卡上——未开过工具卡片的窗口，插件装/卸/热重载（registry 变更）后计数停在启动值；且 agent 激活的 `togglesChanged` emit 先于卡片的转发连接而丢失。修复：`main_widget.__init__` 直连两个数据源——registry `on_change` 回调（可能来自后台 watcher 线程，经新增 `_tool_registry_changed` 信号排队主线程）+ controller 的 `togglesChanged` / `activeAgentChanged` 信号，不再依赖卡片转发；两源统一走 0ms 单发去抖定时器（一次热重载重扫会产生几十次 notify，合并后统一刷 `_refresh_tool_toggle_btn`）。2 条回归测试验证「不创建工具控制卡时」registry 增删与 agent 权限注入都能即时刷新计数。（同步 pyside6 `42d56151`）
+
+- **历史页 SQLite 项目列表走 `sessions ∪ key_documents` 权威口径** (`app/utils/history_manager.py`): 此前 get_project_list 在 SQLite 模式下口径不一致——空项目从切换器消失，且同名项目无法重建。修复：统一从 `sessions` ∪ `key_documents` 派生项目列表，保证空项目可见、同名按预期处理。同步 pyside6 `3c41ee2a`
+
+- **插件 host watcher 误报目录删除 + 插件市场 sparse clone 缺 `--branch`** (`app/core/plugin_host.py`, `app/core/plugin_marketplace.py`): watcher 卸载时只看名字匹配、未做磁盘 `isdir` 核实，偶发误判「插件目录已删除」触发卸载-重载风暴；sparse clone（git-subdir 安装）没传 `--branch ref`，永远拉默认分支。修复：watcher 卸载前先 `isdir` 核实磁盘状态；sparse clone 显式传 `--branch <ref>`。同步 pyside6 `1c37a92f`, `1321d87f`
+
+- **看门狗扫描探活先行 + 失效条目就地剔除** (`app/core/thread_guard.py`): C++ 析构后 `QThread.isRunning()` 会抛 `RuntimeError` 直接打死看门狗线程；修复：先 `sip.isdeleted(obj)` 探活再访问 `isRunning`，失效条目立刻从监控列表剔除。同步 pyside6 `ad524790`
+
+- **卡片关闭接线幂等（不再 widget-is-None 路径下接不上）** (`app/plugins/registries/ui_plugin_registry.py`, `app/widgets/cards/floating/diff_card.py`): 第二个 panel 永远接不上 × 信号；diff 卡接线改实例级标志；吞异常改留痕（异常仍然记到日志而非静默）。同步 pyside6 `ad524790`
+
+- **stophook 执行期间用户插话被吞 + 繁忙发送派发加固** (`app/core/workers/chat_worker.py`, `app/core/hook_manager.py`): stophook 串行执行期间 `_hook_message_queue` 仍按顺序派发，但 stophook 内 emit 的 hook 消息被排到下轮 API 调用前才消费，期间用户发出的插话会被 stophook 队列排出吞掉。修复：插话标记条目在 stophook 队列派发前显式优先处理；繁忙发送派发加固，stophook 链不再饿死插话。
+
+- **message_card 多个问题合集** (`app/widgets/message_card.py`):
+  - `QLabel` 改 `_ElidedLabel`：`queue-message-card` 与 `plugin-config-card` 用 `_ElidedLabel` 处理长文本，避免路径/文件名被单行省略裁掉（QLabel 在固定宽度下会直接截断）。
+  - **运行框行数徽标改为独立元素**：长文本不再把徽标挤掉。
+  - **运行框行数徽标复用完成框 diff 胶囊样式**：运行态与完成态视觉一致。
+  - **运行框进度节流放宽 + 未闭合路径提取**：解决「参数接收中长时间不动」的卡顿观感（throttle 间距加大，path 未闭合时按当前缓冲显示「编辑 X 行」而不是停在「准备中」）。
+  - **修复工具完成框被吞**（在途异步渲染 + restore 判据）：异步渲染竞态导致某些工具完成后框消失。
+  - **question card 关闭栈管理**：用户提交后 question card 不再卡在栈顶关闭不掉。
+
+- **历史页面板/列表区过渡 1px 缝** (`app/widgets/modules/history_manager.py`): cross-height driver 引入后旧高度仍按各自时序推进，相邻元素过渡完成瞬间出现 1px 缝隙；修复走统一驱动同步完成时点。
+
+- **BOTTOM followContent 判定改 all → any** (`app/widgets/cards/floating/*`, `app/widgets/modules/input_card_module.py`): 状态卡共存时 BOTTOM 容器高度误判为空 → 留出额外空白；修复：followContent 判定改 any（任一子卡需要即撑开）。
+
+- **GitHub `.drifox` gitignore 模式** (`.gitignore`): `.drifox` 之前只忽略顶层目录，子目录（如 `plugins/.drifox/`）未覆盖 → 误入库；改为匹配任意子目录模式。
+
+- **tool_desc 有 tail 时截断 description** (`plugins/system-tools/tools/_tool_desc.py`): `description` 与文件路径拼接超 30 字符时优先截 description，保证文件路径始终在可见区。
+
+### ♻️ 代码重构 (Refactoring)
+
+- **tab-indicator 延迟 snap 到 active button** (`app/widgets/modules/tab_indicator.py`): 布局抖动时 snap 到 active 按钮改为延迟执行，避免布局未稳定时算错位置。
+
+- **hover-preview 延迟展开** (`app/widgets/simple_hover_tooltip.py`): hover 触发预览改为带延迟展开 + 自动收起阈值，减少误触。
+
+- **宠物动画 hide/show 计时器优化** (`app/widgets/pixmap_pet.py`): hide/show 状态切换复用单一计时器，减少 QTimer 创建销毁；尊重系统 reduce-motion 设置。
+
+- **UI 系统卡片头部图标 SVG 化 + BOTTOM 卡高度跟随声明 + arc_stack 动画收敛** (`app/widgets/cards/`, `app/widgets/animations/arc_stack.py`): 系统卡头部图标统一走 SVG 资源（避免位图缩放模糊）；BOTTOM 卡片显式声明高度跟随语义；arc_stack 动画收敛到统一驱动，减少重复动画片段。
+
+- **settings 卡片 + 设计令牌 / 图标 / 动效系统收尾** (`app/widgets/cards/settings/`, `app/widgets/design_tokens.py` 新增): 设置卡片样式统一走设计令牌；图标系统收尾；动效系统接入统一驱动。
+
+- **整体代码结构可读性与可维护性提升** (`app/widgets/`, `app/widgets/cards/settings/`): settings 卡片与动画系统重构，整理命名与目录边界，减少跨模块耦合。
+
+### ⚡ 性能优化 (Performance)
+
+- **运行框行数估算按 2000 字符步长重算** (`app/core/tool_arg_lines.py`, `app/widgets/message_card.py`): 避免超长参数 O(n²) 扫描拖住界面，长输入按 2000 字符步长分段估算。
+
+### 📚 文档 (Documentation)
+
+- **CHANGELOG 增补编辑工具运行框增删行数流式显示说明** (`CHANGELOG.md`): 在本版本条目中记录新增流式行数徽标的语义与边界。
+
+### 🔧 其他 (Chores & Build)
+
+- **版本号升级到 v0.5.12** (`pyproject.toml`, `app/utils/config.py`, `dist/installer.iss`, `README.md`): `0.5.11` → `0.5.12`。
+
 ## [Unreleased]
+
+### ✨ 新功能 (New Features)
+
+- **系统级密钥存储（keyring）** (`app/utils/secret_store.py` 新增, `app/utils/config.py`, `app/core/config_sync.py`, `build.py`, `Drifox.spec`): 服务商 API Key / Gitee OAuth token / GitHub token 迁入操作系统凭证库（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service），app.config 落盘与云端同步不再含明文密钥（此前 API_KEY 与 GitHub token 会原样上传 Gitee 私库）。`Settings.save()` 深拷贝后剥钥（toDict 内层与内存共享引用，必须隔离）、`load()` 后回填内存（须早于 config_id hash 迁移）；config_sync 两处「磁盘读回」路径（全量重载 / Gitee token 恢复）同步回填，防跨设备同步后本机密钥丢失。降级 fail-open：keyring 未装 / 无后端 / 异常 / 开关关闭（`General/UseSystemKeyring`）→ 完全旁路，明文照旧。密钥不跨设备同步，新设备拉到配置后需重输；PyInstaller 下 keyring 后端发现走 entry points 收不齐，build.py / spec 按平台显式声明后端模块（jaraco/keyring #439/#468）。已知边界：OS 凭证库不防本机同用户进程读取；更换服务商 URL/Key 后旧凭据条目会残留在系统凭据管理器（条目名 `DriFox:provider/xxx`），可手动删除。10 条单元测试 + WinVaultKeyring 真机全链冒烟（迁移/剥钥/回填）。
+
+- **编辑工具运行框的增删行数流式显示** (`app/core/tool_arg_lines.py`, `app/core/workers/chat_worker.py`, `app/widgets/message_card.py`, `plugins/system-tools/tools/_tool_desc.py`): write/edit/multi_edit 在参数流式接收期间显示 `+N/-M` 胶囊（复用完成框 diff 统计的 `.tool-diff-stats` 结构，运行中与完成态形态一致），取代对编辑场景没有信息量的 `(N字符)`。行数从 worker 手里的**半截 JSON 缓冲**估算：按字段取 `"field": "…"` 片段（未闭合截到缓冲末尾），转义感知计数（连续反斜杠奇数才是 `\n`），行数 = 换行转义数 + 1 对齐 diff 语义；同一 tool_call 内只增不减防正则失配抖动，完成后由真实 diff 统计接管。顺带修两处预览缺陷：progress 阶段路径字段扩展 `path/file_path/file/target`，且 path 未到达时显示「编辑文件中」而非空窗「准备中...」；`description` 与文件路径拼接时超 30 字符截断，保证路径不被单行省略裁掉。
+
+### 🐛 问题修复 (Bug Fixes)
+
+- **插话可打断 API 自动重试** (`app/core/workers/chat_worker.py`, `tests/core/test_retry_interject_abort.py`): 此前 `_make_api_call` 内部 15 次退避重试（5/10/15…s，累计最长 600s）期间 worker 阻塞在该函数内，而 `_hook_message_queue` 只在每轮 API 调用前由 `_inject_pending_hook_messages` 消费 → 报错重试期间发出的插话要等重试全部跑完才生效，表现为「发了消息 AI 长时间无响应」，实际只有点停止才能打断（停止还会把插话回收回填输入框）。修复：新增 `_has_pending_interject`（只探测不消费，取出后按原顺序放回）与 `_abort_retry_for_interject`（恢复协议错误重试的 partial 备份 + emit `retry_resolved` 收掉重试动画），在每轮 attempt 开头（限 `attempt > 0`，首轮遗留交给循环顶部正常消费）与退避等待循环（沿用 0.5s 粒度）探测插话，命中即放弃剩余重试并返回 `(None, None)`；主循环随后走 `not tool_calls_found` 完成路径把已接收内容落库，再由 `_drain_pending_hooks_before_exit` 注入插话并续跑一轮——保留上下文，不丢已生成内容，也不需要用户点停止。仅认 `_interject` 标记条目，TeamMail / SubAgentFinished 等不触发打断；worker 未持有 tool_executor（单测最小实例）时探测安全返回 False。3 条单元测试锁死：插话打断（只打 1 次 API、队列不被消费、发射 retry_resolved）、空队列照常重试、非插话条目不打断。
+
+- **keyring 化导致 Gitee 绑定失效（token 丢失）** (`app/utils/secret_store.py`, `app/utils/config.py`, `app/core/config_sync.py`): 扁平 ConfigItem（Gitee OAuth token / GitHub token）的 value 是不可变 str，`toDict(serialize=False)` 只有最内层 dict/value 是原引用，`unwrap_secrets` 在外壳上的回填写不回 `item.value`——升级后首次重启内存 token 为空 → `_ensure_valid_token` 报「access_token 为空」→ 自动清绑（SavedProviders 的 dict 值可穿透修改不受影响）。修复：按用户决策 **Gitee token / GitHub token 彻底退出 keyring 范围**（其云同步面本就由 config_sync 上传剔除/下载合并覆盖），keyring 仅存服务商 API_KEY；新增 `_recover_flat_secrets_from_keyring` 一次性把凭证库残留的 gitee/user_token、gitee/user_refresh_token、github/patch_token 回迁 app.config 并删除条目；顺带修 `strip_secrets` 写凭证库失败时仍清空落盘的双丢缺陷（改为 fail-open 保留明文）。测试隔离：回迁用例 monkeypatch SecretStore，不触碰真实凭证库。
+
+- **输入框在主题切换后停留在错误样式（楷体 placeholder + 青色下划线）** (`app/widgets/bottom_input_area.py`, `tests/widgets/test_input_theme_style_persistence.py`): `SendableTextEdit` 继承 qfluentwidgets 的 `TextEdit`，构造时被注册进 qfw `styleSheetManager`（LINE_EDIT 源）；DriFox 历史上用裸 `setStyleSheet` 覆盖为「透明融入卡片」样式，但任何一次 qfw `setTheme` 都会 `updateStyleSheet` 遍历重设所有注册 widget 的 Fluent QSS，把自定义样式顶掉——一旦 DriFox 刷新链因幂等跳过或异常中断没盖回，输入框就停留在 Fluent 白底描边样式（楷体 placeholder + 青色下划线，正是「主题更新后输入框变样」的观感）。修复：`_apply_input_style` / `_apply_agent_combo_style`（新增）改走 qfw 官方 `setCustomStyleSheet` 通道，自定义 QSS 并入 styleSheetManager 组合源，主题切换重设时自动携带不再被顶掉；并补 `:hover` / `:focus` / `:disabled` 三态显式透明覆盖（qfw 亮色 qss 的 focus 规则特异性更高，基础规则压不住白底与青色 border-bottom）。3 条回归测试锁死主题 LIGHT/DARK 往返样式存活、`refresh_style` 后仍存活、focus/hover 态不渗入。（同步 pyside6 74a0d290）
+
+- **输入框工具计数在插件装/卸/热重载后不即时刷新** (`app/main_widget.py`, `tests/plugins/test_tool_count_refresh.py`): 输入框「危险/安全」计数（`_tool_count_label`）的刷新此前寄生在懒创建的工具控制卡上——未开过工具卡片的窗口，插件装/卸/热重载（registry 变更）后计数停在启动值；且 agent 激活的 `togglesChanged` emit 先于卡片的转发连接而丢失。修复：`main_widget.__init__` 直连两个数据源——registry `on_change` 回调（可能来自后台 watcher 线程，经新增 `_tool_registry_changed` 信号排队主线程）+ controller 的 `togglesChanged` / `activeAgentChanged` 信号，不再依赖卡片转发；两源统一走 0ms 单发去抖定时器（一次热重载重扫会产生几十次 notify，合并后统一刷 `_refresh_tool_toggle_btn`）。2 条回归测试验证「不创建工具控制卡时」registry 增删与 agent 权限注入都能即时刷新计数。（同步 pyside6 42d56151）
+
+- **工具块 restore 判据根治（不再假设 markdown 必定重建）** (`app/widgets/message_card.py`, `tests/widgets/test_message_card_tool_box_disappear.py`, `tests/widgets/test_message_card_edit_tool_swallow_inflight.py`): save/restore 的 restore 条件由「未完成（`!_isFinished`）且 DOM 无同 id 块」收紧为「**DOM 无同 id 块**」。旧判据默认「已完成块的 markdown 一定会重建」，把「是否恢复」与「HTML 是否真的含该块」解耦——任何一次全量渲染的 HTML 缺块（在途旧快照落地、`_lazy_markdown_cb` 未刷新、注入失败、md 生成失败）都会让该块被 `el.remove()` 后无人恢复、永久消失，是「工具完成框被吞」的根因族。新判据只看 DOM：markdown 已重建同 id 块 → 跳过（防重复，行为与旧版一致）；没重建 → 把保存的块原样放回（无论是否 finished）。`_finishedSet` 不再参与判定，仅用于给恢复出的已完成块打 `data-restored-finished` 排查标记。既有用例 `test_save_restore_js_finished_blocks_not_restored` 改名为 `test_save_restore_js_restores_finished_block_when_html_missing_it` 并反转断言。
+
+- **编辑类工具完成框偶尔被吞（在途异步渲染落地覆盖）** (`app/widgets/message_card.py`, `tests/widgets/test_message_card_edit_tool_swallow_inflight.py`): 非流式渲染在长正文（> `_ASYNC_HISTORY_RENDER_MIN_CHARS` = 6000 字符）下走线程池异步，HTML 快照在**提交时刻**生成；编辑类工具完成（`append_tool_result` 编辑分支）只做 JS 增量注入、刻意不触发渲染（防闪烁），因而不递增 `_render_seq`，在途旧快照不会被作废。旧结果随后落地时 `_needs_save_restore`（`_restore_finished_ids` 已含该 id）走 save/restore：save 把 DOM 中的完成框 `el.remove()`，`updateContent(旧快照 HTML)` 不含该块，restore 又因该 id 已 finished 跳过恢复 → 完成框永久消失（窗口 = 线程池渲染耗时，故表现为「偶尔」）。修复：编辑分支追加 `viewer.invalidate_inflight_render()`（递增 `_render_seq` + 清 `_render_pending`），在途旧快照过期丢弃；非编辑工具路径不变（`_schedule_render(immediate=True)`，新快照自带该块）。新增 5 条回归测试，其中契约断言锁死吞框组合（落地 JS 的 `_finishedSet` 含 id 而 `updateContent` HTML 不含 `data-tool-call-id`）。
+
+- **提问卡片提交后关不掉、点击无反应** (`app/widgets/cards/card_manager.py`, `tests/widgets/test_question_card_stuck.py`): 修掉一处栈顶记账被抢走的竞态。`CardManager` 用 `visible_cards[容器]` 单值记「谁是栈顶」，而 L2 状态层的 `refresh_layer() → _apply_visible_set()` 会无条件覆写该单值；提问卡注册在 `BOTTOM` 且非 stackable，因此只要提问等待期间状态层刷过一次（子智能体进度刷新 / 紧凑卡 auto_hide 定时器 / 撤销卡 TTL / 新消息进队列，共 4 处可自发触发），记账就被换成状态卡或置空，此后 `hide_card("question")` 命中「记账不匹配」早退，widget 永不 `setVisible(False)`。表现为：提交后卡片仍压在输入框上方、再点提交/忽略全无反应（答案其实每次都送达、正文照常输出），而非提问卡独占的输入区隐藏与卡片隐藏是两条独立动作，前者成功后者失败。修复两处结构性问题且均不硬编码 `question` 字面量：① `_apply_visible_set` 写栈顶记账时，若现栈顶不在本次重算的管辖集内（非本层成员）则不抢，保住「question 覆盖一切」的优先级判定（`is_card_visible` 不再被侵蚀）；② `hide_card` 语义由「按记账判定该不该隐藏」改为「让指定卡消失」，新增 `_hand_over_stack_top` 只在记账确实属于本卡时交接、不动其他卡占位（同修 `multi_visible` 分支同类抢占）。5 条回归测试锁死关不掉路径、反复点击、优先级不被侵蚀，以及状态层在无提问卡时照常接管栈顶。
+
+- **超长 API Key 无法存入系统凭证库，静默退回明文落盘** (`app/utils/secret_store.py`, `tests/utils/test_secret_store.py`): Windows 单个凭证 Blob 上限 2560 字节（`CRED_MAX_CREDENTIAL_BLOB_SIZE = 5*512`，utf-16 下 1280 字符），超出时 `CredWriteW` 直接失败（错误码 1783）。此前 `strip_secrets` 的 fail-open 逻辑「写入失败则保留明文」虽避免双丢，但 Windows 分支的 `set()` 不落任何日志，叠加后表现为**该服务商密钥静默以明文留在 app.config 里**——典型如 CodeBuddy 的 1472 字符 access_token JWT（需 2944 字节，溢出 384 字节），而其余短密钥正常入库，用户只看到「钥匙串已生效」与「某一条仍是明文」并存。修复：超限值自动分片，拆成 `provider/<id>#0..#n-1`，主条目只存 `\x00drifox:chunks:<n>` 标记，读取按标记拼回；向后兼容老条目（无标记按单片直读）；任一分片缺失返回空而非半截密钥；写入中途失败回滚已写分片、主条目保持原值；值改短时清理陈旧分片；删除时主条目与分片一并清理（主条目标记缺失时探测清理脏残留）。同时给 `strip_secrets` 的失败分支补 warning 日志，杜绝同类静默降级。10 条新增用例覆盖分片边界（含代理对不切断）、回滚、残缺分片、收缩清理与 1472 字符 key 的端到端闭环。
 
 ## [v0.5.11] - 2026-09-13 (重新发布 #3)
 

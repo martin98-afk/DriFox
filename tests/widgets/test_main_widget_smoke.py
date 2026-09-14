@@ -769,7 +769,9 @@ def test_deferred_ui_plugins_refresh_shared_launcher(monkeypatch):
     win = OpenAIChatToolWindow.__new__(OpenAIChatToolWindow)
     win._is_destroyed = False
     win._function_command_handlers = {}
-    win._load_all_ui_plugins = MagicMock()
+    # 装载改为「慢插件让出一帧」的分批链，后续步骤挂在 on_done 上：
+    # 桩必须回调 on_done，否则后面的 launcher 补挂永远不会执行
+    win._load_all_ui_plugins = MagicMock(side_effect=lambda on_done=None: on_done() if on_done else None)
     win._build_plugin_input_buttons = MagicMock()
 
     reg = MagicMock()

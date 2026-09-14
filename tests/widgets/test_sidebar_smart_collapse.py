@@ -2,11 +2,17 @@
 """侧边栏智能折叠四规则测试
 
 设计：docs/superpowers/specs/2026-09-12-smart-sidebar-collapse-design.md
-规则 1：挤压即折叠（阈值 100→200）
+规则 1：挤压即折叠（折叠线对齐展开最小可用宽度 _EXPANDED_MIN_FRAME_WIDTH）
 规则 2：双面板协调（右先折、反向恢复）
 规则 3：空间恢复即展开（增长门槛 200→80；手动折叠永不自动展开）
 规则 4：启动记忆（会话栏折叠态 + 工作台显隐态，仅记用户手动终态）
+
+★ 2026-09-13 修订：折叠线从硬编码 120 改为引用单一真源
+_EXPANDED_MIN_FRAME_WIDTH(200)。原 120 与设计稿 200 不一致，导致
+120~200px 出现"文字已不可读但仍不折叠"的死区。
 """
+
+from unittest.mock import patch
 
 import pytest
 
@@ -47,14 +53,21 @@ class _StubFrame:
 
 
 class _StubPanel:
-    """最小 TabPanel 替身"""
+    """最小 TabPanel 替身（宽度口径与真实 TabPanel 一致：content 宽）"""
 
     def __init__(self):
+        from app.widgets.tab_manager_window import (
+            _COLLAPSED_PANEL_WIDTH,
+            _EXPANDED_MIN_CONTENT_WIDTH,
+        )
+
         self._collapsed = False
         self._collapsed_by_squeeze = False
         self._animating = False
-        self._auto_collapse_width = 200
-        self._collapsed_min_width = 46
+        # ★ content 口径（真实 TabPanel 同源），禁止写 frame 值
+        self._auto_collapse_width = _EXPANDED_MIN_CONTENT_WIDTH
+        self._auto_expand_width = _EXPANDED_MIN_CONTENT_WIDTH + 6
+        self._collapsed_min_width = _COLLAPSED_PANEL_WIDTH
         self.sync_calls = 0
 
     def _update_toggle_button(self):
@@ -87,43 +100,169 @@ def panel_collapsible(qtbot):
 # ── 规则 1：挤压即折叠 ──
 
 
-def test_auto_collapse_width_set_to_120(qapp):
+def test_auto_collapse_width_aligns_expanded_min(qapp):
+    """折叠线必须与展开最小可用宽度同源，且是 **content 口径**
+
+    ★ 坐标系回归：TabPanel.resizeEvent 比较的是 self.width()（content 宽 =
+    frame 宽 − 14）。若此处误用 frame 域的 _EXPANDED_MIN_FRAME_WIDTH，等价于
+    把折叠线抬高 14px。
+    """
     from unittest.mock import patch
 
+    from app.widgets.tab_manager_window import (
+        _EXPANDED_MIN_CONTENT_WIDTH,
+        _FRAME_PADDING_X,
+        _EXPANDED_MIN_FRAME_WIDTH,
+    )
     from app.widgets.tab_panel import TabPanel
 
     with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
         p = TabPanel()
-    assert p._auto_collapse_width == 120
+    assert p._auto_collapse_width == _EXPANDED_MIN_CONTENT_WIDTH
+    # 与 frame 域常量的换算关系必须成立
+    assert _EXPANDED_MIN_FRAME_WIDTH == _EXPANDED_MIN_CONTENT_WIDTH + _FRAME_PADDING_X
 
 
-def test_resize_to_119_collapses(panel_collapsible, qtbot):
+def test_auto_expand_width_is_hysteresis_offset(qapp):
+    """展开线 = 折叠线 + 滞回区，且滞回区必须窄（防"拉宽了却仍折叠"）"""
+    from unittest.mock import patch
+
+    from app.widgets.tab_manager_window import _EXPANDED_MIN_CONTENT_WIDTH, _HYSTERESIS_WIDTH
+    from app.widgets.tab_panel import TabPanel
+
+    with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
+        p = TabPanel()
+    assert p._auto_expand_width == _EXPANDED_MIN_CONTENT_WIDTH + _HYSTERESIS_WIDTH
+    assert p._auto_expand_width > p._auto_collapse_width
+    # ★ 滞回区必须远小于"用户可感知的操作粒度"：否则手动拉宽 15~20px
+    #   仍等不到展开，手感即"明显拉宽了却还是折叠态"（实测 bug）。
+    assert _HYSTERESIS_WIDTH <= 8, "滞回区过大 → 拉宽后长时间保持折叠，手感断裂"
+
+
+def test_default_expanded_width_is_readable(qapp):
+    """默认展开宽度必须 >= 折叠线：否则启动即落在"展开态却不该展开"的矛盾区"""
+    from unittest.mock import patch
+
+    from app.widgets.tab_manager_window import _DEFAULT_PANEL_WIDTH, _EXPANDED_MIN_CONTENT_WIDTH
+    from app.widgets.tab_panel import TabPanel
+
+    with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
+        p = TabPanel()
+    assert _DEFAULT_PANEL_WIDTH >= p._auto_collapse_width
+
+
+def test_width_constants_ordering_invariant(qapp):
+    """★ 宽度常量序关系不变式（本次 bug 的根因防护）
+
+    必须同时满足，否则出现"拉到正常宽度仍是折叠态"：
+        收起宽 < 折叠线 < 默认展开宽
+        且 默认展开宽 >= 展开线（= 折叠线 + 滞回区）
+    这条不变式是本 bug 的核心：此前折叠线 186 > 默认展开 187 之差仅 1px，
+    加 6px 滞回区后展开线 192 超过默认展开宽度 → 拉到 187 仍折叠。
+    """
+    from unittest.mock import patch
+
+    from app.widgets.tab_manager_window import _DEFAULT_PANEL_WIDTH
+    from app.widgets.tab_panel import TabPanel
+
+    with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
+        p = TabPanel()
+    assert p._collapsed_min_width < p._auto_collapse_width, "收起宽必须小于折叠线"
+    assert p._auto_collapse_width < _DEFAULT_PANEL_WIDTH, "折叠线必须小于默认展开宽度"
+    assert _DEFAULT_PANEL_WIDTH >= p._auto_expand_width, (
+        "默认展开宽度必须 >= 展开线：否则拉回正常宽度仍判折叠（本次 bug）"
+    )
+
+
+def test_drag_to_expanded_width_expands_when_collapsed(panel_collapsible, qtbot):
+    """★ 用户 bug 回归：收起态手动拉到"默认展开宽度"必须立刻展开
+
+    复现原问题：折叠线被抬高 + 滞回区被撑大后，用户从折叠态拉开到
+    187px content（视觉上完全够用）仍判定为折叠 → 表现为"宽度够大但里面
+    还是折叠的样子"（截图：左栏文字齐全，底部 tab 仍是图标胶囊）。
+    """
     from PyQt5.QtCore import QSize
     from PyQt5.QtGui import QResizeEvent
 
-    panel_collapsible.add_tab("会话A")
-    panel_collapsible.resize(250, 600)
-    panel_collapsible.resizeEvent(QResizeEvent(QSize(250, 600), QSize(250, 600)))
-    assert panel_collapsible._collapsed is False
-    panel_collapsible.resize(119, 600)
-    panel_collapsible.resizeEvent(QResizeEvent(QSize(119, 600), QSize(250, 600)))
-    qtbot.wait(50)
-    assert panel_collapsible._collapsed is True
-
-
-def test_still_expanded_at_130(panel_collapsible, qtbot):
-    """滞回区：折叠态拉到 130 展开；130 以下保持折叠"""
-    from PyQt5.QtCore import QSize
-    from PyQt5.QtGui import QResizeEvent
+    from app.widgets.tab_manager_window import _DEFAULT_PANEL_WIDTH
 
     panel_collapsible.add_tab("会话A")
     panel_collapsible.set_collapsed(True)
-    panel_collapsible.resize(125, 600)  # 滞回区（120~129）内不动
-    panel_collapsible.resizeEvent(QResizeEvent(QSize(125, 600), QSize(60, 600)))
+    # 用户从收起态拖到默认展开宽度（187 content）
+    panel_collapsible.resize(_DEFAULT_PANEL_WIDTH, 600)
+    panel_collapsible.resizeEvent(
+        QResizeEvent(QSize(_DEFAULT_PANEL_WIDTH, 600), QSize(panel_collapsible._collapsed_min_width, 600))
+    )
+    qtbot.wait(50)
+    assert panel_collapsible._collapsed is False, "拉到默认展开宽度必须展开（本次 bug 的核心）"
+    assert panel_collapsible._items[0]._compact is False
+
+
+def test_drag_just_past_expand_line_expands(panel_collapsible, qtbot):
+    """收起态拉到刚越过展开线即展开（不能要求拉到远超阈值的宽度）"""
+    from PyQt5.QtCore import QSize
+    from PyQt5.QtGui import QResizeEvent
+
+    from app.widgets.tab_manager_window import _HYSTERESIS_WIDTH
+    from app.widgets.tab_panel import TabPanel
+
+    with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
+        ref = TabPanel()
+    expand_w = ref._auto_expand_width
+    assert _HYSTERESIS_WIDTH <= 8  # 滞回区必须窄，保证"拉到就好"
+
+    panel_collapsible.add_tab("会话A")
+    panel_collapsible.set_collapsed(True)
+    panel_collapsible.resize(expand_w, 600)
+    panel_collapsible.resizeEvent(QResizeEvent(QSize(expand_w, 600), QSize(60, 600)))
+    qtbot.wait(50)
+    assert panel_collapsible._collapsed is False
+
+
+def test_no_dead_zone_between_collapse_and_expanded_min(panel_collapsible, qtbot):
+    """★ 死区回归：宽度低于折叠线必须折叠，不得停留在压扁态"""
+    from PyQt5.QtCore import QSize
+    from PyQt5.QtGui import QResizeEvent
+
+    from app.widgets.tab_manager_window import _EXPANDED_MIN_CONTENT_WIDTH
+
+    panel_collapsible.add_tab("会话A")
+    panel_collapsible.resize(300, 600)
+    panel_collapsible.resizeEvent(QResizeEvent(QSize(300, 600), QSize(300, 600)))
+    assert panel_collapsible._collapsed is False
+    # 折叠线以下 → 必须折叠
+    below = _EXPANDED_MIN_CONTENT_WIDTH - 1
+    panel_collapsible.resize(below, 600)
+    panel_collapsible.resizeEvent(QResizeEvent(QSize(below, 600), QSize(300, 600)))
     qtbot.wait(50)
     assert panel_collapsible._collapsed is True
-    panel_collapsible.resize(130, 600)
-    panel_collapsible.resizeEvent(QResizeEvent(QSize(130, 600), QSize(125, 600)))
+
+
+def test_hysteresis_zone_holds_state(panel_collapsible, qtbot):
+    """滞回区内保持状态不动；跨过展开线才展开"""
+    from PyQt5.QtCore import QSize
+    from PyQt5.QtGui import QResizeEvent
+
+    from app.widgets.tab_manager_window import _HYSTERESIS_WIDTH
+    from app.widgets.tab_panel import TabPanel
+
+    with patch("app.widgets.cards.settings.gitee_card.GiteeAccountRow._auto_enable_sync"):
+        _p = TabPanel()
+    collapse_w = _p._auto_collapse_width
+    expand_w = _p._auto_expand_width
+
+    panel_collapsible.add_tab("会话A")
+    panel_collapsible.set_collapsed(True)
+    # 折叠线与展开线之间（滞回区）内不动
+    if _HYSTERESIS_WIDTH > 1:
+        mid = collapse_w + max(1, _HYSTERESIS_WIDTH // 2)
+        panel_collapsible.resize(mid, 600)
+        panel_collapsible.resizeEvent(QResizeEvent(QSize(mid, 600), QSize(60, 600)))
+        qtbot.wait(50)
+        assert panel_collapsible._collapsed is True, "滞回区内不得展开"
+    # 越过展开线 → 展开
+    panel_collapsible.resize(expand_w, 600)
+    panel_collapsible.resizeEvent(QResizeEvent(QSize(expand_w, 600), QSize(collapse_w, 600)))
     qtbot.wait(50)
     assert panel_collapsible._collapsed is False
 
@@ -190,7 +329,9 @@ def test_coordinate_collapse_wb_first_when_full_layout_fits_without_wb(qapp):
         TabManagerWindow,
     )
 
-    total = _EXPANDED_MIN_FRAME_WIDTH + _MIN_CHAT_WIDTH + 50  # 650：<850（含工作台）但 >=600
+    # sizes 恒定（left=60, total=614, wb=250）→ needed(201) + chat(400) + wb(250) = 851 > 614（放不下工作台）
+    # 与下条断言无关：wb 让位后 needed(201) + chat(400) = 601 <= 614（放得下左栏+聊天）
+    total = _EXPANDED_MIN_FRAME_WIDTH + _MIN_CHAT_WIDTH + 50
     win = _Win(left=60, total=total, wb_visible=True, wb_width=250)
     assert TabManagerWindow._evaluate_squeeze_collapse(win) is False
     assert win._wb_collapsed_by_squeeze is True, "应先折工作台让位"
@@ -200,9 +341,17 @@ def test_coordinate_collapse_wb_first_when_full_layout_fits_without_wb(qapp):
 
 def test_coordinate_collapse_both_when_total_too_small(qapp):
     """total 连「面板+聊天」都放不下 → 工作台与左栏都折"""
-    from app.widgets.tab_manager_window import TabManagerWindow
+    from app.widgets.tab_manager_window import (
+        _EXPANDED_MIN_FRAME_WIDTH,
+        _MIN_CHAT_WIDTH,
+        TabManagerWindow,
+    )
 
-    win = _Win(left=60, total=550, wb_visible=True, wb_width=250)
+    # ★ 用常量推导（勿写死 550）：工作台让位能腾出的最大宽度就是 wb_width，
+    #   因此"让位后仍放不下"的临界是 total + wb_width < needed + chat_min。
+    wb_width = 250
+    total = _EXPANDED_MIN_FRAME_WIDTH + _MIN_CHAT_WIDTH - wb_width - 50
+    win = _Win(left=60, total=total, wb_visible=True, wb_width=wb_width)
     assert TabManagerWindow._evaluate_squeeze_collapse(win) is True
     assert win._wb_collapsed_by_squeeze is True
     assert win._tab_panel._collapsed is True

@@ -125,6 +125,10 @@ def detect_provider_family(llm_config: Dict[str, Any]) -> str:
     model = str(llm_config.get("模型名称", "") or "").lower()
     auth = str(llm_config.get("认证方式", "") or "").lower()
 
+    # CodeBuddy 网关必须先于 glm/deepseek 等模型名前缀判断：
+    # 其模型池含 glm-*/deepseek-* 系，按模型名会误判成 zhipu/deepseek 族
+    if "copilot.tencent.com" in api_url:
+        return "codebuddy"
     if "anthropic" in api_url or model.startswith("claude"):
         return "anthropic"
     if "generativelanguage.googleapis.com" in api_url or model.startswith("gemini"):

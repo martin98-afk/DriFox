@@ -99,6 +99,7 @@ from app.core import (
 from app.core.message_content import make_tool_result_block
 from app.core.webengine_profile import get_shared_web_profile
 from app.utils.design_tokens import (
+    Animations,
     BorderRadius,
     Colors,
     _get_global_font,
@@ -344,11 +345,12 @@ WHEEL_STUCK_MIN_INTERVAL = 0.1
 # 背景：流式结束时卡片高度会从"坞态限高"收敛到自然高度（常是数百 px 的突变），
 # 原来 _update_height 对大 delta 直接 snap（noContainerAnimation），外层滚动区
 # 跟着瞬移 —— 页面内的位移已被 FLIP 补间，唯独 Qt 侧这一跳没动画。
-# 这里在"结束态窗口"内改用既有的 _height_anim 做 200ms 缓动。
+# 这里在"结束态窗口"内改用既有的 _height_anim 做缓动（时长走全局 token，
+# 与 JS 侧 FLIP 的 220ms 完全一致，Qt 侧与页内补间同拍收尾）。
 # 关闭方式：环境变量 DRIFOX_FINISH_HEIGHT_ANIM=0，或运行时
 # set_finish_height_anim_enabled(False)。
 FINISH_HEIGHT_ANIM_ENABLED = os.environ.get("DRIFOX_FINISH_HEIGHT_ANIM", "1") != "0"
-FINISH_HEIGHT_ANIM_MS = 200  # 与 JS 侧 FLIP 时长（220ms）接近，观感一致
+FINISH_HEIGHT_ANIM_MS = Animations.ENTER_MS  # 与 JS 侧 FLIP 时长 220ms 对齐
 FINISH_HEIGHT_ANIM_MIN_DELTA = 60  # 小于该变化不值得动画（避免噪声抖动）
 FINISH_HEIGHT_ANIM_WINDOW_S = 2.0  # 结束态窗口：只覆盖结束后的高度收敛
 FINISH_HEIGHT_ANIM_MAX_USES = 2  # 窗口内最多缓动几次（归位+重排、随后折叠）
@@ -1481,12 +1483,51 @@ def _render_svg_pixmap(
     return pixmap
 
 
+# 编辑类工具在 progress 阶段（path 尚未到达）的兜底文案：避免运行框空窗成「准备中...」
+_FILE_EDIT_TOOLS_FALLBACK_TEXT = {
+    "write": "写入文件",
+    "edit": "编辑文件",
+    "multi_edit": "批量编辑文件",
+}
+
+
+def _format_tool_progress_badge(char_count: int, add_lines: int = 0, del_lines: int = 0) -> str:
+    """运行框进度徽标：编辑类工具显示 `+N/-M` 胶囊，其它工具显示 `(N字符)`。
+
+    行数优先——编辑类工具的字符数对用户没有信息量（设计：
+    docs/superpowers/specs/2026-09-13-tool-streaming-line-stats-design.md）。
+    胶囊结构与完成框的 diff 统计完全一致（复用 `.tool-diff-stats` 系列 class）。
+    返回值是**独立元素**（class 含 `tool-streaming-badge`），需与预览 span 平级放在
+    块末尾：预览 span 是 `overflow:hidden + ellipsis`，徽标嵌在里面会被长文本裁掉。
+    """
+    if add_lines or del_lines:
+        # 颜色与完成框的 diff 统计完全一致（render_helpers 里同款内联色，
+        # 不依赖 .tool-diff-stats__add/__del 的 CSS —— 流式块下 CSS 优先级不可靠）
+        return (
+            f'<span class="tool-diff-stats tool-streaming-badge" '
+            f'style="font-size: {scale_font_size(11)}px; flex: 0 0 auto; margin-left: 6px;">'
+            f'<span class="tool-diff-stats__add" style="color: #39d353; font-weight: 600;">+{add_lines}</span>'
+            f'<span class="tool-diff-stats__sep">/</span>'
+            f'<span class="tool-diff-stats__del" style="color: #f85149; font-weight: 600;">-{del_lines}</span>'
+            f"</span>"
+        )
+    if char_count > 0:
+        return (
+            f'<span class="tool-streaming-badge" style="color: var(--text); '
+            f'font-size: {scale_font_size(10)}px; flex: 0 0 auto; margin-left: 6px;">'
+            f"({char_count}字符)</span>"
+        )
+    return ""
+
+
 def _render_tool_streaming_block(
     tool_call_id: str,
     tool_name: str,
     preview: str,
     char_count: int = 0,
     completed: bool = False,
+    add_lines: int = 0,
+    del_lines: int = 0,
 ) -> str:
     """渲染工具流式调用块 HTML — 无折叠 inline 卡片。
 
@@ -1539,16 +1580,31 @@ def _render_tool_streaming_block(
     # spinner
     spinner_html = f'<span class="tool-streaming-spinner">{_THINK_SNAKE_SVG}</span>'
 
-    # 合并预览文本 + 字符数进度（放在同一个 span 里，JS 更新 innerHTML 时一起走）
+    # 预览文本（右侧徽标是独立兄弟节点，避免长文本 ellipsis 把徽标裁掉）
     preview_display = escape(preview) if preview else "准备中..."
-    if not completed and char_count > 0:
-        preview_display += f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
+    badge_html = "" if completed else _format_tool_progress_badge(char_count, add_lines, del_lines)
 
     streaming_state = "false" if completed else "true"
     # 编辑/子智能体/提问类工具标记 data-keep-in-content：JS 正文分区据此保留在正文（registry 派生）
     _keep_attr = ' data-keep-in-content="true"' if tool_name in _edit_tools() else ""
+    # 🐛 修复（工具完成框残留/两份/沉底）：无 tool_call_id 时合成 data-block-key。
+    # 【根因】`<tool>` 协议块解析不到 tool_call_id 时（模型正文复述协议格式、
+    # 输出被截断/停止、旧历史数据缺该字段），产物是 data-tool-call-id="" —— 而
+    # reorganizeContent 全线用 `if (_tid)` 判定，**空串为假**：
+    #   · 不登记 tool id / posMap → 过期清理分支短路 → 块永不清理
+    #   · 排序 getPos 无 data-order / 无 posMap 记录 → 返回 1e9 → 恒沉底
+    # 内容一变 block_key 就变（tool_name+args+result 的 sha1）→ 新块迁入工具区、
+    # 旧块留在原地，渲染几次就几份，全部 data-order 相同且不再重排（真实 DOM
+    # 复现见 tests/debug/unclosed_tool_completed_linger.py：结果逐版变化时
+    # 工具区块数 1→2→3→4，永不回落）。
+    # 【修复】按「工具名 + 预览文本 + 完成态」合成稳定身份：同内容重复渲染 key
+    # 不变（可查重、可清理），内容变化 key 变化（不与新块撞身份被误删）。
+    _syn_key_attr = ""
+    if not tool_call_id:
+        _seed = f"{tool_name}|{preview}|{streaming_state}"
+        _syn_key_attr = ' data-block-key="syn-' + hashlib.sha1(_seed.encode("utf-8")).hexdigest()[:12] + '"'
 
-    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}"{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
+    return f"""<div class="tool-block tool-streaming-block" data-tool-name="{escape(tool_name)}" data-tool-call-id="{tool_call_id}" data-streaming="{streaming_state}"{_syn_key_attr}{_keep_attr} style="margin: 4px 0; background: transparent; border: none; border-radius: 6px; box-shadow: none; display: flex; align-items: center; padding: 5px 10px; {get_font_family_css()}">
         <span style="display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto;">
             <span style="position:relative;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;flex:0 0 auto;">
                 {icon_html}
@@ -1556,9 +1612,9 @@ def _render_tool_streaming_block(
             <span style="white-space: nowrap; flex: 0 0 auto; color: {title_color}; font-size: {scale_font_size(13)}px; font-weight: 500;">{escape(cn_name)}</span>
             {spinner_html}
         </span>
-        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 1 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
+        <span class="tool-streaming-preview" data-dfx-preview data-dfx-key="tool-{escape(tool_call_id)}" data-dfx-text="{escape(preview) if preview else "准备中..."}" style="flex: 0 1 auto; min-width: 0; text-align: left; color: var(--text-secondary); font-size: {scale_font_size(11)}px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 12px;">
             {preview_display}
-        </span>
+        </span>{badge_html}
     </div>"""
 
 
@@ -2966,7 +3022,14 @@ _SKELETON_CACHE_MAX = 48
 # _twFlush + rAF 帧级揭示）；② FLIP 位移动画与动画串行队列（_FLIP_JS：
 # _flipCapture/_flipPlay/_animEnqueue）。旧骨架两者都没有 —— 流式仍是整块蹦字、
 # 结束态三动画叠加跳变 —— 必须靠版本号让旧缓存失效。
-_SKELETON_CACHE_VERSION = 29
+# v28~v31（2026-09-14）：滚动锚点恢复（_anchorable/_anchorables/_progScroll +
+# _beginDomUpdate/_endDomUpdate 事务深度）。旧骨架仍用绝对 scrollTop + 钳制恢复
+# → 阅读位置漂移 —— 必须靠版本号让旧缓存失效。
+# v32（2026-09-14）：reorganizeContent 过期清理支持无 tool_call_id 的工具块
+# （_currentToolBlockKeys 按 data-block-key 判定）。旧骨架只认 tool-call-id，
+# 空串 id 的块（未闭合 <tool> 协议文本渲染产物）永不清理 → 每轮渲染追加一份、
+# 全部同 data-order 且不再重排（工具完成框残留/两份/沉底）。
+_SKELETON_CACHE_VERSION = 32
 
 
 def _js_literal(value) -> str:
@@ -3495,7 +3558,7 @@ _STREAMING_DOCK_JS = """
                         // 归位后滚到底部展示最新条目——仅当用户未在上方阅读时；
                         // 用户上滚查看中则保持其位置（内容未更新，不打扰阅读）
                         var tc = document.getElementById('tool-content');
-                        if (tc && !tc._userScrolledUp) { tc._progScroll = true; tc.scrollTop = tc.scrollHeight; }
+                        if (tc && !tc._userScrolledUp) { _progScroll(tc, tc.scrollHeight); }
                     } else if (on && !wasOn) {
                         // 顶部 → 坞态：正文上移，做对称补偿
                         if (!_atBottom && _dockH > 0) {
@@ -3507,8 +3570,7 @@ _STREAMING_DOCK_JS = """
                         var _cp = document.getElementById('content-placeholder');
                         if (_cp) {
                             _cp._userScrolledUp = false;
-                            _cp._progScroll = true;
-                            _cp.scrollTop = _cp.scrollHeight;
+                            _progScroll(_cp, _cp.scrollHeight);
                         }
                     }
                     // 高度变化（110px ↔ 600px max-height）后报告文档高度。
@@ -3862,6 +3924,153 @@ _FLIP_JS = """
 # 改用 wheel 事件（同步派发、仅用户滚轮/触控板触发，无程序来源）标记上滚
 # 意图；scroll 事件只做"滚回底部恢复跟随"，不再置位。
 _CONTENT_AUTOSCROLL_JS = """
+                // ── 滚动锚点：DOM 重建期间保持阅读位置 ──
+                // 旧实现用「绝对 scrollTop + 新 max 钳制」恢复，而 save 与 restore 之间
+                // 内容结构会变（reorganizeContent 搬走工具/思考块、save/restore 移除工具
+                // 块）→ scrollHeight 收缩 → 恢复值被钳到「新内容底部」，与用户原阅读位置
+                // 不是同一语义点（表现为「跳到别处、也不是滚底」）。
+                // 改为记录「视口顶部第一个可见块 + 相对偏移」，重建后把同一块拉回同一偏移：
+                // 等价于浏览器 scroll anchoring（本页多处显式禁用原生锚定），同时覆盖
+                // 「上方内容被搬走」与「下方内容增长」两种情形。
+                // 🐛 二次修复（置顶回归）：锚块只认「重建后仍存在且顺序稳定」的 markdown
+                // 块。data-incremental（tail 增量节点，每轮整体替换）与 think/tool 块
+                // （会被 reorganizeContent 搬走）一当作锚，重建后 key/idx 全对不上，
+                // 恢复值系统性偏小，反复更新把阅读位置一步步顶到 0。
+                function _anchorable(k) {
+                    if (!k || k.nodeType !== 1) return false;
+                    if (k.hasAttribute('data-incremental') || k.hasAttribute('data-tool-call-id')) return false;
+                    var cl = k.classList;
+                    return !(cl.contains('think-block') || cl.contains('think-streaming') ||
+                             cl.contains('think-compact') || cl.contains('tool-block') ||
+                             cl.contains('tool-streaming-block'));
+                }
+                function _anchorables(el) {
+                    var out = [];
+                    var kids = el.children;
+                    for (var i = 0; i < kids.length; i++) {
+                        if (_anchorable(kids[i])) out.push(kids[i]);
+                    }
+                    return out;
+                }
+                function _captureAnchor(el) {
+                    if (!el) return null;
+                    var st = el.scrollTop;
+                    var list = _anchorables(el);
+                    for (var i = 0; i < list.length; i++) {
+                        var k = list[i];
+                        if (k.offsetTop + k.offsetHeight > st) {
+                            var key = (k.getAttribute && (k.getAttribute('data-order') || k.getAttribute('data-block-key'))) || '';
+                            // 文本前缀：markdown 块重建后内容不变，用它校验 idx 对位是否可靠
+                            var text = (k.textContent || '').replace(/\\s+/g, ' ').slice(0, 64);
+                            return { idx: i, delta: k.offsetTop - st, key: key, text: text };
+                        }
+                    }
+                    return null;
+                }
+                function _applyAnchor(el, a) {
+                    if (!el || !a) return false;
+                    var target = null;
+                    if (a.key) {
+                        var byKey = el.querySelector('[data-order="' + a.key + '"],[data-block-key="' + a.key + '"]');
+                        if (byKey && byKey.parentNode === el) target = byKey;
+                    }
+                    if (!target) {
+                        var list = _anchorables(el);
+                        if (!list.length) return false;
+                        var c = list[Math.min(a.idx, list.length - 1)];
+                        // idx 对位校验：文本对不上说明块序列漂移，线性找同文本块；
+                        // 再找不到就放弃锚点（回退绝对值兜底），宁准勿跳。
+                        if (a.text && (c.textContent || '').replace(/\\s+/g, ' ').slice(0, 64) !== a.text) {
+                            var found = null;
+                            for (var i = 0; i < list.length; i++) {
+                                if ((list[i].textContent || '').replace(/\\s+/g, ' ').slice(0, 64) === a.text) { found = list[i]; break; }
+                            }
+                            if (!found) return false;
+                            c = found;
+                        }
+                        target = c;
+                    }
+                    if (!target) return false;
+                    var max = Math.max(0, el.scrollHeight - el.clientHeight);
+                    var want = Math.max(0, Math.min(target.offsetTop - a.delta, max));
+                    if (Math.abs(el.scrollTop - want) < 1) return false;
+                    _progScroll(el, want);
+                    return true;
+                }
+                // 程序滚动令牌：计数而非布尔。布尔在「赋值前后值未变 → 不触发 scroll 事件」
+                // 时会残留，吞掉下一次真实用户滚动（跟随标志错乱的根因）；rAF 兜底清零。
+                function _progBegin(el) {
+                    el._progDepth = (el._progDepth || 0) + 1;
+                    requestAnimationFrame(function () { if (el._progDepth > 0) el._progDepth--; });
+                }
+                function _progScroll(el, value) {
+                    _progBegin(el);
+                    el.scrollTop = value;
+                }
+                // 用户滚动意图：只由**真实输入**驱动（wheel / 触摸 / 键盘）。scroll 事件
+                // 不再承担置位职责 —— 程序性滚动与浏览器钳制同样派发 scroll，用它推断
+                // 意图必然误判（P033）。置位同步完成，用于抢占「滚轮 → 在途渲染 JS 拉底」
+                // 的竞争窗口（scroll 事件异步派发，抢不过渲染 JS）。
+                function _bindUserScrollIntent(el) {
+                    if (!el || el._intentBound) return;
+                    el._intentBound = true;
+                    var mark = function () {
+                        // 🐛 门控：仅当容器实际可滚（内容溢出）才记为上滚 —— 无溢出时 wheel
+                        // 本应转发外层聊天列表，页面内收到的事件属冒泡残留，置位会让
+                        // 跟随被无关操作误锁死。
+                        if (el.scrollHeight > el.clientHeight) {
+                            el._userScrolledUp = true;
+                            // 即时上报阅读状态：不等下一次渲染的 reportHeight，抢在
+                            // 「滚轮 → 下一帧 chunk 渲染 → 高度变化外层拉底」之前。
+                            if (typeof reportHeight === 'function') reportHeight();
+                        }
+                    };
+                    el.addEventListener('wheel', function (e) { if (e.deltaY < 0) mark(); }, {passive: true});
+                    el.addEventListener('touchstart', mark, {passive: true});
+                    el.addEventListener('keydown', function (e) {
+                        if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') mark();
+                    });
+                }
+                // DOM 重建事务：最外层（save/restore 包装 / updateContent）开始前捕获锚点 +
+                // 用户上滚意图，结束后按锚点复位。嵌套只由最外层生效（depth 守卫）。
+                window._domUpdateDepth = 0;
+                window._domUpdateAnchors = null;
+                function _beginDomUpdate() {
+                    if (window._domUpdateDepth++ > 0) return;
+                    var cp = document.getElementById('content-placeholder');
+                    var tc = document.getElementById('tool-content');
+                    window._domUpdateAnchors = {
+                        cp: cp ? { a: _captureAnchor(cp), top: cp.scrollTop, up: !!cp._userScrolledUp } : null,
+                        tc: tc ? { a: _captureAnchor(tc), top: tc.scrollTop, up: !!tc._userScrolledUp } : null
+                    };
+                }
+                function _endDomUpdate() {
+                    window._domUpdateDepth = Math.max(0, window._domUpdateDepth - 1);
+                    if (window._domUpdateDepth > 0) return;
+                    var s = window._domUpdateAnchors;
+                    window._domUpdateAnchors = null;
+                    if (!s) return;
+                    var cp = document.getElementById('content-placeholder');
+                    var tc = document.getElementById('tool-content');
+                    if (cp && s.cp) {
+                        // 锚点失效（块整体消失）→ 兜底用绝对值钳到新 max
+                        if (!_applyAnchor(cp, s.cp.a)) {
+                            var cMax = Math.max(0, cp.scrollHeight - cp.clientHeight);
+                            var cWant = Math.min(s.cp.top, cMax);
+                            if (Math.abs(cp.scrollTop - cWant) >= 1) _progScroll(cp, cWant);
+                        }
+                        // 恢复用户上滚意图：重建期的钳制不得反过来改写跟随态
+                        cp._userScrolledUp = s.cp.up;
+                    }
+                    if (tc && s.tc) {
+                        if (!_applyAnchor(tc, s.tc.a)) {
+                            var tMax = Math.max(0, tc.scrollHeight - tc.clientHeight);
+                            var tWant = Math.min(s.tc.top, tMax);
+                            if (Math.abs(tc.scrollTop - tWant) >= 1) _progScroll(tc, tWant);
+                        }
+                        tc._userScrolledUp = s.tc.up;
+                    }
+                }
                 function _autoScrollStreamingBody(bodyOnly) {
                     // bodyOnly=true：调用方是工具/思考更新路径（流式块注入/
                     // 完成块替换/高度回调），正文内容未变 → 严禁触碰正文容器
@@ -3872,8 +4081,7 @@ _CONTENT_AUTOSCROLL_JS = """
                     var _cp = document.getElementById('content-placeholder');
                     if (document.body.classList.contains('streaming-dock') && _cp) {
                         if (!_cp._userScrolledUp) {
-                            _cp._progScroll = true;
-                            _cp.scrollTop = _cp.scrollHeight;
+                            _progScroll(_cp, _cp.scrollHeight);
                         }
                     }
                     // 🔧 核心修复：正文（document.body）只在「跟随底部」状态
@@ -3888,25 +4096,15 @@ _CONTENT_AUTOSCROLL_JS = """
                 // 滚回底部附近自动恢复；程序置底（_progScroll）不算用户行为。
                 // wheel/键盘**同步**标记上滚意图（scroll 事件异步派发，与流式
                 // 渲染 JS 存在竞争窗口，不得作为置位依据）；scroll 事件仅恢复跟随。
-                document.getElementById('content-placeholder')?.addEventListener('wheel', function(e) {
-                    // 上滚（deltaY<0）：同步置位，抢占任何在途渲染 JS 的拉底。
-                    // 🐛 门控：仅当容器实际可滚（内容溢出）才记为"上滚正文"——
-                    // 无溢出时 wheel 本应转发外层聊天列表（Qt wheelEvent 转发分支），
-                    // 页面内收到的事件属冒泡残留，置位会让跟随被无关操作误锁死。
-                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {
-                        this._userScrolledUp = true;
-                        // 即时上报阅读状态：不等下一次渲染的 reportHeight，抢在
-                        // 「滚轮 → 下一帧 chunk 渲染 → 高度变化外层拉底」竞争窗口之前。
-                        if (typeof reportHeight === 'function') reportHeight();
-                    }
-                }, {passive: true});
+                // 用户滚动意图绑定（wheel / 触摸 / 键盘），语义见 _bindUserScrollIntent
+                _bindUserScrollIntent(document.getElementById('content-placeholder'));
                 document.getElementById('content-placeholder')?.addEventListener('scroll', function() {
                     var cp = this;
                     // DOM 操作期间（updateContent 重写 innerHTML / reorganizeContent
                     // 搬移 think 块）触发的程序性 scroll 事件必须忽略——与 body 监听的
                     // _suppressScrollEvent 抑制对称。
                     if (window._suppressScrollEvent) return;
-                    if (cp._progScroll) { cp._progScroll = false; return; }
+                    if (cp._progDepth > 0) { cp._progDepth--; return; }
                     // 位置判定（与 body / #tool-content 监听完全一致）：
                     // 接近底部 = 恢复跟随（_userScrolledUp=false），离开底部 =
                     // 用户主动阅读（_userScrolledUp=true），保留其阅读位置——
@@ -6909,6 +7107,16 @@ class CodeWebViewer(QWebEngineView):
                     from {{ transform: translateX(-100%); }}
                     to   {{ transform: translateX(100%); }}
                 }}
+                /* ── 减少动态效果：停掉所有**无限循环**的装饰性 CSS 动画 ──
+                   这些动画（骨架脉冲/扫光、思考提示流光、工具预览流光）会一直
+                   重绘直到元素被移除；流式期间与逐字渲染叠加会明显加剧掉帧与
+                   图表闪烁。关掉后仍有静态骨架与文字，状态反馈不受影响。 */
+                @media (prefers-reduced-motion: reduce) {{
+                    .chart-skeleton__bars i,
+                    .chart-skeleton::after,
+                    .think-streaming-tip,
+                    .tool-streaming-block[data-streaming="true"] .tool-streaming-preview {{ animation: none !important; }}
+                }}
                 /* option 解析失败兜底（fence 已闭合但 JSON 畸形）：收起空洞，给出提示。
                    成功渲染时 JS 移除该 class，容器恢复 300px。 */
                 .echarts-container.echarts-failed {{
@@ -7851,6 +8059,9 @@ class CodeWebViewer(QWebEngineView):
                 function updateContent(newHtml) {{
                     const container = document.getElementById('content-placeholder');
                     if (container.innerHTML !== newHtml) {{
+                        // 🐛 DOM 重建事务：必须在**任何** DOM 操作（_twReset / _stashCharts /
+                        // _saveCharts）之前捕获锚点，否则捕获到的已是被钳制的位置。
+                        _beginDomUpdate();
                         // 打字机：本次将整体替换增量节点，Python 侧 markdown 已含全部
                         // 文本（含尚未揭示部分），故丢弃揭示缓冲，避免重复追加。
                         if (typeof window._twReset === 'function') window._twReset();
@@ -8033,8 +8244,7 @@ class CodeWebViewer(QWebEngineView):
                             var _cpMax = Math.max(0, _cpEl2.scrollHeight - _cpEl2.clientHeight);
                             var _cpTarget = Math.min(_cpPrevTop, _cpMax);
                             if (_cpEl2.scrollTop !== _cpTarget) {{
-                                _cpEl2._progScroll = true;
-                                _cpEl2.scrollTop = _cpTarget;
+                                _progScroll(_cpEl2, _cpTarget);
                             }}
                         }}
                         // 🐛 修复（流式滚动位置重置）：恢复工具区滚动位置（钳制补偿）。
@@ -8046,11 +8256,13 @@ class CodeWebViewer(QWebEngineView):
                             var _tcMax0 = Math.max(0, _tcEl0.scrollHeight - _tcEl0.clientHeight);
                             var _tcTarget0 = Math.min(_tcPrevTop0, _tcMax0);
                             if (_tcEl0.scrollTop !== _tcTarget0) {{
-                                _tcEl0._progScroll = true;
-                                _tcEl0.scrollTop = _tcTarget0;
+                                _progScroll(_tcEl0, _tcTarget0);
                             }}
                         }}
 
+                        // 🐛 锚点复位（必须早于下方 auto-scroll）：跟随态由 auto-scroll
+                        // 置底覆盖，上滚阅读态保持锚点位置，两者不互相打架。
+                        _endDomUpdate();
                         // 🐛 修复：auto-scroll 延后到所有 DOM 操作（table 包裹、折叠框状态恢复、
                         // think-block 展开、ECharts 初始化、reorganizeContent）之后执行，
                         // 确保 scrollHeight 值反映最终渲染结果，避免因 collapsible 展开 /
@@ -8147,10 +8359,6 @@ class CodeWebViewer(QWebEngineView):
                     if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
-                    // 移除增量纯文本节点（差量渲染会以格式化 HTML 替代它们）
-                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
-                        el.remove();
-                    }});
                     // 段落分隔已由本次渲染的 HTML 表达，清掉挂起分段标记
                     container.removeAttribute('data-pending-break');
                     // 追加格式化 HTML（含 table 包裹等后续处理）
@@ -8169,6 +8377,13 @@ class CodeWebViewer(QWebEngineView):
                         tailDiv.innerHTML = tailHtml;
                         container.appendChild(tailDiv);
                     }}
+                    // 🐛 修复（阅读位置被钳制）：旧增量节点改为**最后**删除。
+                    // 「先删后插」会让容器 scrollHeight 瞬时塌陷，浏览器把 scrollTop 钳到
+                    // 更小的 max —— 坞态正文内滚时每来一个 chunk 用户位置就漂一次。
+                    // 先插新内容再删旧的，高度单调不减，scrollTop 没有钳制机会。
+                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
+                        if (el !== tailDiv) el.remove();
+                    }});
                     // 骨架挂回末尾（图表仍在生成中）→ CSS 动画相位连续，不抖动
                     window._reattachSkeleton(container, _skel, newHtml, tailHtml, typeof tailDiv !== 'undefined' ? tailDiv : null);
                     // 🐛 修复（思考块滞留正文）：与全量 updateContent 对齐——简洁模式下
@@ -8228,9 +8443,6 @@ class CodeWebViewer(QWebEngineView):
                     if (typeof window._twReset === 'function') window._twReset();
                     // 骨架复用：必须在移除增量节点之前摘出（否则随 tail 一起被删）
                     var _skel = window._takeSkeleton(container);
-                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
-                        el.remove();
-                    }});
                     // 段落分隔已由本次尾部 HTML 表达，清掉挂起分段标记
                     container.removeAttribute('data-pending-break');
                     // ⚠️ 用 <div> 而非 <p> 包裹：html 是 md.convert 产物（块级元素），
@@ -8240,6 +8452,10 @@ class CodeWebViewer(QWebEngineView):
                     tailDiv.setAttribute('data-rendered', 'true');
                     tailDiv.innerHTML = html;
                     container.appendChild(tailDiv);
+                    // 🐛 修复（阅读位置被钳制）：同 updateContentAppend，先加后删。
+                    container.querySelectorAll('[data-incremental="true"]').forEach(function(el) {{
+                        if (el !== tailDiv) el.remove();
+                    }});
                     // 骨架挂回末尾（图表仍在生成中）；闭合时 _reattachSkeleton 自动丢弃
                     window._reattachSkeleton(container, _skel, html, '', tailDiv);
                     // 与 updateContentAppend 对齐：表格包裹 + 折叠状态恢复 + 滚动
@@ -8385,6 +8601,15 @@ class CodeWebViewer(QWebEngineView):
                     var posMap = Object.create(null);
                     var _currentThinkKeys = new Set();
                     var _currentToolIds = new Set();
+                    // 🐛 修复（工具完成框残留/两份/沉底）：无 tool_call_id 的块也要登记身份。
+                    // 【根因】`<tool>` 协议块解析不到 tool_call_id 时产物是 data-tool-call-id=""，
+                    // 而下方过期清理分支用 `if (_etid && ...)` 判定 —— **空串为假**，整个条件
+                    // 短路 → 这类块永不清理。内容一变 block_key 就变（sha1 of 工具名+参数+结果），
+                    // 新块迁入工具区、旧块留在原地，渲染几次就几份（真实 DOM 复现：
+                    // tests/debug/unclosed_tool_completed_linger.py 工具区块数 1→2→3→4）。
+                    // 【修复】用 data-block-key 作为第二身份判据：无 id 的块按 bk 判过期。
+                    // 与 _currentToolIds 同处单次扫描登记（保持 PERF v2 的 O(n) 单遍结构）。
+                    var _currentToolBlockKeys = new Set();
                     var _hasNewThinkStreaming = false;
                     var _thinkStreamingEl = null;
                     for (var _bi = 0; _bi < blocks.length; _bi++) {{
@@ -8402,6 +8627,10 @@ class CodeWebViewer(QWebEngineView):
                             || _el.classList.contains('think-compact')
                         )) {{
                             _currentThinkKeys.add(_bk);
+                        }}
+                        // 工具块（含空 id）统一登记 block_key，供清理判据使用
+                        if (_bk && !_tid && _el.classList.contains('tool-block')) {{
+                            _currentToolBlockKeys.add(_bk);
                         }}
                         if (_el.classList.contains('think-streaming')) {{
                             _hasNewThinkStreaming = true;
@@ -8445,11 +8674,18 @@ class CodeWebViewer(QWebEngineView):
                             continue;
                         }}
                         // 过期 tool 块（保留流式进行中的块）
+                        // 🐛 修复（工具完成框残留/两份/沉底）：身份判据由「仅 tool_call-id」
+                        // 扩为「id 或 block_key」。无 id 的块（data-tool-call-id=""）在旧条件下
+                        // 整个短路 → 永不清理 → 每轮渲染追加一份、恒沉底（详见扫描处注释）。
+                        // ⚠️ 两个判据互斥使用：有 id 用 id（同一工具多形态块共用 id），
+                        // 无 id 才用 bk（避免 id 与 bk 双判据对同一块给出矛盾结论）。
                         if (
-                            _etid
-                            && !_currentToolIds.has(_etid)
-                            && _eel.getAttribute('data-streaming') !== 'true'
+                            _eel.getAttribute('data-streaming') !== 'true'
                             && _eel.classList.contains('tool-block')
+                            && (
+                                (_etid && !_currentToolIds.has(_etid))
+                                || (!_etid && _ebk && !_currentToolBlockKeys.has(_ebk))
+                            )
                         ) {{
                             _eel.remove();
                             continue;
@@ -9170,11 +9406,22 @@ class CodeWebViewer(QWebEngineView):
                 // 即使 updateContent 重建DOM，新SVG元素在下一帧立即获得正确偏移，
                 // 不再因 CSS animation 重启而导致视觉跳跃。
                 let _snakeStartTime = null;
+                let _snakeRafId = null;
                 function _animateThinkSnake() {{
+                    const nodes = document.querySelectorAll('.think-snake-arc');
+                    if (!nodes.length) {{
+                        // 蛇形图标已从 DOM 移除（思考结束 / 内容重建）：停掉 rAF。
+                        // 旧实现在此仍无条件 requestAnimationFrame，形成**永不停止**
+                        // 的 60fps 空转 + 每帧全表扫描，思考结束后白烧主线程。
+                        // 元素重新出现时由下方 MutationObserver 自动唤醒。
+                        _snakeRafId = null;
+                        _snakeStartTime = null;
+                        return;
+                    }}
                     if (_snakeStartTime === null) _snakeStartTime = performance.now();
                     const elapsed = performance.now() - _snakeStartTime;
                     // 周期 1.5s，完整一圈对应 stroke-dashoffset: 0→-50.265（周长 2π×8 ≈ 50.265）
-                    document.querySelectorAll('.think-snake-arc').forEach(el => {{
+                    nodes.forEach(el => {{
                         let extraDelay = 0;
                         if (el.classList.contains('think-snake-head')) extraDelay = 350;
                         else if (el.classList.contains('think-snake-body')) extraDelay = 180;
@@ -9182,9 +9429,17 @@ class CodeWebViewer(QWebEngineView):
                         const offset = -(phase / 1500) * 50.265;
                         el.setAttribute('stroke-dashoffset', offset);
                     }});
-                    requestAnimationFrame(_animateThinkSnake);
+                    _snakeRafId = requestAnimationFrame(_animateThinkSnake);
                 }}
-                _animateThinkSnake();
+                function _ensureThinkSnake() {{
+                    // 幂等：rAF 已在跑时立即返回（成本 = 一次空判断）
+                    if (_snakeRafId === null && document.querySelector('.think-snake-arc')) {{
+                        _animateThinkSnake();
+                    }}
+                }}
+                window._ensureThinkSnake = _ensureThinkSnake;
+                new MutationObserver(_ensureThinkSnake).observe(document.body, {{ childList: true, subtree: true }});
+                _ensureThinkSnake();
 
                 // ===== 任务列表（嵌入工具区，随工具区折叠/归位/沉底）=====
                 var _TODO_SNAKE_SVG = '{_THINK_SNAKE_SVG}';
@@ -9233,7 +9488,7 @@ class CodeWebViewer(QWebEngineView):
                     // 且归零触发的 scroll 事件会误置 _userScrolledUp（用 _progScroll 吞掉）
                     var _wasUp = !!content._userScrolledUp;
                     var _prevTop = content.scrollTop;
-                    content._progScroll = true;
+                    _progBegin(content);
                     content.innerHTML = html;
                     var progText = ' ' + done + '/' + todos.length + ' 完成';
                     window._todoProgressText = progText;
@@ -9251,17 +9506,16 @@ class CodeWebViewer(QWebEngineView):
                     requestAnimationFrame(function() {{
                         requestAnimationFrame(function() {{
                             if (_tk !== window._todoScrollToken) return;  // 已有更新，放弃旧滚动
-                            content._progScroll = true;
                             if (_wasUp) {{
                                 var _maxT = Math.max(0, content.scrollHeight - content.clientHeight);
-                                content.scrollTop = Math.min(_prevTop, _maxT);
+                                _progScroll(content, Math.min(_prevTop, _maxT));
                                 return;
                             }}
                             var act = content.querySelector('.todo-item[data-status="in_progress"]');
                             if (!act) return;
                             var target = act.offsetTop - (content.clientHeight - act.offsetHeight) / 2;
                             var maxScroll = content.scrollHeight - content.clientHeight;
-                            content.scrollTop = Math.max(0, Math.min(target, Math.max(0, maxScroll)));
+                            _progScroll(content, Math.max(0, Math.min(target, Math.max(0, maxScroll))));
                         }});
                     }});
                     if (hr) hr();
@@ -9278,8 +9532,7 @@ class CodeWebViewer(QWebEngineView):
                     // 抑制本次程序滚底触发的 scroll 事件：异步 scroll 到达时
                     // scrollHeight 可能已增长（流式新块加入），atBottom 误判 false
                     // 会错误置位 _userScrolledUp 导致跟随中断。
-                    tc._progScroll = true;
-                    tc.scrollTop = tc.scrollHeight;
+                    _progScroll(tc, tc.scrollHeight);
                 }}
                 // 工具区滚动跟踪：用户主动向上滚动时标记，滚到底部时取消标记
                 document.getElementById('tool-content')?.addEventListener('scroll', function() {{
@@ -9292,7 +9545,7 @@ class CodeWebViewer(QWebEngineView):
                     // #content-placeholder 监听的 _suppressScrollEvent 抑制对称。
                     if (window._suppressScrollEvent) return;
                     // 程序性滚底（_scrollToolContentToBottom / innerHTML 重建）不视为用户行为
-                    if (tc._progScroll) {{ tc._progScroll = false; return; }}
+                    if (tc._progDepth > 0) {{ tc._progDepth--; return; }}
                     var atBottom = Math.abs(tc.scrollHeight - tc.scrollTop - tc.clientHeight) < 30;
                     tc._userScrolledUp = !atBottom;
                     if (atBottom) tc._userScrolledUp = false;
@@ -9301,29 +9554,18 @@ class CodeWebViewer(QWebEngineView):
                 // 事件异步派发，与流式 JS（_scrollToolContentToBottom）存在竞争窗口：
                 // 用户滚轮后 scroll 未派发，流式 JS 判 _userScrolledUp=false 抢先拉底
                 // 覆盖阅读位置。对齐 #content-placeholder 的 wheel 修复模式。
-                document.getElementById('tool-content')?.addEventListener('wheel', function(e) {{
-                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
-                        this._userScrolledUp = true;
-                        // 即时上报阅读状态（竞争窗口同 #content-placeholder wheel）
-                        if (typeof reportHeight === 'function') reportHeight();
-                    }}
-                }}, {{passive: true}});
+                // 用户滚动意图绑定（wheel / 触摸 / 键盘），语义见 _bindUserScrollIntent
+                _bindUserScrollIntent(document.getElementById('tool-content'));
                 // 任务列表滚动跟踪：与工具区同款（程序滚动/重建不算用户行为）
                 document.getElementById('todo-content')?.addEventListener('scroll', function() {{
                     var td = this;
                     if (window._suppressScrollEvent) return;
-                    if (td._progScroll) {{ td._progScroll = false; return; }}
+                    if (td._progDepth > 0) {{ td._progDepth--; return; }}
                     var atBottom = Math.abs(td.scrollHeight - td.scrollTop - td.clientHeight) < 30;
                     td._userScrolledUp = !atBottom;
                     if (atBottom) td._userScrolledUp = false;
                 }});
-                document.getElementById('todo-content')?.addEventListener('wheel', function(e) {{
-                    if (e.deltaY < 0 && this.scrollHeight > this.clientHeight) {{
-                        this._userScrolledUp = true;
-                        // 即时上报阅读状态（竞争窗口同 #content-placeholder wheel）
-                        if (typeof reportHeight === 'function') reportHeight();
-                    }}
-                }}, {{passive: true}});
+                _bindUserScrollIntent(document.getElementById('todo-content'));
                 {_STREAMING_DOCK_JS}
                 {_TYPEWRITER_JS}
                 {_PREVIEW_TYPEWRITER_JS}
@@ -10287,6 +10529,20 @@ class CodeWebViewer(QWebEngineView):
             "code_font_size": _CODE_FONT_SIZE,
         }
 
+    def invalidate_inflight_render(self) -> None:
+        """B3 兜底：作废在途异步渲染（其结果快照已被新内容超越）。
+
+        使用场景：编辑类工具完成只做 JS 增量注入、不触发渲染（防闪烁设计）。
+        若此时恰有在途异步渲染（长内容的非流式渲染走线程池），其 HTML 快照不含
+        该工具完成块；结果落地时 save/restore 会把 DOM 中的完成框 `el.remove()`，
+        而 restore 判定该 id 已 finished → 不恢复 → 完成框被吞（永久消失）。
+        递增 seq 让在途结果过期丢弃，pending 快照一并清空；DOM 由增量注入的块
+        与后续任意一次渲染（含 finish_streaming 终渲染）兜底。
+        """
+        if self._render_inflight:
+            self._render_seq += 1
+            self._render_pending = None
+
     def _sequence_render(self, md: str, compact: bool):
         """B3: 序列化异步渲染——提交线程池，在途时只记 pending（防抖积压最新快照）
 
@@ -10541,6 +10797,10 @@ class CodeWebViewer(QWebEngineView):
             # "排在其前的流式工具数"修正 → restore 按保存的 data-order 插回时与思考块
             # 尺度不一致 → 找不到比它大的节点 → appendChild 沉底 → 折叠框内
             # "所有思考在前、所有工具在后"（坞态归位瞬间错乱）。
+            # 🐛 锚点事务：save 阶段会 el.remove() 掉工具块 → 容器 scrollHeight 收缩。
+            # 必须在**任何** DOM 操作之前捕获锚点，否则 updateContent 内部捕获到的
+            # 已是钳制后的位置 —— 这正是阅读位置漂到「新内容底部」的根因。
+            "if(typeof _beginDomUpdate==='function')_beginDomUpdate();"
             "window.__pendingStreamFloors=[];"
             f"var _tc=document.getElementById('{_target_id}');"
             # 🐛 修复（流式滚动位置重置）：save 会清空 #tool-content（el.remove()）
@@ -10599,19 +10859,25 @@ class CodeWebViewer(QWebEngineView):
             f"var _finishedSet={_finished_js};"
             f"if(_saved.length){{_tc=document.getElementById('{_target_id}');if(_tc){{"
             "_saved.forEach(function(b){"
-            # 🐛 修复（编辑工具框"运行中→完成"中间消失）：restore 条件从
-            # `b.streaming==='true'` 放宽为 `streaming 或未完成`——finish_tool_streaming
-            # 注入的完成态预览块（data-streaming="false"）在 append_tool_result 之前
-            # **不在 markdown 中**（_content_data 尚无结果块），若只恢复 streaming=true，
-            # 该预览块 save 后不 restore → 全量渲染后被抹掉，直到 append_tool_result
-            # 才重现。已完成（结果已 append_tool_result）的块才由 markdown 重新生成，
-            # 无需 restore（且恢复会与 markdown 生成的块重复）。
+            # 🐛 修复（工具块被吞·restore 判据根治）：restore 条件由「未完成
+            # （!isFinished）且 DOM 无同 id 块」改为「**DOM 无同 id 块**」。
+            # 旧判据默认「已完成块的 markdown 一定会重建」，把「是否恢复」与「HTML
+            # 是否真的含该块」解耦——任何一次全量渲染的 HTML 缺块（在途旧快照落地、
+            # _lazy_markdown_cb 未刷新、注入失败、md 生成失败…）都会让该块被 save
+            # 移除后无人恢复，永久消失（“编辑工具完成框被吞”的根因族）。
+            # 新判据只看 DOM：markdown 已重建同 id 块 → 跳过（防重复，与旧行为一致）；
+            # 没重建 → 把保存的块原样放回（无论是否 finished），块不再丢。
+            # 历史沿革：`b.streaming==='true'`（只恢复流式块）→ `streaming 或未完成`
+            # （补 finish_tool_streaming 的完成态预览块）→ 本次的 DOM 存在性判据。
             "var _isFinished=(_finishedSet.indexOf(b.id)!==-1);"
-            "if(!_isFinished&&!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
+            "if(!document.querySelector('[data-tool-call-id=\"'+b.id+'\"]')){"
             "var _t=document.createElement('div');_t.innerHTML=b.html;"
             "var _bk=_t.firstElementChild;if(_bk){"
             "_bk.removeAttribute('data-tool-injected');"
             "_bk.setAttribute('data-restored','true');"
+            # _isFinished 不再参与恢复判定，仅作排查标记：恢复的块若属于「已完成」
+            # （本该由 markdown 重建却没重建），打 data-restored-finished 供定位来源。
+            "if(_isFinished)_bk.setAttribute('data-restored-finished','true');"
             # 🆕 F1：restore 恢复的运行中块（data-streaming="true"）直接 appendChild 沉底——
             # 不再按 data-order 插位。be57674d 方案 D 的按 data-order 插位逻辑本意是
             # 让"流式块恢复后保持交错顺序"，但运行中块 data-order 是调用时刻快照，
@@ -10634,8 +10900,10 @@ class CodeWebViewer(QWebEngineView):
             "if(_tc&&_tcPrevTop>0){"
             "var _tcMax=Math.max(0,_tc.scrollHeight-_tc.clientHeight);"
             "var _tcTarget=Math.min(_tcPrevTop,_tcMax);"
-            "if(_tc.scrollTop!==_tcTarget){_tc._progScroll=true;_tc.scrollTop=_tcTarget;}"
+            "if(_tc.scrollTop!==_tcTarget){_progScroll(_tc,_tcTarget);}"
             "}"
+            # 🐛 锚点复位：放在工具区自动滚底**之前**，跟随态仍由后者置底覆盖
+            "if(typeof _endDomUpdate==='function')_endDomUpdate();"
             # 🐛 修复：save-restore 恢复块后工具区自动滚底
             "if(typeof _scrollToolContentToBottom==='function')_scrollToolContentToBottom();"
             "if(window._toolCompactMode){"
@@ -12572,7 +12840,9 @@ class MessageCard(SimpleCardWidget):
         ) = QPainterPath()
         self._clip_w = self._clip_h = -1
         self._height_anim = QVariantAnimation(self)
-        self._height_anim.setDuration(180)
+        # 插值时长占位（见下：随即被 setDuration(0) 覆盖，实际长度由每轮动画
+        # 自行设置 —— 结束态收敛用 FINISH_HEIGHT_ANIM_MS，其余为 0 禁用插值）
+        self._height_anim.setDuration(Animations.EXIT_MS)
         self._height_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._height_anim.valueChanged.connect(self._apply_viewer_height)
         self._height_anim.stateChanged.connect(self._on_height_anim_state_changed)
@@ -13767,6 +14037,10 @@ class MessageCard(SimpleCardWidget):
         # 恢复可见后下一拍定时器自动续跑，无需显式重启。
         if not self.isVisible():
             return
+        # 系统「减少动态效果」：脉冲边框是纯装饰动画，直接不重绘。
+        # 这是流式热路径上 20fps 的全卡 update()，关掉即省下这段绘制开销。
+        if not Animations.motion_enabled():
+            return
         # 拖拽期间暂停重绘：原生拖拽时主线程在 DefWindowProc 模态循环里，
         # 每 50ms 触发一次 update() 会强制 DWM 对整窗重新合成 → 拖拽卡顿。
         # 直接跳过 update() 让窗口保持静止，DWM 仅平移已有纹理，拖拽顺滑；
@@ -14454,6 +14728,9 @@ class MessageCard(SimpleCardWidget):
         global FINISH_HEIGHT_ANIM_ENABLED
         if not FINISH_HEIGHT_ANIM_ENABLED:
             return False
+        # 系统「减少动态效果」：不走缓动，退回调用方的 snap（内容照样到位）
+        if not Animations.motion_enabled():
+            return False
         if getattr(self, "_finish_height_anim_until", 0.0) <= 0.0:
             return False
         if time.monotonic() > self._finish_height_anim_until:
@@ -14679,15 +14956,20 @@ class MessageCard(SimpleCardWidget):
         if enabled == self._resize_preview_mode:
             return
 
-        self._resize_preview_mode = enabled
-
         # user 卡片使用 PlainTextViewer，weight 很轻，不需要 placeholder
         if self.role == "user":
             return
 
         # 懒渲染还没创建viewer，跳过（welcome 卡已创建 viewer 时同样走占位逻辑）
+        # 🐛 D1：赋值必须在所有守卫之后。旧实现先置标志再判 viewer，未懒渲染的卡片
+        # 会在 resize 周期里被标成「已占位」，而它什么都没隐藏。随后 ensure_rendered
+        # 创建 viewer，_apply_viewer_height 命中该标志把真实高度写进
+        # _pending_viewer_height 就 return → 卡片永久停在 40px 空白。恢复链队列是
+        # _begin_restore_chain 时刻的快照，不会再回头看这张卡，只能等下一次 resize。
         if self.viewer is None:
             return
+
+        self._resize_preview_mode = enabled
 
         if enabled:
             viewer_height = max(self.viewer.height(), self.viewer.minimumHeight(), 40)
@@ -15407,6 +15689,14 @@ class MessageCard(SimpleCardWidget):
             self.viewer._lazy_markdown_cb = self._build_incremental_md
             if not _is_edit_tool:
                 self.viewer._schedule_render(immediate=True)
+            else:
+                # 🐛 修复（编辑工具完成框被吞·在途异步渲染）：编辑工具不触发渲染
+                # （防闪烁），但必须作废在途异步渲染——其 HTML 快照不含本工具完成块，
+                # 落地时 save 把 DOM 完成框 el.remove()，restore 又因该 id 已 finished
+                # 跳过恢复 → 完成框永久消失（长内容非流式渲染的时间窗口）。
+                _invalidate = getattr(self.viewer, "invalidate_inflight_render", None)
+                if _invalidate is not None:
+                    _invalidate()
 
             # 简洁模式：工具块默认折叠；非简洁模式：默认展开便于查看结果
             _collapsed = self.viewer._tool_compact_mode if self.viewer else True
@@ -15730,6 +16020,8 @@ class MessageCard(SimpleCardWidget):
         preview: str,
         char_count: int = 0,
         completed: bool = False,
+        add_lines: int = 0,
+        del_lines: int = 0,
     ):
         """通过 JS 注入/更新工具流式块
 
@@ -15752,13 +16044,17 @@ class MessageCard(SimpleCardWidget):
         # 构建预览文本（含 char_count），用于后续内容比较和 JS 注入
         _text_only = preview is None
         preview_content = escape(preview) if preview else "准备中..."
-        if not completed and char_count > 0:
-            preview_content += f'<span style="color: var(--text); font-size: {scale_font_size(10)}px; margin-left: 4px;">({char_count}字符)</span>'
+        # 徽标作为预览 span 的**兄弟节点**更新（长文本省略号不会把它裁掉）
+        badge_html = "" if completed else _format_tool_progress_badge(char_count, add_lines, del_lines)
 
-        # ── 内容去重：相同预览内容跳过 JS 执行，减少流式高频更新压力 ──
+        # ── 内容去重：预览文本**与徽标**都相同才跳过 JS 执行，减少流式高频更新压力 ──
+        # 🐛 修复（编辑工具流式徽标不更新）：原实现只比较 preview_content，而编辑类
+        # 工具的预览文本在路径完整后就恒定（如「写入文件中」），导致此后每个进度事件
+        # 都被去重跳过 —— +N/-M 行数与字符数徽标停更，运行框看上去"卡死"在首帧。
         _cache_key = (tool_call_id, completed)
+        _cache_val = (preview_content, badge_html)
         _last = getattr(self, "_tool_streaming_preview_cache", None) or {}
-        if _last.get(_cache_key) == preview_content:
+        if _last.get(_cache_key) == _cache_val:
             # 🐛 修复（编辑工具框运行中消失）：preview 相同不重新注入，但 DOM 中
             # 运行框仍在 → 仍需 dirty 保护标记。否则 dirty 被某次渲染回调清除后，
             # 该工具框永远失去 save/restore 保护，下一次全量渲染裸 updateContent
@@ -15772,7 +16068,7 @@ class MessageCard(SimpleCardWidget):
             return
         if not hasattr(self, "_tool_streaming_preview_cache"):
             self._tool_streaming_preview_cache = {}
-        self._tool_streaming_preview_cache[_cache_key] = preview_content
+        self._tool_streaming_preview_cache[_cache_key] = _cache_val
 
         # 🐛 修复（编辑工具框运行中消失）：dirty 标记必须**先于** _schedule_render
         # 设置。completed=True 时 _schedule_render(immediate=True) 会立即执行
@@ -15808,6 +16104,8 @@ class MessageCard(SimpleCardWidget):
                 preview=preview if preview else "",
                 char_count=char_count,
                 completed=completed,
+                add_lines=add_lines,
+                del_lines=del_lines,
             )
             # 编辑类工具流式块始终注入到正文区域
             _stream_target = "content-placeholder" if tool_name in _edit_tools() else self.viewer._tool_target_id
@@ -15824,6 +16122,7 @@ class MessageCard(SimpleCardWidget):
 
             safe_html = json.dumps(block_html).decode("utf-8")
             safe_preview = json.dumps(preview_content).decode("utf-8")
+            safe_badge = json.dumps(badge_html).decode("utf-8")
             streaming_flag = "true" if not completed else "false"
             _text_only_js = "true" if _text_only else "false"
             js_code = f"""
@@ -15834,6 +16133,17 @@ class MessageCard(SimpleCardWidget):
                 }}
                 var el = document.querySelector('[data-tool-call-id="{tool_call_id}"]');
                 var hr = (typeof reportHeightDebounced === 'function') ? reportHeightDebounced : reportHeight;
+                // 徽标（+N/-M 或字符数）是预览 span 的兄弟节点，避免长文本省略号把徽标裁掉
+                var _dfxSetBadge = function(_bel, _bhtml) {{
+                    var _b = _bel.querySelector('.tool-streaming-badge');
+                    if (_bhtml) {{
+                        if (_b) {{ _b.outerHTML = _bhtml; }}
+                        else {{
+                            var _bp = _bel.querySelector('.tool-streaming-preview');
+                            if (_bp && _bp.parentNode) {{ _bp.insertAdjacentHTML('afterend', _bhtml); }}
+                        }}
+                    }} else if (_b) {{ _b.remove(); }}
+                }};
                 if (el) {{
                     // 🐛 FIX: 清除旧 data-tool-injected，消除 save-remove-restore 闪烁循环
                     el.removeAttribute('data-tool-injected');
@@ -15862,12 +16172,14 @@ class MessageCard(SimpleCardWidget):
                         if (previewEl2) {{
                             previewEl2.innerHTML = {safe_preview};
                         }}
+                        _dfxSetBadge(el, {safe_badge});
                     }} else {{
                         el.setAttribute('data-streaming', '{streaming_flag}');
                         var previewEl = el.querySelector('.tool-streaming-preview');
                         if (previewEl) {{
                             previewEl.innerHTML = {safe_preview};
                         }}
+                        _dfxSetBadge(el, {safe_badge});
                     }}
                     // 🐛 修复：预览内容更新后 body 自动滚底
                     // 区域独立 II：预览内容更新是纯工具区更新 → bodyOnly
@@ -16174,6 +16486,8 @@ class MessageCard(SimpleCardWidget):
         self._maybe_finish_thinking_for_tool(tool_call_id)
         preview = ""
         char_count = 0
+        add_lines = 0
+        del_lines = 0
         if partial_args:
             display = {k: v for k, v in partial_args.items() if not k.startswith("_")}
             if display:
@@ -16203,9 +16517,22 @@ class MessageCard(SimpleCardWidget):
                 if natural:
                     preview = natural + "中"
                 else:
-                    preview = "准备中..."
+                    # 🆕 编辑类工具在 path 未到达时不再空窗「准备中...」
+                    _fallback = _FILE_EDIT_TOOLS_FALLBACK_TEXT.get(tool_name, "")
+                    preview = f"{_fallback}中" if _fallback else "准备中..."
                 char_count = args_len if args_len else len(preview)
-        self._inject_tool_streaming_html(tool_call_id, tool_name, preview, char_count, completed=False)
+                # 🆕 编辑类工具的增删行数（worker 从半截 JSON 估算），取代字数显示
+                add_lines = int(partial_args.get("_add_lines") or 0)
+                del_lines = int(partial_args.get("_del_lines") or 0)
+        self._inject_tool_streaming_html(
+            tool_call_id,
+            tool_name,
+            preview,
+            char_count,
+            completed=False,
+            add_lines=add_lines,
+            del_lines=del_lines,
+        )
 
     def finish_tool_streaming(
         self,

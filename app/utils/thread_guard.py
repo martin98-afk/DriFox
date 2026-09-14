@@ -92,6 +92,61 @@ _watchdog_thread = None
 _watchdog_logger = _logging.getLogger("thread_guard.watchdog")
 
 
+def _cpp_alive(obj: QObject) -> bool:
+    """探测底层 C++ 对象是否仍存活。
+
+    isinstance 只校验 Python 包装器的类型，不校验 sip 内部的 C++ 指针；
+    包装器可以完全合法，而它指向的对象已经被 Qt 在主线程删掉了。
+    """
+    try:
+        from PyQt5 import sip as _sip
+
+        return not _sip.isdeleted(obj)
+    except Exception:
+        return False
+
+
+def _scan_stuck_threads() -> None:
+    """扫描一轮 _running_threads：报告疑似卡死线程，并剔除 C++ 侧已析构的条目。
+
+    独立成函数是为了能被单测直接驱动（原逻辑内嵌 while True + sleep 30s，无法验证）。
+    """
+    now = _time.monotonic()
+    with _watchdog_lock:
+        snapshot = list(_running_threads)
+    for thread in snapshot:
+        if not isinstance(thread, QThread):
+            continue
+        # ★ 本函数跑在纯 Python 线程里，下面的 isRunning() 要穿透到 C++ 对象；
+        #   而 _running_threads 持强引用防的是 Python GC，挡不住主线程把 C++ 对象
+        #   析构。两条路径必踩空：① snapshot 拷完之后、调用之前主线程销毁该线程；
+        #   ② 销毁未触发 destroyed 回调，条目永久滞留 → 每轮扫描稳定抛 RuntimeError，
+        #   看门狗线程整个死掉。故：探活先行 + 调用兑底，失效条目就地剔除。
+        if not _cpp_alive(thread):
+            with _watchdog_lock:
+                _running_threads.discard(thread)
+            continue
+        try:
+            running = thread.isRunning()
+        except RuntimeError:
+            with _watchdog_lock:
+                _running_threads.discard(thread)
+            continue
+        if not running:
+            continue
+        start_ts = getattr(thread, "_guard_start_ts", None)
+        if start_ts is None:
+            continue
+        elapsed = now - start_ts
+        if elapsed > _STUCK_TIMEOUT_S:
+            _watchdog_logger.warning(
+                "[ThreadGuard] 检测到疑似卡死线程: %s (已运行 %.0fs, 阈值 %ds)",
+                type(thread).__name__,
+                elapsed,
+                _STUCK_TIMEOUT_S,
+            )
+
+
 def _watchdog_loop() -> None:
     """看门狗循环：每 _WATCHDOG_INTERVAL_S 秒扫描一次 _running_threads。
 
@@ -100,25 +155,7 @@ def _watchdog_loop() -> None:
     """
     while True:
         _time.sleep(_WATCHDOG_INTERVAL_S)
-        now = _time.monotonic()
-        with _watchdog_lock:
-            snapshot = list(_running_threads)
-        for thread in snapshot:
-            if not isinstance(thread, QThread):
-                continue
-            if not thread.isRunning():
-                continue
-            start_ts = getattr(thread, "_guard_start_ts", None)
-            if start_ts is None:
-                continue
-            elapsed = now - start_ts
-            if elapsed > _STUCK_TIMEOUT_S:
-                _watchdog_logger.warning(
-                    "[ThreadGuard] 检测到疑似卡死线程: %s (已运行 %.0fs, 阈值 %ds)",
-                    type(thread).__name__,
-                    elapsed,
-                    _STUCK_TIMEOUT_S,
-                )
+        _scan_stuck_threads()
 
 
 def start_watchdog() -> None:

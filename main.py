@@ -99,6 +99,18 @@ def main():
     from PyQt5.QtCore import Qt, QTimer
     from PyQt5.QtWidgets import QApplication
 
+    # 启动分段打点：壳前各段（巨型 import / 主窗口构造）历史上有累计 ~3s
+    # 的无日志空窗，逐段 DEBUG 打点便于定位后续优化目标（行为零变更）
+    import time as _sm_time
+
+    _sm_seg = _sm_time.perf_counter()
+
+    def _smark(label: str) -> None:
+        nonlocal _sm_seg
+        _now = _sm_time.perf_counter()
+        logger.debug(f"[StartupMark] {label} 耗时 {(_now - _sm_seg) * 1000:.0f}ms")
+        _sm_seg = _now
+
     if _qt_pp: 
         logger.info(f"[EnvCleanup] QT_PLUGIN_PATH 已清理: {_qt_pp}")
 
@@ -148,6 +160,20 @@ def main():
 
     def _deferred_startup():
         """在事件循环启动后执行的非关键初始化"""
+        # 分段计时：本函数整体在主线程串行执行，任一步骤拖慢都会顺延后续步骤
+        # （历史上 openai resources 预导入独占 ~4s 无从察觉），逐段打点便于定位
+        import time as _time
+
+        _seg_t = _time.perf_counter()
+
+        def _mark(label: str) -> None:
+            nonlocal _seg_t
+            _now = _time.perf_counter()
+            logger.debug(f"[DeferredStartup] {label} 耗时 {(_now - _seg_t) * 1000:.0f}ms")
+            _seg_t = _now
+
+        _mark("enter")
+
         # 迁移旧版本数据
         try:
             from app.utils.utils import migrate_app_data_if_needed
@@ -155,6 +181,7 @@ def main():
             migrate_app_data_if_needed()
         except Exception:
             logger.exception("[DeferredStartup] migrate_app_data_if_needed 失败")
+        _mark("migrate_app_data")
 
         # 设置日志（全量 all.log + 按子系统拆分的分文件，见 app/core/logging_setup.py）
         try:
@@ -164,6 +191,7 @@ def main():
             setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
         except Exception:
             pass
+        _mark("setup_logging")
 
         # 原生崩溃捕获（faulthandler）：Qt/C++ 层段错误不经过 Python excepthook，
         # 打包版表现为「闪退且 all.log 无任何记录」。启用后崩溃栈 dump 到
@@ -192,6 +220,7 @@ def main():
             init_shared_web_profile(parent=app)
         except Exception:
             logger.exception("[DeferredStartup] init_shared_web_profile 失败")
+        _mark("init_shared_web_profile")
 
         # 启动后台 RSS 采样器：把 psutil 进程表遍历从主线程搬走。
         # 采样结果供 B4 强回收阈值判定使用（原为每 content chunk 同步采样，
@@ -221,12 +250,16 @@ def main():
         # import 锁死锁检测，多线程首次并发访问 client.chat/client.responses
         # 会抛 _ModuleLock deadlock。
         try:
-            from app.utils.http_client import preload_openai_resources
+            # [PERF] 冷导入实测 4-5s（`import openai` 3.5s + resources 1.9s），
+            # 改后台线程顺序导入：死锁只在多线程并发导入不同模块时出现，
+            # 单线程串行走完不会触发，主线程不再冻结这段
+            from app.utils.http_client import preload_openai_resources_async
 
-            preload_openai_resources()
-            logger.debug("[DeferredStartup] openai resources 子模块预导入完成")
+            preload_openai_resources_async()
+            logger.debug("[DeferredStartup] openai resources 子模块预导入已转后台线程")
         except Exception:
             logger.exception("[DeferredStartup] openai resources 预导入失败（非致命）")
+        _mark("openai_preload_async")
 
         # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
         # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
@@ -255,6 +288,7 @@ def main():
             logger.debug("[DeferredStartup] WebEngine 预热视图已创建（5s 后释放）")
         except Exception:
             logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
+        _mark("webengine_preheat")
 
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
@@ -365,7 +399,11 @@ def main():
     logger.info("LLM Chatter 启动中...")
 
     from PyQt5.QtWidgets import QWidget
+
+    _smark("pre_import（单实例/主题/字体）")
     from app.main_widget import OpenAIChatToolWindow
+
+    _smark("import_main_widget")
 
     class FakePage(QWidget):
         def __init__(self):
@@ -401,6 +439,7 @@ def main():
             pass
 
     fake_page = FakePage()
+    _smark("fake_page")
 
     def _activate_window(window):
         """激活窗口：显示 + 置前 + 还原"""
@@ -424,25 +463,40 @@ def main():
         # ── Tab 模式 ──
         from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
+        _smark("import_tab_manager")
         tm = TabManagerWindow.create_instance()
-        # 批5 壳先行：先显示壳窗口（空态占位「正在准备会话…」）→ 进程级预热
-        # （SessionStore/StorageRegistry/内置工具链）→ 首窗构造 → add_window。
-        # 首个 ChatWindow 必须在 TabManagerWindow 创建之后构造：
-        # TabManagerWindow.__init__ 里 PluginHostService.ensure_started() 同步完成
-        # PluginManager 扫描；若先构造本窗口，其 setup_ui 的 _load_all_ui_plugins 与
-        # 首帧 singleShot(0) 重试都会早于 ensure_started 执行（pm 未就绪静默 return），
-        # 此后无人再触发 UI 插件装载 → 主窗口插件内容（卡片/侧边栏/输入按钮）全部缺失。
+        _smark("tab_manager_create")
+        # [体验] 置顶 hint 必须在首次 show 之前应用：setWindowFlags 在窗口已可见时
+        # 会销毁并重建 native 窗口，表现为「窗口出现后闪一下（消失又出现）」。
+        # 未 show 时改 flags 不触发重建，后续 tm.show() 一次性显示。
+        _apply_window_topmost(tm)
+        # 批5 壳先行：先显示壳窗口（空态占位「正在准备会话…」）→ 应用级服务启动
+        # → 进程级预热（SessionStore/StorageRegistry/内置工具链）→ 首窗构造 → add_window。
+        # [PERF 2026-09-14] GatewayService/PluginHostService.ensure_started() 从
+        # TabManagerWindow.__init__ 挪到此处：插件发现 + tools/agents/hooks 注册
+        # 实测 ~1.1s，不再挡在壳窗口出现之前。时序约束不变：首个 ChatWindow 仍
+        # 必须在 ensure_started 之后构造——若先构造首窗，其 _load_all_ui_plugins
+        # 会因 pm 未就绪静默 return 且无人重试，主窗口插件内容（卡片/侧边栏/
+        # 输入按钮）全部缺失。
         tm.show()
         tm.show_boot_placeholder()
+        from app.core.gateway_service import GatewayService
+        from app.core.plugin_host_service import PluginHostService
+
+        _smark("shell_show")
+        GatewayService.get_instance().ensure_started()
+        PluginHostService.get_instance().ensure_started()
+        _smark("app_services_start")
         from app.utils.preheat import preheat_process_level
 
         preheat_process_level()
+        _smark("preheat_process")
         chat_window = OpenAIChatToolWindow(fake_page)
+        _smark("first_chat_window")
         tm.add_window(chat_window)
         tm.remove_boot_placeholder()
         tm._mark_first_window_ready()
         _guard.show_requested.connect(lambda: _activate_window(tm))
-        _apply_window_topmost(tm)
         logger.info("DriFox 以 Tab 管理器模式启动（壳先行 + 进程级预热）")
 
         # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条以 InfoBar 提示，不抢首帧。

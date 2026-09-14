@@ -485,8 +485,41 @@ class PluginToolWatcher:
         # 显式 scan_now()（启动对齐 / 插件启停）不触发——那些场景用户已知情。
         self._reload_listeners: List[Callable[[], None]] = []
 
+    def _align_needed(self) -> bool:
+        """启用状态对齐重扫是否有真实差异（无差异可跳过全量注销+重扫）。
+
+        启动链 _do_deferred 会调 scan_now 做“启用状态对齐”，但 import 期
+        加载与此时 enabled 集通常一致，全量注销+重扫是纯浪费（实测 ~330ms，
+        且几十个工具 unregister/register 触发下游缓存失效）。此处对比
+        磁盘期望注册集 vs 注册表实际注册集，一致则跳过。
+        """
+        try:
+            disk: set = set()
+            for root in self._roots:
+                for pname, _py in _iter_tool_modules(Path(root)):
+                    disk.add(pname)
+            expect = {
+                p
+                for p in disk
+                if _is_plugin_enabled(p)
+                and _is_component_enabled(p)
+                and not _is_plugin_load_blocked(p)
+            }
+            actual = {
+                reg.source[len("plugin:"):]
+                for reg in self._registry.list()
+                if isinstance(reg.source, str) and reg.source.startswith("plugin:")
+            }
+            return expect != actual
+        except Exception as e:
+            logger.debug(f"[PluginToolWatcher] 对齐差异判定失败，保守回退全量重扫: {e}")
+            return True
+
     def scan_now(self) -> None:
         """全量重扫：先注销已加载插件的全部工具，再全量重新注册（幂等）。
+
+        ⚡️ 对齐快路径：注册表实际注册集与磁盘期望注册集一致时直接返回
+        （零注销零重扫），见 _align_needed。
 
         ⚠️ 修复：旧实现用「注册前后 diff（after-before）」记录 _loaded，
         热更新场景（工具已注册、文件内容变更）diff 为空集，导致 _loaded
@@ -498,6 +531,9 @@ class PluginToolWatcher:
         跨根保护失效，用户覆盖会被还原）。
         """
         with self._scan_lock:
+            if not self._align_needed():
+                logger.debug("[PluginToolWatcher] 启用状态无差异，跳过全量重扫")
+                return
             # 批量通知合并：注销+全量重扫期内几十次 register/unregister 的
             # 变更通知合并为一次（registry.notify_batch，异常安全），避免
             # UI 重建/缓存失效在热重载时反复排队。

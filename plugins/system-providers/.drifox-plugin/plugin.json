@@ -4,7 +4,7 @@
     "dark": "icon_dark.svg"
   },
   "name": "system-providers",
-  "description": "DriFox 内置服务商定义：DeepSeek / 智谱 / 通达 / 阿里 / 火山 / MiniMax / SiliconFlow / Gemini / 百度 / OpenCode",
+  "description": "DriFox 内置服务商定义：DeepSeek / 智谱 / 通达 / 阿里 / 火山 / MiniMax / SiliconFlow / Gemini / 百度 / OpenCode / CodeBuddy",
   "version": "1.1.0",
   "author": {
     "name": "DriFoxx Team"

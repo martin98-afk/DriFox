@@ -44,6 +44,7 @@ import sys
 
 from PyQt5 import sip
 from PyQt5.QtCore import (
+    QAbstractAnimation,
     QEasingCurve,
     QElapsedTimer,
     QPoint,
@@ -57,6 +58,8 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QColor, QFont, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QWidget
 from loguru import logger
+
+from app.utils.design_tokens import Animations
 
 
 # =============================================================================
@@ -140,6 +143,10 @@ FRAME_INTERVALS = {
 SLEEP_TIMEOUT_MIN_MS = 45_000   # 最早 45s
 SLEEP_TIMEOUT_MAX_MS = 120_000  # 最晚 2 分钟
 
+# error 抖动的最长帧数（40ms/帧 → 约 1.6s）。
+# 超过即停：抖够就够，error 持久化时不无限抖动。
+_SHAKE_MAX_FRAMES = 40
+
 # 成功/错误状态持续后恢复 idle (ms)
 RECOVER_MS = 2500
 
@@ -165,6 +172,12 @@ SLEEP_DURATION_FRAMES = 12         # 入睡过渡完整一轮（按帧数精确�
 # 惯性滑动参数
 INERTIA_DECAY = 0.92
 INERTIA_MIN_VELOCITY = 0.5
+
+# 宠物弹跳动效时长 (ms) — 娱乐性动效，手感优先独立标定，不进全局 token 阶梯；
+# 系统开「减少动态效果」时各 _play_* 跳过位移补间直落终态
+BOUNCE_MS = 350
+BOUNCE_SMALL_MS = 250
+CUDDLE_MS = 400
 
 # ★ 情绪 emoji 映射（画在桌宠上方，直观显示心情）
 STATE_EMOJI = {
@@ -609,18 +622,53 @@ class PixelPetWidget(QWidget):
     # 过渡动画
     # ═══════════════════════════════════════════════════════════
 
-    def _play_transition(self, old_state: str, new_state: str) -> None:
-        """状态切换时的微过渡：Y轴小弹跳 + 透明度呼吸"""
-        self._transition_anim = QPropertyAnimation(self, b"windowOpacity", self)
-        self._transition_anim.setDuration(120)
-        self._transition_anim.setKeyValueAt(0, self.windowOpacity())
-        self._transition_anim.setKeyValueAt(0.5, 0.85)
-        self._transition_anim.setKeyValueAt(1, 1.0)
-        self._transition_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._transition_anim.start()
+    def _track_animation(self, anim) -> None:
+        """持有动画引用防 GC，并在结束后自动摘除
+
+        ★ 旧实现是裸 ``self._animations.append(anim)`` 且从不清理：每次状态切换
+        / 点击 / 弹跳都往列表里塞一个 QPropertyAnimation，桌宠是**常驻**控件，
+        跑一整天可累积上千个对象（列表只增不减 = 稳定内存泄漏）。
+        这里在 finished 时摘除；另加长度兜底，清掉已停止的残留。
+        """
+        if anim is None:
+            return
         if not hasattr(self, "_animations"):
             self._animations = []
-        self._animations.append(self._transition_anim)
+        if anim in self._animations:
+            return
+        self._animations.append(anim)
+
+        def _drop() -> None:
+            try:
+                self._animations.remove(anim)
+            except ValueError:
+                pass
+
+        anim.finished.connect(_drop)
+        if len(self._animations) > 24:
+            # 兜底：异常路径下 finished 可能没连上，清掉已停止的
+            self._animations = [a for a in self._animations if a.state() != QAbstractAnimation.Stopped]
+
+    def _play_transition(self, old_state: str, new_state: str) -> None:
+        """状态切换时的微过渡：Y轴小弹跳 + 透明度呼吸
+
+        ⚠️ 已知无效：此处动的是 ``windowOpacity``，而 PixelPet 是 TabManagerWindow
+        的**子 widget**（非顶层 window），Qt 对该属性在子控件上不生效 —— 本动画
+        实际全程空转。保留是因为其 finished 语义可能被外部依赖，且改为 geometry
+        动画需另行验证与 _play_bounce / _shake 的位移叠加。
+        """
+        # 复用同一个动画对象：旧实现每次覆盖成员，被覆盖的那条仍在跑且静默丢弃
+        if getattr(self, "_transition_anim", None) is None:
+            self._transition_anim = QPropertyAnimation(self, b"windowOpacity", self)
+            self._transition_anim.setDuration(120)
+            self._transition_anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim = self._transition_anim
+        anim.stop()
+        anim.setKeyValueAt(0, self.windowOpacity())
+        anim.setKeyValueAt(0.5, 0.85)
+        anim.setKeyValueAt(1, 1.0)
+        anim.start()
+        self._track_animation(anim)
 
     def _on_recover(self) -> None:
         """恢复计时器回调：重置宠物状态和 AI 状态跟踪，防止状态卡死"""
@@ -746,18 +794,23 @@ class PixelPetWidget(QWidget):
                 target_y = btn_top - 42
             else:
                 target_y = ph - self.height() - 100
+            if not Animations.motion_enabled():
+                # 减少动态效果：跳过补间，直接落到目标位（入场位置必须落定）
+                self.move(target_x, target_y)
+                self.set_state("success")
+                logger.debug("[PixelPet] 入场欢迎动画（减少动态效果直落）")
+                return
             self.move(target_x, ph)  # 从底部开始
             anim = QPropertyAnimation(self, b"geometry", self)
-            anim.setDuration(400)
+            # 入场欢迎是整窗位移（跨大半屏），走 SLOW_MS 档 + OutBack 回弹
+            anim.setDuration(Animations.SLOW_MS)
             start_geo = QRect(target_x, ph, self.width(), self.height())
             end_geo = QRect(target_x, target_y, self.width(), self.height())
             anim.setStartValue(start_geo)
             anim.setEndValue(end_geo)
-            anim.setEasingCurve(QEasingCurve.OutBack)
+            anim.setEasingCurve(QEasingCurve(Animations.EASE_OVERSHOOT))
             anim.start()
-            if not hasattr(self, "_animations"):
-                self._animations = []
-            self._animations.append(anim)
+            self._track_animation(anim)
             # 短暂显示 success 帧作为欢迎
             self.set_state("success")
             logger.debug("[PixelPet] 入场欢迎动画")
@@ -1046,9 +1099,11 @@ class PixelPetWidget(QWidget):
 
     def _play_bounce(self) -> None:
         """弹跳动画"""
+        if not Animations.motion_enabled():
+            return  # 减少动态效果：起止同位，无需位移补间
         anim = QPropertyAnimation(self, b"geometry", self)
         geo = self.geometry()
-        anim.setDuration(350)
+        anim.setDuration(BOUNCE_MS)
         anim.setKeyValueAt(0, geo)
         anim.setKeyValueAt(0.2, QRect(geo.x(), geo.y() - 2, geo.width(), geo.height()))
         anim.setKeyValueAt(0.5, QRect(geo.x(), geo.y() - 3, geo.width(), geo.height()))
@@ -1056,47 +1111,44 @@ class PixelPetWidget(QWidget):
         anim.setKeyValueAt(1, geo)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.start()
-        if not hasattr(self, "_animations"):
-            self._animations = []
-        self._animations.append(anim)
+        self._track_animation(anim)
 
     def _play_bounce_small(self) -> None:
         """小弹跳（比 bounce 更低更柔和）"""
+        if not Animations.motion_enabled():
+            return  # 减少动态效果：起止同位，无需位移补间
         anim = QPropertyAnimation(self, b"geometry", self)
         geo = self.geometry()
-        anim.setDuration(250)
+        anim.setDuration(BOUNCE_SMALL_MS)
         anim.setKeyValueAt(0, geo)
         anim.setKeyValueAt(0.3, QRect(geo.x(), geo.y() - 2, geo.width(), geo.height()))
         anim.setKeyValueAt(0.6, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
         anim.setKeyValueAt(1, geo)
         anim.setEasingCurve(QEasingCurve.OutCubic)
         anim.start()
-        if not hasattr(self, "_animations"):
-            self._animations = []
-        self._animations.append(anim)
+        self._track_animation(anim)
 
     def _play_cuddle(self) -> None:
         """快速连击 → 蹭蹭动画"""
         self._reset_interaction_timer()
-        anim = QPropertyAnimation(self, b"geometry", self)
-        geo = self.geometry()
-        anim.setDuration(400)
-        anim.setKeyValueAt(0, geo)
-        anim.setKeyValueAt(0.15, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
-        anim.setKeyValueAt(0.3, QRect(geo.x() + 2, geo.y(), geo.width(), geo.height()))
-        anim.setKeyValueAt(0.5, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
-        anim.setKeyValueAt(0.7, QRect(geo.x() - 1, geo.y(), geo.width(), geo.height()))
-        anim.setKeyValueAt(1, geo)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.start()
-        if not hasattr(self, "_animations"):
-            self._animations = []
-        self._animations.append(anim)
-        # 短暂闪烁爱心效果（改变状态到 success 帧再回来）
+        if Animations.motion_enabled():
+            anim = QPropertyAnimation(self, b"geometry", self)
+            geo = self.geometry()
+            anim.setDuration(CUDDLE_MS)
+            anim.setKeyValueAt(0, geo)
+            anim.setKeyValueAt(0.15, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
+            anim.setKeyValueAt(0.3, QRect(geo.x() + 2, geo.y(), geo.width(), geo.height()))
+            anim.setKeyValueAt(0.5, QRect(geo.x(), geo.y() - 1, geo.width(), geo.height()))
+            anim.setKeyValueAt(0.7, QRect(geo.x() - 1, geo.y(), geo.width(), geo.height()))
+            anim.setKeyValueAt(1, geo)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.start()
+            self._track_animation(anim)
+        # 短暂闪烁爱心效果（改变状态到 success 帧再回来）——静态反馈，减少动效时保留
         if self._current_state == "idle":
             self._frame_index = 4  # success 的爱心帧
             self.update()
-            QTimer.singleShot(400, lambda: self.update())
+            QTimer.singleShot(CUDDLE_MS, lambda: self.update())
         logger.debug("[PixelPet] 蹭蹭~")
 
     # ═══════════════════════════════════════════════════════════
@@ -1130,6 +1182,12 @@ class PixelPetWidget(QWidget):
             self._stop_shake()
             return
         self._shake_frame += 1
+        # ★ 抖动上限：error 持久化（重试中）时旧实现会以 25fps **无限**位移下去，
+        # 每帧两次 randint + move + 整窗重绘，既扰人又纯耗 CPU。抖够即停，
+        # error 状态自身的红色边框 / 泪痕 / 哭泣帧完全不受影响。
+        if self._shake_frame > _SHAKE_MAX_FRAMES:
+            self._stop_shake()
+            return
         if self._shake_original_pos is None:
             self._shake_original_pos = QPoint(self.x(), self.y())
         intensity = self._shake_intensity
@@ -1497,17 +1555,22 @@ class PixelPetWidget(QWidget):
         else:
             self.move(target_x, target_y)
 
-    def _animate_to(self, x: int, y: int, duration: int = 300) -> None:
-        """平滑移动到目标位置"""
-        self._position_anim = QPropertyAnimation(self, b"geometry", self)
-        self._position_anim.setDuration(duration)
-        self._position_anim.setStartValue(self.geometry())
-        self._position_anim.setEndValue(QRect(x, y, self.width(), self.height()))
-        self._position_anim.setEasingCurve(QEasingCurve.OutCubic)
-        self._position_anim.start()
-        if not hasattr(self, "_animations"):
-            self._animations = []
-        self._animations.append(self._position_anim)
+    def _animate_to(self, x: int, y: int, duration: int = Animations.SLOW_MS) -> None:
+        """平滑移动到目标位置（复用动画对象，起点取当前 geometry 续接）
+
+        旧实现每次新建并覆盖 ``_position_anim``：被覆盖的那条若无 parent 会被
+        GC 打断，有 parent 则继续与新的同时写 geometry → 位置打架。
+        """
+        if getattr(self, "_position_anim", None) is None:
+            self._position_anim = QPropertyAnimation(self, b"geometry", self)
+            self._position_anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER))
+        anim = self._position_anim
+        anim.stop()
+        anim.setDuration(max(1, int(duration)))
+        anim.setStartValue(self.geometry())
+        anim.setEndValue(QRect(x, y, self.width(), self.height()))
+        anim.start()
+        self._track_animation(anim)
 
     # ═══════════════════════════════════════════════════════════
     # 尺寸变化响应
@@ -1558,14 +1621,65 @@ class PixelPetWidget(QWidget):
     def showEvent(self, event: object) -> None:
         super().showEvent(event)
         self.raise_()
+        self._resume_loops()
         # ★ 显示时恢复 raise_timer（除非在睡觉）
         if self._current_state != "sleeping" and not self._raise_timer.isActive():
             self._raise_timer.start(5000)
 
     def hideEvent(self, event: object) -> None:
-        """★ 隐藏时停止不必要的定时器"""
+        """★ 隐藏（含窗口最小化）时停掉**全部**循环定时器
+
+        旧实现只停 ``_raise_timer``，主帧循环（idle 3–5fps 的宠物帧动画）与
+        行为调度器（睡眠 / 闲逛 / 求关注）仍在后台跑。桌宠是常驻控件，隐藏后
+        这些全是纯 CPU 空转（还会随窗口最小化一直持续）。恢复显示时由
+        ``showEvent`` 按当前状态续上。
+        """
         super().hideEvent(event)
-        self._raise_timer.stop()
+        self._pause_loops()
+
+    # 全部循环/调度定时器（隐藏时统一暂停；新增 timer 记得加入本清单）
+    _LOOP_TIMER_ATTRS = (
+        "_frame_timer",
+        "_sleep_timer",
+        "_sleep_wake_timer",
+        "_recover_timer",
+        "_raise_timer",
+        "_idle_behavior_timer",
+        "_attention_timer",
+        "_inertia_timer",
+        "_click_timer",
+        "_shake_timer",
+        "_particle_timer",
+    )
+
+    def _pause_loops(self) -> None:
+        """暂停全部循环/调度定时器（隐藏时调用）"""
+        for name in self._LOOP_TIMER_ATTRS:
+            timer = getattr(self, name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except RuntimeError:
+                    pass
+
+    def _resume_loops(self) -> None:
+        """恢复循环/调度定时器（显示时调用）：只恢复当前状态真正需要的
+
+        - 帧循环：按当前状态重设间隔
+        - 睡眠/闲逛/求关注：睡觉时不重排（唤醒时自会重排）
+        - 粒子：仅在有存活粒子时
+        惯性 / 抖动 / 点击链都是短时自停的，隐藏期间已自然结束，不恢复。
+        """
+        try:
+            self._start_frame_timer(self._current_state)
+        except Exception:
+            pass
+        if self._current_state != "sleeping":
+            self._reset_sleep_timer()
+            self._reset_idle_behavior_timer()
+            self._reset_attention_timer()
+        if getattr(self, "_particles", None):
+            self._particle_timer.start(50)
 
     def cleanup(self) -> None:
         self._frame_timer.stop()

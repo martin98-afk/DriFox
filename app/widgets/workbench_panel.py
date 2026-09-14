@@ -28,7 +28,7 @@ refresh_workbench 时调用），页面自行实现可选协议 ``refresh_data()
 import json
 from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QRect, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QCursor
 from PyQt5.QtWidgets import (
     QFrame,
@@ -46,10 +46,11 @@ from qfluentwidgets import ScrollArea, TransparentToolButton
 
 from app.core.project_changed import dispatch_project_changed, is_active_window
 from app.utils.design_tokens import BorderRadius, Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.motion import LoopTimer
 from app.utils.utils import _is_current_theme_light, get_font_family_css, get_icon
 from loguru import logger
 from app.widgets._workbench_helpers import _EmptyHint, _SectionHeader
-from app.widgets.custom_title_bar import CustomTabButton
+from app.widgets.custom_title_bar import CustomTabButton, TabIndicatorController
 from app.widgets.flow_layout import FlowLayout
 from app.widgets.cards.floating.sub_agent_compact_widget import _RotatingIcon
 
@@ -295,18 +296,19 @@ class TasksPage(QWidget):
             mark_widget: QWidget = _RotatingIcon(":/icons/执行中.svg", size=16, parent=frame)
             # 浅色主题叠加半透明黑色，避免亮背景下图标不可见（与子智能体悬浮框一致）
             mark_widget.set_tint("#88000000" if _is_current_theme_light() else None)
-            # _RotatingIcon 无自驱动定时器，条目自带 QTimer 驱动
-            # （60ms/24° 与子智能体悬浮框旋转参数一致；定时器挂 frame，条目销毁自动停）
-            spin_timer = QTimer(mark_widget)
+            # _RotatingIcon 无自驱动定时器，条目自带循环驱动。用 LoopTimer 门控：
+            # 条目不可见（面板收起 / 页签切走）或系统「减少动态效果」时自动跳过
+            # 回调，不再在隐藏状态下空转重绘 SVG。80ms/32° 与子智能体悬浮框
+            # 旋转参数一致（400°/s）；宿主取 mark_widget，条目销毁即自动停。
             _angle = 0
 
             def _spin_tick() -> None:
                 nonlocal _angle
-                _angle = (_angle + 24) % 360
+                _angle = (_angle + 32) % 360
                 mark_widget.set_angle(_angle)
 
-            spin_timer.timeout.connect(_spin_tick)
-            spin_timer.start(60)
+            spin_timer = LoopTimer(mark_widget, 80, _spin_tick)
+            spin_timer.start()
             layout.addWidget(mark_widget)
         else:
             mark_label = QLabel(mark, frame)
@@ -452,6 +454,14 @@ class WorkbenchPanel(QWidget):
         # FlowLayout：tab 多时自动折行；AlignRight 整体右对齐（每行独立计算）
         self._tab_bar_layout = FlowLayout(tab_bar_host, spacing=2, alignment=Qt.AlignRight, margins=0)
         root.addWidget(tab_bar_host)
+        # 页签滑动指示器：与标题栏顶栏 tab 同款（先于任何按钮创建，天然垫在底层）
+        self._indicator_ctl = TabIndicatorController(
+            tab_bar_host,
+            self,
+            lambda: self._tab_buttons[self._stack.currentIndex()].geometry()
+            if 0 <= self._stack.currentIndex() < len(self._tab_buttons)
+            else None,
+        )
 
         # ── 主体：QSplitter(垂直) 切分内容栈 / 任务区 ──
         # 上：tab 条已上移，这里只剩 QStackedWidget（工作树 / 记忆 / 产物 / 插件页 / 卡片页）
@@ -714,7 +724,7 @@ class WorkbenchPanel(QWidget):
         self._tab_labels = []
         for tab_id, label in specs:
             closable = tab_id in self._card_tabs
-            btn = CustomTabButton(tab_id, label, self, closable=closable)
+            btn = CustomTabButton(tab_id, label, self, closable=closable, indicator_managed=True)
             btn.clicked.connect(self._on_tab_clicked)
             if closable:
                 btn.close_clicked.connect(self.card_tab_close_requested.emit)
@@ -771,6 +781,13 @@ class WorkbenchPanel(QWidget):
     def _run_tab_hover_sync(self) -> None:
         self._hover_sync_pending = False
         self.sync_tab_hover()
+        # 显式钉位：show() 首次布局走 QLayout 同步 activate，不产生
+        # LayoutRequest，controller 的事件链接不到；showEvent 会调度到这里，
+        # 延迟一拍后按钮几何已收敛，能正确落位。与 controller 内建事件链
+        # （覆盖后续动态布局）双保险，幂等。
+        idx = self._stack.currentIndex()
+        if 0 <= idx < len(self._tab_buttons):
+            self._indicator_ctl.move_to(self._tab_buttons[idx].geometry(), animate=False)
 
     def leaveEvent(self, event) -> None:
         # 鼠标离开面板时兜底清空（动画/其它窗口抢焦点时子 widget 的
@@ -1165,6 +1182,9 @@ class WorkbenchPanel(QWidget):
         self._stack.setCurrentIndex(index)
         for i, btn in enumerate(self._tab_buttons):
             btn.set_active(i == index)
+        # 滑动指示器：用户点击切换时滑过去；程序性切换（切窗恢复 saved）瞬移落位
+        if 0 <= index < len(self._tab_buttons):
+            self._indicator_ctl.move_to(self._tab_buttons[index].geometry(), animate=user)
         # 通知宿主记录（当前页签按对话窗口独立记忆，见 TabManagerWindow 回调）
         if user:
             self.current_tab_changed.emit(index)

@@ -4,7 +4,7 @@ from typing import Dict, Optional
 from PyQt5.QtCore import Qt, QEasingCurve, QEvent, QPropertyAnimation, QTimer, pyqtSignal
 from PyQt5.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Animations, Colors
 from app.widgets.cards.card_manager import CardManager, ContainerType
 
 
@@ -40,8 +40,9 @@ class CardContainer(QWidget):
     # 不再覆盖其设定。左右栏为横向轴、卡片天然较宽，沿用最小宽即可。
     _DOCK_DEFAULT_RATIO_V = 0.30
     # 展开/收起动画参数（按方向分离，与 TabManagerWindow._start_wb_anim 对齐）
-    _EXPAND_ANIM_MS = 200
-    _COLLAPSE_ANIM_MS = 160
+    # 走全局动效 token：进入 ENTER_MS/EASE_ENTER、离场 EXIT_MS/EASE_EXIT
+    _EXPAND_ANIM_MS = Animations.ENTER_MS
+    _COLLAPSE_ANIM_MS = Animations.EXIT_MS
 
     # 卡片可通过 setProperty(NO_ANIMATION_PROP, True) 声明不参与容器的展开/折叠动画
     # 适用场景：卡片自带 resize / 拖拽 等会持续触发 heightChanged 的交互，
@@ -157,6 +158,21 @@ class CardContainer(QWidget):
                 return True
         return False
 
+    def _set_style_sheet_cached(self, css: str):
+        """setStyleSheet 的同串短路
+
+        ★ Qt5 的 setStyleSheet 对**完全相同**的样式串也不会短路：每次调用都会
+        让 QStyleSheetStyle 重建并 repolish 整棵子树。实测 1200 控件的子树
+        单次约 26ms；系统设置卡子树控件数以千计，而容器 showEvent 每次显示都
+        调 _apply_background_style → 每次打开卡片都白付一次百毫秒级 repolish
+        （线上 toggle_card 170~270ms，离屏不 paint 所以复现不出来）。
+
+        串未变则直接跳过。无需额外失效逻辑：主题切换会改变颜色 token、透明
+        卡片集合变化会切换分支——两种情况都会让串内容不同，届时自然应用。
+        """
+        if css != self.styleSheet():
+            self.setStyleSheet(css)
+
     def _apply_background_style(self):
         """应用主题背景 + 边框
 
@@ -169,7 +185,7 @@ class CardContainer(QWidget):
         if self._overlay_mode:
             # 覆盖层模式：卡片声明透明 → 容器只做透明承托，透出宿主背景
             if self._has_transparent_card():
-                self.setStyleSheet("""
+                self._set_style_sheet_cached("""
                     CardContainer {
                         background: transparent;
                         border: none;
@@ -177,7 +193,7 @@ class CardContainer(QWidget):
                 """)
                 return
             # 覆盖层模式：四角圆角独立面板视觉 + 较实背景，与对话区形成明确边界
-            self.setStyleSheet(f"""
+            self._set_style_sheet_cached(f"""
                 CardContainer {{
                     background: {Colors.CARD_BG.format(alpha=246)};
                     border: 1px solid {Colors.BORDER};
@@ -188,7 +204,7 @@ class CardContainer(QWidget):
         if self._horizontal or self._dock_splitter is not None:
             # 停靠区（左右容器 / 启用停靠模式的上下容器）：
             # 四角圆角独立面板视觉 + 更实的背景，与对话区形成明确边界
-            self.setStyleSheet(f"""
+            self._set_style_sheet_cached(f"""
                 CardContainer {{
                     background: {Colors.CARD_BG.format(alpha=246)};
                     border: 1px solid {Colors.BORDER};
@@ -196,7 +212,7 @@ class CardContainer(QWidget):
                 }}
             """)
             return
-        self.setStyleSheet(f"""
+        self._set_style_sheet_cached(f"""
             CardContainer {{
                 background: {bg};
                 border: 1px solid {Colors.BORDER};
@@ -302,16 +318,26 @@ class CardContainer(QWidget):
         return axis_min
 
     def _visible_cards_follow_content(self) -> bool:
-        """当前可见卡片是否声明了"高度严格跟随内容"（FOLLOW_CONTENT_PROP）
+        """当前可见卡片是否存在声明了"高度严格跟随内容"（FOLLOW_CONTENT_PROP）的卡
 
-        有可见卡片且全部声明时返回 True：dock 模式下容器也按 sizeHint 收缩，
-        不套 30% 下限 / 记忆高度 / 展开后早退，避免内容与容器高度不匹配产生空白。
+        判定用 any 而非 all：BOTTOM 是共存容器，question 强制清场对 L2 状态卡
+        豁免（_hide_same_container_cards 默认 exempt_stackable=True），提问卡与
+        状态卡（sub_agent_compact / message_queue / undo_delete）可同容器共存。
+        若按 all 判定，任一未声明 followContent 的状态卡都会让判定失效 →
+        _do_expand 走 dock 通用分支（30% 占比地板 + 记忆高度 + 布局 sizeHint
+        的 wordWrap 高估）→ 容器槽位远大于提问卡内容 → 卡片下方出现大块空白；
+        状态卡 visible_when 谓词翻转时 follow / 非 follow 分支交替 → 空白反复
+        出现消失。any 语义下只要 followContent 卡可见就走内容跟随分支，
+        _follow_content_natural_h 本就逐卡累加所有可见卡的内容高度（含状态卡），
+        共存时容器 = 各卡内容之和，既无空白也不裁切。
+        无 followContent 卡可见时（纯状态卡 / dock 卡）返回 False，维持
+        30% 占比地板 / 记忆恢复的原有行为不变。
         """
         visible = [w for w in self._cards.values() if not w.isHidden()]
-        return bool(visible) and all(w.property(self.FOLLOW_CONTENT_PROP) for w in visible)
+        return bool(visible) and any(w.property(self.FOLLOW_CONTENT_PROP) for w in visible)
 
     def _follow_content_natural_h(self) -> int:
-        """followContent 卡片：用卡片 heightForWidth(容器宽) 计算真实内容高度
+        """followContent 卡片：用卡片 heightForWidth(卡片可用宽度) 计算真实内容高度
 
         不能直接用布局 sizeHint：QVBoxLayout::sizeHint()（C++）内部遍历
         QWidgetItem 时**不会**调用 Python 覆写的 sizeHint()，而 wordWrap QLabel
@@ -320,8 +346,23 @@ class CardContainer(QWidget):
         容器锁高 → 卡片底部大段空白。
         heightForWidth() 按真实宽度换行，是 Qt 原生正确实现，从 Python 侧
         显式调用可拿到真实内容高度。
+
+        ★ 测量宽度必须等于卡片真实排版宽度：容器左右各有 8px margin
+        （BottomCardContainer margins 8/6/8/6）。早期版本传「容器宽」测量，
+        等于按比真实排版宽 16px 的假宽度算换行；文本换行数一旦落在这 16px
+        窗口内就少算一行（实测 hfw(容器宽)=362 vs 真实 384）→ 容器锁高低于
+        卡片布局最小需求 → Qt 布局无解 → 重排 → Resize → heightChanged →
+        _do_expand（仍用错宽度）→ 无限循环，表现为卡内元素每帧上下位移
+        （实测 _do_expand 323 次、footer_y 在 327↔349 往复 22px）；窗口
+        resize 跳出该宽度窗口后才收敛。
+
+        故测量宽度取「容器内容区宽度」（= 卡片将获得的排版宽度，实测与
+        card.width() 一致）。不可用 card.width()：它随滚动条出现/消失跳
+        20px，而测量结果又反过来决定滚动条状态 → 反馈环 → 自激循环；
+        容器内容区宽度只依赖父布局分配，是稳定输入。
         """
-        w = self.width()
+        _m = self._layout.contentsMargins()
+        w = self.width() - _m.left() - _m.right()
         if w <= 0:
             # 容器宽度未分配（如首次展开时容器尚在折叠态）：
             # 用可见卡片的布局理想宽度兜底，避免 fallback 到受 wordWrap
@@ -349,15 +390,18 @@ class CardContainer(QWidget):
                 continue
             h = 0
             if card.hasHeightForWidth():
-                # 防御：容器宽度未分配（如首次展开/测试环境无真实布局）时，
-                # 用卡片布局理想宽度兜底，避免以极小宽度计算换行导致高度虚高。
-                cw = card.width()
+                # 测量宽度 = 容器内容区宽度（= 卡片将获得的排版宽度）。
+                # 不用 card.width()：滚动条出现/消失会让它跳 20px，
+                # 而高度测量结果又反过来决定滚动条状态 → 反馈环 → 自激循环。
+                # 容器内容区宽度只依赖容器自身宽度（父布局分配），是稳定输入。
+                # 不可取 max(容器宽, 卡片宽)：容器宽比卡片宽一个 margins，
+                # 按假宽度测量会在换行临界处少算一行 → 容器锁高低于卡片布局
+                # 最小需求 → 布局无解 → 自激循环。
+                cw = w
                 if cw <= 0:
                     cl = card.layout()
                     cw = cl.sizeHint().width() if cl is not None else 0
-                if cw > 0:
-                    w = max(w, cw)
-                h = card.heightForWidth(w)
+                h = card.heightForWidth(cw)
             if h <= 0:
                 # 未实现 heightForWidth（或尚未测量出目标高）：退回布局 sizeHint
                 h = card.sizeHint().height()
@@ -937,6 +981,12 @@ class CardContainer(QWidget):
             # 折叠前轴向 max 可能是 _EXPAND_MAX 或动画中间值，确保放开以读取真实尺寸
             if self._axis_max() < self._EXPAND_MAX:
                 self._set_axis_max(self._EXPAND_MAX)
+                # ★ 放开约束后必须让布局同步生效再读尺寸：Qt 不会在 setMaximum
+                # 后立即重排，直接读 height() 拿到的是放开前的旧值（布局未刷
+                # 新时甚至更旧）→ 折叠起手先「撑满」一下再收，肉眼可见闪跳。
+                lay = self.layout()
+                if lay is not None:
+                    lay.activate()
             current_h = self._axis_current()
             if current_h <= 0 or skip_anim:
                 _on_collapsed()
@@ -959,12 +1009,18 @@ class CardContainer(QWidget):
         """
         anim = self._expand_animation
         collapsing = end_h < start_h
+        # 减少动态效果 / 未挂载父级：跳过动画直落终值（保留状态反馈，去掉运动）
+        if not Animations.motion_enabled() or self.parentWidget() is None:
+            self._set_axis_max(int(end_h))
+            if on_finished is not None:
+                on_finished()
+            return
         if anim is None:
             anim = QPropertyAnimation(self, self._axis_property())
             self._expand_animation = anim
         # 每次都重设：复用同一对象时方向可能反转
         anim.setDuration(self._COLLAPSE_ANIM_MS if collapsing else self._EXPAND_ANIM_MS)
-        anim.setEasingCurve(QEasingCurve.OutQuad if collapsing else QEasingCurve.OutCubic)
+        anim.setEasingCurve(QEasingCurve(Animations.EASE_EXIT if collapsing else Animations.EASE_ENTER))
 
         # 断开上次的 on_finished 回调（避免重复连接）
         try:
@@ -1109,7 +1165,7 @@ class CompletionCardContainer(CardContainer):
 
     def _apply_background_style(self):
         """透明承托：面板表面由卡片自绘（见类 docstring）"""
-        self.setStyleSheet("""
+        self._set_style_sheet_cached("""
             CompletionCardContainer {
                 background: transparent;
                 border: none;
@@ -1137,18 +1193,18 @@ class BottomCardContainer(CardContainer):
         self._layout.setSpacing(self.STACK_SPACING)
 
     def _apply_background_style(self):
-        """底部容器背景：8px 上圆角 + 底部直角，与输入框视觉拼接"""
-        Colors.refresh()
-        bg = Colors.CARD_BG.format(alpha=232)
-        self.setStyleSheet(f"""
-            BottomCardContainer {{
-                background: {bg};
-                border: 1px solid {Colors.BORDER};
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-            }}
+        """底部容器：透明承托，不画面板背景与边框。
+
+        L2 状态卡（子智能体/排队/撤销）与系统模态卡可堆叠共存，每张卡已由
+        CardStyles.floating 自绘完整表面；容器再画一圈 CARD_BG+BORDER 就是双层
+        边框嵌套（两层之间只隔 8px padding）。故容器只保留 padding 与卡间距，
+        边界交给卡片自己表达。
+        """
+        self._set_style_sheet_cached("""
+            BottomCardContainer {
+                background: transparent;
+                border: none;
+            }
         """)
 
     def add_card(self, card_id: str, card_widget: QWidget):

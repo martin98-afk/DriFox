@@ -446,15 +446,17 @@ class CardManager:
         if multi and card_id in multi:
             self._set_card_visible_raw(card_id, window_id, False)
             multi.remove(card_id)
-            win_data["visible_cards"][container_type] = multi[0] if multi else None
+            self._hand_over_stack_top(win_data, container_type, card_id, multi)
             if card_id in win_data["system_cards"]:
                 if not any(self.is_card_visible(sc, window_id) for sc in win_data["system_cards"]):
                     win_data["suppressed_by_system"] = False
             return
 
-        if win_data["visible_cards"].get(container_type) != card_id:
-            return
-
+        # hide_card 的语义是「让这张卡消失」，不能按栈顶记账是否匹配来决定要不要隐藏：
+        # 记账会被同容器其他层的重算改写（历史 bug：提问卡提交后永久关不掉，
+        # 因为 L2 状态层刷新把栈顶单值抢走，此后每次 hide_card 都早退，
+        # 表现为「点提交/忽略均无反应」，而答案其实已送达、正文照常输出）。
+        # 记账只在确实属于本卡时交接出去，不动别的卡的占位。
         try:
             if hasattr(card_widget, "hide_card"):
                 card_widget.hide_card()
@@ -464,7 +466,7 @@ class CardManager:
             self._check_and_remove_deleted_card(window_id, card_id, container_type, card_widget)
             return
 
-        win_data["visible_cards"][container_type] = None
+        self._hand_over_stack_top(win_data, container_type, card_id, [])
         # Phase G：dock 容器多卡——从可见列表移除；active 若指向本卡则指向列表尾
         if container_type in DOCK_CONTAINER_TYPES:
             dock_list = win_data.get("dock_visible_cards", {}).get(container_type, [])
@@ -725,9 +727,27 @@ class CardManager:
             if cid not in current:
                 self._set_card_visible_raw(cid, window_id, True)
         win_data["multi_visible"][container_type] = list(desired)
-        # 栈顶单值仅作旧调用兼容（is_card_visible 已优先查完整可见集）
-        win_data["visible_cards"][container_type] = desired[0] if desired else None
+        # 栈顶单值仅作旧调用兼容（is_card_visible 已优先查完整可见集）。
+        # 现栈顶若不在本次重算的管辖集内（既非目标成员也非原成员），说明它被同
+        # 容器的非本层卡占住——比如提问卡这类由宿主显式 show_card 的普通卡——
+        # 本层无权改写：抢走记账会让对方的 hide_card 因记账不匹配而早退，卡片永久关不掉。
+        cur_top = win_data["visible_cards"].get(container_type)
+        if cur_top is None or cur_top in desired or cur_top in current:
+            win_data["visible_cards"][container_type] = desired[0] if desired else None
         self._reorder_in_layout(window_id, container_type, desired)
+
+    @staticmethod
+    def _hand_over_stack_top(
+        win_data: Dict[str, Any], container_type: ContainerType, card_id: str, remaining: List[str]
+    ) -> None:
+        """卡片退出栈顶时的记账交接：栈顶确实属于本卡才改写
+
+        Args:
+            remaining: 该容器内仍有资格占据栈顶的卡片列表（可为空）
+        """
+        if win_data["visible_cards"].get(container_type) != card_id:
+            return
+        win_data["visible_cards"][container_type] = remaining[0] if remaining else None
 
     def _set_card_visible_raw(self, card_id: str, window_id: str, visible: bool) -> None:
         """底层显隐（不做互斥/压制决策）：驱动 widget + 回调 + 显隐事件"""

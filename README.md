@@ -13,7 +13,7 @@
 ![Stars](https://img.shields.io/github/stars/martin98-afk/DriFox)
 ![Downloads](https://img.shields.io/github/downloads/martin98-afk/DriFox/total)
 ![Last Commit](https://img.shields.io/github/last-commit/martin98-afk/DriFox)
-![Version](https://img.shields.io/badge/version-0.5.11-brightgreen)
+![Version](https://img.shields.io/badge/version-0.6.0-brightgreen)
 
 </div>
 
@@ -28,7 +28,7 @@
 
 ![软件介绍](images/软件介绍.png)
 
-![v0.5.0 Release Poster](images/release-poster-v0.5.0.png)
+![v0.5.0 Release Poster](images/release-poster-v0.6.0.png)
 
 ---
 
@@ -111,6 +111,7 @@ DriFox 把"团队"建模为**多窗口 + 文件邮箱**——把"团队协作"�
 | 🛠️ **40+ 内置工具** | 文件/执行/网络/代码/桌面/团队/MCP |
 | 🔌 **多模型** | **原生 OpenAI 兼容**：OpenAI / Claude / DeepSeek / MiniMax / 通义 / Gemini / Groq / OpenCode Zen / OpenCode Go / SiliconFlow / Ollama / 火山方舟 / 百度千帆 / 智谱AI |
 | ☁️ **Gitee 云同步** | OAuth 绑定，配置自动备份/恢复，图床上传，分享记录云端管理，Token 自动续期 |
+| 🔐 **密钥加密可选** | API Key 三种保存方式：系统钥匙串（本机绑定）／密码加密（密文随配置同步，换机输同一密码即可解出）／明文；OAuth token 同前走系统凭证库 |
 | 🌐 **MCP 系统** | Model Context Protocol，扩展工具能力 |
 | 🔌 **Hook 系统** | 6 种事件钩子，PreToolUse 可 BLOCK |
 | 🧩 **Skill 系统** | 25+ 即用技能，可自行扩展 |
@@ -154,7 +155,7 @@ python main.py
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                    DriFox v0.5.11 架构                  │
+│                    DriFox v0.6.0 架构                  │
 ├──────────────────────────────────────────────────────────────┤
 │  UI 层      悬浮窗口 / 消息卡片 / 差异视图 / 输入区         │
 │             浮动卡片 / 桌宠 / 系统托盘 / 设置面板            │

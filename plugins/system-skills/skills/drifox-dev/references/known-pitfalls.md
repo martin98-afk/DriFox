@@ -11,6 +11,7 @@
 
 | # | 症状 | 根因模式 | 通用规避 |
 |---|------|---------|---------|
+| P052 | 坞态（简洁模式+流式）正文内滚：用户手动滚动后每次更新位置漂到别处，也不是滚底 | 位置恢复用**绝对 scrollTop + 新 max 钳制**，而 save 与 restore 之间内容结构会变（reorganizeContent 搬走工具/思考块、save/restore 的 `el.remove()`）→ scrollHeight 收缩 → 恢复值被钳到「新内容底部」，与用户原位置不是同一语义点 | 改**锚点恢复**：记录视口顶第一个可见块 + `offsetTop - scrollTop` 偏移，重建后把同一块拉回同一偏移；锚点必须在**任何** DOM 操作之前捕获；配套 `updateContentAppend/updateTailHtml` 改「先插后删」避免高度塌陷钳制 |
 | P033 | 流式滚动反复回归：要么强拉底覆盖阅读位置，要么不跟随 | **多套标志位启发式**维护跟随态（scroll delta 判断用户 vs 程序滚动），必然误判 | 收敛为**单一状态机 + 唯一实现**：程序自写基准 top，用户滚动不改基准；所有调用点收敛到一个函数，去掉监听器与标志位 |
 | P046 | 工具/思考区滚动位置反复重置 | 程序性 scroll 事件被误判为用户滚动；save/restore 未保存 scrollTop | 对齐既有模式：wheel 同步置位 + `_suppressScrollEvent` 检查 + 程序性滚动标记 + scrollTop 保存恢复 |
 | P048 | 折叠框展开瞬间视口内容被推走 | 外层列表**无 scroll anchoring**：高度变化时 value 不动 | 卡片记录 `_last_height_delta`，宿主按卡片顶是否在视口上方补偿 value；其它 emit 点清零 delta 防误补偿 |

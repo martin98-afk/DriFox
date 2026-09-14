@@ -144,9 +144,14 @@ class LspListSettingCard(ExpandSettingCard):
         # 列表行延迟到首次展开时构建（见 _ensure_built）：_get_lsp_manager()
         # 会首次导入 app.core.lsp.lsp_manager，实测约 0.27s，折叠态下不必付
         self._built = False
-        # 首次加载后延迟刷新一次状态
-        QTimer.singleShot(500, self._refresh_status)
-        self._refresh_timer.start()
+        # ★ 性能（2026-09-13）：构造期既不预热 LSP 管理器、也不启动 3s 轮询。
+        #   原来这里有两笔主线程开销，都会落在「设置卡刚显示」这一刻：
+        #     ① QTimer.singleShot(500, _refresh_status) —— 卡片显示后 0.5s 才在
+        #        主线程补首次 _get_lsp_manager()（首次 import lsp_manager 及依赖链
+        #        ~0.27s），用户表现为"卡片刚出来又卡一下"；
+        #     ② _refresh_timer.start() —— 折叠态、甚至设置弹窗从未打开时也在跑。
+        #   两者都与本类既有设计意图（注释上一条：折叠态下不必付这份开销）相悖，
+        #   改为统一在展开时开始，收起/隐藏即停止（见 setExpand / hideEvent）。
 
     def _ensure_built(self):
         """首次需要时构建列表行（幂等）"""
@@ -156,10 +161,30 @@ class LspListSettingCard(ExpandSettingCard):
         self._rebuild()
 
     def setExpand(self, isExpand: bool):
-        """展开前补齐列表行，保证展开动画算到的是完整高度"""
+        """展开前补齐列表行，保证展开动画算到的是完整高度
+
+        展开同时启动状态轮询并立即取一次真实状态（此时 lsp_manager 已被
+        _rebuild 导入，属缓存命中，不再付导入成本）；收起即停轮询。
+        """
         if isExpand:
             self._ensure_built()
+            self._refresh_status()
+            if not self._refresh_timer.isActive():
+                self._refresh_timer.start()
+        else:
+            self._refresh_timer.stop()
         super().setExpand(isExpand)
+
+    def hideEvent(self, event):
+        """卡片不可见（含设置弹窗收起）时停止轮询，避免后台空转"""
+        self._refresh_timer.stop()
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        """重新可见时，仅当仍处于展开态才恢复轮询"""
+        super().showEvent(event)
+        if self.isExpand and not self._refresh_timer.isActive():
+            self._refresh_timer.start()
 
     def _get_lsp_manager(self):
         """获取 LspManager 实例"""
@@ -229,6 +254,7 @@ class LspListSettingCard(ExpandSettingCard):
         while self.viewLayout.count():
             item = self.viewLayout.takeAt(0)
             if item.widget():
+                item.widget().hide()
                 item.widget().deleteLater()
 
         # 更新开关状态（与配置同步）
@@ -261,9 +287,10 @@ class LspListSettingCard(ExpandSettingCard):
                 self._rows[name] = row
                 self.viewLayout.addWidget(row)
 
-        from PyQt5.QtCore import QCoreApplication
-
-        QCoreApplication.processEvents()
+        # ★ 原实现在这里 QCoreApplication.processEvents()：泵走当时事件队列里的
+        # 全部事件，本函数耗时因此变成"那一刻队列里积压了什么"（实测首建被顶到
+        # 691ms，其中绝大部分是替别人还债）。布局尺寸不需要它：takeAt 已把 item
+        # 摘出布局，sizeHint 不再计入；hide() 保证残留 widget 在被 delete 前不重绘。
         self.viewLayout.activate()
         self.view.updateGeometry()
         self._adjustViewSize()

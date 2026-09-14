@@ -22,6 +22,10 @@
 
 DESCRIPTION_KEY = "description"
 
+# 有 tail（如文件路径）时 description 的最大展示宽度：
+# 折叠头是单行省略（ellipsis 从尾部裁），不裁 description 就会把路径挤出可视区。
+_DESC_PREVIEW_MAX = 30
+
 
 def description_param(example: str, required: bool = True) -> dict:
     """生成 description 参数的 schema 片段（展开进 parameters.properties）
@@ -79,6 +83,9 @@ def prefer_description(preview_fn=None, tail_fn=None):
             tail = tail_fn(args) or ""
         except Exception:
             tail = ""
-        return f"{desc} {tail}" if tail else desc
+        if not tail:
+            return desc
+        _desc = desc if len(desc) <= _DESC_PREVIEW_MAX else desc[: _DESC_PREVIEW_MAX - 1] + "…"
+        return f"{_desc} {tail}"
 
     return _wrapped

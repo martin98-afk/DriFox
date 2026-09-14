@@ -169,7 +169,6 @@ class GlobalCardController:
             return
         self._settings_popup_building = True
         try:
-            from app.core.hook_manager import HookManager
             from app.widgets.cards.settings.llm_settings_card import LLMSettingsCard
 
             self._settings_popup = LLMSettingsCard(self._tab_manager)
@@ -177,13 +176,10 @@ class GlobalCardController:
             self._settings_popup.configChanged.connect(self.on_settings_config_changed)
             self._settings_popup.closed.connect(lambda: self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID))
 
-            # 全局 Hook 列表：HookManager 使用类级共享状态，单例即可跨窗口共用
-            try:
-                self._settings_popup.hookListCard._hook_manager = HookManager()
-                # 重新加载一次（构建时 manager 可能为 None 导致列表为空）
-                self._settings_popup.hookListCard._refresh(reload=True)
-            except Exception as e:
-                logger.warning(f"[GlobalCard] 设置 HookManager 注入失败: {e}")
+            # ★ 原实现在这里注入 HookManager 并全量重渲染一次（实测 ~0.7s，
+            # 其中 _refresh 内的 processEvents 会把构造期积压的事件一并泵走）。
+            # Hooks 页并非首屏，改为延迟到该页首次进入时做（LLMSettingsCard
+            # ._ensure_page_ready("hooks")），首开设置卡不再为它垫付。
 
             # 连接服务商添加/编辑信号
             self._settings_popup.llmProviderCard.showAddProviderCard.connect(self._show_provider_add_card)
@@ -260,7 +256,7 @@ class GlobalCardController:
         from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
         from app.widgets.cards.settings.provider_edit_card import ProviderEditCard
 
-        self._provider_edit_card = BaseSettingsCard("服务商配置", "⚙️", parent=self._tab_manager)
+        self._provider_edit_card = BaseSettingsCard("服务商配置", icon_svg="大模型", parent=self._tab_manager)
         self._provider_edit_card.setMinimumHeight(300)
         self._provider_edit_card.set_height_mode("content")
         self._provider_edit_popup = ProviderEditCard(parent=self._provider_edit_card)
@@ -284,7 +280,7 @@ class GlobalCardController:
 
         self._ensure_provider_edit_card()
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._provider_edit_card.set_title("⚙️ 添加服务商")
+        self._provider_edit_card.set_title("添加服务商", icon_svg="大模型")
         self._provider_edit_popup = ProviderEditCard(
             provider_name="", provider_info={}, is_new=True, parent=self._provider_edit_card
         )
@@ -310,7 +306,7 @@ class GlobalCardController:
         self._ensure_provider_edit_card()
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
         display_name = provider_info.get("name", "") or provider_info.get("provider_name", config_id)
-        self._provider_edit_card.set_title(f"⚙️ 编辑: {display_name}")
+        self._provider_edit_card.set_title(f"编辑: {display_name}", icon_svg="大模型")
         if "provider_name" not in provider_info:
             provider_info["provider_name"] = display_name
         self._provider_edit_popup = ProviderEditCard(
@@ -408,7 +404,7 @@ class GlobalCardController:
         from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
-        self._hook_edit_card = BaseSettingsCard("Hook 配置", "⚙️", parent=self._tab_manager)
+        self._hook_edit_card = BaseSettingsCard("Hook 配置", icon_svg="hooks", parent=self._tab_manager)
         self._hook_edit_card.setMinimumHeight(200)
         self._hook_edit_card.set_height_mode("proportional")
         self._hook_edit_popup = HookEditCard(parent=self._hook_edit_card)
@@ -428,7 +424,7 @@ class GlobalCardController:
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._hook_edit_card.set_title("➕ 添加 Hook")
+        self._hook_edit_card.set_title("添加 Hook", icon_svg="hooks")
         hm = None
         if self._settings_popup is not None:
             hm = self._settings_popup.hookListCard._hook_manager
@@ -450,7 +446,7 @@ class GlobalCardController:
         from app.widgets.cards.settings.hook_setting_card import HookEditCard
 
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._hook_edit_card.set_title("✏️ 编辑 Hook")
+        self._hook_edit_card.set_title("编辑 Hook", icon_svg="hooks")
         hm = None
         if self._settings_popup is not None:
             hm = self._settings_popup.hookListCard._hook_manager
@@ -535,7 +531,7 @@ class GlobalCardController:
             return
         from app.widgets.cards.settings.base_settings_card import BaseSettingsCard
 
-        self._mcp_edit_card = BaseSettingsCard("MCP 服务器", "🔌", parent=self._tab_manager)
+        self._mcp_edit_card = BaseSettingsCard("MCP 服务器", icon_svg="MCP", parent=self._tab_manager)
         self._mcp_edit_card.setMinimumHeight(200)
         self._mcp_edit_card.set_height_mode("content")
         self._mcp_edit_popup = None
@@ -551,7 +547,7 @@ class GlobalCardController:
 
         self._ensure_mcp_edit_card()
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._mcp_edit_card.set_title("🔌 添加 MCP 服务器")
+        self._mcp_edit_card.set_title("添加 MCP 服务器", icon_svg="MCP")
         self._mcp_edit_popup = MCPEditCard(server_data=None, parent=self._mcp_edit_card)
         self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
         self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
@@ -573,7 +569,7 @@ class GlobalCardController:
 
         self._ensure_mcp_edit_card()
         self._card_manager.hide_card("settings", GLOBAL_WINDOW_ID)
-        self._mcp_edit_card.set_title(f"🌐 编辑: {name}")
+        self._mcp_edit_card.set_title(f"编辑: {name}", icon_svg="MCP")
         self._mcp_edit_popup = MCPEditCard(server_data=server_data, parent=self._mcp_edit_card)
         self._mcp_edit_popup.saved.connect(self._on_mcp_edit_saved)
         self._mcp_edit_popup.closed.connect(self._on_mcp_edit_closed)
@@ -743,7 +739,15 @@ class GlobalCardController:
 
     def _show_file_undo_diff(self, html, title):
         self.show_diff_viewer(html, title)
-        self._diff_viewer_card.closed.connect(self._return_to_file_undo, type=Qt.UniqueConnection)
+        # ★ 不能用 type=Qt.UniqueConnection：diff 卡是 ensure_diff_viewer 懒建的复用
+        #   单例，本方法每次进入都执行到 connect，重复连接时 UniqueConnection 会抛
+        #   TypeError（PyQt5）/静默拒连（PySide6），两种绑定下都不是正确写法。
+        #   标志挂在 card 实例上：万一 card 被重建，标志随之复位，不会留下「以为连过」的谎。
+        #   （同步 pyside6 ad524790）
+        card = self._diff_viewer_card
+        if card is not None and not getattr(card, "_file_undo_wired", False):
+            card.closed.connect(self._return_to_file_undo)
+            card._file_undo_wired = True
 
     def _return_to_file_undo(self):
         self._card_manager.hide_card("diff_viewer", GLOBAL_WINDOW_ID)

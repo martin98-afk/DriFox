@@ -31,6 +31,12 @@ _WER_REPORT_BASE = Path(r"C:\ProgramData\Microsoft\Windows\WER")
 # 句柄被 GC 关闭后崩溃时将无法写入
 _crash_file = None
 
+# 取证产物目录（qt 消息日志 / minidump），模块级供回调链使用
+_forensic_dir: Optional[Path] = None
+
+# SetUnhandledExceptionFilter 回调必须模块级持有，防 GC 后野指针
+_minidump_filter = None
+
 
 def install_crash_handler(logs_dir: Path) -> Optional[Path]:
     """启用 faulthandler，崩溃时调用栈 dump 到 logs_dir/crash/。
@@ -49,9 +55,123 @@ def install_crash_handler(logs_dir: Path) -> Optional[Path]:
         faulthandler.enable(file=_crash_file)
         atexit.register(_mark_clean_exit)
         _setup_wer_localdumps(crash_dir)
+        # 取证增强：0xC0000409（qFatal/fastfail）不触发 faulthandler，
+        # 0xC0000005 在 Windows 上走 SEH/WER 也不触发。两类崩溃此前只留下
+        # 空文件无法定位。补两条独立取证链：
+        #   1) qInstallMessageHandler → qt_messages.log（qFatal 文本，abort 前必经）
+        #   2) SetUnhandledExceptionFilter + MiniDumpWriteDump → dumps/*.dmp（C 栈）
+        _install_qt_message_logger(crash_dir)
+        _install_minidump_filter(crash_dir / "dumps")
         return dump_path
     except Exception:
         return None
+
+
+def _install_qt_message_logger(crash_dir: Path) -> None:
+    """安装 Qt 消息钩子：warning 及以上写入 crash_dir/qt_messages.log。
+
+    qFatal（触发 0xC0000409 fastfail，如跨线程 QPixmap / 跨线程事件）的
+    致命文本在 abort 前必经本钩子，落盘后即可按文本定位崩溃源头。
+    """
+    global _forensic_dir
+    try:
+        from PyQt5.QtCore import qInstallMessageHandler, QtMsgType
+
+        log_path = crash_dir / "qt_messages.log"
+        _forensic_dir = crash_dir
+
+        def _qt_handler(mode, context, message):
+            try:
+                label = {
+                    QtMsgType.QtDebugMsg: "DEBUG",
+                    QtMsgType.QtInfoMsg: "INFO",
+                    QtMsgType.QtWarningMsg: "WARNING",
+                    QtMsgType.QtCriticalMsg: "CRITICAL",
+                    QtMsgType.QtFatalMsg: "FATAL",
+                }.get(mode, "?")
+                line = f"{time.strftime('%H:%M:%S')} [{label}] {message}\n"
+                with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+                    f.write(line)
+                    if mode in (QtMsgType.QtFatalMsg, QtMsgType.QtCriticalMsg):
+                        f.flush()
+                        os.fsync(f.fileno())
+            except Exception:  # noqa: BLE001
+                pass
+
+        qInstallMessageHandler(_qt_handler)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _install_minidump_filter(dumps_dir: Path) -> None:
+    """注册 SEH 未处理异常过滤器：原生崩溃时用 MiniDumpWriteDump 写 .dmp。
+
+    与 WER LocalDumps（需 HKLM 管理员）不同，本函数在进程内注册，
+    无需任何权限。回调内只做 C 层调用（不跑复杂 Python），失败静默。
+    """
+    global _minidump_filter
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        dumps_dir.mkdir(parents=True, exist_ok=True)
+        dbghelp = ctypes.WinDLL("dbghelp")
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        kernel32.SetUnhandledExceptionFilter.restype = ctypes.c_void_p
+        kernel32.SetUnhandledExceptionFilter.argtypes = [ctypes.c_void_p]
+        dbghelp.MiniDumpWriteDump.restype = wintypes.BOOL
+        dbghelp.MiniDumpWriteDump.argtypes = [
+            wintypes.HANDLE,   # hProcess
+            wintypes.DWORD,    # ProcessId
+            wintypes.HANDLE,   # hFile
+            ctypes.c_int,      # DumpType
+            ctypes.c_void_p,   # ExceptionParam (LPEXCEPTION_POINTERS)
+            ctypes.c_void_p,   # UserStreamParam
+            ctypes.c_void_p,   # CallbackParam
+        ]
+
+        GENERIC_WRITE = 0x40000000
+        CREATE_ALWAYS = 2
+        INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+        EXCEPTION_EXECUTE_HANDLER = 1
+
+        @ctypes.WINFUNCTYPE(wintypes.LONG, ctypes.c_void_p)
+        def _filter(exception_pointers):
+            try:
+                path = dumps_dir / f"mini_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}.dmp"
+                h_file = kernel32.CreateFileW(
+                    str(path), GENERIC_WRITE, 0, None, CREATE_ALWAYS, 0, None
+                )
+                if (
+                    h_file is not None
+                    and h_file != INVALID_HANDLE_VALUE
+                    and h_file != 0xFFFFFFFFFFFFFFFF
+                ):
+                    try:
+                        dbghelp.MiniDumpWriteDump(
+                            kernel32.GetCurrentProcess(),
+                            kernel32.GetCurrentProcessId(),
+                            h_file,
+                            0,  # MiniDumpNormal
+                            exception_pointers,
+                            None,
+                            None,
+                        )
+                    finally:
+                        kernel32.CloseHandle(h_file)
+            except Exception:  # noqa: BLE001
+                pass
+            return EXCEPTION_EXECUTE_HANDLER
+
+        _minidump_filter = _filter  # 防 GC
+        kernel32.SetUnhandledExceptionFilter(_minidump_filter)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _setup_wer_localdumps(crash_dir: Path) -> Optional[Path]:

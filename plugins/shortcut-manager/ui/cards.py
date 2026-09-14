@@ -117,6 +117,33 @@ def _find_original_cmd_file(cmd_name: str) -> Optional[Path]:
     return None
 
 
+def _is_ui_plugin_command(cmd_name: str) -> bool:
+    """判断是否 UI 插件命令（快捷键走 shortcuts.json 持久化，不走 md 兜底）
+
+    UI 命令名常带冒号（如 quick-screenshot:quick-screenshot），写 md 兜底时
+    文件名安全化（: → __）会导致重启后注册出孤儿命令，快捷键落不到 UI 命令上。
+    """
+    from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+    return cmd_name in UIPluginRegistry.get_instance().get_ui_command_names()
+
+
+def _cleanup_legacy_shortcut_md(cmd_name: str) -> None:
+    """清理旧版为 UI 命令写的兜底 md（历史遗留，防孤儿命令）"""
+    cmd_dir = _get_user_custom_cmd_dir()
+    if not cmd_dir.exists():
+        return
+    safe_name = _safe_filename(cmd_name)
+    for name in {safe_name, cmd_name}:
+        cmd_file = cmd_dir / f"{name}.md"
+        if cmd_file.exists():
+            try:
+                cmd_file.unlink()
+                logger.info(f"[ShortcutManager] 已清理旧兜底文件: {cmd_file.name}")
+            except OSError as e:
+                logger.warning(f"[ShortcutManager] 清理旧兜底文件失败: {cmd_file.name}: {e}")
+
+
 def _make_minimal_cmd_file(name: str, description: str, shortcut: str) -> str:
     """生成最小化命令文件（仅用作兜底，当找不到原始文件时）"""
     lines = ["---"]
@@ -786,10 +813,18 @@ class ShortcutManagerCard(QWidget):
     def _get_customized_names(self) -> set:
         """获取已自定义的命令名集合（将安全文件名反向映射为命令名）"""
         cmd_dir = _get_user_custom_cmd_dir()
-        if not cmd_dir.exists():
-            return set()
-        # 安全文件名中的 __ 映射回命令名中的 :
-        return {p.stem.replace("__", ":") for p in cmd_dir.glob("*.md")}
+        result: set = set()
+        if cmd_dir.exists():
+            # 安全文件名中的 __ 映射回命令名中的 :
+            result |= {p.stem.replace("__", ":") for p in cmd_dir.glob("*.md")}
+        # UI 插件命令快捷键存 shortcuts.json（键 = 命令名原样），也计入
+        try:
+            from app.plugins.registries.ui_plugin_registry import load_ui_command_shortcuts
+
+            result |= set(load_ui_command_shortcuts().keys())
+        except Exception:
+            pass
+        return result
 
     # ── 编辑快捷键 ──
 
@@ -912,6 +947,16 @@ class ShortcutManagerCard(QWidget):
             # 确保 user-custom 插件被 PluginManager 发现（创建清单如不存在）
             _ensure_user_custom_plugin()
 
+            # UI 插件命令：快捷键存 shortcuts.json（名字原样，不经 md 文件名安全化），
+            # 并清理历史兜底 md，防止重启后注册出孤儿命令
+            if _is_ui_plugin_command(cmd_name):
+                from app.plugins.registries.ui_plugin_registry import save_ui_command_shortcut
+
+                save_ui_command_shortcut(cmd_name, shortcut)
+                _cleanup_legacy_shortcut_md(cmd_name)
+                logger.info(f"[ShortcutManager] 已保存(UI): /{cmd_name} → {shortcut}")
+                return True
+
             # 1. 找到原始命令文件
             original = _find_original_cmd_file(cmd_name)
             if original:
@@ -935,6 +980,19 @@ class ShortcutManagerCard(QWidget):
 
     def _on_restore(self, cmd_name: str):
         try:
+            # UI 插件命令：从 shortcuts.json 删除（并清理历史兜底 md）
+            if _is_ui_plugin_command(cmd_name):
+                from app.plugins.registries.ui_plugin_registry import save_ui_command_shortcut
+
+                save_ui_command_shortcut(cmd_name, "")
+                _cleanup_legacy_shortcut_md(cmd_name)
+                logger.info(f"[ShortcutManager] 已恢复: /{cmd_name}")
+                self._count_lb.setText(f"↺ 已恢复 /{cmd_name}")
+                from app.core.builtin_commands import reload_all_commands
+
+                reload_all_commands()
+                QTimer.singleShot(300, self._refresh)
+                return
             cmd_dir = _get_user_custom_cmd_dir()
             safe_name = _safe_filename(cmd_name)
             # 尝试安全文件名和原始名（不同时才分别尝试，兼容旧文件）

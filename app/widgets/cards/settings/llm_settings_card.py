@@ -56,6 +56,7 @@ from app.widgets.cards.settings.list_setting_card import SkillListSettingCard
 from app.widgets.cards.settings.mcp_setting_card import MCPListSettingCard
 from app.widgets.cards.settings.plugin_components_card import PluginComponentsCard
 from app.widgets.cards.settings.provider_setting_card import ProviderListSettingCard
+from app.widgets.cards.settings.secret_mode_card import SecretModeSettingCard
 from app.widgets.cards.settings.render_restart_card import RenderRestartCard
 from app.widgets.cards.settings.render_advanced_card import RenderAdvancedCard
 from app.widgets.cards.settings.render_backend_card import RenderBackendCard
@@ -388,12 +389,15 @@ class LLMSettingsCard(SystemCardFrame):
 
     _autostart_toggling = False  # 类级防重入标志
     _last_change_type: str | None = None  # "theme" | "font_family" | "font_size" | None(=全部)
+    # 插件分区指纹的类级默认：`__new__` 造的桩（测试 fixture）不跑 __init__，
+    # QObject 未初始化时读实例属性会抛 RuntimeError 而非 AttributeError → 必须给默认值
+    _plugin_cards_sig: tuple | None = None
     closed = pyqtSignal()
     configChanged = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.set_icon("⚙️")
+        self.set_icon_svg("配置管理")
         self.set_title_text("系统设置")
         self.setMinimumHeight(250)  # 自适应窗口高度，showEvent 会自动设置 maximumHeight
 
@@ -402,6 +406,13 @@ class LLMSettingsCard(SystemCardFrame):
         # 左侧导航 + 右侧分页：分区归属见 _setup_content
         self._current_tab = "provider"
         self._nav_frame = None  # _build_side_nav 中创建
+        # 插件设置分区指纹：清单未变时跳过「销毁 + 重建」整片插件卡
+        # （历史上每次打开设置面板都无条件重建，见 rebuild_plugin_cards）
+        self._plugin_cards_sig = None
+        # 插件设置分区是否已真正实例化（未实例化时只同步导航显隐，不构造 widget）
+        self._plugin_cards_built = False
+        # 已"就绪"的分页（首次进入时付一次性准备成本，见 _ensure_page_ready）
+        self._page_ready: set[str] = set()
 
         self._setup_content()
 
@@ -441,6 +452,10 @@ class LLMSettingsCard(SystemCardFrame):
         # Gitee 账号绑定（保持原默认页顶部位置）
         self.giteeCard = GiteeCard(self)
         provider_layout.addWidget(self.giteeCard)
+
+        # API Key 加密方式（系统钥匙串 / 密码加密 / 不加密）
+        self.secretModeCard = SecretModeSettingCard(self)
+        provider_layout.addWidget(self.secretModeCard)
 
         self.llmProviderCard = ProviderListSettingCard(
             icon=get_icon("大模型"),
@@ -673,6 +688,7 @@ class LLMSettingsCard(SystemCardFrame):
             "消息卡片渲染进程数硬上限",
             parent=self,
         )
+        self.renderProcessLimitCard.slider.setFixedWidth(160)  # qfluentwidgets 默认 minWidth=268，压缩滑条长度
         render_layout.addWidget(self.renderProcessLimitCard)
 
         # 单 renderer JS 堆上限
@@ -683,6 +699,7 @@ class LLMSettingsCard(SystemCardFrame):
             "限制单张消息卡片的内存",
             parent=self,
         )
+        self.renderJsHeapCard.slider.setFixedWidth(160)
         render_layout.addWidget(self.renderJsHeapCard)
 
         # Chromium 低内存模式
@@ -839,11 +856,9 @@ class LLMSettingsCard(SystemCardFrame):
         self._page_layouts["plugins"].addWidget(self._plugin_cards_widget)
         self._page_layouts["plugins"].addStretch(1)
         self._plugin_cards_widget.setVisible(False)
-        # 左侧导航：初始隐藏（rebuild_plugin_cards 按注册卡片显隐）
-        try:
-            self._nav_buttons["plugins"].setVisible(False)
-        except Exception:
-            pass
+        # 左侧导航：按「有无注册卡片」显隐（只查清单不构造卡片；实际实例化
+        # 延迟到首次进入该页，见 _ensure_page_ready）
+        self._sync_plugin_nav_visibility()
 
         # 连接信号
         # 注意：只有真正影响外观的变更才走 _on_config_changed（触发全量刷新）
@@ -866,15 +881,31 @@ class LLMSettingsCard(SystemCardFrame):
         ]
         self._apply_list_accordion()
 
-    def rebuild_plugin_cards(self):
+    def rebuild_plugin_cards(self, force: bool = False):
         """重建插件设置分区（Phase D，幂等）
 
         按 UIPluginRegistry.get_settings_cards() 实例化插件卡片 widget_class；
         无注册卡片时整个分区隐藏（行为零变化）。设置弹窗每次打开时调用，
         保证插件增删/热重载后分区内容最新。
+
+        ★ 性能（2026-09-13）：插件清单未变时跳过「清空 + 重建整片卡片」。
+        原来每次打开设置面板都走 `deleteLater()` + 全量 new，即使清单一个都没变
+        —— 每张插件卡（含 ExpandSettingCard 内部 view/滚动区）都要重新构造并
+        应用字号，是打开设置时纯浪费的一笔主线程开销。签名只取
+        (card_id, widget_class) 清单指纹：内容型变化由各卡自身的 refresh 负责，
+        清单增删（插件装卸/热重载）才需要真正重建。
         """
-        # 工具/智能体开关卡同步重建（插件增删/热重载后组件列表可能变化）
-        for card_name in ("pluginToolCard", "pluginAgentCard"):
+        # 首次构建延迟到「插件设置页首次进入」：实例化 5 张插件卡（含 ExpandSettingCard
+        # 内部 view/滚动区）是笔一次性重活，不该在打开设置的那一帧同步付。
+        # 未访问该页时只同步导航显隐（查清单，几乎零成本）。
+        if not force and not self._plugin_cards_built:
+            self._sync_plugin_nav_visibility()
+            return
+        # 工具/智能体开关卡：仅在其页已访问过后才顺带刷新（首次构建由
+        # _ensure_page_ready 在该页首次进入时付，非 force 路径命中脏检查时近乎零成本）
+        for tab_id, card_name in (("tools", "pluginToolCard"), ("agents", "pluginAgentCard")):
+            if tab_id not in self._page_ready:
+                continue
             try:
                 getattr(self, card_name).refresh_components()
             except Exception as e:
@@ -885,18 +916,28 @@ class LLMSettingsCard(SystemCardFrame):
             cards = UIPluginRegistry.get_instance().get_settings_cards()
         except Exception:
             cards = []
+
+        sig = tuple((getattr(info, "card_id", ""), getattr(info, "widget_class", None)) for info in cards)
+        # 分区显隐无论是否重建都幂等同步一次：不让「跳过重建」路径依赖上一轮留下的
+        # 界面状态（插件全被停用 / 最后一张卡被卸载后仍显示空分区就是这种脏状态）。
+        has_cards = bool(cards)
+        self._plugin_cards_widget.setVisible(has_cards)
+        try:
+            self._nav_buttons["plugins"].setVisible(has_cards)
+        except Exception:
+            pass
+        if not force and sig == self._plugin_cards_sig:
+            return
+        self._plugin_cards_sig = sig
+        self._plugin_cards_built = True
+
         # 清空旧卡片
         while self._plugin_cards_layout.count():
             item = self._plugin_cards_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
-        if not cards:
-            self._plugin_cards_widget.setVisible(False)
-            try:
-                self._nav_buttons["plugins"].setVisible(False)
-            except Exception:
-                pass
+        if not has_cards:
             return
         for info in cards:
             try:
@@ -913,11 +954,6 @@ class LLMSettingsCard(SystemCardFrame):
                     logger.warning(f"[LLMSettingsCard] 插件卡片字号应用失败 {info.card_id}: {e}")
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] 插件设置卡片 {info.card_id} 构建失败：{e}")
-        self._plugin_cards_widget.setVisible(True)
-        try:
-            self._nav_buttons["plugins"].setVisible(True)
-        except Exception:
-            pass
 
     def _apply_list_accordion(self):
         """为列表形式配置卡片应用手风琴效果
@@ -996,7 +1032,9 @@ class LLMSettingsCard(SystemCardFrame):
         if not self.isVisible():
             return
         try:
-            self.rebuild_plugin_cards()
+            # force=True：热重载后插件设置卡必须重建，避免卡片实例仍持有旧类；
+            # 且插件可能只改了卡内部实现（清单指纹不变），跳过就刷新不到。
+            self.rebuild_plugin_cards(force=True)
             # force=True：热重载可能只改了组件内部的细项（工具/智能体增删），
             # 插件清单未变 → 签名相同 → 非 force 的脏检查会跳过，必须强制重建
             for card_name in ("pluginToolCard", "pluginAgentCard"):
@@ -1016,7 +1054,6 @@ class LLMSettingsCard(SystemCardFrame):
         try:
             scroll_area = self._ancestor_scroll_area(card) or self.scroll_area
             if scroll_area is None:
-                logger.warning("[FocusScroll] scroll_area 为空，提前 return")
                 return
             content_widget = scroll_area.widget()
             if content_widget is None:
@@ -1024,20 +1061,13 @@ class LLMSettingsCard(SystemCardFrame):
             # ExpandSettingCard 自带的 header widget（含图标/标题/展开按钮）
             header_widget = getattr(card, "card", None)
             if header_widget is None:
-                logger.warning(f"[FocusScroll] {card.__class__.__name__} 没有 .card 属性")
                 return
             doc_y = header_widget.mapTo(content_widget, QPoint(0, 0)).y()
             # header 顶部对齐视窗顶部，留 5px 边距
             target = max(0, doc_y - 5)
-            scroll_bar = scroll_area.verticalScrollBar()
-            old_val = scroll_bar.value()
-            scroll_bar.setValue(target)
-            logger.info(
-                f"[FocusScroll] {card.__class__.__name__} -> header doc_y={doc_y} target={target} "
-                f"old={old_val} new={scroll_bar.value()}"
-            )
-        except Exception as e:
-            logger.warning(f"[FocusScroll] 异常: {e}")
+            scroll_area.verticalScrollBar().setValue(target)
+        except Exception:
+            pass
 
     # ── 左侧导航 + 分页 ──────────────────────────────
 
@@ -1133,8 +1163,72 @@ class LLMSettingsCard(SystemCardFrame):
         self._expand_page_cards(tab_id)
         self.tabChanged.emit(tab_id)
 
+    def _sync_plugin_nav_visibility(self) -> bool:
+        """同步「插件设置」导航项与分区显隐：只查注册清单，不构造卡片（成本可忽略）"""
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            has_cards = bool(UIPluginRegistry.get_instance().get_settings_cards())
+        except Exception:
+            has_cards = False
+        self._plugin_cards_widget.setVisible(has_cards)
+        try:
+            self._nav_buttons["plugins"].setVisible(has_cards)
+        except Exception:
+            pass
+        return has_cards
+
+    def _ensure_page_ready(self, tab_id: str):
+        """分页首次进入时的一次性准备：把「只有这页才需要的重活」从打开设置挪走
+
+        首开设置卡的成本里，非首屏页的一次性准备占了七成以上（Hooks 页的
+        HookManager 注入 + 全量重渲染、工具/智能体页的组件清单首次构建、插件
+        设置页的插件卡实例化）。用户可能整场会话都不点开这些页，却要在点开
+        设置的那一刻同步付完 —— 这就是"点设置要卡 1~2 秒"的主体。
+
+        改为按页延迟 + 只做一次：进入该页时才付，付完即止。
+        """
+        if tab_id in self._page_ready:
+            return
+        try:
+            if tab_id == "hooks":
+                # 构造期 hook_manager 为 None（parent 无 backend），原实现在
+                # controller 里构造完立刻注入并全量重渲染一次（实测 ~0.7s）
+                if getattr(self.hookListCard, "_hook_manager", None) is None:
+                    from app.core.hook_manager import HookManager
+
+                    self.hookListCard._hook_manager = HookManager()
+                self.hookListCard._refresh(reload=True)
+            elif tab_id in ("tools", "agents"):
+                card = getattr(self, "pluginToolCard" if tab_id == "tools" else "pluginAgentCard", None)
+                if card is not None:
+                    card.refresh_components()
+            elif tab_id == "plugins":
+                self.rebuild_plugin_cards(force=True)
+            elif tab_id == "skills":
+                self._prefetch_skills()
+        except Exception as e:
+            # 失败不标记 ready：否则该页内容会永久为空且不再重试
+            logger.warning(f"[LLMSettingsCard] {tab_id} 页首次准备失败: {e}")
+            return
+        self._page_ready.add(tab_id)
+
+    def _prefetch_pages(self):
+        """空闲帧预热：把非首屏页的内容在卡片显示后补齐
+
+        _ensure_page_ready 只做「首次进入该页时」的一次性准备，但那会让「填充
+        内容」与「展开卡片」落在同一 tick —— 原实现里两者相隔很久（构造时填充、
+        用户点击导航时才展开），ExpandSettingCard 的展开动画依赖其间的布局
+        轮次。这里在设置卡显示后的空闲帧就把各页内容补齐，用户点导航时内容
+        早已就位，展开时序回到与原实现一致；_expand_page_cards 里的调用退化为
+        「用户点得比预热还快」时的兜底。
+        """
+        for tab_id in ("hooks", "tools", "agents", "plugins", "skills"):
+            self._ensure_page_ready(tab_id)
+
     def _expand_page_cards(self, tab_id: str):
         """进入分页时展开页内可展开卡片：进页即见列表，无需再点一次标题栏"""
+        self._ensure_page_ready(tab_id)
         layout = self._page_layouts.get(tab_id)
         if layout is None:
             return
@@ -1146,6 +1240,17 @@ class LLMSettingsCard(SystemCardFrame):
             try:
                 # qfluentwidgets ExpandSettingCard 的展开状态属性是 isExpand
                 if not getattr(card, "isExpand", False):
+                    # ★ 同一 tick 内「刚填完内容就展开」必须先让 QScrollArea 定尺：
+                    # ExpandSettingCard.setExpand(True) 内部拿
+                    # `verticalScrollBar().setValue(h)` 驱动高度动画，而
+                    # scrollWidget 尚未按新内容重算高度时 scrollbar.maximum 还是
+                    # 旧值 → setValue 被钳制 → valueChanged 不触发 →
+                    # setFixedHeight 永远不落地，表现为「列表已展开但内容看不见」。
+                    # 内容填充挪到首次进页（_ensure_page_ready）后，刷新与展开
+                    # 落在同一 tick，这个前置条件不再自动成立，故显式定尺。
+                    inner = card.widget() if hasattr(card, "widget") else None
+                    if inner is not None and inner.sizeHint().height() > inner.height():
+                        inner.adjustSize()
                     card.toggleExpand()
             except Exception as e:
                 logger.warning(f"[LLMSettingsCard] {tab_id} 页卡片展开失败: {e}")
@@ -1155,7 +1260,11 @@ class LLMSettingsCard(SystemCardFrame):
 
     def _update_nav_styles(self):
         for tab_id, btn in self._nav_buttons.items():
-            btn.setStyleSheet(self._nav_btn_style(tab_id == self._current_tab))
+            css = self._nav_btn_style(tab_id == self._current_tab)
+            # setStyleSheet 对同串也会全量 repolish（Qt5 不短路），13 个导航按钮
+            # 每次外观刷新都重写一遍，短路掉
+            if css != btn.styleSheet():
+                btn.setStyleSheet(css)
 
     def _nav_frame_style(self) -> str:
         return f"""
@@ -1632,12 +1741,38 @@ class LLMSettingsCard(SystemCardFrame):
         # 预热技能发现：展开技能卡时要同步扫盘 + parse 每个 SKILL.md（~90ms），
         # 挪到打开设置后的空闲帧做，用户点开卡片时就不必再等
         QTimer.singleShot(300, self._prefetch_skills)
-        # 每次打开设置时刷新工具/智能体列表（插件热重载/启停后保持最新）
-        for card_name in ("pluginToolCard", "pluginAgentCard"):
+        # 非首屏页内容在空闲帧补齐（见 _prefetch_pages）
+        self._prefetch_pages()
+        # 打开设置时刷新工具/智能体列表（插件热重载/启停后保持最新）。
+        # ★ 仅限「已访问过的页」：未访问页的第一次 refresh_components 会走全量
+        # 构建（数百毫秒），那笔由 _ensure_page_ready 在该页首次进入时付，
+        # 不在这里替用户垫付。
+        for tab_id, card_name in (("tools", "pluginToolCard"), ("agents", "pluginAgentCard")):
+            if tab_id not in self._page_ready:
+                continue
             card = getattr(self, card_name, None)
             if card is not None:
                 card.refresh_components()
         super().showEvent(event)
+
+    def _prefetch_pages(self):
+        """空闲帧错峰预热：把非首屏页的内容在卡片显示后逐页补齐
+
+        为什么不是「一次性补齐」：五页合计数百毫秒（冷缓存下工具/智能体页单页
+        可达 360ms），挤在一帧里就是打开设置后的一次明显顿卡。按页错峰后单帧
+        只付一页的钱。
+
+        为什么不是「只等在首次进入该页时」：那样「填充内容」与「展开卡片」会
+        落在同一 tick，而原实现里两者相隔很久（构造时填充、用户点导航时才展开），
+        ExpandSettingCard 的展开动画依赖其间的布局轮次。预热后用户点导航时内容
+        早已就位，时序回到原实现；_expand_page_cards 里的调用退化为「用户点得
+        比预热还快」时的兜底。
+        """
+        tabs = ("hooks", "plugins", "tools", "agents", "skills")
+        if all(t in self._page_ready for t in tabs):
+            return
+        for i, tab_id in enumerate(tabs):
+            QTimer.singleShot(250 + i * 200, lambda t=tab_id: self._ensure_page_ready(t))
 
     def set_opacity(self, opacity: float):
         """设置透明度（保留接口，暂不实现动态透明度）"""

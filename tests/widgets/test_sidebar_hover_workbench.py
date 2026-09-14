@@ -8,8 +8,9 @@
   标题栏 hover 信号接到控制器；
 - 全局坐标跟随：place() 用 mapToGlobal 换算屏幕坐标；主窗口移动后
   _sync_wb_overlay_geometry 重定位浮层；
-- 收起态 hover 进入预览：_workbench_frame 被 reparent 到浮层、控制器进入
-  previewing；但**预览≠打开**——is_workbench_visible() 保持 False、不写
+- 收起态 hover 进入预览：按钮 hover 先挂 show 延时（防划过误触），到期才
+  _workbench_frame 被 reparent 到浮层、控制器进入 previewing；但**预览≠打开**
+  ——is_workbench_visible() 保持 False、不写
   per-tab 显隐记忆（预览是浮层盖在已稳定的对话区上，不动 splitter 布局）；
 - 浮层滑入/滑出是异步动画（QVariantAnimation），故 leave/click 后要等动画
   完成（_SLIDE_MS）再看 reparent 回挂结果；
@@ -109,6 +110,10 @@ class TestHoverEntersPreview:
         assert frame.parent() is tm_window._splitter
 
         tm_window.titleBar.workbench_hover_changed.emit(True)
+        # 新契约：hover 进入先走 show 延时，到期才真正进入预览
+        assert tm_window._wb_in_preview is False
+        assert tm_window._wb_preview_ctrl._show_timer.isActive() is True
+        tm_window._wb_preview_ctrl._show_timer.timeout.emit()
 
         # frame 同步挂入 overlay（set_content），随后 slide_in 异步展开
         assert frame.parent() is tm_window._wb_overlay
@@ -122,6 +127,7 @@ class TestPreviewDoesNotPolluteMemory:
     def test_memory_untouched_during_preview(self, tm_window):
         cur = _fake_cur(tm_window)
         tm_window.titleBar.workbench_hover_changed.emit(True)
+        tm_window._wb_preview_ctrl._show_timer.timeout.emit()  # 进入预览
         # 预览不调 set_workbench_visible，记忆保持 False
         assert cur._workbench_visible_memory is False
         assert tm_window.is_workbench_visible() is False
@@ -135,6 +141,7 @@ class TestEventFilterOverlayHover:
         from PyQt5.QtGui import QHoverEvent
 
         tm_window.titleBar.workbench_hover_changed.emit(True)
+        tm_window._wb_preview_ctrl._show_timer.timeout.emit()  # 进入预览
         assert tm_window._wb_in_preview is True
 
         p = QPoint(0, 0)
@@ -151,6 +158,7 @@ class TestHoverTimeoutLeaveCollapses:
         cur = _fake_cur(tm_window)
         frame = tm_window._workbench_frame
         tm_window.titleBar.workbench_hover_changed.emit(True)
+        tm_window._wb_preview_ctrl._show_timer.timeout.emit()  # 进入预览
         assert frame.parent() is tm_window._wb_overlay
         tm_window._wb_overlay._slide.stop()  # 结束 slide_in，进入稳定预览
 
@@ -173,6 +181,7 @@ class TestClickPromotesToEmbeddedOpen:
         cur = _fake_cur(tm_window)
         frame = tm_window._workbench_frame
         tm_window.titleBar.workbench_hover_changed.emit(True)
+        tm_window._wb_preview_ctrl._show_timer.timeout.emit()  # 进入预览
         assert tm_window._wb_in_preview is True
         tm_window._wb_overlay._slide.stop()  # 结束 slide_in
 

@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     pass
 
 from qfluentwidgets import ScrollArea
-from app.utils.design_tokens import Colors, font_size_css, get_unified_scrollbar_style
+from app.utils.design_tokens import CardStyles, Colors, font_size_css, get_unified_scrollbar_style
 from app.utils.utils import get_font_family_css
 from app.widgets.elided_label import _ElidedLabel
 
@@ -725,18 +725,12 @@ class FileMentionCard(QWidget):
 
     def _setup_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # 自定义 QWidget 子类不设 WA_StyledBackground 时，QSS 写的背景/边框/圆角
+        # 一行都不会绘制（见 CardStyles.floating 说明）。
+        self.setAttribute(Qt.WA_StyledBackground, True)
 
         Colors.refresh()
-        self.setStyleSheet(f"""
-            FileMentionCard {{
-                background-color: {Colors.REALTIME_BG};
-                border: 1px solid {Colors.REALTIME_BORDER};
-                border-bottom-left-radius: 0px;
-                border-bottom-right-radius: 0px;
-                border-top-left-radius: 8px;
-                border-top-right-radius: 8px;
-            }}
-        """)
+        self.setStyleSheet(CardStyles.floating("FileMentionCard"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)

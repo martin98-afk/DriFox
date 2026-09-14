@@ -4,7 +4,8 @@
 背景：OpenCode Zen/Go 网关自 2026-09-06 起要求每个 LLM 请求携带
 x-opencode-session（稳定会话 ID），缺失报 400 MissingSessionID。
 头名由 providers 插件 opencode.py 按 family 声明（capabilities["session_header"]），
-chat_worker._gateway_session_headers 通用注入，值=当前会话 ID。
+chat_worker._provider_extra_headers 通用注入，值=当前会话 ID。
+capabilities["extra_headers"] 为静态自定义头（伪装 UA 等），声明即注入，不依赖会话。
 """
 
 import pytest
@@ -54,7 +55,7 @@ from app.core.workers.chat_worker import OpenAIChatWorker as ChatWorker  # noqa:
 class _StubWorker:
     """只挂被测方法的轻量 stub（绕开 QThread 实例化）"""
 
-    _gateway_session_headers = ChatWorker._gateway_session_headers
+    _provider_extra_headers = ChatWorker._provider_extra_headers
 
     def __init__(self, llm_config, session_id):
         self.llm_config = llm_config
@@ -79,7 +80,7 @@ def test_injects_session_header_for_declared_provider(patched_profile):
     stub = patched_profile({"session_header": "x-opencode-session"})(
         {"API_URL": "https://opencode.ai/zen/go/v1"}, "sess-abc"
     )
-    assert stub._gateway_session_headers() == {"x-opencode-session": "sess-abc"}
+    assert stub._provider_extra_headers() == {"x-opencode-session": "sess-abc"}
 
 
 def test_no_session_id_no_header(patched_profile):
@@ -87,13 +88,38 @@ def test_no_session_id_no_header(patched_profile):
     stub = patched_profile({"session_header": "x-opencode-session"})(
         {"API_URL": "https://opencode.ai/zen/go/v1"}, ""
     )
-    assert stub._gateway_session_headers() is None
+    assert stub._provider_extra_headers() is None
+
+
+def test_injects_static_extra_headers(patched_profile):
+    """extra_headers 静态头 → 原样注入，不依赖会话 ID（伪装 UA 场景）"""
+    stub = patched_profile(
+        {"extra_headers": {"User-Agent": "CodeBuddyIDE/1.106.1", "X-Product": "ide"}}
+    )({"API_URL": "https://copilot.tencent.com/v2"}, "")
+    assert stub._provider_extra_headers() == {
+        "User-Agent": "CodeBuddyIDE/1.106.1",
+        "X-Product": "ide",
+    }
+
+
+def test_extra_headers_merge_with_session_header(patched_profile):
+    """静态头与会话头并存 → 合并注入"""
+    stub = patched_profile(
+        {
+            "extra_headers": {"User-Agent": "CodeBuddyIDE/1.106.1"},
+            "session_header": "x-opencode-session",
+        }
+    )({"API_URL": "https://opencode.ai/zen/go/v1"}, "sess-abc")
+    assert stub._provider_extra_headers() == {
+        "User-Agent": "CodeBuddyIDE/1.106.1",
+        "x-opencode-session": "sess-abc",
+    }
 
 
 def test_undeclared_provider_no_header(patched_profile):
     """未声明 session_header 的 provider → 不注入"""
     stub = patched_profile({})({"API_URL": "https://api.deepseek.com/v1"}, "sess-abc")
-    assert stub._gateway_session_headers() is None
+    assert stub._provider_extra_headers() is None
 
 
 def test_profile_exception_safe(monkeypatch):
@@ -104,4 +130,4 @@ def test_profile_exception_safe(monkeypatch):
 
     monkeypatch.setattr("app.core.workers.chat_worker.get_provider_profile", _boom)
     stub = _StubWorker({"API_URL": "https://opencode.ai/zen/go/v1"}, "sess-abc")
-    assert stub._gateway_session_headers() is None
+    assert stub._provider_extra_headers() is None

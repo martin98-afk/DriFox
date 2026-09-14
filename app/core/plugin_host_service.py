@@ -360,6 +360,13 @@ class PluginHostService(QObject):
     # _watcher_pending_reload: 抑制窗口内被跳过的 user-custom 变更标志，
     # 由 config_sync 下载完成后兜底合并触发一次 reload_plugin_subsystems。
     _suppress_watcher_until = 0.0
+    # 启动基线期截止时间戳（0=已结束）：watcher 启动后的一段窗口内，
+    # 插件自身在装载期写的 runtime 文件（日志/状态/控制端点 token 等）
+    # 会被当成外部变更触发即时重载（实测 browser 启动后 8s 被自己触发的
+    # mcp 重载拖住主线程 ~450ms）。基线期内变更进 pending，窗口结束后
+    # 走既有的合并兑底重载一次消费，不丢变更。由 main_widget 在 UI 插件
+    # 全部装载完成后调 finish_watcher_baseline() 提前收口（留 2s 缓冲）。
+    _watcher_baseline_until = 0.0
     _watcher_pending_reload = False
     # 引用计数式抑制（suppress_plugin_watcher/resume_plugin_watcher 维护，
     # 并发安装/卸载互不清除的语义基础——见模块头注释）
@@ -468,6 +475,10 @@ class PluginHostService(QObject):
         if not watch_paths:
             logger.warning("[PluginHost] 无插件目录可监听，跳过热更新")
             return
+
+        # 启动基线期（兜底 15s，正常由 finish_watcher_baseline 提前收口）：
+        # UI 插件装载期内插件自身写文件不再触发即时重载（风暴治理）。
+        self._watcher_baseline_until = time.time() + 15.0
 
         logger.info(f"[PluginHost] 启动插件文件变更监听: {watch_paths}")
 
@@ -710,11 +721,9 @@ class PluginHostService(QObject):
                             # 特殊 case：插件根目录被删除（整个插件被移出），此时 path 精确等于
                             # plugin_path，被 _identify_all_components_from_changes 跳过（continue），
                             # 导致 all_components 为空。需要在此处兜底检测并触发全组件卸载。
-                            _root_deleted = any(
-                                ct == 3 and cp.lower() == path
-                                for path, name in current_prefixes.items()
-                                if name == plugin_name
-                                for ct, cp in relevant_changes
+                            # 磁盘二次核实：watchfiles 误报删除时忽略，避免卸载→重载风暴卡死主线程。
+                            _root_deleted = self._confirm_plugin_root_deleted(
+                                plugin_name, current_prefixes, relevant_changes
                             )
                             if _root_deleted:
                                 logger.info(f"[PluginHost] 插件 [{plugin_name}] 目录已被删除，触发全组件卸载...")
@@ -847,8 +856,22 @@ class PluginHostService(QObject):
         t.start()
 
     def _watcher_suppressed(self) -> bool:
-        """watcher 当前是否处于抑制窗口（引用计数 + 截止时间戳任一命中）"""
-        return self._watcher_suppress_refs > 0 or time.time() < self._suppress_watcher_until
+        """watcher 当前是否处于抑制窗口（引用计数 + 截止时间戳 + 启动基线期任一命中）"""
+        return (
+            self._watcher_suppress_refs > 0
+            or time.time() < self._suppress_watcher_until
+            or time.time() < self._watcher_baseline_until
+        )
+
+    def finish_watcher_baseline(self) -> None:
+        """启动装载完成，提前收口 watcher 基线期（留 2s 缓冲后恢复即时热更新）。
+
+        由 main_widget 在 UI 插件全部装载完成后调用；窗口内累积的变更
+        由 _watch_loop 既有逻辑合并为一次兑底重载，不丢变更。
+        """
+        if self._watcher_baseline_until > 0.0:
+            self._watcher_baseline_until = min(self._watcher_baseline_until, time.time() + 2.0)
+            logger.debug("[PluginHost] watcher 启动基线期收口（2s 缓冲后恢复即时热更新）")
 
     def _stop_plugin_watcher(self):
         """backend 关闭时递减 watcher 引用计数；归零时停止 watchfiles 线程。
@@ -876,6 +899,35 @@ class PluginHostService(QObject):
                 pass
         self._plugin_watcher_thread = None
         self._plugin_watcher_started = False
+
+    @staticmethod
+    def _confirm_plugin_root_deleted(plugin_name: str, plugin_prefixes: Dict[str, str], relevant_changes: list) -> bool:
+        """核实「插件根目录被删除」事件是否属实（磁盘二次确认）。
+
+        watchfiles 在 Windows 上可能对仍存在的目录误报 Deleted（杀毒扫描/索引服务/
+        资源管理器刷新等批量触碰目录句柄，表现为多个插件根在数百 ms 内连续"被删除"）。
+        若不核实直接全组件卸载，目录实际仍在 → 随后变更事件又触发重载 → 主线程同步
+        重建全部 UI 组件（设置卡/欢迎卡/输入按钮），UI 插件越多阻塞越久，形成用户可
+        感知的整软件卡死风暴。
+
+        Returns:
+            True: 删除事件属实（磁盘上目录确实不存在），调用方可安全触发全组件卸载；
+            False: 无删除事件，或磁盘上目录仍存在（误报，忽略）。
+        """
+        for path, name in plugin_prefixes.items():
+            if name != plugin_name:
+                continue
+            if not any(ct == 3 and cp.lower() == path for ct, cp in relevant_changes):
+                continue
+            # prefix 为小写路径；Windows 文件系统大小写不敏感，isdir 可直接核实
+            if os.path.isdir(path):
+                logger.info(
+                    f"[PluginHost] 插件 [{plugin_name}] 收到根目录删除事件，"
+                    f"但磁盘上目录仍存在（watchfiles 误报），忽略全组件卸载"
+                )
+                return False
+            return True
+        return False
 
     def _build_plugin_path_index(self) -> Dict[str, str]:
         """构建插件路径前缀 → 插件名的映射表
@@ -1923,7 +1975,8 @@ class PluginHostService(QObject):
                 return result
 
             # 1. 重新扫描插件目录，获取变更详情
-            diff = pm.rescan()
+            # force_full（设置面板显式「重载插件」）时绕过目录签名短路，强制全量重扫
+            diff = pm.rescan(force=force_full)
             added = diff.get("added", [])
             removed = diff.get("removed", [])
             changed = diff.get("changed", [])
@@ -2000,10 +2053,22 @@ class PluginHostService(QObject):
         禁用插件跳过（其组件本就不该加载）。
         """
         missed: Dict[str, List[str]] = {}
+        try:
+            from app.utils.config import Settings
+
+            disabled_components = set(Settings.get_instance().disabled_plugin_components.value or [])
+        except Exception:
+            disabled_components = set()
         for plugin in pm.list_plugins():
             if not pm.is_enabled(plugin.name):
                 continue
             declared = {c for c, v in (plugin.components or {}).items() if v}
+            if not declared:
+                continue
+            # 组件级禁用（D9）不算漏载：加载链本就跳过它们，补载会被
+            # 再次跳过，白耗 rescan + reload（实测启动期 3 个禁用插件
+            # 被误补载一遍）。
+            declared = {c for c in declared if f"{plugin.name}:{c}" not in disabled_components}
             if not declared:
                 continue
             lack = [c for c in sorted(declared) if self._component_registered(plugin.name, c) is False]

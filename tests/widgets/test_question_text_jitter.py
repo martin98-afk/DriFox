@@ -93,7 +93,11 @@ def _make_scene(win_w=900, win_h=800):
     chat = QWidget()
     chat.setMinimumHeight(400)
     splitter = QSplitter()
-    splitter.setOrientation(1)
+    # 纵向：与真机语义一致（下方卡片容器占高度轴，宽度由父布局分配）。
+    # 曾误写 setOrientation(1)（= Qt.Horizontal），却又用窗口**高度**给
+    # setSizes 分配尺寸，使容器宽高互相耦合——真机不存在该结构，会制造
+    # 与真实场景无关的宽度-高度联动往复。
+    splitter.setOrientation(Qt.Vertical)
     splitter.addWidget(chat)
     splitter.setStretchFactor(0, 1)
     container = BottomCardContainer()

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from PyQt5.QtCore import QEasingCurve, QPoint, QVariantAnimation, Qt, QTimer
+from PyQt5.QtCore import QPoint, QVariantAnimation, Qt, QTimer
 from PyQt5.QtWidgets import QWidget
 
-from app.utils.design_tokens import Colors
+from app.utils.design_tokens import Animations, Colors
+from app.utils.motion import retarget
 
 
 class HoverPreviewOverlay(QWidget):
@@ -133,54 +134,82 @@ class HoverPreviewOverlay(QWidget):
 
     # ── 几何滑入/滑出（逐帧全局坐标 setGeometry） ──
 
+    def _slide_anim(self) -> QVariantAnimation:
+        """取（或惰性创建）几何滑入滑出动画
+
+        ★ 必须复用同一个动画对象：hover 反复进出时若每次 new 一个且不停旧的，
+        两条动画会同时 ``valueChanged`` 写同一宽度 → 面板来回抽搐。
+        """
+        anim = getattr(self, "_slide", None)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.valueChanged.connect(lambda v: self._place_at_width(int(v)))
+            self._slide = anim
+        return anim
+
     def slide_in(self, target_w: int, on_done=None) -> None:
-        """从贴边外缘向内滑到 target_w（180ms OutCubic）。滑入期覆盖的对话区不 resize。"""
+        """滑入到 target_w（ENTER_MS + EASE_OUT），**从当前宽度续接**
+
+        ★ 不能先 ``_place_at_width(0)`` 再启动动画：上一次滑出未跑完时（宽度
+        还剩一截）会先跳到 0 再滑入 —— 肉眼可见的回抽。起点统一取实测的
+        ``_current_w``。
+        """
         self._target_w = int(target_w)
-        self._place_at_width(0)
         self.show()
         self.raise_()
-        anim = QVariantAnimation(self)
-        anim.setDuration(180)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
-        anim.setStartValue(0.0)
-        anim.setEndValue(float(self._target_w))
-        anim.valueChanged.connect(lambda v: self._place_at_width(int(v)))
-        if on_done is not None:
-            anim.finished.connect(on_done)
-        self._slide = anim  # 持引用防 GC
-        anim.start()
+        if not retarget(
+            self._slide_anim(),
+            float(self._current_w),
+            float(self._target_w),
+            duration=Animations.ENTER_MS,
+            curve=Animations.EASE_OUT,
+            on_finished=on_done,
+        ):
+            self._place_at_width(self._target_w)
+            if on_done is not None:
+                on_done()
 
     def slide_out(self, on_done=None) -> None:
-        """从当前宽滑回贴边外缘（150ms OutQuad），动画结束调 on_done（交宿主 reparent 回挂）。"""
-        anim = QVariantAnimation(self)
-        anim.setDuration(150)
-        anim.setEasingCurve(QEasingCurve.OutQuad)
-        anim.setStartValue(float(self._current_w))
-        anim.setEndValue(0.0)
-        anim.valueChanged.connect(lambda v: self._place_at_width(int(v)))
-        if on_done is not None:
-            anim.finished.connect(on_done)
-        self._slide = anim
-        anim.start()
+        """滑回贴边外缘（EXIT_MS + EASE_IN），结束调 on_done（交宿主 reparent 回挂）
+
+        退出比进入短一档是刻意的：收起阶段用户注意力已经移开，拖长了显得黏。
+        """
+        if not retarget(
+            self._slide_anim(),
+            float(self._current_w),
+            0.0,
+            duration=Animations.EXIT_MS,
+            curve=Animations.EASE_IN,
+            on_finished=on_done,
+        ):
+            self._place_at_width(0)
+            if on_done is not None:
+                on_done()
 
 
 class HoverPreviewController:
-    """hover 悬浮预览状态机：按钮/浮层的进出事件 + 可取消的缓收计时。
+    """hover 悬浮预览状态机：按钮/浮层的进出事件 + 可取消的缓开/缓收计时。
 
-    不持有业务数据、不读写显隐记忆；通过回调把「进入/退出预览」的具体动作
-    （reparent、落位、还原 splitter）交给宿主。
+    进入按钮不立即展开（show_delay_ms 延时），鼠标划过即取消，避免误触发；
+    预览中离开走 hide_delay_ms 缓收。不持有业务数据、不读写显隐记忆；通过
+    回调把「进入/退出预览」的具体动作（reparent、落位、还原 splitter）交给宿主。
     """
 
-    def __init__(self, overlay, can_preview, on_enter, on_leave, hide_delay_ms=300):
+    def __init__(self, overlay, can_preview, on_enter, on_leave, hide_delay_ms=300, show_delay_ms=250):
         self._overlay = overlay
         self._can_preview = can_preview
         self._on_enter = on_enter
         self._on_leave = on_leave
         self._previewing = False
+        self._show_pending = False  # 挂起的展开意图（_do_enter 的判据，防迟到触发）
         self._hide_timer = QTimer()
         self._hide_timer.setSingleShot(True)
         self._hide_timer.setInterval(int(hide_delay_ms))
         self._hide_timer.timeout.connect(self._do_leave)
+        self._show_timer = QTimer()
+        self._show_timer.setSingleShot(True)
+        self._show_timer.setInterval(int(show_delay_ms))
+        self._show_timer.timeout.connect(self._do_enter)
 
     def is_previewing(self) -> bool:
         return self._previewing
@@ -189,9 +218,10 @@ class HoverPreviewController:
         if on:
             self._cancel_hide()
             if not self._previewing and self._can_preview():
-                self._previewing = True
-                self._on_enter()
+                self._show_pending = True
+                self._show_timer.start()  # 延时展开：划过不触发，停稳才出
         else:
+            self._cancel_show()
             self._start_hide_if_previewing()
 
     def on_overlay_hover(self, on: bool) -> None:
@@ -202,6 +232,7 @@ class HoverPreviewController:
 
     def on_clicked(self) -> None:
         self._cancel_hide()
+        self._cancel_show()  # 点击转显式开关，取消挂起的 hover 展开
         if self._previewing:
             self._do_leave()
 
@@ -211,6 +242,18 @@ class HoverPreviewController:
 
     def _cancel_hide(self) -> None:
         self._hide_timer.stop()
+
+    def _cancel_show(self) -> None:
+        self._show_pending = False
+        self._show_timer.stop()
+
+    def _do_enter(self) -> None:
+        # 延时窗口内状态可能已变（划过取消/点击已展开常驻），二次确认
+        if self._show_pending:
+            self._show_pending = False
+            if not self._previewing and self._can_preview():
+                self._previewing = True
+                self._on_enter()
 
     def _do_leave(self) -> None:
         self._hide_timer.stop()

@@ -215,6 +215,9 @@ class TrayManager(QObject):
             )
             self._tray_menu.addAction(tm_action)
             self._tray_menu.addSeparator()
+            restart_action = QAction("🔄 重启", self._tray_menu)
+            restart_action.triggered.connect(self._restart_application)
+            self._tray_menu.addAction(restart_action)
             quit_action = QAction("退出", self._tray_menu)
             quit_action.triggered.connect(self._quit_application)
             self._tray_menu.addAction(quit_action)
@@ -738,10 +741,18 @@ class TrayManager(QObject):
 
         # —— 注册失败：组合键被占用，回退到 keyboard LL 钩子 ——
         err = ctypes.GetLastError()
-        logger.warning(
-            f"[TrayManager] RegisterHotKey 注册失败({hotkey_str}): 错误码 {err}"
-            f"（组合键已被其它程序占用，自动回退到 keyboard 钩子兼容模式）"
-        )
+        if getattr(self, "_hotkey_failed_once", False) and self._hotkey_failed_hotkey == hotkey_str:
+            # 已提示过占用：kbd 兜底态每次调用都会重试原生注册（升回机制），
+            # 占用方仍在时每次都失败——降为 debug，避免热重载/健康检查刷 warning
+            logger.debug(
+                f"[TrayManager] RegisterHotKey 重试失败({hotkey_str}): 错误码 {err}"
+                f"（占用方仍在，维持 keyboard 钩子兼容模式）"
+            )
+        else:
+            logger.warning(
+                f"[TrayManager] RegisterHotKey 注册失败({hotkey_str}): 错误码 {err}"
+                f"（组合键已被其它程序占用，自动回退到 keyboard 钩子兼容模式）"
+            )
         # 仅首次失败 / 更换组合时弹一次托盘提示，引导用户换键
         if not getattr(self, "_hotkey_failed_once", False) or self._hotkey_failed_hotkey != hotkey_str:
             self._hotkey_failed_once = True
@@ -1128,6 +1139,13 @@ class TrayManager(QObject):
                     logger.debug("[TrayManager] 热键健康检查失败，保留旧热键")
         except Exception as exc:
             logger.debug(f"[TrayManager] 健康检查异常（非致命）: {exc}")
+
+    def _restart_application(self) -> None:
+        """托盘菜单重启：拉起新进程替换当前实例（与设置页「立即重启」同源）"""
+        from app.utils.app_restart import restart_application
+
+        if not restart_application():
+            self._tray_icon.showMessage("Drifox", "重启失败：无法拉起新进程", QSystemTrayIcon.MessageIcon(3), 4000)
 
     def _quit_application(self) -> None:
         """退出应用：强制关闭所有窗口后退出"""

@@ -60,7 +60,7 @@ class DiffViewerCard(BaseSettingsCard):
     """内嵌差异对比卡片，用法类似系统设置面板覆盖右侧对话区域"""
 
     def __init__(self, parent=None):
-        super().__init__("文件差异对比", "📄", parent=parent)
+        super().__init__("文件差异对比", icon_svg="差异对比", parent=parent)
         self.setMinimumHeight(200)
         self.set_height_mode("proportional")
         self._current_html = None

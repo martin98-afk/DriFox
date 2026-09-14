@@ -20,7 +20,7 @@ from PyQt5.QtWidgets import (
 )
 from qfluentwidgets import FluentIcon, PrimaryToolButton, ScrollArea, StrongBodyLabel, TransparentToolButton
 
-from app.utils.design_tokens import Colors, TabStyles, font_size_css, get_unified_scrollbar_style, scale_icon_size
+from app.utils.design_tokens import CardStyles, Colors, TabStyles, font_size_css, get_unified_scrollbar_style, scale_icon_size
 from app.utils.utils import get_font_family_css, get_icon, get_unified_font
 
 
@@ -39,6 +39,9 @@ class SystemCardFrame(QFrame):
     _PROPORTIONAL_RESERVED = 200
     # 窗口再矮也保底的卡片可见高度（头部 + 一两行内容，内容区滚动查看）
     _MIN_CARD_VISIBLE_H = 120
+
+    # 头部 SVG 图标基准尺寸（随系统字体大小经 scale_icon_size 缩放）
+    _ICON_SVG_BASE_SIZE = 20
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,6 +71,9 @@ class SystemCardFrame(QFrame):
 
     def _build_base_ui(self):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # 自定义 QWidget 子类不设 WA_StyledBackground 时，_apply_base_style 写的
+        # 背景/边框/圆角一行都不会绘制（见 CardStyles.floating 说明）。
+        self.setAttribute(Qt.WA_StyledBackground, True)
         Colors.refresh()
         self._apply_base_style()
 
@@ -81,6 +87,8 @@ class SystemCardFrame(QFrame):
 
         self.icon_label = QLabel(self)
         self.icon_label.setFont(get_unified_font(11))
+        # 当前 SVG 图标名（set_icon_svg 时记录，refresh_style 重刷 pixmap；None = 文字 emoji 模式）
+        self._svg_icon_name: str | None = None
 
         self.title_label = StrongBodyLabel(self)
         self.title_label.setFont(get_unified_font(11, True))
@@ -154,13 +162,8 @@ class SystemCardFrame(QFrame):
 
     def _apply_base_style(self):
         # Colors.refresh() 由调用方（refresh_style / _build_base_ui）确保已执行
-        self.setStyleSheet(f"""
-            SystemCardFrame {{
-                background: {Colors.CARD_BG.format(alpha=230)};
-                border: 1px solid {Colors.BORDER};
-                border-radius: 10px;
-            }}
-        """)
+        # 表面规范与浮层卡同源（CardStyles.floating），alpha 沿用原本的 230。
+        self.setStyleSheet(CardStyles.floating("SystemCardFrame", alpha=230))
 
     def refresh_style(self):
         """刷新主题底色和边框 — 子控件样式各自独立更新，不依赖 Qt 级联
@@ -179,6 +182,9 @@ class SystemCardFrame(QFrame):
         self.title_label.setFont(get_unified_font(12, True))
         if self.icon_label is not None:
             self.icon_label.setFont(get_unified_font(12))
+            if self._svg_icon_name:
+                s = scale_icon_size(self._ICON_SVG_BASE_SIZE)
+                self.icon_label.setPixmap(get_icon(self._svg_icon_name).pixmap(s, s))
         icon_widget = getattr(self, "_icon_widget", None)
         if icon_widget is not None:
             base_size = getattr(self, "_icon_base_size", 20)
@@ -269,8 +275,25 @@ class SystemCardFrame(QFrame):
     # ── 公开控制 ───────────────────────────────────────
 
     def set_icon(self, icon: str):
+        self._svg_icon_name = None
         if self.icon_label is not None:
+            # 撤销 set_icon_svg 留下的固定尺寸，恢复文字自适应布局
+            self.icon_label.setMinimumSize(0, 0)
+            self.icon_label.setMaximumSize(16777215, 16777215)  # QWIDGETSIZE_MAX
             self.icon_label.setText(icon)
+
+    def set_icon_svg(self, name: str):
+        """头部图标改用主题感知 SVG（qrc 资源，dark/light 自动适配）
+
+        与 set_icon_widget 一致：基准 20px，随系统字体大小经 scale_icon_size 缩放。
+        主题切换后由 refresh_style 重刷 pixmap（_ThemeIconEngine 按当前主题取图）。
+        """
+        if self.icon_label is None:
+            return
+        self._svg_icon_name = name
+        s = scale_icon_size(self._ICON_SVG_BASE_SIZE)
+        self.icon_label.setPixmap(get_icon(name).pixmap(s, s))
+        self.icon_label.setFixedSize(s, s)
 
     def set_icon_widget(self, widget):
         """用自定义 widget 替换头部文字图标（如 ProviderIconWidget）

@@ -893,11 +893,12 @@ class ThinkCard(QFrame):
             self.apply_streaming(False)
 
     def toggle(self) -> None:
-        # 收起从"当前实际渲染高度"起步：展开完成时限高已放开(16777215)，
-        # 直接拿 maximumHeight 当起点会导致大半动画时长无视觉变化、末尾骤缩。
+        # 两头都从"当前实际渲染高度"起步：展开完成时限高已放开(16777215)，
+        # 直接拿 maximumHeight 当起点会导致大半动画时长无视觉变化、末尾骤缩；
+        # 展开侧硬编 0 则会在「收起动画中途再点展开」时先跳回 0 再长出来。
         if not self._expanded:
             target = max(_measure_expanded_height(self._body_wrap), 1)
-            start = 0
+            start = max(self._body_wrap.height(), 0)
             self._expanded = True
         else:
             start = max(self._body_wrap.height(), 1)
@@ -913,8 +914,10 @@ class ThinkCard(QFrame):
         if self._anim is not None:
             self._anim.stop()
         self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        self._anim.setDuration(Animations.EXPAND_MS)
-        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+        # 时长/曲线按方向分离（走全局 token）：展开 ENTER_MS + EASE_ENTER，
+        # 收起 EXIT_MS + EASE_EXIT（OutCubic 在收起的尾段拖尾明显）
+        self._anim.setDuration(Animations.ENTER_MS if self._expanded else Animations.EXIT_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT))
         self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_anim_done)
@@ -1284,10 +1287,11 @@ class ToolCardWidget(QFrame):
             )
 
     def toggle(self) -> None:
-        # 收起从"当前实际渲染高度"起步（ThinkCard 同策略），避免从 16777215 起步
+        # 收起从"当前实际渲染高度"起步（ThinkCard 同策略），避免从 16777215 起步；
+        # 展开同理取当前高度，保证收起中途反向不会先跳回 0
         if not self._expanded:
             target = max(_measure_expanded_height(self._body_wrap), 1)
-            start = 0
+            start = max(self._body_wrap.height(), 0)
             self._expanded = True
         else:
             start = max(self._body_wrap.height(), 1)
@@ -1303,8 +1307,9 @@ class ToolCardWidget(QFrame):
         if self._anim is not None:
             self._anim.stop()
         self._anim = QPropertyAnimation(self._body_wrap, b"maximumHeight", self)
-        self._anim.setDuration(Animations.EXPAND_MS)
-        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+        # 时长/曲线按方向分离（走全局 token）
+        self._anim.setDuration(Animations.ENTER_MS if self._expanded else Animations.EXIT_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_ENTER if self._expanded else Animations.EASE_EXIT))
         self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_anim_done)
@@ -1577,7 +1582,8 @@ class ToolSectionWidget(QWidget):
         else:
             self._content_wrap.setVisible(True)
             target = max(_measure_expanded_height(self._content_wrap), 1)
-            start = 0
+            # 展开也从当前高度续接：收起动画中途再点展开时不会先跳回 0
+            start = max(self._content_wrap.height(), 0)
             self._collapsed = False
         self._separator.set_collapsed(self._collapsed)
         if not Animations.motion_enabled():
@@ -1586,8 +1592,9 @@ class ToolSectionWidget(QWidget):
             self._on_done()
             return
         self._anim = QPropertyAnimation(self._content_wrap, b"maximumHeight", self)
-        self._anim.setDuration(Animations.EXPAND_MS)
-        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_OUT))
+        # 时长/曲线按方向分离（走全局 token）
+        self._anim.setDuration(Animations.EXIT_MS if self._collapsed else Animations.ENTER_MS)
+        self._anim.setEasingCurve(QEasingCurve(Animations.EASE_EXIT if self._collapsed else Animations.EASE_ENTER))
         self._anim.setStartValue(start)
         self._anim.setEndValue(target)
         self._anim.finished.connect(self._on_done)

@@ -144,6 +144,8 @@ class ProviderEditCard(QWidget):
     closed = pyqtSignal()
     fetchSuccess = pyqtSignal(list)  # 获取成功信号
     fetchFailed = pyqtSignal()  # 获取失败信号
+    loginSuccess = pyqtSignal(str, str)  # 登录成功（api_key, info）
+    loginFailed = pyqtSignal(str)  # 登录失败（原因）
 
     def __init__(self, provider_name: str = "", provider_info: dict = None, is_new: bool = True, parent=None):
         super().__init__(parent)
@@ -160,6 +162,8 @@ class ProviderEditCard(QWidget):
         # 连接信号
         self.fetchSuccess.connect(self._on_fetch_success)
         self.fetchFailed.connect(self._on_fetch_failed)
+        self.loginSuccess.connect(self._on_login_success)
+        self.loginFailed.connect(self._on_login_failed)
 
     def _init_ui(self):
         self._apply_style()
@@ -267,6 +271,10 @@ class ProviderEditCard(QWidget):
         if current_key:
             self.apiKeyEdit.setText(current_key)
         key_row.addWidget(self.apiKeyEdit, 1)
+        self.loginBtn = PrimaryPushButton("登录")
+        self.loginBtn.clicked.connect(self._on_auto_login)
+        self.loginBtn.setVisible(False)
+        key_row.addWidget(self.loginBtn)
         main_layout.addLayout(key_row)
 
         # 获取按钮行
@@ -535,6 +543,79 @@ class ProviderEditCard(QWidget):
                 shown += 1
 
         self._extra_config_section.setVisible(shown > 0)
+        self._sync_login_btn()
+
+    def _sync_login_btn(self):
+        """按当前服务商 capabilities 是否含 login_hook 显示/隐藏「登录」按钮"""
+        if not hasattr(self, "loginBtn"):
+            return
+        provider = self.nameCombo.currentText() if self.is_new else self.provider_name
+        p = ProviderRegistry.get_instance().get(provider)
+        self.loginBtn.setVisible(bool(p and p.capabilities.get("login_hook")))
+
+    def _on_auto_login(self):
+        """登录：后台执行 capabilities["login_hook"]，成功后回填 API Key 输入框"""
+        provider = self.nameCombo.currentText() if self.is_new else self.provider_name
+        p = ProviderRegistry.get_instance().get(provider)
+        hook = p.capabilities.get("login_hook") if p else None
+        if hook is None:
+            return
+        self.loginBtn.setEnabled(False)
+        from qfluentwidgets import InfoBar
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        parent = TabManagerWindow.get_instance() or self.window()
+        InfoBar.info(
+            "登录",
+            "已打开浏览器等待授权，完成后自动回填（最长等待 5 分钟）",
+            parent=parent,
+            duration=6000,
+            position=InfoBarPosition.BOTTOM,
+        )
+        threading.Thread(target=self._do_login_thread, args=(hook,), daemon=True).start()
+
+    def _do_login_thread(self, hook):
+        """后台执行 login_hook（可长阻塞：轮询浏览器授权结果）"""
+        try:
+            result = hook()
+        except Exception as e:  # noqa: BLE001 —— 失败原因需透传到 UI
+            self.loginFailed.emit(str(e))
+            return
+        if not result or not result.get("api_key"):
+            self.loginFailed.emit("登录结果为空")
+            return
+        self.loginSuccess.emit(result["api_key"], result.get("info", ""))
+
+    def _on_login_success(self, api_key: str, info: str):
+        """登录成功（主线程）：回填 API Key 输入框，保存时走原生加密链"""
+        self.loginBtn.setEnabled(True)
+        self.apiKeyEdit.setText(api_key)
+        from qfluentwidgets import InfoBar
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        parent = TabManagerWindow.get_instance() or self.window()
+        InfoBar.success(
+            "登录成功",
+            info or "API Key 已回填，请保存配置",
+            parent=parent,
+            duration=4000,
+            position=InfoBarPosition.BOTTOM,
+        )
+
+    def _on_login_failed(self, reason: str):
+        """登录失败（主线程）"""
+        self.loginBtn.setEnabled(True)
+        from qfluentwidgets import InfoBar
+        from app.widgets.tab_manager_window import TabManagerWindow
+
+        parent = TabManagerWindow.get_instance() or self.window()
+        InfoBar.error(
+            "登录失败",
+            reason[:120],
+            parent=parent,
+            duration=5000,
+            position=InfoBarPosition.BOTTOM,
+        )
 
     def _open_help_url(self, name: str):
         """打开帮助链接"""
@@ -555,6 +636,15 @@ class ProviderEditCard(QWidget):
         api_url = self.apiUrlCombo.currentText().strip()
         api_key = self.apiKeyEdit.text().strip()
         provider_name = self.nameCombo.currentText() if self.is_new else self.provider_name
+
+        # capabilities["models_hook"]：服务商自定义获取（自包含，无需输入框参数）
+        p = ProviderRegistry.get_instance().get(provider_name)
+        hook = p.capabilities.get("models_hook") if p else None
+        if hook is not None:
+            self.fetchBtn.setEnabled(False)
+            InfoBar.info("获取中", "正在获取模型列表...", parent=parent, duration=3000, position=InfoBarPosition.BOTTOM)
+            threading.Thread(target=self._do_fetch_thread, args=(hook,), daemon=True).start()
+            return
 
         if not api_url or not api_key:
             InfoBar.warning(

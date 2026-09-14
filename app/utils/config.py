@@ -18,6 +18,8 @@ import uuid
 import orjson as json
 from loguru import logger
 
+from app.utils.secret_store import MODE_KEYRING, MODE_NONE, MODE_PASSWORD
+
 from qfluentwidgets import (
     BoolValidator,
     ConfigItem,
@@ -56,6 +58,10 @@ class Settings(QConfig):
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
+            # 密钥模式运行时状态（见 secret_mode / _apply_secret_mode）
+            cls._instance._secrets_locked = False  # 密码模式下密钥未解锁
+            cls._instance._cipher_backup = {}  # config_id → 密文（locked 期间落盘回写用）
+            cls._instance._secret_password = ""  # 本次会话已解锁的密码（仅内存）
         return cls._instance
 
     @classmethod
@@ -113,6 +119,12 @@ class Settings(QConfig):
         """
         saved_providers = instance.llm_saved_providers.value
         if not saved_providers or not isinstance(saved_providers, dict):
+            return
+        # 密码模式未解锁：API_KEY 仍是密文（AES-GCM nonce 随机 → 密文每次不同），
+        # 此时按 hash 重算 config_id 会让 id 每次启动漂移，导致服务商条目与
+        # 已选模型映射错乱 → 整段跳过，解锁后由 unlock_secrets 补跑。
+        if getattr(instance, "secrets_locked", False):
+            logger.info("[_migrate_saved_providers] 密钥未解锁，跳过 config_id 重算")
             return
 
         from app.core.provider_profile import apply_provider_save
@@ -298,20 +310,299 @@ class Settings(QConfig):
             pass
         # 确保目录存在
         self.file.parent.mkdir(parents=True, exist_ok=True)
+        # toDict() 内层值与 item.value 共享引用，必须深拷贝后剥钥，
+        # 否则会污染内存态导致 UI 回显 / API 请求丢 key
+        data = deepcopy(self.toDict())
+        mode = str(self.secret_mode.value or MODE_KEYRING)
+        if mode != MODE_NONE:
+            try:
+                from app.utils.secret_store import SecretStore, seal_secrets, strip_secrets
+
+                if mode == MODE_PASSWORD:
+                    # 密码模式：明文加密落盘；locked 期间用备份密文原样回写
+                    seal_secrets(data, self._secret_password, self._cipher_backup, kdf_salt=self._password_kdf_salt())
+                else:
+                    strip_secrets(data, SecretStore(), mode=mode)
+            except Exception:
+                logger.exception("[SecretStore] 密钥剥出失败，本次按明文落盘")
         # 写入文件
         with open(self.file, "wb") as f:
-            f.write(json.dumps(self.toDict(), option=json.OPT_INDENT_2))
+            f.write(json.dumps(data, option=json.OPT_INDENT_2))
+
+    def load(self):
+        """load config，加载后按 secret_mode 回填服务商 API_KEY。
+
+        必须在 _migrate_saved_providers（get_instance 中紧随 load 调用）之前
+        完成：config_id 是 (API_URL, API_KEY) 的 hash，回填晚了会算错 hash。
+        """
+        super().load()
+        try:
+            self._migrate_secret_mode()
+            self._apply_secret_mode()
+        except Exception:
+            logger.exception("[SecretStore] 密钥回填失败，按文件值继续")
+
+    def _recover_flat_secrets_from_keyring(self):
+        """一次性回迁：v0.5.11 keyring 化误剥的扁平 token 从凭证库迁回 app.config。
+
+        背景：扁平 ConfigItem（Gitee OAuth token / GitHub token）的 value 是
+        不可变 str，toDict 外壳上的回填写不回 item.value，导致 Gitee 绑定
+        token 丢失、被迫重新绑定；且用户决策 Gitee token 不参与 keyring 加密
+        （其云同步面由 config_sync 上传剔除/下载合并覆盖）。本方法把凭证库
+        残留条目取回内存并落盘，然后删除凭证库条目，彻底退出 keyring 范围。
+        """
+        from app.utils.secret_store import LEGACY_FLAT_ACCOUNTS, SecretStore
+
+        store = SecretStore()
+        recovered = False
+        for account in LEGACY_FLAT_ACCOUNTS:
+            back = store.get(account)
+            if not back:
+                continue
+            item = {
+                "gitee/user_token": self.gitee_user_token,
+                "gitee/user_refresh_token": self.gitee_user_refresh_token,
+                "github/patch_token": self.github_token,
+            }.get(account)
+            if item is not None and not str(item.value or ""):
+                item.value = back
+                recovered = True
+            store.delete(account)
+        if recovered:
+            self.save()
+            logger.info("[SecretStore] 已从凭证库回迁扁平 token 至 app.config")
+
+    # ── 密钥加密模式：keyring（本机凭证库）/ password（密码加密，随配置同步）/ none（明文） ──
+
+    def _migrate_secret_mode(self):
+        """旧布尔项 UseSystemKeyring → 新模式项 SecretMode（一次性迁移）。
+
+        文件已存在 SecretMode 则以文件为准；缺失时按旧布尔项推导并落盘固化，
+        保证老用户升级后行为不变（关闭过 keyring 的仍是明文模式）。
+        """
+        if self.secret_mode.value not in (MODE_KEYRING, MODE_PASSWORD, MODE_NONE):
+            self.secret_mode.value = MODE_KEYRING
+        if self._file_has_secret_mode():
+            return
+        self.secret_mode.value = MODE_NONE if self.use_system_keyring.value is False else MODE_KEYRING
+        self.save()
+
+    def _file_has_secret_mode(self) -> bool:
+        """配置文件原始 JSON 中是否已存在 General.SecretMode 键"""
+        try:
+            with open(self.file, "rb") as f:
+                raw = json.loads(f.read() or b"{}")
+        except Exception:
+            return False
+        return "SecretMode" in (raw.get("General") or {})
+
+    def _apply_secret_mode(self):
+        """按 secret_mode 回填密钥（load 与解锁后复用同一入口）"""
+        mode = str(self.secret_mode.value or MODE_KEYRING)
+        self._secrets_locked = False
+        if mode == MODE_NONE:
+            return
+        from app.utils.secret_store import (
+            MASTER_PASSWORD_ACCOUNT,
+            SecretStore,
+            collect_ciphertexts,
+            unwrap_secrets,
+        )
+
+        store = SecretStore()
+        # toDict(serialize=False) 外壳是新 dict、内层是 item.value 原引用，
+        # unwrap_secrets 就地改内层即写回内存态（仅对 dict 类 value 有效）
+        data = self.toDict(serialize=False)
+        if mode == MODE_PASSWORD:
+            password = store.get(MASTER_PASSWORD_ACCOUNT)
+            self._secret_password = password
+            # 解密前先备份密文：解密失败会置空，落盘靠这份备份原样回写
+            self._cipher_backup = collect_ciphertexts(data)
+            unwrap_secrets(data, store, mode=mode, password=password)
+            self._secrets_locked = self._has_locked_cipher()
+            if self._secrets_locked:
+                logger.info("[SecretStore] 密码模式：本机无记住的密码或解密失败，等待用户解锁")
+            else:
+                # 自动解锁成功（本机记住的密码可用）：备份密文只在 locked 期间用于
+                # 原样回写，解锁后留着会让「是否存在未解密密文」的判断失准 —— 设置卡
+                # 据此显示「等待解锁」，表现为每次启动都误报未解锁（明文实际已就绪）。
+                self._cipher_backup = {}
+            return
+        unwrap_secrets(data, store, mode=mode)
+        self._recover_flat_secrets_from_keyring()
+
+    def _has_locked_cipher(self) -> bool:
+        """是否存在「有密文备份但内存为空」的条目（即未解开的密钥）"""
+        if not self._cipher_backup:
+            return False
+        saved = self.llm_saved_providers.value
+        if not isinstance(saved, dict):
+            return False
+        for cfg_id in self._cipher_backup:
+            info = saved.get(cfg_id)
+            if isinstance(info, dict) and not str(info.get("API_KEY") or ""):
+                return True
+        return False
+
+    def _password_kdf_salt(self) -> str:
+        """密码模式批量 KDF salt（持久化复用，避免每次保存重复付 scrypt；nonce 仍每次随机）"""
+        value = str(self.secret_kdf_salt.value or "")
+        if not value:
+            import secrets
+
+            value = secrets.token_hex(16)
+            self.secret_kdf_salt.value = value
+        return value
+
+    @property
+    def secrets_locked(self) -> bool:
+        """密码模式下密钥是否未解锁（True 时应提示用户输入密码）"""
+        return bool(self._secrets_locked)
+
+    def verify_secret_password(self, password: str) -> bool:
+        """校验密码能否解开本机密文（无密文时恒真）"""
+        from app.utils.secret_store import decrypt_secret
+
+        for token in self._cipher_backup.values():
+            try:
+                decrypt_secret(token, password)
+                return True
+            except Exception:
+                return False
+        return True
+
+    def unlock_secrets(self, password: str) -> bool:
+        """用密码解锁密钥：成功则回填明文、清除 locked，返回 True"""
+        if not self.verify_secret_password(password):
+            return False
+        from app.utils.secret_store import SecretStore, unwrap_secrets
+
+        # locked 期间内存里是空值（密文只留在 _cipher_backup），先把密文填回
+        # 内存再解密，否则 unwrap 对空值无动作、解锁后仍拿不到明文
+        saved = self.llm_saved_providers.value
+        if isinstance(saved, dict):
+            for cfg_id, token in self._cipher_backup.items():
+                info = saved.get(cfg_id)
+                if isinstance(info, dict) and not str(info.get("API_KEY") or ""):
+                    info["API_KEY"] = token
+        self._secret_password = password
+        unwrap_secrets(self.toDict(serialize=False), SecretStore(), mode=MODE_PASSWORD, password=password)
+        self._cipher_backup = {}
+        self._secrets_locked = False
+        # 解锁后明文就绪，补跑被跳过的 config_id 迁移（此时 hash 才稳定）
+        self._migrate_saved_providers(self)
+        logger.info("[SecretStore] 密码模式：密钥已解锁")
+        return True
+
+    def set_secret_password(self, new_password: str, old_password: str = "") -> bool:
+        """设置/修改加密密码：先用旧密码解开 locked 项，再用新密码加密落盘。
+
+        存在未解开密文（locked）时必须给出正确的旧密码，否则拒绝——
+        空密码过不了校验，密文不会被空值覆盖。
+        """
+        if not new_password:
+            return False
+        if self._cipher_backup and not self.unlock_secrets(old_password):
+            return False
+        self._secret_password = new_password
+        self._cipher_backup = {}
+        self._secrets_locked = False
+        self.secret_kdf_salt.value = ""  # 换密码后换 salt（卫生习惯）
+        self.save()
+        return True
+
+    def switch_secret_mode(self, new_mode: str, new_password: str = "", old_password: str = "") -> tuple[bool, str]:
+        """切换加密方式（UI 唯一入口），返回 (是否成功, 提示)。
+
+        - 切到 password：需新密码；当前有未解开密文时还需正确旧密码。
+        - 从 password 切出（keyring / none）：若有未解开密文，需旧密码解开后
+          才能以新形态落盘（明文都没有的话切过去只会得到空 key）。
+        - 明文已在内存（keyring 已回填 / password 已解锁）时三者互切不需要重配 key。
+        """
+        if new_mode not in (MODE_KEYRING, MODE_PASSWORD, MODE_NONE):
+            return False, "未知的加密方式"
+        current = str(self.secret_mode.value or MODE_KEYRING)
+        if current == new_mode:
+            return True, ""
+
+        if new_mode == MODE_PASSWORD:
+            if not new_password:
+                return False, "切换到密码加密需要先设置密码"
+            if self._cipher_backup and not self.unlock_secrets(old_password):
+                return False, "旧密码不正确，无法完成切换"
+            # 先切模式再落盘：否则中间那次 save 会按旧模式把明文写进文件
+            self.secret_mode.value = MODE_PASSWORD
+            self._secret_password = new_password
+            self._cipher_backup = {}
+            self._secrets_locked = False
+        else:
+            # 从 password 切出：先解开 locked 项（没密码就没明文，切过去等于丢 key）
+            if current == MODE_PASSWORD and self._cipher_backup and not self.unlock_secrets(old_password):
+                return False, "旧密码不正确，无法解密已有密钥"
+            if current == MODE_PASSWORD:
+                self.forget_secret_password()
+            self._secret_password = ""
+            self._cipher_backup = {}
+            self._secrets_locked = False
+            self.secret_mode.value = new_mode
+
+        self.save()
+        return True, ""
+
+    def remember_secret_password(self, password: str) -> bool:
+        """把密码记到本机钥匙串（keyring 不可用时返回 False）"""
+        from app.utils.secret_store import MASTER_PASSWORD_ACCOUNT, SecretStore
+
+        return SecretStore().set(MASTER_PASSWORD_ACCOUNT, password)
+
+    def forget_secret_password(self) -> None:
+        """清除本机记住的密码"""
+        from app.utils.secret_store import MASTER_PASSWORD_ACCOUNT, SecretStore
+
+        SecretStore().delete(MASTER_PASSWORD_ACCOUNT)
+
+    def reset_locked_secrets(self) -> None:
+        """忘记密码兜底：清空所有已保存 API Key 与密文，转明文模式（不可恢复）"""
+        saved = self.llm_saved_providers.value
+        if isinstance(saved, dict):
+            for info in saved.values():
+                if isinstance(info, dict):
+                    info["API_KEY"] = ""
+        self._cipher_backup = {}
+        self._secret_password = ""
+        self._secrets_locked = False
+        self.secret_mode.value = MODE_NONE
+        self.forget_secret_password()
+        self.save()
+        logger.warning("[SecretStore] 已重置密码模式：所有已保存 API Key 被清空")
 
     # 开机自启
     auto_start = ConfigItem("General", "AutoStart", False, BoolValidator())
 
     # 版本信息
-    current_version = "v0.5.11"
+    current_version = "v0.6.0"
     # 通用设置
     auto_check_update = ConfigItem("General", "AutoCheckUpdate", True, BoolValidator())
 
     # 单实例限制：开启后同时只允许运行一个 Drifox 实例（重启生效）
     enable_single_instance = ConfigItem("General", "EnableSingleInstance", False, BoolValidator())
+
+    # 系统密钥存储（keyring）：开启后服务商 API Key / OAuth token 迁入 OS 凭证库，
+    # app.config 落盘不含明文；关闭则回退明文落盘（与旧版一致）。
+    # 注意：v0.5.12 起真正判定源是 secret_mode，本项仅用于老配置的一次性迁移。
+    use_system_keyring = ConfigItem("General", "UseSystemKeyring", True, BoolValidator())
+
+    # API Key 加密方式：keyring=系统钥匙串（本机绑定，换机需重填）/
+    # password=密码加密（密文随配置同步，换机输同一密码即可解出）/ none=明文落盘
+    secret_mode = ConfigItem(
+        "General",
+        "SecretMode",
+        MODE_KEYRING,
+        OptionsValidator([MODE_KEYRING, MODE_PASSWORD, MODE_NONE]),
+    )
+
+    # 密码模式批量 KDF salt（hex，持久化复用；nonce 每次随机，安全性不受影响）
+    secret_kdf_salt = ConfigItem("General", "SecretKdfSalt", "")
 
     # 灰度开关：消息正文用纯 Qt 块级渲染器（MarkdownBlockViewer）替代 QWebEngineView。
     # 仅作用于 assistant 卡片（welcome 卡 JS 交互复杂暂不灰度）；默认关闭。

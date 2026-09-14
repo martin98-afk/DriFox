@@ -506,6 +506,9 @@ class OpenAIChatWorker(QThread):
         self._tool_execution_cancelled = s.tool_call.execution_cancelled
         self._waiting_tool_params = s.tool_call.waiting_params
         self._last_progress_len = s.response.last_progress_len
+        self._last_progress_ts = s.response.last_progress_ts
+        self._last_line_est = s.response.last_line_est
+        self._last_est_len = s.response.last_est_len
         self._last_compaction_state = s.compaction.last_state
         self._current_session_messages = s.session.current_messages
         self._last_usage = s.session.last_usage
@@ -694,6 +697,10 @@ class OpenAIChatWorker(QThread):
                 m.pop("_interject_text", None)
                 m.pop("_interject_image_paths", None)
             if interject_count:
+                logger.info(
+                    f"[Interject] 消费插话 {interject_count} 条 session={str(self.session_id)[:8]} "
+                    f"backend={id(getattr(self.tool_executor, '_backend', None))}"
+                )
                 # 信号先于本轮 _make_api_call 的流式 chunk（queued 保序）→ UI 新卡先建好
                 self._emit_with_callback(
                     "queued_user_injected", self.queued_user_injected, interject_count
@@ -950,39 +957,21 @@ class OpenAIChatWorker(QThread):
             if extra_context:
                 ctx.update(extra_context)
 
-            # 记录 trigger_event 前的队列大小，用于后续精确 drain
-            # 只排出本轮同步执行中入队的消息，不误伤其他路径（如 SubAgentFinished）放入的消息
-            _q = getattr(backend, "_hook_message_queue", None)
-            qsize_before = _q.qsize() if _q is not None else 0
-
+            # 🛡️ skip_finished_callback=True：本函数的 hook 输出已由下方 results
+            # 循环直接注入消息列表（current_messages / current_session_messages），
+            # 完成回调再经 backend.on_hook_finished 入队属于重复投递。
+            # 旧实现改为事后按「队列长度差 + FIFO 头取」排出，无法区分 hook 自身
+            # 入队与同期到达的外部消息：用户插话（_interject_entry）、TeamMail 等
+            # 排在 hook 消息之前时被 get_nowait() 当作 hook 输出丢弃 → 消息进了 UI
+            # 但 AI 永不响应（"stophook 执行期间发消息无反应"的根因）。
+            # 现在从源头不再入队，无需任何事后排出。
             results = backend.hook_manager.trigger_event(
                 event_name,
                 context=ctx,
                 current_message=current_message_text,
                 trigger_async=False,
+                skip_finished_callback=True,
             )
-
-            # 🛡️ 精确排出 _hook_message_queue：同步执行路径中 _execute_hook 也会调用
-            # on_hook_finished 回调将输出入队，但同步返回值已由下方 results 循环直接
-            # 注入消息列表。若不排出，_inject_pending_hook_messages 会在下一轮循环顶部
-            # 从队列取出再注入一次，导致重复（尤其是 PROMPT 类型 hook）。
-            # ★ 修复：只排出本轮 trigger_event 新增的消息，不误伤其他路径放入的消息
-            #   （如 SubAgentFinished，由主线程通过 _inject_subagent_completion_into_stream 放入）
-            # 注意：PostToolUse 等事件由 tool_executor 的同步路径触发并通过队列传递，
-            # 不经过 _trigger_worker_hook，不受此排出影响。
-            if _q is not None:
-                qsize_after = _q.qsize()
-                to_drain = qsize_after - qsize_before
-                for _ in range(to_drain):
-                    try:
-                        _q.get_nowait()
-                    except Exception:
-                        break
-                if to_drain > 0:
-                    logger.debug(
-                        f"[HookManager] Drained {to_drain} msg(s) from hook queue"
-                        f" after sync trigger_event({event_name})"
-                    )
 
             # 收集所有 hook 结果中的 block reason（按 hook 顺序，最后一个覆盖前面的）
             block_reason: Optional[str] = None
@@ -1432,6 +1421,59 @@ class OpenAIChatWorker(QThread):
             self._response_chunks = list(backup.get("response_chunks", []) or [])
         self._partial_content_backup = None
 
+    def _has_pending_interject(self) -> bool:
+        """探测 hook 队列中是否有用户插话（繁忙时插话发送）
+
+        只探测不消费：插话仍由循环顶部的 _inject_pending_hook_messages 正常注入
+        对话流。取出的条目按原顺序放回，不改变后续注入顺序。
+
+        Returns:
+            True = 队列中至少有一条 _interject 标记的插话消息。
+        """
+        q = None
+        try:
+            backend = getattr(self.tool_executor, "_backend", None)
+            q = getattr(backend, "_hook_message_queue", None) if backend is not None else None
+        except Exception as exc:  # noqa: BLE001
+            # worker 未持有 tool_executor（单测最小实例/已清理对象）时属性访问即抛错
+            logger.debug(f"[Interject] 取 hook 队列失败: {exc}")
+            return False
+        if q is None:
+            return False
+        items: List[Dict] = []
+        try:
+            while True:
+                try:
+                    items.append(q.get_nowait())
+                except queue.Empty:
+                    break
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[Interject] 探测 hook 队列失败: {exc}")
+            return False
+        finally:
+            for item in items:
+                try:
+                    q.put(item)
+                except Exception:  # noqa: BLE001
+                    pass
+        return any(isinstance(m, dict) and m.get("_interject") is True for m in items)
+
+    def _abort_retry_for_interject(self):
+        """放弃剩余重试，让插话尽快进入对话流
+
+        返回 (None, None) 与取消路径同形：主循环走到 ``if not tool_calls_found`` 的
+        完成路径，已接收内容由 _build_response_message_sequence 落库，随后
+        _drain_pending_hooks_before_exit 注入插话并续跑一轮。
+        """
+        # 🛡️ 恢复备份：协议错误重试清空过 _response_content_blocks
+        self._restore_partial_content_backup()
+        # 通知 UI：重试状态结束，收掉重试动画（续轮开始后自行重新进入流式态）
+        try:
+            self.retry_resolved.emit()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[Interject] retry_resolved 发射失败: {exc}")
+        return None, None
+
     @staticmethod
     def _detect_repetitive_tool_loop(messages: List[Dict]) -> Optional[Dict]:
         """
@@ -1816,7 +1858,7 @@ class OpenAIChatWorker(QThread):
                 f"extra_body_keys={[k for k in extra_body if k in ('thinking', 'thinking_budget', 'reasoning_effort')]}"
             )
 
-        # 处理认证 + 网关会话头（服务商插件声明，如 opencode 的 x-opencode-session）
+        # 处理认证 + 服务商能力头（extra_headers 静态头 / session_header 会话头）
         auth_headers = None
         auth_type = self.llm_config.get("认证方式", "bearer")
         if auth_type == "bce":
@@ -1825,9 +1867,9 @@ class OpenAIChatWorker(QThread):
             auth_str = f"{api_key}:{api_key}"
             b64_auth = base64.b64encode(auth_str.encode()).decode()
             auth_headers = {"Authorization": f"Basic {b64_auth}"}
-        gateway_headers = self._gateway_session_headers()
-        if gateway_headers:
-            auth_headers = {**(auth_headers or {}), **gateway_headers}
+        provider_headers = self._provider_extra_headers()
+        if provider_headers:
+            auth_headers = {**(auth_headers or {}), **provider_headers}
 
         is_o1 = model.startswith("o1") or model.startswith("o3")
 
@@ -1910,7 +1952,7 @@ class OpenAIChatWorker(QThread):
         if self.session_id:
             kwargs["user"] = self.session_id
 
-        # 认证头（bce 认证方式）+ 网关会话头（服务商插件声明）
+        # 认证头（bce 认证方式）+ 服务商能力头（extra_headers / session_header）
         auth_headers = None
         if str(self.llm_config.get("认证方式", "bearer")) == "bce":
             import base64
@@ -1919,9 +1961,9 @@ class OpenAIChatWorker(QThread):
             auth_str = f"{api_key}:{api_key}"
             b64_auth = base64.b64encode(auth_str.encode()).decode()
             auth_headers = {"Authorization": f"Basic {b64_auth}"}
-        gateway_headers = self._gateway_session_headers()
-        if gateway_headers:
-            auth_headers = {**(auth_headers or {}), **gateway_headers}
+        provider_headers = self._provider_extra_headers()
+        if provider_headers:
+            auth_headers = {**(auth_headers or {}), **provider_headers}
         if auth_headers:
             kwargs["extra_headers"] = auth_headers
         return kwargs
@@ -3138,23 +3180,39 @@ class OpenAIChatWorker(QThread):
             logger.warning(f"[ToolCall恢复] 尝试恢复工具参数时出错: {e}")
             return None
 
-    def _gateway_session_headers(self) -> Optional[Dict[str, str]]:
-        """服务商插件声明的网关会话头（capabilities["session_header"]），值=当前会话 ID。
+    def _provider_extra_headers(self) -> Optional[Dict[str, str]]:
+        """服务商插件声明的能力头（capabilities），两通道合并：
 
-        OpenCode Zen/Go 等网关要求每个 LLM 请求携带稳定会话标识
-        （2026-09 起缺失报 400 MissingSessionID）；头名由 providers 插件
-        按 family 声明，主程序只做通用注入，不感知具体服务商。
+        - extra_headers：静态自定义头 dict（伪装 UA / X-Product 等），声明即注入，
+          不依赖会话；同名键覆盖 openai SDK 默认头（如 User-Agent）。
+        - session_header：网关会话标识头名，值=当前会话 ID。OpenCode Zen/Go
+          等网关要求每个 LLM 请求携带稳定会话标识（2026-09 起缺失报 400
+          MissingSessionID）。
+
+        头名/头值均由 providers 插件按 family 声明，主程序只做通用注入，
+        不感知具体服务商。
         """
-        if not self.session_id:
-            return None
         try:
-            header = get_provider_profile(self.llm_config or {}).get("session_header")
+            profile = get_provider_profile(self.llm_config or {})
         except Exception as e:
-            logger.debug(f"[ChatWorker] session_header 解析失败: {e}")
+            logger.debug(f"[ChatWorker] 能力头解析失败: {e}")
             return None
-        if not header:
-            return None
-        return {str(header): self.session_id}
+        headers: Dict[str, str] = {}
+        extra = profile.get("extra_headers")
+        if isinstance(extra, dict):
+            for name, value in extra.items():
+                if value is None:
+                    continue
+                # 可调用值 = 动态头：按当前请求的 llm_config 取值
+                # （如 CodeBuddy 按各配置的 refresh_token 换 access_token）
+                headers[str(name)] = (
+                    str(value(self.llm_config or {})) if callable(value) else str(value)
+                )
+        if self.session_id:
+            header = profile.get("session_header")
+            if header:
+                headers[str(header)] = self.session_id
+        return headers or None
 
     def _adapter_flags(self):
         """经 ModelAdapterRegistry 解析协议开关（系统插件 openai 兜底，可覆盖）
@@ -3375,6 +3433,11 @@ class OpenAIChatWorker(QThread):
             if self._is_cancelled:
                 logger.info("[API] 重试被用户取消")
                 return None, None
+            # 用户插话打断重试：仅在已失败过一次（attempt > 0）时生效。首次调用前
+            # 队列里的插话属上一轮遗留，循环顶部已消费，此处不打断。
+            if attempt > 0 and self._has_pending_interject():
+                logger.info(f"[API] 检测到用户插话，放弃剩余重试（attempt={attempt}）")
+                return self._abort_retry_for_interject()
             try:
                 if use_responses:
                     # Responses API 解析器仅支持事件流（非流式返回 Response 对象不可迭代）
@@ -3550,6 +3613,10 @@ class OpenAIChatWorker(QThread):
                     elapsed = 0.0
                     step = 0.5
                     while elapsed < wait_time:
+                        # 用户插话：立即中止退避等待，不等剩余重试
+                        if self._has_pending_interject():
+                            logger.info(f"[API] 重试等待被用户插话打断（attempt={attempt + 1}）")
+                            return self._abort_retry_for_interject()
                         if self._is_cancelled:
                             logger.info("[API] 重试等待被用户取消")
                             # 🛡️ 恢复备份：协议错误重试清空了 _response_content_blocks，
@@ -3850,21 +3917,34 @@ class OpenAIChatWorker(QThread):
                             except json.JSONDecodeError:
                                 # 短参数的 JSON 解析失败，记录到等待队列
                                 # 同时也发射长度进度，避免 UI 一直卡在"正在准备参数..."
+                                from app.core.tool_arg_lines import (
+                                    LINE_ESTIMATE_STEP,
+                                    build_progress_payload,
+                                    extract_partial_path,
+                                    should_emit_progress,
+                                )
+
                                 prev = self._last_progress_len.get(tc_id, 0)
-                                if not prev or args_len - prev >= 200:
+                                _now_ms = time.monotonic() * 1000.0
+                                if should_emit_progress(prev, args_len, self._last_progress_ts.get(tc_id, 0.0), _now_ms):
                                     self._last_progress_len[tc_id] = args_len
-                                    progress_args = {
-                                        "_status": "loading",
-                                        "_args_len": args_len,
-                                    }
-                                    # 缓冲区已有 path/file_path 时提前提取，让 UI 显示真实文件名
-                                    _pm = re.search(
-                                        r'"(?:path|file_path)"\s*:\s*"([^"]+)"',
-                                        buffer["function"]["arguments"],
-                                    )
-                                    if _pm:
-                                        progress_args["_path"] = _pm.group(1)
+                                    self._last_progress_ts[tc_id] = _now_ms
                                     _buf_name = buffer["function"].get("name", tool_name)
+                                    # 行数按步长重算，未到步长沿用上次（超长参数下避免 O(n²) 扫描）
+                                    _est_len = self._last_est_len.get(tc_id, 0)
+                                    _reuse = bool(_est_len) and (args_len - _est_len) < LINE_ESTIMATE_STEP
+                                    # 编辑类工具顺带估算增删行数（运行框显示 +N/-M）+ 未闭合路径提前提取
+                                    progress_args, _est = build_progress_payload(
+                                        _buf_name or tool_name,
+                                        buffer["function"]["arguments"],
+                                        args_len,
+                                        extract_partial_path(buffer["function"]["arguments"]),
+                                        self._last_line_est.get(tc_id, (0, 0)),
+                                        _reuse,
+                                    )
+                                    if not _reuse:
+                                        self._last_est_len[tc_id] = args_len
+                                    self._last_line_est[tc_id] = _est
                                     self._emit_with_callback(
                                         "tool_args_updated",
                                         self.tool_args_updated,
@@ -3882,21 +3962,34 @@ class OpenAIChatWorker(QThread):
                         else:
                             # 参数已超过 1000 字符，跳过逐块 JSON 解析以节省开销
                             # 但仍推送长度进度 + 累积尾部预览，让 UI 显示接收进度
+                            from app.core.tool_arg_lines import (
+                                LINE_ESTIMATE_STEP,
+                                build_progress_payload,
+                                extract_partial_path,
+                                should_emit_progress,
+                            )
+
                             prev = self._last_progress_len.get(tc_id, 0)
-                            if not prev or args_len - prev >= 500:
+                            _now_ms = time.monotonic() * 1000.0
+                            if should_emit_progress(prev, args_len, self._last_progress_ts.get(tc_id, 0.0), _now_ms):
                                 self._last_progress_len[tc_id] = args_len
-                                progress_args = {
-                                    "_status": "loading",
-                                    "_args_len": args_len,
-                                }
-                                # 缓冲区已有 path/file_path 时提前提取
-                                _pm = re.search(
-                                    r'"(?:path|file_path)"\s*:\s*"([^"]+)"',
-                                    buffer["function"]["arguments"],
-                                )
-                                if _pm:
-                                    progress_args["_path"] = _pm.group(1)
+                                self._last_progress_ts[tc_id] = _now_ms
                                 _buf_name = buffer["function"].get("name", tool_name)
+                                # 行数按步长重算，未到步长沿用上次（超长参数下避免 O(n²) 扫描）
+                                _est_len = self._last_est_len.get(tc_id, 0)
+                                _reuse = bool(_est_len) and (args_len - _est_len) < LINE_ESTIMATE_STEP
+                                # 编辑类工具顺带估算增删行数（运行框显示 +N/-M）+ 未闭合路径提前提取
+                                progress_args, _est = build_progress_payload(
+                                    _buf_name or tool_name,
+                                    buffer["function"]["arguments"],
+                                    args_len,
+                                    extract_partial_path(buffer["function"]["arguments"]),
+                                    self._last_line_est.get(tc_id, (0, 0)),
+                                    _reuse,
+                                )
+                                if not _reuse:
+                                    self._last_est_len[tc_id] = args_len
+                                self._last_line_est[tc_id] = _est
                                 self._emit_with_callback(
                                     "tool_args_updated",
                                     self.tool_args_updated,

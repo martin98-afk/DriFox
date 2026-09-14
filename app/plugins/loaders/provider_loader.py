@@ -352,8 +352,37 @@ class ProviderWatcher:
         self._root_tracker: Dict[str, Path] = {}
         self._scan_lock = threading.Lock()
 
+    def _align_needed(self) -> bool:
+        """启用状态对齐重扫是否有真实差异（无差异可跳过全量卸载+重注册）。
+
+        启动链 _do_deferred 会调 scan_now，但 warmup_providers 已按相同
+        过滤规则注册过，全量卸载+重注册是纯浪费（实测 11 个服务商
+        clear+register 往返 ~130ms）。以注册表实际内容为准做对比
+        （与 scan_now 卸载语义一致，规避 watcher 记忆失真）。
+        """
+        try:
+            disk: set = set()
+            for root in self._roots:
+                for pname, _py in _iter_provider_modules(Path(root)):
+                    disk.add(pname)
+            expect = {
+                p
+                for p in disk
+                if _is_plugin_enabled(p)
+                and _is_component_enabled(p)
+                and not _is_plugin_load_blocked(p)
+            }
+            actual = {s[len("plugin:"):] for s in self._registry.provider_sources()}
+            return expect != actual
+        except Exception as e:
+            logger.debug(f"[ProviderWatcher] 对齐差异判定失败，保守回退全量重扫: {e}")
+            return True
+
     def scan_now(self) -> None:
         """全量重扫：先注销注册表中全部插件来源服务商，再全量重新注册（幂等）。
+
+        ⚡️ 对齐快路径：注册表实际注册集与磁盘期望注册集一致时直接返回
+        （零卸载零重注册），见 _align_needed。
 
         卸载以注册表实际内容为准（而非 watcher 自身的加载记忆）：
         启动链 warmup_providers() 直接注册不经 watcher，且重扫时同名保护
@@ -361,6 +390,9 @@ class ProviderWatcher:
         文件对应的服务商（残留 bug 回归点，见 tests/core/test_provider_watcher.py）。
         """
         with self._scan_lock:
+            if not self._align_needed():
+                logger.debug("[ProviderWatcher] 服务商启用状态无差异，跳过全量重扫")
+                return
             # 1) 按注册表实际内容注销全部插件来源
             for source in self._registry.provider_sources():
                 self._registry.clear_source(source)

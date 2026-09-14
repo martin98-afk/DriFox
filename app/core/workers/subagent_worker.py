@@ -899,32 +899,18 @@ class SubAgentExecutor(QThread):
                         cur_msg = c
                     break
 
-            # 记录 trigger_event 前的队列大小，用于后续精确 drain
-            _q = getattr(backend, "_hook_message_queue", None)
-            qsize_before = _q.qsize() if _q is not None else 0
-
+            # 🛡️ skip_finished_callback=True：下方 results 循环已把 hook 输出注入
+            # messages，完成回调再经 backend.on_hook_finished 入队属重复投递。
+            # 旧实现事后按「队列长度差 + FIFO 头取」排出，会把同期入队的外部消息
+            # （用户插话 / TeamMail 等，排在 hook 消息之前时首个被 get_nowait() 取走）
+            # 误当作 hook 输出丢弃。与 chat_worker 同根因，一并改为从源头不入队。
             results = backend.hook_manager.trigger_event(
                 event_name,
                 context=ctx,
                 current_message=cur_msg,
                 trigger_async=False,
+                skip_finished_callback=True,
             )
-
-            # 🛡️ 精确排出同步执行中 _execute_hook 通过 on_hook_finished 入队的消息，
-            # 避免 _inject_pending_hook_messages（_drain_hook_queues）重复注入。
-            # ★ 只排出本轮 trigger_event 新增的消息，不误伤其他路径放入的消息。
-            if _q is not None:
-                qsize_after = _q.qsize()
-                to_drain = qsize_after - qsize_before
-                for _ in range(to_drain):
-                    try:
-                        _q.get_nowait()
-                    except Exception:
-                        break
-                if to_drain > 0:
-                    logger.debug(
-                        f"[SubAgent] Drained {to_drain} msg(s) from hook queue after sync trigger_event({event_name})"
-                    )
 
             # 收集成功执行的 hook 输出，注入 messages
             # ★ 只注入标记为 add_to_context=true 的 hook 结果

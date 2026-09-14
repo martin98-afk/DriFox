@@ -1492,7 +1492,15 @@ class HistoryManager:
         return True
 
     def get_project_list(self) -> List[str]:
-        """全部会话的 distinct 项目名（内存聚合，排序返回；供历史页项目切换器）"""
+        """全部项目名（排序返回；供历史页项目切换器）
+
+        SQLite 模式走 sessions ∪ key_documents 权威口径（与 get_projects 查重
+        口径一致）：新建项目只写 key_documents（工作目录），首轮对话后才落
+        sessions；若只从会话聚合，空项目在切换当前项目后会从列表消失，且因
+        查重命中而无法重建同名（2026-09-13 修复）。
+        """
+        if self._use_sqlite and self._session_store and self._session_store.is_initialized:
+            return sorted(p for p in self._session_store.get_projects() if p)
         self._ensure_history_loaded()
         self._deduplicate_history_sessions()
         projects = {(s.get("project") or "默认项目").strip() or "默认项目" for s in self._history_sessions}

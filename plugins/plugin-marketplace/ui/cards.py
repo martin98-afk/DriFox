@@ -63,6 +63,8 @@ from qfluentwidgets import (
     isDarkTheme,
 )
 
+from app.widgets.elided_label import _ElidedLabel
+
 from .downloads import get_downloads_fetcher
 from .installer import get_installer
 from .marketplace_manager import get_marketplace_manager
@@ -5103,7 +5105,12 @@ class MarketplaceCard(QWidget):
                 "QPushButton:hover { background: rgba(64,158,255,0.32); }"
             )
             if rec.get("meta"):
-                retry_btn.clicked.connect(lambda checked=False, r=rec: self._retry_record(r))
+                # 该插件已有任务在跑/排队 → 按钮直接置忙（重建行也保持正确状态）
+                if self._is_plugin_task_active(name):
+                    retry_btn.setEnabled(False)
+                    retry_btn.setText("重试中…")
+                else:
+                    retry_btn.clicked.connect(lambda checked=False, r=rec, b=retry_btn: self._retry_record(r, b))
             else:
                 retry_btn.setEnabled(False)
                 retry_btn.setToolTip("缺少插件元数据，无法重试")
@@ -5111,12 +5118,28 @@ class MarketplaceCard(QWidget):
 
         return row
 
-    def _retry_record(self, rec: dict):
-        """失败记录一键重试：重试原动作（安装→重新安装，更新→重新更新）"""
+    def _is_plugin_task_active(self, name: str) -> bool:
+        """插件是否有任务在运行或排队（供记录行重试按钮置忙）"""
+        if name in self._active_tasks:
+            return True
+        return any(t.get("name") == name for t in self._task_queue)
+
+    def _retry_record(self, rec: dict, btn: Optional[QPushButton] = None):
+        """失败记录一键重试：重试原动作（安装→重新安装，更新→重新更新）
+
+        点击即反馈：按钮置忙「重试中…」+ toast 确认已提交；任务完成/失败后
+        _record_task_result 刷新记录列表（新行置顶）+ InfoBar 收尾。
+        """
         meta = rec.get("meta")
         if not meta:
             self._show_proxy_info("缺少插件元数据，无法重试", error=True)
             return
+        action_text = "安装" if rec.get("action") == "install" else "更新"
+        name = rec.get("name", "")
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText("重试中…")
+        self._show_proxy_info(f"已重新提交{action_text}：{name}")
         if rec.get("action") == "install":
             self._async_install(meta)
         else:
@@ -5843,6 +5866,11 @@ class MarketplaceCard(QWidget):
         """
         tc = getattr(self, "_cached_tc", None) or _text_color()
         tcs = getattr(self, "_cached_tcs", None) or _text_color(secondary=True)
+        # 裸 QLabel 的 QSS 带 font-size 时 Qt 会用应用默认字体族渲染（非全局字体）。
+        # qfluentwidgets 的 setFontFamilies 只管它自己的组件，管不到裸 QLabel
+        # → 必须在 QSS 里显式写 font-family（与代理页记录行 _refresh_records_ui 同款）。
+        ff = getattr(self, "_cached_font_family", "") or ""
+        ff_qss = f" font-family: '{ff}';" if ff else ""
         row = QWidget(self._markets_content)
         row.setStyleSheet("background: rgba(128,128,128,0.08); border-radius: 8px;")
         h = QHBoxLayout(row)
@@ -5864,10 +5892,11 @@ class MarketplaceCard(QWidget):
         name_row_layout.setContentsMargins(0, 0, 0, 0)
         name_row_layout.setSpacing(6)
 
-        name_label = QLabel(name_text, name_row)
+        # 名称用 _ElidedLabel：长名自动中间省略 + tooltip 全文，不再把徽标挤出行
+        name_label = _ElidedLabel(name_text, name_row)
         name_label.setObjectName("marketRowName")
-        name_label.setStyleSheet(f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;")
-        name_row_layout.addWidget(name_label)
+        name_label.setStyleSheet(f"color: {tc}; font-weight: bold; font-size: 18px; background: transparent;{ff_qss}")
+        name_row_layout.addWidget(name_label, 1)
 
         # 拉取状态徽标（读 manager 持久化状态；无记录 → 未拉取）
         status_lb = QLabel("", name_row)
@@ -5876,17 +5905,16 @@ class MarketplaceCard(QWidget):
         self._market_status_labels[src_def["name"]] = status_lb
         self._refresh_market_status_label(src_def["name"])
 
-        name_row_layout.addStretch(1)
         info.addWidget(name_row)
 
         src = src_def.get("source", {})
         src_type = src.get("source", "url")
         src_text = src.get("repo", src.get("url", "unknown"))
-        if len(src_text) > 60:
-            src_text = src_text[:57] + "..."
-        url_label = QLabel(src_text, row)
+        # URL 用 _ElidedLabel：窄行自动中间省略 + tooltip 全文
+        # （原为 len>60 硬截断加 "..."，全文无法查看）
+        url_label = _ElidedLabel(src_text, row)
         url_label.setObjectName("marketRowUrl")
-        url_label.setStyleSheet(f"color: {tcs}; font-size: 14px; background: transparent;")
+        url_label.setStyleSheet(f"color: {tcs}; font-size: 14px; background: transparent;{ff_qss}")
         info.addWidget(url_label)
 
         h.addLayout(info, 1)

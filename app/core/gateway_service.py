@@ -166,14 +166,17 @@ class GatewayService(QObject):
             # [PERF] 引擎构造不再阻塞启动关键路径：_ensure_engine 触发的懒加载
             # import 链（GatewayEngine → adapters → mcp SDK 3s + tool_executor
             # 1.4s + SessionStore DB 迁移）实测 ~8.5s，是 create_instance 的最大
-            # 单项。延迟到首帧后（事件循环首拍）执行，tm.show() 大幅提前。
-            # 时序安全：
+            # 单项。时序安全：
             # - 首批外部平台消息早于引擎就绪 → _on_gateway_input 的
             #   _ensure_engine 自愈守卫兜底（幂等 + 5s 冷却）
             # - 应用退出早于引擎就绪 → stop() 只动 _manager，_engine=None 无害
+            # [PERF 2026-09-14] singleShot(0) → 4000ms：首帧后立即预热仍落在启动
+            # 高峰窗口（UI 插件装载/后端延迟创建并发期），实测 _ensure_engine 占
+            # 主线程 ~370ms（含 ToolExecutor 重复初始化日志）。延后 4s 错峰执行，
+            # 首条平台消息早到仍由自愈守卫兜底。
             from PyQt5.QtCore import QTimer
 
-            QTimer.singleShot(0, self._ensure_engine)
+            QTimer.singleShot(4000, self._ensure_engine)
 
             self._manager.start_all_async()
         except Exception as e:

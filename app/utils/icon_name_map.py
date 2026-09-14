@@ -33,6 +33,8 @@ ICON_NAME_TO_FILE = {
     "团队": "团队.svg",
     "复制": "复制.svg",
     "大模型": "大模型.svg",
+    "chart": "chart.svg",
+    "setting": "setting.svg",
     "字体": "字体.svg",
     "字体大小": "字体大小.svg",
     "导入": "导入.svg",

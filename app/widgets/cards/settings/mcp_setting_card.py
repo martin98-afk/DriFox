@@ -1109,6 +1109,7 @@ class MCPListSettingCard(ExpandSettingCard):
         while self.viewLayout.count():
             item = self.viewLayout.takeAt(0)
             if item.widget():
+                item.widget().hide()
                 item.widget().deleteLater()
 
         servers = self._get_servers()
@@ -1128,10 +1129,11 @@ class MCPListSettingCard(ExpandSettingCard):
                 self._server_rows[server_data.get("name", "")] = row
                 self.viewLayout.addWidget(row)
 
-        # 处理异步删除（deleteLater）+ 强制布局计算，确保 sizeHint 正确
-        from PyQt5.QtCore import QCoreApplication
-
-        QCoreApplication.processEvents()
+        # 处理异步删除（deleteLater）+ 强制布局计算，确保 sizeHint 正确。
+        # ★ 原实现在这里 QCoreApplication.processEvents()：泵走当时事件队列里的
+        # 全部事件，本函数耗时因此变成"那一刻队列里积压了什么"（同 hook/lsp 卡，
+        # 实测把首建成本放大 4~10 倍，且可能事件重入构造出第二张设置卡 P024）。
+        # 布局尺寸不需要它：takeAt 已把 item 摘出布局，sizeHint 不再计入。
         self.viewLayout.activate()
         self.view.updateGeometry()
 
@@ -1145,8 +1147,8 @@ class MCPListSettingCard(ExpandSettingCard):
 
         # 刷新状态指示灯
         self._refresh_status_dots()
-        # 启动状态轮询（卡片展开时持续刷新）
-        self._status_timer.start()
+        # 启动状态轮询（仅在展开 + 可见时，见 _sync_status_timer）
+        self._sync_status_timer()
 
         # 更新头部 subtitle（服务器计数 + token 占用）
         self._update_mcp_token_count()
@@ -1154,6 +1156,30 @@ class MCPListSettingCard(ExpandSettingCard):
         # 重要：新创建的行/标签未应用字体大小，需要重新刷新
         # 否则会回退到 qfluentwidgets 默认的 14px 硬编码字体
         apply_font_size_to_widget(self, 14)
+
+    def _sync_status_timer(self):
+        """状态轮询只在「展开 + 可见」时跑
+
+        ★ 原实现在 _refresh 末尾无条件 start()，而 _refresh 在卡片构造时就跑过
+        一次 —— 于是 3s 轮询从设置卡构造那刻起就在主线程空转，哪怕设置面板根本
+        没打开（每次还带一次 token 估算）。与 LSP 卡同款缺陷，同一套修法。
+        """
+        if self.isExpand and not self.isHidden():
+            self._status_timer.start()
+        else:
+            self._status_timer.stop()
+
+    def setExpand(self, isExpand: bool):
+        super().setExpand(isExpand)
+        self._sync_status_timer()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._sync_status_timer()
+
+    def hideEvent(self, event):
+        self._status_timer.stop()
+        super().hideEvent(event)
 
     def refresh_style(self):
         """主题变更时刷新所有行的命令描述颜色"""

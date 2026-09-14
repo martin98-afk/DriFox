@@ -6,6 +6,7 @@
 """
 
 import functools
+import json
 import os
 import re
 import threading
@@ -23,6 +24,60 @@ if TYPE_CHECKING:
 
 # re-export：让 `from app.plugins.registries.ui_plugin_registry import WorkspacePageInfo` 直接可用
 from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo  # noqa: E402,F401
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UI 命令快捷键持久化（user-custom/shortcuts.json）
+# ═══════════════════════════════════════════════════════════════════════════
+# Why 不走 user-custom/commands/*.md 兜底：UI 插件命令名常带冒号
+# （如 quick-screenshot:quick-screenshot），写 md 时文件名安全化（: → __），
+# 重启后 md 以 stem 注册成孤儿命令，快捷键落不到 UI 命令上。
+# 改存名字原样的 JSON 映射，_apply_ui_command 时查表带入 shortcut。
+# 注销 UI 命令时映射保留：插件重装后快捷键自动恢复。
+
+_UI_SHORTCUTS_REL = Path("plugins/user-custom/shortcuts.json")
+_shortcuts_cache: Optional[Dict[str, str]] = None
+
+
+def _get_ui_shortcuts_file() -> Path:
+    from app.utils.utils import get_app_data_dir
+
+    return get_app_data_dir() / _UI_SHORTCUTS_REL
+
+
+def load_ui_command_shortcuts() -> Dict[str, str]:
+    """读取 UI 命令快捷键映射（模块级缓存，保存时同步更新）"""
+    global _shortcuts_cache
+    if _shortcuts_cache is not None:
+        return dict(_shortcuts_cache)
+    path = _get_ui_shortcuts_file()
+    result: Dict[str, str] = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                result = {str(k): str(v) for k, v in data.items() if str(v)}
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] shortcuts.json 解析失败，忽略: {e}")
+    _shortcuts_cache = result
+    return dict(result)
+
+
+def save_ui_command_shortcut(name: str, shortcut: str) -> None:
+    """写入一条 UI 命令快捷键并落盘；shortcut 为空串时删除该条"""
+    global _shortcuts_cache
+    mapping = load_ui_command_shortcuts()
+    if shortcut:
+        mapping[name] = shortcut
+    else:
+        mapping.pop(name, None)
+    path = _get_ui_shortcuts_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(mapping, indent=2, ensure_ascii=False), encoding="utf-8")
+        _shortcuts_cache = dict(mapping)
+    except Exception as e:
+        logger.error(f"[UIPluginRegistry] shortcuts.json 写入失败: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1598,6 +1653,28 @@ class UIPluginRegistry:
         infos.sort(key=lambda i: -i.priority)
         return infos
 
+    def unregister_auto_config_cards(self, plugin_name: str) -> None:
+        """移除插件的 config_schema 自动设置卡（E1，metadata.auto_config_card）。
+
+        与 unload_plugin 分离：自动卡的清理只由 manifest 层触发
+        （PluginManager._unregister_config_schema，插件真正卸载/schema 删除时）；
+        ui 组件的 unload/load 不触碰它，避免热重载误杀 rescan 刚注册的卡。
+        """
+        self._settings_cards = {
+            k: v
+            for k, v in self._settings_cards.items()
+            if not (v.plugin_name == plugin_name and v.metadata.get("auto_config_card"))
+        }
+        for region in self._regions.values():
+            region["entries"] = {
+                k: v
+                for k, v in region["entries"].items()
+                if not (
+                    v.plugin_name == plugin_name
+                    and (getattr(v.payload, "metadata", None) or {}).get("auto_config_card")
+                )
+            }
+
     # ── Phase E：Region 通用挂载模型 ──
 
     def declare_region(self, region_id: str, kind: str, description: str = "") -> None:
@@ -1762,15 +1839,37 @@ class UIPluginRegistry:
         # handler 始终刷新：命令可能被 register_all_commands 清空后由本账本重建，
         # 且热重载后闭包指向新实例
         FunctionCommandHandlers.register(name, handler)
-        if not cmd_mgr.has_command(name):
+        # 快捷键以 shortcuts.json 为准。同名外部命令已注册时（如旧版兜底 md 残留，
+        # 先于 UI 注册且带过期 shortcut），也重注册覆盖；register 同名同类型时
+        # 保留旧 parameters/prompt_text，此处覆盖只影响 shortcut/description。
+        saved_shortcut = load_ui_command_shortcuts().get(name, "")
+        if not cmd_mgr.has_command(name) or saved_shortcut:
             cmd_mgr.register(
                 name=name,
                 command_type=CommandType.FUNCTION,
                 description=description,
                 argument_hint="",
+                shortcut=saved_shortcut,
             )
         self._ui_applied_names.add(name)
         self._ui_command_names.add(name)
+        # 带快捷键的 UI 命令落表后需重建 QShortcut 绑定（幂等；无快捷键时跳过避免启动期浪费）。
+        # 守卫：仅 QApplication 与活窗口均已就绪时才 rebind——_rebind 会惰性创建
+        # TrayManager 单例，启动早期/无头环境（测试）拉起托盘会 native crash。
+        # 冷启动场景由主窗口初始化时的 _register_command_shortcuts 全量扫描兑底。
+        if saved_shortcut:
+            try:
+                from PyQt5.QtWidgets import QApplication
+
+                from app.core import window_registry
+
+                if QApplication.instance() is not None and window_registry.alive_window_instances():
+                    from app.core.builtin_commands import _rebind_command_shortcuts
+
+                    logger.info(f"[UIPluginRegistry] UI 命令 /{name} 带快捷键落表，重建 QShortcut 绑定")
+                    _rebind_command_shortcuts()
+            except Exception:
+                logger.warning(f"[UIPluginRegistry] /{name} 快捷键重绑失败", exc_info=True)
 
     def unregister_ui_command(self, name: str) -> None:
         """注销单条 UI 命令（账本 + CommandManager + 处理器三处同步）
@@ -1791,6 +1890,19 @@ class UIPluginRegistry:
             FunctionCommandHandlers._handlers.pop(name, None)
         except Exception:
             pass
+        # 注销带快捷键的 UI 命令后重建 QShortcut，清掉幽灵绑定（环境守卫同 _apply_ui_command）
+        if load_ui_command_shortcuts().get(name, ""):
+            try:
+                from PyQt5.QtWidgets import QApplication
+
+                from app.core import window_registry
+
+                if QApplication.instance() is not None and window_registry.alive_window_instances():
+                    from app.core.builtin_commands import _rebind_command_shortcuts
+
+                    _rebind_command_shortcuts()
+            except Exception:
+                pass
 
     def unregister_ui_commands(self, owner: str) -> None:
         """按归属插件批量注销其全部 UI 命令（含浮动卡 / 工作台页 / 工作区页）"""
@@ -2308,16 +2420,20 @@ class UIPluginRegistry:
         # 记录 window_id → 宿主映射，供 unload 时清理容器使用
         self._window_main_widgets[window_id] = host
 
+        # tab × 关闭钮 → registry 同步清理卡片状态并摘 tab。
+        # ★ 幂等标志必须挂在 panel 上：registry 是全局单例、panel 每宿主一份，挂在 self 上
+        #   会让第二个 panel 永远接不上线；接线也必须留在 if widget is None 之外——
+        #   卡片实例复用路径此前会整段跳过接线。
+        # ★ 不用 type=Qt.UniqueConnection：本方法多次进入时标志已防重，
+        #   UniqueConnection 与普通函数组合在各绑定下语义不一（PyQt5 重复连会抛 TypeError）。
+        #   （同步 pyside6 ad524790）
+        if not getattr(panel, "_drifox_card_close_wired", False):
+            panel.card_tab_close_requested.connect(self._close_workbench_card_tab)
+            panel._drifox_card_close_wired = True
+
         win_instances = self._card_widget_instances.setdefault(window_id, {})
         widget = win_instances.get(card_id)
         if widget is None:
-            # tab × 关闭钮 → registry 同步清理卡片状态并摘 tab。
-            # UniqueConnection 防止多次 open 重复连接导致 _close_workbench_card_tab 多次调用。
-            if not getattr(self, "_workbench_card_signal_wired", False):
-                from PyQt5.QtCore import Qt as _Qt
-
-                panel.card_tab_close_requested.connect(self._close_workbench_card_tab, type=_Qt.UniqueConnection)
-                self._workbench_card_signal_wired = True
             widget = card_info.widget_class(parent=panel)
             if card_info.metadata.get("stack"):
                 try:
@@ -2373,11 +2489,25 @@ class UIPluginRegistry:
             cards.discard(card_id)
         host = self._resolve_global_host()
         panel = getattr(host, "workbench_panel", None) if host is not None else None
-        if panel is not None:
-            try:
-                panel.close_card_tab(card_id)
-            except Exception:
-                pass
+        if panel is None:
+            # 静默 return 会让「点了没反应」永远查不到证据，必须留痕（同步 pyside6 ad524790）
+            logger.warning(
+                "[UIPluginRegistry] 关闭卡片页签时拿不到工作台面板，tab 不会被摘除 (card_id=%s, host=%s)",
+                card_id,
+                type(host).__name__ if host is not None else None,
+            )
+            return
+        try:
+            closed = panel.close_card_tab(card_id)
+        except Exception:
+            logger.exception(
+                "[UIPluginRegistry] panel.close_card_tab 异常，页签摘除中断 (card_id=%s)", card_id
+            )
+            return
+        if not closed:
+            logger.warning(
+                "[UIPluginRegistry] 面板回应该页签不存在，可能已与实际显示脱节 (card_id=%s)", card_id
+            )
 
     def sync_workbench_cards_to_tab(self, scope: Optional[str]) -> None:
         """切换对话标签页时按目标标签页投影工作台卡片 tab（per-tab 隔离）
@@ -2842,7 +2972,15 @@ class UIPluginRegistry:
         self._sidebar_items = {k: v for k, v in self._sidebar_items.items() if v.plugin_name != plugin_name}
         self._input_buttons = {k: v for k, v in self._input_buttons.items() if v.plugin_name != plugin_name}
         self._context_actions = {k: v for k, v in self._context_actions.items() if v.plugin_name != plugin_name}
-        self._settings_cards = {k: v for k, v in self._settings_cards.items() if v.plugin_name != plugin_name}
+        # config_schema 自动设置卡（metadata.auto_config_card）保留：其生命周期归
+        # manifest 层（PluginManager._unregister_config_schema），ui 组件的 unload/load
+        # 不得误伤——否则 targeted 热重载「rescan 注册卡 → ui 卸载清卡」会让插件配置卡
+        # 从设置页消失，直到下一次全量扫描才回来（2026-09-14 安装/更新后配置卡不刷新回归）。
+        self._settings_cards = {
+            k: v
+            for k, v in self._settings_cards.items()
+            if v.plugin_name != plugin_name or v.metadata.get("auto_config_card")
+        }
         # 清理工作区页面槽（Phase G）
         self._workspace_pages = {k: v for k, v in self._workspace_pages.items() if v.plugin_name != plugin_name}
         # 清理右侧工作台页签槽位（含其联动命令）
@@ -2855,9 +2993,14 @@ class UIPluginRegistry:
         self.unregister_titlebar_widgets(plugin_name)
         # 清理服务槽
         self._services = {k: v for k, v in self._services.items() if v[0] != plugin_name}
-        # 清理通用区域条目（Phase E）
+        # 清理通用区域条目（Phase E）；settings: 分区中 auto_config_card 条目保留（同上）
         for region in self._regions.values():
-            region["entries"] = {k: v for k, v in region["entries"].items() if v.plugin_name != plugin_name}
+            region["entries"] = {
+                k: v
+                for k, v in region["entries"].items()
+                if v.plugin_name != plugin_name
+                or (getattr(v.payload, "metadata", None) or {}).get("auto_config_card")
+            }
         # 清理 UI 模块槽（Phase F）：仅移除该 plugin 的实现，其余保留
         for module_id, impls in list(self._ui_modules.items()):
             kept = [s for s in impls if s[0] != plugin_name]
