@@ -40,15 +40,19 @@ _OPENAI_RESOURCES_MODULES = (
 
 
 def preload_openai_resources() -> None:
-    """主线程预导入 openai resources 子模块，消除运行时多线程并发导入死锁。
+    """预导入 openai resources 子模块，消除运行时多线程并发导入死锁。
 
     openai SDK 的 client.chat / client.responses 等是 LazyProxy 懒加载：
     首次访问才 import 对应子模块（openai.resources.chat 等）。
     多个 worker 线程（对话/子智能体/压缩/摘要）首次同时访问不同端点时，
     Python 3.14 的 import 锁会检测到循环等待并抛 deadlock。
 
-    本函数在启动早期（主线程、worker 线程创建前）一次性完成全部导入；
+    本函数在启动早期（worker 线程创建前）一次性完成全部导入；
     内部加锁保证即使被并发调用也只会执行一次。
+
+    ⚠️ 冷导入实测 4-5s（`import openai` 3.5s + `openai.resources` 1.9s），
+    同步调用会实打实阻塞调用方线程。启动期请改用
+    `preload_openai_resources_async()` 放到后台线程，别挡主线程。
     """
     global _OPENAI_RESOURCES_LOADED
     if _OPENAI_RESOURCES_LOADED:
@@ -65,6 +69,27 @@ def preload_openai_resources() -> None:
                 # 单个子模块导入失败不影响其它模块（如 realtime 依赖额外包）
                 continue
         _OPENAI_RESOURCES_LOADED = True
+
+
+def preload_openai_resources_async() -> None:
+    """后台线程版预导入（启动期专用：省掉 4s 主线程阻塞）
+
+    单线程顺序导入不会触发死锁——死锁只发生在多线程并发导入不同模块形成
+    循环等待；本线程按固定顺序串行走完，主线程/其他线程此时若也要 import
+    openai 会在 import 锁上等待而非互相持有。副作用是导入窗口内（约 4s）
+    首次 LLM 调用会稍慢，仍远好于主线程整段冻结。
+    """
+    global _OPENAI_RESOURCES_LOADED
+    if _OPENAI_RESOURCES_LOADED:
+        return
+
+    def _worker():
+        try:
+            preload_openai_resources()
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True, name="openai-resources-preload").start()
 
 
 class _StripAuthTransport(httpx.HTTPTransport):

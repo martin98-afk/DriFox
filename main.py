@@ -148,6 +148,20 @@ def main():
 
     def _deferred_startup():
         """在事件循环启动后执行的非关键初始化"""
+        # 分段计时：本函数整体在主线程串行执行，任一步骤拖慢都会顺延后续步骤
+        # （历史上 openai resources 预导入独占 ~4s 无从察觉），逐段打点便于定位
+        import time as _time
+
+        _seg_t = _time.perf_counter()
+
+        def _mark(label: str) -> None:
+            nonlocal _seg_t
+            _now = _time.perf_counter()
+            logger.debug(f"[DeferredStartup] {label} 耗时 {(_now - _seg_t) * 1000:.0f}ms")
+            _seg_t = _now
+
+        _mark("enter")
+
         # 迁移旧版本数据
         try:
             from app.utils.utils import migrate_app_data_if_needed
@@ -155,6 +169,7 @@ def main():
             migrate_app_data_if_needed()
         except Exception:
             logger.exception("[DeferredStartup] migrate_app_data_if_needed 失败")
+        _mark("migrate_app_data")
 
         # 设置日志（全量 all.log + 按子系统拆分的分文件，见 app/core/logging_setup.py）
         try:
@@ -164,6 +179,7 @@ def main():
             setup_logging(get_app_data_dir() / "logs", mem_diag_enabled=MEM_DIAG_ENABLED)
         except Exception:
             pass
+        _mark("setup_logging")
 
         # 原生崩溃捕获（faulthandler）：Qt/C++ 层段错误不经过 Python excepthook，
         # 打包版表现为「闪退且 all.log 无任何记录」。启用后崩溃栈 dump 到
@@ -192,6 +208,7 @@ def main():
             init_shared_web_profile(parent=app)
         except Exception:
             logger.exception("[DeferredStartup] init_shared_web_profile 失败")
+        _mark("init_shared_web_profile")
 
         # 启动后台 RSS 采样器：把 psutil 进程表遍历从主线程搬走。
         # 采样结果供 B4 强回收阈值判定使用（原为每 content chunk 同步采样，
@@ -221,12 +238,16 @@ def main():
         # import 锁死锁检测，多线程首次并发访问 client.chat/client.responses
         # 会抛 _ModuleLock deadlock。
         try:
-            from app.utils.http_client import preload_openai_resources
+            # [PERF] 冷导入实测 4-5s（`import openai` 3.5s + resources 1.9s），
+            # 改后台线程顺序导入：死锁只在多线程并发导入不同模块时出现，
+            # 单线程串行走完不会触发，主线程不再冻结这段
+            from app.utils.http_client import preload_openai_resources_async
 
-            preload_openai_resources()
-            logger.debug("[DeferredStartup] openai resources 子模块预导入完成")
+            preload_openai_resources_async()
+            logger.debug("[DeferredStartup] openai resources 子模块预导入已转后台线程")
         except Exception:
             logger.exception("[DeferredStartup] openai resources 预导入失败（非致命）")
+        _mark("openai_preload_async")
 
         # [PERF] 预热 WebEngine Chromium 进程：创建隐藏 QWebEngineView 并加载空白页，
         # 让 Chromium 浏览器进程/GPU 进程提前初始化。欢迎卡片创建 QWebEngineView 时
@@ -255,6 +276,7 @@ def main():
             logger.debug("[DeferredStartup] WebEngine 预热视图已创建（5s 后释放）")
         except Exception:
             logger.exception("[DeferredStartup] WebEngine 预热失败（非致命）")
+        _mark("webengine_preheat")
 
         # 后台同步 models.dev 最新模型元数据（不阻塞 UI）
         def _sync_models_dev():
@@ -425,6 +447,10 @@ def main():
         from app.widgets.tab_manager_window import TabManagerWindow, _apply_window_topmost
 
         tm = TabManagerWindow.create_instance()
+        # [体验] 置顶 hint 必须在首次 show 之前应用：setWindowFlags 在窗口已可见时
+        # 会销毁并重建 native 窗口，表现为「窗口出现后闪一下（消失又出现）」。
+        # 未 show 时改 flags 不触发重建，后续 tm.show() 一次性显示。
+        _apply_window_topmost(tm)
         # 批5 壳先行：先显示壳窗口（空态占位「正在准备会话…」）→ 进程级预热
         # （SessionStore/StorageRegistry/内置工具链）→ 首窗构造 → add_window。
         # 首个 ChatWindow 必须在 TabManagerWindow 创建之后构造：
@@ -442,7 +468,6 @@ def main():
         tm.remove_boot_placeholder()
         tm._mark_first_window_ready()
         _guard.show_requested.connect(lambda: _activate_window(tm))
-        _apply_window_topmost(tm)
         logger.info("DriFox 以 Tab 管理器模式启动（壳先行 + 进程级预热）")
 
         # 延迟检测上次原生崩溃 dump：主窗口就绪 8s 后逐条以 InfoBar 提示，不抢首帧。

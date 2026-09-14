@@ -3532,46 +3532,54 @@ class OpenAIChatToolWindow(ToolWindow):
             from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
 
             ui_registry = UIPluginRegistry.get_instance()
-            # 加载所有已启用的 UI 插件
-            self._load_all_ui_plugins()
-            # 标题栏 slot 补装：首窗 build 早于 UI 插件注册（首帧后延迟加载），
-            # build 时 slot 查空 → 无分支标签；此处注册表已就绪，补装一次
-            self._install_titlebar_widgets()
-            # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
-            ui_registry.re_register_all_commands()
-            # 多窗口隔离：为每个 UI 插件浮动卡片注册当前窗口的实例级处理器
-            for card_id, card_info in ui_registry.get_floating_cards().items():
-                if ":" in card_id:
-                    cmd_name = card_id
-                elif card_info.plugin_name in ("system",) or card_id == card_info.plugin_name:
-                    cmd_name = card_id
-                else:
-                    cmd_name = f"{card_info.plugin_name}:{card_id}"
-                if cmd_name in self._function_command_handlers:
-                    continue
-
-                def _make_handler(cid=card_id, mw=self):
-                    return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
-
-                self._function_command_handlers[cmd_name] = _make_handler()
-            # Phase D：插件加载完成后构建输入区插件按钮（首帧时注册表为空不渲染）
-            try:
-                self._build_plugin_input_buttons()
-            except Exception as e:
-                logger.error(f"[MainWidget] 输入区插件按钮初始化失败: {e}")
-
-            # T5-2R: UI plugins load deferred; sidebar/titlebar built with empty
-            # registry during setup_ui, refresh here (idempotent chain)
-            try:
-                from app.widgets.tab_manager_window import TabManagerWindow
-
-                _tm = TabManagerWindow.get_instance()
-                if _tm is not None:
-                    _tm._update_shared_launcher()
-            except Exception:
-                logger.exception("[UIPluginDeferred] Failed to refresh shared launcher")
         except Exception as e:
-            logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
+            logger.error(f"[MainWidget] UI plugin registry 获取失败: {e}")
+            return
+
+        def _after_plugins_loaded():
+            """插件全部装载完成后执行（装载可能跨多帧，见 _load_all_ui_plugins）"""
+            try:
+                # 标题栏 slot 补装：首窗 build 早于 UI 插件注册（首帧后延迟加载），
+                # build 时 slot 查空 → 无分支标签；此处注册表已就绪，补装一次
+                self._install_titlebar_widgets()
+                # 确保 UI 插件命令在 CommandManager 中（覆盖 register_all_commands 的清理）
+                ui_registry.re_register_all_commands()
+                # 多窗口隔离：为每个 UI 插件浮动卡片注册当前窗口的实例级处理器
+                for card_id, card_info in ui_registry.get_floating_cards().items():
+                    if ":" in card_id:
+                        cmd_name = card_id
+                    elif card_info.plugin_name in ("system",) or card_id == card_info.plugin_name:
+                        cmd_name = card_id
+                    else:
+                        cmd_name = f"{card_info.plugin_name}:{card_id}"
+                    if cmd_name in self._function_command_handlers:
+                        continue
+
+                    def _make_handler(cid=card_id, mw=self):
+                        return lambda args: ui_registry._show_floating_card(cid, main_widget=mw)
+
+                    self._function_command_handlers[cmd_name] = _make_handler()
+                # Phase D：插件加载完成后构建输入区插件按钮（首帧时注册表为空不渲染）
+                try:
+                    self._build_plugin_input_buttons()
+                except Exception as e:
+                    logger.error(f"[MainWidget] 输入区插件按钮初始化失败: {e}")
+
+                # T5-2R: UI plugins load deferred; sidebar/titlebar built with empty
+                # registry during setup_ui, refresh here (idempotent chain)
+                try:
+                    from app.widgets.tab_manager_window import TabManagerWindow
+
+                    _tm = TabManagerWindow.get_instance()
+                    if _tm is not None:
+                        _tm._update_shared_launcher()
+                except Exception:
+                    logger.exception("[UIPluginDeferred] Failed to refresh shared launcher")
+            except Exception as e:
+                logger.error(f"[MainWidget] UI plugin deferred init failed: {e}")
+
+        # 加载所有已启用的 UI 插件（慢插件会让出事件循环，完成后回调继续）
+        self._load_all_ui_plugins(on_done=_after_plugins_loaded)
 
     def _on_plugin_input_button_clicked(self, info):
         """输入区插件按钮点击：组上下文（window_id + button_id）派发 info.on_click"""
@@ -3810,13 +3818,25 @@ class OpenAIChatToolWindow(ToolWindow):
         except Exception as e:
             logger.warning(f"[MainWidget] 标题栏分支标签补装失败: {e}")
 
-    def _load_all_ui_plugins(self):
-        """加载所有已启用的 UI 插件"""
+    # 单个 UI 插件装载超过该阈值时让出事件循环一帧（防主线程连续冻结）
+    _UI_PLUGIN_YIELD_MS = 200
+
+    def _load_all_ui_plugins(self, on_done=None):
+        """加载所有已启用的 UI 插件
+
+        Args:
+            on_done: 全部装载完成后调用（无参）。装载走「逐个 + 慢插件让出一帧」
+                的分批链，完成时机可能是若干事件循环之后，因此后续依赖插件就绪
+                的步骤（标题栏 slot / 命令重放 / 输入区按钮）必须挂在这个回调上，
+                不能假设本方法返回即就绪。
+        """
         from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
         from app.plugins.managers.plugin_manager import PluginManager
 
         pm = PluginManager.get_instance()
         if not pm.is_initialized():
+            if on_done:
+                on_done()
             return
         registry = UIPluginRegistry.get_instance()
 
@@ -3827,6 +3847,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # 的浮动卡片 widget 被 deleteLater()，造成界面闪烁 / 状态丢失。
         # 窗口实例级的命令注册由 setup_ui 中后续的 for 循环处理，不受此影响。
         if registry.list_loaded_plugins():
+            if on_done:
+                on_done()
             return
 
         plugin_dirs = []
@@ -3837,9 +3859,41 @@ class OpenAIChatToolWindow(ToolWindow):
             if plugin.has_component("ui"):
                 plugin_dirs.append((plugin.name, plugin.path))
         logger.info(f"[MainWidget] Found {len(plugin_dirs)} UI-enabled plugins: {[p[0] for p in plugin_dirs]}")
-        count = registry.load_all_enabled_plugins(plugin_dirs)
-        if count > 0:
-            logger.info(f"[MainWidget] Loaded {count}/{len(plugin_dirs)} UI plugins")
+        self._load_ui_plugins_step(plugin_dirs, 0, 0, on_done)
+
+    def _load_ui_plugins_step(self, plugin_dirs, idx: int, loaded: int, on_done=None):
+        """逐个装载 UI 插件：单插件耗时超阈值时让出事件循环一帧
+
+        顺序与一次性装载完全一致（多数插件几十 ms，连续跑完不产生额外调度），
+        只在遇到慢插件（实测 browser 曾独占 3.4s）时插一帧，把连续数秒的主线程
+        冻结切成可响应的碎片；装载数量与最终注册表状态不变。
+        """
+        if idx >= len(plugin_dirs):
+            if loaded > 0:
+                logger.info(f"[MainWidget] Loaded {loaded}/{len(plugin_dirs)} UI plugins")
+            if on_done:
+                on_done()
+            return
+
+        name, path = plugin_dirs[idx]
+        t0 = time.perf_counter()
+        ok = False
+        try:
+            from app.plugins.registries.ui_plugin_registry import UIPluginRegistry
+
+            ok = UIPluginRegistry.get_instance().load_plugin(name, path)
+        except Exception as e:
+            logger.error(f"[MainWidget] UI 插件 {name} 装载失败: {e}")
+        cost_ms = (time.perf_counter() - t0) * 1000
+        if ok:
+            loaded += 1
+
+        next_call = lambda: self._load_ui_plugins_step(plugin_dirs, idx + 1, loaded, on_done)  # noqa: E731
+        if cost_ms >= self._UI_PLUGIN_YIELD_MS:
+            logger.info(f"[MainWidget] UI 插件 {name} 装载耗时 {cost_ms:.0f}ms（让出一帧继续）")
+            QTimer.singleShot(0, lambda: self._safe_timer_call(next_call))
+        else:
+            next_call()
 
     def _build_ui_context(self) -> Dict[str, Any]:
         """构建 UI 插件的上下文 dict

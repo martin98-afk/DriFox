@@ -1950,7 +1950,8 @@ class PluginHostService(QObject):
                 return result
 
             # 1. 重新扫描插件目录，获取变更详情
-            diff = pm.rescan()
+            # force_full（设置面板显式「重载插件」）时绕过目录签名短路，强制全量重扫
+            diff = pm.rescan(force=force_full)
             added = diff.get("added", [])
             removed = diff.get("removed", [])
             changed = diff.get("changed", [])
