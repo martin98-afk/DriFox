@@ -2,6 +2,9 @@
 """模型列表编辑器组件测试。
 
 覆盖：三元组接口、勾选写隐藏集、别名读写、批量导入切分、搜索过滤不改变底层数据。
+
+注意：QApplication 必须在 qfluentwidgets 首次使用前创建——否则 qconfig 的
+C++ 对象无效，后续构造 QWidget 报 RuntimeError（与其它 widget 测试同因）。
 """
 
 import sys
@@ -10,16 +13,14 @@ import pytest
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
+# 与 message_card 系列测试同因：Qt 属性 + QApplication 先于 qfluentwidgets
+QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+_APP = QApplication.instance() or QApplication(sys.argv)
+
 
 @pytest.fixture(scope="module", autouse=True)
 def _qapp():
-    from PyQt5.QtCore import QCoreApplication
-
-    QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    return app
+    return _APP
 
 
 @pytest.fixture
