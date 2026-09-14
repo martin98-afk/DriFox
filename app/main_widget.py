@@ -3375,15 +3375,8 @@ class OpenAIChatToolWindow(ToolWindow):
         # === 统一胶囊光晕底层 ===
         # 旧实现里两个 widget 各挂 QGraphicsDropShadowEffect，光晕只走各自局部
         # 轮廓 + 接缝相互遮挡 → 看起来"上半弧形发光、下半突兀"。现在改由
-        # InputGlowUnderlay 沿整个胶囊轮廓一次性自绘，per-widget shadow 保留壳
-        # 但归零，避免叠加污染。
-        if hasattr(self, "_input_card_primary_shadow"):
-            self._input_card_primary_shadow.setBlurRadius(0)
-            self._input_card_primary_shadow.setColor(QColor(0, 0, 0, 0))
-
-        if hasattr(self, "_input_card_ambient_shadow"):
-            self._input_card_ambient_shadow.setBlurRadius(0)
-            self._input_card_ambient_shadow.setColor(QColor(0, 0, 0, 0))
+        # InputGlowUnderlay 沿整个胶囊轮廓一次性自绘；_input_card / _input_card_wrapper
+        # 与 _bottom_toolbar_strip 均已不挂载 effect，故此处无需再对占位 shadow 归零。
 
         if hasattr(self, "_input_glow_underlay"):
             self._input_glow_underlay.set_color(QColor(Colors.INPUT_FOCUS_BORDER))
@@ -3412,17 +3405,8 @@ class OpenAIChatToolWindow(ToolWindow):
             # input_card 折叠到 0），同步一次确保 underlay 跟上
             self._position_input_glow_underlay()
 
-        # 工具栏：失焦保留轻微下投阴影（offset 0,4）增强"落地"感；
-        # 聚焦时光晕由 underlay 接管，工具栏自身阴影关闭，避免与 underlay 叠加。
-        if hasattr(self, "_bottom_toolbar_shadow"):
-            if focused:
-                self._bottom_toolbar_shadow.setBlurRadius(0)
-                self._bottom_toolbar_shadow.setOffset(0, 0)
-                self._bottom_toolbar_shadow.setColor(QColor(0, 0, 0, 0))
-            else:
-                self._bottom_toolbar_shadow.setBlurRadius(14)
-                self._bottom_toolbar_shadow.setOffset(0, 4)
-                self._bottom_toolbar_shadow.setColor(QColor(0, 0, 0, 70))
+        # 工具栏阴影已不再挂载（原因见 bottom_toolbar_module：其 blur 四周对称扩散，
+        # 会向上渗透进 _input_card 底部形成接缝暗带），故此处无需再按焦点态切换参数。
 
     def _init_builtin_commands(self):
         """注册并初始化所有内置命令"""
@@ -17347,6 +17331,10 @@ class OpenAIChatToolWindow(ToolWindow):
             "_interject_image_paths": list(image_paths),
         }
         self.backend._hook_message_queue.put(msg)
+        logger.info(
+            f"[Interject] 入队 win={getattr(self, '_window_id', '?')} "
+            f"backend={id(self.backend)} text={user_text[:40]!r}"
+        )
         if show_user_card:
             card = self._append_user_message(user_text, image_attachments=image_paths or None)
             if card is not None:
@@ -17431,7 +17419,12 @@ class OpenAIChatToolWindow(ToolWindow):
         if entry is None:
             return
         # 🛡️ 用 worker 真实状态判定：worker 已退出时插话会留在 hook 队列无人消费
-        if self._worker_actually_busy():
+        _busy = self._worker_actually_busy()
+        logger.info(
+            f"[QueueInsert] win={getattr(self, '_window_id', '?')} id={msg_id} "
+            f"worker_busy={_busy} ui_streaming={self._is_streaming}"
+        )
+        if _busy:
             self._interject_entry(entry, show_user_card=True)
         else:
             # 兜底：worker 已结束（理论上队首由自动续发出队）→ 直接作为新一轮发送
@@ -17537,6 +17530,7 @@ class OpenAIChatToolWindow(ToolWindow):
         """
         if getattr(self, "_is_destroyed", False):
             return
+        logger.info(f"[Interject] worker 消费插话 {count} 条，开新回复卡 win={getattr(self, '_window_id', '?')}")
         old = self._current_assistant_card
         if old is not None and not _is_sip_deleted(old):
             old.stop_streaming_anim()

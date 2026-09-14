@@ -6,6 +6,7 @@
 """
 
 import functools
+import json
 import os
 import re
 import threading
@@ -23,6 +24,60 @@ if TYPE_CHECKING:
 
 # re-export：让 `from app.plugins.registries.ui_plugin_registry import WorkspacePageInfo` 直接可用
 from app.plugins.contracts.ui_page import WorkspacePageInfo as WorkspacePageInfo  # noqa: E402,F401
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# UI 命令快捷键持久化（user-custom/shortcuts.json）
+# ═══════════════════════════════════════════════════════════════════════════
+# Why 不走 user-custom/commands/*.md 兜底：UI 插件命令名常带冒号
+# （如 quick-screenshot:quick-screenshot），写 md 时文件名安全化（: → __），
+# 重启后 md 以 stem 注册成孤儿命令，快捷键落不到 UI 命令上。
+# 改存名字原样的 JSON 映射，_apply_ui_command 时查表带入 shortcut。
+# 注销 UI 命令时映射保留：插件重装后快捷键自动恢复。
+
+_UI_SHORTCUTS_REL = Path("plugins/user-custom/shortcuts.json")
+_shortcuts_cache: Optional[Dict[str, str]] = None
+
+
+def _get_ui_shortcuts_file() -> Path:
+    from app.utils.utils import get_app_data_dir
+
+    return get_app_data_dir() / _UI_SHORTCUTS_REL
+
+
+def load_ui_command_shortcuts() -> Dict[str, str]:
+    """读取 UI 命令快捷键映射（模块级缓存，保存时同步更新）"""
+    global _shortcuts_cache
+    if _shortcuts_cache is not None:
+        return dict(_shortcuts_cache)
+    path = _get_ui_shortcuts_file()
+    result: Dict[str, str] = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                result = {str(k): str(v) for k, v in data.items() if str(v)}
+        except Exception as e:
+            logger.warning(f"[UIPluginRegistry] shortcuts.json 解析失败，忽略: {e}")
+    _shortcuts_cache = result
+    return dict(result)
+
+
+def save_ui_command_shortcut(name: str, shortcut: str) -> None:
+    """写入一条 UI 命令快捷键并落盘；shortcut 为空串时删除该条"""
+    global _shortcuts_cache
+    mapping = load_ui_command_shortcuts()
+    if shortcut:
+        mapping[name] = shortcut
+    else:
+        mapping.pop(name, None)
+    path = _get_ui_shortcuts_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(mapping, indent=2, ensure_ascii=False), encoding="utf-8")
+        _shortcuts_cache = dict(mapping)
+    except Exception as e:
+        logger.error(f"[UIPluginRegistry] shortcuts.json 写入失败: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1762,15 +1817,28 @@ class UIPluginRegistry:
         # handler 始终刷新：命令可能被 register_all_commands 清空后由本账本重建，
         # 且热重载后闭包指向新实例
         FunctionCommandHandlers.register(name, handler)
-        if not cmd_mgr.has_command(name):
+        # 快捷键以 shortcuts.json 为准。同名外部命令已注册时（如旧版兜底 md 残留，
+        # 先于 UI 注册且带过期 shortcut），也重注册覆盖；register 同名同类型时
+        # 保留旧 parameters/prompt_text，此处覆盖只影响 shortcut/description。
+        saved_shortcut = load_ui_command_shortcuts().get(name, "")
+        if not cmd_mgr.has_command(name) or saved_shortcut:
             cmd_mgr.register(
                 name=name,
                 command_type=CommandType.FUNCTION,
                 description=description,
                 argument_hint="",
+                shortcut=saved_shortcut,
             )
         self._ui_applied_names.add(name)
         self._ui_command_names.add(name)
+        # 带快捷键的 UI 命令落表后需重建 QShortcut 绑定（幂等；无快捷键时跳过避免启动期浪费）
+        if saved_shortcut:
+            try:
+                from app.core.builtin_commands import _rebind_command_shortcuts
+
+                _rebind_command_shortcuts()
+            except Exception:
+                pass
 
     def unregister_ui_command(self, name: str) -> None:
         """注销单条 UI 命令（账本 + CommandManager + 处理器三处同步）
@@ -1791,6 +1859,14 @@ class UIPluginRegistry:
             FunctionCommandHandlers._handlers.pop(name, None)
         except Exception:
             pass
+        # 注销带快捷键的 UI 命令后重建 QShortcut，清掉幽灵绑定
+        if load_ui_command_shortcuts().get(name, ""):
+            try:
+                from app.core.builtin_commands import _rebind_command_shortcuts
+
+                _rebind_command_shortcuts()
+            except Exception:
+                pass
 
     def unregister_ui_commands(self, owner: str) -> None:
         """按归属插件批量注销其全部 UI 命令（含浮动卡 / 工作台页 / 工作区页）"""

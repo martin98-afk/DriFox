@@ -697,6 +697,10 @@ class OpenAIChatWorker(QThread):
                 m.pop("_interject_text", None)
                 m.pop("_interject_image_paths", None)
             if interject_count:
+                logger.info(
+                    f"[Interject] 消费插话 {interject_count} 条 session={str(self.session_id)[:8]} "
+                    f"backend={id(getattr(self.tool_executor, '_backend', None))}"
+                )
                 # 信号先于本轮 _make_api_call 的流式 chunk（queued 保序）→ UI 新卡先建好
                 self._emit_with_callback(
                     "queued_user_injected", self.queued_user_injected, interject_count

@@ -313,24 +313,28 @@ class BottomToolbarModule(UIModule):
         # 避免两个独立 widget 各挂 QGraphicsDropShadowEffect 时光晕只走局部轮廓、
         # 接缝处互相遮挡导致"只上半弧形发光"的诡异观感。
         host._input_glow_underlay = InputGlowUnderlay(host)
-        # 旧的 input_card 主光 / wrapper 环境光保留为占位但默认关闭：发光统一由 underlay 提供。
-        # 之所以不直接删除，是为了保留 setGraphicsEffect 钩子，方便未来需要时复用。
+        # 旧的 input_card 主光 / wrapper 环境光：对象保留作 setGraphicsEffect 钩子，
+        # 但**不再挂载**。两者都是 blur=0 + 全透明色，不产生任何像素，发光已统一由
+        # InputGlowUnderlay 提供；不挂载可让输入卡与工具条走同一条直绘路径
+        # （挂载会把 widget 改为离屏 pixmap 重合成，属无收益的额外开销）。
         host._input_card_primary_shadow = QGraphicsDropShadowEffect(host._input_card)
         host._input_card_primary_shadow.setOffset(0, 0)
         host._input_card_primary_shadow.setBlurRadius(0)
         host._input_card_primary_shadow.setColor(QColor(0, 0, 0, 0))
-        host._input_card.setGraphicsEffect(host._input_card_primary_shadow)
         host._input_card_ambient_shadow = QGraphicsDropShadowEffect(host._input_card_wrapper)
         host._input_card_ambient_shadow.setOffset(0, 0)
         host._input_card_ambient_shadow.setBlurRadius(0)
         host._input_card_ambient_shadow.setColor(QColor(0, 0, 0, 0))
-        host._input_card_wrapper.setGraphicsEffect(host._input_card_ambient_shadow)
-        # 工具栏自身只保留失焦态的轻微下投阴影增强"落地"感，聚焦发光交给 underlay 统一处理
+        # 工具栏下投影：**不挂载**。
+        # strip 距窗口底仅 8px（_position_bottom_toolbar: toolbar_y = h-8-44），而
+        # QGraphicsDropShadowEffect 的 blur 是四周对称扩散，offset 加大又会让阴影掉出
+        # 窗口底被裁光 —— 无法只向下不向上。实测（截图垂直扫描）该阴影向上渗透进
+        # _input_card 底部，在接缝画出 245→238 的暗带（比两侧暗 6-7 灰阶），就是
+        # 「输入区与工具区有色差」的真因。胶囊光晕已由 InputGlowUnderlay 统一提供。
         host._bottom_toolbar_shadow = QGraphicsDropShadowEffect(host._bottom_toolbar_strip)
-        host._bottom_toolbar_shadow.setBlurRadius(14)
-        host._bottom_toolbar_shadow.setOffset(0, 4)
-        host._bottom_toolbar_shadow.setColor(QColor(0, 0, 0, 70))
-        host._bottom_toolbar_strip.setGraphicsEffect(host._bottom_toolbar_shadow)
+        host._bottom_toolbar_shadow.setOffset(0, 0)
+        host._bottom_toolbar_shadow.setBlurRadius(0)
+        host._bottom_toolbar_shadow.setColor(QColor(0, 0, 0, 0))
         host._input_card_focused = False
         host._input_area_collapsed = False
         host._apply_bottom_input_stack_style()
